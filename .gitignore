@@ -1,0 +1,68 @@
+# =========================
+# Build output
+# =========================
+bin/
+bin-int/
+build/
+out/
+
+# =========================
+# Premake generated files
+# =========================
+*.sln
+*.vcxproj*
+*.vcproj*
+*.make
+*.make2
+*.workspace
+
+# =========================
+# Visual Studio
+# =========================
+.vs/
+*.user
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+
+# =========================
+# VS Code
+# =========================
+.vscode/
+
+# =========================
+# JetBrains (CLion, etc.)
+# =========================
+.idea/
+
+# =========================
+# CMake (if ever used)
+# =========================
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+
+# =========================
+# OS junk
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Compiled binaries
+# =========================
+*.exe
+*.out
+*.app
+*.so
+*.dylib
+*.a
+
+# =========================
+# Logs / temp
+# =========================
+*.log
+*.tmp
+*.temp
+*.cache
