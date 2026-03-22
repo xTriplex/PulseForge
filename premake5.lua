@@ -9,20 +9,27 @@ configurations
 	"Dist"
 }
 
-
 outputdir = "%{cfg.buildcfg}-%{cfg.system}-%{cfg.architecture}"
 
 -- Include directories
 IncludeDir = {}
+IncludeDir["spdlog"] = "PulseForge/Vendor/spdlog/include"
 IncludeDir["Glfw"]  = "PulseForge/Vendor/Glfw/include"
 IncludeDir["Glad"]  = "PulseForge/Vendor/Glad/include"
 IncludeDir["imgui"] = "PulseForge/Vendor/imgui"
 IncludeDir["glm"]   = "PulseForge/Vendor/glm"
+IncludeDir["miniaudio"] = "PulseForge/Vendor/miniaudio"
+IncludeDir["stb"] = "PulseForge/Vendor/stb"
+IncludeDir["freetype"] = "PulseForge/Vendor/freetype/include"
+IncludeDir["json"] = "PulseForge/Vendor/json/single_include"
+IncludeDir["nfd"] = "PulseForge/Vendor/nativefiledialog/src/include"
 
 group "Dependencies"
 include "PulseForge/Vendor/Glfw"
 include "PulseForge/Vendor/Glad"
 include "PulseForge/Vendor/imgui"
+include "PulseForge/Vendor/freetype"
+include "PulseForge/Vendor/nativefiledialog"
 group ""
 
 -- =========================
@@ -50,17 +57,25 @@ files
 defines
 {
 	"_CRT_SECURE_NO_WARNINGS",
-	"IMGUI_IMPL_OPENGL_LOADER_GLAD"
+	"IMGUI_IMPL_OPENGL_LOADER_GLAD",
+	"MA_NO_WIN32_LEAN_AND_MEAN"
 }
 
 includedirs
 {
+	"%{prj.name}/Source/Public",
+	"%{prj.name}/Source/Private",
 	"%{prj.name}/Source",
-	"%{prj.name}/Vendor/spdlog/include",
+	"%{IncludeDir.spdlog}",
 	"%{IncludeDir.Glfw}",
 	"%{IncludeDir.Glad}",
 	"%{IncludeDir.imgui}",
-	"%{IncludeDir.glm}"
+	"%{IncludeDir.glm}",
+	"%{IncludeDir.miniaudio}",
+	"%{IncludeDir.stb}",
+	"%{IncludeDir.freetype}",
+	"%{IncludeDir.json}",
+	"%{IncludeDir.nfd}"
 }
 
 links
@@ -68,6 +83,8 @@ links
 	"Glfw",
 	"Glad",
 	"imgui",
+	"freetype",
+	"NativeFileDialog",
 	"opengl32.lib"
 }
 
@@ -127,7 +144,9 @@ files
 includedirs
 {
 	"PulseForge/Source",
-	"%{IncludeDir.glm}"
+	"PulseForge/Source/Public",
+	"PulseForge/Source/Private",
+	"%{prj.name}/Source"
 }
 
 links
@@ -167,4 +186,3 @@ filter { "system:windows", "configurations:*" }
 	buildoptions "/utf-8"
 
 filter {}
-

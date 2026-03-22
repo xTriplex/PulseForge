@@ -8,3 +8,18 @@
 	path = PulseForge/Vendor/imgui
 	url = https://github.com/ocornut/imgui
 	branch = docking
+[submodule "PulseForge/Vendor/miniaudio"]
+	path = PulseForge/Vendor/miniaudio
+	url = https://github.com/mackron/miniaudio
+[submodule "PulseForge/Vendor/stb"]
+	path = PulseForge/Vendor/stb
+	url = https://github.com/nothings/stb
+[submodule "PulseForge/Vendor/freetype"]
+	path = PulseForge/Vendor/freetype
+	url = https://github.com/freetype/freetype
+[submodule "PulseForge/Vendor/json"]
+	path = PulseForge/Vendor/json
+	url = https://github.com/nlohmann/json
+[submodule "PulseForge/Vendor/nativefiledialog"]
+	path = PulseForge/Vendor/nativefiledialog
+	url = https://github.com/btzy/nativefiledialog-extended

@@ -1,1 +1,5 @@
+C:\Dev\PulseForge\PulseForge\Source\Private\Audio\MiniAudio\MiniAudio.cpp;C:\Dev\PulseForge\Int\Debug-windows-x86_64\PulseForge\MiniAudio.obj
+C:\Dev\PulseForge\PulseForge\Source\Private\Core\Core.cpp;C:\Dev\PulseForge\Int\Debug-windows-x86_64\PulseForge\Core.obj
+C:\Dev\PulseForge\PulseForge\Source\Private\Core\Log.cpp;C:\Dev\PulseForge\Int\Debug-windows-x86_64\PulseForge\Log.obj
+C:\Dev\PulseForge\PulseForge\Source\Private\Utils\stb_image.cpp;C:\Dev\PulseForge\Int\Debug-windows-x86_64\PulseForge\stb_image.obj
 C:\Dev\PulseForge\PulseForge\Source\pfpch.cpp;C:\Dev\PulseForge\Int\Debug-windows-x86_64\PulseForge\pfpch.obj

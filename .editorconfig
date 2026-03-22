@@ -1,0 +1,22 @@
+root = true
+
+[*]
+indent_style = tab
+indent_size = 4
+end_of_line = crlf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[*.{cpp,h,hpp,inl}]
+# Allman brace style
+cpp_indent_braces = true
+csharp_new_line_before_open_brace = all
+
+# Naming conventions - PascalCase
+dotnet_naming_rule.pascal_case_rule.symbols = all_symbols
+dotnet_naming_rule.pascal_case_rule.style = pascal_case_style
+dotnet_naming_rule.pascal_case_rule.severity = suggestion
+
+dotnet_naming_symbols.all_symbols.applicable_kinds = *
+dotnet_naming_style.pascal_case_style.capitalization = pascal_case
