@@ -23,3 +23,15 @@
 [submodule "PulseForge/Vendor/nativefiledialog"]
 	path = PulseForge/Vendor/nativefiledialog
 	url = https://github.com/btzy/nativefiledialog-extended
+[submodule "PulseForge/Vendor/entt"]
+	path = PulseForge/Vendor/entt
+	url = https://github.com/skypjack/entt
+[submodule "PulseForge/Vendor/JoltPhysics"]
+	path = PulseForge/Vendor/JoltPhysics
+	url = https://github.com/jrouwe/JoltPhysics
+[submodule "PulseForge/Vendor/tracy"]
+	path = PulseForge/Vendor/tracy
+	url = https://github.com/wolfpld/tracy
+[submodule "PulseForge/Vendor/enet"]
+	path = PulseForge/Vendor/enet
+	url = https://github.com/lsalzman/enet

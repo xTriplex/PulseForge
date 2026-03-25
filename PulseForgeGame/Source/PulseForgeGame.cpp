@@ -1,25 +1,23 @@
 #include "PulseForgeGame.h"
+#include "Core/Application.h"
+#include "Core/EntryPoint.h"
 #include "Core/Log.h"
-#include<iostream>
 
-int main()
+class PulseForgeGameApp : public PulseForge::Application
 {
-	PulseForge::Log::Init();
+public:
+	PulseForgeGameApp()
+	{
+		PF_INFO("Hello, PulseForge!");
+	}
 
-	PF_CORE_TRACE("Trace Message    - Check");
-	PF_CORE_INFO("Info Message     - Check");
-	PF_CORE_WARN("Warning Message  - Check");
-	PF_CORE_ERROR("Error Message    - Check");
-	PF_CORE_CRITICAL("Critical Message - Check");
+	~PulseForgeGameApp()
+	{
 
-	std::cout << "\n";
+	}
+};
 
-	PF_TRACE("Trace Message    - Check");
-	PF_INFO("Info Message     - Check");
-	PF_WARN("Warning Message  - Check");
-	PF_ERROR("Error Message    - Check");
-	PF_CRITICAL("Critical Message - Check");
-
-	std::cout << "\n";
-	std::cout << "Hello, PulseForge!\n";
+PulseForge::Application* PulseForge::CreateApplication()
+{
+	return new PulseForgeGameApp();
 }

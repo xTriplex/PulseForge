@@ -20,15 +20,9 @@ if exist "*.vcxproj" del /q *.vcxproj
 if exist "*.vcxproj.filters" del /q *.vcxproj.filters
 if exist "*.vcxproj.user" del /q *.vcxproj.user
 
-REM Remove .vs folder (Visual Studio cache)
-if exist ".vs" (
-echo Removing .vs folder...
-rmdir /s /q .vs
-)
 
-REM Optional: clean bin/int (uncomment if you want full clean)
-REM if exist "Bin" rmdir /s /q Bin
-REM if exist "Int" rmdir /s /q Int
+if exist "Bin" rmdir /s /q Bin
+if exist "Int" rmdir /s /q Int
 
 REM --------------------------------------------
 REM Generate with Premake

@@ -1,10 +1,10 @@
 # =========================
 # Build output
 # =========================
-bin/
-bin-int/
-build/
-out/
+**/Bin/
+**/Int/
+**/Build/
+**/Out/
 
 # =========================
 # Premake generated files
@@ -50,7 +50,7 @@ compile_commands.json
 Thumbs.db
 
 # =========================
-# Compiled binaries
+# Compiled binaries & objects
 # =========================
 *.exe
 *.out
@@ -58,6 +58,13 @@ Thumbs.db
 *.so
 *.dylib
 *.a
+*.lib
+*.obj
+*.o
+*.pch
+*.pdb
+*.ilk
+*.idb
 
 # =========================
 # Logs / temp

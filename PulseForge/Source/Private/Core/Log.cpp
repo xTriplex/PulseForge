@@ -1,7 +1,8 @@
-#include <pfpch.h>
+#include "pfpch.h"
+#include "Core/Core.h"
+
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
-#include "Core/Log.h"
 
 namespace PulseForge
 {
@@ -29,77 +30,17 @@ namespace PulseForge
 		s_Impl = std::make_unique<Impl>();
 	}
 
-	// Engine wrappers
-	template<typename... Args>
-	void Log::CoreTrace(const char* fmt, Args&&... args)
-	{
-		s_Impl->CoreLogger->trace(fmt, std::forward<Args>(args)...);
-	}
+	// Engine wrappers - These now take pre-formatted strings from the header macros!
+	void Log::PrintCoreTrace(const std::string& msg) { s_Impl->CoreLogger->trace(msg); }
+	void Log::PrintCoreInfo(const std::string& msg) { s_Impl->CoreLogger->info(msg); }
+	void Log::PrintCoreWarn(const std::string& msg) { s_Impl->CoreLogger->warn(msg); }
+	void Log::PrintCoreError(const std::string& msg) { s_Impl->CoreLogger->error(msg); }
+	void Log::PrintCoreCritical(const std::string& msg) { s_Impl->CoreLogger->critical(msg); }
 
-	template<typename... Args>
-	void Log::CoreInfo(const char* fmt, Args&&... args)
-	{
-		s_Impl->CoreLogger->info(fmt, std::forward<Args>(args)...);
-	}
-
-	template<typename... Args>
-	void Log::CoreWarn(const char* fmt, Args&&... args)
-	{
-		s_Impl->CoreLogger->warn(fmt, std::forward<Args>(args)...);
-	}
-
-	template<typename... Args>
-	void Log::CoreError(const char* fmt, Args&&... args)
-	{
-		s_Impl->CoreLogger->error(fmt, std::forward<Args>(args)...);
-	}
-
-	template<typename... Args>
-	void Log::CoreCritical(const char* fmt, Args&&... args)
-	{
-		s_Impl->CoreLogger->critical(fmt, std::forward<Args>(args)...);
-	}
-
-	template<typename... Args>
-	void Log::Trace(const char* fmt, Args&&... args)
-	{
-		s_Impl->ClientLogger->trace(fmt, std::forward<Args>(args)...);
-	}
-
-	template<typename... Args>
-	void Log::Info(const char* fmt, Args&&... args)
-	{
-		s_Impl->ClientLogger->info(fmt, std::forward<Args>(args)...);
-	}
-
-	template<typename... Args>
-	void Log::Warn(const char* fmt, Args&&... args)
-	{
-		s_Impl->ClientLogger->warn(fmt, std::forward<Args>(args)...);
-	}
-
-	template<typename... Args>
-	void Log::Error(const char* fmt, Args&&... args)
-	{
-		s_Impl->ClientLogger->error(fmt, std::forward<Args>(args)...);
-	}
-
-	template<typename... Args>
-	void Log::Critical(const char* fmt, Args&&... args)
-	{
-		s_Impl->ClientLogger->critical(fmt, std::forward<Args>(args)...);
-	}
-
-	// Explicit template instantiations if needed
-	template void Log::CoreTrace<>(const char* fmt);
-	template void Log::CoreInfo<>(const char* fmt);
-	template void Log::CoreWarn<>(const char* fmt);
-	template void Log::CoreError<>(const char* fmt);
-	template void Log::CoreCritical<>(const char* fmt);
-
-	template void Log::Trace<>(const char* fmt);
-	template void Log::Info<>(const char* fmt);
-	template void Log::Warn<>(const char* fmt);
-	template void Log::Error<>(const char* fmt);
-	template void Log::Critical<>(const char* fmt);
+	// Client wrappers - These now take pre-formatted strings from the header macros!
+	void Log::PrintTrace(const std::string& msg) { s_Impl->ClientLogger->trace(msg); }
+	void Log::PrintInfo(const std::string& msg) { s_Impl->ClientLogger->info(msg); }
+	void Log::PrintWarn(const std::string& msg) { s_Impl->ClientLogger->warn(msg); }
+	void Log::PrintError(const std::string& msg) { s_Impl->ClientLogger->error(msg); }
+	void Log::PrintCritical(const std::string& msg) { s_Impl->ClientLogger->critical(msg); }
 }
