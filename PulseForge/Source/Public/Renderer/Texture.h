@@ -14,7 +14,14 @@ namespace PulseForge
 	enum class TextureFormat : uint8_t
 	{
 		RGBA8_UNorm,
-		RGBA8_Srgb
+		RGBA8_Srgb,
+		Depth32Float
+	};
+
+	enum class TextureUsage : uint8_t
+	{
+		ShaderResource,
+		DepthStencilAttachment
 	};
 
 	struct TextureDesc
@@ -22,6 +29,7 @@ namespace PulseForge
 		uint32_t Width = 0;
 		uint32_t Height = 0;
 		TextureFormat Format = TextureFormat::RGBA8_Srgb;
+		TextureUsage Usage = TextureUsage::ShaderResource;
 		std::string DebugName;
 	};
 
@@ -84,6 +92,5 @@ namespace PulseForge
 	[[nodiscard]] PULSEFORGE_API std::expected<size_t, TextureError> ValidateTextureUpload(
 		const TextureDesc& Description,
 		size_t InitialDataSize);
-	[[nodiscard]] PULSEFORGE_API std::expected<void, TextureError> ValidateSamplerDescription(
-		const SamplerDesc& Description);
+	[[nodiscard]] PULSEFORGE_API std::expected<void, TextureError> ValidateSamplerDescription(const SamplerDesc& Description);
 }

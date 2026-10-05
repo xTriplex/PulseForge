@@ -90,6 +90,25 @@ namespace PulseForge
 		bool Enabled = false;
 	};
 
+	enum class DepthCompareOperation : uint8_t
+	{
+		Never,
+		Less,
+		Equal,
+		LessEqual,
+		Greater,
+		NotEqual,
+		GreaterEqual,
+		Always
+	};
+
+	struct DepthState
+	{
+		bool TestEnabled = false;
+		bool WriteEnabled = false;
+		DepthCompareOperation Compare = DepthCompareOperation::Less;
+	};
+
 	class PULSEFORGE_API Shader
 	{
 	public:
@@ -110,6 +129,7 @@ namespace PulseForge
 		ColorTargetFormat ColorFormat = ColorTargetFormat::Swapchain;
 		RasterState Rasterizer;
 		BlendState Blend;
+		DepthState Depth;
 		std::string DebugName;
 	};
 

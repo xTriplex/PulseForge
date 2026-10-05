@@ -25,8 +25,22 @@ namespace PulseForge
 		if (Description.Width == 0 || Description.Height == 0)
 			return MakeTextureError(TextureErrorCode::InvalidDescription, "Texture dimensions must be non-zero");
 
+		if (Description.Format == TextureFormat::Depth32Float)
+		{
+			if (Description.Usage != TextureUsage::DepthStencilAttachment)
+				return MakeTextureError(TextureErrorCode::InvalidDescription, "Depth32Float textures require DepthStencilAttachment usage");
+
+			if (InitialDataSize != 0)
+				return MakeTextureError(TextureErrorCode::InvalidData, "Depth attachment textures do not accept initial upload data");
+
+			return size_t{ 0 };
+		}
+
 		if (Description.Format != TextureFormat::RGBA8_UNorm && Description.Format != TextureFormat::RGBA8_Srgb)
 			return MakeTextureError(TextureErrorCode::InvalidDescription, "Texture format is not supported by PulseForge");
+
+		if (Description.Usage != TextureUsage::ShaderResource)
+			return MakeTextureError(TextureErrorCode::InvalidDescription, "RGBA8 textures currently support ShaderResource usage only");
 
 		constexpr uint64_t BytesPerPixel = 4;
 		const uint64_t Width = Description.Width;

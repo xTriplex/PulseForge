@@ -562,6 +562,19 @@ namespace
 		UnsupportedTarget.ColorFormat = static_cast<ColorTargetFormat>(0xff);
 		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(UnsupportedTarget).has_value());
 
+		auto DepthTestedPipeline = Pipeline;
+		DepthTestedPipeline.Depth.TestEnabled = true;
+		DepthTestedPipeline.Depth.WriteEnabled = true;
+		PF_CHECK(Tests, ValidateGraphicsPipelineDescription(DepthTestedPipeline).has_value());
+
+		auto InvalidDepthComparison = DepthTestedPipeline;
+		InvalidDepthComparison.Depth.Compare = static_cast<DepthCompareOperation>(0xff);
+		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(InvalidDepthComparison).has_value());
+
+		auto DepthWriteWithoutTest = Pipeline;
+		DepthWriteWithoutTest.Depth.WriteEnabled = true;
+		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(DepthWriteWithoutTest).has_value());
+
 		BufferDesc VertexBuffer{ sizeof(float) * 6 * 3, BufferUsage::Vertex, "Test triangle vertices" };
 		DrawArguments Triangle{ 3, 1, 0, 0 };
 		PF_CHECK(Tests, ValidateDrawArguments(Triangle, Pipeline, VertexBuffer).has_value());
@@ -662,6 +675,27 @@ namespace
 		OverflowDimensions.Width = UINT32_MAX;
 		OverflowDimensions.Height = UINT32_MAX;
 		PF_CHECK(Tests, !ValidateTextureUpload(OverflowDimensions, 0).has_value());
+
+		TextureDesc DepthDescription;
+		DepthDescription.Width = 128;
+		DepthDescription.Height = 64;
+		DepthDescription.Format = TextureFormat::Depth32Float;
+		DepthDescription.Usage = TextureUsage::DepthStencilAttachment;
+		PF_CHECK(Tests, ValidateTextureUpload(DepthDescription, 0).value() == 0);
+
+		auto ZeroDepthHeight = DepthDescription;
+		ZeroDepthHeight.Height = 0;
+		PF_CHECK(Tests, !ValidateTextureUpload(ZeroDepthHeight, 0).has_value());
+
+		auto DepthAsShaderResource = DepthDescription;
+		DepthAsShaderResource.Usage = TextureUsage::ShaderResource;
+		PF_CHECK(Tests, !ValidateTextureUpload(DepthAsShaderResource, 0).has_value());
+
+		PF_CHECK(Tests, !ValidateTextureUpload(DepthDescription, sizeof(float)).has_value());
+
+		auto ColorAsDepthAttachment = Description;
+		ColorAsDepthAttachment.Usage = TextureUsage::DepthStencilAttachment;
+		PF_CHECK(Tests, !ValidateTextureUpload(ColorAsDepthAttachment, 16).has_value());
 
 		SamplerDesc SamplerDescription;
 		PF_CHECK(Tests, ValidateSamplerDescription(SamplerDescription).has_value());

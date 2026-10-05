@@ -47,10 +47,16 @@ public:
 			float Color[3];
 			float TexCoord[2];
 		};
-		const std::array<VertexPositionColorTexCoord, 3> InitialVertices = {{
-			{ { 0.0f, 0.58f, 0.0f }, { 1.0f, 0.1f, 0.1f }, { 0.5f, 0.0f } },
-			{ { 0.58f, -0.5f, 0.0f }, { 0.1f, 1.0f, 0.2f }, { 1.0f, 1.0f } },
-			{ { -0.58f, -0.5f, 0.0f }, { 0.1f, 0.35f, 1.0f }, { 0.0f, 1.0f } }
+		const std::array<VertexPositionColorTexCoord, 6> InitialVertices = {{
+			// Submit the smaller, nearer red triangle first.
+			{ { 0.0f, 0.32f, 0.2f }, { 1.0f, 0.08f, 0.08f }, { 0.5f, 0.0f } },
+			{ { 0.32f, -0.25f, 0.2f }, { 1.0f, 0.08f, 0.08f }, { 1.0f, 1.0f } },
+			{ { -0.32f, -0.25f, 0.2f }, { 1.0f, 0.08f, 0.08f }, { 0.0f, 1.0f } },
+			// Submit a larger, farther blue triangle afterward. Depth testing must preserve
+			// the near triangle where the two overlap.
+			{ { 0.0f, 0.72f, 0.8f }, { 0.08f, 0.2f, 1.0f }, { 0.5f, 0.0f } },
+			{ { 0.72f, -0.64f, 0.8f }, { 0.08f, 0.2f, 1.0f }, { 1.0f, 1.0f } },
+			{ { -0.72f, -0.64f, 0.8f }, { 0.08f, 0.2f, 1.0f }, { 0.0f, 1.0f } }
 		}};
 		PulseForge::BufferDesc BufferDescription;
 		BufferDescription.ByteSize = sizeof(InitialVertices);
@@ -168,6 +174,9 @@ public:
 				{ PulseForge::VertexSemantic::TexCoord, PulseForge::VertexFormat::Float2, offsetof(VertexPositionColorTexCoord, TexCoord) }
 			};
 			PipelineDescription.Rasterizer.Cull = PulseForge::CullMode::None;
+			PipelineDescription.Depth.TestEnabled = true;
+			PipelineDescription.Depth.WriteEnabled = true;
+			PipelineDescription.Depth.Compare = PulseForge::DepthCompareOperation::Less;
 			PipelineDescription.DebugName = "PulseForge triangle pipeline";
 			auto CreatedPipeline = PulseForge::Application::Get().CreateGraphicsPipeline(PipelineDescription);
 			if (!CreatedPipeline)
@@ -186,17 +195,37 @@ public:
 		if (!m_Pipeline || m_DrawFailed)
 			return;
 
-		const PulseForge::DrawArguments Arguments{ 3, 1, 0, 0 };
+		const PulseForge::DrawArguments NearTriangle{ 3, 1, 0, 0 };
+		const PulseForge::DrawArguments FarTriangle{ 3, 1, 3, 0 };
 		const std::array<const PulseForge::BindingSet*, 1> BindingSets = { m_BindingSet.get() };
-		auto DrawResultWithBindings = PulseForge::Application::Get().Draw(
+		auto NearDraw = PulseForge::Application::Get().Draw(
 			*m_Pipeline,
 			*m_VertexBuffer,
-			Arguments,
+			NearTriangle,
 			BindingSets);
-		if (!DrawResultWithBindings)
+		if (!NearDraw)
 		{
-			PF_ERROR("Sample triangle draw failed: {0}", DrawResultWithBindings.error().Message);
+			PF_ERROR("Near depth-test sample draw failed: {0}", NearDraw.error().Message);
 			m_DrawFailed = true;
+			return;
+		}
+
+		auto FarDraw = PulseForge::Application::Get().Draw(
+			*m_Pipeline,
+			*m_VertexBuffer,
+			FarTriangle,
+			BindingSets);
+		if (!FarDraw)
+		{
+			PF_ERROR("Far depth-test sample draw failed: {0}", FarDraw.error().Message);
+			m_DrawFailed = true;
+			return;
+		}
+
+		if (!m_LoggedDepthTestDraws)
+		{
+			m_LoggedDepthTestDraws = true;
+			PF_INFO("Submitted overlapping depth-tested triangles: near first, far second");
 		}
 	}
 
@@ -232,6 +261,7 @@ private:
 	PulseForge::ShaderHandle m_FragmentShader;
 	PulseForge::GraphicsPipelineHandle m_Pipeline;
 	bool m_DrawFailed = false;
+	bool m_LoggedDepthTestDraws = false;
 };
 
 PulseForgeGameApp::PulseForgeGameApp()

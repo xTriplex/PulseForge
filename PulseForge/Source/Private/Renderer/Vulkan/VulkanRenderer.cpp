@@ -420,6 +420,13 @@ namespace PulseForge
 			return (static_cast<VkImageUsageFlags>(Capabilities.supportedUsageFlags) & RequiredUsage) == RequiredUsage;
 		}
 
+		bool SupportsDepth32Attachment(vk::PhysicalDevice Device)
+		{
+			const vk::FormatProperties Properties = Device.getFormatProperties(vk::Format::eD32Sfloat);
+			return (static_cast<VkFormatFeatureFlags>(Properties.optimalTilingFeatures) &
+				VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+		}
+
 		vk::CompositeAlphaFlagBitsKHR ChooseCompositeAlpha(vk::CompositeAlphaFlagsKHR Supported)
 		{
 			constexpr std::array Preferred = {
@@ -504,11 +511,23 @@ namespace PulseForge
 
 			m_AcquiredImageIndex = ImageIndex;
 			m_AcquiredSuboptimal = AcquireResult == VK_SUBOPTIMAL_KHR;
+			SwapchainImage& Image = m_SwapchainImages[m_AcquiredImageIndex];
+			const auto* DepthTarget = dynamic_cast<const VulkanTexture*>(Image.DepthTarget.get());
+			if (!DepthTarget)
+				throw std::runtime_error("Vulkan swapchain image is missing its PulseForge depth target");
+
 			Frame.CommandList->open();
 			Frame.CommandList->clearTextureFloat(
-				m_SwapchainImages[m_AcquiredImageIndex].Texture,
+				Image.Texture,
 				nvrhi::TextureSubresourceSet(),
 				nvrhi::Color(ClearColor[0], ClearColor[1], ClearColor[2], ClearColor[3]));
+			Frame.CommandList->clearDepthStencilTexture(
+				DepthTarget->GetNativeTexture(),
+				nvrhi::TextureSubresourceSet(),
+				true,
+				1.0f,
+				false,
+				0);
 			m_FrameActive = true;
 			return true;
 		}
@@ -569,9 +588,9 @@ namespace PulseForge
 				CheckVkResult(PresentResult, "vkQueuePresentKHR");
 			}
 
-			if (PresentResult == VK_SUCCESS && !m_LoggedFirstPresentedFrame)
+			if (PresentResult == VK_SUCCESS && !m_LoggedFirstPresentedFrameForSwapchain)
 			{
-				m_LoggedFirstPresentedFrame = true;
+				m_LoggedFirstPresentedFrameForSwapchain = true;
 				PF_CORE_INFO(
 					"First Vulkan/NVRHI frame submitted and presented successfully (geometry draw recorded: {0})",
 					m_LoggedFirstDraw);
@@ -701,9 +720,18 @@ namespace PulseForge
 			const TextureDesc& Description,
 			std::span<const std::byte> InitialData) override
 		{
-			nvrhi::Format Format = nvrhi::Format::RGBA8_UNORM;
-			if (Description.Format == TextureFormat::RGBA8_Srgb)
-				Format = nvrhi::Format::SRGBA8_UNORM;
+			const auto Validation = ValidateTextureUpload(Description, InitialData.size());
+			if (!Validation)
+				return std::unexpected(Validation.error());
+
+			nvrhi::Format Format = nvrhi::Format::UNKNOWN;
+			switch (Description.Format)
+			{
+				case TextureFormat::RGBA8_UNorm: Format = nvrhi::Format::RGBA8_UNORM; break;
+				case TextureFormat::RGBA8_Srgb: Format = nvrhi::Format::SRGBA8_UNORM; break;
+				case TextureFormat::Depth32Float: Format = nvrhi::Format::D32; break;
+			}
+			const bool IsDepthAttachment = Description.Usage == TextureUsage::DepthStencilAttachment;
 
 			nvrhi::TextureDesc NativeDescription;
 			NativeDescription
@@ -711,8 +739,12 @@ namespace PulseForge
 				.setWidth(Description.Width)
 				.setHeight(Description.Height)
 				.setFormat(Format)
-				.enableAutomaticStateTracking(nvrhi::ResourceStates::ShaderResource)
+				.setIsRenderTarget(IsDepthAttachment)
+				.enableAutomaticStateTracking(IsDepthAttachment
+					? nvrhi::ResourceStates::DepthWrite
+					: nvrhi::ResourceStates::ShaderResource)
 				.setDebugName(Description.DebugName.empty() ? "PulseForge texture" : Description.DebugName);
+			NativeDescription.isShaderResource = !IsDepthAttachment;
 
 			try
 			{
@@ -722,6 +754,15 @@ namespace PulseForge
 					const std::string Message = "NVRHI failed to create texture '" + Description.DebugName + "'";
 					PF_CORE_ERROR("{0}", Message);
 					return std::unexpected(TextureError{ TextureErrorCode::BackendFailure, Message });
+				}
+
+				if (IsDepthAttachment)
+				{
+					PF_CORE_INFO("Created Vulkan/NVRHI {0}x{1} D32 depth attachment '{2}'",
+						Description.Width,
+						Description.Height,
+						Description.DebugName);
+					return TextureHandle(std::make_unique<VulkanTexture>(Description, std::move(NativeTexture)));
 				}
 
 				nvrhi::CommandListHandle UploadCommandList = m_ActiveNvrhiDevice->createCommandList();
@@ -1020,8 +1061,23 @@ namespace PulseForge
 						: nvrhi::RasterFillMode::Solid)
 					.setScissorEnable(true);
 
+				nvrhi::ComparisonFunc DepthComparison = nvrhi::ComparisonFunc::Less;
+				switch (Description.Depth.Compare)
+				{
+					case DepthCompareOperation::Never: DepthComparison = nvrhi::ComparisonFunc::Never; break;
+					case DepthCompareOperation::Less: DepthComparison = nvrhi::ComparisonFunc::Less; break;
+					case DepthCompareOperation::Equal: DepthComparison = nvrhi::ComparisonFunc::Equal; break;
+					case DepthCompareOperation::LessEqual: DepthComparison = nvrhi::ComparisonFunc::LessOrEqual; break;
+					case DepthCompareOperation::Greater: DepthComparison = nvrhi::ComparisonFunc::Greater; break;
+					case DepthCompareOperation::NotEqual: DepthComparison = nvrhi::ComparisonFunc::NotEqual; break;
+					case DepthCompareOperation::GreaterEqual: DepthComparison = nvrhi::ComparisonFunc::GreaterOrEqual; break;
+					case DepthCompareOperation::Always: DepthComparison = nvrhi::ComparisonFunc::Always; break;
+				}
 				nvrhi::DepthStencilState DepthState;
-				DepthState.disableDepthTest().disableDepthWrite();
+				DepthState
+					.setDepthTestEnable(Description.Depth.TestEnabled)
+					.setDepthWriteEnable(Description.Depth.WriteEnabled)
+					.setDepthFunc(DepthComparison);
 
 				nvrhi::BlendState BlendState;
 				if (Description.Blend.Enabled)
@@ -1053,7 +1109,9 @@ namespace PulseForge
 					NativeDescription.addBindingLayout(Layout->GetNativeLayout());
 
 				nvrhi::FramebufferInfo FramebufferInfo;
-				FramebufferInfo.addColorFormat(m_NvrhiFormat);
+				FramebufferInfo
+					.addColorFormat(m_NvrhiFormat)
+					.setDepthFormat(nvrhi::Format::D32);
 				nvrhi::GraphicsPipelineHandle NativePipeline = m_ActiveNvrhiDevice->createGraphicsPipeline(
 					NativeDescription,
 					FramebufferInfo);
@@ -1170,6 +1228,7 @@ namespace PulseForge
 		{
 			vk::Image NativeImage;
 			nvrhi::TextureHandle Texture;
+			TextureHandle DepthTarget;
 			nvrhi::FramebufferHandle Framebuffer;
 			vk::Semaphore PresentReady;
 		};
@@ -1306,6 +1365,8 @@ namespace PulseForge
 			Candidate.Properties = PhysicalDevice.getProperties();
 			if (Candidate.Properties.apiVersion < VulkanApiVersion)
 				return std::nullopt;
+			if (!SupportsDepth32Attachment(PhysicalDevice))
+				return std::nullopt;
 
 			const auto Extensions = PhysicalDevice.enumerateDeviceExtensionProperties();
 			if (!HasName(Extensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
@@ -1396,7 +1457,8 @@ namespace PulseForge
 			{
 				throw std::runtime_error(
 					"No Vulkan 1.3 GPU supports graphics/presentation, VK_KHR_swapchain, "
-					"timeline semaphores, synchronization2, dynamic rendering, a recognized swapchain format, and color/transfer-destination images");
+					"timeline semaphores, synchronization2, dynamic rendering, D32 depth attachments, "
+					"a recognized swapchain format, and color/transfer-destination images");
 			}
 
 			m_PhysicalDevice = BestCandidate->Device;
@@ -1615,14 +1677,30 @@ namespace PulseForge
 				if (!Image.Texture)
 					throw std::runtime_error("NVRHI could not wrap a Vulkan swapchain image");
 
+				TextureDesc DepthDescription;
+				DepthDescription.Width = m_SwapchainExtent.width;
+				DepthDescription.Height = m_SwapchainExtent.height;
+				DepthDescription.Format = TextureFormat::Depth32Float;
+				DepthDescription.Usage = TextureUsage::DepthStencilAttachment;
+				DepthDescription.DebugName = "PulseForge swapchain depth image " + std::to_string(Index);
+				auto CreatedDepthTarget = CreateTexture(DepthDescription, std::span<const std::byte>{});
+				if (!CreatedDepthTarget)
+					throw std::runtime_error("Could not create a Vulkan swapchain depth target: " + CreatedDepthTarget.error().Message);
+				Image.DepthTarget = std::move(CreatedDepthTarget.value());
+				const auto* DepthTarget = dynamic_cast<const VulkanTexture*>(Image.DepthTarget.get());
+				if (!DepthTarget)
+					throw std::runtime_error("Vulkan backend returned an incompatible depth-target implementation");
+
 				nvrhi::FramebufferDesc FramebufferDescription;
 				FramebufferDescription.addColorAttachment(Image.Texture);
+				FramebufferDescription.setDepthAttachment(DepthTarget->GetNativeTexture());
 				Image.Framebuffer = m_ActiveNvrhiDevice->createFramebuffer(FramebufferDescription);
 				if (!Image.Framebuffer)
 					throw std::runtime_error("NVRHI could not create a framebuffer for a Vulkan swapchain image");
 			}
 
 			m_SwapchainRecreationNeeded = false;
+			m_LoggedFirstPresentedFrameForSwapchain = false;
 			PF_CORE_INFO(
 				"Vulkan swapchain: {0}x{1}, {2} images, format {3}, present mode {4} (VSync enabled)",
 				m_SwapchainExtent.width,
@@ -1724,7 +1802,7 @@ namespace PulseForge
 		bool m_KhronosValidationEnabled = false;
 		bool m_SwapchainRecreationNeeded = false;
 		bool m_AcquiredSuboptimal = false;
-		bool m_LoggedFirstPresentedFrame = false;
+		bool m_LoggedFirstPresentedFrameForSwapchain = false;
 		bool m_LoggedFirstDraw = false;
 		bool m_FrameActive = false;
 	};

@@ -36,6 +36,18 @@ namespace PulseForge
 				Semantic == VertexSemantic::Color ||
 				Semantic == VertexSemantic::TexCoord;
 		}
+
+		bool IsValidDepthComparison(DepthCompareOperation Operation)
+		{
+			return Operation == DepthCompareOperation::Never ||
+				Operation == DepthCompareOperation::Less ||
+				Operation == DepthCompareOperation::Equal ||
+				Operation == DepthCompareOperation::LessEqual ||
+				Operation == DepthCompareOperation::Greater ||
+				Operation == DepthCompareOperation::NotEqual ||
+				Operation == DepthCompareOperation::GreaterEqual ||
+				Operation == DepthCompareOperation::Always;
+		}
 	}
 
 	GraphicsResult ValidateShaderBytecode(const ShaderDesc& Description, std::span<const std::byte> Bytecode)
@@ -133,6 +145,12 @@ namespace PulseForge
 		{
 			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline specifies an unsupported culling mode");
 		}
+
+		if (!IsValidDepthComparison(Description.Depth.Compare))
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline specifies an unsupported depth comparison operation");
+
+		if (Description.Depth.WriteEnabled && !Description.Depth.TestEnabled)
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Depth writes require depth testing to be enabled");
 
 		return ValidateVertexLayout(Description.VertexLayout);
 	}
