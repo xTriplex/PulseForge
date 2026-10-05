@@ -13,15 +13,14 @@ namespace PulseForge
 
 		virtual ~WindowsWindow();
 
-		virtual void OnUpdate() override;
+		virtual void PollEvents() override;
+		virtual void WaitEventsTimeout(double TimeoutSeconds) override;
 
 		virtual unsigned int GetWidth() const override { return WindowData.Width; }
 		virtual unsigned int GetHeight() const override { return WindowData.Height; }
+		virtual std::pair<unsigned int, unsigned int> GetFramebufferSize() const override;
 
 		virtual void SetEventCallback(const EventCallbackFn& Callback) override { WindowData.EventCallback = Callback; }
-
-		virtual void SetVSync(bool bEnabled) override;
-		virtual bool IsVSync() const override;
 
 		virtual void* GetNativeWindow() const override { return m_NativeWindow; }
 
@@ -30,15 +29,14 @@ namespace PulseForge
 		virtual void Shutdown();
 
 	private:
-		GLFWwindow* m_NativeWindow;
+		GLFWwindow* m_NativeWindow = nullptr;
+		bool m_GLFWRuntimeAcquired = false;
 
 		struct FWindowData
 		{
 			std::string Title;
 			unsigned int Width = 0;
 			unsigned int Height = 0;
-			bool bVSync = false;
-
 			EventCallbackFn EventCallback;
 		};
 

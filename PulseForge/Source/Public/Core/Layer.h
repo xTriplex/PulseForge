@@ -2,6 +2,7 @@
 
 #include "Core/Core.h"
 #include "Events/Event.h"
+#include "Core/Timestep.h"
 
 #include <string>
 
@@ -15,7 +16,9 @@ namespace PulseForge
 
 		virtual void OnAttach() {}
 		virtual void OnDetach() {}
-		virtual void OnUpdate() {}
+		virtual void OnUpdate(Timestep DeltaTime) { (void)DeltaTime; }
+		virtual void OnRender() {}
+		virtual void OnImGuiRender() {}
 		virtual void OnEvent(Event& Event) {}
 
 		inline const std::string& GetName() const { return m_DebugName; }

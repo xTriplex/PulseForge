@@ -2,6 +2,8 @@
 
 #include "Events/Event.h"
 
+#include <format>
+
 namespace PulseForge
 {
     class PULSEFORGE_API WindowResizeEvent : public Event

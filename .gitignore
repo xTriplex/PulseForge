@@ -5,9 +5,11 @@
 **/Int/
 **/Build/
 **/Out/
+/build/
+/cmake-build-*/
 
 # =========================
-# Premake generated files
+# Generated IDE files
 # =========================
 *.sln
 *.vcxproj*
@@ -37,7 +39,7 @@
 .idea/
 
 # =========================
-# CMake (if ever used)
+# CMake
 # =========================
 CMakeFiles/
 CMakeCache.txt
@@ -73,3 +75,4 @@ Thumbs.db
 *.tmp
 *.temp
 *.cache
+**/imgui.ini

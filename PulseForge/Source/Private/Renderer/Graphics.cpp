@@ -1,0 +1,182 @@
+#include "Core/PulseForgePCH.h"
+#include "Renderer/Binding.h"
+#include "Renderer/Graphics.h"
+
+#include <array>
+#include <optional>
+
+namespace PulseForge
+{
+	namespace
+	{
+		GraphicsResult MakeError(GraphicsErrorCode Code, const char* Message)
+		{
+			return std::unexpected(GraphicsError{ Code, Message });
+		}
+
+		bool IsValidShaderStage(ShaderStage Stage)
+		{
+			return Stage == ShaderStage::Vertex || Stage == ShaderStage::Fragment;
+		}
+
+		std::optional<uint32_t> GetVertexFormatSize(VertexFormat Format)
+		{
+			switch (Format)
+			{
+				case VertexFormat::Float2: return static_cast<uint32_t>(sizeof(float) * 2);
+				case VertexFormat::Float3: return static_cast<uint32_t>(sizeof(float) * 3);
+				case VertexFormat::Float4: return static_cast<uint32_t>(sizeof(float) * 4);
+				default: return std::nullopt;
+			}
+		}
+
+		bool IsValidSemantic(VertexSemantic Semantic)
+		{
+			return Semantic == VertexSemantic::Position ||
+				Semantic == VertexSemantic::Color ||
+				Semantic == VertexSemantic::TexCoord;
+		}
+	}
+
+	GraphicsResult ValidateShaderBytecode(const ShaderDesc& Description, std::span<const std::byte> Bytecode)
+	{
+		if (!IsValidShaderStage(Description.Stage))
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Shader stage must be Vertex or Fragment");
+
+		if (Description.BytecodeFormat != ShaderBytecodeFormat::SpirV)
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Only SPIR-V shader bytecode is currently supported");
+
+		if (Description.EntryPoint.empty())
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Shader entry point must not be empty");
+
+		constexpr size_t SpirVHeaderSize = 5 * sizeof(uint32_t);
+		if (Bytecode.size() < SpirVHeaderSize || Bytecode.size() % sizeof(uint32_t) != 0)
+			return MakeError(GraphicsErrorCode::InvalidBytecode, "SPIR-V bytecode must contain a complete, word-aligned module header");
+
+		const uint32_t Magic =
+			std::to_integer<uint32_t>(Bytecode[0]) |
+			(std::to_integer<uint32_t>(Bytecode[1]) << 8) |
+			(std::to_integer<uint32_t>(Bytecode[2]) << 16) |
+			(std::to_integer<uint32_t>(Bytecode[3]) << 24);
+		if (Magic != 0x07230203)
+			return MakeError(GraphicsErrorCode::InvalidBytecode, "Shader bytecode does not begin with the SPIR-V magic word");
+
+		return {};
+	}
+
+	GraphicsResult ValidateVertexLayout(const VertexLayoutDesc& Description)
+	{
+		if (Description.Stride == 0)
+			return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex layout stride must be non-zero");
+
+		if (Description.Attributes.empty())
+			return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex layout must contain at least one attribute");
+
+		if (Description.Attributes.size() > 16)
+			return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex layout exceeds PulseForge's 16-attribute limit");
+
+		std::array<bool, 3> SeenSemantics = {};
+		for (const VertexAttributeDesc& Attribute : Description.Attributes)
+		{
+			if (!IsValidSemantic(Attribute.Semantic))
+				return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex layout contains an unsupported semantic");
+
+			const size_t SemanticIndex = static_cast<size_t>(Attribute.Semantic);
+			if (SeenSemantics[SemanticIndex])
+				return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex layout contains a duplicate semantic");
+			SeenSemantics[SemanticIndex] = true;
+
+			const auto AttributeSize = GetVertexFormatSize(Attribute.Format);
+			if (!AttributeSize)
+				return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex layout contains an unsupported attribute format");
+
+			if (Attribute.Offset > Description.Stride || *AttributeSize > Description.Stride - Attribute.Offset)
+				return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex attribute extends beyond the declared vertex stride");
+		}
+
+		return {};
+	}
+
+	GraphicsResult ValidateGraphicsPipelineDescription(const GraphicsPipelineDesc& Description)
+	{
+		if (!Description.VertexShader || !Description.FragmentShader)
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline requires both vertex and fragment shaders");
+
+		if (Description.VertexShader->GetDescription().Stage != ShaderStage::Vertex)
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline vertex shader handle has the wrong stage");
+
+		if (Description.FragmentShader->GetDescription().Stage != ShaderStage::Fragment)
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline fragment shader handle has the wrong stage");
+
+		if (Description.Topology != PrimitiveTopology::TriangleList)
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Only triangle-list topology is currently supported");
+
+		if (Description.ColorFormat != ColorTargetFormat::Swapchain)
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Only the active swapchain color target is currently supported");
+
+		if (Description.BindingLayouts.size() > 8)
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline exceeds PulseForge's 8-layout limit");
+
+		for (const BindingLayoutHandle& Layout : Description.BindingLayouts)
+		{
+			if (!Layout)
+				return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline contains an invalid binding-layout handle");
+
+			const auto Validation = ValidateBindingLayout(Layout->GetDescription());
+			if (!Validation)
+				return std::unexpected(GraphicsError{ GraphicsErrorCode::InvalidDescription, Validation.error().Message });
+		}
+
+		if (Description.Rasterizer.Cull != CullMode::None &&
+			Description.Rasterizer.Cull != CullMode::Back &&
+			Description.Rasterizer.Cull != CullMode::Front)
+		{
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline specifies an unsupported culling mode");
+		}
+
+		return ValidateVertexLayout(Description.VertexLayout);
+	}
+
+	GraphicsResult ValidateDrawArguments(
+		const DrawArguments& Arguments,
+		const GraphicsPipelineDesc& Pipeline,
+		const BufferDesc& VertexBuffer)
+	{
+		if (Arguments.VertexCount == 0 || Arguments.InstanceCount == 0)
+			return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Draw vertex and instance counts must be non-zero");
+
+		if (VertexBuffer.Usage != BufferUsage::Vertex)
+			return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Non-indexed draw requires a vertex buffer");
+
+		const GraphicsResult LayoutValidation = ValidateVertexLayout(Pipeline.VertexLayout);
+		if (!LayoutValidation)
+			return LayoutValidation;
+
+		const uint64_t RequiredVertexCount =
+			static_cast<uint64_t>(Arguments.FirstVertex) + Arguments.VertexCount;
+		const uint64_t AvailableVertexCount = VertexBuffer.ByteSize / Pipeline.VertexLayout.Stride;
+		if (RequiredVertexCount > AvailableVertexCount)
+			return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Draw vertex range exceeds the vertex buffer capacity");
+
+		return {};
+	}
+
+	GraphicsResult ValidateDrawBindingSets(
+		const GraphicsPipelineDesc& Pipeline,
+		std::span<const BindingSet* const> BindingSets)
+	{
+		if (BindingSets.size() != Pipeline.BindingLayouts.size())
+			return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Draw must provide one binding set for each graphics-pipeline layout");
+
+		for (size_t Index = 0; Index < BindingSets.size(); ++Index)
+		{
+			if (!BindingSets[Index])
+				return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Draw contains an invalid binding-set reference");
+
+			if (&BindingSets[Index]->GetLayout() != Pipeline.BindingLayouts[Index].get())
+				return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Draw binding set was created from a different pipeline layout");
+		}
+
+		return {};
+	}
+}
