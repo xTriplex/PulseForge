@@ -4,6 +4,7 @@
 
 #include "Assets/AssetMetadata.h"
 #include "Assets/AssetOperations.h"
+#include "Assets/AssetReferenceValidator.h"
 #include "Assets/AssetRegistry.h"
 #include "Assets/PrefabSerializer.h"
 #include "Core/Input.h"
@@ -1541,6 +1542,83 @@ namespace
 		PF_CHECK(Tests, !std::filesystem::exists(ProjectRoot / "Assets/Models/untracked.gltf"));
 	}
 
+	void TestAssetReferenceValidation(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		std::error_code FileError;
+		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const auto ProjectIdentifier = UUID::Generate();
+		const auto MissingAssetIdentifier = UUID::Generate();
+		PF_CHECK(Tests, ProjectIdentifier.has_value() && MissingAssetIdentifier.has_value());
+		if (!ProjectIdentifier || !MissingAssetIdentifier)
+			return;
+
+		const std::filesystem::path ProjectRoot =
+			TemporaryDirectory / ("PulseForgeAssetReferences-" + ProjectIdentifier->ToString());
+		struct ProjectDirectoryCleanup
+		{
+			std::filesystem::path Path;
+			~ProjectDirectoryCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} Cleanup{ ProjectRoot };
+
+		const std::filesystem::path AssetsDirectory = ProjectRoot / "Assets" / "Meshes";
+		std::filesystem::create_directories(AssetsDirectory, FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		Scene TestScene;
+		const auto ResolvedEntity = TestScene.CreateEntity("Resolved mesh");
+		const auto MissingEntity = TestScene.CreateEntity("Missing mesh");
+		PF_CHECK(Tests, ResolvedEntity.has_value() && MissingEntity.has_value());
+		if (!ResolvedEntity || !MissingEntity)
+			return;
+
+		const std::filesystem::path MeshSource = AssetsDirectory / "resolved.mesh";
+		{
+			std::ofstream Output(MeshSource, std::ios::binary | std::ios::trunc);
+			Output << "mesh source";
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto MeshMetadata = AssetMetadataSerializer::CreateForNewAsset(MeshSource);
+		PF_CHECK(Tests, MeshMetadata.has_value());
+		if (!MeshMetadata)
+			return;
+
+		PF_CHECK(Tests, ResolvedEntity->SetMeshRenderer(MeshRendererComponent{ MeshMetadata->ID }).has_value());
+		PF_CHECK(Tests, MissingEntity->SetMeshRenderer(MeshRendererComponent{ *MissingAssetIdentifier }).has_value());
+
+		AssetRegistry EmptyRegistry;
+		const auto AllMissing = AssetReferenceValidator::Validate(TestScene, EmptyRegistry);
+		PF_CHECK(Tests, AllMissing.has_value());
+		PF_CHECK(Tests, AllMissing && AllMissing->size() == 2);
+
+		AssetRegistry Registry;
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		const auto Validation = AssetReferenceValidator::Validate(TestScene, Registry);
+		PF_CHECK(Tests, Validation.has_value());
+		PF_CHECK(Tests, Validation && Validation->size() == 1);
+		if (!Validation || Validation->size() != 1)
+			return;
+
+		const AssetReferenceIssue& Issue = Validation->front();
+		PF_CHECK(Tests, Issue.Code == AssetReferenceIssueCode::MissingAsset);
+		PF_CHECK(Tests, Issue.Kind == AssetReferenceKind::Mesh);
+		PF_CHECK(Tests, Issue.Entity == MissingEntity->GetUUID());
+		PF_CHECK(Tests, Issue.Asset == *MissingAssetIdentifier);
+		const auto MissingReference = MissingEntity->GetMeshRenderer();
+		PF_CHECK(Tests, MissingReference && MissingReference->has_value());
+		PF_CHECK(Tests, MissingReference && MissingReference->value().MeshAsset == *MissingAssetIdentifier);
+	}
+
 	void TestPrefabSerialization(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -1958,6 +2036,7 @@ int main()
 	TestPrefabSerialization(Tests);
 	TestAssetMetadataAndRegistry(Tests);
 	TestAssetOperations(Tests);
+	TestAssetReferenceValidation(Tests);
 	TestGraphicsPipelineAndDrawValidation(Tests);
 	TestConstantBufferBindingValidation(Tests);
 	TestTextureAndSamplerValidation(Tests);
