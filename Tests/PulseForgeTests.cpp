@@ -9,6 +9,9 @@
 #include "Assets/AssetRegistry.h"
 #include "Assets/GltfMeshImporter.h"
 #include "Assets/ImageAssetImporter.h"
+#include "Assets/MaterialAsset.h"
+#include "Assets/MaterialAssetCache.h"
+#include "Assets/MaterialAssetService.h"
 #include "Assets/PrefabAssetService.h"
 #include "Assets/PrefabSerializer.h"
 #include "Assets/SceneAssetService.h"
@@ -844,6 +847,7 @@ namespace
 		const UUID SecondMeshID{ 0x4000000000000000ull, 4 };
 		const AssetID FirstMeshAssetID{ 0x5000000000000000ull, 5 };
 		const AssetID SecondMeshAssetID{ 0x6000000000000000ull, 6 };
+		const AssetID MaterialAssetID{ 0x6100000000000000ull, 61 };
 		auto Camera = TestScene.CreateEntityWithUUID(CameraID, "Camera");
 		auto Parent = TestScene.CreateEntityWithUUID(ParentID, "Parent");
 		auto FirstMesh = TestScene.CreateEntityWithUUID(FirstMeshID, "First mesh");
@@ -872,7 +876,7 @@ namespace
 		PF_CHECK(Tests, SecondMesh->SetTransform(SecondMeshTransform).has_value());
 		PF_CHECK(Tests, FirstMesh->SetParent(*Parent).has_value());
 		PF_CHECK(Tests, FirstMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID }).has_value());
-		PF_CHECK(Tests, SharedMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID }).has_value());
+		PF_CHECK(Tests, SharedMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID, MaterialAssetID }).has_value());
 		PF_CHECK(Tests, SecondMesh->SetMeshRenderer(MeshRendererComponent{ SecondMeshAssetID }).has_value());
 
 		const auto Snapshot = SceneRenderSnapshotBuilder::Build(TestScene, CameraID, 16.0f / 9.0f);
@@ -887,6 +891,8 @@ namespace
 		PF_CHECK(Tests, Snapshot->Meshes[0].MeshAsset == FirstMeshAssetID);
 		PF_CHECK(Tests, Snapshot->Meshes[1].MeshAsset == FirstMeshAssetID);
 		PF_CHECK(Tests, Snapshot->Meshes[2].MeshAsset == SecondMeshAssetID);
+		PF_CHECK(Tests, !Snapshot->Meshes[0].MaterialAsset.has_value());
+		PF_CHECK(Tests, Snapshot->Meshes[1].MaterialAsset == MaterialAssetID);
 		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[0].WorldTransform[3].x - 1.0f) < 0.0001f);
 		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[0].WorldTransform[3].y - 1.0f) < 0.0001f);
 		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[0].WorldTransform[3].z + 2.0f) < 0.0001f);
@@ -917,6 +923,7 @@ namespace
 		const UUID RootId{ 0x2000000000000000ull, 2 };
 		const UUID ChildId{ 0x1000000000000000ull, 1 };
 		const AssetID MeshAssetIdentifier{ 0x5000000000000000ull, 5 };
+		const AssetID MaterialAssetIdentifier{ 0x5100000000000000ull, 51 };
 		auto ChildResult = Source.CreateEntityWithUUID(ChildId, "Child \"one\"");
 		auto RootResult = Source.CreateEntityWithUUID(RootId, "Root");
 		PF_CHECK(Tests, ChildResult.has_value() && RootResult.has_value());
@@ -960,7 +967,8 @@ namespace
 		const auto CameraBeforeSet = Child.GetCamera();
 		PF_CHECK(Tests, CameraBeforeSet && !CameraBeforeSet->has_value());
 		PF_CHECK(Tests, Child.SetCamera(SourceCamera).has_value());
-		PF_CHECK(Tests, Child.SetMeshRenderer(MeshRendererComponent{ MeshAssetIdentifier }).has_value());
+		PF_CHECK(Tests, Child.SetMeshRenderer(MeshRendererComponent{ MeshAssetIdentifier, MaterialAssetIdentifier }).has_value());
+		PF_CHECK(Tests, !Child.SetMeshRenderer(MeshRendererComponent{ MeshAssetIdentifier, AssetID{} }).has_value());
 		const auto RootCamera = Root.GetCamera();
 		PF_CHECK(Tests, RootCamera.has_value() && !RootCamera->has_value());
 
@@ -969,8 +977,9 @@ namespace
 		if (!Serialized)
 			return;
 		PF_CHECK(Tests, Serialized->find("\"format\": \"PulseForgeScene\"") != std::string::npos);
-		PF_CHECK(Tests, Serialized->find("\"version\": 2") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 3") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"meshAsset\": \"" + MeshAssetIdentifier.ToString() + "\"") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"materialAsset\": \"" + MaterialAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("Assets/") == std::string::npos);
 		const size_t ChildEntityPosition = Serialized->find("\"uuid\": \"" + ChildId.ToString() + "\"");
 		const size_t RootEntityPosition = Serialized->find("\"uuid\": \"" + RootId.ToString() + "\"");
@@ -1008,6 +1017,8 @@ namespace
 			glm::abs(LoadedCamera->value().VerticalFieldOfViewRadians - SourceCamera.VerticalFieldOfViewRadians) < 0.0001f);
 		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
 			LoadedMeshRenderer->value().MeshAsset == MeshAssetIdentifier);
+		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
+			LoadedMeshRenderer->value().MaterialAsset == MaterialAssetIdentifier);
 		PF_CHECK(Tests, LoadedParent && LoadedParent->has_value() && **LoadedParent == *LoadedRoot);
 		const auto SerializedAgain = SceneSerializer::Serialize(Destination);
 		PF_CHECK(Tests, SerializedAgain && *SerializedAgain == *Serialized);
@@ -1023,10 +1034,10 @@ namespace
 
 		const auto DestinationRootBeforeFailure = Destination.FindEntity(RootId);
 		std::string UnsupportedVersion = *Serialized;
-		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 2");
+		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 3");
 		PF_CHECK(Tests, VersionPosition != std::string::npos);
 		if (VersionPosition != std::string::npos)
-			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 2").size(), "\"version\": 99");
+			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 3").size(), "\"version\": 99");
 		const auto UnsupportedVersionResult = SceneSerializer::Deserialize(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedVersionResult.has_value());
 		PF_CHECK(Tests, !UnsupportedVersionResult && UnsupportedVersionResult.error().Code == SceneSerializationErrorCode::UnsupportedVersion);
@@ -1040,10 +1051,10 @@ namespace
 		if (LegacySerializedVersionTwo)
 		{
 			std::string LegacyVersionOne = *LegacySerializedVersionTwo;
-			const size_t LegacyVersionPosition = LegacyVersionOne.find("\"version\": 2");
+			const size_t LegacyVersionPosition = LegacyVersionOne.find("\"version\": 3");
 			PF_CHECK(Tests, LegacyVersionPosition != std::string::npos);
 			if (LegacyVersionPosition != std::string::npos)
-				LegacyVersionOne.replace(LegacyVersionPosition, std::string("\"version\": 2").size(), "\"version\": 1");
+				LegacyVersionOne.replace(LegacyVersionPosition, std::string("\"version\": 3").size(), "\"version\": 1");
 			Scene LegacyDestination;
 			const auto LegacyLoad = SceneSerializer::Deserialize(LegacyVersionOne, LegacyDestination);
 			PF_CHECK(Tests, LegacyLoad.has_value());
@@ -1057,6 +1068,35 @@ namespace
 			}
 		}
 
+		std::string LegacyVersionTwo = *Serialized;
+		const std::string MaterialField = "\"materialAsset\": \"" + MaterialAssetIdentifier.ToString() + "\"";
+		const size_t MaterialFieldPosition = LegacyVersionTwo.find(MaterialField);
+		PF_CHECK(Tests, MaterialFieldPosition != std::string::npos);
+		if (MaterialFieldPosition != std::string::npos)
+		{
+			const size_t CommaPosition = LegacyVersionTwo.rfind(',', MaterialFieldPosition);
+			const size_t LineEnd = LegacyVersionTwo.find('\n', MaterialFieldPosition);
+			PF_CHECK(Tests, CommaPosition != std::string::npos && LineEnd != std::string::npos);
+			if (CommaPosition != std::string::npos && LineEnd != std::string::npos)
+				LegacyVersionTwo.erase(CommaPosition, LineEnd - CommaPosition);
+		}
+		const size_t VersionTwoPosition = LegacyVersionTwo.find("\"version\": 3");
+		PF_CHECK(Tests, VersionTwoPosition != std::string::npos);
+		if (VersionTwoPosition != std::string::npos)
+			LegacyVersionTwo.replace(VersionTwoPosition, std::string("\"version\": 3").size(), "\"version\": 2");
+		Scene LegacyVersionTwoDestination;
+		const auto LegacyVersionTwoLoad = SceneSerializer::Deserialize(LegacyVersionTwo, LegacyVersionTwoDestination);
+		PF_CHECK(Tests, LegacyVersionTwoLoad.has_value());
+		const auto LegacyVersionTwoChild = LegacyVersionTwoDestination.FindEntity(ChildId);
+		PF_CHECK(Tests, LegacyVersionTwoChild.has_value());
+		if (LegacyVersionTwoChild)
+		{
+			const auto LegacyMeshRenderer = LegacyVersionTwoChild->GetMeshRenderer();
+			PF_CHECK(Tests, LegacyMeshRenderer && LegacyMeshRenderer->has_value());
+			PF_CHECK(Tests, LegacyMeshRenderer && LegacyMeshRenderer->has_value() &&
+				!LegacyMeshRenderer->value().MaterialAsset.has_value());
+		}
+
 		std::string InvalidMeshAsset = *Serialized;
 		const size_t MeshAssetPosition = InvalidMeshAsset.find(MeshAssetIdentifier.ToString());
 		PF_CHECK(Tests, MeshAssetPosition != std::string::npos);
@@ -1066,6 +1106,15 @@ namespace
 		PF_CHECK(Tests, !InvalidMeshAssetLoad.has_value());
 		PF_CHECK(Tests, !InvalidMeshAssetLoad &&
 			InvalidMeshAssetLoad.error().Code == SceneSerializationErrorCode::InvalidEntityData);
+		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+
+		std::string InvalidMaterialAsset = *Serialized;
+		const size_t InvalidMaterialPosition = InvalidMaterialAsset.find(MaterialAssetIdentifier.ToString());
+		PF_CHECK(Tests, InvalidMaterialPosition != std::string::npos);
+		if (InvalidMaterialPosition != std::string::npos)
+			InvalidMaterialAsset.replace(InvalidMaterialPosition, MaterialAssetIdentifier.ToString().size(), "not-a-uuid");
+		const auto InvalidMaterialLoad = SceneSerializer::Deserialize(InvalidMaterialAsset, Destination);
+		PF_CHECK(Tests, !InvalidMaterialLoad && InvalidMaterialLoad.error().Code == SceneSerializationErrorCode::InvalidEntityData);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
 
 		std::string InvalidCameraDocument = *Serialized;
@@ -2001,6 +2050,161 @@ namespace
 		PF_CHECK(Tests, !std::filesystem::exists(ProjectRoot / "Assets" / "Imported" / "refused.bin"));
 	}
 
+	void TestMaterialAssets(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const auto TextureAsset = UUID::Generate();
+		PF_CHECK(Tests, TextureAsset.has_value());
+		if (!TextureAsset)
+			return;
+
+		MaterialAssetDesc Description;
+		Description.BaseColorTexture = *TextureAsset;
+		Description.BaseColorFactor = { 0.8f, 0.6f, 0.4f, 1.0f };
+		const auto Serialized = MaterialAssetSerializer::Serialize(Description);
+		PF_CHECK(Tests, Serialized.has_value());
+		if (!Serialized)
+			return;
+		const auto Deserialized = MaterialAssetSerializer::Deserialize(*Serialized);
+		PF_CHECK(Tests, Deserialized && Deserialized->BaseColorTexture == Description.BaseColorTexture);
+		PF_CHECK(Tests, Deserialized && glm::all(glm::equal(Deserialized->BaseColorFactor, Description.BaseColorFactor)));
+
+		MaterialAssetDesc MissingTexture = Description;
+		MissingTexture.BaseColorTexture = {};
+		PF_CHECK(Tests, !ValidateMaterialAssetDescription(MissingTexture));
+		MaterialAssetDesc InvalidFactor = Description;
+		InvalidFactor.BaseColorFactor.g = std::numeric_limits<float>::quiet_NaN();
+		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
+		InvalidFactor.BaseColorFactor = Description.BaseColorFactor;
+		InvalidFactor.BaseColorFactor.r = 1.1f;
+		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
+		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize("{invalid"));
+		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize("{\"format\":\"OtherMaterial\",\"version\":1}"));
+		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize("{\"format\":\"PulseForgeMaterial\",\"version\":99}"));
+
+		std::error_code FileError;
+		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+		const auto ProjectIdentifier = UUID::Generate();
+		PF_CHECK(Tests, ProjectIdentifier.has_value());
+		if (!ProjectIdentifier)
+			return;
+
+		const std::filesystem::path ProjectRoot = TemporaryDirectory / ("PulseForgeMaterials-" + ProjectIdentifier->ToString());
+		struct ProjectCleanup
+		{
+			std::filesystem::path Path;
+			~ProjectCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} Cleanup{ ProjectRoot };
+		const std::filesystem::path MaterialsDirectory = ProjectRoot / "Assets" / "Materials";
+		const std::filesystem::path TexturesDirectory = ProjectRoot / "Assets" / "Textures";
+		std::filesystem::create_directories(MaterialsDirectory, FileError);
+		PF_CHECK(Tests, !FileError);
+		std::filesystem::create_directories(TexturesDirectory, FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const std::filesystem::path TexturePath = TexturesDirectory / "base-color.png";
+		{
+			std::ofstream Output(TexturePath, std::ios::binary | std::ios::trunc);
+			Output << "texture placeholder";
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto TextureMetadata = AssetMetadataSerializer::CreateForNewAsset(TexturePath);
+		PF_CHECK(Tests, TextureMetadata.has_value());
+		if (!TextureMetadata)
+			return;
+		Description.BaseColorTexture = TextureMetadata->ID;
+
+		AssetRegistry Registry;
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		const auto Created = MaterialAssetService::Create(
+			Registry,
+			ProjectRoot,
+			"Assets/Materials/validation.material",
+			Description);
+		PF_CHECK(Tests, Created.has_value());
+		PF_CHECK(Tests, Created && Created->ID != TextureMetadata->ID);
+		if (!Created)
+			return;
+
+		const std::filesystem::path MaterialPath = ProjectRoot / "Assets" / "Materials" / "validation.material";
+		const auto Metadata = AssetMetadataSerializer::LoadFromFile(AssetMetadataSerializer::GetSidecarPath(MaterialPath));
+		PF_CHECK(Tests, Metadata && Metadata->ID == Created->ID);
+		PF_CHECK(Tests, Registry.Find(Created->ID).has_value());
+		const auto Loaded = MaterialAssetService::Load(Created->ID, ProjectRoot, Registry);
+		PF_CHECK(Tests, Loaded && Loaded->BaseColorTexture == Description.BaseColorTexture);
+		PF_CHECK(Tests, Loaded && glm::all(glm::equal(Loaded->BaseColorFactor, Description.BaseColorFactor)));
+
+		MaterialAssetCache Cache(ProjectRoot, Registry);
+		const auto Cached = Cache.GetOrLoad(Created->ID);
+		const auto CachedAgain = Cache.GetOrLoad(Created->ID);
+		PF_CHECK(Tests, Cached && CachedAgain && &Cached->get() == &CachedAgain->get());
+		PF_CHECK(Tests, Cache.GetLoadedCount() == 1);
+
+		MaterialAssetDesc Updated = Description;
+		Updated.BaseColorFactor = { 0.3f, 0.5f, 0.7f, 1.0f };
+		PF_CHECK(Tests, MaterialAssetService::Save(Created->ID, ProjectRoot, Registry, Updated).has_value());
+		const auto PreservedMetadata = AssetMetadataSerializer::LoadFromFile(
+			AssetMetadataSerializer::GetSidecarPath(MaterialPath));
+		PF_CHECK(Tests, PreservedMetadata && PreservedMetadata->ID == Created->ID);
+		PF_CHECK(Tests, Cached && glm::all(glm::equal(Cached->get().BaseColorFactor, Description.BaseColorFactor)));
+		Cache.Clear();
+		const auto Reloaded = Cache.GetOrLoad(Created->ID);
+		PF_CHECK(Tests, Reloaded && glm::all(glm::equal(Reloaded->get().BaseColorFactor, Updated.BaseColorFactor)));
+
+		const auto Moved = AssetOperations::Move(Registry, ProjectRoot, Created->ID, "Assets/Materials/renamed.material");
+		PF_CHECK(Tests, Moved && Moved->ID == Created->ID);
+		const auto LoadedAfterMove = MaterialAssetService::Load(Created->ID, ProjectRoot, Registry);
+		PF_CHECK(Tests, LoadedAfterMove && glm::all(glm::equal(LoadedAfterMove->BaseColorFactor, Updated.BaseColorFactor)));
+
+		const auto InvalidExtension = MaterialAssetService::Create(
+			Registry,
+			ProjectRoot,
+			"Assets/Materials/invalid.json",
+			Description);
+		PF_CHECK(Tests, !InvalidExtension && InvalidExtension.error().Code == MaterialAssetErrorCode::UnsupportedAssetType);
+		const auto Duplicate = MaterialAssetService::Create(
+			Registry,
+			ProjectRoot,
+			"Assets/Materials/renamed.material",
+			Description);
+		PF_CHECK(Tests, !Duplicate && Duplicate.error().Code == MaterialAssetErrorCode::AssetOperationFailed);
+
+		const std::filesystem::path WrongTypePath = MaterialsDirectory / "not-material.txt";
+		{
+			std::ofstream Output(WrongTypePath, std::ios::binary | std::ios::trunc);
+			Output << "not a material";
+		}
+		const auto WrongTypeMetadata = AssetMetadataSerializer::CreateForNewAsset(WrongTypePath);
+		PF_CHECK(Tests, WrongTypeMetadata.has_value());
+		const std::filesystem::path BrokenPath = MaterialsDirectory / "broken.material";
+		{
+			std::ofstream Output(BrokenPath, std::ios::binary | std::ios::trunc);
+			Output << "{broken";
+		}
+		const auto BrokenMetadata = AssetMetadataSerializer::CreateForNewAsset(BrokenPath);
+		PF_CHECK(Tests, BrokenMetadata.has_value());
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		if (WrongTypeMetadata)
+		{
+			const auto WrongType = MaterialAssetService::Load(WrongTypeMetadata->ID, ProjectRoot, Registry);
+			PF_CHECK(Tests, !WrongType && WrongType.error().Code == MaterialAssetErrorCode::UnsupportedAssetType);
+		}
+		if (BrokenMetadata)
+		{
+			const auto Broken = MaterialAssetService::Load(BrokenMetadata->ID, ProjectRoot, Registry);
+			PF_CHECK(Tests, !Broken && Broken.error().Code == MaterialAssetErrorCode::InvalidDocument);
+		}
+	}
+
 	void TestAssetReferenceValidation(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -2037,8 +2241,9 @@ namespace
 		Scene TestScene;
 		const auto ResolvedEntity = TestScene.CreateEntity("Resolved mesh");
 		const auto MissingEntity = TestScene.CreateEntity("Missing mesh");
-		PF_CHECK(Tests, ResolvedEntity.has_value() && MissingEntity.has_value());
-		if (!ResolvedEntity || !MissingEntity)
+		const auto WrongMaterialEntity = TestScene.CreateEntity("Wrong material type");
+		PF_CHECK(Tests, ResolvedEntity.has_value() && MissingEntity.has_value() && WrongMaterialEntity.has_value());
+		if (!ResolvedEntity || !MissingEntity || !WrongMaterialEntity)
 			return;
 
 		const std::filesystem::path MeshSource = AssetsDirectory / "resolved.mesh";
@@ -2051,28 +2256,70 @@ namespace
 		PF_CHECK(Tests, MeshMetadata.has_value());
 		if (!MeshMetadata)
 			return;
+		const std::filesystem::path MaterialsDirectory = ProjectRoot / "Assets" / "Materials";
+		std::filesystem::create_directories(MaterialsDirectory, FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+		const std::filesystem::path MaterialSource = MaterialsDirectory / "resolved.material";
+		const std::filesystem::path WrongMaterialSource = MaterialsDirectory / "wrong.txt";
+		{
+			std::ofstream Output(MaterialSource, std::ios::binary | std::ios::trunc);
+			Output << "material";
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		{
+			std::ofstream Output(WrongMaterialSource, std::ios::binary | std::ios::trunc);
+			Output << "not a material";
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto MaterialMetadata = AssetMetadataSerializer::CreateForNewAsset(MaterialSource);
+		const auto WrongMaterialMetadata = AssetMetadataSerializer::CreateForNewAsset(WrongMaterialSource);
+		PF_CHECK(Tests, MaterialMetadata.has_value() && WrongMaterialMetadata.has_value());
+		if (!MaterialMetadata || !WrongMaterialMetadata)
+			return;
 
-		PF_CHECK(Tests, ResolvedEntity->SetMeshRenderer(MeshRendererComponent{ MeshMetadata->ID }).has_value());
+		PF_CHECK(Tests, ResolvedEntity->SetMeshRenderer(
+			MeshRendererComponent{ MeshMetadata->ID, MaterialMetadata->ID }).has_value());
 		PF_CHECK(Tests, MissingEntity->SetMeshRenderer(MeshRendererComponent{ *MissingAssetIdentifier }).has_value());
+		PF_CHECK(Tests, WrongMaterialEntity->SetMeshRenderer(
+			MeshRendererComponent{ MeshMetadata->ID, WrongMaterialMetadata->ID }).has_value());
 
 		AssetRegistry EmptyRegistry;
 		const auto AllMissing = AssetReferenceValidator::Validate(TestScene, EmptyRegistry);
 		PF_CHECK(Tests, AllMissing.has_value());
-		PF_CHECK(Tests, AllMissing && AllMissing->size() == 2);
+		PF_CHECK(Tests, AllMissing && AllMissing->size() == 5);
 
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
 		const auto Validation = AssetReferenceValidator::Validate(TestScene, Registry);
 		PF_CHECK(Tests, Validation.has_value());
-		PF_CHECK(Tests, Validation && Validation->size() == 1);
-		if (!Validation || Validation->size() != 1)
+		PF_CHECK(Tests, Validation && Validation->size() == 2);
+		if (!Validation || Validation->size() != 2)
 			return;
 
-		const AssetReferenceIssue& Issue = Validation->front();
-		PF_CHECK(Tests, Issue.Code == AssetReferenceIssueCode::MissingAsset);
-		PF_CHECK(Tests, Issue.Kind == AssetReferenceKind::Mesh);
-		PF_CHECK(Tests, Issue.Entity == MissingEntity->GetUUID());
-		PF_CHECK(Tests, Issue.Asset == *MissingAssetIdentifier);
+		const auto MissingIssue = std::find_if(Validation->begin(), Validation->end(), [&](const AssetReferenceIssue& Issue)
+		{
+			return Issue.Entity == MissingEntity->GetUUID();
+		});
+		PF_CHECK(Tests, MissingIssue != Validation->end());
+		if (MissingIssue != Validation->end())
+		{
+			PF_CHECK(Tests, MissingIssue->Code == AssetReferenceIssueCode::MissingAsset);
+			PF_CHECK(Tests, MissingIssue->Kind == AssetReferenceKind::Mesh);
+			PF_CHECK(Tests, MissingIssue->Asset == *MissingAssetIdentifier);
+		}
+		const auto WrongTypeIssue = std::find_if(Validation->begin(), Validation->end(), [&](const AssetReferenceIssue& Issue)
+		{
+			return Issue.Entity == WrongMaterialEntity->GetUUID();
+		});
+		PF_CHECK(Tests, WrongTypeIssue != Validation->end());
+		if (WrongTypeIssue != Validation->end())
+		{
+			PF_CHECK(Tests, WrongTypeIssue->Code == AssetReferenceIssueCode::WrongAssetType);
+			PF_CHECK(Tests, WrongTypeIssue->Kind == AssetReferenceKind::Material);
+			PF_CHECK(Tests, WrongTypeIssue->Asset == WrongMaterialMetadata->ID);
+		}
 		const auto MissingReference = MissingEntity->GetMeshRenderer();
 		PF_CHECK(Tests, MissingReference && MissingReference->has_value());
 		PF_CHECK(Tests, MissingReference && MissingReference->value().MeshAsset == *MissingAssetIdentifier);
@@ -2544,7 +2791,8 @@ namespace
 		RootCamera.VerticalFieldOfViewRadians = 0.95f;
 		PF_CHECK(Tests, Root->SetCamera(RootCamera).has_value());
 		const AssetID MeshAssetID{ 0x7300000000000000ull, 7 };
-		PF_CHECK(Tests, Child->SetMeshRenderer(MeshRendererComponent{ MeshAssetID }).has_value());
+		const AssetID MaterialAssetID{ 0x7400000000000000ull, 7 };
+		PF_CHECK(Tests, Child->SetMeshRenderer(MeshRendererComponent{ MeshAssetID, MaterialAssetID }).has_value());
 
 		const auto PrefabData = PrefabSerializer::Serialize(Source, *Root);
 		PF_CHECK(Tests, PrefabData.has_value());
@@ -2553,6 +2801,7 @@ namespace
 		PF_CHECK(Tests, PrefabData->find("\"format\": \"PulseForgePrefab\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"root\": \"" + Root->GetUUID().ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"meshAsset\": \"" + MeshAssetID.ToString() + "\"") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"materialAsset\": \"" + MaterialAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("Outside prefab") == std::string::npos);
 		PF_CHECK(Tests, PrefabData->find(ExternalParent->GetUUID().ToString()) == std::string::npos);
 
@@ -2581,6 +2830,7 @@ namespace
 		const auto FirstGrandchildren = FirstChild.GetChildren();
 		PF_CHECK(Tests, FirstChildTag && FirstChildTag->Name == "Prefab child");
 		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MeshAsset == MeshAssetID);
+		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MaterialAsset == MaterialAssetID);
 		PF_CHECK(Tests, FirstGrandchildren && FirstGrandchildren->size() == 1);
 
 		const auto SecondInstance = PrefabSerializer::Instantiate(*PrefabData, Destination);
@@ -3145,6 +3395,7 @@ int main()
 	TestAssetMetadataAndRegistry(Tests);
 	TestAssetOperations(Tests);
 	TestAssetImportOperation(Tests);
+	TestMaterialAssets(Tests);
 	TestAssetReferenceValidation(Tests);
 	TestGltfMeshImport(Tests);
 	TestImageAssetImport(Tests);

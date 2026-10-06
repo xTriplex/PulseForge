@@ -87,6 +87,9 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Assets/AssetOperations.cpp
 	PulseForge/Source/Private/Assets/AssetReferenceValidator.cpp
 	PulseForge/Source/Private/Assets/AssetRegistry.cpp
+	PulseForge/Source/Private/Assets/MaterialAsset.cpp
+	PulseForge/Source/Private/Assets/MaterialAssetCache.cpp
+	PulseForge/Source/Private/Assets/MaterialAssetService.cpp
 	PulseForge/Source/Private/Assets/GltfMeshImporter.cpp
 	PulseForge/Source/Private/Assets/ImageAssetImporter.cpp
 	PulseForge/Source/Private/Assets/MeshAssetCache.cpp
@@ -241,6 +244,9 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
 		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scenes"
 		COMMAND "${CMAKE_COMMAND}" -E copy_directory
 			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Scenes" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scenes"
+		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Materials"
+		COMMAND "${CMAKE_COMMAND}" -E copy_directory
+			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Materials" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Materials"
 		VERBATIM
 	)
 	set_property(TARGET PulseForgeGame PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGame>")

@@ -1,6 +1,6 @@
-cbuffer RenderTint : register(b0)
+cbuffer BaseColor : register(b0)
 {
-	float4 Tint;
+	float4 BaseColorFactor;
 };
 
 cbuffer Transform : register(b1)
@@ -36,5 +36,5 @@ VertexOutput VSMain(VertexInput Input)
 
 float4 PSMain(VertexOutput Input) : SV_Target0
 {
-	return float4(Input.Color * DiffuseTexture.Sample(DiffuseSampler, Input.TexCoord).rgb * Tint.rgb, Tint.a);
+	return float4(Input.Color * DiffuseTexture.Sample(DiffuseSampler, Input.TexCoord).rgb * BaseColorFactor.rgb, BaseColorFactor.a);
 }

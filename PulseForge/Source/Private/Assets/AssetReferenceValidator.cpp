@@ -26,6 +26,29 @@ namespace PulseForge
 					MeshAssetID
 				});
 			}
+			if (MeshRenderer->value().MaterialAsset)
+			{
+				const AssetID& MaterialAssetID = *MeshRenderer->value().MaterialAsset;
+				const auto MaterialRecord = Registry.Find(MaterialAssetID);
+				if (!MaterialRecord)
+				{
+					Issues.push_back({
+						AssetReferenceIssueCode::MissingAsset,
+						AssetReferenceKind::Material,
+						CurrentEntity.GetUUID(),
+						MaterialAssetID
+					});
+				}
+				else if (MaterialRecord->ProjectRelativePath.extension() != ".material")
+				{
+					Issues.push_back({
+						AssetReferenceIssueCode::WrongAssetType,
+						AssetReferenceKind::Material,
+						CurrentEntity.GetUUID(),
+						MaterialAssetID
+					});
+				}
+			}
 		}
 		return Issues;
 	}

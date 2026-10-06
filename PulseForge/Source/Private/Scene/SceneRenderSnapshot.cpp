@@ -134,6 +134,13 @@ namespace PulseForge
 					Current.GetUUID(),
 					"A mesh renderer references a nil mesh asset UUID"));
 			}
+			if (Component.MaterialAsset && Component.MaterialAsset->IsNil())
+			{
+				return std::unexpected(MakeError(
+					SceneRenderSnapshotErrorCode::SceneOperationFailed,
+					Current.GetUUID(),
+					"A mesh renderer references a nil material asset UUID"));
+			}
 
 			const auto WorldTransform = Current.GetWorldMatrix();
 			if (!WorldTransform)
@@ -151,7 +158,7 @@ namespace PulseForge
 					"Mesh entity world transform contains a non-finite matrix value"));
 			}
 
-			Snapshot.Meshes.push_back({ Current.GetUUID(), Component.MeshAsset, *WorldTransform });
+			Snapshot.Meshes.push_back({ Current.GetUUID(), Component.MeshAsset, Component.MaterialAsset, *WorldTransform });
 		}
 		return Snapshot;
 	}

@@ -9,7 +9,7 @@
   "root": "00112233-4455-4677-8899-aabbccddeeff",
   "scene": {
     "format": "PulseForgeScene",
-    "version": 2,
+    "version": 3,
     "entities": [
       {
         "uuid": "00112233-4455-4677-8899-aabbccddeeff",
@@ -26,9 +26,9 @@
 }
 ```
 
-The root's parent outside the captured subtree is omitted. Instantiation creates new entity UUIDs and reconstructs hierarchy while retaining component asset UUIDs, so multiple instances can reference the same mesh asset. Asset paths and prefab inheritance/overrides are not stored in this format.
+The root's parent outside the captured subtree is omitted. Instantiation creates new entity UUIDs and reconstructs hierarchy while retaining component asset UUIDs, so multiple instances can reference the same mesh and optional material assets. Asset paths and prefab inheritance/overrides are not stored in this format.
 
-The current serializer preserves tag, transform, camera, and mesh-renderer components. New scene components must be added to scene and prefab serialization together.
+The current serializer preserves tag, transform, camera, and mesh-renderer components. Scene format version 3 adds an optional `materialAsset` UUID to mesh renderers; older scene versions remain readable. New scene components must be added to scene and prefab serialization together.
 
 Managed prefabs use the `.prefab` source extension and an adjacent `.prefab.meta` sidecar. `PrefabAssetService::Create` serializes a subtree to a new managed path, assigns a fresh sidecar UUID, and refreshes the supplied registry without overwriting existing files. The sidecar UUID is the prefab asset identity; the service resolves that UUID through the generated asset registry before saving or instantiating. Moving the prefab and sidecar changes its path, not its identity. Duplicating a prefab creates a new sidecar UUID.
 

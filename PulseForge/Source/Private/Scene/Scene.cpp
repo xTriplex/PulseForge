@@ -432,6 +432,10 @@ namespace PulseForge
 			return std::unexpected(MakeSceneError(
 				SceneErrorCode::InvalidAssetReference,
 				"Mesh renderer requires a non-nil mesh asset UUID"));
+		if (MeshRenderer.MaterialAsset && MeshRenderer.MaterialAsset->IsNil())
+			return std::unexpected(MakeSceneError(
+				SceneErrorCode::InvalidAssetReference,
+				"Mesh renderer material reference must be a non-nil asset UUID when present"));
 
 		try
 		{

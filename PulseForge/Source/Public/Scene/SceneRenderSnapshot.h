@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,7 @@ namespace PulseForge
 	{
 		UUID Entity;
 		AssetID MeshAsset;
+		std::optional<AssetID> MaterialAsset;
 		glm::mat4 WorldTransform{ 1.0f };
 	};
 

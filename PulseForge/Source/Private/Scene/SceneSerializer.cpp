@@ -21,7 +21,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t SceneFormatVersion = 2;
+		constexpr int64_t SceneFormatVersion = 3;
 		constexpr int64_t MinimumSupportedSceneFormatVersion = 1;
 		constexpr std::string_view SceneFormatName = "PulseForgeScene";
 
@@ -115,9 +115,12 @@ namespace PulseForge
 				}
 				if (MeshRenderer->has_value())
 				{
-					Record["meshRenderer"] = Json::object({
+					Json MeshRendererRecord = Json::object({
 						{ "meshAsset", MeshRenderer->value().MeshAsset.ToString() }
 					});
+					if (MeshRenderer->value().MaterialAsset)
+						MeshRendererRecord["materialAsset"] = MeshRenderer->value().MaterialAsset->ToString();
+					Record["meshRenderer"] = std::move(MeshRendererRecord);
 				}
 				Record["parent"] = Parent->has_value()
 					? Json((**Parent).GetUUID().ToString())
@@ -287,7 +290,23 @@ namespace PulseForge
 							SceneSerializationErrorCode::InvalidEntityData,
 							ParsedMeshAsset ? "Mesh renderer asset UUID must not be nil" : ParsedMeshAsset.error().Message));
 
-					MeshRendererData = MeshRendererComponent{ *ParsedMeshAsset };
+					std::optional<AssetID> MaterialAsset;
+					const auto SerializedMaterialAsset = SerializedMeshRenderer->find("materialAsset");
+					if (SerializedMaterialAsset != SerializedMeshRenderer->end())
+					{
+						if (!SerializedMaterialAsset->is_string())
+							return std::unexpected(MakeError(
+								SceneSerializationErrorCode::InvalidEntityData,
+								"Mesh renderer materialAsset must be a UUID string when present"));
+						const auto ParsedMaterialAsset = UUID::Parse(SerializedMaterialAsset->get<std::string>());
+						if (!ParsedMaterialAsset || ParsedMaterialAsset->IsNil())
+							return std::unexpected(MakeError(
+								SceneSerializationErrorCode::InvalidEntityData,
+								ParsedMaterialAsset ? "Mesh renderer material UUID must not be nil" : ParsedMaterialAsset.error().Message));
+						MaterialAsset = *ParsedMaterialAsset;
+					}
+
+					MeshRendererData = MeshRendererComponent{ *ParsedMeshAsset, MaterialAsset };
 				}
 
 				auto Created = Staging.CreateEntityWithUUID(ParsedUUID.value(), Name->get<std::string>());

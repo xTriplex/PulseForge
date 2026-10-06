@@ -1,5 +1,6 @@
 #include "Client/PulseForgeGame.h"
 #include "Assets/AssetRegistry.h"
+#include "Assets/MaterialAssetCache.h"
 #include "Assets/MeshAssetCache.h"
 #include "Assets/SceneAssetService.h"
 #include "Assets/TextureAssetCache.h"
@@ -20,6 +21,7 @@
 #include <stdexcept>
 #include <expected>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -69,6 +71,7 @@ public:
 				PulseForge::Application::Get(),
 				ProjectRoot,
 				m_AssetRegistry);
+			m_MaterialAssetCache = std::make_unique<PulseForge::MaterialAssetCache>(ProjectRoot, m_AssetRegistry);
 
 			const auto [FramebufferWidth, FramebufferHeight] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
 			if (FramebufferWidth == 0 || FramebufferHeight == 0)
@@ -117,20 +120,6 @@ public:
 				throw std::runtime_error(CreatedFragmentShader.error().Message);
 			m_FragmentShader = std::move(CreatedFragmentShader.value());
 
-			const auto TextureAssetID = PulseForge::UUID::Parse("4c9b0a26-5ca1-4d37-b451-f23231002f92");
-			if (!TextureAssetID)
-				throw std::runtime_error(TextureAssetID.error().Message);
-			m_TextureAssetID = *TextureAssetID;
-			auto CreatedTexture = m_TextureAssetCache->GetOrLoad(
-				m_TextureAssetID,
-				PulseForge::TextureFormat::RGBA8_Srgb);
-			if (!CreatedTexture)
-				throw std::runtime_error(CreatedTexture.error().Message);
-			PF_INFO("Resolved image asset {0} as {1}x{2} sRGB texture",
-				m_TextureAssetID.ToString(),
-				CreatedTexture->get().GetDescription().Width,
-				CreatedTexture->get().GetDescription().Height);
-
 			PulseForge::SamplerDesc SamplerDescription;
 			SamplerDescription.Minification = PulseForge::SamplerFilter::Nearest;
 			SamplerDescription.Magnification = PulseForge::SamplerFilter::Nearest;
@@ -141,18 +130,6 @@ public:
 			if (!CreatedSampler)
 				throw std::runtime_error(CreatedSampler.error().Message);
 			m_Sampler = std::move(CreatedSampler.value());
-
-			const std::array<float, 4> Tint = { 1.0f, 0.82f, 0.9f, 1.0f };
-			PulseForge::BufferDesc ConstantBufferDescription;
-			ConstantBufferDescription.ByteSize = sizeof(Tint);
-			ConstantBufferDescription.Usage = PulseForge::BufferUsage::Constant;
-			ConstantBufferDescription.DebugName = "PulseForge sample tint constants";
-			auto CreatedConstantBuffer = PulseForge::Application::Get().CreateBuffer(
-				ConstantBufferDescription,
-				std::as_bytes(std::span(Tint)));
-			if (!CreatedConstantBuffer)
-				throw std::runtime_error(CreatedConstantBuffer.error().Message);
-			m_ConstantBuffer = std::move(CreatedConstantBuffer.value());
 
 			PulseForge::BindingLayoutDesc BindingLayoutDescription;
 			BindingLayoutDescription.Visibility = PulseForge::ShaderVisibility::AllGraphics;
@@ -168,8 +145,8 @@ public:
 				throw std::runtime_error(CreatedBindingLayout.error().Message);
 			m_BindingLayout = std::move(CreatedBindingLayout.value());
 
-			if (auto BindingResult = CreateTransformBindings(); !BindingResult)
-				throw std::runtime_error(BindingResult.error());
+			if (auto TransformResult = CreateTransformBuffer(); !TransformResult)
+				throw std::runtime_error(TransformResult.error());
 
 			PulseForge::GraphicsPipelineDesc PipelineDescription;
 			PipelineDescription.VertexShader = m_VertexShader;
@@ -185,6 +162,15 @@ public:
 			if (!CreatedPipeline)
 				throw std::runtime_error(CreatedPipeline.error().Message);
 			m_Pipeline = std::move(CreatedPipeline.value());
+
+			for (const PulseForge::SceneMeshInstance& Instance : InitialSnapshot->Meshes)
+			{
+				if (!Instance.MaterialAsset)
+					throw std::runtime_error("Every mesh in the validation scene must reference a material asset");
+				auto MaterialBindings = GetOrCreateMaterialBindings(*Instance.MaterialAsset);
+				if (!MaterialBindings)
+					throw std::runtime_error("Could not prepare validation-scene material: " + MaterialBindings.error());
+			}
 		}
 	}
 
@@ -217,7 +203,6 @@ public:
 		}
 		m_LoggedSnapshotFailure = false;
 
-		const std::array<const PulseForge::BindingSet*, 1> BindingSets = { m_BindingSet.get() };
 		size_t SubmittedDraws = 0;
 		for (const PulseForge::SceneMeshInstance& Instance : Snapshot->Meshes)
 		{
@@ -226,6 +211,19 @@ public:
 			{
 				if (m_ReportedMeshFailures.insert(Instance.MeshAsset).second)
 					PF_ERROR("Could not resolve mesh asset {0}: {1}", Instance.MeshAsset.ToString(), Mesh.error().Message);
+				continue;
+			}
+			if (!Instance.MaterialAsset)
+			{
+				if (m_ReportedMaterialFailures.insert(Instance.MeshAsset).second)
+					PF_ERROR("Mesh asset {0} has no material assigned in the scene", Instance.MeshAsset.ToString());
+				continue;
+			}
+			const auto MaterialBindings = m_MaterialBindings.find(*Instance.MaterialAsset);
+			if (MaterialBindings == m_MaterialBindings.end())
+			{
+				if (m_ReportedMaterialFailures.insert(*Instance.MaterialAsset).second)
+					PF_ERROR("Material asset {0} was not prepared before rendering began", Instance.MaterialAsset->ToString());
 				continue;
 			}
 
@@ -246,6 +244,9 @@ public:
 			m_LoggedTransformUpdateFailure = false;
 
 			const PulseForge::DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
+			const std::array<const PulseForge::BindingSet*, 1> BindingSets = {
+				MaterialBindings->second->BindingSet.get()
+			};
 			const auto DrawResult = PulseForge::Application::Get().DrawIndexed(
 				*m_Pipeline,
 				Mesh->get(),
@@ -263,9 +264,10 @@ public:
 		if (SubmittedDraws > 0 && !m_LoggedSceneDraw)
 		{
 			m_LoggedSceneDraw = true;
-			PF_INFO("Submitted {0} indexed mesh instance(s) from the scene snapshot using {1} cached mesh asset(s)",
+			PF_INFO("Submitted {0} indexed mesh instance(s) from the scene snapshot using {1} cached mesh asset(s) and {2} material(s)",
 				SubmittedDraws,
-				m_MeshAssetCache->GetLoadedCount());
+				m_MeshAssetCache->GetLoadedCount(),
+				m_MaterialBindings.size());
 		}
 	}
 
@@ -309,7 +311,13 @@ private:
 		m_CameraEntity = *CameraID;
 	}
 
-	[[nodiscard]] std::expected<void, std::string> CreateTransformBindings()
+	struct MaterialBindingResources
+	{
+		PulseForge::BufferHandle BaseColorFactorBuffer;
+		PulseForge::BindingSetHandle BindingSet;
+	};
+
+	[[nodiscard]] std::expected<void, std::string> CreateTransformBuffer()
 	{
 		const glm::mat4 InitialTransform(1.0f);
 		PulseForge::BufferDesc TransformBufferDescription;
@@ -322,35 +330,71 @@ private:
 		if (!CreatedTransformBuffer)
 			return std::unexpected(CreatedTransformBuffer.error().Message);
 
-		PulseForge::BindingSetDesc BindingSetDescription;
-		BindingSetDescription.Layout = m_BindingLayout;
-		const auto Texture = m_TextureAssetCache->GetOrLoad(m_TextureAssetID, PulseForge::TextureFormat::RGBA8_Srgb);
-		if (!Texture)
-			return std::unexpected(Texture.error().Message);
-		BindingSetDescription.Textures.push_back({ 0, std::cref(Texture->get()) });
-		BindingSetDescription.Samplers.push_back({ 0, std::cref(*m_Sampler) });
-		BindingSetDescription.Buffers.push_back({ 0, std::cref(*m_ConstantBuffer) });
-		BindingSetDescription.Buffers.push_back({ 1, std::cref(*CreatedTransformBuffer.value()) });
-		auto CreatedBindingSet = PulseForge::Application::Get().CreateBindingSet(BindingSetDescription);
-		if (!CreatedBindingSet)
-			return std::unexpected(CreatedBindingSet.error().Message);
-
-		m_BindingSet = std::move(CreatedBindingSet.value());
 		m_TransformBuffer = std::move(CreatedTransformBuffer.value());
 		return {};
+	}
+
+	[[nodiscard]] std::expected<MaterialBindingResources*, std::string> GetOrCreateMaterialBindings(
+		const PulseForge::AssetID& MaterialAsset)
+	{
+		if (const auto Existing = m_MaterialBindings.find(MaterialAsset); Existing != m_MaterialBindings.end())
+			return Existing->second.get();
+
+		auto Material = m_MaterialAssetCache->GetOrLoad(MaterialAsset);
+		if (!Material)
+			return std::unexpected(Material.error().Message);
+
+		auto Texture = m_TextureAssetCache->GetOrLoad(
+			Material->get().BaseColorTexture,
+			PulseForge::TextureFormat::RGBA8_Srgb);
+		if (!Texture)
+			return std::unexpected(Texture.error().Message);
+
+		const glm::vec4& BaseColorFactor = Material->get().BaseColorFactor;
+		PulseForge::BufferDesc FactorBufferDescription;
+		FactorBufferDescription.ByteSize = sizeof(BaseColorFactor);
+		FactorBufferDescription.Usage = PulseForge::BufferUsage::Constant;
+		FactorBufferDescription.DebugName = "PulseForge material base-color factor";
+		auto FactorBuffer = PulseForge::Application::Get().CreateBuffer(
+			FactorBufferDescription,
+			std::as_bytes(std::span(&BaseColorFactor, 1)));
+		if (!FactorBuffer)
+			return std::unexpected(FactorBuffer.error().Message);
+
+		PulseForge::BindingSetDesc BindingSetDescription;
+		BindingSetDescription.Layout = m_BindingLayout;
+		BindingSetDescription.Textures.push_back({ 0, std::cref(Texture->get()) });
+		BindingSetDescription.Samplers.push_back({ 0, std::cref(*m_Sampler) });
+		BindingSetDescription.Buffers.push_back({ 0, std::cref(*FactorBuffer.value()) });
+		BindingSetDescription.Buffers.push_back({ 1, std::cref(*m_TransformBuffer) });
+		auto BindingSet = PulseForge::Application::Get().CreateBindingSet(BindingSetDescription);
+		if (!BindingSet)
+			return std::unexpected(BindingSet.error().Message);
+
+		auto Resources = std::make_unique<MaterialBindingResources>();
+		Resources->BaseColorFactorBuffer = std::move(FactorBuffer.value());
+		Resources->BindingSet = std::move(BindingSet.value());
+		auto [Inserted, WasInserted] = m_MaterialBindings.emplace(MaterialAsset, std::move(Resources));
+		if (!WasInserted)
+			return std::unexpected("Material binding set was already present during cache insertion");
+		PF_INFO("Resolved material {0} to sRGB texture {1} ({2}x{3})",
+			MaterialAsset.ToString(),
+			Material->get().BaseColorTexture.ToString(),
+			Texture->get().GetDescription().Width,
+			Texture->get().GetDescription().Height);
+		return Inserted->second.get();
 	}
 
 	PulseForge::Scene m_Scene;
 	PulseForge::UUID m_CameraEntity;
 	PulseForge::AssetRegistry m_AssetRegistry;
-	PulseForge::AssetID m_TextureAssetID;
 	std::unique_ptr<PulseForge::MeshAssetCache> m_MeshAssetCache;
 	std::unique_ptr<PulseForge::TextureAssetCache> m_TextureAssetCache;
+	std::unique_ptr<PulseForge::MaterialAssetCache> m_MaterialAssetCache;
 	PulseForge::SamplerHandle m_Sampler;
-	PulseForge::BufferHandle m_ConstantBuffer;
 	PulseForge::BufferHandle m_TransformBuffer;
 	PulseForge::BindingLayoutHandle m_BindingLayout;
-	PulseForge::BindingSetHandle m_BindingSet;
+	std::unordered_map<PulseForge::AssetID, std::unique_ptr<MaterialBindingResources>, PulseForge::UUIDHash> m_MaterialBindings;
 	PulseForge::ShaderHandle m_VertexShader;
 	PulseForge::ShaderHandle m_FragmentShader;
 	PulseForge::GraphicsPipelineHandle m_Pipeline;
@@ -358,6 +402,7 @@ private:
 	bool m_LoggedSnapshotFailure = false;
 	bool m_LoggedSceneDraw = false;
 	std::unordered_set<PulseForge::AssetID, PulseForge::UUIDHash> m_ReportedMeshFailures;
+	std::unordered_set<PulseForge::AssetID, PulseForge::UUIDHash> m_ReportedMaterialFailures;
 };
 
 PulseForgeGameApp::PulseForgeGameApp()

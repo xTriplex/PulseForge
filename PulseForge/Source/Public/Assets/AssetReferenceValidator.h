@@ -12,12 +12,14 @@ namespace PulseForge
 {
 	enum class AssetReferenceKind : uint8_t
 	{
-		Mesh
+		Mesh,
+		Material
 	};
 
 	enum class AssetReferenceIssueCode : uint8_t
 	{
-		MissingAsset
+		MissingAsset,
+		WrongAssetType
 	};
 
 	struct AssetReferenceIssue
