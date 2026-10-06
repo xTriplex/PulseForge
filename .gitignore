@@ -76,3 +76,7 @@ Thumbs.db
 *.temp
 *.cache
 **/imgui.ini
+
+# Per-project generated data; source asset .meta sidecars remain tracked.
+**/.pulseforge/cache/
+**/.pulseforge/imported/

@@ -82,6 +82,8 @@ target_compile_options(PulseForgeImGui PRIVATE
 add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/PulseForgePCH.cpp
 	PulseForge/Source/Private/Audio/MiniAudio/MiniAudio.cpp
+	PulseForge/Source/Private/Assets/AssetMetadata.cpp
+	PulseForge/Source/Private/Assets/AssetRegistry.cpp
 	PulseForge/Source/Private/Core/Application.cpp
 	PulseForge/Source/Private/Core/Core.cpp
 	PulseForge/Source/Private/Core/EntryPoint.cpp
