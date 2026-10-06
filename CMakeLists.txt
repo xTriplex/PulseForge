@@ -26,6 +26,34 @@ set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory(PulseForge/Vendor/Glfw)
 
+# Build only Jolt's CPU physics library. PulseForge owns the engine-facing
+# integration; Jolt remains a private implementation dependency.
+set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
+set(ENABLE_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
+set(JPH_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(JPH_USE_DX12 OFF CACHE BOOL "" FORCE)
+set(JPH_USE_DXC OFF CACHE BOOL "" FORCE)
+set(JPH_USE_VK OFF CACHE BOOL "" FORCE)
+set(JPH_USE_MTL OFF CACHE BOOL "" FORCE)
+set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
+set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+set(DEBUG_RENDERER_IN_DISTRIBUTION OFF CACHE BOOL "" FORCE)
+set(PROFILER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+set(PROFILER_IN_DISTRIBUTION OFF CACHE BOOL "" FORCE)
+set(ENABLE_OBJECT_STREAM OFF CACHE BOOL "" FORCE)
+set(USE_AVX512 OFF CACHE BOOL "" FORCE)
+set(USE_AVX2 OFF CACHE BOOL "" FORCE)
+set(USE_AVX OFF CACHE BOOL "" FORCE)
+set(USE_SSE4_2 OFF CACHE BOOL "" FORCE)
+set(USE_SSE4_1 OFF CACHE BOOL "" FORCE)
+set(USE_LZCNT OFF CACHE BOOL "" FORCE)
+set(USE_TZCNT OFF CACHE BOOL "" FORCE)
+set(USE_F16C OFF CACHE BOOL "" FORCE)
+set(USE_FMADD OFF CACHE BOOL "" FORCE)
+add_subdirectory(PulseForge/Vendor/JoltPhysics/Build "${CMAKE_BINARY_DIR}/_deps/JoltPhysics-build" EXCLUDE_FROM_ALL)
+
 # NVRHI is an implementation dependency of the Vulkan renderer backend. Keep
 # its upstream source revision pinned and build only the backend PulseForge
 # currently uses.
@@ -118,7 +146,10 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanSupport.cpp
 	PulseForge/Source/Private/Scene/CameraComponent.cpp
+	PulseForge/Source/Private/Scene/Components/RigidbodyComponent.cpp
+	PulseForge/Source/Private/Scene/Components/BoxColliderComponent.cpp
 	PulseForge/Source/Private/Scene/Scene.cpp
+	PulseForge/Source/Private/Physics/PhysicsSceneRuntime.cpp
 	PulseForge/Source/Private/Scene/SceneRenderSnapshot.cpp
 	PulseForge/Source/Private/Scene/SceneSerializer.cpp
 	PulseForge/Source/Private/Scene/TransformComponent.cpp
@@ -157,6 +188,7 @@ target_link_libraries(PulseForge PRIVATE
 	nvrhi
 	nvrhi_vk
 	Vulkan-Headers
+	Jolt
 )
 target_precompile_headers(PulseForge PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
 

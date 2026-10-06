@@ -22,7 +22,7 @@ namespace PulseForge
 	{
 		using Json = nlohmann::ordered_json;
 		constexpr uint64_t MinimumSupportedPrefabFormatVersion = 1;
-		constexpr uint64_t PrefabFormatVersion = 2;
+		constexpr uint64_t PrefabFormatVersion = 3;
 		constexpr std::string_view PrefabFormatName = "PulseForgePrefab";
 		constexpr size_t MaxPrefabDocumentBytes = 64u * 1024u * 1024u;
 
@@ -41,7 +41,9 @@ namespace PulseForge
 			const auto Transform = Source.GetTransform();
 			const auto Camera = Source.GetCamera();
 			const auto MeshRenderer = Source.GetMeshRenderer();
-			if (!Transform || !Camera || !MeshRenderer)
+			const auto Rigidbody = Source.GetRigidbody();
+			const auto BoxCollider = Source.GetBoxCollider();
+			if (!Transform || !Camera || !MeshRenderer || !Rigidbody || !BoxCollider)
 				return std::unexpected(MakeError(
 					PrefabErrorCode::SceneOperationFailed,
 					"Could not read supported entity components for prefab operation"));
@@ -56,6 +58,16 @@ namespace PulseForge
 			if (MeshRenderer->has_value())
 			{
 				if (auto Result = Destination.SetMeshRenderer(MeshRenderer->value()); !Result)
+					return std::unexpected(SceneOperationError(Result.error()));
+			}
+			if (Rigidbody->has_value())
+			{
+				if (auto Result = Destination.SetRigidbody(Rigidbody->value()); !Result)
+					return std::unexpected(SceneOperationError(Result.error()));
+			}
+			if (BoxCollider->has_value())
+			{
+				if (auto Result = Destination.SetBoxCollider(BoxCollider->value()); !Result)
 					return std::unexpected(SceneOperationError(Result.error()));
 			}
 			return {};

@@ -19,7 +19,8 @@ namespace PulseForge
 		StorageFailure,
 		MissingComponent,
 		InvalidCamera,
-		InvalidAssetReference
+		InvalidAssetReference,
+		InvalidPhysicsComponent
 	};
 
 	struct SceneError

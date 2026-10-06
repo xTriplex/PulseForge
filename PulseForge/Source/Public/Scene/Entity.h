@@ -2,6 +2,8 @@
 
 #include "Scene/Components/CameraComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
+#include "Scene/Components/RigidbodyComponent.h"
+#include "Scene/Components/BoxColliderComponent.h"
 #include "Scene/Components/TagComponent.h"
 #include "Scene/Components/TransformComponent.h"
 #include "Scene/SceneError.h"
@@ -40,6 +42,12 @@ namespace PulseForge
 		[[nodiscard]] std::expected<std::optional<MeshRendererComponent>, SceneError> GetMeshRenderer() const;
 		[[nodiscard]] std::expected<void, SceneError> SetMeshRenderer(const MeshRendererComponent& MeshRenderer) const;
 		[[nodiscard]] std::expected<void, SceneError> RemoveMeshRenderer() const;
+		[[nodiscard]] std::expected<std::optional<RigidbodyComponent>, SceneError> GetRigidbody() const;
+		[[nodiscard]] std::expected<void, SceneError> SetRigidbody(const RigidbodyComponent& Rigidbody) const;
+		[[nodiscard]] std::expected<void, SceneError> RemoveRigidbody() const;
+		[[nodiscard]] std::expected<std::optional<BoxColliderComponent>, SceneError> GetBoxCollider() const;
+		[[nodiscard]] std::expected<void, SceneError> SetBoxCollider(const BoxColliderComponent& Collider) const;
+		[[nodiscard]] std::expected<void, SceneError> RemoveBoxCollider() const;
 		[[nodiscard]] std::expected<glm::mat4, SceneError> GetWorldMatrix() const;
 		[[nodiscard]] std::expected<std::optional<Entity>, SceneError> GetParent() const;
 		[[nodiscard]] std::expected<std::vector<Entity>, SceneError> GetChildren() const;

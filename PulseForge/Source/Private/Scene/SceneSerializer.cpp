@@ -21,7 +21,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t SceneFormatVersion = 4;
+		constexpr int64_t SceneFormatVersion = 5;
 		constexpr int64_t MinimumSupportedSceneFormatVersion = 1;
 		constexpr std::string_view SceneFormatName = "PulseForgeScene";
 
@@ -50,7 +50,8 @@ namespace PulseForge
 		{
 			if (Error.Code == SceneErrorCode::DuplicateUUID || Error.Code == SceneErrorCode::NilUUID ||
 				Error.Code == SceneErrorCode::InvalidTransform || Error.Code == SceneErrorCode::ParentCycle ||
-				Error.Code == SceneErrorCode::InvalidCamera || Error.Code == SceneErrorCode::InvalidAssetReference)
+				Error.Code == SceneErrorCode::InvalidCamera || Error.Code == SceneErrorCode::InvalidAssetReference ||
+				Error.Code == SceneErrorCode::InvalidPhysicsComponent)
 			{
 				return MakeError(SceneSerializationErrorCode::InvalidEntityData, Error.Message);
 			}
@@ -90,8 +91,10 @@ namespace PulseForge
 				const auto Transform = Current.GetTransform();
 				const auto Camera = Current.GetCamera();
 				const auto MeshRenderer = Current.GetMeshRenderer();
+				const auto Rigidbody = Current.GetRigidbody();
+				const auto BoxCollider = Current.GetBoxCollider();
 				const auto Parent = Current.GetParent();
-				if (!Tag || !Transform || !Camera || !MeshRenderer || !Parent)
+				if (!Tag || !Transform || !Camera || !MeshRenderer || !Rigidbody || !BoxCollider || !Parent)
 					return std::unexpected(MakeError(
 						SceneSerializationErrorCode::SceneOperationFailed,
 						"Could not read all required components while serializing an entity"));
@@ -122,6 +125,24 @@ namespace PulseForge
 					if (MeshRenderer->value().MaterialAsset)
 						MeshRendererRecord["materialAsset"] = MeshRenderer->value().MaterialAsset->ToString();
 					Record["meshRenderer"] = std::move(MeshRendererRecord);
+				}
+				if (Rigidbody->has_value())
+				{
+					const RigidbodyComponent& RigidbodyData = Rigidbody->value();
+					Record["rigidbody"] = Json::object({
+						{ "motionType", RigidbodyData.MotionType == RigidbodyMotionType::Static ? "static" : "dynamic" },
+						{ "mass", RigidbodyData.Mass },
+						{ "friction", RigidbodyData.Friction },
+						{ "restitution", RigidbodyData.Restitution },
+						{ "allowSleeping", RigidbodyData.AllowSleeping }
+					});
+				}
+				if (BoxCollider->has_value())
+				{
+					const glm::vec3 HalfExtents = BoxCollider->value().HalfExtents;
+					Record["boxCollider"] = Json::object({
+						{ "halfExtents", { HalfExtents.x, HalfExtents.y, HalfExtents.z } }
+					});
 				}
 				Record["parent"] = Parent->has_value()
 					? Json((**Parent).GetUUID().ToString())
@@ -313,6 +334,59 @@ namespace PulseForge
 					MeshRendererData = MeshRendererComponent{ *ParsedMeshAsset, MaterialAsset };
 				}
 
+				std::optional<RigidbodyComponent> RigidbodyData;
+				const auto SerializedRigidbody = SerializedEntity.find("rigidbody");
+				if (SerializedRigidbody != SerializedEntity.end())
+				{
+					if (!SerializedRigidbody->is_object())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity rigidbody must be an object"));
+
+					const auto MotionType = SerializedRigidbody->find("motionType");
+					const auto Mass = SerializedRigidbody->find("mass");
+					const auto Friction = SerializedRigidbody->find("friction");
+					const auto Restitution = SerializedRigidbody->find("restitution");
+					const auto AllowSleeping = SerializedRigidbody->find("allowSleeping");
+					if (MotionType == SerializedRigidbody->end() || !MotionType->is_string() ||
+						Mass == SerializedRigidbody->end() || !Mass->is_number() ||
+						Friction == SerializedRigidbody->end() || !Friction->is_number() ||
+						Restitution == SerializedRigidbody->end() || !Restitution->is_number() ||
+						AllowSleeping == SerializedRigidbody->end() || !AllowSleeping->is_boolean())
+					{
+						return std::unexpected(MakeError(
+							SceneSerializationErrorCode::InvalidEntityData,
+							"Rigidbody requires motionType, mass, friction, restitution, and allowSleeping fields"));
+					}
+
+					const std::string MotionName = MotionType->get<std::string>();
+					if (MotionName != "static" && MotionName != "dynamic")
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Rigidbody motionType must be static or dynamic"));
+					RigidbodyData = RigidbodyComponent{
+						MotionName == "static" ? RigidbodyMotionType::Static : RigidbodyMotionType::Dynamic,
+						Mass->get<float>(),
+						Friction->get<float>(),
+						Restitution->get<float>(),
+						AllowSleeping->get<bool>() };
+					if (auto Validation = RigidbodyData->Validate(); !Validation)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error().Message));
+				}
+
+				std::optional<BoxColliderComponent> BoxColliderData;
+				const auto SerializedBoxCollider = SerializedEntity.find("boxCollider");
+				if (SerializedBoxCollider != SerializedEntity.end())
+				{
+					if (!SerializedBoxCollider->is_object())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity boxCollider must be an object"));
+					const auto HalfExtents = SerializedBoxCollider->find("halfExtents");
+					std::array<float, 3> HalfExtentValues{};
+					if (HalfExtents == SerializedBoxCollider->end() || !ReadFiniteFloats(*HalfExtents, HalfExtentValues))
+						return std::unexpected(MakeError(
+							SceneSerializationErrorCode::InvalidEntityData,
+							"Box collider halfExtents must contain three finite numbers"));
+					BoxColliderData = BoxColliderComponent{ { HalfExtentValues[0], HalfExtentValues[1], HalfExtentValues[2] } };
+					if (auto Validation = BoxColliderData->Validate(); !Validation)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error().Message));
+				}
+
 				auto Created = Staging.CreateEntityWithUUID(ParsedUUID.value(), Name->get<std::string>());
 				if (!Created)
 					return std::unexpected(SceneOperationError(Created.error()));
@@ -332,6 +406,16 @@ namespace PulseForge
 				{
 					if (auto MeshRendererResult = Created->SetMeshRenderer(*MeshRendererData); !MeshRendererResult)
 						return std::unexpected(SceneOperationError(MeshRendererResult.error()));
+				}
+				if (RigidbodyData)
+				{
+					if (auto RigidbodyResult = Created->SetRigidbody(*RigidbodyData); !RigidbodyResult)
+						return std::unexpected(SceneOperationError(RigidbodyResult.error()));
+				}
+				if (BoxColliderData)
+				{
+					if (auto ColliderResult = Created->SetBoxCollider(*BoxColliderData); !ColliderResult)
+						return std::unexpected(SceneOperationError(ColliderResult.error()));
 				}
 
 				PendingParents.push_back({ *Created, ParentIdentifier });

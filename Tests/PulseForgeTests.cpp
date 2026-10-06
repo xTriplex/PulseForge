@@ -19,6 +19,7 @@
 #include "Core/Input.h"
 #include "Core/LayerStack.h"
 #include "Core/Timestep.h"
+#include "Physics/PhysicsSceneRuntime.h"
 #include "Renderer/Binding.h"
 #include "Renderer/Buffer.h"
 #include "Renderer/Graphics.h"
@@ -821,6 +822,237 @@ namespace
 		}));
 	}
 
+	void TestPhysicsComponentsAndPersistence(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		RigidbodyComponent Rigidbody;
+		PF_CHECK(Tests, Rigidbody.Validate().has_value());
+		Rigidbody.Mass = std::numeric_limits<float>::infinity();
+		PF_CHECK(Tests, !Rigidbody.Validate().has_value());
+		Rigidbody.Mass = 1.0f;
+		Rigidbody.Friction = -0.1f;
+		PF_CHECK(Tests, !Rigidbody.Validate().has_value());
+		Rigidbody.Friction = 0.2f;
+		Rigidbody.Restitution = 1.1f;
+		PF_CHECK(Tests, !Rigidbody.Validate().has_value());
+		Rigidbody.Restitution = 0.0f;
+		Rigidbody.MotionType = static_cast<RigidbodyMotionType>(0xff);
+		PF_CHECK(Tests, !Rigidbody.Validate().has_value());
+
+		BoxColliderComponent Collider;
+		PF_CHECK(Tests, Collider.Validate().has_value());
+		Collider.HalfExtents.y = 0.0f;
+		PF_CHECK(Tests, !Collider.Validate().has_value());
+		Collider.HalfExtents = { 0.75f, 0.5f, 0.25f };
+
+		Scene Source;
+		const auto Body = Source.CreateEntity("Physics body");
+		PF_CHECK(Tests, Body.has_value());
+		if (!Body)
+			return;
+
+		Rigidbody = { RigidbodyMotionType::Dynamic, 3.0f, 0.6f, 0.15f, false };
+		PF_CHECK(Tests, Body->SetRigidbody(Rigidbody).has_value());
+		PF_CHECK(Tests, Body->SetBoxCollider(Collider).has_value());
+		Rigidbody.Mass = std::numeric_limits<float>::quiet_NaN();
+		const auto InvalidRigidbodySet = Body->SetRigidbody(Rigidbody);
+		PF_CHECK(Tests, !InvalidRigidbodySet && InvalidRigidbodySet.error().Code == SceneErrorCode::InvalidPhysicsComponent);
+		Collider.HalfExtents.y = 0.0f;
+		const auto InvalidColliderSet = Body->SetBoxCollider(Collider);
+		PF_CHECK(Tests, !InvalidColliderSet && InvalidColliderSet.error().Code == SceneErrorCode::InvalidPhysicsComponent);
+		Collider.HalfExtents.y = 0.5f;
+
+		const auto Duplicated = Source.DuplicateEntity(*Body);
+		PF_CHECK(Tests, Duplicated.has_value());
+		if (Duplicated)
+		{
+			const auto DuplicateRigidbody = Duplicated->GetRigidbody();
+			const auto DuplicateCollider = Duplicated->GetBoxCollider();
+			PF_CHECK(Tests, DuplicateRigidbody && DuplicateRigidbody->has_value() &&
+				DuplicateRigidbody->value().Mass == 3.0f);
+			PF_CHECK(Tests, DuplicateCollider && DuplicateCollider->has_value() &&
+				DuplicateCollider->value().HalfExtents == Collider.HalfExtents);
+		}
+
+		const auto Serialized = SceneSerializer::Serialize(Source);
+		PF_CHECK(Tests, Serialized.has_value());
+		if (!Serialized)
+			return;
+		PF_CHECK(Tests, Serialized->find("\"version\": 5") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"motionType\": \"dynamic\"") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"halfExtents\": [\n          0.75,") != std::string::npos);
+
+		Scene Destination;
+		PF_CHECK(Tests, SceneSerializer::Deserialize(*Serialized, Destination).has_value());
+		const auto LoadedBody = Destination.FindEntity(Body->GetUUID());
+		PF_CHECK(Tests, LoadedBody.has_value());
+		if (LoadedBody)
+		{
+			const auto LoadedRigidbody = LoadedBody->GetRigidbody();
+			const auto LoadedCollider = LoadedBody->GetBoxCollider();
+			PF_CHECK(Tests, LoadedRigidbody && LoadedRigidbody->has_value() &&
+				LoadedRigidbody->value().Mass == 3.0f && LoadedRigidbody->value().Friction == 0.6f &&
+				LoadedRigidbody->value().Restitution == 0.15f && !LoadedRigidbody->value().AllowSleeping);
+			PF_CHECK(Tests, LoadedCollider && LoadedCollider->has_value() &&
+				LoadedCollider->value().HalfExtents == Collider.HalfExtents);
+		}
+
+		const auto PrefabData = PrefabSerializer::Serialize(Source, *Body);
+		PF_CHECK(Tests, PrefabData.has_value());
+		if (PrefabData)
+		{
+			PF_CHECK(Tests, PrefabData->find("\"version\": 3") != std::string::npos);
+			Scene PrefabDestination;
+			const auto Instance = PrefabSerializer::Instantiate(*PrefabData, PrefabDestination);
+			PF_CHECK(Tests, Instance.has_value());
+			if (Instance)
+			{
+				const auto InstanceRigidbody = Instance->GetRigidbody();
+				const auto InstanceCollider = Instance->GetBoxCollider();
+				PF_CHECK(Tests, InstanceRigidbody && InstanceRigidbody->has_value() &&
+					InstanceRigidbody->value().Mass == 3.0f);
+				PF_CHECK(Tests, InstanceCollider && InstanceCollider->has_value() &&
+					InstanceCollider->value().HalfExtents == Collider.HalfExtents);
+			}
+		}
+	}
+
+	void TestPhysicsSceneRuntime(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		Scene Source;
+		const auto Floor = Source.CreateEntity("Floor");
+		const auto FallingBody = Source.CreateEntity("Falling body");
+		PF_CHECK(Tests, Floor.has_value() && FallingBody.has_value());
+		if (!Floor || !FallingBody)
+			return;
+
+		TransformComponent FloorTransform;
+		FloorTransform.Translation.y = -0.5f;
+		PF_CHECK(Tests, Floor->SetTransform(FloorTransform).has_value());
+		PF_CHECK(Tests, Floor->SetRigidbody({ RigidbodyMotionType::Static }).has_value());
+		PF_CHECK(Tests, Floor->SetBoxCollider({ { 5.0f, 0.5f, 5.0f } }).has_value());
+
+		TransformComponent FallingTransform;
+		FallingTransform.Translation.y = 2.0f;
+		PF_CHECK(Tests, FallingBody->SetTransform(FallingTransform).has_value());
+		PF_CHECK(Tests, FallingBody->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.5f, 0.0f, true }).has_value());
+		PF_CHECK(Tests, FallingBody->SetBoxCollider({ { 0.5f, 0.5f, 0.5f } }).has_value());
+
+		PhysicsSceneRuntimeDesc Description;
+		Description.MaxSubsteps = 4;
+		PhysicsSceneRuntime Runtime(Description);
+		const auto BeforeStart = Runtime.Advance(Source, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, !BeforeStart && BeforeStart.error().Code == PhysicsSceneRuntimeErrorCode::NotRunning);
+		PF_CHECK(Tests, Runtime.Start(Source).has_value());
+		PF_CHECK(Tests, Runtime.IsRunning());
+		const auto DuplicateStart = Runtime.Start(Source);
+		PF_CHECK(Tests, !DuplicateStart && DuplicateStart.error().Code == PhysicsSceneRuntimeErrorCode::AlreadyRunning);
+
+		Scene OtherScene;
+		const auto DifferentScene = Runtime.Advance(OtherScene, Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, !DifferentScene && DifferentScene.error().Code == PhysicsSceneRuntimeErrorCode::DifferentScene);
+		PhysicsSceneRuntime IndependentRuntime;
+		PF_CHECK(Tests, IndependentRuntime.Start(OtherScene).has_value());
+		const auto NegativeDelta = Runtime.Advance(Source, Timestep(-0.1));
+		PF_CHECK(Tests, !NegativeDelta && NegativeDelta.error().Code == PhysicsSceneRuntimeErrorCode::InvalidDeltaTime);
+		const auto NonFiniteDelta = Runtime.Advance(Source, Timestep(std::numeric_limits<double>::quiet_NaN()));
+		PF_CHECK(Tests, !NonFiniteDelta && NonFiniteDelta.error().Code == PhysicsSceneRuntimeErrorCode::InvalidDeltaTime);
+
+		constexpr double FixedStep = 1.0 / 60.0;
+		const auto PartialStep = Runtime.Advance(Source, Timestep(FixedStep * 0.5));
+		PF_CHECK(Tests, PartialStep && *PartialStep == 0);
+		const auto FirstStep = Runtime.Advance(Source, Timestep(FixedStep * 0.5));
+		PF_CHECK(Tests, FirstStep && *FirstStep == 1);
+		const auto FirstUpdatedTransform = FallingBody->GetTransform();
+		PF_CHECK(Tests, FirstUpdatedTransform && FirstUpdatedTransform->Translation.y < 2.0f);
+
+		uint32_t TotalSteps = 1;
+		for (uint32_t Index = 0; Index < 179; ++Index)
+		{
+			const auto Step = Runtime.Advance(Source, Timestep(FixedStep));
+			if (!Step)
+			{
+				PF_CHECK(Tests, false);
+				break;
+			}
+			TotalSteps += *Step;
+		}
+		PF_CHECK(Tests, TotalSteps == 180);
+		const auto SettledTransform = FallingBody->GetTransform();
+		PF_CHECK(Tests, SettledTransform && SettledTransform->Translation.y > 0.4f && SettledTransform->Translation.y < 0.7f);
+
+		const auto CappedCatchup = Runtime.Advance(Source, Timestep(0.25));
+		PF_CHECK(Tests, CappedCatchup && *CappedCatchup == Description.MaxSubsteps);
+		PF_CHECK(Tests, Source.DestroyEntity(*FallingBody).has_value());
+		PF_CHECK(Tests, Runtime.Advance(Source, Timestep(FixedStep)).has_value());
+		Runtime.Stop();
+		PF_CHECK(Tests, !Runtime.IsRunning());
+		const auto IndependentStep = IndependentRuntime.Advance(OtherScene, Timestep(FixedStep));
+		PF_CHECK(Tests, IndependentStep && *IndependentStep == 1);
+		IndependentRuntime.Stop();
+
+		Scene InvalidScene;
+		const auto Parent = InvalidScene.CreateEntity("Physics parent");
+		const auto Child = InvalidScene.CreateEntity("Parented physics body");
+		PF_CHECK(Tests, Parent.has_value() && Child.has_value());
+		if (Parent && Child)
+		{
+			PF_CHECK(Tests, Child->SetParent(*Parent).has_value());
+			PF_CHECK(Tests, Child->SetRigidbody({}).has_value());
+			PF_CHECK(Tests, Child->SetBoxCollider({}).has_value());
+			PhysicsSceneRuntime InvalidRuntime;
+			const auto RejectedHierarchy = InvalidRuntime.Start(InvalidScene);
+			PF_CHECK(Tests, !RejectedHierarchy &&
+				RejectedHierarchy.error().Code == PhysicsSceneRuntimeErrorCode::UnsupportedHierarchy);
+			PF_CHECK(Tests, !InvalidRuntime.IsRunning());
+		}
+
+		Scene IncompleteScene;
+		const auto IncompleteBody = IncompleteScene.CreateEntity("Incomplete physics body");
+		PF_CHECK(Tests, IncompleteBody.has_value());
+		if (IncompleteBody)
+		{
+			PF_CHECK(Tests, IncompleteBody->SetRigidbody({}).has_value());
+			PhysicsSceneRuntime IncompleteRuntime;
+			const auto RejectedIncompletePair = IncompleteRuntime.Start(IncompleteScene);
+			PF_CHECK(Tests, !RejectedIncompletePair &&
+				RejectedIncompletePair.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
+			PF_CHECK(Tests, !IncompleteRuntime.IsRunning());
+		}
+
+		PhysicsSceneRuntime InvalidSettingsRuntime(
+			PhysicsSceneRuntimeDesc{ 0.0, 0, 0.0, glm::vec3(0.0f) });
+		const auto RejectedSettings = InvalidSettingsRuntime.Start(Source);
+		PF_CHECK(Tests, !RejectedSettings && RejectedSettings.error().Code == PhysicsSceneRuntimeErrorCode::InvalidSettings);
+		PhysicsSceneRuntime UnrepresentableStepRuntime(PhysicsSceneRuntimeDesc{
+			1.0e100, 1, 1.0e101, glm::vec3(0.0f) });
+		const auto RejectedStep = UnrepresentableStepRuntime.Start(Source);
+		PF_CHECK(Tests, !RejectedStep && RejectedStep.error().Code == PhysicsSceneRuntimeErrorCode::InvalidSettings);
+		PhysicsSceneRuntime UnderflowingStepRuntime(PhysicsSceneRuntimeDesc{
+			std::numeric_limits<double>::denorm_min(), 1, 1.0, glm::vec3(0.0f) });
+		const auto RejectedUnderflowingStep = UnderflowingStepRuntime.Start(Source);
+		PF_CHECK(Tests, !RejectedUnderflowingStep &&
+			RejectedUnderflowingStep.error().Code == PhysicsSceneRuntimeErrorCode::InvalidSettings);
+
+		Scene ScaledExtentsOverflowScene;
+		const auto OverflowingBody = ScaledExtentsOverflowScene.CreateEntity("Overflowing collider");
+		PF_CHECK(Tests, OverflowingBody.has_value());
+		if (OverflowingBody)
+		{
+			TransformComponent OverflowingTransform;
+			OverflowingTransform.Scale = glm::vec3(std::numeric_limits<float>::max());
+			PF_CHECK(Tests, OverflowingBody->SetTransform(OverflowingTransform).has_value());
+			PF_CHECK(Tests, OverflowingBody->SetRigidbody({}).has_value());
+			PF_CHECK(Tests, OverflowingBody->SetBoxCollider({ glm::vec3(std::numeric_limits<float>::max()) }).has_value());
+			PhysicsSceneRuntime OverflowRuntime;
+			const auto RejectedOverflow = OverflowRuntime.Start(ScaledExtentsOverflowScene);
+			PF_CHECK(Tests, !RejectedOverflow &&
+				RejectedOverflow.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
+			PF_CHECK(Tests, !OverflowRuntime.IsRunning());
+		}
+	}
+
 	void TestEntityHandlesExpireWithScene(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -996,7 +1228,7 @@ namespace
 		if (!Serialized)
 			return;
 		PF_CHECK(Tests, Serialized->find("\"format\": \"PulseForgeScene\"") != std::string::npos);
-		PF_CHECK(Tests, Serialized->find("\"version\": 4") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 5") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"primary\": true") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"meshAsset\": \"" + MeshAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"materialAsset\": \"" + MaterialAssetIdentifier.ToString() + "\"") != std::string::npos);
@@ -1055,10 +1287,10 @@ namespace
 
 		const auto DestinationRootBeforeFailure = Destination.FindEntity(RootId);
 		std::string UnsupportedVersion = *Serialized;
-		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 4");
+		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 5");
 		PF_CHECK(Tests, VersionPosition != std::string::npos);
 		if (VersionPosition != std::string::npos)
-			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 4").size(), "\"version\": 99");
+			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 5").size(), "\"version\": 99");
 		const auto UnsupportedVersionResult = SceneSerializer::Deserialize(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedVersionResult.has_value());
 		PF_CHECK(Tests, !UnsupportedVersionResult && UnsupportedVersionResult.error().Code == SceneSerializationErrorCode::UnsupportedVersion);
@@ -1075,10 +1307,10 @@ namespace
 			if (PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos)
 				LegacyVersionThree.erase(PrimaryCommaPosition, PrimaryLineEnd - PrimaryCommaPosition);
 		}
-		const size_t LegacyVersionThreePosition = LegacyVersionThree.find("\"version\": 4");
+		const size_t LegacyVersionThreePosition = LegacyVersionThree.find("\"version\": 5");
 		PF_CHECK(Tests, LegacyVersionThreePosition != std::string::npos);
 		if (LegacyVersionThreePosition != std::string::npos)
-			LegacyVersionThree.replace(LegacyVersionThreePosition, std::string("\"version\": 4").size(), "\"version\": 3");
+			LegacyVersionThree.replace(LegacyVersionThreePosition, std::string("\"version\": 5").size(), "\"version\": 3");
 		Scene LegacyVersionThreeDestination;
 		const auto LegacyVersionThreeLoad = SceneSerializer::Deserialize(LegacyVersionThree, LegacyVersionThreeDestination);
 		PF_CHECK(Tests, LegacyVersionThreeLoad.has_value());
@@ -1099,10 +1331,10 @@ namespace
 		if (LegacySerializedVersionTwo)
 		{
 			std::string LegacyVersionOne = *LegacySerializedVersionTwo;
-			const size_t LegacyVersionPosition = LegacyVersionOne.find("\"version\": 4");
+			const size_t LegacyVersionPosition = LegacyVersionOne.find("\"version\": 5");
 			PF_CHECK(Tests, LegacyVersionPosition != std::string::npos);
 			if (LegacyVersionPosition != std::string::npos)
-				LegacyVersionOne.replace(LegacyVersionPosition, std::string("\"version\": 4").size(), "\"version\": 1");
+				LegacyVersionOne.replace(LegacyVersionPosition, std::string("\"version\": 5").size(), "\"version\": 1");
 			Scene LegacyDestination;
 			const auto LegacyLoad = SceneSerializer::Deserialize(LegacyVersionOne, LegacyDestination);
 			PF_CHECK(Tests, LegacyLoad.has_value());
@@ -2943,7 +3175,7 @@ namespace
 		if (!PrefabData)
 			return;
 		PF_CHECK(Tests, PrefabData->find("\"format\": \"PulseForgePrefab\"") != std::string::npos);
-		PF_CHECK(Tests, PrefabData->find("\"version\": 2") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"version\": 3") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"root\": \"" + Root->GetUUID().ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"meshAsset\": \"" + MeshAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"materialAsset\": \"" + MaterialAssetID.ToString() + "\"") != std::string::npos);
@@ -2962,14 +3194,14 @@ namespace
 			if (PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos)
 				LegacyPrefabV1.erase(PrimaryCommaPosition, PrimaryLineEnd - PrimaryCommaPosition);
 		}
-		const size_t EmbeddedSceneVersionPosition = LegacyPrefabV1.find("\"version\": 4", LegacyPrefabV1.find("\"scene\""));
+		const size_t EmbeddedSceneVersionPosition = LegacyPrefabV1.find("\"version\": 5", LegacyPrefabV1.find("\"scene\""));
 		PF_CHECK(Tests, EmbeddedSceneVersionPosition != std::string::npos);
 		if (EmbeddedSceneVersionPosition != std::string::npos)
-			LegacyPrefabV1.replace(EmbeddedSceneVersionPosition, std::string("\"version\": 4").size(), "\"version\": 3");
-		const size_t OuterPrefabVersionPosition = LegacyPrefabV1.find("\"version\": 2");
+			LegacyPrefabV1.replace(EmbeddedSceneVersionPosition, std::string("\"version\": 5").size(), "\"version\": 3");
+		const size_t OuterPrefabVersionPosition = LegacyPrefabV1.find("\"version\": 3");
 		PF_CHECK(Tests, OuterPrefabVersionPosition != std::string::npos);
 		if (OuterPrefabVersionPosition != std::string::npos)
-			LegacyPrefabV1.replace(OuterPrefabVersionPosition, std::string("\"version\": 2").size(), "\"version\": 1");
+			LegacyPrefabV1.replace(OuterPrefabVersionPosition, std::string("\"version\": 3").size(), "\"version\": 1");
 		Scene LegacyPrefabDestination;
 		const auto LegacyPrefabInstance = PrefabSerializer::Instantiate(LegacyPrefabV1, LegacyPrefabDestination);
 		PF_CHECK(Tests, LegacyPrefabInstance.has_value());
@@ -3034,10 +3266,10 @@ namespace
 		PF_CHECK(Tests, Destination.GetEntityCount() == CountBeforeFailure);
 
 		std::string UnsupportedVersion = *PrefabData;
-		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 2");
+		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 3");
 		PF_CHECK(Tests, VersionPosition != std::string::npos);
 		if (VersionPosition != std::string::npos)
-			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 2").size(), "\"version\": 99");
+			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 3").size(), "\"version\": 99");
 		const auto UnsupportedPrefabVersion = PrefabSerializer::Instantiate(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedPrefabVersion.has_value());
 		PF_CHECK(Tests, !UnsupportedPrefabVersion &&
@@ -3561,6 +3793,8 @@ int main()
 	TestMeshDescriptionAndDrawValidation(Tests);
 	TestUUIDBehavior(Tests);
 	TestSceneEntityAndHierarchy(Tests);
+	TestPhysicsComponentsAndPersistence(Tests);
+	TestPhysicsSceneRuntime(Tests);
 	TestEntityHandlesExpireWithScene(Tests);
 	TestSceneRenderSnapshot(Tests);
 	TestSceneSerializationRoundTrip(Tests);

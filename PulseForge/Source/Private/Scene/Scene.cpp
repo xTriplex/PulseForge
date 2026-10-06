@@ -180,7 +180,9 @@ namespace PulseForge
 		const auto Transform = Source.GetTransform();
 		const auto Camera = Source.GetCamera();
 		const auto MeshRenderer = Source.GetMeshRenderer();
-		if (!Tag || !Transform || !Camera || !MeshRenderer)
+		const auto Rigidbody = Source.GetRigidbody();
+		const auto BoxCollider = Source.GetBoxCollider();
+		if (!Tag || !Transform || !Camera || !MeshRenderer || !Rigidbody || !BoxCollider)
 			return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure, "Could not read source entity components for duplication"));
 
 		auto Duplicated = CreateEntity(Tag->Name + " Copy");
@@ -206,6 +208,22 @@ namespace PulseForge
 			{
 				(void)DestroyEntity(*Duplicated);
 				return std::unexpected(MeshRendererResult.error());
+			}
+		}
+		if (Rigidbody->has_value())
+		{
+			if (auto RigidbodyResult = Duplicated->SetRigidbody(Rigidbody->value()); !RigidbodyResult)
+			{
+				(void)DestroyEntity(*Duplicated);
+				return std::unexpected(RigidbodyResult.error());
+			}
+		}
+		if (BoxCollider->has_value())
+		{
+			if (auto ColliderResult = Duplicated->SetBoxCollider(BoxCollider->value()); !ColliderResult)
+			{
+				(void)DestroyEntity(*Duplicated);
+				return std::unexpected(ColliderResult.error());
 			}
 		}
 
@@ -462,6 +480,98 @@ namespace PulseForge
 			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have a mesh renderer component"));
 
 		Storage->Registry.remove<MeshRendererComponent>(*Native);
+		return {};
+	}
+
+	std::expected<std::optional<RigidbodyComponent>, SceneError> Entity::GetRigidbody() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read the rigidbody of an invalid entity"));
+		if (!Storage->Registry.all_of<RigidbodyComponent>(*Native))
+			return std::optional<RigidbodyComponent>{};
+		return std::optional<RigidbodyComponent>{ Storage->Registry.get<RigidbodyComponent>(*Native) };
+	}
+
+	std::expected<void, SceneError> Entity::SetRigidbody(const RigidbodyComponent& Rigidbody) const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add a rigidbody to an invalid entity"));
+		if (auto Validation = Rigidbody.Validate(); !Validation)
+			return std::unexpected(SceneError{ SceneErrorCode::InvalidPhysicsComponent, Validation.error().Message });
+
+		try
+		{
+			Storage->Registry.emplace_or_replace<RigidbodyComponent>(*Native, Rigidbody);
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{
+				SceneErrorCode::StorageFailure,
+				std::string("Could not set rigidbody component: ") + Exception.what() });
+		}
+	}
+
+	std::expected<void, SceneError> Entity::RemoveRigidbody() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove a rigidbody from an invalid entity"));
+		if (!Storage->Registry.all_of<RigidbodyComponent>(*Native))
+			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have a rigidbody component"));
+
+		Storage->Registry.remove<RigidbodyComponent>(*Native);
+		return {};
+	}
+
+	std::expected<std::optional<BoxColliderComponent>, SceneError> Entity::GetBoxCollider() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read the box collider of an invalid entity"));
+		if (!Storage->Registry.all_of<BoxColliderComponent>(*Native))
+			return std::optional<BoxColliderComponent>{};
+		return std::optional<BoxColliderComponent>{ Storage->Registry.get<BoxColliderComponent>(*Native) };
+	}
+
+	std::expected<void, SceneError> Entity::SetBoxCollider(const BoxColliderComponent& Collider) const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add a box collider to an invalid entity"));
+		if (auto Validation = Collider.Validate(); !Validation)
+			return std::unexpected(SceneError{ SceneErrorCode::InvalidPhysicsComponent, Validation.error().Message });
+
+		try
+		{
+			Storage->Registry.emplace_or_replace<BoxColliderComponent>(*Native, Collider);
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{
+				SceneErrorCode::StorageFailure,
+				std::string("Could not set box collider component: ") + Exception.what() });
+		}
+	}
+
+	std::expected<void, SceneError> Entity::RemoveBoxCollider() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove a box collider from an invalid entity"));
+		if (!Storage->Registry.all_of<BoxColliderComponent>(*Native))
+			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have a box collider component"));
+
+		Storage->Registry.remove<BoxColliderComponent>(*Native);
 		return {};
 	}
 
