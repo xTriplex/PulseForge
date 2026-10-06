@@ -7,6 +7,7 @@
 #include "Assets/AssetPathResolver.h"
 #include "Assets/AssetReferenceValidator.h"
 #include "Assets/AssetRegistry.h"
+#include "Assets/AudioAssetCache.h"
 #include "Assets/GltfMeshImporter.h"
 #include "Assets/ImageAssetImporter.h"
 #include "Assets/MaterialAsset.h"
@@ -19,6 +20,7 @@
 #include "Core/Input.h"
 #include "Core/LayerStack.h"
 #include "Core/Timestep.h"
+#include "Audio/AudioEngine.h"
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Renderer/Binding.h"
 #include "Renderer/Buffer.h"
@@ -3147,6 +3149,160 @@ namespace
 		}
 	}
 
+	std::vector<std::byte> MakeSilentWave(uint32_t SampleCount)
+	{
+		constexpr uint32_t Channels = 1;
+		constexpr uint32_t SampleRate = 44100;
+		constexpr uint16_t BitsPerSample = 16;
+		constexpr uint16_t BlockAlign = Channels * (BitsPerSample / 8);
+		const uint32_t DataSize = SampleCount * BlockAlign;
+		std::vector<std::byte> Data(44 + DataSize);
+
+		auto WriteFourCC = [&Data](size_t Offset, std::string_view Value)
+		{
+			for (size_t Index = 0; Index < Value.size(); ++Index)
+				Data[Offset + Index] = static_cast<std::byte>(static_cast<unsigned char>(Value[Index]));
+		};
+		auto Write16 = [&Data](size_t Offset, uint16_t Value)
+		{
+			Data[Offset] = static_cast<std::byte>(Value & 0xff);
+			Data[Offset + 1] = static_cast<std::byte>((Value >> 8) & 0xff);
+		};
+		auto Write32 = [&Data](size_t Offset, uint32_t Value)
+		{
+			for (size_t Byte = 0; Byte < 4; ++Byte)
+				Data[Offset + Byte] = static_cast<std::byte>((Value >> (Byte * 8)) & 0xff);
+		};
+
+		WriteFourCC(0, "RIFF");
+		Write32(4, static_cast<uint32_t>(Data.size() - 8));
+		WriteFourCC(8, "WAVE");
+		WriteFourCC(12, "fmt ");
+		Write32(16, 16);
+		Write16(20, 1);
+		Write16(22, Channels);
+		Write32(24, SampleRate);
+		Write32(28, SampleRate * BlockAlign);
+		Write16(32, BlockAlign);
+		Write16(34, BitsPerSample);
+		WriteFourCC(36, "data");
+		Write32(40, DataSize);
+		return Data;
+	}
+
+	void TestAudioEngineAndAssetCache(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const auto ProjectIdentifier = UUID::Generate();
+		PF_CHECK(Tests, ProjectIdentifier.has_value());
+		if (!ProjectIdentifier)
+			return;
+
+		std::error_code FileError;
+		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const std::filesystem::path ProjectRoot = TemporaryDirectory / ("PulseForgeAudio-" + ProjectIdentifier->ToString());
+		struct ProjectCleanup
+		{
+			std::filesystem::path Path;
+			~ProjectCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} Cleanup{ ProjectRoot };
+
+		std::filesystem::create_directories(ProjectRoot / "Assets" / "Audio", FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const std::vector<std::byte> WaveData = MakeSilentWave(44100 * 5);
+		AudioPlayback Playback;
+		{
+			auto CreatedEngine = AudioEngine::Create({ AudioOutputBackend::Null });
+			PF_CHECK(Tests, CreatedEngine.has_value());
+			if (!CreatedEngine)
+				return;
+			AudioEngine Engine = std::move(*CreatedEngine);
+			PF_CHECK(Tests, Engine.IsInitialized());
+
+			const std::array<std::byte, 4> InvalidData{};
+			const auto InvalidClip = Engine.CreateClip("Invalid", InvalidData);
+			PF_CHECK(Tests, !InvalidClip && InvalidClip.error().Code == AudioErrorCode::InvalidClip);
+			const auto Clip = Engine.CreateClip("Test WAV", WaveData);
+			PF_CHECK(Tests, Clip.has_value());
+			if (!Clip)
+				return;
+			PF_CHECK(Tests, Clip->IsValid() && Clip->GetDebugName() == "Test WAV");
+
+			AudioPlaybackDesc InvalidDescription;
+			InvalidDescription.Volume = 1.1f;
+			PF_CHECK(Tests, !InvalidDescription.Validate());
+			PF_CHECK(Tests, !Engine.Play(*Clip, InvalidDescription));
+			AudioPlaybackDesc Description;
+			Description.Spatialized = true;
+			Description.Position = { 2.0f, 0.0f, -1.0f };
+			Description.Volume = 0.5f;
+			auto StartedPlayback = Engine.Play(*Clip, Description);
+			PF_CHECK(Tests, StartedPlayback.has_value());
+			if (!StartedPlayback)
+				return;
+			Playback = std::move(*StartedPlayback);
+			PF_CHECK(Tests, Playback.IsValid());
+			auto ConcurrentPlayback = Engine.Play(*Clip, Description);
+			PF_CHECK(Tests, ConcurrentPlayback.has_value() && ConcurrentPlayback->IsValid());
+			if (ConcurrentPlayback)
+				PF_CHECK(Tests, ConcurrentPlayback->Stop().has_value());
+			PF_CHECK(Tests, Playback.Pause().has_value());
+			PF_CHECK(Tests, Playback.Resume().has_value());
+			PF_CHECK(Tests, Playback.SetVolume(0.25f).has_value());
+			PF_CHECK(Tests, Playback.SetLooping(true).has_value());
+			PF_CHECK(Tests, Playback.SetSpatialized(false).has_value());
+			PF_CHECK(Tests, Playback.SetPosition({ 0.0f, 1.0f, 0.0f }).has_value());
+			PF_CHECK(Tests, Playback.Stop().has_value());
+			PF_CHECK(Tests, Engine.SetListenerPosition({ 0.0f, 0.0f, 0.0f }).has_value());
+			PF_CHECK(Tests, Engine.SetListenerDirection({ 0.0f, 0.0f, -1.0f }).has_value());
+			PF_CHECK(Tests, !Engine.SetListenerDirection({ 0.0f, 0.0f, 0.0f }));
+
+			AssetRegistry Registry;
+			auto Imported = AssetOperations::CreateAssetFromBytes(
+				Registry,
+				ProjectRoot,
+				WaveData,
+				"Assets/Audio/test.wav");
+			PF_CHECK(Tests, Imported.has_value());
+			if (!Imported)
+				return;
+
+			AudioAssetCache Cache(Engine, ProjectRoot, Registry);
+			const auto Loaded = Cache.GetOrLoad(Imported->ID);
+			PF_CHECK(Tests, Loaded && Loaded->IsValid());
+			PF_CHECK(Tests, Cache.GetLoadedCount() == 1);
+			const auto CachedAgain = Cache.GetOrLoad(Imported->ID);
+			PF_CHECK(Tests, CachedAgain && Cache.GetLoadedCount() == 1);
+
+			const auto Moved = AssetOperations::Move(
+				Registry,
+				ProjectRoot,
+				Imported->ID,
+				"Assets/Audio/renamed.wav");
+			PF_CHECK(Tests, Moved && Moved->ID == Imported->ID);
+			Cache.Clear();
+			const auto LoadedAfterMove = Cache.GetOrLoad(Imported->ID);
+			PF_CHECK(Tests, LoadedAfterMove && LoadedAfterMove->IsValid());
+			const auto MovedRecord = Registry.Find(Imported->ID);
+			PF_CHECK(Tests, MovedRecord && MovedRecord->ProjectRelativePath == "Assets/Audio/renamed.wav");
+		}
+
+		// A playback retains the initialized device state even after its AudioEngine owner goes away.
+		PF_CHECK(Tests, Playback.SetVolume(0.75f).has_value());
+		PF_CHECK(Tests, Playback.Stop().has_value());
+	}
+
 	void TestPrefabSerialization(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -3809,6 +3965,7 @@ int main()
 	TestAssetReferenceValidation(Tests);
 	TestGltfMeshImport(Tests);
 	TestImageAssetImport(Tests);
+	TestAudioEngineAndAssetCache(Tests);
 	TestGraphicsPipelineAndDrawValidation(Tests);
 	TestConstantBufferBindingValidation(Tests);
 	TestTextureAndSamplerValidation(Tests);

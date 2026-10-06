@@ -109,12 +109,14 @@ target_compile_options(PulseForgeImGui PRIVATE
 
 add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/PulseForgePCH.cpp
+	PulseForge/Source/Private/Audio/AudioEngine.cpp
 	PulseForge/Source/Private/Audio/MiniAudio/MiniAudio.cpp
 	PulseForge/Source/Private/Assets/AssetPathResolver.cpp
 	PulseForge/Source/Private/Assets/AssetMetadata.cpp
 	PulseForge/Source/Private/Assets/AssetOperations.cpp
 	PulseForge/Source/Private/Assets/AssetReferenceValidator.cpp
 	PulseForge/Source/Private/Assets/AssetRegistry.cpp
+	PulseForge/Source/Private/Assets/AudioAssetCache.cpp
 	PulseForge/Source/Private/Assets/MaterialAsset.cpp
 	PulseForge/Source/Private/Assets/MaterialAssetCache.cpp
 	PulseForge/Source/Private/Assets/MaterialAssetService.cpp
