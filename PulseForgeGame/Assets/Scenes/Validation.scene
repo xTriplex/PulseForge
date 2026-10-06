@@ -1,6 +1,6 @@
 {
   "format": "PulseForgeScene",
-  "version": 3,
+  "version": 4,
   "entities": [
     {
       "uuid": "2e5f5605-08d3-4f7f-84d9-39ca49047701",
@@ -41,7 +41,8 @@
       "camera": {
         "verticalFovRadians": 0.785398163,
         "nearClipPlane": 0.1,
-        "farClipPlane": 1000.0
+        "farClipPlane": 1000.0,
+        "primary": true
       },
       "parent": null
     }

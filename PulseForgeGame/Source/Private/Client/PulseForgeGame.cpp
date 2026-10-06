@@ -56,7 +56,6 @@ public:
 
 		const auto Prepared = m_SceneRenderer->PrepareScene(
 			m_Scene,
-			m_CameraEntity,
 			static_cast<float>(FramebufferWidth) / static_cast<float>(FramebufferHeight));
 		if (!Prepared)
 		{
@@ -123,17 +122,9 @@ private:
 			!LoadResult)
 			throw std::runtime_error("Could not load validation scene: " + LoadResult.error().Message);
 
-		const auto CameraID = PulseForge::UUID::Parse("c312582b-32cb-4811-9b93-4917d7bb6096");
-		if (!CameraID)
-			throw std::runtime_error("Validation scene camera UUID is invalid");
-		const auto Camera = m_Scene.FindEntity(*CameraID);
-		if (!Camera)
-			throw std::runtime_error("Validation scene is missing its expected camera entity");
-		m_CameraEntity = *CameraID;
 	}
 
 	PulseForge::Scene m_Scene;
-	PulseForge::UUID m_CameraEntity;
 	std::optional<PulseForge::Project> m_Project;
 	std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
 	bool m_LoggedPrepareFailure = false;

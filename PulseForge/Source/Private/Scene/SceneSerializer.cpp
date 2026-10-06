@@ -21,7 +21,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t SceneFormatVersion = 3;
+		constexpr int64_t SceneFormatVersion = 4;
 		constexpr int64_t MinimumSupportedSceneFormatVersion = 1;
 		constexpr std::string_view SceneFormatName = "PulseForgeScene";
 
@@ -110,7 +110,8 @@ namespace PulseForge
 					Record["camera"] = Json::object({
 						{ "verticalFovRadians", CameraData.VerticalFieldOfViewRadians },
 						{ "nearClipPlane", CameraData.NearClipPlane },
-						{ "farClipPlane", CameraData.FarClipPlane }
+						{ "farClipPlane", CameraData.FarClipPlane },
+						{ "primary", CameraData.IsPrimary }
 					});
 				}
 				if (MeshRenderer->has_value())
@@ -252,19 +253,22 @@ namespace PulseForge
 					const auto VerticalFov = SerializedCamera->find("verticalFovRadians");
 					const auto NearClip = SerializedCamera->find("nearClipPlane");
 					const auto FarClip = SerializedCamera->find("farClipPlane");
+					const auto Primary = SerializedCamera->find("primary");
 					if (VerticalFov == SerializedCamera->end() || NearClip == SerializedCamera->end() ||
 						FarClip == SerializedCamera->end() || !VerticalFov->is_number() ||
-						!NearClip->is_number() || !FarClip->is_number())
+						!NearClip->is_number() || !FarClip->is_number() ||
+						(Primary != SerializedCamera->end() && !Primary->is_boolean()))
 					{
 						return std::unexpected(MakeError(
 							SceneSerializationErrorCode::InvalidEntityData,
-							"Camera requires numeric vertical field of view and near/far clip planes"));
+							"Camera requires numeric field of view and clip planes, and an optional boolean primary field"));
 					}
 
 					CameraData = CameraComponent{
 						VerticalFov->get<float>(),
 						NearClip->get<float>(),
-						FarClip->get<float>() };
+						FarClip->get<float>(),
+						Primary != SerializedCamera->end() && Primary->get<bool>() };
 					if (auto CameraValidation = CameraData->Validate(); !CameraValidation)
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, CameraValidation.error().Message));
 				}

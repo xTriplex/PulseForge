@@ -36,6 +36,8 @@ namespace PulseForge
 		InvalidCamera,
 		InvalidCameraTransform,
 		InvalidMeshTransform,
+		MissingPrimaryCamera,
+		MultiplePrimaryCameras,
 		SceneOperationFailed
 	};
 
@@ -53,6 +55,10 @@ namespace PulseForge
 		[[nodiscard]] static std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Build(
 			const Scene& Source,
 			UUID CameraEntity,
+			float AspectRatio);
+		// Selects the scene's sole primary camera; no backend work is performed.
+		[[nodiscard]] static std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Build(
+			const Scene& Source,
 			float AspectRatio);
 	};
 }

@@ -860,8 +860,10 @@ namespace
 
 		TransformComponent CameraTransform;
 		CameraTransform.Translation = { 0.0f, 0.0f, 5.0f };
+		CameraComponent PrimaryCameraComponent;
+		PrimaryCameraComponent.IsPrimary = true;
 		PF_CHECK(Tests, Camera->SetTransform(CameraTransform).has_value());
-		PF_CHECK(Tests, Camera->SetCamera(CameraComponent{}).has_value());
+		PF_CHECK(Tests, Camera->SetCamera(PrimaryCameraComponent).has_value());
 
 		TransformComponent ParentTransform;
 		ParentTransform.Translation = { 2.0f, 1.0f, 0.0f };
@@ -880,7 +882,7 @@ namespace
 		PF_CHECK(Tests, SharedMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID, MaterialAssetID }).has_value());
 		PF_CHECK(Tests, SecondMesh->SetMeshRenderer(MeshRendererComponent{ SecondMeshAssetID }).has_value());
 
-		const auto Snapshot = SceneRenderSnapshotBuilder::Build(TestScene, CameraID, 16.0f / 9.0f);
+		const auto Snapshot = SceneRenderSnapshotBuilder::Build(TestScene, 16.0f / 9.0f);
 		PF_CHECK(Tests, Snapshot.has_value());
 		if (!Snapshot)
 			return;
@@ -907,8 +909,23 @@ namespace
 		PF_CHECK(Tests, !NilCamera && NilCamera.error().Code == SceneRenderSnapshotErrorCode::InvalidCameraEntity);
 		const auto MissingCamera = SceneRenderSnapshotBuilder::Build(TestScene, FirstMeshID, 1.0f);
 		PF_CHECK(Tests, !MissingCamera && MissingCamera.error().Code == SceneRenderSnapshotErrorCode::MissingCameraComponent);
-		const auto InvalidAspect = SceneRenderSnapshotBuilder::Build(TestScene, CameraID, 0.0f);
+		const auto InvalidAspect = SceneRenderSnapshotBuilder::Build(TestScene, 0.0f);
 		PF_CHECK(Tests, !InvalidAspect && InvalidAspect.error().Code == SceneRenderSnapshotErrorCode::InvalidCamera);
+		CameraComponent NonPrimaryCameraComponent;
+		PF_CHECK(Tests, Camera->SetCamera(NonPrimaryCameraComponent).has_value());
+		const auto NoPrimaryCamera = SceneRenderSnapshotBuilder::Build(TestScene, 1.0f);
+		PF_CHECK(Tests, !NoPrimaryCamera &&
+			NoPrimaryCamera.error().Code == SceneRenderSnapshotErrorCode::MissingPrimaryCamera);
+		PF_CHECK(Tests, Camera->SetCamera(PrimaryCameraComponent).has_value());
+		auto AdditionalCamera = TestScene.CreateEntityWithUUID(UUID{ 0x1800000000000000ull, 18 }, "Second camera");
+		PF_CHECK(Tests, AdditionalCamera.has_value());
+		if (AdditionalCamera)
+		{
+			PF_CHECK(Tests, AdditionalCamera->SetCamera(PrimaryCameraComponent).has_value());
+			const auto MultiplePrimaryCameras = SceneRenderSnapshotBuilder::Build(TestScene, 1.0f);
+			PF_CHECK(Tests, !MultiplePrimaryCameras &&
+				MultiplePrimaryCameras.error().Code == SceneRenderSnapshotErrorCode::MultiplePrimaryCameras);
+		}
 
 		TransformComponent SingularCameraTransform = CameraTransform;
 		SingularCameraTransform.Scale.x = 0.0f;
@@ -946,6 +963,7 @@ namespace
 		SourceCamera.VerticalFieldOfViewRadians = 0.9f;
 		SourceCamera.NearClipPlane = 0.25f;
 		SourceCamera.FarClipPlane = 80.0f;
+		SourceCamera.IsPrimary = true;
 		PF_CHECK(Tests, SourceCamera.Validate().has_value());
 		const auto SourceProjection = SourceCamera.GetProjectionMatrix(16.0f / 9.0f);
 		PF_CHECK(Tests, SourceProjection.has_value());
@@ -978,7 +996,8 @@ namespace
 		if (!Serialized)
 			return;
 		PF_CHECK(Tests, Serialized->find("\"format\": \"PulseForgeScene\"") != std::string::npos);
-		PF_CHECK(Tests, Serialized->find("\"version\": 3") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 4") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"primary\": true") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"meshAsset\": \"" + MeshAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"materialAsset\": \"" + MaterialAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("Assets/") == std::string::npos);
@@ -1016,6 +1035,7 @@ namespace
 		PF_CHECK(Tests, LoadedCamera && LoadedCamera->has_value());
 		PF_CHECK(Tests, LoadedCamera && LoadedCamera->has_value() &&
 			glm::abs(LoadedCamera->value().VerticalFieldOfViewRadians - SourceCamera.VerticalFieldOfViewRadians) < 0.0001f);
+		PF_CHECK(Tests, LoadedCamera && LoadedCamera->has_value() && LoadedCamera->value().IsPrimary);
 		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
 			LoadedMeshRenderer->value().MeshAsset == MeshAssetIdentifier);
 		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
@@ -1035,14 +1055,41 @@ namespace
 
 		const auto DestinationRootBeforeFailure = Destination.FindEntity(RootId);
 		std::string UnsupportedVersion = *Serialized;
-		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 3");
+		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 4");
 		PF_CHECK(Tests, VersionPosition != std::string::npos);
 		if (VersionPosition != std::string::npos)
-			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 3").size(), "\"version\": 99");
+			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 4").size(), "\"version\": 99");
 		const auto UnsupportedVersionResult = SceneSerializer::Deserialize(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedVersionResult.has_value());
 		PF_CHECK(Tests, !UnsupportedVersionResult && UnsupportedVersionResult.error().Code == SceneSerializationErrorCode::UnsupportedVersion);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+
+		std::string LegacyVersionThree = *Serialized;
+		const size_t PrimaryFieldPosition = LegacyVersionThree.find("\"primary\": true");
+		PF_CHECK(Tests, PrimaryFieldPosition != std::string::npos);
+		if (PrimaryFieldPosition != std::string::npos)
+		{
+			const size_t PrimaryCommaPosition = LegacyVersionThree.rfind(',', PrimaryFieldPosition);
+			const size_t PrimaryLineEnd = LegacyVersionThree.find('\n', PrimaryFieldPosition);
+			PF_CHECK(Tests, PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos);
+			if (PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos)
+				LegacyVersionThree.erase(PrimaryCommaPosition, PrimaryLineEnd - PrimaryCommaPosition);
+		}
+		const size_t LegacyVersionThreePosition = LegacyVersionThree.find("\"version\": 4");
+		PF_CHECK(Tests, LegacyVersionThreePosition != std::string::npos);
+		if (LegacyVersionThreePosition != std::string::npos)
+			LegacyVersionThree.replace(LegacyVersionThreePosition, std::string("\"version\": 4").size(), "\"version\": 3");
+		Scene LegacyVersionThreeDestination;
+		const auto LegacyVersionThreeLoad = SceneSerializer::Deserialize(LegacyVersionThree, LegacyVersionThreeDestination);
+		PF_CHECK(Tests, LegacyVersionThreeLoad.has_value());
+		const auto LegacyCamera = LegacyVersionThreeDestination.FindEntity(ChildId);
+		PF_CHECK(Tests, LegacyCamera.has_value());
+		if (LegacyCamera)
+		{
+			const auto LegacyCameraComponent = LegacyCamera->GetCamera();
+			PF_CHECK(Tests, LegacyCameraComponent && LegacyCameraComponent->has_value() &&
+				!LegacyCameraComponent->value().IsPrimary);
+		}
 
 		Scene LegacySource;
 		const auto LegacyEntity = LegacySource.CreateEntityWithUUID(UUID{ 0x6000000000000000ull, 6 }, "Version one");
@@ -1052,10 +1099,10 @@ namespace
 		if (LegacySerializedVersionTwo)
 		{
 			std::string LegacyVersionOne = *LegacySerializedVersionTwo;
-			const size_t LegacyVersionPosition = LegacyVersionOne.find("\"version\": 3");
+			const size_t LegacyVersionPosition = LegacyVersionOne.find("\"version\": 4");
 			PF_CHECK(Tests, LegacyVersionPosition != std::string::npos);
 			if (LegacyVersionPosition != std::string::npos)
-				LegacyVersionOne.replace(LegacyVersionPosition, std::string("\"version\": 3").size(), "\"version\": 1");
+				LegacyVersionOne.replace(LegacyVersionPosition, std::string("\"version\": 4").size(), "\"version\": 1");
 			Scene LegacyDestination;
 			const auto LegacyLoad = SceneSerializer::Deserialize(LegacyVersionOne, LegacyDestination);
 			PF_CHECK(Tests, LegacyLoad.has_value());
@@ -1069,7 +1116,7 @@ namespace
 			}
 		}
 
-		std::string LegacyVersionTwo = *Serialized;
+		std::string LegacyVersionTwo = LegacyVersionThree;
 		const std::string MaterialField = "\"materialAsset\": \"" + MaterialAssetIdentifier.ToString() + "\"";
 		const size_t MaterialFieldPosition = LegacyVersionTwo.find(MaterialField);
 		PF_CHECK(Tests, MaterialFieldPosition != std::string::npos);
@@ -1129,6 +1176,16 @@ namespace
 		const auto InvalidCameraResult = SceneSerializer::Deserialize(InvalidCameraDocument, Destination);
 		PF_CHECK(Tests, !InvalidCameraResult.has_value());
 		PF_CHECK(Tests, !InvalidCameraResult && InvalidCameraResult.error().Code == SceneSerializationErrorCode::InvalidEntityData);
+		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+
+		std::string InvalidPrimaryCameraDocument = *Serialized;
+		const size_t PrimaryValuePosition = InvalidPrimaryCameraDocument.find("\"primary\": true");
+		PF_CHECK(Tests, PrimaryValuePosition != std::string::npos);
+		if (PrimaryValuePosition != std::string::npos)
+			InvalidPrimaryCameraDocument.replace(PrimaryValuePosition, std::string("\"primary\": true").size(), "\"primary\": \"yes\"");
+		const auto InvalidPrimaryCameraResult = SceneSerializer::Deserialize(InvalidPrimaryCameraDocument, Destination);
+		PF_CHECK(Tests, !InvalidPrimaryCameraResult &&
+			InvalidPrimaryCameraResult.error().Code == SceneSerializationErrorCode::InvalidEntityData);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
 
 		std::string UnsupportedFormat = *Serialized;
@@ -2875,6 +2932,7 @@ namespace
 		PF_CHECK(Tests, Grandchild->SetParent(*Child).has_value());
 		CameraComponent RootCamera;
 		RootCamera.VerticalFieldOfViewRadians = 0.95f;
+		RootCamera.IsPrimary = true;
 		PF_CHECK(Tests, Root->SetCamera(RootCamera).has_value());
 		const AssetID MeshAssetID{ 0x7300000000000000ull, 7 };
 		const AssetID MaterialAssetID{ 0x7400000000000000ull, 7 };
@@ -2885,11 +2943,41 @@ namespace
 		if (!PrefabData)
 			return;
 		PF_CHECK(Tests, PrefabData->find("\"format\": \"PulseForgePrefab\"") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"version\": 2") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"root\": \"" + Root->GetUUID().ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"meshAsset\": \"" + MeshAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"materialAsset\": \"" + MaterialAssetID.ToString() + "\"") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"primary\": true") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("Outside prefab") == std::string::npos);
 		PF_CHECK(Tests, PrefabData->find(ExternalParent->GetUUID().ToString()) == std::string::npos);
+
+		std::string LegacyPrefabV1 = *PrefabData;
+		const size_t CameraPrimaryPosition = LegacyPrefabV1.find("\"primary\": true");
+		PF_CHECK(Tests, CameraPrimaryPosition != std::string::npos);
+		if (CameraPrimaryPosition != std::string::npos)
+		{
+			const size_t PrimaryCommaPosition = LegacyPrefabV1.rfind(',', CameraPrimaryPosition);
+			const size_t PrimaryLineEnd = LegacyPrefabV1.find('\n', CameraPrimaryPosition);
+			PF_CHECK(Tests, PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos);
+			if (PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos)
+				LegacyPrefabV1.erase(PrimaryCommaPosition, PrimaryLineEnd - PrimaryCommaPosition);
+		}
+		const size_t EmbeddedSceneVersionPosition = LegacyPrefabV1.find("\"version\": 4", LegacyPrefabV1.find("\"scene\""));
+		PF_CHECK(Tests, EmbeddedSceneVersionPosition != std::string::npos);
+		if (EmbeddedSceneVersionPosition != std::string::npos)
+			LegacyPrefabV1.replace(EmbeddedSceneVersionPosition, std::string("\"version\": 4").size(), "\"version\": 3");
+		const size_t OuterPrefabVersionPosition = LegacyPrefabV1.find("\"version\": 2");
+		PF_CHECK(Tests, OuterPrefabVersionPosition != std::string::npos);
+		if (OuterPrefabVersionPosition != std::string::npos)
+			LegacyPrefabV1.replace(OuterPrefabVersionPosition, std::string("\"version\": 2").size(), "\"version\": 1");
+		Scene LegacyPrefabDestination;
+		const auto LegacyPrefabInstance = PrefabSerializer::Instantiate(LegacyPrefabV1, LegacyPrefabDestination);
+		PF_CHECK(Tests, LegacyPrefabInstance.has_value());
+		if (LegacyPrefabInstance)
+		{
+			const auto LegacyCamera = LegacyPrefabInstance->GetCamera();
+			PF_CHECK(Tests, LegacyCamera && LegacyCamera->has_value() && !LegacyCamera->value().IsPrimary);
+		}
 
 		Scene Destination;
 		const auto Existing = Destination.CreateEntity("Existing destination entity");
@@ -2906,6 +2994,7 @@ namespace
 		const auto FirstCamera = FirstInstance->GetCamera();
 		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() &&
 			FirstCamera->value().VerticalFieldOfViewRadians == RootCamera.VerticalFieldOfViewRadians);
+		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() && FirstCamera->value().IsPrimary);
 		const auto FirstChildren = FirstInstance->GetChildren();
 		PF_CHECK(Tests, FirstChildren && FirstChildren->size() == 1);
 		if (!FirstChildren || FirstChildren->size() != 1)
@@ -2945,10 +3034,10 @@ namespace
 		PF_CHECK(Tests, Destination.GetEntityCount() == CountBeforeFailure);
 
 		std::string UnsupportedVersion = *PrefabData;
-		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 1");
+		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 2");
 		PF_CHECK(Tests, VersionPosition != std::string::npos);
 		if (VersionPosition != std::string::npos)
-			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 1").size(), "\"version\": 99");
+			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 2").size(), "\"version\": 99");
 		const auto UnsupportedPrefabVersion = PrefabSerializer::Instantiate(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedPrefabVersion.has_value());
 		PF_CHECK(Tests, !UnsupportedPrefabVersion &&

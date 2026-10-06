@@ -58,6 +58,9 @@ namespace PulseForge
 			const Scene& Source,
 			UUID CameraEntity,
 			float AspectRatio);
+		[[nodiscard]] std::expected<void, SceneRendererError> PrepareScene(
+			const Scene& Source,
+			float AspectRatio);
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene();
 
 	private:
@@ -65,6 +68,8 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
 			const std::filesystem::path& CompiledShaderDirectory);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureMaterialBindings(const AssetID& MaterialAsset);
+		[[nodiscard]] std::expected<void, SceneRendererError> PrepareSnapshot(
+			std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot);
 
 		struct MaterialBindingResources
 		{

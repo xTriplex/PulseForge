@@ -21,7 +21,8 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr uint64_t PrefabFormatVersion = 1;
+		constexpr uint64_t MinimumSupportedPrefabFormatVersion = 1;
+		constexpr uint64_t PrefabFormatVersion = 2;
 		constexpr std::string_view PrefabFormatName = "PulseForgePrefab";
 		constexpr size_t MaxPrefabDocumentBytes = 64u * 1024u * 1024u;
 
@@ -182,8 +183,10 @@ namespace PulseForge
 			if (Version == Document.end() || (!Version->is_number_integer() && !Version->is_number_unsigned()))
 				return std::unexpected(MakeError(PrefabErrorCode::InvalidDocument, "Prefab document is missing a numeric version"));
 			const bool SupportedVersion = Version->is_number_unsigned()
-				? Version->get<uint64_t>() == PrefabFormatVersion
-				: Version->get<int64_t>() == static_cast<int64_t>(PrefabFormatVersion);
+				? Version->get<uint64_t>() >= MinimumSupportedPrefabFormatVersion &&
+					Version->get<uint64_t>() <= PrefabFormatVersion
+				: Version->get<int64_t>() >= static_cast<int64_t>(MinimumSupportedPrefabFormatVersion) &&
+					Version->get<int64_t>() <= static_cast<int64_t>(PrefabFormatVersion);
 			if (!SupportedVersion)
 				return std::unexpected(MakeError(PrefabErrorCode::UnsupportedVersion, "Prefab document version is not supported"));
 

@@ -162,4 +162,40 @@ namespace PulseForge
 		}
 		return Snapshot;
 	}
+
+	std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> SceneRenderSnapshotBuilder::Build(
+		const Scene& Source,
+		float AspectRatio)
+	{
+		std::optional<UUID> PrimaryCamera;
+		for (const Entity& Current : Source.GetEntities())
+		{
+			const auto Camera = Current.GetCamera();
+			if (!Camera)
+				return std::unexpected(MakeError(
+					SceneRenderSnapshotErrorCode::SceneOperationFailed,
+					Current.GetUUID(),
+					Camera.error().Message));
+			if (!Camera->has_value() || !Camera->value().IsPrimary)
+				continue;
+
+			if (PrimaryCamera)
+			{
+				return std::unexpected(MakeError(
+					SceneRenderSnapshotErrorCode::MultiplePrimaryCameras,
+					Current.GetUUID(),
+					"Scene contains more than one primary camera entity"));
+			}
+			PrimaryCamera = Current.GetUUID();
+		}
+
+		if (!PrimaryCamera)
+		{
+			return std::unexpected(MakeError(
+				SceneRenderSnapshotErrorCode::MissingPrimaryCamera,
+				{},
+				"Scene does not contain a primary camera entity"));
+		}
+		return Build(Source, *PrimaryCamera, AspectRatio);
+	}
 }

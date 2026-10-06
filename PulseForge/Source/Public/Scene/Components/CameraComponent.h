@@ -30,6 +30,7 @@ namespace PulseForge
 		float VerticalFieldOfViewRadians = 0.785398163f;
 		float NearClipPlane = 0.1f;
 		float FarClipPlane = 1000.0f;
+		bool IsPrimary = false;
 
 		[[nodiscard]] PULSEFORGE_API std::expected<void, CameraError> Validate() const;
 		[[nodiscard]] PULSEFORGE_API std::expected<glm::mat4, CameraError> GetProjectionMatrix(float AspectRatio) const;

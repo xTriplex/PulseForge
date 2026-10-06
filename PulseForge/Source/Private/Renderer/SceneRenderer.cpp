@@ -231,8 +231,20 @@ namespace PulseForge
 		UUID CameraEntity,
 		float AspectRatio)
 	{
+		return PrepareSnapshot(SceneRenderSnapshotBuilder::Build(Source, CameraEntity, AspectRatio));
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::PrepareScene(
+		const Scene& Source,
+		float AspectRatio)
+	{
+		return PrepareSnapshot(SceneRenderSnapshotBuilder::Build(Source, AspectRatio));
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::PrepareSnapshot(
+		std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot)
+	{
 		m_PreparedSnapshot.reset();
-		auto Snapshot = SceneRenderSnapshotBuilder::Build(Source, CameraEntity, AspectRatio);
 		if (!Snapshot)
 		{
 			return std::unexpected(SceneRendererError{
