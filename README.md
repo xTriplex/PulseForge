@@ -55,6 +55,10 @@ cmake -S . -B Build/CMake/VS2022-x64-OpenGL -G "Visual Studio 17 2022" -A x64 -D
 
 The OpenGL fallback supports the current bootstrap and ImGui path; the newer shader, binding, and geometry APIs are Vulkan-only for now. Vulkan presentation currently uses FIFO (VSync); runtime VSync controls are not exposed.
 
+## Scene API
+
+The engine provides UUID-backed `Scene` and non-owning `Entity` handles with tags, transforms, parent/child relationships, duplication, and deterministic entity enumeration. Entity transforms include a world-matrix query that composes the local transforms through the hierarchy.
+
 ## Tests
 
-`PulseForgeTests` is the first-party test target and runs through CTest. It covers core lifecycle, events and input, Vulkan selection helpers, and deterministic validation of renderer descriptions and draw/binding arguments. GPU and window behavior is exercised by running the sample.
+`PulseForgeTests` is the first-party test target and runs through CTest. It covers core lifecycle, events and input, UUID/scene hierarchy behavior, Vulkan selection helpers, and renderer description/draw validation. GPU and window behavior is exercised by running the sample.

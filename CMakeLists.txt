@@ -100,15 +100,20 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/RendererBackend.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanSupport.cpp
+	PulseForge/Source/Private/Scene/Scene.cpp
+	PulseForge/Source/Private/Scene/TransformComponent.cpp
+	PulseForge/Source/Private/Scene/UUID.cpp
 	PulseForge/Source/Private/Utils/stb_image.cpp
 	PulseForge/Source/Private/Window/Window.cpp
 	PulseForge/Source/Private/Window/Platform/Windows/WindowsWindow.cpp
 )
 target_include_directories(PulseForge
 	PUBLIC PulseForge/Source/Public
+		PulseForge/Vendor/glm
 	PRIVATE
 		PulseForge/Source
 		PulseForge/Source/Private
+		PulseForge/Vendor/entt/src
 		PulseForge/Vendor/Glfw/include
 		PulseForge/Vendor/Glad/include
 		PulseForge/Vendor/imgui
@@ -135,7 +140,7 @@ target_link_libraries(PulseForge PRIVATE
 target_precompile_headers(PulseForge PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
 
 add_executable(PulseForgeGame PulseForgeGame/Source/Private/Client/PulseForgeGame.cpp)
-target_include_directories(PulseForgeGame PRIVATE PulseForgeGame/Source/Public PulseForge/Vendor/glm)
+target_include_directories(PulseForgeGame PRIVATE PulseForgeGame/Source/Public)
 target_compile_definitions(PulseForgeGame PRIVATE PF_PLATFORM_WINDOWS "PF_SAMPLE_SHADER_DIRECTORY=\"Shaders\"")
 if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "OpenGL")
 	target_compile_definitions(PulseForgeGame PRIVATE PF_SAMPLE_RENDERER_OPENGL)

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <iostream>
 #include <string_view>
 
@@ -9,6 +10,8 @@
 #include "Renderer/Graphics.h"
 #include "Renderer/Mesh.h"
 #include "Renderer/Vulkan/VulkanSupport.h"
+#include "Scene/Scene.h"
+#include "Scene/UUID.h"
 #include "Events/ApplicationEvent.h"
 #include "Events/Event.h"
 #include "Events/KeyEvent.h"
@@ -17,6 +20,7 @@
 #include <array>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -631,6 +635,165 @@ namespace
 		PF_CHECK(Tests, NonIndexedMesh && NonIndexedMesh->VertexCount == 3 && NonIndexedMesh->IndexCount == 0);
 	}
 
+	void TestUUIDBehavior(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const auto Parsed = UUID::Parse("00112233-4455-6677-8899-aabbccddeeff");
+		PF_CHECK(Tests, Parsed.has_value());
+		PF_CHECK(Tests, Parsed && Parsed->ToString() == "00112233-4455-6677-8899-aabbccddeeff");
+		PF_CHECK(Tests, Parsed && Parsed->GetHigh() == 0x0011223344556677ull);
+		PF_CHECK(Tests, Parsed && Parsed->GetLow() == 0x8899aabbccddeeffull);
+		PF_CHECK(Tests, !UUID::Parse("00112233-4455-6677-8899-aabbccddeefg").has_value());
+		PF_CHECK(Tests, !UUID::Parse("00112233445566778899aabbccddeeff").has_value());
+
+		const auto GeneratedFirst = UUID::Generate();
+		const auto GeneratedSecond = UUID::Generate();
+		PF_CHECK(Tests, GeneratedFirst.has_value() && GeneratedSecond.has_value());
+		if (GeneratedFirst && GeneratedSecond)
+		{
+			PF_CHECK(Tests, !GeneratedFirst->IsNil());
+			PF_CHECK(Tests, *GeneratedFirst != *GeneratedSecond);
+			const auto ParsedGenerated = UUID::Parse(GeneratedFirst->ToString());
+			PF_CHECK(Tests, ParsedGenerated && *ParsedGenerated == *GeneratedFirst);
+			PF_CHECK(Tests, ((GeneratedFirst->GetHigh() >> 12) & 0xf) == 4);
+			PF_CHECK(Tests, (GeneratedFirst->GetLow() >> 62) == 2);
+		}
+	}
+
+	void TestSceneEntityAndHierarchy(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		Scene TestScene;
+		const UUID ParentId{ 0x1000000000000000ull, 1 };
+		const UUID ChildId{ 0x2000000000000000ull, 2 };
+		const UUID GrandchildId{ 0x3000000000000000ull, 3 };
+		auto ParentResult = TestScene.CreateEntityWithUUID(ParentId, "Root");
+		auto ChildResult = TestScene.CreateEntityWithUUID(ChildId, "Child");
+		auto GrandchildResult = TestScene.CreateEntityWithUUID(GrandchildId, "Grandchild");
+		PF_CHECK(Tests, ParentResult.has_value() && ChildResult.has_value() && GrandchildResult.has_value());
+		if (!ParentResult || !ChildResult || !GrandchildResult)
+			return;
+
+		Entity Parent = *ParentResult;
+		Entity Child = *ChildResult;
+		Entity Grandchild = *GrandchildResult;
+		PF_CHECK(Tests, Parent.IsValid() && Child.IsValid() && Grandchild.IsValid());
+		PF_CHECK(Tests, TestScene.GetEntityCount() == 3);
+		PF_CHECK(Tests, TestScene.FindEntity(ChildId) == Child);
+		PF_CHECK(Tests, !TestScene.FindEntity(UUID{ 0x4000000000000000ull, 4 }).has_value());
+		PF_CHECK(Tests, !TestScene.CreateEntityWithUUID(ChildId, "Duplicate UUID").has_value());
+		PF_CHECK(Tests, !TestScene.CreateEntityWithUUID(UUID{}, "Nil UUID").has_value());
+
+		auto ChildTag = Child.GetTag();
+		PF_CHECK(Tests, ChildTag && ChildTag->Name == "Child");
+		if (ChildTag)
+		{
+			ChildTag->Name = "Renamed child";
+			PF_CHECK(Tests, Child.SetTag(*ChildTag).has_value());
+		}
+
+		TransformComponent ParentTransform;
+		ParentTransform.Translation = { 10.0f, 0.0f, 0.0f };
+		TransformComponent ChildTransform;
+		ChildTransform.Translation = { 2.0f, 0.0f, 0.0f };
+		TransformComponent GrandchildTransform;
+		GrandchildTransform.Translation = { 1.0f, 0.0f, 0.0f };
+		PF_CHECK(Tests, Parent.SetTransform(ParentTransform).has_value());
+		PF_CHECK(Tests, Child.SetTransform(ChildTransform).has_value());
+		PF_CHECK(Tests, Grandchild.SetTransform(GrandchildTransform).has_value());
+		auto InvalidTransform = ChildTransform;
+		InvalidTransform.Translation.x = std::numeric_limits<float>::infinity();
+		const auto InvalidTransformResult = Child.SetTransform(InvalidTransform);
+		PF_CHECK(Tests, !InvalidTransformResult.has_value());
+		PF_CHECK(Tests, !InvalidTransformResult && InvalidTransformResult.error().Code == SceneErrorCode::InvalidTransform);
+		InvalidTransform = ChildTransform;
+		InvalidTransform.Rotation = glm::quat(0.0f, 0.0f, 0.0f, 0.0f);
+		PF_CHECK(Tests, !Child.SetTransform(InvalidTransform).has_value());
+		InvalidTransform = ChildTransform;
+		InvalidTransform.Rotation = glm::quat(2.0f, 0.0f, 0.0f, 0.0f);
+		PF_CHECK(Tests, Child.SetTransform(InvalidTransform).has_value());
+		const auto NormalizedTransform = Child.GetTransform();
+		PF_CHECK(Tests, NormalizedTransform && glm::abs(glm::length(NormalizedTransform->Rotation) - 1.0f) < 0.0001f);
+		PF_CHECK(Tests, Child.SetTransform(ChildTransform).has_value());
+		PF_CHECK(Tests, Child.SetParent(Parent).has_value());
+		PF_CHECK(Tests, Grandchild.SetParent(Child).has_value());
+
+		const auto WorldMatrix = Grandchild.GetWorldMatrix();
+		PF_CHECK(Tests, WorldMatrix.has_value());
+		if (WorldMatrix)
+		{
+			const glm::vec4 WorldOrigin = *WorldMatrix * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+			PF_CHECK(Tests, glm::abs(WorldOrigin.x - 13.0f) < 0.0001f);
+		}
+
+		const auto ParentChildren = Parent.GetChildren();
+		const auto ChildParent = Child.GetParent();
+		PF_CHECK(Tests, ParentChildren && ParentChildren->size() == 1 && ParentChildren->front() == Child);
+		PF_CHECK(Tests, ChildParent && ChildParent->has_value() && **ChildParent == Parent);
+		const auto CycleResult = Parent.SetParent(Grandchild);
+		PF_CHECK(Tests, !CycleResult.has_value());
+		PF_CHECK(Tests, !CycleResult && CycleResult.error().Code == SceneErrorCode::ParentCycle);
+
+		PF_CHECK(Tests, Grandchild.SetParent(Parent).has_value());
+		const auto ChildChildrenAfterReparent = Child.GetChildren();
+		const auto ParentChildrenAfterReparent = Parent.GetChildren();
+		PF_CHECK(Tests, ChildChildrenAfterReparent && ChildChildrenAfterReparent->empty());
+		PF_CHECK(Tests, ParentChildrenAfterReparent && ParentChildrenAfterReparent->size() == 2);
+
+		auto DuplicateResult = TestScene.DuplicateEntity(Child);
+		PF_CHECK(Tests, DuplicateResult.has_value());
+		if (DuplicateResult)
+		{
+			const Entity Duplicate = *DuplicateResult;
+			const auto DuplicateTag = Duplicate.GetTag();
+			const auto DuplicateTransform = Duplicate.GetTransform();
+			const auto DuplicateParent = Duplicate.GetParent();
+			PF_CHECK(Tests, Duplicate.GetUUID() != Child.GetUUID());
+			PF_CHECK(Tests, DuplicateTag && DuplicateTag->Name == "Renamed child Copy");
+			PF_CHECK(Tests, DuplicateTransform && glm::all(glm::equal(DuplicateTransform->Translation, ChildTransform.Translation)));
+			PF_CHECK(Tests, DuplicateParent && DuplicateParent->has_value() && **DuplicateParent == Parent);
+		}
+
+		Scene OtherScene;
+		auto OtherEntityResult = OtherScene.CreateEntity("Other scene");
+		PF_CHECK(Tests, OtherEntityResult.has_value());
+		if (OtherEntityResult)
+		{
+			PF_CHECK(Tests, !Child.SetParent(*OtherEntityResult).has_value());
+			PF_CHECK(Tests, !OtherScene.DestroyEntity(Child).has_value());
+		}
+
+		PF_CHECK(Tests, TestScene.DestroyEntity(Parent).has_value());
+		PF_CHECK(Tests, !Parent.IsValid());
+		PF_CHECK(Tests, Child.IsValid() && Grandchild.IsValid());
+		const auto DetachedGrandchild = Grandchild.GetParent();
+		PF_CHECK(Tests, DetachedGrandchild && !DetachedGrandchild->has_value());
+		PF_CHECK(Tests, TestScene.GetEntityCount() == 3);
+		PF_CHECK(Tests, !TestScene.DestroyEntity(Parent).has_value());
+
+		const auto OrderedEntities = TestScene.GetEntities();
+		PF_CHECK(Tests, std::is_sorted(OrderedEntities.begin(), OrderedEntities.end(), [](const Entity& First, const Entity& Second)
+		{
+			return First.GetUUID() < Second.GetUUID();
+		}));
+	}
+
+	void TestEntityHandlesExpireWithScene(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		Entity StaleHandle;
+		{
+			Scene TemporaryScene;
+			auto Created = TemporaryScene.CreateEntity("Temporary");
+			PF_CHECK(Tests, Created.has_value());
+			if (Created)
+				StaleHandle = *Created;
+			PF_CHECK(Tests, StaleHandle.IsValid());
+		}
+		PF_CHECK(Tests, !StaleHandle.IsValid());
+		PF_CHECK(Tests, !StaleHandle.GetTag().has_value());
+	}
+
 	void TestGraphicsPipelineAndDrawValidation(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -936,6 +1099,9 @@ int main()
 	TestShaderDescriptionAndSpirVValidation(Tests);
 	TestVertexLayoutValidation(Tests);
 	TestMeshDescriptionAndDrawValidation(Tests);
+	TestUUIDBehavior(Tests);
+	TestSceneEntityAndHierarchy(Tests);
+	TestEntityHandlesExpireWithScene(Tests);
 	TestGraphicsPipelineAndDrawValidation(Tests);
 	TestConstantBufferBindingValidation(Tests);
 	TestTextureAndSamplerValidation(Tests);
