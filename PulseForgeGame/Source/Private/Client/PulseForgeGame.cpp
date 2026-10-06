@@ -9,7 +9,9 @@
 #include "ImGui/UI.h"
 #include "Scene/Components/MeshRendererComponent.h"
 #include "Scene/Scene.h"
+#include "Scene/SceneRenderSnapshot.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <filesystem>
@@ -23,7 +25,6 @@
 #include <vector>
 
 #include <glm/ext/matrix_transform.hpp>
-#include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/quaternion.hpp>
 
 namespace
@@ -73,8 +74,14 @@ public:
 			if (auto ComponentResult = m_CubeEntity.SetMeshRenderer(PulseForge::MeshRendererComponent{ *MeshAssetID });
 				!ComponentResult)
 				throw std::runtime_error(ComponentResult.error().Message);
+			const auto MeshRenderer = m_CubeEntity.GetMeshRenderer();
+			if (!MeshRenderer || !MeshRenderer->has_value())
+				throw std::runtime_error("Could not read the validation mesh renderer component");
 
-			auto ImportedMesh = PulseForge::GltfMeshImporter::ImportStaticPrimitive(*MeshAssetID, ProjectRoot, Registry);
+			auto ImportedMesh = PulseForge::GltfMeshImporter::ImportStaticPrimitive(
+				MeshRenderer->value().MeshAsset,
+				ProjectRoot,
+				Registry);
 			if (!ImportedMesh)
 				throw std::runtime_error(ImportedMesh.error().Message);
 			const PulseForge::MeshDesc MeshDescription = ImportedMesh->GetMeshDescription();
@@ -287,20 +294,24 @@ private:
 
 	[[nodiscard]] std::expected<glm::mat4, std::string> CreateModelViewProjection() const
 	{
-		const auto Model = m_CubeEntity.GetWorldMatrix();
-		const auto CameraWorld = m_CameraEntity.GetWorldMatrix();
-		const auto Camera = m_CameraEntity.GetCamera();
-		if (!Model || !CameraWorld || !Camera || !Camera->has_value())
-			return std::unexpected("Could not read the sample scene camera or model transform");
-
 		const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
 		if (Width == 0 || Height == 0)
 			return std::unexpected("Cannot build the camera projection for a zero-sized framebuffer");
 
-		const auto Projection = Camera->value().GetProjectionMatrix(static_cast<float>(Width) / static_cast<float>(Height));
-		if (!Projection)
-			return std::unexpected(Projection.error().Message);
-		return *Projection * glm::inverse(*CameraWorld) * *Model;
+		const auto Snapshot = PulseForge::SceneRenderSnapshotBuilder::Build(
+			m_Scene,
+			m_CameraEntity.GetUUID(),
+			static_cast<float>(Width) / static_cast<float>(Height));
+		if (!Snapshot)
+			return std::unexpected(Snapshot.error().Message);
+
+		const auto Mesh = std::find_if(Snapshot->Meshes.begin(), Snapshot->Meshes.end(), [this](const auto& Instance)
+		{
+			return Instance.Entity == m_CubeEntity.GetUUID();
+		});
+		if (Mesh == Snapshot->Meshes.end())
+			return std::unexpected("Sample scene has no mesh-renderer instance for its validation cube");
+		return Snapshot->ViewProjection * Mesh->WorldTransform;
 	}
 
 	[[nodiscard]] std::expected<void, std::string> RebuildTransformBindings()

@@ -18,6 +18,7 @@
 #include "Renderer/Mesh.h"
 #include "Renderer/Vulkan/VulkanSupport.h"
 #include "Scene/Scene.h"
+#include "Scene/SceneRenderSnapshot.h"
 #include "Scene/SceneSerializer.h"
 #include "Scene/UUID.h"
 #include "Events/ApplicationEvent.h"
@@ -826,6 +827,73 @@ namespace
 		}
 		PF_CHECK(Tests, !StaleHandle.IsValid());
 		PF_CHECK(Tests, !StaleHandle.GetTag().has_value());
+	}
+
+	void TestSceneRenderSnapshot(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		Scene TestScene;
+		const UUID CameraID{ 0x1000000000000000ull, 1 };
+		const UUID ParentID{ 0x2000000000000000ull, 2 };
+		const UUID FirstMeshID{ 0x3000000000000000ull, 3 };
+		const UUID SecondMeshID{ 0x4000000000000000ull, 4 };
+		const AssetID FirstMeshAssetID{ 0x5000000000000000ull, 5 };
+		const AssetID SecondMeshAssetID{ 0x6000000000000000ull, 6 };
+		auto Camera = TestScene.CreateEntityWithUUID(CameraID, "Camera");
+		auto Parent = TestScene.CreateEntityWithUUID(ParentID, "Parent");
+		auto FirstMesh = TestScene.CreateEntityWithUUID(FirstMeshID, "First mesh");
+		auto SecondMesh = TestScene.CreateEntityWithUUID(SecondMeshID, "Second mesh");
+		PF_CHECK(Tests, Camera && Parent && FirstMesh && SecondMesh);
+		if (!Camera || !Parent || !FirstMesh || !SecondMesh)
+			return;
+
+		TransformComponent CameraTransform;
+		CameraTransform.Translation = { 0.0f, 0.0f, 5.0f };
+		PF_CHECK(Tests, Camera->SetTransform(CameraTransform).has_value());
+		PF_CHECK(Tests, Camera->SetCamera(CameraComponent{}).has_value());
+
+		TransformComponent ParentTransform;
+		ParentTransform.Translation = { 2.0f, 1.0f, 0.0f };
+		TransformComponent FirstMeshTransform;
+		FirstMeshTransform.Translation = { -1.0f, 0.0f, -2.0f };
+		TransformComponent SecondMeshTransform;
+		SecondMeshTransform.Translation = { 0.0f, -1.0f, -4.0f };
+		PF_CHECK(Tests, Parent->SetTransform(ParentTransform).has_value());
+		PF_CHECK(Tests, FirstMesh->SetTransform(FirstMeshTransform).has_value());
+		PF_CHECK(Tests, SecondMesh->SetTransform(SecondMeshTransform).has_value());
+		PF_CHECK(Tests, FirstMesh->SetParent(*Parent).has_value());
+		PF_CHECK(Tests, FirstMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID }).has_value());
+		PF_CHECK(Tests, SecondMesh->SetMeshRenderer(MeshRendererComponent{ SecondMeshAssetID }).has_value());
+
+		const auto Snapshot = SceneRenderSnapshotBuilder::Build(TestScene, CameraID, 16.0f / 9.0f);
+		PF_CHECK(Tests, Snapshot.has_value());
+		if (!Snapshot)
+			return;
+		PF_CHECK(Tests, Snapshot->CameraEntity == CameraID);
+		PF_CHECK(Tests, Snapshot->Meshes.size() == 2);
+		PF_CHECK(Tests, Snapshot->Meshes[0].Entity == FirstMeshID);
+		PF_CHECK(Tests, Snapshot->Meshes[1].Entity == SecondMeshID);
+		PF_CHECK(Tests, Snapshot->Meshes[0].MeshAsset == FirstMeshAssetID);
+		PF_CHECK(Tests, Snapshot->Meshes[1].MeshAsset == SecondMeshAssetID);
+		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[0].WorldTransform[3].x - 1.0f) < 0.0001f);
+		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[0].WorldTransform[3].y - 1.0f) < 0.0001f);
+		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[0].WorldTransform[3].z + 2.0f) < 0.0001f);
+		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[1].WorldTransform[3].y + 1.0f) < 0.0001f);
+		const glm::vec4 CameraPositionClip = Snapshot->ViewProjection * glm::vec4(CameraTransform.Translation, 1.0f);
+		PF_CHECK(Tests, glm::abs(CameraPositionClip.x) < 0.0001f && glm::abs(CameraPositionClip.y) < 0.0001f);
+
+		const auto NilCamera = SceneRenderSnapshotBuilder::Build(TestScene, UUID{}, 1.0f);
+		PF_CHECK(Tests, !NilCamera && NilCamera.error().Code == SceneRenderSnapshotErrorCode::InvalidCameraEntity);
+		const auto MissingCamera = SceneRenderSnapshotBuilder::Build(TestScene, FirstMeshID, 1.0f);
+		PF_CHECK(Tests, !MissingCamera && MissingCamera.error().Code == SceneRenderSnapshotErrorCode::MissingCameraComponent);
+		const auto InvalidAspect = SceneRenderSnapshotBuilder::Build(TestScene, CameraID, 0.0f);
+		PF_CHECK(Tests, !InvalidAspect && InvalidAspect.error().Code == SceneRenderSnapshotErrorCode::InvalidCamera);
+
+		TransformComponent SingularCameraTransform = CameraTransform;
+		SingularCameraTransform.Scale.x = 0.0f;
+		PF_CHECK(Tests, Camera->SetTransform(SingularCameraTransform).has_value());
+		const auto SingularCamera = SceneRenderSnapshotBuilder::Build(TestScene, CameraID, 1.0f);
+		PF_CHECK(Tests, !SingularCamera && SingularCamera.error().Code == SceneRenderSnapshotErrorCode::InvalidCameraTransform);
 	}
 
 	void TestSceneSerializationRoundTrip(TestRunner& Tests)
@@ -2481,6 +2549,7 @@ int main()
 	TestUUIDBehavior(Tests);
 	TestSceneEntityAndHierarchy(Tests);
 	TestEntityHandlesExpireWithScene(Tests);
+	TestSceneRenderSnapshot(Tests);
 	TestSceneSerializationRoundTrip(Tests);
 	TestPrefabSerialization(Tests);
 	TestAssetMetadataAndRegistry(Tests);
