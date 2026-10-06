@@ -59,9 +59,10 @@ namespace PulseForge
 			return ProjectPaths{ AbsoluteRoot };
 		}
 
-		std::expected<void, AssetOperationError> ValidateProjectRegistry(const FilesystemPath& ProjectRoot)
+		std::expected<void, AssetOperationError> ValidateProjectRegistry(
+			AssetRegistry& Registry,
+			const FilesystemPath& ProjectRoot)
 		{
-			AssetRegistry Registry;
 			const auto RebuildResult = Registry.Rebuild(ProjectRoot);
 			if (RebuildResult)
 				return {};
@@ -78,6 +79,16 @@ namespace PulseForge
 				AssetOperationErrorCode::InvalidProjectAssets,
 				std::move(Path),
 				std::move(Message)));
+		}
+
+		AssetOperationError MakeRegistryRefreshError(
+			const AssetOperationError& RegistryError,
+			std::string Operation)
+		{
+			return MakeError(
+				AssetOperationErrorCode::RegistryRefreshFailed,
+				RegistryError.Path,
+				std::move(Operation) + " completed, but the asset registry could not be refreshed: " + RegistryError.Message);
 		}
 
 		bool IsValidProjectAssetPath(const FilesystemPath& Path)
@@ -282,6 +293,7 @@ namespace PulseForge
 	}
 
 	std::expected<AssetRecord, AssetOperationError> AssetOperations::Move(
+		AssetRegistry& Registry,
 		const std::filesystem::path& ProjectRoot,
 		const std::filesystem::path& SourcePath,
 		const std::filesystem::path& DestinationPath)
@@ -289,7 +301,7 @@ namespace PulseForge
 		const auto Project = OpenProject(ProjectRoot);
 		if (!Project)
 			return std::unexpected(Project.error());
-		if (auto RegistryResult = ValidateProjectRegistry(Project->Root); !RegistryResult)
+		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
 			return std::unexpected(RegistryResult.error());
 		if (SourcePath == DestinationPath)
 		{
@@ -408,10 +420,14 @@ namespace PulseForge
 				"Could not remove the original sidecar; the source asset was restored: " + RemoveFailure));
 		}
 
+		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
+			return std::unexpected(MakeRegistryRefreshError(RegistryResult.error(), "Asset move"));
+
 		return AssetRecord{ Metadata->ID, DestinationPath };
 	}
 
 	std::expected<AssetRecord, AssetOperationError> AssetOperations::Duplicate(
+		AssetRegistry& Registry,
 		const std::filesystem::path& ProjectRoot,
 		const std::filesystem::path& SourcePath,
 		const std::filesystem::path& DestinationPath)
@@ -419,7 +435,7 @@ namespace PulseForge
 		const auto Project = OpenProject(ProjectRoot);
 		if (!Project)
 			return std::unexpected(Project.error());
-		if (auto RegistryResult = ValidateProjectRegistry(Project->Root); !RegistryResult)
+		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
 			return std::unexpected(RegistryResult.error());
 		if (SourcePath == DestinationPath)
 		{
@@ -490,7 +506,7 @@ namespace PulseForge
 			return std::unexpected(MakeMetadataOperationError(NewMetadata.error(), DestinationPath));
 		}
 
-		if (auto RegistryResult = ValidateProjectRegistry(Project->Root); !RegistryResult)
+		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
 		{
 			std::string RollbackFailure;
 			if (!RemoveDestinationPair(*Destination, RollbackFailure))
@@ -501,6 +517,8 @@ namespace PulseForge
 					"The copied asset failed registry validation (" + RegistryResult.error().Message +
 					") and rollback failed: " + RollbackFailure));
 			}
+			if (auto RefreshResult = ValidateProjectRegistry(Registry, Project->Root); !RefreshResult)
+				return std::unexpected(MakeRegistryRefreshError(RefreshResult.error(), "Duplicate rollback"));
 			return std::unexpected(RegistryResult.error());
 		}
 
@@ -508,13 +526,14 @@ namespace PulseForge
 	}
 
 	std::expected<void, AssetOperationError> AssetOperations::Delete(
+		AssetRegistry& Registry,
 		const std::filesystem::path& ProjectRoot,
 		const std::filesystem::path& SourcePath)
 	{
 		const auto Project = OpenProject(ProjectRoot);
 		if (!Project)
 			return std::unexpected(Project.error());
-		if (auto RegistryResult = ValidateProjectRegistry(Project->Root); !RegistryResult)
+		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
 			return std::unexpected(RegistryResult.error());
 
 		const auto Source = ResolveAssetPath(*Project, SourcePath, true);
@@ -668,6 +687,9 @@ namespace PulseForge
 				TransactionDirectory.lexically_relative(Project->Root),
 				"Managed asset was removed, but its temporary recovery copy could not be deleted: " + Error.message()));
 		}
+
+		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
+			return std::unexpected(MakeRegistryRefreshError(RegistryResult.error(), "Asset deletion"));
 
 		return {};
 	}

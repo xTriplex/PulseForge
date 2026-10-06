@@ -1461,7 +1461,7 @@ namespace
 		PF_CHECK(Tests, InitialRegistry.GetAssetCount() == 1);
 
 		const std::filesystem::path MovedPath = "Assets/Models/ship-renamed.gltf";
-		const auto MoveResult = AssetOperations::Move(ProjectRoot, "Assets/Models/ship.gltf", MovedPath);
+		const auto MoveResult = AssetOperations::Move(InitialRegistry, ProjectRoot, "Assets/Models/ship.gltf", MovedPath);
 		PF_CHECK(Tests, MoveResult.has_value());
 		PF_CHECK(Tests, MoveResult && MoveResult->ID == SourceMetadata->ID);
 		PF_CHECK(Tests, MoveResult && MoveResult->ProjectRelativePath == MovedPath);
@@ -1474,16 +1474,15 @@ namespace
 		const auto MovedMetadata = AssetMetadataSerializer::LoadFromFile(MovedSidecarPath);
 		PF_CHECK(Tests, MovedMetadata && MovedMetadata->ID == SourceMetadata->ID);
 
-		AssetRegistry MovedRegistry;
-		PF_CHECK(Tests, MovedRegistry.Rebuild(ProjectRoot).has_value());
-		const auto MovedRecord = MovedRegistry.Find(SourceMetadata->ID);
+		const auto MovedRecord = InitialRegistry.Find(SourceMetadata->ID);
 		PF_CHECK(Tests, MovedRecord && MovedRecord->ProjectRelativePath == MovedPath);
 
 		const std::filesystem::path DuplicatePath = "Assets/Models/ship-copy.gltf";
-		const auto DuplicateResult = AssetOperations::Duplicate(ProjectRoot, MovedPath, DuplicatePath);
+		const auto DuplicateResult = AssetOperations::Duplicate(InitialRegistry, ProjectRoot, MovedPath, DuplicatePath);
 		PF_CHECK(Tests, DuplicateResult.has_value());
 		PF_CHECK(Tests, DuplicateResult && DuplicateResult->ID != SourceMetadata->ID);
 		PF_CHECK(Tests, DuplicateResult && DuplicateResult->ProjectRelativePath == DuplicatePath);
+		PF_CHECK(Tests, InitialRegistry.GetAssetCount() == 2);
 		const std::filesystem::path DuplicateSource = ProjectRoot / DuplicatePath;
 		PF_CHECK(Tests, ReadFile(DuplicateSource) == std::optional<std::string>("managed model source"));
 		const auto DuplicateSidecar = ReadFile(AssetMetadataSerializer::GetSidecarPath(DuplicateSource));
@@ -1492,26 +1491,24 @@ namespace
 			AssetMetadataSerializer::GetSidecarPath(DuplicateSource));
 		PF_CHECK(Tests, DuplicateMetadata && DuplicateMetadata->ID == DuplicateResult->ID);
 
-		const auto ExistingDestination = AssetOperations::Duplicate(ProjectRoot, MovedPath, DuplicatePath);
+		const auto ExistingDestination = AssetOperations::Duplicate(InitialRegistry, ProjectRoot, MovedPath, DuplicatePath);
 		PF_CHECK(Tests, !ExistingDestination.has_value());
 		PF_CHECK(Tests, !ExistingDestination && ExistingDestination.error().Code == AssetOperationErrorCode::DestinationExists);
-		const auto ExistingMoveDestination = AssetOperations::Move(ProjectRoot, MovedPath, DuplicatePath);
+		const auto ExistingMoveDestination = AssetOperations::Move(InitialRegistry, ProjectRoot, MovedPath, DuplicatePath);
 		PF_CHECK(Tests, !ExistingMoveDestination.has_value());
 		PF_CHECK(Tests, !ExistingMoveDestination &&
 			ExistingMoveDestination.error().Code == AssetOperationErrorCode::DestinationExists);
 		PF_CHECK(Tests, std::filesystem::exists(MovedSource));
 		PF_CHECK(Tests, std::filesystem::exists(DuplicateSource));
-		const auto InvalidTraversal = AssetOperations::Move(ProjectRoot, MovedPath, "Assets/../escaped.gltf");
+		const auto InvalidTraversal = AssetOperations::Move(InitialRegistry, ProjectRoot, MovedPath, "Assets/../escaped.gltf");
 		PF_CHECK(Tests, !InvalidTraversal.has_value());
 		PF_CHECK(Tests, !InvalidTraversal && InvalidTraversal.error().Code == AssetOperationErrorCode::InvalidPath);
 
-		PF_CHECK(Tests, AssetOperations::Delete(ProjectRoot, DuplicatePath).has_value());
+		PF_CHECK(Tests, AssetOperations::Delete(InitialRegistry, ProjectRoot, DuplicatePath).has_value());
 		PF_CHECK(Tests, !std::filesystem::exists(DuplicateSource));
 		PF_CHECK(Tests, !std::filesystem::exists(AssetMetadataSerializer::GetSidecarPath(DuplicateSource)));
-		AssetRegistry AfterDeleteRegistry;
-		PF_CHECK(Tests, AfterDeleteRegistry.Rebuild(ProjectRoot).has_value());
-		PF_CHECK(Tests, AfterDeleteRegistry.GetAssetCount() == 1);
-		PF_CHECK(Tests, !AfterDeleteRegistry.Find(DuplicateMetadata->ID).has_value());
+		PF_CHECK(Tests, InitialRegistry.GetAssetCount() == 1);
+		PF_CHECK(Tests, !InitialRegistry.Find(DuplicateMetadata->ID).has_value());
 		const bool TransactionDirectoryEmpty = std::filesystem::is_empty(
 			ProjectRoot / ".pulseforge" / "cache" / "asset-operations", FileError);
 		PF_CHECK(Tests, !FileError && TransactionDirectoryEmpty);
@@ -1523,7 +1520,8 @@ namespace
 			"{\"format\":\"PulseForgeAssetMeta\",\"version\":1,\"uuid\":\"" +
 				SourceMetadata->ID.ToString() + "\",\"importSettings\":{}}"));
 		const std::filesystem::path CollisionCopyPath = "Assets/Models/collision-copy.gltf";
-		const auto DuplicateInInvalidProject = AssetOperations::Duplicate(ProjectRoot, MovedPath, CollisionCopyPath);
+		const auto DuplicateInInvalidProject = AssetOperations::Duplicate(
+			InitialRegistry, ProjectRoot, MovedPath, CollisionCopyPath);
 		PF_CHECK(Tests, !DuplicateInInvalidProject.has_value());
 		PF_CHECK(Tests, !DuplicateInInvalidProject &&
 			DuplicateInInvalidProject.error().Code == AssetOperationErrorCode::InvalidProjectAssets);
@@ -1535,7 +1533,8 @@ namespace
 
 		std::filesystem::remove(AssetMetadataSerializer::GetSidecarPath(MovedSource), FileError);
 		PF_CHECK(Tests, !FileError);
-		const auto MissingMetadataOperation = AssetOperations::Duplicate(ProjectRoot, MovedPath, "Assets/Models/untracked.gltf");
+		const auto MissingMetadataOperation = AssetOperations::Duplicate(
+			InitialRegistry, ProjectRoot, MovedPath, "Assets/Models/untracked.gltf");
 		PF_CHECK(Tests, !MissingMetadataOperation.has_value());
 		PF_CHECK(Tests, !MissingMetadataOperation &&
 			MissingMetadataOperation.error().Code == AssetOperationErrorCode::InvalidProjectAssets);
