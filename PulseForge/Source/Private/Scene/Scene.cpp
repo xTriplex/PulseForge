@@ -1,5 +1,7 @@
 #include "Core/PulseForgePCH.h"
 #include "Scene/Scene.h"
+#include "Scene/Components/AudioListenerComponent.h"
+#include "Scene/Components/AudioSourceComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
 
 #include <entt/entt.hpp>
@@ -182,7 +184,9 @@ namespace PulseForge
 		const auto MeshRenderer = Source.GetMeshRenderer();
 		const auto Rigidbody = Source.GetRigidbody();
 		const auto BoxCollider = Source.GetBoxCollider();
-		if (!Tag || !Transform || !Camera || !MeshRenderer || !Rigidbody || !BoxCollider)
+		const auto AudioSource = Source.GetAudioSource();
+		const auto AudioListener = Source.GetAudioListener();
+		if (!Tag || !Transform || !Camera || !MeshRenderer || !Rigidbody || !BoxCollider || !AudioSource || !AudioListener)
 			return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure, "Could not read source entity components for duplication"));
 
 		auto Duplicated = CreateEntity(Tag->Name + " Copy");
@@ -224,6 +228,22 @@ namespace PulseForge
 			{
 				(void)DestroyEntity(*Duplicated);
 				return std::unexpected(ColliderResult.error());
+			}
+		}
+		if (AudioSource->has_value())
+		{
+			if (auto AudioSourceResult = Duplicated->SetAudioSource(AudioSource->value()); !AudioSourceResult)
+			{
+				(void)DestroyEntity(*Duplicated);
+				return std::unexpected(AudioSourceResult.error());
+			}
+		}
+		if (AudioListener->has_value())
+		{
+			if (auto AudioListenerResult = Duplicated->SetAudioListener(AudioListener->value()); !AudioListenerResult)
+			{
+				(void)DestroyEntity(*Duplicated);
+				return std::unexpected(AudioListenerResult.error());
 			}
 		}
 
@@ -572,6 +592,96 @@ namespace PulseForge
 			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have a box collider component"));
 
 		Storage->Registry.remove<BoxColliderComponent>(*Native);
+		return {};
+	}
+
+	std::expected<std::optional<AudioSourceComponent>, SceneError> Entity::GetAudioSource() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read audio source from an invalid entity"));
+		if (!Storage->Registry.all_of<AudioSourceComponent>(*Native))
+			return std::optional<AudioSourceComponent>{};
+		return std::optional<AudioSourceComponent>{ Storage->Registry.get<AudioSourceComponent>(*Native) };
+	}
+
+	std::expected<void, SceneError> Entity::SetAudioSource(const AudioSourceComponent& AudioSource) const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add audio source to an invalid entity"));
+		if (auto Validation = AudioSource.Validate(); !Validation)
+			return std::unexpected(SceneError{ SceneErrorCode::InvalidAudioComponent, Validation.error().Message });
+
+		try
+		{
+			Storage->Registry.emplace_or_replace<AudioSourceComponent>(*Native, AudioSource);
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{
+				SceneErrorCode::StorageFailure,
+				std::string("Could not set audio source component: ") + Exception.what() });
+		}
+	}
+
+	std::expected<void, SceneError> Entity::RemoveAudioSource() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove audio source from an invalid entity"));
+		if (!Storage->Registry.all_of<AudioSourceComponent>(*Native))
+			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have an audio source component"));
+
+		Storage->Registry.remove<AudioSourceComponent>(*Native);
+		return {};
+	}
+
+	std::expected<std::optional<AudioListenerComponent>, SceneError> Entity::GetAudioListener() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read audio listener from an invalid entity"));
+		if (!Storage->Registry.all_of<AudioListenerComponent>(*Native))
+			return std::optional<AudioListenerComponent>{};
+		return std::optional<AudioListenerComponent>{ Storage->Registry.get<AudioListenerComponent>(*Native) };
+	}
+
+	std::expected<void, SceneError> Entity::SetAudioListener(const AudioListenerComponent& AudioListener) const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add audio listener to an invalid entity"));
+
+		try
+		{
+			Storage->Registry.emplace_or_replace<AudioListenerComponent>(*Native, AudioListener);
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{
+				SceneErrorCode::StorageFailure,
+				std::string("Could not set audio listener component: ") + Exception.what() });
+		}
+	}
+
+	std::expected<void, SceneError> Entity::RemoveAudioListener() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove audio listener from an invalid entity"));
+		if (!Storage->Registry.all_of<AudioListenerComponent>(*Native))
+			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have an audio listener component"));
+
+		Storage->Registry.remove<AudioListenerComponent>(*Native);
 		return {};
 	}
 

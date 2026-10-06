@@ -21,6 +21,7 @@
 #include "Core/LayerStack.h"
 #include "Core/Timestep.h"
 #include "Audio/AudioEngine.h"
+#include "Audio/AudioSceneRuntime.h"
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Renderer/Binding.h"
 #include "Renderer/Buffer.h"
@@ -880,7 +881,7 @@ namespace
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized)
 			return;
-		PF_CHECK(Tests, Serialized->find("\"version\": 5") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 6") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"motionType\": \"dynamic\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"halfExtents\": [\n          0.75,") != std::string::npos);
 
@@ -1176,6 +1177,7 @@ namespace
 		const UUID ChildId{ 0x1000000000000000ull, 1 };
 		const AssetID MeshAssetIdentifier{ 0x5000000000000000ull, 5 };
 		const AssetID MaterialAssetIdentifier{ 0x5100000000000000ull, 51 };
+		const AssetID AudioAssetIdentifier{ 0x5200000000000000ull, 52 };
 		auto ChildResult = Source.CreateEntityWithUUID(ChildId, "Child \"one\"");
 		auto RootResult = Source.CreateEntityWithUUID(RootId, "Root");
 		PF_CHECK(Tests, ChildResult.has_value() && RootResult.has_value());
@@ -1222,6 +1224,13 @@ namespace
 		PF_CHECK(Tests, Child.SetCamera(SourceCamera).has_value());
 		PF_CHECK(Tests, Child.SetMeshRenderer(MeshRendererComponent{ MeshAssetIdentifier, MaterialAssetIdentifier }).has_value());
 		PF_CHECK(Tests, !Child.SetMeshRenderer(MeshRendererComponent{ MeshAssetIdentifier, AssetID{} }).has_value());
+		const AudioSourceComponent SourceAudio{ AudioAssetIdentifier, 0.35f, true, false, true };
+		PF_CHECK(Tests, Child.SetAudioSource(SourceAudio).has_value());
+		PF_CHECK(Tests, Root.SetAudioListener(AudioListenerComponent{ true }).has_value());
+		AudioSourceComponent InvalidAudio = SourceAudio;
+		InvalidAudio.AudioAsset = AssetID{};
+		const auto InvalidAudioSet = Child.SetAudioSource(InvalidAudio);
+		PF_CHECK(Tests, !InvalidAudioSet && InvalidAudioSet.error().Code == SceneErrorCode::InvalidAudioComponent);
 		const auto RootCamera = Root.GetCamera();
 		PF_CHECK(Tests, RootCamera.has_value() && !RootCamera->has_value());
 
@@ -1230,10 +1239,13 @@ namespace
 		if (!Serialized)
 			return;
 		PF_CHECK(Tests, Serialized->find("\"format\": \"PulseForgeScene\"") != std::string::npos);
-		PF_CHECK(Tests, Serialized->find("\"version\": 5") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 6") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"primary\": true") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"meshAsset\": \"" + MeshAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"materialAsset\": \"" + MaterialAssetIdentifier.ToString() + "\"") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"asset\": \"" + AudioAssetIdentifier.ToString() + "\"") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"playOnStart\": false") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"audioListener\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("Assets/") == std::string::npos);
 		const size_t ChildEntityPosition = Serialized->find("\"uuid\": \"" + ChildId.ToString() + "\"");
 		const size_t RootEntityPosition = Serialized->find("\"uuid\": \"" + RootId.ToString() + "\"");
@@ -1261,6 +1273,8 @@ namespace
 		const auto LoadedTransform = LoadedChild->GetTransform();
 		const auto LoadedCamera = LoadedChild->GetCamera();
 		const auto LoadedMeshRenderer = LoadedChild->GetMeshRenderer();
+		const auto LoadedAudioSource = LoadedChild->GetAudioSource();
+		const auto LoadedAudioListener = LoadedRoot->GetAudioListener();
 		const auto LoadedParent = LoadedChild->GetParent();
 		PF_CHECK(Tests, LoadedTag && LoadedTag->Name == "Child \"one\"");
 		PF_CHECK(Tests, LoadedTransform && glm::all(glm::equal(LoadedTransform->Translation, ChildTransform.Translation)));
@@ -1274,6 +1288,12 @@ namespace
 			LoadedMeshRenderer->value().MeshAsset == MeshAssetIdentifier);
 		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
 			LoadedMeshRenderer->value().MaterialAsset == MaterialAssetIdentifier);
+		PF_CHECK(Tests, LoadedAudioSource && LoadedAudioSource->has_value() &&
+			LoadedAudioSource->value().AudioAsset == AudioAssetIdentifier);
+		PF_CHECK(Tests, LoadedAudioSource && LoadedAudioSource->has_value() &&
+			LoadedAudioSource->value().Volume == SourceAudio.Volume && LoadedAudioSource->value().Looping &&
+			!LoadedAudioSource->value().PlayOnStart && LoadedAudioSource->value().Spatialized);
+		PF_CHECK(Tests, LoadedAudioListener && LoadedAudioListener->has_value() && LoadedAudioListener->value().IsPrimary);
 		PF_CHECK(Tests, LoadedParent && LoadedParent->has_value() && **LoadedParent == *LoadedRoot);
 		const auto SerializedAgain = SceneSerializer::Serialize(Destination);
 		PF_CHECK(Tests, SerializedAgain && *SerializedAgain == *Serialized);
@@ -1289,13 +1309,30 @@ namespace
 
 		const auto DestinationRootBeforeFailure = Destination.FindEntity(RootId);
 		std::string UnsupportedVersion = *Serialized;
-		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 5");
+		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 6");
 		PF_CHECK(Tests, VersionPosition != std::string::npos);
 		if (VersionPosition != std::string::npos)
-			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 5").size(), "\"version\": 99");
+			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 6").size(), "\"version\": 99");
 		const auto UnsupportedVersionResult = SceneSerializer::Deserialize(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedVersionResult.has_value());
 		PF_CHECK(Tests, !UnsupportedVersionResult && UnsupportedVersionResult.error().Code == SceneSerializationErrorCode::UnsupportedVersion);
+		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+
+		std::string InvalidAudioVolume = *Serialized;
+		const size_t AudioSourcePosition = InvalidAudioVolume.find("\"audioSource\"");
+		const size_t AudioVolumePosition = InvalidAudioVolume.find("\"volume\": ", AudioSourcePosition);
+		PF_CHECK(Tests, AudioSourcePosition != std::string::npos && AudioVolumePosition != std::string::npos);
+		if (AudioVolumePosition != std::string::npos)
+		{
+			const size_t AudioVolumeValueStart = AudioVolumePosition + std::string("\"volume\": ").size();
+			const size_t AudioVolumeValueEnd = InvalidAudioVolume.find_first_of(",\n", AudioVolumeValueStart);
+			PF_CHECK(Tests, AudioVolumeValueEnd != std::string::npos);
+			if (AudioVolumeValueEnd != std::string::npos)
+				InvalidAudioVolume.replace(AudioVolumeValueStart, AudioVolumeValueEnd - AudioVolumeValueStart, "2.0");
+		}
+		const auto InvalidAudioVolumeResult = SceneSerializer::Deserialize(InvalidAudioVolume, Destination);
+		PF_CHECK(Tests, !InvalidAudioVolumeResult &&
+			InvalidAudioVolumeResult.error().Code == SceneSerializationErrorCode::InvalidEntityData);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
 
 		std::string LegacyVersionThree = *Serialized;
@@ -1309,10 +1346,10 @@ namespace
 			if (PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos)
 				LegacyVersionThree.erase(PrimaryCommaPosition, PrimaryLineEnd - PrimaryCommaPosition);
 		}
-		const size_t LegacyVersionThreePosition = LegacyVersionThree.find("\"version\": 5");
+		const size_t LegacyVersionThreePosition = LegacyVersionThree.find("\"version\": 6");
 		PF_CHECK(Tests, LegacyVersionThreePosition != std::string::npos);
 		if (LegacyVersionThreePosition != std::string::npos)
-			LegacyVersionThree.replace(LegacyVersionThreePosition, std::string("\"version\": 5").size(), "\"version\": 3");
+			LegacyVersionThree.replace(LegacyVersionThreePosition, std::string("\"version\": 6").size(), "\"version\": 3");
 		Scene LegacyVersionThreeDestination;
 		const auto LegacyVersionThreeLoad = SceneSerializer::Deserialize(LegacyVersionThree, LegacyVersionThreeDestination);
 		PF_CHECK(Tests, LegacyVersionThreeLoad.has_value());
@@ -1333,10 +1370,10 @@ namespace
 		if (LegacySerializedVersionTwo)
 		{
 			std::string LegacyVersionOne = *LegacySerializedVersionTwo;
-			const size_t LegacyVersionPosition = LegacyVersionOne.find("\"version\": 5");
+			const size_t LegacyVersionPosition = LegacyVersionOne.find("\"version\": 6");
 			PF_CHECK(Tests, LegacyVersionPosition != std::string::npos);
 			if (LegacyVersionPosition != std::string::npos)
-				LegacyVersionOne.replace(LegacyVersionPosition, std::string("\"version\": 5").size(), "\"version\": 1");
+				LegacyVersionOne.replace(LegacyVersionPosition, std::string("\"version\": 6").size(), "\"version\": 1");
 			Scene LegacyDestination;
 			const auto LegacyLoad = SceneSerializer::Deserialize(LegacyVersionOne, LegacyDestination);
 			PF_CHECK(Tests, LegacyLoad.has_value());
@@ -3296,6 +3333,76 @@ namespace
 			PF_CHECK(Tests, LoadedAfterMove && LoadedAfterMove->IsValid());
 			const auto MovedRecord = Registry.Find(Imported->ID);
 			PF_CHECK(Tests, MovedRecord && MovedRecord->ProjectRelativePath == "Assets/Audio/renamed.wav");
+
+			Scene AudioScene;
+			auto EmitterResult = AudioScene.CreateEntity("Audio emitter and listener");
+			PF_CHECK(Tests, EmitterResult.has_value());
+			if (!EmitterResult)
+				return;
+			Entity Emitter = *EmitterResult;
+			PF_CHECK(Tests, Emitter.SetAudioSource(AudioSourceComponent{ Imported->ID, 0.5f, true, true, true }).has_value());
+			PF_CHECK(Tests, Emitter.SetAudioListener(AudioListenerComponent{}).has_value());
+
+			AudioSceneRuntime Runtime(Engine, Cache);
+			PF_CHECK(Tests, Runtime.Start(AudioScene).has_value());
+			PF_CHECK(Tests, Runtime.IsRunning() && Runtime.GetPlaybackCount() == 1);
+			PF_CHECK(Tests, Runtime.Advance(AudioScene).has_value());
+			Scene OtherAudioScene;
+			PF_CHECK(Tests, !Runtime.Advance(OtherAudioScene));
+			PF_CHECK(Tests, Runtime.Pause(Emitter.GetUUID()).has_value());
+			PF_CHECK(Tests, Runtime.Resume(Emitter.GetUUID()).has_value());
+
+			AudioSourceComponent UpdatedSource{ Imported->ID, 0.25f, false, true, false };
+			PF_CHECK(Tests, Emitter.SetAudioSource(UpdatedSource).has_value());
+			TransformComponent MovedEmitter;
+			MovedEmitter.Translation = { 3.0f, 2.0f, 1.0f };
+			PF_CHECK(Tests, Emitter.SetTransform(MovedEmitter).has_value());
+			PF_CHECK(Tests, Runtime.Advance(AudioScene).has_value());
+			PF_CHECK(Tests, Runtime.StopPlayback(Emitter.GetUUID()).has_value());
+			PF_CHECK(Tests, Runtime.GetPlaybackCount() == 0);
+			PF_CHECK(Tests, Runtime.Advance(AudioScene).has_value() && Runtime.GetPlaybackCount() == 0);
+			PF_CHECK(Tests, Runtime.Play(Emitter.GetUUID()).has_value());
+			PF_CHECK(Tests, Runtime.GetPlaybackCount() == 1);
+			PF_CHECK(Tests, Emitter.RemoveAudioSource().has_value());
+			PF_CHECK(Tests, Runtime.Advance(AudioScene).has_value() && Runtime.GetPlaybackCount() == 0);
+			Runtime.Stop();
+			PF_CHECK(Tests, !Runtime.IsRunning());
+
+			Scene PartialStartScene;
+			const UUID ValidEmitterId{ 0x5300000000000000ull, 1 };
+			const UUID MissingEmitterId{ 0x5300000000000000ull, 2 };
+			const auto ValidEmitterResult = PartialStartScene.CreateEntityWithUUID(ValidEmitterId, "Valid audio source");
+			const auto MissingEmitterResult = PartialStartScene.CreateEntityWithUUID(MissingEmitterId, "Missing audio source");
+			PF_CHECK(Tests, ValidEmitterResult && MissingEmitterResult);
+			if (ValidEmitterResult && MissingEmitterResult)
+			{
+				PF_CHECK(Tests, ValidEmitterResult->SetAudioSource(AudioSourceComponent{ Imported->ID }).has_value());
+				PF_CHECK(Tests, MissingEmitterResult->SetAudioSource(AudioSourceComponent{
+					AssetID{ 0x5300000000000000ull, 3 } }).has_value());
+				AudioSceneRuntime RollbackRuntime(Engine, Cache);
+				const auto FailedStart = RollbackRuntime.Start(PartialStartScene);
+				PF_CHECK(Tests, !FailedStart && FailedStart.error().Code == AudioSceneRuntimeErrorCode::AssetLoadFailed);
+				PF_CHECK(Tests, !RollbackRuntime.IsRunning() && RollbackRuntime.GetPlaybackCount() == 0);
+				PF_CHECK(Tests, MissingEmitterResult->RemoveAudioSource().has_value());
+				PF_CHECK(Tests, RollbackRuntime.Start(PartialStartScene).has_value());
+				PF_CHECK(Tests, RollbackRuntime.GetPlaybackCount() == 1);
+				RollbackRuntime.Stop();
+			}
+
+			Scene InvalidListenerScene;
+			auto FirstListener = InvalidListenerScene.CreateEntity("First listener");
+			auto SecondListener = InvalidListenerScene.CreateEntity("Second listener");
+			PF_CHECK(Tests, FirstListener && SecondListener);
+			if (FirstListener && SecondListener)
+			{
+				PF_CHECK(Tests, FirstListener->SetAudioListener(AudioListenerComponent{}).has_value());
+				PF_CHECK(Tests, SecondListener->SetAudioListener(AudioListenerComponent{}).has_value());
+				AudioSceneRuntime InvalidRuntime(Engine, Cache);
+				const auto InvalidStart = InvalidRuntime.Start(InvalidListenerScene);
+				PF_CHECK(Tests, !InvalidStart &&
+					InvalidStart.error().Code == AudioSceneRuntimeErrorCode::MultiplePrimaryListeners);
+				PF_CHECK(Tests, !InvalidRuntime.IsRunning());
+			}
 		}
 
 		// A playback retains the initialized device state even after its AudioEngine owner goes away.
@@ -3324,7 +3431,10 @@ namespace
 		PF_CHECK(Tests, Root->SetCamera(RootCamera).has_value());
 		const AssetID MeshAssetID{ 0x7300000000000000ull, 7 };
 		const AssetID MaterialAssetID{ 0x7400000000000000ull, 7 };
+		const AssetID AudioAssetID{ 0x7500000000000000ull, 7 };
 		PF_CHECK(Tests, Child->SetMeshRenderer(MeshRendererComponent{ MeshAssetID, MaterialAssetID }).has_value());
+		PF_CHECK(Tests, Child->SetAudioSource(AudioSourceComponent{ AudioAssetID, 0.6f, true, false, true }).has_value());
+		PF_CHECK(Tests, Root->SetAudioListener(AudioListenerComponent{ true }).has_value());
 
 		const auto PrefabData = PrefabSerializer::Serialize(Source, *Root);
 		PF_CHECK(Tests, PrefabData.has_value());
@@ -3335,6 +3445,7 @@ namespace
 		PF_CHECK(Tests, PrefabData->find("\"root\": \"" + Root->GetUUID().ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"meshAsset\": \"" + MeshAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"materialAsset\": \"" + MaterialAssetID.ToString() + "\"") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"asset\": \"" + AudioAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"primary\": true") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("Outside prefab") == std::string::npos);
 		PF_CHECK(Tests, PrefabData->find(ExternalParent->GetUUID().ToString()) == std::string::npos);
@@ -3350,10 +3461,10 @@ namespace
 			if (PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos)
 				LegacyPrefabV1.erase(PrimaryCommaPosition, PrimaryLineEnd - PrimaryCommaPosition);
 		}
-		const size_t EmbeddedSceneVersionPosition = LegacyPrefabV1.find("\"version\": 5", LegacyPrefabV1.find("\"scene\""));
+		const size_t EmbeddedSceneVersionPosition = LegacyPrefabV1.find("\"version\": 6", LegacyPrefabV1.find("\"scene\""));
 		PF_CHECK(Tests, EmbeddedSceneVersionPosition != std::string::npos);
 		if (EmbeddedSceneVersionPosition != std::string::npos)
-			LegacyPrefabV1.replace(EmbeddedSceneVersionPosition, std::string("\"version\": 5").size(), "\"version\": 3");
+			LegacyPrefabV1.replace(EmbeddedSceneVersionPosition, std::string("\"version\": 6").size(), "\"version\": 3");
 		const size_t OuterPrefabVersionPosition = LegacyPrefabV1.find("\"version\": 3");
 		PF_CHECK(Tests, OuterPrefabVersionPosition != std::string::npos);
 		if (OuterPrefabVersionPosition != std::string::npos)
@@ -3380,9 +3491,11 @@ namespace
 		const auto FirstParent = FirstInstance->GetParent();
 		PF_CHECK(Tests, FirstParent && !FirstParent->has_value());
 		const auto FirstCamera = FirstInstance->GetCamera();
+		const auto FirstAudioListener = FirstInstance->GetAudioListener();
 		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() &&
 			FirstCamera->value().VerticalFieldOfViewRadians == RootCamera.VerticalFieldOfViewRadians);
 		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() && FirstCamera->value().IsPrimary);
+		PF_CHECK(Tests, FirstAudioListener && FirstAudioListener->has_value() && FirstAudioListener->value().IsPrimary);
 		const auto FirstChildren = FirstInstance->GetChildren();
 		PF_CHECK(Tests, FirstChildren && FirstChildren->size() == 1);
 		if (!FirstChildren || FirstChildren->size() != 1)
@@ -3390,10 +3503,13 @@ namespace
 		const Entity FirstChild = FirstChildren->front();
 		const auto FirstChildTag = FirstChild.GetTag();
 		const auto FirstChildMesh = FirstChild.GetMeshRenderer();
+		const auto FirstChildAudioSource = FirstChild.GetAudioSource();
 		const auto FirstGrandchildren = FirstChild.GetChildren();
 		PF_CHECK(Tests, FirstChildTag && FirstChildTag->Name == "Prefab child");
 		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MeshAsset == MeshAssetID);
 		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MaterialAsset == MaterialAssetID);
+		PF_CHECK(Tests, FirstChildAudioSource && FirstChildAudioSource->has_value() &&
+			FirstChildAudioSource->value().AudioAsset == AudioAssetID && !FirstChildAudioSource->value().PlayOnStart);
 		PF_CHECK(Tests, FirstGrandchildren && FirstGrandchildren->size() == 1);
 
 		const auto SecondInstance = PrefabSerializer::Instantiate(*PrefabData, Destination);

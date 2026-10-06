@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Scene/Components/CameraComponent.h"
+#include "Scene/Components/AudioListenerComponent.h"
+#include "Scene/Components/AudioSourceComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
 #include "Scene/Components/RigidbodyComponent.h"
 #include "Scene/Components/BoxColliderComponent.h"
@@ -48,6 +50,12 @@ namespace PulseForge
 		[[nodiscard]] std::expected<std::optional<BoxColliderComponent>, SceneError> GetBoxCollider() const;
 		[[nodiscard]] std::expected<void, SceneError> SetBoxCollider(const BoxColliderComponent& Collider) const;
 		[[nodiscard]] std::expected<void, SceneError> RemoveBoxCollider() const;
+		[[nodiscard]] std::expected<std::optional<AudioSourceComponent>, SceneError> GetAudioSource() const;
+		[[nodiscard]] std::expected<void, SceneError> SetAudioSource(const AudioSourceComponent& AudioSource) const;
+		[[nodiscard]] std::expected<void, SceneError> RemoveAudioSource() const;
+		[[nodiscard]] std::expected<std::optional<AudioListenerComponent>, SceneError> GetAudioListener() const;
+		[[nodiscard]] std::expected<void, SceneError> SetAudioListener(const AudioListenerComponent& AudioListener) const;
+		[[nodiscard]] std::expected<void, SceneError> RemoveAudioListener() const;
 		[[nodiscard]] std::expected<glm::mat4, SceneError> GetWorldMatrix() const;
 		[[nodiscard]] std::expected<std::optional<Entity>, SceneError> GetParent() const;
 		[[nodiscard]] std::expected<std::vector<Entity>, SceneError> GetChildren() const;

@@ -1,5 +1,7 @@
 #include "Core/PulseForgePCH.h"
 #include "Scene/SceneSerializer.h"
+#include "Scene/Components/AudioListenerComponent.h"
+#include "Scene/Components/AudioSourceComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
 
 #include <nlohmann/json.hpp>
@@ -21,7 +23,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t SceneFormatVersion = 5;
+		constexpr int64_t SceneFormatVersion = 6;
 		constexpr int64_t MinimumSupportedSceneFormatVersion = 1;
 		constexpr std::string_view SceneFormatName = "PulseForgeScene";
 
@@ -51,7 +53,7 @@ namespace PulseForge
 			if (Error.Code == SceneErrorCode::DuplicateUUID || Error.Code == SceneErrorCode::NilUUID ||
 				Error.Code == SceneErrorCode::InvalidTransform || Error.Code == SceneErrorCode::ParentCycle ||
 				Error.Code == SceneErrorCode::InvalidCamera || Error.Code == SceneErrorCode::InvalidAssetReference ||
-				Error.Code == SceneErrorCode::InvalidPhysicsComponent)
+				Error.Code == SceneErrorCode::InvalidPhysicsComponent || Error.Code == SceneErrorCode::InvalidAudioComponent)
 			{
 				return MakeError(SceneSerializationErrorCode::InvalidEntityData, Error.Message);
 			}
@@ -93,8 +95,11 @@ namespace PulseForge
 				const auto MeshRenderer = Current.GetMeshRenderer();
 				const auto Rigidbody = Current.GetRigidbody();
 				const auto BoxCollider = Current.GetBoxCollider();
+				const auto AudioSource = Current.GetAudioSource();
+				const auto AudioListener = Current.GetAudioListener();
 				const auto Parent = Current.GetParent();
-				if (!Tag || !Transform || !Camera || !MeshRenderer || !Rigidbody || !BoxCollider || !Parent)
+				if (!Tag || !Transform || !Camera || !MeshRenderer || !Rigidbody || !BoxCollider ||
+					!AudioSource || !AudioListener || !Parent)
 					return std::unexpected(MakeError(
 						SceneSerializationErrorCode::SceneOperationFailed,
 						"Could not read all required components while serializing an entity"));
@@ -144,6 +149,19 @@ namespace PulseForge
 						{ "halfExtents", { HalfExtents.x, HalfExtents.y, HalfExtents.z } }
 					});
 				}
+				if (AudioSource->has_value())
+				{
+					const AudioSourceComponent& AudioSourceData = AudioSource->value();
+					Record["audioSource"] = Json::object({
+						{ "asset", AudioSourceData.AudioAsset.ToString() },
+						{ "volume", AudioSourceData.Volume },
+						{ "looping", AudioSourceData.Looping },
+						{ "playOnStart", AudioSourceData.PlayOnStart },
+						{ "spatialized", AudioSourceData.Spatialized }
+					});
+				}
+				if (AudioListener->has_value())
+					Record["audioListener"] = Json::object({ { "primary", AudioListener->value().IsPrimary } });
 				Record["parent"] = Parent->has_value()
 					? Json((**Parent).GetUUID().ToString())
 					: Json(nullptr);
@@ -387,6 +405,58 @@ namespace PulseForge
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error().Message));
 				}
 
+				std::optional<AudioSourceComponent> AudioSourceData;
+				const auto SerializedAudioSource = SerializedEntity.find("audioSource");
+				if (SerializedAudioSource != SerializedEntity.end())
+				{
+					if (!SerializedAudioSource->is_object())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity audioSource must be an object"));
+					const auto Asset = SerializedAudioSource->find("asset");
+					const auto Volume = SerializedAudioSource->find("volume");
+					const auto Looping = SerializedAudioSource->find("looping");
+					const auto PlayOnStart = SerializedAudioSource->find("playOnStart");
+					const auto Spatialized = SerializedAudioSource->find("spatialized");
+					if (Asset == SerializedAudioSource->end() || !Asset->is_string() ||
+						Volume == SerializedAudioSource->end() || !Volume->is_number() ||
+						Looping == SerializedAudioSource->end() || !Looping->is_boolean() ||
+						PlayOnStart == SerializedAudioSource->end() || !PlayOnStart->is_boolean() ||
+						Spatialized == SerializedAudioSource->end() || !Spatialized->is_boolean())
+					{
+						return std::unexpected(MakeError(
+							SceneSerializationErrorCode::InvalidEntityData,
+							"Audio source requires asset, volume, looping, playOnStart, and spatialized fields"));
+					}
+
+					const auto ParsedAsset = UUID::Parse(Asset->get<std::string>());
+					if (!ParsedAsset || ParsedAsset->IsNil())
+						return std::unexpected(MakeError(
+							SceneSerializationErrorCode::InvalidEntityData,
+							ParsedAsset ? "Audio source asset UUID must not be nil" : ParsedAsset.error().Message));
+
+					AudioSourceData = AudioSourceComponent{
+						*ParsedAsset,
+						Volume->get<float>(),
+						Looping->get<bool>(),
+						PlayOnStart->get<bool>(),
+						Spatialized->get<bool>() };
+					if (auto Validation = AudioSourceData->Validate(); !Validation)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error().Message));
+				}
+
+				std::optional<AudioListenerComponent> AudioListenerData;
+				const auto SerializedAudioListener = SerializedEntity.find("audioListener");
+				if (SerializedAudioListener != SerializedEntity.end())
+				{
+					if (!SerializedAudioListener->is_object())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity audioListener must be an object"));
+					const auto Primary = SerializedAudioListener->find("primary");
+					if (Primary == SerializedAudioListener->end() || !Primary->is_boolean())
+						return std::unexpected(MakeError(
+							SceneSerializationErrorCode::InvalidEntityData,
+							"Audio listener requires a boolean primary field"));
+					AudioListenerData = AudioListenerComponent{ Primary->get<bool>() };
+				}
+
 				auto Created = Staging.CreateEntityWithUUID(ParsedUUID.value(), Name->get<std::string>());
 				if (!Created)
 					return std::unexpected(SceneOperationError(Created.error()));
@@ -416,6 +486,16 @@ namespace PulseForge
 				{
 					if (auto ColliderResult = Created->SetBoxCollider(*BoxColliderData); !ColliderResult)
 						return std::unexpected(SceneOperationError(ColliderResult.error()));
+				}
+				if (AudioSourceData)
+				{
+					if (auto AudioSourceResult = Created->SetAudioSource(*AudioSourceData); !AudioSourceResult)
+						return std::unexpected(SceneOperationError(AudioSourceResult.error()));
+				}
+				if (AudioListenerData)
+				{
+					if (auto AudioListenerResult = Created->SetAudioListener(*AudioListenerData); !AudioListenerResult)
+						return std::unexpected(SceneOperationError(AudioListenerResult.error()));
 				}
 
 				PendingParents.push_back({ *Created, ParentIdentifier });

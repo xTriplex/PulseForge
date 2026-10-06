@@ -110,6 +110,7 @@ target_compile_options(PulseForgeImGui PRIVATE
 add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/PulseForgePCH.cpp
 	PulseForge/Source/Private/Audio/AudioEngine.cpp
+	PulseForge/Source/Private/Audio/AudioSceneRuntime.cpp
 	PulseForge/Source/Private/Audio/MiniAudio/MiniAudio.cpp
 	PulseForge/Source/Private/Assets/AssetPathResolver.cpp
 	PulseForge/Source/Private/Assets/AssetMetadata.cpp
@@ -148,6 +149,7 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanSupport.cpp
 	PulseForge/Source/Private/Scene/CameraComponent.cpp
+	PulseForge/Source/Private/Scene/Components/AudioSourceComponent.cpp
 	PulseForge/Source/Private/Scene/Components/RigidbodyComponent.cpp
 	PulseForge/Source/Private/Scene/Components/BoxColliderComponent.cpp
 	PulseForge/Source/Private/Scene/Scene.cpp

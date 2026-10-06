@@ -9,7 +9,7 @@
   "root": "00112233-4455-4677-8899-aabbccddeeff",
   "scene": {
     "format": "PulseForgeScene",
-    "version": 5,
+    "version": 6,
     "entities": [
       {
         "uuid": "00112233-4455-4677-8899-aabbccddeeff",
@@ -28,7 +28,7 @@
 
 The root's parent outside the captured subtree is omitted. Instantiation creates new entity UUIDs and reconstructs hierarchy while retaining component asset UUIDs, so multiple instances can reference the same mesh and optional material assets. Asset paths and prefab inheritance/overrides are not stored in this format.
 
-The current serializer preserves tag, transform, camera, mesh-renderer, rigidbody, and box-collider components. Scene format version 3 added an optional `materialAsset` UUID to mesh renderers; version 4 adds the optional camera `primary` flag; version 5 adds physics components. Older embedded scene versions remain readable, and cameras without the flag are not primary. New scene components must be added to scene and prefab serialization together.
+The current serializer preserves tag, transform, camera, mesh-renderer, rigidbody, box-collider, audio source, and audio listener components. Scene format version 3 added an optional `materialAsset` UUID to mesh renderers; version 4 adds the optional camera `primary` flag; version 5 adds physics components; version 6 adds audio components. Older embedded scene versions remain readable, and cameras without the flag are not primary. New scene components must be added to scene and prefab serialization together.
 
 Managed prefabs use the `.prefab` source extension and an adjacent `.prefab.meta` sidecar. `PrefabAssetService::Create` serializes a subtree to a new managed path, assigns a fresh sidecar UUID, and refreshes the supplied registry without overwriting existing files. The sidecar UUID is the prefab asset identity; the service resolves that UUID through the generated asset registry before saving or instantiating. Moving the prefab and sidecar changes its path, not its identity. Duplicating a prefab creates a new sidecar UUID.
 
