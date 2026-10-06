@@ -47,7 +47,8 @@ namespace PulseForge
 		SceneSerializationError SceneOperationError(const SceneError& Error)
 		{
 			if (Error.Code == SceneErrorCode::DuplicateUUID || Error.Code == SceneErrorCode::NilUUID ||
-				Error.Code == SceneErrorCode::InvalidTransform || Error.Code == SceneErrorCode::ParentCycle)
+				Error.Code == SceneErrorCode::InvalidTransform || Error.Code == SceneErrorCode::ParentCycle ||
+				Error.Code == SceneErrorCode::InvalidCamera)
 			{
 				return MakeError(SceneSerializationErrorCode::InvalidEntityData, Error.Message);
 			}
@@ -85,8 +86,9 @@ namespace PulseForge
 			{
 				const auto Tag = Current.GetTag();
 				const auto Transform = Current.GetTransform();
+				const auto Camera = Current.GetCamera();
 				const auto Parent = Current.GetParent();
-				if (!Tag || !Transform || !Parent)
+				if (!Tag || !Transform || !Camera || !Parent)
 					return std::unexpected(MakeError(
 						SceneSerializationErrorCode::SceneOperationFailed,
 						"Could not read all required components while serializing an entity"));
@@ -99,6 +101,15 @@ namespace PulseForge
 					{ "rotation", { Transform->Rotation.w, Transform->Rotation.x, Transform->Rotation.y, Transform->Rotation.z } },
 					{ "scale", { Transform->Scale.x, Transform->Scale.y, Transform->Scale.z } }
 				});
+				if (Camera->has_value())
+				{
+					const CameraComponent& CameraData = Camera->value();
+					Record["camera"] = Json::object({
+						{ "verticalFovRadians", CameraData.VerticalFieldOfViewRadians },
+						{ "nearClipPlane", CameraData.NearClipPlane },
+						{ "farClipPlane", CameraData.FarClipPlane }
+					});
+				}
 				Record["parent"] = Parent->has_value()
 					? Json((**Parent).GetUUID().ToString())
 					: Json(nullptr);
@@ -214,6 +225,33 @@ namespace PulseForge
 					ParentIdentifier = ParsedParent.value();
 				}
 
+				std::optional<CameraComponent> CameraData;
+				const auto SerializedCamera = SerializedEntity.find("camera");
+				if (SerializedCamera != SerializedEntity.end())
+				{
+					if (!SerializedCamera->is_object())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity camera must be an object"));
+
+					const auto VerticalFov = SerializedCamera->find("verticalFovRadians");
+					const auto NearClip = SerializedCamera->find("nearClipPlane");
+					const auto FarClip = SerializedCamera->find("farClipPlane");
+					if (VerticalFov == SerializedCamera->end() || NearClip == SerializedCamera->end() ||
+						FarClip == SerializedCamera->end() || !VerticalFov->is_number() ||
+						!NearClip->is_number() || !FarClip->is_number())
+					{
+						return std::unexpected(MakeError(
+							SceneSerializationErrorCode::InvalidEntityData,
+							"Camera requires numeric vertical field of view and near/far clip planes"));
+					}
+
+					CameraData = CameraComponent{
+						VerticalFov->get<float>(),
+						NearClip->get<float>(),
+						FarClip->get<float>() };
+					if (auto CameraValidation = CameraData->Validate(); !CameraValidation)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, CameraValidation.error().Message));
+				}
+
 				auto Created = Staging.CreateEntityWithUUID(ParsedUUID.value(), Name->get<std::string>());
 				if (!Created)
 					return std::unexpected(SceneOperationError(Created.error()));
@@ -224,6 +262,11 @@ namespace PulseForge
 				ComponentTransform.Scale = { ScaleValues[0], ScaleValues[1], ScaleValues[2] };
 				if (auto TransformResult = Created->SetTransform(ComponentTransform); !TransformResult)
 					return std::unexpected(SceneOperationError(TransformResult.error()));
+				if (CameraData)
+				{
+					if (auto CameraResult = Created->SetCamera(*CameraData); !CameraResult)
+						return std::unexpected(SceneOperationError(CameraResult.error()));
+				}
 
 				PendingParents.push_back({ *Created, ParentIdentifier });
 			}

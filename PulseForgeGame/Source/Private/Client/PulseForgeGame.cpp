@@ -2,7 +2,10 @@
 #include "Core/Application.h"
 #include "Core/EntryPoint.h"
 #include "Core/Log.h"
+#include "Events/ApplicationEvent.h"
+#include "Events/Event.h"
 #include "ImGui/UI.h"
+#include "Scene/Scene.h"
 
 #include <array>
 #include <cstddef>
@@ -12,10 +15,13 @@
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <expected>
+#include <string>
 #include <vector>
 
-#include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 namespace
 {
@@ -103,6 +109,8 @@ public:
 
 		if (PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan)
 		{
+			InitializeValidationScene();
+
 			auto CreatedMesh = PulseForge::Application::Get().CreateMesh(MeshDescription);
 			if (!CreatedMesh)
 				throw std::runtime_error(CreatedMesh.error().Message);
@@ -137,27 +145,6 @@ public:
 			if (!CreatedFragmentShader)
 				throw std::runtime_error(CreatedFragmentShader.error().Message);
 			m_FragmentShader = std::move(CreatedFragmentShader.value());
-
-			const glm::mat4 Model =
-				glm::rotate(glm::mat4(1.0f), 0.48f, glm::vec3(0.0f, 1.0f, 0.0f)) *
-				glm::rotate(glm::mat4(1.0f), -0.31f, glm::vec3(1.0f, 0.0f, 0.0f));
-			const glm::mat4 View = glm::lookAtRH(
-				glm::vec3(2.2f, 1.7f, 3.1f),
-				glm::vec3(0.0f),
-				glm::vec3(0.0f, 1.0f, 0.0f));
-			glm::mat4 Projection = glm::perspectiveRH_ZO(0.785398163f, 1280.0f / 720.0f, 0.1f, 20.0f);
-			Projection[1][1] *= -1.0f;
-			const glm::mat4 ModelViewProjection = Projection * View * Model;
-			PulseForge::BufferDesc TransformBufferDescription;
-			TransformBufferDescription.ByteSize = sizeof(ModelViewProjection);
-			TransformBufferDescription.Usage = PulseForge::BufferUsage::Constant;
-			TransformBufferDescription.DebugName = "PulseForge sample transform constants";
-			auto CreatedTransformBuffer = PulseForge::Application::Get().CreateBuffer(
-				TransformBufferDescription,
-				std::as_bytes(std::span(&ModelViewProjection, 1)));
-			if (!CreatedTransformBuffer)
-				throw std::runtime_error(CreatedTransformBuffer.error().Message);
-			m_TransformBuffer = std::move(CreatedTransformBuffer.value());
 
 			const std::array<uint8_t, 16> TexturePixels = {{
 				255, 255, 255, 255, 255, 150, 40, 255,
@@ -212,16 +199,8 @@ public:
 				throw std::runtime_error(CreatedBindingLayout.error().Message);
 			m_BindingLayout = std::move(CreatedBindingLayout.value());
 
-			PulseForge::BindingSetDesc BindingSetDescription;
-			BindingSetDescription.Layout = m_BindingLayout;
-			BindingSetDescription.Textures.push_back({ 0, std::cref(*m_Texture) });
-			BindingSetDescription.Samplers.push_back({ 0, std::cref(*m_Sampler) });
-			BindingSetDescription.Buffers.push_back({ 0, std::cref(*m_ConstantBuffer) });
-			BindingSetDescription.Buffers.push_back({ 1, std::cref(*m_TransformBuffer) });
-			auto CreatedBindingSet = PulseForge::Application::Get().CreateBindingSet(BindingSetDescription);
-			if (!CreatedBindingSet)
-				throw std::runtime_error(CreatedBindingSet.error().Message);
-			m_BindingSet = std::move(CreatedBindingSet.value());
+			if (auto BindingResult = RebuildTransformBindings(); !BindingResult)
+				throw std::runtime_error(BindingResult.error());
 
 			PulseForge::GraphicsPipelineDesc PipelineDescription;
 			PipelineDescription.VertexShader = m_VertexShader;
@@ -289,10 +268,107 @@ public:
 
 	void OnEvent(PulseForge::Event& Event) override
 	{
+		PulseForge::EventDispatcher Dispatcher(Event);
+		Dispatcher.Dispatch<PulseForge::WindowResizeEvent>([this](PulseForge::WindowResizeEvent&)
+		{
+			if (!m_BindingLayout)
+				return false;
+
+			const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
+			if (Width == 0 || Height == 0)
+				return false;
+
+			if (auto BindingResult = RebuildTransformBindings(); !BindingResult)
+				PF_ERROR("Could not update sample camera for resized framebuffer: {0}", BindingResult.error());
+			return false;
+		});
 		PF_TRACE("{0}", Event.ToString());
 	}
 
 private:
+	void InitializeValidationScene()
+	{
+		auto Cube = m_Scene.CreateEntity("Sample Cube");
+		if (!Cube)
+			throw std::runtime_error(Cube.error().Message);
+		m_CubeEntity = *Cube;
+
+		const glm::mat4 Model =
+			glm::rotate(glm::mat4(1.0f), 0.48f, glm::vec3(0.0f, 1.0f, 0.0f)) *
+			glm::rotate(glm::mat4(1.0f), -0.31f, glm::vec3(1.0f, 0.0f, 0.0f));
+		PulseForge::TransformComponent CubeTransform;
+		CubeTransform.Rotation = glm::quat_cast(Model);
+		if (auto TransformResult = m_CubeEntity.SetTransform(CubeTransform); !TransformResult)
+			throw std::runtime_error(TransformResult.error().Message);
+
+		auto Camera = m_Scene.CreateEntity("Sample Camera");
+		if (!Camera)
+			throw std::runtime_error(Camera.error().Message);
+		m_CameraEntity = *Camera;
+
+		PulseForge::TransformComponent CameraTransform;
+		CameraTransform.Translation = { 2.2f, 1.7f, 3.1f };
+		CameraTransform.Rotation = glm::quatLookAtRH(
+			glm::normalize(-CameraTransform.Translation),
+			glm::vec3(0.0f, 1.0f, 0.0f));
+		if (auto TransformResult = m_CameraEntity.SetTransform(CameraTransform); !TransformResult)
+			throw std::runtime_error(TransformResult.error().Message);
+		if (auto CameraResult = m_CameraEntity.SetCamera(PulseForge::CameraComponent{}); !CameraResult)
+			throw std::runtime_error(CameraResult.error().Message);
+	}
+
+	[[nodiscard]] std::expected<glm::mat4, std::string> CreateModelViewProjection() const
+	{
+		const auto Model = m_CubeEntity.GetWorldMatrix();
+		const auto CameraWorld = m_CameraEntity.GetWorldMatrix();
+		const auto Camera = m_CameraEntity.GetCamera();
+		if (!Model || !CameraWorld || !Camera || !Camera->has_value())
+			return std::unexpected("Could not read the sample scene camera or model transform");
+
+		const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
+		if (Width == 0 || Height == 0)
+			return std::unexpected("Cannot build the camera projection for a zero-sized framebuffer");
+
+		const auto Projection = Camera->value().GetProjectionMatrix(static_cast<float>(Width) / static_cast<float>(Height));
+		if (!Projection)
+			return std::unexpected(Projection.error().Message);
+		return *Projection * glm::inverse(*CameraWorld) * *Model;
+	}
+
+	[[nodiscard]] std::expected<void, std::string> RebuildTransformBindings()
+	{
+		const auto ModelViewProjection = CreateModelViewProjection();
+		if (!ModelViewProjection)
+			return std::unexpected(ModelViewProjection.error());
+
+		PulseForge::BufferDesc TransformBufferDescription;
+		TransformBufferDescription.ByteSize = sizeof(glm::mat4);
+		TransformBufferDescription.Usage = PulseForge::BufferUsage::Constant;
+		TransformBufferDescription.DebugName = "PulseForge sample camera and model constants";
+		auto CreatedTransformBuffer = PulseForge::Application::Get().CreateBuffer(
+			TransformBufferDescription,
+			std::as_bytes(std::span(&ModelViewProjection.value(), 1)));
+		if (!CreatedTransformBuffer)
+			return std::unexpected(CreatedTransformBuffer.error().Message);
+
+		PulseForge::BindingSetDesc BindingSetDescription;
+		BindingSetDescription.Layout = m_BindingLayout;
+		BindingSetDescription.Textures.push_back({ 0, std::cref(*m_Texture) });
+		BindingSetDescription.Samplers.push_back({ 0, std::cref(*m_Sampler) });
+		BindingSetDescription.Buffers.push_back({ 0, std::cref(*m_ConstantBuffer) });
+		BindingSetDescription.Buffers.push_back({ 1, std::cref(*CreatedTransformBuffer.value()) });
+		auto CreatedBindingSet = PulseForge::Application::Get().CreateBindingSet(BindingSetDescription);
+		if (!CreatedBindingSet)
+			return std::unexpected(CreatedBindingSet.error().Message);
+
+		m_BindingSet = std::move(CreatedBindingSet.value());
+		m_TransformBuffer = std::move(CreatedTransformBuffer.value());
+		return {};
+	}
+
+	PulseForge::Scene m_Scene;
+	PulseForge::Entity m_CubeEntity;
+	PulseForge::Entity m_CameraEntity;
 	PulseForge::MeshHandle m_Mesh;
 	PulseForge::TextureHandle m_Texture;
 	PulseForge::SamplerHandle m_Sampler;

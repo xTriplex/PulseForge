@@ -16,7 +16,9 @@ namespace PulseForge
 		UUIDGenerationFailed,
 		InvalidTransform,
 		ParentCycle,
-		StorageFailure
+		StorageFailure,
+		MissingComponent,
+		InvalidCamera
 	};
 
 	struct SceneError

@@ -341,6 +341,57 @@ namespace PulseForge
 		return {};
 	}
 
+	std::expected<std::optional<CameraComponent>, SceneError> Entity::GetCamera() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read the camera component of an invalid entity"));
+		if (!Storage->Registry.all_of<CameraComponent>(*Native))
+			return std::optional<CameraComponent>{};
+		return std::optional<CameraComponent>{ Storage->Registry.get<CameraComponent>(*Native) };
+	}
+
+	std::expected<void, SceneError> Entity::SetCamera(const CameraComponent& Camera) const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add a camera component to an invalid entity"));
+
+		if (auto ValidationResult = Camera.Validate(); !ValidationResult)
+		{
+			return std::unexpected(SceneError{
+				SceneErrorCode::InvalidCamera,
+				ValidationResult.error().Message });
+		}
+
+		try
+		{
+			Storage->Registry.emplace_or_replace<CameraComponent>(*Native, Camera);
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{
+				SceneErrorCode::StorageFailure,
+				std::string("Could not set camera component: ") + Exception.what() });
+		}
+	}
+
+	std::expected<void, SceneError> Entity::RemoveCamera() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove a camera component from an invalid entity"));
+		if (!Storage->Registry.all_of<CameraComponent>(*Native))
+			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have a camera component"));
+
+		Storage->Registry.remove<CameraComponent>(*Native);
+		return {};
+	}
+
 	std::expected<glm::mat4, SceneError> Entity::GetWorldMatrix() const
 	{
 		const auto Storage = m_Storage.lock();

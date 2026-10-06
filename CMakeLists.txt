@@ -100,6 +100,7 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/RendererBackend.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanSupport.cpp
+	PulseForge/Source/Private/Scene/CameraComponent.cpp
 	PulseForge/Source/Private/Scene/Scene.cpp
 	PulseForge/Source/Private/Scene/SceneSerializer.cpp
 	PulseForge/Source/Private/Scene/TransformComponent.cpp

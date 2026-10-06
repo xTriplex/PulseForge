@@ -821,6 +821,34 @@ namespace
 		PF_CHECK(Tests, Root.SetTransform(RootTransform).has_value());
 		PF_CHECK(Tests, Child.SetTransform(ChildTransform).has_value());
 		PF_CHECK(Tests, Child.SetParent(Root).has_value());
+		CameraComponent SourceCamera;
+		SourceCamera.VerticalFieldOfViewRadians = 0.9f;
+		SourceCamera.NearClipPlane = 0.25f;
+		SourceCamera.FarClipPlane = 80.0f;
+		PF_CHECK(Tests, SourceCamera.Validate().has_value());
+		const auto SourceProjection = SourceCamera.GetProjectionMatrix(16.0f / 9.0f);
+		PF_CHECK(Tests, SourceProjection.has_value());
+		PF_CHECK(Tests, SourceProjection && (*SourceProjection)[1][1] < 0.0f);
+		const auto InvalidAspectProjection = SourceCamera.GetProjectionMatrix(0.0f);
+		PF_CHECK(Tests, !InvalidAspectProjection.has_value());
+		const auto GLMAssertAspectProjection = SourceCamera.GetProjectionMatrix(std::numeric_limits<float>::epsilon());
+		PF_CHECK(Tests, !GLMAssertAspectProjection.has_value());
+		CameraComponent OverflowingProjectionCamera = SourceCamera;
+		OverflowingProjectionCamera.NearClipPlane = 2.0f;
+		OverflowingProjectionCamera.FarClipPlane = std::numeric_limits<float>::max();
+		const auto OverflowingProjection = OverflowingProjectionCamera.GetProjectionMatrix(16.0f / 9.0f);
+		PF_CHECK(Tests, !OverflowingProjection.has_value());
+		PF_CHECK(Tests, !OverflowingProjection && OverflowingProjection.error().Code == CameraErrorCode::NonFiniteProjection);
+		CameraComponent InvalidCamera = SourceCamera;
+		InvalidCamera.VerticalFieldOfViewRadians = 0.0f;
+		const auto InvalidCameraSet = Child.SetCamera(InvalidCamera);
+		PF_CHECK(Tests, !InvalidCameraSet.has_value());
+		PF_CHECK(Tests, !InvalidCameraSet && InvalidCameraSet.error().Code == SceneErrorCode::InvalidCamera);
+		const auto CameraBeforeSet = Child.GetCamera();
+		PF_CHECK(Tests, CameraBeforeSet && !CameraBeforeSet->has_value());
+		PF_CHECK(Tests, Child.SetCamera(SourceCamera).has_value());
+		const auto RootCamera = Root.GetCamera();
+		PF_CHECK(Tests, RootCamera.has_value() && !RootCamera->has_value());
 
 		const auto Serialized = SceneSerializer::Serialize(Source);
 		PF_CHECK(Tests, Serialized.has_value());
@@ -852,14 +880,27 @@ namespace
 
 		const auto LoadedTag = LoadedChild->GetTag();
 		const auto LoadedTransform = LoadedChild->GetTransform();
+		const auto LoadedCamera = LoadedChild->GetCamera();
 		const auto LoadedParent = LoadedChild->GetParent();
 		PF_CHECK(Tests, LoadedTag && LoadedTag->Name == "Child \"one\"");
 		PF_CHECK(Tests, LoadedTransform && glm::all(glm::equal(LoadedTransform->Translation, ChildTransform.Translation)));
 		PF_CHECK(Tests, LoadedTransform && glm::all(glm::equal(LoadedTransform->Scale, ChildTransform.Scale)));
 		PF_CHECK(Tests, LoadedTransform && glm::abs(glm::length(LoadedTransform->Rotation) - 1.0f) < 0.0001f);
+		PF_CHECK(Tests, LoadedCamera && LoadedCamera->has_value());
+		PF_CHECK(Tests, LoadedCamera && LoadedCamera->has_value() &&
+			glm::abs(LoadedCamera->value().VerticalFieldOfViewRadians - SourceCamera.VerticalFieldOfViewRadians) < 0.0001f);
 		PF_CHECK(Tests, LoadedParent && LoadedParent->has_value() && **LoadedParent == *LoadedRoot);
 		const auto SerializedAgain = SceneSerializer::Serialize(Destination);
 		PF_CHECK(Tests, SerializedAgain && *SerializedAgain == *Serialized);
+		if (LoadedCamera && LoadedCamera->has_value())
+		{
+			PF_CHECK(Tests, LoadedChild->RemoveCamera().has_value());
+			const auto RemovedCamera = LoadedChild->GetCamera();
+			PF_CHECK(Tests, RemovedCamera && !RemovedCamera->has_value());
+			const auto MissingCameraRemoval = LoadedChild->RemoveCamera();
+			PF_CHECK(Tests, !MissingCameraRemoval.has_value());
+			PF_CHECK(Tests, !MissingCameraRemoval && MissingCameraRemoval.error().Code == SceneErrorCode::MissingComponent);
+		}
 
 		const auto DestinationRootBeforeFailure = Destination.FindEntity(RootId);
 		std::string UnsupportedVersion = *Serialized;
@@ -870,6 +911,19 @@ namespace
 		const auto UnsupportedVersionResult = SceneSerializer::Deserialize(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedVersionResult.has_value());
 		PF_CHECK(Tests, !UnsupportedVersionResult && UnsupportedVersionResult.error().Code == SceneSerializationErrorCode::UnsupportedVersion);
+		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+
+		std::string InvalidCameraDocument = *Serialized;
+		const size_t CameraFieldPosition = InvalidCameraDocument.find("\"verticalFovRadians\": ");
+		const size_t CameraValuePosition = InvalidCameraDocument.find_first_of("0123456789", CameraFieldPosition);
+		const size_t CameraValueEnd = InvalidCameraDocument.find_first_of(",\r\n", CameraValuePosition);
+		PF_CHECK(Tests, CameraFieldPosition != std::string::npos && CameraValuePosition != std::string::npos &&
+			CameraValueEnd != std::string::npos);
+		if (CameraValuePosition != std::string::npos && CameraValueEnd != std::string::npos)
+			InvalidCameraDocument.replace(CameraValuePosition, CameraValueEnd - CameraValuePosition, "0.0");
+		const auto InvalidCameraResult = SceneSerializer::Deserialize(InvalidCameraDocument, Destination);
+		PF_CHECK(Tests, !InvalidCameraResult.has_value());
+		PF_CHECK(Tests, !InvalidCameraResult && InvalidCameraResult.error().Code == SceneSerializationErrorCode::InvalidEntityData);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
 
 		std::string UnsupportedFormat = *Serialized;

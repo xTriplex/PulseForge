@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Scene/Components/CameraComponent.h"
 #include "Scene/Components/TagComponent.h"
 #include "Scene/Components/TransformComponent.h"
 #include "Scene/SceneError.h"
@@ -32,6 +33,9 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneError> SetTag(TagComponent Tag) const;
 		[[nodiscard]] std::expected<TransformComponent, SceneError> GetTransform() const;
 		[[nodiscard]] std::expected<void, SceneError> SetTransform(const TransformComponent& Transform) const;
+		[[nodiscard]] std::expected<std::optional<CameraComponent>, SceneError> GetCamera() const;
+		[[nodiscard]] std::expected<void, SceneError> SetCamera(const CameraComponent& Camera) const;
+		[[nodiscard]] std::expected<void, SceneError> RemoveCamera() const;
 		[[nodiscard]] std::expected<glm::mat4, SceneError> GetWorldMatrix() const;
 		[[nodiscard]] std::expected<std::optional<Entity>, SceneError> GetParent() const;
 		[[nodiscard]] std::expected<std::vector<Entity>, SceneError> GetChildren() const;
