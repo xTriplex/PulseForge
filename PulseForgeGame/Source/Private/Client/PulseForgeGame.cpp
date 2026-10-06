@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <expected>
@@ -162,26 +163,14 @@ public:
 			if (!CreatedPipeline)
 				throw std::runtime_error(CreatedPipeline.error().Message);
 			m_Pipeline = std::move(CreatedPipeline.value());
-
-			for (const PulseForge::SceneMeshInstance& Instance : InitialSnapshot->Meshes)
-			{
-				if (!Instance.MaterialAsset)
-					throw std::runtime_error("Every mesh in the validation scene must reference a material asset");
-				auto MaterialBindings = GetOrCreateMaterialBindings(*Instance.MaterialAsset);
-				if (!MaterialBindings)
-					throw std::runtime_error("Could not prepare validation-scene material: " + MaterialBindings.error());
-			}
 		}
 	}
 
 	void OnUpdate(PulseForge::Timestep DeltaTime) override
 	{
 		(void)DeltaTime;
-	}
-
-	void OnRender() override
-	{
-		if (!m_Pipeline || !m_MeshAssetCache)
+		m_PreparedSnapshot.reset();
+		if (!m_MeshAssetCache || !m_MaterialAssetCache)
 			return;
 
 		const auto [FramebufferWidth, FramebufferHeight] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
@@ -196,16 +185,48 @@ public:
 		{
 			if (!m_LoggedSnapshotFailure)
 			{
-				PF_ERROR("Could not build the sample scene render snapshot: {0}", Snapshot.error().Message);
+				PF_ERROR("Could not prepare the sample scene render snapshot: {0}", Snapshot.error().Message);
 				m_LoggedSnapshotFailure = true;
 			}
 			return;
 		}
 		m_LoggedSnapshotFailure = false;
 
-		size_t SubmittedDraws = 0;
 		for (const PulseForge::SceneMeshInstance& Instance : Snapshot->Meshes)
 		{
+			auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
+			if (!Mesh)
+			{
+				if (m_ReportedMeshFailures.insert(Instance.MeshAsset).second)
+					PF_ERROR("Could not prepare mesh asset {0}: {1}", Instance.MeshAsset.ToString(), Mesh.error().Message);
+				continue;
+			}
+			m_PreparedMeshAssets.insert(Instance.MeshAsset);
+			if (!Instance.MaterialAsset)
+			{
+				if (m_ReportedMaterialFailures.insert(Instance.MeshAsset).second)
+					PF_ERROR("Mesh asset {0} has no material assigned in the scene", Instance.MeshAsset.ToString());
+				continue;
+			}
+
+			auto MaterialBindings = GetOrCreateMaterialBindings(*Instance.MaterialAsset);
+			if (!MaterialBindings && m_ReportedMaterialFailures.insert(*Instance.MaterialAsset).second)
+				PF_ERROR("Could not prepare material asset {0}: {1}", Instance.MaterialAsset->ToString(), MaterialBindings.error());
+		}
+		m_PreparedSnapshot = std::move(*Snapshot);
+	}
+
+	void OnRender() override
+	{
+		if (!m_Pipeline || !m_MeshAssetCache || !m_PreparedSnapshot)
+			return;
+		const PulseForge::SceneRenderSnapshot& Snapshot = *m_PreparedSnapshot;
+
+		size_t SubmittedDraws = 0;
+		for (const PulseForge::SceneMeshInstance& Instance : Snapshot.Meshes)
+		{
+			if (!m_PreparedMeshAssets.contains(Instance.MeshAsset))
+				continue;
 			auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
 			if (!Mesh)
 			{
@@ -227,7 +248,7 @@ public:
 				continue;
 			}
 
-			const glm::mat4 ModelViewProjection = Snapshot->ViewProjection * Instance.WorldTransform;
+			const glm::mat4 ModelViewProjection = Snapshot.ViewProjection * Instance.WorldTransform;
 			const auto UpdateResult = PulseForge::Application::Get().WriteBuffer(
 				*m_TransformBuffer,
 				0,
@@ -398,6 +419,8 @@ private:
 	PulseForge::ShaderHandle m_VertexShader;
 	PulseForge::ShaderHandle m_FragmentShader;
 	PulseForge::GraphicsPipelineHandle m_Pipeline;
+	std::optional<PulseForge::SceneRenderSnapshot> m_PreparedSnapshot;
+	std::unordered_set<PulseForge::AssetID, PulseForge::UUIDHash> m_PreparedMeshAssets;
 	bool m_LoggedTransformUpdateFailure = false;
 	bool m_LoggedSnapshotFailure = false;
 	bool m_LoggedSceneDraw = false;

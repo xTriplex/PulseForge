@@ -58,7 +58,6 @@ namespace PulseForge
 		while (m_Running)
 		{
 			m_Window->PollEvents();
-			const bool bCanRender = m_Renderer->BeginFrame();
 
 			const auto CurrentFrameTime = std::chrono::steady_clock::now();
 			const Timestep DeltaTime(CurrentFrameTime - PreviousFrameTime);
@@ -68,6 +67,9 @@ namespace PulseForge
 			{
 				Layer->OnUpdate(DeltaTime);
 			}
+
+			// Resource preparation during updates must happen before the renderer opens its frame command list.
+			const bool bCanRender = m_Renderer->BeginFrame();
 
 			if (bCanRender)
 			{

@@ -16,6 +16,7 @@ namespace PulseForge
 
 		virtual void OnAttach() {}
 		virtual void OnDetach() {}
+		// Runs after event polling and before BeginFrame so updates can safely prepare renderer resources.
 		virtual void OnUpdate(Timestep DeltaTime) { (void)DeltaTime; }
 		virtual void OnRender() {}
 		virtual void OnImGuiRender() {}
