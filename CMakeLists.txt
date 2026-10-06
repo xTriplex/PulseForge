@@ -86,6 +86,7 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Assets/AssetOperations.cpp
 	PulseForge/Source/Private/Assets/AssetReferenceValidator.cpp
 	PulseForge/Source/Private/Assets/AssetRegistry.cpp
+	PulseForge/Source/Private/Assets/GltfMeshImporter.cpp
 	PulseForge/Source/Private/Assets/PrefabSerializer.cpp
 	PulseForge/Source/Private/Core/Application.cpp
 	PulseForge/Source/Private/Core/Core.cpp
@@ -224,6 +225,9 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
 			"${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Triangle.vs.spv"
 		COMMAND "${CMAKE_COMMAND}" -E copy_if_different
 			"${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Triangle.ps.spv"
+		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
+		COMMAND "${CMAKE_COMMAND}" -E copy_directory
+			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Models" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
 		VERBATIM
 	)
 	set_property(TARGET PulseForgeGame PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGame>")

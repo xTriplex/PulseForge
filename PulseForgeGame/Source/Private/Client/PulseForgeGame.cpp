@@ -1,10 +1,13 @@
 #include "Client/PulseForgeGame.h"
+#include "Assets/AssetRegistry.h"
+#include "Assets/GltfMeshImporter.h"
 #include "Core/Application.h"
 #include "Core/EntryPoint.h"
 #include "Core/Log.h"
 #include "Events/ApplicationEvent.h"
 #include "Events/Event.h"
 #include "ImGui/UI.h"
+#include "Scene/Components/MeshRendererComponent.h"
 #include "Scene/Scene.h"
 
 #include <array>
@@ -50,72 +53,37 @@ public:
 	ExampleLayer()
 		: Layer("Example")
 	{
-		struct VertexPositionColorTexCoord
-		{
-			float Position[3];
-			float Color[3];
-			float TexCoord[2];
-		};
-		const std::array<VertexPositionColorTexCoord, 24> CubeVertices = {{
-			{ { -0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
-			{ {  0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
-			{ {  0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
-			{ { -0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
-
-			{ {  0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
-			{ { -0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
-			{ { -0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
-			{ {  0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
-
-			{ {  0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
-			{ {  0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
-			{ {  0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
-			{ {  0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
-
-			{ { -0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
-			{ { -0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
-			{ { -0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
-			{ { -0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
-
-			{ { -0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
-			{ {  0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
-			{ {  0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
-			{ { -0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
-
-			{ { -0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
-			{ {  0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
-			{ {  0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
-			{ { -0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } }
-		}};
-		const std::array<uint32_t, 36> CubeIndices = {{
-			0, 1, 2, 0, 2, 3,
-			4, 5, 6, 4, 6, 7,
-			8, 9, 10, 8, 10, 11,
-			12, 13, 14, 12, 14, 15,
-			16, 17, 18, 16, 18, 19,
-			20, 21, 22, 20, 22, 23
-		}};
-
-		PulseForge::MeshDesc MeshDescription;
-		MeshDescription.VertexLayout.Stride = sizeof(VertexPositionColorTexCoord);
-		MeshDescription.VertexLayout.Attributes = {
-			{ PulseForge::VertexSemantic::Position, PulseForge::VertexFormat::Float3, offsetof(VertexPositionColorTexCoord, Position) },
-			{ PulseForge::VertexSemantic::Color, PulseForge::VertexFormat::Float3, offsetof(VertexPositionColorTexCoord, Color) },
-			{ PulseForge::VertexSemantic::TexCoord, PulseForge::VertexFormat::Float2, offsetof(VertexPositionColorTexCoord, TexCoord) }
-		};
-		MeshDescription.VertexData = std::as_bytes(std::span(CubeVertices));
-		MeshDescription.Indices = CubeIndices;
-		MeshDescription.DebugName = "PulseForge sample textured cube";
-
 		if (PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan)
 		{
 			InitializeValidationScene();
 
+			const std::filesystem::path ProjectRoot = std::filesystem::current_path();
+			PulseForge::AssetRegistry Registry;
+			if (auto RegistryResult = Registry.Rebuild(ProjectRoot); !RegistryResult)
+			{
+				const std::string Error = RegistryResult.error().Issues.empty()
+					? "unknown registry error"
+					: RegistryResult.error().Issues.front().Message;
+				throw std::runtime_error("Could not build sample asset registry: " + Error);
+			}
+
+			const auto MeshAssetID = PulseForge::UUID::Parse("6f4d338d-ec74-49ab-9a7e-8a2285feb411");
+			if (!MeshAssetID)
+				throw std::runtime_error(MeshAssetID.error().Message);
+			if (auto ComponentResult = m_CubeEntity.SetMeshRenderer(PulseForge::MeshRendererComponent{ *MeshAssetID });
+				!ComponentResult)
+				throw std::runtime_error(ComponentResult.error().Message);
+
+			auto ImportedMesh = PulseForge::GltfMeshImporter::ImportStaticPrimitive(*MeshAssetID, ProjectRoot, Registry);
+			if (!ImportedMesh)
+				throw std::runtime_error(ImportedMesh.error().Message);
+			const PulseForge::MeshDesc MeshDescription = ImportedMesh->GetMeshDescription();
 			auto CreatedMesh = PulseForge::Application::Get().CreateMesh(MeshDescription);
 			if (!CreatedMesh)
 				throw std::runtime_error(CreatedMesh.error().Message);
 			m_Mesh = std::move(CreatedMesh.value());
-			PF_INFO("Created indexed sample mesh ({0} vertices, {1} indices)",
+			PF_INFO("Imported asset '{0}' as indexed mesh ({1} vertices, {2} indices)",
+				ImportedMesh->Name,
 				m_Mesh->GetVertexCount(),
 				m_Mesh->GetIndexCount());
 
