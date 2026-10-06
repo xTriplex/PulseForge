@@ -88,6 +88,7 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Assets/AssetRegistry.cpp
 	PulseForge/Source/Private/Assets/GltfMeshImporter.cpp
 	PulseForge/Source/Private/Assets/ImageAssetImporter.cpp
+	PulseForge/Source/Private/Assets/MeshAssetCache.cpp
 	PulseForge/Source/Private/Assets/PrefabSerializer.cpp
 	PulseForge/Source/Private/Core/Application.cpp
 	PulseForge/Source/Private/Core/Core.cpp

@@ -1,6 +1,6 @@
 #include "Client/PulseForgeGame.h"
 #include "Assets/AssetRegistry.h"
-#include "Assets/GltfMeshImporter.h"
+#include "Assets/MeshAssetCache.h"
 #include "Core/Application.h"
 #include "Core/EntryPoint.h"
 #include "Core/Log.h"
@@ -59,14 +59,17 @@ public:
 			InitializeValidationScene();
 
 			const std::filesystem::path ProjectRoot = std::filesystem::current_path();
-			PulseForge::AssetRegistry Registry;
-			if (auto RegistryResult = Registry.Rebuild(ProjectRoot); !RegistryResult)
+			if (auto RegistryResult = m_AssetRegistry.Rebuild(ProjectRoot); !RegistryResult)
 			{
 				const std::string Error = RegistryResult.error().Issues.empty()
 					? "unknown registry error"
 					: RegistryResult.error().Issues.front().Message;
 				throw std::runtime_error("Could not build sample asset registry: " + Error);
 			}
+			m_MeshAssetCache = std::make_unique<PulseForge::MeshAssetCache>(
+				PulseForge::Application::Get(),
+				ProjectRoot,
+				m_AssetRegistry);
 
 			const auto MeshAssetID = PulseForge::UUID::Parse("6f4d338d-ec74-49ab-9a7e-8a2285feb411");
 			if (!MeshAssetID)
@@ -78,21 +81,15 @@ public:
 			if (!MeshRenderer || !MeshRenderer->has_value())
 				throw std::runtime_error("Could not read the validation mesh renderer component");
 
-			auto ImportedMesh = PulseForge::GltfMeshImporter::ImportStaticPrimitive(
-				MeshRenderer->value().MeshAsset,
-				ProjectRoot,
-				Registry);
-			if (!ImportedMesh)
-				throw std::runtime_error(ImportedMesh.error().Message);
-			const PulseForge::MeshDesc MeshDescription = ImportedMesh->GetMeshDescription();
-			auto CreatedMesh = PulseForge::Application::Get().CreateMesh(MeshDescription);
-			if (!CreatedMesh)
-				throw std::runtime_error(CreatedMesh.error().Message);
-			m_Mesh = std::move(CreatedMesh.value());
-			PF_INFO("Imported asset '{0}' as indexed mesh ({1} vertices, {2} indices)",
-				ImportedMesh->Name,
-				m_Mesh->GetVertexCount(),
-				m_Mesh->GetIndexCount());
+			m_MeshAssetID = MeshRenderer->value().MeshAsset;
+			auto LoadedMesh = m_MeshAssetCache->GetOrLoad(m_MeshAssetID);
+			if (!LoadedMesh)
+				throw std::runtime_error(LoadedMesh.error().Message);
+			const PulseForge::Mesh& Mesh = LoadedMesh->get();
+			PF_INFO("Resolved mesh asset {0} as indexed geometry ({1} vertices, {2} indices)",
+				m_MeshAssetID.ToString(),
+				Mesh.GetVertexCount(),
+				Mesh.GetIndexCount());
 
 			const std::filesystem::path ShaderDirectory =
 				std::filesystem::current_path() / PF_SAMPLE_SHADER_DIRECTORY;
@@ -181,7 +178,7 @@ public:
 			PipelineDescription.VertexShader = m_VertexShader;
 			PipelineDescription.FragmentShader = m_FragmentShader;
 			PipelineDescription.BindingLayouts = { m_BindingLayout };
-			PipelineDescription.VertexLayout = MeshDescription.VertexLayout;
+			PipelineDescription.VertexLayout = Mesh.GetVertexLayout();
 			PipelineDescription.Rasterizer.Cull = PulseForge::CullMode::None;
 			PipelineDescription.Depth.TestEnabled = true;
 			PipelineDescription.Depth.WriteEnabled = true;
@@ -201,14 +198,21 @@ public:
 
 	void OnRender() override
 	{
-		if (!m_Pipeline || !m_Mesh || m_DrawFailed)
+		if (!m_Pipeline || !m_MeshAssetCache || m_DrawFailed)
 			return;
 
-		const PulseForge::DrawIndexedArguments Arguments{ m_Mesh->GetIndexCount(), 1, 0, 0 };
+		const auto Mesh = m_MeshAssetCache->GetOrLoad(m_MeshAssetID);
+		if (!Mesh)
+		{
+			PF_ERROR("Sample mesh asset resolution failed: {0}", Mesh.error().Message);
+			m_DrawFailed = true;
+			return;
+		}
+		const PulseForge::DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
 		const std::array<const PulseForge::BindingSet*, 1> BindingSets = { m_BindingSet.get() };
 		auto DrawResult = PulseForge::Application::Get().DrawIndexed(
 			*m_Pipeline,
-			*m_Mesh,
+			Mesh->get(),
 			Arguments,
 			BindingSets);
 		if (!DrawResult)
@@ -348,7 +352,9 @@ private:
 	PulseForge::Scene m_Scene;
 	PulseForge::Entity m_CubeEntity;
 	PulseForge::Entity m_CameraEntity;
-	PulseForge::MeshHandle m_Mesh;
+	PulseForge::AssetRegistry m_AssetRegistry;
+	PulseForge::AssetID m_MeshAssetID;
+	std::unique_ptr<PulseForge::MeshAssetCache> m_MeshAssetCache;
 	PulseForge::TextureHandle m_Texture;
 	PulseForge::SamplerHandle m_Sampler;
 	PulseForge::BufferHandle m_ConstantBuffer;
