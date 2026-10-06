@@ -26,3 +26,5 @@ UUIDs use the canonical 8-4-4-4-12 hexadecimal spelling. Generated IDs are rando
 Every entity must have a UUID, tag name, transform, and parent field. Parent references must resolve, and the hierarchy must be acyclic. The serializer emits entities in UUID order. Child lists are derived from parent references rather than stored separately. Unknown fields are ignored by version 1 readers; incompatible formats or versions are rejected.
 
 Deserialization stages and validates the full scene before replacing the destination. On failure the destination and its entity handles remain unchanged; on success, handles referring to the replaced scene state become invalid. Incompatible format changes require a new version and an explicit migration path.
+
+`SaveToFile` writes a temporary sibling file and replaces the destination only after the complete document has been written. `LoadFromFile` leaves the destination scene unchanged if opening, reading, or parsing fails. File paths are supplied by the caller and are not stored in the scene document.

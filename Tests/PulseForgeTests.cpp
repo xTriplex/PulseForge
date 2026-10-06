@@ -20,11 +20,14 @@
 
 #include <array>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace
@@ -940,6 +943,62 @@ namespace
 			PF_CHECK(Tests, Destination.GetEntityCount() == 0);
 			PF_CHECK(Tests, !LoadedRoot->IsValid());
 		}
+
+		std::error_code TemporaryDirectoryError;
+		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(TemporaryDirectoryError);
+		PF_CHECK(Tests, !TemporaryDirectoryError);
+		if (TemporaryDirectoryError)
+			return;
+		const auto FileIdentifier = UUID::Generate();
+		PF_CHECK(Tests, FileIdentifier.has_value());
+		if (!FileIdentifier)
+			return;
+
+		const std::filesystem::path ScenePath = TemporaryDirectory / ("PulseForgeScene-" + FileIdentifier->ToString() + ".json");
+		struct SceneFileCleanup
+		{
+			std::filesystem::path Path;
+			~SceneFileCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove(Path, Error);
+			}
+		} Cleanup{ ScenePath };
+
+		const auto SaveResult = SceneSerializer::SaveToFile(Source, ScenePath);
+		PF_CHECK(Tests, SaveResult.has_value());
+		if (!SaveResult)
+			return;
+
+		Scene FileLoadedScene;
+		const auto LoadResult = SceneSerializer::LoadFromFile(ScenePath, FileLoadedScene);
+		PF_CHECK(Tests, LoadResult.has_value());
+		PF_CHECK(Tests, FileLoadedScene.GetEntityCount() == 2);
+		const auto FileLoadedChild = FileLoadedScene.FindEntity(ChildId);
+		PF_CHECK(Tests, FileLoadedChild.has_value());
+		if (FileLoadedChild)
+		{
+			const auto FileLoadedParent = FileLoadedChild->GetParent();
+			PF_CHECK(Tests, FileLoadedParent.has_value() && FileLoadedParent->has_value());
+		}
+
+		const auto OverwriteResult = SceneSerializer::SaveToFile(EmptyScene, ScenePath);
+		PF_CHECK(Tests, OverwriteResult.has_value());
+		if (OverwriteResult)
+		{
+			PF_CHECK(Tests, SceneSerializer::LoadFromFile(ScenePath, FileLoadedScene).has_value());
+			PF_CHECK(Tests, FileLoadedScene.GetEntityCount() == 0);
+			PF_CHECK(Tests, FileLoadedChild && !FileLoadedChild->IsValid());
+		}
+
+		std::filesystem::path MissingScenePath = ScenePath;
+		MissingScenePath += ".missing";
+		const auto EmptyPathResult = SceneSerializer::SaveToFile(Source, {});
+		PF_CHECK(Tests, !EmptyPathResult.has_value());
+		const auto MissingFileResult = SceneSerializer::LoadFromFile(MissingScenePath, Source);
+		PF_CHECK(Tests, !MissingFileResult.has_value());
+		PF_CHECK(Tests, !MissingFileResult && MissingFileResult.error().Code == SceneSerializationErrorCode::FileOpenFailed);
+		PF_CHECK(Tests, Source.GetEntityCount() == 2);
 	}
 
 	void TestGraphicsPipelineAndDrawValidation(TestRunner& Tests)

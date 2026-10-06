@@ -6,8 +6,12 @@
 #include <array>
 #include <cmath>
 #include <exception>
+#include <fstream>
+#include <iterator>
+#include <limits>
 #include <optional>
 #include <span>
+#include <system_error>
 #include <unordered_set>
 #include <vector>
 
@@ -49,6 +53,23 @@ namespace PulseForge
 			}
 			return MakeError(SceneSerializationErrorCode::SceneOperationFailed, Error.Message);
 		}
+
+		std::string PathForMessage(const std::filesystem::path& Path)
+		{
+			const std::u8string UTF8Path = Path.u8string();
+			return { reinterpret_cast<const char*>(UTF8Path.data()), UTF8Path.size() };
+		}
+
+		struct TemporaryFileCleanup
+		{
+			std::filesystem::path Path;
+
+			~TemporaryFileCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove(Path, Error);
+			}
+		};
 	}
 
 	std::expected<std::string, SceneSerializationError> SceneSerializer::Serialize(const Scene& Source)
@@ -164,7 +185,11 @@ namespace PulseForge
 				const auto Rotation = Transform->find("rotation");
 				const auto Scale = Transform->find("scale");
 				if (Translation == Transform->end() || Rotation == Transform->end() || Scale == Transform->end())
-					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity transform is missing translation, rotation, or scale"));
+				{
+					return std::unexpected(MakeError(
+						SceneSerializationErrorCode::InvalidEntityData,
+						"Entity transform is missing translation, rotation, or scale"));
+				}
 
 				std::array<float, 3> TranslationValues{};
 				std::array<float, 4> RotationValues{};
@@ -209,7 +234,11 @@ namespace PulseForge
 					continue;
 				const auto Parent = Staging.FindEntity(*Relationship.Parent);
 				if (!Parent)
-					return std::unexpected(MakeError(SceneSerializationErrorCode::MissingParent, "Scene entity references a parent UUID that does not exist"));
+				{
+					return std::unexpected(MakeError(
+						SceneSerializationErrorCode::MissingParent,
+						"Scene entity references a parent UUID that does not exist"));
+				}
 				if (auto ParentResult = Relationship.Child.SetParent(*Parent); !ParentResult)
 					return std::unexpected(SceneOperationError(ParentResult.error()));
 			}
@@ -228,6 +257,109 @@ namespace PulseForge
 			return std::unexpected(MakeError(
 				SceneSerializationErrorCode::InvalidDocument,
 				std::string("Scene deserialization failed: ") + Exception.what()));
+		}
+	}
+
+	std::expected<void, SceneSerializationError> SceneSerializer::SaveToFile(
+		const Scene& Source,
+		const std::filesystem::path& Path)
+	{
+		if (Path.empty())
+			return std::unexpected(MakeError(SceneSerializationErrorCode::FileOpenFailed, "Scene file path must not be empty"));
+
+		const auto Serialized = Serialize(Source);
+		if (!Serialized)
+			return std::unexpected(Serialized.error());
+
+		try
+		{
+			const auto TemporaryIdentifier = UUID::Generate();
+			if (!TemporaryIdentifier)
+				return std::unexpected(MakeError(SceneSerializationErrorCode::SceneOperationFailed, TemporaryIdentifier.error().Message));
+
+			std::filesystem::path TemporaryPath = Path;
+			TemporaryPath += "." + TemporaryIdentifier->ToString() + ".tmp";
+			TemporaryFileCleanup Cleanup{ TemporaryPath };
+
+			std::ofstream Output(TemporaryPath, std::ios::binary | std::ios::trunc);
+			if (!Output.is_open())
+			{
+				return std::unexpected(MakeError(
+					SceneSerializationErrorCode::FileOpenFailed,
+					"Could not open scene file for writing: " + PathForMessage(Path)));
+			}
+			if (Serialized->size() > static_cast<size_t>(std::numeric_limits<std::streamsize>::max()))
+			{
+				return std::unexpected(MakeError(
+					SceneSerializationErrorCode::FileWriteFailed,
+					"Serialized scene is too large to write: " + PathForMessage(Path)));
+			}
+
+			Output.write(Serialized->data(), static_cast<std::streamsize>(Serialized->size()));
+			Output.flush();
+			if (!Output)
+			{
+				return std::unexpected(MakeError(
+					SceneSerializationErrorCode::FileWriteFailed,
+					"Could not write the complete scene document: " + PathForMessage(Path)));
+			}
+			Output.close();
+			if (Output.fail())
+			{
+				return std::unexpected(MakeError(
+					SceneSerializationErrorCode::FileWriteFailed,
+					"Could not finish writing the scene document: " + PathForMessage(Path)));
+			}
+
+			std::error_code ReplaceError;
+			std::filesystem::rename(TemporaryPath, Path, ReplaceError);
+			if (ReplaceError)
+			{
+				return std::unexpected(MakeError(
+					SceneSerializationErrorCode::FileReplaceFailed,
+					"Could not replace scene file '" + PathForMessage(Path) + "': " + ReplaceError.message()));
+			}
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(MakeError(
+				SceneSerializationErrorCode::FileWriteFailed,
+				std::string("Scene file save failed: ") + Exception.what()));
+		}
+	}
+
+	std::expected<void, SceneSerializationError> SceneSerializer::LoadFromFile(
+		const std::filesystem::path& Path,
+		Scene& Destination)
+	{
+		if (Path.empty())
+			return std::unexpected(MakeError(SceneSerializationErrorCode::FileOpenFailed, "Scene file path must not be empty"));
+
+		try
+		{
+			std::ifstream Input(Path, std::ios::binary);
+			if (!Input.is_open())
+			{
+				return std::unexpected(MakeError(
+					SceneSerializationErrorCode::FileOpenFailed,
+					"Could not open scene file for reading: " + PathForMessage(Path)));
+			}
+
+			std::string Data{ std::istreambuf_iterator<char>(Input), std::istreambuf_iterator<char>() };
+			if (Input.bad())
+			{
+				return std::unexpected(MakeError(
+					SceneSerializationErrorCode::FileReadFailed,
+					"Could not read the complete scene file: " + PathForMessage(Path)));
+			}
+			return Deserialize(Data, Destination);
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(MakeError(
+				SceneSerializationErrorCode::FileReadFailed,
+				std::string("Scene file load failed: ") + Exception.what()));
 		}
 	}
 }

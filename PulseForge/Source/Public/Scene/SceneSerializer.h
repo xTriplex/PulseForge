@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -17,7 +18,11 @@ namespace PulseForge
 		UnsupportedVersion,
 		InvalidEntityData,
 		MissingParent,
-		SceneOperationFailed
+		SceneOperationFailed,
+		FileOpenFailed,
+		FileReadFailed,
+		FileWriteFailed,
+		FileReplaceFailed
 	};
 
 	struct SceneSerializationError
@@ -31,5 +36,7 @@ namespace PulseForge
 	public:
 		[[nodiscard]] static std::expected<std::string, SceneSerializationError> Serialize(const Scene& Source);
 		[[nodiscard]] static std::expected<void, SceneSerializationError> Deserialize(std::string_view Data, Scene& Destination);
+		[[nodiscard]] static std::expected<void, SceneSerializationError> SaveToFile(const Scene& Source, const std::filesystem::path& Path);
+		[[nodiscard]] static std::expected<void, SceneSerializationError> LoadFromFile(const std::filesystem::path& Path, Scene& Destination);
 	};
 }
