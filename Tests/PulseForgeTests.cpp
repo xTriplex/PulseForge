@@ -839,15 +839,17 @@ namespace
 		const UUID CameraID{ 0x1000000000000000ull, 1 };
 		const UUID ParentID{ 0x2000000000000000ull, 2 };
 		const UUID FirstMeshID{ 0x3000000000000000ull, 3 };
+		const UUID SharedMeshID{ 0x3800000000000000ull, 38 };
 		const UUID SecondMeshID{ 0x4000000000000000ull, 4 };
 		const AssetID FirstMeshAssetID{ 0x5000000000000000ull, 5 };
 		const AssetID SecondMeshAssetID{ 0x6000000000000000ull, 6 };
 		auto Camera = TestScene.CreateEntityWithUUID(CameraID, "Camera");
 		auto Parent = TestScene.CreateEntityWithUUID(ParentID, "Parent");
 		auto FirstMesh = TestScene.CreateEntityWithUUID(FirstMeshID, "First mesh");
+		auto SharedMesh = TestScene.CreateEntityWithUUID(SharedMeshID, "Shared mesh instance");
 		auto SecondMesh = TestScene.CreateEntityWithUUID(SecondMeshID, "Second mesh");
-		PF_CHECK(Tests, Camera && Parent && FirstMesh && SecondMesh);
-		if (!Camera || !Parent || !FirstMesh || !SecondMesh)
+		PF_CHECK(Tests, Camera && Parent && FirstMesh && SharedMesh && SecondMesh);
+		if (!Camera || !Parent || !FirstMesh || !SharedMesh || !SecondMesh)
 			return;
 
 		TransformComponent CameraTransform;
@@ -859,13 +861,17 @@ namespace
 		ParentTransform.Translation = { 2.0f, 1.0f, 0.0f };
 		TransformComponent FirstMeshTransform;
 		FirstMeshTransform.Translation = { -1.0f, 0.0f, -2.0f };
+		TransformComponent SharedMeshTransform;
+		SharedMeshTransform.Translation = { 3.0f, 0.0f, -1.0f };
 		TransformComponent SecondMeshTransform;
 		SecondMeshTransform.Translation = { 0.0f, -1.0f, -4.0f };
 		PF_CHECK(Tests, Parent->SetTransform(ParentTransform).has_value());
 		PF_CHECK(Tests, FirstMesh->SetTransform(FirstMeshTransform).has_value());
+		PF_CHECK(Tests, SharedMesh->SetTransform(SharedMeshTransform).has_value());
 		PF_CHECK(Tests, SecondMesh->SetTransform(SecondMeshTransform).has_value());
 		PF_CHECK(Tests, FirstMesh->SetParent(*Parent).has_value());
 		PF_CHECK(Tests, FirstMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID }).has_value());
+		PF_CHECK(Tests, SharedMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID }).has_value());
 		PF_CHECK(Tests, SecondMesh->SetMeshRenderer(MeshRendererComponent{ SecondMeshAssetID }).has_value());
 
 		const auto Snapshot = SceneRenderSnapshotBuilder::Build(TestScene, CameraID, 16.0f / 9.0f);
@@ -873,15 +879,19 @@ namespace
 		if (!Snapshot)
 			return;
 		PF_CHECK(Tests, Snapshot->CameraEntity == CameraID);
-		PF_CHECK(Tests, Snapshot->Meshes.size() == 2);
+		PF_CHECK(Tests, Snapshot->Meshes.size() == 3);
 		PF_CHECK(Tests, Snapshot->Meshes[0].Entity == FirstMeshID);
-		PF_CHECK(Tests, Snapshot->Meshes[1].Entity == SecondMeshID);
+		PF_CHECK(Tests, Snapshot->Meshes[1].Entity == SharedMeshID);
+		PF_CHECK(Tests, Snapshot->Meshes[2].Entity == SecondMeshID);
 		PF_CHECK(Tests, Snapshot->Meshes[0].MeshAsset == FirstMeshAssetID);
-		PF_CHECK(Tests, Snapshot->Meshes[1].MeshAsset == SecondMeshAssetID);
+		PF_CHECK(Tests, Snapshot->Meshes[1].MeshAsset == FirstMeshAssetID);
+		PF_CHECK(Tests, Snapshot->Meshes[2].MeshAsset == SecondMeshAssetID);
 		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[0].WorldTransform[3].x - 1.0f) < 0.0001f);
 		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[0].WorldTransform[3].y - 1.0f) < 0.0001f);
 		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[0].WorldTransform[3].z + 2.0f) < 0.0001f);
-		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[1].WorldTransform[3].y + 1.0f) < 0.0001f);
+		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[1].WorldTransform[3].x - 3.0f) < 0.0001f);
+		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[1].WorldTransform[3].z + 1.0f) < 0.0001f);
+		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[2].WorldTransform[3].y + 1.0f) < 0.0001f);
 		const glm::vec4 CameraPositionClip = Snapshot->ViewProjection * glm::vec4(CameraTransform.Translation, 1.0f);
 		PF_CHECK(Tests, glm::abs(CameraPositionClip.x) < 0.0001f && glm::abs(CameraPositionClip.y) < 0.0001f);
 

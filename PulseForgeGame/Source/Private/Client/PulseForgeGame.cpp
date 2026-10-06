@@ -6,24 +6,21 @@
 #include "Core/Application.h"
 #include "Core/EntryPoint.h"
 #include "Core/Log.h"
-#include "Events/ApplicationEvent.h"
 #include "Events/Event.h"
 #include "ImGui/UI.h"
-#include "Scene/Components/MeshRendererComponent.h"
 #include "Scene/Scene.h"
 #include "Scene/SceneRenderSnapshot.h"
 
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
-#include <functional>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <expected>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -73,17 +70,23 @@ public:
 				ProjectRoot,
 				m_AssetRegistry);
 
-			const auto MeshRenderer = m_CubeEntity.GetMeshRenderer();
-			if (!MeshRenderer || !MeshRenderer->has_value())
-				throw std::runtime_error("Could not read the validation mesh renderer component");
+			const auto [FramebufferWidth, FramebufferHeight] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
+			if (FramebufferWidth == 0 || FramebufferHeight == 0)
+				throw std::runtime_error("The sample window has no drawable framebuffer during renderer setup");
+			const auto InitialSnapshot = PulseForge::SceneRenderSnapshotBuilder::Build(
+				m_Scene,
+				m_CameraEntity,
+				static_cast<float>(FramebufferWidth) / static_cast<float>(FramebufferHeight));
+			if (!InitialSnapshot)
+				throw std::runtime_error("Could not build the initial scene render snapshot: " + InitialSnapshot.error().Message);
+			if (InitialSnapshot->Meshes.empty())
+				throw std::runtime_error("The validation scene does not contain a mesh-renderer entity");
 
-			m_MeshAssetID = MeshRenderer->value().MeshAsset;
-			auto LoadedMesh = m_MeshAssetCache->GetOrLoad(m_MeshAssetID);
-			if (!LoadedMesh)
-				throw std::runtime_error(LoadedMesh.error().Message);
-			const PulseForge::Mesh& Mesh = LoadedMesh->get();
-			PF_INFO("Resolved mesh asset {0} as indexed geometry ({1} vertices, {2} indices)",
-				m_MeshAssetID.ToString(),
+			auto InitialMesh = m_MeshAssetCache->GetOrLoad(InitialSnapshot->Meshes.front().MeshAsset);
+			if (!InitialMesh)
+				throw std::runtime_error(InitialMesh.error().Message);
+			const PulseForge::Mesh& Mesh = InitialMesh->get();
+			PF_INFO("Resolved the validation scene's initial mesh asset as indexed geometry ({0} vertices, {1} indices)",
 				Mesh.GetVertexCount(),
 				Mesh.GetIndexCount());
 
@@ -192,50 +195,77 @@ public:
 
 	void OnRender() override
 	{
-		if (!m_Pipeline || !m_MeshAssetCache || m_DrawFailed)
+		if (!m_Pipeline || !m_MeshAssetCache)
 			return;
 
-		if (m_TransformBindingsDirty)
+		const auto [FramebufferWidth, FramebufferHeight] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
+		if (FramebufferWidth == 0 || FramebufferHeight == 0)
+			return;
+
+		const auto Snapshot = PulseForge::SceneRenderSnapshotBuilder::Build(
+			m_Scene,
+			m_CameraEntity,
+			static_cast<float>(FramebufferWidth) / static_cast<float>(FramebufferHeight));
+		if (!Snapshot)
 		{
-			if (auto UpdateResult = UpdateTransformBuffer(); !UpdateResult)
+			if (!m_LoggedSnapshotFailure)
+			{
+				PF_ERROR("Could not build the sample scene render snapshot: {0}", Snapshot.error().Message);
+				m_LoggedSnapshotFailure = true;
+			}
+			return;
+		}
+		m_LoggedSnapshotFailure = false;
+
+		const std::array<const PulseForge::BindingSet*, 1> BindingSets = { m_BindingSet.get() };
+		size_t SubmittedDraws = 0;
+		for (const PulseForge::SceneMeshInstance& Instance : Snapshot->Meshes)
+		{
+			auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
+			if (!Mesh)
+			{
+				if (m_ReportedMeshFailures.insert(Instance.MeshAsset).second)
+					PF_ERROR("Could not resolve mesh asset {0}: {1}", Instance.MeshAsset.ToString(), Mesh.error().Message);
+				continue;
+			}
+
+			const glm::mat4 ModelViewProjection = Snapshot->ViewProjection * Instance.WorldTransform;
+			const auto UpdateResult = PulseForge::Application::Get().WriteBuffer(
+				*m_TransformBuffer,
+				0,
+				std::as_bytes(std::span(&ModelViewProjection, 1)));
+			if (!UpdateResult)
 			{
 				if (!m_LoggedTransformUpdateFailure)
 				{
-					PF_ERROR("Could not update sample camera constants after resize: {0}", UpdateResult.error());
+					PF_ERROR("Could not update sample per-object camera constants: {0}", UpdateResult.error().Message);
 					m_LoggedTransformUpdateFailure = true;
 				}
 				return;
 			}
-
-			m_TransformBindingsDirty = false;
 			m_LoggedTransformUpdateFailure = false;
+
+			const PulseForge::DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
+			const auto DrawResult = PulseForge::Application::Get().DrawIndexed(
+				*m_Pipeline,
+				Mesh->get(),
+				Arguments,
+				BindingSets);
+			if (!DrawResult)
+			{
+				if (m_ReportedMeshFailures.insert(Instance.MeshAsset).second)
+					PF_ERROR("Could not draw mesh asset {0}: {1}", Instance.MeshAsset.ToString(), DrawResult.error().Message);
+				continue;
+			}
+			++SubmittedDraws;
 		}
 
-		const auto Mesh = m_MeshAssetCache->GetOrLoad(m_MeshAssetID);
-		if (!Mesh)
+		if (SubmittedDraws > 0 && !m_LoggedSceneDraw)
 		{
-			PF_ERROR("Sample mesh asset resolution failed: {0}", Mesh.error().Message);
-			m_DrawFailed = true;
-			return;
-		}
-		const PulseForge::DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
-		const std::array<const PulseForge::BindingSet*, 1> BindingSets = { m_BindingSet.get() };
-		auto DrawResult = PulseForge::Application::Get().DrawIndexed(
-			*m_Pipeline,
-			Mesh->get(),
-			Arguments,
-			BindingSets);
-		if (!DrawResult)
-		{
-			PF_ERROR("Sample indexed mesh draw failed: {0}", DrawResult.error().Message);
-			m_DrawFailed = true;
-			return;
-		}
-
-		if (!m_LoggedDepthTestDraws)
-		{
-			m_LoggedDepthTestDraws = true;
-			PF_INFO("Submitted indexed textured cube mesh with depth testing");
+			m_LoggedSceneDraw = true;
+			PF_INFO("Submitted {0} indexed mesh instance(s) from the scene snapshot using {1} cached mesh asset(s)",
+				SubmittedDraws,
+				m_MeshAssetCache->GetLoadedCount());
 		}
 	}
 
@@ -257,19 +287,6 @@ public:
 
 	void OnEvent(PulseForge::Event& Event) override
 	{
-		PulseForge::EventDispatcher Dispatcher(Event);
-		Dispatcher.Dispatch<PulseForge::WindowResizeEvent>([this](PulseForge::WindowResizeEvent&)
-		{
-			if (!m_BindingLayout)
-				return false;
-
-			const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
-			if (Width == 0 || Height == 0)
-				return false;
-
-			m_TransformBindingsDirty = true;
-			return false;
-		});
 		PF_TRACE("{0}", Event.ToString());
 	}
 
@@ -283,53 +300,25 @@ private:
 			!LoadResult)
 			throw std::runtime_error("Could not load validation scene: " + LoadResult.error().Message);
 
-		const auto CubeID = PulseForge::UUID::Parse("2e5f5605-08d3-4f7f-84d9-39ca49047701");
 		const auto CameraID = PulseForge::UUID::Parse("c312582b-32cb-4811-9b93-4917d7bb6096");
-		if (!CubeID || !CameraID)
-			throw std::runtime_error("Validation scene entity UUID is invalid");
-		const auto Cube = m_Scene.FindEntity(*CubeID);
+		if (!CameraID)
+			throw std::runtime_error("Validation scene camera UUID is invalid");
 		const auto Camera = m_Scene.FindEntity(*CameraID);
-		if (!Cube || !Camera)
-			throw std::runtime_error("Validation scene is missing its expected cube or camera entity");
-		m_CubeEntity = *Cube;
-		m_CameraEntity = *Camera;
-	}
-
-	[[nodiscard]] std::expected<glm::mat4, std::string> CreateModelViewProjection() const
-	{
-		const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
-		if (Width == 0 || Height == 0)
-			return std::unexpected("Cannot build the camera projection for a zero-sized framebuffer");
-
-		const auto Snapshot = PulseForge::SceneRenderSnapshotBuilder::Build(
-			m_Scene,
-			m_CameraEntity.GetUUID(),
-			static_cast<float>(Width) / static_cast<float>(Height));
-		if (!Snapshot)
-			return std::unexpected(Snapshot.error().Message);
-
-		const auto Mesh = std::find_if(Snapshot->Meshes.begin(), Snapshot->Meshes.end(), [this](const auto& Instance)
-		{
-			return Instance.Entity == m_CubeEntity.GetUUID();
-		});
-		if (Mesh == Snapshot->Meshes.end())
-			return std::unexpected("Sample scene has no mesh-renderer instance for its validation cube");
-		return Snapshot->ViewProjection * Mesh->WorldTransform;
+		if (!Camera)
+			throw std::runtime_error("Validation scene is missing its expected camera entity");
+		m_CameraEntity = *CameraID;
 	}
 
 	[[nodiscard]] std::expected<void, std::string> CreateTransformBindings()
 	{
-		const auto ModelViewProjection = CreateModelViewProjection();
-		if (!ModelViewProjection)
-			return std::unexpected(ModelViewProjection.error());
-
+		const glm::mat4 InitialTransform(1.0f);
 		PulseForge::BufferDesc TransformBufferDescription;
-		TransformBufferDescription.ByteSize = sizeof(glm::mat4);
+		TransformBufferDescription.ByteSize = sizeof(InitialTransform);
 		TransformBufferDescription.Usage = PulseForge::BufferUsage::Constant;
-		TransformBufferDescription.DebugName = "PulseForge sample camera and model constants";
+		TransformBufferDescription.DebugName = "PulseForge sample per-object camera constants";
 		auto CreatedTransformBuffer = PulseForge::Application::Get().CreateBuffer(
 			TransformBufferDescription,
-			std::as_bytes(std::span(&ModelViewProjection.value(), 1)));
+			std::as_bytes(std::span(&InitialTransform, 1)));
 		if (!CreatedTransformBuffer)
 			return std::unexpected(CreatedTransformBuffer.error().Message);
 
@@ -351,27 +340,9 @@ private:
 		return {};
 	}
 
-	[[nodiscard]] std::expected<void, std::string> UpdateTransformBuffer()
-	{
-		const auto ModelViewProjection = CreateModelViewProjection();
-		if (!ModelViewProjection)
-			return std::unexpected(ModelViewProjection.error());
-
-		const auto UpdateResult = PulseForge::Application::Get().WriteBuffer(
-			*m_TransformBuffer,
-			0,
-			std::as_bytes(std::span(&ModelViewProjection.value(), 1)));
-		if (!UpdateResult)
-			return std::unexpected(UpdateResult.error().Message);
-
-		return {};
-	}
-
 	PulseForge::Scene m_Scene;
-	PulseForge::Entity m_CubeEntity;
-	PulseForge::Entity m_CameraEntity;
+	PulseForge::UUID m_CameraEntity;
 	PulseForge::AssetRegistry m_AssetRegistry;
-	PulseForge::AssetID m_MeshAssetID;
 	PulseForge::AssetID m_TextureAssetID;
 	std::unique_ptr<PulseForge::MeshAssetCache> m_MeshAssetCache;
 	std::unique_ptr<PulseForge::TextureAssetCache> m_TextureAssetCache;
@@ -383,10 +354,10 @@ private:
 	PulseForge::ShaderHandle m_VertexShader;
 	PulseForge::ShaderHandle m_FragmentShader;
 	PulseForge::GraphicsPipelineHandle m_Pipeline;
-	bool m_TransformBindingsDirty = false;
 	bool m_LoggedTransformUpdateFailure = false;
-	bool m_DrawFailed = false;
-	bool m_LoggedDepthTestDraws = false;
+	bool m_LoggedSnapshotFailure = false;
+	bool m_LoggedSceneDraw = false;
+	std::unordered_set<PulseForge::AssetID, PulseForge::UUIDHash> m_ReportedMeshFailures;
 };
 
 PulseForgeGameApp::PulseForgeGameApp()

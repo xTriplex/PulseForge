@@ -57,7 +57,7 @@ The OpenGL fallback supports the current bootstrap and ImGui path; the newer sha
 
 ## Scene API
 
-The engine provides UUID-backed `Scene` and non-owning `Entity` handles with tags, transforms, perspective cameras, mesh-asset references, parent/child relationships, duplication, and deterministic entity enumeration. `SceneSerializer` reads and writes versioned JSON scenes in memory or to files; see [the scene format](Docs/SceneFormat.md).
+The engine provides UUID-backed `Scene` and non-owning `Entity` handles with tags, transforms, perspective cameras, mesh-asset references, parent/child relationships, duplication, and deterministic entity enumeration. `SceneRenderSnapshotBuilder` produces camera and mesh-instance data for rendering. `SceneSerializer` reads and writes versioned JSON scenes in memory or to files; see [the scene format](Docs/SceneFormat.md).
 
 `PrefabSerializer` captures an entity subtree and instantiates it with fresh entity UUIDs while retaining asset UUID references. See [the prefab format](Docs/PrefabFormat.md).
 

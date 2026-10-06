@@ -14,6 +14,17 @@
       "parent": null
     },
     {
+      "uuid": "8e4a1f95-712d-4bb4-9413-0f8277202d56",
+      "tag": { "name": "Shared Cube Instance" },
+      "transform": {
+        "translation": [0.9, 0.0, -0.45],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale": [0.65, 0.65, 0.65]
+      },
+      "meshRenderer": { "meshAsset": "6f4d338d-ec74-49ab-9a7e-8a2285feb411" },
+      "parent": null
+    },
+    {
       "uuid": "c312582b-32cb-4811-9b93-4917d7bb6096",
       "tag": { "name": "Sample Camera" },
       "transform": {
