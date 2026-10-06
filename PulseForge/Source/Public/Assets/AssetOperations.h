@@ -20,7 +20,8 @@ namespace PulseForge
 		FilesystemFailure,
 		MetadataFailure,
 		RecoveryRequired,
-		RegistryRefreshFailed
+		RegistryRefreshFailed,
+		ImportSourceInvalid
 	};
 
 	struct AssetOperationError
@@ -35,6 +36,12 @@ namespace PulseForge
 	public:
 		// Asset paths are project-relative (for example, Assets/Models/ship.gltf).
 		// Operations validate and refresh the supplied registry; move preserves identity and duplicate creates a new UUID.
+		// Import copies an external regular file into Assets and creates a fresh sidecar UUID.
+		[[nodiscard]] static std::expected<AssetRecord, AssetOperationError> ImportFile(
+			AssetRegistry& Registry,
+			const std::filesystem::path& ProjectRoot,
+			const std::filesystem::path& SourceFile,
+			const std::filesystem::path& DestinationPath);
 		[[nodiscard]] static std::expected<AssetRecord, AssetOperationError> Move(
 			AssetRegistry& Registry,
 			const std::filesystem::path& ProjectRoot,

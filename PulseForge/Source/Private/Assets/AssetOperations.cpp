@@ -292,6 +292,128 @@ namespace PulseForge
 		}
 	}
 
+	std::expected<AssetRecord, AssetOperationError> AssetOperations::ImportFile(
+		AssetRegistry& Registry,
+		const std::filesystem::path& ProjectRoot,
+		const std::filesystem::path& SourceFile,
+		const std::filesystem::path& DestinationPath)
+	{
+		const auto Project = OpenProject(ProjectRoot);
+		if (!Project)
+			return std::unexpected(Project.error());
+		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
+			return std::unexpected(RegistryResult.error());
+
+		if (SourceFile.empty())
+		{
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::ImportSourceInvalid,
+				SourceFile,
+				"Import source path must not be empty"));
+		}
+
+		std::error_code Error;
+		const auto SourceStatus = std::filesystem::symlink_status(SourceFile, Error);
+		if (Error || std::filesystem::is_symlink(SourceStatus) || !std::filesystem::is_regular_file(SourceStatus))
+		{
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::ImportSourceInvalid,
+				SourceFile,
+				"Import source must be an accessible regular, non-symlink file"));
+		}
+
+		const auto Destination = ResolveAssetPath(*Project, DestinationPath, false);
+		if (!Destination)
+			return std::unexpected(Destination.error());
+		if (auto SidecarResult = RequireAbsent(AssetMetadataSerializer::GetSidecarPath(*Destination), DestinationPath);
+			!SidecarResult)
+		{
+			return std::unexpected(SidecarResult.error());
+		}
+
+		Error.clear();
+		if (!std::filesystem::copy_file(SourceFile, *Destination, std::filesystem::copy_options::none, Error) || Error)
+		{
+			const std::string CopyFailure = Error ? Error.message() : "destination already exists";
+			if (Error == std::errc::file_exists)
+			{
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::DestinationExists,
+					DestinationPath,
+					"Asset destination appeared during import and was not overwritten"));
+			}
+
+			std::string CleanupFailure;
+			if (!RemoveFileIfPresent(*Destination, CleanupFailure))
+			{
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::RecoveryRequired,
+					DestinationPath,
+					"Asset import failed (" + CopyFailure + ") and partial output could not be removed: " + CleanupFailure));
+			}
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::FilesystemFailure,
+				DestinationPath,
+				"Could not copy import source: " + CopyFailure));
+		}
+
+		const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(*Destination);
+		if (!Metadata)
+		{
+			std::string SourceCleanupFailure;
+			const bool SourceRemoved = RemoveFile(*Destination, SourceCleanupFailure);
+			std::string SidecarCleanupFailure;
+			const bool SidecarRemoved = Metadata.error().Code == AssetMetadataErrorCode::MetadataAlreadyExists ||
+				RemoveFileIfPresent(AssetMetadataSerializer::GetSidecarPath(*Destination), SidecarCleanupFailure);
+			if (!SourceRemoved || !SidecarRemoved)
+			{
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::RecoveryRequired,
+					DestinationPath,
+					"Could not create imported asset metadata (" + Metadata.error().Message +
+					") and rollback failed. Source cleanup: " + SourceCleanupFailure +
+					"; sidecar cleanup: " + SidecarCleanupFailure));
+			}
+			return std::unexpected(MakeMetadataOperationError(Metadata.error(), DestinationPath));
+		}
+
+		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
+		{
+			std::string RollbackFailure;
+			if (!RemoveDestinationPair(*Destination, RollbackFailure))
+			{
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::RecoveryRequired,
+					DestinationPath,
+					"Imported asset failed registry validation (" + RegistryResult.error().Message +
+					") and rollback failed: " + RollbackFailure));
+			}
+			if (auto RefreshResult = ValidateProjectRegistry(Registry, Project->Root); !RefreshResult)
+				return std::unexpected(MakeRegistryRefreshError(RefreshResult.error(), "Import rollback"));
+			return std::unexpected(RegistryResult.error());
+		}
+
+		const auto ImportedRecord = Registry.Find(Metadata->ID);
+		if (!ImportedRecord)
+		{
+			std::string RollbackFailure;
+			if (!RemoveDestinationPair(*Destination, RollbackFailure))
+			{
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::RecoveryRequired,
+					DestinationPath,
+					"Imported asset is missing from the rebuilt registry and rollback failed: " + RollbackFailure));
+			}
+			if (auto RefreshResult = ValidateProjectRegistry(Registry, Project->Root); !RefreshResult)
+				return std::unexpected(MakeRegistryRefreshError(RefreshResult.error(), "Import rollback"));
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::RegistryRefreshFailed,
+				DestinationPath,
+				"Imported asset UUID was not present after registry reconstruction"));
+		}
+		return *ImportedRecord;
+	}
+
 	std::expected<AssetRecord, AssetOperationError> AssetOperations::Move(
 		AssetRegistry& Registry,
 		const std::filesystem::path& ProjectRoot,
