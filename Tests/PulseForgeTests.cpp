@@ -7,6 +7,7 @@
 #include "Assets/AssetReferenceValidator.h"
 #include "Assets/AssetRegistry.h"
 #include "Assets/GltfMeshImporter.h"
+#include "Assets/ImageAssetImporter.h"
 #include "Assets/PrefabSerializer.h"
 #include "Core/Input.h"
 #include "Core/LayerStack.h"
@@ -1943,6 +1944,130 @@ namespace
 		PF_CHECK(Tests, !EscapingImport && EscapingImport.error().Code == GltfMeshImportErrorCode::InvalidProjectPath);
 	}
 
+	void TestImageAssetImport(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		std::error_code FileError;
+		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const auto ProjectIdentifier = UUID::Generate();
+		PF_CHECK(Tests, ProjectIdentifier.has_value());
+		if (!ProjectIdentifier)
+			return;
+
+		const std::filesystem::path ProjectRoot = TemporaryDirectory / ("PulseForgeImageImport-" + ProjectIdentifier->ToString());
+		struct ProjectDirectoryCleanup
+		{
+			std::filesystem::path Path;
+			~ProjectDirectoryCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} Cleanup{ ProjectRoot };
+
+		const std::filesystem::path TextureDirectory = ProjectRoot / "Assets" / "Textures";
+		std::filesystem::create_directories(TextureDirectory, FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		std::vector<uint8_t> Bitmap;
+		const auto AppendUInt16 = [&Bitmap](uint16_t Value)
+		{
+			Bitmap.push_back(static_cast<uint8_t>(Value & 0xff));
+			Bitmap.push_back(static_cast<uint8_t>(Value >> 8));
+		};
+		const auto AppendUInt32 = [&Bitmap](uint32_t Value)
+		{
+			for (size_t Byte = 0; Byte < sizeof(Value); ++Byte)
+				Bitmap.push_back(static_cast<uint8_t>((Value >> (Byte * 8)) & 0xff));
+		};
+		Bitmap.push_back('B');
+		Bitmap.push_back('M');
+		AppendUInt32(70);
+		AppendUInt32(0);
+		AppendUInt32(54);
+		AppendUInt32(40);
+		AppendUInt32(2);
+		AppendUInt32(2);
+		AppendUInt16(1);
+		AppendUInt16(24);
+		AppendUInt32(0);
+		AppendUInt32(16);
+		AppendUInt32(0);
+		AppendUInt32(0);
+		AppendUInt32(0);
+		AppendUInt32(0);
+		// BMP storage is bottom-up and BGR: bottom row red/green, top row blue/white.
+		Bitmap.insert(Bitmap.end(), { 0, 0, 255, 0, 255, 0, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0 });
+		PF_CHECK(Tests, Bitmap.size() == 70);
+
+		const std::filesystem::path SourcePath = TextureDirectory / "checker.bmp";
+		{
+			std::ofstream Output(SourcePath, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(Bitmap.data()), static_cast<std::streamsize>(Bitmap.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(SourcePath);
+		PF_CHECK(Tests, Metadata.has_value());
+		if (!Metadata)
+			return;
+
+		AssetRegistry Registry;
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		const auto Imported = ImageAssetImporter::ImportRGBA8(Metadata->ID, ProjectRoot, Registry);
+		PF_CHECK(Tests, Imported.has_value());
+		if (!Imported)
+			return;
+		PF_CHECK(Tests, Imported->Width == 2 && Imported->Height == 2);
+		PF_CHECK(Tests, Imported->RGBA8Pixels.size() == 16);
+		PF_CHECK(Tests, Imported->RGBA8Pixels == std::vector<uint8_t>({
+			0, 0, 255, 255, 255, 255, 255, 255,
+			255, 0, 0, 255, 0, 255, 0, 255 }));
+
+		const auto MissingAssetID = UUID::Generate();
+		PF_CHECK(Tests, MissingAssetID.has_value());
+		if (MissingAssetID)
+		{
+			const auto Missing = ImageAssetImporter::ImportRGBA8(*MissingAssetID, ProjectRoot, Registry);
+			PF_CHECK(Tests, !Missing && Missing.error().Code == ImageAssetImportErrorCode::AssetNotFound);
+		}
+
+		const std::filesystem::path RenamedPath = TextureDirectory / "checker-renamed.bmp";
+		const auto Move = AssetOperations::Move(
+			Registry,
+			ProjectRoot,
+			"Assets/Textures/checker.bmp",
+			"Assets/Textures/checker-renamed.bmp");
+		PF_CHECK(Tests, Move.has_value() && Move->ID == Metadata->ID);
+		if (Move)
+		{
+			const auto ImportedAfterMove = ImageAssetImporter::ImportRGBA8(Metadata->ID, ProjectRoot, Registry);
+			PF_CHECK(Tests, ImportedAfterMove.has_value());
+			PF_CHECK(Tests, ImportedAfterMove && ImportedAfterMove->RGBA8Pixels == Imported->RGBA8Pixels);
+		}
+		PF_CHECK(Tests, std::filesystem::exists(RenamedPath));
+
+		const std::filesystem::path InvalidImagePath = TextureDirectory / "invalid.bmp";
+		{
+			std::ofstream Output(InvalidImagePath, std::ios::binary | std::ios::trunc);
+			Output.write("not an image", 12);
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto InvalidImageMetadata = AssetMetadataSerializer::CreateForNewAsset(InvalidImagePath);
+		PF_CHECK(Tests, InvalidImageMetadata.has_value());
+		if (InvalidImageMetadata)
+		{
+			PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+			const auto InvalidImage = ImageAssetImporter::ImportRGBA8(InvalidImageMetadata->ID, ProjectRoot, Registry);
+			PF_CHECK(Tests, !InvalidImage && InvalidImage.error().Code == ImageAssetImportErrorCode::InvalidImage);
+		}
+	}
+
 	void TestPrefabSerialization(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -2362,6 +2487,7 @@ int main()
 	TestAssetOperations(Tests);
 	TestAssetReferenceValidation(Tests);
 	TestGltfMeshImport(Tests);
+	TestImageAssetImport(Tests);
 	TestGraphicsPipelineAndDrawValidation(Tests);
 	TestConstantBufferBindingValidation(Tests);
 	TestTextureAndSamplerValidation(Tests);
