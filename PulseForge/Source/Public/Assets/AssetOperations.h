@@ -21,7 +21,8 @@ namespace PulseForge
 		MetadataFailure,
 		RecoveryRequired,
 		RegistryRefreshFailed,
-		ImportSourceInvalid
+		ImportSourceInvalid,
+		AssetNotFound
 	};
 
 	struct AssetOperationError
@@ -34,7 +35,7 @@ namespace PulseForge
 	class PULSEFORGE_API AssetOperations final
 	{
 	public:
-		// Asset paths are project-relative (for example, Assets/Models/ship.gltf).
+		// Destination paths are project-relative. Existing source assets are selected by UUID and resolved through the registry.
 		// Operations validate and refresh the supplied registry; move preserves identity and duplicate creates a new UUID.
 		// Import copies an external regular file into Assets and creates a fresh sidecar UUID.
 		[[nodiscard]] static std::expected<AssetRecord, AssetOperationError> ImportFile(
@@ -45,17 +46,17 @@ namespace PulseForge
 		[[nodiscard]] static std::expected<AssetRecord, AssetOperationError> Move(
 			AssetRegistry& Registry,
 			const std::filesystem::path& ProjectRoot,
-			const std::filesystem::path& SourcePath,
+			const AssetID& SourceAsset,
 			const std::filesystem::path& DestinationPath);
 		[[nodiscard]] static std::expected<AssetRecord, AssetOperationError> Duplicate(
 			AssetRegistry& Registry,
 			const std::filesystem::path& ProjectRoot,
-			const std::filesystem::path& SourcePath,
+			const AssetID& SourceAsset,
 			const std::filesystem::path& DestinationPath);
 		// Permanently removes both the managed source and its sidecar. The caller owns any UI confirmation policy.
 		[[nodiscard]] static std::expected<void, AssetOperationError> Delete(
 			AssetRegistry& Registry,
 			const std::filesystem::path& ProjectRoot,
-			const std::filesystem::path& SourcePath);
+			const AssetID& SourceAsset);
 	};
 }

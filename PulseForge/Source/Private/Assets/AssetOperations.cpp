@@ -417,7 +417,7 @@ namespace PulseForge
 	std::expected<AssetRecord, AssetOperationError> AssetOperations::Move(
 		AssetRegistry& Registry,
 		const std::filesystem::path& ProjectRoot,
-		const std::filesystem::path& SourcePath,
+		const AssetID& SourceAsset,
 		const std::filesystem::path& DestinationPath)
 	{
 		const auto Project = OpenProject(ProjectRoot);
@@ -425,6 +425,15 @@ namespace PulseForge
 			return std::unexpected(Project.error());
 		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
 			return std::unexpected(RegistryResult.error());
+		const auto SourceRecord = Registry.Find(SourceAsset);
+		if (!SourceRecord)
+		{
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::AssetNotFound,
+				{},
+				"Asset UUID " + SourceAsset.ToString() + " is not present in the project registry"));
+		}
+		const FilesystemPath SourcePath = SourceRecord->ProjectRelativePath;
 		if (SourcePath == DestinationPath)
 		{
 			return std::unexpected(MakeError(
@@ -442,6 +451,13 @@ namespace PulseForge
 		const auto Metadata = LoadManagedMetadata(*Source, SourcePath);
 		if (!Metadata)
 			return std::unexpected(Metadata.error());
+		if (Metadata->ID != SourceAsset)
+		{
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::InvalidProjectAssets,
+				SourcePath,
+				"Asset sidecar identity changed while preparing the move; expected UUID " + SourceAsset.ToString()));
+		}
 
 		const FilesystemPath SourceSidecar = AssetMetadataSerializer::GetSidecarPath(*Source);
 		const FilesystemPath DestinationSidecar = AssetMetadataSerializer::GetSidecarPath(*Destination);
@@ -551,7 +567,7 @@ namespace PulseForge
 	std::expected<AssetRecord, AssetOperationError> AssetOperations::Duplicate(
 		AssetRegistry& Registry,
 		const std::filesystem::path& ProjectRoot,
-		const std::filesystem::path& SourcePath,
+		const AssetID& SourceAsset,
 		const std::filesystem::path& DestinationPath)
 	{
 		const auto Project = OpenProject(ProjectRoot);
@@ -559,6 +575,15 @@ namespace PulseForge
 			return std::unexpected(Project.error());
 		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
 			return std::unexpected(RegistryResult.error());
+		const auto SourceRecord = Registry.Find(SourceAsset);
+		if (!SourceRecord)
+		{
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::AssetNotFound,
+				{},
+				"Asset UUID " + SourceAsset.ToString() + " is not present in the project registry"));
+		}
+		const FilesystemPath SourcePath = SourceRecord->ProjectRelativePath;
 		if (SourcePath == DestinationPath)
 		{
 			return std::unexpected(MakeError(
@@ -576,6 +601,13 @@ namespace PulseForge
 		const auto SourceMetadata = LoadManagedMetadata(*Source, SourcePath);
 		if (!SourceMetadata)
 			return std::unexpected(SourceMetadata.error());
+		if (SourceMetadata->ID != SourceAsset)
+		{
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::InvalidProjectAssets,
+				SourcePath,
+				"Asset sidecar identity changed while preparing the duplicate; expected UUID " + SourceAsset.ToString()));
+		}
 		if (auto SidecarResult = RequireAbsent(AssetMetadataSerializer::GetSidecarPath(*Destination), DestinationPath);
 			!SidecarResult)
 		{
@@ -650,13 +682,22 @@ namespace PulseForge
 	std::expected<void, AssetOperationError> AssetOperations::Delete(
 		AssetRegistry& Registry,
 		const std::filesystem::path& ProjectRoot,
-		const std::filesystem::path& SourcePath)
+		const AssetID& SourceAsset)
 	{
 		const auto Project = OpenProject(ProjectRoot);
 		if (!Project)
 			return std::unexpected(Project.error());
 		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
 			return std::unexpected(RegistryResult.error());
+		const auto SourceRecord = Registry.Find(SourceAsset);
+		if (!SourceRecord)
+		{
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::AssetNotFound,
+				{},
+				"Asset UUID " + SourceAsset.ToString() + " is not present in the project registry"));
+		}
+		const FilesystemPath SourcePath = SourceRecord->ProjectRelativePath;
 
 		const auto Source = ResolveAssetPath(*Project, SourcePath, true);
 		if (!Source)
@@ -664,6 +705,13 @@ namespace PulseForge
 		const auto Metadata = LoadManagedMetadata(*Source, SourcePath);
 		if (!Metadata)
 			return std::unexpected(Metadata.error());
+		if (Metadata->ID != SourceAsset)
+		{
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::InvalidProjectAssets,
+				SourcePath,
+				"Asset sidecar identity changed while preparing deletion; expected UUID " + SourceAsset.ToString()));
+		}
 		const FilesystemPath Sidecar = AssetMetadataSerializer::GetSidecarPath(*Source);
 
 		const auto TransactionID = UUID::Generate();
@@ -804,10 +852,15 @@ namespace PulseForge
 		std::filesystem::remove_all(TransactionDirectory, Error);
 		if (Error)
 		{
+			std::string Message = "Managed asset was removed, but its temporary recovery copy could not be deleted: " +
+				Error.message();
+			if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
+				Message += "\nThe supplied registry could not be refreshed after deletion: " + RegistryResult.error().Message;
+
 			return std::unexpected(MakeError(
 				AssetOperationErrorCode::RecoveryRequired,
 				TransactionDirectory.lexically_relative(Project->Root),
-				"Managed asset was removed, but its temporary recovery copy could not be deleted: " + Error.message()));
+				std::move(Message)));
 		}
 
 		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
