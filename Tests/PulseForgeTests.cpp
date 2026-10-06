@@ -9,6 +9,7 @@
 #include "Assets/AssetRegistry.h"
 #include "Assets/GltfMeshImporter.h"
 #include "Assets/ImageAssetImporter.h"
+#include "Assets/PrefabAssetService.h"
 #include "Assets/PrefabSerializer.h"
 #include "Assets/SceneAssetService.h"
 #include "Core/Input.h"
@@ -2391,6 +2392,156 @@ namespace
 		}
 	}
 
+	void TestPrefabAssetsByUUID(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		std::error_code FileError;
+		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const auto ProjectIdentifier = UUID::Generate();
+		PF_CHECK(Tests, ProjectIdentifier.has_value());
+		if (!ProjectIdentifier)
+			return;
+
+		const std::filesystem::path ProjectRoot = TemporaryDirectory / ("PulseForgePrefabAssets-" + ProjectIdentifier->ToString());
+		struct ProjectCleanup
+		{
+			std::filesystem::path Path;
+			~ProjectCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} Cleanup{ ProjectRoot };
+
+		const std::filesystem::path PrefabDirectory = ProjectRoot / "Assets" / "Prefabs";
+		std::filesystem::create_directories(PrefabDirectory, FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const auto RootID = UUID::Parse("15261902-2c12-4a92-9e99-0e355a16af4e");
+		const auto ChildID = UUID::Parse("df753d9d-1024-40f1-980f-5ca589fd87d8");
+		const auto MeshAssetID = UUID::Parse("d3ce3630-b87a-4dab-b8e0-59c1f258ae78");
+		PF_CHECK(Tests, RootID && ChildID && MeshAssetID);
+		if (!RootID || !ChildID || !MeshAssetID)
+			return;
+
+		Scene Source;
+		const auto Root = Source.CreateEntityWithUUID(*RootID, "Prefab Root");
+		const auto Child = Source.CreateEntityWithUUID(*ChildID, "Prefab Child");
+		PF_CHECK(Tests, Root && Child);
+		if (!Root || !Child)
+			return;
+		PF_CHECK(Tests, Child->SetParent(*Root).has_value());
+		PF_CHECK(Tests, Child->SetMeshRenderer(MeshRendererComponent{ *MeshAssetID }).has_value());
+
+		const std::filesystem::path SourcePath = PrefabDirectory / "crate.prefab";
+		PF_CHECK(Tests, PrefabSerializer::SaveToFile(Source, *Root, SourcePath).has_value());
+		const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(SourcePath);
+		PF_CHECK(Tests, Metadata.has_value());
+		if (!Metadata)
+			return;
+
+		AssetRegistry Registry;
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		Scene Destination;
+		const auto Existing = Destination.CreateEntity("Existing entity");
+		PF_CHECK(Tests, Existing.has_value());
+		const auto FirstInstance = PrefabAssetService::Instantiate(Metadata->ID, ProjectRoot, Registry, Destination);
+		PF_CHECK(Tests, FirstInstance.has_value());
+		PF_CHECK(Tests, FirstInstance && FirstInstance->GetUUID() != *RootID);
+		PF_CHECK(Tests, Destination.GetEntityCount() == 3);
+		if (!FirstInstance)
+			return;
+		const auto FirstChildren = FirstInstance->GetChildren();
+		PF_CHECK(Tests, FirstChildren && FirstChildren->size() == 1);
+		if (!FirstChildren || FirstChildren->size() != 1)
+			return;
+		const auto ChildRenderer = FirstChildren->front().GetMeshRenderer();
+		PF_CHECK(Tests, ChildRenderer && ChildRenderer->has_value());
+		PF_CHECK(Tests, ChildRenderer && ChildRenderer->has_value() && ChildRenderer->value().MeshAsset == *MeshAssetID);
+
+		const auto MoveResult = AssetOperations::Move(
+			Registry,
+			ProjectRoot,
+			"Assets/Prefabs/crate.prefab",
+			"Assets/Prefabs/renamed.prefab");
+		PF_CHECK(Tests, MoveResult && MoveResult->ID == Metadata->ID);
+		PF_CHECK(Tests, PrefabAssetService::Instantiate(Metadata->ID, ProjectRoot, Registry, Destination).has_value());
+
+		auto RootTag = Root->GetTag();
+		PF_CHECK(Tests, RootTag.has_value());
+		if (!RootTag)
+			return;
+		RootTag->Name = "Saved through prefab UUID";
+		PF_CHECK(Tests, Root->SetTag(*RootTag).has_value());
+		PF_CHECK(Tests, PrefabAssetService::Save(Metadata->ID, ProjectRoot, Registry, Source, *Root).has_value());
+		const auto PreservedMetadata = AssetMetadataSerializer::LoadFromFile(
+			AssetMetadataSerializer::GetSidecarPath(ProjectRoot / "Assets" / "Prefabs" / "renamed.prefab"));
+		PF_CHECK(Tests, PreservedMetadata && PreservedMetadata->ID == Metadata->ID);
+		Scene UpdatedInstance;
+		const auto UpdatedRoot = PrefabAssetService::Instantiate(Metadata->ID, ProjectRoot, Registry, UpdatedInstance);
+		PF_CHECK(Tests, UpdatedRoot.has_value());
+		if (UpdatedRoot)
+		{
+			const auto UpdatedTag = UpdatedRoot->GetTag();
+			PF_CHECK(Tests, UpdatedTag && UpdatedTag->Name == "Saved through prefab UUID");
+		}
+
+		const auto Duplicate = AssetOperations::Duplicate(
+			Registry,
+			ProjectRoot,
+			"Assets/Prefabs/renamed.prefab",
+			"Assets/Prefabs/copy.prefab");
+		PF_CHECK(Tests, Duplicate.has_value());
+		PF_CHECK(Tests, Duplicate && Duplicate->ID != Metadata->ID);
+		PF_CHECK(Tests, Duplicate && PrefabAssetService::Instantiate(Duplicate->ID, ProjectRoot, Registry, UpdatedInstance).has_value());
+
+		const std::filesystem::path OtherAssetPath = PrefabDirectory / "notes.txt";
+		{
+			std::ofstream Output(OtherAssetPath, std::ios::binary | std::ios::trunc);
+			Output << "not a prefab";
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto OtherMetadata = AssetMetadataSerializer::CreateForNewAsset(OtherAssetPath);
+		PF_CHECK(Tests, OtherMetadata.has_value());
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		if (OtherMetadata)
+		{
+			const auto WrongType = PrefabAssetService::Instantiate(OtherMetadata->ID, ProjectRoot, Registry, UpdatedInstance);
+			PF_CHECK(Tests, !WrongType && WrongType.error().Code == PrefabAssetErrorCode::UnsupportedAssetType);
+		}
+
+		const std::filesystem::path BrokenPath = PrefabDirectory / "broken.prefab";
+		{
+			std::ofstream Output(BrokenPath, std::ios::binary | std::ios::trunc);
+			Output << "{broken";
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto BrokenMetadata = AssetMetadataSerializer::CreateForNewAsset(BrokenPath);
+		PF_CHECK(Tests, BrokenMetadata.has_value());
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		if (BrokenMetadata)
+		{
+			const size_t CountBeforeFailure = UpdatedInstance.GetEntityCount();
+			const auto Broken = PrefabAssetService::Instantiate(BrokenMetadata->ID, ProjectRoot, Registry, UpdatedInstance);
+			PF_CHECK(Tests, !Broken && Broken.error().Code == PrefabAssetErrorCode::SerializationFailed);
+			PF_CHECK(Tests, UpdatedInstance.GetEntityCount() == CountBeforeFailure);
+		}
+
+		const auto MissingID = UUID::Generate();
+		PF_CHECK(Tests, MissingID.has_value());
+		if (MissingID)
+		{
+			const auto Missing = PrefabAssetService::Instantiate(*MissingID, ProjectRoot, Registry, UpdatedInstance);
+			PF_CHECK(Tests, !Missing && Missing.error().Code == PrefabAssetErrorCode::AssetNotFound);
+		}
+	}
+
 	void TestGraphicsPipelineAndDrawValidation(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -2703,6 +2854,7 @@ int main()
 	TestSceneSerializationRoundTrip(Tests);
 	TestSceneAssetsByUUID(Tests);
 	TestPrefabSerialization(Tests);
+	TestPrefabAssetsByUUID(Tests);
 	TestAssetMetadataAndRegistry(Tests);
 	TestAssetOperations(Tests);
 	TestAssetReferenceValidation(Tests);

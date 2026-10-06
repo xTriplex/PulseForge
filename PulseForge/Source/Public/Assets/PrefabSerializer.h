@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -19,7 +20,11 @@ namespace PulseForge
 		UnsupportedVersion,
 		SceneSerializationFailed,
 		SceneOperationFailed,
-		InstantiationFailed
+		InstantiationFailed,
+		FileOpenFailed,
+		FileReadFailed,
+		FileWriteFailed,
+		FileReplaceFailed
 	};
 
 	struct PrefabError
@@ -35,5 +40,12 @@ namespace PulseForge
 		[[nodiscard]] static std::expected<std::string, PrefabError> Serialize(const Scene& Source, const Entity& Root);
 		// Creates a new subtree with fresh entity UUIDs; asset UUID references are retained.
 		[[nodiscard]] static std::expected<Entity, PrefabError> Instantiate(std::string_view Data, Scene& Destination);
+		[[nodiscard]] static std::expected<void, PrefabError> SaveToFile(
+			const Scene& Source,
+			const Entity& Root,
+			const std::filesystem::path& Path);
+		[[nodiscard]] static std::expected<Entity, PrefabError> InstantiateFromFile(
+			const std::filesystem::path& Path,
+			Scene& Destination);
 	};
 }

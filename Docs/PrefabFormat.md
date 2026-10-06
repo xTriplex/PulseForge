@@ -30,4 +30,6 @@ The root's parent outside the captured subtree is omitted. Instantiation creates
 
 The current serializer preserves tag, transform, camera, and mesh-renderer components. New scene components must be added to scene and prefab serialization together.
 
-Prefab JSON is source content and should receive its own adjacent `.meta` sidecar when managed by a project. Its stable asset identity is not embedded in the document. Unsupported prefab versions are rejected; scene and prefab versions are independent.
+Managed prefabs use the `.prefab` source extension and an adjacent `.prefab.meta` sidecar. The sidecar UUID is the prefab asset identity; `PrefabAssetService` resolves that UUID through the generated asset registry before saving or instantiating. Moving the prefab and sidecar changes its path, not its identity. Duplicating a prefab creates a new sidecar UUID.
+
+Prefab documents are capped at 64 MiB when read or written. Unsupported prefab versions are rejected; scene and prefab versions are independent.

@@ -6,8 +6,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <cstdint>
 #include <exception>
+#include <fstream>
+#include <limits>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -19,6 +23,7 @@ namespace PulseForge
 		using Json = nlohmann::ordered_json;
 		constexpr uint64_t PrefabFormatVersion = 1;
 		constexpr std::string_view PrefabFormatName = "PulseForgePrefab";
+		constexpr size_t MaxPrefabDocumentBytes = 64u * 1024u * 1024u;
 
 		PrefabError MakeError(PrefabErrorCode Code, std::string Message)
 		{
@@ -60,6 +65,17 @@ namespace PulseForge
 			for (auto Iterator = Entities.rbegin(); Iterator != Entities.rend(); ++Iterator)
 				(void)Destination.DestroyEntity(*Iterator);
 		}
+
+		struct TemporaryFileCleanup
+		{
+			std::filesystem::path Path;
+
+			~TemporaryFileCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove(Path, Error);
+			}
+		};
 	}
 
 	std::expected<std::string, PrefabError> PrefabSerializer::Serialize(const Scene& Source, const Entity& Root)
@@ -284,6 +300,108 @@ namespace PulseForge
 			return std::unexpected(MakeError(
 				PrefabErrorCode::InstantiationFailed,
 				std::string("Prefab instantiation failed: ") + Exception.what()));
+		}
+	}
+
+	std::expected<void, PrefabError> PrefabSerializer::SaveToFile(
+		const Scene& Source,
+		const Entity& Root,
+		const std::filesystem::path& Path)
+	{
+		if (Path.empty())
+			return std::unexpected(MakeError(PrefabErrorCode::FileOpenFailed, "Prefab file path must not be empty"));
+
+		const auto Serialized = Serialize(Source, Root);
+		if (!Serialized)
+			return std::unexpected(Serialized.error());
+		if (Serialized->size() > MaxPrefabDocumentBytes ||
+			Serialized->size() > static_cast<size_t>(std::numeric_limits<std::streamsize>::max()))
+		{
+			return std::unexpected(MakeError(
+				PrefabErrorCode::FileWriteFailed,
+				"Serialized prefab exceeds the supported document size"));
+		}
+
+		try
+		{
+			const auto TemporaryIdentifier = UUID::Generate();
+			if (!TemporaryIdentifier)
+				return std::unexpected(MakeError(PrefabErrorCode::FileWriteFailed, TemporaryIdentifier.error().Message));
+
+			std::filesystem::path TemporaryPath = Path;
+			TemporaryPath += "." + TemporaryIdentifier->ToString() + ".tmp";
+			TemporaryFileCleanup Cleanup{ TemporaryPath };
+
+			std::ofstream Output(TemporaryPath, std::ios::binary | std::ios::trunc);
+			if (!Output.is_open())
+				return std::unexpected(MakeError(PrefabErrorCode::FileOpenFailed, "Could not open temporary prefab file for writing"));
+
+			Output.write(Serialized->data(), static_cast<std::streamsize>(Serialized->size()));
+			Output.flush();
+			if (!Output)
+				return std::unexpected(MakeError(PrefabErrorCode::FileWriteFailed, "Could not write the complete prefab document"));
+			Output.close();
+			if (Output.fail())
+				return std::unexpected(MakeError(PrefabErrorCode::FileWriteFailed, "Could not finish writing the prefab document"));
+
+			std::error_code ReplaceError;
+			std::filesystem::rename(TemporaryPath, Path, ReplaceError);
+			if (ReplaceError)
+			{
+				return std::unexpected(MakeError(
+					PrefabErrorCode::FileReplaceFailed,
+					"Could not replace prefab file: " + ReplaceError.message()));
+			}
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(MakeError(
+				PrefabErrorCode::FileWriteFailed,
+				std::string("Prefab file save failed: ") + Exception.what()));
+		}
+	}
+
+	std::expected<Entity, PrefabError> PrefabSerializer::InstantiateFromFile(
+		const std::filesystem::path& Path,
+		Scene& Destination)
+	{
+		if (Path.empty())
+			return std::unexpected(MakeError(PrefabErrorCode::FileOpenFailed, "Prefab file path must not be empty"));
+
+		try
+		{
+			std::ifstream Input(Path, std::ios::binary);
+			if (!Input.is_open())
+				return std::unexpected(MakeError(PrefabErrorCode::FileOpenFailed, "Could not open prefab file for reading"));
+
+			std::string Data;
+			Data.reserve(4096);
+			std::array<char, 8192> Buffer{};
+			while (Input)
+			{
+				Input.read(Buffer.data(), static_cast<std::streamsize>(Buffer.size()));
+				const std::streamsize ReadCount = Input.gcount();
+				if (ReadCount > 0)
+				{
+					const size_t Count = static_cast<size_t>(ReadCount);
+					if (Count > MaxPrefabDocumentBytes - Data.size())
+						return std::unexpected(MakeError(
+							PrefabErrorCode::FileReadFailed,
+							"Prefab document exceeds the supported 64 MiB size limit"));
+					Data.append(Buffer.data(), Count);
+				}
+			}
+			if (!Input.eof())
+				return std::unexpected(MakeError(PrefabErrorCode::FileReadFailed, "Could not read the complete prefab document"));
+
+			return Instantiate(Data, Destination);
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(MakeError(
+				PrefabErrorCode::FileReadFailed,
+				std::string("Prefab file load failed: ") + Exception.what()));
 		}
 	}
 }
