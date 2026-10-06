@@ -4,6 +4,7 @@
 
 #include "Assets/AssetMetadata.h"
 #include "Assets/AssetRegistry.h"
+#include "Assets/PrefabSerializer.h"
 #include "Core/Input.h"
 #include "Core/LayerStack.h"
 #include "Core/Timestep.h"
@@ -1390,6 +1391,111 @@ namespace
 			HasIssue(ReservedSuffixBuild.error(), AssetRegistryIssueCode::UnsupportedEntry));
 	}
 
+	void TestPrefabSerialization(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		Scene Source;
+		const auto ExternalParent = Source.CreateEntity("Outside prefab");
+		const auto Root = Source.CreateEntityWithUUID(UUID{ 0x7000000000000000ull, 7 }, "Prefab root");
+		const auto Child = Source.CreateEntityWithUUID(UUID{ 0x7100000000000000ull, 7 }, "Prefab child");
+		const auto Grandchild = Source.CreateEntityWithUUID(UUID{ 0x7200000000000000ull, 7 }, "Prefab grandchild");
+		PF_CHECK(Tests, ExternalParent && Root && Child && Grandchild);
+		if (!ExternalParent || !Root || !Child || !Grandchild)
+			return;
+
+		PF_CHECK(Tests, Root->SetParent(*ExternalParent).has_value());
+		PF_CHECK(Tests, Child->SetParent(*Root).has_value());
+		PF_CHECK(Tests, Grandchild->SetParent(*Child).has_value());
+		CameraComponent RootCamera;
+		RootCamera.VerticalFieldOfViewRadians = 0.95f;
+		PF_CHECK(Tests, Root->SetCamera(RootCamera).has_value());
+		const AssetID MeshAssetID{ 0x7300000000000000ull, 7 };
+		PF_CHECK(Tests, Child->SetMeshRenderer(MeshRendererComponent{ MeshAssetID }).has_value());
+
+		const auto PrefabData = PrefabSerializer::Serialize(Source, *Root);
+		PF_CHECK(Tests, PrefabData.has_value());
+		if (!PrefabData)
+			return;
+		PF_CHECK(Tests, PrefabData->find("\"format\": \"PulseForgePrefab\"") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"root\": \"" + Root->GetUUID().ToString() + "\"") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"meshAsset\": \"" + MeshAssetID.ToString() + "\"") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("Outside prefab") == std::string::npos);
+		PF_CHECK(Tests, PrefabData->find(ExternalParent->GetUUID().ToString()) == std::string::npos);
+
+		Scene Destination;
+		const auto Existing = Destination.CreateEntity("Existing destination entity");
+		PF_CHECK(Tests, Existing.has_value());
+		const size_t OriginalEntityCount = Destination.GetEntityCount();
+		const auto FirstInstance = PrefabSerializer::Instantiate(*PrefabData, Destination);
+		PF_CHECK(Tests, FirstInstance.has_value());
+		PF_CHECK(Tests, Destination.GetEntityCount() == OriginalEntityCount + 3);
+		if (!FirstInstance)
+			return;
+		PF_CHECK(Tests, FirstInstance->GetUUID() != Root->GetUUID());
+		const auto FirstParent = FirstInstance->GetParent();
+		PF_CHECK(Tests, FirstParent && !FirstParent->has_value());
+		const auto FirstCamera = FirstInstance->GetCamera();
+		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() &&
+			FirstCamera->value().VerticalFieldOfViewRadians == RootCamera.VerticalFieldOfViewRadians);
+		const auto FirstChildren = FirstInstance->GetChildren();
+		PF_CHECK(Tests, FirstChildren && FirstChildren->size() == 1);
+		if (!FirstChildren || FirstChildren->size() != 1)
+			return;
+		const Entity FirstChild = FirstChildren->front();
+		const auto FirstChildTag = FirstChild.GetTag();
+		const auto FirstChildMesh = FirstChild.GetMeshRenderer();
+		const auto FirstGrandchildren = FirstChild.GetChildren();
+		PF_CHECK(Tests, FirstChildTag && FirstChildTag->Name == "Prefab child");
+		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MeshAsset == MeshAssetID);
+		PF_CHECK(Tests, FirstGrandchildren && FirstGrandchildren->size() == 1);
+
+		const auto SecondInstance = PrefabSerializer::Instantiate(*PrefabData, Destination);
+		PF_CHECK(Tests, SecondInstance.has_value());
+		PF_CHECK(Tests, Destination.GetEntityCount() == OriginalEntityCount + 6);
+		PF_CHECK(Tests, SecondInstance && FirstInstance->GetUUID() != SecondInstance->GetUUID());
+
+		const size_t CountBeforeFailure = Destination.GetEntityCount();
+		const auto InvalidJSON = PrefabSerializer::Instantiate("{ invalid", Destination);
+		PF_CHECK(Tests, !InvalidJSON.has_value());
+		PF_CHECK(Tests, !InvalidJSON && InvalidJSON.error().Code == PrefabErrorCode::InvalidDocument);
+		PF_CHECK(Tests, Destination.GetEntityCount() == CountBeforeFailure);
+
+		std::string MissingPrefabRoot = *PrefabData;
+		const size_t RootFieldPosition = MissingPrefabRoot.find("\"root\": \"");
+		const size_t RootIdentifierPosition = MissingPrefabRoot.find(Root->GetUUID().ToString(), RootFieldPosition);
+		PF_CHECK(Tests, RootFieldPosition != std::string::npos && RootIdentifierPosition != std::string::npos);
+		if (RootIdentifierPosition != std::string::npos)
+			MissingPrefabRoot.replace(
+				RootIdentifierPosition,
+				Root->GetUUID().ToString().size(),
+				UUID{ 0x7400000000000000ull, 7 }.ToString());
+		const auto MissingRootResult = PrefabSerializer::Instantiate(MissingPrefabRoot, Destination);
+		PF_CHECK(Tests, !MissingRootResult.has_value());
+		PF_CHECK(Tests, !MissingRootResult && MissingRootResult.error().Code == PrefabErrorCode::InvalidDocument);
+		PF_CHECK(Tests, Destination.GetEntityCount() == CountBeforeFailure);
+
+		std::string UnsupportedVersion = *PrefabData;
+		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 1");
+		PF_CHECK(Tests, VersionPosition != std::string::npos);
+		if (VersionPosition != std::string::npos)
+			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 1").size(), "\"version\": 99");
+		const auto UnsupportedPrefabVersion = PrefabSerializer::Instantiate(UnsupportedVersion, Destination);
+		PF_CHECK(Tests, !UnsupportedPrefabVersion.has_value());
+		PF_CHECK(Tests, !UnsupportedPrefabVersion &&
+			UnsupportedPrefabVersion.error().Code == PrefabErrorCode::UnsupportedVersion);
+		PF_CHECK(Tests, Destination.GetEntityCount() == CountBeforeFailure);
+
+		Scene OtherScene;
+		const auto ForeignRoot = OtherScene.CreateEntityWithUUID(Root->GetUUID(), "Foreign prefab root");
+		PF_CHECK(Tests, ForeignRoot.has_value());
+		if (ForeignRoot)
+		{
+			const auto ForeignPrefab = PrefabSerializer::Serialize(Source, *ForeignRoot);
+			PF_CHECK(Tests, !ForeignPrefab.has_value());
+			PF_CHECK(Tests, !ForeignPrefab && ForeignPrefab.error().Code == PrefabErrorCode::InvalidRootEntity);
+		}
+	}
+
 	void TestGraphicsPipelineAndDrawValidation(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -1699,6 +1805,7 @@ int main()
 	TestSceneEntityAndHierarchy(Tests);
 	TestEntityHandlesExpireWithScene(Tests);
 	TestSceneSerializationRoundTrip(Tests);
+	TestPrefabSerialization(Tests);
 	TestAssetMetadataAndRegistry(Tests);
 	TestGraphicsPipelineAndDrawValidation(Tests);
 	TestConstantBufferBindingValidation(Tests);
