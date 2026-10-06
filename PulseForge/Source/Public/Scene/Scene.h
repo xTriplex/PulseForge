@@ -28,7 +28,7 @@ namespace PulseForge
 
 		[[nodiscard]] std::expected<Entity, SceneError> CreateEntity(std::string Name = "Entity");
 		[[nodiscard]] std::expected<Entity, SceneError> CreateEntityWithUUID(UUID Identifier, std::string Name = "Entity");
-		// Duplicates one entity's tag/transform and parent; child entities are not recursively copied.
+		// Duplicates supported components and the parent; child entities are not recursively copied.
 		[[nodiscard]] std::expected<Entity, SceneError> DuplicateEntity(const Entity& Source);
 		// Existing children survive as roots when a parent entity is destroyed.
 		[[nodiscard]] std::expected<void, SceneError> DestroyEntity(const Entity& Target);

@@ -1,7 +1,7 @@
 #pragma once
 
+#include "Assets/AssetID.h"
 #include "Core/Core.h"
-#include "Scene/UUID.h"
 
 #include <cstdint>
 #include <expected>
@@ -10,8 +10,6 @@
 
 namespace PulseForge
 {
-	using AssetID = UUID;
-
 	enum class AssetMetadataErrorCode : uint8_t
 	{
 		InvalidPath,

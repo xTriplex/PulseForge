@@ -1,5 +1,6 @@
 #include "Core/PulseForgePCH.h"
 #include "Scene/SceneSerializer.h"
+#include "Scene/Components/MeshRendererComponent.h"
 
 #include <nlohmann/json.hpp>
 
@@ -20,7 +21,8 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t SceneFormatVersion = 1;
+		constexpr int64_t SceneFormatVersion = 2;
+		constexpr int64_t MinimumSupportedSceneFormatVersion = 1;
 		constexpr std::string_view SceneFormatName = "PulseForgeScene";
 
 		SceneSerializationError MakeError(SceneSerializationErrorCode Code, std::string Message)
@@ -48,7 +50,7 @@ namespace PulseForge
 		{
 			if (Error.Code == SceneErrorCode::DuplicateUUID || Error.Code == SceneErrorCode::NilUUID ||
 				Error.Code == SceneErrorCode::InvalidTransform || Error.Code == SceneErrorCode::ParentCycle ||
-				Error.Code == SceneErrorCode::InvalidCamera)
+				Error.Code == SceneErrorCode::InvalidCamera || Error.Code == SceneErrorCode::InvalidAssetReference)
 			{
 				return MakeError(SceneSerializationErrorCode::InvalidEntityData, Error.Message);
 			}
@@ -87,8 +89,9 @@ namespace PulseForge
 				const auto Tag = Current.GetTag();
 				const auto Transform = Current.GetTransform();
 				const auto Camera = Current.GetCamera();
+				const auto MeshRenderer = Current.GetMeshRenderer();
 				const auto Parent = Current.GetParent();
-				if (!Tag || !Transform || !Camera || !Parent)
+				if (!Tag || !Transform || !Camera || !MeshRenderer || !Parent)
 					return std::unexpected(MakeError(
 						SceneSerializationErrorCode::SceneOperationFailed,
 						"Could not read all required components while serializing an entity"));
@@ -108,6 +111,12 @@ namespace PulseForge
 						{ "verticalFovRadians", CameraData.VerticalFieldOfViewRadians },
 						{ "nearClipPlane", CameraData.NearClipPlane },
 						{ "farClipPlane", CameraData.FarClipPlane }
+					});
+				}
+				if (MeshRenderer->has_value())
+				{
+					Record["meshRenderer"] = Json::object({
+						{ "meshAsset", MeshRenderer->value().MeshAsset.ToString() }
 					});
 				}
 				Record["parent"] = Parent->has_value()
@@ -143,7 +152,12 @@ namespace PulseForge
 			const auto Version = Document.find("version");
 			if (Version == Document.end() || (!Version->is_number_integer() && !Version->is_number_unsigned()))
 				return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidDocument, "Scene document is missing a numeric format version"));
-			if (Version->get<int64_t>() != SceneFormatVersion)
+			const bool SupportedVersion = Version->is_number_unsigned()
+				? Version->get<uint64_t>() >= static_cast<uint64_t>(MinimumSupportedSceneFormatVersion) &&
+					Version->get<uint64_t>() <= static_cast<uint64_t>(SceneFormatVersion)
+				: Version->get<int64_t>() >= MinimumSupportedSceneFormatVersion &&
+					Version->get<int64_t>() <= SceneFormatVersion;
+			if (!SupportedVersion)
 				return std::unexpected(MakeError(SceneSerializationErrorCode::UnsupportedVersion, "Scene document version is not supported"));
 
 			const auto SerializedEntities = Document.find("entities");
@@ -252,6 +266,30 @@ namespace PulseForge
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, CameraValidation.error().Message));
 				}
 
+				std::optional<MeshRendererComponent> MeshRendererData;
+				const auto SerializedMeshRenderer = SerializedEntity.find("meshRenderer");
+				if (SerializedMeshRenderer != SerializedEntity.end())
+				{
+					if (!SerializedMeshRenderer->is_object())
+						return std::unexpected(MakeError(
+							SceneSerializationErrorCode::InvalidEntityData,
+							"Entity meshRenderer must be an object"));
+
+					const auto MeshAsset = SerializedMeshRenderer->find("meshAsset");
+					if (MeshAsset == SerializedMeshRenderer->end() || !MeshAsset->is_string())
+						return std::unexpected(MakeError(
+							SceneSerializationErrorCode::InvalidEntityData,
+							"Mesh renderer requires a meshAsset UUID string"));
+
+					const auto ParsedMeshAsset = UUID::Parse(MeshAsset->get<std::string>());
+					if (!ParsedMeshAsset || ParsedMeshAsset->IsNil())
+						return std::unexpected(MakeError(
+							SceneSerializationErrorCode::InvalidEntityData,
+							ParsedMeshAsset ? "Mesh renderer asset UUID must not be nil" : ParsedMeshAsset.error().Message));
+
+					MeshRendererData = MeshRendererComponent{ *ParsedMeshAsset };
+				}
+
 				auto Created = Staging.CreateEntityWithUUID(ParsedUUID.value(), Name->get<std::string>());
 				if (!Created)
 					return std::unexpected(SceneOperationError(Created.error()));
@@ -266,6 +304,11 @@ namespace PulseForge
 				{
 					if (auto CameraResult = Created->SetCamera(*CameraData); !CameraResult)
 						return std::unexpected(SceneOperationError(CameraResult.error()));
+				}
+				if (MeshRendererData)
+				{
+					if (auto MeshRendererResult = Created->SetMeshRenderer(*MeshRendererData); !MeshRendererResult)
+						return std::unexpected(SceneOperationError(MeshRendererResult.error()));
 				}
 
 				PendingParents.push_back({ *Created, ParentIdentifier });

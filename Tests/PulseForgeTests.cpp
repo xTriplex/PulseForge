@@ -746,6 +746,14 @@ namespace
 		const auto ParentChildrenAfterReparent = Parent.GetChildren();
 		PF_CHECK(Tests, ChildChildrenAfterReparent && ChildChildrenAfterReparent->empty());
 		PF_CHECK(Tests, ParentChildrenAfterReparent && ParentChildrenAfterReparent->size() == 2);
+		CameraComponent DuplicateCamera;
+		DuplicateCamera.VerticalFieldOfViewRadians = 1.0f;
+		PF_CHECK(Tests, Child.SetCamera(DuplicateCamera).has_value());
+		const AssetID DuplicateMeshAsset{ 0x4000000000000000ull, 4 };
+		PF_CHECK(Tests, Child.SetMeshRenderer(MeshRendererComponent{ DuplicateMeshAsset }).has_value());
+		const auto InvalidMeshRenderer = Child.SetMeshRenderer(MeshRendererComponent{ UUID{} });
+		PF_CHECK(Tests, !InvalidMeshRenderer.has_value());
+		PF_CHECK(Tests, !InvalidMeshRenderer && InvalidMeshRenderer.error().Code == SceneErrorCode::InvalidAssetReference);
 
 		auto DuplicateResult = TestScene.DuplicateEntity(Child);
 		PF_CHECK(Tests, DuplicateResult.has_value());
@@ -754,11 +762,24 @@ namespace
 			const Entity Duplicate = *DuplicateResult;
 			const auto DuplicateTag = Duplicate.GetTag();
 			const auto DuplicateTransform = Duplicate.GetTransform();
+			const auto DuplicatedCamera = Duplicate.GetCamera();
+			const auto DuplicatedMeshRenderer = Duplicate.GetMeshRenderer();
 			const auto DuplicateParent = Duplicate.GetParent();
 			PF_CHECK(Tests, Duplicate.GetUUID() != Child.GetUUID());
 			PF_CHECK(Tests, DuplicateTag && DuplicateTag->Name == "Renamed child Copy");
 			PF_CHECK(Tests, DuplicateTransform && glm::all(glm::equal(DuplicateTransform->Translation, ChildTransform.Translation)));
+			PF_CHECK(Tests, DuplicatedCamera && DuplicatedCamera->has_value() &&
+				DuplicatedCamera->value().VerticalFieldOfViewRadians == DuplicateCamera.VerticalFieldOfViewRadians);
+			PF_CHECK(Tests, DuplicatedMeshRenderer && DuplicatedMeshRenderer->has_value() &&
+				DuplicatedMeshRenderer->value().MeshAsset == DuplicateMeshAsset);
 			PF_CHECK(Tests, DuplicateParent && DuplicateParent->has_value() && **DuplicateParent == Parent);
+			PF_CHECK(Tests, Duplicate.RemoveMeshRenderer().has_value());
+			const auto RemovedMeshRenderer = Duplicate.GetMeshRenderer();
+			PF_CHECK(Tests, RemovedMeshRenderer && !RemovedMeshRenderer->has_value());
+			const auto MissingMeshRendererRemoval = Duplicate.RemoveMeshRenderer();
+			PF_CHECK(Tests, !MissingMeshRendererRemoval.has_value());
+			PF_CHECK(Tests, !MissingMeshRendererRemoval &&
+				MissingMeshRendererRemoval.error().Code == SceneErrorCode::MissingComponent);
 		}
 
 		Scene OtherScene;
@@ -807,6 +828,7 @@ namespace
 		Scene Source;
 		const UUID RootId{ 0x2000000000000000ull, 2 };
 		const UUID ChildId{ 0x1000000000000000ull, 1 };
+		const AssetID MeshAssetIdentifier{ 0x5000000000000000ull, 5 };
 		auto ChildResult = Source.CreateEntityWithUUID(ChildId, "Child \"one\"");
 		auto RootResult = Source.CreateEntityWithUUID(RootId, "Root");
 		PF_CHECK(Tests, ChildResult.has_value() && RootResult.has_value());
@@ -850,6 +872,7 @@ namespace
 		const auto CameraBeforeSet = Child.GetCamera();
 		PF_CHECK(Tests, CameraBeforeSet && !CameraBeforeSet->has_value());
 		PF_CHECK(Tests, Child.SetCamera(SourceCamera).has_value());
+		PF_CHECK(Tests, Child.SetMeshRenderer(MeshRendererComponent{ MeshAssetIdentifier }).has_value());
 		const auto RootCamera = Root.GetCamera();
 		PF_CHECK(Tests, RootCamera.has_value() && !RootCamera->has_value());
 
@@ -858,7 +881,9 @@ namespace
 		if (!Serialized)
 			return;
 		PF_CHECK(Tests, Serialized->find("\"format\": \"PulseForgeScene\"") != std::string::npos);
-		PF_CHECK(Tests, Serialized->find("\"version\": 1") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 2") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"meshAsset\": \"" + MeshAssetIdentifier.ToString() + "\"") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("Assets/") == std::string::npos);
 		const size_t ChildEntityPosition = Serialized->find("\"uuid\": \"" + ChildId.ToString() + "\"");
 		const size_t RootEntityPosition = Serialized->find("\"uuid\": \"" + RootId.ToString() + "\"");
 		PF_CHECK(Tests, ChildEntityPosition != std::string::npos && RootEntityPosition != std::string::npos &&
@@ -884,6 +909,7 @@ namespace
 		const auto LoadedTag = LoadedChild->GetTag();
 		const auto LoadedTransform = LoadedChild->GetTransform();
 		const auto LoadedCamera = LoadedChild->GetCamera();
+		const auto LoadedMeshRenderer = LoadedChild->GetMeshRenderer();
 		const auto LoadedParent = LoadedChild->GetParent();
 		PF_CHECK(Tests, LoadedTag && LoadedTag->Name == "Child \"one\"");
 		PF_CHECK(Tests, LoadedTransform && glm::all(glm::equal(LoadedTransform->Translation, ChildTransform.Translation)));
@@ -892,6 +918,8 @@ namespace
 		PF_CHECK(Tests, LoadedCamera && LoadedCamera->has_value());
 		PF_CHECK(Tests, LoadedCamera && LoadedCamera->has_value() &&
 			glm::abs(LoadedCamera->value().VerticalFieldOfViewRadians - SourceCamera.VerticalFieldOfViewRadians) < 0.0001f);
+		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
+			LoadedMeshRenderer->value().MeshAsset == MeshAssetIdentifier);
 		PF_CHECK(Tests, LoadedParent && LoadedParent->has_value() && **LoadedParent == *LoadedRoot);
 		const auto SerializedAgain = SceneSerializer::Serialize(Destination);
 		PF_CHECK(Tests, SerializedAgain && *SerializedAgain == *Serialized);
@@ -907,13 +935,49 @@ namespace
 
 		const auto DestinationRootBeforeFailure = Destination.FindEntity(RootId);
 		std::string UnsupportedVersion = *Serialized;
-		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 1");
+		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 2");
 		PF_CHECK(Tests, VersionPosition != std::string::npos);
 		if (VersionPosition != std::string::npos)
-			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 1").size(), "\"version\": 99");
+			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 2").size(), "\"version\": 99");
 		const auto UnsupportedVersionResult = SceneSerializer::Deserialize(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedVersionResult.has_value());
 		PF_CHECK(Tests, !UnsupportedVersionResult && UnsupportedVersionResult.error().Code == SceneSerializationErrorCode::UnsupportedVersion);
+		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+
+		Scene LegacySource;
+		const auto LegacyEntity = LegacySource.CreateEntityWithUUID(UUID{ 0x6000000000000000ull, 6 }, "Version one");
+		PF_CHECK(Tests, LegacyEntity.has_value());
+		const auto LegacySerializedVersionTwo = SceneSerializer::Serialize(LegacySource);
+		PF_CHECK(Tests, LegacySerializedVersionTwo.has_value());
+		if (LegacySerializedVersionTwo)
+		{
+			std::string LegacyVersionOne = *LegacySerializedVersionTwo;
+			const size_t LegacyVersionPosition = LegacyVersionOne.find("\"version\": 2");
+			PF_CHECK(Tests, LegacyVersionPosition != std::string::npos);
+			if (LegacyVersionPosition != std::string::npos)
+				LegacyVersionOne.replace(LegacyVersionPosition, std::string("\"version\": 2").size(), "\"version\": 1");
+			Scene LegacyDestination;
+			const auto LegacyLoad = SceneSerializer::Deserialize(LegacyVersionOne, LegacyDestination);
+			PF_CHECK(Tests, LegacyLoad.has_value());
+			PF_CHECK(Tests, LegacyDestination.GetEntityCount() == 1);
+			const auto LegacyLoadedEntity = LegacyDestination.FindEntity(UUID{ 0x6000000000000000ull, 6 });
+			PF_CHECK(Tests, LegacyLoadedEntity.has_value());
+			if (LegacyLoadedEntity)
+			{
+				const auto LegacyMeshRenderer = LegacyLoadedEntity->GetMeshRenderer();
+				PF_CHECK(Tests, LegacyMeshRenderer && !LegacyMeshRenderer->has_value());
+			}
+		}
+
+		std::string InvalidMeshAsset = *Serialized;
+		const size_t MeshAssetPosition = InvalidMeshAsset.find(MeshAssetIdentifier.ToString());
+		PF_CHECK(Tests, MeshAssetPosition != std::string::npos);
+		if (MeshAssetPosition != std::string::npos)
+			InvalidMeshAsset.replace(MeshAssetPosition, MeshAssetIdentifier.ToString().size(), "not-a-uuid");
+		const auto InvalidMeshAssetLoad = SceneSerializer::Deserialize(InvalidMeshAsset, Destination);
+		PF_CHECK(Tests, !InvalidMeshAssetLoad.has_value());
+		PF_CHECK(Tests, !InvalidMeshAssetLoad &&
+			InvalidMeshAssetLoad.error().Code == SceneSerializationErrorCode::InvalidEntityData);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
 
 		std::string InvalidCameraDocument = *Serialized;

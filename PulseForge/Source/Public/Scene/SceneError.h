@@ -18,7 +18,8 @@ namespace PulseForge
 		ParentCycle,
 		StorageFailure,
 		MissingComponent,
-		InvalidCamera
+		InvalidCamera,
+		InvalidAssetReference
 	};
 
 	struct SceneError

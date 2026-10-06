@@ -1,5 +1,6 @@
 #include "Core/PulseForgePCH.h"
 #include "Scene/Scene.h"
+#include "Scene/Components/MeshRendererComponent.h"
 
 #include <entt/entt.hpp>
 
@@ -177,7 +178,9 @@ namespace PulseForge
 
 		const auto Tag = Source.GetTag();
 		const auto Transform = Source.GetTransform();
-		if (!Tag || !Transform)
+		const auto Camera = Source.GetCamera();
+		const auto MeshRenderer = Source.GetMeshRenderer();
+		if (!Tag || !Transform || !Camera || !MeshRenderer)
 			return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure, "Could not read source entity components for duplication"));
 
 		auto Duplicated = CreateEntity(Tag->Name + " Copy");
@@ -188,6 +191,22 @@ namespace PulseForge
 		{
 			(void)DestroyEntity(*Duplicated);
 			return std::unexpected(TransformResult.error());
+		}
+		if (Camera->has_value())
+		{
+			if (auto CameraResult = Duplicated->SetCamera(Camera->value()); !CameraResult)
+			{
+				(void)DestroyEntity(*Duplicated);
+				return std::unexpected(CameraResult.error());
+			}
+		}
+		if (MeshRenderer->has_value())
+		{
+			if (auto MeshRendererResult = Duplicated->SetMeshRenderer(MeshRenderer->value()); !MeshRendererResult)
+			{
+				(void)DestroyEntity(*Duplicated);
+				return std::unexpected(MeshRendererResult.error());
+			}
 		}
 
 		const auto Parent = Source.GetParent();
@@ -389,6 +408,56 @@ namespace PulseForge
 			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have a camera component"));
 
 		Storage->Registry.remove<CameraComponent>(*Native);
+		return {};
+	}
+
+	std::expected<std::optional<MeshRendererComponent>, SceneError> Entity::GetMeshRenderer() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read the mesh renderer of an invalid entity"));
+		if (!Storage->Registry.all_of<MeshRendererComponent>(*Native))
+			return std::optional<MeshRendererComponent>{};
+		return std::optional<MeshRendererComponent>{ Storage->Registry.get<MeshRendererComponent>(*Native) };
+	}
+
+	std::expected<void, SceneError> Entity::SetMeshRenderer(const MeshRendererComponent& MeshRenderer) const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add a mesh renderer to an invalid entity"));
+		if (MeshRenderer.MeshAsset.IsNil())
+			return std::unexpected(MakeSceneError(
+				SceneErrorCode::InvalidAssetReference,
+				"Mesh renderer requires a non-nil mesh asset UUID"));
+
+		try
+		{
+			Storage->Registry.emplace_or_replace<MeshRendererComponent>(*Native, MeshRenderer);
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{
+				SceneErrorCode::StorageFailure,
+				std::string("Could not set mesh renderer component: ") + Exception.what() });
+		}
+	}
+
+	std::expected<void, SceneError> Entity::RemoveMeshRenderer() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(
+				SceneErrorCode::InvalidEntity,
+				"Cannot remove a mesh renderer from an invalid entity"));
+		if (!Storage->Registry.all_of<MeshRendererComponent>(*Native))
+			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have a mesh renderer component"));
+
+		Storage->Registry.remove<MeshRendererComponent>(*Native);
 		return {};
 	}
 
