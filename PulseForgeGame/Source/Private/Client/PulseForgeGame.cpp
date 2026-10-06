@@ -2,6 +2,7 @@
 #include "Assets/AssetRegistry.h"
 #include "Assets/MaterialAssetCache.h"
 #include "Assets/MeshAssetCache.h"
+#include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
 #include "Assets/TextureAssetCache.h"
 #include "Core/Application.h"
@@ -56,23 +57,23 @@ public:
 		if (PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan)
 		{
 			const std::filesystem::path ProjectRoot = std::filesystem::current_path();
-			if (auto RegistryResult = m_AssetRegistry.Rebuild(ProjectRoot); !RegistryResult)
-			{
-				const std::string Error = RegistryResult.error().Issues.empty()
-					? "unknown registry error"
-					: RegistryResult.error().Issues.front().Message;
-				throw std::runtime_error("Could not build sample asset registry: " + Error);
-			}
-			LoadValidationScene(ProjectRoot);
+			auto OpenedProject = PulseForge::Project::Open(ProjectRoot / "PulseForgeGame.pfproj");
+			if (!OpenedProject)
+				throw std::runtime_error("Could not open sample project: " + OpenedProject.error().Message);
+			m_Project.emplace(std::move(*OpenedProject));
+			if (!m_Project->GetDescription().StartScene)
+				throw std::runtime_error("Sample project does not specify a startup scene asset");
+			const PulseForge::AssetRegistry& Registry = m_Project->GetAssetRegistry();
+			LoadValidationScene(ProjectRoot, Registry, *m_Project->GetDescription().StartScene);
 			m_MeshAssetCache = std::make_unique<PulseForge::MeshAssetCache>(
 				PulseForge::Application::Get(),
 				ProjectRoot,
-				m_AssetRegistry);
+				Registry);
 			m_TextureAssetCache = std::make_unique<PulseForge::TextureAssetCache>(
 				PulseForge::Application::Get(),
 				ProjectRoot,
-				m_AssetRegistry);
-			m_MaterialAssetCache = std::make_unique<PulseForge::MaterialAssetCache>(ProjectRoot, m_AssetRegistry);
+				Registry);
+			m_MaterialAssetCache = std::make_unique<PulseForge::MaterialAssetCache>(ProjectRoot, Registry);
 
 			const auto [FramebufferWidth, FramebufferHeight] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
 			if (FramebufferWidth == 0 || FramebufferHeight == 0)
@@ -314,12 +315,12 @@ public:
 	}
 
 private:
-	void LoadValidationScene(const std::filesystem::path& ProjectRoot)
+	void LoadValidationScene(
+		const std::filesystem::path& ProjectRoot,
+		const PulseForge::AssetRegistry& Registry,
+		const PulseForge::AssetID& SceneAsset)
 	{
-		const auto SceneAsset = PulseForge::UUID::Parse("b101a2e7-582d-4dfb-ae1e-8ce41fb375ce");
-		if (!SceneAsset)
-			throw std::runtime_error(SceneAsset.error().Message);
-		if (auto LoadResult = PulseForge::SceneAssetService::Load(*SceneAsset, ProjectRoot, m_AssetRegistry, m_Scene);
+		if (auto LoadResult = PulseForge::SceneAssetService::Load(SceneAsset, ProjectRoot, Registry, m_Scene);
 			!LoadResult)
 			throw std::runtime_error("Could not load validation scene: " + LoadResult.error().Message);
 
@@ -408,7 +409,7 @@ private:
 
 	PulseForge::Scene m_Scene;
 	PulseForge::UUID m_CameraEntity;
-	PulseForge::AssetRegistry m_AssetRegistry;
+	std::optional<PulseForge::Project> m_Project;
 	std::unique_ptr<PulseForge::MeshAssetCache> m_MeshAssetCache;
 	std::unique_ptr<PulseForge::TextureAssetCache> m_TextureAssetCache;
 	std::unique_ptr<PulseForge::MaterialAssetCache> m_MaterialAssetCache;

@@ -12,6 +12,7 @@
 #include "Assets/MaterialAsset.h"
 #include "Assets/MaterialAssetCache.h"
 #include "Assets/MaterialAssetService.h"
+#include "Assets/Project.h"
 #include "Assets/PrefabAssetService.h"
 #include "Assets/PrefabSerializer.h"
 #include "Assets/SceneAssetService.h"
@@ -2205,6 +2206,91 @@ namespace
 		}
 	}
 
+	void TestProjectFiles(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const auto ProjectIdentifier = UUID::Generate();
+		PF_CHECK(Tests, ProjectIdentifier.has_value());
+		if (!ProjectIdentifier)
+			return;
+
+		std::error_code FileError;
+		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const std::filesystem::path Root = TemporaryDirectory / ("PulseForgeProject-" + ProjectIdentifier->ToString());
+		const std::filesystem::path RelocatedRoot = Root.parent_path() / (Root.filename().string() + "-relocated");
+		struct ProjectCleanup
+		{
+			std::filesystem::path First;
+			std::filesystem::path Second;
+			~ProjectCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(First, Error);
+				Error.clear();
+				std::filesystem::remove_all(Second, Error);
+			}
+		} Cleanup{ Root, RelocatedRoot };
+
+		const std::filesystem::path ProjectFile = Root / "Example.pfproj";
+		auto Created = Project::Create(ProjectFile, "Example Project");
+		PF_CHECK(Tests, Created.has_value());
+		if (!Created)
+			return;
+		PF_CHECK(Tests, Created->GetDescription().Name == "Example Project");
+		PF_CHECK(Tests, !Created->GetDescription().StartScene.has_value());
+		PF_CHECK(Tests, std::filesystem::is_directory(Root / "Assets"));
+		PF_CHECK(Tests, !Project::Create(ProjectFile, "Duplicate Project"));
+		PF_CHECK(Tests, !ProjectSerializer::Deserialize("{broken"));
+		PF_CHECK(Tests, !ProjectSerializer::Deserialize("{\"format\":\"PulseForgeProject\",\"version\":99}"));
+
+		const std::filesystem::path ScenesDirectory = Root / "Assets" / "Scenes";
+		std::filesystem::create_directories(ScenesDirectory, FileError);
+		PF_CHECK(Tests, !FileError);
+		const std::filesystem::path ScenePath = ScenesDirectory / "start.scene";
+		{
+			std::ofstream Output(ScenePath, std::ios::binary | std::ios::trunc);
+			Output << "{}";
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto SceneMetadata = AssetMetadataSerializer::CreateForNewAsset(ScenePath);
+		PF_CHECK(Tests, SceneMetadata.has_value());
+		if (!SceneMetadata)
+			return;
+		PF_CHECK(Tests, Created->GetAssetRegistry().Rebuild(Root).has_value());
+		PF_CHECK(Tests, Created->SetStartScene(SceneMetadata->ID).has_value());
+		PF_CHECK(Tests, Created->GetDescription().StartScene == SceneMetadata->ID);
+
+		const std::filesystem::path WrongTypePath = Root / "Assets" / "not-a-scene.txt";
+		{
+			std::ofstream Output(WrongTypePath, std::ios::binary | std::ios::trunc);
+			Output << "asset";
+		}
+		const auto WrongTypeMetadata = AssetMetadataSerializer::CreateForNewAsset(WrongTypePath);
+		PF_CHECK(Tests, WrongTypeMetadata.has_value());
+		PF_CHECK(Tests, Created->GetAssetRegistry().Rebuild(Root).has_value());
+		if (WrongTypeMetadata)
+		{
+			const auto WrongType = Created->SetStartScene(WrongTypeMetadata->ID);
+			PF_CHECK(Tests, !WrongType && WrongType.error().Code == ProjectErrorCode::StartSceneWrongType);
+			PF_CHECK(Tests, Created->GetDescription().StartScene == SceneMetadata->ID);
+		}
+
+		Created = Project::Open(ProjectFile);
+		PF_CHECK(Tests, Created && Created->GetDescription().StartScene == SceneMetadata->ID);
+		if (!Created)
+			return;
+		std::filesystem::rename(Root, RelocatedRoot, FileError);
+		PF_CHECK(Tests, !FileError);
+		const auto RelocatedProject = Project::Open(RelocatedRoot / "Example.pfproj");
+		PF_CHECK(Tests, RelocatedProject.has_value());
+		PF_CHECK(Tests, RelocatedProject && RelocatedProject->GetAssetRegistry().Find(SceneMetadata->ID).has_value());
+		PF_CHECK(Tests, RelocatedProject && RelocatedProject->GetRootPath() == RelocatedRoot);
+	}
+
 	void TestAssetReferenceValidation(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -3396,6 +3482,7 @@ int main()
 	TestAssetOperations(Tests);
 	TestAssetImportOperation(Tests);
 	TestMaterialAssets(Tests);
+	TestProjectFiles(Tests);
 	TestAssetReferenceValidation(Tests);
 	TestGltfMeshImport(Tests);
 	TestImageAssetImport(Tests);
