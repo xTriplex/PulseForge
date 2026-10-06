@@ -133,6 +133,53 @@ namespace PulseForge
 		return m_Renderer->CreateBuffer(Description, InitialData);
 	}
 
+	MeshCreateResult Application::CreateMesh(const MeshDesc& Description)
+	{
+		const MeshValidationResult Validation = ValidateMeshDescription(Description);
+		if (!Validation)
+			return std::unexpected(Validation.error());
+
+		const std::string& DebugName = Description.DebugName;
+		BufferDesc VertexBufferDescription;
+		VertexBufferDescription.ByteSize = Description.VertexData.size();
+		VertexBufferDescription.Usage = BufferUsage::Vertex;
+		VertexBufferDescription.DebugName = DebugName.empty() ? "PulseForge mesh vertices" : DebugName + " vertices";
+		auto CreatedVertexBuffer = CreateBuffer(VertexBufferDescription, Description.VertexData);
+		if (!CreatedVertexBuffer)
+		{
+			return std::unexpected(MeshError{
+				MeshErrorCode::BufferCreationFailed,
+				"Mesh vertex buffer creation failed: " + CreatedVertexBuffer.error().Message
+			});
+		}
+
+		BufferHandle IndexBuffer;
+		if (!Description.Indices.empty())
+		{
+			const std::span<const std::byte> IndexData = std::as_bytes(Description.Indices);
+			BufferDesc IndexBufferDescription;
+			IndexBufferDescription.ByteSize = IndexData.size();
+			IndexBufferDescription.Usage = BufferUsage::Index;
+			IndexBufferDescription.DebugName = DebugName.empty() ? "PulseForge mesh indices" : DebugName + " indices";
+			auto CreatedIndexBuffer = CreateBuffer(IndexBufferDescription, IndexData);
+			if (!CreatedIndexBuffer)
+			{
+				return std::unexpected(MeshError{
+					MeshErrorCode::BufferCreationFailed,
+					"Mesh index buffer creation failed: " + CreatedIndexBuffer.error().Message
+				});
+			}
+			IndexBuffer = std::move(CreatedIndexBuffer.value());
+		}
+
+		return MeshHandle(new Mesh(
+			Description.VertexLayout,
+			Validation->VertexCount,
+			Validation->IndexCount,
+			std::move(CreatedVertexBuffer.value()),
+			std::move(IndexBuffer)));
+	}
+
 	TextureCreateResult Application::CreateTexture(
 		const TextureDesc& Description,
 		std::span<const std::byte> InitialData)
@@ -210,6 +257,53 @@ namespace PulseForge
 			return BindingValidation;
 
 		return m_Renderer->Draw(Pipeline, VertexBuffer, Arguments, BindingSets);
+	}
+
+	GraphicsResult Application::Draw(
+		const GraphicsPipeline& Pipeline,
+		const Mesh& Geometry,
+		const DrawArguments& Arguments,
+		std::span<const BindingSet* const> BindingSets)
+	{
+		const GraphicsResult Validation = ValidateMeshDrawArguments(
+			Arguments,
+			Pipeline.GetDescription(),
+			Geometry.GetVertexLayout(),
+			Geometry.GetVertexBuffer().GetDescription());
+		if (!Validation)
+			return Validation;
+
+		const GraphicsResult BindingValidation = ValidateDrawBindingSets(Pipeline.GetDescription(), BindingSets);
+		if (!BindingValidation)
+			return BindingValidation;
+
+		return m_Renderer->Draw(Pipeline, Geometry.GetVertexBuffer(), Arguments, BindingSets);
+	}
+
+	GraphicsResult Application::DrawIndexed(
+		const GraphicsPipeline& Pipeline,
+		const Mesh& Geometry,
+		const DrawIndexedArguments& Arguments,
+		std::span<const BindingSet* const> BindingSets)
+	{
+		const GraphicsResult Validation = ValidateIndexedDrawArguments(
+			Arguments,
+			Pipeline.GetDescription(),
+			Geometry.GetVertexLayout(),
+			Geometry.GetIndexCount());
+		if (!Validation)
+			return Validation;
+
+		const GraphicsResult BindingValidation = ValidateDrawBindingSets(Pipeline.GetDescription(), BindingSets);
+		if (!BindingValidation)
+			return BindingValidation;
+
+		return m_Renderer->DrawIndexed(
+			Pipeline,
+			Geometry.GetVertexBuffer(),
+			*Geometry.GetIndexBuffer(),
+			Arguments,
+			BindingSets);
 	}
 
 	Application& Application::Get()

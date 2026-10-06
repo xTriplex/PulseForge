@@ -37,6 +37,12 @@ namespace PulseForge
 			const Buffer& VertexBuffer,
 			const DrawArguments& Arguments,
 			std::span<const BindingSet* const> BindingSets) = 0;
+		virtual GraphicsResult DrawIndexed(
+			const GraphicsPipeline& Pipeline,
+			const Buffer& VertexBuffer,
+			const Buffer& IndexBuffer,
+			const DrawIndexedArguments& Arguments,
+			std::span<const BindingSet* const> BindingSets) = 0;
 
 		static std::unique_ptr<RendererBackend> Create(RendererAPI API, Window& Window);
 	};

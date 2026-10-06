@@ -10,6 +10,7 @@
 #include "Renderer/Buffer.h"
 #include "Renderer/Binding.h"
 #include "Renderer/Graphics.h"
+#include "Renderer/Mesh.h"
 
 #include <memory>
 
@@ -33,6 +34,7 @@ namespace PulseForge
 		RendererAPI GetRendererAPI() const { return m_RendererAPI; }
 		// Renderer resources should be released before this Application is destroyed.
 		BufferCreateResult CreateBuffer(const BufferDesc& Description, std::span<const std::byte> InitialData = {});
+		MeshCreateResult CreateMesh(const MeshDesc& Description);
 		TextureCreateResult CreateTexture(const TextureDesc& Description, std::span<const std::byte> InitialData);
 		SamplerCreateResult CreateSampler(const SamplerDesc& Description);
 		BindingLayoutCreateResult CreateBindingLayout(const BindingLayoutDesc& Description);
@@ -43,6 +45,16 @@ namespace PulseForge
 			const GraphicsPipeline& Pipeline,
 			const Buffer& VertexBuffer,
 			const DrawArguments& Arguments,
+			std::span<const BindingSet* const> BindingSets = {});
+		GraphicsResult Draw(
+			const GraphicsPipeline& Pipeline,
+			const Mesh& Geometry,
+			const DrawArguments& Arguments,
+			std::span<const BindingSet* const> BindingSets = {});
+		GraphicsResult DrawIndexed(
+			const GraphicsPipeline& Pipeline,
+			const Mesh& Geometry,
+			const DrawIndexedArguments& Arguments,
 			std::span<const BindingSet* const> BindingSets = {});
 		static Application& Get();
 

@@ -93,6 +93,7 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/ImGui/UI.cpp
 	PulseForge/Source/Private/Renderer/OpenGLRenderer.cpp
 	PulseForge/Source/Private/Renderer/Buffer.cpp
+	PulseForge/Source/Private/Renderer/Mesh.cpp
 	PulseForge/Source/Private/Renderer/Texture.cpp
 	PulseForge/Source/Private/Renderer/Binding.cpp
 	PulseForge/Source/Private/Renderer/Graphics.cpp
@@ -134,7 +135,7 @@ target_link_libraries(PulseForge PRIVATE
 target_precompile_headers(PulseForge PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
 
 add_executable(PulseForgeGame PulseForgeGame/Source/Private/Client/PulseForgeGame.cpp)
-target_include_directories(PulseForgeGame PRIVATE PulseForgeGame/Source/Public)
+target_include_directories(PulseForgeGame PRIVATE PulseForgeGame/Source/Public PulseForge/Vendor/glm)
 target_compile_definitions(PulseForgeGame PRIVATE PF_PLATFORM_WINDOWS "PF_SAMPLE_SHADER_DIRECTORY=\"Shaders\"")
 if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "OpenGL")
 	target_compile_definitions(PulseForgeGame PRIVATE PF_SAMPLE_RENDERER_OPENGL)

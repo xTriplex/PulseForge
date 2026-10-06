@@ -150,6 +150,14 @@ namespace PulseForge
 		uint32_t FirstInstance = 0;
 	};
 
+	struct DrawIndexedArguments
+	{
+		uint32_t IndexCount = 0;
+		uint32_t InstanceCount = 1;
+		uint32_t FirstIndex = 0;
+		uint32_t FirstInstance = 0;
+	};
+
 	enum class GraphicsErrorCode : uint8_t
 	{
 		InvalidDescription,

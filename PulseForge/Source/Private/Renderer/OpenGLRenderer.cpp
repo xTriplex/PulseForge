@@ -186,6 +186,19 @@ namespace PulseForge
 			});
 		}
 
+		GraphicsResult DrawIndexed(
+			const GraphicsPipeline&,
+			const Buffer&,
+			const Buffer&,
+			const DrawIndexedArguments&,
+			std::span<const BindingSet* const>) override
+		{
+			return std::unexpected(GraphicsError{
+				GraphicsErrorCode::UnsupportedFeature,
+				"The transitional OpenGL backend does not support PulseForge indexed draw commands yet"
+			});
+		}
+
 	private:
 		GLFWwindow* m_NativeWindow = nullptr;
 	};

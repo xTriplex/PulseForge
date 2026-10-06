@@ -7,6 +7,7 @@
 #include "Renderer/Binding.h"
 #include "Renderer/Buffer.h"
 #include "Renderer/Graphics.h"
+#include "Renderer/Mesh.h"
 #include "Renderer/Vulkan/VulkanSupport.h"
 #include "Events/ApplicationEvent.h"
 #include "Events/Event.h"
@@ -539,6 +540,97 @@ namespace
 		PF_CHECK(Tests, !ValidateVertexLayout(InvalidSemantic).has_value());
 	}
 
+	void TestMeshDescriptionAndDrawValidation(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const std::array<float, 9> Vertices = {
+			0.0f, 0.5f, 0.0f,
+			0.5f, -0.5f, 0.0f,
+			-0.5f, -0.5f, 0.0f
+		};
+		const std::array<uint32_t, 3> Indices = { 0, 1, 2 };
+		MeshDesc Description;
+		Description.VertexLayout.Stride = sizeof(float) * 3;
+		Description.VertexLayout.Attributes = { { VertexSemantic::Position, VertexFormat::Float3, 0 } };
+		Description.VertexData = std::as_bytes(std::span(Vertices));
+		Description.Indices = Indices;
+		Description.DebugName = "Test indexed mesh";
+
+		const MeshValidationResult ValidMesh = ValidateMeshDescription(Description);
+		PF_CHECK(Tests, ValidMesh.has_value());
+		PF_CHECK(Tests, ValidMesh && ValidMesh->VertexCount == 3 && ValidMesh->IndexCount == 3);
+		const uint32_t ValidatedIndexCount = ValidMesh ? ValidMesh->IndexCount : 0;
+
+		auto EmptyVertices = Description;
+		EmptyVertices.VertexData = {};
+		const auto EmptyVertexResult = ValidateMeshDescription(EmptyVertices);
+		PF_CHECK(Tests, !EmptyVertexResult.has_value());
+		PF_CHECK(Tests, EmptyVertexResult.error().Code == MeshErrorCode::InvalidVertexData);
+
+		auto InvalidLayout = Description;
+		InvalidLayout.VertexLayout.Stride = 0;
+		PF_CHECK(Tests, !ValidateMeshDescription(InvalidLayout).has_value());
+
+		std::array<std::byte, sizeof(Vertices) + 1> TrailingVertexByte{};
+		auto MisalignedVertexData = Description;
+		MisalignedVertexData.VertexData = TrailingVertexByte;
+		PF_CHECK(Tests, !ValidateMeshDescription(MisalignedVertexData).has_value());
+
+		const std::array<uint32_t, 3> OutOfRangeIndices = { 0, 1, 3 };
+		auto InvalidIndices = Description;
+		InvalidIndices.Indices = OutOfRangeIndices;
+		const auto InvalidIndexResult = ValidateMeshDescription(InvalidIndices);
+		PF_CHECK(Tests, !InvalidIndexResult.has_value());
+		PF_CHECK(Tests, InvalidIndexResult.error().Code == MeshErrorCode::InvalidIndexData);
+
+		GraphicsPipelineDesc Pipeline = MakeTestPipelineDescription();
+		Pipeline.VertexLayout = Description.VertexLayout;
+		const DrawIndexedArguments IndexedTriangle{ 3, 1, 0, 0 };
+		PF_CHECK(Tests, ValidateIndexedDrawArguments(
+			IndexedTriangle,
+			Pipeline,
+			Description.VertexLayout,
+			ValidatedIndexCount).has_value());
+
+		auto IndexRangePastEnd = IndexedTriangle;
+		IndexRangePastEnd.FirstIndex = 2;
+		PF_CHECK(Tests, !ValidateIndexedDrawArguments(
+			IndexRangePastEnd,
+			Pipeline,
+			Description.VertexLayout,
+			ValidatedIndexCount).has_value());
+		PF_CHECK(Tests, !ValidateIndexedDrawArguments(
+			IndexedTriangle,
+			Pipeline,
+			Description.VertexLayout,
+			0).has_value());
+
+		auto ZeroIndexedInstances = IndexedTriangle;
+		ZeroIndexedInstances.InstanceCount = 0;
+		PF_CHECK(Tests, !ValidateIndexedDrawArguments(
+			ZeroIndexedInstances,
+			Pipeline,
+			Description.VertexLayout,
+			ValidatedIndexCount).has_value());
+
+		auto MismatchedPipeline = Pipeline;
+		MismatchedPipeline.VertexLayout.Attributes[0].Offset = sizeof(float);
+		PF_CHECK(Tests, !ValidateIndexedDrawArguments(
+			IndexedTriangle,
+			MismatchedPipeline,
+			Description.VertexLayout,
+			ValidatedIndexCount).has_value());
+
+		const BufferDesc VertexBuffer{ Description.VertexData.size(), BufferUsage::Vertex, "Test mesh vertices" };
+		const DrawArguments Triangle{ 3, 1, 0, 0 };
+		PF_CHECK(Tests, ValidateMeshDrawArguments(Triangle, Pipeline, Description.VertexLayout, VertexBuffer).has_value());
+
+		auto NonIndexedDescription = Description;
+		NonIndexedDescription.Indices = {};
+		const auto NonIndexedMesh = ValidateMeshDescription(NonIndexedDescription);
+		PF_CHECK(Tests, NonIndexedMesh && NonIndexedMesh->VertexCount == 3 && NonIndexedMesh->IndexCount == 0);
+	}
+
 	void TestGraphicsPipelineAndDrawValidation(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -600,7 +692,7 @@ namespace
 	{
 		using namespace PulseForge;
 		BindingLayoutDesc LayoutDescription;
-		LayoutDescription.Visibility = ShaderStage::Fragment;
+		LayoutDescription.Visibility = ShaderVisibility::Fragment;
 		LayoutDescription.Items = { { BindingResourceType::ConstantBuffer, 0 } };
 		LayoutDescription.DebugName = "Test fragment constants";
 		PF_CHECK(Tests, ValidateBindingLayout(LayoutDescription).has_value());
@@ -610,8 +702,12 @@ namespace
 		PF_CHECK(Tests, !ValidateBindingLayout(DuplicateSlot).has_value());
 
 		auto InvalidVisibility = LayoutDescription;
-		InvalidVisibility.Visibility = static_cast<ShaderStage>(0xff);
+		InvalidVisibility.Visibility = static_cast<ShaderVisibility>(0xff);
 		PF_CHECK(Tests, !ValidateBindingLayout(InvalidVisibility).has_value());
+
+		auto SharedVisibility = LayoutDescription;
+		SharedVisibility.Visibility = ShaderVisibility::AllGraphics;
+		PF_CHECK(Tests, ValidateBindingLayout(SharedVisibility).has_value());
 
 		auto UnsupportedType = LayoutDescription;
 		UnsupportedType.Items[0].Type = static_cast<BindingResourceType>(0xff);
@@ -711,7 +807,7 @@ namespace
 	{
 		using namespace PulseForge;
 		BindingLayoutDesc LayoutDescription;
-		LayoutDescription.Visibility = ShaderStage::Fragment;
+		LayoutDescription.Visibility = ShaderVisibility::Fragment;
 		LayoutDescription.Items = {
 			{ BindingResourceType::Texture2D, 0 },
 			{ BindingResourceType::Sampler, 0 },
@@ -839,6 +935,7 @@ int main()
 	TestBufferDescriptionValidation(Tests);
 	TestShaderDescriptionAndSpirVValidation(Tests);
 	TestVertexLayoutValidation(Tests);
+	TestMeshDescriptionAndDrawValidation(Tests);
 	TestGraphicsPipelineAndDrawValidation(Tests);
 	TestConstantBufferBindingValidation(Tests);
 	TestTextureAndSamplerValidation(Tests);

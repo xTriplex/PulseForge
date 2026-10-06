@@ -14,6 +14,9 @@
 #include <stdexcept>
 #include <vector>
 
+#include <glm/ext/matrix_clip_space.hpp>
+#include <glm/ext/matrix_transform.hpp>
+
 namespace
 {
 	std::vector<std::byte> ReadShaderBytecode(const std::filesystem::path& Path)
@@ -47,33 +50,67 @@ public:
 			float Color[3];
 			float TexCoord[2];
 		};
-		const std::array<VertexPositionColorTexCoord, 6> InitialVertices = {{
-			// Submit the smaller, nearer red triangle first.
-			{ { 0.0f, 0.32f, 0.2f }, { 1.0f, 0.08f, 0.08f }, { 0.5f, 0.0f } },
-			{ { 0.32f, -0.25f, 0.2f }, { 1.0f, 0.08f, 0.08f }, { 1.0f, 1.0f } },
-			{ { -0.32f, -0.25f, 0.2f }, { 1.0f, 0.08f, 0.08f }, { 0.0f, 1.0f } },
-			// Submit a larger, farther blue triangle afterward. Depth testing must preserve
-			// the near triangle where the two overlap.
-			{ { 0.0f, 0.72f, 0.8f }, { 0.08f, 0.2f, 1.0f }, { 0.5f, 0.0f } },
-			{ { 0.72f, -0.64f, 0.8f }, { 0.08f, 0.2f, 1.0f }, { 1.0f, 1.0f } },
-			{ { -0.72f, -0.64f, 0.8f }, { 0.08f, 0.2f, 1.0f }, { 0.0f, 1.0f } }
+		const std::array<VertexPositionColorTexCoord, 24> CubeVertices = {{
+			{ { -0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
+			{ {  0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
+			{ {  0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
+			{ { -0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
+
+			{ {  0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
+			{ { -0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
+			{ { -0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
+			{ {  0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
+
+			{ {  0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
+			{ {  0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
+			{ {  0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
+			{ {  0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
+
+			{ { -0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
+			{ { -0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
+			{ { -0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
+			{ { -0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
+
+			{ { -0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
+			{ {  0.5f,  0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
+			{ {  0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
+			{ { -0.5f,  0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } },
+
+			{ { -0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f } },
+			{ {  0.5f, -0.5f, -0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f } },
+			{ {  0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 1.0f, 0.0f } },
+			{ { -0.5f, -0.5f,  0.5f }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f } }
 		}};
-		PulseForge::BufferDesc BufferDescription;
-		BufferDescription.ByteSize = sizeof(InitialVertices);
-		BufferDescription.Usage = PulseForge::BufferUsage::Vertex;
-		BufferDescription.DebugName = "PulseForge sample vertex buffer";
+		const std::array<uint32_t, 36> CubeIndices = {{
+			0, 1, 2, 0, 2, 3,
+			4, 5, 6, 4, 6, 7,
+			8, 9, 10, 8, 10, 11,
+			12, 13, 14, 12, 14, 15,
+			16, 17, 18, 16, 18, 19,
+			20, 21, 22, 20, 22, 23
+		}};
 
-		auto CreatedBuffer = PulseForge::Application::Get().CreateBuffer(
-			BufferDescription,
-			std::as_bytes(std::span(InitialVertices)));
-		if (!CreatedBuffer)
-			throw std::runtime_error(CreatedBuffer.error().Message);
-
-		m_VertexBuffer = std::move(CreatedBuffer.value());
-		PF_INFO("Created sample renderer buffer ({0} bytes)", BufferDescription.ByteSize);
+		PulseForge::MeshDesc MeshDescription;
+		MeshDescription.VertexLayout.Stride = sizeof(VertexPositionColorTexCoord);
+		MeshDescription.VertexLayout.Attributes = {
+			{ PulseForge::VertexSemantic::Position, PulseForge::VertexFormat::Float3, offsetof(VertexPositionColorTexCoord, Position) },
+			{ PulseForge::VertexSemantic::Color, PulseForge::VertexFormat::Float3, offsetof(VertexPositionColorTexCoord, Color) },
+			{ PulseForge::VertexSemantic::TexCoord, PulseForge::VertexFormat::Float2, offsetof(VertexPositionColorTexCoord, TexCoord) }
+		};
+		MeshDescription.VertexData = std::as_bytes(std::span(CubeVertices));
+		MeshDescription.Indices = CubeIndices;
+		MeshDescription.DebugName = "PulseForge sample textured cube";
 
 		if (PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan)
 		{
+			auto CreatedMesh = PulseForge::Application::Get().CreateMesh(MeshDescription);
+			if (!CreatedMesh)
+				throw std::runtime_error(CreatedMesh.error().Message);
+			m_Mesh = std::move(CreatedMesh.value());
+			PF_INFO("Created indexed sample mesh ({0} vertices, {1} indices)",
+				m_Mesh->GetVertexCount(),
+				m_Mesh->GetIndexCount());
+
 			const std::filesystem::path ShaderDirectory =
 				std::filesystem::current_path() / PF_SAMPLE_SHADER_DIRECTORY;
 			auto VertexBytecode = ReadShaderBytecode(ShaderDirectory / "Triangle.vs.spv");
@@ -82,7 +119,7 @@ public:
 			PulseForge::ShaderDesc VertexShaderDescription;
 			VertexShaderDescription.Stage = PulseForge::ShaderStage::Vertex;
 			VertexShaderDescription.EntryPoint = "VSMain";
-			VertexShaderDescription.DebugName = "PulseForge triangle vertex shader";
+			VertexShaderDescription.DebugName = "PulseForge cube vertex shader";
 			auto CreatedVertexShader = PulseForge::Application::Get().CreateShader(
 				VertexShaderDescription,
 				VertexBytecode);
@@ -93,13 +130,34 @@ public:
 			PulseForge::ShaderDesc FragmentShaderDescription;
 			FragmentShaderDescription.Stage = PulseForge::ShaderStage::Fragment;
 			FragmentShaderDescription.EntryPoint = "PSMain";
-			FragmentShaderDescription.DebugName = "PulseForge triangle fragment shader";
+			FragmentShaderDescription.DebugName = "PulseForge cube fragment shader";
 			auto CreatedFragmentShader = PulseForge::Application::Get().CreateShader(
 				FragmentShaderDescription,
 				FragmentBytecode);
 			if (!CreatedFragmentShader)
 				throw std::runtime_error(CreatedFragmentShader.error().Message);
 			m_FragmentShader = std::move(CreatedFragmentShader.value());
+
+			const glm::mat4 Model =
+				glm::rotate(glm::mat4(1.0f), 0.48f, glm::vec3(0.0f, 1.0f, 0.0f)) *
+				glm::rotate(glm::mat4(1.0f), -0.31f, glm::vec3(1.0f, 0.0f, 0.0f));
+			const glm::mat4 View = glm::lookAtRH(
+				glm::vec3(2.2f, 1.7f, 3.1f),
+				glm::vec3(0.0f),
+				glm::vec3(0.0f, 1.0f, 0.0f));
+			glm::mat4 Projection = glm::perspectiveRH_ZO(0.785398163f, 1280.0f / 720.0f, 0.1f, 20.0f);
+			Projection[1][1] *= -1.0f;
+			const glm::mat4 ModelViewProjection = Projection * View * Model;
+			PulseForge::BufferDesc TransformBufferDescription;
+			TransformBufferDescription.ByteSize = sizeof(ModelViewProjection);
+			TransformBufferDescription.Usage = PulseForge::BufferUsage::Constant;
+			TransformBufferDescription.DebugName = "PulseForge sample transform constants";
+			auto CreatedTransformBuffer = PulseForge::Application::Get().CreateBuffer(
+				TransformBufferDescription,
+				std::as_bytes(std::span(&ModelViewProjection, 1)));
+			if (!CreatedTransformBuffer)
+				throw std::runtime_error(CreatedTransformBuffer.error().Message);
+			m_TransformBuffer = std::move(CreatedTransformBuffer.value());
 
 			const std::array<uint8_t, 16> TexturePixels = {{
 				255, 255, 255, 255, 255, 150, 40, 255,
@@ -141,13 +199,14 @@ public:
 			m_ConstantBuffer = std::move(CreatedConstantBuffer.value());
 
 			PulseForge::BindingLayoutDesc BindingLayoutDescription;
-			BindingLayoutDescription.Visibility = PulseForge::ShaderStage::Fragment;
+			BindingLayoutDescription.Visibility = PulseForge::ShaderVisibility::AllGraphics;
 			BindingLayoutDescription.Items = {
 				{ PulseForge::BindingResourceType::Texture2D, 0 },
 				{ PulseForge::BindingResourceType::Sampler, 0 },
-				{ PulseForge::BindingResourceType::ConstantBuffer, 0 }
+				{ PulseForge::BindingResourceType::ConstantBuffer, 0 },
+				{ PulseForge::BindingResourceType::ConstantBuffer, 1 }
 			};
-			BindingLayoutDescription.DebugName = "PulseForge sample fragment resources";
+			BindingLayoutDescription.DebugName = "PulseForge sample shader resources";
 			auto CreatedBindingLayout = PulseForge::Application::Get().CreateBindingLayout(BindingLayoutDescription);
 			if (!CreatedBindingLayout)
 				throw std::runtime_error(CreatedBindingLayout.error().Message);
@@ -158,6 +217,7 @@ public:
 			BindingSetDescription.Textures.push_back({ 0, std::cref(*m_Texture) });
 			BindingSetDescription.Samplers.push_back({ 0, std::cref(*m_Sampler) });
 			BindingSetDescription.Buffers.push_back({ 0, std::cref(*m_ConstantBuffer) });
+			BindingSetDescription.Buffers.push_back({ 1, std::cref(*m_TransformBuffer) });
 			auto CreatedBindingSet = PulseForge::Application::Get().CreateBindingSet(BindingSetDescription);
 			if (!CreatedBindingSet)
 				throw std::runtime_error(CreatedBindingSet.error().Message);
@@ -167,17 +227,12 @@ public:
 			PipelineDescription.VertexShader = m_VertexShader;
 			PipelineDescription.FragmentShader = m_FragmentShader;
 			PipelineDescription.BindingLayouts = { m_BindingLayout };
-			PipelineDescription.VertexLayout.Stride = sizeof(VertexPositionColorTexCoord);
-			PipelineDescription.VertexLayout.Attributes = {
-				{ PulseForge::VertexSemantic::Position, PulseForge::VertexFormat::Float3, offsetof(VertexPositionColorTexCoord, Position) },
-				{ PulseForge::VertexSemantic::Color, PulseForge::VertexFormat::Float3, offsetof(VertexPositionColorTexCoord, Color) },
-				{ PulseForge::VertexSemantic::TexCoord, PulseForge::VertexFormat::Float2, offsetof(VertexPositionColorTexCoord, TexCoord) }
-			};
+			PipelineDescription.VertexLayout = MeshDescription.VertexLayout;
 			PipelineDescription.Rasterizer.Cull = PulseForge::CullMode::None;
 			PipelineDescription.Depth.TestEnabled = true;
 			PipelineDescription.Depth.WriteEnabled = true;
 			PipelineDescription.Depth.Compare = PulseForge::DepthCompareOperation::Less;
-			PipelineDescription.DebugName = "PulseForge triangle pipeline";
+			PipelineDescription.DebugName = "PulseForge textured cube pipeline";
 			auto CreatedPipeline = PulseForge::Application::Get().CreateGraphicsPipeline(PipelineDescription);
 			if (!CreatedPipeline)
 				throw std::runtime_error(CreatedPipeline.error().Message);
@@ -192,32 +247,19 @@ public:
 
 	void OnRender() override
 	{
-		if (!m_Pipeline || m_DrawFailed)
+		if (!m_Pipeline || !m_Mesh || m_DrawFailed)
 			return;
 
-		const PulseForge::DrawArguments NearTriangle{ 3, 1, 0, 0 };
-		const PulseForge::DrawArguments FarTriangle{ 3, 1, 3, 0 };
+		const PulseForge::DrawIndexedArguments Arguments{ m_Mesh->GetIndexCount(), 1, 0, 0 };
 		const std::array<const PulseForge::BindingSet*, 1> BindingSets = { m_BindingSet.get() };
-		auto NearDraw = PulseForge::Application::Get().Draw(
+		auto DrawResult = PulseForge::Application::Get().DrawIndexed(
 			*m_Pipeline,
-			*m_VertexBuffer,
-			NearTriangle,
+			*m_Mesh,
+			Arguments,
 			BindingSets);
-		if (!NearDraw)
+		if (!DrawResult)
 		{
-			PF_ERROR("Near depth-test sample draw failed: {0}", NearDraw.error().Message);
-			m_DrawFailed = true;
-			return;
-		}
-
-		auto FarDraw = PulseForge::Application::Get().Draw(
-			*m_Pipeline,
-			*m_VertexBuffer,
-			FarTriangle,
-			BindingSets);
-		if (!FarDraw)
-		{
-			PF_ERROR("Far depth-test sample draw failed: {0}", FarDraw.error().Message);
+			PF_ERROR("Sample indexed mesh draw failed: {0}", DrawResult.error().Message);
 			m_DrawFailed = true;
 			return;
 		}
@@ -225,7 +267,7 @@ public:
 		if (!m_LoggedDepthTestDraws)
 		{
 			m_LoggedDepthTestDraws = true;
-			PF_INFO("Submitted overlapping depth-tested triangles: near first, far second");
+			PF_INFO("Submitted indexed textured cube mesh with depth testing");
 		}
 	}
 
@@ -251,10 +293,11 @@ public:
 	}
 
 private:
-	PulseForge::BufferHandle m_VertexBuffer;
+	PulseForge::MeshHandle m_Mesh;
 	PulseForge::TextureHandle m_Texture;
 	PulseForge::SamplerHandle m_Sampler;
 	PulseForge::BufferHandle m_ConstantBuffer;
+	PulseForge::BufferHandle m_TransformBuffer;
 	PulseForge::BindingLayoutHandle m_BindingLayout;
 	PulseForge::BindingSetHandle m_BindingSet;
 	PulseForge::ShaderHandle m_VertexShader;

@@ -15,8 +15,10 @@ namespace PulseForge
 
 	std::expected<void, BindingError> ValidateBindingLayout(const BindingLayoutDesc& Description)
 	{
-		if (Description.Visibility != ShaderStage::Vertex && Description.Visibility != ShaderStage::Fragment)
-			return MakeError(BindingErrorCode::InvalidLayout, "Binding layout visibility must be Vertex or Fragment");
+		if (Description.Visibility != ShaderVisibility::Vertex &&
+			Description.Visibility != ShaderVisibility::Fragment &&
+			Description.Visibility != ShaderVisibility::AllGraphics)
+			return MakeError(BindingErrorCode::InvalidLayout, "Binding layout visibility is not supported");
 
 		if (Description.Items.empty())
 			return MakeError(BindingErrorCode::InvalidLayout, "Binding layout must contain at least one item");

@@ -3,6 +3,11 @@ cbuffer RenderTint : register(b0)
 	float4 Tint;
 };
 
+cbuffer Transform : register(b1)
+{
+	float4x4 ModelViewProjection;
+};
+
 Texture2D DiffuseTexture : register(t0);
 SamplerState DiffuseSampler : register(s0);
 
@@ -23,7 +28,7 @@ struct VertexOutput
 VertexOutput VSMain(VertexInput Input)
 {
 	VertexOutput Output;
-	Output.Position = float4(Input.Position, 1.0f);
+	Output.Position = mul(ModelViewProjection, float4(Input.Position, 1.0f));
 	Output.Color = Input.Color;
 	Output.TexCoord = Input.TexCoord;
 	return Output;

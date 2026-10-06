@@ -21,6 +21,13 @@ namespace PulseForge
 		ConstantBuffer
 	};
 
+	enum class ShaderVisibility : uint8_t
+	{
+		Vertex,
+		Fragment,
+		AllGraphics
+	};
+
 	struct BindingLayoutItemDesc
 	{
 		BindingResourceType Type = BindingResourceType::ConstantBuffer;
@@ -29,7 +36,7 @@ namespace PulseForge
 
 	struct BindingLayoutDesc
 	{
-		ShaderStage Visibility = ShaderStage::Fragment;
+		ShaderVisibility Visibility = ShaderVisibility::Fragment;
 		std::vector<BindingLayoutItemDesc> Items;
 		std::string DebugName;
 	};

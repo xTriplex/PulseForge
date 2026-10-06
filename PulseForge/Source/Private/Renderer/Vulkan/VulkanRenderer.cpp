@@ -669,11 +669,23 @@ namespace PulseForge
 
 		BindingLayoutCreateResult CreateBindingLayout(const BindingLayoutDesc& Description) override
 		{
+			nvrhi::ShaderType Visibility = nvrhi::ShaderType::Pixel;
+			switch (Description.Visibility)
+			{
+				case ShaderVisibility::Vertex:
+					Visibility = nvrhi::ShaderType::Vertex;
+					break;
+				case ShaderVisibility::Fragment:
+					Visibility = nvrhi::ShaderType::Pixel;
+					break;
+				case ShaderVisibility::AllGraphics:
+					Visibility = nvrhi::ShaderType::AllGraphics;
+					break;
+			}
+
 			nvrhi::BindingLayoutDesc NativeDescription;
 			NativeDescription
-				.setVisibility(Description.Visibility == ShaderStage::Vertex
-					? nvrhi::ShaderType::Vertex
-					: nvrhi::ShaderType::Pixel)
+				.setVisibility(Visibility)
 				.setBindingOffsets(nvrhi::VulkanBindingOffsets()
 					.setShaderResourceOffset(0)
 					.setSamplerOffset(128)
@@ -1143,57 +1155,13 @@ namespace PulseForge
 			const DrawArguments& Arguments,
 			std::span<const BindingSet* const> BindingSets) override
 		{
-			if (!m_FrameActive)
-			{
-				return std::unexpected(GraphicsError{
-					GraphicsErrorCode::InvalidFrameState,
-					"PulseForge draw commands may only be submitted during an active renderer frame"
-				});
-			}
-
-			const auto* NativePipeline = dynamic_cast<const VulkanGraphicsPipeline*>(&Pipeline);
-			const auto* NativeBuffer = dynamic_cast<const VulkanBuffer*>(&VertexBuffer);
-			if (!NativePipeline || !NativeBuffer)
-			{
-				return std::unexpected(GraphicsError{
-					GraphicsErrorCode::UnsupportedFeature,
-					"Vulkan draws require graphics pipelines and vertex buffers created by the active Vulkan renderer"
-				});
-			}
+			const GraphicsResult StateResult = SetDrawState(Pipeline, VertexBuffer, nullptr, BindingSets);
+			if (!StateResult)
+				return StateResult;
 
 			try
 			{
-				SwapchainImage& Image = m_SwapchainImages[m_AcquiredImageIndex];
-				const nvrhi::Viewport Viewport(
-					static_cast<float>(m_SwapchainExtent.width),
-					static_cast<float>(m_SwapchainExtent.height));
-				nvrhi::ViewportState ViewportState;
-				ViewportState.addViewportAndScissorRect(Viewport);
-
-				nvrhi::GraphicsState State;
-				State
-					.setPipeline(NativePipeline->GetNativePipeline())
-					.setFramebuffer(Image.Framebuffer)
-					.setViewport(ViewportState)
-					.addVertexBuffer(nvrhi::VertexBufferBinding()
-						.setBuffer(NativeBuffer->GetNativeBuffer())
-						.setSlot(0)
-						.setOffset(0));
-				for (const BindingSet* Binding : BindingSets)
-				{
-					const auto* NativeBindingSet = dynamic_cast<const VulkanBindingSet*>(Binding);
-					if (!NativeBindingSet)
-					{
-						return std::unexpected(GraphicsError{
-							GraphicsErrorCode::UnsupportedFeature,
-							"Vulkan draws require binding sets created by the active Vulkan renderer"
-						});
-					}
-					State.addBindingSet(NativeBindingSet->GetNativeBindingSet());
-				}
 				FrameContext& Frame = m_Frames[m_CurrentFrame];
-				Frame.CommandList->setGraphicsState(State);
-
 				nvrhi::DrawArguments NativeArguments;
 				NativeArguments
 					.setVertexCount(Arguments.VertexCount)
@@ -1216,7 +1184,122 @@ namespace PulseForge
 			}
 		}
 
+		GraphicsResult DrawIndexed(
+			const GraphicsPipeline& Pipeline,
+			const Buffer& VertexBuffer,
+			const Buffer& IndexBuffer,
+			const DrawIndexedArguments& Arguments,
+			std::span<const BindingSet* const> BindingSets) override
+		{
+			const GraphicsResult StateResult = SetDrawState(Pipeline, VertexBuffer, &IndexBuffer, BindingSets);
+			if (!StateResult)
+				return StateResult;
+
+			try
+			{
+				FrameContext& Frame = m_Frames[m_CurrentFrame];
+				nvrhi::DrawArguments NativeArguments;
+				NativeArguments
+					.setVertexCount(Arguments.IndexCount)
+					.setInstanceCount(Arguments.InstanceCount)
+					.setStartIndexLocation(Arguments.FirstIndex)
+					.setStartVertexLocation(0)
+					.setStartInstanceLocation(Arguments.FirstInstance);
+				Frame.CommandList->drawIndexed(NativeArguments);
+				if (!m_LoggedFirstDraw)
+				{
+					m_LoggedFirstDraw = true;
+					PF_CORE_INFO("Bound PulseForge vertex/index buffers and recorded the first NVRHI indexed geometry draw");
+				}
+				return {};
+			}
+			catch (const std::exception& Exception)
+			{
+				const std::string Message = std::string("Vulkan/NVRHI indexed draw recording failed: ") + Exception.what();
+				PF_CORE_ERROR("{0}", Message);
+				return std::unexpected(GraphicsError{ GraphicsErrorCode::BackendFailure, Message });
+			}
+		}
+
 	private:
+		GraphicsResult SetDrawState(
+			const GraphicsPipeline& Pipeline,
+			const Buffer& VertexBuffer,
+			const Buffer* IndexBuffer,
+			std::span<const BindingSet* const> BindingSets)
+		{
+			if (!m_FrameActive)
+			{
+				return std::unexpected(GraphicsError{
+					GraphicsErrorCode::InvalidFrameState,
+					"PulseForge draw commands may only be submitted during an active renderer frame"
+				});
+			}
+
+			const auto* NativePipeline = dynamic_cast<const VulkanGraphicsPipeline*>(&Pipeline);
+			const auto* NativeVertexBuffer = dynamic_cast<const VulkanBuffer*>(&VertexBuffer);
+			const auto* NativeIndexBuffer = IndexBuffer ? dynamic_cast<const VulkanBuffer*>(IndexBuffer) : nullptr;
+			if (!NativePipeline || !NativeVertexBuffer ||
+				(IndexBuffer && (!NativeIndexBuffer || IndexBuffer->GetDescription().Usage != BufferUsage::Index)))
+			{
+				return std::unexpected(GraphicsError{
+					GraphicsErrorCode::UnsupportedFeature,
+					"Vulkan draws require compatible resources created by the active Vulkan renderer"
+				});
+			}
+			if (VertexBuffer.GetDescription().Usage != BufferUsage::Vertex)
+				return std::unexpected(GraphicsError{ GraphicsErrorCode::InvalidDrawArguments, "Vulkan draw requires a vertex buffer" });
+
+			try
+			{
+				SwapchainImage& Image = m_SwapchainImages[m_AcquiredImageIndex];
+				const nvrhi::Viewport Viewport(
+					static_cast<float>(m_SwapchainExtent.width),
+					static_cast<float>(m_SwapchainExtent.height));
+				nvrhi::ViewportState ViewportState;
+				ViewportState.addViewportAndScissorRect(Viewport);
+
+				nvrhi::GraphicsState State;
+				State
+					.setPipeline(NativePipeline->GetNativePipeline())
+					.setFramebuffer(Image.Framebuffer)
+					.setViewport(ViewportState)
+					.addVertexBuffer(nvrhi::VertexBufferBinding()
+						.setBuffer(NativeVertexBuffer->GetNativeBuffer())
+						.setSlot(0)
+						.setOffset(0));
+				if (NativeIndexBuffer)
+				{
+					State.setIndexBuffer(nvrhi::IndexBufferBinding()
+						.setBuffer(NativeIndexBuffer->GetNativeBuffer())
+						.setFormat(nvrhi::Format::R32_UINT)
+						.setOffset(0));
+				}
+
+				for (const BindingSet* Binding : BindingSets)
+				{
+					const auto* NativeBindingSet = dynamic_cast<const VulkanBindingSet*>(Binding);
+					if (!NativeBindingSet)
+					{
+						return std::unexpected(GraphicsError{
+							GraphicsErrorCode::UnsupportedFeature,
+							"Vulkan draws require binding sets created by the active Vulkan renderer"
+						});
+					}
+					State.addBindingSet(NativeBindingSet->GetNativeBindingSet());
+				}
+
+				m_Frames[m_CurrentFrame].CommandList->setGraphicsState(State);
+				return {};
+			}
+			catch (const std::exception& Exception)
+			{
+				const std::string Message = std::string("Vulkan/NVRHI graphics state binding failed: ") + Exception.what();
+				PF_CORE_ERROR("{0}", Message);
+				return std::unexpected(GraphicsError{ GraphicsErrorCode::BackendFailure, Message });
+			}
+		}
+
 		struct FrameContext
 		{
 			vk::Semaphore ImageAvailable;
