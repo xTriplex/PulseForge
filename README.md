@@ -57,7 +57,7 @@ The OpenGL fallback supports the current bootstrap and ImGui path; the newer sha
 
 ## Scene API
 
-The engine provides UUID-backed `Scene` and non-owning `Entity` handles with tags, transforms, parent/child relationships, duplication, and deterministic entity enumeration. Entity transforms include a world-matrix query that composes the local transforms through the hierarchy.
+The engine provides UUID-backed `Scene` and non-owning `Entity` handles with tags, transforms, parent/child relationships, duplication, and deterministic entity enumeration. `SceneSerializer` reads and writes a versioned JSON representation; see [the scene format](Docs/SceneFormat.md).
 
 ## Tests
 

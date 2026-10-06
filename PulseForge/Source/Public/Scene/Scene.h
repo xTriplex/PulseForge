@@ -12,6 +12,8 @@
 
 namespace PulseForge
 {
+	class SceneSerializer;
+
 	// Scene is not internally synchronized; callers must serialize access across threads.
 	class PULSEFORGE_API Scene final
 	{
@@ -35,6 +37,7 @@ namespace PulseForge
 		[[nodiscard]] size_t GetEntityCount() const noexcept;
 
 	private:
+		friend class SceneSerializer;
 		std::shared_ptr<Detail::SceneStorage> m_Storage;
 	};
 }

@@ -101,6 +101,7 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanSupport.cpp
 	PulseForge/Source/Private/Scene/Scene.cpp
+	PulseForge/Source/Private/Scene/SceneSerializer.cpp
 	PulseForge/Source/Private/Scene/TransformComponent.cpp
 	PulseForge/Source/Private/Scene/UUID.cpp
 	PulseForge/Source/Private/Utils/stb_image.cpp
@@ -114,6 +115,7 @@ target_include_directories(PulseForge
 		PulseForge/Source
 		PulseForge/Source/Private
 		PulseForge/Vendor/entt/src
+		PulseForge/Vendor/json/include
 		PulseForge/Vendor/Glfw/include
 		PulseForge/Vendor/Glad/include
 		PulseForge/Vendor/imgui

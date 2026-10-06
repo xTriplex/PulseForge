@@ -11,6 +11,7 @@
 #include "Renderer/Mesh.h"
 #include "Renderer/Vulkan/VulkanSupport.h"
 #include "Scene/Scene.h"
+#include "Scene/SceneSerializer.h"
 #include "Scene/UUID.h"
 #include "Events/ApplicationEvent.h"
 #include "Events/Event.h"
@@ -794,6 +795,153 @@ namespace
 		PF_CHECK(Tests, !StaleHandle.GetTag().has_value());
 	}
 
+	void TestSceneSerializationRoundTrip(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		Scene Source;
+		const UUID RootId{ 0x2000000000000000ull, 2 };
+		const UUID ChildId{ 0x1000000000000000ull, 1 };
+		auto ChildResult = Source.CreateEntityWithUUID(ChildId, "Child \"one\"");
+		auto RootResult = Source.CreateEntityWithUUID(RootId, "Root");
+		PF_CHECK(Tests, ChildResult.has_value() && RootResult.has_value());
+		if (!ChildResult || !RootResult)
+			return;
+
+		Entity Child = *ChildResult;
+		Entity Root = *RootResult;
+		TransformComponent RootTransform;
+		RootTransform.Translation = { 3.0f, 0.0f, 0.0f };
+		TransformComponent ChildTransform;
+		ChildTransform.Translation = { 4.0f, 2.0f, 1.0f };
+		ChildTransform.Rotation = glm::quat(0.9238795f, 0.0f, 0.3826834f, 0.0f);
+		ChildTransform.Scale = { 2.0f, 2.0f, 2.0f };
+		PF_CHECK(Tests, Root.SetTransform(RootTransform).has_value());
+		PF_CHECK(Tests, Child.SetTransform(ChildTransform).has_value());
+		PF_CHECK(Tests, Child.SetParent(Root).has_value());
+
+		const auto Serialized = SceneSerializer::Serialize(Source);
+		PF_CHECK(Tests, Serialized.has_value());
+		if (!Serialized)
+			return;
+		PF_CHECK(Tests, Serialized->find("\"format\": \"PulseForgeScene\"") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 1") != std::string::npos);
+		const size_t ChildEntityPosition = Serialized->find("\"uuid\": \"" + ChildId.ToString() + "\"");
+		const size_t RootEntityPosition = Serialized->find("\"uuid\": \"" + RootId.ToString() + "\"");
+		PF_CHECK(Tests, ChildEntityPosition != std::string::npos && RootEntityPosition != std::string::npos &&
+			ChildEntityPosition < RootEntityPosition);
+
+		Scene Destination;
+		auto PreviousResult = Destination.CreateEntity("Previous scene");
+		PF_CHECK(Tests, PreviousResult.has_value());
+		if (!PreviousResult)
+			return;
+		Entity PreviousEntity = *PreviousResult;
+		const auto Loaded = SceneSerializer::Deserialize(*Serialized, Destination);
+		PF_CHECK(Tests, Loaded.has_value());
+		PF_CHECK(Tests, !PreviousEntity.IsValid());
+		PF_CHECK(Tests, Destination.GetEntityCount() == 2);
+
+		const auto LoadedRoot = Destination.FindEntity(RootId);
+		const auto LoadedChild = Destination.FindEntity(ChildId);
+		PF_CHECK(Tests, LoadedRoot.has_value() && LoadedChild.has_value());
+		if (!LoadedRoot || !LoadedChild)
+			return;
+
+		const auto LoadedTag = LoadedChild->GetTag();
+		const auto LoadedTransform = LoadedChild->GetTransform();
+		const auto LoadedParent = LoadedChild->GetParent();
+		PF_CHECK(Tests, LoadedTag && LoadedTag->Name == "Child \"one\"");
+		PF_CHECK(Tests, LoadedTransform && glm::all(glm::equal(LoadedTransform->Translation, ChildTransform.Translation)));
+		PF_CHECK(Tests, LoadedTransform && glm::all(glm::equal(LoadedTransform->Scale, ChildTransform.Scale)));
+		PF_CHECK(Tests, LoadedTransform && glm::abs(glm::length(LoadedTransform->Rotation) - 1.0f) < 0.0001f);
+		PF_CHECK(Tests, LoadedParent && LoadedParent->has_value() && **LoadedParent == *LoadedRoot);
+		const auto SerializedAgain = SceneSerializer::Serialize(Destination);
+		PF_CHECK(Tests, SerializedAgain && *SerializedAgain == *Serialized);
+
+		const auto DestinationRootBeforeFailure = Destination.FindEntity(RootId);
+		std::string UnsupportedVersion = *Serialized;
+		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 1");
+		PF_CHECK(Tests, VersionPosition != std::string::npos);
+		if (VersionPosition != std::string::npos)
+			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 1").size(), "\"version\": 99");
+		const auto UnsupportedVersionResult = SceneSerializer::Deserialize(UnsupportedVersion, Destination);
+		PF_CHECK(Tests, !UnsupportedVersionResult.has_value());
+		PF_CHECK(Tests, !UnsupportedVersionResult && UnsupportedVersionResult.error().Code == SceneSerializationErrorCode::UnsupportedVersion);
+		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+
+		std::string UnsupportedFormat = *Serialized;
+		const size_t FormatPosition = UnsupportedFormat.find("PulseForgeScene");
+		PF_CHECK(Tests, FormatPosition != std::string::npos);
+		if (FormatPosition != std::string::npos)
+			UnsupportedFormat.replace(FormatPosition, std::string("PulseForgeScene").size(), "OtherSceneFormat");
+		const auto UnsupportedFormatResult = SceneSerializer::Deserialize(UnsupportedFormat, Destination);
+		PF_CHECK(Tests, !UnsupportedFormatResult.has_value());
+		PF_CHECK(Tests, !UnsupportedFormatResult && UnsupportedFormatResult.error().Code == SceneSerializationErrorCode::UnsupportedFormat);
+		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+
+		std::string InvalidTransform = *Serialized;
+		const size_t TranslationPosition = InvalidTransform.find("\"translation\": [");
+		const size_t FirstTranslation = InvalidTransform.find("4.0", TranslationPosition);
+		PF_CHECK(Tests, TranslationPosition != std::string::npos && FirstTranslation != std::string::npos);
+		if (FirstTranslation != std::string::npos)
+			InvalidTransform.replace(FirstTranslation, 3, "\"bad\"");
+		const auto InvalidTransformResult = SceneSerializer::Deserialize(InvalidTransform, Destination);
+		PF_CHECK(Tests, !InvalidTransformResult.has_value());
+		PF_CHECK(Tests, !InvalidTransformResult && InvalidTransformResult.error().Code == SceneSerializationErrorCode::InvalidEntityData);
+		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+
+		std::string MissingParent = *Serialized;
+		const size_t ChildPosition = MissingParent.find(ChildId.ToString());
+		const size_t ParentPosition = MissingParent.find(RootId.ToString(), ChildPosition);
+		PF_CHECK(Tests, ChildPosition != std::string::npos && ParentPosition != std::string::npos);
+		if (ParentPosition != std::string::npos)
+			MissingParent.replace(ParentPosition, RootId.ToString().size(), UUID{ 0x3000000000000000ull, 3 }.ToString());
+		const auto MissingParentResult = SceneSerializer::Deserialize(MissingParent, Destination);
+		PF_CHECK(Tests, !MissingParentResult.has_value());
+		PF_CHECK(Tests, !MissingParentResult && MissingParentResult.error().Code == SceneSerializationErrorCode::MissingParent);
+		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+
+		std::string HierarchyCycle = *Serialized;
+		const size_t DetachedParentPosition = HierarchyCycle.find("\"parent\": null");
+		PF_CHECK(Tests, DetachedParentPosition != std::string::npos);
+		if (DetachedParentPosition != std::string::npos)
+		{
+			HierarchyCycle.replace(
+				DetachedParentPosition,
+				std::string("\"parent\": null").size(),
+				"\"parent\": \"" + ChildId.ToString() + "\"");
+		}
+		const auto HierarchyCycleResult = SceneSerializer::Deserialize(HierarchyCycle, Destination);
+		PF_CHECK(Tests, !HierarchyCycleResult.has_value());
+		PF_CHECK(Tests, !HierarchyCycleResult && HierarchyCycleResult.error().Code == SceneSerializationErrorCode::InvalidEntityData);
+		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+
+		std::string DuplicateUUID = *Serialized;
+		const std::string RootRecordPrefix = "\"uuid\": \"";
+		const size_t RootRecordPosition = DuplicateUUID.find(RootRecordPrefix + RootId.ToString() + "\"");
+		PF_CHECK(Tests, RootRecordPosition != std::string::npos);
+		if (RootRecordPosition != std::string::npos)
+			DuplicateUUID.replace(RootRecordPosition + RootRecordPrefix.size(), RootId.ToString().size(), ChildId.ToString());
+		const auto DuplicateUUIDResult = SceneSerializer::Deserialize(DuplicateUUID, Destination);
+		PF_CHECK(Tests, !DuplicateUUIDResult.has_value());
+		PF_CHECK(Tests, !DuplicateUUIDResult && DuplicateUUIDResult.error().Code == SceneSerializationErrorCode::InvalidEntityData);
+		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+
+		const auto InvalidJsonResult = SceneSerializer::Deserialize("{invalid json", Destination);
+		PF_CHECK(Tests, !InvalidJsonResult.has_value());
+		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+
+		Scene EmptyScene;
+		const auto EmptySerialized = SceneSerializer::Serialize(EmptyScene);
+		PF_CHECK(Tests, EmptySerialized.has_value());
+		if (EmptySerialized)
+		{
+			PF_CHECK(Tests, SceneSerializer::Deserialize(*EmptySerialized, Destination).has_value());
+			PF_CHECK(Tests, Destination.GetEntityCount() == 0);
+			PF_CHECK(Tests, !LoadedRoot->IsValid());
+		}
+	}
+
 	void TestGraphicsPipelineAndDrawValidation(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -1102,6 +1250,7 @@ int main()
 	TestUUIDBehavior(Tests);
 	TestSceneEntityAndHierarchy(Tests);
 	TestEntityHandlesExpireWithScene(Tests);
+	TestSceneSerializationRoundTrip(Tests);
 	TestGraphicsPipelineAndDrawValidation(Tests);
 	TestConstantBufferBindingValidation(Tests);
 	TestTextureAndSamplerValidation(Tests);
