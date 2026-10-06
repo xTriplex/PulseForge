@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 
@@ -22,6 +23,7 @@ namespace PulseForge
 		FilesystemFailure,
 		MetadataFailure,
 		RecoveryRequired,
+		CommittedWithCleanupFailure,
 		RegistryRefreshFailed,
 		ImportSourceInvalid,
 		AssetNotFound
@@ -32,6 +34,10 @@ namespace PulseForge
 		AssetOperationErrorCode Code;
 		std::filesystem::path Path;
 		std::string Message;
+		// Set only when the operation committed the asset but failed to remove auxiliary recovery data.
+		std::optional<AssetRecord> CommittedAsset;
+		// Identifies temporary recovery data retained after explicit cleanup failed.
+		std::optional<std::filesystem::path> RecoveryPath;
 	};
 
 	class PULSEFORGE_API AssetOperations final
@@ -46,6 +52,7 @@ namespace PulseForge
 			const std::filesystem::path& SourceFile,
 			const std::filesystem::path& DestinationPath);
 		// Creates a new managed source file from bytes, assigns a fresh UUID sidecar, and refreshes the registry.
+		// On CommittedWithCleanupFailure, the returned error includes CommittedAsset; callers must not retry creation.
 		[[nodiscard]] static std::expected<AssetRecord, AssetOperationError> CreateAssetFromBytes(
 			AssetRegistry& Registry,
 			const std::filesystem::path& ProjectRoot,

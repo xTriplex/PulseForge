@@ -1971,6 +1971,7 @@ namespace
 				"Assets/Imported/generated.bin");
 			PF_CHECK(Tests, !DuplicateCreation &&
 				DuplicateCreation.error().Code == AssetOperationErrorCode::DestinationExists);
+			PF_CHECK(Tests, !DuplicateCreation.error().CommittedAsset.has_value());
 			PF_CHECK(Tests, ReadFile(CreatedPath) == SourceContents);
 
 			PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());

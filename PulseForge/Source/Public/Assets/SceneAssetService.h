@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <optional>
 #include <string>
 
 namespace PulseForge
@@ -17,7 +18,8 @@ namespace PulseForge
 		UnsupportedAssetType,
 		PathResolutionFailed,
 		SerializationFailed,
-		AssetOperationFailed
+		AssetOperationFailed,
+		CommittedWithCleanupFailure
 	};
 
 	struct SceneAssetError
@@ -25,12 +27,15 @@ namespace PulseForge
 		SceneAssetErrorCode Code;
 		AssetID Asset;
 		std::string Message;
+		std::optional<AssetRecord> CommittedAsset;
+		std::optional<std::filesystem::path> RecoveryPath;
 	};
 
 	class PULSEFORGE_API SceneAssetService final
 	{
 	public:
 		// Serializes a new scene asset with a fresh sidecar UUID and adds it to the supplied project registry.
+		// A CommittedWithCleanupFailure error carries the created record in CommittedAsset; do not retry it.
 		[[nodiscard]] static std::expected<AssetRecord, SceneAssetError> Create(
 			AssetRegistry& Registry,
 			const std::filesystem::path& ProjectRoot,

@@ -77,10 +77,17 @@ namespace PulseForge
 			ProjectRelativePath);
 		if (!Created)
 		{
-			return std::unexpected(SceneAssetError{
-				SceneAssetErrorCode::AssetOperationFailed,
+			SceneAssetError Error{
+				Created.error().Code == AssetOperationErrorCode::CommittedWithCleanupFailure
+					? SceneAssetErrorCode::CommittedWithCleanupFailure
+					: SceneAssetErrorCode::AssetOperationFailed,
 				{},
-				Created.error().Message });
+				Created.error().Message };
+			Error.CommittedAsset = Created.error().CommittedAsset;
+			Error.RecoveryPath = Created.error().RecoveryPath;
+			if (Error.CommittedAsset)
+				Error.Asset = Error.CommittedAsset->ID;
+			return std::unexpected(std::move(Error));
 		}
 		return *Created;
 	}

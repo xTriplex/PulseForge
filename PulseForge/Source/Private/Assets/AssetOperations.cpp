@@ -272,6 +272,7 @@ namespace PulseForge
 
 			~TransactionDirectoryGuard()
 			{
+				// Keep a best-effort fallback for exits that bypass explicit cleanup (for example, exceptions).
 				if (!Path.empty())
 				{
 					std::error_code Error;
@@ -284,7 +285,12 @@ namespace PulseForge
 				if (Path.empty())
 					return true;
 				if (!RemoveTransactionDirectory(Path, FailureMessage))
+				{
+					// An explicit failure is reported to the caller. Relinquish ownership so destruction
+					// cannot silently retry and make the reported recovery state inaccurate.
+					Path.clear();
 					return false;
+				}
 				Path.clear();
 				return true;
 			}
@@ -521,10 +527,12 @@ namespace PulseForge
 			std::string CleanupFailure;
 			if (!TemporaryDirectoryOwner.Remove(CleanupFailure))
 			{
-				return std::unexpected(MakeError(
+				AssetOperationError RecoveryError = MakeError(
 					AssetOperationErrorCode::RecoveryRequired,
 					DestinationPath,
-					"Could not open temporary source data and temporary cleanup failed: " + CleanupFailure));
+					"Could not open temporary source data and temporary cleanup failed: " + CleanupFailure);
+				RecoveryError.RecoveryPath = TemporaryDirectory;
+				return std::unexpected(std::move(RecoveryError));
 			}
 			return std::unexpected(MakeError(
 				AssetOperationErrorCode::FilesystemFailure,
@@ -542,10 +550,12 @@ namespace PulseForge
 			std::string CleanupFailure;
 			if (!TemporaryDirectoryOwner.Remove(CleanupFailure))
 			{
-				return std::unexpected(MakeError(
+				AssetOperationError RecoveryError = MakeError(
 					AssetOperationErrorCode::RecoveryRequired,
 					DestinationPath,
-					"Could not write temporary source data and temporary cleanup failed: " + CleanupFailure));
+					"Could not write temporary source data and temporary cleanup failed: " + CleanupFailure);
+				RecoveryError.RecoveryPath = TemporaryDirectory;
+				return std::unexpected(std::move(RecoveryError));
 			}
 			return std::unexpected(MakeError(
 				AssetOperationErrorCode::FilesystemFailure,
@@ -557,14 +567,25 @@ namespace PulseForge
 		std::string CleanupFailure;
 		if (!TemporaryDirectoryOwner.Remove(CleanupFailure))
 		{
-			std::string Message = CreatedAsset
-				? "Managed asset creation succeeded with UUID " + CreatedAsset->ID.ToString()
-				: "Managed asset creation failed: " + CreatedAsset.error().Message;
-			Message += "; temporary source cleanup failed at " + TemporaryDirectory.generic_string() + ": " + CleanupFailure;
-			return std::unexpected(MakeError(
+			if (CreatedAsset)
+			{
+				AssetOperationError CleanupError = MakeError(
+					AssetOperationErrorCode::CommittedWithCleanupFailure,
+					DestinationPath,
+					"Managed asset creation committed, but temporary source cleanup failed at " +
+					TemporaryDirectory.generic_string() + ": " + CleanupFailure);
+				CleanupError.CommittedAsset = *CreatedAsset;
+				CleanupError.RecoveryPath = TemporaryDirectory;
+				return std::unexpected(std::move(CleanupError));
+			}
+
+			AssetOperationError RecoveryError = MakeError(
 				AssetOperationErrorCode::RecoveryRequired,
 				DestinationPath,
-				std::move(Message)));
+				"Managed asset import failed (" + CreatedAsset.error().Message +
+				") and temporary source cleanup failed at " + TemporaryDirectory.generic_string() + ": " + CleanupFailure);
+			RecoveryError.RecoveryPath = TemporaryDirectory;
+			return std::unexpected(std::move(RecoveryError));
 		}
 		if (!CreatedAsset)
 			return std::unexpected(std::move(CreatedAsset.error()));

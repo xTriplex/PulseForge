@@ -78,10 +78,17 @@ namespace PulseForge
 			ProjectRelativePath);
 		if (!Created)
 		{
-			return std::unexpected(PrefabAssetError{
-				PrefabAssetErrorCode::AssetOperationFailed,
+			PrefabAssetError Error{
+				Created.error().Code == AssetOperationErrorCode::CommittedWithCleanupFailure
+					? PrefabAssetErrorCode::CommittedWithCleanupFailure
+					: PrefabAssetErrorCode::AssetOperationFailed,
 				{},
-				Created.error().Message });
+				Created.error().Message };
+			Error.CommittedAsset = Created.error().CommittedAsset;
+			Error.RecoveryPath = Created.error().RecoveryPath;
+			if (Error.CommittedAsset)
+				Error.Asset = Error.CommittedAsset->ID;
+			return std::unexpected(std::move(Error));
 		}
 		return *Created;
 	}
