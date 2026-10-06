@@ -38,6 +38,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -1266,6 +1267,44 @@ namespace
 
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		const auto CreatedScene = SceneAssetService::Create(
+			Registry,
+			ProjectRoot,
+			"Assets/Scenes/generated.scene",
+			Source);
+		PF_CHECK(Tests, CreatedScene.has_value());
+		PF_CHECK(Tests, CreatedScene && !CreatedScene->ID.IsNil() &&
+			CreatedScene->ID != SceneID &&
+			CreatedScene->ProjectRelativePath == "Assets/Scenes/generated.scene");
+		if (CreatedScene)
+		{
+			const auto CreatedMetadata = AssetMetadataSerializer::LoadFromFile(
+				ProjectRoot / "Assets/Scenes/generated.scene.meta");
+			PF_CHECK(Tests, CreatedMetadata && CreatedMetadata->ID == CreatedScene->ID);
+			PF_CHECK(Tests, Registry.Find(CreatedScene->ID).has_value());
+
+			Scene GeneratedScene;
+			PF_CHECK(Tests, SceneAssetService::Load(CreatedScene->ID, ProjectRoot, Registry, GeneratedScene).has_value());
+			PF_CHECK(Tests, GeneratedScene.GetEntityCount() == Source.GetEntityCount());
+			PF_CHECK(Tests, GeneratedScene.FindEntity(*MeshEntityID).has_value());
+
+			const auto DuplicateCreation = SceneAssetService::Create(
+				Registry,
+				ProjectRoot,
+				"Assets/Scenes/generated.scene",
+				Source);
+			PF_CHECK(Tests, !DuplicateCreation &&
+				DuplicateCreation.error().Code == SceneAssetErrorCode::AssetOperationFailed);
+			PF_CHECK(Tests, Registry.Find(CreatedScene->ID).has_value());
+		}
+		const auto InvalidSceneCreation = SceneAssetService::Create(
+			Registry,
+			ProjectRoot,
+			"Assets/Scenes/generated.json",
+			Source);
+		PF_CHECK(Tests, !InvalidSceneCreation &&
+			InvalidSceneCreation.error().Code == SceneAssetErrorCode::UnsupportedAssetType);
+
 		const auto ResolvedSource = AssetPathResolver::ResolveManagedSourcePath(
 			ProjectRoot,
 			std::filesystem::path("Assets/Scenes/validation.scene"));
@@ -1907,6 +1946,44 @@ namespace
 			"Assets/Imported/missing.bin");
 		PF_CHECK(Tests, !MissingSource && MissingSource.error().Code == AssetOperationErrorCode::ImportSourceInvalid);
 		PF_CHECK(Tests, !std::filesystem::exists(ProjectRoot / "Assets" / "Imported" / "missing.bin"));
+
+		const std::span<const char> BinaryContents(SourceContents.data(), SourceContents.size());
+		const auto Created = AssetOperations::CreateAssetFromBytes(
+			Registry,
+			ProjectRoot,
+			std::as_bytes(BinaryContents),
+			"Assets/Imported/generated.bin");
+		PF_CHECK(Tests, Created.has_value());
+		PF_CHECK(Tests, Created && Created->ID != Imported->ID && Created->ID != SecondImport->ID);
+		const std::filesystem::path CreatedPath = ProjectRoot / "Assets" / "Imported" / "generated.bin";
+		PF_CHECK(Tests, ReadFile(CreatedPath) == SourceContents);
+		const auto CreatedMetadata = AssetMetadataSerializer::LoadFromFile(
+			AssetMetadataSerializer::GetSidecarPath(CreatedPath));
+		PF_CHECK(Tests, Created && CreatedMetadata && CreatedMetadata->ID == Created->ID);
+		PF_CHECK(Tests, Registry.GetAssetCount() == 3);
+		PF_CHECK(Tests, Created && Registry.Find(Created->ID).has_value());
+		if (Created)
+		{
+			const auto DuplicateCreation = AssetOperations::CreateAssetFromBytes(
+				Registry,
+				ProjectRoot,
+				std::as_bytes(BinaryContents),
+				"Assets/Imported/generated.bin");
+			PF_CHECK(Tests, !DuplicateCreation &&
+				DuplicateCreation.error().Code == AssetOperationErrorCode::DestinationExists);
+			PF_CHECK(Tests, ReadFile(CreatedPath) == SourceContents);
+
+			PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+			PF_CHECK(Tests, Registry.Find(Created->ID).has_value());
+		}
+
+		const auto EmptyCreated = AssetOperations::CreateAssetFromBytes(
+			Registry,
+			ProjectRoot,
+			{},
+			"Assets/Imported/empty.bin");
+		PF_CHECK(Tests, EmptyCreated.has_value());
+		PF_CHECK(Tests, EmptyCreated && std::filesystem::file_size(ProjectRoot / EmptyCreated->ProjectRelativePath) == 0);
 
 		const std::filesystem::path UntrackedFile = ProjectRoot / "Assets" / "Imported" / "untracked.bin";
 		{
@@ -2651,6 +2728,55 @@ namespace
 			const auto UpdatedTag = UpdatedRoot->GetTag();
 			PF_CHECK(Tests, UpdatedTag && UpdatedTag->Name == "Saved through prefab UUID");
 		}
+
+		const auto CreatedPrefab = PrefabAssetService::Create(
+			Registry,
+			ProjectRoot,
+			"Assets/Prefabs/generated.prefab",
+			Source,
+			*Root);
+		PF_CHECK(Tests, CreatedPrefab.has_value());
+		PF_CHECK(Tests, CreatedPrefab && CreatedPrefab->ID != Metadata->ID &&
+			CreatedPrefab->ProjectRelativePath == "Assets/Prefabs/generated.prefab");
+		if (CreatedPrefab)
+		{
+			const auto CreatedMetadata = AssetMetadataSerializer::LoadFromFile(
+				ProjectRoot / "Assets/Prefabs/generated.prefab.meta");
+			PF_CHECK(Tests, CreatedMetadata && CreatedMetadata->ID == CreatedPrefab->ID);
+			PF_CHECK(Tests, Registry.Find(CreatedPrefab->ID).has_value());
+
+			Scene CreatedPrefabScene;
+			const auto CreatedRoot = PrefabAssetService::Instantiate(
+				CreatedPrefab->ID,
+				ProjectRoot,
+				Registry,
+				CreatedPrefabScene);
+			PF_CHECK(Tests, CreatedRoot && CreatedRoot->GetUUID() != Root->GetUUID());
+			PF_CHECK(Tests, CreatedPrefabScene.GetEntityCount() == 2);
+			if (CreatedRoot)
+			{
+				const auto CreatedChildren = CreatedRoot->GetChildren();
+				PF_CHECK(Tests, CreatedChildren && CreatedChildren->size() == 1);
+			}
+
+			const auto DuplicateCreation = PrefabAssetService::Create(
+				Registry,
+				ProjectRoot,
+				"Assets/Prefabs/generated.prefab",
+				Source,
+				*Root);
+			PF_CHECK(Tests, !DuplicateCreation &&
+				DuplicateCreation.error().Code == PrefabAssetErrorCode::AssetOperationFailed);
+			PF_CHECK(Tests, Registry.Find(CreatedPrefab->ID).has_value());
+		}
+		const auto InvalidPrefabCreation = PrefabAssetService::Create(
+			Registry,
+			ProjectRoot,
+			"Assets/Prefabs/generated.json",
+			Source,
+			*Root);
+		PF_CHECK(Tests, !InvalidPrefabCreation &&
+			InvalidPrefabCreation.error().Code == PrefabAssetErrorCode::UnsupportedAssetType);
 
 		const auto Duplicate = AssetOperations::Duplicate(
 			Registry,

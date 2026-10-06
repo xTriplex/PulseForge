@@ -16,7 +16,8 @@ namespace PulseForge
 		AssetNotFound,
 		UnsupportedAssetType,
 		PathResolutionFailed,
-		SerializationFailed
+		SerializationFailed,
+		AssetOperationFailed
 	};
 
 	struct SceneAssetError
@@ -29,6 +30,13 @@ namespace PulseForge
 	class PULSEFORGE_API SceneAssetService final
 	{
 	public:
+		// Serializes a new scene asset with a fresh sidecar UUID and adds it to the supplied project registry.
+		[[nodiscard]] static std::expected<AssetRecord, SceneAssetError> Create(
+			AssetRegistry& Registry,
+			const std::filesystem::path& ProjectRoot,
+			const std::filesystem::path& ProjectRelativePath,
+			const Scene& Source);
+
 		// Resolves the scene's current source path by sidecar UUID. Failed loads leave the destination scene unchanged.
 		[[nodiscard]] static std::expected<void, SceneAssetError> Load(
 			const AssetID& SceneAsset,

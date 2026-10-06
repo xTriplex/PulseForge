@@ -1,9 +1,11 @@
 #include "Core/PulseForgePCH.h"
 #include "Assets/SceneAssetService.h"
 
+#include "Assets/AssetOperations.h"
 #include "Assets/AssetPathResolver.h"
 #include "Scene/SceneSerializer.h"
 
+#include <span>
 #include <utility>
 
 namespace PulseForge
@@ -42,6 +44,45 @@ namespace PulseForge
 			}
 			return *ResolvedPath;
 		}
+	}
+
+	std::expected<AssetRecord, SceneAssetError> SceneAssetService::Create(
+		AssetRegistry& Registry,
+		const std::filesystem::path& ProjectRoot,
+		const std::filesystem::path& ProjectRelativePath,
+		const Scene& Source)
+	{
+		if (ProjectRelativePath.extension() != ".scene")
+		{
+			return std::unexpected(SceneAssetError{
+				SceneAssetErrorCode::UnsupportedAssetType,
+				{},
+				"New scene assets must use the .scene extension" });
+		}
+
+		const auto Serialized = SceneSerializer::Serialize(Source);
+		if (!Serialized)
+		{
+			return std::unexpected(SceneAssetError{
+				SceneAssetErrorCode::SerializationFailed,
+				{},
+				Serialized.error().Message });
+		}
+
+		const std::span<const char> Characters(Serialized->data(), Serialized->size());
+		const auto Created = AssetOperations::CreateAssetFromBytes(
+			Registry,
+			ProjectRoot,
+			std::as_bytes(Characters),
+			ProjectRelativePath);
+		if (!Created)
+		{
+			return std::unexpected(SceneAssetError{
+				SceneAssetErrorCode::AssetOperationFailed,
+				{},
+				Created.error().Message });
+		}
+		return *Created;
 	}
 
 	std::expected<void, SceneAssetError> SceneAssetService::Load(

@@ -3,9 +3,11 @@
 #include "Assets/AssetRegistry.h"
 #include "Core/Core.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <span>
 #include <string>
 
 namespace PulseForge
@@ -42,6 +44,12 @@ namespace PulseForge
 			AssetRegistry& Registry,
 			const std::filesystem::path& ProjectRoot,
 			const std::filesystem::path& SourceFile,
+			const std::filesystem::path& DestinationPath);
+		// Creates a new managed source file from bytes, assigns a fresh UUID sidecar, and refreshes the registry.
+		[[nodiscard]] static std::expected<AssetRecord, AssetOperationError> CreateAssetFromBytes(
+			AssetRegistry& Registry,
+			const std::filesystem::path& ProjectRoot,
+			std::span<const std::byte> Contents,
 			const std::filesystem::path& DestinationPath);
 		[[nodiscard]] static std::expected<AssetRecord, AssetOperationError> Move(
 			AssetRegistry& Registry,

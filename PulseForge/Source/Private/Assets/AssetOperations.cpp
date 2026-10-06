@@ -3,7 +3,10 @@
 
 #include "Assets/AssetMetadata.h"
 
+#include <fstream>
 #include <iterator>
+#include <limits>
+#include <span>
 #include <system_error>
 
 namespace PulseForge
@@ -263,6 +266,30 @@ namespace PulseForge
 			return true;
 		}
 
+		struct TransactionDirectoryGuard
+		{
+			FilesystemPath Path;
+
+			~TransactionDirectoryGuard()
+			{
+				if (!Path.empty())
+				{
+					std::error_code Error;
+					std::filesystem::remove_all(Path, Error);
+				}
+			}
+
+			bool Remove(std::string& FailureMessage)
+			{
+				if (Path.empty())
+					return true;
+				if (!RemoveTransactionDirectory(Path, FailureMessage))
+					return false;
+				Path.clear();
+				return true;
+			}
+		};
+
 		bool RemoveDestinationPair(const FilesystemPath& SourcePath, std::string& FailureMessage)
 		{
 			std::string SidecarFailure;
@@ -412,6 +439,136 @@ namespace PulseForge
 				"Imported asset UUID was not present after registry reconstruction"));
 		}
 		return *ImportedRecord;
+	}
+
+	std::expected<AssetRecord, AssetOperationError> AssetOperations::CreateAssetFromBytes(
+		AssetRegistry& Registry,
+		const std::filesystem::path& ProjectRoot,
+		std::span<const std::byte> Contents,
+		const std::filesystem::path& DestinationPath)
+	{
+		const auto Project = OpenProject(ProjectRoot);
+		if (!Project)
+			return std::unexpected(Project.error());
+		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
+			return std::unexpected(RegistryResult.error());
+
+		const auto Destination = ResolveAssetPath(*Project, DestinationPath, false);
+		if (!Destination)
+			return std::unexpected(Destination.error());
+		if (auto SidecarResult = RequireAbsent(AssetMetadataSerializer::GetSidecarPath(*Destination), DestinationPath);
+			!SidecarResult)
+		{
+			return std::unexpected(SidecarResult.error());
+		}
+
+		if (Contents.size() > static_cast<size_t>(std::numeric_limits<std::streamsize>::max()))
+		{
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::FilesystemFailure,
+				DestinationPath,
+				"New asset content exceeds the filesystem stream size limit"));
+		}
+
+		std::error_code Error;
+		const FilesystemPath TemporaryRoot = std::filesystem::temp_directory_path(Error);
+		if (Error)
+		{
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::FilesystemFailure,
+				DestinationPath,
+				"Could not resolve a temporary directory for managed asset creation: " + Error.message()));
+		}
+
+		FilesystemPath TemporaryDirectory;
+		for (size_t Attempt = 0; Attempt < 8; ++Attempt)
+		{
+			const auto Identifier = UUID::Generate();
+			if (!Identifier)
+			{
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::FilesystemFailure,
+					DestinationPath,
+					Identifier.error().Message));
+			}
+
+			TemporaryDirectory = TemporaryRoot / ("PulseForgeAssetCreate-" + Identifier->ToString());
+			Error.clear();
+			if (std::filesystem::create_directory(TemporaryDirectory, Error))
+				break;
+			if (Error && Error != std::errc::file_exists)
+			{
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::FilesystemFailure,
+					DestinationPath,
+					"Could not create a temporary managed-asset transaction directory: " + Error.message()));
+			}
+			TemporaryDirectory.clear();
+		}
+		if (TemporaryDirectory.empty())
+		{
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::FilesystemFailure,
+				DestinationPath,
+				"Could not reserve a unique temporary directory for managed asset creation"));
+		}
+
+		TransactionDirectoryGuard TemporaryDirectoryOwner{ TemporaryDirectory };
+		const FilesystemPath TemporarySource = TemporaryDirectory / "source.asset";
+		std::ofstream Output(TemporarySource, std::ios::binary | std::ios::out | std::ios::trunc);
+		if (!Output.is_open())
+		{
+			std::string CleanupFailure;
+			if (!TemporaryDirectoryOwner.Remove(CleanupFailure))
+			{
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::RecoveryRequired,
+					DestinationPath,
+					"Could not open temporary source data and temporary cleanup failed: " + CleanupFailure));
+			}
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::FilesystemFailure,
+				DestinationPath,
+				"Could not open a temporary source file for managed asset creation"));
+		}
+
+		if (!Contents.empty())
+			Output.write(reinterpret_cast<const char*>(Contents.data()), static_cast<std::streamsize>(Contents.size()));
+		Output.flush();
+		const bool ContentsWritten = static_cast<bool>(Output);
+		Output.close();
+		if (!ContentsWritten || Output.fail())
+		{
+			std::string CleanupFailure;
+			if (!TemporaryDirectoryOwner.Remove(CleanupFailure))
+			{
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::RecoveryRequired,
+					DestinationPath,
+					"Could not write temporary source data and temporary cleanup failed: " + CleanupFailure));
+			}
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::FilesystemFailure,
+				DestinationPath,
+				"Could not write temporary source data for managed asset creation"));
+		}
+
+		auto CreatedAsset = ImportFile(Registry, Project->Root, TemporarySource, DestinationPath);
+		std::string CleanupFailure;
+		if (!TemporaryDirectoryOwner.Remove(CleanupFailure))
+		{
+			std::string Message = CreatedAsset
+				? "Managed asset creation succeeded with UUID " + CreatedAsset->ID.ToString()
+				: "Managed asset creation failed: " + CreatedAsset.error().Message;
+			Message += "; temporary source cleanup failed at " + TemporaryDirectory.generic_string() + ": " + CleanupFailure;
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::RecoveryRequired,
+				DestinationPath,
+				std::move(Message)));
+		}
+		if (!CreatedAsset)
+			return std::unexpected(std::move(CreatedAsset.error()));
+		return *CreatedAsset;
 	}
 
 	std::expected<AssetRecord, AssetOperationError> AssetOperations::Move(

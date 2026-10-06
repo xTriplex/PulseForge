@@ -17,7 +17,8 @@ namespace PulseForge
 		AssetNotFound,
 		UnsupportedAssetType,
 		PathResolutionFailed,
-		SerializationFailed
+		SerializationFailed,
+		AssetOperationFailed
 	};
 
 	struct PrefabAssetError
@@ -30,6 +31,14 @@ namespace PulseForge
 	class PULSEFORGE_API PrefabAssetService final
 	{
 	public:
+		// Serializes a new prefab asset with a fresh sidecar UUID and adds it to the supplied project registry.
+		[[nodiscard]] static std::expected<AssetRecord, PrefabAssetError> Create(
+			AssetRegistry& Registry,
+			const std::filesystem::path& ProjectRoot,
+			const std::filesystem::path& ProjectRelativePath,
+			const Scene& Source,
+			const Entity& Root);
+
 		// Instantiates the prefab found by sidecar UUID, assigning fresh entity UUIDs while retaining asset references.
 		[[nodiscard]] static std::expected<Entity, PrefabAssetError> Instantiate(
 			const AssetID& PrefabAsset,
