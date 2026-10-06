@@ -1,6 +1,7 @@
 #include "Client/PulseForgeGame.h"
 #include "Assets/AssetRegistry.h"
 #include "Assets/MeshAssetCache.h"
+#include "Assets/TextureAssetCache.h"
 #include "Core/Application.h"
 #include "Core/EntryPoint.h"
 #include "Core/Log.h"
@@ -70,6 +71,10 @@ public:
 				PulseForge::Application::Get(),
 				ProjectRoot,
 				m_AssetRegistry);
+			m_TextureAssetCache = std::make_unique<PulseForge::TextureAssetCache>(
+				PulseForge::Application::Get(),
+				ProjectRoot,
+				m_AssetRegistry);
 
 			const auto MeshAssetID = PulseForge::UUID::Parse("6f4d338d-ec74-49ab-9a7e-8a2285feb411");
 			if (!MeshAssetID)
@@ -118,21 +123,19 @@ public:
 				throw std::runtime_error(CreatedFragmentShader.error().Message);
 			m_FragmentShader = std::move(CreatedFragmentShader.value());
 
-			const std::array<uint8_t, 16> TexturePixels = {{
-				255, 255, 255, 255, 255, 150, 40, 255,
-				40, 210, 255, 255, 230, 60, 180, 255
-			}};
-			PulseForge::TextureDesc TextureDescription;
-			TextureDescription.Width = 2;
-			TextureDescription.Height = 2;
-			TextureDescription.Format = PulseForge::TextureFormat::RGBA8_Srgb;
-			TextureDescription.DebugName = "PulseForge sample 2x2 texture";
-			auto CreatedTexture = PulseForge::Application::Get().CreateTexture(
-				TextureDescription,
-				std::as_bytes(std::span(TexturePixels)));
+			const auto TextureAssetID = PulseForge::UUID::Parse("4c9b0a26-5ca1-4d37-b451-f23231002f92");
+			if (!TextureAssetID)
+				throw std::runtime_error(TextureAssetID.error().Message);
+			m_TextureAssetID = *TextureAssetID;
+			auto CreatedTexture = m_TextureAssetCache->GetOrLoad(
+				m_TextureAssetID,
+				PulseForge::TextureFormat::RGBA8_Srgb);
 			if (!CreatedTexture)
 				throw std::runtime_error(CreatedTexture.error().Message);
-			m_Texture = std::move(CreatedTexture.value());
+			PF_INFO("Resolved image asset {0} as {1}x{2} sRGB texture",
+				m_TextureAssetID.ToString(),
+				CreatedTexture->get().GetDescription().Width,
+				CreatedTexture->get().GetDescription().Height);
 
 			PulseForge::SamplerDesc SamplerDescription;
 			SamplerDescription.Minification = PulseForge::SamplerFilter::Nearest;
@@ -336,7 +339,10 @@ private:
 
 		PulseForge::BindingSetDesc BindingSetDescription;
 		BindingSetDescription.Layout = m_BindingLayout;
-		BindingSetDescription.Textures.push_back({ 0, std::cref(*m_Texture) });
+		const auto Texture = m_TextureAssetCache->GetOrLoad(m_TextureAssetID, PulseForge::TextureFormat::RGBA8_Srgb);
+		if (!Texture)
+			return std::unexpected(Texture.error().Message);
+		BindingSetDescription.Textures.push_back({ 0, std::cref(Texture->get()) });
 		BindingSetDescription.Samplers.push_back({ 0, std::cref(*m_Sampler) });
 		BindingSetDescription.Buffers.push_back({ 0, std::cref(*m_ConstantBuffer) });
 		BindingSetDescription.Buffers.push_back({ 1, std::cref(*CreatedTransformBuffer.value()) });
@@ -354,8 +360,9 @@ private:
 	PulseForge::Entity m_CameraEntity;
 	PulseForge::AssetRegistry m_AssetRegistry;
 	PulseForge::AssetID m_MeshAssetID;
+	PulseForge::AssetID m_TextureAssetID;
 	std::unique_ptr<PulseForge::MeshAssetCache> m_MeshAssetCache;
-	PulseForge::TextureHandle m_Texture;
+	std::unique_ptr<PulseForge::TextureAssetCache> m_TextureAssetCache;
 	PulseForge::SamplerHandle m_Sampler;
 	PulseForge::BufferHandle m_ConstantBuffer;
 	PulseForge::BufferHandle m_TransformBuffer;
