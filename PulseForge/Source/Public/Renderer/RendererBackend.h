@@ -21,6 +21,10 @@ namespace PulseForge
 		virtual BufferCreateResult CreateBuffer(
 			const BufferDesc& Description,
 			std::span<const std::byte> InitialData) = 0;
+		virtual BufferUpdateResult WriteBuffer(
+			const Buffer& Target,
+			uint64_t DestinationOffset,
+			std::span<const std::byte> Data) = 0;
 		virtual TextureCreateResult CreateTexture(
 			const TextureDesc& Description,
 			std::span<const std::byte> InitialData) = 0;

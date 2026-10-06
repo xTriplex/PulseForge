@@ -252,9 +252,14 @@ if(BUILD_TESTING)
 	target_compile_definitions(PulseForgeTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeTests PRIVATE PulseForge)
 	add_test(NAME PulseForge.Core COMMAND PulseForgeTests)
+
+	add_executable(PulseForgeBufferUpdateTests Tests/BufferUpdateValidationTests.cpp)
+	target_compile_definitions(PulseForgeBufferUpdateTests PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeBufferUpdateTests PRIVATE PulseForge)
+	add_test(NAME PulseForge.BufferUpdates COMMAND PulseForgeBufferUpdateTests)
 endif()
 
-foreach(Target PulseForge PulseForgeGame PulseForgeTests)
+foreach(Target PulseForge PulseForgeGame PulseForgeTests PulseForgeBufferUpdateTests)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE
 			$<$<CXX_COMPILER_ID:MSVC>:/EHsc>

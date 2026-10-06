@@ -37,4 +37,33 @@ namespace PulseForge
 				});
 		}
 	}
+
+	BufferUpdateResult ValidateBufferUpdate(
+		const BufferDesc& Description,
+		uint64_t DestinationOffset,
+		size_t UpdateSize)
+	{
+		if (Description.Usage != BufferUsage::Constant)
+			return std::unexpected(BufferUpdateError{
+				BufferUpdateErrorCode::UnsupportedUsage,
+				"The current renderer only supports updates to constant buffers"
+			});
+
+		if (UpdateSize == 0 || DestinationOffset % 4 != 0 || UpdateSize % 4 != 0)
+			return std::unexpected(BufferUpdateError{
+				BufferUpdateErrorCode::InvalidUpdateSize,
+				"Constant buffer updates must be non-empty and 4-byte aligned"
+			});
+
+		if (DestinationOffset > Description.ByteSize ||
+			static_cast<uint64_t>(UpdateSize) > Description.ByteSize - DestinationOffset)
+		{
+			return std::unexpected(BufferUpdateError{
+				BufferUpdateErrorCode::OutOfBounds,
+				"Constant buffer update extends beyond the declared buffer size"
+			});
+		}
+
+		return {};
+	}
 }

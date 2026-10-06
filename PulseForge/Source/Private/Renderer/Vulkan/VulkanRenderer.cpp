@@ -667,6 +667,48 @@ namespace PulseForge
 			}
 		}
 
+		BufferUpdateResult WriteBuffer(
+			const Buffer& Target,
+			uint64_t DestinationOffset,
+			std::span<const std::byte> Data) override
+		{
+			if (!m_FrameActive)
+			{
+				return std::unexpected(BufferUpdateError{
+					BufferUpdateErrorCode::InvalidFrameState,
+					"Vulkan buffer updates must be recorded between BeginFrame and EndFrame"
+				});
+			}
+
+			const auto* NativeBuffer = dynamic_cast<const VulkanBuffer*>(&Target);
+			if (!NativeBuffer)
+			{
+				return std::unexpected(BufferUpdateError{
+					BufferUpdateErrorCode::BackendFailure,
+					"The buffer was not created by the active Vulkan renderer"
+				});
+			}
+
+			try
+			{
+				m_Frames[m_CurrentFrame].CommandList->writeBuffer(
+					NativeBuffer->GetNativeBuffer(),
+					Data.data(),
+					Data.size(),
+					DestinationOffset);
+				return {};
+			}
+			catch (const std::exception& Exception)
+			{
+				const std::string Message = std::string("NVRHI failed to record a buffer update: ") + Exception.what();
+				PF_CORE_ERROR("{0}", Message);
+				return std::unexpected(BufferUpdateError{
+					BufferUpdateErrorCode::BackendFailure,
+					Message
+				});
+			}
+		}
+
 		BindingLayoutCreateResult CreateBindingLayout(const BindingLayoutDesc& Description) override
 		{
 			nvrhi::ShaderType Visibility = nvrhi::ShaderType::Pixel;
@@ -1694,7 +1736,6 @@ namespace PulseForge
 			m_Device.waitIdle();
 			ReleaseSwapchainImages();
 
-			const vk::SwapchainKHR OldSwapchain = m_Swapchain;
 			const auto Capabilities = m_PhysicalDevice.getSurfaceCapabilitiesKHR(m_Surface);
 			auto Extent = ChooseSwapchainExtent(Capabilities);
 			if (!Extent)
@@ -1722,20 +1763,23 @@ namespace PulseForge
 				.setPreTransform(Capabilities.currentTransform)
 				.setCompositeAlpha(ChooseCompositeAlpha(Capabilities.supportedCompositeAlpha))
 				.setPresentMode(m_PresentMode)
-				.setClipped(VK_TRUE)
-				.setOldSwapchain(OldSwapchain);
+				.setClipped(VK_TRUE);
 			if (SeparateQueues)
 				PresentInfo.setQueueFamilyIndices(QueueIndices);
 
+			// Avoid the oldSwapchain handoff path, which retained private memory per recreation on tested Vulkan ICDs.
+			// Queue work is idle and all NVRHI wrappers for the retired chain have already been released.
+			if (m_Swapchain)
+			{
+				m_Device.destroySwapchainKHR(m_Swapchain);
+				m_Swapchain = vk::SwapchainKHR();
+			}
 			m_Swapchain = m_Device.createSwapchainKHR(PresentInfo);
-			if (OldSwapchain)
-				m_Device.destroySwapchainKHR(OldSwapchain);
 			m_SwapchainExtent = *Extent;
 
 			const auto NativeImages = m_Device.getSwapchainImagesKHR(m_Swapchain);
 			if (NativeImages.empty())
 				throw std::runtime_error("Vulkan created a swapchain without any images");
-
 			m_SwapchainImages.reserve(NativeImages.size());
 			for (size_t Index = 0; Index < NativeImages.size(); ++Index)
 			{

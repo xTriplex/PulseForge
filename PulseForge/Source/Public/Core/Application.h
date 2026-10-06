@@ -34,6 +34,11 @@ namespace PulseForge
 		RendererAPI GetRendererAPI() const { return m_RendererAPI; }
 		// Renderer resources should be released before this Application is destroyed.
 		BufferCreateResult CreateBuffer(const BufferDesc& Description, std::span<const std::byte> InitialData = {});
+		// Records an aligned constant-buffer update on the active renderer frame.
+		BufferUpdateResult WriteBuffer(
+			const Buffer& Target,
+			uint64_t DestinationOffset,
+			std::span<const std::byte> Data);
 		MeshCreateResult CreateMesh(const MeshDesc& Description);
 		TextureCreateResult CreateTexture(const TextureDesc& Description, std::span<const std::byte> InitialData);
 		SamplerCreateResult CreateSampler(const SamplerDesc& Description);

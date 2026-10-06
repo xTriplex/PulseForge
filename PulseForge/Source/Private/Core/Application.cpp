@@ -133,6 +133,21 @@ namespace PulseForge
 		return m_Renderer->CreateBuffer(Description, InitialData);
 	}
 
+	BufferUpdateResult Application::WriteBuffer(
+		const Buffer& Target,
+		uint64_t DestinationOffset,
+		std::span<const std::byte> Data)
+	{
+		const BufferUpdateResult Validation = ValidateBufferUpdate(
+			Target.GetDescription(),
+			DestinationOffset,
+			Data.size());
+		if (!Validation)
+			return std::unexpected(Validation.error());
+
+		return m_Renderer->WriteBuffer(Target, DestinationOffset, Data);
+	}
+
 	MeshCreateResult Application::CreateMesh(const MeshDesc& Description)
 	{
 		const MeshValidationResult Validation = ValidateMeshDescription(Description);

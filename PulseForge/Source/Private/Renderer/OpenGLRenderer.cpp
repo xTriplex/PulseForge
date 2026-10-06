@@ -126,6 +126,14 @@ namespace PulseForge
 			return std::make_unique<OpenGLBuffer>(Description, Handle);
 		}
 
+		BufferUpdateResult WriteBuffer(const Buffer&, uint64_t, std::span<const std::byte>) override
+		{
+			return std::unexpected(BufferUpdateError{
+				BufferUpdateErrorCode::UnsupportedFeature,
+				"The transitional OpenGL backend does not support PulseForge constant-buffer updates"
+			});
+		}
+
 		BindingLayoutCreateResult CreateBindingLayout(const BindingLayoutDesc&) override
 		{
 			return std::unexpected(BindingError{

@@ -34,9 +34,25 @@ namespace PulseForge
 		BackendFailure
 	};
 
+	enum class BufferUpdateErrorCode : uint8_t
+	{
+		UnsupportedUsage,
+		InvalidUpdateSize,
+		OutOfBounds,
+		InvalidFrameState,
+		UnsupportedFeature,
+		BackendFailure
+	};
+
 	struct BufferCreateError
 	{
 		BufferCreateErrorCode Code;
+		std::string Message;
+	};
+
+	struct BufferUpdateError
+	{
+		BufferUpdateErrorCode Code;
 		std::string Message;
 	};
 
@@ -49,8 +65,13 @@ namespace PulseForge
 
 	using BufferHandle = std::unique_ptr<Buffer>;
 	using BufferCreateResult = std::expected<BufferHandle, BufferCreateError>;
+	using BufferUpdateResult = std::expected<void, BufferUpdateError>;
 
 	[[nodiscard]] PULSEFORGE_API std::expected<void, BufferCreateError> ValidateBufferDescription(
 		const BufferDesc& Description,
 		size_t InitialDataSize);
+	[[nodiscard]] PULSEFORGE_API BufferUpdateResult ValidateBufferUpdate(
+		const BufferDesc& Description,
+		uint64_t DestinationOffset,
+		size_t UpdateSize);
 }

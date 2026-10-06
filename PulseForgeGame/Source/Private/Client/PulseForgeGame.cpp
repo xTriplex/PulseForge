@@ -165,7 +165,7 @@ public:
 				throw std::runtime_error(CreatedBindingLayout.error().Message);
 			m_BindingLayout = std::move(CreatedBindingLayout.value());
 
-			if (auto BindingResult = RebuildTransformBindings(); !BindingResult)
+			if (auto BindingResult = CreateTransformBindings(); !BindingResult)
 				throw std::runtime_error(BindingResult.error());
 
 			PulseForge::GraphicsPipelineDesc PipelineDescription;
@@ -194,6 +194,22 @@ public:
 	{
 		if (!m_Pipeline || !m_MeshAssetCache || m_DrawFailed)
 			return;
+
+		if (m_TransformBindingsDirty)
+		{
+			if (auto UpdateResult = UpdateTransformBuffer(); !UpdateResult)
+			{
+				if (!m_LoggedTransformUpdateFailure)
+				{
+					PF_ERROR("Could not update sample camera constants after resize: {0}", UpdateResult.error());
+					m_LoggedTransformUpdateFailure = true;
+				}
+				return;
+			}
+
+			m_TransformBindingsDirty = false;
+			m_LoggedTransformUpdateFailure = false;
+		}
 
 		const auto Mesh = m_MeshAssetCache->GetOrLoad(m_MeshAssetID);
 		if (!Mesh)
@@ -251,8 +267,7 @@ public:
 			if (Width == 0 || Height == 0)
 				return false;
 
-			if (auto BindingResult = RebuildTransformBindings(); !BindingResult)
-				PF_ERROR("Could not update sample camera for resized framebuffer: {0}", BindingResult.error());
+			m_TransformBindingsDirty = true;
 			return false;
 		});
 		PF_TRACE("{0}", Event.ToString());
@@ -302,7 +317,7 @@ private:
 		return Snapshot->ViewProjection * Mesh->WorldTransform;
 	}
 
-	[[nodiscard]] std::expected<void, std::string> RebuildTransformBindings()
+	[[nodiscard]] std::expected<void, std::string> CreateTransformBindings()
 	{
 		const auto ModelViewProjection = CreateModelViewProjection();
 		if (!ModelViewProjection)
@@ -336,6 +351,22 @@ private:
 		return {};
 	}
 
+	[[nodiscard]] std::expected<void, std::string> UpdateTransformBuffer()
+	{
+		const auto ModelViewProjection = CreateModelViewProjection();
+		if (!ModelViewProjection)
+			return std::unexpected(ModelViewProjection.error());
+
+		const auto UpdateResult = PulseForge::Application::Get().WriteBuffer(
+			*m_TransformBuffer,
+			0,
+			std::as_bytes(std::span(&ModelViewProjection.value(), 1)));
+		if (!UpdateResult)
+			return std::unexpected(UpdateResult.error().Message);
+
+		return {};
+	}
+
 	PulseForge::Scene m_Scene;
 	PulseForge::Entity m_CubeEntity;
 	PulseForge::Entity m_CameraEntity;
@@ -352,6 +383,8 @@ private:
 	PulseForge::ShaderHandle m_VertexShader;
 	PulseForge::ShaderHandle m_FragmentShader;
 	PulseForge::GraphicsPipelineHandle m_Pipeline;
+	bool m_TransformBindingsDirty = false;
+	bool m_LoggedTransformUpdateFailure = false;
 	bool m_DrawFailed = false;
 	bool m_LoggedDepthTestDraws = false;
 };
