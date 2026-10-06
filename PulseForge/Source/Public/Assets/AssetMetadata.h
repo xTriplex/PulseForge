@@ -21,7 +21,8 @@ namespace PulseForge
 		UnsupportedVersion,
 		InvalidIdentifier,
 		UUIDGenerationFailed,
-		FileWriteFailed
+		FileWriteFailed,
+		DestinationAssetMissing
 	};
 
 	struct AssetMetadataError
@@ -47,5 +48,9 @@ namespace PulseForge
 		// Use only when importing or duplicating a genuinely new asset. Existing assets are never repaired automatically.
 		[[nodiscard]] static std::expected<AssetMetadata, AssetMetadataError> CreateForNewAsset(
 			const std::filesystem::path& SourceAssetPath);
+		// Both files must exist. Copies source settings to the new asset while assigning it a fresh UUID.
+		[[nodiscard]] static std::expected<AssetMetadata, AssetMetadataError> CreateDuplicateForNewAsset(
+			const std::filesystem::path& SourceAssetPath,
+			const std::filesystem::path& DuplicateAssetPath);
 	};
 }

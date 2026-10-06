@@ -83,6 +83,7 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/PulseForgePCH.cpp
 	PulseForge/Source/Private/Audio/MiniAudio/MiniAudio.cpp
 	PulseForge/Source/Private/Assets/AssetMetadata.cpp
+	PulseForge/Source/Private/Assets/AssetOperations.cpp
 	PulseForge/Source/Private/Assets/AssetRegistry.cpp
 	PulseForge/Source/Private/Assets/PrefabSerializer.cpp
 	PulseForge/Source/Private/Core/Application.cpp

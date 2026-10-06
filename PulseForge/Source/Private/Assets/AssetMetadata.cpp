@@ -27,6 +27,77 @@ namespace PulseForge
 			return Path.generic_string();
 		}
 
+		std::expected<AssetMetadata, AssetMetadataError> ValidateMetadataDocument(
+			const Json& Document,
+			const std::filesystem::path& SidecarPath)
+		{
+			if (!Document.is_object())
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::InvalidDocument,
+					SidecarPath,
+					"Asset metadata root must be a JSON object"));
+			}
+
+			const auto Format = Document.find("format");
+			if (Format == Document.end() || !Format->is_string() || Format->get<std::string>() != AssetMetadataFormat)
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::InvalidDocument,
+					SidecarPath,
+					"Asset metadata has a missing or unsupported format identifier"));
+			}
+
+			const auto Version = Document.find("version");
+			if (Version == Document.end() || (!Version->is_number_integer() && !Version->is_number_unsigned()))
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::InvalidDocument,
+					SidecarPath,
+					"Asset metadata requires a numeric version"));
+			}
+
+			const bool SupportedVersion = Version->is_number_unsigned()
+				? Version->get<uint64_t>() == AssetMetadataSerializer::CurrentVersion
+				: Version->get<int64_t>() == AssetMetadataSerializer::CurrentVersion;
+			if (!SupportedVersion)
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::UnsupportedVersion,
+					SidecarPath,
+					"Asset metadata version is not supported"));
+			}
+
+			const auto SerializedID = Document.find("uuid");
+			if (SerializedID == Document.end() || !SerializedID->is_string())
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::InvalidDocument,
+					SidecarPath,
+					"Asset metadata requires a UUID string"));
+			}
+
+			const auto ImportSettings = Document.find("importSettings");
+			if (ImportSettings == Document.end() || !ImportSettings->is_object())
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::InvalidDocument,
+					SidecarPath,
+					"Asset metadata importSettings field must be an object"));
+			}
+
+			const auto ParsedID = UUID::Parse(SerializedID->get<std::string>());
+			if (!ParsedID || ParsedID->IsNil())
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::InvalidIdentifier,
+					SidecarPath,
+					ParsedID ? "Asset UUID must not be nil" : ParsedID.error().Message));
+			}
+
+			return AssetMetadata{ *ParsedID, AssetMetadataSerializer::CurrentVersion };
+		}
+
 		struct TemporaryFileCleanup
 		{
 			std::filesystem::path Path;
@@ -37,6 +108,67 @@ namespace PulseForge
 				std::filesystem::remove(Path, Error);
 			}
 		};
+
+		std::expected<void, AssetMetadataError> WriteNewMetadataFile(
+			const std::filesystem::path& SidecarPath,
+			const AssetID& ID,
+			const Json& Document)
+		{
+			std::filesystem::path TemporaryPath = SidecarPath;
+			TemporaryPath += "." + ID.ToString() + ".tmp";
+			TemporaryFileCleanup Cleanup{ TemporaryPath };
+
+			const std::string Serialized = Document.dump(2) + "\n";
+			std::ofstream Output(TemporaryPath, std::ios::binary | std::ios::trunc);
+			if (!Output.is_open())
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::FileWriteFailed,
+					SidecarPath,
+					"Could not create temporary asset metadata beside: " + PathForMessage(SidecarPath)));
+			}
+			Output.write(Serialized.data(), static_cast<std::streamsize>(Serialized.size()));
+			Output.flush();
+			if (!Output)
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::FileWriteFailed,
+					SidecarPath,
+					"Could not write asset metadata: " + PathForMessage(SidecarPath)));
+			}
+			Output.close();
+			if (Output.fail())
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::FileWriteFailed,
+					SidecarPath,
+					"Could not finish writing asset metadata: " + PathForMessage(SidecarPath)));
+			}
+
+			std::error_code FileError;
+			const bool Created = std::filesystem::copy_file(
+				TemporaryPath,
+				SidecarPath,
+				std::filesystem::copy_options::none,
+				FileError);
+			if (!Created || FileError)
+			{
+				if (FileError == std::errc::file_exists)
+				{
+					return std::unexpected(MakeMetadataError(
+						AssetMetadataErrorCode::MetadataAlreadyExists,
+						SidecarPath,
+						"Asset metadata appeared during creation and was not overwritten: " + PathForMessage(SidecarPath)));
+				}
+				const std::string FailureReason = FileError ? FileError.message() : "filesystem did not create the sidecar";
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::FileWriteFailed,
+					SidecarPath,
+					"Could not create asset metadata: " + FailureReason));
+			}
+
+			return {};
+		}
 	}
 
 	std::filesystem::path AssetMetadataSerializer::GetSidecarPath(const std::filesystem::path& SourceAssetPath)
@@ -77,72 +209,7 @@ namespace PulseForge
 					"Could not read asset metadata completely: " + PathForMessage(SidecarPath)));
 			}
 
-			const Json Document = Json::parse(Data);
-			if (!Document.is_object())
-			{
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::InvalidDocument,
-					SidecarPath,
-					"Asset metadata root must be a JSON object"));
-			}
-
-			const auto Format = Document.find("format");
-			if (Format == Document.end() || !Format->is_string() || Format->get<std::string>() != AssetMetadataFormat)
-			{
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::InvalidDocument,
-					SidecarPath,
-					"Asset metadata has a missing or unsupported format identifier"));
-			}
-
-			const auto Version = Document.find("version");
-			if (Version == Document.end() || (!Version->is_number_integer() && !Version->is_number_unsigned()))
-			{
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::InvalidDocument,
-					SidecarPath,
-					"Asset metadata requires a numeric version"));
-			}
-
-			const bool SupportedVersion = Version->is_number_unsigned()
-				? Version->get<uint64_t>() == CurrentVersion
-				: Version->get<int64_t>() == CurrentVersion;
-			if (!SupportedVersion)
-			{
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::UnsupportedVersion,
-					SidecarPath,
-					"Asset metadata version is not supported"));
-			}
-
-			const auto SerializedID = Document.find("uuid");
-			if (SerializedID == Document.end() || !SerializedID->is_string())
-			{
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::InvalidDocument,
-					SidecarPath,
-					"Asset metadata requires a UUID string"));
-			}
-
-			const auto ImportSettings = Document.find("importSettings");
-			if (ImportSettings == Document.end() || !ImportSettings->is_object())
-			{
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::InvalidDocument,
-					SidecarPath,
-					"Asset metadata importSettings field must be an object"));
-			}
-
-			const auto ParsedID = UUID::Parse(SerializedID->get<std::string>());
-			if (!ParsedID || ParsedID->IsNil())
-			{
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::InvalidIdentifier,
-					SidecarPath,
-					ParsedID ? "Asset UUID must not be nil" : ParsedID.error().Message));
-			}
-
-			return AssetMetadata{ *ParsedID, CurrentVersion };
+			return ValidateMetadataDocument(Json::parse(Data), SidecarPath);
 		}
 		catch (const nlohmann::json::exception& Exception)
 		{
@@ -219,57 +286,9 @@ namespace PulseForge
 				{ "uuid", GeneratedID->ToString() },
 				{ "importSettings", Json::object() }
 			});
-			std::filesystem::path TemporaryPath = SidecarPath;
-			TemporaryPath += "." + GeneratedID->ToString() + ".tmp";
-			TemporaryFileCleanup Cleanup{ TemporaryPath };
 
-			const std::string Serialized = Document.dump(2) + "\n";
-			std::ofstream Output(TemporaryPath, std::ios::binary | std::ios::trunc);
-			if (!Output.is_open())
-			{
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::FileWriteFailed,
-					SidecarPath,
-					"Could not create temporary asset metadata beside: " + PathForMessage(SidecarPath)));
-			}
-			Output.write(Serialized.data(), static_cast<std::streamsize>(Serialized.size()));
-			Output.flush();
-			if (!Output)
-			{
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::FileWriteFailed,
-					SidecarPath,
-					"Could not write asset metadata: " + PathForMessage(SidecarPath)));
-			}
-			Output.close();
-			if (Output.fail())
-			{
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::FileWriteFailed,
-					SidecarPath,
-					"Could not finish writing asset metadata: " + PathForMessage(SidecarPath)));
-			}
-
-			const bool Created = std::filesystem::copy_file(
-				TemporaryPath,
-				SidecarPath,
-				std::filesystem::copy_options::none,
-				FileError);
-			if (!Created || FileError)
-			{
-				if (FileError == std::errc::file_exists)
-				{
-					return std::unexpected(MakeMetadataError(
-						AssetMetadataErrorCode::MetadataAlreadyExists,
-						SidecarPath,
-						"Asset metadata appeared during creation and was not overwritten: " + PathForMessage(SidecarPath)));
-				}
-				const std::string FailureReason = FileError ? FileError.message() : "filesystem did not create the sidecar";
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::FileWriteFailed,
-					SidecarPath,
-					"Could not create asset metadata: " + FailureReason));
-			}
+			if (auto WriteResult = WriteNewMetadataFile(SidecarPath, *GeneratedID, Document); !WriteResult)
+				return std::unexpected(std::move(WriteResult.error()));
 
 			return AssetMetadata{ *GeneratedID, CurrentVersion };
 		}
@@ -279,6 +298,95 @@ namespace PulseForge
 				AssetMetadataErrorCode::FileWriteFailed,
 				SourceAssetPath,
 				std::string("Asset metadata creation failed: ") + Exception.what()));
+		}
+	}
+
+	std::expected<AssetMetadata, AssetMetadataError> AssetMetadataSerializer::CreateDuplicateForNewAsset(
+		const std::filesystem::path& SourceAssetPath,
+		const std::filesystem::path& DuplicateAssetPath)
+	{
+		if (SourceAssetPath.empty() || SourceAssetPath.extension() == ".meta" ||
+			DuplicateAssetPath.empty() || DuplicateAssetPath.filename().empty() || DuplicateAssetPath.extension() == ".meta")
+		{
+			return std::unexpected(MakeMetadataError(
+				AssetMetadataErrorCode::InvalidPath,
+				DuplicateAssetPath,
+				"Asset duplication requires valid source and destination file paths"));
+		}
+
+		try
+		{
+			std::error_code FileError;
+			const auto SourceStatus = std::filesystem::symlink_status(SourceAssetPath, FileError);
+			if (FileError || !std::filesystem::is_regular_file(SourceStatus))
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::SourceAssetMissing,
+					SourceAssetPath,
+					"Cannot duplicate metadata because the source asset is missing or is not a regular file: " +
+						PathForMessage(SourceAssetPath)));
+			}
+
+			FileError.clear();
+			const auto DuplicateStatus = std::filesystem::symlink_status(DuplicateAssetPath, FileError);
+			if (FileError || !std::filesystem::is_regular_file(DuplicateStatus))
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::DestinationAssetMissing,
+					DuplicateAssetPath,
+					"Duplicate metadata requires an existing regular destination asset: " + PathForMessage(DuplicateAssetPath)));
+			}
+
+			const std::filesystem::path SourceSidecarPath = GetSidecarPath(SourceAssetPath);
+			std::ifstream Input(SourceSidecarPath, std::ios::binary);
+			if (!Input.is_open())
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::FileOpenFailed,
+					SourceSidecarPath,
+					"Could not open source metadata for duplication: " + PathForMessage(SourceSidecarPath)));
+			}
+			const std::string Data{ std::istreambuf_iterator<char>(Input), std::istreambuf_iterator<char>() };
+			if (Input.bad())
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::FileReadFailed,
+					SourceSidecarPath,
+					"Could not read source metadata completely: " + PathForMessage(SourceSidecarPath)));
+			}
+
+			Json Document = Json::parse(Data);
+			if (auto ParsedMetadata = ValidateMetadataDocument(Document, SourceSidecarPath); !ParsedMetadata)
+				return std::unexpected(std::move(ParsedMetadata.error()));
+			const auto GeneratedID = UUID::Generate();
+			if (!GeneratedID)
+			{
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::UUIDGenerationFailed,
+					DuplicateAssetPath,
+					GeneratedID.error().Message));
+			}
+			Document["uuid"] = GeneratedID->ToString();
+
+			const std::filesystem::path DuplicateSidecarPath = GetSidecarPath(DuplicateAssetPath);
+			if (auto WriteResult = WriteNewMetadataFile(DuplicateSidecarPath, *GeneratedID, Document); !WriteResult)
+				return std::unexpected(std::move(WriteResult.error()));
+
+			return AssetMetadata{ *GeneratedID, CurrentVersion };
+		}
+		catch (const nlohmann::json::exception& Exception)
+		{
+			return std::unexpected(MakeMetadataError(
+				AssetMetadataErrorCode::InvalidDocument,
+				SourceAssetPath,
+				std::string("Source asset metadata became invalid during duplication: ") + Exception.what()));
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(MakeMetadataError(
+				AssetMetadataErrorCode::FileWriteFailed,
+				DuplicateAssetPath,
+				std::string("Could not duplicate asset metadata: ") + Exception.what()));
 		}
 	}
 }

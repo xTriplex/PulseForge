@@ -3,6 +3,7 @@
 #include <string_view>
 
 #include "Assets/AssetMetadata.h"
+#include "Assets/AssetOperations.h"
 #include "Assets/AssetRegistry.h"
 #include "Assets/PrefabSerializer.h"
 #include "Core/Input.h"
@@ -1391,6 +1392,155 @@ namespace
 			HasIssue(ReservedSuffixBuild.error(), AssetRegistryIssueCode::UnsupportedEntry));
 	}
 
+	void TestAssetOperations(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		std::error_code FileError;
+		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const auto ProjectIdentifier = UUID::Generate();
+		PF_CHECK(Tests, ProjectIdentifier.has_value());
+		if (!ProjectIdentifier)
+			return;
+
+		const std::filesystem::path ProjectRoot = TemporaryDirectory / ("PulseForgeAssetOperations-" + ProjectIdentifier->ToString());
+		struct ProjectDirectoryCleanup
+		{
+			std::filesystem::path Path;
+			~ProjectDirectoryCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} Cleanup{ ProjectRoot };
+
+		const std::filesystem::path AssetDirectory = ProjectRoot / "Assets" / "Models";
+		std::filesystem::create_directories(AssetDirectory, FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const auto WriteFile = [](const std::filesystem::path& Path, std::string_view Data)
+		{
+			std::ofstream Output(Path, std::ios::binary | std::ios::trunc);
+			if (!Output)
+				return false;
+			Output.write(Data.data(), static_cast<std::streamsize>(Data.size()));
+			Output.close();
+			return static_cast<bool>(Output);
+		};
+		const auto ReadFile = [](const std::filesystem::path& Path) -> std::optional<std::string>
+		{
+			std::ifstream Input(Path, std::ios::binary);
+			if (!Input)
+				return std::nullopt;
+			std::string Data{ std::istreambuf_iterator<char>(Input), std::istreambuf_iterator<char>() };
+			if (Input.bad())
+				return std::nullopt;
+			return Data;
+		};
+
+		const std::filesystem::path Source = AssetDirectory / "ship.gltf";
+		PF_CHECK(Tests, WriteFile(Source, "managed model source"));
+		const auto SourceMetadata = AssetMetadataSerializer::CreateForNewAsset(Source);
+		PF_CHECK(Tests, SourceMetadata.has_value());
+		if (!SourceMetadata)
+			return;
+		const std::filesystem::path SourceSidecar = AssetMetadataSerializer::GetSidecarPath(Source);
+		const std::string MetadataWithImportSettings =
+			"{\"format\":\"PulseForgeAssetMeta\",\"version\":1,\"uuid\":\"" +
+			SourceMetadata->ID.ToString() + "\",\"importSettings\":{\"scale\":2.5}}";
+		PF_CHECK(Tests, WriteFile(SourceSidecar, MetadataWithImportSettings));
+
+		AssetRegistry InitialRegistry;
+		PF_CHECK(Tests, InitialRegistry.Rebuild(ProjectRoot).has_value());
+		PF_CHECK(Tests, InitialRegistry.GetAssetCount() == 1);
+
+		const std::filesystem::path MovedPath = "Assets/Models/ship-renamed.gltf";
+		const auto MoveResult = AssetOperations::Move(ProjectRoot, "Assets/Models/ship.gltf", MovedPath);
+		PF_CHECK(Tests, MoveResult.has_value());
+		PF_CHECK(Tests, MoveResult && MoveResult->ID == SourceMetadata->ID);
+		PF_CHECK(Tests, MoveResult && MoveResult->ProjectRelativePath == MovedPath);
+		const std::filesystem::path MovedSource = ProjectRoot / MovedPath;
+		PF_CHECK(Tests, !std::filesystem::exists(Source));
+		PF_CHECK(Tests, !std::filesystem::exists(SourceSidecar));
+		PF_CHECK(Tests, ReadFile(MovedSource) == std::optional<std::string>("managed model source"));
+		const std::filesystem::path MovedSidecarPath = AssetMetadataSerializer::GetSidecarPath(MovedSource);
+		PF_CHECK(Tests, ReadFile(MovedSidecarPath) == std::optional<std::string>(MetadataWithImportSettings));
+		const auto MovedMetadata = AssetMetadataSerializer::LoadFromFile(MovedSidecarPath);
+		PF_CHECK(Tests, MovedMetadata && MovedMetadata->ID == SourceMetadata->ID);
+
+		AssetRegistry MovedRegistry;
+		PF_CHECK(Tests, MovedRegistry.Rebuild(ProjectRoot).has_value());
+		const auto MovedRecord = MovedRegistry.Find(SourceMetadata->ID);
+		PF_CHECK(Tests, MovedRecord && MovedRecord->ProjectRelativePath == MovedPath);
+
+		const std::filesystem::path DuplicatePath = "Assets/Models/ship-copy.gltf";
+		const auto DuplicateResult = AssetOperations::Duplicate(ProjectRoot, MovedPath, DuplicatePath);
+		PF_CHECK(Tests, DuplicateResult.has_value());
+		PF_CHECK(Tests, DuplicateResult && DuplicateResult->ID != SourceMetadata->ID);
+		PF_CHECK(Tests, DuplicateResult && DuplicateResult->ProjectRelativePath == DuplicatePath);
+		const std::filesystem::path DuplicateSource = ProjectRoot / DuplicatePath;
+		PF_CHECK(Tests, ReadFile(DuplicateSource) == std::optional<std::string>("managed model source"));
+		const auto DuplicateSidecar = ReadFile(AssetMetadataSerializer::GetSidecarPath(DuplicateSource));
+		PF_CHECK(Tests, DuplicateSidecar && DuplicateSidecar->find("\"scale\": 2.5") != std::string::npos);
+		const auto DuplicateMetadata = AssetMetadataSerializer::LoadFromFile(
+			AssetMetadataSerializer::GetSidecarPath(DuplicateSource));
+		PF_CHECK(Tests, DuplicateMetadata && DuplicateMetadata->ID == DuplicateResult->ID);
+
+		const auto ExistingDestination = AssetOperations::Duplicate(ProjectRoot, MovedPath, DuplicatePath);
+		PF_CHECK(Tests, !ExistingDestination.has_value());
+		PF_CHECK(Tests, !ExistingDestination && ExistingDestination.error().Code == AssetOperationErrorCode::DestinationExists);
+		const auto ExistingMoveDestination = AssetOperations::Move(ProjectRoot, MovedPath, DuplicatePath);
+		PF_CHECK(Tests, !ExistingMoveDestination.has_value());
+		PF_CHECK(Tests, !ExistingMoveDestination &&
+			ExistingMoveDestination.error().Code == AssetOperationErrorCode::DestinationExists);
+		PF_CHECK(Tests, std::filesystem::exists(MovedSource));
+		PF_CHECK(Tests, std::filesystem::exists(DuplicateSource));
+		const auto InvalidTraversal = AssetOperations::Move(ProjectRoot, MovedPath, "Assets/../escaped.gltf");
+		PF_CHECK(Tests, !InvalidTraversal.has_value());
+		PF_CHECK(Tests, !InvalidTraversal && InvalidTraversal.error().Code == AssetOperationErrorCode::InvalidPath);
+
+		PF_CHECK(Tests, AssetOperations::Delete(ProjectRoot, DuplicatePath).has_value());
+		PF_CHECK(Tests, !std::filesystem::exists(DuplicateSource));
+		PF_CHECK(Tests, !std::filesystem::exists(AssetMetadataSerializer::GetSidecarPath(DuplicateSource)));
+		AssetRegistry AfterDeleteRegistry;
+		PF_CHECK(Tests, AfterDeleteRegistry.Rebuild(ProjectRoot).has_value());
+		PF_CHECK(Tests, AfterDeleteRegistry.GetAssetCount() == 1);
+		PF_CHECK(Tests, !AfterDeleteRegistry.Find(DuplicateMetadata->ID).has_value());
+		const bool TransactionDirectoryEmpty = std::filesystem::is_empty(
+			ProjectRoot / ".pulseforge" / "cache" / "asset-operations", FileError);
+		PF_CHECK(Tests, !FileError && TransactionDirectoryEmpty);
+
+		const std::filesystem::path AliasedSource = AssetDirectory / "aliased.gltf";
+		PF_CHECK(Tests, WriteFile(AliasedSource, "duplicate identity source"));
+		PF_CHECK(Tests, WriteFile(
+			AssetMetadataSerializer::GetSidecarPath(AliasedSource),
+			"{\"format\":\"PulseForgeAssetMeta\",\"version\":1,\"uuid\":\"" +
+				SourceMetadata->ID.ToString() + "\",\"importSettings\":{}}"));
+		const std::filesystem::path CollisionCopyPath = "Assets/Models/collision-copy.gltf";
+		const auto DuplicateInInvalidProject = AssetOperations::Duplicate(ProjectRoot, MovedPath, CollisionCopyPath);
+		PF_CHECK(Tests, !DuplicateInInvalidProject.has_value());
+		PF_CHECK(Tests, !DuplicateInInvalidProject &&
+			DuplicateInInvalidProject.error().Code == AssetOperationErrorCode::InvalidProjectAssets);
+		PF_CHECK(Tests, !std::filesystem::exists(ProjectRoot / CollisionCopyPath));
+		std::filesystem::remove(AliasedSource, FileError);
+		PF_CHECK(Tests, !FileError);
+		std::filesystem::remove(AssetMetadataSerializer::GetSidecarPath(AliasedSource), FileError);
+		PF_CHECK(Tests, !FileError);
+
+		std::filesystem::remove(AssetMetadataSerializer::GetSidecarPath(MovedSource), FileError);
+		PF_CHECK(Tests, !FileError);
+		const auto MissingMetadataOperation = AssetOperations::Duplicate(ProjectRoot, MovedPath, "Assets/Models/untracked.gltf");
+		PF_CHECK(Tests, !MissingMetadataOperation.has_value());
+		PF_CHECK(Tests, !MissingMetadataOperation &&
+			MissingMetadataOperation.error().Code == AssetOperationErrorCode::InvalidProjectAssets);
+		PF_CHECK(Tests, !std::filesystem::exists(ProjectRoot / "Assets/Models/untracked.gltf"));
+	}
+
 	void TestPrefabSerialization(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -1807,6 +1957,7 @@ int main()
 	TestSceneSerializationRoundTrip(Tests);
 	TestPrefabSerialization(Tests);
 	TestAssetMetadataAndRegistry(Tests);
+	TestAssetOperations(Tests);
 	TestGraphicsPipelineAndDrawValidation(Tests);
 	TestConstantBufferBindingValidation(Tests);
 	TestTextureAndSamplerValidation(Tests);
