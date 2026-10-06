@@ -1,0 +1,32 @@
+{
+  "format": "PulseForgeScene",
+  "version": 2,
+  "entities": [
+    {
+      "uuid": "2e5f5605-08d3-4f7f-84d9-39ca49047701",
+      "tag": { "name": "Sample Cube" },
+      "transform": {
+        "translation": [0.0, 0.0, 0.0],
+        "rotation": [0.9689124, 0.0, 0.221259, 0.110729],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "meshRenderer": { "meshAsset": "6f4d338d-ec74-49ab-9a7e-8a2285feb411" },
+      "parent": null
+    },
+    {
+      "uuid": "c312582b-32cb-4811-9b93-4917d7bb6096",
+      "tag": { "name": "Sample Camera" },
+      "transform": {
+        "translation": [0.0, 0.0, 3.1],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "camera": {
+        "verticalFovRadians": 0.785398163,
+        "nearClipPlane": 0.1,
+        "farClipPlane": 1000.0
+      },
+      "parent": null
+    }
+  ]
+}

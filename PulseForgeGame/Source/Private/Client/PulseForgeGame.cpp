@@ -1,6 +1,7 @@
 #include "Client/PulseForgeGame.h"
 #include "Assets/AssetRegistry.h"
 #include "Assets/MeshAssetCache.h"
+#include "Assets/SceneAssetService.h"
 #include "Assets/TextureAssetCache.h"
 #include "Core/Application.h"
 #include "Core/EntryPoint.h"
@@ -24,9 +25,6 @@
 #include <expected>
 #include <string>
 #include <vector>
-
-#include <glm/ext/matrix_transform.hpp>
-#include <glm/gtc/quaternion.hpp>
 
 namespace
 {
@@ -57,8 +55,6 @@ public:
 	{
 		if (PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan)
 		{
-			InitializeValidationScene();
-
 			const std::filesystem::path ProjectRoot = std::filesystem::current_path();
 			if (auto RegistryResult = m_AssetRegistry.Rebuild(ProjectRoot); !RegistryResult)
 			{
@@ -67,6 +63,7 @@ public:
 					: RegistryResult.error().Issues.front().Message;
 				throw std::runtime_error("Could not build sample asset registry: " + Error);
 			}
+			LoadValidationScene(ProjectRoot);
 			m_MeshAssetCache = std::make_unique<PulseForge::MeshAssetCache>(
 				PulseForge::Application::Get(),
 				ProjectRoot,
@@ -76,12 +73,6 @@ public:
 				ProjectRoot,
 				m_AssetRegistry);
 
-			const auto MeshAssetID = PulseForge::UUID::Parse("6f4d338d-ec74-49ab-9a7e-8a2285feb411");
-			if (!MeshAssetID)
-				throw std::runtime_error(MeshAssetID.error().Message);
-			if (auto ComponentResult = m_CubeEntity.SetMeshRenderer(PulseForge::MeshRendererComponent{ *MeshAssetID });
-				!ComponentResult)
-				throw std::runtime_error(ComponentResult.error().Message);
 			const auto MeshRenderer = m_CubeEntity.GetMeshRenderer();
 			if (!MeshRenderer || !MeshRenderer->has_value())
 				throw std::runtime_error("Could not read the validation mesh renderer component");
@@ -268,35 +259,25 @@ public:
 	}
 
 private:
-	void InitializeValidationScene()
+	void LoadValidationScene(const std::filesystem::path& ProjectRoot)
 	{
-		auto Cube = m_Scene.CreateEntity("Sample Cube");
-		if (!Cube)
-			throw std::runtime_error(Cube.error().Message);
+		const auto SceneAsset = PulseForge::UUID::Parse("b101a2e7-582d-4dfb-ae1e-8ce41fb375ce");
+		if (!SceneAsset)
+			throw std::runtime_error(SceneAsset.error().Message);
+		if (auto LoadResult = PulseForge::SceneAssetService::Load(*SceneAsset, ProjectRoot, m_AssetRegistry, m_Scene);
+			!LoadResult)
+			throw std::runtime_error("Could not load validation scene: " + LoadResult.error().Message);
+
+		const auto CubeID = PulseForge::UUID::Parse("2e5f5605-08d3-4f7f-84d9-39ca49047701");
+		const auto CameraID = PulseForge::UUID::Parse("c312582b-32cb-4811-9b93-4917d7bb6096");
+		if (!CubeID || !CameraID)
+			throw std::runtime_error("Validation scene entity UUID is invalid");
+		const auto Cube = m_Scene.FindEntity(*CubeID);
+		const auto Camera = m_Scene.FindEntity(*CameraID);
+		if (!Cube || !Camera)
+			throw std::runtime_error("Validation scene is missing its expected cube or camera entity");
 		m_CubeEntity = *Cube;
-
-		const glm::mat4 Model =
-			glm::rotate(glm::mat4(1.0f), 0.48f, glm::vec3(0.0f, 1.0f, 0.0f)) *
-			glm::rotate(glm::mat4(1.0f), -0.31f, glm::vec3(1.0f, 0.0f, 0.0f));
-		PulseForge::TransformComponent CubeTransform;
-		CubeTransform.Rotation = glm::quat_cast(Model);
-		if (auto TransformResult = m_CubeEntity.SetTransform(CubeTransform); !TransformResult)
-			throw std::runtime_error(TransformResult.error().Message);
-
-		auto Camera = m_Scene.CreateEntity("Sample Camera");
-		if (!Camera)
-			throw std::runtime_error(Camera.error().Message);
 		m_CameraEntity = *Camera;
-
-		PulseForge::TransformComponent CameraTransform;
-		CameraTransform.Translation = { 2.2f, 1.7f, 3.1f };
-		CameraTransform.Rotation = glm::quatLookAtRH(
-			glm::normalize(-CameraTransform.Translation),
-			glm::vec3(0.0f, 1.0f, 0.0f));
-		if (auto TransformResult = m_CameraEntity.SetTransform(CameraTransform); !TransformResult)
-			throw std::runtime_error(TransformResult.error().Message);
-		if (auto CameraResult = m_CameraEntity.SetCamera(PulseForge::CameraComponent{}); !CameraResult)
-			throw std::runtime_error(CameraResult.error().Message);
 	}
 
 	[[nodiscard]] std::expected<glm::mat4, std::string> CreateModelViewProjection() const

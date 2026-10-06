@@ -4,11 +4,13 @@
 
 #include "Assets/AssetMetadata.h"
 #include "Assets/AssetOperations.h"
+#include "Assets/AssetPathResolver.h"
 #include "Assets/AssetReferenceValidator.h"
 #include "Assets/AssetRegistry.h"
 #include "Assets/GltfMeshImporter.h"
 #include "Assets/ImageAssetImporter.h"
 #include "Assets/PrefabSerializer.h"
+#include "Assets/SceneAssetService.h"
 #include "Core/Input.h"
 #include "Core/LayerStack.h"
 #include "Core/Timestep.h"
@@ -1194,6 +1196,154 @@ namespace
 		PF_CHECK(Tests, !MissingFileResult.has_value());
 		PF_CHECK(Tests, !MissingFileResult && MissingFileResult.error().Code == SceneSerializationErrorCode::FileOpenFailed);
 		PF_CHECK(Tests, Source.GetEntityCount() == 2);
+	}
+
+	void TestSceneAssetsByUUID(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		std::error_code FileError;
+		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const auto ProjectIdentifier = UUID::Generate();
+		PF_CHECK(Tests, ProjectIdentifier.has_value());
+		if (!ProjectIdentifier)
+			return;
+
+		const std::filesystem::path ProjectRoot = TemporaryDirectory / ("PulseForgeSceneAssets-" + ProjectIdentifier->ToString());
+		struct ProjectCleanup
+		{
+			std::filesystem::path Path;
+			~ProjectCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} Cleanup{ ProjectRoot };
+
+		const std::filesystem::path SceneDirectory = ProjectRoot / "Assets" / "Scenes";
+		std::filesystem::create_directories(SceneDirectory, FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const auto CameraID = UUID::Parse("1b6cafe2-0f30-44ea-b841-10cf66f3e517");
+		const auto MeshEntityID = UUID::Parse("2c76c6f7-e8f5-4936-9a24-61dbe7527e08");
+		const auto MeshAssetID = UUID::Parse("3d56dd08-fd22-4a47-9ddf-09f392f1a619");
+		PF_CHECK(Tests, CameraID && MeshEntityID && MeshAssetID);
+		if (!CameraID || !MeshEntityID || !MeshAssetID)
+			return;
+
+		Scene Source;
+		const auto Camera = Source.CreateEntityWithUUID(*CameraID, "Camera");
+		const auto MeshEntity = Source.CreateEntityWithUUID(*MeshEntityID, "Mesh");
+		PF_CHECK(Tests, Camera && MeshEntity);
+		if (!Camera || !MeshEntity)
+			return;
+		PF_CHECK(Tests, Camera->SetCamera(CameraComponent{}).has_value());
+		PF_CHECK(Tests, MeshEntity->SetMeshRenderer(MeshRendererComponent{ *MeshAssetID }).has_value());
+
+		const std::filesystem::path SourcePath = SceneDirectory / "validation.scene";
+		PF_CHECK(Tests, SceneSerializer::SaveToFile(Source, SourcePath).has_value());
+		const auto CreatedMetadata = AssetMetadataSerializer::CreateForNewAsset(SourcePath);
+		PF_CHECK(Tests, CreatedMetadata.has_value());
+		if (!CreatedMetadata)
+			return;
+		const AssetID SceneID = CreatedMetadata->ID;
+
+		AssetRegistry Registry;
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		const auto ResolvedSource = AssetPathResolver::ResolveManagedSourcePath(
+			ProjectRoot,
+			std::filesystem::path("Assets/Scenes/validation.scene"));
+		PF_CHECK(Tests, ResolvedSource && *ResolvedSource == std::filesystem::absolute(SourcePath).lexically_normal());
+		PF_CHECK(Tests, !AssetPathResolver::ResolveManagedSourcePath(ProjectRoot, "Assets/../outside.scene"));
+		PF_CHECK(Tests, !AssetPathResolver::ResolveManagedSourcePath(ProjectRoot, SourcePath));
+
+		Scene Loaded;
+		const auto PreviousEntity = Loaded.CreateEntity("Previous scene contents");
+		const auto LoadedScene = SceneAssetService::Load(SceneID, ProjectRoot, Registry, Loaded);
+		PF_CHECK(Tests, LoadedScene.has_value());
+		PF_CHECK(Tests, PreviousEntity && !PreviousEntity->IsValid());
+		PF_CHECK(Tests, Loaded.GetEntityCount() == 2);
+		const auto LoadedMesh = Loaded.FindEntity(*MeshEntityID);
+		PF_CHECK(Tests, LoadedMesh.has_value());
+		if (!LoadedMesh)
+			return;
+		const auto LoadedMeshRenderer = LoadedMesh->GetMeshRenderer();
+		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value());
+		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
+			LoadedMeshRenderer->value().MeshAsset == *MeshAssetID);
+
+		const auto MoveResult = AssetOperations::Move(
+			Registry,
+			ProjectRoot,
+			"Assets/Scenes/validation.scene",
+			"Assets/Scenes/renamed.scene");
+		PF_CHECK(Tests, MoveResult && MoveResult->ID == SceneID);
+		const auto MovedRecord = Registry.Find(SceneID);
+		PF_CHECK(Tests, MovedRecord && MovedRecord->ProjectRelativePath == "Assets/Scenes/renamed.scene");
+		PF_CHECK(Tests, SceneAssetService::Load(SceneID, ProjectRoot, Registry, Loaded).has_value());
+
+		const auto UpdatedMesh = Loaded.FindEntity(*MeshEntityID);
+		PF_CHECK(Tests, UpdatedMesh.has_value());
+		if (!UpdatedMesh)
+			return;
+		auto UpdatedTag = UpdatedMesh->GetTag();
+		PF_CHECK(Tests, UpdatedTag.has_value());
+		if (!UpdatedTag)
+			return;
+		UpdatedTag->Name = "Saved through stable scene UUID";
+		PF_CHECK(Tests, UpdatedMesh->SetTag(*UpdatedTag).has_value());
+		PF_CHECK(Tests, SceneAssetService::Save(SceneID, ProjectRoot, Registry, Loaded).has_value());
+		const auto PreservedMetadata = AssetMetadataSerializer::LoadFromFile(
+			AssetMetadataSerializer::GetSidecarPath(ProjectRoot / "Assets" / "Scenes" / "renamed.scene"));
+		PF_CHECK(Tests, PreservedMetadata && PreservedMetadata->ID == SceneID);
+		Scene SavedAgain;
+		PF_CHECK(Tests, SceneAssetService::Load(SceneID, ProjectRoot, Registry, SavedAgain).has_value());
+		const auto SavedEntity = SavedAgain.FindEntity(*MeshEntityID);
+		PF_CHECK(Tests, SavedEntity && SavedEntity->GetTag() && SavedEntity->GetTag()->Name == "Saved through stable scene UUID");
+
+		const std::filesystem::path OtherAssetPath = ProjectRoot / "Assets" / "Scenes" / "notes.txt";
+		{
+			std::ofstream Output(OtherAssetPath, std::ios::binary | std::ios::trunc);
+			Output << "not a scene";
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto OtherMetadata = AssetMetadataSerializer::CreateForNewAsset(OtherAssetPath);
+		PF_CHECK(Tests, OtherMetadata.has_value());
+
+		const std::filesystem::path InvalidScenePath = ProjectRoot / "Assets" / "Scenes" / "broken.scene";
+		{
+			std::ofstream Output(InvalidScenePath, std::ios::binary | std::ios::trunc);
+			Output << "{broken";
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto InvalidSceneMetadata = AssetMetadataSerializer::CreateForNewAsset(InvalidScenePath);
+		PF_CHECK(Tests, InvalidSceneMetadata.has_value());
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		if (OtherMetadata)
+		{
+			const auto WrongType = SceneAssetService::Load(OtherMetadata->ID, ProjectRoot, Registry, SavedAgain);
+			PF_CHECK(Tests, !WrongType && WrongType.error().Code == SceneAssetErrorCode::UnsupportedAssetType);
+		}
+		if (InvalidSceneMetadata)
+		{
+			const auto ExistingSavedEntity = SavedAgain.FindEntity(*MeshEntityID);
+			const auto BrokenLoad = SceneAssetService::Load(InvalidSceneMetadata->ID, ProjectRoot, Registry, SavedAgain);
+			PF_CHECK(Tests, !BrokenLoad && BrokenLoad.error().Code == SceneAssetErrorCode::SerializationFailed);
+			PF_CHECK(Tests, ExistingSavedEntity && ExistingSavedEntity->IsValid());
+		}
+
+		const auto MissingID = UUID::Generate();
+		PF_CHECK(Tests, MissingID.has_value());
+		if (MissingID)
+		{
+			const auto Missing = SceneAssetService::Load(*MissingID, ProjectRoot, Registry, SavedAgain);
+			PF_CHECK(Tests, !Missing && Missing.error().Code == SceneAssetErrorCode::AssetNotFound);
+		}
 	}
 
 	void TestAssetMetadataAndRegistry(TestRunner& Tests)
@@ -2551,6 +2701,7 @@ int main()
 	TestEntityHandlesExpireWithScene(Tests);
 	TestSceneRenderSnapshot(Tests);
 	TestSceneSerializationRoundTrip(Tests);
+	TestSceneAssetsByUUID(Tests);
 	TestPrefabSerialization(Tests);
 	TestAssetMetadataAndRegistry(Tests);
 	TestAssetOperations(Tests);

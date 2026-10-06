@@ -1,5 +1,6 @@
 #include "Core/PulseForgePCH.h"
 #include "Assets/GltfMeshImporter.h"
+#include "Assets/AssetPathResolver.h"
 
 #include <nlohmann/json.hpp>
 
@@ -367,74 +368,6 @@ namespace PulseForge
 			return Decoded;
 		}
 
-		std::expected<std::filesystem::path, GltfMeshImportError> ValidateManagedFilePath(
-			const std::filesystem::path& AssetRoot,
-			const std::filesystem::path& RelativePath)
-		{
-			const std::filesystem::path Normalized = RelativePath.lexically_normal();
-			if (Normalized.empty() || Normalized.is_absolute() || Normalized.has_root_name() ||
-				Normalized.has_root_directory() || Normalized.begin() == Normalized.end() || *Normalized.begin() != "Assets")
-			{
-				return std::unexpected(MakeError(
-					GltfMeshImportErrorCode::InvalidProjectPath,
-					RelativePath,
-					"Asset registry path is not project-relative under Assets"));
-			}
-			for (const auto& Component : Normalized)
-			{
-				if (Component == "." || Component == "..")
-				{
-					return std::unexpected(MakeError(
-						GltfMeshImportErrorCode::InvalidProjectPath,
-						RelativePath,
-						"Asset registry path contains a traversal component"));
-				}
-				if (HasWindowsAmbiguousTrailingCharacter(Component))
-				{
-					return std::unexpected(MakeError(
-						GltfMeshImportErrorCode::InvalidProjectPath,
-						RelativePath,
-						"Managed asset path contains a component that is ambiguous on Windows"));
-				}
-			}
-
-			std::error_code FileError;
-			const std::filesystem::file_status AssetRootStatus = std::filesystem::symlink_status(AssetRoot, FileError);
-			if (FileError || std::filesystem::is_symlink(AssetRootStatus) || !std::filesystem::is_directory(AssetRootStatus))
-			{
-				return std::unexpected(MakeError(
-					GltfMeshImportErrorCode::InvalidProjectPath,
-					AssetRoot,
-					"Project Assets root must be an accessible, non-symlink directory"));
-			}
-
-			const std::filesystem::path RelativeToAssets = Normalized.lexically_relative("Assets");
-			std::filesystem::path Current = AssetRoot;
-			for (auto Component = RelativeToAssets.begin(); Component != RelativeToAssets.end(); ++Component)
-			{
-				Current /= *Component;
-				FileError.clear();
-				const std::filesystem::file_status Status = std::filesystem::symlink_status(Current, FileError);
-				if (FileError || std::filesystem::is_symlink(Status))
-				{
-					return std::unexpected(MakeError(
-						GltfMeshImportErrorCode::InvalidProjectPath,
-						Current,
-						"Managed asset and buffer paths must not traverse missing entries or symbolic links"));
-				}
-				const bool IsFinal = std::next(Component) == RelativeToAssets.end();
-				if ((!IsFinal && !std::filesystem::is_directory(Status)) ||
-					(IsFinal && !std::filesystem::is_regular_file(Status)))
-				{
-					return std::unexpected(MakeError(
-						GltfMeshImportErrorCode::InvalidProjectPath,
-						Current,
-						"Managed asset path contains an invalid filesystem entry"));
-				}
-			}
-			return Current;
-		}
-
 		std::expected<uint64_t, GltfMeshImportError> ReadUnsignedInteger(
 			const Json* Value,
 			const std::filesystem::path& Path,
@@ -485,7 +418,6 @@ namespace PulseForge
 			const Json& Document,
 			const std::filesystem::path& SourcePath,
 			const std::filesystem::path& ProjectRoot,
-			const std::filesystem::path& AssetRoot,
 			const std::optional<std::span<const std::byte>>& GlbBinaryChunk)
 		{
 			const Json* Buffers = FindField(Document, "buffers");
@@ -591,9 +523,14 @@ namespace PulseForge
 						}
 						const std::filesystem::path BufferPath = (SourcePath.parent_path() / UriPath).lexically_normal();
 						const std::filesystem::path RelativeBufferPath = BufferPath.lexically_relative(ProjectRoot);
-						auto ManagedBufferPath = ValidateManagedFilePath(AssetRoot, RelativeBufferPath);
+						auto ManagedBufferPath = AssetPathResolver::ResolveManagedSourcePath(ProjectRoot, RelativeBufferPath);
 						if (!ManagedBufferPath)
-							return std::unexpected(std::move(ManagedBufferPath.error()));
+						{
+							return std::unexpected(MakeError(
+								GltfMeshImportErrorCode::InvalidProjectPath,
+								ManagedBufferPath.error().Path,
+								ManagedBufferPath.error().Message));
+						}
 						auto ReadBuffer = ReadFile(*ManagedBufferPath, MaxDecodedBufferBytes);
 						if (!ReadBuffer)
 							return std::unexpected(std::move(ReadBuffer.error()));
@@ -986,10 +923,14 @@ namespace PulseForge
 					ProjectRoot,
 					"Could not resolve project root: " + FileError.message()));
 			}
-			const std::filesystem::path AssetRoot = AbsoluteProjectRoot / "Assets";
-			auto Source = ValidateManagedFilePath(AssetRoot, Record->ProjectRelativePath);
+			auto Source = AssetPathResolver::ResolveManagedSourcePath(AbsoluteProjectRoot, Record->ProjectRelativePath);
 			if (!Source)
-				return std::unexpected(std::move(Source.error()));
+			{
+				return std::unexpected(MakeError(
+					GltfMeshImportErrorCode::InvalidProjectPath,
+					Source.error().Path,
+					Source.error().Message));
+			}
 			if (!HasExtension(*Source, ".gltf") && !HasExtension(*Source, ".glb"))
 			{
 				return std::unexpected(MakeError(
@@ -1078,7 +1019,7 @@ namespace PulseForge
 				}
 			}
 
-			auto Buffers = LoadBuffers(Document, *Source, AbsoluteProjectRoot, AssetRoot, Container.BinaryChunk);
+			auto Buffers = LoadBuffers(Document, *Source, AbsoluteProjectRoot, Container.BinaryChunk);
 			if (!Buffers)
 				return std::unexpected(std::move(Buffers.error()));
 

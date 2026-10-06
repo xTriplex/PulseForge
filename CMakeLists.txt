@@ -82,6 +82,7 @@ target_compile_options(PulseForgeImGui PRIVATE
 add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/PulseForgePCH.cpp
 	PulseForge/Source/Private/Audio/MiniAudio/MiniAudio.cpp
+	PulseForge/Source/Private/Assets/AssetPathResolver.cpp
 	PulseForge/Source/Private/Assets/AssetMetadata.cpp
 	PulseForge/Source/Private/Assets/AssetOperations.cpp
 	PulseForge/Source/Private/Assets/AssetReferenceValidator.cpp
@@ -89,6 +90,7 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Assets/GltfMeshImporter.cpp
 	PulseForge/Source/Private/Assets/ImageAssetImporter.cpp
 	PulseForge/Source/Private/Assets/MeshAssetCache.cpp
+	PulseForge/Source/Private/Assets/SceneAssetService.cpp
 	PulseForge/Source/Private/Assets/TextureAssetCache.cpp
 	PulseForge/Source/Private/Assets/PrefabSerializer.cpp
 	PulseForge/Source/Private/Core/Application.cpp
@@ -235,6 +237,9 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
 		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Textures"
 		COMMAND "${CMAKE_COMMAND}" -E copy_directory
 			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Textures" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Textures"
+		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scenes"
+		COMMAND "${CMAKE_COMMAND}" -E copy_directory
+			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Scenes" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scenes"
 		VERBATIM
 	)
 	set_property(TARGET PulseForgeGame PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGame>")
