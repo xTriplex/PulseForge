@@ -1004,8 +1004,41 @@ namespace
 
 		const auto CappedCatchup = Runtime.Advance(Source, Timestep(0.25));
 		PF_CHECK(Tests, CappedCatchup && *CappedCatchup == Description.MaxSubsteps);
+
+		const auto RuntimeAddedBody = Source.CreateEntity("Runtime-added body");
+		PF_CHECK(Tests, RuntimeAddedBody.has_value());
+		if (RuntimeAddedBody)
+		{
+			TransformComponent RuntimeAddedTransform;
+			RuntimeAddedTransform.Translation.y = 4.0f;
+			PF_CHECK(Tests, RuntimeAddedBody->SetTransform(RuntimeAddedTransform).has_value());
+			PF_CHECK(Tests, RuntimeAddedBody->SetRigidbody(
+				{ RigidbodyMotionType::Dynamic, 1.0f, 0.5f, 0.0f, true }).has_value());
+			PF_CHECK(Tests, RuntimeAddedBody->SetBoxCollider({ { 0.5f, 0.5f, 0.5f } }).has_value());
+
+			const auto ReconciledWithoutStep = Runtime.Advance(Source, Timestep(0.0));
+			PF_CHECK(Tests, ReconciledWithoutStep && *ReconciledWithoutStep == 0);
+			PF_CHECK(Tests, Runtime.ApplyForce(RuntimeAddedBody->GetUUID(), { 0.0f, 120.0f, 0.0f }).has_value());
+			PF_CHECK(Tests, Runtime.Advance(Source, Timestep(FixedStep)).has_value());
+			const auto RuntimeAddedTransformAfterStep = RuntimeAddedBody->GetTransform();
+			PF_CHECK(Tests, RuntimeAddedTransformAfterStep && RuntimeAddedTransformAfterStep->Translation.y > 4.0f);
+
+			PF_CHECK(Tests, RuntimeAddedBody->RemoveRigidbody().has_value());
+			const auto RejectedPartialPair = Runtime.Advance(Source, Timestep(0.0));
+			PF_CHECK(Tests, !RejectedPartialPair &&
+				RejectedPartialPair.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
+			const auto RemovedPartialBodyForce = Runtime.ApplyForce(RuntimeAddedBody->GetUUID(), { 0.0f, 1.0f, 0.0f });
+			PF_CHECK(Tests, !RemovedPartialBodyForce &&
+				RemovedPartialBodyForce.error().Code == PhysicsSceneRuntimeErrorCode::MissingBody);
+			PF_CHECK(Tests, RuntimeAddedBody->RemoveBoxCollider().has_value());
+			PF_CHECK(Tests, Runtime.Advance(Source, Timestep(0.0)).has_value());
+		}
+
+		const UUID RemovedEntityIdentifier = FallingBody->GetUUID();
 		PF_CHECK(Tests, Source.DestroyEntity(*FallingBody).has_value());
-		PF_CHECK(Tests, Runtime.Advance(Source, Timestep(FixedStep)).has_value());
+		PF_CHECK(Tests, Runtime.Advance(Source, Timestep(0.0)).has_value());
+		const auto RemovedEntityForce = Runtime.ApplyForce(RemovedEntityIdentifier, { 0.0f, 1.0f, 0.0f });
+		PF_CHECK(Tests, !RemovedEntityForce && RemovedEntityForce.error().Code == PhysicsSceneRuntimeErrorCode::MissingBody);
 		Runtime.Stop();
 		PF_CHECK(Tests, !Runtime.IsRunning());
 		const auto IndependentStep = IndependentRuntime.Advance(OtherScene, Timestep(FixedStep));

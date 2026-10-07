@@ -218,115 +218,87 @@ namespace PulseForge
 			SourceScene = nullptr;
 		}
 
-		std::expected<void, PhysicsSceneRuntimeError> CreateBodies(Scene& Source)
+		std::expected<BodyRecord, PhysicsSceneRuntimeError> CreateBody(
+			const Entity& Current,
+			const RigidbodyComponent& Rigidbody,
+			const BoxColliderComponent& Collider)
 		{
-			Bodies.reserve(Source.GetEntityCount());
 			JPH::BodyInterface& BodyInterface = System.GetBodyInterface();
-			for (const Entity& Current : Source.GetEntities())
+
+			const auto Parent = Current.GetParent();
+			const auto Transform = Current.GetTransform();
+			if (!Parent || !Transform)
 			{
-				const auto Rigidbody = Current.GetRigidbody();
-				const auto Collider = Current.GetBoxCollider();
-				if (!Rigidbody || !Collider)
-				{
-					return std::unexpected(MakeError(
-						PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
-						"Could not inspect physics components for entity " + Current.GetUUID().ToString()));
-				}
-				if (!Rigidbody->has_value() && !Collider->has_value())
-					continue;
-				if (!Rigidbody->has_value() || !Collider->has_value())
-				{
-					return std::unexpected(MakeError(
-						PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
-						"Physics entities require both a rigidbody and box collider: " + Current.GetUUID().ToString()));
-				}
-
-				const auto Parent = Current.GetParent();
-				const auto Transform = Current.GetTransform();
-				if (!Parent || !Transform)
-				{
-					return std::unexpected(MakeError(
-						PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
-						"Could not read hierarchy or transform for physics entity " + Current.GetUUID().ToString()));
-				}
-				if (Parent->has_value())
-				{
-					return std::unexpected(MakeError(
-						PhysicsSceneRuntimeErrorCode::UnsupportedHierarchy,
-						"Physics entities must be scene roots in this initial integration: " + Current.GetUUID().ToString()));
-				}
-				if (auto Validation = Rigidbody->value().Validate(); !Validation)
-					return std::unexpected(MakeError(PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity, Validation.error().Message));
-				if (auto Validation = Collider->value().Validate(); !Validation)
-					return std::unexpected(MakeError(PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity, Validation.error().Message));
-
-				const glm::vec3 Scale = glm::abs(Transform->Scale);
-				if (!IsFinite(Transform->Translation) || !IsFinite(Scale) ||
-					Scale.x <= 0.00001f || Scale.y <= 0.00001f || Scale.z <= 0.00001f)
-				{
-					return std::unexpected(MakeError(
-						PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
-						"Physics entity transform must have finite translation and non-zero scale: " + Current.GetUUID().ToString()));
-				}
-
-				const glm::vec3 HalfExtents = Collider->value().HalfExtents * Scale;
-				if (!IsFinite(HalfExtents) || HalfExtents.x <= 0.0f || HalfExtents.y <= 0.0f || HalfExtents.z <= 0.0f)
-				{
-					return std::unexpected(MakeError(
-						PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
-						"Box collider half-extents must remain finite and positive after applying entity scale: " +
-						Current.GetUUID().ToString()));
-				}
-				JPH::BoxShapeSettings ShapeSettings(
-					JPH::Vec3(HalfExtents.x, HalfExtents.y, HalfExtents.z),
-					0.0f);
-				ShapeSettings.SetEmbedded();
-				auto ShapeResult = ShapeSettings.Create();
-				if (ShapeResult.HasError())
-				{
-					return std::unexpected(MakeError(
-						PhysicsSceneRuntimeErrorCode::BodyCreationFailed,
-						"Jolt could not create a box shape for entity " + Current.GetUUID().ToString() + ": " +
-						std::string(ShapeResult.GetError().c_str())));
-				}
-				const JPH::Ref<JPH::Shape> Shape = ShapeResult.Get();
-				const bool Dynamic = Rigidbody->value().MotionType == RigidbodyMotionType::Dynamic;
-				JPH::BodyCreationSettings BodySettings(
-					Shape.GetPtr(),
-					JPH::RVec3(Transform->Translation.x, Transform->Translation.y, Transform->Translation.z),
-					ToJolt(Transform->Rotation),
-					Dynamic ? JPH::EMotionType::Dynamic : JPH::EMotionType::Static,
-					Dynamic ? DynamicObjectLayer : StaticObjectLayer);
-				BodySettings.mFriction = Rigidbody->value().Friction;
-				BodySettings.mRestitution = Rigidbody->value().Restitution;
-				BodySettings.mAllowSleeping = Rigidbody->value().AllowSleeping;
-				if (Dynamic)
-				{
-					BodySettings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
-					BodySettings.mMassPropertiesOverride.mMass = Rigidbody->value().Mass;
-				}
-
-				const JPH::EActivation Activation = Dynamic ? JPH::EActivation::Activate : JPH::EActivation::DontActivate;
-				const JPH::BodyID Body = BodyInterface.CreateAndAddBody(BodySettings, Activation);
-				if (Body.IsInvalid())
-				{
-					return std::unexpected(MakeError(
-						PhysicsSceneRuntimeErrorCode::BodyCreationFailed,
-						"Jolt could not allocate a body for entity " + Current.GetUUID().ToString()));
-				}
-				try
-				{
-					Bodies.emplace(Current.GetUUID(), BodyRecord{ Body, Rigidbody->value().MotionType });
-				}
-				catch (...)
-				{
-					BodyInterface.RemoveBody(Body);
-					BodyInterface.DestroyBody(Body);
-					throw;
-				}
+				return std::unexpected(MakeError(
+					PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
+					"Could not read hierarchy or transform for physics entity " + Current.GetUUID().ToString()));
 			}
-			SourceScene = &Source;
-			return {};
+			if (Parent->has_value())
+			{
+				return std::unexpected(MakeError(
+					PhysicsSceneRuntimeErrorCode::UnsupportedHierarchy,
+					"Physics entities must be scene roots in this initial integration: " + Current.GetUUID().ToString()));
+			}
+			if (auto Validation = Rigidbody.Validate(); !Validation)
+				return std::unexpected(MakeError(PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity, Validation.error().Message));
+			if (auto Validation = Collider.Validate(); !Validation)
+				return std::unexpected(MakeError(PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity, Validation.error().Message));
+
+			const glm::vec3 Scale = glm::abs(Transform->Scale);
+			if (!IsFinite(Transform->Translation) || !IsFinite(Scale) ||
+				Scale.x <= 0.00001f || Scale.y <= 0.00001f || Scale.z <= 0.00001f)
+			{
+				return std::unexpected(MakeError(
+					PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
+					"Physics entity transform must have finite translation and non-zero scale: " + Current.GetUUID().ToString()));
+			}
+
+			const glm::vec3 HalfExtents = Collider.HalfExtents * Scale;
+			if (!IsFinite(HalfExtents) || HalfExtents.x <= 0.0f || HalfExtents.y <= 0.0f || HalfExtents.z <= 0.0f)
+			{
+				return std::unexpected(MakeError(
+					PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
+					"Box collider half-extents must remain finite and positive after applying entity scale: " +
+					Current.GetUUID().ToString()));
+			}
+			JPH::BoxShapeSettings ShapeSettings(
+				JPH::Vec3(HalfExtents.x, HalfExtents.y, HalfExtents.z),
+				0.0f);
+			ShapeSettings.SetEmbedded();
+			auto ShapeResult = ShapeSettings.Create();
+			if (ShapeResult.HasError())
+			{
+				return std::unexpected(MakeError(
+					PhysicsSceneRuntimeErrorCode::BodyCreationFailed,
+					"Jolt could not create a box shape for entity " + Current.GetUUID().ToString() + ": " +
+					std::string(ShapeResult.GetError().c_str())));
+			}
+			const JPH::Ref<JPH::Shape> Shape = ShapeResult.Get();
+			const bool Dynamic = Rigidbody.MotionType == RigidbodyMotionType::Dynamic;
+			JPH::BodyCreationSettings BodySettings(
+				Shape.GetPtr(),
+				JPH::RVec3(Transform->Translation.x, Transform->Translation.y, Transform->Translation.z),
+				ToJolt(Transform->Rotation),
+				Dynamic ? JPH::EMotionType::Dynamic : JPH::EMotionType::Static,
+				Dynamic ? DynamicObjectLayer : StaticObjectLayer);
+			BodySettings.mFriction = Rigidbody.Friction;
+			BodySettings.mRestitution = Rigidbody.Restitution;
+			BodySettings.mAllowSleeping = Rigidbody.AllowSleeping;
+			if (Dynamic)
+			{
+				BodySettings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+				BodySettings.mMassPropertiesOverride.mMass = Rigidbody.Mass;
+			}
+
+			const JPH::EActivation Activation = Dynamic ? JPH::EActivation::Activate : JPH::EActivation::DontActivate;
+			const JPH::BodyID Body = BodyInterface.CreateAndAddBody(BodySettings, Activation);
+			if (Body.IsInvalid())
+			{
+				return std::unexpected(MakeError(
+					PhysicsSceneRuntimeErrorCode::BodyCreationFailed,
+					"Jolt could not allocate a body for entity " + Current.GetUUID().ToString()));
+			}
+			return BodyRecord{ Body, Rigidbody.MotionType };
 		}
 
 		void RemoveBody(BodyRecord Body) noexcept
@@ -336,6 +308,122 @@ namespace PulseForge
 			BodyInterface.DestroyBody(Body.ID);
 		}
 
+		std::expected<void, PhysicsSceneRuntimeError> AddBody(
+			const Entity& Current,
+			const RigidbodyComponent& Rigidbody,
+			const BoxColliderComponent& Collider)
+		{
+			auto CreatedBody = CreateBody(Current, Rigidbody, Collider);
+			if (!CreatedBody)
+				return std::unexpected(CreatedBody.error());
+
+			try
+			{
+				if (!Bodies.emplace(Current.GetUUID(), *CreatedBody).second)
+				{
+					RemoveBody(*CreatedBody);
+					return std::unexpected(MakeError(
+						PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
+						"Physics body already exists for entity " + Current.GetUUID().ToString()));
+				}
+			}
+			catch (const std::exception& Exception)
+			{
+				RemoveBody(*CreatedBody);
+				return std::unexpected(MakeError(
+					PhysicsSceneRuntimeErrorCode::BodyCreationFailed,
+					"Could not track physics body for entity " + Current.GetUUID().ToString() + ": " + Exception.what()));
+			}
+			catch (...)
+			{
+				RemoveBody(*CreatedBody);
+				return std::unexpected(MakeError(
+					PhysicsSceneRuntimeErrorCode::BodyCreationFailed,
+					"Could not track physics body for entity " + Current.GetUUID().ToString()));
+			}
+			return {};
+		}
+
+		std::expected<void, PhysicsSceneRuntimeError> ReconcileBodies(Scene& Source)
+		{
+			try
+			{
+				Bodies.reserve(Source.GetEntityCount());
+				for (auto Iterator = Bodies.begin(); Iterator != Bodies.end();)
+				{
+					if (!Source.FindEntity(Iterator->first))
+					{
+						RemoveBody(Iterator->second);
+						Iterator = Bodies.erase(Iterator);
+					}
+					else
+						++Iterator;
+				}
+
+				for (const Entity& Current : Source.GetEntities())
+				{
+					const auto Rigidbody = Current.GetRigidbody();
+					const auto Collider = Current.GetBoxCollider();
+					if (!Rigidbody || !Collider)
+					{
+						return std::unexpected(MakeError(
+							PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
+							"Could not inspect physics components for entity " + Current.GetUUID().ToString()));
+					}
+
+					const bool HasRigidbody = Rigidbody->has_value();
+					const bool HasCollider = Collider->has_value();
+					auto ExistingBody = Bodies.find(Current.GetUUID());
+					if (!HasRigidbody && !HasCollider)
+					{
+						if (ExistingBody != Bodies.end())
+						{
+							RemoveBody(ExistingBody->second);
+							Bodies.erase(ExistingBody);
+						}
+						continue;
+					}
+					if (HasRigidbody != HasCollider)
+					{
+						if (ExistingBody != Bodies.end())
+						{
+							RemoveBody(ExistingBody->second);
+							Bodies.erase(ExistingBody);
+						}
+						return std::unexpected(MakeError(
+							PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
+							"Physics entities require both a rigidbody and box collider: " + Current.GetUUID().ToString()));
+					}
+					if (ExistingBody != Bodies.end())
+						continue;
+
+					if (auto Result = AddBody(Current, Rigidbody->value(), Collider->value()); !Result)
+						return std::unexpected(Result.error());
+				}
+			}
+			catch (const std::exception& Exception)
+			{
+				return std::unexpected(MakeError(
+					PhysicsSceneRuntimeErrorCode::BodyCreationFailed,
+					std::string("Could not reconcile physics bodies: ") + Exception.what()));
+			}
+			catch (...)
+			{
+				return std::unexpected(MakeError(
+					PhysicsSceneRuntimeErrorCode::BodyCreationFailed,
+					"Could not reconcile physics bodies"));
+			}
+			return {};
+		}
+
+		std::expected<void, PhysicsSceneRuntimeError> CreateBodies(Scene& Source)
+		{
+			if (auto Result = ReconcileBodies(Source); !Result)
+				return std::unexpected(Result.error());
+			SourceScene = &Source;
+			return {};
+		}
+
 		std::expected<void, PhysicsSceneRuntimeError> SynchronizeScene()
 		{
 			JPH::BodyInterface& BodyInterface = System.GetBodyInterface();
@@ -343,11 +431,9 @@ namespace PulseForge
 			{
 				const auto EntityValue = SourceScene->FindEntity(Iterator->first);
 				if (!EntityValue)
-				{
-					RemoveBody(Iterator->second);
-					Iterator = Bodies.erase(Iterator);
-					continue;
-				}
+					return std::unexpected(MakeError(
+						PhysicsSceneRuntimeErrorCode::SceneSynchronizationFailed,
+						"Physics entity disappeared before scene synchronization"));
 				if (Iterator->second.MotionType == RigidbodyMotionType::Dynamic)
 				{
 					auto Transform = EntityValue->GetTransform();
@@ -463,6 +549,8 @@ namespace PulseForge
 		const double DeltaSeconds = FrameDelta.GetSeconds();
 		if (!std::isfinite(DeltaSeconds) || DeltaSeconds < 0.0)
 			return std::unexpected(MakeError(PhysicsSceneRuntimeErrorCode::InvalidDeltaTime, "Physics frame delta must be finite and non-negative"));
+		if (auto Result = m_Impl->ReconcileBodies(Source); !Result)
+			return std::unexpected(Result.error());
 
 		m_Impl->AccumulatorSeconds += std::min(DeltaSeconds, m_Description.MaxFrameDeltaSeconds);
 		const double FixedStep = m_Description.FixedStepSeconds;
