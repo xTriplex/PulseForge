@@ -114,7 +114,59 @@ namespace PulseForgeEditor
 		}
 	}
 
-	// CameraComponent uses Vulkan's zero-to-one depth range and flips projection Y; screen Y maps directly to NDC Y.
+	// NVRHI's Vulkan backend uses a negative-height viewport, so NDC +Y maps to the top of the image.
+	[[nodiscard]] inline std::optional<glm::vec2> ViewportImageToNdc(
+		const glm::vec2& ImagePosition,
+		const ViewportImageRect& ImageRect)
+	{
+		if (!Detail::IsFinite(ImagePosition) || !Detail::IsFinite(ImageRect.Minimum) ||
+			!Detail::IsFinite(ImageRect.Maximum))
+			return std::nullopt;
+
+		const glm::vec2 ImageSize = ImageRect.Maximum - ImageRect.Minimum;
+		if (ImageSize.x <= 0.0f || ImageSize.y <= 0.0f)
+			return std::nullopt;
+
+		const glm::vec2 Unit = (ImagePosition - ImageRect.Minimum) / ImageSize;
+		const glm::vec2 Ndc{ Unit.x * 2.0f - 1.0f, 1.0f - Unit.y * 2.0f };
+		return Detail::IsFinite(Ndc) ? std::optional<glm::vec2>{ Ndc } : std::nullopt;
+	}
+
+	[[nodiscard]] inline std::optional<glm::vec2> NdcToViewportImage(
+		const glm::vec2& Ndc,
+		const ViewportImageRect& ImageRect)
+	{
+		if (!Detail::IsFinite(Ndc) || !Detail::IsFinite(ImageRect.Minimum) ||
+			!Detail::IsFinite(ImageRect.Maximum))
+			return std::nullopt;
+
+		const glm::vec2 ImageSize = ImageRect.Maximum - ImageRect.Minimum;
+		if (ImageSize.x <= 0.0f || ImageSize.y <= 0.0f)
+			return std::nullopt;
+
+		const glm::vec2 Unit{ Ndc.x * 0.5f + 0.5f, 0.5f - Ndc.y * 0.5f };
+		const glm::vec2 ImagePosition = ImageRect.Minimum + Unit * ImageSize;
+		return Detail::IsFinite(ImagePosition) ? std::optional<glm::vec2>{ ImagePosition } : std::nullopt;
+	}
+
+	[[nodiscard]] inline std::optional<glm::vec2> ProjectWorldToViewportImage(
+		const glm::vec3& WorldPosition,
+		const glm::mat4& ViewProjection,
+		const ViewportImageRect& ImageRect)
+	{
+		if (!Detail::IsFinite(WorldPosition) || !Detail::IsFinite(ViewProjection))
+			return std::nullopt;
+
+		const glm::vec4 Clip = ViewProjection * glm::vec4(WorldPosition, 1.0f);
+		if (!std::isfinite(Clip.w) || Clip.w <= 1.0e-7f)
+			return std::nullopt;
+
+		const glm::vec3 Ndc = glm::vec3(Clip) / Clip.w;
+		if (!Detail::IsFinite(Ndc) || Ndc.z < 0.0f || Ndc.z > 1.0f)
+			return std::nullopt;
+		return NdcToViewportImage(glm::vec2(Ndc), ImageRect);
+	}
+
 	[[nodiscard]] inline std::optional<Ray> MakeViewportRay(
 		const glm::vec2& ScreenPosition,
 		const ViewportImageRect& ImageRect,
@@ -125,25 +177,23 @@ namespace PulseForgeEditor
 			!Detail::IsFinite(ImageRect.Maximum) || !Detail::IsFinite(ViewProjection))
 			return std::nullopt;
 
-		const glm::vec2 ImageSize = ImageRect.Maximum - ImageRect.Minimum;
-		if (ImageSize.x <= 0.0f || ImageSize.y <= 0.0f)
-			return std::nullopt;
 		if (!AllowOutsideImage && (ScreenPosition.x < ImageRect.Minimum.x || ScreenPosition.x >= ImageRect.Maximum.x ||
 			ScreenPosition.y < ImageRect.Minimum.y || ScreenPosition.y >= ImageRect.Maximum.y))
+			return std::nullopt;
+		const auto Ndc = ViewportImageToNdc(ScreenPosition, ImageRect);
+		if (!Ndc)
 			return std::nullopt;
 
 		const float Determinant = glm::determinant(ViewProjection);
 		if (!std::isfinite(Determinant) || std::abs(Determinant) < std::numeric_limits<float>::min())
 			return std::nullopt;
 
-		const glm::vec2 Unit = (ScreenPosition - ImageRect.Minimum) / ImageSize;
-		const glm::vec2 Ndc{ Unit.x * 2.0f - 1.0f, Unit.y * 2.0f - 1.0f };
 		const glm::mat4 InverseViewProjection = glm::inverse(ViewProjection);
 		if (!Detail::IsFinite(InverseViewProjection))
 			return std::nullopt;
 
-		const glm::vec4 NearHomogeneous = InverseViewProjection * glm::vec4(Ndc, 0.0f, 1.0f);
-		const glm::vec4 FarHomogeneous = InverseViewProjection * glm::vec4(Ndc, 1.0f, 1.0f);
+		const glm::vec4 NearHomogeneous = InverseViewProjection * glm::vec4(*Ndc, 0.0f, 1.0f);
+		const glm::vec4 FarHomogeneous = InverseViewProjection * glm::vec4(*Ndc, 1.0f, 1.0f);
 		if (!std::isfinite(NearHomogeneous.w) || !std::isfinite(FarHomogeneous.w) ||
 			std::abs(NearHomogeneous.w) < 1.0e-8f || std::abs(FarHomogeneous.w) < 1.0e-8f)
 			return std::nullopt;

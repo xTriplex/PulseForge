@@ -1361,6 +1361,23 @@ namespace
 		using namespace PulseForgeEditor;
 
 		const ViewportImageRect ImageRect{ { 100.0f, 50.0f }, { 300.0f, 150.0f } };
+		const auto TopLeft = NdcToViewportImage({ -1.0f, 1.0f }, ImageRect);
+		const auto BottomRight = NdcToViewportImage({ 1.0f, -1.0f }, ImageRect);
+		const auto ImageCenter = NdcToViewportImage({ 0.0f, 0.0f }, ImageRect);
+		PF_CHECK(Tests, TopLeft && glm::length(*TopLeft - ImageRect.Minimum) < 1.0e-5f);
+		PF_CHECK(Tests, BottomRight && glm::length(*BottomRight - ImageRect.Maximum) < 1.0e-5f);
+		PF_CHECK(Tests, ImageCenter && glm::length(*ImageCenter - glm::vec2(200.0f, 100.0f)) < 1.0e-5f);
+		const auto TopLeftNdc = ViewportImageToNdc(ImageRect.Minimum, ImageRect);
+		const auto BottomRightNdc = ViewportImageToNdc(ImageRect.Maximum, ImageRect);
+		PF_CHECK(Tests, TopLeftNdc && glm::length(*TopLeftNdc - glm::vec2(-1.0f, 1.0f)) < 1.0e-5f);
+		PF_CHECK(Tests, BottomRightNdc && glm::length(*BottomRightNdc - glm::vec2(1.0f, -1.0f)) < 1.0e-5f);
+		PF_CHECK(Tests, !NdcToViewportImage({ 0.0f, 0.0f }, {}));
+		PF_CHECK(Tests, !ViewportImageToNdc({ 0.0f, 0.0f }, {}));
+		const auto KnownProjectedPoint = ProjectWorldToViewportImage(
+			{ 0.25f, -0.5f, 0.5f }, glm::mat4(1.0f), ImageRect);
+		PF_CHECK(Tests, KnownProjectedPoint &&
+			glm::length(*KnownProjectedPoint - glm::vec2(225.0f, 125.0f)) < 1.0e-5f);
+
 		CameraComponent Camera;
 		const auto Projection = Camera.GetProjectionMatrix(2.0f);
 		PF_CHECK(Tests, Projection.has_value());
@@ -1371,6 +1388,15 @@ namespace
 			glm::vec3(0.0f),
 			glm::vec3(0.0f, 1.0f, 0.0f));
 		const glm::mat4 ViewProjection = *Projection * View;
+		const auto ProjectedAbove = ProjectWorldToViewportImage({ 0.0f, 1.0f, 0.0f }, ViewProjection, ImageRect);
+		const auto ProjectedBelow = ProjectWorldToViewportImage({ 0.0f, -1.0f, 0.0f }, ViewProjection, ImageRect);
+		PF_CHECK(Tests, ProjectedAbove && ProjectedAbove->y < 100.0f);
+		PF_CHECK(Tests, ProjectedBelow && ProjectedBelow->y > 100.0f);
+		const ViewportImageRect DpiScaledRect{ { 200.0f, 100.0f }, { 600.0f, 300.0f } };
+		const auto LogicalCenterNdc = ViewportImageToNdc({ 200.0f, 100.0f }, ImageRect);
+		const auto DpiCenterNdc = ViewportImageToNdc({ 400.0f, 200.0f }, DpiScaledRect);
+		PF_CHECK(Tests, LogicalCenterNdc && DpiCenterNdc &&
+			glm::length(*LogicalCenterNdc - *DpiCenterNdc) < 1.0e-5f);
 
 		const auto CenterRay = MakeViewportRay({ 200.0f, 100.0f }, ImageRect, ViewProjection);
 		PF_CHECK(Tests, CenterRay.has_value());
@@ -1381,14 +1407,63 @@ namespace
 		}
 		const auto RightRay = MakeViewportRay({ 250.0f, 100.0f }, ImageRect, ViewProjection);
 		PF_CHECK(Tests, RightRay && RightRay->Direction.x > 0.0f);
-		const auto TopRay = MakeViewportRay({ 200.0f, 75.0f }, ImageRect, ViewProjection);
-		PF_CHECK(Tests, TopRay && TopRay->Direction.y > 0.0f);
+		const auto TopImageRay = MakeViewportRay({ 200.0f, 75.0f }, ImageRect, ViewProjection);
+		PF_CHECK(Tests, TopImageRay && TopImageRay->Direction.y > 0.0f);
 		PF_CHECK(Tests, !MakeViewportRay({ 300.0f, 100.0f }, ImageRect, ViewProjection));
 		PF_CHECK(Tests, !MakeViewportRay({ 99.0f, 100.0f }, ImageRect, ViewProjection));
 		PF_CHECK(Tests, !MakeViewportRay({ 200.0f, 100.0f }, {}, ViewProjection));
 		PF_CHECK(Tests, !MakeViewportRay({ 200.0f, 100.0f }, ImageRect, glm::mat4(0.0f)));
 		const glm::vec2 Outside{ 350.0f, 100.0f };
 		PF_CHECK(Tests, MakeViewportRay(Outside, ImageRect, ViewProjection, true).has_value());
+
+		const std::array<ViewportImageRect, 2> ResizedImageRects{
+			ViewportImageRect{ { 13.0f, 27.0f }, { 613.0f, 327.0f } },
+			ViewportImageRect{ { 41.0f, 19.0f }, { 341.0f, 619.0f } }
+		};
+		for (const ViewportImageRect& TestRect : ResizedImageRects)
+		{
+			const float AspectRatio = (TestRect.Maximum.x - TestRect.Minimum.x) /
+				(TestRect.Maximum.y - TestRect.Minimum.y);
+			const auto TestProjection = Camera.GetProjectionMatrix(AspectRatio);
+			PF_CHECK(Tests, TestProjection.has_value());
+			if (!TestProjection)
+				continue;
+
+			const std::array<glm::vec3, 3> CameraPositions{
+				glm::vec3(0.0f, 0.0f, 5.0f),
+				glm::vec3(2.0f, 1.0f, 5.0f),
+				glm::vec3(-3.0f, 2.0f, 4.0f)
+			};
+			const std::array<glm::vec3, 3> CameraTargets{
+				glm::vec3(0.4f, -0.2f, 0.0f),
+				glm::vec3(-0.5f, 0.3f, -0.5f),
+				glm::vec3(0.8f, -0.4f, -1.0f)
+			};
+			for (size_t CameraIndex = 0; CameraIndex < CameraPositions.size(); ++CameraIndex)
+			{
+				const glm::mat4 CameraView = glm::lookAtRH(
+					CameraPositions[CameraIndex],
+					CameraTargets[CameraIndex],
+					glm::vec3(0.0f, 1.0f, 0.0f));
+				const glm::mat4 TestViewProjection = *TestProjection * CameraView;
+				const glm::vec3 WorldPoint = CameraTargets[CameraIndex] + glm::vec3(0.15f, 0.1f, 0.0f);
+				const auto Projected = ProjectWorldToViewportImage(WorldPoint, TestViewProjection, TestRect);
+				PF_CHECK(Tests, Projected.has_value());
+				if (!Projected)
+					continue;
+
+				const auto ThroughPoint = MakeViewportRay(*Projected, TestRect, TestViewProjection);
+				PF_CHECK(Tests, ThroughPoint.has_value());
+				if (ThroughPoint)
+				{
+					const glm::vec3 ToPoint = WorldPoint - ThroughPoint->Origin;
+					const float AlongRay = glm::dot(ToPoint, ThroughPoint->Direction);
+					const glm::vec3 ClosestPoint = ThroughPoint->Origin + ThroughPoint->Direction * AlongRay;
+					PF_CHECK(Tests, AlongRay > 0.0f && AlongRay <= ThroughPoint->MaxDistance + 1.0e-3f);
+					PF_CHECK(Tests, glm::length(ClosestPoint - WorldPoint) < 1.0e-3f);
+				}
+			}
+		}
 
 		const std::array<glm::vec3, 3> Triangle{
 			glm::vec3(-1.0f, -1.0f, 0.0f), glm::vec3(1.0f, -1.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f) };
@@ -1596,7 +1671,7 @@ namespace
 		PF_CHECK(Tests, SourceCamera.Validate().has_value());
 		const auto SourceProjection = SourceCamera.GetProjectionMatrix(16.0f / 9.0f);
 		PF_CHECK(Tests, SourceProjection.has_value());
-		PF_CHECK(Tests, SourceProjection && (*SourceProjection)[1][1] < 0.0f);
+		PF_CHECK(Tests, SourceProjection && (*SourceProjection)[1][1] > 0.0f);
 		const auto InvalidAspectProjection = SourceCamera.GetProjectionMatrix(0.0f);
 		PF_CHECK(Tests, !InvalidAspectProjection.has_value());
 		const auto GLMAssertAspectProjection = SourceCamera.GetProjectionMatrix(std::numeric_limits<float>::epsilon());

@@ -45,8 +45,7 @@ namespace PulseForge
 			AspectRatio,
 			NearClipPlane,
 			FarClipPlane);
-		// Keep camera-up oriented toward the top of PulseForge's framebuffer coordinates.
-		Projection[1][1] *= -1.0f;
+		// NVRHI maps clip-space +Y to the framebuffer top using a negative-height Vulkan viewport.
 		for (int Column = 0; Column < 4; ++Column)
 		{
 			for (int Row = 0; Row < 4; ++Row)

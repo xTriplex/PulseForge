@@ -1713,18 +1713,12 @@ namespace
 
 		[[nodiscard]] std::optional<glm::vec2> ProjectToViewportImage(const glm::vec3& Position) const
 		{
-			if (!m_ViewportViewProjectionValid || !PulseForgeEditor::Detail::IsFinite(Position))
+			if (!m_ViewportViewProjectionValid)
 				return std::nullopt;
-			const glm::vec4 Clip = m_ViewportViewProjection * glm::vec4(Position, 1.0f);
-			if (!std::isfinite(Clip.w) || Clip.w <= 1.0e-7f)
-				return std::nullopt;
-			const glm::vec3 Ndc = glm::vec3(Clip) / Clip.w;
-			if (!PulseForgeEditor::Detail::IsFinite(Ndc) || Ndc.z < 0.0f || Ndc.z > 1.0f)
-				return std::nullopt;
-
-			const glm::vec2 Size = m_ViewportImageRect.Maximum - m_ViewportImageRect.Minimum;
-			const glm::vec2 Screen = m_ViewportImageRect.Minimum + (glm::vec2(Ndc) * 0.5f + 0.5f) * Size;
-			return PulseForgeEditor::Detail::IsFinite(Screen) ? std::optional<glm::vec2>{ Screen } : std::nullopt;
+			return PulseForgeEditor::ProjectWorldToViewportImage(
+				Position,
+				m_ViewportViewProjection,
+				m_ViewportImageRect);
 		}
 
 		[[nodiscard]] std::optional<ViewportGizmoGeometry> BuildViewportGizmoGeometry(
