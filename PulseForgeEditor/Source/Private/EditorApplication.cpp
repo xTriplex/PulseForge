@@ -18,12 +18,17 @@
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
 #include <glm/gtc/quaternion.hpp>
+#include <spdlog/sinks/base_sink.h>
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <initializer_list>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -55,6 +60,68 @@ namespace
 		nfdu8char_t* m_Path = nullptr;
 	};
 
+	struct EditorConsoleMessage
+	{
+		std::string Logger;
+		spdlog::level::level_enum Level;
+		std::string Text;
+	};
+
+	class EditorConsoleSink final : public spdlog::sinks::base_sink<std::mutex>
+	{
+	public:
+		static constexpr size_t Capacity = 2000;
+		static constexpr size_t MaxMessageBytes = 8192;
+
+		bool CopyMessagesIfChanged(
+			uint64_t PreviousRevision,
+			std::vector<EditorConsoleMessage>& Destination,
+			uint64_t& CurrentRevision)
+		{
+			std::lock_guard<std::mutex> Lock(mutex_);
+			CurrentRevision = m_Revision;
+			if (CurrentRevision == PreviousRevision)
+				return false;
+
+			Destination.assign(m_Messages.begin(), m_Messages.end());
+			return true;
+		}
+
+		void Clear()
+		{
+			std::lock_guard<std::mutex> Lock(mutex_);
+			m_Messages.clear();
+			++m_Revision;
+		}
+
+	protected:
+		void sink_it_(const spdlog::details::log_msg& Message) override
+		{
+			const size_t MessageSize = (std::min)(Message.payload.size(), MaxMessageBytes);
+			std::string Text = MessageSize == 0
+				? std::string{}
+				: std::string(Message.payload.data(), MessageSize);
+			if (Message.payload.size() > MaxMessageBytes)
+				Text += " [truncated]";
+			std::replace(Text.begin(), Text.end(), '\r', ' ');
+			std::replace(Text.begin(), Text.end(), '\n', ' ');
+
+			m_Messages.push_back({
+				std::string(Message.logger_name.data(), Message.logger_name.size()),
+				Message.level,
+				std::move(Text) });
+			if (m_Messages.size() > Capacity)
+				m_Messages.pop_front();
+			++m_Revision;
+		}
+
+		void flush_() override { }
+
+	private:
+		std::deque<EditorConsoleMessage> m_Messages;
+		uint64_t m_Revision = 0;
+	};
+
 	class EditorLayer final : public PulseForge::Layer
 	{
 	public:
@@ -65,6 +132,7 @@ namespace
 
 		~EditorLayer() override
 		{
+			DetachConsoleSink();
 			ShutdownImGui();
 			ShutdownFileDialog();
 		}
@@ -99,6 +167,7 @@ namespace
 				throw std::runtime_error("Could not initialize the editor OpenGL ImGui backend");
 			}
 			m_OpenGLBackendActive = true;
+			AttachConsoleSink();
 
 			if (NFD_Init() == NFD_OKAY)
 			{
@@ -111,6 +180,7 @@ namespace
 
 		void OnDetach() override
 		{
+			DetachConsoleSink();
 			m_Scene.reset();
 			m_Project.reset();
 			ShutdownImGui();
@@ -689,8 +759,107 @@ namespace
 			DrawInspectorPanel();
 			DrawContentBrowserPanel();
 
+			DrawConsolePanel();
+		}
+
+		void AttachConsoleSink()
+		{
+			m_ConsoleSink = std::make_shared<EditorConsoleSink>();
+			for (const char* LoggerName : { "PULSEFORGE", "APP" })
+			{
+				if (auto Logger = spdlog::get(LoggerName))
+				{
+					Logger->sinks().push_back(m_ConsoleSink);
+					m_ConsoleLoggers.push_back(std::move(Logger));
+				}
+			}
+			if (m_ConsoleLoggers.empty())
+				m_ConsoleSink.reset();
+		}
+
+		void DetachConsoleSink() noexcept
+		{
+			if (!m_ConsoleSink)
+				return;
+
+			const std::shared_ptr<spdlog::sinks::sink> Sink = m_ConsoleSink;
+			for (const std::shared_ptr<spdlog::logger>& Logger : m_ConsoleLoggers)
+				std::erase(Logger->sinks(), Sink);
+			m_ConsoleLoggers.clear();
+			m_ConsoleSink.reset();
+		}
+
+		static const char* LogLevelName(spdlog::level::level_enum Level)
+		{
+			switch (Level)
+			{
+			case spdlog::level::trace: return "trace";
+			case spdlog::level::debug: return "debug";
+			case spdlog::level::info: return "info";
+			case spdlog::level::warn: return "warning";
+			case spdlog::level::err: return "error";
+			case spdlog::level::critical: return "critical";
+			default: return "unknown";
+			}
+		}
+
+		static ImVec4 LogLevelColor(spdlog::level::level_enum Level)
+		{
+			switch (Level)
+			{
+			case spdlog::level::warn: return { 1.0f, 0.75f, 0.28f, 1.0f };
+			case spdlog::level::err:
+			case spdlog::level::critical: return { 1.0f, 0.38f, 0.32f, 1.0f };
+			default: return ImGui::GetStyleColorVec4(ImGuiCol_Text);
+			}
+		}
+
+		void DrawConsolePanel()
+		{
 			if (ImGui::Begin("Console"))
-				ImGui::TextUnformatted("See the application output for engine and editor diagnostics.");
+			{
+				if (!m_ConsoleSink)
+					ImGui::TextUnformatted("The editor could not connect to the engine loggers.");
+				else
+				{
+					if (ImGui::Button("Clear"))
+						m_ConsoleSink->Clear();
+					ImGui::SameLine();
+					ImGui::Checkbox("Auto-scroll", &m_ConsoleAutoScroll);
+
+					ImGui::Separator();
+					if (ImGui::BeginChild("ConsoleMessages", ImVec2(0.0f, 0.0f), true,
+						ImGuiWindowFlags_HorizontalScrollbar))
+					{
+						const bool WasAtBottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
+						uint64_t CurrentRevision = m_ConsoleRevision;
+						if (m_ConsoleSink->CopyMessagesIfChanged(
+							m_ConsoleRevision,
+							m_ConsoleMessages,
+							CurrentRevision))
+						{
+							m_ConsoleRevision = CurrentRevision;
+						}
+
+						ImGuiListClipper Clipper;
+						Clipper.Begin(static_cast<int>(m_ConsoleMessages.size()));
+						while (Clipper.Step())
+						{
+							for (int Index = Clipper.DisplayStart; Index < Clipper.DisplayEnd; ++Index)
+							{
+								const EditorConsoleMessage& Message = m_ConsoleMessages[static_cast<size_t>(Index)];
+								ImGui::TextColored(LogLevelColor(Message.Level), "[%s] %s:",
+									LogLevelName(Message.Level), Message.Logger.c_str());
+								ImGui::SameLine();
+								ImGui::TextUnformatted(Message.Text.data(), Message.Text.data() + Message.Text.size());
+							}
+						}
+						if (m_ConsoleAutoScroll && WasAtBottom)
+							ImGui::SetScrollHereY(1.0f);
+					}
+					ImGui::EndChild();
+				}
+			}
 			ImGui::End();
 		}
 
@@ -1393,6 +1562,11 @@ namespace
 		bool m_FileDialogActive = false;
 		bool m_SceneDirty = false;
 		bool m_OpenUnsavedDialog = false;
+		bool m_ConsoleAutoScroll = true;
+		uint64_t m_ConsoleRevision = 0;
+		std::shared_ptr<EditorConsoleSink> m_ConsoleSink;
+		std::vector<EditorConsoleMessage> m_ConsoleMessages;
+		std::vector<std::shared_ptr<spdlog::logger>> m_ConsoleLoggers;
 		std::function<void()> m_PendingAction;
 		std::optional<PulseForge::Project> m_Project;
 		std::unique_ptr<PulseForge::Scene> m_Scene;

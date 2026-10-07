@@ -259,7 +259,7 @@ target_link_libraries(PulseForgeGame PRIVATE PulseForge)
 if(PULSEFORGE_BUILD_EDITOR)
 	add_executable(PulseForgeEditor PulseForgeEditor/Source/Private/EditorApplication.cpp)
 	target_compile_definitions(PulseForgeEditor PRIVATE PF_PLATFORM_WINDOWS)
-	target_link_libraries(PulseForgeEditor PRIVATE PulseForge PulseForgeImGui nfd::nfd)
+	target_link_libraries(PulseForgeEditor PRIVATE PulseForge PulseForgeImGui nfd::nfd spdlog::spdlog)
 endif()
 
 if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
