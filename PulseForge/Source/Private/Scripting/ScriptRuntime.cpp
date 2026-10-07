@@ -2,6 +2,7 @@
 #include "Scripting/ScriptRuntime.h"
 
 #include "Assets/AssetPathResolver.h"
+#include "Assets/PrefabAssetService.h"
 #include "Assets/Project.h"
 #include "Audio/AudioSceneRuntime.h"
 #include "Core/Log.h"
@@ -70,6 +71,7 @@ namespace PulseForge
 			Entity BoundEntity;
 			AssetID Asset;
 			Scene* SourceScene = nullptr;
+			const Project* SourceProject = nullptr;
 			ScriptRuntimeServices Services;
 			LuaMemory Memory;
 			lua_State* State = nullptr;
@@ -170,6 +172,28 @@ namespace PulseForge
 			if (auto* UserData = GetLuaEntity(State))
 				std::destroy_at(UserData);
 			return 0;
+		}
+
+		void SetEntityMetatable(lua_State* State)
+		{
+			luaL_getmetatable(State, EntityMetatableName);
+			lua_setmetatable(State, -2);
+		}
+
+		LuaEntity* CreateLuaEntityUserData(lua_State* State)
+		{
+			auto* UserData = static_cast<LuaEntity*>(lua_newuserdatauv(State, sizeof(LuaEntity), 0));
+			new (UserData) LuaEntity{};
+			SetEntityMetatable(State);
+			return UserData;
+		}
+
+		template<size_t Capacity>
+		void CopyHostError(std::array<char, Capacity>& Buffer, std::string_view Message)
+		{
+			const size_t CopyLength = std::min(Message.size(), Capacity - 1);
+			std::copy_n(Message.data(), CopyLength, Buffer.data());
+			Buffer[CopyLength] = '\0';
 		}
 
 		int LuaEntityUUID(lua_State* State)
@@ -323,38 +347,69 @@ namespace PulseForge
 			return InvokeAudioControl(State, &AudioSceneRuntime::StopPlayback);
 		}
 
+		int LuaEntityDestroy(lua_State* State)
+		{
+			LuaEntity* UserData = GetLuaEntity(State);
+			if (!UserData)
+				return ReturnHostError(State, "entity method requires an Entity value as self");
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || !Instance->SourceScene)
+				return ReturnHostError(State, "scene service is no longer available");
+
+			std::array<char, 512> Failure{};
+			bool Destroyed = false;
+			try
+			{
+				{
+					auto Result = Instance->SourceScene->DestroyEntity(UserData->Value);
+					if (Result)
+						Destroyed = true;
+					else
+						CopyHostError(Failure, Result.error().Message);
+				}
+			}
+			catch (const std::exception& Exception)
+			{
+				CopyHostError(Failure, Exception.what());
+			}
+			catch (...)
+			{
+				CopyHostError(Failure, "Could not destroy the scene entity");
+			}
+			if (!Destroyed)
+				return ReturnHostError(State, Failure.data());
+			lua_pushboolean(State, true);
+			return 1;
+		}
+
+		std::optional<UUID> ReadUUIDArgument(lua_State* State, int Index)
+		{
+			if (lua_type(State, Index) != LUA_TSTRING)
+				return std::nullopt;
+			size_t Length = 0;
+			const char* Text = lua_tolstring(State, Index, &Length);
+			const auto Parsed = UUID::Parse(std::string_view(Text, Length));
+			if (!Parsed)
+				return std::nullopt;
+			return *Parsed;
+		}
+
 		int LuaSceneFindEntity(lua_State* State)
 		{
 			ScriptInstance* Instance = GetScriptInstance(State);
 			if (!Instance || !Instance->SourceScene)
 				return ReturnHostError(State, "scene service is no longer available");
-			if (lua_type(State, 1) != LUA_TSTRING)
-				return ReturnHostError(State, "scene.find_entity requires a UUID string");
-
-			size_t IdentifierLength = 0;
-			const char* IdentifierText = lua_tolstring(State, 1, &IdentifierLength);
-			UUID Identifier;
-			bool ValidIdentifier = false;
-			{
-				const auto ParsedIdentifier = UUID::Parse(std::string_view(IdentifierText, IdentifierLength));
-				if (ParsedIdentifier)
-				{
-					Identifier = *ParsedIdentifier;
-					ValidIdentifier = true;
-				}
-			}
-			if (!ValidIdentifier)
+			const auto Identifier = ReadUUIDArgument(State, 1);
+			if (!Identifier)
 				return ReturnHostError(State, "scene.find_entity requires a canonical UUID");
 
-			auto* UserData = static_cast<LuaEntity*>(lua_newuserdatauv(State, sizeof(LuaEntity), 0));
+			auto* UserData = CreateLuaEntityUserData(State);
 			bool Found = false;
 			{
-				const auto FoundEntity = Instance->SourceScene->FindEntity(Identifier);
+				const auto FoundEntity = Instance->SourceScene->FindEntity(*Identifier);
 				if (FoundEntity)
 				{
-					luaL_getmetatable(State, EntityMetatableName);
-					lua_setmetatable(State, -2);
-					new (UserData) LuaEntity{ *FoundEntity };
+					UserData->Value = *FoundEntity;
 					Found = true;
 				}
 			}
@@ -363,6 +418,94 @@ namespace PulseForge
 				lua_pop(State, 1);
 				lua_pushnil(State);
 				return 1;
+			}
+			return 1;
+		}
+
+		int LuaSceneCreateEntity(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || !Instance->SourceScene)
+				return ReturnHostError(State, "scene service is no longer available");
+			if (lua_type(State, 1) != LUA_TSTRING)
+				return ReturnHostError(State, "scene.create_entity requires a name string");
+
+			size_t NameLength = 0;
+			const char* NameText = lua_tolstring(State, 1, &NameLength);
+			auto* UserData = CreateLuaEntityUserData(State);
+			std::array<char, 512> Failure{};
+			bool Created = false;
+			try
+			{
+				{
+					std::string Name(NameText, NameLength);
+					auto Result = Instance->SourceScene->CreateEntity(std::move(Name));
+					if (Result)
+					{
+						UserData->Value = std::move(*Result);
+						Created = true;
+					}
+					else
+						CopyHostError(Failure, Result.error().Message);
+				}
+			}
+			catch (const std::exception& Exception)
+			{
+				CopyHostError(Failure, Exception.what());
+			}
+			catch (...)
+			{
+				CopyHostError(Failure, "Could not create a scene entity");
+			}
+			if (!Created)
+			{
+				lua_pop(State, 1);
+				return ReturnHostError(State, Failure.data());
+			}
+			return 1;
+		}
+
+		int LuaSceneSpawnPrefab(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || !Instance->SourceScene || !Instance->SourceProject)
+				return ReturnHostError(State, "scene or project service is no longer available");
+			const auto PrefabIdentifier = ReadUUIDArgument(State, 1);
+			if (!PrefabIdentifier)
+				return ReturnHostError(State, "scene.spawn_prefab requires a canonical prefab asset UUID");
+
+			auto* UserData = CreateLuaEntityUserData(State);
+			std::array<char, 512> Failure{};
+			bool Spawned = false;
+			try
+			{
+				{
+					auto Result = PrefabAssetService::Instantiate(
+						*PrefabIdentifier,
+						Instance->SourceProject->GetRootPath(),
+						Instance->SourceProject->GetAssetRegistry(),
+						*Instance->SourceScene);
+					if (Result)
+					{
+						UserData->Value = std::move(*Result);
+						Spawned = true;
+					}
+					else
+						CopyHostError(Failure, Result.error().Message);
+				}
+			}
+			catch (const std::exception& Exception)
+			{
+				CopyHostError(Failure, Exception.what());
+			}
+			catch (...)
+			{
+				CopyHostError(Failure, "Could not instantiate the prefab");
+			}
+			if (!Spawned)
+			{
+				lua_pop(State, 1);
+				return ReturnHostError(State, Failure.data());
 			}
 			return 1;
 		}
@@ -414,6 +557,8 @@ namespace PulseForge
 			lua_newtable(State);
 			lua_pushcfunction(State, LuaEntityUUID);
 			lua_setfield(State, -2, "uuid");
+			lua_pushcfunction(State, LuaEntityDestroy);
+			lua_setfield(State, -2, "destroy");
 			lua_pushcfunction(State, LuaEntityGetTranslation);
 			lua_setfield(State, -2, "get_translation");
 			lua_pushcfunction(State, LuaEntitySetTranslation);
@@ -434,6 +579,10 @@ namespace PulseForge
 			lua_newtable(State);
 			lua_pushcfunction(State, LuaSceneFindEntity);
 			lua_setfield(State, -2, "find_entity");
+			lua_pushcfunction(State, LuaSceneCreateEntity);
+			lua_setfield(State, -2, "create_entity");
+			lua_pushcfunction(State, LuaSceneSpawnPrefab);
+			lua_setfield(State, -2, "spawn_prefab");
 			lua_setglobal(State, "scene");
 
 			lua_newuserdatauv(State, sizeof(LuaEntity), 0);
@@ -645,6 +794,7 @@ namespace PulseForge
 			Instance->BoundEntity = EntityValue;
 			Instance->Asset = Component.ScriptAsset;
 			Instance->SourceScene = &SceneValue;
+			Instance->SourceProject = &SourceProject;
 			Instance->Services = Services;
 			Instance->Memory.MaximumBytes = Description.MaxLuaMemoryBytes;
 			Instance->Memory.Pool = &MemoryPool;

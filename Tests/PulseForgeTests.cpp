@@ -2903,6 +2903,130 @@ end
 		if (!TransformScriptAsset)
 			return;
 
+		std::filesystem::create_directories(ProjectRoot / "Assets/Prefabs", FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+		const auto PrefabChildScriptAsset = CreateScriptAsset(
+			"prefab_child.lua",
+			"function OnCreate() assert(entity:set_translation(9, 8, 7)) end\n");
+		PF_CHECK(Tests, PrefabChildScriptAsset.has_value());
+		if (!PrefabChildScriptAsset)
+			return;
+
+		Scene ScriptSpawnPrefabSource;
+		const auto ScriptSpawnPrefabRoot = ScriptSpawnPrefabSource.CreateEntity("Script-spawned prefab root");
+		const auto ScriptSpawnPrefabChild = ScriptSpawnPrefabSource.CreateEntity("Script-spawned prefab child");
+		PF_CHECK(Tests, ScriptSpawnPrefabRoot && ScriptSpawnPrefabChild);
+		if (!ScriptSpawnPrefabRoot || !ScriptSpawnPrefabChild)
+			return;
+		PF_CHECK(Tests, ScriptSpawnPrefabChild->SetParent(*ScriptSpawnPrefabRoot).has_value());
+		PF_CHECK(Tests, ScriptSpawnPrefabChild->SetScript(ScriptComponent{ PrefabChildScriptAsset->ID }).has_value());
+		const auto ScriptSpawnPrefab = PrefabAssetService::Create(
+			ProjectResult->GetAssetRegistry(),
+			ProjectResult->GetRootPath(),
+			"Assets/Prefabs/ScriptSpawn.prefab",
+			ScriptSpawnPrefabSource,
+			*ScriptSpawnPrefabRoot);
+		PF_CHECK(Tests, ScriptSpawnPrefab.has_value());
+		if (!ScriptSpawnPrefab)
+			return;
+
+		const std::string SceneMutationScript =
+			"local CreatedEntity\n"
+			"local SpawnedPrefab\n"
+			"local Destroyed = false\n"
+			"function OnCreate()\n"
+			"  local invalidName, nameMessage = scene.create_entity(17)\n"
+			"  assert(invalidName == nil and nameMessage ~= nil)\n"
+			"  CreatedEntity, nameMessage = scene.create_entity('Lua-created entity')\n"
+			"  assert(CreatedEntity, nameMessage)\n"
+			"  local found = scene.find_entity(CreatedEntity:uuid())\n"
+			"  assert(found ~= nil and found:uuid() == CreatedEntity:uuid())\n"
+			"  local invalidPrefab, prefabMessage = scene.spawn_prefab('not-a-uuid')\n"
+			"  assert(invalidPrefab == nil and prefabMessage ~= nil)\n"
+			"  local wrongType = scene.spawn_prefab('" + TransformScriptAsset->ID.ToString() + "')\n"
+			"  assert(wrongType == nil)\n"
+			"  SpawnedPrefab, prefabMessage = scene.spawn_prefab('" + ScriptSpawnPrefab->ID.ToString() + "')\n"
+			"  assert(SpawnedPrefab, prefabMessage)\n"
+			"end\n"
+			"function OnUpdate()\n"
+			"  if not Destroyed then\n"
+			"    assert(CreatedEntity:destroy())\n"
+			"    Destroyed = true\n"
+			"    assert(scene.find_entity(CreatedEntity:uuid()) == nil)\n"
+			"    local x, staleMessage = CreatedEntity:get_translation()\n"
+			"    assert(x == nil and staleMessage ~= nil)\n"
+			"    local transient, message = scene.create_entity('Transient Lua entity')\n"
+			"    assert(transient, message)\n"
+			"    assert(transient:destroy())\n"
+			"    assert(entity:destroy())\n"
+			"  end\n"
+			"  assert(SpawnedPrefab:set_translation(4, 5, 6))\n"
+			"end\n"
+			"function OnDestroy()\n"
+			"  local x, staleMessage = entity:get_translation()\n"
+			"  assert(x == nil and staleMessage ~= nil)\n"
+			"end\n";
+		const auto SceneMutationScriptAsset = CreateScriptAsset("scene_mutation.lua", SceneMutationScript);
+		PF_CHECK(Tests, SceneMutationScriptAsset.has_value());
+		if (!SceneMutationScriptAsset)
+			return;
+
+		Scene SceneMutationTestScene;
+		const auto SceneMutationController = SceneMutationTestScene.CreateEntity("Scene mutation controller");
+		PF_CHECK(Tests, SceneMutationController.has_value());
+		if (!SceneMutationController)
+			return;
+		PF_CHECK(Tests, SceneMutationController->SetScript(ScriptComponent{ SceneMutationScriptAsset->ID }).has_value());
+		ScriptRuntime SceneMutationRuntime(*ProjectResult);
+		PF_CHECK(Tests, SceneMutationRuntime.Start(SceneMutationTestScene).has_value());
+		PF_CHECK(Tests, SceneMutationRuntime.GetDiagnostics().empty());
+		PF_CHECK(Tests, SceneMutationTestScene.GetEntityCount() == 4);
+
+		std::optional<Entity> SpawnedPrefabRoot;
+		std::optional<Entity> SpawnedPrefabChild;
+		for (const Entity& Current : SceneMutationTestScene.GetEntities())
+		{
+			const auto Tag = Current.GetTag();
+			if (Tag && Tag->Name == "Script-spawned prefab root")
+				SpawnedPrefabRoot = Current;
+			else if (Tag && Tag->Name == "Script-spawned prefab child")
+				SpawnedPrefabChild = Current;
+		}
+		PF_CHECK(Tests, SpawnedPrefabRoot.has_value() && SpawnedPrefabChild.has_value());
+		if (SpawnedPrefabRoot && SpawnedPrefabChild)
+		{
+			const auto SpawnedChildParent = SpawnedPrefabChild->GetParent();
+			PF_CHECK(Tests, SpawnedChildParent && SpawnedChildParent->has_value() &&
+				(**SpawnedChildParent).GetUUID() == SpawnedPrefabRoot->GetUUID());
+		}
+
+		PF_CHECK(Tests, SceneMutationRuntime.Advance(SceneMutationTestScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, SceneMutationTestScene.GetEntityCount() == 2);
+		if (SpawnedPrefabRoot)
+		{
+			const auto SpawnedTransform = SpawnedPrefabRoot->GetTransform();
+			PF_CHECK(Tests, SpawnedTransform &&
+				std::abs(SpawnedTransform->Translation.x - 4.0f) < 0.0001f &&
+				std::abs(SpawnedTransform->Translation.y - 5.0f) < 0.0001f &&
+				std::abs(SpawnedTransform->Translation.z - 6.0f) < 0.0001f);
+		}
+		PF_CHECK(Tests, SceneMutationRuntime.GetDiagnostics().empty());
+		PF_CHECK(Tests, SceneMutationRuntime.GetScriptCount() == 2);
+		if (SpawnedPrefabChild)
+		{
+			const auto SpawnedChildTransform = SpawnedPrefabChild->GetTransform();
+			PF_CHECK(Tests, SpawnedChildTransform &&
+				std::abs(SpawnedChildTransform->Translation.x - 9.0f) < 0.0001f &&
+				std::abs(SpawnedChildTransform->Translation.y - 8.0f) < 0.0001f &&
+				std::abs(SpawnedChildTransform->Translation.z - 7.0f) < 0.0001f);
+		}
+		PF_CHECK(Tests, SceneMutationRuntime.Advance(SceneMutationTestScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, SceneMutationRuntime.GetScriptCount() == 1);
+		PF_CHECK(Tests, SceneMutationRuntime.GetDiagnostics().empty());
+		SceneMutationRuntime.Stop();
+
 		Scene TestScene;
 		const auto FirstEntity = TestScene.CreateEntity("First scripted entity");
 		const auto SecondEntity = TestScene.CreateEntity("Second scripted entity");

@@ -15,14 +15,19 @@ The initial host API is deliberately small:
 - `entity:uuid()` returns the entity UUID.
 - `entity:get_translation()` returns `x, y, z`.
 - `entity:set_translation(x, y, z)` returns `true`, or `nil, message` if the entity or values are invalid.
+- `entity:destroy()` removes the entity and returns `true`, or `nil, message` if it is already invalid.
 - `entity:apply_force(x, y, z)` applies force to the entity's active dynamic rigidbody and returns `true`, or `nil, message` when unavailable or invalid. Forces are submitted before the frame's fixed physics steps.
 - `entity:play_audio()`, `pause_audio()`, `resume_audio()`, and `stop_audio()` control that entity's audio source/playback and return `true` or `nil, message`.
 - `scene.find_entity(uuid)` returns an entity handle or `nil` when no entity has that UUID; invalid UUID input returns `nil, message`.
+- `scene.create_entity(name)` creates an entity and returns its handle, or `nil, message` for invalid input or creation failure.
+- `scene.spawn_prefab(asset_uuid)` instantiates a managed prefab by stable asset UUID and returns its root entity, or `nil, message` if resolution or instantiation fails. Prefabs containing scripts attach those scripts on the next runtime update.
 
 Physics and audio methods require `ScriptRuntimeServices` to provide live scene runtimes. `SceneRuntime` supplies them automatically and stops scripts before releasing those services. Standalone script runtimes without these services return an actionable `nil, message` instead of accessing global engine state.
+
+Scene mutations are applied immediately to the scene. Script attachment synchronization happens at the start of each update, so scripts added by a spawn receive `OnCreate` on the next `Advance`. Destroyed script entities receive `OnDestroy` at the next update or when the runtime stops. Physics recognizes added and removed body/component pairs during that frame's later physics update; changes to the settings of an existing body still require restarting the scene runtime.
 
 The runtime opens only the base, table, string, math, and UTF-8 libraries. File, operating-system, package, debug, and coroutine libraries are not opened. `load`, `loadfile`, `dofile`, `collectgarbage`, `pcall`, `xpcall`, and `string.dump` are disabled so scripts cannot catch the instruction-budget hook's callback error and continue running. These restrictions and execution limits are intended for gameplay scripts, not as a security boundary for hostile code.
 
 By default, a source file is limited to 2 MiB, each Lua state to 16 MiB, all states in one runtime to 256 MiB, and each lifecycle callback to at most 100,000 Lua instructions. Instruction checks run in 1,000-instruction quanta and round the effective limit down to a quantum. `ScriptRuntimeDesc` can lower these limits for tests or projects. Source code is read at runtime; there is no bytecode cache or hot reload yet.
 
-Lua 5.5.1 is fetched from the official Lua release archive and built into PulseForge. It is a build-time dependency; end-user builds do not require a Lua installation or the Vulkan SDK. The editor, project script authoring, hot reload, entity creation/destruction, component access beyond transforms, and physics/audio/input bindings remain future work.
+Lua 5.5.1 is fetched from the official Lua release archive and built into PulseForge. It is a build-time dependency; end-user builds do not require a Lua installation or the Vulkan SDK. The editor, project script authoring, hot reload, broader component access, and input bindings remain future work.
