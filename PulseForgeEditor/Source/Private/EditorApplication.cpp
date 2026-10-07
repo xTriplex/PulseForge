@@ -1413,12 +1413,15 @@ namespace
 					ImGui::TextUnformatted("This scene has no entities.");
 				else
 				{
+					std::function<void()> HierarchyAction;
 					for (const PulseForge::Entity& Entity : m_Scene->GetEntities())
 					{
 						const auto Parent = Entity.GetParent();
 						if (Parent && !Parent->has_value())
-							DrawEntityTree(Entity);
+							DrawEntityTree(Entity, HierarchyAction);
 					}
+					if (HierarchyAction)
+						HierarchyAction();
 				}
 			}
 			ImGui::End();
@@ -1477,12 +1480,53 @@ namespace
 			m_SceneDirty = true;
 		}
 
-		void DrawEntityTree(const PulseForge::Entity& Entity)
+		void ReparentEntity(
+			const PulseForge::UUID& ChildIdentifier,
+			std::optional<PulseForge::UUID> ParentIdentifier)
+		{
+			if (!m_Scene)
+				return;
+			const auto Child = m_Scene->FindEntity(ChildIdentifier);
+			if (!Child)
+			{
+				SetError("The hierarchy entity no longer exists.");
+				return;
+			}
+
+			std::expected<void, PulseForge::SceneError> Result;
+			if (ParentIdentifier)
+			{
+				const auto Parent = m_Scene->FindEntity(*ParentIdentifier);
+				if (!Parent)
+				{
+					SetError("The selected parent entity no longer exists.");
+					return;
+				}
+				Result = Child->SetParent(*Parent);
+			}
+			else
+				Result = Child->ClearParent();
+
+			if (!Result)
+			{
+				SetError("Entity reparenting failed: " + Result.error().Message);
+				return;
+			}
+			m_SceneDirty = true;
+		}
+
+		void DrawEntityTree(const PulseForge::Entity& Entity, std::function<void()>& DeferredHierarchyAction)
 		{
 			const auto Tag = Entity.GetTag();
 			if (!Tag)
 				return;
 
+			const auto Parent = Entity.GetParent();
+			if (!Parent)
+			{
+				SetError("Could not inspect an entity's hierarchy: " + Parent.error().Message);
+				return;
+			}
 			const auto Children = Entity.GetChildren();
 			const std::string Identifier = Entity.GetUUID().ToString();
 			ImGui::PushID(Identifier.c_str());
@@ -1495,10 +1539,28 @@ namespace
 			const bool IsOpen = ImGui::TreeNodeEx("Entity", Flags, "%s", Tag->Name.c_str());
 			if (ImGui::IsItemClicked())
 				m_SelectedEntity = Entity.GetUUID();
+			if (ImGui::BeginPopupContextItem("Entity Actions"))
+			{
+				const PulseForge::UUID ChildIdentifier = Entity.GetUUID();
+				const bool HasParent = Parent && Parent->has_value();
+				if (ImGui::MenuItem("Make Root", nullptr, false, HasParent))
+					DeferredHierarchyAction = [this, ChildIdentifier] { ReparentEntity(ChildIdentifier, std::nullopt); };
+
+				const std::optional<PulseForge::UUID> ParentIdentifier = m_SelectedEntity;
+				const bool CanParentUnderSelection = ParentIdentifier && *ParentIdentifier != ChildIdentifier;
+				if (ImGui::MenuItem("Parent Under Selected", nullptr, false, CanParentUnderSelection))
+				{
+					DeferredHierarchyAction = [this, ChildIdentifier, ParentIdentifier]
+					{
+						ReparentEntity(ChildIdentifier, ParentIdentifier);
+					};
+				}
+				ImGui::EndPopup();
+			}
 			if (IsOpen && Children && !Children->empty())
 			{
 				for (const PulseForge::Entity& Child : *Children)
-					DrawEntityTree(Child);
+					DrawEntityTree(Child, DeferredHierarchyAction);
 				ImGui::TreePop();
 			}
 			ImGui::PopID();
