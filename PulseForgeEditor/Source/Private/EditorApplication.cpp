@@ -1,19 +1,56 @@
+#define GLFW_EXPOSE_NATIVE_WIN32
+
 #include "Core/Application.h"
 #include "Core/EntryPoint.h"
 #include "Core/Layer.h"
 #include "Core/Log.h"
 #include "Events/Event.h"
+#include "Assets/Project.h"
+#include "Assets/SceneAssetService.h"
+#include "Scene/Scene.h"
 #include "Window/Window.h"
 
 #include <GLFW/glfw3.h>
+#include <nfd.h>
+#include <nfd_glfw3.h>
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
 
+#include <algorithm>
+#include <filesystem>
+#include <memory>
+#include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace
 {
+	std::string PathToUtf8(const std::filesystem::path& Path)
+	{
+		const std::u8string UTF8Path = Path.generic_u8string();
+		return { reinterpret_cast<const char*>(UTF8Path.data()), UTF8Path.size() };
+	}
+
+	class DialogPath final
+	{
+	public:
+		~DialogPath()
+		{
+			if (m_Path)
+				NFD_FreePathU8(m_Path);
+		}
+
+		[[nodiscard]] nfdu8char_t** GetAddress() noexcept { return &m_Path; }
+		[[nodiscard]] std::filesystem::path GetPath() const { return std::filesystem::u8path(m_Path); }
+
+	private:
+		nfdu8char_t* m_Path = nullptr;
+	};
+
 	class EditorLayer final : public PulseForge::Layer
 	{
 	public:
@@ -25,6 +62,7 @@ namespace
 		~EditorLayer() override
 		{
 			ShutdownImGui();
+			ShutdownFileDialog();
 		}
 
 		void OnAttach() override
@@ -57,11 +95,22 @@ namespace
 				throw std::runtime_error("Could not initialize the editor OpenGL ImGui backend");
 			}
 			m_OpenGLBackendActive = true;
+
+			if (NFD_Init() == NFD_OKAY)
+			{
+				m_FileDialogActive = true;
+				PF_INFO("Native file dialogs initialized");
+			}
+			else
+				SetError(NfdError("Could not initialize the native file dialog"));
 		}
 
 		void OnDetach() override
 		{
+			m_Scene.reset();
+			m_Project.reset();
 			ShutdownImGui();
+			ShutdownFileDialog();
 		}
 
 		void OnRender() override
@@ -99,7 +148,303 @@ namespace
 		}
 
 	private:
-		static void DrawMainMenu()
+		static std::string NfdError(std::string_view Context)
+		{
+			const char* Error = NFD_GetError();
+			return std::string(Context) + ": " + (Error ? Error : "unknown NativeFileDialog error");
+		}
+
+		[[nodiscard]] nfdwindowhandle_t GetDialogParent() const
+		{
+			nfdwindowhandle_t Parent{};
+			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
+			(void)NFD_GetNativeWindowFromGLFWWindow(Window, &Parent);
+			return Parent;
+		}
+
+		std::optional<std::filesystem::path> ShowOpenDialog(
+			const nfdu8filteritem_t& Filter,
+			const std::filesystem::path& DefaultPath = {})
+		{
+			if (!m_FileDialogActive)
+			{
+				SetError("Native file dialogs are unavailable. See the Console for initialization diagnostics.");
+				return std::nullopt;
+			}
+
+			const std::string DefaultPathUTF8 = DefaultPath.empty() ? std::string{} : PathToUtf8(DefaultPath);
+			nfdopendialogu8args_t Arguments{};
+			Arguments.filterList = &Filter;
+			Arguments.filterCount = 1;
+			Arguments.defaultPath = DefaultPath.empty() ? nullptr : DefaultPathUTF8.c_str();
+			Arguments.parentWindow = GetDialogParent();
+
+			DialogPath Path;
+			const nfdresult_t Result = NFD_OpenDialogU8_With(Path.GetAddress(), &Arguments);
+			if (Result == NFD_CANCEL)
+				return std::nullopt;
+			if (Result == NFD_ERROR)
+			{
+				SetError(NfdError("Could not open the file dialog"));
+				return std::nullopt;
+			}
+			return Path.GetPath();
+		}
+
+		std::optional<std::filesystem::path> ShowSaveDialog(
+			const nfdu8filteritem_t& Filter,
+			const std::filesystem::path& DefaultPath,
+			const char* DefaultName)
+		{
+			if (!m_FileDialogActive)
+			{
+				SetError("Native file dialogs are unavailable. See the Console for initialization diagnostics.");
+				return std::nullopt;
+			}
+
+			const std::string DefaultPathUTF8 = DefaultPath.empty() ? std::string{} : PathToUtf8(DefaultPath);
+			nfdsavedialogu8args_t Arguments{};
+			Arguments.filterList = &Filter;
+			Arguments.filterCount = 1;
+			Arguments.defaultPath = DefaultPath.empty() ? nullptr : DefaultPathUTF8.c_str();
+			Arguments.defaultName = DefaultName;
+			Arguments.parentWindow = GetDialogParent();
+
+			DialogPath Path;
+			const nfdresult_t Result = NFD_SaveDialogU8_With(Path.GetAddress(), &Arguments);
+			if (Result == NFD_CANCEL)
+				return std::nullopt;
+			if (Result == NFD_ERROR)
+			{
+				SetError(NfdError("Could not open the save dialog"));
+				return std::nullopt;
+			}
+			return Path.GetPath();
+		}
+
+		void CreateProject()
+		{
+			static constexpr nfdu8filteritem_t Filter{ "PulseForge Project", "pfproj" };
+			auto ProjectFile = ShowSaveDialog(Filter, {}, "NewProject.pfproj");
+			if (!ProjectFile)
+				return;
+			if (ProjectFile->extension().empty())
+				*ProjectFile += ".pfproj";
+
+			const std::string ProjectName = PathToUtf8(ProjectFile->stem());
+			auto Created = PulseForge::Project::Create(*ProjectFile, ProjectName);
+			if (!Created)
+			{
+				SetError("Project creation failed: " + Created.error().Message);
+				return;
+			}
+
+			auto NewScene = std::make_unique<PulseForge::Scene>();
+			auto MainScene = PulseForge::SceneAssetService::Create(
+				Created->GetAssetRegistry(),
+				Created->GetRootPath(),
+				std::filesystem::path("Assets") / "Main.scene",
+				*NewScene);
+			if (!MainScene && !MainScene.error().CommittedAsset)
+			{
+				m_Project.emplace(std::move(*Created));
+				ClearScene();
+				UpdateAssetList();
+				SetError("Project was created, but its initial scene could not be created: " + MainScene.error().Message);
+				return;
+			}
+
+			const PulseForge::AssetRecord MainSceneRecord = MainScene
+				? *MainScene
+				: *MainScene.error().CommittedAsset;
+			m_Project.emplace(std::move(*Created));
+			m_Scene = std::move(NewScene);
+			m_SceneAsset = MainSceneRecord.ID;
+			m_SelectedEntity.reset();
+			if (!MainScene)
+			{
+				std::string Message = "Project and Main.scene were created, but temporary cleanup needs attention: ";
+				Message += MainScene.error().Message;
+				if (MainScene.error().RecoveryPath)
+					Message += " Recovery data: " + PathToUtf8(*MainScene.error().RecoveryPath);
+				SetWarning(std::move(Message));
+			}
+			else
+				SetStatus("Created project " + ProjectName + " with Assets/Main.scene.");
+			UpdateAssetList();
+
+			if (auto StartScene = m_Project->SetStartScene(MainSceneRecord.ID); !StartScene)
+			{
+				std::string Message = "Project and scene are open, but the startup scene could not be saved: ";
+				Message += StartScene.error().Message;
+				if (!MainScene)
+					Message += " Temporary cleanup also needs attention: " + MainScene.error().Message;
+				if (!MainScene && MainScene.error().RecoveryPath)
+					Message += " Recovery data: " + PathToUtf8(*MainScene.error().RecoveryPath);
+				SetWarning(std::move(Message));
+			}
+		}
+
+		void OpenProject()
+		{
+			static constexpr nfdu8filteritem_t Filter{ "PulseForge Project", "pfproj" };
+			auto ProjectFile = ShowOpenDialog(Filter);
+			if (!ProjectFile)
+				return;
+
+			auto Opened = PulseForge::Project::Open(*ProjectFile);
+			if (!Opened)
+			{
+				SetError("Project could not be opened: " + Opened.error().Message);
+				return;
+			}
+
+			std::unique_ptr<PulseForge::Scene> LoadedScene;
+			std::optional<PulseForge::AssetID> LoadedSceneAsset;
+			std::string SceneLoadWarning;
+			if (const auto StartScene = Opened->GetDescription().StartScene)
+			{
+				LoadedScene = std::make_unique<PulseForge::Scene>();
+				const auto Result = PulseForge::SceneAssetService::Load(
+					*StartScene,
+					Opened->GetRootPath(),
+					Opened->GetAssetRegistry(),
+					*LoadedScene);
+				if (Result)
+					LoadedSceneAsset = *StartScene;
+				else
+				{
+					SceneLoadWarning = "Project opened, but its startup scene could not be loaded: " + Result.error().Message;
+					LoadedScene.reset();
+				}
+			}
+
+			const std::string ProjectName = Opened->GetDescription().Name;
+			m_Project.emplace(std::move(*Opened));
+			m_Scene = std::move(LoadedScene);
+			m_SceneAsset = LoadedSceneAsset;
+			m_SelectedEntity.reset();
+			UpdateAssetList();
+			if (SceneLoadWarning.empty())
+				SetStatus("Opened project " + ProjectName + ".");
+			else
+				SetWarning(std::move(SceneLoadWarning));
+		}
+
+		void CreateScene(bool SaveAs)
+		{
+			if (!m_Project)
+			{
+				SetError("Create or open a project before creating a scene.");
+				return;
+			}
+			if (SaveAs && !m_Scene)
+			{
+				SetError("There is no open scene to save under a new asset identity.");
+				return;
+			}
+
+			static constexpr nfdu8filteritem_t Filter{ "PulseForge Scene", "scene" };
+			auto SelectedPath = ShowSaveDialog(Filter, m_Project->GetRootPath() / "Assets", "NewScene.scene");
+			if (!SelectedPath)
+				return;
+			if (SelectedPath->extension().empty())
+				*SelectedPath += ".scene";
+
+			std::error_code PathError;
+			const std::filesystem::path AbsolutePath = std::filesystem::absolute(*SelectedPath, PathError).lexically_normal();
+			if (PathError)
+			{
+				SetError("Could not resolve the scene destination: " + PathError.message());
+				return;
+			}
+			const std::filesystem::path RelativePath = AbsolutePath.lexically_relative(m_Project->GetRootPath());
+			std::unique_ptr<PulseForge::Scene> NewScene;
+			if (!SaveAs)
+				NewScene = std::make_unique<PulseForge::Scene>();
+			const PulseForge::Scene& Source = SaveAs ? *m_Scene : *NewScene;
+			auto Created = PulseForge::SceneAssetService::Create(
+				m_Project->GetAssetRegistry(),
+				m_Project->GetRootPath(),
+				RelativePath,
+				Source);
+			if (!Created && !Created.error().CommittedAsset)
+			{
+				SetError("Scene asset creation failed: " + Created.error().Message);
+				return;
+			}
+
+			const PulseForge::AssetRecord Record = Created ? *Created : *Created.error().CommittedAsset;
+			if (!SaveAs)
+				m_Scene = std::move(NewScene);
+			m_SceneAsset = Record.ID;
+			m_SelectedEntity.reset();
+			UpdateAssetList();
+			if (auto StartScene = m_Project->SetStartScene(Record.ID); !StartScene)
+			{
+				std::string Message = "Scene was created, but the project startup scene could not be updated: ";
+				Message += StartScene.error().Message;
+				if (!Created)
+					Message += " Temporary cleanup also needs attention: " + Created.error().Message;
+				if (!Created && Created.error().RecoveryPath)
+					Message += " Recovery data: " + PathToUtf8(*Created.error().RecoveryPath);
+				SetWarning(std::move(Message));
+			}
+			else if (!Created)
+			{
+				std::string Message = "Scene was created, but temporary cleanup needs attention: ";
+				Message += Created.error().Message;
+				if (Created.error().RecoveryPath)
+					Message += " Recovery data: " + PathToUtf8(*Created.error().RecoveryPath);
+				SetWarning(std::move(Message));
+			}
+			else
+				SetStatus("Created scene " + PathToUtf8(Record.ProjectRelativePath) + ".");
+		}
+
+		void OpenScene(const PulseForge::AssetID& Identifier)
+		{
+			if (!m_Project)
+				return;
+			auto Loaded = std::make_unique<PulseForge::Scene>();
+			const auto Result = PulseForge::SceneAssetService::Load(
+				Identifier,
+				m_Project->GetRootPath(),
+				m_Project->GetAssetRegistry(),
+				*Loaded);
+			if (!Result)
+			{
+				SetError("Scene could not be opened: " + Result.error().Message);
+				return;
+			}
+
+			m_Scene = std::move(Loaded);
+			m_SceneAsset = Identifier;
+			m_SelectedEntity.reset();
+			const auto Record = m_Project->GetAssetRegistry().Find(Identifier);
+			SetStatus(Record ? "Opened scene " + PathToUtf8(Record->ProjectRelativePath) + "." : "Opened scene.");
+		}
+
+		void SaveScene()
+		{
+			if (!m_Project || !m_Scene || !m_SceneAsset)
+			{
+				SetError("There is no managed scene asset to save.");
+				return;
+			}
+
+			const auto Result = PulseForge::SceneAssetService::Save(
+				*m_SceneAsset,
+				m_Project->GetRootPath(),
+				m_Project->GetAssetRegistry(),
+				*m_Scene);
+			if (!Result)
+				SetError("Scene save failed: " + Result.error().Message);
+			else
+				SetStatus("Scene saved.");
+		}
+
+		void DrawMainMenu()
 		{
 			if (!ImGui::BeginMainMenuBar())
 				return;
@@ -107,36 +452,259 @@ namespace
 			ImGui::TextUnformatted("PulseForge");
 			if (ImGui::BeginMenu("File"))
 			{
-				ImGui::MenuItem("New Project", nullptr, false, false);
-				ImGui::MenuItem("Open Project", nullptr, false, false);
+				if (ImGui::MenuItem("New Project..."))
+					CreateProject();
+				if (ImGui::MenuItem("Open Project..."))
+					OpenProject();
+				if (m_Project && ImGui::MenuItem("Close Project"))
+				{
+					m_Scene.reset();
+					m_Project.reset();
+					m_SceneAsset.reset();
+					m_SelectedEntity.reset();
+					m_Assets.clear();
+					SetStatus("Project closed.");
+				}
 				ImGui::Separator();
-				ImGui::MenuItem("Exit", nullptr, false, false);
+				if (ImGui::MenuItem("Exit"))
+					PulseForge::Application::Get().RequestClose();
+				ImGui::EndMenu();
+			}
+
+			if (ImGui::BeginMenu("Scene", m_Project.has_value()))
+			{
+				if (ImGui::MenuItem("New Scene..."))
+					CreateScene(false);
+				if (ImGui::MenuItem("Save Scene", nullptr, false, m_Scene && m_SceneAsset))
+					SaveScene();
+				if (ImGui::MenuItem("Save Scene As...", nullptr, false, m_Scene != nullptr))
+					CreateScene(true);
+				if (ImGui::BeginMenu("Open Scene", m_Project.has_value()))
+				{
+					bool HasScenes = false;
+					for (const PulseForge::AssetRecord& Asset : m_Assets)
+					{
+						if (Asset.ProjectRelativePath.extension() != ".scene")
+							continue;
+						HasScenes = true;
+						const bool IsOpen = m_SceneAsset && *m_SceneAsset == Asset.ID;
+						if (ImGui::MenuItem(PathToUtf8(Asset.ProjectRelativePath.filename()).c_str(), nullptr, IsOpen))
+							OpenScene(Asset.ID);
+					}
+					if (!HasScenes)
+						ImGui::MenuItem("No scene assets", nullptr, false, false);
+					ImGui::EndMenu();
+				}
 				ImGui::EndMenu();
 			}
 			ImGui::EndMainMenuBar();
 		}
 
-		static void DrawWorkspacePanels()
+		void DrawWorkspacePanels()
 		{
 			if (ImGui::Begin("Scene"))
-				ImGui::TextUnformatted("Open a project and scene to begin.");
+			{
+				if (m_Project)
+				{
+					ImGui::Text("Project: %s", m_Project->GetDescription().Name.c_str());
+					if (m_Scene && m_SceneAsset)
+					{
+						const auto Record = m_Project->GetAssetRegistry().Find(*m_SceneAsset);
+						ImGui::Text("Scene: %s", Record ? PathToUtf8(Record->ProjectRelativePath).c_str() : "<unregistered>");
+						ImGui::Text("Entities: %zu", m_Scene->GetEntityCount());
+					}
+					else
+						ImGui::TextUnformatted("No scene is open. Create one from the Scene menu or open a scene asset.");
+				}
+				else
+					ImGui::TextUnformatted("Create or open a project from the File menu.");
+
+				ImGui::Separator();
+				const ImVec4 Color = m_StatusIsError
+					? ImVec4(1.0f, 0.38f, 0.32f, 1.0f)
+					: m_StatusIsWarning ? ImVec4(1.0f, 0.75f, 0.28f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_Text);
+				ImGui::PushStyleColor(ImGuiCol_Text, Color);
+				ImGui::TextWrapped("%s", m_StatusMessage.c_str());
+				ImGui::PopStyleColor();
+			}
 			ImGui::End();
 
-			if (ImGui::Begin("Hierarchy"))
-				ImGui::TextUnformatted("No scene is open.");
-			ImGui::End();
-
-			if (ImGui::Begin("Inspector"))
-				ImGui::TextUnformatted("Select an entity to inspect its components.");
-			ImGui::End();
-
-			if (ImGui::Begin("Content Browser"))
-				ImGui::TextUnformatted("Open a project to browse managed assets.");
-			ImGui::End();
+			DrawHierarchyPanel();
+			DrawInspectorPanel();
+			DrawContentBrowserPanel();
 
 			if (ImGui::Begin("Console"))
-				ImGui::TextUnformatted("Engine diagnostics will appear here when connected.");
+				ImGui::TextUnformatted("See the application output for engine and editor diagnostics.");
 			ImGui::End();
+		}
+
+		void DrawHierarchyPanel()
+		{
+			if (ImGui::Begin("Hierarchy"))
+			{
+				if (!m_Scene)
+					ImGui::TextUnformatted("No scene is open.");
+				else if (m_Scene->GetEntityCount() == 0)
+					ImGui::TextUnformatted("This scene has no entities.");
+				else
+				{
+					for (const PulseForge::Entity& Entity : m_Scene->GetEntities())
+					{
+						const auto Parent = Entity.GetParent();
+						if (Parent && !Parent->has_value())
+							DrawEntityTree(Entity);
+					}
+				}
+			}
+			ImGui::End();
+		}
+
+		void DrawEntityTree(const PulseForge::Entity& Entity)
+		{
+			const auto Tag = Entity.GetTag();
+			if (!Tag)
+				return;
+
+			const auto Children = Entity.GetChildren();
+			const std::string Identifier = Entity.GetUUID().ToString();
+			ImGui::PushID(Identifier.c_str());
+			ImGuiTreeNodeFlags Flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+			if (m_SelectedEntity && *m_SelectedEntity == Entity.GetUUID())
+				Flags |= ImGuiTreeNodeFlags_Selected;
+			if (!Children || Children->empty())
+				Flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+
+			const bool IsOpen = ImGui::TreeNodeEx("Entity", Flags, "%s", Tag->Name.c_str());
+			if (ImGui::IsItemClicked())
+				m_SelectedEntity = Entity.GetUUID();
+			if (IsOpen && Children && !Children->empty())
+			{
+				for (const PulseForge::Entity& Child : *Children)
+					DrawEntityTree(Child);
+				ImGui::TreePop();
+			}
+			ImGui::PopID();
+		}
+
+		void DrawInspectorPanel()
+		{
+			if (ImGui::Begin("Inspector"))
+			{
+				if (!m_Scene || !m_SelectedEntity)
+					ImGui::TextUnformatted("Select an entity in the Hierarchy.");
+				else if (const auto Entity = m_Scene->FindEntity(*m_SelectedEntity))
+				{
+					const auto Tag = Entity->GetTag();
+					if (Tag)
+						ImGui::Text("Name: %s", Tag->Name.c_str());
+					ImGui::Text("UUID: %s", Entity->GetUUID().ToString().c_str());
+
+					if (const auto Transform = Entity->GetTransform())
+					{
+						ImGui::SeparatorText("Transform");
+						ImGui::Text("Position: %.3f, %.3f, %.3f",
+							Transform->Translation.x, Transform->Translation.y, Transform->Translation.z);
+						ImGui::Text("Scale: %.3f, %.3f, %.3f",
+							Transform->Scale.x, Transform->Scale.y, Transform->Scale.z);
+					}
+				}
+				else
+				{
+					m_SelectedEntity.reset();
+					ImGui::TextUnformatted("The selected entity no longer exists.");
+				}
+			}
+			ImGui::End();
+		}
+
+		void DrawContentBrowserPanel()
+		{
+			if (ImGui::Begin("Content Browser"))
+			{
+				if (!m_Project)
+					ImGui::TextUnformatted("Open a project to browse managed assets.");
+				else
+				{
+					if (ImGui::Button("Refresh"))
+						RefreshAssets();
+					if (m_Assets.empty())
+						ImGui::TextUnformatted("The project has no managed assets.");
+					for (const PulseForge::AssetRecord& Asset : m_Assets)
+					{
+						const std::string AssetID = Asset.ID.ToString();
+						ImGui::PushID(AssetID.c_str());
+						const bool IsCurrent = m_SceneAsset && *m_SceneAsset == Asset.ID;
+						const std::string Path = PathToUtf8(Asset.ProjectRelativePath);
+						ImGui::Selectable(Path.c_str(), IsCurrent, ImGuiSelectableFlags_AllowDoubleClick);
+						if (ImGui::IsItemClicked() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
+							Asset.ProjectRelativePath.extension() == ".scene")
+							OpenScene(Asset.ID);
+						if (ImGui::IsItemHovered())
+							ImGui::SetTooltip("UUID: %s", AssetID.c_str());
+						ImGui::PopID();
+					}
+				}
+			}
+			ImGui::End();
+		}
+
+		void SetStatus(std::string Message)
+		{
+			m_StatusMessage = std::move(Message);
+			m_StatusIsError = false;
+			m_StatusIsWarning = false;
+			PF_INFO("{}", m_StatusMessage);
+		}
+
+		void RefreshAssets()
+		{
+			if (!m_Project)
+				return;
+
+			const auto Rebuild = m_Project->GetAssetRegistry().Rebuild(m_Project->GetRootPath());
+			if (!Rebuild)
+			{
+				std::string Message = "Asset registry refresh failed:";
+				if (Rebuild.error().Issues.empty())
+					Message += " unknown registry error";
+				for (const PulseForge::AssetRegistryIssue& Issue : Rebuild.error().Issues)
+					Message += "\n - " + Issue.Message;
+				SetError(std::move(Message));
+				return;
+			}
+			UpdateAssetList();
+			SetStatus("Asset registry refreshed.");
+		}
+
+		void UpdateAssetList()
+		{
+			if (m_Project)
+				m_Assets = m_Project->GetAssetRegistry().GetAssets();
+			else
+				m_Assets.clear();
+		}
+
+		void SetWarning(std::string Message)
+		{
+			m_StatusMessage = std::move(Message);
+			m_StatusIsError = false;
+			m_StatusIsWarning = true;
+			PF_WARN("{}", m_StatusMessage);
+		}
+
+		void SetError(std::string Message)
+		{
+			m_StatusMessage = std::move(Message);
+			m_StatusIsError = true;
+			m_StatusIsWarning = false;
+			PF_ERROR("{}", m_StatusMessage);
+		}
+
+		void ClearScene() noexcept
+		{
+			m_Scene.reset();
+			m_SceneAsset.reset();
+			m_SelectedEntity.reset();
 		}
 
 		void ShutdownImGui() noexcept
@@ -155,9 +723,25 @@ namespace
 			m_GlfwBackendActive = false;
 		}
 
+		void ShutdownFileDialog() noexcept
+		{
+			if (m_FileDialogActive)
+				NFD_Quit();
+			m_FileDialogActive = false;
+		}
+
 		ImGuiContext* m_Context = nullptr;
 		bool m_GlfwBackendActive = false;
 		bool m_OpenGLBackendActive = false;
+		bool m_FileDialogActive = false;
+		std::optional<PulseForge::Project> m_Project;
+		std::unique_ptr<PulseForge::Scene> m_Scene;
+		std::optional<PulseForge::AssetID> m_SceneAsset;
+		std::optional<PulseForge::UUID> m_SelectedEntity;
+		std::vector<PulseForge::AssetRecord> m_Assets;
+		std::string m_StatusMessage = "Create or open a project to begin.";
+		bool m_StatusIsError = false;
+		bool m_StatusIsWarning = false;
 	};
 
 	class PulseForgeEditorApplication final : public PulseForge::Application
@@ -167,7 +751,7 @@ namespace
 			: Application(PulseForge::RendererAPI::OpenGL)
 		{
 			PushLayer(std::make_unique<EditorLayer>());
-			PF_INFO("PulseForge editor shell started; scene and project operations are not connected yet");
+			PF_INFO("PulseForge editor started with the OpenGL ImGui backend");
 		}
 	};
 }

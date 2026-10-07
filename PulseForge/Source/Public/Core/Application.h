@@ -24,6 +24,8 @@ namespace PulseForge
 		virtual ~Application();
 
 		void Run();
+		// Stops the main loop after the current iteration.
+		void RequestClose() noexcept { m_Running = false; }
 		void OnEvent(Event& E);
 		Layer& PushLayer(std::unique_ptr<Layer> Layer);
 		Layer& PushOverlay(std::unique_ptr<Layer> Overlay);

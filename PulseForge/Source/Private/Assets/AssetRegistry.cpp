@@ -240,4 +240,19 @@ namespace PulseForge
 			return std::nullopt;
 		return Asset->second;
 	}
+
+	std::vector<AssetRecord> AssetRegistry::GetAssets() const
+	{
+		std::vector<AssetRecord> Assets;
+		Assets.reserve(m_Assets.size());
+		for (const auto& Entry : m_Assets)
+		{
+			Assets.push_back(Entry.second);
+		}
+		std::sort(Assets.begin(), Assets.end(), [](const AssetRecord& First, const AssetRecord& Second)
+		{
+			return First.ProjectRelativePath < Second.ProjectRelativePath;
+		});
+		return Assets;
+	}
 }

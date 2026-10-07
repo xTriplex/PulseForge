@@ -130,6 +130,12 @@ target_compile_options(PulseForgeGlad PRIVATE
 )
 
 if(PULSEFORGE_BUILD_EDITOR)
+	set(NFD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+	set(NFD_BUILD_SDL2_TESTS OFF CACHE BOOL "" FORCE)
+	set(NFD_BUILD_GLFW3_TESTS OFF CACHE BOOL "" FORCE)
+	set(NFD_INSTALL OFF CACHE BOOL "" FORCE)
+	add_subdirectory(PulseForge/Vendor/nativefiledialog)
+
 	add_library(PulseForgeImGui STATIC
 		PulseForge/Vendor/imgui/imgui.cpp
 		PulseForge/Vendor/imgui/imgui_draw.cpp
@@ -252,7 +258,7 @@ target_link_libraries(PulseForgeGame PRIVATE PulseForge)
 if(PULSEFORGE_BUILD_EDITOR)
 	add_executable(PulseForgeEditor PulseForgeEditor/Source/Private/EditorApplication.cpp)
 	target_compile_definitions(PulseForgeEditor PRIVATE PF_PLATFORM_WINDOWS)
-	target_link_libraries(PulseForgeEditor PRIVATE PulseForge PulseForgeImGui)
+	target_link_libraries(PulseForgeEditor PRIVATE PulseForge PulseForgeImGui nfd::nfd)
 endif()
 
 if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")

@@ -47,7 +47,7 @@ ctest --test-dir Build/CMake/VS2022-x64 -C Dist --output-on-failure
 
 ## Running
 
-Run `PulseForgeEditor` from its output directory for the early docking shell. It currently uses the OpenGL fallback for ImGui; project and scene operations are not connected yet. See [the editor notes](Docs/Editor.md).
+Run `PulseForgeEditor` from its output directory for the docking editor shell. It uses the OpenGL fallback for ImGui and supports basic project and scene file workflows. See [the editor notes](Docs/Editor.md).
 
 `PulseForgeGame` uses Vulkan by default. Run it from its output directory so it can find the generated `Shaders` folder. To build the sample with the OpenGL fallback, configure with:
 

@@ -50,6 +50,8 @@ namespace PulseForge
 		// Scans <ProjectRoot>/Assets. The registry stores project-relative paths and is rebuilt from sidecars.
 		[[nodiscard]] std::expected<void, AssetRegistryError> Rebuild(const std::filesystem::path& ProjectRoot);
 		[[nodiscard]] std::optional<AssetRecord> Find(const AssetID& ID) const;
+		// Returns a copy ordered by project-relative path for deterministic browser and tooling views.
+		[[nodiscard]] std::vector<AssetRecord> GetAssets() const;
 		[[nodiscard]] size_t GetAssetCount() const noexcept { return m_Assets.size(); }
 
 	private:

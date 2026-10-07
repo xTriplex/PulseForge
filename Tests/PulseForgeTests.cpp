@@ -1933,6 +1933,13 @@ namespace
 		const auto InitialBuild = Registry.Rebuild(ProjectRoot);
 		PF_CHECK(Tests, InitialBuild.has_value());
 		PF_CHECK(Tests, Registry.GetAssetCount() == 3);
+		const std::vector<AssetRecord> RegisteredAssets = Registry.GetAssets();
+		PF_CHECK(Tests, RegisteredAssets.size() == 3);
+		if (RegisteredAssets.size() != 3)
+			return;
+		PF_CHECK(Tests, RegisteredAssets[0].ProjectRelativePath == std::filesystem::path("Assets/Models/duplicate.hlsl"));
+		PF_CHECK(Tests, RegisteredAssets[1].ProjectRelativePath == std::filesystem::path("Assets/Shaders/first.hlsl"));
+		PF_CHECK(Tests, RegisteredAssets[2].ProjectRelativePath == std::filesystem::path("Assets/Shaders/second.hlsl"));
 		const auto FirstRecord = Registry.Find(FirstMetadata->ID);
 		PF_CHECK(Tests, FirstRecord.has_value());
 		if (!InitialBuild || !FirstRecord)
@@ -1963,6 +1970,11 @@ namespace
 		PF_CHECK(Tests, RebuiltAfterMove.has_value());
 		const auto MovedRecord = Registry.Find(FirstMetadata->ID);
 		PF_CHECK(Tests, MovedRecord && MovedRecord->ProjectRelativePath == std::filesystem::path("Assets/Models/renamed.hlsl"));
+		const std::vector<AssetRecord> AssetsAfterMove = Registry.GetAssets();
+		const auto MovedRecordInListing = std::find_if(AssetsAfterMove.begin(), AssetsAfterMove.end(),
+			[&FirstMetadata](const AssetRecord& Asset) { return Asset.ID == FirstMetadata->ID; });
+		PF_CHECK(Tests, MovedRecordInListing != AssetsAfterMove.end() &&
+			MovedRecordInListing->ProjectRelativePath == std::filesystem::path("Assets/Models/renamed.hlsl"));
 
 		const std::filesystem::path SecondSidecar = AssetMetadataSerializer::GetSidecarPath(SecondSource);
 		const auto OriginalSecondSidecar = ReadFile(SecondSidecar);
