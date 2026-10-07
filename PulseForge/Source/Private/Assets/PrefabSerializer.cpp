@@ -4,6 +4,7 @@
 #include "Scene/Components/AudioListenerComponent.h"
 #include "Scene/Components/AudioSourceComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
+#include "Scene/Components/ScriptComponent.h"
 #include "Scene/SceneSerializer.h"
 
 #include <nlohmann/json.hpp>
@@ -47,7 +48,9 @@ namespace PulseForge
 			const auto BoxCollider = Source.GetBoxCollider();
 			const auto AudioSource = Source.GetAudioSource();
 			const auto AudioListener = Source.GetAudioListener();
-			if (!Transform || !Camera || !MeshRenderer || !Rigidbody || !BoxCollider || !AudioSource || !AudioListener)
+			const auto Script = Source.GetScript();
+			if (!Transform || !Camera || !MeshRenderer || !Rigidbody || !BoxCollider ||
+				!AudioSource || !AudioListener || !Script)
 				return std::unexpected(MakeError(
 					PrefabErrorCode::SceneOperationFailed,
 					"Could not read supported entity components for prefab operation"));
@@ -82,6 +85,11 @@ namespace PulseForge
 			if (AudioListener->has_value())
 			{
 				if (auto Result = Destination.SetAudioListener(AudioListener->value()); !Result)
+					return std::unexpected(SceneOperationError(Result.error()));
+			}
+			if (Script->has_value())
+			{
+				if (auto Result = Destination.SetScript(Script->value()); !Result)
 					return std::unexpected(SceneOperationError(Result.error()));
 			}
 			return {};

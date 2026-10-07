@@ -6,6 +6,7 @@
 #include "Scene/Components/MeshRendererComponent.h"
 #include "Scene/Components/RigidbodyComponent.h"
 #include "Scene/Components/BoxColliderComponent.h"
+#include "Scene/Components/ScriptComponent.h"
 #include "Scene/Components/TagComponent.h"
 #include "Scene/Components/TransformComponent.h"
 #include "Scene/SceneError.h"
@@ -56,6 +57,9 @@ namespace PulseForge
 		[[nodiscard]] std::expected<std::optional<AudioListenerComponent>, SceneError> GetAudioListener() const;
 		[[nodiscard]] std::expected<void, SceneError> SetAudioListener(const AudioListenerComponent& AudioListener) const;
 		[[nodiscard]] std::expected<void, SceneError> RemoveAudioListener() const;
+		[[nodiscard]] std::expected<std::optional<ScriptComponent>, SceneError> GetScript() const;
+		[[nodiscard]] std::expected<void, SceneError> SetScript(const ScriptComponent& Script) const;
+		[[nodiscard]] std::expected<void, SceneError> RemoveScript() const;
 		[[nodiscard]] std::expected<glm::mat4, SceneError> GetWorldMatrix() const;
 		[[nodiscard]] std::expected<std::optional<Entity>, SceneError> GetParent() const;
 		[[nodiscard]] std::expected<std::vector<Entity>, SceneError> GetChildren() const;

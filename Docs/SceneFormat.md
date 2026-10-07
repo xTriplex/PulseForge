@@ -5,7 +5,7 @@
 ```json
 {
   "format": "PulseForgeScene",
-  "version": 6,
+  "version": 7,
   "entities": [
     {
       "uuid": "00112233-4455-4677-8899-aabbccddeeff",
@@ -41,6 +41,10 @@
         "spatialized": true
       },
       "audioListener": { "primary": true },
+      "script": {
+        "asset": "84d2d353-1c24-4b65-901b-47b2aa3421e3",
+        "enabled": true
+      },
       "parent": null
     }
   ]
@@ -49,9 +53,11 @@
 
 UUIDs use the canonical 8-4-4-4-12 hexadecimal spelling. Generated IDs are random version-4 UUIDs. Rotation values are quaternions in `[w, x, y, z]` order. Transform values are local to the entity's parent; `parent` is either `null` or another entity UUID in the same document.
 
-Every entity must have a UUID, tag name, transform, and parent field. The `camera` object is optional; when present it describes a perspective camera with a vertical field of view in radians, finite near/far clip planes, and an optional `primary` boolean. Older scenes without `primary` load with it set to `false`. Scene snapshot construction can select a camera by UUID or resolve the single primary camera; zero or multiple primary cameras are reported as errors. PulseForge uses a right-handed, -Z-forward projection with zero-to-one clip depth and a vertical flip for framebuffer coordinates. `meshRenderer.meshAsset` is a stable mesh UUID; `materialAsset` is an optional stable material UUID. References are never filesystem paths and are retained when an asset is temporarily unresolved. Optional `rigidbody` and `boxCollider` objects store Jolt body settings and positive box half-extents. An `audioSource.asset` is a stable audio asset UUID; volume, looping, play-on-start, and spatialization are stored with it. An optional `audioListener` marks whether that entity is the primary listener. At runtime, at most one primary audio listener is allowed. Versions 1 through 6 are readable; scenes written by the current serializer use version 6. Parent references must resolve, and the hierarchy must be acyclic. The serializer emits entities in UUID order. Child lists are derived from parent references rather than stored separately. Unknown fields are ignored; incompatible formats or versions are rejected.
+Every entity must have a UUID, tag name, transform, and parent field. Camera, mesh-renderer, physics, audio, and script component objects are optional. Asset fields contain stable UUIDs, never filesystem paths; unresolved references are preserved for later validation. Script components store a `.lua` asset UUID and an `enabled` flag. An optional audio listener marks whether that entity is the primary listener; at runtime, at most one primary listener is allowed. Parent references must resolve, and the hierarchy must be acyclic. The serializer emits entities in UUID order. Child lists are derived from parent references rather than stored separately. Unknown fields are ignored; incompatible formats or versions are rejected.
 
-Version 2 added the optional mesh-renderer reference. Version 3 added the optional material UUID. Version 4 added the optional primary-camera flag. Version 5 added optional `rigidbody` and `boxCollider` components. Version 6 added optional audio source and listener components. Older mesh renderers have no material assignment, and older cameras are not primary unless explicitly marked after migration. The serializer writes version 6. A version change is required when a new schema cannot be safely interpreted by older readers.
+Versions 1 through 7 are readable; scenes written by the current serializer use version 7. Version 2 added mesh-renderer references, version 3 added material UUIDs, version 4 added the primary-camera flag, version 5 added physics components, version 6 added audio components, and version 7 added script attachments. Missing camera `primary` values default to false. A version change is required when a new schema cannot be safely interpreted by older readers.
+
+Version 2 added the optional mesh-renderer reference. Version 3 added the optional material UUID. Version 4 added the optional primary-camera flag. Version 5 added optional `rigidbody` and `boxCollider` components. Version 6 added optional audio source and listener components. Older mesh renderers have no material assignment, and older cameras are not primary unless explicitly marked after migration.
 
 Deserialization stages and validates the full scene before replacing the destination. On failure the destination and its entity handles remain unchanged; on success, handles referring to the replaced scene state become invalid. Incompatible format changes require a new version and an explicit migration path.
 

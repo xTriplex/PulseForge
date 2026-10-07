@@ -49,6 +49,33 @@ namespace PulseForge
 					});
 				}
 			}
+
+			const auto ScriptComponent = CurrentEntity.GetScript();
+			if (!ScriptComponent)
+				return std::unexpected(ScriptComponent.error());
+			if (ScriptComponent->has_value())
+			{
+				const AssetID& ScriptAssetID = ScriptComponent->value().ScriptAsset;
+				const auto ScriptRecord = Registry.Find(ScriptAssetID);
+				if (!ScriptRecord)
+				{
+					Issues.push_back({
+						AssetReferenceIssueCode::MissingAsset,
+						AssetReferenceKind::Script,
+						CurrentEntity.GetUUID(),
+						ScriptAssetID
+					});
+				}
+				else if (ScriptRecord->ProjectRelativePath.extension() != ".lua")
+				{
+					Issues.push_back({
+						AssetReferenceIssueCode::WrongAssetType,
+						AssetReferenceKind::Script,
+						CurrentEntity.GetUUID(),
+						ScriptAssetID
+					});
+				}
+			}
 		}
 		return Issues;
 	}

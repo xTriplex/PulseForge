@@ -8,6 +8,7 @@
 #include "ImGui/UI.h"
 #include "Renderer/SceneRenderer.h"
 #include "Scene/Scene.h"
+#include "Scripting/ScriptRuntime.h"
 
 #include <filesystem>
 #include <memory>
@@ -32,6 +33,9 @@ public:
 			if (!m_Project->GetDescription().StartScene)
 				throw std::runtime_error("Sample project does not specify a startup scene asset");
 			LoadValidationScene(ProjectRoot, m_Project->GetAssetRegistry(), *m_Project->GetDescription().StartScene);
+			m_ScriptRuntime = std::make_unique<PulseForge::ScriptRuntime>(*m_Project);
+			if (auto StartResult = m_ScriptRuntime->Start(m_Scene); !StartResult)
+				throw std::runtime_error("Could not start sample script runtime: " + StartResult.error().Message);
 			const std::filesystem::path ShaderDirectory =
 				std::filesystem::current_path() / PF_SAMPLE_SHADER_DIRECTORY;
 			auto CreatedSceneRenderer = PulseForge::SceneRenderer::Create(
@@ -46,7 +50,19 @@ public:
 
 	void OnUpdate(PulseForge::Timestep DeltaTime) override
 	{
-		(void)DeltaTime;
+		if (m_ScriptRuntime)
+		{
+			if (auto ScriptResult = m_ScriptRuntime->Advance(m_Scene, DeltaTime); !ScriptResult)
+			{
+				if (!m_LoggedScriptFailure)
+				{
+					PF_ERROR("Could not advance the sample script runtime: {0}", ScriptResult.error().Message);
+					m_LoggedScriptFailure = true;
+				}
+			}
+			else
+				m_LoggedScriptFailure = false;
+		}
 		if (!m_SceneRenderer)
 			return;
 
@@ -127,8 +143,10 @@ private:
 	PulseForge::Scene m_Scene;
 	std::optional<PulseForge::Project> m_Project;
 	std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
+	std::unique_ptr<PulseForge::ScriptRuntime> m_ScriptRuntime;
 	bool m_LoggedPrepareFailure = false;
 	bool m_LoggedRenderFailure = false;
+	bool m_LoggedScriptFailure = false;
 	bool m_LoggedSceneDraw = false;
 };
 

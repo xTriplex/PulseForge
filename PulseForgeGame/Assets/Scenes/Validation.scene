@@ -1,6 +1,6 @@
 {
   "format": "PulseForgeScene",
-  "version": 4,
+  "version": 7,
   "entities": [
     {
       "uuid": "2e5f5605-08d3-4f7f-84d9-39ca49047701",
@@ -13,6 +13,10 @@
       "meshRenderer": {
         "meshAsset": "6f4d338d-ec74-49ab-9a7e-8a2285feb411",
         "materialAsset": "7aa6eb08-f1ba-47e5-8cc4-21e9d2080201"
+      },
+      "script": {
+        "asset": "c5efc4f9-6ff4-4d92-9c99-c3b8b9b5d846",
+        "enabled": true
       },
       "parent": null
     },

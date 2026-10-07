@@ -14,6 +14,7 @@
 #include "Assets/MaterialAssetCache.h"
 #include "Assets/MaterialAssetService.h"
 #include "Assets/Project.h"
+#include "Core/Log.h"
 #include "Assets/PrefabAssetService.h"
 #include "Assets/PrefabSerializer.h"
 #include "Assets/SceneAssetService.h"
@@ -23,6 +24,7 @@
 #include "Audio/AudioEngine.h"
 #include "Audio/AudioSceneRuntime.h"
 #include "Physics/PhysicsSceneRuntime.h"
+#include "Scripting/ScriptRuntime.h"
 #include "Renderer/Binding.h"
 #include "Renderer/Buffer.h"
 #include "Renderer/Graphics.h"
@@ -881,7 +883,7 @@ namespace
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized)
 			return;
-		PF_CHECK(Tests, Serialized->find("\"version\": 6") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 7") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"motionType\": \"dynamic\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"halfExtents\": [\n          0.75,") != std::string::npos);
 
@@ -1178,6 +1180,7 @@ namespace
 		const AssetID MeshAssetIdentifier{ 0x5000000000000000ull, 5 };
 		const AssetID MaterialAssetIdentifier{ 0x5100000000000000ull, 51 };
 		const AssetID AudioAssetIdentifier{ 0x5200000000000000ull, 52 };
+		const AssetID ScriptAssetIdentifier{ 0x5300000000000000ull, 53 };
 		auto ChildResult = Source.CreateEntityWithUUID(ChildId, "Child \"one\"");
 		auto RootResult = Source.CreateEntityWithUUID(RootId, "Root");
 		PF_CHECK(Tests, ChildResult.has_value() && RootResult.has_value());
@@ -1226,6 +1229,9 @@ namespace
 		PF_CHECK(Tests, !Child.SetMeshRenderer(MeshRendererComponent{ MeshAssetIdentifier, AssetID{} }).has_value());
 		const AudioSourceComponent SourceAudio{ AudioAssetIdentifier, 0.35f, true, false, true };
 		PF_CHECK(Tests, Child.SetAudioSource(SourceAudio).has_value());
+		PF_CHECK(Tests, Child.SetScript(ScriptComponent{ ScriptAssetIdentifier, false }).has_value());
+		const auto InvalidScriptSet = Child.SetScript(ScriptComponent{});
+		PF_CHECK(Tests, !InvalidScriptSet && InvalidScriptSet.error().Code == SceneErrorCode::InvalidScriptComponent);
 		PF_CHECK(Tests, Root.SetAudioListener(AudioListenerComponent{ true }).has_value());
 		AudioSourceComponent InvalidAudio = SourceAudio;
 		InvalidAudio.AudioAsset = AssetID{};
@@ -1239,13 +1245,15 @@ namespace
 		if (!Serialized)
 			return;
 		PF_CHECK(Tests, Serialized->find("\"format\": \"PulseForgeScene\"") != std::string::npos);
-		PF_CHECK(Tests, Serialized->find("\"version\": 6") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 7") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"primary\": true") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"meshAsset\": \"" + MeshAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"materialAsset\": \"" + MaterialAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"asset\": \"" + AudioAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"playOnStart\": false") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"audioListener\"") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"script\"") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"asset\": \"" + ScriptAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("Assets/") == std::string::npos);
 		const size_t ChildEntityPosition = Serialized->find("\"uuid\": \"" + ChildId.ToString() + "\"");
 		const size_t RootEntityPosition = Serialized->find("\"uuid\": \"" + RootId.ToString() + "\"");
@@ -1275,6 +1283,7 @@ namespace
 		const auto LoadedMeshRenderer = LoadedChild->GetMeshRenderer();
 		const auto LoadedAudioSource = LoadedChild->GetAudioSource();
 		const auto LoadedAudioListener = LoadedRoot->GetAudioListener();
+		const auto LoadedScript = LoadedChild->GetScript();
 		const auto LoadedParent = LoadedChild->GetParent();
 		PF_CHECK(Tests, LoadedTag && LoadedTag->Name == "Child \"one\"");
 		PF_CHECK(Tests, LoadedTransform && glm::all(glm::equal(LoadedTransform->Translation, ChildTransform.Translation)));
@@ -1294,6 +1303,8 @@ namespace
 			LoadedAudioSource->value().Volume == SourceAudio.Volume && LoadedAudioSource->value().Looping &&
 			!LoadedAudioSource->value().PlayOnStart && LoadedAudioSource->value().Spatialized);
 		PF_CHECK(Tests, LoadedAudioListener && LoadedAudioListener->has_value() && LoadedAudioListener->value().IsPrimary);
+		PF_CHECK(Tests, LoadedScript && LoadedScript->has_value() &&
+			LoadedScript->value().ScriptAsset == ScriptAssetIdentifier && !LoadedScript->value().Enabled);
 		PF_CHECK(Tests, LoadedParent && LoadedParent->has_value() && **LoadedParent == *LoadedRoot);
 		const auto SerializedAgain = SceneSerializer::Serialize(Destination);
 		PF_CHECK(Tests, SerializedAgain && *SerializedAgain == *Serialized);
@@ -1309,10 +1320,10 @@ namespace
 
 		const auto DestinationRootBeforeFailure = Destination.FindEntity(RootId);
 		std::string UnsupportedVersion = *Serialized;
-		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 6");
+		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 7");
 		PF_CHECK(Tests, VersionPosition != std::string::npos);
 		if (VersionPosition != std::string::npos)
-			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 6").size(), "\"version\": 99");
+			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 7").size(), "\"version\": 99");
 		const auto UnsupportedVersionResult = SceneSerializer::Deserialize(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedVersionResult.has_value());
 		PF_CHECK(Tests, !UnsupportedVersionResult && UnsupportedVersionResult.error().Code == SceneSerializationErrorCode::UnsupportedVersion);
@@ -1346,10 +1357,10 @@ namespace
 			if (PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos)
 				LegacyVersionThree.erase(PrimaryCommaPosition, PrimaryLineEnd - PrimaryCommaPosition);
 		}
-		const size_t LegacyVersionThreePosition = LegacyVersionThree.find("\"version\": 6");
+		const size_t LegacyVersionThreePosition = LegacyVersionThree.find("\"version\": 7");
 		PF_CHECK(Tests, LegacyVersionThreePosition != std::string::npos);
 		if (LegacyVersionThreePosition != std::string::npos)
-			LegacyVersionThree.replace(LegacyVersionThreePosition, std::string("\"version\": 6").size(), "\"version\": 3");
+			LegacyVersionThree.replace(LegacyVersionThreePosition, std::string("\"version\": 7").size(), "\"version\": 3");
 		Scene LegacyVersionThreeDestination;
 		const auto LegacyVersionThreeLoad = SceneSerializer::Deserialize(LegacyVersionThree, LegacyVersionThreeDestination);
 		PF_CHECK(Tests, LegacyVersionThreeLoad.has_value());
@@ -1370,10 +1381,10 @@ namespace
 		if (LegacySerializedVersionTwo)
 		{
 			std::string LegacyVersionOne = *LegacySerializedVersionTwo;
-			const size_t LegacyVersionPosition = LegacyVersionOne.find("\"version\": 6");
+			const size_t LegacyVersionPosition = LegacyVersionOne.find("\"version\": 7");
 			PF_CHECK(Tests, LegacyVersionPosition != std::string::npos);
 			if (LegacyVersionPosition != std::string::npos)
-				LegacyVersionOne.replace(LegacyVersionPosition, std::string("\"version\": 6").size(), "\"version\": 1");
+				LegacyVersionOne.replace(LegacyVersionPosition, std::string("\"version\": 7").size(), "\"version\": 1");
 			Scene LegacyDestination;
 			const auto LegacyLoad = SceneSerializer::Deserialize(LegacyVersionOne, LegacyDestination);
 			PF_CHECK(Tests, LegacyLoad.has_value());
@@ -2692,24 +2703,42 @@ namespace
 		PF_CHECK(Tests, MaterialMetadata.has_value() && WrongMaterialMetadata.has_value());
 		if (!MaterialMetadata || !WrongMaterialMetadata)
 			return;
+		const std::filesystem::path ScriptsDirectory = ProjectRoot / "Assets" / "Scripts";
+		std::filesystem::create_directories(ScriptsDirectory, FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+		const std::filesystem::path ScriptSource = ScriptsDirectory / "resolved.lua";
+		{
+			std::ofstream Output(ScriptSource, std::ios::binary | std::ios::trunc);
+			Output << "function OnUpdate() end\n";
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto ScriptMetadata = AssetMetadataSerializer::CreateForNewAsset(ScriptSource);
+		PF_CHECK(Tests, ScriptMetadata.has_value());
+		if (!ScriptMetadata)
+			return;
 
 		PF_CHECK(Tests, ResolvedEntity->SetMeshRenderer(
 			MeshRendererComponent{ MeshMetadata->ID, MaterialMetadata->ID }).has_value());
 		PF_CHECK(Tests, MissingEntity->SetMeshRenderer(MeshRendererComponent{ *MissingAssetIdentifier }).has_value());
 		PF_CHECK(Tests, WrongMaterialEntity->SetMeshRenderer(
 			MeshRendererComponent{ MeshMetadata->ID, WrongMaterialMetadata->ID }).has_value());
+		PF_CHECK(Tests, ResolvedEntity->SetScript(ScriptComponent{ ScriptMetadata->ID }).has_value());
+		PF_CHECK(Tests, MissingEntity->SetScript(ScriptComponent{ *MissingAssetIdentifier }).has_value());
+		PF_CHECK(Tests, WrongMaterialEntity->SetScript(ScriptComponent{ WrongMaterialMetadata->ID }).has_value());
 
 		AssetRegistry EmptyRegistry;
 		const auto AllMissing = AssetReferenceValidator::Validate(TestScene, EmptyRegistry);
 		PF_CHECK(Tests, AllMissing.has_value());
-		PF_CHECK(Tests, AllMissing && AllMissing->size() == 5);
+		PF_CHECK(Tests, AllMissing && AllMissing->size() == 8);
 
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
 		const auto Validation = AssetReferenceValidator::Validate(TestScene, Registry);
 		PF_CHECK(Tests, Validation.has_value());
-		PF_CHECK(Tests, Validation && Validation->size() == 2);
-		if (!Validation || Validation->size() != 2)
+		PF_CHECK(Tests, Validation && Validation->size() == 4);
+		if (!Validation || Validation->size() != 4)
 			return;
 
 		const auto MissingIssue = std::find_if(Validation->begin(), Validation->end(), [&](const AssetReferenceIssue& Issue)
@@ -2734,9 +2763,201 @@ namespace
 			PF_CHECK(Tests, WrongTypeIssue->Kind == AssetReferenceKind::Material);
 			PF_CHECK(Tests, WrongTypeIssue->Asset == WrongMaterialMetadata->ID);
 		}
+		const auto MissingScriptIssue = std::find_if(Validation->begin(), Validation->end(), [&](const AssetReferenceIssue& Issue)
+		{
+			return Issue.Entity == MissingEntity->GetUUID() && Issue.Kind == AssetReferenceKind::Script;
+		});
+		PF_CHECK(Tests, MissingScriptIssue != Validation->end());
+		if (MissingScriptIssue != Validation->end())
+		{
+			PF_CHECK(Tests, MissingScriptIssue->Code == AssetReferenceIssueCode::MissingAsset);
+			PF_CHECK(Tests, MissingScriptIssue->Asset == *MissingAssetIdentifier);
+		}
+		const auto WrongScriptTypeIssue = std::find_if(Validation->begin(), Validation->end(), [&](const AssetReferenceIssue& Issue)
+		{
+			return Issue.Entity == WrongMaterialEntity->GetUUID() && Issue.Kind == AssetReferenceKind::Script;
+		});
+		PF_CHECK(Tests, WrongScriptTypeIssue != Validation->end());
+		if (WrongScriptTypeIssue != Validation->end())
+		{
+			PF_CHECK(Tests, WrongScriptTypeIssue->Code == AssetReferenceIssueCode::WrongAssetType);
+			PF_CHECK(Tests, WrongScriptTypeIssue->Asset == WrongMaterialMetadata->ID);
+		}
 		const auto MissingReference = MissingEntity->GetMeshRenderer();
 		PF_CHECK(Tests, MissingReference && MissingReference->has_value());
 		PF_CHECK(Tests, MissingReference && MissingReference->value().MeshAsset == *MissingAssetIdentifier);
+	}
+
+	void TestScriptRuntime(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		std::error_code FileError;
+		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const auto ProjectIdentifier = UUID::Generate();
+		PF_CHECK(Tests, ProjectIdentifier.has_value());
+		if (!ProjectIdentifier)
+			return;
+
+		const std::filesystem::path ProjectRoot = TemporaryDirectory / ("PulseForgeScriptRuntime-" + ProjectIdentifier->ToString());
+		struct ProjectCleanup
+		{
+			std::filesystem::path Path;
+			~ProjectCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} Cleanup{ ProjectRoot };
+
+		auto ProjectResult = Project::Create(ProjectRoot / "ScriptProject.pfproj", "Script Runtime Tests");
+		PF_CHECK(Tests, ProjectResult.has_value());
+		if (!ProjectResult)
+			return;
+		std::filesystem::create_directories(ProjectRoot / "Assets/Scripts", FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const auto CreateScriptAsset = [&](std::string_view FileName, std::string_view Source)
+		{
+			const auto Contents = std::as_bytes(std::span(Source.data(), Source.size()));
+			return AssetOperations::CreateAssetFromBytes(
+				ProjectResult->GetAssetRegistry(),
+				ProjectResult->GetRootPath(),
+				Contents,
+				std::filesystem::path("Assets/Scripts") / FileName);
+		};
+
+		constexpr std::string_view TransformScript = R"(
+local elapsed = 0
+function OnCreate()
+  assert(io == nil and os == nil and debug == nil and package == nil)
+  assert(load == nil and loadfile == nil and dofile == nil and collectgarbage == nil)
+  assert(pcall == nil and xpcall == nil)
+  assert(string.dump == nil)
+  local found = scene.find_entity(entity:uuid())
+  assert(found ~= nil and found:uuid() == entity:uuid())
+end
+function OnUpdate(dt)
+  elapsed = elapsed + dt
+  assert(entity:set_translation(elapsed, 2, 3))
+end
+function OnDestroy()
+  assert(entity:set_translation(-1, 2, 3))
+end
+)";
+		const auto TransformScriptAsset = CreateScriptAsset("transform.lua", TransformScript);
+		PF_CHECK(Tests, TransformScriptAsset.has_value());
+		if (!TransformScriptAsset)
+			return;
+
+		Scene TestScene;
+		const auto FirstEntity = TestScene.CreateEntity("First scripted entity");
+		const auto SecondEntity = TestScene.CreateEntity("Second scripted entity");
+		const auto DisabledEntity = TestScene.CreateEntity("Disabled scripted entity");
+		PF_CHECK(Tests, FirstEntity && SecondEntity && DisabledEntity);
+		if (!FirstEntity || !SecondEntity || !DisabledEntity)
+			return;
+		PF_CHECK(Tests, FirstEntity->SetScript(ScriptComponent{ TransformScriptAsset->ID }).has_value());
+		PF_CHECK(Tests, SecondEntity->SetScript(ScriptComponent{ TransformScriptAsset->ID }).has_value());
+		PF_CHECK(Tests, DisabledEntity->SetScript(ScriptComponent{ TransformScriptAsset->ID, false }).has_value());
+
+		ScriptRuntime Runtime(*ProjectResult);
+		const auto BeforeStart = Runtime.Advance(TestScene, Timestep(0.1));
+		PF_CHECK(Tests, !BeforeStart && BeforeStart.error().Code == ScriptRuntimeErrorCode::NotRunning);
+		PF_CHECK(Tests, Runtime.Start(TestScene).has_value());
+		PF_CHECK(Tests, Runtime.IsRunning() && Runtime.GetScriptCount() == 2);
+		PF_CHECK(Tests, Runtime.GetDiagnostics().empty());
+		const auto DuplicateStart = Runtime.Start(TestScene);
+		PF_CHECK(Tests, !DuplicateStart && DuplicateStart.error().Code == ScriptRuntimeErrorCode::AlreadyRunning);
+		Scene OtherScene;
+		const auto DifferentScene = Runtime.Advance(OtherScene, Timestep(0.1));
+		PF_CHECK(Tests, !DifferentScene && DifferentScene.error().Code == ScriptRuntimeErrorCode::DifferentScene);
+		const auto NegativeDelta = Runtime.Advance(TestScene, Timestep(-0.1));
+		PF_CHECK(Tests, !NegativeDelta && NegativeDelta.error().Code == ScriptRuntimeErrorCode::InvalidDeltaTime);
+		PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(0.25)).has_value());
+		const auto FirstTransform = FirstEntity->GetTransform();
+		const auto SecondTransform = SecondEntity->GetTransform();
+		PF_CHECK(Tests, FirstTransform && std::abs(FirstTransform->Translation.x - 0.25f) < 0.0001f);
+		PF_CHECK(Tests, SecondTransform && std::abs(SecondTransform->Translation.x - 0.25f) < 0.0001f);
+
+		PF_CHECK(Tests, FirstEntity->RemoveScript().has_value());
+		PF_CHECK(Tests, Runtime.Advance(TestScene, Timestep(0.1)).has_value());
+		PF_CHECK(Tests, Runtime.GetScriptCount() == 1);
+		const auto DetachedTransform = FirstEntity->GetTransform();
+		const auto ActiveTransform = SecondEntity->GetTransform();
+		PF_CHECK(Tests, DetachedTransform && DetachedTransform->Translation.x == -1.0f);
+		PF_CHECK(Tests, ActiveTransform && std::abs(ActiveTransform->Translation.x - 0.35f) < 0.0001f);
+		Runtime.Stop();
+		PF_CHECK(Tests, !Runtime.IsRunning() && Runtime.GetScriptCount() == 0);
+		const auto StoppedTransform = SecondEntity->GetTransform();
+		PF_CHECK(Tests, StoppedTransform && StoppedTransform->Translation.x == -1.0f);
+		Runtime.Stop();
+
+		constexpr std::string_view SyntaxErrorScript = "function OnUpdate(\n";
+		const auto SyntaxErrorAsset = CreateScriptAsset("syntax_error.lua", SyntaxErrorScript);
+		PF_CHECK(Tests, SyntaxErrorAsset.has_value());
+		if (!SyntaxErrorAsset)
+			return;
+		Scene CompileErrorScene;
+		const auto CompileErrorEntity = CompileErrorScene.CreateEntity("Compile error");
+		PF_CHECK(Tests, CompileErrorEntity && CompileErrorEntity->SetScript(ScriptComponent{ SyntaxErrorAsset->ID }));
+		ScriptRuntime CompileErrorRuntime(*ProjectResult);
+		PF_CHECK(Tests, CompileErrorRuntime.Start(CompileErrorScene).has_value());
+		PF_CHECK(Tests, CompileErrorRuntime.GetScriptCount() == 0 && CompileErrorRuntime.GetDiagnostics().size() == 1);
+		PF_CHECK(Tests, CompileErrorRuntime.GetDiagnostics().front().Code == ScriptDiagnosticCode::CompileFailed);
+		CompileErrorRuntime.Stop();
+		PF_CHECK(Tests, CompileErrorRuntime.GetDiagnostics().size() == 1);
+		CompileErrorRuntime.ClearDiagnostics();
+		PF_CHECK(Tests, CompileErrorRuntime.GetDiagnostics().empty());
+
+		constexpr std::string_view InfiniteScript = "function OnUpdate() while true do end end\n";
+		const auto InfiniteScriptAsset = CreateScriptAsset("instruction_limit.lua", InfiniteScript);
+		PF_CHECK(Tests, InfiniteScriptAsset.has_value());
+		if (!InfiniteScriptAsset)
+			return;
+		Scene InfiniteScene;
+		const auto InfiniteEntity = InfiniteScene.CreateEntity("Instruction-limited script");
+		PF_CHECK(Tests, InfiniteEntity && InfiniteEntity->SetScript(ScriptComponent{ InfiniteScriptAsset->ID }));
+		ScriptRuntimeDesc LimitedDescription;
+		LimitedDescription.MaxInstructionsPerCallback = 1000;
+		ScriptRuntime LimitedRuntime(*ProjectResult, LimitedDescription);
+		PF_CHECK(Tests, LimitedRuntime.Start(InfiniteScene).has_value());
+		PF_CHECK(Tests, LimitedRuntime.Advance(InfiniteScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, LimitedRuntime.GetDiagnostics().size() == 1);
+		PF_CHECK(Tests, LimitedRuntime.GetDiagnostics().front().Code == ScriptDiagnosticCode::UpdateFailed);
+		PF_CHECK(Tests, LimitedRuntime.GetDiagnostics().front().Message.find("instruction budget") != std::string::npos);
+		PF_CHECK(Tests, LimitedRuntime.Advance(InfiniteScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, LimitedRuntime.GetDiagnostics().size() == 1);
+		LimitedRuntime.Stop();
+
+		constexpr std::string_view MemoryLimitScript = R"(
+function OnCreate()
+  local values = {}
+  while true do
+    values[#values + 1] = string.rep("x", 4096)
+  end
+end
+)";
+		const auto MemoryScriptAsset = CreateScriptAsset("memory_limit.lua", MemoryLimitScript);
+		PF_CHECK(Tests, MemoryScriptAsset.has_value());
+		if (!MemoryScriptAsset)
+			return;
+		Scene MemoryScene;
+		const auto MemoryEntity = MemoryScene.CreateEntity("Memory-limited script");
+		PF_CHECK(Tests, MemoryEntity && MemoryEntity->SetScript(ScriptComponent{ MemoryScriptAsset->ID }));
+		ScriptRuntimeDesc MemoryDescription;
+		MemoryDescription.MaxLuaMemoryBytes = 512u * 1024u;
+		MemoryDescription.MaxTotalLuaMemoryBytes = 2u * 1024u * 1024u;
+		ScriptRuntime MemoryRuntime(*ProjectResult, MemoryDescription);
+		PF_CHECK(Tests, MemoryRuntime.Start(MemoryScene).has_value());
+		PF_CHECK(Tests, MemoryRuntime.GetScriptCount() == 0 && MemoryRuntime.GetDiagnostics().size() == 1);
+		PF_CHECK(Tests, MemoryRuntime.GetDiagnostics().front().Code == ScriptDiagnosticCode::InitializationFailed);
+		MemoryRuntime.Stop();
 	}
 
 	void TestGltfMeshImport(TestRunner& Tests)
@@ -3432,8 +3653,10 @@ namespace
 		const AssetID MeshAssetID{ 0x7300000000000000ull, 7 };
 		const AssetID MaterialAssetID{ 0x7400000000000000ull, 7 };
 		const AssetID AudioAssetID{ 0x7500000000000000ull, 7 };
+		const AssetID ScriptAssetID{ 0x7600000000000000ull, 7 };
 		PF_CHECK(Tests, Child->SetMeshRenderer(MeshRendererComponent{ MeshAssetID, MaterialAssetID }).has_value());
 		PF_CHECK(Tests, Child->SetAudioSource(AudioSourceComponent{ AudioAssetID, 0.6f, true, false, true }).has_value());
+		PF_CHECK(Tests, Child->SetScript(ScriptComponent{ ScriptAssetID, false }).has_value());
 		PF_CHECK(Tests, Root->SetAudioListener(AudioListenerComponent{ true }).has_value());
 
 		const auto PrefabData = PrefabSerializer::Serialize(Source, *Root);
@@ -3446,6 +3669,7 @@ namespace
 		PF_CHECK(Tests, PrefabData->find("\"meshAsset\": \"" + MeshAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"materialAsset\": \"" + MaterialAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"asset\": \"" + AudioAssetID.ToString() + "\"") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"asset\": \"" + ScriptAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"primary\": true") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("Outside prefab") == std::string::npos);
 		PF_CHECK(Tests, PrefabData->find(ExternalParent->GetUUID().ToString()) == std::string::npos);
@@ -3461,10 +3685,10 @@ namespace
 			if (PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos)
 				LegacyPrefabV1.erase(PrimaryCommaPosition, PrimaryLineEnd - PrimaryCommaPosition);
 		}
-		const size_t EmbeddedSceneVersionPosition = LegacyPrefabV1.find("\"version\": 6", LegacyPrefabV1.find("\"scene\""));
+		const size_t EmbeddedSceneVersionPosition = LegacyPrefabV1.find("\"version\": 7", LegacyPrefabV1.find("\"scene\""));
 		PF_CHECK(Tests, EmbeddedSceneVersionPosition != std::string::npos);
 		if (EmbeddedSceneVersionPosition != std::string::npos)
-			LegacyPrefabV1.replace(EmbeddedSceneVersionPosition, std::string("\"version\": 6").size(), "\"version\": 3");
+			LegacyPrefabV1.replace(EmbeddedSceneVersionPosition, std::string("\"version\": 7").size(), "\"version\": 3");
 		const size_t OuterPrefabVersionPosition = LegacyPrefabV1.find("\"version\": 3");
 		PF_CHECK(Tests, OuterPrefabVersionPosition != std::string::npos);
 		if (OuterPrefabVersionPosition != std::string::npos)
@@ -3504,12 +3728,15 @@ namespace
 		const auto FirstChildTag = FirstChild.GetTag();
 		const auto FirstChildMesh = FirstChild.GetMeshRenderer();
 		const auto FirstChildAudioSource = FirstChild.GetAudioSource();
+		const auto FirstChildScript = FirstChild.GetScript();
 		const auto FirstGrandchildren = FirstChild.GetChildren();
 		PF_CHECK(Tests, FirstChildTag && FirstChildTag->Name == "Prefab child");
 		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MeshAsset == MeshAssetID);
 		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MaterialAsset == MaterialAssetID);
 		PF_CHECK(Tests, FirstChildAudioSource && FirstChildAudioSource->has_value() &&
 			FirstChildAudioSource->value().AudioAsset == AudioAssetID && !FirstChildAudioSource->value().PlayOnStart);
+		PF_CHECK(Tests, FirstChildScript && FirstChildScript->has_value() &&
+			FirstChildScript->value().ScriptAsset == ScriptAssetID && !FirstChildScript->value().Enabled);
 		PF_CHECK(Tests, FirstGrandchildren && FirstGrandchildren->size() == 1);
 
 		const auto SecondInstance = PrefabSerializer::Instantiate(*PrefabData, Destination);
@@ -4049,6 +4276,7 @@ namespace
 
 int main()
 {
+	PulseForge::Log::Init();
 	TestRunner Tests;
 	TestLayerStackOwnership(Tests);
 	TestLayerStackClearDetachesInReverseOrder(Tests);
@@ -4082,6 +4310,7 @@ int main()
 	TestGltfMeshImport(Tests);
 	TestImageAssetImport(Tests);
 	TestAudioEngineAndAssetCache(Tests);
+	TestScriptRuntime(Tests);
 	TestGraphicsPipelineAndDrawValidation(Tests);
 	TestConstantBufferBindingValidation(Tests);
 	TestTextureAndSamplerValidation(Tests);

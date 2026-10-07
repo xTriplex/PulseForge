@@ -3,6 +3,7 @@
 #include "Scene/Components/AudioListenerComponent.h"
 #include "Scene/Components/AudioSourceComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
+#include "Scene/Components/ScriptComponent.h"
 
 #include <entt/entt.hpp>
 
@@ -186,7 +187,9 @@ namespace PulseForge
 		const auto BoxCollider = Source.GetBoxCollider();
 		const auto AudioSource = Source.GetAudioSource();
 		const auto AudioListener = Source.GetAudioListener();
-		if (!Tag || !Transform || !Camera || !MeshRenderer || !Rigidbody || !BoxCollider || !AudioSource || !AudioListener)
+		const auto Script = Source.GetScript();
+		if (!Tag || !Transform || !Camera || !MeshRenderer || !Rigidbody || !BoxCollider ||
+			!AudioSource || !AudioListener || !Script)
 			return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure, "Could not read source entity components for duplication"));
 
 		auto Duplicated = CreateEntity(Tag->Name + " Copy");
@@ -244,6 +247,14 @@ namespace PulseForge
 			{
 				(void)DestroyEntity(*Duplicated);
 				return std::unexpected(AudioListenerResult.error());
+			}
+		}
+		if (Script->has_value())
+		{
+			if (auto ScriptResult = Duplicated->SetScript(Script->value()); !ScriptResult)
+			{
+				(void)DestroyEntity(*Duplicated);
+				return std::unexpected(ScriptResult.error());
 			}
 		}
 
@@ -682,6 +693,52 @@ namespace PulseForge
 			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have an audio listener component"));
 
 		Storage->Registry.remove<AudioListenerComponent>(*Native);
+		return {};
+	}
+
+	std::expected<std::optional<ScriptComponent>, SceneError> Entity::GetScript() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read script from an invalid entity"));
+		if (!Storage->Registry.all_of<ScriptComponent>(*Native))
+			return std::optional<ScriptComponent>{};
+		return std::optional<ScriptComponent>{ Storage->Registry.get<ScriptComponent>(*Native) };
+	}
+
+	std::expected<void, SceneError> Entity::SetScript(const ScriptComponent& Script) const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add a script to an invalid entity"));
+		if (auto Validation = Script.Validate(); !Validation)
+			return std::unexpected(SceneError{ SceneErrorCode::InvalidScriptComponent, Validation.error().Message });
+
+		try
+		{
+			Storage->Registry.emplace_or_replace<ScriptComponent>(*Native, Script);
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{
+				SceneErrorCode::StorageFailure,
+				std::string("Could not set script component: ") + Exception.what() });
+		}
+	}
+
+	std::expected<void, SceneError> Entity::RemoveScript() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove a script from an invalid entity"));
+		if (!Storage->Registry.all_of<ScriptComponent>(*Native))
+			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have a script component"));
+
+		Storage->Registry.remove<ScriptComponent>(*Native);
 		return {};
 	}
 

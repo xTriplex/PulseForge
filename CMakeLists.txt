@@ -73,6 +73,46 @@ FetchContent_Declare(PulseForgeNVRHI
 )
 FetchContent_MakeAvailable(PulseForgeNVRHI)
 
+# Lua is embedded through PulseForge's narrow C API bindings. Pin the official
+# release archive and verify it before compiling the VM as a private dependency.
+FetchContent_Declare(PulseForgeLua
+	URL https://www.lua.org/ftp/lua-5.5.1.tar.gz
+	URL_HASH SHA256=1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce
+	DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(PulseForgeLua)
+set(PULSEFORGE_LUA_SOURCE_DIR "${pulseforgelua_SOURCE_DIR}/src")
+add_library(PulseForgeLua STATIC
+	${PULSEFORGE_LUA_SOURCE_DIR}/lapi.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lcode.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lctype.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/ldebug.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/ldo.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/ldump.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lfunc.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lgc.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/llex.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lmem.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lobject.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lopcodes.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lparser.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lstate.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lstring.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/ltable.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/ltm.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lundump.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lvm.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lzio.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lauxlib.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lbaselib.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lmathlib.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lstrlib.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/ltablib.c
+	${PULSEFORGE_LUA_SOURCE_DIR}/lutf8lib.c
+)
+target_include_directories(PulseForgeLua PUBLIC "${PULSEFORGE_LUA_SOURCE_DIR}")
+set_target_properties(PulseForgeLua PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
+
 set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_BENCH OFF CACHE BOOL "" FORCE)
@@ -148,8 +188,10 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/SceneRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanSupport.cpp
+	PulseForge/Source/Private/Scripting/ScriptRuntime.cpp
 	PulseForge/Source/Private/Scene/CameraComponent.cpp
 	PulseForge/Source/Private/Scene/Components/AudioSourceComponent.cpp
+	PulseForge/Source/Private/Scene/Components/ScriptComponent.cpp
 	PulseForge/Source/Private/Scene/Components/RigidbodyComponent.cpp
 	PulseForge/Source/Private/Scene/Components/BoxColliderComponent.cpp
 	PulseForge/Source/Private/Scene/Scene.cpp
@@ -184,6 +226,7 @@ target_compile_definitions(PulseForge PRIVATE
 	MA_NO_WIN32_LEAN_AND_MEAN
 )
 target_link_libraries(PulseForge PRIVATE
+	PulseForgeLua
 	glfw
 	PulseForgeGlad
 	PulseForgeImGui
@@ -285,6 +328,9 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
 		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Materials"
 		COMMAND "${CMAKE_COMMAND}" -E copy_directory
 			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Materials" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Materials"
+		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scripts"
+		COMMAND "${CMAKE_COMMAND}" -E copy_directory
+			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Scripts" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scripts"
 		COMMAND "${CMAKE_COMMAND}" -E copy_if_different
 			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/PulseForgeGame.pfproj" "$<TARGET_FILE_DIR:PulseForgeGame>/PulseForgeGame.pfproj"
 		VERBATIM

@@ -28,7 +28,7 @@ Configure from the repository root using an x64 Visual Studio developer environm
 cmake -S . -B Build/CMake/VS2022-x64 -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
 ```
 
-CMake fetches the pinned NVRHI/Vulkan-Headers sources and Microsoft DXC. DXC compiles the sample's HLSL shaders to SPIR-V at build time; the generated shader files are copied beside the sample executable. DXC is a build-time tool and is not needed to run a built game.
+CMake fetches pinned NVRHI/Vulkan-Headers and Lua sources, plus Microsoft DXC. DXC compiles the sample's HLSL shaders to SPIR-V at build time; the generated shader files are copied beside the sample executable. DXC and Lua source are build-time dependencies, not runtime requirements.
 
 ## Building
 
@@ -61,10 +61,12 @@ The engine provides UUID-backed `Scene` and non-owning `Entity` handles with tag
 
 `PrefabSerializer` captures an entity subtree and instantiates it with fresh entity UUIDs while retaining asset UUID references. See [the prefab format](Docs/PrefabFormat.md).
 
+`ScriptRuntime` loads managed Lua assets by UUID and provides per-entity lifecycle callbacks and a small entity/scene API. See [scripting](Docs/Scripting.md).
+
 ## Asset identity
 
 Managed files under a project's `Assets` directory use adjacent `.meta` sidecars as their stable UUID source. `AssetRegistry` rebuilds an in-memory UUID-to-project-relative-path index from those files. See [asset metadata](Docs/AssetMetadata.md).
 
 ## Tests
 
-`PulseForgeTests` is the first-party test target and runs through CTest. It covers core lifecycle, events and input, UUID/scene hierarchy behavior, Vulkan selection helpers, and renderer description/draw validation. GPU and window behavior is exercised by running the sample.
+`PulseForgeTests` is the first-party test target and runs through CTest. It covers core lifecycle, scene/prefab persistence, assets, physics/audio/scripting runtimes, Vulkan selection helpers, and renderer validation. GPU and window behavior is exercised by running the sample.

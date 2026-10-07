@@ -3,6 +3,7 @@
 #include "Scene/Components/AudioListenerComponent.h"
 #include "Scene/Components/AudioSourceComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
+#include "Scene/Components/ScriptComponent.h"
 
 #include <nlohmann/json.hpp>
 
@@ -23,7 +24,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t SceneFormatVersion = 6;
+		constexpr int64_t SceneFormatVersion = 7;
 		constexpr int64_t MinimumSupportedSceneFormatVersion = 1;
 		constexpr std::string_view SceneFormatName = "PulseForgeScene";
 
@@ -53,7 +54,8 @@ namespace PulseForge
 			if (Error.Code == SceneErrorCode::DuplicateUUID || Error.Code == SceneErrorCode::NilUUID ||
 				Error.Code == SceneErrorCode::InvalidTransform || Error.Code == SceneErrorCode::ParentCycle ||
 				Error.Code == SceneErrorCode::InvalidCamera || Error.Code == SceneErrorCode::InvalidAssetReference ||
-				Error.Code == SceneErrorCode::InvalidPhysicsComponent || Error.Code == SceneErrorCode::InvalidAudioComponent)
+				Error.Code == SceneErrorCode::InvalidPhysicsComponent || Error.Code == SceneErrorCode::InvalidAudioComponent ||
+				Error.Code == SceneErrorCode::InvalidScriptComponent)
 			{
 				return MakeError(SceneSerializationErrorCode::InvalidEntityData, Error.Message);
 			}
@@ -97,9 +99,10 @@ namespace PulseForge
 				const auto BoxCollider = Current.GetBoxCollider();
 				const auto AudioSource = Current.GetAudioSource();
 				const auto AudioListener = Current.GetAudioListener();
+				const auto Script = Current.GetScript();
 				const auto Parent = Current.GetParent();
 				if (!Tag || !Transform || !Camera || !MeshRenderer || !Rigidbody || !BoxCollider ||
-					!AudioSource || !AudioListener || !Parent)
+					!AudioSource || !AudioListener || !Script || !Parent)
 					return std::unexpected(MakeError(
 						SceneSerializationErrorCode::SceneOperationFailed,
 						"Could not read all required components while serializing an entity"));
@@ -162,6 +165,13 @@ namespace PulseForge
 				}
 				if (AudioListener->has_value())
 					Record["audioListener"] = Json::object({ { "primary", AudioListener->value().IsPrimary } });
+				if (Script->has_value())
+				{
+					Record["script"] = Json::object({
+						{ "asset", Script->value().ScriptAsset.ToString() },
+						{ "enabled", Script->value().Enabled }
+					});
+				}
 				Record["parent"] = Parent->has_value()
 					? Json((**Parent).GetUUID().ToString())
 					: Json(nullptr);
@@ -457,6 +467,31 @@ namespace PulseForge
 					AudioListenerData = AudioListenerComponent{ Primary->get<bool>() };
 				}
 
+				std::optional<ScriptComponent> ScriptData;
+				const auto SerializedScript = SerializedEntity.find("script");
+				if (SerializedScript != SerializedEntity.end())
+				{
+					if (!SerializedScript->is_object())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity script must be an object"));
+					const auto Asset = SerializedScript->find("asset");
+					const auto Enabled = SerializedScript->find("enabled");
+					if (Asset == SerializedScript->end() || !Asset->is_string() ||
+						Enabled == SerializedScript->end() || !Enabled->is_boolean())
+					{
+						return std::unexpected(MakeError(
+							SceneSerializationErrorCode::InvalidEntityData,
+							"Script component requires an asset UUID and boolean enabled field"));
+					}
+					const auto ParsedAsset = UUID::Parse(Asset->get<std::string>());
+					if (!ParsedAsset || ParsedAsset->IsNil())
+						return std::unexpected(MakeError(
+							SceneSerializationErrorCode::InvalidEntityData,
+							ParsedAsset ? "Script asset UUID must not be nil" : ParsedAsset.error().Message));
+					ScriptData = ScriptComponent{ *ParsedAsset, Enabled->get<bool>() };
+					if (auto Validation = ScriptData->Validate(); !Validation)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error().Message));
+				}
+
 				auto Created = Staging.CreateEntityWithUUID(ParsedUUID.value(), Name->get<std::string>());
 				if (!Created)
 					return std::unexpected(SceneOperationError(Created.error()));
@@ -496,6 +531,11 @@ namespace PulseForge
 				{
 					if (auto AudioListenerResult = Created->SetAudioListener(*AudioListenerData); !AudioListenerResult)
 						return std::unexpected(SceneOperationError(AudioListenerResult.error()));
+				}
+				if (ScriptData)
+				{
+					if (auto ScriptResult = Created->SetScript(*ScriptData); !ScriptResult)
+						return std::unexpected(SceneOperationError(ScriptResult.error()));
 				}
 
 				PendingParents.push_back({ *Created, ParentIdentifier });

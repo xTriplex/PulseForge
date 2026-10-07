@@ -13,7 +13,8 @@ namespace PulseForge
 	enum class AssetReferenceKind : uint8_t
 	{
 		Mesh,
-		Material
+		Material,
+		Script
 	};
 
 	enum class AssetReferenceIssueCode : uint8_t
