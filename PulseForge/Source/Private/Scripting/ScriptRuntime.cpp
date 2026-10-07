@@ -3,7 +3,9 @@
 
 #include "Assets/AssetPathResolver.h"
 #include "Assets/Project.h"
+#include "Audio/AudioSceneRuntime.h"
 #include "Core/Log.h"
+#include "Physics/PhysicsSceneRuntime.h"
 #include "Scene/Components/ScriptComponent.h"
 #include "Scene/Entity.h"
 #include "Scene/Scene.h"
@@ -68,6 +70,7 @@ namespace PulseForge
 			Entity BoundEntity;
 			AssetID Asset;
 			Scene* SourceScene = nullptr;
+			ScriptRuntimeServices Services;
 			LuaMemory Memory;
 			lua_State* State = nullptr;
 			int EnvironmentReference = LUA_NOREF;
@@ -255,6 +258,71 @@ namespace PulseForge
 			return 1;
 		}
 
+		int LuaEntityApplyForce(lua_State* State)
+		{
+			LuaEntity* UserData = GetLuaEntity(State);
+			if (!UserData)
+				return ReturnHostError(State, "entity method requires an Entity value as self");
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || !Instance->Services.Physics)
+				return ReturnHostError(State, "physics service is unavailable to this script runtime");
+
+			int IsXNumber = 0;
+			int IsYNumber = 0;
+			int IsZNumber = 0;
+			const lua_Number X = lua_tonumberx(State, 2, &IsXNumber);
+			const lua_Number Y = lua_tonumberx(State, 3, &IsYNumber);
+			const lua_Number Z = lua_tonumberx(State, 4, &IsZNumber);
+			if (!IsXNumber || !IsYNumber || !IsZNumber ||
+				!std::isfinite(X) || !std::isfinite(Y) || !std::isfinite(Z))
+				return ReturnHostError(State, "apply_force requires three finite numbers");
+
+			const glm::vec3 Force{ static_cast<float>(X), static_cast<float>(Y), static_cast<float>(Z) };
+			if (!std::isfinite(Force.x) || !std::isfinite(Force.y) || !std::isfinite(Force.z))
+				return ReturnHostError(State, "force values are outside the supported range");
+			if (auto Result = Instance->Services.Physics->ApplyForce(UserData->Value.GetUUID(), Force); !Result)
+				return ReturnHostError(State, Result.error().Message.c_str());
+			lua_pushboolean(State, true);
+			return 1;
+		}
+
+		using AudioControl = std::expected<void, AudioSceneRuntimeError> (AudioSceneRuntime::*)(UUID);
+
+		int InvokeAudioControl(lua_State* State, AudioControl Control)
+		{
+			LuaEntity* UserData = GetLuaEntity(State);
+			if (!UserData)
+				return ReturnHostError(State, "entity method requires an Entity value as self");
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || !Instance->Services.Audio)
+				return ReturnHostError(State, "audio service is unavailable to this script runtime");
+
+			if (auto Result = (Instance->Services.Audio->*Control)(UserData->Value.GetUUID()); !Result)
+				return ReturnHostError(State, Result.error().Message.c_str());
+			lua_pushboolean(State, true);
+			return 1;
+		}
+
+		int LuaEntityPlayAudio(lua_State* State)
+		{
+			return InvokeAudioControl(State, &AudioSceneRuntime::Play);
+		}
+
+		int LuaEntityPauseAudio(lua_State* State)
+		{
+			return InvokeAudioControl(State, &AudioSceneRuntime::Pause);
+		}
+
+		int LuaEntityResumeAudio(lua_State* State)
+		{
+			return InvokeAudioControl(State, &AudioSceneRuntime::Resume);
+		}
+
+		int LuaEntityStopAudio(lua_State* State)
+		{
+			return InvokeAudioControl(State, &AudioSceneRuntime::StopPlayback);
+		}
+
 		int LuaSceneFindEntity(lua_State* State)
 		{
 			ScriptInstance* Instance = GetScriptInstance(State);
@@ -350,6 +418,16 @@ namespace PulseForge
 			lua_setfield(State, -2, "get_translation");
 			lua_pushcfunction(State, LuaEntitySetTranslation);
 			lua_setfield(State, -2, "set_translation");
+			lua_pushcfunction(State, LuaEntityApplyForce);
+			lua_setfield(State, -2, "apply_force");
+			lua_pushcfunction(State, LuaEntityPlayAudio);
+			lua_setfield(State, -2, "play_audio");
+			lua_pushcfunction(State, LuaEntityPauseAudio);
+			lua_setfield(State, -2, "pause_audio");
+			lua_pushcfunction(State, LuaEntityResumeAudio);
+			lua_setfield(State, -2, "resume_audio");
+			lua_pushcfunction(State, LuaEntityStopAudio);
+			lua_setfield(State, -2, "stop_audio");
 			lua_setfield(State, -2, "__index");
 			lua_pop(State, 1);
 
@@ -516,14 +594,15 @@ namespace PulseForge
 	{
 		const Project& SourceProject;
 		ScriptRuntimeDesc Description;
+		ScriptRuntimeServices Services;
 		Scene* Source = nullptr;
 		LuaMemoryPool MemoryPool;
 		std::map<UUID, std::unique_ptr<ScriptInstance>> Scripts;
 		std::map<UUID, AssetID> FailedAttachments;
 		std::vector<ScriptDiagnostic> Diagnostics;
 
-		Impl(const Project& ProjectValue, ScriptRuntimeDesc RuntimeDescription)
-			: SourceProject(ProjectValue), Description(RuntimeDescription)
+		Impl(const Project& ProjectValue, ScriptRuntimeDesc RuntimeDescription, ScriptRuntimeServices RuntimeServices)
+			: SourceProject(ProjectValue), Description(RuntimeDescription), Services(RuntimeServices)
 		{
 			MemoryPool.MaximumBytes = Description.MaxTotalLuaMemoryBytes;
 		}
@@ -566,6 +645,7 @@ namespace PulseForge
 			Instance->BoundEntity = EntityValue;
 			Instance->Asset = Component.ScriptAsset;
 			Instance->SourceScene = &SceneValue;
+			Instance->Services = Services;
 			Instance->Memory.MaximumBytes = Description.MaxLuaMemoryBytes;
 			Instance->Memory.Pool = &MemoryPool;
 			Instance->MaximumInstructions = Description.MaxInstructionsPerCallback;
@@ -742,8 +822,11 @@ namespace PulseForge
 		}
 	};
 
-	ScriptRuntime::ScriptRuntime(const Project& SourceProject, ScriptRuntimeDesc Description)
-		: m_Project(SourceProject), m_Description(Description)
+	ScriptRuntime::ScriptRuntime(
+		const Project& SourceProject,
+		ScriptRuntimeDesc Description,
+		ScriptRuntimeServices Services)
+		: m_Project(SourceProject), m_Description(Description), m_Services(Services)
 	{
 	}
 
@@ -767,7 +850,7 @@ namespace PulseForge
 
 		try
 		{
-			auto Candidate = std::make_unique<Impl>(m_Project, m_Description);
+			auto Candidate = std::make_unique<Impl>(m_Project, m_Description, m_Services);
 			Candidate->Source = &Source;
 			for (const Entity& EntityValue : Source.GetEntities())
 			{

@@ -2,6 +2,7 @@
 
 #include "Core/Core.h"
 #include "Core/Timestep.h"
+#include "Scene/UUID.h"
 
 #include <expected>
 #include <glm/glm.hpp>
@@ -29,6 +30,9 @@ namespace PulseForge
 		InvalidDeltaTime,
 		InvalidPhysicsEntity,
 		UnsupportedHierarchy,
+		MissingBody,
+		StaticBody,
+		InvalidForce,
 		InitializationFailed,
 		BodyCreationFailed,
 		SimulationFailed,
@@ -53,6 +57,7 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, PhysicsSceneRuntimeError> Start(Scene& Source);
 		void Stop() noexcept;
 		[[nodiscard]] bool IsRunning() const noexcept;
+		[[nodiscard]] std::expected<void, PhysicsSceneRuntimeError> ApplyForce(UUID Entity, const glm::vec3& Force);
 		// Returns the number of fixed simulation steps advanced. Excess time beyond
 		// MaxSubsteps is dropped to keep catch-up work bounded after a stall.
 		[[nodiscard]] std::expected<uint32_t, PhysicsSceneRuntimeError> Advance(Scene& Source, Timestep FrameDelta);

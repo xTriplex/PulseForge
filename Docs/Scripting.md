@@ -15,7 +15,11 @@ The initial host API is deliberately small:
 - `entity:uuid()` returns the entity UUID.
 - `entity:get_translation()` returns `x, y, z`.
 - `entity:set_translation(x, y, z)` returns `true`, or `nil, message` if the entity or values are invalid.
+- `entity:apply_force(x, y, z)` applies force to the entity's active dynamic rigidbody and returns `true`, or `nil, message` when unavailable or invalid. Forces are submitted before the frame's fixed physics steps.
+- `entity:play_audio()`, `pause_audio()`, `resume_audio()`, and `stop_audio()` control that entity's audio source/playback and return `true` or `nil, message`.
 - `scene.find_entity(uuid)` returns an entity handle or `nil` when no entity has that UUID; invalid UUID input returns `nil, message`.
+
+Physics and audio methods require `ScriptRuntimeServices` to provide live scene runtimes. `SceneRuntime` supplies them automatically and stops scripts before releasing those services. Standalone script runtimes without these services return an actionable `nil, message` instead of accessing global engine state.
 
 The runtime opens only the base, table, string, math, and UTF-8 libraries. File, operating-system, package, debug, and coroutine libraries are not opened. `load`, `loadfile`, `dofile`, `collectgarbage`, `pcall`, `xpcall`, and `string.dump` are disabled so scripts cannot catch the instruction-budget hook's callback error and continue running. These restrictions and execution limits are intended for gameplay scripts, not as a security boundary for hostile code.
 

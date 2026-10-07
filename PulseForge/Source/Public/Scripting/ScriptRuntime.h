@@ -14,6 +14,8 @@
 
 namespace PulseForge
 {
+	class AudioSceneRuntime;
+	class PhysicsSceneRuntime;
 	class Project;
 	class Scene;
 
@@ -23,6 +25,13 @@ namespace PulseForge
 		size_t MaxLuaMemoryBytes = 16u * 1024u * 1024u;
 		size_t MaxTotalLuaMemoryBytes = 256u * 1024u * 1024u;
 		int MaxInstructionsPerCallback = 100000;
+	};
+
+	// Non-owning gameplay services. When provided, they must remain alive until ScriptRuntime stops.
+	struct ScriptRuntimeServices
+	{
+		PhysicsSceneRuntime* Physics = nullptr;
+		AudioSceneRuntime* Audio = nullptr;
 	};
 
 	enum class ScriptDiagnosticCode : uint8_t
@@ -67,7 +76,10 @@ namespace PulseForge
 	class PULSEFORGE_API ScriptRuntime final
 	{
 	public:
-		explicit ScriptRuntime(const Project& SourceProject, ScriptRuntimeDesc Description = {});
+		explicit ScriptRuntime(
+			const Project& SourceProject,
+			ScriptRuntimeDesc Description = {},
+			ScriptRuntimeServices Services = {});
 		~ScriptRuntime();
 		ScriptRuntime(const ScriptRuntime&) = delete;
 		ScriptRuntime& operator=(const ScriptRuntime&) = delete;
@@ -84,6 +96,7 @@ namespace PulseForge
 		struct Impl;
 		const Project& m_Project;
 		ScriptRuntimeDesc m_Description;
+		ScriptRuntimeServices m_Services;
 		std::unique_ptr<Impl> m_Impl;
 		std::vector<ScriptDiagnostic> m_StoppedDiagnostics;
 	};

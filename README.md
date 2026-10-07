@@ -61,7 +61,7 @@ The engine provides UUID-backed `Scene` and non-owning `Entity` handles with tag
 
 `PrefabSerializer` captures an entity subtree and instantiates it with fresh entity UUIDs while retaining asset UUID references. See [the prefab format](Docs/PrefabFormat.md).
 
-`ScriptRuntime` loads managed Lua assets by UUID and provides per-entity lifecycle callbacks and a small entity/scene API. See [scripting](Docs/Scripting.md).
+`ScriptRuntime` loads managed Lua assets by UUID and provides per-entity lifecycle callbacks plus entity, physics, and audio APIs. See [scripting](Docs/Scripting.md).
 
 `SceneRuntime` coordinates script updates, fixed-step physics, and spatial-audio synchronization before scene rendering. See [runtime lifecycle](Docs/RuntimeLifecycle.md).
 

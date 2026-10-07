@@ -430,6 +430,30 @@ namespace PulseForge
 		return m_Impl != nullptr;
 	}
 
+	std::expected<void, PhysicsSceneRuntimeError> PhysicsSceneRuntime::ApplyForce(UUID Entity, const glm::vec3& Force)
+	{
+		if (!m_Impl)
+			return std::unexpected(MakeError(PhysicsSceneRuntimeErrorCode::NotRunning, "Physics scene runtime is not started"));
+		if (!IsFinite(Force))
+			return std::unexpected(MakeError(PhysicsSceneRuntimeErrorCode::InvalidForce, "Applied force must be finite"));
+
+		const auto Body = m_Impl->Bodies.find(Entity);
+		if (Body == m_Impl->Bodies.end())
+			return std::unexpected(MakeError(
+				PhysicsSceneRuntimeErrorCode::MissingBody,
+				"Entity has no active physics body"));
+		if (Body->second.MotionType != RigidbodyMotionType::Dynamic)
+			return std::unexpected(MakeError(
+				PhysicsSceneRuntimeErrorCode::StaticBody,
+				"Forces can only be applied to dynamic physics bodies"));
+
+		m_Impl->System.GetBodyInterface().AddForce(
+			Body->second.ID,
+			JPH::Vec3(Force.x, Force.y, Force.z),
+			JPH::EActivation::Activate);
+		return {};
+	}
+
 	std::expected<uint32_t, PhysicsSceneRuntimeError> PhysicsSceneRuntime::Advance(Scene& Source, Timestep FrameDelta)
 	{
 		if (!m_Impl)

@@ -66,13 +66,6 @@ namespace PulseForge
 				m_Project.GetRootPath(),
 				m_Project.GetAssetRegistry());
 
-			Candidate->Scripting = std::make_unique<ScriptRuntime>(m_Project, m_Description.Scripting);
-			if (auto Result = Candidate->Scripting->Start(Source); !Result)
-				return std::unexpected(MakeError(
-					SceneRuntimeErrorCode::InitializationFailed,
-					SceneRuntimeSubsystem::Scripting,
-					"Could not start scene scripting: " + Result.error().Message));
-
 			Candidate->Physics = std::make_unique<PhysicsSceneRuntime>(m_Description.Physics);
 			if (auto Result = Candidate->Physics->Start(Source); !Result)
 				return std::unexpected(MakeError(
@@ -86,6 +79,16 @@ namespace PulseForge
 					SceneRuntimeErrorCode::InitializationFailed,
 					SceneRuntimeSubsystem::Audio,
 					"Could not start scene audio: " + Result.error().Message));
+
+			const ScriptRuntimeServices Services{
+				.Physics = Candidate->Physics.get(),
+				.Audio = Candidate->Audio.get() };
+			Candidate->Scripting = std::make_unique<ScriptRuntime>(m_Project, m_Description.Scripting, Services);
+			if (auto Result = Candidate->Scripting->Start(Source); !Result)
+				return std::unexpected(MakeError(
+					SceneRuntimeErrorCode::InitializationFailed,
+					SceneRuntimeSubsystem::Scripting,
+					"Could not start scene scripting: " + Result.error().Message));
 
 			m_Impl = std::move(Candidate);
 			return {};

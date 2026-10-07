@@ -950,6 +950,8 @@ namespace
 		PhysicsSceneRuntime Runtime(Description);
 		const auto BeforeStart = Runtime.Advance(Source, Timestep(1.0 / 60.0));
 		PF_CHECK(Tests, !BeforeStart && BeforeStart.error().Code == PhysicsSceneRuntimeErrorCode::NotRunning);
+		const auto ForceBeforeStart = Runtime.ApplyForce(FallingBody->GetUUID(), { 0.0f, 10.0f, 0.0f });
+		PF_CHECK(Tests, !ForceBeforeStart && ForceBeforeStart.error().Code == PhysicsSceneRuntimeErrorCode::NotRunning);
 		PF_CHECK(Tests, Runtime.Start(Source).has_value());
 		PF_CHECK(Tests, Runtime.IsRunning());
 		const auto DuplicateStart = Runtime.Start(Source);
@@ -987,6 +989,18 @@ namespace
 		PF_CHECK(Tests, TotalSteps == 180);
 		const auto SettledTransform = FallingBody->GetTransform();
 		PF_CHECK(Tests, SettledTransform && SettledTransform->Translation.y > 0.4f && SettledTransform->Translation.y < 0.7f);
+		PF_CHECK(Tests, Runtime.ApplyForce(FallingBody->GetUUID(), { 0.0f, 100.0f, 0.0f }).has_value());
+		const auto StaticForce = Runtime.ApplyForce(Floor->GetUUID(), { 0.0f, 100.0f, 0.0f });
+		PF_CHECK(Tests, !StaticForce && StaticForce.error().Code == PhysicsSceneRuntimeErrorCode::StaticBody);
+		const auto MissingBodyForce = Runtime.ApplyForce(UUID{ 0x5300000000000000ull, 3 }, { 0.0f, 1.0f, 0.0f });
+		PF_CHECK(Tests, !MissingBodyForce && MissingBodyForce.error().Code == PhysicsSceneRuntimeErrorCode::MissingBody);
+		const auto InvalidForce = Runtime.ApplyForce(
+			FallingBody->GetUUID(),
+			{ std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f });
+		PF_CHECK(Tests, !InvalidForce && InvalidForce.error().Code == PhysicsSceneRuntimeErrorCode::InvalidForce);
+		PF_CHECK(Tests, Runtime.Advance(Source, Timestep(FixedStep)).has_value());
+		const auto ForcedTransform = FallingBody->GetTransform();
+		PF_CHECK(Tests, ForcedTransform && SettledTransform && ForcedTransform->Translation.y > SettledTransform->Translation.y);
 
 		const auto CappedCatchup = Runtime.Advance(Source, Timestep(0.25));
 		PF_CHECK(Tests, CappedCatchup && *CappedCatchup == Description.MaxSubsteps);
@@ -2939,21 +2953,74 @@ end
 		PF_CHECK(Tests,
 			CoordinatedStoppedTransform && CoordinatedStoppedTransform->Translation.x == -1.0f);
 
+		constexpr std::string_view ForceScript = R"(
+function OnUpdate()
+  local applied, message = entity:apply_force(0, 100, 0)
+  assert(applied, message)
+end
+)";
+		const auto ForceScriptAsset = CreateScriptAsset("force.lua", ForceScript);
+		PF_CHECK(Tests, ForceScriptAsset.has_value());
+		if (!ForceScriptAsset)
+			return;
+		Scene ScriptedPhysicsScene;
+		const auto ScriptedBody = ScriptedPhysicsScene.CreateEntity("Script-driven body");
+		PF_CHECK(Tests, ScriptedBody.has_value());
+		if (!ScriptedBody)
+			return;
+		PF_CHECK(Tests, ScriptedBody->SetRigidbody(RigidbodyComponent{}).has_value());
+		PF_CHECK(Tests, ScriptedBody->SetBoxCollider(BoxColliderComponent{}).has_value());
+		PF_CHECK(Tests, ScriptedBody->SetScript(ScriptComponent{ ForceScriptAsset->ID }).has_value());
+		SceneRuntime ScriptedPhysicsRuntime(*ProjectResult, RuntimeDescription);
+		PF_CHECK(Tests, ScriptedPhysicsRuntime.Start(ScriptedPhysicsScene).has_value());
+		const auto ScriptedPhysicsFrame = ScriptedPhysicsRuntime.Advance(ScriptedPhysicsScene, Timestep(0.1));
+		const auto ScriptedBodyTransform = ScriptedBody->GetTransform();
+		PF_CHECK(Tests, ScriptedPhysicsFrame && ScriptedPhysicsFrame->PhysicsSteps == 1);
+		PF_CHECK(Tests, ScriptedBodyTransform && ScriptedBodyTransform->Translation.y > 0.0f);
+		ScriptedPhysicsRuntime.Stop();
+
+		constexpr std::string_view UnavailableServicesScript = R"(
+function OnUpdate()
+  local applied, forceMessage = entity:apply_force(0, 1, 0)
+  assert(applied == nil and string.find(forceMessage, "unavailable", 1, true) ~= nil)
+  local played, audioMessage = entity:play_audio()
+  assert(played == nil and string.find(audioMessage, "unavailable", 1, true) ~= nil)
+end
+)";
+		const auto UnavailableServicesAsset = CreateScriptAsset("services_unavailable.lua", UnavailableServicesScript);
+		PF_CHECK(Tests, UnavailableServicesAsset.has_value());
+		if (!UnavailableServicesAsset)
+			return;
+		Scene UnavailableServicesScene;
+		const auto UnavailableServicesEntity = UnavailableServicesScene.CreateEntity("No runtime services");
+		PF_CHECK(Tests, UnavailableServicesEntity.has_value());
+		if (!UnavailableServicesEntity)
+			return;
+		PF_CHECK(Tests, UnavailableServicesEntity->SetScript(ScriptComponent{ UnavailableServicesAsset->ID }).has_value());
+		ScriptRuntime UnavailableServicesRuntime(*ProjectResult);
+		PF_CHECK(Tests, UnavailableServicesRuntime.Start(UnavailableServicesScene).has_value());
+		PF_CHECK(Tests, UnavailableServicesRuntime.Advance(UnavailableServicesScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, UnavailableServicesRuntime.GetDiagnostics().empty());
+		UnavailableServicesRuntime.Stop();
+
 		Scene RollbackScene;
 		const auto RollbackScriptEntity = RollbackScene.CreateEntity("Rollback script");
-		const auto IncompletePhysicsEntity = RollbackScene.CreateEntity("Incomplete physics entity");
-		PF_CHECK(Tests, RollbackScriptEntity && IncompletePhysicsEntity);
-		if (!RollbackScriptEntity || !IncompletePhysicsEntity)
+		const auto RollbackPhysicsEntity = RollbackScene.CreateEntity("Rollback physics entity");
+		PF_CHECK(Tests, RollbackScriptEntity && RollbackPhysicsEntity);
+		if (!RollbackScriptEntity || !RollbackPhysicsEntity)
 			return;
 		PF_CHECK(Tests, RollbackScriptEntity->SetScript(ScriptComponent{ TransformScriptAsset->ID }).has_value());
-		PF_CHECK(Tests, IncompletePhysicsEntity->SetRigidbody(RigidbodyComponent{}).has_value());
-		SceneRuntime RollbackRuntime(*ProjectResult, RuntimeDescription);
+		PF_CHECK(Tests, RollbackPhysicsEntity->SetRigidbody(RigidbodyComponent{}).has_value());
+		PF_CHECK(Tests, RollbackPhysicsEntity->SetBoxCollider(BoxColliderComponent{}).has_value());
+		SceneRuntimeDesc InvalidScriptDescription = RuntimeDescription;
+		InvalidScriptDescription.Scripting.MaxSourceBytes = 0;
+		SceneRuntime RollbackRuntime(*ProjectResult, InvalidScriptDescription);
 		const auto FailedRuntimeStart = RollbackRuntime.Start(RollbackScene);
 		PF_CHECK(Tests,
-			!FailedRuntimeStart && FailedRuntimeStart.error().Subsystem == SceneRuntimeSubsystem::Physics);
+			!FailedRuntimeStart && FailedRuntimeStart.error().Subsystem == SceneRuntimeSubsystem::Scripting);
 		PF_CHECK(Tests, !RollbackRuntime.IsRunning());
 		const auto RolledBackTransform = RollbackScriptEntity->GetTransform();
-		PF_CHECK(Tests, RolledBackTransform && RolledBackTransform->Translation.x == -1.0f);
+		PF_CHECK(Tests, RolledBackTransform && RolledBackTransform->Translation.x == 0.0f);
 
 		constexpr std::string_view SyntaxErrorScript = "function OnUpdate(\n";
 		const auto SyntaxErrorAsset = CreateScriptAsset("syntax_error.lua", SyntaxErrorScript);
@@ -3534,6 +3601,10 @@ end
 		PF_CHECK(Tests, !FileError);
 		if (FileError)
 			return;
+		auto AudioProject = Project::Create(ProjectRoot / "AudioProject.pfproj", "Audio Script Tests");
+		PF_CHECK(Tests, AudioProject.has_value());
+		if (!AudioProject)
+			return;
 
 		const std::vector<std::byte> WaveData = MakeSilentWave(44100 * 5);
 		AudioPlayback Playback;
@@ -3583,7 +3654,7 @@ end
 			PF_CHECK(Tests, Engine.SetListenerDirection({ 0.0f, 0.0f, -1.0f }).has_value());
 			PF_CHECK(Tests, !Engine.SetListenerDirection({ 0.0f, 0.0f, 0.0f }));
 
-			AssetRegistry Registry;
+			AssetRegistry& Registry = AudioProject->GetAssetRegistry();
 			auto Imported = AssetOperations::CreateAssetFromBytes(
 				Registry,
 				ProjectRoot,
@@ -3641,6 +3712,39 @@ end
 			PF_CHECK(Tests, Runtime.Advance(AudioScene).has_value() && Runtime.GetPlaybackCount() == 0);
 			PF_CHECK(Tests, Runtime.Play(Emitter.GetUUID()).has_value());
 			PF_CHECK(Tests, Runtime.GetPlaybackCount() == 1);
+
+			std::filesystem::create_directories(ProjectRoot / "Assets" / "Scripts", FileError);
+			PF_CHECK(Tests, !FileError);
+			if (FileError)
+				return;
+			constexpr std::string_view AudioControlSource = R"(
+function OnUpdate()
+  assert(entity:stop_audio())
+  assert(entity:play_audio())
+  assert(entity:pause_audio())
+  assert(entity:resume_audio())
+end
+)";
+			const auto AudioControlBytes = std::as_bytes(std::span(AudioControlSource.data(), AudioControlSource.size()));
+			const auto AudioControlAsset = AssetOperations::CreateAssetFromBytes(
+				Registry,
+				ProjectRoot,
+				AudioControlBytes,
+				"Assets/Scripts/audio_controls.lua");
+			PF_CHECK(Tests, AudioControlAsset.has_value());
+			if (!AudioControlAsset)
+				return;
+			PF_CHECK(Tests, Emitter.SetScript(ScriptComponent{ AudioControlAsset->ID }).has_value());
+			ScriptRuntimeServices AudioServices;
+			AudioServices.Audio = &Runtime;
+			ScriptRuntime AudioControlRuntime(*AudioProject, {}, AudioServices);
+			PF_CHECK(Tests, AudioControlRuntime.Start(AudioScene).has_value());
+			PF_CHECK(Tests, AudioControlRuntime.Advance(AudioScene, Timestep(1.0 / 60.0)).has_value());
+			PF_CHECK(Tests, AudioControlRuntime.GetDiagnostics().empty());
+			PF_CHECK(Tests, Runtime.GetPlaybackCount() == 1);
+			AudioControlRuntime.Stop();
+			PF_CHECK(Tests, Emitter.RemoveScript().has_value());
+
 			PF_CHECK(Tests, Emitter.RemoveAudioSource().has_value());
 			PF_CHECK(Tests, Runtime.Advance(AudioScene).has_value() && Runtime.GetPlaybackCount() == 0);
 			Runtime.Stop();
