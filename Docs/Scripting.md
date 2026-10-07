@@ -21,8 +21,10 @@ The initial host API is deliberately small:
 - `scene.find_entity(uuid)` returns an entity handle or `nil` when no entity has that UUID; invalid UUID input returns `nil, message`.
 - `scene.create_entity(name)` creates an entity and returns its handle, or `nil, message` for invalid input or creation failure.
 - `scene.spawn_prefab(asset_uuid)` instantiates a managed prefab by stable asset UUID and returns its root entity, or `nil, message` if resolution or instantiation fails. Prefabs containing scripts attach those scripts on the next runtime update.
+- `input.is_key_pressed(key_code)` and `input.is_mouse_button_pressed(button_code)` return the current event-tracked state. Codes currently match GLFW's integer values; invalid argument types return `nil, message`.
+- `input.get_mouse_position()` returns the current cursor position in window coordinates as `x, y`.
 
-Physics and audio methods require `ScriptRuntimeServices` to provide live scene runtimes. `SceneRuntime` supplies them automatically and stops scripts before releasing those services. Standalone script runtimes without these services return an actionable `nil, message` instead of accessing global engine state.
+Physics and audio methods require `ScriptRuntimeServices` to provide live scene runtimes. `SceneRuntime` supplies those services and can receive the application's `Input` state through `SceneRuntimeServices`. Standalone script runtimes without optional services return an actionable `nil, message` instead of accessing global engine state.
 
 Scene mutations are applied immediately to the scene. Script attachment synchronization happens at the start of each update, so scripts added by a spawn receive `OnCreate` on the next `Advance`. Destroyed script entities receive `OnDestroy` at the next update or when the runtime stops. Physics recognizes added and removed body/component pairs during that frame's later physics update; changes to the settings of an existing body still require restarting the scene runtime.
 

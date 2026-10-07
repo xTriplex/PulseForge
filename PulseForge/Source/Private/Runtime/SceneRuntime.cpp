@@ -34,8 +34,11 @@ namespace PulseForge
 		Scene* Source = nullptr;
 	};
 
-	SceneRuntime::SceneRuntime(const Project& SourceProject, SceneRuntimeDesc Description)
-		: m_Project(SourceProject), m_Description(Description)
+	SceneRuntime::SceneRuntime(
+		const Project& SourceProject,
+		SceneRuntimeDesc Description,
+		SceneRuntimeServices Services)
+		: m_Project(SourceProject), m_Description(Description), m_Services(Services)
 	{
 	}
 
@@ -82,7 +85,8 @@ namespace PulseForge
 
 			const ScriptRuntimeServices Services{
 				.Physics = Candidate->Physics.get(),
-				.Audio = Candidate->Audio.get() };
+				.Audio = Candidate->Audio.get(),
+				.InputState = m_Services.InputState };
 			Candidate->Scripting = std::make_unique<ScriptRuntime>(m_Project, m_Description.Scripting, Services);
 			if (auto Result = Candidate->Scripting->Start(Source); !Result)
 				return std::unexpected(MakeError(

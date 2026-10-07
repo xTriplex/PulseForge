@@ -15,6 +15,7 @@
 namespace PulseForge
 {
 	class AudioSceneRuntime;
+	class Input;
 	class PhysicsSceneRuntime;
 	class Project;
 	class Scene;
@@ -32,6 +33,7 @@ namespace PulseForge
 	{
 		PhysicsSceneRuntime* Physics = nullptr;
 		AudioSceneRuntime* Audio = nullptr;
+		Input* InputState = nullptr;
 	};
 
 	enum class ScriptDiagnosticCode : uint8_t

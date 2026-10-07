@@ -3142,6 +3142,8 @@ function OnUpdate()
   assert(applied == nil and string.find(forceMessage, "unavailable", 1, true) ~= nil)
   local played, audioMessage = entity:play_audio()
   assert(played == nil and string.find(audioMessage, "unavailable", 1, true) ~= nil)
+  local pressed, inputMessage = input.is_key_pressed(87)
+  assert(pressed == nil and string.find(inputMessage, "unavailable", 1, true) ~= nil)
 end
 )";
 		const auto UnavailableServicesAsset = CreateScriptAsset("services_unavailable.lua", UnavailableServicesScript);
@@ -3159,6 +3161,92 @@ end
 		PF_CHECK(Tests, UnavailableServicesRuntime.Advance(UnavailableServicesScene, Timestep(1.0 / 60.0)).has_value());
 		PF_CHECK(Tests, UnavailableServicesRuntime.GetDiagnostics().empty());
 		UnavailableServicesRuntime.Stop();
+
+		constexpr std::string_view InputScript = R"(
+local Updated = false
+function OnCreate()
+  local invalidKey, keyMessage = input.is_key_pressed("W")
+  assert(invalidKey == nil and keyMessage ~= nil)
+  local invalidButton, buttonMessage = input.is_mouse_button_pressed("left")
+  assert(invalidButton == nil and buttonMessage ~= nil)
+end
+function OnUpdate()
+  local x, y = input.get_mouse_position()
+  if not Updated then
+    assert(input.is_key_pressed(87))
+    assert(not input.is_key_pressed(83))
+    assert(input.is_mouse_button_pressed(0))
+    assert(not input.is_mouse_button_pressed(1))
+    assert(x == 12.5 and y == 9.25)
+    Updated = true
+  else
+    assert(not input.is_key_pressed(87))
+    assert(not input.is_mouse_button_pressed(0))
+    assert(x == 14.5 and y == 7.25)
+  end
+  assert(entity:set_translation(x, y, 0))
+end
+)";
+		const auto InputScriptAsset = CreateScriptAsset("input.lua", InputScript);
+		PF_CHECK(Tests, InputScriptAsset.has_value());
+		if (!InputScriptAsset)
+			return;
+
+		Input TestInput;
+		KeyPressedEvent WPressed(87, 0);
+		MouseButtonPressedEvent LeftPressed(0);
+		MouseMovedEvent InitialMousePosition(12.5f, 9.25f);
+		TestInput.OnEvent(WPressed);
+		TestInput.OnEvent(LeftPressed);
+		TestInput.OnEvent(InitialMousePosition);
+
+		Scene InputTestScene;
+		const auto InputTestEntity = InputTestScene.CreateEntity("Input-driven script");
+		PF_CHECK(Tests, InputTestEntity && InputTestEntity->SetScript(ScriptComponent{ InputScriptAsset->ID }));
+		if (!InputTestEntity)
+			return;
+		ScriptRuntimeServices InputServices;
+		InputServices.InputState = &TestInput;
+		ScriptRuntime InputRuntime(*ProjectResult, {}, InputServices);
+		PF_CHECK(Tests, InputRuntime.Start(InputTestScene).has_value());
+		PF_CHECK(Tests, InputRuntime.Advance(InputTestScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, InputRuntime.GetDiagnostics().empty());
+		KeyReleasedEvent WReleased(87);
+		MouseButtonReleasedEvent LeftReleased(0);
+		MouseMovedEvent UpdatedMousePosition(14.5f, 7.25f);
+		TestInput.OnEvent(WReleased);
+		TestInput.OnEvent(LeftReleased);
+		TestInput.OnEvent(UpdatedMousePosition);
+		PF_CHECK(Tests, InputRuntime.Advance(InputTestScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, InputRuntime.GetDiagnostics().empty());
+		const auto InputUpdatedTransform = InputTestEntity->GetTransform();
+		PF_CHECK(Tests, InputUpdatedTransform &&
+			std::abs(InputUpdatedTransform->Translation.x - 14.5f) < 0.0001f &&
+			std::abs(InputUpdatedTransform->Translation.y - 7.25f) < 0.0001f);
+		InputRuntime.Stop();
+
+		KeyPressedEvent CoordinatorWPressed(87, 0);
+		MouseButtonPressedEvent CoordinatorLeftPressed(0);
+		MouseMovedEvent CoordinatorMousePosition(12.5f, 9.25f);
+		TestInput.OnEvent(CoordinatorWPressed);
+		TestInput.OnEvent(CoordinatorLeftPressed);
+		TestInput.OnEvent(CoordinatorMousePosition);
+		Scene CoordinatedInputScene;
+		const auto CoordinatedInputEntity = CoordinatedInputScene.CreateEntity("Coordinated input script");
+		PF_CHECK(Tests, CoordinatedInputEntity &&
+			CoordinatedInputEntity->SetScript(ScriptComponent{ InputScriptAsset->ID }));
+		if (!CoordinatedInputEntity)
+			return;
+		SceneRuntimeServices HostServices{ .InputState = &TestInput };
+		SceneRuntime CoordinatedInputRuntime(*ProjectResult, RuntimeDescription, HostServices);
+		PF_CHECK(Tests, CoordinatedInputRuntime.Start(CoordinatedInputScene).has_value());
+		PF_CHECK(Tests,
+			CoordinatedInputRuntime.Advance(CoordinatedInputScene, Timestep(1.0 / 60.0)).has_value());
+		const auto CoordinatedInputTransform = CoordinatedInputEntity->GetTransform();
+		PF_CHECK(Tests, CoordinatedInputTransform &&
+			std::abs(CoordinatedInputTransform->Translation.x - 12.5f) < 0.0001f &&
+			std::abs(CoordinatedInputTransform->Translation.y - 9.25f) < 0.0001f);
+		CoordinatedInputRuntime.Stop();
 
 		Scene RollbackScene;
 		const auto RollbackScriptEntity = RollbackScene.CreateEntity("Rollback script");

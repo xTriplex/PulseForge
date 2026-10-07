@@ -12,6 +12,7 @@
 
 namespace PulseForge
 {
+	class Input;
 	class Project;
 	class Scene;
 
@@ -20,6 +21,12 @@ namespace PulseForge
 		AudioEngineDesc Audio{};
 		PhysicsSceneRuntimeDesc Physics{};
 		ScriptRuntimeDesc Scripting{};
+	};
+
+	// Non-owning host services supplied by the application to the scene runtime.
+	struct SceneRuntimeServices
+	{
+		Input* InputState = nullptr;
 	};
 
 	enum class SceneRuntimeErrorCode : uint8_t
@@ -53,11 +60,14 @@ namespace PulseForge
 		uint32_t PhysicsSteps = 0;
 	};
 
-	// Project and started Scene must outlive this coordinator; keep the scene at the same address while running.
+	// Project, optional host services, and started Scene must outlive this coordinator; keep the scene at the same address while running.
 	class PULSEFORGE_API SceneRuntime final
 	{
 	public:
-		explicit SceneRuntime(const Project& SourceProject, SceneRuntimeDesc Description = {});
+		explicit SceneRuntime(
+			const Project& SourceProject,
+			SceneRuntimeDesc Description = {},
+			SceneRuntimeServices Services = {});
 		~SceneRuntime();
 		SceneRuntime(const SceneRuntime&) = delete;
 		SceneRuntime& operator=(const SceneRuntime&) = delete;
@@ -74,6 +84,7 @@ namespace PulseForge
 		struct Impl;
 		const Project& m_Project;
 		SceneRuntimeDesc m_Description;
+		SceneRuntimeServices m_Services;
 		std::unique_ptr<Impl> m_Impl;
 	};
 }

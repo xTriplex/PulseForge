@@ -33,7 +33,10 @@ public:
 			if (!m_Project->GetDescription().StartScene)
 				throw std::runtime_error("Sample project does not specify a startup scene asset");
 			LoadValidationScene(ProjectRoot, m_Project->GetAssetRegistry(), *m_Project->GetDescription().StartScene);
-			m_SceneRuntime = std::make_unique<PulseForge::SceneRuntime>(*m_Project);
+			m_SceneRuntime = std::make_unique<PulseForge::SceneRuntime>(
+				*m_Project,
+				PulseForge::SceneRuntimeDesc{},
+				PulseForge::SceneRuntimeServices{ .InputState = &PulseForge::Application::Get().GetInput() });
 			if (auto StartResult = m_SceneRuntime->Start(m_Scene); !StartResult)
 				throw std::runtime_error("Could not start sample scene runtime: " + StartResult.error().Message);
 			const std::filesystem::path ShaderDirectory =

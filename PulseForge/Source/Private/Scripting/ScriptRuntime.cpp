@@ -6,6 +6,7 @@
 #include "Assets/Project.h"
 #include "Audio/AudioSceneRuntime.h"
 #include "Core/Log.h"
+#include "Core/Input.h"
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Scene/Components/ScriptComponent.h"
 #include "Scene/Entity.h"
@@ -327,6 +328,54 @@ namespace PulseForge
 			return 1;
 		}
 
+		bool ReadIntegerArgument(lua_State* State, int Index, int& Value)
+		{
+			int IsInteger = 0;
+			const lua_Integer LuaValue = lua_tointegerx(State, Index, &IsInteger);
+			if (!IsInteger || LuaValue < std::numeric_limits<int>::min() || LuaValue > std::numeric_limits<int>::max())
+				return false;
+			Value = static_cast<int>(LuaValue);
+			return true;
+		}
+
+		int LuaInputIsKeyPressed(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || !Instance->Services.InputState)
+				return ReturnHostError(State, "input service is unavailable to this script runtime");
+
+			int KeyCode = 0;
+			if (!ReadIntegerArgument(State, 1, KeyCode))
+				return ReturnHostError(State, "input.is_key_pressed requires an integer key code");
+			lua_pushboolean(State, Instance->Services.InputState->IsKeyPressed(KeyCode));
+			return 1;
+		}
+
+		int LuaInputIsMouseButtonPressed(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || !Instance->Services.InputState)
+				return ReturnHostError(State, "input service is unavailable to this script runtime");
+
+			int Button = 0;
+			if (!ReadIntegerArgument(State, 1, Button))
+				return ReturnHostError(State, "input.is_mouse_button_pressed requires an integer button code");
+			lua_pushboolean(State, Instance->Services.InputState->IsMouseButtonPressed(Button));
+			return 1;
+		}
+
+		int LuaInputGetMousePosition(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || !Instance->Services.InputState)
+				return ReturnHostError(State, "input service is unavailable to this script runtime");
+
+			const MousePosition Position = Instance->Services.InputState->GetMousePosition();
+			lua_pushnumber(State, Position.X);
+			lua_pushnumber(State, Position.Y);
+			return 2;
+		}
+
 		int LuaEntityPlayAudio(lua_State* State)
 		{
 			return InvokeAudioControl(State, &AudioSceneRuntime::Play);
@@ -584,6 +633,15 @@ namespace PulseForge
 			lua_pushcfunction(State, LuaSceneSpawnPrefab);
 			lua_setfield(State, -2, "spawn_prefab");
 			lua_setglobal(State, "scene");
+
+			lua_newtable(State);
+			lua_pushcfunction(State, LuaInputIsKeyPressed);
+			lua_setfield(State, -2, "is_key_pressed");
+			lua_pushcfunction(State, LuaInputIsMouseButtonPressed);
+			lua_setfield(State, -2, "is_mouse_button_pressed");
+			lua_pushcfunction(State, LuaInputGetMousePosition);
+			lua_setfield(State, -2, "get_mouse_position");
+			lua_setglobal(State, "input");
 
 			lua_newuserdatauv(State, sizeof(LuaEntity), 0);
 			luaL_getmetatable(State, EntityMetatableName);
