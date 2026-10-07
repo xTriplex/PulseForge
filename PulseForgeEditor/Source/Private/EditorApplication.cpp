@@ -45,6 +45,23 @@ namespace
 		return { reinterpret_cast<const char*>(UTF8Path.data()), UTF8Path.size() };
 	}
 
+	std::string NormalizedExtension(const std::filesystem::path& Path)
+	{
+		std::string Extension = PathToUtf8(Path.extension());
+		std::transform(Extension.begin(), Extension.end(), Extension.begin(), [](unsigned char Character)
+		{
+			return Character >= 'A' && Character <= 'Z'
+				? static_cast<char>(Character - 'A' + 'a')
+				: static_cast<char>(Character);
+		});
+		return Extension;
+	}
+
+	bool HasReservedMetadataExtension(const std::filesystem::path& Path)
+	{
+		return NormalizedExtension(Path) == ".meta";
+	}
+
 	class DialogPath final
 	{
 	public:
@@ -349,6 +366,9 @@ namespace
 			m_Scene = std::move(NewScene);
 			m_SceneAsset = MainSceneRecord.ID;
 			m_SelectedEntity.reset();
+			m_SelectedAsset = MainSceneRecord.ID;
+			m_PendingDeleteAsset.reset();
+			m_OpenDeleteAssetDialog = false;
 			m_SceneDirty = false;
 			if (!MainScene)
 			{
@@ -418,6 +438,9 @@ namespace
 			m_Scene = std::move(LoadedScene);
 			m_SceneAsset = LoadedSceneAsset;
 			m_SelectedEntity.reset();
+			m_SelectedAsset = LoadedSceneAsset;
+			m_PendingDeleteAsset.reset();
+			m_OpenDeleteAssetDialog = false;
 			m_SceneDirty = false;
 			UpdateAssetList();
 			if (SceneLoadWarning.empty())
@@ -437,7 +460,7 @@ namespace
 			auto SourceFile = ShowOpenDialog(nullptr, m_Project->GetRootPath());
 			if (!SourceFile)
 				return;
-			if (SourceFile->extension() == ".meta")
+			if (HasReservedMetadataExtension(*SourceFile))
 			{
 				SetError("Asset sidecar metadata files cannot be imported as source assets.");
 				return;
@@ -452,7 +475,7 @@ namespace
 				return;
 			if (DestinationFile->extension().empty())
 				*DestinationFile += SourceFile->extension();
-			if (DestinationFile->extension() == ".meta")
+			if (HasReservedMetadataExtension(*DestinationFile))
 			{
 				SetError("Asset destinations cannot use the reserved .meta extension.");
 				return;
@@ -476,34 +499,15 @@ namespace
 				return;
 			}
 
-			std::error_code PathError;
-			const std::filesystem::path ProjectRoot =
-				std::filesystem::absolute(m_Project->GetRootPath(), PathError).lexically_normal();
-			if (PathError)
-			{
-				SetError("Could not resolve the project root for asset import: " + PathError.message());
+			const auto RelativeDestination = GetProjectRelativePath(DestinationFile, "asset import");
+			if (!RelativeDestination)
 				return;
-			}
-			PathError.clear();
-			const std::filesystem::path AbsoluteDestination =
-				std::filesystem::absolute(DestinationFile, PathError).lexically_normal();
-			if (PathError)
-			{
-				SetError("Could not resolve the asset destination: " + PathError.message());
-				return;
-			}
-			const std::filesystem::path RelativeDestination = AbsoluteDestination.lexically_relative(ProjectRoot);
-			if (RelativeDestination.empty())
-			{
-				SetError("Could not make the asset destination relative to the project root.");
-				return;
-			}
 
 			auto Imported = PulseForge::AssetOperations::ImportFile(
 				m_Project->GetAssetRegistry(),
-				ProjectRoot,
+				m_Project->GetRootPath(),
 				SourceFile,
-				RelativeDestination);
+				*RelativeDestination);
 			if (!Imported)
 			{
 				std::string Message = "Asset import failed: " + Imported.error().Message;
@@ -514,7 +518,7 @@ namespace
 				if (Imported.error().CommittedAsset)
 					Message += " The asset was committed with UUID " + Imported.error().CommittedAsset->ID.ToString() + ".";
 
-				const auto RegistryRefresh = m_Project->GetAssetRegistry().Rebuild(ProjectRoot);
+				const auto RegistryRefresh = m_Project->GetAssetRegistry().Rebuild(m_Project->GetRootPath());
 				UpdateAssetList();
 				if (!RegistryRefresh)
 				{
@@ -527,9 +531,291 @@ namespace
 			}
 
 			UpdateAssetList();
+			m_SelectedAsset = Imported->ID;
 			SetStatus(
 				"Imported " + PathToUtf8(Imported->ProjectRelativePath) +
 				" (UUID " + Imported->ID.ToString() + ").");
+		}
+
+		void MoveAsset(const PulseForge::AssetID& Identifier)
+		{
+			if (!m_Project)
+				return;
+			const auto Asset = m_Project->GetAssetRegistry().Find(Identifier);
+			if (!Asset)
+			{
+				std::string Message = "The selected asset is no longer registered.";
+				RefreshAssetsAfterOperationFailure(Message);
+				SetError(std::move(Message));
+				return;
+			}
+
+			const std::string DefaultName = PathToUtf8(Asset->ProjectRelativePath.filename());
+			auto Destination = ShowSaveDialog(
+				nullptr,
+				m_Project->GetRootPath() / Asset->ProjectRelativePath.parent_path(),
+				DefaultName.c_str());
+			if (!Destination)
+				return;
+			if (Destination->extension().empty())
+				*Destination += Asset->ProjectRelativePath.extension();
+			if (Destination->extension() != Asset->ProjectRelativePath.extension())
+			{
+				SetError("Moving an asset cannot change its file extension.");
+				return;
+			}
+			if (HasReservedMetadataExtension(*Destination))
+			{
+				SetError("Asset destinations cannot use the reserved .meta extension.");
+				return;
+			}
+
+			const auto RelativeDestination = GetProjectRelativePath(*Destination, "asset move");
+			if (!RelativeDestination)
+				return;
+			const std::filesystem::path Target = *RelativeDestination;
+			QueueAfterSave([this, Identifier, Target] { MoveAssetAt(Identifier, Target); });
+		}
+
+		void MoveAssetAt(
+			const PulseForge::AssetID& Identifier,
+			const std::filesystem::path& Destination)
+		{
+			if (!m_Project)
+				return;
+			auto Moved = PulseForge::AssetOperations::Move(
+				m_Project->GetAssetRegistry(),
+				m_Project->GetRootPath(),
+				Identifier,
+				Destination);
+			if (!Moved)
+			{
+				std::string Message = DescribeAssetOperationError("Asset move failed", Moved.error());
+				RefreshAssetsAfterOperationFailure(Message);
+				SetError(std::move(Message));
+				return;
+			}
+
+			UpdateAssetList();
+			m_SelectedAsset = Moved->ID;
+			SetStatus("Moved " + PathToUtf8(Moved->ProjectRelativePath) + ".");
+		}
+
+		void DuplicateAsset(const PulseForge::AssetID& Identifier)
+		{
+			if (!m_Project)
+				return;
+			const auto Asset = m_Project->GetAssetRegistry().Find(Identifier);
+			if (!Asset)
+			{
+				std::string Message = "The selected asset is no longer registered.";
+				RefreshAssetsAfterOperationFailure(Message);
+				SetError(std::move(Message));
+				return;
+			}
+
+			const std::filesystem::path Filename = Asset->ProjectRelativePath.filename();
+			const std::string DefaultName =
+				PathToUtf8(Filename.stem()) + " Copy" + PathToUtf8(Filename.extension());
+			auto Destination = ShowSaveDialog(
+				nullptr,
+				m_Project->GetRootPath() / Asset->ProjectRelativePath.parent_path(),
+				DefaultName.c_str());
+			if (!Destination)
+				return;
+			if (Destination->extension().empty())
+				*Destination += Asset->ProjectRelativePath.extension();
+			if (Destination->extension() != Asset->ProjectRelativePath.extension())
+			{
+				SetError("Duplicating an asset cannot change its file extension.");
+				return;
+			}
+			if (HasReservedMetadataExtension(*Destination))
+			{
+				SetError("Asset destinations cannot use the reserved .meta extension.");
+				return;
+			}
+
+			const auto RelativeDestination = GetProjectRelativePath(*Destination, "asset duplication");
+			if (!RelativeDestination)
+				return;
+			const std::filesystem::path Target = *RelativeDestination;
+			QueueAfterSave([this, Identifier, Target] { DuplicateAssetAt(Identifier, Target); });
+		}
+
+		void DuplicateAssetAt(
+			const PulseForge::AssetID& Identifier,
+			const std::filesystem::path& Destination)
+		{
+			if (!m_Project)
+				return;
+			auto Duplicated = PulseForge::AssetOperations::Duplicate(
+				m_Project->GetAssetRegistry(),
+				m_Project->GetRootPath(),
+				Identifier,
+				Destination);
+			if (!Duplicated)
+			{
+				std::string Message = DescribeAssetOperationError("Asset duplication failed", Duplicated.error());
+				RefreshAssetsAfterOperationFailure(Message);
+				SetError(std::move(Message));
+				return;
+			}
+
+			UpdateAssetList();
+			m_SelectedAsset = Duplicated->ID;
+			SetStatus(
+				"Duplicated " + PathToUtf8(Duplicated->ProjectRelativePath) +
+				" (new UUID " + Duplicated->ID.ToString() + ").");
+		}
+
+		void RequestDeleteAsset(const PulseForge::AssetID& Identifier)
+		{
+			if (IsProtectedSceneAsset(Identifier))
+			{
+				SetError("The open or configured startup scene cannot be deleted. Choose another startup scene first.");
+				return;
+			}
+			m_PendingDeleteAsset = Identifier;
+			m_OpenDeleteAssetDialog = true;
+		}
+
+		void DrawDeleteAssetDialog()
+		{
+			if (m_OpenDeleteAssetDialog)
+			{
+				ImGui::OpenPopup("Delete Managed Asset");
+				m_OpenDeleteAssetDialog = false;
+			}
+
+			bool PopupOpen = true;
+			if (ImGui::BeginPopupModal("Delete Managed Asset", &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize))
+			{
+				const auto Asset = m_Project && m_PendingDeleteAsset
+					? m_Project->GetAssetRegistry().Find(*m_PendingDeleteAsset)
+					: std::optional<PulseForge::AssetRecord>{};
+				if (Asset)
+					ImGui::TextWrapped("Permanently delete %s and its sidecar metadata?", PathToUtf8(Asset->ProjectRelativePath).c_str());
+				else
+					ImGui::TextUnformatted("The selected asset is no longer registered.");
+				ImGui::TextUnformatted("This cannot be undone and may leave UUID references unresolved.");
+
+				if (Asset && ImGui::Button("Delete", ImVec2(120.0f, 0.0f)))
+				{
+					const PulseForge::AssetID Identifier = Asset->ID;
+					m_PendingDeleteAsset.reset();
+					ImGui::CloseCurrentPopup();
+					QueueAfterSave([this, Identifier] { DeleteAssetAt(Identifier); });
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)))
+				{
+					m_PendingDeleteAsset.reset();
+					m_OpenDeleteAssetDialog = false;
+					ImGui::CloseCurrentPopup();
+				}
+				ImGui::EndPopup();
+			}
+			if (!PopupOpen)
+			{
+				m_PendingDeleteAsset.reset();
+				m_OpenDeleteAssetDialog = false;
+			}
+		}
+
+		void DeleteAssetAt(const PulseForge::AssetID& Identifier)
+		{
+			if (!m_Project)
+				return;
+			if (IsProtectedSceneAsset(Identifier))
+			{
+				SetError("The open or configured startup scene cannot be deleted. Choose another startup scene first.");
+				return;
+			}
+
+			auto Deleted = PulseForge::AssetOperations::Delete(
+				m_Project->GetAssetRegistry(),
+				m_Project->GetRootPath(),
+				Identifier);
+			if (!Deleted)
+			{
+				std::string Message = DescribeAssetOperationError("Asset deletion failed", Deleted.error());
+				RefreshAssetsAfterOperationFailure(Message);
+				SetError(std::move(Message));
+				return;
+			}
+
+			UpdateAssetList();
+			if (m_SelectedAsset && *m_SelectedAsset == Identifier)
+				m_SelectedAsset.reset();
+			SetStatus("Deleted asset " + Identifier.ToString() + ".");
+		}
+
+		bool IsProtectedSceneAsset(const PulseForge::AssetID& Identifier) const
+		{
+			return (m_SceneAsset && *m_SceneAsset == Identifier) ||
+				(m_Project && m_Project->GetDescription().StartScene &&
+					*m_Project->GetDescription().StartScene == Identifier);
+		}
+
+		[[nodiscard]] std::optional<std::filesystem::path> GetProjectRelativePath(
+			const std::filesystem::path& AbsolutePath,
+			std::string_view Operation)
+		{
+			if (!m_Project)
+				return std::nullopt;
+
+			std::error_code Error;
+			const std::filesystem::path Root =
+				std::filesystem::absolute(m_Project->GetRootPath(), Error).lexically_normal();
+			if (Error)
+			{
+				SetError("Could not resolve the project root for " + std::string(Operation) + ": " + Error.message());
+				return std::nullopt;
+			}
+			Error.clear();
+			const std::filesystem::path Absolute = std::filesystem::absolute(AbsolutePath, Error).lexically_normal();
+			if (Error)
+			{
+				SetError("Could not resolve the destination for " + std::string(Operation) + ": " + Error.message());
+				return std::nullopt;
+			}
+
+			const std::filesystem::path Relative = Absolute.lexically_relative(Root);
+			if (Relative.empty() || Relative.is_absolute())
+			{
+				SetError("Could not make the destination relative to the project for " + std::string(Operation) + ".");
+				return std::nullopt;
+			}
+			return Relative;
+		}
+
+		static std::string DescribeAssetOperationError(
+			std::string_view Operation,
+			const PulseForge::AssetOperationError& Error)
+		{
+			std::string Message = std::string(Operation) + ": " + Error.Message;
+			if (!Error.Path.empty())
+				Message += " Path: " + PathToUtf8(Error.Path) + ".";
+			if (Error.RecoveryPath)
+				Message += " Recovery data: " + PathToUtf8(*Error.RecoveryPath) + ".";
+			if (Error.CommittedAsset)
+				Message += " The asset was committed with UUID " + Error.CommittedAsset->ID.ToString() + ".";
+			return Message;
+		}
+
+		void RefreshAssetsAfterOperationFailure(std::string& Message)
+		{
+			if (!m_Project)
+				return;
+			const auto Rebuild = m_Project->GetAssetRegistry().Rebuild(m_Project->GetRootPath());
+			UpdateAssetList();
+			if (!Rebuild)
+			{
+				Message += " Registry refresh also reported:";
+				for (const PulseForge::AssetRegistryIssue& Issue : Rebuild.error().Issues)
+					Message += " " + Issue.Message;
+			}
 		}
 
 		void CreateScene(bool SaveAs)
@@ -643,6 +929,7 @@ namespace
 
 			m_Scene = std::move(Loaded);
 			m_SceneAsset = Identifier;
+			m_SelectedAsset = Identifier;
 			m_SelectedEntity.reset();
 			m_SceneDirty = false;
 			const auto Record = m_Project->GetAssetRegistry().Find(Identifier);
@@ -1564,20 +1851,65 @@ namespace
 						RefreshAssets();
 					if (m_Assets.empty())
 						ImGui::TextUnformatted("The project has no managed assets.");
+					std::function<void()> ContextAction;
 					for (const PulseForge::AssetRecord& Asset : m_Assets)
 					{
 						const std::string AssetID = Asset.ID.ToString();
 						ImGui::PushID(AssetID.c_str());
-						const bool IsCurrent = m_SceneAsset && *m_SceneAsset == Asset.ID;
+						const bool IsSelected = m_SelectedAsset && *m_SelectedAsset == Asset.ID;
 						const std::string Path = PathToUtf8(Asset.ProjectRelativePath);
-						ImGui::Selectable(Path.c_str(), IsCurrent, ImGuiSelectableFlags_AllowDoubleClick);
-						if (ImGui::IsItemClicked() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
-							Asset.ProjectRelativePath.extension() == ".scene")
-							OpenScene(Asset.ID);
+						if (ImGui::Selectable(Path.c_str(), IsSelected, ImGuiSelectableFlags_AllowDoubleClick))
+						{
+							m_SelectedAsset = Asset.ID;
+							if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
+								Asset.ProjectRelativePath.extension() == ".scene")
+								OpenScene(Asset.ID);
+						}
 						if (ImGui::IsItemHovered())
 							ImGui::SetTooltip("UUID: %s", AssetID.c_str());
+						if (ImGui::BeginPopupContextItem("Asset Actions"))
+						{
+							m_SelectedAsset = Asset.ID;
+							const PulseForge::AssetID Identifier = Asset.ID;
+							if (ImGui::MenuItem("Move / Rename..."))
+								ContextAction = [this, Identifier] { MoveAsset(Identifier); };
+							if (ImGui::MenuItem("Duplicate..."))
+								ContextAction = [this, Identifier] { DuplicateAsset(Identifier); };
+							if (ImGui::MenuItem("Delete..."))
+								ContextAction = [this, Identifier] { RequestDeleteAsset(Identifier); };
+							ImGui::EndPopup();
+						}
 						ImGui::PopID();
 					}
+					if (ContextAction)
+						ContextAction();
+
+					if (m_SelectedAsset)
+					{
+						const auto Asset = m_Project->GetAssetRegistry().Find(*m_SelectedAsset);
+						if (Asset)
+						{
+							ImGui::Separator();
+							ImGui::TextWrapped("%s", PathToUtf8(Asset->ProjectRelativePath).c_str());
+							ImGui::Text("UUID: %s", Asset->ID.ToString().c_str());
+							if (ImGui::Button("Move / Rename..."))
+								MoveAsset(Asset->ID);
+							ImGui::SameLine();
+							if (ImGui::Button("Duplicate..."))
+								DuplicateAsset(Asset->ID);
+							ImGui::SameLine();
+							const bool IsProtectedScene = IsProtectedSceneAsset(Asset->ID);
+							ImGui::BeginDisabled(IsProtectedScene);
+							if (ImGui::Button("Delete..."))
+								RequestDeleteAsset(Asset->ID);
+							ImGui::EndDisabled();
+							if (IsProtectedScene)
+								ImGui::TextUnformatted("Open and startup scenes cannot be deleted.");
+						}
+						else
+							m_SelectedAsset.reset();
+					}
+					DrawDeleteAssetDialog();
 				}
 			}
 			ImGui::End();
@@ -1640,6 +1972,9 @@ namespace
 			m_Scene.reset();
 			m_SceneAsset.reset();
 			m_SelectedEntity.reset();
+			m_SelectedAsset.reset();
+			m_PendingDeleteAsset.reset();
+			m_OpenDeleteAssetDialog = false;
 			m_SceneDirty = false;
 		}
 
@@ -1682,10 +2017,13 @@ namespace
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::optional<PulseForge::AssetID> m_SceneAsset;
 		std::optional<PulseForge::UUID> m_SelectedEntity;
+		std::optional<PulseForge::AssetID> m_SelectedAsset;
+		std::optional<PulseForge::AssetID> m_PendingDeleteAsset;
 		std::vector<PulseForge::AssetRecord> m_Assets;
 		std::string m_StatusMessage = "Create or open a project to begin.";
 		bool m_StatusIsError = false;
 		bool m_StatusIsWarning = false;
+		bool m_OpenDeleteAssetDialog = false;
 	};
 
 	class PulseForgeEditorApplication final : public PulseForge::Application
