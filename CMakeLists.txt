@@ -188,6 +188,7 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/SceneRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanSupport.cpp
+	PulseForge/Source/Private/Runtime/SceneRuntime.cpp
 	PulseForge/Source/Private/Scripting/ScriptRuntime.cpp
 	PulseForge/Source/Private/Scene/CameraComponent.cpp
 	PulseForge/Source/Private/Scene/Components/AudioSourceComponent.cpp

@@ -63,6 +63,8 @@ The engine provides UUID-backed `Scene` and non-owning `Entity` handles with tag
 
 `ScriptRuntime` loads managed Lua assets by UUID and provides per-entity lifecycle callbacks and a small entity/scene API. See [scripting](Docs/Scripting.md).
 
+`SceneRuntime` coordinates script updates, fixed-step physics, and spatial-audio synchronization before scene rendering. See [runtime lifecycle](Docs/RuntimeLifecycle.md).
+
 ## Asset identity
 
 Managed files under a project's `Assets` directory use adjacent `.meta` sidecars as their stable UUID source. `AssetRegistry` rebuilds an in-memory UUID-to-project-relative-path index from those files. See [asset metadata](Docs/AssetMetadata.md).

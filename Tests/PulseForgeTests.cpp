@@ -24,6 +24,7 @@
 #include "Audio/AudioEngine.h"
 #include "Audio/AudioSceneRuntime.h"
 #include "Physics/PhysicsSceneRuntime.h"
+#include "Runtime/SceneRuntime.h"
 #include "Scripting/ScriptRuntime.h"
 #include "Renderer/Binding.h"
 #include "Renderer/Buffer.h"
@@ -2897,6 +2898,62 @@ end
 		const auto StoppedTransform = SecondEntity->GetTransform();
 		PF_CHECK(Tests, StoppedTransform && StoppedTransform->Translation.x == -1.0f);
 		Runtime.Stop();
+
+		Scene CoordinatedScene;
+		const auto CoordinatedScriptEntity = CoordinatedScene.CreateEntity("Coordinated script");
+		const auto CoordinatedPhysicsEntity = CoordinatedScene.CreateEntity("Coordinated body");
+		PF_CHECK(Tests, CoordinatedScriptEntity && CoordinatedPhysicsEntity);
+		if (!CoordinatedScriptEntity || !CoordinatedPhysicsEntity)
+			return;
+		PF_CHECK(Tests, CoordinatedScriptEntity->SetScript(ScriptComponent{ TransformScriptAsset->ID }).has_value());
+		PF_CHECK(Tests, CoordinatedPhysicsEntity->SetRigidbody(RigidbodyComponent{}).has_value());
+		PF_CHECK(Tests, CoordinatedPhysicsEntity->SetBoxCollider(BoxColliderComponent{}).has_value());
+
+		SceneRuntimeDesc RuntimeDescription;
+		RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+		RuntimeDescription.Physics.FixedStepSeconds = 0.1;
+		RuntimeDescription.Physics.MaxSubsteps = 2;
+		RuntimeDescription.Physics.MaxFrameDeltaSeconds = 0.25;
+		SceneRuntime CoordinatedRuntime(*ProjectResult, RuntimeDescription);
+		const auto BeforeRuntimeStart = CoordinatedRuntime.Advance(CoordinatedScene, Timestep(0.1));
+		PF_CHECK(Tests, !BeforeRuntimeStart && BeforeRuntimeStart.error().Code == SceneRuntimeErrorCode::NotRunning);
+		PF_CHECK(Tests, CoordinatedRuntime.Start(CoordinatedScene).has_value());
+		PF_CHECK(Tests, CoordinatedRuntime.IsRunning());
+		const auto DuplicateRuntimeStart = CoordinatedRuntime.Start(CoordinatedScene);
+		PF_CHECK(Tests, !DuplicateRuntimeStart && DuplicateRuntimeStart.error().Code == SceneRuntimeErrorCode::AlreadyRunning);
+		const auto CoordinatedNegativeDelta = CoordinatedRuntime.Advance(CoordinatedScene, Timestep(-0.1));
+		PF_CHECK(Tests,
+			!CoordinatedNegativeDelta && CoordinatedNegativeDelta.error().Code == SceneRuntimeErrorCode::InvalidDeltaTime);
+		const auto CoordinatedUpdate = CoordinatedRuntime.Advance(CoordinatedScene, Timestep(0.25));
+		PF_CHECK(Tests, CoordinatedUpdate && CoordinatedUpdate->PhysicsSteps == 2);
+		const auto CoordinatedTransform = CoordinatedScriptEntity->GetTransform();
+		const auto PhysicsTransform = CoordinatedPhysicsEntity->GetTransform();
+		PF_CHECK(Tests, CoordinatedTransform && std::abs(CoordinatedTransform->Translation.x - 0.25f) < 0.0001f);
+		PF_CHECK(Tests, PhysicsTransform && PhysicsTransform->Translation.y < 0.0f);
+		Scene OtherRuntimeScene;
+		const auto WrongRuntimeScene = CoordinatedRuntime.Advance(OtherRuntimeScene, Timestep(0.1));
+		PF_CHECK(Tests, !WrongRuntimeScene && WrongRuntimeScene.error().Code == SceneRuntimeErrorCode::DifferentScene);
+		CoordinatedRuntime.Stop();
+		PF_CHECK(Tests, !CoordinatedRuntime.IsRunning());
+		const auto CoordinatedStoppedTransform = CoordinatedScriptEntity->GetTransform();
+		PF_CHECK(Tests,
+			CoordinatedStoppedTransform && CoordinatedStoppedTransform->Translation.x == -1.0f);
+
+		Scene RollbackScene;
+		const auto RollbackScriptEntity = RollbackScene.CreateEntity("Rollback script");
+		const auto IncompletePhysicsEntity = RollbackScene.CreateEntity("Incomplete physics entity");
+		PF_CHECK(Tests, RollbackScriptEntity && IncompletePhysicsEntity);
+		if (!RollbackScriptEntity || !IncompletePhysicsEntity)
+			return;
+		PF_CHECK(Tests, RollbackScriptEntity->SetScript(ScriptComponent{ TransformScriptAsset->ID }).has_value());
+		PF_CHECK(Tests, IncompletePhysicsEntity->SetRigidbody(RigidbodyComponent{}).has_value());
+		SceneRuntime RollbackRuntime(*ProjectResult, RuntimeDescription);
+		const auto FailedRuntimeStart = RollbackRuntime.Start(RollbackScene);
+		PF_CHECK(Tests,
+			!FailedRuntimeStart && FailedRuntimeStart.error().Subsystem == SceneRuntimeSubsystem::Physics);
+		PF_CHECK(Tests, !RollbackRuntime.IsRunning());
+		const auto RolledBackTransform = RollbackScriptEntity->GetTransform();
+		PF_CHECK(Tests, RolledBackTransform && RolledBackTransform->Translation.x == -1.0f);
 
 		constexpr std::string_view SyntaxErrorScript = "function OnUpdate(\n";
 		const auto SyntaxErrorAsset = CreateScriptAsset("syntax_error.lua", SyntaxErrorScript);
