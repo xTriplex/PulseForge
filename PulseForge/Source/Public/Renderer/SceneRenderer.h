@@ -3,6 +3,7 @@
 #include "Core/Core.h"
 #include "Renderer/Graphics.h"
 #include "Renderer/Binding.h"
+#include "Renderer/RenderTarget.h"
 #include "Scene/SceneRenderSnapshot.h"
 
 #include <expected>
@@ -62,12 +63,18 @@ namespace PulseForge
 			const Scene& Source,
 			float AspectRatio);
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene();
+		// Begins, clears, renders to, and ends Target during the active Application frame.
+		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene(
+			const RenderTarget& Target,
+			const RenderTargetClearValue& ClearValue = {});
 
 	private:
 		SceneRenderer(Application& Runtime, const Project& SourceProject);
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
 			const std::filesystem::path& CompiledShaderDirectory);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureMaterialBindings(const AssetID& MaterialAsset);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePipeline(ColorTargetFormat ColorFormat);
+		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedSceneForFormat(ColorTargetFormat ColorFormat);
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareSnapshot(
 			std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot);
 
@@ -88,7 +95,7 @@ namespace PulseForge
 		BindingLayoutHandle m_BindingLayout;
 		BufferHandle m_TransformBuffer;
 		std::unordered_map<AssetID, MaterialBindingResources, UUIDHash> m_MaterialBindings;
-		GraphicsPipelineHandle m_Pipeline;
+		std::unordered_map<ColorTargetFormat, GraphicsPipelineHandle> m_Pipelines;
 		std::optional<VertexLayoutDesc> m_PipelineVertexLayout;
 		std::optional<SceneRenderSnapshot> m_PreparedSnapshot;
 	};

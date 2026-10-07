@@ -14,6 +14,7 @@
 #include <fstream>
 #include <iterator>
 #include <span>
+#include <exception>
 
 namespace PulseForge
 {
@@ -80,6 +81,54 @@ namespace PulseForge
 		{
 			return { SceneRendererErrorCode::ResourceCreationFailed, {}, {}, std::move(Message) };
 		}
+
+		SceneRendererError MakeDrawError(std::string Message)
+		{
+			return { SceneRendererErrorCode::DrawFailed, {}, {}, std::move(Message) };
+		}
+
+		class RenderTargetFrameScope final
+		{
+		public:
+			explicit RenderTargetFrameScope(Application& Runtime)
+				: m_Runtime(Runtime)
+			{
+			}
+
+			RenderTargetFrameScope(const RenderTargetFrameScope&) = delete;
+			RenderTargetFrameScope& operator=(const RenderTargetFrameScope&) = delete;
+
+			~RenderTargetFrameScope() noexcept
+			{
+				if (!m_Active)
+					return;
+
+				try
+				{
+					const GraphicsResult EndResult = m_Runtime.EndRenderTarget();
+					if (!EndResult)
+						PF_CORE_ERROR("Could not close render target during scene-renderer unwinding: {0}", EndResult.error().Message);
+				}
+				catch (const std::exception& Exception)
+				{
+					PF_CORE_ERROR("Exception while closing render target during scene-renderer unwinding: {0}", Exception.what());
+				}
+				catch (...)
+				{
+					PF_CORE_ERROR("Unknown exception while closing render target during scene-renderer unwinding");
+				}
+			}
+
+			GraphicsResult End()
+			{
+				m_Active = false;
+				return m_Runtime.EndRenderTarget();
+			}
+
+		private:
+			Application& m_Runtime;
+			bool m_Active = true;
+		};
 	}
 
 	SceneRenderer::SceneRenderer(Application& Runtime, const Project& SourceProject)
@@ -308,37 +357,87 @@ namespace PulseForge
 					"Scene mesh vertex layout differs from the layout used to create the renderer pipeline"
 				});
 			}
-			if (!m_Pipeline)
-			{
-				GraphicsPipelineDesc PipelineDescription;
-				PipelineDescription.VertexShader = m_VertexShader;
-				PipelineDescription.FragmentShader = m_FragmentShader;
-				PipelineDescription.BindingLayouts = { m_BindingLayout };
-				PipelineDescription.VertexLayout = *SceneVertexLayout;
-				PipelineDescription.Rasterizer.Cull = CullMode::None;
-				PipelineDescription.Depth.TestEnabled = true;
-				PipelineDescription.Depth.WriteEnabled = true;
-				PipelineDescription.Depth.Compare = DepthCompareOperation::Less;
-				PipelineDescription.DebugName = "PulseForge scene pipeline";
-				auto Pipeline = m_Runtime.CreateGraphicsPipeline(PipelineDescription);
-				if (!Pipeline)
-					return std::unexpected(MakeResourceError("Could not create scene graphics pipeline: " + Pipeline.error().Message));
-				m_Pipeline = std::move(Pipeline.value());
-				m_PipelineVertexLayout = std::move(SceneVertexLayout);
-				PF_CORE_INFO("Created scene pipeline for vertex stride {0}", m_PipelineVertexLayout->Stride);
-			}
+			if (!m_PipelineVertexLayout)
+				m_PipelineVertexLayout = *SceneVertexLayout;
+			if (auto Pipeline = EnsurePipeline(ColorTargetFormat::Swapchain); !Pipeline)
+				return std::unexpected(std::move(Pipeline.error()));
 		}
 
 		m_PreparedSnapshot = std::move(*Snapshot);
 		return {};
 	}
 
+	std::expected<void, SceneRendererError> SceneRenderer::EnsurePipeline(ColorTargetFormat ColorFormat)
+	{
+		if (m_Pipelines.contains(ColorFormat))
+			return {};
+		if (!m_PipelineVertexLayout)
+			return std::unexpected(MakeResourceError("Cannot create a scene pipeline before a mesh vertex layout is prepared"));
+
+		GraphicsPipelineDesc PipelineDescription;
+		PipelineDescription.VertexShader = m_VertexShader;
+		PipelineDescription.FragmentShader = m_FragmentShader;
+		PipelineDescription.BindingLayouts = { m_BindingLayout };
+		PipelineDescription.VertexLayout = *m_PipelineVertexLayout;
+		PipelineDescription.ColorFormat = ColorFormat;
+		PipelineDescription.Rasterizer.Cull = CullMode::None;
+		PipelineDescription.Depth.TestEnabled = true;
+		PipelineDescription.Depth.WriteEnabled = true;
+		PipelineDescription.Depth.Compare = DepthCompareOperation::Less;
+		PipelineDescription.DebugName = "PulseForge scene pipeline";
+		auto Pipeline = m_Runtime.CreateGraphicsPipeline(PipelineDescription);
+		if (!Pipeline)
+			return std::unexpected(MakeResourceError("Could not create scene graphics pipeline: " + Pipeline.error().Message));
+
+		m_Pipelines.emplace(ColorFormat, std::move(Pipeline.value()));
+		PF_CORE_INFO("Created scene pipeline for vertex stride {0} and color format {1}",
+			m_PipelineVertexLayout->Stride,
+			static_cast<uint32_t>(ColorFormat));
+		return {};
+	}
+
 	std::expected<size_t, SceneRendererError> SceneRenderer::RenderPreparedScene()
+	{
+		return RenderPreparedSceneForFormat(ColorTargetFormat::Swapchain);
+	}
+
+	std::expected<size_t, SceneRendererError> SceneRenderer::RenderPreparedScene(
+		const RenderTarget& Target,
+		const RenderTargetClearValue& ClearValue)
+	{
+		const ColorTargetFormat ColorFormat = Target.GetDescription().ColorFormat;
+		if (m_PreparedSnapshot && !m_PreparedSnapshot->Meshes.empty())
+		{
+			if (auto Pipeline = EnsurePipeline(ColorFormat); !Pipeline)
+				return std::unexpected(std::move(Pipeline.error()));
+		}
+
+		const GraphicsResult BeginResult = m_Runtime.BeginRenderTarget(Target, ClearValue);
+		if (!BeginResult)
+			return std::unexpected(MakeDrawError("Could not begin scene render target: " + BeginResult.error().Message));
+
+		RenderTargetFrameScope TargetScope(m_Runtime);
+		auto Rendered = RenderPreparedSceneForFormat(ColorFormat);
+		const GraphicsResult EndResult = TargetScope.End();
+		if (!Rendered)
+		{
+			if (!EndResult)
+				PF_CORE_ERROR("Could not close scene render target after draw failure: {0}", EndResult.error().Message);
+			return std::unexpected(std::move(Rendered.error()));
+		}
+		if (!EndResult)
+			return std::unexpected(MakeDrawError("Could not end scene render target: " + EndResult.error().Message));
+
+		return Rendered;
+	}
+
+	std::expected<size_t, SceneRendererError> SceneRenderer::RenderPreparedSceneForFormat(ColorTargetFormat ColorFormat)
 	{
 		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty())
 			return size_t{ 0 };
-		if (!m_Pipeline)
-			return std::unexpected(MakeResourceError("Scene has mesh instances but the graphics pipeline is unavailable"));
+		if (auto Pipeline = EnsurePipeline(ColorFormat); !Pipeline)
+			return std::unexpected(std::move(Pipeline.error()));
+		const GraphicsPipeline& ScenePipeline = *m_Pipelines.at(ColorFormat);
 
 		size_t SubmittedDraws = 0;
 		for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
@@ -381,7 +480,7 @@ namespace PulseForge
 
 			const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
 			const std::array<const BindingSet*, 1> BindingSets = { Binding->second.BindingSet.get() };
-			const GraphicsResult Draw = m_Runtime.DrawIndexed(*m_Pipeline, Mesh->get(), Arguments, BindingSets);
+			const GraphicsResult Draw = m_Runtime.DrawIndexed(ScenePipeline, Mesh->get(), Arguments, BindingSets);
 			if (!Draw)
 			{
 				return std::unexpected(SceneRendererError{
