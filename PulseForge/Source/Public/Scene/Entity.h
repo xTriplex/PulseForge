@@ -22,11 +22,12 @@ namespace PulseForge
 	namespace Detail
 	{
 		struct SceneStorage;
+		struct EntityIncarnation;
 	}
 
 	class Scene;
 
-	// A non-owning reference. It becomes invalid when its entity or owning Scene is destroyed.
+	// A non-owning reference to one entity incarnation. It becomes invalid when that entity or its Scene is destroyed.
 	class PULSEFORGE_API Entity final
 	{
 	public:
@@ -71,9 +72,13 @@ namespace PulseForge
 
 	private:
 		friend class Scene;
-		Entity(std::weak_ptr<Detail::SceneStorage> Storage, UUID Identifier);
+		Entity(
+			std::weak_ptr<Detail::SceneStorage> Storage,
+			UUID Identifier,
+			std::weak_ptr<Detail::EntityIncarnation> Incarnation);
 
 		std::weak_ptr<Detail::SceneStorage> m_Storage;
 		UUID m_UUID;
+		std::weak_ptr<Detail::EntityIncarnation> m_Incarnation;
 	};
 }

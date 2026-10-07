@@ -13,6 +13,13 @@
 
 namespace PulseForge::Detail
 {
+	struct EntityIncarnation final {};
+
+	struct EntityIncarnationComponent
+	{
+		std::shared_ptr<EntityIncarnation> Value;
+	};
+
 	struct HierarchyComponent
 	{
 		std::optional<UUID> Parent;
@@ -41,6 +48,23 @@ namespace PulseForge
 			if (It == Storage.Entities.end() || !Storage.Registry.valid(It->second))
 				return std::nullopt;
 			return It->second;
+		}
+
+		std::optional<entt::entity> ResolveEntity(
+			const Detail::SceneStorage& Storage,
+			UUID Identifier,
+			const std::weak_ptr<Detail::EntityIncarnation>& Incarnation)
+		{
+			const auto Native = ResolveEntity(Storage, Identifier);
+			const auto HandleIncarnation = Incarnation.lock();
+			if (!Native || !HandleIncarnation)
+				return std::nullopt;
+
+			const auto& CurrentIncarnation = Storage.Registry.get<Detail::EntityIncarnationComponent>(*Native).Value;
+			if (!CurrentIncarnation || CurrentIncarnation.owner_before(HandleIncarnation) ||
+				HandleIncarnation.owner_before(CurrentIncarnation))
+				return std::nullopt;
+			return Native;
 		}
 
 		std::expected<void, SceneError> SetParentInStorage(
@@ -149,10 +173,12 @@ namespace PulseForge
 		entt::entity Native = entt::null;
 		try
 		{
+			auto Incarnation = std::make_shared<Detail::EntityIncarnation>();
 			Native = m_Storage->Registry.create();
 			m_Storage->Registry.emplace<TagComponent>(Native, TagComponent{ std::move(Name) });
 			m_Storage->Registry.emplace<TransformComponent>(Native);
 			m_Storage->Registry.emplace<Detail::HierarchyComponent>(Native);
+			m_Storage->Registry.emplace<Detail::EntityIncarnationComponent>(Native, std::move(Incarnation));
 
 			const auto [Iterator, Inserted] = m_Storage->Entities.emplace(Identifier, Native);
 			(void)Iterator;
@@ -161,7 +187,10 @@ namespace PulseForge
 				m_Storage->Registry.destroy(Native);
 				return std::unexpected(MakeSceneError(SceneErrorCode::DuplicateUUID, "An entity with this UUID already exists in the scene"));
 			}
-			return Entity{ m_Storage, Identifier };
+			return Entity{
+				m_Storage,
+				Identifier,
+				m_Storage->Registry.get<Detail::EntityIncarnationComponent>(Native).Value };
 		}
 		catch (const std::exception& Exception)
 		{
@@ -203,7 +232,9 @@ namespace PulseForge
 		}
 		if (Camera->has_value())
 		{
-			if (auto CameraResult = Duplicated->SetCamera(Camera->value()); !CameraResult)
+			CameraComponent ClonedCamera = Camera->value();
+			ClonedCamera.IsPrimary = false;
+			if (auto CameraResult = Duplicated->SetCamera(ClonedCamera); !CameraResult)
 			{
 				(void)DestroyEntity(*Duplicated);
 				return std::unexpected(CameraResult.error());
@@ -243,7 +274,9 @@ namespace PulseForge
 		}
 		if (AudioListener->has_value())
 		{
-			if (auto AudioListenerResult = Duplicated->SetAudioListener(AudioListener->value()); !AudioListenerResult)
+			AudioListenerComponent ClonedListener = AudioListener->value();
+			ClonedListener.IsPrimary = false;
+			if (auto AudioListenerResult = Duplicated->SetAudioListener(ClonedListener); !AudioListenerResult)
 			{
 				(void)DestroyEntity(*Duplicated);
 				return std::unexpected(AudioListenerResult.error());
@@ -310,9 +343,10 @@ namespace PulseForge
 
 	std::optional<Entity> Scene::FindEntity(UUID Identifier) const
 	{
-		if (!ResolveEntity(*m_Storage, Identifier))
+		const auto Native = ResolveEntity(*m_Storage, Identifier);
+		if (!Native)
 			return std::nullopt;
-		return Entity{ m_Storage, Identifier };
+		return Entity{ m_Storage, Identifier, m_Storage->Registry.get<Detail::EntityIncarnationComponent>(*Native).Value };
 	}
 
 	std::vector<Entity> Scene::GetEntities() const
@@ -322,7 +356,10 @@ namespace PulseForge
 		for (const auto& [Identifier, Native] : m_Storage->Entities)
 		{
 			if (m_Storage->Registry.valid(Native))
-				Entities.push_back(Entity{ m_Storage, Identifier });
+				Entities.push_back(Entity{
+					m_Storage,
+					Identifier,
+					m_Storage->Registry.get<Detail::EntityIncarnationComponent>(Native).Value });
 		}
 		std::sort(Entities.begin(), Entities.end(), [](const Entity& First, const Entity& Second)
 		{
@@ -336,21 +373,24 @@ namespace PulseForge
 		return m_Storage->Entities.size();
 	}
 
-	Entity::Entity(std::weak_ptr<Detail::SceneStorage> Storage, UUID Identifier)
-		: m_Storage(std::move(Storage)), m_UUID(Identifier)
+	Entity::Entity(
+		std::weak_ptr<Detail::SceneStorage> Storage,
+		UUID Identifier,
+		std::weak_ptr<Detail::EntityIncarnation> Incarnation)
+		: m_Storage(std::move(Storage)), m_UUID(Identifier), m_Incarnation(std::move(Incarnation))
 	{
 	}
 
 	bool Entity::IsValid() const noexcept
 	{
 		const auto Storage = m_Storage.lock();
-		return Storage && !m_UUID.IsNil() && ResolveEntity(*Storage, m_UUID).has_value();
+		return Storage && !m_UUID.IsNil() && ResolveEntity(*Storage, m_UUID, m_Incarnation).has_value();
 	}
 
 	std::expected<TagComponent, SceneError> Entity::GetTag() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read the tag of an invalid entity"));
 		return Storage->Registry.get<TagComponent>(*Native);
@@ -359,7 +399,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::SetTag(TagComponent Tag) const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot set the tag of an invalid entity"));
 
@@ -377,7 +417,7 @@ namespace PulseForge
 	std::expected<TransformComponent, SceneError> Entity::GetTransform() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read the transform of an invalid entity"));
 		return Storage->Registry.get<TransformComponent>(*Native);
@@ -386,7 +426,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::SetTransform(const TransformComponent& Transform) const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot set the transform of an invalid entity"));
 
@@ -412,7 +452,7 @@ namespace PulseForge
 	std::expected<std::optional<CameraComponent>, SceneError> Entity::GetCamera() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read the camera component of an invalid entity"));
 		if (!Storage->Registry.all_of<CameraComponent>(*Native))
@@ -423,7 +463,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::SetCamera(const CameraComponent& Camera) const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add a camera component to an invalid entity"));
 
@@ -450,7 +490,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::RemoveCamera() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove a camera component from an invalid entity"));
 		if (!Storage->Registry.all_of<CameraComponent>(*Native))
@@ -463,7 +503,7 @@ namespace PulseForge
 	std::expected<std::optional<MeshRendererComponent>, SceneError> Entity::GetMeshRenderer() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read the mesh renderer of an invalid entity"));
 		if (!Storage->Registry.all_of<MeshRendererComponent>(*Native))
@@ -474,7 +514,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::SetMeshRenderer(const MeshRendererComponent& MeshRenderer) const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add a mesh renderer to an invalid entity"));
 		if (MeshRenderer.MeshAsset.IsNil())
@@ -502,7 +542,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::RemoveMeshRenderer() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(
 				SceneErrorCode::InvalidEntity,
@@ -517,7 +557,7 @@ namespace PulseForge
 	std::expected<std::optional<RigidbodyComponent>, SceneError> Entity::GetRigidbody() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read the rigidbody of an invalid entity"));
 		if (!Storage->Registry.all_of<RigidbodyComponent>(*Native))
@@ -528,7 +568,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::SetRigidbody(const RigidbodyComponent& Rigidbody) const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add a rigidbody to an invalid entity"));
 		if (auto Validation = Rigidbody.Validate(); !Validation)
@@ -550,7 +590,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::RemoveRigidbody() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove a rigidbody from an invalid entity"));
 		if (!Storage->Registry.all_of<RigidbodyComponent>(*Native))
@@ -563,7 +603,7 @@ namespace PulseForge
 	std::expected<std::optional<BoxColliderComponent>, SceneError> Entity::GetBoxCollider() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read the box collider of an invalid entity"));
 		if (!Storage->Registry.all_of<BoxColliderComponent>(*Native))
@@ -574,7 +614,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::SetBoxCollider(const BoxColliderComponent& Collider) const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add a box collider to an invalid entity"));
 		if (auto Validation = Collider.Validate(); !Validation)
@@ -596,7 +636,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::RemoveBoxCollider() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove a box collider from an invalid entity"));
 		if (!Storage->Registry.all_of<BoxColliderComponent>(*Native))
@@ -609,7 +649,7 @@ namespace PulseForge
 	std::expected<std::optional<AudioSourceComponent>, SceneError> Entity::GetAudioSource() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read audio source from an invalid entity"));
 		if (!Storage->Registry.all_of<AudioSourceComponent>(*Native))
@@ -620,7 +660,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::SetAudioSource(const AudioSourceComponent& AudioSource) const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add audio source to an invalid entity"));
 		if (auto Validation = AudioSource.Validate(); !Validation)
@@ -642,7 +682,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::RemoveAudioSource() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove audio source from an invalid entity"));
 		if (!Storage->Registry.all_of<AudioSourceComponent>(*Native))
@@ -655,7 +695,7 @@ namespace PulseForge
 	std::expected<std::optional<AudioListenerComponent>, SceneError> Entity::GetAudioListener() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read audio listener from an invalid entity"));
 		if (!Storage->Registry.all_of<AudioListenerComponent>(*Native))
@@ -666,7 +706,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::SetAudioListener(const AudioListenerComponent& AudioListener) const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add audio listener to an invalid entity"));
 
@@ -686,7 +726,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::RemoveAudioListener() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove audio listener from an invalid entity"));
 		if (!Storage->Registry.all_of<AudioListenerComponent>(*Native))
@@ -699,7 +739,7 @@ namespace PulseForge
 	std::expected<std::optional<ScriptComponent>, SceneError> Entity::GetScript() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read script from an invalid entity"));
 		if (!Storage->Registry.all_of<ScriptComponent>(*Native))
@@ -710,7 +750,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::SetScript(const ScriptComponent& Script) const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot add a script to an invalid entity"));
 		if (auto Validation = Script.Validate(); !Validation)
@@ -732,7 +772,7 @@ namespace PulseForge
 	std::expected<void, SceneError> Entity::RemoveScript() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove a script from an invalid entity"));
 		if (!Storage->Registry.all_of<ScriptComponent>(*Native))
@@ -745,7 +785,7 @@ namespace PulseForge
 	std::expected<glm::mat4, SceneError> Entity::GetWorldMatrix() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot compute the transform of an invalid entity"));
 
@@ -769,23 +809,27 @@ namespace PulseForge
 	std::expected<std::optional<Entity>, SceneError> Entity::GetParent() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read the parent of an invalid entity"));
 
 		const std::optional<UUID> ParentIdentifier = Storage->Registry.get<Detail::HierarchyComponent>(*Native).Parent;
 		if (!ParentIdentifier)
 			return std::optional<Entity>{};
-		if (!ResolveEntity(*Storage, *ParentIdentifier))
+		const auto ParentNative = ResolveEntity(*Storage, *ParentIdentifier);
+		if (!ParentNative)
 			return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure, "Hierarchy references a parent that no longer exists"));
 
-		return std::optional<Entity>{ Entity{ Storage, *ParentIdentifier } };
+		return std::optional<Entity>{ Entity{
+			Storage,
+			*ParentIdentifier,
+			Storage->Registry.get<Detail::EntityIncarnationComponent>(*ParentNative).Value } };
 	}
 
 	std::expected<std::vector<Entity>, SceneError> Entity::GetChildren() const
 	{
 		const auto Storage = m_Storage.lock();
-		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID) : std::nullopt;
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
 		if (!Native)
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read the children of an invalid entity"));
 
@@ -794,9 +838,13 @@ namespace PulseForge
 		Children.reserve(ChildIdentifiers.size());
 		for (const UUID ChildIdentifier : ChildIdentifiers)
 		{
-			if (!ResolveEntity(*Storage, ChildIdentifier))
+			const auto ChildNative = ResolveEntity(*Storage, ChildIdentifier);
+			if (!ChildNative)
 				return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure, "Hierarchy references a child that no longer exists"));
-			Children.push_back(Entity{ Storage, ChildIdentifier });
+			Children.push_back(Entity{
+				Storage,
+				ChildIdentifier,
+				Storage->Registry.get<Detail::EntityIncarnationComponent>(*ChildNative).Value });
 		}
 		return Children;
 	}
@@ -825,6 +873,8 @@ namespace PulseForge
 	{
 		return First.m_UUID == Second.m_UUID &&
 			!First.m_Storage.owner_before(Second.m_Storage) &&
-			!Second.m_Storage.owner_before(First.m_Storage);
+			!Second.m_Storage.owner_before(First.m_Storage) &&
+			!First.m_Incarnation.owner_before(Second.m_Incarnation) &&
+			!Second.m_Incarnation.owner_before(First.m_Incarnation);
 	}
 }

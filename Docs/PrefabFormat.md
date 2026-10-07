@@ -26,7 +26,7 @@
 }
 ```
 
-The root's parent outside the captured subtree is omitted. Instantiation creates new entity UUIDs and reconstructs hierarchy while retaining component asset UUIDs, so multiple instances can reference the same mesh and optional material assets. Asset paths and prefab inheritance/overrides are not stored in this format.
+The root's parent outside the captured subtree is omitted. Instantiation creates new entity UUIDs and reconstructs hierarchy while retaining component asset UUIDs, so multiple instances can reference the same mesh and optional material assets. Primary camera and audio-listener flags are scene-local roles: prefab capture and instantiation clear those flags so a prefab instance cannot silently create another primary. Asset paths and prefab inheritance/overrides are not stored in this format.
 
 The current serializer preserves tag, transform, camera, mesh-renderer, rigidbody, box-collider, audio, and script components. Embedded scene versions 1 through 7 are readable. Scene format version 7 added optional script attachments; older embedded scenes remain readable. New scene components must be added to scene and prefab serialization together.
 

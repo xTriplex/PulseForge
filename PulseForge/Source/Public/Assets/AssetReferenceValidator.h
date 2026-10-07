@@ -14,7 +14,8 @@ namespace PulseForge
 	{
 		Mesh,
 		Material,
-		Script
+		Script,
+		Audio
 	};
 
 	enum class AssetReferenceIssueCode : uint8_t

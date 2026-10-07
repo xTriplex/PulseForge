@@ -779,7 +779,9 @@ namespace
 		PF_CHECK(Tests, ParentChildrenAfterReparent && ParentChildrenAfterReparent->size() == 2);
 		CameraComponent DuplicateCamera;
 		DuplicateCamera.VerticalFieldOfViewRadians = 1.0f;
+		DuplicateCamera.IsPrimary = true;
 		PF_CHECK(Tests, Child.SetCamera(DuplicateCamera).has_value());
+		PF_CHECK(Tests, Child.SetAudioListener(AudioListenerComponent{ true }).has_value());
 		const AssetID DuplicateMeshAsset{ 0x4000000000000000ull, 4 };
 		PF_CHECK(Tests, Child.SetMeshRenderer(MeshRendererComponent{ DuplicateMeshAsset }).has_value());
 		const auto InvalidMeshRenderer = Child.SetMeshRenderer(MeshRendererComponent{ UUID{} });
@@ -794,13 +796,20 @@ namespace
 			const auto DuplicateTag = Duplicate.GetTag();
 			const auto DuplicateTransform = Duplicate.GetTransform();
 			const auto DuplicatedCamera = Duplicate.GetCamera();
+			const auto DuplicatedListener = Duplicate.GetAudioListener();
+			const auto OriginalCamera = Child.GetCamera();
+			const auto OriginalListener = Child.GetAudioListener();
 			const auto DuplicatedMeshRenderer = Duplicate.GetMeshRenderer();
 			const auto DuplicateParent = Duplicate.GetParent();
 			PF_CHECK(Tests, Duplicate.GetUUID() != Child.GetUUID());
 			PF_CHECK(Tests, DuplicateTag && DuplicateTag->Name == "Renamed child Copy");
 			PF_CHECK(Tests, DuplicateTransform && glm::all(glm::equal(DuplicateTransform->Translation, ChildTransform.Translation)));
 			PF_CHECK(Tests, DuplicatedCamera && DuplicatedCamera->has_value() &&
-				DuplicatedCamera->value().VerticalFieldOfViewRadians == DuplicateCamera.VerticalFieldOfViewRadians);
+				DuplicatedCamera->value().VerticalFieldOfViewRadians == DuplicateCamera.VerticalFieldOfViewRadians &&
+				!DuplicatedCamera->value().IsPrimary);
+			PF_CHECK(Tests, OriginalCamera && OriginalCamera->has_value() && OriginalCamera->value().IsPrimary);
+			PF_CHECK(Tests, DuplicatedListener && DuplicatedListener->has_value() && !DuplicatedListener->value().IsPrimary);
+			PF_CHECK(Tests, OriginalListener && OriginalListener->has_value() && OriginalListener->value().IsPrimary);
 			PF_CHECK(Tests, DuplicatedMeshRenderer && DuplicatedMeshRenderer->has_value() &&
 				DuplicatedMeshRenderer->value().MeshAsset == DuplicateMeshAsset);
 			PF_CHECK(Tests, DuplicateParent && DuplicateParent->has_value() && **DuplicateParent == Parent);
@@ -811,6 +820,25 @@ namespace
 			PF_CHECK(Tests, !MissingMeshRendererRemoval.has_value());
 			PF_CHECK(Tests, !MissingMeshRendererRemoval &&
 				MissingMeshRendererRemoval.error().Code == SceneErrorCode::MissingComponent);
+		}
+
+		Scene NonPrimaryScene;
+		auto NonPrimarySource = NonPrimaryScene.CreateEntity("Non-primary camera");
+		PF_CHECK(Tests, NonPrimarySource.has_value());
+		if (NonPrimarySource)
+		{
+			CameraComponent NonPrimaryCamera;
+			PF_CHECK(Tests, NonPrimarySource->SetCamera(NonPrimaryCamera).has_value());
+			PF_CHECK(Tests, NonPrimarySource->SetAudioListener(AudioListenerComponent{ false }).has_value());
+			auto NonPrimaryDuplicate = NonPrimaryScene.DuplicateEntity(*NonPrimarySource);
+			PF_CHECK(Tests, NonPrimaryDuplicate.has_value());
+			if (NonPrimaryDuplicate)
+			{
+				const auto CopiedCamera = NonPrimaryDuplicate->GetCamera();
+				const auto CopiedListener = NonPrimaryDuplicate->GetAudioListener();
+				PF_CHECK(Tests, CopiedCamera && CopiedCamera->has_value() && !CopiedCamera->value().IsPrimary);
+				PF_CHECK(Tests, CopiedListener && CopiedListener->has_value() && !CopiedListener->value().IsPrimary);
+			}
 		}
 
 		Scene OtherScene;
@@ -1115,7 +1143,7 @@ namespace
 		}
 	}
 
-	void TestEntityHandlesExpireWithScene(TestRunner& Tests)
+	void TestEntityHandleIdentityAndLifetime(TestRunner& Tests)
 	{
 		using namespace PulseForge;
 		Entity StaleHandle;
@@ -1128,7 +1156,68 @@ namespace
 			PF_CHECK(Tests, StaleHandle.IsValid());
 		}
 		PF_CHECK(Tests, !StaleHandle.IsValid());
-		PF_CHECK(Tests, !StaleHandle.GetTag().has_value());
+		const auto DestroyedSceneTag = StaleHandle.GetTag();
+		PF_CHECK(Tests, !DestroyedSceneTag && DestroyedSceneTag.error().Code == SceneErrorCode::InvalidEntity);
+
+		Scene ReuseScene;
+		const UUID ReusedIdentifier{ 0x6f00000000000000ull, 42 };
+		auto Original = ReuseScene.CreateEntityWithUUID(ReusedIdentifier, "Original incarnation");
+		PF_CHECK(Tests, Original.has_value());
+		if (!Original)
+			return;
+
+		const Entity OldHandle = *Original;
+		PF_CHECK(Tests, OldHandle.IsValid());
+		PF_CHECK(Tests, ReuseScene.DestroyEntity(OldHandle).has_value());
+		PF_CHECK(Tests, !OldHandle.IsValid());
+		PF_CHECK(Tests, !ReuseScene.FindEntity(ReusedIdentifier).has_value());
+		const auto DestroyedTag = OldHandle.GetTag();
+		PF_CHECK(Tests, !DestroyedTag && DestroyedTag.error().Code == SceneErrorCode::InvalidEntity);
+		const auto DestroyedTransform = OldHandle.GetTransform();
+		PF_CHECK(Tests, !DestroyedTransform && DestroyedTransform.error().Code == SceneErrorCode::InvalidEntity);
+		const auto StaleTagSet = OldHandle.SetTag(TagComponent{ "Must not reach replacement" });
+		PF_CHECK(Tests, !StaleTagSet && StaleTagSet.error().Code == SceneErrorCode::InvalidEntity);
+		const auto StaleTransformSet = OldHandle.SetTransform(TransformComponent{});
+		PF_CHECK(Tests, !StaleTransformSet && StaleTransformSet.error().Code == SceneErrorCode::InvalidEntity);
+		const auto StaleDestroy = ReuseScene.DestroyEntity(OldHandle);
+		PF_CHECK(Tests, !StaleDestroy && StaleDestroy.error().Code == SceneErrorCode::InvalidEntity);
+
+		auto Replacement = ReuseScene.CreateEntityWithUUID(ReusedIdentifier, "Replacement incarnation");
+		PF_CHECK(Tests, Replacement.has_value());
+		if (!Replacement)
+			return;
+		const Entity NewHandle = *Replacement;
+		PF_CHECK(Tests, NewHandle.IsValid());
+		PF_CHECK(Tests, OldHandle.GetUUID() == NewHandle.GetUUID());
+		PF_CHECK(Tests, OldHandle != NewHandle);
+		PF_CHECK(Tests, !OldHandle.IsValid());
+		PF_CHECK(Tests, ReuseScene.FindEntity(ReusedIdentifier) == NewHandle);
+		const auto ReplacementTag = NewHandle.GetTag();
+		PF_CHECK(Tests, ReplacementTag && ReplacementTag->Name == "Replacement incarnation");
+		const auto StillStaleTag = OldHandle.GetTag();
+		PF_CHECK(Tests, !StillStaleTag && StillStaleTag.error().Code == SceneErrorCode::InvalidEntity);
+		PF_CHECK(Tests, NewHandle.SetTag(TagComponent{ "Replacement works" }).has_value());
+		const auto UpdatedReplacementTag = NewHandle.GetTag();
+		PF_CHECK(Tests, UpdatedReplacementTag && UpdatedReplacementTag->Name == "Replacement works");
+
+		PF_CHECK(Tests, ReuseScene.DestroyEntity(NewHandle).has_value());
+		bool ReusePreservedStaleHandle = true;
+		// Exercise beyond EnTT's current packed-entity generation cycle for one repeatedly reused slot.
+		for (uint32_t Reuse = 0; Reuse < 5000; ++Reuse)
+		{
+			auto RecycledEntity = ReuseScene.CreateEntityWithUUID(ReusedIdentifier, "Recycled incarnation");
+			if (!RecycledEntity)
+			{
+				ReusePreservedStaleHandle = false;
+				break;
+			}
+			if (!RecycledEntity->IsValid() || OldHandle.IsValid() || !ReuseScene.DestroyEntity(*RecycledEntity))
+			{
+				ReusePreservedStaleHandle = false;
+				break;
+			}
+		}
+		PF_CHECK(Tests, ReusePreservedStaleHandle);
 	}
 
 	void TestSceneRenderSnapshot(TestRunner& Tests)
@@ -1198,6 +1287,16 @@ namespace
 		PF_CHECK(Tests, glm::abs(Snapshot->Meshes[2].WorldTransform[3].y + 1.0f) < 0.0001f);
 		const glm::vec4 CameraPositionClip = Snapshot->ViewProjection * glm::vec4(CameraTransform.Translation, 1.0f);
 		PF_CHECK(Tests, glm::abs(CameraPositionClip.x) < 0.0001f && glm::abs(CameraPositionClip.y) < 0.0001f);
+		auto DuplicatedCamera = TestScene.DuplicateEntity(*Camera);
+		PF_CHECK(Tests, DuplicatedCamera.has_value());
+		if (DuplicatedCamera)
+		{
+			const auto DuplicateCameraComponent = DuplicatedCamera->GetCamera();
+			PF_CHECK(Tests, DuplicateCameraComponent && DuplicateCameraComponent->has_value() &&
+				!DuplicateCameraComponent->value().IsPrimary);
+			const auto SnapshotAfterCameraDuplication = SceneRenderSnapshotBuilder::Build(TestScene, 16.0f / 9.0f);
+			PF_CHECK(Tests, SnapshotAfterCameraDuplication && SnapshotAfterCameraDuplication->CameraEntity == CameraID);
+		}
 
 		const auto NilCamera = SceneRenderSnapshotBuilder::Build(TestScene, UUID{}, 1.0f);
 		PF_CHECK(Tests, !NilCamera && NilCamera.error().Code == SceneRenderSnapshotErrorCode::InvalidCameraEntity);
@@ -2710,7 +2809,7 @@ namespace
 
 		const auto ProjectIdentifier = UUID::Generate();
 		const auto MissingAssetIdentifier = UUID::Generate();
-		PF_CHECK(Tests, ProjectIdentifier.has_value() && MissingAssetIdentifier.has_value());
+		PF_CHECK(Tests, ProjectIdentifier && MissingAssetIdentifier);
 		if (!ProjectIdentifier || !MissingAssetIdentifier)
 			return;
 
@@ -2726,135 +2825,128 @@ namespace
 			}
 		} Cleanup{ ProjectRoot };
 
-		const std::filesystem::path AssetsDirectory = ProjectRoot / "Assets" / "Meshes";
-		std::filesystem::create_directories(AssetsDirectory, FileError);
-		PF_CHECK(Tests, !FileError);
-		if (FileError)
+		const auto CreateManagedAsset = [&](std::string_view RelativePath, std::string_view Contents)
+			-> std::optional<AssetMetadata>
+		{
+			const std::filesystem::path Path = ProjectRoot / RelativePath;
+			std::filesystem::create_directories(Path.parent_path(), FileError);
+			PF_CHECK(Tests, !FileError);
+			if (FileError)
+				return std::nullopt;
+			{
+				std::ofstream Output(Path, std::ios::binary | std::ios::trunc);
+				Output.write(Contents.data(), static_cast<std::streamsize>(Contents.size()));
+				PF_CHECK(Tests, static_cast<bool>(Output));
+				if (!Output)
+					return std::nullopt;
+			}
+			auto Metadata = AssetMetadataSerializer::CreateForNewAsset(Path);
+			PF_CHECK(Tests, Metadata.has_value());
+			return Metadata ? std::optional<AssetMetadata>{ *Metadata } : std::nullopt;
+		};
+
+		const auto MeshMetadata = CreateManagedAsset("Assets/Meshes/mesh.Gltf", "mesh source");
+		const auto MaterialMetadata = CreateManagedAsset("Assets/Materials/surface.material", "material");
+		const auto WrongTypeMetadata = CreateManagedAsset("Assets/Misc/not-an-asset.txt", "other data");
+		const auto ScriptMetadata = CreateManagedAsset("Assets/Scripts/controller.lua", "return {}\n");
+		const auto AudioMetadata = CreateManagedAsset("Assets/Audio/sound.WAV", "audio data");
+		PF_CHECK(Tests, MeshMetadata && MaterialMetadata && WrongTypeMetadata && ScriptMetadata && AudioMetadata);
+		if (!MeshMetadata || !MaterialMetadata || !WrongTypeMetadata || !ScriptMetadata || !AudioMetadata)
 			return;
 
 		Scene TestScene;
-		const auto ResolvedEntity = TestScene.CreateEntity("Resolved mesh");
-		const auto MissingEntity = TestScene.CreateEntity("Missing mesh");
-		const auto WrongMaterialEntity = TestScene.CreateEntity("Wrong material type");
-		PF_CHECK(Tests, ResolvedEntity.has_value() && MissingEntity.has_value() && WrongMaterialEntity.has_value());
-		if (!ResolvedEntity || !MissingEntity || !WrongMaterialEntity)
+		const auto ValidScriptOnly = TestScene.CreateEntity("Valid script only");
+		const auto MissingScriptOnly = TestScene.CreateEntity("Missing script only");
+		const auto WrongScriptOnly = TestScene.CreateEntity("Wrong script only");
+		const auto ValidAudioOnly = TestScene.CreateEntity("Valid audio only");
+		const auto MissingAudioOnly = TestScene.CreateEntity("Missing audio only");
+		const auto WrongAudioOnly = TestScene.CreateEntity("Wrong audio only");
+		const auto WrongMeshType = TestScene.CreateEntity("Wrong mesh type");
+		const auto WrongMaterialType = TestScene.CreateEntity("Wrong material type");
+		const auto ValidMeshAndMaterial = TestScene.CreateEntity("Valid mesh and material");
+		const auto MultipleReferences = TestScene.CreateEntity("Multiple references");
+		const auto Unrelated = TestScene.CreateEntity("Unrelated");
+		PF_CHECK(Tests, ValidScriptOnly && MissingScriptOnly && WrongScriptOnly && ValidAudioOnly && MissingAudioOnly &&
+			WrongAudioOnly && WrongMeshType && WrongMaterialType && ValidMeshAndMaterial && MultipleReferences && Unrelated);
+		if (!ValidScriptOnly || !MissingScriptOnly || !WrongScriptOnly || !ValidAudioOnly || !MissingAudioOnly ||
+			!WrongAudioOnly || !WrongMeshType || !WrongMaterialType || !ValidMeshAndMaterial || !MultipleReferences || !Unrelated)
 			return;
 
-		const std::filesystem::path MeshSource = AssetsDirectory / "resolved.mesh";
-		{
-			std::ofstream Output(MeshSource, std::ios::binary | std::ios::trunc);
-			Output << "mesh source";
-			PF_CHECK(Tests, static_cast<bool>(Output));
-		}
-		const auto MeshMetadata = AssetMetadataSerializer::CreateForNewAsset(MeshSource);
-		PF_CHECK(Tests, MeshMetadata.has_value());
-		if (!MeshMetadata)
-			return;
-		const std::filesystem::path MaterialsDirectory = ProjectRoot / "Assets" / "Materials";
-		std::filesystem::create_directories(MaterialsDirectory, FileError);
-		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
-		const std::filesystem::path MaterialSource = MaterialsDirectory / "resolved.material";
-		const std::filesystem::path WrongMaterialSource = MaterialsDirectory / "wrong.txt";
-		{
-			std::ofstream Output(MaterialSource, std::ios::binary | std::ios::trunc);
-			Output << "material";
-			PF_CHECK(Tests, static_cast<bool>(Output));
-		}
-		{
-			std::ofstream Output(WrongMaterialSource, std::ios::binary | std::ios::trunc);
-			Output << "not a material";
-			PF_CHECK(Tests, static_cast<bool>(Output));
-		}
-		const auto MaterialMetadata = AssetMetadataSerializer::CreateForNewAsset(MaterialSource);
-		const auto WrongMaterialMetadata = AssetMetadataSerializer::CreateForNewAsset(WrongMaterialSource);
-		PF_CHECK(Tests, MaterialMetadata.has_value() && WrongMaterialMetadata.has_value());
-		if (!MaterialMetadata || !WrongMaterialMetadata)
-			return;
-		const std::filesystem::path ScriptsDirectory = ProjectRoot / "Assets" / "Scripts";
-		std::filesystem::create_directories(ScriptsDirectory, FileError);
-		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
-		const std::filesystem::path ScriptSource = ScriptsDirectory / "resolved.lua";
-		{
-			std::ofstream Output(ScriptSource, std::ios::binary | std::ios::trunc);
-			Output << "function OnUpdate() end\n";
-			PF_CHECK(Tests, static_cast<bool>(Output));
-		}
-		const auto ScriptMetadata = AssetMetadataSerializer::CreateForNewAsset(ScriptSource);
-		PF_CHECK(Tests, ScriptMetadata.has_value());
-		if (!ScriptMetadata)
-			return;
-
-		PF_CHECK(Tests, ResolvedEntity->SetMeshRenderer(
+		PF_CHECK(Tests, ValidScriptOnly->SetScript(ScriptComponent{ ScriptMetadata->ID }).has_value());
+		PF_CHECK(Tests, MissingScriptOnly->SetScript(ScriptComponent{ *MissingAssetIdentifier, false }).has_value());
+		PF_CHECK(Tests, WrongScriptOnly->SetScript(ScriptComponent{ WrongTypeMetadata->ID }).has_value());
+		PF_CHECK(Tests, ValidAudioOnly->SetAudioSource(AudioSourceComponent{ AudioMetadata->ID }).has_value());
+		PF_CHECK(Tests, MissingAudioOnly->SetAudioSource(AudioSourceComponent{ *MissingAssetIdentifier }).has_value());
+		PF_CHECK(Tests, WrongAudioOnly->SetAudioSource(AudioSourceComponent{ WrongTypeMetadata->ID }).has_value());
+		PF_CHECK(Tests, WrongMeshType->SetMeshRenderer(MeshRendererComponent{ WrongTypeMetadata->ID }).has_value());
+		PF_CHECK(Tests, WrongMaterialType->SetMeshRenderer(
+			MeshRendererComponent{ MeshMetadata->ID, WrongTypeMetadata->ID }).has_value());
+		PF_CHECK(Tests, ValidMeshAndMaterial->SetMeshRenderer(
 			MeshRendererComponent{ MeshMetadata->ID, MaterialMetadata->ID }).has_value());
-		PF_CHECK(Tests, MissingEntity->SetMeshRenderer(MeshRendererComponent{ *MissingAssetIdentifier }).has_value());
-		PF_CHECK(Tests, WrongMaterialEntity->SetMeshRenderer(
-			MeshRendererComponent{ MeshMetadata->ID, WrongMaterialMetadata->ID }).has_value());
-		PF_CHECK(Tests, ResolvedEntity->SetScript(ScriptComponent{ ScriptMetadata->ID }).has_value());
-		PF_CHECK(Tests, MissingEntity->SetScript(ScriptComponent{ *MissingAssetIdentifier }).has_value());
-		PF_CHECK(Tests, WrongMaterialEntity->SetScript(ScriptComponent{ WrongMaterialMetadata->ID }).has_value());
+		PF_CHECK(Tests, MultipleReferences->SetMeshRenderer(
+			MeshRendererComponent{ *MissingAssetIdentifier, *MissingAssetIdentifier }).has_value());
+		PF_CHECK(Tests, MultipleReferences->SetScript(ScriptComponent{ *MissingAssetIdentifier }).has_value());
+		PF_CHECK(Tests, MultipleReferences->SetAudioSource(AudioSourceComponent{ *MissingAssetIdentifier }).has_value());
+
+		const auto HasIssue = [](const std::vector<AssetReferenceIssue>& Issues,
+			const Entity& Owner,
+			AssetReferenceKind Kind,
+			AssetReferenceIssueCode Code,
+			AssetID Asset)
+		{
+			return std::ranges::any_of(Issues, [&](const AssetReferenceIssue& Issue)
+			{
+				return Issue.Entity == Owner.GetUUID() && Issue.Kind == Kind && Issue.Code == Code && Issue.Asset == Asset;
+			});
+		};
 
 		AssetRegistry EmptyRegistry;
 		const auto AllMissing = AssetReferenceValidator::Validate(TestScene, EmptyRegistry);
-		PF_CHECK(Tests, AllMissing.has_value());
-		PF_CHECK(Tests, AllMissing && AllMissing->size() == 8);
+		PF_CHECK(Tests, AllMissing && AllMissing->size() == 15);
+		PF_CHECK(Tests, AllMissing && HasIssue(*AllMissing, *ValidScriptOnly, AssetReferenceKind::Script,
+			AssetReferenceIssueCode::MissingAsset, ScriptMetadata->ID));
+		PF_CHECK(Tests, AllMissing && HasIssue(*AllMissing, *ValidAudioOnly, AssetReferenceKind::Audio,
+			AssetReferenceIssueCode::MissingAsset, AudioMetadata->ID));
 
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
 		const auto Validation = AssetReferenceValidator::Validate(TestScene, Registry);
-		PF_CHECK(Tests, Validation.has_value());
-		PF_CHECK(Tests, Validation && Validation->size() == 4);
-		if (!Validation || Validation->size() != 4)
+		PF_CHECK(Tests, Validation && Validation->size() == 10);
+		if (!Validation)
 			return;
 
-		const auto MissingIssue = std::find_if(Validation->begin(), Validation->end(), [&](const AssetReferenceIssue& Issue)
+		PF_CHECK(Tests, HasIssue(*Validation, *MissingScriptOnly, AssetReferenceKind::Script,
+			AssetReferenceIssueCode::MissingAsset, *MissingAssetIdentifier));
+		PF_CHECK(Tests, HasIssue(*Validation, *WrongScriptOnly, AssetReferenceKind::Script,
+			AssetReferenceIssueCode::WrongAssetType, WrongTypeMetadata->ID));
+		PF_CHECK(Tests, HasIssue(*Validation, *MissingAudioOnly, AssetReferenceKind::Audio,
+			AssetReferenceIssueCode::MissingAsset, *MissingAssetIdentifier));
+		PF_CHECK(Tests, HasIssue(*Validation, *WrongAudioOnly, AssetReferenceKind::Audio,
+			AssetReferenceIssueCode::WrongAssetType, WrongTypeMetadata->ID));
+		PF_CHECK(Tests, HasIssue(*Validation, *WrongMeshType, AssetReferenceKind::Mesh,
+			AssetReferenceIssueCode::WrongAssetType, WrongTypeMetadata->ID));
+		PF_CHECK(Tests, HasIssue(*Validation, *WrongMaterialType, AssetReferenceKind::Material,
+			AssetReferenceIssueCode::WrongAssetType, WrongTypeMetadata->ID));
+		PF_CHECK(Tests, !HasIssue(*Validation, *ValidScriptOnly, AssetReferenceKind::Script,
+			AssetReferenceIssueCode::WrongAssetType, ScriptMetadata->ID));
+		PF_CHECK(Tests, !HasIssue(*Validation, *ValidAudioOnly, AssetReferenceKind::Audio,
+			AssetReferenceIssueCode::WrongAssetType, AudioMetadata->ID));
+		PF_CHECK(Tests, !HasIssue(*Validation, *ValidMeshAndMaterial, AssetReferenceKind::Mesh,
+			AssetReferenceIssueCode::WrongAssetType, MeshMetadata->ID));
+		PF_CHECK(Tests, !HasIssue(*Validation, *ValidMeshAndMaterial, AssetReferenceKind::Material,
+			AssetReferenceIssueCode::WrongAssetType, MaterialMetadata->ID));
+		PF_CHECK(Tests, HasIssue(*Validation, *MultipleReferences, AssetReferenceKind::Mesh,
+			AssetReferenceIssueCode::MissingAsset, *MissingAssetIdentifier));
+		PF_CHECK(Tests, HasIssue(*Validation, *MultipleReferences, AssetReferenceKind::Material,
+			AssetReferenceIssueCode::MissingAsset, *MissingAssetIdentifier));
+		PF_CHECK(Tests, HasIssue(*Validation, *MultipleReferences, AssetReferenceKind::Script,
+			AssetReferenceIssueCode::MissingAsset, *MissingAssetIdentifier));
+		PF_CHECK(Tests, HasIssue(*Validation, *MultipleReferences, AssetReferenceKind::Audio,
+			AssetReferenceIssueCode::MissingAsset, *MissingAssetIdentifier));
+		PF_CHECK(Tests, std::ranges::none_of(*Validation, [&](const AssetReferenceIssue& Issue)
 		{
-			return Issue.Entity == MissingEntity->GetUUID();
-		});
-		PF_CHECK(Tests, MissingIssue != Validation->end());
-		if (MissingIssue != Validation->end())
-		{
-			PF_CHECK(Tests, MissingIssue->Code == AssetReferenceIssueCode::MissingAsset);
-			PF_CHECK(Tests, MissingIssue->Kind == AssetReferenceKind::Mesh);
-			PF_CHECK(Tests, MissingIssue->Asset == *MissingAssetIdentifier);
-		}
-		const auto WrongTypeIssue = std::find_if(Validation->begin(), Validation->end(), [&](const AssetReferenceIssue& Issue)
-		{
-			return Issue.Entity == WrongMaterialEntity->GetUUID();
-		});
-		PF_CHECK(Tests, WrongTypeIssue != Validation->end());
-		if (WrongTypeIssue != Validation->end())
-		{
-			PF_CHECK(Tests, WrongTypeIssue->Code == AssetReferenceIssueCode::WrongAssetType);
-			PF_CHECK(Tests, WrongTypeIssue->Kind == AssetReferenceKind::Material);
-			PF_CHECK(Tests, WrongTypeIssue->Asset == WrongMaterialMetadata->ID);
-		}
-		const auto MissingScriptIssue = std::find_if(Validation->begin(), Validation->end(), [&](const AssetReferenceIssue& Issue)
-		{
-			return Issue.Entity == MissingEntity->GetUUID() && Issue.Kind == AssetReferenceKind::Script;
-		});
-		PF_CHECK(Tests, MissingScriptIssue != Validation->end());
-		if (MissingScriptIssue != Validation->end())
-		{
-			PF_CHECK(Tests, MissingScriptIssue->Code == AssetReferenceIssueCode::MissingAsset);
-			PF_CHECK(Tests, MissingScriptIssue->Asset == *MissingAssetIdentifier);
-		}
-		const auto WrongScriptTypeIssue = std::find_if(Validation->begin(), Validation->end(), [&](const AssetReferenceIssue& Issue)
-		{
-			return Issue.Entity == WrongMaterialEntity->GetUUID() && Issue.Kind == AssetReferenceKind::Script;
-		});
-		PF_CHECK(Tests, WrongScriptTypeIssue != Validation->end());
-		if (WrongScriptTypeIssue != Validation->end())
-		{
-			PF_CHECK(Tests, WrongScriptTypeIssue->Code == AssetReferenceIssueCode::WrongAssetType);
-			PF_CHECK(Tests, WrongScriptTypeIssue->Asset == WrongMaterialMetadata->ID);
-		}
-		const auto MissingReference = MissingEntity->GetMeshRenderer();
-		PF_CHECK(Tests, MissingReference && MissingReference->has_value());
-		PF_CHECK(Tests, MissingReference && MissingReference->value().MeshAsset == *MissingAssetIdentifier);
+			return Issue.Entity == Unrelated->GetUUID();
+		}));
 	}
 
 	void TestScriptRuntime(TestRunner& Tests)
@@ -4051,6 +4143,28 @@ end
 					InvalidStart.error().Code == AudioSceneRuntimeErrorCode::MultiplePrimaryListeners);
 				PF_CHECK(Tests, !InvalidRuntime.IsRunning());
 			}
+
+			Scene DuplicatedPrimaryListenerScene;
+			auto PrimaryListener = DuplicatedPrimaryListenerScene.CreateEntity("Primary listener");
+			PF_CHECK(Tests, PrimaryListener.has_value());
+			if (PrimaryListener)
+			{
+				PF_CHECK(Tests, PrimaryListener->SetAudioListener(AudioListenerComponent{ true }).has_value());
+				auto DuplicatedListener = DuplicatedPrimaryListenerScene.DuplicateEntity(*PrimaryListener);
+				PF_CHECK(Tests, DuplicatedListener.has_value());
+				if (DuplicatedListener)
+				{
+					const auto OriginalListenerComponent = PrimaryListener->GetAudioListener();
+					const auto DuplicatedListenerComponent = DuplicatedListener->GetAudioListener();
+					PF_CHECK(Tests, OriginalListenerComponent && OriginalListenerComponent->has_value() &&
+						OriginalListenerComponent->value().IsPrimary);
+					PF_CHECK(Tests, DuplicatedListenerComponent && DuplicatedListenerComponent->has_value() &&
+						!DuplicatedListenerComponent->value().IsPrimary);
+					AudioSceneRuntime RuntimeAfterListenerDuplication(Engine, Cache);
+					PF_CHECK(Tests, RuntimeAfterListenerDuplication.Start(DuplicatedPrimaryListenerScene).has_value());
+					PF_CHECK(Tests, RuntimeAfterListenerDuplication.Advance(DuplicatedPrimaryListenerScene).has_value());
+				}
+			}
 		}
 
 		// A playback retains the initialized device state even after its AudioEngine owner goes away.
@@ -4148,15 +4262,43 @@ end
 		PF_CHECK(Tests, PrefabData->find("\"materialAsset\": \"" + MaterialAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"asset\": \"" + AudioAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"asset\": \"" + ScriptAssetID.ToString() + "\"") != std::string::npos);
-		PF_CHECK(Tests, PrefabData->find("\"primary\": true") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"primary\": false") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"primary\": true") == std::string::npos);
+		const auto SourceCamera = Root->GetCamera();
+		const auto SourceListener = Root->GetAudioListener();
+		PF_CHECK(Tests, SourceCamera && SourceCamera->has_value() && SourceCamera->value().IsPrimary);
+		PF_CHECK(Tests, SourceListener && SourceListener->has_value() && SourceListener->value().IsPrimary);
 		PF_CHECK(Tests, PrefabData->find("Outside prefab") == std::string::npos);
 		PF_CHECK(Tests, PrefabData->find(ExternalParent->GetUUID().ToString()) == std::string::npos);
 
+		std::string PrimaryRolePrefab = *PrefabData;
+		size_t PrimaryRoleCount = 0;
+		for (size_t PrimaryFlag = PrimaryRolePrefab.find("\"primary\": false");
+			PrimaryFlag != std::string::npos;
+			PrimaryFlag = PrimaryRolePrefab.find("\"primary\": false", PrimaryFlag))
+		{
+			PrimaryRolePrefab.replace(PrimaryFlag, std::string("\"primary\": false").size(), "\"primary\": true");
+			PrimaryFlag += std::string("\"primary\": true").size();
+			++PrimaryRoleCount;
+		}
+		PF_CHECK(Tests, PrimaryRoleCount == 2);
+		Scene PrimaryRoleDestination;
+		const auto PrimaryRoleInstance = PrefabSerializer::Instantiate(PrimaryRolePrefab, PrimaryRoleDestination);
+		PF_CHECK(Tests, PrimaryRoleInstance.has_value());
+		if (PrimaryRoleInstance)
+		{
+			const auto InstanceCamera = PrimaryRoleInstance->GetCamera();
+			const auto InstanceListener = PrimaryRoleInstance->GetAudioListener();
+			PF_CHECK(Tests, InstanceCamera && InstanceCamera->has_value() && !InstanceCamera->value().IsPrimary);
+			PF_CHECK(Tests, InstanceListener && InstanceListener->has_value() && !InstanceListener->value().IsPrimary);
+		}
+
 		std::string LegacyPrefabV1 = *PrefabData;
-		const size_t CameraPrimaryPosition = LegacyPrefabV1.find("\"primary\": true");
+		const size_t CameraPrimaryPosition = LegacyPrefabV1.find("\"primary\": false");
 		PF_CHECK(Tests, CameraPrimaryPosition != std::string::npos);
 		if (CameraPrimaryPosition != std::string::npos)
 		{
+			LegacyPrefabV1.replace(CameraPrimaryPosition, std::string("\"primary\": false").size(), "\"primary\": true");
 			const size_t PrimaryCommaPosition = LegacyPrefabV1.rfind(',', CameraPrimaryPosition);
 			const size_t PrimaryLineEnd = LegacyPrefabV1.find('\n', CameraPrimaryPosition);
 			PF_CHECK(Tests, PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos);
@@ -4196,8 +4338,8 @@ end
 		const auto FirstAudioListener = FirstInstance->GetAudioListener();
 		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() &&
 			FirstCamera->value().VerticalFieldOfViewRadians == RootCamera.VerticalFieldOfViewRadians);
-		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() && FirstCamera->value().IsPrimary);
-		PF_CHECK(Tests, FirstAudioListener && FirstAudioListener->has_value() && FirstAudioListener->value().IsPrimary);
+		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() && !FirstCamera->value().IsPrimary);
+		PF_CHECK(Tests, FirstAudioListener && FirstAudioListener->has_value() && !FirstAudioListener->value().IsPrimary);
 		const auto FirstChildren = FirstInstance->GetChildren();
 		PF_CHECK(Tests, FirstChildren && FirstChildren->size() == 1);
 		if (!FirstChildren || FirstChildren->size() != 1)
@@ -4221,6 +4363,13 @@ end
 		PF_CHECK(Tests, SecondInstance.has_value());
 		PF_CHECK(Tests, Destination.GetEntityCount() == OriginalEntityCount + 6);
 		PF_CHECK(Tests, SecondInstance && FirstInstance->GetUUID() != SecondInstance->GetUUID());
+		if (SecondInstance)
+		{
+			const auto SecondCamera = SecondInstance->GetCamera();
+			const auto SecondListener = SecondInstance->GetAudioListener();
+			PF_CHECK(Tests, SecondCamera && SecondCamera->has_value() && !SecondCamera->value().IsPrimary);
+			PF_CHECK(Tests, SecondListener && SecondListener->has_value() && !SecondListener->value().IsPrimary);
+		}
 
 		const size_t CountBeforeFailure = Destination.GetEntityCount();
 		const auto InvalidJSON = PrefabSerializer::Instantiate("{ invalid", Destination);
@@ -4892,7 +5041,7 @@ int main()
 	TestSceneEntityAndHierarchy(Tests);
 	TestPhysicsComponentsAndPersistence(Tests);
 	TestPhysicsSceneRuntime(Tests);
-	TestEntityHandlesExpireWithScene(Tests);
+	TestEntityHandleIdentityAndLifetime(Tests);
 	TestSceneRenderSnapshot(Tests);
 	TestSceneSerializationRoundTrip(Tests);
 	TestSceneSerializerClone(Tests);

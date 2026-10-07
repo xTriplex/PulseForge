@@ -59,7 +59,9 @@ namespace PulseForge
 				return std::unexpected(SceneOperationError(Result.error()));
 			if (Camera->has_value())
 			{
-				if (auto Result = Destination.SetCamera(Camera->value()); !Result)
+				CameraComponent InstanceCamera = Camera->value();
+				InstanceCamera.IsPrimary = false;
+				if (auto Result = Destination.SetCamera(InstanceCamera); !Result)
 					return std::unexpected(SceneOperationError(Result.error()));
 			}
 			if (MeshRenderer->has_value())
@@ -84,7 +86,9 @@ namespace PulseForge
 			}
 			if (AudioListener->has_value())
 			{
-				if (auto Result = Destination.SetAudioListener(AudioListener->value()); !Result)
+				AudioListenerComponent InstanceListener = AudioListener->value();
+				InstanceListener.IsPrimary = false;
+				if (auto Result = Destination.SetAudioListener(InstanceListener); !Result)
 					return std::unexpected(SceneOperationError(Result.error()));
 			}
 			if (Script->has_value())
