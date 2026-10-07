@@ -6,6 +6,7 @@
 #include "Core/Log.h"
 #include "Events/Event.h"
 #include "Assets/AssetOperations.h"
+#include "Assets/PrefabAssetService.h"
 #include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
 #include "Scene/Scene.h"
@@ -669,6 +670,121 @@ namespace
 				" (new UUID " + Duplicated->ID.ToString() + ").");
 		}
 
+		void CreatePrefabFromSelectedEntity()
+		{
+			if (!m_Project || !m_Scene || !m_SelectedEntity)
+			{
+				SetError("Open a project and select an entity before creating a prefab.");
+				return;
+			}
+
+			static constexpr nfdu8filteritem_t Filter{ "PulseForge Prefab", "prefab" };
+			auto Destination = ShowSaveDialog(
+				&Filter,
+				m_Project->GetRootPath() / "Assets",
+				"NewPrefab.prefab");
+			if (!Destination)
+				return;
+			if (Destination->extension().empty())
+				*Destination += ".prefab";
+			if (Destination->extension() != ".prefab")
+			{
+				SetError("Prefab assets must use the .prefab extension.");
+				return;
+			}
+
+			const auto RelativeDestination = GetProjectRelativePath(*Destination, "prefab creation");
+			if (!RelativeDestination)
+				return;
+			const PulseForge::UUID Root = *m_SelectedEntity;
+			const std::filesystem::path Target = *RelativeDestination;
+			QueueAfterSave([this, Root, Target] { CreatePrefabAt(Root, Target); });
+		}
+
+		void CreatePrefabAt(
+			const PulseForge::UUID& RootIdentifier,
+			const std::filesystem::path& Destination)
+		{
+			if (!m_Project || !m_Scene)
+			{
+				SetError("The project or scene closed before prefab creation could run.");
+				return;
+			}
+
+			const auto Root = m_Scene->FindEntity(RootIdentifier);
+			if (!Root)
+			{
+				SetError("The selected entity no longer exists; no prefab was created.");
+				return;
+			}
+
+			auto Created = PulseForge::PrefabAssetService::Create(
+				m_Project->GetAssetRegistry(),
+				m_Project->GetRootPath(),
+				Destination,
+				*m_Scene,
+				*Root);
+			if (!Created)
+			{
+				std::string Message = "Prefab creation failed: " + Created.error().Message;
+				if (Created.error().RecoveryPath)
+					Message += " Recovery data: " + PathToUtf8(*Created.error().RecoveryPath) + ".";
+				if (Created.error().CommittedAsset)
+				{
+					UpdateAssetList();
+					m_SelectedAsset = Created.error().CommittedAsset->ID;
+					SetWarning(
+						"Prefab was created with UUID " + Created.error().CommittedAsset->ID.ToString() +
+						", but temporary cleanup failed: " + Message);
+					return;
+				}
+
+				RefreshAssetsAfterOperationFailure(Message);
+				SetError(std::move(Message));
+				return;
+			}
+
+			UpdateAssetList();
+			m_SelectedAsset = Created->ID;
+			SetStatus(
+				"Created prefab " + PathToUtf8(Created->ProjectRelativePath) +
+				" (UUID " + Created->ID.ToString() + ").");
+		}
+
+		void InstantiatePrefab(const PulseForge::AssetID& Identifier)
+		{
+			if (!m_Project || !m_Scene)
+			{
+				SetError("Open a project and scene before instantiating a prefab.");
+				return;
+			}
+			QueueAfterSave([this, Identifier] { InstantiatePrefabAt(Identifier); });
+		}
+
+		void InstantiatePrefabAt(const PulseForge::AssetID& Identifier)
+		{
+			if (!m_Project || !m_Scene)
+			{
+				SetError("The project or scene closed before prefab instantiation could run.");
+				return;
+			}
+
+			auto Instantiated = PulseForge::PrefabAssetService::Instantiate(
+				Identifier,
+				m_Project->GetRootPath(),
+				m_Project->GetAssetRegistry(),
+				*m_Scene);
+			if (!Instantiated)
+			{
+				SetError("Prefab instantiation failed: " + Instantiated.error().Message);
+				return;
+			}
+
+			m_SelectedEntity = Instantiated->GetUUID();
+			m_SceneDirty = true;
+			SetStatus("Instantiated prefab " + Identifier.ToString() + " into the current scene.");
+		}
+
 		void RequestDeleteAsset(const PulseForge::AssetID& Identifier)
 		{
 			if (IsProtectedSceneAsset(Identifier))
@@ -1271,6 +1387,10 @@ namespace
 				ImGui::SameLine();
 				if (ImGui::Button("Delete"))
 					DeleteSelectedEntity();
+				ImGui::EndDisabled();
+				ImGui::BeginDisabled(!m_SelectedEntity);
+				if (ImGui::Button("Create Prefab..."))
+					CreatePrefabFromSelectedEntity();
 				ImGui::EndDisabled();
 				ImGui::EndDisabled();
 				ImGui::Separator();
@@ -1875,6 +1995,9 @@ namespace
 								ContextAction = [this, Identifier] { MoveAsset(Identifier); };
 							if (ImGui::MenuItem("Duplicate..."))
 								ContextAction = [this, Identifier] { DuplicateAsset(Identifier); };
+							if (Asset.ProjectRelativePath.extension() == ".prefab" &&
+								ImGui::MenuItem("Instantiate in Scene", nullptr, false, m_Scene != nullptr))
+								ContextAction = [this, Identifier] { InstantiatePrefab(Identifier); };
 							if (ImGui::MenuItem("Delete..."))
 								ContextAction = [this, Identifier] { RequestDeleteAsset(Identifier); };
 							ImGui::EndPopup();
@@ -1903,6 +2026,13 @@ namespace
 							if (ImGui::Button("Delete..."))
 								RequestDeleteAsset(Asset->ID);
 							ImGui::EndDisabled();
+							if (Asset->ProjectRelativePath.extension() == ".prefab")
+							{
+								ImGui::BeginDisabled(!m_Scene);
+								if (ImGui::Button("Instantiate in Scene"))
+									InstantiatePrefab(Asset->ID);
+								ImGui::EndDisabled();
+							}
 							if (IsProtectedScene)
 								ImGui::TextUnformatted("Open and startup scenes cannot be deleted.");
 						}
