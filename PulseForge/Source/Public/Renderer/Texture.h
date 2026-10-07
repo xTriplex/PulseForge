@@ -20,9 +20,20 @@ namespace PulseForge
 
 	enum class TextureUsage : uint8_t
 	{
-		ShaderResource,
-		DepthStencilAttachment
+		ShaderResource = 1 << 0,
+		ColorAttachment = 1 << 1,
+		DepthStencilAttachment = 1 << 2
 	};
+
+	[[nodiscard]] constexpr TextureUsage operator|(TextureUsage Left, TextureUsage Right) noexcept
+	{
+		return static_cast<TextureUsage>(static_cast<uint8_t>(Left) | static_cast<uint8_t>(Right));
+	}
+
+	[[nodiscard]] constexpr bool HasTextureUsage(TextureUsage Usage, TextureUsage Required) noexcept
+	{
+		return (static_cast<uint8_t>(Usage) & static_cast<uint8_t>(Required)) == static_cast<uint8_t>(Required);
+	}
 
 	struct TextureDesc
 	{

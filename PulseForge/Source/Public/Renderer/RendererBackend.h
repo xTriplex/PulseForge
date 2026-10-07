@@ -3,6 +3,7 @@
 #include "Renderer/Buffer.h"
 #include "Renderer/Binding.h"
 #include "Renderer/Graphics.h"
+#include "Renderer/RenderTarget.h"
 
 #include <memory>
 #include "Renderer/RendererAPI.h"
@@ -18,6 +19,11 @@ namespace PulseForge
 
 		virtual bool BeginFrame() = 0;
 		virtual void EndFrame() = 0;
+		virtual RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description) = 0;
+		virtual GraphicsResult BeginRenderTarget(
+			const RenderTarget& Target,
+			const RenderTargetClearValue& ClearValue) = 0;
+		virtual GraphicsResult EndRenderTarget() = 0;
 		virtual BufferCreateResult CreateBuffer(
 			const BufferDesc& Description,
 			std::span<const std::byte> InitialData) = 0;

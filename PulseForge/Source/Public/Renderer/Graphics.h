@@ -69,7 +69,9 @@ namespace PulseForge
 
 	enum class ColorTargetFormat : uint8_t
 	{
-		Swapchain
+		Swapchain,
+		RGBA8_UNorm,
+		RGBA8_Srgb
 	};
 
 	enum class CullMode : uint8_t

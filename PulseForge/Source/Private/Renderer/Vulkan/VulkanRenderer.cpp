@@ -268,9 +268,67 @@ namespace PulseForge
 				return m_Handle.Get();
 			}
 
+			nvrhi::TextureHandle GetNativeTextureHandle() const noexcept
+			{
+				return m_Handle;
+			}
+
 		private:
 			TextureDesc m_Description;
 			nvrhi::TextureHandle m_Handle;
+		};
+
+		class VulkanRenderTarget final : public RenderTarget
+		{
+		public:
+			VulkanRenderTarget(
+				RenderTargetDesc Description,
+				TextureHandle ColorTexture,
+				TextureHandle DepthTexture,
+				nvrhi::FramebufferHandle Framebuffer)
+				: m_Description(std::move(Description)),
+				  m_ColorTexture(std::move(ColorTexture)),
+				  m_DepthTexture(std::move(DepthTexture)),
+				  m_Framebuffer(std::move(Framebuffer))
+			{
+			}
+
+			const RenderTargetDesc& GetDescription() const noexcept override
+			{
+				return m_Description;
+			}
+
+			const Texture& GetColorTexture() const noexcept override
+			{
+				return *m_ColorTexture;
+			}
+
+			const Texture& GetDepthTexture() const noexcept override
+			{
+				return *m_DepthTexture;
+			}
+
+			nvrhi::FramebufferHandle GetNativeFramebuffer() const noexcept
+			{
+				return m_Framebuffer;
+			}
+
+			nvrhi::TextureHandle GetNativeColorTexture() const noexcept
+			{
+				return static_cast<const VulkanTexture&>(*m_ColorTexture).GetNativeTextureHandle();
+			}
+
+			nvrhi::TextureHandle GetNativeDepthTexture() const noexcept
+			{
+				return static_cast<const VulkanTexture&>(*m_DepthTexture).GetNativeTextureHandle();
+			}
+
+		private:
+			// Declaration order ensures the framebuffer releases its attachment references first.
+			RenderTargetDesc m_Description;
+			TextureHandle m_ColorTexture;
+			TextureHandle m_DepthTexture;
+			nvrhi::FramebufferHandle m_Framebuffer;
 		};
 
 		class VulkanSampler final : public Sampler
@@ -517,6 +575,7 @@ namespace PulseForge
 				throw std::runtime_error("Vulkan swapchain image is missing its PulseForge depth target");
 
 			Frame.CommandList->open();
+			m_ActiveRenderTarget.reset();
 			Frame.CommandList->clearTextureFloat(
 				Image.Texture,
 				nvrhi::TextureSubresourceSet(),
@@ -536,6 +595,14 @@ namespace PulseForge
 		{
 			if (!m_FrameActive)
 				return;
+
+			if (m_ActiveRenderTarget)
+			{
+				PF_CORE_WARN("EndFrame closed an offscreen render target that was left active");
+				const GraphicsResult TargetEndResult = EndRenderTarget();
+				if (!TargetEndResult)
+					PF_CORE_ERROR("Could not close active offscreen render target: {0}", TargetEndResult.error().Message);
+			}
 
 			FrameContext& Frame = m_Frames[m_CurrentFrame];
 			SwapchainImage& Image = m_SwapchainImages[m_AcquiredImageIndex];
@@ -600,6 +667,116 @@ namespace PulseForge
 			{
 				m_SwapchainRecreationNeeded = true;
 				return;
+			}
+		}
+
+		GraphicsResult BeginRenderTarget(
+			const RenderTarget& Target,
+			const RenderTargetClearValue& ClearValue) override
+		{
+			if (!m_FrameActive)
+			{
+				return std::unexpected(GraphicsError{
+					GraphicsErrorCode::InvalidFrameState,
+					"Offscreen render targets may only begin during an active renderer frame"
+				});
+			}
+			if (m_ActiveRenderTarget)
+			{
+				return std::unexpected(GraphicsError{
+					GraphicsErrorCode::InvalidFrameState,
+					"PulseForge does not support nested render targets"
+				});
+			}
+
+			const auto ClearValidation = ValidateRenderTargetClearValue(ClearValue);
+			if (!ClearValidation)
+			{
+				return std::unexpected(GraphicsError{
+					GraphicsErrorCode::InvalidDescription,
+					ClearValidation.error().Message
+				});
+			}
+
+			const auto* NativeTarget = dynamic_cast<const VulkanRenderTarget*>(&Target);
+			if (!NativeTarget)
+			{
+				return std::unexpected(GraphicsError{
+					GraphicsErrorCode::UnsupportedFeature,
+					"Vulkan rendering requires a render target created by the active Vulkan renderer"
+				});
+			}
+
+			try
+			{
+				nvrhi::TextureHandle ColorTexture = NativeTarget->GetNativeColorTexture();
+				nvrhi::TextureHandle DepthTexture = NativeTarget->GetNativeDepthTexture();
+				FrameContext& Frame = m_Frames[m_CurrentFrame];
+				Frame.CommandList->setTextureState(
+					ColorTexture,
+					nvrhi::TextureSubresourceSet(),
+					nvrhi::ResourceStates::RenderTarget);
+				Frame.CommandList->setTextureState(
+					DepthTexture,
+					nvrhi::TextureSubresourceSet(),
+					nvrhi::ResourceStates::DepthWrite);
+				Frame.CommandList->commitBarriers();
+				Frame.CommandList->clearTextureFloat(
+					ColorTexture,
+					nvrhi::TextureSubresourceSet(),
+					nvrhi::Color(ClearValue.Color[0], ClearValue.Color[1], ClearValue.Color[2], ClearValue.Color[3]));
+				Frame.CommandList->clearDepthStencilTexture(
+					DepthTexture,
+					nvrhi::TextureSubresourceSet(),
+					true,
+					ClearValue.Depth,
+					false,
+					0);
+
+				m_ActiveRenderTarget = ActiveRenderTarget{
+					NativeTarget->GetDescription().ColorFormat,
+					NativeTarget->GetDescription().Width,
+					NativeTarget->GetDescription().Height,
+					NativeTarget->GetNativeFramebuffer(),
+					std::move(ColorTexture),
+					std::move(DepthTexture)
+				};
+				return {};
+			}
+			catch (const std::exception& Exception)
+			{
+				const std::string Message = "Vulkan/NVRHI render-target begin failed: " + std::string(Exception.what());
+				PF_CORE_ERROR("{0}", Message);
+				return std::unexpected(GraphicsError{ GraphicsErrorCode::BackendFailure, Message });
+			}
+		}
+
+		GraphicsResult EndRenderTarget() override
+		{
+			if (!m_FrameActive || !m_ActiveRenderTarget)
+			{
+				return std::unexpected(GraphicsError{
+					GraphicsErrorCode::InvalidFrameState,
+					"EndRenderTarget requires an active frame and an active offscreen render target"
+				});
+			}
+
+			try
+			{
+				FrameContext& Frame = m_Frames[m_CurrentFrame];
+				Frame.CommandList->setTextureState(
+					m_ActiveRenderTarget->ColorTexture,
+					nvrhi::TextureSubresourceSet(),
+					nvrhi::ResourceStates::ShaderResource);
+				Frame.CommandList->commitBarriers();
+				m_ActiveRenderTarget.reset();
+				return {};
+			}
+			catch (const std::exception& Exception)
+			{
+				const std::string Message = "Vulkan/NVRHI render-target end failed: " + std::string(Exception.what());
+				PF_CORE_ERROR("{0}", Message);
+				return std::unexpected(GraphicsError{ GraphicsErrorCode::BackendFailure, Message });
 			}
 		}
 
@@ -785,7 +962,14 @@ namespace PulseForge
 				case TextureFormat::RGBA8_Srgb: Format = nvrhi::Format::SRGBA8_UNORM; break;
 				case TextureFormat::Depth32Float: Format = nvrhi::Format::D32; break;
 			}
-			const bool IsDepthAttachment = Description.Usage == TextureUsage::DepthStencilAttachment;
+			const bool IsDepthAttachment = Description.Format == TextureFormat::Depth32Float;
+			const bool IsColorAttachment = HasTextureUsage(Description.Usage, TextureUsage::ColorAttachment);
+			const bool IsShaderResource = HasTextureUsage(Description.Usage, TextureUsage::ShaderResource);
+			const nvrhi::ResourceStates InitialState = IsDepthAttachment
+				? nvrhi::ResourceStates::DepthWrite
+				: IsColorAttachment
+					? nvrhi::ResourceStates::RenderTarget
+					: nvrhi::ResourceStates::ShaderResource;
 
 			nvrhi::TextureDesc NativeDescription;
 			NativeDescription
@@ -793,12 +977,10 @@ namespace PulseForge
 				.setWidth(Description.Width)
 				.setHeight(Description.Height)
 				.setFormat(Format)
-				.setIsRenderTarget(IsDepthAttachment)
-				.enableAutomaticStateTracking(IsDepthAttachment
-					? nvrhi::ResourceStates::DepthWrite
-					: nvrhi::ResourceStates::ShaderResource)
+				.setIsRenderTarget(IsDepthAttachment || IsColorAttachment)
+				.enableAutomaticStateTracking(InitialState)
 				.setDebugName(Description.DebugName.empty() ? "PulseForge texture" : Description.DebugName);
-			NativeDescription.isShaderResource = !IsDepthAttachment;
+			NativeDescription.isShaderResource = IsShaderResource;
 
 			try
 			{
@@ -818,6 +1000,9 @@ namespace PulseForge
 						Description.DebugName);
 					return TextureHandle(std::make_unique<VulkanTexture>(Description, std::move(NativeTexture)));
 				}
+
+				if (InitialData.empty())
+					return TextureHandle(std::make_unique<VulkanTexture>(Description, std::move(NativeTexture)));
 
 				nvrhi::CommandListHandle UploadCommandList = m_ActiveNvrhiDevice->createCommandList();
 				if (!UploadCommandList)
@@ -843,7 +1028,7 @@ namespace PulseForge
 				UploadCommandList->setTextureState(
 					NativeTexture,
 					nvrhi::TextureSubresourceSet(),
-					nvrhi::ResourceStates::ShaderResource);
+					IsShaderResource ? nvrhi::ResourceStates::ShaderResource : nvrhi::ResourceStates::RenderTarget);
 				UploadCommandList->commitBarriers();
 				UploadCommandList->close();
 				m_ActiveNvrhiDevice->executeCommandList(UploadCommandList, nvrhi::CommandQueue::Graphics);
@@ -860,6 +1045,92 @@ namespace PulseForge
 					Description.DebugName + "': " + Exception.what();
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(TextureError{ TextureErrorCode::BackendFailure, Message });
+			}
+		}
+
+		RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description) override
+		{
+			const auto Validation = ValidateRenderTargetDescription(Description);
+			if (!Validation)
+				return std::unexpected(Validation.error());
+
+			TextureDesc ColorDescription;
+			ColorDescription.Width = Description.Width;
+			ColorDescription.Height = Description.Height;
+			ColorDescription.Format = Description.ColorFormat == ColorTargetFormat::RGBA8_UNorm
+				? TextureFormat::RGBA8_UNorm
+				: TextureFormat::RGBA8_Srgb;
+			ColorDescription.Usage = TextureUsage::ShaderResource | TextureUsage::ColorAttachment;
+			ColorDescription.DebugName = Description.DebugName.empty()
+				? "PulseForge offscreen color"
+				: Description.DebugName + " color";
+			auto ColorTexture = CreateTexture(ColorDescription, {});
+			if (!ColorTexture)
+			{
+				return std::unexpected(RenderTargetError{
+					RenderTargetErrorCode::BackendFailure,
+					"Could not create render-target color texture: " + ColorTexture.error().Message
+				});
+			}
+
+			TextureDesc DepthDescription;
+			DepthDescription.Width = Description.Width;
+			DepthDescription.Height = Description.Height;
+			DepthDescription.Format = TextureFormat::Depth32Float;
+			DepthDescription.Usage = TextureUsage::DepthStencilAttachment;
+			DepthDescription.DebugName = Description.DebugName.empty()
+				? "PulseForge offscreen depth"
+				: Description.DebugName + " depth";
+			auto DepthTexture = CreateTexture(DepthDescription, {});
+			if (!DepthTexture)
+			{
+				return std::unexpected(RenderTargetError{
+					RenderTargetErrorCode::BackendFailure,
+					"Could not create render-target depth texture: " + DepthTexture.error().Message
+				});
+			}
+
+			const auto* NativeColor = dynamic_cast<const VulkanTexture*>(ColorTexture->get());
+			const auto* NativeDepth = dynamic_cast<const VulkanTexture*>(DepthTexture->get());
+			if (!NativeColor || !NativeDepth)
+			{
+				return std::unexpected(RenderTargetError{
+					RenderTargetErrorCode::UnsupportedFeature,
+					"Vulkan render targets require textures created by the active Vulkan renderer"
+				});
+			}
+
+			try
+			{
+				nvrhi::FramebufferDesc NativeDescription;
+				NativeDescription
+					.addColorAttachment(NativeColor->GetNativeTextureHandle())
+					.setDepthAttachment(NativeDepth->GetNativeTexture());
+				nvrhi::FramebufferHandle Framebuffer = m_ActiveNvrhiDevice->createFramebuffer(NativeDescription);
+				if (!Framebuffer)
+				{
+					return std::unexpected(RenderTargetError{
+						RenderTargetErrorCode::BackendFailure,
+						"NVRHI could not create the offscreen render-target framebuffer"
+					});
+				}
+
+				PF_CORE_INFO(
+					"Created Vulkan/NVRHI {0}x{1} offscreen render target '{2}'",
+					Description.Width,
+					Description.Height,
+					Description.DebugName);
+				return RenderTargetHandle(std::make_unique<VulkanRenderTarget>(
+					Description,
+					std::move(ColorTexture.value()),
+					std::move(DepthTexture.value()),
+					std::move(Framebuffer)));
+			}
+			catch (const std::exception& Exception)
+			{
+				const std::string Message = "Vulkan/NVRHI render-target creation failed: " + std::string(Exception.what());
+				PF_CORE_ERROR("{0}", Message);
+				return std::unexpected(RenderTargetError{ RenderTargetErrorCode::BackendFailure, Message });
 			}
 		}
 
@@ -1164,7 +1435,11 @@ namespace PulseForge
 
 				nvrhi::FramebufferInfo FramebufferInfo;
 				FramebufferInfo
-					.addColorFormat(m_NvrhiFormat)
+					.addColorFormat(Description.ColorFormat == ColorTargetFormat::Swapchain
+						? m_NvrhiFormat
+						: Description.ColorFormat == ColorTargetFormat::RGBA8_UNorm
+							? nvrhi::Format::RGBA8_UNORM
+							: nvrhi::Format::SRGBA8_UNORM)
 					.setDepthFormat(nvrhi::Format::D32);
 				nvrhi::GraphicsPipelineHandle NativePipeline = m_ActiveNvrhiDevice->createGraphicsPipeline(
 					NativeDescription,
@@ -1294,17 +1569,43 @@ namespace PulseForge
 
 			try
 			{
-				SwapchainImage& Image = m_SwapchainImages[m_AcquiredImageIndex];
+				nvrhi::FramebufferHandle Framebuffer;
+				uint32_t TargetWidth = 0;
+				uint32_t TargetHeight = 0;
+				ColorTargetFormat TargetFormat = ColorTargetFormat::Swapchain;
+				if (m_ActiveRenderTarget)
+				{
+					TargetFormat = m_ActiveRenderTarget->ColorFormat;
+					TargetWidth = m_ActiveRenderTarget->Width;
+					TargetHeight = m_ActiveRenderTarget->Height;
+					Framebuffer = m_ActiveRenderTarget->Framebuffer;
+				}
+				else
+				{
+					SwapchainImage& Image = m_SwapchainImages[m_AcquiredImageIndex];
+					TargetWidth = m_SwapchainExtent.width;
+					TargetHeight = m_SwapchainExtent.height;
+					Framebuffer = Image.Framebuffer;
+				}
+
+				if (NativePipeline->GetDescription().ColorFormat != TargetFormat)
+				{
+					return std::unexpected(GraphicsError{
+						GraphicsErrorCode::InvalidDescription,
+						"Graphics pipeline color format does not match the active render target"
+					});
+				}
+
 				const nvrhi::Viewport Viewport(
-					static_cast<float>(m_SwapchainExtent.width),
-					static_cast<float>(m_SwapchainExtent.height));
+					static_cast<float>(TargetWidth),
+					static_cast<float>(TargetHeight));
 				nvrhi::ViewportState ViewportState;
 				ViewportState.addViewportAndScissorRect(Viewport);
 
 				nvrhi::GraphicsState State;
 				State
 					.setPipeline(NativePipeline->GetNativePipeline())
-					.setFramebuffer(Image.Framebuffer)
+					.setFramebuffer(Framebuffer)
 					.setViewport(ViewportState)
 					.addVertexBuffer(nvrhi::VertexBufferBinding()
 						.setBuffer(NativeVertexBuffer->GetNativeBuffer())
@@ -1347,6 +1648,16 @@ namespace PulseForge
 			vk::Semaphore ImageAvailable;
 			nvrhi::CommandListHandle CommandList;
 			uint64_t SubmissionValue = 0;
+		};
+
+		struct ActiveRenderTarget
+		{
+			ColorTargetFormat ColorFormat = ColorTargetFormat::Swapchain;
+			uint32_t Width = 0;
+			uint32_t Height = 0;
+			nvrhi::FramebufferHandle Framebuffer;
+			nvrhi::TextureHandle ColorTexture;
+			nvrhi::TextureHandle DepthTexture;
 		};
 
 		struct SwapchainImage
@@ -1854,6 +2165,7 @@ namespace PulseForge
 					PF_CORE_ERROR("Vulkan shutdown wait failed: {0}", Exception.what());
 				}
 			}
+			m_ActiveRenderTarget.reset();
 
 			if (m_Device)
 			{
@@ -1917,6 +2229,7 @@ namespace PulseForge
 		std::vector<const char*> m_EnabledInstanceExtensions;
 		std::vector<const char*> m_EnabledLayers;
 		std::array<FrameContext, FramesInFlight> m_Frames;
+		std::optional<ActiveRenderTarget> m_ActiveRenderTarget;
 		std::vector<SwapchainImage> m_SwapchainImages;
 		vk::SwapchainKHR m_Swapchain;
 		vk::Extent2D m_SwapchainExtent;

@@ -190,6 +190,7 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/Buffer.cpp
 	PulseForge/Source/Private/Renderer/Mesh.cpp
 	PulseForge/Source/Private/Renderer/Texture.cpp
+	PulseForge/Source/Private/Renderer/RenderTarget.cpp
 	PulseForge/Source/Private/Renderer/Binding.cpp
 	PulseForge/Source/Private/Renderer/Graphics.cpp
 	PulseForge/Source/Private/Renderer/RendererBackend.cpp

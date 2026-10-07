@@ -77,6 +77,11 @@ namespace PulseForge
 			const auto SlotValidation = ValidateSlot(BindingResourceType::Texture2D, TextureBinding.Slot);
 			if (!SlotValidation)
 				return std::unexpected(SlotValidation.error());
+			if (!HasTextureUsage(TextureBinding.Resource.get().GetDescription().Usage, TextureUsage::ShaderResource) ||
+				TextureBinding.Resource.get().GetDescription().Format == TextureFormat::Depth32Float)
+			{
+				return MakeError(BindingErrorCode::InvalidSet, "Texture binding requires a color texture with ShaderResource usage");
+			}
 
 			const auto LayoutItem = std::find_if(LayoutItems.begin(), LayoutItems.end(), [&TextureBinding](const auto& Item)
 			{

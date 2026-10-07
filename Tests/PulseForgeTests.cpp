@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <iostream>
+#include <limits>
 #include <string_view>
 
 #include "Assets/AssetMetadata.h"
@@ -30,6 +31,7 @@
 #include "Renderer/Buffer.h"
 #include "Renderer/Graphics.h"
 #include "Renderer/Mesh.h"
+#include "Renderer/RenderTarget.h"
 #include "Renderer/Vulkan/VulkanSupport.h"
 #include "Scene/Scene.h"
 #include "Scene/SceneRenderSnapshot.h"
@@ -4477,6 +4479,13 @@ end
 		UnsupportedTarget.ColorFormat = static_cast<ColorTargetFormat>(0xff);
 		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(UnsupportedTarget).has_value());
 
+		auto UnormTarget = Pipeline;
+		UnormTarget.ColorFormat = ColorTargetFormat::RGBA8_UNorm;
+		PF_CHECK(Tests, ValidateGraphicsPipelineDescription(UnormTarget).has_value());
+		auto SrgbTarget = Pipeline;
+		SrgbTarget.ColorFormat = ColorTargetFormat::RGBA8_Srgb;
+		PF_CHECK(Tests, ValidateGraphicsPipelineDescription(SrgbTarget).has_value());
+
 		auto DepthTestedPipeline = Pipeline;
 		DepthTestedPipeline.Depth.TestEnabled = true;
 		DepthTestedPipeline.Depth.WriteEnabled = true;
@@ -4616,6 +4625,50 @@ end
 		ColorAsDepthAttachment.Usage = TextureUsage::DepthStencilAttachment;
 		PF_CHECK(Tests, !ValidateTextureUpload(ColorAsDepthAttachment, 16).has_value());
 
+		auto RenderableColor = Description;
+		RenderableColor.Usage = TextureUsage::ShaderResource | TextureUsage::ColorAttachment;
+		PF_CHECK(Tests, ValidateTextureUpload(RenderableColor, 0).value() == 0);
+		PF_CHECK(Tests, ValidateTextureUpload(RenderableColor, 16).value() == 16);
+		PF_CHECK(Tests, !ValidateTextureUpload(RenderableColor, 15).has_value());
+
+		auto AttachmentOnly = Description;
+		AttachmentOnly.Usage = TextureUsage::ColorAttachment;
+		PF_CHECK(Tests, ValidateTextureUpload(AttachmentOnly, 0).value() == 0);
+
+		auto MissingShaderUpload = Description;
+		PF_CHECK(Tests, !ValidateTextureUpload(MissingShaderUpload, 0).has_value());
+
+		auto UnknownUsage = Description;
+		UnknownUsage.Usage = static_cast<TextureUsage>(0x80);
+		PF_CHECK(Tests, !ValidateTextureUpload(UnknownUsage, 16).has_value());
+
+		auto InvalidDepthUsage = DepthDescription;
+		InvalidDepthUsage.Usage = TextureUsage::DepthStencilAttachment | TextureUsage::ShaderResource;
+		PF_CHECK(Tests, !ValidateTextureUpload(InvalidDepthUsage, 0).has_value());
+
+		RenderTargetDesc TargetDescription;
+		TargetDescription.Width = 800;
+		TargetDescription.Height = 600;
+		PF_CHECK(Tests, ValidateRenderTargetDescription(TargetDescription).has_value());
+		auto ZeroTargetWidth = TargetDescription;
+		ZeroTargetWidth.Width = 0;
+		PF_CHECK(Tests, !ValidateRenderTargetDescription(ZeroTargetWidth).has_value());
+		auto SwapchainTarget = TargetDescription;
+		SwapchainTarget.ColorFormat = ColorTargetFormat::Swapchain;
+		PF_CHECK(Tests, !ValidateRenderTargetDescription(SwapchainTarget).has_value());
+		auto UnknownTargetFormat = TargetDescription;
+		UnknownTargetFormat.ColorFormat = static_cast<ColorTargetFormat>(0xff);
+		PF_CHECK(Tests, !ValidateRenderTargetDescription(UnknownTargetFormat).has_value());
+
+		RenderTargetClearValue ClearValue;
+		PF_CHECK(Tests, ValidateRenderTargetClearValue(ClearValue).has_value());
+		auto InvalidClearDepth = ClearValue;
+		InvalidClearDepth.Depth = 1.1f;
+		PF_CHECK(Tests, !ValidateRenderTargetClearValue(InvalidClearDepth).has_value());
+		auto NonFiniteClearColor = ClearValue;
+		NonFiniteClearColor.Color[2] = std::numeric_limits<float>::infinity();
+		PF_CHECK(Tests, !ValidateRenderTargetClearValue(NonFiniteClearColor).has_value());
+
 		SamplerDesc SamplerDescription;
 		PF_CHECK(Tests, ValidateSamplerDescription(SamplerDescription).has_value());
 		auto UnsupportedFilter = SamplerDescription;
@@ -4649,6 +4702,12 @@ end
 		TextureDescription.Height = 1;
 		TextureDescription.DebugName = "Test texture";
 		TestTexture FakeTexture(TextureDescription);
+		TextureDesc DepthTextureDescription;
+		DepthTextureDescription.Width = 1;
+		DepthTextureDescription.Height = 1;
+		DepthTextureDescription.Format = TextureFormat::Depth32Float;
+		DepthTextureDescription.Usage = TextureUsage::DepthStencilAttachment;
+		TestTexture FakeDepthTexture(DepthTextureDescription);
 		TestSampler Sampler;
 		TestBuffer ConstantBuffer(BufferDesc{ 16, BufferUsage::Constant, "Test constants" });
 
@@ -4658,6 +4717,10 @@ end
 		SetDescription.Samplers.push_back({ 0, std::cref(static_cast<const PulseForge::Sampler&>(Sampler)) });
 		SetDescription.Buffers.push_back({ 0, std::cref(static_cast<const Buffer&>(ConstantBuffer)) });
 		PF_CHECK(Tests, ValidateBindingSet(SetDescription).has_value());
+
+		auto DepthTextureBinding = SetDescription;
+		DepthTextureBinding.Textures[0].Resource = std::cref(static_cast<const Texture&>(FakeDepthTexture));
+		PF_CHECK(Tests, !ValidateBindingSet(DepthTextureBinding).has_value());
 
 		auto MissingTexture = SetDescription;
 		MissingTexture.Textures.clear();

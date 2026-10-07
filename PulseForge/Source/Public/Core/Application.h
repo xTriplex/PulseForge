@@ -10,6 +10,7 @@
 #include "Renderer/Binding.h"
 #include "Renderer/Graphics.h"
 #include "Renderer/Mesh.h"
+#include "Renderer/RenderTarget.h"
 
 #include <memory>
 
@@ -41,6 +42,10 @@ namespace PulseForge
 			uint64_t DestinationOffset,
 			std::span<const std::byte> Data);
 		MeshCreateResult CreateMesh(const MeshDesc& Description);
+		RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description);
+		// The target may be rendered only during a frame; EndFrame closes an unclosed target with a diagnostic.
+		GraphicsResult BeginRenderTarget(const RenderTarget& Target, const RenderTargetClearValue& ClearValue = {});
+		GraphicsResult EndRenderTarget();
 		TextureCreateResult CreateTexture(const TextureDesc& Description, std::span<const std::byte> InitialData);
 		SamplerCreateResult CreateSampler(const SamplerDesc& Description);
 		BindingLayoutCreateResult CreateBindingLayout(const BindingLayoutDesc& Description);

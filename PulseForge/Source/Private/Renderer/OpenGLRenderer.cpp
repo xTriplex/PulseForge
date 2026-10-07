@@ -69,6 +69,30 @@ namespace PulseForge
 			glfwSwapBuffers(m_NativeWindow);
 		}
 
+		RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc&) override
+		{
+			return std::unexpected(RenderTargetError{
+				RenderTargetErrorCode::UnsupportedFeature,
+				"The transitional OpenGL backend does not support PulseForge render targets"
+			});
+		}
+
+		GraphicsResult BeginRenderTarget(const RenderTarget&, const RenderTargetClearValue&) override
+		{
+			return std::unexpected(GraphicsError{
+				GraphicsErrorCode::UnsupportedFeature,
+				"The transitional OpenGL backend does not support PulseForge render targets"
+			});
+		}
+
+		GraphicsResult EndRenderTarget() override
+		{
+			return std::unexpected(GraphicsError{
+				GraphicsErrorCode::UnsupportedFeature,
+				"The transitional OpenGL backend does not support PulseForge render targets"
+			});
+		}
+
 		BufferCreateResult CreateBuffer(
 			const BufferDesc& Description,
 			std::span<const std::byte> InitialData) override

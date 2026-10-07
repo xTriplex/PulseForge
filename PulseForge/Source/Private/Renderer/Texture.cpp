@@ -25,6 +25,14 @@ namespace PulseForge
 		if (Description.Width == 0 || Description.Height == 0)
 			return MakeTextureError(TextureErrorCode::InvalidDescription, "Texture dimensions must be non-zero");
 
+		constexpr uint8_t SupportedUsageBits =
+			static_cast<uint8_t>(TextureUsage::ShaderResource) |
+			static_cast<uint8_t>(TextureUsage::ColorAttachment) |
+			static_cast<uint8_t>(TextureUsage::DepthStencilAttachment);
+		const uint8_t UsageBits = static_cast<uint8_t>(Description.Usage);
+		if (UsageBits == 0 || (UsageBits & ~SupportedUsageBits) != 0)
+			return MakeTextureError(TextureErrorCode::InvalidDescription, "Texture usage contains no supported usage or unknown flags");
+
 		if (Description.Format == TextureFormat::Depth32Float)
 		{
 			if (Description.Usage != TextureUsage::DepthStencilAttachment)
@@ -39,8 +47,13 @@ namespace PulseForge
 		if (Description.Format != TextureFormat::RGBA8_UNorm && Description.Format != TextureFormat::RGBA8_Srgb)
 			return MakeTextureError(TextureErrorCode::InvalidDescription, "Texture format is not supported by PulseForge");
 
-		if (Description.Usage != TextureUsage::ShaderResource)
-			return MakeTextureError(TextureErrorCode::InvalidDescription, "RGBA8 textures currently support ShaderResource usage only");
+		if (HasTextureUsage(Description.Usage, TextureUsage::DepthStencilAttachment))
+			return MakeTextureError(TextureErrorCode::InvalidDescription, "RGBA8 textures cannot use DepthStencilAttachment usage");
+
+		const bool IsShaderResource = HasTextureUsage(Description.Usage, TextureUsage::ShaderResource);
+		const bool IsColorAttachment = HasTextureUsage(Description.Usage, TextureUsage::ColorAttachment);
+		if (!IsShaderResource && !IsColorAttachment)
+			return MakeTextureError(TextureErrorCode::InvalidDescription, "RGBA8 textures require ShaderResource or ColorAttachment usage");
 
 		constexpr uint64_t BytesPerPixel = 4;
 		const uint64_t Width = Description.Width;
@@ -51,6 +64,9 @@ namespace PulseForge
 		const uint64_t RequiredBytes = Width * Height * BytesPerPixel;
 		if (RequiredBytes > std::numeric_limits<size_t>::max())
 			return MakeTextureError(TextureErrorCode::InvalidDescription, "Texture upload exceeds the addressable memory size");
+
+		if (InitialDataSize == 0 && IsColorAttachment)
+			return size_t{ 0 };
 
 		if (InitialDataSize != RequiredBytes)
 			return MakeTextureError(TextureErrorCode::InvalidData, "RGBA8 texture upload must provide exactly width * height * 4 bytes");

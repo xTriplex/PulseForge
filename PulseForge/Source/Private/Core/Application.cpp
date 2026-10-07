@@ -178,6 +178,34 @@ namespace PulseForge
 			std::move(IndexBuffer)));
 	}
 
+	RenderTargetCreateResult Application::CreateRenderTarget(const RenderTargetDesc& Description)
+	{
+		const auto Validation = ValidateRenderTargetDescription(Description);
+		if (!Validation)
+			return std::unexpected(Validation.error());
+
+		return m_Renderer->CreateRenderTarget(Description);
+	}
+
+	GraphicsResult Application::BeginRenderTarget(const RenderTarget& Target, const RenderTargetClearValue& ClearValue)
+	{
+		const auto Validation = ValidateRenderTargetClearValue(ClearValue);
+		if (!Validation)
+		{
+			return std::unexpected(GraphicsError{
+				GraphicsErrorCode::InvalidDescription,
+				Validation.error().Message
+			});
+		}
+
+		return m_Renderer->BeginRenderTarget(Target, ClearValue);
+	}
+
+	GraphicsResult Application::EndRenderTarget()
+	{
+		return m_Renderer->EndRenderTarget();
+	}
+
 	TextureCreateResult Application::CreateTexture(
 		const TextureDesc& Description,
 		std::span<const std::byte> InitialData)

@@ -123,8 +123,12 @@ namespace PulseForge
 		if (Description.Topology != PrimitiveTopology::TriangleList)
 			return MakeError(GraphicsErrorCode::InvalidDescription, "Only triangle-list topology is currently supported");
 
-		if (Description.ColorFormat != ColorTargetFormat::Swapchain)
-			return MakeError(GraphicsErrorCode::InvalidDescription, "Only the active swapchain color target is currently supported");
+		if (Description.ColorFormat != ColorTargetFormat::Swapchain &&
+			Description.ColorFormat != ColorTargetFormat::RGBA8_UNorm &&
+			Description.ColorFormat != ColorTargetFormat::RGBA8_Srgb)
+		{
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline specifies an unsupported color target format");
+		}
 
 		if (Description.BindingLayouts.size() > 8)
 			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline exceeds PulseForge's 8-layout limit");
