@@ -1384,7 +1384,7 @@ namespace PulseForge
 					.setFillMode(Description.Rasterizer.Wireframe
 						? nvrhi::RasterFillMode::Wireframe
 						: nvrhi::RasterFillMode::Solid)
-					.setScissorEnable(true);
+					.setScissorEnable(Description.Rasterizer.ScissorEnabled);
 
 				nvrhi::ComparisonFunc DepthComparison = nvrhi::ComparisonFunc::Less;
 				switch (Description.Depth.Compare)
@@ -1472,7 +1472,12 @@ namespace PulseForge
 			const DrawArguments& Arguments,
 			std::span<const BindingSet* const> BindingSets) override
 		{
-			const GraphicsResult StateResult = SetDrawState(Pipeline, VertexBuffer, nullptr, BindingSets);
+			const GraphicsResult StateResult = SetDrawState(
+				Pipeline,
+				VertexBuffer,
+				nullptr,
+				BindingSets,
+				std::nullopt);
 			if (!StateResult)
 				return StateResult;
 
@@ -1508,7 +1513,12 @@ namespace PulseForge
 			const DrawIndexedArguments& Arguments,
 			std::span<const BindingSet* const> BindingSets) override
 		{
-			const GraphicsResult StateResult = SetDrawState(Pipeline, VertexBuffer, &IndexBuffer, BindingSets);
+			const GraphicsResult StateResult = SetDrawState(
+				Pipeline,
+				VertexBuffer,
+				&IndexBuffer,
+				BindingSets,
+				Arguments.Scissor);
 			if (!StateResult)
 				return StateResult;
 
@@ -1543,7 +1553,8 @@ namespace PulseForge
 			const GraphicsPipeline& Pipeline,
 			const Buffer& VertexBuffer,
 			const Buffer* IndexBuffer,
-			std::span<const BindingSet* const> BindingSets)
+			std::span<const BindingSet* const> BindingSets,
+			const std::optional<ScissorRect>& Scissor)
 		{
 			if (!m_FrameActive)
 			{
@@ -1600,7 +1611,28 @@ namespace PulseForge
 					static_cast<float>(TargetWidth),
 					static_cast<float>(TargetHeight));
 				nvrhi::ViewportState ViewportState;
-				ViewportState.addViewportAndScissorRect(Viewport);
+				ViewportState.addViewport(Viewport);
+				if (Scissor)
+				{
+					const uint64_t Right = static_cast<uint64_t>(Scissor->X) + Scissor->Width;
+					const uint64_t Bottom = static_cast<uint64_t>(Scissor->Y) + Scissor->Height;
+					if (Right > TargetWidth || Bottom > TargetHeight ||
+						Right > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+						Bottom > static_cast<uint64_t>(std::numeric_limits<int>::max()))
+					{
+						return std::unexpected(GraphicsError{
+							GraphicsErrorCode::InvalidDrawArguments,
+							"Indexed draw scissor exceeds the active framebuffer extent"
+						});
+					}
+					ViewportState.addScissorRect(nvrhi::Rect(
+						static_cast<int>(Scissor->X),
+						static_cast<int>(Right),
+						static_cast<int>(Scissor->Y),
+						static_cast<int>(Bottom)));
+				}
+				else
+					ViewportState.addScissorRect(nvrhi::Rect(Viewport));
 
 				nvrhi::GraphicsState State;
 				State

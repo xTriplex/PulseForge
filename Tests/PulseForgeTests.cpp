@@ -4525,6 +4525,64 @@ end
 		auto ZeroInstances = Triangle;
 		ZeroInstances.InstanceCount = 0;
 		PF_CHECK(Tests, !ValidateDrawArguments(ZeroInstances, Pipeline, VertexBuffer).has_value());
+
+		BufferDesc IndexedVertexBuffer{ sizeof(float) * 6 * 3, BufferUsage::Vertex, "Raw indexed draw vertices" };
+		BufferDesc RawIndexBuffer{ sizeof(uint32_t) * 6, BufferUsage::Index, "Raw indexed draw indices" };
+		const DrawIndexedArguments RawIndexedTriangle{ 3, 1, 0, 0 };
+		PF_CHECK(Tests, ValidateIndexedBufferDrawArguments(
+			RawIndexedTriangle,
+			Pipeline,
+			IndexedVertexBuffer,
+			RawIndexBuffer).has_value());
+
+		auto IndexRangePastEnd = RawIndexedTriangle;
+		IndexRangePastEnd.FirstIndex = 4;
+		PF_CHECK(Tests, !ValidateIndexedBufferDrawArguments(
+			IndexRangePastEnd,
+			Pipeline,
+			IndexedVertexBuffer,
+			RawIndexBuffer).has_value());
+
+		auto WrongRawIndexBuffer = RawIndexBuffer;
+		WrongRawIndexBuffer.Usage = BufferUsage::Vertex;
+		PF_CHECK(Tests, !ValidateIndexedBufferDrawArguments(
+			RawIndexedTriangle,
+			Pipeline,
+			IndexedVertexBuffer,
+			WrongRawIndexBuffer).has_value());
+
+		auto MisalignedIndexBuffer = RawIndexBuffer;
+		++MisalignedIndexBuffer.ByteSize;
+		PF_CHECK(Tests, !ValidateIndexedBufferDrawArguments(
+			RawIndexedTriangle,
+			Pipeline,
+			IndexedVertexBuffer,
+			MisalignedIndexBuffer).has_value());
+
+		auto ScissoredPipeline = Pipeline;
+		ScissoredPipeline.Rasterizer.ScissorEnabled = true;
+		auto ScissoredDraw = RawIndexedTriangle;
+		ScissoredDraw.Scissor = ScissorRect{ 10, 12, 64, 48 };
+		PF_CHECK(Tests, ValidateIndexedBufferDrawArguments(
+			ScissoredDraw,
+			ScissoredPipeline,
+			IndexedVertexBuffer,
+			RawIndexBuffer).has_value());
+
+		auto MissingScissorState = Pipeline;
+		PF_CHECK(Tests, !ValidateIndexedBufferDrawArguments(
+			ScissoredDraw,
+			MissingScissorState,
+			IndexedVertexBuffer,
+			RawIndexBuffer).has_value());
+
+		auto EmptyScissor = ScissoredDraw;
+		EmptyScissor.Scissor->Width = 0;
+		PF_CHECK(Tests, !ValidateIndexedBufferDrawArguments(
+			EmptyScissor,
+			ScissoredPipeline,
+			IndexedVertexBuffer,
+			RawIndexBuffer).has_value());
 	}
 
 	void TestConstantBufferBindingValidation(TestRunner& Tests)

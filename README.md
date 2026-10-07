@@ -55,7 +55,7 @@ Cleanup is optional and manual; normal builds retain their outputs.
 
 ## Running
 
-Run `PulseForgeEditor` from its output directory for the docking editor shell. It uses the OpenGL fallback for ImGui and supports basic project and scene file workflows. See [the editor notes](Docs/Editor.md).
+Run `PulseForgeEditor` from its output directory for the docking editor. Vulkan is the default; its Scene Viewport renders the active authored or runtime scene through the PulseForge renderer. The transitional OpenGL editor shell can be selected with `-DPULSEFORGE_EDITOR_RENDERER=OpenGL` at configure time, but it has no scene viewport. See [the editor notes](Docs/Editor.md).
 
 `PulseForgeGame` uses Vulkan by default. Run it from its output directory so it can find the generated `Shaders` folder. To build the sample with the OpenGL fallback, configure with:
 

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -85,6 +86,7 @@ namespace PulseForge
 	{
 		CullMode Cull = CullMode::None;
 		bool Wireframe = false;
+		bool ScissorEnabled = false;
 	};
 
 	struct BlendState
@@ -152,12 +154,21 @@ namespace PulseForge
 		uint32_t FirstInstance = 0;
 	};
 
+	struct ScissorRect
+	{
+		uint32_t X = 0;
+		uint32_t Y = 0;
+		uint32_t Width = 0;
+		uint32_t Height = 0;
+	};
+
 	struct DrawIndexedArguments
 	{
 		uint32_t IndexCount = 0;
 		uint32_t InstanceCount = 1;
 		uint32_t FirstIndex = 0;
 		uint32_t FirstInstance = 0;
+		std::optional<ScissorRect> Scissor;
 	};
 
 	enum class GraphicsErrorCode : uint8_t
@@ -191,6 +202,11 @@ namespace PulseForge
 		const DrawArguments& Arguments,
 		const GraphicsPipelineDesc& Pipeline,
 		const BufferDesc& VertexBuffer);
+	[[nodiscard]] PULSEFORGE_API GraphicsResult ValidateIndexedBufferDrawArguments(
+		const DrawIndexedArguments& Arguments,
+		const GraphicsPipelineDesc& Pipeline,
+		const BufferDesc& VertexBuffer,
+		const BufferDesc& IndexBuffer);
 	[[nodiscard]] PULSEFORGE_API GraphicsResult ValidateDrawBindingSets(
 		const GraphicsPipelineDesc& Pipeline,
 		std::span<const class BindingSet* const> BindingSets);

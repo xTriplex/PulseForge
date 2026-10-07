@@ -3,6 +3,7 @@
 #include "Renderer/Graphics.h"
 
 #include <array>
+#include <limits>
 #include <optional>
 
 namespace PulseForge
@@ -179,6 +180,50 @@ namespace PulseForge
 		const uint64_t AvailableVertexCount = VertexBuffer.ByteSize / Pipeline.VertexLayout.Stride;
 		if (RequiredVertexCount > AvailableVertexCount)
 			return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Draw vertex range exceeds the vertex buffer capacity");
+
+		return {};
+	}
+
+	GraphicsResult ValidateIndexedBufferDrawArguments(
+		const DrawIndexedArguments& Arguments,
+		const GraphicsPipelineDesc& Pipeline,
+		const BufferDesc& VertexBuffer,
+		const BufferDesc& IndexBuffer)
+	{
+		if (Arguments.IndexCount == 0 || Arguments.InstanceCount == 0)
+			return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Indexed draw index and instance counts must be non-zero");
+
+		if (VertexBuffer.Usage != BufferUsage::Vertex || VertexBuffer.ByteSize == 0)
+			return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Indexed draw requires a non-empty vertex buffer");
+
+		if (IndexBuffer.Usage != BufferUsage::Index || IndexBuffer.ByteSize == 0 ||
+			IndexBuffer.ByteSize % sizeof(uint32_t) != 0)
+		{
+			return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Indexed draw requires a 32-bit index buffer");
+		}
+
+		const GraphicsResult LayoutValidation = ValidateVertexLayout(Pipeline.VertexLayout);
+		if (!LayoutValidation)
+			return LayoutValidation;
+		if (VertexBuffer.ByteSize / Pipeline.VertexLayout.Stride == 0)
+			return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Indexed draw vertex buffer is smaller than one vertex");
+
+		const uint64_t RequiredIndexCount = static_cast<uint64_t>(Arguments.FirstIndex) + Arguments.IndexCount;
+		if (RequiredIndexCount > IndexBuffer.ByteSize / sizeof(uint32_t))
+			return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Indexed draw range exceeds the index buffer capacity");
+
+		if (Arguments.Scissor)
+		{
+			const ScissorRect& Scissor = *Arguments.Scissor;
+			if (!Pipeline.Rasterizer.ScissorEnabled)
+				return MakeError(GraphicsErrorCode::InvalidDrawArguments, "A draw scissor requires scissor testing in the graphics pipeline");
+			if (Scissor.Width == 0 || Scissor.Height == 0 ||
+				static_cast<uint64_t>(Scissor.X) + Scissor.Width > std::numeric_limits<uint32_t>::max() ||
+				static_cast<uint64_t>(Scissor.Y) + Scissor.Height > std::numeric_limits<uint32_t>::max())
+			{
+				return MakeError(GraphicsErrorCode::InvalidDrawArguments, "Indexed draw scissor must have a valid, non-empty extent");
+			}
+		}
 
 		return {};
 	}

@@ -5,6 +5,13 @@ project(PulseForge LANGUAGES C CXX)
 set(PULSEFORGE_SAMPLE_RENDERER "Vulkan" CACHE STRING "Renderer used by PulseForgeGame (Vulkan or OpenGL)")
 set_property(CACHE PULSEFORGE_SAMPLE_RENDERER PROPERTY STRINGS Vulkan OpenGL)
 option(PULSEFORGE_BUILD_EDITOR "Build the experimental PulseForge editor shell" ON)
+set(PULSEFORGE_EDITOR_RENDERER "Vulkan" CACHE STRING "Renderer used by PulseForgeEditor (Vulkan or OpenGL)")
+set_property(CACHE PULSEFORGE_EDITOR_RENDERER PROPERTY STRINGS Vulkan OpenGL)
+
+if(PULSEFORGE_BUILD_EDITOR AND NOT PULSEFORGE_EDITOR_RENDERER STREQUAL "Vulkan" AND
+	NOT PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
+	message(FATAL_ERROR "PULSEFORGE_EDITOR_RENDERER must be Vulkan or OpenGL")
+endif()
 
 if(NOT WIN32)
 	message(FATAL_ERROR "PulseForge currently supports Windows only; desktop platform support is being implemented separately.")
@@ -136,7 +143,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	set(NFD_INSTALL OFF CACHE BOOL "" FORCE)
 	add_subdirectory(PulseForge/Vendor/nativefiledialog)
 
-	add_library(PulseForgeImGui STATIC
+	set(PULSEFORGE_IMGUI_SOURCES
 		PulseForge/Vendor/imgui/imgui.cpp
 		PulseForge/Vendor/imgui/imgui_draw.cpp
 		PulseForge/Vendor/imgui/imgui_tables.cpp
@@ -144,13 +151,19 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForge/Vendor/imgui/imgui_demo.cpp
 		PulseForge/Vendor/imgui/misc/cpp/imgui_stdlib.cpp
 		PulseForge/Vendor/imgui/backends/imgui_impl_glfw.cpp
-		PulseForge/Vendor/imgui/backends/imgui_impl_opengl3.cpp
 	)
+	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
+		list(APPEND PULSEFORGE_IMGUI_SOURCES PulseForge/Vendor/imgui/backends/imgui_impl_opengl3.cpp)
+	endif()
+	add_library(PulseForgeImGui STATIC ${PULSEFORGE_IMGUI_SOURCES})
 	target_include_directories(PulseForgeImGui PUBLIC
 		PulseForge/Vendor/imgui
 		PulseForge/Vendor/imgui/backends
 	)
-	target_link_libraries(PulseForgeImGui PUBLIC glfw opengl32)
+	target_link_libraries(PulseForgeImGui PUBLIC glfw)
+	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
+		target_link_libraries(PulseForgeImGui PUBLIC opengl32)
+	endif()
 	target_compile_options(PulseForgeImGui PRIVATE
 		$<$<CXX_COMPILER_ID:MSVC>:/EHsc>
 		$<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Dist>>:/O2>
@@ -258,12 +271,23 @@ endif()
 target_link_libraries(PulseForgeGame PRIVATE PulseForge)
 
 if(PULSEFORGE_BUILD_EDITOR)
-	add_executable(PulseForgeEditor PulseForgeEditor/Source/Private/EditorApplication.cpp)
+	add_executable(PulseForgeEditor
+		PulseForgeEditor/Source/Private/EditorApplication.cpp
+		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
+	)
+	target_include_directories(PulseForgeEditor PRIVATE PulseForgeEditor/Source/Public)
 	target_compile_definitions(PulseForgeEditor PRIVATE PF_PLATFORM_WINDOWS)
+	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
+		target_compile_definitions(PulseForgeEditor PRIVATE PF_EDITOR_RENDERER_OPENGL)
+	else()
+		target_compile_definitions(PulseForgeEditor PRIVATE PF_EDITOR_SHADER_DIRECTORY="Shaders")
+	endif()
 	target_link_libraries(PulseForgeEditor PRIVATE PulseForge PulseForgeImGui nfd::nfd spdlog::spdlog)
+	set_property(TARGET PulseForgeEditor PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeEditor>")
 endif()
 
-if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
+if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
+	(PULSEFORGE_BUILD_EDITOR AND PULSEFORGE_EDITOR_RENDERER STREQUAL "Vulkan"))
 	# Pin the compiler executable and its archive hash instead of relying on a
 	# developer-installed DXC or whatever happens to be on PATH. DXC is a
 	# build-time tool only; runtime builds consume the generated SPIR-V files.
@@ -321,35 +345,77 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
 		VERBATIM
 		COMMENT "Compiling PulseForge triangle fragment shader to SPIR-V"
 	)
-	add_custom_target(PulseForgeShaderAssets
+	add_custom_target(PulseForgeSceneShaderAssets
 		DEPENDS "${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}")
-	add_dependencies(PulseForgeGame PulseForgeShaderAssets)
-	add_custom_command(TARGET PulseForgeGame POST_BUILD
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders"
-		COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-			"${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Triangle.vs.spv"
-		COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-			"${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Triangle.ps.spv"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
-		COMMAND "${CMAKE_COMMAND}" -E copy_directory
-			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Models" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Textures"
-		COMMAND "${CMAKE_COMMAND}" -E copy_directory
-			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Textures" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Textures"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scenes"
-		COMMAND "${CMAKE_COMMAND}" -E copy_directory
-			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Scenes" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scenes"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Materials"
-		COMMAND "${CMAKE_COMMAND}" -E copy_directory
-			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Materials" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Materials"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scripts"
-		COMMAND "${CMAKE_COMMAND}" -E copy_directory
-			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Scripts" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scripts"
-		COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/PulseForgeGame.pfproj" "$<TARGET_FILE_DIR:PulseForgeGame>/PulseForgeGame.pfproj"
-		VERBATIM
-	)
-	set_property(TARGET PulseForgeGame PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGame>")
+	if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
+		add_dependencies(PulseForgeGame PulseForgeSceneShaderAssets)
+		add_custom_command(TARGET PulseForgeGame POST_BUILD
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Triangle.vs.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Triangle.ps.spv"
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
+			COMMAND "${CMAKE_COMMAND}" -E copy_directory
+				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Models" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Textures"
+			COMMAND "${CMAKE_COMMAND}" -E copy_directory
+				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Textures" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Textures"
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scenes"
+			COMMAND "${CMAKE_COMMAND}" -E copy_directory
+				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Scenes" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scenes"
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Materials"
+			COMMAND "${CMAKE_COMMAND}" -E copy_directory
+				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Materials" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Materials"
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scripts"
+			COMMAND "${CMAKE_COMMAND}" -E copy_directory
+				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Scripts" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scripts"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/PulseForgeGame.pfproj" "$<TARGET_FILE_DIR:PulseForgeGame>/PulseForgeGame.pfproj"
+			VERBATIM
+		)
+		set_property(TARGET PulseForgeGame PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGame>")
+	endif()
+
+	if(PULSEFORGE_BUILD_EDITOR AND PULSEFORGE_EDITOR_RENDERER STREQUAL "Vulkan")
+		set(PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/Editor/Shaders")
+		set(PULSEFORGE_EDITOR_IMGUI_VERTEX_SPIRV "${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}/EditorImGui.vs.spv")
+		set(PULSEFORGE_EDITOR_IMGUI_FRAGMENT_SPIRV "${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}/EditorImGui.ps.spv")
+		set(PULSEFORGE_EDITOR_IMGUI_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Shaders/EditorImGui.hlsl")
+		add_custom_command(
+			OUTPUT "${PULSEFORGE_EDITOR_IMGUI_VERTEX_SPIRV}"
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}"
+			COMMAND "${PULSEFORGE_DXC}" -spirv -T vs_6_0 -E VSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
+				-Fo "${PULSEFORGE_EDITOR_IMGUI_VERTEX_SPIRV}" "${PULSEFORGE_EDITOR_IMGUI_HLSL}"
+			DEPENDS "${PULSEFORGE_EDITOR_IMGUI_HLSL}"
+			VERBATIM
+			COMMENT "Compiling PulseForge editor ImGui vertex shader to SPIR-V"
+		)
+		add_custom_command(
+			OUTPUT "${PULSEFORGE_EDITOR_IMGUI_FRAGMENT_SPIRV}"
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}"
+			COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
+				-Fo "${PULSEFORGE_EDITOR_IMGUI_FRAGMENT_SPIRV}" "${PULSEFORGE_EDITOR_IMGUI_HLSL}"
+			DEPENDS "${PULSEFORGE_EDITOR_IMGUI_HLSL}"
+			VERBATIM
+			COMMENT "Compiling PulseForge editor ImGui fragment shader to SPIR-V"
+		)
+		add_custom_target(PulseForgeEditorShaderAssets
+			DEPENDS "${PULSEFORGE_EDITOR_IMGUI_VERTEX_SPIRV}" "${PULSEFORGE_EDITOR_IMGUI_FRAGMENT_SPIRV}")
+		add_dependencies(PulseForgeEditor PulseForgeSceneShaderAssets PulseForgeEditorShaderAssets)
+		add_custom_command(TARGET PulseForgeEditor POST_BUILD
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/Triangle.vs.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/Triangle.ps.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_EDITOR_IMGUI_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/EditorImGui.vs.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_EDITOR_IMGUI_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/EditorImGui.ps.spv"
+			VERBATIM
+		)
+	endif()
 endif()
 
 include(CTest)

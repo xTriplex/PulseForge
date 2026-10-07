@@ -332,6 +332,28 @@ namespace PulseForge
 			BindingSets);
 	}
 
+	GraphicsResult Application::DrawIndexed(
+		const GraphicsPipeline& Pipeline,
+		const Buffer& VertexBuffer,
+		const Buffer& IndexBuffer,
+		const DrawIndexedArguments& Arguments,
+		std::span<const BindingSet* const> BindingSets)
+	{
+		const GraphicsResult Validation = ValidateIndexedBufferDrawArguments(
+			Arguments,
+			Pipeline.GetDescription(),
+			VertexBuffer.GetDescription(),
+			IndexBuffer.GetDescription());
+		if (!Validation)
+			return Validation;
+
+		const GraphicsResult BindingValidation = ValidateDrawBindingSets(Pipeline.GetDescription(), BindingSets);
+		if (!BindingValidation)
+			return BindingValidation;
+
+		return m_Renderer->DrawIndexed(Pipeline, VertexBuffer, IndexBuffer, Arguments, BindingSets);
+	}
+
 	Application& Application::Get()
 	{
 		if (!s_Instance)

@@ -67,6 +67,12 @@ namespace PulseForge
 			const Mesh& Geometry,
 			const DrawIndexedArguments& Arguments,
 			std::span<const BindingSet* const> BindingSets = {});
+		GraphicsResult DrawIndexed(
+			const GraphicsPipeline& Pipeline,
+			const Buffer& VertexBuffer,
+			const Buffer& IndexBuffer,
+			const DrawIndexedArguments& Arguments,
+			std::span<const BindingSet* const> BindingSets = {});
 		static Application& Get();
 
 	private:

@@ -9,10 +9,12 @@
 #include "Assets/PrefabAssetService.h"
 #include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
+#include "Renderer/SceneRenderer.h"
 #include "Scene/Scene.h"
 #include "Scene/SceneSerializer.h"
 #include "Runtime/SceneRuntime.h"
 #include "Window/Window.h"
+#include "Editor/EditorImGuiRenderer.h"
 
 #include <GLFW/glfw3.h>
 #include <nfd.h>
@@ -20,17 +22,22 @@
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
 #include <backends/imgui_impl_glfw.h>
+#ifdef PF_EDITOR_RENDERER_OPENGL
 #include <backends/imgui_impl_opengl3.h>
+#endif
 #include <glm/gtc/quaternion.hpp>
 #include <spdlog/sinks/base_sink.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <deque>
+#include <expected>
 #include <filesystem>
 #include <functional>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -167,8 +174,10 @@ namespace
 
 			ImGui::SetCurrentContext(m_Context);
 			ImGuiIO& IO = ImGui::GetIO();
-			IO.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable |
-				ImGuiConfigFlags_ViewportsEnable;
+			IO.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
+			#ifdef PF_EDITOR_RENDERER_OPENGL
+			IO.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+			#endif
 			ImGui::StyleColorsDark();
 
 			ImGuiStyle& Style = ImGui::GetStyle();
@@ -176,19 +185,34 @@ namespace
 			Style.Colors[ImGuiCol_WindowBg].w = 1.0f;
 
 			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
+			#ifdef PF_EDITOR_RENDERER_OPENGL
 			if (!ImGui_ImplGlfw_InitForOpenGL(Window, true))
+			#else
+			if (!ImGui_ImplGlfw_InitForOther(Window, true))
+			#endif
 			{
 				ShutdownImGui();
 				throw std::runtime_error("Could not initialize the editor GLFW ImGui backend");
 			}
 			m_GlfwBackendActive = true;
 
+			#ifdef PF_EDITOR_RENDERER_OPENGL
 			if (!ImGui_ImplOpenGL3_Init("#version 410"))
 			{
 				ShutdownImGui();
 				throw std::runtime_error("Could not initialize the editor OpenGL ImGui backend");
 			}
 			m_OpenGLBackendActive = true;
+			#else
+			m_ImGuiRenderer = std::make_unique<PulseForgeEditor::EditorImGuiRenderer>();
+			auto& Runtime = PulseForge::Application::Get();
+			if (auto Result = m_ImGuiRenderer->Initialize(Runtime, std::filesystem::path(PF_EDITOR_SHADER_DIRECTORY)); !Result)
+			{
+				const std::string Message = "Could not initialize the Vulkan editor UI renderer: " + Result.error();
+				ShutdownImGui();
+				throw std::runtime_error(Message);
+			}
+			#endif
 			AttachConsoleSink();
 
 			if (NFD_Init() == NFD_OKAY)
@@ -204,6 +228,8 @@ namespace
 		{
 			StopRuntime();
 			DetachConsoleSink();
+			ResetViewportSceneRenderer();
+			ResetViewportTarget();
 			m_Scene.reset();
 			m_Project.reset();
 			ShutdownImGui();
@@ -212,34 +238,37 @@ namespace
 
 		void OnUpdate(PulseForge::Timestep DeltaTime) override
 		{
-			if (!m_SceneRuntime || !m_RuntimeScene)
-				return;
-
-			if (auto Result = m_SceneRuntime->Advance(*m_RuntimeScene, DeltaTime); !Result)
+			if (m_SceneRuntime && m_RuntimeScene)
 			{
-				const std::string Message = "Runtime update failed: " + Result.error().Message;
-				StopRuntime();
-				SetError(Message);
+				if (auto Result = m_SceneRuntime->Advance(*m_RuntimeScene, DeltaTime); !Result)
+				{
+					const std::string Message = "Runtime update failed: " + Result.error().Message;
+					StopRuntime();
+					SetError(Message);
+				}
 			}
+			PrepareViewportScene();
 		}
 
 		void OnRender() override
 		{
 			ImGui::SetCurrentContext(m_Context);
+			#ifdef PF_EDITOR_RENDERER_OPENGL
 			ImGui_ImplOpenGL3_NewFrame();
+			#endif
 			ImGui_ImplGlfw_NewFrame();
-			ImGuiIO& IO = ImGui::GetIO();
-			const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
-			IO.DisplaySize = ImVec2(static_cast<float>(Width), static_cast<float>(Height));
 			ImGui::NewFrame();
 
 			ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
 			DrawMainMenu();
 			DrawWorkspacePanels();
+			RenderViewportScene();
 
 			ImGui::Render();
+			#ifdef PF_EDITOR_RENDERER_OPENGL
 			ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
+			ImGuiIO& IO = ImGui::GetIO();
 			if (IO.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
 			{
 				GLFWwindow* MainContext = glfwGetCurrentContext();
@@ -247,6 +276,21 @@ namespace
 				ImGui::RenderPlatformWindowsDefault();
 				glfwMakeContextCurrent(MainContext);
 			}
+			#else
+			if (m_ImGuiRenderer)
+			{
+				if (auto Result = m_ImGuiRenderer->RenderDrawData(); !Result)
+				{
+					if (m_ImGuiRenderingError != Result.error())
+					{
+						m_ImGuiRenderingError = Result.error();
+						PF_ERROR("Editor UI rendering failed: {}", m_ImGuiRenderingError);
+					}
+				}
+				else
+					m_ImGuiRenderingError.clear();
+			}
+			#endif
 		}
 
 		void OnEvent(PulseForge::Event& Event) override
@@ -371,6 +415,7 @@ namespace
 			if (!MainScene && !MainScene.error().CommittedAsset)
 			{
 				StopRuntime();
+				ResetViewportSceneRenderer();
 				m_Project.emplace(std::move(*Created));
 				ClearScene();
 				UpdateAssetList();
@@ -382,6 +427,7 @@ namespace
 				? *MainScene
 				: *MainScene.error().CommittedAsset;
 			StopRuntime();
+			ResetViewportSceneRenderer();
 			m_Project.emplace(std::move(*Created));
 			m_Scene = std::move(NewScene);
 			m_SceneAsset = MainSceneRecord.ID;
@@ -455,6 +501,7 @@ namespace
 
 			const std::string ProjectName = Opened->GetDescription().Name;
 			StopRuntime();
+			ResetViewportSceneRenderer();
 			m_Project.emplace(std::move(*Opened));
 			m_Scene = std::move(LoadedScene);
 			m_SceneAsset = LoadedSceneAsset;
@@ -1213,6 +1260,7 @@ namespace
 		void CloseProjectNow()
 		{
 			ClearScene();
+			ResetViewportSceneRenderer();
 			m_Project.reset();
 			m_Assets.clear();
 			SetStatus("Project closed.");
@@ -1301,7 +1349,7 @@ namespace
 						{
 							ImGui::Separator();
 							ImGui::Text("Runtime simulation: playing (%zu entities)", m_RuntimeScene->GetEntityCount());
-							ImGui::TextWrapped("Running on an isolated scene copy. The editor viewport is not connected yet.");
+							ImGui::TextWrapped("Running on an isolated scene copy. The viewport displays this runtime scene.");
 						}
 					}
 					else
@@ -1321,11 +1369,240 @@ namespace
 			DrawUnsavedChangesDialog();
 			ImGui::End();
 
+			DrawSceneViewportPanel();
 			DrawHierarchyPanel();
 			DrawInspectorPanel();
 			DrawContentBrowserPanel();
 
 			DrawConsolePanel();
+		}
+
+		void DrawSceneViewportPanel()
+		{
+			if (ImGui::Begin("Scene Viewport"))
+			{
+				if (!m_Project)
+					ImGui::TextUnformatted("Open a project to render a scene.");
+				else if (!m_Scene)
+					ImGui::TextUnformatted("Open a scene to render it here.");
+				else
+				{
+#ifdef PF_EDITOR_RENDERER_OPENGL
+					ImGui::TextWrapped("The OpenGL fallback retains the editor shell; the scene viewport requires Vulkan.");
+#else
+					const ImVec2 Available = ImGui::GetContentRegionAvail();
+					if (Available.x <= 1.0f || Available.y <= 1.0f)
+						ImGui::TextUnformatted("Expand the panel to display the scene.");
+					else
+					{
+						if (auto Result = EnsureViewportTarget(Available); !Result)
+							SetViewportTargetError("Could not resize the scene viewport: " + Result.error());
+						else
+							ClearViewportTargetError();
+						if (m_ViewportTarget && m_ViewportTextureID != 0)
+						{
+							const float TargetAspect = static_cast<float>(m_ViewportWidth) /
+								static_cast<float>(m_ViewportHeight);
+							ImVec2 ImageSize = Available;
+							if (ImageSize.x / ImageSize.y > TargetAspect)
+								ImageSize.x = ImageSize.y * TargetAspect;
+							else
+								ImageSize.y = ImageSize.x / TargetAspect;
+							const ImVec2 Cursor = ImGui::GetCursorScreenPos();
+							ImGui::SetCursorScreenPos(ImVec2(
+								Cursor.x + (Available.x - ImageSize.x) * 0.5f,
+								Cursor.y + (Available.y - ImageSize.y) * 0.5f));
+							ImGui::Image(
+								ImTextureRef(static_cast<ImTextureID>(m_ViewportTextureID)),
+								ImageSize);
+						}
+						else
+							ImGui::TextUnformatted("The scene viewport render target is unavailable.");
+
+						if (!m_ViewportTargetError.empty())
+						{
+							ImGui::Separator();
+							ImGui::TextWrapped("%s", m_ViewportTargetError.c_str());
+						}
+						if (!m_ViewportSceneError.empty())
+						{
+							ImGui::Separator();
+							ImGui::TextWrapped("%s", m_ViewportSceneError.c_str());
+						}
+					}
+#endif
+				}
+			}
+			ImGui::End();
+		}
+
+		std::expected<void, std::string> EnsureViewportTarget(const ImVec2& LogicalSize)
+		{
+#ifdef PF_EDITOR_RENDERER_OPENGL
+			(void)LogicalSize;
+			return std::unexpected("The OpenGL fallback does not support the engine scene viewport");
+#else
+			const ImVec2 FramebufferScale = ImGui::GetIO().DisplayFramebufferScale;
+			const double WidthInPixels = std::ceil(static_cast<double>(LogicalSize.x) *
+				(FramebufferScale.x > 0.0f ? FramebufferScale.x : 1.0f));
+			const double HeightInPixels = std::ceil(static_cast<double>(LogicalSize.y) *
+				(FramebufferScale.y > 0.0f ? FramebufferScale.y : 1.0f));
+			constexpr uint32_t ResolutionQuantum = 32;
+			if (!std::isfinite(WidthInPixels) || !std::isfinite(HeightInPixels) ||
+				WidthInPixels < 1.0 || HeightInPixels < 1.0 ||
+				WidthInPixels > (std::numeric_limits<uint32_t>::max)() - ResolutionQuantum ||
+				HeightInPixels > (std::numeric_limits<uint32_t>::max)() - ResolutionQuantum)
+			{
+				return std::unexpected("Viewport dimensions are outside the supported range");
+			}
+
+			const auto Quantize = [ResolutionQuantum](double Dimension)
+			{
+				return static_cast<uint32_t>(std::ceil(Dimension / ResolutionQuantum) * ResolutionQuantum);
+			};
+			const uint32_t Width = Quantize(WidthInPixels);
+			const uint32_t Height = Quantize(HeightInPixels);
+			if (m_ViewportTarget && m_ViewportWidth == Width && m_ViewportHeight == Height)
+				return {};
+
+			PulseForge::RenderTargetDesc Description;
+			Description.Width = Width;
+			Description.Height = Height;
+			Description.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
+			Description.DebugName = "PulseForge editor scene viewport";
+			auto Created = PulseForge::Application::Get().CreateRenderTarget(Description);
+			if (!Created)
+				return std::unexpected(Created.error().Message);
+
+			if (!m_ImGuiRenderer)
+				return std::unexpected("The Vulkan editor UI renderer is unavailable");
+			auto TextureID = m_ImGuiRenderer->RegisterTexture((*Created)->GetColorTexture());
+			if (!TextureID)
+				return std::unexpected(TextureID.error());
+
+			if (m_ViewportTextureID != 0)
+				m_ImGuiRenderer->UnregisterTexture(m_ViewportTextureID);
+			m_ViewportTarget = std::move(*Created);
+			m_ViewportTextureID = *TextureID;
+			m_ViewportWidth = Width;
+			m_ViewportHeight = Height;
+			m_ViewportSceneReady = false;
+			return {};
+#endif
+		}
+
+		void PrepareViewportScene()
+		{
+			m_ViewportSceneReady = false;
+#ifdef PF_EDITOR_RENDERER_OPENGL
+			return;
+#else
+			if (!m_Project || !m_Scene || m_ViewportWidth == 0 || m_ViewportHeight == 0)
+				return;
+			if (m_SceneRendererInitializationFailed)
+				return;
+
+			if (!m_SceneRenderer)
+			{
+				auto Created = PulseForge::SceneRenderer::Create(
+					PulseForge::Application::Get(),
+					*m_Project,
+					std::filesystem::path(PF_EDITOR_SHADER_DIRECTORY));
+				if (!Created)
+				{
+					m_SceneRendererInitializationFailed = true;
+					SetViewportSceneError("Could not initialize the scene renderer: " + Created.error().Message);
+					return;
+				}
+				m_SceneRenderer = std::move(*Created);
+			}
+
+			const PulseForge::Scene& ActiveScene = m_SceneRuntime && m_RuntimeScene ? *m_RuntimeScene : *m_Scene;
+			const float AspectRatio = static_cast<float>(m_ViewportWidth) / static_cast<float>(m_ViewportHeight);
+			if (auto Prepared = m_SceneRenderer->PrepareScene(ActiveScene, AspectRatio); !Prepared)
+			{
+				SetViewportSceneError("Could not prepare the scene viewport: " + Prepared.error().Message);
+				return;
+			}
+			ClearViewportSceneError();
+			m_ViewportSceneReady = true;
+#endif
+		}
+
+		void RenderViewportScene()
+		{
+#ifdef PF_EDITOR_RENDERER_OPENGL
+			return;
+#else
+			if (!m_ViewportTarget)
+				return;
+
+			if (m_SceneRenderer && m_ViewportSceneReady)
+			{
+				if (auto Rendered = m_SceneRenderer->RenderPreparedScene(*m_ViewportTarget); !Rendered)
+					SetViewportSceneError("Scene viewport rendering failed: " + Rendered.error().Message);
+				else
+					ClearViewportSceneError();
+				return;
+			}
+
+			PulseForge::RenderTargetClearValue Clear;
+			Clear.Color = { 0.10f, 0.11f, 0.13f, 1.0f };
+			const auto Begin = PulseForge::Application::Get().BeginRenderTarget(*m_ViewportTarget, Clear);
+			if (!Begin)
+			{
+				SetViewportSceneError("Could not clear the scene viewport: " + Begin.error().Message);
+				return;
+			}
+			if (const auto End = PulseForge::Application::Get().EndRenderTarget(); !End)
+				SetViewportSceneError("Could not finish clearing the scene viewport: " + End.error().Message);
+#endif
+		}
+
+		void SetViewportTargetError(std::string Message)
+		{
+			if (m_ViewportTargetError == Message)
+				return;
+			m_ViewportTargetError = std::move(Message);
+			PF_WARN("{}", m_ViewportTargetError);
+		}
+
+		void ClearViewportTargetError()
+		{
+			m_ViewportTargetError.clear();
+		}
+
+		void SetViewportSceneError(std::string Message)
+		{
+			if (m_ViewportSceneError == Message)
+				return;
+			m_ViewportSceneError = std::move(Message);
+			PF_WARN("{}", m_ViewportSceneError);
+		}
+
+		void ClearViewportSceneError()
+		{
+			m_ViewportSceneError.clear();
+		}
+
+		void ResetViewportSceneRenderer() noexcept
+		{
+			m_SceneRenderer.reset();
+			m_ViewportSceneReady = false;
+			m_SceneRendererInitializationFailed = false;
+			ClearViewportSceneError();
+		}
+
+		void ResetViewportTarget() noexcept
+		{
+			if (m_ImGuiRenderer && m_ViewportTextureID != 0)
+				m_ImGuiRenderer->UnregisterTexture(m_ViewportTextureID);
+			m_ViewportTextureID = 0;
+			m_ViewportTarget.reset();
+			m_ViewportWidth = 0;
+			m_ViewportHeight = 0;
+			m_ViewportSceneReady = false;
+			ClearViewportTargetError();
 		}
 
 		void AttachConsoleSink()
@@ -2212,7 +2489,7 @@ namespace
 
 			m_RuntimeScene = std::move(*CandidateScene);
 			m_SceneRuntime = std::move(CandidateRuntime);
-			SetStatus("Runtime started on an isolated scene copy. The editor viewport is not connected yet.");
+			SetStatus("Runtime started on an isolated scene copy. The viewport now displays the runtime scene.");
 		}
 
 		void StopRuntime() noexcept
@@ -2270,6 +2547,8 @@ namespace
 		void ClearScene() noexcept
 		{
 			StopRuntime();
+			m_ViewportSceneReady = false;
+			ClearViewportSceneError();
 			m_Scene.reset();
 			m_SceneAsset.reset();
 			m_SelectedEntity.reset();
@@ -2281,12 +2560,19 @@ namespace
 
 		void ShutdownImGui() noexcept
 		{
+			if (m_ImGuiRenderer)
+			{
+				m_ImGuiRenderer->Shutdown();
+				m_ImGuiRenderer.reset();
+			}
 			if (!m_Context)
 				return;
 
 			ImGui::SetCurrentContext(m_Context);
+			#ifdef PF_EDITOR_RENDERER_OPENGL
 			if (m_OpenGLBackendActive)
 				ImGui_ImplOpenGL3_Shutdown();
+			#endif
 			if (m_GlfwBackendActive)
 				ImGui_ImplGlfw_Shutdown();
 			ImGui::DestroyContext(m_Context);
@@ -2303,9 +2589,12 @@ namespace
 		}
 
 		ImGuiContext* m_Context = nullptr;
+		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
 		bool m_GlfwBackendActive = false;
 		bool m_OpenGLBackendActive = false;
 		bool m_FileDialogActive = false;
+		bool m_ViewportSceneReady = false;
+		bool m_SceneRendererInitializationFailed = false;
 		bool m_SceneDirty = false;
 		bool m_OpenUnsavedDialog = false;
 		bool m_ConsoleAutoScroll = true;
@@ -2318,11 +2607,19 @@ namespace
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::unique_ptr<PulseForge::Scene> m_RuntimeScene;
 		std::unique_ptr<PulseForge::SceneRuntime> m_SceneRuntime;
+		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
+		PulseForge::RenderTargetHandle m_ViewportTarget;
+		uint64_t m_ViewportTextureID = 0;
+		uint32_t m_ViewportWidth = 0;
+		uint32_t m_ViewportHeight = 0;
 		std::optional<PulseForge::AssetID> m_SceneAsset;
 		std::optional<PulseForge::UUID> m_SelectedEntity;
 		std::optional<PulseForge::AssetID> m_SelectedAsset;
 		std::optional<PulseForge::AssetID> m_PendingDeleteAsset;
 		std::vector<PulseForge::AssetRecord> m_Assets;
+		std::string m_ViewportTargetError;
+		std::string m_ViewportSceneError;
+		std::string m_ImGuiRenderingError;
 		std::string m_StatusMessage = "Create or open a project to begin.";
 		bool m_StatusIsError = false;
 		bool m_StatusIsWarning = false;
@@ -2333,10 +2630,18 @@ namespace
 	{
 	public:
 		PulseForgeEditorApplication()
+#ifdef PF_EDITOR_RENDERER_OPENGL
 			: Application(PulseForge::RendererAPI::OpenGL)
+#else
+			: Application(PulseForge::RendererAPI::Vulkan)
+#endif
 		{
 			PushLayer(std::make_unique<EditorLayer>());
+#ifdef PF_EDITOR_RENDERER_OPENGL
 			PF_INFO("PulseForge editor started with the OpenGL ImGui backend");
+#else
+			PF_INFO("PulseForge editor started with the Vulkan/NVRHI ImGui backend");
+#endif
 		}
 	};
 }
