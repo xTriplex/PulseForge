@@ -1052,6 +1052,18 @@ namespace
 			SetStatus(Record ? "Opened scene " + PathToUtf8(Record->ProjectRelativePath) + "." : "Opened scene.");
 		}
 
+		void SetStartupScene(const PulseForge::AssetID& Identifier)
+		{
+			if (!m_Project)
+				return;
+			if (auto Result = m_Project->SetStartScene(Identifier); !Result)
+			{
+				SetError("Could not set the project startup scene: " + Result.error().Message);
+				return;
+			}
+			SetStatus("Updated the project startup scene to " + Identifier.ToString() + ".");
+		}
+
 		bool SaveScene()
 		{
 			if (!m_Project || !m_Scene || !m_SceneAsset)
@@ -1998,6 +2010,11 @@ namespace
 							if (Asset.ProjectRelativePath.extension() == ".prefab" &&
 								ImGui::MenuItem("Instantiate in Scene", nullptr, false, m_Scene != nullptr))
 								ContextAction = [this, Identifier] { InstantiatePrefab(Identifier); };
+							const bool IsStartupScene = m_Project->GetDescription().StartScene &&
+								*m_Project->GetDescription().StartScene == Identifier;
+							if (Asset.ProjectRelativePath.extension() == ".scene" &&
+								ImGui::MenuItem("Set as Startup Scene", nullptr, IsStartupScene, !IsStartupScene))
+								ContextAction = [this, Identifier] { SetStartupScene(Identifier); };
 							if (ImGui::MenuItem("Delete..."))
 								ContextAction = [this, Identifier] { RequestDeleteAsset(Identifier); };
 							ImGui::EndPopup();
@@ -2015,6 +2032,15 @@ namespace
 							ImGui::Separator();
 							ImGui::TextWrapped("%s", PathToUtf8(Asset->ProjectRelativePath).c_str());
 							ImGui::Text("UUID: %s", Asset->ID.ToString().c_str());
+							if (Asset->ProjectRelativePath.extension() == ".scene")
+							{
+								const bool IsStartupScene = m_Project->GetDescription().StartScene &&
+									*m_Project->GetDescription().StartScene == Asset->ID;
+								if (IsStartupScene)
+									ImGui::TextUnformatted("Project startup scene.");
+								else if (ImGui::Button("Set as Startup Scene"))
+									SetStartupScene(Asset->ID);
+							}
 							if (ImGui::Button("Move / Rename..."))
 								MoveAsset(Asset->ID);
 							ImGui::SameLine();
