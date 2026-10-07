@@ -22,6 +22,7 @@
 #include "Core/Input.h"
 #include "Core/LayerStack.h"
 #include "Core/Timestep.h"
+#include "Editor/ViewportMath.h"
 #include "Audio/AudioEngine.h"
 #include "Audio/AudioSceneRuntime.h"
 #include "Physics/PhysicsSceneRuntime.h"
@@ -56,6 +57,10 @@
 #include <string>
 #include <system_error>
 #include <vector>
+
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/constants.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 namespace
 {
@@ -1347,6 +1352,136 @@ namespace
 		const auto InvalidView = SceneRenderSnapshotBuilder::BuildForView(CameraLessScene, InvalidTransientView);
 		PF_CHECK(Tests, !InvalidView &&
 			InvalidView.error().Code == SceneRenderSnapshotErrorCode::InvalidViewProjection);
+	}
+
+	void TestEditorViewportMath(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+
+		const ViewportImageRect ImageRect{ { 100.0f, 50.0f }, { 300.0f, 150.0f } };
+		CameraComponent Camera;
+		const auto Projection = Camera.GetProjectionMatrix(2.0f);
+		PF_CHECK(Tests, Projection.has_value());
+		if (!Projection)
+			return;
+		const glm::mat4 View = glm::lookAtRH(
+			glm::vec3(0.0f, 0.0f, 5.0f),
+			glm::vec3(0.0f),
+			glm::vec3(0.0f, 1.0f, 0.0f));
+		const glm::mat4 ViewProjection = *Projection * View;
+
+		const auto CenterRay = MakeViewportRay({ 200.0f, 100.0f }, ImageRect, ViewProjection);
+		PF_CHECK(Tests, CenterRay.has_value());
+		if (CenterRay)
+		{
+			PF_CHECK(Tests, glm::length(CenterRay->Direction - glm::vec3(0.0f, 0.0f, -1.0f)) < 1.0e-4f);
+			PF_CHECK(Tests, CenterRay->Origin.z < 5.0f && CenterRay->Origin.z > 4.8f);
+		}
+		const auto RightRay = MakeViewportRay({ 250.0f, 100.0f }, ImageRect, ViewProjection);
+		PF_CHECK(Tests, RightRay && RightRay->Direction.x > 0.0f);
+		const auto TopRay = MakeViewportRay({ 200.0f, 75.0f }, ImageRect, ViewProjection);
+		PF_CHECK(Tests, TopRay && TopRay->Direction.y > 0.0f);
+		PF_CHECK(Tests, !MakeViewportRay({ 300.0f, 100.0f }, ImageRect, ViewProjection));
+		PF_CHECK(Tests, !MakeViewportRay({ 99.0f, 100.0f }, ImageRect, ViewProjection));
+		PF_CHECK(Tests, !MakeViewportRay({ 200.0f, 100.0f }, {}, ViewProjection));
+		PF_CHECK(Tests, !MakeViewportRay({ 200.0f, 100.0f }, ImageRect, glm::mat4(0.0f)));
+		const glm::vec2 Outside{ 350.0f, 100.0f };
+		PF_CHECK(Tests, MakeViewportRay(Outside, ImageRect, ViewProjection, true).has_value());
+
+		const std::array<glm::vec3, 3> Triangle{
+			glm::vec3(-1.0f, -1.0f, 0.0f), glm::vec3(1.0f, -1.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f) };
+		const std::array<uint32_t, 3> Indices{ 0, 1, 2 };
+		const UUID FarEntity{ 1, 1 };
+		const UUID NearEntity{ 2, 2 };
+		const glm::mat4 FarTransform = glm::translate(glm::mat4(1.0f), { 0.0f, 0.0f, -2.0f });
+		const glm::mat4 NearTransform = glm::translate(glm::mat4(1.0f), { 0.0f, 0.0f, 1.0f });
+		const std::array<PickableMesh, 2> Overlapping{
+			PickableMesh{ FarEntity, FarTransform, Triangle, Indices },
+			PickableMesh{ NearEntity, NearTransform, Triangle, Indices } };
+		const Ray WorldRay{ { 0.0f, 0.0f, 5.0f }, { 0.0f, 0.0f, -1.0f } };
+		const auto Nearest = RaycastMeshes(WorldRay, Overlapping);
+		PF_CHECK(Tests, Nearest && Nearest->Entity == NearEntity);
+		PF_CHECK(Tests, Nearest && std::abs(Nearest->Distance - 4.0f) < 1.0e-4f);
+		const std::array<PickableMesh, 1> NoHit{
+			PickableMesh{ FarEntity, glm::translate(glm::mat4(1.0f), { 5.0f, 0.0f, 0.0f }), Triangle, Indices } };
+		PF_CHECK(Tests, !RaycastMeshes(WorldRay, NoHit));
+
+		const glm::mat4 RotatedNonUniform =
+			glm::rotate(glm::scale(glm::mat4(1.0f), { 2.0f, 0.5f, 1.0f }), glm::radians(35.0f), { 0.0f, 0.0f, 1.0f });
+		const std::array<PickableMesh, 1> TransformedMesh{
+			PickableMesh{ NearEntity, RotatedNonUniform, Triangle, Indices } };
+		const auto TransformedHit = RaycastMeshes(WorldRay, TransformedMesh);
+		PF_CHECK(Tests, TransformedHit && TransformedHit->Entity == NearEntity);
+		PF_CHECK(Tests, std::abs(glm::length(WorldRay.Direction) - 1.0f) < 1.0e-5f);
+		const std::array<PickableMesh, 1> BeyondFarPlane{
+			PickableMesh{ NearEntity, glm::translate(glm::mat4(1.0f), { 0.0f, 0.0f, -2000.0f }), Triangle, Indices } };
+		PF_CHECK(Tests, !RaycastMeshes(*CenterRay, BeyondFarPlane));
+		const std::array<uint32_t, 3> InvalidIndices{ 0, 1, 9 };
+		const std::array<PickableMesh, 1> InvalidGeometry{
+			PickableMesh{ NearEntity, glm::mat4(1.0f), Triangle, InvalidIndices } };
+		PF_CHECK(Tests, !RaycastMeshes(WorldRay, InvalidGeometry));
+
+		Scene HierarchyScene;
+		auto Parent = HierarchyScene.CreateEntity("Picking parent");
+		auto Child = HierarchyScene.CreateEntity("Picking child");
+		PF_CHECK(Tests, Parent && Child);
+		if (Parent && Child)
+		{
+			TransformComponent ParentTransform;
+			ParentTransform.Translation = { 0.5f, 0.25f, 0.0f };
+			ParentTransform.Rotation = glm::angleAxis(glm::radians(20.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+			ParentTransform.Scale = { 1.5f, 0.75f, 1.0f };
+			TransformComponent ChildTransform;
+			ChildTransform.Rotation = glm::angleAxis(glm::radians(-15.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+			ChildTransform.Scale = { 0.8f, 1.2f, 1.0f };
+			PF_CHECK(Tests, Parent->SetTransform(ParentTransform).has_value());
+			PF_CHECK(Tests, Child->SetTransform(ChildTransform).has_value());
+			PF_CHECK(Tests, Child->SetParent(*Parent).has_value());
+			const auto ChildWorld = Child->GetWorldMatrix();
+			PF_CHECK(Tests, ChildWorld.has_value());
+			if (ChildWorld)
+			{
+				const glm::vec3 Center = glm::vec3((*ChildWorld)[3]);
+				const glm::vec3 Normal = glm::normalize(glm::transpose(glm::inverse(glm::mat3(*ChildWorld))) *
+					glm::vec3(0.0f, 0.0f, 1.0f));
+				const Ray ChildRay{ Center + Normal * 4.0f, -Normal };
+				const std::array<PickableMesh, 1> ParentedMesh{
+					PickableMesh{ Child->GetUUID(), *ChildWorld, Triangle, Indices } };
+				const auto ChildHit = RaycastMeshes(ChildRay, ParentedMesh);
+				PF_CHECK(Tests, ChildHit && ChildHit->Entity == Child->GetUUID());
+				PF_CHECK(Tests, ChildHit && std::abs(ChildHit->Distance - 4.0f) < 1.0e-3f);
+			}
+		}
+
+		const glm::mat4 ParentWorld = glm::translate(glm::mat4(1.0f), { 3.0f, -1.0f, 2.0f }) *
+			glm::rotate(glm::mat4(1.0f), glm::radians(25.0f), { 0.0f, 0.0f, 1.0f }) *
+			glm::scale(glm::mat4(1.0f), { 2.0f, 3.0f, 0.5f });
+		const glm::quat LocalRotation = glm::angleAxis(glm::radians(40.0f), glm::normalize(glm::vec3(1.0f, 1.0f, 0.0f)));
+		const auto ParentAxis = GetWorldGizmoAxis(ParentWorld, LocalRotation, 1);
+		const auto LocalDelta = WorldDeltaToLocalAxisDelta(2.5f, ParentWorld, LocalRotation, 1);
+		PF_CHECK(Tests, ParentAxis && LocalDelta && ParentAxis->WorldUnitsPerLocalUnit > 0.0f);
+		if (ParentAxis && LocalDelta)
+		{
+			const glm::vec3 LocalMovement = LocalRotation * glm::vec3(0.0f, 1.0f, 0.0f) * *LocalDelta;
+			const glm::vec3 WorldMovement = glm::mat3(ParentWorld) * LocalMovement;
+			PF_CHECK(Tests, glm::length(WorldMovement - ParentAxis->Direction * 2.5f) < 1.0e-4f);
+		}
+		PF_CHECK(Tests, !GetWorldGizmoAxis(ParentWorld, LocalRotation, 3));
+		PF_CHECK(Tests, !WorldDeltaToLocalAxisDelta(std::numeric_limits<float>::quiet_NaN(), ParentWorld, LocalRotation, 1));
+
+		TransformComponent Initial;
+		Initial.Rotation = glm::angleAxis(glm::half_pi<float>(), glm::vec3(0.0f, 0.0f, 1.0f));
+		const auto Translated = ApplyLocalGizmoDelta(Initial, TransformGizmoOperation::Translate, 0, 2.0f);
+		PF_CHECK(Tests, Translated && glm::length(Translated->Translation - glm::vec3(0.0f, 2.0f, 0.0f)) < 1.0e-4f);
+		const auto Rotated = ApplyLocalGizmoDelta(Initial, TransformGizmoOperation::Rotate, 2, glm::half_pi<float>());
+		PF_CHECK(Tests, Rotated && std::abs(glm::length(Rotated->Rotation) - 1.0f) < 1.0e-5f);
+		const auto Scaled = ApplyLocalGizmoDelta(Initial, TransformGizmoOperation::Scale, 1, 0.5f);
+		PF_CHECK(Tests, Scaled && std::abs(Scaled->Scale.y - 1.5f) < 1.0e-5f);
+		PF_CHECK(Tests, !ApplyLocalGizmoDelta(Initial, TransformGizmoOperation::Scale, 0, -1.0f));
+		PF_CHECK(Tests, !ApplyLocalGizmoDelta(Initial, TransformGizmoOperation::Rotate, 3, 0.5f));
+		PF_CHECK(Tests, !ApplyLocalGizmoDelta(Initial, TransformGizmoOperation::Translate, 0,
+			std::numeric_limits<float>::infinity()));
 	}
 
 	void TestSceneSerializationRoundTrip(TestRunner& Tests)
@@ -5065,6 +5200,7 @@ int main()
 	TestPhysicsSceneRuntime(Tests);
 	TestEntityHandleIdentityAndLifetime(Tests);
 	TestSceneRenderSnapshot(Tests);
+	TestEditorViewportMath(Tests);
 	TestSceneSerializationRoundTrip(Tests);
 	TestSceneSerializerClone(Tests);
 	TestSceneAssetsByUUID(Tests);
