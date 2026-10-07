@@ -1325,6 +1325,28 @@ namespace
 		PF_CHECK(Tests, Camera->SetTransform(SingularCameraTransform).has_value());
 		const auto SingularCamera = SceneRenderSnapshotBuilder::Build(TestScene, CameraID, 1.0f);
 		PF_CHECK(Tests, !SingularCamera && SingularCamera.error().Code == SceneRenderSnapshotErrorCode::InvalidCameraTransform);
+
+		Scene CameraLessScene;
+		auto CameraLessMesh = CameraLessScene.CreateEntity("Editor view mesh");
+		PF_CHECK(Tests, CameraLessMesh.has_value());
+		if (CameraLessMesh)
+			PF_CHECK(Tests, CameraLessMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID }).has_value());
+
+		const glm::mat4 TransientViewProjection(1.0f);
+		const auto TransientView = SceneRenderSnapshotBuilder::BuildForView(CameraLessScene, TransientViewProjection);
+		PF_CHECK(Tests, TransientView.has_value());
+		if (TransientView)
+		{
+			PF_CHECK(Tests, !TransientView->CameraEntity.has_value());
+			PF_CHECK(Tests, TransientView->Meshes.size() == 1);
+			PF_CHECK(Tests, TransientView->ViewProjection[0][0] == 1.0f);
+		}
+
+		glm::mat4 InvalidTransientView(1.0f);
+		InvalidTransientView[2][1] = std::numeric_limits<float>::quiet_NaN();
+		const auto InvalidView = SceneRenderSnapshotBuilder::BuildForView(CameraLessScene, InvalidTransientView);
+		PF_CHECK(Tests, !InvalidView &&
+			InvalidView.error().Code == SceneRenderSnapshotErrorCode::InvalidViewProjection);
 	}
 
 	void TestSceneSerializationRoundTrip(TestRunner& Tests)

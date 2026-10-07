@@ -23,7 +23,8 @@ namespace PulseForge
 
 	struct SceneRenderSnapshot
 	{
-		UUID CameraEntity;
+		// Empty when the view is transient editor state rather than an authored scene camera.
+		std::optional<UUID> CameraEntity;
 		glm::mat4 ViewProjection{ 1.0f };
 		// Scene::GetEntities returns UUID-sorted entities, so snapshot order is deterministic.
 		std::vector<SceneMeshInstance> Meshes;
@@ -35,6 +36,7 @@ namespace PulseForge
 		MissingCameraComponent,
 		InvalidCamera,
 		InvalidCameraTransform,
+		InvalidViewProjection,
 		InvalidMeshTransform,
 		MissingPrimaryCamera,
 		MultiplePrimaryCameras,
@@ -60,5 +62,9 @@ namespace PulseForge
 		[[nodiscard]] static std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Build(
 			const Scene& Source,
 			float AspectRatio);
+		// Builds scene geometry using a caller-owned transient view without requiring an authored camera entity.
+		[[nodiscard]] static std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> BuildForView(
+			const Scene& Source,
+			const glm::mat4& ViewProjection);
 	};
 }

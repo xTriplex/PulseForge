@@ -29,6 +29,65 @@ namespace PulseForge
 		{
 			return { Code, Entity, std::move(Message) };
 		}
+
+		std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> BuildGeometrySnapshot(
+			const Scene& Source,
+			const glm::mat4& ViewProjection,
+			std::optional<UUID> CameraEntity)
+		{
+			SceneRenderSnapshot Snapshot;
+			Snapshot.CameraEntity = CameraEntity;
+			Snapshot.ViewProjection = ViewProjection;
+
+			for (const Entity& Current : Source.GetEntities())
+			{
+				const auto MeshRenderer = Current.GetMeshRenderer();
+				if (!MeshRenderer)
+				{
+					return std::unexpected(MakeError(
+						SceneRenderSnapshotErrorCode::SceneOperationFailed,
+						Current.GetUUID(),
+						MeshRenderer.error().Message));
+				}
+				if (!MeshRenderer->has_value())
+					continue;
+
+				const MeshRendererComponent& Component = MeshRenderer->value();
+				if (Component.MeshAsset.IsNil())
+				{
+					return std::unexpected(MakeError(
+						SceneRenderSnapshotErrorCode::SceneOperationFailed,
+						Current.GetUUID(),
+						"A mesh renderer references a nil mesh asset UUID"));
+				}
+				if (Component.MaterialAsset && Component.MaterialAsset->IsNil())
+				{
+					return std::unexpected(MakeError(
+						SceneRenderSnapshotErrorCode::SceneOperationFailed,
+						Current.GetUUID(),
+						"A mesh renderer references a nil material asset UUID"));
+				}
+
+				const auto WorldTransform = Current.GetWorldMatrix();
+				if (!WorldTransform)
+				{
+					return std::unexpected(MakeError(
+						SceneRenderSnapshotErrorCode::SceneOperationFailed,
+						Current.GetUUID(),
+						WorldTransform.error().Message));
+				}
+				if (!IsFinite(*WorldTransform))
+				{
+					return std::unexpected(MakeError(
+						SceneRenderSnapshotErrorCode::InvalidMeshTransform,
+						Current.GetUUID(),
+						"Mesh entity world transform contains a non-finite matrix value"));
+				}
+
+				Snapshot.Meshes.push_back({ Current.GetUUID(), Component.MeshAsset, Component.MaterialAsset, *WorldTransform });
+			}
+			return Snapshot;
+		}
 	}
 
 	std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> SceneRenderSnapshotBuilder::Build(
@@ -102,65 +161,15 @@ namespace PulseForge
 				Projection.error().Message));
 		}
 
-		SceneRenderSnapshot Snapshot;
-		Snapshot.CameraEntity = CameraEntityIdentifier;
-		Snapshot.ViewProjection = *Projection * CameraView;
-		if (!IsFinite(Snapshot.ViewProjection))
+		const glm::mat4 ViewProjection = *Projection * CameraView;
+		if (!IsFinite(ViewProjection))
 		{
 			return std::unexpected(MakeError(
 				SceneRenderSnapshotErrorCode::InvalidCameraTransform,
 				CameraEntityIdentifier,
 				"The selected camera produces a non-finite view-projection matrix"));
 		}
-
-		for (const Entity& Current : Source.GetEntities())
-		{
-			const auto MeshRenderer = Current.GetMeshRenderer();
-			if (!MeshRenderer)
-			{
-				return std::unexpected(MakeError(
-					SceneRenderSnapshotErrorCode::SceneOperationFailed,
-					Current.GetUUID(),
-					MeshRenderer.error().Message));
-			}
-			if (!MeshRenderer->has_value())
-				continue;
-
-			const MeshRendererComponent& Component = MeshRenderer->value();
-			if (Component.MeshAsset.IsNil())
-			{
-				return std::unexpected(MakeError(
-					SceneRenderSnapshotErrorCode::SceneOperationFailed,
-					Current.GetUUID(),
-					"A mesh renderer references a nil mesh asset UUID"));
-			}
-			if (Component.MaterialAsset && Component.MaterialAsset->IsNil())
-			{
-				return std::unexpected(MakeError(
-					SceneRenderSnapshotErrorCode::SceneOperationFailed,
-					Current.GetUUID(),
-					"A mesh renderer references a nil material asset UUID"));
-			}
-
-			const auto WorldTransform = Current.GetWorldMatrix();
-			if (!WorldTransform)
-			{
-				return std::unexpected(MakeError(
-					SceneRenderSnapshotErrorCode::SceneOperationFailed,
-					Current.GetUUID(),
-					WorldTransform.error().Message));
-			}
-			if (!IsFinite(*WorldTransform))
-			{
-				return std::unexpected(MakeError(
-					SceneRenderSnapshotErrorCode::InvalidMeshTransform,
-					Current.GetUUID(),
-					"Mesh entity world transform contains a non-finite matrix value"));
-			}
-
-			Snapshot.Meshes.push_back({ Current.GetUUID(), Component.MeshAsset, Component.MaterialAsset, *WorldTransform });
-		}
-		return Snapshot;
+		return BuildGeometrySnapshot(Source, ViewProjection, CameraEntityIdentifier);
 	}
 
 	std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> SceneRenderSnapshotBuilder::Build(
@@ -197,5 +206,19 @@ namespace PulseForge
 				"Scene does not contain a primary camera entity"));
 		}
 		return Build(Source, *PrimaryCamera, AspectRatio);
+	}
+
+	std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> SceneRenderSnapshotBuilder::BuildForView(
+		const Scene& Source,
+		const glm::mat4& ViewProjection)
+	{
+		if (!IsFinite(ViewProjection))
+		{
+			return std::unexpected(MakeError(
+				SceneRenderSnapshotErrorCode::InvalidViewProjection,
+				{},
+				"The supplied transient view-projection matrix must contain only finite values"));
+		}
+		return BuildGeometrySnapshot(Source, ViewProjection, std::nullopt);
 	}
 }

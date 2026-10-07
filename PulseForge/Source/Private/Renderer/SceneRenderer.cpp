@@ -290,6 +290,13 @@ namespace PulseForge
 		return PrepareSnapshot(SceneRenderSnapshotBuilder::Build(Source, AspectRatio));
 	}
 
+	std::expected<void, SceneRendererError> SceneRenderer::PrepareScene(
+		const Scene& Source,
+		const glm::mat4& ViewProjection)
+	{
+		return PrepareSnapshot(SceneRenderSnapshotBuilder::BuildForView(Source, ViewProjection));
+	}
+
 	std::expected<void, SceneRendererError> SceneRenderer::PrepareSnapshot(
 		std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot)
 	{

@@ -62,6 +62,10 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareScene(
 			const Scene& Source,
 			float AspectRatio);
+		// Prepares scene geometry with a transient view-projection matrix, such as an editor viewport camera.
+		[[nodiscard]] std::expected<void, SceneRendererError> PrepareScene(
+			const Scene& Source,
+			const glm::mat4& ViewProjection);
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene();
 		// Begins, clears, renders to, and ends Target during the active Application frame.
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene(

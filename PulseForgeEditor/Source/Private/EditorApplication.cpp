@@ -4,12 +4,16 @@
 #include "Core/EntryPoint.h"
 #include "Core/Layer.h"
 #include "Core/Log.h"
+#include "Events/ApplicationEvent.h"
 #include "Events/Event.h"
+#include "Events/KeyEvent.h"
+#include "Events/MouseEvent.h"
 #include "Assets/AssetOperations.h"
 #include "Assets/PrefabAssetService.h"
 #include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
 #include "Renderer/SceneRenderer.h"
+#include "Scene/Components/CameraComponent.h"
 #include "Scene/Scene.h"
 #include "Scene/SceneSerializer.h"
 #include "Runtime/SceneRuntime.h"
@@ -17,6 +21,7 @@
 #include "Editor/EditorImGuiRenderer.h"
 
 #include <GLFW/glfw3.h>
+#include <glm/gtc/matrix_transform.hpp>
 #include <nfd.h>
 #include <nfd_glfw3.h>
 #include <imgui.h>
@@ -150,6 +155,80 @@ namespace
 		uint64_t m_Revision = 0;
 	};
 
+	class EditorViewportCamera final
+	{
+	public:
+		void Reset() noexcept
+		{
+			m_Position = { 0.0f, 0.0f, 3.1f };
+			m_YawDegrees = -90.0f;
+			m_PitchDegrees = 0.0f;
+		}
+
+		void Rotate(float DeltaX, float DeltaY) noexcept
+		{
+			constexpr float Sensitivity = 0.1f;
+			m_YawDegrees = std::remainder(m_YawDegrees + DeltaX * Sensitivity, 360.0f);
+			m_PitchDegrees = std::clamp(m_PitchDegrees - DeltaY * Sensitivity, -89.0f, 89.0f);
+		}
+
+		void Move(const PulseForge::Input& Input, double DeltaSeconds) noexcept
+		{
+			if (!std::isfinite(DeltaSeconds) || DeltaSeconds <= 0.0)
+				return;
+
+			const float Step = static_cast<float>((std::min)(DeltaSeconds, 0.1));
+			const glm::vec3 Forward = GetForward();
+			const glm::vec3 Right = glm::normalize(glm::cross(Forward, glm::vec3(0.0f, 1.0f, 0.0f)));
+			glm::vec3 Direction(0.0f);
+			if (Input.IsKeyPressed(GLFW_KEY_W))
+				Direction += Forward;
+			if (Input.IsKeyPressed(GLFW_KEY_S))
+				Direction -= Forward;
+			if (Input.IsKeyPressed(GLFW_KEY_D))
+				Direction += Right;
+			if (Input.IsKeyPressed(GLFW_KEY_A))
+				Direction -= Right;
+			if (Input.IsKeyPressed(GLFW_KEY_E))
+				Direction.y += 1.0f;
+			if (Input.IsKeyPressed(GLFW_KEY_Q))
+				Direction.y -= 1.0f;
+			if (glm::dot(Direction, Direction) < 1.0e-6f)
+				return;
+
+			Direction = glm::normalize(Direction);
+			const bool Fast = Input.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) || Input.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT);
+			m_Position += Direction * (5.0f * (Fast ? 4.0f : 1.0f) * Step);
+		}
+
+		[[nodiscard]] std::expected<glm::mat4, std::string> GetViewProjection(float AspectRatio) const
+		{
+			PulseForge::CameraComponent Camera;
+			auto Projection = Camera.GetProjectionMatrix(AspectRatio);
+			if (!Projection)
+				return std::unexpected(Projection.error().Message);
+
+			const glm::vec3 Forward = GetForward();
+			const glm::mat4 View = glm::lookAtRH(m_Position, m_Position + Forward, glm::vec3(0.0f, 1.0f, 0.0f));
+			return *Projection * View;
+		}
+
+	private:
+		[[nodiscard]] glm::vec3 GetForward() const noexcept
+		{
+			const float Yaw = glm::radians(m_YawDegrees);
+			const float Pitch = glm::radians(m_PitchDegrees);
+			return glm::normalize(glm::vec3(
+				std::cos(Yaw) * std::cos(Pitch),
+				std::sin(Pitch),
+				std::sin(Yaw) * std::cos(Pitch)));
+		}
+
+		glm::vec3 m_Position{ 0.0f, 0.0f, 3.1f };
+		float m_YawDegrees = -90.0f;
+		float m_PitchDegrees = 0.0f;
+	};
+
 	class EditorLayer final : public PulseForge::Layer
 	{
 	public:
@@ -160,6 +239,7 @@ namespace
 
 		~EditorLayer() override
 		{
+			EndEditorCameraNavigation();
 			StopRuntime();
 			DetachConsoleSink();
 			ShutdownImGui();
@@ -226,6 +306,7 @@ namespace
 
 		void OnDetach() override
 		{
+			EndEditorCameraNavigation();
 			StopRuntime();
 			DetachConsoleSink();
 			ResetViewportSceneRenderer();
@@ -238,6 +319,7 @@ namespace
 
 		void OnUpdate(PulseForge::Timestep DeltaTime) override
 		{
+			UpdateEditorCamera(DeltaTime);
 			if (m_SceneRuntime && m_RuntimeScene)
 			{
 				if (auto Result = m_SceneRuntime->Advance(*m_RuntimeScene, DeltaTime); !Result)
@@ -301,6 +383,33 @@ namespace
 				m_OpenUnsavedDialog = true;
 				Event.bHandled = true;
 				return;
+			}
+
+			if (Event.GetEventType() == PulseForge::EEventType::WindowLostFocus)
+				EndEditorCameraNavigation();
+			else if (Event.GetEventType() == PulseForge::EEventType::MouseButtonPressed)
+			{
+				const auto& Mouse = static_cast<PulseForge::MouseButtonPressedEvent&>(Event);
+				if (Mouse.GetMouseButton() == GLFW_MOUSE_BUTTON_RIGHT)
+					BeginEditorCameraNavigation();
+			}
+			else if (Event.GetEventType() == PulseForge::EEventType::MouseButtonReleased)
+			{
+				const auto& Mouse = static_cast<PulseForge::MouseButtonReleasedEvent&>(Event);
+				if (Mouse.GetMouseButton() == GLFW_MOUSE_BUTTON_RIGHT)
+					EndEditorCameraNavigation();
+			}
+			else if (Event.GetEventType() == PulseForge::EEventType::MouseMoved && m_EditorCameraNavigationActive)
+			{
+				const auto& Mouse = static_cast<PulseForge::MouseMovedEvent&>(Event);
+				if (m_IgnoreFirstCursorDelta)
+					m_IgnoreFirstCursorDelta = false;
+				else
+				{
+					m_EditorCamera.Rotate(Mouse.GetX() - m_LastCursorX, Mouse.GetY() - m_LastCursorY);
+				}
+				m_LastCursorX = Mouse.GetX();
+				m_LastCursorY = Mouse.GetY();
 			}
 
 			ImGui::SetCurrentContext(m_Context);
@@ -1063,7 +1172,10 @@ namespace
 			const PulseForge::AssetRecord Record = Created ? *Created : *Created.error().CommittedAsset;
 			StopRuntime();
 			if (!SaveAs)
+			{
+				ResetEditorViewportCamera();
 				m_Scene = std::move(NewScene);
+			}
 			m_SceneAsset = Record.ID;
 			m_SelectedEntity.reset();
 			m_SceneDirty = false;
@@ -1112,6 +1224,7 @@ namespace
 			}
 
 			StopRuntime();
+			ResetEditorViewportCamera();
 			m_Scene = std::move(Loaded);
 			m_SceneAsset = Identifier;
 			m_SelectedAsset = Identifier;
@@ -1200,6 +1313,7 @@ namespace
 			}
 
 			StopRuntime();
+			ResetEditorViewportCamera();
 			m_Scene = std::move(ReloadedScene);
 			m_SelectedEntity.reset();
 			m_SceneDirty = false;
@@ -1379,6 +1493,7 @@ namespace
 
 		void DrawSceneViewportPanel()
 		{
+			m_ViewportImageHovered = false;
 			if (ImGui::Begin("Scene Viewport"))
 			{
 				if (!m_Project)
@@ -1390,6 +1505,9 @@ namespace
 #ifdef PF_EDITOR_RENDERER_OPENGL
 					ImGui::TextWrapped("The OpenGL fallback retains the editor shell; the scene viewport requires Vulkan.");
 #else
+					ImGui::TextUnformatted(m_SceneRuntime
+						? "Play view: runtime scene camera"
+						: "Edit view: transient editor camera (right-click and drag to look; WASD/QE to move, Shift to speed up)");
 					const ImVec2 Available = ImGui::GetContentRegionAvail();
 					if (Available.x <= 1.0f || Available.y <= 1.0f)
 						ImGui::TextUnformatted("Expand the panel to display the scene.");
@@ -1415,6 +1533,7 @@ namespace
 							ImGui::Image(
 								ImTextureRef(static_cast<ImTextureID>(m_ViewportTextureID)),
 								ImageSize);
+							m_ViewportImageHovered = ImGui::IsItemHovered();
 						}
 						else
 							ImGui::TextUnformatted("The scene viewport render target is unavailable.");
@@ -1519,7 +1638,20 @@ namespace
 
 			const PulseForge::Scene& ActiveScene = m_SceneRuntime && m_RuntimeScene ? *m_RuntimeScene : *m_Scene;
 			const float AspectRatio = static_cast<float>(m_ViewportWidth) / static_cast<float>(m_ViewportHeight);
-			if (auto Prepared = m_SceneRenderer->PrepareScene(ActiveScene, AspectRatio); !Prepared)
+			std::expected<void, PulseForge::SceneRendererError> Prepared;
+			if (m_SceneRuntime && m_RuntimeScene)
+				Prepared = m_SceneRenderer->PrepareScene(ActiveScene, AspectRatio);
+			else
+			{
+				auto ViewProjection = m_EditorCamera.GetViewProjection(AspectRatio);
+				if (!ViewProjection)
+				{
+					SetViewportSceneError("Could not prepare the editor camera: " + ViewProjection.error());
+					return;
+				}
+				Prepared = m_SceneRenderer->PrepareScene(ActiveScene, *ViewProjection);
+			}
+			if (!Prepared)
 			{
 				SetViewportSceneError("Could not prepare the scene viewport: " + Prepared.error().Message);
 				return;
@@ -1587,10 +1719,65 @@ namespace
 
 		void ResetViewportSceneRenderer() noexcept
 		{
+			ResetEditorViewportCamera();
 			m_SceneRenderer.reset();
 			m_ViewportSceneReady = false;
 			m_SceneRendererInitializationFailed = false;
 			ClearViewportSceneError();
+		}
+
+		void BeginEditorCameraNavigation()
+		{
+#ifdef PF_EDITOR_RENDERER_OPENGL
+			return;
+#else
+			if (m_EditorCameraNavigationActive || m_SceneRuntime || !m_Scene || !m_ViewportImageHovered)
+				return;
+
+			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
+			if (!Window || glfwGetWindowAttrib(Window, GLFW_FOCUSED) != GLFW_TRUE)
+				return;
+
+			m_PreviousCursorMode = glfwGetInputMode(Window, GLFW_CURSOR);
+			m_EditorCameraNavigationActive = true;
+			m_IgnoreFirstCursorDelta = true;
+			glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+#endif
+		}
+
+		void EndEditorCameraNavigation() noexcept
+		{
+			if (!m_EditorCameraNavigationActive)
+				return;
+
+			m_EditorCameraNavigationActive = false;
+			m_IgnoreFirstCursorDelta = false;
+			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
+			if (Window)
+				glfwSetInputMode(Window, GLFW_CURSOR, m_PreviousCursorMode);
+		}
+
+		void ResetEditorViewportCamera() noexcept
+		{
+			EndEditorCameraNavigation();
+			m_EditorCamera.Reset();
+		}
+
+		void UpdateEditorCamera(PulseForge::Timestep DeltaTime)
+		{
+			if (!m_EditorCameraNavigationActive)
+				return;
+			if (m_SceneRuntime || !m_Scene)
+			{
+				EndEditorCameraNavigation();
+				return;
+			}
+			if (!PulseForge::Application::Get().GetInput().IsMouseButtonPressed(GLFW_MOUSE_BUTTON_RIGHT))
+			{
+				EndEditorCameraNavigation();
+				return;
+			}
+			m_EditorCamera.Move(PulseForge::Application::Get().GetInput(), DeltaTime.GetSeconds());
 		}
 
 		void ResetViewportTarget() noexcept
@@ -2464,6 +2651,7 @@ namespace
 
 		void StartRuntime()
 		{
+			EndEditorCameraNavigation();
 			if (!m_Project || !m_Scene)
 			{
 				SetError("Open a project and scene before starting the runtime.");
@@ -2494,6 +2682,7 @@ namespace
 
 		void StopRuntime() noexcept
 		{
+			EndEditorCameraNavigation();
 			if (m_SceneRuntime)
 				m_SceneRuntime->Stop();
 			m_SceneRuntime.reset();
@@ -2546,6 +2735,7 @@ namespace
 
 		void ClearScene() noexcept
 		{
+			ResetEditorViewportCamera();
 			StopRuntime();
 			m_ViewportSceneReady = false;
 			ClearViewportSceneError();
@@ -2594,6 +2784,9 @@ namespace
 		bool m_OpenGLBackendActive = false;
 		bool m_FileDialogActive = false;
 		bool m_ViewportSceneReady = false;
+		bool m_ViewportImageHovered = false;
+		bool m_EditorCameraNavigationActive = false;
+		bool m_IgnoreFirstCursorDelta = false;
 		bool m_SceneRendererInitializationFailed = false;
 		bool m_SceneDirty = false;
 		bool m_OpenUnsavedDialog = false;
@@ -2612,6 +2805,10 @@ namespace
 		uint64_t m_ViewportTextureID = 0;
 		uint32_t m_ViewportWidth = 0;
 		uint32_t m_ViewportHeight = 0;
+		int m_PreviousCursorMode = GLFW_CURSOR_NORMAL;
+		float m_LastCursorX = 0.0f;
+		float m_LastCursorY = 0.0f;
+		EditorViewportCamera m_EditorCamera;
 		std::optional<PulseForge::AssetID> m_SceneAsset;
 		std::optional<PulseForge::UUID> m_SelectedEntity;
 		std::optional<PulseForge::AssetID> m_SelectedAsset;
