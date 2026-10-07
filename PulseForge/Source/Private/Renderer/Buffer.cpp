@@ -23,8 +23,14 @@ namespace PulseForge
 		{
 			case BufferUsage::Vertex:
 			case BufferUsage::Index:
+				return {};
 			case BufferUsage::Constant:
-				if (Description.Usage == BufferUsage::Constant && Description.ByteSize % 16 != 0)
+				if (Description.IsDynamic)
+					return std::unexpected(BufferCreateError{
+						BufferCreateErrorCode::UnsupportedUsage,
+						"The dynamic flag applies only to vertex and index buffers"
+					});
+				if (Description.ByteSize % 16 != 0)
 					return std::unexpected(BufferCreateError{
 						BufferCreateErrorCode::InvalidByteSize,
 						"Constant buffer size must be a multiple of 16 bytes"
@@ -43,16 +49,19 @@ namespace PulseForge
 		uint64_t DestinationOffset,
 		size_t UpdateSize)
 	{
-		if (Description.Usage != BufferUsage::Constant)
+		const bool IsWritableConstant = Description.Usage == BufferUsage::Constant && !Description.IsDynamic;
+		const bool IsWritableGeometry = Description.IsDynamic &&
+			(Description.Usage == BufferUsage::Vertex || Description.Usage == BufferUsage::Index);
+		if (!IsWritableConstant && !IsWritableGeometry)
 			return std::unexpected(BufferUpdateError{
 				BufferUpdateErrorCode::UnsupportedUsage,
-				"The current renderer only supports updates to constant buffers"
+				"Only constant buffers and explicitly dynamic vertex/index buffers may be updated"
 			});
 
 		if (UpdateSize == 0 || DestinationOffset % 4 != 0 || UpdateSize % 4 != 0)
 			return std::unexpected(BufferUpdateError{
 				BufferUpdateErrorCode::InvalidUpdateSize,
-				"Constant buffer updates must be non-empty and 4-byte aligned"
+				"Buffer updates must be non-empty and 4-byte aligned"
 			});
 
 		if (DestinationOffset > Description.ByteSize ||
@@ -60,7 +69,7 @@ namespace PulseForge
 		{
 			return std::unexpected(BufferUpdateError{
 				BufferUpdateErrorCode::OutOfBounds,
-				"Constant buffer update extends beyond the declared buffer size"
+				"Buffer update extends beyond the declared buffer size"
 			});
 		}
 

@@ -36,7 +36,7 @@ namespace PulseForge
 		RendererAPI GetRendererAPI() const { return m_RendererAPI; }
 		// Renderer resources should be released before this Application is destroyed.
 		BufferCreateResult CreateBuffer(const BufferDesc& Description, std::span<const std::byte> InitialData = {});
-		// Records an aligned constant-buffer update on the active renderer frame.
+		// Records an aligned constant-buffer or dynamic geometry-buffer update on the active renderer frame.
 		BufferUpdateResult WriteBuffer(
 			const Buffer& Target,
 			uint64_t DestinationOffset,

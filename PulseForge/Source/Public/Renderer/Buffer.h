@@ -23,6 +23,8 @@ namespace PulseForge
 		uint64_t ByteSize = 0;
 		BufferUsage Usage = BufferUsage::Vertex;
 		std::string DebugName;
+		// Dynamic vertex and index buffers may be updated through Application::WriteBuffer during a frame.
+		bool IsDynamic = false;
 	};
 
 	enum class BufferCreateErrorCode : uint8_t

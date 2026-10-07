@@ -31,6 +31,11 @@ namespace PulseForge
 				return m_Description;
 			}
 
+			GLuint GetHandle() const noexcept
+			{
+				return m_Handle;
+			}
+
 		private:
 			BufferDesc m_Description;
 			GLuint m_Handle = 0;
@@ -59,6 +64,9 @@ namespace PulseForge
 
 		bool BeginFrame() override
 		{
+			if (m_FrameActive)
+				return false;
+			m_FrameActive = true;
 			glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
 			glClear(GL_COLOR_BUFFER_BIT);
 			return true;
@@ -66,7 +74,10 @@ namespace PulseForge
 
 		void EndFrame() override
 		{
+			if (!m_FrameActive)
+				return;
 			glfwSwapBuffers(m_NativeWindow);
+			m_FrameActive = false;
 		}
 
 		RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc&) override
@@ -131,7 +142,7 @@ namespace PulseForge
 				Target,
 				static_cast<GLsizeiptr>(Description.ByteSize),
 				InitialData.empty() ? nullptr : InitialData.data(),
-				GL_STATIC_DRAW);
+				Description.IsDynamic ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW);
 			glBindBuffer(Target, 0);
 
 			const GLenum Error = glGetError();
@@ -150,12 +161,63 @@ namespace PulseForge
 			return std::make_unique<OpenGLBuffer>(Description, Handle);
 		}
 
-		BufferUpdateResult WriteBuffer(const Buffer&, uint64_t, std::span<const std::byte>) override
+		BufferUpdateResult WriteBuffer(
+			const Buffer& Target,
+			uint64_t DestinationOffset,
+			std::span<const std::byte> Data) override
 		{
-			return std::unexpected(BufferUpdateError{
-				BufferUpdateErrorCode::UnsupportedFeature,
-				"The transitional OpenGL backend does not support PulseForge constant-buffer updates"
-			});
+			if (!m_FrameActive)
+			{
+				return std::unexpected(BufferUpdateError{
+					BufferUpdateErrorCode::InvalidFrameState,
+					"OpenGL buffer updates must be recorded between BeginFrame and EndFrame"
+				});
+			}
+
+			const auto* NativeBuffer = dynamic_cast<const OpenGLBuffer*>(&Target);
+			if (!NativeBuffer)
+			{
+				return std::unexpected(BufferUpdateError{
+					BufferUpdateErrorCode::BackendFailure,
+					"The buffer was not created by the active OpenGL renderer"
+				});
+			}
+
+			const BufferDesc& Description = NativeBuffer->GetDescription();
+			if (!Description.IsDynamic || Description.Usage == BufferUsage::Constant)
+			{
+				return std::unexpected(BufferUpdateError{
+					BufferUpdateErrorCode::UnsupportedFeature,
+					"The transitional OpenGL backend only updates dynamic vertex and index buffers"
+				});
+			}
+
+			if (Data.size() > static_cast<size_t>(std::numeric_limits<GLsizeiptr>::max()))
+			{
+				return std::unexpected(BufferUpdateError{
+					BufferUpdateErrorCode::InvalidUpdateSize,
+					"OpenGL buffer update size exceeds the GLsizeiptr limit"
+				});
+			}
+
+			glBindBuffer(GL_COPY_WRITE_BUFFER, NativeBuffer->GetHandle());
+			glBufferSubData(
+				GL_COPY_WRITE_BUFFER,
+				static_cast<GLintptr>(DestinationOffset),
+				static_cast<GLsizeiptr>(Data.size()),
+				Data.data());
+			glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+
+			const GLenum Error = glGetError();
+			if (Error != GL_NO_ERROR)
+			{
+				const std::string Message = "OpenGL failed to update a dynamic buffer; glGetError returned " +
+					std::to_string(Error);
+				PF_CORE_ERROR("{0}", Message);
+				return std::unexpected(BufferUpdateError{ BufferUpdateErrorCode::BackendFailure, Message });
+			}
+
+			return {};
 		}
 
 		BindingLayoutCreateResult CreateBindingLayout(const BindingLayoutDesc&) override
@@ -233,6 +295,7 @@ namespace PulseForge
 
 	private:
 		GLFWwindow* m_NativeWindow = nullptr;
+		bool m_FrameActive = false;
 	};
 
 	std::unique_ptr<RendererBackend> CreateOpenGLRenderer(Window& Window)

@@ -369,6 +369,10 @@ namespace
 		PF_CHECK(Tests, ValidateBufferDescription(ValidDescription, 48).has_value());
 		PF_CHECK(Tests, ValidateBufferDescription(ValidDescription, 0).has_value());
 
+		auto DynamicVertexDescription = ValidDescription;
+		DynamicVertexDescription.IsDynamic = true;
+		PF_CHECK(Tests, ValidateBufferDescription(DynamicVertexDescription, 48).has_value());
+
 		auto ZeroSize = ValidDescription;
 		ZeroSize.ByteSize = 0;
 		auto ZeroSizeResult = ValidateBufferDescription(ZeroSize, 0);
@@ -387,6 +391,9 @@ namespace
 
 		BufferDesc ConstantDescription{ 16, BufferUsage::Constant, "Test constant buffer" };
 		PF_CHECK(Tests, ValidateBufferDescription(ConstantDescription, 16).has_value());
+		ConstantDescription.IsDynamic = true;
+		PF_CHECK(Tests, !ValidateBufferDescription(ConstantDescription, 0).has_value());
+		ConstantDescription.IsDynamic = false;
 		ConstantDescription.ByteSize = 17;
 		PF_CHECK(Tests, !ValidateBufferDescription(ConstantDescription, 0).has_value());
 	}
