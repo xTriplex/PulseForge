@@ -5,7 +5,6 @@
 #include "Core/EntryPoint.h"
 #include "Core/Log.h"
 #include "Events/Event.h"
-#include "ImGui/UI.h"
 #include "Renderer/SceneRenderer.h"
 #include "Runtime/SceneRuntime.h"
 #include "Scene/Scene.h"
@@ -108,22 +107,6 @@ public:
 			m_LoggedSceneDraw = true;
 			PF_INFO("Submitted {0} indexed mesh instance(s) from the prepared scene", *Rendered);
 		}
-	}
-
-	void OnImGuiRender() override
-	{
-		PulseForge::UI::BeginWindow("Pulseforge Debug");
-		PulseForge::UI::Text("Welcome to the PulseForge UI System!");
-		PulseForge::UI::Separator();
-
-		if (PulseForge::UI::Button("Click Me!"))
-		{
-			PF_TRACE("Button was clicked from the UI!");
-		}
-
-		PulseForge::UI::EndWindow();
-
-		PulseForge::UI::ShowDemoWindow();
 	}
 
 	void OnEvent(PulseForge::Event& Event) override

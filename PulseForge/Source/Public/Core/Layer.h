@@ -19,7 +19,6 @@ namespace PulseForge
 		// Runs after event polling and before BeginFrame so updates can safely prepare renderer resources.
 		virtual void OnUpdate(Timestep DeltaTime) { (void)DeltaTime; }
 		virtual void OnRender() {}
-		virtual void OnImGuiRender() {}
 		virtual void OnEvent(Event& Event) {}
 
 		inline const std::string& GetName() const { return m_DebugName; }

@@ -4,7 +4,6 @@
 #include "Window/Window.h"
 #include "Core/LayerStack.h"
 #include "Events/ApplicationEvent.h"
-#include "ImGui/ImGuiLayer.h"
 #include "Core/Input.h"
 #include "Renderer/RendererAPI.h"
 #include "Renderer/Buffer.h"
@@ -74,7 +73,6 @@ namespace PulseForge
 		Input m_Input;
 		RendererAPI m_RendererAPI;
 		static Application* s_Instance;
-		ImGuiLayer* m_ImGuiLayer = nullptr; // Owned by m_LayerStack.
 	};
 
 	// To be defined in the Client

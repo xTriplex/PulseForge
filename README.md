@@ -1,6 +1,6 @@
 # PulseForge
 
-PulseForge is a C++23 game engine under active development. Windows is the supported platform today, and CMake is the canonical build system. The sample uses the Vulkan/NVRHI renderer by default; OpenGL remains available as a transitional fallback.
+PulseForge is a C++23 game engine under active development. Windows is the supported platform today, and CMake is the canonical build system. `PulseForgeGame` uses the Vulkan/NVRHI renderer by default; OpenGL remains available as a transitional fallback.
 
 ## Requirements
 
@@ -28,7 +28,7 @@ Configure from the repository root using an x64 Visual Studio developer environm
 cmake -S . -B Build/CMake/VS2022-x64 -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
 ```
 
-CMake fetches pinned NVRHI/Vulkan-Headers and Lua sources, plus Microsoft DXC. DXC compiles the sample's HLSL shaders to SPIR-V at build time; the generated shader files are copied beside the sample executable. DXC and Lua source are build-time dependencies, not runtime requirements.
+CMake builds the editor by default. Set `-DPULSEFORGE_BUILD_EDITOR=OFF` for a runtime-only build. Configure also fetches pinned NVRHI/Vulkan-Headers and Lua sources, plus Microsoft DXC. DXC compiles the sample's HLSL shaders to SPIR-V at build time; the generated shader files are copied beside the sample executable. DXC and Lua source are build-time dependencies, not runtime requirements.
 
 ## Building
 
@@ -47,13 +47,15 @@ ctest --test-dir Build/CMake/VS2022-x64 -C Dist --output-on-failure
 
 ## Running
 
+Run `PulseForgeEditor` from its output directory for the early docking shell. It currently uses the OpenGL fallback for ImGui; project and scene operations are not connected yet. See [the editor notes](Docs/Editor.md).
+
 `PulseForgeGame` uses Vulkan by default. Run it from its output directory so it can find the generated `Shaders` folder. To build the sample with the OpenGL fallback, configure with:
 
 ```bat
 cmake -S . -B Build/CMake/VS2022-x64-OpenGL -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON -DPULSEFORGE_SAMPLE_RENDERER=OpenGL
 ```
 
-The OpenGL fallback supports the current bootstrap and ImGui path; the newer shader, binding, and geometry APIs are Vulkan-only for now. Vulkan presentation currently uses FIFO (VSync); runtime VSync controls are not exposed.
+The OpenGL fallback supports the renderer bootstrap; the newer shader, binding, and geometry APIs are Vulkan-only for now. Vulkan presentation currently uses FIFO (VSync); runtime VSync controls are not exposed.
 
 ## Scene API
 
@@ -61,7 +63,7 @@ The engine provides UUID-backed `Scene` and non-owning `Entity` handles with tag
 
 `PrefabSerializer` captures an entity subtree and instantiates it with fresh entity UUIDs while retaining asset UUID references. See [the prefab format](Docs/PrefabFormat.md).
 
-`ScriptRuntime` loads managed Lua assets by UUID and provides per-entity lifecycle callbacks plus entity, physics, and audio APIs. See [scripting](Docs/Scripting.md).
+`ScriptRuntime` loads managed Lua assets by UUID and provides per-entity lifecycle callbacks plus entity, scene mutation, physics, audio, and input APIs. See [scripting](Docs/Scripting.md).
 
 `SceneRuntime` coordinates script updates, fixed-step physics, and spatial-audio synchronization before scene rendering. See [runtime lifecycle](Docs/RuntimeLifecycle.md).
 

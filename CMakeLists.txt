@@ -4,6 +4,7 @@ project(PulseForge LANGUAGES C CXX)
 
 set(PULSEFORGE_SAMPLE_RENDERER "Vulkan" CACHE STRING "Renderer used by PulseForgeGame (Vulkan or OpenGL)")
 set_property(CACHE PULSEFORGE_SAMPLE_RENDERER PROPERTY STRINGS Vulkan OpenGL)
+option(PULSEFORGE_BUILD_EDITOR "Build the experimental PulseForge editor shell" ON)
 
 if(NOT WIN32)
 	message(FATAL_ERROR "PulseForge currently supports Windows only; desktop platform support is being implemented separately.")
@@ -128,24 +129,26 @@ target_compile_options(PulseForgeGlad PRIVATE
 	$<$<AND:$<C_COMPILER_ID:MSVC>,$<CONFIG:Dist>>:/O2>
 )
 
-add_library(PulseForgeImGui STATIC
-	PulseForge/Vendor/imgui/imgui.cpp
-	PulseForge/Vendor/imgui/imgui_draw.cpp
-	PulseForge/Vendor/imgui/imgui_tables.cpp
-	PulseForge/Vendor/imgui/imgui_widgets.cpp
-	PulseForge/Vendor/imgui/imgui_demo.cpp
-	PulseForge/Vendor/imgui/backends/imgui_impl_glfw.cpp
-	PulseForge/Vendor/imgui/backends/imgui_impl_opengl3.cpp
-)
-target_include_directories(PulseForgeImGui PUBLIC
-	PulseForge/Vendor/imgui
-	PulseForge/Vendor/imgui/backends
-)
-target_link_libraries(PulseForgeImGui PUBLIC glfw opengl32)
-target_compile_options(PulseForgeImGui PRIVATE
-	$<$<CXX_COMPILER_ID:MSVC>:/EHsc>
-	$<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Dist>>:/O2>
-)
+if(PULSEFORGE_BUILD_EDITOR)
+	add_library(PulseForgeImGui STATIC
+		PulseForge/Vendor/imgui/imgui.cpp
+		PulseForge/Vendor/imgui/imgui_draw.cpp
+		PulseForge/Vendor/imgui/imgui_tables.cpp
+		PulseForge/Vendor/imgui/imgui_widgets.cpp
+		PulseForge/Vendor/imgui/imgui_demo.cpp
+		PulseForge/Vendor/imgui/backends/imgui_impl_glfw.cpp
+		PulseForge/Vendor/imgui/backends/imgui_impl_opengl3.cpp
+	)
+	target_include_directories(PulseForgeImGui PUBLIC
+		PulseForge/Vendor/imgui
+		PulseForge/Vendor/imgui/backends
+	)
+	target_link_libraries(PulseForgeImGui PUBLIC glfw opengl32)
+	target_compile_options(PulseForgeImGui PRIVATE
+		$<$<CXX_COMPILER_ID:MSVC>:/EHsc>
+		$<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Dist>>:/O2>
+	)
+endif()
 
 add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/PulseForgePCH.cpp
@@ -176,8 +179,6 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/Layer.cpp
 	PulseForge/Source/Private/Core/LayerStack.cpp
 	PulseForge/Source/Private/Core/Log.cpp
-	PulseForge/Source/Private/ImGui/ImGuiLayer.cpp
-	PulseForge/Source/Private/ImGui/UI.cpp
 	PulseForge/Source/Private/Renderer/OpenGLRenderer.cpp
 	PulseForge/Source/Private/Renderer/Buffer.cpp
 	PulseForge/Source/Private/Renderer/Mesh.cpp
@@ -215,7 +216,6 @@ target_include_directories(PulseForge
 		PulseForge/Vendor/json/include
 		PulseForge/Vendor/Glfw/include
 		PulseForge/Vendor/Glad/include
-		PulseForge/Vendor/imgui
 		PulseForge/Vendor/miniaudio
 		PulseForge/Vendor/spdlog/include
 		PulseForge/Vendor/stb
@@ -230,7 +230,6 @@ target_link_libraries(PulseForge PRIVATE
 	PulseForgeLua
 	glfw
 	PulseForgeGlad
-	PulseForgeImGui
 	spdlog::spdlog
 	opengl32
 	nvrhi
@@ -249,6 +248,12 @@ elseif(NOT PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
 	message(FATAL_ERROR "PULSEFORGE_SAMPLE_RENDERER must be Vulkan or OpenGL")
 endif()
 target_link_libraries(PulseForgeGame PRIVATE PulseForge)
+
+if(PULSEFORGE_BUILD_EDITOR)
+	add_executable(PulseForgeEditor PulseForgeEditor/Source/Private/EditorApplication.cpp)
+	target_compile_definitions(PulseForgeEditor PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeEditor PRIVATE PulseForge PulseForgeImGui)
+endif()
 
 if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
 	# Pin the compiler executable and its archive hash instead of relying on a
@@ -352,7 +357,7 @@ if(BUILD_TESTING)
 	add_test(NAME PulseForge.BufferUpdates COMMAND PulseForgeBufferUpdateTests)
 endif()
 
-foreach(Target PulseForge PulseForgeGame PulseForgeTests PulseForgeBufferUpdateTests)
+foreach(Target PulseForge PulseForgeGame PulseForgeEditor PulseForgeTests PulseForgeBufferUpdateTests)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE
 			$<$<CXX_COMPILER_ID:MSVC>:/EHsc>

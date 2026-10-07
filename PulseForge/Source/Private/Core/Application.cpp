@@ -28,13 +28,6 @@ namespace PulseForge
 		try
 		{
 			m_Window->SetEventCallback(std::bind(&Application::OnEvent, this, std::placeholders::_1));
-
-			if (API == RendererAPI::OpenGL)
-			{
-				auto ImGuiOverlay = std::make_unique<ImGuiLayer>();
-				m_ImGuiLayer = static_cast<ImGuiLayer*>(
-					&m_LayerStack.PushOverlay(std::move(ImGuiOverlay)));
-			}
 		}
 		catch (...)
 		{
@@ -46,7 +39,6 @@ namespace PulseForge
 	Application::~Application()
 	{
 		m_LayerStack.Clear();
-		m_ImGuiLayer = nullptr;
 		s_Instance = nullptr;
 		m_Renderer.reset();
 		m_Window.reset();
@@ -75,18 +67,6 @@ namespace PulseForge
 			{
 				for (const auto& Layer : m_LayerStack)
 					Layer->OnRender();
-			}
-
-			if (bCanRender && m_ImGuiLayer)
-			{
-				m_ImGuiLayer->Begin();
-
-				for (const auto& Layer : m_LayerStack)
-				{
-					Layer->OnImGuiRender();
-				}
-
-				m_ImGuiLayer->End();
 			}
 
 			if (bCanRender)
