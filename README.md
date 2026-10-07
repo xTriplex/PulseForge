@@ -45,6 +45,13 @@ ctest --test-dir Build/CMake/VS2022-x64 -C Dist --output-on-failure
 
 `Dist` is an optimized build configuration, not a game packaging or export pipeline.
 
+## Cleaning generated files
+
+`Build/` and `out/` contain generated build trees. Keep them for incremental development. Run
+`CleanGeneratedFiles.bat` to inspect sizes or explicitly clean either tree. A deep clean removes
+CMake caches and fetched dependencies, so reconfiguration may need network access and builds will
+take longer. Cleanup is always manual.
+
 ## Running
 
 Run `PulseForgeEditor` from its output directory for the docking editor shell. It uses the OpenGL fallback for ImGui and supports basic project and scene file workflows. See [the editor notes](Docs/Editor.md).
