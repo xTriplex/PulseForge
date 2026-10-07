@@ -4049,6 +4049,57 @@ end
 		PF_CHECK(Tests, Playback.Stop().has_value());
 	}
 
+	void TestSceneSerializerClone(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		Scene Source;
+		const UUID RootIdentifier{ 0x7400000000000000ull, 74 };
+		const UUID ChildIdentifier{ 0x7500000000000000ull, 75 };
+		const AssetID MeshIdentifier{ 0x7600000000000000ull, 76 };
+		const AssetID MaterialIdentifier{ 0x7700000000000000ull, 77 };
+		auto Root = Source.CreateEntityWithUUID(RootIdentifier, "Runtime root");
+		auto Child = Source.CreateEntityWithUUID(ChildIdentifier, "Runtime child");
+		PF_CHECK(Tests, Root.has_value() && Child.has_value());
+		if (!Root || !Child)
+			return;
+
+		TransformComponent RootTransform;
+		RootTransform.Translation = { 2.0f, 3.0f, 4.0f };
+		PF_CHECK(Tests, Root->SetTransform(RootTransform).has_value());
+		PF_CHECK(Tests, Child->SetParent(*Root).has_value());
+		PF_CHECK(Tests, Child->SetMeshRenderer(MeshRendererComponent{ MeshIdentifier, MaterialIdentifier }).has_value());
+
+		auto Clone = SceneSerializer::Clone(Source);
+		PF_CHECK(Tests, Clone.has_value() && Clone->get() != &Source);
+		if (!Clone)
+			return;
+
+		PF_CHECK(Tests, (*Clone)->GetEntityCount() == Source.GetEntityCount());
+		auto ClonedRoot = (*Clone)->FindEntity(RootIdentifier);
+		auto ClonedChild = (*Clone)->FindEntity(ChildIdentifier);
+		PF_CHECK(Tests, ClonedRoot.has_value() && ClonedChild.has_value());
+		if (!ClonedRoot || !ClonedChild)
+			return;
+
+		const auto ClonedTransform = ClonedRoot->GetTransform();
+		const auto ClonedRenderer = ClonedChild->GetMeshRenderer();
+		const auto ClonedParent = ClonedChild->GetParent();
+		PF_CHECK(Tests, ClonedTransform && glm::all(glm::equal(ClonedTransform->Translation, RootTransform.Translation)));
+		PF_CHECK(Tests, ClonedRenderer && ClonedRenderer->has_value() &&
+			ClonedRenderer->value().MeshAsset == MeshIdentifier && ClonedRenderer->value().MaterialAsset == MaterialIdentifier);
+		PF_CHECK(Tests, ClonedParent && ClonedParent->has_value() && **ClonedParent == *ClonedRoot);
+
+		TransformComponent RuntimeTransform = *ClonedTransform;
+		RuntimeTransform.Translation.x = 20.0f;
+		PF_CHECK(Tests, ClonedRoot->SetTransform(RuntimeTransform).has_value());
+		const auto AuthoredTransform = Root->GetTransform();
+		PF_CHECK(Tests, AuthoredTransform && AuthoredTransform->Translation.x == RootTransform.Translation.x);
+
+		Scene Empty;
+		auto EmptyClone = SceneSerializer::Clone(Empty);
+		PF_CHECK(Tests, EmptyClone.has_value() && (*EmptyClone)->GetEntityCount() == 0);
+	}
+
 	void TestPrefabSerialization(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -4716,6 +4767,7 @@ int main()
 	TestEntityHandlesExpireWithScene(Tests);
 	TestSceneRenderSnapshot(Tests);
 	TestSceneSerializationRoundTrip(Tests);
+	TestSceneSerializerClone(Tests);
 	TestSceneAssetsByUUID(Tests);
 	TestPrefabSerialization(Tests);
 	TestPrefabAssetsByUUID(Tests);

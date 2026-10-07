@@ -573,6 +573,19 @@ namespace PulseForge
 		}
 	}
 
+	std::expected<std::unique_ptr<Scene>, SceneSerializationError> SceneSerializer::Clone(const Scene& Source)
+	{
+		auto Serialized = Serialize(Source);
+		if (!Serialized)
+			return std::unexpected(Serialized.error());
+
+		auto Copy = std::make_unique<Scene>();
+		if (auto Result = Deserialize(*Serialized, *Copy); !Result)
+			return std::unexpected(Result.error());
+
+		return Copy;
+	}
+
 	std::expected<void, SceneSerializationError> SceneSerializer::SaveToFile(
 		const Scene& Source,
 		const std::filesystem::path& Path)

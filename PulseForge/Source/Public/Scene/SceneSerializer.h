@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -36,6 +37,8 @@ namespace PulseForge
 	public:
 		[[nodiscard]] static std::expected<std::string, SceneSerializationError> Serialize(const Scene& Source);
 		[[nodiscard]] static std::expected<void, SceneSerializationError> Deserialize(std::string_view Data, Scene& Destination);
+		// Creates an independent scene copy retaining persistent entity and asset UUIDs.
+		[[nodiscard]] static std::expected<std::unique_ptr<Scene>, SceneSerializationError> Clone(const Scene& Source);
 		[[nodiscard]] static std::expected<void, SceneSerializationError> SaveToFile(const Scene& Source, const std::filesystem::path& Path);
 		[[nodiscard]] static std::expected<void, SceneSerializationError> LoadFromFile(const std::filesystem::path& Path, Scene& Destination);
 	};

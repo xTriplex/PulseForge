@@ -10,6 +10,8 @@
 #include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
 #include "Scene/Scene.h"
+#include "Scene/SceneSerializer.h"
+#include "Runtime/SceneRuntime.h"
 #include "Window/Window.h"
 
 #include <GLFW/glfw3.h>
@@ -151,6 +153,7 @@ namespace
 
 		~EditorLayer() override
 		{
+			StopRuntime();
 			DetachConsoleSink();
 			ShutdownImGui();
 			ShutdownFileDialog();
@@ -199,11 +202,25 @@ namespace
 
 		void OnDetach() override
 		{
+			StopRuntime();
 			DetachConsoleSink();
 			m_Scene.reset();
 			m_Project.reset();
 			ShutdownImGui();
 			ShutdownFileDialog();
+		}
+
+		void OnUpdate(PulseForge::Timestep DeltaTime) override
+		{
+			if (!m_SceneRuntime || !m_RuntimeScene)
+				return;
+
+			if (auto Result = m_SceneRuntime->Advance(*m_RuntimeScene, DeltaTime); !Result)
+			{
+				const std::string Message = "Runtime update failed: " + Result.error().Message;
+				StopRuntime();
+				SetError(Message);
+			}
 		}
 
 		void OnRender() override
@@ -353,6 +370,7 @@ namespace
 				*NewScene);
 			if (!MainScene && !MainScene.error().CommittedAsset)
 			{
+				StopRuntime();
 				m_Project.emplace(std::move(*Created));
 				ClearScene();
 				UpdateAssetList();
@@ -363,6 +381,7 @@ namespace
 			const PulseForge::AssetRecord MainSceneRecord = MainScene
 				? *MainScene
 				: *MainScene.error().CommittedAsset;
+			StopRuntime();
 			m_Project.emplace(std::move(*Created));
 			m_Scene = std::move(NewScene);
 			m_SceneAsset = MainSceneRecord.ID;
@@ -435,6 +454,7 @@ namespace
 			}
 
 			const std::string ProjectName = Opened->GetDescription().Name;
+			StopRuntime();
 			m_Project.emplace(std::move(*Opened));
 			m_Scene = std::move(LoadedScene);
 			m_SceneAsset = LoadedSceneAsset;
@@ -994,6 +1014,7 @@ namespace
 			}
 
 			const PulseForge::AssetRecord Record = Created ? *Created : *Created.error().CommittedAsset;
+			StopRuntime();
 			if (!SaveAs)
 				m_Scene = std::move(NewScene);
 			m_SceneAsset = Record.ID;
@@ -1043,6 +1064,7 @@ namespace
 				return;
 			}
 
+			StopRuntime();
 			m_Scene = std::move(Loaded);
 			m_SceneAsset = Identifier;
 			m_SelectedAsset = Identifier;
@@ -1130,6 +1152,7 @@ namespace
 				return false;
 			}
 
+			StopRuntime();
 			m_Scene = std::move(ReloadedScene);
 			m_SelectedEntity.reset();
 			m_SceneDirty = false;
@@ -1241,6 +1264,21 @@ namespace
 				}
 				ImGui::EndMenu();
 			}
+
+			ImGui::SameLine();
+			if (!m_SceneRuntime)
+			{
+				ImGui::BeginDisabled(!m_Project || !m_Scene);
+				if (ImGui::Button("Play"))
+					StartRuntime();
+				ImGui::EndDisabled();
+			}
+			else if (ImGui::Button("Stop"))
+			{
+				StopRuntime();
+				SetStatus("Runtime stopped. The authored scene was not modified by simulation.");
+			}
+
 			ImGui::EndMainMenuBar();
 		}
 
@@ -1259,6 +1297,12 @@ namespace
 							: std::string("<unregistered>");
 						ImGui::Text("Scene: %s%s", SceneName.c_str(), m_SceneDirty ? " *" : "");
 						ImGui::Text("Entities: %zu", m_Scene->GetEntityCount());
+						if (m_SceneRuntime && m_RuntimeScene)
+						{
+							ImGui::Separator();
+							ImGui::Text("Runtime simulation: playing (%zu entities)", m_RuntimeScene->GetEntityCount());
+							ImGui::TextWrapped("Running on an isolated scene copy. The editor viewport is not connected yet.");
+						}
 					}
 					else
 						ImGui::TextUnformatted("No scene is open. Create one from the Scene menu or open a scene asset.");
@@ -2141,6 +2185,44 @@ namespace
 			PF_INFO("{}", m_StatusMessage);
 		}
 
+		void StartRuntime()
+		{
+			if (!m_Project || !m_Scene)
+			{
+				SetError("Open a project and scene before starting the runtime.");
+				return;
+			}
+
+			auto CandidateScene = PulseForge::SceneSerializer::Clone(*m_Scene);
+			if (!CandidateScene)
+			{
+				SetError("Could not copy the authored scene for runtime: " + CandidateScene.error().Message);
+				return;
+			}
+
+			PulseForge::SceneRuntimeServices Services;
+			Services.InputState = &PulseForge::Application::Get().GetInput();
+			auto CandidateRuntime = std::make_unique<PulseForge::SceneRuntime>(*m_Project,
+				PulseForge::SceneRuntimeDesc{}, Services);
+			if (auto Result = CandidateRuntime->Start(**CandidateScene); !Result)
+			{
+				SetError("Could not start the scene runtime: " + Result.error().Message);
+				return;
+			}
+
+			m_RuntimeScene = std::move(*CandidateScene);
+			m_SceneRuntime = std::move(CandidateRuntime);
+			SetStatus("Runtime started on an isolated scene copy. The editor viewport is not connected yet.");
+		}
+
+		void StopRuntime() noexcept
+		{
+			if (m_SceneRuntime)
+				m_SceneRuntime->Stop();
+			m_SceneRuntime.reset();
+			m_RuntimeScene.reset();
+		}
+
 		void RefreshAssets()
 		{
 			if (!m_Project)
@@ -2187,6 +2269,7 @@ namespace
 
 		void ClearScene() noexcept
 		{
+			StopRuntime();
 			m_Scene.reset();
 			m_SceneAsset.reset();
 			m_SelectedEntity.reset();
@@ -2233,6 +2316,8 @@ namespace
 		std::function<void()> m_PendingAction;
 		std::optional<PulseForge::Project> m_Project;
 		std::unique_ptr<PulseForge::Scene> m_Scene;
+		std::unique_ptr<PulseForge::Scene> m_RuntimeScene;
+		std::unique_ptr<PulseForge::SceneRuntime> m_SceneRuntime;
 		std::optional<PulseForge::AssetID> m_SceneAsset;
 		std::optional<PulseForge::UUID> m_SelectedEntity;
 		std::optional<PulseForge::AssetID> m_SelectedAsset;
