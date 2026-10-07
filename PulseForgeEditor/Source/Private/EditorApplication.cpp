@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -848,6 +849,8 @@ namespace
 								m_SceneDirty = true;
 						}
 					}
+					ImGui::Separator();
+					DrawComponentAuthoring(*Entity);
 				}
 				else
 				{
@@ -856,6 +859,418 @@ namespace
 				}
 			}
 			ImGui::End();
+		}
+
+		template<typename Result>
+		void RecordComponentOperation(Result&& Operation, std::string_view Context)
+		{
+			if (!Operation)
+			{
+				SetError(std::string(Context) + ": " + Operation.error().Message);
+				return;
+			}
+			m_SceneDirty = true;
+		}
+
+		void SetCameraComponent(const PulseForge::Entity& Target, const PulseForge::CameraComponent& Camera)
+		{
+			if (auto Validation = Camera.Validate(); !Validation)
+			{
+				SetError("Camera update failed: " + Validation.error().Message);
+				return;
+			}
+			if (Camera.IsPrimary && m_Scene)
+			{
+				for (const PulseForge::Entity& Other : m_Scene->GetEntities())
+				{
+					if (Other.GetUUID() == Target.GetUUID())
+						continue;
+					auto Existing = Other.GetCamera();
+					if (!Existing)
+					{
+						SetError("Could not inspect camera components while selecting the primary camera: " + Existing.error().Message);
+						return;
+					}
+					if (!Existing->has_value() || !Existing->value().IsPrimary)
+						continue;
+					PulseForge::CameraComponent Updated = Existing->value();
+					Updated.IsPrimary = false;
+					if (auto Result = Other.SetCamera(Updated); !Result)
+					{
+						SetError("Could not clear the previous primary camera: " + Result.error().Message);
+						return;
+					}
+					m_SceneDirty = true;
+				}
+			}
+			RecordComponentOperation(Target.SetCamera(Camera), "Camera update failed");
+		}
+
+		void SetAudioListenerComponent(
+			const PulseForge::Entity& Target,
+			const PulseForge::AudioListenerComponent& Listener)
+		{
+			if (Listener.IsPrimary && m_Scene)
+			{
+				for (const PulseForge::Entity& Other : m_Scene->GetEntities())
+				{
+					if (Other.GetUUID() == Target.GetUUID())
+						continue;
+					auto Existing = Other.GetAudioListener();
+					if (!Existing)
+					{
+						SetError("Could not inspect audio listener components while selecting the primary listener: " + Existing.error().Message);
+						return;
+					}
+					if (!Existing->has_value() || !Existing->value().IsPrimary)
+						continue;
+					PulseForge::AudioListenerComponent Updated = Existing->value();
+					Updated.IsPrimary = false;
+					if (auto Result = Other.SetAudioListener(Updated); !Result)
+					{
+						SetError("Could not clear the previous primary audio listener: " + Result.error().Message);
+						return;
+					}
+					m_SceneDirty = true;
+				}
+			}
+			RecordComponentOperation(Target.SetAudioListener(Listener), "Audio listener update failed");
+		}
+
+		bool IsAssetExtension(
+			const PulseForge::AssetRecord& Asset,
+			std::initializer_list<std::string_view> Extensions) const
+		{
+			const std::string Extension = Asset.ProjectRelativePath.extension().string();
+			return std::any_of(Extensions.begin(), Extensions.end(), [&](std::string_view Candidate)
+			{
+				return Extension == Candidate;
+			});
+		}
+
+		bool DrawAssetSelector(
+			const char* Label,
+			std::optional<PulseForge::AssetID>& Current,
+			std::initializer_list<std::string_view> Extensions,
+			bool AllowNone)
+		{
+			std::string Preview = "<None>";
+			if (Current)
+			{
+				const auto Record = m_Project ? m_Project->GetAssetRegistry().Find(*Current) : std::nullopt;
+				Preview = Record ? PathToUtf8(Record->ProjectRelativePath) : "<Missing asset: " + Current->ToString() + ">";
+			}
+
+			bool Changed = false;
+			if (!ImGui::BeginCombo(Label, Preview.c_str()))
+				return false;
+
+			if (AllowNone)
+			{
+				const bool IsSelected = !Current;
+				if (ImGui::Selectable("None", IsSelected))
+				{
+					Current.reset();
+					Changed = true;
+				}
+				if (IsSelected)
+					ImGui::SetItemDefaultFocus();
+			}
+
+			bool HasCandidates = false;
+			if (m_Project)
+			{
+				for (const PulseForge::AssetRecord& Asset : m_Assets)
+				{
+					if (!IsAssetExtension(Asset, Extensions))
+						continue;
+					HasCandidates = true;
+					const std::string Identifier = Asset.ID.ToString();
+					const std::string Path = PathToUtf8(Asset.ProjectRelativePath);
+					const bool IsSelected = Current && *Current == Asset.ID;
+					ImGui::PushID(Identifier.c_str());
+					if (ImGui::Selectable(Path.c_str(), IsSelected))
+					{
+						Current = Asset.ID;
+						Changed = true;
+					}
+					if (IsSelected)
+						ImGui::SetItemDefaultFocus();
+					ImGui::PopID();
+				}
+			}
+			if (!HasCandidates)
+				ImGui::TextDisabled("No compatible managed assets are available.");
+
+			ImGui::EndCombo();
+			return Changed;
+		}
+
+		void DrawComponentAuthoring(const PulseForge::Entity& Entity)
+		{
+			if (ImGui::Button("Add Component"))
+				ImGui::OpenPopup("Add Component");
+			if (ImGui::BeginPopup("Add Component"))
+			{
+				const auto Camera = Entity.GetCamera();
+				const auto Mesh = Entity.GetMeshRenderer();
+				const auto Rigidbody = Entity.GetRigidbody();
+				const auto Collider = Entity.GetBoxCollider();
+				const auto AudioSource = Entity.GetAudioSource();
+				const auto AudioListener = Entity.GetAudioListener();
+				const auto Script = Entity.GetScript();
+				if (!Camera || !Mesh || !Rigidbody || !Collider || !AudioSource || !AudioListener || !Script)
+					SetError("Could not inspect entity components.");
+
+				if (Camera && !Camera->has_value() && ImGui::MenuItem("Camera"))
+				{
+					PulseForge::CameraComponent Component;
+					Component.IsPrimary = true;
+					SetCameraComponent(Entity, Component);
+				}
+				if (Rigidbody && !Rigidbody->has_value() && ImGui::MenuItem("Rigidbody"))
+					RecordComponentOperation(Entity.SetRigidbody(PulseForge::RigidbodyComponent{}), "Rigidbody component add failed");
+				if (Collider && !Collider->has_value() && ImGui::MenuItem("Box Collider"))
+					RecordComponentOperation(Entity.SetBoxCollider(PulseForge::BoxColliderComponent{}), "Box collider add failed");
+				if (AudioListener && !AudioListener->has_value() && ImGui::MenuItem("Audio Listener"))
+					SetAudioListenerComponent(Entity, PulseForge::AudioListenerComponent{});
+
+				if (Mesh && !Mesh->has_value() && ImGui::BeginMenu("Mesh Renderer"))
+				{
+					bool HasMeshAssets = false;
+					for (const PulseForge::AssetRecord& Asset : m_Assets)
+					{
+						if (!IsAssetExtension(Asset, { ".gltf", ".glb" }))
+							continue;
+						HasMeshAssets = true;
+						const std::string Path = PathToUtf8(Asset.ProjectRelativePath);
+						if (ImGui::MenuItem(Path.c_str()))
+						{
+							PulseForge::MeshRendererComponent Component;
+							Component.MeshAsset = Asset.ID;
+							RecordComponentOperation(Entity.SetMeshRenderer(Component), "Mesh renderer add failed");
+							break;
+						}
+					}
+					if (!HasMeshAssets)
+						ImGui::MenuItem("Import a glTF asset first", nullptr, false, false);
+					ImGui::EndMenu();
+				}
+
+				if (AudioSource && !AudioSource->has_value() && ImGui::BeginMenu("Audio Source"))
+				{
+					bool HasAudioAssets = false;
+					for (const PulseForge::AssetRecord& Asset : m_Assets)
+					{
+						if (!IsAssetExtension(Asset, { ".wav", ".mp3", ".flac", ".ogg" }))
+							continue;
+						HasAudioAssets = true;
+						const std::string Path = PathToUtf8(Asset.ProjectRelativePath);
+						if (ImGui::MenuItem(Path.c_str()))
+						{
+							PulseForge::AudioSourceComponent Component;
+							Component.AudioAsset = Asset.ID;
+							RecordComponentOperation(Entity.SetAudioSource(Component), "Audio source add failed");
+							break;
+						}
+					}
+					if (!HasAudioAssets)
+						ImGui::MenuItem("Import an audio asset first", nullptr, false, false);
+					ImGui::EndMenu();
+				}
+
+				if (Script && !Script->has_value() && ImGui::BeginMenu("Script"))
+				{
+					bool HasScripts = false;
+					for (const PulseForge::AssetRecord& Asset : m_Assets)
+					{
+						if (!IsAssetExtension(Asset, { ".lua" }))
+							continue;
+						HasScripts = true;
+						const std::string Path = PathToUtf8(Asset.ProjectRelativePath);
+						if (ImGui::MenuItem(Path.c_str()))
+						{
+							PulseForge::ScriptComponent Component;
+							Component.ScriptAsset = Asset.ID;
+							RecordComponentOperation(Entity.SetScript(Component), "Script component add failed");
+							break;
+						}
+					}
+					if (!HasScripts)
+						ImGui::MenuItem("Import a Lua script first", nullptr, false, false);
+					ImGui::EndMenu();
+				}
+				ImGui::EndPopup();
+			}
+
+			DrawCameraComponent(Entity);
+			DrawMeshRendererComponent(Entity);
+			DrawRigidbodyComponent(Entity);
+			DrawBoxColliderComponent(Entity);
+			DrawAudioSourceComponent(Entity);
+			DrawAudioListenerComponent(Entity);
+			DrawScriptComponent(Entity);
+		}
+
+		void DrawCameraComponent(const PulseForge::Entity& Entity)
+		{
+			const auto Result = Entity.GetCamera();
+			if (!Result || !Result->has_value() || !ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen))
+				return;
+
+			PulseForge::CameraComponent Component = **Result;
+			if (ImGui::SmallButton("Remove Camera"))
+			{
+				RecordComponentOperation(Entity.RemoveCamera(), "Camera component removal failed");
+				return;
+			}
+			float FieldOfViewDegrees = glm::degrees(Component.VerticalFieldOfViewRadians);
+			const bool FieldOfViewChanged = ImGui::DragFloat("Vertical FOV (degrees)", &FieldOfViewDegrees, 0.1f, 1.0f, 179.0f);
+			const float MaxNearClip = (std::max)(0.002f, Component.FarClipPlane - 0.001f);
+			const bool NearChanged = ImGui::DragFloat("Near Clip", &Component.NearClipPlane, 0.01f, 0.001f, MaxNearClip);
+			const float MinFarClip = Component.NearClipPlane + 0.001f;
+			const bool FarChanged = ImGui::DragFloat("Far Clip", &Component.FarClipPlane, 1.0f, MinFarClip, 1000000.0f);
+			const bool PrimaryChanged = ImGui::Checkbox("Primary Camera", &Component.IsPrimary);
+			if (FieldOfViewChanged || NearChanged || FarChanged || PrimaryChanged)
+			{
+				Component.VerticalFieldOfViewRadians = glm::radians(FieldOfViewDegrees);
+				SetCameraComponent(Entity, Component);
+			}
+		}
+
+		void DrawMeshRendererComponent(const PulseForge::Entity& Entity)
+		{
+			const auto Result = Entity.GetMeshRenderer();
+			if (!Result || !Result->has_value() || !ImGui::CollapsingHeader("Mesh Renderer", ImGuiTreeNodeFlags_DefaultOpen))
+				return;
+
+			PulseForge::MeshRendererComponent Component = **Result;
+			if (ImGui::SmallButton("Remove Mesh Renderer"))
+			{
+				RecordComponentOperation(Entity.RemoveMeshRenderer(), "Mesh renderer removal failed");
+				return;
+			}
+			std::optional<PulseForge::AssetID> Mesh = Component.MeshAsset;
+			bool Changed = DrawAssetSelector("Mesh Asset", Mesh, { ".gltf", ".glb" }, false);
+			std::optional<PulseForge::AssetID> Material = Component.MaterialAsset;
+			Changed |= DrawAssetSelector("Material Asset", Material, { ".material" }, true);
+			if (Changed && Mesh)
+			{
+				Component.MeshAsset = *Mesh;
+				Component.MaterialAsset = Material;
+				RecordComponentOperation(Entity.SetMeshRenderer(Component), "Mesh renderer update failed");
+			}
+		}
+
+		void DrawRigidbodyComponent(const PulseForge::Entity& Entity)
+		{
+			const auto Result = Entity.GetRigidbody();
+			if (!Result || !Result->has_value() || !ImGui::CollapsingHeader("Rigidbody", ImGuiTreeNodeFlags_DefaultOpen))
+				return;
+
+			PulseForge::RigidbodyComponent Component = **Result;
+			if (ImGui::SmallButton("Remove Rigidbody"))
+			{
+				RecordComponentOperation(Entity.RemoveRigidbody(), "Rigidbody removal failed");
+				return;
+			}
+			int MotionType = Component.MotionType == PulseForge::RigidbodyMotionType::Static ? 0 : 1;
+			const char* MotionTypes[]{ "Static", "Dynamic" };
+			bool Changed = ImGui::Combo("Motion Type", &MotionType, MotionTypes, 2);
+			if (Changed)
+				Component.MotionType = MotionType == 0
+					? PulseForge::RigidbodyMotionType::Static
+					: PulseForge::RigidbodyMotionType::Dynamic;
+			Changed |= ImGui::DragFloat("Mass", &Component.Mass, 0.05f, 0.001f, 1000000.0f);
+			Changed |= ImGui::DragFloat("Friction", &Component.Friction, 0.01f, 0.0f, 1.0f);
+			Changed |= ImGui::DragFloat("Restitution", &Component.Restitution, 0.01f, 0.0f, 1.0f);
+			Changed |= ImGui::Checkbox("Allow Sleeping", &Component.AllowSleeping);
+			if (Changed)
+				RecordComponentOperation(Entity.SetRigidbody(Component), "Rigidbody update failed");
+		}
+
+		void DrawBoxColliderComponent(const PulseForge::Entity& Entity)
+		{
+			const auto Result = Entity.GetBoxCollider();
+			if (!Result || !Result->has_value() || !ImGui::CollapsingHeader("Box Collider", ImGuiTreeNodeFlags_DefaultOpen))
+				return;
+
+			PulseForge::BoxColliderComponent Component = **Result;
+			if (ImGui::SmallButton("Remove Box Collider"))
+			{
+				RecordComponentOperation(Entity.RemoveBoxCollider(), "Box collider removal failed");
+				return;
+			}
+			float HalfExtents[3]{ Component.HalfExtents.x, Component.HalfExtents.y, Component.HalfExtents.z };
+			const bool Changed = ImGui::DragFloat3("Half Extents", HalfExtents, 0.01f, 0.001f, 1000000.0f);
+			if (Changed)
+			{
+				Component.HalfExtents = { HalfExtents[0], HalfExtents[1], HalfExtents[2] };
+				RecordComponentOperation(Entity.SetBoxCollider(Component), "Box collider update failed");
+			}
+		}
+
+		void DrawAudioSourceComponent(const PulseForge::Entity& Entity)
+		{
+			const auto Result = Entity.GetAudioSource();
+			if (!Result || !Result->has_value() || !ImGui::CollapsingHeader("Audio Source", ImGuiTreeNodeFlags_DefaultOpen))
+				return;
+
+			PulseForge::AudioSourceComponent Component = **Result;
+			if (ImGui::SmallButton("Remove Audio Source"))
+			{
+				RecordComponentOperation(Entity.RemoveAudioSource(), "Audio source removal failed");
+				return;
+			}
+			std::optional<PulseForge::AssetID> Audio = Component.AudioAsset;
+			bool Changed = DrawAssetSelector("Audio Asset", Audio, { ".wav", ".mp3", ".flac", ".ogg" }, false);
+			Changed |= ImGui::DragFloat("Volume", &Component.Volume, 0.01f, 0.0f, 1.0f);
+			Changed |= ImGui::Checkbox("Looping", &Component.Looping);
+			Changed |= ImGui::Checkbox("Play On Start", &Component.PlayOnStart);
+			Changed |= ImGui::Checkbox("Spatialized", &Component.Spatialized);
+			if (Changed && Audio)
+			{
+				Component.AudioAsset = *Audio;
+				RecordComponentOperation(Entity.SetAudioSource(Component), "Audio source update failed");
+			}
+		}
+
+		void DrawAudioListenerComponent(const PulseForge::Entity& Entity)
+		{
+			const auto Result = Entity.GetAudioListener();
+			if (!Result || !Result->has_value() || !ImGui::CollapsingHeader("Audio Listener", ImGuiTreeNodeFlags_DefaultOpen))
+				return;
+
+			PulseForge::AudioListenerComponent Component = **Result;
+			if (ImGui::SmallButton("Remove Audio Listener"))
+			{
+				RecordComponentOperation(Entity.RemoveAudioListener(), "Audio listener removal failed");
+				return;
+			}
+			if (ImGui::Checkbox("Primary Audio Listener", &Component.IsPrimary))
+				SetAudioListenerComponent(Entity, Component);
+		}
+
+		void DrawScriptComponent(const PulseForge::Entity& Entity)
+		{
+			const auto Result = Entity.GetScript();
+			if (!Result || !Result->has_value() || !ImGui::CollapsingHeader("Script", ImGuiTreeNodeFlags_DefaultOpen))
+				return;
+
+			PulseForge::ScriptComponent Component = **Result;
+			if (ImGui::SmallButton("Remove Script"))
+			{
+				RecordComponentOperation(Entity.RemoveScript(), "Script component removal failed");
+				return;
+			}
+			std::optional<PulseForge::AssetID> Script = Component.ScriptAsset;
+			bool Changed = DrawAssetSelector("Lua Script", Script, { ".lua" }, false);
+			Changed |= ImGui::Checkbox("Enabled", &Component.Enabled);
+			if (Changed && Script)
+			{
+				Component.ScriptAsset = *Script;
+				RecordComponentOperation(Entity.SetScript(Component), "Script component update failed");
+			}
 		}
 
 		void DrawContentBrowserPanel()
