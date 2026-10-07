@@ -142,6 +142,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForge/Vendor/imgui/imgui_tables.cpp
 		PulseForge/Vendor/imgui/imgui_widgets.cpp
 		PulseForge/Vendor/imgui/imgui_demo.cpp
+		PulseForge/Vendor/imgui/misc/cpp/imgui_stdlib.cpp
 		PulseForge/Vendor/imgui/backends/imgui_impl_glfw.cpp
 		PulseForge/Vendor/imgui/backends/imgui_impl_opengl3.cpp
 	)

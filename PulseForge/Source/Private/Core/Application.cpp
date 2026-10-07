@@ -82,8 +82,6 @@ namespace PulseForge
 
 		EventDispatcher Dispatcher(E);
 
-		Dispatcher.Dispatch<WindowCloseEvent>(std::bind(&Application::OnWindowClose, this, std::placeholders::_1));
-
 		for (auto It = m_LayerStack.rbegin(); It != m_LayerStack.rend(); ++It)
 		{
 			(*It)->OnEvent(E);
@@ -92,6 +90,9 @@ namespace PulseForge
 				break;
 			}
 		}
+
+		if (!E.bHandled)
+			Dispatcher.Dispatch<WindowCloseEvent>(std::bind(&Application::OnWindowClose, this, std::placeholders::_1));
 	}
 
 	Layer& Application::PushLayer(std::unique_ptr<Layer> Layer)

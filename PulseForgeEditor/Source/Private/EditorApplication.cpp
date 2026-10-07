@@ -14,11 +14,14 @@
 #include <nfd.h>
 #include <nfd_glfw3.h>
 #include <imgui.h>
+#include <misc/cpp/imgui_stdlib.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
+#include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -141,6 +144,14 @@ namespace
 
 		void OnEvent(PulseForge::Event& Event) override
 		{
+			if (Event.GetEventType() == PulseForge::EEventType::WindowClose && m_SceneDirty)
+			{
+				m_PendingAction = [] { PulseForge::Application::Get().RequestClose(); };
+				m_OpenUnsavedDialog = true;
+				Event.bHandled = true;
+				return;
+			}
+
 			ImGui::SetCurrentContext(m_Context);
 			const ImGuiIO& IO = ImGui::GetIO();
 			Event.bHandled |= Event.IsInCategory(PulseForge::EventCategoryMouse) && IO.WantCaptureMouse;
@@ -230,9 +241,14 @@ namespace
 				return;
 			if (ProjectFile->extension().empty())
 				*ProjectFile += ".pfproj";
+			const std::filesystem::path ChosenPath = *ProjectFile;
+			QueueAfterSave([this, ChosenPath] { CreateProjectAt(ChosenPath); });
+		}
 
-			const std::string ProjectName = PathToUtf8(ProjectFile->stem());
-			auto Created = PulseForge::Project::Create(*ProjectFile, ProjectName);
+		void CreateProjectAt(const std::filesystem::path& ProjectFile)
+		{
+			const std::string ProjectName = PathToUtf8(ProjectFile.stem());
+			auto Created = PulseForge::Project::Create(ProjectFile, ProjectName);
 			if (!Created)
 			{
 				SetError("Project creation failed: " + Created.error().Message);
@@ -261,6 +277,7 @@ namespace
 			m_Scene = std::move(NewScene);
 			m_SceneAsset = MainSceneRecord.ID;
 			m_SelectedEntity.reset();
+			m_SceneDirty = false;
 			if (!MainScene)
 			{
 				std::string Message = "Project and Main.scene were created, but temporary cleanup needs attention: ";
@@ -291,8 +308,13 @@ namespace
 			auto ProjectFile = ShowOpenDialog(Filter);
 			if (!ProjectFile)
 				return;
+			const std::filesystem::path ChosenPath = *ProjectFile;
+			QueueAfterSave([this, ChosenPath] { OpenProjectAt(ChosenPath); });
+		}
 
-			auto Opened = PulseForge::Project::Open(*ProjectFile);
+		void OpenProjectAt(const std::filesystem::path& ProjectFile)
+		{
+			auto Opened = PulseForge::Project::Open(ProjectFile);
 			if (!Opened)
 			{
 				SetError("Project could not be opened: " + Opened.error().Message);
@@ -324,6 +346,7 @@ namespace
 			m_Scene = std::move(LoadedScene);
 			m_SceneAsset = LoadedSceneAsset;
 			m_SelectedEntity.reset();
+			m_SceneDirty = false;
 			UpdateAssetList();
 			if (SceneLoadWarning.empty())
 				SetStatus("Opened project " + ProjectName + ".");
@@ -350,9 +373,25 @@ namespace
 				return;
 			if (SelectedPath->extension().empty())
 				*SelectedPath += ".scene";
+			const std::filesystem::path ChosenPath = *SelectedPath;
+			QueueAfterSave([this, ChosenPath, SaveAs] { CreateSceneAt(ChosenPath, SaveAs); });
+		}
+
+		void CreateSceneAt(const std::filesystem::path& SelectedPath, bool SaveAs)
+		{
+			if (!m_Project)
+			{
+				SetError("Create or open a project before creating a scene.");
+				return;
+			}
+			if (SaveAs && !m_Scene)
+			{
+				SetError("There is no open scene to save under a new asset identity.");
+				return;
+			}
 
 			std::error_code PathError;
-			const std::filesystem::path AbsolutePath = std::filesystem::absolute(*SelectedPath, PathError).lexically_normal();
+			const std::filesystem::path AbsolutePath = std::filesystem::absolute(SelectedPath, PathError).lexically_normal();
 			if (PathError)
 			{
 				SetError("Could not resolve the scene destination: " + PathError.message());
@@ -379,6 +418,7 @@ namespace
 				m_Scene = std::move(NewScene);
 			m_SceneAsset = Record.ID;
 			m_SelectedEntity.reset();
+			m_SceneDirty = false;
 			UpdateAssetList();
 			if (auto StartScene = m_Project->SetStartScene(Record.ID); !StartScene)
 			{
@@ -404,6 +444,11 @@ namespace
 
 		void OpenScene(const PulseForge::AssetID& Identifier)
 		{
+			QueueAfterSave([this, Identifier] { OpenSceneNow(Identifier); });
+		}
+
+		void OpenSceneNow(const PulseForge::AssetID& Identifier)
+		{
 			if (!m_Project)
 				return;
 			auto Loaded = std::make_unique<PulseForge::Scene>();
@@ -421,16 +466,17 @@ namespace
 			m_Scene = std::move(Loaded);
 			m_SceneAsset = Identifier;
 			m_SelectedEntity.reset();
+			m_SceneDirty = false;
 			const auto Record = m_Project->GetAssetRegistry().Find(Identifier);
 			SetStatus(Record ? "Opened scene " + PathToUtf8(Record->ProjectRelativePath) + "." : "Opened scene.");
 		}
 
-		void SaveScene()
+		bool SaveScene()
 		{
 			if (!m_Project || !m_Scene || !m_SceneAsset)
 			{
 				SetError("There is no managed scene asset to save.");
-				return;
+				return false;
 			}
 
 			const auto Result = PulseForge::SceneAssetService::Save(
@@ -439,9 +485,121 @@ namespace
 				m_Project->GetAssetRegistry(),
 				*m_Scene);
 			if (!Result)
+			{
 				SetError("Scene save failed: " + Result.error().Message);
+				return false;
+			}
 			else
+			{
+				m_SceneDirty = false;
 				SetStatus("Scene saved.");
+			}
+			return true;
+		}
+
+		void QueueAfterSave(std::function<void()> Action)
+		{
+			if (m_PendingAction)
+			{
+				SetWarning("Resolve the current unsaved-scene prompt before starting another project or scene operation.");
+				return;
+			}
+
+			if (!m_SceneDirty)
+			{
+				Action();
+				return;
+			}
+
+			m_PendingAction = std::move(Action);
+			m_OpenUnsavedDialog = true;
+		}
+
+		bool DiscardSceneChanges()
+		{
+			if (!m_SceneDirty)
+				return true;
+			if (!m_Project || !m_Scene || !m_SceneAsset)
+			{
+				SetError("Cannot discard changes because the current scene has no managed source asset to reload.");
+				return false;
+			}
+
+			auto ReloadedScene = std::make_unique<PulseForge::Scene>();
+			const auto Result = PulseForge::SceneAssetService::Load(
+				*m_SceneAsset,
+				m_Project->GetRootPath(),
+				m_Project->GetAssetRegistry(),
+				*ReloadedScene);
+			if (!Result)
+			{
+				SetError("Unsaved changes were preserved because the saved scene could not be reloaded: " + Result.error().Message);
+				return false;
+			}
+
+			m_Scene = std::move(ReloadedScene);
+			m_SelectedEntity.reset();
+			m_SceneDirty = false;
+			SetStatus("Unsaved scene changes discarded.");
+			return true;
+		}
+
+		void ExecutePendingAction()
+		{
+			auto Action = std::move(m_PendingAction);
+			m_PendingAction = {};
+			m_OpenUnsavedDialog = false;
+			ImGui::CloseCurrentPopup();
+			if (Action)
+				Action();
+		}
+
+		void DrawUnsavedChangesDialog()
+		{
+			if (m_OpenUnsavedDialog)
+			{
+				ImGui::OpenPopup("Unsaved Scene Changes");
+				m_OpenUnsavedDialog = false;
+			}
+
+			bool PopupOpen = true;
+			if (ImGui::BeginPopupModal("Unsaved Scene Changes", &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize))
+			{
+				ImGui::TextUnformatted("The current scene has unsaved changes.");
+				ImGui::TextUnformatted("Save before continuing?");
+				if (ImGui::Button("Save", ImVec2(120.0f, 0.0f)))
+				{
+					if (SaveScene())
+						ExecutePendingAction();
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Discard", ImVec2(120.0f, 0.0f)))
+				{
+					if (DiscardSceneChanges())
+						ExecutePendingAction();
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)))
+				{
+					m_PendingAction = {};
+					m_OpenUnsavedDialog = false;
+					ImGui::CloseCurrentPopup();
+				}
+				ImGui::EndPopup();
+			}
+			if (!PopupOpen)
+			{
+				m_PendingAction = {};
+				m_OpenUnsavedDialog = false;
+			}
+		}
+
+		void CloseProjectNow()
+		{
+			ClearScene();
+			m_Project.reset();
+			m_Assets.clear();
+			SetStatus("Project closed.");
 		}
 
 		void DrawMainMenu()
@@ -457,17 +615,10 @@ namespace
 				if (ImGui::MenuItem("Open Project..."))
 					OpenProject();
 				if (m_Project && ImGui::MenuItem("Close Project"))
-				{
-					m_Scene.reset();
-					m_Project.reset();
-					m_SceneAsset.reset();
-					m_SelectedEntity.reset();
-					m_Assets.clear();
-					SetStatus("Project closed.");
-				}
+					QueueAfterSave([this] { CloseProjectNow(); });
 				ImGui::Separator();
 				if (ImGui::MenuItem("Exit"))
-					PulseForge::Application::Get().RequestClose();
+					QueueAfterSave([] { PulseForge::Application::Get().RequestClose(); });
 				ImGui::EndMenu();
 			}
 
@@ -510,7 +661,10 @@ namespace
 					if (m_Scene && m_SceneAsset)
 					{
 						const auto Record = m_Project->GetAssetRegistry().Find(*m_SceneAsset);
-						ImGui::Text("Scene: %s", Record ? PathToUtf8(Record->ProjectRelativePath).c_str() : "<unregistered>");
+						const std::string SceneName = Record
+							? PathToUtf8(Record->ProjectRelativePath)
+							: std::string("<unregistered>");
+						ImGui::Text("Scene: %s%s", SceneName.c_str(), m_SceneDirty ? " *" : "");
 						ImGui::Text("Entities: %zu", m_Scene->GetEntityCount());
 					}
 					else
@@ -527,6 +681,7 @@ namespace
 				ImGui::TextWrapped("%s", m_StatusMessage.c_str());
 				ImGui::PopStyleColor();
 			}
+			DrawUnsavedChangesDialog();
 			ImGui::End();
 
 			DrawHierarchyPanel();
@@ -542,6 +697,20 @@ namespace
 		{
 			if (ImGui::Begin("Hierarchy"))
 			{
+				ImGui::BeginDisabled(!m_Scene);
+				if (ImGui::Button("Create Entity"))
+					CreateEntityFromEditor();
+				ImGui::SameLine();
+				ImGui::BeginDisabled(!m_SelectedEntity);
+				if (ImGui::Button("Duplicate"))
+					DuplicateSelectedEntity();
+				ImGui::SameLine();
+				if (ImGui::Button("Delete"))
+					DeleteSelectedEntity();
+				ImGui::EndDisabled();
+				ImGui::EndDisabled();
+				ImGui::Separator();
+
 				if (!m_Scene)
 					ImGui::TextUnformatted("No scene is open.");
 				else if (m_Scene->GetEntityCount() == 0)
@@ -557,6 +726,59 @@ namespace
 				}
 			}
 			ImGui::End();
+		}
+
+		void CreateEntityFromEditor()
+		{
+			if (!m_Scene)
+				return;
+			auto Created = m_Scene->CreateEntity();
+			if (!Created)
+			{
+				SetError("Entity creation failed: " + Created.error().Message);
+				return;
+			}
+			m_SelectedEntity = Created->GetUUID();
+			m_SceneDirty = true;
+		}
+
+		void DuplicateSelectedEntity()
+		{
+			if (!m_Scene || !m_SelectedEntity)
+				return;
+			const auto Source = m_Scene->FindEntity(*m_SelectedEntity);
+			if (!Source)
+			{
+				m_SelectedEntity.reset();
+				return;
+			}
+			auto Duplicated = m_Scene->DuplicateEntity(*Source);
+			if (!Duplicated)
+			{
+				SetError("Entity duplication failed: " + Duplicated.error().Message);
+				return;
+			}
+			m_SelectedEntity = Duplicated->GetUUID();
+			m_SceneDirty = true;
+		}
+
+		void DeleteSelectedEntity()
+		{
+			if (!m_Scene || !m_SelectedEntity)
+				return;
+			const auto Target = m_Scene->FindEntity(*m_SelectedEntity);
+			if (!Target)
+			{
+				m_SelectedEntity.reset();
+				return;
+			}
+			if (auto Deleted = m_Scene->DestroyEntity(*Target); !Deleted)
+			{
+				SetError("Entity deletion failed: " + Deleted.error().Message);
+				return;
+			}
+			m_SelectedEntity.reset();
+			m_SceneDirty = true;
 		}
 
 		void DrawEntityTree(const PulseForge::Entity& Entity)
@@ -594,18 +816,37 @@ namespace
 					ImGui::TextUnformatted("Select an entity in the Hierarchy.");
 				else if (const auto Entity = m_Scene->FindEntity(*m_SelectedEntity))
 				{
-					const auto Tag = Entity->GetTag();
-					if (Tag)
-						ImGui::Text("Name: %s", Tag->Name.c_str());
+					auto Tag = Entity->GetTag();
+					if (Tag && ImGui::InputText("Name", &Tag->Name))
+					{
+						if (auto Updated = Entity->SetTag(*Tag); !Updated)
+							SetError("Entity name update failed: " + Updated.error().Message);
+						else
+							m_SceneDirty = true;
+					}
 					ImGui::Text("UUID: %s", Entity->GetUUID().ToString().c_str());
 
 					if (const auto Transform = Entity->GetTransform())
 					{
 						ImGui::SeparatorText("Transform");
-						ImGui::Text("Position: %.3f, %.3f, %.3f",
-							Transform->Translation.x, Transform->Translation.y, Transform->Translation.z);
-						ImGui::Text("Scale: %.3f, %.3f, %.3f",
-							Transform->Scale.x, Transform->Scale.y, Transform->Scale.z);
+						float Translation[3]{ Transform->Translation.x, Transform->Translation.y, Transform->Translation.z };
+						glm::vec3 RotationDegrees = glm::degrees(glm::eulerAngles(Transform->Rotation));
+						float Rotation[3]{ RotationDegrees.x, RotationDegrees.y, RotationDegrees.z };
+						float Scale[3]{ Transform->Scale.x, Transform->Scale.y, Transform->Scale.z };
+						const bool TranslationChanged = ImGui::DragFloat3("Translation", Translation, 0.05f);
+						const bool RotationChanged = ImGui::DragFloat3("Rotation (degrees)", Rotation, 0.5f);
+						const bool ScaleChanged = ImGui::DragFloat3("Scale", Scale, 0.05f);
+						if (TranslationChanged || RotationChanged || ScaleChanged)
+						{
+							PulseForge::TransformComponent UpdatedTransform = *Transform;
+							UpdatedTransform.Translation = { Translation[0], Translation[1], Translation[2] };
+							UpdatedTransform.Rotation = glm::quat(glm::radians(glm::vec3(Rotation[0], Rotation[1], Rotation[2])));
+							UpdatedTransform.Scale = { Scale[0], Scale[1], Scale[2] };
+							if (auto Updated = Entity->SetTransform(UpdatedTransform); !Updated)
+								SetError("Entity transform update failed: " + Updated.error().Message);
+							else
+								m_SceneDirty = true;
+						}
 					}
 				}
 				else
@@ -705,6 +946,7 @@ namespace
 			m_Scene.reset();
 			m_SceneAsset.reset();
 			m_SelectedEntity.reset();
+			m_SceneDirty = false;
 		}
 
 		void ShutdownImGui() noexcept
@@ -734,6 +976,9 @@ namespace
 		bool m_GlfwBackendActive = false;
 		bool m_OpenGLBackendActive = false;
 		bool m_FileDialogActive = false;
+		bool m_SceneDirty = false;
+		bool m_OpenUnsavedDialog = false;
+		std::function<void()> m_PendingAction;
 		std::optional<PulseForge::Project> m_Project;
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::optional<PulseForge::AssetID> m_SceneAsset;
