@@ -48,9 +48,10 @@ ctest --test-dir Build/CMake/VS2022-x64 -C Dist --output-on-failure
 ## Cleaning generated files
 
 `Build/` and `out/` contain generated build trees. Keep them for incremental development. Run
-`CleanGeneratedFiles.bat` to inspect sizes or explicitly clean either tree. A deep clean removes
-CMake caches and fetched dependencies, so reconfiguration may need network access and builds will
-take longer. Cleanup is always manual.
+`CleanGeneratedFiles.bat` at the repository root to inspect sizes or explicitly clean either tree;
+it checks for active build processes and asks for confirmation. A deep clean removes CMake caches
+and fetched dependencies, so reconfiguration may need network access and builds will take longer.
+Cleanup is optional and manual; normal builds retain their outputs.
 
 ## Running
 

@@ -2,119 +2,75 @@
 setlocal EnableExtensions DisableDelayedExpansion
 
 for %%I in ("%~dp0.") do set "PF_ROOT=%%~fI"
-if not exist "%PF_ROOT%\CMakeLists.txt" goto InvalidRoot
+if not exist "%PF_ROOT%\CMakeLists.txt" goto invalidRoot
 
-echo.
-echo PulseForge generated-file cleanup
+set "PF_BUILD_TARGET=%PF_ROOT%\Build"
+set "PF_OUT_TARGET=%PF_ROOT%\out"
+for %%I in ("%PF_BUILD_TARGET%") do set "PF_BUILD_TARGET=%%~fI"
+for %%I in ("%PF_OUT_TARGET%") do set "PF_OUT_TARGET=%%~fI"
+
+echo PulseForge generated-files maintenance
 echo Repository: %PF_ROOT%
 echo.
-
-:Menu
-echo 1. Clean canonical Build directory
-echo 2. Clean Visual Studio out directory
-echo 3. Deep clean both Build and out
-echo 4. Show generated directory sizes
-echo 5. Cancel
+echo A complete Build cleanup also removes the local CMake cache and fetched dependencies,
+echo including dependencies such as NVRHI, Vulkan-Headers, Lua, and DXC when fetch-managed.
+echo Reconfiguration may need network access and a full rebuild. Cleanup is never automatic.
 echo.
-set "PF_CHOICE="
-set /p "PF_CHOICE=Select an option: "
 
-if "%PF_CHOICE%"=="1" goto CleanBuild
-if "%PF_CHOICE%"=="2" goto CleanOut
-if "%PF_CHOICE%"=="3" goto DeepClean
-if "%PF_CHOICE%"=="4" goto ShowSizes
-if "%PF_CHOICE%"=="5" goto Cancel
-echo Please enter a number from 1 to 5.
+:menu
+echo [1] Clean canonical Build directory
+echo [2] Clean Visual Studio out directory
+echo [3] Deep clean both Build and out
+echo [4] Show generated directory sizes
+echo [5] Cancel
+choice /C 12345 /N /M "Select an option: "
+if errorlevel 5 goto cancel
+if errorlevel 4 goto showSizes
+if errorlevel 3 goto cleanBoth
+if errorlevel 2 goto cleanOut
+if errorlevel 1 goto cleanBuild
+goto menu
+
+:cleanBuild
+set "PF_TARGET_NAME=Build"
+set "PF_TARGET=%PF_BUILD_TARGET%"
+set "PF_CONFIRMATION=DELETE BUILD"
+goto cleanOne
+
+:cleanOut
+set "PF_TARGET_NAME=out"
+set "PF_TARGET=%PF_OUT_TARGET%"
+set "PF_CONFIRMATION=DELETE OUT"
+goto cleanOne
+
+:cleanOne
 echo.
-goto Menu
+echo Action: recursively delete this generated directory.
+echo Full resolved path: %PF_TARGET%
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $root=[IO.Path]::GetFullPath($env:PF_ROOT).TrimEnd('\')+'\'; if(-not (Test-Path -LiteralPath (Join-Path $root 'CMakeLists.txt') -PathType Leaf)){Write-Error 'CMakeLists.txt is missing at the repository root.'; exit 1}; function AssertSafe([string]$Path){$full=[IO.Path]::GetFullPath($Path); if(-not $full.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)){throw 'Refusing a target outside the repository root.'}; if(Test-Path -LiteralPath $full){$item=Get-Item -LiteralPath $full -Force; if(-not $item.PSIsContainer){throw 'Refusing to clean a non-directory target.'}; $pending=[Collections.Generic.Stack[string]]::new(); $pending.Push($full); while($pending.Count -gt 0){$directory=$pending.Pop(); foreach($entry in [IO.Directory]::EnumerateFileSystemEntries($directory)){$attributes=[IO.File]::GetAttributes($entry); if(($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw ('Refusing a tree containing a junction or symbolic link: ' + $entry)}; if(($attributes -band [IO.FileAttributes]::Directory) -ne 0){$pending.Push($entry)}}}}; return $full}; function GetSize([string]$Path){if(-not (Test-Path -LiteralPath $Path -PathType Container)){return 0L}; $sum=(Get-ChildItem -LiteralPath $Path -File -Force -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum; if($null -eq $sum){return 0L}; return [long]$sum}; try{$target=AssertSafe $env:PF_TARGET; if(-not (Test-Path -LiteralPath $target -PathType Container)){Write-Host ($env:PF_TARGET_NAME + ' does not exist; nothing to clean.'); exit 0}; $bytes=GetSize $target; Write-Host ('Approximate size: {0:N2} GiB ({1:N0} bytes)' -f ($bytes/1GB),$bytes); $active=@(Get-Process -Name @('cmake','ninja','MSBuild','cl','link') -ErrorAction SilentlyContinue | Sort-Object Id -Unique); if($active.Count -gt 0){Write-Warning 'A build may be active. Deleting build trees could corrupt it.'; foreach($process in $active){Write-Host ('  {0}.exe (PID {1})' -f $process.ProcessName,$process.Id)}; if((Read-Host 'Type I UNDERSTAND ACTIVE BUILDS MAY BE DAMAGED to continue') -cne 'I UNDERSTAND ACTIVE BUILDS MAY BE DAMAGED'){Write-Host 'Confirmation did not match; canceled.'; exit 1}}; $expected=$env:PF_CONFIRMATION; if((Read-Host ('Type ' + $expected + ' to continue')) -cne $expected){Write-Host 'Confirmation did not match; canceled.'; exit 1}; Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop; if(Test-Path -LiteralPath $target){throw 'The target still exists after cleanup.'}; Write-Host ('Approximate file data removed: {0:N2} GiB ({1:N0} bytes). Actual free-space change may differ.' -f ($bytes/1GB),$bytes); exit 0}catch{Write-Error $_; exit 1}"
+if errorlevel 1 echo Cleanup aborted. No further action was taken.
+goto menu
 
-:CleanBuild
-set "PF_TARGETS=Build"
-call :CleanTargets "the canonical CMake build tree"
-goto Menu
-
-:CleanOut
-set "PF_TARGETS=out"
-call :CleanTargets "the Visual Studio CMake build tree"
-goto Menu
-
-:DeepClean
-set "PF_TARGETS=Build,out"
-call :CleanTargets "both generated build trees"
-goto Menu
-
-:CleanTargets
+:cleanBoth
 echo.
-echo Repository: %PF_ROOT%
-for %%T in (%PF_TARGETS:,= %) do echo Target:     %PF_ROOT%\%%T
-echo.
-echo This permanently removes only the generated directory or directories listed above.
-echo A full Build cleanup also removes CMake caches and fetched dependencies such as NVRHI, Vulkan-Headers, Lua, and DXC.
-echo Reconfiguration may need network access and the next build will recompile substantially more.
-echo Normal development should retain these trees for incremental builds.
-echo.
-if "%PF_TARGETS%"=="Build,out" goto ConfirmBoth
-set "PF_CONFIRM="
-set /p "PF_CONFIRM=Type YES to continue: "
-if /i not "%PF_CONFIRM%"=="YES" goto CancelCleanup
-goto ConfirmationAccepted
+echo DEEP CLEAN: recursively delete both generated directories:
+echo   %PF_BUILD_TARGET%
+echo   %PF_OUT_TARGET%
+echo This removes build outputs, CMake caches, and fetched dependency copies.
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $root=[IO.Path]::GetFullPath($env:PF_ROOT).TrimEnd('\')+'\'; if(-not (Test-Path -LiteralPath (Join-Path $root 'CMakeLists.txt') -PathType Leaf)){Write-Error 'CMakeLists.txt is missing at the repository root.'; exit 1}; function AssertSafe([string]$Path){$full=[IO.Path]::GetFullPath($Path); if(-not $full.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)){throw 'Refusing a target outside the repository root.'}; if(Test-Path -LiteralPath $full){$item=Get-Item -LiteralPath $full -Force; if(-not $item.PSIsContainer){throw 'Refusing to clean a non-directory target.'}; $pending=[Collections.Generic.Stack[string]]::new(); $pending.Push($full); while($pending.Count -gt 0){$directory=$pending.Pop(); foreach($entry in [IO.Directory]::EnumerateFileSystemEntries($directory)){$attributes=[IO.File]::GetAttributes($entry); if(($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw ('Refusing a tree containing a junction or symbolic link: ' + $entry)}; if(($attributes -band [IO.FileAttributes]::Directory) -ne 0){$pending.Push($entry)}}}}; return $full}; function GetSize([string]$Path){if(-not (Test-Path -LiteralPath $Path -PathType Container)){return 0L}; $sum=(Get-ChildItem -LiteralPath $Path -File -Force -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum; if($null -eq $sum){return 0L}; return [long]$sum}; try{$targets=@(@{Name='Build';Path=$env:PF_BUILD_TARGET},@{Name='out';Path=$env:PF_OUT_TARGET}); foreach($item in $targets){$item.Path=AssertSafe $item.Path; Write-Host ('Target: ' + $item.Path); $item.Bytes=GetSize $item.Path; Write-Host ('  Approximate size: {0:N2} GiB ({1:N0} bytes)' -f ($item.Bytes/1GB),$item.Bytes)}; $active=@(Get-Process -Name @('cmake','ninja','MSBuild','cl','link') -ErrorAction SilentlyContinue | Sort-Object Id -Unique); if($active.Count -gt 0){Write-Warning 'A build may be active. Deleting build trees could corrupt it.'; foreach($process in $active){Write-Host ('  {0}.exe (PID {1})' -f $process.ProcessName,$process.Id)}; if((Read-Host 'Type I UNDERSTAND ACTIVE BUILDS MAY BE DAMAGED to continue') -cne 'I UNDERSTAND ACTIVE BUILDS MAY BE DAMAGED'){Write-Host 'Confirmation did not match; canceled.'; exit 1}}; if((Read-Host 'Deep clean permanently removes both generated trees. Type DELETE BOTH to continue') -cne 'DELETE BOTH'){Write-Host 'Confirmation did not match; canceled.'; exit 1}; foreach($item in $targets){if(Test-Path -LiteralPath $item.Path -PathType Container){Remove-Item -LiteralPath $item.Path -Recurse -Force -ErrorAction Stop; if(Test-Path -LiteralPath $item.Path){throw ('The target still exists: ' + $item.Path)}; Write-Host ('Approximate file data removed from {0}: {1:N2} GiB ({2:N0} bytes).' -f $item.Name,($item.Bytes/1GB),$item.Bytes)}}; exit 0}catch{Write-Error $_; exit 1}"
+if errorlevel 1 echo Deep clean aborted or partially completed. Review the diagnostics above.
+goto menu
 
-:ConfirmBoth
-set "PF_CONFIRM="
-set /p "PF_CONFIRM=Type DELETE BOTH to continue: "
-if /i not "%PF_CONFIRM%"=="DELETE BOTH" goto CancelCleanup
-
-:ConfirmationAccepted
-set "PF_BUILD_ACK=0"
-call :CheckBuildProcesses
-if errorlevel 1 exit /b 0
-
-set "PF_CLEAN_ROOT=%PF_ROOT%"
-set "PF_CLEAN_TARGETS=%PF_TARGETS%"
-set "PF_CLEAN_BUILD_ACK=%PF_BUILD_ACK%"
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { $root = [IO.Path]::GetFullPath($env:PF_CLEAN_ROOT).TrimEnd([IO.Path]::DirectorySeparatorChar); if (-not (Test-Path -LiteralPath (Join-Path $root 'CMakeLists.txt') -PathType Leaf)) { throw 'Repository marker CMakeLists.txt is missing.' }; $names = @($env:PF_CLEAN_TARGETS -split ','); if ($names.Count -eq 0 -or @($names | Where-Object { $_ -notin @('Build', 'out') }).Count -ne 0) { throw 'A cleanup target is not allowlisted.' }; $targets = @(); foreach ($name in $names) { $path = [IO.Path]::GetFullPath((Join-Path $root $name)).TrimEnd([IO.Path]::DirectorySeparatorChar); if ([string]::Equals([IO.Path]::GetDirectoryName($path), $root, [StringComparison]::OrdinalIgnoreCase) -eq $false -or [IO.Path]::GetFileName($path) -cne $name) { throw ('Target is not a direct repository child: ' + $path) }; if (Test-Path -LiteralPath $path) { $item = Get-Item -LiteralPath $path -Force; if (-not $item.PSIsContainer) { throw ('Target is not a directory: ' + $path) }; if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw ('Refusing to remove a reparse point: ' + $path) }; $links = @(Get-ChildItem -LiteralPath $path -Force -Recurse -ErrorAction Stop | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }); if ($links.Count -ne 0) { throw ('Refusing a tree containing reparse points: ' + $links[0].FullName) }; $measure = Get-ChildItem -LiteralPath $path -Force -Recurse -File -ErrorAction Stop | Measure-Object -Property Length -Sum; $bytes = if ($null -eq $measure.Sum) { [int64]0 } else { [int64]$measure.Sum }; $targets += [pscustomobject]@{ Name = $name; Path = $path; Bytes = $bytes } } else { $targets += [pscustomobject]@{ Name = $name; Path = $path; Bytes = [int64]0 } } }; $active = @(Get-Process -Name cmake, ninja, MSBuild, cl, link -ErrorAction SilentlyContinue); if ($active.Count -gt 0 -and $env:PF_CLEAN_BUILD_ACK -ne '1') { throw 'A likely build process started during cleanup checks; no directories were removed. Close it and retry.' }; foreach ($target in $targets) { if (Test-Path -LiteralPath $target.Path) { Remove-Item -LiteralPath $target.Path -Recurse -Force -ErrorAction Stop; if (Test-Path -LiteralPath $target.Path) { throw ('Directory still exists after removal: ' + $target.Path) } } }; $reclaimed = [int64](($targets | Measure-Object -Property Bytes -Sum).Sum); Write-Output ('Cleanup complete. Approximate file data removed: {0:N2} GB ({1:N0} bytes).' -f ($reclaimed / 1GB), $reclaimed) } catch { Write-Error $_; exit 1 }"
-if errorlevel 1 (
-	echo Cleanup failed or was refused. A failure during deletion may have removed some generated files.
-)
+:showSizes
 echo.
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $root=[IO.Path]::GetFullPath($env:PF_ROOT); foreach($name in 'Build','out'){$path=Join-Path $root $name; if(Test-Path -LiteralPath $path -PathType Container){$item=Get-Item -LiteralPath $path -Force; if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){Write-Output ($name + ': not measured (junction or symbolic link)'); continue}; $sum=(Get-ChildItem -LiteralPath $path -File -Force -Recurse -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum; if($null -eq $sum){$sum=0}; Write-Output ('{0}: approximately {1:N2} GiB ({2:N0} bytes)' -f $name,($sum/1GB),$sum)}else{Write-Output ($name + ': not present')}}"
+echo.
+goto menu
+
+:cancel
+echo Cleanup canceled. No additional action was taken.
 exit /b 0
 
-:CheckBuildProcesses
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { $processes = @(Get-Process -Name cmake, ninja, MSBuild, cl, link -ErrorAction SilentlyContinue); if ($processes.Count -gt 0) { Write-Output 'WARNING: likely build processes are running:'; $processes | Sort-Object Id -Unique | ForEach-Object { Write-Output ('  {0} (PID {1})' -f $_.ProcessName, $_.Id) }; exit 10 }; Write-Output 'No likely active CMake, Ninja, MSBuild, compiler, or linker process was detected.'; exit 0 } catch { Write-Error ('Could not reliably check active build processes: ' + $_); exit 20 }"
-if errorlevel 20 goto BuildCheckFailed
-if errorlevel 10 goto BuildProcessDetected
-exit /b 0
-
-:BuildProcessDetected
-echo Do not remove build trees while a build is active. Cancel unless you have verified these processes are idle.
-set "PF_ACK="
-set /p "PF_ACK=Type I UNDERSTAND to acknowledge the risk and continue: "
-if /i not "%PF_ACK%"=="I UNDERSTAND" goto BuildCheckCancelled
-set "PF_BUILD_ACK=1"
-exit /b 0
-
-:BuildCheckFailed
-echo Refusing cleanup because active-build detection failed.
-exit /b 1
-
-:BuildCheckCancelled
-echo Confirmation did not match. No cleanup was performed.
-exit /b 1
-
-:ShowSizes
-set "PF_CLEAN_ROOT=%PF_ROOT%"
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $root = [IO.Path]::GetFullPath($env:PF_CLEAN_ROOT); foreach ($name in @('Build', 'out')) { $path = Join-Path $root $name; if (-not (Test-Path -LiteralPath $path -PathType Container)) { Write-Output ('{0}: not present' -f $name); continue }; try { $measure = Get-ChildItem -LiteralPath $path -Force -Recurse -File -ErrorAction Stop | Measure-Object -Property Length -Sum; $bytes = if ($null -eq $measure.Sum) { [int64]0 } else { [int64]$measure.Sum }; Write-Output ('{0}: {1:N2} GB ({2:N0} bytes, {3:N0} files)' -f $name, ($bytes / 1GB), $bytes, $measure.Count) } catch { Write-Output ('{0}: size unavailable ({1})' -f $name, $_.Exception.Message) } }"
-echo.
-goto Menu
-
-:CancelCleanup
-echo Confirmation did not match. No cleanup was performed.
-exit /b 0
-
-:Cancel
-echo Cleanup cancelled. No files were removed.
-exit /b 0
-
-:InvalidRoot
-echo ERROR: CMakeLists.txt was not found beside this script. No files were removed.
+:invalidRoot
+echo ERROR: CMakeLists.txt was not found beside this script. No files were deleted.
 exit /b 2
