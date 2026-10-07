@@ -1325,6 +1325,7 @@ namespace PulseForge
 			}
 
 			std::vector<VertexAttributeDesc> OrderedAttributes = Description.VertexLayout.Attributes;
+			// NVRHI's Vulkan input layout assigns locations by array order; semantic order is the shader-location contract.
 			std::sort(OrderedAttributes.begin(), OrderedAttributes.end(), [](
 				const VertexAttributeDesc& Left,
 				const VertexAttributeDesc& Right)
@@ -1472,14 +1473,18 @@ namespace PulseForge
 			const DrawArguments& Arguments,
 			std::span<const BindingSet* const> BindingSets) override
 		{
+			bool SkipDraw = false;
 			const GraphicsResult StateResult = SetDrawState(
 				Pipeline,
 				VertexBuffer,
 				nullptr,
 				BindingSets,
-				std::nullopt);
+				std::nullopt,
+				SkipDraw);
 			if (!StateResult)
 				return StateResult;
+			if (SkipDraw)
+				return {};
 
 			try
 			{
@@ -1513,14 +1518,18 @@ namespace PulseForge
 			const DrawIndexedArguments& Arguments,
 			std::span<const BindingSet* const> BindingSets) override
 		{
+			bool SkipDraw = false;
 			const GraphicsResult StateResult = SetDrawState(
 				Pipeline,
 				VertexBuffer,
 				&IndexBuffer,
 				BindingSets,
-				Arguments.Scissor);
+				Arguments.Scissor,
+				SkipDraw);
 			if (!StateResult)
 				return StateResult;
+			if (SkipDraw)
+				return {};
 
 			try
 			{
@@ -1554,8 +1563,10 @@ namespace PulseForge
 			const Buffer& VertexBuffer,
 			const Buffer* IndexBuffer,
 			std::span<const BindingSet* const> BindingSets,
-			const std::optional<ScissorRect>& Scissor)
+			const std::optional<ScissorRect>& Scissor,
+			bool& OutSkipDraw)
 		{
+			OutSkipDraw = false;
 			if (!m_FrameActive)
 			{
 				return std::unexpected(GraphicsError{
@@ -1614,21 +1625,30 @@ namespace PulseForge
 				ViewportState.addViewport(Viewport);
 				if (Scissor)
 				{
-					const uint64_t Right = static_cast<uint64_t>(Scissor->X) + Scissor->Width;
-					const uint64_t Bottom = static_cast<uint64_t>(Scissor->Y) + Scissor->Height;
-					if (Right > TargetWidth || Bottom > TargetHeight ||
-						Right > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+					// Draw data may reflect a just-resized window before the active swapchain is recreated.
+					const std::optional<ScissorRect> ClippedScissor = IntersectScissorRect(
+						*Scissor,
+						TargetWidth,
+						TargetHeight);
+					if (!ClippedScissor)
+					{
+						OutSkipDraw = true;
+						return {};
+					}
+					const uint64_t Right = static_cast<uint64_t>(ClippedScissor->X) + ClippedScissor->Width;
+					const uint64_t Bottom = static_cast<uint64_t>(ClippedScissor->Y) + ClippedScissor->Height;
+					if (Right > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
 						Bottom > static_cast<uint64_t>(std::numeric_limits<int>::max()))
 					{
 						return std::unexpected(GraphicsError{
 							GraphicsErrorCode::InvalidDrawArguments,
-							"Indexed draw scissor exceeds the active framebuffer extent"
+							"Scissor exceeds NVRHI integer limits"
 						});
 					}
 					ViewportState.addScissorRect(nvrhi::Rect(
-						static_cast<int>(Scissor->X),
+						static_cast<int>(ClippedScissor->X),
 						static_cast<int>(Right),
-						static_cast<int>(Scissor->Y),
+						static_cast<int>(ClippedScissor->Y),
 						static_cast<int>(Bottom)));
 				}
 				else

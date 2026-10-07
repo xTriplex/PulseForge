@@ -3,9 +3,10 @@ SamplerState EditorSampler : register(s0);
 
 struct VertexInput
 {
+	// Vulkan input locations follow PulseForge's VertexSemantic order: Position, Color, then TexCoord.
 	[[vk::location(0)]] float2 Position : POSITION;
-	[[vk::location(1)]] float2 TexCoord : TEXCOORD0;
-	[[vk::location(2)]] float4 Color : COLOR0;
+	[[vk::location(1)]] float4 Color : COLOR0;
+	[[vk::location(2)]] float2 TexCoord : TEXCOORD0;
 };
 
 struct VertexOutput

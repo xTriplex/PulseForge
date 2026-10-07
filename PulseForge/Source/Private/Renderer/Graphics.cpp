@@ -2,6 +2,7 @@
 #include "Renderer/Binding.h"
 #include "Renderer/Graphics.h"
 
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <optional>
@@ -245,5 +246,28 @@ namespace PulseForge
 		}
 
 		return {};
+	}
+
+	std::optional<ScissorRect> IntersectScissorRect(
+		const ScissorRect& Scissor,
+		uint32_t TargetWidth,
+		uint32_t TargetHeight) noexcept
+	{
+		if (TargetWidth == 0 || TargetHeight == 0 || Scissor.Width == 0 || Scissor.Height == 0)
+			return std::nullopt;
+
+		const uint64_t Right = static_cast<uint64_t>(Scissor.X) + Scissor.Width;
+		const uint64_t Bottom = static_cast<uint64_t>(Scissor.Y) + Scissor.Height;
+		const uint64_t ClippedRight = std::min<uint64_t>(Right, TargetWidth);
+		const uint64_t ClippedBottom = std::min<uint64_t>(Bottom, TargetHeight);
+		if (Scissor.X >= ClippedRight || Scissor.Y >= ClippedBottom)
+			return std::nullopt;
+
+		return ScissorRect{
+			Scissor.X,
+			Scissor.Y,
+			static_cast<uint32_t>(ClippedRight - Scissor.X),
+			static_cast<uint32_t>(ClippedBottom - Scissor.Y)
+		};
 	}
 }

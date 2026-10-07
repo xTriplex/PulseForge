@@ -22,6 +22,7 @@
 #include "Core/Input.h"
 #include "Core/LayerStack.h"
 #include "Core/Timestep.h"
+#include "Editor/ImGuiRendererMath.h"
 #include "Editor/ViewportMath.h"
 #include "Audio/AudioEngine.h"
 #include "Audio/AudioSceneRuntime.h"
@@ -1482,6 +1483,82 @@ namespace
 		PF_CHECK(Tests, !ApplyLocalGizmoDelta(Initial, TransformGizmoOperation::Rotate, 3, 0.5f));
 		PF_CHECK(Tests, !ApplyLocalGizmoDelta(Initial, TransformGizmoOperation::Translate, 0,
 			std::numeric_limits<float>::infinity()));
+	}
+
+	void TestEditorImGuiRendererMath(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor::ImGuiRendererMath;
+		PF_CHECK(Tests, static_cast<uint8_t>(PulseForge::VertexSemantic::Position) == 0);
+		PF_CHECK(Tests, static_cast<uint8_t>(PulseForge::VertexSemantic::Color) == 1);
+		PF_CHECK(Tests, static_cast<uint8_t>(PulseForge::VertexSemantic::TexCoord) == 2);
+
+		const auto ClippedToOldSwapchain = PulseForge::IntersectScissorRect({ 0, 0, 2560, 1361 }, 1280, 720);
+		PF_CHECK(Tests, ClippedToOldSwapchain && ClippedToOldSwapchain->X == 0 && ClippedToOldSwapchain->Y == 0 &&
+			ClippedToOldSwapchain->Width == 1280 && ClippedToOldSwapchain->Height == 720);
+		const auto PartiallyVisible = PulseForge::IntersectScissorRect({ 1000, 600, 500, 300 }, 1280, 720);
+		PF_CHECK(Tests, PartiallyVisible && PartiallyVisible->X == 1000 && PartiallyVisible->Y == 600 &&
+			PartiallyVisible->Width == 280 && PartiallyVisible->Height == 120);
+		PF_CHECK(Tests, !PulseForge::IntersectScissorRect({ 1280, 0, 1, 1 }, 1280, 720));
+		PF_CHECK(Tests, !PulseForge::IntersectScissorRect({ 0, 0, 1, 1 }, 0, 720));
+
+		const glm::vec2 DisplayPosition{ 20.0f, 30.0f };
+		const glm::vec2 DisplaySize{ 100.0f, 50.0f };
+		const auto TopLeft = PositionToVulkanNdc(DisplayPosition, DisplayPosition, DisplaySize);
+		PF_CHECK(Tests, TopLeft && glm::length(*TopLeft - glm::vec2(-1.0f, 1.0f)) < 1.0e-6f);
+		const auto Center = PositionToVulkanNdc(DisplayPosition + DisplaySize * 0.5f, DisplayPosition, DisplaySize);
+		PF_CHECK(Tests, Center && glm::length(*Center) < 1.0e-6f);
+		const auto BottomRight = PositionToVulkanNdc(DisplayPosition + DisplaySize, DisplayPosition, DisplaySize);
+		PF_CHECK(Tests, BottomRight && glm::length(*BottomRight - glm::vec2(1.0f, -1.0f)) < 1.0e-6f);
+		PF_CHECK(Tests, !PositionToVulkanNdc({ 0.0f, 0.0f }, DisplayPosition, { 0.0f, 50.0f }));
+		PF_CHECK(Tests, !PositionToVulkanNdc({ std::numeric_limits<float>::infinity(), 0.0f }, DisplayPosition, DisplaySize));
+
+		const auto Extent = CalculateFramebufferExtent(DisplaySize, { 1.5f, 2.0f });
+		PF_CHECK(Tests, Extent && Extent->Width == 150 && Extent->Height == 100);
+		const auto FractionalExtent = CalculateFramebufferExtent({ 10.1f, 20.2f }, { 1.5f, 1.25f });
+		PF_CHECK(Tests, FractionalExtent && FractionalExtent->Width == 16 && FractionalExtent->Height == 26);
+		PF_CHECK(Tests, !CalculateFramebufferExtent({ 0.0f, 1.0f }, { 1.0f, 1.0f }));
+		PF_CHECK(Tests, !CalculateFramebufferExtent(DisplaySize, { 1.0f, 0.0f }));
+		PF_CHECK(Tests, !CalculateFramebufferExtent({ std::numeric_limits<float>::infinity(), 1.0f }, { 1.0f, 1.0f }));
+		const auto LargeExtent = CalculateFramebufferExtent({ 100000.0f, 50000.0f }, { 1.0f, 1.0f });
+		PF_CHECK(Tests, LargeExtent && LargeExtent->Width == 100000 && LargeExtent->Height == 50000);
+
+		const FramebufferExtent ScissorExtent{ 200, 100 };
+		const glm::vec2 Scale{ 2.0f, 2.0f };
+		const auto Full = ClipRectToScissor(
+			DisplayPosition,
+			DisplayPosition + DisplaySize,
+			DisplayPosition,
+			Scale,
+			ScissorExtent);
+		PF_CHECK(Tests, Full && *Full && (*Full)->X == 0 && (*Full)->Y == 0 &&
+			(*Full)->Width == 200 && (*Full)->Height == 100);
+
+		const auto Fractional = ClipRectToScissor(
+			DisplayPosition + glm::vec2(1.2f, 2.4f),
+			DisplayPosition + glm::vec2(5.1f, 6.2f),
+			DisplayPosition,
+			Scale,
+			ScissorExtent);
+		PF_CHECK(Tests, Fractional && *Fractional && (*Fractional)->X == 2 && (*Fractional)->Y == 4 &&
+			(*Fractional)->Width == 9 && (*Fractional)->Height == 9);
+
+		const auto PartlyOutside = ClipRectToScissor(
+			DisplayPosition + glm::vec2(-10.0f, -5.0f),
+			DisplayPosition + glm::vec2(5.0f, 8.0f),
+			DisplayPosition,
+			Scale,
+			ScissorExtent);
+		PF_CHECK(Tests, PartlyOutside && *PartlyOutside && (*PartlyOutside)->X == 0 && (*PartlyOutside)->Y == 0 &&
+			(*PartlyOutside)->Width == 10 && (*PartlyOutside)->Height == 16);
+
+		const auto FullyOutside = ClipRectToScissor(
+			DisplayPosition + glm::vec2(150.0f, 10.0f),
+			DisplayPosition + glm::vec2(160.0f, 20.0f),
+			DisplayPosition,
+			Scale,
+			ScissorExtent);
+		PF_CHECK(Tests, FullyOutside && !*FullyOutside);
+		PF_CHECK(Tests, !ClipRectToScissor({ 0.0f, 0.0f }, { 1.0f, 1.0f }, {}, { 1.0f, 1.0f }, {}));
 	}
 
 	void TestSceneSerializationRoundTrip(TestRunner& Tests)
@@ -5201,6 +5278,7 @@ int main()
 	TestEntityHandleIdentityAndLifetime(Tests);
 	TestSceneRenderSnapshot(Tests);
 	TestEditorViewportMath(Tests);
+	TestEditorImGuiRendererMath(Tests);
 	TestSceneSerializationRoundTrip(Tests);
 	TestSceneSerializerClone(Tests);
 	TestSceneAssetsByUUID(Tests);

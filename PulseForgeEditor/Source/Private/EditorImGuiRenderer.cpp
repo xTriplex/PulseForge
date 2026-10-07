@@ -1,4 +1,5 @@
 #include "Editor/EditorImGuiRenderer.h"
+#include "Editor/ImGuiRendererMath.h"
 
 #include "Core/Application.h"
 
@@ -6,7 +7,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <fstream>
 #include <limits>
 #include <span>
@@ -113,8 +113,8 @@ namespace PulseForgeEditor
 			PipelineDescription.VertexLayout.Stride = sizeof(Vertex);
 			PipelineDescription.VertexLayout.Attributes = {
 				{ PulseForge::VertexSemantic::Position, PulseForge::VertexFormat::Float2, offsetof(Vertex, Position) },
-				{ PulseForge::VertexSemantic::TexCoord, PulseForge::VertexFormat::Float2, offsetof(Vertex, TexCoord) },
-				{ PulseForge::VertexSemantic::Color, PulseForge::VertexFormat::Float4, offsetof(Vertex, Color) }
+				{ PulseForge::VertexSemantic::Color, PulseForge::VertexFormat::Float4, offsetof(Vertex, Color) },
+				{ PulseForge::VertexSemantic::TexCoord, PulseForge::VertexFormat::Float2, offsetof(Vertex, TexCoord) }
 			};
 			PipelineDescription.ColorFormat = PulseForge::ColorTargetFormat::Swapchain;
 			PipelineDescription.Rasterizer.ScissorEnabled = true;
@@ -256,20 +256,14 @@ namespace PulseForgeEditor
 		if (!DrawData || DrawData->CmdLists.empty() || DrawData->DisplaySize.x <= 0.0f || DrawData->DisplaySize.y <= 0.0f)
 			return {};
 
-		const float ScaleX = DrawData->FramebufferScale.x;
-		const float ScaleY = DrawData->FramebufferScale.y;
-		const float FramebufferWidth = DrawData->DisplaySize.x * ScaleX;
-		const float FramebufferHeight = DrawData->DisplaySize.y * ScaleY;
-		if (!std::isfinite(FramebufferWidth) || !std::isfinite(FramebufferHeight) ||
-			FramebufferWidth <= 0.0f || FramebufferHeight <= 0.0f ||
-			FramebufferWidth > static_cast<float>((std::numeric_limits<int>::max)()) ||
-			FramebufferHeight > static_cast<float>((std::numeric_limits<int>::max)()))
-		{
-			return std::unexpected("Dear ImGui draw data has an invalid framebuffer extent");
-		}
-
-		const uint32_t TargetWidth = static_cast<uint32_t>(std::ceil(FramebufferWidth));
-		const uint32_t TargetHeight = static_cast<uint32_t>(std::ceil(FramebufferHeight));
+		const glm::vec2 DisplaySize{ DrawData->DisplaySize.x, DrawData->DisplaySize.y };
+		const glm::vec2 DisplayPosition{ DrawData->DisplayPos.x, DrawData->DisplayPos.y };
+		const glm::vec2 FramebufferScale{ DrawData->FramebufferScale.x, DrawData->FramebufferScale.y };
+		const auto TargetExtent = ImGuiRendererMath::CalculateFramebufferExtent(DisplaySize, FramebufferScale);
+		if (!TargetExtent)
+			return std::unexpected(TargetExtent.error());
+		const uint32_t TargetWidth = TargetExtent->Width;
+		const uint32_t TargetHeight = TargetExtent->Height;
 		m_Vertices.clear();
 		m_Indices.clear();
 		m_Batches.clear();
@@ -285,9 +279,14 @@ namespace PulseForgeEditor
 				const uint64_t ListVertexBase = m_Vertices.size();
 				for (const ImDrawVert& Source : List->VtxBuffer)
 				{
+					const auto Position = ImGuiRendererMath::PositionToVulkanNdc(
+						{ Source.pos.x, Source.pos.y }, DisplayPosition, DisplaySize);
+					if (!Position)
+						return std::unexpected("Dear ImGui draw list contains an invalid vertex position");
+
 					Vertex& Destination = m_Vertices.emplace_back();
-					Destination.Position[0] = 2.0f * (Source.pos.x - DrawData->DisplayPos.x) / DrawData->DisplaySize.x - 1.0f;
-					Destination.Position[1] = 2.0f * (Source.pos.y - DrawData->DisplayPos.y) / DrawData->DisplaySize.y - 1.0f;
+					Destination.Position[0] = Position->x;
+					Destination.Position[1] = Position->y;
 					Destination.TexCoord[0] = Source.uv.x;
 					Destination.TexCoord[1] = Source.uv.y;
 					Destination.Color[0] = ColorChannel(Source.col, IM_COL32_R_SHIFT);
@@ -311,21 +310,15 @@ namespace PulseForgeEditor
 					if (IndexEnd > static_cast<uint64_t>(List->IdxBuffer.Size))
 						return std::unexpected("Dear ImGui draw command references indices outside its draw list");
 
-					const ImVec2 ClipMin(
-						(Command.ClipRect.x - DrawData->DisplayPos.x) * ScaleX,
-						(Command.ClipRect.y - DrawData->DisplayPos.y) * ScaleY);
-					const ImVec2 ClipMax(
-						(Command.ClipRect.z - DrawData->DisplayPos.x) * ScaleX,
-						(Command.ClipRect.w - DrawData->DisplayPos.y) * ScaleY);
-					if (!std::isfinite(ClipMin.x) || !std::isfinite(ClipMin.y) ||
-						!std::isfinite(ClipMax.x) || !std::isfinite(ClipMax.y))
-						return std::unexpected("Dear ImGui draw command contains a non-finite clip rectangle");
-
-					const float MinX = std::clamp(std::floor(ClipMin.x), 0.0f, static_cast<float>(TargetWidth));
-					const float MinY = std::clamp(std::floor(ClipMin.y), 0.0f, static_cast<float>(TargetHeight));
-					const float MaxX = std::clamp(std::ceil(ClipMax.x), 0.0f, static_cast<float>(TargetWidth));
-					const float MaxY = std::clamp(std::ceil(ClipMax.y), 0.0f, static_cast<float>(TargetHeight));
-					if (MaxX <= MinX || MaxY <= MinY)
+					const auto Scissor = ImGuiRendererMath::ClipRectToScissor(
+						{ Command.ClipRect.x, Command.ClipRect.y },
+						{ Command.ClipRect.z, Command.ClipRect.w },
+						DisplayPosition,
+						FramebufferScale,
+						*TargetExtent);
+					if (!Scissor)
+						return std::unexpected(Scissor.error());
+					if (!*Scissor)
 						continue;
 
 					const uint64_t TextureID = Command.GetTexID();
@@ -353,12 +346,7 @@ namespace PulseForgeEditor
 					Batch.FirstIndex = FirstIndex;
 					Batch.IndexCount = Command.ElemCount;
 					Batch.TextureID = TextureID;
-					Batch.Scissor = {
-						static_cast<uint32_t>(MinX),
-						static_cast<uint32_t>(MinY),
-						static_cast<uint32_t>(MaxX - MinX),
-						static_cast<uint32_t>(MaxY - MinY)
-					};
+					Batch.Scissor = **Scissor;
 				}
 			}
 		}

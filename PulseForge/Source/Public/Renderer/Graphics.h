@@ -207,6 +207,10 @@ namespace PulseForge
 		const GraphicsPipelineDesc& Pipeline,
 		const BufferDesc& VertexBuffer,
 		const BufferDesc& IndexBuffer);
+	[[nodiscard]] PULSEFORGE_API std::optional<ScissorRect> IntersectScissorRect(
+		const ScissorRect& Scissor,
+		uint32_t TargetWidth,
+		uint32_t TargetHeight) noexcept;
 	[[nodiscard]] PULSEFORGE_API GraphicsResult ValidateDrawBindingSets(
 		const GraphicsPipelineDesc& Pipeline,
 		std::span<const class BindingSet* const> BindingSets);
