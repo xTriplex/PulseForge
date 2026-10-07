@@ -5,6 +5,7 @@
 #include "Core/Layer.h"
 #include "Core/Log.h"
 #include "Events/Event.h"
+#include "Assets/AssetOperations.h"
 #include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
 #include "Scene/Scene.h"
@@ -245,7 +246,7 @@ namespace
 		}
 
 		std::optional<std::filesystem::path> ShowOpenDialog(
-			const nfdu8filteritem_t& Filter,
+			const nfdu8filteritem_t* Filter,
 			const std::filesystem::path& DefaultPath = {})
 		{
 			if (!m_FileDialogActive)
@@ -256,8 +257,8 @@ namespace
 
 			const std::string DefaultPathUTF8 = DefaultPath.empty() ? std::string{} : PathToUtf8(DefaultPath);
 			nfdopendialogu8args_t Arguments{};
-			Arguments.filterList = &Filter;
-			Arguments.filterCount = 1;
+			Arguments.filterList = Filter;
+			Arguments.filterCount = Filter ? 1 : 0;
 			Arguments.defaultPath = DefaultPath.empty() ? nullptr : DefaultPathUTF8.c_str();
 			Arguments.parentWindow = GetDialogParent();
 
@@ -274,7 +275,7 @@ namespace
 		}
 
 		std::optional<std::filesystem::path> ShowSaveDialog(
-			const nfdu8filteritem_t& Filter,
+			const nfdu8filteritem_t* Filter,
 			const std::filesystem::path& DefaultPath,
 			const char* DefaultName)
 		{
@@ -286,8 +287,8 @@ namespace
 
 			const std::string DefaultPathUTF8 = DefaultPath.empty() ? std::string{} : PathToUtf8(DefaultPath);
 			nfdsavedialogu8args_t Arguments{};
-			Arguments.filterList = &Filter;
-			Arguments.filterCount = 1;
+			Arguments.filterList = Filter;
+			Arguments.filterCount = Filter ? 1 : 0;
 			Arguments.defaultPath = DefaultPath.empty() ? nullptr : DefaultPathUTF8.c_str();
 			Arguments.defaultName = DefaultName;
 			Arguments.parentWindow = GetDialogParent();
@@ -307,7 +308,7 @@ namespace
 		void CreateProject()
 		{
 			static constexpr nfdu8filteritem_t Filter{ "PulseForge Project", "pfproj" };
-			auto ProjectFile = ShowSaveDialog(Filter, {}, "NewProject.pfproj");
+			auto ProjectFile = ShowSaveDialog(&Filter, {}, "NewProject.pfproj");
 			if (!ProjectFile)
 				return;
 			if (ProjectFile->extension().empty())
@@ -376,7 +377,7 @@ namespace
 		void OpenProject()
 		{
 			static constexpr nfdu8filteritem_t Filter{ "PulseForge Project", "pfproj" };
-			auto ProjectFile = ShowOpenDialog(Filter);
+			auto ProjectFile = ShowOpenDialog(&Filter);
 			if (!ProjectFile)
 				return;
 			const std::filesystem::path ChosenPath = *ProjectFile;
@@ -425,6 +426,112 @@ namespace
 				SetWarning(std::move(SceneLoadWarning));
 		}
 
+		void ImportAsset()
+		{
+			if (!m_Project)
+			{
+				SetError("Create or open a project before importing assets.");
+				return;
+			}
+
+			auto SourceFile = ShowOpenDialog(nullptr, m_Project->GetRootPath());
+			if (!SourceFile)
+				return;
+			if (SourceFile->extension() == ".meta")
+			{
+				SetError("Asset sidecar metadata files cannot be imported as source assets.");
+				return;
+			}
+
+			const std::string DefaultName = PathToUtf8(SourceFile->filename());
+			auto DestinationFile = ShowSaveDialog(
+				nullptr,
+				m_Project->GetRootPath() / "Assets",
+				DefaultName.c_str());
+			if (!DestinationFile)
+				return;
+			if (DestinationFile->extension().empty())
+				*DestinationFile += SourceFile->extension();
+			if (DestinationFile->extension() == ".meta")
+			{
+				SetError("Asset destinations cannot use the reserved .meta extension.");
+				return;
+			}
+
+			const std::filesystem::path SourcePath = *SourceFile;
+			const std::filesystem::path DestinationPath = *DestinationFile;
+			QueueAfterSave([this, SourcePath, DestinationPath]
+			{
+				ImportAssetAt(SourcePath, DestinationPath);
+			});
+		}
+
+		void ImportAssetAt(
+			const std::filesystem::path& SourceFile,
+			const std::filesystem::path& DestinationFile)
+		{
+			if (!m_Project)
+			{
+				SetError("Create or open a project before importing assets.");
+				return;
+			}
+
+			std::error_code PathError;
+			const std::filesystem::path ProjectRoot =
+				std::filesystem::absolute(m_Project->GetRootPath(), PathError).lexically_normal();
+			if (PathError)
+			{
+				SetError("Could not resolve the project root for asset import: " + PathError.message());
+				return;
+			}
+			PathError.clear();
+			const std::filesystem::path AbsoluteDestination =
+				std::filesystem::absolute(DestinationFile, PathError).lexically_normal();
+			if (PathError)
+			{
+				SetError("Could not resolve the asset destination: " + PathError.message());
+				return;
+			}
+			const std::filesystem::path RelativeDestination = AbsoluteDestination.lexically_relative(ProjectRoot);
+			if (RelativeDestination.empty())
+			{
+				SetError("Could not make the asset destination relative to the project root.");
+				return;
+			}
+
+			auto Imported = PulseForge::AssetOperations::ImportFile(
+				m_Project->GetAssetRegistry(),
+				ProjectRoot,
+				SourceFile,
+				RelativeDestination);
+			if (!Imported)
+			{
+				std::string Message = "Asset import failed: " + Imported.error().Message;
+				if (!Imported.error().Path.empty())
+					Message += " Path: " + PathToUtf8(Imported.error().Path) + ".";
+				if (Imported.error().RecoveryPath)
+					Message += " Recovery data: " + PathToUtf8(*Imported.error().RecoveryPath) + ".";
+				if (Imported.error().CommittedAsset)
+					Message += " The asset was committed with UUID " + Imported.error().CommittedAsset->ID.ToString() + ".";
+
+				const auto RegistryRefresh = m_Project->GetAssetRegistry().Rebuild(ProjectRoot);
+				UpdateAssetList();
+				if (!RegistryRefresh)
+				{
+					Message += " Registry recovery also reported:";
+					for (const PulseForge::AssetRegistryIssue& Issue : RegistryRefresh.error().Issues)
+						Message += " " + Issue.Message;
+				}
+				SetError(std::move(Message));
+				return;
+			}
+
+			UpdateAssetList();
+			SetStatus(
+				"Imported " + PathToUtf8(Imported->ProjectRelativePath) +
+				" (UUID " + Imported->ID.ToString() + ").");
+		}
+
 		void CreateScene(bool SaveAs)
 		{
 			if (!m_Project)
@@ -439,7 +546,7 @@ namespace
 			}
 
 			static constexpr nfdu8filteritem_t Filter{ "PulseForge Scene", "scene" };
-			auto SelectedPath = ShowSaveDialog(Filter, m_Project->GetRootPath() / "Assets", "NewScene.scene");
+			auto SelectedPath = ShowSaveDialog(&Filter, m_Project->GetRootPath() / "Assets", "NewScene.scene");
 			if (!SelectedPath)
 				return;
 			if (SelectedPath->extension().empty())
@@ -572,7 +679,7 @@ namespace
 		{
 			if (m_PendingAction)
 			{
-				SetWarning("Resolve the current unsaved-scene prompt before starting another project or scene operation.");
+				SetWarning("Resolve the current unsaved-scene prompt before starting another editor operation.");
 				return;
 			}
 
@@ -1450,6 +1557,9 @@ namespace
 					ImGui::TextUnformatted("Open a project to browse managed assets.");
 				else
 				{
+					if (ImGui::Button("Import Asset..."))
+						ImportAsset();
+					ImGui::SameLine();
 					if (ImGui::Button("Refresh"))
 						RefreshAssets();
 					if (m_Assets.empty())
