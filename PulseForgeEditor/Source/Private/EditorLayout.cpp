@@ -297,24 +297,28 @@ namespace PulseForgeEditor
 		ImGui::DockBuilderSetNodePos(DockspaceID, Viewport->WorkPos);
 		ImGui::DockBuilderSetNodeSize(DockspaceID, Size);
 
+		ImGuiID Inspector = 0;
+		ImGuiID Workspace = 0;
+		ImGui::DockBuilderSplitNode(DockspaceID, ImGuiDir_Right, 0.25f, &Inspector, &Workspace);
+
 		ImGuiID Bottom = 0;
 		ImGuiID Main = 0;
-		ImGui::DockBuilderSplitNode(DockspaceID, ImGuiDir_Down, 0.26f, &Bottom, &Main);
+		ImGui::DockBuilderSplitNode(Workspace, ImGuiDir_Down, 0.30f, &Bottom, &Main);
 
-		ImGuiID Left = 0;
-		ImGuiID CenterAndRight = 0;
-		ImGui::DockBuilderSplitNode(Main, ImGuiDir_Left, 0.20f, &Left, &CenterAndRight);
+		ImGuiID Hierarchy = 0;
+		ImGuiID ViewportNode = 0;
+		ImGui::DockBuilderSplitNode(Main, ImGuiDir_Left, 0.23f, &Hierarchy, &ViewportNode);
 
-		ImGuiID Right = 0;
-		ImGuiID Center = 0;
-		ImGui::DockBuilderSplitNode(CenterAndRight, ImGuiDir_Right, 0.23f, &Right, &Center);
+		ImGuiID Console = 0;
+		ImGuiID ContentBrowser = 0;
+		ImGui::DockBuilderSplitNode(Bottom, ImGuiDir_Right, 0.28f, &Console, &ContentBrowser);
 
-		ImGui::DockBuilderDockWindow("Hierarchy", Left);
-		ImGui::DockBuilderDockWindow("Inspector", Right);
-		ImGui::DockBuilderDockWindow("Scene Viewport", Center);
-		ImGui::DockBuilderDockWindow("Scene", Bottom);
-		ImGui::DockBuilderDockWindow("Console", Bottom);
-		ImGui::DockBuilderDockWindow("Content Browser", Bottom);
+		ImGui::DockBuilderDockWindow("Hierarchy", Hierarchy);
+		ImGui::DockBuilderDockWindow("Inspector", Inspector);
+		ImGui::DockBuilderDockWindow("Scene Viewport", ViewportNode);
+		ImGui::DockBuilderDockWindow("Scene", Console);
+		ImGui::DockBuilderDockWindow("Console", Console);
+		ImGui::DockBuilderDockWindow("Content Browser", ContentBrowser);
 		ImGui::DockBuilderFinish(DockspaceID);
 	}
 

@@ -456,6 +456,12 @@ namespace PulseForgeEditor
 		return ImGui::Button(Text.data());
 	}
 
+	bool EditorStyle::FullWidthButton(EditorIcon Icon, std::string_view Label) const
+	{
+		const auto Text = MakeLabel(m_HasIcons, Icon, Label);
+		return ImGui::Button(Text.data(), ImVec2(ImGui::GetContentRegionAvail().x, 0.0f));
+	}
+
 	bool EditorStyle::AccentButton(EditorIcon Icon, std::string_view Label) const
 	{
 		ImGui::PushStyleColor(ImGuiCol_Button, GetColor(EditorColorToken::AccentActive));
@@ -507,6 +513,87 @@ namespace PulseForgeEditor
 		return ImGui::Button(Text.data());
 	}
 
+	bool EditorStyle::ToolIconButton(
+		EditorIcon Icon,
+		std::string_view FallbackLabel,
+		std::string_view StableID,
+		std::string_view Tooltip,
+		bool Active,
+		bool Enabled) const
+	{
+		const bool UseIcon = m_HasIcons && FindEditorIcon(Icon);
+		const auto Label = MakeLabel(UseIcon, Icon, UseIcon ? std::string_view{} : FallbackLabel, StableID);
+		if (Active)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Button, GetColor(EditorColorToken::Selection));
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, GetColor(EditorColorToken::AccentActive));
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive, GetColor(EditorColorToken::Accent));
+		}
+		ImGui::BeginDisabled(!Enabled);
+		bool Pressed = false;
+		{
+			const ScopedFont FontScope(Active ? m_EmphasisFont : m_InterfaceFont);
+			Pressed = ImGui::Button(Label.data(), UseIcon ? ImVec2(34.0f, 30.0f) : ImVec2(0.0f, 30.0f));
+		}
+		ImGui::EndDisabled();
+		if (ImGui::IsItemHovered() && !Tooltip.empty())
+			ImGui::SetTooltip("%.*s", static_cast<int>(Tooltip.size()), Tooltip.data());
+		if (Active)
+			ImGui::PopStyleColor(3);
+		return Pressed;
+	}
+
+	bool EditorStyle::AssetTile(
+		EditorIcon Icon,
+		std::string_view Label,
+		bool Selected,
+		const ImVec2& Size,
+		int Flags) const
+	{
+		const bool Pressed = ImGui::Selectable("##AssetTile", Selected,
+			static_cast<ImGuiSelectableFlags>(Flags), Size);
+		const ImVec2 Minimum = ImGui::GetItemRectMin();
+		const ImVec2 Maximum = ImGui::GetItemRectMax();
+		ImDrawList* DrawList = ImGui::GetWindowDrawList();
+		DrawList->PushClipRect(Minimum, Maximum, true);
+
+		const EditorIconDescriptor* Descriptor = m_HasIcons ? FindEditorIcon(Icon) : nullptr;
+		if (Descriptor)
+		{
+			const auto Glyph = MakeLabel(true, Icon, {});
+			size_t GlyphBytes = 1;
+			const unsigned char FirstByte = static_cast<unsigned char>(Glyph[0]);
+			if ((FirstByte & 0xe0u) == 0xc0u)
+				GlyphBytes = 2;
+			else if ((FirstByte & 0xf0u) == 0xe0u)
+				GlyphBytes = 3;
+			else if ((FirstByte & 0xf8u) == 0xf0u)
+				GlyphBytes = 4;
+			const float GlyphFontSize = ImGui::GetFontSize() + 10.0f;
+			const ImVec2 GlyphSize = ImGui::GetFont()->CalcTextSizeA(
+				GlyphFontSize, (std::numeric_limits<float>::max)(), 0.0f, Glyph.data(), Glyph.data() + GlyphBytes);
+			const ImVec2 GlyphPosition(
+				Minimum.x + (Size.x - GlyphSize.x) * 0.5f,
+				Minimum.y + 8.0f);
+			DrawList->AddText(ImGui::GetFont(), GlyphFontSize, GlyphPosition,
+				ImGui::GetColorU32(GetColor(EditorColorToken::AccentHovered)),
+				Glyph.data(), Glyph.data() + GlyphBytes);
+		}
+
+		const float NameTop = Minimum.y + (Descriptor ? 39.0f : 11.0f);
+		const float NameWidth = (std::max)(Size.x - 12.0f, 1.0f);
+		const ImVec2 NameSize = ImGui::GetFont()->CalcTextSizeA(
+			ImGui::GetFontSize(), NameWidth, 0.0f, Label.data(), Label.data() + Label.size());
+		const float NameX = Minimum.x + (Size.x - NameSize.x) * 0.5f;
+		DrawList->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(NameX, NameTop),
+			ImGui::GetColorU32(GetColor(EditorColorToken::Text)), Label.data(), Label.data() + Label.size(), NameWidth);
+		DrawList->PopClipRect();
+
+		const ImVec4 BorderColor = GetColor(Selected ? EditorColorToken::Accent : EditorColorToken::Border);
+		DrawList->AddRect(Minimum, Maximum, ImGui::GetColorU32(BorderColor), 2.0f);
+		return Pressed;
+	}
+
 	bool EditorStyle::TreeNode(
 		EditorIcon Icon,
 		std::string_view Label,
@@ -521,7 +608,14 @@ namespace PulseForgeEditor
 	{
 		const auto Text = MakeLabel(m_HasIcons, Icon, Label, Label);
 		const ImGuiTreeNodeFlags Flags = DefaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None;
-		return ImGui::CollapsingHeader(Text.data(), Flags);
+		ImGui::PushStyleColor(ImGuiCol_Header, GetColor(EditorColorToken::PanelRaised));
+		ImGui::PushStyleColor(ImGuiCol_HeaderHovered, GetColor(EditorColorToken::BorderStrong));
+		ImGui::PushStyleColor(ImGuiCol_HeaderActive, GetColor(EditorColorToken::Selection));
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(7.0f, 6.0f));
+		const bool Expanded = ImGui::CollapsingHeader(Text.data(), Flags);
+		ImGui::PopStyleVar();
+		ImGui::PopStyleColor(3);
+		return Expanded;
 	}
 
 	bool EditorStyle::IconButton(
@@ -613,10 +707,76 @@ namespace PulseForgeEditor
 		return ImGui::TableSetColumnIndex(1);
 	}
 
+	bool EditorStyle::Vector3PropertyRow(
+		std::string_view Label,
+		float Values[3],
+		float Speed,
+		const char* Format) const
+	{
+		if (!BeginPropertyRow(Label))
+			return false;
+
+		const float AvailableWidth = ImGui::GetContentRegionAvail().x;
+		if (AvailableWidth < 190.0f)
+			return ImGui::DragFloat3("##Vector3", Values, Speed, 0.0f, 0.0f, Format);
+
+		bool Changed = false;
+		ImGui::PushID(Label.data(), Label.data() + Label.size());
+		if (ImGui::BeginTable("##Vector3Axes", 6,
+			ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings))
+		{
+			ImGui::TableSetupColumn("X", ImGuiTableColumnFlags_WidthFixed, 12.0f);
+			ImGui::TableSetupColumn("XValue", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+			ImGui::TableSetupColumn("Y", ImGuiTableColumnFlags_WidthFixed, 12.0f);
+			ImGui::TableSetupColumn("YValue", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+			ImGui::TableSetupColumn("Z", ImGuiTableColumnFlags_WidthFixed, 12.0f);
+			ImGui::TableSetupColumn("ZValue", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+			ImGui::TableNextRow();
+			constexpr std::array<EditorColorToken, 3> AxisColors = {
+				EditorColorToken::GizmoAxisX,
+				EditorColorToken::GizmoAxisY,
+				EditorColorToken::GizmoAxisZ
+			};
+			constexpr std::array<const char*, 3> AxisNames = { "X", "Y", "Z" };
+			for (int Axis = 0; Axis < 3; ++Axis)
+			{
+				ImGui::TableSetColumnIndex(Axis * 2);
+				ImGui::TextColored(GetColor(AxisColors[static_cast<size_t>(Axis)]), "%s", AxisNames[Axis]);
+				ImGui::TableSetColumnIndex(Axis * 2 + 1);
+				ImGui::PushID(Axis);
+				Changed |= ImGui::DragFloat("##AxisValue", &Values[Axis], Speed, 0.0f, 0.0f, Format);
+				ImGui::PopID();
+			}
+			ImGui::EndTable();
+		}
+		ImGui::PopID();
+		return Changed;
+	}
+
 	void EditorStyle::EndPropertyTable() const
 	{
 		ImGui::EndTable();
 		ImGui::PopStyleColor();
+	}
+
+	void EditorStyle::BeginComponentBody() const
+	{
+		ImGui::BeginGroup();
+		ImGui::Indent(7.0f);
+	}
+
+	void EditorStyle::EndComponentBody() const
+	{
+		ImGui::Unindent(7.0f);
+		ImGui::EndGroup();
+		const ImVec2 Minimum = ImGui::GetItemRectMin();
+		const ImVec2 Maximum = ImGui::GetItemRectMax();
+		ImGui::GetWindowDrawList()->AddRect(
+			ImVec2(Minimum.x - 5.0f, Minimum.y - 3.0f),
+			ImVec2(Maximum.x + 5.0f, Maximum.y + 3.0f),
+			ImGui::GetColorU32(GetColor(EditorColorToken::Border)),
+			2.0f);
+		ImGui::Spacing();
 	}
 
 	void EditorStyle::IconText(EditorIcon Icon, std::string_view Text) const

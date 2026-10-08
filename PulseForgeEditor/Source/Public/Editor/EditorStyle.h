@@ -224,10 +224,24 @@ namespace PulseForgeEditor
 		[[nodiscard]] bool HasIcons() const noexcept { return m_HasIcons; }
 
 		[[nodiscard]] bool Button(EditorIcon Icon, std::string_view Label) const;
+		[[nodiscard]] bool FullWidthButton(EditorIcon Icon, std::string_view Label) const;
 		[[nodiscard]] bool AccentButton(EditorIcon Icon, std::string_view Label) const;
 		[[nodiscard]] bool DangerButton(EditorIcon Icon, std::string_view Label) const;
 		[[nodiscard]] bool SmallButton(EditorIcon Icon, std::string_view Label) const;
 		[[nodiscard]] bool ToolButton(EditorIcon Icon, std::string_view Label, bool Active) const;
+		[[nodiscard]] bool ToolIconButton(
+			EditorIcon Icon,
+			std::string_view FallbackLabel,
+			std::string_view StableID,
+			std::string_view Tooltip,
+			bool Active,
+			bool Enabled = true) const;
+		[[nodiscard]] bool AssetTile(
+			EditorIcon Icon,
+			std::string_view Label,
+			bool Selected,
+			const ImVec2& Size,
+			int Flags = 0) const;
 		[[nodiscard]] bool TreeNode(EditorIcon Icon, std::string_view Label, std::string_view StableID, int Flags) const;
 		[[nodiscard]] bool SectionHeader(
 			EditorIcon Icon,
@@ -254,7 +268,14 @@ namespace PulseForgeEditor
 		void EndToolbar() const;
 		[[nodiscard]] bool BeginPropertyTable(const char* ID) const;
 		[[nodiscard]] bool BeginPropertyRow(std::string_view Label) const;
+		[[nodiscard]] bool Vector3PropertyRow(
+			std::string_view Label,
+			float Values[3],
+			float Speed,
+			const char* Format) const;
 		void EndPropertyTable() const;
+		void BeginComponentBody() const;
+		void EndComponentBody() const;
 		void IconText(EditorIcon Icon, std::string_view Text) const;
 		void EmptyState(EditorIcon Icon, std::string_view Text) const;
 		void TextMuted(std::string_view Text) const;

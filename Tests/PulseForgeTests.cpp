@@ -24,6 +24,7 @@
 #include "Core/Timestep.h"
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorStyle.h"
+#include "Editor/EditorWorkspaceView.h"
 #include "Editor/ImGuiRendererMath.h"
 #include "Editor/ViewportMath.h"
 #include "Audio/AudioEngine.h"
@@ -1566,7 +1567,7 @@ namespace
 	{
 		using namespace PulseForgeEditor;
 
-		PF_CHECK(Tests, CurrentDefaultEditorLayoutVersion == 1);
+		PF_CHECK(Tests, CurrentDefaultEditorLayoutVersion == 2);
 		PF_CHECK(Tests, EditorPanelDescriptors.size() == static_cast<size_t>(EditorPanel::Count));
 		constexpr std::array<std::string_view, static_cast<size_t>(EditorPanel::Count)> StablePanelNames = {
 			"Scene Viewport", "Hierarchy", "Inspector", "Content Browser", "Console", "Scene"
@@ -1605,6 +1606,38 @@ namespace
 		PF_CHECK(Tests, Panels.GetVisibility(EditorPanel::Count) == nullptr);
 		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Count));
 		PF_CHECK(Tests, !Panels.SetVisible(EditorPanel::Count, true));
+	}
+
+	void TestEditorWorkspaceViewHelpers(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+
+		PF_CHECK(Tests, ContainsCaseInsensitive("Sample Cube", "cube"));
+		PF_CHECK(Tests, ContainsCaseInsensitive("Sample Cube", "SAMPLE"));
+		PF_CHECK(Tests, ContainsCaseInsensitive("Sample Cube", ""));
+		PF_CHECK(Tests, !ContainsCaseInsensitive("Sample Cube", "sphere"));
+		PF_CHECK(Tests, !ContainsCaseInsensitive("abc", "abcd"));
+
+		PF_CHECK(Tests, IsManagedAssetInFolder("Assets/Readme.txt", "Assets"));
+		PF_CHECK(Tests, !IsManagedAssetInFolder("Assets/Models/Props/Cube.glb", "Assets"));
+		PF_CHECK(Tests, !IsManagedAssetInFolder("Assets/Models/Props/Cube.glb", "Assets/Models"));
+		PF_CHECK(Tests, IsManagedAssetInFolder("Assets/Models/Cube.glb", "Assets/Models"));
+		PF_CHECK(Tests, !IsManagedAssetInFolder("Assets/Models/Cube.glb", "Assets/Materials"));
+		PF_CHECK(Tests, !IsManagedAssetInFolder("Assets/ModelsExtra/Cube.glb", "Assets/Models"));
+		PF_CHECK(Tests, !IsManagedAssetInFolder("Outside/Cube.glb", "Assets"));
+		PF_CHECK(Tests, !IsManagedAssetInFolder("Assets/../Outside/Cube.glb", "Assets"));
+
+		PF_CHECK(Tests, GetAssetBrowserIcon("Assets/Scenes/Main.scene") == EditorIcon::Scene);
+		PF_CHECK(Tests, GetAssetBrowserIcon("Assets/Models/Cube.GLB") == EditorIcon::Cube);
+		PF_CHECK(Tests, GetAssetBrowserIcon("Assets/Materials/Default.material") == EditorIcon::Material);
+		PF_CHECK(Tests, GetAssetBrowserIcon("Assets/Scripts/Move.lua") == EditorIcon::Script);
+		PF_CHECK(Tests, GetAssetBrowserIcon("Assets/Textures/Icon.png") == EditorIcon::Image);
+		PF_CHECK(Tests, GetAssetBrowserIcon("Assets/Audio/Click.wav") == EditorIcon::AudioSource);
+		PF_CHECK(Tests, GetAssetBrowserIcon("Assets/Other/Readme.txt") == EditorIcon::File);
+
+		PF_CHECK(Tests, IsFolderAncestorOrSelf("Assets/Models/Props", "Assets/Models"));
+		PF_CHECK(Tests, IsFolderAncestorOrSelf("Assets/Models", "Assets/Models"));
+		PF_CHECK(Tests, !IsFolderAncestorOrSelf("Assets/ModelsExtra", "Assets/Models"));
 	}
 
 	void TestEditorImGuiRendererMath(TestRunner& Tests)
@@ -5504,6 +5537,7 @@ int main()
 	TestSceneRenderSnapshot(Tests);
 	TestEditorViewportMath(Tests);
 	TestEditorWorkspacePanelState(Tests);
+	TestEditorWorkspaceViewHelpers(Tests);
 	TestEditorFontAndIconDescriptors(Tests);
 	TestEditorImGuiRendererMath(Tests);
 	TestSceneSerializationRoundTrip(Tests);

@@ -10,7 +10,7 @@
 
 namespace PulseForgeEditor
 {
-	inline constexpr uint32_t CurrentDefaultEditorLayoutVersion = 1;
+	inline constexpr uint32_t CurrentDefaultEditorLayoutVersion = 2;
 
 	enum class EditorPanel : uint8_t
 	{
