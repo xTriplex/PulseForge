@@ -2009,7 +2009,9 @@ namespace
 									"Help", "ViewportNavigationHelp",
 									"Right mouse: look\nW/A/S/D: move\nQ/E: down/up\nShift: move faster",
 									false, true, 27.0f);
-								ImGui::SetCursorScreenPos(CursorAfterImage);
+								// Finish the cursor restore at the image edge; the normal post-image cursor includes extra spacing.
+								ImGui::SetCursorScreenPos(ImVec2(CursorAfterImage.x, ImageMaximum.y));
+								ImGui::Dummy(ImVec2(0.0f, 0.0f));
 							}
 							HandleViewportImage(ImageClicked && !OverHelp && !OverOrientationWidget);
 							if (ShowEditorOverlays)
