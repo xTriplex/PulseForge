@@ -314,16 +314,12 @@ namespace
 			#ifdef PF_EDITOR_RENDERER_OPENGL
 			IO.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 			#endif
-			ImGui::StyleColorsDark();
-
-			ImGuiStyle& Style = ImGui::GetStyle();
-			Style.WindowRounding = 0.0f;
-			Style.Colors[ImGuiCol_WindowBg].w = 1.0f;
 			if (auto Result = m_EditorStyle.Initialize(); !Result)
 			{
 				ShutdownImGui();
 				throw std::runtime_error("Could not initialize editor typography: " + Result.error());
 			}
+			m_EditorStyle.ApplyTheme();
 			if (auto Result = m_Layout.Initialize(); !Result)
 				ReportLayoutPersistenceError(Result.error());
 
@@ -1455,7 +1451,9 @@ namespace
 			if (!ImGui::BeginMainMenuBar())
 				return;
 
+			m_EditorStyle.PushEmphasisFont();
 			ImGui::TextUnformatted("PulseForge");
+			m_EditorStyle.PopFont();
 			if (ImGui::BeginMenu("File"))
 			{
 				if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::NewDocument, "New Project..."))
@@ -1518,11 +1516,11 @@ namespace
 			if (!m_SceneRuntime)
 			{
 				ImGui::BeginDisabled(!m_Project || !m_Scene);
-				if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Play, "Play"))
+				if (m_EditorStyle.AccentButton(PulseForgeEditor::EditorIcon::Play, "Play"))
 					StartRuntime();
 				ImGui::EndDisabled();
 			}
-			else if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Stop, "Stop"))
+			else if (m_EditorStyle.AccentButton(PulseForgeEditor::EditorIcon::Stop, "Stop"))
 			{
 				StopRuntime();
 				SetStatus("Runtime stopped. The authored scene was not modified by simulation.");
@@ -1556,15 +1554,17 @@ namespace
 							}
 						}
 						else
-							ImGui::TextUnformatted("No scene is open. Create one from the Scene menu or open a scene asset.");
+							m_EditorStyle.TextMuted("No scene is open. Create one from the Scene menu or open a scene asset.");
 					}
 					else
-						ImGui::TextUnformatted("Create or open a project from the File menu.");
+						m_EditorStyle.TextMuted("Create or open a project from the File menu.");
 
 					ImGui::Separator();
 					const ImVec4 Color = m_StatusIsError
-						? ImVec4(1.0f, 0.38f, 0.32f, 1.0f)
-						: m_StatusIsWarning ? ImVec4(1.0f, 0.75f, 0.28f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_Text);
+						? m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error)
+						: m_StatusIsWarning
+							? m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning)
+							: m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Text);
 					ImGui::PushStyleColor(ImGuiCol_Text, Color);
 					ImGui::TextWrapped("%s", m_StatusMessage.c_str());
 					ImGui::PopStyleColor();
@@ -1647,40 +1647,41 @@ namespace
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::SceneViewport))
 			{
 				if (!m_Project)
-					ImGui::TextUnformatted("Open a project to render a scene.");
+					m_EditorStyle.TextMuted("Open a project to render a scene.");
 				else if (!m_Scene)
-					ImGui::TextUnformatted("Open a scene to render it here.");
+					m_EditorStyle.TextMuted("Open a scene to render it here.");
 				else
 				{
 #ifdef PF_EDITOR_RENDERER_OPENGL
-					ImGui::TextWrapped("The OpenGL fallback retains the editor shell; the scene viewport requires Vulkan.");
+					m_EditorStyle.TextMuted(
+						"The OpenGL fallback retains the editor shell; the scene viewport requires Vulkan.");
 #else
 					if (m_SceneRuntime)
 						ImGui::TextUnformatted("Play view: runtime camera; selection and transform editing are disabled.");
 					else
 					{
-						ImGui::TextUnformatted(
+						m_EditorStyle.TextMuted(
 							"Edit view: transient camera (right-drag look; WASD/QE move; Shift speed). Gizmos use local axes.");
-						if (m_EditorStyle.RadioButton(PulseForgeEditor::EditorIcon::Translate, "Translate",
+						if (m_EditorStyle.ToolButton(PulseForgeEditor::EditorIcon::Translate, "Translate",
 							m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Translate))
 							SetGizmoOperation(PulseForgeEditor::TransformGizmoOperation::Translate);
 						ImGui::SameLine();
-						if (m_EditorStyle.RadioButton(PulseForgeEditor::EditorIcon::Rotate, "Rotate",
+						if (m_EditorStyle.ToolButton(PulseForgeEditor::EditorIcon::Rotate, "Rotate",
 							m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Rotate))
 							SetGizmoOperation(PulseForgeEditor::TransformGizmoOperation::Rotate);
 						ImGui::SameLine();
-						if (m_EditorStyle.RadioButton(PulseForgeEditor::EditorIcon::Scale, "Scale",
+						if (m_EditorStyle.ToolButton(PulseForgeEditor::EditorIcon::Scale, "Scale",
 							m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Scale))
 							SetGizmoOperation(PulseForgeEditor::TransformGizmoOperation::Scale);
 						ImGui::SameLine();
-						ImGui::TextDisabled("Local");
+						m_EditorStyle.TextMuted("Local");
 					}
 					const ImVec2 Available = ImGui::GetContentRegionAvail();
 					if (Available.x <= 1.0f || Available.y <= 1.0f)
 					{
 						CancelGizmoInteraction();
 						m_ViewportImageRect = {};
-						ImGui::TextUnformatted("Expand the panel to display the scene.");
+						m_EditorStyle.TextMuted("Expand the panel to display the scene.");
 					}
 					else
 					{
@@ -1717,18 +1718,21 @@ namespace
 						{
 							CancelGizmoInteraction();
 							m_ViewportImageRect = {};
-							ImGui::TextUnformatted("The scene viewport render target is unavailable.");
+							ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error),
+								"The scene viewport render target is unavailable.");
 						}
 
 						if (!m_ViewportTargetError.empty())
 						{
 							ImGui::Separator();
-							ImGui::TextWrapped("%s", m_ViewportTargetError.c_str());
+							ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error),
+								"%s", m_ViewportTargetError.c_str());
 						}
 						if (!m_ViewportSceneError.empty())
 						{
 							ImGui::Separator();
-							ImGui::TextWrapped("%s", m_ViewportSceneError.c_str());
+							ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning),
+								"%s", m_ViewportSceneError.c_str());
 						}
 					}
 #endif
@@ -2503,14 +2507,17 @@ namespace
 			}
 		}
 
-		static ImVec4 LogLevelColor(spdlog::level::level_enum Level)
+		ImVec4 LogLevelColor(spdlog::level::level_enum Level) const
 		{
 			switch (Level)
 			{
-			case spdlog::level::warn: return { 1.0f, 0.75f, 0.28f, 1.0f };
+			case spdlog::level::warn:
+				return m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning);
 			case spdlog::level::err:
-			case spdlog::level::critical: return { 1.0f, 0.38f, 0.32f, 1.0f };
-			default: return ImGui::GetStyleColorVec4(ImGuiCol_Text);
+			case spdlog::level::critical:
+				return m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error);
+			default:
+				return m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::TextMuted);
 			}
 		}
 
@@ -2521,10 +2528,10 @@ namespace
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Console))
 			{
 				if (!m_ConsoleSink)
-					ImGui::TextUnformatted("The editor could not connect to the engine loggers.");
+					m_EditorStyle.TextMuted("The editor could not connect to the engine loggers.");
 				else
 				{
-					if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Clear, "Clear"))
+					if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Clear, "Clear"))
 						m_ConsoleSink->Clear();
 					ImGui::SameLine();
 					ImGui::Checkbox("Auto-scroll", &m_ConsoleAutoScroll);
@@ -2574,27 +2581,32 @@ namespace
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Hierarchy))
 			{
 				ImGui::BeginDisabled(!m_Scene);
-				if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Add, "Create Entity"))
+				if (m_EditorStyle.IconButton(
+					PulseForgeEditor::EditorIcon::Add, "Create", "CreateEntity", "Create a new entity"))
 					CreateEntityFromEditor();
 				ImGui::SameLine();
 				ImGui::BeginDisabled(!m_SelectedEntity);
-				if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Duplicate, "Duplicate"))
+				if (m_EditorStyle.IconButton(
+					PulseForgeEditor::EditorIcon::Duplicate, "Duplicate", "DuplicateEntity", "Duplicate selected entity"))
 					DuplicateSelectedEntity();
 				ImGui::SameLine();
-				if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Delete, "Delete"))
+				if (m_EditorStyle.IconButton(
+					PulseForgeEditor::EditorIcon::Delete, "Delete", "DeleteEntity", "Delete selected entity"))
 					DeleteSelectedEntity();
 				ImGui::EndDisabled();
 				ImGui::BeginDisabled(!m_SelectedEntity);
-				if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Prefab, "Create Prefab..."))
+				ImGui::SameLine();
+				if (m_EditorStyle.IconButton(
+					PulseForgeEditor::EditorIcon::Prefab, "Prefab", "CreatePrefab", "Create a prefab from the selection"))
 					CreatePrefabFromSelectedEntity();
 				ImGui::EndDisabled();
 				ImGui::EndDisabled();
 				ImGui::Separator();
 
 				if (!m_Scene)
-					ImGui::TextUnformatted("No scene is open.");
+					m_EditorStyle.TextMuted("No scene is open.");
 				else if (m_Scene->GetEntityCount() == 0)
-					ImGui::TextUnformatted("This scene has no entities.");
+					m_EditorStyle.TextMuted("This scene has no entities.");
 				else
 				{
 					std::function<void()> HierarchyAction;
@@ -2757,7 +2769,7 @@ namespace
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Inspector))
 			{
 				if (!m_Scene || !m_SelectedEntity)
-					ImGui::TextUnformatted("Select an entity in the Hierarchy.");
+					m_EditorStyle.TextMuted("Select an entity in the Hierarchy.");
 				else if (const auto Entity = m_Scene->FindEntity(*m_SelectedEntity))
 				{
 					auto Tag = Entity->GetTag();
@@ -2768,7 +2780,10 @@ namespace
 						else
 							m_SceneDirty = true;
 					}
+					ImGui::PushStyleColor(ImGuiCol_Text,
+						m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::TextMuted));
 					ImGui::Text("UUID: %s", Entity->GetUUID().ToString().c_str());
+					ImGui::PopStyleColor();
 
 					if (const auto Transform = Entity->GetTransform())
 					{
@@ -2798,7 +2813,7 @@ namespace
 				else
 				{
 					m_SelectedEntity.reset();
-					ImGui::TextUnformatted("The selected entity no longer exists.");
+					m_EditorStyle.TextMuted("The selected entity no longer exists.");
 				}
 			}
 			ImGui::End();
@@ -3224,16 +3239,16 @@ namespace
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::ContentBrowser))
 			{
 				if (!m_Project)
-					ImGui::TextUnformatted("Open a project to browse managed assets.");
+					m_EditorStyle.TextMuted("Open a project to browse managed assets.");
 				else
 				{
-					if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Import, "Import Asset..."))
+					if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Import, "Import"))
 						ImportAsset();
 					ImGui::SameLine();
-					if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Refresh, "Refresh"))
+					if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Refresh, "Refresh"))
 						RefreshAssets();
 					if (m_Assets.empty())
-						ImGui::TextUnformatted("The project has no managed assets.");
+						m_EditorStyle.TextMuted("The project has no managed assets.");
 					std::function<void()> ContextAction;
 					for (const PulseForge::AssetRecord& Asset : m_Assets)
 					{
@@ -3241,7 +3256,18 @@ namespace
 						ImGui::PushID(AssetID.c_str());
 						const bool IsSelected = m_SelectedAsset && *m_SelectedAsset == Asset.ID;
 						const std::string Path = PathToUtf8(Asset.ProjectRelativePath);
-						if (ImGui::Selectable(Path.c_str(), IsSelected, ImGuiSelectableFlags_AllowDoubleClick))
+						const std::string Extension = Asset.ProjectRelativePath.extension().string();
+						const PulseForgeEditor::EditorIcon AssetIcon = Extension == ".scene"
+							? PulseForgeEditor::EditorIcon::File
+							: Extension == ".prefab"
+								? PulseForgeEditor::EditorIcon::Prefab
+								: Extension == ".gltf" || Extension == ".glb"
+									? PulseForgeEditor::EditorIcon::Cube
+									: Extension == ".lua"
+										? PulseForgeEditor::EditorIcon::Script
+										: PulseForgeEditor::EditorIcon::File;
+						if (m_EditorStyle.Selectable(
+							AssetIcon, Path, IsSelected, ImGuiSelectableFlags_AllowDoubleClick))
 						{
 							m_SelectedAsset = Asset.ID;
 							if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
@@ -3283,31 +3309,35 @@ namespace
 						{
 							ImGui::Separator();
 							ImGui::TextWrapped("%s", PathToUtf8(Asset->ProjectRelativePath).c_str());
+							ImGui::PushStyleColor(ImGuiCol_Text,
+								m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::TextMuted));
 							ImGui::Text("UUID: %s", Asset->ID.ToString().c_str());
+							ImGui::PopStyleColor();
 							if (Asset->ProjectRelativePath.extension() == ".scene")
 							{
 								const bool IsStartupScene = m_Project->GetDescription().StartScene &&
 									*m_Project->GetDescription().StartScene == Asset->ID;
 								if (IsStartupScene)
 									ImGui::TextUnformatted("Project startup scene.");
-								else if (ImGui::Button("Set as Startup Scene"))
+								else if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Settings,
+									"Set as Startup Scene"))
 									SetStartupScene(Asset->ID);
 							}
-							if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Rename, "Move / Rename..."))
+							if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Rename, "Move / Rename"))
 								MoveAsset(Asset->ID);
 							ImGui::SameLine();
-							if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Duplicate, "Duplicate..."))
+							if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Duplicate, "Duplicate"))
 								DuplicateAsset(Asset->ID);
 							ImGui::SameLine();
 							const bool IsProtectedScene = IsProtectedSceneAsset(Asset->ID);
 							ImGui::BeginDisabled(IsProtectedScene);
-							if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Delete, "Delete..."))
+							if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Delete, "Delete"))
 								RequestDeleteAsset(Asset->ID);
 							ImGui::EndDisabled();
 							if (Asset->ProjectRelativePath.extension() == ".prefab")
 							{
 								ImGui::BeginDisabled(!m_Scene);
-								if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Cube, "Instantiate in Scene"))
+								if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Cube, "Instantiate in Scene"))
 									InstantiatePrefab(Asset->ID);
 								ImGui::EndDisabled();
 							}

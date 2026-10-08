@@ -1693,6 +1693,41 @@ namespace
 		PF_CHECK(Tests, EditorFontDescriptors[1].PixelSize == 15.0f);
 		PF_CHECK(Tests, EditorFontDescriptors[2].PixelSize >= 13.0f && EditorFontDescriptors[2].PixelSize <= 15.0f);
 		PF_CHECK(Tests, EditorIconFontPixelSize == EditorFontDescriptors[0].PixelSize);
+		PF_CHECK(Tests, IsValidEditorTextGlyphRanges());
+		PF_CHECK(Tests, EditorTextGlyphRanges.back() == 0);
+		for (size_t Index = 0; Index + 1 < EditorTextGlyphRanges.size() - 1; Index += 2)
+		{
+			PF_CHECK(Tests, EditorTextGlyphRanges[Index] <= EditorTextGlyphRanges[Index + 1]);
+			if (Index > 0)
+				PF_CHECK(Tests, EditorTextGlyphRanges[Index - 1] < EditorTextGlyphRanges[Index]);
+		}
+		for (const uint32_t Codepoint : {
+			0x011e, 0x011f, 0x0130, 0x0131, 0x015e, 0x015f, 0x010c, 0x0141, 0x017d,
+			0x0150, 0x00c5, 0x00e9, 0x00df, 0x20ac, 0x03a9, 0x0416, 0x1e0a, 0x2014 })
+			PF_CHECK(Tests, EditorTextGlyphRangeContains(Codepoint));
+		PF_CHECK(Tests, !EditorTextGlyphRangeContains(0x4e2d));
+		PF_CHECK(Tests, EditorFontRoleHasIcons(EditorFontRole::Interface));
+		PF_CHECK(Tests, EditorFontRoleHasIcons(EditorFontRole::Emphasis));
+		PF_CHECK(Tests, !EditorFontRoleHasIcons(EditorFontRole::Monospace));
+
+		const std::string_view TwoByteText = "\xc4\x9eX";
+		PF_CHECK(Tests, Utf8SafePrefixLength(TwoByteText, 1) == 0);
+		PF_CHECK(Tests, Utf8SafePrefixLength(TwoByteText, 2) == 2);
+		PF_CHECK(Tests, Utf8SafePrefixLength(TwoByteText, 3) == 3);
+		const std::string_view ThreeByteText = "\xe2\x82\xacX";
+		PF_CHECK(Tests, Utf8SafePrefixLength(ThreeByteText, 2) == 0);
+		PF_CHECK(Tests, Utf8SafePrefixLength(ThreeByteText, 3) == 3);
+		const std::string_view FourByteText = "\xf0\x9f\x98\x80X";
+		PF_CHECK(Tests, Utf8SafePrefixLength(FourByteText, 3) == 0);
+		PF_CHECK(Tests, Utf8SafePrefixLength(FourByteText, 4) == 4);
+
+		for (const EditorColorValue& Color : EditorPalette)
+		{
+			PF_CHECK(Tests, Color.Red >= 0.0f && Color.Red <= 1.0f);
+			PF_CHECK(Tests, Color.Green >= 0.0f && Color.Green <= 1.0f);
+			PF_CHECK(Tests, Color.Blue >= 0.0f && Color.Blue <= 1.0f);
+			PF_CHECK(Tests, Color.Alpha >= 0.0f && Color.Alpha <= 1.0f);
+		}
 
 		std::array<bool, static_cast<size_t>(EditorIcon::Count)> SeenIcons{};
 		for (size_t Index = 0; Index < EditorIconDescriptors.size(); ++Index)
