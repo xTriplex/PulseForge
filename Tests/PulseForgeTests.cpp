@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <limits>
+#include <numbers>
 #include <string_view>
 
 #include "Assets/AssetMetadata.h"
@@ -37,6 +39,8 @@
 #include "Renderer/Graphics.h"
 #include "Renderer/Mesh.h"
 #include "Renderer/RenderTarget.h"
+#include "Renderer/EnvironmentLighting.h"
+#include <glm/geometric.hpp>
 #include "Renderer/Vulkan/VulkanSupport.h"
 #include "Scene/Scene.h"
 #include "Scene/SceneRenderSnapshot.h"
@@ -5616,6 +5620,79 @@ end
 		PF_CHECK(Tests, !ValidateDrawBindingSets(Pipeline, MismatchedSets).has_value());
 	}
 
+	void TestEnvironmentLightingProcessing(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const glm::vec2 PositiveX = EquirectangularUvFromDirection({ 1.0f, 0.0f, 0.0f });
+		const glm::vec2 NegativeX = EquirectangularUvFromDirection({ -1.0f, 0.0f, 0.0f });
+		const glm::vec2 PositiveZ = EquirectangularUvFromDirection({ 0.0f, 0.0f, 1.0f });
+		const glm::vec2 NegativeZ = EquirectangularUvFromDirection({ 0.0f, 0.0f, -1.0f });
+		const glm::vec2 PositiveY = EquirectangularUvFromDirection({ 0.0f, 1.0f, 0.0f });
+		const glm::vec2 NegativeY = EquirectangularUvFromDirection({ 0.0f, -1.0f, 0.0f });
+		PF_CHECK(Tests, std::abs(PositiveX.x - 0.5f) < 0.0001f && std::abs(PositiveX.y - 0.5f) < 0.0001f);
+		PF_CHECK(Tests, NegativeX.x < 0.0001f || NegativeX.x > 0.9999f);
+		PF_CHECK(Tests, std::abs(PositiveZ.x - 0.75f) < 0.0001f);
+		PF_CHECK(Tests, std::abs(NegativeZ.x - 0.25f) < 0.0001f);
+		PF_CHECK(Tests, std::abs(PositiveY.y) < 0.0001f && std::abs(NegativeY.y - 1.0f) < 0.0001f);
+
+		constexpr std::array<glm::vec3, 6> ExpectedFaceCenters = {
+			glm::vec3(1.0f, 0.0f, 0.0f), glm::vec3(-1.0f, 0.0f, 0.0f),
+			glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f),
+			glm::vec3(0.0f, 0.0f, 1.0f), glm::vec3(0.0f, 0.0f, -1.0f)
+		};
+		for (uint32_t Face = 0; Face < ExpectedFaceCenters.size(); ++Face)
+		{
+			const glm::vec3 Direction = CubeFaceTexelDirection(static_cast<CubeFace>(Face), 0.5f, 0.5f);
+			PF_CHECK(Tests, glm::dot(Direction, ExpectedFaceCenters[Face]) > 0.9999f);
+		}
+
+		ImportedFloatImage ConstantEnvironment;
+		ConstantEnvironment.Width = 8;
+		ConstantEnvironment.Height = 4;
+		ConstantEnvironment.RGBA32FPixels.resize(8 * 4 * 4);
+		for (size_t Pixel = 0; Pixel < 8 * 4; ++Pixel)
+		{
+			ConstantEnvironment.RGBA32FPixels[Pixel * 4] = 2.0f;
+			ConstantEnvironment.RGBA32FPixels[Pixel * 4 + 1] = 0.5f;
+			ConstantEnvironment.RGBA32FPixels[Pixel * 4 + 2] = 0.25f;
+			ConstantEnvironment.RGBA32FPixels[Pixel * 4 + 3] = 1.0f;
+		}
+		EnvironmentProcessingDesc Settings;
+		Settings.EnvironmentFaceSize = 8;
+		Settings.IrradianceFaceSize = 4;
+		Settings.SpecularFaceSize = 8;
+		Settings.BrdfLutSize = 8;
+		Settings.IrradianceSamples = 32;
+		Settings.PrefilterSamples = 32;
+		Settings.BrdfSamples = 32;
+		auto Processed = ProcessEnvironmentImage(ConstantEnvironment, Settings);
+		PF_CHECK(Tests, Processed.has_value());
+		if (Processed)
+		{
+			PF_CHECK(Tests, Processed->Environment.Size == 8 && Processed->DiffuseIrradiance.Size == 4);
+			PF_CHECK(Tests, Processed->PrefilteredSpecular.size() == 4);
+			PF_CHECK(Tests, Processed->PrefilteredSpecular.front().Size == 8 && Processed->PrefilteredSpecular.back().Size == 1);
+			PF_CHECK(Tests, Processed->BrdfIntegrationLut.Width == 8 && Processed->BrdfIntegrationLut.Height == 8);
+			for (const float Channel : Processed->Environment.Faces[0])
+				PF_CHECK(Tests, std::isfinite(Channel));
+			for (const float Channel : Processed->BrdfIntegrationLut.RGBA32FPixels)
+				PF_CHECK(Tests, std::isfinite(Channel));
+			const std::vector<float>& IrradiancePositiveX = Processed->DiffuseIrradiance.Faces[0];
+			PF_CHECK(Tests, std::abs(IrradiancePositiveX[0] - 2.0f * std::numbers::pi_v<float>) < 0.05f);
+			PF_CHECK(Tests, std::abs(IrradiancePositiveX[1] - 0.5f * std::numbers::pi_v<float>) < 0.05f);
+			for (const FloatCubeLevel& Level : Processed->PrefilteredSpecular)
+			{
+				PF_CHECK(Tests, std::abs(Level.Faces[0][0] - 2.0f) < 0.01f);
+				PF_CHECK(Tests, std::abs(Level.Faces[0][1] - 0.5f) < 0.01f);
+			}
+		}
+		auto InvalidSize = Settings;
+		InvalidSize.EnvironmentFaceSize = 7;
+		PF_CHECK(Tests, !ProcessEnvironmentImage(ConstantEnvironment, InvalidSize).has_value());
+		ConstantEnvironment.RGBA32FPixels[0] = std::numeric_limits<float>::quiet_NaN();
+		PF_CHECK(Tests, !ProcessEnvironmentImage(ConstantEnvironment, Settings).has_value());
+	}
+
 	void TestTextureAndSamplerValidation(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -5944,6 +6021,7 @@ int main()
 	TestAssetReferenceValidation(Tests);
 	TestGltfMeshImport(Tests);
 	TestImageAssetImport(Tests);
+	TestEnvironmentLightingProcessing(Tests);
 	TestAudioEngineAndAssetCache(Tests);
 	TestScriptRuntime(Tests);
 	TestGraphicsPipelineAndDrawValidation(Tests);
