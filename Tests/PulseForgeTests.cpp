@@ -3650,6 +3650,55 @@ end
 		if (!TransformScriptAsset)
 			return;
 
+		const auto RelativeMotionScriptAsset = CreateScriptAsset(
+			"relative_motion.lua",
+			"local elapsed = 0\n"
+			"local initialX, initialY, initialZ = 0, 0, 0\n"
+			"function OnCreate()\n"
+			"  initialX, initialY, initialZ = entity:get_translation()\n"
+			"  assert(initialX ~= nil and initialY ~= nil and initialZ ~= nil)\n"
+			"end\n"
+			"function OnUpdate(dt)\n"
+			"  elapsed = elapsed + dt\n"
+			"  assert(entity:set_translation(initialX + math.sin(elapsed) * 0.25, initialY, initialZ))\n"
+			"end\n");
+		PF_CHECK(Tests, RelativeMotionScriptAsset.has_value());
+		if (!RelativeMotionScriptAsset)
+			return;
+
+		Scene RelativeMotionScene;
+		const auto OriginalMover = RelativeMotionScene.CreateEntity("Original mover");
+		PF_CHECK(Tests, OriginalMover.has_value());
+		if (!OriginalMover)
+			return;
+		TransformComponent OriginalTransform;
+		OriginalTransform.Translation = { 3.0f, 2.0f, -4.0f };
+		PF_CHECK(Tests, OriginalMover->SetTransform(OriginalTransform).has_value());
+		PF_CHECK(Tests, OriginalMover->SetScript(ScriptComponent{ RelativeMotionScriptAsset->ID }).has_value());
+		const auto DuplicatedMover = RelativeMotionScene.DuplicateEntity(*OriginalMover);
+		PF_CHECK(Tests, DuplicatedMover.has_value());
+		if (!DuplicatedMover)
+			return;
+		TransformComponent DuplicatedTransform;
+		DuplicatedTransform.Translation = { -7.0f, 5.0f, 11.0f };
+		PF_CHECK(Tests, DuplicatedMover->SetTransform(DuplicatedTransform).has_value());
+		ScriptRuntime RelativeMotionRuntime(*ProjectResult);
+		PF_CHECK(Tests, RelativeMotionRuntime.Start(RelativeMotionScene).has_value());
+		PF_CHECK(Tests, RelativeMotionRuntime.Advance(RelativeMotionScene, Timestep(0.5)).has_value());
+		const auto OriginalMovedTransform = OriginalMover->GetTransform();
+		const auto DuplicatedMovedTransform = DuplicatedMover->GetTransform();
+		const float ExpectedOscillation = std::sin(0.5f) * 0.25f;
+		PF_CHECK(Tests, OriginalMovedTransform &&
+			std::abs(OriginalMovedTransform->Translation.x - (3.0f + ExpectedOscillation)) < 0.0001f &&
+			std::abs(OriginalMovedTransform->Translation.y - 2.0f) < 0.0001f &&
+			std::abs(OriginalMovedTransform->Translation.z + 4.0f) < 0.0001f);
+		PF_CHECK(Tests, DuplicatedMovedTransform &&
+			std::abs(DuplicatedMovedTransform->Translation.x - (-7.0f + ExpectedOscillation)) < 0.0001f &&
+			std::abs(DuplicatedMovedTransform->Translation.y - 5.0f) < 0.0001f &&
+			std::abs(DuplicatedMovedTransform->Translation.z - 11.0f) < 0.0001f);
+		PF_CHECK(Tests, RelativeMotionRuntime.GetDiagnostics().empty());
+		RelativeMotionRuntime.Stop();
+
 		std::filesystem::create_directories(ProjectRoot / "Assets/Prefabs", FileError);
 		PF_CHECK(Tests, !FileError);
 		if (FileError)
