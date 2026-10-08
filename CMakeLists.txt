@@ -143,6 +143,16 @@ if(PULSEFORGE_BUILD_EDITOR)
 	set(NFD_INSTALL OFF CACHE BOOL "" FORCE)
 	add_subdirectory(PulseForge/Vendor/nativefiledialog)
 
+	# The current Font Awesome Free desktop font uses CFF outlines in an OTF.
+	# Reuse the repository's pinned FreeType copy for the editor's font atlas;
+	# compressed-font features are disabled because bundled assets are plain local TTF/OTF files.
+	set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
+	set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
+	set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
+	set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+	set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
+	add_subdirectory(PulseForge/Vendor/freetype "${CMAKE_BINARY_DIR}/_deps/freetype-build" EXCLUDE_FROM_ALL)
+
 	set(PULSEFORGE_IMGUI_SOURCES
 		PulseForge/Vendor/imgui/imgui.cpp
 		PulseForge/Vendor/imgui/imgui_draw.cpp
@@ -275,15 +285,35 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorApplication.cpp
 		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
 		PulseForgeEditor/Source/Private/EditorLayout.cpp
+		PulseForgeEditor/Source/Private/EditorStyle.cpp
+		PulseForge/Vendor/imgui/misc/freetype/imgui_freetype.cpp
 	)
-	target_include_directories(PulseForgeEditor PRIVATE PulseForgeEditor/Source/Public)
+	target_include_directories(PulseForgeEditor PRIVATE
+		PulseForgeEditor/Source/Public
+		PulseForge/Vendor/imgui/misc/freetype
+	)
 	target_compile_definitions(PulseForgeEditor PRIVATE PF_PLATFORM_WINDOWS)
 	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
 		target_compile_definitions(PulseForgeEditor PRIVATE PF_EDITOR_RENDERER_OPENGL)
 	else()
 		target_compile_definitions(PulseForgeEditor PRIVATE PF_EDITOR_SHADER_DIRECTORY="Shaders")
 	endif()
-	target_link_libraries(PulseForgeEditor PRIVATE PulseForge PulseForgeImGui nfd::nfd spdlog::spdlog shell32 ole32)
+	target_link_libraries(PulseForgeEditor PRIVATE
+		PulseForge PulseForgeImGui nfd::nfd spdlog::spdlog freetype shell32 ole32)
+	add_custom_command(TARGET PulseForgeEditor POST_BUILD
+		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeEditor>/EditorAssets"
+		COMMAND "${CMAKE_COMMAND}" -E copy_directory
+			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Fonts"
+			"$<TARGET_FILE_DIR:PulseForgeEditor>/EditorAssets/Fonts"
+		COMMAND "${CMAKE_COMMAND}" -E copy_directory
+			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Icons"
+			"$<TARGET_FILE_DIR:PulseForgeEditor>/EditorAssets/Icons"
+		COMMAND "${CMAKE_COMMAND}" -E copy_directory
+			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/ThirdParty"
+			"$<TARGET_FILE_DIR:PulseForgeEditor>/EditorAssets/ThirdParty"
+		VERBATIM
+		COMMENT "Copying bundled PulseForge editor fonts, icons, and notices"
+	)
 	set_property(TARGET PulseForgeEditor PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeEditor>")
 endif()
 

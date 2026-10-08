@@ -23,6 +23,7 @@
 #include "Core/LayerStack.h"
 #include "Core/Timestep.h"
 #include "Editor/EditorLayout.h"
+#include "Editor/EditorStyle.h"
 #include "Editor/ImGuiRendererMath.h"
 #include "Editor/ViewportMath.h"
 #include "Audio/AudioEngine.h"
@@ -1676,6 +1677,45 @@ namespace
 			ScissorExtent);
 		PF_CHECK(Tests, FullyOutside && !*FullyOutside);
 		PF_CHECK(Tests, !ClipRectToScissor({ 0.0f, 0.0f }, { 1.0f, 1.0f }, {}, { 1.0f, 1.0f }, {}));
+	}
+
+	void TestEditorFontAndIconDescriptors(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		PF_CHECK(Tests, EditorFontDescriptors.size() == 3);
+		PF_CHECK(Tests, EditorFontDescriptors[0].Role == EditorFontRole::Interface);
+		PF_CHECK(Tests, EditorFontDescriptors[1].Role == EditorFontRole::Emphasis);
+		PF_CHECK(Tests, EditorFontDescriptors[2].Role == EditorFontRole::Monospace);
+		PF_CHECK(Tests, EditorFontDescriptors[0].RelativePath == "Fonts/Inter-Regular.ttf");
+		PF_CHECK(Tests, EditorFontDescriptors[1].RelativePath == "Fonts/Inter-SemiBold.ttf");
+		PF_CHECK(Tests, EditorFontDescriptors[2].RelativePath == "Fonts/JetBrainsMono-Regular.ttf");
+		PF_CHECK(Tests, EditorFontDescriptors[0].PixelSize == 15.0f);
+		PF_CHECK(Tests, EditorFontDescriptors[1].PixelSize == 15.0f);
+		PF_CHECK(Tests, EditorFontDescriptors[2].PixelSize >= 13.0f && EditorFontDescriptors[2].PixelSize <= 15.0f);
+		PF_CHECK(Tests, EditorIconFontPixelSize == EditorFontDescriptors[0].PixelSize);
+
+		std::array<bool, static_cast<size_t>(EditorIcon::Count)> SeenIcons{};
+		for (size_t Index = 0; Index < EditorIconDescriptors.size(); ++Index)
+		{
+			const EditorIconDescriptor& Descriptor = EditorIconDescriptors[Index];
+			const size_t IconIndex = static_cast<size_t>(Descriptor.Icon);
+			PF_CHECK(Tests, IconIndex < SeenIcons.size());
+			if (IconIndex < SeenIcons.size())
+			{
+				PF_CHECK(Tests, !SeenIcons[IconIndex]);
+				SeenIcons[IconIndex] = true;
+			}
+			PF_CHECK(Tests, !Descriptor.Name.empty());
+			PF_CHECK(Tests, Descriptor.Codepoint >= 0xe000 && Descriptor.Codepoint <= 0xf8ff);
+			PF_CHECK(Tests, EditorIconGlyphRanges[Index * 2] == Descriptor.Codepoint);
+			PF_CHECK(Tests, EditorIconGlyphRanges[Index * 2 + 1] == Descriptor.Codepoint);
+			if (Index > 0)
+				PF_CHECK(Tests, EditorIconDescriptors[Index - 1].Codepoint < Descriptor.Codepoint);
+			PF_CHECK(Tests, FindEditorIcon(Descriptor.Icon) == &Descriptor);
+		}
+		PF_CHECK(Tests, std::all_of(SeenIcons.begin(), SeenIcons.end(), [](bool Seen) { return Seen; }));
+		PF_CHECK(Tests, EditorIconGlyphRanges.back() == 0);
+		PF_CHECK(Tests, FindEditorIcon(EditorIcon::Count) == nullptr);
 	}
 
 	void TestSceneSerializationRoundTrip(TestRunner& Tests)
@@ -5396,6 +5436,7 @@ int main()
 	TestSceneRenderSnapshot(Tests);
 	TestEditorViewportMath(Tests);
 	TestEditorWorkspacePanelState(Tests);
+	TestEditorFontAndIconDescriptors(Tests);
 	TestEditorImGuiRendererMath(Tests);
 	TestSceneSerializationRoundTrip(Tests);
 	TestSceneSerializerClone(Tests);

@@ -22,6 +22,7 @@
 #include "Window/Window.h"
 #include "Editor/EditorImGuiRenderer.h"
 #include "Editor/EditorLayout.h"
+#include "Editor/EditorStyle.h"
 #include "Editor/ViewportMath.h"
 
 #include <GLFW/glfw3.h>
@@ -318,6 +319,11 @@ namespace
 			ImGuiStyle& Style = ImGui::GetStyle();
 			Style.WindowRounding = 0.0f;
 			Style.Colors[ImGuiCol_WindowBg].w = 1.0f;
+			if (auto Result = m_EditorStyle.Initialize(); !Result)
+			{
+				ShutdownImGui();
+				throw std::runtime_error("Could not initialize editor typography: " + Result.error());
+			}
 			if (auto Result = m_Layout.Initialize(); !Result)
 				ReportLayoutPersistenceError(Result.error());
 
@@ -1452,25 +1458,27 @@ namespace
 			ImGui::TextUnformatted("PulseForge");
 			if (ImGui::BeginMenu("File"))
 			{
-				if (ImGui::MenuItem("New Project..."))
+				if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::NewDocument, "New Project..."))
 					CreateProject();
-				if (ImGui::MenuItem("Open Project..."))
+				if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::FolderOpen, "Open Project..."))
 					OpenProject();
-				if (m_Project && ImGui::MenuItem("Close Project"))
+				if (m_Project && m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Close, "Close Project"))
 					QueueAfterSave([this] { CloseProjectNow(); });
 				ImGui::Separator();
-				if (ImGui::MenuItem("Exit"))
+				if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Close, "Exit"))
 					QueueAfterSave([] { PulseForge::Application::Get().RequestClose(); });
 				ImGui::EndMenu();
 			}
 
 			if (ImGui::BeginMenu("Scene", m_Project.has_value()))
 			{
-				if (ImGui::MenuItem("New Scene..."))
+				if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::NewDocument, "New Scene..."))
 					CreateScene(false);
-				if (ImGui::MenuItem("Save Scene", nullptr, false, m_Scene && m_SceneAsset))
+				if (m_EditorStyle.MenuItem(
+					PulseForgeEditor::EditorIcon::Save, "Save Scene", nullptr, false, m_Scene && m_SceneAsset))
 					SaveScene();
-				if (ImGui::MenuItem("Save Scene As...", nullptr, false, m_Scene != nullptr))
+				if (m_EditorStyle.MenuItem(
+					PulseForgeEditor::EditorIcon::Save, "Save Scene As...", nullptr, false, m_Scene != nullptr))
 					CreateScene(true);
 				if (ImGui::BeginMenu("Open Scene", m_Project.has_value()))
 				{
@@ -1510,11 +1518,11 @@ namespace
 			if (!m_SceneRuntime)
 			{
 				ImGui::BeginDisabled(!m_Project || !m_Scene);
-				if (ImGui::Button("Play"))
+				if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Play, "Play"))
 					StartRuntime();
 				ImGui::EndDisabled();
 			}
-			else if (ImGui::Button("Stop"))
+			else if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Stop, "Stop"))
 			{
 				StopRuntime();
 				SetStatus("Runtime stopped. The authored scene was not modified by simulation.");
@@ -1653,13 +1661,16 @@ namespace
 					{
 						ImGui::TextUnformatted(
 							"Edit view: transient camera (right-drag look; WASD/QE move; Shift speed). Gizmos use local axes.");
-						if (ImGui::RadioButton("Translate", m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Translate))
+						if (m_EditorStyle.RadioButton(PulseForgeEditor::EditorIcon::Translate, "Translate",
+							m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Translate))
 							SetGizmoOperation(PulseForgeEditor::TransformGizmoOperation::Translate);
 						ImGui::SameLine();
-						if (ImGui::RadioButton("Rotate", m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Rotate))
+						if (m_EditorStyle.RadioButton(PulseForgeEditor::EditorIcon::Rotate, "Rotate",
+							m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Rotate))
 							SetGizmoOperation(PulseForgeEditor::TransformGizmoOperation::Rotate);
 						ImGui::SameLine();
-						if (ImGui::RadioButton("Scale", m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Scale))
+						if (m_EditorStyle.RadioButton(PulseForgeEditor::EditorIcon::Scale, "Scale",
+							m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Scale))
 							SetGizmoOperation(PulseForgeEditor::TransformGizmoOperation::Scale);
 						ImGui::SameLine();
 						ImGui::TextDisabled("Local");
@@ -2513,12 +2524,13 @@ namespace
 					ImGui::TextUnformatted("The editor could not connect to the engine loggers.");
 				else
 				{
-					if (ImGui::Button("Clear"))
+					if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Clear, "Clear"))
 						m_ConsoleSink->Clear();
 					ImGui::SameLine();
 					ImGui::Checkbox("Auto-scroll", &m_ConsoleAutoScroll);
 
 					ImGui::Separator();
+					m_EditorStyle.PushMonospaceFont();
 					if (ImGui::BeginChild("ConsoleMessages", ImVec2(0.0f, 0.0f), true,
 						ImGuiWindowFlags_HorizontalScrollbar))
 					{
@@ -2549,6 +2561,7 @@ namespace
 							ImGui::SetScrollHereY(1.0f);
 					}
 					ImGui::EndChild();
+					m_EditorStyle.PopFont();
 				}
 			}
 			ImGui::End();
@@ -2561,18 +2574,18 @@ namespace
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Hierarchy))
 			{
 				ImGui::BeginDisabled(!m_Scene);
-				if (ImGui::Button("Create Entity"))
+				if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Add, "Create Entity"))
 					CreateEntityFromEditor();
 				ImGui::SameLine();
 				ImGui::BeginDisabled(!m_SelectedEntity);
-				if (ImGui::Button("Duplicate"))
+				if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Duplicate, "Duplicate"))
 					DuplicateSelectedEntity();
 				ImGui::SameLine();
-				if (ImGui::Button("Delete"))
+				if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Delete, "Delete"))
 					DeleteSelectedEntity();
 				ImGui::EndDisabled();
 				ImGui::BeginDisabled(!m_SelectedEntity);
-				if (ImGui::Button("Create Prefab..."))
+				if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Prefab, "Create Prefab..."))
 					CreatePrefabFromSelectedEntity();
 				ImGui::EndDisabled();
 				ImGui::EndDisabled();
@@ -2938,7 +2951,7 @@ namespace
 
 		void DrawComponentAuthoring(const PulseForge::Entity& Entity)
 		{
-			if (ImGui::Button("Add Component"))
+			if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::AddComponent, "Add Component"))
 				ImGui::OpenPopup("Add Component");
 			if (ImGui::BeginPopup("Add Component"))
 			{
@@ -2952,7 +2965,8 @@ namespace
 				if (!Camera || !Mesh || !Rigidbody || !Collider || !AudioSource || !AudioListener || !Script)
 					SetError("Could not inspect entity components.");
 
-				if (Camera && !Camera->has_value() && ImGui::MenuItem("Camera"))
+				if (Camera && !Camera->has_value() &&
+					m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Camera, "Camera"))
 				{
 					PulseForge::CameraComponent Component;
 					Component.IsPrimary = true;
@@ -3049,7 +3063,7 @@ namespace
 				return;
 
 			PulseForge::CameraComponent Component = **Result;
-			if (ImGui::SmallButton("Remove Camera"))
+			if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Remove, "Remove Camera"))
 			{
 				RecordComponentOperation(Entity.RemoveCamera(), "Camera component removal failed");
 				return;
@@ -3075,7 +3089,7 @@ namespace
 				return;
 
 			PulseForge::MeshRendererComponent Component = **Result;
-			if (ImGui::SmallButton("Remove Mesh Renderer"))
+			if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Remove, "Remove Mesh Renderer"))
 			{
 				RecordComponentOperation(Entity.RemoveMeshRenderer(), "Mesh renderer removal failed");
 				return;
@@ -3099,7 +3113,7 @@ namespace
 				return;
 
 			PulseForge::RigidbodyComponent Component = **Result;
-			if (ImGui::SmallButton("Remove Rigidbody"))
+			if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Remove, "Remove Rigidbody"))
 			{
 				RecordComponentOperation(Entity.RemoveRigidbody(), "Rigidbody removal failed");
 				return;
@@ -3126,7 +3140,7 @@ namespace
 				return;
 
 			PulseForge::BoxColliderComponent Component = **Result;
-			if (ImGui::SmallButton("Remove Box Collider"))
+			if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Remove, "Remove Box Collider"))
 			{
 				RecordComponentOperation(Entity.RemoveBoxCollider(), "Box collider removal failed");
 				return;
@@ -3147,7 +3161,7 @@ namespace
 				return;
 
 			PulseForge::AudioSourceComponent Component = **Result;
-			if (ImGui::SmallButton("Remove Audio Source"))
+			if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Remove, "Remove Audio Source"))
 			{
 				RecordComponentOperation(Entity.RemoveAudioSource(), "Audio source removal failed");
 				return;
@@ -3172,7 +3186,7 @@ namespace
 				return;
 
 			PulseForge::AudioListenerComponent Component = **Result;
-			if (ImGui::SmallButton("Remove Audio Listener"))
+			if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Remove, "Remove Audio Listener"))
 			{
 				RecordComponentOperation(Entity.RemoveAudioListener(), "Audio listener removal failed");
 				return;
@@ -3188,7 +3202,7 @@ namespace
 				return;
 
 			PulseForge::ScriptComponent Component = **Result;
-			if (ImGui::SmallButton("Remove Script"))
+			if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Remove, "Remove Script"))
 			{
 				RecordComponentOperation(Entity.RemoveScript(), "Script component removal failed");
 				return;
@@ -3213,10 +3227,10 @@ namespace
 					ImGui::TextUnformatted("Open a project to browse managed assets.");
 				else
 				{
-					if (ImGui::Button("Import Asset..."))
+					if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Import, "Import Asset..."))
 						ImportAsset();
 					ImGui::SameLine();
-					if (ImGui::Button("Refresh"))
+					if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Refresh, "Refresh"))
 						RefreshAssets();
 					if (m_Assets.empty())
 						ImGui::TextUnformatted("The project has no managed assets.");
@@ -3240,19 +3254,20 @@ namespace
 						{
 							m_SelectedAsset = Asset.ID;
 							const PulseForge::AssetID Identifier = Asset.ID;
-							if (ImGui::MenuItem("Move / Rename..."))
+							if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Rename, "Move / Rename..."))
 								ContextAction = [this, Identifier] { MoveAsset(Identifier); };
-							if (ImGui::MenuItem("Duplicate..."))
+							if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Duplicate, "Duplicate..."))
 								ContextAction = [this, Identifier] { DuplicateAsset(Identifier); };
 							if (Asset.ProjectRelativePath.extension() == ".prefab" &&
-								ImGui::MenuItem("Instantiate in Scene", nullptr, false, m_Scene != nullptr))
+								m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Cube, "Instantiate in Scene", nullptr, false,
+									m_Scene != nullptr))
 								ContextAction = [this, Identifier] { InstantiatePrefab(Identifier); };
 							const bool IsStartupScene = m_Project->GetDescription().StartScene &&
 								*m_Project->GetDescription().StartScene == Identifier;
 							if (Asset.ProjectRelativePath.extension() == ".scene" &&
 								ImGui::MenuItem("Set as Startup Scene", nullptr, IsStartupScene, !IsStartupScene))
 								ContextAction = [this, Identifier] { SetStartupScene(Identifier); };
-							if (ImGui::MenuItem("Delete..."))
+							if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Delete, "Delete..."))
 								ContextAction = [this, Identifier] { RequestDeleteAsset(Identifier); };
 							ImGui::EndPopup();
 						}
@@ -3278,21 +3293,21 @@ namespace
 								else if (ImGui::Button("Set as Startup Scene"))
 									SetStartupScene(Asset->ID);
 							}
-							if (ImGui::Button("Move / Rename..."))
+							if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Rename, "Move / Rename..."))
 								MoveAsset(Asset->ID);
 							ImGui::SameLine();
-							if (ImGui::Button("Duplicate..."))
+							if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Duplicate, "Duplicate..."))
 								DuplicateAsset(Asset->ID);
 							ImGui::SameLine();
 							const bool IsProtectedScene = IsProtectedSceneAsset(Asset->ID);
 							ImGui::BeginDisabled(IsProtectedScene);
-							if (ImGui::Button("Delete..."))
+							if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Delete, "Delete..."))
 								RequestDeleteAsset(Asset->ID);
 							ImGui::EndDisabled();
 							if (Asset->ProjectRelativePath.extension() == ".prefab")
 							{
 								ImGui::BeginDisabled(!m_Scene);
-								if (ImGui::Button("Instantiate in Scene"))
+								if (m_EditorStyle.Button(PulseForgeEditor::EditorIcon::Cube, "Instantiate in Scene"))
 									InstantiatePrefab(Asset->ID);
 								ImGui::EndDisabled();
 							}
@@ -3440,6 +3455,7 @@ namespace
 			#endif
 			if (m_GlfwBackendActive)
 				ImGui_ImplGlfw_Shutdown();
+			m_EditorStyle.Reset();
 			ImGui::DestroyContext(m_Context);
 			m_Context = nullptr;
 			m_OpenGLBackendActive = false;
@@ -3455,6 +3471,7 @@ namespace
 
 		ImGuiContext* m_Context = nullptr;
 		PulseForgeEditor::EditorLayout m_Layout;
+		PulseForgeEditor::EditorStyle m_EditorStyle;
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
 		bool m_GlfwBackendActive = false;
 		bool m_OpenGLBackendActive = false;
