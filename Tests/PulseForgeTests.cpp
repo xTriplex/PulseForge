@@ -3468,6 +3468,36 @@ namespace
 		PF_CHECK(Tests, RelocatedProject && RelocatedProject->GetRootPath() == RelocatedRoot);
 	}
 
+	void TestBundledValidationProjectAssetRegistry(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const std::filesystem::path RepositoryRoot = std::filesystem::path(__FILE__).parent_path().parent_path();
+		const std::filesystem::path ProjectFile = RepositoryRoot / "PulseForgeGame" / "PulseForgeGame.pfproj";
+		auto OpenedProject = Project::Open(ProjectFile);
+		PF_CHECK(Tests, OpenedProject.has_value());
+		if (!OpenedProject)
+			return;
+
+		const std::filesystem::path AssetsRoot = ProjectFile.parent_path() / "Assets";
+		const std::vector<AssetRecord> RegisteredAssets = OpenedProject->GetAssetRegistry().GetAssets();
+		size_t ManagedSourceCount = 0;
+		std::error_code FileError;
+		for (std::filesystem::recursive_directory_iterator Iterator(AssetsRoot, FileError), End;
+			!FileError && Iterator != End; Iterator.increment(FileError))
+		{
+			if (!Iterator->is_regular_file(FileError) || FileError || Iterator->path().extension() == ".meta")
+				continue;
+
+			++ManagedSourceCount;
+			const std::filesystem::path RelativePath = Iterator->path().lexically_relative(ProjectFile.parent_path());
+			const auto Record = std::find_if(RegisteredAssets.begin(), RegisteredAssets.end(),
+				[&RelativePath](const AssetRecord& Asset) { return Asset.ProjectRelativePath == RelativePath; });
+			PF_CHECK(Tests, Record != RegisteredAssets.end());
+		}
+		PF_CHECK(Tests, !FileError);
+		PF_CHECK(Tests, RegisteredAssets.size() == ManagedSourceCount);
+	}
+
 	void TestAssetReferenceValidation(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -6068,6 +6098,7 @@ int main()
 	TestAssetImportOperation(Tests);
 	TestMaterialAssets(Tests);
 	TestProjectFiles(Tests);
+	TestBundledValidationProjectAssetRegistry(Tests);
 	TestAssetReferenceValidation(Tests);
 	TestGltfMeshImport(Tests);
 	TestImageAssetImport(Tests);
