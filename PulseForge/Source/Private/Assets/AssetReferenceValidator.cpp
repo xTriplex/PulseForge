@@ -68,6 +68,7 @@ namespace PulseForge
 			std::string_view{ ".flac" },
 			std::string_view{ ".ogg" }
 		};
+		static constexpr std::array EnvironmentExtensions{ std::string_view{ ".hdr" } };
 
 		std::vector<AssetReferenceIssue> Issues;
 		for (const Entity& CurrentEntity : SceneToValidate.GetEntities())
@@ -108,6 +109,13 @@ namespace PulseForge
 					AssetReferenceKind::Audio,
 					AudioExtensions);
 			}
+
+			const auto EnvironmentLight = CurrentEntity.GetEnvironmentLight();
+			if (!EnvironmentLight)
+				return std::unexpected(EnvironmentLight.error());
+			if (EnvironmentLight->has_value())
+				ValidateReference(Issues, Registry, CurrentEntity, EnvironmentLight->value().HdrImage,
+					AssetReferenceKind::Environment, EnvironmentExtensions);
 		}
 		return Issues;
 	}

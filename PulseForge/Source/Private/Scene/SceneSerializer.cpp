@@ -3,6 +3,7 @@
 #include "Scene/Components/AudioListenerComponent.h"
 #include "Scene/Components/AudioSourceComponent.h"
 #include "Scene/Components/DirectionalLightComponent.h"
+#include "Scene/Components/EnvironmentLightComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
 #include "Scene/Components/ScriptComponent.h"
 
@@ -55,6 +56,7 @@ namespace PulseForge
 			if (Error.Code == SceneErrorCode::DuplicateUUID || Error.Code == SceneErrorCode::NilUUID ||
 				Error.Code == SceneErrorCode::InvalidTransform || Error.Code == SceneErrorCode::ParentCycle ||
 				Error.Code == SceneErrorCode::InvalidCamera || Error.Code == SceneErrorCode::InvalidDirectionalLight ||
+				Error.Code == SceneErrorCode::InvalidEnvironmentLight ||
 				Error.Code == SceneErrorCode::InvalidAssetReference ||
 				Error.Code == SceneErrorCode::InvalidPhysicsComponent || Error.Code == SceneErrorCode::InvalidAudioComponent ||
 				Error.Code == SceneErrorCode::InvalidScriptComponent)
@@ -97,6 +99,7 @@ namespace PulseForge
 				const auto Transform = Current.GetTransform();
 				const auto Camera = Current.GetCamera();
 				const auto DirectionalLight = Current.GetDirectionalLight();
+				const auto EnvironmentLight = Current.GetEnvironmentLight();
 				const auto MeshRenderer = Current.GetMeshRenderer();
 				const auto Rigidbody = Current.GetRigidbody();
 				const auto BoxCollider = Current.GetBoxCollider();
@@ -104,7 +107,7 @@ namespace PulseForge
 				const auto AudioListener = Current.GetAudioListener();
 				const auto Script = Current.GetScript();
 				const auto Parent = Current.GetParent();
-				if (!Tag || !Transform || !Camera || !DirectionalLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
+				if (!Tag || !Transform || !Camera || !DirectionalLight || !EnvironmentLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
 					!AudioSource || !AudioListener || !Script || !Parent)
 					return std::unexpected(MakeError(
 						SceneSerializationErrorCode::SceneOperationFailed,
@@ -134,6 +137,14 @@ namespace PulseForge
 					Record["directionalLight"] = Json::object({
 						{ "color", { Light.Color.r, Light.Color.g, Light.Color.b } },
 						{ "intensity", Light.Intensity }
+					});
+				}
+				if (EnvironmentLight->has_value())
+				{
+					const EnvironmentLightComponent& Environment = EnvironmentLight->value();
+					Record["environmentLight"] = Json::object({
+						{ "hdrImage", Environment.HdrImage.ToString() },
+						{ "intensity", Environment.Intensity }
 					});
 				}
 				if (MeshRenderer->has_value())
@@ -353,6 +364,28 @@ namespace PulseForge
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error()));
 				}
 
+				std::optional<EnvironmentLightComponent> EnvironmentLightData;
+				const auto SerializedEnvironmentLight = SerializedEntity.find("environmentLight");
+				if (SerializedEnvironmentLight != SerializedEntity.end())
+				{
+					if (!SerializedEnvironmentLight->is_object())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Entity environmentLight must be an object"));
+					const auto HdrImage = SerializedEnvironmentLight->find("hdrImage");
+					const auto Intensity = SerializedEnvironmentLight->find("intensity");
+					if (HdrImage == SerializedEnvironmentLight->end() || !HdrImage->is_string() ||
+						Intensity == SerializedEnvironmentLight->end() || !Intensity->is_number())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Environment light requires an HDR image UUID and numeric intensity"));
+					const auto ParsedImage = UUID::Parse(HdrImage->get<std::string>());
+					if (!ParsedImage || ParsedImage->IsNil())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							ParsedImage ? "Environment HDR image UUID must not be nil" : ParsedImage.error().Message));
+					EnvironmentLightData = EnvironmentLightComponent{ *ParsedImage, Intensity->get<float>() };
+					if (auto Validation = EnvironmentLightData->Validate(); !Validation)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error()));
+				}
+
 				std::optional<MeshRendererComponent> MeshRendererData;
 				const auto SerializedMeshRenderer = SerializedEntity.find("meshRenderer");
 				if (SerializedMeshRenderer != SerializedEntity.end())
@@ -542,6 +575,11 @@ namespace PulseForge
 				{
 					if (auto LightResult = Created->SetDirectionalLight(*DirectionalLightData); !LightResult)
 						return std::unexpected(SceneOperationError(LightResult.error()));
+				}
+				if (EnvironmentLightData)
+				{
+					if (auto EnvironmentResult = Created->SetEnvironmentLight(*EnvironmentLightData); !EnvironmentResult)
+						return std::unexpected(SceneOperationError(EnvironmentResult.error()));
 				}
 				if (MeshRendererData)
 				{

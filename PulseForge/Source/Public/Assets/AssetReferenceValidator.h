@@ -15,7 +15,8 @@ namespace PulseForge
 		Mesh,
 		Material,
 		Script,
-		Audio
+		Audio,
+		Environment
 	};
 
 	enum class AssetReferenceIssueCode : uint8_t

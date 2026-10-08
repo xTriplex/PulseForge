@@ -217,6 +217,7 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/Binding.cpp
 	PulseForge/Source/Private/Renderer/Graphics.cpp
 	PulseForge/Source/Private/Renderer/EnvironmentLighting.cpp
+	PulseForge/Source/Private/Renderer/EnvironmentLightingCache.cpp
 	PulseForge/Source/Private/Renderer/RendererBackend.cpp
 	PulseForge/Source/Private/Renderer/SceneRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp
@@ -359,6 +360,9 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 	set(PULSEFORGE_TRIANGLE_VERTEX_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/Triangle.vs.spv")
 	set(PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/Triangle.ps.spv")
 	set(PULSEFORGE_TRIANGLE_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Shaders/Triangle.hlsl")
+	set(PULSEFORGE_BACKGROUND_VERTEX_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/EnvironmentBackground.vs.spv")
+	set(PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/EnvironmentBackground.ps.spv")
+	set(PULSEFORGE_BACKGROUND_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Shaders/EnvironmentBackground.hlsl")
 	add_custom_command(
 		OUTPUT "${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}"
 		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
@@ -377,8 +381,27 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 		VERBATIM
 		COMMENT "Compiling PulseForge triangle fragment shader to SPIR-V"
 	)
+	add_custom_command(
+		OUTPUT "${PULSEFORGE_BACKGROUND_VERTEX_SPIRV}"
+		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
+		COMMAND "${PULSEFORGE_DXC}" -spirv -T vs_6_0 -E VSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
+			-Fo "${PULSEFORGE_BACKGROUND_VERTEX_SPIRV}" "${PULSEFORGE_BACKGROUND_HLSL}"
+		DEPENDS "${PULSEFORGE_BACKGROUND_HLSL}"
+		VERBATIM
+		COMMENT "Compiling PulseForge environment background vertex shader to SPIR-V"
+	)
+	add_custom_command(
+		OUTPUT "${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}"
+		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
+		COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
+			-Fo "${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}" "${PULSEFORGE_BACKGROUND_HLSL}"
+		DEPENDS "${PULSEFORGE_BACKGROUND_HLSL}"
+		VERBATIM
+		COMMENT "Compiling PulseForge environment background fragment shader to SPIR-V"
+	)
 	add_custom_target(PulseForgeSceneShaderAssets
-		DEPENDS "${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}")
+		DEPENDS "${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}"
+			"${PULSEFORGE_BACKGROUND_VERTEX_SPIRV}" "${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}")
 	if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
 		add_dependencies(PulseForgeGame PulseForgeSceneShaderAssets)
 		add_custom_command(TARGET PulseForgeGame POST_BUILD
@@ -387,12 +410,19 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 				"${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Triangle.vs.spv"
 			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
 				"${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Triangle.ps.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_BACKGROUND_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/EnvironmentBackground.vs.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/EnvironmentBackground.ps.spv"
 			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
 			COMMAND "${CMAKE_COMMAND}" -E copy_directory
 				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Models" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
 			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Textures"
 			COMMAND "${CMAKE_COMMAND}" -E copy_directory
 				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Textures" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Textures"
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Environments"
+			COMMAND "${CMAKE_COMMAND}" -E copy_directory
+				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Environments" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Environments"
 			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scenes"
 			COMMAND "${CMAKE_COMMAND}" -E copy_directory
 				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Scenes" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scenes"
@@ -441,6 +471,10 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 				"${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/Triangle.vs.spv"
 			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
 				"${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/Triangle.ps.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_BACKGROUND_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/EnvironmentBackground.vs.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/EnvironmentBackground.ps.spv"
 			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
 				"${PULSEFORGE_EDITOR_IMGUI_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/EditorImGui.vs.spv"
 			COMMAND "${CMAKE_COMMAND}" -E copy_if_different

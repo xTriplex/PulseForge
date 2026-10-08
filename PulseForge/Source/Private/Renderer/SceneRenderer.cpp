@@ -9,12 +9,16 @@
 #include "Core/Log.h"
 #include "Renderer/Mesh.h"
 #include "Scene/Scene.h"
+#include "Scene/Components/EnvironmentLightComponent.h"
 
 #include <array>
+#include <cmath>
 #include <fstream>
 #include <iterator>
 #include <span>
 #include <exception>
+#include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace PulseForge
 {
@@ -77,6 +81,15 @@ namespace PulseForge
 			return true;
 		}
 
+		bool IsFinite(const glm::mat4& Matrix)
+		{
+			for (int Column = 0; Column < 4; ++Column)
+				for (int Row = 0; Row < 4; ++Row)
+					if (!std::isfinite(Matrix[Column][Row]))
+						return false;
+			return true;
+		}
+
 		SceneRendererError MakeResourceError(std::string Message)
 		{
 			return { SceneRendererErrorCode::ResourceCreationFailed, {}, {}, std::move(Message) };
@@ -85,6 +98,27 @@ namespace PulseForge
 		SceneRendererError MakeDrawError(std::string Message)
 		{
 			return { SceneRendererErrorCode::DrawFailed, {}, {}, std::move(Message) };
+		}
+
+		std::string MakeMaterialBindingKey(const AssetID& Material, const std::optional<AssetID>& Environment)
+		{
+			return Material.ToString() + ":" + (Environment ? Environment->ToString() : std::string("none"));
+		}
+
+		std::expected<TextureHandle, TextureError> CreateBlackCube(Application& Runtime, std::string DebugName)
+		{
+			const std::array<float, 4> Black{ 0.0f, 0.0f, 0.0f, 1.0f };
+			const std::span<const float> Pixel(Black);
+			std::array<TextureSubresourceData, 6> Faces;
+			for (uint32_t Face = 0; Face < 6; ++Face)
+				Faces[Face] = { 0, Face, std::as_bytes(Pixel), sizeof(Black) };
+			TextureDesc Description;
+			Description.Width = 1;
+			Description.Height = 1;
+			Description.Format = TextureFormat::RGBA32_Float;
+			Description.Dimension = TextureDimension::TextureCube;
+			Description.DebugName = std::move(DebugName);
+			return Runtime.CreateTexture(Description, Faces);
 		}
 
 		class RenderTargetFrameScope final
@@ -136,7 +170,8 @@ namespace PulseForge
 		  m_Project(SourceProject),
 		  m_MeshAssetCache(std::make_unique<MeshAssetCache>(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry())),
 		  m_TextureAssetCache(std::make_unique<TextureAssetCache>(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry())),
-		  m_MaterialAssetCache(std::make_unique<MaterialAssetCache>(SourceProject.GetRootPath(), SourceProject.GetAssetRegistry()))
+		  m_MaterialAssetCache(std::make_unique<MaterialAssetCache>(SourceProject.GetRootPath(), SourceProject.GetAssetRegistry())),
+		  m_EnvironmentLightingCache(std::make_unique<EnvironmentLightingCache>(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry()))
 	{
 	}
 
@@ -181,6 +216,29 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Could not create the scene fragment shader: " + FragmentShader.error().Message));
 		m_FragmentShader = std::move(FragmentShader.value());
 
+		auto BackgroundVertexBytecode = ReadShaderBytecode(CompiledShaderDirectory / "EnvironmentBackground.vs.spv");
+		if (!BackgroundVertexBytecode)
+			return std::unexpected(std::move(BackgroundVertexBytecode.error()));
+		auto BackgroundFragmentBytecode = ReadShaderBytecode(CompiledShaderDirectory / "EnvironmentBackground.ps.spv");
+		if (!BackgroundFragmentBytecode)
+			return std::unexpected(std::move(BackgroundFragmentBytecode.error()));
+		ShaderDesc BackgroundVertexDescription;
+		BackgroundVertexDescription.Stage = ShaderStage::Vertex;
+		BackgroundVertexDescription.EntryPoint = "VSMain";
+		BackgroundVertexDescription.DebugName = "PulseForge environment background vertex shader";
+		auto BackgroundVertex = m_Runtime.CreateShader(BackgroundVertexDescription, *BackgroundVertexBytecode);
+		if (!BackgroundVertex)
+			return std::unexpected(MakeResourceError("Could not create environment background vertex shader: " + BackgroundVertex.error().Message));
+		m_BackgroundVertexShader = std::move(*BackgroundVertex);
+		ShaderDesc BackgroundFragmentDescription;
+		BackgroundFragmentDescription.Stage = ShaderStage::Fragment;
+		BackgroundFragmentDescription.EntryPoint = "PSMain";
+		BackgroundFragmentDescription.DebugName = "PulseForge environment background fragment shader";
+		auto BackgroundFragment = m_Runtime.CreateShader(BackgroundFragmentDescription, *BackgroundFragmentBytecode);
+		if (!BackgroundFragment)
+			return std::unexpected(MakeResourceError("Could not create environment background fragment shader: " + BackgroundFragment.error().Message));
+		m_BackgroundFragmentShader = std::move(*BackgroundFragment);
+
 		SamplerDesc SamplerDescription;
 		SamplerDescription.Minification = SamplerFilter::Nearest;
 		SamplerDescription.Magnification = SamplerFilter::Nearest;
@@ -192,11 +250,79 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Could not create the scene sampler: " + Sampler.error().Message));
 		m_Sampler = std::move(Sampler.value());
 
+		SamplerDesc EnvironmentSamplerDescription;
+		EnvironmentSamplerDescription.Minification = SamplerFilter::Linear;
+		EnvironmentSamplerDescription.Magnification = SamplerFilter::Linear;
+		EnvironmentSamplerDescription.Mip = SamplerMipFilter::Linear;
+		EnvironmentSamplerDescription.AddressU = SamplerAddressMode::ClampToEdge;
+		EnvironmentSamplerDescription.AddressV = SamplerAddressMode::ClampToEdge;
+		EnvironmentSamplerDescription.DebugName = "PulseForge environment linear mip sampler";
+		auto EnvironmentSampler = m_Runtime.CreateSampler(EnvironmentSamplerDescription);
+		if (!EnvironmentSampler)
+			return std::unexpected(MakeResourceError("Could not create the environment sampler: " + EnvironmentSampler.error().Message));
+		m_EnvironmentSampler = std::move(EnvironmentSampler.value());
+
+		auto FallbackEnvironment = CreateBlackCube(m_Runtime, "PulseForge fallback environment cube");
+		auto FallbackIrradiance = CreateBlackCube(m_Runtime, "PulseForge fallback irradiance cube");
+		auto FallbackPrefiltered = CreateBlackCube(m_Runtime, "PulseForge fallback prefiltered cube");
+		if (!FallbackEnvironment || !FallbackIrradiance || !FallbackPrefiltered)
+			return std::unexpected(MakeResourceError("Could not create fallback environment cubemaps"));
+		m_FallbackEnvironmentTextures.Environment = std::move(*FallbackEnvironment);
+		m_FallbackEnvironmentTextures.DiffuseIrradiance = std::move(*FallbackIrradiance);
+		m_FallbackEnvironmentTextures.PrefilteredSpecular = std::move(*FallbackPrefiltered);
+		const std::array<float, 4> BrdfFallback{ 0.0f, 0.0f, 0.0f, 0.0f };
+		TextureDesc BrdfFallbackDescription;
+		BrdfFallbackDescription.Width = 1;
+		BrdfFallbackDescription.Height = 1;
+		BrdfFallbackDescription.Format = TextureFormat::RGBA32_Float;
+		BrdfFallbackDescription.DebugName = "PulseForge fallback BRDF LUT";
+		auto FallbackBrdf = m_Runtime.CreateTexture(BrdfFallbackDescription,
+			std::as_bytes(std::span<const float>(BrdfFallback)));
+		if (!FallbackBrdf)
+			return std::unexpected(MakeResourceError("Could not create fallback BRDF LUT: " + FallbackBrdf.error().Message));
+		m_FallbackEnvironmentTextures.BrdfIntegrationLut = std::move(*FallbackBrdf);
+
+		const std::array<uint8_t, 4> WhitePixel{ 255, 255, 255, 255 };
+		TextureDesc WhiteDescription;
+		WhiteDescription.Width = 1;
+		WhiteDescription.Height = 1;
+		WhiteDescription.Format = TextureFormat::RGBA8_Srgb;
+		WhiteDescription.DebugName = "PulseForge fallback white base-color texture";
+		auto WhiteTexture = m_Runtime.CreateTexture(WhiteDescription, std::as_bytes(std::span<const uint8_t>(WhitePixel)));
+		if (!WhiteTexture)
+			return std::unexpected(MakeResourceError("Could not create fallback base-color texture: " + WhiteTexture.error().Message));
+		m_FallbackBaseColorTexture = std::move(*WhiteTexture);
+		const MaterialConstants FallbackMaterial{ { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f, 0.0f, 0.0f } };
+		BufferDesc FallbackMaterialDescription;
+		FallbackMaterialDescription.ByteSize = sizeof(FallbackMaterial);
+		FallbackMaterialDescription.Usage = BufferUsage::Constant;
+		FallbackMaterialDescription.DebugName = "PulseForge fallback material constants";
+		auto FallbackMaterialBuffer = m_Runtime.CreateBuffer(
+			FallbackMaterialDescription, std::as_bytes(std::span(&FallbackMaterial, 1)));
+		if (!FallbackMaterialBuffer)
+			return std::unexpected(MakeResourceError("Could not create fallback material constants: " + FallbackMaterialBuffer.error().Message));
+		m_FallbackMaterialConstantsBuffer = std::move(*FallbackMaterialBuffer);
+		const std::array<float, 6> BackgroundVertices{ -1.0f, -1.0f, 3.0f, -1.0f, -1.0f, 3.0f };
+		BufferDesc BackgroundBufferDescription;
+		BackgroundBufferDescription.ByteSize = sizeof(BackgroundVertices);
+		BackgroundBufferDescription.Usage = BufferUsage::Vertex;
+		BackgroundBufferDescription.DebugName = "PulseForge environment background triangle";
+		auto BackgroundBuffer = m_Runtime.CreateBuffer(
+			BackgroundBufferDescription, std::as_bytes(std::span<const float>(BackgroundVertices)));
+		if (!BackgroundBuffer)
+			return std::unexpected(MakeResourceError("Could not create environment background geometry: " + BackgroundBuffer.error().Message));
+		m_BackgroundTriangleBuffer = std::move(*BackgroundBuffer);
+
 		BindingLayoutDesc BindingLayoutDescription;
 		BindingLayoutDescription.Visibility = ShaderVisibility::AllGraphics;
 		BindingLayoutDescription.Items = {
 			{ BindingResourceType::Texture2D, 0 },
+			{ BindingResourceType::TextureCube, 1 },
+			{ BindingResourceType::TextureCube, 2 },
+			{ BindingResourceType::TextureCube, 4 },
+			{ BindingResourceType::Texture2D, 3 },
 			{ BindingResourceType::Sampler, 0 },
+			{ BindingResourceType::Sampler, 1 },
 			{ BindingResourceType::ConstantBuffer, 0 },
 			{ BindingResourceType::ConstantBuffer, 1 },
 			{ BindingResourceType::ConstantBuffer, 2 }
@@ -229,9 +355,13 @@ namespace PulseForge
 		return {};
 	}
 
-	std::expected<void, SceneRendererError> SceneRenderer::EnsureMaterialBindings(const AssetID& MaterialAsset)
+	std::expected<void, SceneRendererError> SceneRenderer::EnsureMaterialBindings(
+		const AssetID& MaterialAsset,
+		const std::optional<AssetID>& EnvironmentAsset,
+		const EnvironmentLightingTextures& EnvironmentTextures)
 	{
-		if (m_MaterialBindings.contains(MaterialAsset))
+		const std::string Key = MakeMaterialBindingKey(MaterialAsset, EnvironmentAsset);
+		if (m_MaterialBindings.contains(Key))
 			return {};
 
 		auto Material = m_MaterialAssetCache->GetOrLoad(MaterialAsset);
@@ -272,7 +402,12 @@ namespace PulseForge
 		BindingSetDesc BindingSetDescription;
 		BindingSetDescription.Layout = m_BindingLayout;
 		BindingSetDescription.Textures.push_back({ 0, std::cref(Texture->get()) });
+		BindingSetDescription.Textures.push_back({ 1, std::cref(*EnvironmentTextures.DiffuseIrradiance), BindingResourceType::TextureCube });
+		BindingSetDescription.Textures.push_back({ 2, std::cref(*EnvironmentTextures.PrefilteredSpecular), BindingResourceType::TextureCube });
+		BindingSetDescription.Textures.push_back({ 3, std::cref(*EnvironmentTextures.BrdfIntegrationLut) });
+		BindingSetDescription.Textures.push_back({ 4, std::cref(*EnvironmentTextures.Environment), BindingResourceType::TextureCube });
 		BindingSetDescription.Samplers.push_back({ 0, std::cref(*m_Sampler) });
+		BindingSetDescription.Samplers.push_back({ 1, std::cref(*m_EnvironmentSampler) });
 		BindingSetDescription.Buffers.push_back({ 0, std::cref(*MaterialBuffer.value()) });
 		BindingSetDescription.Buffers.push_back({ 1, std::cref(*m_ObjectConstantsBuffer) });
 		BindingSetDescription.Buffers.push_back({ 2, std::cref(*m_FrameConstantsBuffer) });
@@ -283,7 +418,39 @@ namespace PulseForge
 		MaterialBindingResources Resources;
 		Resources.MaterialConstantsBuffer = std::move(MaterialBuffer.value());
 		Resources.BindingSet = std::move(BindingSet.value());
-		m_MaterialBindings.emplace(MaterialAsset, std::move(Resources));
+		m_MaterialBindings.emplace(Key, std::move(Resources));
+		return {};
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::EnsureEnvironmentBindings(
+		const AssetID& EnvironmentAsset,
+		const EnvironmentLightingTextures& EnvironmentTextures)
+	{
+		const std::string Key = EnvironmentAsset.ToString();
+		if (m_EnvironmentBindingSets.contains(Key))
+			return {};
+		BindingSetDesc Description;
+		Description.Layout = m_BindingLayout;
+		Description.Textures = {
+			{ 0, std::cref(*m_FallbackBaseColorTexture) },
+			{ 1, std::cref(*EnvironmentTextures.DiffuseIrradiance), BindingResourceType::TextureCube },
+			{ 2, std::cref(*EnvironmentTextures.PrefilteredSpecular), BindingResourceType::TextureCube },
+			{ 3, std::cref(*EnvironmentTextures.BrdfIntegrationLut) },
+			{ 4, std::cref(*EnvironmentTextures.Environment), BindingResourceType::TextureCube }
+		};
+		Description.Samplers = {
+			{ 0, std::cref(*m_Sampler) },
+			{ 1, std::cref(*m_EnvironmentSampler) }
+		};
+		Description.Buffers = {
+			{ 0, std::cref(*m_FallbackMaterialConstantsBuffer) },
+			{ 1, std::cref(*m_ObjectConstantsBuffer) },
+			{ 2, std::cref(*m_FrameConstantsBuffer) }
+		};
+		auto BindingSet = m_Runtime.CreateBindingSet(Description);
+		if (!BindingSet)
+			return std::unexpected(MakeResourceError("Could not create environment binding set: " + BindingSet.error().Message));
+		m_EnvironmentBindingSets.emplace(Key, std::move(*BindingSet));
 		return {};
 	}
 
@@ -323,6 +490,24 @@ namespace PulseForge
 				Snapshot.error().Message
 			});
 		}
+		const std::optional<AssetID> EnvironmentAsset = Snapshot->EnvironmentLight
+			? std::optional<AssetID>{ Snapshot->EnvironmentLight->HdrImage }
+			: std::nullopt;
+		const EnvironmentLightingTextures* EnvironmentTextures = &m_FallbackEnvironmentTextures;
+		if (EnvironmentAsset)
+		{
+			auto LoadedEnvironment = m_EnvironmentLightingCache->GetOrLoad(*EnvironmentAsset);
+			if (!LoadedEnvironment)
+				return std::unexpected(SceneRendererError{
+					SceneRendererErrorCode::AssetLoadFailed,
+					Snapshot->EnvironmentLight->Entity,
+					*EnvironmentAsset,
+					"Could not prepare HDR environment: " + LoadedEnvironment.error().Message
+				});
+			EnvironmentTextures = &LoadedEnvironment->get();
+			if (auto Bindings = EnsureEnvironmentBindings(*EnvironmentAsset, *EnvironmentTextures); !Bindings)
+				return std::unexpected(std::move(Bindings.error()));
+		}
 
 		std::optional<VertexLayoutDesc> SceneVertexLayout;
 		for (const SceneMeshInstance& Instance : Snapshot->Meshes)
@@ -359,7 +544,7 @@ namespace PulseForge
 					"Visible mesh entity has no material asset assigned"
 				});
 			}
-			if (auto Bindings = EnsureMaterialBindings(*Instance.MaterialAsset); !Bindings)
+			if (auto Bindings = EnsureMaterialBindings(*Instance.MaterialAsset, EnvironmentAsset, *EnvironmentTextures); !Bindings)
 			{
 				Bindings.error().Entity = Instance.Entity;
 				return std::unexpected(std::move(Bindings.error()));
@@ -384,6 +569,7 @@ namespace PulseForge
 		}
 
 		m_PreparedSnapshot = std::move(*Snapshot);
+		m_PreparedEnvironmentTextures = EnvironmentTextures;
 		return {};
 	}
 
@@ -416,6 +602,27 @@ namespace PulseForge
 		return {};
 	}
 
+	std::expected<void, SceneRendererError> SceneRenderer::EnsureBackgroundPipeline(ColorTargetFormat ColorFormat)
+	{
+		if (m_BackgroundPipelines.contains(ColorFormat))
+			return {};
+		GraphicsPipelineDesc Description;
+		Description.VertexShader = m_BackgroundVertexShader;
+		Description.FragmentShader = m_BackgroundFragmentShader;
+		Description.BindingLayouts = { m_BindingLayout };
+		Description.VertexLayout.Stride = sizeof(float) * 2;
+		Description.VertexLayout.Attributes = { { VertexSemantic::Position, VertexFormat::Float2, 0 } };
+		Description.ColorFormat = ColorFormat;
+		Description.Depth.TestEnabled = false;
+		Description.Depth.WriteEnabled = false;
+		Description.DebugName = "PulseForge environment background pipeline";
+		auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
+		if (!Pipeline)
+			return std::unexpected(MakeResourceError("Could not create environment background pipeline: " + Pipeline.error().Message));
+		m_BackgroundPipelines.emplace(ColorFormat, std::move(*Pipeline));
+		return {};
+	}
+
 	std::expected<size_t, SceneRendererError> SceneRenderer::RenderPreparedScene()
 	{
 		return RenderPreparedSceneForFormat(ColorTargetFormat::Swapchain);
@@ -426,6 +633,11 @@ namespace PulseForge
 		const RenderTargetClearValue& ClearValue)
 	{
 		const ColorTargetFormat ColorFormat = Target.GetDescription().ColorFormat;
+		if (m_PreparedSnapshot && m_PreparedSnapshot->EnvironmentLight)
+		{
+			if (auto Pipeline = EnsureBackgroundPipeline(ColorFormat); !Pipeline)
+				return std::unexpected(std::move(Pipeline.error()));
+		}
 		if (m_PreparedSnapshot && !m_PreparedSnapshot->Meshes.empty())
 		{
 			if (auto Pipeline = EnsurePipeline(ColorFormat); !Pipeline)
@@ -453,17 +665,39 @@ namespace PulseForge
 
 	std::expected<size_t, SceneRendererError> SceneRenderer::RenderPreparedSceneForFormat(ColorTargetFormat ColorFormat)
 	{
-		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty())
+		if (!m_PreparedSnapshot || (m_PreparedSnapshot->Meshes.empty() && !m_PreparedSnapshot->EnvironmentLight))
 			return size_t{ 0 };
-		if (auto Pipeline = EnsurePipeline(ColorFormat); !Pipeline)
-			return std::unexpected(std::move(Pipeline.error()));
-		const GraphicsPipeline& ScenePipeline = *m_Pipelines.at(ColorFormat);
+		if (m_PreparedSnapshot->EnvironmentLight)
+			if (auto Pipeline = EnsureBackgroundPipeline(ColorFormat); !Pipeline)
+				return std::unexpected(std::move(Pipeline.error()));
+		if (!m_PreparedSnapshot->Meshes.empty())
+			if (auto Pipeline = EnsurePipeline(ColorFormat); !Pipeline)
+				return std::unexpected(std::move(Pipeline.error()));
+		const GraphicsPipeline* ScenePipeline = m_PreparedSnapshot->Meshes.empty() ? nullptr : m_Pipelines.at(ColorFormat).get();
 
 		size_t SubmittedDraws = 0;
 		FrameConstants Frame{};
 		Frame.CameraWorldPosition[0] = m_PreparedSnapshot->CameraWorldPosition.x;
 		Frame.CameraWorldPosition[1] = m_PreparedSnapshot->CameraWorldPosition.y;
 		Frame.CameraWorldPosition[2] = m_PreparedSnapshot->CameraWorldPosition.z;
+		Frame.InverseViewProjection = glm::inverse(m_PreparedSnapshot->ViewProjection);
+		if (m_PreparedSnapshot->EnvironmentLight && !IsFinite(Frame.InverseViewProjection))
+			return std::unexpected(MakeDrawError("Environment background requires an invertible view-projection matrix"));
+		if (m_PreparedSnapshot->EnvironmentLight)
+		{
+			const SceneEnvironmentLight& Environment = *m_PreparedSnapshot->EnvironmentLight;
+			const glm::quat InverseRotation{
+				Environment.WorldRotation.w,
+				-Environment.WorldRotation.x,
+				-Environment.WorldRotation.y,
+				-Environment.WorldRotation.z };
+			Frame.EnvironmentInverseRotation[0] = InverseRotation.x;
+			Frame.EnvironmentInverseRotation[1] = InverseRotation.y;
+			Frame.EnvironmentInverseRotation[2] = InverseRotation.z;
+			Frame.EnvironmentInverseRotation[3] = InverseRotation.w;
+			Frame.EnvironmentParameters[0] = Environment.Intensity;
+			Frame.EnvironmentParameters[1] = static_cast<float>(m_PreparedEnvironmentTextures->PrefilteredSpecular->GetDescription().MipLevels - 1);
+		}
 		if (m_PreparedSnapshot->DirectionalLight)
 		{
 			const SceneDirectionalLight& Light = *m_PreparedSnapshot->DirectionalLight;
@@ -479,6 +713,22 @@ namespace PulseForge
 		if (!FrameUpdate)
 			return std::unexpected(MakeDrawError("Could not update scene frame constants: " + FrameUpdate.error().Message));
 
+		if (m_PreparedSnapshot->EnvironmentLight)
+		{
+			const std::string EnvironmentKey = m_PreparedSnapshot->EnvironmentLight->HdrImage.ToString();
+			const auto BackgroundBindings = m_EnvironmentBindingSets.find(EnvironmentKey);
+			if (BackgroundBindings == m_EnvironmentBindingSets.end())
+				return std::unexpected(MakeDrawError("Prepared environment background bindings are unavailable"));
+			const std::array<const BindingSet*, 1> BindingSets = { BackgroundBindings->second.get() };
+			const DrawArguments BackgroundArguments{ 3, 1, 0, 0 };
+			const GraphicsResult BackgroundDraw = m_Runtime.Draw(
+				*m_BackgroundPipelines.at(ColorFormat), *m_BackgroundTriangleBuffer, BackgroundArguments, BindingSets);
+			if (!BackgroundDraw)
+				return std::unexpected(MakeDrawError("Could not draw environment background: " + BackgroundDraw.error().Message));
+		}
+		if (!ScenePipeline)
+			return size_t{ 0 };
+
 		for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
 		{
 			auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
@@ -491,7 +741,10 @@ namespace PulseForge
 					Mesh ? "Prepared mesh instance lost its material assignment" : "Prepared mesh resource is unavailable"
 				});
 			}
-			const auto Binding = m_MaterialBindings.find(*Instance.MaterialAsset);
+			const std::optional<AssetID> EnvironmentAsset = m_PreparedSnapshot->EnvironmentLight
+				? std::optional<AssetID>{ m_PreparedSnapshot->EnvironmentLight->HdrImage }
+				: std::nullopt;
+			const auto Binding = m_MaterialBindings.find(MakeMaterialBindingKey(*Instance.MaterialAsset, EnvironmentAsset));
 			if (Binding == m_MaterialBindings.end())
 			{
 				return std::unexpected(SceneRendererError{
@@ -529,7 +782,7 @@ namespace PulseForge
 
 			const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
 			const std::array<const BindingSet*, 1> BindingSets = { Binding->second.BindingSet.get() };
-			const GraphicsResult Draw = m_Runtime.DrawIndexed(ScenePipeline, Mesh->get(), Arguments, BindingSets);
+			const GraphicsResult Draw = m_Runtime.DrawIndexed(*ScenePipeline, Mesh->get(), Arguments, BindingSets);
 			if (!Draw)
 			{
 				return std::unexpected(SceneRendererError{

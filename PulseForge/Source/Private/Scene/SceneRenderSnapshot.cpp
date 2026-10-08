@@ -48,6 +48,30 @@ namespace PulseForge
 			return { Code, Entity, std::move(Message) };
 		}
 
+		std::optional<glm::quat> GetWorldRotation(const Entity& Current, size_t Depth = 0)
+		{
+			if (Depth > 1024)
+				return std::nullopt;
+			const auto Transform = Current.GetTransform();
+			const auto Parent = Current.GetParent();
+			if (!Transform || !Parent)
+				return std::nullopt;
+			const glm::quat Local = Transform->Rotation;
+			const float Length = glm::length(Local);
+			if (!std::isfinite(Length) || Length <= 1.0e-6f)
+				return std::nullopt;
+			if (!Parent->has_value())
+				return glm::normalize(Local);
+			const auto ParentRotation = GetWorldRotation(**Parent, Depth + 1);
+			if (!ParentRotation)
+				return std::nullopt;
+			const glm::quat Result = *ParentRotation * glm::normalize(Local);
+			const float ResultLength = glm::length(Result);
+			if (!std::isfinite(ResultLength) || ResultLength <= 1.0e-6f)
+				return std::nullopt;
+			return glm::normalize(Result);
+		}
+
 		std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> BuildGeometrySnapshot(
 			const Scene& Source,
 			const glm::mat4& ViewProjection,
@@ -85,6 +109,27 @@ namespace PulseForge
 							Current.GetUUID(), Validation.error()));
 					Snapshot.DirectionalLight = SceneDirectionalLight{
 						Current.GetUUID(), RayDirection / DirectionLength, Light.Color, Light.Intensity };
+				}
+
+				const auto EnvironmentLight = Current.GetEnvironmentLight();
+				if (!EnvironmentLight)
+					return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::SceneOperationFailed,
+						Current.GetUUID(), EnvironmentLight.error().Message));
+				if (EnvironmentLight->has_value())
+				{
+					if (Snapshot.EnvironmentLight)
+						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::MultipleEnvironmentLights,
+							Current.GetUUID(), "The environment-light renderer currently supports one environment per scene"));
+					const auto Rotation = GetWorldRotation(Current);
+					if (!Rotation)
+						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidEnvironmentTransform,
+							Current.GetUUID(), "Environment world rotation must be finite and non-zero"));
+					const auto& Environment = EnvironmentLight->value();
+					if (auto Validation = Environment.Validate(); !Validation)
+						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::SceneOperationFailed,
+							Current.GetUUID(), Validation.error()));
+					Snapshot.EnvironmentLight = SceneEnvironmentLight{
+						Current.GetUUID(), Environment.HdrImage, Environment.Intensity, *Rotation };
 				}
 
 				const auto MeshRenderer = Current.GetMeshRenderer();

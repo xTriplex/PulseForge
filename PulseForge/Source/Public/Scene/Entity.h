@@ -2,6 +2,7 @@
 
 #include "Scene/Components/CameraComponent.h"
 #include "Scene/Components/DirectionalLightComponent.h"
+#include "Scene/Components/EnvironmentLightComponent.h"
 #include "Scene/Components/AudioListenerComponent.h"
 #include "Scene/Components/AudioSourceComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
@@ -47,6 +48,9 @@ namespace PulseForge
 		[[nodiscard]] std::expected<std::optional<DirectionalLightComponent>, SceneError> GetDirectionalLight() const;
 		[[nodiscard]] std::expected<void, SceneError> SetDirectionalLight(const DirectionalLightComponent& Light) const;
 		[[nodiscard]] std::expected<void, SceneError> RemoveDirectionalLight() const;
+		[[nodiscard]] std::expected<std::optional<EnvironmentLightComponent>, SceneError> GetEnvironmentLight() const;
+		[[nodiscard]] std::expected<void, SceneError> SetEnvironmentLight(const EnvironmentLightComponent& Environment) const;
+		[[nodiscard]] std::expected<void, SceneError> RemoveEnvironmentLight() const;
 		[[nodiscard]] std::expected<std::optional<MeshRendererComponent>, SceneError> GetMeshRenderer() const;
 		[[nodiscard]] std::expected<void, SceneError> SetMeshRenderer(const MeshRendererComponent& MeshRenderer) const;
 		[[nodiscard]] std::expected<void, SceneError> RemoveMeshRenderer() const;

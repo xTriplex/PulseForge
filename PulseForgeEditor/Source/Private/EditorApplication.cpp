@@ -3502,13 +3502,14 @@ namespace
 			{
 				const auto Camera = Entity.GetCamera();
 				const auto DirectionalLight = Entity.GetDirectionalLight();
+				const auto EnvironmentLight = Entity.GetEnvironmentLight();
 				const auto Mesh = Entity.GetMeshRenderer();
 				const auto Rigidbody = Entity.GetRigidbody();
 				const auto Collider = Entity.GetBoxCollider();
 				const auto AudioSource = Entity.GetAudioSource();
 				const auto AudioListener = Entity.GetAudioListener();
 				const auto Script = Entity.GetScript();
-				if (!Camera || !DirectionalLight || !Mesh || !Rigidbody || !Collider || !AudioSource || !AudioListener || !Script)
+				if (!Camera || !DirectionalLight || !EnvironmentLight || !Mesh || !Rigidbody || !Collider || !AudioSource || !AudioListener || !Script)
 					SetError("Could not inspect entity components.");
 
 				if (Camera && !Camera->has_value() &&
@@ -3522,6 +3523,27 @@ namespace
 					m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::DirectionalLight, "Directional Light"))
 					RecordComponentOperation(Entity.SetDirectionalLight(PulseForge::DirectionalLightComponent{}),
 						"Directional light component add failed");
+				if (EnvironmentLight && !EnvironmentLight->has_value() && ImGui::BeginMenu("Environment Light"))
+				{
+					bool HasHdrImages = false;
+					for (const PulseForge::AssetRecord& Asset : m_Assets)
+					{
+						if (!IsAssetExtension(Asset, { ".hdr" }))
+							continue;
+						HasHdrImages = true;
+						const std::string Path = PathToUtf8(Asset.ProjectRelativePath);
+						if (ImGui::MenuItem(Path.c_str()))
+						{
+							PulseForge::EnvironmentLightComponent Component;
+							Component.HdrImage = Asset.ID;
+							RecordComponentOperation(Entity.SetEnvironmentLight(Component), "Environment light add failed");
+							break;
+						}
+					}
+					if (!HasHdrImages)
+						ImGui::MenuItem("Import a Radiance HDR image first", nullptr, false, false);
+					ImGui::EndMenu();
+				}
 				if (Rigidbody && !Rigidbody->has_value() && ImGui::MenuItem("Rigidbody"))
 					RecordComponentOperation(Entity.SetRigidbody(PulseForge::RigidbodyComponent{}), "Rigidbody component add failed");
 				if (Collider && !Collider->has_value() && ImGui::MenuItem("Box Collider"))
@@ -3602,12 +3624,48 @@ namespace
 		{
 			DrawCameraComponent(Entity);
 			DrawDirectionalLightComponent(Entity);
+			DrawEnvironmentLightComponent(Entity);
 			DrawMeshRendererComponent(Entity);
 			DrawRigidbodyComponent(Entity);
 			DrawBoxColliderComponent(Entity);
 			DrawAudioSourceComponent(Entity);
 			DrawAudioListenerComponent(Entity);
 			DrawScriptComponent(Entity);
+		}
+
+		void DrawEnvironmentLightComponent(const PulseForge::Entity& Entity)
+		{
+			const auto Result = Entity.GetEnvironmentLight();
+			if (!Result || !Result->has_value())
+				return;
+			PulseForge::EnvironmentLightComponent Component = **Result;
+			const bool Expanded = m_EditorStyle.SectionHeader(PulseForgeEditor::EditorIcon::Environment, "Environment Light");
+			ImGui::SameLine();
+			ImGui::SetCursorPosX((std::max)(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 31.0f));
+			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveEnvironmentLight",
+				"Remove Environment Light component", true))
+			{
+				RecordComponentOperation(Entity.RemoveEnvironmentLight(), "Environment light removal failed");
+				return;
+			}
+			if (!Expanded)
+				return;
+			m_EditorStyle.BeginComponentBody("EnvironmentLightComponentBody");
+			bool Changed = false;
+			std::optional<PulseForge::AssetID> HdrImage{ Component.HdrImage };
+			if (m_EditorStyle.BeginPropertyTable("EnvironmentLightProperties"))
+			{
+				if (m_EditorStyle.BeginPropertyRow("HDR Image"))
+					Changed |= DrawAssetSelector("##EnvironmentHDR", HdrImage, { ".hdr" }, false);
+				if (m_EditorStyle.BeginPropertyRow("Intensity"))
+					Changed |= ImGui::DragFloat("##EnvironmentIntensity", &Component.Intensity, 0.05f, 0.0f, 100000.0f, "%.3f");
+				m_EditorStyle.EndPropertyTable();
+			}
+			if (HdrImage)
+				Component.HdrImage = *HdrImage;
+			if (Changed)
+				RecordComponentOperation(Entity.SetEnvironmentLight(Component), "Environment light update failed");
+			m_EditorStyle.EndComponentBody();
 		}
 
 		void DrawDirectionalLightComponent(const PulseForge::Entity& Entity)

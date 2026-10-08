@@ -3,6 +3,7 @@
 #include "Core/Core.h"
 #include "Renderer/Graphics.h"
 #include "Renderer/Binding.h"
+#include "Renderer/EnvironmentLightingCache.h"
 #include "Renderer/RenderTarget.h"
 #include "Scene/SceneRenderSnapshot.h"
 
@@ -77,8 +78,15 @@ namespace PulseForge
 		SceneRenderer(Application& Runtime, const Project& SourceProject);
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
 			const std::filesystem::path& CompiledShaderDirectory);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureMaterialBindings(const AssetID& MaterialAsset);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureMaterialBindings(
+			const AssetID& MaterialAsset,
+			const std::optional<AssetID>& EnvironmentAsset,
+			const EnvironmentLightingTextures& EnvironmentTextures);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePipeline(ColorTargetFormat ColorFormat);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBackgroundPipeline(ColorTargetFormat ColorFormat);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureEnvironmentBindings(
+			const AssetID& EnvironmentAsset,
+			const EnvironmentLightingTextures& EnvironmentTextures);
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedSceneForFormat(ColorTargetFormat ColorFormat);
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareSnapshot(
 			std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot);
@@ -109,23 +117,37 @@ namespace PulseForge
 			float CameraWorldPosition[4]{};
 			float LightRayDirection[4]{ 0.0f, 0.0f, -1.0f, 0.0f };
 			float LightColorIntensity[4]{};
+			float EnvironmentInverseRotation[4]{ 0.0f, 0.0f, 0.0f, 1.0f };
+			float EnvironmentParameters[4]{};
+			glm::mat4 InverseViewProjection{ 1.0f };
 		};
-		static_assert(sizeof(FrameConstants) == 48);
+		static_assert(sizeof(FrameConstants) == 144);
 
 		Application& m_Runtime;
 		const Project& m_Project;
 		std::unique_ptr<MeshAssetCache> m_MeshAssetCache;
 		std::unique_ptr<TextureAssetCache> m_TextureAssetCache;
 		std::unique_ptr<MaterialAssetCache> m_MaterialAssetCache;
+		std::unique_ptr<EnvironmentLightingCache> m_EnvironmentLightingCache;
 		ShaderHandle m_VertexShader;
 		ShaderHandle m_FragmentShader;
+		ShaderHandle m_BackgroundVertexShader;
+		ShaderHandle m_BackgroundFragmentShader;
 		SamplerHandle m_Sampler;
+		SamplerHandle m_EnvironmentSampler;
 		BindingLayoutHandle m_BindingLayout;
 		BufferHandle m_ObjectConstantsBuffer;
 		BufferHandle m_FrameConstantsBuffer;
-		std::unordered_map<AssetID, MaterialBindingResources, UUIDHash> m_MaterialBindings;
+		BufferHandle m_BackgroundTriangleBuffer;
+		BufferHandle m_FallbackMaterialConstantsBuffer;
+		TextureHandle m_FallbackBaseColorTexture;
+		EnvironmentLightingTextures m_FallbackEnvironmentTextures;
+		std::unordered_map<std::string, MaterialBindingResources> m_MaterialBindings;
+		std::unordered_map<std::string, BindingSetHandle> m_EnvironmentBindingSets;
 		std::unordered_map<ColorTargetFormat, GraphicsPipelineHandle> m_Pipelines;
+		std::unordered_map<ColorTargetFormat, GraphicsPipelineHandle> m_BackgroundPipelines;
 		std::optional<VertexLayoutDesc> m_PipelineVertexLayout;
 		std::optional<SceneRenderSnapshot> m_PreparedSnapshot;
+		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;
 	};
 }

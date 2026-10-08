@@ -1250,6 +1250,7 @@ namespace
 		const AssetID FirstMeshAssetID{ 0x5000000000000000ull, 5 };
 		const AssetID SecondMeshAssetID{ 0x6000000000000000ull, 6 };
 		const AssetID MaterialAssetID{ 0x6100000000000000ull, 61 };
+		const AssetID EnvironmentAssetID{ 0x6200000000000000ull, 62 };
 		auto Camera = TestScene.CreateEntityWithUUID(CameraID, "Camera");
 		auto Parent = TestScene.CreateEntityWithUUID(ParentID, "Parent");
 		auto FirstMesh = TestScene.CreateEntityWithUUID(FirstMeshID, "First mesh");
@@ -1292,6 +1293,7 @@ namespace
 		TransformComponent SecondMeshTransform;
 		SecondMeshTransform.Translation = { 0.0f, -1.0f, -4.0f };
 		PF_CHECK(Tests, Parent->SetTransform(ParentTransform).has_value());
+		PF_CHECK(Tests, Light->SetEnvironmentLight(EnvironmentLightComponent{ EnvironmentAssetID, 1.5f }).has_value());
 		PF_CHECK(Tests, FirstMesh->SetTransform(FirstMeshTransform).has_value());
 		PF_CHECK(Tests, SharedMesh->SetTransform(SharedMeshTransform).has_value());
 		PF_CHECK(Tests, SecondMesh->SetTransform(SecondMeshTransform).has_value());
@@ -1309,6 +1311,11 @@ namespace
 		PF_CHECK(Tests, Snapshot->DirectionalLight && Snapshot->DirectionalLight->Entity == LightID);
 		PF_CHECK(Tests, Snapshot->DirectionalLight && glm::abs(Snapshot->DirectionalLight->RayDirection.x + 1.0f) < 0.0001f);
 		PF_CHECK(Tests, Snapshot->DirectionalLight && Snapshot->DirectionalLight->Intensity == 2.0f);
+		PF_CHECK(Tests, Snapshot->EnvironmentLight && Snapshot->EnvironmentLight->Entity == LightID);
+		PF_CHECK(Tests, Snapshot->EnvironmentLight && Snapshot->EnvironmentLight->HdrImage == EnvironmentAssetID);
+		PF_CHECK(Tests, Snapshot->EnvironmentLight && Snapshot->EnvironmentLight->Intensity == 1.5f);
+		PF_CHECK(Tests, Snapshot->EnvironmentLight && glm::abs((glm::mat3(
+			Snapshot->EnvironmentLight->WorldRotation) * glm::vec3(0.0f, 0.0f, -1.0f)).x + 1.0f) < 0.0001f);
 		PF_CHECK(Tests, Snapshot->Meshes.size() == 3);
 		PF_CHECK(Tests, Snapshot->Meshes[0].Entity == FirstMeshID);
 		PF_CHECK(Tests, Snapshot->Meshes[1].Entity == SharedMeshID);
@@ -1344,6 +1351,16 @@ namespace
 			const auto MultipleLights = SceneRenderSnapshotBuilder::Build(TestScene, CameraID, 16.0f / 9.0f);
 			PF_CHECK(Tests, !MultipleLights && MultipleLights.error().Code == SceneRenderSnapshotErrorCode::MultipleDirectionalLights);
 			(void)TestScene.DestroyEntity(*SecondLight);
+		}
+		auto SecondEnvironment = TestScene.CreateEntity("Second environment");
+		PF_CHECK(Tests, SecondEnvironment.has_value());
+		if (SecondEnvironment)
+		{
+			PF_CHECK(Tests, SecondEnvironment->SetEnvironmentLight(EnvironmentLightComponent{ EnvironmentAssetID, 0.5f }).has_value());
+			const auto MultipleEnvironments = SceneRenderSnapshotBuilder::Build(TestScene, CameraID, 16.0f / 9.0f);
+			PF_CHECK(Tests, !MultipleEnvironments &&
+				MultipleEnvironments.error().Code == SceneRenderSnapshotErrorCode::MultipleEnvironmentLights);
+			(void)TestScene.DestroyEntity(*SecondEnvironment);
 		}
 		TransformComponent SingularMeshTransform;
 		SingularMeshTransform.Scale.x = 0.0f;
@@ -1984,6 +2001,16 @@ namespace
 		DirectionalLightComponent SourceLight{ glm::vec3(0.75f, 0.8f, 1.0f), 3.0f };
 		PF_CHECK(Tests, SourceLight.Validate().has_value());
 		PF_CHECK(Tests, Child.SetDirectionalLight(SourceLight).has_value());
+		const EnvironmentLightComponent SourceEnvironment{ AssetID{ 0x7400000000000000ull, 74 }, 1.25f };
+		PF_CHECK(Tests, SourceEnvironment.Validate().has_value());
+		const EnvironmentLightComponent MissingEnvironmentAsset{ AssetID{}, 1.0f };
+		const EnvironmentLightComponent NegativeEnvironmentIntensity{ SourceEnvironment.HdrImage, -1.0f };
+		const EnvironmentLightComponent InfiniteEnvironmentIntensity{
+			SourceEnvironment.HdrImage, std::numeric_limits<float>::infinity() };
+		PF_CHECK(Tests, !MissingEnvironmentAsset.Validate().has_value());
+		PF_CHECK(Tests, !NegativeEnvironmentIntensity.Validate().has_value());
+		PF_CHECK(Tests, !InfiniteEnvironmentIntensity.Validate().has_value());
+		PF_CHECK(Tests, Child.SetEnvironmentLight(SourceEnvironment).has_value());
 		PF_CHECK(Tests, Child.SetMeshRenderer(MeshRendererComponent{ MeshAssetIdentifier, MaterialAssetIdentifier }).has_value());
 		PF_CHECK(Tests, !Child.SetMeshRenderer(MeshRendererComponent{ MeshAssetIdentifier, AssetID{} }).has_value());
 		const AudioSourceComponent SourceAudio{ AudioAssetIdentifier, 0.35f, true, false, true };
@@ -2007,6 +2034,7 @@ namespace
 		PF_CHECK(Tests, Serialized->find("\"version\": 7") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"primary\": true") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"directionalLight\"") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"environmentLight\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"meshAsset\": \"" + MeshAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"materialAsset\": \"" + MaterialAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"asset\": \"" + AudioAssetIdentifier.ToString() + "\"") != std::string::npos);
@@ -2041,6 +2069,7 @@ namespace
 		const auto LoadedTransform = LoadedChild->GetTransform();
 		const auto LoadedCamera = LoadedChild->GetCamera();
 		const auto LoadedLight = LoadedChild->GetDirectionalLight();
+		const auto LoadedEnvironment = LoadedChild->GetEnvironmentLight();
 		const auto LoadedMeshRenderer = LoadedChild->GetMeshRenderer();
 		const auto LoadedAudioSource = LoadedChild->GetAudioSource();
 		const auto LoadedAudioListener = LoadedRoot->GetAudioListener();
@@ -2057,6 +2086,9 @@ namespace
 		PF_CHECK(Tests, LoadedLight && LoadedLight->has_value() &&
 			LoadedLight->value().Intensity == SourceLight.Intensity &&
 			glm::all(glm::equal(LoadedLight->value().Color, SourceLight.Color)));
+		PF_CHECK(Tests, LoadedEnvironment && LoadedEnvironment->has_value() &&
+			LoadedEnvironment->value().HdrImage == SourceEnvironment.HdrImage &&
+			LoadedEnvironment->value().Intensity == SourceEnvironment.Intensity);
 		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
 			LoadedMeshRenderer->value().MeshAsset == MeshAssetIdentifier);
 		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
@@ -3488,8 +3520,9 @@ namespace
 		const auto WrongTypeMetadata = CreateManagedAsset("Assets/Misc/not-an-asset.txt", "other data");
 		const auto ScriptMetadata = CreateManagedAsset("Assets/Scripts/controller.lua", "return {}\n");
 		const auto AudioMetadata = CreateManagedAsset("Assets/Audio/sound.WAV", "audio data");
-		PF_CHECK(Tests, MeshMetadata && MaterialMetadata && WrongTypeMetadata && ScriptMetadata && AudioMetadata);
-		if (!MeshMetadata || !MaterialMetadata || !WrongTypeMetadata || !ScriptMetadata || !AudioMetadata)
+		const auto HdrMetadata = CreateManagedAsset("Assets/Environments/studio.hdr", "hdr data");
+		PF_CHECK(Tests, MeshMetadata && MaterialMetadata && WrongTypeMetadata && ScriptMetadata && AudioMetadata && HdrMetadata);
+		if (!MeshMetadata || !MaterialMetadata || !WrongTypeMetadata || !ScriptMetadata || !AudioMetadata || !HdrMetadata)
 			return;
 
 		Scene TestScene;
@@ -3503,11 +3536,15 @@ namespace
 		const auto WrongMaterialType = TestScene.CreateEntity("Wrong material type");
 		const auto ValidMeshAndMaterial = TestScene.CreateEntity("Valid mesh and material");
 		const auto MultipleReferences = TestScene.CreateEntity("Multiple references");
+		const auto ValidEnvironment = TestScene.CreateEntity("Valid environment");
+		const auto WrongEnvironment = TestScene.CreateEntity("Wrong environment");
 		const auto Unrelated = TestScene.CreateEntity("Unrelated");
 		PF_CHECK(Tests, ValidScriptOnly && MissingScriptOnly && WrongScriptOnly && ValidAudioOnly && MissingAudioOnly &&
-			WrongAudioOnly && WrongMeshType && WrongMaterialType && ValidMeshAndMaterial && MultipleReferences && Unrelated);
+			WrongAudioOnly && WrongMeshType && WrongMaterialType && ValidMeshAndMaterial && MultipleReferences &&
+			ValidEnvironment && WrongEnvironment && Unrelated);
 		if (!ValidScriptOnly || !MissingScriptOnly || !WrongScriptOnly || !ValidAudioOnly || !MissingAudioOnly ||
-			!WrongAudioOnly || !WrongMeshType || !WrongMaterialType || !ValidMeshAndMaterial || !MultipleReferences || !Unrelated)
+			!WrongAudioOnly || !WrongMeshType || !WrongMaterialType || !ValidMeshAndMaterial || !MultipleReferences ||
+			!ValidEnvironment || !WrongEnvironment || !Unrelated)
 			return;
 
 		PF_CHECK(Tests, ValidScriptOnly->SetScript(ScriptComponent{ ScriptMetadata->ID }).has_value());
@@ -3525,6 +3562,8 @@ namespace
 			MeshRendererComponent{ *MissingAssetIdentifier, *MissingAssetIdentifier }).has_value());
 		PF_CHECK(Tests, MultipleReferences->SetScript(ScriptComponent{ *MissingAssetIdentifier }).has_value());
 		PF_CHECK(Tests, MultipleReferences->SetAudioSource(AudioSourceComponent{ *MissingAssetIdentifier }).has_value());
+		PF_CHECK(Tests, ValidEnvironment->SetEnvironmentLight(EnvironmentLightComponent{ HdrMetadata->ID, 0.8f }).has_value());
+		PF_CHECK(Tests, WrongEnvironment->SetEnvironmentLight(EnvironmentLightComponent{ WrongTypeMetadata->ID, 1.0f }).has_value());
 
 		const auto HasIssue = [](const std::vector<AssetReferenceIssue>& Issues,
 			const Entity& Owner,
@@ -3540,7 +3579,7 @@ namespace
 
 		AssetRegistry EmptyRegistry;
 		const auto AllMissing = AssetReferenceValidator::Validate(TestScene, EmptyRegistry);
-		PF_CHECK(Tests, AllMissing && AllMissing->size() == 15);
+		PF_CHECK(Tests, AllMissing && AllMissing->size() == 17);
 		PF_CHECK(Tests, AllMissing && HasIssue(*AllMissing, *ValidScriptOnly, AssetReferenceKind::Script,
 			AssetReferenceIssueCode::MissingAsset, ScriptMetadata->ID));
 		PF_CHECK(Tests, AllMissing && HasIssue(*AllMissing, *ValidAudioOnly, AssetReferenceKind::Audio,
@@ -3549,7 +3588,7 @@ namespace
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
 		const auto Validation = AssetReferenceValidator::Validate(TestScene, Registry);
-		PF_CHECK(Tests, Validation && Validation->size() == 10);
+		PF_CHECK(Tests, Validation && Validation->size() == 11);
 		if (!Validation)
 			return;
 
@@ -3561,6 +3600,10 @@ namespace
 			AssetReferenceIssueCode::MissingAsset, *MissingAssetIdentifier));
 		PF_CHECK(Tests, HasIssue(*Validation, *WrongAudioOnly, AssetReferenceKind::Audio,
 			AssetReferenceIssueCode::WrongAssetType, WrongTypeMetadata->ID));
+		PF_CHECK(Tests, HasIssue(*Validation, *WrongEnvironment, AssetReferenceKind::Environment,
+			AssetReferenceIssueCode::WrongAssetType, WrongTypeMetadata->ID));
+		PF_CHECK(Tests, !HasIssue(*Validation, *ValidEnvironment, AssetReferenceKind::Environment,
+			AssetReferenceIssueCode::WrongAssetType, HdrMetadata->ID));
 		PF_CHECK(Tests, HasIssue(*Validation, *WrongMeshType, AssetReferenceKind::Mesh,
 			AssetReferenceIssueCode::WrongAssetType, WrongTypeMetadata->ID));
 		PF_CHECK(Tests, HasIssue(*Validation, *WrongMaterialType, AssetReferenceKind::Material,
@@ -5064,6 +5107,8 @@ end
 		PF_CHECK(Tests, Root->SetCamera(RootCamera).has_value());
 		const DirectionalLightComponent PrefabLight{ glm::vec3(0.8f, 0.9f, 1.0f), 1.75f };
 		PF_CHECK(Tests, Root->SetDirectionalLight(PrefabLight).has_value());
+		const EnvironmentLightComponent PrefabEnvironment{ AssetID{ 0x7200000000000000ull, 7 }, 0.65f };
+		PF_CHECK(Tests, Root->SetEnvironmentLight(PrefabEnvironment).has_value());
 		const AssetID MeshAssetID{ 0x7300000000000000ull, 7 };
 		const AssetID MaterialAssetID{ 0x7400000000000000ull, 7 };
 		const AssetID AudioAssetID{ 0x7500000000000000ull, 7 };
@@ -5087,6 +5132,7 @@ end
 		PF_CHECK(Tests, PrefabData->find("\"primary\": false") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"primary\": true") == std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"directionalLight\"") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"environmentLight\"") != std::string::npos);
 		const auto SourceCamera = Root->GetCamera();
 		const auto SourceListener = Root->GetAudioListener();
 		PF_CHECK(Tests, SourceCamera && SourceCamera->has_value() && SourceCamera->value().IsPrimary);
@@ -5159,12 +5205,16 @@ end
 		PF_CHECK(Tests, FirstParent && !FirstParent->has_value());
 		const auto FirstCamera = FirstInstance->GetCamera();
 		const auto FirstLight = FirstInstance->GetDirectionalLight();
+		const auto FirstEnvironment = FirstInstance->GetEnvironmentLight();
 		const auto FirstAudioListener = FirstInstance->GetAudioListener();
 		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() &&
 			FirstCamera->value().VerticalFieldOfViewRadians == RootCamera.VerticalFieldOfViewRadians);
 		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() && !FirstCamera->value().IsPrimary);
 		PF_CHECK(Tests, FirstLight && FirstLight->has_value() &&
 			FirstLight->value().Intensity == PrefabLight.Intensity);
+		PF_CHECK(Tests, FirstEnvironment && FirstEnvironment->has_value() &&
+			FirstEnvironment->value().HdrImage == PrefabEnvironment.HdrImage &&
+			FirstEnvironment->value().Intensity == PrefabEnvironment.Intensity);
 		PF_CHECK(Tests, FirstAudioListener && FirstAudioListener->has_value() && !FirstAudioListener->value().IsPrimary);
 		const auto FirstChildren = FirstInstance->GetChildren();
 		PF_CHECK(Tests, FirstChildren && FirstChildren->size() == 1);

@@ -63,6 +63,20 @@
         "intensity": 3.0
       },
       "parent": null
+    },
+    {
+      "uuid": "e7d2b1d8-9c88-40da-8ce5-67eced630001",
+      "tag": { "name": "Studio Environment" },
+      "transform": {
+        "translation": [0.0, 0.0, 0.0],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "environmentLight": {
+        "hdrImage": "f274c7b4-1801-4fac-82ab-9e6fcf270001",
+        "intensity": 0.35
+      },
+      "parent": null
     }
   ]
 }

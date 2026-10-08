@@ -1221,7 +1221,9 @@ namespace PulseForge
 					Texture->GetNativeTexture(),
 					nvrhi::Format::UNKNOWN,
 					nvrhi::AllSubresources,
-					nvrhi::TextureDimension::Texture2D));
+					Item.Type == BindingResourceType::TextureCube
+						? nvrhi::TextureDimension::TextureCube
+						: nvrhi::TextureDimension::Texture2D));
 			}
 
 			for (const SamplerBindingDesc& Item : Description.Samplers)

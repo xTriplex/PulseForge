@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 namespace PulseForge
 {
@@ -33,6 +34,15 @@ namespace PulseForge
 		float Intensity = 1.0f;
 	};
 
+	struct SceneEnvironmentLight
+	{
+		UUID Entity;
+		AssetID HdrImage;
+		float Intensity = 1.0f;
+		// Rotation composition is parent-world * local; shaders rotate world sample vectors by the inverse.
+		glm::quat WorldRotation{ 1.0f, 0.0f, 0.0f, 0.0f };
+	};
+
 	struct SceneRenderSnapshot
 	{
 		// Empty when the view is transient editor state rather than an authored scene camera.
@@ -40,6 +50,7 @@ namespace PulseForge
 		glm::mat4 ViewProjection{ 1.0f };
 		glm::vec3 CameraWorldPosition{ 0.0f };
 		std::optional<SceneDirectionalLight> DirectionalLight;
+		std::optional<SceneEnvironmentLight> EnvironmentLight;
 		// Scene::GetEntities returns UUID-sorted entities, so snapshot order is deterministic.
 		std::vector<SceneMeshInstance> Meshes;
 	};
@@ -54,6 +65,8 @@ namespace PulseForge
 		InvalidMeshTransform,
 		InvalidDirectionalLightTransform,
 		MultipleDirectionalLights,
+		InvalidEnvironmentTransform,
+		MultipleEnvironmentLights,
 		MissingPrimaryCamera,
 		MultiplePrimaryCameras,
 		SceneOperationFailed

@@ -4,6 +4,7 @@
 #include "Scene/Components/AudioSourceComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
 #include "Scene/Components/DirectionalLightComponent.h"
+#include "Scene/Components/EnvironmentLightComponent.h"
 #include "Scene/Components/ScriptComponent.h"
 
 #include <entt/entt.hpp>
@@ -36,6 +37,15 @@ namespace PulseForge::Detail
 
 namespace PulseForge
 {
+	std::expected<void, std::string> EnvironmentLightComponent::Validate() const
+	{
+		if (HdrImage.IsNil())
+			return std::unexpected("Environment light requires a non-nil managed HDR image asset UUID");
+		if (!std::isfinite(Intensity) || Intensity < 0.0f)
+			return std::unexpected("Environment intensity must be finite and non-negative");
+		return {};
+	}
+
 	std::expected<void, std::string> DirectionalLightComponent::Validate() const
 	{
 		if (!std::isfinite(Color.r) || !std::isfinite(Color.g) || !std::isfinite(Color.b) ||
@@ -226,13 +236,14 @@ namespace PulseForge
 		const auto Transform = Source.GetTransform();
 		const auto Camera = Source.GetCamera();
 		const auto DirectionalLight = Source.GetDirectionalLight();
+		const auto EnvironmentLight = Source.GetEnvironmentLight();
 		const auto MeshRenderer = Source.GetMeshRenderer();
 		const auto Rigidbody = Source.GetRigidbody();
 		const auto BoxCollider = Source.GetBoxCollider();
 		const auto AudioSource = Source.GetAudioSource();
 		const auto AudioListener = Source.GetAudioListener();
 		const auto Script = Source.GetScript();
-		if (!Tag || !Transform || !Camera || !DirectionalLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
+		if (!Tag || !Transform || !Camera || !DirectionalLight || !EnvironmentLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
 			!AudioSource || !AudioListener || !Script)
 			return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure, "Could not read source entity components for duplication"));
 
@@ -261,6 +272,14 @@ namespace PulseForge
 			{
 				(void)DestroyEntity(*Duplicated);
 				return std::unexpected(LightResult.error());
+			}
+		}
+		if (EnvironmentLight->has_value())
+		{
+			if (auto EnvironmentResult = Duplicated->SetEnvironmentLight(EnvironmentLight->value()); !EnvironmentResult)
+			{
+				(void)DestroyEntity(*Duplicated);
+				return std::unexpected(EnvironmentResult.error());
 			}
 		}
 		if (MeshRenderer->has_value())
@@ -568,6 +587,54 @@ namespace PulseForge
 			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent,
 				"Entity does not have a directional light component"));
 		Storage->Registry.remove<DirectionalLightComponent>(*Native);
+		return {};
+	}
+
+	std::expected<std::optional<EnvironmentLightComponent>, SceneError> Entity::GetEnvironmentLight() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity,
+				"Cannot read the environment light of an invalid entity"));
+		if (!Storage->Registry.all_of<EnvironmentLightComponent>(*Native))
+			return std::optional<EnvironmentLightComponent>{};
+		return std::optional<EnvironmentLightComponent>{ Storage->Registry.get<EnvironmentLightComponent>(*Native) };
+	}
+
+	std::expected<void, SceneError> Entity::SetEnvironmentLight(const EnvironmentLightComponent& Environment) const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity,
+				"Cannot add an environment light to an invalid entity"));
+		if (auto Validation = Environment.Validate(); !Validation)
+			return std::unexpected(SceneError{ SceneErrorCode::InvalidEnvironmentLight, Validation.error() });
+		try
+		{
+			Storage->Registry.emplace_or_replace<EnvironmentLightComponent>(*Native, Environment);
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{
+				SceneErrorCode::StorageFailure,
+				std::string("Could not set environment light component: ") + Exception.what() });
+		}
+	}
+
+	std::expected<void, SceneError> Entity::RemoveEnvironmentLight() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity,
+				"Cannot remove an environment light from an invalid entity"));
+		if (!Storage->Registry.all_of<EnvironmentLightComponent>(*Native))
+			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent,
+				"Entity does not have an environment light component"));
+		Storage->Registry.remove<EnvironmentLightComponent>(*Native);
 		return {};
 	}
 

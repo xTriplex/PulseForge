@@ -20,6 +20,7 @@ namespace PulseForge
 		MissingComponent,
 		InvalidCamera,
 		InvalidDirectionalLight,
+		InvalidEnvironmentLight,
 		InvalidAssetReference,
 		InvalidPhysicsComponent,
 		InvalidAudioComponent,
