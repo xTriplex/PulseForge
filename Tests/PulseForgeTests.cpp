@@ -1626,6 +1626,18 @@ namespace
 		PF_CHECK(Tests, !IsManagedAssetInFolder("Assets/ModelsExtra/Cube.glb", "Assets/Models"));
 		PF_CHECK(Tests, !IsManagedAssetInFolder("Outside/Cube.glb", "Assets"));
 		PF_CHECK(Tests, !IsManagedAssetInFolder("Assets/../Outside/Cube.glb", "Assets"));
+		PF_CHECK(Tests, IsImmediateChildFolder("Assets/Models", "Assets"));
+		PF_CHECK(Tests, IsImmediateChildFolder("Assets/Models/Props", "Assets/Models"));
+		PF_CHECK(Tests, !IsImmediateChildFolder("Assets/Models/Props", "Assets"));
+		PF_CHECK(Tests, !IsImmediateChildFolder("Assets/ModelsExtra", "Assets/Models"));
+		PF_CHECK(Tests, !IsImmediateChildFolder("Assets/../Outside", "Assets"));
+		PF_CHECK(Tests, IsManagedAssetInFolderSubtree("Assets/Models/Cube.glb", "Assets"));
+		PF_CHECK(Tests, IsManagedAssetInFolderSubtree("Assets/Models/Cube.glb", "Assets/Models"));
+		PF_CHECK(Tests, !IsManagedAssetInFolderSubtree("Assets/ModelsExtra/Cube.glb", "Assets/Models"));
+		PF_CHECK(Tests, MatchesManagedAssetFolderSearch("Assets/Models/Cube.glb", "Assets", "cube"));
+		PF_CHECK(Tests, MatchesManagedAssetFolderSearch("Assets/Models/Cube.glb", "Assets", "models/cube"));
+		PF_CHECK(Tests, !MatchesManagedAssetFolderSearch("Assets/Models/Cube.glb", "Assets/Materials", "cube"));
+		PF_CHECK(Tests, !MatchesManagedAssetFolderSearch("Assets/Models/Cube.glb", "Assets", "missing"));
 
 		PF_CHECK(Tests, GetAssetBrowserIcon("Assets/Scenes/Main.scene") == EditorIcon::Scene);
 		PF_CHECK(Tests, GetAssetBrowserIcon("Assets/Models/Cube.GLB") == EditorIcon::Cube);
@@ -1638,6 +1650,20 @@ namespace
 		PF_CHECK(Tests, IsFolderAncestorOrSelf("Assets/Models/Props", "Assets/Models"));
 		PF_CHECK(Tests, IsFolderAncestorOrSelf("Assets/Models", "Assets/Models"));
 		PF_CHECK(Tests, !IsFolderAncestorOrSelf("Assets/ModelsExtra", "Assets/Models"));
+
+		const auto FrontFacingAxes = ProjectViewportOrientationAxes({ 0.0f, 0.0f, -1.0f });
+		PF_CHECK(Tests, FrontFacingAxes.has_value());
+		if (FrontFacingAxes)
+		{
+			PF_CHECK(Tests, glm::length((*FrontFacingAxes)[0].ScreenDirection - glm::vec2(1.0f, 0.0f)) < 1.0e-5f);
+			PF_CHECK(Tests, glm::length((*FrontFacingAxes)[1].ScreenDirection - glm::vec2(0.0f, -1.0f)) < 1.0e-5f);
+			PF_CHECK(Tests, std::abs((*FrontFacingAxes)[2].Depth + 1.0f) < 1.0e-5f);
+		}
+		const auto RotatedAxes = ProjectViewportOrientationAxes(glm::normalize(glm::vec3(1.0f, 1.0f, -1.0f)));
+		PF_CHECK(Tests, RotatedAxes.has_value());
+		if (RotatedAxes)
+			PF_CHECK(Tests, glm::length((*RotatedAxes)[2].ScreenDirection) > 0.1f);
+		PF_CHECK(Tests, !ProjectViewportOrientationAxes(glm::vec3(0.0f)));
 	}
 
 	void TestEditorImGuiRendererMath(TestRunner& Tests)
@@ -1726,9 +1752,9 @@ namespace
 		PF_CHECK(Tests, EditorFontDescriptors[0].RelativePath == "Fonts/Inter-Regular.ttf");
 		PF_CHECK(Tests, EditorFontDescriptors[1].RelativePath == "Fonts/Inter-SemiBold.ttf");
 		PF_CHECK(Tests, EditorFontDescriptors[2].RelativePath == "Fonts/JetBrainsMono-Regular.ttf");
-		PF_CHECK(Tests, EditorFontDescriptors[0].PixelSize == 15.0f);
-		PF_CHECK(Tests, EditorFontDescriptors[1].PixelSize == 15.0f);
-		PF_CHECK(Tests, EditorFontDescriptors[2].PixelSize >= 13.0f && EditorFontDescriptors[2].PixelSize <= 15.0f);
+		PF_CHECK(Tests, EditorFontDescriptors[0].PixelSize == 16.0f);
+		PF_CHECK(Tests, EditorFontDescriptors[1].PixelSize == 16.0f);
+		PF_CHECK(Tests, EditorFontDescriptors[2].PixelSize == 15.0f);
 		PF_CHECK(Tests, EditorIconFontPixelSize == EditorFontDescriptors[0].PixelSize);
 		PF_CHECK(Tests, IsValidEditorTextGlyphRanges());
 		PF_CHECK(Tests, EditorTextGlyphRanges.back() == 0);

@@ -51,6 +51,51 @@ namespace PulseForgeEditor
 		return NormalizedAsset.parent_path() == NormalizedFolder;
 	}
 
+	[[nodiscard]] inline bool IsManagedAssetInFolderSubtree(
+		const std::filesystem::path& AssetPath,
+		const std::filesystem::path& FolderPath)
+	{
+		const std::filesystem::path NormalizedAsset = AssetPath.lexically_normal();
+		const std::filesystem::path NormalizedFolder = FolderPath.lexically_normal();
+		auto Asset = NormalizedAsset.begin();
+		auto Folder = NormalizedFolder.begin();
+		if (Asset == NormalizedAsset.end() || *Asset != "Assets" ||
+			Folder == NormalizedFolder.end() || *Folder != "Assets")
+			return false;
+
+		for (; Folder != NormalizedFolder.end(); ++Asset, ++Folder)
+			if (Asset == NormalizedAsset.end() || *Asset != *Folder)
+				return false;
+
+		return Asset != NormalizedAsset.end() && NormalizedAsset.has_filename();
+	}
+
+	[[nodiscard]] inline bool IsImmediateChildFolder(
+		const std::filesystem::path& CandidateFolder,
+		const std::filesystem::path& ParentFolder)
+	{
+		const std::filesystem::path NormalizedCandidate = CandidateFolder.lexically_normal();
+		const std::filesystem::path NormalizedParent = ParentFolder.lexically_normal();
+		return NormalizedCandidate != NormalizedParent &&
+			IsManagedAssetInFolderSubtree(NormalizedCandidate / "__folder_marker__", NormalizedParent) &&
+			NormalizedCandidate.parent_path() == NormalizedParent;
+	}
+
+	[[nodiscard]] inline bool MatchesManagedAssetFolderSearch(
+		const std::filesystem::path& AssetPath,
+		const std::filesystem::path& FolderPath,
+		std::string_view Query)
+	{
+		if (Query.empty())
+			return IsManagedAssetInFolder(AssetPath, FolderPath);
+		if (!IsManagedAssetInFolderSubtree(AssetPath, FolderPath))
+			return false;
+
+		const std::string Path = AssetPath.lexically_normal().generic_string();
+		const std::string Filename = AssetPath.filename().string();
+		return ContainsCaseInsensitive(Filename, Query) || ContainsCaseInsensitive(Path, Query);
+	}
+
 	[[nodiscard]] constexpr bool IsFolderAncestorOrSelf(
 		std::string_view Candidate,
 		std::string_view Folder) noexcept

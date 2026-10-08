@@ -187,11 +187,11 @@ namespace PulseForgeEditor
 		return Length;
 	}
 
-	inline constexpr float EditorIconFontPixelSize = 15.0f;
+	inline constexpr float EditorIconFontPixelSize = 16.0f;
 	inline constexpr std::array<EditorFontDescriptor, 3> EditorFontDescriptors = {{
-		{ EditorFontRole::Interface, "Fonts/Inter-Regular.ttf", 15.0f },
-		{ EditorFontRole::Emphasis, "Fonts/Inter-SemiBold.ttf", 15.0f },
-		{ EditorFontRole::Monospace, "Fonts/JetBrainsMono-Regular.ttf", 14.0f }
+		{ EditorFontRole::Interface, "Fonts/Inter-Regular.ttf", 16.0f },
+		{ EditorFontRole::Emphasis, "Fonts/Inter-SemiBold.ttf", 16.0f },
+		{ EditorFontRole::Monospace, "Fonts/JetBrainsMono-Regular.ttf", 15.0f }
 	}};
 
 	// Loads editor fonts into the current ImGui atlas. The atlas owns the font data;
@@ -235,7 +235,8 @@ namespace PulseForgeEditor
 			std::string_view StableID,
 			std::string_view Tooltip,
 			bool Active,
-			bool Enabled = true) const;
+			bool Enabled = true,
+			float ButtonSize = 34.0f) const;
 		[[nodiscard]] bool AssetTile(
 			EditorIcon Icon,
 			std::string_view Label,
@@ -252,7 +253,9 @@ namespace PulseForgeEditor
 			std::string_view FallbackLabel,
 			std::string_view StableID,
 			std::string_view Tooltip,
-			bool Destructive = false) const;
+			bool Destructive = false,
+			float ButtonWidth = 32.0f,
+			float ButtonHeight = 30.0f) const;
 		[[nodiscard]] bool Selectable(
 			EditorIcon Icon,
 			std::string_view Label,
@@ -274,7 +277,7 @@ namespace PulseForgeEditor
 			float Speed,
 			const char* Format) const;
 		void EndPropertyTable() const;
-		void BeginComponentBody() const;
+		void BeginComponentBody(const char* ID) const;
 		void EndComponentBody() const;
 		void IconText(EditorIcon Icon, std::string_view Text) const;
 		void EmptyState(EditorIcon Icon, std::string_view Text) const;

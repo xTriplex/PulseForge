@@ -347,10 +347,10 @@ namespace PulseForgeEditor
 		m_OutputColorEncoding = Encoding;
 		m_ThemeApplied = true;
 		ImGuiStyle& Style = ImGui::GetStyle();
-		Style.WindowPadding = { 8.0f, 7.0f };
-		Style.FramePadding = { 6.0f, 4.0f };
-		Style.ItemSpacing = { 7.0f, 5.0f };
-		Style.ItemInnerSpacing = { 5.0f, 4.0f };
+		Style.WindowPadding = { 9.0f, 8.0f };
+		Style.FramePadding = { 7.0f, 5.0f };
+		Style.ItemSpacing = { 8.0f, 6.0f };
+		Style.ItemInnerSpacing = { 6.0f, 4.0f };
 		Style.IndentSpacing = 15.0f;
 		Style.ScrollbarSize = 12.0f;
 		Style.GrabMinSize = 10.0f;
@@ -519,7 +519,8 @@ namespace PulseForgeEditor
 		std::string_view StableID,
 		std::string_view Tooltip,
 		bool Active,
-		bool Enabled) const
+		bool Enabled,
+		float ButtonSize) const
 	{
 		const bool UseIcon = m_HasIcons && FindEditorIcon(Icon);
 		const auto Label = MakeLabel(UseIcon, Icon, UseIcon ? std::string_view{} : FallbackLabel, StableID);
@@ -533,7 +534,9 @@ namespace PulseForgeEditor
 		bool Pressed = false;
 		{
 			const ScopedFont FontScope(Active ? m_EmphasisFont : m_InterfaceFont);
-			Pressed = ImGui::Button(Label.data(), UseIcon ? ImVec2(34.0f, 30.0f) : ImVec2(0.0f, 30.0f));
+			Pressed = ImGui::Button(Label.data(), UseIcon
+				? ImVec2(ButtonSize, ButtonSize)
+				: ImVec2(0.0f, ButtonSize));
 		}
 		ImGui::EndDisabled();
 		if (ImGui::IsItemHovered() && !Tooltip.empty())
@@ -623,7 +626,9 @@ namespace PulseForgeEditor
 		std::string_view FallbackLabel,
 		std::string_view StableID,
 		std::string_view Tooltip,
-		bool Destructive) const
+		bool Destructive,
+		float ButtonWidth,
+		float ButtonHeight) const
 	{
 		const bool UseIcon = m_HasIcons && FindEditorIcon(Icon);
 		const auto Text = MakeLabel(UseIcon, Icon, UseIcon ? std::string_view{} : FallbackLabel, StableID);
@@ -637,7 +642,7 @@ namespace PulseForgeEditor
 			ImGui::PushStyleColor(ImGuiCol_ButtonActive, Active);
 		}
 		const bool Pressed = UseIcon
-			? ImGui::Button(Text.data(), ImVec2(28.0f, 24.0f))
+			? ImGui::Button(Text.data(), ImVec2(ButtonWidth, ButtonHeight))
 			: ImGui::Button(Text.data());
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("%.*s", static_cast<int>(Tooltip.size()), Tooltip.data());
@@ -759,23 +764,22 @@ namespace PulseForgeEditor
 		ImGui::PopStyleColor();
 	}
 
-	void EditorStyle::BeginComponentBody() const
+	void EditorStyle::BeginComponentBody(const char* ID) const
 	{
-		ImGui::BeginGroup();
-		ImGui::Indent(7.0f);
+		ImGui::PushStyleColor(ImGuiCol_ChildBg, GetColor(EditorColorToken::Panel));
+		ImGui::PushStyleColor(ImGuiCol_Border, GetColor(EditorColorToken::Border));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 2.0f);
+		(void)ImGui::BeginChild(ID, ImVec2(0.0f, 0.0f),
+			ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
+			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings);
 	}
 
 	void EditorStyle::EndComponentBody() const
 	{
-		ImGui::Unindent(7.0f);
-		ImGui::EndGroup();
-		const ImVec2 Minimum = ImGui::GetItemRectMin();
-		const ImVec2 Maximum = ImGui::GetItemRectMax();
-		ImGui::GetWindowDrawList()->AddRect(
-			ImVec2(Minimum.x - 5.0f, Minimum.y - 3.0f),
-			ImVec2(Maximum.x + 5.0f, Maximum.y + 3.0f),
-			ImGui::GetColorU32(GetColor(EditorColorToken::Border)),
-			2.0f);
+		ImGui::EndChild();
+		ImGui::PopStyleVar(2);
+		ImGui::PopStyleColor(2);
 		ImGui::Spacing();
 	}
 

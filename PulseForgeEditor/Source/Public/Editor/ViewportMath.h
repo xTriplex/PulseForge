@@ -49,6 +49,12 @@ namespace PulseForgeEditor
 		float WorldUnitsPerLocalUnit = 0.0f;
 	};
 
+	struct ViewportOrientationAxis
+	{
+		glm::vec2 ScreenDirection{ 0.0f };
+		float Depth = 0.0f;
+	};
+
 	enum class TransformGizmoOperation : uint8_t
 	{
 		Translate,
@@ -112,6 +118,40 @@ namespace PulseForgeEditor
 				? std::optional<float>{ Distance }
 				: std::nullopt;
 		}
+	}
+
+	[[nodiscard]] inline std::optional<std::array<ViewportOrientationAxis, 3>> ProjectViewportOrientationAxes(
+		const glm::vec3& CameraForward)
+	{
+		if (!Detail::IsFinite(CameraForward))
+			return std::nullopt;
+
+		const float ForwardLength = glm::length(CameraForward);
+		if (!std::isfinite(ForwardLength) || ForwardLength < 1.0e-6f)
+			return std::nullopt;
+		const glm::vec3 Forward = CameraForward / ForwardLength;
+		const glm::vec3 RightUnnormalized = glm::cross(Forward, glm::vec3(0.0f, 1.0f, 0.0f));
+		const float RightLength = glm::length(RightUnnormalized);
+		if (!std::isfinite(RightLength) || RightLength < 1.0e-6f)
+			return std::nullopt;
+		const glm::vec3 Right = RightUnnormalized / RightLength;
+		const glm::vec3 Up = glm::normalize(glm::cross(Right, Forward));
+		constexpr std::array<glm::vec3, 3> WorldAxes = {
+			glm::vec3(1.0f, 0.0f, 0.0f),
+			glm::vec3(0.0f, 1.0f, 0.0f),
+			glm::vec3(0.0f, 0.0f, 1.0f)
+		};
+
+		std::array<ViewportOrientationAxis, 3> Result{};
+		for (size_t Index = 0; Index < WorldAxes.size(); ++Index)
+		{
+			Result[Index].ScreenDirection = {
+				glm::dot(WorldAxes[Index], Right),
+				-glm::dot(WorldAxes[Index], Up)
+			};
+			Result[Index].Depth = glm::dot(WorldAxes[Index], Forward);
+		}
+		return Result;
 	}
 
 	// NVRHI's Vulkan backend uses a negative-height viewport, so NDC +Y maps to the top of the image.
