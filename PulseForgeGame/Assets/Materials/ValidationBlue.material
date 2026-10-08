@@ -1,6 +1,8 @@
 {
   "format": "PulseForgeMaterial",
-  "version": 1,
+  "version": 2,
   "baseColorTexture": "4c9b0a26-5ca1-4d37-b451-f23231002f92",
-  "baseColorFactor": [0.55, 0.75, 1.0, 1.0]
+  "baseColorFactor": [0.55, 0.75, 1.0, 1.0],
+  "metallicFactor": 0.92,
+  "roughnessFactor": 0.24
 }

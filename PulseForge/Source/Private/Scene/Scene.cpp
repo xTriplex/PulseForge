@@ -3,6 +3,7 @@
 #include "Scene/Components/AudioListenerComponent.h"
 #include "Scene/Components/AudioSourceComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
+#include "Scene/Components/DirectionalLightComponent.h"
 #include "Scene/Components/ScriptComponent.h"
 
 #include <entt/entt.hpp>
@@ -31,6 +32,19 @@ namespace PulseForge::Detail
 		entt::registry Registry;
 		std::unordered_map<UUID, entt::entity, UUIDHash> Entities;
 	};
+}
+
+namespace PulseForge
+{
+	std::expected<void, std::string> DirectionalLightComponent::Validate() const
+	{
+		if (!std::isfinite(Color.r) || !std::isfinite(Color.g) || !std::isfinite(Color.b) ||
+			Color.r < 0.0f || Color.g < 0.0f || Color.b < 0.0f)
+			return std::unexpected("Directional-light color must contain finite non-negative linear RGB values");
+		if (!std::isfinite(Intensity) || Intensity < 0.0f)
+			return std::unexpected("Directional-light intensity must be finite and non-negative");
+		return {};
+	}
 }
 
 namespace PulseForge
@@ -211,13 +225,14 @@ namespace PulseForge
 		const auto Tag = Source.GetTag();
 		const auto Transform = Source.GetTransform();
 		const auto Camera = Source.GetCamera();
+		const auto DirectionalLight = Source.GetDirectionalLight();
 		const auto MeshRenderer = Source.GetMeshRenderer();
 		const auto Rigidbody = Source.GetRigidbody();
 		const auto BoxCollider = Source.GetBoxCollider();
 		const auto AudioSource = Source.GetAudioSource();
 		const auto AudioListener = Source.GetAudioListener();
 		const auto Script = Source.GetScript();
-		if (!Tag || !Transform || !Camera || !MeshRenderer || !Rigidbody || !BoxCollider ||
+		if (!Tag || !Transform || !Camera || !DirectionalLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
 			!AudioSource || !AudioListener || !Script)
 			return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure, "Could not read source entity components for duplication"));
 
@@ -238,6 +253,14 @@ namespace PulseForge
 			{
 				(void)DestroyEntity(*Duplicated);
 				return std::unexpected(CameraResult.error());
+			}
+		}
+		if (DirectionalLight->has_value())
+		{
+			if (auto LightResult = Duplicated->SetDirectionalLight(DirectionalLight->value()); !LightResult)
+			{
+				(void)DestroyEntity(*Duplicated);
+				return std::unexpected(LightResult.error());
 			}
 		}
 		if (MeshRenderer->has_value())
@@ -497,6 +520,54 @@ namespace PulseForge
 			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have a camera component"));
 
 		Storage->Registry.remove<CameraComponent>(*Native);
+		return {};
+	}
+
+	std::expected<std::optional<DirectionalLightComponent>, SceneError> Entity::GetDirectionalLight() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity,
+				"Cannot read the directional light of an invalid entity"));
+		if (!Storage->Registry.all_of<DirectionalLightComponent>(*Native))
+			return std::optional<DirectionalLightComponent>{};
+		return std::optional<DirectionalLightComponent>{ Storage->Registry.get<DirectionalLightComponent>(*Native) };
+	}
+
+	std::expected<void, SceneError> Entity::SetDirectionalLight(const DirectionalLightComponent& Light) const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity,
+				"Cannot add a directional light to an invalid entity"));
+		if (auto Validation = Light.Validate(); !Validation)
+			return std::unexpected(SceneError{ SceneErrorCode::InvalidDirectionalLight, Validation.error() });
+		try
+		{
+			Storage->Registry.emplace_or_replace<DirectionalLightComponent>(*Native, Light);
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{
+				SceneErrorCode::StorageFailure,
+				std::string("Could not set directional light component: ") + Exception.what() });
+		}
+	}
+
+	std::expected<void, SceneError> Entity::RemoveDirectionalLight() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity,
+				"Cannot remove a directional light from an invalid entity"));
+		if (!Storage->Registry.all_of<DirectionalLightComponent>(*Native))
+			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent,
+				"Entity does not have a directional light component"));
+		Storage->Registry.remove<DirectionalLightComponent>(*Native);
 		return {};
 	}
 

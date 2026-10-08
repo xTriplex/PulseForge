@@ -2602,7 +2602,8 @@ namespace
 			const auto Ray = PulseForgeEditor::MakeViewportRay(Mouse, m_ViewportImageRect, m_ViewportViewProjection);
 			if (!Ray)
 				return;
-			auto Snapshot = PulseForge::SceneRenderSnapshotBuilder::BuildForView(*m_Scene, m_ViewportViewProjection);
+			auto Snapshot = PulseForge::SceneRenderSnapshotBuilder::BuildForView(
+				*m_Scene, m_ViewportViewProjection, m_EditorCamera.GetPosition());
 			if (!Snapshot)
 			{
 				SetError("Viewport picking could not inspect the scene: " + Snapshot.error().Message);
@@ -2726,7 +2727,7 @@ namespace
 					return;
 				}
 				m_ViewportViewProjection = *ViewProjection;
-				Prepared = m_SceneRenderer->PrepareScene(ActiveScene, *ViewProjection);
+				Prepared = m_SceneRenderer->PrepareScene(ActiveScene, *ViewProjection, m_EditorCamera.GetPosition());
 			}
 			if (!Prepared)
 			{
@@ -3500,13 +3501,14 @@ namespace
 			if (ImGui::BeginPopup("Add Component"))
 			{
 				const auto Camera = Entity.GetCamera();
+				const auto DirectionalLight = Entity.GetDirectionalLight();
 				const auto Mesh = Entity.GetMeshRenderer();
 				const auto Rigidbody = Entity.GetRigidbody();
 				const auto Collider = Entity.GetBoxCollider();
 				const auto AudioSource = Entity.GetAudioSource();
 				const auto AudioListener = Entity.GetAudioListener();
 				const auto Script = Entity.GetScript();
-				if (!Camera || !Mesh || !Rigidbody || !Collider || !AudioSource || !AudioListener || !Script)
+				if (!Camera || !DirectionalLight || !Mesh || !Rigidbody || !Collider || !AudioSource || !AudioListener || !Script)
 					SetError("Could not inspect entity components.");
 
 				if (Camera && !Camera->has_value() &&
@@ -3516,6 +3518,10 @@ namespace
 					Component.IsPrimary = true;
 					SetCameraComponent(Entity, Component);
 				}
+				if (DirectionalLight && !DirectionalLight->has_value() &&
+					m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::DirectionalLight, "Directional Light"))
+					RecordComponentOperation(Entity.SetDirectionalLight(PulseForge::DirectionalLightComponent{}),
+						"Directional light component add failed");
 				if (Rigidbody && !Rigidbody->has_value() && ImGui::MenuItem("Rigidbody"))
 					RecordComponentOperation(Entity.SetRigidbody(PulseForge::RigidbodyComponent{}), "Rigidbody component add failed");
 				if (Collider && !Collider->has_value() && ImGui::MenuItem("Box Collider"))
@@ -3595,12 +3601,46 @@ namespace
 		void DrawExistingComponents(const PulseForge::Entity& Entity)
 		{
 			DrawCameraComponent(Entity);
+			DrawDirectionalLightComponent(Entity);
 			DrawMeshRendererComponent(Entity);
 			DrawRigidbodyComponent(Entity);
 			DrawBoxColliderComponent(Entity);
 			DrawAudioSourceComponent(Entity);
 			DrawAudioListenerComponent(Entity);
 			DrawScriptComponent(Entity);
+		}
+
+		void DrawDirectionalLightComponent(const PulseForge::Entity& Entity)
+		{
+			const auto Result = Entity.GetDirectionalLight();
+			if (!Result || !Result->has_value())
+				return;
+			PulseForge::DirectionalLightComponent Component = **Result;
+			const bool Expanded = m_EditorStyle.SectionHeader(
+				PulseForgeEditor::EditorIcon::DirectionalLight, "Directional Light");
+			ImGui::SameLine();
+			ImGui::SetCursorPosX((std::max)(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 31.0f));
+			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveDirectionalLight",
+				"Remove Directional Light component", true))
+			{
+				RecordComponentOperation(Entity.RemoveDirectionalLight(), "Directional light removal failed");
+				return;
+			}
+			if (!Expanded)
+				return;
+			m_EditorStyle.BeginComponentBody("DirectionalLightComponentBody");
+			bool Changed = false;
+			if (m_EditorStyle.BeginPropertyTable("DirectionalLightProperties"))
+			{
+				if (m_EditorStyle.BeginPropertyRow("Linear Color"))
+					Changed |= ImGui::DragFloat3("##DirectionalLightLinearColor", &Component.Color.x, 0.01f, 0.0f, 100000.0f, "%.3f");
+				if (m_EditorStyle.BeginPropertyRow("Intensity"))
+					Changed |= ImGui::DragFloat("##DirectionalLightIntensity", &Component.Intensity, 0.05f, 0.0f, 100000.0f, "%.3f");
+				m_EditorStyle.EndPropertyTable();
+			}
+			if (Changed)
+				RecordComponentOperation(Entity.SetDirectionalLight(Component), "Directional light update failed");
+			m_EditorStyle.EndComponentBody();
 		}
 
 		void DrawCameraComponent(const PulseForge::Entity& Entity)

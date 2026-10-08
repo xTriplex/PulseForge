@@ -17,6 +17,7 @@ namespace PulseForge
 		float Position[3]{};
 		float Color[3]{ 1.0f, 1.0f, 1.0f };
 		float TexCoord[2]{};
+		float Normal[3]{ 0.0f, 0.0f, 1.0f };
 	};
 
 	struct ImportedGltfMesh
@@ -53,8 +54,9 @@ namespace PulseForge
 	class PULSEFORGE_API GltfMeshImporter final
 	{
 	public:
-		// Imports one static triangle primitive by stable asset UUID. This first version accepts glTF 2.0 JSON/GLB,
-		// dense float POSITION/TEXCOORD_0/COLOR_0 accessors, and unsigned scalar indices; it does not import nodes/materials.
+		// Imports one static triangle primitive by stable asset UUID. Missing normals are generated smoothly across shared
+		// vertices; degenerate triangles add no contribution, and vertices without a valid contribution use +Z.
+		// This first version accepts glTF 2.0 JSON/GLB dense-float vertex attributes and unsigned scalar indices.
 		[[nodiscard]] static std::expected<ImportedGltfMesh, GltfMeshImportError> ImportStaticPrimitive(
 			const AssetID& Asset,
 			const std::filesystem::path& ProjectRoot,

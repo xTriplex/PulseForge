@@ -19,6 +19,7 @@ namespace PulseForge
 		StorageFailure,
 		MissingComponent,
 		InvalidCamera,
+		InvalidDirectionalLight,
 		InvalidAssetReference,
 		InvalidPhysicsComponent,
 		InvalidAudioComponent,

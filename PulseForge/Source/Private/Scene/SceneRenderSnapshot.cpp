@@ -7,6 +7,24 @@
 
 namespace PulseForge
 {
+	std::optional<glm::mat4> BuildNormalTransform(const glm::mat4& Model) noexcept
+	{
+		const glm::mat3 Linear(Model);
+		const float Determinant = glm::determinant(Linear);
+		if (!std::isfinite(Determinant) || std::abs(Determinant) <= 1.0e-8f)
+			return std::nullopt;
+		const glm::mat3 Normal = glm::transpose(glm::inverse(Linear));
+		glm::mat4 Result(1.0f);
+		for (int Column = 0; Column < 3; ++Column)
+			for (int Row = 0; Row < 3; ++Row)
+			{
+				if (!std::isfinite(Normal[Column][Row]))
+					return std::nullopt;
+				Result[Column][Row] = Normal[Column][Row];
+			}
+		return Result;
+	}
+
 	namespace
 	{
 		bool IsFinite(const glm::mat4& Matrix)
@@ -33,14 +51,42 @@ namespace PulseForge
 		std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> BuildGeometrySnapshot(
 			const Scene& Source,
 			const glm::mat4& ViewProjection,
+			const glm::vec3& CameraWorldPosition,
 			std::optional<UUID> CameraEntity)
 		{
 			SceneRenderSnapshot Snapshot;
 			Snapshot.CameraEntity = CameraEntity;
 			Snapshot.ViewProjection = ViewProjection;
+			Snapshot.CameraWorldPosition = CameraWorldPosition;
 
 			for (const Entity& Current : Source.GetEntities())
 			{
+				const auto DirectionalLight = Current.GetDirectionalLight();
+				if (!DirectionalLight)
+					return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::SceneOperationFailed,
+						Current.GetUUID(), DirectionalLight.error().Message));
+				if (DirectionalLight->has_value())
+				{
+					if (Snapshot.DirectionalLight)
+						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::MultipleDirectionalLights,
+							Current.GetUUID(), "The direct-light renderer currently supports one directional light per scene"));
+					const auto World = Current.GetWorldMatrix();
+					if (!World || !IsFinite(*World))
+						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidDirectionalLightTransform,
+							Current.GetUUID(), "Directional-light world transform must be finite"));
+					const glm::vec3 RayDirection = glm::mat3(*World) * glm::vec3(0.0f, 0.0f, -1.0f);
+					const float DirectionLength = glm::length(RayDirection);
+					if (!std::isfinite(DirectionLength) || DirectionLength <= 1.0e-6f)
+						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidDirectionalLightTransform,
+							Current.GetUUID(), "Directional-light transform produces a zero or non-finite direction"));
+					const auto& Light = DirectionalLight->value();
+					if (auto Validation = Light.Validate(); !Validation)
+						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::SceneOperationFailed,
+							Current.GetUUID(), Validation.error()));
+					Snapshot.DirectionalLight = SceneDirectionalLight{
+						Current.GetUUID(), RayDirection / DirectionLength, Light.Color, Light.Intensity };
+				}
+
 				const auto MeshRenderer = Current.GetMeshRenderer();
 				if (!MeshRenderer)
 				{
@@ -169,7 +215,7 @@ namespace PulseForge
 				CameraEntityIdentifier,
 				"The selected camera produces a non-finite view-projection matrix"));
 		}
-		return BuildGeometrySnapshot(Source, ViewProjection, CameraEntityIdentifier);
+		return BuildGeometrySnapshot(Source, ViewProjection, glm::vec3((*CameraWorld)[3]), CameraEntityIdentifier);
 	}
 
 	std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> SceneRenderSnapshotBuilder::Build(
@@ -210,15 +256,17 @@ namespace PulseForge
 
 	std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> SceneRenderSnapshotBuilder::BuildForView(
 		const Scene& Source,
-		const glm::mat4& ViewProjection)
+		const glm::mat4& ViewProjection,
+		const glm::vec3& CameraWorldPosition)
 	{
-		if (!IsFinite(ViewProjection))
+		if (!IsFinite(ViewProjection) || !std::isfinite(CameraWorldPosition.x) ||
+			!std::isfinite(CameraWorldPosition.y) || !std::isfinite(CameraWorldPosition.z))
 		{
 			return std::unexpected(MakeError(
 				SceneRenderSnapshotErrorCode::InvalidViewProjection,
 				{},
-				"The supplied transient view-projection matrix must contain only finite values"));
+				"The supplied transient view and camera position must contain only finite values"));
 		}
-		return BuildGeometrySnapshot(Source, ViewProjection, std::nullopt);
+		return BuildGeometrySnapshot(Source, ViewProjection, CameraWorldPosition, std::nullopt);
 	}
 }

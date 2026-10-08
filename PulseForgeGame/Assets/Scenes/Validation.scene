@@ -49,6 +49,20 @@
         "primary": true
       },
       "parent": null
+    },
+    {
+      "uuid": "d742716a-5ed3-48ec-8a91-617d742716a5",
+      "tag": { "name": "Directional Light" },
+      "transform": {
+        "translation": [0.0, 2.0, 3.0],
+        "rotation": [1.0, 0.0, 0.0, 0.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "directionalLight": {
+        "color": [1.0, 0.94, 0.82],
+        "intensity": 3.0
+      },
+      "parent": null
     }
   ]
 }

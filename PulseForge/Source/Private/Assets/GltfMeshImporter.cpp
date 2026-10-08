@@ -863,6 +863,57 @@ namespace PulseForge
 			return Accessor;
 		}
 
+		std::expected<void, GltfMeshImportError> GenerateVertexNormals(
+			std::vector<GltfMeshVertex>& Vertices,
+			std::span<const uint32_t> Indices,
+			const std::filesystem::path& Path)
+		{
+			std::vector<std::array<float, 3>> Accumulated(Vertices.size(), { 0.0f, 0.0f, 0.0f });
+			for (size_t Triangle = 0; Triangle < Indices.size(); Triangle += 3)
+			{
+				const GltfMeshVertex& A = Vertices[Indices[Triangle]];
+				const GltfMeshVertex& B = Vertices[Indices[Triangle + 1]];
+				const GltfMeshVertex& C = Vertices[Indices[Triangle + 2]];
+				const float AB[3]{ B.Position[0] - A.Position[0], B.Position[1] - A.Position[1], B.Position[2] - A.Position[2] };
+				const float AC[3]{ C.Position[0] - A.Position[0], C.Position[1] - A.Position[1], C.Position[2] - A.Position[2] };
+				const float Face[3]{
+					AB[1] * AC[2] - AB[2] * AC[1],
+					AB[2] * AC[0] - AB[0] * AC[2],
+					AB[0] * AC[1] - AB[1] * AC[0]
+				};
+				const float LengthSquared = Face[0] * Face[0] + Face[1] * Face[1] + Face[2] * Face[2];
+				if (!std::isfinite(LengthSquared))
+					return std::unexpected(MakeError(
+						GltfMeshImportErrorCode::InvalidMesh, Path, "Generated glTF vertex normal is not finite"));
+				if (LengthSquared <= 1.0e-20f)
+					continue;
+				for (const uint32_t Index : { Indices[Triangle], Indices[Triangle + 1], Indices[Triangle + 2] })
+					for (size_t Component = 0; Component < 3; ++Component)
+						Accumulated[Index][Component] += Face[Component];
+			}
+
+			for (size_t Vertex = 0; Vertex < Vertices.size(); ++Vertex)
+			{
+				auto& Normal = Vertices[Vertex].Normal;
+				const auto& Sum = Accumulated[Vertex];
+				const float LengthSquared = Sum[0] * Sum[0] + Sum[1] * Sum[1] + Sum[2] * Sum[2];
+				if (!std::isfinite(LengthSquared))
+					return std::unexpected(MakeError(
+						GltfMeshImportErrorCode::InvalidMesh, Path, "Accumulated glTF vertex normal is not finite"));
+				if (LengthSquared <= 1.0e-20f)
+				{
+					Normal[0] = 0.0f;
+					Normal[1] = 0.0f;
+					Normal[2] = 1.0f;
+					continue;
+				}
+				const float InverseLength = 1.0f / std::sqrt(LengthSquared);
+				for (size_t Component = 0; Component < 3; ++Component)
+					Normal[Component] = Sum[Component] * InverseLength;
+			}
+			return {};
+		}
+
 		bool HasExtension(const std::filesystem::path& Path, std::string_view Extension)
 		{
 			std::string Actual = PathToUtf8(Path.extension());
@@ -881,7 +932,8 @@ namespace PulseForge
 		Description.VertexLayout.Attributes = {
 			{ VertexSemantic::Position, VertexFormat::Float3, offsetof(GltfMeshVertex, Position) },
 			{ VertexSemantic::Color, VertexFormat::Float3, offsetof(GltfMeshVertex, Color) },
-			{ VertexSemantic::TexCoord, VertexFormat::Float2, offsetof(GltfMeshVertex, TexCoord) }
+			{ VertexSemantic::TexCoord, VertexFormat::Float2, offsetof(GltfMeshVertex, TexCoord) },
+			{ VertexSemantic::Normal, VertexFormat::Float3, offsetof(GltfMeshVertex, Normal) }
 		};
 		Description.VertexData = std::as_bytes(std::span(Vertices));
 		Description.Indices = Indices;
@@ -1148,6 +1200,36 @@ namespace PulseForge
 				}
 			}
 
+			const bool HasNormals = FindField(*Attributes, "NORMAL") != nullptr;
+			if (HasNormals)
+			{
+				constexpr std::array<size_t, 1> NormalCounts = { 3 };
+				auto Normals = ResolveFloatAttribute(
+					Document, *Buffers, *Attributes, "NORMAL", Positions->Count, NormalCounts, *Source);
+				if (!Normals)
+					return std::unexpected(std::move(Normals.error()));
+				for (size_t VertexIndex = 0; VertexIndex < Positions->Count; ++VertexIndex)
+				{
+					float LengthSquared = 0.0f;
+					for (size_t Component = 0; Component < 3; ++Component)
+					{
+						auto Value = ReadFloatComponent(*Normals, VertexIndex, Component, *Source);
+						if (!Value)
+							return std::unexpected(std::move(Value.error()));
+						Imported.Vertices[VertexIndex].Normal[Component] = *Value;
+						LengthSquared += *Value * *Value;
+					}
+					if (!std::isfinite(LengthSquared) || LengthSquared <= 1.0e-20f)
+						return std::unexpected(MakeError(
+							GltfMeshImportErrorCode::InvalidAccessor,
+							*Source,
+							"NORMAL values must be finite non-zero vectors"));
+					const float InverseLength = 1.0f / std::sqrt(LengthSquared);
+					for (float& Component : Imported.Vertices[VertexIndex].Normal)
+						Component *= InverseLength;
+				}
+			}
+
 			if (const Json* IndicesIndexValue = FindField(Primitive, "indices"); IndicesIndexValue != nullptr)
 			{
 				const auto IndicesIndex = ReadUnsignedInteger(IndicesIndexValue, *Source, "primitives.indices");
@@ -1211,6 +1293,11 @@ namespace PulseForge
 					GltfMeshImportErrorCode::InvalidMesh,
 					*Source,
 					"Triangle-list glTF geometry must contain a non-zero multiple of three indices"));
+			}
+			if (!HasNormals)
+			{
+				if (auto Generated = GenerateVertexNormals(Imported.Vertices, Imported.Indices, *Source); !Generated)
+					return std::unexpected(std::move(Generated.error()));
 			}
 			Imported.Name += " primitive " + std::to_string(PrimitiveIndex);
 			if (auto Validation = ValidateMeshDescription(Imported.GetMeshDescription()); !Validation)

@@ -17,6 +17,8 @@ namespace PulseForge
 	{
 		AssetID BaseColorTexture;
 		glm::vec4 BaseColorFactor{ 1.0f };
+		float MetallicFactor = 0.0f;
+		float RoughnessFactor = 1.0f;
 	};
 
 	enum class MaterialAssetErrorCode : uint8_t

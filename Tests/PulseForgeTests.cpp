@@ -565,6 +565,10 @@ namespace
 			{ VertexSemantic::Color, VertexFormat::Float3, sizeof(float) * 3 }
 		};
 		PF_CHECK(Tests, ValidateVertexLayout(Layout).has_value());
+		auto NormalLayout = Layout;
+		NormalLayout.Stride = sizeof(float) * 9;
+		NormalLayout.Attributes.push_back({ VertexSemantic::Normal, VertexFormat::Float3, sizeof(float) * 6 });
+		PF_CHECK(Tests, ValidateVertexLayout(NormalLayout).has_value());
 
 		auto ZeroStride = Layout;
 		ZeroStride.Stride = 0;
@@ -1238,6 +1242,7 @@ namespace
 		const UUID FirstMeshID{ 0x3000000000000000ull, 3 };
 		const UUID SharedMeshID{ 0x3800000000000000ull, 38 };
 		const UUID SecondMeshID{ 0x4000000000000000ull, 4 };
+		const UUID LightID{ 0x7000000000000000ull, 7 };
 		const AssetID FirstMeshAssetID{ 0x5000000000000000ull, 5 };
 		const AssetID SecondMeshAssetID{ 0x6000000000000000ull, 6 };
 		const AssetID MaterialAssetID{ 0x6100000000000000ull, 61 };
@@ -1246,8 +1251,9 @@ namespace
 		auto FirstMesh = TestScene.CreateEntityWithUUID(FirstMeshID, "First mesh");
 		auto SharedMesh = TestScene.CreateEntityWithUUID(SharedMeshID, "Shared mesh instance");
 		auto SecondMesh = TestScene.CreateEntityWithUUID(SecondMeshID, "Second mesh");
-		PF_CHECK(Tests, Camera && Parent && FirstMesh && SharedMesh && SecondMesh);
-		if (!Camera || !Parent || !FirstMesh || !SharedMesh || !SecondMesh)
+		auto Light = TestScene.CreateEntityWithUUID(LightID, "Sun");
+		PF_CHECK(Tests, Camera && Parent && FirstMesh && SharedMesh && SecondMesh && Light);
+		if (!Camera || !Parent || !FirstMesh || !SharedMesh || !SecondMesh || !Light)
 			return;
 
 		TransformComponent CameraTransform;
@@ -1256,6 +1262,22 @@ namespace
 		PrimaryCameraComponent.IsPrimary = true;
 		PF_CHECK(Tests, Camera->SetTransform(CameraTransform).has_value());
 		PF_CHECK(Tests, Camera->SetCamera(PrimaryCameraComponent).has_value());
+		TransformComponent LightTransform;
+		LightTransform.Rotation = glm::angleAxis(glm::half_pi<float>(), glm::vec3(0.0f, 1.0f, 0.0f));
+		PF_CHECK(Tests, Light->SetTransform(LightTransform).has_value());
+		PF_CHECK(Tests, Light->SetDirectionalLight(DirectionalLightComponent{ glm::vec3(0.5f, 0.6f, 0.7f), 2.0f }).has_value());
+		auto DuplicateLightEntity = TestScene.DuplicateEntity(*Light);
+		PF_CHECK(Tests, DuplicateLightEntity.has_value());
+		if (DuplicateLightEntity)
+		{
+			const auto CopiedLight = DuplicateLightEntity->GetDirectionalLight();
+			PF_CHECK(Tests, CopiedLight && CopiedLight->has_value() && CopiedLight->value().Intensity == 2.0f);
+			(void)TestScene.DestroyEntity(*DuplicateLightEntity);
+		}
+		DirectionalLightComponent InvalidLight;
+		InvalidLight.Intensity = -1.0f;
+		const auto InvalidLightSet = Light->SetDirectionalLight(InvalidLight);
+		PF_CHECK(Tests, !InvalidLightSet && InvalidLightSet.error().Code == SceneErrorCode::InvalidDirectionalLight);
 
 		TransformComponent ParentTransform;
 		ParentTransform.Translation = { 2.0f, 1.0f, 0.0f };
@@ -1279,6 +1301,10 @@ namespace
 		if (!Snapshot)
 			return;
 		PF_CHECK(Tests, Snapshot->CameraEntity == CameraID);
+		PF_CHECK(Tests, glm::all(glm::equal(Snapshot->CameraWorldPosition, glm::vec3(0.0f, 0.0f, 5.0f))));
+		PF_CHECK(Tests, Snapshot->DirectionalLight && Snapshot->DirectionalLight->Entity == LightID);
+		PF_CHECK(Tests, Snapshot->DirectionalLight && glm::abs(Snapshot->DirectionalLight->RayDirection.x + 1.0f) < 0.0001f);
+		PF_CHECK(Tests, Snapshot->DirectionalLight && Snapshot->DirectionalLight->Intensity == 2.0f);
 		PF_CHECK(Tests, Snapshot->Meshes.size() == 3);
 		PF_CHECK(Tests, Snapshot->Meshes[0].Entity == FirstMeshID);
 		PF_CHECK(Tests, Snapshot->Meshes[1].Entity == SharedMeshID);
@@ -1306,6 +1332,29 @@ namespace
 			const auto SnapshotAfterCameraDuplication = SceneRenderSnapshotBuilder::Build(TestScene, 16.0f / 9.0f);
 			PF_CHECK(Tests, SnapshotAfterCameraDuplication && SnapshotAfterCameraDuplication->CameraEntity == CameraID);
 		}
+		auto SecondLight = TestScene.CreateEntity("Second sun");
+		PF_CHECK(Tests, SecondLight.has_value());
+		if (SecondLight)
+		{
+			PF_CHECK(Tests, SecondLight->SetDirectionalLight(DirectionalLightComponent{}).has_value());
+			const auto MultipleLights = SceneRenderSnapshotBuilder::Build(TestScene, CameraID, 16.0f / 9.0f);
+			PF_CHECK(Tests, !MultipleLights && MultipleLights.error().Code == SceneRenderSnapshotErrorCode::MultipleDirectionalLights);
+			(void)TestScene.DestroyEntity(*SecondLight);
+		}
+		TransformComponent SingularMeshTransform;
+		SingularMeshTransform.Scale.x = 0.0f;
+		PF_CHECK(Tests, FirstMesh->SetTransform(SingularMeshTransform).has_value());
+		const auto SingularMeshWorld = FirstMesh->GetWorldMatrix();
+		PF_CHECK(Tests, SingularMeshWorld.has_value());
+		PF_CHECK(Tests, SingularMeshWorld && !BuildNormalTransform(*SingularMeshWorld));
+		PF_CHECK(Tests, FirstMesh->SetTransform(FirstMeshTransform).has_value());
+		const auto NonUniformNormal = BuildNormalTransform(glm::scale(glm::mat4(1.0f), glm::vec3(2.0f, 1.0f, 0.5f)));
+		PF_CHECK(Tests, NonUniformNormal.has_value());
+		if (NonUniformNormal)
+			PF_CHECK(Tests, glm::abs((*NonUniformNormal)[0][0] - 0.5f) < 1.0e-6f &&
+				glm::abs((*NonUniformNormal)[1][1] - 1.0f) < 1.0e-6f &&
+				glm::abs((*NonUniformNormal)[2][2] - 2.0f) < 1.0e-6f);
+		PF_CHECK(Tests, !BuildNormalTransform(glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, 0.0f, 1.0f))));
 
 		const auto NilCamera = SceneRenderSnapshotBuilder::Build(TestScene, UUID{}, 1.0f);
 		PF_CHECK(Tests, !NilCamera && NilCamera.error().Code == SceneRenderSnapshotErrorCode::InvalidCameraEntity);
@@ -1342,18 +1391,22 @@ namespace
 			PF_CHECK(Tests, CameraLessMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID }).has_value());
 
 		const glm::mat4 TransientViewProjection(1.0f);
-		const auto TransientView = SceneRenderSnapshotBuilder::BuildForView(CameraLessScene, TransientViewProjection);
+		const auto TransientView = SceneRenderSnapshotBuilder::BuildForView(
+			CameraLessScene, TransientViewProjection, glm::vec3(3.0f, 4.0f, 5.0f));
 		PF_CHECK(Tests, TransientView.has_value());
 		if (TransientView)
 		{
 			PF_CHECK(Tests, !TransientView->CameraEntity.has_value());
+			PF_CHECK(Tests, glm::all(glm::equal(TransientView->CameraWorldPosition, glm::vec3(3.0f, 4.0f, 5.0f))));
 			PF_CHECK(Tests, TransientView->Meshes.size() == 1);
+			PF_CHECK(Tests, !TransientView->DirectionalLight.has_value());
 			PF_CHECK(Tests, TransientView->ViewProjection[0][0] == 1.0f);
 		}
 
 		glm::mat4 InvalidTransientView(1.0f);
 		InvalidTransientView[2][1] = std::numeric_limits<float>::quiet_NaN();
-		const auto InvalidView = SceneRenderSnapshotBuilder::BuildForView(CameraLessScene, InvalidTransientView);
+		const auto InvalidView = SceneRenderSnapshotBuilder::BuildForView(
+			CameraLessScene, InvalidTransientView, glm::vec3(0.0f));
 		PF_CHECK(Tests, !InvalidView &&
 			InvalidView.error().Code == SceneRenderSnapshotErrorCode::InvalidViewProjection);
 	}
@@ -1694,6 +1747,7 @@ namespace
 		PF_CHECK(Tests, static_cast<uint8_t>(PulseForge::VertexSemantic::Position) == 0);
 		PF_CHECK(Tests, static_cast<uint8_t>(PulseForge::VertexSemantic::Color) == 1);
 		PF_CHECK(Tests, static_cast<uint8_t>(PulseForge::VertexSemantic::TexCoord) == 2);
+		PF_CHECK(Tests, static_cast<uint8_t>(PulseForge::VertexSemantic::Normal) == 3);
 
 		const auto ClippedToOldSwapchain = PulseForge::IntersectScissorRect({ 0, 0, 2560, 1361 }, 1280, 720);
 		PF_CHECK(Tests, ClippedToOldSwapchain && ClippedToOldSwapchain->X == 0 && ClippedToOldSwapchain->Y == 0 &&
@@ -1923,6 +1977,9 @@ namespace
 		const auto CameraBeforeSet = Child.GetCamera();
 		PF_CHECK(Tests, CameraBeforeSet && !CameraBeforeSet->has_value());
 		PF_CHECK(Tests, Child.SetCamera(SourceCamera).has_value());
+		DirectionalLightComponent SourceLight{ glm::vec3(0.75f, 0.8f, 1.0f), 3.0f };
+		PF_CHECK(Tests, SourceLight.Validate().has_value());
+		PF_CHECK(Tests, Child.SetDirectionalLight(SourceLight).has_value());
 		PF_CHECK(Tests, Child.SetMeshRenderer(MeshRendererComponent{ MeshAssetIdentifier, MaterialAssetIdentifier }).has_value());
 		PF_CHECK(Tests, !Child.SetMeshRenderer(MeshRendererComponent{ MeshAssetIdentifier, AssetID{} }).has_value());
 		const AudioSourceComponent SourceAudio{ AudioAssetIdentifier, 0.35f, true, false, true };
@@ -1945,6 +2002,7 @@ namespace
 		PF_CHECK(Tests, Serialized->find("\"format\": \"PulseForgeScene\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"version\": 7") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"primary\": true") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"directionalLight\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"meshAsset\": \"" + MeshAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"materialAsset\": \"" + MaterialAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"asset\": \"" + AudioAssetIdentifier.ToString() + "\"") != std::string::npos);
@@ -1978,6 +2036,7 @@ namespace
 		const auto LoadedTag = LoadedChild->GetTag();
 		const auto LoadedTransform = LoadedChild->GetTransform();
 		const auto LoadedCamera = LoadedChild->GetCamera();
+		const auto LoadedLight = LoadedChild->GetDirectionalLight();
 		const auto LoadedMeshRenderer = LoadedChild->GetMeshRenderer();
 		const auto LoadedAudioSource = LoadedChild->GetAudioSource();
 		const auto LoadedAudioListener = LoadedRoot->GetAudioListener();
@@ -1991,6 +2050,9 @@ namespace
 		PF_CHECK(Tests, LoadedCamera && LoadedCamera->has_value() &&
 			glm::abs(LoadedCamera->value().VerticalFieldOfViewRadians - SourceCamera.VerticalFieldOfViewRadians) < 0.0001f);
 		PF_CHECK(Tests, LoadedCamera && LoadedCamera->has_value() && LoadedCamera->value().IsPrimary);
+		PF_CHECK(Tests, LoadedLight && LoadedLight->has_value() &&
+			LoadedLight->value().Intensity == SourceLight.Intensity &&
+			glm::all(glm::equal(LoadedLight->value().Color, SourceLight.Color)));
 		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
 			LoadedMeshRenderer->value().MeshAsset == MeshAssetIdentifier);
 		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
@@ -3111,6 +3173,8 @@ namespace
 		MaterialAssetDesc Description;
 		Description.BaseColorTexture = *TextureAsset;
 		Description.BaseColorFactor = { 0.8f, 0.6f, 0.4f, 1.0f };
+		Description.MetallicFactor = 0.65f;
+		Description.RoughnessFactor = 0.25f;
 		const auto Serialized = MaterialAssetSerializer::Serialize(Description);
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized)
@@ -3118,6 +3182,24 @@ namespace
 		const auto Deserialized = MaterialAssetSerializer::Deserialize(*Serialized);
 		PF_CHECK(Tests, Deserialized && Deserialized->BaseColorTexture == Description.BaseColorTexture);
 		PF_CHECK(Tests, Deserialized && glm::all(glm::equal(Deserialized->BaseColorFactor, Description.BaseColorFactor)));
+		PF_CHECK(Tests, Deserialized && Deserialized->MetallicFactor == Description.MetallicFactor &&
+			Deserialized->RoughnessFactor == Description.RoughnessFactor);
+		PF_CHECK(Tests, Serialized && Serialized->find("\"version\": 2") != std::string::npos);
+		const std::string Version1Document = "{\"format\":\"PulseForgeMaterial\",\"version\":1,\"baseColorTexture\":\"" +
+			TextureAsset->ToString() + "\",\"baseColorFactor\":[1,1,1,1]}";
+		const auto Version1Material = MaterialAssetSerializer::Deserialize(Version1Document);
+		PF_CHECK(Tests, Version1Material && Version1Material->MetallicFactor == 0.0f &&
+			Version1Material->RoughnessFactor == 1.0f);
+		std::string InvalidMetallicDocument = *Serialized;
+		const size_t MetallicField = InvalidMetallicDocument.find("\"metallicFactor\":");
+		const size_t MetallicValue = MetallicField == std::string::npos ? MetallicField :
+			InvalidMetallicDocument.find_first_not_of(" :", MetallicField + std::string("\"metallicFactor\"").size());
+		const size_t MetallicEnd = MetallicValue == std::string::npos ? MetallicValue :
+			InvalidMetallicDocument.find_first_of(",\n", MetallicValue);
+		PF_CHECK(Tests, MetallicValue != std::string::npos && MetallicEnd != std::string::npos);
+		if (MetallicEnd != std::string::npos)
+			InvalidMetallicDocument.replace(MetallicValue, MetallicEnd - MetallicValue, "-0.1");
+		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize(InvalidMetallicDocument));
 
 		MaterialAssetDesc MissingTexture = Description;
 		MissingTexture.BaseColorTexture = {};
@@ -3127,6 +3209,14 @@ namespace
 		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
 		InvalidFactor.BaseColorFactor = Description.BaseColorFactor;
 		InvalidFactor.BaseColorFactor.r = 1.1f;
+		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
+		InvalidFactor = Description;
+		InvalidFactor.MetallicFactor = -0.01f;
+		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
+		InvalidFactor.MetallicFactor = 1.01f;
+		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
+		InvalidFactor = Description;
+		InvalidFactor.RoughnessFactor = std::numeric_limits<float>::infinity();
 		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
 		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize("{invalid"));
 		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize("{\"format\":\"OtherMaterial\",\"version\":1}"));
@@ -3192,6 +3282,8 @@ namespace
 		const auto Loaded = MaterialAssetService::Load(Created->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, Loaded && Loaded->BaseColorTexture == Description.BaseColorTexture);
 		PF_CHECK(Tests, Loaded && glm::all(glm::equal(Loaded->BaseColorFactor, Description.BaseColorFactor)));
+		PF_CHECK(Tests, Loaded && std::abs(Loaded->MetallicFactor - Description.MetallicFactor) < 1.0e-5f);
+		PF_CHECK(Tests, Loaded && std::abs(Loaded->RoughnessFactor - Description.RoughnessFactor) < 1.0e-5f);
 
 		MaterialAssetCache Cache(ProjectRoot, Registry);
 		const auto Cached = Cache.GetOrLoad(Created->ID);
@@ -4080,7 +4172,111 @@ end
 		PF_CHECK(Tests, Imported->Vertices[1].Position[0] == 1.0f);
 		PF_CHECK(Tests, Imported->Vertices[2].TexCoord[1] == 1.0f);
 		PF_CHECK(Tests, Imported->Vertices[0].Color[0] == 1.0f && Imported->Vertices[0].Color[1] == 1.0f);
+		PF_CHECK(Tests, Imported->Vertices[0].Normal[0] == 0.0f && Imported->Vertices[0].Normal[1] == 0.0f &&
+			Imported->Vertices[0].Normal[2] == 1.0f);
+		for (const GltfMeshVertex& Vertex : Imported->Vertices)
+			PF_CHECK(Tests, std::abs(glm::length(glm::vec3(Vertex.Normal[0], Vertex.Normal[1], Vertex.Normal[2])) - 1.0f) < 1.0e-6f);
+		PF_CHECK(Tests, Imported->GetMeshDescription().VertexLayout.Attributes.size() == 4);
+		PF_CHECK(Tests, Imported->GetMeshDescription().VertexLayout.Attributes[3].Semantic == VertexSemantic::Normal);
 		PF_CHECK(Tests, ValidateMeshDescription(Imported->GetMeshDescription()).has_value());
+		std::vector<std::byte> DegenerateBytes = BufferBytes;
+		std::fill_n(DegenerateBytes.begin(), sizeof(float) * 9, std::byte{ 0 });
+		{
+			std::ofstream Output(BufferPath, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(DegenerateBytes.data()), static_cast<std::streamsize>(DegenerateBytes.size()));
+		}
+		const auto DegenerateImport = GltfMeshImporter::ImportStaticPrimitive(SourceMetadata->ID, ProjectRoot, Registry);
+		PF_CHECK(Tests, DegenerateImport.has_value());
+		if (DegenerateImport)
+			for (const GltfMeshVertex& Vertex : DegenerateImport->Vertices)
+				PF_CHECK(Tests, Vertex.Normal[0] == 0.0f && Vertex.Normal[1] == 0.0f && Vertex.Normal[2] == 1.0f);
+		{
+			std::ofstream Output(BufferPath, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(BufferBytes.data()), static_cast<std::streamsize>(BufferBytes.size()));
+		}
+
+		std::string ExplicitNormalDocument = GltfDocument;
+		const size_t ExplicitBufferUri = ExplicitNormalDocument.find("Triangle.bin");
+		PF_CHECK(Tests, ExplicitBufferUri != std::string::npos);
+		if (ExplicitBufferUri != std::string::npos)
+			ExplicitNormalDocument.replace(ExplicitBufferUri, std::string("Triangle.bin").size(), "ExplicitNormals.bin");
+		ExplicitNormalDocument.replace(ExplicitNormalDocument.find("\"byteLength\":66"), 15, "\"byteLength\":104");
+		ExplicitNormalDocument.replace(
+			ExplicitNormalDocument.find("{\"buffer\":0,\"byteOffset\":60,\"byteLength\":6}"),
+			std::string("{\"buffer\":0,\"byteOffset\":60,\"byteLength\":6}").size(),
+			"{\"buffer\":0,\"byteOffset\":60,\"byteLength\":6},{\"buffer\":0,\"byteOffset\":68,\"byteLength\":36}");
+		ExplicitNormalDocument.replace(
+			ExplicitNormalDocument.find("{\"bufferView\":2,\"componentType\":5123,"),
+			std::string("{\"bufferView\":2,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}").size(),
+			"{\"bufferView\":2,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"},"
+			"{\"bufferView\":3,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}");
+		ExplicitNormalDocument.replace(
+			ExplicitNormalDocument.find("\"POSITION\":0,\"TEXCOORD_0\":1"),
+			std::string("\"POSITION\":0,\"TEXCOORD_0\":1").size(),
+			"\"POSITION\":0,\"TEXCOORD_0\":1,\"NORMAL\":3");
+		const std::filesystem::path ExplicitNormalPath = ModelDirectory / "ExplicitNormals.gltf";
+		std::vector<std::byte> ExplicitNormalBytes = BufferBytes;
+		BufferBytes.push_back(std::byte{ 0 });
+		BufferBytes.push_back(std::byte{ 0 });
+		for (const float Value : { 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 2.0f })
+			AppendFloatLE(Value);
+		ExplicitNormalBytes = BufferBytes;
+		BufferBytes.resize(66);
+		const std::filesystem::path ExplicitNormalBufferPath = ModelDirectory / "ExplicitNormals.bin";
+		{
+			std::ofstream Output(ExplicitNormalPath, std::ios::binary | std::ios::trunc);
+			Output.write(ExplicitNormalDocument.data(), static_cast<std::streamsize>(ExplicitNormalDocument.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		{
+			std::ofstream Output(ExplicitNormalBufferPath, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(ExplicitNormalBytes.data()),
+				static_cast<std::streamsize>(ExplicitNormalBytes.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto ExplicitNormalMetadata = AssetMetadataSerializer::CreateForNewAsset(ExplicitNormalPath);
+		const auto ExplicitNormalBufferMetadata = AssetMetadataSerializer::CreateForNewAsset(ExplicitNormalBufferPath);
+		PF_CHECK(Tests, ExplicitNormalMetadata.has_value());
+		PF_CHECK(Tests, ExplicitNormalBufferMetadata.has_value());
+		const auto ExplicitRegistryResult = Registry.Rebuild(ProjectRoot);
+		PF_CHECK(Tests, ExplicitRegistryResult.has_value());
+		if (!ExplicitNormalMetadata)
+			return;
+		const auto ExplicitNormals = GltfMeshImporter::ImportStaticPrimitive(
+			ExplicitNormalMetadata->ID, ProjectRoot, Registry);
+		PF_CHECK(Tests, ExplicitNormals.has_value());
+		PF_CHECK(Tests, ExplicitNormals && std::abs(ExplicitNormals->Vertices[0].Normal[2] - 1.0f) < 1.0e-6f);
+		std::string InvalidNormalDocument = ExplicitNormalDocument;
+		const size_t NormalAccessor = InvalidNormalDocument.find("\"bufferView\":3,\"componentType\":5126");
+		const size_t NormalType = InvalidNormalDocument.find("\"type\":\"VEC3\"", NormalAccessor);
+		PF_CHECK(Tests, NormalAccessor != std::string::npos && NormalType != std::string::npos);
+		if (NormalType == std::string::npos)
+			return;
+		InvalidNormalDocument.replace(NormalType + std::string("\"type\":\"").size(), 4, "VEC2");
+		{
+			std::ofstream Output(ExplicitNormalPath, std::ios::binary | std::ios::trunc);
+			Output.write(InvalidNormalDocument.data(), static_cast<std::streamsize>(InvalidNormalDocument.size()));
+		}
+		const auto InvalidNormals = GltfMeshImporter::ImportStaticPrimitive(
+			ExplicitNormalMetadata->ID, ProjectRoot, Registry);
+		PF_CHECK(Tests, !InvalidNormals && InvalidNormals.error().Code == GltfMeshImportErrorCode::UnsupportedFeature);
+		{
+			std::ofstream Output(ExplicitNormalPath, std::ios::binary | std::ios::trunc);
+			Output.write(ExplicitNormalDocument.data(), static_cast<std::streamsize>(ExplicitNormalDocument.size()));
+		}
+		ExplicitNormalBytes[68] = static_cast<std::byte>(0x00);
+		ExplicitNormalBytes[69] = static_cast<std::byte>(0x00);
+		ExplicitNormalBytes[70] = static_cast<std::byte>(0xc0);
+		ExplicitNormalBytes[71] = static_cast<std::byte>(0x7f);
+		{
+			std::ofstream Output(ExplicitNormalBufferPath, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(ExplicitNormalBytes.data()),
+				static_cast<std::streamsize>(ExplicitNormalBytes.size()));
+		}
+		const auto NonFiniteNormals = GltfMeshImporter::ImportStaticPrimitive(
+			ExplicitNormalMetadata->ID, ProjectRoot, Registry);
+		PF_CHECK(Tests, !NonFiniteNormals && NonFiniteNormals.error().Code == GltfMeshImportErrorCode::InvalidAccessor);
+
 		const std::filesystem::path RenamedSourcePath = ModelDirectory / "RenamedTriangle.gltf";
 		const auto MovedSource = AssetOperations::Move(
 			Registry,
@@ -4784,6 +4980,8 @@ end
 		RootCamera.VerticalFieldOfViewRadians = 0.95f;
 		RootCamera.IsPrimary = true;
 		PF_CHECK(Tests, Root->SetCamera(RootCamera).has_value());
+		const DirectionalLightComponent PrefabLight{ glm::vec3(0.8f, 0.9f, 1.0f), 1.75f };
+		PF_CHECK(Tests, Root->SetDirectionalLight(PrefabLight).has_value());
 		const AssetID MeshAssetID{ 0x7300000000000000ull, 7 };
 		const AssetID MaterialAssetID{ 0x7400000000000000ull, 7 };
 		const AssetID AudioAssetID{ 0x7500000000000000ull, 7 };
@@ -4806,6 +5004,7 @@ end
 		PF_CHECK(Tests, PrefabData->find("\"asset\": \"" + ScriptAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"primary\": false") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"primary\": true") == std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"directionalLight\"") != std::string::npos);
 		const auto SourceCamera = Root->GetCamera();
 		const auto SourceListener = Root->GetAudioListener();
 		PF_CHECK(Tests, SourceCamera && SourceCamera->has_value() && SourceCamera->value().IsPrimary);
@@ -4877,10 +5076,13 @@ end
 		const auto FirstParent = FirstInstance->GetParent();
 		PF_CHECK(Tests, FirstParent && !FirstParent->has_value());
 		const auto FirstCamera = FirstInstance->GetCamera();
+		const auto FirstLight = FirstInstance->GetDirectionalLight();
 		const auto FirstAudioListener = FirstInstance->GetAudioListener();
 		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() &&
 			FirstCamera->value().VerticalFieldOfViewRadians == RootCamera.VerticalFieldOfViewRadians);
 		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() && !FirstCamera->value().IsPrimary);
+		PF_CHECK(Tests, FirstLight && FirstLight->has_value() &&
+			FirstLight->value().Intensity == PrefabLight.Intensity);
 		PF_CHECK(Tests, FirstAudioListener && FirstAudioListener->has_value() && !FirstAudioListener->value().IsPrimary);
 		const auto FirstChildren = FirstInstance->GetChildren();
 		PF_CHECK(Tests, FirstChildren && FirstChildren->size() == 1);

@@ -16,7 +16,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t MaterialFormatVersion = 1;
+		constexpr int64_t MaterialFormatVersion = 2;
 		constexpr size_t MaximumMaterialFileSize = 1024 * 1024;
 		constexpr std::string_view MaterialFormatName = "PulseForgeMaterial";
 
@@ -62,6 +62,12 @@ namespace PulseForge
 					"Base-color factor components must be finite values in the range [0, 1]"));
 			}
 		}
+		if (!std::isfinite(Description.MetallicFactor) || Description.MetallicFactor < 0.0f || Description.MetallicFactor > 1.0f)
+			return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDescription,
+				"Metallic factor must be a finite value in the range [0, 1]"));
+		if (!std::isfinite(Description.RoughnessFactor) || Description.RoughnessFactor < 0.0f || Description.RoughnessFactor > 1.0f)
+			return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDescription,
+				"Roughness factor must be a finite value in the range [0, 1]"));
 		return {};
 	}
 
@@ -82,6 +88,8 @@ namespace PulseForge
 				Material.BaseColorFactor.b,
 				Material.BaseColorFactor.a
 			};
+			Document["metallicFactor"] = Material.MetallicFactor;
+			Document["roughnessFactor"] = Material.RoughnessFactor;
 			return Document.dump(2) + "\n";
 		}
 		catch (const std::exception& Exception)
@@ -107,8 +115,10 @@ namespace PulseForge
 				return std::unexpected(MakeError(MaterialAssetErrorCode::UnsupportedFormat, "Document is not a PulseForge material"));
 
 			const auto Version = Document.find("version");
-			if (Version == Document.end() || !Version->is_number_integer() || Version->get<int64_t>() != MaterialFormatVersion)
+			if (Version == Document.end() || !Version->is_number_integer() ||
+				(Version->get<int64_t>() != 1 && Version->get<int64_t>() != MaterialFormatVersion))
 				return std::unexpected(MakeError(MaterialAssetErrorCode::UnsupportedVersion, "Material document version is not supported"));
+			const int64_t DocumentVersion = Version->get<int64_t>();
 
 			const auto Texture = Document.find("baseColorTexture");
 			const auto Factor = Document.find("baseColorFactor");
@@ -135,6 +145,17 @@ namespace PulseForge
 				if (!(*Factor)[Index].is_number())
 					return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument, "Base-color factor must contain numeric values"));
 				Material.BaseColorFactor[static_cast<int>(Index)] = (*Factor)[Index].get<float>();
+			}
+			if (DocumentVersion == 2)
+			{
+				const auto Metallic = Document.find("metallicFactor");
+				const auto Roughness = Document.find("roughnessFactor");
+				if (Metallic == Document.end() || !Metallic->is_number() ||
+					Roughness == Document.end() || !Roughness->is_number())
+					return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument,
+						"Version 2 material requires numeric metallicFactor and roughnessFactor fields"));
+				Material.MetallicFactor = Metallic->get<float>();
+				Material.RoughnessFactor = Roughness->get<float>();
 			}
 
 			if (auto Validation = ValidateMaterialAssetDescription(Material); !Validation)

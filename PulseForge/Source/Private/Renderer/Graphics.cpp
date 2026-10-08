@@ -36,7 +36,8 @@ namespace PulseForge
 		{
 			return Semantic == VertexSemantic::Position ||
 				Semantic == VertexSemantic::Color ||
-				Semantic == VertexSemantic::TexCoord;
+				Semantic == VertexSemantic::TexCoord ||
+				Semantic == VertexSemantic::Normal;
 		}
 
 		bool IsValidDepthComparison(DepthCompareOperation Operation)
@@ -89,7 +90,7 @@ namespace PulseForge
 		if (Description.Attributes.size() > 16)
 			return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex layout exceeds PulseForge's 16-attribute limit");
 
-		std::array<bool, 3> SeenSemantics = {};
+		std::array<bool, 4> SeenSemantics = {};
 		for (const VertexAttributeDesc& Attribute : Description.Attributes)
 		{
 			if (!IsValidSemantic(Attribute.Semantic))

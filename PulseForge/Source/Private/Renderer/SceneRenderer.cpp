@@ -198,7 +198,8 @@ namespace PulseForge
 			{ BindingResourceType::Texture2D, 0 },
 			{ BindingResourceType::Sampler, 0 },
 			{ BindingResourceType::ConstantBuffer, 0 },
-			{ BindingResourceType::ConstantBuffer, 1 }
+			{ BindingResourceType::ConstantBuffer, 1 },
+			{ BindingResourceType::ConstantBuffer, 2 }
 		};
 		BindingLayoutDescription.DebugName = "PulseForge scene resources";
 		auto BindingLayout = m_Runtime.CreateBindingLayout(BindingLayoutDescription);
@@ -206,17 +207,25 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Could not create the scene binding layout: " + BindingLayout.error().Message));
 		m_BindingLayout = std::move(BindingLayout.value());
 
-		const glm::mat4 InitialTransform(1.0f);
-		BufferDesc TransformBufferDescription;
-		TransformBufferDescription.ByteSize = sizeof(InitialTransform);
-		TransformBufferDescription.Usage = BufferUsage::Constant;
-		TransformBufferDescription.DebugName = "PulseForge scene per-object transform";
-		auto TransformBuffer = m_Runtime.CreateBuffer(
-			TransformBufferDescription,
-			std::as_bytes(std::span(&InitialTransform, 1)));
-		if (!TransformBuffer)
-			return std::unexpected(MakeResourceError("Could not create the scene transform buffer: " + TransformBuffer.error().Message));
-		m_TransformBuffer = std::move(TransformBuffer.value());
+		const ObjectConstants InitialObject{};
+		BufferDesc ObjectBufferDescription;
+		ObjectBufferDescription.ByteSize = sizeof(InitialObject);
+		ObjectBufferDescription.Usage = BufferUsage::Constant;
+		ObjectBufferDescription.DebugName = "PulseForge scene object constants";
+		auto ObjectBuffer = m_Runtime.CreateBuffer(ObjectBufferDescription, std::as_bytes(std::span(&InitialObject, 1)));
+		if (!ObjectBuffer)
+			return std::unexpected(MakeResourceError("Could not create scene object constants: " + ObjectBuffer.error().Message));
+		m_ObjectConstantsBuffer = std::move(ObjectBuffer.value());
+
+		const FrameConstants InitialFrame{};
+		BufferDesc FrameBufferDescription;
+		FrameBufferDescription.ByteSize = sizeof(InitialFrame);
+		FrameBufferDescription.Usage = BufferUsage::Constant;
+		FrameBufferDescription.DebugName = "PulseForge scene frame and light constants";
+		auto FrameBuffer = m_Runtime.CreateBuffer(FrameBufferDescription, std::as_bytes(std::span(&InitialFrame, 1)));
+		if (!FrameBuffer)
+			return std::unexpected(MakeResourceError("Could not create scene frame constants: " + FrameBuffer.error().Message));
+		m_FrameConstantsBuffer = std::move(FrameBuffer.value());
 		return {};
 	}
 
@@ -247,29 +256,32 @@ namespace PulseForge
 			});
 		}
 
-		const glm::vec4& BaseColorFactor = Material->get().BaseColorFactor;
-		BufferDesc FactorBufferDescription;
-		FactorBufferDescription.ByteSize = sizeof(BaseColorFactor);
-		FactorBufferDescription.Usage = BufferUsage::Constant;
-		FactorBufferDescription.DebugName = "PulseForge material base-color factor";
-		auto FactorBuffer = m_Runtime.CreateBuffer(
-			FactorBufferDescription,
-			std::as_bytes(std::span(&BaseColorFactor, 1)));
-		if (!FactorBuffer)
-			return std::unexpected(MakeResourceError("Could not create material constants: " + FactorBuffer.error().Message));
+		const MaterialConstants Constants{
+			{ Material->get().BaseColorFactor.r, Material->get().BaseColorFactor.g,
+				Material->get().BaseColorFactor.b, Material->get().BaseColorFactor.a },
+			{ Material->get().MetallicFactor, Material->get().RoughnessFactor, 0.0f, 0.0f }
+		};
+		BufferDesc MaterialBufferDescription;
+		MaterialBufferDescription.ByteSize = sizeof(Constants);
+		MaterialBufferDescription.Usage = BufferUsage::Constant;
+		MaterialBufferDescription.DebugName = "PulseForge PBR material constants";
+		auto MaterialBuffer = m_Runtime.CreateBuffer(MaterialBufferDescription, std::as_bytes(std::span(&Constants, 1)));
+		if (!MaterialBuffer)
+			return std::unexpected(MakeResourceError("Could not create material constants: " + MaterialBuffer.error().Message));
 
 		BindingSetDesc BindingSetDescription;
 		BindingSetDescription.Layout = m_BindingLayout;
 		BindingSetDescription.Textures.push_back({ 0, std::cref(Texture->get()) });
 		BindingSetDescription.Samplers.push_back({ 0, std::cref(*m_Sampler) });
-		BindingSetDescription.Buffers.push_back({ 0, std::cref(*FactorBuffer.value()) });
-		BindingSetDescription.Buffers.push_back({ 1, std::cref(*m_TransformBuffer) });
+		BindingSetDescription.Buffers.push_back({ 0, std::cref(*MaterialBuffer.value()) });
+		BindingSetDescription.Buffers.push_back({ 1, std::cref(*m_ObjectConstantsBuffer) });
+		BindingSetDescription.Buffers.push_back({ 2, std::cref(*m_FrameConstantsBuffer) });
 		auto BindingSet = m_Runtime.CreateBindingSet(BindingSetDescription);
 		if (!BindingSet)
 			return std::unexpected(MakeResourceError("Could not create material bindings: " + BindingSet.error().Message));
 
 		MaterialBindingResources Resources;
-		Resources.BaseColorFactorBuffer = std::move(FactorBuffer.value());
+		Resources.MaterialConstantsBuffer = std::move(MaterialBuffer.value());
 		Resources.BindingSet = std::move(BindingSet.value());
 		m_MaterialBindings.emplace(MaterialAsset, std::move(Resources));
 		return {};
@@ -292,9 +304,10 @@ namespace PulseForge
 
 	std::expected<void, SceneRendererError> SceneRenderer::PrepareScene(
 		const Scene& Source,
-		const glm::mat4& ViewProjection)
+		const glm::mat4& ViewProjection,
+		const glm::vec3& CameraWorldPosition)
 	{
-		return PrepareSnapshot(SceneRenderSnapshotBuilder::BuildForView(Source, ViewProjection));
+		return PrepareSnapshot(SceneRenderSnapshotBuilder::BuildForView(Source, ViewProjection, CameraWorldPosition));
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::PrepareSnapshot(
@@ -447,6 +460,25 @@ namespace PulseForge
 		const GraphicsPipeline& ScenePipeline = *m_Pipelines.at(ColorFormat);
 
 		size_t SubmittedDraws = 0;
+		FrameConstants Frame{};
+		Frame.CameraWorldPosition[0] = m_PreparedSnapshot->CameraWorldPosition.x;
+		Frame.CameraWorldPosition[1] = m_PreparedSnapshot->CameraWorldPosition.y;
+		Frame.CameraWorldPosition[2] = m_PreparedSnapshot->CameraWorldPosition.z;
+		if (m_PreparedSnapshot->DirectionalLight)
+		{
+			const SceneDirectionalLight& Light = *m_PreparedSnapshot->DirectionalLight;
+			Frame.LightRayDirection[0] = Light.RayDirection.x;
+			Frame.LightRayDirection[1] = Light.RayDirection.y;
+			Frame.LightRayDirection[2] = Light.RayDirection.z;
+			Frame.LightColorIntensity[0] = Light.Color.r;
+			Frame.LightColorIntensity[1] = Light.Color.g;
+			Frame.LightColorIntensity[2] = Light.Color.b;
+			Frame.LightColorIntensity[3] = Light.Intensity;
+		}
+		const auto FrameUpdate = m_Runtime.WriteBuffer(*m_FrameConstantsBuffer, 0, std::as_bytes(std::span(&Frame, 1)));
+		if (!FrameUpdate)
+			return std::unexpected(MakeDrawError("Could not update scene frame constants: " + FrameUpdate.error().Message));
+
 		for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
 		{
 			auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
@@ -470,11 +502,21 @@ namespace PulseForge
 				});
 			}
 
-			const glm::mat4 ModelViewProjection = m_PreparedSnapshot->ViewProjection * Instance.WorldTransform;
+			const auto NormalTransform = BuildNormalTransform(Instance.WorldTransform);
+			if (!NormalTransform)
+				return std::unexpected(SceneRendererError{
+					SceneRendererErrorCode::DrawFailed,
+					Instance.Entity,
+					Instance.MeshAsset,
+					"Cannot render a mesh with a singular/non-finite normal transform" });
+			const ObjectConstants Object{
+				Instance.WorldTransform,
+				m_PreparedSnapshot->ViewProjection * Instance.WorldTransform,
+				*NormalTransform };
 			const auto Update = m_Runtime.WriteBuffer(
-				*m_TransformBuffer,
+				*m_ObjectConstantsBuffer,
 				0,
-				std::as_bytes(std::span(&ModelViewProjection, 1)));
+				std::as_bytes(std::span(&Object, 1)));
 			if (!Update)
 			{
 				return std::unexpected(SceneRendererError{

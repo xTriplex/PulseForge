@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Scene/Components/CameraComponent.h"
+#include "Scene/Components/DirectionalLightComponent.h"
 #include "Scene/Components/AudioListenerComponent.h"
 #include "Scene/Components/AudioSourceComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
@@ -43,6 +44,9 @@ namespace PulseForge
 		[[nodiscard]] std::expected<std::optional<CameraComponent>, SceneError> GetCamera() const;
 		[[nodiscard]] std::expected<void, SceneError> SetCamera(const CameraComponent& Camera) const;
 		[[nodiscard]] std::expected<void, SceneError> RemoveCamera() const;
+		[[nodiscard]] std::expected<std::optional<DirectionalLightComponent>, SceneError> GetDirectionalLight() const;
+		[[nodiscard]] std::expected<void, SceneError> SetDirectionalLight(const DirectionalLightComponent& Light) const;
+		[[nodiscard]] std::expected<void, SceneError> RemoveDirectionalLight() const;
 		[[nodiscard]] std::expected<std::optional<MeshRendererComponent>, SceneError> GetMeshRenderer() const;
 		[[nodiscard]] std::expected<void, SceneError> SetMeshRenderer(const MeshRendererComponent& MeshRenderer) const;
 		[[nodiscard]] std::expected<void, SceneError> RemoveMeshRenderer() const;
