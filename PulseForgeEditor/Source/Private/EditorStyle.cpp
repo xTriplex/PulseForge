@@ -147,27 +147,7 @@ namespace
 
 	ImVec4 ToImVec4(PulseForgeEditor::EditorColorValue Color)
 	{
-		const auto ToFramebufferChannel = [](float DisplayChannel)
-		{
-#ifdef PF_EDITOR_RENDERER_OPENGL
-			return DisplayChannel;
-#else
-			// Vulkan presents to an sRGB swapchain, so style colors authored in display-space sRGB
-			// must be linearized before ImGui emits them as fragment colors.
-			return DisplayChannel <= 0.04045f
-				? DisplayChannel / 12.92f
-				: static_cast<float>(std::pow((DisplayChannel + 0.055f) / 1.055f, 2.4f));
-#endif
-		};
-		return {
-			ToFramebufferChannel(Color.Red), ToFramebufferChannel(Color.Green),
-			ToFramebufferChannel(Color.Blue), Color.Alpha
-		};
-	}
-
-	ImVec4 ToImVec4(PulseForgeEditor::EditorColorToken Token)
-	{
-		return ToImVec4(PulseForgeEditor::GetEditorColorValue(Token));
+		return { Color.Red, Color.Green, Color.Blue, Color.Alpha };
 	}
 
 	bool LoadIconFont(ImFontAtlas& Atlas, const std::filesystem::path& Path, ImFont* Target)
@@ -187,6 +167,21 @@ namespace
 
 namespace PulseForgeEditor
 {
+	EditorStyle::ScopedFont::ScopedFont(ImFont* Font)
+	{
+		if (Font)
+		{
+			ImGui::PushFont(Font);
+			m_Pushed = true;
+		}
+	}
+
+	EditorStyle::ScopedFont::~ScopedFont()
+	{
+		if (m_Pushed)
+			ImGui::PopFont();
+	}
+
 	std::expected<void, std::string> EditorStyle::Initialize()
 	{
 		ImGuiContext* Context = ImGui::GetCurrentContext();
@@ -344,8 +339,13 @@ namespace PulseForgeEditor
 		return {};
 	}
 
-	void EditorStyle::ApplyTheme() const
+	void EditorStyle::ApplyTheme(PulseForge::OutputColorEncoding Encoding)
 	{
+		if (m_ThemeApplied && m_OutputColorEncoding == Encoding)
+			return;
+
+		m_OutputColorEncoding = Encoding;
+		m_ThemeApplied = true;
 		ImGuiStyle& Style = ImGui::GetStyle();
 		Style.WindowPadding = { 8.0f, 7.0f };
 		Style.FramePadding = { 6.0f, 4.0f };
@@ -374,7 +374,7 @@ namespace PulseForgeEditor
 		Style.Colors[ImGuiCol_ChildBg] = GetColor(EditorColorToken::Panel);
 		Style.Colors[ImGuiCol_PopupBg] = GetColor(EditorColorToken::PanelRaised);
 		Style.Colors[ImGuiCol_Border] = GetColor(EditorColorToken::Border);
-		Style.Colors[ImGuiCol_BorderShadow] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		Style.Colors[ImGuiCol_BorderShadow] = GetColor(EditorColorToken::Transparent);
 		Style.Colors[ImGuiCol_FrameBg] = GetColor(EditorColorToken::Input);
 		Style.Colors[ImGuiCol_FrameBgHovered] = GetColor(EditorColorToken::PanelRaised);
 		Style.Colors[ImGuiCol_FrameBgActive] = GetColor(EditorColorToken::Selection);
@@ -421,7 +421,7 @@ namespace PulseForgeEditor
 		Style.Colors[ImGuiCol_TableBorderStrong] = GetColor(EditorColorToken::BorderStrong);
 		Style.Colors[ImGuiCol_TableBorderLight] = GetColor(EditorColorToken::Border);
 		Style.Colors[ImGuiCol_TableRowBg] = GetColor(EditorColorToken::Panel);
-		Style.Colors[ImGuiCol_TableRowBgAlt] = { 0.125f, 0.145f, 0.168f, 1.0f };
+		Style.Colors[ImGuiCol_TableRowBgAlt] = GetColor(EditorColorToken::PanelAlternate);
 		Style.Colors[ImGuiCol_TextLink] = GetColor(EditorColorToken::AccentHovered);
 		AccentTint = GetColor(EditorColorToken::AccentActive);
 		AccentTint.w = 0.45f;
@@ -437,7 +437,7 @@ namespace PulseForgeEditor
 
 	ImVec4 EditorStyle::GetColor(EditorColorToken Token) const noexcept
 	{
-		return ToImVec4(Token);
+		return ToImVec4(ConvertEditorColorForOutput(GetEditorColorValue(Token), m_OutputColorEncoding));
 	}
 
 	void EditorStyle::Reset() noexcept
@@ -446,6 +446,8 @@ namespace PulseForgeEditor
 		m_EmphasisFont = nullptr;
 		m_MonospaceFont = nullptr;
 		m_HasIcons = false;
+		m_OutputColorEncoding = PulseForge::OutputColorEncoding::UnormAttachment;
+		m_ThemeApplied = false;
 	}
 
 	bool EditorStyle::Button(EditorIcon Icon, std::string_view Label) const
@@ -465,6 +467,21 @@ namespace PulseForgeEditor
 		return Pressed;
 	}
 
+	bool EditorStyle::DangerButton(EditorIcon Icon, std::string_view Label) const
+	{
+		ImVec4 Hovered = GetColor(EditorColorToken::Error);
+		Hovered.w = 0.55f;
+		ImVec4 Active = GetColor(EditorColorToken::Error);
+		Active.w = 0.82f;
+		ImGui::PushStyleColor(ImGuiCol_Button, GetColor(EditorColorToken::PanelRaised));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Hovered);
+		ImGui::PushStyleColor(ImGuiCol_ButtonActive, Active);
+		const auto Text = MakeLabel(m_HasIcons, Icon, Label);
+		const bool Pressed = ImGui::Button(Text.data());
+		ImGui::PopStyleColor(3);
+		return Pressed;
+	}
+
 	bool EditorStyle::SmallButton(EditorIcon Icon, std::string_view Label) const
 	{
 		const auto Text = MakeLabel(m_HasIcons, Icon, Label);
@@ -473,34 +490,65 @@ namespace PulseForgeEditor
 
 	bool EditorStyle::ToolButton(EditorIcon Icon, std::string_view Label, bool Active) const
 	{
+		const auto Text = MakeLabel(m_HasIcons, Icon, Label);
 		if (Active)
 		{
 			ImGui::PushStyleColor(ImGuiCol_Button, GetColor(EditorColorToken::Selection));
 			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, GetColor(EditorColorToken::AccentActive));
 			ImGui::PushStyleColor(ImGuiCol_ButtonActive, GetColor(EditorColorToken::Accent));
-			PushEmphasisFont();
-		}
-		const auto Text = MakeLabel(m_HasIcons, Icon, Label);
-		const bool Pressed = ImGui::Button(Text.data());
-		if (Active)
-		{
-			PopFont();
+			bool Pressed = false;
+			{
+				const ScopedFont FontScope(m_EmphasisFont);
+				Pressed = ImGui::Button(Text.data());
+			}
 			ImGui::PopStyleColor(3);
+			return Pressed;
 		}
-		return Pressed;
+		return ImGui::Button(Text.data());
+	}
+
+	bool EditorStyle::TreeNode(
+		EditorIcon Icon,
+		std::string_view Label,
+		std::string_view StableID,
+		int Flags) const
+	{
+		const auto Text = MakeLabel(m_HasIcons, Icon, Label, StableID);
+		return ImGui::TreeNodeEx(Text.data(), static_cast<ImGuiTreeNodeFlags>(Flags));
+	}
+
+	bool EditorStyle::SectionHeader(EditorIcon Icon, std::string_view Label, bool DefaultOpen) const
+	{
+		const auto Text = MakeLabel(m_HasIcons, Icon, Label, Label);
+		const ImGuiTreeNodeFlags Flags = DefaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None;
+		return ImGui::CollapsingHeader(Text.data(), Flags);
 	}
 
 	bool EditorStyle::IconButton(
 		EditorIcon Icon,
 		std::string_view FallbackLabel,
 		std::string_view StableID,
-		std::string_view Tooltip) const
+		std::string_view Tooltip,
+		bool Destructive) const
 	{
 		const bool UseIcon = m_HasIcons && FindEditorIcon(Icon);
 		const auto Text = MakeLabel(UseIcon, Icon, UseIcon ? std::string_view{} : FallbackLabel, StableID);
-		const bool Pressed = ImGui::Button(Text.data());
+		if (Destructive)
+		{
+			ImVec4 Hovered = GetColor(EditorColorToken::Error);
+			Hovered.w = 0.40f;
+			ImVec4 Active = GetColor(EditorColorToken::Error);
+			Active.w = 0.72f;
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Hovered);
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive, Active);
+		}
+		const bool Pressed = UseIcon
+			? ImGui::Button(Text.data(), ImVec2(28.0f, 24.0f))
+			: ImGui::Button(Text.data());
 		if (ImGui::IsItemHovered())
 			ImGui::SetTooltip("%.*s", static_cast<int>(Tooltip.size()), Tooltip.data());
+		if (Destructive)
+			ImGui::PopStyleColor(2);
 		return Pressed;
 	}
 
@@ -521,6 +569,70 @@ namespace PulseForgeEditor
 		return ImGui::MenuItem(Text.data(), Shortcut, Selected, Enabled);
 	}
 
+	bool EditorStyle::BeginToolbar(const char* ID, float Height) const
+	{
+		ImGui::PushStyleColor(ImGuiCol_ChildBg, GetColor(EditorColorToken::PanelRaised));
+		ImGui::PushStyleColor(ImGuiCol_Border, GetColor(EditorColorToken::Border));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 3.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 2.0f);
+		return ImGui::BeginChild(ID, ImVec2(0.0f, Height), ImGuiChildFlags_Borders,
+			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings);
+	}
+
+	void EditorStyle::EndToolbar() const
+	{
+		ImGui::EndChild();
+		ImGui::PopStyleVar(2);
+		ImGui::PopStyleColor(2);
+	}
+
+	bool EditorStyle::BeginPropertyTable(const char* ID) const
+	{
+		ImGui::PushStyleColor(ImGuiCol_TableBorderLight, GetColor(EditorColorToken::Border));
+		const ImGuiTableFlags Flags = ImGuiTableFlags_SizingStretchProp |
+			ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_NoSavedSettings;
+		if (!ImGui::BeginTable(ID, 2, Flags))
+		{
+			ImGui::PopStyleColor();
+			return false;
+		}
+
+		const float AvailableWidth = ImGui::GetContentRegionAvail().x;
+		const float LabelWidth = std::clamp(AvailableWidth * 0.34f, 66.0f, 104.0f);
+		ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthFixed, LabelWidth);
+		ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+		return true;
+	}
+
+	bool EditorStyle::BeginPropertyRow(std::string_view Label) const
+	{
+		ImGui::TableNextRow();
+		if (!ImGui::TableSetColumnIndex(0))
+			return false;
+		TextMuted(Label);
+		return ImGui::TableSetColumnIndex(1);
+	}
+
+	void EditorStyle::EndPropertyTable() const
+	{
+		ImGui::EndTable();
+		ImGui::PopStyleColor();
+	}
+
+	void EditorStyle::IconText(EditorIcon Icon, std::string_view Text) const
+	{
+		const auto Label = MakeLabel(m_HasIcons, Icon, Text);
+		ImGui::TextUnformatted(Label.data());
+	}
+
+	void EditorStyle::EmptyState(EditorIcon Icon, std::string_view Text) const
+	{
+		ImGui::Spacing();
+		ImGui::PushStyleColor(ImGuiCol_Text, GetColor(EditorColorToken::TextMuted));
+		IconText(Icon, Text);
+		ImGui::PopStyleColor();
+	}
+
 	void EditorStyle::TextMuted(std::string_view Text) const
 	{
 		if (Text.empty())
@@ -530,21 +642,13 @@ namespace PulseForgeEditor
 		ImGui::PopStyleColor();
 	}
 
-	void EditorStyle::PushEmphasisFont() const
+	EditorStyle::ScopedFont EditorStyle::PushEmphasisFont() const
 	{
-		if (m_EmphasisFont)
-			ImGui::PushFont(m_EmphasisFont);
+		return ScopedFont(m_EmphasisFont);
 	}
 
-	void EditorStyle::PushMonospaceFont() const
+	EditorStyle::ScopedFont EditorStyle::PushMonospaceFont() const
 	{
-		if (m_MonospaceFont)
-			ImGui::PushFont(m_MonospaceFont);
-	}
-
-	void EditorStyle::PopFont() const
-	{
-		if (m_MonospaceFont)
-			ImGui::PopFont();
+		return ScopedFont(m_MonospaceFont);
 	}
 }

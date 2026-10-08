@@ -527,6 +527,18 @@ namespace PulseForge
 			Shutdown();
 		}
 
+		OutputColorEncoding GetOutputColorEncoding() const noexcept override
+		{
+			switch (m_SurfaceFormat.format)
+			{
+				case vk::Format::eB8G8R8A8Srgb:
+				case vk::Format::eR8G8B8A8Srgb:
+					return OutputColorEncoding::SrgbAttachment;
+				default:
+					return OutputColorEncoding::UnormAttachment;
+			}
+		}
+
 		bool BeginFrame() override
 		{
 			if (!m_Device)

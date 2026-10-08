@@ -299,7 +299,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		target_compile_definitions(PulseForgeEditor PRIVATE PF_EDITOR_SHADER_DIRECTORY="Shaders")
 	endif()
 	target_link_libraries(PulseForgeEditor PRIVATE
-		PulseForge PulseForgeImGui nfd::nfd spdlog::spdlog freetype shell32 ole32)
+		PulseForge PulseForgeImGui nfd::nfd spdlog::spdlog freetype shell32 ole32 dwmapi)
 	add_custom_command(TARGET PulseForgeEditor POST_BUILD
 		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeEditor>/EditorAssets"
 		COMMAND "${CMAKE_COMMAND}" -E copy_directory

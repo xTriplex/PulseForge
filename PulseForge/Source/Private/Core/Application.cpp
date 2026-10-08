@@ -44,6 +44,11 @@ namespace PulseForge
 		m_Window.reset();
 	}
 
+	OutputColorEncoding Application::GetOutputColorEncoding() const noexcept
+	{
+		return m_Renderer->GetOutputColorEncoding();
+	}
+
 	void Application::Run()
 	{
 		auto PreviousFrameTime = std::chrono::steady_clock::now();

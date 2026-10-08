@@ -1,8 +1,10 @@
 #pragma once
 
 #include "Editor/EditorIcons.h"
+#include "Renderer/RendererAPI.h"
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -10,6 +12,7 @@
 #include <string_view>
 
 struct ImFont;
+struct ImVec2;
 struct ImVec4;
 
 namespace PulseForgeEditor
@@ -81,6 +84,8 @@ namespace PulseForgeEditor
 		Background,
 		Panel,
 		PanelRaised,
+		PanelAlternate,
+		ViewportBackground,
 		MenuBar,
 		Input,
 		Border,
@@ -94,6 +99,11 @@ namespace PulseForgeEditor
 		Warning,
 		Error,
 		Success,
+		GizmoAxisX,
+		GizmoAxisY,
+		GizmoAxisZ,
+		GizmoHighlight,
+		Transparent,
 		Count
 	};
 
@@ -105,10 +115,33 @@ namespace PulseForgeEditor
 		float Alpha;
 	};
 
+	[[nodiscard]] inline EditorColorValue ConvertEditorColorForOutput(
+		EditorColorValue DisplayColor,
+		PulseForge::OutputColorEncoding Encoding) noexcept
+	{
+		if (Encoding == PulseForge::OutputColorEncoding::UnormAttachment)
+			return DisplayColor;
+
+		const auto ConvertChannel = [](float Channel)
+		{
+			return Channel <= 0.04045f
+				? Channel / 12.92f
+				: static_cast<float>(std::pow((Channel + 0.055f) / 1.055f, 2.4f));
+		};
+		return {
+			ConvertChannel(DisplayColor.Red),
+			ConvertChannel(DisplayColor.Green),
+			ConvertChannel(DisplayColor.Blue),
+			DisplayColor.Alpha
+		};
+	}
+
 	inline constexpr std::array<EditorColorValue, static_cast<size_t>(EditorColorToken::Count)> EditorPalette = {{
 		{ 0.075f, 0.086f, 0.102f, 1.0f }, // Background
 		{ 0.106f, 0.122f, 0.145f, 1.0f }, // Panel
 		{ 0.137f, 0.157f, 0.184f, 1.0f }, // PanelRaised
+		{ 0.125f, 0.145f, 0.168f, 1.0f }, // PanelAlternate
+		{ 0.100f, 0.110f, 0.130f, 1.0f }, // ViewportBackground
 		{ 0.090f, 0.106f, 0.125f, 1.0f }, // MenuBar
 		{ 0.071f, 0.086f, 0.106f, 1.0f }, // Input
 		{ 0.205f, 0.235f, 0.275f, 1.0f }, // Border
@@ -121,7 +154,12 @@ namespace PulseForgeEditor
 		{ 0.155f, 0.245f, 0.310f, 1.0f }, // Selection
 		{ 0.820f, 0.650f, 0.350f, 1.0f }, // Warning
 		{ 0.825f, 0.390f, 0.370f, 1.0f }, // Error
-		{ 0.415f, 0.680f, 0.525f, 1.0f }  // Success
+		{ 0.415f, 0.680f, 0.525f, 1.0f }, // Success
+		{ 0.922f, 0.275f, 0.275f, 1.0f }, // GizmoAxisX
+		{ 0.373f, 0.863f, 0.431f, 1.0f }, // GizmoAxisY
+		{ 0.333f, 0.569f, 1.000f, 1.0f }, // GizmoAxisZ
+		{ 1.000f, 0.902f, 0.431f, 1.0f }, // GizmoHighlight
+		{ 0.000f, 0.000f, 0.000f, 0.0f }  // Transparent
 	}};
 
 	[[nodiscard]] constexpr EditorColorValue GetEditorColorValue(EditorColorToken Token) noexcept
@@ -161,8 +199,22 @@ namespace PulseForgeEditor
 	class EditorStyle final
 	{
 	public:
+		class ScopedFont final
+		{
+		public:
+			explicit ScopedFont(ImFont* Font);
+			~ScopedFont();
+			ScopedFont(const ScopedFont&) = delete;
+			ScopedFont& operator=(const ScopedFont&) = delete;
+			ScopedFont(ScopedFont&&) = delete;
+			ScopedFont& operator=(ScopedFont&&) = delete;
+
+		private:
+			bool m_Pushed = false;
+		};
+
 		[[nodiscard]] std::expected<void, std::string> Initialize();
-		void ApplyTheme() const;
+		void ApplyTheme(PulseForge::OutputColorEncoding Encoding);
 		void Reset() noexcept;
 		[[nodiscard]] ImVec4 GetColor(EditorColorToken Token) const noexcept;
 
@@ -173,13 +225,20 @@ namespace PulseForgeEditor
 
 		[[nodiscard]] bool Button(EditorIcon Icon, std::string_view Label) const;
 		[[nodiscard]] bool AccentButton(EditorIcon Icon, std::string_view Label) const;
+		[[nodiscard]] bool DangerButton(EditorIcon Icon, std::string_view Label) const;
 		[[nodiscard]] bool SmallButton(EditorIcon Icon, std::string_view Label) const;
 		[[nodiscard]] bool ToolButton(EditorIcon Icon, std::string_view Label, bool Active) const;
+		[[nodiscard]] bool TreeNode(EditorIcon Icon, std::string_view Label, std::string_view StableID, int Flags) const;
+		[[nodiscard]] bool SectionHeader(
+			EditorIcon Icon,
+			std::string_view Label,
+			bool DefaultOpen = true) const;
 		[[nodiscard]] bool IconButton(
 			EditorIcon Icon,
 			std::string_view FallbackLabel,
 			std::string_view StableID,
-			std::string_view Tooltip) const;
+			std::string_view Tooltip,
+			bool Destructive = false) const;
 		[[nodiscard]] bool Selectable(
 			EditorIcon Icon,
 			std::string_view Label,
@@ -191,15 +250,23 @@ namespace PulseForgeEditor
 			const char* Shortcut = nullptr,
 			bool Selected = false,
 			bool Enabled = true) const;
+		[[nodiscard]] bool BeginToolbar(const char* ID, float Height = 32.0f) const;
+		void EndToolbar() const;
+		[[nodiscard]] bool BeginPropertyTable(const char* ID) const;
+		[[nodiscard]] bool BeginPropertyRow(std::string_view Label) const;
+		void EndPropertyTable() const;
+		void IconText(EditorIcon Icon, std::string_view Text) const;
+		void EmptyState(EditorIcon Icon, std::string_view Text) const;
 		void TextMuted(std::string_view Text) const;
-		void PushEmphasisFont() const;
-		void PushMonospaceFont() const;
-		void PopFont() const;
+		[[nodiscard]] ScopedFont PushEmphasisFont() const;
+		[[nodiscard]] ScopedFont PushMonospaceFont() const;
 
 	private:
 		ImFont* m_InterfaceFont = nullptr;
 		ImFont* m_EmphasisFont = nullptr;
 		ImFont* m_MonospaceFont = nullptr;
 		bool m_HasIcons = false;
+		PulseForge::OutputColorEncoding m_OutputColorEncoding = PulseForge::OutputColorEncoding::UnormAttachment;
+		bool m_ThemeApplied = false;
 	};
 }

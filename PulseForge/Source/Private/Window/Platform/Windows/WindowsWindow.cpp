@@ -53,6 +53,8 @@ namespace PulseForge
 			glfwWindowHint(GLFW_CLIENT_API, Props.m_ClientAPI == EWindowClientAPI::OpenGL
 				? GLFW_OPENGL_API
 				: GLFW_NO_API);
+			if (Props.m_ClientAPI == EWindowClientAPI::OpenGL)
+				glfwWindowHint(GLFW_SRGB_CAPABLE, GLFW_FALSE);
 
 			if (HasStyle(Props.m_Style, EWindowStyle::Borderless))
 			{

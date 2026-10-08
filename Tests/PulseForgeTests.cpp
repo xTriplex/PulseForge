@@ -1568,6 +1568,9 @@ namespace
 
 		PF_CHECK(Tests, CurrentDefaultEditorLayoutVersion == 1);
 		PF_CHECK(Tests, EditorPanelDescriptors.size() == static_cast<size_t>(EditorPanel::Count));
+		constexpr std::array<std::string_view, static_cast<size_t>(EditorPanel::Count)> StablePanelNames = {
+			"Scene Viewport", "Hierarchy", "Inspector", "Content Browser", "Console", "Scene"
+		};
 
 		EditorPanelVisibility Panels;
 		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::SceneViewport));
@@ -1580,6 +1583,7 @@ namespace
 		for (size_t Index = 0; Index < EditorPanelDescriptors.size(); ++Index)
 		{
 			const EditorPanelDescriptor& Descriptor = EditorPanelDescriptors[Index];
+			PF_CHECK(Tests, Descriptor.WindowName == StablePanelNames[Index]);
 			PF_CHECK(Tests, !Descriptor.SettingsKey.empty());
 			PF_CHECK(Tests, !Descriptor.WindowName.empty());
 			for (size_t OtherIndex = Index + 1; OtherIndex < EditorPanelDescriptors.size(); ++OtherIndex)
@@ -1728,6 +1732,35 @@ namespace
 			PF_CHECK(Tests, Color.Blue >= 0.0f && Color.Blue <= 1.0f);
 			PF_CHECK(Tests, Color.Alpha >= 0.0f && Color.Alpha <= 1.0f);
 		}
+		constexpr std::array<EditorColorToken, 4> GizmoColorTokens = {
+			EditorColorToken::GizmoAxisX,
+			EditorColorToken::GizmoAxisY,
+			EditorColorToken::GizmoAxisZ,
+			EditorColorToken::GizmoHighlight
+		};
+		for (const EditorColorToken Token : GizmoColorTokens)
+		{
+			const EditorColorValue Color = GetEditorColorValue(Token);
+			const EditorColorValue SrgbOutput = ConvertEditorColorForOutput(
+				Color, PulseForge::OutputColorEncoding::SrgbAttachment);
+			const EditorColorValue UnormOutput = ConvertEditorColorForOutput(
+				Color, PulseForge::OutputColorEncoding::UnormAttachment);
+			PF_CHECK(Tests, SrgbOutput.Alpha == Color.Alpha);
+			PF_CHECK(Tests, UnormOutput.Red == Color.Red && UnormOutput.Green == Color.Green &&
+				UnormOutput.Blue == Color.Blue && UnormOutput.Alpha == Color.Alpha);
+		}
+
+		const EditorColorValue DisplayColor{ 0.5f, 0.04045f, 1.0f, 0.37f };
+		const EditorColorValue LinearColor = ConvertEditorColorForOutput(
+			DisplayColor, PulseForge::OutputColorEncoding::SrgbAttachment);
+		PF_CHECK(Tests, std::abs(LinearColor.Red - 0.21404114f) < 1.0e-6f);
+		PF_CHECK(Tests, std::abs(LinearColor.Green - 0.003130805f) < 1.0e-7f);
+		PF_CHECK(Tests, LinearColor.Blue == 1.0f);
+		PF_CHECK(Tests, LinearColor.Alpha == DisplayColor.Alpha);
+		const EditorColorValue UnormColor = ConvertEditorColorForOutput(
+			DisplayColor, PulseForge::OutputColorEncoding::UnormAttachment);
+		PF_CHECK(Tests, UnormColor.Red == DisplayColor.Red && UnormColor.Green == DisplayColor.Green &&
+			UnormColor.Blue == DisplayColor.Blue && UnormColor.Alpha == DisplayColor.Alpha);
 
 		std::array<bool, static_cast<size_t>(EditorIcon::Count)> SeenIcons{};
 		for (size_t Index = 0; Index < EditorIconDescriptors.size(); ++Index)

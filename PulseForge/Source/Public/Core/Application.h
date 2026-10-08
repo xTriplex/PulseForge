@@ -34,6 +34,7 @@ namespace PulseForge
 		inline Window& GetWindow() { return *m_Window; }
 		Input& GetInput() { return m_Input; }
 		RendererAPI GetRendererAPI() const { return m_RendererAPI; }
+		[[nodiscard]] OutputColorEncoding GetOutputColorEncoding() const noexcept;
 		// Renderer resources should be released before this Application is destroyed.
 		BufferCreateResult CreateBuffer(const BufferDesc& Description, std::span<const std::byte> InitialData = {});
 		// Records an aligned constant-buffer or dynamic geometry-buffer update on the active renderer frame.

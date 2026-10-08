@@ -17,6 +17,7 @@ namespace PulseForge
 	public:
 		virtual ~RendererBackend() = default;
 
+		[[nodiscard]] virtual OutputColorEncoding GetOutputColorEncoding() const noexcept = 0;
 		virtual bool BeginFrame() = 0;
 		virtual void EndFrame() = 0;
 		virtual RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description) = 0;
