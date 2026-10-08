@@ -187,11 +187,11 @@ namespace PulseForgeEditor
 		return Length;
 	}
 
-	inline constexpr float EditorIconFontPixelSize = 16.0f;
+	inline constexpr float EditorIconFontPixelSize = 17.0f;
 	inline constexpr std::array<EditorFontDescriptor, 3> EditorFontDescriptors = {{
-		{ EditorFontRole::Interface, "Fonts/Inter-Regular.ttf", 16.0f },
-		{ EditorFontRole::Emphasis, "Fonts/Inter-SemiBold.ttf", 16.0f },
-		{ EditorFontRole::Monospace, "Fonts/JetBrainsMono-Regular.ttf", 15.0f }
+		{ EditorFontRole::Interface, "Fonts/Inter-Regular.ttf", 17.0f },
+		{ EditorFontRole::Emphasis, "Fonts/Inter-SemiBold.ttf", 17.0f },
+		{ EditorFontRole::Monospace, "Fonts/JetBrainsMono-Regular.ttf", 16.0f }
 	}};
 
 	// Loads editor fonts into the current ImGui atlas. The atlas owns the font data;

@@ -348,8 +348,8 @@ namespace PulseForgeEditor
 		m_ThemeApplied = true;
 		ImGuiStyle& Style = ImGui::GetStyle();
 		Style.WindowPadding = { 9.0f, 8.0f };
-		Style.FramePadding = { 7.0f, 5.0f };
-		Style.ItemSpacing = { 8.0f, 6.0f };
+		Style.FramePadding = { 7.0f, 6.0f };
+		Style.ItemSpacing = { 8.0f, 7.0f };
 		Style.ItemInnerSpacing = { 6.0f, 4.0f };
 		Style.IndentSpacing = 15.0f;
 		Style.ScrollbarSize = 12.0f;
@@ -572,18 +572,18 @@ namespace PulseForgeEditor
 				GlyphBytes = 3;
 			else if ((FirstByte & 0xf8u) == 0xf0u)
 				GlyphBytes = 4;
-			const float GlyphFontSize = ImGui::GetFontSize() + 10.0f;
+			const float GlyphFontSize = ImGui::GetFontSize() + 12.0f;
 			const ImVec2 GlyphSize = ImGui::GetFont()->CalcTextSizeA(
 				GlyphFontSize, (std::numeric_limits<float>::max)(), 0.0f, Glyph.data(), Glyph.data() + GlyphBytes);
 			const ImVec2 GlyphPosition(
 				Minimum.x + (Size.x - GlyphSize.x) * 0.5f,
-				Minimum.y + 8.0f);
+				Minimum.y + 10.0f);
 			DrawList->AddText(ImGui::GetFont(), GlyphFontSize, GlyphPosition,
 				ImGui::GetColorU32(GetColor(EditorColorToken::AccentHovered)),
 				Glyph.data(), Glyph.data() + GlyphBytes);
 		}
 
-		const float NameTop = Minimum.y + (Descriptor ? 39.0f : 11.0f);
+		const float NameTop = Minimum.y + (Descriptor ? 49.0f : 11.0f);
 		const float NameWidth = (std::max)(Size.x - 12.0f, 1.0f);
 		const ImVec2 NameSize = ImGui::GetFont()->CalcTextSizeA(
 			ImGui::GetFontSize(), NameWidth, 0.0f, Label.data(), Label.data() + Label.size());
@@ -614,7 +614,7 @@ namespace PulseForgeEditor
 		ImGui::PushStyleColor(ImGuiCol_Header, GetColor(EditorColorToken::PanelRaised));
 		ImGui::PushStyleColor(ImGuiCol_HeaderHovered, GetColor(EditorColorToken::BorderStrong));
 		ImGui::PushStyleColor(ImGuiCol_HeaderActive, GetColor(EditorColorToken::Selection));
-		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(7.0f, 6.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 7.0f));
 		const bool Expanded = ImGui::CollapsingHeader(Text.data(), Flags);
 		ImGui::PopStyleVar();
 		ImGui::PopStyleColor(3);
@@ -672,7 +672,7 @@ namespace PulseForgeEditor
 	{
 		ImGui::PushStyleColor(ImGuiCol_ChildBg, GetColor(EditorColorToken::PanelRaised));
 		ImGui::PushStyleColor(ImGuiCol_Border, GetColor(EditorColorToken::Border));
-		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 3.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(7.0f, 4.0f));
 		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 2.0f);
 		return ImGui::BeginChild(ID, ImVec2(0.0f, Height), ImGuiChildFlags_Borders,
 			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings);
@@ -768,8 +768,9 @@ namespace PulseForgeEditor
 	{
 		ImGui::PushStyleColor(ImGuiCol_ChildBg, GetColor(EditorColorToken::Panel));
 		ImGui::PushStyleColor(ImGuiCol_Border, GetColor(EditorColorToken::Border));
-		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 6.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 8.0f));
 		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 2.0f);
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(7.0f, 6.0f));
 		(void)ImGui::BeginChild(ID, ImVec2(0.0f, 0.0f),
 			ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
 			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings);
@@ -778,7 +779,7 @@ namespace PulseForgeEditor
 	void EditorStyle::EndComponentBody() const
 	{
 		ImGui::EndChild();
-		ImGui::PopStyleVar(2);
+		ImGui::PopStyleVar(3);
 		ImGui::PopStyleColor(2);
 		ImGui::Spacing();
 	}

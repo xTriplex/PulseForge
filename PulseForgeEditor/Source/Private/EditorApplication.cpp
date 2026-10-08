@@ -144,6 +144,19 @@ namespace
 		return NormalizedExtension(Path) == ".meta";
 	}
 
+	PulseForgeEditor::EditorIcon GetEntityIcon(const PulseForge::Entity& Entity)
+	{
+		const auto Camera = Entity.GetCamera();
+		if (Camera && Camera->has_value())
+			return PulseForgeEditor::EditorIcon::Camera;
+
+		const auto Mesh = Entity.GetMeshRenderer();
+		if (Mesh && Mesh->has_value())
+			return PulseForgeEditor::EditorIcon::Cube;
+
+		return PulseForgeEditor::EditorIcon::Entity;
+	}
+
 	class DialogPath final
 	{
 	public:
@@ -477,6 +490,7 @@ namespace
 			ImGui_ImplGlfw_NewFrame();
 			ImGui::NewFrame();
 			m_EditorStyle.ApplyTheme(PulseForge::Application::Get().GetOutputColorEncoding());
+			HandleViewportToolShortcuts();
 
 			DrawMainMenu();
 			DrawEditorToolbar();
@@ -1602,22 +1616,19 @@ namespace
 
 		void DrawEditorToolbar()
 		{
-			constexpr float Height = 52.0f;
+			constexpr float Height = 60.0f;
 			if (!BeginEditorChromeBar("##PulseForgeGlobalToolbar", ImGuiDir_Up, Height,
 				PulseForgeEditor::EditorColorToken::PanelRaised, m_EditorStyle))
 				return;
 
 			const float ContentWidth = ImGui::GetContentRegionAvail().x;
-			const bool HasVulkanViewport =
-				PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan;
-			const bool CanEditViewport = m_Scene && !m_SceneRuntime;
 			if (ImGui::BeginTable("GlobalToolbarLayout", 3,
 				ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings))
 			{
 				ImGui::TableSetupColumn("Tools", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-				ImGui::TableSetupColumn("Runtime", ImGuiTableColumnFlags_WidthFixed, 160.0f);
+				ImGui::TableSetupColumn("Runtime", ImGuiTableColumnFlags_WidthFixed, 188.0f);
 				ImGui::TableSetupColumn("Save", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-				ImGui::TableNextRow(ImGuiTableRowFlags_None, 42.0f);
+				ImGui::TableNextRow(ImGuiTableRowFlags_None, 50.0f);
 
 				ImGui::TableSetColumnIndex(0);
 				if (m_Project && ContentWidth >= 1450.0f)
@@ -1642,31 +1653,11 @@ namespace
 					ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
 					ImGui::SameLine(0.0f, 10.0f);
 				}
-
-				if (HasVulkanViewport)
-				{
-					if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Translate, "Move", "GlobalMoveTool",
-						"Move selected entity", m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Translate,
-						CanEditViewport, 38.0f))
-						SetGizmoOperation(PulseForgeEditor::TransformGizmoOperation::Translate);
-					ImGui::SameLine(0.0f, 5.0f);
-					if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Rotate, "Rotate", "GlobalRotateTool",
-						"Rotate selected entity", m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Rotate,
-						CanEditViewport, 38.0f))
-						SetGizmoOperation(PulseForgeEditor::TransformGizmoOperation::Rotate);
-					ImGui::SameLine(0.0f, 5.0f);
-					if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Scale, "Scale", "GlobalScaleTool",
-						"Scale selected entity", m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Scale,
-						CanEditViewport, 38.0f))
-						SetGizmoOperation(PulseForgeEditor::TransformGizmoOperation::Scale);
-					ImGui::SameLine(0.0f, 10.0f);
-					m_EditorStyle.TextMuted("Local");
-				}
 				ImGui::TableSetColumnIndex(1);
-				const float RuntimeWidth = m_SceneRuntime ? 100.0f : 90.0f;
+				const float RuntimeWidth = m_SceneRuntime ? 116.0f : 112.0f;
 				ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
 				(std::max)(0.0f, (ImGui::GetContentRegionAvail().x - RuntimeWidth) * 0.5f));
-				ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(20.0f, 6.0f));
+				ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(24.0f, 8.0f));
 				if (!m_SceneRuntime)
 				{
 					ImGui::BeginDisabled(!m_Project || !m_Scene);
@@ -1682,12 +1673,12 @@ namespace
 				ImGui::PopStyleVar();
 
 				ImGui::TableSetColumnIndex(2);
-				const float SaveWidth = 38.0f;
+				const float SaveWidth = 42.0f;
 				ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
 					(std::max)(0.0f, ImGui::GetContentRegionAvail().x - SaveWidth));
 				ImGui::BeginDisabled(!m_Scene || !m_SceneAsset || m_SceneRuntime);
 				if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Save, "Save", "GlobalSaveScene",
-					"Save the current scene", false, SaveWidth, 36.0f))
+					"Save the current scene", false, SaveWidth, 40.0f))
 					SaveScene();
 				ImGui::EndDisabled();
 				ImGui::EndTable();
@@ -1721,7 +1712,7 @@ namespace
 
 		void DrawStatusBar()
 		{
-			if (!BeginEditorChromeBar("##PulseForgeStatusBar", ImGuiDir_Down, 24.0f,
+			if (!BeginEditorChromeBar("##PulseForgeStatusBar", ImGuiDir_Down, 28.0f,
 				PulseForgeEditor::EditorColorToken::MenuBar, m_EditorStyle))
 				return;
 
@@ -1814,6 +1805,9 @@ namespace
 			DrawContentBrowserPanel();
 			DrawDeleteAssetDialog();
 			DrawConsolePanel();
+#ifndef PF_EDITOR_RENDERER_OPENGL
+			DrawViewportTransformTabTools();
+#endif
 		}
 
 		bool BeginEditorPanel(PulseForgeEditor::EditorPanel Panel)
@@ -2007,7 +2001,8 @@ namespace
 								ImGui::SetCursorScreenPos(HelpMinimum);
 								(void)m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Info,
 									"Help", "ViewportNavigationHelp",
-									"Right mouse: look\nW/A/S/D: move\nQ/E: down/up\nShift: move faster",
+									"Right mouse + drag: look\nWhile holding right mouse: WASD move; Q/E down/up; Shift faster\n"
+									"Without right mouse: Q/W/E/R select/move/rotate/scale",
 									false, true, 27.0f);
 								// Finish the cursor restore at the image edge; the normal post-image cursor includes extra spacing.
 								ImGui::SetCursorScreenPos(ImVec2(CursorAfterImage.x, ImageMaximum.y));
@@ -2046,12 +2041,127 @@ namespace
 			ImGui::End();
 		}
 
-		void SetGizmoOperation(PulseForgeEditor::TransformGizmoOperation Operation)
+#ifndef PF_EDITOR_RENDERER_OPENGL
+		void DrawViewportTransformTabTools()
 		{
-			if (m_GizmoOperation == Operation)
+			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport))
+				return;
+
+			ImGuiWindow* ViewportWindow = ImGui::FindWindowByName(
+				PulseForgeEditor::EditorPanelDescriptors[
+					static_cast<size_t>(PulseForgeEditor::EditorPanel::SceneViewport)].WindowName.data());
+			if (!ViewportWindow || !ViewportWindow->DockNode)
+				return;
+
+			ImGuiDockNode* DockNode = ViewportWindow->DockNode;
+			if (!DockNode->TabBar || DockNode->IsHiddenTabBar() || DockNode->IsNoTabBar())
+				return;
+
+			const ImRect& TabBarRect = DockNode->TabBar->BarRect;
+			const ImRect& ViewportTabRect = ViewportWindow->DC.DockTabItemRect;
+			constexpr float ButtonSize = 28.0f;
+			constexpr float GroupWidth = ButtonSize * 4.0f + 4.0f * 3.0f + 8.0f + 36.0f;
+			const float ToolbarLeft = ViewportTabRect.Max.x + 5.0f;
+			if (ViewportTabRect.GetWidth() <= 1.0f || TabBarRect.GetHeight() < ButtonSize ||
+				TabBarRect.Max.x - ToolbarLeft < GroupWidth ||
+				!ImGui::DockNodeBeginAmendTabBar(DockNode))
+				return;
+
+			ImGui::SetCursorScreenPos(ImVec2(
+				ToolbarLeft,
+				TabBarRect.Min.y + (TabBarRect.GetHeight() - ButtonSize) * 0.5f));
+			const bool CanEditViewport = m_Scene && !m_SceneRuntime;
+			if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Select, "Select", "ViewportSelectTool",
+				"Select entities in the viewport (Q)", m_ViewportTool == PulseForgeEditor::ViewportTool::Select,
+				CanEditViewport, ButtonSize))
+			{
+				SetViewportTool(PulseForgeEditor::ViewportTool::Select);
+			}
+			ImGui::SameLine(0.0f, 4.0f);
+			if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Translate, "Move", "ViewportMoveTool",
+				"Move selected entity (W)", m_ViewportTool == PulseForgeEditor::ViewportTool::Move,
+				CanEditViewport, ButtonSize))
+			{
+				SetViewportTool(PulseForgeEditor::ViewportTool::Move);
+			}
+			ImGui::SameLine(0.0f, 4.0f);
+			if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Rotate, "Rotate", "ViewportRotateTool",
+				"Rotate selected entity (E)", m_ViewportTool == PulseForgeEditor::ViewportTool::Rotate,
+				CanEditViewport, ButtonSize))
+			{
+				SetViewportTool(PulseForgeEditor::ViewportTool::Rotate);
+			}
+			ImGui::SameLine(0.0f, 4.0f);
+			if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Scale, "Scale", "ViewportScaleTool",
+				"Scale selected entity (R)", m_ViewportTool == PulseForgeEditor::ViewportTool::Scale,
+				CanEditViewport, ButtonSize))
+			{
+				SetViewportTool(PulseForgeEditor::ViewportTool::Scale);
+			}
+			ImGui::SameLine(0.0f, 8.0f);
+			m_EditorStyle.TextMuted("Local");
+			ImGui::DockNodeEndAmendTabBar();
+		}
+#endif
+
+		void SetViewportTool(PulseForgeEditor::ViewportTool Tool)
+		{
+			if (m_ViewportTool == Tool)
 				return;
 			CancelGizmoInteraction();
-			m_GizmoOperation = Operation;
+			m_ViewportTool = Tool;
+			switch (Tool)
+			{
+			case PulseForgeEditor::ViewportTool::Move:
+				m_GizmoOperation = PulseForgeEditor::TransformGizmoOperation::Translate;
+				break;
+			case PulseForgeEditor::ViewportTool::Rotate:
+				m_GizmoOperation = PulseForgeEditor::TransformGizmoOperation::Rotate;
+				break;
+			case PulseForgeEditor::ViewportTool::Scale:
+				m_GizmoOperation = PulseForgeEditor::TransformGizmoOperation::Scale;
+				break;
+			case PulseForgeEditor::ViewportTool::Select:
+				break;
+			}
+		}
+
+		void HandleViewportToolShortcuts()
+		{
+#ifdef PF_EDITOR_RENDERER_OPENGL
+			return;
+#else
+			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport))
+				return;
+
+			const ImGuiIO& IO = ImGui::GetIO();
+			const PulseForgeEditor::ViewportShortcutContext ShortcutContext{
+				.SceneAvailable = m_Scene != nullptr,
+				.RuntimeActive = m_SceneRuntime != nullptr,
+				.CameraNavigationActive = m_EditorCameraNavigationActive,
+				.RightMouseHeld = IO.MouseDown[ImGuiMouseButton_Right],
+				.TextInputActive = IO.WantTextInput,
+				.ActiveImGuiItem = ImGui::IsAnyItemActive(),
+				.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup),
+				.MenuNavigationActive = GImGui->NavLayer == ImGuiNavLayer_Menu ||
+					GImGui->NavWindowingTarget != nullptr,
+				.ModifierHeld = IO.KeyCtrl || IO.KeyShift || IO.KeyAlt || IO.KeySuper
+			};
+			// Keyboard navigation alone doesn't own these keys; text edits, active controls, menus, and popups do.
+			if (!PulseForgeEditor::CanHandleViewportToolShortcuts(ShortcutContext))
+				return;
+
+			constexpr std::array<std::pair<ImGuiKey, char>, 4> Shortcuts = {{
+				{ ImGuiKey_Q, 'Q' },
+				{ ImGuiKey_W, 'W' },
+				{ ImGuiKey_E, 'E' },
+				{ ImGuiKey_R, 'R' }
+			}};
+			for (const auto& [Key, Character] : Shortcuts)
+				if (ImGui::IsKeyPressed(Key, false))
+					if (const auto Tool = PulseForgeEditor::GetViewportToolForShortcut(Character))
+						SetViewportTool(*Tool);
+#endif
 		}
 
 		void HandleViewportImage(bool ImageClicked)
@@ -2084,7 +2194,7 @@ namespace
 			}
 
 			std::optional<ViewportGizmoGeometry> Geometry;
-			if (m_SelectedEntity)
+			if (m_SelectedEntity && m_ViewportTool != PulseForgeEditor::ViewportTool::Select)
 			{
 				if (const auto Selected = m_Scene->FindEntity(*m_SelectedEntity))
 					Geometry = BuildViewportGizmoGeometry(*Selected);
@@ -2847,7 +2957,7 @@ namespace
 						"The editor could not connect to the engine loggers.");
 				else
 				{
-					if (m_EditorStyle.BeginToolbar("ConsoleToolbar", 30.0f))
+					if (m_EditorStyle.BeginToolbar("ConsoleToolbar", 34.0f))
 					{
 						if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Clear, "Clear"))
 							m_ConsoleSink->Clear();
@@ -2910,17 +3020,17 @@ namespace
 				return;
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Hierarchy))
 			{
-				if (m_EditorStyle.BeginToolbar("HierarchyToolbar", 40.0f))
+				if (m_EditorStyle.BeginToolbar("HierarchyToolbar", 44.0f))
 				{
 					ImGui::BeginDisabled(!m_Scene);
 					if (m_EditorStyle.IconButton(
-						PulseForgeEditor::EditorIcon::Add, "Create", "CreateEntity", "Create a new entity", false, 34.0f, 32.0f))
+						PulseForgeEditor::EditorIcon::Add, "Create", "CreateEntity", "Create a new entity", false, 38.0f, 34.0f))
 						CreateEntityFromEditor();
 					ImGui::SameLine();
 					ImGui::BeginDisabled(!m_SelectedEntity);
 					if (m_EditorStyle.IconButton(
 						PulseForgeEditor::EditorIcon::Duplicate, "Duplicate", "DuplicateEntity", "Duplicate selected entity",
-						false, 34.0f, 32.0f))
+						false, 38.0f, 34.0f))
 						DuplicateSelectedEntity();
 					ImGui::SameLine();
 					if (m_EditorStyle.IconButton(
@@ -2934,15 +3044,15 @@ namespace
 						"CreatePrefab",
 						"Create a prefab from the selection",
 						false,
-						34.0f,
-						32.0f))
+						38.0f,
+						34.0f))
 						CreatePrefabFromSelectedEntity();
 					ImGui::EndDisabled();
 					ImGui::EndDisabled();
 				}
 				m_EditorStyle.EndToolbar();
 				ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-				ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 6.0f));
+				ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 7.0f));
 				ImGui::InputTextWithHint("##HierarchySearch", "Search hierarchy...", &m_HierarchySearch);
 				ImGui::PopStyleVar();
 				ImGui::Separator();
@@ -2979,7 +3089,7 @@ namespace
 						}
 					}
 					const auto* Visible = m_HierarchySearch.empty() ? nullptr : &VisibleEntities;
-					ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 5.0f));
+					ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(7.0f, 6.0f));
 					for (const PulseForge::Entity& Entity : Entities)
 					{
 						const auto Parent = Entity.GetParent();
@@ -3100,16 +3210,7 @@ namespace
 				return;
 			}
 			const auto Children = Entity.GetChildren();
-			PulseForgeEditor::EditorIcon Icon = PulseForgeEditor::EditorIcon::Entity;
-			const auto Camera = Entity.GetCamera();
-			if (Camera && Camera->has_value())
-				Icon = PulseForgeEditor::EditorIcon::Camera;
-			else
-			{
-				const auto Mesh = Entity.GetMeshRenderer();
-				if (Mesh && Mesh->has_value())
-					Icon = PulseForgeEditor::EditorIcon::Cube;
-			}
+			const PulseForgeEditor::EditorIcon Icon = GetEntityIcon(Entity);
 			const std::string Identifier = Entity.GetUUID().ToString();
 			ImGui::PushID(Identifier.c_str());
 			ImGuiTreeNodeFlags Flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
@@ -3164,9 +3265,9 @@ namespace
 					auto Tag = Entity->GetTag();
 					if (Tag)
 					{
-						if (m_EditorStyle.BeginToolbar("InspectorEntityHeader", 68.0f))
+						if (m_EditorStyle.BeginToolbar("InspectorEntityHeader", 74.0f))
 						{
-							m_EditorStyle.IconText(PulseForgeEditor::EditorIcon::Entity, {});
+							m_EditorStyle.IconText(GetEntityIcon(*Entity), {});
 							ImGui::SameLine();
 							const float NameWidth = (std::max)(ImGui::GetContentRegionAvail().x, 1.0f);
 							ImGui::SetNextItemWidth(NameWidth);
@@ -3965,7 +4066,7 @@ namespace
 				return;
 
 			const float AvailableWidth = ImGui::GetContentRegionAvail().x;
-			const float DesiredTileWidth = 108.0f;
+			const float DesiredTileWidth = 122.0f;
 			const float Spacing = ImGui::GetStyle().ItemSpacing.x;
 			const int ColumnCount = (std::max)(1, static_cast<int>((AvailableWidth + Spacing) /
 				(DesiredTileWidth + Spacing)));
@@ -3974,7 +4075,7 @@ namespace
 				ImGuiTableFlags_NoBordersInBody))
 				return;
 
-			constexpr float TileHeight = 78.0f;
+			constexpr float TileHeight = 96.0f;
 			const int RowCount = static_cast<int>((Folders.size() + static_cast<size_t>(ColumnCount) - 1) /
 				static_cast<size_t>(ColumnCount));
 			ImGuiListClipper Clipper;
@@ -4057,7 +4158,7 @@ namespace
 				return;
 
 			const float AvailableWidth = ImGui::GetContentRegionAvail().x;
-			const float DesiredTileWidth = 112.0f;
+			const float DesiredTileWidth = 124.0f;
 			const float Spacing = ImGui::GetStyle().ItemSpacing.x;
 			const int ColumnCount = (std::max)(1, static_cast<int>((AvailableWidth + Spacing) /
 				(DesiredTileWidth + Spacing)));
@@ -4068,7 +4169,7 @@ namespace
 				ImGuiTableFlags_NoBordersInBody))
 				return;
 
-			constexpr float TileHeight = 86.0f;
+			constexpr float TileHeight = 102.0f;
 			ImGuiListClipper Clipper;
 			Clipper.Begin(RowCount, TileHeight + Spacing);
 			while (Clipper.Step())
@@ -4223,7 +4324,7 @@ namespace
 						}
 					}
 
-					if (m_EditorStyle.BeginToolbar("ContentBrowserToolbar", 31.0f))
+					if (m_EditorStyle.BeginToolbar("ContentBrowserToolbar", 37.0f))
 					{
 						const bool Compact = ImGui::GetWindowWidth() < 440.0f;
 						if (Compact
@@ -4497,6 +4598,7 @@ namespace
 		std::optional<GizmoDrag> m_GizmoDrag;
 		PulseForgeEditor::TransformGizmoOperation m_GizmoOperation =
 			PulseForgeEditor::TransformGizmoOperation::Translate;
+		PulseForgeEditor::ViewportTool m_ViewportTool = PulseForgeEditor::ViewportTool::Move;
 		std::unordered_map<PulseForge::AssetID, CpuPickingMesh, PulseForge::UUIDHash> m_PickingMeshCache;
 		std::unordered_map<PulseForge::AssetID, std::string, PulseForge::UUIDHash> m_PickingMeshErrors;
 		uint64_t m_ViewportTextureID = 0;

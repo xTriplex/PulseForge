@@ -1362,6 +1362,28 @@ namespace
 	{
 		using namespace PulseForge;
 		using namespace PulseForgeEditor;
+		PF_CHECK(Tests, GetViewportToolForShortcut('q') == ViewportTool::Select);
+		PF_CHECK(Tests, GetViewportToolForShortcut('Q') == ViewportTool::Select);
+		PF_CHECK(Tests, GetViewportToolForShortcut('w') == ViewportTool::Move);
+		PF_CHECK(Tests, GetViewportToolForShortcut('W') == ViewportTool::Move);
+		PF_CHECK(Tests, GetViewportToolForShortcut('e') == ViewportTool::Rotate);
+		PF_CHECK(Tests, GetViewportToolForShortcut('E') == ViewportTool::Rotate);
+		PF_CHECK(Tests, GetViewportToolForShortcut('r') == ViewportTool::Scale);
+		PF_CHECK(Tests, GetViewportToolForShortcut('R') == ViewportTool::Scale);
+		PF_CHECK(Tests, !GetViewportToolForShortcut('x'));
+		const ViewportShortcutContext Ready{ .SceneAvailable = true };
+		PF_CHECK(Tests, CanHandleViewportToolShortcuts(Ready));
+		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({ .SceneAvailable = true, .RuntimeActive = true }));
+		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({ .SceneAvailable = true, .CameraNavigationActive = true }));
+		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({ .SceneAvailable = true, .RightMouseHeld = true }));
+		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({ .SceneAvailable = true, .TextInputActive = true }));
+		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({ .SceneAvailable = true, .ActiveImGuiItem = true }));
+		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({ .SceneAvailable = true, .PopupOpen = true }));
+		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({ .SceneAvailable = true, .MenuNavigationActive = true }));
+		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({ .SceneAvailable = true, .ModifierHeld = true }));
+		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({}));
+		PF_CHECK(Tests, FindEditorIcon(EditorIcon::Translate)->Codepoint !=
+			FindEditorIcon(EditorIcon::Scale)->Codepoint);
 
 		const ViewportImageRect ImageRect{ { 100.0f, 50.0f }, { 300.0f, 150.0f } };
 		const auto TopLeft = NdcToViewportImage({ -1.0f, 1.0f }, ImageRect);
@@ -1752,9 +1774,9 @@ namespace
 		PF_CHECK(Tests, EditorFontDescriptors[0].RelativePath == "Fonts/Inter-Regular.ttf");
 		PF_CHECK(Tests, EditorFontDescriptors[1].RelativePath == "Fonts/Inter-SemiBold.ttf");
 		PF_CHECK(Tests, EditorFontDescriptors[2].RelativePath == "Fonts/JetBrainsMono-Regular.ttf");
-		PF_CHECK(Tests, EditorFontDescriptors[0].PixelSize == 16.0f);
-		PF_CHECK(Tests, EditorFontDescriptors[1].PixelSize == 16.0f);
-		PF_CHECK(Tests, EditorFontDescriptors[2].PixelSize == 15.0f);
+		PF_CHECK(Tests, EditorFontDescriptors[0].PixelSize == 17.0f);
+		PF_CHECK(Tests, EditorFontDescriptors[1].PixelSize == 17.0f);
+		PF_CHECK(Tests, EditorFontDescriptors[2].PixelSize == 16.0f);
 		PF_CHECK(Tests, EditorIconFontPixelSize == EditorFontDescriptors[0].PixelSize);
 		PF_CHECK(Tests, IsValidEditorTextGlyphRanges());
 		PF_CHECK(Tests, EditorTextGlyphRanges.back() == 0);
@@ -1843,6 +1865,8 @@ namespace
 		PF_CHECK(Tests, std::all_of(SeenIcons.begin(), SeenIcons.end(), [](bool Seen) { return Seen; }));
 		PF_CHECK(Tests, EditorIconGlyphRanges.back() == 0);
 		PF_CHECK(Tests, FindEditorIcon(EditorIcon::Count) == nullptr);
+		const EditorIconDescriptor* SelectIcon = FindEditorIcon(EditorIcon::Select);
+		PF_CHECK(Tests, SelectIcon && SelectIcon->Codepoint == 0xf245);
 	}
 
 	void TestSceneSerializationRoundTrip(TestRunner& Tests)

@@ -46,6 +46,7 @@ namespace PulseForgeEditor
 		Clear,
 		Close,
 		Import,
+		Select,
 		Count
 	};
 
@@ -79,7 +80,6 @@ namespace PulseForgeEditor
 		{ EditorIcon::Warning, 0xf071, "triangle-exclamation" },
 		{ EditorIcon::Folder, 0xf07b, "folder" },
 		{ EditorIcon::FolderOpen, 0xf07c, "folder-open" },
-		{ EditorIcon::Scale, 0xf0b2, "up-down-left-right" },
 		{ EditorIcon::Save, 0xf0c7, "floppy-disk" },
 		{ EditorIcon::Entity, 0xf111, "circle" },
 		{ EditorIcon::Terminal, 0xf120, "terminal" },
@@ -88,8 +88,10 @@ namespace PulseForgeEditor
 		{ EditorIcon::Cube, 0xf1b2, "cube" },
 		{ EditorIcon::Script, 0xf1c9, "file-code" },
 		{ EditorIcon::Delete, 0xf1f8, "trash" },
+		{ EditorIcon::Select, 0xf245, "arrow-pointer" },
 		{ EditorIcon::Duplicate, 0xf24d, "clone" },
 		{ EditorIcon::Rotate, 0xf2f1, "rotate" },
+		{ EditorIcon::Scale, 0xf424, "up-right-and-down-left-from-center" },
 		{ EditorIcon::Prefab, 0xf466, "box" },
 		{ EditorIcon::Clear, 0xf51a, "broom" },
 		{ EditorIcon::Close, 0xf52b, "door-open" },

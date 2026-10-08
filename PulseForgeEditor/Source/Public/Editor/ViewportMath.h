@@ -62,6 +62,50 @@ namespace PulseForgeEditor
 		Scale
 	};
 
+	enum class ViewportTool : uint8_t
+	{
+		Select,
+		Move,
+		Rotate,
+		Scale
+	};
+
+	struct ViewportShortcutContext
+	{
+		bool SceneAvailable = false;
+		bool RuntimeActive = false;
+		bool CameraNavigationActive = false;
+		bool RightMouseHeld = false;
+		bool TextInputActive = false;
+		bool ActiveImGuiItem = false;
+		bool PopupOpen = false;
+		bool MenuNavigationActive = false;
+		bool ModifierHeld = false;
+	};
+
+	[[nodiscard]] constexpr bool CanHandleViewportToolShortcuts(const ViewportShortcutContext& Context) noexcept
+	{
+		return Context.SceneAvailable && !Context.RuntimeActive && !Context.CameraNavigationActive &&
+			!Context.RightMouseHeld && !Context.TextInputActive && !Context.ActiveImGuiItem && !Context.PopupOpen &&
+			!Context.MenuNavigationActive && !Context.ModifierHeld;
+	}
+
+	[[nodiscard]] constexpr std::optional<ViewportTool> GetViewportToolForShortcut(char Key) noexcept
+	{
+		switch (Key)
+		{
+		case 'q':
+		case 'Q': return ViewportTool::Select;
+		case 'w':
+		case 'W': return ViewportTool::Move;
+		case 'e':
+		case 'E': return ViewportTool::Rotate;
+		case 'r':
+		case 'R': return ViewportTool::Scale;
+		default: return std::nullopt;
+		}
+	}
+
 	namespace Detail
 	{
 		inline bool IsFinite(const glm::vec2& Value)
