@@ -274,6 +274,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	add_executable(PulseForgeEditor
 		PulseForgeEditor/Source/Private/EditorApplication.cpp
 		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
+		PulseForgeEditor/Source/Private/EditorLayout.cpp
 	)
 	target_include_directories(PulseForgeEditor PRIVATE PulseForgeEditor/Source/Public)
 	target_compile_definitions(PulseForgeEditor PRIVATE PF_PLATFORM_WINDOWS)
@@ -282,7 +283,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	else()
 		target_compile_definitions(PulseForgeEditor PRIVATE PF_EDITOR_SHADER_DIRECTORY="Shaders")
 	endif()
-	target_link_libraries(PulseForgeEditor PRIVATE PulseForge PulseForgeImGui nfd::nfd spdlog::spdlog)
+	target_link_libraries(PulseForgeEditor PRIVATE PulseForge PulseForgeImGui nfd::nfd spdlog::spdlog shell32 ole32)
 	set_property(TARGET PulseForgeEditor PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeEditor>")
 endif()
 

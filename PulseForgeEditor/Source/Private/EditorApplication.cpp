@@ -21,6 +21,7 @@
 #include "Runtime/SceneRuntime.h"
 #include "Window/Window.h"
 #include "Editor/EditorImGuiRenderer.h"
+#include "Editor/EditorLayout.h"
 #include "Editor/ViewportMath.h"
 
 #include <GLFW/glfw3.h>
@@ -317,6 +318,8 @@ namespace
 			ImGuiStyle& Style = ImGui::GetStyle();
 			Style.WindowRounding = 0.0f;
 			Style.Colors[ImGuiCol_WindowBg].w = 1.0f;
+			if (auto Result = m_Layout.Initialize(); !Result)
+				ReportLayoutPersistenceError(Result.error());
 
 			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
 			#ifdef PF_EDITOR_RENDERER_OPENGL
@@ -396,12 +399,15 @@ namespace
 			ImGui_ImplGlfw_NewFrame();
 			ImGui::NewFrame();
 
-			ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+			if (m_Layout.SubmitDockspace())
+				CancelViewportInteractionForLayoutChange();
 			DrawMainMenu();
 			DrawWorkspacePanels();
 			RenderViewportScene();
 
 			ImGui::Render();
+			if (auto Result = m_Layout.SaveIfRequested(); !Result)
+				ReportLayoutPersistenceError(Result.error());
 			#ifdef PF_EDITOR_RENDERER_OPENGL
 			ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
@@ -1485,6 +1491,21 @@ namespace
 				ImGui::EndMenu();
 			}
 
+			if (ImGui::BeginMenu("Window"))
+			{
+				for (const PulseForgeEditor::EditorPanelDescriptor& Descriptor :
+					PulseForgeEditor::EditorPanelDescriptors)
+				{
+					const bool IsVisible = m_Layout.IsPanelVisible(Descriptor.Panel);
+					if (ImGui::MenuItem(Descriptor.WindowName.data(), nullptr, IsVisible))
+						SetEditorPanelVisible(Descriptor.Panel, !IsVisible);
+				}
+				ImGui::Separator();
+				if (ImGui::MenuItem("Reset Layout"))
+					m_Layout.RequestReset();
+				ImGui::EndMenu();
+			}
+
 			ImGui::SameLine();
 			if (!m_SceneRuntime)
 			{
@@ -1504,55 +1525,118 @@ namespace
 
 		void DrawWorkspacePanels()
 		{
-			if (ImGui::Begin("Scene"))
+			if (m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Scene))
 			{
-				if (m_Project)
+				if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Scene))
 				{
-					ImGui::Text("Project: %s", m_Project->GetDescription().Name.c_str());
-					if (m_Scene && m_SceneAsset)
+					if (m_Project)
 					{
-						const auto Record = m_Project->GetAssetRegistry().Find(*m_SceneAsset);
-						const std::string SceneName = Record
-							? PathToUtf8(Record->ProjectRelativePath)
-							: std::string("<unregistered>");
-						ImGui::Text("Scene: %s%s", SceneName.c_str(), m_SceneDirty ? " *" : "");
-						ImGui::Text("Entities: %zu", m_Scene->GetEntityCount());
-						if (m_SceneRuntime && m_RuntimeScene)
+						ImGui::Text("Project: %s", m_Project->GetDescription().Name.c_str());
+						if (m_Scene && m_SceneAsset)
 						{
-							ImGui::Separator();
-							ImGui::Text("Runtime simulation: playing (%zu entities)", m_RuntimeScene->GetEntityCount());
-							ImGui::TextWrapped("Running on an isolated scene copy. The viewport displays this runtime scene.");
+							const auto Record = m_Project->GetAssetRegistry().Find(*m_SceneAsset);
+							const std::string SceneName = Record
+								? PathToUtf8(Record->ProjectRelativePath)
+								: std::string("<unregistered>");
+							ImGui::Text("Scene: %s%s", SceneName.c_str(), m_SceneDirty ? " *" : "");
+							ImGui::Text("Entities: %zu", m_Scene->GetEntityCount());
+							if (m_SceneRuntime && m_RuntimeScene)
+							{
+								ImGui::Separator();
+								ImGui::Text("Runtime simulation: playing (%zu entities)", m_RuntimeScene->GetEntityCount());
+								ImGui::TextWrapped("Running on an isolated scene copy. The viewport displays this runtime scene.");
+							}
 						}
+						else
+							ImGui::TextUnformatted("No scene is open. Create one from the Scene menu or open a scene asset.");
 					}
 					else
-						ImGui::TextUnformatted("No scene is open. Create one from the Scene menu or open a scene asset.");
-				}
-				else
-					ImGui::TextUnformatted("Create or open a project from the File menu.");
+						ImGui::TextUnformatted("Create or open a project from the File menu.");
 
-				ImGui::Separator();
-				const ImVec4 Color = m_StatusIsError
-					? ImVec4(1.0f, 0.38f, 0.32f, 1.0f)
-					: m_StatusIsWarning ? ImVec4(1.0f, 0.75f, 0.28f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_Text);
-				ImGui::PushStyleColor(ImGuiCol_Text, Color);
-				ImGui::TextWrapped("%s", m_StatusMessage.c_str());
-				ImGui::PopStyleColor();
+					ImGui::Separator();
+					const ImVec4 Color = m_StatusIsError
+						? ImVec4(1.0f, 0.38f, 0.32f, 1.0f)
+						: m_StatusIsWarning ? ImVec4(1.0f, 0.75f, 0.28f, 1.0f) : ImGui::GetStyleColorVec4(ImGuiCol_Text);
+					ImGui::PushStyleColor(ImGuiCol_Text, Color);
+					ImGui::TextWrapped("%s", m_StatusMessage.c_str());
+					ImGui::PopStyleColor();
+				}
+				ImGui::End();
 			}
 			DrawUnsavedChangesDialog();
-			ImGui::End();
 
 			DrawSceneViewportPanel();
 			DrawHierarchyPanel();
 			DrawInspectorPanel();
 			DrawContentBrowserPanel();
-
+			DrawDeleteAssetDialog();
 			DrawConsolePanel();
+		}
+
+		bool BeginEditorPanel(PulseForgeEditor::EditorPanel Panel)
+		{
+			bool* IsOpen = m_Layout.GetPanelVisibility(Panel);
+			if (!IsOpen || !*IsOpen)
+				return false;
+
+			const bool WasOpen = *IsOpen;
+			const bool ContentsVisible = ImGui::Begin(
+				PulseForgeEditor::EditorPanelDescriptors[static_cast<size_t>(Panel)].WindowName.data(),
+				IsOpen);
+			if (WasOpen != *IsOpen)
+			{
+				m_Layout.MarkSettingsDirty();
+				HandleEditorPanelVisibilityChange(Panel);
+			}
+			return ContentsVisible;
+		}
+
+		void SetEditorPanelVisible(PulseForgeEditor::EditorPanel Panel, bool Visible)
+		{
+			if (m_Layout.SetPanelVisible(Panel, Visible))
+				HandleEditorPanelVisibilityChange(Panel);
+		}
+
+		void HandleEditorPanelVisibilityChange(PulseForgeEditor::EditorPanel Panel)
+		{
+			if (Panel != PulseForgeEditor::EditorPanel::SceneViewport ||
+				m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport))
+				return;
+
+			ResetViewportPanelInteraction();
+		}
+
+		void ResetViewportPanelInteraction()
+		{
+			EndEditorCameraNavigation();
+			CancelGizmoInteraction();
+			m_ViewportImageHovered = false;
+			m_ViewportImageRect = {};
+		}
+
+		void CancelViewportInteractionForLayoutChange()
+		{
+			ResetViewportPanelInteraction();
+		}
+
+		void ReportLayoutPersistenceError(const std::string& Message)
+		{
+			if (m_LayoutPersistenceError == Message)
+				return;
+			m_LayoutPersistenceError = Message;
+			PF_WARN("Editor workspace persistence failed: {}", Message);
 		}
 
 		void DrawSceneViewportPanel()
 		{
 			m_ViewportImageHovered = false;
-			if (ImGui::Begin("Scene Viewport"))
+			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport))
+			{
+				ResetViewportPanelInteraction();
+				return;
+			}
+
+			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::SceneViewport))
 			{
 				if (!m_Project)
 					ImGui::TextUnformatted("Open a project to render a scene.");
@@ -1640,10 +1724,7 @@ namespace
 				}
 			}
 			else
-			{
-				CancelGizmoInteraction();
-				m_ViewportImageRect = {};
-			}
+				ResetViewportPanelInteraction();
 			ImGui::End();
 		}
 
@@ -2230,7 +2311,7 @@ namespace
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			return;
 #else
-			if (!m_ViewportTarget)
+			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport) || !m_ViewportTarget)
 				return;
 
 			if (m_SceneRenderer && m_ViewportSceneReady)
@@ -2424,7 +2505,9 @@ namespace
 
 		void DrawConsolePanel()
 		{
-			if (ImGui::Begin("Console"))
+			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Console))
+				return;
+			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Console))
 			{
 				if (!m_ConsoleSink)
 					ImGui::TextUnformatted("The editor could not connect to the engine loggers.");
@@ -2473,7 +2556,9 @@ namespace
 
 		void DrawHierarchyPanel()
 		{
-			if (ImGui::Begin("Hierarchy"))
+			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Hierarchy))
+				return;
+			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Hierarchy))
 			{
 				ImGui::BeginDisabled(!m_Scene);
 				if (ImGui::Button("Create Entity"))
@@ -2654,7 +2739,9 @@ namespace
 
 		void DrawInspectorPanel()
 		{
-			if (ImGui::Begin("Inspector"))
+			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Inspector))
+				return;
+			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Inspector))
 			{
 				if (!m_Scene || !m_SelectedEntity)
 					ImGui::TextUnformatted("Select an entity in the Hierarchy.");
@@ -3118,7 +3205,9 @@ namespace
 
 		void DrawContentBrowserPanel()
 		{
-			if (ImGui::Begin("Content Browser"))
+			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::ContentBrowser))
+				return;
+			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::ContentBrowser))
 			{
 				if (!m_Project)
 					ImGui::TextUnformatted("Open a project to browse managed assets.");
@@ -3213,7 +3302,6 @@ namespace
 						else
 							m_SelectedAsset.reset();
 					}
-					DrawDeleteAssetDialog();
 				}
 			}
 			ImGui::End();
@@ -3342,6 +3430,10 @@ namespace
 				return;
 
 			ImGui::SetCurrentContext(m_Context);
+			if (auto Result = m_Layout.SaveNow(); !Result)
+				ReportLayoutPersistenceError(Result.error());
+			else
+				m_LayoutPersistenceError.clear();
 			#ifdef PF_EDITOR_RENDERER_OPENGL
 			if (m_OpenGLBackendActive)
 				ImGui_ImplOpenGL3_Shutdown();
@@ -3362,6 +3454,7 @@ namespace
 		}
 
 		ImGuiContext* m_Context = nullptr;
+		PulseForgeEditor::EditorLayout m_Layout;
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
 		bool m_GlfwBackendActive = false;
 		bool m_OpenGLBackendActive = false;
@@ -3408,6 +3501,7 @@ namespace
 		std::string m_ViewportTargetError;
 		std::string m_ViewportSceneError;
 		std::string m_ImGuiRenderingError;
+		std::string m_LayoutPersistenceError;
 		std::string m_StatusMessage = "Create or open a project to begin.";
 		bool m_StatusIsError = false;
 		bool m_StatusIsWarning = false;

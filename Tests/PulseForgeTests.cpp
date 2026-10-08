@@ -22,6 +22,7 @@
 #include "Core/Input.h"
 #include "Core/LayerStack.h"
 #include "Core/Timestep.h"
+#include "Editor/EditorLayout.h"
 #include "Editor/ImGuiRendererMath.h"
 #include "Editor/ViewportMath.h"
 #include "Audio/AudioEngine.h"
@@ -1558,6 +1559,47 @@ namespace
 		PF_CHECK(Tests, !ApplyLocalGizmoDelta(Initial, TransformGizmoOperation::Rotate, 3, 0.5f));
 		PF_CHECK(Tests, !ApplyLocalGizmoDelta(Initial, TransformGizmoOperation::Translate, 0,
 			std::numeric_limits<float>::infinity()));
+	}
+
+	void TestEditorWorkspacePanelState(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+
+		PF_CHECK(Tests, CurrentDefaultEditorLayoutVersion == 1);
+		PF_CHECK(Tests, EditorPanelDescriptors.size() == static_cast<size_t>(EditorPanel::Count));
+
+		EditorPanelVisibility Panels;
+		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::SceneViewport));
+		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::Hierarchy));
+		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::Inspector));
+		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::ContentBrowser));
+		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::Console));
+		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Scene));
+
+		for (size_t Index = 0; Index < EditorPanelDescriptors.size(); ++Index)
+		{
+			const EditorPanelDescriptor& Descriptor = EditorPanelDescriptors[Index];
+			PF_CHECK(Tests, !Descriptor.SettingsKey.empty());
+			PF_CHECK(Tests, !Descriptor.WindowName.empty());
+			for (size_t OtherIndex = Index + 1; OtherIndex < EditorPanelDescriptors.size(); ++OtherIndex)
+			{
+				PF_CHECK(Tests, Descriptor.SettingsKey != EditorPanelDescriptors[OtherIndex].SettingsKey);
+				PF_CHECK(Tests, Descriptor.WindowName != EditorPanelDescriptors[OtherIndex].WindowName);
+			}
+		}
+
+		PF_CHECK(Tests, Panels.SetVisible(EditorPanel::Scene, true));
+		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::Scene));
+		PF_CHECK(Tests, Panels.SetVisible(EditorPanel::Console, false));
+		PF_CHECK(Tests, !Panels.SetVisible(EditorPanel::Console, false));
+		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Console));
+		Panels.ResetToDefaults();
+		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::Console));
+		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Scene));
+		PF_CHECK(Tests, Panels.GetVisibility(EditorPanel::Scene) != nullptr);
+		PF_CHECK(Tests, Panels.GetVisibility(EditorPanel::Count) == nullptr);
+		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Count));
+		PF_CHECK(Tests, !Panels.SetVisible(EditorPanel::Count, true));
 	}
 
 	void TestEditorImGuiRendererMath(TestRunner& Tests)
@@ -5353,6 +5395,7 @@ int main()
 	TestEntityHandleIdentityAndLifetime(Tests);
 	TestSceneRenderSnapshot(Tests);
 	TestEditorViewportMath(Tests);
+	TestEditorWorkspacePanelState(Tests);
 	TestEditorImGuiRendererMath(Tests);
 	TestSceneSerializationRoundTrip(Tests);
 	TestSceneSerializerClone(Tests);
