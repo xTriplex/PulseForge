@@ -15,7 +15,14 @@ namespace PulseForge
 	{
 		RGBA8_UNorm,
 		RGBA8_Srgb,
+		RGBA32_Float,
 		Depth32Float
+	};
+
+	enum class TextureDimension : uint8_t
+	{
+		Texture2D,
+		TextureCube
 	};
 
 	enum class TextureUsage : uint8_t
@@ -41,7 +48,19 @@ namespace PulseForge
 		uint32_t Height = 0;
 		TextureFormat Format = TextureFormat::RGBA8_Srgb;
 		TextureUsage Usage = TextureUsage::ShaderResource;
+		TextureDimension Dimension = TextureDimension::Texture2D;
+		uint32_t MipLevels = 1;
 		std::string DebugName;
+	};
+
+	struct TextureSubresourceData
+	{
+		uint32_t MipLevel = 0;
+		// Texture2D uses slice zero. TextureCube uses +X, -X, +Y, -Y, +Z, -Z.
+		uint32_t ArraySlice = 0;
+		std::span<const std::byte> Data;
+		// Zero means tightly packed. Non-zero pitches must be at least the packed row size.
+		size_t RowPitch = 0;
 	};
 
 	class PULSEFORGE_API Texture
@@ -59,6 +78,12 @@ namespace PulseForge
 		Linear
 	};
 
+	enum class SamplerMipFilter : uint8_t
+	{
+		None,
+		Linear
+	};
+
 	enum class SamplerAddressMode : uint8_t
 	{
 		Repeat,
@@ -69,6 +94,7 @@ namespace PulseForge
 	{
 		SamplerFilter Minification = SamplerFilter::Linear;
 		SamplerFilter Magnification = SamplerFilter::Linear;
+		SamplerMipFilter Mip = SamplerMipFilter::None;
 		SamplerAddressMode AddressU = SamplerAddressMode::Repeat;
 		SamplerAddressMode AddressV = SamplerAddressMode::Repeat;
 		std::string DebugName;
@@ -103,5 +129,8 @@ namespace PulseForge
 	[[nodiscard]] PULSEFORGE_API std::expected<size_t, TextureError> ValidateTextureUpload(
 		const TextureDesc& Description,
 		size_t InitialDataSize);
+	[[nodiscard]] PULSEFORGE_API std::expected<void, TextureError> ValidateTextureUpload(
+		const TextureDesc& Description,
+		std::span<const TextureSubresourceData> InitialData);
 	[[nodiscard]] PULSEFORGE_API std::expected<void, TextureError> ValidateSamplerDescription(const SamplerDesc& Description);
 }

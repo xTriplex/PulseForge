@@ -26,10 +26,10 @@ namespace PulseForge
 		if (Description.Items.size() > 16)
 			return MakeError(BindingErrorCode::InvalidLayout, "Binding layout exceeds PulseForge's 16-item limit");
 
-		std::array<std::array<bool, 32>, 3> SeenSlots = {};
+		std::array<std::array<bool, 32>, 4> SeenSlots = {};
 		for (const BindingLayoutItemDesc& Item : Description.Items)
 		{
-			if (Item.Type != BindingResourceType::Texture2D &&
+			if (Item.Type != BindingResourceType::Texture2D && Item.Type != BindingResourceType::TextureCube &&
 				Item.Type != BindingResourceType::Sampler &&
 				Item.Type != BindingResourceType::ConstantBuffer)
 				return MakeError(BindingErrorCode::InvalidLayout, "Binding layout contains an unsupported resource type");
@@ -59,7 +59,7 @@ namespace PulseForge
 		if (Description.Buffers.size() + Description.Textures.size() + Description.Samplers.size() != LayoutItems.size())
 			return MakeError(BindingErrorCode::InvalidSet, "Binding set must provide exactly one resource for each layout item");
 
-		std::array<std::array<bool, 32>, 3> SeenSlots = {};
+		std::array<std::array<bool, 32>, 4> SeenSlots = {};
 		const auto ValidateSlot = [&SeenSlots](BindingResourceType Type, uint32_t Slot) -> std::expected<void, BindingError>
 		{
 			if (Slot >= SeenSlots[0].size())
@@ -74,21 +74,29 @@ namespace PulseForge
 
 		for (const TextureBindingDesc& TextureBinding : Description.Textures)
 		{
-			const auto SlotValidation = ValidateSlot(BindingResourceType::Texture2D, TextureBinding.Slot);
+			const TextureDesc& TextureDescription = TextureBinding.Resource.get().GetDescription();
+			const BindingResourceType ExpectedType = TextureDescription.Dimension == TextureDimension::TextureCube
+				? BindingResourceType::TextureCube
+				: BindingResourceType::Texture2D;
+			if (TextureBinding.Type != ExpectedType)
+				return MakeError(BindingErrorCode::InvalidSet, "Texture resource dimension does not match its declared binding type");
+			if (TextureBinding.Type != BindingResourceType::Texture2D && TextureBinding.Type != BindingResourceType::TextureCube)
+				return MakeError(BindingErrorCode::InvalidSet, "Texture binding type must be Texture2D or TextureCube");
+			const auto SlotValidation = ValidateSlot(TextureBinding.Type, TextureBinding.Slot);
 			if (!SlotValidation)
 				return std::unexpected(SlotValidation.error());
-			if (!HasTextureUsage(TextureBinding.Resource.get().GetDescription().Usage, TextureUsage::ShaderResource) ||
-				TextureBinding.Resource.get().GetDescription().Format == TextureFormat::Depth32Float)
+			if (!HasTextureUsage(TextureDescription.Usage, TextureUsage::ShaderResource) ||
+				TextureDescription.Format == TextureFormat::Depth32Float)
 			{
 				return MakeError(BindingErrorCode::InvalidSet, "Texture binding requires a color texture with ShaderResource usage");
 			}
 
 			const auto LayoutItem = std::find_if(LayoutItems.begin(), LayoutItems.end(), [&TextureBinding](const auto& Item)
 			{
-				return Item.Slot == TextureBinding.Slot && Item.Type == BindingResourceType::Texture2D;
+				return Item.Slot == TextureBinding.Slot && Item.Type == TextureBinding.Type;
 			});
 			if (LayoutItem == LayoutItems.end())
-				return MakeError(BindingErrorCode::InvalidSet, "Texture binding does not match a Texture2D item in the layout");
+				return MakeError(BindingErrorCode::InvalidSet, "Texture binding dimension does not match its layout item");
 		}
 
 		for (const SamplerBindingDesc& SamplerBinding : Description.Samplers)

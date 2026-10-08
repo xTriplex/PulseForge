@@ -4674,6 +4674,35 @@ end
 			const auto InvalidImage = ImageAssetImporter::ImportRGBA8(InvalidImageMetadata->ID, ProjectRoot, Registry);
 			PF_CHECK(Tests, !InvalidImage && InvalidImage.error().Code == ImageAssetImportErrorCode::InvalidImage);
 		}
+
+		const std::filesystem::path HdrPath = TextureDirectory / "tiny.hdr";
+		{
+			constexpr std::string_view HdrHeader = "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 2\n";
+			std::ofstream Output(HdrPath, std::ios::binary | std::ios::trunc);
+			Output.write(HdrHeader.data(), static_cast<std::streamsize>(HdrHeader.size()));
+			constexpr std::array<uint8_t, 8> RgbePixels = { 128, 64, 32, 130, 128, 128, 128, 129 };
+			Output.write(reinterpret_cast<const char*>(RgbePixels.data()), static_cast<std::streamsize>(RgbePixels.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto HdrMetadata = AssetMetadataSerializer::CreateForNewAsset(HdrPath);
+		PF_CHECK(Tests, HdrMetadata.has_value());
+		if (HdrMetadata)
+		{
+			PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+			const auto ImportedHdr = ImageAssetImporter::ImportRGBA32F(HdrMetadata->ID, ProjectRoot, Registry);
+			PF_CHECK(Tests, ImportedHdr.has_value());
+			if (ImportedHdr)
+			{
+				PF_CHECK(Tests, ImportedHdr->Width == 2 && ImportedHdr->Height == 1);
+				PF_CHECK(Tests, ImportedHdr->RGBA32FPixels.size() == 8);
+				PF_CHECK(Tests, std::abs(ImportedHdr->RGBA32FPixels[0] - 2.0f) < 0.001f);
+				PF_CHECK(Tests, ImportedHdr->RGBA32FPixels[1] > 0.99f);
+				PF_CHECK(Tests, ImportedHdr->RGBA32FPixels[2] > 0.49f);
+				PF_CHECK(Tests, ImportedHdr->RGBA32FPixels[3] == 1.0f);
+			}
+			const auto RejectedLdrAsHdr = ImageAssetImporter::ImportRGBA32F(Metadata->ID, ProjectRoot, Registry);
+			PF_CHECK(Tests, !RejectedLdrAsHdr && RejectedLdrAsHdr.error().Code == ImageAssetImportErrorCode::InvalidImage);
+		}
 	}
 
 	std::vector<std::byte> MakeSilentWave(uint32_t SampleCount)
@@ -5597,6 +5626,49 @@ end
 		PF_CHECK(Tests, ValidateTextureUpload(Description, 16).value() == 16);
 		PF_CHECK(Tests, !ValidateTextureUpload(Description, 15).has_value());
 		PF_CHECK(Tests, !ValidateTextureUpload(Description, 17).has_value());
+		PF_CHECK(Tests, Description.Dimension == TextureDimension::Texture2D && Description.MipLevels == 1);
+
+		TextureDesc CubeDescription;
+		CubeDescription.Width = 1;
+		CubeDescription.Height = 1;
+		CubeDescription.Format = TextureFormat::RGBA32_Float;
+		CubeDescription.Dimension = TextureDimension::TextureCube;
+		std::array<std::byte, 96> CubeUploadBytes{};
+		std::array<TextureSubresourceData, 6> CubeSubresources{};
+		for (uint32_t Face = 0; Face < CubeSubresources.size(); ++Face)
+			CubeSubresources[Face] = { 0, Face, std::span(CubeUploadBytes).subspan(Face * 16, 16), 0 };
+		PF_CHECK(Tests, ValidateTextureUpload(CubeDescription, CubeSubresources).has_value());
+		PF_CHECK(Tests, !ValidateTextureUpload(CubeDescription, std::span(CubeSubresources).first(5)).has_value());
+		auto DuplicateFaceUploads = CubeSubresources;
+		DuplicateFaceUploads[5].ArraySlice = 4;
+		PF_CHECK(Tests, !ValidateTextureUpload(CubeDescription, DuplicateFaceUploads).has_value());
+		auto InvalidFaceUpload = CubeSubresources;
+		InvalidFaceUpload[0].ArraySlice = 6;
+		PF_CHECK(Tests, !ValidateTextureUpload(CubeDescription, InvalidFaceUpload).has_value());
+		auto InvalidCubePitch = CubeSubresources;
+		InvalidCubePitch[0].RowPitch = 15;
+		PF_CHECK(Tests, !ValidateTextureUpload(CubeDescription, InvalidCubePitch).has_value());
+		auto RectangularCube = CubeDescription;
+		RectangularCube.Height = 2;
+		PF_CHECK(Tests, !ValidateTextureUpload(RectangularCube, CubeSubresources).has_value());
+		auto ExcessMips = CubeDescription;
+		ExcessMips.MipLevels = 2;
+		PF_CHECK(Tests, !ValidateTextureUpload(ExcessMips, CubeSubresources).has_value());
+
+		TextureDesc MippedFloat2D = CubeDescription;
+		MippedFloat2D.Dimension = TextureDimension::Texture2D;
+		MippedFloat2D.Width = 2;
+		MippedFloat2D.Height = 2;
+		MippedFloat2D.MipLevels = 2;
+		const std::array<std::byte, 80> MippedUploadBytes{};
+		const std::array<TextureSubresourceData, 2> MippedSubresources = {
+			TextureSubresourceData{ 0, 0, std::span(MippedUploadBytes).first(64), 0 },
+			TextureSubresourceData{ 1, 0, std::span(MippedUploadBytes).last(16), 0 }
+		};
+		PF_CHECK(Tests, ValidateTextureUpload(MippedFloat2D, MippedSubresources).has_value());
+		auto MissingMipUpload = MippedSubresources;
+		MissingMipUpload[1].MipLevel = 0;
+		PF_CHECK(Tests, !ValidateTextureUpload(MippedFloat2D, MissingMipUpload).has_value());
 
 		auto ZeroWidth = Description;
 		ZeroWidth.Width = 0;
@@ -5724,6 +5796,24 @@ end
 		SetDescription.Samplers.push_back({ 0, std::cref(static_cast<const PulseForge::Sampler&>(Sampler)) });
 		SetDescription.Buffers.push_back({ 0, std::cref(static_cast<const Buffer&>(ConstantBuffer)) });
 		PF_CHECK(Tests, ValidateBindingSet(SetDescription).has_value());
+
+		auto CubeLayoutDescription = LayoutDescription;
+		CubeLayoutDescription.Items[0].Type = BindingResourceType::TextureCube;
+		BindingLayoutHandle CubeLayout = std::make_shared<TestBindingLayout>(CubeLayoutDescription);
+		TextureDesc CubeTextureDescription = TextureDescription;
+		CubeTextureDescription.Dimension = TextureDimension::TextureCube;
+		TestTexture FakeCubeTexture(CubeTextureDescription);
+		auto CubeBindingDescription = SetDescription;
+		CubeBindingDescription.Layout = CubeLayout;
+		CubeBindingDescription.Textures[0].Resource = std::cref(static_cast<const Texture&>(FakeCubeTexture));
+		CubeBindingDescription.Textures[0].Type = BindingResourceType::TextureCube;
+		PF_CHECK(Tests, ValidateBindingSet(CubeBindingDescription).has_value());
+		auto WrongCubeDimension = CubeBindingDescription;
+		WrongCubeDimension.Textures[0].Resource = std::cref(static_cast<const Texture&>(FakeTexture));
+		PF_CHECK(Tests, !ValidateBindingSet(WrongCubeDimension).has_value());
+		auto Wrong2DDimension = SetDescription;
+		Wrong2DDimension.Textures[0].Resource = std::cref(static_cast<const Texture&>(FakeCubeTexture));
+		PF_CHECK(Tests, !ValidateBindingSet(Wrong2DDimension).has_value());
 
 		auto DepthTextureBinding = SetDescription;
 		DepthTextureBinding.Textures[0].Resource = std::cref(static_cast<const Texture&>(FakeDepthTexture));

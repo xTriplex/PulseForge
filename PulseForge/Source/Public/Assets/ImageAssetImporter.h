@@ -19,6 +19,15 @@ namespace PulseForge
 		std::vector<uint8_t> RGBA8Pixels;
 	};
 
+	struct ImportedFloatImage
+	{
+		uint32_t Width = 0;
+		uint32_t Height = 0;
+		// Four linear-light floating-point channels in top-to-bottom row order.
+		// HDR values are not clamped; alpha is supplied by the decoder.
+		std::vector<float> RGBA32FPixels;
+	};
+
 	enum class ImageAssetImportErrorCode : uint8_t
 	{
 		AssetNotFound,
@@ -41,6 +50,11 @@ namespace PulseForge
 	public:
 		// Decodes a managed image by UUID. Decoded pixels are owned by the result; source paths are only registry locations.
 		[[nodiscard]] static std::expected<ImportedImage, ImageAssetImportError> ImportRGBA8(
+			const AssetID& Asset,
+			const std::filesystem::path& ProjectRoot,
+			const AssetRegistry& Registry);
+		// Imports managed Radiance .hdr assets as linear RGBA32F data without gamma conversion or clamping.
+		[[nodiscard]] static std::expected<ImportedFloatImage, ImageAssetImportError> ImportRGBA32F(
 			const AssetID& Asset,
 			const std::filesystem::path& ProjectRoot,
 			const AssetRegistry& Registry);

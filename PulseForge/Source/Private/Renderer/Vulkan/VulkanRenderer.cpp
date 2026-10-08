@@ -927,6 +927,7 @@ namespace PulseForge
 				switch (Item.Type)
 				{
 					case BindingResourceType::Texture2D:
+					case BindingResourceType::TextureCube:
 						NativeDescription.addItem(nvrhi::BindingLayoutItem::Texture_SRV(Item.Slot));
 						break;
 					case BindingResourceType::Sampler:
@@ -961,9 +962,9 @@ namespace PulseForge
 
 		TextureCreateResult CreateTexture(
 			const TextureDesc& Description,
-			std::span<const std::byte> InitialData) override
+			std::span<const TextureSubresourceData> InitialData) override
 		{
-			const auto Validation = ValidateTextureUpload(Description, InitialData.size());
+			const auto Validation = ValidateTextureUpload(Description, InitialData);
 			if (!Validation)
 				return std::unexpected(Validation.error());
 
@@ -972,6 +973,7 @@ namespace PulseForge
 			{
 				case TextureFormat::RGBA8_UNorm: Format = nvrhi::Format::RGBA8_UNORM; break;
 				case TextureFormat::RGBA8_Srgb: Format = nvrhi::Format::SRGBA8_UNORM; break;
+				case TextureFormat::RGBA32_Float: Format = nvrhi::Format::RGBA32_FLOAT; break;
 				case TextureFormat::Depth32Float: Format = nvrhi::Format::D32; break;
 			}
 			const bool IsDepthAttachment = Description.Format == TextureFormat::Depth32Float;
@@ -985,9 +987,13 @@ namespace PulseForge
 
 			nvrhi::TextureDesc NativeDescription;
 			NativeDescription
-				.setDimension(nvrhi::TextureDimension::Texture2D)
+				.setDimension(Description.Dimension == TextureDimension::TextureCube
+					? nvrhi::TextureDimension::TextureCube
+					: nvrhi::TextureDimension::Texture2D)
 				.setWidth(Description.Width)
 				.setHeight(Description.Height)
+				.setArraySize(Description.Dimension == TextureDimension::TextureCube ? 6u : 1u)
+				.setMipLevels(Description.MipLevels)
 				.setFormat(Format)
 				.setIsRenderTarget(IsDepthAttachment || IsColorAttachment)
 				.enableAutomaticStateTracking(InitialState)
@@ -1025,18 +1031,22 @@ namespace PulseForge
 				}
 
 				UploadCommandList->open();
-				UploadCommandList->setTextureState(
-					NativeTexture,
-					nvrhi::TextureSubresourceSet(),
-					nvrhi::ResourceStates::CopyDest);
+				UploadCommandList->setTextureState(NativeTexture, nvrhi::TextureSubresourceSet(), nvrhi::ResourceStates::CopyDest);
 				UploadCommandList->commitBarriers();
-				UploadCommandList->writeTexture(
-					NativeTexture,
-					0,
-					0,
-					InitialData.data(),
-					static_cast<size_t>(Description.Width) * 4,
-					0);
+				for (const TextureSubresourceData& Subresource : InitialData)
+				{
+					const size_t BytesPerPixel = Description.Format == TextureFormat::RGBA32_Float ? 16 : 4;
+					const size_t RowPitch = Subresource.RowPitch == 0
+						? static_cast<size_t>(std::max(1u, Description.Width >> Subresource.MipLevel)) * BytesPerPixel
+						: Subresource.RowPitch;
+					UploadCommandList->writeTexture(
+						NativeTexture,
+						Subresource.ArraySlice,
+						Subresource.MipLevel,
+						Subresource.Data.data(),
+						RowPitch,
+						0);
+				}
 				UploadCommandList->setTextureState(
 					NativeTexture,
 					nvrhi::TextureSubresourceSet(),
@@ -1158,7 +1168,7 @@ namespace PulseForge
 			NativeDescription
 				.setMinFilter(Description.Minification == SamplerFilter::Linear)
 				.setMagFilter(Description.Magnification == SamplerFilter::Linear)
-				.setMipFilter(false)
+				.setMipFilter(Description.Mip != SamplerMipFilter::None)
 				.setAddressU(ToNativeAddressMode(Description.AddressU))
 				.setAddressV(ToNativeAddressMode(Description.AddressV))
 				.setAddressW(nvrhi::SamplerAddressMode::Clamp);
@@ -2186,7 +2196,7 @@ namespace PulseForge
 				DepthDescription.Format = TextureFormat::Depth32Float;
 				DepthDescription.Usage = TextureUsage::DepthStencilAttachment;
 				DepthDescription.DebugName = "PulseForge swapchain depth image " + std::to_string(Index);
-				auto CreatedDepthTarget = CreateTexture(DepthDescription, std::span<const std::byte>{});
+				auto CreatedDepthTarget = CreateTexture(DepthDescription, std::span<const TextureSubresourceData>{});
 				if (!CreatedDepthTarget)
 					throw std::runtime_error("Could not create a Vulkan swapchain depth target: " + CreatedDepthTarget.error().Message);
 				Image.DepthTarget = std::move(CreatedDepthTarget.value());

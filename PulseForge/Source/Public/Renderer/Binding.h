@@ -17,6 +17,7 @@ namespace PulseForge
 	enum class BindingResourceType : uint8_t
 	{
 		Texture2D,
+		TextureCube,
 		Sampler,
 		ConstantBuffer
 	};
@@ -61,6 +62,7 @@ namespace PulseForge
 		uint32_t Slot = 0;
 		// The texture is borrowed while creating the set; the backend set retains its GPU resource.
 		std::reference_wrapper<const Texture> Resource;
+		BindingResourceType Type = BindingResourceType::Texture2D;
 	};
 
 	struct SamplerBindingDesc

@@ -34,7 +34,7 @@ namespace PulseForge
 			std::span<const std::byte> Data) = 0;
 		virtual TextureCreateResult CreateTexture(
 			const TextureDesc& Description,
-			std::span<const std::byte> InitialData) = 0;
+			std::span<const TextureSubresourceData> InitialData) = 0;
 		virtual SamplerCreateResult CreateSampler(const SamplerDesc& Description) = 0;
 		virtual BindingLayoutCreateResult CreateBindingLayout(const BindingLayoutDesc& Description) = 0;
 		virtual BindingSetCreateResult CreateBindingSet(const BindingSetDesc& Description) = 0;

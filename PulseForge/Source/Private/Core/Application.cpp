@@ -218,7 +218,19 @@ namespace PulseForge
 		const auto Validation = ValidateTextureUpload(Description, InitialData.size());
 		if (!Validation)
 			return std::unexpected(Validation.error());
+		if (InitialData.empty())
+			return CreateTexture(Description, std::span<const TextureSubresourceData>{});
+		const TextureSubresourceData Subresource{ 0, 0, InitialData, 0 };
+		return CreateTexture(Description, std::span(&Subresource, 1));
+	}
 
+	TextureCreateResult Application::CreateTexture(
+		const TextureDesc& Description,
+		std::span<const TextureSubresourceData> InitialData)
+	{
+		const auto Validation = ValidateTextureUpload(Description, InitialData);
+		if (!Validation)
+			return std::unexpected(Validation.error());
 		return m_Renderer->CreateTexture(Description, InitialData);
 	}
 

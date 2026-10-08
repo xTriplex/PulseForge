@@ -48,6 +48,9 @@ namespace PulseForge
 		GraphicsResult BeginRenderTarget(const RenderTarget& Target, const RenderTargetClearValue& ClearValue = {});
 		GraphicsResult EndRenderTarget();
 		TextureCreateResult CreateTexture(const TextureDesc& Description, std::span<const std::byte> InitialData);
+		TextureCreateResult CreateTexture(
+			const TextureDesc& Description,
+			std::span<const TextureSubresourceData> InitialData);
 		SamplerCreateResult CreateSampler(const SamplerDesc& Description);
 		BindingLayoutCreateResult CreateBindingLayout(const BindingLayoutDesc& Description);
 		BindingSetCreateResult CreateBindingSet(const BindingSetDesc& Description);

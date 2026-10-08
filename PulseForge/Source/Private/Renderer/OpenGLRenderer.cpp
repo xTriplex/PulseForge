@@ -235,7 +235,7 @@ namespace PulseForge
 			});
 		}
 
-		TextureCreateResult CreateTexture(const TextureDesc&, std::span<const std::byte>) override
+		TextureCreateResult CreateTexture(const TextureDesc&, std::span<const TextureSubresourceData>) override
 		{
 			return std::unexpected(TextureError{
 				TextureErrorCode::UnsupportedFeature,

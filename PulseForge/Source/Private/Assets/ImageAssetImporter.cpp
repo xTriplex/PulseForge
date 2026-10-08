@@ -5,11 +5,13 @@
 #include <stb_image.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <cmath>
 #include <system_error>
 
 namespace PulseForge
@@ -18,7 +20,18 @@ namespace PulseForge
 	{
 		constexpr uint64_t MaxSourceBytes = 128ull * 1024ull * 1024ull;
 		constexpr uint64_t MaxDecodedPixels = 32ull * 1024ull * 1024ull;
+		constexpr uint64_t MaxHdrDecodedPixels = 8ull * 1024ull * 1024ull;
 		constexpr int MaxImageDimension = 32768;
+
+		bool HasHdrExtension(const std::filesystem::path& Path)
+		{
+			std::string Extension = Path.extension().string();
+			std::ranges::transform(Extension, Extension.begin(), [](unsigned char Character)
+			{
+				return static_cast<char>(std::tolower(Character));
+			});
+			return Extension == ".hdr";
+		}
 
 		ImageAssetImportError MakeError(
 			ImageAssetImportErrorCode Code,
@@ -85,6 +98,13 @@ namespace PulseForge
 					ImageAssetImportErrorCode::AssetNotFound,
 					{},
 					"Image asset UUID " + Asset.ToString() + " is not present in the project asset registry"));
+			}
+			if (HasHdrExtension(Record->ProjectRelativePath))
+			{
+				return std::unexpected(MakeError(
+					ImageAssetImportErrorCode::InvalidImage,
+					Record->ProjectRelativePath,
+					"Radiance .hdr assets require ImportRGBA32F and cannot be quantized through the LDR image path"));
 			}
 
 			auto SourcePath = AssetPathResolver::ResolveManagedSourcePath(ProjectRoot, Record->ProjectRelativePath);
@@ -179,6 +199,142 @@ namespace PulseForge
 				ImageAssetImportErrorCode::FilesystemFailure,
 				{},
 				std::string("Image asset import failed: ") + Exception.what()));
+		}
+	}
+
+	std::expected<ImportedFloatImage, ImageAssetImportError> ImageAssetImporter::ImportRGBA32F(
+		const AssetID& Asset,
+		const std::filesystem::path& ProjectRoot,
+		const AssetRegistry& Registry)
+	{
+		try
+		{
+			const auto Record = Registry.Find(Asset);
+			if (!Record)
+			{
+				return std::unexpected(MakeError(
+					ImageAssetImportErrorCode::AssetNotFound,
+					{},
+					"HDR image asset UUID " + Asset.ToString() + " is not present in the project asset registry"));
+			}
+			if (!HasHdrExtension(Record->ProjectRelativePath))
+			{
+				return std::unexpected(MakeError(
+					ImageAssetImportErrorCode::InvalidImage,
+					Record->ProjectRelativePath,
+					"Floating-point environment import only accepts managed Radiance .hdr assets"));
+			}
+
+			auto SourcePath = AssetPathResolver::ResolveManagedSourcePath(ProjectRoot, Record->ProjectRelativePath);
+			if (!SourcePath)
+			{
+				return std::unexpected(MakeError(
+					ImageAssetImportErrorCode::InvalidProjectPath,
+					SourcePath.error().Path,
+					SourcePath.error().Message));
+			}
+			auto SourceBytes = ReadSourceFile(*SourcePath);
+			if (!SourceBytes)
+				return std::unexpected(std::move(SourceBytes.error()));
+
+			const auto* InputBytes = reinterpret_cast<const stbi_uc*>(SourceBytes->data());
+			const int InputLength = static_cast<int>(SourceBytes->size());
+			if (stbi_is_hdr_from_memory(InputBytes, InputLength) == 0)
+			{
+				return std::unexpected(MakeError(
+					ImageAssetImportErrorCode::InvalidImage,
+					*SourcePath,
+					"Managed .hdr asset is not a valid Radiance floating-point image"));
+			}
+
+			int Width = 0;
+			int Height = 0;
+			int SourceChannels = 0;
+			if (stbi_info_from_memory(InputBytes, InputLength, &Width, &Height, &SourceChannels) == 0)
+			{
+				const char* Failure = stbi_failure_reason();
+				return std::unexpected(MakeError(
+					ImageAssetImportErrorCode::InvalidImage,
+					*SourcePath,
+					std::string("Could not inspect Radiance HDR image: ") +
+						(Failure == nullptr ? "unknown decoder error" : Failure)));
+			}
+			if (Width <= 0 || Height <= 0 || Width > MaxImageDimension || Height > MaxImageDimension ||
+				static_cast<uint64_t>(Width) * static_cast<uint64_t>(Height) > MaxHdrDecodedPixels)
+			{
+				return std::unexpected(MakeError(
+					ImageAssetImportErrorCode::ResourceLimitExceeded,
+					*SourcePath,
+					"HDR image dimensions are invalid or exceed importer limits"));
+			}
+			const int InspectedWidth = Width;
+			const int InspectedHeight = Height;
+
+			float* DecodedPixels = stbi_loadf_from_memory(
+				InputBytes,
+				InputLength,
+				&Width,
+				&Height,
+				&SourceChannels,
+				STBI_rgb_alpha);
+			if (DecodedPixels == nullptr)
+			{
+				const char* Failure = stbi_failure_reason();
+				return std::unexpected(MakeError(
+					ImageAssetImportErrorCode::InvalidImage,
+					*SourcePath,
+					std::string("Could not decode Radiance HDR image: ") +
+						(Failure == nullptr ? "unknown decoder error" : Failure)));
+			}
+			const std::unique_ptr<float, decltype(&stbi_image_free)> PixelOwner(DecodedPixels, &stbi_image_free);
+			if (Width != InspectedWidth || Height != InspectedHeight || Width <= 0 || Height <= 0 ||
+				static_cast<uint64_t>(Width) * static_cast<uint64_t>(Height) > MaxHdrDecodedPixels)
+			{
+				return std::unexpected(MakeError(
+					ImageAssetImportErrorCode::InvalidImage,
+					*SourcePath,
+					"HDR decoder dimensions did not match the inspected image header"));
+			}
+
+			const size_t PixelCount = static_cast<size_t>(Width) * static_cast<size_t>(Height);
+			if (PixelCount > std::numeric_limits<size_t>::max() / 4)
+			{
+				return std::unexpected(MakeError(
+					ImageAssetImportErrorCode::ResourceLimitExceeded,
+					*SourcePath,
+					"HDR RGBA32F storage size exceeds the platform address range"));
+			}
+			const size_t ChannelCount = PixelCount * 4;
+			for (size_t Channel = 0; Channel < ChannelCount; ++Channel)
+			{
+				if (!std::isfinite(PixelOwner.get()[Channel]))
+				{
+					return std::unexpected(MakeError(
+						ImageAssetImportErrorCode::InvalidImage,
+						*SourcePath,
+						"HDR image contains a non-finite decoded channel"));
+				}
+			}
+
+			ImportedFloatImage Image;
+			Image.Width = static_cast<uint32_t>(Width);
+			Image.Height = static_cast<uint32_t>(Height);
+			Image.RGBA32FPixels.assign(PixelOwner.get(), PixelOwner.get() + ChannelCount);
+			return Image;
+		}
+		catch (const std::bad_alloc&)
+		{
+			return std::unexpected(MakeError(
+				ImageAssetImportErrorCode::ResourceLimitExceeded,
+				{},
+				"HDR image import could not allocate the bounded decode buffers"));
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(MakeError(
+				ImageAssetImportErrorCode::FilesystemFailure,
+				{},
+				std::string("HDR image import failed: ") + Exception.what()));
 		}
 	}
 }
