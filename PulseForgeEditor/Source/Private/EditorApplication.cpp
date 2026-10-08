@@ -4067,8 +4067,8 @@ namespace
 					DrawSelectedAssetDetails();
 					ImGui::EndChild();
 				}
-				ImGui::End();
 			}
+			ImGui::End();
 		}
 
 		void SetStatus(std::string Message)
