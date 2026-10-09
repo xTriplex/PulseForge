@@ -10,6 +10,17 @@ namespace PulseForge::VulkanSupport
 		return Features.TimelineSemaphore && Features.Synchronization2 && Features.DynamicRendering;
 	}
 
+	bool SupportsFormatUsage(
+		const FormatFeatureSupport& Features,
+		bool RequiresSampledImage,
+		bool RequiresColorAttachment,
+		bool RequiresLinearFiltering) noexcept
+	{
+		return (!RequiresSampledImage || Features.SampledImage) &&
+			(!RequiresColorAttachment || Features.ColorAttachment) &&
+			(!RequiresLinearFiltering || (Features.SampledImage && Features.LinearFiltering));
+	}
+
 	std::optional<QueueFamilySelection> ChooseQueueFamilies(std::span<const QueueFamily> Families)
 	{
 		std::optional<uint32_t> GraphicsIndex;

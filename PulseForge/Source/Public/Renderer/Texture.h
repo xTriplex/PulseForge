@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 
@@ -16,7 +17,8 @@ namespace PulseForge
 		RGBA8_UNorm,
 		RGBA8_Srgb,
 		RGBA32_Float,
-		Depth32Float
+		Depth32Float,
+		RGBA16_Float
 	};
 
 	enum class TextureDimension : uint8_t
@@ -129,6 +131,7 @@ namespace PulseForge
 	[[nodiscard]] PULSEFORGE_API std::expected<size_t, TextureError> ValidateTextureUpload(
 		const TextureDesc& Description,
 		size_t InitialDataSize);
+	[[nodiscard]] PULSEFORGE_API std::optional<size_t> GetTextureFormatBytesPerPixel(TextureFormat Format) noexcept;
 	[[nodiscard]] PULSEFORGE_API std::expected<void, TextureError> ValidateTextureUpload(
 		const TextureDesc& Description,
 		std::span<const TextureSubresourceData> InitialData);

@@ -129,7 +129,8 @@ namespace PulseForge
 
 		if (Description.ColorFormat != ColorTargetFormat::None && Description.ColorFormat != ColorTargetFormat::Swapchain &&
 			Description.ColorFormat != ColorTargetFormat::RGBA8_UNorm &&
-			Description.ColorFormat != ColorTargetFormat::RGBA8_Srgb)
+			Description.ColorFormat != ColorTargetFormat::RGBA8_Srgb &&
+			Description.ColorFormat != ColorTargetFormat::RGBA16_Float)
 		{
 			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline specifies an unsupported color target format");
 		}

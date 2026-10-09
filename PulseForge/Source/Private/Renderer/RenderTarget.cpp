@@ -21,11 +21,12 @@ namespace PulseForge
 			return MakeError(RenderTargetErrorCode::InvalidDescription, "Render targets require at least one attachment");
 
 		if (Description.ColorFormat != ColorTargetFormat::None && Description.ColorFormat != ColorTargetFormat::RGBA8_UNorm &&
-			Description.ColorFormat != ColorTargetFormat::RGBA8_Srgb)
+			Description.ColorFormat != ColorTargetFormat::RGBA8_Srgb &&
+			Description.ColorFormat != ColorTargetFormat::RGBA16_Float)
 		{
 			return MakeError(
 				RenderTargetErrorCode::InvalidDescription,
-				"Offscreen render targets require None, RGBA8_UNorm, or RGBA8_Srgb color format");
+				"Offscreen render targets require None, RGBA8_UNorm, RGBA8_Srgb, or RGBA16_Float color format");
 		}
 		if (Description.DepthMode != DepthAttachmentMode::None && Description.DepthMode != DepthAttachmentMode::Attachment &&
 			Description.DepthMode != DepthAttachmentMode::ShaderReadableAttachment)

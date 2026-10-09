@@ -992,12 +992,41 @@ namespace PulseForge
 			{
 				case TextureFormat::RGBA8_UNorm: Format = nvrhi::Format::RGBA8_UNORM; break;
 				case TextureFormat::RGBA8_Srgb: Format = nvrhi::Format::SRGBA8_UNORM; break;
+				case TextureFormat::RGBA16_Float: Format = nvrhi::Format::RGBA16_FLOAT; break;
 				case TextureFormat::RGBA32_Float: Format = nvrhi::Format::RGBA32_FLOAT; break;
 				case TextureFormat::Depth32Float: Format = nvrhi::Format::D32; break;
+				default: break;
 			}
+			if (Format == nvrhi::Format::UNKNOWN)
+				return std::unexpected(TextureError{ TextureErrorCode::InvalidDescription, "Texture format has no Vulkan/NVRHI mapping" });
+
 			const bool IsDepthAttachment = Description.Format == TextureFormat::Depth32Float;
 			const bool IsColorAttachment = HasTextureUsage(Description.Usage, TextureUsage::ColorAttachment);
 			const bool IsShaderResource = HasTextureUsage(Description.Usage, TextureUsage::ShaderResource);
+			if (Description.Format == TextureFormat::RGBA16_Float)
+			{
+				const vk::FormatProperties Properties = m_PhysicalDevice.getFormatProperties(vk::Format::eR16G16B16A16Sfloat);
+				const VkFormatFeatureFlags AvailableFeatures =
+					static_cast<VkFormatFeatureFlags>(Properties.optimalTilingFeatures);
+				const VulkanSupport::FormatFeatureSupport Features{
+					(AvailableFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0,
+					(AvailableFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) != 0,
+					(AvailableFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0
+				};
+				if (!VulkanSupport::SupportsFormatUsage(Features, IsShaderResource, IsColorAttachment, false))
+				{
+					std::string RequiredUsage;
+					if (IsShaderResource)
+						RequiredUsage = "sampled-image";
+					if (IsColorAttachment)
+						RequiredUsage += RequiredUsage.empty() ? "color-attachment" : " and color-attachment";
+					return std::unexpected(TextureError{
+						TextureErrorCode::UnsupportedFeature,
+						"The active Vulkan device does not support optimal-tiled RGBA16_Float " + RequiredUsage +
+							" usage required by texture '" + Description.DebugName + "'"
+					});
+				}
+			}
 			const nvrhi::ResourceStates InitialState = IsDepthAttachment
 				? nvrhi::ResourceStates::DepthWrite
 				: IsColorAttachment
@@ -1054,7 +1083,7 @@ namespace PulseForge
 				UploadCommandList->commitBarriers();
 				for (const TextureSubresourceData& Subresource : InitialData)
 				{
-					const size_t BytesPerPixel = Description.Format == TextureFormat::RGBA32_Float ? 16 : 4;
+					const size_t BytesPerPixel = *GetTextureFormatBytesPerPixel(Description.Format);
 					const size_t RowPitch = Subresource.RowPitch == 0
 						? static_cast<size_t>(std::max(1u, Description.Width >> Subresource.MipLevel)) * BytesPerPixel
 						: Subresource.RowPitch;
@@ -1101,17 +1130,32 @@ namespace PulseForge
 				TextureDesc ColorDescription;
 				ColorDescription.Width = Description.Width;
 				ColorDescription.Height = Description.Height;
-				ColorDescription.Format = Description.ColorFormat == ColorTargetFormat::RGBA8_UNorm
-					? TextureFormat::RGBA8_UNorm
-					: TextureFormat::RGBA8_Srgb;
+				switch (Description.ColorFormat)
+				{
+					case ColorTargetFormat::RGBA8_UNorm: ColorDescription.Format = TextureFormat::RGBA8_UNorm; break;
+					case ColorTargetFormat::RGBA8_Srgb: ColorDescription.Format = TextureFormat::RGBA8_Srgb; break;
+					case ColorTargetFormat::RGBA16_Float: ColorDescription.Format = TextureFormat::RGBA16_Float; break;
+					default:
+						return std::unexpected(RenderTargetError{
+							RenderTargetErrorCode::InvalidDescription,
+							"Offscreen color target format has no texture representation"
+						});
+				}
 				ColorDescription.Usage = TextureUsage::ShaderResource | TextureUsage::ColorAttachment;
 				ColorDescription.DebugName = Description.DebugName.empty()
 					? "PulseForge offscreen color"
 					: Description.DebugName + " color";
 				ColorTexture = CreateTexture(ColorDescription, {});
 				if (!ColorTexture)
-					return std::unexpected(RenderTargetError{ RenderTargetErrorCode::BackendFailure,
+				{
+					const RenderTargetErrorCode Code = ColorTexture.error().Code == TextureErrorCode::UnsupportedFeature
+						? RenderTargetErrorCode::UnsupportedFeature
+						: ColorTexture.error().Code == TextureErrorCode::InvalidDescription
+							? RenderTargetErrorCode::InvalidDescription
+							: RenderTargetErrorCode::BackendFailure;
+					return std::unexpected(RenderTargetError{ Code,
 						"Could not create render-target color texture: " + ColorTexture.error().Message });
+				}
 			}
 
 			TextureCreateResult DepthTexture = TextureHandle{};
@@ -1131,7 +1175,9 @@ namespace PulseForge
 				if (!DepthTexture)
 				{
 					return std::unexpected(RenderTargetError{
-						RenderTargetErrorCode::BackendFailure,
+						DepthTexture.error().Code == TextureErrorCode::UnsupportedFeature
+							? RenderTargetErrorCode::UnsupportedFeature
+							: RenderTargetErrorCode::BackendFailure,
 						"Could not create render-target depth texture: " + DepthTexture.error().Message
 					});
 				}
@@ -1492,11 +1538,23 @@ namespace PulseForge
 
 				nvrhi::FramebufferInfo FramebufferInfo;
 				if (Description.ColorFormat != ColorTargetFormat::None)
-					FramebufferInfo.addColorFormat(Description.ColorFormat == ColorTargetFormat::Swapchain
-						? m_NvrhiFormat
-						: Description.ColorFormat == ColorTargetFormat::RGBA8_UNorm
-							? nvrhi::Format::RGBA8_UNORM
-							: nvrhi::Format::SRGBA8_UNORM);
+				{
+					nvrhi::Format ColorFormat = nvrhi::Format::UNKNOWN;
+					switch (Description.ColorFormat)
+					{
+						case ColorTargetFormat::Swapchain: ColorFormat = m_NvrhiFormat; break;
+						case ColorTargetFormat::RGBA8_UNorm: ColorFormat = nvrhi::Format::RGBA8_UNORM; break;
+						case ColorTargetFormat::RGBA8_Srgb: ColorFormat = nvrhi::Format::SRGBA8_UNORM; break;
+						case ColorTargetFormat::RGBA16_Float: ColorFormat = nvrhi::Format::RGBA16_FLOAT; break;
+						default: break;
+					}
+					if (ColorFormat == nvrhi::Format::UNKNOWN)
+						return std::unexpected(GraphicsError{
+							GraphicsErrorCode::InvalidDescription,
+							"Graphics pipeline color format has no Vulkan/NVRHI framebuffer mapping"
+						});
+					FramebufferInfo.addColorFormat(ColorFormat);
+				}
 				if (Description.DepthAttachmentEnabled)
 					FramebufferInfo.setDepthFormat(nvrhi::Format::D32);
 				nvrhi::GraphicsPipelineHandle NativePipeline = m_ActiveNvrhiDevice->createGraphicsPipeline(

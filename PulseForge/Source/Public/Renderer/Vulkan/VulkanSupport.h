@@ -15,6 +15,19 @@ namespace PulseForge::VulkanSupport
 
 	bool SupportsRequiredDeviceFeatures(const RequiredDeviceFeatures& Features);
 
+	struct FormatFeatureSupport
+	{
+		bool SampledImage = false;
+		bool ColorAttachment = false;
+		bool LinearFiltering = false;
+	};
+
+	[[nodiscard]] bool SupportsFormatUsage(
+		const FormatFeatureSupport& Features,
+		bool RequiresSampledImage,
+		bool RequiresColorAttachment,
+		bool RequiresLinearFiltering) noexcept;
+
 	struct QueueFamily
 	{
 		uint32_t Index = 0;

@@ -74,7 +74,8 @@ namespace PulseForge
 		None,
 		Swapchain,
 		RGBA8_UNorm,
-		RGBA8_Srgb
+		RGBA8_Srgb,
+		RGBA16_Float
 	};
 
 	enum class CullMode : uint8_t

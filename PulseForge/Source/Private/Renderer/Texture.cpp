@@ -7,6 +7,19 @@
 
 namespace PulseForge
 {
+	std::optional<size_t> GetTextureFormatBytesPerPixel(TextureFormat Format) noexcept
+	{
+		switch (Format)
+		{
+			case TextureFormat::RGBA8_UNorm:
+			case TextureFormat::RGBA8_Srgb: return 4;
+			case TextureFormat::RGBA16_Float: return 8;
+			case TextureFormat::RGBA32_Float: return 16;
+			case TextureFormat::Depth32Float: return std::nullopt;
+		}
+		return std::nullopt;
+	}
+
 	namespace
 	{
 		std::expected<size_t, TextureError> MakeTextureError(TextureErrorCode Code, const char* Message)
@@ -58,8 +71,8 @@ namespace PulseForge
 			return size_t{ 0 };
 		}
 
-		if (Description.Format != TextureFormat::RGBA8_UNorm && Description.Format != TextureFormat::RGBA8_Srgb &&
-			Description.Format != TextureFormat::RGBA32_Float)
+		const std::optional<size_t> BytesPerPixel = GetTextureFormatBytesPerPixel(Description.Format);
+		if (!BytesPerPixel)
 			return MakeTextureError(TextureErrorCode::InvalidDescription, "Texture format is not supported by PulseForge");
 
 		if (HasTextureUsage(Description.Usage, TextureUsage::DepthStencilAttachment))
@@ -68,15 +81,15 @@ namespace PulseForge
 		const bool IsShaderResource = HasTextureUsage(Description.Usage, TextureUsage::ShaderResource);
 		const bool IsColorAttachment = HasTextureUsage(Description.Usage, TextureUsage::ColorAttachment);
 		if (!IsShaderResource && !IsColorAttachment)
-			return MakeTextureError(TextureErrorCode::InvalidDescription, "RGBA8 textures require ShaderResource or ColorAttachment usage");
+			return MakeTextureError(TextureErrorCode::InvalidDescription, "Color textures require ShaderResource or ColorAttachment usage");
 
-		const uint64_t BytesPerPixel = Description.Format == TextureFormat::RGBA32_Float ? 16 : 4;
+		const uint64_t BytesPerPixelValue = *BytesPerPixel;
 		const uint64_t Width = Description.Width;
 		const uint64_t Height = Description.Height;
-		if (Width > std::numeric_limits<uint64_t>::max() / BytesPerPixel / Height)
+		if (Width > std::numeric_limits<uint64_t>::max() / BytesPerPixelValue / Height)
 			return MakeTextureError(TextureErrorCode::InvalidDescription, "Texture dimensions overflow the upload-size representation");
 
-		const uint64_t RequiredBytes = Width * Height * BytesPerPixel;
+		const uint64_t RequiredBytes = Width * Height * BytesPerPixelValue;
 		if (RequiredBytes > std::numeric_limits<size_t>::max())
 			return MakeTextureError(TextureErrorCode::InvalidDescription, "Texture upload exceeds the addressable memory size");
 
@@ -127,8 +140,8 @@ namespace PulseForge
 				return MakeTextureValidationError(TextureErrorCode::InvalidData, "Depth attachment textures do not accept initial upload data");
 			return {};
 		}
-		if (Description.Format != TextureFormat::RGBA8_UNorm && Description.Format != TextureFormat::RGBA8_Srgb &&
-			Description.Format != TextureFormat::RGBA32_Float)
+		const std::optional<size_t> BytesPerPixel = GetTextureFormatBytesPerPixel(Description.Format);
+		if (!BytesPerPixel)
 			return MakeTextureValidationError(TextureErrorCode::InvalidDescription, "Texture format is not supported by PulseForge");
 		if (HasTextureUsage(Description.Usage, TextureUsage::DepthStencilAttachment))
 			return MakeTextureValidationError(TextureErrorCode::InvalidDescription, "Color textures cannot use DepthStencilAttachment usage");
@@ -146,7 +159,7 @@ namespace PulseForge
 		if (InitialData.size() != ExpectedSubresources)
 			return MakeTextureValidationError(TextureErrorCode::InvalidData, "Initialized textures require every mip and cube face exactly once");
 		std::vector<bool> Seen(ExpectedSubresources, false);
-		const size_t BytesPerPixel = Description.Format == TextureFormat::RGBA32_Float ? 16 : 4;
+		const size_t BytesPerPixelValue = *BytesPerPixel;
 		for (const TextureSubresourceData& Subresource : InitialData)
 		{
 			if (Subresource.MipLevel >= Description.MipLevels || Subresource.ArraySlice >= ArraySlices)
@@ -157,9 +170,9 @@ namespace PulseForge
 			Seen[Index] = true;
 			const size_t MipWidth = std::max(1u, Description.Width >> Subresource.MipLevel);
 			const size_t MipHeight = std::max(1u, Description.Height >> Subresource.MipLevel);
-			if (MipWidth > std::numeric_limits<size_t>::max() / BytesPerPixel)
+			if (MipWidth > std::numeric_limits<size_t>::max() / BytesPerPixelValue)
 				return MakeTextureValidationError(TextureErrorCode::InvalidDescription, "Texture row size exceeds addressable memory");
-			const size_t PackedRowPitch = MipWidth * BytesPerPixel;
+			const size_t PackedRowPitch = MipWidth * BytesPerPixelValue;
 			const size_t RowPitch = Subresource.RowPitch == 0 ? PackedRowPitch : Subresource.RowPitch;
 			if (RowPitch < PackedRowPitch || MipHeight > std::numeric_limits<size_t>::max() / RowPitch ||
 				Subresource.Data.size() != RowPitch * MipHeight)

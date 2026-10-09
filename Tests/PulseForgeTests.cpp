@@ -5699,6 +5699,15 @@ end
 		auto SrgbTarget = Pipeline;
 		SrgbTarget.ColorFormat = ColorTargetFormat::RGBA8_Srgb;
 		PF_CHECK(Tests, ValidateGraphicsPipelineDescription(SrgbTarget).has_value());
+		auto HalfFloatPipeline = Pipeline;
+		HalfFloatPipeline.ColorFormat = ColorTargetFormat::RGBA16_Float;
+		PF_CHECK(Tests, ValidateGraphicsPipelineDescription(HalfFloatPipeline).has_value());
+		HalfFloatPipeline.DepthAttachmentEnabled = false;
+		PF_CHECK(Tests, ValidateGraphicsPipelineDescription(HalfFloatPipeline).has_value());
+		HalfFloatPipeline.DepthAttachmentEnabled = true;
+		HalfFloatPipeline.Depth.TestEnabled = true;
+		HalfFloatPipeline.Depth.WriteEnabled = true;
+		PF_CHECK(Tests, ValidateGraphicsPipelineDescription(HalfFloatPipeline).has_value());
 
 		auto DepthTestedPipeline = Pipeline;
 		DepthTestedPipeline.Depth.TestEnabled = true;
@@ -6020,6 +6029,83 @@ end
 		PF_CHECK(Tests, !ValidateTextureUpload(Description, 15).has_value());
 		PF_CHECK(Tests, !ValidateTextureUpload(Description, 17).has_value());
 		PF_CHECK(Tests, Description.Dimension == TextureDimension::Texture2D && Description.MipLevels == 1);
+		PF_CHECK(Tests, GetTextureFormatBytesPerPixel(TextureFormat::RGBA8_UNorm) == 4);
+		PF_CHECK(Tests, GetTextureFormatBytesPerPixel(TextureFormat::RGBA8_Srgb) == 4);
+		PF_CHECK(Tests, GetTextureFormatBytesPerPixel(TextureFormat::RGBA16_Float) == 8);
+		PF_CHECK(Tests, GetTextureFormatBytesPerPixel(TextureFormat::RGBA32_Float) == 16);
+		PF_CHECK(Tests, !GetTextureFormatBytesPerPixel(TextureFormat::Depth32Float).has_value());
+
+		TextureDesc HalfFloatDescription;
+		HalfFloatDescription.Format = TextureFormat::RGBA16_Float;
+		HalfFloatDescription.Width = 1;
+		HalfFloatDescription.Height = 1;
+		PF_CHECK(Tests, ValidateTextureUpload(HalfFloatDescription, 8).value() == 8);
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription, 7).has_value());
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription, 9).has_value());
+		HalfFloatDescription.Width = 0;
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription, 0).has_value());
+		HalfFloatDescription.Width = 2;
+		HalfFloatDescription.Height = 3;
+		PF_CHECK(Tests, ValidateTextureUpload(HalfFloatDescription, 48).value() == 48);
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription, 47).has_value());
+		HalfFloatDescription.Width = 4;
+		HalfFloatDescription.Height = 4;
+		PF_CHECK(Tests, ValidateTextureUpload(HalfFloatDescription, 128).value() == 128);
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription, 127).has_value());
+
+		const std::array<std::byte, 72> HalfFloatUploadBytes{};
+		HalfFloatDescription.Width = 2;
+		HalfFloatDescription.Height = 3;
+		const TextureSubresourceData HalfFloatSubresource{ 0, 0, HalfFloatUploadBytes, 24 };
+		PF_CHECK(Tests, ValidateTextureUpload(HalfFloatDescription,
+			std::span<const TextureSubresourceData>(&HalfFloatSubresource, 1)).has_value());
+		const TextureSubresourceData InvalidHalfFloatPitch{ 0, 0, HalfFloatUploadBytes, 15 };
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription,
+			std::span<const TextureSubresourceData>(&InvalidHalfFloatPitch, 1)).has_value());
+		const TextureSubresourceData InvalidHalfFloatSize{ 0, 0,
+			std::span<const std::byte>(HalfFloatUploadBytes).first(71), 24 };
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription,
+			std::span<const TextureSubresourceData>(&InvalidHalfFloatSize, 1)).has_value());
+		const std::array<std::byte, 73> OversizedHalfFloatUploadBytes{};
+		const TextureSubresourceData OversizedHalfFloatSubresource{ 0, 0, OversizedHalfFloatUploadBytes, 24 };
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription,
+			std::span<const TextureSubresourceData>(&OversizedHalfFloatSubresource, 1)).has_value());
+		HalfFloatDescription.Width = 4;
+		HalfFloatDescription.Height = 4;
+		HalfFloatDescription.MipLevels = 3;
+		const std::array<std::byte, 168> HalfFloatMips{};
+		const std::array<TextureSubresourceData, 3> HalfFloatMipSubresources = {
+			TextureSubresourceData{ 0, 0, std::span(HalfFloatMips).first(128), 0 },
+			TextureSubresourceData{ 1, 0, std::span(HalfFloatMips).subspan(128, 32), 0 },
+			TextureSubresourceData{ 2, 0, std::span(HalfFloatMips).last(8), 0 }
+		};
+		PF_CHECK(Tests, ValidateTextureUpload(HalfFloatDescription, HalfFloatMipSubresources).has_value());
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription,
+			std::span(HalfFloatMipSubresources).first(2)).has_value());
+		HalfFloatDescription.MipLevels = 4;
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription,
+			std::span<const TextureSubresourceData>{}).has_value());
+		HalfFloatDescription.MipLevels = 1;
+		HalfFloatDescription.Usage = TextureUsage::ShaderResource | TextureUsage::ColorAttachment;
+		PF_CHECK(Tests, ValidateTextureUpload(HalfFloatDescription, 0).value() == 0);
+		HalfFloatDescription.Usage = TextureUsage::ColorAttachment;
+		PF_CHECK(Tests, ValidateTextureUpload(HalfFloatDescription, 0).value() == 0);
+		HalfFloatDescription.Usage = TextureUsage::DepthStencilAttachment;
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription, 0).has_value());
+		HalfFloatDescription.Usage = static_cast<TextureUsage>(0x80);
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription,
+			std::span<const TextureSubresourceData>{}).has_value());
+		HalfFloatDescription.Usage = TextureUsage::ShaderResource;
+		HalfFloatDescription.Dimension = TextureDimension::TextureCube;
+		HalfFloatDescription.Width = 1;
+		HalfFloatDescription.Height = 1;
+		std::array<std::byte, 48> HalfFloatCubeBytes{};
+		std::array<TextureSubresourceData, 6> HalfFloatCube{};
+		for (uint32_t Face = 0; Face < HalfFloatCube.size(); ++Face)
+			HalfFloatCube[Face] = { 0, Face, std::span(HalfFloatCubeBytes).subspan(Face * 8, 8), 0 };
+		PF_CHECK(Tests, ValidateTextureUpload(HalfFloatDescription, HalfFloatCube).has_value());
+		HalfFloatDescription.Usage = TextureUsage::ShaderResource | TextureUsage::ColorAttachment;
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription, HalfFloatCube).has_value());
 
 		TextureDesc CubeDescription;
 		CubeDescription.Width = 1;
@@ -6075,6 +6161,9 @@ end
 		OverflowDimensions.Width = UINT32_MAX;
 		OverflowDimensions.Height = UINT32_MAX;
 		PF_CHECK(Tests, !ValidateTextureUpload(OverflowDimensions, 0).has_value());
+		auto HalfFloatOverflowDimensions = OverflowDimensions;
+		HalfFloatOverflowDimensions.Format = TextureFormat::RGBA16_Float;
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatOverflowDimensions, 0).has_value());
 
 		TextureDesc DepthDescription;
 		DepthDescription.Width = 128;
@@ -6125,6 +6214,12 @@ end
 		TargetDescription.Width = 800;
 		TargetDescription.Height = 600;
 		PF_CHECK(Tests, ValidateRenderTargetDescription(TargetDescription).has_value());
+		auto HalfFloatColorTarget = TargetDescription;
+		HalfFloatColorTarget.ColorFormat = ColorTargetFormat::RGBA16_Float;
+		HalfFloatColorTarget.DepthMode = DepthAttachmentMode::None;
+		PF_CHECK(Tests, ValidateRenderTargetDescription(HalfFloatColorTarget).has_value());
+		HalfFloatColorTarget.DepthMode = DepthAttachmentMode::Attachment;
+		PF_CHECK(Tests, ValidateRenderTargetDescription(HalfFloatColorTarget).has_value());
 		auto DepthOnlyTarget = TargetDescription;
 		DepthOnlyTarget.ColorFormat = ColorTargetFormat::None;
 		PF_CHECK(Tests, ValidateRenderTargetDescription(DepthOnlyTarget).has_value());
@@ -6147,6 +6242,9 @@ end
 		auto ZeroTargetWidth = TargetDescription;
 		ZeroTargetWidth.Width = 0;
 		PF_CHECK(Tests, !ValidateRenderTargetDescription(ZeroTargetWidth).has_value());
+		auto ZeroTargetHeight = TargetDescription;
+		ZeroTargetHeight.Height = 0;
+		PF_CHECK(Tests, !ValidateRenderTargetDescription(ZeroTargetHeight).has_value());
 		auto SwapchainTarget = TargetDescription;
 		SwapchainTarget.ColorFormat = ColorTargetFormat::Swapchain;
 		PF_CHECK(Tests, !ValidateRenderTargetDescription(SwapchainTarget).has_value());
@@ -6286,6 +6384,22 @@ end
 		PF_CHECK(Tests, !SupportsRequiredDeviceFeatures({ true, true, false }));
 	}
 
+	void TestVulkanFormatUsageCapabilities(TestRunner& Tests)
+	{
+		using namespace PulseForge::VulkanSupport;
+		const FormatFeatureSupport AllFeatures{ true, true, true };
+		PF_CHECK(Tests, SupportsFormatUsage(AllFeatures, true, true, false));
+		PF_CHECK(Tests, SupportsFormatUsage(AllFeatures, true, false, false));
+		PF_CHECK(Tests, SupportsFormatUsage(AllFeatures, false, true, false));
+		PF_CHECK(Tests, SupportsFormatUsage(AllFeatures, true, true, true));
+		PF_CHECK(Tests, SupportsFormatUsage({}, false, false, false));
+		PF_CHECK(Tests, !SupportsFormatUsage({ false, true, true }, true, true, false));
+		PF_CHECK(Tests, !SupportsFormatUsage({ true, false, true }, true, true, false));
+		PF_CHECK(Tests, !SupportsFormatUsage({ true, true, false }, true, true, true));
+		PF_CHECK(Tests, !SupportsFormatUsage({ true, true, false }, false, false, true));
+		PF_CHECK(Tests, !SupportsFormatUsage({ false, false, true }, false, false, true));
+	}
+
 	void TestVulkanSurfaceAndPresentationSelection(TestRunner& Tests)
 	{
 		using namespace PulseForge::VulkanSupport;
@@ -6378,6 +6492,7 @@ int main()
 	TestTextureSamplerAndBufferBindingValidation(Tests);
 	TestVulkanQueueFamilySelection(Tests);
 	TestVulkanRequiredDeviceFeatures(Tests);
+	TestVulkanFormatUsageCapabilities(Tests);
 	TestVulkanSurfaceAndPresentationSelection(Tests);
 	TestVulkanExtentAndImageCountSelection(Tests);
 	return Tests.Finish();
