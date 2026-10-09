@@ -18,12 +18,12 @@ namespace PulseForge
 		if (Description.Width == 0 || Description.Height == 0)
 			return MakeError(RenderTargetErrorCode::InvalidDescription, "Render-target dimensions must be non-zero");
 
-		if (Description.ColorFormat != ColorTargetFormat::RGBA8_UNorm &&
+		if (Description.ColorFormat != ColorTargetFormat::None && Description.ColorFormat != ColorTargetFormat::RGBA8_UNorm &&
 			Description.ColorFormat != ColorTargetFormat::RGBA8_Srgb)
 		{
 			return MakeError(
 				RenderTargetErrorCode::InvalidDescription,
-				"Offscreen render targets require an RGBA8_UNorm or RGBA8_Srgb color format");
+				"Offscreen render targets require None, RGBA8_UNorm, or RGBA8_Srgb color format");
 		}
 
 		return {};

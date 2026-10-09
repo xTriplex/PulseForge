@@ -32,6 +32,11 @@ namespace PulseForge
 		glm::vec3 RayDirection{ 0.0f, 0.0f, -1.0f };
 		glm::vec3 Color{ 1.0f };
 		float Intensity = 1.0f;
+		bool CastShadows = true;
+		float ShadowDistance = 100.0f;
+		float ShadowBias = 1.0f;
+		float ShadowNormalBias = 0.025f;
+		float ShadowSoftness = 1.5f;
 	};
 
 	struct SceneEnvironmentLight
@@ -48,7 +53,13 @@ namespace PulseForge
 		// Empty when the view is transient editor state rather than an authored scene camera.
 		std::optional<UUID> CameraEntity;
 		glm::mat4 ViewProjection{ 1.0f };
+		glm::mat4 View{ 1.0f };
+		glm::mat4 Projection{ 1.0f };
 		glm::vec3 CameraWorldPosition{ 0.0f };
+		float NearClipPlane = 0.1f;
+		float FarClipPlane = 1000.0f;
+		// False for transient callers that provide only ViewProjection, which cannot define CSM frustum slices.
+		bool HasCameraFrustum = false;
 		std::optional<SceneDirectionalLight> DirectionalLight;
 		std::optional<SceneEnvironmentLight> EnvironmentLight;
 		// Scene::GetEntities returns UUID-sorted entities, so snapshot order is deterministic.
@@ -96,5 +107,12 @@ namespace PulseForge
 			const Scene& Source,
 			const glm::mat4& ViewProjection,
 			const glm::vec3& CameraWorldPosition);
+		[[nodiscard]] static std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> BuildForView(
+			const Scene& Source,
+			const glm::mat4& View,
+			const glm::mat4& Projection,
+			const glm::vec3& CameraWorldPosition,
+			float NearClipPlane,
+			float FarClipPlane);
 	};
 }

@@ -38,6 +38,8 @@ namespace PulseForge
 	struct BindingLayoutDesc
 	{
 		ShaderVisibility Visibility = ShaderVisibility::Fragment;
+		// HLSL register space; Vulkan maps this explicitly to the descriptor-set index.
+		uint32_t ShaderRegisterSpace = 0;
 		std::vector<BindingLayoutItemDesc> Items;
 		std::string DebugName;
 	};

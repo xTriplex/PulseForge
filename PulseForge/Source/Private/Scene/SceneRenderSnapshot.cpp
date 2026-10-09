@@ -74,14 +74,23 @@ namespace PulseForge
 
 		std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> BuildGeometrySnapshot(
 			const Scene& Source,
+			const glm::mat4& View,
+			const glm::mat4& Projection,
 			const glm::mat4& ViewProjection,
 			const glm::vec3& CameraWorldPosition,
+			float NearClipPlane,
+			float FarClipPlane,
 			std::optional<UUID> CameraEntity)
 		{
 			SceneRenderSnapshot Snapshot;
 			Snapshot.CameraEntity = CameraEntity;
 			Snapshot.ViewProjection = ViewProjection;
+			Snapshot.View = View;
+			Snapshot.Projection = Projection;
 			Snapshot.CameraWorldPosition = CameraWorldPosition;
+			Snapshot.NearClipPlane = NearClipPlane;
+			Snapshot.FarClipPlane = FarClipPlane;
+			Snapshot.HasCameraFrustum = true;
 
 			for (const Entity& Current : Source.GetEntities())
 			{
@@ -108,7 +117,8 @@ namespace PulseForge
 						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::SceneOperationFailed,
 							Current.GetUUID(), Validation.error()));
 					Snapshot.DirectionalLight = SceneDirectionalLight{
-						Current.GetUUID(), RayDirection / DirectionLength, Light.Color, Light.Intensity };
+						Current.GetUUID(), RayDirection / DirectionLength, Light.Color, Light.Intensity,
+						Light.CastShadows, Light.ShadowDistance, Light.ShadowBias, Light.ShadowNormalBias, Light.ShadowSoftness };
 				}
 
 				const auto EnvironmentLight = Current.GetEnvironmentLight();
@@ -260,7 +270,8 @@ namespace PulseForge
 				CameraEntityIdentifier,
 				"The selected camera produces a non-finite view-projection matrix"));
 		}
-		return BuildGeometrySnapshot(Source, ViewProjection, glm::vec3((*CameraWorld)[3]), CameraEntityIdentifier);
+		return BuildGeometrySnapshot(Source, CameraView, *Projection, ViewProjection, glm::vec3((*CameraWorld)[3]),
+			Camera->value().NearClipPlane, Camera->value().FarClipPlane, CameraEntityIdentifier);
 	}
 
 	std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> SceneRenderSnapshotBuilder::Build(
@@ -312,6 +323,33 @@ namespace PulseForge
 				{},
 				"The supplied transient view and camera position must contain only finite values"));
 		}
-		return BuildGeometrySnapshot(Source, ViewProjection, CameraWorldPosition, std::nullopt);
+		auto Snapshot = BuildForView(Source, glm::mat4(1.0f), ViewProjection, CameraWorldPosition, 0.1f, 1000.0f);
+		if (Snapshot)
+			Snapshot->HasCameraFrustum = false;
+		return Snapshot;
+	}
+
+	std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> SceneRenderSnapshotBuilder::BuildForView(
+		const Scene& Source,
+		const glm::mat4& View,
+		const glm::mat4& Projection,
+		const glm::vec3& CameraWorldPosition,
+		float NearClipPlane,
+		float FarClipPlane)
+	{
+		if (!IsFinite(View) || !IsFinite(Projection) || !std::isfinite(NearClipPlane) ||
+			!std::isfinite(FarClipPlane) || NearClipPlane <= 0.0f || FarClipPlane <= NearClipPlane ||
+			!std::isfinite(CameraWorldPosition.x) || !std::isfinite(CameraWorldPosition.y) ||
+			!std::isfinite(CameraWorldPosition.z))
+		{
+			return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidViewProjection, {},
+				"Transient render view matrices, position, and clip planes must be finite and valid"));
+		}
+		const glm::mat4 ViewProjection = Projection * View;
+		if (!IsFinite(ViewProjection))
+			return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidViewProjection, {},
+				"Transient view-projection matrix must be finite"));
+		return BuildGeometrySnapshot(Source, View, Projection, ViewProjection, CameraWorldPosition,
+			NearClipPlane, FarClipPlane, std::nullopt);
 	}
 }

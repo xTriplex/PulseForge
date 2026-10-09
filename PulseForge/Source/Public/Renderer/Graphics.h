@@ -71,6 +71,7 @@ namespace PulseForge
 
 	enum class ColorTargetFormat : uint8_t
 	{
+		None,
 		Swapchain,
 		RGBA8_UNorm,
 		RGBA8_Srgb
@@ -88,6 +89,8 @@ namespace PulseForge
 		CullMode Cull = CullMode::None;
 		bool Wireframe = false;
 		bool ScissorEnabled = false;
+		float DepthBias = 0.0f;
+		float SlopeScaledDepthBias = 0.0f;
 	};
 
 	struct BlendState
@@ -127,6 +130,7 @@ namespace PulseForge
 	struct GraphicsPipelineDesc
 	{
 		ShaderHandle VertexShader;
+		// Depth-only pipelines intentionally omit the fragment shader and set ColorFormat to None.
 		ShaderHandle FragmentShader;
 		std::vector<BindingLayoutHandle> BindingLayouts;
 		VertexLayoutDesc VertexLayout;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 #include <optional>
 
@@ -114,32 +115,50 @@ namespace PulseForge
 
 	GraphicsResult ValidateGraphicsPipelineDescription(const GraphicsPipelineDesc& Description)
 	{
-		if (!Description.VertexShader || !Description.FragmentShader)
-			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline requires both vertex and fragment shaders");
+		if (!Description.VertexShader)
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline requires a vertex shader");
 
 		if (Description.VertexShader->GetDescription().Stage != ShaderStage::Vertex)
 			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline vertex shader handle has the wrong stage");
 
-		if (Description.FragmentShader->GetDescription().Stage != ShaderStage::Fragment)
+		if (Description.FragmentShader && Description.FragmentShader->GetDescription().Stage != ShaderStage::Fragment)
 			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline fragment shader handle has the wrong stage");
 
 		if (Description.Topology != PrimitiveTopology::TriangleList)
 			return MakeError(GraphicsErrorCode::InvalidDescription, "Only triangle-list topology is currently supported");
 
-		if (Description.ColorFormat != ColorTargetFormat::Swapchain &&
+		if (Description.ColorFormat != ColorTargetFormat::None && Description.ColorFormat != ColorTargetFormat::Swapchain &&
 			Description.ColorFormat != ColorTargetFormat::RGBA8_UNorm &&
 			Description.ColorFormat != ColorTargetFormat::RGBA8_Srgb)
 		{
 			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline specifies an unsupported color target format");
 		}
+		if ((Description.ColorFormat == ColorTargetFormat::None) != !Description.FragmentShader)
+			return MakeError(GraphicsErrorCode::InvalidDescription,
+				"Depth-only pipelines require no fragment shader and no color target; color pipelines require both");
+		if (Description.ColorFormat == ColorTargetFormat::None && Description.Blend.Enabled)
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Blending is not meaningful for a depth-only pipeline");
+		if (Description.ColorFormat == ColorTargetFormat::None &&
+			(!Description.Depth.TestEnabled || !Description.Depth.WriteEnabled))
+			return MakeError(GraphicsErrorCode::InvalidDescription,
+				"Depth-only pipelines require depth testing and depth writes to be enabled");
+		if (!std::isfinite(Description.Rasterizer.DepthBias) || !std::isfinite(Description.Rasterizer.SlopeScaledDepthBias))
+			return MakeError(GraphicsErrorCode::InvalidDescription, "Raster depth bias values must be finite");
 
 		if (Description.BindingLayouts.size() > 8)
 			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline exceeds PulseForge's 8-layout limit");
 
+		std::vector<uint32_t> ShaderRegisterSpaces;
+		ShaderRegisterSpaces.reserve(Description.BindingLayouts.size());
 		for (const BindingLayoutHandle& Layout : Description.BindingLayouts)
 		{
 			if (!Layout)
 				return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline contains an invalid binding-layout handle");
+			const uint32_t RegisterSpace = Layout->GetDescription().ShaderRegisterSpace;
+			if (std::find(ShaderRegisterSpaces.begin(), ShaderRegisterSpaces.end(), RegisterSpace) != ShaderRegisterSpaces.end())
+				return MakeError(GraphicsErrorCode::InvalidDescription,
+					"Graphics pipeline binding layouts must use distinct shader register spaces");
+			ShaderRegisterSpaces.push_back(RegisterSpace);
 
 			const auto Validation = ValidateBindingLayout(Layout->GetDescription());
 			if (!Validation)

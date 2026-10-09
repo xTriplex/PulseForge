@@ -28,4 +28,6 @@ Click a rendered mesh to select its entity; clicking empty viewport space clears
 
 Play starts scripts, fixed-step physics, and spatial audio on a serialized copy of the open scene; the viewport then uses that runtime scene's primary camera. Stop discards the runtime copy and restores the editor camera view. The viewport resizes its offscreen target in quantized steps to avoid rebuilding render resources for every small panel-size change. A separate game viewport, world-axis gizmos, multi-selection, and undo/redo are not implemented yet.
 
+Directional Light components expose Cast Shadows, Shadow Distance, raster Shadow Bias, receiver Normal Bias, and PCF Softness. The initial renderer uses a fixed four 1024-pixel cascade configuration; softness is a 3x3 filter radius in shadow texels, not a physical light-source size. Shadow settings persist in scenes and prefabs and default when older scene files omit them.
+
 Build the target with the default `PULSEFORGE_BUILD_EDITOR=ON` CMake option, or set it to `OFF` for runtime-only builds. The editor currently targets Windows. To use the transitional OpenGL shell instead of Vulkan, configure with `-DPULSEFORGE_EDITOR_RENDERER=OpenGL`.

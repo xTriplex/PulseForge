@@ -136,7 +136,12 @@ namespace PulseForge
 					const DirectionalLightComponent& Light = DirectionalLight->value();
 					Record["directionalLight"] = Json::object({
 						{ "color", { Light.Color.r, Light.Color.g, Light.Color.b } },
-						{ "intensity", Light.Intensity }
+						{ "intensity", Light.Intensity },
+						{ "castShadows", Light.CastShadows },
+						{ "shadowDistance", Light.ShadowDistance },
+						{ "shadowBias", Light.ShadowBias },
+						{ "shadowNormalBias", Light.ShadowNormalBias },
+						{ "shadowSoftness", Light.ShadowSoftness }
 					});
 				}
 				if (EnvironmentLight->has_value())
@@ -358,8 +363,30 @@ namespace PulseForge
 						!ReadFiniteFloats(*Color, ColorValues) || !Intensity->is_number())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
 							"Directional light requires finite RGB color and numeric intensity"));
-					DirectionalLightData = DirectionalLightComponent{
-						{ ColorValues[0], ColorValues[1], ColorValues[2] }, Intensity->get<float>() };
+					DirectionalLightComponent Light;
+					Light.Color = { ColorValues[0], ColorValues[1], ColorValues[2] };
+					Light.Intensity = Intensity->get<float>();
+					const auto ReadOptionalFloat = [&SerializedDirectionalLight](const char* Key, float& Target)
+					{
+						const auto Value = SerializedDirectionalLight->find(Key);
+						if (Value == SerializedDirectionalLight->end())
+							return true;
+						if (!Value->is_number())
+							return false;
+						Target = Value->get<float>();
+						return std::isfinite(Target);
+					};
+					const auto CastShadows = SerializedDirectionalLight->find("castShadows");
+					if ((CastShadows != SerializedDirectionalLight->end() && !CastShadows->is_boolean()) ||
+						!ReadOptionalFloat("shadowDistance", Light.ShadowDistance) ||
+						!ReadOptionalFloat("shadowBias", Light.ShadowBias) ||
+						!ReadOptionalFloat("shadowNormalBias", Light.ShadowNormalBias) ||
+						!ReadOptionalFloat("shadowSoftness", Light.ShadowSoftness))
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Directional-light shadow settings contain invalid values"));
+					if (CastShadows != SerializedDirectionalLight->end())
+						Light.CastShadows = CastShadows->get<bool>();
+					DirectionalLightData = Light;
 					if (auto Validation = DirectionalLightData->Validate(); !Validation)
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error()));
 				}

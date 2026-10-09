@@ -53,6 +53,12 @@ namespace PulseForge
 			return std::unexpected("Directional-light color must contain finite non-negative linear RGB values");
 		if (!std::isfinite(Intensity) || Intensity < 0.0f)
 			return std::unexpected("Directional-light intensity must be finite and non-negative");
+		if (!std::isfinite(ShadowDistance) || ShadowDistance <= 0.0f || ShadowDistance > 100000.0f)
+			return std::unexpected("Directional-light shadow distance must be finite, positive, and at most 100000 units");
+		if (!std::isfinite(ShadowBias) || ShadowBias < 0.0f || ShadowBias > 16.0f ||
+			!std::isfinite(ShadowNormalBias) || ShadowNormalBias < 0.0f || ShadowNormalBias > 1.0f ||
+			!std::isfinite(ShadowSoftness) || ShadowSoftness < 0.0f || ShadowSoftness > 8.0f)
+			return std::unexpected("Directional-light shadow bias must be <=16, normal bias <=1, and softness <=8; all must be finite and non-negative");
 		return {};
 	}
 }

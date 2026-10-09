@@ -239,6 +239,18 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Could not create environment background fragment shader: " + BackgroundFragment.error().Message));
 		m_BackgroundFragmentShader = std::move(*BackgroundFragment);
 
+		auto ShadowVertexBytecode = ReadShaderBytecode(CompiledShaderDirectory / "DirectionalShadow.vs.spv");
+		if (!ShadowVertexBytecode)
+			return std::unexpected(std::move(ShadowVertexBytecode.error()));
+		ShaderDesc ShadowVertexDescription;
+		ShadowVertexDescription.Stage = ShaderStage::Vertex;
+		ShadowVertexDescription.EntryPoint = "VSMain";
+		ShadowVertexDescription.DebugName = "PulseForge directional shadow vertex shader";
+		auto ShadowVertex = m_Runtime.CreateShader(ShadowVertexDescription, *ShadowVertexBytecode);
+		if (!ShadowVertex)
+			return std::unexpected(MakeResourceError("Could not create directional shadow vertex shader: " + ShadowVertex.error().Message));
+		m_ShadowVertexShader = std::move(*ShadowVertex);
+
 		SamplerDesc SamplerDescription;
 		SamplerDescription.Minification = SamplerFilter::Nearest;
 		SamplerDescription.Magnification = SamplerFilter::Nearest;
@@ -333,6 +345,29 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Could not create the scene binding layout: " + BindingLayout.error().Message));
 		m_BindingLayout = std::move(BindingLayout.value());
 
+		BindingLayoutDesc ShadowBindingLayoutDescription;
+		ShadowBindingLayoutDescription.Visibility = ShaderVisibility::Fragment;
+		ShadowBindingLayoutDescription.ShaderRegisterSpace = 1;
+		ShadowBindingLayoutDescription.Items = {
+			{ BindingResourceType::Texture2D, 0 }, { BindingResourceType::Texture2D, 1 },
+			{ BindingResourceType::Texture2D, 2 }, { BindingResourceType::Texture2D, 3 },
+			{ BindingResourceType::Sampler, 0 }
+		};
+		ShadowBindingLayoutDescription.DebugName = "PulseForge directional shadow maps (space1)";
+		auto ShadowBindingLayout = m_Runtime.CreateBindingLayout(ShadowBindingLayoutDescription);
+		if (!ShadowBindingLayout)
+			return std::unexpected(MakeResourceError("Could not create directional shadow binding layout: " + ShadowBindingLayout.error().Message));
+		m_ShadowBindingLayout = std::move(*ShadowBindingLayout);
+
+		BindingLayoutDesc ShadowObjectLayoutDescription;
+		ShadowObjectLayoutDescription.Visibility = ShaderVisibility::Vertex;
+		ShadowObjectLayoutDescription.Items = { { BindingResourceType::ConstantBuffer, 0 } };
+		ShadowObjectLayoutDescription.DebugName = "PulseForge directional shadow object constants";
+		auto ShadowObjectLayout = m_Runtime.CreateBindingLayout(ShadowObjectLayoutDescription);
+		if (!ShadowObjectLayout)
+			return std::unexpected(MakeResourceError("Could not create shadow object layout: " + ShadowObjectLayout.error().Message));
+		m_ShadowObjectBindingLayout = std::move(*ShadowObjectLayout);
+
 		const ObjectConstants InitialObject{};
 		BufferDesc ObjectBufferDescription;
 		ObjectBufferDescription.ByteSize = sizeof(InitialObject);
@@ -352,6 +387,60 @@ namespace PulseForge
 		if (!FrameBuffer)
 			return std::unexpected(MakeResourceError("Could not create scene frame constants: " + FrameBuffer.error().Message));
 		m_FrameConstantsBuffer = std::move(FrameBuffer.value());
+
+		const glm::mat4 InitialShadowObject(1.0f);
+		BufferDesc ShadowObjectDescription;
+		ShadowObjectDescription.ByteSize = sizeof(InitialShadowObject);
+		ShadowObjectDescription.Usage = BufferUsage::Constant;
+		ShadowObjectDescription.DebugName = "PulseForge shadow object constants";
+		auto ShadowObjectBuffer = m_Runtime.CreateBuffer(
+			ShadowObjectDescription, std::as_bytes(std::span(&InitialShadowObject, 1)));
+		if (!ShadowObjectBuffer)
+			return std::unexpected(MakeResourceError("Could not create shadow object constants: " + ShadowObjectBuffer.error().Message));
+		m_ShadowObjectConstantsBuffer = std::move(*ShadowObjectBuffer);
+		BindingSetDesc ShadowObjectSetDescription;
+		ShadowObjectSetDescription.Layout = m_ShadowObjectBindingLayout;
+		ShadowObjectSetDescription.Buffers.push_back({ 0, std::cref(*m_ShadowObjectConstantsBuffer) });
+		auto ShadowObjectSet = m_Runtime.CreateBindingSet(ShadowObjectSetDescription);
+		if (!ShadowObjectSet)
+			return std::unexpected(MakeResourceError("Could not create shadow object binding set: " + ShadowObjectSet.error().Message));
+		m_ShadowObjectBindingSet = std::move(*ShadowObjectSet);
+
+		SamplerDesc ShadowSamplerDescription;
+		ShadowSamplerDescription.Minification = SamplerFilter::Nearest;
+		ShadowSamplerDescription.Magnification = SamplerFilter::Nearest;
+		ShadowSamplerDescription.AddressU = SamplerAddressMode::ClampToEdge;
+		ShadowSamplerDescription.AddressV = SamplerAddressMode::ClampToEdge;
+		ShadowSamplerDescription.DebugName = "PulseForge shadow PCF sampler";
+		auto ShadowSampler = m_Runtime.CreateSampler(ShadowSamplerDescription);
+		if (!ShadowSampler)
+			return std::unexpected(MakeResourceError("Could not create shadow sampler: " + ShadowSampler.error().Message));
+		m_ShadowSampler = std::move(*ShadowSampler);
+
+		constexpr uint32_t ShadowResolution = 1024;
+		for (size_t CascadeIndex = 0; CascadeIndex < m_ShadowTargets.size(); ++CascadeIndex)
+		{
+			RenderTargetDesc ShadowTargetDescription;
+			ShadowTargetDescription.Width = ShadowResolution;
+			ShadowTargetDescription.Height = ShadowResolution;
+			ShadowTargetDescription.ColorFormat = ColorTargetFormat::None;
+			ShadowTargetDescription.DebugName = "PulseForge directional shadow cascade " + std::to_string(CascadeIndex);
+			auto ShadowTarget = m_Runtime.CreateRenderTarget(ShadowTargetDescription);
+			if (!ShadowTarget)
+				return std::unexpected(MakeResourceError("Could not create directional shadow target: " + ShadowTarget.error().Message));
+			m_ShadowTargets[CascadeIndex] = std::move(*ShadowTarget);
+		}
+
+		BindingSetDesc ShadowSetDescription;
+		ShadowSetDescription.Layout = m_ShadowBindingLayout;
+		for (uint32_t CascadeIndex = 0; CascadeIndex < m_ShadowTargets.size(); ++CascadeIndex)
+			ShadowSetDescription.Textures.push_back({ CascadeIndex,
+				std::cref(m_ShadowTargets[CascadeIndex]->GetDepthTexture()) });
+		ShadowSetDescription.Samplers.push_back({ 0, std::cref(*m_ShadowSampler) });
+		auto ShadowSet = m_Runtime.CreateBindingSet(ShadowSetDescription);
+		if (!ShadowSet)
+			return std::unexpected(MakeResourceError("Could not create directional shadow bindings: " + ShadowSet.error().Message));
+		m_ShadowBindingSet = std::move(*ShadowSet);
 		return {};
 	}
 
@@ -477,6 +566,18 @@ namespace PulseForge
 		return PrepareSnapshot(SceneRenderSnapshotBuilder::BuildForView(Source, ViewProjection, CameraWorldPosition));
 	}
 
+	std::expected<void, SceneRendererError> SceneRenderer::PrepareScene(
+		const Scene& Source,
+		const glm::mat4& View,
+		const glm::mat4& Projection,
+		const glm::vec3& CameraWorldPosition,
+		float NearClipPlane,
+		float FarClipPlane)
+	{
+		return PrepareSnapshot(SceneRenderSnapshotBuilder::BuildForView(
+			Source, View, Projection, CameraWorldPosition, NearClipPlane, FarClipPlane));
+	}
+
 	std::expected<void, SceneRendererError> SceneRenderer::PrepareSnapshot(
 		std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot)
 	{
@@ -566,8 +667,23 @@ namespace PulseForge
 				m_PipelineVertexLayout = *SceneVertexLayout;
 			if (auto Pipeline = EnsurePipeline(ColorTargetFormat::Swapchain); !Pipeline)
 				return std::unexpected(std::move(Pipeline.error()));
+			if (Snapshot->DirectionalLight && Snapshot->DirectionalLight->CastShadows)
+				if (auto ShadowPipeline = EnsureShadowPipeline(Snapshot->DirectionalLight->ShadowBias); !ShadowPipeline)
+					return std::unexpected(std::move(ShadowPipeline.error()));
 		}
 
+		m_PreparedCascades.reset();
+		if (Snapshot->HasCameraFrustum && Snapshot->DirectionalLight &&
+			Snapshot->DirectionalLight->CastShadows && !Snapshot->Meshes.empty())
+		{
+			const SceneDirectionalLight& Light = *Snapshot->DirectionalLight;
+			auto Cascades = BuildDirectionalShadowCascades(
+				Snapshot->View, Snapshot->Projection, Snapshot->NearClipPlane, Snapshot->FarClipPlane,
+				Light.ShadowDistance, Light.RayDirection, 1024);
+			if (!Cascades)
+				return std::unexpected(MakeDrawError("Could not build directional shadow cascades: " + Cascades.error().Message));
+			m_PreparedCascades = std::move(*Cascades);
+		}
 		m_PreparedSnapshot = std::move(*Snapshot);
 		m_PreparedEnvironmentTextures = EnvironmentTextures;
 		return {};
@@ -583,7 +699,7 @@ namespace PulseForge
 		GraphicsPipelineDesc PipelineDescription;
 		PipelineDescription.VertexShader = m_VertexShader;
 		PipelineDescription.FragmentShader = m_FragmentShader;
-		PipelineDescription.BindingLayouts = { m_BindingLayout };
+		PipelineDescription.BindingLayouts = { m_BindingLayout, m_ShadowBindingLayout };
 		PipelineDescription.VertexLayout = *m_PipelineVertexLayout;
 		PipelineDescription.ColorFormat = ColorFormat;
 		PipelineDescription.Rasterizer.Cull = CullMode::None;
@@ -599,6 +715,81 @@ namespace PulseForge
 		PF_CORE_INFO("Created scene pipeline for vertex stride {0} and color format {1}",
 			m_PipelineVertexLayout->Stride,
 			static_cast<uint32_t>(ColorFormat));
+		return {};
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::EnsureShadowPipeline(float DepthBias)
+	{
+		const int32_t RasterBias = static_cast<int32_t>(std::lround(DepthBias));
+		if (m_ShadowPipelines.contains(RasterBias))
+			return {};
+		if (!m_PipelineVertexLayout)
+			return std::unexpected(MakeResourceError("Cannot create a shadow pipeline before a mesh layout is prepared"));
+		GraphicsPipelineDesc Description;
+		Description.VertexShader = m_ShadowVertexShader;
+		Description.BindingLayouts = { m_ShadowObjectBindingLayout };
+		Description.VertexLayout.Stride = m_PipelineVertexLayout->Stride;
+		const auto PositionAttribute = std::find_if(m_PipelineVertexLayout->Attributes.begin(),
+			m_PipelineVertexLayout->Attributes.end(), [](const VertexAttributeDesc& Attribute)
+			{
+				return Attribute.Semantic == VertexSemantic::Position;
+			});
+		if (PositionAttribute == m_PipelineVertexLayout->Attributes.end())
+			return std::unexpected(MakeResourceError("The mesh layout has no position attribute for shadow rendering"));
+		Description.VertexLayout.Attributes.push_back(*PositionAttribute);
+		Description.ColorFormat = ColorTargetFormat::None;
+		Description.Rasterizer.Cull = CullMode::Back;
+		Description.Rasterizer.DepthBias = static_cast<float>(RasterBias);
+		Description.Rasterizer.SlopeScaledDepthBias = 1.5f;
+		Description.Depth.TestEnabled = true;
+		Description.Depth.WriteEnabled = true;
+		Description.Depth.Compare = DepthCompareOperation::Less;
+		Description.DebugName = "PulseForge directional shadow depth-only pipeline";
+		auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
+		if (!Pipeline)
+			return std::unexpected(MakeResourceError("Could not create directional shadow pipeline: " + Pipeline.error().Message));
+		m_ShadowPipelines.emplace(RasterBias, std::move(*Pipeline));
+		return {};
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::RenderShadowCascades()
+	{
+		if (!m_PreparedSnapshot || !m_PreparedSnapshot->DirectionalLight ||
+			!m_PreparedSnapshot->DirectionalLight->CastShadows || m_PreparedSnapshot->Meshes.empty())
+			return {};
+		if (!m_PreparedCascades)
+			return std::unexpected(MakeDrawError("Prepared directional shadow cascades are unavailable"));
+		const int32_t RasterBias = static_cast<int32_t>(std::lround(m_PreparedSnapshot->DirectionalLight->ShadowBias));
+		const auto Pipeline = m_ShadowPipelines.find(RasterBias);
+		if (Pipeline == m_ShadowPipelines.end())
+			return std::unexpected(MakeResourceError("Directional shadow pipeline was not prepared for the authored raster bias"));
+
+		for (size_t CascadeIndex = 0; CascadeIndex < m_PreparedCascades->Cascades.size(); ++CascadeIndex)
+		{
+			const GraphicsResult Begin = m_Runtime.BeginRenderTarget(*m_ShadowTargets[CascadeIndex]);
+			if (!Begin)
+				return std::unexpected(MakeDrawError("Could not begin shadow cascade: " + Begin.error().Message));
+			RenderTargetFrameScope TargetScope(m_Runtime);
+			for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
+			{
+				auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
+				if (!Mesh)
+					return std::unexpected(MakeDrawError("Shadow pass mesh became unavailable: " + Mesh.error().Message));
+				const glm::mat4 ShadowTransform = m_PreparedCascades->Cascades[CascadeIndex].ViewProjection * Instance.WorldTransform;
+				const auto Update = m_Runtime.WriteBuffer(
+					*m_ShadowObjectConstantsBuffer, 0, std::as_bytes(std::span(&ShadowTransform, 1)));
+				if (!Update)
+					return std::unexpected(MakeDrawError("Could not update shadow object constants: " + Update.error().Message));
+				const std::array<const BindingSet*, 1> Bindings = { m_ShadowObjectBindingSet.get() };
+				const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
+				const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline->second, Mesh->get(), Arguments, Bindings);
+				if (!Draw)
+					return std::unexpected(MakeDrawError("Could not draw shadow caster: " + Draw.error().Message));
+			}
+			const GraphicsResult End = TargetScope.End();
+			if (!End)
+				return std::unexpected(MakeDrawError("Could not end shadow cascade: " + End.error().Message));
+		}
 		return {};
 	}
 
@@ -625,6 +816,8 @@ namespace PulseForge
 
 	std::expected<size_t, SceneRendererError> SceneRenderer::RenderPreparedScene()
 	{
+		if (auto Shadows = RenderShadowCascades(); !Shadows)
+			return std::unexpected(std::move(Shadows.error()));
 		return RenderPreparedSceneForFormat(ColorTargetFormat::Swapchain);
 	}
 
@@ -643,6 +836,8 @@ namespace PulseForge
 			if (auto Pipeline = EnsurePipeline(ColorFormat); !Pipeline)
 				return std::unexpected(std::move(Pipeline.error()));
 		}
+		if (auto Shadows = RenderShadowCascades(); !Shadows)
+			return std::unexpected(std::move(Shadows.error()));
 
 		const GraphicsResult BeginResult = m_Runtime.BeginRenderTarget(Target, ClearValue);
 		if (!BeginResult)
@@ -681,6 +876,7 @@ namespace PulseForge
 		Frame.CameraWorldPosition[1] = m_PreparedSnapshot->CameraWorldPosition.y;
 		Frame.CameraWorldPosition[2] = m_PreparedSnapshot->CameraWorldPosition.z;
 		Frame.InverseViewProjection = glm::inverse(m_PreparedSnapshot->ViewProjection);
+		Frame.View = m_PreparedSnapshot->View;
 		if (m_PreparedSnapshot->EnvironmentLight && !IsFinite(Frame.InverseViewProjection))
 			return std::unexpected(MakeDrawError("Environment background requires an invertible view-projection matrix"));
 		if (m_PreparedSnapshot->EnvironmentLight)
@@ -708,6 +904,18 @@ namespace PulseForge
 			Frame.LightColorIntensity[1] = Light.Color.g;
 			Frame.LightColorIntensity[2] = Light.Color.b;
 			Frame.LightColorIntensity[3] = Light.Intensity;
+			if (Light.CastShadows && m_PreparedCascades)
+			{
+				Frame.ShadowParameters[0] = 1.0f;
+				Frame.ShadowParameters[1] = Light.ShadowNormalBias;
+				Frame.ShadowParameters[2] = Light.ShadowSoftness;
+				Frame.ShadowParameters[3] = m_PreparedCascades->ShadowDistance;
+				for (size_t CascadeIndex = 0; CascadeIndex < m_PreparedCascades->Cascades.size(); ++CascadeIndex)
+				{
+					Frame.CascadeViewProjection[CascadeIndex] = m_PreparedCascades->Cascades[CascadeIndex].ViewProjection;
+					Frame.CascadeSplitDepths[CascadeIndex] = m_PreparedCascades->Cascades[CascadeIndex].FarDistance;
+				}
+			}
 		}
 		const auto FrameUpdate = m_Runtime.WriteBuffer(*m_FrameConstantsBuffer, 0, std::as_bytes(std::span(&Frame, 1)));
 		if (!FrameUpdate)
@@ -781,7 +989,8 @@ namespace PulseForge
 			}
 
 			const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
-			const std::array<const BindingSet*, 1> BindingSets = { Binding->second.BindingSet.get() };
+			const std::array<const BindingSet*, 2> BindingSets = {
+				Binding->second.BindingSet.get(), m_ShadowBindingSet.get() };
 			const GraphicsResult Draw = m_Runtime.DrawIndexed(*ScenePipeline, Mesh->get(), Arguments, BindingSets);
 			if (!Draw)
 			{

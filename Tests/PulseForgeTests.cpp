@@ -39,9 +39,12 @@
 #include "Renderer/Graphics.h"
 #include "Renderer/Mesh.h"
 #include "Renderer/RenderTarget.h"
+#include "Renderer/DirectionalShadowMath.h"
 #include "Renderer/EnvironmentLighting.h"
 #include <glm/geometric.hpp>
 #include "Renderer/Vulkan/VulkanSupport.h"
+
+#include <nlohmann/json.hpp>
 #include "Scene/Scene.h"
 #include "Scene/SceneRenderSnapshot.h"
 #include "Scene/SceneSerializer.h"
@@ -684,6 +687,23 @@ namespace
 		const DrawArguments Triangle{ 3, 1, 0, 0 };
 		PF_CHECK(Tests, ValidateMeshDrawArguments(Triangle, Pipeline, Description.VertexLayout, VertexBuffer).has_value());
 
+		VertexLayoutDesc FullMeshLayout;
+		FullMeshLayout.Stride = sizeof(float) * 6;
+		FullMeshLayout.Attributes = {
+			{ VertexSemantic::Position, VertexFormat::Float3, 0 },
+			{ VertexSemantic::Color, VertexFormat::Float3, sizeof(float) * 3 }
+		};
+		VertexLayoutDesc PositionOnlyPipelineLayout;
+		PositionOnlyPipelineLayout.Stride = FullMeshLayout.Stride;
+		PositionOnlyPipelineLayout.Attributes = { { VertexSemantic::Position, VertexFormat::Float3, 0 } };
+		auto PositionOnlyPipeline = Pipeline;
+		PositionOnlyPipeline.VertexLayout = PositionOnlyPipelineLayout;
+		PF_CHECK(Tests, ValidateIndexedDrawArguments(
+			IndexedTriangle, PositionOnlyPipeline, FullMeshLayout, ValidatedIndexCount).has_value());
+		PositionOnlyPipeline.VertexLayout.Attributes[0].Format = VertexFormat::Float2;
+		PF_CHECK(Tests, !ValidateIndexedDrawArguments(
+			IndexedTriangle, PositionOnlyPipeline, FullMeshLayout, ValidatedIndexCount).has_value());
+
 		auto NonIndexedDescription = Description;
 		NonIndexedDescription.Indices = {};
 		const auto NonIndexedMesh = ValidateMeshDescription(NonIndexedDescription);
@@ -1311,6 +1331,8 @@ namespace
 		PF_CHECK(Tests, Snapshot->DirectionalLight && Snapshot->DirectionalLight->Entity == LightID);
 		PF_CHECK(Tests, Snapshot->DirectionalLight && glm::abs(Snapshot->DirectionalLight->RayDirection.x + 1.0f) < 0.0001f);
 		PF_CHECK(Tests, Snapshot->DirectionalLight && Snapshot->DirectionalLight->Intensity == 2.0f);
+		PF_CHECK(Tests, Snapshot->DirectionalLight && Snapshot->DirectionalLight->CastShadows);
+		PF_CHECK(Tests, Snapshot->DirectionalLight && Snapshot->DirectionalLight->ShadowDistance == 100.0f);
 		PF_CHECK(Tests, Snapshot->EnvironmentLight && Snapshot->EnvironmentLight->Entity == LightID);
 		PF_CHECK(Tests, Snapshot->EnvironmentLight && Snapshot->EnvironmentLight->HdrImage == EnvironmentAssetID);
 		PF_CHECK(Tests, Snapshot->EnvironmentLight && Snapshot->EnvironmentLight->Intensity == 1.5f);
@@ -1415,6 +1437,7 @@ namespace
 		const auto TransientView = SceneRenderSnapshotBuilder::BuildForView(
 			CameraLessScene, TransientViewProjection, glm::vec3(3.0f, 4.0f, 5.0f));
 		PF_CHECK(Tests, TransientView.has_value());
+		PF_CHECK(Tests, TransientView && !TransientView->HasCameraFrustum);
 		if (TransientView)
 		{
 			PF_CHECK(Tests, !TransientView->CameraEntity.has_value());
@@ -1422,6 +1445,68 @@ namespace
 			PF_CHECK(Tests, TransientView->Meshes.size() == 1);
 			PF_CHECK(Tests, !TransientView->DirectionalLight.has_value());
 			PF_CHECK(Tests, TransientView->ViewProjection[0][0] == 1.0f);
+		}
+
+		CameraComponent CascadeCamera;
+		CascadeCamera.NearClipPlane = 0.1f;
+		CascadeCamera.FarClipPlane = 100.0f;
+		const auto CascadeProjection = CascadeCamera.GetProjectionMatrix(16.0f / 9.0f);
+		PF_CHECK(Tests, CascadeProjection.has_value());
+		if (CascadeProjection)
+		{
+			const auto ExplicitTransientView = SceneRenderSnapshotBuilder::BuildForView(
+				CameraLessScene, glm::mat4(1.0f), *CascadeProjection,
+				glm::vec3(3.0f, 4.0f, 5.0f), 0.1f, 100.0f);
+			PF_CHECK(Tests, ExplicitTransientView && ExplicitTransientView->HasCameraFrustum);
+			const auto Cascades = BuildDirectionalShadowCascades(
+				glm::mat4(1.0f), *CascadeProjection, 0.1f, 100.0f, 60.0f, glm::vec3(0.0f, 1.0f, 0.0f));
+			PF_CHECK(Tests, Cascades.has_value());
+			if (Cascades)
+			{
+				PF_CHECK(Tests, Cascades->ShadowDistance == 60.0f);
+				PF_CHECK(Tests, Cascades->Cascades.front().NearDistance == 0.1f);
+				PF_CHECK(Tests, Cascades->Cascades.back().FarDistance == 60.0f);
+				for (size_t Index = 0; Index < Cascades->Cascades.size(); ++Index)
+				{
+					PF_CHECK(Tests, Cascades->Cascades[Index].FarDistance > Cascades->Cascades[Index].NearDistance);
+					if (Index > 0)
+						PF_CHECK(Tests, Cascades->Cascades[Index].NearDistance == Cascades->Cascades[Index - 1].FarDistance);
+					for (int Column = 0; Column < 4; ++Column)
+						for (int Row = 0; Row < 4; ++Row)
+							PF_CHECK(Tests, std::isfinite(Cascades->Cascades[Index].ViewProjection[Column][Row]));
+
+					for (const float Distance : { Cascades->Cascades[Index].NearDistance, Cascades->Cascades[Index].FarDistance })
+					{
+						for (const float Y : { -1.0f, 1.0f })
+						{
+							for (const float X : { -1.0f, 1.0f })
+							{
+								glm::vec4 ViewCorner = glm::inverse(*CascadeProjection) * glm::vec4(X, Y, 1.0f, 1.0f);
+								ViewCorner /= ViewCorner.w;
+								ViewCorner = glm::vec4(glm::vec3(ViewCorner) * (Distance / -ViewCorner.z), 1.0f);
+								const glm::vec4 ShadowClip = Cascades->Cascades[Index].ViewProjection * ViewCorner;
+								const glm::vec3 ShadowNdc = glm::vec3(ShadowClip) / ShadowClip.w;
+								PF_CHECK(Tests, ShadowNdc.x >= -1.001f && ShadowNdc.x <= 1.001f);
+								PF_CHECK(Tests, ShadowNdc.y >= -1.001f && ShadowNdc.y <= 1.001f);
+								PF_CHECK(Tests, ShadowNdc.z >= 0.0f && ShadowNdc.z <= 1.0f);
+							}
+						}
+					}
+				}
+			}
+			const glm::mat4 SlightCameraTranslation = glm::translate(glm::mat4(1.0f), glm::vec3(0.001f, 0.0f, 0.0f));
+			const auto StableCascades = BuildDirectionalShadowCascades(
+				SlightCameraTranslation, *CascadeProjection, 0.1f, 100.0f, 60.0f, glm::vec3(0.0f, 1.0f, 0.0f));
+			PF_CHECK(Tests, StableCascades.has_value());
+			if (Cascades && StableCascades)
+				for (int Column = 0; Column < 4; ++Column)
+					for (int Row = 0; Row < 4; ++Row)
+						PF_CHECK(Tests, glm::abs(Cascades->Cascades[0].ViewProjection[Column][Row] -
+							StableCascades->Cascades[0].ViewProjection[Column][Row]) < 0.001f);
+			PF_CHECK(Tests, !BuildDirectionalShadowCascades(glm::mat4(1.0f), *CascadeProjection,
+				0.1f, 100.0f, 10.0f, glm::vec3(0.0f)).has_value());
+			PF_CHECK(Tests, !BuildDirectionalShadowCascades(glm::mat4(1.0f), *CascadeProjection,
+				0.1f, 100.0f, 0.05f, glm::vec3(0.0f, 1.0f, 0.0f)).has_value());
 		}
 
 		glm::mat4 InvalidTransientView(1.0f);
@@ -1999,6 +2084,11 @@ namespace
 		PF_CHECK(Tests, CameraBeforeSet && !CameraBeforeSet->has_value());
 		PF_CHECK(Tests, Child.SetCamera(SourceCamera).has_value());
 		DirectionalLightComponent SourceLight{ glm::vec3(0.75f, 0.8f, 1.0f), 3.0f };
+		SourceLight.CastShadows = false;
+		SourceLight.ShadowDistance = 42.0f;
+		SourceLight.ShadowBias = 2.0f;
+		SourceLight.ShadowNormalBias = 0.04f;
+		SourceLight.ShadowSoftness = 3.0f;
 		PF_CHECK(Tests, SourceLight.Validate().has_value());
 		PF_CHECK(Tests, Child.SetDirectionalLight(SourceLight).has_value());
 		const EnvironmentLightComponent SourceEnvironment{ AssetID{ 0x7400000000000000ull, 74 }, 1.25f };
@@ -2034,6 +2124,8 @@ namespace
 		PF_CHECK(Tests, Serialized->find("\"version\": 7") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"primary\": true") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"directionalLight\"") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"castShadows\": false") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"shadowDistance\": 42.0") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"environmentLight\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"meshAsset\": \"" + MeshAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"materialAsset\": \"" + MaterialAssetIdentifier.ToString() + "\"") != std::string::npos);
@@ -2047,6 +2139,38 @@ namespace
 		const size_t RootEntityPosition = Serialized->find("\"uuid\": \"" + RootId.ToString() + "\"");
 		PF_CHECK(Tests, ChildEntityPosition != std::string::npos && RootEntityPosition != std::string::npos &&
 			ChildEntityPosition < RootEntityPosition);
+
+		auto LegacyDocument = nlohmann::json::parse(*Serialized);
+		bool FoundLegacyLight = false;
+		for (auto& EntityRecord : LegacyDocument["entities"])
+		{
+			if (EntityRecord.value("uuid", std::string{}) != ChildId.ToString())
+				continue;
+			FoundLegacyLight = EntityRecord.contains("directionalLight");
+			if (!FoundLegacyLight)
+				break;
+			for (const std::string_view Key : { "castShadows", "shadowDistance", "shadowBias", "shadowNormalBias", "shadowSoftness" })
+				EntityRecord["directionalLight"].erase(std::string(Key));
+			break;
+		}
+		PF_CHECK(Tests, FoundLegacyLight);
+		const std::string LegacySerialized = LegacyDocument.dump(2) + "\n";
+		Scene LegacyDestination;
+		const auto LegacyLoaded = SceneSerializer::Deserialize(LegacySerialized, LegacyDestination);
+		PF_CHECK(Tests, LegacyLoaded.has_value());
+		if (LegacyLoaded)
+		{
+			const auto LegacyEntity = LegacyDestination.FindEntity(ChildId);
+			PF_CHECK(Tests, LegacyEntity.has_value());
+			if (LegacyEntity)
+			{
+				const auto LegacyLight = LegacyEntity->GetDirectionalLight();
+				PF_CHECK(Tests, LegacyLight && LegacyLight->has_value() && LegacyLight->value().CastShadows);
+				PF_CHECK(Tests, LegacyLight && LegacyLight->has_value() && LegacyLight->value().ShadowDistance == 100.0f);
+				PF_CHECK(Tests, LegacyLight && LegacyLight->has_value() && LegacyLight->value().ShadowBias == 1.0f &&
+					LegacyLight->value().ShadowNormalBias == 0.025f && LegacyLight->value().ShadowSoftness == 1.5f);
+			}
+		}
 
 		Scene Destination;
 		auto PreviousResult = Destination.CreateEntity("Previous scene");
@@ -2086,6 +2210,10 @@ namespace
 		PF_CHECK(Tests, LoadedLight && LoadedLight->has_value() &&
 			LoadedLight->value().Intensity == SourceLight.Intensity &&
 			glm::all(glm::equal(LoadedLight->value().Color, SourceLight.Color)));
+		PF_CHECK(Tests, LoadedLight && LoadedLight->has_value() &&
+			!LoadedLight->value().CastShadows && LoadedLight->value().ShadowDistance == 42.0f &&
+			LoadedLight->value().ShadowBias == 2.0f && LoadedLight->value().ShadowNormalBias == 0.04f &&
+			LoadedLight->value().ShadowSoftness == 3.0f);
 		PF_CHECK(Tests, LoadedEnvironment && LoadedEnvironment->has_value() &&
 			LoadedEnvironment->value().HdrImage == SourceEnvironment.HdrImage &&
 			LoadedEnvironment->value().Intensity == SourceEnvironment.Intensity);
@@ -5561,6 +5689,31 @@ end
 		DepthWriteWithoutTest.Depth.WriteEnabled = true;
 		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(DepthWriteWithoutTest).has_value());
 
+		auto DepthOnlyPipeline = Pipeline;
+		DepthOnlyPipeline.FragmentShader.reset();
+		DepthOnlyPipeline.ColorFormat = ColorTargetFormat::None;
+		DepthOnlyPipeline.Depth.TestEnabled = true;
+		DepthOnlyPipeline.Depth.WriteEnabled = true;
+		PF_CHECK(Tests, ValidateGraphicsPipelineDescription(DepthOnlyPipeline).has_value());
+		auto DepthOnlyWithColor = DepthOnlyPipeline;
+		DepthOnlyWithColor.ColorFormat = ColorTargetFormat::RGBA8_UNorm;
+		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(DepthOnlyWithColor).has_value());
+		auto DepthOnlyWithoutTesting = DepthOnlyPipeline;
+		DepthOnlyWithoutTesting.Depth.TestEnabled = false;
+		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(DepthOnlyWithoutTesting).has_value());
+		auto DepthOnlyWithoutWrites = DepthOnlyPipeline;
+		DepthOnlyWithoutWrites.Depth.WriteEnabled = false;
+		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(DepthOnlyWithoutWrites).has_value());
+		auto ColorPipelineWithoutFragment = Pipeline;
+		ColorPipelineWithoutFragment.FragmentShader.reset();
+		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(ColorPipelineWithoutFragment).has_value());
+		auto DepthOnlyBlending = DepthOnlyPipeline;
+		DepthOnlyBlending.Blend.Enabled = true;
+		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(DepthOnlyBlending).has_value());
+		auto NonFiniteBias = DepthOnlyPipeline;
+		NonFiniteBias.Rasterizer.SlopeScaledDepthBias = std::numeric_limits<float>::infinity();
+		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(NonFiniteBias).has_value());
+
 		BufferDesc VertexBuffer{ sizeof(float) * 6 * 3, BufferUsage::Vertex, "Test triangle vertices" };
 		DrawArguments Triangle{ 3, 1, 0, 0 };
 		PF_CHECK(Tests, ValidateDrawArguments(Triangle, Pipeline, VertexBuffer).has_value());
@@ -5688,6 +5841,9 @@ end
 		GraphicsPipelineDesc Pipeline = MakeTestPipelineDescription();
 		Pipeline.BindingLayouts.push_back(Layout);
 		PF_CHECK(Tests, ValidateGraphicsPipelineDescription(Pipeline).has_value());
+		auto DuplicateRegisterSpace = Pipeline;
+		DuplicateRegisterSpace.BindingLayouts.push_back(Layout);
+		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(DuplicateRegisterSpace).has_value());
 
 		TestBindingSet CreatedTestBindingSet(Layout);
 		const std::array<const BindingSet*, 1> ValidSets = { &CreatedTestBindingSet };
@@ -5878,14 +6034,20 @@ end
 		UnknownUsage.Usage = static_cast<TextureUsage>(0x80);
 		PF_CHECK(Tests, !ValidateTextureUpload(UnknownUsage, 16).has_value());
 
+		auto SampleableDepth = DepthDescription;
+		SampleableDepth.Usage = TextureUsage::DepthStencilAttachment | TextureUsage::ShaderResource;
+		PF_CHECK(Tests, ValidateTextureUpload(SampleableDepth, 0).has_value());
 		auto InvalidDepthUsage = DepthDescription;
-		InvalidDepthUsage.Usage = TextureUsage::DepthStencilAttachment | TextureUsage::ShaderResource;
+		InvalidDepthUsage.Usage = TextureUsage::DepthStencilAttachment | TextureUsage::ColorAttachment;
 		PF_CHECK(Tests, !ValidateTextureUpload(InvalidDepthUsage, 0).has_value());
 
 		RenderTargetDesc TargetDescription;
 		TargetDescription.Width = 800;
 		TargetDescription.Height = 600;
 		PF_CHECK(Tests, ValidateRenderTargetDescription(TargetDescription).has_value());
+		auto DepthOnlyTarget = TargetDescription;
+		DepthOnlyTarget.ColorFormat = ColorTargetFormat::None;
+		PF_CHECK(Tests, ValidateRenderTargetDescription(DepthOnlyTarget).has_value());
 		auto ZeroTargetWidth = TargetDescription;
 		ZeroTargetWidth.Width = 0;
 		PF_CHECK(Tests, !ValidateRenderTargetDescription(ZeroTargetWidth).has_value());
@@ -5944,6 +6106,8 @@ end
 		DepthTextureDescription.Format = TextureFormat::Depth32Float;
 		DepthTextureDescription.Usage = TextureUsage::DepthStencilAttachment;
 		TestTexture FakeDepthTexture(DepthTextureDescription);
+		DepthTextureDescription.Usage = TextureUsage::DepthStencilAttachment | TextureUsage::ShaderResource;
+		TestTexture FakeSampleableDepthTexture(DepthTextureDescription);
 		TestSampler Sampler;
 		TestBuffer ConstantBuffer(BufferDesc{ 16, BufferUsage::Constant, "Test constants" });
 
@@ -5974,6 +6138,11 @@ end
 
 		auto DepthTextureBinding = SetDescription;
 		DepthTextureBinding.Textures[0].Resource = std::cref(static_cast<const Texture&>(FakeDepthTexture));
+		PF_CHECK(Tests, !ValidateBindingSet(DepthTextureBinding).has_value());
+		DepthTextureBinding.Textures[0].Resource = std::cref(static_cast<const Texture&>(FakeSampleableDepthTexture));
+		PF_CHECK(Tests, ValidateBindingSet(DepthTextureBinding).has_value());
+		DepthTextureBinding.Textures[0].Resource = std::cref(static_cast<const Texture&>(FakeSampleableDepthTexture));
+		DepthTextureBinding.Textures[0].Type = BindingResourceType::TextureCube;
 		PF_CHECK(Tests, !ValidateBindingSet(DepthTextureBinding).has_value());
 
 		auto MissingTexture = SetDescription;

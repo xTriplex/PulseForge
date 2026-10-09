@@ -15,6 +15,7 @@ namespace PulseForge
 	{
 		uint32_t Width = 0;
 		uint32_t Height = 0;
+		// None creates a depth-only target; in that case no color texture exists.
 		ColorTargetFormat ColorFormat = ColorTargetFormat::RGBA8_Srgb;
 		std::string DebugName;
 	};
@@ -30,7 +31,7 @@ namespace PulseForge
 	public:
 		virtual ~RenderTarget() = default;
 		[[nodiscard]] virtual const RenderTargetDesc& GetDescription() const noexcept = 0;
-		[[nodiscard]] virtual const Texture& GetColorTexture() const noexcept = 0;
+		[[nodiscard]] virtual const Texture* GetColorTexture() const noexcept = 0;
 		[[nodiscard]] virtual const Texture& GetDepthTexture() const noexcept = 0;
 	};
 

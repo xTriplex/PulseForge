@@ -287,10 +287,21 @@ namespace
 			auto Projection = Camera.GetProjectionMatrix(AspectRatio);
 			if (!Projection)
 				return std::unexpected(Projection.error().Message);
+			return *Projection * GetView();
+		}
 
-			const glm::vec3 Forward = GetForward();
-			const glm::mat4 View = glm::lookAtRH(m_Position, m_Position + Forward, glm::vec3(0.0f, 1.0f, 0.0f));
-			return *Projection * View;
+		[[nodiscard]] glm::mat4 GetView() const
+		{
+			return glm::lookAtRH(m_Position, m_Position + GetForward(), glm::vec3(0.0f, 1.0f, 0.0f));
+		}
+
+		[[nodiscard]] std::expected<glm::mat4, std::string> GetProjection(float AspectRatio) const
+		{
+			PulseForge::CameraComponent Camera;
+			auto Projection = Camera.GetProjectionMatrix(AspectRatio);
+			if (!Projection)
+				return std::unexpected(Projection.error().Message);
+			return *Projection;
 		}
 
 		[[nodiscard]] glm::vec3 GetPosition() const noexcept { return m_Position; }
@@ -2670,7 +2681,10 @@ namespace
 
 			if (!m_ImGuiRenderer)
 				return std::unexpected("The Vulkan editor UI renderer is unavailable");
-			auto TextureID = m_ImGuiRenderer->RegisterTexture((*Created)->GetColorTexture());
+			const PulseForge::Texture* ColorTexture = (*Created)->GetColorTexture();
+			if (!ColorTexture)
+				return std::unexpected("The editor scene viewport requires a color attachment");
+			auto TextureID = m_ImGuiRenderer->RegisterTexture(*ColorTexture);
 			if (!TextureID)
 				return std::unexpected(TextureID.error());
 
@@ -2727,7 +2741,14 @@ namespace
 					return;
 				}
 				m_ViewportViewProjection = *ViewProjection;
-				Prepared = m_SceneRenderer->PrepareScene(ActiveScene, *ViewProjection, m_EditorCamera.GetPosition());
+				auto Projection = m_EditorCamera.GetProjection(AspectRatio);
+				if (!Projection)
+				{
+					SetViewportSceneError("Could not prepare the editor camera projection: " + Projection.error());
+					return;
+				}
+				Prepared = m_SceneRenderer->PrepareScene(
+					ActiveScene, m_EditorCamera.GetView(), *Projection, m_EditorCamera.GetPosition(), 0.1f, 1000.0f);
 			}
 			if (!Prepared)
 			{
@@ -3694,6 +3715,19 @@ namespace
 					Changed |= ImGui::DragFloat3("##DirectionalLightLinearColor", &Component.Color.x, 0.01f, 0.0f, 100000.0f, "%.3f");
 				if (m_EditorStyle.BeginPropertyRow("Intensity"))
 					Changed |= ImGui::DragFloat("##DirectionalLightIntensity", &Component.Intensity, 0.05f, 0.0f, 100000.0f, "%.3f");
+				if (m_EditorStyle.BeginPropertyRow("Cast Shadows"))
+					Changed |= ImGui::Checkbox("##DirectionalLightCastShadows", &Component.CastShadows);
+				if (Component.CastShadows)
+				{
+					if (m_EditorStyle.BeginPropertyRow("Shadow Distance"))
+						Changed |= ImGui::DragFloat("##DirectionalLightShadowDistance", &Component.ShadowDistance, 0.25f, 0.1f, 5000.0f, "%.1f m");
+					if (m_EditorStyle.BeginPropertyRow("Shadow Bias"))
+						Changed |= ImGui::DragFloat("##DirectionalLightShadowBias", &Component.ShadowBias, 0.25f, 0.0f, 16.0f, "%.0f units");
+					if (m_EditorStyle.BeginPropertyRow("Normal Bias"))
+						Changed |= ImGui::DragFloat("##DirectionalLightShadowNormalBias", &Component.ShadowNormalBias, 0.0025f, 0.0f, 0.25f, "%.4f");
+					if (m_EditorStyle.BeginPropertyRow("Softness"))
+						Changed |= ImGui::DragFloat("##DirectionalLightShadowSoftness", &Component.ShadowSoftness, 0.05f, 0.0f, 8.0f, "%.2f texels");
+				}
 				m_EditorStyle.EndPropertyTable();
 			}
 			if (Changed)

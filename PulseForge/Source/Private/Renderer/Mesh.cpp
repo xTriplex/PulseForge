@@ -13,23 +13,24 @@ namespace PulseForge
 			return std::unexpected(GraphicsError{ GraphicsErrorCode::InvalidDrawArguments, Message });
 		}
 
-		bool HasSameVertexLayout(const VertexLayoutDesc& First, const VertexLayoutDesc& Second)
+		bool IsPipelineVertexLayoutCompatible(const VertexLayoutDesc& PipelineLayout, const VertexLayoutDesc& MeshLayout)
 		{
-			if (First.Stride != Second.Stride || First.Attributes.size() != Second.Attributes.size())
+			if (PipelineLayout.Stride != MeshLayout.Stride || PipelineLayout.Attributes.empty() ||
+				PipelineLayout.Attributes.size() > MeshLayout.Attributes.size())
 				return false;
 
-			for (const VertexAttributeDesc& Attribute : First.Attributes)
+			for (const VertexAttributeDesc& Attribute : PipelineLayout.Attributes)
 			{
 				const auto Match = std::find_if(
-					Second.Attributes.begin(),
-					Second.Attributes.end(),
+					MeshLayout.Attributes.begin(),
+					MeshLayout.Attributes.end(),
 					[&Attribute](const VertexAttributeDesc& Candidate)
 					{
 						return Candidate.Semantic == Attribute.Semantic &&
 							Candidate.Format == Attribute.Format &&
 							Candidate.Offset == Attribute.Offset;
 					});
-				if (Match == Second.Attributes.end())
+				if (Match == MeshLayout.Attributes.end())
 					return false;
 			}
 
@@ -115,7 +116,7 @@ namespace PulseForge
 		const VertexLayoutDesc& MeshLayout,
 		const BufferDesc& VertexBuffer)
 	{
-		if (!HasSameVertexLayout(Pipeline.VertexLayout, MeshLayout))
+		if (!IsPipelineVertexLayoutCompatible(Pipeline.VertexLayout, MeshLayout))
 			return MakeGraphicsError("Graphics pipeline vertex layout does not match the mesh vertex layout");
 
 		return ValidateDrawArguments(Arguments, Pipeline, VertexBuffer);
@@ -133,7 +134,7 @@ namespace PulseForge
 		if (Arguments.IndexCount == 0 || Arguments.InstanceCount == 0)
 			return MakeGraphicsError("Indexed draw index and instance counts must be non-zero");
 
-		if (!HasSameVertexLayout(Pipeline.VertexLayout, MeshLayout))
+		if (!IsPipelineVertexLayoutCompatible(Pipeline.VertexLayout, MeshLayout))
 			return MakeGraphicsError("Graphics pipeline vertex layout does not match the mesh vertex layout");
 
 		const uint64_t RequiredIndexCount = static_cast<uint64_t>(Arguments.FirstIndex) + Arguments.IndexCount;

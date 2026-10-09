@@ -5,9 +5,11 @@
 #include "Renderer/Binding.h"
 #include "Renderer/EnvironmentLightingCache.h"
 #include "Renderer/RenderTarget.h"
+#include "Renderer/DirectionalShadowMath.h"
 #include "Scene/SceneRenderSnapshot.h"
 
 #include <expected>
+#include <array>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -68,6 +70,13 @@ namespace PulseForge
 			const Scene& Source,
 			const glm::mat4& ViewProjection,
 			const glm::vec3& CameraWorldPosition);
+		[[nodiscard]] std::expected<void, SceneRendererError> PrepareScene(
+			const Scene& Source,
+			const glm::mat4& View,
+			const glm::mat4& Projection,
+			const glm::vec3& CameraWorldPosition,
+			float NearClipPlane,
+			float FarClipPlane);
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene();
 		// Begins, clears, renders to, and ends Target during the active Application frame.
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene(
@@ -84,6 +93,8 @@ namespace PulseForge
 			const EnvironmentLightingTextures& EnvironmentTextures);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePipeline(ColorTargetFormat ColorFormat);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBackgroundPipeline(ColorTargetFormat ColorFormat);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureShadowPipeline(float DepthBias);
+		[[nodiscard]] std::expected<void, SceneRendererError> RenderShadowCascades();
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureEnvironmentBindings(
 			const AssetID& EnvironmentAsset,
 			const EnvironmentLightingTextures& EnvironmentTextures);
@@ -120,8 +131,12 @@ namespace PulseForge
 			float EnvironmentInverseRotation[4]{ 0.0f, 0.0f, 0.0f, 1.0f };
 			float EnvironmentParameters[4]{};
 			glm::mat4 InverseViewProjection{ 1.0f };
+			glm::mat4 View{ 1.0f };
+			float CascadeSplitDepths[4]{};
+			float ShadowParameters[4]{}; // enabled, receiver normal bias, PCF radius texels, max distance
+			std::array<glm::mat4, 4> CascadeViewProjection{ glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
 		};
-		static_assert(sizeof(FrameConstants) == 144);
+		static_assert(sizeof(FrameConstants) == 496);
 
 		Application& m_Runtime;
 		const Project& m_Project;
@@ -133,14 +148,23 @@ namespace PulseForge
 		ShaderHandle m_FragmentShader;
 		ShaderHandle m_BackgroundVertexShader;
 		ShaderHandle m_BackgroundFragmentShader;
+		ShaderHandle m_ShadowVertexShader;
 		SamplerHandle m_Sampler;
 		SamplerHandle m_EnvironmentSampler;
+		SamplerHandle m_ShadowSampler;
 		BindingLayoutHandle m_BindingLayout;
+		BindingLayoutHandle m_ShadowBindingLayout;
+		BindingLayoutHandle m_ShadowObjectBindingLayout;
+		BindingSetHandle m_ShadowBindingSet;
+		BindingSetHandle m_ShadowObjectBindingSet;
+		std::unordered_map<int32_t, GraphicsPipelineHandle> m_ShadowPipelines;
 		BufferHandle m_ObjectConstantsBuffer;
+		BufferHandle m_ShadowObjectConstantsBuffer;
 		BufferHandle m_FrameConstantsBuffer;
 		BufferHandle m_BackgroundTriangleBuffer;
 		BufferHandle m_FallbackMaterialConstantsBuffer;
 		TextureHandle m_FallbackBaseColorTexture;
+		std::array<RenderTargetHandle, 4> m_ShadowTargets;
 		EnvironmentLightingTextures m_FallbackEnvironmentTextures;
 		std::unordered_map<std::string, MaterialBindingResources> m_MaterialBindings;
 		std::unordered_map<std::string, BindingSetHandle> m_EnvironmentBindingSets;
@@ -148,6 +172,7 @@ namespace PulseForge
 		std::unordered_map<ColorTargetFormat, GraphicsPipelineHandle> m_BackgroundPipelines;
 		std::optional<VertexLayoutDesc> m_PipelineVertexLayout;
 		std::optional<SceneRenderSnapshot> m_PreparedSnapshot;
+		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
 		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;
 	};
 }
