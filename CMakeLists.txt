@@ -627,9 +627,11 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	add_executable(PulseForgeGpuValidation Tests/GpuRendererValidation.cpp)
 	target_compile_definitions(PulseForgeGpuValidation PRIVATE
 		PF_PLATFORM_WINDOWS
-		PF_GPU_VALIDATION_SHADER_DIRECTORY="${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}")
+		PF_GPU_VALIDATION_SHADER_DIRECTORY="${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}"
+		PF_GPU_VALIDATION_PROJECT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/PulseForgeGame.pfproj"
+		PF_GPU_VALIDATION_SCENE_SHADER_DIRECTORY="${PULSEFORGE_SHADER_OUTPUT_DIR}")
 	target_link_libraries(PulseForgeGpuValidation PRIVATE PulseForge)
-	add_dependencies(PulseForgeGpuValidation PulseForgeGpuValidationShaders)
+	add_dependencies(PulseForgeGpuValidation PulseForgeGpuValidationShaders PulseForgeSceneShaderAssets)
 	set_property(TARGET PulseForgeGpuValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGpuValidation>")
 endif()
 

@@ -6214,12 +6214,24 @@ end
 		TargetDescription.Width = 800;
 		TargetDescription.Height = 600;
 		PF_CHECK(Tests, ValidateRenderTargetDescription(TargetDescription).has_value());
+		PF_CHECK(Tests, MatchesRenderTargetConfiguration(
+			TargetDescription, 800, 600, ColorTargetFormat::RGBA8_Srgb, DepthAttachmentMode::Attachment));
+		PF_CHECK(Tests, !MatchesRenderTargetConfiguration(
+			TargetDescription, 0, 600, ColorTargetFormat::RGBA8_Srgb, DepthAttachmentMode::Attachment));
+		PF_CHECK(Tests, !MatchesRenderTargetConfiguration(
+			TargetDescription, 800, 600, ColorTargetFormat::RGBA16_Float, DepthAttachmentMode::Attachment));
+		PF_CHECK(Tests, !MatchesRenderTargetConfiguration(
+			TargetDescription, 800, 600, ColorTargetFormat::RGBA8_Srgb, DepthAttachmentMode::None));
 		auto HalfFloatColorTarget = TargetDescription;
 		HalfFloatColorTarget.ColorFormat = ColorTargetFormat::RGBA16_Float;
 		HalfFloatColorTarget.DepthMode = DepthAttachmentMode::None;
 		PF_CHECK(Tests, ValidateRenderTargetDescription(HalfFloatColorTarget).has_value());
+		PF_CHECK(Tests, MatchesRenderTargetConfiguration(
+			HalfFloatColorTarget, 800, 600, ColorTargetFormat::RGBA16_Float, DepthAttachmentMode::None));
 		HalfFloatColorTarget.DepthMode = DepthAttachmentMode::Attachment;
 		PF_CHECK(Tests, ValidateRenderTargetDescription(HalfFloatColorTarget).has_value());
+		PF_CHECK(Tests, MatchesRenderTargetConfiguration(
+			HalfFloatColorTarget, 800, 600, ColorTargetFormat::RGBA16_Float, DepthAttachmentMode::Attachment));
 		auto DepthOnlyTarget = TargetDescription;
 		DepthOnlyTarget.ColorFormat = ColorTargetFormat::None;
 		PF_CHECK(Tests, ValidateRenderTargetDescription(DepthOnlyTarget).has_value());

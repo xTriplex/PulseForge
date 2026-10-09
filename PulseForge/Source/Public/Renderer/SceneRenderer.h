@@ -45,6 +45,17 @@ namespace PulseForge
 		std::string Message;
 	};
 
+	struct HdrSceneRenderResult
+	{
+		// Borrowed from SceneRenderer; valid until the next HDR render at a different extent or renderer destruction.
+		const Texture* ColorTexture = nullptr;
+		const Texture* DepthTexture = nullptr;
+		uint32_t Width = 0;
+		uint32_t Height = 0;
+		size_t GeometryDrawCount = 0;
+		bool EnvironmentBackgroundDrawn = false;
+	};
+
 	struct AmbientOcclusionSettings
 	{
 		bool Enabled = true;
@@ -91,6 +102,12 @@ namespace PulseForge
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene(
 			const RenderTarget& Target,
 			const RenderTargetClearValue& ClearValue = {});
+		// Renders the prepared scene into a persistent RGBA16F+D32 target during an active frame.
+		// A scene snapshot must have been prepared beforehand. The returned color texture is borrowed and
+		// returned color/depth textures remain valid until this renderer next renders at a different extent or is destroyed.
+		[[nodiscard]] std::expected<HdrSceneRenderResult, SceneRendererError> RenderPreparedSceneToHdr(
+			uint32_t Width,
+			uint32_t Height);
 		[[nodiscard]] bool SetAmbientOcclusionSettings(const AmbientOcclusionSettings& Settings) noexcept;
 		[[nodiscard]] const AmbientOcclusionSettings& GetAmbientOcclusionSettings() const noexcept { return m_AmbientOcclusionSettings; }
 		[[nodiscard]] bool IsEnvironmentLightingPending() const noexcept { return m_EnvironmentLightingPending; }
@@ -106,6 +123,7 @@ namespace PulseForge
 			const EnvironmentLightingTextures& EnvironmentTextures);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePipeline(ColorTargetFormat ColorFormat);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBackgroundPipeline(ColorTargetFormat ColorFormat);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureHdrSceneTarget(uint32_t Width, uint32_t Height);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureShadowPipeline(float DepthBias);
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderShadowCascades();
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureAmbientOcclusionResources(uint32_t Width, uint32_t Height);
@@ -235,6 +253,7 @@ namespace PulseForge
 		TextureHandle m_FallbackBaseColorTexture;
 		TextureHandle m_FallbackAmbientOcclusionTexture;
 		std::array<RenderTargetHandle, 4> m_ShadowTargets;
+		RenderTargetHandle m_HdrSceneTarget;
 		RenderTargetHandle m_AmbientOcclusionPrepassTarget;
 		RenderTargetHandle m_AmbientOcclusionRawTarget;
 		std::array<RenderTargetHandle, 2> m_AmbientOcclusionBlurTargets;

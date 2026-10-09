@@ -35,6 +35,18 @@ namespace PulseForge
 		return {};
 	}
 
+	bool MatchesRenderTargetConfiguration(
+		const RenderTargetDesc& Description,
+		uint32_t Width,
+		uint32_t Height,
+		ColorTargetFormat ColorFormat,
+		DepthAttachmentMode DepthMode) noexcept
+	{
+		return Width != 0 && Height != 0 &&
+			Description.Width == Width && Description.Height == Height &&
+			Description.ColorFormat == ColorFormat && Description.DepthMode == DepthMode;
+	}
+
 	std::expected<void, RenderTargetError> ValidateRenderTargetClearValue(const RenderTargetClearValue& ClearValue)
 	{
 		for (const float Component : ClearValue.Color)

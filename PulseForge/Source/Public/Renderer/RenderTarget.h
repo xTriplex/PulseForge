@@ -62,6 +62,12 @@ namespace PulseForge
 
 	[[nodiscard]] PULSEFORGE_API std::expected<void, RenderTargetError> ValidateRenderTargetDescription(
 		const RenderTargetDesc& Description);
+	[[nodiscard]] PULSEFORGE_API bool MatchesRenderTargetConfiguration(
+		const RenderTargetDesc& Description,
+		uint32_t Width,
+		uint32_t Height,
+		ColorTargetFormat ColorFormat,
+		DepthAttachmentMode DepthMode) noexcept;
 	[[nodiscard]] PULSEFORGE_API std::expected<void, RenderTargetError> ValidateRenderTargetClearValue(
 		const RenderTargetClearValue& ClearValue);
 }
