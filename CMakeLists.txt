@@ -217,6 +217,7 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/Binding.cpp
 	PulseForge/Source/Private/Renderer/Graphics.cpp
 	PulseForge/Source/Private/Renderer/DirectionalShadowMath.cpp
+	PulseForge/Source/Private/Renderer/ScreenSpaceAmbientOcclusion.cpp
 	PulseForge/Source/Private/Renderer/EnvironmentLighting.cpp
 	PulseForge/Source/Private/Renderer/EnvironmentLightingCache.cpp
 	PulseForge/Source/Private/Renderer/RendererBackend.cpp
@@ -366,6 +367,15 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 	set(PULSEFORGE_BACKGROUND_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Shaders/EnvironmentBackground.hlsl")
 	set(PULSEFORGE_SHADOW_VERTEX_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/DirectionalShadow.vs.spv")
 	set(PULSEFORGE_SHADOW_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Shaders/DirectionalShadow.hlsl")
+	set(PULSEFORGE_SSAO_PREPASS_VERTEX_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/SsaoNormalDepth.vs.spv")
+	set(PULSEFORGE_SSAO_PREPASS_FRAGMENT_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/SsaoNormalDepth.ps.spv")
+	set(PULSEFORGE_SSAO_PREPASS_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Shaders/SsaoNormalDepth.hlsl")
+	set(PULSEFORGE_SSAO_VERTEX_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/Ssao.vs.spv")
+	set(PULSEFORGE_SSAO_FRAGMENT_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/Ssao.ps.spv")
+	set(PULSEFORGE_SSAO_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Shaders/Ssao.hlsl")
+	set(PULSEFORGE_SSAO_BLUR_VERTEX_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/SsaoBlur.vs.spv")
+	set(PULSEFORGE_SSAO_BLUR_FRAGMENT_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/SsaoBlur.ps.spv")
+	set(PULSEFORGE_SSAO_BLUR_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Shaders/SsaoBlur.hlsl")
 	add_custom_command(
 		OUTPUT "${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}"
 		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
@@ -378,7 +388,7 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 	add_custom_command(
 		OUTPUT "${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}"
 		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
-		COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -fvk-b-shift 256 1 -fvk-t-shift 0 1 -fvk-s-shift 128 1 -O3 -WX
+		COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -fvk-b-shift 256 1 -fvk-t-shift 0 1 -fvk-s-shift 128 1 -fvk-b-shift 256 2 -fvk-t-shift 0 2 -fvk-s-shift 128 2 -O3 -WX
 			-Fo "${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}" "${PULSEFORGE_TRIANGLE_HLSL}"
 		DEPENDS "${PULSEFORGE_TRIANGLE_HLSL}"
 		VERBATIM
@@ -411,10 +421,37 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 		VERBATIM
 		COMMENT "Compiling PulseForge directional-shadow vertex shader to SPIR-V"
 	)
+	foreach(PULSEFORGE_SSAO_SHADER IN ITEMS
+		"${PULSEFORGE_SSAO_PREPASS_HLSL}|${PULSEFORGE_SSAO_PREPASS_VERTEX_SPIRV}|vs_6_0|VSMain|normal-depth vertex"
+		"${PULSEFORGE_SSAO_PREPASS_HLSL}|${PULSEFORGE_SSAO_PREPASS_FRAGMENT_SPIRV}|ps_6_0|PSMain|normal-depth fragment"
+		"${PULSEFORGE_SSAO_HLSL}|${PULSEFORGE_SSAO_VERTEX_SPIRV}|vs_6_0|VSMain|SSAO vertex"
+		"${PULSEFORGE_SSAO_HLSL}|${PULSEFORGE_SSAO_FRAGMENT_SPIRV}|ps_6_0|PSMain|SSAO fragment"
+		"${PULSEFORGE_SSAO_BLUR_HLSL}|${PULSEFORGE_SSAO_BLUR_VERTEX_SPIRV}|vs_6_0|VSMain|SSAO blur vertex"
+		"${PULSEFORGE_SSAO_BLUR_HLSL}|${PULSEFORGE_SSAO_BLUR_FRAGMENT_SPIRV}|ps_6_0|PSMain|SSAO blur fragment")
+		string(REPLACE "|" ";" PULSEFORGE_SSAO_FIELDS "${PULSEFORGE_SSAO_SHADER}")
+		list(GET PULSEFORGE_SSAO_FIELDS 0 PULSEFORGE_SSAO_SOURCE)
+		list(GET PULSEFORGE_SSAO_FIELDS 1 PULSEFORGE_SSAO_OUTPUT)
+		list(GET PULSEFORGE_SSAO_FIELDS 2 PULSEFORGE_SSAO_PROFILE)
+		list(GET PULSEFORGE_SSAO_FIELDS 3 PULSEFORGE_SSAO_ENTRY)
+		list(GET PULSEFORGE_SSAO_FIELDS 4 PULSEFORGE_SSAO_LABEL)
+		add_custom_command(
+			OUTPUT "${PULSEFORGE_SSAO_OUTPUT}"
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
+			COMMAND "${PULSEFORGE_DXC}" -spirv -T "${PULSEFORGE_SSAO_PROFILE}" -E "${PULSEFORGE_SSAO_ENTRY}"
+				-fspv-target-env=vulkan1.3 -fvk-b-shift 256 4 -fvk-t-shift 0 4 -fvk-s-shift 128 4 -O3 -WX
+				-Fo "${PULSEFORGE_SSAO_OUTPUT}" "${PULSEFORGE_SSAO_SOURCE}"
+			DEPENDS "${PULSEFORGE_SSAO_SOURCE}"
+			VERBATIM
+			COMMENT "Compiling PulseForge ${PULSEFORGE_SSAO_LABEL} shader to SPIR-V"
+		)
+	endforeach()
 	add_custom_target(PulseForgeSceneShaderAssets
 		DEPENDS "${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}"
 			"${PULSEFORGE_BACKGROUND_VERTEX_SPIRV}" "${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}"
-			"${PULSEFORGE_SHADOW_VERTEX_SPIRV}")
+			"${PULSEFORGE_SHADOW_VERTEX_SPIRV}"
+			"${PULSEFORGE_SSAO_PREPASS_VERTEX_SPIRV}" "${PULSEFORGE_SSAO_PREPASS_FRAGMENT_SPIRV}"
+			"${PULSEFORGE_SSAO_VERTEX_SPIRV}" "${PULSEFORGE_SSAO_FRAGMENT_SPIRV}"
+			"${PULSEFORGE_SSAO_BLUR_VERTEX_SPIRV}" "${PULSEFORGE_SSAO_BLUR_FRAGMENT_SPIRV}")
 	if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
 		add_dependencies(PulseForgeGame PulseForgeSceneShaderAssets)
 		add_custom_command(TARGET PulseForgeGame POST_BUILD
@@ -429,6 +466,18 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 				"${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/EnvironmentBackground.ps.spv"
 			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
 				"${PULSEFORGE_SHADOW_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/DirectionalShadow.vs.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_SSAO_PREPASS_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/SsaoNormalDepth.vs.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_SSAO_PREPASS_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/SsaoNormalDepth.ps.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_SSAO_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Ssao.vs.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_SSAO_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Ssao.ps.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_SSAO_BLUR_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/SsaoBlur.vs.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_SSAO_BLUR_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/SsaoBlur.ps.spv"
 			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
 			COMMAND "${CMAKE_COMMAND}" -E copy_directory
 				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Models" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
@@ -492,6 +541,18 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 				"${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/EnvironmentBackground.ps.spv"
 			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
 				"${PULSEFORGE_SHADOW_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/DirectionalShadow.vs.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_SSAO_PREPASS_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/SsaoNormalDepth.vs.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_SSAO_PREPASS_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/SsaoNormalDepth.ps.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_SSAO_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/Ssao.vs.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_SSAO_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/Ssao.ps.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_SSAO_BLUR_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/SsaoBlur.vs.spv"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${PULSEFORGE_SSAO_BLUR_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/SsaoBlur.ps.spv"
 			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
 				"${PULSEFORGE_EDITOR_IMGUI_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/EditorImGui.vs.spv"
 			COMMAND "${CMAKE_COMMAND}" -E copy_if_different

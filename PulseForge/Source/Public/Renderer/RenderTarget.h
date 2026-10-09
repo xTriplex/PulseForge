@@ -11,12 +11,20 @@
 
 namespace PulseForge
 {
+	enum class DepthAttachmentMode : uint8_t
+	{
+		None,
+		Attachment,
+		ShaderReadableAttachment
+	};
+
 	struct RenderTargetDesc
 	{
 		uint32_t Width = 0;
 		uint32_t Height = 0;
-		// None creates a depth-only target; in that case no color texture exists.
+		// None omits the color attachment. Depth policy is independent.
 		ColorTargetFormat ColorFormat = ColorTargetFormat::RGBA8_Srgb;
+		DepthAttachmentMode DepthMode = DepthAttachmentMode::Attachment;
 		std::string DebugName;
 	};
 
@@ -32,7 +40,7 @@ namespace PulseForge
 		virtual ~RenderTarget() = default;
 		[[nodiscard]] virtual const RenderTargetDesc& GetDescription() const noexcept = 0;
 		[[nodiscard]] virtual const Texture* GetColorTexture() const noexcept = 0;
-		[[nodiscard]] virtual const Texture& GetDepthTexture() const noexcept = 0;
+		[[nodiscard]] virtual const Texture* GetDepthTexture() const noexcept = 0;
 	};
 
 	using RenderTargetHandle = std::unique_ptr<RenderTarget>;

@@ -303,9 +303,9 @@ namespace PulseForge
 				return m_ColorTexture.get();
 			}
 
-			const Texture& GetDepthTexture() const noexcept override
+			const Texture* GetDepthTexture() const noexcept override
 			{
-				return *m_DepthTexture;
+				return m_DepthTexture.get();
 			}
 
 			nvrhi::FramebufferHandle GetNativeFramebuffer() const noexcept
@@ -322,7 +322,9 @@ namespace PulseForge
 
 			nvrhi::TextureHandle GetNativeDepthTexture() const noexcept
 			{
-				return static_cast<const VulkanTexture&>(*m_DepthTexture).GetNativeTextureHandle();
+				return m_DepthTexture
+					? static_cast<const VulkanTexture&>(*m_DepthTexture).GetNativeTextureHandle()
+					: nvrhi::TextureHandle{};
 			}
 
 		private:
@@ -731,10 +733,11 @@ namespace PulseForge
 						ColorTexture,
 						nvrhi::TextureSubresourceSet(),
 						nvrhi::ResourceStates::RenderTarget);
-				Frame.CommandList->setTextureState(
-					DepthTexture,
-					nvrhi::TextureSubresourceSet(),
-					nvrhi::ResourceStates::DepthWrite);
+				if (DepthTexture)
+					Frame.CommandList->setTextureState(
+						DepthTexture,
+						nvrhi::TextureSubresourceSet(),
+						nvrhi::ResourceStates::DepthWrite);
 				Frame.CommandList->commitBarriers();
 				if (ColorTexture)
 				{
@@ -743,19 +746,21 @@ namespace PulseForge
 						nvrhi::TextureSubresourceSet(),
 						nvrhi::Color(ClearValue.Color[0], ClearValue.Color[1], ClearValue.Color[2], ClearValue.Color[3]));
 				}
-				Frame.CommandList->clearDepthStencilTexture(
-					DepthTexture,
-					nvrhi::TextureSubresourceSet(),
-					true,
-					ClearValue.Depth,
-					false,
-					0);
+				if (DepthTexture)
+					Frame.CommandList->clearDepthStencilTexture(
+						DepthTexture,
+						nvrhi::TextureSubresourceSet(),
+						true,
+						ClearValue.Depth,
+						false,
+						0);
 
 				m_ActiveRenderTarget = ActiveRenderTarget{
 					NativeTarget->GetDescription().ColorFormat,
 					NativeTarget->GetDescription().Width,
 					NativeTarget->GetDescription().Height,
-					HasTextureUsage(NativeTarget->GetDepthTexture().GetDescription().Usage, TextureUsage::ShaderResource),
+					NativeTarget->GetDescription().DepthMode == DepthAttachmentMode::ShaderReadableAttachment,
+					NativeTarget->GetDescription().DepthMode != DepthAttachmentMode::None,
 					NativeTarget->GetNativeFramebuffer(),
 					std::move(ColorTexture),
 					std::move(DepthTexture)
@@ -788,7 +793,7 @@ namespace PulseForge
 						m_ActiveRenderTarget->ColorTexture,
 						nvrhi::TextureSubresourceSet(),
 						nvrhi::ResourceStates::ShaderResource);
-				if (m_ActiveRenderTarget->DepthShaderResource)
+				if (m_ActiveRenderTarget->DepthShaderResource && m_ActiveRenderTarget->DepthTexture)
 					Frame.CommandList->setTextureState(
 						m_ActiveRenderTarget->DepthTexture,
 						nvrhi::TextureSubresourceSet(),
@@ -1109,29 +1114,34 @@ namespace PulseForge
 						"Could not create render-target color texture: " + ColorTexture.error().Message });
 			}
 
-			TextureDesc DepthDescription;
-			DepthDescription.Width = Description.Width;
-			DepthDescription.Height = Description.Height;
-			DepthDescription.Format = TextureFormat::Depth32Float;
-			DepthDescription.Usage = Description.ColorFormat == ColorTargetFormat::None
-				? TextureUsage::DepthStencilAttachment | TextureUsage::ShaderResource
-				: TextureUsage::DepthStencilAttachment;
-			DepthDescription.DebugName = Description.DebugName.empty()
-				? "PulseForge offscreen depth"
-				: Description.DebugName + " depth";
-			auto DepthTexture = CreateTexture(DepthDescription, {});
-			if (!DepthTexture)
+			TextureCreateResult DepthTexture = TextureHandle{};
+			if (Description.DepthMode != DepthAttachmentMode::None)
 			{
-				return std::unexpected(RenderTargetError{
-					RenderTargetErrorCode::BackendFailure,
-					"Could not create render-target depth texture: " + DepthTexture.error().Message
-				});
+				TextureDesc DepthDescription;
+				DepthDescription.Width = Description.Width;
+				DepthDescription.Height = Description.Height;
+				DepthDescription.Format = TextureFormat::Depth32Float;
+				DepthDescription.Usage = Description.DepthMode == DepthAttachmentMode::ShaderReadableAttachment
+					? TextureUsage::DepthStencilAttachment | TextureUsage::ShaderResource
+					: TextureUsage::DepthStencilAttachment;
+				DepthDescription.DebugName = Description.DebugName.empty()
+					? "PulseForge offscreen depth"
+					: Description.DebugName + " depth";
+				DepthTexture = CreateTexture(DepthDescription, {});
+				if (!DepthTexture)
+				{
+					return std::unexpected(RenderTargetError{
+						RenderTargetErrorCode::BackendFailure,
+						"Could not create render-target depth texture: " + DepthTexture.error().Message
+					});
+				}
 			}
 
 			const bool HasColorTexture = Description.ColorFormat != ColorTargetFormat::None;
 			const auto* NativeColor = HasColorTexture ? dynamic_cast<const VulkanTexture*>(ColorTexture->get()) : nullptr;
-			const auto* NativeDepth = dynamic_cast<const VulkanTexture*>(DepthTexture->get());
-			if ((HasColorTexture && !NativeColor) || !NativeDepth)
+			const auto* NativeDepth = DepthTexture ? dynamic_cast<const VulkanTexture*>(DepthTexture->get()) : nullptr;
+			if ((HasColorTexture && !NativeColor) ||
+				(Description.DepthMode != DepthAttachmentMode::None && !NativeDepth))
 			{
 				return std::unexpected(RenderTargetError{
 					RenderTargetErrorCode::UnsupportedFeature,
@@ -1144,7 +1154,8 @@ namespace PulseForge
 				nvrhi::FramebufferDesc NativeDescription;
 				if (NativeColor)
 					NativeDescription.addColorAttachment(NativeColor->GetNativeTextureHandle());
-				NativeDescription.setDepthAttachment(NativeDepth->GetNativeTexture());
+				if (NativeDepth)
+					NativeDescription.setDepthAttachment(NativeDepth->GetNativeTexture());
 				nvrhi::FramebufferHandle Framebuffer = m_ActiveNvrhiDevice->createFramebuffer(NativeDescription);
 				if (!Framebuffer)
 				{
@@ -1162,7 +1173,7 @@ namespace PulseForge
 				return RenderTargetHandle(std::make_unique<VulkanRenderTarget>(
 					Description,
 					HasColorTexture ? std::move(ColorTexture.value()) : TextureHandle{},
-					std::move(DepthTexture.value()),
+					DepthTexture ? std::move(DepthTexture.value()) : TextureHandle{},
 					std::move(Framebuffer)));
 			}
 			catch (const std::exception& Exception)
@@ -1486,7 +1497,8 @@ namespace PulseForge
 						: Description.ColorFormat == ColorTargetFormat::RGBA8_UNorm
 							? nvrhi::Format::RGBA8_UNORM
 							: nvrhi::Format::SRGBA8_UNORM);
-				FramebufferInfo.setDepthFormat(nvrhi::Format::D32);
+				if (Description.DepthAttachmentEnabled)
+					FramebufferInfo.setDepthFormat(nvrhi::Format::D32);
 				nvrhi::GraphicsPipelineHandle NativePipeline = m_ActiveNvrhiDevice->createGraphicsPipeline(
 					NativeDescription,
 					FramebufferInfo);
@@ -1655,7 +1667,11 @@ namespace PulseForge
 					Framebuffer = Image.Framebuffer;
 				}
 
-				if (NativePipeline->GetDescription().ColorFormat != TargetFormat)
+				const bool TargetHasDepth = m_ActiveRenderTarget
+					? m_ActiveRenderTarget->HasDepthAttachment
+					: true;
+				if (NativePipeline->GetDescription().ColorFormat != TargetFormat ||
+					NativePipeline->GetDescription().DepthAttachmentEnabled != TargetHasDepth)
 				{
 					return std::unexpected(GraphicsError{
 						GraphicsErrorCode::InvalidDescription,
@@ -1753,6 +1769,7 @@ namespace PulseForge
 			uint32_t Width = 0;
 			uint32_t Height = 0;
 			bool DepthShaderResource = false;
+			bool HasDepthAttachment = false;
 			nvrhi::FramebufferHandle Framebuffer;
 			nvrhi::TextureHandle ColorTexture;
 			nvrhi::TextureHandle DepthTexture;

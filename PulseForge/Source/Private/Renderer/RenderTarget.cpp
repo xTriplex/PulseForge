@@ -17,6 +17,8 @@ namespace PulseForge
 	{
 		if (Description.Width == 0 || Description.Height == 0)
 			return MakeError(RenderTargetErrorCode::InvalidDescription, "Render-target dimensions must be non-zero");
+		if (Description.ColorFormat == ColorTargetFormat::None && Description.DepthMode == DepthAttachmentMode::None)
+			return MakeError(RenderTargetErrorCode::InvalidDescription, "Render targets require at least one attachment");
 
 		if (Description.ColorFormat != ColorTargetFormat::None && Description.ColorFormat != ColorTargetFormat::RGBA8_UNorm &&
 			Description.ColorFormat != ColorTargetFormat::RGBA8_Srgb)
@@ -25,6 +27,9 @@ namespace PulseForge
 				RenderTargetErrorCode::InvalidDescription,
 				"Offscreen render targets require None, RGBA8_UNorm, or RGBA8_Srgb color format");
 		}
+		if (Description.DepthMode != DepthAttachmentMode::None && Description.DepthMode != DepthAttachmentMode::Attachment &&
+			Description.DepthMode != DepthAttachmentMode::ShaderReadableAttachment)
+			return MakeError(RenderTargetErrorCode::InvalidDescription, "Render target has an unsupported depth attachment mode");
 
 		return {};
 	}

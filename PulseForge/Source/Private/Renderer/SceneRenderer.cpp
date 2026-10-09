@@ -251,6 +251,38 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Could not create directional shadow vertex shader: " + ShadowVertex.error().Message));
 		m_ShadowVertexShader = std::move(*ShadowVertex);
 
+		const auto LoadAuxiliaryShader = [&](const char* FileName, ShaderStage Stage, const char* DebugName)
+			-> std::expected<ShaderHandle, SceneRendererError>
+		{
+			auto Bytecode = ReadShaderBytecode(CompiledShaderDirectory / FileName);
+			if (!Bytecode)
+				return std::unexpected(std::move(Bytecode.error()));
+			ShaderDesc Description;
+			Description.Stage = Stage;
+			Description.EntryPoint = Stage == ShaderStage::Vertex ? "VSMain" : "PSMain";
+			Description.DebugName = DebugName;
+			auto Shader = m_Runtime.CreateShader(Description, *Bytecode);
+			if (!Shader)
+				return std::unexpected(MakeResourceError(std::string("Could not create shader '") + DebugName + "': " + Shader.error().Message));
+			return std::move(*Shader);
+		};
+		auto AoPrepassVs = LoadAuxiliaryShader("SsaoNormalDepth.vs.spv", ShaderStage::Vertex,
+			"PulseForge SSAO normal-depth vertex shader");
+		auto AoPrepassPs = LoadAuxiliaryShader("SsaoNormalDepth.ps.spv", ShaderStage::Fragment,
+			"PulseForge SSAO normal-depth fragment shader");
+		auto AoVs = LoadAuxiliaryShader("Ssao.vs.spv", ShaderStage::Vertex, "PulseForge SSAO fullscreen vertex shader");
+		auto AoPs = LoadAuxiliaryShader("Ssao.ps.spv", ShaderStage::Fragment, "PulseForge SSAO evaluation fragment shader");
+		auto AoBlurVs = LoadAuxiliaryShader("SsaoBlur.vs.spv", ShaderStage::Vertex, "PulseForge SSAO blur vertex shader");
+		auto AoBlurPs = LoadAuxiliaryShader("SsaoBlur.ps.spv", ShaderStage::Fragment, "PulseForge SSAO blur fragment shader");
+		if (!AoPrepassVs || !AoPrepassPs || !AoVs || !AoPs || !AoBlurVs || !AoBlurPs)
+			return std::unexpected(MakeResourceError("Could not load the SSAO shader set"));
+		m_AmbientOcclusionPrepassVertexShader = std::move(*AoPrepassVs);
+		m_AmbientOcclusionPrepassFragmentShader = std::move(*AoPrepassPs);
+		m_AmbientOcclusionVertexShader = std::move(*AoVs);
+		m_AmbientOcclusionFragmentShader = std::move(*AoPs);
+		m_AmbientOcclusionBlurVertexShader = std::move(*AoBlurVs);
+		m_AmbientOcclusionBlurFragmentShader = std::move(*AoBlurPs);
+
 		SamplerDesc SamplerDescription;
 		SamplerDescription.Minification = SamplerFilter::Nearest;
 		SamplerDescription.Magnification = SamplerFilter::Nearest;
@@ -273,6 +305,24 @@ namespace PulseForge
 		if (!EnvironmentSampler)
 			return std::unexpected(MakeResourceError("Could not create the environment sampler: " + EnvironmentSampler.error().Message));
 		m_EnvironmentSampler = std::move(EnvironmentSampler.value());
+		SamplerDesc AmbientOcclusionPointDescription;
+		AmbientOcclusionPointDescription.Minification = SamplerFilter::Nearest;
+		AmbientOcclusionPointDescription.Magnification = SamplerFilter::Nearest;
+		AmbientOcclusionPointDescription.AddressU = SamplerAddressMode::ClampToEdge;
+		AmbientOcclusionPointDescription.AddressV = SamplerAddressMode::ClampToEdge;
+		AmbientOcclusionPointDescription.DebugName = "PulseForge SSAO point clamp sampler";
+		auto AmbientOcclusionPointSampler = m_Runtime.CreateSampler(AmbientOcclusionPointDescription);
+		if (!AmbientOcclusionPointSampler)
+			return std::unexpected(MakeResourceError("Could not create SSAO point sampler: " + AmbientOcclusionPointSampler.error().Message));
+		m_AmbientOcclusionPointSampler = std::move(*AmbientOcclusionPointSampler);
+		SamplerDesc AmbientOcclusionLinearDescription = AmbientOcclusionPointDescription;
+		AmbientOcclusionLinearDescription.Minification = SamplerFilter::Linear;
+		AmbientOcclusionLinearDescription.Magnification = SamplerFilter::Linear;
+		AmbientOcclusionLinearDescription.DebugName = "PulseForge SSAO linear clamp sampler";
+		auto AmbientOcclusionLinearSampler = m_Runtime.CreateSampler(AmbientOcclusionLinearDescription);
+		if (!AmbientOcclusionLinearSampler)
+			return std::unexpected(MakeResourceError("Could not create SSAO linear sampler: " + AmbientOcclusionLinearSampler.error().Message));
+		m_AmbientOcclusionLinearSampler = std::move(*AmbientOcclusionLinearSampler);
 
 		auto FallbackEnvironment = CreateBlackCube(m_Runtime, "PulseForge fallback environment cube");
 		auto FallbackIrradiance = CreateBlackCube(m_Runtime, "PulseForge fallback irradiance cube");
@@ -304,6 +354,16 @@ namespace PulseForge
 		if (!WhiteTexture)
 			return std::unexpected(MakeResourceError("Could not create fallback base-color texture: " + WhiteTexture.error().Message));
 		m_FallbackBaseColorTexture = std::move(*WhiteTexture);
+		TextureDesc AmbientOcclusionFallbackDescription;
+		AmbientOcclusionFallbackDescription.Width = 1;
+		AmbientOcclusionFallbackDescription.Height = 1;
+		AmbientOcclusionFallbackDescription.Format = TextureFormat::RGBA8_UNorm;
+		AmbientOcclusionFallbackDescription.DebugName = "PulseForge unoccluded SSAO fallback";
+		auto AmbientOcclusionFallback = m_Runtime.CreateTexture(
+			AmbientOcclusionFallbackDescription, std::as_bytes(std::span<const uint8_t>(WhitePixel)));
+		if (!AmbientOcclusionFallback)
+			return std::unexpected(MakeResourceError("Could not create the unoccluded SSAO fallback: " + AmbientOcclusionFallback.error().Message));
+		m_FallbackAmbientOcclusionTexture = std::move(*AmbientOcclusionFallback);
 		const MaterialConstants FallbackMaterial{ { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f, 0.0f, 0.0f } };
 		BufferDesc FallbackMaterialDescription;
 		FallbackMaterialDescription.ByteSize = sizeof(FallbackMaterial);
@@ -344,6 +404,65 @@ namespace PulseForge
 		if (!BindingLayout)
 			return std::unexpected(MakeResourceError("Could not create the scene binding layout: " + BindingLayout.error().Message));
 		m_BindingLayout = std::move(BindingLayout.value());
+
+		BindingLayoutDesc AmbientOcclusionFinalDescription;
+		AmbientOcclusionFinalDescription.Visibility = ShaderVisibility::Fragment;
+		AmbientOcclusionFinalDescription.ShaderRegisterSpace = 2;
+		AmbientOcclusionFinalDescription.Items = {
+			{ BindingResourceType::Texture2D, 0 }, { BindingResourceType::Sampler, 0 }
+		};
+		AmbientOcclusionFinalDescription.DebugName = "PulseForge SSAO final result (space2)";
+		auto AmbientOcclusionFinalLayout = m_Runtime.CreateBindingLayout(AmbientOcclusionFinalDescription);
+		if (!AmbientOcclusionFinalLayout)
+			return std::unexpected(MakeResourceError("Could not create SSAO final layout: " + AmbientOcclusionFinalLayout.error().Message));
+		m_AmbientOcclusionFinalBindingLayout = std::move(*AmbientOcclusionFinalLayout);
+
+		BindingLayoutDesc AmbientOcclusionEvaluationDescription;
+		AmbientOcclusionEvaluationDescription.Visibility = ShaderVisibility::Fragment;
+		AmbientOcclusionEvaluationDescription.ShaderRegisterSpace = 4;
+		AmbientOcclusionEvaluationDescription.Items = {
+			{ BindingResourceType::Texture2D, 0 }, { BindingResourceType::Texture2D, 1 },
+			{ BindingResourceType::Sampler, 0 }, { BindingResourceType::ConstantBuffer, 0 }
+		};
+		AmbientOcclusionEvaluationDescription.DebugName = "PulseForge SSAO evaluation resources (space4)";
+		auto AmbientOcclusionEvaluationLayout = m_Runtime.CreateBindingLayout(AmbientOcclusionEvaluationDescription);
+		if (!AmbientOcclusionEvaluationLayout)
+			return std::unexpected(MakeResourceError("Could not create SSAO evaluation layout: " + AmbientOcclusionEvaluationLayout.error().Message));
+		m_AmbientOcclusionEvaluationBindingLayout = std::move(*AmbientOcclusionEvaluationLayout);
+
+		BindingLayoutDesc AmbientOcclusionBlurDescription;
+		AmbientOcclusionBlurDescription.Visibility = ShaderVisibility::Fragment;
+		AmbientOcclusionBlurDescription.ShaderRegisterSpace = 4;
+		AmbientOcclusionBlurDescription.Items = {
+			{ BindingResourceType::Texture2D, 0 }, { BindingResourceType::Texture2D, 1 },
+			{ BindingResourceType::Texture2D, 2 }, { BindingResourceType::Sampler, 0 },
+			{ BindingResourceType::Sampler, 1 }, { BindingResourceType::ConstantBuffer, 0 }
+		};
+		AmbientOcclusionBlurDescription.DebugName = "PulseForge SSAO bilateral blur resources (space4)";
+		auto AmbientOcclusionBlurLayout = m_Runtime.CreateBindingLayout(AmbientOcclusionBlurDescription);
+		if (!AmbientOcclusionBlurLayout)
+			return std::unexpected(MakeResourceError("Could not create SSAO blur layout: " + AmbientOcclusionBlurLayout.error().Message));
+		m_AmbientOcclusionBlurBindingLayout = std::move(*AmbientOcclusionBlurLayout);
+
+		BindingLayoutDesc AmbientOcclusionPrepassDescription;
+		AmbientOcclusionPrepassDescription.Visibility = ShaderVisibility::Vertex;
+		AmbientOcclusionPrepassDescription.ShaderRegisterSpace = 4;
+		AmbientOcclusionPrepassDescription.Items = { { BindingResourceType::ConstantBuffer, 0 } };
+		AmbientOcclusionPrepassDescription.DebugName = "PulseForge SSAO prepass constants (space4)";
+		auto AmbientOcclusionPrepassLayout = m_Runtime.CreateBindingLayout(AmbientOcclusionPrepassDescription);
+		if (!AmbientOcclusionPrepassLayout)
+			return std::unexpected(MakeResourceError("Could not create SSAO prepass layout: " + AmbientOcclusionPrepassLayout.error().Message));
+		m_AmbientOcclusionPrepassBindingLayout = std::move(*AmbientOcclusionPrepassLayout);
+
+		BindingSetDesc AmbientOcclusionFinalSetDescription;
+		AmbientOcclusionFinalSetDescription.Layout = m_AmbientOcclusionFinalBindingLayout;
+		AmbientOcclusionFinalSetDescription.Textures.push_back({ 0, std::cref(*m_FallbackAmbientOcclusionTexture) });
+		AmbientOcclusionFinalSetDescription.Samplers.push_back({ 0, std::cref(*m_AmbientOcclusionLinearSampler) });
+		auto AmbientOcclusionFinalSet = m_Runtime.CreateBindingSet(AmbientOcclusionFinalSetDescription);
+		if (!AmbientOcclusionFinalSet)
+			return std::unexpected(MakeResourceError("Could not create fallback SSAO bindings: " + AmbientOcclusionFinalSet.error().Message));
+		m_AmbientOcclusionFallbackBindingSet = std::move(*AmbientOcclusionFinalSet);
+		m_AmbientOcclusionFinalBindingSet = nullptr;
 
 		BindingLayoutDesc ShadowBindingLayoutDescription;
 		ShadowBindingLayoutDescription.Visibility = ShaderVisibility::Fragment;
@@ -388,6 +507,56 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Could not create scene frame constants: " + FrameBuffer.error().Message));
 		m_FrameConstantsBuffer = std::move(FrameBuffer.value());
 
+		AmbientOcclusionConstants InitialAmbientOcclusionConstants;
+		InitialAmbientOcclusionConstants.Parameters = glm::vec4(
+			m_AmbientOcclusionSettings.Radius,
+			m_AmbientOcclusionSettings.Bias,
+			m_AmbientOcclusionSettings.Strength,
+			0.0f);
+		m_AmbientOcclusionKernel = GenerateAmbientOcclusionKernel();
+		InitialAmbientOcclusionConstants.Kernel = m_AmbientOcclusionKernel;
+		BufferDesc AmbientOcclusionParametersDescription;
+		AmbientOcclusionParametersDescription.ByteSize = sizeof(InitialAmbientOcclusionConstants);
+		AmbientOcclusionParametersDescription.Usage = BufferUsage::Constant;
+		AmbientOcclusionParametersDescription.DebugName = "PulseForge SSAO kernel and parameters";
+		auto AmbientOcclusionParameters = m_Runtime.CreateBuffer(
+			AmbientOcclusionParametersDescription,
+			std::as_bytes(std::span(&InitialAmbientOcclusionConstants, 1)));
+		if (!AmbientOcclusionParameters)
+			return std::unexpected(MakeResourceError("Could not create SSAO parameters: " + AmbientOcclusionParameters.error().Message));
+		m_AmbientOcclusionParametersBuffer = std::move(*AmbientOcclusionParameters);
+
+		const AmbientOcclusionBlurConstants InitialBlurConstants{};
+		BufferDesc AmbientOcclusionBlurParametersDescription;
+		AmbientOcclusionBlurParametersDescription.ByteSize = sizeof(InitialBlurConstants);
+		AmbientOcclusionBlurParametersDescription.Usage = BufferUsage::Constant;
+		AmbientOcclusionBlurParametersDescription.DebugName = "PulseForge SSAO bilateral blur parameters";
+		auto AmbientOcclusionBlurParameters = m_Runtime.CreateBuffer(
+			AmbientOcclusionBlurParametersDescription,
+			std::as_bytes(std::span(&InitialBlurConstants, 1)));
+		if (!AmbientOcclusionBlurParameters)
+			return std::unexpected(MakeResourceError("Could not create SSAO blur parameters: " + AmbientOcclusionBlurParameters.error().Message));
+		m_AmbientOcclusionBlurParametersBuffer = std::move(*AmbientOcclusionBlurParameters);
+
+		const AmbientOcclusionObjectConstants InitialAmbientOcclusionObject{};
+		BufferDesc AmbientOcclusionObjectDescription;
+		AmbientOcclusionObjectDescription.ByteSize = sizeof(InitialAmbientOcclusionObject);
+		AmbientOcclusionObjectDescription.Usage = BufferUsage::Constant;
+		AmbientOcclusionObjectDescription.DebugName = "PulseForge SSAO prepass object constants";
+		auto AmbientOcclusionObjectBuffer = m_Runtime.CreateBuffer(
+			AmbientOcclusionObjectDescription,
+			std::as_bytes(std::span(&InitialAmbientOcclusionObject, 1)));
+		if (!AmbientOcclusionObjectBuffer)
+			return std::unexpected(MakeResourceError("Could not create SSAO prepass constants: " + AmbientOcclusionObjectBuffer.error().Message));
+		m_AmbientOcclusionObjectConstantsBuffer = std::move(*AmbientOcclusionObjectBuffer);
+		BindingSetDesc AmbientOcclusionPrepassSetDescription;
+		AmbientOcclusionPrepassSetDescription.Layout = m_AmbientOcclusionPrepassBindingLayout;
+		AmbientOcclusionPrepassSetDescription.Buffers.push_back({ 0, std::cref(*m_AmbientOcclusionObjectConstantsBuffer) });
+		auto AmbientOcclusionPrepassSet = m_Runtime.CreateBindingSet(AmbientOcclusionPrepassSetDescription);
+		if (!AmbientOcclusionPrepassSet)
+			return std::unexpected(MakeResourceError("Could not create SSAO prepass object bindings: " + AmbientOcclusionPrepassSet.error().Message));
+		m_AmbientOcclusionPrepassBindingSet = std::move(*AmbientOcclusionPrepassSet);
+
 		const glm::mat4 InitialShadowObject(1.0f);
 		BufferDesc ShadowObjectDescription;
 		ShadowObjectDescription.ByteSize = sizeof(InitialShadowObject);
@@ -424,6 +593,7 @@ namespace PulseForge
 			ShadowTargetDescription.Width = ShadowResolution;
 			ShadowTargetDescription.Height = ShadowResolution;
 			ShadowTargetDescription.ColorFormat = ColorTargetFormat::None;
+			ShadowTargetDescription.DepthMode = DepthAttachmentMode::ShaderReadableAttachment;
 			ShadowTargetDescription.DebugName = "PulseForge directional shadow cascade " + std::to_string(CascadeIndex);
 			auto ShadowTarget = m_Runtime.CreateRenderTarget(ShadowTargetDescription);
 			if (!ShadowTarget)
@@ -435,12 +605,14 @@ namespace PulseForge
 		ShadowSetDescription.Layout = m_ShadowBindingLayout;
 		for (uint32_t CascadeIndex = 0; CascadeIndex < m_ShadowTargets.size(); ++CascadeIndex)
 			ShadowSetDescription.Textures.push_back({ CascadeIndex,
-				std::cref(m_ShadowTargets[CascadeIndex]->GetDepthTexture()) });
+				std::cref(*m_ShadowTargets[CascadeIndex]->GetDepthTexture()) });
 		ShadowSetDescription.Samplers.push_back({ 0, std::cref(*m_ShadowSampler) });
 		auto ShadowSet = m_Runtime.CreateBindingSet(ShadowSetDescription);
 		if (!ShadowSet)
 			return std::unexpected(MakeResourceError("Could not create directional shadow bindings: " + ShadowSet.error().Message));
 		m_ShadowBindingSet = std::move(*ShadowSet);
+		if (auto Pipelines = EnsureAmbientOcclusionPipelines(); !Pipelines)
+			return std::unexpected(std::move(Pipelines.error()));
 		return {};
 	}
 
@@ -670,6 +842,8 @@ namespace PulseForge
 			if (Snapshot->DirectionalLight && Snapshot->DirectionalLight->CastShadows)
 				if (auto ShadowPipeline = EnsureShadowPipeline(Snapshot->DirectionalLight->ShadowBias); !ShadowPipeline)
 					return std::unexpected(std::move(ShadowPipeline.error()));
+			if (auto AmbientOcclusionPipelines = EnsureAmbientOcclusionPipelines(); !AmbientOcclusionPipelines)
+				return std::unexpected(std::move(AmbientOcclusionPipelines.error()));
 		}
 
 		m_PreparedCascades.reset();
@@ -699,7 +873,8 @@ namespace PulseForge
 		GraphicsPipelineDesc PipelineDescription;
 		PipelineDescription.VertexShader = m_VertexShader;
 		PipelineDescription.FragmentShader = m_FragmentShader;
-		PipelineDescription.BindingLayouts = { m_BindingLayout, m_ShadowBindingLayout };
+		PipelineDescription.BindingLayouts = {
+			m_BindingLayout, m_ShadowBindingLayout, m_AmbientOcclusionFinalBindingLayout };
 		PipelineDescription.VertexLayout = *m_PipelineVertexLayout;
 		PipelineDescription.ColorFormat = ColorFormat;
 		PipelineDescription.Rasterizer.Cull = CullMode::None;
@@ -793,6 +968,274 @@ namespace PulseForge
 		return {};
 	}
 
+	std::expected<void, SceneRendererError> SceneRenderer::EnsureAmbientOcclusionPipelines()
+	{
+		if (!m_AmbientOcclusionPipeline)
+		{
+			GraphicsPipelineDesc Description;
+			Description.VertexShader = m_AmbientOcclusionVertexShader;
+			Description.FragmentShader = m_AmbientOcclusionFragmentShader;
+			Description.BindingLayouts = { m_AmbientOcclusionEvaluationBindingLayout };
+			Description.VertexLayout.Stride = sizeof(float) * 2;
+			Description.VertexLayout.Attributes = { { VertexSemantic::Position, VertexFormat::Float2, 0 } };
+			Description.ColorFormat = ColorTargetFormat::RGBA8_UNorm;
+			Description.DepthAttachmentEnabled = false;
+			Description.DebugName = "PulseForge half-resolution SSAO evaluation pipeline";
+			auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
+			if (!Pipeline)
+				return std::unexpected(MakeResourceError("Could not create SSAO evaluation pipeline: " + Pipeline.error().Message));
+			m_AmbientOcclusionPipeline = std::move(*Pipeline);
+		}
+
+		if (!m_AmbientOcclusionBlurPipeline)
+		{
+			GraphicsPipelineDesc Description;
+			Description.VertexShader = m_AmbientOcclusionBlurVertexShader;
+			Description.FragmentShader = m_AmbientOcclusionBlurFragmentShader;
+			Description.BindingLayouts = { m_AmbientOcclusionBlurBindingLayout };
+			Description.VertexLayout.Stride = sizeof(float) * 2;
+			Description.VertexLayout.Attributes = { { VertexSemantic::Position, VertexFormat::Float2, 0 } };
+			Description.ColorFormat = ColorTargetFormat::RGBA8_UNorm;
+			Description.DepthAttachmentEnabled = false;
+			Description.DebugName = "PulseForge bilateral SSAO blur pipeline";
+			auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
+			if (!Pipeline)
+				return std::unexpected(MakeResourceError("Could not create SSAO blur pipeline: " + Pipeline.error().Message));
+			m_AmbientOcclusionBlurPipeline = std::move(*Pipeline);
+		}
+
+		if (!m_AmbientOcclusionPrepassPipeline && m_PipelineVertexLayout)
+		{
+			GraphicsPipelineDesc Description;
+			Description.VertexShader = m_AmbientOcclusionPrepassVertexShader;
+			Description.FragmentShader = m_AmbientOcclusionPrepassFragmentShader;
+			Description.BindingLayouts = { m_AmbientOcclusionPrepassBindingLayout };
+			Description.VertexLayout.Stride = m_PipelineVertexLayout->Stride;
+			for (const VertexSemantic Semantic : { VertexSemantic::Position, VertexSemantic::Normal })
+			{
+				const auto Attribute = std::find_if(m_PipelineVertexLayout->Attributes.begin(), m_PipelineVertexLayout->Attributes.end(),
+					[Semantic](const VertexAttributeDesc& Candidate) { return Candidate.Semantic == Semantic; });
+				if (Attribute == m_PipelineVertexLayout->Attributes.end())
+					return std::unexpected(MakeResourceError("Mesh layout lacks position or normal attributes required by the SSAO prepass"));
+				Description.VertexLayout.Attributes.push_back(*Attribute);
+			}
+			Description.ColorFormat = ColorTargetFormat::RGBA8_UNorm;
+			Description.Depth.TestEnabled = true;
+			Description.Depth.WriteEnabled = true;
+			Description.Depth.Compare = DepthCompareOperation::Less;
+			Description.Rasterizer.Cull = CullMode::Back;
+			Description.DebugName = "PulseForge camera normal-depth prepass pipeline";
+			auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
+			if (!Pipeline)
+				return std::unexpected(MakeResourceError("Could not create SSAO normal-depth pipeline: " + Pipeline.error().Message));
+			m_AmbientOcclusionPrepassPipeline = std::move(*Pipeline);
+		}
+		return {};
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::EnsureAmbientOcclusionResources(uint32_t Width, uint32_t Height)
+	{
+		const auto [HalfWidth, HalfHeight] = CalculateAmbientOcclusionExtent(Width, Height);
+		if (m_AmbientOcclusionPrepassTarget && m_AmbientOcclusionWidth == Width && m_AmbientOcclusionHeight == Height)
+			return {};
+
+		const auto CreateTarget = [&](uint32_t TargetWidth, uint32_t TargetHeight, DepthAttachmentMode DepthMode, const char* Name)
+			-> std::expected<RenderTargetHandle, SceneRendererError>
+		{
+			RenderTargetDesc Description;
+			Description.Width = TargetWidth;
+			Description.Height = TargetHeight;
+			Description.ColorFormat = ColorTargetFormat::RGBA8_UNorm;
+			Description.DepthMode = DepthMode;
+			Description.DebugName = Name;
+			auto Target = m_Runtime.CreateRenderTarget(Description);
+			if (!Target)
+				return std::unexpected(MakeResourceError(std::string("Could not create ") + Name + ": " + Target.error().Message));
+			return std::move(*Target);
+		};
+		auto Prepass = CreateTarget(Width, Height, DepthAttachmentMode::ShaderReadableAttachment,
+			"PulseForge SSAO camera normal-depth target");
+		auto Raw = CreateTarget(HalfWidth, HalfHeight, DepthAttachmentMode::None, "PulseForge raw half-resolution SSAO target");
+		auto BlurHorizontal = CreateTarget(HalfWidth, HalfHeight, DepthAttachmentMode::None,
+			"PulseForge horizontal SSAO blur target");
+		auto BlurVertical = CreateTarget(HalfWidth, HalfHeight, DepthAttachmentMode::None,
+			"PulseForge vertical SSAO blur target");
+		if (!Prepass || !Raw || !BlurHorizontal || !BlurVertical)
+			return std::unexpected(MakeResourceError("Could not allocate the persistent SSAO target set"));
+		const Texture* PrepassNormal = (*Prepass)->GetColorTexture();
+		const Texture* PrepassDepth = (*Prepass)->GetDepthTexture();
+		const Texture* RawTexture = (*Raw)->GetColorTexture();
+		const Texture* HorizontalTexture = (*BlurHorizontal)->GetColorTexture();
+		const Texture* VerticalTexture = (*BlurVertical)->GetColorTexture();
+		if (!PrepassNormal || !PrepassDepth || !RawTexture || !HorizontalTexture || !VerticalTexture)
+			return std::unexpected(MakeResourceError("SSAO target allocation returned a missing required attachment"));
+
+		BindingSetDesc EvaluationSetDescription;
+		EvaluationSetDescription.Layout = m_AmbientOcclusionEvaluationBindingLayout;
+		EvaluationSetDescription.Textures = { { 0, std::cref(*PrepassDepth) }, { 1, std::cref(*PrepassNormal) } };
+		EvaluationSetDescription.Samplers = { { 0, std::cref(*m_AmbientOcclusionPointSampler) } };
+		EvaluationSetDescription.Buffers = { { 0, std::cref(*m_AmbientOcclusionParametersBuffer) } };
+		auto EvaluationSet = m_Runtime.CreateBindingSet(EvaluationSetDescription);
+		if (!EvaluationSet)
+			return std::unexpected(MakeResourceError("Could not create SSAO evaluation bindings: " + EvaluationSet.error().Message));
+
+		const auto CreateBlurSet = [&](const Texture& AoTexture) -> std::expected<BindingSetHandle, SceneRendererError>
+		{
+			BindingSetDesc Description;
+			Description.Layout = m_AmbientOcclusionBlurBindingLayout;
+			Description.Textures = { { 0, std::cref(AoTexture) }, { 1, std::cref(*PrepassNormal) }, { 2, std::cref(*PrepassDepth) } };
+			Description.Samplers = { { 0, std::cref(*m_AmbientOcclusionLinearSampler) },
+				{ 1, std::cref(*m_AmbientOcclusionPointSampler) } };
+			Description.Buffers = { { 0, std::cref(*m_AmbientOcclusionBlurParametersBuffer) } };
+			auto Set = m_Runtime.CreateBindingSet(Description);
+			if (!Set)
+				return std::unexpected(MakeResourceError("Could not create SSAO bilateral bindings: " + Set.error().Message));
+			return std::move(*Set);
+		};
+		auto HorizontalSet = CreateBlurSet(*RawTexture);
+		auto VerticalSet = CreateBlurSet(*HorizontalTexture);
+		if (!HorizontalSet || !VerticalSet)
+			return std::unexpected(MakeResourceError("Could not create the SSAO blur binding sets"));
+		BindingSetDesc FinalSetDescription;
+		FinalSetDescription.Layout = m_AmbientOcclusionFinalBindingLayout;
+		FinalSetDescription.Textures.push_back({ 0, std::cref(*VerticalTexture) });
+		FinalSetDescription.Samplers.push_back({ 0, std::cref(*m_AmbientOcclusionLinearSampler) });
+		auto FinalSet = m_Runtime.CreateBindingSet(FinalSetDescription);
+		if (!FinalSet)
+			return std::unexpected(MakeResourceError("Could not create final SSAO bindings: " + FinalSet.error().Message));
+
+		m_AmbientOcclusionPrepassTarget = std::move(*Prepass);
+		m_AmbientOcclusionRawTarget = std::move(*Raw);
+		m_AmbientOcclusionBlurTargets[0] = std::move(*BlurHorizontal);
+		m_AmbientOcclusionBlurTargets[1] = std::move(*BlurVertical);
+		m_AmbientOcclusionEvaluationBindingSet = std::move(*EvaluationSet);
+		m_AmbientOcclusionBlurBindingSets[0] = std::move(*HorizontalSet);
+		m_AmbientOcclusionBlurBindingSets[1] = std::move(*VerticalSet);
+		m_AmbientOcclusionFinalBindingSet = std::move(*FinalSet);
+		m_AmbientOcclusionWidth = Width;
+		m_AmbientOcclusionHeight = Height;
+		return {};
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::RenderAmbientOcclusion(uint32_t Width, uint32_t Height)
+	{
+		m_AmbientOcclusionFrameAvailable = false;
+		if (!m_AmbientOcclusionSettings.Enabled || !m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty() ||
+			!m_PreparedSnapshot->HasCameraFrustum || Width == 0 || Height == 0)
+		{
+			return {};
+		}
+		if (auto Resources = EnsureAmbientOcclusionResources(Width, Height); !Resources)
+			return std::unexpected(std::move(Resources.error()));
+		if (auto Pipelines = EnsureAmbientOcclusionPipelines(); !Pipelines)
+			return std::unexpected(std::move(Pipelines.error()));
+		if (!m_AmbientOcclusionPrepassPipeline)
+			return std::unexpected(MakeResourceError("SSAO normal-depth pipeline is not available for the prepared mesh layout"));
+
+		const glm::mat4 InverseProjection = glm::inverse(m_PreparedSnapshot->Projection);
+		if (!IsFinite(InverseProjection))
+			return std::unexpected(MakeDrawError("SSAO requires an invertible camera projection"));
+		const auto [HalfWidth, HalfHeight] = CalculateAmbientOcclusionExtent(Width, Height);
+		AmbientOcclusionConstants Parameters;
+		Parameters.InverseProjection = InverseProjection;
+		Parameters.Projection = m_PreparedSnapshot->Projection;
+		Parameters.OutputSize = glm::vec4(static_cast<float>(Width), static_cast<float>(Height),
+			1.0f / static_cast<float>(Width), 1.0f / static_cast<float>(Height));
+		Parameters.HalfSize = glm::vec4(static_cast<float>(HalfWidth), static_cast<float>(HalfHeight),
+			1.0f / static_cast<float>(HalfWidth), 1.0f / static_cast<float>(HalfHeight));
+		Parameters.Parameters = glm::vec4(m_AmbientOcclusionSettings.Radius, m_AmbientOcclusionSettings.Bias,
+			m_AmbientOcclusionSettings.Strength, 0.0f);
+		Parameters.Kernel = m_AmbientOcclusionKernel;
+		const auto ParameterUpdate = m_Runtime.WriteBuffer(*m_AmbientOcclusionParametersBuffer, 0,
+			std::as_bytes(std::span(&Parameters, 1)));
+		if (!ParameterUpdate)
+			return std::unexpected(MakeDrawError("Could not update SSAO parameters: " + ParameterUpdate.error().Message));
+
+		RenderTargetClearValue PrepassClear;
+		PrepassClear.Color = { 0.5f, 0.5f, 1.0f, 1.0f };
+		if (const GraphicsResult Begin = m_Runtime.BeginRenderTarget(*m_AmbientOcclusionPrepassTarget, PrepassClear); !Begin)
+			return std::unexpected(MakeDrawError("Could not begin SSAO normal-depth prepass: " + Begin.error().Message));
+		RenderTargetFrameScope PrepassScope(m_Runtime);
+		for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
+		{
+			auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
+			if (!Mesh)
+				return std::unexpected(MakeDrawError("SSAO prepass mesh became unavailable: " + Mesh.error().Message));
+			const glm::mat4 ViewModel = m_PreparedSnapshot->View * Instance.WorldTransform;
+			const glm::mat4 ViewNormalTransform = glm::transpose(glm::inverse(ViewModel));
+			if (!IsFinite(ViewNormalTransform))
+				return std::unexpected(MakeDrawError("SSAO prepass cannot transform normals for a singular mesh transform"));
+			const AmbientOcclusionObjectConstants Object{
+				m_PreparedSnapshot->ViewProjection * Instance.WorldTransform,
+				ViewNormalTransform };
+			const auto Update = m_Runtime.WriteBuffer(*m_AmbientOcclusionObjectConstantsBuffer, 0,
+				std::as_bytes(std::span(&Object, 1)));
+			if (!Update)
+				return std::unexpected(MakeDrawError("Could not update SSAO object constants: " + Update.error().Message));
+			const std::array<const BindingSet*, 1> Bindings = { m_AmbientOcclusionPrepassBindingSet.get() };
+			const GraphicsResult Draw = m_Runtime.DrawIndexed(*m_AmbientOcclusionPrepassPipeline, Mesh->get(),
+				{ Mesh->get().GetIndexCount(), 1, 0, 0 }, Bindings);
+			if (!Draw)
+				return std::unexpected(MakeDrawError("Could not draw SSAO normal-depth prepass: " + Draw.error().Message));
+		}
+		if (const GraphicsResult End = PrepassScope.End(); !End)
+			return std::unexpected(MakeDrawError("Could not end SSAO normal-depth prepass: " + End.error().Message));
+
+		const auto DrawFullscreen = [&](const RenderTarget& Target, const GraphicsPipeline& Pipeline,
+			const BindingSet& Bindings, const char* PassName) -> std::expected<void, SceneRendererError>
+		{
+			RenderTargetClearValue Clear;
+			Clear.Color = { 1.0f, 1.0f, 1.0f, 1.0f };
+			const GraphicsResult Begin = m_Runtime.BeginRenderTarget(Target, Clear);
+			if (!Begin)
+				return std::unexpected(MakeDrawError(std::string("Could not begin ") + PassName + ": " + Begin.error().Message));
+			RenderTargetFrameScope Scope(m_Runtime);
+			const std::array<const BindingSet*, 1> BindingSets = { &Bindings };
+			const GraphicsResult Draw = m_Runtime.Draw(Pipeline, *m_BackgroundTriangleBuffer, { 3, 1, 0, 0 }, BindingSets);
+			if (!Draw)
+				return std::unexpected(MakeDrawError(std::string("Could not draw ") + PassName + ": " + Draw.error().Message));
+			const GraphicsResult End = Scope.End();
+			if (!End)
+				return std::unexpected(MakeDrawError(std::string("Could not end ") + PassName + ": " + End.error().Message));
+			return {};
+		};
+		if (auto RawPass = DrawFullscreen(*m_AmbientOcclusionRawTarget, *m_AmbientOcclusionPipeline,
+			*m_AmbientOcclusionEvaluationBindingSet, "SSAO evaluation pass"); !RawPass)
+			return std::unexpected(std::move(RawPass.error()));
+
+		AmbientOcclusionBlurConstants BlurParameters;
+		BlurParameters.InverseProjection = InverseProjection;
+		BlurParameters.OutputSize = Parameters.OutputSize;
+		BlurParameters.HalfSize = Parameters.HalfSize;
+		BlurParameters.Direction = glm::vec4(1.0f / static_cast<float>(HalfWidth), 0.0f, 0.0f, 0.0f);
+		if (const auto Update = m_Runtime.WriteBuffer(*m_AmbientOcclusionBlurParametersBuffer, 0,
+			std::as_bytes(std::span(&BlurParameters, 1))); !Update)
+			return std::unexpected(MakeDrawError("Could not update horizontal SSAO blur parameters: " + Update.error().Message));
+		if (auto BlurPass = DrawFullscreen(*m_AmbientOcclusionBlurTargets[0], *m_AmbientOcclusionBlurPipeline,
+			*m_AmbientOcclusionBlurBindingSets[0], "horizontal SSAO bilateral blur"); !BlurPass)
+			return std::unexpected(std::move(BlurPass.error()));
+
+		BlurParameters.Direction = glm::vec4(0.0f, 1.0f / static_cast<float>(HalfHeight), 0.0f, 0.0f);
+		if (const auto Update = m_Runtime.WriteBuffer(*m_AmbientOcclusionBlurParametersBuffer, 0,
+			std::as_bytes(std::span(&BlurParameters, 1))); !Update)
+			return std::unexpected(MakeDrawError("Could not update vertical SSAO blur parameters: " + Update.error().Message));
+		if (auto BlurPass = DrawFullscreen(*m_AmbientOcclusionBlurTargets[1], *m_AmbientOcclusionBlurPipeline,
+			*m_AmbientOcclusionBlurBindingSets[1], "vertical SSAO bilateral blur"); !BlurPass)
+			return std::unexpected(std::move(BlurPass.error()));
+		m_AmbientOcclusionFrameAvailable = true;
+		return {};
+	}
+
+	bool SceneRenderer::SetAmbientOcclusionSettings(const AmbientOcclusionSettings& Settings) noexcept
+	{
+		if (!std::isfinite(Settings.Radius) || Settings.Radius <= 0.0f || Settings.Radius > 10.0f ||
+			!std::isfinite(Settings.Bias) || Settings.Bias < 0.0f || Settings.Bias > Settings.Radius ||
+			!std::isfinite(Settings.Strength) || Settings.Strength < 0.0f || Settings.Strength > 4.0f)
+			return false;
+		m_AmbientOcclusionSettings = Settings;
+		return true;
+	}
+
 	std::expected<void, SceneRendererError> SceneRenderer::EnsureBackgroundPipeline(ColorTargetFormat ColorFormat)
 	{
 		if (m_BackgroundPipelines.contains(ColorFormat))
@@ -818,7 +1261,10 @@ namespace PulseForge
 	{
 		if (auto Shadows = RenderShadowCascades(); !Shadows)
 			return std::unexpected(std::move(Shadows.error()));
-		return RenderPreparedSceneForFormat(ColorTargetFormat::Swapchain);
+		const auto [Width, Height] = m_Runtime.GetWindow().GetFramebufferSize();
+		if (auto AmbientOcclusion = RenderAmbientOcclusion(Width, Height); !AmbientOcclusion)
+			return std::unexpected(std::move(AmbientOcclusion.error()));
+		return RenderPreparedSceneForFormat(ColorTargetFormat::Swapchain, Width, Height);
 	}
 
 	std::expected<size_t, SceneRendererError> SceneRenderer::RenderPreparedScene(
@@ -838,13 +1284,17 @@ namespace PulseForge
 		}
 		if (auto Shadows = RenderShadowCascades(); !Shadows)
 			return std::unexpected(std::move(Shadows.error()));
+		if (auto AmbientOcclusion = RenderAmbientOcclusion(
+			Target.GetDescription().Width, Target.GetDescription().Height); !AmbientOcclusion)
+			return std::unexpected(std::move(AmbientOcclusion.error()));
 
 		const GraphicsResult BeginResult = m_Runtime.BeginRenderTarget(Target, ClearValue);
 		if (!BeginResult)
 			return std::unexpected(MakeDrawError("Could not begin scene render target: " + BeginResult.error().Message));
 
 		RenderTargetFrameScope TargetScope(m_Runtime);
-		auto Rendered = RenderPreparedSceneForFormat(ColorFormat);
+		auto Rendered = RenderPreparedSceneForFormat(
+			ColorFormat, Target.GetDescription().Width, Target.GetDescription().Height);
 		const GraphicsResult EndResult = TargetScope.End();
 		if (!Rendered)
 		{
@@ -858,7 +1308,10 @@ namespace PulseForge
 		return Rendered;
 	}
 
-	std::expected<size_t, SceneRendererError> SceneRenderer::RenderPreparedSceneForFormat(ColorTargetFormat ColorFormat)
+	std::expected<size_t, SceneRendererError> SceneRenderer::RenderPreparedSceneForFormat(
+		ColorTargetFormat ColorFormat,
+		uint32_t Width,
+		uint32_t Height)
 	{
 		if (!m_PreparedSnapshot || (m_PreparedSnapshot->Meshes.empty() && !m_PreparedSnapshot->EnvironmentLight))
 			return size_t{ 0 };
@@ -877,6 +1330,10 @@ namespace PulseForge
 		Frame.CameraWorldPosition[2] = m_PreparedSnapshot->CameraWorldPosition.z;
 		Frame.InverseViewProjection = glm::inverse(m_PreparedSnapshot->ViewProjection);
 		Frame.View = m_PreparedSnapshot->View;
+		Frame.Projection = m_PreparedSnapshot->Projection;
+		if (Width > 0 && Height > 0)
+			Frame.OutputSize = glm::vec4(static_cast<float>(Width), static_cast<float>(Height),
+				1.0f / static_cast<float>(Width), 1.0f / static_cast<float>(Height));
 		if (m_PreparedSnapshot->EnvironmentLight && !IsFinite(Frame.InverseViewProjection))
 			return std::unexpected(MakeDrawError("Environment background requires an invertible view-projection matrix"));
 		if (m_PreparedSnapshot->EnvironmentLight)
@@ -989,8 +1446,11 @@ namespace PulseForge
 			}
 
 			const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
-			const std::array<const BindingSet*, 2> BindingSets = {
-				Binding->second.BindingSet.get(), m_ShadowBindingSet.get() };
+			const BindingSet* AmbientOcclusionBindings = m_AmbientOcclusionFrameAvailable && m_AmbientOcclusionFinalBindingSet
+				? m_AmbientOcclusionFinalBindingSet.get()
+				: m_AmbientOcclusionFallbackBindingSet.get();
+			const std::array<const BindingSet*, 3> BindingSets = {
+				Binding->second.BindingSet.get(), m_ShadowBindingSet.get(), AmbientOcclusionBindings };
 			const GraphicsResult Draw = m_Runtime.DrawIndexed(*ScenePipeline, Mesh->get(), Arguments, BindingSets);
 			if (!Draw)
 			{

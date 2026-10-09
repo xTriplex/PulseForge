@@ -20,6 +20,8 @@ cbuffer Frame : register(b2)
 	float4 EnvironmentParameters; // linear radiance intensity, maximum specular mip, unused, unused
 	float4x4 InverseViewProjection;
 	float4x4 View;
+	float4x4 Projection;
+	float4 OutputSize;
 	float4 CascadeSplitDepths;
 	float4 ShadowParameters; // enabled, receiver normal bias, PCF radius (texels), shadow distance
 	float4x4 CascadeViewProjection[4];
@@ -36,6 +38,8 @@ Texture2D<float> ShadowCascade1 : register(t1, space1);
 Texture2D<float> ShadowCascade2 : register(t2, space1);
 Texture2D<float> ShadowCascade3 : register(t3, space1);
 SamplerState ShadowSampler : register(s0, space1);
+Texture2D<float> AmbientOcclusionTexture : register(t0, space2);
+SamplerState AmbientOcclusionSampler : register(s0, space2);
 
 float3 SafeNormalize(float3 Value, float3 Fallback)
 {
@@ -180,7 +184,10 @@ float4 PSMain(VertexOutput Input) : SV_Target0
 		EnvironmentSampler, EnvironmentReflection, Roughness * EnvironmentParameters.y).rgb;
 	const float2 Brdf = BrdfIntegrationLut.Sample(EnvironmentSampler, float2(NdotV, Roughness)).rg;
 	const float3 SpecularIbl = Prefiltered * (AmbientFresnel * Brdf.x + Brdf.y);
-	const float3 EnvironmentIbl = (DiffuseIbl + SpecularIbl) * EnvironmentParameters.x;
+	const float2 ScreenUV = Input.Position.xy / max(OutputSize.xy, 1.0f.xx);
+	const float AmbientOcclusion = saturate(AmbientOcclusionTexture.Sample(AmbientOcclusionSampler, ScreenUV));
+	const float SpecularOcclusion = saturate(1.0f - (1.0f - AmbientOcclusion) * (1.0f - NdotV) * Roughness);
+	const float3 EnvironmentIbl = (DiffuseIbl * AmbientOcclusion + SpecularIbl * SpecularOcclusion) * EnvironmentParameters.x;
 	const float3 Color = DirectColor + EnvironmentIbl;
 	return float4(Color, BaseColorFactor.a);
 }

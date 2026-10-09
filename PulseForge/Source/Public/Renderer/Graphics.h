@@ -136,6 +136,7 @@ namespace PulseForge
 		VertexLayoutDesc VertexLayout;
 		PrimitiveTopology Topology = PrimitiveTopology::TriangleList;
 		ColorTargetFormat ColorFormat = ColorTargetFormat::Swapchain;
+		bool DepthAttachmentEnabled = true;
 		RasterState Rasterizer;
 		BlendState Blend;
 		DepthState Depth;

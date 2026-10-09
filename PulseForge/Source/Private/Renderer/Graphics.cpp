@@ -142,6 +142,9 @@ namespace PulseForge
 			(!Description.Depth.TestEnabled || !Description.Depth.WriteEnabled))
 			return MakeError(GraphicsErrorCode::InvalidDescription,
 				"Depth-only pipelines require depth testing and depth writes to be enabled");
+		if (!Description.DepthAttachmentEnabled && (Description.Depth.TestEnabled || Description.Depth.WriteEnabled))
+			return MakeError(GraphicsErrorCode::InvalidDescription,
+				"Pipelines without a depth attachment must disable depth testing and writes");
 		if (!std::isfinite(Description.Rasterizer.DepthBias) || !std::isfinite(Description.Rasterizer.SlopeScaledDepthBias))
 			return MakeError(GraphicsErrorCode::InvalidDescription, "Raster depth bias values must be finite");
 

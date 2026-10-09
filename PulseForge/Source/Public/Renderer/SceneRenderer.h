@@ -6,6 +6,7 @@
 #include "Renderer/EnvironmentLightingCache.h"
 #include "Renderer/RenderTarget.h"
 #include "Renderer/DirectionalShadowMath.h"
+#include "Renderer/ScreenSpaceAmbientOcclusion.h"
 #include "Scene/SceneRenderSnapshot.h"
 
 #include <expected>
@@ -42,6 +43,14 @@ namespace PulseForge
 		std::optional<UUID> Entity;
 		std::optional<AssetID> Asset;
 		std::string Message;
+	};
+
+	struct AmbientOcclusionSettings
+	{
+		bool Enabled = true;
+		float Radius = 0.65f;
+		float Bias = 0.025f;
+		float Strength = 1.15f;
 	};
 
 	// Runtime renderer for opaque direct-lit metallic/roughness materials. The Application and unmoved Project must outlive it.
@@ -82,6 +91,8 @@ namespace PulseForge
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene(
 			const RenderTarget& Target,
 			const RenderTargetClearValue& ClearValue = {});
+		[[nodiscard]] bool SetAmbientOcclusionSettings(const AmbientOcclusionSettings& Settings) noexcept;
+		[[nodiscard]] const AmbientOcclusionSettings& GetAmbientOcclusionSettings() const noexcept { return m_AmbientOcclusionSettings; }
 
 	private:
 		SceneRenderer(Application& Runtime, const Project& SourceProject);
@@ -95,10 +106,16 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBackgroundPipeline(ColorTargetFormat ColorFormat);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureShadowPipeline(float DepthBias);
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderShadowCascades();
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureAmbientOcclusionResources(uint32_t Width, uint32_t Height);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureAmbientOcclusionPipelines();
+		[[nodiscard]] std::expected<void, SceneRendererError> RenderAmbientOcclusion(uint32_t Width, uint32_t Height);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureEnvironmentBindings(
 			const AssetID& EnvironmentAsset,
 			const EnvironmentLightingTextures& EnvironmentTextures);
-		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedSceneForFormat(ColorTargetFormat ColorFormat);
+		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedSceneForFormat(
+			ColorTargetFormat ColorFormat,
+			uint32_t Width,
+			uint32_t Height);
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareSnapshot(
 			std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot);
 
@@ -132,11 +149,40 @@ namespace PulseForge
 			float EnvironmentParameters[4]{};
 			glm::mat4 InverseViewProjection{ 1.0f };
 			glm::mat4 View{ 1.0f };
+			glm::mat4 Projection{ 1.0f };
+			glm::vec4 OutputSize{ 1.0f };
 			float CascadeSplitDepths[4]{};
 			float ShadowParameters[4]{}; // enabled, receiver normal bias, PCF radius texels, max distance
 			std::array<glm::mat4, 4> CascadeViewProjection{ glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
 		};
-		static_assert(sizeof(FrameConstants) == 496);
+		static_assert(sizeof(FrameConstants) == 576);
+
+		struct alignas(16) AmbientOcclusionConstants
+		{
+			glm::mat4 InverseProjection{ 1.0f };
+			glm::mat4 Projection{ 1.0f };
+			glm::vec4 OutputSize{};
+			glm::vec4 HalfSize{};
+			glm::vec4 Parameters{};
+			AmbientOcclusionKernel Kernel;
+		};
+		static_assert(sizeof(AmbientOcclusionConstants) == 688);
+
+		struct alignas(16) AmbientOcclusionBlurConstants
+		{
+			glm::mat4 InverseProjection{ 1.0f };
+			glm::vec4 OutputSize{};
+			glm::vec4 HalfSize{};
+			glm::vec4 Direction{};
+		};
+		static_assert(sizeof(AmbientOcclusionBlurConstants) == 112);
+
+		struct alignas(16) AmbientOcclusionObjectConstants
+		{
+			glm::mat4 ViewProjectionModel{ 1.0f };
+			glm::mat4 ViewNormalTransform{ 1.0f };
+		};
+		static_assert(sizeof(AmbientOcclusionObjectConstants) == 128);
 
 		Application& m_Runtime;
 		const Project& m_Project;
@@ -149,30 +195,62 @@ namespace PulseForge
 		ShaderHandle m_BackgroundVertexShader;
 		ShaderHandle m_BackgroundFragmentShader;
 		ShaderHandle m_ShadowVertexShader;
+		ShaderHandle m_AmbientOcclusionPrepassVertexShader;
+		ShaderHandle m_AmbientOcclusionPrepassFragmentShader;
+		ShaderHandle m_AmbientOcclusionVertexShader;
+		ShaderHandle m_AmbientOcclusionFragmentShader;
+		ShaderHandle m_AmbientOcclusionBlurVertexShader;
+		ShaderHandle m_AmbientOcclusionBlurFragmentShader;
 		SamplerHandle m_Sampler;
 		SamplerHandle m_EnvironmentSampler;
 		SamplerHandle m_ShadowSampler;
+		SamplerHandle m_AmbientOcclusionPointSampler;
+		SamplerHandle m_AmbientOcclusionLinearSampler;
 		BindingLayoutHandle m_BindingLayout;
 		BindingLayoutHandle m_ShadowBindingLayout;
 		BindingLayoutHandle m_ShadowObjectBindingLayout;
+		BindingLayoutHandle m_AmbientOcclusionFinalBindingLayout;
+		BindingLayoutHandle m_AmbientOcclusionEvaluationBindingLayout;
+		BindingLayoutHandle m_AmbientOcclusionBlurBindingLayout;
+		BindingLayoutHandle m_AmbientOcclusionPrepassBindingLayout;
 		BindingSetHandle m_ShadowBindingSet;
 		BindingSetHandle m_ShadowObjectBindingSet;
+		BindingSetHandle m_AmbientOcclusionFinalBindingSet;
+		BindingSetHandle m_AmbientOcclusionFallbackBindingSet;
+		BindingSetHandle m_AmbientOcclusionEvaluationBindingSet;
+		std::array<BindingSetHandle, 2> m_AmbientOcclusionBlurBindingSets;
+		BindingSetHandle m_AmbientOcclusionPrepassBindingSet;
 		std::unordered_map<int32_t, GraphicsPipelineHandle> m_ShadowPipelines;
 		BufferHandle m_ObjectConstantsBuffer;
 		BufferHandle m_ShadowObjectConstantsBuffer;
 		BufferHandle m_FrameConstantsBuffer;
 		BufferHandle m_BackgroundTriangleBuffer;
+		BufferHandle m_AmbientOcclusionParametersBuffer;
+		BufferHandle m_AmbientOcclusionBlurParametersBuffer;
+		BufferHandle m_AmbientOcclusionObjectConstantsBuffer;
 		BufferHandle m_FallbackMaterialConstantsBuffer;
 		TextureHandle m_FallbackBaseColorTexture;
+		TextureHandle m_FallbackAmbientOcclusionTexture;
 		std::array<RenderTargetHandle, 4> m_ShadowTargets;
+		RenderTargetHandle m_AmbientOcclusionPrepassTarget;
+		RenderTargetHandle m_AmbientOcclusionRawTarget;
+		std::array<RenderTargetHandle, 2> m_AmbientOcclusionBlurTargets;
 		EnvironmentLightingTextures m_FallbackEnvironmentTextures;
 		std::unordered_map<std::string, MaterialBindingResources> m_MaterialBindings;
 		std::unordered_map<std::string, BindingSetHandle> m_EnvironmentBindingSets;
 		std::unordered_map<ColorTargetFormat, GraphicsPipelineHandle> m_Pipelines;
 		std::unordered_map<ColorTargetFormat, GraphicsPipelineHandle> m_BackgroundPipelines;
+		GraphicsPipelineHandle m_AmbientOcclusionPrepassPipeline;
+		GraphicsPipelineHandle m_AmbientOcclusionPipeline;
+		GraphicsPipelineHandle m_AmbientOcclusionBlurPipeline;
 		std::optional<VertexLayoutDesc> m_PipelineVertexLayout;
 		std::optional<SceneRenderSnapshot> m_PreparedSnapshot;
 		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
 		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;
+		AmbientOcclusionSettings m_AmbientOcclusionSettings;
+		AmbientOcclusionKernel m_AmbientOcclusionKernel;
+		uint32_t m_AmbientOcclusionWidth = 0;
+		uint32_t m_AmbientOcclusionHeight = 0;
+		bool m_AmbientOcclusionFrameAvailable = false;
 	};
 }

@@ -41,6 +41,7 @@
 #include "Renderer/RenderTarget.h"
 #include "Renderer/DirectionalShadowMath.h"
 #include "Renderer/EnvironmentLighting.h"
+#include "Renderer/ScreenSpaceAmbientOcclusion.h"
 #include <glm/geometric.hpp>
 #include "Renderer/Vulkan/VulkanSupport.h"
 
@@ -5714,6 +5715,12 @@ end
 		auto DepthOnlyBlending = DepthOnlyPipeline;
 		DepthOnlyBlending.Blend.Enabled = true;
 		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(DepthOnlyBlending).has_value());
+		auto ColorOnlyPipeline = Pipeline;
+		ColorOnlyPipeline.DepthAttachmentEnabled = false;
+		PF_CHECK(Tests, ValidateGraphicsPipelineDescription(ColorOnlyPipeline).has_value());
+		auto ColorOnlyWithDepthTest = ColorOnlyPipeline;
+		ColorOnlyWithDepthTest.Depth.TestEnabled = true;
+		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(ColorOnlyWithDepthTest).has_value());
 		auto NonFiniteBias = DepthOnlyPipeline;
 		NonFiniteBias.Rasterizer.SlopeScaledDepthBias = std::numeric_limits<float>::infinity();
 		PF_CHECK(Tests, !ValidateGraphicsPipelineDescription(NonFiniteBias).has_value());
@@ -5858,6 +5865,51 @@ end
 		TestBindingSet MismatchedSet(DifferentLayout);
 		const std::array<const BindingSet*, 1> MismatchedSets = { &MismatchedSet };
 		PF_CHECK(Tests, !ValidateDrawBindingSets(Pipeline, MismatchedSets).has_value());
+	}
+
+	void TestScreenSpaceAmbientOcclusionMath(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const AmbientOcclusionKernel Kernel = GenerateAmbientOcclusionKernel();
+		const AmbientOcclusionKernel RepeatedKernel = GenerateAmbientOcclusionKernel();
+		for (size_t Index = 0; Index < Kernel.Samples.size(); ++Index)
+		{
+			const glm::vec4& Sample = Kernel.Samples[Index];
+			PF_CHECK(Tests, std::isfinite(Sample.x) && std::isfinite(Sample.y) &&
+				std::isfinite(Sample.z) && Sample.z >= 0.0f);
+			PF_CHECK(Tests, glm::length(glm::vec3(Sample)) <= 1.0f + 1.0e-5f);
+			PF_CHECK(Tests, Sample == RepeatedKernel.Samples[Index]);
+		}
+		PF_CHECK(Tests, (CalculateAmbientOcclusionExtent(1920, 1080) == std::array<uint32_t, 2>{ 960, 540 }));
+		PF_CHECK(Tests, (CalculateAmbientOcclusionExtent(5, 3) == std::array<uint32_t, 2>{ 3, 2 }));
+		PF_CHECK(Tests, (CalculateAmbientOcclusionExtent(1, 1) == std::array<uint32_t, 2>{ 1, 1 }));
+		PF_CHECK(Tests, CalculateAmbientOcclusionExtent(std::numeric_limits<uint32_t>::max(), 9)[0] ==
+			std::numeric_limits<uint32_t>::max() / 2u + 1u);
+
+		const glm::mat4 Projection = glm::perspective(glm::radians(60.0f), 1.6f, 0.1f, 100.0f);
+		const glm::mat4 InverseProjection = glm::inverse(Projection);
+		for (const glm::vec3 ViewPosition : { glm::vec3(0.0f, 0.0f, -2.0f), glm::vec3(0.5f, -0.3f, -5.0f) })
+		{
+			const glm::vec4 Clip = Projection * glm::vec4(ViewPosition, 1.0f);
+			const glm::vec3 Ndc = glm::vec3(Clip) / Clip.w;
+			const glm::vec2 UV{ Ndc.x * 0.5f + 0.5f, 0.5f - Ndc.y * 0.5f };
+			const auto Reconstructed = ReconstructViewPosition(InverseProjection, UV, Ndc.z);
+			PF_CHECK(Tests, Reconstructed && glm::length(*Reconstructed - ViewPosition) < 1.0e-4f);
+		}
+		PF_CHECK(Tests, !ReconstructViewPosition(InverseProjection, glm::vec2(0.5f), 1.1f));
+
+		for (const glm::vec3 Normal : { glm::vec3(1, 0, 0), glm::vec3(-1, 0, 0), glm::vec3(0, 1, 0),
+			glm::vec3(0, -1, 0), glm::vec3(0, 0, 1), glm::vec3(0, 0, -1), glm::normalize(glm::vec3(1, 2, 3)) })
+		{
+			const glm::vec3 Decoded = DecodeViewNormal(EncodeViewNormal(Normal));
+			PF_CHECK(Tests, glm::length(Decoded - Normal) < 1.0e-5f);
+		}
+		PF_CHECK(Tests, AmbientOcclusionRangeWeight(0.0f, 0.6f) == 1.0f);
+		PF_CHECK(Tests, AmbientOcclusionRangeWeight(0.6f, 0.6f) == 0.0f);
+		PF_CHECK(Tests, AmbientOcclusionRangeWeight(std::numeric_limits<float>::infinity(), 0.6f) == 0.0f);
+		PF_CHECK(Tests, ComputeSpecularOcclusion(1.0f, 0.2f, 0.8f) == 1.0f);
+		PF_CHECK(Tests, ComputeSpecularOcclusion(0.2f, 1.0f, 0.05f) == 1.0f);
+		PF_CHECK(Tests, ComputeSpecularOcclusion(0.2f, 0.0f, 1.0f) < 0.21f);
 	}
 
 	void TestEnvironmentLightingProcessing(TestRunner& Tests)
@@ -6052,6 +6104,22 @@ end
 		auto DepthOnlyTarget = TargetDescription;
 		DepthOnlyTarget.ColorFormat = ColorTargetFormat::None;
 		PF_CHECK(Tests, ValidateRenderTargetDescription(DepthOnlyTarget).has_value());
+		PF_CHECK(Tests, DepthOnlyTarget.DepthMode == DepthAttachmentMode::Attachment);
+		auto SampleableDepthOnlyTarget = DepthOnlyTarget;
+		SampleableDepthOnlyTarget.DepthMode = DepthAttachmentMode::ShaderReadableAttachment;
+		PF_CHECK(Tests, ValidateRenderTargetDescription(SampleableDepthOnlyTarget).has_value());
+		auto ColorOnlyTarget = TargetDescription;
+		ColorOnlyTarget.DepthMode = DepthAttachmentMode::None;
+		PF_CHECK(Tests, ValidateRenderTargetDescription(ColorOnlyTarget).has_value());
+		auto ColorSampleableDepthTarget = TargetDescription;
+		ColorSampleableDepthTarget.DepthMode = DepthAttachmentMode::ShaderReadableAttachment;
+		PF_CHECK(Tests, ValidateRenderTargetDescription(ColorSampleableDepthTarget).has_value());
+		auto NoAttachmentsTarget = ColorOnlyTarget;
+		NoAttachmentsTarget.ColorFormat = ColorTargetFormat::None;
+		PF_CHECK(Tests, !ValidateRenderTargetDescription(NoAttachmentsTarget).has_value());
+		auto InvalidDepthMode = TargetDescription;
+		InvalidDepthMode.DepthMode = static_cast<DepthAttachmentMode>(0xff);
+		PF_CHECK(Tests, !ValidateRenderTargetDescription(InvalidDepthMode).has_value());
 		auto ZeroTargetWidth = TargetDescription;
 		ZeroTargetWidth.Width = 0;
 		PF_CHECK(Tests, !ValidateRenderTargetDescription(ZeroTargetWidth).has_value());
@@ -6275,6 +6343,7 @@ int main()
 	TestAssetReferenceValidation(Tests);
 	TestGltfMeshImport(Tests);
 	TestImageAssetImport(Tests);
+	TestScreenSpaceAmbientOcclusionMath(Tests);
 	TestEnvironmentLightingProcessing(Tests);
 	TestAudioEngineAndAssetCache(Tests);
 	TestScriptRuntime(Tests);
