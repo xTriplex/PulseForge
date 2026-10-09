@@ -414,6 +414,7 @@ namespace
 			ImGui::SetCurrentContext(m_Context);
 			ImGuiIO& IO = ImGui::GetIO();
 			IO.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
+			IO.ConfigDragClickToInputText = true;
 			#ifdef PF_EDITOR_RENDERER_OPENGL
 			IO.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 			#endif
