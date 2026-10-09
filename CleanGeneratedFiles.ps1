@@ -200,6 +200,54 @@ function Get-ActiveProcessWarnings
 	return $found
 }
 
+function Find-PulseForgeLauncherProcesses
+{
+	param([object[]]$ProcessMetadata)
+
+	$rootPattern = [Regex]::Escape($script:RepoRoot)
+	$launcherPatterns = @(
+		@{ Pattern = '(?i)\bPulseForge(Editor|Game)(\.exe)?\b'; Reason = 'command line names a PulseForge executable' },
+		@{ Pattern = '(?i)' + $rootPattern + '[\\/](Build|out[\\/]build)([\\/]|\b)'; Reason = 'command line references a repository build directory' }
+	)
+	$results = New-Object System.Collections.ArrayList
+	foreach ($process in $ProcessMetadata)
+	{
+		if ([string]::IsNullOrWhiteSpace($process.CommandLine)) { continue }
+		foreach ($pattern in $launcherPatterns)
+		{
+			if ($process.CommandLine -match $pattern.Pattern)
+			{
+				$null = $results.Add([pscustomobject]@{ Name = $process.Name; Id = $process.ProcessId; Reason = $pattern.Reason })
+				break
+			}
+		}
+	}
+	return @($results.ToArray())
+}
+
+function Get-ShellLauncherAudit
+{
+	$shellProcesses = @(Get-Process -Name cmd,powershell,pwsh -ErrorAction SilentlyContinue)
+	$filter = "Name = 'cmd.exe' OR Name = 'powershell.exe' OR Name = 'pwsh.exe'"
+	try
+	{
+		$metadata = @(Get-CimInstance -ClassName Win32_Process -Filter $filter -ErrorAction Stop)
+		return [pscustomobject]@{ Available = $true; ShellCount = $shellProcesses.Count; Matches = @(Find-PulseForgeLauncherProcesses -ProcessMetadata $metadata) }
+	}
+	catch
+	{
+		try
+		{
+			$metadata = @(Get-WmiObject -Class Win32_Process -Filter $filter -ErrorAction Stop)
+			return [pscustomobject]@{ Available = $true; ShellCount = $shellProcesses.Count; Matches = @(Find-PulseForgeLauncherProcesses -ProcessMetadata $metadata) }
+		}
+		catch
+		{
+			return [pscustomobject]@{ Available = $false; ShellCount = $shellProcesses.Count; Matches = @() }
+		}
+	}
+}
+
 function Show-SizeReport
 {
 	if (-not $script:RepoRoot) { throw 'Cleaner root has not been initialized.' }
@@ -306,6 +354,17 @@ function Invoke-CleanupAction
 		Write-Warning 'The following processes may be using generated files. The utility will not terminate them. Close relevant applications/builds before proceeding; locked files will be reported as failures.'
 		foreach ($process in $active) { Write-Host ('  {0}.exe (PID {1})' -f $process.ProcessName, $process.Id) }
 	}
+	$shellAudit = Get-ShellLauncherAudit
+	if ($shellAudit.Matches.Count -gt 0)
+	{
+		Write-Warning 'Possible PulseForge launch wrapper(s) were identified from process command lines. This does not reveal their current working directories or prove they own a file lock:'
+		foreach ($process in $shellAudit.Matches) { Write-Host ('  {0}.exe (PID {1}): {2}' -f $process.Name, $process.Id, $process.Reason) }
+	}
+	elseif (-not $shellAudit.Available)
+	{
+		Write-Host 'Shell command-line metadata is unavailable in this session; no shell was classified as a PulseForge launcher.'
+	}
+	Write-Host 'A cmd.exe, PowerShell, or terminal may hold a generated directory as its current working directory. Command-line metadata does not establish that directory; close shells you launched from a cleanup target before proceeding.'
 	if ($invalid.Count -gt 0)
 	{
 		$skip = Read-Host 'Type CLEAN SAFE TARGETS ONLY to continue with inspected targets; anything else cancels'
@@ -350,7 +409,7 @@ function Invoke-CleanupAction
 		catch
 		{
 			$failed++
-			Write-Error -ErrorAction Continue ("Failed to remove '{0}': {1}. The target may be partially removed; a Windows file lock or permission may be responsible. Remaining targets will still be attempted." -f $inspection.FullPath, $_.Exception.Message)
+			Write-Error -ErrorAction Continue ("Failed to remove '{0}': {1}. The target may be partially removed; a Windows file lock or permission may be responsible. Use Resource Monitor > CPU > Associated Handles to search for the target path/name, close the owning application or shell manually, then retry. Remaining targets will still be attempted." -f $inspection.FullPath, $_.Exception.Message)
 		}
 	}
 	Write-Host ("Cleanup result: {0} removed, {1} failed/possibly partial, {2} absent." -f $succeeded, $failed, $skipped)

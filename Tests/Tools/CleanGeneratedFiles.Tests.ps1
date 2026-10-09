@@ -9,6 +9,9 @@ $script:PromptAnswers = @()
 $script:PromptIndex = 0
 $script:CapturedOutput = New-Object 'System.Collections.Generic.List[string]'
 $script:OutsidePaths = New-Object 'System.Collections.Generic.List[string]'
+$script:CreatedJunctions = New-Object 'System.Collections.Generic.List[string]'
+$script:JunctionSkipReasons = New-Object 'System.Collections.Generic.List[string]'
+$script:JunctionAssertionsExecuted = 0
 
 function Assert-True
 {
@@ -50,6 +53,25 @@ function Set-FixtureFile
 	$parent = Split-Path -Parent $full
 	$null = New-Item -ItemType Directory -Path $parent -Force
 	Set-Content -LiteralPath $full -Value $Value
+}
+
+function Try-NewFixtureJunction
+{
+	param([string]$Path, [string]$Target)
+	try
+	{
+		$null = New-Item -ItemType Junction -Path $Path -Target $Target -ErrorAction Stop
+	}
+	catch
+	{
+		return [pscustomobject]@{ Created = $false; Reason = $_.Exception.Message }
+	}
+	$item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+	if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)
+	{
+		throw 'Junction creation returned a non-reparse directory; test setup is invalid.'
+	}
+	return [pscustomobject]@{ Created = $true; Reason = $null }
 }
 
 function New-Fixture
@@ -119,6 +141,14 @@ try
 	Assert-True ((Resolve-MenuSelection '1') -eq 'Build' -and (Resolve-MenuSelection '2') -eq 'Out' -and (Resolve-MenuSelection '3') -eq 'BuildOut') 'legacy menu selections remain mapped'
 	Assert-True ((Resolve-MenuSelection '4') -eq 'Legacy' -and (Resolve-MenuSelection '5') -eq 'VisualStudio' -and (Resolve-MenuSelection '6') -eq 'Comprehensive') 'new cleanup menu selections map to their actions'
 	Assert-True ((Resolve-MenuSelection '7') -eq 'Sizes' -and (Resolve-MenuSelection '8') -eq 'Cancel' -and $null -eq (Resolve-MenuSelection '9')) 'size, cancel, and invalid menu options are handled'
+	$processMetadata = @(
+		[pscustomobject]@{ Name = 'cmd.exe'; ProcessId = 101; CommandLine = 'cmd.exe /c start "" PulseForgeEditor.exe' },
+		[pscustomobject]@{ Name = 'powershell.exe'; ProcessId = 102; CommandLine = ('powershell.exe -Command cd ' + $root + '\out\build\x64-Debug') },
+		[pscustomobject]@{ Name = 'cmd.exe'; ProcessId = 103; CommandLine = 'cmd.exe /k' }
+	)
+	$launcherMatches = @(Find-PulseForgeLauncherProcesses -ProcessMetadata $processMetadata)
+	Assert-True ($launcherMatches.Count -eq 2) 'known launch wrappers match process command lines without flagging every shell'
+	Assert-True ($launcherMatches[0].Reason -match 'command line') 'launcher match explains it is command-line evidence only'
 	Assert-Throws { Get-TargetFullPath -RelativePath '..\CMakeSettings.json' } 'path traversal is rejected'
 	Assert-Throws { Get-TargetFullPath -RelativePath 'CMakeSettings.json' } 'non-allowlisted file is rejected'
 	Assert-Throws { Get-TargetFullPath -RelativePath 'PulseForge\Vendor\JoltPhysics\Build' } 'Jolt upstream build path is not allowlisted'
@@ -194,12 +224,41 @@ try
 	$outside = Join-Path ([IO.Path]::GetTempPath()) ('PulseForgeCleanerOutside-' + [Guid]::NewGuid().ToString('N'))
 	$script:OutsidePaths.Add($outside)
 	Set-FixtureFile $outside 'must-survive.txt' 'outside allowlisted tree'
-	Remove-Item -LiteralPath (Join-Path $linkRoot 'Build') -Recurse -Force
-	$null = New-Item -ItemType Junction -Path (Join-Path $linkRoot 'Build') -Target $outside -ErrorAction SilentlyContinue
-	if ((Get-Item -LiteralPath (Join-Path $linkRoot 'Build') -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)
+	$topJunction = Join-Path $linkRoot 'Build'
+	Remove-Item -LiteralPath $topJunction -Recurse -Force
+	$topLinkResult = Try-NewFixtureJunction -Path $topJunction -Target $outside
+	if ($topLinkResult.Created)
 	{
+		$script:CreatedJunctions.Add($topJunction)
+		$script:JunctionAssertionsExecuted++
 		Assert-Throws { Get-TargetInspection -RelativePath 'Build' } 'junction target is rejected'
 		Assert-True (Test-Path -LiteralPath (Join-Path $outside 'must-survive.txt')) 'junction destination remains untouched'
+		[IO.Directory]::Delete($topJunction, $false)
+		Assert-True (Test-Path -LiteralPath (Join-Path $outside 'must-survive.txt')) 'removing the fixture junction does not remove its destination'
+	}
+	else
+	{
+		$script:JunctionSkipReasons.Add(('top-level junction test: ' + $topLinkResult.Reason))
+	}
+
+	# Also verify traversal catches a junction nested below an otherwise valid allowlisted target.
+	$nestedRoot = New-Fixture
+	$fixtureRoots.Add($nestedRoot)
+	Set-CleanerRoot -Path $nestedRoot
+	$nestedJunction = Join-Path $nestedRoot 'Build\external-link'
+	$nestedLinkResult = Try-NewFixtureJunction -Path $nestedJunction -Target $outside
+	if ($nestedLinkResult.Created)
+	{
+		$script:CreatedJunctions.Add($nestedJunction)
+		$script:JunctionAssertionsExecuted++
+		Assert-Throws { Get-TargetInspection -RelativePath 'Build' } 'nested junction in allowlisted directory is rejected'
+		Assert-True (Test-Path -LiteralPath (Join-Path $outside 'must-survive.txt')) 'nested junction destination remains intact'
+		[IO.Directory]::Delete($nestedJunction, $false)
+		Assert-True (Test-Path -LiteralPath (Join-Path $outside 'must-survive.txt')) 'removing nested fixture junction preserves its destination'
+	}
+	else
+	{
+		$script:JunctionSkipReasons.Add(('nested junction test: ' + $nestedLinkResult.Reason))
 	}
 
 	# Verify complete action on a fresh synthetic tree, then verify user data remains.
@@ -229,10 +288,19 @@ try
 	Assert-True ($report.TotalBytes -gt 0) 'size report returns aggregate total'
 	Assert-True (@($report.Entries | Where-Object { $_.RelativePath -eq 'CMakeFiles' }).Count -eq 1) 'size report includes legacy target paths'
 
-	Write-Output ("PASS: {0} cleanup safety assertions." -f $script:Assertions)
+	if ($script:JunctionAssertionsExecuted -eq 0 -and $script:JunctionSkipReasons.Count -eq 0)
+	{
+		throw 'Junction tests neither executed nor reported an explicit skip.'
+	}
+	Write-Output ("PASS: {0} cleanup safety assertions; junction assertions executed: {1}." -f $script:Assertions, ($script:JunctionAssertionsExecuted * 3))
+	foreach ($reason in $script:JunctionSkipReasons) { Write-Output ('SKIP: ' + $reason) }
 }
 finally
 {
+	foreach ($junction in $script:CreatedJunctions)
+	{
+		try { [IO.Directory]::Delete($junction, $false) } catch { }
+	}
 	foreach ($fixture in $fixtureRoots)
 	{
 		if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force -ErrorAction SilentlyContinue }
