@@ -5,6 +5,7 @@ project(PulseForge LANGUAGES C CXX)
 set(PULSEFORGE_SAMPLE_RENDERER "Vulkan" CACHE STRING "Renderer used by PulseForgeGame (Vulkan or OpenGL)")
 set_property(CACHE PULSEFORGE_SAMPLE_RENDERER PROPERTY STRINGS Vulkan OpenGL)
 option(PULSEFORGE_BUILD_EDITOR "Build the experimental PulseForge editor shell" ON)
+option(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS "Build opt-in Vulkan GPU validation smoke tests" OFF)
 set(PULSEFORGE_EDITOR_RENDERER "Vulkan" CACHE STRING "Renderer used by PulseForgeEditor (Vulkan or OpenGL)")
 set_property(CACHE PULSEFORGE_EDITOR_RENDERER PROPERTY STRINGS Vulkan OpenGL)
 
@@ -15,6 +16,12 @@ endif()
 
 if(NOT WIN32)
 	message(FATAL_ERROR "PulseForge currently supports Windows only; desktop platform support is being implemented separately.")
+endif()
+
+if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS AND
+	NOT PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" AND
+	(NOT PULSEFORGE_BUILD_EDITOR OR NOT PULSEFORGE_EDITOR_RENDERER STREQUAL "Vulkan"))
+	message(FATAL_ERROR "PULSEFORGE_BUILD_GPU_VALIDATION_TESTS requires the Vulkan renderer and its pinned DXC shader path")
 endif()
 
 set(CMAKE_CXX_STANDARD 23)
@@ -452,6 +459,46 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 			"${PULSEFORGE_SSAO_PREPASS_VERTEX_SPIRV}" "${PULSEFORGE_SSAO_PREPASS_FRAGMENT_SPIRV}"
 			"${PULSEFORGE_SSAO_VERTEX_SPIRV}" "${PULSEFORGE_SSAO_FRAGMENT_SPIRV}"
 			"${PULSEFORGE_SSAO_BLUR_VERTEX_SPIRV}" "${PULSEFORGE_SSAO_BLUR_FRAGMENT_SPIRV}")
+	if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
+		set(PULSEFORGE_GPU_VALIDATION_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/GpuValidationShaders")
+		set(PULSEFORGE_GPU_VALIDATION_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/Tests/GpuRendererValidation.hlsl")
+		set(PULSEFORGE_GPU_VALIDATION_VERTEX_SPIRV "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}/GpuRendererValidation.vs.spv")
+		set(PULSEFORGE_GPU_VALIDATION_COLOR_SPIRV "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}/GpuRendererValidation.color.ps.spv")
+		set(PULSEFORGE_GPU_VALIDATION_SAMPLE_SPIRV "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}/GpuRendererValidation.sample.ps.spv")
+		add_custom_command(
+			OUTPUT "${PULSEFORGE_GPU_VALIDATION_VERTEX_SPIRV}"
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}"
+			COMMAND "${PULSEFORGE_DXC}" -spirv -T vs_6_0 -E VSMain -fspv-target-env=vulkan1.3
+				-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
+				-Fo "${PULSEFORGE_GPU_VALIDATION_VERTEX_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_HLSL}"
+			DEPENDS "${PULSEFORGE_GPU_VALIDATION_HLSL}"
+			VERBATIM
+			COMMENT "Compiling PulseForge GPU-validation vertex shader to SPIR-V"
+		)
+		add_custom_command(
+			OUTPUT "${PULSEFORGE_GPU_VALIDATION_COLOR_SPIRV}"
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}"
+			COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSColor -fspv-target-env=vulkan1.3
+				-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
+				-Fo "${PULSEFORGE_GPU_VALIDATION_COLOR_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_HLSL}"
+			DEPENDS "${PULSEFORGE_GPU_VALIDATION_HLSL}"
+			VERBATIM
+			COMMENT "Compiling PulseForge GPU-validation color shader to SPIR-V"
+		)
+		add_custom_command(
+			OUTPUT "${PULSEFORGE_GPU_VALIDATION_SAMPLE_SPIRV}"
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}"
+			COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSSample -fspv-target-env=vulkan1.3
+				-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
+				-Fo "${PULSEFORGE_GPU_VALIDATION_SAMPLE_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_HLSL}"
+			DEPENDS "${PULSEFORGE_GPU_VALIDATION_HLSL}"
+			VERBATIM
+			COMMENT "Compiling PulseForge GPU-validation sampling shader to SPIR-V"
+		)
+		add_custom_target(PulseForgeGpuValidationShaders
+			DEPENDS "${PULSEFORGE_GPU_VALIDATION_VERTEX_SPIRV}"
+				"${PULSEFORGE_GPU_VALIDATION_COLOR_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_SAMPLE_SPIRV}")
+	endif()
 	if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
 		add_dependencies(PulseForgeGame PulseForgeSceneShaderAssets)
 		add_custom_command(TARGET PulseForgeGame POST_BUILD
@@ -576,7 +623,17 @@ if(BUILD_TESTING)
 	add_test(NAME PulseForge.BufferUpdates COMMAND PulseForgeBufferUpdateTests)
 endif()
 
-foreach(Target PulseForge PulseForgeGame PulseForgeEditor PulseForgeTests PulseForgeBufferUpdateTests)
+if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
+	add_executable(PulseForgeGpuValidation Tests/GpuRendererValidation.cpp)
+	target_compile_definitions(PulseForgeGpuValidation PRIVATE
+		PF_PLATFORM_WINDOWS
+		PF_GPU_VALIDATION_SHADER_DIRECTORY="${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}")
+	target_link_libraries(PulseForgeGpuValidation PRIVATE PulseForge)
+	add_dependencies(PulseForgeGpuValidation PulseForgeGpuValidationShaders)
+	set_property(TARGET PulseForgeGpuValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGpuValidation>")
+endif()
+
+foreach(Target PulseForge PulseForgeGame PulseForgeEditor PulseForgeTests PulseForgeBufferUpdateTests PulseForgeGpuValidation)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE
 			$<$<CXX_COMPILER_ID:MSVC>:/EHsc>
