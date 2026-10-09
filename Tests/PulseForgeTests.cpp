@@ -1748,7 +1748,11 @@ namespace
 	{
 		using namespace PulseForgeEditor;
 
-		PF_CHECK(Tests, CurrentDefaultEditorLayoutVersion == 2);
+		PF_CHECK(Tests, CurrentDefaultEditorLayoutVersion == 3);
+		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::ContentBrowser) == EditorDefaultDockRegion::Bottom);
+		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Console) == EditorDefaultDockRegion::Bottom);
+		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Scene) == EditorDefaultDockRegion::Bottom);
+		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Inspector) == EditorDefaultDockRegion::Right);
 		PF_CHECK(Tests, EditorPanelDescriptors.size() == static_cast<size_t>(EditorPanel::Count));
 		constexpr std::array<std::string_view, static_cast<size_t>(EditorPanel::Count)> StablePanelNames = {
 			"Scene Viewport", "Hierarchy", "Inspector", "Content Browser", "Console", "Scene"

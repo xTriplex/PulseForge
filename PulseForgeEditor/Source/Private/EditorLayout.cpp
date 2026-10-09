@@ -309,16 +309,19 @@ namespace PulseForgeEditor
 		ImGuiID ViewportNode = 0;
 		ImGui::DockBuilderSplitNode(Main, ImGuiDir_Left, 0.23f, &Hierarchy, &ViewportNode);
 
-		ImGuiID Console = 0;
-		ImGuiID ContentBrowser = 0;
-		ImGui::DockBuilderSplitNode(Bottom, ImGuiDir_Right, 0.28f, &Console, &ContentBrowser);
+		const std::array<ImGuiID, 4> RegionNodes = { Hierarchy, ViewportNode, Inspector, Bottom };
+		const auto DockPanel = [&RegionNodes](EditorPanel Panel, const char* WindowName)
+		{
+			const size_t Region = static_cast<size_t>(GetDefaultDockRegion(Panel));
+			ImGui::DockBuilderDockWindow(WindowName, RegionNodes[Region]);
+		};
 
-		ImGui::DockBuilderDockWindow("Hierarchy", Hierarchy);
-		ImGui::DockBuilderDockWindow("Inspector", Inspector);
-		ImGui::DockBuilderDockWindow("Scene Viewport", ViewportNode);
-		ImGui::DockBuilderDockWindow("Scene", Console);
-		ImGui::DockBuilderDockWindow("Console", Console);
-		ImGui::DockBuilderDockWindow("Content Browser", ContentBrowser);
+		DockPanel(EditorPanel::Hierarchy, "Hierarchy");
+		DockPanel(EditorPanel::Inspector, "Inspector");
+		DockPanel(EditorPanel::SceneViewport, "Scene Viewport");
+		DockPanel(EditorPanel::Scene, "Scene");
+		DockPanel(EditorPanel::Console, "Console");
+		DockPanel(EditorPanel::ContentBrowser, "Content Browser");
 		ImGui::DockBuilderFinish(DockspaceID);
 	}
 

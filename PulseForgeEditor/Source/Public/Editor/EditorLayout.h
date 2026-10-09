@@ -10,7 +10,7 @@
 
 namespace PulseForgeEditor
 {
-	inline constexpr uint32_t CurrentDefaultEditorLayoutVersion = 2;
+	inline constexpr uint32_t CurrentDefaultEditorLayoutVersion = 3;
 
 	enum class EditorPanel : uint8_t
 	{
@@ -22,6 +22,29 @@ namespace PulseForgeEditor
 		Scene,
 		Count
 	};
+
+	enum class EditorDefaultDockRegion : uint8_t
+	{
+		Left,
+		Center,
+		Right,
+		Bottom
+	};
+
+	[[nodiscard]] constexpr EditorDefaultDockRegion GetDefaultDockRegion(EditorPanel Panel) noexcept
+	{
+		switch (Panel)
+		{
+			case EditorPanel::Hierarchy: return EditorDefaultDockRegion::Left;
+			case EditorPanel::SceneViewport: return EditorDefaultDockRegion::Center;
+			case EditorPanel::Inspector: return EditorDefaultDockRegion::Right;
+			case EditorPanel::ContentBrowser:
+			case EditorPanel::Console:
+			case EditorPanel::Scene: return EditorDefaultDockRegion::Bottom;
+			case EditorPanel::Count: return EditorDefaultDockRegion::Center;
+		}
+		return EditorDefaultDockRegion::Center;
+	}
 
 	struct EditorPanelDescriptor
 	{
