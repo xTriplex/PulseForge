@@ -4,6 +4,7 @@
 #include "Core/EntryPoint.h"
 #include "Core/Layer.h"
 #include "Core/Log.h"
+#include "Core/ScopedProfileTimer.h"
 #include "Assets/GltfMeshImporter.h"
 #include "Events/ApplicationEvent.h"
 #include "Events/Event.h"
@@ -24,6 +25,7 @@
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
+#include "Editor/ViewportMouseCapture.h"
 #include "Editor/ViewportMath.h"
 
 #include <GLFW/glfw3.h>
@@ -51,7 +53,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cfloat>
 #include <cstdint>
+#include <chrono>
 #include <deque>
 #include <expected>
 #include <filesystem>
@@ -545,6 +549,8 @@ namespace
 
 		void OnEvent(PulseForge::Event& Event) override
 		{
+			const bool NavigationOwnedMouseBeforeEvent = m_ViewportMouseCapture.OwnsMouse();
+			bool BeganNavigationForEvent = false;
 			if (Event.GetEventType() == PulseForge::EEventType::WindowClose && m_SceneDirty)
 			{
 				m_PendingAction = [] { PulseForge::Application::Get().RequestClose(); };
@@ -555,22 +561,22 @@ namespace
 
 			if (Event.GetEventType() == PulseForge::EEventType::WindowLostFocus)
 			{
-				EndEditorCameraNavigation();
+				EndEditorCameraNavigation(false);
 				CancelGizmoInteraction();
 			}
 			else if (Event.GetEventType() == PulseForge::EEventType::MouseButtonPressed)
 			{
 				const auto& Mouse = static_cast<PulseForge::MouseButtonPressedEvent&>(Event);
 				if (Mouse.GetMouseButton() == GLFW_MOUSE_BUTTON_RIGHT)
-					BeginEditorCameraNavigation();
+					BeganNavigationForEvent = BeginEditorCameraNavigation();
 			}
 			else if (Event.GetEventType() == PulseForge::EEventType::MouseButtonReleased)
 			{
 				const auto& Mouse = static_cast<PulseForge::MouseButtonReleasedEvent&>(Event);
-				if (Mouse.GetMouseButton() == GLFW_MOUSE_BUTTON_RIGHT)
+				if (Mouse.GetMouseButton() == GLFW_MOUSE_BUTTON_RIGHT && m_ViewportMouseCapture.OwnsMouse())
 					EndEditorCameraNavigation();
 			}
-			else if (Event.GetEventType() == PulseForge::EEventType::MouseMoved && m_EditorCameraNavigationActive)
+			else if (Event.GetEventType() == PulseForge::EEventType::MouseMoved && m_ViewportMouseCapture.OwnsMouse())
 			{
 				const auto& Mouse = static_cast<PulseForge::MouseMovedEvent&>(Event);
 				if (m_IgnoreFirstCursorDelta)
@@ -585,7 +591,8 @@ namespace
 
 			ImGui::SetCurrentContext(m_Context);
 			const ImGuiIO& IO = ImGui::GetIO();
-			Event.bHandled |= Event.IsInCategory(PulseForge::EventCategoryMouse) && IO.WantCaptureMouse;
+			Event.bHandled |= Event.IsInCategory(PulseForge::EventCategoryMouse) &&
+				(NavigationOwnedMouseBeforeEvent || BeganNavigationForEvent || m_ViewportMouseCapture.OwnsMouse() || IO.WantCaptureMouse);
 			Event.bHandled |= Event.IsInCategory(PulseForge::EventCategoryKeyboard) && IO.WantCaptureKeyboard;
 		}
 
@@ -754,6 +761,13 @@ namespace
 
 		void OpenProjectAt(const std::filesystem::path& ProjectFile)
 		{
+			m_ProjectOpenStartedAt = std::chrono::steady_clock::now();
+			m_ProjectOpenTimingActive = true;
+			m_LoggedFirstViewportPrepared = false;
+			m_LoggedFirstViewportRendered = false;
+			m_LoggedEnvironmentReady = false;
+			m_EnvironmentLightingPending = false;
+			PulseForge::Detail::ScopedProfileTimer OpenTimer("Editor project open + startup scene load");
 			auto Opened = PulseForge::Project::Open(ProjectFile);
 			if (!Opened)
 			{
@@ -1953,8 +1967,7 @@ namespace
 					const ImVec2 Available = ImGui::GetContentRegionAvail();
 					if (Available.x <= 1.0f || Available.y <= 1.0f)
 					{
-						CancelGizmoInteraction();
-						m_ViewportImageRect = {};
+						ResetViewportPanelInteraction();
 						m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Scene,
 							"Expand the panel to display the scene.");
 					}
@@ -2022,6 +2035,10 @@ namespace
 							HandleViewportImage(ImageClicked && !OverHelp && !OverOrientationWidget);
 							if (ShowEditorOverlays)
 								DrawViewportOrientationWidget(ImGui::GetWindowDrawList(), ImageMinimum, ImageMaximum);
+							if (m_EnvironmentLightingPending)
+								ImGui::GetWindowDrawList()->AddText(ImVec2(ImageMinimum.x + 12.0f, ImageMinimum.y + 12.0f),
+									ImGui::GetColorU32(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::TextMuted)),
+									"Preparing environment lighting...");
 						}
 						else
 						{
@@ -2704,6 +2721,7 @@ namespace
 		{
 			m_ViewportSceneReady = false;
 			m_ViewportViewProjectionValid = false;
+			m_EnvironmentLightingPending = false;
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			return;
 #else
@@ -2758,6 +2776,21 @@ namespace
 			ClearViewportSceneError();
 			m_ViewportViewProjectionValid = !m_SceneRuntime && m_Scene != nullptr;
 			m_ViewportSceneReady = true;
+			m_EnvironmentLightingPending = m_SceneRenderer->IsEnvironmentLightingPending();
+			if (m_ProjectOpenTimingActive && !m_LoggedFirstViewportPrepared)
+			{
+				m_LoggedFirstViewportPrepared = true;
+				const double Milliseconds = std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - m_ProjectOpenStartedAt).count();
+				PF_INFO("Profile: Project open to first renderable viewport preparation took {:.2f} ms", Milliseconds);
+			}
+			if (m_ProjectOpenTimingActive && m_SceneRenderer->HasPreparedEnvironmentLighting() && !m_LoggedEnvironmentReady)
+			{
+				m_LoggedEnvironmentReady = true;
+				const double Milliseconds = std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - m_ProjectOpenStartedAt).count();
+				PF_INFO("Profile: Project open to HDR environment-ready viewport preparation took {:.2f} ms", Milliseconds);
+			}
 #endif
 		}
 
@@ -2774,7 +2807,16 @@ namespace
 				if (auto Rendered = m_SceneRenderer->RenderPreparedScene(*m_ViewportTarget); !Rendered)
 					SetViewportSceneError("Scene viewport rendering failed: " + Rendered.error().Message);
 				else
+				{
 					ClearViewportSceneError();
+					if (m_ProjectOpenTimingActive && !m_LoggedFirstViewportRendered)
+					{
+						m_LoggedFirstViewportRendered = true;
+						const double Milliseconds = std::chrono::duration<double, std::milli>(
+							std::chrono::steady_clock::now() - m_ProjectOpenStartedAt).count();
+						PF_INFO("Profile: Project open to first rendered viewport frame took {:.2f} ms", Milliseconds);
+					}
+				}
 				return;
 			}
 
@@ -2836,22 +2878,37 @@ namespace
 			ClearViewportSceneError();
 		}
 
-		void BeginEditorCameraNavigation()
+		bool BeginEditorCameraNavigation()
 		{
 #ifdef PF_EDITOR_RENDERER_OPENGL
-			return;
+			return false;
 #else
-			if (m_EditorCameraNavigationActive || m_GizmoDrag || m_SceneRuntime || !m_Scene || !IsCursorOverViewportImage())
-				return;
-
 			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
-			if (!Window || glfwGetWindowAttrib(Window, GLFW_FOCUSED) != GLFW_TRUE)
-				return;
+			ImGui::SetCurrentContext(m_Context);
+			ImGuiIO& IO = ImGui::GetIO();
+			const bool Focused = Window && glfwGetWindowAttrib(Window, GLFW_FOCUSED) == GLFW_TRUE;
+			if (!m_ViewportMouseCapture.Begin(true, IsCursorOverViewportImage(), Focused,
+				m_GizmoDrag.has_value(), m_SceneRuntime != nullptr))
+				return false;
 
 			m_PreviousCursorMode = glfwGetInputMode(Window, GLFW_CURSOR);
-			m_EditorCameraNavigationActive = true;
+			glfwGetCursorPos(Window, &m_CursorRestoreX, &m_CursorRestoreY);
+			m_CursorRestoreValid = std::isfinite(m_CursorRestoreX) && std::isfinite(m_CursorRestoreY);
+			m_LastCursorX = static_cast<float>(m_CursorRestoreX);
+			m_LastCursorY = static_cast<float>(m_CursorRestoreY);
+			m_PreviousImGuiNoMouse = (IO.ConfigFlags & ImGuiConfigFlags_NoMouse) != 0;
+			m_PreviousRawMouseMotion = false;
+			m_RawMouseMotionChanged = glfwRawMouseMotionSupported() == GLFW_TRUE;
+			if (m_RawMouseMotionChanged)
+				m_PreviousRawMouseMotion = glfwGetInputMode(Window, GLFW_RAW_MOUSE_MOTION) == GLFW_TRUE;
+			IO.ConfigFlags |= ImGuiConfigFlags_NoMouse;
+			IO.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
 			m_IgnoreFirstCursorDelta = true;
+			m_EditorCameraNavigationActive = true;
 			glfwSetInputMode(Window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+			if (m_RawMouseMotionChanged)
+				glfwSetInputMode(Window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
+			return true;
 #endif
 		}
 
@@ -2864,16 +2921,33 @@ namespace
 				Mouse.y >= m_ViewportImageRect.Minimum.y && Mouse.y < m_ViewportImageRect.Maximum.y;
 		}
 
-		void EndEditorCameraNavigation() noexcept
+		void EndEditorCameraNavigation(bool RestoreCursorPosition = true) noexcept
 		{
-			if (!m_EditorCameraNavigationActive)
+			if (!m_ViewportMouseCapture.OwnsMouse())
 				return;
 
+			m_ViewportMouseCapture.End();
 			m_EditorCameraNavigationActive = false;
 			m_IgnoreFirstCursorDelta = false;
 			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
 			if (Window)
+			{
+				if (m_RawMouseMotionChanged)
+					glfwSetInputMode(Window, GLFW_RAW_MOUSE_MOTION, m_PreviousRawMouseMotion ? GLFW_TRUE : GLFW_FALSE);
 				glfwSetInputMode(Window, GLFW_CURSOR, m_PreviousCursorMode);
+				if (RestoreCursorPosition && m_CursorRestoreValid && glfwGetWindowAttrib(Window, GLFW_FOCUSED) == GLFW_TRUE)
+					glfwSetCursorPos(Window, m_CursorRestoreX, m_CursorRestoreY);
+			}
+			m_RawMouseMotionChanged = false;
+			m_CursorRestoreValid = false;
+			if (m_Context)
+			{
+				ImGui::SetCurrentContext(m_Context);
+				ImGuiIO& IO = ImGui::GetIO();
+				if (!m_PreviousImGuiNoMouse)
+					IO.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
+				IO.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+			}
 		}
 
 		void ResetEditorViewportCamera() noexcept
@@ -4707,8 +4781,18 @@ namespace
 		bool m_ViewportSceneReady = false;
 		bool m_ViewportImageHovered = false;
 		bool m_ViewportViewProjectionValid = false;
+		bool m_EnvironmentLightingPending = false;
+		bool m_ProjectOpenTimingActive = false;
+		bool m_LoggedFirstViewportPrepared = false;
+		bool m_LoggedFirstViewportRendered = false;
+		bool m_LoggedEnvironmentReady = false;
 		bool m_EditorCameraNavigationActive = false;
+		PulseForgeEditor::Detail::ViewportMouseCaptureState m_ViewportMouseCapture;
 		bool m_IgnoreFirstCursorDelta = false;
+		bool m_PreviousImGuiNoMouse = false;
+		bool m_PreviousRawMouseMotion = false;
+		bool m_RawMouseMotionChanged = false;
+		bool m_CursorRestoreValid = false;
 		bool m_SceneRendererInitializationFailed = false;
 		bool m_SceneDirty = false;
 		bool m_OpenUnsavedDialog = false;
@@ -4739,6 +4823,8 @@ namespace
 		int m_PreviousCursorMode = GLFW_CURSOR_NORMAL;
 		float m_LastCursorX = 0.0f;
 		float m_LastCursorY = 0.0f;
+		double m_CursorRestoreX = 0.0;
+		double m_CursorRestoreY = 0.0;
 		EditorViewportCamera m_EditorCamera;
 		std::optional<PulseForge::AssetID> m_SceneAsset;
 		std::optional<PulseForge::UUID> m_SelectedEntity;
@@ -4757,6 +4843,7 @@ namespace
 		std::string m_ViewportSceneError;
 		std::string m_ImGuiRenderingError;
 		std::string m_LayoutPersistenceError;
+		std::chrono::steady_clock::time_point m_ProjectOpenStartedAt{};
 		std::string m_StatusMessage = "Create or open a project to begin.";
 		bool m_StatusIsError = false;
 		bool m_StatusIsWarning = false;

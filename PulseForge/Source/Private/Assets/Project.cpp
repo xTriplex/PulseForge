@@ -1,5 +1,6 @@
 #include "Core/PulseForgePCH.h"
 #include "Assets/Project.h"
+#include "Core/ScopedProfileTimer.h"
 
 #include <nlohmann/json.hpp>
 
@@ -224,6 +225,7 @@ namespace PulseForge
 
 	std::expected<Project, ProjectError> Project::Open(const std::filesystem::path& ProjectFile)
 	{
+		Detail::ScopedProfileTimer Timer("Project::Open total");
 		if (auto Validation = ValidateProjectPath(ProjectFile); !Validation)
 			return std::unexpected(std::move(Validation.error()));
 

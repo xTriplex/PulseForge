@@ -1,5 +1,6 @@
 #include "Core/PulseForgePCH.h"
 #include "Assets/AssetRegistry.h"
+#include "Core/ScopedProfileTimer.h"
 
 #include <algorithm>
 #include <system_error>
@@ -25,6 +26,7 @@ namespace PulseForge
 
 	std::expected<void, AssetRegistryError> AssetRegistry::Rebuild(const std::filesystem::path& ProjectRoot)
 	{
+		Detail::ScopedProfileTimer Timer("AssetRegistry::Rebuild");
 		AssetRegistryError Error;
 		if (ProjectRoot.empty())
 		{

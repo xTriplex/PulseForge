@@ -27,6 +27,7 @@
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
+#include "Editor/ViewportMouseCapture.h"
 #include "Editor/ImGuiRendererMath.h"
 #include "Editor/ViewportMath.h"
 #include "Audio/AudioEngine.h"
@@ -1850,6 +1851,24 @@ namespace
 		if (RotatedAxes)
 			PF_CHECK(Tests, glm::length((*RotatedAxes)[2].ScreenDirection) > 0.1f);
 		PF_CHECK(Tests, !ProjectViewportOrientationAxes(glm::vec3(0.0f)));
+	}
+
+	void TestViewportMouseCaptureState(TestRunner& Tests)
+	{
+		PulseForgeEditor::Detail::ViewportMouseCaptureState Capture;
+		PF_CHECK(Tests, !Capture.OwnsMouse());
+		PF_CHECK(Tests, !Capture.Begin(true, false, true, false, false)); // RMB outside the viewport image.
+		PF_CHECK(Tests, !Capture.Begin(true, true, false, false, false)); // Unfocused window.
+		PF_CHECK(Tests, !Capture.Begin(true, true, true, true, false)); // Gizmo drag owns the pointer.
+		PF_CHECK(Tests, !Capture.Begin(true, true, true, false, true)); // Runtime camera is active.
+		PF_CHECK(Tests, Capture.Begin(true, true, true, false, false));
+		PF_CHECK(Tests, Capture.OwnsMouse()); // Capture owns mouse routing until release/cancellation.
+		PF_CHECK(Tests, !Capture.Begin(true, true, true, false, false)); // No duplicate capture transition.
+		Capture.End(); // Same transition is used for RMB release, focus loss, and layout/project changes.
+		PF_CHECK(Tests, !Capture.OwnsMouse());
+		PF_CHECK(Tests, Capture.Begin(true, true, true, false, false));
+		Capture.End();
+		PF_CHECK(Tests, !Capture.OwnsMouse());
 	}
 
 	void TestEditorImGuiRendererMath(TestRunner& Tests)
@@ -5978,6 +5997,11 @@ end
 				PF_CHECK(Tests, std::abs(Level.Faces[0][1] - 0.5f) < 0.01f);
 			}
 		}
+		std::stop_source CancelSource;
+		CancelSource.request_stop();
+		const auto CancelledProcessing = ProcessEnvironmentImage(ConstantEnvironment, Settings, CancelSource.get_token());
+		PF_CHECK(Tests, !CancelledProcessing &&
+			CancelledProcessing.error().Code == EnvironmentProcessingErrorCode::Cancelled);
 		auto InvalidSize = Settings;
 		InvalidSize.EnvironmentFaceSize = 7;
 		PF_CHECK(Tests, !ProcessEnvironmentImage(ConstantEnvironment, InvalidSize).has_value());
@@ -6327,6 +6351,7 @@ int main()
 	TestEditorViewportMath(Tests);
 	TestEditorWorkspacePanelState(Tests);
 	TestEditorWorkspaceViewHelpers(Tests);
+	TestViewportMouseCaptureState(Tests);
 	TestEditorFontAndIconDescriptors(Tests);
 	TestEditorImGuiRendererMath(Tests);
 	TestSceneSerializationRoundTrip(Tests);

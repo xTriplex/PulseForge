@@ -319,6 +319,16 @@ namespace PulseForge
 			ImportedFloatImage Image;
 			Image.Width = static_cast<uint32_t>(Width);
 			Image.Height = static_cast<uint32_t>(Height);
+			uint64_t FingerprintA = 14695981039346656037ull;
+			uint64_t FingerprintB = 7809847782465536322ull;
+			for (const std::byte Byte : *SourceBytes)
+			{
+				const uint8_t Value = std::to_integer<uint8_t>(Byte);
+				FingerprintA = (FingerprintA ^ Value) * 1099511628211ull;
+				FingerprintB = (FingerprintB ^ (Value + 0x9du)) * 14029467366897019727ull;
+				FingerprintB ^= FingerprintB >> 29;
+			}
+			Image.SourceFingerprint = { FingerprintA, FingerprintB };
 			Image.RGBA32FPixels.assign(PixelOwner.get(), PixelOwner.get() + ChannelCount);
 			return Image;
 		}

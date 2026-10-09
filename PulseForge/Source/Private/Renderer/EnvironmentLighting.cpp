@@ -1,5 +1,6 @@
 #include "Core/PulseForgePCH.h"
 #include "Renderer/EnvironmentLighting.h"
+#include "Core/ScopedProfileTimer.h"
 
 #include <algorithm>
 #include <cmath>
@@ -243,8 +244,11 @@ namespace PulseForge
 
 	std::expected<EnvironmentLightingData, EnvironmentProcessingError> ProcessEnvironmentImage(
 		const ImportedFloatImage& Source,
-		const EnvironmentProcessingDesc& Description)
+		const EnvironmentProcessingDesc& Description,
+		std::stop_token StopToken,
+		const ImportedFloatImage* CachedBrdfLut)
 	{
+		Detail::ScopedProfileTimer TotalTimer("ProcessEnvironmentImage total");
 		if (Source.Width == 0 || Source.Height == 0 ||
 			static_cast<uint64_t>(Source.Width) * Source.Height > 8ull * 1024ull * 1024ull ||
 			Source.RGBA32FPixels.size() != static_cast<size_t>(Source.Width) * Source.Height * 4)
@@ -281,10 +285,14 @@ namespace PulseForge
 			Output.Environment.Size = Description.EnvironmentFaceSize;
 			for (std::vector<float>& Face : Output.Environment.Faces)
 				Face.resize(static_cast<size_t>(Description.EnvironmentFaceSize) * Description.EnvironmentFaceSize * 4);
+			{
+				Detail::ScopedProfileTimer Timer("HDRI equirectangular-to-cubemap generation");
 			for (uint32_t Face = 0; Face < 6; ++Face)
 			{
 				for (uint32_t Y = 0; Y < Description.EnvironmentFaceSize; ++Y)
 				{
+					if (StopToken.stop_requested())
+						return std::unexpected(MakeError(EnvironmentProcessingErrorCode::Cancelled, "Environment processing was cancelled"));
 					for (uint32_t X = 0; X < Description.EnvironmentFaceSize; ++X)
 					{
 						const float U = (static_cast<float>(X) + 0.5f) / static_cast<float>(Description.EnvironmentFaceSize);
@@ -294,14 +302,19 @@ namespace PulseForge
 					}
 				}
 			}
+			}
 
 			Output.DiffuseIrradiance.Size = Description.IrradianceFaceSize;
 			for (std::vector<float>& Face : Output.DiffuseIrradiance.Faces)
 				Face.resize(static_cast<size_t>(Description.IrradianceFaceSize) * Description.IrradianceFaceSize * 4);
+			{
+				Detail::ScopedProfileTimer Timer("HDRI diffuse irradiance convolution");
 			for (uint32_t Face = 0; Face < 6; ++Face)
 			{
 				for (uint32_t Y = 0; Y < Description.IrradianceFaceSize; ++Y)
 				{
+					if (StopToken.stop_requested())
+						return std::unexpected(MakeError(EnvironmentProcessingErrorCode::Cancelled, "Environment processing was cancelled"));
 					for (uint32_t X = 0; X < Description.IrradianceFaceSize; ++X)
 					{
 						const glm::vec3 Normal = CubeFaceTexelDirection(
@@ -322,9 +335,12 @@ namespace PulseForge
 					}
 				}
 			}
+			}
 
 			const uint32_t SpecularMipCount = MipCountFor(Description.SpecularFaceSize);
 			Output.PrefilteredSpecular.reserve(SpecularMipCount);
+			{
+				Detail::ScopedProfileTimer Timer("HDRI GGX specular prefilter");
 			uint32_t MipSize = Description.SpecularFaceSize;
 			for (uint32_t Mip = 0; Mip < SpecularMipCount; ++Mip)
 			{
@@ -337,6 +353,8 @@ namespace PulseForge
 				{
 					for (uint32_t Y = 0; Y < MipSize; ++Y)
 					{
+						if (StopToken.stop_requested())
+							return std::unexpected(MakeError(EnvironmentProcessingErrorCode::Cancelled, "Environment processing was cancelled"));
 						for (uint32_t X = 0; X < MipSize; ++X)
 						{
 							const glm::vec3 Normal = CubeFaceTexelDirection(
@@ -373,23 +391,60 @@ namespace PulseForge
 				}
 				MipSize = std::max(1u, MipSize / 2);
 			}
+			}
 
-			Output.BrdfIntegrationLut.Width = Description.BrdfLutSize;
-			Output.BrdfIntegrationLut.Height = Description.BrdfLutSize;
-			Output.BrdfIntegrationLut.RGBA32FPixels.resize(
-				static_cast<size_t>(Description.BrdfLutSize) * Description.BrdfLutSize * 4);
-			for (uint32_t Y = 0; Y < Description.BrdfLutSize; ++Y)
+			if (CachedBrdfLut && CachedBrdfLut->Width == Description.BrdfLutSize &&
+				CachedBrdfLut->Height == Description.BrdfLutSize &&
+				CachedBrdfLut->RGBA32FPixels.size() == static_cast<size_t>(Description.BrdfLutSize) * Description.BrdfLutSize * 4)
 			{
-				for (uint32_t X = 0; X < Description.BrdfLutSize; ++X)
+				Output.BrdfIntegrationLut = *CachedBrdfLut;
+			}
+			else
+			{
+				auto Brdf = GenerateBrdfIntegrationLut(Description.BrdfLutSize, Description.BrdfSamples, StopToken);
+				if (!Brdf)
+					return std::unexpected(std::move(Brdf.error()));
+				Output.BrdfIntegrationLut = std::move(*Brdf);
+			}
+			return Output;
+		}
+		catch (const std::bad_alloc&)
+		{
+			return std::unexpected(MakeError(EnvironmentProcessingErrorCode::ResourceLimitExceeded,
+				"Environment preprocessing could not allocate the bounded generated images"));
+		}
+	}
+
+	std::expected<ImportedFloatImage, EnvironmentProcessingError> GenerateBrdfIntegrationLut(
+		uint32_t Size,
+		uint32_t Samples,
+		std::stop_token StopToken)
+	{
+		if (!IsPowerOfTwo(Size) || Size > MaxLutSize || Samples == 0 || Samples > MaxSamples)
+			return std::unexpected(MakeError(EnvironmentProcessingErrorCode::InvalidDescription,
+				"BRDF LUT size must be a supported power of two and sample count must be within 1..1024"));
+
+		try
+		{
+			Detail::ScopedProfileTimer Timer("HDRI BRDF integration LUT generation");
+			ImportedFloatImage Output;
+			Output.Width = Size;
+			Output.Height = Size;
+			Output.RGBA32FPixels.resize(static_cast<size_t>(Size) * Size * 4);
+			for (uint32_t Y = 0; Y < Size; ++Y)
+			{
+				if (StopToken.stop_requested())
+					return std::unexpected(MakeError(EnvironmentProcessingErrorCode::Cancelled, "BRDF LUT generation was cancelled"));
+				for (uint32_t X = 0; X < Size; ++X)
 				{
-					const float NdotV = std::max((static_cast<float>(X) + 0.5f) / Description.BrdfLutSize, 1.0e-4f);
-					const float Roughness = (static_cast<float>(Y) + 0.5f) / Description.BrdfLutSize;
+					const float NdotV = std::max((static_cast<float>(X) + 0.5f) / Size, 1.0e-4f);
+					const float Roughness = (static_cast<float>(Y) + 0.5f) / Size;
 					const glm::vec3 View(std::sqrt(std::max(0.0f, 1.0f - NdotV * NdotV)), 0.0f, NdotV);
 					float A = 0.0f;
 					float B = 0.0f;
-					for (uint32_t Sample = 0; Sample < Description.BrdfSamples; ++Sample)
+					for (uint32_t Sample = 0; Sample < Samples; ++Sample)
 					{
-						const glm::vec3 HalfVector = ImportanceSampleGgx(Hammersley(Sample, Description.BrdfSamples), Roughness, { 0.0f, 0.0f, 1.0f });
+						const glm::vec3 HalfVector = ImportanceSampleGgx(Hammersley(Sample, Samples), Roughness, { 0.0f, 0.0f, 1.0f });
 						const glm::vec3 Light = SafeNormalize(2.0f * glm::dot(View, HalfVector) * HalfVector - View,
 							{ 0.0f, 0.0f, 1.0f });
 						const float NdotL = std::max(Light.z, 0.0f);
@@ -406,12 +461,12 @@ namespace PulseForge
 						A += (1.0f - Fc) * Visibility;
 						B += Fc * Visibility;
 					}
-					const float Scale = 1.0f / static_cast<float>(Description.BrdfSamples);
-					const size_t Offset = (static_cast<size_t>(Y) * Description.BrdfLutSize + X) * 4;
-					Output.BrdfIntegrationLut.RGBA32FPixels[Offset] = A * Scale;
-					Output.BrdfIntegrationLut.RGBA32FPixels[Offset + 1] = B * Scale;
-					Output.BrdfIntegrationLut.RGBA32FPixels[Offset + 2] = 0.0f;
-					Output.BrdfIntegrationLut.RGBA32FPixels[Offset + 3] = 1.0f;
+					const float Scale = 1.0f / static_cast<float>(Samples);
+					const size_t Offset = (static_cast<size_t>(Y) * Size + X) * 4;
+					Output.RGBA32FPixels[Offset] = A * Scale;
+					Output.RGBA32FPixels[Offset + 1] = B * Scale;
+					Output.RGBA32FPixels[Offset + 2] = 0.0f;
+					Output.RGBA32FPixels[Offset + 3] = 1.0f;
 				}
 			}
 			return Output;
@@ -419,7 +474,7 @@ namespace PulseForge
 		catch (const std::bad_alloc&)
 		{
 			return std::unexpected(MakeError(EnvironmentProcessingErrorCode::ResourceLimitExceeded,
-				"Environment preprocessing could not allocate the bounded generated images"));
+				"BRDF integration LUT could not allocate its bounded output"));
 		}
 	}
 }

@@ -93,6 +93,8 @@ namespace PulseForge
 			const RenderTargetClearValue& ClearValue = {});
 		[[nodiscard]] bool SetAmbientOcclusionSettings(const AmbientOcclusionSettings& Settings) noexcept;
 		[[nodiscard]] const AmbientOcclusionSettings& GetAmbientOcclusionSettings() const noexcept { return m_AmbientOcclusionSettings; }
+		[[nodiscard]] bool IsEnvironmentLightingPending() const noexcept { return m_EnvironmentLightingPending; }
+		[[nodiscard]] bool HasPreparedEnvironmentLighting() const noexcept { return m_PreparedEnvironmentReady; }
 
 	private:
 		SceneRenderer(Application& Runtime, const Project& SourceProject);
@@ -111,7 +113,8 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderAmbientOcclusion(uint32_t Width, uint32_t Height);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureEnvironmentBindings(
 			const AssetID& EnvironmentAsset,
-			const EnvironmentLightingTextures& EnvironmentTextures);
+			const EnvironmentLightingTextures& EnvironmentTextures,
+			bool IsReady);
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedSceneForFormat(
 			ColorTargetFormat ColorFormat,
 			uint32_t Width,
@@ -252,5 +255,8 @@ namespace PulseForge
 		uint32_t m_AmbientOcclusionWidth = 0;
 		uint32_t m_AmbientOcclusionHeight = 0;
 		bool m_AmbientOcclusionFrameAvailable = false;
+		bool m_EnvironmentLightingPending = false;
+		bool m_PreparedEnvironmentReady = false;
+		bool m_LoggedFirstSnapshotPreparation = false;
 	};
 }

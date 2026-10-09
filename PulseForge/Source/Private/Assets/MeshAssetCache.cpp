@@ -3,6 +3,7 @@
 
 #include "Assets/GltfMeshImporter.h"
 #include "Core/Application.h"
+#include "Core/ScopedProfileTimer.h"
 
 #include <exception>
 #include <utility>
@@ -39,6 +40,7 @@ namespace PulseForge
 		if (const auto Existing = m_Meshes.find(Asset); Existing != m_Meshes.end())
 			return std::cref(*Existing->second);
 
+		Detail::ScopedProfileTimer Timer("MeshAssetCache first load (import + GPU mesh upload)");
 		auto ImportedMesh = GltfMeshImporter::ImportStaticPrimitive(Asset, m_ProjectRoot, m_Registry);
 		if (!ImportedMesh)
 		{

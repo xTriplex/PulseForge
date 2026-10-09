@@ -80,3 +80,4 @@ Thumbs.db
 # Per-project generated data; source asset .meta sidecars remain tracked.
 **/.pulseforge/cache/
 **/.pulseforge/imported/
+**/.pulseforge/derived/

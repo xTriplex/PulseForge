@@ -6,6 +6,7 @@
 #include <array>
 #include <expected>
 #include <string>
+#include <stop_token>
 #include <vector>
 
 #include <glm/vec2.hpp>
@@ -54,7 +55,8 @@ namespace PulseForge
 	{
 		InvalidSource,
 		InvalidDescription,
-		ResourceLimitExceeded
+		ResourceLimitExceeded,
+		Cancelled
 	};
 
 	struct EnvironmentProcessingError
@@ -67,5 +69,11 @@ namespace PulseForge
 	[[nodiscard]] PULSEFORGE_API glm::vec3 CubeFaceTexelDirection(CubeFace Face, float U, float V) noexcept;
 	[[nodiscard]] PULSEFORGE_API std::expected<EnvironmentLightingData, EnvironmentProcessingError> ProcessEnvironmentImage(
 		const ImportedFloatImage& Source,
-		const EnvironmentProcessingDesc& Description = {});
+		const EnvironmentProcessingDesc& Description = {},
+		std::stop_token StopToken = {},
+		const ImportedFloatImage* CachedBrdfLut = nullptr);
+	[[nodiscard]] PULSEFORGE_API std::expected<ImportedFloatImage, EnvironmentProcessingError> GenerateBrdfIntegrationLut(
+		uint32_t Size,
+		uint32_t Samples,
+		std::stop_token StopToken = {});
 }

@@ -7,6 +7,7 @@
 #include "Assets/TextureAssetCache.h"
 #include "Core/Application.h"
 #include "Core/Log.h"
+#include "Core/ScopedProfileTimer.h"
 #include "Renderer/Mesh.h"
 #include "Scene/Scene.h"
 #include "Scene/Components/EnvironmentLightComponent.h"
@@ -182,6 +183,7 @@ namespace PulseForge
 		const Project& SourceProject,
 		const std::filesystem::path& CompiledShaderDirectory)
 	{
+		Detail::ScopedProfileTimer Timer("SceneRenderer::Create");
 		auto Renderer = std::unique_ptr<SceneRenderer>(new SceneRenderer(Runtime, SourceProject));
 		if (auto Result = Renderer->Initialize(CompiledShaderDirectory); !Result)
 			return std::unexpected(std::move(Result.error()));
@@ -624,6 +626,7 @@ namespace PulseForge
 		const std::string Key = MakeMaterialBindingKey(MaterialAsset, EnvironmentAsset);
 		if (m_MaterialBindings.contains(Key))
 			return {};
+		Detail::ScopedProfileTimer Timer("PBR material/texture binding first creation");
 
 		auto Material = m_MaterialAssetCache->GetOrLoad(MaterialAsset);
 		if (!Material)
@@ -685,11 +688,13 @@ namespace PulseForge
 
 	std::expected<void, SceneRendererError> SceneRenderer::EnsureEnvironmentBindings(
 		const AssetID& EnvironmentAsset,
-		const EnvironmentLightingTextures& EnvironmentTextures)
+		const EnvironmentLightingTextures& EnvironmentTextures,
+		bool IsReady)
 	{
-		const std::string Key = EnvironmentAsset.ToString();
+		const std::string Key = EnvironmentAsset.ToString() + (IsReady ? ":ready" : ":loading");
 		if (m_EnvironmentBindingSets.contains(Key))
 			return {};
+		Detail::ScopedProfileTimer Timer("Environment GPU binding creation");
 		BindingSetDesc Description;
 		Description.Layout = m_BindingLayout;
 		Description.Textures = {
@@ -753,7 +758,15 @@ namespace PulseForge
 	std::expected<void, SceneRendererError> SceneRenderer::PrepareSnapshot(
 		std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot)
 	{
+		std::optional<Detail::ScopedProfileTimer> FirstPrepareTimer;
+		if (!m_LoggedFirstSnapshotPreparation)
+		{
+			m_LoggedFirstSnapshotPreparation = true;
+			FirstPrepareTimer.emplace("SceneRenderer first PrepareSnapshot");
+		}
 		m_PreparedSnapshot.reset();
+		m_EnvironmentLightingPending = false;
+		m_PreparedEnvironmentReady = false;
 		if (!Snapshot)
 		{
 			return std::unexpected(SceneRendererError{
@@ -767,6 +780,7 @@ namespace PulseForge
 			? std::optional<AssetID>{ Snapshot->EnvironmentLight->HdrImage }
 			: std::nullopt;
 		const EnvironmentLightingTextures* EnvironmentTextures = &m_FallbackEnvironmentTextures;
+		std::optional<AssetID> BindingEnvironmentAsset = EnvironmentAsset;
 		if (EnvironmentAsset)
 		{
 			auto LoadedEnvironment = m_EnvironmentLightingCache->GetOrLoad(*EnvironmentAsset);
@@ -777,8 +791,17 @@ namespace PulseForge
 					*EnvironmentAsset,
 					"Could not prepare HDR environment: " + LoadedEnvironment.error().Message
 				});
-			EnvironmentTextures = &LoadedEnvironment->get();
-			if (auto Bindings = EnsureEnvironmentBindings(*EnvironmentAsset, *EnvironmentTextures); !Bindings)
+			if (!LoadedEnvironment->has_value())
+			{
+				m_EnvironmentLightingPending = true;
+				BindingEnvironmentAsset.reset();
+			}
+			else
+			{
+				EnvironmentTextures = &LoadedEnvironment->value().get();
+				m_PreparedEnvironmentReady = true;
+			}
+			if (auto Bindings = EnsureEnvironmentBindings(*EnvironmentAsset, *EnvironmentTextures, m_PreparedEnvironmentReady); !Bindings)
 				return std::unexpected(std::move(Bindings.error()));
 		}
 
@@ -817,7 +840,7 @@ namespace PulseForge
 					"Visible mesh entity has no material asset assigned"
 				});
 			}
-			if (auto Bindings = EnsureMaterialBindings(*Instance.MaterialAsset, EnvironmentAsset, *EnvironmentTextures); !Bindings)
+			if (auto Bindings = EnsureMaterialBindings(*Instance.MaterialAsset, BindingEnvironmentAsset, *EnvironmentTextures); !Bindings)
 			{
 				Bindings.error().Entity = Instance.Entity;
 				return std::unexpected(std::move(Bindings.error()));
@@ -867,6 +890,7 @@ namespace PulseForge
 	{
 		if (m_Pipelines.contains(ColorFormat))
 			return {};
+		Detail::ScopedProfileTimer Timer("Scene graphics pipeline creation");
 		if (!m_PipelineVertexLayout)
 			return std::unexpected(MakeResourceError("Cannot create a scene pipeline before a mesh vertex layout is prepared"));
 
@@ -1038,6 +1062,7 @@ namespace PulseForge
 		const auto [HalfWidth, HalfHeight] = CalculateAmbientOcclusionExtent(Width, Height);
 		if (m_AmbientOcclusionPrepassTarget && m_AmbientOcclusionWidth == Width && m_AmbientOcclusionHeight == Height)
 			return {};
+		Detail::ScopedProfileTimer Timer("SSAO first/resize resource creation");
 
 		const auto CreateTarget = [&](uint32_t TargetWidth, uint32_t TargetHeight, DepthAttachmentMode DepthMode, const char* Name)
 			-> std::expected<RenderTargetHandle, SceneRendererError>
@@ -1380,7 +1405,8 @@ namespace PulseForge
 
 		if (m_PreparedSnapshot->EnvironmentLight)
 		{
-			const std::string EnvironmentKey = m_PreparedSnapshot->EnvironmentLight->HdrImage.ToString();
+			const std::string EnvironmentKey = m_PreparedSnapshot->EnvironmentLight->HdrImage.ToString() +
+				(m_PreparedEnvironmentReady ? ":ready" : ":loading");
 			const auto BackgroundBindings = m_EnvironmentBindingSets.find(EnvironmentKey);
 			if (BackgroundBindings == m_EnvironmentBindingSets.end())
 				return std::unexpected(MakeDrawError("Prepared environment background bindings are unavailable"));
@@ -1409,7 +1435,8 @@ namespace PulseForge
 			const std::optional<AssetID> EnvironmentAsset = m_PreparedSnapshot->EnvironmentLight
 				? std::optional<AssetID>{ m_PreparedSnapshot->EnvironmentLight->HdrImage }
 				: std::nullopt;
-			const auto Binding = m_MaterialBindings.find(MakeMaterialBindingKey(*Instance.MaterialAsset, EnvironmentAsset));
+			const std::optional<AssetID> BindingEnvironmentAsset = m_PreparedEnvironmentReady ? EnvironmentAsset : std::nullopt;
+			const auto Binding = m_MaterialBindings.find(MakeMaterialBindingKey(*Instance.MaterialAsset, BindingEnvironmentAsset));
 			if (Binding == m_MaterialBindings.end())
 			{
 				return std::unexpected(SceneRendererError{

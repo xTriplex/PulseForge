@@ -2,6 +2,7 @@
 #include "Assets/MaterialAssetCache.h"
 
 #include "Assets/MaterialAssetService.h"
+#include "Core/ScopedProfileTimer.h"
 
 #include <exception>
 #include <utility>
@@ -21,6 +22,7 @@ namespace PulseForge
 		if (const auto Existing = m_Materials.find(Asset); Existing != m_Materials.end())
 			return std::cref(Existing->second);
 
+		Detail::ScopedProfileTimer Timer("MaterialAssetCache first load");
 		auto Material = MaterialAssetService::Load(Asset, m_ProjectRoot, m_Registry);
 		if (!Material)
 			return std::unexpected(std::move(Material.error()));

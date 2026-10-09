@@ -1,5 +1,6 @@
 #include "Core/PulseForgePCH.h"
 #include "Assets/SceneAssetService.h"
+#include "Core/ScopedProfileTimer.h"
 
 #include "Assets/AssetOperations.h"
 #include "Assets/AssetPathResolver.h"
@@ -98,6 +99,7 @@ namespace PulseForge
 		const AssetRegistry& Registry,
 		Scene& Destination)
 	{
+		Detail::ScopedProfileTimer Timer("SceneAssetService::Load / deserialize");
 		auto Path = ResolveScenePath(SceneAsset, ProjectRoot, Registry);
 		if (!Path)
 			return std::unexpected(std::move(Path.error()));
