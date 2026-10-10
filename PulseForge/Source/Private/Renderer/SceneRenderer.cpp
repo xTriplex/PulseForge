@@ -18,6 +18,8 @@
 #include <iterator>
 #include <span>
 #include <exception>
+#include <algorithm>
+#include <limits>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -456,7 +458,8 @@ namespace PulseForge
 			{ BindingResourceType::Sampler, 1 },
 			{ BindingResourceType::ConstantBuffer, 0 },
 			{ BindingResourceType::ConstantBuffer, 1 },
-			{ BindingResourceType::ConstantBuffer, 2 }
+			{ BindingResourceType::ConstantBuffer, 2 },
+			{ BindingResourceType::ConstantBuffer, 3 }
 		};
 		BindingLayoutDescription.DebugName = "PulseForge scene resources";
 		auto BindingLayout = m_Runtime.CreateBindingLayout(BindingLayoutDescription);
@@ -565,6 +568,17 @@ namespace PulseForge
 		if (!FrameBuffer)
 			return std::unexpected(MakeResourceError("Could not create scene frame constants: " + FrameBuffer.error().Message));
 		m_FrameConstantsBuffer = std::move(FrameBuffer.value());
+
+		const LocalLightingConstants InitialLocalLighting{};
+		BufferDesc LocalLightingBufferDescription;
+		LocalLightingBufferDescription.ByteSize = sizeof(InitialLocalLighting);
+		LocalLightingBufferDescription.Usage = BufferUsage::Constant;
+		LocalLightingBufferDescription.DebugName = "PulseForge bounded point/spot light constants";
+		auto LocalLightingBuffer = m_Runtime.CreateBuffer(
+			LocalLightingBufferDescription, std::as_bytes(std::span(&InitialLocalLighting, 1)));
+		if (!LocalLightingBuffer)
+			return std::unexpected(MakeResourceError("Could not create local-light constants: " + LocalLightingBuffer.error().Message));
+		m_LocalLightingConstantsBuffer = std::move(*LocalLightingBuffer);
 
 		AmbientOcclusionConstants InitialAmbientOcclusionConstants;
 		InitialAmbientOcclusionConstants.Parameters = glm::vec4(
@@ -732,6 +746,7 @@ namespace PulseForge
 		BindingSetDescription.Buffers.push_back({ 0, std::cref(*MaterialBuffer.value()) });
 		BindingSetDescription.Buffers.push_back({ 1, std::cref(*m_ObjectConstantsBuffer) });
 		BindingSetDescription.Buffers.push_back({ 2, std::cref(*m_FrameConstantsBuffer) });
+		BindingSetDescription.Buffers.push_back({ 3, std::cref(*m_LocalLightingConstantsBuffer) });
 		auto BindingSet = m_Runtime.CreateBindingSet(BindingSetDescription);
 		if (!BindingSet)
 			return std::unexpected(MakeResourceError("Could not create material bindings: " + BindingSet.error().Message));
@@ -768,7 +783,8 @@ namespace PulseForge
 		Description.Buffers = {
 			{ 0, std::cref(*m_FallbackMaterialConstantsBuffer) },
 			{ 1, std::cref(*m_ObjectConstantsBuffer) },
-			{ 2, std::cref(*m_FrameConstantsBuffer) }
+			{ 2, std::cref(*m_FrameConstantsBuffer) },
+			{ 3, std::cref(*m_LocalLightingConstantsBuffer) }
 		};
 		auto BindingSet = m_Runtime.CreateBindingSet(Description);
 		if (!BindingSet)
@@ -1704,6 +1720,58 @@ namespace PulseForge
 				}
 			}
 		}
+
+		struct CandidateLocalLight
+		{
+			LocalLightRelevance Relevance;
+			LocalLightGpuData Data;
+		};
+		std::vector<CandidateLocalLight> LocalLights;
+		LocalLights.reserve(m_PreparedSnapshot->PointLights.size() + m_PreparedSnapshot->SpotLights.size());
+		for (const ScenePointLight& Light : m_PreparedSnapshot->PointLights)
+		{
+			if (Light.Intensity <= 0.0f)
+				continue;
+			LocalLightGpuData Data{};
+			Data.PositionRange = glm::vec4(Light.WorldPosition, Light.Range);
+			Data.ColorIntensity = glm::vec4(Light.Color, Light.Intensity);
+			LocalLights.push_back({ { Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, 0 }, Data });
+		}
+		for (const SceneSpotLight& Light : m_PreparedSnapshot->SpotLights)
+		{
+			if (Light.Intensity <= 0.0f)
+				continue;
+			LocalLightGpuData Data{};
+			Data.PositionRange = glm::vec4(Light.WorldPosition, Light.Range);
+			Data.ColorIntensity = glm::vec4(Light.Color, Light.Intensity);
+			const float InnerRadians = glm::radians(Light.InnerConeAngleDegrees);
+			const float OuterRadians = glm::radians(Light.OuterConeAngleDegrees);
+			Data.DirectionInnerCos = glm::vec4(Light.WorldDirection, std::cos(InnerRadians));
+			Data.OuterCosAndType = glm::vec4(std::cos(OuterRadians), 0.0f, 0.0f, 1.0f);
+			LocalLights.push_back({ { Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, 1 }, Data });
+		}
+		std::vector<LocalLightRelevance> Relevance;
+		Relevance.reserve(LocalLights.size());
+		for (const CandidateLocalLight& Light : LocalLights)
+			Relevance.push_back(Light.Relevance);
+		const std::vector<size_t> SelectedIndices = SelectLocalLightIndices(
+			Relevance, m_PreparedSnapshot->CameraWorldPosition, MaxLocalLights);
+		LocalLightingConstants LocalLighting{};
+		const size_t SelectedLightCount = SelectedIndices.size();
+		LocalLighting.Counts.x = static_cast<uint32_t>(SelectedLightCount);
+		for (size_t Index = 0; Index < SelectedLightCount; ++Index)
+			LocalLighting.Lights[Index] = LocalLights[SelectedIndices[Index]].Data;
+		if (LocalLights.size() > MaxLocalLights && !m_LoggedLocalLightOverflow)
+		{
+			PF_CORE_WARN("Scene has {0} active local lights; rendering the {1} most camera-relevant lights (UUID and type break ties)",
+				LocalLights.size(), MaxLocalLights);
+			m_LoggedLocalLightOverflow = true;
+		}
+		const auto LocalLightingUpdate = m_Runtime.WriteBuffer(
+			*m_LocalLightingConstantsBuffer, 0, std::as_bytes(std::span(&LocalLighting, 1)));
+		if (!LocalLightingUpdate)
+			return std::unexpected(MakeDrawError("Could not update local-light constants: " + LocalLightingUpdate.error().Message));
+
 		const auto FrameUpdate = m_Runtime.WriteBuffer(*m_FrameConstantsBuffer, 0, std::as_bytes(std::span(&Frame, 1)));
 		if (!FrameUpdate)
 			return std::unexpected(MakeDrawError("Could not update scene frame constants: " + FrameUpdate.error().Message));

@@ -46,6 +46,7 @@
 #include "Renderer/EnvironmentLighting.h"
 #include "Renderer/ScreenSpaceAmbientOcclusion.h"
 #include "Renderer/ToneMapping.h"
+#include "Renderer/LocalLighting.h"
 #include <glm/geometric.hpp>
 #include "Renderer/Vulkan/VulkanSupport.h"
 
@@ -1296,12 +1297,30 @@ namespace
 		LightTransform.Rotation = glm::angleAxis(glm::half_pi<float>(), glm::vec3(0.0f, 1.0f, 0.0f));
 		PF_CHECK(Tests, Light->SetTransform(LightTransform).has_value());
 		PF_CHECK(Tests, Light->SetDirectionalLight(DirectionalLightComponent{ glm::vec3(0.5f, 0.6f, 0.7f), 2.0f }).has_value());
+		PF_CHECK(Tests, Light->SetPointLight(PointLightComponent{ glm::vec3(1.0f, 0.5f, 0.25f), 4.0f, 12.0f }).has_value());
+		PF_CHECK(Tests, Light->SetSpotLight(SpotLightComponent{ glm::vec3(0.2f, 0.4f, 1.0f), 8.0f, 20.0f, 10.0f, 25.0f }).has_value());
+		PointLightComponent InvalidPointLight;
+		InvalidPointLight.Intensity = -1.0f;
+		const auto InvalidPointLightSet = Light->SetPointLight(InvalidPointLight);
+		PF_CHECK(Tests, !InvalidPointLightSet && InvalidPointLightSet.error().Code == SceneErrorCode::InvalidPointLight);
+		SpotLightComponent InvalidSpotLight;
+		InvalidSpotLight.OuterConeAngleDegrees = InvalidSpotLight.InnerConeAngleDegrees;
+		const auto InvalidSpotLightSet = Light->SetSpotLight(InvalidSpotLight);
+		PF_CHECK(Tests, !InvalidSpotLightSet && InvalidSpotLightSet.error().Code == SceneErrorCode::InvalidSpotLight);
+		const auto ExistingPointLight = Light->GetPointLight();
+		const auto ExistingSpotLight = Light->GetSpotLight();
+		PF_CHECK(Tests, ExistingPointLight && ExistingPointLight->has_value() && ExistingPointLight->value().Intensity == 4.0f);
+		PF_CHECK(Tests, ExistingSpotLight && ExistingSpotLight->has_value() && ExistingSpotLight->value().Intensity == 8.0f);
 		auto DuplicateLightEntity = TestScene.DuplicateEntity(*Light);
 		PF_CHECK(Tests, DuplicateLightEntity.has_value());
 		if (DuplicateLightEntity)
 		{
 			const auto CopiedLight = DuplicateLightEntity->GetDirectionalLight();
 			PF_CHECK(Tests, CopiedLight && CopiedLight->has_value() && CopiedLight->value().Intensity == 2.0f);
+			const auto CopiedPoint = DuplicateLightEntity->GetPointLight();
+			const auto CopiedSpot = DuplicateLightEntity->GetSpotLight();
+			PF_CHECK(Tests, CopiedPoint && CopiedPoint->has_value() && CopiedPoint->value().Range == 12.0f);
+			PF_CHECK(Tests, CopiedSpot && CopiedSpot->has_value() && CopiedSpot->value().OuterConeAngleDegrees == 25.0f);
 			(void)TestScene.DestroyEntity(*DuplicateLightEntity);
 		}
 		DirectionalLightComponent InvalidLight;
@@ -1318,6 +1337,7 @@ namespace
 		TransformComponent SecondMeshTransform;
 		SecondMeshTransform.Translation = { 0.0f, -1.0f, -4.0f };
 		PF_CHECK(Tests, Parent->SetTransform(ParentTransform).has_value());
+		PF_CHECK(Tests, Light->SetParent(*Parent).has_value());
 		PF_CHECK(Tests, Light->SetEnvironmentLight(EnvironmentLightComponent{ EnvironmentAssetID, 1.5f }).has_value());
 		PF_CHECK(Tests, FirstMesh->SetTransform(FirstMeshTransform).has_value());
 		PF_CHECK(Tests, SharedMesh->SetTransform(SharedMeshTransform).has_value());
@@ -1343,6 +1363,11 @@ namespace
 		PF_CHECK(Tests, Snapshot->EnvironmentLight && Snapshot->EnvironmentLight->Intensity == 1.5f);
 		PF_CHECK(Tests, Snapshot->EnvironmentLight && glm::abs((glm::mat3(
 			Snapshot->EnvironmentLight->WorldRotation) * glm::vec3(0.0f, 0.0f, -1.0f)).x + 1.0f) < 0.0001f);
+		PF_CHECK(Tests, Snapshot->PointLights.size() == 1 && Snapshot->PointLights[0].Entity == LightID);
+		PF_CHECK(Tests, Snapshot->PointLights.size() == 1 && glm::all(glm::equal(
+			Snapshot->PointLights[0].WorldPosition, glm::vec3(2.0f, 1.0f, 0.0f))));
+		PF_CHECK(Tests, Snapshot->SpotLights.size() == 1 && Snapshot->SpotLights[0].Entity == LightID);
+		PF_CHECK(Tests, Snapshot->SpotLights.size() == 1 && glm::abs(Snapshot->SpotLights[0].WorldDirection.x + 1.0f) < 0.0001f);
 		PF_CHECK(Tests, Snapshot->Meshes.size() == 3);
 		PF_CHECK(Tests, Snapshot->Meshes[0].Entity == FirstMeshID);
 		PF_CHECK(Tests, Snapshot->Meshes[1].Entity == SharedMeshID);
@@ -2144,6 +2169,10 @@ namespace
 		SourceLight.ShadowSoftness = 3.0f;
 		PF_CHECK(Tests, SourceLight.Validate().has_value());
 		PF_CHECK(Tests, Child.SetDirectionalLight(SourceLight).has_value());
+		const PointLightComponent SourcePointLight{ glm::vec3(0.2f, 0.7f, 0.4f), 5.5f, 18.0f };
+		const SpotLightComponent SourceSpotLight{ glm::vec3(0.5f, 0.6f, 0.9f), 12.0f, 24.0f, 12.0f, 30.0f };
+		PF_CHECK(Tests, Child.SetPointLight(SourcePointLight).has_value());
+		PF_CHECK(Tests, Child.SetSpotLight(SourceSpotLight).has_value());
 		const EnvironmentLightComponent SourceEnvironment{ AssetID{ 0x7400000000000000ull, 74 }, 1.25f };
 		PF_CHECK(Tests, SourceEnvironment.Validate().has_value());
 		const EnvironmentLightComponent MissingEnvironmentAsset{ AssetID{}, 1.0f };
@@ -2180,6 +2209,8 @@ namespace
 		PF_CHECK(Tests, Serialized->find("\"castShadows\": false") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"shadowDistance\": 42.0") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"environmentLight\"") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"pointLight\"") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"spotLight\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"meshAsset\": \"" + MeshAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"materialAsset\": \"" + MaterialAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"asset\": \"" + AudioAssetIdentifier.ToString() + "\"") != std::string::npos);
@@ -2247,6 +2278,8 @@ namespace
 		const auto LoadedCamera = LoadedChild->GetCamera();
 		const auto LoadedLight = LoadedChild->GetDirectionalLight();
 		const auto LoadedEnvironment = LoadedChild->GetEnvironmentLight();
+		const auto LoadedPoint = LoadedChild->GetPointLight();
+		const auto LoadedSpot = LoadedChild->GetSpotLight();
 		const auto LoadedMeshRenderer = LoadedChild->GetMeshRenderer();
 		const auto LoadedAudioSource = LoadedChild->GetAudioSource();
 		const auto LoadedAudioListener = LoadedRoot->GetAudioListener();
@@ -2270,6 +2303,13 @@ namespace
 		PF_CHECK(Tests, LoadedEnvironment && LoadedEnvironment->has_value() &&
 			LoadedEnvironment->value().HdrImage == SourceEnvironment.HdrImage &&
 			LoadedEnvironment->value().Intensity == SourceEnvironment.Intensity);
+		PF_CHECK(Tests, LoadedPoint && LoadedPoint->has_value() &&
+			LoadedPoint->value().Intensity == SourcePointLight.Intensity && LoadedPoint->value().Range == SourcePointLight.Range &&
+			glm::all(glm::equal(LoadedPoint->value().Color, SourcePointLight.Color)));
+		PF_CHECK(Tests, LoadedSpot && LoadedSpot->has_value() &&
+			LoadedSpot->value().InnerConeAngleDegrees == SourceSpotLight.InnerConeAngleDegrees &&
+			LoadedSpot->value().OuterConeAngleDegrees == SourceSpotLight.OuterConeAngleDegrees &&
+			LoadedSpot->value().Range == SourceSpotLight.Range);
 		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
 			LoadedMeshRenderer->value().MeshAsset == MeshAssetIdentifier);
 		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
@@ -2283,6 +2323,14 @@ namespace
 		PF_CHECK(Tests, LoadedScript && LoadedScript->has_value() &&
 			LoadedScript->value().ScriptAsset == ScriptAssetIdentifier && !LoadedScript->value().Enabled);
 		PF_CHECK(Tests, LoadedParent && LoadedParent->has_value() && **LoadedParent == *LoadedRoot);
+		auto InvalidSpotDocument = nlohmann::json::parse(*Serialized);
+		for (auto& EntityRecord : InvalidSpotDocument["entities"])
+			if (EntityRecord.value("uuid", std::string{}) == ChildId.ToString())
+				EntityRecord["spotLight"]["innerConeAngleDegrees"] =
+					EntityRecord["spotLight"]["outerConeAngleDegrees"];
+		const auto InvalidSpotLoad = SceneSerializer::Deserialize(InvalidSpotDocument.dump(), Destination);
+		PF_CHECK(Tests, !InvalidSpotLoad);
+		PF_CHECK(Tests, Destination.FindEntity(ChildId).has_value() && Destination.GetEntityCount() == 2);
 		const auto SerializedAgain = SceneSerializer::Serialize(Destination);
 		PF_CHECK(Tests, SerializedAgain && *SerializedAgain == *Serialized);
 		if (LoadedCamera && LoadedCamera->has_value())
@@ -5318,6 +5366,8 @@ end
 		PF_CHECK(Tests, Root->SetCamera(RootCamera).has_value());
 		const DirectionalLightComponent PrefabLight{ glm::vec3(0.8f, 0.9f, 1.0f), 1.75f };
 		PF_CHECK(Tests, Root->SetDirectionalLight(PrefabLight).has_value());
+		PF_CHECK(Tests, Root->SetPointLight(PointLightComponent{ glm::vec3(1.0f, 0.5f, 0.25f), 3.0f, 9.0f }).has_value());
+		PF_CHECK(Tests, Grandchild->SetSpotLight(SpotLightComponent{ glm::vec3(0.3f, 0.5f, 1.0f), 7.0f, 14.0f, 8.0f, 22.0f }).has_value());
 		const EnvironmentLightComponent PrefabEnvironment{ AssetID{ 0x7200000000000000ull, 7 }, 0.65f };
 		PF_CHECK(Tests, Root->SetEnvironmentLight(PrefabEnvironment).has_value());
 		const AssetID MeshAssetID{ 0x7300000000000000ull, 7 };
@@ -5343,6 +5393,8 @@ end
 		PF_CHECK(Tests, PrefabData->find("\"primary\": false") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"primary\": true") == std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"directionalLight\"") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"pointLight\"") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"spotLight\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"environmentLight\"") != std::string::npos);
 		const auto SourceCamera = Root->GetCamera();
 		const auto SourceListener = Root->GetAudioListener();
@@ -5417,6 +5469,7 @@ end
 		const auto FirstCamera = FirstInstance->GetCamera();
 		const auto FirstLight = FirstInstance->GetDirectionalLight();
 		const auto FirstEnvironment = FirstInstance->GetEnvironmentLight();
+		const auto FirstPointLight = FirstInstance->GetPointLight();
 		const auto FirstAudioListener = FirstInstance->GetAudioListener();
 		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() &&
 			FirstCamera->value().VerticalFieldOfViewRadians == RootCamera.VerticalFieldOfViewRadians);
@@ -5426,6 +5479,7 @@ end
 		PF_CHECK(Tests, FirstEnvironment && FirstEnvironment->has_value() &&
 			FirstEnvironment->value().HdrImage == PrefabEnvironment.HdrImage &&
 			FirstEnvironment->value().Intensity == PrefabEnvironment.Intensity);
+		PF_CHECK(Tests, FirstPointLight && FirstPointLight->has_value() && FirstPointLight->value().Range == 9.0f);
 		PF_CHECK(Tests, FirstAudioListener && FirstAudioListener->has_value() && !FirstAudioListener->value().IsPrimary);
 		const auto FirstChildren = FirstInstance->GetChildren();
 		PF_CHECK(Tests, FirstChildren && FirstChildren->size() == 1);
@@ -5445,6 +5499,12 @@ end
 		PF_CHECK(Tests, FirstChildScript && FirstChildScript->has_value() &&
 			FirstChildScript->value().ScriptAsset == ScriptAssetID && !FirstChildScript->value().Enabled);
 		PF_CHECK(Tests, FirstGrandchildren && FirstGrandchildren->size() == 1);
+		if (FirstGrandchildren && FirstGrandchildren->size() == 1)
+		{
+			const auto FirstGrandchildSpot = FirstGrandchildren->front().GetSpotLight();
+			PF_CHECK(Tests, FirstGrandchildSpot && FirstGrandchildSpot->has_value() &&
+				FirstGrandchildSpot->value().OuterConeAngleDegrees == 22.0f);
+		}
 
 		const auto SecondInstance = PrefabSerializer::Instantiate(*PrefabData, Destination);
 		PF_CHECK(Tests, SecondInstance.has_value());
@@ -6590,6 +6650,91 @@ end
 		PF_CHECK(Tests, CapacityHistory.starts_with("[info] [APP] retained\n"));
 		PF_CHECK(Tests, CapacityHistory.ends_with("[info] [APP] retained"));
 	}
+
+	void TestLocalLightingMathAndSelection(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		static_assert(sizeof(LocalLightingConstants) == 2064);
+		PointLightComponent Point;
+		SpotLightComponent Spot;
+		PF_CHECK(Tests, Point.Validate().has_value() && Spot.Validate().has_value());
+		Point.Intensity = 0.0f;
+		PF_CHECK(Tests, Point.Validate().has_value());
+		Point.Intensity = -1.0f;
+		PF_CHECK(Tests, !Point.Validate());
+		Point.Intensity = std::numeric_limits<float>::infinity();
+		PF_CHECK(Tests, !Point.Validate());
+		Point.Intensity = 1000000.0f;
+		Point.Range = 10000.0f;
+		PF_CHECK(Tests, Point.Validate().has_value());
+		Point.Color.r = -0.01f;
+		PF_CHECK(Tests, !Point.Validate());
+		Point.Color.r = 1.0f;
+		Point.Intensity = 1.0f;
+		Point.Range = 0.0f;
+		PF_CHECK(Tests, !Point.Validate());
+		Point.Range = 1.0f;
+		Point.Color.g = std::numeric_limits<float>::quiet_NaN();
+		PF_CHECK(Tests, !Point.Validate());
+		Spot.OuterConeAngleDegrees = Spot.InnerConeAngleDegrees;
+		PF_CHECK(Tests, !Spot.Validate());
+		Spot.InnerConeAngleDegrees = 30.0f;
+		Spot.OuterConeAngleDegrees = 20.0f;
+		PF_CHECK(Tests, !Spot.Validate());
+		Spot.InnerConeAngleDegrees = 10.0f;
+		Spot.OuterConeAngleDegrees = 90.0f;
+		PF_CHECK(Tests, !Spot.Validate());
+		Spot.InnerConeAngleDegrees = 0.5f;
+		Spot.OuterConeAngleDegrees = 89.5f;
+		Spot.Intensity = 0.0f;
+		PF_CHECK(Tests, Spot.Validate().has_value());
+		Spot.OuterConeAngleDegrees = std::numeric_limits<float>::infinity();
+		PF_CHECK(Tests, !Spot.Validate());
+
+		const float AtZero = EvaluateLocalLightRangeAttenuation(0.0f, 10.0f);
+		const float AtOne = EvaluateLocalLightRangeAttenuation(1.0f, 10.0f);
+		const float AtFive = EvaluateLocalLightRangeAttenuation(5.0f, 10.0f);
+		PF_CHECK(Tests, std::isfinite(AtZero) && AtZero > 0.0f);
+		PF_CHECK(Tests, AtZero > AtOne && AtOne > AtFive && AtFive > 0.0f);
+		PF_CHECK(Tests, EvaluateLocalLightRangeAttenuation(10.0f, 10.0f) == 0.0f);
+		PF_CHECK(Tests, EvaluateLocalLightRangeAttenuation(std::numeric_limits<float>::quiet_NaN(), 10.0f) == 0.0f);
+		PF_CHECK(Tests, EvaluateLocalLightRangeAttenuation(1.0f, 0.0f) == 0.0f);
+		const float InnerCos = std::cos(glm::radians(15.0f));
+		const float OuterCos = std::cos(glm::radians(30.0f));
+		PF_CHECK(Tests, EvaluateSpotLightAngularAttenuation(1.0f, 15.0f, 30.0f) == 1.0f);
+		PF_CHECK(Tests, EvaluateSpotLightAngularAttenuation(InnerCos, 15.0f, 30.0f) > 0.999f);
+		PF_CHECK(Tests, EvaluateSpotLightAngularAttenuation(OuterCos, 15.0f, 30.0f) < 0.001f);
+		PF_CHECK(Tests, EvaluateSpotLightAngularAttenuation(-1.0f, 15.0f, 30.0f) == 0.0f);
+		PF_CHECK(Tests, EvaluateSpotLightAngularAttenuation(
+			std::numeric_limits<float>::quiet_NaN(), 15.0f, 30.0f) == 0.0f);
+
+		std::array<LocalLightRelevance, 4> Lights = {{
+			{ UUID{ 0, 4 }, { 0.0f, 0.0f, 0.0f }, glm::vec3(1.0f), 1.0f, 10.0f },
+			{ UUID{ 0, 2 }, { 0.0f, 0.0f, 0.0f }, glm::vec3(1.0f), 1.0f, 10.0f },
+			{ UUID{ 0, 3 }, { 0.0f, 0.0f, 0.0f }, glm::vec3(1.0f), 0.0f, 10.0f },
+			{ UUID{ 0, 1 }, { 2.0f, 0.0f, 0.0f }, glm::vec3(2.0f), 10.0f, 8.0f }
+		}};
+		const auto Selected = SelectLocalLightIndices(Lights, glm::vec3(0.0f), 2);
+		PF_CHECK(Tests, Selected.size() == 2 && Selected[0] == 3);
+		PF_CHECK(Tests, Selected.size() == 2 && Selected[1] == 1);
+		PF_CHECK(Tests, SelectLocalLightIndices({}, glm::vec3(0.0f)).empty());
+		std::array<LocalLightRelevance, 2> SameEntityTypes = {{
+			{ UUID{ 0, 9 }, glm::vec3(0.0f), glm::vec3(1.0f), 1.0f, 1.0f, 1 },
+			{ UUID{ 0, 9 }, glm::vec3(0.0f), glm::vec3(1.0f), 1.0f, 1.0f, 0 }
+		}};
+		const auto TypeTied = SelectLocalLightIndices(SameEntityTypes, glm::vec3(0.0f));
+		PF_CHECK(Tests, TypeTied.size() == 2 && TypeTied[0] == 1 && TypeTied[1] == 0);
+		std::vector<LocalLightRelevance> CapacityLights(MaxLocalLightCount + 1);
+		for (size_t Index = 0; Index < CapacityLights.size(); ++Index)
+		{
+			CapacityLights[Index].Entity = UUID{ 0, Index + 1 };
+			CapacityLights[Index].Intensity = 1.0f;
+			CapacityLights[Index].Range = 1.0f;
+		}
+		const auto CapacityBounded = SelectLocalLightIndices(CapacityLights, glm::vec3(0.0f));
+		PF_CHECK(Tests, CapacityBounded.size() == MaxLocalLightCount);
+		PF_CHECK(Tests, std::find(CapacityBounded.begin(), CapacityBounded.end(), MaxLocalLightCount) == CapacityBounded.end());
+	}
 }
 
 int main()
@@ -6615,6 +6760,7 @@ int main()
 	TestPhysicsSceneRuntime(Tests);
 	TestEntityHandleIdentityAndLifetime(Tests);
 	TestSceneRenderSnapshot(Tests);
+	TestLocalLightingMathAndSelection(Tests);
 	TestEditorViewportMath(Tests);
 	TestEditorWorkspacePanelState(Tests);
 	TestEditorWorkspaceViewHelpers(Tests);

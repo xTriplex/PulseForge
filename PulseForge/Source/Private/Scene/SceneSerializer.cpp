@@ -4,6 +4,8 @@
 #include "Scene/Components/AudioSourceComponent.h"
 #include "Scene/Components/DirectionalLightComponent.h"
 #include "Scene/Components/EnvironmentLightComponent.h"
+#include "Scene/Components/PointLightComponent.h"
+#include "Scene/Components/SpotLightComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
 #include "Scene/Components/ScriptComponent.h"
 
@@ -57,6 +59,7 @@ namespace PulseForge
 				Error.Code == SceneErrorCode::InvalidTransform || Error.Code == SceneErrorCode::ParentCycle ||
 				Error.Code == SceneErrorCode::InvalidCamera || Error.Code == SceneErrorCode::InvalidDirectionalLight ||
 				Error.Code == SceneErrorCode::InvalidEnvironmentLight ||
+				Error.Code == SceneErrorCode::InvalidPointLight || Error.Code == SceneErrorCode::InvalidSpotLight ||
 				Error.Code == SceneErrorCode::InvalidAssetReference ||
 				Error.Code == SceneErrorCode::InvalidPhysicsComponent || Error.Code == SceneErrorCode::InvalidAudioComponent ||
 				Error.Code == SceneErrorCode::InvalidScriptComponent)
@@ -100,6 +103,8 @@ namespace PulseForge
 				const auto Camera = Current.GetCamera();
 				const auto DirectionalLight = Current.GetDirectionalLight();
 				const auto EnvironmentLight = Current.GetEnvironmentLight();
+				const auto PointLight = Current.GetPointLight();
+				const auto SpotLight = Current.GetSpotLight();
 				const auto MeshRenderer = Current.GetMeshRenderer();
 				const auto Rigidbody = Current.GetRigidbody();
 				const auto BoxCollider = Current.GetBoxCollider();
@@ -107,7 +112,7 @@ namespace PulseForge
 				const auto AudioListener = Current.GetAudioListener();
 				const auto Script = Current.GetScript();
 				const auto Parent = Current.GetParent();
-				if (!Tag || !Transform || !Camera || !DirectionalLight || !EnvironmentLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
+				if (!Tag || !Transform || !Camera || !DirectionalLight || !EnvironmentLight || !PointLight || !SpotLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
 					!AudioSource || !AudioListener || !Script || !Parent)
 					return std::unexpected(MakeError(
 						SceneSerializationErrorCode::SceneOperationFailed,
@@ -150,6 +155,24 @@ namespace PulseForge
 					Record["environmentLight"] = Json::object({
 						{ "hdrImage", Environment.HdrImage.ToString() },
 						{ "intensity", Environment.Intensity }
+					});
+				}
+				if (PointLight->has_value())
+				{
+					const auto& Light = PointLight->value();
+					Record["pointLight"] = Json::object({
+						{ "color", { Light.Color.r, Light.Color.g, Light.Color.b } },
+						{ "intensity", Light.Intensity }, { "range", Light.Range }
+					});
+				}
+				if (SpotLight->has_value())
+				{
+					const auto& Light = SpotLight->value();
+					Record["spotLight"] = Json::object({
+						{ "color", { Light.Color.r, Light.Color.g, Light.Color.b } },
+						{ "intensity", Light.Intensity }, { "range", Light.Range },
+						{ "innerConeAngleDegrees", Light.InnerConeAngleDegrees },
+						{ "outerConeAngleDegrees", Light.OuterConeAngleDegrees }
 					});
 				}
 				if (MeshRenderer->has_value())
@@ -413,6 +436,51 @@ namespace PulseForge
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error()));
 				}
 
+				std::optional<PointLightComponent> PointLightData;
+				const auto SerializedPointLight = SerializedEntity.find("pointLight");
+				if (SerializedPointLight != SerializedEntity.end())
+				{
+					if (!SerializedPointLight->is_object())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity pointLight must be an object"));
+					const auto Color = SerializedPointLight->find("color");
+					const auto Intensity = SerializedPointLight->find("intensity");
+					const auto Range = SerializedPointLight->find("range");
+					std::array<float, 3> ColorValues{};
+					if (Color == SerializedPointLight->end() || Intensity == SerializedPointLight->end() ||
+						Range == SerializedPointLight->end() || !ReadFiniteFloats(*Color, ColorValues) ||
+						!Intensity->is_number() || !Range->is_number())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Point light requires finite RGB color, intensity, and range"));
+					PointLightData = PointLightComponent{ { ColorValues[0], ColorValues[1], ColorValues[2] },
+						Intensity->get<float>(), Range->get<float>() };
+					if (auto Validation = PointLightData->Validate(); !Validation)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error()));
+				}
+
+				std::optional<SpotLightComponent> SpotLightData;
+				const auto SerializedSpotLight = SerializedEntity.find("spotLight");
+				if (SerializedSpotLight != SerializedEntity.end())
+				{
+					if (!SerializedSpotLight->is_object())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity spotLight must be an object"));
+					const auto Color = SerializedSpotLight->find("color");
+					const auto Intensity = SerializedSpotLight->find("intensity");
+					const auto Range = SerializedSpotLight->find("range");
+					const auto Inner = SerializedSpotLight->find("innerConeAngleDegrees");
+					const auto Outer = SerializedSpotLight->find("outerConeAngleDegrees");
+					std::array<float, 3> ColorValues{};
+					if (Color == SerializedSpotLight->end() || Intensity == SerializedSpotLight->end() ||
+						Range == SerializedSpotLight->end() || Inner == SerializedSpotLight->end() || Outer == SerializedSpotLight->end() ||
+						!ReadFiniteFloats(*Color, ColorValues) || !Intensity->is_number() || !Range->is_number() ||
+						!Inner->is_number() || !Outer->is_number())
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Spot light requires finite RGB color, intensity, range, and cone half-angles in degrees"));
+					SpotLightData = SpotLightComponent{ { ColorValues[0], ColorValues[1], ColorValues[2] },
+						Intensity->get<float>(), Range->get<float>(), Inner->get<float>(), Outer->get<float>() };
+					if (auto Validation = SpotLightData->Validate(); !Validation)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error()));
+				}
+
 				std::optional<MeshRendererComponent> MeshRendererData;
 				const auto SerializedMeshRenderer = SerializedEntity.find("meshRenderer");
 				if (SerializedMeshRenderer != SerializedEntity.end())
@@ -608,6 +676,12 @@ namespace PulseForge
 					if (auto EnvironmentResult = Created->SetEnvironmentLight(*EnvironmentLightData); !EnvironmentResult)
 						return std::unexpected(SceneOperationError(EnvironmentResult.error()));
 				}
+				if (PointLightData)
+					if (auto LightResult = Created->SetPointLight(*PointLightData); !LightResult)
+						return std::unexpected(SceneOperationError(LightResult.error()));
+				if (SpotLightData)
+					if (auto LightResult = Created->SetSpotLight(*SpotLightData); !LightResult)
+						return std::unexpected(SceneOperationError(LightResult.error()));
 				if (MeshRendererData)
 				{
 					if (auto MeshRendererResult = Created->SetMeshRenderer(*MeshRendererData); !MeshRendererResult)

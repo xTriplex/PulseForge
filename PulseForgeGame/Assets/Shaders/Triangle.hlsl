@@ -27,6 +27,20 @@ cbuffer Frame : register(b2)
 	float4x4 CascadeViewProjection[4];
 };
 
+struct LocalLightData
+{
+	float4 PositionRange;
+	float4 ColorIntensity;
+	float4 DirectionInnerCos;
+	float4 OuterCosAndType; // outer cosine, unused, unused, 1 for spot / 0 for point
+};
+
+cbuffer LocalLighting : register(b3)
+{
+	uint4 LocalLightCounts; // x is active count, bounded by 32
+	LocalLightData LocalLights[32];
+};
+
 Texture2D DiffuseTexture : register(t0);
 TextureCube IrradianceTexture : register(t1);
 TextureCube PrefilteredEnvironment : register(t2);
@@ -129,6 +143,47 @@ struct VertexOutput
 	[[vk::location(4)]] float ViewDepth : TEXCOORD3;
 };
 
+float3 EvaluateDirectBRDF(
+	float3 Albedo,
+	float Metallic,
+	float Roughness,
+	float3 N,
+	float3 V,
+	float3 L,
+	float3 Radiance,
+	out float NdotL)
+{
+	const float3 H = SafeNormalize(V + L, N);
+	const float NdotV = max(dot(N, V), 1.0e-4f);
+	NdotL = max(dot(N, L), 0.0f);
+	const float NdotH = max(dot(N, H), 0.0f);
+	const float VdotH = max(dot(V, H), 0.0f);
+	const float Alpha = Roughness * Roughness;
+	const float AlphaSquared = Alpha * Alpha;
+	const float Denominator = NdotH * NdotH * (AlphaSquared - 1.0f) + 1.0f;
+	const float Distribution = AlphaSquared / max(3.14159265f * Denominator * Denominator, 1.0e-6f);
+	const float GeometryK = (Roughness + 1.0f) * (Roughness + 1.0f) / 8.0f;
+	const float GeometryV = NdotV / (NdotV * (1.0f - GeometryK) + GeometryK);
+	const float GeometryL = NdotL / (NdotL * (1.0f - GeometryK) + GeometryK);
+	const float3 F0 = lerp(0.04f.xxx, Albedo, Metallic);
+	const float3 Fresnel = F0 + (1.0f - F0) * pow(1.0f - VdotH, 5.0f);
+	const float3 Specular = Distribution * GeometryV * GeometryL * Fresnel /
+		max(4.0f * NdotV * NdotL, 1.0e-4f);
+	const float3 DiffuseWeight = (1.0f - Fresnel) * (1.0f - Metallic);
+	const float3 Diffuse = DiffuseWeight * Albedo / 3.14159265f;
+	return (Diffuse + Specular) * Radiance * NdotL;
+}
+
+float LocalRangeAttenuation(float Distance, float Range)
+{
+	if (Distance >= Range)
+		return 0.0f;
+	const float NormalizedDistance = Distance / Range;
+	const float RangeWindow = max(1.0f - NormalizedDistance * NormalizedDistance *
+		NormalizedDistance * NormalizedDistance, 0.0f);
+	return RangeWindow * RangeWindow / max(Distance * Distance, 0.01f);
+}
+
 VertexOutput VSMain(VertexInput Input)
 {
 	VertexOutput Output;
@@ -150,28 +205,37 @@ float4 PSMain(VertexOutput Input) : SV_Target0
 	const float3 N = SafeNormalize(Input.Normal, float3(0.0f, 0.0f, 1.0f));
 	const float3 V = SafeNormalize(CameraWorldPosition.xyz - Input.WorldPosition, float3(0.0f, 0.0f, 1.0f));
 	const float3 L = SafeNormalize(-LightRayDirection.xyz, float3(0.0f, 0.0f, 1.0f));
-	const float3 H = SafeNormalize(V + L, N);
 	const float NdotV = max(dot(N, V), 1.0e-4f);
-	const float NdotL = max(dot(N, L), 0.0f);
-	const float NdotH = max(dot(N, H), 0.0f);
-	const float VdotH = max(dot(V, H), 0.0f);
-	const float Alpha = Roughness * Roughness;
-	const float AlphaSquared = Alpha * Alpha;
-	const float Denominator = NdotH * NdotH * (AlphaSquared - 1.0f) + 1.0f;
-	const float Distribution = AlphaSquared / max(3.14159265f * Denominator * Denominator, 1.0e-6f);
-	const float GeometryK = (Roughness + 1.0f) * (Roughness + 1.0f) / 8.0f;
-	const float GeometryV = NdotV / (NdotV * (1.0f - GeometryK) + GeometryK);
-	const float GeometryL = NdotL / (NdotL * (1.0f - GeometryK) + GeometryK);
 	const float3 F0 = lerp(0.04f.xxx, Albedo, Metallic);
-	const float3 Fresnel = F0 + (1.0f - F0) * pow(1.0f - VdotH, 5.0f);
-	const float3 Specular = Distribution * GeometryV * GeometryL * Fresnel /
-		max(4.0f * NdotV * NdotL, 1.0e-4f);
-	const float3 DirectDiffuseWeight = (1.0f - Fresnel) * (1.0f - Metallic);
-	const float3 DirectDiffuse = DirectDiffuseWeight * Albedo / 3.14159265f;
 	const float3 DirectRadiance = LightColorIntensity.rgb * LightColorIntensity.a;
+	float NdotL = 0.0f;
+	const float3 DirectionalBrdf = EvaluateDirectBRDF(Albedo, Metallic, Roughness, N, V, L, DirectRadiance, NdotL);
 	const float3 BiasedWorldPosition = Input.WorldPosition + N * (ShadowParameters.y * (1.0f - NdotL));
-	const float3 DirectColor = (DirectDiffuse + Specular) * DirectRadiance * NdotL *
-		ShadowVisibility(BiasedWorldPosition, Input.ViewDepth);
+	const float3 DirectionalColor = DirectionalBrdf * ShadowVisibility(BiasedWorldPosition, Input.ViewDepth);
+	float3 LocalDirectColor = 0.0f.xxx;
+	[loop]
+	for (uint LightIndex = 0; LightIndex < min(LocalLightCounts.x, 32u); ++LightIndex)
+	{
+		const LocalLightData LocalLight = LocalLights[LightIndex];
+		const float3 ToLight = LocalLight.PositionRange.xyz - Input.WorldPosition;
+		const float DistanceSquared = dot(ToLight, ToLight);
+		const float Distance = sqrt(max(DistanceSquared, 0.0f));
+		if (Distance >= LocalLight.PositionRange.w)
+			continue;
+		const float3 LocalL = SafeNormalize(ToLight, N);
+		float AngularAttenuation = 1.0f;
+		if (LocalLight.OuterCosAndType.w > 0.5f)
+		{
+			const float3 LightToSurface = -LocalL;
+			const float CosTheta = dot(LocalLight.DirectionInnerCos.xyz, LightToSurface);
+			AngularAttenuation = smoothstep(
+				LocalLight.OuterCosAndType.x, LocalLight.DirectionInnerCos.w, CosTheta);
+		}
+		const float Attenuation = LocalRangeAttenuation(Distance, LocalLight.PositionRange.w) * AngularAttenuation;
+		float LocalNdotL = 0.0f;
+		LocalDirectColor += EvaluateDirectBRDF(Albedo, Metallic, Roughness, N, V, LocalL,
+			LocalLight.ColorIntensity.rgb * LocalLight.ColorIntensity.a * Attenuation, LocalNdotL);
+	}
 
 	const float3 AmbientFresnel = F0 + (max(1.0f - Roughness, F0) - F0) * pow(1.0f - NdotV, 5.0f);
 	const float3 AmbientDiffuseWeight = (1.0f - AmbientFresnel) * (1.0f - Metallic);
@@ -188,6 +252,6 @@ float4 PSMain(VertexOutput Input) : SV_Target0
 	const float AmbientOcclusion = saturate(AmbientOcclusionTexture.Sample(AmbientOcclusionSampler, ScreenUV));
 	const float SpecularOcclusion = saturate(1.0f - (1.0f - AmbientOcclusion) * (1.0f - NdotV) * Roughness);
 	const float3 EnvironmentIbl = (DiffuseIbl * AmbientOcclusion + SpecularIbl * SpecularOcclusion) * EnvironmentParameters.x;
-	const float3 Color = DirectColor + EnvironmentIbl;
+	const float3 Color = DirectionalColor + LocalDirectColor + EnvironmentIbl;
 	return float4(Color, BaseColorFactor.a);
 }

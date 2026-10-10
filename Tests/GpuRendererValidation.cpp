@@ -5,6 +5,8 @@
 #include "Assets/SceneAssetService.h"
 #include "Renderer/SceneRenderer.h"
 #include "Scene/Scene.h"
+#include "Scene/Components/PointLightComponent.h"
+#include "Scene/Components/SpotLightComponent.h"
 
 #include <array>
 #include <chrono>
@@ -58,13 +60,15 @@ namespace
 	class GpuValidationLayer final : public PulseForge::Layer
 	{
 	public:
-		GpuValidationLayer(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm)
+		GpuValidationLayer(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm, bool ValidateLocalLights)
 			: Layer(ValidateEditorUiUnorm ? "Editor UNORM UI composition GPU validation" :
+				ValidateLocalLights ? "SceneRenderer local-light GPU validation" :
 				ValidateToneMapping ? "HDR tonemapping GPU validation" :
 				ValidateSceneHdr ? "SceneRenderer HDR GPU validation" : "RGBA16F GPU validation"),
 			  m_ValidateSceneHdr(ValidateSceneHdr),
 			  m_ValidateToneMapping(ValidateToneMapping),
-			  m_ValidateEditorUiUnorm(ValidateEditorUiUnorm)
+			  m_ValidateEditorUiUnorm(ValidateEditorUiUnorm),
+			  m_ValidateLocalLights(ValidateLocalLights)
 		{
 		}
 
@@ -76,8 +80,10 @@ namespace
 				InitializeResources();
 				if (m_ValidateEditorUiUnorm)
 					InitializeEditorUiUnormResources();
-				if (m_ValidateSceneHdr || m_ValidateToneMapping)
+				if (m_ValidateSceneHdr || m_ValidateToneMapping || m_ValidateLocalLights)
 					InitializeSceneResources();
+				if (m_ValidateLocalLights)
+					InitializeLocalLightScenario();
 				PF_INFO("RGBA16F GPU validation resources initialized");
 			}
 			catch (const std::exception& Exception)
@@ -103,6 +109,36 @@ namespace
 				}
 				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(15))
 					Fail("Timed out during editor UI UNORM composition validation");
+				return;
+			}
+			if (m_ValidateLocalLights)
+			{
+				if (m_LocalLightFrames >= 6)
+				{
+					PF_INFO("GPU_VALIDATION_RESULT=PASS; SceneRenderer submitted real PBR geometry with mixed point/spot lights through HDR and SDR presentation across light updates");
+					PulseForge::Application::Get().RequestClose();
+					return;
+				}
+				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(45))
+				{
+					Fail("Timed out preparing or rendering local-light scene");
+					return;
+				}
+				const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
+				if (Width == 0 || Height == 0)
+					return;
+				if (m_LocalLightFrames > 0)
+					UpdateLocalLightTransforms();
+				const auto Prepared = m_SceneRenderer->PrepareScene(
+					m_LocalLightsScene, static_cast<float>(Width) / static_cast<float>(Height));
+				if (!Prepared)
+				{
+					Fail("Could not prepare mixed local-light scene: " + Prepared.error().Message);
+					return;
+				}
+				if (m_SceneRenderer->IsEnvironmentLightingPending())
+					return;
+				m_ScenePrepared = true;
 				return;
 			}
 			if (m_ValidateToneMapping)
@@ -222,6 +258,11 @@ namespace
 				RenderEditorUiUnormFrame();
 				return;
 			}
+			if (m_ValidateLocalLights)
+			{
+				RenderLocalLightFrame();
+				return;
+			}
 			if (m_ValidateToneMapping)
 			{
 				RenderToneMappingFrame();
@@ -308,6 +349,7 @@ namespace
 		[[nodiscard]] bool Succeeded() const noexcept
 		{
 			return m_Succeeded && (m_ValidateEditorUiUnorm ? m_EditorUiFrames == 3 && m_EditorUiTargetCreations == 2 :
+				m_ValidateLocalLights ? m_LocalLightFrames == 6 :
 				m_ValidateToneMapping ? m_ToneMappingFrame == 10 :
 				m_ValidateSceneHdr ? m_SceneCompletedFrames == 4 && m_ScenarioIndex == 4 : m_CompletedFrames == 3);
 		}
@@ -485,6 +527,125 @@ namespace
 			if (MissingSnapshot || MissingSnapshot.error().Code != PulseForge::SceneRendererErrorCode::SnapshotBuildFailed)
 				throw std::runtime_error("HDR rendering did not reject a missing prepared snapshot");
 			PF_INFO("SceneRenderer rejected HDR rendering before scene preparation as expected");
+		}
+
+		void InitializeLocalLightScenario()
+		{
+			BuildScenario(m_LocalLightsScene, true, true, true);
+			const std::array<PulseForge::PointLightComponent, 2> Points = {
+				PulseForge::PointLightComponent{ { 1.0f, 0.35f, 0.15f }, 18.0f, 12.0f },
+				PulseForge::PointLightComponent{ { 0.15f, 0.35f, 1.0f }, 12.0f, 10.0f }
+			};
+			for (size_t Index = 0; Index < Points.size(); ++Index)
+			{
+				auto Light = m_LocalLightsScene.CreateEntity("GPU validation point light");
+				if (!Light || !Light->SetPointLight(Points[Index]))
+					throw std::runtime_error("Could not create GPU validation point light");
+				auto Transform = Light->GetTransform();
+				if (!Transform)
+					throw std::runtime_error("Could not read GPU validation point-light transform");
+				Transform->Translation = { static_cast<float>(Index) * 2.0f - 1.0f, 2.0f, 1.0f };
+				if (!Light->SetTransform(*Transform))
+					throw std::runtime_error("Could not position GPU validation point light");
+				m_LocalLightEntities.push_back(*Light);
+			}
+			const std::array<PulseForge::SpotLightComponent, 2> Spots = {
+				PulseForge::SpotLightComponent{ { 0.3f, 1.0f, 0.4f }, 24.0f, 18.0f, 10.0f, 28.0f },
+				PulseForge::SpotLightComponent{ { 1.0f, 0.75f, 0.25f }, 20.0f, 16.0f, 12.0f, 32.0f }
+			};
+			for (size_t Index = 0; Index < Spots.size(); ++Index)
+			{
+				auto Light = m_LocalLightsScene.CreateEntity("GPU validation spot light");
+				if (!Light || !Light->SetSpotLight(Spots[Index]))
+					throw std::runtime_error("Could not create GPU validation spot light");
+				auto Transform = Light->GetTransform();
+				if (!Transform)
+					throw std::runtime_error("Could not read GPU validation spot-light transform");
+				Transform->Translation = { static_cast<float>(Index) * 3.0f - 1.5f, 3.0f, 1.5f };
+				if (!Light->SetTransform(*Transform))
+					throw std::runtime_error("Could not position GPU validation spot light");
+				m_LocalLightEntities.push_back(*Light);
+			}
+			for (size_t Index = 0; Index < 30; ++Index)
+			{
+				auto Light = m_LocalLightsScene.CreateEntity("GPU validation capacity point light");
+				if (!Light || !Light->SetPointLight(PulseForge::PointLightComponent{ { 0.4f, 0.5f, 0.6f }, 0.5f, 5.0f }))
+					throw std::runtime_error("Could not create GPU validation capacity light");
+				auto Transform = Light->GetTransform();
+				if (!Transform)
+					throw std::runtime_error("Could not read GPU validation capacity-light transform");
+				Transform->Translation = { 100.0f + static_cast<float>(Index), 0.0f, 0.0f };
+				if (!Light->SetTransform(*Transform))
+					throw std::runtime_error("Could not position GPU validation capacity light");
+				m_LocalLightEntities.push_back(*Light);
+			}
+			PulseForge::RenderTargetDesc OutputDescription;
+			OutputDescription.Width = 128;
+			OutputDescription.Height = 72;
+			OutputDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
+			OutputDescription.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
+			OutputDescription.DebugName = "Local-light GPU validation SDR output";
+			auto OutputTarget = PulseForge::Application::Get().CreateRenderTarget(OutputDescription);
+			if (!OutputTarget)
+				throw std::runtime_error("Could not create local-light SDR validation target: " + OutputTarget.error().Message);
+			m_LocalLightOutputTarget = std::move(*OutputTarget);
+			PF_INFO("Prepared GPU local-light scene with 32 point and 2 spot lights (over the combined 32-light budget) alongside bundled geometry, environment, and directional light");
+		}
+
+		void UpdateLocalLightTransforms()
+		{
+			for (size_t Index = 0; Index < m_LocalLightEntities.size(); ++Index)
+			{
+				const auto Current = m_LocalLightEntities[Index].GetTransform();
+				if (!Current)
+					throw std::runtime_error("Could not read moving GPU validation light transform");
+				PulseForge::TransformComponent Updated = *Current;
+				Updated.Translation.x += 0.1f;
+				if (Index >= 2)
+				{
+					const float HalfAngle = 0.025f * static_cast<float>(m_LocalLightFrames);
+					Updated.Rotation = glm::quat(std::cos(HalfAngle), 0.0f, std::sin(HalfAngle), 0.0f);
+				}
+				if (!m_LocalLightEntities[Index].SetTransform(Updated))
+					throw std::runtime_error("Could not update moving GPU validation light transform");
+			}
+			if (m_LocalLightFrames == 1 || m_LocalLightFrames == 4)
+			{
+				auto Point = m_LocalLightEntities[0].GetPointLight();
+				if (!Point || !Point->has_value())
+					throw std::runtime_error("Could not update GPU validation point-light count");
+				Point->value().Intensity = m_LocalLightFrames == 1 ? 0.0f : 18.0f;
+				if (!m_LocalLightEntities[0].SetPointLight(Point->value()))
+					throw std::runtime_error("Could not change GPU validation point-light count");
+			}
+			if (m_LocalLightFrames == 2 || m_LocalLightFrames == 4)
+			{
+				if (m_LocalLightFrames == 2)
+				{
+					if (!m_LocalLightEntities[2].RemoveSpotLight())
+						throw std::runtime_error("Could not reduce GPU validation spotlight count");
+				}
+				else if (!m_LocalLightEntities[2].SetSpotLight(
+					PulseForge::SpotLightComponent{ { 0.3f, 1.0f, 0.4f }, 24.0f, 18.0f, 10.0f, 28.0f }))
+					throw std::runtime_error("Could not restore GPU validation spotlight count");
+			}
+		}
+
+		void RenderLocalLightFrame()
+		{
+			if (!m_Succeeded || !m_ScenePrepared || m_LocalLightFrames >= 6)
+				return;
+			auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_LocalLightOutputTarget);
+			if (!Rendered || Rendered->GeometryDrawCount == 0)
+			{
+				Fail(Rendered ? "Local-light validation rendered no PBR geometry" :
+					"Local-light scene render failed: " + Rendered.error().Message);
+				return;
+			}
+			PF_INFO("Local-light GPU validation frame {0}: {1} geometry draw(s), HDR generation {2}",
+				m_LocalLightFrames, Rendered->GeometryDrawCount, Rendered->HdrTargetGeneration);
+			++m_LocalLightFrames;
+			m_ScenePrepared = false;
 		}
 
 		void InitializeEditorUiUnormResources()
@@ -1089,6 +1250,9 @@ namespace
 		PulseForge::Scene m_EnvironmentOnlyScene;
 		PulseForge::Scene m_GeometryOnlyScene;
 		PulseForge::Scene m_DirectionalOnlyScene;
+		PulseForge::Scene m_LocalLightsScene;
+		std::vector<PulseForge::Entity> m_LocalLightEntities;
+		PulseForge::RenderTargetHandle m_LocalLightOutputTarget;
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
 		const PulseForge::Texture* m_FirstHdrTexture = nullptr;
 		const PulseForge::Texture* m_ResizedHdrTexture = nullptr;
@@ -1097,6 +1261,7 @@ namespace
 		std::chrono::steady_clock::time_point m_StartedAt{};
 		uint32_t m_CompletedFrames = 0;
 		uint32_t m_SceneCompletedFrames = 0;
+		uint32_t m_LocalLightFrames = 0;
 		uint32_t m_ToneMappingFrame = 0;
 		uint32_t m_EditorUiFrames = 0;
 		uint32_t m_EditorUiTargetCreations = 0;
@@ -1111,16 +1276,17 @@ namespace
 		bool m_ValidateSceneHdr = false;
 		bool m_ValidateToneMapping = false;
 		bool m_ValidateEditorUiUnorm = false;
+		bool m_ValidateLocalLights = false;
 		bool m_ScenePrepared = false;
 	};
 
 	class GpuValidationApplication final : public PulseForge::Application
 	{
 	public:
-		GpuValidationApplication(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm)
+		GpuValidationApplication(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm, bool ValidateLocalLights)
 			: Application(PulseForge::RendererAPI::Vulkan)
 		{
-			auto Layer = std::make_unique<GpuValidationLayer>(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm);
+			auto Layer = std::make_unique<GpuValidationLayer>(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm, ValidateLocalLights);
 			m_Layer = Layer.get();
 			PushLayer(std::move(Layer));
 		}
@@ -1145,7 +1311,8 @@ int main(int ArgumentCount, char** Arguments)
 		const bool ValidateSceneHdr = Mode == "--scene-hdr";
 		const bool ValidateToneMapping = Mode == "--scene-tonemap";
 		const bool ValidateEditorUiUnorm = Mode == "--editor-ui-unorm";
-		GpuValidationApplication App(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm);
+		const bool ValidateLocalLights = Mode == "--scene-local-lights";
+		GpuValidationApplication App(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm, ValidateLocalLights);
 		return App.RunValidation();
 	}
 	catch (const std::exception& Exception)

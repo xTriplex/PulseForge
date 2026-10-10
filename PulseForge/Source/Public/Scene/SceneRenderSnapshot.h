@@ -48,6 +48,27 @@ namespace PulseForge
 		glm::quat WorldRotation{ 1.0f, 0.0f, 0.0f, 0.0f };
 	};
 
+	struct ScenePointLight
+	{
+		UUID Entity;
+		glm::vec3 WorldPosition{ 0.0f };
+		glm::vec3 Color{ 1.0f };
+		float Intensity = 0.0f;
+		float Range = 1.0f;
+	};
+
+	struct SceneSpotLight
+	{
+		UUID Entity;
+		glm::vec3 WorldPosition{ 0.0f };
+		glm::vec3 WorldDirection{ 0.0f, 0.0f, -1.0f };
+		glm::vec3 Color{ 1.0f };
+		float Intensity = 0.0f;
+		float Range = 1.0f;
+		float InnerConeAngleDegrees = 15.0f;
+		float OuterConeAngleDegrees = 25.0f;
+	};
+
 	struct SceneRenderSnapshot
 	{
 		// Empty when the view is transient editor state rather than an authored scene camera.
@@ -62,6 +83,9 @@ namespace PulseForge
 		bool HasCameraFrustum = false;
 		std::optional<SceneDirectionalLight> DirectionalLight;
 		std::optional<SceneEnvironmentLight> EnvironmentLight;
+		// Both vectors inherit deterministic UUID ordering from Scene::GetEntities().
+		std::vector<ScenePointLight> PointLights;
+		std::vector<SceneSpotLight> SpotLights;
 		// Scene::GetEntities returns UUID-sorted entities, so snapshot order is deterministic.
 		std::vector<SceneMeshInstance> Meshes;
 	};
@@ -77,6 +101,7 @@ namespace PulseForge
 		InvalidDirectionalLightTransform,
 		MultipleDirectionalLights,
 		InvalidEnvironmentTransform,
+		InvalidLocalLightTransform,
 		MultipleEnvironmentLights,
 		MissingPrimaryCamera,
 		MultiplePrimaryCameras,

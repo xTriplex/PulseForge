@@ -142,6 +142,50 @@ namespace PulseForge
 						Current.GetUUID(), Environment.HdrImage, Environment.Intensity, *Rotation };
 				}
 
+				const auto PointLight = Current.GetPointLight();
+				if (!PointLight)
+					return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::SceneOperationFailed,
+						Current.GetUUID(), PointLight.error().Message));
+				if (PointLight->has_value())
+				{
+					const auto& Light = PointLight->value();
+					if (auto Validation = Light.Validate(); !Validation)
+						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::SceneOperationFailed,
+							Current.GetUUID(), Validation.error()));
+					const auto World = Current.GetWorldMatrix();
+					if (!World || !IsFinite(*World) || !std::isfinite((*World)[3].x) ||
+						!std::isfinite((*World)[3].y) || !std::isfinite((*World)[3].z))
+						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidLocalLightTransform,
+							Current.GetUUID(), "Point-light world position must be finite"));
+					Snapshot.PointLights.push_back({ Current.GetUUID(), glm::vec3((*World)[3]), Light.Color,
+						Light.Intensity, Light.Range });
+				}
+
+				const auto SpotLight = Current.GetSpotLight();
+				if (!SpotLight)
+					return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::SceneOperationFailed,
+						Current.GetUUID(), SpotLight.error().Message));
+				if (SpotLight->has_value())
+				{
+					const auto& Light = SpotLight->value();
+					if (auto Validation = Light.Validate(); !Validation)
+						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::SceneOperationFailed,
+							Current.GetUUID(), Validation.error()));
+					const auto World = Current.GetWorldMatrix();
+					const auto Rotation = GetWorldRotation(Current);
+					if (!World || !IsFinite(*World) || !Rotation)
+						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidLocalLightTransform,
+							Current.GetUUID(), "Spot-light world transform must be finite with a valid world rotation"));
+					const glm::vec3 Position((*World)[3]);
+					const glm::vec3 Direction = glm::normalize(*Rotation * glm::vec3(0.0f, 0.0f, -1.0f));
+					if (!std::isfinite(Position.x) || !std::isfinite(Position.y) || !std::isfinite(Position.z) ||
+						!std::isfinite(Direction.x) || !std::isfinite(Direction.y) || !std::isfinite(Direction.z))
+						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidLocalLightTransform,
+							Current.GetUUID(), "Spot-light world position or direction is non-finite"));
+					Snapshot.SpotLights.push_back({ Current.GetUUID(), Position, Direction, Light.Color,
+						Light.Intensity, Light.Range, Light.InnerConeAngleDegrees, Light.OuterConeAngleDegrees });
+				}
+
 				const auto MeshRenderer = Current.GetMeshRenderer();
 				if (!MeshRenderer)
 				{

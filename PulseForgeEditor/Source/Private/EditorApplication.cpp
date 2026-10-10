@@ -3732,13 +3732,15 @@ namespace
 				const auto Camera = Entity.GetCamera();
 				const auto DirectionalLight = Entity.GetDirectionalLight();
 				const auto EnvironmentLight = Entity.GetEnvironmentLight();
+				const auto PointLight = Entity.GetPointLight();
+				const auto SpotLight = Entity.GetSpotLight();
 				const auto Mesh = Entity.GetMeshRenderer();
 				const auto Rigidbody = Entity.GetRigidbody();
 				const auto Collider = Entity.GetBoxCollider();
 				const auto AudioSource = Entity.GetAudioSource();
 				const auto AudioListener = Entity.GetAudioListener();
 				const auto Script = Entity.GetScript();
-				if (!Camera || !DirectionalLight || !EnvironmentLight || !Mesh || !Rigidbody || !Collider || !AudioSource || !AudioListener || !Script)
+				if (!Camera || !DirectionalLight || !EnvironmentLight || !PointLight || !SpotLight || !Mesh || !Rigidbody || !Collider || !AudioSource || !AudioListener || !Script)
 					SetError("Could not inspect entity components.");
 
 				if (Camera && !Camera->has_value() &&
@@ -3773,6 +3775,10 @@ namespace
 						ImGui::MenuItem("Import a Radiance HDR image first", nullptr, false, false);
 					ImGui::EndMenu();
 				}
+				if (PointLight && !PointLight->has_value() && ImGui::MenuItem("Point Light"))
+					RecordComponentOperation(Entity.SetPointLight(PulseForge::PointLightComponent{}), "Point light component add failed");
+				if (SpotLight && !SpotLight->has_value() && ImGui::MenuItem("Spot Light"))
+					RecordComponentOperation(Entity.SetSpotLight(PulseForge::SpotLightComponent{}), "Spot light component add failed");
 				if (Rigidbody && !Rigidbody->has_value() && ImGui::MenuItem("Rigidbody"))
 					RecordComponentOperation(Entity.SetRigidbody(PulseForge::RigidbodyComponent{}), "Rigidbody component add failed");
 				if (Collider && !Collider->has_value() && ImGui::MenuItem("Box Collider"))
@@ -3853,6 +3859,8 @@ namespace
 		{
 			DrawCameraComponent(Entity);
 			DrawDirectionalLightComponent(Entity);
+			DrawPointLightComponent(Entity);
+			DrawSpotLightComponent(Entity);
 			DrawEnvironmentLightComponent(Entity);
 			DrawMeshRendererComponent(Entity);
 			DrawRigidbodyComponent(Entity);
@@ -3940,6 +3948,80 @@ namespace
 			}
 			if (Changed)
 				RecordComponentOperation(Entity.SetDirectionalLight(Component), "Directional light update failed");
+			m_EditorStyle.EndComponentBody();
+		}
+
+		void DrawPointLightComponent(const PulseForge::Entity& Entity)
+		{
+			const auto Result = Entity.GetPointLight();
+			if (!Result || !Result->has_value())
+				return;
+			PulseForge::PointLightComponent Component = **Result;
+			const bool Expanded = m_EditorStyle.SectionHeader(PulseForgeEditor::EditorIcon::DirectionalLight, "Point Light");
+			ImGui::SameLine();
+			ImGui::SetCursorPosX((std::max)(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 31.0f));
+			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Delete, "Remove", "RemovePointLight",
+				"Remove Point Light component", true))
+			{
+				RecordComponentOperation(Entity.RemovePointLight(), "Point light removal failed");
+				return;
+			}
+			if (!Expanded)
+				return;
+			m_EditorStyle.BeginComponentBody("PointLightComponentBody");
+			bool Changed = false;
+			if (m_EditorStyle.BeginPropertyTable("PointLightProperties"))
+			{
+				if (m_EditorStyle.BeginPropertyRow("Linear Color"))
+					Changed |= ImGui::DragFloat3("##PointLightColor", &Component.Color.x, 0.01f, 0.0f, 1000.0f, "%.3f");
+				if (m_EditorStyle.BeginPropertyRow("Intensity (unitless)"))
+					Changed |= ImGui::DragFloat("##PointLightIntensity", &Component.Intensity, 0.1f, 0.0f, 1000000.0f, "%.2f");
+				if (m_EditorStyle.BeginPropertyRow("Range"))
+					Changed |= ImGui::DragFloat("##PointLightRange", &Component.Range, 0.05f, 0.01f, 10000.0f, "%.2f units");
+				m_EditorStyle.EndPropertyTable();
+			}
+			if (Changed)
+				RecordComponentOperation(Entity.SetPointLight(Component), "Point light update failed");
+			m_EditorStyle.EndComponentBody();
+		}
+
+		void DrawSpotLightComponent(const PulseForge::Entity& Entity)
+		{
+			const auto Result = Entity.GetSpotLight();
+			if (!Result || !Result->has_value())
+				return;
+			PulseForge::SpotLightComponent Component = **Result;
+			const bool Expanded = m_EditorStyle.SectionHeader(PulseForgeEditor::EditorIcon::DirectionalLight, "Spot Light");
+			ImGui::SameLine();
+			ImGui::SetCursorPosX((std::max)(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 31.0f));
+			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveSpotLight",
+				"Remove Spot Light component", true))
+			{
+				RecordComponentOperation(Entity.RemoveSpotLight(), "Spot light removal failed");
+				return;
+			}
+			if (!Expanded)
+				return;
+			m_EditorStyle.BeginComponentBody("SpotLightComponentBody");
+			bool Changed = false;
+			if (m_EditorStyle.BeginPropertyTable("SpotLightProperties"))
+			{
+				if (m_EditorStyle.BeginPropertyRow("Linear Color"))
+					Changed |= ImGui::DragFloat3("##SpotLightColor", &Component.Color.x, 0.01f, 0.0f, 1000.0f, "%.3f");
+				if (m_EditorStyle.BeginPropertyRow("Intensity (unitless)"))
+					Changed |= ImGui::DragFloat("##SpotLightIntensity", &Component.Intensity, 0.1f, 0.0f, 1000000.0f, "%.2f");
+				if (m_EditorStyle.BeginPropertyRow("Range"))
+					Changed |= ImGui::DragFloat("##SpotLightRange", &Component.Range, 0.05f, 0.01f, 10000.0f, "%.2f units");
+				if (m_EditorStyle.BeginPropertyRow("Inner cone half-angle"))
+					Changed |= ImGui::DragFloat("##SpotLightInner", &Component.InnerConeAngleDegrees, 0.25f, 0.5f,
+						Component.OuterConeAngleDegrees - 0.1f, "%.1f deg");
+				if (m_EditorStyle.BeginPropertyRow("Outer cone half-angle"))
+					Changed |= ImGui::DragFloat("##SpotLightOuter", &Component.OuterConeAngleDegrees, 0.25f,
+						Component.InnerConeAngleDegrees + 0.1f, 89.5f, "%.1f deg");
+				m_EditorStyle.EndPropertyTable();
+			}
+			if (Changed)
+				RecordComponentOperation(Entity.SetSpotLight(Component), "Spot light update failed");
 			m_EditorStyle.EndComponentBody();
 		}
 

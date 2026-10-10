@@ -5,6 +5,8 @@
 #include "Scene/Components/MeshRendererComponent.h"
 #include "Scene/Components/DirectionalLightComponent.h"
 #include "Scene/Components/EnvironmentLightComponent.h"
+#include "Scene/Components/PointLightComponent.h"
+#include "Scene/Components/SpotLightComponent.h"
 #include "Scene/Components/ScriptComponent.h"
 
 #include <entt/entt.hpp>
@@ -243,13 +245,15 @@ namespace PulseForge
 		const auto Camera = Source.GetCamera();
 		const auto DirectionalLight = Source.GetDirectionalLight();
 		const auto EnvironmentLight = Source.GetEnvironmentLight();
+		const auto PointLight = Source.GetPointLight();
+		const auto SpotLight = Source.GetSpotLight();
 		const auto MeshRenderer = Source.GetMeshRenderer();
 		const auto Rigidbody = Source.GetRigidbody();
 		const auto BoxCollider = Source.GetBoxCollider();
 		const auto AudioSource = Source.GetAudioSource();
 		const auto AudioListener = Source.GetAudioListener();
 		const auto Script = Source.GetScript();
-		if (!Tag || !Transform || !Camera || !DirectionalLight || !EnvironmentLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
+		if (!Tag || !Transform || !Camera || !DirectionalLight || !EnvironmentLight || !PointLight || !SpotLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
 			!AudioSource || !AudioListener || !Script)
 			return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure, "Could not read source entity components for duplication"));
 
@@ -286,6 +290,22 @@ namespace PulseForge
 			{
 				(void)DestroyEntity(*Duplicated);
 				return std::unexpected(EnvironmentResult.error());
+			}
+		}
+		if (PointLight->has_value())
+		{
+			if (auto LightResult = Duplicated->SetPointLight(PointLight->value()); !LightResult)
+			{
+				(void)DestroyEntity(*Duplicated);
+				return std::unexpected(LightResult.error());
+			}
+		}
+		if (SpotLight->has_value())
+		{
+			if (auto LightResult = Duplicated->SetSpotLight(SpotLight->value()); !LightResult)
+			{
+				(void)DestroyEntity(*Duplicated);
+				return std::unexpected(LightResult.error());
 			}
 		}
 		if (MeshRenderer->has_value())
@@ -641,6 +661,92 @@ namespace PulseForge
 			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent,
 				"Entity does not have an environment light component"));
 		Storage->Registry.remove<EnvironmentLightComponent>(*Native);
+		return {};
+	}
+
+	std::expected<std::optional<PointLightComponent>, SceneError> Entity::GetPointLight() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read the point light of an invalid entity"));
+		if (!Storage->Registry.all_of<PointLightComponent>(*Native))
+			return std::optional<PointLightComponent>{};
+		return std::optional<PointLightComponent>{ Storage->Registry.get<PointLightComponent>(*Native) };
+	}
+
+	std::expected<void, SceneError> Entity::SetPointLight(const PointLightComponent& Light) const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot set a point light on an invalid entity"));
+		if (auto Validation = Light.Validate(); !Validation)
+			return std::unexpected(SceneError{ SceneErrorCode::InvalidPointLight, Validation.error() });
+		try
+		{
+			Storage->Registry.emplace_or_replace<PointLightComponent>(*Native, Light);
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{ SceneErrorCode::StorageFailure,
+				std::string("Could not set point light component: ") + Exception.what() });
+		}
+	}
+
+	std::expected<void, SceneError> Entity::RemovePointLight() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove a point light from an invalid entity"));
+		if (!Storage->Registry.all_of<PointLightComponent>(*Native))
+			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have a point light component"));
+		Storage->Registry.remove<PointLightComponent>(*Native);
+		return {};
+	}
+
+	std::expected<std::optional<SpotLightComponent>, SceneError> Entity::GetSpotLight() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read the spot light of an invalid entity"));
+		if (!Storage->Registry.all_of<SpotLightComponent>(*Native))
+			return std::optional<SpotLightComponent>{};
+		return std::optional<SpotLightComponent>{ Storage->Registry.get<SpotLightComponent>(*Native) };
+	}
+
+	std::expected<void, SceneError> Entity::SetSpotLight(const SpotLightComponent& Light) const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot set a spot light on an invalid entity"));
+		if (auto Validation = Light.Validate(); !Validation)
+			return std::unexpected(SceneError{ SceneErrorCode::InvalidSpotLight, Validation.error() });
+		try
+		{
+			Storage->Registry.emplace_or_replace<SpotLightComponent>(*Native, Light);
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{ SceneErrorCode::StorageFailure,
+				std::string("Could not set spot light component: ") + Exception.what() });
+		}
+	}
+
+	std::expected<void, SceneError> Entity::RemoveSpotLight() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove a spot light from an invalid entity"));
+		if (!Storage->Registry.all_of<SpotLightComponent>(*Native))
+			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity does not have a spot light component"));
+		Storage->Registry.remove<SpotLightComponent>(*Native);
 		return {};
 	}
 

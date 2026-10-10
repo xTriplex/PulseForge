@@ -8,6 +8,7 @@
 #include "Renderer/DirectionalShadowMath.h"
 #include "Renderer/ScreenSpaceAmbientOcclusion.h"
 #include "Renderer/ToneMapping.h"
+#include "Renderer/LocalLighting.h"
 #include "Scene/SceneRenderSnapshot.h"
 
 #include <expected>
@@ -81,6 +82,7 @@ namespace PulseForge
 	class PULSEFORGE_API SceneRenderer final
 	{
 	public:
+		static constexpr size_t MaxLocalLights = MaxLocalLightCount;
 		[[nodiscard]] static std::expected<std::unique_ptr<SceneRenderer>, SceneRendererError> Create(
 			Application& Runtime,
 			const Project& SourceProject,
@@ -286,6 +288,7 @@ namespace PulseForge
 		BufferHandle m_ObjectConstantsBuffer;
 		BufferHandle m_ShadowObjectConstantsBuffer;
 		BufferHandle m_FrameConstantsBuffer;
+		BufferHandle m_LocalLightingConstantsBuffer;
 		BufferHandle m_BackgroundTriangleBuffer;
 		BufferHandle m_AmbientOcclusionParametersBuffer;
 		BufferHandle m_AmbientOcclusionBlurParametersBuffer;
@@ -325,5 +328,6 @@ namespace PulseForge
 		bool m_EnvironmentLightingPending = false;
 		bool m_PreparedEnvironmentReady = false;
 		bool m_LoggedFirstSnapshotPreparation = false;
+		bool m_LoggedLocalLightOverflow = false;
 	};
 }

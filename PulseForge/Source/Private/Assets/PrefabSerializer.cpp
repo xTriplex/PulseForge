@@ -47,13 +47,15 @@ namespace PulseForge
 			const auto Camera = Source.GetCamera();
 			const auto DirectionalLight = Source.GetDirectionalLight();
 			const auto EnvironmentLight = Source.GetEnvironmentLight();
+			const auto PointLight = Source.GetPointLight();
+			const auto SpotLight = Source.GetSpotLight();
 			const auto MeshRenderer = Source.GetMeshRenderer();
 			const auto Rigidbody = Source.GetRigidbody();
 			const auto BoxCollider = Source.GetBoxCollider();
 			const auto AudioSource = Source.GetAudioSource();
 			const auto AudioListener = Source.GetAudioListener();
 			const auto Script = Source.GetScript();
-			if (!Transform || !Camera || !DirectionalLight || !EnvironmentLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
+			if (!Transform || !Camera || !DirectionalLight || !EnvironmentLight || !PointLight || !SpotLight || !MeshRenderer || !Rigidbody || !BoxCollider ||
 				!AudioSource || !AudioListener || !Script)
 				return std::unexpected(MakeError(
 					PrefabErrorCode::SceneOperationFailed,
@@ -73,6 +75,12 @@ namespace PulseForge
 					return std::unexpected(SceneOperationError(Result.error()));
 			if (EnvironmentLight->has_value())
 				if (auto Result = Destination.SetEnvironmentLight(EnvironmentLight->value()); !Result)
+					return std::unexpected(SceneOperationError(Result.error()));
+			if (PointLight->has_value())
+				if (auto Result = Destination.SetPointLight(PointLight->value()); !Result)
+					return std::unexpected(SceneOperationError(Result.error()));
+			if (SpotLight->has_value())
+				if (auto Result = Destination.SetSpotLight(SpotLight->value()); !Result)
 					return std::unexpected(SceneOperationError(Result.error()));
 			if (MeshRenderer->has_value())
 			{
