@@ -7,15 +7,18 @@
 #include "Renderer/RenderTarget.h"
 #include "Renderer/DirectionalShadowMath.h"
 #include "Renderer/ScreenSpaceAmbientOcclusion.h"
+#include "Renderer/ToneMapping.h"
 #include "Scene/SceneRenderSnapshot.h"
 
 #include <expected>
 #include <array>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 namespace PulseForge
 {
@@ -54,6 +57,15 @@ namespace PulseForge
 		uint32_t Height = 0;
 		size_t GeometryDrawCount = 0;
 		bool EnvironmentBackgroundDrawn = false;
+		uint64_t TargetGeneration = 0;
+	};
+
+	struct SceneRenderOutputResult
+	{
+		size_t GeometryDrawCount = 0;
+		uint64_t HdrTargetGeneration = 0;
+		ColorTargetFormat DestinationFormat = ColorTargetFormat::Swapchain;
+		bool ShaderSrgbEncoded = false;
 	};
 
 	struct AmbientOcclusionSettings
@@ -108,6 +120,12 @@ namespace PulseForge
 		[[nodiscard]] std::expected<HdrSceneRenderResult, SceneRendererError> RenderPreparedSceneToHdr(
 			uint32_t Width,
 			uint32_t Height);
+		// Renders once to the persistent HDR target, then tone maps to the active swapchain.
+		[[nodiscard]] std::expected<SceneRenderOutputResult, SceneRendererError> RenderPreparedSceneToOutput();
+		// Renders once to HDR, then tone maps into the supplied SDR offscreen target.
+		[[nodiscard]] std::expected<SceneRenderOutputResult, SceneRendererError> RenderPreparedSceneToOutput(const RenderTarget& Target);
+		[[nodiscard]] bool SetToneMappingSettings(const ToneMappingSettings& Settings) noexcept;
+		[[nodiscard]] const ToneMappingSettings& GetToneMappingSettings() const noexcept { return m_ToneMappingSettings; }
 		[[nodiscard]] bool SetAmbientOcclusionSettings(const AmbientOcclusionSettings& Settings) noexcept;
 		[[nodiscard]] const AmbientOcclusionSettings& GetAmbientOcclusionSettings() const noexcept { return m_AmbientOcclusionSettings; }
 		[[nodiscard]] bool IsEnvironmentLightingPending() const noexcept { return m_EnvironmentLightingPending; }
@@ -124,6 +142,16 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePipeline(ColorTargetFormat ColorFormat);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBackgroundPipeline(ColorTargetFormat ColorFormat);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureHdrSceneTarget(uint32_t Width, uint32_t Height);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureToneMappingResources();
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureToneMappingPipeline(
+			ColorTargetFormat ColorFormat,
+			bool DepthAttachmentEnabled);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureToneMappingBindings(const Texture& HdrTexture, uint64_t Generation);
+		[[nodiscard]] std::expected<size_t, SceneRendererError> ToneMapToOutput(
+			const Texture& HdrTexture,
+			uint64_t Generation,
+			ColorTargetFormat DestinationFormat,
+			bool DepthAttachmentEnabled);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureShadowPipeline(float DepthBias);
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderShadowCascades();
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureAmbientOcclusionResources(uint32_t Width, uint32_t Height);
@@ -205,6 +233,14 @@ namespace PulseForge
 		};
 		static_assert(sizeof(AmbientOcclusionObjectConstants) == 128);
 
+		struct alignas(16) ToneMappingConstants
+		{
+			float ExposureEV = 0.0f;
+			uint32_t EncodeSrgbForUnorm = 0;
+			std::array<uint32_t, 2> Padding{};
+		};
+		static_assert(sizeof(ToneMappingConstants) == 16);
+
 		Application& m_Runtime;
 		const Project& m_Project;
 		std::unique_ptr<MeshAssetCache> m_MeshAssetCache;
@@ -222,11 +258,14 @@ namespace PulseForge
 		ShaderHandle m_AmbientOcclusionFragmentShader;
 		ShaderHandle m_AmbientOcclusionBlurVertexShader;
 		ShaderHandle m_AmbientOcclusionBlurFragmentShader;
+		ShaderHandle m_ToneMappingVertexShader;
+		ShaderHandle m_ToneMappingFragmentShader;
 		SamplerHandle m_Sampler;
 		SamplerHandle m_EnvironmentSampler;
 		SamplerHandle m_ShadowSampler;
 		SamplerHandle m_AmbientOcclusionPointSampler;
 		SamplerHandle m_AmbientOcclusionLinearSampler;
+		SamplerHandle m_ToneMappingSampler;
 		BindingLayoutHandle m_BindingLayout;
 		BindingLayoutHandle m_ShadowBindingLayout;
 		BindingLayoutHandle m_ShadowObjectBindingLayout;
@@ -234,6 +273,7 @@ namespace PulseForge
 		BindingLayoutHandle m_AmbientOcclusionEvaluationBindingLayout;
 		BindingLayoutHandle m_AmbientOcclusionBlurBindingLayout;
 		BindingLayoutHandle m_AmbientOcclusionPrepassBindingLayout;
+		BindingLayoutHandle m_ToneMappingBindingLayout;
 		BindingSetHandle m_ShadowBindingSet;
 		BindingSetHandle m_ShadowObjectBindingSet;
 		BindingSetHandle m_AmbientOcclusionFinalBindingSet;
@@ -241,6 +281,7 @@ namespace PulseForge
 		BindingSetHandle m_AmbientOcclusionEvaluationBindingSet;
 		std::array<BindingSetHandle, 2> m_AmbientOcclusionBlurBindingSets;
 		BindingSetHandle m_AmbientOcclusionPrepassBindingSet;
+		BindingSetHandle m_ToneMappingBindingSet;
 		std::unordered_map<int32_t, GraphicsPipelineHandle> m_ShadowPipelines;
 		BufferHandle m_ObjectConstantsBuffer;
 		BufferHandle m_ShadowObjectConstantsBuffer;
@@ -249,6 +290,7 @@ namespace PulseForge
 		BufferHandle m_AmbientOcclusionParametersBuffer;
 		BufferHandle m_AmbientOcclusionBlurParametersBuffer;
 		BufferHandle m_AmbientOcclusionObjectConstantsBuffer;
+		BufferHandle m_ToneMappingConstantsBuffer;
 		BufferHandle m_FallbackMaterialConstantsBuffer;
 		TextureHandle m_FallbackBaseColorTexture;
 		TextureHandle m_FallbackAmbientOcclusionTexture;
@@ -262,6 +304,7 @@ namespace PulseForge
 		std::unordered_map<std::string, BindingSetHandle> m_EnvironmentBindingSets;
 		std::unordered_map<ColorTargetFormat, GraphicsPipelineHandle> m_Pipelines;
 		std::unordered_map<ColorTargetFormat, GraphicsPipelineHandle> m_BackgroundPipelines;
+		std::map<std::pair<ColorTargetFormat, bool>, GraphicsPipelineHandle> m_ToneMappingPipelines;
 		GraphicsPipelineHandle m_AmbientOcclusionPrepassPipeline;
 		GraphicsPipelineHandle m_AmbientOcclusionPipeline;
 		GraphicsPipelineHandle m_AmbientOcclusionBlurPipeline;
@@ -270,6 +313,11 @@ namespace PulseForge
 		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
 		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;
 		AmbientOcclusionSettings m_AmbientOcclusionSettings;
+		ToneMappingSettings m_ToneMappingSettings;
+		ToneMappingConstants m_UploadedToneMappingConstants{};
+		uint64_t m_HdrSceneTargetGeneration = 0;
+		uint64_t m_ToneMappingBindingGeneration = 0;
+		bool m_HasUploadedToneMappingConstants = false;
 		AmbientOcclusionKernel m_AmbientOcclusionKernel;
 		uint32_t m_AmbientOcclusionWidth = 0;
 		uint32_t m_AmbientOcclusionHeight = 0;

@@ -53,6 +53,20 @@ namespace PulseForgeEditor
 			PulseForge::ScissorRect Scissor;
 		};
 
+		struct RegisteredTexture
+		{
+			PulseForge::BindingSetHandle BindingSet;
+			bool IsSrgb = false;
+		};
+
+		struct alignas(16) ColorSpaceConstants
+		{
+			uint32_t OutputIsUnorm = 0;
+			uint32_t TextureIsSrgb = 0;
+			uint32_t Padding[2]{};
+		};
+		static_assert(sizeof(ColorSpaceConstants) == 16);
+
 		[[nodiscard]] std::expected<void, std::string> EnsureBuffers(size_t VertexBytes, size_t IndexBytes);
 
 		PulseForge::Application* m_Runtime = nullptr;
@@ -61,6 +75,7 @@ namespace PulseForgeEditor
 		PulseForge::SamplerHandle m_Sampler;
 		PulseForge::TextureHandle m_FontTexture;
 		PulseForge::BindingLayoutHandle m_BindingLayout;
+		PulseForge::BufferHandle m_ColorSpaceConstantsBuffer;
 		PulseForge::GraphicsPipelineHandle m_Pipeline;
 		PulseForge::BufferHandle m_VertexBuffer;
 		PulseForge::BufferHandle m_IndexBuffer;
@@ -68,10 +83,12 @@ namespace PulseForgeEditor
 		uint64_t m_IndexBufferCapacity = 0;
 		uint64_t m_NextTextureID = 1;
 		uint64_t m_FontTextureID = 0;
-		std::unordered_map<uint64_t, PulseForge::BindingSetHandle> m_TextureBindings;
+		std::unordered_map<uint64_t, RegisteredTexture> m_TextureBindings;
 		std::vector<Vertex> m_Vertices;
 		std::vector<uint32_t> m_Indices;
 		std::vector<DrawBatch> m_Batches;
 		bool m_Initialized = false;
+		ColorSpaceConstants m_UploadedColorSpaceConstants{};
+		bool m_HasUploadedColorSpaceConstants = false;
 	};
 }

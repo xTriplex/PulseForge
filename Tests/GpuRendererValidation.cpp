@@ -51,9 +51,11 @@ namespace
 	class GpuValidationLayer final : public PulseForge::Layer
 	{
 	public:
-		explicit GpuValidationLayer(bool ValidateSceneHdr)
-			: Layer(ValidateSceneHdr ? "SceneRenderer HDR GPU validation" : "RGBA16F GPU validation"),
-			  m_ValidateSceneHdr(ValidateSceneHdr)
+		GpuValidationLayer(bool ValidateSceneHdr, bool ValidateToneMapping)
+			: Layer(ValidateToneMapping ? "HDR tonemapping GPU validation" :
+				ValidateSceneHdr ? "SceneRenderer HDR GPU validation" : "RGBA16F GPU validation"),
+			  m_ValidateSceneHdr(ValidateSceneHdr),
+			  m_ValidateToneMapping(ValidateToneMapping)
 		{
 		}
 
@@ -63,7 +65,7 @@ namespace
 			try
 			{
 				InitializeResources();
-				if (m_ValidateSceneHdr)
+				if (m_ValidateSceneHdr || m_ValidateToneMapping)
 					InitializeSceneResources();
 				PF_INFO("RGBA16F GPU validation resources initialized");
 			}
@@ -75,6 +77,60 @@ namespace
 
 		void OnUpdate(PulseForge::Timestep) override
 		{
+			if (m_ValidateToneMapping)
+			{
+				if (m_ToneMappingFrame >= 10)
+				{
+					PF_INFO("GPU_VALIDATION_RESULT=PASS; HDR scene tone mapping covered swapchain, sRGB and UNORM targets, exposure, resize, reuse, and scene variants");
+					PulseForge::Application::Get().RequestClose();
+					return;
+				}
+				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(60))
+				{
+					Fail("Timed out preparing or rendering tone-mapped scene outputs");
+					return;
+				}
+				m_ScenePrepared = false;
+				const bool Offscreen = m_ToneMappingFrame >= 2;
+				uint32_t Width = 0;
+				uint32_t Height = 0;
+				if (Offscreen)
+				{
+					Width = m_ToneMappingFrame >= 4 ? 96u : 64u;
+					Height = 64;
+				}
+				else
+				{
+					const auto Extent = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
+					Width = Extent.first;
+					Height = Extent.second;
+				}
+				if (Width == 0 || Height == 0)
+					return;
+				PulseForge::Scene* SceneToPrepare = &m_Scene;
+				if (m_ToneMappingFrame == 6) SceneToPrepare = &m_EnvironmentOnlyScene;
+				if (m_ToneMappingFrame == 7) SceneToPrepare = &m_GeometryOnlyScene;
+				if (m_ToneMappingFrame == 8) SceneToPrepare = &m_EmptyScene;
+				if (m_ToneMappingFrame == 9) SceneToPrepare = &m_DirectionalOnlyScene;
+				const float AspectRatio = static_cast<float>(Width) / static_cast<float>(Height);
+				const auto Prepared = m_SceneRenderer->PrepareScene(*SceneToPrepare, AspectRatio);
+				if (!Prepared)
+				{
+					Fail("Could not prepare the scene for tone mapping: " + Prepared.error().Message);
+					return;
+				}
+				const bool HasEnvironment = m_ToneMappingFrame < 7;
+				if (HasEnvironment && m_SceneRenderer->IsEnvironmentLightingPending())
+					return;
+				if (HasEnvironment && !m_SceneRenderer->HasPreparedEnvironmentLighting())
+				{
+					Fail("Tone-mapping scenario did not prepare its environment lighting");
+					return;
+				}
+				m_ScenePrepared = true;
+				return;
+			}
+
 			if (m_ValidateSceneHdr)
 			{
 				if (m_SceneCompletedFrames >= 4 && m_ScenarioIndex >= 4)
@@ -133,6 +189,11 @@ namespace
 
 		void OnRender() override
 		{
+			if (m_ValidateToneMapping)
+			{
+				RenderToneMappingFrame();
+				return;
+			}
 			if (m_ValidateSceneHdr)
 			{
 				RenderSceneHdrFrame();
@@ -187,6 +248,7 @@ namespace
 		void OnDetach() override
 		{
 			m_SamplingBindingSet.reset();
+			m_SdrTarget.reset();
 			m_SceneRenderer.reset();
 			m_Project.reset();
 			m_SamplingPipeline.reset();
@@ -199,7 +261,8 @@ namespace
 
 		[[nodiscard]] bool Succeeded() const noexcept
 		{
-			return m_Succeeded && (m_ValidateSceneHdr ? m_SceneCompletedFrames == 4 : m_CompletedFrames == 3);
+			return m_Succeeded && (m_ValidateToneMapping ? m_ToneMappingFrame == 10 :
+				m_ValidateSceneHdr ? m_SceneCompletedFrames == 4 && m_ScenarioIndex == 4 : m_CompletedFrames == 3);
 		}
 
 	private:
@@ -488,6 +551,155 @@ namespace
 				Rendered->EnvironmentBackgroundDrawn ? "drawn" : "not present");
 		}
 
+		void EnsureSdrValidationTarget(PulseForge::ColorTargetFormat Format, uint32_t Width, uint32_t Height)
+		{
+			if (m_SdrTarget && m_SdrTarget->GetDescription().Width == Width &&
+				m_SdrTarget->GetDescription().Height == Height && m_SdrTarget->GetDescription().ColorFormat == Format)
+				return;
+			m_SamplingBindingSet.reset();
+			m_BoundOutputTexture = nullptr;
+			PulseForge::RenderTargetDesc Description;
+			Description.Width = Width;
+			Description.Height = Height;
+			Description.ColorFormat = Format;
+			Description.DepthMode = Format == PulseForge::ColorTargetFormat::RGBA8_UNorm
+				? PulseForge::DepthAttachmentMode::None
+				: PulseForge::DepthAttachmentMode::Attachment;
+			Description.DebugName = Format == PulseForge::ColorTargetFormat::RGBA8_Srgb
+				? "Tone-mapping validation sRGB output"
+				: "Tone-mapping validation UNORM output";
+			auto Target = PulseForge::Application::Get().CreateRenderTarget(Description);
+			if (!Target)
+				throw std::runtime_error("Could not create SDR validation target: " + Target.error().Message);
+			m_SdrTarget = std::move(*Target);
+		}
+
+		void RenderToneMappingFrame()
+		{
+			if (!m_Succeeded || !m_ScenePrepared || m_ToneMappingFrame >= 10)
+				return;
+
+			PulseForge::Application& App = PulseForge::Application::Get();
+			const bool DirectToSwapchain = m_ToneMappingFrame < 2;
+			const bool UseUnormTarget = m_ToneMappingFrame == 5;
+			const uint32_t Width = DirectToSwapchain ? App.GetWindow().GetFramebufferSize().first :
+				(m_ToneMappingFrame >= 4 ? 96u : 64u);
+			const uint32_t Height = DirectToSwapchain ? App.GetWindow().GetFramebufferSize().second : 64u;
+			if (Width == 0 || Height == 0)
+				return;
+			const std::array<float, 10> Exposures = { 0.0f, 1.0f, -2.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+			if (!m_SceneRenderer->SetToneMappingSettings({ Exposures[m_ToneMappingFrame] }))
+			{
+				Fail("SceneRenderer rejected a valid GPU-validation exposure setting");
+				return;
+			}
+
+			PulseForge::SceneRenderOutputResult Output;
+			const PulseForge::Texture* OutputTexture = nullptr;
+			if (DirectToSwapchain)
+			{
+				auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput();
+				if (!Rendered)
+				{
+					Fail("SceneRenderer swapchain tonemapping failed: " + Rendered.error().Message);
+					return;
+				}
+				Output = *Rendered;
+				if (Output.DestinationFormat != PulseForge::ColorTargetFormat::Swapchain ||
+					Output.ShaderSrgbEncoded != (App.GetOutputColorEncoding() == PulseForge::OutputColorEncoding::UnormAttachment))
+				{
+					Fail("Swapchain tone-mapping output encoding did not match the active attachment");
+					return;
+				}
+			}
+			else
+			{
+				const PulseForge::ColorTargetFormat Format = UseUnormTarget
+					? PulseForge::ColorTargetFormat::RGBA8_UNorm : PulseForge::ColorTargetFormat::RGBA8_Srgb;
+				EnsureSdrValidationTarget(Format, Width, Height);
+				auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_SdrTarget);
+				if (!Rendered)
+				{
+					Fail("SceneRenderer offscreen tonemapping failed: " + Rendered.error().Message);
+					return;
+				}
+				Output = *Rendered;
+				OutputTexture = m_SdrTarget->GetColorTexture();
+				const PulseForge::TextureFormat ExpectedFormat = UseUnormTarget
+					? PulseForge::TextureFormat::RGBA8_UNorm : PulseForge::TextureFormat::RGBA8_Srgb;
+				if (!OutputTexture || Output.DestinationFormat != Format ||
+					Output.ShaderSrgbEncoded != UseUnormTarget ||
+					m_SdrTarget->GetDescription().DepthMode != (UseUnormTarget
+						? PulseForge::DepthAttachmentMode::None
+						: PulseForge::DepthAttachmentMode::Attachment) ||
+					OutputTexture->GetDescription().Format != ExpectedFormat ||
+					OutputTexture->GetDescription().Width != Width || OutputTexture->GetDescription().Height != Height)
+				{
+					Fail("Tone-mapped SDR target format, extent, or transfer-function decision was incorrect");
+					return;
+				}
+				if (Output.GeometryDrawCount != ((m_ToneMappingFrame == 6 || m_ToneMappingFrame == 8) ? 0u : 3u))
+				{
+					Fail("Tone-mapping scene variant submitted an unexpected indexed geometry count");
+					return;
+				}
+				if (m_BoundOutputTexture != OutputTexture)
+				{
+					m_SamplingBindingSet.reset();
+					PulseForge::BindingSetDesc Description;
+					Description.Layout = m_BindingLayout;
+					Description.Textures.push_back({ 0, *OutputTexture, PulseForge::BindingResourceType::Texture2D });
+					Description.Samplers.push_back({ 0, *m_Sampler });
+					auto Set = App.CreateBindingSet(Description);
+					if (!Set)
+					{
+						Fail("Could not bind tone-mapped SDR output for validation sampling: " + Set.error().Message);
+						return;
+					}
+					m_SamplingBindingSet = std::move(*Set);
+					m_BoundOutputTexture = OutputTexture;
+				}
+				const std::array<const PulseForge::BindingSet*, 1> Sets = { m_SamplingBindingSet.get() };
+				if (const auto Draw = App.Draw(*m_SamplingPipeline, *m_VertexBuffer, { 3, 1, 0, 0 }, Sets); !Draw)
+				{
+					Fail("Could not sample tone-mapped SDR output: " + Draw.error().Message);
+					return;
+				}
+			}
+
+			if (m_ToneMappingFrame == 0)
+				m_SwapchainHdrGeneration = Output.HdrTargetGeneration;
+			else if (m_ToneMappingFrame == 1 && Output.HdrTargetGeneration != m_SwapchainHdrGeneration)
+			{
+				Fail("Unchanged swapchain extent recreated the HDR scene target");
+				return;
+			}
+			if (m_ToneMappingFrame == 2)
+				m_SrgbHdrGeneration = Output.HdrTargetGeneration;
+			else if (m_ToneMappingFrame == 3 && Output.HdrTargetGeneration != m_SrgbHdrGeneration)
+			{
+				Fail("Exposure changes recreated the unchanged HDR target");
+				return;
+			}
+			if (m_ToneMappingFrame == 4 && Output.HdrTargetGeneration == m_SrgbHdrGeneration)
+			{
+				Fail("HDR target generation did not change after the 64x64 to 96x64 resize");
+				return;
+			}
+			if (m_ToneMappingFrame == 4)
+				m_ResizedHdrGeneration = Output.HdrTargetGeneration;
+			else if (m_ToneMappingFrame >= 5 && Output.HdrTargetGeneration != m_ResizedHdrGeneration)
+			{
+				Fail("Changing output format or scene scenario recreated the same-size HDR target");
+				return;
+			}
+			PF_INFO("Tonemapping validation frame {0}: {1}, EV {2}, {3}x{4}, HDR generation {5}, shader sRGB encode {6}",
+				m_ToneMappingFrame,
+				DirectToSwapchain ? "swapchain" : UseUnormTarget ? "RGBA8_UNorm" : "RGBA8_Srgb",
+				Exposures[m_ToneMappingFrame], Width, Height, Output.HdrTargetGeneration, Output.ShaderSrgbEncoded);
+			++m_ToneMappingFrame;
+		}
+
 		PulseForge::Scene& GetScenarioScene(size_t Index)
 		{
 			switch (Index)
@@ -579,6 +791,7 @@ namespace
 		PulseForge::BindingSetHandle m_SamplingBindingSet;
 		PulseForge::GraphicsPipelineHandle m_ColorPipeline;
 		PulseForge::GraphicsPipelineHandle m_SamplingPipeline;
+		PulseForge::RenderTargetHandle m_SdrTarget;
 		std::optional<PulseForge::Project> m_Project;
 		PulseForge::Scene m_Scene;
 		PulseForge::Scene m_EmptyScene;
@@ -589,23 +802,29 @@ namespace
 		const PulseForge::Texture* m_FirstHdrTexture = nullptr;
 		const PulseForge::Texture* m_ResizedHdrTexture = nullptr;
 		const PulseForge::Texture* m_BoundHdrTexture = nullptr;
+		const PulseForge::Texture* m_BoundOutputTexture = nullptr;
 		std::chrono::steady_clock::time_point m_StartedAt{};
 		uint32_t m_CompletedFrames = 0;
 		uint32_t m_SceneCompletedFrames = 0;
+		uint32_t m_ToneMappingFrame = 0;
 		size_t m_ScenarioIndex = 0;
+		uint64_t m_SwapchainHdrGeneration = 0;
+		uint64_t m_SrgbHdrGeneration = 0;
+		uint64_t m_ResizedHdrGeneration = 0;
 		const std::array<const char*, 4> ScenarioNames = { "empty", "environment-only", "geometry-only", "directional-only" };
 		bool m_Succeeded = true;
 		bool m_ValidateSceneHdr = false;
+		bool m_ValidateToneMapping = false;
 		bool m_ScenePrepared = false;
 	};
 
 	class GpuValidationApplication final : public PulseForge::Application
 	{
 	public:
-		explicit GpuValidationApplication(bool ValidateSceneHdr)
+		GpuValidationApplication(bool ValidateSceneHdr, bool ValidateToneMapping)
 			: Application(PulseForge::RendererAPI::Vulkan)
 		{
-			auto Layer = std::make_unique<GpuValidationLayer>(ValidateSceneHdr);
+			auto Layer = std::make_unique<GpuValidationLayer>(ValidateSceneHdr, ValidateToneMapping);
 			m_Layer = Layer.get();
 			PushLayer(std::move(Layer));
 		}
@@ -626,8 +845,10 @@ int main(int ArgumentCount, char** Arguments)
 	PulseForge::Log::Init();
 	try
 	{
-		const bool ValidateSceneHdr = ArgumentCount > 1 && std::string_view(Arguments[1]) == "--scene-hdr";
-		GpuValidationApplication App(ValidateSceneHdr);
+		const std::string_view Mode = ArgumentCount > 1 ? std::string_view(Arguments[1]) : std::string_view{};
+		const bool ValidateSceneHdr = Mode == "--scene-hdr";
+		const bool ValidateToneMapping = Mode == "--scene-tonemap";
+		GpuValidationApplication App(ValidateSceneHdr, ValidateToneMapping);
 		return App.RunValidation();
 	}
 	catch (const std::exception& Exception)

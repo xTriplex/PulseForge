@@ -98,8 +98,8 @@ namespace PulseForge
 			constexpr uint32_t UndefinedFormat = static_cast<uint32_t>(vk::Format::eUndefined);
 			constexpr std::array PreferredFormats = {
 				vk::Format::eB8G8R8A8Srgb,
-				vk::Format::eB8G8R8A8Unorm,
 				vk::Format::eR8G8B8A8Srgb,
+				vk::Format::eB8G8R8A8Unorm,
 				vk::Format::eR8G8B8A8Unorm
 			};
 

@@ -1,5 +1,6 @@
 #include "Editor/EditorImGuiRenderer.h"
 #include "Editor/ImGuiRendererMath.h"
+#include "Editor/EditorStyle.h"
 
 #include "Core/Application.h"
 
@@ -87,7 +88,8 @@ namespace PulseForgeEditor
 			LayoutDescription.Visibility = PulseForge::ShaderVisibility::Fragment;
 			LayoutDescription.Items = {
 				{ PulseForge::BindingResourceType::Texture2D, 0 },
-				{ PulseForge::BindingResourceType::Sampler, 0 }
+				{ PulseForge::BindingResourceType::Sampler, 0 },
+				{ PulseForge::BindingResourceType::ConstantBuffer, 0 }
 			};
 			LayoutDescription.DebugName = "PulseForge editor ImGui texture";
 			auto Layout = Runtime.CreateBindingLayout(LayoutDescription);
@@ -105,6 +107,15 @@ namespace PulseForgeEditor
 			if (!Sampler)
 				return std::unexpected("Could not create editor sampler: " + Sampler.error().Message);
 			m_Sampler = std::move(*Sampler);
+			PulseForge::BufferDesc ColorSpaceBufferDescription;
+			ColorSpaceBufferDescription.ByteSize = sizeof(ColorSpaceConstants);
+			ColorSpaceBufferDescription.Usage = PulseForge::BufferUsage::Constant;
+			ColorSpaceBufferDescription.DebugName = "PulseForge editor texture color-space constants";
+			auto ColorSpaceBuffer = Runtime.CreateBuffer(ColorSpaceBufferDescription,
+				std::as_bytes(std::span(&m_UploadedColorSpaceConstants, 1)));
+			if (!ColorSpaceBuffer)
+				return std::unexpected("Could not create editor color-space constants: " + ColorSpaceBuffer.error().Message);
+			m_ColorSpaceConstantsBuffer = std::move(*ColorSpaceBuffer);
 
 			PulseForge::GraphicsPipelineDesc PipelineDescription;
 			PipelineDescription.VertexShader = m_VertexShader;
@@ -179,12 +190,14 @@ namespace PulseForgeEditor
 		Description.Layout = m_BindingLayout;
 		Description.Textures.push_back({ 0, std::cref(Texture) });
 		Description.Samplers.push_back({ 0, std::cref(*m_Sampler) });
+		Description.Buffers.push_back({ 0, std::cref(*m_ColorSpaceConstantsBuffer) });
 		auto Binding = m_Runtime->CreateBindingSet(Description);
 		if (!Binding)
 			return std::unexpected("Could not create editor texture binding: " + Binding.error().Message);
 
 		const uint64_t TextureID = m_NextTextureID++;
-		m_TextureBindings.emplace(TextureID, std::move(*Binding));
+		m_TextureBindings.emplace(TextureID, RegisteredTexture{
+			std::move(*Binding), Texture.GetDescription().Format == PulseForge::TextureFormat::RGBA8_Srgb });
 		return TextureID;
 	}
 
@@ -381,7 +394,23 @@ namespace PulseForgeEditor
 			const auto Texture = m_TextureBindings.find(Batch.TextureID);
 			if (Texture == m_TextureBindings.end())
 				return std::unexpected("An editor texture was released before its ImGui draw command was submitted");
-			const std::array<const PulseForge::BindingSet*, 1> Bindings = { Texture->second.get() };
+			const ColorSpaceConstants Constants{
+				m_Runtime->GetOutputColorEncoding() == PulseForge::OutputColorEncoding::UnormAttachment ? 1u : 0u,
+				ShouldEncodeSrgbTextureForImGui(Texture->second.IsSrgb, m_Runtime->GetOutputColorEncoding()) ? 1u : 0u,
+				{}
+			};
+			if (!m_HasUploadedColorSpaceConstants ||
+				Constants.OutputIsUnorm != m_UploadedColorSpaceConstants.OutputIsUnorm ||
+				Constants.TextureIsSrgb != m_UploadedColorSpaceConstants.TextureIsSrgb)
+			{
+				const auto Update = m_Runtime->WriteBuffer(*m_ColorSpaceConstantsBuffer, 0,
+					std::as_bytes(std::span(&Constants, 1)));
+				if (!Update)
+					return std::unexpected("Could not update editor color-space constants: " + Update.error().Message);
+				m_UploadedColorSpaceConstants = Constants;
+				m_HasUploadedColorSpaceConstants = true;
+			}
+			const std::array<const PulseForge::BindingSet*, 1> Bindings = { Texture->second.BindingSet.get() };
 			PulseForge::DrawIndexedArguments Arguments;
 			Arguments.IndexCount = Batch.IndexCount;
 			Arguments.FirstIndex = Batch.FirstIndex;
@@ -403,6 +432,7 @@ namespace PulseForgeEditor
 	{
 		m_TextureBindings.clear();
 		m_Pipeline.reset();
+		m_ColorSpaceConstantsBuffer.reset();
 		m_VertexBuffer.reset();
 		m_IndexBuffer.reset();
 		m_FontTexture.reset();
@@ -419,5 +449,7 @@ namespace PulseForgeEditor
 		m_NextTextureID = 1;
 		m_Runtime = nullptr;
 		m_Initialized = false;
+		m_UploadedColorSpaceConstants = {};
+		m_HasUploadedColorSpaceConstants = false;
 	}
 }

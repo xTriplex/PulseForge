@@ -43,6 +43,7 @@
 #include "Renderer/DirectionalShadowMath.h"
 #include "Renderer/EnvironmentLighting.h"
 #include "Renderer/ScreenSpaceAmbientOcclusion.h"
+#include "Renderer/ToneMapping.h"
 #include <glm/geometric.hpp>
 #include "Renderer/Vulkan/VulkanSupport.h"
 
@@ -2026,6 +2027,9 @@ namespace
 			DisplayColor, PulseForge::OutputColorEncoding::UnormAttachment);
 		PF_CHECK(Tests, UnormColor.Red == DisplayColor.Red && UnormColor.Green == DisplayColor.Green &&
 			UnormColor.Blue == DisplayColor.Blue && UnormColor.Alpha == DisplayColor.Alpha);
+		PF_CHECK(Tests, ShouldEncodeSrgbTextureForImGui(true, PulseForge::OutputColorEncoding::UnormAttachment));
+		PF_CHECK(Tests, !ShouldEncodeSrgbTextureForImGui(true, PulseForge::OutputColorEncoding::SrgbAttachment));
+		PF_CHECK(Tests, !ShouldEncodeSrgbTextureForImGui(false, PulseForge::OutputColorEncoding::UnormAttachment));
 
 		std::array<bool, static_cast<size_t>(EditorIcon::Count)> SeenIcons{};
 		for (size_t Index = 0; Index < EditorIconDescriptors.size(); ++Index)
@@ -5832,6 +5836,66 @@ end
 			RawIndexBuffer).has_value());
 	}
 
+	void TestToneMappingMathAndOutputEncoding(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		ToneMappingSettings Settings;
+		PF_CHECK(Tests, Settings.ExposureEV == 0.0f);
+		PF_CHECK(Tests, IsValidToneMappingSettings(Settings));
+		PF_CHECK(Tests, TryUpdateToneMappingSettings(Settings, { -16.0f }));
+		PF_CHECK(Tests, Settings.ExposureEV == -16.0f);
+		PF_CHECK(Tests, TryUpdateToneMappingSettings(Settings, { 16.0f }));
+		PF_CHECK(Tests, TryUpdateToneMappingSettings(Settings, { 0.0f }));
+		PF_CHECK(Tests, TryUpdateToneMappingSettings(Settings, { -2.0f }));
+		PF_CHECK(Tests, TryUpdateToneMappingSettings(Settings, { -1.0f }));
+		PF_CHECK(Tests, TryUpdateToneMappingSettings(Settings, { 1.0f }));
+		PF_CHECK(Tests, TryUpdateToneMappingSettings(Settings, { 2.0f }));
+		for (float Invalid : { std::numeric_limits<float>::quiet_NaN(),
+			std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(), -16.01f, 16.01f })
+		{
+			const ToneMappingSettings Previous = Settings;
+			PF_CHECK(Tests, !TryUpdateToneMappingSettings(Settings, { Invalid }));
+			PF_CHECK(Tests, Settings.ExposureEV == Previous.ExposureEV);
+		}
+
+		const auto Black = ApplyAcesFittedToneMapping({ 0.0f, -1.0f, -10.0f }, 0.0f);
+		PF_CHECK(Tests, Black[0] == 0.0f && Black[1] == 0.0f && Black[2] == 0.0f);
+		const auto NonFinite = ApplyAcesFittedToneMapping({
+			std::numeric_limits<float>::infinity(),
+			-std::numeric_limits<float>::infinity(),
+			std::numeric_limits<float>::quiet_NaN() }, 0.0f);
+		PF_CHECK(Tests, NonFinite[0] == 1.0f && NonFinite[1] == 0.0f && NonFinite[2] == 0.0f);
+		const auto Reference = ApplyAcesFittedToneMapping({ 0.18f, 1.0f, 4.0f }, 0.0f);
+		PF_CHECK(Tests, std::abs(Reference[0] - 0.2669f) < 0.0002f);
+		PF_CHECK(Tests, std::abs(Reference[1] - 0.803797f) < 0.00001f);
+		PF_CHECK(Tests, std::abs(Reference[2] - 0.973417f) < 0.00002f);
+		const auto NegativeExposure = ApplyAcesFittedToneMapping({ 1.0f, 1.0f, 1.0f }, -1.0f);
+		const auto PositiveExposure = ApplyAcesFittedToneMapping({ 1.0f, 1.0f, 1.0f }, 1.0f);
+		PF_CHECK(Tests, NegativeExposure[0] < Reference[1] && PositiveExposure[0] > Reference[1]);
+		PF_CHECK(Tests, PositiveExposure[0] < 1.0f);
+		const auto Large = ApplyAcesFittedToneMapping({ (std::numeric_limits<float>::max)(), 1.0e20f, 65504.0f }, 16.0f);
+		PF_CHECK(Tests, Large[0] == 1.0f && Large[1] == 1.0f && Large[2] == 1.0f);
+		float Previous = -1.0f;
+		for (float Value : { 0.0f, 0.01f, 0.1f, 0.18f, 0.5f, 1.0f, 2.0f, 16.0f, 65504.0f })
+		{
+			const auto Mapped = ApplyAcesFittedToneMapping({ Value, Value, Value }, 0.0f);
+			PF_CHECK(Tests, std::isfinite(Mapped[0]) && Mapped[0] >= 0.0f && Mapped[0] <= 1.0f);
+			PF_CHECK(Tests, Mapped[0] >= Previous);
+			Previous = Mapped[0];
+		}
+		PF_CHECK(Tests, LinearToSrgb(0.0f) == 0.0f);
+		PF_CHECK(Tests, std::abs(LinearToSrgb(0.0031308f) - 0.0404499f) < 1.0e-5f);
+		PF_CHECK(Tests, std::abs(LinearToSrgb(0.04045f) - 0.222205f) < 1.0e-5f);
+		PF_CHECK(Tests, LinearToSrgb(1.0f) == 1.0f);
+		PF_CHECK(Tests, ShouldShaderEncodeSrgb(ColorTargetFormat::RGBA8_UNorm, OutputColorEncoding::SrgbAttachment));
+		PF_CHECK(Tests, !ShouldShaderEncodeSrgb(ColorTargetFormat::RGBA8_Srgb, OutputColorEncoding::UnormAttachment));
+		PF_CHECK(Tests, !ShouldShaderEncodeSrgb(ColorTargetFormat::Swapchain, OutputColorEncoding::SrgbAttachment));
+		PF_CHECK(Tests, ShouldShaderEncodeSrgb(ColorTargetFormat::Swapchain, OutputColorEncoding::UnormAttachment));
+		PF_CHECK(Tests, !IsToneMappingBindingCurrent(0, 0));
+		PF_CHECK(Tests, IsToneMappingBindingCurrent(5, 5));
+		PF_CHECK(Tests, !IsToneMappingBindingCurrent(4, 5));
+	}
+
 	void TestConstantBufferBindingValidation(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -6499,6 +6563,7 @@ int main()
 	TestAudioEngineAndAssetCache(Tests);
 	TestScriptRuntime(Tests);
 	TestGraphicsPipelineAndDrawValidation(Tests);
+	TestToneMappingMathAndOutputEncoding(Tests);
 	TestConstantBufferBindingValidation(Tests);
 	TestTextureAndSamplerValidation(Tests);
 	TestTextureSamplerAndBufferBindingValidation(Tests);

@@ -387,6 +387,63 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Could not create environment background geometry: " + BackgroundBuffer.error().Message));
 		m_BackgroundTriangleBuffer = std::move(*BackgroundBuffer);
 
+		auto ToneMappingVertexBytecode = ReadShaderBytecode(CompiledShaderDirectory / "Tonemapping.vs.spv");
+		if (!ToneMappingVertexBytecode)
+			return std::unexpected(std::move(ToneMappingVertexBytecode.error()));
+		auto ToneMappingFragmentBytecode = ReadShaderBytecode(CompiledShaderDirectory / "Tonemapping.ps.spv");
+		if (!ToneMappingFragmentBytecode)
+			return std::unexpected(std::move(ToneMappingFragmentBytecode.error()));
+		ShaderDesc ToneMappingVertexDescription;
+		ToneMappingVertexDescription.Stage = ShaderStage::Vertex;
+		ToneMappingVertexDescription.EntryPoint = "VSMain";
+		ToneMappingVertexDescription.DebugName = "PulseForge tone mapping vertex shader";
+		auto ToneMappingVertex = m_Runtime.CreateShader(ToneMappingVertexDescription, *ToneMappingVertexBytecode);
+		if (!ToneMappingVertex)
+			return std::unexpected(MakeResourceError("Could not create tone mapping vertex shader: " + ToneMappingVertex.error().Message));
+		m_ToneMappingVertexShader = std::move(*ToneMappingVertex);
+		ShaderDesc ToneMappingFragmentDescription;
+		ToneMappingFragmentDescription.Stage = ShaderStage::Fragment;
+		ToneMappingFragmentDescription.EntryPoint = "PSMain";
+		ToneMappingFragmentDescription.DebugName = "PulseForge tone mapping fragment shader";
+		auto ToneMappingFragment = m_Runtime.CreateShader(ToneMappingFragmentDescription, *ToneMappingFragmentBytecode);
+		if (!ToneMappingFragment)
+			return std::unexpected(MakeResourceError("Could not create tone mapping fragment shader: " + ToneMappingFragment.error().Message));
+		m_ToneMappingFragmentShader = std::move(*ToneMappingFragment);
+
+		BindingLayoutDesc ToneMappingLayoutDescription;
+		ToneMappingLayoutDescription.Visibility = ShaderVisibility::Fragment;
+		ToneMappingLayoutDescription.Items = {
+			{ BindingResourceType::Texture2D, 0 },
+			{ BindingResourceType::Sampler, 0 },
+			{ BindingResourceType::ConstantBuffer, 0 }
+		};
+		ToneMappingLayoutDescription.DebugName = "PulseForge tone mapping input and parameters";
+		auto ToneMappingLayout = m_Runtime.CreateBindingLayout(ToneMappingLayoutDescription);
+		if (!ToneMappingLayout)
+			return std::unexpected(MakeResourceError("Could not create tone mapping binding layout: " + ToneMappingLayout.error().Message));
+		m_ToneMappingBindingLayout = std::move(*ToneMappingLayout);
+
+		SamplerDesc ToneMappingSamplerDescription;
+		ToneMappingSamplerDescription.Minification = SamplerFilter::Linear;
+		ToneMappingSamplerDescription.Magnification = SamplerFilter::Linear;
+		ToneMappingSamplerDescription.AddressU = SamplerAddressMode::ClampToEdge;
+		ToneMappingSamplerDescription.AddressV = SamplerAddressMode::ClampToEdge;
+		ToneMappingSamplerDescription.DebugName = "PulseForge tone mapping HDR sampler";
+		auto ToneMappingSampler = m_Runtime.CreateSampler(ToneMappingSamplerDescription);
+		if (!ToneMappingSampler)
+			return std::unexpected(MakeResourceError("Could not create tone mapping sampler: " + ToneMappingSampler.error().Message));
+		m_ToneMappingSampler = std::move(*ToneMappingSampler);
+
+		BufferDesc ToneMappingConstantsDescription;
+		ToneMappingConstantsDescription.ByteSize = sizeof(ToneMappingConstants);
+		ToneMappingConstantsDescription.Usage = BufferUsage::Constant;
+		ToneMappingConstantsDescription.DebugName = "PulseForge tone mapping constants";
+		auto ToneMappingConstantsBuffer = m_Runtime.CreateBuffer(
+			ToneMappingConstantsDescription, std::as_bytes(std::span(&m_UploadedToneMappingConstants, 1)));
+		if (!ToneMappingConstantsBuffer)
+			return std::unexpected(MakeResourceError("Could not create tone mapping constants: " + ToneMappingConstantsBuffer.error().Message));
+		m_ToneMappingConstantsBuffer = std::move(*ToneMappingConstantsBuffer);
+
 		BindingLayoutDesc BindingLayoutDescription;
 		BindingLayoutDescription.Visibility = ShaderVisibility::AllGraphics;
 		BindingLayoutDescription.Items = {
@@ -1324,7 +1381,13 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("HDR scene target returned incompatible color or depth attachments"));
 		}
 
+		m_ToneMappingBindingSet.reset();
+		m_ToneMappingBindingGeneration = 0;
 		m_HdrSceneTarget = std::move(*Replacement);
+		if (m_HdrSceneTargetGeneration == (std::numeric_limits<uint64_t>::max)())
+			m_HdrSceneTargetGeneration = 1;
+		else
+			++m_HdrSceneTargetGeneration;
 		PF_CORE_INFO("Created/resized persistent RGBA16F HDR scene target to {0}x{1}", Width, Height);
 		return {};
 	}
@@ -1359,8 +1422,169 @@ namespace PulseForge
 			Width,
 			Height,
 			*Rendered,
-			m_PreparedSnapshot->EnvironmentLight.has_value()
+			m_PreparedSnapshot->EnvironmentLight.has_value(),
+			m_HdrSceneTargetGeneration
 		};
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::EnsureToneMappingResources()
+	{
+		if (!m_ToneMappingVertexShader || !m_ToneMappingFragmentShader || !m_ToneMappingBindingLayout ||
+			!m_ToneMappingSampler || !m_ToneMappingConstantsBuffer)
+			return std::unexpected(MakeResourceError("Tone mapping resources are not initialized"));
+		return {};
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::EnsureToneMappingPipeline(
+		ColorTargetFormat ColorFormat,
+		bool DepthAttachmentEnabled)
+	{
+		const auto Key = std::pair{ ColorFormat, DepthAttachmentEnabled };
+		if (m_ToneMappingPipelines.contains(Key))
+			return {};
+		if (auto Resources = EnsureToneMappingResources(); !Resources)
+			return std::unexpected(std::move(Resources.error()));
+
+		GraphicsPipelineDesc Description;
+		Description.VertexShader = m_ToneMappingVertexShader;
+		Description.FragmentShader = m_ToneMappingFragmentShader;
+		Description.BindingLayouts = { m_ToneMappingBindingLayout };
+		Description.VertexLayout.Stride = sizeof(float) * 2;
+		Description.VertexLayout.Attributes = { { VertexSemantic::Position, VertexFormat::Float2, 0 } };
+		Description.ColorFormat = ColorFormat;
+		Description.DepthAttachmentEnabled = DepthAttachmentEnabled;
+		Description.Depth.TestEnabled = false;
+		Description.Depth.WriteEnabled = false;
+		Description.DebugName = "PulseForge fullscreen SDR tone mapping pipeline";
+		auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
+		if (!Pipeline)
+			return std::unexpected(MakeResourceError("Could not create tone mapping pipeline: " + Pipeline.error().Message));
+		m_ToneMappingPipelines.emplace(Key, std::move(*Pipeline));
+		return {};
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::EnsureToneMappingBindings(
+		const Texture& HdrTexture,
+		uint64_t Generation)
+	{
+		if (IsToneMappingBindingCurrent(m_ToneMappingBindingGeneration, Generation) && m_ToneMappingBindingSet)
+			return {};
+		m_ToneMappingBindingSet.reset();
+		m_ToneMappingBindingGeneration = 0;
+		BindingSetDesc Description;
+		Description.Layout = m_ToneMappingBindingLayout;
+		Description.Textures = { { 0, std::cref(HdrTexture), BindingResourceType::Texture2D } };
+		Description.Samplers = { { 0, std::cref(*m_ToneMappingSampler) } };
+		Description.Buffers = { { 0, std::cref(*m_ToneMappingConstantsBuffer) } };
+		auto BindingSet = m_Runtime.CreateBindingSet(Description);
+		if (!BindingSet)
+			return std::unexpected(MakeResourceError("Could not bind HDR scene texture for tone mapping: " + BindingSet.error().Message));
+		m_ToneMappingBindingSet = std::move(*BindingSet);
+		m_ToneMappingBindingGeneration = Generation;
+		return {};
+	}
+
+	std::expected<size_t, SceneRendererError> SceneRenderer::ToneMapToOutput(
+		const Texture& HdrTexture,
+		uint64_t Generation,
+		ColorTargetFormat DestinationFormat,
+		bool DepthAttachmentEnabled)
+	{
+		if (auto Pipeline = EnsureToneMappingPipeline(DestinationFormat, DepthAttachmentEnabled); !Pipeline)
+			return std::unexpected(std::move(Pipeline.error()));
+		if (auto Bindings = EnsureToneMappingBindings(HdrTexture, Generation); !Bindings)
+			return std::unexpected(std::move(Bindings.error()));
+
+		const ToneMappingConstants Constants{
+			m_ToneMappingSettings.ExposureEV,
+			ShouldShaderEncodeSrgb(DestinationFormat, m_Runtime.GetOutputColorEncoding()) ? 1u : 0u,
+			{}
+		};
+		if (!m_HasUploadedToneMappingConstants || Constants.ExposureEV != m_UploadedToneMappingConstants.ExposureEV ||
+			Constants.EncodeSrgbForUnorm != m_UploadedToneMappingConstants.EncodeSrgbForUnorm)
+		{
+			if (const auto Update = m_Runtime.WriteBuffer(*m_ToneMappingConstantsBuffer, 0,
+				std::as_bytes(std::span(&Constants, 1))); !Update)
+				return std::unexpected(MakeDrawError("Could not update tone mapping constants: " + Update.error().Message));
+			m_UploadedToneMappingConstants = Constants;
+			m_HasUploadedToneMappingConstants = true;
+		}
+
+		const std::array<const BindingSet*, 1> BindingSets = { m_ToneMappingBindingSet.get() };
+		const GraphicsResult Draw = m_Runtime.Draw(
+			*m_ToneMappingPipelines.at({ DestinationFormat, DepthAttachmentEnabled }),
+			*m_BackgroundTriangleBuffer,
+			{ 3, 1, 0, 0 },
+			BindingSets);
+		if (!Draw)
+			return std::unexpected(MakeDrawError("Could not draw fullscreen tone mapping pass: " + Draw.error().Message));
+		return size_t{ 1 };
+	}
+
+	std::expected<SceneRenderOutputResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToOutput()
+	{
+		const auto [Width, Height] = m_Runtime.GetWindow().GetFramebufferSize();
+		if (Width == 0 || Height == 0)
+			return SceneRenderOutputResult{};
+		auto Hdr = RenderPreparedSceneToHdr(Width, Height);
+		if (!Hdr)
+			return std::unexpected(std::move(Hdr.error()));
+		if (auto Tonemapped = ToneMapToOutput(*Hdr->ColorTexture, Hdr->TargetGeneration,
+			ColorTargetFormat::Swapchain, true); !Tonemapped)
+			return std::unexpected(std::move(Tonemapped.error()));
+	return SceneRenderOutputResult{
+			Hdr->GeometryDrawCount,
+			Hdr->TargetGeneration,
+			ColorTargetFormat::Swapchain,
+			ShouldShaderEncodeSrgb(ColorTargetFormat::Swapchain, m_Runtime.GetOutputColorEncoding())
+		};
+	}
+
+	std::expected<SceneRenderOutputResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToOutput(const RenderTarget& Target)
+	{
+		const RenderTargetDesc& Description = Target.GetDescription();
+		if (Description.Width == 0 || Description.Height == 0 ||
+			(Description.ColorFormat != ColorTargetFormat::RGBA8_UNorm &&
+			 Description.ColorFormat != ColorTargetFormat::RGBA8_Srgb) || !Target.GetColorTexture())
+			return std::unexpected(MakeResourceError("Tone mapping requires a valid RGBA8_UNorm or RGBA8_Srgb color target"));
+
+		auto Hdr = RenderPreparedSceneToHdr(Description.Width, Description.Height);
+		if (!Hdr)
+			return std::unexpected(std::move(Hdr.error()));
+		if (auto Pipeline = EnsureToneMappingPipeline(
+			Description.ColorFormat, Description.DepthMode != DepthAttachmentMode::None); !Pipeline)
+			return std::unexpected(std::move(Pipeline.error()));
+		if (auto Bindings = EnsureToneMappingBindings(*Hdr->ColorTexture, Hdr->TargetGeneration); !Bindings)
+			return std::unexpected(std::move(Bindings.error()));
+
+		RenderTargetClearValue Clear;
+		Clear.Color = { 0.0f, 0.0f, 0.0f, 1.0f };
+		Clear.Depth = 1.0f;
+		if (const GraphicsResult Begin = m_Runtime.BeginRenderTarget(Target, Clear); !Begin)
+			return std::unexpected(MakeDrawError("Could not begin tone-mapped output target: " + Begin.error().Message));
+		RenderTargetFrameScope Scope(m_Runtime);
+		auto Draw = ToneMapToOutput(*Hdr->ColorTexture, Hdr->TargetGeneration,
+			Description.ColorFormat, Description.DepthMode != DepthAttachmentMode::None);
+		const GraphicsResult End = Scope.End();
+		if (!Draw)
+		{
+			if (!End)
+				PF_CORE_ERROR("Could not close tone-mapped output target after draw failure: {0}", End.error().Message);
+			return std::unexpected(std::move(Draw.error()));
+		}
+		if (!End)
+			return std::unexpected(MakeDrawError("Could not end tone-mapped output target: " + End.error().Message));
+		return SceneRenderOutputResult{
+			Hdr->GeometryDrawCount,
+			Hdr->TargetGeneration,
+			Description.ColorFormat,
+			ShouldShaderEncodeSrgb(Description.ColorFormat, m_Runtime.GetOutputColorEncoding())
+		};
+	}
+
+	bool SceneRenderer::SetToneMappingSettings(const ToneMappingSettings& Settings) noexcept
+	{
+		return TryUpdateToneMappingSettings(m_ToneMappingSettings, Settings);
 	}
 
 	std::expected<size_t, SceneRendererError> SceneRenderer::RenderPreparedScene()

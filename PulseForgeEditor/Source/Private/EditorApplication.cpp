@@ -1965,6 +1965,9 @@ namespace
 					m_EditorStyle.TextMuted(
 						"The OpenGL fallback retains the editor shell; the scene viewport requires Vulkan.");
 #else
+					ImGui::SetNextItemWidth(150.0f);
+					(void)ImGui::DragFloat("Exposure (EV)", &m_ExposureEV, 0.05f, -8.0f, 8.0f, "%.2f EV",
+						ImGuiSliderFlags_AlwaysClamp);
 					const ImVec2 Available = ImGui::GetContentRegionAvail();
 					if (Available.x <= 1.0f || Available.y <= 1.0f)
 					{
@@ -2805,8 +2808,28 @@ namespace
 
 			if (m_SceneRenderer && m_ViewportSceneReady)
 			{
-				if (auto Rendered = m_SceneRenderer->RenderPreparedScene(*m_ViewportTarget); !Rendered)
+				PulseForge::ToneMappingSettings ToneSettings;
+				ToneSettings.ExposureEV = m_ExposureEV;
+				if (!m_SceneRenderer->SetToneMappingSettings(ToneSettings))
+				{
+					SetViewportSceneError("The viewport exposure value is outside the supported range");
+					return;
+				}
+				if (auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_ViewportTarget); !Rendered)
+				{
 					SetViewportSceneError("Scene viewport rendering failed: " + Rendered.error().Message);
+					PulseForge::RenderTargetClearValue Clear;
+					const auto Background = PulseForgeEditor::GetEditorColorValue(
+						PulseForgeEditor::EditorColorToken::ViewportBackground);
+					Clear.Color = { Background.Red, Background.Green, Background.Blue, Background.Alpha };
+					if (const auto Begin = PulseForge::Application::Get().BeginRenderTarget(*m_ViewportTarget, Clear); Begin)
+					{
+						if (const auto End = PulseForge::Application::Get().EndRenderTarget(); !End)
+							SetViewportSceneError("Could not clear the scene viewport after rendering failed: " + End.error().Message);
+					}
+					else
+						SetViewportSceneError("Could not clear the scene viewport after rendering failed: " + Begin.error().Message);
+				}
 				else
 				{
 					ClearViewportSceneError();
@@ -2872,6 +2895,7 @@ namespace
 			CancelGizmoInteraction();
 			ResetEditorViewportCamera();
 			m_SceneRenderer.reset();
+			m_ExposureEV = 0.0f;
 			m_PickingMeshCache.clear();
 			m_PickingMeshErrors.clear();
 			m_ViewportSceneReady = false;
@@ -4821,6 +4845,7 @@ namespace
 		uint64_t m_ViewportTextureID = 0;
 		uint32_t m_ViewportWidth = 0;
 		uint32_t m_ViewportHeight = 0;
+		float m_ExposureEV = 0.0f;
 		int m_PreviousCursorMode = GLFW_CURSOR_NORMAL;
 		float m_LastCursorX = 0.0f;
 		float m_LastCursorY = 0.0f;

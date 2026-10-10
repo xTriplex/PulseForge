@@ -115,6 +115,13 @@ namespace PulseForgeEditor
 		float Alpha;
 	};
 
+	[[nodiscard]] constexpr bool ShouldEncodeSrgbTextureForImGui(
+		bool TextureIsSrgb,
+		PulseForge::OutputColorEncoding OutputEncoding) noexcept
+	{
+		return TextureIsSrgb && OutputEncoding == PulseForge::OutputColorEncoding::UnormAttachment;
+	}
+
 	[[nodiscard]] inline EditorColorValue ConvertEditorColorForOutput(
 		EditorColorValue DisplayColor,
 		PulseForge::OutputColorEncoding Encoding) noexcept

@@ -91,7 +91,7 @@ public:
 	{
 		if (!m_SceneRenderer)
 			return;
-		const auto Rendered = m_SceneRenderer->RenderPreparedScene();
+		const auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput();
 		if (!Rendered)
 		{
 			if (!m_LoggedRenderFailure)
@@ -102,10 +102,10 @@ public:
 			return;
 		}
 		m_LoggedRenderFailure = false;
-		if (*Rendered > 0 && !m_LoggedSceneDraw)
+		if (Rendered->GeometryDrawCount > 0 && !m_LoggedSceneDraw)
 		{
 			m_LoggedSceneDraw = true;
-			PF_INFO("Submitted {0} indexed mesh instance(s) from the prepared scene", *Rendered);
+			PF_INFO("Submitted {0} indexed mesh instance(s) from the prepared scene", Rendered->GeometryDrawCount);
 		}
 	}
 
