@@ -224,6 +224,7 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/Binding.cpp
 	PulseForge/Source/Private/Renderer/Graphics.cpp
 	PulseForge/Source/Private/Renderer/DirectionalShadowMath.cpp
+	PulseForge/Source/Private/Renderer/SpotlightShadowMath.cpp
 	PulseForge/Source/Private/Renderer/ScreenSpaceAmbientOcclusion.cpp
 	PulseForge/Source/Private/Renderer/EnvironmentLighting.cpp
 	PulseForge/Source/Private/Renderer/EnvironmentLightingCache.cpp
@@ -400,7 +401,7 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 	add_custom_command(
 		OUTPUT "${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}"
 		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
-		COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -fvk-b-shift 256 1 -fvk-t-shift 0 1 -fvk-s-shift 128 1 -fvk-b-shift 256 2 -fvk-t-shift 0 2 -fvk-s-shift 128 2 -O3 -WX
+		COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -fvk-b-shift 256 1 -fvk-t-shift 0 1 -fvk-s-shift 128 1 -fvk-b-shift 256 2 -fvk-t-shift 0 2 -fvk-s-shift 128 2 -fvk-t-shift 0 3 -fvk-s-shift 128 3 -O3 -WX
 			-Fo "${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}" "${PULSEFORGE_TRIANGLE_HLSL}"
 		DEPENDS "${PULSEFORGE_TRIANGLE_HLSL}"
 		VERBATIM

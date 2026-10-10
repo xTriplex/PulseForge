@@ -540,6 +540,20 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Could not create directional shadow binding layout: " + ShadowBindingLayout.error().Message));
 		m_ShadowBindingLayout = std::move(*ShadowBindingLayout);
 
+		BindingLayoutDesc SpotShadowBindingLayoutDescription;
+		SpotShadowBindingLayoutDescription.Visibility = ShaderVisibility::Fragment;
+		SpotShadowBindingLayoutDescription.ShaderRegisterSpace = 3;
+		SpotShadowBindingLayoutDescription.Items = {
+			{ BindingResourceType::Texture2D, 0 }, { BindingResourceType::Texture2D, 1 },
+			{ BindingResourceType::Texture2D, 2 }, { BindingResourceType::Texture2D, 3 },
+			{ BindingResourceType::Sampler, 0 }
+		};
+		SpotShadowBindingLayoutDescription.DebugName = "PulseForge spotlight shadow maps (space3)";
+		auto SpotShadowBindingLayout = m_Runtime.CreateBindingLayout(SpotShadowBindingLayoutDescription);
+		if (!SpotShadowBindingLayout)
+			return std::unexpected(MakeResourceError("Could not create spotlight shadow binding layout: " + SpotShadowBindingLayout.error().Message));
+		m_SpotShadowBindingLayout = std::move(*SpotShadowBindingLayout);
+
 		BindingLayoutDesc ShadowObjectLayoutDescription;
 		ShadowObjectLayoutDescription.Visibility = ShaderVisibility::Vertex;
 		ShadowObjectLayoutDescription.Items = { { BindingResourceType::ConstantBuffer, 0 } };
@@ -684,6 +698,17 @@ namespace PulseForge
 		if (!ShadowSet)
 			return std::unexpected(MakeResourceError("Could not create directional shadow bindings: " + ShadowSet.error().Message));
 		m_ShadowBindingSet = std::move(*ShadowSet);
+
+		BindingSetDesc SpotShadowSetDescription;
+		SpotShadowSetDescription.Layout = m_SpotShadowBindingLayout;
+		for (uint32_t ShadowIndex = 0; ShadowIndex < m_SpotShadowTargets.size(); ++ShadowIndex)
+			SpotShadowSetDescription.Textures.push_back({ ShadowIndex,
+				std::cref(*m_ShadowTargets[ShadowIndex]->GetDepthTexture()) });
+		SpotShadowSetDescription.Samplers.push_back({ 0, std::cref(*m_ShadowSampler) });
+		auto SpotShadowSet = m_Runtime.CreateBindingSet(SpotShadowSetDescription);
+		if (!SpotShadowSet)
+			return std::unexpected(MakeResourceError("Could not create safe initial spotlight shadow bindings: " + SpotShadowSet.error().Message));
+		m_SpotShadowBindingSet = std::move(*SpotShadowSet);
 		if (auto Pipelines = EnsureAmbientOcclusionPipelines(); !Pipelines)
 			return std::unexpected(std::move(Pipelines.error()));
 		return {};
@@ -971,7 +996,7 @@ namespace PulseForge
 		PipelineDescription.VertexShader = m_VertexShader;
 		PipelineDescription.FragmentShader = m_FragmentShader;
 		PipelineDescription.BindingLayouts = {
-			m_BindingLayout, m_ShadowBindingLayout, m_AmbientOcclusionFinalBindingLayout };
+			m_BindingLayout, m_ShadowBindingLayout, m_AmbientOcclusionFinalBindingLayout, m_SpotShadowBindingLayout };
 		PipelineDescription.VertexLayout = *m_PipelineVertexLayout;
 		PipelineDescription.ColorFormat = ColorFormat;
 		PipelineDescription.Rasterizer.Cull = CullMode::None;
@@ -1024,11 +1049,227 @@ namespace PulseForge
 		return {};
 	}
 
+	std::expected<void, SceneRendererError> SceneRenderer::EnsureSpotShadowResources()
+	{
+		if (m_SpotShadowTargets.front())
+			return {};
+
+		std::array<RenderTargetHandle, MaxSpotlightShadowMapCount> Targets;
+		for (size_t ShadowIndex = 0; ShadowIndex < Targets.size(); ++ShadowIndex)
+		{
+			RenderTargetDesc Description;
+			Description.Width = SpotlightShadowMapResolution;
+			Description.Height = SpotlightShadowMapResolution;
+			Description.ColorFormat = ColorTargetFormat::None;
+			Description.DepthMode = DepthAttachmentMode::ShaderReadableAttachment;
+			Description.DebugName = "PulseForge spotlight shadow map " + std::to_string(ShadowIndex);
+			auto Target = m_Runtime.CreateRenderTarget(Description);
+			if (!Target)
+				return std::unexpected(MakeResourceError("Could not create spotlight shadow map: " + Target.error().Message));
+			if (!(*Target)->GetDepthTexture() ||
+				(*Target)->GetDepthTexture()->GetDescription().Format != TextureFormat::Depth32Float)
+				return std::unexpected(MakeResourceError("Spotlight shadow target did not provide a shader-readable D32 depth texture"));
+			Targets[ShadowIndex] = std::move(*Target);
+		}
+
+		BindingSetDesc Description;
+		Description.Layout = m_SpotShadowBindingLayout;
+		for (uint32_t ShadowIndex = 0; ShadowIndex < Targets.size(); ++ShadowIndex)
+			Description.Textures.push_back({ ShadowIndex, std::cref(*Targets[ShadowIndex]->GetDepthTexture()) });
+		Description.Samplers.push_back({ 0, std::cref(*m_ShadowSampler) });
+		auto BindingSet = m_Runtime.CreateBindingSet(Description);
+		if (!BindingSet)
+			return std::unexpected(MakeResourceError("Could not create spotlight shadow bindings: " + BindingSet.error().Message));
+
+		m_SpotShadowTargets = std::move(Targets);
+		m_SpotShadowBindingSet = std::move(*BindingSet);
+		if (m_SpotShadowResourceGeneration == (std::numeric_limits<uint64_t>::max)())
+			m_SpotShadowResourceGeneration = 1;
+		else
+			++m_SpotShadowResourceGeneration;
+		PF_CORE_INFO("Created {0} persistent {1}x{1} D32 spotlight shadow maps ({2} MiB depth storage)",
+			MaxSpotlightShadowMapCount, SpotlightShadowMapResolution,
+			(MaxSpotlightShadowMapCount * SpotlightShadowMapResolution * SpotlightShadowMapResolution * sizeof(float)) / (1024 * 1024));
+		return {};
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::PrepareLocalLighting()
+	{
+		m_PreparedLocalLighting = {};
+		m_SelectedLocalLightCount = 0;
+		m_PreparedSpotShadowMatrices.fill(glm::mat4(1.0f));
+		m_PreparedSpotShadowParameters.fill(glm::vec4(0.0f));
+		if (!m_PreparedSnapshot)
+		{
+			m_SpotShadowSlotOwners.fill(std::nullopt);
+			return {};
+		}
+
+		size_t ActiveLightCount = 0;
+		const auto ConsiderLocalLight = [&](const LocalLightRelevance& Relevance, const LocalLightGpuData& Data,
+			UUID Entity, const SceneSpotLight* Spot)
+		{
+			if (Relevance.Intensity <= 0.0f)
+				return;
+			++ActiveLightCount;
+			const SelectedLocalLight Candidate{ Relevance, Data, Entity, Spot };
+			size_t InsertIndex = 0;
+			while (InsertIndex < m_SelectedLocalLightCount && !IsLocalLightMoreRelevant(
+				Candidate.Relevance, m_SelectedLocalLights[InsertIndex].Relevance, m_PreparedSnapshot->CameraWorldPosition))
+				++InsertIndex;
+			if (InsertIndex >= MaxLocalLightCount)
+				return;
+			const size_t NewCount = (std::min)(m_SelectedLocalLightCount + 1, MaxLocalLightCount);
+			for (size_t Index = NewCount - 1; Index > InsertIndex; --Index)
+				m_SelectedLocalLights[Index] = m_SelectedLocalLights[Index - 1];
+			m_SelectedLocalLights[InsertIndex] = Candidate;
+			m_SelectedLocalLightCount = NewCount;
+		};
+
+		for (const ScenePointLight& Light : m_PreparedSnapshot->PointLights)
+		{
+			LocalLightGpuData Data{};
+			Data.PositionRange = glm::vec4(Light.WorldPosition, Light.Range);
+			Data.ColorIntensity = glm::vec4(Light.Color, Light.Intensity);
+			Data.OuterCosAndType = glm::vec4(0.0f, -1.0f, 0.0f, 0.0f);
+			ConsiderLocalLight({ Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, 0 },
+				Data, Light.Entity, nullptr);
+		}
+		for (const SceneSpotLight& Light : m_PreparedSnapshot->SpotLights)
+		{
+			LocalLightGpuData Data{};
+			Data.PositionRange = glm::vec4(Light.WorldPosition, Light.Range);
+			Data.ColorIntensity = glm::vec4(Light.Color, Light.Intensity);
+			Data.DirectionInnerCos = glm::vec4(Light.WorldDirection, std::cos(glm::radians(Light.InnerConeAngleDegrees)));
+			Data.OuterCosAndType = glm::vec4(std::cos(glm::radians(Light.OuterConeAngleDegrees)), -1.0f, 0.0f, 1.0f);
+			ConsiderLocalLight({ Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, 1 },
+				Data, Light.Entity, &Light);
+		}
+
+		if (ActiveLightCount > MaxLocalLightCount && !m_LoggedLocalLightOverflow)
+		{
+			PF_CORE_WARN("Scene has {0} active local lights; rendering the {1} most camera-relevant lights (UUID and type break ties)",
+				ActiveLightCount, MaxLocalLightCount);
+			m_LoggedLocalLightOverflow = true;
+		}
+
+		std::array<SpotlightShadowCandidate, MaxLocalLightCount> ShadowCandidates{};
+		size_t ShadowCandidateCount = 0;
+		for (size_t Index = 0; Index < m_SelectedLocalLightCount; ++Index)
+		{
+			const SceneSpotLight* Spot = m_SelectedLocalLights[Index].Spot;
+			if (!Spot || !Spot->CastShadows || m_PreparedSnapshot->Meshes.empty())
+				continue;
+			auto Projection = BuildSpotlightShadowProjection(
+				Spot->WorldPosition, Spot->WorldDirection, Spot->Range, Spot->OuterConeAngleDegrees);
+			if (!Projection)
+			{
+				if (Spot->OuterConeAngleDegrees > MaxSpotlightShadowOuterHalfAngleDegrees && !m_LoggedUnsupportedSpotShadowCone)
+				{
+					PF_CORE_WARN("Spotlight shadow projection supports outer half-angles up to {0} degrees; wider spotlights remain illuminated without shadows",
+						MaxSpotlightShadowOuterHalfAngleDegrees);
+					m_LoggedUnsupportedSpotShadowCone = true;
+				}
+				continue;
+			}
+			ShadowCandidates[ShadowCandidateCount++] = { m_SelectedLocalLights[Index].Entity,
+				static_cast<uint32_t>(Index) };
+		}
+
+		if (ShadowCandidateCount > 0)
+		{
+			if (auto Resources = EnsureSpotShadowResources(); !Resources)
+				return std::unexpected(std::move(Resources.error()));
+			if (auto Pipeline = EnsureShadowPipeline(1.0f); !Pipeline)
+				return std::unexpected(std::move(Pipeline.error()));
+		}
+		const SpotlightShadowSlotAssignments SlotAssignments = AssignSpotlightShadowSlots(
+			std::span(ShadowCandidates.data(), ShadowCandidateCount), m_SpotShadowSlotOwners);
+		for (size_t Index = 0; Index < m_SelectedLocalLightCount; ++Index)
+			if (SlotAssignments[Index] >= 0)
+				m_SelectedLocalLights[Index].Data.OuterCosAndType.y = static_cast<float>(SlotAssignments[Index]);
+		if (ShadowCandidateCount > MaxSpotlightShadowMapCount && !m_LoggedSpotShadowOverflow)
+		{
+			PF_CORE_WARN("More than {0} selected spotlights request shadows; remaining lights render unshadowed",
+				MaxSpotlightShadowMapCount);
+			m_LoggedSpotShadowOverflow = true;
+		}
+
+		m_PreparedLocalLighting.Counts.x = static_cast<uint32_t>(m_SelectedLocalLightCount);
+		for (size_t Index = 0; Index < m_SelectedLocalLightCount; ++Index)
+			m_PreparedLocalLighting.Lights[Index] = m_SelectedLocalLights[Index].Data;
+
+		for (size_t Slot = 0; Slot < m_SpotShadowSlotOwners.size(); ++Slot)
+		{
+			if (!m_SpotShadowSlotOwners[Slot])
+				continue;
+			const auto Selected = std::find_if(m_SelectedLocalLights.begin(),
+				m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount),
+				[&](const SelectedLocalLight& Light) { return Light.Entity == *m_SpotShadowSlotOwners[Slot]; });
+			if (Selected == m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount) || !Selected->Spot)
+				return std::unexpected(MakeDrawError("Spotlight shadow slot no longer identifies a selected spotlight"));
+			auto Projection = BuildSpotlightShadowProjection(
+				Selected->Spot->WorldPosition, Selected->Spot->WorldDirection,
+				Selected->Spot->Range, Selected->Spot->OuterConeAngleDegrees);
+			if (!Projection)
+				return std::unexpected(MakeDrawError("Could not build assigned spotlight shadow projection: " + Projection.error().Message));
+			m_PreparedSpotShadowMatrices[Slot] = Projection->ViewProjection;
+			m_PreparedSpotShadowParameters[Slot] = glm::vec4(
+				Selected->Spot->ShadowBias, Selected->Spot->ShadowNormalBias,
+				Selected->Spot->ShadowSoftness, 1.0f);
+		}
+		return {};
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::RenderSpotlightShadows()
+	{
+		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty() || !m_SpotShadowTargets.front())
+			return {};
+		const auto Pipeline = m_ShadowPipelines.find(1);
+		if (Pipeline == m_ShadowPipelines.end())
+			return std::unexpected(MakeResourceError("Spotlight shadow pipeline was not prepared"));
+		for (size_t Slot = 0; Slot < m_SpotShadowSlotOwners.size(); ++Slot)
+		{
+			if (!m_SpotShadowSlotOwners[Slot])
+				continue;
+			const GraphicsResult Begin = m_Runtime.BeginRenderTarget(*m_SpotShadowTargets[Slot]);
+			if (!Begin)
+				return std::unexpected(MakeDrawError("Could not begin spotlight shadow target: " + Begin.error().Message));
+			RenderTargetFrameScope TargetScope(m_Runtime);
+			for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
+			{
+				auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
+				if (!Mesh)
+					return std::unexpected(MakeDrawError("Spotlight shadow caster mesh became unavailable: " + Mesh.error().Message));
+				const glm::mat4 ShadowTransform = m_PreparedSpotShadowMatrices[Slot] * Instance.WorldTransform;
+				const auto Update = m_Runtime.WriteBuffer(
+					*m_ShadowObjectConstantsBuffer, 0, std::as_bytes(std::span(&ShadowTransform, 1)));
+				if (!Update)
+					return std::unexpected(MakeDrawError("Could not update spotlight shadow object constants: " + Update.error().Message));
+				const std::array<const BindingSet*, 1> Bindings = { m_ShadowObjectBindingSet.get() };
+				const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
+				const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline->second, Mesh->get(), Arguments, Bindings);
+				if (!Draw)
+					return std::unexpected(MakeDrawError("Could not draw spotlight shadow caster: " + Draw.error().Message));
+				++m_LastSpotShadowCasterDrawCount;
+			}
+			const GraphicsResult End = TargetScope.End();
+			if (!End)
+				return std::unexpected(MakeDrawError("Could not end spotlight shadow target: " + End.error().Message));
+			++m_LastSpotShadowPassCount;
+		}
+		return {};
+	}
+
 	std::expected<void, SceneRendererError> SceneRenderer::RenderShadowCascades()
 	{
+		m_LastSpotShadowPassCount = 0;
+		m_LastSpotShadowCasterDrawCount = 0;
+		if (auto LocalLighting = PrepareLocalLighting(); !LocalLighting)
+			return std::unexpected(std::move(LocalLighting.error()));
 		if (!m_PreparedSnapshot || !m_PreparedSnapshot->DirectionalLight ||
 			!m_PreparedSnapshot->DirectionalLight->CastShadows || m_PreparedSnapshot->Meshes.empty())
-			return {};
+			return RenderSpotlightShadows();
 		if (!m_PreparedCascades)
 			return std::unexpected(MakeDrawError("Prepared directional shadow cascades are unavailable"));
 		const int32_t RasterBias = static_cast<int32_t>(std::lround(m_PreparedSnapshot->DirectionalLight->ShadowBias));
@@ -1062,7 +1303,7 @@ namespace PulseForge
 			if (!End)
 				return std::unexpected(MakeDrawError("Could not end shadow cascade: " + End.error().Message));
 		}
-		return {};
+		return RenderSpotlightShadows();
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::EnsureAmbientOcclusionPipelines()
@@ -1438,8 +1679,11 @@ namespace PulseForge
 			Width,
 			Height,
 			*Rendered,
+			m_LastSpotShadowPassCount,
+			m_LastSpotShadowCasterDrawCount,
 			m_PreparedSnapshot->EnvironmentLight.has_value(),
-			m_HdrSceneTargetGeneration
+			m_HdrSceneTargetGeneration,
+			m_SpotShadowResourceGeneration
 		};
 	}
 
@@ -1552,7 +1796,10 @@ namespace PulseForge
 			Hdr->GeometryDrawCount,
 			Hdr->TargetGeneration,
 			ColorTargetFormat::Swapchain,
-			ShouldShaderEncodeSrgb(ColorTargetFormat::Swapchain, m_Runtime.GetOutputColorEncoding())
+			ShouldShaderEncodeSrgb(ColorTargetFormat::Swapchain, m_Runtime.GetOutputColorEncoding()),
+			Hdr->SpotlightShadowPassCount,
+			Hdr->SpotlightShadowCasterDrawCount,
+			Hdr->SpotlightShadowResourceGeneration
 		};
 	}
 
@@ -1594,7 +1841,10 @@ namespace PulseForge
 			Hdr->GeometryDrawCount,
 			Hdr->TargetGeneration,
 			Description.ColorFormat,
-			ShouldShaderEncodeSrgb(Description.ColorFormat, m_Runtime.GetOutputColorEncoding())
+			ShouldShaderEncodeSrgb(Description.ColorFormat, m_Runtime.GetOutputColorEncoding()),
+			Hdr->SpotlightShadowPassCount,
+			Hdr->SpotlightShadowCasterDrawCount,
+			Hdr->SpotlightShadowResourceGeneration
 		};
 	}
 
@@ -1720,63 +1970,10 @@ namespace PulseForge
 				}
 			}
 		}
-
-		struct CandidateLocalLight
-		{
-			LocalLightRelevance Relevance;
-			LocalLightGpuData Data;
-		};
-		std::array<CandidateLocalLight, MaxLocalLightCount> SelectedLocalLights{};
-		size_t SelectedLightCount = 0;
-		size_t ActiveLightCount = 0;
-		const auto ConsiderLocalLight = [&](const LocalLightRelevance& Relevance, const LocalLightGpuData& Data)
-		{
-			if (Relevance.Intensity <= 0.0f)
-				return;
-			++ActiveLightCount;
-			const CandidateLocalLight Candidate{ Relevance, Data };
-			size_t InsertIndex = 0;
-			while (InsertIndex < SelectedLightCount && !IsLocalLightMoreRelevant(
-				Candidate.Relevance, SelectedLocalLights[InsertIndex].Relevance, m_PreparedSnapshot->CameraWorldPosition))
-				++InsertIndex;
-			if (InsertIndex >= MaxLocalLightCount)
-				return;
-			const size_t NewCount = (std::min)(SelectedLightCount + 1, MaxLocalLightCount);
-			for (size_t Index = NewCount - 1; Index > InsertIndex; --Index)
-				SelectedLocalLights[Index] = SelectedLocalLights[Index - 1];
-			SelectedLocalLights[InsertIndex] = Candidate;
-			SelectedLightCount = NewCount;
-		};
-		for (const ScenePointLight& Light : m_PreparedSnapshot->PointLights)
-		{
-			LocalLightGpuData Data{};
-			Data.PositionRange = glm::vec4(Light.WorldPosition, Light.Range);
-			Data.ColorIntensity = glm::vec4(Light.Color, Light.Intensity);
-			ConsiderLocalLight({ Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, 0 }, Data);
-		}
-		for (const SceneSpotLight& Light : m_PreparedSnapshot->SpotLights)
-		{
-			LocalLightGpuData Data{};
-			Data.PositionRange = glm::vec4(Light.WorldPosition, Light.Range);
-			Data.ColorIntensity = glm::vec4(Light.Color, Light.Intensity);
-			const float InnerRadians = glm::radians(Light.InnerConeAngleDegrees);
-			const float OuterRadians = glm::radians(Light.OuterConeAngleDegrees);
-			Data.DirectionInnerCos = glm::vec4(Light.WorldDirection, std::cos(InnerRadians));
-			Data.OuterCosAndType = glm::vec4(std::cos(OuterRadians), 0.0f, 0.0f, 1.0f);
-			ConsiderLocalLight({ Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, 1 }, Data);
-		}
-		LocalLightingConstants LocalLighting{};
-		LocalLighting.Counts.x = static_cast<uint32_t>(SelectedLightCount);
-		for (size_t Index = 0; Index < SelectedLightCount; ++Index)
-			LocalLighting.Lights[Index] = SelectedLocalLights[Index].Data;
-		if (ActiveLightCount > MaxLocalLightCount && !m_LoggedLocalLightOverflow)
-		{
-			PF_CORE_WARN("Scene has {0} active local lights; rendering the {1} most camera-relevant lights (UUID and type break ties)",
-				ActiveLightCount, MaxLocalLightCount);
-			m_LoggedLocalLightOverflow = true;
-		}
+		Frame.SpotShadowViewProjection = m_PreparedSpotShadowMatrices;
+		Frame.SpotShadowParameters = m_PreparedSpotShadowParameters;
 		const auto LocalLightingUpdate = m_Runtime.WriteBuffer(
-			*m_LocalLightingConstantsBuffer, 0, std::as_bytes(std::span(&LocalLighting, 1)));
+			*m_LocalLightingConstantsBuffer, 0, std::as_bytes(std::span(&m_PreparedLocalLighting, 1)));
 		if (!LocalLightingUpdate)
 			return std::unexpected(MakeDrawError("Could not update local-light constants: " + LocalLightingUpdate.error().Message));
 
@@ -1857,8 +2054,9 @@ namespace PulseForge
 			const BindingSet* AmbientOcclusionBindings = m_AmbientOcclusionFrameAvailable && m_AmbientOcclusionFinalBindingSet
 				? m_AmbientOcclusionFinalBindingSet.get()
 				: m_AmbientOcclusionFallbackBindingSet.get();
-			const std::array<const BindingSet*, 3> BindingSets = {
-				Binding->second.BindingSet.get(), m_ShadowBindingSet.get(), AmbientOcclusionBindings };
+			const std::array<const BindingSet*, 4> BindingSets = {
+				Binding->second.BindingSet.get(), m_ShadowBindingSet.get(), AmbientOcclusionBindings,
+				m_SpotShadowBindingSet.get() };
 			const GraphicsResult Draw = m_Runtime.DrawIndexed(*ScenePipeline, Mesh->get(), Arguments, BindingSets);
 			if (!Draw)
 			{

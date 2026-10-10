@@ -4018,6 +4018,19 @@ namespace
 				if (m_EditorStyle.BeginPropertyRow("Outer cone half-angle"))
 					Changed |= ImGui::DragFloat("##SpotLightOuter", &Component.OuterConeAngleDegrees, 0.25f,
 						Component.InnerConeAngleDegrees + 0.1f, 89.5f, "%.1f deg");
+				if (m_EditorStyle.BeginPropertyRow("Cast Shadows"))
+					Changed |= ImGui::Checkbox("##SpotLightCastShadows", &Component.CastShadows);
+				if (m_EditorStyle.BeginPropertyRow("Shadow Bias"))
+					Changed |= ImGui::DragFloat("##SpotLightShadowBias", &Component.ShadowBias, 0.0001f,
+						0.0f, 0.02f, "%.4f");
+				if (m_EditorStyle.BeginPropertyRow("Shadow Normal Bias"))
+					Changed |= ImGui::DragFloat("##SpotLightShadowNormalBias", &Component.ShadowNormalBias, 0.0025f,
+						0.0f, 1.0f, "%.3f units");
+				if (m_EditorStyle.BeginPropertyRow("Shadow Softness"))
+					Changed |= ImGui::DragFloat("##SpotLightShadowSoftness", &Component.ShadowSoftness, 0.1f,
+						0.0f, 4.0f, "%.1f texels");
+				if (Component.CastShadows && Component.OuterConeAngleDegrees > 80.0f)
+					ImGui::TextDisabled("Shadows support outer half-angles up to 80 degrees; illumination is unchanged.");
 				m_EditorStyle.EndPropertyTable();
 			}
 			if (Changed)

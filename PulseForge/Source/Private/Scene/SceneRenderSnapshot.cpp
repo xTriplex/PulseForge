@@ -183,7 +183,8 @@ namespace PulseForge
 						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidLocalLightTransform,
 							Current.GetUUID(), "Spot-light world position or direction is non-finite"));
 					Snapshot.SpotLights.push_back({ Current.GetUUID(), Position, Direction, Light.Color,
-						Light.Intensity, Light.Range, Light.InnerConeAngleDegrees, Light.OuterConeAngleDegrees });
+						Light.Intensity, Light.Range, Light.InnerConeAngleDegrees, Light.OuterConeAngleDegrees,
+						Light.CastShadows, Light.ShadowBias, Light.ShadowNormalBias, Light.ShadowSoftness });
 				}
 
 				const auto MeshRenderer = Current.GetMeshRenderer();

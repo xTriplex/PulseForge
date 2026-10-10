@@ -18,6 +18,12 @@ namespace PulseForge
 			InnerConeAngleDegrees < 0.5f || OuterConeAngleDegrees > 89.5f ||
 			OuterConeAngleDegrees <= InnerConeAngleDegrees)
 			return std::unexpected("Spot-light cone half-angles must satisfy 0.5 <= inner < outer <= 89.5 degrees");
+		if (!std::isfinite(ShadowBias) || ShadowBias < 0.0f || ShadowBias > 0.02f)
+			return std::unexpected("Spot-light shadow bias must be finite and between 0 and 0.02 light-space depth");
+		if (!std::isfinite(ShadowNormalBias) || ShadowNormalBias < 0.0f || ShadowNormalBias > 1.0f)
+			return std::unexpected("Spot-light shadow normal bias must be finite and between 0 and 1 world unit");
+		if (!std::isfinite(ShadowSoftness) || ShadowSoftness < 0.0f || ShadowSoftness > 4.0f)
+			return std::unexpected("Spot-light shadow softness must be finite and between 0 and 4 texels");
 		return {};
 	}
 }

@@ -67,6 +67,10 @@ namespace PulseForge
 		float Range = 1.0f;
 		float InnerConeAngleDegrees = 15.0f;
 		float OuterConeAngleDegrees = 25.0f;
+		bool CastShadows = false;
+		float ShadowBias = 0.001f;
+		float ShadowNormalBias = 0.025f;
+		float ShadowSoftness = 1.5f;
 	};
 
 	struct SceneRenderSnapshot

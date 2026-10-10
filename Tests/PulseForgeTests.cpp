@@ -43,6 +43,7 @@
 #include "Renderer/Mesh.h"
 #include "Renderer/RenderTarget.h"
 #include "Renderer/DirectionalShadowMath.h"
+#include "Renderer/SpotlightShadowMath.h"
 #include "Renderer/EnvironmentLighting.h"
 #include "Renderer/ScreenSpaceAmbientOcclusion.h"
 #include "Renderer/ToneMapping.h"
@@ -1298,7 +1299,10 @@ namespace
 		PF_CHECK(Tests, Light->SetTransform(LightTransform).has_value());
 		PF_CHECK(Tests, Light->SetDirectionalLight(DirectionalLightComponent{ glm::vec3(0.5f, 0.6f, 0.7f), 2.0f }).has_value());
 		PF_CHECK(Tests, Light->SetPointLight(PointLightComponent{ glm::vec3(1.0f, 0.5f, 0.25f), 4.0f, 12.0f }).has_value());
-		PF_CHECK(Tests, Light->SetSpotLight(SpotLightComponent{ glm::vec3(0.2f, 0.4f, 1.0f), 8.0f, 20.0f, 10.0f, 25.0f }).has_value());
+		SpotLightComponent SnapshotSpotLight{ glm::vec3(0.2f, 0.4f, 1.0f), 8.0f, 20.0f, 10.0f, 25.0f };
+		SnapshotSpotLight.CastShadows = true;
+		SnapshotSpotLight.ShadowBias = 0.004f;
+		PF_CHECK(Tests, Light->SetSpotLight(SnapshotSpotLight).has_value());
 		PointLightComponent InvalidPointLight;
 		InvalidPointLight.Intensity = -1.0f;
 		const auto InvalidPointLightSet = Light->SetPointLight(InvalidPointLight);
@@ -1368,6 +1372,8 @@ namespace
 			Snapshot->PointLights[0].WorldPosition, glm::vec3(2.0f, 1.0f, 0.0f))));
 		PF_CHECK(Tests, Snapshot->SpotLights.size() == 1 && Snapshot->SpotLights[0].Entity == LightID);
 		PF_CHECK(Tests, Snapshot->SpotLights.size() == 1 && glm::abs(Snapshot->SpotLights[0].WorldDirection.x + 1.0f) < 0.0001f);
+		PF_CHECK(Tests, Snapshot->SpotLights.size() == 1 && Snapshot->SpotLights[0].CastShadows &&
+			Snapshot->SpotLights[0].ShadowBias == 0.004f && Snapshot->SpotLights[0].ShadowSoftness == 1.5f);
 		PF_CHECK(Tests, Snapshot->Meshes.size() == 3);
 		PF_CHECK(Tests, Snapshot->Meshes[0].Entity == FirstMeshID);
 		PF_CHECK(Tests, Snapshot->Meshes[1].Entity == SharedMeshID);
@@ -2170,7 +2176,11 @@ namespace
 		PF_CHECK(Tests, SourceLight.Validate().has_value());
 		PF_CHECK(Tests, Child.SetDirectionalLight(SourceLight).has_value());
 		const PointLightComponent SourcePointLight{ glm::vec3(0.2f, 0.7f, 0.4f), 5.5f, 18.0f };
-		const SpotLightComponent SourceSpotLight{ glm::vec3(0.5f, 0.6f, 0.9f), 12.0f, 24.0f, 12.0f, 30.0f };
+		SpotLightComponent SourceSpotLight{ glm::vec3(0.5f, 0.6f, 0.9f), 12.0f, 24.0f, 12.0f, 30.0f };
+		SourceSpotLight.CastShadows = true;
+		SourceSpotLight.ShadowBias = 0.0025f;
+		SourceSpotLight.ShadowNormalBias = 0.05f;
+		SourceSpotLight.ShadowSoftness = 2.0f;
 		PF_CHECK(Tests, Child.SetPointLight(SourcePointLight).has_value());
 		PF_CHECK(Tests, Child.SetSpotLight(SourceSpotLight).has_value());
 		const EnvironmentLightComponent SourceEnvironment{ AssetID{ 0x7400000000000000ull, 74 }, 1.25f };
@@ -2309,7 +2319,10 @@ namespace
 		PF_CHECK(Tests, LoadedSpot && LoadedSpot->has_value() &&
 			LoadedSpot->value().InnerConeAngleDegrees == SourceSpotLight.InnerConeAngleDegrees &&
 			LoadedSpot->value().OuterConeAngleDegrees == SourceSpotLight.OuterConeAngleDegrees &&
-			LoadedSpot->value().Range == SourceSpotLight.Range);
+			LoadedSpot->value().Range == SourceSpotLight.Range && LoadedSpot->value().CastShadows &&
+			LoadedSpot->value().ShadowBias == SourceSpotLight.ShadowBias &&
+			LoadedSpot->value().ShadowNormalBias == SourceSpotLight.ShadowNormalBias &&
+			LoadedSpot->value().ShadowSoftness == SourceSpotLight.ShadowSoftness);
 		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
 			LoadedMeshRenderer->value().MeshAsset == MeshAssetIdentifier);
 		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
@@ -2323,6 +2336,29 @@ namespace
 		PF_CHECK(Tests, LoadedScript && LoadedScript->has_value() &&
 			LoadedScript->value().ScriptAsset == ScriptAssetIdentifier && !LoadedScript->value().Enabled);
 		PF_CHECK(Tests, LoadedParent && LoadedParent->has_value() && **LoadedParent == *LoadedRoot);
+		auto LegacySpotDocument = nlohmann::json::parse(*Serialized);
+		for (auto& EntityRecord : LegacySpotDocument["entities"])
+			if (EntityRecord.contains("spotLight"))
+			{
+				EntityRecord["spotLight"].erase("castShadows");
+				EntityRecord["spotLight"].erase("shadowBias");
+				EntityRecord["spotLight"].erase("shadowNormalBias");
+				EntityRecord["spotLight"].erase("shadowSoftness");
+			}
+		Scene LegacySpotDestination;
+		const auto LegacySpotLoad = SceneSerializer::Deserialize(LegacySpotDocument.dump(), LegacySpotDestination);
+		PF_CHECK(Tests, LegacySpotLoad.has_value());
+		if (LegacySpotLoad)
+		{
+			const auto LegacySpotEntity = LegacySpotDestination.FindEntity(ChildId);
+			PF_CHECK(Tests, LegacySpotEntity.has_value());
+			if (LegacySpotEntity)
+			{
+				const auto LegacySpot = LegacySpotEntity->GetSpotLight();
+				PF_CHECK(Tests, LegacySpot && LegacySpot->has_value() && !LegacySpot->value().CastShadows &&
+					LegacySpot->value().ShadowBias == SpotLightComponent{}.ShadowBias);
+			}
+		}
 		auto InvalidSpotDocument = nlohmann::json::parse(*Serialized);
 		for (auto& EntityRecord : InvalidSpotDocument["entities"])
 			if (EntityRecord.value("uuid", std::string{}) == ChildId.ToString())
@@ -5367,7 +5403,10 @@ end
 		const DirectionalLightComponent PrefabLight{ glm::vec3(0.8f, 0.9f, 1.0f), 1.75f };
 		PF_CHECK(Tests, Root->SetDirectionalLight(PrefabLight).has_value());
 		PF_CHECK(Tests, Root->SetPointLight(PointLightComponent{ glm::vec3(1.0f, 0.5f, 0.25f), 3.0f, 9.0f }).has_value());
-		PF_CHECK(Tests, Grandchild->SetSpotLight(SpotLightComponent{ glm::vec3(0.3f, 0.5f, 1.0f), 7.0f, 14.0f, 8.0f, 22.0f }).has_value());
+		SpotLightComponent PrefabSpot{ glm::vec3(0.3f, 0.5f, 1.0f), 7.0f, 14.0f, 8.0f, 22.0f };
+		PrefabSpot.CastShadows = true;
+		PrefabSpot.ShadowBias = 0.003f;
+		PF_CHECK(Tests, Grandchild->SetSpotLight(PrefabSpot).has_value());
 		const EnvironmentLightComponent PrefabEnvironment{ AssetID{ 0x7200000000000000ull, 7 }, 0.65f };
 		PF_CHECK(Tests, Root->SetEnvironmentLight(PrefabEnvironment).has_value());
 		const AssetID MeshAssetID{ 0x7300000000000000ull, 7 };
@@ -5503,7 +5542,8 @@ end
 		{
 			const auto FirstGrandchildSpot = FirstGrandchildren->front().GetSpotLight();
 			PF_CHECK(Tests, FirstGrandchildSpot && FirstGrandchildSpot->has_value() &&
-				FirstGrandchildSpot->value().OuterConeAngleDegrees == 22.0f);
+				FirstGrandchildSpot->value().OuterConeAngleDegrees == 22.0f &&
+				FirstGrandchildSpot->value().CastShadows && FirstGrandchildSpot->value().ShadowBias == 0.003f);
 		}
 
 		const auto SecondInstance = PrefabSerializer::Instantiate(*PrefabData, Destination);
@@ -6690,6 +6730,64 @@ end
 		PF_CHECK(Tests, Spot.Validate().has_value());
 		Spot.OuterConeAngleDegrees = std::numeric_limits<float>::infinity();
 		PF_CHECK(Tests, !Spot.Validate());
+		Spot.OuterConeAngleDegrees = 25.0f;
+		Spot.ShadowBias = std::numeric_limits<float>::quiet_NaN();
+		PF_CHECK(Tests, !Spot.Validate());
+		Spot.ShadowBias = 0.001f;
+		Spot.ShadowNormalBias = -0.01f;
+		PF_CHECK(Tests, !Spot.Validate());
+		Spot.ShadowNormalBias = 0.025f;
+		Spot.ShadowSoftness = 4.1f;
+		PF_CHECK(Tests, !Spot.Validate());
+		Spot.ShadowSoftness = 1.5f;
+
+		const auto Projection = BuildSpotlightShadowProjection(
+			glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, -1.0f), 10.0f, 30.0f);
+		PF_CHECK(Tests, Projection.has_value());
+		if (Projection)
+		{
+			glm::vec3 UvDepth;
+			PF_CHECK(Tests, ProjectSpotlightShadowCoordinate(Projection->ViewProjection, { 0.0f, 0.0f, -5.0f }, UvDepth));
+			PF_CHECK(Tests, glm::abs(UvDepth.x - 0.5f) < 0.0001f && glm::abs(UvDepth.y - 0.5f) < 0.0001f);
+			PF_CHECK(Tests, UvDepth.z > 0.0f && UvDepth.z < 1.0f);
+			PF_CHECK(Tests, !ProjectSpotlightShadowCoordinate(Projection->ViewProjection, { 0.0f, 0.0f, 1.0f }, UvDepth));
+			PF_CHECK(Tests, !ProjectSpotlightShadowCoordinate(Projection->ViewProjection, { 0.0f, 0.0f, -12.0f }, UvDepth));
+		}
+		PF_CHECK(Tests, !BuildSpotlightShadowProjection(
+			glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, -1.0f), 10.0f, 85.0f));
+		PF_CHECK(Tests, !BuildSpotlightShadowProjection(
+			glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, 0.0f), 10.0f, 30.0f));
+		PF_CHECK(Tests, !BuildSpotlightShadowProjection(
+			glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, -1.0f), 0.01f, 30.0f));
+		const auto VerticalProjection = BuildSpotlightShadowProjection(
+			glm::vec3(1.0f), glm::vec3(0.0f, 1.0f, 0.00001f), 10.0f, 45.0f);
+		PF_CHECK(Tests, VerticalProjection.has_value());
+		PF_CHECK(Tests, VerticalProjection && std::isfinite(VerticalProjection->ViewProjection[0][0]));
+		PF_CHECK(Tests, MaxSpotlightShadowMapCount == 4 && SpotlightShadowMapResolution == 1024);
+		PF_CHECK(Tests, !Spot.CastShadows);
+
+		SpotlightShadowSlotOwners ShadowOwners{};
+		const std::array<SpotlightShadowCandidate, 5> ShadowCandidates = {{
+			{ UUID(0, 10), 0 }, { UUID(0, 20), 1 }, { UUID(0, 30), 2 },
+			{ UUID(0, 40), 3 }, { UUID(0, 50), 4 }
+		}};
+		const auto InitialAssignments = AssignSpotlightShadowSlots(ShadowCandidates, ShadowOwners);
+		PF_CHECK(Tests, InitialAssignments[0] == 0 && InitialAssignments[1] == 1 &&
+			InitialAssignments[2] == 2 && InitialAssignments[3] == 3 && InitialAssignments[4] == -1);
+		const std::array<SpotlightShadowCandidate, 4> ReorderedCandidates = {{
+			{ UUID(0, 40), 0 }, { UUID(0, 30), 1 }, { UUID(0, 20), 2 }, { UUID(0, 10), 3 }
+		}};
+		const auto StableAssignments = AssignSpotlightShadowSlots(ReorderedCandidates, ShadowOwners);
+		PF_CHECK(Tests, StableAssignments[0] == 3 && StableAssignments[1] == 2 &&
+			StableAssignments[2] == 1 && StableAssignments[3] == 0);
+		const std::array<SpotlightShadowCandidate, 4> ReassignedCandidates = {{
+			{ UUID(0, 40), 0 }, { UUID(0, 30), 1 }, { UUID(0, 20), 2 }, { UUID(0, 60), 3 }
+		}};
+		const auto Reassigned = AssignSpotlightShadowSlots(ReassignedCandidates, ShadowOwners);
+		PF_CHECK(Tests, Reassigned[0] == 3 && Reassigned[1] == 2 && Reassigned[2] == 1 && Reassigned[3] == 0);
+		const auto ClearedAssignments = AssignSpotlightShadowSlots({}, ShadowOwners);
+		PF_CHECK(Tests, std::ranges::all_of(ClearedAssignments, [](int32_t Slot) { return Slot == -1; }));
+		PF_CHECK(Tests, std::ranges::all_of(ShadowOwners, [](const auto& Owner) { return !Owner.has_value(); }));
 
 		const float AtZero = EvaluateLocalLightRangeAttenuation(0.0f, 10.0f);
 		const float AtOne = EvaluateLocalLightRangeAttenuation(1.0f, 10.0f);

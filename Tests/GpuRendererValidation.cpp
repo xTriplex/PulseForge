@@ -60,15 +60,18 @@ namespace
 	class GpuValidationLayer final : public PulseForge::Layer
 	{
 	public:
-		GpuValidationLayer(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm, bool ValidateLocalLights)
-			: Layer(ValidateEditorUiUnorm ? "Editor UNORM UI composition GPU validation" :
+		GpuValidationLayer(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm,
+			bool ValidateLocalLights, bool ValidateSpotlightShadows)
+			: Layer(ValidateSpotlightShadows ? "SceneRenderer spotlight-shadow GPU validation" :
+				ValidateEditorUiUnorm ? "Editor UNORM UI composition GPU validation" :
 				ValidateLocalLights ? "SceneRenderer local-light GPU validation" :
 				ValidateToneMapping ? "HDR tonemapping GPU validation" :
 				ValidateSceneHdr ? "SceneRenderer HDR GPU validation" : "RGBA16F GPU validation"),
 			  m_ValidateSceneHdr(ValidateSceneHdr),
 			  m_ValidateToneMapping(ValidateToneMapping),
 			  m_ValidateEditorUiUnorm(ValidateEditorUiUnorm),
-			  m_ValidateLocalLights(ValidateLocalLights)
+			  m_ValidateLocalLights(ValidateLocalLights),
+			  m_ValidateSpotlightShadows(ValidateSpotlightShadows)
 		{
 		}
 
@@ -80,10 +83,12 @@ namespace
 				InitializeResources();
 				if (m_ValidateEditorUiUnorm)
 					InitializeEditorUiUnormResources();
-				if (m_ValidateSceneHdr || m_ValidateToneMapping || m_ValidateLocalLights)
+				if (m_ValidateSceneHdr || m_ValidateToneMapping || m_ValidateLocalLights || m_ValidateSpotlightShadows)
 					InitializeSceneResources();
 				if (m_ValidateLocalLights)
 					InitializeLocalLightScenario();
+				if (m_ValidateSpotlightShadows)
+					InitializeSpotlightShadowScenario();
 				PF_INFO("RGBA16F GPU validation resources initialized");
 			}
 			catch (const std::exception& Exception)
@@ -134,6 +139,37 @@ namespace
 				if (!Prepared)
 				{
 					Fail("Could not prepare mixed local-light scene: " + Prepared.error().Message);
+					return;
+				}
+				if (m_SceneRenderer->IsEnvironmentLightingPending())
+					return;
+				m_ScenePrepared = true;
+				return;
+			}
+			if (m_ValidateSpotlightShadows)
+			{
+				if (m_SpotShadowFrames >= 6)
+				{
+					PF_INFO("GPU_VALIDATION_RESULT=PASS; spotlight maps rendered and reused across 1/2/4 active shadows, dynamic edits, budget overflow, and a frame without directional lighting");
+					PulseForge::Application::Get().RequestClose();
+					return;
+				}
+				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(45))
+				{
+					Fail("Timed out preparing or rendering spotlight-shadow scene");
+					return;
+				}
+				const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
+				if (Width == 0 || Height == 0)
+					return;
+				if (m_ScenePrepared)
+					return;
+				UpdateSpotlightShadowScenario();
+				const auto Prepared = m_SceneRenderer->PrepareScene(
+					m_SpotlightShadowScene, static_cast<float>(Width) / static_cast<float>(Height));
+				if (!Prepared)
+				{
+					Fail("Could not prepare spotlight-shadow scene: " + Prepared.error().Message);
 					return;
 				}
 				if (m_SceneRenderer->IsEnvironmentLightingPending())
@@ -263,6 +299,11 @@ namespace
 				RenderLocalLightFrame();
 				return;
 			}
+			if (m_ValidateSpotlightShadows)
+			{
+				RenderSpotlightShadowFrame();
+				return;
+			}
 			if (m_ValidateToneMapping)
 			{
 				RenderToneMappingFrame();
@@ -321,6 +362,7 @@ namespace
 
 		void OnDetach() override
 		{
+			m_SpotlightShadowOutputTarget.reset();
 			m_EditorUiBindingSet.reset();
 			m_EditorUiDrawBindingSet.reset();
 			m_EditorUiUnormTarget.reset();
@@ -349,6 +391,7 @@ namespace
 		[[nodiscard]] bool Succeeded() const noexcept
 		{
 			return m_Succeeded && (m_ValidateEditorUiUnorm ? m_EditorUiFrames == 3 && m_EditorUiTargetCreations == 2 :
+				m_ValidateSpotlightShadows ? m_SpotShadowFrames == 6 :
 				m_ValidateLocalLights ? m_LocalLightFrames == 6 :
 				m_ValidateToneMapping ? m_ToneMappingFrame == 10 :
 				m_ValidateSceneHdr ? m_SceneCompletedFrames == 4 && m_ScenarioIndex == 4 : m_CompletedFrames == 3);
@@ -590,6 +633,159 @@ namespace
 				throw std::runtime_error("Could not create local-light SDR validation target: " + OutputTarget.error().Message);
 			m_LocalLightOutputTarget = std::move(*OutputTarget);
 			PF_INFO("Prepared GPU local-light scene with 32 point and 2 spot lights (over the combined 32-light budget) alongside bundled geometry, environment, and directional light");
+		}
+
+		void InitializeSpotlightShadowScenario()
+		{
+			BuildScenario(m_SpotlightShadowScene, true, true, true);
+			for (size_t Index = 0; Index < 5; ++Index)
+			{
+				PulseForge::SpotLightComponent Spot;
+				Spot.Color = Index % 2 == 0 ? glm::vec3(1.0f, 0.65f, 0.35f) : glm::vec3(0.35f, 0.65f, 1.0f);
+				Spot.Intensity = 35.0f;
+				Spot.Range = 30.0f;
+				Spot.InnerConeAngleDegrees = 20.0f;
+				Spot.OuterConeAngleDegrees = 35.0f;
+				auto Light = m_SpotlightShadowScene.CreateEntity("GPU validation shadow spotlight");
+				if (!Light || !Light->SetSpotLight(Spot))
+					throw std::runtime_error("Could not create spotlight-shadow validation light");
+				auto Transform = Light->GetTransform();
+				if (!Transform)
+					throw std::runtime_error("Could not read spotlight-shadow validation transform");
+				Transform->Translation = { static_cast<float>(Index) * 2.0f - 4.0f, 5.0f, 3.0f };
+				Transform->Rotation = glm::angleAxis(glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+				if (!Light->SetTransform(*Transform))
+					throw std::runtime_error("Could not position spotlight-shadow validation light");
+				m_SpotlightShadowEntities.push_back(*Light);
+			}
+
+			PulseForge::RenderTargetDesc OutputDescription;
+			OutputDescription.Width = 128;
+			OutputDescription.Height = 72;
+			OutputDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
+			OutputDescription.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
+			OutputDescription.DebugName = "Spotlight-shadow GPU validation SDR output";
+			auto OutputTarget = PulseForge::Application::Get().CreateRenderTarget(OutputDescription);
+			if (!OutputTarget)
+				throw std::runtime_error("Could not create spotlight-shadow validation output: " + OutputTarget.error().Message);
+			m_SpotlightShadowOutputTarget = std::move(*OutputTarget);
+			PF_INFO("Prepared real SceneRenderer spotlight-shadow scenario with 5 lights, bundled opaque geometry, IBL, directional CSM, and SSAO");
+		}
+
+		void UpdateSpotlightShadowScenario()
+		{
+			const size_t Frame = m_SpotShadowFrames;
+			if (Frame == 1 || Frame == 2 || Frame == 3 || Frame == 4)
+			{
+				const size_t EnabledCount = Frame == 1 ? 1 : 2;
+				for (size_t Index = 0; Index < m_SpotlightShadowEntities.size(); ++Index)
+				{
+					auto Spot = m_SpotlightShadowEntities[Index].GetSpotLight();
+					if (!Spot || !Spot->has_value())
+						throw std::runtime_error("Could not update spotlight-shadow validation settings");
+					Spot->value().CastShadows = Index < EnabledCount;
+					if (Frame == 3 && Index == 0)
+					{
+						Spot->value().ShadowBias = 0.0015f;
+						Spot->value().ShadowNormalBias = 0.04f;
+						Spot->value().ShadowSoftness = 2.0f;
+						auto Transform = m_SpotlightShadowEntities[Index].GetTransform();
+						if (!Transform)
+							throw std::runtime_error("Could not read moving spotlight-shadow transform");
+						Transform->Translation.x += 0.5f;
+						Transform->Rotation = glm::angleAxis(glm::radians(-80.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+						if (!m_SpotlightShadowEntities[Index].SetTransform(*Transform))
+							throw std::runtime_error("Could not move spotlight-shadow validation light");
+					}
+					if (!m_SpotlightShadowEntities[Index].SetSpotLight(Spot->value()))
+						throw std::runtime_error("Could not apply spotlight-shadow validation settings");
+				}
+				if (Frame == 4)
+				{
+					auto Spot = m_SpotlightShadowEntities[0].GetSpotLight();
+					if (!Spot || !Spot->has_value())
+						throw std::runtime_error("Could not read spotlight before shadow-slot reassignment");
+					Spot->value().CastShadows = false;
+					if (!m_SpotlightShadowEntities[0].SetSpotLight(Spot->value()))
+						throw std::runtime_error("Could not disable spotlight shadow before slot reassignment");
+
+					PulseForge::RenderTargetDesc OutputDescription;
+					OutputDescription.Width = 96;
+					OutputDescription.Height = 64;
+					OutputDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
+					OutputDescription.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
+					OutputDescription.DebugName = "Resized spotlight-shadow GPU validation output";
+					auto OutputTarget = PulseForge::Application::Get().CreateRenderTarget(OutputDescription);
+					if (!OutputTarget)
+						throw std::runtime_error("Could not resize spotlight-shadow validation output: " + OutputTarget.error().Message);
+					m_SpotlightShadowOutputTarget = std::move(*OutputTarget);
+				}
+			}
+			else if (Frame == 5)
+			{
+				for (const PulseForge::Entity Entity : m_SpotlightShadowScene.GetEntities())
+				{
+					auto Directional = Entity.GetDirectionalLight();
+					if (!Directional)
+						throw std::runtime_error("Could not inspect directional light in spotlight-shadow scenario");
+					if (*Directional && !Entity.RemoveDirectionalLight())
+						throw std::runtime_error("Could not remove directional light for spotlight-only shadow validation");
+				}
+				for (const PulseForge::Entity Entity : m_SpotlightShadowEntities)
+				{
+					auto Spot = Entity.GetSpotLight();
+					if (!Spot || !Spot->has_value())
+						throw std::runtime_error("Could not enable spotlight budget validation");
+					Spot->value().CastShadows = true;
+					if (!Entity.SetSpotLight(Spot->value()))
+						throw std::runtime_error("Could not enable spotlight budget validation");
+				}
+			}
+		}
+
+		void RenderSpotlightShadowFrame()
+		{
+			if (!m_Succeeded || !m_ScenePrepared || m_SpotShadowFrames >= 6)
+				return;
+			auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_SpotlightShadowOutputTarget);
+			if (!Rendered || Rendered->GeometryDrawCount == 0)
+			{
+				Fail(Rendered ? "Spotlight-shadow validation rendered no PBR geometry" :
+					"Spotlight-shadow scene render failed: " + Rendered.error().Message);
+				return;
+			}
+
+			static constexpr std::array<size_t, 6> ExpectedShadowPasses = { 0, 1, 2, 2, 1, 4 };
+			const size_t ExpectedPasses = ExpectedShadowPasses[m_SpotShadowFrames];
+			if (Rendered->SpotlightShadowPassCount != ExpectedPasses ||
+				Rendered->SpotlightShadowCasterDrawCount != ExpectedPasses * Rendered->GeometryDrawCount)
+			{
+				Fail("Spotlight shadow-pass or depth-only caster draw count did not match the scenario");
+				return;
+			}
+			if ((m_SpotShadowFrames == 0 && Rendered->SpotlightShadowResourceGeneration != 0) ||
+				(m_SpotShadowFrames > 0 && Rendered->SpotlightShadowResourceGeneration != 1))
+			{
+				Fail("Spotlight shadow targets were allocated eagerly or recreated during the scenario");
+				return;
+			}
+			if (m_SpotShadowFrames == 0)
+				m_FirstSpotShadowHdrGeneration = Rendered->HdrTargetGeneration;
+			else if (m_SpotShadowFrames < 4 && Rendered->HdrTargetGeneration != m_FirstSpotShadowHdrGeneration)
+			{
+				Fail("Unchanged output extents did not reuse the HDR target during spotlight-shadow rendering");
+				return;
+			}
+			else if (m_SpotShadowFrames == 4 && Rendered->HdrTargetGeneration == m_FirstSpotShadowHdrGeneration)
+			{
+				Fail("Resizing the spotlight-shadow output did not replace the HDR target");
+				return;
+			}
+			PF_INFO("SPOT_SHADOW_FRAME={0}; shadow_passes={1}; caster_draws={2}; pbr_draws={3}; hdr_generation={4}; shadow_resource_generation={5}",
+				m_SpotShadowFrames, Rendered->SpotlightShadowPassCount, Rendered->SpotlightShadowCasterDrawCount,
+				Rendered->GeometryDrawCount, Rendered->HdrTargetGeneration, Rendered->SpotlightShadowResourceGeneration);
+			++m_SpotShadowFrames;
+			m_ScenePrepared = false;
 		}
 
 		void UpdateLocalLightTransforms()
@@ -1251,8 +1447,11 @@ namespace
 		PulseForge::Scene m_GeometryOnlyScene;
 		PulseForge::Scene m_DirectionalOnlyScene;
 		PulseForge::Scene m_LocalLightsScene;
+		PulseForge::Scene m_SpotlightShadowScene;
 		std::vector<PulseForge::Entity> m_LocalLightEntities;
+		std::vector<PulseForge::Entity> m_SpotlightShadowEntities;
 		PulseForge::RenderTargetHandle m_LocalLightOutputTarget;
+		PulseForge::RenderTargetHandle m_SpotlightShadowOutputTarget;
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
 		const PulseForge::Texture* m_FirstHdrTexture = nullptr;
 		const PulseForge::Texture* m_ResizedHdrTexture = nullptr;
@@ -1262,6 +1461,7 @@ namespace
 		uint32_t m_CompletedFrames = 0;
 		uint32_t m_SceneCompletedFrames = 0;
 		uint32_t m_LocalLightFrames = 0;
+		uint32_t m_SpotShadowFrames = 0;
 		uint32_t m_ToneMappingFrame = 0;
 		uint32_t m_EditorUiFrames = 0;
 		uint32_t m_EditorUiTargetCreations = 0;
@@ -1271,22 +1471,26 @@ namespace
 		uint64_t m_SwapchainHdrGeneration = 0;
 		uint64_t m_SrgbHdrGeneration = 0;
 		uint64_t m_ResizedHdrGeneration = 0;
+		uint64_t m_FirstSpotShadowHdrGeneration = 0;
 		const std::array<const char*, 4> ScenarioNames = { "empty", "environment-only", "geometry-only", "directional-only" };
 		bool m_Succeeded = true;
 		bool m_ValidateSceneHdr = false;
 		bool m_ValidateToneMapping = false;
 		bool m_ValidateEditorUiUnorm = false;
 		bool m_ValidateLocalLights = false;
+		bool m_ValidateSpotlightShadows = false;
 		bool m_ScenePrepared = false;
 	};
 
 	class GpuValidationApplication final : public PulseForge::Application
 	{
 	public:
-		GpuValidationApplication(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm, bool ValidateLocalLights)
+		GpuValidationApplication(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm,
+			bool ValidateLocalLights, bool ValidateSpotlightShadows)
 			: Application(PulseForge::RendererAPI::Vulkan)
 		{
-			auto Layer = std::make_unique<GpuValidationLayer>(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm, ValidateLocalLights);
+			auto Layer = std::make_unique<GpuValidationLayer>(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm,
+				ValidateLocalLights, ValidateSpotlightShadows);
 			m_Layer = Layer.get();
 			PushLayer(std::move(Layer));
 		}
@@ -1312,7 +1516,9 @@ int main(int ArgumentCount, char** Arguments)
 		const bool ValidateToneMapping = Mode == "--scene-tonemap";
 		const bool ValidateEditorUiUnorm = Mode == "--editor-ui-unorm";
 		const bool ValidateLocalLights = Mode == "--scene-local-lights";
-		GpuValidationApplication App(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm, ValidateLocalLights);
+		const bool ValidateSpotlightShadows = Mode == "--scene-spot-shadows";
+		GpuValidationApplication App(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm, ValidateLocalLights,
+			ValidateSpotlightShadows);
 		return App.RunValidation();
 	}
 	catch (const std::exception& Exception)

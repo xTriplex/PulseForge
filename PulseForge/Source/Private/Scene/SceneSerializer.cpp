@@ -172,7 +172,11 @@ namespace PulseForge
 						{ "color", { Light.Color.r, Light.Color.g, Light.Color.b } },
 						{ "intensity", Light.Intensity }, { "range", Light.Range },
 						{ "innerConeAngleDegrees", Light.InnerConeAngleDegrees },
-						{ "outerConeAngleDegrees", Light.OuterConeAngleDegrees }
+						{ "outerConeAngleDegrees", Light.OuterConeAngleDegrees },
+						{ "castShadows", Light.CastShadows },
+						{ "shadowBias", Light.ShadowBias },
+						{ "shadowNormalBias", Light.ShadowNormalBias },
+						{ "shadowSoftness", Light.ShadowSoftness }
 					});
 				}
 				if (MeshRenderer->has_value())
@@ -468,6 +472,10 @@ namespace PulseForge
 					const auto Range = SerializedSpotLight->find("range");
 					const auto Inner = SerializedSpotLight->find("innerConeAngleDegrees");
 					const auto Outer = SerializedSpotLight->find("outerConeAngleDegrees");
+					const auto CastShadows = SerializedSpotLight->find("castShadows");
+					const auto ShadowBias = SerializedSpotLight->find("shadowBias");
+					const auto ShadowNormalBias = SerializedSpotLight->find("shadowNormalBias");
+					const auto ShadowSoftness = SerializedSpotLight->find("shadowSoftness");
 					std::array<float, 3> ColorValues{};
 					if (Color == SerializedSpotLight->end() || Intensity == SerializedSpotLight->end() ||
 						Range == SerializedSpotLight->end() || Inner == SerializedSpotLight->end() || Outer == SerializedSpotLight->end() ||
@@ -477,6 +485,16 @@ namespace PulseForge
 							"Spot light requires finite RGB color, intensity, range, and cone half-angles in degrees"));
 					SpotLightData = SpotLightComponent{ { ColorValues[0], ColorValues[1], ColorValues[2] },
 						Intensity->get<float>(), Range->get<float>(), Inner->get<float>(), Outer->get<float>() };
+					if ((CastShadows != SerializedSpotLight->end() && !CastShadows->is_boolean()) ||
+						(ShadowBias != SerializedSpotLight->end() && !ShadowBias->is_number()) ||
+						(ShadowNormalBias != SerializedSpotLight->end() && !ShadowNormalBias->is_number()) ||
+						(ShadowSoftness != SerializedSpotLight->end() && !ShadowSoftness->is_number()))
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Spot-light shadow settings must be boolean/numeric values"));
+					SpotLightData->CastShadows = CastShadows != SerializedSpotLight->end() && CastShadows->get<bool>();
+					if (ShadowBias != SerializedSpotLight->end()) SpotLightData->ShadowBias = ShadowBias->get<float>();
+					if (ShadowNormalBias != SerializedSpotLight->end()) SpotLightData->ShadowNormalBias = ShadowNormalBias->get<float>();
+					if (ShadowSoftness != SerializedSpotLight->end()) SpotLightData->ShadowSoftness = ShadowSoftness->get<float>();
 					if (auto Validation = SpotLightData->Validate(); !Validation)
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error()));
 				}
