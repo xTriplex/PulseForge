@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -148,9 +149,9 @@ namespace
 			}
 			if (m_ValidateSpotlightShadows)
 			{
-				if (m_SpotShadowFrames >= 6)
+				if (m_SpotShadowFrames >= 9)
 				{
-					PF_INFO("GPU_VALIDATION_RESULT=PASS; spotlight maps rendered and reused across 1/2/4 active shadows, dynamic edits, budget overflow, and a frame without directional lighting");
+					PF_INFO("GPU_VALIDATION_RESULT=PASS; spotlight slot ownership was deterministically reassigned through repeated oversubscribed Cast Shadows toggles, with directional-light absence and target resize coverage");
 					PulseForge::Application::Get().RequestClose();
 					return;
 				}
@@ -391,7 +392,7 @@ namespace
 		[[nodiscard]] bool Succeeded() const noexcept
 		{
 			return m_Succeeded && (m_ValidateEditorUiUnorm ? m_EditorUiFrames == 3 && m_EditorUiTargetCreations == 2 :
-				m_ValidateSpotlightShadows ? m_SpotShadowFrames == 6 :
+				m_ValidateSpotlightShadows ? m_SpotShadowFrames == 9 :
 				m_ValidateLocalLights ? m_LocalLightFrames == 6 :
 				m_ValidateToneMapping ? m_ToneMappingFrame == 10 :
 				m_ValidateSceneHdr ? m_SceneCompletedFrames == 4 && m_ScenarioIndex == 4 : m_CompletedFrames == 3);
@@ -642,7 +643,8 @@ namespace
 			{
 				PulseForge::SpotLightComponent Spot;
 				Spot.Color = Index % 2 == 0 ? glm::vec3(1.0f, 0.65f, 0.35f) : glm::vec3(0.35f, 0.65f, 1.0f);
-				Spot.Intensity = 35.0f;
+				static constexpr std::array<float, 5> Intensities = { 500.0f, 100.0f, 80.0f, 60.0f, 1.0f };
+				Spot.Intensity = Intensities[Index];
 				Spot.Range = 30.0f;
 				Spot.InnerConeAngleDegrees = 20.0f;
 				Spot.OuterConeAngleDegrees = 35.0f;
@@ -669,59 +671,56 @@ namespace
 			if (!OutputTarget)
 				throw std::runtime_error("Could not create spotlight-shadow validation output: " + OutputTarget.error().Message);
 			m_SpotlightShadowOutputTarget = std::move(*OutputTarget);
-			PF_INFO("Prepared real SceneRenderer spotlight-shadow scenario with 5 lights, bundled opaque geometry, IBL, directional CSM, and SSAO");
+			PF_INFO("Prepared real SceneRenderer spotlight-shadow reassignment scenario: A-D outrank E; E must be evicted when A-D are all eligible; includes bundled geometry, IBL, directional CSM, and SSAO");
 		}
 
 		void UpdateSpotlightShadowScenario()
 		{
 			const size_t Frame = m_SpotShadowFrames;
-			if (Frame == 1 || Frame == 2 || Frame == 3 || Frame == 4)
+			if (Frame == 0)
 			{
-				const size_t EnabledCount = Frame == 1 ? 1 : 2;
 				for (size_t Index = 0; Index < m_SpotlightShadowEntities.size(); ++Index)
 				{
 					auto Spot = m_SpotlightShadowEntities[Index].GetSpotLight();
 					if (!Spot || !Spot->has_value())
-						throw std::runtime_error("Could not update spotlight-shadow validation settings");
-					Spot->value().CastShadows = Index < EnabledCount;
-					if (Frame == 3 && Index == 0)
-					{
-						Spot->value().ShadowBias = 0.0015f;
-						Spot->value().ShadowNormalBias = 0.04f;
-						Spot->value().ShadowSoftness = 2.0f;
-						auto Transform = m_SpotlightShadowEntities[Index].GetTransform();
-						if (!Transform)
-							throw std::runtime_error("Could not read moving spotlight-shadow transform");
-						Transform->Translation.x += 0.5f;
-						Transform->Rotation = glm::angleAxis(glm::radians(-80.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-						if (!m_SpotlightShadowEntities[Index].SetTransform(*Transform))
-							throw std::runtime_error("Could not move spotlight-shadow validation light");
-					}
-					if (!m_SpotlightShadowEntities[Index].SetSpotLight(Spot->value()))
-						throw std::runtime_error("Could not apply spotlight-shadow validation settings");
-				}
-				if (Frame == 4)
-				{
-					auto Spot = m_SpotlightShadowEntities[0].GetSpotLight();
-					if (!Spot || !Spot->has_value())
-						throw std::runtime_error("Could not read spotlight before shadow-slot reassignment");
+						throw std::runtime_error("Could not initialize spotlight-shadow validation settings");
 					Spot->value().CastShadows = false;
-					if (!m_SpotlightShadowEntities[0].SetSpotLight(Spot->value()))
-						throw std::runtime_error("Could not disable spotlight shadow before slot reassignment");
-
-					PulseForge::RenderTargetDesc OutputDescription;
-					OutputDescription.Width = 96;
-					OutputDescription.Height = 64;
-					OutputDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
-					OutputDescription.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
-					OutputDescription.DebugName = "Resized spotlight-shadow GPU validation output";
-					auto OutputTarget = PulseForge::Application::Get().CreateRenderTarget(OutputDescription);
-					if (!OutputTarget)
-						throw std::runtime_error("Could not resize spotlight-shadow validation output: " + OutputTarget.error().Message);
-					m_SpotlightShadowOutputTarget = std::move(*OutputTarget);
+					if (!m_SpotlightShadowEntities[Index].SetSpotLight(Spot->value()))
+						throw std::runtime_error("Could not initialize spotlight-shadow validation settings");
 				}
 			}
-			else if (Frame == 5)
+			else if (Frame >= 2 && Frame <= 7)
+			{
+				const size_t ToggledIndex = Frame == 2 || Frame == 3 ? 0 : Frame == 4 || Frame == 5 ? 1 : 2;
+				auto Spot = m_SpotlightShadowEntities[ToggledIndex].GetSpotLight();
+				if (!Spot || !Spot->has_value())
+					throw std::runtime_error("Could not read spotlight before repeated shadow-slot reassignment");
+				Spot->value().CastShadows = Frame % 2 != 0;
+				if (!m_SpotlightShadowEntities[ToggledIndex].SetSpotLight(Spot->value()))
+					throw std::runtime_error("Could not apply repeated Cast Shadows change");
+				if (Frame == 2)
+				{
+					auto Transform = m_SpotlightShadowEntities[0].GetTransform();
+					if (!Transform)
+						throw std::runtime_error("Could not read moving spotlight-shadow transform");
+					Transform->Translation.x += 0.5f;
+					if (!m_SpotlightShadowEntities[0].SetTransform(*Transform))
+						throw std::runtime_error("Could not move spotlight-shadow validation light");
+				}
+			}
+			else if (Frame == 1)
+			{
+				for (size_t Index = 0; Index < m_SpotlightShadowEntities.size(); ++Index)
+				{
+					auto Spot = m_SpotlightShadowEntities[Index].GetSpotLight();
+					if (!Spot || !Spot->has_value())
+						throw std::runtime_error("Could not enable spotlight budget validation");
+					Spot->value().CastShadows = true;
+					if (!m_SpotlightShadowEntities[Index].SetSpotLight(Spot->value()))
+						throw std::runtime_error("Could not enable spotlight budget validation");
+				}
+			}
+			else if (Frame == 8)
 			{
 				for (const PulseForge::Entity Entity : m_SpotlightShadowScene.GetEntities())
 				{
@@ -731,21 +730,22 @@ namespace
 					if (*Directional && !Entity.RemoveDirectionalLight())
 						throw std::runtime_error("Could not remove directional light for spotlight-only shadow validation");
 				}
-				for (const PulseForge::Entity Entity : m_SpotlightShadowEntities)
-				{
-					auto Spot = Entity.GetSpotLight();
-					if (!Spot || !Spot->has_value())
-						throw std::runtime_error("Could not enable spotlight budget validation");
-					Spot->value().CastShadows = true;
-					if (!Entity.SetSpotLight(Spot->value()))
-						throw std::runtime_error("Could not enable spotlight budget validation");
-				}
+				PulseForge::RenderTargetDesc OutputDescription;
+				OutputDescription.Width = 96;
+				OutputDescription.Height = 64;
+				OutputDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
+				OutputDescription.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
+				OutputDescription.DebugName = "Resized spotlight-shadow GPU validation output";
+				auto OutputTarget = PulseForge::Application::Get().CreateRenderTarget(OutputDescription);
+				if (!OutputTarget)
+					throw std::runtime_error("Could not resize spotlight-shadow validation output: " + OutputTarget.error().Message);
+				m_SpotlightShadowOutputTarget = std::move(*OutputTarget);
 			}
 		}
 
 		void RenderSpotlightShadowFrame()
 		{
-			if (!m_Succeeded || !m_ScenePrepared || m_SpotShadowFrames >= 6)
+			if (!m_Succeeded || !m_ScenePrepared || m_SpotShadowFrames >= 9)
 				return;
 			auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_SpotlightShadowOutputTarget);
 			if (!Rendered || Rendered->GeometryDrawCount == 0)
@@ -755,7 +755,7 @@ namespace
 				return;
 			}
 
-			static constexpr std::array<size_t, 6> ExpectedShadowPasses = { 0, 1, 2, 2, 1, 4 };
+			static constexpr std::array<size_t, 9> ExpectedShadowPasses = { 0, 4, 4, 4, 4, 4, 4, 4, 4 };
 			const size_t ExpectedPasses = ExpectedShadowPasses[m_SpotShadowFrames];
 			if (Rendered->SpotlightShadowPassCount != ExpectedPasses ||
 				Rendered->SpotlightShadowCasterDrawCount != ExpectedPasses * Rendered->GeometryDrawCount)
@@ -769,6 +769,62 @@ namespace
 				Fail("Spotlight shadow targets were allocated eagerly or recreated during the scenario");
 				return;
 			}
+			const auto HasOwner = [&](size_t Index)
+			{
+				return std::ranges::find(Rendered->SpotlightShadowSlotOwners, m_SpotlightShadowEntities[Index].GetUUID()) !=
+					Rendered->SpotlightShadowSlotOwners.end();
+			};
+			const auto HasExpectedOwners = [&](std::initializer_list<size_t> Expected)
+			{
+				for (size_t Index = 0; Index < m_SpotlightShadowEntities.size(); ++Index)
+					if (HasOwner(Index) != (std::ranges::find(Expected, Index) != Expected.end()))
+						return false;
+				return true;
+			};
+			const auto HasExpectedSlotOrder = [&](const std::array<int32_t, 4>& Expected)
+			{
+				for (size_t Slot = 0; Slot < Expected.size(); ++Slot)
+				{
+					if (Expected[Slot] < 0)
+					{
+						if (Rendered->SpotlightShadowSlotOwners[Slot])
+							return false;
+					}
+					else if (!Rendered->SpotlightShadowSlotOwners[Slot] ||
+						*Rendered->SpotlightShadowSlotOwners[Slot] != m_SpotlightShadowEntities[static_cast<size_t>(Expected[Slot])].GetUUID())
+						return false;
+				}
+				return true;
+			};
+			if ((m_SpotShadowFrames == 0 && !HasExpectedOwners({})) ||
+				(m_SpotShadowFrames == 1 && !HasExpectedOwners({ 0, 1, 2, 3 })) ||
+				(m_SpotShadowFrames == 2 && !HasExpectedOwners({ 1, 2, 3, 4 })) ||
+				(m_SpotShadowFrames == 3 && !HasExpectedOwners({ 0, 1, 2, 3 })) ||
+				(m_SpotShadowFrames == 4 && !HasExpectedOwners({ 0, 2, 3, 4 })) ||
+				(m_SpotShadowFrames == 5 && !HasExpectedOwners({ 0, 1, 2, 3 })) ||
+				(m_SpotShadowFrames == 6 && !HasExpectedOwners({ 0, 1, 3, 4 })) ||
+				(m_SpotShadowFrames == 7 && !HasExpectedOwners({ 0, 1, 2, 3 })) ||
+				(m_SpotShadowFrames == 8 && !HasExpectedOwners({ 0, 1, 2, 3 })))
+			{
+				Fail("Spotlight shadow slot owners did not match deterministic top-four selection after Cast Shadows changes");
+				return;
+			}
+			static constexpr std::array<std::array<int32_t, 4>, 9> ExpectedSlotOwners = {{
+				{{ -1, -1, -1, -1 }},
+				{{ 0, 1, 2, 3 }},
+				{{ 4, 1, 2, 3 }},
+				{{ 0, 1, 2, 3 }},
+				{{ 0, 4, 2, 3 }},
+				{{ 0, 1, 2, 3 }},
+				{{ 0, 1, 4, 3 }},
+				{{ 0, 1, 2, 3 }},
+				{{ 0, 1, 2, 3 }}
+			}};
+			if (!HasExpectedSlotOrder(ExpectedSlotOwners[m_SpotShadowFrames]))
+			{
+				Fail("Spotlight shadow maps were not rebound to their exact deterministic slot owners");
+				return;
+			}
 			if (m_SpotShadowFrames == 0)
 				m_FirstSpotShadowHdrGeneration = Rendered->HdrTargetGeneration;
 			else if (m_SpotShadowFrames < 4 && Rendered->HdrTargetGeneration != m_FirstSpotShadowHdrGeneration)
@@ -776,14 +832,18 @@ namespace
 				Fail("Unchanged output extents did not reuse the HDR target during spotlight-shadow rendering");
 				return;
 			}
-			else if (m_SpotShadowFrames == 4 && Rendered->HdrTargetGeneration == m_FirstSpotShadowHdrGeneration)
+			else if (m_SpotShadowFrames == 8 && Rendered->HdrTargetGeneration == m_FirstSpotShadowHdrGeneration)
 			{
 				Fail("Resizing the spotlight-shadow output did not replace the HDR target");
 				return;
 			}
-			PF_INFO("SPOT_SHADOW_FRAME={0}; shadow_passes={1}; caster_draws={2}; pbr_draws={3}; hdr_generation={4}; shadow_resource_generation={5}",
+			PF_INFO("SPOT_SHADOW_FRAME={0}; shadow_passes={1}; caster_draws={2}; pbr_draws={3}; hdr_generation={4}; shadow_resource_generation={5}; slot_owners=[{6},{7},{8},{9}]",
 				m_SpotShadowFrames, Rendered->SpotlightShadowPassCount, Rendered->SpotlightShadowCasterDrawCount,
-				Rendered->GeometryDrawCount, Rendered->HdrTargetGeneration, Rendered->SpotlightShadowResourceGeneration);
+				Rendered->GeometryDrawCount, Rendered->HdrTargetGeneration, Rendered->SpotlightShadowResourceGeneration,
+				Rendered->SpotlightShadowSlotOwners[0] ? Rendered->SpotlightShadowSlotOwners[0]->ToString() : "none",
+				Rendered->SpotlightShadowSlotOwners[1] ? Rendered->SpotlightShadowSlotOwners[1]->ToString() : "none",
+				Rendered->SpotlightShadowSlotOwners[2] ? Rendered->SpotlightShadowSlotOwners[2]->ToString() : "none",
+				Rendered->SpotlightShadowSlotOwners[3] ? Rendered->SpotlightShadowSlotOwners[3]->ToString() : "none");
 			++m_SpotShadowFrames;
 			m_ScenePrepared = false;
 		}

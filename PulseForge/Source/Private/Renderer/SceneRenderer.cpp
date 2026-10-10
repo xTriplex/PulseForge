@@ -1792,14 +1792,15 @@ namespace PulseForge
 		if (auto Tonemapped = ToneMapToOutput(*Hdr->ColorTexture, Hdr->TargetGeneration,
 			ColorTargetFormat::Swapchain, true); !Tonemapped)
 			return std::unexpected(std::move(Tonemapped.error()));
-	return SceneRenderOutputResult{
+		return SceneRenderOutputResult{
 			Hdr->GeometryDrawCount,
 			Hdr->TargetGeneration,
 			ColorTargetFormat::Swapchain,
 			ShouldShaderEncodeSrgb(ColorTargetFormat::Swapchain, m_Runtime.GetOutputColorEncoding()),
 			Hdr->SpotlightShadowPassCount,
 			Hdr->SpotlightShadowCasterDrawCount,
-			Hdr->SpotlightShadowResourceGeneration
+			Hdr->SpotlightShadowResourceGeneration,
+			m_SpotShadowSlotOwners
 		};
 	}
 
@@ -1844,7 +1845,8 @@ namespace PulseForge
 			ShouldShaderEncodeSrgb(Description.ColorFormat, m_Runtime.GetOutputColorEncoding()),
 			Hdr->SpotlightShadowPassCount,
 			Hdr->SpotlightShadowCasterDrawCount,
-			Hdr->SpotlightShadowResourceGeneration
+			Hdr->SpotlightShadowResourceGeneration,
+			m_SpotShadowSlotOwners
 		};
 	}
 

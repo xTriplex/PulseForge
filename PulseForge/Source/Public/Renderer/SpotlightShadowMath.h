@@ -41,25 +41,27 @@ namespace PulseForge
 	using SpotlightShadowSlotOwners = std::array<std::optional<UUID>, MaxSpotlightShadowMapCount>;
 	using SpotlightShadowSlotAssignments = std::array<int32_t, MaxLocalLightCount>;
 
-	// Candidates must be provided in the selected local-light relevance order. Existing eligible owners retain
-	// their slots; new owners take the lowest free slot. Entries without a slot use -1 (unshadowed).
+	// Candidates must be provided in selected local-light relevance order. Only the highest-ranked candidates
+	// receive shadow maps. Existing physical slots are preserved for owners that remain in that selected set;
+	// ineligible and lower-ranked owners are evicted. Entries without a slot use -1 (unshadowed).
 	[[nodiscard]] inline SpotlightShadowSlotAssignments AssignSpotlightShadowSlots(
 		std::span<const SpotlightShadowCandidate> Candidates,
 		SpotlightShadowSlotOwners& Owners) noexcept
 	{
 		SpotlightShadowSlotAssignments Assignments;
 		Assignments.fill(-1);
+		const size_t SelectedCandidateCount = (std::min)(Candidates.size(), Owners.size());
 		for (std::optional<UUID>& Owner : Owners)
 		{
 			if (!Owner)
 				continue;
-			const bool RemainsEligible = std::ranges::any_of(Candidates,
+			const bool RemainsSelected = std::ranges::any_of(Candidates.first(SelectedCandidateCount),
 				[&](const SpotlightShadowCandidate& Candidate) { return Candidate.Entity == *Owner; });
-			if (!RemainsEligible)
+			if (!RemainsSelected)
 				Owner.reset();
 		}
 
-		for (const SpotlightShadowCandidate& Candidate : Candidates)
+		for (const SpotlightShadowCandidate& Candidate : Candidates.first(SelectedCandidateCount))
 		{
 			if (Candidate.SelectedLightIndex >= Assignments.size())
 				continue;

@@ -74,6 +74,8 @@ namespace PulseForge
 		size_t SpotlightShadowPassCount = 0;
 		size_t SpotlightShadowCasterDrawCount = 0;
 		uint64_t SpotlightShadowResourceGeneration = 0;
+		// Diagnostic ownership snapshot for the completed frame, ordered by physical shadow-map slot.
+		SpotlightShadowSlotOwners SpotlightShadowSlotOwners{};
 	};
 
 	struct AmbientOcclusionSettings

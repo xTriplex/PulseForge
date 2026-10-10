@@ -6789,6 +6789,81 @@ end
 		PF_CHECK(Tests, std::ranges::all_of(ClearedAssignments, [](int32_t Slot) { return Slot == -1; }));
 		PF_CHECK(Tests, std::ranges::all_of(ShadowOwners, [](const auto& Owner) { return !Owner.has_value(); }));
 
+		// Over-budget lights are selected by candidate rank every update; slot persistence only applies inside
+		// that selected set. A previously waiting light must not retain a slot over a higher-ranked light.
+		const std::array<SpotlightShadowCandidate, 5> RankedCandidates = {{
+			{ UUID(0, 101), 0 }, { UUID(0, 102), 1 }, { UUID(0, 103), 2 },
+			{ UUID(0, 104), 3 }, { UUID(0, 105), 4 }
+		}};
+		SpotlightShadowSlotOwners RankedOwners{};
+		const auto RankedInitial = AssignSpotlightShadowSlots(RankedCandidates, RankedOwners);
+		PF_CHECK(Tests, RankedInitial[0] == 0 && RankedInitial[1] == 1 &&
+			RankedInitial[2] == 2 && RankedInitial[3] == 3 && RankedInitial[4] == -1);
+		const std::array<SpotlightShadowCandidate, 4> WithoutThird = {{
+			{ UUID(0, 101), 0 }, { UUID(0, 102), 1 }, { UUID(0, 104), 3 }, { UUID(0, 105), 4 }
+		}};
+		const auto PromotedFifth = AssignSpotlightShadowSlots(WithoutThird, RankedOwners);
+		PF_CHECK(Tests, PromotedFifth[0] == 0 && PromotedFifth[1] == 1 &&
+			PromotedFifth[2] == -1 && PromotedFifth[3] == 3 && PromotedFifth[4] == 2);
+		PF_CHECK(Tests, RankedOwners[2] == UUID(0, 105) && RankedOwners[3] == UUID(0, 104));
+		const auto RestoredThird = AssignSpotlightShadowSlots(RankedCandidates, RankedOwners);
+		PF_CHECK(Tests, RestoredThird[0] == 0 && RestoredThird[1] == 1 &&
+			RestoredThird[2] == 2 && RestoredThird[3] == 3 && RestoredThird[4] == -1);
+		PF_CHECK(Tests, RankedOwners[2] == UUID(0, 103) && RankedOwners[3] == UUID(0, 104));
+		const std::array<SpotlightShadowCandidate, 4> WithoutFirst = {{
+			{ UUID(0, 102), 1 }, { UUID(0, 103), 2 }, { UUID(0, 104), 3 }, { UUID(0, 105), 4 }
+		}};
+		const auto FirstDisabled = AssignSpotlightShadowSlots(WithoutFirst, RankedOwners);
+		PF_CHECK(Tests, FirstDisabled[0] == -1 && FirstDisabled[1] == 1 &&
+			FirstDisabled[2] == 2 && FirstDisabled[3] == 3 && FirstDisabled[4] == 0);
+		const auto FirstRestored = AssignSpotlightShadowSlots(RankedCandidates, RankedOwners);
+		PF_CHECK(Tests, FirstRestored[0] == 0 && FirstRestored[1] == 1 &&
+			FirstRestored[2] == 2 && FirstRestored[3] == 3 && FirstRestored[4] == -1);
+		PF_CHECK(Tests, std::ranges::count_if(RankedOwners,
+			[](const auto& Owner) { return Owner.has_value(); }) == MaxSpotlightShadowMapCount);
+
+		const std::array<SpotlightShadowCandidate, 2> UnderCapacityCandidates = {{
+			{ UUID(0, 201), 0 }, { UUID(0, 202), 1 }
+		}};
+		SpotlightShadowSlotOwners UnderCapacityOwners{};
+		const auto UnderCapacityOn = AssignSpotlightShadowSlots(UnderCapacityCandidates, UnderCapacityOwners);
+		PF_CHECK(Tests, UnderCapacityOn[0] >= 0 && UnderCapacityOn[1] >= 0);
+		const auto UnderCapacityOff = AssignSpotlightShadowSlots({}, UnderCapacityOwners);
+		PF_CHECK(Tests, UnderCapacityOff[0] == -1 && UnderCapacityOff[1] == -1 &&
+			std::ranges::none_of(UnderCapacityOwners, [](const auto& Owner) { return Owner.has_value(); }));
+		const auto UnderCapacityRestored = AssignSpotlightShadowSlots(UnderCapacityCandidates, UnderCapacityOwners);
+		PF_CHECK(Tests, UnderCapacityRestored[0] >= 0 && UnderCapacityRestored[1] >= 0);
+
+		const std::array<SpotlightShadowCandidate, 4> AtCapacityCandidates = {{
+			{ UUID(0, 301), 0 }, { UUID(0, 302), 1 }, { UUID(0, 303), 2 }, { UUID(0, 304), 3 }
+		}};
+		SpotlightShadowSlotOwners AtCapacityOwners{};
+		const auto AtCapacityInitial = AssignSpotlightShadowSlots(AtCapacityCandidates, AtCapacityOwners);
+		PF_CHECK(Tests, std::ranges::count_if(AtCapacityInitial, [](int32_t Slot) { return Slot >= 0; }) == 4);
+		for (size_t DisabledIndex = 0; DisabledIndex < AtCapacityCandidates.size(); ++DisabledIndex)
+		{
+			std::array<SpotlightShadowCandidate, 3> ReducedCandidates{};
+			size_t WriteIndex = 0;
+			for (size_t CandidateIndex = 0; CandidateIndex < AtCapacityCandidates.size(); ++CandidateIndex)
+				if (CandidateIndex != DisabledIndex)
+					ReducedCandidates[WriteIndex++] = AtCapacityCandidates[CandidateIndex];
+			const auto Reduced = AssignSpotlightShadowSlots(ReducedCandidates, AtCapacityOwners);
+			PF_CHECK(Tests, std::ranges::count_if(Reduced, [](int32_t Slot) { return Slot >= 0; }) == 3);
+			const auto Restored = AssignSpotlightShadowSlots(AtCapacityCandidates, AtCapacityOwners);
+			PF_CHECK(Tests, std::ranges::count_if(Restored, [](int32_t Slot) { return Slot >= 0; }) == 4);
+			std::array<bool, MaxSpotlightShadowMapCount> UsedSlots{};
+			for (size_t CandidateIndex = 0; CandidateIndex < AtCapacityCandidates.size(); ++CandidateIndex)
+			{
+				const int32_t Slot = Restored[CandidateIndex];
+				PF_CHECK(Tests, Slot >= 0 && static_cast<size_t>(Slot) < UsedSlots.size());
+				if (Slot >= 0 && static_cast<size_t>(Slot) < UsedSlots.size())
+				{
+					PF_CHECK(Tests, !UsedSlots[static_cast<size_t>(Slot)]);
+					UsedSlots[static_cast<size_t>(Slot)] = true;
+				}
+			}
+		}
+
 		const float AtZero = EvaluateLocalLightRangeAttenuation(0.0f, 10.0f);
 		const float AtOne = EvaluateLocalLightRangeAttenuation(1.0f, 10.0f);
 		const float AtFive = EvaluateLocalLightRangeAttenuation(5.0f, 10.0f);

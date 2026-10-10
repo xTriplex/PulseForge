@@ -35,7 +35,7 @@ Try these checks from the Inspector:
 
 ### SpotlightShadowLimits
 
-Open `Assets/Scenes/SpotlightShadowLimits.scene` from the Content Browser for a preconfigured budget case. Five spots request shadows and are aimed at the same opaque display area from different positions. Four maps are available; the low-intensity, short-range E is deliberately the least relevant candidate at the authored view and should remain illuminated without a map. Assignment follows renderer camera-relevance ordering and stable UUID ties, so changing the lights or camera can make a different candidate the overflow light. Disable a shadow owner to exercise slot reassignment.
+Open `Assets/Scenes/SpotlightShadowLimits.scene` from the Content Browser for a preconfigured budget case. Five spots request shadows and are aimed at the same opaque display area from different positions. Four maps are available; the low-intensity, short-range E is deliberately the least relevant candidate at the authored view and should remain illuminated without a map. Each prepared frame selects the four highest-ranked eligible shadow requesters using camera relevance and stable UUID ties. Existing selected lights retain their physical map slots, but an overflow light cannot hold a slot over a newly higher-ranked eligible light. Toggle an owner off to let E enter the selected four, then back on to verify that E yields its slot immediately. The four slots are independent of the 32-light direct-illumination budget; an overflow spotlight continues to illuminate without shadows.
 
 ## Expected behavior and limits
 
