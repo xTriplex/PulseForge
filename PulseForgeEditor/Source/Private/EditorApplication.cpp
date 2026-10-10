@@ -22,6 +22,7 @@
 #include "Runtime/SceneRuntime.h"
 #include "Window/Window.h"
 #include "Editor/EditorImGuiRenderer.h"
+#include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
@@ -191,6 +192,7 @@ namespace
 
 	struct EditorConsoleMessage
 	{
+		uint64_t Sequence = 0;
 		std::string Logger;
 		spdlog::level::level_enum Level;
 		std::string Text;
@@ -236,6 +238,7 @@ namespace
 			std::replace(Text.begin(), Text.end(), '\n', ' ');
 
 			m_Messages.push_back({
+				++m_NextSequence,
 				std::string(Message.logger_name.data(), Message.logger_name.size()),
 				Message.level,
 				std::move(Text) });
@@ -249,6 +252,7 @@ namespace
 	private:
 		std::deque<EditorConsoleMessage> m_Messages;
 		uint64_t m_Revision = 0;
+		uint64_t m_NextSequence = 0;
 	};
 
 	class EditorViewportCamera final
@@ -3081,6 +3085,31 @@ namespace
 			}
 		}
 
+		bool RefreshConsoleSnapshot()
+		{
+			if (!m_ConsoleSink)
+				return false;
+			uint64_t CurrentRevision = m_ConsoleRevision;
+			if (!m_ConsoleSink->CopyMessagesIfChanged(m_ConsoleRevision, m_ConsoleMessages, CurrentRevision))
+				return false;
+			m_ConsoleRevision = CurrentRevision;
+			return true;
+		}
+
+		std::string FormatConsoleMessages() const
+		{
+			std::vector<PulseForgeEditor::ConsoleEntryView> Entries;
+			Entries.reserve(m_ConsoleMessages.size());
+			for (const EditorConsoleMessage& Message : m_ConsoleMessages)
+				Entries.push_back({ LogLevelName(Message.Level), Message.Logger, Message.Text });
+			return PulseForgeEditor::FormatConsoleHistory(Entries);
+		}
+
+		std::string FormatConsoleMessage(const EditorConsoleMessage& Message) const
+		{
+			return PulseForgeEditor::FormatConsoleEntry({ LogLevelName(Message.Level), Message.Logger, Message.Text });
+		}
+
 		void DrawConsolePanel()
 		{
 			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Console))
@@ -3092,12 +3121,35 @@ namespace
 						"The editor could not connect to the engine loggers.");
 				else
 				{
+					// Refresh before toolbar actions so Copy All uses a coherent current sink snapshot.
+					RefreshConsoleSnapshot();
 					if (m_EditorStyle.BeginToolbar("ConsoleToolbar", 34.0f))
 					{
 						if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Clear, "Clear"))
+						{
 							m_ConsoleSink->Clear();
+							RefreshConsoleSnapshot();
+							m_ConsoleSelectableText.clear();
+							m_ConsoleSelectableTextRevision = m_ConsoleRevision;
+							m_ConsoleSelectableTextInitialized = true;
+							m_ConsoleSelectableTextInteracting = false;
+							m_ConsoleSelectableAutoScrollSuspended = false;
+						}
 						ImGui::SameLine();
-						ImGui::Checkbox("Auto-scroll", &m_ConsoleAutoScroll);
+						if (ImGui::Checkbox("Auto-scroll", &m_ConsoleAutoScroll) && m_ConsoleAutoScroll)
+							m_ConsoleSelectableAutoScrollSuspended = false;
+						ImGui::SameLine();
+						ImGui::BeginDisabled(m_ConsoleMessages.empty());
+						if (ImGui::Button("Copy All"))
+						{
+							const std::string Formatted = FormatConsoleMessages();
+							if (!Formatted.empty())
+								ImGui::SetClipboardText(Formatted.c_str());
+						}
+						ImGui::EndDisabled();
+						ImGui::SameLine();
+						if (ImGui::Checkbox("Select text", &m_ConsoleSelectableView))
+							m_ConsoleSelectableTextInteracting = false;
 					}
 					m_EditorStyle.EndToolbar();
 
@@ -3105,43 +3157,86 @@ namespace
 						ImGuiWindowFlags_HorizontalScrollbar))
 					{
 						[[maybe_unused]] const auto MonospaceFont = m_EditorStyle.PushMonospaceFont();
-						const bool WasAtBottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
-						uint64_t CurrentRevision = m_ConsoleRevision;
-						if (m_ConsoleSink->CopyMessagesIfChanged(
-							m_ConsoleRevision,
-							m_ConsoleMessages,
-							CurrentRevision))
+						if (m_ConsoleSelectableView)
 						{
-							m_ConsoleRevision = CurrentRevision;
-						}
-
-						const float PrefixWidth = std::clamp(ImGui::GetContentRegionAvail().x * 0.28f, 112.0f, 190.0f);
-						if (ImGui::BeginTable("ConsoleMessageRows", 2,
-							ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
-							ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_NoSavedSettings))
-						{
-							ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthFixed, PrefixWidth);
-							ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-							ImGuiListClipper Clipper;
-						Clipper.Begin(static_cast<int>(m_ConsoleMessages.size()));
-						while (Clipper.Step())
-						{
-							for (int Index = Clipper.DisplayStart; Index < Clipper.DisplayEnd; ++Index)
+							const bool TextViewHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
+							if (TextViewHovered && ImGui::GetIO().MouseWheel != 0.0f)
+								m_ConsoleSelectableAutoScrollSuspended = true;
+							const bool CanReplaceText = !m_ConsoleSelectableTextInteracting;
+							const bool TextNeedsRefresh = !m_ConsoleSelectableTextInitialized ||
+								m_ConsoleSelectableTextRevision != m_ConsoleRevision;
+							const bool TextChanged = CanReplaceText && TextNeedsRefresh;
+							if (TextChanged)
 							{
-								const EditorConsoleMessage& Message = m_ConsoleMessages[static_cast<size_t>(Index)];
-								ImGui::TableNextRow();
-								ImGui::TableSetColumnIndex(0);
-								ImGui::TextColored(LogLevelColor(Message.Level), "[%s]", LogLevelName(Message.Level));
-								ImGui::SameLine();
-								m_EditorStyle.TextMuted(Message.Logger);
-								ImGui::TableSetColumnIndex(1);
-								ImGui::TextUnformatted(Message.Text.data(), Message.Text.data() + Message.Text.size());
+								m_ConsoleSelectableText = FormatConsoleMessages();
+								m_ConsoleSelectableTextRevision = m_ConsoleRevision;
+								m_ConsoleSelectableTextInitialized = true;
 							}
+							if (TextChanged && m_ConsoleAutoScroll && !m_ConsoleSelectableAutoScrollSuspended)
+								ImGui::SetNextWindowScroll(ImVec2(-1.0f, FLT_MAX));
+
+							const ImVec2 TextViewSize = ImGui::GetContentRegionAvail();
+							ImGui::InputTextMultiline(
+								"##ConsoleSelectableText",
+								m_ConsoleSelectableText.data(),
+								m_ConsoleSelectableText.size() + 1,
+								TextViewSize,
+								ImGuiInputTextFlags_ReadOnly);
+							const bool TextViewActive = ImGui::IsItemActive();
+							m_ConsoleSelectableTextInteracting = TextViewActive;
 						}
-							ImGui::EndTable();
+						else
+						{
+							const bool WasAtBottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
+							const float PrefixWidth = std::clamp(
+								ImGui::GetContentRegionAvail().x * 0.28f, 112.0f, 190.0f);
+							if (ImGui::BeginTable("ConsoleMessageRows", 2,
+								ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
+								ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_NoSavedSettings))
+							{
+								ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthFixed, PrefixWidth);
+								ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+								ImGuiListClipper Clipper;
+								Clipper.Begin(static_cast<int>(m_ConsoleMessages.size()));
+								while (Clipper.Step())
+								{
+									for (int Index = Clipper.DisplayStart; Index < Clipper.DisplayEnd; ++Index)
+									{
+										const EditorConsoleMessage& Message = m_ConsoleMessages[static_cast<size_t>(Index)];
+										ImGui::PushID(static_cast<int>(Message.Sequence >> 32));
+										ImGui::PushID(static_cast<int>(Message.Sequence & 0xffffffffu));
+										ImGui::TableNextRow();
+										ImGui::TableSetColumnIndex(0);
+										ImGui::Selectable("##ConsoleEntryContext", false,
+											ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
+											ImVec2(0.0f, ImGui::GetTextLineHeightWithSpacing()));
+										if (ImGui::BeginPopupContextItem("ConsoleEntryContextMenu"))
+										{
+											if (ImGui::MenuItem("Copy Message"))
+												ImGui::SetClipboardText(Message.Text.c_str());
+											if (ImGui::MenuItem("Copy Entry"))
+											{
+												const std::string Formatted = FormatConsoleMessage(Message);
+												ImGui::SetClipboardText(Formatted.c_str());
+											}
+											ImGui::EndPopup();
+										}
+										ImGui::TableSetColumnIndex(0);
+										ImGui::TextColored(LogLevelColor(Message.Level), "[%s]", LogLevelName(Message.Level));
+										ImGui::SameLine();
+										m_EditorStyle.TextMuted(Message.Logger);
+										ImGui::TableSetColumnIndex(1);
+										ImGui::TextUnformatted(
+											Message.Text.data(), Message.Text.data() + Message.Text.size());
+										ImGui::PopID();
+										ImGui::PopID();
+									}
+								}
+								ImGui::EndTable();
+							}
+							if (m_ConsoleAutoScroll && WasAtBottom)
+								ImGui::SetScrollHereY(1.0f);
 						}
-						if (m_ConsoleAutoScroll && WasAtBottom)
-							ImGui::SetScrollHereY(1.0f);
 					}
 					ImGui::EndChild();
 				}
@@ -4836,8 +4931,14 @@ namespace
 		bool m_SceneDirty = false;
 		bool m_OpenUnsavedDialog = false;
 		bool m_ConsoleAutoScroll = true;
+		bool m_ConsoleSelectableView = false;
+		bool m_ConsoleSelectableTextInteracting = false;
+		bool m_ConsoleSelectableTextInitialized = false;
+		bool m_ConsoleSelectableAutoScrollSuspended = false;
 		bool m_ContentGridView = true;
 		uint64_t m_ConsoleRevision = 0;
+		uint64_t m_ConsoleSelectableTextRevision = 0;
+		std::string m_ConsoleSelectableText;
 		std::shared_ptr<EditorConsoleSink> m_ConsoleSink;
 		std::vector<EditorConsoleMessage> m_ConsoleMessages;
 		std::vector<std::shared_ptr<spdlog::logger>> m_ConsoleLoggers;
