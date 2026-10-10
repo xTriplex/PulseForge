@@ -1,0 +1,83 @@
+{
+  "format": "PulseForgeScene",
+  "version": 7,
+  "entities": [
+    {
+      "uuid": "96eb2f8c-a293-4f57-bcf6-66b2af4bee8e",
+      "tag": { "name": "Budget test floor" },
+      "transform": { "translation": [0.0, -0.12, -1.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [8.0, 0.12, 8.0] },
+      "meshRenderer": { "meshAsset": "fe3f55f9-ee65-4186-a28c-a9abe4629e8b", "materialAsset": "93212271-50fa-49fc-9f60-3400f62c334d" },
+      "parent": null
+    },
+    {
+      "uuid": "6394c090-03c6-496b-affe-f4586b006f65",
+      "tag": { "name": "Budget test warm caster" },
+      "transform": { "translation": [-1.0, 0.65, -0.3], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [0.65, 0.65, 0.65] },
+      "meshRenderer": { "meshAsset": "fe3f55f9-ee65-4186-a28c-a9abe4629e8b", "materialAsset": "be079076-aece-4891-a5d1-cd2701322a19" },
+      "parent": null
+    },
+    {
+      "uuid": "f3abe0b0-44ba-497b-bf6e-2977d0193f78",
+      "tag": { "name": "Budget test pillar" },
+      "transform": { "translation": [1.1, 1.0, -1.2], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [0.35, 1.0, 0.35] },
+      "meshRenderer": { "meshAsset": "fe3f55f9-ee65-4186-a28c-a9abe4629e8b", "materialAsset": "ef713f20-eeeb-4cfe-91cc-0e04c6135868" },
+      "parent": null
+    },
+    {
+      "uuid": "aff2c744-b6df-4c34-9d2a-d6c49481fe90",
+      "tag": { "name": "Budget test elevated caster" },
+      "transform": { "translation": [0.0, 1.75, 0.25], "rotation": [0.9239, 0.0, 0.3827, 0.0], "scale": [0.45, 0.45, 0.45] },
+      "meshRenderer": { "meshAsset": "fe3f55f9-ee65-4186-a28c-a9abe4629e8b", "materialAsset": "caf948b9-5262-4f68-9466-553af2844bd4" },
+      "parent": null
+    },
+    {
+      "uuid": "523e4b23-aabd-485b-93d2-e97a58b1d4fe",
+      "tag": { "name": "Budget test camera" },
+      "transform": { "translation": [0.0, 4.4, 12.5], "rotation": [0.9903, -0.1380, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "camera": { "verticalFovRadians": 0.7853982, "nearClipPlane": 0.1, "farClipPlane": 100.0, "primary": true },
+      "parent": null
+    },
+    {
+      "uuid": "9a8a06d2-756c-4869-85a3-5cf54bbaf51c",
+      "tag": { "name": "Budget test environment" },
+      "transform": { "translation": [0.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "environmentLight": { "hdrImage": "1d01d496-3226-482e-ba5a-7767fe35bc93", "intensity": 0.22 },
+      "parent": null
+    },
+    {
+      "uuid": "7f792bb4-1615-41d1-afb2-aad2a425a21b",
+      "tag": { "name": "Shadow requester 1" },
+      "transform": { "translation": [-3.0, 5.0, 3.0], "rotation": [0.859003, -0.461554, -0.221546, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "spotLight": { "color": [1.0, 0.72, 0.50], "intensity": 42.0, "range": 15.0, "innerConeAngleDegrees": 18.0, "outerConeAngleDegrees": 31.0, "castShadows": true, "shadowBias": 0.001, "shadowNormalBias": 0.025, "shadowSoftness": 1.5 },
+      "parent": null
+    },
+    {
+      "uuid": "2a0db254-ef30-4c5e-a8a7-deb08443a29a",
+      "tag": { "name": "Shadow requester 2" },
+      "transform": { "translation": [3.5, 4.5, 2.5], "rotation": [0.837044, -0.479409, 0.263675, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "spotLight": { "color": [0.46, 0.67, 1.0], "intensity": 38.0, "range": 14.0, "innerConeAngleDegrees": 17.0, "outerConeAngleDegrees": 29.0, "castShadows": true, "shadowBias": 0.001, "shadowNormalBias": 0.025, "shadowSoftness": 1.5 },
+      "parent": null
+    },
+    {
+      "uuid": "30a278e8-bad7-4cec-9553-c64a0ba4963c",
+      "tag": { "name": "Shadow requester 3" },
+      "transform": { "translation": [-4.0, 3.8, -0.5], "rotation": [0.784033, -0.438915, -0.438915, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "spotLight": { "color": [1.0, 0.40, 0.20], "intensity": 32.0, "range": 12.0, "innerConeAngleDegrees": 15.0, "outerConeAngleDegrees": 27.0, "castShadows": true, "shadowBias": 0.001, "shadowNormalBias": 0.025, "shadowSoftness": 1.5 },
+      "parent": null
+    },
+    {
+      "uuid": "4d2a4f28-f9ca-4615-bc38-6869b291bf70",
+      "tag": { "name": "Shadow requester 4" },
+      "transform": { "translation": [2.5, 4.5, -2.0], "rotation": [0.625213, -0.698060, 0.349030, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "spotLight": { "color": [0.74, 0.88, 1.0], "intensity": 28.0, "range": 13.0, "innerConeAngleDegrees": 16.0, "outerConeAngleDegrees": 28.0, "castShadows": true, "shadowBias": 0.001, "shadowNormalBias": 0.025, "shadowSoftness": 1.5 },
+      "parent": null
+    },
+    {
+      "uuid": "ea8d79b8-3045-4ff1-9140-6f2804d3e13e",
+      "tag": { "name": "Shadow requester 5 - expected unshadowed overflow" },
+      "transform": { "translation": [0.0, 3.0, 2.0], "rotation": [0.8810, -0.4731, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "spotLight": { "color": [1.0, 0.94, 0.80], "intensity": 12.0, "range": 6.0, "innerConeAngleDegrees": 14.0, "outerConeAngleDegrees": 25.0, "castShadows": true, "shadowBias": 0.001, "shadowNormalBias": 0.025, "shadowSoftness": 1.5 },
+      "parent": null
+    }
+  ]
+}

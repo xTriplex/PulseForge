@@ -1,0 +1,90 @@
+{
+  "format": "PulseForgeScene",
+  "version": 7,
+  "entities": [
+    {
+      "uuid": "a4f23219-d8df-4dbc-9352-8977414ec314",
+      "tag": { "name": "Floor - broad shadow receiver" },
+      "transform": { "translation": [0.0, -0.12, -1.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [8.0, 0.12, 8.0] },
+      "meshRenderer": { "meshAsset": "fe3f55f9-ee65-4186-a28c-a9abe4629e8b", "materialAsset": "93212271-50fa-49fc-9f60-3400f62c334d" },
+      "parent": null
+    },
+    {
+      "uuid": "c5d85021-33d9-49a3-a8e3-7744c32433fd",
+      "tag": { "name": "Back wall" },
+      "transform": { "translation": [0.0, 2.0, -4.8], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [8.0, 2.0, 0.12] },
+      "meshRenderer": { "meshAsset": "fe3f55f9-ee65-4186-a28c-a9abe4629e8b", "materialAsset": "93212271-50fa-49fc-9f60-3400f62c334d" },
+      "parent": null
+    },
+    {
+      "uuid": "f4f16f1a-a1b4-40b8-966e-099bf2e581e0",
+      "tag": { "name": "Warm matte block" },
+      "transform": { "translation": [-1.3, 0.62, -0.4], "rotation": [0.9763, 0.0, 0.2164, 0.0], "scale": [0.72, 0.62, 0.72] },
+      "meshRenderer": { "meshAsset": "fe3f55f9-ee65-4186-a28c-a9abe4629e8b", "materialAsset": "be079076-aece-4891-a5d1-cd2701322a19" },
+      "parent": null
+    },
+    {
+      "uuid": "16e240fc-b5a2-41db-86e6-b815496b4d58",
+      "tag": { "name": "Tall pillar - long shadow caster" },
+      "transform": { "translation": [1.0, 1.15, -1.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [0.38, 1.15, 0.38] },
+      "meshRenderer": { "meshAsset": "fe3f55f9-ee65-4186-a28c-a9abe4629e8b", "materialAsset": "ef713f20-eeeb-4cfe-91cc-0e04c6135868" },
+      "parent": null
+    },
+    {
+      "uuid": "ac1dce8a-0e6a-4078-abbc-24d90b054546",
+      "tag": { "name": "Suspended brass caster" },
+      "transform": { "translation": [0.1, 2.0, 0.4], "rotation": [0.9239, 0.0, 0.3827, 0.0], "scale": [0.5, 0.5, 0.5] },
+      "meshRenderer": { "meshAsset": "fe3f55f9-ee65-4186-a28c-a9abe4629e8b", "materialAsset": "caf948b9-5262-4f68-9466-553af2844bd4" },
+      "parent": null
+    },
+    {
+      "uuid": "1778c803-77e8-44d5-a0d7-0a2e4098dc55",
+      "tag": { "name": "Camera - authored game view" },
+      "transform": { "translation": [0.0, 4.4, 12.5], "rotation": [0.9903, -0.1380, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "camera": { "verticalFovRadians": 0.7853982, "nearClipPlane": 0.1, "farClipPlane": 100.0, "primary": true },
+      "parent": null
+    },
+    {
+      "uuid": "b037b5b1-4e1d-4434-9834-565ad72573d2",
+      "tag": { "name": "Studio Small environment" },
+      "transform": { "translation": [0.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "environmentLight": { "hdrImage": "1d01d496-3226-482e-ba5a-7767fe35bc93", "intensity": 0.28 },
+      "parent": null
+    },
+    {
+      "uuid": "a7e77b16-414e-4c3f-87a3-fe066975f45d",
+      "tag": { "name": "Spotlight A - Primary Shadow" },
+      "transform": { "translation": [-3.0, 5.0, 3.0], "rotation": [0.859003, -0.461554, -0.221546, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "spotLight": { "color": [1.0, 0.78, 0.58], "intensity": 58.0, "range": 15.0, "innerConeAngleDegrees": 18.0, "outerConeAngleDegrees": 31.0, "castShadows": true, "shadowBias": 0.001, "shadowNormalBias": 0.025, "shadowSoftness": 1.5 },
+      "parent": null
+    },
+    {
+      "uuid": "c85808a5-8f34-4d32-a192-db72f14e2ec8",
+      "tag": { "name": "Spotlight B - Overlapping Shadow" },
+      "transform": { "translation": [3.5, 4.5, 2.5], "rotation": [0.837044, -0.479409, 0.263675, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "spotLight": { "color": [0.48, 0.68, 1.0], "intensity": 48.0, "range": 14.0, "innerConeAngleDegrees": 17.0, "outerConeAngleDegrees": 29.0, "castShadows": true, "shadowBias": 0.001, "shadowNormalBias": 0.025, "shadowSoftness": 1.5 },
+      "parent": null
+    },
+    {
+      "uuid": "eb7bca5b-f099-4f2b-8a99-68dd3027c386",
+      "tag": { "name": "Spotlight C - Toggle for third slot" },
+      "transform": { "translation": [-4.0, 3.8, -0.5], "rotation": [0.784033, -0.438915, -0.438915, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "spotLight": { "color": [1.0, 0.42, 0.22], "intensity": 35.0, "range": 12.0, "innerConeAngleDegrees": 15.0, "outerConeAngleDegrees": 27.0, "castShadows": false, "shadowBias": 0.001, "shadowNormalBias": 0.025, "shadowSoftness": 1.5 },
+      "parent": null
+    },
+    {
+      "uuid": "1ced355c-cace-443e-9fb0-077927c64ea3",
+      "tag": { "name": "Spotlight D - Fourth shadow slot" },
+      "transform": { "translation": [2.5, 4.5, -2.0], "rotation": [0.625213, -0.698060, 0.349030, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "spotLight": { "color": [0.76, 0.9, 1.0], "intensity": 30.0, "range": 13.0, "innerConeAngleDegrees": 16.0, "outerConeAngleDegrees": 28.0, "castShadows": false, "shadowBias": 0.001, "shadowNormalBias": 0.025, "shadowSoftness": 1.5 },
+      "parent": null
+    },
+    {
+      "uuid": "690e46f6-903f-433e-bc51-562206adcdd8",
+      "tag": { "name": "Spotlight E - Overflow test" },
+      "transform": { "translation": [0.0, 5.5, 4.0], "rotation": [0.901303, -0.433189, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "spotLight": { "color": [1.0, 0.95, 0.82], "intensity": 28.0, "range": 14.0, "innerConeAngleDegrees": 14.0, "outerConeAngleDegrees": 25.0, "castShadows": false, "shadowBias": 0.001, "shadowNormalBias": 0.025, "shadowSoftness": 1.5 },
+      "parent": null
+    }
+  ]
+}
