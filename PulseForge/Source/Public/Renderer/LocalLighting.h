@@ -70,6 +70,20 @@ namespace PulseForge
 			(1.0 + OutsideRange * OutsideRange);
 	}
 
+	[[nodiscard]] inline bool IsLocalLightMoreRelevant(
+		const LocalLightRelevance& Left,
+		const LocalLightRelevance& Right,
+		const glm::vec3& CameraPosition) noexcept
+	{
+		const double LeftScore = ComputeLocalLightRelevance(Left, CameraPosition);
+		const double RightScore = ComputeLocalLightRelevance(Right, CameraPosition);
+		if (LeftScore != RightScore)
+			return LeftScore > RightScore;
+		if (Left.Entity != Right.Entity)
+			return Left.Entity < Right.Entity;
+		return Left.TypeOrder < Right.TypeOrder;
+	}
+
 	// Returns input indices ordered by relevance, UUID, then light type for deterministic overflow handling.
 	[[nodiscard]] inline std::vector<size_t> SelectLocalLightIndices(
 		std::span<const LocalLightRelevance> Lights,
@@ -81,18 +95,11 @@ namespace PulseForge
 		for (size_t Index = 0; Index < Lights.size(); ++Index)
 			if (Lights[Index].Intensity > 0.0f)
 				Indices.push_back(Index);
-		const auto MoreRelevant = [&](size_t LeftIndex, size_t RightIndex)
-		{
-			const double LeftScore = ComputeLocalLightRelevance(Lights[LeftIndex], CameraPosition);
-			const double RightScore = ComputeLocalLightRelevance(Lights[RightIndex], CameraPosition);
-			if (LeftScore != RightScore)
-				return LeftScore > RightScore;
-			if (Lights[LeftIndex].Entity != Lights[RightIndex].Entity)
-				return Lights[LeftIndex].Entity < Lights[RightIndex].Entity;
-			return Lights[LeftIndex].TypeOrder < Lights[RightIndex].TypeOrder;
-		};
 		const size_t SelectedCount = (std::min)(Capacity, Indices.size());
-		std::partial_sort(Indices.begin(), Indices.begin() + SelectedCount, Indices.end(), MoreRelevant);
+		std::partial_sort(Indices.begin(), Indices.begin() + SelectedCount, Indices.end(), [&](size_t Left, size_t Right)
+		{
+			return IsLocalLightMoreRelevant(Lights[Left], Lights[Right], CameraPosition);
+		});
 		Indices.resize(SelectedCount);
 		return Indices;
 	}

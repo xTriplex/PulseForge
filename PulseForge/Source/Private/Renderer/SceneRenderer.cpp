@@ -1726,21 +1726,36 @@ namespace PulseForge
 			LocalLightRelevance Relevance;
 			LocalLightGpuData Data;
 		};
-		std::vector<CandidateLocalLight> LocalLights;
-		LocalLights.reserve(m_PreparedSnapshot->PointLights.size() + m_PreparedSnapshot->SpotLights.size());
+		std::array<CandidateLocalLight, MaxLocalLightCount> SelectedLocalLights{};
+		size_t SelectedLightCount = 0;
+		size_t ActiveLightCount = 0;
+		const auto ConsiderLocalLight = [&](const LocalLightRelevance& Relevance, const LocalLightGpuData& Data)
+		{
+			if (Relevance.Intensity <= 0.0f)
+				return;
+			++ActiveLightCount;
+			const CandidateLocalLight Candidate{ Relevance, Data };
+			size_t InsertIndex = 0;
+			while (InsertIndex < SelectedLightCount && !IsLocalLightMoreRelevant(
+				Candidate.Relevance, SelectedLocalLights[InsertIndex].Relevance, m_PreparedSnapshot->CameraWorldPosition))
+				++InsertIndex;
+			if (InsertIndex >= MaxLocalLightCount)
+				return;
+			const size_t NewCount = (std::min)(SelectedLightCount + 1, MaxLocalLightCount);
+			for (size_t Index = NewCount - 1; Index > InsertIndex; --Index)
+				SelectedLocalLights[Index] = SelectedLocalLights[Index - 1];
+			SelectedLocalLights[InsertIndex] = Candidate;
+			SelectedLightCount = NewCount;
+		};
 		for (const ScenePointLight& Light : m_PreparedSnapshot->PointLights)
 		{
-			if (Light.Intensity <= 0.0f)
-				continue;
 			LocalLightGpuData Data{};
 			Data.PositionRange = glm::vec4(Light.WorldPosition, Light.Range);
 			Data.ColorIntensity = glm::vec4(Light.Color, Light.Intensity);
-			LocalLights.push_back({ { Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, 0 }, Data });
+			ConsiderLocalLight({ Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, 0 }, Data);
 		}
 		for (const SceneSpotLight& Light : m_PreparedSnapshot->SpotLights)
 		{
-			if (Light.Intensity <= 0.0f)
-				continue;
 			LocalLightGpuData Data{};
 			Data.PositionRange = glm::vec4(Light.WorldPosition, Light.Range);
 			Data.ColorIntensity = glm::vec4(Light.Color, Light.Intensity);
@@ -1748,23 +1763,16 @@ namespace PulseForge
 			const float OuterRadians = glm::radians(Light.OuterConeAngleDegrees);
 			Data.DirectionInnerCos = glm::vec4(Light.WorldDirection, std::cos(InnerRadians));
 			Data.OuterCosAndType = glm::vec4(std::cos(OuterRadians), 0.0f, 0.0f, 1.0f);
-			LocalLights.push_back({ { Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, 1 }, Data });
+			ConsiderLocalLight({ Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, 1 }, Data);
 		}
-		std::vector<LocalLightRelevance> Relevance;
-		Relevance.reserve(LocalLights.size());
-		for (const CandidateLocalLight& Light : LocalLights)
-			Relevance.push_back(Light.Relevance);
-		const std::vector<size_t> SelectedIndices = SelectLocalLightIndices(
-			Relevance, m_PreparedSnapshot->CameraWorldPosition, MaxLocalLights);
 		LocalLightingConstants LocalLighting{};
-		const size_t SelectedLightCount = SelectedIndices.size();
 		LocalLighting.Counts.x = static_cast<uint32_t>(SelectedLightCount);
 		for (size_t Index = 0; Index < SelectedLightCount; ++Index)
-			LocalLighting.Lights[Index] = LocalLights[SelectedIndices[Index]].Data;
-		if (LocalLights.size() > MaxLocalLights && !m_LoggedLocalLightOverflow)
+			LocalLighting.Lights[Index] = SelectedLocalLights[Index].Data;
+		if (ActiveLightCount > MaxLocalLightCount && !m_LoggedLocalLightOverflow)
 		{
 			PF_CORE_WARN("Scene has {0} active local lights; rendering the {1} most camera-relevant lights (UUID and type break ties)",
-				LocalLights.size(), MaxLocalLights);
+				ActiveLightCount, MaxLocalLightCount);
 			m_LoggedLocalLightOverflow = true;
 		}
 		const auto LocalLightingUpdate = m_Runtime.WriteBuffer(
