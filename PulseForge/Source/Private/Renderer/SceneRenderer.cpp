@@ -1254,7 +1254,7 @@ namespace PulseForge
 			Data.PositionRange = glm::vec4(Light.WorldPosition, Light.Range);
 			Data.ColorIntensity = glm::vec4(Light.Color, Light.Intensity);
 			Data.OuterCosAndType = glm::vec4(0.0f, -1.0f, 0.0f, 0.0f);
-			ConsiderLocalLight({ Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, 0 },
+			ConsiderLocalLight({ Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, PointLocalLightTypeOrder },
 				Data, Light.Entity, nullptr, &Light);
 		}
 		for (const SceneSpotLight& Light : m_PreparedSnapshot->SpotLights)
@@ -1264,7 +1264,7 @@ namespace PulseForge
 			Data.ColorIntensity = glm::vec4(Light.Color, Light.Intensity);
 			Data.DirectionInnerCos = glm::vec4(Light.WorldDirection, std::cos(glm::radians(Light.InnerConeAngleDegrees)));
 			Data.OuterCosAndType = glm::vec4(std::cos(glm::radians(Light.OuterConeAngleDegrees)), -1.0f, 0.0f, 1.0f);
-			ConsiderLocalLight({ Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, 1 },
+			ConsiderLocalLight({ Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, SpotLocalLightTypeOrder },
 				Data, Light.Entity, &Light, nullptr);
 		}
 
@@ -1382,7 +1382,11 @@ namespace PulseForge
 				continue;
 			const auto Selected = std::find_if(m_SelectedLocalLights.begin(),
 				m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount),
-				[&](const SelectedLocalLight& Light) { return Light.Entity == *m_SpotShadowSlotOwners[Slot]; });
+				[&](const SelectedLocalLight& Light)
+				{
+					return Light.Spot && MatchesLocalLightIdentity(
+						Light.Relevance, *m_SpotShadowSlotOwners[Slot], SpotLocalLightTypeOrder);
+				});
 			if (Selected == m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount) || !Selected->Spot)
 				return std::unexpected(MakeDrawError("Spotlight shadow slot no longer identifies a selected spotlight"));
 			auto Projection = BuildSpotlightShadowProjection(
@@ -1401,7 +1405,11 @@ namespace PulseForge
 				continue;
 			const auto Selected = std::find_if(m_SelectedLocalLights.begin(),
 				m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount),
-				[&](const SelectedLocalLight& Light) { return Light.Entity == *m_PointShadowSlotOwners[Slot]; });
+				[&](const SelectedLocalLight& Light)
+				{
+					return Light.Point && MatchesLocalLightIdentity(
+						Light.Relevance, *m_PointShadowSlotOwners[Slot], PointLocalLightTypeOrder);
+				});
 			if (Selected == m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount) || !Selected->Point)
 				return std::unexpected(MakeDrawError("Point-shadow slot no longer identifies a selected point light"));
 			auto Projections = BuildPointShadowProjections(Selected->Point->WorldPosition, Selected->Point->Range);
@@ -1469,7 +1477,11 @@ namespace PulseForge
 				continue;
 			const auto Selected = std::find_if(m_SelectedLocalLights.begin(),
 				m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount),
-				[&](const SelectedLocalLight& Light) { return Light.Entity == *m_PointShadowSlotOwners[Slot]; });
+				[&](const SelectedLocalLight& Light)
+				{
+					return Light.Point && MatchesLocalLightIdentity(
+						Light.Relevance, *m_PointShadowSlotOwners[Slot], PointLocalLightTypeOrder);
+				});
 			if (Selected == m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount) || !Selected->Point)
 				return std::unexpected(MakeDrawError("Point-shadow rendering found a stale slot owner"));
 

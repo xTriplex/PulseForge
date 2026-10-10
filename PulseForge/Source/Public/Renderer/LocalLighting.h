@@ -16,6 +16,8 @@
 namespace PulseForge
 {
 	inline constexpr size_t MaxLocalLightCount = 32;
+	inline constexpr uint32_t PointLocalLightTypeOrder = 0;
+	inline constexpr uint32_t SpotLocalLightTypeOrder = 1;
 
 	// Four float4 registers; must remain byte-for-byte compatible with Triangle.hlsl LocalLightData.
 	struct alignas(16) LocalLightGpuData
@@ -49,6 +51,14 @@ namespace PulseForge
 		float Range = 1.0f;
 		uint32_t TypeOrder = 0;
 	};
+
+	[[nodiscard]] inline bool MatchesLocalLightIdentity(
+		const LocalLightRelevance& Light,
+		UUID Entity,
+		uint32_t TypeOrder) noexcept
+	{
+		return Light.Entity == Entity && Light.TypeOrder == TypeOrder;
+	}
 
 	[[nodiscard]] inline double ComputeLocalLightRelevance(
 		const LocalLightRelevance& Light,

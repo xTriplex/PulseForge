@@ -6950,11 +6950,56 @@ end
 		PF_CHECK(Tests, Selected.size() == 2 && Selected[1] == 1);
 		PF_CHECK(Tests, SelectLocalLightIndices({}, glm::vec3(0.0f)).empty());
 		std::array<LocalLightRelevance, 2> SameEntityTypes = {{
-			{ UUID{ 0, 9 }, glm::vec3(0.0f), glm::vec3(1.0f), 1.0f, 1.0f, 1 },
-			{ UUID{ 0, 9 }, glm::vec3(0.0f), glm::vec3(1.0f), 1.0f, 1.0f, 0 }
+			{ UUID{ 0, 9 }, glm::vec3(0.0f), glm::vec3(1.0f), 1.0f, 1.0f, SpotLocalLightTypeOrder },
+			{ UUID{ 0, 9 }, glm::vec3(0.0f), glm::vec3(1.0f), 1.0f, 1.0f, PointLocalLightTypeOrder }
 		}};
 		const auto TypeTied = SelectLocalLightIndices(SameEntityTypes, glm::vec3(0.0f));
 		PF_CHECK(Tests, TypeTied.size() == 2 && TypeTied[0] == 1 && TypeTied[1] == 0);
+		const UUID SharedEntity{ 0, 9 };
+		const auto SelectedIndexForType = [&](uint32_t TypeOrder, const auto& Order)
+		{
+			for (size_t Rank = 0; Rank < Order.size(); ++Rank)
+				if (MatchesLocalLightIdentity(SameEntityTypes[Order[Rank]], SharedEntity, TypeOrder))
+					return Rank;
+			return Order.size();
+		};
+		SameEntityTypes[0].Intensity = 1.0f;
+		SameEntityTypes[1].Intensity = 10.0f;
+		const auto PointRanksFirst = SelectLocalLightIndices(SameEntityTypes, glm::vec3(0.0f));
+		PF_CHECK(Tests, SelectedIndexForType(PointLocalLightTypeOrder, PointRanksFirst) == 0);
+		PF_CHECK(Tests, SelectedIndexForType(SpotLocalLightTypeOrder, PointRanksFirst) == 1);
+		SameEntityTypes[0].Intensity = 10.0f;
+		SameEntityTypes[1].Intensity = 1.0f;
+		const auto SpotRanksFirst = SelectLocalLightIndices(SameEntityTypes, glm::vec3(0.0f));
+		PF_CHECK(Tests, SelectedIndexForType(SpotLocalLightTypeOrder, SpotRanksFirst) == 0);
+		PF_CHECK(Tests, SelectedIndexForType(PointLocalLightTypeOrder, SpotRanksFirst) == 1);
+
+		PointLightComponent SharedPoint;
+		SpotLightComponent SharedSpot;
+		SharedPoint.CastShadows = true;
+		PointShadowSlotOwners SharedPointOwners{};
+		SpotlightShadowSlotOwners SharedSpotOwners{};
+		const std::array<PointShadowCandidate, 1> SharedPointCandidate = {{ { SharedEntity, 1 } }};
+		const auto PointOnlySlots = AssignPointShadowSlots(SharedPointCandidate, SharedPointOwners);
+		const auto NoSpotSlots = AssignSpotlightShadowSlots({}, SharedSpotOwners);
+		PF_CHECK(Tests, SharedPoint.CastShadows && !SharedSpot.CastShadows && PointOnlySlots[1] == 0);
+		PF_CHECK(Tests, SharedPointOwners[0] == SharedEntity && !SharedSpotOwners[0] && NoSpotSlots[0] == -1);
+
+		SharedPoint.CastShadows = false;
+		SharedSpot.CastShadows = true;
+		const auto NoPointSlots = AssignPointShadowSlots({}, SharedPointOwners);
+		const std::array<SpotlightShadowCandidate, 1> SharedSpotCandidate = {{ { SharedEntity, 0 } }};
+		const auto SpotOnlySlots = AssignSpotlightShadowSlots(SharedSpotCandidate, SharedSpotOwners);
+		PF_CHECK(Tests, !SharedPoint.CastShadows && SharedSpot.CastShadows && NoPointSlots[0] == -1);
+		PF_CHECK(Tests, !SharedPointOwners[0] && SharedSpotOwners[0] == SharedEntity && SpotOnlySlots[0] == 0);
+
+		SharedPoint.CastShadows = true;
+		const auto BothPointSlots = AssignPointShadowSlots(SharedPointCandidate, SharedPointOwners);
+		const auto BothSpotSlots = AssignSpotlightShadowSlots(SharedSpotCandidate, SharedSpotOwners);
+		PF_CHECK(Tests, BothPointSlots[1] == 0 && BothSpotSlots[0] == 0);
+		PF_CHECK(Tests, SharedPointOwners[0] == SharedEntity && SharedSpotOwners[0] == SharedEntity);
+		PF_CHECK(Tests, MatchesLocalLightIdentity(SameEntityTypes[SpotRanksFirst[0]], SharedEntity, SpotLocalLightTypeOrder));
+		PF_CHECK(Tests, MatchesLocalLightIdentity(SameEntityTypes[SpotRanksFirst[1]], SharedEntity, PointLocalLightTypeOrder));
 		std::vector<LocalLightRelevance> CapacityLights(MaxLocalLightCount + 1);
 		for (size_t Index = 0; Index < CapacityLights.size(); ++Index)
 		{

@@ -743,6 +743,15 @@ namespace
 				Transform->Translation = { static_cast<float>(Index) * 2.0f - 2.0f, 2.0f, -1.0f };
 				if (!Light->SetTransform(*Transform))
 					throw std::runtime_error("Could not position point-shadow validation light");
+				if (Index == 0)
+				{
+					PulseForge::SpotLightComponent Spot;
+					Spot.Color = { 0.8f, 0.7f, 1.0f };
+					Spot.Intensity = 1000.0f;
+					Spot.Range = 30.0f;
+					if (!Light->SetSpotLight(Spot))
+						throw std::runtime_error("Could not add the co-located spotlight to the point-shadow validation light");
+				}
 				m_PointShadowEntities.push_back(*Light);
 			}
 
@@ -762,6 +771,15 @@ namespace
 		void UpdatePointShadowScenario()
 		{
 			const size_t Frame = m_PointShadowFrames;
+			auto DualSpot = m_PointShadowEntities.front().GetSpotLight();
+			if (!DualSpot || !DualSpot->has_value())
+				throw std::runtime_error("Could not read the co-located spotlight shadow state");
+			DualSpot->value().CastShadows = Frame == 1 || Frame == 2 || Frame == 3 ||
+				Frame == 5 || Frame == 6 || Frame == 7;
+			DualSpot->value().Intensity = Frame == 2 || Frame == 3 || Frame == 6 ? 25.0f : 1000.0f;
+			if (!m_PointShadowEntities.front().SetSpotLight(DualSpot->value()))
+				throw std::runtime_error("Could not update the co-located spotlight shadow state");
+
 			if (Frame == 0 || Frame == 8)
 			{
 				const std::array<size_t, 3> Lights = { 0, 1, 2 };
@@ -842,10 +860,23 @@ namespace
 			}
 			static constexpr std::array<size_t, 9> ExpectedPasses = { 0, 12, 12, 12, 12, 12, 12, 12, 0 };
 			const size_t Expected = ExpectedPasses[m_PointShadowFrames];
+			const bool ExpectSpotShadow = m_PointShadowFrames == 1 || m_PointShadowFrames == 2 ||
+				m_PointShadowFrames == 3 || m_PointShadowFrames == 5 || m_PointShadowFrames == 6 ||
+				m_PointShadowFrames == 7;
 			if (Rendered->PointShadowPassCount != Expected ||
-				Rendered->PointShadowCasterDrawCount != Expected * Rendered->GeometryDrawCount)
+				Rendered->PointShadowCasterDrawCount != Expected * Rendered->GeometryDrawCount ||
+				Rendered->SpotlightShadowPassCount != static_cast<size_t>(ExpectSpotShadow) ||
+				Rendered->SpotlightShadowCasterDrawCount !=
+					static_cast<size_t>(ExpectSpotShadow) * Rendered->GeometryDrawCount)
 			{
-				Fail("Point-shadow six-face pass or caster draw counts did not match expected allocation");
+				Fail("Mixed point/spot shadow pass counts did not match the dual-component allocation");
+				return;
+			}
+			if ((ExpectSpotShadow && Rendered->SpotlightShadowSlotOwners[0] !=
+					std::optional<PulseForge::UUID>{ m_PointShadowEntities.front().GetUUID() }) ||
+				(!ExpectSpotShadow && Rendered->SpotlightShadowSlotOwners[0]))
+			{
+				Fail("Spotlight shadow ownership did not resolve to the spotlight on the dual-component entity");
 				return;
 			}
 			const uint64_t ExpectedGeneration = m_PointShadowFrames == 0 ? 0u : 1u;
