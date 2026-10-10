@@ -65,6 +65,12 @@ namespace PulseForgeEditor
 			const auto FragmentBytecode = ReadShaderBytecode(ShaderDirectory / "EditorImGui.ps.spv");
 			if (!FragmentBytecode)
 				return std::unexpected(FragmentBytecode.error());
+			const auto PresentationVertexBytecode = ReadShaderBytecode(ShaderDirectory / "EditorImGuiPresent.vs.spv");
+			if (!PresentationVertexBytecode)
+				return std::unexpected(PresentationVertexBytecode.error());
+			const auto PresentationFragmentBytecode = ReadShaderBytecode(ShaderDirectory / "EditorImGuiPresent.ps.spv");
+			if (!PresentationFragmentBytecode)
+				return std::unexpected(PresentationFragmentBytecode.error());
 
 			PulseForge::ShaderDesc VertexDescription;
 			VertexDescription.Stage = PulseForge::ShaderStage::Vertex;
@@ -83,20 +89,30 @@ namespace PulseForgeEditor
 			if (!FragmentShader)
 				return std::unexpected("Could not create editor fragment shader: " + FragmentShader.error().Message);
 			m_FragmentShader = std::move(*FragmentShader);
+			PulseForge::ShaderDesc PresentationVertexDescription = VertexDescription;
+			PresentationVertexDescription.DebugName = "PulseForge editor UI presentation vertex shader";
+			auto PresentationVertexShader = Runtime.CreateShader(PresentationVertexDescription, *PresentationVertexBytecode);
+			if (!PresentationVertexShader)
+				return std::unexpected("Could not create editor presentation vertex shader: " + PresentationVertexShader.error().Message);
+			m_PresentationVertexShader = std::move(*PresentationVertexShader);
+			PulseForge::ShaderDesc PresentationFragmentDescription = FragmentDescription;
+			PresentationFragmentDescription.DebugName = "PulseForge editor UI presentation fragment shader";
+			auto PresentationFragmentShader = Runtime.CreateShader(PresentationFragmentDescription, *PresentationFragmentBytecode);
+			if (!PresentationFragmentShader)
+				return std::unexpected("Could not create editor presentation fragment shader: " + PresentationFragmentShader.error().Message);
+			m_PresentationFragmentShader = std::move(*PresentationFragmentShader);
 
 			PulseForge::BindingLayoutDesc LayoutDescription;
 			LayoutDescription.Visibility = PulseForge::ShaderVisibility::Fragment;
 			LayoutDescription.Items = {
 				{ PulseForge::BindingResourceType::Texture2D, 0 },
-				{ PulseForge::BindingResourceType::Sampler, 0 },
-				{ PulseForge::BindingResourceType::ConstantBuffer, 0 }
+				{ PulseForge::BindingResourceType::Sampler, 0 }
 			};
 			LayoutDescription.DebugName = "PulseForge editor ImGui texture";
 			auto Layout = Runtime.CreateBindingLayout(LayoutDescription);
 			if (!Layout)
 				return std::unexpected("Could not create editor texture layout: " + Layout.error().Message);
 			m_BindingLayout = std::move(*Layout);
-
 			PulseForge::SamplerDesc SamplerDescription;
 			SamplerDescription.Minification = PulseForge::SamplerFilter::Linear;
 			SamplerDescription.Magnification = PulseForge::SamplerFilter::Linear;
@@ -107,16 +123,6 @@ namespace PulseForgeEditor
 			if (!Sampler)
 				return std::unexpected("Could not create editor sampler: " + Sampler.error().Message);
 			m_Sampler = std::move(*Sampler);
-			PulseForge::BufferDesc ColorSpaceBufferDescription;
-			ColorSpaceBufferDescription.ByteSize = sizeof(ColorSpaceConstants);
-			ColorSpaceBufferDescription.Usage = PulseForge::BufferUsage::Constant;
-			ColorSpaceBufferDescription.DebugName = "PulseForge editor texture color-space constants";
-			auto ColorSpaceBuffer = Runtime.CreateBuffer(ColorSpaceBufferDescription,
-				std::as_bytes(std::span(&m_UploadedColorSpaceConstants, 1)));
-			if (!ColorSpaceBuffer)
-				return std::unexpected("Could not create editor color-space constants: " + ColorSpaceBuffer.error().Message);
-			m_ColorSpaceConstantsBuffer = std::move(*ColorSpaceBuffer);
-
 			PulseForge::GraphicsPipelineDesc PipelineDescription;
 			PipelineDescription.VertexShader = m_VertexShader;
 			PipelineDescription.FragmentShader = m_FragmentShader;
@@ -135,6 +141,44 @@ namespace PulseForgeEditor
 			if (!Pipeline)
 				return std::unexpected("Could not create editor graphics pipeline: " + Pipeline.error().Message);
 			m_Pipeline = std::move(*Pipeline);
+			PipelineDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
+			PipelineDescription.DepthAttachmentEnabled = false;
+			PipelineDescription.DebugName = "PulseForge editor ImGui linear-light composition pipeline";
+			auto IntermediatePipeline = Runtime.CreateGraphicsPipeline(PipelineDescription);
+			if (!IntermediatePipeline)
+				return std::unexpected("Could not create editor sRGB composition pipeline: " + IntermediatePipeline.error().Message);
+			m_SrgbIntermediatePipeline = std::move(*IntermediatePipeline);
+
+			PulseForge::GraphicsPipelineDesc PresentationPipelineDescription;
+			PresentationPipelineDescription.VertexShader = m_PresentationVertexShader;
+			PresentationPipelineDescription.FragmentShader = m_PresentationFragmentShader;
+			PresentationPipelineDescription.BindingLayouts = { m_BindingLayout };
+			PresentationPipelineDescription.VertexLayout.Stride = sizeof(FullscreenVertex);
+			PresentationPipelineDescription.VertexLayout.Attributes = {
+				{ PulseForge::VertexSemantic::Position, PulseForge::VertexFormat::Float2, offsetof(FullscreenVertex, Position) }
+			};
+			PresentationPipelineDescription.ColorFormat = PulseForge::ColorTargetFormat::Swapchain;
+			PresentationPipelineDescription.DepthAttachmentEnabled = true;
+			PresentationPipelineDescription.Depth.TestEnabled = false;
+			PresentationPipelineDescription.Depth.WriteEnabled = false;
+			PresentationPipelineDescription.DebugName = "PulseForge editor UNORM UI presentation pipeline";
+			auto PresentationPipeline = Runtime.CreateGraphicsPipeline(PresentationPipelineDescription);
+			if (!PresentationPipeline)
+				return std::unexpected("Could not create editor UNORM presentation pipeline: " + PresentationPipeline.error().Message);
+			m_UnormPresentationPipeline = std::move(*PresentationPipeline);
+
+			constexpr std::array<FullscreenVertex, 3> FullscreenVertices = {{
+				{{ -1.0f, -1.0f }}, {{ 3.0f, -1.0f }}, {{ -1.0f, 3.0f }}
+			}};
+			PulseForge::BufferDesc FullscreenBufferDescription;
+			FullscreenBufferDescription.ByteSize = sizeof(FullscreenVertices);
+			FullscreenBufferDescription.Usage = PulseForge::BufferUsage::Vertex;
+			FullscreenBufferDescription.DebugName = "PulseForge editor UI fullscreen triangle";
+			auto FullscreenBuffer = Runtime.CreateBuffer(
+				FullscreenBufferDescription, std::as_bytes(std::span(FullscreenVertices)));
+			if (!FullscreenBuffer)
+				return std::unexpected("Could not create editor presentation geometry: " + FullscreenBuffer.error().Message);
+			m_FullscreenVertexBuffer = std::move(*FullscreenBuffer);
 
 			ImGuiIO& IO = ImGui::GetIO();
 			IO.BackendRendererName = "PulseForgeEditorRenderer";
@@ -190,14 +234,12 @@ namespace PulseForgeEditor
 		Description.Layout = m_BindingLayout;
 		Description.Textures.push_back({ 0, std::cref(Texture) });
 		Description.Samplers.push_back({ 0, std::cref(*m_Sampler) });
-		Description.Buffers.push_back({ 0, std::cref(*m_ColorSpaceConstantsBuffer) });
 		auto Binding = m_Runtime->CreateBindingSet(Description);
 		if (!Binding)
 			return std::unexpected("Could not create editor texture binding: " + Binding.error().Message);
 
 		const uint64_t TextureID = m_NextTextureID++;
-		m_TextureBindings.emplace(TextureID, RegisteredTexture{
-			std::move(*Binding), Texture.GetDescription().Format == PulseForge::TextureFormat::RGBA8_Srgb });
+		m_TextureBindings.emplace(TextureID, RegisteredTexture{ std::move(*Binding) });
 		return TextureID;
 	}
 
@@ -260,14 +302,81 @@ namespace PulseForgeEditor
 			"ImGui dynamic indices");
 	}
 
+	std::expected<void, std::string> EditorImGuiRenderer::EnsureUnormCompositionTarget(uint32_t Width, uint32_t Height)
+	{
+		if (!m_Runtime || !m_BindingLayout || !m_Sampler)
+			return std::unexpected("Editor UI presentation resources are not initialized");
+		if (Width == 0 || Height == 0)
+			return std::unexpected("Editor UI composition target dimensions must be nonzero");
+		if (IsEditorUiCompositionTargetReusable(
+			m_UnormCompositionTarget && m_UnormPresentationBindingSet,
+			m_UnormCompositionWidth,
+			m_UnormCompositionHeight,
+			Width,
+			Height))
+			return {};
+
+		PulseForge::RenderTargetDesc TargetDescription;
+		TargetDescription.Width = Width;
+		TargetDescription.Height = Height;
+		TargetDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
+		TargetDescription.DepthMode = PulseForge::DepthAttachmentMode::None;
+		TargetDescription.DebugName = "PulseForge editor linear-light UI composition";
+		auto Target = m_Runtime->CreateRenderTarget(TargetDescription);
+		if (!Target)
+			return std::unexpected("Could not create editor UI sRGB composition target: " + Target.error().Message);
+		const PulseForge::Texture* ColorTexture = (*Target)->GetColorTexture();
+		if (!ColorTexture)
+			return std::unexpected("Editor UI composition target has no color texture");
+
+		PulseForge::BindingSetDesc BindingDescription;
+		BindingDescription.Layout = m_BindingLayout;
+		BindingDescription.Textures.push_back({ 0, std::cref(*ColorTexture) });
+		BindingDescription.Samplers.push_back({ 0, std::cref(*m_Sampler) });
+		auto Binding = m_Runtime->CreateBindingSet(BindingDescription);
+		if (!Binding)
+			return std::unexpected("Could not create editor UI presentation binding: " + Binding.error().Message);
+
+		m_UnormPresentationBindingSet = std::move(*Binding);
+		m_UnormCompositionTarget = std::move(*Target);
+		m_UnormCompositionWidth = Width;
+		m_UnormCompositionHeight = Height;
+		return {};
+	}
+
+	std::expected<void, std::string> EditorImGuiRenderer::RenderUnormCompositionTarget()
+	{
+		if (!m_Runtime || !m_UnormPresentationPipeline || !m_FullscreenVertexBuffer || !m_UnormPresentationBindingSet)
+			return std::unexpected("Editor UNORM presentation resources are unavailable");
+		const std::array<const PulseForge::BindingSet*, 1> Bindings = { m_UnormPresentationBindingSet.get() };
+		PulseForge::DrawArguments Arguments;
+		Arguments.VertexCount = 3;
+		const PulseForge::GraphicsResult Draw = m_Runtime->Draw(
+			*m_UnormPresentationPipeline, *m_FullscreenVertexBuffer, Arguments, Bindings);
+		if (!Draw)
+			return std::unexpected("Could not record editor UNORM UI presentation: " + Draw.error().Message);
+		return {};
+	}
+
 	std::expected<void, std::string> EditorImGuiRenderer::RenderDrawData()
 	{
 		if (!m_Initialized || !m_Runtime || !m_Pipeline)
 			return std::unexpected("Editor ImGui renderer is not initialized");
 
 		const ImDrawData* DrawData = ImGui::GetDrawData();
-		if (!DrawData || DrawData->CmdLists.empty() || DrawData->DisplaySize.x <= 0.0f || DrawData->DisplaySize.y <= 0.0f)
+		if (!DrawData || DrawData->DisplaySize.x <= 0.0f || DrawData->DisplaySize.y <= 0.0f)
 			return {};
+		const auto CompositionPath = SelectEditorUiCompositionPath(m_Runtime->GetOutputColorEncoding());
+		if (!CompositionPath)
+			return std::unexpected("The active renderer reported an unsupported editor UI output encoding");
+		const bool UseUnormComposition = *CompositionPath == EditorUiCompositionPath::SrgbIntermediateToUnormSwapchain;
+		if (!UseUnormComposition)
+		{
+			m_UnormPresentationBindingSet.reset();
+			m_UnormCompositionTarget.reset();
+			m_UnormCompositionWidth = 0;
+			m_UnormCompositionHeight = 0;
+		}
 
 		const glm::vec2 DisplaySize{ DrawData->DisplaySize.x, DrawData->DisplaySize.y };
 		const glm::vec2 DisplayPosition{ DrawData->DisplayPos.x, DrawData->DisplayPos.y };
@@ -368,61 +477,81 @@ namespace PulseForgeEditor
 			return std::unexpected(std::string("Could not assemble Dear ImGui draw data: ") + Exception.what());
 		}
 
-		if (m_Indices.empty())
+		if (m_Indices.empty() && !UseUnormComposition)
 			return {};
 
-		const size_t VertexBytes = m_Vertices.size() * sizeof(Vertex);
-		const size_t IndexBytes = m_Indices.size() * sizeof(uint32_t);
-		if (auto Result = EnsureBuffers(VertexBytes, IndexBytes); !Result)
-			return Result;
+		if (!m_Indices.empty())
+		{
+			const size_t VertexBytes = m_Vertices.size() * sizeof(Vertex);
+			const size_t IndexBytes = m_Indices.size() * sizeof(uint32_t);
+			if (auto Result = EnsureBuffers(VertexBytes, IndexBytes); !Result)
+				return Result;
 
-		const auto VertexUpload = m_Runtime->WriteBuffer(
-			*m_VertexBuffer,
-			0,
-			std::as_bytes(std::span(m_Vertices)));
-		if (!VertexUpload)
-			return std::unexpected("Could not upload editor vertices: " + VertexUpload.error().Message);
-		const auto IndexUpload = m_Runtime->WriteBuffer(
-			*m_IndexBuffer,
-			0,
-			std::as_bytes(std::span(m_Indices)));
-		if (!IndexUpload)
-			return std::unexpected("Could not upload editor indices: " + IndexUpload.error().Message);
+			const auto VertexUpload = m_Runtime->WriteBuffer(
+				*m_VertexBuffer,
+				0,
+				std::as_bytes(std::span(m_Vertices)));
+			if (!VertexUpload)
+				return std::unexpected("Could not upload editor vertices: " + VertexUpload.error().Message);
+			const auto IndexUpload = m_Runtime->WriteBuffer(
+				*m_IndexBuffer,
+				0,
+				std::as_bytes(std::span(m_Indices)));
+			if (!IndexUpload)
+				return std::unexpected("Could not upload editor indices: " + IndexUpload.error().Message);
+		}
+
+		const PulseForge::GraphicsPipeline* UiPipeline = m_Pipeline.get();
+		if (UseUnormComposition)
+		{
+			if (auto Result = EnsureUnormCompositionTarget(TargetWidth, TargetHeight); !Result)
+				return Result;
+			const EditorColorValue Background = ConvertEditorColorForOutput(
+				GetEditorColorValue(EditorColorToken::Background), PulseForge::OutputColorEncoding::SrgbAttachment);
+			PulseForge::RenderTargetClearValue ClearValue;
+			ClearValue.Color = { Background.Red, Background.Green, Background.Blue, 1.0f };
+			const PulseForge::GraphicsResult Begin = m_Runtime->BeginRenderTarget(*m_UnormCompositionTarget, ClearValue);
+			if (!Begin)
+				return std::unexpected("Could not begin editor UI sRGB composition target: " + Begin.error().Message);
+			UiPipeline = m_SrgbIntermediatePipeline.get();
+		}
+		const auto CloseIntermediateAfterError = [this, UseUnormComposition](std::string Message)
+		{
+			if (UseUnormComposition)
+			{
+				const PulseForge::GraphicsResult End = m_Runtime->EndRenderTarget();
+				if (!End)
+					Message += "; additionally, ending the UI target failed: " + End.error().Message;
+			}
+			return std::unexpected(std::move(Message));
+		};
 
 		for (const DrawBatch& Batch : m_Batches)
 		{
 			const auto Texture = m_TextureBindings.find(Batch.TextureID);
 			if (Texture == m_TextureBindings.end())
-				return std::unexpected("An editor texture was released before its ImGui draw command was submitted");
-			const ColorSpaceConstants Constants{
-				m_Runtime->GetOutputColorEncoding() == PulseForge::OutputColorEncoding::UnormAttachment ? 1u : 0u,
-				ShouldEncodeSrgbTextureForImGui(Texture->second.IsSrgb, m_Runtime->GetOutputColorEncoding()) ? 1u : 0u,
-				{}
-			};
-			if (!m_HasUploadedColorSpaceConstants ||
-				Constants.OutputIsUnorm != m_UploadedColorSpaceConstants.OutputIsUnorm ||
-				Constants.TextureIsSrgb != m_UploadedColorSpaceConstants.TextureIsSrgb)
-			{
-				const auto Update = m_Runtime->WriteBuffer(*m_ColorSpaceConstantsBuffer, 0,
-					std::as_bytes(std::span(&Constants, 1)));
-				if (!Update)
-					return std::unexpected("Could not update editor color-space constants: " + Update.error().Message);
-				m_UploadedColorSpaceConstants = Constants;
-				m_HasUploadedColorSpaceConstants = true;
-			}
+				return CloseIntermediateAfterError(
+					"An editor texture was released before its ImGui draw command was submitted");
 			const std::array<const PulseForge::BindingSet*, 1> Bindings = { Texture->second.BindingSet.get() };
 			PulseForge::DrawIndexedArguments Arguments;
 			Arguments.IndexCount = Batch.IndexCount;
 			Arguments.FirstIndex = Batch.FirstIndex;
 			Arguments.Scissor = Batch.Scissor;
 			const PulseForge::GraphicsResult Draw = m_Runtime->DrawIndexed(
-				*m_Pipeline,
+				*UiPipeline,
 				*m_VertexBuffer,
 				*m_IndexBuffer,
 				Arguments,
 				Bindings);
 			if (!Draw)
-				return std::unexpected("Could not record editor UI draw: " + Draw.error().Message);
+				return CloseIntermediateAfterError("Could not record editor UI draw: " + Draw.error().Message);
+		}
+		if (UseUnormComposition)
+		{
+			const PulseForge::GraphicsResult End = m_Runtime->EndRenderTarget();
+			if (!End)
+				return std::unexpected("Could not end editor UI sRGB composition target: " + End.error().Message);
+			return RenderUnormCompositionTarget();
 		}
 
 		return {};
@@ -431,13 +560,21 @@ namespace PulseForgeEditor
 	void EditorImGuiRenderer::Shutdown() noexcept
 	{
 		m_TextureBindings.clear();
+		m_UnormPresentationBindingSet.reset();
+		m_UnormCompositionTarget.reset();
+		m_UnormCompositionWidth = 0;
+		m_UnormCompositionHeight = 0;
+		m_UnormPresentationPipeline.reset();
+		m_SrgbIntermediatePipeline.reset();
 		m_Pipeline.reset();
-		m_ColorSpaceConstantsBuffer.reset();
+		m_FullscreenVertexBuffer.reset();
 		m_VertexBuffer.reset();
 		m_IndexBuffer.reset();
 		m_FontTexture.reset();
 		m_Sampler.reset();
 		m_BindingLayout.reset();
+		m_PresentationFragmentShader.reset();
+		m_PresentationVertexShader.reset();
 		m_VertexShader.reset();
 		m_FragmentShader.reset();
 		m_Vertices.clear();
@@ -449,7 +586,5 @@ namespace PulseForgeEditor
 		m_NextTextureID = 1;
 		m_Runtime = nullptr;
 		m_Initialized = false;
-		m_UploadedColorSpaceConstants = {};
-		m_HasUploadedColorSpaceConstants = false;
 	}
 }

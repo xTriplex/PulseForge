@@ -76,6 +76,18 @@
 
 namespace
 {
+	PulseForge::OutputColorEncoding GetEditorUiColorEncoding(PulseForge::OutputColorEncoding OutputEncoding) noexcept
+	{
+		#ifdef PF_EDITOR_RENDERER_OPENGL
+		return OutputEncoding;
+		#else
+		(void)OutputEncoding;
+		// Vulkan ImGui always blends against an sRGB attachment: directly for an sRGB swapchain,
+		// or in the editor-owned sRGB intermediate for a UNORM swapchain.
+		return PulseForge::OutputColorEncoding::SrgbAttachment;
+		#endif
+	}
+
 	void RequestDarkNativeCaption(GLFWwindow* Window)
 	{
 		const HWND NativeWindow = Window ? glfwGetWin32Window(Window) : nullptr;
@@ -423,7 +435,8 @@ namespace
 				ShutdownImGui();
 				throw std::runtime_error("Could not initialize editor typography: " + Result.error());
 			}
-			m_EditorStyle.ApplyTheme(PulseForge::Application::Get().GetOutputColorEncoding());
+			m_EditorStyle.ApplyTheme(GetEditorUiColorEncoding(
+				PulseForge::Application::Get().GetOutputColorEncoding()));
 			if (auto Result = m_Layout.Initialize(); !Result)
 				ReportLayoutPersistenceError(Result.error());
 
@@ -505,7 +518,8 @@ namespace
 			#endif
 			ImGui_ImplGlfw_NewFrame();
 			ImGui::NewFrame();
-			m_EditorStyle.ApplyTheme(PulseForge::Application::Get().GetOutputColorEncoding());
+			m_EditorStyle.ApplyTheme(GetEditorUiColorEncoding(
+				PulseForge::Application::Get().GetOutputColorEncoding()));
 			HandleViewportToolShortcuts();
 
 			DrawMainMenu();

@@ -1,13 +1,6 @@
 Texture2D EditorTexture : register(t0);
 SamplerState EditorSampler : register(s0);
 
-cbuffer EditorColorSpace : register(b0)
-{
-	uint OutputIsUnorm;
-	uint TextureIsSrgb;
-	float2 Padding;
-};
-
 struct VertexInput
 {
 	// Vulkan input locations follow PulseForge's VertexSemantic order: Position, Color, then TexCoord.
@@ -34,12 +27,5 @@ VertexOutput VSMain(VertexInput Input)
 
 float4 PSMain(VertexOutput Input) : SV_Target0
 {
-	float4 TextureColor = EditorTexture.Sample(EditorSampler, Input.TexCoord);
-	if (OutputIsUnorm != 0 && TextureIsSrgb != 0)
-	{
-		const float3 Low = TextureColor.rgb * 12.92f;
-		const float3 High = 1.055f * pow(max(TextureColor.rgb, 0.0f), 1.0f / 2.4f) - 0.055f;
-		TextureColor.rgb = lerp(High, Low, step(TextureColor.rgb, 0.0031308f));
-	}
-	return Input.Color * TextureColor;
+	return Input.Color * EditorTexture.Sample(EditorSampler, Input.TexCoord);
 }

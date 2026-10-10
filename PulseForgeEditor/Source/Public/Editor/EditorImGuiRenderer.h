@@ -3,6 +3,7 @@
 #include "Renderer/Binding.h"
 #include "Renderer/Buffer.h"
 #include "Renderer/Graphics.h"
+#include "Renderer/RenderTarget.h"
 #include "Renderer/Texture.h"
 
 #include <cstddef>
@@ -56,27 +57,31 @@ namespace PulseForgeEditor
 		struct RegisteredTexture
 		{
 			PulseForge::BindingSetHandle BindingSet;
-			bool IsSrgb = false;
 		};
 
-		struct alignas(16) ColorSpaceConstants
+		struct FullscreenVertex
 		{
-			uint32_t OutputIsUnorm = 0;
-			uint32_t TextureIsSrgb = 0;
-			uint32_t Padding[2]{};
+			float Position[2];
 		};
-		static_assert(sizeof(ColorSpaceConstants) == 16);
 
 		[[nodiscard]] std::expected<void, std::string> EnsureBuffers(size_t VertexBytes, size_t IndexBytes);
+		[[nodiscard]] std::expected<void, std::string> EnsureUnormCompositionTarget(uint32_t Width, uint32_t Height);
+		[[nodiscard]] std::expected<void, std::string> RenderUnormCompositionTarget();
 
 		PulseForge::Application* m_Runtime = nullptr;
 		PulseForge::ShaderHandle m_VertexShader;
 		PulseForge::ShaderHandle m_FragmentShader;
+		PulseForge::ShaderHandle m_PresentationVertexShader;
+		PulseForge::ShaderHandle m_PresentationFragmentShader;
 		PulseForge::SamplerHandle m_Sampler;
 		PulseForge::TextureHandle m_FontTexture;
 		PulseForge::BindingLayoutHandle m_BindingLayout;
-		PulseForge::BufferHandle m_ColorSpaceConstantsBuffer;
 		PulseForge::GraphicsPipelineHandle m_Pipeline;
+		PulseForge::GraphicsPipelineHandle m_SrgbIntermediatePipeline;
+		PulseForge::GraphicsPipelineHandle m_UnormPresentationPipeline;
+		PulseForge::RenderTargetHandle m_UnormCompositionTarget;
+		PulseForge::BindingSetHandle m_UnormPresentationBindingSet;
+		PulseForge::BufferHandle m_FullscreenVertexBuffer;
 		PulseForge::BufferHandle m_VertexBuffer;
 		PulseForge::BufferHandle m_IndexBuffer;
 		uint64_t m_VertexBufferCapacity = 0;
@@ -88,7 +93,7 @@ namespace PulseForgeEditor
 		std::vector<uint32_t> m_Indices;
 		std::vector<DrawBatch> m_Batches;
 		bool m_Initialized = false;
-		ColorSpaceConstants m_UploadedColorSpaceConstants{};
-		bool m_HasUploadedColorSpaceConstants = false;
+		uint32_t m_UnormCompositionWidth = 0;
+		uint32_t m_UnormCompositionHeight = 0;
 	};
 }

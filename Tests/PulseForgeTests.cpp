@@ -2027,9 +2027,32 @@ namespace
 			DisplayColor, PulseForge::OutputColorEncoding::UnormAttachment);
 		PF_CHECK(Tests, UnormColor.Red == DisplayColor.Red && UnormColor.Green == DisplayColor.Green &&
 			UnormColor.Blue == DisplayColor.Blue && UnormColor.Alpha == DisplayColor.Alpha);
-		PF_CHECK(Tests, ShouldEncodeSrgbTextureForImGui(true, PulseForge::OutputColorEncoding::UnormAttachment));
-		PF_CHECK(Tests, !ShouldEncodeSrgbTextureForImGui(true, PulseForge::OutputColorEncoding::SrgbAttachment));
-		PF_CHECK(Tests, !ShouldEncodeSrgbTextureForImGui(false, PulseForge::OutputColorEncoding::UnormAttachment));
+		PF_CHECK(Tests, SelectEditorUiCompositionPath(PulseForge::OutputColorEncoding::SrgbAttachment) ==
+			EditorUiCompositionPath::DirectSrgbSwapchain);
+		PF_CHECK(Tests, SelectEditorUiCompositionPath(PulseForge::OutputColorEncoding::UnormAttachment) ==
+			EditorUiCompositionPath::SrgbIntermediateToUnormSwapchain);
+		PF_CHECK(Tests, !SelectEditorUiCompositionPath(static_cast<PulseForge::OutputColorEncoding>(255)));
+		PF_CHECK(Tests, !IsEditorUiCompositionTargetReusable(false, 1280, 720, 1280, 720));
+		PF_CHECK(Tests, IsEditorUiCompositionTargetReusable(true, 1280, 720, 1280, 720));
+		PF_CHECK(Tests, !IsEditorUiCompositionTargetReusable(true, 1280, 720, 1280, 721));
+		PF_CHECK(Tests, !IsEditorUiCompositionTargetReusable(true, 1280, 720, 0, 720));
+		PF_CHECK(Tests, LinearToSrgbForEditorUi(0.0f) == 0.0f);
+		PF_CHECK(Tests, LinearToSrgbForEditorUi(1.0f) == 1.0f);
+		PF_CHECK(Tests, std::abs(LinearToSrgbForEditorUi(0.5f) - 0.7353569f) < 1.0e-6f);
+		PF_CHECK(Tests, std::abs(LinearToSrgbForEditorUi(0.0031308f) - 0.0404499f) < 1.0e-6f);
+		PF_CHECK(Tests, LinearToSrgbForEditorUi(-1.0f) == 0.0f);
+		PF_CHECK(Tests, LinearToSrgbForEditorUi(2.0f) == 1.0f);
+
+		const float WhiteOverBlackLinear = BlendSourceOverLinear(1.0f, 0.0f, 0.5f);
+		PF_CHECK(Tests, WhiteOverBlackLinear == 0.5f);
+		PF_CHECK(Tests, std::abs(LinearToSrgbForEditorUi(WhiteOverBlackLinear) - 0.7353569f) < 1.0e-6f);
+		PF_CHECK(Tests, std::abs(0.5f - LinearToSrgbForEditorUi(WhiteOverBlackLinear)) > 0.2f);
+		PF_CHECK(Tests, BlendSourceOverLinear(1.0f, 0.25f, 0.0f) == 0.25f);
+		PF_CHECK(Tests, BlendSourceOverLinear(0.25f, 0.75f, 1.0f) == 0.25f);
+		PF_CHECK(Tests, std::abs(BlendSourceOverLinear(0.8f, 0.2f, 0.25f) - 0.35f) < 1.0e-6f);
+		const float FirstLayer = BlendSourceOverLinear(0.8f, 0.1f, 0.5f);
+		const float OrderedLayers = BlendSourceOverLinear(0.2f, FirstLayer, 0.25f);
+		PF_CHECK(Tests, std::abs(OrderedLayers - 0.3875f) < 1.0e-6f);
 
 		std::array<bool, static_cast<size_t>(EditorIcon::Count)> SeenIcons{};
 		for (size_t Index = 0; Index < EditorIconDescriptors.size(); ++Index)

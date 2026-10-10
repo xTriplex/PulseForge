@@ -3,11 +3,13 @@
 #include "Editor/EditorIcons.h"
 #include "Renderer/RendererAPI.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -115,11 +117,48 @@ namespace PulseForgeEditor
 		float Alpha;
 	};
 
-	[[nodiscard]] constexpr bool ShouldEncodeSrgbTextureForImGui(
-		bool TextureIsSrgb,
-		PulseForge::OutputColorEncoding OutputEncoding) noexcept
+	enum class EditorUiCompositionPath : uint8_t
 	{
-		return TextureIsSrgb && OutputEncoding == PulseForge::OutputColorEncoding::UnormAttachment;
+		DirectSrgbSwapchain,
+		SrgbIntermediateToUnormSwapchain
+	};
+
+	[[nodiscard]] constexpr std::optional<EditorUiCompositionPath> SelectEditorUiCompositionPath(
+		PulseForge::OutputColorEncoding Encoding) noexcept
+	{
+		if (Encoding == PulseForge::OutputColorEncoding::UnormAttachment)
+			return EditorUiCompositionPath::SrgbIntermediateToUnormSwapchain;
+		if (Encoding == PulseForge::OutputColorEncoding::SrgbAttachment)
+			return EditorUiCompositionPath::DirectSrgbSwapchain;
+		return std::nullopt;
+	}
+
+	[[nodiscard]] constexpr bool IsEditorUiCompositionTargetReusable(
+		bool HasTarget,
+		uint32_t CurrentWidth,
+		uint32_t CurrentHeight,
+		uint32_t RequestedWidth,
+		uint32_t RequestedHeight) noexcept
+	{
+		return HasTarget && RequestedWidth > 0 && RequestedHeight > 0 &&
+			CurrentWidth == RequestedWidth && CurrentHeight == RequestedHeight;
+	}
+
+	[[nodiscard]] inline float LinearToSrgbForEditorUi(float Linear) noexcept
+	{
+		if (!std::isfinite(Linear))
+			return Linear > 0.0f ? 1.0f : 0.0f;
+		const float Clamped = std::clamp(Linear, 0.0f, 1.0f);
+		if (Clamped <= 0.0f || Clamped >= 1.0f)
+			return Clamped;
+		if (Clamped <= 0.0031308f)
+			return Clamped * 12.92f;
+		return 1.055f * std::pow(Clamped, 1.0f / 2.4f) - 0.055f;
+	}
+
+	[[nodiscard]] constexpr float BlendSourceOverLinear(float Foreground, float Background, float Alpha) noexcept
+	{
+		return Foreground * Alpha + Background * (1.0f - Alpha);
 	}
 
 	[[nodiscard]] inline EditorColorValue ConvertEditorColorForOutput(
