@@ -11,6 +11,7 @@
 #include "Renderer/Graphics.h"
 #include "Renderer/Mesh.h"
 #include "Renderer/RenderTarget.h"
+#include "Renderer/DepthCubemap.h"
 
 #include <memory>
 
@@ -44,6 +45,7 @@ namespace PulseForge
 			std::span<const std::byte> Data);
 		MeshCreateResult CreateMesh(const MeshDesc& Description);
 		RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description);
+		DepthCubemapCreateResult CreateDepthCubemap(uint32_t Resolution, const std::string& DebugName);
 		// The target may be rendered only during a frame; EndFrame closes an unclosed target with a diagnostic.
 		GraphicsResult BeginRenderTarget(const RenderTarget& Target, const RenderTargetClearValue& ClearValue = {});
 		GraphicsResult EndRenderTarget();

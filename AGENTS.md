@@ -21,3 +21,7 @@ A suitable demonstration project must:
 Do not consider an implementation handoff complete without a suitable visual demonstration project when visual inspection is a meaningful acceptance requirement. Pure documentation, build-system, unit-test-only, backend-only infrastructure, and similarly nonvisual changes are exempt. Do not create empty placeholder projects or one oversized project for unrelated systems.
 
 See [Docs/VisualValidationProjects.md](Docs/VisualValidationProjects.md) for the human workflow and current demonstrations.
+
+## External research notes
+
+Consult public external projects when useful, but do not copy research repositories into PulseForge or publish exhaustive source inventories, browsing histories, or upstream commit lists. Keep design documentation and reports focused on PulseForge's own decisions, rationale, validation, and limitations; use concise citations only when needed to support a technical claim. Preserve required licenses and attribution for third-party material actually included in the project.

@@ -5,8 +5,10 @@
 #include "Renderer/Binding.h"
 #include "Renderer/EnvironmentLightingCache.h"
 #include "Renderer/RenderTarget.h"
+#include "Renderer/DepthCubemap.h"
 #include "Renderer/DirectionalShadowMath.h"
 #include "Renderer/SpotlightShadowMath.h"
+#include "Renderer/PointLightShadowMath.h"
 #include "Renderer/ScreenSpaceAmbientOcclusion.h"
 #include "Renderer/ToneMapping.h"
 #include "Renderer/LocalLighting.h"
@@ -63,6 +65,10 @@ namespace PulseForge
 		bool EnvironmentBackgroundDrawn = false;
 		uint64_t TargetGeneration = 0;
 		uint64_t SpotlightShadowResourceGeneration = 0;
+		size_t PointShadowPassCount = 0;
+		size_t PointShadowCasterDrawCount = 0;
+		uint64_t PointShadowResourceGeneration = 0;
+		PointShadowSlotOwners PointShadowSlotOwners{};
 	};
 
 	struct SceneRenderOutputResult
@@ -76,6 +82,10 @@ namespace PulseForge
 		uint64_t SpotlightShadowResourceGeneration = 0;
 		// Diagnostic ownership snapshot for the completed frame, ordered by physical shadow-map slot.
 		SpotlightShadowSlotOwners SpotlightShadowSlotOwners{};
+		size_t PointShadowPassCount = 0;
+		size_t PointShadowCasterDrawCount = 0;
+		uint64_t PointShadowResourceGeneration = 0;
+		PointShadowSlotOwners PointShadowSlotOwners{};
 	};
 
 	struct AmbientOcclusionSettings
@@ -165,8 +175,10 @@ namespace PulseForge
 			bool DepthAttachmentEnabled);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureShadowPipeline(float DepthBias);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureSpotShadowResources();
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePointShadowResources();
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareLocalLighting();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderSpotlightShadows();
+		[[nodiscard]] std::expected<void, SceneRendererError> RenderPointLightShadows();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderShadowCascades();
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureAmbientOcclusionResources(uint32_t Width, uint32_t Height);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureAmbientOcclusionPipelines();
@@ -219,8 +231,17 @@ namespace PulseForge
 			std::array<glm::mat4, 4> CascadeViewProjection{ glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
 			std::array<glm::mat4, MaxSpotlightShadowMapCount> SpotShadowViewProjection{};
 			std::array<glm::vec4, MaxSpotlightShadowMapCount> SpotShadowParameters{}; // depth bias, normal bias, PCF radius, enabled
+			std::array<glm::vec4, MaxPointLightShadowCount> PointShadowParameters{}; // radial bias, normal bias, PCF radius, enabled
 		};
-		static_assert(sizeof(FrameConstants) == 896);
+		static_assert(sizeof(FrameConstants) == 928);
+
+		struct alignas(16) PointShadowObjectConstants
+		{
+			glm::mat4 ViewProjection{ 1.0f };
+			glm::vec4 LightPositionRange{ 0.0f, 0.0f, 0.0f, 1.0f };
+			glm::mat4 Model{ 1.0f };
+		};
+		static_assert(sizeof(PointShadowObjectConstants) == 144);
 
 		struct SelectedLocalLight
 		{
@@ -228,6 +249,7 @@ namespace PulseForge
 			LocalLightGpuData Data;
 			UUID Entity;
 			const SceneSpotLight* Spot = nullptr;
+			const ScenePointLight* Point = nullptr;
 		};
 
 		struct alignas(16) AmbientOcclusionConstants
@@ -276,6 +298,8 @@ namespace PulseForge
 		ShaderHandle m_BackgroundVertexShader;
 		ShaderHandle m_BackgroundFragmentShader;
 		ShaderHandle m_ShadowVertexShader;
+		ShaderHandle m_PointShadowVertexShader;
+		ShaderHandle m_PointShadowFragmentShader;
 		ShaderHandle m_AmbientOcclusionPrepassVertexShader;
 		ShaderHandle m_AmbientOcclusionPrepassFragmentShader;
 		ShaderHandle m_AmbientOcclusionVertexShader;
@@ -293,7 +317,9 @@ namespace PulseForge
 		BindingLayoutHandle m_BindingLayout;
 		BindingLayoutHandle m_ShadowBindingLayout;
 		BindingLayoutHandle m_SpotShadowBindingLayout;
+		BindingLayoutHandle m_PointShadowBindingLayout;
 		BindingLayoutHandle m_ShadowObjectBindingLayout;
+		BindingLayoutHandle m_PointShadowObjectBindingLayout;
 		BindingLayoutHandle m_AmbientOcclusionFinalBindingLayout;
 		BindingLayoutHandle m_AmbientOcclusionEvaluationBindingLayout;
 		BindingLayoutHandle m_AmbientOcclusionBlurBindingLayout;
@@ -301,7 +327,9 @@ namespace PulseForge
 		BindingLayoutHandle m_ToneMappingBindingLayout;
 		BindingSetHandle m_ShadowBindingSet;
 		BindingSetHandle m_SpotShadowBindingSet;
+		BindingSetHandle m_PointShadowBindingSet;
 		BindingSetHandle m_ShadowObjectBindingSet;
+		BindingSetHandle m_PointShadowObjectBindingSet;
 		BindingSetHandle m_AmbientOcclusionFinalBindingSet;
 		BindingSetHandle m_AmbientOcclusionFallbackBindingSet;
 		BindingSetHandle m_AmbientOcclusionEvaluationBindingSet;
@@ -309,8 +337,10 @@ namespace PulseForge
 		BindingSetHandle m_AmbientOcclusionPrepassBindingSet;
 		BindingSetHandle m_ToneMappingBindingSet;
 		std::unordered_map<int32_t, GraphicsPipelineHandle> m_ShadowPipelines;
+		GraphicsPipelineHandle m_PointShadowPipeline;
 		BufferHandle m_ObjectConstantsBuffer;
 		BufferHandle m_ShadowObjectConstantsBuffer;
+		BufferHandle m_PointShadowObjectConstantsBuffer;
 		BufferHandle m_FrameConstantsBuffer;
 		BufferHandle m_LocalLightingConstantsBuffer;
 		BufferHandle m_BackgroundTriangleBuffer;
@@ -321,8 +351,10 @@ namespace PulseForge
 		BufferHandle m_FallbackMaterialConstantsBuffer;
 		TextureHandle m_FallbackBaseColorTexture;
 		TextureHandle m_FallbackAmbientOcclusionTexture;
+		TextureHandle m_FallbackPointShadowTexture;
 		std::array<RenderTargetHandle, 4> m_ShadowTargets;
 		std::array<RenderTargetHandle, MaxSpotlightShadowMapCount> m_SpotShadowTargets;
+		std::array<DepthCubemapHandle, MaxPointLightShadowCount> m_PointShadowCubemaps;
 		RenderTargetHandle m_HdrSceneTarget;
 		RenderTargetHandle m_AmbientOcclusionPrepassTarget;
 		RenderTargetHandle m_AmbientOcclusionRawTarget;
@@ -341,8 +373,11 @@ namespace PulseForge
 		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
 		std::array<SelectedLocalLight, MaxLocalLightCount> m_SelectedLocalLights{};
 		std::array<std::optional<UUID>, MaxSpotlightShadowMapCount> m_SpotShadowSlotOwners{};
+		PointShadowSlotOwners m_PointShadowSlotOwners{};
 		std::array<glm::mat4, MaxSpotlightShadowMapCount> m_PreparedSpotShadowMatrices{};
 		std::array<glm::vec4, MaxSpotlightShadowMapCount> m_PreparedSpotShadowParameters{};
+		std::array<std::array<glm::mat4, 6>, MaxPointLightShadowCount> m_PreparedPointShadowMatrices{};
+		std::array<glm::vec4, MaxPointLightShadowCount> m_PreparedPointShadowParameters{};
 		LocalLightingConstants m_PreparedLocalLighting{};
 		size_t m_SelectedLocalLightCount = 0;
 		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;
@@ -362,8 +397,12 @@ namespace PulseForge
 		bool m_LoggedLocalLightOverflow = false;
 		bool m_LoggedSpotShadowOverflow = false;
 		bool m_LoggedUnsupportedSpotShadowCone = false;
+		bool m_LoggedPointShadowOverflow = false;
 		size_t m_LastSpotShadowPassCount = 0;
 		size_t m_LastSpotShadowCasterDrawCount = 0;
+		size_t m_LastPointShadowPassCount = 0;
+		size_t m_LastPointShadowCasterDrawCount = 0;
 		uint64_t m_SpotShadowResourceGeneration = 0;
+		uint64_t m_PointShadowResourceGeneration = 0;
 	};
 }

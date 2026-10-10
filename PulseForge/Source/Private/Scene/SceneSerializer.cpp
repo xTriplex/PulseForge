@@ -162,7 +162,11 @@ namespace PulseForge
 					const auto& Light = PointLight->value();
 					Record["pointLight"] = Json::object({
 						{ "color", { Light.Color.r, Light.Color.g, Light.Color.b } },
-						{ "intensity", Light.Intensity }, { "range", Light.Range }
+						{ "intensity", Light.Intensity }, { "range", Light.Range },
+						{ "castShadows", Light.CastShadows },
+						{ "shadowBias", Light.ShadowBias },
+						{ "shadowNormalBias", Light.ShadowNormalBias },
+						{ "shadowSoftness", Light.ShadowSoftness }
 					});
 				}
 				if (SpotLight->has_value())
@@ -457,6 +461,29 @@ namespace PulseForge
 							"Point light requires finite RGB color, intensity, and range"));
 					PointLightData = PointLightComponent{ { ColorValues[0], ColorValues[1], ColorValues[2] },
 						Intensity->get<float>(), Range->get<float>() };
+					const auto ReadOptionalFloat = [&](const char* Name, float& Destination) -> bool
+					{
+						const auto Value = SerializedPointLight->find(Name);
+						if (Value == SerializedPointLight->end())
+							return true;
+						if (!Value->is_number())
+							return false;
+						Destination = Value->get<float>();
+						return std::isfinite(Destination);
+					};
+					if (const auto CastShadows = SerializedPointLight->find("castShadows");
+						CastShadows != SerializedPointLight->end())
+					{
+						if (!CastShadows->is_boolean())
+							return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+								"Point-light castShadows must be a boolean"));
+						PointLightData->CastShadows = CastShadows->get<bool>();
+					}
+					if (!ReadOptionalFloat("shadowBias", PointLightData->ShadowBias) ||
+						!ReadOptionalFloat("shadowNormalBias", PointLightData->ShadowNormalBias) ||
+						!ReadOptionalFloat("shadowSoftness", PointLightData->ShadowSoftness))
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+							"Point-light shadow parameters must be finite numbers"));
 					if (auto Validation = PointLightData->Validate(); !Validation)
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error()));
 				}

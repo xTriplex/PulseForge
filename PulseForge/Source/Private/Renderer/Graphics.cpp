@@ -134,9 +134,9 @@ namespace PulseForge
 		{
 			return MakeError(GraphicsErrorCode::InvalidDescription, "Graphics pipeline specifies an unsupported color target format");
 		}
-		if ((Description.ColorFormat == ColorTargetFormat::None) != !Description.FragmentShader)
+		if (Description.ColorFormat != ColorTargetFormat::None && !Description.FragmentShader)
 			return MakeError(GraphicsErrorCode::InvalidDescription,
-				"Depth-only pipelines require no fragment shader and no color target; color pipelines require both");
+				"Color pipelines require a fragment shader; depth-only pipelines may use one to write depth explicitly");
 		if (Description.ColorFormat == ColorTargetFormat::None && Description.Blend.Enabled)
 			return MakeError(GraphicsErrorCode::InvalidDescription, "Blending is not meaningful for a depth-only pipeline");
 		if (Description.ColorFormat == ColorTargetFormat::None &&

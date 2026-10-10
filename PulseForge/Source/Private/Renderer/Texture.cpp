@@ -61,9 +61,10 @@ namespace PulseForge
 			const uint8_t AllowedDepthUsage = static_cast<uint8_t>(TextureUsage::DepthStencilAttachment) |
 				static_cast<uint8_t>(TextureUsage::ShaderResource);
 			if (!HasTextureUsage(Description.Usage, TextureUsage::DepthStencilAttachment) ||
-				(UsageBits & ~AllowedDepthUsage) != 0 || Description.Dimension != TextureDimension::Texture2D || Description.MipLevels != 1)
+				(UsageBits & ~AllowedDepthUsage) != 0 || Description.MipLevels != 1 ||
+				(Description.Dimension == TextureDimension::TextureCube && Description.Width != Description.Height))
 				return MakeTextureError(TextureErrorCode::InvalidDescription,
-					"Depth32Float requires a single-mip 2D depth attachment, optionally shader-readable");
+					"Depth32Float requires a single-mip 2D or square cubemap depth attachment, optionally shader-readable");
 
 			if (InitialDataSize != 0)
 				return MakeTextureError(TextureErrorCode::InvalidData, "Depth attachment textures do not accept initial upload data");
@@ -132,10 +133,11 @@ namespace PulseForge
 		{
 			const uint8_t AllowedDepthUsage = static_cast<uint8_t>(TextureUsage::DepthStencilAttachment) |
 				static_cast<uint8_t>(TextureUsage::ShaderResource);
-			if (Description.Dimension != TextureDimension::Texture2D || Description.MipLevels != 1 ||
+			if (Description.MipLevels != 1 ||
+				(Description.Dimension == TextureDimension::TextureCube && Description.Width != Description.Height) ||
 				!HasTextureUsage(Description.Usage, TextureUsage::DepthStencilAttachment) || (UsageBits & ~AllowedDepthUsage) != 0)
 				return MakeTextureValidationError(TextureErrorCode::InvalidDescription,
-					"Depth32Float requires a single-mip 2D depth attachment, optionally shader-readable");
+					"Depth32Float requires a single-mip 2D or square cubemap depth attachment, optionally shader-readable");
 			if (!InitialData.empty())
 				return MakeTextureValidationError(TextureErrorCode::InvalidData, "Depth attachment textures do not accept initial upload data");
 			return {};

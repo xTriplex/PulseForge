@@ -14,6 +14,12 @@ namespace PulseForge
 			return std::unexpected("Point-light intensity must be finite and between 0 and 1000000 (unitless)");
 		if (!std::isfinite(Range) || Range <= 0.0f || Range > 10000.0f)
 			return std::unexpected("Point-light range must be finite, positive, and at most 10000 world units");
+		if (!std::isfinite(ShadowBias) || ShadowBias < 0.0f || ShadowBias > MaxPointLightShadowBias)
+			return std::unexpected("Point-light shadow bias must be finite and between 0 and 0.05 normalized radial depth");
+		if (!std::isfinite(ShadowNormalBias) || ShadowNormalBias < 0.0f || ShadowNormalBias > MaxPointLightShadowNormalBias)
+			return std::unexpected("Point-light shadow normal bias must be finite and between 0 and 1 world unit");
+		if (!std::isfinite(ShadowSoftness) || ShadowSoftness < 0.0f || ShadowSoftness > MaxPointLightShadowSoftness)
+			return std::unexpected("Point-light shadow softness must be finite and between 0 and 4 cubemap texels");
 		return {};
 	}
 }

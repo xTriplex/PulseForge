@@ -1,0 +1,411 @@
+{
+  "format": "PulseForgeScene",
+  "version": 7,
+  "entities": [
+    {
+      "uuid": "ae38c650-82e9-4f69-a509-c8bcea123a34",
+      "tag": {
+        "name": "Floor - broad shadow receiver"
+      },
+      "transform": {
+        "translation": [
+          0.0,
+          -0.12,
+          -1.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          8.0,
+          0.12,
+          8.0
+        ]
+      },
+      "meshRenderer": {
+        "meshAsset": "774b11dd-3b46-441b-82a0-2444de263b23",
+        "materialAsset": "57b2df63-fdd0-47c6-bd0c-bd7b55ba241b"
+      },
+      "parent": null
+    },
+    {
+      "uuid": "25a13976-9bab-49d1-b959-cf488280a104",
+      "tag": {
+        "name": "Back wall"
+      },
+      "transform": {
+        "translation": [
+          0.0,
+          2.0,
+          -4.8
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          8.0,
+          2.0,
+          0.12
+        ]
+      },
+      "meshRenderer": {
+        "meshAsset": "774b11dd-3b46-441b-82a0-2444de263b23",
+        "materialAsset": "57b2df63-fdd0-47c6-bd0c-bd7b55ba241b"
+      },
+      "parent": null
+    },
+    {
+      "uuid": "384c5461-edda-4d3b-a557-5d67c75e5d03",
+      "tag": {
+        "name": "Warm matte block"
+      },
+      "transform": {
+        "translation": [
+          -1.3,
+          0.62,
+          -0.4
+        ],
+        "rotation": [
+          0.9763,
+          0.0,
+          0.2164,
+          0.0
+        ],
+        "scale": [
+          0.72,
+          0.62,
+          0.72
+        ]
+      },
+      "meshRenderer": {
+        "meshAsset": "774b11dd-3b46-441b-82a0-2444de263b23",
+        "materialAsset": "f472afa5-2b2d-41ba-81a0-ea28e0c758f9"
+      },
+      "parent": null
+    },
+    {
+      "uuid": "bbbd3590-71f6-411a-a932-0bac7ac93579",
+      "tag": {
+        "name": "Tall pillar - long shadow caster"
+      },
+      "transform": {
+        "translation": [
+          1.0,
+          1.15,
+          -1.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          0.38,
+          1.15,
+          0.38
+        ]
+      },
+      "meshRenderer": {
+        "meshAsset": "774b11dd-3b46-441b-82a0-2444de263b23",
+        "materialAsset": "31acfa37-fd80-4859-a0c8-294b54e1f652"
+      },
+      "parent": null
+    },
+    {
+      "uuid": "c7fc9ce2-97e2-4750-a8d0-e910496209e7",
+      "tag": {
+        "name": "Suspended brass caster"
+      },
+      "transform": {
+        "translation": [
+          0.1,
+          2.0,
+          0.4
+        ],
+        "rotation": [
+          0.9239,
+          0.0,
+          0.3827,
+          0.0
+        ],
+        "scale": [
+          0.5,
+          0.5,
+          0.5
+        ]
+      },
+      "meshRenderer": {
+        "meshAsset": "774b11dd-3b46-441b-82a0-2444de263b23",
+        "materialAsset": "27dcb6ba-21a3-43bc-8938-175803d3ebac"
+      },
+      "parent": null
+    },
+    {
+      "uuid": "4862078d-af18-45b1-8281-0a6db9074ca7",
+      "tag": {
+        "name": "Camera - authored game view"
+      },
+      "transform": {
+        "translation": [
+          0.0,
+          4.4,
+          12.5
+        ],
+        "rotation": [
+          0.9903,
+          -0.138,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "camera": {
+        "verticalFovRadians": 0.7853982,
+        "nearClipPlane": 0.1,
+        "farClipPlane": 100.0,
+        "primary": true
+      },
+      "parent": null
+    },
+    {
+      "uuid": "d9155a15-db17-4e03-b0b7-557100494311",
+      "tag": {
+        "name": "Studio Small environment"
+      },
+      "transform": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "environmentLight": {
+        "hdrImage": "8707a670-b142-4047-9d43-2cb2160f93a1",
+        "intensity": 0.28
+      },
+      "parent": null
+    },
+    {
+      "uuid": "93f5b0a5-3d9c-46f0-aa38-b5fb204b9d16",
+      "tag": {
+        "name": "Point Light A - Primary Shadow"
+      },
+      "transform": {
+        "translation": [
+          -3.0,
+          5.0,
+          3.0
+        ],
+        "rotation": [
+          0.859003,
+          -0.461554,
+          -0.221546,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "parent": null,
+      "pointLight": {
+        "color": [
+          1.0,
+          0.78,
+          0.58
+        ],
+        "intensity": 58.0,
+        "range": 15.0,
+        "innerConeAngleDegrees": 18.0,
+        "outerConeAngleDegrees": 31.0,
+        "castShadows": true,
+        "shadowBias": 0.001,
+        "shadowNormalBias": 0.025,
+        "shadowSoftness": 1.5
+      }
+    },
+    {
+      "uuid": "fa7e10ae-c949-48f0-89b4-a8396540c758",
+      "tag": {
+        "name": "Point Light B - Secondary Shadow"
+      },
+      "transform": {
+        "translation": [
+          3.5,
+          4.5,
+          2.5
+        ],
+        "rotation": [
+          0.837044,
+          -0.479409,
+          0.263675,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "parent": null,
+      "pointLight": {
+        "color": [
+          0.48,
+          0.68,
+          1.0
+        ],
+        "intensity": 48.0,
+        "range": 14.0,
+        "innerConeAngleDegrees": 17.0,
+        "outerConeAngleDegrees": 29.0,
+        "castShadows": true,
+        "shadowBias": 0.001,
+        "shadowNormalBias": 0.025,
+        "shadowSoftness": 1.5
+      }
+    },
+    {
+      "uuid": "ff87544c-033c-4f01-a10d-b79ad1ff98bb",
+      "tag": {
+        "name": "Point Light C - Budget Test"
+      },
+      "transform": {
+        "translation": [
+          -4.0,
+          3.8,
+          -0.5
+        ],
+        "rotation": [
+          0.784033,
+          -0.438915,
+          -0.438915,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "parent": null,
+      "pointLight": {
+        "color": [
+          1.0,
+          0.42,
+          0.22
+        ],
+        "intensity": 35.0,
+        "range": 12.0,
+        "innerConeAngleDegrees": 15.0,
+        "outerConeAngleDegrees": 27.0,
+        "castShadows": false,
+        "shadowBias": 0.001,
+        "shadowNormalBias": 0.025,
+        "shadowSoftness": 1.5
+      }
+    },
+    {
+      "uuid": "c11c778b-ff4d-42d4-a072-4038bc6fa63f",
+      "tag": {
+        "name": "Point Light D - Budget Test"
+      },
+      "transform": {
+        "translation": [
+          2.5,
+          4.5,
+          -2.0
+        ],
+        "rotation": [
+          0.625213,
+          -0.69806,
+          0.34903,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "parent": null,
+      "pointLight": {
+        "color": [
+          0.76,
+          0.9,
+          1.0
+        ],
+        "intensity": 30.0,
+        "range": 13.0,
+        "innerConeAngleDegrees": 16.0,
+        "outerConeAngleDegrees": 28.0,
+        "castShadows": false,
+        "shadowBias": 0.001,
+        "shadowNormalBias": 0.025,
+        "shadowSoftness": 1.5
+      }
+    },
+    {
+      "uuid": "7342fe2c-f1d9-4593-bf02-7f5c50dc0288",
+      "tag": {
+        "name": "Point Light E - Budget Test"
+      },
+      "transform": {
+        "translation": [
+          0.0,
+          5.5,
+          4.0
+        ],
+        "rotation": [
+          0.901303,
+          -0.433189,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "parent": null,
+      "pointLight": {
+        "color": [
+          1.0,
+          0.95,
+          0.82
+        ],
+        "intensity": 28.0,
+        "range": 14.0,
+        "innerConeAngleDegrees": 14.0,
+        "outerConeAngleDegrees": 25.0,
+        "castShadows": false,
+        "shadowBias": 0.001,
+        "shadowNormalBias": 0.025,
+        "shadowSoftness": 1.5
+      }
+    }
+  ]
+}

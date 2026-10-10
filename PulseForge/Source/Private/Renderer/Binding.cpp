@@ -85,8 +85,7 @@ namespace PulseForge
 			const auto SlotValidation = ValidateSlot(TextureBinding.Type, TextureBinding.Slot);
 			if (!SlotValidation)
 				return std::unexpected(SlotValidation.error());
-			if (!HasTextureUsage(TextureDescription.Usage, TextureUsage::ShaderResource) ||
-				(TextureDescription.Format == TextureFormat::Depth32Float && TextureBinding.Type != BindingResourceType::Texture2D))
+			if (!HasTextureUsage(TextureDescription.Usage, TextureUsage::ShaderResource))
 			{
 				return MakeError(BindingErrorCode::InvalidSet,
 					"Texture binding requires a shader-readable resource with a supported dimension");

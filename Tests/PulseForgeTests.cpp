@@ -44,6 +44,7 @@
 #include "Renderer/RenderTarget.h"
 #include "Renderer/DirectionalShadowMath.h"
 #include "Renderer/SpotlightShadowMath.h"
+#include "Renderer/PointLightShadowMath.h"
 #include "Renderer/EnvironmentLighting.h"
 #include "Renderer/ScreenSpaceAmbientOcclusion.h"
 #include "Renderer/ToneMapping.h"
@@ -2175,7 +2176,11 @@ namespace
 		SourceLight.ShadowSoftness = 3.0f;
 		PF_CHECK(Tests, SourceLight.Validate().has_value());
 		PF_CHECK(Tests, Child.SetDirectionalLight(SourceLight).has_value());
-		const PointLightComponent SourcePointLight{ glm::vec3(0.2f, 0.7f, 0.4f), 5.5f, 18.0f };
+		PointLightComponent SourcePointLight{ glm::vec3(0.2f, 0.7f, 0.4f), 5.5f, 18.0f };
+		SourcePointLight.CastShadows = true;
+		SourcePointLight.ShadowBias = 0.003f;
+		SourcePointLight.ShadowNormalBias = 0.08f;
+		SourcePointLight.ShadowSoftness = 2.25f;
 		SpotLightComponent SourceSpotLight{ glm::vec3(0.5f, 0.6f, 0.9f), 12.0f, 24.0f, 12.0f, 30.0f };
 		SourceSpotLight.CastShadows = true;
 		SourceSpotLight.ShadowBias = 0.0025f;
@@ -2220,6 +2225,7 @@ namespace
 		PF_CHECK(Tests, Serialized->find("\"shadowDistance\": 42.0") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"environmentLight\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"pointLight\"") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"shadowSoftness\": 2.25") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"spotLight\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"meshAsset\": \"" + MeshAssetIdentifier.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"materialAsset\": \"" + MaterialAssetIdentifier.ToString() + "\"") != std::string::npos);
@@ -2315,7 +2321,10 @@ namespace
 			LoadedEnvironment->value().Intensity == SourceEnvironment.Intensity);
 		PF_CHECK(Tests, LoadedPoint && LoadedPoint->has_value() &&
 			LoadedPoint->value().Intensity == SourcePointLight.Intensity && LoadedPoint->value().Range == SourcePointLight.Range &&
-			glm::all(glm::equal(LoadedPoint->value().Color, SourcePointLight.Color)));
+			glm::all(glm::equal(LoadedPoint->value().Color, SourcePointLight.Color)) &&
+			LoadedPoint->value().CastShadows && LoadedPoint->value().ShadowBias == SourcePointLight.ShadowBias &&
+			LoadedPoint->value().ShadowNormalBias == SourcePointLight.ShadowNormalBias &&
+			LoadedPoint->value().ShadowSoftness == SourcePointLight.ShadowSoftness);
 		PF_CHECK(Tests, LoadedSpot && LoadedSpot->has_value() &&
 			LoadedSpot->value().InnerConeAngleDegrees == SourceSpotLight.InnerConeAngleDegrees &&
 			LoadedSpot->value().OuterConeAngleDegrees == SourceSpotLight.OuterConeAngleDegrees &&
@@ -3761,6 +3770,35 @@ namespace
 		}
 		PF_CHECK(Tests, !FileError);
 		PF_CHECK(Tests, RegisteredAssets.size() == ManagedSourceCount);
+
+		const std::filesystem::path DemoProjectFile = RepositoryRoot / "Samples" / "VisualValidation" /
+			"PointLightShadows" / "PointLightShadows.pfproj";
+		auto DemoProject = Project::Open(DemoProjectFile);
+		PF_CHECK(Tests, DemoProject.has_value());
+		if (!DemoProject)
+			return;
+		PF_CHECK(Tests, DemoProject->GetDescription().StartScene.has_value());
+		if (!DemoProject->GetDescription().StartScene)
+			return;
+		const auto StartupRecord = DemoProject->GetAssetRegistry().Find(*DemoProject->GetDescription().StartScene);
+		PF_CHECK(Tests, StartupRecord.has_value());
+		PF_CHECK(Tests, StartupRecord && StartupRecord->ProjectRelativePath.filename() == "PointLightShadowsOverview.scene");
+		size_t LoadedDemoSceneCount = 0;
+		for (const AssetRecord& Asset : DemoProject->GetAssetRegistry().GetAssets())
+		{
+			if (Asset.ProjectRelativePath.extension() != ".scene")
+				continue;
+
+			Scene LoadedDemoScene;
+			PF_CHECK(Tests, SceneAssetService::Load(Asset.ID, DemoProject->GetRootPath(),
+				DemoProject->GetAssetRegistry(), LoadedDemoScene).has_value());
+			const auto ReferenceIssues = AssetReferenceValidator::Validate(
+				LoadedDemoScene, DemoProject->GetAssetRegistry());
+			PF_CHECK(Tests, ReferenceIssues.has_value());
+			PF_CHECK(Tests, ReferenceIssues && ReferenceIssues->empty());
+			++LoadedDemoSceneCount;
+		}
+		PF_CHECK(Tests, LoadedDemoSceneCount == 4);
 	}
 
 	void TestAssetReferenceValidation(TestRunner& Tests)
@@ -5402,7 +5440,12 @@ end
 		PF_CHECK(Tests, Root->SetCamera(RootCamera).has_value());
 		const DirectionalLightComponent PrefabLight{ glm::vec3(0.8f, 0.9f, 1.0f), 1.75f };
 		PF_CHECK(Tests, Root->SetDirectionalLight(PrefabLight).has_value());
-		PF_CHECK(Tests, Root->SetPointLight(PointLightComponent{ glm::vec3(1.0f, 0.5f, 0.25f), 3.0f, 9.0f }).has_value());
+		PointLightComponent PrefabPoint{ glm::vec3(1.0f, 0.5f, 0.25f), 3.0f, 9.0f };
+		PrefabPoint.CastShadows = true;
+		PrefabPoint.ShadowBias = 0.0025f;
+		PrefabPoint.ShadowNormalBias = 0.04f;
+		PrefabPoint.ShadowSoftness = 2.25f;
+		PF_CHECK(Tests, Root->SetPointLight(PrefabPoint).has_value());
 		SpotLightComponent PrefabSpot{ glm::vec3(0.3f, 0.5f, 1.0f), 7.0f, 14.0f, 8.0f, 22.0f };
 		PrefabSpot.CastShadows = true;
 		PrefabSpot.ShadowBias = 0.003f;
@@ -5518,7 +5561,11 @@ end
 		PF_CHECK(Tests, FirstEnvironment && FirstEnvironment->has_value() &&
 			FirstEnvironment->value().HdrImage == PrefabEnvironment.HdrImage &&
 			FirstEnvironment->value().Intensity == PrefabEnvironment.Intensity);
-		PF_CHECK(Tests, FirstPointLight && FirstPointLight->has_value() && FirstPointLight->value().Range == 9.0f);
+		PF_CHECK(Tests, FirstPointLight && FirstPointLight->has_value() &&
+			FirstPointLight->value().Range == 9.0f && FirstPointLight->value().CastShadows &&
+			FirstPointLight->value().ShadowBias == PrefabPoint.ShadowBias &&
+			FirstPointLight->value().ShadowNormalBias == PrefabPoint.ShadowNormalBias &&
+			FirstPointLight->value().ShadowSoftness == PrefabPoint.ShadowSoftness);
 		PF_CHECK(Tests, FirstAudioListener && FirstAudioListener->has_value() && !FirstAudioListener->value().IsPrimary);
 		const auto FirstChildren = FirstInstance->GetChildren();
 		PF_CHECK(Tests, FirstChildren && FirstChildren->size() == 1);
@@ -6395,6 +6442,17 @@ end
 		auto SampleableDepth = DepthDescription;
 		SampleableDepth.Usage = TextureUsage::DepthStencilAttachment | TextureUsage::ShaderResource;
 		PF_CHECK(Tests, ValidateTextureUpload(SampleableDepth, 0).has_value());
+		auto SampleableDepthCube = SampleableDepth;
+		SampleableDepthCube.Dimension = TextureDimension::TextureCube;
+		SampleableDepthCube.Width = 512;
+		SampleableDepthCube.Height = 512;
+		PF_CHECK(Tests, ValidateTextureUpload(SampleableDepthCube, std::span<const TextureSubresourceData>{}).has_value());
+		auto NonSquareDepthCube = SampleableDepthCube;
+		NonSquareDepthCube.Width = 256;
+		PF_CHECK(Tests, !ValidateTextureUpload(NonSquareDepthCube, std::span<const TextureSubresourceData>{}).has_value());
+		auto MippedDepthCube = SampleableDepthCube;
+		MippedDepthCube.MipLevels = 2;
+		PF_CHECK(Tests, !ValidateTextureUpload(MippedDepthCube, std::span<const TextureSubresourceData>{}).has_value());
 		auto InvalidDepthUsage = DepthDescription;
 		InvalidDepthUsage.Usage = TextureUsage::DepthStencilAttachment | TextureUsage::ColorAttachment;
 		PF_CHECK(Tests, !ValidateTextureUpload(InvalidDepthUsage, 0).has_value());
@@ -6908,6 +6966,75 @@ end
 		PF_CHECK(Tests, CapacityBounded.size() == MaxLocalLightCount);
 		PF_CHECK(Tests, std::find(CapacityBounded.begin(), CapacityBounded.end(), MaxLocalLightCount) == CapacityBounded.end());
 	}
+
+	void TestPointLightShadowMath(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		PointLightComponent Light;
+		PF_CHECK(Tests, !Light.CastShadows && Light.Validate());
+		Light.CastShadows = true;
+		PF_CHECK(Tests, Light.Validate().has_value());
+		Light.ShadowBias = std::numeric_limits<float>::quiet_NaN();
+		PF_CHECK(Tests, !Light.Validate());
+		Light.ShadowBias = 0.001f;
+		Light.ShadowNormalBias = -0.1f;
+		PF_CHECK(Tests, !Light.Validate());
+		Light.ShadowNormalBias = 0.025f;
+		Light.ShadowSoftness = MaxPointLightShadowSoftness + 0.1f;
+		PF_CHECK(Tests, !Light.Validate());
+		Light.ShadowSoftness = 1.5f;
+
+		const auto Projections = BuildPointShadowProjections({ 1.0f, 2.0f, 3.0f }, 10.0f);
+		PF_CHECK(Tests, Projections.has_value());
+		if (Projections)
+		{
+			PF_CHECK(Tests, Projections->NearPlane > 0.0f && Projections->NearPlane < Projections->FarPlane);
+			PF_CHECK(Tests, Projections->FarPlane == 10.0f);
+			for (size_t Face = 0; Face < Projections->Faces.size(); ++Face)
+			{
+				const auto& Projection = Projections->Faces[Face];
+				const glm::vec4 Clip = Projection.ViewProjection * glm::vec4(
+					glm::vec3(1.0f, 2.0f, 3.0f) + Projection.Direction * 5.0f, 1.0f);
+				PF_CHECK(Tests, std::isfinite(Clip.x) && std::isfinite(Clip.y) && std::isfinite(Clip.z) && Clip.w > 0.0f);
+				PF_CHECK(Tests, glm::abs(Clip.x / Clip.w) < 0.0001f && glm::abs(Clip.y / Clip.w) < 0.0001f);
+				PF_CHECK(Tests, Clip.z / Clip.w > 0.0f && Clip.z / Clip.w < 1.0f);
+			}
+		}
+		const auto ShortRange = BuildPointShadowProjections(glm::vec3(0.0f), 0.01f);
+		PF_CHECK(Tests, ShortRange.has_value() && ShortRange->NearPlane < ShortRange->FarPlane);
+		PF_CHECK(Tests, !BuildPointShadowProjections({ std::numeric_limits<float>::infinity(), 0.0f, 0.0f }, 1.0f));
+		PF_CHECK(Tests, !BuildPointShadowProjections(glm::vec3(0.0f), 0.0f));
+		PF_CHECK(Tests, SelectPointShadowCubeFace({ 1.0f, 0.0f, 0.0f }) == PointShadowCubeFace::PositiveX);
+		PF_CHECK(Tests, SelectPointShadowCubeFace({ -1.0f, 0.0f, 0.0f }) == PointShadowCubeFace::NegativeX);
+		PF_CHECK(Tests, SelectPointShadowCubeFace({ 0.0f, 1.0f, 0.0f }) == PointShadowCubeFace::PositiveY);
+		PF_CHECK(Tests, SelectPointShadowCubeFace({ 0.0f, -1.0f, 0.0f }) == PointShadowCubeFace::NegativeY);
+		PF_CHECK(Tests, SelectPointShadowCubeFace({ 0.0f, 0.0f, 1.0f }) == PointShadowCubeFace::PositiveZ);
+		PF_CHECK(Tests, SelectPointShadowCubeFace({ 0.0f, 0.0f, -1.0f }) == PointShadowCubeFace::NegativeZ);
+		PF_CHECK(Tests, SelectPointShadowCubeFace({ 1.0f, 1.0f, 0.0f }) == PointShadowCubeFace::PositiveX);
+		PF_CHECK(Tests, EncodePointShadowRadialDepth(5.0f, 10.0f) == 0.5f);
+		PF_CHECK(Tests, EncodePointShadowRadialDepth(20.0f, 10.0f) == 1.0f);
+		PF_CHECK(Tests, EncodePointShadowRadialDepth(std::numeric_limits<float>::quiet_NaN(), 10.0f) == 1.0f);
+		PF_CHECK(Tests, IsPointShadowOccluded(0.8f, 0.5f, 0.01f));
+		PF_CHECK(Tests, !IsPointShadowOccluded(0.5f, 0.5f, 0.01f));
+
+		const std::array<PointShadowCandidate, 3> Candidates = {{
+			{ UUID{ 0, 11 }, 0 }, { UUID{ 0, 12 }, 1 }, { UUID{ 0, 13 }, 2 }
+		}};
+		PointShadowSlotOwners Owners{};
+		const auto Initial = AssignPointShadowSlots(Candidates, Owners);
+		PF_CHECK(Tests, Initial[0] == 0 && Initial[1] == 1 && Initial[2] == -1);
+		const std::array<PointShadowCandidate, 2> Replaced = {{
+			{ UUID{ 0, 12 }, 1 }, { UUID{ 0, 13 }, 2 }
+		}};
+		const auto Reassignment = AssignPointShadowSlots(Replaced, Owners);
+		PF_CHECK(Tests, Reassignment[0] == -1 && Reassignment[1] == 1 && Reassignment[2] == 0);
+		const auto Restored = AssignPointShadowSlots(Candidates, Owners);
+		PF_CHECK(Tests, Restored[0] == 0 && Restored[1] == 1 && Restored[2] == -1);
+		PF_CHECK(Tests, Owners[0] == (UUID{ 0, 11 }) && Owners[1] == (UUID{ 0, 12 }));
+		const auto Cleared = AssignPointShadowSlots({}, Owners);
+		PF_CHECK(Tests, Cleared[0] == -1 && Cleared[1] == -1 && !Owners[0] && !Owners[1]);
+		PF_CHECK(Tests, MaxPointLightShadowCount == 2 && PointLightShadowMapResolution == 512);
+	}
 }
 
 int main()
@@ -6969,5 +7096,6 @@ int main()
 	TestVulkanSurfaceAndPresentationSelection(Tests);
 	TestVulkanExtentAndImageCountSelection(Tests);
 	TestConsoleFormatting(Tests);
+	TestPointLightShadowMath(Tests);
 	return Tests.Finish();
 }

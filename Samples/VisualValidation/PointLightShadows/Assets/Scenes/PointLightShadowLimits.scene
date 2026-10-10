@@ -1,0 +1,382 @@
+{
+  "format": "PulseForgeScene",
+  "version": 7,
+  "entities": [
+    {
+      "uuid": "a32567ef-0fe4-4da1-967b-889a8523a68e",
+      "tag": {
+        "name": "Budget test floor"
+      },
+      "transform": {
+        "translation": [
+          0.0,
+          -0.12,
+          -1.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          8.0,
+          0.12,
+          8.0
+        ]
+      },
+      "meshRenderer": {
+        "meshAsset": "774b11dd-3b46-441b-82a0-2444de263b23",
+        "materialAsset": "57b2df63-fdd0-47c6-bd0c-bd7b55ba241b"
+      },
+      "parent": null
+    },
+    {
+      "uuid": "711310cb-3774-49ec-88cd-972f5df6da57",
+      "tag": {
+        "name": "Budget test warm caster"
+      },
+      "transform": {
+        "translation": [
+          -1.0,
+          0.65,
+          -0.3
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          0.65,
+          0.65,
+          0.65
+        ]
+      },
+      "meshRenderer": {
+        "meshAsset": "774b11dd-3b46-441b-82a0-2444de263b23",
+        "materialAsset": "f472afa5-2b2d-41ba-81a0-ea28e0c758f9"
+      },
+      "parent": null
+    },
+    {
+      "uuid": "ee0801c3-4488-49c6-bc06-f6d64bedb609",
+      "tag": {
+        "name": "Budget test pillar"
+      },
+      "transform": {
+        "translation": [
+          1.1,
+          1.0,
+          -1.2
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          0.35,
+          1.0,
+          0.35
+        ]
+      },
+      "meshRenderer": {
+        "meshAsset": "774b11dd-3b46-441b-82a0-2444de263b23",
+        "materialAsset": "31acfa37-fd80-4859-a0c8-294b54e1f652"
+      },
+      "parent": null
+    },
+    {
+      "uuid": "472bf37a-ce6d-4f3b-add8-bb9411e928f0",
+      "tag": {
+        "name": "Budget test elevated caster"
+      },
+      "transform": {
+        "translation": [
+          0.0,
+          1.75,
+          0.25
+        ],
+        "rotation": [
+          0.9239,
+          0.0,
+          0.3827,
+          0.0
+        ],
+        "scale": [
+          0.45,
+          0.45,
+          0.45
+        ]
+      },
+      "meshRenderer": {
+        "meshAsset": "774b11dd-3b46-441b-82a0-2444de263b23",
+        "materialAsset": "27dcb6ba-21a3-43bc-8938-175803d3ebac"
+      },
+      "parent": null
+    },
+    {
+      "uuid": "880f5993-2d74-4909-9551-579ccae34575",
+      "tag": {
+        "name": "Budget test camera"
+      },
+      "transform": {
+        "translation": [
+          0.0,
+          4.4,
+          12.5
+        ],
+        "rotation": [
+          0.9903,
+          -0.138,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "camera": {
+        "verticalFovRadians": 0.7853982,
+        "nearClipPlane": 0.1,
+        "farClipPlane": 100.0,
+        "primary": true
+      },
+      "parent": null
+    },
+    {
+      "uuid": "23d9b13c-a4bf-47e2-b221-e50995f597b0",
+      "tag": {
+        "name": "Budget test environment"
+      },
+      "transform": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "environmentLight": {
+        "hdrImage": "8707a670-b142-4047-9d43-2cb2160f93a1",
+        "intensity": 0.22
+      },
+      "parent": null
+    },
+    {
+      "uuid": "0a77a5ee-476f-41e3-894d-fee71aa169bf",
+      "tag": {
+        "name": "Point Shadow Requester 1"
+      },
+      "transform": {
+        "translation": [
+          -3.0,
+          5.0,
+          3.0
+        ],
+        "rotation": [
+          0.859003,
+          -0.461554,
+          -0.221546,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "parent": null,
+      "pointLight": {
+        "color": [
+          1.0,
+          0.72,
+          0.5
+        ],
+        "intensity": 42.0,
+        "range": 15.0,
+        "innerConeAngleDegrees": 18.0,
+        "outerConeAngleDegrees": 31.0,
+        "castShadows": true,
+        "shadowBias": 0.001,
+        "shadowNormalBias": 0.025,
+        "shadowSoftness": 1.5
+      }
+    },
+    {
+      "uuid": "4ac048f2-3862-4952-aa41-e459a79123ef",
+      "tag": {
+        "name": "Point Shadow Requester 2"
+      },
+      "transform": {
+        "translation": [
+          3.5,
+          4.5,
+          2.5
+        ],
+        "rotation": [
+          0.837044,
+          -0.479409,
+          0.263675,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "parent": null,
+      "pointLight": {
+        "color": [
+          0.46,
+          0.67,
+          1.0
+        ],
+        "intensity": 38.0,
+        "range": 14.0,
+        "innerConeAngleDegrees": 17.0,
+        "outerConeAngleDegrees": 29.0,
+        "castShadows": true,
+        "shadowBias": 0.001,
+        "shadowNormalBias": 0.025,
+        "shadowSoftness": 1.5
+      }
+    },
+    {
+      "uuid": "d325eca5-41f0-4467-a7ff-65c22bf9ece1",
+      "tag": {
+        "name": "Point Shadow Requester 3"
+      },
+      "transform": {
+        "translation": [
+          -4.0,
+          3.8,
+          -0.5
+        ],
+        "rotation": [
+          0.784033,
+          -0.438915,
+          -0.438915,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "parent": null,
+      "pointLight": {
+        "color": [
+          1.0,
+          0.4,
+          0.2
+        ],
+        "intensity": 32.0,
+        "range": 12.0,
+        "innerConeAngleDegrees": 15.0,
+        "outerConeAngleDegrees": 27.0,
+        "castShadows": true,
+        "shadowBias": 0.001,
+        "shadowNormalBias": 0.025,
+        "shadowSoftness": 1.5
+      }
+    },
+    {
+      "uuid": "c99cfddf-42e0-4e00-9c6e-d83a509eab0f",
+      "tag": {
+        "name": "Point Shadow Requester 4"
+      },
+      "transform": {
+        "translation": [
+          2.5,
+          4.5,
+          -2.0
+        ],
+        "rotation": [
+          0.625213,
+          -0.69806,
+          0.34903,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "parent": null,
+      "pointLight": {
+        "color": [
+          0.74,
+          0.88,
+          1.0
+        ],
+        "intensity": 28.0,
+        "range": 13.0,
+        "innerConeAngleDegrees": 16.0,
+        "outerConeAngleDegrees": 28.0,
+        "castShadows": true,
+        "shadowBias": 0.001,
+        "shadowNormalBias": 0.025,
+        "shadowSoftness": 1.5
+      }
+    },
+    {
+      "uuid": "604bdbd8-88ef-4e60-a7da-12a7e3d897d7",
+      "tag": {
+        "name": "Point Shadow Requester 5"
+      },
+      "transform": {
+        "translation": [
+          0.0,
+          3.0,
+          2.0
+        ],
+        "rotation": [
+          0.881,
+          -0.4731,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "parent": null,
+      "pointLight": {
+        "color": [
+          1.0,
+          0.94,
+          0.8
+        ],
+        "intensity": 12.0,
+        "range": 6.0,
+        "innerConeAngleDegrees": 14.0,
+        "outerConeAngleDegrees": 25.0,
+        "castShadows": true,
+        "shadowBias": 0.001,
+        "shadowNormalBias": 0.025,
+        "shadowSoftness": 1.5
+      }
+    }
+  ]
+}

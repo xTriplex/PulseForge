@@ -158,7 +158,8 @@ namespace PulseForge
 						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidLocalLightTransform,
 							Current.GetUUID(), "Point-light world position must be finite"));
 					Snapshot.PointLights.push_back({ Current.GetUUID(), glm::vec3((*World)[3]), Light.Color,
-						Light.Intensity, Light.Range });
+						Light.Intensity, Light.Range, Light.CastShadows, Light.ShadowBias,
+						Light.ShadowNormalBias, Light.ShadowSoftness });
 				}
 
 				const auto SpotLight = Current.GetSpotLight();

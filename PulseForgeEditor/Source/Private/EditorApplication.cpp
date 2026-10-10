@@ -3978,6 +3978,20 @@ namespace
 					Changed |= ImGui::DragFloat("##PointLightIntensity", &Component.Intensity, 0.1f, 0.0f, 1000000.0f, "%.2f");
 				if (m_EditorStyle.BeginPropertyRow("Range"))
 					Changed |= ImGui::DragFloat("##PointLightRange", &Component.Range, 0.05f, 0.01f, 10000.0f, "%.2f units");
+				if (m_EditorStyle.BeginPropertyRow("Cast Shadows"))
+					Changed |= ImGui::Checkbox("##PointLightCastShadows", &Component.CastShadows);
+				if (Component.CastShadows)
+				{
+					if (m_EditorStyle.BeginPropertyRow("Shadow Bias (normalized)"))
+						Changed |= ImGui::DragFloat("##PointLightShadowBias", &Component.ShadowBias, 0.0001f, 0.0f,
+							PulseForge::MaxPointLightShadowBias, "%.4f");
+					if (m_EditorStyle.BeginPropertyRow("Shadow Normal Bias"))
+						Changed |= ImGui::DragFloat("##PointLightShadowNormalBias", &Component.ShadowNormalBias,
+							0.001f, 0.0f, PulseForge::MaxPointLightShadowNormalBias, "%.3f units");
+					if (m_EditorStyle.BeginPropertyRow("Shadow Softness (texels)"))
+						Changed |= ImGui::DragFloat("##PointLightShadowSoftness", &Component.ShadowSoftness,
+							0.05f, 0.0f, PulseForge::MaxPointLightShadowSoftness, "%.2f");
+				}
 				m_EditorStyle.EndPropertyTable();
 			}
 			if (Changed)

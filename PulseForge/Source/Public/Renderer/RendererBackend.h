@@ -4,6 +4,7 @@
 #include "Renderer/Binding.h"
 #include "Renderer/Graphics.h"
 #include "Renderer/RenderTarget.h"
+#include "Renderer/DepthCubemap.h"
 
 #include <memory>
 #include "Renderer/RendererAPI.h"
@@ -21,6 +22,7 @@ namespace PulseForge
 		virtual bool BeginFrame() = 0;
 		virtual void EndFrame() = 0;
 		virtual RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description) = 0;
+		virtual DepthCubemapCreateResult CreateDepthCubemap(uint32_t Resolution, const std::string& DebugName) = 0;
 		virtual GraphicsResult BeginRenderTarget(
 			const RenderTarget& Target,
 			const RenderTargetClearValue& ClearValue) = 0;

@@ -192,6 +192,14 @@ namespace PulseForge
 		return m_Renderer->CreateRenderTarget(Description);
 	}
 
+	DepthCubemapCreateResult Application::CreateDepthCubemap(uint32_t Resolution, const std::string& DebugName)
+	{
+		if (Resolution == 0 || DebugName.empty())
+			return std::unexpected(DepthCubemapError{ DepthCubemapErrorCode::InvalidDescription,
+				"Depth cubemap resolution and debug name must be valid" });
+		return m_Renderer->CreateDepthCubemap(Resolution, DebugName);
+	}
+
 	GraphicsResult Application::BeginRenderTarget(const RenderTarget& Target, const RenderTargetClearValue& ClearValue)
 	{
 		const auto Validation = ValidateRenderTargetClearValue(ClearValue);

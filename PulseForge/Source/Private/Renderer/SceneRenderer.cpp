@@ -124,6 +124,22 @@ namespace PulseForge
 			return Runtime.CreateTexture(Description, Faces);
 		}
 
+		std::expected<TextureHandle, TextureError> CreateWhiteCube(Application& Runtime, std::string DebugName)
+		{
+			const std::array<float, 4> White{ 1.0f, 1.0f, 1.0f, 1.0f };
+			const std::span<const float> Pixel(White);
+			std::array<TextureSubresourceData, 6> Faces;
+			for (uint32_t Face = 0; Face < Faces.size(); ++Face)
+				Faces[Face] = { 0, Face, std::as_bytes(Pixel), sizeof(White) };
+			TextureDesc Description;
+			Description.Width = 1;
+			Description.Height = 1;
+			Description.Format = TextureFormat::RGBA32_Float;
+			Description.Dimension = TextureDimension::TextureCube;
+			Description.DebugName = std::move(DebugName);
+			return Runtime.CreateTexture(Description, Faces);
+		}
+
 		class RenderTargetFrameScope final
 		{
 		public:
@@ -286,6 +302,14 @@ namespace PulseForge
 		m_AmbientOcclusionFragmentShader = std::move(*AoPs);
 		m_AmbientOcclusionBlurVertexShader = std::move(*AoBlurVs);
 		m_AmbientOcclusionBlurFragmentShader = std::move(*AoBlurPs);
+		auto PointShadowVs = LoadAuxiliaryShader("PointShadow.vs.spv", ShaderStage::Vertex,
+			"PulseForge point-shadow vertex shader");
+		auto PointShadowPs = LoadAuxiliaryShader("PointShadow.ps.spv", ShaderStage::Fragment,
+			"PulseForge point-shadow radial-depth fragment shader");
+		if (!PointShadowVs || !PointShadowPs)
+			return std::unexpected(MakeResourceError("Could not load the point-shadow shader set"));
+		m_PointShadowVertexShader = std::move(*PointShadowVs);
+		m_PointShadowFragmentShader = std::move(*PointShadowPs);
 
 		SamplerDesc SamplerDescription;
 		SamplerDescription.Minification = SamplerFilter::Nearest;
@@ -368,6 +392,10 @@ namespace PulseForge
 		if (!AmbientOcclusionFallback)
 			return std::unexpected(MakeResourceError("Could not create the unoccluded SSAO fallback: " + AmbientOcclusionFallback.error().Message));
 		m_FallbackAmbientOcclusionTexture = std::move(*AmbientOcclusionFallback);
+		auto FallbackPointShadow = CreateWhiteCube(m_Runtime, "PulseForge fully-lit point-shadow fallback cube");
+		if (!FallbackPointShadow)
+			return std::unexpected(MakeResourceError("Could not create fallback point-shadow cubemap: " + FallbackPointShadow.error().Message));
+		m_FallbackPointShadowTexture = std::move(*FallbackPointShadow);
 		const MaterialConstants FallbackMaterial{ { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f, 0.0f, 0.0f } };
 		BufferDesc FallbackMaterialDescription;
 		FallbackMaterialDescription.ByteSize = sizeof(FallbackMaterial);
@@ -554,6 +582,19 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Could not create spotlight shadow binding layout: " + SpotShadowBindingLayout.error().Message));
 		m_SpotShadowBindingLayout = std::move(*SpotShadowBindingLayout);
 
+		BindingLayoutDesc PointShadowBindingLayoutDescription;
+		PointShadowBindingLayoutDescription.Visibility = ShaderVisibility::Fragment;
+		PointShadowBindingLayoutDescription.ShaderRegisterSpace = 5;
+		PointShadowBindingLayoutDescription.Items = {
+			{ BindingResourceType::TextureCube, 0 }, { BindingResourceType::TextureCube, 1 },
+			{ BindingResourceType::Sampler, 0 }
+		};
+		PointShadowBindingLayoutDescription.DebugName = "PulseForge point-shadow cubemaps (space5)";
+		auto PointShadowBindingLayout = m_Runtime.CreateBindingLayout(PointShadowBindingLayoutDescription);
+		if (!PointShadowBindingLayout)
+			return std::unexpected(MakeResourceError("Could not create point-shadow binding layout: " + PointShadowBindingLayout.error().Message));
+		m_PointShadowBindingLayout = std::move(*PointShadowBindingLayout);
+
 		BindingLayoutDesc ShadowObjectLayoutDescription;
 		ShadowObjectLayoutDescription.Visibility = ShaderVisibility::Vertex;
 		ShadowObjectLayoutDescription.Items = { { BindingResourceType::ConstantBuffer, 0 } };
@@ -562,6 +603,15 @@ namespace PulseForge
 		if (!ShadowObjectLayout)
 			return std::unexpected(MakeResourceError("Could not create shadow object layout: " + ShadowObjectLayout.error().Message));
 		m_ShadowObjectBindingLayout = std::move(*ShadowObjectLayout);
+
+		BindingLayoutDesc PointShadowObjectLayoutDescription;
+		PointShadowObjectLayoutDescription.Visibility = ShaderVisibility::AllGraphics;
+		PointShadowObjectLayoutDescription.Items = { { BindingResourceType::ConstantBuffer, 0 } };
+		PointShadowObjectLayoutDescription.DebugName = "PulseForge point-shadow pass/object constants";
+		auto PointShadowObjectLayout = m_Runtime.CreateBindingLayout(PointShadowObjectLayoutDescription);
+		if (!PointShadowObjectLayout)
+			return std::unexpected(MakeResourceError("Could not create point-shadow object layout: " + PointShadowObjectLayout.error().Message));
+		m_PointShadowObjectBindingLayout = std::move(*PointShadowObjectLayout);
 
 		const ObjectConstants InitialObject{};
 		BufferDesc ObjectBufferDescription;
@@ -661,6 +711,23 @@ namespace PulseForge
 		if (!ShadowObjectSet)
 			return std::unexpected(MakeResourceError("Could not create shadow object binding set: " + ShadowObjectSet.error().Message));
 		m_ShadowObjectBindingSet = std::move(*ShadowObjectSet);
+		const PointShadowObjectConstants InitialPointShadow{};
+		BufferDesc PointShadowObjectBufferDescription;
+		PointShadowObjectBufferDescription.ByteSize = sizeof(PointShadowObjectConstants);
+		PointShadowObjectBufferDescription.Usage = BufferUsage::Constant;
+		PointShadowObjectBufferDescription.DebugName = "PulseForge point-shadow pass/object constants";
+		auto PointShadowObjectBuffer = m_Runtime.CreateBuffer(
+			PointShadowObjectBufferDescription, std::as_bytes(std::span(&InitialPointShadow, 1)));
+		if (!PointShadowObjectBuffer)
+			return std::unexpected(MakeResourceError("Could not create point-shadow object constants: " + PointShadowObjectBuffer.error().Message));
+		m_PointShadowObjectConstantsBuffer = std::move(*PointShadowObjectBuffer);
+		BindingSetDesc PointShadowObjectSetDescription;
+		PointShadowObjectSetDescription.Layout = m_PointShadowObjectBindingLayout;
+		PointShadowObjectSetDescription.Buffers.push_back({ 0, std::cref(*m_PointShadowObjectConstantsBuffer) });
+		auto PointShadowObjectSet = m_Runtime.CreateBindingSet(PointShadowObjectSetDescription);
+		if (!PointShadowObjectSet)
+			return std::unexpected(MakeResourceError("Could not create point-shadow object binding set: " + PointShadowObjectSet.error().Message));
+		m_PointShadowObjectBindingSet = std::move(*PointShadowObjectSet);
 
 		SamplerDesc ShadowSamplerDescription;
 		ShadowSamplerDescription.Minification = SamplerFilter::Nearest;
@@ -709,6 +776,17 @@ namespace PulseForge
 		if (!SpotShadowSet)
 			return std::unexpected(MakeResourceError("Could not create safe initial spotlight shadow bindings: " + SpotShadowSet.error().Message));
 		m_SpotShadowBindingSet = std::move(*SpotShadowSet);
+		BindingSetDesc PointShadowSetDescription;
+		PointShadowSetDescription.Layout = m_PointShadowBindingLayout;
+		PointShadowSetDescription.Textures = {
+			{ 0, std::cref(*m_FallbackPointShadowTexture), BindingResourceType::TextureCube },
+			{ 1, std::cref(*m_FallbackPointShadowTexture), BindingResourceType::TextureCube }
+		};
+		PointShadowSetDescription.Samplers.push_back({ 0, std::cref(*m_ShadowSampler) });
+		auto PointShadowSet = m_Runtime.CreateBindingSet(PointShadowSetDescription);
+		if (!PointShadowSet)
+			return std::unexpected(MakeResourceError("Could not create fallback point-shadow bindings: " + PointShadowSet.error().Message));
+		m_PointShadowBindingSet = std::move(*PointShadowSet);
 		if (auto Pipelines = EnsureAmbientOcclusionPipelines(); !Pipelines)
 			return std::unexpected(std::move(Pipelines.error()));
 		return {};
@@ -996,7 +1074,8 @@ namespace PulseForge
 		PipelineDescription.VertexShader = m_VertexShader;
 		PipelineDescription.FragmentShader = m_FragmentShader;
 		PipelineDescription.BindingLayouts = {
-			m_BindingLayout, m_ShadowBindingLayout, m_AmbientOcclusionFinalBindingLayout, m_SpotShadowBindingLayout };
+			m_BindingLayout, m_ShadowBindingLayout, m_AmbientOcclusionFinalBindingLayout,
+			m_SpotShadowBindingLayout, m_PointShadowBindingLayout };
 		PipelineDescription.VertexLayout = *m_PipelineVertexLayout;
 		PipelineDescription.ColorFormat = ColorFormat;
 		PipelineDescription.Rasterizer.Cull = CullMode::None;
@@ -1093,26 +1172,69 @@ namespace PulseForge
 		return {};
 	}
 
+	std::expected<void, SceneRendererError> SceneRenderer::EnsurePointShadowResources()
+	{
+		if (m_PointShadowCubemaps.front())
+			return {};
+
+		std::array<DepthCubemapHandle, MaxPointLightShadowCount> Cubemaps;
+		for (size_t Slot = 0; Slot < Cubemaps.size(); ++Slot)
+		{
+			auto Cubemap = m_Runtime.CreateDepthCubemap(PointLightShadowMapResolution,
+				"PulseForge point-shadow depth cubemap " + std::to_string(Slot));
+			if (!Cubemap)
+				return std::unexpected(MakeResourceError("Could not create point-shadow depth cubemap: " + Cubemap.error().Message));
+			if ((*Cubemap)->GetTexture().GetDescription().Format != TextureFormat::Depth32Float ||
+				(*Cubemap)->GetResolution() != PointLightShadowMapResolution)
+				return std::unexpected(MakeResourceError("Point-shadow cubemap has an incompatible depth format or resolution"));
+			Cubemaps[Slot] = std::move(*Cubemap);
+		}
+
+		BindingSetDesc Description;
+		Description.Layout = m_PointShadowBindingLayout;
+		for (uint32_t Slot = 0; Slot < Cubemaps.size(); ++Slot)
+			Description.Textures.push_back({ Slot, std::cref(Cubemaps[Slot]->GetTexture()), BindingResourceType::TextureCube });
+		Description.Samplers.push_back({ 0, std::cref(*m_ShadowSampler) });
+		auto BindingSet = m_Runtime.CreateBindingSet(Description);
+		if (!BindingSet)
+			return std::unexpected(MakeResourceError("Could not create point-shadow cubemap bindings: " + BindingSet.error().Message));
+
+		m_PointShadowCubemaps = std::move(Cubemaps);
+		m_PointShadowBindingSet = std::move(*BindingSet);
+		if (m_PointShadowResourceGeneration == (std::numeric_limits<uint64_t>::max)())
+			m_PointShadowResourceGeneration = 1;
+		else
+			++m_PointShadowResourceGeneration;
+		PF_CORE_INFO("Created {0} persistent {1}x{1} D32 point-shadow cubemaps ({2} MiB depth storage)",
+			MaxPointLightShadowCount, PointLightShadowMapResolution,
+			(MaxPointLightShadowCount * 6 * PointLightShadowMapResolution * PointLightShadowMapResolution * sizeof(float)) / (1024 * 1024));
+		return {};
+	}
+
 	std::expected<void, SceneRendererError> SceneRenderer::PrepareLocalLighting()
 	{
 		m_PreparedLocalLighting = {};
 		m_SelectedLocalLightCount = 0;
 		m_PreparedSpotShadowMatrices.fill(glm::mat4(1.0f));
 		m_PreparedSpotShadowParameters.fill(glm::vec4(0.0f));
+		for (auto& FaceMatrices : m_PreparedPointShadowMatrices)
+			FaceMatrices.fill(glm::mat4(1.0f));
+		m_PreparedPointShadowParameters.fill(glm::vec4(0.0f));
 		if (!m_PreparedSnapshot)
 		{
 			m_SpotShadowSlotOwners.fill(std::nullopt);
+			m_PointShadowSlotOwners.fill(std::nullopt);
 			return {};
 		}
 
 		size_t ActiveLightCount = 0;
 		const auto ConsiderLocalLight = [&](const LocalLightRelevance& Relevance, const LocalLightGpuData& Data,
-			UUID Entity, const SceneSpotLight* Spot)
+			UUID Entity, const SceneSpotLight* Spot, const ScenePointLight* Point)
 		{
 			if (Relevance.Intensity <= 0.0f)
 				return;
 			++ActiveLightCount;
-			const SelectedLocalLight Candidate{ Relevance, Data, Entity, Spot };
+			const SelectedLocalLight Candidate{ Relevance, Data, Entity, Spot, Point };
 			size_t InsertIndex = 0;
 			while (InsertIndex < m_SelectedLocalLightCount && !IsLocalLightMoreRelevant(
 				Candidate.Relevance, m_SelectedLocalLights[InsertIndex].Relevance, m_PreparedSnapshot->CameraWorldPosition))
@@ -1133,7 +1255,7 @@ namespace PulseForge
 			Data.ColorIntensity = glm::vec4(Light.Color, Light.Intensity);
 			Data.OuterCosAndType = glm::vec4(0.0f, -1.0f, 0.0f, 0.0f);
 			ConsiderLocalLight({ Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, 0 },
-				Data, Light.Entity, nullptr);
+				Data, Light.Entity, nullptr, &Light);
 		}
 		for (const SceneSpotLight& Light : m_PreparedSnapshot->SpotLights)
 		{
@@ -1143,7 +1265,7 @@ namespace PulseForge
 			Data.DirectionInnerCos = glm::vec4(Light.WorldDirection, std::cos(glm::radians(Light.InnerConeAngleDegrees)));
 			Data.OuterCosAndType = glm::vec4(std::cos(glm::radians(Light.OuterConeAngleDegrees)), -1.0f, 0.0f, 1.0f);
 			ConsiderLocalLight({ Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, 1 },
-				Data, Light.Entity, &Light);
+				Data, Light.Entity, &Light, nullptr);
 		}
 
 		if (ActiveLightCount > MaxLocalLightCount && !m_LoggedLocalLightOverflow)
@@ -1195,6 +1317,61 @@ namespace PulseForge
 			m_LoggedSpotShadowOverflow = true;
 		}
 
+		std::array<PointShadowCandidate, MaxLocalLightCount> PointCandidates{};
+		size_t PointCandidateCount = 0;
+		for (size_t Index = 0; Index < m_SelectedLocalLightCount; ++Index)
+		{
+			const ScenePointLight* Point = m_SelectedLocalLights[Index].Point;
+			if (!Point || !Point->CastShadows || m_PreparedSnapshot->Meshes.empty())
+				continue;
+			auto Projections = BuildPointShadowProjections(Point->WorldPosition, Point->Range);
+			if (!Projections)
+				return std::unexpected(MakeDrawError("Could not build point-shadow projections for entity " +
+					Point->Entity.ToString() + ": " + Projections.error().Message));
+			PointCandidates[PointCandidateCount++] = { Point->Entity, static_cast<uint32_t>(Index) };
+		}
+		if (PointCandidateCount > 0)
+		{
+			if (auto Resources = EnsurePointShadowResources(); !Resources)
+				return std::unexpected(std::move(Resources.error()));
+			if (!m_PointShadowPipeline)
+			{
+				if (!m_PipelineVertexLayout)
+					return std::unexpected(MakeResourceError("Cannot create point-shadow pipeline before a mesh layout is prepared"));
+				GraphicsPipelineDesc Description;
+				Description.VertexShader = m_PointShadowVertexShader;
+				Description.FragmentShader = m_PointShadowFragmentShader;
+				Description.BindingLayouts = { m_PointShadowObjectBindingLayout };
+				Description.VertexLayout.Stride = m_PipelineVertexLayout->Stride;
+				const auto Position = std::find_if(m_PipelineVertexLayout->Attributes.begin(), m_PipelineVertexLayout->Attributes.end(),
+					[](const VertexAttributeDesc& Attribute) { return Attribute.Semantic == VertexSemantic::Position; });
+				if (Position == m_PipelineVertexLayout->Attributes.end())
+					return std::unexpected(MakeResourceError("The mesh layout has no position attribute for point-shadow rendering"));
+				Description.VertexLayout.Attributes.push_back(*Position);
+				Description.ColorFormat = ColorTargetFormat::None;
+				Description.Rasterizer.Cull = CullMode::Back;
+				Description.Depth.TestEnabled = true;
+				Description.Depth.WriteEnabled = true;
+				Description.Depth.Compare = DepthCompareOperation::Less;
+				Description.DebugName = "PulseForge point-shadow radial depth pipeline";
+				auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
+				if (!Pipeline)
+					return std::unexpected(MakeResourceError("Could not create point-shadow pipeline: " + Pipeline.error().Message));
+				m_PointShadowPipeline = std::move(*Pipeline);
+			}
+		}
+		const PointShadowSlotAssignments PointAssignments = AssignPointShadowSlots(
+			std::span(PointCandidates.data(), PointCandidateCount), m_PointShadowSlotOwners);
+		for (size_t Index = 0; Index < m_SelectedLocalLightCount; ++Index)
+			if (m_SelectedLocalLights[Index].Point && PointAssignments[Index] >= 0)
+				m_SelectedLocalLights[Index].Data.OuterCosAndType.y = static_cast<float>(PointAssignments[Index]);
+		if (PointCandidateCount > MaxPointLightShadowCount && !m_LoggedPointShadowOverflow)
+		{
+			PF_CORE_WARN("More than {0} selected point lights request shadows; remaining lights continue unshadowed",
+				MaxPointLightShadowCount);
+			m_LoggedPointShadowOverflow = true;
+		}
+
 		m_PreparedLocalLighting.Counts.x = static_cast<uint32_t>(m_SelectedLocalLightCount);
 		for (size_t Index = 0; Index < m_SelectedLocalLightCount; ++Index)
 			m_PreparedLocalLighting.Lights[Index] = m_SelectedLocalLights[Index].Data;
@@ -1218,13 +1395,31 @@ namespace PulseForge
 				Selected->Spot->ShadowBias, Selected->Spot->ShadowNormalBias,
 				Selected->Spot->ShadowSoftness, 1.0f);
 		}
+		for (size_t Slot = 0; Slot < m_PointShadowSlotOwners.size(); ++Slot)
+		{
+			if (!m_PointShadowSlotOwners[Slot])
+				continue;
+			const auto Selected = std::find_if(m_SelectedLocalLights.begin(),
+				m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount),
+				[&](const SelectedLocalLight& Light) { return Light.Entity == *m_PointShadowSlotOwners[Slot]; });
+			if (Selected == m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount) || !Selected->Point)
+				return std::unexpected(MakeDrawError("Point-shadow slot no longer identifies a selected point light"));
+			auto Projections = BuildPointShadowProjections(Selected->Point->WorldPosition, Selected->Point->Range);
+			if (!Projections)
+				return std::unexpected(MakeDrawError("Could not build assigned point-shadow projections: " + Projections.error().Message));
+			for (size_t Face = 0; Face < Projections->Faces.size(); ++Face)
+				m_PreparedPointShadowMatrices[Slot][Face] = Projections->Faces[Face].ViewProjection;
+			m_PreparedPointShadowParameters[Slot] = glm::vec4(
+				Selected->Point->ShadowBias, Selected->Point->ShadowNormalBias,
+				Selected->Point->ShadowSoftness, 1.0f);
+		}
 		return {};
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::RenderSpotlightShadows()
 	{
 		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty() || !m_SpotShadowTargets.front())
-			return {};
+			return RenderPointLightShadows();
 		const auto Pipeline = m_ShadowPipelines.find(1);
 		if (Pipeline == m_ShadowPipelines.end())
 			return std::unexpected(MakeResourceError("Spotlight shadow pipeline was not prepared"));
@@ -1258,6 +1453,61 @@ namespace PulseForge
 				return std::unexpected(MakeDrawError("Could not end spotlight shadow target: " + End.error().Message));
 			++m_LastSpotShadowPassCount;
 		}
+		return RenderPointLightShadows();
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::RenderPointLightShadows()
+	{
+		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty() || !m_PointShadowCubemaps.front())
+			return {};
+		if (!m_PointShadowPipeline)
+			return std::unexpected(MakeResourceError("Point-shadow pipeline was not prepared for active shadow owners"));
+
+		for (size_t Slot = 0; Slot < m_PointShadowSlotOwners.size(); ++Slot)
+		{
+			if (!m_PointShadowSlotOwners[Slot])
+				continue;
+			const auto Selected = std::find_if(m_SelectedLocalLights.begin(),
+				m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount),
+				[&](const SelectedLocalLight& Light) { return Light.Entity == *m_PointShadowSlotOwners[Slot]; });
+			if (Selected == m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount) || !Selected->Point)
+				return std::unexpected(MakeDrawError("Point-shadow rendering found a stale slot owner"));
+
+			for (size_t Face = 0; Face < 6; ++Face)
+			{
+				const RenderTarget& Target = m_PointShadowCubemaps[Slot]->GetFaceTarget(static_cast<uint32_t>(Face));
+				RenderTargetClearValue ClearValue;
+				ClearValue.Depth = 1.0f;
+				const GraphicsResult Begin = m_Runtime.BeginRenderTarget(Target, ClearValue);
+				if (!Begin)
+					return std::unexpected(MakeDrawError("Could not begin point-shadow cubemap face: " + Begin.error().Message));
+				RenderTargetFrameScope TargetScope(m_Runtime);
+				for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
+				{
+					auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
+					if (!Mesh)
+						return std::unexpected(MakeDrawError("Point-shadow caster mesh became unavailable: " + Mesh.error().Message));
+					const PointShadowObjectConstants Object{
+						m_PreparedPointShadowMatrices[Slot][Face],
+						glm::vec4(Selected->Point->WorldPosition, Selected->Point->Range),
+						Instance.WorldTransform };
+					const auto Update = m_Runtime.WriteBuffer(
+						*m_PointShadowObjectConstantsBuffer, 0, std::as_bytes(std::span(&Object, 1)));
+					if (!Update)
+						return std::unexpected(MakeDrawError("Could not update point-shadow constants: " + Update.error().Message));
+					const std::array<const BindingSet*, 1> Bindings = { m_PointShadowObjectBindingSet.get() };
+					const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
+					const GraphicsResult Draw = m_Runtime.DrawIndexed(*m_PointShadowPipeline, Mesh->get(), Arguments, Bindings);
+					if (!Draw)
+						return std::unexpected(MakeDrawError("Could not draw point-shadow caster: " + Draw.error().Message));
+					++m_LastPointShadowCasterDrawCount;
+				}
+				const GraphicsResult End = TargetScope.End();
+				if (!End)
+					return std::unexpected(MakeDrawError("Could not end point-shadow cubemap face: " + End.error().Message));
+				++m_LastPointShadowPassCount;
+			}
+		}
 		return {};
 	}
 
@@ -1265,6 +1515,8 @@ namespace PulseForge
 	{
 		m_LastSpotShadowPassCount = 0;
 		m_LastSpotShadowCasterDrawCount = 0;
+		m_LastPointShadowPassCount = 0;
+		m_LastPointShadowCasterDrawCount = 0;
 		if (auto LocalLighting = PrepareLocalLighting(); !LocalLighting)
 			return std::unexpected(std::move(LocalLighting.error()));
 		if (!m_PreparedSnapshot || !m_PreparedSnapshot->DirectionalLight ||
@@ -1683,7 +1935,11 @@ namespace PulseForge
 			m_LastSpotShadowCasterDrawCount,
 			m_PreparedSnapshot->EnvironmentLight.has_value(),
 			m_HdrSceneTargetGeneration,
-			m_SpotShadowResourceGeneration
+			m_SpotShadowResourceGeneration,
+			m_LastPointShadowPassCount,
+			m_LastPointShadowCasterDrawCount,
+			m_PointShadowResourceGeneration,
+			m_PointShadowSlotOwners
 		};
 	}
 
@@ -1800,7 +2056,11 @@ namespace PulseForge
 			Hdr->SpotlightShadowPassCount,
 			Hdr->SpotlightShadowCasterDrawCount,
 			Hdr->SpotlightShadowResourceGeneration,
-			m_SpotShadowSlotOwners
+			m_SpotShadowSlotOwners,
+			Hdr->PointShadowPassCount,
+			Hdr->PointShadowCasterDrawCount,
+			Hdr->PointShadowResourceGeneration,
+			Hdr->PointShadowSlotOwners
 		};
 	}
 
@@ -1846,7 +2106,11 @@ namespace PulseForge
 			Hdr->SpotlightShadowPassCount,
 			Hdr->SpotlightShadowCasterDrawCount,
 			Hdr->SpotlightShadowResourceGeneration,
-			m_SpotShadowSlotOwners
+			m_SpotShadowSlotOwners,
+			Hdr->PointShadowPassCount,
+			Hdr->PointShadowCasterDrawCount,
+			Hdr->PointShadowResourceGeneration,
+			Hdr->PointShadowSlotOwners
 		};
 	}
 
@@ -1974,6 +2238,7 @@ namespace PulseForge
 		}
 		Frame.SpotShadowViewProjection = m_PreparedSpotShadowMatrices;
 		Frame.SpotShadowParameters = m_PreparedSpotShadowParameters;
+		Frame.PointShadowParameters = m_PreparedPointShadowParameters;
 		const auto LocalLightingUpdate = m_Runtime.WriteBuffer(
 			*m_LocalLightingConstantsBuffer, 0, std::as_bytes(std::span(&m_PreparedLocalLighting, 1)));
 		if (!LocalLightingUpdate)
@@ -2056,9 +2321,9 @@ namespace PulseForge
 			const BindingSet* AmbientOcclusionBindings = m_AmbientOcclusionFrameAvailable && m_AmbientOcclusionFinalBindingSet
 				? m_AmbientOcclusionFinalBindingSet.get()
 				: m_AmbientOcclusionFallbackBindingSet.get();
-			const std::array<const BindingSet*, 4> BindingSets = {
+			const std::array<const BindingSet*, 5> BindingSets = {
 				Binding->second.BindingSet.get(), m_ShadowBindingSet.get(), AmbientOcclusionBindings,
-				m_SpotShadowBindingSet.get() };
+				m_SpotShadowBindingSet.get(), m_PointShadowBindingSet.get() };
 			const GraphicsResult Draw = m_Runtime.DrawIndexed(*ScenePipeline, Mesh->get(), Arguments, BindingSets);
 			if (!Draw)
 			{

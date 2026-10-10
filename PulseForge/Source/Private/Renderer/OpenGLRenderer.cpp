@@ -95,6 +95,14 @@ namespace PulseForge
 			});
 		}
 
+		DepthCubemapCreateResult CreateDepthCubemap(uint32_t, const std::string&) override
+		{
+			return std::unexpected(DepthCubemapError{
+				DepthCubemapErrorCode::UnsupportedFeature,
+				"The transitional OpenGL backend does not support depth cubemaps"
+			});
+		}
+
 		GraphicsResult BeginRenderTarget(const RenderTarget&, const RenderTargetClearValue&) override
 		{
 			return std::unexpected(GraphicsError{

@@ -27,6 +27,7 @@ cbuffer Frame : register(b2)
 	float4x4 CascadeViewProjection[4];
 	float4x4 SpotShadowViewProjection[4];
 	float4 SpotShadowParameters[4]; // receiver depth bias, normal bias (world units), PCF radius, enabled
+	float4 PointShadowParameters[2]; // normalized radial-depth bias, world normal bias, cube texel radius, enabled
 };
 
 struct LocalLightData
@@ -61,6 +62,9 @@ Texture2D<float> SpotShadowMap1 : register(t1, space3);
 Texture2D<float> SpotShadowMap2 : register(t2, space3);
 Texture2D<float> SpotShadowMap3 : register(t3, space3);
 SamplerState SpotShadowSampler : register(s0, space3);
+TextureCube<float> PointShadowMap0 : register(t0, space5);
+TextureCube<float> PointShadowMap1 : register(t1, space5);
+SamplerState PointShadowSampler : register(s0, space5);
 
 float3 SafeNormalize(float3 Value, float3 Fallback)
 {
@@ -181,6 +185,44 @@ float SpotlightShadowVisibility(uint ShadowIndex, float3 WorldPosition, float3 N
 	return FilterSpotShadowMap(SpotShadowMap3, UV, ReceiverDepth, Radius);
 }
 
+float SamplePointShadowDepth(uint ShadowIndex, float3 Direction)
+{
+	if (ShadowIndex == 0u) return PointShadowMap0.SampleLevel(PointShadowSampler, Direction, 0.0f);
+	return PointShadowMap1.SampleLevel(PointShadowSampler, Direction, 0.0f);
+}
+
+float PointShadowVisibility(uint ShadowIndex, float3 WorldPosition, float3 Normal, float NdotL, float3 LightPosition, float Range)
+{
+	if (ShadowIndex >= 2u || PointShadowParameters[ShadowIndex].w < 0.5f || Range <= 0.0f)
+		return 1.0f;
+	const float4 Parameters = PointShadowParameters[ShadowIndex];
+	const float3 BiasedPosition = WorldPosition + Normal * (Parameters.y * (1.0f - NdotL));
+	const float3 ToReceiver = BiasedPosition - LightPosition;
+	const float ReceiverDistance = length(ToReceiver);
+	if (ReceiverDistance <= 1.0e-6f || ReceiverDistance >= Range)
+		return 1.0f;
+	const float3 Direction = ToReceiver / ReceiverDistance;
+	const float3 Up = abs(Direction.y) < 0.99f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+	const float3 Tangent = normalize(cross(Up, Direction));
+	const float3 Bitangent = cross(Direction, Tangent);
+	const float AngularRadius = max(Parameters.z, 0.0f) * (2.0f / 512.0f);
+	const float ReceiverDepth = max(ReceiverDistance / Range - Parameters.x, 0.0f);
+	float Visibility = 0.0f;
+	[unroll]
+	for (int Y = -1; Y <= 1; ++Y)
+	{
+		[unroll]
+		for (int X = -1; X <= 1; ++X)
+		{
+			const float3 SampleDirection = normalize(Direction +
+				(Tangent * float(X) + Bitangent * float(Y)) * AngularRadius);
+			const float StoredDepth = SamplePointShadowDepth(ShadowIndex, SampleDirection);
+			Visibility += ReceiverDepth <= StoredDepth ? 1.0f : 0.0f;
+		}
+	}
+	return Visibility / 9.0f;
+}
+
 struct VertexInput
 {
 	[[vk::location(0)]] float3 Position : POSITION;
@@ -292,10 +334,16 @@ float4 PSMain(VertexOutput Input) : SV_Target0
 		const float3 LocalContribution = EvaluateDirectBRDF(Albedo, Metallic, Roughness, N, V, LocalL,
 			LocalLight.ColorIntensity.rgb * LocalLight.ColorIntensity.a * Attenuation, LocalNdotL);
 		const float ShadowSlotValue = LocalLight.OuterCosAndType.y;
-		const float SpotVisibility = LocalLight.OuterCosAndType.w > 0.5f && ShadowSlotValue >= 0.0f
-			? SpotlightShadowVisibility((uint)round(ShadowSlotValue), Input.WorldPosition, N, LocalNdotL)
-			: 1.0f;
-		LocalDirectColor += LocalContribution * SpotVisibility;
+		float LocalVisibility = 1.0f;
+		if (ShadowSlotValue >= 0.0f)
+		{
+			if (LocalLight.OuterCosAndType.w > 0.5f)
+				LocalVisibility = SpotlightShadowVisibility((uint)round(ShadowSlotValue), Input.WorldPosition, N, LocalNdotL);
+			else
+				LocalVisibility = PointShadowVisibility((uint)round(ShadowSlotValue), Input.WorldPosition, N, LocalNdotL,
+					LocalLight.PositionRange.xyz, LocalLight.PositionRange.w);
+		}
+		LocalDirectColor += LocalContribution * LocalVisibility;
 	}
 
 	const float3 AmbientFresnel = F0 + (max(1.0f - Roughness, F0) - F0) * pow(1.0f - NdotV, 5.0f);

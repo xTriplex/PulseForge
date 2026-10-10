@@ -285,10 +285,14 @@ namespace PulseForge
 				RenderTargetDesc Description,
 				TextureHandle ColorTexture,
 				TextureHandle DepthTexture,
-				nvrhi::FramebufferHandle Framebuffer)
+				nvrhi::FramebufferHandle Framebuffer,
+			const Texture* BorrowedDepthTexture = nullptr,
+			uint32_t DepthArraySlice = 0)
 				: m_Description(std::move(Description)),
 				  m_ColorTexture(std::move(ColorTexture)),
 				  m_DepthTexture(std::move(DepthTexture)),
+				  m_BorrowedDepthTexture(BorrowedDepthTexture),
+				  m_DepthArraySlice(DepthArraySlice),
 				  m_Framebuffer(std::move(Framebuffer))
 			{
 			}
@@ -305,7 +309,7 @@ namespace PulseForge
 
 			const Texture* GetDepthTexture() const noexcept override
 			{
-				return m_DepthTexture.get();
+				return m_DepthTexture ? m_DepthTexture.get() : m_BorrowedDepthTexture;
 			}
 
 			nvrhi::FramebufferHandle GetNativeFramebuffer() const noexcept
@@ -322,9 +326,17 @@ namespace PulseForge
 
 			nvrhi::TextureHandle GetNativeDepthTexture() const noexcept
 			{
-				return m_DepthTexture
-					? static_cast<const VulkanTexture&>(*m_DepthTexture).GetNativeTextureHandle()
+				const Texture* DepthTexture = m_DepthTexture ? m_DepthTexture.get() : m_BorrowedDepthTexture;
+				return DepthTexture
+					? static_cast<const VulkanTexture&>(*DepthTexture).GetNativeTextureHandle()
 					: nvrhi::TextureHandle{};
+			}
+
+			nvrhi::TextureSubresourceSet GetDepthSubresources() const noexcept
+			{
+				return m_BorrowedDepthTexture
+					? nvrhi::TextureSubresourceSet(0, 1, m_DepthArraySlice, 1)
+					: nvrhi::TextureSubresourceSet();
 			}
 
 		private:
@@ -332,7 +344,38 @@ namespace PulseForge
 			RenderTargetDesc m_Description;
 			TextureHandle m_ColorTexture;
 			TextureHandle m_DepthTexture;
+			const Texture* m_BorrowedDepthTexture = nullptr;
+			uint32_t m_DepthArraySlice = 0;
 			nvrhi::FramebufferHandle m_Framebuffer;
+		};
+
+		class VulkanDepthCubemap final : public DepthCubemap
+		{
+		public:
+			VulkanDepthCubemap(TextureHandle Texture, uint32_t Resolution)
+				: m_Texture(std::move(Texture)), m_Resolution(Resolution)
+			{
+			}
+
+			const Texture& GetTexture() const noexcept override { return *m_Texture; }
+			const RenderTarget& GetFaceTarget(uint32_t Face) const override
+			{
+				if (Face >= m_FaceTargets.size() || !m_FaceTargets[Face])
+					throw std::out_of_range("Depth cubemap face index is not available");
+				return *m_FaceTargets[Face];
+			}
+			uint32_t GetResolution() const noexcept override { return m_Resolution; }
+
+			void SetFaceTarget(uint32_t Face, RenderTargetHandle Target)
+			{
+				m_FaceTargets.at(Face) = std::move(Target);
+			}
+
+		private:
+			// Face targets release their framebuffer references before the cube texture wrapper.
+			TextureHandle m_Texture;
+			std::array<RenderTargetHandle, 6> m_FaceTargets;
+			uint32_t m_Resolution = 0;
 		};
 
 		class VulkanSampler final : public Sampler
@@ -736,7 +779,7 @@ namespace PulseForge
 				if (DepthTexture)
 					Frame.CommandList->setTextureState(
 						DepthTexture,
-						nvrhi::TextureSubresourceSet(),
+						NativeTarget->GetDepthSubresources(),
 						nvrhi::ResourceStates::DepthWrite);
 				Frame.CommandList->commitBarriers();
 				if (ColorTexture)
@@ -749,7 +792,7 @@ namespace PulseForge
 				if (DepthTexture)
 					Frame.CommandList->clearDepthStencilTexture(
 						DepthTexture,
-						nvrhi::TextureSubresourceSet(),
+						NativeTarget->GetDepthSubresources(),
 						true,
 						ClearValue.Depth,
 						false,
@@ -763,7 +806,8 @@ namespace PulseForge
 					NativeTarget->GetDescription().DepthMode != DepthAttachmentMode::None,
 					NativeTarget->GetNativeFramebuffer(),
 					std::move(ColorTexture),
-					std::move(DepthTexture)
+					std::move(DepthTexture),
+					NativeTarget->GetDepthSubresources()
 				};
 				return {};
 			}
@@ -796,7 +840,7 @@ namespace PulseForge
 				if (m_ActiveRenderTarget->DepthShaderResource && m_ActiveRenderTarget->DepthTexture)
 					Frame.CommandList->setTextureState(
 						m_ActiveRenderTarget->DepthTexture,
-						nvrhi::TextureSubresourceSet(),
+						m_ActiveRenderTarget->DepthSubresources,
 						nvrhi::ResourceStates::ShaderResource);
 				Frame.CommandList->commitBarriers();
 				m_ActiveRenderTarget.reset();
@@ -1003,6 +1047,16 @@ namespace PulseForge
 			const bool IsDepthAttachment = Description.Format == TextureFormat::Depth32Float;
 			const bool IsColorAttachment = HasTextureUsage(Description.Usage, TextureUsage::ColorAttachment);
 			const bool IsShaderResource = HasTextureUsage(Description.Usage, TextureUsage::ShaderResource);
+			if (IsDepthAttachment)
+			{
+				const vk::FormatProperties Properties = m_PhysicalDevice.getFormatProperties(vk::Format::eD32Sfloat);
+				const VkFormatFeatureFlags AvailableFeatures =
+					static_cast<VkFormatFeatureFlags>(Properties.optimalTilingFeatures);
+				if ((AvailableFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0 ||
+					(IsShaderResource && (AvailableFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0))
+					return std::unexpected(TextureError{ TextureErrorCode::UnsupportedFeature,
+						"The active Vulkan device does not support the requested D32 depth attachment/sampling usage" });
+			}
 			if (Description.Format == TextureFormat::RGBA16_Float)
 			{
 				const vk::FormatProperties Properties = m_PhysicalDevice.getFormatProperties(vk::Format::eR16G16B16A16Sfloat);
@@ -1228,6 +1282,63 @@ namespace PulseForge
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(RenderTargetError{ RenderTargetErrorCode::BackendFailure, Message });
 			}
+		}
+
+		DepthCubemapCreateResult CreateDepthCubemap(uint32_t Resolution, const std::string& DebugName) override
+		{
+			if (Resolution == 0 || DebugName.empty())
+				return std::unexpected(DepthCubemapError{ DepthCubemapErrorCode::InvalidDescription,
+					"Depth cubemap resolution and debug name must be valid" });
+
+			TextureDesc TextureDescription;
+			TextureDescription.Width = Resolution;
+			TextureDescription.Height = Resolution;
+			TextureDescription.Format = TextureFormat::Depth32Float;
+			TextureDescription.Usage = TextureUsage::DepthStencilAttachment | TextureUsage::ShaderResource;
+			TextureDescription.Dimension = TextureDimension::TextureCube;
+			TextureDescription.DebugName = DebugName;
+			auto TextureResult = CreateTexture(TextureDescription, std::span<const TextureSubresourceData>{});
+			if (!TextureResult)
+				return std::unexpected(DepthCubemapError{
+					TextureResult.error().Code == TextureErrorCode::UnsupportedFeature
+						? DepthCubemapErrorCode::UnsupportedFeature
+						: DepthCubemapErrorCode::BackendFailure,
+					"Could not create shader-readable D32 cubemap: " + TextureResult.error().Message });
+
+			const auto* NativeTexture = dynamic_cast<const VulkanTexture*>(TextureResult->get());
+			if (!NativeTexture)
+				return std::unexpected(DepthCubemapError{ DepthCubemapErrorCode::UnsupportedFeature,
+					"The depth cubemap texture was not created by the active Vulkan renderer" });
+
+			auto Cubemap = std::make_unique<VulkanDepthCubemap>(std::move(*TextureResult), Resolution);
+			for (uint32_t Face = 0; Face < 6; ++Face)
+			{
+				RenderTargetDesc FaceDescription;
+				FaceDescription.Width = Resolution;
+				FaceDescription.Height = Resolution;
+				FaceDescription.ColorFormat = ColorTargetFormat::None;
+				FaceDescription.DepthMode = DepthAttachmentMode::ShaderReadableAttachment;
+				FaceDescription.DebugName = DebugName + " face " + std::to_string(Face);
+				nvrhi::FramebufferDesc FramebufferDescription;
+				FramebufferDescription.setDepthAttachment(NativeTexture->GetNativeTexture(),
+					nvrhi::TextureSubresourceSet(0, 1, Face, 1));
+				try
+				{
+					nvrhi::FramebufferHandle Framebuffer = m_ActiveNvrhiDevice->createFramebuffer(FramebufferDescription);
+					if (!Framebuffer)
+						return std::unexpected(DepthCubemapError{ DepthCubemapErrorCode::BackendFailure,
+							"NVRHI failed to create a depth cubemap face framebuffer" });
+					Cubemap->SetFaceTarget(Face, std::make_unique<VulkanRenderTarget>(
+						FaceDescription, TextureHandle{}, TextureHandle{}, std::move(Framebuffer),
+						Cubemap ? &Cubemap->GetTexture() : nullptr, Face));
+				}
+				catch (const std::exception& Exception)
+				{
+					return std::unexpected(DepthCubemapError{ DepthCubemapErrorCode::BackendFailure,
+						"NVRHI failed to create a depth cubemap face framebuffer: " + std::string(Exception.what()) });
+				}
+			}
+			return DepthCubemapHandle(std::move(Cubemap));
 		}
 
 		SamplerCreateResult CreateSampler(const SamplerDesc& Description) override
@@ -1831,6 +1942,7 @@ namespace PulseForge
 			nvrhi::FramebufferHandle Framebuffer;
 			nvrhi::TextureHandle ColorTexture;
 			nvrhi::TextureHandle DepthTexture;
+			nvrhi::TextureSubresourceSet DepthSubresources;
 		};
 
 		struct SwapchainImage

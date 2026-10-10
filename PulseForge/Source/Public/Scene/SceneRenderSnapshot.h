@@ -55,6 +55,10 @@ namespace PulseForge
 		glm::vec3 Color{ 1.0f };
 		float Intensity = 0.0f;
 		float Range = 1.0f;
+		bool CastShadows = false;
+		float ShadowBias = 0.001f;
+		float ShadowNormalBias = 0.025f;
+		float ShadowSoftness = 1.5f;
 	};
 
 	struct SceneSpotLight
