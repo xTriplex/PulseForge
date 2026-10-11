@@ -8,6 +8,7 @@
 #include "Scene/Scene.h"
 #include "Scene/Components/PointLightComponent.h"
 #include "Scene/Components/SpotLightComponent.h"
+#include "Scene/Components/DirectionalLightComponent.h"
 
 #define STB_IMAGE_WRITE_STATIC
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -327,8 +328,10 @@ namespace
 	public:
 		GpuValidationLayer(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm,
 			bool ValidateLocalLights, bool ValidateSpotlightShadows, bool ValidatePointShadows, bool ValidatePbrMaterials,
+			bool ValidateTransparency,
 			bool ValidatePointShadowImages, std::filesystem::path PointShadowImageDirectory)
-			: Layer(ValidatePbrMaterials ? "PBR material rendered-image validation" :
+			: Layer(ValidateTransparency ? "Transparency rendered-image validation" :
+				ValidatePbrMaterials ? "PBR material rendered-image validation" :
 				ValidatePointShadowImages ? "Point-shadow rendered-image investigation" :
 				ValidatePointShadows ? "SceneRenderer point-shadow GPU validation" :
 				ValidateSpotlightShadows ? "SceneRenderer spotlight-shadow GPU validation" :
@@ -343,6 +346,7 @@ namespace
 			  m_ValidateSpotlightShadows(ValidateSpotlightShadows),
 			  m_ValidatePointShadows(ValidatePointShadows),
 			  m_ValidatePbrMaterials(ValidatePbrMaterials),
+			  m_ValidateTransparency(ValidateTransparency),
 			  m_ValidatePointShadowImages(ValidatePointShadowImages),
 			  m_PointShadowImageDirectory(std::move(PointShadowImageDirectory))
 		{
@@ -357,7 +361,7 @@ namespace
 				if (m_ValidateEditorUiUnorm)
 					InitializeEditorUiUnormResources();
 				if (m_ValidateSceneHdr || m_ValidateToneMapping || m_ValidateLocalLights || m_ValidateSpotlightShadows ||
-					m_ValidatePointShadows || m_ValidatePbrMaterials || m_ValidatePointShadowImages)
+					m_ValidatePointShadows || m_ValidatePbrMaterials || m_ValidateTransparency || m_ValidatePointShadowImages)
 					InitializeSceneResources();
 				if (m_ValidateLocalLights)
 					InitializeLocalLightScenario();
@@ -367,6 +371,8 @@ namespace
 					InitializePointShadowScenario();
 				if (m_ValidatePbrMaterials)
 					InitializePbrMaterialScenario();
+				if (m_ValidateTransparency)
+					InitializeTransparencyScenario();
 				if (m_ValidatePointShadowImages)
 					InitializePointShadowImageScenario();
 				if (m_ValidatePointShadowImages)
@@ -527,6 +533,128 @@ namespace
 				}
 				if (m_SceneRenderer->IsEnvironmentLightingPending())
 					return;
+				m_ScenePrepared = true;
+				return;
+			}
+			if (m_ValidateTransparency)
+			{
+				if (m_TransparencyCapturePending)
+				{
+					CaptureTransparencyImage();
+					m_TransparencyCapturePending = false;
+					if (!m_Succeeded)
+						return;
+					if (m_TransparencyCaptureStage < 2)
+					{
+						const auto Spot = m_TransparencySpotLight.GetSpotLight();
+						if (!Spot || !Spot->has_value())
+						{
+							Fail("Transparency image comparison lost its spotlight component");
+							return;
+						}
+						PulseForge::SpotLightComponent Updated = Spot->value();
+						if (m_TransparencyCaptureStage == 0)
+						{
+							Updated.Intensity = m_TransparencySpotIntensity;
+							Updated.CastShadows = false;
+						}
+						else
+							Updated.CastShadows = true;
+						if (!m_TransparencySpotLight.SetSpotLight(Updated))
+						{
+							Fail("Could not update the spotlight for alpha-mask image comparison");
+							return;
+						}
+						PF_INFO("TRANSPARENCY_SPOTLIGHT_UPDATE next_stage={0}; intensity={1:.1f}; cast_shadows={2}",
+							m_TransparencyCaptureStage + 1, Updated.Intensity, Updated.CastShadows);
+						++m_TransparencyCaptureStage;
+						m_ScenePrepared = false;
+						return;
+					}
+					if (m_TransparencyCaptureStage == 2)
+					{
+						if (!ValidateTransparencyLightDifference() || !ValidateTransparencyShadowDifference() ||
+							!SetTransparencySpotShadows(false) || !CreateTransparencyPointLight())
+							return;
+						m_TransparencyCaptureStage = 3;
+					}
+					else if (m_TransparencyCaptureStage == 3)
+					{
+						if (!SetTransparencyPointShadows(true))
+							return;
+						m_TransparencyCaptureStage = 4;
+					}
+					else if (m_TransparencyCaptureStage == 4)
+					{
+						if (!ValidateTransparencyPointShadowDifference() || !PrepareTransparencyDirectionalShadowTest(false))
+							return;
+						m_TransparencyCaptureStage = 5;
+					}
+					else if (m_TransparencyCaptureStage == 5)
+					{
+						if (!PrepareTransparencyDirectionalShadowTest(true))
+							return;
+						m_TransparencyCaptureStage = 6;
+					}
+					else if (m_TransparencyCaptureStage == 6)
+					{
+						if (!ValidateTransparencyDirectionalShadowDifference() || !SetTransparencyBluePanelOpaqueControl())
+							return;
+						m_TransparencyCaptureStage = 7;
+					}
+					else
+					{
+						if (!ValidateTransparencyBlendDifference())
+							return;
+						m_TransparencyCaptureComplete = true;
+					}
+					m_ScenePrepared = false;
+					return;
+				}
+				if (m_TransparencyCaptureComplete)
+				{
+					PF_INFO("GPU_VALIDATION_RESULT=PASS; Transparency project rendered actual sRGB comparisons for masked spotlight, point-light, and directional shadows, plus HDR blending; startup image: {0}",
+						m_TransparencyImagePath.string());
+					PulseForge::Application::Get().RequestClose();
+					return;
+				}
+				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(60))
+				{
+					Fail("Timed out preparing or capturing the transparency demonstration scene");
+					return;
+				}
+				const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
+				if (Width == 0 || Height == 0 || m_ScenePrepared)
+					return;
+				const auto Prepared = m_SceneRenderer->PrepareScene(
+					m_Scene,
+					static_cast<float>(m_TransparencyOutputTarget->GetDescription().Width) /
+						static_cast<float>(m_TransparencyOutputTarget->GetDescription().Height));
+				if (!Prepared)
+				{
+					Fail("Could not prepare the transparency project startup scene: " + Prepared.error().Message);
+					return;
+				}
+				if (m_SceneRenderer->IsEnvironmentLightingPending())
+					return;
+				const auto Snapshot = PulseForge::SceneRenderSnapshotBuilder::Build(
+					m_Scene, static_cast<float>(m_TransparencyOutputTarget->GetDescription().Width) /
+						static_cast<float>(m_TransparencyOutputTarget->GetDescription().Height));
+				if (!Snapshot)
+				{
+					Fail("Could not inspect prepared transparency light values: " + Snapshot.error().Message);
+					return;
+				}
+				const auto Spot = std::find_if(Snapshot->SpotLights.begin(), Snapshot->SpotLights.end(),
+					[this](const PulseForge::SceneSpotLight& Light) { return Light.Entity == m_TransparencySpotLight.GetUUID(); });
+				if (Spot == Snapshot->SpotLights.end())
+				{
+					Fail("Transparency spotlight disappeared from the prepared scene snapshot");
+					return;
+				}
+				PF_INFO("TRANSPARENCY_PREPARED_LIGHT stage={0}; intensity={1:.1f}; cast_shadows={2}; direction=({3:.3f},{4:.3f},{5:.3f})",
+					m_TransparencyCaptureStage, Spot->Intensity, Spot->CastShadows,
+					Spot->WorldDirection.x, Spot->WorldDirection.y, Spot->WorldDirection.z);
 				m_ScenePrepared = true;
 				return;
 			}
@@ -726,6 +854,11 @@ namespace
 				RenderPbrMaterialFrame();
 				return;
 			}
+			if (m_ValidateTransparency)
+			{
+				RenderTransparencyFrame();
+				return;
+			}
 			if (m_ValidatePointShadowImages)
 			{
 				if (m_CapturingPointShadowOverview)
@@ -795,6 +928,7 @@ namespace
 			m_PointShadowOutputTarget.reset();
 			m_PointShadowImageOutputTarget.reset();
 			m_PbrMaterialOutputTarget.reset();
+			m_TransparencyOutputTarget.reset();
 			m_SpotlightShadowOutputTarget.reset();
 			m_EditorUiBindingSet.reset();
 			m_EditorUiDrawBindingSet.reset();
@@ -824,6 +958,7 @@ namespace
 		[[nodiscard]] bool Succeeded() const noexcept
 		{
 			return m_Succeeded && (m_ValidateEditorUiUnorm ? m_EditorUiFrames == 3 && m_EditorUiTargetCreations == 2 :
+				m_ValidateTransparency ? m_TransparencyCaptureComplete :
 				m_ValidatePbrMaterials ? m_PbrMaterialCaptureComplete :
 				m_ValidatePointShadowImages ? m_PointShadowImageCase == PointShadowImageCases.size() :
 				m_ValidatePointShadows ? m_PointShadowFrames == 9 :
@@ -976,8 +1111,10 @@ namespace
 
 		void InitializeSceneResources()
 		{
-			const std::filesystem::path ProjectFile = m_ValidatePbrMaterials
-				? std::filesystem::path(PF_PBR_DEMO_PROJECT_FILE)
+			const std::filesystem::path ProjectFile = m_ValidateTransparency
+				? std::filesystem::path(PF_TRANSPARENCY_DEMO_PROJECT_FILE)
+				: m_ValidatePbrMaterials
+					? std::filesystem::path(PF_PBR_DEMO_PROJECT_FILE)
 				: m_ValidatePointShadows || m_ValidatePointShadowImages
 					? std::filesystem::path(PF_POINT_SHADOW_DEMO_PROJECT_FILE)
 					: std::filesystem::path(PF_GPU_VALIDATION_PROJECT_FILE);
@@ -1176,6 +1313,185 @@ namespace
 			m_PbrMaterialImagePath = m_PointShadowImageDirectory / "PBRMaterials" / "overview.png";
 			std::filesystem::create_directories(m_PbrMaterialImagePath.parent_path());
 			PF_INFO("PBR validation will capture the actual project-owned 960x540 sRGB scene output");
+		}
+
+		void InitializeTransparencyScenario()
+		{
+			PulseForge::RenderTargetDesc Description;
+			Description.Width = 960;
+			Description.Height = 540;
+			Description.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
+			Description.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
+			Description.DebugName = "Transparency project validation image";
+			auto Target = PulseForge::Application::Get().CreateRenderTarget(Description);
+			if (!Target)
+				throw std::runtime_error("Could not create transparency validation output: " + Target.error().Message);
+			m_TransparencyOutputTarget = std::move(*Target);
+			m_TransparencyImagePath = m_PointShadowImageDirectory / "Transparency" / "overview.png";
+			std::filesystem::create_directories(m_TransparencyImagePath.parent_path());
+			for (const PulseForge::Entity Entity : m_Scene.GetEntities())
+			{
+				const auto Tag = Entity.GetTag();
+				if (Tag && Tag->Name == "Directional fill - no shadow test interference")
+				{
+					m_TransparencyDirectionalLight = Entity;
+					const auto Directional = Entity.GetDirectionalLight();
+					if (!Directional || !Directional->has_value() || Directional->value().CastShadows)
+						throw std::runtime_error("Transparency demo's directional fill must not cast test shadows");
+				}
+				if (Tag && Tag->Name == "Key spot - masked shadow on backdrop")
+				{
+					m_TransparencySpotLight = Entity;
+					const auto Spot = Entity.GetSpotLight();
+					if (!Spot || !Spot->has_value())
+						throw std::runtime_error("Transparency scene spotlight component could not be read");
+					PulseForge::SpotLightComponent Disabled = Spot->value();
+					Disabled.CastShadows = false;
+					// Keep the authored key strong enough for an sRGB shadow/image comparison.
+					m_TransparencySpotIntensity = Spot->value().Intensity;
+					Disabled.Intensity = 0.0f;
+					if (!Entity.SetSpotLight(Disabled))
+						throw std::runtime_error("Could not disable the spotlight for the no-light baseline image");
+				}
+				if (Tag && Tag->Name == "Blue glass - transparent depth test")
+					m_TransparencyBlueGlassPanel = Entity;
+			}
+			if (!m_TransparencyDirectionalLight || !m_TransparencySpotLight)
+				throw std::runtime_error("Transparency scene is missing its shadow-isolated key and fill lights");
+			if (!m_TransparencyBlueGlassPanel)
+				throw std::runtime_error("Transparency scene is missing its blue glass blend comparison mesh");
+			for (const PulseForge::AssetRecord& Record : m_Project->GetAssetRegistry().GetAssets())
+				if (Record.ProjectRelativePath.generic_string() == "Assets/Materials/BlueOpaqueControl.material")
+					m_TransparencyBlueOpaqueControlMaterial = Record.ID;
+			if (m_TransparencyBlueOpaqueControlMaterial.IsNil())
+				throw std::runtime_error("Transparency project is missing its matching opaque material control");
+			PF_INFO("Transparency validation will capture the actual project-owned 960x540 sRGB scene output");
+		}
+
+		bool SetTransparencyBluePanelOpaqueControl()
+		{
+			const auto Mesh = m_TransparencyBlueGlassPanel.GetMeshRenderer();
+			if (!Mesh || !*Mesh)
+			{
+				Fail("Could not read the blue panel mesh renderer for the blend material comparison");
+				return false;
+			}
+			PulseForge::MeshRendererComponent OpaqueControl = **Mesh;
+			OpaqueControl.MaterialAsset = m_TransparencyBlueOpaqueControlMaterial;
+			if (!m_TransparencyBlueGlassPanel.SetMeshRenderer(OpaqueControl))
+			{
+				Fail("Could not assign the matching opaque material control for blend comparison");
+				return false;
+			}
+			PF_INFO("TRANSPARENCY_BLEND_CONTROL=matching OPAQUE blue material assigned for pixel comparison");
+			return true;
+		}
+
+		bool SetTransparencySpotShadows(bool Enabled)
+		{
+			const auto Spot = m_TransparencySpotLight.GetSpotLight();
+			if (!Spot || !Spot->has_value())
+			{
+				Fail("Transparency spotlight component is unavailable while switching shadow tests");
+				return false;
+			}
+			PulseForge::SpotLightComponent Updated = Spot->value();
+			Updated.CastShadows = Enabled;
+			if (!m_TransparencySpotLight.SetSpotLight(Updated))
+			{
+				Fail("Could not update transparency spotlight shadow state");
+				return false;
+			}
+			return true;
+		}
+
+		bool CreateTransparencyPointLight()
+		{
+			if (m_TransparencyPointLight)
+				return true;
+			const auto SpotTransform = m_TransparencySpotLight.GetTransform();
+			if (!SpotTransform)
+			{
+				Fail("Could not read the transparency light transform for point-shadow testing");
+				return false;
+			}
+			auto PointEntity = m_Scene.CreateEntity("GPU alpha-mask point shadow light");
+			if (!PointEntity)
+			{
+				Fail("Could not create a runtime point light for alpha-mask shadow validation");
+				return false;
+			}
+			PulseForge::PointLightComponent Point;
+			Point.Color = { 1.0f, 0.82f, 0.58f };
+			Point.Intensity = m_TransparencySpotIntensity;
+			Point.Range = 8.0f;
+			Point.CastShadows = false;
+			if (!PointEntity->SetPointLight(Point) || !PointEntity->SetTransform(*SpotTransform))
+			{
+				Fail("Could not configure the runtime point light for alpha-mask shadow validation");
+				return false;
+			}
+			m_TransparencyPointLight = *PointEntity;
+			return true;
+		}
+
+		bool SetTransparencyPointShadows(bool Enabled)
+		{
+			const auto Point = m_TransparencyPointLight.GetPointLight();
+			if (!Point || !Point->has_value())
+			{
+				Fail("Transparency point-light component is unavailable while switching shadow tests");
+				return false;
+			}
+			PulseForge::PointLightComponent Updated = Point->value();
+			Updated.CastShadows = Enabled;
+			if (!m_TransparencyPointLight.SetPointLight(Updated))
+			{
+				Fail("Could not update transparency point-light shadow state");
+				return false;
+			}
+			return true;
+		}
+
+		bool PrepareTransparencyDirectionalShadowTest(bool Enabled)
+		{
+			if (m_TransparencyPointLight)
+			{
+				const auto Point = m_TransparencyPointLight.GetPointLight();
+				if (!Point || !Point->has_value())
+				{
+					Fail("Transparency point-light component is unavailable for directional shadow isolation");
+					return false;
+				}
+				PulseForge::PointLightComponent Disabled = Point->value();
+				Disabled.CastShadows = false;
+				Disabled.Intensity = 0.0f;
+				if (!m_TransparencyPointLight.SetPointLight(Disabled))
+				{
+					Fail("Could not disable the point light for directional shadow validation");
+					return false;
+				}
+			}
+			const auto Directional = m_TransparencyDirectionalLight.GetDirectionalLight();
+			if (!Directional || !Directional->has_value())
+			{
+				Fail("Transparency directional-light component is unavailable for masked shadow validation");
+				return false;
+			}
+			PulseForge::DirectionalLightComponent Updated = Directional->value();
+			Updated.Intensity = 4.0f;
+			Updated.CastShadows = Enabled;
+			Updated.ShadowDistance = 32.0f;
+			Updated.ShadowBias = 0.0f;
+			Updated.ShadowNormalBias = 0.01f;
+			Updated.ShadowSoftness = 1.0f;
+			if (!m_TransparencyDirectionalLight.SetDirectionalLight(Updated))
+			{
+				Fail("Could not configure the directional light for alpha-mask shadow validation");
+				return false;
+			}
+			PF_INFO("TRANSPARENCY_DIRECTIONAL_SHADOW_UPDATE cast_shadows={0}; intensity=4.0", Enabled);
+			return true;
 		}
 
 		void InitializePointShadowImageScenario()
@@ -1767,6 +2083,351 @@ namespace
 				return;
 			}
 			m_PbrMaterialCaptureComplete = true;
+		}
+
+		void RenderTransparencyFrame()
+		{
+			if (!m_Succeeded || !m_ScenePrepared || m_TransparencyCaptureComplete || m_TransparencyCapturePending)
+				return;
+			const auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_TransparencyOutputTarget);
+			if (!Rendered || Rendered->GeometryDrawCount != 10)
+			{
+				Fail(Rendered ? "Transparency startup scene did not submit its ten indexed mesh instances" :
+					"Transparency scene render failed: " + Rendered.error().Message);
+				return;
+			}
+			const size_t ExpectedSpotShadowPasses = m_TransparencyCaptureStage == 2 ? 1u : 0u;
+			if (Rendered->SpotlightShadowPassCount != ExpectedSpotShadowPasses ||
+				(m_TransparencyCaptureStage < 2 && Rendered->SpotlightShadowCasterDrawCount != 0) ||
+				(m_TransparencyCaptureStage == 2 && Rendered->SpotlightShadowCasterDrawCount == 0))
+			{
+				Fail("Transparency capture did not submit the expected alpha-tested spotlight shadow pass and casters");
+				return;
+			}
+			const size_t ExpectedPointShadowPasses = m_TransparencyCaptureStage == 4 ? 6u : 0u;
+			if (Rendered->PointShadowPassCount != ExpectedPointShadowPasses ||
+				(m_TransparencyCaptureStage == 4 && Rendered->PointShadowCasterDrawCount == 0))
+			{
+				Fail("Transparency capture did not submit all six alpha-tested point-shadow faces and their casters");
+				return;
+			}
+			PF_INFO("TRANSPARENCY_RENDER_STAGE={0}; spot_shadow_passes={1}; spot_shadow_caster_draws={2}; point_shadow_passes={3}; point_shadow_caster_draws={4}; selected_shadow_owners={5}",
+				m_TransparencyCaptureStage, Rendered->SpotlightShadowPassCount,
+				Rendered->SpotlightShadowCasterDrawCount,
+				Rendered->PointShadowPassCount, Rendered->PointShadowCasterDrawCount,
+				static_cast<size_t>(std::count_if(Rendered->SpotlightShadowSlotOwners.begin(),
+					Rendered->SpotlightShadowSlotOwners.end(), [](const auto& Owner) { return Owner.has_value(); })));
+			m_TransparencyGeometryDrawCount = Rendered->GeometryDrawCount;
+			m_TransparencyCapturePending = true;
+		}
+
+		void CaptureTransparencyImage()
+		{
+			const PulseForge::Texture* Color = m_TransparencyOutputTarget->GetColorTexture();
+			if (!Color)
+			{
+				Fail("Transparency output target has no readable color texture");
+				return;
+			}
+			const auto Readback = PulseForge::Application::Get().ReadTextureForValidation(*Color);
+			if (!Readback || Readback->Format != PulseForge::TextureFormat::RGBA8_Srgb)
+			{
+				Fail(Readback ? "Transparency output readback was not RGBA8 sRGB" :
+					"Could not read actual transparency output pixels: " + Readback.error().Message);
+				return;
+			}
+			static constexpr std::array<const char*, 8> ComparisonNames = {
+				"spot_disabled.png", "spot_shadows_off.png", "spot_shadows_on.png",
+				"point_shadows_off.png", "point_shadows_on.png",
+				"directional_shadows_off.png", "directional_shadows_on.png", "opaque_control.png"
+			};
+			if (m_TransparencyCaptureStage >= ComparisonNames.size())
+			{
+				Fail("Transparency capture reached an invalid shadow test stage");
+				return;
+			}
+			const std::filesystem::path ComparisonPath = m_PointShadowImageDirectory / "Transparency" /
+				ComparisonNames[m_TransparencyCaptureStage];
+			const auto SaveImage = [&](const std::filesystem::path& Path)
+			{
+				return stbi_write_png(Path.string().c_str(), static_cast<int>(Readback->Width),
+					static_cast<int>(Readback->Height), 4,
+					reinterpret_cast<const uint8_t*>(Readback->Pixels.data()), static_cast<int>(Readback->Width * 4)) != 0;
+			};
+			if (!SaveImage(ComparisonPath) || (m_TransparencyCaptureStage == 2 && !SaveImage(m_TransparencyImagePath)))
+			{
+				Fail("Could not save actual transparency scene pixels: " + ComparisonPath.string());
+				return;
+			}
+			switch (m_TransparencyCaptureStage)
+			{
+				case 0: m_TransparencyNoSpotPixels = Readback->Pixels; break;
+				case 1: m_TransparencyShadowOffPixels = Readback->Pixels; break;
+				case 2: m_TransparencyShadowOnPixels = Readback->Pixels; break;
+				case 3: m_TransparencyPointShadowOffPixels = Readback->Pixels; break;
+				case 4: m_TransparencyPointShadowOnPixels = Readback->Pixels; break;
+				case 5: m_TransparencyDirectionalShadowOffPixels = Readback->Pixels; break;
+				case 6: m_TransparencyDirectionalShadowOnPixels = Readback->Pixels; break;
+				case 7: m_TransparencyOpaqueControlPixels = Readback->Pixels; break;
+			}
+			double LuminanceSum = 0.0;
+			float MinimumLuminance = 1.0f;
+			float MaximumLuminance = 0.0f;
+			size_t LitPixelCount = 0;
+			size_t DistinctColorPixels = 0;
+			for (size_t Pixel = 0; Pixel < static_cast<size_t>(Readback->Width) * Readback->Height; ++Pixel)
+			{
+				const float Luminance = PixelLuminance(*Readback, Pixel);
+				LuminanceSum += Luminance;
+				MinimumLuminance = (std::min)(MinimumLuminance, Luminance);
+				MaximumLuminance = (std::max)(MaximumLuminance, Luminance);
+				if (Luminance > 0.1f)
+					++LitPixelCount;
+				const size_t Channel = Pixel * 4;
+				const uint8_t Red = static_cast<uint8_t>(Readback->Pixels[Channel]);
+				const uint8_t Green = static_cast<uint8_t>(Readback->Pixels[Channel + 1]);
+				const uint8_t Blue = static_cast<uint8_t>(Readback->Pixels[Channel + 2]);
+				if (static_cast<uint8_t>((std::max)({ Red, Green, Blue }) - (std::min)({ Red, Green, Blue })) > 28)
+					++DistinctColorPixels;
+			}
+			const double MeanLuminance = LuminanceSum /
+				static_cast<double>(static_cast<size_t>(Readback->Width) * Readback->Height);
+			PF_INFO("TRANSPARENCY_IMAGE={0}; extent={1}x{2}; draws={3}; mean_luma={4:.4f}; range={5:.3f}-{6:.3f}; lit_pixels={7}; chromatic_pixels={8}",
+				ComparisonPath.string(), Readback->Width, Readback->Height, m_TransparencyGeometryDrawCount,
+				MeanLuminance, MinimumLuminance, MaximumLuminance, LitPixelCount, DistinctColorPixels);
+			if (MaximumLuminance < 0.35f || MaximumLuminance - MinimumLuminance < 0.15f ||
+				LitPixelCount < 1000 || DistinctColorPixels < 1000)
+			{
+				Fail("Captured transparency image lacks the expected visible geometry and color variation");
+				return;
+			}
+		}
+
+		bool ValidateTransparencyShadowDifference()
+		{
+			if (m_TransparencyShadowOffPixels.size() != m_TransparencyShadowOnPixels.size() ||
+				m_TransparencyShadowOffPixels.empty())
+			{
+				Fail("Transparency shadow comparison images have inconsistent or empty pixel buffers");
+				return false;
+			}
+			size_t ChangedPixels = 0;
+			double AbsoluteDifference = 0.0;
+		std::vector<uint8_t> DifferenceImage(m_TransparencyShadowOnPixels.size());
+			for (size_t Pixel = 0; Pixel < m_TransparencyShadowOffPixels.size() / 4; ++Pixel)
+			{
+				const size_t Channel = Pixel * 4;
+				const int RedDifference = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel])) -
+					static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel])));
+				const int GreenDifference = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + 1])) -
+					static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel + 1])));
+				const int BlueDifference = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + 2])) -
+					static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel + 2])));
+				const int PixelDifference = (std::max)({ RedDifference, GreenDifference, BlueDifference });
+				AbsoluteDifference += RedDifference + GreenDifference + BlueDifference;
+				if (PixelDifference > 8)
+					++ChangedPixels;
+				DifferenceImage[Channel] = static_cast<uint8_t>((std::min)(RedDifference * 5, 255));
+				DifferenceImage[Channel + 1] = static_cast<uint8_t>((std::min)(GreenDifference * 5, 255));
+				DifferenceImage[Channel + 2] = static_cast<uint8_t>((std::min)(BlueDifference * 5, 255));
+				DifferenceImage[Channel + 3] = 255;
+			}
+			const std::filesystem::path DifferencePath = m_PointShadowImageDirectory / "Transparency" / "shadow_difference.png";
+			if (!stbi_write_png(DifferencePath.string().c_str(), 960, 540, 4, DifferenceImage.data(), 960 * 4))
+			{
+				Fail("Could not save actual transparency shadow-difference image");
+				return false;
+			}
+			const double MeanAbsoluteDifference = AbsoluteDifference /
+				static_cast<double>((m_TransparencyShadowOffPixels.size() / 4) * 3);
+			const auto CountChangedInRegion = [this](uint32_t MinX, uint32_t MinY, uint32_t MaxX, uint32_t MaxY)
+			{
+				size_t RegionChangedPixels = 0;
+				for (uint32_t Y = MinY; Y < MaxY; ++Y)
+				{
+					for (uint32_t X = MinX; X < MaxX; ++X)
+					{
+						const size_t Channel = (static_cast<size_t>(Y) * 960 + X) * 4;
+						const int Red = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel])) -
+							static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel])));
+						const int Green = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + 1])) -
+							static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel + 1])));
+						const int Blue = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + 2])) -
+							static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel + 2])));
+						if ((std::max)({ Red, Green, Blue }) > 8)
+							++RegionChangedPixels;
+					}
+				}
+				return RegionChangedPixels;
+			};
+			const size_t MaskedBackdropChanges = CountChangedInRegion(185, 95, 350, 282);
+			PF_INFO("TRANSPARENCY_SHADOW_IMAGE_DIFF=changed_pixels:{0}; mean_abs_rgb:{1:.3f}",
+				ChangedPixels, MeanAbsoluteDifference);
+			PF_INFO("TRANSPARENCY_MASKED_BACKDROP_DIFF=changed_pixels:{0}; roi=(185,95)-(350,282)", MaskedBackdropChanges);
+			if (ChangedPixels < 150 || MeanAbsoluteDifference < 0.15)
+			{
+				Fail("Enabling alpha-tested spotlight shadows did not produce a measurable image change");
+				return false;
+			}
+			if (MaskedBackdropChanges < 12)
+			{
+				Fail("Alpha-tested fence shadow did not change pixels in its projected backdrop region");
+				return false;
+			}
+			return true;
+		}
+
+		bool ValidateMaskedShadowImageDifference(
+			const std::vector<std::byte>& ShadowsOff,
+			const std::vector<std::byte>& ShadowsOn,
+			const char* ShadowType,
+			uint32_t MinX,
+			uint32_t MinY,
+			uint32_t MaxX,
+			uint32_t MaxY)
+		{
+			if (ShadowsOff.size() != ShadowsOn.size() || ShadowsOff.empty())
+			{
+				Fail(std::string("Transparency ") + ShadowType + " comparison has inconsistent or empty pixel buffers");
+				return false;
+			}
+			size_t ChangedPixels = 0;
+			double AbsoluteDifference = 0.0;
+			size_t BackdropChangedPixels = 0;
+			for (size_t Pixel = 0; Pixel < ShadowsOff.size() / 4; ++Pixel)
+			{
+				const size_t Channel = Pixel * 4;
+				int MaximumDifference = 0;
+				for (size_t Component = 0; Component < 3; ++Component)
+				{
+					const int Difference = std::abs(static_cast<int>(static_cast<uint8_t>(ShadowsOff[Channel + Component])) -
+						static_cast<int>(static_cast<uint8_t>(ShadowsOn[Channel + Component])));
+					AbsoluteDifference += Difference;
+					MaximumDifference = (std::max)(MaximumDifference, Difference);
+				}
+				if (MaximumDifference > 8)
+				{
+					++ChangedPixels;
+					const uint32_t X = static_cast<uint32_t>(Pixel % 960);
+					const uint32_t Y = static_cast<uint32_t>(Pixel / 960);
+					if (X >= MinX && X < MaxX && Y >= MinY && Y < MaxY)
+						++BackdropChangedPixels;
+				}
+			}
+			const double MeanAbsoluteDifference = AbsoluteDifference / static_cast<double>((ShadowsOff.size() / 4) * 3);
+			PF_INFO("TRANSPARENCY_{0}_SHADOW_IMAGE_DIFF=changed_pixels:{1}; mean_abs_rgb:{2:.3f}; receiver_roi_pixels:{3}; roi=({4},{5})-({6},{7})",
+				ShadowType, ChangedPixels, MeanAbsoluteDifference, BackdropChangedPixels, MinX, MinY, MaxX, MaxY);
+			if (ChangedPixels < 100 || MeanAbsoluteDifference < 0.1 || BackdropChangedPixels < 12)
+			{
+				Fail(std::string("The alpha-masked backdrop did not show a measurable ") + ShadowType + " shadow difference");
+				return false;
+			}
+			return true;
+		}
+
+		bool ValidateTransparencyPointShadowDifference()
+		{
+			return ValidateMaskedShadowImageDifference(
+				m_TransparencyPointShadowOffPixels, m_TransparencyPointShadowOnPixels, "point-light", 180, 280, 370, 360);
+		}
+
+		bool ValidateTransparencyDirectionalShadowDifference()
+		{
+			return ValidateMaskedShadowImageDifference(
+				m_TransparencyDirectionalShadowOffPixels, m_TransparencyDirectionalShadowOnPixels, "directional", 185, 260, 350, 360);
+		}
+
+		bool ValidateTransparencyBlendDifference()
+		{
+			if (m_TransparencyDirectionalShadowOnPixels.size() != m_TransparencyOpaqueControlPixels.size() ||
+				m_TransparencyOpaqueControlPixels.empty())
+			{
+				Fail("Transparency and opaque-control images have inconsistent or empty pixel buffers");
+				return false;
+			}
+			constexpr uint32_t MinX = 410;
+			constexpr uint32_t MinY = 190;
+			constexpr uint32_t MaxX = 550;
+			constexpr uint32_t MaxY = 325;
+			size_t ChangedPixels = 0;
+			double AbsoluteDifference = 0.0;
+			for (uint32_t Y = MinY; Y < MaxY; ++Y)
+			{
+				for (uint32_t X = MinX; X < MaxX; ++X)
+				{
+					const size_t Channel = (static_cast<size_t>(Y) * 960 + X) * 4;
+					int MaximumDifference = 0;
+					for (size_t Component = 0; Component < 3; ++Component)
+					{
+						const int Difference = std::abs(
+							static_cast<int>(static_cast<uint8_t>(m_TransparencyDirectionalShadowOnPixels[Channel + Component])) -
+							static_cast<int>(static_cast<uint8_t>(m_TransparencyOpaqueControlPixels[Channel + Component])));
+						AbsoluteDifference += Difference;
+						MaximumDifference = (std::max)(MaximumDifference, Difference);
+					}
+					if (MaximumDifference > 8)
+						++ChangedPixels;
+				}
+			}
+			const double MeanAbsoluteDifference = AbsoluteDifference /
+				static_cast<double>((MaxX - MinX) * (MaxY - MinY) * 3);
+			PF_INFO("TRANSPARENCY_BLEND_IMAGE_DIFF=changed_pixels:{0}; mean_abs_rgb:{1:.3f}; blue_panel_roi=({2},{3})-({4},{5})",
+				ChangedPixels, MeanAbsoluteDifference, MinX, MinY, MaxX, MaxY);
+			if (ChangedPixels < 1000 || MeanAbsoluteDifference < 1.0)
+			{
+				Fail("The BLEND blue panel did not differ from its matching OPAQUE control in the expected image region");
+				return false;
+			}
+			return true;
+		}
+
+		bool ValidateTransparencyLightDifference()
+		{
+			if (m_TransparencyNoSpotPixels.size() != m_TransparencyShadowOffPixels.size() ||
+				m_TransparencyNoSpotPixels.empty())
+			{
+				Fail("Transparency spotlight comparison images have inconsistent or empty pixel buffers");
+				return false;
+			}
+			size_t ChangedPixels = 0;
+			double AbsoluteDifference = 0.0;
+			uint32_t MinX = 960;
+			uint32_t MinY = 540;
+			uint32_t MaxX = 0;
+			uint32_t MaxY = 0;
+			for (size_t Pixel = 0; Pixel < m_TransparencyNoSpotPixels.size() / 4; ++Pixel)
+			{
+				const size_t Channel = Pixel * 4;
+				int MaximumDifference = 0;
+				for (size_t Component = 0; Component < 3; ++Component)
+				{
+					const int Difference = std::abs(
+						static_cast<int>(static_cast<uint8_t>(m_TransparencyNoSpotPixels[Channel + Component])) -
+						static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + Component])));
+					AbsoluteDifference += Difference;
+					MaximumDifference = (std::max)(MaximumDifference, Difference);
+				}
+				if (MaximumDifference > 8)
+				{
+					++ChangedPixels;
+					const uint32_t X = static_cast<uint32_t>(Pixel % 960);
+					const uint32_t Y = static_cast<uint32_t>(Pixel / 960);
+					MinX = (std::min)(MinX, X);
+					MinY = (std::min)(MinY, Y);
+					MaxX = (std::max)(MaxX, X);
+					MaxY = (std::max)(MaxY, Y);
+				}
+			}
+			const double MeanAbsoluteDifference = AbsoluteDifference /
+				static_cast<double>((m_TransparencyNoSpotPixels.size() / 4) * 3);
+			PF_INFO("TRANSPARENCY_DIRECT_LIGHT_DIFF=changed_pixels:{0}; mean_abs_rgb:{1:.3f}; bounds=({2},{3})-({4},{5})",
+				ChangedPixels, MeanAbsoluteDifference, MinX, MinY, MaxX, MaxY);
+			if (ChangedPixels < 150 || MeanAbsoluteDifference < 0.15)
+			{
+				Fail("The configured transparency spotlight did not measurably illuminate the scene");
+				return false;
+			}
+			return true;
 		}
 
 		void RenderPointShadowOverviewImageFrame()
@@ -2832,6 +3493,7 @@ namespace
 		bool m_ValidateSpotlightShadows = false;
 		bool m_ValidatePointShadows = false;
 		bool m_ValidatePbrMaterials = false;
+		bool m_ValidateTransparency = false;
 		bool m_ValidatePointShadowImages = false;
 		bool m_ScenePrepared = false;
 		bool m_PointShadowScenarioUpdated = false;
@@ -2843,6 +3505,26 @@ namespace
 		bool m_PbrMaterialCapturePending = false;
 		bool m_PbrMaterialCaptureComplete = false;
 		size_t m_PbrMaterialGeometryDrawCount = 0;
+		std::unique_ptr<PulseForge::RenderTarget> m_TransparencyOutputTarget;
+		std::filesystem::path m_TransparencyImagePath;
+		PulseForge::Entity m_TransparencyDirectionalLight;
+		PulseForge::Entity m_TransparencySpotLight;
+		PulseForge::Entity m_TransparencyPointLight;
+		PulseForge::Entity m_TransparencyBlueGlassPanel;
+		PulseForge::UUID m_TransparencyBlueOpaqueControlMaterial;
+		std::vector<std::byte> m_TransparencyShadowOffPixels;
+		std::vector<std::byte> m_TransparencyShadowOnPixels;
+		std::vector<std::byte> m_TransparencyNoSpotPixels;
+		std::vector<std::byte> m_TransparencyPointShadowOffPixels;
+		std::vector<std::byte> m_TransparencyPointShadowOnPixels;
+		std::vector<std::byte> m_TransparencyDirectionalShadowOffPixels;
+		std::vector<std::byte> m_TransparencyDirectionalShadowOnPixels;
+		std::vector<std::byte> m_TransparencyOpaqueControlPixels;
+		float m_TransparencySpotIntensity = 0.0f;
+		bool m_TransparencyCapturePending = false;
+		bool m_TransparencyCaptureComplete = false;
+		size_t m_TransparencyCaptureStage = 0;
+		size_t m_TransparencyGeometryDrawCount = 0;
 	};
 
 	class GpuValidationApplication final : public PulseForge::Application
@@ -2850,11 +3532,12 @@ namespace
 	public:
 		GpuValidationApplication(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm,
 			bool ValidateLocalLights, bool ValidateSpotlightShadows, bool ValidatePointShadows, bool ValidatePbrMaterials,
-			bool ValidatePointShadowImages, std::filesystem::path PointShadowImageDirectory)
+			bool ValidateTransparency, bool ValidatePointShadowImages, std::filesystem::path PointShadowImageDirectory)
 			: Application(PulseForge::RendererAPI::Vulkan)
 		{
 			auto Layer = std::make_unique<GpuValidationLayer>(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm,
 				ValidateLocalLights, ValidateSpotlightShadows, ValidatePointShadows, ValidatePbrMaterials,
+				ValidateTransparency,
 				ValidatePointShadowImages, std::move(PointShadowImageDirectory));
 			m_Layer = Layer.get();
 			PushLayer(std::move(Layer));
@@ -2884,12 +3567,14 @@ int main(int ArgumentCount, char** Arguments)
 		const bool ValidateSpotlightShadows = Mode == "--scene-spot-shadows";
 		const bool ValidatePointShadows = Mode == "--scene-point-shadows";
 		const bool ValidatePbrMaterials = Mode == "--scene-pbr-materials";
+		const bool ValidateTransparency = Mode == "--scene-transparency";
 		const bool ValidatePointShadowImages = Mode == "--scene-point-shadow-images";
 		const std::filesystem::path PointShadowImageDirectory = ArgumentCount > 2
 			? std::filesystem::path(Arguments[2])
 			: std::filesystem::current_path() / "Diagnostics" / "PointShadowDirection";
 		GpuValidationApplication App(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm, ValidateLocalLights,
 			ValidateSpotlightShadows, ValidatePointShadows, ValidatePbrMaterials,
+			ValidateTransparency,
 			ValidatePointShadowImages, PointShadowImageDirectory);
 		return App.RunValidation();
 	}

@@ -11,6 +11,7 @@ namespace PulseForge::VulkanSupport
 		bool TimelineSemaphore = false;
 		bool Synchronization2 = false;
 		bool DynamicRendering = false;
+		bool ShaderDemoteToHelperInvocation = false;
 	};
 
 	bool SupportsRequiredDeviceFeatures(const RequiredDeviceFeatures& Features);

@@ -293,6 +293,11 @@ namespace PulseForge
 				return std::unexpected(MakeResourceError(std::string("Could not create shader '") + DebugName + "': " + Shader.error().Message));
 			return std::move(*Shader);
 		};
+		auto ShadowFragment = LoadAuxiliaryShader("DirectionalShadow.ps.spv", ShaderStage::Fragment,
+			"PulseForge alpha-tested shadow fragment shader");
+		if (!ShadowFragment)
+			return std::unexpected(std::move(ShadowFragment.error()));
+		m_ShadowFragmentShader = std::move(*ShadowFragment);
 		auto AoPrepassVs = LoadAuxiliaryShader("SsaoNormalDepth.vs.spv", ShaderStage::Vertex,
 			"PulseForge SSAO normal-depth vertex shader");
 		auto AoPrepassPs = LoadAuxiliaryShader("SsaoNormalDepth.ps.spv", ShaderStage::Fragment,
@@ -581,7 +586,7 @@ namespace PulseForge
 		m_AmbientOcclusionBlurBindingLayout = std::move(*AmbientOcclusionBlurLayout);
 
 		BindingLayoutDesc AmbientOcclusionPrepassDescription;
-		AmbientOcclusionPrepassDescription.Visibility = ShaderVisibility::Vertex;
+		AmbientOcclusionPrepassDescription.Visibility = ShaderVisibility::AllGraphics;
 		AmbientOcclusionPrepassDescription.ShaderRegisterSpace = 4;
 		AmbientOcclusionPrepassDescription.Items = { { BindingResourceType::ConstantBuffer, 0 } };
 		AmbientOcclusionPrepassDescription.DebugName = "PulseForge SSAO prepass constants (space4)";
@@ -643,6 +648,7 @@ namespace PulseForge
 
 		BindingLayoutDesc ShadowObjectLayoutDescription;
 		ShadowObjectLayoutDescription.Visibility = ShaderVisibility::Vertex;
+		ShadowObjectLayoutDescription.ShaderRegisterSpace = 4;
 		ShadowObjectLayoutDescription.Items = { { BindingResourceType::ConstantBuffer, 0 } };
 		ShadowObjectLayoutDescription.DebugName = "PulseForge directional shadow object constants";
 		auto ShadowObjectLayout = m_Runtime.CreateBindingLayout(ShadowObjectLayoutDescription);
@@ -652,6 +658,7 @@ namespace PulseForge
 
 		BindingLayoutDesc PointShadowObjectLayoutDescription;
 		PointShadowObjectLayoutDescription.Visibility = ShaderVisibility::AllGraphics;
+		PointShadowObjectLayoutDescription.ShaderRegisterSpace = 4;
 		PointShadowObjectLayoutDescription.Items = { { BindingResourceType::ConstantBuffer, 0 } };
 		PointShadowObjectLayoutDescription.DebugName = "PulseForge point-shadow pass/object constants";
 		auto PointShadowObjectLayout = m_Runtime.CreateBindingLayout(PointShadowObjectLayoutDescription);
@@ -914,7 +921,9 @@ namespace PulseForge
 			{ Material->get().MetallicFactor, Material->get().RoughnessFactor,
 				Material->get().NormalScale, Material->get().OcclusionStrength },
 			{ Material->get().EmissiveFactor.r, Material->get().EmissiveFactor.g,
-				Material->get().EmissiveFactor.b, 0.0f }
+				Material->get().EmissiveFactor.b, 0.0f },
+			{ static_cast<float>(Material->get().AlphaMode), Material->get().AlphaCutoff,
+				Material->get().DoubleSided ? 1.0f : 0.0f, 0.0f }
 		};
 		BufferDesc MaterialBufferDescription;
 		MaterialBufferDescription.ByteSize = sizeof(Constants);
@@ -1157,9 +1166,55 @@ namespace PulseForge
 		return {};
 	}
 
-	std::expected<void, SceneRendererError> SceneRenderer::EnsurePipeline(ColorTargetFormat ColorFormat)
+	std::expected<const MaterialAssetDesc*, SceneRendererError> SceneRenderer::ResolveMaterialDescription(
+		const SceneMeshInstance& Instance)
 	{
-		if (m_Pipelines.contains(ColorFormat))
+		if (!Instance.MaterialAsset)
+			return std::unexpected(SceneRendererError{
+				SceneRendererErrorCode::MissingMaterial,
+				Instance.Entity,
+				Instance.MeshAsset,
+				"Visible mesh entity has no material asset assigned" });
+		auto Material = m_MaterialAssetCache->GetOrLoad(*Instance.MaterialAsset);
+		if (!Material)
+			return std::unexpected(SceneRendererError{
+				SceneRendererErrorCode::AssetLoadFailed,
+				Instance.Entity,
+				*Instance.MaterialAsset,
+				"Could not resolve material for mesh instance: " + Material.error().Message });
+		return &Material->get();
+	}
+
+	std::expected<const SceneRenderer::MaterialBindingResources*, SceneRendererError> SceneRenderer::ResolveMaterialBinding(
+		const SceneMeshInstance& Instance)
+	{
+		if (!Instance.MaterialAsset)
+			return std::unexpected(SceneRendererError{
+				SceneRendererErrorCode::MissingMaterial,
+				Instance.Entity,
+				Instance.MeshAsset,
+				"Visible mesh entity has no material asset assigned" });
+		const std::optional<AssetID> EnvironmentAsset = m_PreparedSnapshot && m_PreparedSnapshot->EnvironmentLight
+			? std::optional<AssetID>{ m_PreparedSnapshot->EnvironmentLight->HdrImage }
+			: std::nullopt;
+		const std::optional<AssetID> BindingEnvironmentAsset = m_PreparedEnvironmentReady ? EnvironmentAsset : std::nullopt;
+		const auto Binding = m_MaterialBindings.find(MakeMaterialBindingKey(*Instance.MaterialAsset, BindingEnvironmentAsset));
+		if (Binding == m_MaterialBindings.end())
+			return std::unexpected(SceneRendererError{
+				SceneRendererErrorCode::AssetLoadFailed,
+				Instance.Entity,
+				*Instance.MaterialAsset,
+				"Prepared material binding set is unavailable" });
+		return &Binding->second;
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::EnsurePipeline(
+		ColorTargetFormat ColorFormat,
+		bool AlphaBlend,
+		bool DoubleSided)
+	{
+		const auto Key = std::tuple{ ColorFormat, AlphaBlend, DoubleSided };
+		if (m_Pipelines.contains(Key))
 			return {};
 		Detail::ScopedProfileTimer Timer("Scene graphics pipeline creation");
 		if (!m_PipelineVertexLayout)
@@ -1173,32 +1228,36 @@ namespace PulseForge
 			m_SpotShadowBindingLayout, m_PointShadowBindingLayout };
 		PipelineDescription.VertexLayout = *m_PipelineVertexLayout;
 		PipelineDescription.ColorFormat = ColorFormat;
-		PipelineDescription.Rasterizer.Cull = CullMode::None;
+		PipelineDescription.Rasterizer.Cull = DoubleSided ? CullMode::None : CullMode::Back;
+		PipelineDescription.Blend.Enabled = AlphaBlend;
 		PipelineDescription.Depth.TestEnabled = true;
-		PipelineDescription.Depth.WriteEnabled = true;
+		PipelineDescription.Depth.WriteEnabled = !AlphaBlend;
 		PipelineDescription.Depth.Compare = DepthCompareOperation::Less;
-		PipelineDescription.DebugName = "PulseForge scene pipeline";
+		PipelineDescription.DebugName = AlphaBlend ? "PulseForge transparent scene pipeline" :
+			DoubleSided ? "PulseForge double-sided scene pipeline" : "PulseForge opaque/masked scene pipeline";
 		auto Pipeline = m_Runtime.CreateGraphicsPipeline(PipelineDescription);
 		if (!Pipeline)
 			return std::unexpected(MakeResourceError("Could not create scene graphics pipeline: " + Pipeline.error().Message));
 
-		m_Pipelines.emplace(ColorFormat, std::move(Pipeline.value()));
-		PF_CORE_INFO("Created scene pipeline for vertex stride {0} and color format {1}",
+		m_Pipelines.emplace(Key, std::move(Pipeline.value()));
+		PF_CORE_INFO("Created scene pipeline for vertex stride {0}, color format {1}, blend {2}, double-sided {3}",
 			m_PipelineVertexLayout->Stride,
-			static_cast<uint32_t>(ColorFormat));
+			static_cast<uint32_t>(ColorFormat), AlphaBlend, DoubleSided);
 		return {};
 	}
 
-	std::expected<void, SceneRendererError> SceneRenderer::EnsureShadowPipeline(float DepthBias)
+	std::expected<void, SceneRendererError> SceneRenderer::EnsureShadowPipeline(float DepthBias, bool DoubleSided)
 	{
 		const int32_t RasterBias = static_cast<int32_t>(std::lround(DepthBias));
-		if (m_ShadowPipelines.contains(RasterBias))
+		const auto Key = std::pair{ RasterBias, DoubleSided };
+		if (m_ShadowPipelines.contains(Key))
 			return {};
 		if (!m_PipelineVertexLayout)
 			return std::unexpected(MakeResourceError("Cannot create a shadow pipeline before a mesh layout is prepared"));
 		GraphicsPipelineDesc Description;
 		Description.VertexShader = m_ShadowVertexShader;
-		Description.BindingLayouts = { m_ShadowObjectBindingLayout };
+		Description.FragmentShader = m_ShadowFragmentShader;
+		Description.BindingLayouts = { m_BindingLayout, m_ShadowObjectBindingLayout };
 		Description.VertexLayout.Stride = m_PipelineVertexLayout->Stride;
 		const auto PositionAttribute = std::find_if(m_PipelineVertexLayout->Attributes.begin(),
 			m_PipelineVertexLayout->Attributes.end(), [](const VertexAttributeDesc& Attribute)
@@ -1208,18 +1267,36 @@ namespace PulseForge
 		if (PositionAttribute == m_PipelineVertexLayout->Attributes.end())
 			return std::unexpected(MakeResourceError("The mesh layout has no position attribute for shadow rendering"));
 		Description.VertexLayout.Attributes.push_back(*PositionAttribute);
+		const auto ColorAttribute = std::find_if(m_PipelineVertexLayout->Attributes.begin(),
+			m_PipelineVertexLayout->Attributes.end(), [](const VertexAttributeDesc& Attribute)
+			{
+				return Attribute.Semantic == VertexSemantic::Color;
+			});
+		if (ColorAttribute == m_PipelineVertexLayout->Attributes.end())
+			return std::unexpected(MakeResourceError("The mesh layout has no color attribute for alpha-tested shadows"));
+		Description.VertexLayout.Attributes.push_back(*ColorAttribute);
+		const auto TexCoordAttribute = std::find_if(m_PipelineVertexLayout->Attributes.begin(),
+			m_PipelineVertexLayout->Attributes.end(), [](const VertexAttributeDesc& Attribute)
+			{
+				return Attribute.Semantic == VertexSemantic::TexCoord;
+			});
+		if (TexCoordAttribute == m_PipelineVertexLayout->Attributes.end())
+			return std::unexpected(MakeResourceError("The mesh layout has no texture coordinates for alpha-tested shadows"));
+		Description.VertexLayout.Attributes.push_back(*TexCoordAttribute);
 		Description.ColorFormat = ColorTargetFormat::None;
-		Description.Rasterizer.Cull = CullMode::Back;
+		Description.Rasterizer.Cull = DoubleSided ? CullMode::None : CullMode::Back;
 		Description.Rasterizer.DepthBias = static_cast<float>(RasterBias);
 		Description.Rasterizer.SlopeScaledDepthBias = 1.5f;
 		Description.Depth.TestEnabled = true;
 		Description.Depth.WriteEnabled = true;
 		Description.Depth.Compare = DepthCompareOperation::Less;
-		Description.DebugName = "PulseForge directional shadow depth-only pipeline";
+		Description.DebugName = DoubleSided
+			? "PulseForge double-sided alpha-tested shadow depth pipeline"
+			: "PulseForge alpha-tested shadow depth pipeline";
 		auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
 		if (!Pipeline)
 			return std::unexpected(MakeResourceError("Could not create directional shadow pipeline: " + Pipeline.error().Message));
-		m_ShadowPipelines.emplace(RasterBias, std::move(*Pipeline));
+		m_ShadowPipelines.emplace(Key, std::move(*Pipeline));
 		return {};
 	}
 
@@ -1429,30 +1506,44 @@ namespace PulseForge
 		{
 			if (auto Resources = EnsurePointShadowResources(); !Resources)
 				return std::unexpected(std::move(Resources.error()));
-			if (!m_PointShadowPipeline)
+			for (size_t DoubleSidedIndex = 0; DoubleSidedIndex < m_PointShadowPipelines.size(); ++DoubleSidedIndex)
 			{
+				if (m_PointShadowPipelines[DoubleSidedIndex])
+					continue;
 				if (!m_PipelineVertexLayout)
 					return std::unexpected(MakeResourceError("Cannot create point-shadow pipeline before a mesh layout is prepared"));
 				GraphicsPipelineDesc Description;
 				Description.VertexShader = m_PointShadowVertexShader;
 				Description.FragmentShader = m_PointShadowFragmentShader;
-				Description.BindingLayouts = { m_PointShadowObjectBindingLayout };
+				Description.BindingLayouts = { m_BindingLayout, m_PointShadowObjectBindingLayout };
 				Description.VertexLayout.Stride = m_PipelineVertexLayout->Stride;
 				const auto Position = std::find_if(m_PipelineVertexLayout->Attributes.begin(), m_PipelineVertexLayout->Attributes.end(),
 					[](const VertexAttributeDesc& Attribute) { return Attribute.Semantic == VertexSemantic::Position; });
 				if (Position == m_PipelineVertexLayout->Attributes.end())
 					return std::unexpected(MakeResourceError("The mesh layout has no position attribute for point-shadow rendering"));
 				Description.VertexLayout.Attributes.push_back(*Position);
+				const auto Color = std::find_if(m_PipelineVertexLayout->Attributes.begin(), m_PipelineVertexLayout->Attributes.end(),
+					[](const VertexAttributeDesc& Attribute) { return Attribute.Semantic == VertexSemantic::Color; });
+				if (Color == m_PipelineVertexLayout->Attributes.end())
+					return std::unexpected(MakeResourceError("The mesh layout has no color attribute for point-shadow alpha tests"));
+				Description.VertexLayout.Attributes.push_back(*Color);
+				const auto TexCoord = std::find_if(m_PipelineVertexLayout->Attributes.begin(), m_PipelineVertexLayout->Attributes.end(),
+					[](const VertexAttributeDesc& Attribute) { return Attribute.Semantic == VertexSemantic::TexCoord; });
+				if (TexCoord == m_PipelineVertexLayout->Attributes.end())
+					return std::unexpected(MakeResourceError("The mesh layout has no texture coordinates for point-shadow alpha tests"));
+				Description.VertexLayout.Attributes.push_back(*TexCoord);
 				Description.ColorFormat = ColorTargetFormat::None;
-				Description.Rasterizer.Cull = CullMode::Back;
+				Description.Rasterizer.Cull = DoubleSidedIndex == 1 ? CullMode::None : CullMode::Back;
 				Description.Depth.TestEnabled = true;
 				Description.Depth.WriteEnabled = true;
 				Description.Depth.Compare = DepthCompareOperation::Less;
-				Description.DebugName = "PulseForge point-shadow radial depth pipeline";
+				Description.DebugName = DoubleSidedIndex == 1
+					? "PulseForge double-sided alpha-tested point-shadow pipeline"
+					: "PulseForge alpha-tested point-shadow pipeline";
 				auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
 				if (!Pipeline)
 					return std::unexpected(MakeResourceError("Could not create point-shadow pipeline: " + Pipeline.error().Message));
-				m_PointShadowPipeline = std::move(*Pipeline);
+				m_PointShadowPipelines[DoubleSidedIndex] = std::move(*Pipeline);
 			}
 		}
 		const PointShadowSlotAssignments PointAssignments = AssignPointShadowSlots(
@@ -1523,9 +1614,6 @@ namespace PulseForge
 	{
 		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty() || !m_SpotShadowTargets.front())
 			return RenderPointLightShadows();
-		const auto Pipeline = m_ShadowPipelines.find(1);
-		if (Pipeline == m_ShadowPipelines.end())
-			return std::unexpected(MakeResourceError("Spotlight shadow pipeline was not prepared"));
 		for (size_t Slot = 0; Slot < m_SpotShadowSlotOwners.size(); ++Slot)
 		{
 			if (!m_SpotShadowSlotOwners[Slot])
@@ -1536,6 +1624,19 @@ namespace PulseForge
 			RenderTargetFrameScope TargetScope(m_Runtime);
 			for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
 			{
+				auto Material = ResolveMaterialDescription(Instance);
+				if (!Material)
+					return std::unexpected(std::move(Material.error()));
+				if ((*Material)->AlphaMode == MaterialAlphaMode::Blend)
+					continue;
+				auto MaterialBinding = ResolveMaterialBinding(Instance);
+				if (!MaterialBinding)
+					return std::unexpected(std::move(MaterialBinding.error()));
+				if (auto PipelineResult = EnsureShadowPipeline(1.0f, (*Material)->DoubleSided); !PipelineResult)
+					return std::unexpected(std::move(PipelineResult.error()));
+				const auto Pipeline = m_ShadowPipelines.find({ 1, (*Material)->DoubleSided });
+				if (Pipeline == m_ShadowPipelines.end())
+					return std::unexpected(MakeResourceError("Spotlight alpha-tested shadow pipeline was not prepared"));
 				auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
 				if (!Mesh)
 					return std::unexpected(MakeDrawError("Spotlight shadow caster mesh became unavailable: " + Mesh.error().Message));
@@ -1544,7 +1645,8 @@ namespace PulseForge
 					*m_ShadowObjectConstantsBuffer, 0, std::as_bytes(std::span(&ShadowTransform, 1)));
 				if (!Update)
 					return std::unexpected(MakeDrawError("Could not update spotlight shadow object constants: " + Update.error().Message));
-				const std::array<const BindingSet*, 1> Bindings = { m_ShadowObjectBindingSet.get() };
+				const std::array<const BindingSet*, 2> Bindings = {
+					(*MaterialBinding)->BindingSet.get(), m_ShadowObjectBindingSet.get() };
 				const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
 				const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline->second, Mesh->get(), Arguments, Bindings);
 				if (!Draw)
@@ -1563,7 +1665,8 @@ namespace PulseForge
 	{
 		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty() || !m_PointShadowCubemaps.front())
 			return {};
-		if (!m_PointShadowPipeline)
+		if (std::none_of(m_PointShadowPipelines.begin(), m_PointShadowPipelines.end(),
+			[](const GraphicsPipelineHandle& Pipeline) { return static_cast<bool>(Pipeline); }))
 			return std::unexpected(MakeResourceError("Point-shadow pipeline was not prepared for active shadow owners"));
 
 		for (size_t Slot = 0; Slot < m_PointShadowSlotOwners.size(); ++Slot)
@@ -1591,6 +1694,17 @@ namespace PulseForge
 				RenderTargetFrameScope TargetScope(m_Runtime);
 				for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
 				{
+					auto Material = ResolveMaterialDescription(Instance);
+					if (!Material)
+						return std::unexpected(std::move(Material.error()));
+					if ((*Material)->AlphaMode == MaterialAlphaMode::Blend)
+						continue;
+					auto MaterialBinding = ResolveMaterialBinding(Instance);
+					if (!MaterialBinding)
+						return std::unexpected(std::move(MaterialBinding.error()));
+					const size_t PipelineIndex = (*Material)->DoubleSided ? 1u : 0u;
+					if (!m_PointShadowPipelines[PipelineIndex])
+						return std::unexpected(MakeResourceError("Point-shadow alpha-tested pipeline was not prepared"));
 					auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
 					if (!Mesh)
 						return std::unexpected(MakeDrawError("Point-shadow caster mesh became unavailable: " + Mesh.error().Message));
@@ -1602,9 +1716,11 @@ namespace PulseForge
 						*m_PointShadowObjectConstantsBuffer, 0, std::as_bytes(std::span(&Object, 1)));
 					if (!Update)
 						return std::unexpected(MakeDrawError("Could not update point-shadow constants: " + Update.error().Message));
-					const std::array<const BindingSet*, 1> Bindings = { m_PointShadowObjectBindingSet.get() };
+					const std::array<const BindingSet*, 2> Bindings = {
+						(*MaterialBinding)->BindingSet.get(), m_PointShadowObjectBindingSet.get() };
 					const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
-					const GraphicsResult Draw = m_Runtime.DrawIndexed(*m_PointShadowPipeline, Mesh->get(), Arguments, Bindings);
+					const GraphicsResult Draw = m_Runtime.DrawIndexed(
+						*m_PointShadowPipelines[PipelineIndex], Mesh->get(), Arguments, Bindings);
 					if (!Draw)
 						return std::unexpected(MakeDrawError("Could not draw point-shadow caster: " + Draw.error().Message));
 					++m_LastPointShadowCasterDrawCount;
@@ -1632,9 +1748,6 @@ namespace PulseForge
 		if (!m_PreparedCascades)
 			return std::unexpected(MakeDrawError("Prepared directional shadow cascades are unavailable"));
 		const int32_t RasterBias = static_cast<int32_t>(std::lround(m_PreparedSnapshot->DirectionalLight->ShadowBias));
-		const auto Pipeline = m_ShadowPipelines.find(RasterBias);
-		if (Pipeline == m_ShadowPipelines.end())
-			return std::unexpected(MakeResourceError("Directional shadow pipeline was not prepared for the authored raster bias"));
 
 		for (size_t CascadeIndex = 0; CascadeIndex < m_PreparedCascades->Cascades.size(); ++CascadeIndex)
 		{
@@ -1644,6 +1757,20 @@ namespace PulseForge
 			RenderTargetFrameScope TargetScope(m_Runtime);
 			for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
 			{
+				auto Material = ResolveMaterialDescription(Instance);
+				if (!Material)
+					return std::unexpected(std::move(Material.error()));
+				if ((*Material)->AlphaMode == MaterialAlphaMode::Blend)
+					continue;
+				auto MaterialBinding = ResolveMaterialBinding(Instance);
+				if (!MaterialBinding)
+					return std::unexpected(std::move(MaterialBinding.error()));
+				if (auto PipelineResult = EnsureShadowPipeline(
+						m_PreparedSnapshot->DirectionalLight->ShadowBias, (*Material)->DoubleSided); !PipelineResult)
+					return std::unexpected(std::move(PipelineResult.error()));
+				const auto Pipeline = m_ShadowPipelines.find({ RasterBias, (*Material)->DoubleSided });
+				if (Pipeline == m_ShadowPipelines.end())
+					return std::unexpected(MakeResourceError("Directional alpha-tested shadow pipeline was not prepared"));
 				auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
 				if (!Mesh)
 					return std::unexpected(MakeDrawError("Shadow pass mesh became unavailable: " + Mesh.error().Message));
@@ -1652,7 +1779,8 @@ namespace PulseForge
 					*m_ShadowObjectConstantsBuffer, 0, std::as_bytes(std::span(&ShadowTransform, 1)));
 				if (!Update)
 					return std::unexpected(MakeDrawError("Could not update shadow object constants: " + Update.error().Message));
-				const std::array<const BindingSet*, 1> Bindings = { m_ShadowObjectBindingSet.get() };
+				const std::array<const BindingSet*, 2> Bindings = {
+					(*MaterialBinding)->BindingSet.get(), m_ShadowObjectBindingSet.get() };
 				const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
 				const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline->second, Mesh->get(), Arguments, Bindings);
 				if (!Draw)
@@ -1701,31 +1829,40 @@ namespace PulseForge
 			m_AmbientOcclusionBlurPipeline = std::move(*Pipeline);
 		}
 
-		if (!m_AmbientOcclusionPrepassPipeline && m_PipelineVertexLayout)
+		if (m_PipelineVertexLayout)
 		{
-			GraphicsPipelineDesc Description;
-			Description.VertexShader = m_AmbientOcclusionPrepassVertexShader;
-			Description.FragmentShader = m_AmbientOcclusionPrepassFragmentShader;
-			Description.BindingLayouts = { m_AmbientOcclusionPrepassBindingLayout };
-			Description.VertexLayout.Stride = m_PipelineVertexLayout->Stride;
-			for (const VertexSemantic Semantic : { VertexSemantic::Position, VertexSemantic::Normal })
+			for (size_t DoubleSidedIndex = 0; DoubleSidedIndex < m_AmbientOcclusionPrepassPipelines.size(); ++DoubleSidedIndex)
 			{
-				const auto Attribute = std::find_if(m_PipelineVertexLayout->Attributes.begin(), m_PipelineVertexLayout->Attributes.end(),
-					[Semantic](const VertexAttributeDesc& Candidate) { return Candidate.Semantic == Semantic; });
-				if (Attribute == m_PipelineVertexLayout->Attributes.end())
-					return std::unexpected(MakeResourceError("Mesh layout lacks position or normal attributes required by the SSAO prepass"));
-				Description.VertexLayout.Attributes.push_back(*Attribute);
+				if (m_AmbientOcclusionPrepassPipelines[DoubleSidedIndex])
+					continue;
+				GraphicsPipelineDesc Description;
+				Description.VertexShader = m_AmbientOcclusionPrepassVertexShader;
+				Description.FragmentShader = m_AmbientOcclusionPrepassFragmentShader;
+				Description.BindingLayouts = { m_BindingLayout, m_AmbientOcclusionPrepassBindingLayout };
+				Description.VertexLayout.Stride = m_PipelineVertexLayout->Stride;
+				for (const VertexSemantic Semantic : {
+					VertexSemantic::Position, VertexSemantic::Color, VertexSemantic::TexCoord, VertexSemantic::Normal })
+				{
+					const auto Attribute = std::find_if(m_PipelineVertexLayout->Attributes.begin(), m_PipelineVertexLayout->Attributes.end(),
+						[Semantic](const VertexAttributeDesc& Candidate) { return Candidate.Semantic == Semantic; });
+					if (Attribute == m_PipelineVertexLayout->Attributes.end())
+						return std::unexpected(MakeResourceError(
+							"Mesh layout lacks position, texture coordinates, or normals required by the SSAO alpha prepass"));
+					Description.VertexLayout.Attributes.push_back(*Attribute);
+				}
+				Description.ColorFormat = ColorTargetFormat::RGBA8_UNorm;
+				Description.Depth.TestEnabled = true;
+				Description.Depth.WriteEnabled = true;
+				Description.Depth.Compare = DepthCompareOperation::Less;
+				Description.Rasterizer.Cull = DoubleSidedIndex == 1 ? CullMode::None : CullMode::Back;
+				Description.DebugName = DoubleSidedIndex == 1
+					? "PulseForge double-sided alpha-tested SSAO prepass pipeline"
+					: "PulseForge alpha-tested SSAO prepass pipeline";
+				auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
+				if (!Pipeline)
+					return std::unexpected(MakeResourceError("Could not create SSAO normal-depth pipeline: " + Pipeline.error().Message));
+				m_AmbientOcclusionPrepassPipelines[DoubleSidedIndex] = std::move(*Pipeline);
 			}
-			Description.ColorFormat = ColorTargetFormat::RGBA8_UNorm;
-			Description.Depth.TestEnabled = true;
-			Description.Depth.WriteEnabled = true;
-			Description.Depth.Compare = DepthCompareOperation::Less;
-			Description.Rasterizer.Cull = CullMode::Back;
-			Description.DebugName = "PulseForge camera normal-depth prepass pipeline";
-			auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
-			if (!Pipeline)
-				return std::unexpected(MakeResourceError("Could not create SSAO normal-depth pipeline: " + Pipeline.error().Message));
-			m_AmbientOcclusionPrepassPipeline = std::move(*Pipeline);
 		}
 		return {};
 	}
@@ -1827,7 +1964,7 @@ namespace PulseForge
 			return std::unexpected(std::move(Resources.error()));
 		if (auto Pipelines = EnsureAmbientOcclusionPipelines(); !Pipelines)
 			return std::unexpected(std::move(Pipelines.error()));
-		if (!m_AmbientOcclusionPrepassPipeline)
+		if (!m_AmbientOcclusionPrepassPipelines[0] || !m_AmbientOcclusionPrepassPipelines[1])
 			return std::unexpected(MakeResourceError("SSAO normal-depth pipeline is not available for the prepared mesh layout"));
 
 		const glm::mat4 InverseProjection = glm::inverse(m_PreparedSnapshot->Projection);
@@ -1856,6 +1993,14 @@ namespace PulseForge
 		RenderTargetFrameScope PrepassScope(m_Runtime);
 		for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
 		{
+			auto Material = ResolveMaterialDescription(Instance);
+			if (!Material)
+				return std::unexpected(std::move(Material.error()));
+			if ((*Material)->AlphaMode == MaterialAlphaMode::Blend)
+				continue;
+			auto MaterialBinding = ResolveMaterialBinding(Instance);
+			if (!MaterialBinding)
+				return std::unexpected(std::move(MaterialBinding.error()));
 			auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
 			if (!Mesh)
 				return std::unexpected(MakeDrawError("SSAO prepass mesh became unavailable: " + Mesh.error().Message));
@@ -1870,8 +2015,10 @@ namespace PulseForge
 				std::as_bytes(std::span(&Object, 1)));
 			if (!Update)
 				return std::unexpected(MakeDrawError("Could not update SSAO object constants: " + Update.error().Message));
-			const std::array<const BindingSet*, 1> Bindings = { m_AmbientOcclusionPrepassBindingSet.get() };
-			const GraphicsResult Draw = m_Runtime.DrawIndexed(*m_AmbientOcclusionPrepassPipeline, Mesh->get(),
+			const std::array<const BindingSet*, 2> Bindings = {
+				(*MaterialBinding)->BindingSet.get(), m_AmbientOcclusionPrepassBindingSet.get() };
+			const size_t PipelineIndex = (*Material)->DoubleSided ? 1u : 0u;
+			const GraphicsResult Draw = m_Runtime.DrawIndexed(*m_AmbientOcclusionPrepassPipelines[PipelineIndex], Mesh->get(),
 				{ Mesh->get().GetIndexCount(), 1, 0, 0 }, Bindings);
 			if (!Draw)
 				return std::unexpected(MakeDrawError("Could not draw SSAO normal-depth prepass: " + Draw.error().Message));
@@ -2294,11 +2441,6 @@ namespace PulseForge
 		if (m_PreparedSnapshot->EnvironmentLight)
 			if (auto Pipeline = EnsureBackgroundPipeline(ColorFormat); !Pipeline)
 				return std::unexpected(std::move(Pipeline.error()));
-		if (!m_PreparedSnapshot->Meshes.empty())
-			if (auto Pipeline = EnsurePipeline(ColorFormat); !Pipeline)
-				return std::unexpected(std::move(Pipeline.error()));
-		const GraphicsPipeline* ScenePipeline = m_PreparedSnapshot->Meshes.empty() ? nullptr : m_Pipelines.at(ColorFormat).get();
-
 		size_t SubmittedDraws = 0;
 		FrameConstants Frame{};
 		Frame.CameraWorldPosition[0] = m_PreparedSnapshot->CameraWorldPosition.x;
@@ -2376,33 +2518,30 @@ namespace PulseForge
 			if (!BackgroundDraw)
 				return std::unexpected(MakeDrawError("Could not draw environment background: " + BackgroundDraw.error().Message));
 		}
-		if (!ScenePipeline)
+		if (m_PreparedSnapshot->Meshes.empty())
 			return size_t{ 0 };
 
-		for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
+		const auto DrawMaterialInstance = [this, ColorFormat, &SubmittedDraws](
+			const SceneMeshInstance& Instance,
+			const MaterialAssetDesc& Material) -> std::expected<void, SceneRendererError>
 		{
+			const bool AlphaBlend = Material.AlphaMode == MaterialAlphaMode::Blend;
+			if (auto PipelineResult = EnsurePipeline(ColorFormat, AlphaBlend, Material.DoubleSided); !PipelineResult)
+				return std::unexpected(std::move(PipelineResult.error()));
+			const auto Pipeline = m_Pipelines.find(std::tuple{ ColorFormat, AlphaBlend, Material.DoubleSided });
+			if (Pipeline == m_Pipelines.end())
+				return std::unexpected(MakeResourceError("Prepared material graphics pipeline is unavailable"));
+			auto MaterialBinding = ResolveMaterialBinding(Instance);
+			if (!MaterialBinding)
+				return std::unexpected(std::move(MaterialBinding.error()));
 			auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
-			if (!Mesh || !Instance.MaterialAsset)
+			if (!Mesh)
 			{
 				return std::unexpected(SceneRendererError{
 					SceneRendererErrorCode::AssetLoadFailed,
 					Instance.Entity,
 					Instance.MeshAsset,
-					Mesh ? "Prepared mesh instance lost its material assignment" : "Prepared mesh resource is unavailable"
-				});
-			}
-			const std::optional<AssetID> EnvironmentAsset = m_PreparedSnapshot->EnvironmentLight
-				? std::optional<AssetID>{ m_PreparedSnapshot->EnvironmentLight->HdrImage }
-				: std::nullopt;
-			const std::optional<AssetID> BindingEnvironmentAsset = m_PreparedEnvironmentReady ? EnvironmentAsset : std::nullopt;
-			const auto Binding = m_MaterialBindings.find(MakeMaterialBindingKey(*Instance.MaterialAsset, BindingEnvironmentAsset));
-			if (Binding == m_MaterialBindings.end())
-			{
-				return std::unexpected(SceneRendererError{
-					SceneRendererErrorCode::AssetLoadFailed,
-					Instance.Entity,
-					*Instance.MaterialAsset,
-					"Prepared material binding set is unavailable"
+					"Prepared mesh resource is unavailable"
 				});
 			}
 
@@ -2436,9 +2575,9 @@ namespace PulseForge
 				? m_AmbientOcclusionFinalBindingSet.get()
 				: m_AmbientOcclusionFallbackBindingSet.get();
 			const std::array<const BindingSet*, 5> BindingSets = {
-				Binding->second.BindingSet.get(), m_ShadowBindingSet.get(), AmbientOcclusionBindings,
+				(*MaterialBinding)->BindingSet.get(), m_ShadowBindingSet.get(), AmbientOcclusionBindings,
 				m_SpotShadowBindingSet.get(), m_PointShadowBindingSet.get() };
-			const GraphicsResult Draw = m_Runtime.DrawIndexed(*ScenePipeline, Mesh->get(), Arguments, BindingSets);
+			const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline->second, Mesh->get(), Arguments, BindingSets);
 			if (!Draw)
 			{
 				return std::unexpected(SceneRendererError{
@@ -2449,6 +2588,45 @@ namespace PulseForge
 				});
 			}
 			++SubmittedDraws;
+			return {};
+		};
+
+		m_TransparentDrawOrder.clear();
+		m_TransparentDrawOrder.reserve(std::max(m_TransparentDrawOrder.capacity(), m_PreparedSnapshot->Meshes.size()));
+		for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
+		{
+			auto Material = ResolveMaterialDescription(Instance);
+			if (!Material)
+				return std::unexpected(std::move(Material.error()));
+			if ((*Material)->AlphaMode == MaterialAlphaMode::Blend)
+			{
+				m_TransparentDrawOrder.push_back(&Instance);
+				continue;
+			}
+			if (auto Draw = DrawMaterialInstance(Instance, **Material); !Draw)
+				return std::unexpected(std::move(Draw.error()));
+		}
+		const auto CameraDepth = [this](const SceneMeshInstance* Instance)
+		{
+			const glm::vec3 WorldOrigin = glm::vec3(Instance->WorldTransform[3]);
+			return -(m_PreparedSnapshot->View * glm::vec4(WorldOrigin, 1.0f)).z;
+		};
+		std::sort(m_TransparentDrawOrder.begin(), m_TransparentDrawOrder.end(),
+			[&CameraDepth](const SceneMeshInstance* Left, const SceneMeshInstance* Right)
+			{
+				const float LeftDepth = CameraDepth(Left);
+				const float RightDepth = CameraDepth(Right);
+				if (LeftDepth != RightDepth)
+					return LeftDepth > RightDepth;
+				return Left->Entity < Right->Entity;
+			});
+		for (const SceneMeshInstance* Instance : m_TransparentDrawOrder)
+		{
+			auto Material = ResolveMaterialDescription(*Instance);
+			if (!Material)
+				return std::unexpected(std::move(Material.error()));
+			if (auto Draw = DrawMaterialInstance(*Instance, **Material); !Draw)
+				return std::unexpected(std::move(Draw.error()));
 		}
 		return SubmittedDraws;
 	}

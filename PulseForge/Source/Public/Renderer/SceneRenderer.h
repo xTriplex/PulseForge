@@ -21,12 +21,14 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 
 namespace PulseForge
 {
 	class Application;
+	struct MaterialAssetDesc;
 	class MaterialAssetCache;
 	class MeshAssetCache;
 	class Project;
@@ -96,7 +98,7 @@ namespace PulseForge
 		float Strength = 1.15f;
 	};
 
-	// Runtime renderer for opaque direct-lit metallic/roughness materials. The Application and unmoved Project must outlive it.
+	// Runtime renderer for opaque, masked, and sorted alpha-blended PBR materials. The Application and unmoved Project must outlive it.
 	// Call PrepareScene before BeginFrame and RenderPreparedScene only during an active renderer frame.
 	class PULSEFORGE_API SceneRenderer final
 	{
@@ -164,7 +166,10 @@ namespace PulseForge
 			const AssetID& MaterialAsset,
 			const std::optional<AssetID>& EnvironmentAsset,
 			const EnvironmentLightingTextures& EnvironmentTextures);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePipeline(ColorTargetFormat ColorFormat);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePipeline(
+			ColorTargetFormat ColorFormat,
+			bool AlphaBlend = false,
+			bool DoubleSided = false);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBackgroundPipeline(ColorTargetFormat ColorFormat);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureHdrSceneTarget(uint32_t Width, uint32_t Height);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureToneMappingResources();
@@ -177,7 +182,7 @@ namespace PulseForge
 			uint64_t Generation,
 			ColorTargetFormat DestinationFormat,
 			bool DepthAttachmentEnabled);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureShadowPipeline(float DepthBias);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureShadowPipeline(float DepthBias, bool DoubleSided = false);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureSpotShadowResources();
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePointShadowResources();
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareLocalLighting();
@@ -203,14 +208,19 @@ namespace PulseForge
 			BufferHandle MaterialConstantsBuffer;
 			BindingSetHandle BindingSet;
 		};
+		[[nodiscard]] std::expected<const MaterialAssetDesc*, SceneRendererError> ResolveMaterialDescription(
+			const SceneMeshInstance& Instance);
+		[[nodiscard]] std::expected<const MaterialBindingResources*, SceneRendererError> ResolveMaterialBinding(
+			const SceneMeshInstance& Instance);
 
 		struct alignas(16) MaterialConstants
 		{
 			float BaseColor[4];
 			float Surface[4];
 			float Emissive[4];
+			float Alpha[4];
 		};
-		static_assert(sizeof(MaterialConstants) == 48);
+		static_assert(sizeof(MaterialConstants) == 64);
 
 		struct alignas(16) ObjectConstants
 		{
@@ -303,6 +313,7 @@ namespace PulseForge
 		ShaderHandle m_BackgroundVertexShader;
 		ShaderHandle m_BackgroundFragmentShader;
 		ShaderHandle m_ShadowVertexShader;
+		ShaderHandle m_ShadowFragmentShader;
 		ShaderHandle m_PointShadowVertexShader;
 		ShaderHandle m_PointShadowFragmentShader;
 		ShaderHandle m_AmbientOcclusionPrepassVertexShader;
@@ -341,8 +352,8 @@ namespace PulseForge
 		std::array<BindingSetHandle, 2> m_AmbientOcclusionBlurBindingSets;
 		BindingSetHandle m_AmbientOcclusionPrepassBindingSet;
 		BindingSetHandle m_ToneMappingBindingSet;
-		std::unordered_map<int32_t, GraphicsPipelineHandle> m_ShadowPipelines;
-		GraphicsPipelineHandle m_PointShadowPipeline;
+		std::map<std::pair<int32_t, bool>, GraphicsPipelineHandle> m_ShadowPipelines;
+		std::array<GraphicsPipelineHandle, 2> m_PointShadowPipelines;
 		BufferHandle m_ObjectConstantsBuffer;
 		BufferHandle m_ShadowObjectConstantsBuffer;
 		BufferHandle m_PointShadowObjectConstantsBuffer;
@@ -370,14 +381,15 @@ namespace PulseForge
 		EnvironmentLightingTextures m_FallbackEnvironmentTextures;
 		std::unordered_map<std::string, MaterialBindingResources> m_MaterialBindings;
 		std::unordered_map<std::string, BindingSetHandle> m_EnvironmentBindingSets;
-		std::unordered_map<ColorTargetFormat, GraphicsPipelineHandle> m_Pipelines;
+		std::map<std::tuple<ColorTargetFormat, bool, bool>, GraphicsPipelineHandle> m_Pipelines;
 		std::unordered_map<ColorTargetFormat, GraphicsPipelineHandle> m_BackgroundPipelines;
 		std::map<std::pair<ColorTargetFormat, bool>, GraphicsPipelineHandle> m_ToneMappingPipelines;
-		GraphicsPipelineHandle m_AmbientOcclusionPrepassPipeline;
+		std::array<GraphicsPipelineHandle, 2> m_AmbientOcclusionPrepassPipelines;
 		GraphicsPipelineHandle m_AmbientOcclusionPipeline;
 		GraphicsPipelineHandle m_AmbientOcclusionBlurPipeline;
 		std::optional<VertexLayoutDesc> m_PipelineVertexLayout;
 		std::optional<SceneRenderSnapshot> m_PreparedSnapshot;
+		std::vector<const SceneMeshInstance*> m_TransparentDrawOrder;
 		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
 		std::array<SelectedLocalLight, MaxLocalLightCount> m_SelectedLocalLights{};
 		std::array<std::optional<UUID>, MaxSpotlightShadowMapCount> m_SpotShadowSlotOwners{};

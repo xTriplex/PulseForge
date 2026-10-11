@@ -16,7 +16,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t MaterialFormatVersion = 3;
+		constexpr int64_t MaterialFormatVersion = 4;
 		constexpr size_t MaximumMaterialFileSize = 1024 * 1024;
 		constexpr std::string_view MaterialFormatName = "PulseForgeMaterial";
 
@@ -68,6 +68,12 @@ namespace PulseForge
 			Description.OcclusionStrength < 0.0f || Description.OcclusionStrength > 1.0f)
 			return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDescription,
 				"Occlusion strength must be a finite value in the range [0, 1]"));
+		if (Description.AlphaMode != MaterialAlphaMode::Opaque && Description.AlphaMode != MaterialAlphaMode::Mask &&
+			Description.AlphaMode != MaterialAlphaMode::Blend)
+			return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDescription, "Material alpha mode is unsupported"));
+		if (!std::isfinite(Description.AlphaCutoff) || Description.AlphaCutoff < 0.0f || Description.AlphaCutoff > 1.0f)
+			return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDescription,
+				"Alpha cutoff must be a finite value in the range [0, 1]"));
 		for (int Component = 0; Component < 3; ++Component)
 		{
 			const float Value = Description.EmissiveFactor[Component];
@@ -113,6 +119,10 @@ namespace PulseForge
 				Material.EmissiveFactor.g,
 				Material.EmissiveFactor.b
 			};
+			Document["alphaMode"] = Material.AlphaMode == MaterialAlphaMode::Mask ? "MASK" :
+				Material.AlphaMode == MaterialAlphaMode::Blend ? "BLEND" : "OPAQUE";
+			Document["alphaCutoff"] = Material.AlphaCutoff;
+			Document["doubleSided"] = Material.DoubleSided;
 			return Document.dump(2) + "\n";
 		}
 		catch (const std::exception& Exception)
@@ -244,6 +254,37 @@ namespace PulseForge
 								"emissiveFactor must contain numeric values"));
 						Material.EmissiveFactor[static_cast<int>(Component)] = (*Emissive)[Component].get<float>();
 					}
+				}
+			}
+			if (DocumentVersion >= 4)
+			{
+				if (const auto AlphaMode = Document.find("alphaMode"); AlphaMode != Document.end())
+				{
+					if (!AlphaMode->is_string())
+						return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument,
+							"alphaMode must be OPAQUE, MASK, or BLEND"));
+					const std::string Value = AlphaMode->get<std::string>();
+					if (Value == "OPAQUE")
+						Material.AlphaMode = MaterialAlphaMode::Opaque;
+					else if (Value == "MASK")
+						Material.AlphaMode = MaterialAlphaMode::Mask;
+					else if (Value == "BLEND")
+						Material.AlphaMode = MaterialAlphaMode::Blend;
+					else
+						return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument,
+							"alphaMode must be OPAQUE, MASK, or BLEND"));
+				}
+				if (const auto AlphaCutoff = Document.find("alphaCutoff"); AlphaCutoff != Document.end())
+				{
+					if (!AlphaCutoff->is_number())
+						return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument, "alphaCutoff must be numeric"));
+					Material.AlphaCutoff = AlphaCutoff->get<float>();
+				}
+				if (const auto DoubleSided = Document.find("doubleSided"); DoubleSided != Document.end())
+				{
+					if (!DoubleSided->is_boolean())
+						return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument, "doubleSided must be a boolean"));
+					Material.DoubleSided = DoubleSided->get<bool>();
 				}
 			}
 

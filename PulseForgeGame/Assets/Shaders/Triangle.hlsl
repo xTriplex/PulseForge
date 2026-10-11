@@ -3,6 +3,7 @@ cbuffer Material : register(b0)
 	float4 BaseColorFactor;
 	float4 SurfaceParameters; // metallic, roughness, normal scale, occlusion strength
 	float4 EmissiveFactor;
+	float4 AlphaParameters; // mode: 0 opaque, 1 mask, 2 blend; cutoff; double-sided; unused
 };
 
 cbuffer Object : register(b1)
@@ -233,7 +234,7 @@ float PointShadowVisibility(uint ShadowIndex, float3 WorldPosition, float3 Norma
 struct VertexInput
 {
 	[[vk::location(0)]] float3 Position : POSITION;
-	[[vk::location(1)]] float3 Color : COLOR0;
+	[[vk::location(1)]] float4 Color : COLOR0;
 	[[vk::location(2)]] float2 TexCoord : TEXCOORD0;
 	[[vk::location(3)]] float3 Normal : NORMAL;
 	[[vk::location(4)]] float4 Tangent : TANGENT;
@@ -242,7 +243,7 @@ struct VertexInput
 struct VertexOutput
 {
 	float4 Position : SV_Position;
-	[[vk::location(0)]] float3 Color : COLOR0;
+	[[vk::location(0)]] float4 Color : COLOR0;
 	[[vk::location(1)]] float2 TexCoord : TEXCOORD0;
 	[[vk::location(2)]] float3 WorldPosition : TEXCOORD1;
 	[[vk::location(3)]] float3 Normal : TEXCOORD2;
@@ -307,24 +308,30 @@ VertexOutput VSMain(VertexInput Input)
 	return Output;
 }
 
-float4 PSMain(VertexOutput Input) : SV_Target0
+float4 PSMain(VertexOutput Input, bool IsFrontFace : SV_IsFrontFace) : SV_Target0
 {
 	const float4 BaseColorSample = DiffuseTexture.Sample(DiffuseSampler, Input.TexCoord);
+	const float Alpha = BaseColorFactor.a * BaseColorSample.a * Input.Color.a;
+	if (AlphaParameters.x > 0.5f && AlphaParameters.x < 1.5f && Alpha < AlphaParameters.y)
+		discard;
 	const float4 MetallicRoughnessSample = MetallicRoughnessTexture.Sample(DiffuseSampler, Input.TexCoord);
-	const float3 Albedo = max(Input.Color * BaseColorSample.rgb * BaseColorFactor.rgb, 0.0f);
+	const float3 Albedo = max(Input.Color.rgb * BaseColorSample.rgb * BaseColorFactor.rgb, 0.0f);
 	const float Metallic = saturate(SurfaceParameters.x * MetallicRoughnessSample.b);
 	const float Roughness = clamp(SurfaceParameters.y * MetallicRoughnessSample.g, 0.045f, 1.0f);
 	const float3 GeometricNormal = SafeNormalize(Input.Normal, float3(0.0f, 0.0f, 1.0f));
-	float3 Tangent = Input.Tangent.xyz - GeometricNormal * dot(GeometricNormal, Input.Tangent.xyz);
+	const float3 OrientedGeometricNormal = AlphaParameters.z > 0.5f && !IsFrontFace
+		? -GeometricNormal
+		: GeometricNormal;
+	float3 Tangent = Input.Tangent.xyz - OrientedGeometricNormal * dot(OrientedGeometricNormal, Input.Tangent.xyz);
 	Tangent = SafeNormalize(Tangent, float3(1.0f, 0.0f, 0.0f));
-	const float3 Bitangent = SafeNormalize(cross(GeometricNormal, Tangent) * Input.Tangent.w,
+	const float3 Bitangent = SafeNormalize(cross(OrientedGeometricNormal, Tangent) * Input.Tangent.w,
 		float3(0.0f, 1.0f, 0.0f));
 	float3 TangentNormal = NormalTexture.Sample(DiffuseSampler, Input.TexCoord).xyz * 2.0f - 1.0f;
 	TangentNormal.xy *= SurfaceParameters.z;
 	TangentNormal = SafeNormalize(TangentNormal, float3(0.0f, 0.0f, 1.0f));
 	const float3 N = SafeNormalize(
-		Tangent * TangentNormal.x + Bitangent * TangentNormal.y + GeometricNormal * TangentNormal.z,
-		GeometricNormal);
+		Tangent * TangentNormal.x + Bitangent * TangentNormal.y + OrientedGeometricNormal * TangentNormal.z,
+		OrientedGeometricNormal);
 	const float3 V = SafeNormalize(CameraWorldPosition.xyz - Input.WorldPosition, float3(0.0f, 0.0f, 1.0f));
 	const float3 L = SafeNormalize(-LightRayDirection.xyz, float3(0.0f, 0.0f, 1.0f));
 	const float NdotV = max(dot(N, V), 1.0e-4f);
@@ -390,5 +397,5 @@ float4 PSMain(VertexOutput Input) : SV_Target0
 	const float3 EnvironmentIbl = (DiffuseIbl * DiffuseOcclusion + SpecularIbl * SpecularOcclusion) * EnvironmentParameters.x;
 	const float3 Emissive = EmissiveTexture.Sample(DiffuseSampler, Input.TexCoord).rgb * EmissiveFactor.rgb;
 	const float3 Color = DirectionalColor + LocalDirectColor + EnvironmentIbl + Emissive;
-	return float4(Color, BaseColorFactor.a * BaseColorSample.a);
+	return float4(Color, Alpha);
 }

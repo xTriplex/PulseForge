@@ -16,7 +16,7 @@ namespace PulseForge
 	struct GltfMeshVertex
 	{
 		float Position[3]{};
-		float Color[3]{ 1.0f, 1.0f, 1.0f };
+		float Color[4]{ 1.0f, 1.0f, 1.0f, 1.0f };
 		float TexCoord[2]{};
 		float Normal[3]{ 0.0f, 0.0f, 1.0f };
 		std::array<float, 4> Tangent{ 1.0f, 0.0f, 0.0f, 1.0f };

@@ -7,7 +7,8 @@ namespace PulseForge::VulkanSupport
 {
 	bool SupportsRequiredDeviceFeatures(const RequiredDeviceFeatures& Features)
 	{
-		return Features.TimelineSemaphore && Features.Synchronization2 && Features.DynamicRendering;
+		return Features.TimelineSemaphore && Features.Synchronization2 && Features.DynamicRendering &&
+			Features.ShaderDemoteToHelperInvocation;
 	}
 
 	bool SupportsFormatUsage(

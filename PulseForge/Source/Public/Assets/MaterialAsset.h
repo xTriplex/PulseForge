@@ -14,6 +14,13 @@
 
 namespace PulseForge
 {
+	enum class MaterialAlphaMode : uint8_t
+	{
+		Opaque,
+		Mask,
+		Blend
+	};
+
 	struct MaterialAssetDesc
 	{
 		// Optional maps use nil AssetIDs and shader fallbacks when absent.
@@ -28,6 +35,9 @@ namespace PulseForge
 		float NormalScale = 1.0f;
 		float OcclusionStrength = 1.0f;
 		glm::vec3 EmissiveFactor{ 0.0f };
+		MaterialAlphaMode AlphaMode = MaterialAlphaMode::Opaque;
+		float AlphaCutoff = 0.5f;
+		bool DoubleSided = false;
 	};
 
 	enum class MaterialAssetErrorCode : uint8_t

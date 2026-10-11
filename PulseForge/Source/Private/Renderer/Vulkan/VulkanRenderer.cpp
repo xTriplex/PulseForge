@@ -1708,6 +1708,7 @@ namespace PulseForge
 					case CullMode::Front: Rasterizer.setCullFront(); break;
 				}
 				Rasterizer
+					.setFrontCounterClockwise(true)
 					.setFillMode(Description.Rasterizer.Wireframe
 						? nvrhi::RasterFillMode::Wireframe
 						: nvrhi::RasterFillMode::Solid)
@@ -2253,7 +2254,8 @@ namespace PulseForge
 			const VulkanSupport::RequiredDeviceFeatures RequiredFeatures{
 				Supported12.timelineSemaphore == VK_TRUE,
 				Supported13.synchronization2 == VK_TRUE,
-				Supported13.dynamicRendering == VK_TRUE
+				Supported13.dynamicRendering == VK_TRUE,
+				Supported13.shaderDemoteToHelperInvocation == VK_TRUE
 			};
 			if (!VulkanSupport::SupportsRequiredDeviceFeatures(RequiredFeatures))
 				return std::nullopt;
@@ -2332,7 +2334,8 @@ namespace PulseForge
 			vk::PhysicalDeviceVulkan13Features Enabled13;
 			Enabled13
 				.setSynchronization2(VK_TRUE)
-				.setDynamicRendering(VK_TRUE);
+				.setDynamicRendering(VK_TRUE)
+				.setShaderDemoteToHelperInvocation(VK_TRUE);
 			Enabled12.setPNext(&Enabled13);
 
 			std::vector<const char*> DeviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };

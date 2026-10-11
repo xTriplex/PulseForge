@@ -3494,7 +3494,7 @@ namespace
 		PF_CHECK(Tests, Deserialized && glm::all(glm::equal(Deserialized->BaseColorFactor, Description.BaseColorFactor)));
 		PF_CHECK(Tests, Deserialized && Deserialized->MetallicFactor == Description.MetallicFactor &&
 			Deserialized->RoughnessFactor == Description.RoughnessFactor);
-		PF_CHECK(Tests, Serialized && Serialized->find("\"version\": 3") != std::string::npos);
+		PF_CHECK(Tests, Serialized && Serialized->find("\"version\": 4") != std::string::npos);
 		const std::string Version1Document = "{\"format\":\"PulseForgeMaterial\",\"version\":1,\"baseColorTexture\":\"" +
 			TextureAsset->ToString() + "\",\"baseColorFactor\":[1,1,1,1]}";
 		const auto Version1Material = MaterialAssetSerializer::Deserialize(Version1Document);
@@ -3505,6 +3505,10 @@ namespace
 		const auto Version2Material = MaterialAssetSerializer::Deserialize(Version2Document);
 		PF_CHECK(Tests, Version2Material && Version2Material->MetallicFactor == 0.4f &&
 			Version2Material->RoughnessFactor == 0.6f && Version2Material->NormalTexture.IsNil());
+		const std::string Version3Document = "{\"format\":\"PulseForgeMaterial\",\"version\":3,\"baseColorFactor\":[1,1,1,1],\"baseColorTexture\":null,\"metallicFactor\":0.4,\"roughnessFactor\":0.6}";
+		const auto Version3Material = MaterialAssetSerializer::Deserialize(Version3Document);
+		PF_CHECK(Tests, Version3Material && Version3Material->AlphaMode == MaterialAlphaMode::Opaque &&
+			Version3Material->AlphaCutoff == 0.5f && !Version3Material->DoubleSided);
 		MaterialAssetDesc TexturedDescription = Description;
 		TexturedDescription.BaseColorTexture = {};
 		TexturedDescription.MetallicRoughnessTexture = *TextureAsset;
@@ -3514,6 +3518,9 @@ namespace
 		TexturedDescription.NormalScale = 0.75f;
 		TexturedDescription.OcclusionStrength = 0.35f;
 		TexturedDescription.EmissiveFactor = { 0.5f, 1.25f, 2.0f };
+		TexturedDescription.AlphaMode = MaterialAlphaMode::Mask;
+		TexturedDescription.AlphaCutoff = 0.42f;
+		TexturedDescription.DoubleSided = true;
 		const auto TexturedSerialized = MaterialAssetSerializer::Serialize(TexturedDescription);
 		PF_CHECK(Tests, TexturedSerialized.has_value());
 		if (!TexturedSerialized)
@@ -3527,6 +3534,19 @@ namespace
 		PF_CHECK(Tests, TexturedDeserialized && TexturedDeserialized->NormalScale == 0.75f &&
 			TexturedDeserialized->OcclusionStrength == 0.35f &&
 			glm::all(glm::equal(TexturedDeserialized->EmissiveFactor, TexturedDescription.EmissiveFactor)));
+		PF_CHECK(Tests, TexturedDeserialized && TexturedDeserialized->AlphaMode == MaterialAlphaMode::Mask &&
+			TexturedDeserialized->AlphaCutoff == 0.42f && TexturedDeserialized->DoubleSided);
+		MaterialAssetDesc BlendDescription = Description;
+		BlendDescription.AlphaMode = MaterialAlphaMode::Blend;
+		const auto BlendSerialized = MaterialAssetSerializer::Serialize(BlendDescription);
+		PF_CHECK(Tests, BlendSerialized.has_value());
+		if (BlendSerialized)
+		{
+			const auto BlendDeserialized = MaterialAssetSerializer::Deserialize(*BlendSerialized);
+			PF_CHECK(Tests, BlendDeserialized && BlendDeserialized->AlphaMode == MaterialAlphaMode::Blend);
+		}
+		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize(
+			"{\"format\":\"PulseForgeMaterial\",\"version\":4,\"baseColorFactor\":[1,1,1,1],\"alphaMode\":\"HASH\"}"));
 		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize(
 			"{\"format\":\"PulseForgeMaterial\",\"version\":3,\"baseColorFactor\":[1,1,1,1],\"normalTexture\":7}"));
 		std::string InvalidMetallicDocument = *Serialized;
@@ -3564,6 +3584,14 @@ namespace
 		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
 		InvalidFactor = Description;
 		InvalidFactor.OcclusionStrength = std::numeric_limits<float>::quiet_NaN();
+		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
+		InvalidFactor = Description;
+		InvalidFactor.AlphaCutoff = std::numeric_limits<float>::infinity();
+		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
+		InvalidFactor.AlphaCutoff = -0.01f;
+		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
+		InvalidFactor = Description;
+		InvalidFactor.AlphaMode = static_cast<MaterialAlphaMode>(0xff);
 		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
 		InvalidFactor = Description;
 		InvalidFactor.EmissiveFactor.g = -0.01f;
@@ -4657,6 +4685,74 @@ end
 			PF_CHECK(Tests, Vertex.Tangent[3] == 1.0f);
 		}
 		PF_CHECK(Tests, ValidateMeshDescription(Imported->GetMeshDescription()).has_value());
+
+		const std::filesystem::path VertexAlphaPath = ModelDirectory / "VertexColorAlpha.gltf";
+		const std::filesystem::path VertexAlphaBufferPath = ModelDirectory / "VertexColorAlpha.bin";
+		const std::string VertexAlphaDocument = R"({
+			"asset":{"version":"2.0"},
+			"buffers":[{"uri":"VertexColorAlpha.bin","byteLength":114}],
+			"bufferViews":[
+				{"buffer":0,"byteOffset":0,"byteLength":36},
+				{"buffer":0,"byteOffset":36,"byteLength":24},
+				{"buffer":0,"byteOffset":60,"byteLength":48},
+				{"buffer":0,"byteOffset":108,"byteLength":6}],
+			"accessors":[
+				{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},
+				{"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"},
+				{"bufferView":2,"componentType":5126,"count":3,"type":"VEC4"},
+				{"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"}],
+			"meshes":[{"name":"Vertex alpha","primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1,"COLOR_0":2},"indices":3}]}]
+		})";
+		{
+			std::ofstream Output(VertexAlphaPath, std::ios::binary | std::ios::trunc);
+			Output.write(VertexAlphaDocument.data(), static_cast<std::streamsize>(VertexAlphaDocument.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		std::vector<std::byte> VertexAlphaBytes;
+		const auto AppendVertexAlphaFloat = [&VertexAlphaBytes](float Value)
+		{
+			const uint32_t Bits = std::bit_cast<uint32_t>(Value);
+			for (size_t Byte = 0; Byte < sizeof(Bits); ++Byte)
+				VertexAlphaBytes.push_back(static_cast<std::byte>((Bits >> (Byte * 8)) & 0xff));
+		};
+		for (const float Value : { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f })
+			AppendVertexAlphaFloat(Value);
+		for (const float Value : { 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f })
+			AppendVertexAlphaFloat(Value);
+		for (const float Value : {
+			1.0f, 1.0f, 1.0f, 0.0f,
+			0.5f, 0.75f, 1.0f, 0.5f,
+			0.25f, 0.5f, 0.75f, 1.0f })
+			AppendVertexAlphaFloat(Value);
+		for (const uint16_t Value : { 0, 1, 2 })
+		{
+			VertexAlphaBytes.push_back(static_cast<std::byte>(Value & 0xff));
+			VertexAlphaBytes.push_back(static_cast<std::byte>(Value >> 8));
+		}
+		PF_CHECK(Tests, VertexAlphaBytes.size() == 114);
+		{
+			std::ofstream Output(VertexAlphaBufferPath, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(VertexAlphaBytes.data()),
+				static_cast<std::streamsize>(VertexAlphaBytes.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto VertexAlphaMetadata = AssetMetadataSerializer::CreateForNewAsset(VertexAlphaPath);
+		const auto VertexAlphaBufferMetadata = AssetMetadataSerializer::CreateForNewAsset(VertexAlphaBufferPath);
+		PF_CHECK(Tests, VertexAlphaMetadata.has_value() && VertexAlphaBufferMetadata.has_value());
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		if (VertexAlphaMetadata)
+		{
+			const auto VertexAlpha = GltfMeshImporter::ImportStaticPrimitive(VertexAlphaMetadata->ID, ProjectRoot, Registry);
+			PF_CHECK(Tests, VertexAlpha.has_value());
+			if (VertexAlpha)
+			{
+				PF_CHECK(Tests, VertexAlpha->Vertices[0].Color[3] == 0.0f);
+				PF_CHECK(Tests, VertexAlpha->Vertices[1].Color[0] == 0.5f && VertexAlpha->Vertices[1].Color[1] == 0.75f &&
+					VertexAlpha->Vertices[1].Color[3] == 0.5f);
+				PF_CHECK(Tests, VertexAlpha->Vertices[2].Color[3] == 1.0f);
+				PF_CHECK(Tests, VertexAlpha->GetMeshDescription().VertexLayout.Attributes[1].Format == VertexFormat::Float4);
+			}
+		}
 
 		const std::filesystem::path AuthoredTangentPath = ModelDirectory / "AuthoredTangent.gltf";
 		const std::filesystem::path AuthoredTangentBufferPath = ModelDirectory / "AuthoredTangent.bin";
@@ -6804,10 +6900,11 @@ end
 	void TestVulkanRequiredDeviceFeatures(TestRunner& Tests)
 	{
 		using namespace PulseForge::VulkanSupport;
-		PF_CHECK(Tests, SupportsRequiredDeviceFeatures({ true, true, true }));
-		PF_CHECK(Tests, !SupportsRequiredDeviceFeatures({ false, true, true }));
-		PF_CHECK(Tests, !SupportsRequiredDeviceFeatures({ true, false, true }));
-		PF_CHECK(Tests, !SupportsRequiredDeviceFeatures({ true, true, false }));
+		PF_CHECK(Tests, SupportsRequiredDeviceFeatures({ true, true, true, true }));
+		PF_CHECK(Tests, !SupportsRequiredDeviceFeatures({ false, true, true, true }));
+		PF_CHECK(Tests, !SupportsRequiredDeviceFeatures({ true, false, true, true }));
+		PF_CHECK(Tests, !SupportsRequiredDeviceFeatures({ true, true, false, true }));
+		PF_CHECK(Tests, !SupportsRequiredDeviceFeatures({ true, true, true, false }));
 	}
 
 	void TestVulkanFormatUsageCapabilities(TestRunner& Tests)

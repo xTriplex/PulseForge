@@ -1154,7 +1154,7 @@ namespace PulseForge
 		Description.VertexLayout.Stride = sizeof(GltfMeshVertex);
 		Description.VertexLayout.Attributes = {
 			{ VertexSemantic::Position, VertexFormat::Float3, offsetof(GltfMeshVertex, Position) },
-			{ VertexSemantic::Color, VertexFormat::Float3, offsetof(GltfMeshVertex, Color) },
+			{ VertexSemantic::Color, VertexFormat::Float4, offsetof(GltfMeshVertex, Color) },
 			{ VertexSemantic::TexCoord, VertexFormat::Float2, offsetof(GltfMeshVertex, TexCoord) },
 			{ VertexSemantic::Normal, VertexFormat::Float3, offsetof(GltfMeshVertex, Normal) },
 			{ VertexSemantic::Tangent, VertexFormat::Float4, offsetof(GltfMeshVertex, Tangent) }
@@ -1414,7 +1414,7 @@ namespace PulseForge
 					return std::unexpected(std::move(Colors.error()));
 				for (size_t VertexIndex = 0; VertexIndex < Positions->Count; ++VertexIndex)
 				{
-					for (size_t Component = 0; Component < 3; ++Component)
+					for (size_t Component = 0; Component < Colors->ComponentCount; ++Component)
 					{
 						auto Value = ReadFloatComponent(*Colors, VertexIndex, Component, *Source);
 						if (!Value)

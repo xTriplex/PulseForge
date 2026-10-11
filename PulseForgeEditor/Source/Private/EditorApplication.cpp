@@ -4752,6 +4752,20 @@ namespace
 			{
 				if (m_EditorStyle.BeginPropertyRow("Base Color Factor"))
 					Changed |= ImGui::DragFloat4("##MaterialBaseColorFactor", &Material.BaseColorFactor.x, 0.01f, 0.0f, 1.0f, "%.3f");
+				if (m_EditorStyle.BeginPropertyRow("Alpha Mode"))
+				{
+					int AlphaMode = static_cast<int>(Material.AlphaMode);
+					if (ImGui::Combo("##MaterialAlphaMode", &AlphaMode, "Opaque\0Mask\0Blend\0"))
+					{
+						Material.AlphaMode = static_cast<PulseForge::MaterialAlphaMode>(AlphaMode);
+						Changed = true;
+					}
+				}
+				if (Material.AlphaMode == PulseForge::MaterialAlphaMode::Mask &&
+					m_EditorStyle.BeginPropertyRow("Alpha Cutoff"))
+					Changed |= ImGui::DragFloat("##MaterialAlphaCutoff", &Material.AlphaCutoff, 0.01f, 0.0f, 1.0f, "%.3f");
+				if (m_EditorStyle.BeginPropertyRow("Double Sided"))
+					Changed |= ImGui::Checkbox("##MaterialDoubleSided", &Material.DoubleSided);
 				if (m_EditorStyle.BeginPropertyRow("Base Color Texture"))
 				{
 					std::optional<PulseForge::AssetID> Texture = Material.BaseColorTexture.IsNil()
@@ -4825,6 +4839,7 @@ namespace
 			if (Changed)
 				m_DirtyMaterialDrafts.insert(Key);
 			m_EditorStyle.TextMuted("Base color and emissive maps use sRGB; normal, metallic-roughness and occlusion maps use linear data.");
+			m_EditorStyle.TextMuted("Mask clips below Alpha Cutoff and casts cutout shadows. Blend is sorted back-to-front and does not cast shadows.");
 			if (m_DirtyMaterialDrafts.contains(Key))
 			{
 				m_EditorStyle.TextMuted("Unsaved material draft");
