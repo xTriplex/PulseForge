@@ -20,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -132,6 +133,15 @@ namespace PulseForge
 			const glm::vec3& CameraWorldPosition,
 			float NearClipPlane,
 			float FarClipPlane);
+		// Excludes editor-hidden entities and their render contributions without changing authored/runtime scene state.
+		[[nodiscard]] std::expected<void, SceneRendererError> PrepareSceneFiltered(
+			const Scene& Source,
+			const glm::mat4& View,
+			const glm::mat4& Projection,
+			const glm::vec3& CameraWorldPosition,
+			float NearClipPlane,
+			float FarClipPlane,
+			std::span<const UUID> ExcludedEntities);
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene();
 		// Begins, clears, renders to, and ends Target during the active Application frame.
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene(

@@ -22,6 +22,7 @@ For downloaded or third-party content, verify the actual source, author, redistr
 | [`Point Light Shadows`](../Samples/VisualValidation/PointLightShadows/README.md) | Omnidirectional point-light shadows, six cube faces, face boundaries, bias/softness, multiple lights, and the two-map limit. | Startup Overview plus Faces, Bias, and Limits scenes; interactive visual acceptance is requested in its README. |
 | [`PBR Materials`](../Samples/VisualValidation/PBRMaterials/README.md) | Textured base color, packed metallic-roughness, tangent-space normal mapping, material occlusion, HDR emission, and the material asset editor. | Startup workbench has seven indexed meshes; Debug GPU validation loads the project and captures an inspected 960×540 sRGB output image. |
 | [`Transparency`](../Samples/VisualValidation/Transparency/README.md) | OPAQUE, alpha-masked, and straight-alpha BLEND materials; double-sided shading; and cutout shadows. | Startup workbench includes a cutout fence and transparent colored panels; Vulkan image validation compares masked spotlight, point-light, and directional shadows. |
+| [`Editor Workflow`](../Samples/VisualValidation/EditorWorkflow/README.md) | Editor selection, multiselection, hierarchy clipboard and duplication, visibility, focus, viewport navigation, transform snapping, and End surface placement. | Startup workbench includes flat ground, raised and sloped supports, centered-pivot objects, and a parent/child hierarchy for interactive acceptance. |
 
 ## Handoff checklist
 

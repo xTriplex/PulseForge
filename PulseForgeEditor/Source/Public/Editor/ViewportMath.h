@@ -3,6 +3,7 @@
 #include "Scene/Components/TransformComponent.h"
 #include "Scene/UUID.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -16,6 +17,11 @@
 
 namespace PulseForgeEditor
 {
+	namespace Detail
+	{
+		[[nodiscard]] inline bool IsFinite(const glm::vec3& Value);
+	}
+
 	struct ViewportImageRect
 	{
 		glm::vec2 Minimum{ 0.0f };
@@ -43,6 +49,14 @@ namespace PulseForgeEditor
 		float Distance = 0.0f;
 	};
 
+	struct SupportingSurfaceHit
+	{
+		PulseForge::UUID Entity;
+		float Distance = 0.0f;
+		glm::vec3 Position{ 0.0f };
+		glm::vec3 Normal{ 0.0f, 1.0f, 0.0f };
+	};
+
 	struct WorldGizmoAxis
 	{
 		glm::vec3 Direction{ 0.0f };
@@ -54,6 +68,14 @@ namespace PulseForgeEditor
 		glm::vec2 ScreenDirection{ 0.0f };
 		float Depth = 0.0f;
 	};
+
+	[[nodiscard]] inline std::optional<float> SnapValueToIncrement(float Value, float Increment)
+	{
+		if (!std::isfinite(Value) || !std::isfinite(Increment) || Increment <= 0.0f)
+			return std::nullopt;
+		const float Snapped = std::round(Value / Increment) * Increment;
+		return std::isfinite(Snapped) ? std::optional<float>(Snapped) : std::nullopt;
+	}
 
 	enum class TransformGizmoOperation : uint8_t
 	{
@@ -75,6 +97,7 @@ namespace PulseForgeEditor
 		bool SceneAvailable = false;
 		bool RuntimeActive = false;
 		bool CameraNavigationActive = false;
+		bool ViewportKeyboardFocused = false;
 		bool RightMouseHeld = false;
 		bool TextInputActive = false;
 		bool ActiveImGuiItem = false;
@@ -86,8 +109,17 @@ namespace PulseForgeEditor
 	[[nodiscard]] constexpr bool CanHandleViewportToolShortcuts(const ViewportShortcutContext& Context) noexcept
 	{
 		return Context.SceneAvailable && !Context.RuntimeActive && !Context.CameraNavigationActive &&
+			!Context.ViewportKeyboardFocused &&
 			!Context.RightMouseHeld && !Context.TextInputActive && !Context.ActiveImGuiItem && !Context.PopupOpen &&
 			!Context.MenuNavigationActive && !Context.ModifierHeld;
+	}
+
+	[[nodiscard]] constexpr bool CanHandleFocusedViewportToolShortcuts(
+		const ViewportShortcutContext& Context) noexcept
+	{
+		return Context.SceneAvailable && !Context.RuntimeActive && !Context.CameraNavigationActive &&
+			Context.ViewportKeyboardFocused && !Context.RightMouseHeld && !Context.TextInputActive &&
+			!Context.ActiveImGuiItem && !Context.PopupOpen && !Context.MenuNavigationActive && !Context.ModifierHeld;
 	}
 
 	[[nodiscard]] constexpr std::optional<ViewportTool> GetViewportToolForShortcut(char Key) noexcept
@@ -104,6 +136,184 @@ namespace PulseForgeEditor
 		case 'R': return ViewportTool::Scale;
 		default: return std::nullopt;
 		}
+	}
+
+	[[nodiscard]] constexpr std::optional<ViewportTool> GetFocusedViewportToolForShortcut(char Key) noexcept
+	{
+		switch (Key)
+		{
+		case '1': return ViewportTool::Select;
+		case '2': return ViewportTool::Move;
+		case '3': return ViewportTool::Rotate;
+		case '4': return ViewportTool::Scale;
+		default: return std::nullopt;
+		}
+	}
+
+	enum class ViewportKeyboardFocusEvent : uint8_t
+	{
+		NoChange,
+		RenderedImageClicked,
+		OtherEditorPanelClicked,
+		ApplicationFocusLost,
+		ViewportUnavailable,
+		PlayModeStarted
+	};
+
+	[[nodiscard]] constexpr bool ResolveViewportKeyboardFocus(
+		bool CurrentlyFocused,
+		ViewportKeyboardFocusEvent Event) noexcept
+	{
+		switch (Event)
+		{
+		case ViewportKeyboardFocusEvent::RenderedImageClicked: return true;
+		case ViewportKeyboardFocusEvent::OtherEditorPanelClicked:
+		case ViewportKeyboardFocusEvent::ApplicationFocusLost:
+		case ViewportKeyboardFocusEvent::ViewportUnavailable:
+		case ViewportKeyboardFocusEvent::PlayModeStarted: return false;
+		case ViewportKeyboardFocusEvent::NoChange: return CurrentlyFocused;
+		default: return false;
+		}
+	}
+
+	struct ViewportCameraNavigationContext
+	{
+		bool SceneAvailable = false;
+		bool RuntimeActive = false;
+		bool ViewportKeyboardFocused = false;
+		bool RightMouseNavigationActive = false;
+		bool ApplicationFocused = false;
+		bool TextInputActive = false;
+		bool ActiveImGuiItem = false;
+		bool PopupOpen = false;
+		bool MenuNavigationActive = false;
+		bool ModifierHeld = false;
+		bool GizmoInteractionActive = false;
+		bool CameraGestureActive = false;
+	};
+
+	[[nodiscard]] constexpr bool CanNavigateViewportCamera(
+		const ViewportCameraNavigationContext& Context) noexcept
+	{
+		return Context.SceneAvailable && !Context.RuntimeActive && Context.ApplicationFocused &&
+			(Context.ViewportKeyboardFocused || Context.RightMouseNavigationActive) && !Context.TextInputActive &&
+			!Context.ActiveImGuiItem && !Context.PopupOpen && !Context.MenuNavigationActive && !Context.ModifierHeld &&
+			!Context.GizmoInteractionActive && !Context.CameraGestureActive;
+	}
+
+	struct ViewportCameraMoveKeys
+	{
+		bool Forward = false;
+		bool Backward = false;
+		bool Left = false;
+		bool Right = false;
+		bool Down = false;
+		bool Up = false;
+		bool Fast = false;
+	};
+
+	[[nodiscard]] inline glm::vec3 CalculateViewportCameraMoveOffset(
+		const glm::vec3& Forward,
+		const glm::vec3& Right,
+		const ViewportCameraMoveKeys& Keys,
+		float MoveSpeed,
+		double DeltaSeconds) noexcept
+	{
+		if (!Detail::IsFinite(Forward) || !Detail::IsFinite(Right) || !std::isfinite(MoveSpeed) || MoveSpeed <= 0.0f ||
+			!std::isfinite(DeltaSeconds) || DeltaSeconds <= 0.0)
+			return glm::vec3(0.0f);
+
+		glm::vec3 Direction(0.0f);
+		if (Keys.Forward)
+			Direction += Forward;
+		if (Keys.Backward)
+			Direction -= Forward;
+		if (Keys.Right)
+			Direction += Right;
+		if (Keys.Left)
+			Direction -= Right;
+		if (Keys.Up)
+			Direction.y += 1.0f;
+		if (Keys.Down)
+			Direction.y -= 1.0f;
+		const float DirectionLength = glm::length(Direction);
+		if (!std::isfinite(DirectionLength) || DirectionLength < 1.0e-6f)
+			return glm::vec3(0.0f);
+
+		const float Step = static_cast<float>((std::min)(DeltaSeconds, 0.1));
+		const float Speed = MoveSpeed * (Keys.Fast ? 4.0f : 1.0f);
+		const glm::vec3 Offset = Direction / DirectionLength * (Speed * Step);
+		return Detail::IsFinite(Offset) ? Offset : glm::vec3(0.0f);
+	}
+
+	struct ViewportCameraDollyResult
+	{
+		glm::vec3 Position{ 0.0f };
+		glm::vec3 FocusPivot{ 0.0f };
+	};
+
+	[[nodiscard]] inline std::optional<ViewportCameraDollyResult> CalculateViewportCameraDolly(
+		const glm::vec3& Position,
+		const glm::vec3& Forward,
+		const std::optional<glm::vec3>& ExistingFocusPivot,
+		float MoveSpeed,
+		float Delta) noexcept
+	{
+		if (!Detail::IsFinite(Position) || !Detail::IsFinite(Forward) || !std::isfinite(MoveSpeed) || MoveSpeed <= 0.0f ||
+			!std::isfinite(Delta))
+			return std::nullopt;
+		const float ForwardLength = glm::length(Forward);
+		if (!std::isfinite(ForwardLength) || ForwardLength < 1.0e-6f)
+			return std::nullopt;
+
+		const glm::vec3 Direction = Forward / ForwardLength;
+		glm::vec3 Pivot = ExistingFocusPivot.value_or(Position + Direction * (std::max)(MoveSpeed * 2.0f, 1.0f));
+		if (!Detail::IsFinite(Pivot))
+			return std::nullopt;
+
+		const float CurrentDistance = glm::length(Position - Pivot);
+		if (!std::isfinite(CurrentDistance))
+			return std::nullopt;
+		const float BoundedDelta = std::clamp(Delta, -48.0f, 48.0f);
+		const float Distance = std::clamp(CurrentDistance * std::exp(-BoundedDelta * 0.12f), 0.15f, 100000.0f);
+		const glm::vec3 UpdatedPosition = Pivot - Direction * Distance;
+		if (!Detail::IsFinite(UpdatedPosition))
+			return std::nullopt;
+		return ViewportCameraDollyResult{ UpdatedPosition, Pivot };
+	}
+
+	[[nodiscard]] inline float GetViewportWheelDollyDelta(float WheelDelta) noexcept
+	{
+		return std::isfinite(WheelDelta) ? std::clamp(WheelDelta, -4.0f, 4.0f) * 1.5f : 0.0f;
+	}
+
+	enum class ViewportWheelAction : uint8_t
+	{
+		None,
+		ScrollPanel,
+		AdjustFlySpeed,
+		Zoom
+	};
+
+	struct ViewportWheelContext
+	{
+		bool PointerOverViewportImage = false;
+		bool RightMouseNavigationActive = false;
+		bool RightMouseHeld = false;
+		bool RuntimeActive = false;
+		bool PopupOpen = false;
+	};
+
+	[[nodiscard]] constexpr ViewportWheelAction ResolveViewportWheelAction(
+		const ViewportWheelContext& Context) noexcept
+	{
+		if (Context.PopupOpen)
+			return ViewportWheelAction::None;
+		if (Context.RightMouseNavigationActive && Context.RightMouseHeld && !Context.RuntimeActive)
+			return ViewportWheelAction::AdjustFlySpeed;
+		if (Context.PointerOverViewportImage && !Context.RuntimeActive && !Context.RightMouseHeld)
+			return ViewportWheelAction::Zoom;
+		return Context.PointerOverViewportImage ? ViewportWheelAction::None : ViewportWheelAction::ScrollPanel;
 	}
 
 	namespace Detail
@@ -371,6 +581,65 @@ namespace PulseForgeEditor
 		return Closest;
 	}
 
+	[[nodiscard]] inline std::optional<SupportingSurfaceHit> RaycastSupportingSurface(
+		const Ray& WorldRay,
+		std::span<const PickableMesh> Meshes,
+		float MinimumUpDot = 0.5f)
+	{
+		if (!Detail::IsFinite(WorldRay.Origin) || !Detail::IsFinite(WorldRay.Direction) ||
+			std::isnan(WorldRay.MaxDistance) || WorldRay.MaxDistance <= 0.0f ||
+			!std::isfinite(MinimumUpDot) || MinimumUpDot < 0.0f || MinimumUpDot > 1.0f)
+			return std::nullopt;
+		const float DirectionLength = glm::length(WorldRay.Direction);
+		if (!std::isfinite(DirectionLength) || DirectionLength < 1.0e-7f)
+			return std::nullopt;
+		const Ray NormalizedRay{ WorldRay.Origin, WorldRay.Direction / DirectionLength, WorldRay.MaxDistance };
+		std::optional<SupportingSurfaceHit> Closest;
+		for (const PickableMesh& Mesh : Meshes)
+		{
+			if (Mesh.Entity.IsNil() || Mesh.Positions.size() < 3 || !Detail::IsFinite(Mesh.WorldTransform))
+				continue;
+			const size_t TriangleCount = Mesh.Indices.empty() ? Mesh.Positions.size() : Mesh.Indices.size();
+			for (size_t Index = 0; Index + 2 < TriangleCount; Index += 3)
+			{
+				const uint32_t A = Mesh.Indices.empty() ? static_cast<uint32_t>(Index) : Mesh.Indices[Index];
+				const uint32_t B = Mesh.Indices.empty() ? static_cast<uint32_t>(Index + 1) : Mesh.Indices[Index + 1];
+				const uint32_t C = Mesh.Indices.empty() ? static_cast<uint32_t>(Index + 2) : Mesh.Indices[Index + 2];
+				if (A >= Mesh.Positions.size() || B >= Mesh.Positions.size() || C >= Mesh.Positions.size())
+					continue;
+				const glm::vec4 WorldA = Mesh.WorldTransform * glm::vec4(Mesh.Positions[A], 1.0f);
+				const glm::vec4 WorldB = Mesh.WorldTransform * glm::vec4(Mesh.Positions[B], 1.0f);
+				const glm::vec4 WorldC = Mesh.WorldTransform * glm::vec4(Mesh.Positions[C], 1.0f);
+				if (!std::isfinite(WorldA.w) || !std::isfinite(WorldB.w) || !std::isfinite(WorldC.w) ||
+					std::abs(WorldA.w) < 1.0e-7f || std::abs(WorldB.w) < 1.0e-7f || std::abs(WorldC.w) < 1.0e-7f)
+					continue;
+				const glm::vec3 PositionA = glm::vec3(WorldA) / WorldA.w;
+				const glm::vec3 PositionB = glm::vec3(WorldB) / WorldB.w;
+				const glm::vec3 PositionC = glm::vec3(WorldC) / WorldC.w;
+				if (!Detail::IsFinite(PositionA) || !Detail::IsFinite(PositionB) || !Detail::IsFinite(PositionC))
+					continue;
+				glm::vec3 Normal = glm::cross(PositionB - PositionA, PositionC - PositionA);
+				const float NormalLength = glm::length(Normal);
+				if (!std::isfinite(NormalLength) || NormalLength < 1.0e-7f)
+					continue;
+				Normal /= NormalLength;
+				if (Normal.y < 0.0f)
+					Normal = -Normal;
+				if (Normal.y < MinimumUpDot)
+					continue;
+				const auto Distance = Detail::IntersectTriangle(NormalizedRay, PositionA, PositionB, PositionC);
+				if (!Distance || *Distance > NormalizedRay.MaxDistance || (Closest && *Distance >= Closest->Distance))
+					continue;
+				Closest = SupportingSurfaceHit{
+					Mesh.Entity,
+					*Distance,
+					NormalizedRay.Origin + NormalizedRay.Direction * *Distance,
+					Normal };
+			}
+		}
+		return Closest;
+	}
+
 	[[nodiscard]] inline std::optional<WorldGizmoAxis> GetWorldGizmoAxis(
 		const glm::mat4& ParentWorldTransform,
 		const glm::quat& LocalRotation,
@@ -389,6 +658,20 @@ namespace PulseForgeEditor
 		if (!Detail::IsFinite(WorldVector) || !std::isfinite(WorldLength) || WorldLength < 1.0e-7f)
 			return std::nullopt;
 		return WorldGizmoAxis{ WorldVector / WorldLength, WorldLength };
+	}
+
+	[[nodiscard]] inline std::optional<WorldGizmoAxis> GetGizmoAxis(
+		const glm::mat4& ParentWorldTransform,
+		const glm::quat& LocalRotation,
+		uint32_t AxisIndex,
+		bool LocalSpace)
+	{
+		if (LocalSpace)
+			return GetWorldGizmoAxis(ParentWorldTransform, LocalRotation, AxisIndex);
+		if (AxisIndex >= 3)
+			return std::nullopt;
+		const glm::vec3 Direction(AxisIndex == 0, AxisIndex == 1, AxisIndex == 2);
+		return WorldGizmoAxis{ Direction, 1.0f };
 	}
 
 	[[nodiscard]] inline std::optional<float> WorldDeltaToLocalAxisDelta(
