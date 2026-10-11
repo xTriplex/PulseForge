@@ -26,6 +26,7 @@
 #include "Core/LayerStack.h"
 #include "Core/Timestep.h"
 #include "Editor/EditorLayout.h"
+#include "Editor/EditorCommandHistory.h"
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
@@ -7344,6 +7345,148 @@ end
 		PF_CHECK(Tests, Cleared[0] == -1 && Cleared[1] == -1 && !Owners[0] && !Owners[1]);
 		PF_CHECK(Tests, MaxPointLightShadowCount == 2 && PointLightShadowMapResolution == 512);
 	}
+
+	void TestEditorCommandHistory(TestRunner& Tests)
+	{
+		using PulseForgeEditor::EditorCommandHistory;
+		EditorCommandHistory History(2, 1024);
+		History.Reset();
+		PF_CHECK(Tests, !History.IsDirty() && !History.CanUndo() && !History.CanRedo());
+
+		std::string Current = "scene-0";
+		PF_CHECK(Tests, History.Begin("Create entity", Current));
+		Current = "scene-1";
+		const auto FirstCommit = History.Commit(Current);
+		PF_CHECK(Tests, FirstCommit && *FirstCommit && History.IsDirty() && History.CanUndo());
+		PF_CHECK(Tests, History.GetUndoCommand() && History.GetUndoCommand()->Description == "Create entity");
+
+		auto Restore = [&Current](std::string_view State) -> std::expected<void, std::string>
+		{
+			Current.assign(State);
+			return {};
+		};
+		const auto Undone = History.Undo(Restore);
+		PF_CHECK(Tests, Undone && *Undone && Current == "scene-0" && !History.IsDirty());
+		const auto Redone = History.Redo(Restore);
+		PF_CHECK(Tests, Redone && *Redone && Current == "scene-1" && History.IsDirty());
+
+		History.MarkSaved();
+		PF_CHECK(Tests, !History.IsDirty());
+		PF_CHECK(Tests, History.Undo(Restore) && History.IsDirty());
+		PF_CHECK(Tests, History.Redo(Restore) && !History.IsDirty());
+
+		PF_CHECK(Tests, History.Undo(Restore));
+		PF_CHECK(Tests, History.Begin("Rename entity", Current));
+		Current = "renamed";
+		PF_CHECK(Tests, History.Commit(Current));
+		PF_CHECK(Tests, !History.CanRedo() && Current == "renamed");
+
+		const size_t BeforeNoOp = History.GetCommandCount();
+		PF_CHECK(Tests, History.Begin("No-op", Current));
+		const auto NoOp = History.Commit(Current);
+		PF_CHECK(Tests, NoOp && !*NoOp && History.GetCommandCount() == BeforeNoOp);
+
+		PF_CHECK(Tests, History.Begin("Third command", Current));
+		Current = "third";
+		PF_CHECK(Tests, History.Commit(Current));
+		PF_CHECK(Tests, History.GetCommandCount() == 2 && History.GetStoredBytes() <= History.GetMaximumBytes());
+		PF_CHECK(Tests, History.Undo(Restore) && Current == "renamed");
+		PF_CHECK(Tests, History.Undo(Restore));
+		PF_CHECK(Tests, !History.CanUndo());
+
+		EditorCommandHistory ByteLimited(4, 8);
+		ByteLimited.Reset();
+		PF_CHECK(Tests, ByteLimited.Begin("Large command", "1234"));
+		const auto Rejected = ByteLimited.Commit("12345678");
+		PF_CHECK(Tests, !Rejected && ByteLimited.IsActive() && !ByteLimited.CanUndo());
+		Current = "12345678";
+		const auto Cancelled = ByteLimited.Cancel([&Current](std::string_view State) -> std::expected<void, std::string>
+		{
+			Current.assign(State);
+			return {};
+		});
+		PF_CHECK(Tests, Cancelled && Current == "1234" && !ByteLimited.IsActive());
+
+		PF_CHECK(Tests, ByteLimited.Begin("Failed restore", "a"));
+		Current = "b";
+		PF_CHECK(Tests, ByteLimited.Commit(Current));
+		const auto FailedUndo = ByteLimited.Undo([](std::string_view) -> std::expected<void, std::string>
+		{
+			return std::unexpected("restore rejected");
+		});
+		PF_CHECK(Tests, !FailedUndo && ByteLimited.CanUndo() && Current == "b");
+	}
+
+	void TestSceneCommandHistoryRestoresIdentity(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		Scene SceneValue;
+		const auto Root = SceneValue.CreateEntity("Parent");
+		PF_CHECK(Tests, Root.has_value());
+		if (!Root)
+			return;
+
+		PulseForgeEditor::EditorCommandHistory History;
+		History.Reset();
+		const auto Before = SceneSerializer::Serialize(SceneValue);
+		PF_CHECK(Tests, Before.has_value());
+		if (!Before)
+			return;
+		PF_CHECK(Tests, History.Begin("Create child", *Before));
+
+		auto Child = SceneValue.CreateEntity("Shadow Caster");
+		PF_CHECK(Tests, Child.has_value());
+		if (!Child)
+			return;
+		const UUID ChildIdentifier = Child->GetUUID();
+		TransformComponent Transform;
+		Transform.Translation = { 1.0f, 2.0f, 3.0f };
+		PF_CHECK(Tests, Child->SetTransform(Transform));
+		PointLightComponent Light;
+		Light.CastShadows = true;
+		PF_CHECK(Tests, Child->SetPointLight(Light));
+		PF_CHECK(Tests, Child->SetParent(*Root));
+		const auto After = SceneSerializer::Serialize(SceneValue);
+		PF_CHECK(Tests, After.has_value());
+		if (!After)
+			return;
+		PF_CHECK(Tests, History.Commit(*After));
+
+		auto Restore = [&SceneValue](std::string_view State) -> std::expected<void, std::string>
+		{
+			if (auto Result = SceneSerializer::Deserialize(State, SceneValue); !Result)
+				return std::unexpected(Result.error().Message);
+			return {};
+		};
+		const auto UndoCreate = History.Undo(Restore);
+		PF_CHECK(Tests, UndoCreate && *UndoCreate && !SceneValue.FindEntity(ChildIdentifier));
+		PF_CHECK(Tests, SceneValue.FindEntity(Root->GetUUID()).has_value());
+		const auto RedoCreate = History.Redo(Restore);
+		PF_CHECK(Tests, RedoCreate && *RedoCreate);
+		const auto RestoredChild = SceneValue.FindEntity(ChildIdentifier);
+		PF_CHECK(Tests, RestoredChild.has_value());
+		if (RestoredChild)
+		{
+			const auto RestoredTransform = RestoredChild->GetTransform();
+			const auto RestoredLight = RestoredChild->GetPointLight();
+			const auto RestoredParent = RestoredChild->GetParent();
+			PF_CHECK(Tests, RestoredTransform && RestoredTransform->Translation == glm::vec3(1.0f, 2.0f, 3.0f));
+			PF_CHECK(Tests, RestoredLight && RestoredLight->has_value() && RestoredLight->value().CastShadows);
+			PF_CHECK(Tests, RestoredParent && RestoredParent->has_value() && (**RestoredParent).GetUUID() == Root->GetUUID());
+		}
+
+		History.MarkSaved();
+		const auto DeleteBefore = SceneSerializer::Serialize(SceneValue);
+		PF_CHECK(Tests, DeleteBefore && History.Begin("Delete child", *DeleteBefore));
+		const auto CurrentChild = SceneValue.FindEntity(ChildIdentifier);
+		PF_CHECK(Tests, CurrentChild && SceneValue.DestroyEntity(*CurrentChild));
+		const auto DeleteAfter = SceneSerializer::Serialize(SceneValue);
+		PF_CHECK(Tests, DeleteAfter && History.Commit(*DeleteAfter));
+		PF_CHECK(Tests, History.IsDirty() && !SceneValue.FindEntity(ChildIdentifier));
+		const auto UndoDelete = History.Undo(Restore);
+		PF_CHECK(Tests, UndoDelete && *UndoDelete && SceneValue.FindEntity(ChildIdentifier));
+		PF_CHECK(Tests, !History.IsDirty());
+	}
 }
 
 int main()
@@ -7406,5 +7549,7 @@ int main()
 	TestVulkanExtentAndImageCountSelection(Tests);
 	TestConsoleFormatting(Tests);
 	TestPointLightShadowMath(Tests);
+	TestEditorCommandHistory(Tests);
+	TestSceneCommandHistoryRestoresIdentity(Tests);
 	return Tests.Finish();
 }

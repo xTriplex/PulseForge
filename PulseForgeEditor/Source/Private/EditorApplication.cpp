@@ -25,6 +25,7 @@
 #include "Editor/EditorImGuiRenderer.h"
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorLayout.h"
+#include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
 #include "Editor/ViewportMouseCapture.h"
@@ -54,6 +55,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cfloat>
 #include <cstdint>
@@ -526,6 +528,7 @@ namespace
 			m_EditorStyle.ApplyTheme(GetEditorUiColorEncoding(
 				PulseForge::Application::Get().GetOutputColorEncoding()));
 			HandleViewportToolShortcuts();
+			HandleEditorHistoryShortcuts();
 
 			DrawMainMenu();
 			DrawEditorToolbar();
@@ -535,6 +538,10 @@ namespace
 			DrawWorkspacePanels();
 			RenderViewportScene();
 			UpdateWindowTitle();
+			if (m_SceneHistory.IsActive() &&
+				m_InspectorHistoryItem != (std::numeric_limits<uint32_t>::max)() &&
+				(!GImGui || GImGui->ActiveId != m_InspectorHistoryItem))
+				FinishSceneEdit();
 
 			ImGui::Render();
 			if (auto Result = m_Layout.SaveIfRequested(); !Result)
@@ -617,6 +624,225 @@ namespace
 		}
 
 	private:
+		[[nodiscard]] std::expected<std::string, std::string> CaptureSceneState() const
+		{
+			if (!m_Scene)
+				return std::unexpected("There is no active authored scene to capture");
+			auto Serialized = PulseForge::SceneSerializer::Serialize(*m_Scene);
+			if (!Serialized)
+				return std::unexpected(Serialized.error().Message);
+
+			std::string State = std::to_string(Serialized->size());
+			State.push_back('\n');
+			State.append(*Serialized);
+			State.push_back('\n');
+			if (m_SelectedEntity)
+				State.append(m_SelectedEntity->ToString());
+			return State;
+		}
+
+		[[nodiscard]] std::expected<void, std::string> RestoreSceneState(std::string_view State)
+		{
+			if (!m_Scene || m_SceneRuntime)
+				return std::unexpected("Scene history is available only for the authored scene in Edit mode");
+			const size_t LengthTerminator = State.find('\n');
+			if (LengthTerminator == std::string_view::npos)
+				return std::unexpected("Scene history snapshot is malformed");
+			size_t SceneLength = 0;
+			const auto ParsedLength = std::from_chars(
+				State.data(), State.data() + LengthTerminator, SceneLength);
+			if (ParsedLength.ec != std::errc{} || ParsedLength.ptr != State.data() + LengthTerminator ||
+				State.size() < LengthTerminator + 2 ||
+				SceneLength > State.size() - LengthTerminator - 2)
+				return std::unexpected("Scene history snapshot has an invalid payload length");
+			const size_t SceneStart = LengthTerminator + 1;
+			const std::string_view SceneData = State.substr(SceneStart, SceneLength);
+			const size_t SelectionStart = SceneStart + SceneLength + 1;
+			if (State[SelectionStart - 1] != '\n')
+				return std::unexpected("Scene history snapshot has an invalid editor-state separator");
+			const std::string_view SelectionData = State.substr(SelectionStart);
+			if (auto Result = PulseForge::SceneSerializer::Deserialize(SceneData, *m_Scene); !Result)
+				return std::unexpected(Result.error().Message);
+			m_SelectedEntity.reset();
+			if (!SelectionData.empty())
+			{
+				const auto ParsedSelection = PulseForge::UUID::Parse(SelectionData);
+				if (ParsedSelection && m_Scene->FindEntity(*ParsedSelection))
+					m_SelectedEntity = *ParsedSelection;
+			}
+			m_GizmoDrag.reset();
+			m_InspectorHistoryItem = 0;
+			m_SceneDirty = m_SceneHistory.IsDirty();
+			return {};
+		}
+
+		void ResetSceneHistory()
+		{
+			m_SceneHistory.Reset();
+			m_InspectorHistoryItem = 0;
+			m_SceneDirty = false;
+		}
+
+		void CancelSceneEdit()
+		{
+			if (m_SceneHistory.IsActive())
+			{
+				const auto Result = m_SceneHistory.Cancel(
+					[this](std::string_view State) { return RestoreSceneState(State); });
+				if (!Result)
+					SetError("Scene edit rollback failed: " + Result.error());
+			}
+			m_InspectorHistoryItem = 0;
+			m_SceneDirty = m_SceneHistory.IsDirty();
+		}
+
+		bool BeginSceneEdit(std::string Description)
+		{
+			if (m_SceneHistory.IsActive())
+				FinishSceneEdit();
+			if (!m_Scene || m_SceneRuntime)
+				return false;
+			auto Before = CaptureSceneState();
+			if (!Before)
+			{
+				SetError("Could not begin the scene edit: " + Before.error());
+				return false;
+			}
+			if (auto Begun = m_SceneHistory.Begin(std::move(Description), std::move(*Before)); !Begun)
+			{
+				SetError("Could not begin the scene edit: " + Begun.error());
+				return false;
+			}
+			m_InspectorHistoryItem = (std::numeric_limits<uint32_t>::max)();
+			return true;
+		}
+
+		void MarkSceneSaved()
+		{
+			m_SceneHistory.MarkSaved();
+			m_SceneDirty = false;
+		}
+
+		void FinishSceneEdit()
+		{
+			if (!m_SceneHistory.IsActive())
+			{
+				m_InspectorHistoryItem = 0;
+				return;
+			}
+
+			auto After = CaptureSceneState();
+			if (!After)
+			{
+				const std::string Error = After.error();
+				(void)m_SceneHistory.Cancel([this](std::string_view State) { return RestoreSceneState(State); });
+				m_InspectorHistoryItem = 0;
+				SetError("Could not finish the scene edit transaction: " + Error);
+				return;
+			}
+
+			const auto Committed = m_SceneHistory.Commit(std::move(*After));
+			if (!Committed)
+			{
+				const std::string Error = Committed.error();
+				(void)m_SceneHistory.Cancel([this](std::string_view State) { return RestoreSceneState(State); });
+				m_InspectorHistoryItem = 0;
+				SetError("Scene edit was rolled back because it could not be stored in history: " + Error);
+				return;
+			}
+			m_InspectorHistoryItem = 0;
+			m_SceneDirty = m_SceneHistory.IsDirty();
+		}
+
+		template<typename Action>
+		[[nodiscard]] std::expected<void, std::string> RunSceneEdit(std::string Description, Action&& Operation)
+		{
+			if (!m_Scene || m_SceneRuntime)
+				return std::unexpected("Scene editing is unavailable while the runtime scene is active");
+
+			const uint32_t ActiveItem = GImGui ? GImGui->ActiveId : 0;
+			if (m_SceneHistory.IsActive() && m_InspectorHistoryItem != ActiveItem)
+				FinishSceneEdit();
+			if (!m_SceneHistory.IsActive())
+			{
+				auto Before = CaptureSceneState();
+				if (!Before)
+					return std::unexpected("Could not begin the scene edit: " + Before.error());
+				if (auto Begun = m_SceneHistory.Begin(std::move(Description), std::move(*Before)); !Begun)
+					return std::unexpected(Begun.error());
+				m_InspectorHistoryItem = ActiveItem;
+			}
+
+			auto Result = std::forward<Action>(Operation)();
+			if (!Result)
+			{
+				const std::string Error = Result.error().Message;
+				(void)m_SceneHistory.Cancel([this](std::string_view State) { return RestoreSceneState(State); });
+				m_InspectorHistoryItem = 0;
+				m_SceneDirty = m_SceneHistory.IsDirty();
+				return std::unexpected(Error);
+			}
+
+			if (ActiveItem == 0 || !GImGui || GImGui->ActiveId != ActiveItem)
+				FinishSceneEdit();
+			else
+				m_SceneDirty = true;
+			return {};
+		}
+
+		void UndoSceneEdit()
+		{
+			if (!m_Scene || m_SceneRuntime)
+				return;
+			FinishSceneEdit();
+			const auto Result = m_SceneHistory.Undo(
+				[this](std::string_view State) { return RestoreSceneState(State); });
+			if (!Result)
+			{
+				SetError("Undo failed: " + Result.error());
+				return;
+			}
+			if (*Result)
+				SetStatus("Undid the last scene edit.");
+			m_SceneDirty = m_SceneHistory.IsDirty();
+		}
+
+		void RedoSceneEdit()
+		{
+			if (!m_Scene || m_SceneRuntime)
+				return;
+			FinishSceneEdit();
+			const auto Result = m_SceneHistory.Redo(
+				[this](std::string_view State) { return RestoreSceneState(State); });
+			if (!Result)
+			{
+				SetError("Redo failed: " + Result.error());
+				return;
+			}
+			if (*Result)
+				SetStatus("Redid the last scene edit.");
+			m_SceneDirty = m_SceneHistory.IsDirty();
+		}
+
+		void HandleEditorHistoryShortcuts()
+		{
+			if (!m_Scene || m_SceneRuntime || m_EditorCameraNavigationActive || m_GizmoDrag ||
+				ImGui::GetIO().WantTextInput ||
+				ImGui::IsAnyItemActive() || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) ||
+				GImGui->NavLayer == ImGuiNavLayer_Menu || GImGui->NavWindowingTarget != nullptr)
+				return;
+
+			const ImGuiIO& IO = ImGui::GetIO();
+			if (!IO.KeyCtrl || IO.KeyAlt || IO.KeySuper)
+				return;
+			if (ImGui::IsKeyPressed(ImGuiKey_Y, false))
+				RedoSceneEdit();
+			else if (ImGui::IsKeyPressed(ImGuiKey_Z, false) && IO.KeyShift)
+				RedoSceneEdit();
+			else if (ImGui::IsKeyPressed(ImGuiKey_Z, false))
+				UndoSceneEdit();
+		}
+
 		static std::string NfdError(std::string_view Context)
 		{
 			const char* Error = NFD_GetError();
@@ -744,7 +970,7 @@ namespace
 			m_SelectedAsset = MainSceneRecord.ID;
 			m_PendingDeleteAsset.reset();
 			m_OpenDeleteAssetDialog = false;
-			m_SceneDirty = false;
+			ResetSceneHistory();
 			if (!MainScene)
 			{
 				std::string Message = "Project and Main.scene were created, but temporary cleanup needs attention: ";
@@ -826,7 +1052,7 @@ namespace
 			m_SelectedAsset = LoadedSceneAsset;
 			m_PendingDeleteAsset.reset();
 			m_OpenDeleteAssetDialog = false;
-			m_SceneDirty = false;
+			ResetSceneHistory();
 			UpdateAssetList();
 			if (SceneLoadWarning.empty())
 				SetStatus("Opened project " + ProjectName + ".");
@@ -1153,19 +1379,26 @@ namespace
 				return;
 			}
 
-			auto Instantiated = PulseForge::PrefabAssetService::Instantiate(
-				Identifier,
-				m_Project->GetRootPath(),
-				m_Project->GetAssetRegistry(),
-				*m_Scene);
-			if (!Instantiated)
+			std::optional<PulseForge::UUID> InstantiatedIdentifier;
+			const auto Recorded = RunSceneEdit("Instantiate Prefab", [this, Identifier, &InstantiatedIdentifier]
+				-> std::expected<void, PulseForge::PrefabAssetError>
 			{
-				SetError("Prefab instantiation failed: " + Instantiated.error().Message);
+				auto Instantiated = PulseForge::PrefabAssetService::Instantiate(
+					Identifier,
+					m_Project->GetRootPath(),
+					m_Project->GetAssetRegistry(),
+					*m_Scene);
+				if (!Instantiated)
+					return std::unexpected(Instantiated.error());
+				InstantiatedIdentifier = Instantiated->GetUUID();
+				m_SelectedEntity = *InstantiatedIdentifier;
+				return {};
+			});
+			if (!Recorded)
+			{
+				SetError("Prefab instantiation failed: " + Recorded.error());
 				return;
 			}
-
-			m_SelectedEntity = Instantiated->GetUUID();
-			m_SceneDirty = true;
 			SetStatus("Instantiated prefab " + Identifier.ToString() + " into the current scene.");
 		}
 
@@ -1388,7 +1621,10 @@ namespace
 			}
 			m_SceneAsset = Record.ID;
 			m_SelectedEntity.reset();
-			m_SceneDirty = false;
+			if (SaveAs)
+				MarkSceneSaved();
+			else
+				ResetSceneHistory();
 			UpdateAssetList();
 			if (auto StartScene = m_Project->SetStartScene(Record.ID); !StartScene)
 			{
@@ -1439,7 +1675,7 @@ namespace
 			m_SceneAsset = Identifier;
 			m_SelectedAsset = Identifier;
 			m_SelectedEntity.reset();
-			m_SceneDirty = false;
+			ResetSceneHistory();
 			const auto Record = m_Project->GetAssetRegistry().Find(Identifier);
 			SetStatus(Record ? "Opened scene " + PathToUtf8(Record->ProjectRelativePath) + "." : "Opened scene.");
 		}
@@ -1458,6 +1694,7 @@ namespace
 
 		bool SaveScene()
 		{
+			FinishSceneEdit();
 			if (!m_Project || !m_Scene || !m_SceneAsset)
 			{
 				SetError("There is no managed scene asset to save.");
@@ -1476,7 +1713,7 @@ namespace
 			}
 			else
 			{
-				m_SceneDirty = false;
+				MarkSceneSaved();
 				SetStatus("Scene saved.");
 			}
 			return true;
@@ -1484,6 +1721,7 @@ namespace
 
 		void QueueAfterSave(std::function<void()> Action)
 		{
+			FinishSceneEdit();
 			if (m_PendingAction)
 			{
 				SetWarning("Resolve the current unsaved-scene prompt before starting another editor operation.");
@@ -1526,7 +1764,7 @@ namespace
 			ResetEditorViewportCamera();
 			m_Scene = std::move(ReloadedScene);
 			m_SelectedEntity.reset();
-			m_SceneDirty = false;
+			ResetSceneHistory();
 			SetStatus("Unsaved scene changes discarded.");
 			return true;
 		}
@@ -1610,6 +1848,23 @@ namespace
 				ImGui::Separator();
 				if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Close, "Exit"))
 					QueueAfterSave([] { PulseForge::Application::Get().RequestClose(); });
+				ImGui::EndMenu();
+			}
+
+			if (ImGui::BeginMenu("Edit", m_Scene != nullptr && m_SceneRuntime == nullptr))
+			{
+				const auto UndoCommand = m_SceneHistory.GetUndoCommand();
+				const auto RedoCommand = m_SceneHistory.GetRedoCommand();
+				const std::string UndoLabel = UndoCommand
+					? "Undo " + std::string(UndoCommand->Description)
+					: "Undo";
+				const std::string RedoLabel = RedoCommand
+					? "Redo " + std::string(RedoCommand->Description)
+					: "Redo";
+				if (ImGui::MenuItem(UndoLabel.c_str(), "Ctrl+Z", false, m_SceneHistory.CanUndo()))
+					UndoSceneEdit();
+				if (ImGui::MenuItem(RedoLabel.c_str(), "Ctrl+Y / Ctrl+Shift+Z", false, m_SceneHistory.CanRedo()))
+					RedoSceneEdit();
 				ImGui::EndMenu();
 			}
 
@@ -2240,7 +2495,7 @@ namespace
 						DrawViewportGizmo(*Selected, std::nullopt);
 				}
 				if (IO.MouseReleased[ImGuiMouseButton_Left] || !IO.MouseDown[ImGuiMouseButton_Left])
-					CancelGizmoInteraction();
+					CompleteGizmoInteraction();
 				return;
 			}
 
@@ -2514,6 +2769,11 @@ namespace
 			const auto StartPoint = PulseForgeEditor::IntersectRayPlane(*Ray, Geometry.PivotWorld, PlaneNormal);
 			if (!StartPoint)
 				return false;
+			if (!BeginSceneEdit(Handle.Operation == PulseForgeEditor::TransformGizmoOperation::Translate
+				? "Move Entity"
+				: Handle.Operation == PulseForgeEditor::TransformGizmoOperation::Rotate
+					? "Rotate Entity" : "Scale Entity"))
+				return false;
 
 			m_GizmoDrag = GizmoDrag{
 				*m_SelectedEntity,
@@ -2605,6 +2865,15 @@ namespace
 
 		void CancelGizmoInteraction() noexcept
 		{
+			if (m_GizmoDrag)
+				CancelSceneEdit();
+			m_GizmoDrag.reset();
+		}
+
+		void CompleteGizmoInteraction()
+		{
+			if (m_GizmoDrag)
+				FinishSceneEdit();
 			m_GizmoDrag.reset();
 		}
 
@@ -3341,14 +3610,16 @@ namespace
 		{
 			if (!m_Scene)
 				return;
-			auto Created = m_Scene->CreateEntity();
-			if (!Created)
+			const auto Recorded = RunSceneEdit("Create Entity", [this]() -> std::expected<void, PulseForge::SceneError>
 			{
-				SetError("Entity creation failed: " + Created.error().Message);
-				return;
-			}
-			m_SelectedEntity = Created->GetUUID();
-			m_SceneDirty = true;
+				auto Created = m_Scene->CreateEntity();
+				if (!Created)
+					return std::unexpected(Created.error());
+				m_SelectedEntity = Created->GetUUID();
+				return {};
+			});
+			if (!Recorded)
+				SetError("Entity creation failed: " + Recorded.error());
 		}
 
 		void DuplicateSelectedEntity()
@@ -3361,14 +3632,17 @@ namespace
 				m_SelectedEntity.reset();
 				return;
 			}
-			auto Duplicated = m_Scene->DuplicateEntity(*Source);
-			if (!Duplicated)
+			const auto Recorded = RunSceneEdit("Duplicate Entity", [this, Source = *Source]()
+				-> std::expected<void, PulseForge::SceneError>
 			{
-				SetError("Entity duplication failed: " + Duplicated.error().Message);
-				return;
-			}
-			m_SelectedEntity = Duplicated->GetUUID();
-			m_SceneDirty = true;
+				auto Duplicated = m_Scene->DuplicateEntity(Source);
+				if (!Duplicated)
+					return std::unexpected(Duplicated.error());
+				m_SelectedEntity = Duplicated->GetUUID();
+				return {};
+			});
+			if (!Recorded)
+				SetError("Entity duplication failed: " + Recorded.error());
 		}
 
 		void DeleteSelectedEntity()
@@ -3381,13 +3655,16 @@ namespace
 				m_SelectedEntity.reset();
 				return;
 			}
-			if (auto Deleted = m_Scene->DestroyEntity(*Target); !Deleted)
+			const auto Recorded = RunSceneEdit("Delete Entity", [this, Target = *Target]()
+				-> std::expected<void, PulseForge::SceneError>
 			{
-				SetError("Entity deletion failed: " + Deleted.error().Message);
-				return;
-			}
-			m_SelectedEntity.reset();
-			m_SceneDirty = true;
+				if (auto Deleted = m_Scene->DestroyEntity(Target); !Deleted)
+					return std::unexpected(Deleted.error());
+				m_SelectedEntity.reset();
+				return {};
+			});
+			if (!Recorded)
+				SetError("Entity deletion failed: " + Recorded.error());
 		}
 
 		void ReparentEntity(
@@ -3403,26 +3680,27 @@ namespace
 				return;
 			}
 
-			std::expected<void, PulseForge::SceneError> Result;
-			if (ParentIdentifier)
+			if (ParentIdentifier && !m_Scene->FindEntity(*ParentIdentifier))
 			{
-				const auto Parent = m_Scene->FindEntity(*ParentIdentifier);
-				if (!Parent)
-				{
-					SetError("The selected parent entity no longer exists.");
-					return;
-				}
-				Result = Child->SetParent(*Parent);
-			}
-			else
-				Result = Child->ClearParent();
-
-			if (!Result)
-			{
-				SetError("Entity reparenting failed: " + Result.error().Message);
+				SetError("The selected parent entity no longer exists.");
 				return;
 			}
-			m_SceneDirty = true;
+
+			const auto Recorded = RunSceneEdit("Reparent Entity", [this, Child = *Child, ParentIdentifier]()
+				-> std::expected<void, PulseForge::SceneError>
+			{
+				if (ParentIdentifier)
+				{
+					const auto Parent = m_Scene->FindEntity(*ParentIdentifier);
+					if (!Parent)
+						return std::unexpected(PulseForge::SceneError{
+							PulseForge::SceneErrorCode::InvalidEntity, "The selected parent entity no longer exists" });
+					return Child.SetParent(*Parent);
+				}
+				return Child.ClearParent();
+			});
+			if (!Recorded)
+				SetError("Entity reparenting failed: " + Recorded.error());
 		}
 
 		void DrawEntityTree(
@@ -3489,6 +3767,8 @@ namespace
 				return;
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Inspector))
 			{
+				if (m_SceneHistory.IsActive() && m_InspectorHistoryItem != (GImGui ? GImGui->ActiveId : 0))
+					FinishSceneEdit();
 				if (!m_Scene || !m_SelectedEntity)
 					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Entity, "Select an entity in the Hierarchy.");
 				else if (const auto Entity = m_Scene->FindEntity(*m_SelectedEntity))
@@ -3509,10 +3789,10 @@ namespace
 							}
 							if (NameChanged)
 							{
-								if (auto Updated = Entity->SetTag(*Tag); !Updated)
-									SetError("Entity name update failed: " + Updated.error().Message);
-								else
-									m_SceneDirty = true;
+								const auto Updated = RunSceneEdit("Rename Entity", [Entity = *Entity, Tag = *Tag]
+									{ return Entity.SetTag(Tag); });
+								if (!Updated)
+									SetError("Entity name update failed: " + Updated.error());
 							}
 							ImGui::SetCursorPosX(ImGui::GetStyle().WindowPadding.x + 29.0f);
 							m_EditorStyle.TextMuted(Entity->GetUUID().ToString());
@@ -3547,10 +3827,10 @@ namespace
 									UpdatedTransform.Rotation = glm::quat(glm::radians(
 										glm::vec3(Rotation[0], Rotation[1], Rotation[2])));
 									UpdatedTransform.Scale = { Scale[0], Scale[1], Scale[2] };
-									if (auto Updated = Entity->SetTransform(UpdatedTransform); !Updated)
-										SetError("Entity transform update failed: " + Updated.error().Message);
-									else
-										m_SceneDirty = true;
+									const auto Updated = RunSceneEdit("Edit Transform", [Entity = *Entity, UpdatedTransform]
+										{ return Entity.SetTransform(UpdatedTransform); });
+									if (!Updated)
+									SetError("Entity transform update failed: " + Updated.error());
 								}
 							}
 							m_EditorStyle.EndComponentBody();
@@ -3569,15 +3849,15 @@ namespace
 			ImGui::End();
 		}
 
-		template<typename Result>
-		void RecordComponentOperation(Result&& Operation, std::string_view Context)
+		template<typename Action>
+		void RecordComponentOperation(Action&& Operation, std::string_view Context)
 		{
-			if (!Operation)
+			const auto Result = RunSceneEdit(std::string(Context), std::forward<Action>(Operation));
+			if (!Result)
 			{
-				SetError(std::string(Context) + ": " + Operation.error().Message);
+				SetError(std::string(Context) + ": " + Result.error());
 				return;
 			}
-			m_SceneDirty = true;
 		}
 
 		void SetCameraComponent(const PulseForge::Entity& Target, const PulseForge::CameraComponent& Camera)
@@ -3587,62 +3867,54 @@ namespace
 				SetError("Camera update failed: " + Validation.error().Message);
 				return;
 			}
-			if (Camera.IsPrimary && m_Scene)
+			RecordComponentOperation([this, Target, Camera]() -> std::expected<void, PulseForge::SceneError>
 			{
-				for (const PulseForge::Entity& Other : m_Scene->GetEntities())
+				if (Camera.IsPrimary && m_Scene)
 				{
-					if (Other.GetUUID() == Target.GetUUID())
-						continue;
-					auto Existing = Other.GetCamera();
-					if (!Existing)
+					for (const PulseForge::Entity& Other : m_Scene->GetEntities())
 					{
-						SetError("Could not inspect camera components while selecting the primary camera: " + Existing.error().Message);
-						return;
+						if (Other.GetUUID() == Target.GetUUID())
+							continue;
+						auto Existing = Other.GetCamera();
+						if (!Existing)
+							return std::unexpected(Existing.error());
+						if (!Existing->has_value() || !Existing->value().IsPrimary)
+							continue;
+						PulseForge::CameraComponent Updated = Existing->value();
+						Updated.IsPrimary = false;
+						if (auto Result = Other.SetCamera(Updated); !Result)
+							return std::unexpected(Result.error());
 					}
-					if (!Existing->has_value() || !Existing->value().IsPrimary)
-						continue;
-					PulseForge::CameraComponent Updated = Existing->value();
-					Updated.IsPrimary = false;
-					if (auto Result = Other.SetCamera(Updated); !Result)
-					{
-						SetError("Could not clear the previous primary camera: " + Result.error().Message);
-						return;
-					}
-					m_SceneDirty = true;
 				}
-			}
-			RecordComponentOperation(Target.SetCamera(Camera), "Camera update failed");
+				return Target.SetCamera(Camera);
+			}, "Camera update failed");
 		}
 
 		void SetAudioListenerComponent(
 			const PulseForge::Entity& Target,
 			const PulseForge::AudioListenerComponent& Listener)
 		{
-			if (Listener.IsPrimary && m_Scene)
+			RecordComponentOperation([this, Target, Listener]() -> std::expected<void, PulseForge::SceneError>
 			{
-				for (const PulseForge::Entity& Other : m_Scene->GetEntities())
+				if (Listener.IsPrimary && m_Scene)
 				{
-					if (Other.GetUUID() == Target.GetUUID())
-						continue;
-					auto Existing = Other.GetAudioListener();
-					if (!Existing)
+					for (const PulseForge::Entity& Other : m_Scene->GetEntities())
 					{
-						SetError("Could not inspect audio listener components while selecting the primary listener: " + Existing.error().Message);
-						return;
+						if (Other.GetUUID() == Target.GetUUID())
+							continue;
+						auto Existing = Other.GetAudioListener();
+						if (!Existing)
+							return std::unexpected(Existing.error());
+						if (!Existing->has_value() || !Existing->value().IsPrimary)
+							continue;
+						PulseForge::AudioListenerComponent Updated = Existing->value();
+						Updated.IsPrimary = false;
+						if (auto Result = Other.SetAudioListener(Updated); !Result)
+							return std::unexpected(Result.error());
 					}
-					if (!Existing->has_value() || !Existing->value().IsPrimary)
-						continue;
-					PulseForge::AudioListenerComponent Updated = Existing->value();
-					Updated.IsPrimary = false;
-					if (auto Result = Other.SetAudioListener(Updated); !Result)
-					{
-						SetError("Could not clear the previous primary audio listener: " + Result.error().Message);
-						return;
-					}
-					m_SceneDirty = true;
 				}
-			}
-			RecordComponentOperation(Target.SetAudioListener(Listener), "Audio listener update failed");
+				return Target.SetAudioListener(Listener);
+				}, "Audio listener update failed");
 		}
 
 		bool IsAssetExtension(
@@ -3753,7 +4025,8 @@ namespace
 				}
 				if (DirectionalLight && !DirectionalLight->has_value() &&
 					m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::DirectionalLight, "Directional Light"))
-					RecordComponentOperation(Entity.SetDirectionalLight(PulseForge::DirectionalLightComponent{}),
+					RecordComponentOperation([Entity]
+						{ return Entity.SetDirectionalLight(PulseForge::DirectionalLightComponent{}); },
 						"Directional light component add failed");
 				if (EnvironmentLight && !EnvironmentLight->has_value() && ImGui::BeginMenu("Environment Light"))
 				{
@@ -3768,7 +4041,8 @@ namespace
 						{
 							PulseForge::EnvironmentLightComponent Component;
 							Component.HdrImage = Asset.ID;
-							RecordComponentOperation(Entity.SetEnvironmentLight(Component), "Environment light add failed");
+							RecordComponentOperation([Entity, Component] { return Entity.SetEnvironmentLight(Component); },
+								"Environment light add failed");
 							break;
 						}
 					}
@@ -3777,13 +4051,17 @@ namespace
 					ImGui::EndMenu();
 				}
 				if (PointLight && !PointLight->has_value() && ImGui::MenuItem("Point Light"))
-					RecordComponentOperation(Entity.SetPointLight(PulseForge::PointLightComponent{}), "Point light component add failed");
+					RecordComponentOperation([Entity]
+						{ return Entity.SetPointLight(PulseForge::PointLightComponent{}); }, "Point light component add failed");
 				if (SpotLight && !SpotLight->has_value() && ImGui::MenuItem("Spot Light"))
-					RecordComponentOperation(Entity.SetSpotLight(PulseForge::SpotLightComponent{}), "Spot light component add failed");
+					RecordComponentOperation([Entity]
+						{ return Entity.SetSpotLight(PulseForge::SpotLightComponent{}); }, "Spot light component add failed");
 				if (Rigidbody && !Rigidbody->has_value() && ImGui::MenuItem("Rigidbody"))
-					RecordComponentOperation(Entity.SetRigidbody(PulseForge::RigidbodyComponent{}), "Rigidbody component add failed");
+					RecordComponentOperation([Entity]
+						{ return Entity.SetRigidbody(PulseForge::RigidbodyComponent{}); }, "Rigidbody component add failed");
 				if (Collider && !Collider->has_value() && ImGui::MenuItem("Box Collider"))
-					RecordComponentOperation(Entity.SetBoxCollider(PulseForge::BoxColliderComponent{}), "Box collider add failed");
+					RecordComponentOperation([Entity]
+						{ return Entity.SetBoxCollider(PulseForge::BoxColliderComponent{}); }, "Box collider add failed");
 				if (AudioListener && !AudioListener->has_value() && ImGui::MenuItem("Audio Listener"))
 					SetAudioListenerComponent(Entity, PulseForge::AudioListenerComponent{});
 
@@ -3800,7 +4078,8 @@ namespace
 						{
 							PulseForge::MeshRendererComponent Component;
 							Component.MeshAsset = Asset.ID;
-							RecordComponentOperation(Entity.SetMeshRenderer(Component), "Mesh renderer add failed");
+							RecordComponentOperation([Entity, Component] { return Entity.SetMeshRenderer(Component); },
+								"Mesh renderer add failed");
 							break;
 						}
 					}
@@ -3822,7 +4101,8 @@ namespace
 						{
 							PulseForge::AudioSourceComponent Component;
 							Component.AudioAsset = Asset.ID;
-							RecordComponentOperation(Entity.SetAudioSource(Component), "Audio source add failed");
+							RecordComponentOperation([Entity, Component] { return Entity.SetAudioSource(Component); },
+								"Audio source add failed");
 							break;
 						}
 					}
@@ -3844,7 +4124,8 @@ namespace
 						{
 							PulseForge::ScriptComponent Component;
 							Component.ScriptAsset = Asset.ID;
-							RecordComponentOperation(Entity.SetScript(Component), "Script component add failed");
+							RecordComponentOperation([Entity, Component] { return Entity.SetScript(Component); },
+								"Script component add failed");
 							break;
 						}
 					}
@@ -3883,7 +4164,8 @@ namespace
 			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveEnvironmentLight",
 				"Remove Environment Light component", true))
 			{
-				RecordComponentOperation(Entity.RemoveEnvironmentLight(), "Environment light removal failed");
+				RecordComponentOperation([Entity] { return Entity.RemoveEnvironmentLight(); },
+					"Environment light removal failed");
 				return;
 			}
 			if (!Expanded)
@@ -3902,7 +4184,8 @@ namespace
 			if (HdrImage)
 				Component.HdrImage = *HdrImage;
 			if (Changed)
-				RecordComponentOperation(Entity.SetEnvironmentLight(Component), "Environment light update failed");
+				RecordComponentOperation([Entity, Component] { return Entity.SetEnvironmentLight(Component); },
+					"Environment light update failed");
 			m_EditorStyle.EndComponentBody();
 		}
 
@@ -3919,7 +4202,8 @@ namespace
 			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveDirectionalLight",
 				"Remove Directional Light component", true))
 			{
-				RecordComponentOperation(Entity.RemoveDirectionalLight(), "Directional light removal failed");
+				RecordComponentOperation([Entity] { return Entity.RemoveDirectionalLight(); },
+					"Directional light removal failed");
 				return;
 			}
 			if (!Expanded)
@@ -3948,7 +4232,8 @@ namespace
 				m_EditorStyle.EndPropertyTable();
 			}
 			if (Changed)
-				RecordComponentOperation(Entity.SetDirectionalLight(Component), "Directional light update failed");
+				RecordComponentOperation([Entity, Component] { return Entity.SetDirectionalLight(Component); },
+					"Directional light update failed");
 			m_EditorStyle.EndComponentBody();
 		}
 
@@ -3964,7 +4249,7 @@ namespace
 			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Delete, "Remove", "RemovePointLight",
 				"Remove Point Light component", true))
 			{
-				RecordComponentOperation(Entity.RemovePointLight(), "Point light removal failed");
+				RecordComponentOperation([Entity] { return Entity.RemovePointLight(); }, "Point light removal failed");
 				return;
 			}
 			if (!Expanded)
@@ -3996,7 +4281,8 @@ namespace
 				m_EditorStyle.EndPropertyTable();
 			}
 			if (Changed)
-				RecordComponentOperation(Entity.SetPointLight(Component), "Point light update failed");
+				RecordComponentOperation([Entity, Component] { return Entity.SetPointLight(Component); },
+					"Point light update failed");
 			m_EditorStyle.EndComponentBody();
 		}
 
@@ -4012,7 +4298,7 @@ namespace
 			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveSpotLight",
 				"Remove Spot Light component", true))
 			{
-				RecordComponentOperation(Entity.RemoveSpotLight(), "Spot light removal failed");
+				RecordComponentOperation([Entity] { return Entity.RemoveSpotLight(); }, "Spot light removal failed");
 				return;
 			}
 			if (!Expanded)
@@ -4049,7 +4335,8 @@ namespace
 				m_EditorStyle.EndPropertyTable();
 			}
 			if (Changed)
-				RecordComponentOperation(Entity.SetSpotLight(Component), "Spot light update failed");
+				RecordComponentOperation([Entity, Component] { return Entity.SetSpotLight(Component); },
+					"Spot light update failed");
 			m_EditorStyle.EndComponentBody();
 		}
 
@@ -4066,7 +4353,7 @@ namespace
 			if (m_EditorStyle.IconButton(
 				PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveCamera", "Remove Camera component", true))
 			{
-				RecordComponentOperation(Entity.RemoveCamera(), "Camera component removal failed");
+				RecordComponentOperation([Entity] { return Entity.RemoveCamera(); }, "Camera component removal failed");
 				return;
 			}
 			if (!IsExpanded)
@@ -4113,7 +4400,8 @@ namespace
 			if (m_EditorStyle.IconButton(
 				PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveMeshRenderer", "Remove Mesh Renderer component", true))
 			{
-				RecordComponentOperation(Entity.RemoveMeshRenderer(), "Mesh renderer removal failed");
+				RecordComponentOperation([Entity] { return Entity.RemoveMeshRenderer(); },
+					"Mesh renderer removal failed");
 				return;
 			}
 			if (!IsExpanded)
@@ -4135,7 +4423,8 @@ namespace
 			{
 				Component.MeshAsset = *Mesh;
 				Component.MaterialAsset = Material;
-				RecordComponentOperation(Entity.SetMeshRenderer(Component), "Mesh renderer update failed");
+				RecordComponentOperation([Entity, Component] { return Entity.SetMeshRenderer(Component); },
+					"Mesh renderer update failed");
 			}
 			m_EditorStyle.EndComponentBody();
 		}
@@ -4153,7 +4442,7 @@ namespace
 			if (m_EditorStyle.IconButton(
 				PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveRigidbody", "Remove Rigidbody component", true))
 			{
-				RecordComponentOperation(Entity.RemoveRigidbody(), "Rigidbody removal failed");
+				RecordComponentOperation([Entity] { return Entity.RemoveRigidbody(); }, "Rigidbody removal failed");
 				return;
 			}
 			if (!IsExpanded)
@@ -4184,7 +4473,8 @@ namespace
 				m_EditorStyle.EndPropertyTable();
 			}
 			if (Changed)
-				RecordComponentOperation(Entity.SetRigidbody(Component), "Rigidbody update failed");
+				RecordComponentOperation([Entity, Component] { return Entity.SetRigidbody(Component); },
+					"Rigidbody update failed");
 			m_EditorStyle.EndComponentBody();
 		}
 
@@ -4201,7 +4491,7 @@ namespace
 			if (m_EditorStyle.IconButton(
 				PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveBoxCollider", "Remove Box Collider component", true))
 			{
-				RecordComponentOperation(Entity.RemoveBoxCollider(), "Box collider removal failed");
+				RecordComponentOperation([Entity] { return Entity.RemoveBoxCollider(); }, "Box collider removal failed");
 				return;
 			}
 			if (!IsExpanded)
@@ -4219,7 +4509,8 @@ namespace
 			if (Changed)
 			{
 				Component.HalfExtents = { HalfExtents[0], HalfExtents[1], HalfExtents[2] };
-				RecordComponentOperation(Entity.SetBoxCollider(Component), "Box collider update failed");
+				RecordComponentOperation([Entity, Component] { return Entity.SetBoxCollider(Component); },
+					"Box collider update failed");
 			}
 			m_EditorStyle.EndComponentBody();
 		}
@@ -4237,7 +4528,7 @@ namespace
 			if (m_EditorStyle.IconButton(
 				PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveAudioSource", "Remove Audio Source component", true))
 			{
-				RecordComponentOperation(Entity.RemoveAudioSource(), "Audio source removal failed");
+				RecordComponentOperation([Entity] { return Entity.RemoveAudioSource(); }, "Audio source removal failed");
 				return;
 			}
 			if (!IsExpanded)
@@ -4263,7 +4554,8 @@ namespace
 			if (Changed && Audio)
 			{
 				Component.AudioAsset = *Audio;
-				RecordComponentOperation(Entity.SetAudioSource(Component), "Audio source update failed");
+				RecordComponentOperation([Entity, Component] { return Entity.SetAudioSource(Component); },
+					"Audio source update failed");
 			}
 			m_EditorStyle.EndComponentBody();
 		}
@@ -4281,7 +4573,8 @@ namespace
 			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveAudioListener",
 				"Remove Audio Listener component", true))
 			{
-				RecordComponentOperation(Entity.RemoveAudioListener(), "Audio listener removal failed");
+				RecordComponentOperation([Entity] { return Entity.RemoveAudioListener(); },
+					"Audio listener removal failed");
 				return;
 			}
 			if (!IsExpanded)
@@ -4310,7 +4603,7 @@ namespace
 			if (m_EditorStyle.IconButton(
 				PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveScript", "Remove Script component", true))
 			{
-				RecordComponentOperation(Entity.RemoveScript(), "Script component removal failed");
+				RecordComponentOperation([Entity] { return Entity.RemoveScript(); }, "Script component removal failed");
 				return;
 			}
 			if (!IsExpanded)
@@ -4330,7 +4623,8 @@ namespace
 			if (Changed && Script)
 			{
 				Component.ScriptAsset = *Script;
-				RecordComponentOperation(Entity.SetScript(Component), "Script component update failed");
+				RecordComponentOperation([Entity, Component] { return Entity.SetScript(Component); },
+					"Script component update failed");
 			}
 			m_EditorStyle.EndComponentBody();
 		}
@@ -5145,7 +5439,7 @@ namespace
 			m_SelectedAsset.reset();
 			m_PendingDeleteAsset.reset();
 			m_OpenDeleteAssetDialog = false;
-			m_SceneDirty = false;
+			ResetSceneHistory();
 		}
 
 		void ShutdownImGui() noexcept
@@ -5207,6 +5501,8 @@ namespace
 		bool m_CursorRestoreValid = false;
 		bool m_SceneRendererInitializationFailed = false;
 		bool m_SceneDirty = false;
+		PulseForgeEditor::EditorCommandHistory m_SceneHistory;
+		uint32_t m_InspectorHistoryItem = 0;
 		bool m_OpenUnsavedDialog = false;
 		bool m_ConsoleAutoScroll = true;
 		bool m_ConsoleSelectableView = false;
