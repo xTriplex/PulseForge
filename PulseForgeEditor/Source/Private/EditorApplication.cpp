@@ -642,9 +642,8 @@ namespace
 			DrawWorkspacePanels();
 			RenderViewportScene();
 			UpdateWindowTitle();
-			if (m_SceneHistory.IsActive() &&
-				m_InspectorHistoryItem != (std::numeric_limits<uint32_t>::max)() &&
-				(!GImGui || GImGui->ActiveId != m_InspectorHistoryItem))
+			if (PulseForgeEditor::ShouldFinishSceneEditForInspector(
+				m_SceneHistory.IsActive(), m_InspectorHistoryItem, GImGui ? GImGui->ActiveId : 0))
 				FinishSceneEdit();
 
 			ImGui::Render();
@@ -1220,7 +1219,7 @@ namespace
 				SetError("Could not begin the scene edit: " + Begun.error());
 				return false;
 			}
-			m_InspectorHistoryItem = (std::numeric_limits<uint32_t>::max)();
+			m_InspectorHistoryItem = PulseForgeEditor::NoInspectorHistoryItem;
 			return true;
 		}
 
@@ -5407,7 +5406,8 @@ namespace
 				return;
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Inspector))
 			{
-				if (m_SceneHistory.IsActive() && m_InspectorHistoryItem != (GImGui ? GImGui->ActiveId : 0))
+				if (PulseForgeEditor::ShouldFinishSceneEditForInspector(
+					m_SceneHistory.IsActive(), m_InspectorHistoryItem, GImGui ? GImGui->ActiveId : 0))
 					FinishSceneEdit();
 				if (!m_Scene || !m_SelectedEntity)
 					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Entity, "Select an entity in the Hierarchy.");

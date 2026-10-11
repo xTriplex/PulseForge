@@ -7534,6 +7534,10 @@ end
 			ViewportGizmoPointerOutcome::Cancel);
 		PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ false, false, true }, false) ==
 			ViewportGizmoPointerOutcome::Idle);
+		PF_CHECK(Tests, ShouldFinishSceneEditForInspector(true, 71, 0));
+		PF_CHECK(Tests, !ShouldFinishSceneEditForInspector(true, 71, 71));
+		PF_CHECK(Tests, !ShouldFinishSceneEditForInspector(true, NoInspectorHistoryItem, 0));
+		PF_CHECK(Tests, !ShouldFinishSceneEditForInspector(false, 71, 0));
 	}
 
 	void TestAltGizmoDragHistoryIntegration(TestRunner& Tests)
@@ -7622,6 +7626,19 @@ end
 			if (!Before || !History.Begin(Description, *Before))
 				return;
 
+			// The viewport is drawn before the Inspector. The production Inspector policy must leave
+			// a gizmo-owned transaction active while the gesture is still changing scene state.
+			const uint32_t GizmoInspectorItem = NoInspectorHistoryItem;
+			const bool PrematurelyFinished = ShouldFinishSceneEditForInspector(
+				History.IsActive(), GizmoInspectorItem, 0);
+			PF_CHECK(Tests, !PrematurelyFinished && History.IsActive() && !History.CanUndo());
+			if (PrematurelyFinished)
+			{
+				auto InspectorBoundary = Capture(SceneValue, Selection);
+				if (InspectorBoundary)
+					(void)History.Commit(std::move(*InspectorBoundary));
+			}
+
 			PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ true, true, false }, false) ==
 				ViewportGizmoPointerOutcome::Continue);
 			std::optional<UUID> DuplicateID;
@@ -7645,10 +7662,15 @@ end
 			TransformComponent Final = Initial;
 			if (Operation == TransformGizmoOperation::Translate)
 				Final.Translation += glm::vec3(2.5f, -0.25f, 1.0f);
-			else
+			else if (Operation == TransformGizmoOperation::Rotate)
 				Final.Rotation = glm::normalize(glm::angleAxis(glm::radians(37.0f), glm::vec3(0.0f, 1.0f, 0.0f)) *
 					Initial.Rotation);
+			else
+				Final.Scale *= glm::vec3(1.25f, 0.75f, 1.5f);
 			PF_CHECK(Tests, Target->SetTransform(Final));
+			PF_CHECK(Tests, !ShouldFinishSceneEditForInspector(
+				History.IsActive(), GizmoInspectorItem, 0));
+			PF_CHECK(Tests, History.IsActive() && !History.CanUndo());
 
 			const auto Release = GetViewportGizmoPointerOutcome({ true, false, true }, false);
 			PF_CHECK(Tests, Release == ViewportGizmoPointerOutcome::Complete);
@@ -7675,6 +7697,7 @@ end
 			const auto RestoredOriginalTransform = RestoredOriginal->GetTransform();
 			PF_CHECK(Tests, RestoredOriginalTransform &&
 				glm::length(RestoredOriginalTransform->Translation - Initial.Translation) < 1.0e-5f &&
+				glm::length(RestoredOriginalTransform->Scale - Initial.Scale) < 1.0e-5f &&
 				1.0f - std::abs(glm::dot(RestoredOriginalTransform->Rotation, Initial.Rotation)) < 1.0e-5f);
 
 			const auto Redone = History.Redo([&](std::string_view State) { return Restore(State, SceneValue, Selection); });
@@ -7691,6 +7714,7 @@ end
 				const auto RedoneTransform = RedoneDuplicate->GetTransform();
 				PF_CHECK(Tests, RedoneTransform &&
 					glm::length(RedoneTransform->Translation - Final.Translation) < 1.0e-5f &&
+					glm::length(RedoneTransform->Scale - Final.Scale) < 1.0e-5f &&
 					1.0f - std::abs(glm::dot(RedoneTransform->Rotation, Final.Rotation)) < 1.0e-5f);
 			}
 			else
@@ -7702,13 +7726,92 @@ end
 				const auto RedoneTransform = RedoneOriginal->GetTransform();
 				PF_CHECK(Tests, RedoneTransform &&
 					glm::length(RedoneTransform->Translation - Final.Translation) < 1.0e-5f &&
+					glm::length(RedoneTransform->Scale - Final.Scale) < 1.0e-5f &&
 					1.0f - std::abs(glm::dot(RedoneTransform->Rotation, Final.Rotation)) < 1.0e-5f);
 			}
 		};
 
 		RunSingleGesture(TransformGizmoOperation::Translate, false, "Move Selection");
 		RunSingleGesture(TransformGizmoOperation::Translate, true, "Move Selection");
+		RunSingleGesture(TransformGizmoOperation::Rotate, false, "Rotate Selection");
 		RunSingleGesture(TransformGizmoOperation::Rotate, true, "Rotate Selection");
+		RunSingleGesture(TransformGizmoOperation::Scale, false, "Scale Selection");
+
+		{
+			Scene SceneValue;
+			EditorSelection Selection;
+			EditorCommandHistory History;
+			History.Reset();
+			auto Original = SceneValue.CreateEntity("Original");
+			PF_CHECK(Tests, Original.has_value());
+			if (!Original)
+				return;
+			const UUID OriginalID = Original->GetUUID();
+			Selection.SelectSingle(OriginalID);
+			auto BeforeDuplicate = Capture(SceneValue, Selection);
+			PF_CHECK(Tests, BeforeDuplicate && History.Begin("Duplicate Entities", *BeforeDuplicate));
+			if (!BeforeDuplicate || !History.IsActive())
+				return;
+			auto Duplicate = SceneValue.DuplicateEntity(*Original);
+			PF_CHECK(Tests, Duplicate.has_value());
+			if (!Duplicate)
+				return;
+			const UUID DuplicateID = Duplicate->GetUUID();
+			Selection.SelectSingle(DuplicateID);
+			auto AfterDuplicate = Capture(SceneValue, Selection);
+			PF_CHECK(Tests, AfterDuplicate && History.Commit(std::move(*AfterDuplicate)));
+			if (!History.CanUndo())
+				return;
+
+			auto DuplicateTransform = Duplicate->GetTransform();
+			PF_CHECK(Tests, DuplicateTransform.has_value());
+			if (!DuplicateTransform)
+				return;
+			const TransformComponent BeforeMoveTransform = *DuplicateTransform;
+			auto BeforeMove = Capture(SceneValue, Selection);
+			PF_CHECK(Tests, BeforeMove && History.Begin("Move Selection", *BeforeMove));
+			if (!BeforeMove || !History.IsActive())
+				return;
+			const bool InspectorPrematurelyFinishesMove = ShouldFinishSceneEditForInspector(
+				History.IsActive(), NoInspectorHistoryItem, 0);
+			PF_CHECK(Tests, !InspectorPrematurelyFinishesMove && History.IsActive() && !History.CanUndo());
+			if (InspectorPrematurelyFinishesMove)
+			{
+				auto InspectorBoundary = Capture(SceneValue, Selection);
+				if (InspectorBoundary)
+					(void)History.Commit(std::move(*InspectorBoundary));
+			}
+			TransformComponent AfterMoveTransform = BeforeMoveTransform;
+			AfterMoveTransform.Translation += glm::vec3(0.5f, 1.0f, -0.25f);
+			PF_CHECK(Tests, Duplicate->SetTransform(AfterMoveTransform));
+			PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ true, false, true }, false) ==
+				ViewportGizmoPointerOutcome::Complete);
+			auto AfterMove = Capture(SceneValue, Selection);
+			PF_CHECK(Tests, AfterMove && History.Commit(std::move(*AfterMove)) && History.GetCommandCount() == 2 &&
+				History.GetCursor() == 2 && History.CanUndo() &&
+				History.GetUndoCommand()->Description == "Move Selection");
+
+			const auto UndoMove = History.Undo([&](std::string_view State)
+				{ return Restore(State, SceneValue, Selection); });
+			PF_CHECK(Tests, UndoMove && *UndoMove && SceneValue.FindEntity(DuplicateID) &&
+				Selection.GetPrimary() == DuplicateID);
+			auto MovedBackDuplicate = SceneValue.FindEntity(DuplicateID);
+			PF_CHECK(Tests, MovedBackDuplicate && MovedBackDuplicate->GetTransform() &&
+				glm::length(MovedBackDuplicate->GetTransform()->Translation - BeforeMoveTransform.Translation) < 1.0e-5f);
+			const auto UndoDuplicate = History.Undo([&](std::string_view State)
+				{ return Restore(State, SceneValue, Selection); });
+			PF_CHECK(Tests, UndoDuplicate && *UndoDuplicate && !SceneValue.FindEntity(DuplicateID) &&
+				Selection.GetPrimary() == OriginalID);
+			const auto RedoDuplicate = History.Redo([&](std::string_view State)
+				{ return Restore(State, SceneValue, Selection); });
+			PF_CHECK(Tests, RedoDuplicate && *RedoDuplicate && SceneValue.FindEntity(DuplicateID));
+			const auto RedoMove = History.Redo([&](std::string_view State)
+				{ return Restore(State, SceneValue, Selection); });
+			PF_CHECK(Tests, RedoMove && *RedoMove && Selection.GetPrimary() == DuplicateID);
+			auto MovedDuplicate = SceneValue.FindEntity(DuplicateID);
+			PF_CHECK(Tests, MovedDuplicate && MovedDuplicate->GetTransform() &&
+				glm::length(MovedDuplicate->GetTransform()->Translation - AfterMoveTransform.Translation) < 1.0e-5f);
+		}
 
 		{
 			Scene SceneValue;
@@ -7777,6 +7880,8 @@ end
 			PF_CHECK(Tests, Begun.has_value());
 			if (!Begun)
 				return;
+			PF_CHECK(Tests, !ShouldFinishSceneEditForInspector(
+				History.IsActive(), NoInspectorHistoryItem, 0) && History.IsActive());
 
 			auto DuplicateParent = SceneValue.DuplicateEntity(*OriginalParent);
 			auto DuplicateChild = SceneValue.DuplicateEntity(*OriginalChild);
@@ -7800,6 +7905,8 @@ end
 				}
 			}
 			Selection.Set({ DuplicateParentID, DuplicateSecondID }, DuplicateParentID);
+			PF_CHECK(Tests, !ShouldFinishSceneEditForInspector(
+				History.IsActive(), NoInspectorHistoryItem, 0) && History.IsActive() && !History.CanUndo());
 			PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ true, false, true }, false) ==
 				ViewportGizmoPointerOutcome::Complete);
 			auto After = Capture(SceneValue, Selection);

@@ -1,7 +1,21 @@
 #pragma once
 
+#include <cstdint>
+#include <limits>
+
 namespace PulseForgeEditor
 {
+	inline constexpr uint32_t NoInspectorHistoryItem = (std::numeric_limits<uint32_t>::max)();
+
+	[[nodiscard]] constexpr bool ShouldFinishSceneEditForInspector(
+		bool TransactionActive,
+		uint32_t InspectorHistoryItem,
+		uint32_t ActiveItem) noexcept
+	{
+		return TransactionActive && InspectorHistoryItem != NoInspectorHistoryItem &&
+			InspectorHistoryItem != ActiveItem;
+	}
+
 	struct EditorHistoryShortcutContext
 	{
 		bool SceneAvailable = false;
