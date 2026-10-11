@@ -914,6 +914,229 @@ namespace PulseForge
 			return {};
 		}
 
+		std::expected<void, GltfMeshImportError> GenerateVertexTangents(
+			std::vector<GltfMeshVertex>& Vertices,
+			std::vector<uint32_t>& Indices,
+			const std::filesystem::path& Path)
+		{
+			constexpr uint32_t Unassigned = std::numeric_limits<uint32_t>::max();
+			const size_t OriginalVertexCount = Vertices.size();
+			std::vector<std::array<uint32_t, 2>> RemappedVertices(OriginalVertexCount, { Unassigned, Unassigned });
+			std::vector<int8_t> AssignedSigns(OriginalVertexCount, 0);
+			std::vector<int8_t> FinalSigns(OriginalVertexCount, 0);
+			std::vector<std::array<float, 3>> TangentSums(OriginalVertexCount, { 0.0f, 0.0f, 0.0f });
+			std::vector<std::array<float, 3>> BitangentSums(OriginalVertexCount, { 0.0f, 0.0f, 0.0f });
+
+			const auto Dot = [](const std::array<float, 3>& A, const std::array<float, 3>& B)
+			{
+				return A[0] * B[0] + A[1] * B[1] + A[2] * B[2];
+			};
+			const auto Cross = [](const std::array<float, 3>& A, const std::array<float, 3>& B)
+			{
+				return std::array<float, 3>{
+					A[1] * B[2] - A[2] * B[1],
+					A[2] * B[0] - A[0] * B[2],
+					A[0] * B[1] - A[1] * B[0] };
+			};
+			const auto Normalize = [](std::array<float, 3>& Value)
+			{
+				const float LengthSquared = Value[0] * Value[0] + Value[1] * Value[1] + Value[2] * Value[2];
+				if (!std::isfinite(LengthSquared) || LengthSquared <= 1.0e-20f)
+					return false;
+				const float InverseLength = 1.0f / std::sqrt(LengthSquared);
+				for (float& Component : Value)
+					Component *= InverseLength;
+				return true;
+			};
+
+			for (size_t Triangle = 0; Triangle < Indices.size(); Triangle += 3)
+			{
+				const GltfMeshVertex& A = Vertices[Indices[Triangle]];
+				const GltfMeshVertex& B = Vertices[Indices[Triangle + 1]];
+				const GltfMeshVertex& C = Vertices[Indices[Triangle + 2]];
+				const std::array<float, 3> Edge1{
+					B.Position[0] - A.Position[0], B.Position[1] - A.Position[1], B.Position[2] - A.Position[2] };
+				const std::array<float, 3> Edge2{
+					C.Position[0] - A.Position[0], C.Position[1] - A.Position[1], C.Position[2] - A.Position[2] };
+				const float Delta1U = B.TexCoord[0] - A.TexCoord[0];
+				const float Delta1V = B.TexCoord[1] - A.TexCoord[1];
+				const float Delta2U = C.TexCoord[0] - A.TexCoord[0];
+				const float Delta2V = C.TexCoord[1] - A.TexCoord[1];
+				const float Determinant = Delta1U * Delta2V - Delta1V * Delta2U;
+				bool HasUvArea = std::isfinite(Determinant) && std::abs(Determinant) > 1.0e-12f;
+				std::array<float, 3> TriangleTangent{};
+				std::array<float, 3> TriangleBitangent{};
+				if (HasUvArea)
+				{
+					const float InverseDeterminant = 1.0f / Determinant;
+					for (size_t Component = 0; Component < 3; ++Component)
+					{
+						TriangleTangent[Component] =
+							(Edge1[Component] * Delta2V - Edge2[Component] * Delta1V) * InverseDeterminant;
+						TriangleBitangent[Component] =
+							(Edge2[Component] * Delta1U - Edge1[Component] * Delta2U) * InverseDeterminant;
+					}
+					const float TangentLengthSquared = Dot(TriangleTangent, TriangleTangent);
+					const float BitangentLengthSquared = Dot(TriangleBitangent, TriangleBitangent);
+					if (!std::isfinite(TangentLengthSquared) || !std::isfinite(BitangentLengthSquared))
+						return std::unexpected(MakeError(
+							GltfMeshImportErrorCode::InvalidMesh, Path, "Generated glTF tangent basis is not finite"));
+					if (TangentLengthSquared <= 1.0e-20f || BitangentLengthSquared <= 1.0e-20f)
+					{
+						HasUvArea = false;
+						TriangleTangent = {};
+						TriangleBitangent = {};
+					}
+					else
+					{
+						Normalize(TriangleTangent);
+						Normalize(TriangleBitangent);
+					}
+				}
+
+				for (size_t Corner = 0; Corner < 3; ++Corner)
+				{
+					const uint32_t OriginalIndex = Indices[Triangle + Corner];
+					const GltfMeshVertex OriginalVertex = Vertices[OriginalIndex];
+					std::array<float, 3> Normal{ OriginalVertex.Normal[0], OriginalVertex.Normal[1], OriginalVertex.Normal[2] };
+					if (!Normalize(Normal))
+						return std::unexpected(MakeError(
+							GltfMeshImportErrorCode::InvalidMesh, Path, "Tangent generation encountered a degenerate normal"));
+
+					std::array<float, 3> Tangent = HasUvArea ? TriangleTangent : std::array<float, 3>{ 0.0f, 0.0f, 0.0f };
+					const float NormalProjection = Dot(Normal, Tangent);
+					for (size_t Component = 0; Component < 3; ++Component)
+						Tangent[Component] -= Normal[Component] * NormalProjection;
+					if (!Normalize(Tangent))
+					{
+						const std::array<float, 3> Axis = std::abs(Normal[2]) < 0.999f
+							? std::array<float, 3>{ 0.0f, 0.0f, 1.0f }
+							: std::array<float, 3>{ 0.0f, 1.0f, 0.0f };
+						Tangent = Cross(Axis, Normal);
+						if (!Normalize(Tangent))
+							return std::unexpected(MakeError(
+								GltfMeshImportErrorCode::InvalidMesh, Path, "Could not construct a fallback tangent"));
+					}
+
+					int8_t Sign = 1;
+					if (HasUvArea && Dot(Cross(Normal, Tangent), TriangleBitangent) < 0.0f)
+						Sign = -1;
+					const size_t SignIndex = Sign < 0 ? 1 : 0;
+					uint32_t TargetIndex = RemappedVertices[OriginalIndex][SignIndex];
+					if (TargetIndex == Unassigned)
+					{
+						if (AssignedSigns[OriginalIndex] == 0)
+						{
+							TargetIndex = OriginalIndex;
+							AssignedSigns[OriginalIndex] = Sign;
+							FinalSigns[TargetIndex] = Sign;
+						}
+						else
+						{
+							if (Vertices.size() >= MaxVertexCount || Vertices.size() >= std::numeric_limits<uint32_t>::max())
+								return std::unexpected(MakeError(
+									GltfMeshImportErrorCode::ResourceLimitExceeded,
+									Path, "Tangent seam splitting exceeds the mesh vertex limit"));
+							TargetIndex = static_cast<uint32_t>(Vertices.size());
+							Vertices.push_back(OriginalVertex);
+							FinalSigns.push_back(Sign);
+							TangentSums.push_back({ 0.0f, 0.0f, 0.0f });
+							BitangentSums.push_back({ 0.0f, 0.0f, 0.0f });
+						}
+						RemappedVertices[OriginalIndex][SignIndex] = TargetIndex;
+					}
+					Indices[Triangle + Corner] = TargetIndex;
+
+					if (HasUvArea)
+					{
+						const uint32_t FirstOther = Indices[Triangle + ((Corner + 1) % 3)];
+						const uint32_t SecondOther = Indices[Triangle + ((Corner + 2) % 3)];
+						const GltfMeshVertex& FirstVertex = Vertices[FirstOther];
+						const GltfMeshVertex& SecondVertex = Vertices[SecondOther];
+						std::array<float, 3> FirstEdge{
+							FirstVertex.Position[0] - OriginalVertex.Position[0],
+							FirstVertex.Position[1] - OriginalVertex.Position[1],
+							FirstVertex.Position[2] - OriginalVertex.Position[2] };
+						std::array<float, 3> SecondEdge{
+							SecondVertex.Position[0] - OriginalVertex.Position[0],
+							SecondVertex.Position[1] - OriginalVertex.Position[1],
+							SecondVertex.Position[2] - OriginalVertex.Position[2] };
+						if (Normalize(FirstEdge) && Normalize(SecondEdge))
+						{
+							const float Angle = std::acos(std::clamp(Dot(FirstEdge, SecondEdge), -1.0f, 1.0f));
+							for (size_t Component = 0; Component < 3; ++Component)
+							{
+								TangentSums[TargetIndex][Component] += Tangent[Component] * Angle;
+								BitangentSums[TargetIndex][Component] += TriangleBitangent[Component] * Angle;
+							}
+						}
+					}
+				}
+			}
+
+			for (size_t VertexIndex = 0; VertexIndex < Vertices.size(); ++VertexIndex)
+			{
+				GltfMeshVertex& Vertex = Vertices[VertexIndex];
+				std::array<float, 3> Normal{ Vertex.Normal[0], Vertex.Normal[1], Vertex.Normal[2] };
+				if (!Normalize(Normal))
+					return std::unexpected(MakeError(
+						GltfMeshImportErrorCode::InvalidMesh, Path, "Tangent generation encountered a degenerate normal"));
+				std::array<float, 3> Tangent = TangentSums[VertexIndex];
+				const float Projection = Dot(Normal, Tangent);
+				for (size_t Component = 0; Component < 3; ++Component)
+					Tangent[Component] -= Normal[Component] * Projection;
+				if (!Normalize(Tangent))
+				{
+					const std::array<float, 3> Axis = std::abs(Normal[2]) < 0.999f
+						? std::array<float, 3>{ 0.0f, 0.0f, 1.0f }
+						: std::array<float, 3>{ 0.0f, 1.0f, 0.0f };
+					Tangent = Cross(Axis, Normal);
+					if (!Normalize(Tangent))
+						return std::unexpected(MakeError(
+							GltfMeshImportErrorCode::InvalidMesh, Path, "Could not construct a fallback tangent"));
+				}
+				const std::array<float, 3> NormalCrossTangent = Cross(Normal, Tangent);
+				const float BitangentLengthSquared = Dot(BitangentSums[VertexIndex], BitangentSums[VertexIndex]);
+				const float Handedness = BitangentLengthSquared > 1.0e-20f
+					? (Dot(NormalCrossTangent, BitangentSums[VertexIndex]) < 0.0f ? -1.0f : 1.0f)
+					: (FinalSigns[VertexIndex] < 0 ? -1.0f : 1.0f);
+				for (size_t Component = 0; Component < 3; ++Component)
+					Vertex.Tangent[Component] = Tangent[Component];
+				Vertex.Tangent[3] = Handedness;
+			}
+			return {};
+		}
+
+		std::expected<void, GltfMeshImportError> NormalizeAuthoredTangents(
+			std::vector<GltfMeshVertex>& Vertices,
+			const std::filesystem::path& Path)
+		{
+			for (GltfMeshVertex& Vertex : Vertices)
+			{
+				std::array<float, 3> Normal{ Vertex.Normal[0], Vertex.Normal[1], Vertex.Normal[2] };
+				std::array<float, 3> Tangent{ Vertex.Tangent[0], Vertex.Tangent[1], Vertex.Tangent[2] };
+				const float LengthSquared = Tangent[0] * Tangent[0] + Tangent[1] * Tangent[1] + Tangent[2] * Tangent[2];
+				if (!std::isfinite(LengthSquared) || LengthSquared <= 1.0e-20f ||
+					!std::isfinite(Vertex.Tangent[3]) || std::abs(Vertex.Tangent[3]) <= 1.0e-6f)
+					return std::unexpected(MakeError(
+						GltfMeshImportErrorCode::InvalidAccessor, Path,
+						"TANGENT values must contain a non-zero direction and non-zero handedness"));
+				const float NormalProjection = Normal[0] * Tangent[0] + Normal[1] * Tangent[1] + Normal[2] * Tangent[2];
+				for (size_t Component = 0; Component < 3; ++Component)
+					Tangent[Component] -= Normal[Component] * NormalProjection;
+				const float OrthogonalLengthSquared = Tangent[0] * Tangent[0] + Tangent[1] * Tangent[1] + Tangent[2] * Tangent[2];
+				if (!std::isfinite(OrthogonalLengthSquared) || OrthogonalLengthSquared <= 1.0e-20f)
+					return std::unexpected(MakeError(
+						GltfMeshImportErrorCode::InvalidAccessor, Path,
+						"TANGENT must not be parallel to its vertex normal"));
+				const float InverseLength = 1.0f / std::sqrt(OrthogonalLengthSquared);
+				for (size_t Component = 0; Component < 3; ++Component)
+					Vertex.Tangent[Component] = Tangent[Component] * InverseLength;
+				Vertex.Tangent[3] = Vertex.Tangent[3] < 0.0f ? -1.0f : 1.0f;
+			}
+			return {};
+		}
+
 		bool HasExtension(const std::filesystem::path& Path, std::string_view Extension)
 		{
 			std::string Actual = PathToUtf8(Path.extension());
@@ -933,7 +1156,8 @@ namespace PulseForge
 			{ VertexSemantic::Position, VertexFormat::Float3, offsetof(GltfMeshVertex, Position) },
 			{ VertexSemantic::Color, VertexFormat::Float3, offsetof(GltfMeshVertex, Color) },
 			{ VertexSemantic::TexCoord, VertexFormat::Float2, offsetof(GltfMeshVertex, TexCoord) },
-			{ VertexSemantic::Normal, VertexFormat::Float3, offsetof(GltfMeshVertex, Normal) }
+			{ VertexSemantic::Normal, VertexFormat::Float3, offsetof(GltfMeshVertex, Normal) },
+			{ VertexSemantic::Tangent, VertexFormat::Float4, offsetof(GltfMeshVertex, Tangent) }
 		};
 		Description.VertexData = std::as_bytes(std::span(Vertices));
 		Description.Indices = Indices;
@@ -1230,6 +1454,24 @@ namespace PulseForge
 				}
 			}
 
+			const bool HasTangents = FindField(*Attributes, "TANGENT") != nullptr;
+			if (HasTangents)
+			{
+				constexpr std::array<size_t, 1> TangentCounts = { 4 };
+				auto Tangents = ResolveFloatAttribute(
+					Document, *Buffers, *Attributes, "TANGENT", Positions->Count, TangentCounts, *Source);
+				if (!Tangents)
+					return std::unexpected(std::move(Tangents.error()));
+				for (size_t VertexIndex = 0; VertexIndex < Positions->Count; ++VertexIndex)
+					for (size_t Component = 0; Component < 4; ++Component)
+					{
+						auto Value = ReadFloatComponent(*Tangents, VertexIndex, Component, *Source);
+						if (!Value)
+							return std::unexpected(std::move(Value.error()));
+						Imported.Vertices[VertexIndex].Tangent[Component] = *Value;
+					}
+			}
+
 			if (const Json* IndicesIndexValue = FindField(Primitive, "indices"); IndicesIndexValue != nullptr)
 			{
 				const auto IndicesIndex = ReadUnsignedInteger(IndicesIndexValue, *Source, "primitives.indices");
@@ -1299,6 +1541,13 @@ namespace PulseForge
 				if (auto Generated = GenerateVertexNormals(Imported.Vertices, Imported.Indices, *Source); !Generated)
 					return std::unexpected(std::move(Generated.error()));
 			}
+			if (HasTangents)
+			{
+				if (auto Normalized = NormalizeAuthoredTangents(Imported.Vertices, *Source); !Normalized)
+					return std::unexpected(std::move(Normalized.error()));
+			}
+			else if (auto Generated = GenerateVertexTangents(Imported.Vertices, Imported.Indices, *Source); !Generated)
+				return std::unexpected(std::move(Generated.error()));
 			Imported.Name += " primitive " + std::to_string(PrimitiveIndex);
 			if (auto Validation = ValidateMeshDescription(Imported.GetMeshDescription()); !Validation)
 			{

@@ -6,10 +6,91 @@
 
 #include <exception>
 #include <functional>
+#include <cmath>
 #include <utility>
+#include <vector>
 
 namespace PulseForge
 {
+	namespace
+	{
+		struct OwnedMipLevel
+		{
+			uint32_t Width = 0;
+			uint32_t Height = 0;
+			std::vector<uint8_t> Pixels;
+		};
+
+		float SrgbToLinear(uint8_t Value)
+		{
+			const float Encoded = static_cast<float>(Value) / 255.0f;
+			return Encoded <= 0.04045f ? Encoded / 12.92f : std::pow((Encoded + 0.055f) / 1.055f, 2.4f);
+		}
+
+		uint8_t LinearToSrgbByte(float Value)
+		{
+			Value = std::clamp(Value, 0.0f, 1.0f);
+			const float Encoded = Value <= 0.0031308f
+				? Value * 12.92f
+				: 1.055f * std::pow(Value, 1.0f / 2.4f) - 0.055f;
+			return static_cast<uint8_t>(std::lround(Encoded * 255.0f));
+		}
+
+		std::vector<OwnedMipLevel> BuildMipChain(
+			uint32_t Width,
+			uint32_t Height,
+			std::span<const uint8_t> SourcePixels,
+			bool IsSrgb)
+		{
+			std::vector<OwnedMipLevel> Levels;
+			Levels.push_back({ Width, Height, { SourcePixels.begin(), SourcePixels.end() } });
+			while (Width > 1 || Height > 1)
+			{
+				const OwnedMipLevel& Previous = Levels.back();
+				const uint32_t NextWidth = (std::max)(1u, Width / 2);
+				const uint32_t NextHeight = (std::max)(1u, Height / 2);
+				OwnedMipLevel Next;
+				Next.Width = NextWidth;
+				Next.Height = NextHeight;
+				Next.Pixels.resize(static_cast<size_t>(NextWidth) * NextHeight * 4);
+				for (uint32_t Y = 0; Y < NextHeight; ++Y)
+				{
+					const uint32_t StartY = static_cast<uint32_t>((static_cast<uint64_t>(Y) * Height) / NextHeight);
+					const uint32_t EndY = static_cast<uint32_t>((static_cast<uint64_t>(Y + 1) * Height) / NextHeight);
+					for (uint32_t X = 0; X < NextWidth; ++X)
+					{
+						const uint32_t StartX = static_cast<uint32_t>((static_cast<uint64_t>(X) * Width) / NextWidth);
+						const uint32_t EndX = static_cast<uint32_t>((static_cast<uint64_t>(X + 1) * Width) / NextWidth);
+						std::array<float, 4> Sum{};
+						uint32_t SampleCount = 0;
+						for (uint32_t SourceY = StartY; SourceY < EndY; ++SourceY)
+							for (uint32_t SourceX = StartX; SourceX < EndX; ++SourceX)
+							{
+								const size_t Source = (static_cast<size_t>(SourceY) * Width + SourceX) * 4;
+								for (size_t Channel = 0; Channel < 4; ++Channel)
+									Sum[Channel] += IsSrgb && Channel < 3
+										? SrgbToLinear(Previous.Pixels[Source + Channel])
+										: static_cast<float>(Previous.Pixels[Source + Channel]) / 255.0f;
+								++SampleCount;
+							}
+						const size_t Destination = (static_cast<size_t>(Y) * NextWidth + X) * 4;
+						for (size_t Channel = 0; Channel < 4; ++Channel)
+						{
+							const float Average = Sum[Channel] / static_cast<float>(SampleCount);
+						Next.Pixels[Destination + Channel] = IsSrgb && Channel < 3
+							? LinearToSrgbByte(Average)
+							: static_cast<uint8_t>(std::lround(Average * 255.0f));
+						}
+					}
+				}
+				Levels.push_back(std::move(Next));
+				Width = NextWidth;
+				Height = NextHeight;
+			}
+			return Levels;
+		}
+	}
+
 	TextureAssetCache::TextureAssetCache(
 		Application& Runtime,
 		std::filesystem::path ProjectRoot,
@@ -59,8 +140,21 @@ namespace PulseForge
 		Description.Width = ImportedImage->Width;
 		Description.Height = ImportedImage->Height;
 		Description.Format = Format;
+		auto MipLevels = BuildMipChain(
+			ImportedImage->Width,
+			ImportedImage->Height,
+			ImportedImage->RGBA8Pixels,
+			Format == TextureFormat::RGBA8_Srgb);
+		Description.MipLevels = static_cast<uint32_t>(MipLevels.size());
 		Description.DebugName = "Image asset " + Asset.ToString();
-		auto CreatedTexture = m_Runtime.CreateTexture(Description, std::as_bytes(std::span(ImportedImage->RGBA8Pixels)));
+		std::vector<TextureSubresourceData> InitialData;
+		InitialData.reserve(MipLevels.size());
+		for (uint32_t MipLevel = 0; MipLevel < MipLevels.size(); ++MipLevel)
+		{
+			const OwnedMipLevel& Level = MipLevels[MipLevel];
+			InitialData.push_back({ MipLevel, 0, std::as_bytes(std::span(Level.Pixels)), 0 });
+		}
+		auto CreatedTexture = m_Runtime.CreateTexture(Description, InitialData);
 		if (!CreatedTexture)
 		{
 			return std::unexpected(TextureAssetError{

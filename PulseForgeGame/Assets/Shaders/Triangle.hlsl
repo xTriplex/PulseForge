@@ -1,7 +1,8 @@
 cbuffer Material : register(b0)
 {
 	float4 BaseColorFactor;
-	float4 SurfaceParameters; // metallic, roughness, unused, unused
+	float4 SurfaceParameters; // metallic, roughness, normal scale, occlusion strength
+	float4 EmissiveFactor;
 };
 
 cbuffer Object : register(b1)
@@ -48,6 +49,10 @@ Texture2D DiffuseTexture : register(t0);
 TextureCube IrradianceTexture : register(t1);
 TextureCube PrefilteredEnvironment : register(t2);
 Texture2D BrdfIntegrationLut : register(t3);
+Texture2D MetallicRoughnessTexture : register(t5);
+Texture2D NormalTexture : register(t6);
+Texture2D OcclusionTexture : register(t7);
+Texture2D EmissiveTexture : register(t8);
 SamplerState DiffuseSampler : register(s0);
 SamplerState EnvironmentSampler : register(s1);
 Texture2D<float> ShadowCascade0 : register(t0, space1);
@@ -231,6 +236,7 @@ struct VertexInput
 	[[vk::location(1)]] float3 Color : COLOR0;
 	[[vk::location(2)]] float2 TexCoord : TEXCOORD0;
 	[[vk::location(3)]] float3 Normal : NORMAL;
+	[[vk::location(4)]] float4 Tangent : TANGENT;
 };
 
 struct VertexOutput
@@ -241,6 +247,7 @@ struct VertexOutput
 	[[vk::location(2)]] float3 WorldPosition : TEXCOORD1;
 	[[vk::location(3)]] float3 Normal : TEXCOORD2;
 	[[vk::location(4)]] float ViewDepth : TEXCOORD3;
+	[[vk::location(5)]] float4 Tangent : TEXCOORD4;
 };
 
 float3 EvaluateDirectBRDF(
@@ -291,6 +298,9 @@ VertexOutput VSMain(VertexInput Input)
 	const float4 WorldPosition = mul(Model, float4(Input.Position, 1.0f));
 	Output.WorldPosition = WorldPosition.xyz;
 	Output.Normal = mul((float3x3)NormalTransform, Input.Normal);
+	const float3x3 ModelLinear = (float3x3)Model;
+	Output.Tangent.xyz = mul(ModelLinear, Input.Tangent.xyz);
+	Output.Tangent.w = Input.Tangent.w * (determinant(ModelLinear) < 0.0f ? -1.0f : 1.0f);
 	Output.ViewDepth = -mul(View, WorldPosition).z;
 	Output.Color = Input.Color;
 	Output.TexCoord = Input.TexCoord;
@@ -299,10 +309,22 @@ VertexOutput VSMain(VertexInput Input)
 
 float4 PSMain(VertexOutput Input) : SV_Target0
 {
-	const float3 Albedo = max(Input.Color * DiffuseTexture.Sample(DiffuseSampler, Input.TexCoord).rgb * BaseColorFactor.rgb, 0.0f);
-	const float Metallic = saturate(SurfaceParameters.x);
-	const float Roughness = clamp(SurfaceParameters.y, 0.045f, 1.0f);
-	const float3 N = SafeNormalize(Input.Normal, float3(0.0f, 0.0f, 1.0f));
+	const float4 BaseColorSample = DiffuseTexture.Sample(DiffuseSampler, Input.TexCoord);
+	const float4 MetallicRoughnessSample = MetallicRoughnessTexture.Sample(DiffuseSampler, Input.TexCoord);
+	const float3 Albedo = max(Input.Color * BaseColorSample.rgb * BaseColorFactor.rgb, 0.0f);
+	const float Metallic = saturate(SurfaceParameters.x * MetallicRoughnessSample.b);
+	const float Roughness = clamp(SurfaceParameters.y * MetallicRoughnessSample.g, 0.045f, 1.0f);
+	const float3 GeometricNormal = SafeNormalize(Input.Normal, float3(0.0f, 0.0f, 1.0f));
+	float3 Tangent = Input.Tangent.xyz - GeometricNormal * dot(GeometricNormal, Input.Tangent.xyz);
+	Tangent = SafeNormalize(Tangent, float3(1.0f, 0.0f, 0.0f));
+	const float3 Bitangent = SafeNormalize(cross(GeometricNormal, Tangent) * Input.Tangent.w,
+		float3(0.0f, 1.0f, 0.0f));
+	float3 TangentNormal = NormalTexture.Sample(DiffuseSampler, Input.TexCoord).xyz * 2.0f - 1.0f;
+	TangentNormal.xy *= SurfaceParameters.z;
+	TangentNormal = SafeNormalize(TangentNormal, float3(0.0f, 0.0f, 1.0f));
+	const float3 N = SafeNormalize(
+		Tangent * TangentNormal.x + Bitangent * TangentNormal.y + GeometricNormal * TangentNormal.z,
+		GeometricNormal);
 	const float3 V = SafeNormalize(CameraWorldPosition.xyz - Input.WorldPosition, float3(0.0f, 0.0f, 1.0f));
 	const float3 L = SafeNormalize(-LightRayDirection.xyz, float3(0.0f, 0.0f, 1.0f));
 	const float NdotV = max(dot(N, V), 1.0e-4f);
@@ -361,8 +383,12 @@ float4 PSMain(VertexOutput Input) : SV_Target0
 	const float3 SpecularIbl = Prefiltered * (AmbientFresnel * Brdf.x + Brdf.y);
 	const float2 ScreenUV = Input.Position.xy / max(OutputSize.xy, 1.0f.xx);
 	const float AmbientOcclusion = saturate(AmbientOcclusionTexture.Sample(AmbientOcclusionSampler, ScreenUV));
+	const float MaterialOcclusion = lerp(
+		1.0f, saturate(OcclusionTexture.Sample(DiffuseSampler, Input.TexCoord).r), saturate(SurfaceParameters.w));
+	const float DiffuseOcclusion = min(AmbientOcclusion, MaterialOcclusion);
 	const float SpecularOcclusion = saturate(1.0f - (1.0f - AmbientOcclusion) * (1.0f - NdotV) * Roughness);
-	const float3 EnvironmentIbl = (DiffuseIbl * AmbientOcclusion + SpecularIbl * SpecularOcclusion) * EnvironmentParameters.x;
-	const float3 Color = DirectionalColor + LocalDirectColor + EnvironmentIbl;
-	return float4(Color, BaseColorFactor.a);
+	const float3 EnvironmentIbl = (DiffuseIbl * DiffuseOcclusion + SpecularIbl * SpecularOcclusion) * EnvironmentParameters.x;
+	const float3 Emissive = EmissiveTexture.Sample(DiffuseSampler, Input.TexCoord).rgb * EmissiveFactor.rgb;
+	const float3 Color = DirectionalColor + LocalDirectColor + EnvironmentIbl + Emissive;
+	return float4(Color, BaseColorFactor.a * BaseColorSample.a);
 }

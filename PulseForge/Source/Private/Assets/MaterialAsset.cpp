@@ -16,7 +16,7 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t MaterialFormatVersion = 2;
+		constexpr int64_t MaterialFormatVersion = 3;
 		constexpr size_t MaximumMaterialFileSize = 1024 * 1024;
 		constexpr std::string_view MaterialFormatName = "PulseForgeMaterial";
 
@@ -45,13 +45,6 @@ namespace PulseForge
 
 	std::expected<void, MaterialAssetError> ValidateMaterialAssetDescription(const MaterialAssetDesc& Description)
 	{
-		if (Description.BaseColorTexture.IsNil())
-		{
-			return std::unexpected(MakeError(
-				MaterialAssetErrorCode::InvalidDescription,
-				"Material requires a non-nil base-color texture asset UUID"));
-		}
-
 		for (int Component = 0; Component < 4; ++Component)
 		{
 			const float Value = Description.BaseColorFactor[Component];
@@ -68,6 +61,20 @@ namespace PulseForge
 		if (!std::isfinite(Description.RoughnessFactor) || Description.RoughnessFactor < 0.0f || Description.RoughnessFactor > 1.0f)
 			return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDescription,
 				"Roughness factor must be a finite value in the range [0, 1]"));
+		if (!std::isfinite(Description.NormalScale) || Description.NormalScale < 0.0f || Description.NormalScale > 4.0f)
+			return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDescription,
+				"Normal scale must be a finite value in the range [0, 4]"));
+		if (!std::isfinite(Description.OcclusionStrength) ||
+			Description.OcclusionStrength < 0.0f || Description.OcclusionStrength > 1.0f)
+			return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDescription,
+				"Occlusion strength must be a finite value in the range [0, 1]"));
+		for (int Component = 0; Component < 3; ++Component)
+		{
+			const float Value = Description.EmissiveFactor[Component];
+			if (!std::isfinite(Value) || Value < 0.0f || Value > 10000.0f)
+				return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDescription,
+					"Emissive factor components must be finite values in the range [0, 10000]"));
+		}
 		return {};
 	}
 
@@ -81,7 +88,16 @@ namespace PulseForge
 			Json Document = Json::object();
 			Document["format"] = MaterialFormatName;
 			Document["version"] = MaterialFormatVersion;
-			Document["baseColorTexture"] = Material.BaseColorTexture.ToString();
+			Document["baseColorTexture"] = Material.BaseColorTexture.IsNil()
+				? Json(nullptr) : Json(Material.BaseColorTexture.ToString());
+			Document["metallicRoughnessTexture"] = Material.MetallicRoughnessTexture.IsNil()
+				? Json(nullptr) : Json(Material.MetallicRoughnessTexture.ToString());
+			Document["normalTexture"] = Material.NormalTexture.IsNil()
+				? Json(nullptr) : Json(Material.NormalTexture.ToString());
+			Document["occlusionTexture"] = Material.OcclusionTexture.IsNil()
+				? Json(nullptr) : Json(Material.OcclusionTexture.ToString());
+			Document["emissiveTexture"] = Material.EmissiveTexture.IsNil()
+				? Json(nullptr) : Json(Material.EmissiveTexture.ToString());
 			Document["baseColorFactor"] = {
 				Material.BaseColorFactor.r,
 				Material.BaseColorFactor.g,
@@ -90,6 +106,13 @@ namespace PulseForge
 			};
 			Document["metallicFactor"] = Material.MetallicFactor;
 			Document["roughnessFactor"] = Material.RoughnessFactor;
+			Document["normalScale"] = Material.NormalScale;
+			Document["occlusionStrength"] = Material.OcclusionStrength;
+			Document["emissiveFactor"] = {
+				Material.EmissiveFactor.r,
+				Material.EmissiveFactor.g,
+				Material.EmissiveFactor.b
+			};
 			return Document.dump(2) + "\n";
 		}
 		catch (const std::exception& Exception)
@@ -116,37 +139,72 @@ namespace PulseForge
 
 			const auto Version = Document.find("version");
 			if (Version == Document.end() || !Version->is_number_integer() ||
-				(Version->get<int64_t>() != 1 && Version->get<int64_t>() != MaterialFormatVersion))
+				(Version->get<int64_t>() < 1 || Version->get<int64_t>() > MaterialFormatVersion))
 				return std::unexpected(MakeError(MaterialAssetErrorCode::UnsupportedVersion, "Material document version is not supported"));
 			const int64_t DocumentVersion = Version->get<int64_t>();
 
 			const auto Texture = Document.find("baseColorTexture");
 			const auto Factor = Document.find("baseColorFactor");
-			if (Texture == Document.end() || !Texture->is_string() || Factor == Document.end() ||
+			if (Factor == Document.end() ||
 				!Factor->is_array() || Factor->size() != 4)
 			{
 				return std::unexpected(MakeError(
 					MaterialAssetErrorCode::InvalidDocument,
-					"Material requires a base-color texture UUID and a four-component base-color factor"));
-			}
-
-			const auto TextureAsset = UUID::Parse(Texture->get<std::string>());
-			if (!TextureAsset || TextureAsset->IsNil())
-			{
-				return std::unexpected(MakeError(
-					MaterialAssetErrorCode::InvalidDocument,
-					TextureAsset ? "Base-color texture UUID must not be nil" : TextureAsset.error().Message));
+				"Material requires a four-component base-color factor"));
 			}
 
 			MaterialAssetDesc Material;
-			Material.BaseColorTexture = *TextureAsset;
+			const auto ParseTexture = [&](std::string_view Name, AssetID& Destination) -> std::expected<void, MaterialAssetError>
+			{
+				const auto Value = Document.find(std::string(Name));
+				if (Value == Document.end() || Value->is_null())
+				{
+					Destination = {};
+					return {};
+				}
+				if (!Value->is_string())
+					return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument,
+						std::string(Name) + " must be a texture UUID string or null"));
+				const auto Identifier = UUID::Parse(Value->get<std::string>());
+				if (!Identifier)
+					return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument, Identifier.error().Message));
+				Destination = *Identifier;
+				return {};
+			};
+
+			if (DocumentVersion < 3)
+			{
+				if (Texture == Document.end() || !Texture->is_string())
+					return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument,
+						"Legacy material documents require a base-color texture UUID"));
+				if (auto Parsed = ParseTexture("baseColorTexture", Material.BaseColorTexture); !Parsed)
+					return std::unexpected(std::move(Parsed.error()));
+				if (Material.BaseColorTexture.IsNil())
+					return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument,
+						"Legacy material base-color texture UUID must not be nil"));
+			}
+			else
+			{
+				const std::array<std::pair<std::string_view, AssetID*>, 5> TextureFields{{
+					{ "baseColorTexture", &Material.BaseColorTexture },
+					{ "metallicRoughnessTexture", &Material.MetallicRoughnessTexture },
+					{ "normalTexture", &Material.NormalTexture },
+					{ "occlusionTexture", &Material.OcclusionTexture },
+					{ "emissiveTexture", &Material.EmissiveTexture }
+				}};
+				for (const auto& [Name, Destination] : TextureFields)
+				{
+					if (auto Parsed = ParseTexture(Name, *Destination); !Parsed)
+						return std::unexpected(std::move(Parsed.error()));
+				}
+			}
 			for (size_t Index = 0; Index < 4; ++Index)
 			{
 				if (!(*Factor)[Index].is_number())
 					return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument, "Base-color factor must contain numeric values"));
 				Material.BaseColorFactor[static_cast<int>(Index)] = (*Factor)[Index].get<float>();
 			}
-			if (DocumentVersion == 2)
+			if (DocumentVersion >= 2)
 			{
 				const auto Metallic = Document.find("metallicFactor");
 				const auto Roughness = Document.find("roughnessFactor");
@@ -156,6 +214,37 @@ namespace PulseForge
 						"Version 2 material requires numeric metallicFactor and roughnessFactor fields"));
 				Material.MetallicFactor = Metallic->get<float>();
 				Material.RoughnessFactor = Roughness->get<float>();
+			}
+			if (DocumentVersion >= 3)
+			{
+				const auto ReadOptionalFloat = [&](std::string_view Name, float& Destination) -> std::expected<void, MaterialAssetError>
+				{
+					const auto Value = Document.find(std::string(Name));
+					if (Value == Document.end())
+						return {};
+					if (!Value->is_number())
+						return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument,
+							std::string(Name) + " must be numeric"));
+					Destination = Value->get<float>();
+					return {};
+				};
+				if (auto Parsed = ReadOptionalFloat("normalScale", Material.NormalScale); !Parsed)
+					return std::unexpected(std::move(Parsed.error()));
+				if (auto Parsed = ReadOptionalFloat("occlusionStrength", Material.OcclusionStrength); !Parsed)
+					return std::unexpected(std::move(Parsed.error()));
+				if (const auto Emissive = Document.find("emissiveFactor"); Emissive != Document.end())
+				{
+					if (!Emissive->is_array() || Emissive->size() != 3)
+						return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument,
+							"emissiveFactor must be a three-component array"));
+					for (size_t Component = 0; Component < 3; ++Component)
+					{
+						if (!(*Emissive)[Component].is_number())
+							return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument,
+								"emissiveFactor must contain numeric values"));
+						Material.EmissiveFactor[static_cast<int>(Component)] = (*Emissive)[Component].get<float>();
+					}
+				}
 			}
 
 			if (auto Validation = ValidateMaterialAssetDescription(Material); !Validation)

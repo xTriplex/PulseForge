@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 #include <optional>
 #include <string>
@@ -15,10 +16,18 @@ namespace PulseForge
 {
 	struct MaterialAssetDesc
 	{
+		// Optional maps use nil AssetIDs and shader fallbacks when absent.
 		AssetID BaseColorTexture;
+		AssetID MetallicRoughnessTexture;
+		AssetID NormalTexture;
+		AssetID OcclusionTexture;
+		AssetID EmissiveTexture;
 		glm::vec4 BaseColorFactor{ 1.0f };
 		float MetallicFactor = 0.0f;
 		float RoughnessFactor = 1.0f;
+		float NormalScale = 1.0f;
+		float OcclusionStrength = 1.0f;
+		glm::vec3 EmissiveFactor{ 0.0f };
 	};
 
 	enum class MaterialAssetErrorCode : uint8_t

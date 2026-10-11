@@ -3494,12 +3494,41 @@ namespace
 		PF_CHECK(Tests, Deserialized && glm::all(glm::equal(Deserialized->BaseColorFactor, Description.BaseColorFactor)));
 		PF_CHECK(Tests, Deserialized && Deserialized->MetallicFactor == Description.MetallicFactor &&
 			Deserialized->RoughnessFactor == Description.RoughnessFactor);
-		PF_CHECK(Tests, Serialized && Serialized->find("\"version\": 2") != std::string::npos);
+		PF_CHECK(Tests, Serialized && Serialized->find("\"version\": 3") != std::string::npos);
 		const std::string Version1Document = "{\"format\":\"PulseForgeMaterial\",\"version\":1,\"baseColorTexture\":\"" +
 			TextureAsset->ToString() + "\",\"baseColorFactor\":[1,1,1,1]}";
 		const auto Version1Material = MaterialAssetSerializer::Deserialize(Version1Document);
 		PF_CHECK(Tests, Version1Material && Version1Material->MetallicFactor == 0.0f &&
 			Version1Material->RoughnessFactor == 1.0f);
+		const std::string Version2Document = "{\"format\":\"PulseForgeMaterial\",\"version\":2,\"baseColorTexture\":\"" +
+			TextureAsset->ToString() + "\",\"baseColorFactor\":[1,1,1,1],\"metallicFactor\":0.4,\"roughnessFactor\":0.6}";
+		const auto Version2Material = MaterialAssetSerializer::Deserialize(Version2Document);
+		PF_CHECK(Tests, Version2Material && Version2Material->MetallicFactor == 0.4f &&
+			Version2Material->RoughnessFactor == 0.6f && Version2Material->NormalTexture.IsNil());
+		MaterialAssetDesc TexturedDescription = Description;
+		TexturedDescription.BaseColorTexture = {};
+		TexturedDescription.MetallicRoughnessTexture = *TextureAsset;
+		TexturedDescription.NormalTexture = *TextureAsset;
+		TexturedDescription.OcclusionTexture = *TextureAsset;
+		TexturedDescription.EmissiveTexture = *TextureAsset;
+		TexturedDescription.NormalScale = 0.75f;
+		TexturedDescription.OcclusionStrength = 0.35f;
+		TexturedDescription.EmissiveFactor = { 0.5f, 1.25f, 2.0f };
+		const auto TexturedSerialized = MaterialAssetSerializer::Serialize(TexturedDescription);
+		PF_CHECK(Tests, TexturedSerialized.has_value());
+		if (!TexturedSerialized)
+			return;
+		const auto TexturedDeserialized = MaterialAssetSerializer::Deserialize(*TexturedSerialized);
+		PF_CHECK(Tests, TexturedDeserialized && TexturedDeserialized->BaseColorTexture.IsNil() &&
+			TexturedDeserialized->MetallicRoughnessTexture == TexturedDescription.MetallicRoughnessTexture &&
+			TexturedDeserialized->NormalTexture == TexturedDescription.NormalTexture &&
+			TexturedDeserialized->OcclusionTexture == TexturedDescription.OcclusionTexture &&
+			TexturedDeserialized->EmissiveTexture == TexturedDescription.EmissiveTexture);
+		PF_CHECK(Tests, TexturedDeserialized && TexturedDeserialized->NormalScale == 0.75f &&
+			TexturedDeserialized->OcclusionStrength == 0.35f &&
+			glm::all(glm::equal(TexturedDeserialized->EmissiveFactor, TexturedDescription.EmissiveFactor)));
+		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize(
+			"{\"format\":\"PulseForgeMaterial\",\"version\":3,\"baseColorFactor\":[1,1,1,1],\"normalTexture\":7}"));
 		std::string InvalidMetallicDocument = *Serialized;
 		const size_t MetallicField = InvalidMetallicDocument.find("\"metallicFactor\":");
 		const size_t MetallicValue = MetallicField == std::string::npos ? MetallicField :
@@ -3513,7 +3542,7 @@ namespace
 
 		MaterialAssetDesc MissingTexture = Description;
 		MissingTexture.BaseColorTexture = {};
-		PF_CHECK(Tests, !ValidateMaterialAssetDescription(MissingTexture));
+		PF_CHECK(Tests, ValidateMaterialAssetDescription(MissingTexture).has_value());
 		MaterialAssetDesc InvalidFactor = Description;
 		InvalidFactor.BaseColorFactor.g = std::numeric_limits<float>::quiet_NaN();
 		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
@@ -3527,6 +3556,19 @@ namespace
 		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
 		InvalidFactor = Description;
 		InvalidFactor.RoughnessFactor = std::numeric_limits<float>::infinity();
+		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
+		InvalidFactor = Description;
+		InvalidFactor.NormalScale = -0.01f;
+		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
+		InvalidFactor.NormalScale = 4.01f;
+		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
+		InvalidFactor = Description;
+		InvalidFactor.OcclusionStrength = std::numeric_limits<float>::quiet_NaN();
+		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
+		InvalidFactor = Description;
+		InvalidFactor.EmissiveFactor.g = -0.01f;
+		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
+		InvalidFactor.EmissiveFactor = { 10000.1f, 0.0f, 0.0f };
 		PF_CHECK(Tests, !ValidateMaterialAssetDescription(InvalidFactor));
 		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize("{invalid"));
 		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize("{\"format\":\"OtherMaterial\",\"version\":1}"));
@@ -4605,9 +4647,134 @@ end
 			Imported->Vertices[0].Normal[2] == 1.0f);
 		for (const GltfMeshVertex& Vertex : Imported->Vertices)
 			PF_CHECK(Tests, std::abs(glm::length(glm::vec3(Vertex.Normal[0], Vertex.Normal[1], Vertex.Normal[2])) - 1.0f) < 1.0e-6f);
-		PF_CHECK(Tests, Imported->GetMeshDescription().VertexLayout.Attributes.size() == 4);
+		PF_CHECK(Tests, Imported->GetMeshDescription().VertexLayout.Attributes.size() == 5);
 		PF_CHECK(Tests, Imported->GetMeshDescription().VertexLayout.Attributes[3].Semantic == VertexSemantic::Normal);
+		PF_CHECK(Tests, Imported->GetMeshDescription().VertexLayout.Attributes[4].Semantic == VertexSemantic::Tangent);
+		for (const GltfMeshVertex& Vertex : Imported->Vertices)
+		{
+			PF_CHECK(Tests, std::abs(Vertex.Tangent[0] - 1.0f) < 1.0e-5f &&
+				std::abs(Vertex.Tangent[1]) < 1.0e-5f && std::abs(Vertex.Tangent[2]) < 1.0e-5f);
+			PF_CHECK(Tests, Vertex.Tangent[3] == 1.0f);
+		}
 		PF_CHECK(Tests, ValidateMeshDescription(Imported->GetMeshDescription()).has_value());
+
+		const std::filesystem::path AuthoredTangentPath = ModelDirectory / "AuthoredTangent.gltf";
+		const std::filesystem::path AuthoredTangentBufferPath = ModelDirectory / "AuthoredTangent.bin";
+		const std::string AuthoredTangentDocument = R"({
+			"asset":{"version":"2.0"},
+			"buffers":[{"uri":"AuthoredTangent.bin","byteLength":114}],
+			"bufferViews":[
+				{"buffer":0,"byteOffset":0,"byteLength":36},
+				{"buffer":0,"byteOffset":36,"byteLength":24},
+				{"buffer":0,"byteOffset":60,"byteLength":48},
+				{"buffer":0,"byteOffset":108,"byteLength":6}],
+			"accessors":[
+				{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},
+				{"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"},
+				{"bufferView":2,"componentType":5126,"count":3,"type":"VEC4"},
+				{"bufferView":3,"componentType":5123,"count":3,"type":"SCALAR"}],
+			"meshes":[{"name":"Authored tangent","primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1,"TANGENT":2},"indices":3}]}]
+		})";
+		{
+			std::ofstream Output(AuthoredTangentPath, std::ios::binary | std::ios::trunc);
+			Output.write(AuthoredTangentDocument.data(), static_cast<std::streamsize>(AuthoredTangentDocument.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		std::vector<std::byte> AuthoredTangentBytes(BufferBytes.begin(), BufferBytes.begin() + 60);
+		const auto AppendAuthoredTangentFloat = [&AuthoredTangentBytes](float Value)
+		{
+			const uint32_t Bits = std::bit_cast<uint32_t>(Value);
+			for (size_t Byte = 0; Byte < sizeof(Bits); ++Byte)
+				AuthoredTangentBytes.push_back(static_cast<std::byte>((Bits >> (Byte * 8)) & 0xff));
+		};
+		for (const float Value : { 1.0f, 0.0f, 0.0f, -1.0f, 1.0f, 0.0f, 0.0f, -1.0f, 1.0f, 0.0f, 0.0f, -1.0f })
+			AppendAuthoredTangentFloat(Value);
+		AuthoredTangentBytes.insert(AuthoredTangentBytes.end(), BufferBytes.begin() + 60, BufferBytes.end());
+		PF_CHECK(Tests, AuthoredTangentBytes.size() == 114);
+		{
+			std::ofstream Output(AuthoredTangentBufferPath, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(AuthoredTangentBytes.data()),
+				static_cast<std::streamsize>(AuthoredTangentBytes.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto AuthoredTangentMetadata = AssetMetadataSerializer::CreateForNewAsset(AuthoredTangentPath);
+		const auto AuthoredTangentBufferMetadata = AssetMetadataSerializer::CreateForNewAsset(AuthoredTangentBufferPath);
+		PF_CHECK(Tests, AuthoredTangentMetadata.has_value() && AuthoredTangentBufferMetadata.has_value());
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		if (AuthoredTangentMetadata)
+		{
+			const auto AuthoredTangent = GltfMeshImporter::ImportStaticPrimitive(
+				AuthoredTangentMetadata->ID, ProjectRoot, Registry);
+			PF_CHECK(Tests, AuthoredTangent.has_value());
+			if (AuthoredTangent)
+			{
+				PF_CHECK(Tests, AuthoredTangent->Vertices.size() == 3);
+				for (const GltfMeshVertex& Vertex : AuthoredTangent->Vertices)
+					PF_CHECK(Tests, std::abs(Vertex.Tangent[0] - 1.0f) < 1.0e-5f &&
+						std::abs(Vertex.Tangent[1]) < 1.0e-5f && std::abs(Vertex.Tangent[2]) < 1.0e-5f &&
+						Vertex.Tangent[3] == -1.0f);
+			}
+		}
+
+		const std::filesystem::path MirroredPath = ModelDirectory / "MirroredUv.gltf";
+		const std::filesystem::path MirroredBufferPath = ModelDirectory / "MirroredUv.bin";
+		const std::string MirroredDocument = R"({
+			"asset":{"version":"2.0"},
+			"buffers":[{"uri":"MirroredUv.bin","byteLength":92}],
+			"bufferViews":[
+				{"buffer":0,"byteOffset":0,"byteLength":48},
+				{"buffer":0,"byteOffset":48,"byteLength":32},
+				{"buffer":0,"byteOffset":80,"byteLength":12}],
+			"accessors":[
+				{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3"},
+				{"bufferView":1,"componentType":5126,"count":4,"type":"VEC2"},
+				{"bufferView":2,"componentType":5123,"count":6,"type":"SCALAR"}],
+			"meshes":[{"name":"Mirrored UV seam","primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1},"indices":2}]}]
+		})";
+		{
+			std::ofstream Output(MirroredPath, std::ios::binary | std::ios::trunc);
+			Output.write(MirroredDocument.data(), static_cast<std::streamsize>(MirroredDocument.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		std::vector<std::byte> MirroredBytes;
+		const auto AppendMirroredFloatLE = [&MirroredBytes](float Value)
+		{
+			const uint32_t Bits = std::bit_cast<uint32_t>(Value);
+			for (size_t Byte = 0; Byte < sizeof(Bits); ++Byte)
+				MirroredBytes.push_back(static_cast<std::byte>((Bits >> (Byte * 8)) & 0xff));
+		};
+		for (const float Value : {
+			0.0f, 0.0f, 0.0f,  1.0f, 0.0f, 0.0f,  0.0f, 1.0f, 0.0f,  1.0f, 1.0f, 0.0f,
+			0.0f, 0.0f,  1.0f, 0.0f,  0.0f, 1.0f,  0.0f, 0.0f })
+			AppendMirroredFloatLE(Value);
+		for (const uint16_t Value : { 0, 1, 2, 1, 3, 2 })
+		{
+			MirroredBytes.push_back(static_cast<std::byte>(Value & 0xff));
+			MirroredBytes.push_back(static_cast<std::byte>(Value >> 8));
+		}
+		PF_CHECK(Tests, MirroredBytes.size() == 92);
+		{
+			std::ofstream Output(MirroredBufferPath, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(MirroredBytes.data()), static_cast<std::streamsize>(MirroredBytes.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto MirroredMetadata = AssetMetadataSerializer::CreateForNewAsset(MirroredPath);
+		const auto MirroredBufferMetadata = AssetMetadataSerializer::CreateForNewAsset(MirroredBufferPath);
+		PF_CHECK(Tests, MirroredMetadata.has_value() && MirroredBufferMetadata.has_value());
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		if (MirroredMetadata)
+		{
+			const auto Mirrored = GltfMeshImporter::ImportStaticPrimitive(MirroredMetadata->ID, ProjectRoot, Registry);
+			PF_CHECK(Tests, Mirrored.has_value());
+			if (Mirrored)
+			{
+				PF_CHECK(Tests, Mirrored->Vertices.size() == 6);
+				PF_CHECK(Tests, Mirrored->Indices[0] != Mirrored->Indices[3] && Mirrored->Indices[1] != Mirrored->Indices[5]);
+				PF_CHECK(Tests, Mirrored->Vertices[Mirrored->Indices[0]].Tangent[3] == 1.0f);
+				PF_CHECK(Tests, Mirrored->Vertices[Mirrored->Indices[3]].Tangent[3] == -1.0f);
+				PF_CHECK(Tests, ValidateMeshDescription(Mirrored->GetMeshDescription()).has_value());
+			}
+		}
 		std::vector<std::byte> DegenerateBytes = BufferBytes;
 		std::fill_n(DegenerateBytes.begin(), sizeof(float) * 9, std::byte{ 0 });
 		{

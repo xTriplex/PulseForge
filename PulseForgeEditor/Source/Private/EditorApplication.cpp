@@ -11,6 +11,7 @@
 #include "Events/KeyEvent.h"
 #include "Events/MouseEvent.h"
 #include "Assets/AssetOperations.h"
+#include "Assets/MaterialAssetService.h"
 #include "Assets/PrefabAssetService.h"
 #include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
@@ -4676,6 +4677,8 @@ namespace
 				ImGui::SetTooltip("%s\nUUID: %s", FullPath.c_str(), Identifier.c_str());
 			ImGui::PopStyleColor();
 
+			if (Extension == ".material")
+				DrawMaterialAssetEditor(*Asset);
 			if (Extension == ".scene")
 			{
 				const bool IsStartupScene = m_Project->GetDescription().StartScene &&
@@ -4709,6 +4712,151 @@ namespace
 			}
 			if (IsProtectedScene)
 				m_EditorStyle.TextMuted("Open and startup scenes cannot be deleted.");
+		}
+
+		std::string GetMaterialDraftKey(const PulseForge::AssetID& Asset) const
+		{
+			return PathToUtf8(m_Project->GetRootPath().lexically_normal()) + ":" + Asset.ToString();
+		}
+
+		void DrawMaterialAssetEditor(const PulseForge::AssetRecord& Asset)
+		{
+			const std::string Key = GetMaterialDraftKey(Asset.ID);
+			if (const auto Error = m_MaterialEditorErrors.find(Key); Error != m_MaterialEditorErrors.end())
+			{
+				m_EditorStyle.TextMuted("Material could not be loaded: " + Error->second);
+				if (ImGui::SmallButton("Retry Material Load"))
+					m_MaterialEditorErrors.erase(Error);
+				return;
+			}
+
+			auto Draft = m_MaterialDrafts.find(Key);
+			if (Draft == m_MaterialDrafts.end())
+			{
+				auto Loaded = PulseForge::MaterialAssetService::Load(
+					Asset.ID, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
+				if (!Loaded)
+				{
+					m_MaterialEditorErrors.emplace(Key, Loaded.error().Message);
+					m_EditorStyle.TextMuted("Material could not be loaded: " + Loaded.error().Message);
+					if (ImGui::SmallButton("Retry Material Load"))
+						m_MaterialEditorErrors.erase(Key);
+					return;
+				}
+				Draft = m_MaterialDrafts.emplace(Key, std::move(*Loaded)).first;
+			}
+
+			PulseForge::MaterialAssetDesc& Material = Draft->second;
+			bool Changed = false;
+			if (m_EditorStyle.BeginPropertyTable("MaterialAssetProperties"))
+			{
+				if (m_EditorStyle.BeginPropertyRow("Base Color Factor"))
+					Changed |= ImGui::DragFloat4("##MaterialBaseColorFactor", &Material.BaseColorFactor.x, 0.01f, 0.0f, 1.0f, "%.3f");
+				if (m_EditorStyle.BeginPropertyRow("Base Color Texture"))
+				{
+					std::optional<PulseForge::AssetID> Texture = Material.BaseColorTexture.IsNil()
+						? std::nullopt : std::optional<PulseForge::AssetID>(Material.BaseColorTexture);
+					if (DrawAssetSelector("##MaterialBaseColorTexture", Texture,
+						{ ".png", ".jpg", ".jpeg", ".bmp", ".ppm" }, true))
+					{
+						Material.BaseColorTexture = Texture.value_or(PulseForge::AssetID{});
+						Changed = true;
+					}
+				}
+				if (m_EditorStyle.BeginPropertyRow("Metallic / Roughness"))
+				{
+					Changed |= ImGui::DragFloat("##MaterialMetallic", &Material.MetallicFactor, 0.01f, 0.0f, 1.0f, "M %.3f");
+					ImGui::SameLine();
+					Changed |= ImGui::DragFloat("##MaterialRoughness", &Material.RoughnessFactor, 0.01f, 0.0f, 1.0f, "R %.3f");
+				}
+				if (m_EditorStyle.BeginPropertyRow("Metallic-Roughness Map"))
+				{
+					std::optional<PulseForge::AssetID> Texture = Material.MetallicRoughnessTexture.IsNil()
+						? std::nullopt : std::optional<PulseForge::AssetID>(Material.MetallicRoughnessTexture);
+					if (DrawAssetSelector("##MaterialMetallicRoughnessTexture", Texture,
+						{ ".png", ".jpg", ".jpeg", ".bmp", ".ppm" }, true))
+					{
+						Material.MetallicRoughnessTexture = Texture.value_or(PulseForge::AssetID{});
+						Changed = true;
+					}
+				}
+				if (m_EditorStyle.BeginPropertyRow("Normal Map"))
+				{
+					std::optional<PulseForge::AssetID> Texture = Material.NormalTexture.IsNil()
+						? std::nullopt : std::optional<PulseForge::AssetID>(Material.NormalTexture);
+					if (DrawAssetSelector("##MaterialNormalTexture", Texture,
+						{ ".png", ".jpg", ".jpeg", ".bmp", ".ppm" }, true))
+					{
+						Material.NormalTexture = Texture.value_or(PulseForge::AssetID{});
+						Changed = true;
+					}
+				}
+				if (m_EditorStyle.BeginPropertyRow("Normal Scale"))
+					Changed |= ImGui::DragFloat("##MaterialNormalScale", &Material.NormalScale, 0.02f, 0.0f, 4.0f, "%.3f");
+				if (m_EditorStyle.BeginPropertyRow("Occlusion Map"))
+				{
+					std::optional<PulseForge::AssetID> Texture = Material.OcclusionTexture.IsNil()
+						? std::nullopt : std::optional<PulseForge::AssetID>(Material.OcclusionTexture);
+					if (DrawAssetSelector("##MaterialOcclusionTexture", Texture,
+						{ ".png", ".jpg", ".jpeg", ".bmp", ".ppm" }, true))
+					{
+						Material.OcclusionTexture = Texture.value_or(PulseForge::AssetID{});
+						Changed = true;
+					}
+				}
+				if (m_EditorStyle.BeginPropertyRow("Occlusion Strength"))
+					Changed |= ImGui::DragFloat("##MaterialOcclusionStrength", &Material.OcclusionStrength, 0.01f, 0.0f, 1.0f, "%.3f");
+				if (m_EditorStyle.BeginPropertyRow("Emissive Texture"))
+				{
+					std::optional<PulseForge::AssetID> Texture = Material.EmissiveTexture.IsNil()
+						? std::nullopt : std::optional<PulseForge::AssetID>(Material.EmissiveTexture);
+					if (DrawAssetSelector("##MaterialEmissiveTexture", Texture,
+						{ ".png", ".jpg", ".jpeg", ".bmp", ".ppm" }, true))
+					{
+						Material.EmissiveTexture = Texture.value_or(PulseForge::AssetID{});
+						Changed = true;
+					}
+				}
+				if (m_EditorStyle.BeginPropertyRow("Emissive Factor (Linear)"))
+					Changed |= ImGui::DragFloat3("##MaterialEmissiveFactor", &Material.EmissiveFactor.x, 0.05f, 0.0f, 1000.0f, "%.3f");
+				m_EditorStyle.EndPropertyTable();
+			}
+
+			if (Changed)
+				m_DirtyMaterialDrafts.insert(Key);
+			m_EditorStyle.TextMuted("Base color and emissive maps use sRGB; normal, metallic-roughness and occlusion maps use linear data.");
+			if (m_DirtyMaterialDrafts.contains(Key))
+			{
+				m_EditorStyle.TextMuted("Unsaved material draft");
+				if (ImGui::SmallButton("Save Material"))
+				{
+					auto Saved = PulseForge::MaterialAssetService::Save(
+						Asset.ID, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), Material);
+					if (!Saved)
+						SetError("Material save failed: " + Saved.error().Message);
+					else
+					{
+						m_DirtyMaterialDrafts.erase(Key);
+						m_MaterialEditorErrors.erase(Key);
+						if (m_SceneRenderer)
+							m_SceneRenderer->RefreshMaterialAssets();
+						SetStatus("Saved material " + PathToUtf8(Asset.ProjectRelativePath.filename()) + ".");
+					}
+				}
+				ImGui::SameLine();
+				if (ImGui::SmallButton("Revert Material"))
+				{
+					auto Loaded = PulseForge::MaterialAssetService::Load(
+						Asset.ID, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
+					if (!Loaded)
+						SetError("Material reload failed: " + Loaded.error().Message);
+					else
+					{
+						Material = std::move(*Loaded);
+						m_DirtyMaterialDrafts.erase(Key);
+					}
+				}
+			}
 		}
 
 		void DrawContentBrowserPanel()
@@ -4822,7 +4970,13 @@ namespace
 						SelectedAssetVisible = std::any_of(m_FilteredAssetIndices.begin(), m_FilteredAssetIndices.end(),
 							[this](size_t Index) { return m_Assets[Index].ID == *m_SelectedAsset; });
 
-					const float DetailHeight = SelectedAssetVisible ? 108.0f : 0.0f;
+					float DetailHeight = SelectedAssetVisible ? 108.0f : 0.0f;
+					if (SelectedAssetVisible && m_SelectedAsset)
+					{
+						const auto SelectedRecord = m_Project->GetAssetRegistry().Find(*m_SelectedAsset);
+						if (SelectedRecord && NormalizedExtension(SelectedRecord->ProjectRelativePath) == ".material")
+							DetailHeight = 390.0f;
+					}
 					const float ItemRegionHeight = (std::max)(ImGui::GetContentRegionAvail().y - DetailHeight, 50.0f);
 					ImGui::BeginChild("ContentAssetItems", ImVec2(0.0f, ItemRegionHeight), ImGuiChildFlags_None);
 					if (VisibleFolders && !VisibleFolders->empty())
@@ -5080,6 +5234,9 @@ namespace
 		std::optional<PulseForge::UUID> m_SelectedEntity;
 		std::optional<PulseForge::AssetID> m_SelectedAsset;
 		std::optional<PulseForge::AssetID> m_PendingDeleteAsset;
+		std::unordered_map<std::string, PulseForge::MaterialAssetDesc> m_MaterialDrafts;
+		std::unordered_map<std::string, std::string> m_MaterialEditorErrors;
+		std::unordered_set<std::string> m_DirtyMaterialDrafts;
 		std::vector<PulseForge::AssetRecord> m_Assets;
 		std::vector<AssetBrowserPresentation> m_AssetBrowserPresentations;
 		std::vector<size_t> m_FilteredAssetIndices;

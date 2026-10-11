@@ -1,31 +1,13 @@
 # Material Assets
 
-PulseForge material assets provide an opaque metallic/roughness material description. Each managed `.material` file has the usual adjacent `.meta` sidecar; scenes refer to the material by the sidecar UUID, not its path.
+PulseForge `.material` assets provide opaque glTF-style metallic/roughness shading. Every managed material and referenced image is identified by its stable asset UUID and must have an adjacent `.meta` sidecar. The renderer resolves optional maps through the active project registry and retains material bindings until the asset is saved and the renderer refreshes its cache.
 
-Version 1 documents use this shape:
+Version 1 contains a base-color texture and factor. Version 2 adds scalar metallic and roughness factors. Version 3 adds optional metallic-roughness, tangent-space normal, occlusion, and emissive maps, plus their factors. Version 1 and 2 documents remain readable; absent maps in v3 use neutral renderer-owned fallbacks, and saving writes v3. A v3 material may omit the base-color map. Malformed or nonfinite values are rejected before a material is applied.
 
-```json
-{
-  "format": "PulseForgeMaterial",
-  "version": 1,
-  "baseColorTexture": "4c9b0a26-5ca1-4d37-b451-f23231002f92",
-  "baseColorFactor": [1.0, 1.0, 1.0, 1.0]
-}
-```
+The base-color factor is linear RGBA in `[0,1]`, multiplied by the sRGB-decoded base-color map and vertex color. The packed metallic-roughness map is linear data: green multiplies roughness and blue multiplies metallic. Normal maps are linear tangent-space vectors; `normalScale` scales the tangent-space X/Y components. The occlusion map's red channel and `occlusionStrength` affect indirect diffuse response only. Material AO combines conservatively with SSAO using the lower visibility value; neither attenuates direct lights. The emissive map is sRGB-decoded and multiplied by a finite nonnegative linear `emissiveFactor` (each component up to 10,000), then added to scene-linear HDR radiance. It does not provide emissive GI.
 
-Version 2 adds linear scalar factors:
+Base-color and emissive images use sRGB GPU formats. Metallic-roughness, normal, and occlusion images use linear UNORM. Imported images receive a complete CPU-generated mip chain; color mips are averaged in linear light before being encoded back to sRGB. Texture cache keys include the requested GPU format so a source image can be used with the correct interpretation in separate roles. The shared material sampler uses linear filtering and repeat addressing.
 
-```json
-{
-  "format": "PulseForgeMaterial",
-  "version": 2,
-  "baseColorTexture": "4c9b0a26-5ca1-4d37-b451-f23231002f92",
-  "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
-  "metallicFactor": 0.0,
-  "roughnessFactor": 1.0
-}
-```
+The Editor Content Browser's material details view provides editable factors and UUID-backed selectors for all maps. Changes stay in a draft until **Save Material** is pressed; **Revert Material** reloads the saved asset. A successful save keeps its asset UUID and refreshes the active SceneRenderer's material resources.
 
-`baseColorTexture` is a stable asset UUID resolved through the project registry. The factor is linear RGBA in `[0, 1]`; metallic and roughness are finite linear factors in `[0, 1]`. Version 1 remains readable and maps to `metallicFactor: 0` and `roughnessFactor: 1`. Saving writes version 2. Base-color textures use an sRGB GPU format and are decoded by texture sampling before linear-light shading. Vertex color multiplies base color. Materials remain opaque; alpha is retained in the asset but does not enable blending. The renderer clamps roughness internally for stable BRDF evaluation without changing the authored value.
-
-Material references are optional on a scene mesh renderer for compatibility with older scenes. Material descriptions are cached for the lifetime of the cache and are reloaded after `Clear()`; hot reload and editor import settings are not implemented yet. The renderer supports HDR image-based lighting and directional cascaded soft shadows. Metallic/roughness textures, normal maps, material occlusion maps, emissive, and transparency remain deferred.
+Materials are currently opaque. Alpha masking/blending, glTF material import, transmission, shader graphs, and emissive global illumination are not part of this stage. The static glTF importer reads geometry and tangent attributes only; glTF material/image/texture relationships are not imported automatically.

@@ -149,6 +149,8 @@ namespace PulseForge
 		[[nodiscard]] const ToneMappingSettings& GetToneMappingSettings() const noexcept { return m_ToneMappingSettings; }
 		[[nodiscard]] bool SetAmbientOcclusionSettings(const AmbientOcclusionSettings& Settings) noexcept;
 		[[nodiscard]] const AmbientOcclusionSettings& GetAmbientOcclusionSettings() const noexcept { return m_AmbientOcclusionSettings; }
+		// Clears cached material descriptions and binding sets after an explicit material-asset save.
+		void RefreshMaterialAssets() noexcept;
 		[[nodiscard]] bool IsEnvironmentLightingPending() const noexcept { return m_EnvironmentLightingPending; }
 		[[nodiscard]] bool HasPreparedEnvironmentLighting() const noexcept { return m_PreparedEnvironmentReady; }
 		// Narrow diagnostic access used by the opt-in GPU validation harness to read actual cubemap face depth.
@@ -206,8 +208,9 @@ namespace PulseForge
 		{
 			float BaseColor[4];
 			float Surface[4];
+			float Emissive[4];
 		};
-		static_assert(sizeof(MaterialConstants) == 32);
+		static_assert(sizeof(MaterialConstants) == 48);
 
 		struct alignas(16) ObjectConstants
 		{
@@ -352,6 +355,9 @@ namespace PulseForge
 		BufferHandle m_ToneMappingConstantsBuffer;
 		BufferHandle m_FallbackMaterialConstantsBuffer;
 		TextureHandle m_FallbackBaseColorTexture;
+		TextureHandle m_FallbackMetallicRoughnessTexture;
+		TextureHandle m_FallbackNormalTexture;
+		TextureHandle m_FallbackEmissiveTexture;
 		TextureHandle m_FallbackAmbientOcclusionTexture;
 		TextureHandle m_FallbackPointShadowTexture;
 		std::array<RenderTargetHandle, 4> m_ShadowTargets;

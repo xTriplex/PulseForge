@@ -41,7 +41,8 @@ namespace PulseForge
 		Position,
 		Color,
 		TexCoord,
-		Normal
+		Normal,
+		Tangent
 	};
 
 	enum class VertexFormat : uint8_t

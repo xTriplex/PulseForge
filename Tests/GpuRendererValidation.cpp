@@ -326,9 +326,10 @@ namespace
 	{
 	public:
 		GpuValidationLayer(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm,
-			bool ValidateLocalLights, bool ValidateSpotlightShadows, bool ValidatePointShadows,
+			bool ValidateLocalLights, bool ValidateSpotlightShadows, bool ValidatePointShadows, bool ValidatePbrMaterials,
 			bool ValidatePointShadowImages, std::filesystem::path PointShadowImageDirectory)
-			: Layer(ValidatePointShadowImages ? "Point-shadow rendered-image investigation" :
+			: Layer(ValidatePbrMaterials ? "PBR material rendered-image validation" :
+				ValidatePointShadowImages ? "Point-shadow rendered-image investigation" :
 				ValidatePointShadows ? "SceneRenderer point-shadow GPU validation" :
 				ValidateSpotlightShadows ? "SceneRenderer spotlight-shadow GPU validation" :
 				ValidateEditorUiUnorm ? "Editor UNORM UI composition GPU validation" :
@@ -341,6 +342,7 @@ namespace
 			  m_ValidateLocalLights(ValidateLocalLights),
 			  m_ValidateSpotlightShadows(ValidateSpotlightShadows),
 			  m_ValidatePointShadows(ValidatePointShadows),
+			  m_ValidatePbrMaterials(ValidatePbrMaterials),
 			  m_ValidatePointShadowImages(ValidatePointShadowImages),
 			  m_PointShadowImageDirectory(std::move(PointShadowImageDirectory))
 		{
@@ -355,7 +357,7 @@ namespace
 				if (m_ValidateEditorUiUnorm)
 					InitializeEditorUiUnormResources();
 				if (m_ValidateSceneHdr || m_ValidateToneMapping || m_ValidateLocalLights || m_ValidateSpotlightShadows ||
-					m_ValidatePointShadows || m_ValidatePointShadowImages)
+					m_ValidatePointShadows || m_ValidatePbrMaterials || m_ValidatePointShadowImages)
 					InitializeSceneResources();
 				if (m_ValidateLocalLights)
 					InitializeLocalLightScenario();
@@ -363,6 +365,8 @@ namespace
 					InitializeSpotlightShadowScenario();
 				if (m_ValidatePointShadows)
 					InitializePointShadowScenario();
+				if (m_ValidatePbrMaterials)
+					InitializePbrMaterialScenario();
 				if (m_ValidatePointShadowImages)
 					InitializePointShadowImageScenario();
 				if (m_ValidatePointShadowImages)
@@ -481,6 +485,44 @@ namespace
 				if (!Prepared)
 				{
 					Fail("Could not prepare point-shadow scene: " + Prepared.error().Message);
+					return;
+				}
+				if (m_SceneRenderer->IsEnvironmentLightingPending())
+					return;
+				m_ScenePrepared = true;
+				return;
+			}
+			if (m_ValidatePbrMaterials)
+			{
+				if (m_PbrMaterialCapturePending)
+				{
+					CapturePbrMaterialImage();
+					m_PbrMaterialCapturePending = false;
+					if (!m_Succeeded)
+						return;
+				}
+				if (m_PbrMaterialCaptureComplete)
+				{
+					PF_INFO("GPU_VALIDATION_RESULT=PASS; PBR project loaded, all seven indexed mesh instances rendered, and actual sRGB output was captured; image: {0}",
+						m_PbrMaterialImagePath.string());
+					PulseForge::Application::Get().RequestClose();
+					return;
+				}
+				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(60))
+				{
+					Fail("Timed out preparing or capturing the PBR material demonstration scene");
+					return;
+				}
+				const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
+				if (Width == 0 || Height == 0 || m_ScenePrepared)
+					return;
+				const auto Prepared = m_SceneRenderer->PrepareScene(
+					m_Scene,
+					static_cast<float>(m_PbrMaterialOutputTarget->GetDescription().Width) /
+						static_cast<float>(m_PbrMaterialOutputTarget->GetDescription().Height));
+				if (!Prepared)
+				{
+					Fail("Could not prepare the PBR project startup scene: " + Prepared.error().Message);
 					return;
 				}
 				if (m_SceneRenderer->IsEnvironmentLightingPending())
@@ -679,6 +721,11 @@ namespace
 				RenderPointShadowFrame();
 				return;
 			}
+			if (m_ValidatePbrMaterials)
+			{
+				RenderPbrMaterialFrame();
+				return;
+			}
 			if (m_ValidatePointShadowImages)
 			{
 				if (m_CapturingPointShadowOverview)
@@ -747,6 +794,7 @@ namespace
 		{
 			m_PointShadowOutputTarget.reset();
 			m_PointShadowImageOutputTarget.reset();
+			m_PbrMaterialOutputTarget.reset();
 			m_SpotlightShadowOutputTarget.reset();
 			m_EditorUiBindingSet.reset();
 			m_EditorUiDrawBindingSet.reset();
@@ -776,6 +824,7 @@ namespace
 		[[nodiscard]] bool Succeeded() const noexcept
 		{
 			return m_Succeeded && (m_ValidateEditorUiUnorm ? m_EditorUiFrames == 3 && m_EditorUiTargetCreations == 2 :
+				m_ValidatePbrMaterials ? m_PbrMaterialCaptureComplete :
 				m_ValidatePointShadowImages ? m_PointShadowImageCase == PointShadowImageCases.size() :
 				m_ValidatePointShadows ? m_PointShadowFrames == 9 :
 				m_ValidateSpotlightShadows ? m_SpotShadowFrames == 9 :
@@ -927,9 +976,11 @@ namespace
 
 		void InitializeSceneResources()
 		{
-			const std::filesystem::path ProjectFile = m_ValidatePointShadows || m_ValidatePointShadowImages
-				? std::filesystem::path(PF_POINT_SHADOW_DEMO_PROJECT_FILE)
-				: std::filesystem::path(PF_GPU_VALIDATION_PROJECT_FILE);
+			const std::filesystem::path ProjectFile = m_ValidatePbrMaterials
+				? std::filesystem::path(PF_PBR_DEMO_PROJECT_FILE)
+				: m_ValidatePointShadows || m_ValidatePointShadowImages
+					? std::filesystem::path(PF_POINT_SHADOW_DEMO_PROJECT_FILE)
+					: std::filesystem::path(PF_GPU_VALIDATION_PROJECT_FILE);
 			auto OpenedProject = PulseForge::Project::Open(ProjectFile);
 			if (!OpenedProject)
 				throw std::runtime_error("Could not open GPU-validation project '" + ProjectFile.string() + "': " +
@@ -1108,6 +1159,23 @@ namespace
 				throw std::runtime_error("Could not create point-shadow validation output: " + OutputTarget.error().Message);
 			m_PointShadowOutputTarget = std::move(*OutputTarget);
 			PF_INFO("Prepared point-shadow GPU scene with three differently weighted shadow-requesting points, mixed with directional CSM, IBL, SSAO, and bundled indexed geometry");
+		}
+
+		void InitializePbrMaterialScenario()
+		{
+			PulseForge::RenderTargetDesc Description;
+			Description.Width = 960;
+			Description.Height = 540;
+			Description.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
+			Description.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
+			Description.DebugName = "PBR material project validation image";
+			auto Target = PulseForge::Application::Get().CreateRenderTarget(Description);
+			if (!Target)
+				throw std::runtime_error("Could not create PBR material validation output: " + Target.error().Message);
+			m_PbrMaterialOutputTarget = std::move(*Target);
+			m_PbrMaterialImagePath = m_PointShadowImageDirectory / "PBRMaterials" / "overview.png";
+			std::filesystem::create_directories(m_PbrMaterialImagePath.parent_path());
+			PF_INFO("PBR validation will capture the actual project-owned 960x540 sRGB scene output");
 		}
 
 		void InitializePointShadowImageScenario()
@@ -1630,6 +1698,75 @@ namespace
 				return;
 			}
 			m_PointShadowImageCapturePending = true;
+		}
+
+		void RenderPbrMaterialFrame()
+		{
+			if (!m_Succeeded || !m_ScenePrepared || m_PbrMaterialCaptureComplete)
+				return;
+			const auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_PbrMaterialOutputTarget);
+			if (!Rendered || Rendered->GeometryDrawCount != 7)
+			{
+				Fail(Rendered ? "PBR material startup scene did not submit its seven indexed mesh instances" :
+					"PBR material scene render failed: " + Rendered.error().Message);
+				return;
+			}
+			m_PbrMaterialGeometryDrawCount = Rendered->GeometryDrawCount;
+			const PulseForge::Texture* Color = m_PbrMaterialOutputTarget->GetColorTexture();
+			if (!Color)
+			{
+				Fail("PBR material output target has no readable color texture");
+				return;
+			}
+			m_PbrMaterialCapturePending = true;
+		}
+
+		void CapturePbrMaterialImage()
+		{
+			const PulseForge::Texture* Color = m_PbrMaterialOutputTarget->GetColorTexture();
+			if (!Color)
+			{
+				Fail("PBR material output target has no readable color texture");
+				return;
+			}
+			const auto Readback = PulseForge::Application::Get().ReadTextureForValidation(*Color);
+			if (!Readback || Readback->Format != PulseForge::TextureFormat::RGBA8_Srgb)
+			{
+				Fail(Readback ? "PBR material output readback was not RGBA8 sRGB" :
+					"Could not read actual PBR material output pixels: " + Readback.error().Message);
+				return;
+			}
+			if (!stbi_write_png(m_PbrMaterialImagePath.string().c_str(), static_cast<int>(Readback->Width),
+				static_cast<int>(Readback->Height), 4,
+				reinterpret_cast<const uint8_t*>(Readback->Pixels.data()), static_cast<int>(Readback->Width * 4)))
+			{
+				Fail("Could not save actual PBR material scene pixels: " + m_PbrMaterialImagePath.string());
+				return;
+			}
+			double LuminanceSum = 0.0;
+			float MinimumLuminance = 1.0f;
+			float MaximumLuminance = 0.0f;
+			size_t LitPixelCount = 0;
+			for (size_t Pixel = 0; Pixel < static_cast<size_t>(Readback->Width) * Readback->Height; ++Pixel)
+			{
+				const float Luminance = PixelLuminance(*Readback, Pixel);
+				LuminanceSum += Luminance;
+				MinimumLuminance = (std::min)(MinimumLuminance, Luminance);
+				MaximumLuminance = (std::max)(MaximumLuminance, Luminance);
+				if (Luminance > 0.1f)
+					++LitPixelCount;
+			}
+			const double MeanLuminance = LuminanceSum /
+				static_cast<double>(static_cast<size_t>(Readback->Width) * Readback->Height);
+			PF_INFO("PBR_MATERIAL_IMAGE={0}; extent={1}x{2}; draws={3}; mean_luma={4:.4f}; min={5:.3f}; max={6:.3f}; lit_pixels={7}",
+				m_PbrMaterialImagePath.string(), Readback->Width, Readback->Height, m_PbrMaterialGeometryDrawCount,
+				MeanLuminance, MinimumLuminance, MaximumLuminance, LitPixelCount);
+			if (MaximumLuminance < 0.55f || MaximumLuminance - MinimumLuminance < 0.2f || LitPixelCount < 1000)
+			{
+				Fail("Captured PBR material image lacks the expected visible HDR/material contrast");
+				return;
+			}
+			m_PbrMaterialCaptureComplete = true;
 		}
 
 		void RenderPointShadowOverviewImageFrame()
@@ -2645,6 +2782,7 @@ namespace
 		PulseForge::RenderTargetHandle m_SpotlightShadowOutputTarget;
 		PulseForge::RenderTargetHandle m_PointShadowOutputTarget;
 		PulseForge::RenderTargetHandle m_PointShadowImageOutputTarget;
+		PulseForge::RenderTargetHandle m_PbrMaterialOutputTarget;
 		PulseForge::RenderTargetHandle m_PointShadowOverviewOutputTarget;
 		PulseForge::Entity m_PointShadowOverviewPrimary;
 		PulseForge::Entity m_PointShadowOverviewSecondary;
@@ -2661,6 +2799,7 @@ namespace
 		std::array<std::optional<PulseForge::TextureReadback>, PointShadowImageCases.size()> m_PointShadowImageResults{};
 		std::array<std::array<std::optional<PulseForge::TextureReadback>, 6>, 2> m_PointShadowCubemapDepths{};
 		std::filesystem::path m_PointShadowImageDirectory;
+		std::filesystem::path m_PbrMaterialImagePath;
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
 		const PulseForge::Texture* m_FirstHdrTexture = nullptr;
 		const PulseForge::Texture* m_ResizedHdrTexture = nullptr;
@@ -2692,6 +2831,7 @@ namespace
 		bool m_ValidateLocalLights = false;
 		bool m_ValidateSpotlightShadows = false;
 		bool m_ValidatePointShadows = false;
+		bool m_ValidatePbrMaterials = false;
 		bool m_ValidatePointShadowImages = false;
 		bool m_ScenePrepared = false;
 		bool m_PointShadowScenarioUpdated = false;
@@ -2700,18 +2840,21 @@ namespace
 		bool m_PointShadowOverviewCapturePending = false;
 		bool m_PointShadowOverviewSettingsRestored = false;
 		bool m_CapturingPointShadowOverview = false;
+		bool m_PbrMaterialCapturePending = false;
+		bool m_PbrMaterialCaptureComplete = false;
+		size_t m_PbrMaterialGeometryDrawCount = 0;
 	};
 
 	class GpuValidationApplication final : public PulseForge::Application
 	{
 	public:
 		GpuValidationApplication(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm,
-			bool ValidateLocalLights, bool ValidateSpotlightShadows, bool ValidatePointShadows,
+			bool ValidateLocalLights, bool ValidateSpotlightShadows, bool ValidatePointShadows, bool ValidatePbrMaterials,
 			bool ValidatePointShadowImages, std::filesystem::path PointShadowImageDirectory)
 			: Application(PulseForge::RendererAPI::Vulkan)
 		{
 			auto Layer = std::make_unique<GpuValidationLayer>(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm,
-				ValidateLocalLights, ValidateSpotlightShadows, ValidatePointShadows,
+				ValidateLocalLights, ValidateSpotlightShadows, ValidatePointShadows, ValidatePbrMaterials,
 				ValidatePointShadowImages, std::move(PointShadowImageDirectory));
 			m_Layer = Layer.get();
 			PushLayer(std::move(Layer));
@@ -2740,12 +2883,14 @@ int main(int ArgumentCount, char** Arguments)
 		const bool ValidateLocalLights = Mode == "--scene-local-lights";
 		const bool ValidateSpotlightShadows = Mode == "--scene-spot-shadows";
 		const bool ValidatePointShadows = Mode == "--scene-point-shadows";
+		const bool ValidatePbrMaterials = Mode == "--scene-pbr-materials";
 		const bool ValidatePointShadowImages = Mode == "--scene-point-shadow-images";
 		const std::filesystem::path PointShadowImageDirectory = ArgumentCount > 2
 			? std::filesystem::path(Arguments[2])
 			: std::filesystem::current_path() / "Diagnostics" / "PointShadowDirection";
 		GpuValidationApplication App(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm, ValidateLocalLights,
-			ValidateSpotlightShadows, ValidatePointShadows, ValidatePointShadowImages, PointShadowImageDirectory);
+			ValidateSpotlightShadows, ValidatePointShadows, ValidatePbrMaterials,
+			ValidatePointShadowImages, PointShadowImageDirectory);
 		return App.RunValidation();
 	}
 	catch (const std::exception& Exception)

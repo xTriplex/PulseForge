@@ -1668,6 +1668,7 @@ namespace PulseForge
 					case VertexSemantic::Color: SemanticName = "COLOR"; break;
 					case VertexSemantic::TexCoord: SemanticName = "TEXCOORD"; break;
 					case VertexSemantic::Normal: SemanticName = "NORMAL"; break;
+					case VertexSemantic::Tangent: SemanticName = "TANGENT"; break;
 				}
 				nvrhi::Format NativeFormat = nvrhi::Format::UNKNOWN;
 				switch (Attribute.Format)

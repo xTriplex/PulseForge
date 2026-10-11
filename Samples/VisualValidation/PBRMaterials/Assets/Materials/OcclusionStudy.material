@@ -1,0 +1,8 @@
+{
+  "format": "PulseForgeMaterial", "version": 3,
+  "baseColorTexture": "a1000000-0000-4000-8000-000000000001",
+  "metallicRoughnessTexture": null, "normalTexture": null,
+  "occlusionTexture": "a1000000-0000-4000-8000-000000000004", "emissiveTexture": null,
+  "baseColorFactor": [0.78, 0.82, 0.72, 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.78,
+  "normalScale": 1.0, "occlusionStrength": 1.0, "emissiveFactor": [0.0, 0.0, 0.0]
+}

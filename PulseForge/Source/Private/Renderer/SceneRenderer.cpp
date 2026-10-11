@@ -319,11 +319,12 @@ namespace PulseForge
 		m_PointShadowFragmentShader = std::move(*PointShadowPs);
 
 		SamplerDesc SamplerDescription;
-		SamplerDescription.Minification = SamplerFilter::Nearest;
-		SamplerDescription.Magnification = SamplerFilter::Nearest;
-		SamplerDescription.AddressU = SamplerAddressMode::ClampToEdge;
-		SamplerDescription.AddressV = SamplerAddressMode::ClampToEdge;
-		SamplerDescription.DebugName = "PulseForge scene texture sampler";
+		SamplerDescription.Minification = SamplerFilter::Linear;
+		SamplerDescription.Magnification = SamplerFilter::Linear;
+		SamplerDescription.Mip = SamplerMipFilter::Linear;
+		SamplerDescription.AddressU = SamplerAddressMode::Repeat;
+		SamplerDescription.AddressV = SamplerAddressMode::Repeat;
+		SamplerDescription.DebugName = "PulseForge material linear mip sampler";
 		auto Sampler = m_Runtime.CreateSampler(SamplerDescription);
 		if (!Sampler)
 			return std::unexpected(MakeResourceError("Could not create the scene sampler: " + Sampler.error().Message));
@@ -389,6 +390,36 @@ namespace PulseForge
 		if (!WhiteTexture)
 			return std::unexpected(MakeResourceError("Could not create fallback base-color texture: " + WhiteTexture.error().Message));
 		m_FallbackBaseColorTexture = std::move(*WhiteTexture);
+		auto CreateMaterialFallback = [this](
+			const std::array<uint8_t, 4>& Pixel,
+			TextureFormat Format,
+			std::string DebugName)
+		{
+			TextureDesc Description;
+			Description.Width = 1;
+			Description.Height = 1;
+			Description.Format = Format;
+			Description.DebugName = std::move(DebugName);
+			return m_Runtime.CreateTexture(Description, std::as_bytes(std::span<const uint8_t>(Pixel)));
+		};
+		auto MetallicRoughnessFallback = CreateMaterialFallback(
+			WhitePixel, TextureFormat::RGBA8_UNorm, "PulseForge default metallic-roughness map");
+		if (!MetallicRoughnessFallback)
+			return std::unexpected(MakeResourceError(
+				"Could not create metallic-roughness fallback: " + MetallicRoughnessFallback.error().Message));
+		m_FallbackMetallicRoughnessTexture = std::move(*MetallicRoughnessFallback);
+		const std::array<uint8_t, 4> FlatNormalPixel{ 128, 128, 255, 255 };
+		auto NormalFallback = CreateMaterialFallback(
+			FlatNormalPixel, TextureFormat::RGBA8_UNorm, "PulseForge flat normal map fallback");
+		if (!NormalFallback)
+			return std::unexpected(MakeResourceError("Could not create normal-map fallback: " + NormalFallback.error().Message));
+		m_FallbackNormalTexture = std::move(*NormalFallback);
+		const std::array<uint8_t, 4> BlackPixel{ 0, 0, 0, 255 };
+		auto EmissiveFallback = CreateMaterialFallback(
+			BlackPixel, TextureFormat::RGBA8_Srgb, "PulseForge black emissive map fallback");
+		if (!EmissiveFallback)
+			return std::unexpected(MakeResourceError("Could not create emissive-map fallback: " + EmissiveFallback.error().Message));
+		m_FallbackEmissiveTexture = std::move(*EmissiveFallback);
 		TextureDesc AmbientOcclusionFallbackDescription;
 		AmbientOcclusionFallbackDescription.Width = 1;
 		AmbientOcclusionFallbackDescription.Height = 1;
@@ -403,7 +434,11 @@ namespace PulseForge
 		if (!FallbackPointShadow)
 			return std::unexpected(MakeResourceError("Could not create fallback point-shadow cubemap: " + FallbackPointShadow.error().Message));
 		m_FallbackPointShadowTexture = std::move(*FallbackPointShadow);
-		const MaterialConstants FallbackMaterial{ { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f, 0.0f, 0.0f } };
+		const MaterialConstants FallbackMaterial{
+			{ 1.0f, 1.0f, 1.0f, 1.0f },
+			{ 0.0f, 1.0f, 1.0f, 1.0f },
+			{ 0.0f, 0.0f, 0.0f, 0.0f }
+		};
 		BufferDesc FallbackMaterialDescription;
 		FallbackMaterialDescription.ByteSize = sizeof(FallbackMaterial);
 		FallbackMaterialDescription.Usage = BufferUsage::Constant;
@@ -489,6 +524,10 @@ namespace PulseForge
 			{ BindingResourceType::TextureCube, 2 },
 			{ BindingResourceType::TextureCube, 4 },
 			{ BindingResourceType::Texture2D, 3 },
+			{ BindingResourceType::Texture2D, 5 },
+			{ BindingResourceType::Texture2D, 6 },
+			{ BindingResourceType::Texture2D, 7 },
+			{ BindingResourceType::Texture2D, 8 },
 			{ BindingResourceType::Sampler, 0 },
 			{ BindingResourceType::Sampler, 1 },
 			{ BindingResourceType::ConstantBuffer, 0 },
@@ -820,21 +859,62 @@ namespace PulseForge
 			});
 		}
 
-		auto Texture = m_TextureAssetCache->GetOrLoad(Material->get().BaseColorTexture, TextureFormat::RGBA8_Srgb);
-		if (!Texture)
+		const auto LoadMaterialTexture = [this, &MaterialAsset](
+			const AssetID& TextureAsset,
+			TextureFormat Format,
+			const Texture& Fallback,
+			std::string_view Name) -> std::expected<std::reference_wrapper<const Texture>, SceneRendererError>
 		{
-			return std::unexpected(SceneRendererError{
-				SceneRendererErrorCode::AssetLoadFailed,
-				{},
-				Material->get().BaseColorTexture,
-				"Could not load base-color texture for material " + MaterialAsset.ToString() + ": " + Texture.error().Message
-			});
-		}
+			if (TextureAsset.IsNil())
+				return std::cref(Fallback);
+			auto Texture = m_TextureAssetCache->GetOrLoad(TextureAsset, Format);
+			if (!Texture)
+			{
+				return std::unexpected(SceneRendererError{
+					SceneRendererErrorCode::AssetLoadFailed,
+					{},
+					TextureAsset,
+					"Could not load " + std::string(Name) + " texture for material " +
+						MaterialAsset.ToString() + ": " + Texture.error().Message
+				});
+			}
+			return std::cref(Texture->get());
+		};
+
+		auto BaseColorTexture = LoadMaterialTexture(
+			Material->get().BaseColorTexture, TextureFormat::RGBA8_Srgb, *m_FallbackBaseColorTexture, "base-color");
+		if (!BaseColorTexture)
+			return std::unexpected(std::move(BaseColorTexture.error()));
+		auto MetallicRoughnessTexture = LoadMaterialTexture(
+			Material->get().MetallicRoughnessTexture,
+			TextureFormat::RGBA8_UNorm,
+			*m_FallbackMetallicRoughnessTexture,
+			"metallic-roughness");
+		if (!MetallicRoughnessTexture)
+			return std::unexpected(std::move(MetallicRoughnessTexture.error()));
+		auto NormalTexture = LoadMaterialTexture(
+			Material->get().NormalTexture, TextureFormat::RGBA8_UNorm, *m_FallbackNormalTexture, "normal");
+		if (!NormalTexture)
+			return std::unexpected(std::move(NormalTexture.error()));
+		auto OcclusionTexture = LoadMaterialTexture(
+			Material->get().OcclusionTexture,
+			TextureFormat::RGBA8_UNorm,
+			*m_FallbackAmbientOcclusionTexture,
+			"occlusion");
+		if (!OcclusionTexture)
+			return std::unexpected(std::move(OcclusionTexture.error()));
+		auto EmissiveTexture = LoadMaterialTexture(
+			Material->get().EmissiveTexture, TextureFormat::RGBA8_Srgb, *m_FallbackEmissiveTexture, "emissive");
+		if (!EmissiveTexture)
+			return std::unexpected(std::move(EmissiveTexture.error()));
 
 		const MaterialConstants Constants{
 			{ Material->get().BaseColorFactor.r, Material->get().BaseColorFactor.g,
 				Material->get().BaseColorFactor.b, Material->get().BaseColorFactor.a },
-			{ Material->get().MetallicFactor, Material->get().RoughnessFactor, 0.0f, 0.0f }
+			{ Material->get().MetallicFactor, Material->get().RoughnessFactor,
+				Material->get().NormalScale, Material->get().OcclusionStrength },
+			{ Material->get().EmissiveFactor.r, Material->get().EmissiveFactor.g,
+				Material->get().EmissiveFactor.b, 0.0f }
 		};
 		BufferDesc MaterialBufferDescription;
 		MaterialBufferDescription.ByteSize = sizeof(Constants);
@@ -846,11 +926,15 @@ namespace PulseForge
 
 		BindingSetDesc BindingSetDescription;
 		BindingSetDescription.Layout = m_BindingLayout;
-		BindingSetDescription.Textures.push_back({ 0, std::cref(Texture->get()) });
+		BindingSetDescription.Textures.push_back({ 0, *BaseColorTexture });
 		BindingSetDescription.Textures.push_back({ 1, std::cref(*EnvironmentTextures.DiffuseIrradiance), BindingResourceType::TextureCube });
 		BindingSetDescription.Textures.push_back({ 2, std::cref(*EnvironmentTextures.PrefilteredSpecular), BindingResourceType::TextureCube });
 		BindingSetDescription.Textures.push_back({ 3, std::cref(*EnvironmentTextures.BrdfIntegrationLut) });
 		BindingSetDescription.Textures.push_back({ 4, std::cref(*EnvironmentTextures.Environment), BindingResourceType::TextureCube });
+		BindingSetDescription.Textures.push_back({ 5, *MetallicRoughnessTexture });
+		BindingSetDescription.Textures.push_back({ 6, *NormalTexture });
+		BindingSetDescription.Textures.push_back({ 7, *OcclusionTexture });
+		BindingSetDescription.Textures.push_back({ 8, *EmissiveTexture });
 		BindingSetDescription.Samplers.push_back({ 0, std::cref(*m_Sampler) });
 		BindingSetDescription.Samplers.push_back({ 1, std::cref(*m_EnvironmentSampler) });
 		BindingSetDescription.Buffers.push_back({ 0, std::cref(*MaterialBuffer.value()) });
@@ -884,7 +968,11 @@ namespace PulseForge
 			{ 1, std::cref(*EnvironmentTextures.DiffuseIrradiance), BindingResourceType::TextureCube },
 			{ 2, std::cref(*EnvironmentTextures.PrefilteredSpecular), BindingResourceType::TextureCube },
 			{ 3, std::cref(*EnvironmentTextures.BrdfIntegrationLut) },
-			{ 4, std::cref(*EnvironmentTextures.Environment), BindingResourceType::TextureCube }
+			{ 4, std::cref(*EnvironmentTextures.Environment), BindingResourceType::TextureCube },
+			{ 5, std::cref(*m_FallbackMetallicRoughnessTexture) },
+			{ 6, std::cref(*m_FallbackNormalTexture) },
+			{ 7, std::cref(*m_FallbackAmbientOcclusionTexture) },
+			{ 8, std::cref(*m_FallbackEmissiveTexture) }
 		};
 		Description.Samplers = {
 			{ 0, std::cref(*m_Sampler) },
@@ -1844,6 +1932,13 @@ namespace PulseForge
 			return false;
 		m_AmbientOcclusionSettings = Settings;
 		return true;
+	}
+
+	void SceneRenderer::RefreshMaterialAssets() noexcept
+	{
+		m_MaterialBindings.clear();
+		if (m_MaterialAssetCache)
+			m_MaterialAssetCache->Clear();
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::EnsureBackgroundPipeline(ColorTargetFormat ColorFormat)

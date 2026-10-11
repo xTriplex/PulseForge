@@ -5,6 +5,7 @@
 #include "Renderer/Mesh.h"
 
 #include <cstdint>
+#include <array>
 #include <expected>
 #include <filesystem>
 #include <string>
@@ -18,6 +19,7 @@ namespace PulseForge
 		float Color[3]{ 1.0f, 1.0f, 1.0f };
 		float TexCoord[2]{};
 		float Normal[3]{ 0.0f, 0.0f, 1.0f };
+		std::array<float, 4> Tangent{ 1.0f, 0.0f, 0.0f, 1.0f };
 	};
 
 	struct ImportedGltfMesh
