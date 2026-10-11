@@ -203,7 +203,7 @@
       },
       "environmentLight": {
         "hdrImage": "8707a670-b142-4047-9d43-2cb2160f93a1",
-        "intensity": 0.28
+        "intensity": 0.08
       },
       "parent": null
     },
@@ -214,9 +214,9 @@
       },
       "transform": {
         "translation": [
-          -3.0,
-          5.0,
-          3.0
+          0.0,
+          3.2,
+          1.3
         ],
         "rotation": [
           0.859003,
@@ -237,10 +237,8 @@
           0.78,
           0.58
         ],
-        "intensity": 58.0,
-        "range": 15.0,
-        "innerConeAngleDegrees": 18.0,
-        "outerConeAngleDegrees": 31.0,
+        "intensity": 70.0,
+        "range": 10.5,
         "castShadows": true,
         "shadowBias": 0.001,
         "shadowNormalBias": 0.025,
@@ -254,9 +252,9 @@
       },
       "transform": {
         "translation": [
-          3.5,
-          4.5,
-          2.5
+          4.0,
+          2.8,
+          0.7
         ],
         "rotation": [
           0.837044,
@@ -277,10 +275,8 @@
           0.68,
           1.0
         ],
-        "intensity": 48.0,
-        "range": 14.0,
-        "innerConeAngleDegrees": 17.0,
-        "outerConeAngleDegrees": 29.0,
+        "intensity": 20.0,
+        "range": 10.5,
         "castShadows": true,
         "shadowBias": 0.001,
         "shadowNormalBias": 0.025,
@@ -317,10 +313,8 @@
           0.42,
           0.22
         ],
-        "intensity": 35.0,
+        "intensity": 0.0,
         "range": 12.0,
-        "innerConeAngleDegrees": 15.0,
-        "outerConeAngleDegrees": 27.0,
         "castShadows": false,
         "shadowBias": 0.001,
         "shadowNormalBias": 0.025,
@@ -357,10 +351,8 @@
           0.9,
           1.0
         ],
-        "intensity": 30.0,
+        "intensity": 0.0,
         "range": 13.0,
-        "innerConeAngleDegrees": 16.0,
-        "outerConeAngleDegrees": 28.0,
         "castShadows": false,
         "shadowBias": 0.001,
         "shadowNormalBias": 0.025,
@@ -397,10 +389,8 @@
           0.95,
           0.82
         ],
-        "intensity": 28.0,
+        "intensity": 0.0,
         "range": 14.0,
-        "innerConeAngleDegrees": 14.0,
-        "outerConeAngleDegrees": 25.0,
         "castShadows": false,
         "shadowBias": 0.001,
         "shadowNormalBias": 0.025,

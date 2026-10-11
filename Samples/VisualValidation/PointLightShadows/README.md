@@ -10,7 +10,7 @@ Use a PulseForge build containing point-shadow support (introduced in the point-
 
 ## Scenes
 
-- `PointLightShadowsOverview.scene`: room overview, multiple receivers/casters, and independently configurable point lights.
+- `PointLightShadowsOverview.scene`: the first-open shadow example. A dominant, nearby point light casts a clear floor shadow from the suspended caster and a separate shadow from the tall pillar onto the back wall. A lower-output second shadowed light demonstrates independent contributions. Three additional budget lights are parked at zero intensity here so they do not fill the primary shadows; use Limits to inspect overflow.
 - `PointLightShadowFaces.scene`: central emitter and named casters/receivers arranged around the six cardinal shadow directions.
 - `PointLightShadowBias.scene`: close caster/receiver view for shadow acne and detachment controls.
 - `PointLightShadowLimits.scene`: more eligible point lights than the renderer's two point-shadow slots.
@@ -21,7 +21,9 @@ Select a named point-light entity and use the Inspector's **Cast Shadows** check
 
 In the Bias scene, compare `Shadow Bias` around `0`, `0.001`, and `0.01`. Bias is normalized radial depth. `Shadow Normal Bias` is in world units; increase it cautiously because large values detach shadows. In the Faces or Overview scene, compare `Shadow Softness` at `0`, `1.5`, and `4`; it controls a bounded cube-direction PCF filter radius in texels, not physical area-light penumbra.
 
-The renderer supports two simultaneously shadowed point lights. Selection is deterministic by the existing selected-light relevance ranking, with UUID tie-breaking; eligible overflow lights continue illuminating without shadows. Disable one owner or change relevance to exercise reassignment. This budget is independent of the four spotlight shadow maps and the 32 combined local-light illumination limit.
+The Overview uses reduced environment fill (`0.08`) and only two active local lights so the primary shadow contrast is visible immediately. The primary is at `(0, 3.2, 1.3)` with intensity `70` and range `10.5`, near the room geometry rather than high above it. Its rays through the suspended caster project onto the floor around `(0.5, 0, -2.8)`; rays through the tall pillar project onto the back wall around `(3.1, 1.2, -4.7)`, both well inside their receivers. The secondary light is at `(4, 2.8, 0.7)` with intensity `20` and range `10.5`; it is deliberately lower-output so it adds a separate contribution without washing out the dominant shadow. Three other point-light entities remain in the scene at zero intensity for later editing. This is a scene-setup choice; renderer attenuation and per-light shadow application are unchanged.
+
+The renderer supports two simultaneously shadowed point lights. Selection is deterministic by the existing selected-light relevance ranking, with UUID tie-breaking; eligible overflow lights continue illuminating without shadows. Disable one owner or change relevance to exercise reassignment. This budget is independent of the four spotlight shadow maps and the 32 combined local-light illumination limit. In Limits, the first two requesters are the intended strong shadow owners; remaining requesters are deliberately dimmer but still illuminate when they overflow.
 
 Save/reload to check component persistence. Enter Play and move lights/casters using available runtime tools; Stop restores the authored edit scene. Existing directional and spotlight shadows should continue working alongside point shadows.
 

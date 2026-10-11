@@ -203,7 +203,7 @@
       },
       "environmentLight": {
         "hdrImage": "8707a670-b142-4047-9d43-2cb2160f93a1",
-        "intensity": 0.28
+        "intensity": 0.10
       },
       "parent": null
     },
@@ -237,10 +237,8 @@
           0.78,
           0.58
         ],
-        "intensity": 110.0,
+        "intensity": 70.0,
         "range": 9.0,
-        "innerConeAngleDegrees": 18.0,
-        "outerConeAngleDegrees": 31.0,
         "castShadows": true,
         "shadowBias": 0.001,
         "shadowNormalBias": 0.025,
@@ -279,8 +277,6 @@
         ],
         "intensity": 0.0,
         "range": 14.0,
-        "innerConeAngleDegrees": 17.0,
-        "outerConeAngleDegrees": 29.0,
         "castShadows": false,
         "shadowBias": 0.001,
         "shadowNormalBias": 0.025,
@@ -319,8 +315,6 @@
         ],
         "intensity": 0.0,
         "range": 12.0,
-        "innerConeAngleDegrees": 15.0,
-        "outerConeAngleDegrees": 27.0,
         "castShadows": false,
         "shadowBias": 0.001,
         "shadowNormalBias": 0.025,
@@ -359,8 +353,6 @@
         ],
         "intensity": 0.0,
         "range": 13.0,
-        "innerConeAngleDegrees": 16.0,
-        "outerConeAngleDegrees": 28.0,
         "castShadows": false,
         "shadowBias": 0.001,
         "shadowNormalBias": 0.025,
@@ -399,8 +391,6 @@
         ],
         "intensity": 0.0,
         "range": 14.0,
-        "innerConeAngleDegrees": 14.0,
-        "outerConeAngleDegrees": 25.0,
         "castShadows": false,
         "shadowBias": 0.001,
         "shadowNormalBias": 0.025,
