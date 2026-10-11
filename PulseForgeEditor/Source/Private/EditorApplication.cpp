@@ -328,11 +328,18 @@ namespace
 
 		void Dolly(float Delta) noexcept
 		{
-			if (!m_HasFocusPivot || !std::isfinite(Delta))
+			if (!std::isfinite(Delta) || std::abs(Delta) < 1.0e-6f)
 				return;
-			const float Distance = std::clamp(glm::length(m_Position - m_FocusPivot) * std::exp(-Delta * 0.12f),
-				0.15f, 100000.0f);
-			m_Position = m_FocusPivot - GetForward() * Distance;
+			const std::optional<glm::vec3> ExistingPivot = m_HasFocusPivot
+				? std::optional<glm::vec3>{ m_FocusPivot }
+				: std::nullopt;
+			const auto Dolly = PulseForgeEditor::CalculateViewportCameraDolly(
+				m_Position, GetForward(), ExistingPivot, m_MoveSpeed, Delta);
+			if (!Dolly)
+				return;
+			m_Position = Dolly->Position;
+			m_FocusPivot = Dolly->FocusPivot;
+			m_HasFocusPivot = true;
 		}
 
 		void AdjustMoveSpeed(float WheelDelta) noexcept
@@ -344,31 +351,21 @@ namespace
 
 		void Move(const PulseForge::Input& Input, double DeltaSeconds) noexcept
 		{
-			if (!std::isfinite(DeltaSeconds) || DeltaSeconds <= 0.0)
-				return;
-
-			const float Step = static_cast<float>((std::min)(DeltaSeconds, 0.1));
 			const glm::vec3 Forward = GetForward();
 			const glm::vec3 Right = glm::normalize(glm::cross(Forward, glm::vec3(0.0f, 1.0f, 0.0f)));
-			glm::vec3 Direction(0.0f);
-			if (Input.IsKeyPressed(GLFW_KEY_W))
-				Direction += Forward;
-			if (Input.IsKeyPressed(GLFW_KEY_S))
-				Direction -= Forward;
-			if (Input.IsKeyPressed(GLFW_KEY_D))
-				Direction += Right;
-			if (Input.IsKeyPressed(GLFW_KEY_A))
-				Direction -= Right;
-			if (Input.IsKeyPressed(GLFW_KEY_E))
-				Direction.y += 1.0f;
-			if (Input.IsKeyPressed(GLFW_KEY_Q))
-				Direction.y -= 1.0f;
-			if (glm::dot(Direction, Direction) < 1.0e-6f)
+			const PulseForgeEditor::ViewportCameraMoveKeys Keys{
+				.Forward = Input.IsKeyPressed(GLFW_KEY_W),
+				.Backward = Input.IsKeyPressed(GLFW_KEY_S),
+				.Left = Input.IsKeyPressed(GLFW_KEY_A),
+				.Right = Input.IsKeyPressed(GLFW_KEY_D),
+				.Down = Input.IsKeyPressed(GLFW_KEY_Q),
+				.Up = Input.IsKeyPressed(GLFW_KEY_E),
+				.Fast = Input.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) || Input.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT)
+			};
+			const glm::vec3 Offset = PulseForgeEditor::CalculateViewportCameraMoveOffset(
+				Forward, Right, Keys, m_MoveSpeed, DeltaSeconds);
+			if (glm::dot(Offset, Offset) < 1.0e-12f)
 				return;
-
-			Direction = glm::normalize(Direction);
-			const bool Fast = Input.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) || Input.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT);
-			const glm::vec3 Offset = Direction * (m_MoveSpeed * (Fast ? 4.0f : 1.0f) * Step);
 			m_Position += Offset;
 			if (m_HasFocusPivot)
 				m_FocusPivot += Offset;
@@ -692,12 +689,17 @@ namespace
 			if (Event.GetEventType() == PulseForge::EEventType::WindowLostFocus)
 			{
 				EndEditorCameraNavigation(false);
+				m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
+					m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::ApplicationFocusLost);
 				CancelGizmoInteraction();
 				m_ViewportCameraGesture = ViewportCameraGesture::None;
 			}
 			else if (Event.GetEventType() == PulseForge::EEventType::MouseButtonPressed)
 			{
 				const auto& Mouse = static_cast<PulseForge::MouseButtonPressedEvent&>(Event);
+				if (m_ViewportKeyboardFocused && !IsNativeCursorOverViewportImage())
+					m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
+						m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::OtherEditorPanelClicked);
 				if (Mouse.GetMouseButton() == GLFW_MOUSE_BUTTON_RIGHT)
 					BeganNavigationForEvent = BeginEditorCameraNavigation();
 			}
@@ -707,10 +709,25 @@ namespace
 				if (Mouse.GetMouseButton() == GLFW_MOUSE_BUTTON_RIGHT && m_ViewportMouseCapture.OwnsMouse())
 					EndEditorCameraNavigation();
 			}
-			else if (Event.GetEventType() == PulseForge::EEventType::MouseScrolled && m_EditorCameraNavigationActive)
+			else if (Event.GetEventType() == PulseForge::EEventType::MouseScrolled)
 			{
-				const auto& Scroll = static_cast<PulseForge::MouseScrolledEvent&>(Event);
-				m_EditorCamera.AdjustMoveSpeed(Scroll.GetYOffset());
+				if (m_Context)
+					ImGui::SetCurrentContext(m_Context);
+				const bool PopupOpen = m_Context &&
+					ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
+				const PulseForgeEditor::ViewportWheelAction WheelAction =
+					PulseForgeEditor::ResolveViewportWheelAction({
+						.RightMouseNavigationActive = m_EditorCameraNavigationActive,
+						.RightMouseHeld = PulseForge::Application::Get().GetInput().IsMouseButtonPressed(
+							GLFW_MOUSE_BUTTON_RIGHT),
+						.RuntimeActive = m_SceneRuntime != nullptr,
+						.PopupOpen = PopupOpen
+					});
+				if (WheelAction == PulseForgeEditor::ViewportWheelAction::AdjustFlySpeed)
+				{
+					const auto& Scroll = static_cast<PulseForge::MouseScrolledEvent&>(Event);
+					m_EditorCamera.AdjustMoveSpeed(Scroll.GetYOffset());
+				}
 			}
 			else if (Event.GetEventType() == PulseForge::EEventType::MouseMoved && m_ViewportMouseCapture.OwnsMouse())
 			{
@@ -2835,6 +2852,10 @@ namespace
 			const bool ContentsVisible = ImGui::Begin(
 				PulseForgeEditor::EditorPanelDescriptors[static_cast<size_t>(Panel)].WindowName.data(),
 				IsOpen);
+			if (Panel != PulseForgeEditor::EditorPanel::SceneViewport &&
+				ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+				m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
+					m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::OtherEditorPanelClicked);
 			if (WasOpen != *IsOpen)
 			{
 				m_Layout.MarkSettingsDirty();
@@ -2863,6 +2884,8 @@ namespace
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
 			m_ViewportCameraGesture = ViewportCameraGesture::None;
+			m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
+				m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::ViewportUnavailable);
 			m_ViewportImageHovered = false;
 			m_ViewportImageRect = {};
 		}
@@ -3020,8 +3043,10 @@ namespace
 								ImGui::SetCursorScreenPos(HelpMinimum);
 								(void)m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Info,
 									"Help", "ViewportNavigationHelp",
-									"Right mouse + drag: look\nWhile holding right mouse: WASD move; Q/E down/up; Shift faster\n"
-									"Without right mouse: Q/W/E/R select/move/rotate/scale",
+									"Click the image, then WASD move; Q/E down/up; Shift faster\n"
+									"Wheel: zoom; with right-mouse navigation: adjust fly speed\n"
+									"Right mouse + drag: look\nAlt + left/middle/right drag: orbit/pan/dolly\n"
+									"Viewport focus: 1/2/3/4 select/move/rotate/scale; otherwise Q/W/E/R",
 									false, true, 27.0f);
 								// Finish the cursor restore at the image edge; the normal post-image cursor includes extra spacing.
 								ImGui::SetCursorScreenPos(ImVec2(CursorAfterImage.x, ImageMaximum.y));
@@ -3038,6 +3063,8 @@ namespace
 						else
 						{
 							CancelGizmoInteraction();
+							m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
+								m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::ViewportUnavailable);
 							m_ViewportImageRect = {};
 							ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error),
 								"The scene viewport render target is unavailable.");
@@ -3224,6 +3251,7 @@ namespace
 				.SceneAvailable = m_Scene != nullptr,
 				.RuntimeActive = m_SceneRuntime != nullptr,
 				.CameraNavigationActive = m_EditorCameraNavigationActive,
+				.ViewportKeyboardFocused = m_ViewportKeyboardFocused,
 				.RightMouseHeld = IO.MouseDown[ImGuiMouseButton_Right],
 				.TextInputActive = IO.WantTextInput,
 				.ActiveImGuiItem = ImGui::IsAnyItemActive(),
@@ -3232,7 +3260,24 @@ namespace
 					GImGui->NavWindowingTarget != nullptr,
 				.ModifierHeld = IO.KeyCtrl || IO.KeyShift || IO.KeyAlt || IO.KeySuper
 			};
-			// Keyboard navigation alone doesn't own these keys; text edits, active controls, menus, and popups do.
+			if (m_ViewportKeyboardFocused)
+			{
+				if (!PulseForgeEditor::CanHandleFocusedViewportToolShortcuts(ShortcutContext))
+					return;
+				constexpr std::array<std::pair<ImGuiKey, char>, 4> FocusedShortcuts = {{
+					{ ImGuiKey_1, '1' },
+					{ ImGuiKey_2, '2' },
+					{ ImGuiKey_3, '3' },
+					{ ImGuiKey_4, '4' }
+				}};
+				for (const auto& [Key, Character] : FocusedShortcuts)
+					if (ImGui::IsKeyPressed(Key, false))
+						if (const auto Tool = PulseForgeEditor::GetFocusedViewportToolForShortcut(Character))
+							SetViewportTool(*Tool);
+				return;
+			}
+
+			// With no viewport keyboard focus, Q/W/E/R retain their established editor-wide tool bindings.
 			if (!PulseForgeEditor::CanHandleViewportToolShortcuts(ShortcutContext))
 				return;
 
@@ -3257,6 +3302,23 @@ namespace
 				m_ViewportCameraGesture = ViewportCameraGesture::None;
 				return;
 			}
+			if (ImageClicked && m_ViewportImageHovered)
+				m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
+					m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::RenderedImageClicked);
+
+			ImGuiIO& IO = ImGui::GetIO();
+			const PulseForgeEditor::ViewportWheelAction WheelAction =
+				PulseForgeEditor::ResolveViewportWheelAction({
+					.PointerOverViewportImage = m_ViewportImageHovered,
+					.RightMouseNavigationActive = m_EditorCameraNavigationActive,
+					.RightMouseHeld = IO.MouseDown[ImGuiMouseButton_Right],
+					.RuntimeActive = m_SceneRuntime != nullptr,
+					.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup)
+				});
+			if (WheelAction == PulseForgeEditor::ViewportWheelAction::Zoom && IO.MouseWheel != 0.0f &&
+				!IO.MouseDown[ImGuiMouseButton_Left] && !IO.MouseDown[ImGuiMouseButton_Middle] &&
+				!ImGui::IsAnyItemActive())
+				m_EditorCamera.Dolly(PulseForgeEditor::GetViewportWheelDollyDelta(IO.MouseWheel));
 			if (!m_ShowEditorOverlays)
 				return;
 
@@ -3266,7 +3328,6 @@ namespace
 				CancelGizmoInteraction();
 			}
 
-			ImGuiIO& IO = ImGui::GetIO();
 			const glm::vec2 Mouse{ IO.MousePos.x, IO.MousePos.y };
 			if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) &&
 				(m_ViewportCameraGesture != ViewportCameraGesture::None || m_GizmoDrag.has_value()))
@@ -4552,6 +4613,26 @@ namespace
 				Mouse.y >= m_ViewportImageRect.Minimum.y && Mouse.y < m_ViewportImageRect.Maximum.y;
 		}
 
+		[[nodiscard]] bool IsNativeCursorOverViewportImage() const
+		{
+			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
+			if (!Window)
+				return false;
+			double CursorX = 0.0;
+			double CursorY = 0.0;
+			int WindowX = 0;
+			int WindowY = 0;
+			glfwGetCursorPos(Window, &CursorX, &CursorY);
+			glfwGetWindowPos(Window, &WindowX, &WindowY);
+			const glm::vec2 Mouse{
+				static_cast<float>(WindowX + CursorX),
+				static_cast<float>(WindowY + CursorY)
+			};
+			return PulseForgeEditor::Detail::IsFinite(Mouse) &&
+				Mouse.x >= m_ViewportImageRect.Minimum.x && Mouse.x < m_ViewportImageRect.Maximum.x &&
+				Mouse.y >= m_ViewportImageRect.Minimum.y && Mouse.y < m_ViewportImageRect.Maximum.y;
+		}
+
 		void EndEditorCameraNavigation(bool RestoreCursorPosition = true) noexcept
 		{
 			if (!m_ViewportMouseCapture.OwnsMouse())
@@ -4584,24 +4665,52 @@ namespace
 		void ResetEditorViewportCamera() noexcept
 		{
 			EndEditorCameraNavigation();
+			m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
+				m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::ViewportUnavailable);
 			m_EditorCamera.Reset();
 		}
 
 		void UpdateEditorCamera(PulseForge::Timestep DeltaTime)
 		{
-			if (!m_EditorCameraNavigationActive)
-				return;
 			if (m_SceneRuntime || !m_Scene)
 			{
 				EndEditorCameraNavigation();
+				m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
+					m_ViewportKeyboardFocused, m_SceneRuntime
+						? PulseForgeEditor::ViewportKeyboardFocusEvent::PlayModeStarted
+						: PulseForgeEditor::ViewportKeyboardFocusEvent::ViewportUnavailable);
 				return;
 			}
-			if (!PulseForge::Application::Get().GetInput().IsMouseButtonPressed(GLFW_MOUSE_BUTTON_RIGHT))
+			const PulseForge::Input& Input = PulseForge::Application::Get().GetInput();
+			const bool RightMouseHeld = Input.IsMouseButtonPressed(GLFW_MOUSE_BUTTON_RIGHT);
+			if (m_EditorCameraNavigationActive && !RightMouseHeld)
 			{
 				EndEditorCameraNavigation();
-				return;
 			}
-			m_EditorCamera.Move(PulseForge::Application::Get().GetInput(), DeltaTime.GetSeconds());
+			if (!m_Context)
+				return;
+
+			ImGui::SetCurrentContext(m_Context);
+			const ImGuiIO& IO = ImGui::GetIO();
+			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
+			const bool ApplicationFocused = Window && glfwGetWindowAttrib(Window, GLFW_FOCUSED) == GLFW_TRUE;
+			const PulseForgeEditor::ViewportCameraNavigationContext Context{
+				.SceneAvailable = m_Scene != nullptr,
+				.RuntimeActive = m_SceneRuntime != nullptr,
+				.ViewportKeyboardFocused = m_ViewportKeyboardFocused,
+				.RightMouseNavigationActive = m_EditorCameraNavigationActive && RightMouseHeld,
+				.ApplicationFocused = ApplicationFocused,
+				.TextInputActive = IO.WantTextInput,
+				.ActiveImGuiItem = ImGui::IsAnyItemActive(),
+				.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup),
+				.MenuNavigationActive = GImGui->NavLayer == ImGuiNavLayer_Menu ||
+					GImGui->NavWindowingTarget != nullptr,
+				.ModifierHeld = IO.KeyCtrl || IO.KeyAlt || IO.KeySuper,
+				.GizmoInteractionActive = m_GizmoDrag.has_value(),
+				.CameraGestureActive = m_ViewportCameraGesture != ViewportCameraGesture::None
+			};
+			if (PulseForgeEditor::CanNavigateViewportCamera(Context))
+				m_EditorCamera.Move(Input, DeltaTime.GetSeconds());
 		}
 
 		void ResetViewportTarget() noexcept
@@ -6985,6 +7094,8 @@ namespace
 		{
 			CancelGizmoInteraction();
 			EndEditorCameraNavigation();
+			m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
+				m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::PlayModeStarted);
 			if (!m_Project || !m_Scene)
 			{
 				SetError("Open a project and scene before starting the runtime.");
@@ -7149,6 +7260,7 @@ namespace
 		bool m_LoggedFirstViewportRendered = false;
 		bool m_LoggedEnvironmentReady = false;
 		bool m_EditorCameraNavigationActive = false;
+		bool m_ViewportKeyboardFocused = false;
 		PulseForgeEditor::Detail::ViewportMouseCaptureState m_ViewportMouseCapture;
 		bool m_IgnoreFirstCursorDelta = false;
 		bool m_PreviousImGuiNoMouse = false;

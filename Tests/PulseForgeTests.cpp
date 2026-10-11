@@ -1572,8 +1572,32 @@ namespace
 		PF_CHECK(Tests, GetViewportToolForShortcut('r') == ViewportTool::Scale);
 		PF_CHECK(Tests, GetViewportToolForShortcut('R') == ViewportTool::Scale);
 		PF_CHECK(Tests, !GetViewportToolForShortcut('x'));
+		PF_CHECK(Tests, GetFocusedViewportToolForShortcut('1') == ViewportTool::Select);
+		PF_CHECK(Tests, GetFocusedViewportToolForShortcut('2') == ViewportTool::Move);
+		PF_CHECK(Tests, GetFocusedViewportToolForShortcut('3') == ViewportTool::Rotate);
+		PF_CHECK(Tests, GetFocusedViewportToolForShortcut('4') == ViewportTool::Scale);
+		PF_CHECK(Tests, !GetFocusedViewportToolForShortcut('w'));
 		const ViewportShortcutContext Ready{ .SceneAvailable = true };
 		PF_CHECK(Tests, CanHandleViewportToolShortcuts(Ready));
+		const ViewportShortcutContext Focused{ .SceneAvailable = true, .ViewportKeyboardFocused = true };
+		PF_CHECK(Tests, !CanHandleViewportToolShortcuts(Focused));
+		PF_CHECK(Tests, CanHandleFocusedViewportToolShortcuts(Focused));
+		PF_CHECK(Tests, ResolveViewportKeyboardFocus(false,
+			ViewportKeyboardFocusEvent::RenderedImageClicked));
+		PF_CHECK(Tests, ResolveViewportKeyboardFocus(true,
+			ViewportKeyboardFocusEvent::NoChange));
+		PF_CHECK(Tests, !ResolveViewportKeyboardFocus(true,
+			ViewportKeyboardFocusEvent::OtherEditorPanelClicked));
+		PF_CHECK(Tests, !ResolveViewportKeyboardFocus(true,
+			ViewportKeyboardFocusEvent::ApplicationFocusLost));
+		PF_CHECK(Tests, !ResolveViewportKeyboardFocus(true,
+			ViewportKeyboardFocusEvent::ViewportUnavailable));
+		PF_CHECK(Tests, !ResolveViewportKeyboardFocus(true,
+			ViewportKeyboardFocusEvent::PlayModeStarted));
+		PF_CHECK(Tests, !CanHandleFocusedViewportToolShortcuts({
+			.SceneAvailable = true, .ViewportKeyboardFocused = true, .TextInputActive = true }));
+		PF_CHECK(Tests, !CanHandleFocusedViewportToolShortcuts({
+			.SceneAvailable = true, .ViewportKeyboardFocused = true, .ModifierHeld = true }));
 		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({ .SceneAvailable = true, .RuntimeActive = true }));
 		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({ .SceneAvailable = true, .CameraNavigationActive = true }));
 		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({ .SceneAvailable = true, .RightMouseHeld = true }));
@@ -1583,6 +1607,109 @@ namespace
 		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({ .SceneAvailable = true, .MenuNavigationActive = true }));
 		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({ .SceneAvailable = true, .ModifierHeld = true }));
 		PF_CHECK(Tests, !CanHandleViewportToolShortcuts({}));
+
+		const ViewportCameraNavigationContext KeyboardNavigation{
+			.SceneAvailable = true,
+			.ViewportKeyboardFocused = true,
+			.ApplicationFocused = true
+		};
+		PF_CHECK(Tests, CanNavigateViewportCamera(KeyboardNavigation));
+		PF_CHECK(Tests, !CanNavigateViewportCamera({ .SceneAvailable = true, .ApplicationFocused = true }));
+		PF_CHECK(Tests, CanNavigateViewportCamera({
+			.SceneAvailable = true, .RightMouseNavigationActive = true, .ApplicationFocused = true }));
+		PF_CHECK(Tests, !CanNavigateViewportCamera({
+			.SceneAvailable = true, .RuntimeActive = true, .ViewportKeyboardFocused = true, .ApplicationFocused = true }));
+		PF_CHECK(Tests, !CanNavigateViewportCamera({
+			.SceneAvailable = true, .ViewportKeyboardFocused = true, .ApplicationFocused = true, .TextInputActive = true }));
+		PF_CHECK(Tests, !CanNavigateViewportCamera({
+			.SceneAvailable = true, .ViewportKeyboardFocused = true, .ApplicationFocused = true, .ActiveImGuiItem = true }));
+		PF_CHECK(Tests, !CanNavigateViewportCamera({
+			.SceneAvailable = true, .ViewportKeyboardFocused = true, .ApplicationFocused = true, .PopupOpen = true }));
+		PF_CHECK(Tests, !CanNavigateViewportCamera({
+			.SceneAvailable = true, .ViewportKeyboardFocused = true, .ApplicationFocused = true, .MenuNavigationActive = true }));
+		PF_CHECK(Tests, !CanNavigateViewportCamera({
+			.SceneAvailable = true, .ViewportKeyboardFocused = true, .ApplicationFocused = true, .ModifierHeld = true }));
+		PF_CHECK(Tests, !CanNavigateViewportCamera({
+			.SceneAvailable = true, .ViewportKeyboardFocused = true, .ApplicationFocused = true, .GizmoInteractionActive = true }));
+		PF_CHECK(Tests, !CanNavigateViewportCamera({
+			.SceneAvailable = true, .ViewportKeyboardFocused = true, .ApplicationFocused = true, .CameraGestureActive = true }));
+		PF_CHECK(Tests, !CanNavigateViewportCamera({
+			.SceneAvailable = true, .ViewportKeyboardFocused = true, .ApplicationFocused = false }));
+
+		const glm::vec3 CameraForward{ 0.0f, 0.0f, -1.0f };
+		const glm::vec3 CameraRight{ 1.0f, 0.0f, 0.0f };
+		const auto ForwardStep = CalculateViewportCameraMoveOffset(
+			CameraForward, CameraRight, { .Forward = true }, 5.0f, 0.5);
+		const auto BackwardStep = CalculateViewportCameraMoveOffset(
+			CameraForward, CameraRight, { .Backward = true }, 5.0f, 0.1);
+		const auto RightStep = CalculateViewportCameraMoveOffset(
+			CameraForward, CameraRight, { .Right = true }, 5.0f, 0.1);
+		const auto LeftStep = CalculateViewportCameraMoveOffset(
+			CameraForward, CameraRight, { .Left = true }, 5.0f, 0.1);
+		const auto UpStep = CalculateViewportCameraMoveOffset(
+			CameraForward, CameraRight, { .Up = true }, 5.0f, 0.1);
+		const auto DownStep = CalculateViewportCameraMoveOffset(
+			CameraForward, CameraRight, { .Down = true }, 5.0f, 0.1);
+		const auto DiagonalStep = CalculateViewportCameraMoveOffset(
+			CameraForward, CameraRight, { .Forward = true, .Right = true }, 5.0f, 0.1);
+		const auto FastStep = CalculateViewportCameraMoveOffset(
+			CameraForward, CameraRight, { .Forward = true, .Fast = true }, 5.0f, 0.1);
+		PF_CHECK(Tests, glm::length(ForwardStep - glm::vec3(0.0f, 0.0f, -0.5f)) < 1.0e-5f);
+		PF_CHECK(Tests, glm::length(BackwardStep - glm::vec3(0.0f, 0.0f, 0.5f)) < 1.0e-5f);
+		PF_CHECK(Tests, glm::length(RightStep - glm::vec3(0.5f, 0.0f, 0.0f)) < 1.0e-5f);
+		PF_CHECK(Tests, glm::length(LeftStep - glm::vec3(-0.5f, 0.0f, 0.0f)) < 1.0e-5f);
+		PF_CHECK(Tests, glm::length(UpStep - glm::vec3(0.0f, 0.5f, 0.0f)) < 1.0e-5f);
+		PF_CHECK(Tests, glm::length(DownStep - glm::vec3(0.0f, -0.5f, 0.0f)) < 1.0e-5f);
+		PF_CHECK(Tests, std::abs(glm::length(DiagonalStep) - glm::length(RightStep)) < 1.0e-5f);
+		PF_CHECK(Tests, glm::length(FastStep - ForwardStep * 4.0f) < 1.0e-5f);
+		PF_CHECK(Tests, glm::length(CalculateViewportCameraMoveOffset(
+			CameraForward, CameraRight, { .Forward = true }, 5.0f, 0.0)) == 0.0f);
+		PF_CHECK(Tests, glm::length(CalculateViewportCameraMoveOffset(
+			CameraForward, CameraRight, {}, 5.0f, 0.1)) == 0.0f);
+		PF_CHECK(Tests, glm::length(CalculateViewportCameraMoveOffset(
+			CameraForward, CameraRight, { .Forward = true }, 5.0f, 2.0) - ForwardStep) < 1.0e-5f);
+
+		const float WheelDollyDelta = GetViewportWheelDollyDelta(1.0f);
+		const auto ZoomWithoutPivot = CalculateViewportCameraDolly(
+			glm::vec3(0.0f), CameraForward, std::nullopt, 5.0f, WheelDollyDelta);
+		const auto ZoomOutWithoutPivot = CalculateViewportCameraDolly(
+			glm::vec3(0.0f), CameraForward, std::nullopt, 5.0f, GetViewportWheelDollyDelta(-1.0f));
+		const auto ZoomWithPivot = CalculateViewportCameraDolly(
+			glm::vec3(0.0f), CameraForward, glm::vec3(0.0f, 0.0f, -10.0f), 5.0f, WheelDollyDelta);
+		PF_CHECK(Tests, ZoomWithoutPivot && ZoomWithoutPivot->Position.z < 0.0f);
+		PF_CHECK(Tests, ZoomWithoutPivot && glm::length(ZoomWithoutPivot->FocusPivot - glm::vec3(0, 0, -10)) < 1.0e-5f);
+		PF_CHECK(Tests, ZoomOutWithoutPivot && ZoomOutWithoutPivot->Position.z > 0.0f);
+		PF_CHECK(Tests, ZoomWithPivot && ZoomWithPivot->Position.z < 0.0f);
+		PF_CHECK(Tests, ZoomWithPivot && glm::length(ZoomWithPivot->FocusPivot - glm::vec3(0, 0, -10)) < 1.0e-5f);
+		glm::vec3 RepeatedZoomPosition{ 0.0f };
+		std::optional<glm::vec3> RepeatedZoomPivot;
+		for (size_t Step = 0; Step < 100; ++Step)
+		{
+			const auto Updated = CalculateViewportCameraDolly(
+				RepeatedZoomPosition, CameraForward, RepeatedZoomPivot, 5.0f, WheelDollyDelta);
+			if (!Updated)
+				break;
+			RepeatedZoomPosition = Updated->Position;
+			RepeatedZoomPivot = Updated->FocusPivot;
+		}
+		PF_CHECK(Tests, PulseForgeEditor::Detail::IsFinite(RepeatedZoomPosition) && RepeatedZoomPivot &&
+			glm::length(RepeatedZoomPosition - *RepeatedZoomPivot) >= 0.149f);
+		PF_CHECK(Tests, GetViewportWheelDollyDelta(100.0f) == 6.0f);
+		PF_CHECK(Tests, GetViewportWheelDollyDelta(std::numeric_limits<float>::infinity()) == 0.0f);
+		PF_CHECK(Tests, !CalculateViewportCameraDolly(
+			glm::vec3(0.0f), CameraForward, std::nullopt, 5.0f, std::numeric_limits<float>::quiet_NaN()));
+
+		PF_CHECK(Tests, ResolveViewportWheelAction({ .PointerOverViewportImage = true }) == ViewportWheelAction::Zoom);
+		PF_CHECK(Tests, ResolveViewportWheelAction({ .PointerOverViewportImage = true, .RightMouseHeld = true }) ==
+			ViewportWheelAction::None);
+		PF_CHECK(Tests, ResolveViewportWheelAction({
+			.PointerOverViewportImage = true, .RightMouseNavigationActive = true, .RightMouseHeld = true }) ==
+			ViewportWheelAction::AdjustFlySpeed);
+		PF_CHECK(Tests, ResolveViewportWheelAction({ .PointerOverViewportImage = true, .RuntimeActive = true }) ==
+			ViewportWheelAction::None);
+		PF_CHECK(Tests, ResolveViewportWheelAction({ .PointerOverViewportImage = true, .PopupOpen = true }) ==
+			ViewportWheelAction::None);
+		PF_CHECK(Tests, ResolveViewportWheelAction({}) == ViewportWheelAction::ScrollPanel);
 		PF_CHECK(Tests, FindEditorIcon(EditorIcon::Translate)->Codepoint !=
 			FindEditorIcon(EditorIcon::Scale)->Codepoint);
 
