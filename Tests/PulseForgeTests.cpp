@@ -1723,6 +1723,44 @@ namespace
 			PickableMesh{ NearEntity, glm::mat4(1.0f), Triangle, InvalidIndices } };
 		PF_CHECK(Tests, !RaycastMeshes(WorldRay, InvalidGeometry));
 
+		const std::array<glm::vec3, 4> FloorVertices{
+			glm::vec3(-2.0f, 4.0f, -2.0f), glm::vec3(2.0f, 4.0f, -2.0f),
+			glm::vec3(2.0f, 4.0f, 2.0f), glm::vec3(-2.0f, 4.0f, 2.0f) };
+		const std::array<uint32_t, 6> FloorIndices{ 0, 1, 2, 0, 2, 3 };
+		const std::array<glm::vec3, 4> LowerFloorVertices{
+			glm::vec3(-2.0f, 2.0f, -2.0f), glm::vec3(2.0f, 2.0f, -2.0f),
+			glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(-2.0f, 2.0f, 2.0f) };
+		const UUID FloorEntity{ 3, 3 };
+		const std::array<PickableMesh, 2> StackedFloors{
+			PickableMesh{ FarEntity, glm::mat4(1.0f), LowerFloorVertices, FloorIndices },
+			PickableMesh{ FloorEntity, glm::mat4(1.0f), FloorVertices, FloorIndices } };
+		const auto NearestFloor = RaycastSupportingSurface(
+			Ray{ { 0.0f, 5.0f, 0.0f }, { 0.0f, -1.0f, 0.0f } }, StackedFloors);
+		PF_CHECK(Tests, NearestFloor && NearestFloor->Entity == FloorEntity);
+		PF_CHECK(Tests, NearestFloor && std::abs(NearestFloor->Position.y - 4.0f) < 1.0e-4f &&
+			std::abs(NearestFloor->Distance - 1.0f) < 1.0e-4f && NearestFloor->Normal.y > 0.999f);
+		const std::array<glm::vec3, 3> WallVertices{
+			glm::vec3(0.0f, 0.0f, -1.0f), glm::vec3(0.0f, 2.0f, -1.0f), glm::vec3(0.0f, 0.0f, 1.0f) };
+		const std::array<uint32_t, 3> WallIndices{ 0, 1, 2 };
+		const std::array<PickableMesh, 1> VerticalWall{
+			PickableMesh{ FloorEntity, glm::mat4(1.0f), WallVertices, WallIndices } };
+		PF_CHECK(Tests, !RaycastSupportingSurface(
+			Ray{ { 0.0f, 3.0f, 0.0f }, { 0.0f, -1.0f, 0.0f } }, VerticalWall));
+		const std::array<glm::vec3, 3> SlopeVertices{
+			glm::vec3(0.0f, 0.0f, -1.0f), glm::vec3(2.0f, 1.0f, -1.0f), glm::vec3(2.0f, 1.0f, 1.0f) };
+		const std::array<uint32_t, 3> SlopeIndices{ 0, 1, 2 };
+		const std::array<PickableMesh, 1> SlopeMesh{
+			PickableMesh{ FloorEntity, glm::mat4(1.0f), SlopeVertices, SlopeIndices } };
+		const auto SlopeHit = RaycastSupportingSurface(
+			Ray{ { 1.0f, 2.0f, 0.0f }, { 0.0f, -1.0f, 0.0f } }, SlopeMesh);
+		PF_CHECK(Tests, SlopeHit && std::abs(SlopeHit->Position.y - 0.5f) < 1.0e-4f && SlopeHit->Normal.y > 0.89f);
+		PF_CHECK(Tests, !RaycastSupportingSurface(
+			Ray{ { 1.0f, 2.0f, 0.0f }, { 0.0f, -1.0f, 0.0f } }, SlopeMesh, 0.95f));
+		PF_CHECK(Tests, SnapValueToIncrement(1.26f, 0.5f) == 1.5f);
+		PF_CHECK(Tests, SnapValueToIncrement(-1.26f, 0.5f) == -1.5f);
+		PF_CHECK(Tests, SnapValueToIncrement(2.0f, 0.0f) == std::nullopt);
+		PF_CHECK(Tests, SnapValueToIncrement(std::numeric_limits<float>::infinity(), 1.0f) == std::nullopt);
+
 		Scene HierarchyScene;
 		auto Parent = HierarchyScene.CreateEntity("Picking parent");
 		auto Child = HierarchyScene.CreateEntity("Picking child");
@@ -1760,8 +1798,11 @@ namespace
 			glm::scale(glm::mat4(1.0f), { 2.0f, 3.0f, 0.5f });
 		const glm::quat LocalRotation = glm::angleAxis(glm::radians(40.0f), glm::normalize(glm::vec3(1.0f, 1.0f, 0.0f)));
 		const auto ParentAxis = GetWorldGizmoAxis(ParentWorld, LocalRotation, 1);
+		const auto WorldAxis = GetGizmoAxis(ParentWorld, LocalRotation, 0, false);
 		const auto LocalDelta = WorldDeltaToLocalAxisDelta(2.5f, ParentWorld, LocalRotation, 1);
-		PF_CHECK(Tests, ParentAxis && LocalDelta && ParentAxis->WorldUnitsPerLocalUnit > 0.0f);
+		PF_CHECK(Tests, ParentAxis && LocalDelta && WorldAxis && ParentAxis->WorldUnitsPerLocalUnit > 0.0f);
+		PF_CHECK(Tests, WorldAxis && glm::length(WorldAxis->Direction - glm::vec3(1.0f, 0.0f, 0.0f)) < 1.0e-6f &&
+			std::abs(WorldAxis->WorldUnitsPerLocalUnit - 1.0f) < 1.0e-6f);
 		if (ParentAxis && LocalDelta)
 		{
 			const glm::vec3 LocalMovement = LocalRotation * glm::vec3(0.0f, 1.0f, 0.0f) * *LocalDelta;
@@ -3873,6 +3914,53 @@ namespace
 			++LoadedDemoSceneCount;
 		}
 		PF_CHECK(Tests, LoadedDemoSceneCount == 4);
+
+		const std::filesystem::path EditorWorkflowProjectFile = RepositoryRoot / "Samples" / "VisualValidation" /
+			"EditorWorkflow" / "EditorWorkflow.pfproj";
+		auto EditorWorkflowProject = Project::Open(EditorWorkflowProjectFile);
+		PF_CHECK(Tests, EditorWorkflowProject.has_value());
+		if (!EditorWorkflowProject)
+			return;
+		PF_CHECK(Tests, EditorWorkflowProject->GetDescription().StartScene.has_value());
+		if (!EditorWorkflowProject->GetDescription().StartScene)
+			return;
+		const auto EditorWorkflowStartup = EditorWorkflowProject->GetAssetRegistry().Find(
+			*EditorWorkflowProject->GetDescription().StartScene);
+		PF_CHECK(Tests, EditorWorkflowStartup.has_value());
+		PF_CHECK(Tests, EditorWorkflowStartup &&
+			EditorWorkflowStartup->ProjectRelativePath.filename() == "EditorWorkflowOverview.scene");
+		Scene EditorWorkflowScene;
+		PF_CHECK(Tests, SceneAssetService::Load(*EditorWorkflowProject->GetDescription().StartScene,
+			EditorWorkflowProject->GetRootPath(), EditorWorkflowProject->GetAssetRegistry(), EditorWorkflowScene).has_value());
+		const auto EditorWorkflowReferences = AssetReferenceValidator::Validate(
+			EditorWorkflowScene, EditorWorkflowProject->GetAssetRegistry());
+		PF_CHECK(Tests, EditorWorkflowReferences.has_value());
+		PF_CHECK(Tests, EditorWorkflowReferences && EditorWorkflowReferences->empty());
+		PF_CHECK(Tests, EditorWorkflowScene.GetEntityCount() == 13);
+		const std::vector<AssetRecord> WorkflowAssets = EditorWorkflowProject->GetAssetRegistry().GetAssets();
+		size_t WorkflowMaterialCount = 0;
+		for (const AssetRecord& Asset : WorkflowAssets)
+			if (Asset.ProjectRelativePath.extension() == ".material")
+			{
+				const auto Material = MaterialAssetService::Load(
+					Asset.ID, EditorWorkflowProject->GetRootPath(), EditorWorkflowProject->GetAssetRegistry());
+				PF_CHECK(Tests, Material.has_value());
+				++WorkflowMaterialCount;
+			}
+		PF_CHECK(Tests, WorkflowMaterialCount == 4);
+		const auto WorkflowMesh = std::find_if(WorkflowAssets.begin(), WorkflowAssets.end(), [](const AssetRecord& Asset)
+			{
+				return Asset.ProjectRelativePath == std::filesystem::path("Assets/Models/WorkflowCube.gltf");
+			});
+		PF_CHECK(Tests, WorkflowMesh != WorkflowAssets.end());
+		if (WorkflowMesh != WorkflowAssets.end())
+		{
+			const auto ImportedWorkflowMesh = GltfMeshImporter::ImportStaticPrimitive(
+				WorkflowMesh->ID, EditorWorkflowProject->GetRootPath(), EditorWorkflowProject->GetAssetRegistry());
+			PF_CHECK(Tests, ImportedWorkflowMesh.has_value());
+			PF_CHECK(Tests, ImportedWorkflowMesh && !ImportedWorkflowMesh->Vertices.empty() &&
+				!ImportedWorkflowMesh->Indices.empty());
+		}
 	}
 
 	void TestAssetReferenceValidation(TestRunner& Tests)

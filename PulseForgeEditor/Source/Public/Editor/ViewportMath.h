@@ -43,6 +43,14 @@ namespace PulseForgeEditor
 		float Distance = 0.0f;
 	};
 
+	struct SupportingSurfaceHit
+	{
+		PulseForge::UUID Entity;
+		float Distance = 0.0f;
+		glm::vec3 Position{ 0.0f };
+		glm::vec3 Normal{ 0.0f, 1.0f, 0.0f };
+	};
+
 	struct WorldGizmoAxis
 	{
 		glm::vec3 Direction{ 0.0f };
@@ -54,6 +62,14 @@ namespace PulseForgeEditor
 		glm::vec2 ScreenDirection{ 0.0f };
 		float Depth = 0.0f;
 	};
+
+	[[nodiscard]] inline std::optional<float> SnapValueToIncrement(float Value, float Increment)
+	{
+		if (!std::isfinite(Value) || !std::isfinite(Increment) || Increment <= 0.0f)
+			return std::nullopt;
+		const float Snapped = std::round(Value / Increment) * Increment;
+		return std::isfinite(Snapped) ? std::optional<float>(Snapped) : std::nullopt;
+	}
 
 	enum class TransformGizmoOperation : uint8_t
 	{
@@ -371,6 +387,65 @@ namespace PulseForgeEditor
 		return Closest;
 	}
 
+	[[nodiscard]] inline std::optional<SupportingSurfaceHit> RaycastSupportingSurface(
+		const Ray& WorldRay,
+		std::span<const PickableMesh> Meshes,
+		float MinimumUpDot = 0.5f)
+	{
+		if (!Detail::IsFinite(WorldRay.Origin) || !Detail::IsFinite(WorldRay.Direction) ||
+			std::isnan(WorldRay.MaxDistance) || WorldRay.MaxDistance <= 0.0f ||
+			!std::isfinite(MinimumUpDot) || MinimumUpDot < 0.0f || MinimumUpDot > 1.0f)
+			return std::nullopt;
+		const float DirectionLength = glm::length(WorldRay.Direction);
+		if (!std::isfinite(DirectionLength) || DirectionLength < 1.0e-7f)
+			return std::nullopt;
+		const Ray NormalizedRay{ WorldRay.Origin, WorldRay.Direction / DirectionLength, WorldRay.MaxDistance };
+		std::optional<SupportingSurfaceHit> Closest;
+		for (const PickableMesh& Mesh : Meshes)
+		{
+			if (Mesh.Entity.IsNil() || Mesh.Positions.size() < 3 || !Detail::IsFinite(Mesh.WorldTransform))
+				continue;
+			const size_t TriangleCount = Mesh.Indices.empty() ? Mesh.Positions.size() : Mesh.Indices.size();
+			for (size_t Index = 0; Index + 2 < TriangleCount; Index += 3)
+			{
+				const uint32_t A = Mesh.Indices.empty() ? static_cast<uint32_t>(Index) : Mesh.Indices[Index];
+				const uint32_t B = Mesh.Indices.empty() ? static_cast<uint32_t>(Index + 1) : Mesh.Indices[Index + 1];
+				const uint32_t C = Mesh.Indices.empty() ? static_cast<uint32_t>(Index + 2) : Mesh.Indices[Index + 2];
+				if (A >= Mesh.Positions.size() || B >= Mesh.Positions.size() || C >= Mesh.Positions.size())
+					continue;
+				const glm::vec4 WorldA = Mesh.WorldTransform * glm::vec4(Mesh.Positions[A], 1.0f);
+				const glm::vec4 WorldB = Mesh.WorldTransform * glm::vec4(Mesh.Positions[B], 1.0f);
+				const glm::vec4 WorldC = Mesh.WorldTransform * glm::vec4(Mesh.Positions[C], 1.0f);
+				if (!std::isfinite(WorldA.w) || !std::isfinite(WorldB.w) || !std::isfinite(WorldC.w) ||
+					std::abs(WorldA.w) < 1.0e-7f || std::abs(WorldB.w) < 1.0e-7f || std::abs(WorldC.w) < 1.0e-7f)
+					continue;
+				const glm::vec3 PositionA = glm::vec3(WorldA) / WorldA.w;
+				const glm::vec3 PositionB = glm::vec3(WorldB) / WorldB.w;
+				const glm::vec3 PositionC = glm::vec3(WorldC) / WorldC.w;
+				if (!Detail::IsFinite(PositionA) || !Detail::IsFinite(PositionB) || !Detail::IsFinite(PositionC))
+					continue;
+				glm::vec3 Normal = glm::cross(PositionB - PositionA, PositionC - PositionA);
+				const float NormalLength = glm::length(Normal);
+				if (!std::isfinite(NormalLength) || NormalLength < 1.0e-7f)
+					continue;
+				Normal /= NormalLength;
+				if (Normal.y < 0.0f)
+					Normal = -Normal;
+				if (Normal.y < MinimumUpDot)
+					continue;
+				const auto Distance = Detail::IntersectTriangle(NormalizedRay, PositionA, PositionB, PositionC);
+				if (!Distance || *Distance > NormalizedRay.MaxDistance || (Closest && *Distance >= Closest->Distance))
+					continue;
+				Closest = SupportingSurfaceHit{
+					Mesh.Entity,
+					*Distance,
+					NormalizedRay.Origin + NormalizedRay.Direction * *Distance,
+					Normal };
+			}
+		}
+		return Closest;
+	}
+
 	[[nodiscard]] inline std::optional<WorldGizmoAxis> GetWorldGizmoAxis(
 		const glm::mat4& ParentWorldTransform,
 		const glm::quat& LocalRotation,
@@ -389,6 +464,20 @@ namespace PulseForgeEditor
 		if (!Detail::IsFinite(WorldVector) || !std::isfinite(WorldLength) || WorldLength < 1.0e-7f)
 			return std::nullopt;
 		return WorldGizmoAxis{ WorldVector / WorldLength, WorldLength };
+	}
+
+	[[nodiscard]] inline std::optional<WorldGizmoAxis> GetGizmoAxis(
+		const glm::mat4& ParentWorldTransform,
+		const glm::quat& LocalRotation,
+		uint32_t AxisIndex,
+		bool LocalSpace)
+	{
+		if (LocalSpace)
+			return GetWorldGizmoAxis(ParentWorldTransform, LocalRotation, AxisIndex);
+		if (AxisIndex >= 3)
+			return std::nullopt;
+		const glm::vec3 Direction(AxisIndex == 0, AxisIndex == 1, AxisIndex == 2);
+		return WorldGizmoAxis{ Direction, 1.0f };
 	}
 
 	[[nodiscard]] inline std::optional<float> WorldDeltaToLocalAxisDelta(

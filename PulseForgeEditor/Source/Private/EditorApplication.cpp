@@ -1470,6 +1470,8 @@ namespace
 				}
 				else if (ImGui::IsKeyPressed(ImGuiKey_F, false))
 					FocusSelection();
+				else if (ImGui::IsKeyPressed(ImGuiKey_End, false) && !ContentBrowser)
+					SnapSelectionToSurface();
 				else if (ImGui::IsKeyPressed(ImGuiKey_H, false))
 				{
 					if (Shift)
@@ -2540,6 +2542,9 @@ namespace
 				}
 				if (ImGui::MenuItem("Focus Selected", "F", false, CanEditScene && HasSelection))
 					FocusSelection();
+				if (ImGui::MenuItem("Snap to Supporting Surface", "End", false,
+					CanEditScene && HasSelection))
+					SnapSelectionToSurface();
 				if (ImGui::MenuItem("Hide Selected", "H", false, CanEditScene && HasSelection))
 					HideSelectedEntities();
 				if (ImGui::MenuItem("Show All", "Ctrl+H", false,
@@ -2594,6 +2599,23 @@ namespace
 				ImGui::Separator();
 				if (ImGui::MenuItem("Reset Layout"))
 					m_Layout.RequestReset();
+				ImGui::EndMenu();
+			}
+			if (ImGui::BeginMenu("Help"))
+			{
+				if (ImGui::BeginMenu("Keyboard Shortcuts"))
+				{
+					ImGui::MenuItem("Select / Move / Rotate / Scale", "Q / W / E / R", false, false);
+					ImGui::MenuItem("Focus selection / Snap to surface", "F / End", false, false);
+					ImGui::MenuItem("Undo / Redo", "Ctrl+Z / Ctrl+Y", false, false);
+					ImGui::MenuItem("Copy / Cut / Paste / Duplicate", "Ctrl+C / X / V / D", false, false);
+					ImGui::MenuItem("Delete / Rename / Create entity", "Delete / F2 / Ctrl+Shift+N", false, false);
+					ImGui::MenuItem("Hide / Isolate / Show all", "H / Shift+H / Ctrl+H", false, false);
+					ImGui::MenuItem("Save / Save Scene As", "Ctrl+S / Ctrl+Shift+S", false, false);
+					ImGui::MenuItem("Viewport orbit / pan / dolly", "Alt+LMB / MMB / RMB drag", false, false);
+					ImGui::MenuItem("Duplicate while moving or rotating", "Alt+gizmo drag", false, false);
+					ImGui::EndMenu();
+				}
 				ImGui::EndMenu();
 			}
 			ImGui::EndMainMenuBar();
@@ -2928,6 +2950,7 @@ namespace
 					ImGui::SetNextItemWidth(150.0f);
 					(void)ImGui::DragFloat("Exposure (EV)", &m_ExposureEV, 0.05f, -8.0f, 8.0f, "%.2f EV",
 						ImGuiSliderFlags_AlwaysClamp);
+					DrawViewportPrecisionControls();
 					const ImVec2 Available = ImGui::GetContentRegionAvail();
 					if (Available.x <= 1.0f || Available.y <= 1.0f)
 					{
@@ -3052,7 +3075,7 @@ namespace
 			const ImRect& TabBarRect = DockNode->TabBar->BarRect;
 			const ImRect& ViewportTabRect = ViewportWindow->DC.DockTabItemRect;
 			constexpr float ButtonSize = 28.0f;
-			constexpr float GroupWidth = ButtonSize * 4.0f + 4.0f * 3.0f + 8.0f + 36.0f;
+			constexpr float GroupWidth = ButtonSize * 4.0f + 4.0f * 3.0f + 8.0f + 72.0f;
 			const float ToolbarLeft = ViewportTabRect.Max.x + 5.0f;
 			if (ViewportTabRect.GetWidth() <= 1.0f || TabBarRect.GetHeight() < ButtonSize ||
 				TabBarRect.Max.x - ToolbarLeft < GroupWidth ||
@@ -3091,8 +3114,70 @@ namespace
 				SetViewportTool(PulseForgeEditor::ViewportTool::Scale);
 			}
 			ImGui::SameLine(0.0f, 8.0f);
-			m_EditorStyle.TextMuted("Local");
+			if (ImGui::SmallButton(m_GizmoLocalSpace ? "Local##ViewportCoordinateSpace" : "World##ViewportCoordinateSpace"))
+			{
+				CancelGizmoInteraction();
+				m_GizmoLocalSpace = !m_GizmoLocalSpace;
+			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Toggle Local and World gizmo axes.");
 			ImGui::DockNodeEndAmendTabBar();
+		}
+
+		void DrawViewportPrecisionControls()
+		{
+			struct SnapPreset
+			{
+				const char* Label;
+				float Value;
+			};
+			constexpr std::array<SnapPreset, 5> TranslationPresets{{
+				{ "0.1 units", 0.1f }, { "0.5 units", 0.5f }, { "1 unit", 1.0f },
+				{ "5 units", 5.0f }, { "10 units", 10.0f } }};
+			constexpr std::array<SnapPreset, 5> RotationPresets{{
+				{ "5 degrees", 5.0f }, { "10 degrees", 10.0f }, { "15 degrees", 15.0f },
+				{ "45 degrees", 45.0f }, { "90 degrees", 90.0f } }};
+			constexpr std::array<SnapPreset, 5> ScalePresets{{
+				{ "0.05 scale", 0.05f }, { "0.1 scale", 0.1f }, { "0.25 scale", 0.25f },
+				{ "0.5 scale", 0.5f }, { "1.0 scale", 1.0f } }};
+
+			float* Increment = &m_TranslationSnapIncrement;
+			const std::array<SnapPreset, 5>* Presets = &TranslationPresets;
+			const char* Operation = "Translation";
+			if (m_ViewportTool == PulseForgeEditor::ViewportTool::Rotate)
+			{
+				Increment = &m_RotationSnapDegrees;
+				Presets = &RotationPresets;
+				Operation = "Rotation";
+			}
+			else if (m_ViewportTool == PulseForgeEditor::ViewportTool::Scale)
+			{
+				Increment = &m_ScaleSnapIncrement;
+				Presets = &ScalePresets;
+				Operation = "Scale";
+			}
+
+			ImGui::Checkbox("Snap", &m_TransformSnapping);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Snap %s during gizmo drags. Hold Ctrl to temporarily enable snapping.", Operation);
+			ImGui::SameLine();
+			const char* CurrentLabel = (*Presets)[0].Label;
+			for (const SnapPreset& Preset : *Presets)
+				if (std::abs(Preset.Value - *Increment) < 1.0e-5f)
+					CurrentLabel = Preset.Label;
+			ImGui::SetNextItemWidth(112.0f);
+			if (ImGui::BeginCombo("##TransformSnapIncrement", CurrentLabel))
+			{
+				for (const SnapPreset& Preset : *Presets)
+				{
+					const bool Selected = std::abs(Preset.Value - *Increment) < 1.0e-5f;
+					if (ImGui::Selectable(Preset.Label, Selected))
+						*Increment = Preset.Value;
+					if (Selected)
+						ImGui::SetItemDefaultFocus();
+				}
+				ImGui::EndCombo();
+			}
 		}
 #endif
 
@@ -3325,7 +3410,8 @@ namespace
 
 			for (uint32_t AxisIndex = 0; AxisIndex < 3; ++AxisIndex)
 			{
-				const auto Axis = PulseForgeEditor::GetWorldGizmoAxis(ParentWorld, Transform->Rotation, AxisIndex);
+				const auto Axis = PulseForgeEditor::GetGizmoAxis(
+					ParentWorld, Transform->Rotation, AxisIndex, m_GizmoLocalSpace);
 				if (!Axis)
 					continue;
 				const auto Endpoint = ProjectToViewportImage(
@@ -3634,6 +3720,7 @@ namespace
 				return;
 
 			float Delta = 0.0f;
+			float WorldDelta = 0.0f;
 			if (Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Rotate)
 			{
 				const glm::vec3 StartVector = glm::normalize(Drag.StartPoint - Drag.PivotWorld);
@@ -3644,13 +3731,33 @@ namespace
 			}
 			else
 			{
-				const float WorldDelta = glm::dot(*CurrentPoint - Drag.StartPoint, Drag.WorldAxis);
+				WorldDelta = glm::dot(*CurrentPoint - Drag.StartPoint, Drag.WorldAxis);
 				if (!std::isfinite(Drag.WorldUnitsPerLocalUnit) || Drag.WorldUnitsPerLocalUnit < 1.0e-7f)
 					return;
+				if (Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Translate &&
+					(m_TransformSnapping || ImGui::GetIO().KeyCtrl))
+				{
+					const auto Snapped = PulseForgeEditor::SnapValueToIncrement(WorldDelta, m_TranslationSnapIncrement);
+					if (!Snapped)
+						return;
+					WorldDelta = *Snapped;
+				}
 				Delta = WorldDelta / Drag.WorldUnitsPerLocalUnit;
 			}
 			if (!std::isfinite(Delta))
 				return;
+			if (m_TransformSnapping || ImGui::GetIO().KeyCtrl)
+			{
+				const float Increment = Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Rotate
+					? glm::radians(m_RotationSnapDegrees) : m_ScaleSnapIncrement;
+				if (Drag.Operation != PulseForgeEditor::TransformGizmoOperation::Translate)
+				{
+					const auto Snapped = PulseForgeEditor::SnapValueToIncrement(Delta, Increment);
+					if (!Snapped)
+						return;
+					Delta = *Snapped;
+				}
+			}
 
 			const glm::vec2 MouseDelta = Mouse - Drag.StartMouse;
 			if (Drag.DuplicateOnDrag && !ImGui::GetIO().KeyAlt)
@@ -3697,7 +3804,7 @@ namespace
 				return;
 			}
 
-			if (Drag.Targets.size() == 1 && !Drag.HasDuplicated)
+			if (Drag.Targets.size() == 1 && !Drag.HasDuplicated && m_GizmoLocalSpace)
 			{
 				const auto Entity = m_Scene->FindEntity(Drag.Targets.front().Identifier);
 				const auto Updated = PulseForgeEditor::ApplyLocalGizmoDelta(
@@ -3714,7 +3821,6 @@ namespace
 				return;
 			}
 
-			const float WorldDelta = glm::dot(*CurrentPoint - Drag.StartPoint, Drag.WorldAxis);
 			glm::mat4 WorldOperation(1.0f);
 			if (Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Translate)
 				WorldOperation = glm::translate(glm::mat4(1.0f), Drag.WorldAxis * WorldDelta);
@@ -3729,13 +3835,17 @@ namespace
 				const float Factor = 1.0f + Delta;
 				if (!std::isfinite(Factor) || Factor <= 1.0e-4f)
 					return;
+				const glm::vec3 Scale = Drag.Axis == 0 ? glm::vec3(Factor, 1.0f, 1.0f)
+					: Drag.Axis == 1 ? glm::vec3(1.0f, Factor, 1.0f) : glm::vec3(1.0f, 1.0f, Factor);
+				WorldOperation = glm::translate(glm::mat4(1.0f), Drag.PivotWorld) * glm::scale(glm::mat4(1.0f), Scale) *
+					glm::translate(glm::mat4(1.0f), -Drag.PivotWorld);
 			}
 
 			for (const GizmoEntityStart& Target : Drag.Targets)
 			{
 				const auto Entity = m_Scene->FindEntity(Target.Identifier);
 				std::optional<PulseForge::TransformComponent> Updated;
-				if (Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Scale)
+				if (Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Scale && m_GizmoLocalSpace)
 				{
 					const float Factor = 1.0f + Delta;
 					PulseForge::TransformComponent Scaled = Target.LocalTransform;
@@ -3888,6 +3998,167 @@ namespace
 			}
 			else if (!Control && !Shift)
 				SelectSingleEntity(std::nullopt);
+		}
+
+		void SnapSelectionToSurface()
+		{
+			if (!m_Project || !m_Scene || m_SceneRuntime || m_Selection.GetEntities().empty())
+				return;
+			auto Roots = GetTopLevelSelectedEntities();
+			if (!Roots || Roots->empty())
+				return;
+			auto MovingSubtrees = CollectEntitySubtrees(*Roots);
+			if (!MovingSubtrees)
+			{
+				SetError("Could not inspect the selected hierarchy for surface snapping: " + MovingSubtrees.error());
+				return;
+			}
+			std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> ExcludedEntities;
+			for (const PulseForge::Entity& Entity : *MovingSubtrees)
+				ExcludedEntities.insert(Entity.GetUUID());
+
+			std::vector<PulseForgeEditor::PickableMesh> CandidateMeshes;
+			for (const PulseForge::Entity& Entity : m_Scene->GetEntities())
+			{
+				if (ExcludedEntities.contains(Entity.GetUUID()) || !IsEntityEffectivelyVisible(Entity))
+					continue;
+				const auto MeshRenderer = Entity.GetMeshRenderer();
+				if (!MeshRenderer || !MeshRenderer->has_value())
+					continue;
+				const auto World = Entity.GetWorldMatrix();
+				if (!World || !PulseForgeEditor::Detail::IsFinite(*World))
+					continue;
+				auto Geometry = GetCpuPickingMesh(MeshRenderer->value().MeshAsset);
+				if (!Geometry)
+				{
+					SetWarning(Geometry.error());
+					continue;
+				}
+				CandidateMeshes.push_back({
+					Entity.GetUUID(), *World, (*Geometry)->Positions, (*Geometry)->Indices });
+			}
+			if (CandidateMeshes.empty())
+			{
+				SetStatus("No visible mesh surfaces are available below the selection.");
+				return;
+			}
+
+			std::vector<std::pair<PulseForge::UUID, PulseForge::TransformComponent>> UpdatedTransforms;
+			constexpr size_t MaximumContactCandidates = 2048;
+			constexpr size_t MaximumContactSamples = 128;
+			for (const PulseForge::Entity& Root : *Roots)
+			{
+				auto Subtree = CollectEntitySubtrees(std::vector<PulseForge::Entity>{ Root });
+				if (!Subtree)
+				{
+					SetError("Could not inspect a selected hierarchy for surface snapping: " + Subtree.error());
+					return;
+				}
+				std::vector<glm::vec3> ContactPoints;
+				for (const PulseForge::Entity& Entity : *Subtree)
+				{
+					if (!IsEntityEffectivelyVisible(Entity))
+						continue;
+					const auto MeshRenderer = Entity.GetMeshRenderer();
+					if (!MeshRenderer || !MeshRenderer->has_value())
+						continue;
+					const auto World = Entity.GetWorldMatrix();
+					if (!World || !PulseForgeEditor::Detail::IsFinite(*World))
+						continue;
+					auto Geometry = GetCpuPickingMesh(MeshRenderer->value().MeshAsset);
+					if (!Geometry)
+						continue;
+					for (const glm::vec3& Vertex : (*Geometry)->Positions)
+					{
+						const glm::vec3 Position(*World * glm::vec4(Vertex, 1.0f));
+						if (!PulseForgeEditor::Detail::IsFinite(Position))
+							continue;
+						if (ContactPoints.size() < MaximumContactCandidates)
+							if (std::none_of(ContactPoints.begin(), ContactPoints.end(), [&Position](const glm::vec3& Existing)
+							{
+								const glm::vec3 Difference = Existing - Position;
+								return glm::dot(Difference, Difference) < 1.0e-6f;
+							}))
+								ContactPoints.push_back(Position);
+					}
+				}
+				if (ContactPoints.empty())
+				{
+					if (const auto World = Root.GetWorldMatrix(); World && PulseForgeEditor::Detail::IsFinite(*World))
+						ContactPoints.push_back(glm::vec3((*World)[3]));
+				}
+				if (ContactPoints.size() > MaximumContactSamples)
+				{
+					std::vector<glm::vec3> Samples;
+					const size_t Stride = (ContactPoints.size() + MaximumContactSamples - 1) / MaximumContactSamples;
+					for (size_t Index = 0; Index < ContactPoints.size(); Index += Stride)
+						Samples.push_back(ContactPoints[Index]);
+					ContactPoints = std::move(Samples);
+				}
+
+				float BestDeltaY = -(std::numeric_limits<float>::infinity)();
+				for (const glm::vec3& Point : ContactPoints)
+				{
+					constexpr float RayStartOffset = 0.005f;
+					const auto Hit = PulseForgeEditor::RaycastSupportingSurface(
+						{ Point + glm::vec3(0.0f, RayStartOffset, 0.0f), { 0.0f, -1.0f, 0.0f } },
+						CandidateMeshes);
+					if (!Hit)
+						continue;
+					const float DeltaY = Hit->Position.y - Point.y;
+					if (DeltaY <= RayStartOffset)
+						BestDeltaY = (std::max)(BestDeltaY, DeltaY);
+				}
+				if (!std::isfinite(BestDeltaY) || BestDeltaY >= -0.001f)
+					continue;
+
+				const auto Transform = Root.GetTransform();
+				const auto World = Root.GetWorldMatrix();
+				const auto Parent = Root.GetParent();
+				if (!Transform || !World || !Parent)
+					continue;
+				glm::mat4 ParentWorld(1.0f);
+				if (Parent->has_value())
+				{
+					const auto ParentTransform = Parent->value().GetWorldMatrix();
+					if (!ParentTransform || !PulseForgeEditor::Detail::IsFinite(*ParentTransform) ||
+						std::abs(glm::determinant(*ParentTransform)) < 1.0e-8f)
+						continue;
+					ParentWorld = *ParentTransform;
+				}
+				const glm::vec3 WorldPosition((*World)[3]);
+				const glm::vec3 NewWorldPosition = WorldPosition + glm::vec3(0.0f, BestDeltaY, 0.0f);
+				PulseForge::TransformComponent Updated = *Transform;
+				Updated.Translation = glm::vec3(glm::inverse(ParentWorld) * glm::vec4(NewWorldPosition, 1.0f));
+				if (!PulseForgeEditor::Detail::IsFinite(Updated.Translation))
+					continue;
+				UpdatedTransforms.emplace_back(Root.GetUUID(), Updated);
+			}
+
+			if (UpdatedTransforms.empty())
+			{
+				SetStatus("No supporting surface was found below the selection.");
+				return;
+			}
+			const auto Recorded = RunSceneEdit("Snap Selection to Surface", [this, UpdatedTransforms]()
+				-> std::expected<void, PulseForge::SceneError>
+			{
+				for (const auto& [Identifier, Transform] : UpdatedTransforms)
+				{
+					const auto Entity = m_Scene->FindEntity(Identifier);
+					if (!Entity)
+						return std::unexpected(PulseForge::SceneError{
+							PulseForge::SceneErrorCode::InvalidEntity,
+							"A selected entity disappeared during surface snapping" });
+					if (auto Result = Entity->SetTransform(Transform); !Result)
+						return std::unexpected(Result.error());
+				}
+				return {};
+			});
+			if (!Recorded)
+				SetError("Surface snapping failed: " + Recorded.error());
+			else
+				SetStatus("Snapped " + std::to_string(UpdatedTransforms.size()) + " selected entities to supporting surfaces.");
 		}
 
 		void FocusSelection()
@@ -6888,6 +7159,11 @@ namespace
 		PulseForgeEditor::TransformGizmoOperation m_GizmoOperation =
 			PulseForgeEditor::TransformGizmoOperation::Translate;
 		PulseForgeEditor::ViewportTool m_ViewportTool = PulseForgeEditor::ViewportTool::Move;
+		bool m_GizmoLocalSpace = true;
+		bool m_TransformSnapping = false;
+		float m_TranslationSnapIncrement = 1.0f;
+		float m_RotationSnapDegrees = 15.0f;
+		float m_ScaleSnapIncrement = 0.1f;
 		ViewportCameraGesture m_ViewportCameraGesture = ViewportCameraGesture::None;
 		bool m_ShowEditorOverlays = true;
 		std::unordered_map<PulseForge::AssetID, CpuPickingMesh, PulseForge::UUIDHash> m_PickingMeshCache;
