@@ -26,6 +26,7 @@
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorCommandHistory.h"
+#include "Editor/EditorInteractionPolicy.h"
 #include "Editor/EditorSelection.h"
 #include "Editor/EditorVisibility.h"
 #include "Editor/EditorStyle.h"
@@ -628,6 +629,7 @@ namespace
 			ImGui::NewFrame();
 			m_EditorStyle.ApplyTheme(GetEditorUiColorEncoding(
 				PulseForge::Application::Get().GetOutputColorEncoding()));
+			CompleteReleasedGizmoInteractionBeforeShortcuts();
 			HandleViewportToolShortcuts();
 			HandleEditorHistoryShortcuts();
 			HandleSceneEditingShortcuts();
@@ -1334,13 +1336,20 @@ namespace
 
 		void HandleEditorHistoryShortcuts()
 		{
-			if (!m_Scene || m_SceneRuntime || m_EditorCameraNavigationActive || m_GizmoDrag ||
-				ImGui::GetIO().WantTextInput ||
-				ImGui::IsAnyItemActive() || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) ||
-				GImGui->NavLayer == ImGuiNavLayer_Menu || GImGui->NavWindowingTarget != nullptr)
+			const ImGuiIO& IO = ImGui::GetIO();
+			if (!PulseForgeEditor::CanRouteEditorHistoryShortcut({
+				.SceneAvailable = m_Scene != nullptr,
+				.RuntimeActive = m_SceneRuntime != nullptr,
+				.CameraNavigationActive = m_EditorCameraNavigationActive,
+				.GizmoInteractionActive = m_GizmoDrag.has_value(),
+				.TextInputActive = IO.WantTextInput,
+				.ImGuiItemActive = ImGui::IsAnyItemActive(),
+				.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup),
+				.MenuNavigationActive = GImGui && GImGui->NavLayer == ImGuiNavLayer_Menu,
+				.WindowNavigationActive = GImGui && GImGui->NavWindowingTarget != nullptr
+			}))
 				return;
 
-			const ImGuiIO& IO = ImGui::GetIO();
 			if (!IO.KeyCtrl || IO.KeyAlt || IO.KeySuper)
 				return;
 			if (ImGui::IsKeyPressed(ImGuiKey_Y, false))
@@ -3276,7 +3285,11 @@ namespace
 					if (const auto Selected = m_Scene->FindEntity(*m_SelectedEntity))
 						DrawViewportGizmo(*Selected, std::nullopt);
 				}
-				if (IO.MouseReleased[ImGuiMouseButton_Left] || !IO.MouseDown[ImGuiMouseButton_Left])
+				if (PulseForgeEditor::GetViewportGizmoPointerOutcome({
+					m_GizmoDrag.has_value(),
+					IO.MouseDown[ImGuiMouseButton_Left],
+					IO.MouseReleased[ImGuiMouseButton_Left]
+				}, false) == PulseForgeEditor::ViewportGizmoPointerOutcome::Complete)
 					CompleteGizmoInteraction();
 				return;
 			}
@@ -3900,6 +3913,27 @@ namespace
 			if (m_GizmoDrag)
 				CancelSceneEdit();
 			m_GizmoDrag.reset();
+		}
+
+		void CompleteReleasedGizmoInteractionBeforeShortcuts()
+		{
+			if (!m_GizmoDrag)
+				return;
+
+			const ImGuiIO& IO = ImGui::GetIO();
+			const auto Outcome = PulseForgeEditor::GetViewportGizmoPointerOutcome({
+				m_GizmoDrag.has_value(),
+				IO.MouseDown[ImGuiMouseButton_Left],
+				IO.MouseReleased[ImGuiMouseButton_Left]
+			}, ImGui::IsKeyPressed(ImGuiKey_Escape, false));
+			if (Outcome != PulseForgeEditor::ViewportGizmoPointerOutcome::Complete)
+				return;
+
+			// The viewport image normally consumes release later in this frame; finish first so
+			// the history shortcut router and Edit menu observe the committed gesture immediately.
+			UpdateGizmoDrag({ IO.MousePos.x, IO.MousePos.y });
+			if (m_GizmoDrag)
+				CompleteGizmoInteraction();
 		}
 
 		void CompleteGizmoInteraction()
