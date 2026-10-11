@@ -28,6 +28,7 @@
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorSelection.h"
+#include "Editor/EditorVisibility.h"
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
@@ -77,6 +78,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -7448,6 +7450,46 @@ end
 		PF_CHECK(Tests, Selection.GetEntities().empty() && !Selection.GetPrimary() && !Selection.GetAnchor());
 	}
 
+	void TestEditorVisibility(TestRunner& Tests)
+	{
+		using PulseForgeEditor::EditorVisibility;
+		using PulseForge::UUID;
+		const UUID Parent{ 0, 301 };
+		const UUID Child{ 0, 302 };
+		const UUID Sibling{ 0, 303 };
+		const std::unordered_map<UUID, UUID, PulseForge::UUIDHash> Parents{ { Child, Parent } };
+		const auto ParentLookup = [&Parents](const UUID& Identifier) -> std::optional<UUID>
+		{
+			const auto Found = Parents.find(Identifier);
+			return Found == Parents.end() ? std::nullopt : std::optional<UUID>{ Found->second };
+		};
+
+		EditorVisibility Visibility;
+		Visibility.SetVisible(Child, false);
+		Visibility.SetVisible(Parent, false);
+		PF_CHECK(Tests, !Visibility.IsEffectivelyVisible(Child, ParentLookup));
+		Visibility.SetVisible(Parent, true);
+		PF_CHECK(Tests, !Visibility.IsEffectivelyVisible(Child, ParentLookup));
+		Visibility.SetVisible(Child, true);
+		PF_CHECK(Tests, Visibility.IsEffectivelyVisible(Child, ParentLookup));
+
+		Visibility.SetVisible(Sibling, false);
+		const std::array<UUID, 2> Keep{ Parent, Child };
+		const std::array<UUID, 3> All{ Parent, Child, Sibling };
+		PF_CHECK(Tests, Visibility.Isolate(Keep, All));
+		PF_CHECK(Tests, Visibility.IsLocallyVisible(Parent) && Visibility.IsLocallyVisible(Child));
+		PF_CHECK(Tests, !Visibility.IsLocallyVisible(Sibling));
+		PF_CHECK(Tests, Visibility.RestoreIsolation());
+		PF_CHECK(Tests, !Visibility.IsLocallyVisible(Sibling));
+		Visibility.ShowAll();
+		PF_CHECK(Tests, Visibility.IsLocallyVisible(Sibling) && !Visibility.GetIsolationBaseline());
+
+		PF_CHECK(Tests, Visibility.IsEffectivelyVisible(Parent, [Parent, Child](const UUID& Identifier)
+		{
+			return Identifier == Parent ? std::optional<UUID>{ Child } : std::optional<UUID>{ Parent };
+		}) == false);
+	}
+
 	void TestSceneCommandHistoryRestoresIdentity(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -7582,6 +7624,7 @@ int main()
 	TestPointLightShadowMath(Tests);
 	TestEditorCommandHistory(Tests);
 	TestEditorSelection(Tests);
+	TestEditorVisibility(Tests);
 	TestSceneCommandHistoryRestoresIdentity(Tests);
 	return Tests.Finish();
 }

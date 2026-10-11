@@ -17,6 +17,7 @@
 #include <fstream>
 #include <iterator>
 #include <span>
+#include <unordered_set>
 #include <exception>
 #include <algorithm>
 #include <limits>
@@ -1033,6 +1034,40 @@ namespace PulseForge
 	{
 		return PrepareSnapshot(SceneRenderSnapshotBuilder::BuildForView(
 			Source, View, Projection, CameraWorldPosition, NearClipPlane, FarClipPlane));
+	}
+
+	std::expected<void, SceneRendererError> SceneRenderer::PrepareSceneFiltered(
+		const Scene& Source,
+		const glm::mat4& View,
+		const glm::mat4& Projection,
+		const glm::vec3& CameraWorldPosition,
+		float NearClipPlane,
+		float FarClipPlane,
+		std::span<const UUID> ExcludedEntities)
+	{
+		auto Snapshot = SceneRenderSnapshotBuilder::BuildForView(
+			Source, View, Projection, CameraWorldPosition, NearClipPlane, FarClipPlane);
+		if (!Snapshot)
+			return PrepareSnapshot(std::move(Snapshot));
+		const std::unordered_set<UUID, UUIDHash> Excluded(ExcludedEntities.begin(), ExcludedEntities.end());
+		const auto IsExcluded = [&Excluded](const UUID& Identifier) { return Excluded.contains(Identifier); };
+		std::erase_if(Snapshot->Meshes, [&IsExcluded](const SceneMeshInstance& Instance)
+		{
+			return IsExcluded(Instance.Entity);
+		});
+		std::erase_if(Snapshot->PointLights, [&IsExcluded](const ScenePointLight& Light)
+		{
+			return IsExcluded(Light.Entity);
+		});
+		std::erase_if(Snapshot->SpotLights, [&IsExcluded](const SceneSpotLight& Light)
+		{
+			return IsExcluded(Light.Entity);
+		});
+		if (Snapshot->DirectionalLight && IsExcluded(Snapshot->DirectionalLight->Entity))
+			Snapshot->DirectionalLight.reset();
+		if (Snapshot->EnvironmentLight && IsExcluded(Snapshot->EnvironmentLight->Entity))
+			Snapshot->EnvironmentLight.reset();
+		return PrepareSnapshot(std::move(Snapshot));
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::PrepareSnapshot(

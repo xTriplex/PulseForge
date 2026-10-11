@@ -47,6 +47,8 @@ namespace PulseForgeEditor
 		Material,
 		Clear,
 		Close,
+		Eye,
+		EyeSlash,
 		Import,
 		Select,
 		Count
@@ -79,6 +81,8 @@ namespace PulseForgeEditor
 		{ EditorIcon::Add, 0xf055, "circle-plus" },
 		{ EditorIcon::Info, 0xf05a, "circle-info" },
 		{ EditorIcon::Remove, 0xf068, "minus" },
+		{ EditorIcon::Eye, 0xf06e, "eye" },
+		{ EditorIcon::EyeSlash, 0xf070, "eye-slash" },
 		{ EditorIcon::Warning, 0xf071, "triangle-exclamation" },
 		{ EditorIcon::Folder, 0xf07b, "folder" },
 		{ EditorIcon::FolderOpen, 0xf07c, "folder-open" },

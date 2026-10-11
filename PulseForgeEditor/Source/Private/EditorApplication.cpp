@@ -27,6 +27,7 @@
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorSelection.h"
+#include "Editor/EditorVisibility.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
 #include "Editor/ViewportMouseCapture.h"
@@ -272,6 +273,8 @@ namespace
 			m_Position = { 0.0f, 0.0f, 3.1f };
 			m_YawDegrees = -90.0f;
 			m_PitchDegrees = 0.0f;
+			m_MoveSpeed = 5.0f;
+			m_HasFocusPivot = false;
 		}
 
 		void Rotate(float DeltaX, float DeltaY) noexcept
@@ -279,6 +282,63 @@ namespace
 			constexpr float Sensitivity = 0.1f;
 			m_YawDegrees = std::remainder(m_YawDegrees + DeltaX * Sensitivity, 360.0f);
 			m_PitchDegrees = std::clamp(m_PitchDegrees - DeltaY * Sensitivity, -89.0f, 89.0f);
+			m_HasFocusPivot = false;
+		}
+
+		void Focus(const glm::vec3& Pivot, float Radius, float AspectRatio) noexcept
+		{
+			if (!PulseForgeEditor::Detail::IsFinite(Pivot) || !std::isfinite(Radius) || Radius < 0.0f ||
+				!std::isfinite(AspectRatio) || AspectRatio <= 0.0f)
+				return;
+			constexpr float VerticalFov = glm::radians(45.0f);
+			const float HorizontalFov = 2.0f * std::atan(std::tan(VerticalFov * 0.5f) * AspectRatio);
+			const float LimitingFov = (std::min)(VerticalFov, HorizontalFov);
+			const float Distance = std::clamp(Radius / std::sin(LimitingFov * 0.5f) * 1.2f, 0.2f, 100000.0f);
+			if (!std::isfinite(Distance))
+				return;
+			m_FocusPivot = Pivot;
+			m_HasFocusPivot = true;
+			m_Position = Pivot - GetForward() * Distance;
+		}
+
+		void Orbit(float DeltaX, float DeltaY) noexcept
+		{
+			if (!m_HasFocusPivot)
+				return;
+			const float Distance = glm::length(m_Position - m_FocusPivot);
+			constexpr float Sensitivity = 0.1f;
+			m_YawDegrees = std::remainder(m_YawDegrees + DeltaX * Sensitivity, 360.0f);
+			m_PitchDegrees = std::clamp(m_PitchDegrees - DeltaY * Sensitivity, -89.0f, 89.0f);
+			m_Position = m_FocusPivot - GetForward() * Distance;
+		}
+
+		void Pan(float DeltaX, float DeltaY, float ViewportHeight) noexcept
+		{
+			if (!m_HasFocusPivot || !std::isfinite(ViewportHeight) || ViewportHeight < 1.0f)
+				return;
+			const float Distance = glm::length(m_Position - m_FocusPivot);
+			const float UnitsPerPixel = 2.0f * Distance * std::tan(glm::radians(45.0f) * 0.5f) / ViewportHeight;
+			const glm::vec3 Right = glm::normalize(glm::cross(GetForward(), glm::vec3(0.0f, 1.0f, 0.0f)));
+			const glm::vec3 Up = glm::normalize(glm::cross(Right, GetForward()));
+			const glm::vec3 Offset = (-Right * DeltaX + Up * DeltaY) * UnitsPerPixel;
+			m_Position += Offset;
+			m_FocusPivot += Offset;
+		}
+
+		void Dolly(float Delta) noexcept
+		{
+			if (!m_HasFocusPivot || !std::isfinite(Delta))
+				return;
+			const float Distance = std::clamp(glm::length(m_Position - m_FocusPivot) * std::exp(-Delta * 0.12f),
+				0.15f, 100000.0f);
+			m_Position = m_FocusPivot - GetForward() * Distance;
+		}
+
+		void AdjustMoveSpeed(float WheelDelta) noexcept
+		{
+			if (!std::isfinite(WheelDelta))
+				return;
+			m_MoveSpeed = std::clamp(m_MoveSpeed * std::pow(1.2f, WheelDelta), 0.2f, 80.0f);
 		}
 
 		void Move(const PulseForge::Input& Input, double DeltaSeconds) noexcept
@@ -307,7 +367,10 @@ namespace
 
 			Direction = glm::normalize(Direction);
 			const bool Fast = Input.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) || Input.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT);
-			m_Position += Direction * (5.0f * (Fast ? 4.0f : 1.0f) * Step);
+			const glm::vec3 Offset = Direction * (m_MoveSpeed * (Fast ? 4.0f : 1.0f) * Step);
+			m_Position += Offset;
+			if (m_HasFocusPivot)
+				m_FocusPivot += Offset;
 		}
 
 		[[nodiscard]] std::expected<glm::mat4, std::string> GetViewProjection(float AspectRatio) const
@@ -347,8 +410,11 @@ namespace
 
 	private:
 		glm::vec3 m_Position{ 0.0f, 0.0f, 3.1f };
+		glm::vec3 m_FocusPivot{ 0.0f };
 		float m_YawDegrees = -90.0f;
 		float m_PitchDegrees = 0.0f;
+		float m_MoveSpeed = 5.0f;
+		bool m_HasFocusPivot = false;
 	};
 
 	class EditorLayer final : public PulseForge::Layer
@@ -406,6 +472,14 @@ namespace
 		{
 			PulseForgeEditor::TransformGizmoOperation Operation;
 			uint32_t Axis = 0;
+		};
+
+		enum class ViewportCameraGesture : uint8_t
+		{
+			None,
+			Orbit,
+			Pan,
+			Dolly
 		};
 
 		struct GizmoEntityStart
@@ -618,6 +692,7 @@ namespace
 			{
 				EndEditorCameraNavigation(false);
 				CancelGizmoInteraction();
+				m_ViewportCameraGesture = ViewportCameraGesture::None;
 			}
 			else if (Event.GetEventType() == PulseForge::EEventType::MouseButtonPressed)
 			{
@@ -630,6 +705,11 @@ namespace
 				const auto& Mouse = static_cast<PulseForge::MouseButtonReleasedEvent&>(Event);
 				if (Mouse.GetMouseButton() == GLFW_MOUSE_BUTTON_RIGHT && m_ViewportMouseCapture.OwnsMouse())
 					EndEditorCameraNavigation();
+			}
+			else if (Event.GetEventType() == PulseForge::EEventType::MouseScrolled && m_EditorCameraNavigationActive)
+			{
+				const auto& Scroll = static_cast<PulseForge::MouseScrolledEvent&>(Event);
+				m_EditorCamera.AdjustMoveSpeed(Scroll.GetYOffset());
 			}
 			else if (Event.GetEventType() == PulseForge::EEventType::MouseMoved && m_ViewportMouseCapture.OwnsMouse())
 			{
@@ -674,6 +754,27 @@ namespace
 				State.append(Identifier.ToString());
 				State.push_back('\n');
 			}
+			const auto AppendVisibilitySet = [&State](
+				const std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash>& Identifiers)
+			{
+				std::vector<std::string> SortedIdentifiers;
+				SortedIdentifiers.reserve(Identifiers.size());
+				for (const PulseForge::UUID& Identifier : Identifiers)
+					SortedIdentifiers.push_back(Identifier.ToString());
+				std::sort(SortedIdentifiers.begin(), SortedIdentifiers.end());
+				State.append(std::to_string(SortedIdentifiers.size()));
+				State.push_back('\n');
+				for (const std::string& Identifier : SortedIdentifiers)
+				{
+					State.append(Identifier);
+					State.push_back('\n');
+				}
+			};
+			AppendVisibilitySet(m_EditorVisibility.GetHiddenEntities());
+			const auto IsolationBaseline = m_EditorVisibility.GetIsolationBaseline();
+			State.append(IsolationBaseline ? "1\n" : "0\n");
+			if (IsolationBaseline)
+				AppendVisibilitySet(*IsolationBaseline);
 			return State;
 		}
 
@@ -726,6 +827,52 @@ namespace
 				Selection.push_back(*Identifier);
 				SelectionCursor = IdentifierEnd + 1;
 			}
+			const auto ParseVisibilitySet = [&](size_t& Cursor, std::string_view FieldName)
+				-> std::expected<std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash>, std::string>
+			{
+				const size_t CountEnd = EditorState.find('\n', Cursor);
+				if (CountEnd == std::string_view::npos)
+					return std::unexpected("Scene history snapshot has no " + std::string(FieldName) + " count");
+				size_t Count = 0;
+				const auto Parsed = std::from_chars(EditorState.data() + Cursor, EditorState.data() + CountEnd, Count);
+				if (Parsed.ec != std::errc{} || Parsed.ptr != EditorState.data() + CountEnd ||
+					Count > (EditorState.size() - CountEnd - 1) / 37)
+					return std::unexpected("Scene history snapshot has an invalid " + std::string(FieldName) + " count");
+				Cursor = CountEnd + 1;
+				std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Identifiers;
+				for (size_t Index = 0; Index < Count; ++Index)
+				{
+					const size_t IdentifierEnd = EditorState.find('\n', Cursor);
+					if (IdentifierEnd == std::string_view::npos)
+						return std::unexpected("Scene history snapshot has a truncated " + std::string(FieldName) + " identifier");
+					const auto Identifier = PulseForge::UUID::Parse(EditorState.substr(Cursor, IdentifierEnd - Cursor));
+					if (!Identifier || !Identifiers.insert(*Identifier).second)
+						return std::unexpected("Scene history snapshot has an invalid or duplicate " +
+							std::string(FieldName) + " identifier");
+					Cursor = IdentifierEnd + 1;
+				}
+				return Identifiers;
+			};
+			auto HiddenEntities = ParseVisibilitySet(SelectionCursor, "hidden-entity");
+			if (!HiddenEntities)
+				return std::unexpected(HiddenEntities.error());
+			const size_t IsolationFlagEnd = EditorState.find('\n', SelectionCursor);
+			if (IsolationFlagEnd == std::string_view::npos)
+				return std::unexpected("Scene history snapshot has no isolation-state flag");
+			const std::string_view IsolationFlag = EditorState.substr(SelectionCursor, IsolationFlagEnd - SelectionCursor);
+			if (IsolationFlag != "0" && IsolationFlag != "1")
+				return std::unexpected("Scene history snapshot has an invalid isolation-state flag");
+			SelectionCursor = IsolationFlagEnd + 1;
+			std::optional<std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash>> IsolationBaseline;
+			if (IsolationFlag == "1")
+			{
+				auto ParsedBaseline = ParseVisibilitySet(SelectionCursor, "isolation-baseline");
+				if (!ParsedBaseline)
+					return std::unexpected(ParsedBaseline.error());
+				IsolationBaseline = std::move(*ParsedBaseline);
+			}
+			if (SelectionCursor != EditorState.size())
+				return std::unexpected("Scene history snapshot contains trailing editor-state data");
 			std::optional<PulseForge::UUID> Primary;
 			if (!PrimaryData.empty())
 			{
@@ -746,11 +893,23 @@ namespace
 			});
 			if (Primary && std::find(Selection.begin(), Selection.end(), *Primary) == Selection.end())
 				Primary.reset();
+			const auto RemoveMissingEntities = [this](
+				std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash>& Identifiers)
+			{
+				std::erase_if(Identifiers, [this](const PulseForge::UUID& Identifier)
+				{
+					return !m_Scene->FindEntity(Identifier).has_value();
+				});
+			};
+			RemoveMissingEntities(*HiddenEntities);
+			if (IsolationBaseline)
+				RemoveMissingEntities(*IsolationBaseline);
 			m_Selection.Set(std::move(Selection), Primary);
 			m_SelectedEntity = m_Selection.GetPrimary();
+			m_EditorVisibility.RestoreState(std::move(*HiddenEntities), std::move(IsolationBaseline));
 			m_GizmoDrag.reset();
 			m_InspectorHistoryItem = 0;
-			m_SceneDirty = m_SceneHistory.IsDirty();
+			UpdateSceneDirty();
 			return {};
 		}
 
@@ -778,6 +937,34 @@ namespace
 		[[nodiscard]] bool IsEntitySelected(const PulseForge::UUID& Identifier) const noexcept
 		{
 			return m_Selection.Contains(Identifier);
+		}
+
+		[[nodiscard]] bool IsEntityEffectivelyVisible(const PulseForge::Entity& Entity) const
+		{
+			std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Visited;
+			PulseForge::Entity Current = Entity;
+			while (Current)
+			{
+				if (!Visited.insert(Current.GetUUID()).second ||
+					!m_EditorVisibility.IsLocallyVisible(Current.GetUUID()))
+					return false;
+				const auto Parent = Current.GetParent();
+				if (!Parent || !Parent->has_value())
+					return Parent.has_value();
+				Current = **Parent;
+			}
+			return false;
+		}
+
+		[[nodiscard]] std::vector<PulseForge::UUID> GetEffectivelyHiddenEntities() const
+		{
+			std::vector<PulseForge::UUID> Hidden;
+			if (!m_Scene)
+				return Hidden;
+			for (const PulseForge::Entity& Entity : m_Scene->GetEntities())
+				if (!IsEntityEffectivelyVisible(Entity))
+					Hidden.push_back(Entity.GetUUID());
+			return Hidden;
 		}
 
 		void ToggleEntitySelection(const PulseForge::UUID& Identifier)
@@ -871,11 +1058,134 @@ namespace
 			return BaseName;
 		}
 
+		void ToggleEntityVisibility(const PulseForge::UUID& Identifier)
+		{
+			const auto Entity = m_Scene ? m_Scene->FindEntity(Identifier) : std::nullopt;
+			if (!Entity || m_SceneRuntime)
+				return;
+			const bool MakeVisible = !m_EditorVisibility.IsLocallyVisible(Identifier);
+			const auto Recorded = RunSceneEdit(MakeVisible ? "Show Entity" : "Hide Entity", [this, Identifier, MakeVisible]()
+				-> std::expected<void, PulseForge::SceneError>
+			{
+				m_EditorVisibility.SetVisible(Identifier, MakeVisible);
+				return {};
+			});
+			if (!Recorded)
+				SetError("Could not update editor visibility: " + Recorded.error());
+		}
+
+		void HideSelectedEntities()
+		{
+			if (!m_Scene || m_SceneRuntime || m_Selection.GetEntities().empty())
+				return;
+			const std::vector<PulseForge::UUID> Identifiers = m_Selection.GetEntities();
+			const auto Recorded = RunSceneEdit("Hide Selected", [this, Identifiers]()
+				-> std::expected<void, PulseForge::SceneError>
+			{
+				(void)m_EditorVisibility.Hide(Identifiers);
+				return {};
+			});
+			if (!Recorded)
+				SetError("Could not hide the selection: " + Recorded.error());
+			else
+				SetStatus("Hid " + std::to_string(Identifiers.size()) + " selected entities in the editor viewport.");
+		}
+
+		void ShowAllEntities()
+		{
+			if (!m_Scene || m_SceneRuntime || m_EditorVisibility.GetHiddenEntities().empty())
+				return;
+			const size_t RestoredCount = m_EditorVisibility.GetHiddenEntities().size();
+			const auto Recorded = RunSceneEdit("Show All Entities", [this]() -> std::expected<void, PulseForge::SceneError>
+			{
+				m_EditorVisibility.ShowAll();
+				return {};
+			});
+			if (!Recorded)
+				SetError("Could not restore editor visibility: " + Recorded.error());
+			else
+				SetStatus("Restored visibility for " + std::to_string(RestoredCount) + " hidden entities.");
+		}
+
+		void IsolateSelectedEntities()
+		{
+			if (!m_Scene || m_SceneRuntime || m_Selection.GetEntities().empty())
+				return;
+			std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> KeepVisible;
+			for (const PulseForge::UUID& Identifier : m_Selection.GetEntities())
+			{
+				const auto Selected = m_Scene->FindEntity(Identifier);
+				if (!Selected)
+					continue;
+				KeepVisible.insert(Identifier);
+				PulseForge::Entity ParentWalk = *Selected;
+				while (ParentWalk)
+				{
+					const auto Parent = ParentWalk.GetParent();
+					if (!Parent || !Parent->has_value())
+						break;
+					ParentWalk = **Parent;
+					KeepVisible.insert(ParentWalk.GetUUID());
+				}
+				if (const auto Subtree = CollectEntitySubtrees(std::vector<PulseForge::Entity>{ *Selected }))
+					for (const PulseForge::Entity& Descendant : *Subtree)
+						KeepVisible.insert(Descendant.GetUUID());
+			}
+			std::vector<PulseForge::UUID> Keep(KeepVisible.begin(), KeepVisible.end());
+			std::vector<PulseForge::UUID> All;
+			for (const PulseForge::Entity& Entity : m_Scene->GetEntities())
+				All.push_back(Entity.GetUUID());
+			const auto Recorded = RunSceneEdit("Isolate Selection", [this, Keep, All]()
+				-> std::expected<void, PulseForge::SceneError>
+			{
+				if (!m_EditorVisibility.Isolate(Keep, All))
+					return std::unexpected(PulseForge::SceneError{
+						PulseForge::SceneErrorCode::InvalidEntity, "The selection could not be isolated" });
+				return {};
+			});
+			if (!Recorded)
+				SetError("Could not isolate the selection: " + Recorded.error());
+			else
+				SetStatus("Isolated the selection in the editor viewport.");
+		}
+
+		void RestoreIsolatedVisibility()
+		{
+			if (!m_Scene || m_SceneRuntime || !m_EditorVisibility.GetIsolationBaseline())
+				return;
+			const auto Recorded = RunSceneEdit("Restore Isolated Visibility", [this]()
+				-> std::expected<void, PulseForge::SceneError>
+			{
+				(void)m_EditorVisibility.RestoreIsolation();
+				return {};
+			});
+			if (!Recorded)
+				SetError("Could not restore the prior visibility state: " + Recorded.error());
+			else
+				SetStatus("Restored visibility before isolation.");
+		}
+
+		void UpdateSceneDirty()
+		{
+			if (!m_Scene)
+			{
+				m_SceneDirty = false;
+				return;
+			}
+			auto Serialized = PulseForge::SceneSerializer::Serialize(*m_Scene);
+			m_SceneDirty = !Serialized || !m_SavedSceneSnapshot || *Serialized != *m_SavedSceneSnapshot;
+		}
+
 		void ResetSceneHistory()
 		{
 			m_SceneHistory.Reset();
 			m_InspectorHistoryItem = 0;
-			m_SceneDirty = false;
+			m_EditorVisibility.ShowAll();
+			m_SavedSceneSnapshot.reset();
+			if (m_Scene)
+				if (auto Serialized = PulseForge::SceneSerializer::Serialize(*m_Scene))
+					m_SavedSceneSnapshot = std::move(*Serialized);
+			UpdateSceneDirty();
 		}
 
 		void CancelSceneEdit()
@@ -888,7 +1198,7 @@ namespace
 					SetError("Scene edit rollback failed: " + Result.error());
 			}
 			m_InspectorHistoryItem = 0;
-			m_SceneDirty = m_SceneHistory.IsDirty();
+			UpdateSceneDirty();
 		}
 
 		bool BeginSceneEdit(std::string Description)
@@ -915,7 +1225,10 @@ namespace
 		void MarkSceneSaved()
 		{
 			m_SceneHistory.MarkSaved();
-			m_SceneDirty = false;
+			if (m_Scene)
+				if (auto Serialized = PulseForge::SceneSerializer::Serialize(*m_Scene))
+					m_SavedSceneSnapshot = std::move(*Serialized);
+			UpdateSceneDirty();
 		}
 
 		void FinishSceneEdit()
@@ -946,7 +1259,7 @@ namespace
 				return;
 			}
 			m_InspectorHistoryItem = 0;
-			m_SceneDirty = m_SceneHistory.IsDirty();
+			UpdateSceneDirty();
 		}
 
 		template<typename Action>
@@ -974,7 +1287,7 @@ namespace
 				const std::string Error = Result.error().Message;
 				(void)m_SceneHistory.Cancel([this](std::string_view State) { return RestoreSceneState(State); });
 				m_InspectorHistoryItem = 0;
-				m_SceneDirty = m_SceneHistory.IsDirty();
+				UpdateSceneDirty();
 				return std::unexpected(Error);
 			}
 
@@ -999,7 +1312,7 @@ namespace
 			}
 			if (*Result)
 				SetStatus("Undid the last scene edit.");
-			m_SceneDirty = m_SceneHistory.IsDirty();
+			UpdateSceneDirty();
 		}
 
 		void RedoSceneEdit()
@@ -1016,7 +1329,7 @@ namespace
 			}
 			if (*Result)
 				SetStatus("Redid the last scene edit.");
-			m_SceneDirty = m_SceneHistory.IsDirty();
+			UpdateSceneDirty();
 		}
 
 		void HandleEditorHistoryShortcuts()
@@ -1048,6 +1361,29 @@ namespace
 					static_cast<size_t>(PulseForgeEditor::EditorPanel::ContentBrowser)].WindowName;
 		}
 
+		[[nodiscard]] bool IsEditorPanelFocused(PulseForgeEditor::EditorPanel Panel) const noexcept
+		{
+			if (!GImGui || !GImGui->NavWindow)
+				return false;
+			const ImGuiWindow* Root = GImGui->NavWindow->RootWindow;
+			return Root && std::string_view(Root->Name) ==
+				PulseForgeEditor::EditorPanelDescriptors[static_cast<size_t>(Panel)].WindowName;
+		}
+
+		void FocusActivePanelSearch()
+		{
+			if (IsContentBrowserFocused())
+			{
+				SetEditorPanelVisible(PulseForgeEditor::EditorPanel::ContentBrowser, true);
+				m_FocusContentSearchNextFrame = true;
+			}
+			else
+			{
+				SetEditorPanelVisible(PulseForgeEditor::EditorPanel::Hierarchy, true);
+				m_FocusHierarchySearchNextFrame = true;
+			}
+		}
+
 		[[nodiscard]] bool CanRouteEditorShortcut() const
 		{
 			return m_Scene && !m_SceneRuntime && !m_EditorCameraNavigationActive && !m_GizmoDrag &&
@@ -1058,9 +1394,19 @@ namespace
 
 		void HandleSceneEditingShortcuts()
 		{
+			const ImGuiIO& IO = ImGui::GetIO();
+			const bool CanFocusSearch = m_Project && !m_SceneRuntime && !m_EditorCameraNavigationActive && !m_GizmoDrag &&
+				!IO.WantTextInput && !ImGui::IsAnyItemActive() &&
+				!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
+				GImGui->NavLayer != ImGuiNavLayer_Menu && GImGui->NavWindowingTarget == nullptr &&
+				!IO.KeyAlt && !IO.KeySuper;
+			if (CanFocusSearch && IO.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false))
+			{
+				FocusActivePanelSearch();
+				return;
+			}
 			if (!CanRouteEditorShortcut())
 				return;
-			const ImGuiIO& IO = ImGui::GetIO();
 			const bool HasUnsupportedModifier = IO.KeyAlt || IO.KeySuper;
 			const bool Control = IO.KeyCtrl && !HasUnsupportedModifier;
 			const bool Shift = IO.KeyShift;
@@ -1068,7 +1414,9 @@ namespace
 
 			if (Control)
 			{
-				if (ImGui::IsKeyPressed(ImGuiKey_A, false) && !ContentBrowser)
+				if (ImGui::IsKeyPressed(ImGuiKey_H, false) && !Shift && !ContentBrowser)
+					ShowAllEntities();
+				else if (ImGui::IsKeyPressed(ImGuiKey_A, false) && !ContentBrowser)
 				{
 					std::vector<PulseForge::UUID> Identifiers;
 					for (const PulseForge::Entity& Entity : m_Scene->GetEntities())
@@ -1083,13 +1431,21 @@ namespace
 					PasteEntities();
 				else if (ImGui::IsKeyPressed(ImGuiKey_D, false))
 				{
-					if (ContentBrowser && m_SelectedAsset)
-						DuplicateAsset(*m_SelectedAsset);
+					if (ContentBrowser)
+					{
+						if (m_SelectedAsset)
+							DuplicateAsset(*m_SelectedAsset);
+					}
 					else
 						DuplicateSelectedEntity();
 				}
-				else if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !Shift)
-					SaveScene();
+				else if (ImGui::IsKeyPressed(ImGuiKey_S, false))
+				{
+					if (Shift)
+						CreateScene(true);
+					else
+						SaveScene();
+				}
 				else if (ImGui::IsKeyPressed(ImGuiKey_N, false) && Shift)
 					CreateEntityFromEditor();
 			}
@@ -1097,15 +1453,34 @@ namespace
 			{
 				if (ImGui::IsKeyPressed(ImGuiKey_Delete, false))
 				{
-					if (ContentBrowser && m_SelectedAsset)
-						RequestDeleteAsset(*m_SelectedAsset);
+					if (ContentBrowser)
+					{
+						if (m_SelectedAsset)
+							RequestDeleteAsset(*m_SelectedAsset);
+					}
 					else
 						DeleteSelectedEntity();
 				}
+				else if (ImGui::IsKeyPressed(ImGuiKey_F2, false) && ContentBrowser && m_SelectedAsset)
+					MoveAsset(*m_SelectedAsset);
 				else if (ImGui::IsKeyPressed(ImGuiKey_F2, false) && m_SelectedEntity && !ContentBrowser)
 				{
 					m_FocusEntityNameNextFrame = true;
 					SetEditorPanelVisible(PulseForgeEditor::EditorPanel::Inspector, true);
+				}
+				else if (ImGui::IsKeyPressed(ImGuiKey_F, false))
+					FocusSelection();
+				else if (ImGui::IsKeyPressed(ImGuiKey_H, false))
+				{
+					if (Shift)
+						IsolateSelectedEntities();
+					else
+						HideSelectedEntities();
+				}
+				else if (ImGui::IsKeyPressed(ImGuiKey_G, false))
+				{
+					m_ShowEditorOverlays = !m_ShowEditorOverlays;
+					SetStatus(m_ShowEditorOverlays ? "Editor viewport overlays enabled." : "Game View enabled.");
 				}
 				else if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
 					SelectSingleEntity(std::nullopt);
@@ -2163,6 +2538,18 @@ namespace
 					m_FocusEntityNameNextFrame = true;
 					SetEditorPanelVisible(PulseForgeEditor::EditorPanel::Inspector, true);
 				}
+				if (ImGui::MenuItem("Focus Selected", "F", false, CanEditScene && HasSelection))
+					FocusSelection();
+				if (ImGui::MenuItem("Hide Selected", "H", false, CanEditScene && HasSelection))
+					HideSelectedEntities();
+				if (ImGui::MenuItem("Show All", "Ctrl+H", false,
+					CanEditScene && !m_EditorVisibility.GetHiddenEntities().empty()))
+					ShowAllEntities();
+				if (ImGui::MenuItem("Isolate Selection", "Shift+H", false, CanEditScene && HasSelection))
+					IsolateSelectedEntities();
+				if (ImGui::MenuItem("Restore Isolation Visibility", nullptr, false,
+					CanEditScene && m_EditorVisibility.GetIsolationBaseline().has_value()))
+					RestoreIsolatedVisibility();
 				ImGui::EndMenu();
 			}
 
@@ -2445,6 +2832,7 @@ namespace
 		{
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
+			m_ViewportCameraGesture = ViewportCameraGesture::None;
 			m_ViewportImageHovered = false;
 			m_ViewportImageRect = {};
 		}
@@ -2587,7 +2975,7 @@ namespace
 							const ImVec2 MousePosition = ImGui::GetIO().MousePos;
 							const ImVec2 WidgetMinimum(ImageMaximum.x - 92.0f, ImageMinimum.y + 38.0f);
 							const ImVec2 WidgetMaximum(ImageMaximum.x - 5.0f, ImageMinimum.y + 112.0f);
-							const bool ShowEditorOverlays = !m_SceneRuntime;
+							const bool ShowEditorOverlays = !m_SceneRuntime && m_ShowEditorOverlays;
 							const bool OverHelp = ShowEditorOverlays && MousePosition.x >= HelpMinimum.x && MousePosition.x <= HelpMaximum.x &&
 								MousePosition.y >= HelpMinimum.y && MousePosition.y <= HelpMaximum.y;
 							const bool OverOrientationWidget = ShowEditorOverlays && MousePosition.x >= WidgetMinimum.x &&
@@ -2773,8 +3161,11 @@ namespace
 			if (m_SceneRuntime || !m_Scene)
 			{
 				CancelGizmoInteraction();
+				m_ViewportCameraGesture = ViewportCameraGesture::None;
 				return;
 			}
+			if (!m_ShowEditorOverlays)
+				return;
 
 			if (m_SelectedEntity && !m_Scene->FindEntity(*m_SelectedEntity))
 			{
@@ -2784,6 +3175,14 @@ namespace
 
 			ImGuiIO& IO = ImGui::GetIO();
 			const glm::vec2 Mouse{ IO.MousePos.x, IO.MousePos.y };
+			if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) &&
+				(m_ViewportCameraGesture != ViewportCameraGesture::None || m_GizmoDrag.has_value()))
+			{
+				m_ViewportCameraGesture = ViewportCameraGesture::None;
+				if (m_GizmoDrag)
+					CancelGizmoInteraction();
+				return;
+			}
 			if (m_GizmoDrag)
 			{
 				UpdateGizmoDrag(Mouse);
@@ -2796,12 +3195,34 @@ namespace
 					CompleteGizmoInteraction();
 				return;
 			}
+			if (m_ViewportCameraGesture != ViewportCameraGesture::None)
+			{
+				const int Button = m_ViewportCameraGesture == ViewportCameraGesture::Orbit
+					? ImGuiMouseButton_Left
+					: m_ViewportCameraGesture == ViewportCameraGesture::Pan
+						? ImGuiMouseButton_Middle : ImGuiMouseButton_Right;
+				if (IO.MouseReleased[Button] || !IO.MouseDown[Button] || !IO.KeyAlt)
+				{
+					m_ViewportCameraGesture = ViewportCameraGesture::None;
+					return;
+				}
+				const ImVec2 Delta = IO.MouseDelta;
+				if (m_ViewportCameraGesture == ViewportCameraGesture::Orbit)
+					m_EditorCamera.Orbit(Delta.x, Delta.y);
+				else if (m_ViewportCameraGesture == ViewportCameraGesture::Pan)
+					m_EditorCamera.Pan(Delta.x, Delta.y,
+						m_ViewportImageRect.Maximum.y - m_ViewportImageRect.Minimum.y);
+				else
+					m_EditorCamera.Dolly(-Delta.y * 0.08f);
+				return;
+			}
 
 			std::optional<ViewportGizmoGeometry> Geometry;
 			if (m_SelectedEntity && m_ViewportTool != PulseForgeEditor::ViewportTool::Select)
 			{
 				if (const auto Selected = m_Scene->FindEntity(*m_SelectedEntity))
-					Geometry = BuildViewportGizmoGeometry(*Selected);
+					if (IsEntityEffectivelyVisible(*Selected))
+						Geometry = BuildViewportGizmoGeometry(*Selected);
 			}
 
 			const std::optional<GizmoHandle> HoveredHandle = Geometry && m_ViewportImageHovered
@@ -2814,12 +3235,26 @@ namespace
 					DrawViewportGizmo(*Selected, HoveredHandle);
 			}
 
-			if (!ImageClicked || !m_ViewportImageHovered || m_EditorCameraNavigationActive)
+			const bool CameraGestureClicked = IO.KeyAlt &&
+				(IO.MouseClicked[ImGuiMouseButton_Left] || IO.MouseClicked[ImGuiMouseButton_Middle] ||
+					IO.MouseClicked[ImGuiMouseButton_Right]);
+			if ((!ImageClicked && !CameraGestureClicked) || !m_ViewportImageHovered || m_EditorCameraNavigationActive)
 				return;
 			if (HoveredHandle && Geometry)
 			{
 				(void)BeginGizmoDrag(*HoveredHandle, *Geometry, Mouse);
 				return;
+			}
+			if (IO.KeyAlt)
+			{
+				if (IO.MouseClicked[ImGuiMouseButton_Left])
+					m_ViewportCameraGesture = ViewportCameraGesture::Orbit;
+				else if (IO.MouseClicked[ImGuiMouseButton_Middle])
+					m_ViewportCameraGesture = ViewportCameraGesture::Pan;
+				else if (IO.MouseClicked[ImGuiMouseButton_Right])
+					m_ViewportCameraGesture = ViewportCameraGesture::Dolly;
+				if (m_ViewportCameraGesture != ViewportCameraGesture::None)
+					return;
 			}
 			PickEntityAt(Mouse, IO.KeyCtrl, IO.KeyShift);
 		}
@@ -3416,6 +3851,11 @@ namespace
 				SetError("Viewport picking could not inspect the scene: " + Snapshot.error().Message);
 				return;
 			}
+			std::erase_if(Snapshot->Meshes, [this](const PulseForge::SceneMeshInstance& Instance)
+			{
+				const auto Entity = m_Scene->FindEntity(Instance.Entity);
+				return !Entity || !IsEntityEffectivelyVisible(*Entity);
+			});
 
 			std::vector<PulseForgeEditor::PickableMesh> Meshes;
 			Meshes.reserve(Snapshot->Meshes.size());
@@ -3448,6 +3888,76 @@ namespace
 			}
 			else if (!Control && !Shift)
 				SelectSingleEntity(std::nullopt);
+		}
+
+		void FocusSelection()
+		{
+			if (!m_Scene || m_SceneRuntime || m_Selection.GetEntities().empty())
+				return;
+			auto Roots = GetTopLevelSelectedEntities();
+			if (!Roots || Roots->empty())
+				return;
+			auto Subtree = CollectEntitySubtrees(*Roots);
+			if (!Subtree)
+			{
+				SetError("Could not frame the selection: " + Subtree.error());
+				return;
+			}
+			glm::vec3 Minimum((std::numeric_limits<float>::max)());
+			glm::vec3 Maximum(-(std::numeric_limits<float>::max)());
+			bool HasBounds = false;
+			for (const PulseForge::Entity& Entity : *Subtree)
+			{
+				if (!IsEntityEffectivelyVisible(Entity))
+					continue;
+				const auto World = Entity.GetWorldMatrix();
+				if (!World || !PulseForgeEditor::Detail::IsFinite(*World))
+					continue;
+				const auto MeshRenderer = Entity.GetMeshRenderer();
+				if (!MeshRenderer || !MeshRenderer->has_value())
+					continue;
+				auto Geometry = GetCpuPickingMesh(MeshRenderer->value().MeshAsset);
+				if (!Geometry)
+				{
+					SetWarning(Geometry.error());
+					continue;
+				}
+				for (const glm::vec3& Vertex : (*Geometry)->Positions)
+				{
+					const glm::vec3 Position(*World * glm::vec4(Vertex, 1.0f));
+					if (!PulseForgeEditor::Detail::IsFinite(Position))
+						continue;
+					for (glm::length_t Axis = 0; Axis < 3; ++Axis)
+					{
+						Minimum[Axis] = (std::min)(Minimum[Axis], Position[Axis]);
+						Maximum[Axis] = (std::max)(Maximum[Axis], Position[Axis]);
+					}
+					HasBounds = true;
+				}
+			}
+			if (!HasBounds)
+			{
+				for (const PulseForge::Entity& Root : *Roots)
+					if (const auto World = Root.GetWorldMatrix(); World && PulseForgeEditor::Detail::IsFinite(*World))
+					{
+						const glm::vec3 Position((*World)[3]);
+						for (glm::length_t Axis = 0; Axis < 3; ++Axis)
+						{
+							Minimum[Axis] = (std::min)(Minimum[Axis], Position[Axis]);
+							Maximum[Axis] = (std::max)(Maximum[Axis], Position[Axis]);
+						}
+						HasBounds = true;
+					}
+			}
+			if (!HasBounds)
+				return;
+			const glm::vec3 Center = (Minimum + Maximum) * 0.5f;
+			const float Radius = (std::max)(glm::length(Maximum - Minimum) * 0.5f, 0.35f);
+			const float AspectRatio = m_ViewportHeight > 0
+				? static_cast<float>(m_ViewportWidth) / static_cast<float>(m_ViewportHeight)
+				: 1.0f;
+			m_EditorCamera.Focus(Center, Radius, AspectRatio);
+			SetStatus("Focused the selection.");
 		}
 
 		std::expected<void, std::string> EnsureViewportTarget(const ImVec2& LogicalSize)
@@ -3557,8 +4067,10 @@ namespace
 					SetViewportSceneError("Could not prepare the editor camera projection: " + Projection.error());
 					return;
 				}
-				Prepared = m_SceneRenderer->PrepareScene(
-					ActiveScene, m_EditorCamera.GetView(), *Projection, m_EditorCamera.GetPosition(), 0.1f, 1000.0f);
+				const std::vector<PulseForge::UUID> HiddenEntities = GetEffectivelyHiddenEntities();
+				Prepared = m_SceneRenderer->PrepareSceneFiltered(
+					ActiveScene, m_EditorCamera.GetView(), *Projection, m_EditorCamera.GetPosition(),
+					0.1f, 1000.0f, HiddenEntities);
 			}
 			if (!Prepared)
 			{
@@ -3699,6 +4211,8 @@ namespace
 			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
 			ImGui::SetCurrentContext(m_Context);
 			ImGuiIO& IO = ImGui::GetIO();
+			if (IO.KeyAlt)
+				return false;
 			const bool Focused = Window && glfwGetWindowAttrib(Window, GLFW_FOCUSED) == GLFW_TRUE;
 			if (!m_ViewportMouseCapture.Begin(true, IsCursorOverViewportImage(), Focused,
 				m_GizmoDrag.has_value(), m_SceneRuntime != nullptr))
@@ -4054,6 +4568,11 @@ namespace
 				m_EditorStyle.EndToolbar();
 				ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
 				ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 7.0f));
+				if (m_FocusHierarchySearchNextFrame)
+				{
+					ImGui::SetKeyboardFocusHere();
+					m_FocusHierarchySearchNextFrame = false;
+				}
 				ImGui::InputTextWithHint("##HierarchySearch", "Search hierarchy...", &m_HierarchySearch);
 				ImGui::PopStyleVar();
 				ImGui::Separator();
@@ -4226,6 +4745,7 @@ namespace
 					const auto Target = m_Scene->FindEntity(Entity->GetUUID());
 					if (!Target)
 						continue;
+					m_EditorVisibility.Remove(Entity->GetUUID());
 					if (auto Deleted = m_Scene->DestroyEntity(*Target); !Deleted)
 						return std::unexpected(Deleted.error());
 				}
@@ -4516,8 +5036,25 @@ namespace
 
 			if (VisibleEntities && Children && !Children->empty())
 				ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+			const bool IsEffectivelyVisible = IsEntityEffectivelyVisible(Entity);
+			ImGui::PushStyleVar(ImGuiStyleVar_Alpha, IsEffectivelyVisible ? 1.0f : 0.48f);
 			const bool IsOpen = m_EditorStyle.TreeNode(Icon, Tag->Name, "Entity", Flags);
-			if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
+			const bool RowClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+			if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+				ImGui::OpenPopup("Entity Actions");
+			ImGui::SameLine((std::max)(ImGui::GetWindowContentRegionMax().x - 30.0f, ImGui::GetCursorPosX()));
+			const bool LocallyVisible = m_EditorVisibility.IsLocallyVisible(Entity.GetUUID());
+			if (m_EditorStyle.IconButton(
+				LocallyVisible ? PulseForgeEditor::EditorIcon::Eye : PulseForgeEditor::EditorIcon::EyeSlash,
+				LocallyVisible ? "Visible" : "Hidden",
+				"EntityVisibility",
+				LocallyVisible ? "Hide this entity in the editor viewport" : "Show this entity in the editor viewport",
+				false,
+				25.0f,
+				24.0f))
+				ToggleEntityVisibility(Entity.GetUUID());
+			ImGui::PopStyleVar();
+			if (RowClicked)
 			{
 				const ImGuiIO& IO = ImGui::GetIO();
 				if (IO.KeyShift)
@@ -4527,7 +5064,7 @@ namespace
 				else
 					SelectSingleEntity(Entity.GetUUID());
 			}
-			if (ImGui::BeginPopupContextItem("Entity Actions"))
+			if (ImGui::BeginPopup("Entity Actions"))
 			{
 				if (!IsEntitySelected(Entity.GetUUID()))
 					SelectSingleEntity(Entity.GetUUID());
@@ -4535,6 +5072,8 @@ namespace
 				const bool HasParent = Parent && Parent->has_value();
 				if (ImGui::MenuItem("Make Root", nullptr, false, HasParent))
 					DeferredHierarchyAction = [this, ChildIdentifier] { ReparentEntity(ChildIdentifier, std::nullopt); };
+				if (ImGui::MenuItem(LocallyVisible ? "Hide in Viewport" : "Show in Viewport"))
+					DeferredHierarchyAction = [this, ChildIdentifier] { ToggleEntityVisibility(ChildIdentifier); };
 
 				const std::optional<PulseForge::UUID> ParentIdentifier = m_SelectedEntity;
 				const bool CanParentUnderSelection = ParentIdentifier && *ParentIdentifier != ChildIdentifier;
@@ -6054,6 +6593,11 @@ namespace
 						ImGui::SameLine();
 						const float SearchWidth = (std::max)(ImGui::GetContentRegionAvail().x - 83.0f, 52.0f);
 						ImGui::SetNextItemWidth(SearchWidth);
+						if (m_FocusContentSearchNextFrame)
+						{
+							ImGui::SetKeyboardFocusHere();
+							m_FocusContentSearchNextFrame = false;
+						}
 						ImGui::InputTextWithHint("##AssetSearch", "Search assets...", &m_ContentSearch);
 						ImGui::SameLine();
 						if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Grid, "Grid", "AssetGridMode",
@@ -6310,10 +6854,13 @@ namespace
 		bool m_SceneDirty = false;
 		PulseForgeEditor::EditorCommandHistory m_SceneHistory;
 		PulseForgeEditor::EditorSelection m_Selection;
+		PulseForgeEditor::EditorVisibility m_EditorVisibility;
 		std::vector<PulseForge::UUID> m_HierarchyVisibleOrder;
 		std::vector<PulseForge::UUID> m_HierarchyVisibleOrderCurrent;
 		uint32_t m_InspectorHistoryItem = 0;
 		bool m_FocusEntityNameNextFrame = false;
+		bool m_FocusHierarchySearchNextFrame = false;
+		bool m_FocusContentSearchNextFrame = false;
 		bool m_OpenUnsavedDialog = false;
 		bool m_ConsoleAutoScroll = true;
 		bool m_ConsoleSelectableView = false;
@@ -6330,6 +6877,7 @@ namespace
 		std::function<void()> m_PendingAction;
 		std::optional<PulseForge::Project> m_Project;
 		std::unique_ptr<PulseForge::Scene> m_Scene;
+		std::optional<std::string> m_SavedSceneSnapshot;
 		std::unique_ptr<PulseForge::Scene> m_RuntimeScene;
 		std::unique_ptr<PulseForge::SceneRuntime> m_SceneRuntime;
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
@@ -6340,6 +6888,8 @@ namespace
 		PulseForgeEditor::TransformGizmoOperation m_GizmoOperation =
 			PulseForgeEditor::TransformGizmoOperation::Translate;
 		PulseForgeEditor::ViewportTool m_ViewportTool = PulseForgeEditor::ViewportTool::Move;
+		ViewportCameraGesture m_ViewportCameraGesture = ViewportCameraGesture::None;
+		bool m_ShowEditorOverlays = true;
 		std::unordered_map<PulseForge::AssetID, CpuPickingMesh, PulseForge::UUIDHash> m_PickingMeshCache;
 		std::unordered_map<PulseForge::AssetID, std::string, PulseForge::UUIDHash> m_PickingMeshErrors;
 		uint64_t m_ViewportTextureID = 0;
