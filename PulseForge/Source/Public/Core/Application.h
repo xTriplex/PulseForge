@@ -53,6 +53,8 @@ namespace PulseForge
 		TextureCreateResult CreateTexture(
 			const TextureDesc& Description,
 			std::span<const TextureSubresourceData> InitialData);
+		// Development/test-only blocking readback of one RGBA8 or D32 slice while the renderer is idle.
+		TextureReadbackResult ReadTextureForValidation(const Texture& Source, uint32_t ArraySlice = 0);
 		SamplerCreateResult CreateSampler(const SamplerDesc& Description);
 		BindingLayoutCreateResult CreateBindingLayout(const BindingLayoutDesc& Description);
 		BindingSetCreateResult CreateBindingSet(const BindingSetDesc& Description);

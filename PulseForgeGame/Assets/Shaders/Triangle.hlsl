@@ -187,6 +187,8 @@ float SpotlightShadowVisibility(uint ShadowIndex, float3 WorldPosition, float3 N
 
 float SamplePointShadowDepth(uint ShadowIndex, float3 Direction)
 {
+	// Match world-space directions to the Z orientation of the rendered cubemap slices.
+	Direction.z = -Direction.z;
 	if (ShadowIndex == 0u) return PointShadowMap0.SampleLevel(PointShadowSampler, Direction, 0.0f);
 	return PointShadowMap1.SampleLevel(PointShadowSampler, Direction, 0.0f);
 }

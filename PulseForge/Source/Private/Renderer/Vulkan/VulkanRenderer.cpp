@@ -1172,6 +1172,121 @@ namespace PulseForge
 			}
 		}
 
+		TextureReadbackResult ReadTextureForValidation(const Texture& Source, uint32_t ArraySlice) override
+		{
+			if (m_FrameActive || m_ActiveRenderTarget)
+			{
+				return std::unexpected(TextureError{
+					TextureErrorCode::InvalidData,
+					"Validation texture readback requires an idle renderer frame"
+				});
+			}
+
+			const TextureDesc& Description = Source.GetDescription();
+			const bool IsColor = Description.Format == TextureFormat::RGBA8_UNorm || Description.Format == TextureFormat::RGBA8_Srgb;
+			const bool IsDepth = Description.Format == TextureFormat::Depth32Float;
+			const uint32_t SliceCount = Description.Dimension == TextureDimension::TextureCube ? 6u : 1u;
+			if (Description.MipLevels != 1 || (!IsColor && !IsDepth) || ArraySlice >= SliceCount)
+			{
+				return std::unexpected(TextureError{
+					TextureErrorCode::UnsupportedFeature,
+					"Validation readback supports one RGBA8 or D32 slice from a single-mip 2D texture or cubemap"
+				});
+			}
+
+			const auto* NativeSource = dynamic_cast<const VulkanTexture*>(&Source);
+			if (!NativeSource || !m_ActiveNvrhiDevice)
+			{
+				return std::unexpected(TextureError{
+					TextureErrorCode::UnsupportedFeature,
+					"Validation texture readback requires a texture from the active Vulkan renderer"
+				});
+			}
+
+			try
+			{
+				if (!m_ActiveNvrhiDevice->waitForIdle())
+					throw std::runtime_error("NVRHI failed waiting for the rendered source texture");
+
+				nvrhi::TextureDesc StagingDescription = NativeSource->GetNativeTexture()->getDesc();
+				StagingDescription
+					.setDimension(nvrhi::TextureDimension::Texture2D)
+					.setArraySize(1)
+					.setMipLevels(1)
+					.setIsRenderTarget(false)
+					.setInitialState(nvrhi::ResourceStates::CopyDest)
+					.setKeepInitialState(true)
+					.setDebugName("PulseForge validation readback staging texture");
+				StagingDescription.isShaderResource = false;
+				nvrhi::StagingTextureHandle Staging = m_ActiveNvrhiDevice->createStagingTexture(
+					StagingDescription,
+					nvrhi::CpuAccessMode::Read);
+				if (!Staging)
+					throw std::runtime_error("NVRHI could not create a color/depth readback staging texture");
+
+				nvrhi::CommandListHandle CopyCommands = m_ActiveNvrhiDevice->createCommandList();
+				if (!CopyCommands)
+					throw std::runtime_error("NVRHI could not create a readback command list");
+				CopyCommands->open();
+				const nvrhi::TextureSubresourceSet SourceSubresources(0, 1, ArraySlice, 1);
+				nvrhi::TextureSlice SourceSlice;
+				SourceSlice.arraySlice = ArraySlice;
+				CopyCommands->setTextureState(
+					NativeSource->GetNativeTexture(),
+					SourceSubresources,
+					nvrhi::ResourceStates::CopySource);
+				CopyCommands->commitBarriers();
+				CopyCommands->copyTexture(Staging, nvrhi::TextureSlice(), NativeSource->GetNativeTexture(), SourceSlice);
+				CopyCommands->setTextureState(
+					NativeSource->GetNativeTexture(),
+					SourceSubresources,
+					nvrhi::ResourceStates::ShaderResource);
+				CopyCommands->commitBarriers();
+				CopyCommands->close();
+				m_ActiveNvrhiDevice->executeCommandList(CopyCommands, nvrhi::CommandQueue::Graphics);
+				if (!m_ActiveNvrhiDevice->waitForIdle())
+					throw std::runtime_error("NVRHI failed waiting for the texture readback copy");
+
+				size_t RowPitch = 0;
+				const nvrhi::TextureSlice Slice;
+				const void* Mapped = m_ActiveNvrhiDevice->mapStagingTexture(
+					Staging,
+					Slice,
+					nvrhi::CpuAccessMode::Read,
+					&RowPitch);
+				if (!Mapped)
+					throw std::runtime_error("NVRHI returned no mapped data for the RGBA8 readback");
+				struct StagingUnmap
+				{
+					nvrhi::IDevice* Device;
+					nvrhi::IStagingTexture* Texture;
+					~StagingUnmap() { Device->unmapStagingTexture(Texture); }
+				} Unmap{ m_ActiveNvrhiDevice, Staging };
+
+				TextureReadback Result;
+				Result.Width = Description.Width;
+				Result.Height = Description.Height;
+				Result.Format = Description.Format;
+				const size_t PackedRowSize = static_cast<size_t>(Description.Width) * 4;
+				if (RowPitch < PackedRowSize)
+					throw std::runtime_error("NVRHI returned an invalid color/depth readback row pitch");
+				Result.Pixels.resize(PackedRowSize * Description.Height);
+				const auto* SourceBytes = static_cast<const std::byte*>(Mapped);
+				for (uint32_t Row = 0; Row < Description.Height; ++Row)
+					std::memcpy(
+						Result.Pixels.data() + static_cast<size_t>(Row) * PackedRowSize,
+						SourceBytes + static_cast<size_t>(Row) * RowPitch,
+						PackedRowSize);
+				return Result;
+			}
+			catch (const std::exception& Exception)
+			{
+				const std::string Message = "Vulkan/NVRHI validation texture readback failed: " + std::string(Exception.what());
+				PF_CORE_ERROR("{0}", Message);
+				return std::unexpected(TextureError{ TextureErrorCode::BackendFailure, Message });
+			}
+		}
+
 		RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description) override
 		{
 			const auto Validation = ValidateRenderTargetDescription(Description);

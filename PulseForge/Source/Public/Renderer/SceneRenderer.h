@@ -151,6 +151,8 @@ namespace PulseForge
 		[[nodiscard]] const AmbientOcclusionSettings& GetAmbientOcclusionSettings() const noexcept { return m_AmbientOcclusionSettings; }
 		[[nodiscard]] bool IsEnvironmentLightingPending() const noexcept { return m_EnvironmentLightingPending; }
 		[[nodiscard]] bool HasPreparedEnvironmentLighting() const noexcept { return m_PreparedEnvironmentReady; }
+		// Narrow diagnostic access used by the opt-in GPU validation harness to read actual cubemap face depth.
+		[[nodiscard]] const Texture* GetPointShadowFaceTextureForValidation(size_t Slot, uint32_t Face) const noexcept;
 
 	private:
 		SceneRenderer(Application& Runtime, const Project& SourceProject);

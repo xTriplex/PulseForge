@@ -9,6 +9,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace PulseForge
 {
@@ -127,6 +128,16 @@ namespace PulseForge
 
 	using TextureCreateResult = std::expected<TextureHandle, TextureError>;
 	using SamplerCreateResult = std::expected<SamplerHandle, TextureError>;
+
+	struct TextureReadback
+	{
+		uint32_t Width = 0;
+		uint32_t Height = 0;
+		TextureFormat Format = TextureFormat::RGBA8_UNorm;
+		std::vector<std::byte> Pixels;
+	};
+
+	using TextureReadbackResult = std::expected<TextureReadback, TextureError>;
 
 	[[nodiscard]] PULSEFORGE_API std::expected<size_t, TextureError> ValidateTextureUpload(
 		const TextureDesc& Description,

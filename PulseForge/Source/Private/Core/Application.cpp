@@ -242,6 +242,11 @@ namespace PulseForge
 		return m_Renderer->CreateTexture(Description, InitialData);
 	}
 
+	TextureReadbackResult Application::ReadTextureForValidation(const Texture& Source, uint32_t ArraySlice)
+	{
+		return m_Renderer->ReadTextureForValidation(Source, ArraySlice);
+	}
+
 	SamplerCreateResult Application::CreateSampler(const SamplerDesc& Description)
 	{
 		const auto Validation = ValidateSamplerDescription(Description);

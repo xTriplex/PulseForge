@@ -37,6 +37,15 @@ namespace PulseForge
 		virtual TextureCreateResult CreateTexture(
 			const TextureDesc& Description,
 			std::span<const TextureSubresourceData> InitialData) = 0;
+		virtual TextureReadbackResult ReadTextureForValidation(const Texture& Source, uint32_t ArraySlice)
+		{
+			(void)Source;
+			(void)ArraySlice;
+			return std::unexpected(TextureError{
+				TextureErrorCode::UnsupportedFeature,
+				"This renderer does not support validation-only texture readback"
+			});
+		}
 		virtual SamplerCreateResult CreateSampler(const SamplerDesc& Description) = 0;
 		virtual BindingLayoutCreateResult CreateBindingLayout(const BindingLayoutDesc& Description) = 0;
 		virtual BindingSetCreateResult CreateBindingSet(const BindingSetDesc& Description) = 0;

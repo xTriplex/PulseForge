@@ -196,6 +196,13 @@ namespace PulseForge
 
 	SceneRenderer::~SceneRenderer() = default;
 
+	const Texture* SceneRenderer::GetPointShadowFaceTextureForValidation(size_t Slot, uint32_t Face) const noexcept
+	{
+		if (Slot >= m_PointShadowCubemaps.size() || Face >= 6 || !m_PointShadowCubemaps[Slot])
+			return nullptr;
+		return m_PointShadowCubemaps[Slot]->GetFaceTarget(Face).GetDepthTexture();
+	}
+
 	std::expected<std::unique_ptr<SceneRenderer>, SceneRendererError> SceneRenderer::Create(
 		Application& Runtime,
 		const Project& SourceProject,
