@@ -305,6 +305,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	)
 	target_include_directories(PulseForgeEditor PRIVATE
 		PulseForgeEditor/Source/Public
+		PulseForge/Vendor/json/include
 		PulseForge/Vendor/imgui/misc/freetype
 	)
 	target_compile_definitions(PulseForgeEditor PRIVATE PF_PLATFORM_WINDOWS)

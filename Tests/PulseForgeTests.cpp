@@ -27,6 +27,7 @@
 #include "Core/Timestep.h"
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorCommandHistory.h"
+#include "Editor/EditorSelection.h"
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
@@ -7417,6 +7418,36 @@ end
 		PF_CHECK(Tests, !FailedUndo && ByteLimited.CanUndo() && Current == "b");
 	}
 
+	void TestEditorSelection(TestRunner& Tests)
+	{
+		using PulseForgeEditor::EditorSelection;
+		using PulseForge::UUID;
+		const UUID First{ 0, 201 };
+		const UUID Second{ 0, 202 };
+		const UUID Third{ 0, 203 };
+		const UUID Fourth{ 0, 204 };
+		const std::array<UUID, 4> VisibleOrder{ First, Second, Third, Fourth };
+
+		EditorSelection Selection;
+		Selection.SelectSingle(Second);
+		PF_CHECK(Tests, Selection.GetEntities().size() == 1 && Selection.GetPrimary() == Second);
+		Selection.Toggle(Third);
+		PF_CHECK(Tests, Selection.GetEntities().size() == 2 && Selection.GetPrimary() == Third);
+		PF_CHECK(Tests, Selection.SelectRange(VisibleOrder, Fourth));
+		PF_CHECK(Tests, Selection.GetEntities().size() == 3 && Selection.Contains(Second) &&
+			Selection.Contains(Third) && Selection.Contains(Fourth) && Selection.GetPrimary() == Fourth);
+		PF_CHECK(Tests, Selection.SelectRange(VisibleOrder, First, true));
+		PF_CHECK(Tests, Selection.GetEntities().size() == 4 && Selection.GetPrimary() == First);
+		Selection.Remove(First);
+		PF_CHECK(Tests, Selection.GetEntities().size() == 3 && Selection.GetPrimary() == Fourth);
+		Selection.Toggle(Fourth);
+		PF_CHECK(Tests, !Selection.Contains(Fourth) && Selection.GetPrimary() == Third);
+		Selection.Set({ First, First, Third }, First);
+		PF_CHECK(Tests, Selection.GetEntities().size() == 2 && Selection.GetPrimary() == First);
+		Selection.Clear();
+		PF_CHECK(Tests, Selection.GetEntities().empty() && !Selection.GetPrimary() && !Selection.GetAnchor());
+	}
+
 	void TestSceneCommandHistoryRestoresIdentity(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -7550,6 +7581,7 @@ int main()
 	TestConsoleFormatting(Tests);
 	TestPointLightShadowMath(Tests);
 	TestEditorCommandHistory(Tests);
+	TestEditorSelection(Tests);
 	TestSceneCommandHistoryRestoresIdentity(Tests);
 	return Tests.Finish();
 }
