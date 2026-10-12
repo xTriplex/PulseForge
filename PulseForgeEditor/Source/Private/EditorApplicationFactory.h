@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Application.h"
+#include "Editor/EditorCommandLine.h"
 
 #include <filesystem>
 #include <memory>
@@ -8,6 +9,5 @@
 
 namespace PulseForgeEditor
 {
-	[[nodiscard]] std::unique_ptr<PulseForge::Application> CreateEditorApplication(
-		std::optional<std::filesystem::path> StartupProject);
+	[[nodiscard]] std::unique_ptr<PulseForge::Application> CreateEditorApplication(EditorCommandLineOptions Options = {});
 }

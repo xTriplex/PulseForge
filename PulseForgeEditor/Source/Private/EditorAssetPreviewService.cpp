@@ -14,11 +14,6 @@ namespace PulseForgeEditor
 	namespace
 	{
 		constexpr uint32_t MaxPreviewEdge = 192;
-		constexpr size_t MaxQueuedRequests = 96;
-		constexpr size_t MaxEntries = 512;
-		constexpr size_t MaxCpuBytes = 8ull * 1024ull * 1024ull;
-		constexpr size_t MaxUploadsPerUpdate = 8;
-		constexpr size_t MaxUploadBytesPerUpdate = 512ull * 1024ull;
 
 		std::string EntryKey(std::string_view ProjectID, std::string_view AssetID)
 		{
@@ -36,12 +31,17 @@ namespace PulseForgeEditor
 		Shutdown();
 	}
 
-	void EditorAssetPreviewService::Initialize(PulseForge::Application& Runtime, EditorImGuiRenderer& Renderer)
+	void EditorAssetPreviewService::Initialize(
+		PulseForge::Application& Runtime,
+		EditorImGuiRenderer& Renderer,
+		AssetPreviewServiceLimits Limits)
 	{
 		if (m_Worker.joinable())
 			return;
 		m_Runtime = &Runtime;
 		m_Renderer = &Renderer;
+		m_Limits = Limits;
+		m_GpuBudget.SetLimit(Limits.MaximumGpuBytes);
 		{
 			std::scoped_lock Lock(m_Mutex);
 			m_Stopping = false;
@@ -93,20 +93,21 @@ namespace PulseForgeEditor
 				TouchAssetPreviewEntry(Existing->second.Visible, Existing->second.LastUse, m_UseCounter);
 				return;
 			}
-			if (m_Stopping || m_Requests.size() >= MaxQueuedRequests)
+			if (m_Stopping || m_Requests.size() >= m_Limits.MaximumQueuedRequests)
 				return;
 		}
 		if (!EvictToFit(0, Key, 1))
 			return;
 		{
 			std::scoped_lock Lock(m_Mutex);
-			if (m_Stopping || m_Requests.size() >= MaxQueuedRequests || m_Entries.contains(Key))
+			if (m_Stopping || m_Requests.size() >= m_Limits.MaximumQueuedRequests || m_Entries.contains(Key))
 				return;
 			++m_Stats.CacheMisses;
 			Entry NewEntry;
 			TouchAssetPreviewEntry(NewEntry.Visible, NewEntry.LastUse, m_UseCounter);
 			NewEntry.Generation = m_Generation;
 			m_Entries.emplace(Key, std::move(NewEntry));
+			m_Stats.PeakEntries = (std::max)(m_Stats.PeakEntries, m_Entries.size());
 			m_Requests.push_back({ std::string(ProjectID), std::move(AssetID), SourcePath, m_Generation, RequestKind::Image });
 		}
 		m_WorkAvailable.notify_one();
@@ -129,20 +130,21 @@ namespace PulseForgeEditor
 				TouchAssetPreviewEntry(Existing->second.Visible, Existing->second.LastUse, m_UseCounter);
 				return;
 			}
-			if (m_Stopping || m_Requests.size() >= MaxQueuedRequests)
+			if (m_Stopping || m_Requests.size() >= m_Limits.MaximumQueuedRequests)
 				return;
 		}
 		if (!EvictToFit(0, Key, 1))
 			return;
 		{
 			std::scoped_lock Lock(m_Mutex);
-			if (m_Stopping || m_Requests.size() >= MaxQueuedRequests || m_Entries.contains(Key))
+			if (m_Stopping || m_Requests.size() >= m_Limits.MaximumQueuedRequests || m_Entries.contains(Key))
 				return;
 			++m_Stats.CacheMisses;
 			Entry NewEntry;
 			TouchAssetPreviewEntry(NewEntry.Visible, NewEntry.LastUse, m_UseCounter);
 			NewEntry.Generation = m_Generation;
 			m_Entries.emplace(Key, std::move(NewEntry));
+			m_Stats.PeakEntries = (std::max)(m_Stats.PeakEntries, m_Entries.size());
 			m_Requests.push_back({
 				std::string(ProjectID), std::move(AssetID), SourcePath, m_Generation, RequestKind::MaterialSwatch });
 		}
@@ -175,6 +177,7 @@ namespace PulseForgeEditor
 		TouchAssetPreviewEntry(FailedEntry.Visible, FailedEntry.LastUse, m_UseCounter);
 		FailedEntry.Generation = m_Generation;
 		m_Entries.emplace(Key, std::move(FailedEntry));
+		m_Stats.PeakEntries = (std::max)(m_Stats.PeakEntries, m_Entries.size());
 	}
 
 	std::optional<AssetPreviewTexture> EditorAssetPreviewService::FindPreview(
@@ -189,7 +192,14 @@ namespace PulseForgeEditor
 
 	AssetPreviewStats EditorAssetPreviewService::GetStats() const
 	{
-		AssetPreviewStats Result = m_Stats;
+		AssetPreviewStats Result;
+		{
+			std::scoped_lock Lock(m_Mutex);
+			Result = m_Stats;
+			Result.PendingRequests = m_Requests.size();
+			Result.CpuBytes = m_QueuedCpuBytes;
+		}
+		Result.StaleResultsDiscarded = m_StaleResultsDiscarded.load(std::memory_order_relaxed);
 		Result.ReadyEntries = 0;
 		Result.FailedEntries = 0;
 		for (const auto& [Key, Entry] : m_Entries)
@@ -199,11 +209,9 @@ namespace PulseForgeEditor
 			Result.FailedEntries += Entry.Status == State::Failed ? 1 : 0;
 		}
 		Result.GpuBytes = m_GpuBudget.GetUsed();
-		{
-			std::scoped_lock Lock(m_Mutex);
-			Result.PendingRequests = m_Requests.size();
-			Result.CpuBytes = m_QueuedCpuBytes;
-		}
+		Result.ActiveEntries = m_Entries.size();
+		Result.PeakCpuBytes = m_Stats.PeakCpuBytes;
+		Result.PeakGpuBytes = m_Stats.PeakGpuBytes;
 		return Result;
 	}
 
@@ -223,8 +231,8 @@ namespace PulseForgeEditor
 			CpuPreview Preview = std::move(Completed.front());
 			Completed.pop_front();
 			const size_t ByteCount = Preview.Pixels.size();
-			if (Preview.IsValid && (Uploaded >= MaxUploadsPerUpdate ||
-				(Uploaded != 0 && UploadedBytes + ByteCount > MaxUploadBytesPerUpdate)))
+			if (Preview.IsValid && (Uploaded >= m_Limits.MaximumUploadsPerUpdate ||
+				(Uploaded != 0 && UploadedBytes + ByteCount > m_Limits.MaximumUploadBytesPerUpdate)))
 			{
 				std::scoped_lock Lock(m_Mutex);
 				m_Completed.push_back(std::move(Preview));
@@ -240,6 +248,7 @@ namespace PulseForgeEditor
 			if (Found == m_Entries.end() || !IsCurrentAssetPreviewResult(
 				Preview.Generation, Found->second.Generation, m_Generation, m_Stopping))
 			{
+				m_StaleResultsDiscarded.fetch_add(1, std::memory_order_relaxed);
 				std::scoped_lock Lock(m_Mutex);
 				m_QueuedCpuBytes -= (std::min)(m_QueuedCpuBytes, ByteCount);
 				continue;
@@ -247,8 +256,10 @@ namespace PulseForgeEditor
 			if (!Preview.IsValid)
 			{
 				Found->second.Status = State::Failed;
+				++m_Stats.DecodesFailed;
 				continue;
 			}
+			++m_Stats.DecodesSucceeded;
 			if (!EvictToFit(ByteCount, Key))
 			{
 				Found = m_Entries.find(Key);
@@ -309,6 +320,8 @@ namespace PulseForgeEditor
 			Found->second.GpuBytes = ByteCount;
 			Found->second.Status = State::Ready;
 			++m_Stats.Uploads;
+			++m_Stats.BindingRegistrations;
+			m_Stats.PeakGpuBytes = (std::max)(m_Stats.PeakGpuBytes, m_GpuBudget.GetUsed());
 			++Uploaded;
 			UploadedBytes += ByteCount;
 			{
@@ -323,6 +336,7 @@ namespace PulseForgeEditor
 	{
 		{
 			std::scoped_lock Lock(m_Mutex);
+			m_StaleResultsDiscarded.fetch_add(m_Requests.size() + m_Completed.size(), std::memory_order_relaxed);
 			++m_Generation;
 			m_Requests.clear();
 			m_Completed.clear();
@@ -339,11 +353,13 @@ namespace PulseForgeEditor
 			{
 				(void)Key;
 				if (Entry.TextureID != 0)
+				{
 					m_Renderer->UnregisterTexture(Entry.TextureID);
+					++m_Stats.BindingUnregistrations;
+				}
 			}
 		m_Entries.clear();
 		m_GpuBudget.Clear();
-			m_Stats = {};
 	}
 
 	bool EditorAssetPreviewService::EvictToFit(
@@ -359,7 +375,7 @@ namespace PulseForgeEditor
 				Asset.Status == State::CpuReady;
 			Candidates.push_back({ Key, Asset.Visible, InFlight, Asset.LastUse, Asset.GpuBytes });
 		}
-		auto Planned = PlanAssetPreviewEvictions(Candidates, m_Entries.size(), MaxEntries,
+		auto Planned = PlanAssetPreviewEvictions(Candidates, m_Entries.size(), m_Limits.MaximumEntries,
 			m_GpuBudget.GetUsed(), m_GpuBudget.GetLimit(), RequiredBytes, RequiredEntrySlots, ProtectedKey);
 		if (!Planned)
 			return false;
@@ -369,12 +385,16 @@ namespace PulseForgeEditor
 			if (Candidate == m_Entries.end())
 				continue;
 			if (Candidate->second.TextureID != 0)
+			{
 				m_Renderer->UnregisterTexture(Candidate->second.TextureID);
+				++m_Stats.BindingUnregistrations;
+			}
 			m_GpuBudget.Remove(Candidate->second.GpuBytes);
 			m_Entries.erase(Candidate);
 			++m_Stats.Evictions;
 		}
-		return m_GpuBudget.CanFit(RequiredBytes) && m_Entries.size() + RequiredEntrySlots <= MaxEntries;
+		return m_GpuBudget.CanFit(RequiredBytes) &&
+			m_Entries.size() + RequiredEntrySlots <= m_Limits.MaximumEntries;
 	}
 
 	void EditorAssetPreviewService::WorkerMain()
@@ -395,7 +415,10 @@ namespace PulseForgeEditor
 			if (m_Stopping)
 				return;
 			if (!IsCurrentAssetPreviewResult(Work.Generation, Work.Generation, m_Generation, m_Stopping))
+			{
+				m_StaleResultsDiscarded.fetch_add(1, std::memory_order_relaxed);
 				continue;
+			}
 			if (!Preview)
 			{
 				CpuPreview Failure;
@@ -408,13 +431,14 @@ namespace PulseForgeEditor
 			{
 				m_WorkAvailable.wait(Lock, [this, &Preview]
 				{
-					return m_Stopping || m_QueuedCpuBytes + Preview->Pixels.size() <= MaxCpuBytes;
+					return m_Stopping || m_QueuedCpuBytes + Preview->Pixels.size() <= m_Limits.MaximumCpuBytes;
 				});
 				if (m_Stopping)
 					return;
 				if (!IsCurrentAssetPreviewResult(Work.Generation, Work.Generation, m_Generation, m_Stopping))
 					continue;
 				m_QueuedCpuBytes += Preview->Pixels.size();
+				m_Stats.PeakCpuBytes = (std::max)(m_Stats.PeakCpuBytes, m_QueuedCpuBytes);
 				m_Completed.push_back(std::move(*Preview));
 			}
 		}
@@ -479,6 +503,7 @@ namespace PulseForgeEditor
 		{
 			std::scoped_lock Lock(m_Mutex);
 			m_Stopping = true;
+			m_StaleResultsDiscarded.fetch_add(m_Requests.size() + m_Completed.size(), std::memory_order_relaxed);
 			++m_Generation;
 			m_Requests.clear();
 			m_Completed.clear();

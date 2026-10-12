@@ -4,6 +4,7 @@
 #include "Editor/EditorAssetPreviewPolicy.h"
 
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +25,16 @@ namespace PulseForge
 namespace PulseForgeEditor
 {
 	class EditorImGuiRenderer;
+	struct AssetPreviewServiceLimits
+	{
+		size_t MaximumQueuedRequests = 96;
+		size_t MaximumEntries = 512;
+		size_t MaximumCpuBytes = 8ull * 1024ull * 1024ull;
+		size_t MaximumGpuBytes = 64ull * 1024ull * 1024ull;
+		size_t MaximumUploadsPerUpdate = 8;
+		size_t MaximumUploadBytesPerUpdate = 512ull * 1024ull;
+	};
+
 	struct AssetPreviewTexture
 	{
 		uint64_t TextureID = 0;
@@ -38,10 +49,19 @@ namespace PulseForgeEditor
 		size_t FailedEntries = 0;
 		size_t CpuBytes = 0;
 		size_t GpuBytes = 0;
+		size_t ActiveEntries = 0;
+		size_t PeakEntries = 0;
+		size_t PeakCpuBytes = 0;
+		size_t PeakGpuBytes = 0;
 		uint64_t CacheHits = 0;
 		uint64_t CacheMisses = 0;
+		uint64_t DecodesSucceeded = 0;
+		uint64_t DecodesFailed = 0;
 		uint64_t Uploads = 0;
 		uint64_t Evictions = 0;
+		uint64_t BindingRegistrations = 0;
+		uint64_t BindingUnregistrations = 0;
+		uint64_t StaleResultsDiscarded = 0;
 	};
 
 	class EditorAssetPreviewService final
@@ -52,7 +72,10 @@ namespace PulseForgeEditor
 		EditorAssetPreviewService& operator=(const EditorAssetPreviewService&) = delete;
 		~EditorAssetPreviewService();
 
-		void Initialize(PulseForge::Application& Runtime, EditorImGuiRenderer& Renderer);
+		void Initialize(
+			PulseForge::Application& Runtime,
+			EditorImGuiRenderer& Renderer,
+			AssetPreviewServiceLimits Limits = {});
 		void SetProject(std::string ProjectID);
 		void BeginRequestFrame();
 		[[nodiscard]] bool TouchPreview(std::string_view ProjectID, std::string_view AssetID);
@@ -128,7 +151,9 @@ namespace PulseForgeEditor
 		uint64_t m_Generation = 1;
 		uint64_t m_UseCounter = 0;
 		AssetPreviewStats m_Stats;
-		AssetPreviewBudget m_GpuBudget{ 64ull * 1024ull * 1024ull };
+		std::atomic_uint64_t m_StaleResultsDiscarded = 0;
+		AssetPreviewServiceLimits m_Limits;
+		AssetPreviewBudget m_GpuBudget;
 		size_t m_QueuedCpuBytes = 0;
 		bool m_Stopping = false;
 	};

@@ -36,6 +36,7 @@ namespace PulseForgeEditor
 		void UnregisterTexture(uint64_t TextureID) noexcept;
 		[[nodiscard]] std::expected<void, std::string> RenderDrawData();
 		[[nodiscard]] uint64_t GetFontTextureID() const noexcept { return m_FontTextureID; }
+		[[nodiscard]] size_t GetRegisteredTextureCount() const noexcept { return m_TextureBindings.size(); }
 		void Shutdown() noexcept;
 
 	private:

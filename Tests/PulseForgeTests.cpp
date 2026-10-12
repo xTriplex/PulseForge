@@ -4148,6 +4148,25 @@ namespace
 		PF_CHECK(Tests, RelativeOptions.has_value());
 		PF_CHECK(Tests, RelativeOptions && RelativeOptions->ProjectFile == ProjectFile);
 
+		const std::filesystem::path StressManifest = Root / "stress.manifest";
+		{
+			std::ofstream Manifest(StressManifest, std::ios::binary | std::ios::trunc);
+			Manifest << "fixture|fixture.png\n";
+			PF_CHECK(Tests, static_cast<bool>(Manifest));
+		}
+		const std::string StressManifestPath = StressManifest.string();
+		const std::array StressArguments = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--asset-preview-stress"), std::string_view(StressManifestPath), std::string_view("entries") };
+		const auto StressOptions = ParseEditorCommandLine(StressArguments, Root);
+		PF_CHECK(Tests, StressOptions.has_value());
+		PF_CHECK(Tests, StressOptions && StressOptions->AssetPreviewStressManifest == StressManifest);
+		PF_CHECK(Tests, StressOptions && StressOptions->AssetPreviewStressBudget == "entries");
+		const std::array MissingStressMode = {
+			std::string_view("--asset-preview-stress"), std::string_view(StressManifestPath) };
+		const auto MissingStressModeResult = ParseEditorCommandLine(MissingStressMode, Root);
+		PF_CHECK(Tests, !MissingStressModeResult);
+
 		const std::array MissingValue = { std::string_view("--project") };
 		const auto MissingValueResult = ParseEditorCommandLine(MissingValue, Root);
 		PF_CHECK(Tests, !MissingValueResult);
