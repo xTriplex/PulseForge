@@ -29,6 +29,7 @@
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorCommandLine.h"
 #include "Editor/EditorEntityIconPolicy.h"
+#include "Editor/EditorHierarchyRowPolicy.h"
 #include "Editor/EditorInteractionPolicy.h"
 #include "Editor/EditorProjectOpening.h"
 #include "Editor/EditorSelection.h"
@@ -8299,6 +8300,51 @@ end
 		}) == false);
 	}
 
+	void TestEditorHierarchyRowLayout(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		constexpr float FramePaddingX = 7.0f;
+		constexpr float TextStartX = 50.0f;
+		constexpr float TreeTrailingHitWidth = FramePaddingX;
+
+		const auto WideRow = ComputeEditorHierarchyRowLayout(
+			8.0f, 240.0f, TextStartX, 100.0f, 108.0f, FramePaddingX);
+		PF_CHECK(Tests, WideRow.EyeStartX == 210.0f);
+		PF_CHECK(Tests, WideRow.EyeStartX >= 100.0f + EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, WideRow.EyeStartX + EditorHierarchyEyeButtonWidth <= 240.0f);
+		PF_CHECK(Tests, WideRow.MaximumNameWidth > 80.0f);
+		PF_CHECK(Tests, WideRow.SelectionGutterStartX == 108.0f && WideRow.SelectionGutterWidth > 0.0f);
+		PF_CHECK(Tests, WideRow.SelectionGutterStartX >= 100.0f);
+		PF_CHECK(Tests, WideRow.SelectionGutterStartX + WideRow.SelectionGutterWidth <=
+			WideRow.EyeStartX - EditorHierarchyHitRegionGap);
+		const float LongNameTreeItemRightX = TextStartX + WideRow.MaximumNameWidth + TreeTrailingHitWidth;
+		PF_CHECK(Tests, LongNameTreeItemRightX <= WideRow.EyeStartX - EditorHierarchyHitRegionGap -
+			EditorHierarchyHitRegionSafetyInset);
+
+		const auto NarrowRow = ComputeEditorHierarchyRowLayout(
+			8.0f, 150.0f, 50.0f, 94.0f, 102.0f, FramePaddingX);
+		PF_CHECK(Tests, NarrowRow.EyeStartX >= 94.0f + EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, NarrowRow.EyeStartX + EditorHierarchyEyeButtonWidth <= 150.0f);
+		PF_CHECK(Tests, NarrowRow.MaximumNameWidth >= 0.0f && NarrowRow.SelectionGutterWidth >= 0.0f);
+		PF_CHECK(Tests, NarrowRow.SelectionGutterStartX >= 94.0f);
+		PF_CHECK(Tests, NarrowRow.SelectionGutterStartX + NarrowRow.SelectionGutterWidth <=
+			NarrowRow.EyeStartX - EditorHierarchyHitRegionGap);
+
+		const auto DeepRow = ComputeEditorHierarchyRowLayout(
+			98.0f, 240.0f, 140.0f, 175.0f, 183.0f, FramePaddingX);
+		PF_CHECK(Tests, DeepRow.EyeStartX == 210.0f);
+		PF_CHECK(Tests, DeepRow.SelectionGutterStartX >= 175.0f);
+		PF_CHECK(Tests, DeepRow.SelectionGutterStartX + DeepRow.SelectionGutterWidth <=
+			DeepRow.EyeStartX - EditorHierarchyHitRegionGap);
+
+		const auto ConstrainedDeepRow = ComputeEditorHierarchyRowLayout(
+			170.0f, 260.0f, 215.0f, 230.0f, 238.0f, FramePaddingX);
+		PF_CHECK(Tests, ConstrainedDeepRow.EyeStartX >= 234.0f);
+		PF_CHECK(Tests, ConstrainedDeepRow.EyeStartX + EditorHierarchyEyeButtonWidth <= 260.0f);
+		PF_CHECK(Tests, ConstrainedDeepRow.SelectionGutterWidth == 0.0f);
+		PF_CHECK(Tests, ConstrainedDeepRow.EyeStartX >= 230.0f + EditorHierarchyHitRegionGap);
+	}
+
 	void TestSceneCommandHistoryRestoresIdentity(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -8437,6 +8483,7 @@ int main()
 	TestAltGizmoDragHistoryIntegration(Tests);
 	TestEditorSelection(Tests);
 	TestEditorVisibility(Tests);
+	TestEditorHierarchyRowLayout(Tests);
 	TestSceneCommandHistoryRestoresIdentity(Tests);
 	return Tests.Finish();
 }

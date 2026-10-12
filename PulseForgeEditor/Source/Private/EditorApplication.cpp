@@ -31,6 +31,7 @@
 #include "Editor/EditorSelection.h"
 #include "Editor/EditorVisibility.h"
 #include "Editor/EditorEntityIconPolicy.h"
+#include "Editor/EditorHierarchyRowPolicy.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
 #include "Editor/EditorViewportToolbarPolicy.h"
@@ -5587,21 +5588,30 @@ namespace
 			const std::string Identifier = Entity.GetUUID().ToString();
 			m_HierarchyVisibleOrderCurrent.push_back(Entity.GetUUID());
 			ImGui::PushID(Identifier.c_str());
-			ImGuiTreeNodeFlags Flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+			ImGuiTreeNodeFlags Flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanLabelWidth;
 			if (IsEntitySelected(Entity.GetUUID()))
 				Flags |= ImGuiTreeNodeFlags_Selected;
 			if (!Children || Children->empty())
 				Flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+			Flags |= ImGuiTreeNodeFlags_FramePadding;
 
 			if (VisibleEntities && Children && !Children->empty())
 				ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 			const bool IsEffectivelyVisible = IsEntityEffectivelyVisible(Entity);
 			ImGui::PushStyleVar(ImGuiStyleVar_Alpha, IsEffectivelyVisible ? 1.0f : 0.48f);
 			const float RowStartX = ImGui::GetCursorPosX();
-			const float EyeColumnX = (std::max)(ImGui::GetWindowContentRegionMax().x - 30.0f, RowStartX);
+			const float ContentRightX = ImGui::GetWindowContentRegionMax().x;
 			const float LabelStartX = RowStartX + ImGui::GetTreeNodeToLabelSpacing() + ImGui::GetFontSize() +
 				ImGui::CalcTextSize(" ").x;
-			const float MaximumNameWidth = (std::max)(0.0f, EyeColumnX - LabelStartX - 4.0f);
+			const ImGuiStyle& Style = ImGui::GetStyle();
+			const auto InitialRowLayout = PulseForgeEditor::ComputeEditorHierarchyRowLayout(
+				RowStartX,
+				ContentRightX,
+				LabelStartX,
+				RowStartX,
+				RowStartX,
+				Style.FramePadding.x);
+			const float MaximumNameWidth = InitialRowLayout.MaximumNameWidth;
 			std::string TruncatedNameStorage;
 			std::string_view DisplayName = Tag->Name;
 			if (Tag->Name.size() > 480 ||
@@ -5611,13 +5621,62 @@ namespace
 				DisplayName = TruncatedNameStorage;
 			}
 			const bool NameTruncated = !TruncatedNameStorage.empty() || DisplayName.size() != Tag->Name.size();
+			const float RowFramePaddingY = (std::max)(
+				0.0f, (PulseForgeEditor::EditorHierarchyEyeButtonHeight - ImGui::GetFontSize()) * 0.5f);
+			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(Style.FramePadding.x, RowFramePaddingY));
 			const bool IsOpen = m_EditorStyle.TreeNode(Icon, DisplayName, "Entity", Flags);
-			const bool RowClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
-			if (NameTruncated && ImGui::IsItemHovered() && ImGui::GetIO().MousePos.x < ImGui::GetWindowPos().x + EyeColumnX)
-				ImGui::SetTooltip("%s", Tag->Name.c_str());
-			if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+			ImGui::PopStyleVar();
+			const bool TreeItemClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+			const bool TreeItemRightClicked = ImGui::IsItemClicked(ImGuiMouseButton_Right);
+			const bool TreeItemHovered = ImGui::IsItemHovered();
+			const ImVec2 TreeItemRectMin = ImGui::GetItemRectMin();
+			const ImVec2 TreeItemRectMax = ImGui::GetItemRectMax();
+			const float TreeItemHitRightX = TreeItemRectMax.x - ImGui::GetWindowPos().x;
+			if (TreeItemRightClicked)
 				ImGui::OpenPopup("Entity Actions");
-			ImGui::SameLine((std::max)(EyeColumnX, ImGui::GetCursorPosX()));
+
+			ImGui::SameLine(0.0f, 0.0f);
+			const auto RowLayout = PulseForgeEditor::ComputeEditorHierarchyRowLayout(
+				RowStartX,
+				ContentRightX,
+				LabelStartX,
+				TreeItemHitRightX,
+				ImGui::GetCursorPosX(),
+				Style.FramePadding.x);
+			bool GutterClicked = false;
+			bool GutterRightClicked = false;
+			bool GutterHovered = false;
+			if (RowLayout.SelectionGutterWidth > 0.0f)
+			{
+				const bool IsSelected = IsEntitySelected(Entity.GetUUID());
+				ImGui::SetCursorScreenPos(ImVec2(
+					ImGui::GetWindowPos().x + RowLayout.SelectionGutterStartX, TreeItemRectMin.y));
+				(void)ImGui::InvisibleButton(
+					"##EntitySelectionGutter",
+					ImVec2(RowLayout.SelectionGutterWidth, PulseForgeEditor::EditorHierarchyEyeButtonHeight),
+					ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_NoNavFocus);
+				GutterClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+				GutterRightClicked = ImGui::IsItemClicked(ImGuiMouseButton_Right);
+				GutterHovered = ImGui::IsItemHovered();
+				const ImVec2 GutterMin = ImGui::GetItemRectMin();
+				const ImVec2 GutterMax = ImGui::GetItemRectMax();
+				if (IsSelected || GutterHovered)
+				{
+					const ImGuiCol Background = IsSelected ? ImGuiCol_Header : ImGuiCol_HeaderHovered;
+					ImGui::GetWindowDrawList()->AddRectFilled(
+						GutterMin,
+						GutterMax,
+						ImGui::GetColorU32(ImGui::GetStyleColorVec4(Background)));
+				}
+			}
+			const bool RowClicked = TreeItemClicked || GutterClicked;
+			if (NameTruncated && (TreeItemHovered || GutterHovered) &&
+				ImGui::GetIO().MousePos.x < ImGui::GetWindowPos().x + RowLayout.EyeStartX)
+				ImGui::SetTooltip("%s", Tag->Name.c_str());
+			if (TreeItemRightClicked || GutterRightClicked)
+				ImGui::OpenPopup("Entity Actions");
+
+			ImGui::SameLine(RowLayout.EyeStartX);
 			const bool LocallyVisible = m_EditorVisibility.IsLocallyVisible(Entity.GetUUID());
 			if (m_EditorStyle.IconButton(
 				LocallyVisible ? PulseForgeEditor::EditorIcon::Eye : PulseForgeEditor::EditorIcon::EyeSlash,
@@ -5625,8 +5684,8 @@ namespace
 				"EntityVisibility",
 				LocallyVisible ? "Hide this entity in the editor viewport" : "Show this entity in the editor viewport",
 				false,
-				25.0f,
-				24.0f))
+				PulseForgeEditor::EditorHierarchyEyeButtonWidth,
+				PulseForgeEditor::EditorHierarchyEyeButtonHeight))
 				ToggleEntityVisibility(Entity.GetUUID());
 			ImGui::PopStyleVar();
 			if (RowClicked)
