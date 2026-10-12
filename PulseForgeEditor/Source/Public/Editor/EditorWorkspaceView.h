@@ -130,8 +130,9 @@ namespace PulseForgeEditor
 			return EditorIcon::Material;
 		if (IsExtension(".lua") || IsExtension(".hlsl") || IsExtension(".glsl"))
 			return EditorIcon::Script;
-		if (IsExtension(".png") || IsExtension(".jpg") || IsExtension(".jpeg") || IsExtension(".tga") ||
-			IsExtension(".ppm"))
+		if (IsExtension(".png") || IsExtension(".jpg") || IsExtension(".jpeg") || IsExtension(".bmp") ||
+			IsExtension(".tga") || IsExtension(".psd") || IsExtension(".gif") || IsExtension(".pic") ||
+			IsExtension(".ppm") || IsExtension(".pnm") || IsExtension(".pgm") || IsExtension(".pbm"))
 			return EditorIcon::Image;
 		if (IsExtension(".wav") || IsExtension(".mp3") || IsExtension(".flac") || IsExtension(".ogg"))
 			return EditorIcon::AudioSource;

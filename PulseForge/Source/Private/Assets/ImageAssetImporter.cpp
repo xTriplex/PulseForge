@@ -3,6 +3,7 @@
 #include "Assets/AssetPathResolver.h"
 
 #include <stb_image.h>
+#include <stb_image_resize2.h>
 
 #include <algorithm>
 #include <cctype>
@@ -12,6 +13,7 @@
 #include <limits>
 #include <memory>
 #include <cmath>
+#include <span>
 #include <system_error>
 
 namespace PulseForge
@@ -22,6 +24,22 @@ namespace PulseForge
 		constexpr uint64_t MaxDecodedPixels = 32ull * 1024ull * 1024ull;
 		constexpr uint64_t MaxHdrDecodedPixels = 8ull * 1024ull * 1024ull;
 		constexpr int MaxImageDimension = 32768;
+		constexpr uint64_t MaxPreviewSourceBytes = 64ull * 1024ull * 1024ull;
+		constexpr uint64_t MaxPreviewDecodedPixels = 8ull * 1024ull * 1024ull;
+
+		std::array<uint64_t, 2> Fingerprint(std::span<const std::byte> Bytes)
+		{
+			uint64_t FingerprintA = 14695981039346656037ull;
+			uint64_t FingerprintB = 7809847782465536322ull;
+			for (const std::byte Byte : Bytes)
+			{
+				const uint8_t Value = std::to_integer<uint8_t>(Byte);
+				FingerprintA = (FingerprintA ^ Value) * 1099511628211ull;
+				FingerprintB = (FingerprintB ^ (Value + 0x9du)) * 14029467366897019727ull;
+				FingerprintB ^= FingerprintB >> 29;
+			}
+			return { FingerprintA, FingerprintB };
+		}
 
 		bool HasHdrExtension(const std::filesystem::path& Path)
 		{
@@ -182,6 +200,7 @@ namespace PulseForge
 			ImportedImage Image;
 			Image.Width = static_cast<uint32_t>(Width);
 			Image.Height = static_cast<uint32_t>(Height);
+			Image.SourceFingerprint = Fingerprint(*SourceBytes);
 			Image.RGBA8Pixels.resize(PixelCount * 4);
 			std::memcpy(Image.RGBA8Pixels.data(), PixelOwner.get(), Image.RGBA8Pixels.size());
 			return Image;
@@ -199,6 +218,86 @@ namespace PulseForge
 				ImageAssetImportErrorCode::FilesystemFailure,
 				{},
 				std::string("Image asset import failed: ") + Exception.what()));
+		}
+	}
+
+	std::expected<ImportedImage, ImageAssetImportError> ImageAssetImporter::DecodePreviewRGBA8(
+		const std::filesystem::path& SourcePath,
+		uint32_t MaximumEdge)
+	{
+		try
+		{
+			std::error_code FileError;
+			const uintmax_t FileSize = std::filesystem::file_size(SourcePath, FileError);
+			if (FileError)
+				return std::unexpected(MakeError(ImageAssetImportErrorCode::FileReadFailed, SourcePath,
+					"Could not determine image preview source size: " + FileError.message()));
+			if (MaximumEdge == 0 || FileSize == 0 || FileSize > MaxPreviewSourceBytes)
+				return std::unexpected(MakeError(ImageAssetImportErrorCode::ResourceLimitExceeded, SourcePath,
+					"Image preview source is empty or exceeds its bounded source/size policy"));
+			auto SourceBytes = ReadSourceFile(SourcePath);
+			if (!SourceBytes)
+				return std::unexpected(std::move(SourceBytes.error()));
+			if (SourceBytes->size() > MaxPreviewSourceBytes)
+				return std::unexpected(MakeError(ImageAssetImportErrorCode::ResourceLimitExceeded, SourcePath,
+					"Image preview source grew beyond its bounded source-size policy while being read"));
+			const auto* InputBytes = reinterpret_cast<const stbi_uc*>(SourceBytes->data());
+			const int InputLength = static_cast<int>(SourceBytes->size());
+			int Width = 0;
+			int Height = 0;
+			int SourceChannels = 0;
+			if (!stbi_info_from_memory(InputBytes, InputLength, &Width, &Height, &SourceChannels))
+			{
+				const char* Failure = stbi_failure_reason();
+				return std::unexpected(MakeError(ImageAssetImportErrorCode::InvalidImage, SourcePath,
+					std::string("Could not inspect image preview: ") + (Failure ? Failure : "unknown decoder error")));
+			}
+			if (Width <= 0 || Height <= 0 || Width > MaxImageDimension || Height > MaxImageDimension ||
+				static_cast<uint64_t>(Width) * static_cast<uint64_t>(Height) > MaxPreviewDecodedPixels)
+				return std::unexpected(MakeError(ImageAssetImportErrorCode::ResourceLimitExceeded, SourcePath,
+					"Image preview dimensions are invalid or exceed the eight-million-pixel limit"));
+			const int InspectedWidth = Width;
+			const int InspectedHeight = Height;
+			stbi_uc* Decoded = stbi_load_from_memory(
+				InputBytes, InputLength, &Width, &Height, &SourceChannels, STBI_rgb_alpha);
+			if (!Decoded)
+			{
+				const char* Failure = stbi_failure_reason();
+				return std::unexpected(MakeError(ImageAssetImportErrorCode::InvalidImage, SourcePath,
+					std::string("Could not decode image preview: ") + (Failure ? Failure : "unknown decoder error")));
+			}
+			const std::unique_ptr<stbi_uc, decltype(&stbi_image_free)> PixelOwner(Decoded, &stbi_image_free);
+			if (Width != InspectedWidth || Height != InspectedHeight)
+				return std::unexpected(MakeError(ImageAssetImportErrorCode::InvalidImage, SourcePath,
+					"Image preview decoder dimensions did not match the inspected header"));
+
+			const uint32_t Edge = (std::max)(static_cast<uint32_t>(Width), static_cast<uint32_t>(Height));
+			const double Scale = (std::min)(1.0, static_cast<double>(MaximumEdge) / static_cast<double>(Edge));
+			const uint32_t PreviewWidth = (std::max)(1u, static_cast<uint32_t>(std::lround(Width * Scale)));
+			const uint32_t PreviewHeight = (std::max)(1u, static_cast<uint32_t>(std::lround(Height * Scale)));
+			const size_t OutputPixels = static_cast<size_t>(PreviewWidth) * PreviewHeight;
+			ImportedImage Image;
+			Image.Width = PreviewWidth;
+			Image.Height = PreviewHeight;
+			Image.SourceFingerprint = Fingerprint(*SourceBytes);
+			Image.RGBA8Pixels.resize(OutputPixels * 4);
+			if (PreviewWidth == static_cast<uint32_t>(Width) && PreviewHeight == static_cast<uint32_t>(Height))
+				std::memcpy(Image.RGBA8Pixels.data(), PixelOwner.get(), Image.RGBA8Pixels.size());
+			else if (!stbir_resize_uint8_srgb(PixelOwner.get(), Width, Height, 0,
+				Image.RGBA8Pixels.data(), static_cast<int>(PreviewWidth), static_cast<int>(PreviewHeight), 0, STBIR_RGBA))
+				return std::unexpected(MakeError(ImageAssetImportErrorCode::InvalidImage, SourcePath,
+					"Image preview downsampling failed"));
+			return Image;
+		}
+		catch (const std::bad_alloc&)
+		{
+			return std::unexpected(MakeError(ImageAssetImportErrorCode::ResourceLimitExceeded, SourcePath,
+				"Image preview could not allocate its bounded decode buffers"));
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(MakeError(ImageAssetImportErrorCode::FilesystemFailure, SourcePath,
+				std::string("Image preview failed: ") + Exception.what()));
 		}
 	}
 

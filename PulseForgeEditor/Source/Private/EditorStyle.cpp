@@ -1,4 +1,5 @@
 #include "Editor/EditorStyle.h"
+#include "Editor/EditorAssetPreviewPolicy.h"
 
 #include "Core/Log.h"
 
@@ -551,7 +552,10 @@ namespace PulseForgeEditor
 		std::string_view Label,
 		bool Selected,
 		const ImVec2& Size,
-		int Flags) const
+		int Flags,
+		uint64_t PreviewTextureID,
+		uint32_t PreviewWidth,
+		uint32_t PreviewHeight) const
 	{
 		const bool Pressed = ImGui::Selectable("##AssetTile", Selected,
 			static_cast<ImGuiSelectableFlags>(Flags), Size);
@@ -561,7 +565,31 @@ namespace PulseForgeEditor
 		DrawList->PushClipRect(Minimum, Maximum, true);
 
 		const EditorIconDescriptor* Descriptor = m_HasIcons ? FindEditorIcon(Icon) : nullptr;
-		if (Descriptor)
+		const bool HasPreview = PreviewTextureID != 0 && PreviewWidth != 0 && PreviewHeight != 0 && Size.y >= 72.0f;
+		if (HasPreview)
+		{
+			const ImVec2 PreviewMin(Minimum.x + 8.0f, Minimum.y + 6.0f);
+			const ImVec2 PreviewMax(Maximum.x - 8.0f, Minimum.y + Size.y - 38.0f);
+			const float CheckerSize = 8.0f;
+			for (float Y = PreviewMin.y; Y < PreviewMax.y; Y += CheckerSize)
+				for (float X = PreviewMin.x; X < PreviewMax.x; X += CheckerSize)
+				{
+					const bool Alternate = (static_cast<int>((X - PreviewMin.x) / CheckerSize) +
+						static_cast<int>((Y - PreviewMin.y) / CheckerSize)) % 2 != 0;
+					const ImU32 CheckerColor = ImGui::GetColorU32(Alternate
+						? ImVec4(0.20f, 0.23f, 0.28f, 1.0f) : ImVec4(0.15f, 0.17f, 0.20f, 1.0f));
+					DrawList->AddRectFilled(ImVec2(X, Y),
+						ImVec2((std::min)(X + CheckerSize, PreviewMax.x), (std::min)(Y + CheckerSize, PreviewMax.y)),
+						CheckerColor);
+				}
+			const AssetPreviewRect Fitted = FitAssetPreview(
+				PreviewMin.x + 2.0f, PreviewMin.y + 2.0f,
+				(std::max)(PreviewMax.x - PreviewMin.x - 4.0f, 1.0f),
+				(std::max)(PreviewMax.y - PreviewMin.y - 4.0f, 1.0f), PreviewWidth, PreviewHeight);
+			DrawList->AddImage(static_cast<ImTextureID>(PreviewTextureID),
+				ImVec2(Fitted.X, Fitted.Y), ImVec2(Fitted.X + Fitted.Width, Fitted.Y + Fitted.Height));
+		}
+		else if (Descriptor)
 		{
 			const auto Glyph = MakeLabel(true, Icon, {});
 			size_t GlyphBytes = 1;
@@ -583,7 +611,7 @@ namespace PulseForgeEditor
 				Glyph.data(), Glyph.data() + GlyphBytes);
 		}
 
-		const float NameTop = Minimum.y + (Descriptor ? 49.0f : 11.0f);
+		const float NameTop = Minimum.y + (HasPreview ? Size.y - 29.0f : Descriptor ? 49.0f : 11.0f);
 		const float NameWidth = (std::max)(Size.x - 12.0f, 1.0f);
 		const ImVec2 NameSize = ImGui::GetFont()->CalcTextSizeA(
 			ImGui::GetFontSize(), NameWidth, 0.0f, Label.data(), Label.data() + Label.size());

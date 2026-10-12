@@ -31,6 +31,7 @@
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorCommandLine.h"
 #include "Editor/EditorContentBrowserPolicy.h"
+#include "Editor/EditorAssetPreviewPolicy.h"
 #include "Editor/EditorEntityIconPolicy.h"
 #include "Editor/EditorHierarchyRowPolicy.h"
 #include "Editor/EditorInteractionPolicy.h"
@@ -5712,6 +5713,13 @@ end
 		PF_CHECK(Tests, Imported->RGBA8Pixels == std::vector<uint8_t>({
 			0, 0, 255, 255, 255, 255, 255, 255,
 			255, 0, 0, 255, 0, 255, 0, 255 }));
+		const auto Preview = ImageAssetImporter::DecodePreviewRGBA8(SourcePath, 192);
+		PF_CHECK(Tests, Preview && Preview->Width == 2 && Preview->Height == 2);
+		PF_CHECK(Tests, Preview && Preview->RGBA8Pixels == Imported->RGBA8Pixels);
+		PF_CHECK(Tests, Preview && Preview->SourceFingerprint == Imported->SourceFingerprint);
+		const auto ZeroEdgePreview = ImageAssetImporter::DecodePreviewRGBA8(SourcePath, 0);
+		PF_CHECK(Tests, !ZeroEdgePreview &&
+			ZeroEdgePreview.error().Code == ImageAssetImportErrorCode::ResourceLimitExceeded);
 
 		const auto MissingAssetID = UUID::Generate();
 		PF_CHECK(Tests, MissingAssetID.has_value());
@@ -5735,6 +5743,59 @@ end
 			PF_CHECK(Tests, ImportedAfterMove && ImportedAfterMove->RGBA8Pixels == Imported->RGBA8Pixels);
 		}
 		PF_CHECK(Tests, std::filesystem::exists(RenamedPath));
+		const auto PreviewAfterMove = ImageAssetImporter::DecodePreviewRGBA8(RenamedPath);
+		PF_CHECK(Tests, PreviewAfterMove && PreviewAfterMove->SourceFingerprint == Imported->SourceFingerprint);
+		Bitmap.back() ^= 0x7fu;
+		{
+			std::ofstream Output(RenamedPath, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(Bitmap.data()), static_cast<std::streamsize>(Bitmap.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto ReplacedPreview = ImageAssetImporter::DecodePreviewRGBA8(RenamedPath);
+		PF_CHECK(Tests, ReplacedPreview && ReplacedPreview->SourceFingerprint != Imported->SourceFingerprint);
+
+		const std::filesystem::path LargePreviewPath = TextureDirectory / "wide.ppm";
+		{
+			const std::string Header = "P6\n400 200\n255\n";
+			std::vector<uint8_t> Ppm(Header.begin(), Header.end());
+			Ppm.reserve(Ppm.size() + 400u * 200u * 3u);
+			for (uint32_t Y = 0; Y < 200; ++Y)
+				for (uint32_t X = 0; X < 400; ++X)
+				{
+					Ppm.push_back(static_cast<uint8_t>(X & 0xffu));
+					Ppm.push_back(static_cast<uint8_t>(Y & 0xffu));
+					Ppm.push_back(127);
+				}
+			std::ofstream Output(LargePreviewPath, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(Ppm.data()), static_cast<std::streamsize>(Ppm.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		PF_CHECK(Tests, AssetMetadataSerializer::CreateForNewAsset(LargePreviewPath).has_value());
+		const auto DownsampledPreview = ImageAssetImporter::DecodePreviewRGBA8(LargePreviewPath, 192);
+		PF_CHECK(Tests, DownsampledPreview && DownsampledPreview->Width == 192 && DownsampledPreview->Height == 96);
+		PF_CHECK(Tests, DownsampledPreview && DownsampledPreview->RGBA8Pixels.size() == 192u * 96u * 4u);
+
+		const std::filesystem::path AlphaPreviewPath = TextureDirectory / "alpha.tga";
+		{
+			std::array<uint8_t, 26> Tga{};
+			Tga[2] = 2;
+			Tga[12] = 2;
+			Tga[14] = 1;
+			Tga[16] = 32;
+			Tga[17] = 0x28;
+			Tga[18] = 255;	// Blue, fully transparent.
+			Tga[23] = 0;
+			Tga[24] = 255;
+			Tga[25] = 128;
+			std::ofstream Output(AlphaPreviewPath, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(Tga.data()), static_cast<std::streamsize>(Tga.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		PF_CHECK(Tests, AssetMetadataSerializer::CreateForNewAsset(AlphaPreviewPath).has_value());
+		const auto AlphaPreview = ImageAssetImporter::DecodePreviewRGBA8(AlphaPreviewPath);
+		PF_CHECK(Tests, AlphaPreview && AlphaPreview->Width == 2 && AlphaPreview->Height == 1);
+		PF_CHECK(Tests, AlphaPreview && AlphaPreview->RGBA8Pixels[0] == 0 && AlphaPreview->RGBA8Pixels[2] == 255 &&
+			AlphaPreview->RGBA8Pixels[3] == 0 && AlphaPreview->RGBA8Pixels[4] == 255 && AlphaPreview->RGBA8Pixels[7] == 128);
 
 		const std::filesystem::path InvalidImagePath = TextureDirectory / "invalid.bmp";
 		{
@@ -5744,6 +5805,8 @@ end
 		}
 		const auto InvalidImageMetadata = AssetMetadataSerializer::CreateForNewAsset(InvalidImagePath);
 		PF_CHECK(Tests, InvalidImageMetadata.has_value());
+		const auto InvalidPreview = ImageAssetImporter::DecodePreviewRGBA8(InvalidImagePath);
+		PF_CHECK(Tests, !InvalidPreview && InvalidPreview.error().Code == ImageAssetImportErrorCode::InvalidImage);
 		if (InvalidImageMetadata)
 		{
 			PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
@@ -8505,6 +8568,52 @@ end
 		PF_CHECK(Tests, UndoDelete && *UndoDelete && SceneValue.FindEntity(ChildIdentifier));
 		PF_CHECK(Tests, !History.IsDirty());
 	}
+
+	void TestEditorAssetPreviewPolicy(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		const AssetPreviewDimensions Wide = CalculateAssetPreviewDimensions(4096, 2048, 192);
+		PF_CHECK(Tests, Wide.Width == 192 && Wide.Height == 96);
+		const AssetPreviewDimensions Tall = CalculateAssetPreviewDimensions(64, 4096, 192);
+		PF_CHECK(Tests, Tall.Width == 3 && Tall.Height == 192);
+		const AssetPreviewDimensions Tiny = CalculateAssetPreviewDimensions(3, 2, 192);
+		PF_CHECK(Tests, Tiny.Width == 3 && Tiny.Height == 2);
+		PF_CHECK(Tests, CalculateAssetPreviewDimensions(0, 4, 192).Width == 0);
+		PF_CHECK(Tests, CalculateAssetPreviewDimensions(4, 4, 0).Height == 0);
+
+		const AssetPreviewRect Fitted = FitAssetPreview(10.0f, 20.0f, 100.0f, 60.0f, 200, 100);
+		PF_CHECK(Tests, std::isfinite(Fitted.X) && std::isfinite(Fitted.Y) &&
+			std::isfinite(Fitted.Width) && std::isfinite(Fitted.Height));
+		PF_CHECK(Tests, Fitted.Width == 100.0f && Fitted.Height == 50.0f && Fitted.Y == 25.0f);
+		const AssetPreviewRect Invalid = FitAssetPreview(0.0f, 0.0f, -1.0f, 10.0f, 1, 1);
+		PF_CHECK(Tests, Invalid.Width == 0.0f && Invalid.Height == 0.0f);
+
+		AssetPreviewKey First{ "project-a", "asset", { 1, 2 }, AssetPreviewKind::Image, 192, 96, 1 };
+		AssetPreviewKey Same = First;
+		AssetPreviewKey OtherProject = First;
+		OtherProject.ProjectID = "project-b";
+		AssetPreviewKey OtherRevision = First;
+		OtherRevision.ContentRevision[1]++;
+		PF_CHECK(Tests, First == Same && AssetPreviewKeyHash{}(First) == AssetPreviewKeyHash{}(Same));
+		PF_CHECK(Tests, !(First == OtherProject) && !(First == OtherRevision));
+		const auto OpaqueSwatch = MakeMaterialBaseColorSwatch(0.5f, 1.0f, 0.0f, 0.2f, true);
+		PF_CHECK(Tests, OpaqueSwatch[0] == 188 && OpaqueSwatch[1] == 255 && OpaqueSwatch[2] == 0 && OpaqueSwatch[3] == 255);
+		const auto BlendSwatch = MakeMaterialBaseColorSwatch(-1.0f, 0.0f, 0.0f, 0.25f, false);
+		PF_CHECK(Tests, BlendSwatch[0] == 0 && BlendSwatch[3] == 64);
+
+		AssetPreviewBudget Budget(100);
+		PF_CHECK(Tests, Budget.Add(60) && Budget.GetUsed() == 60);
+		PF_CHECK(Tests, !Budget.Add(41) && Budget.GetUsed() == 60);
+		Budget.Remove(20);
+		PF_CHECK(Tests, Budget.CanFit(60) && !Budget.CanFit(81));
+		Budget.SetLimit(0);
+		Budget.Clear();
+		PF_CHECK(Tests, !Budget.Add(1) && Budget.Add(0));
+		PF_CHECK(Tests, IsSupportedImagePreviewExtension("sample.PNG"));
+		PF_CHECK(Tests, IsSupportedImagePreviewExtension("sample.ppm"));
+		PF_CHECK(Tests, !IsSupportedImagePreviewExtension("sample.hdr"));
+		PF_CHECK(Tests, !IsSupportedImagePreviewExtension("sample.material"));
+	}
 }
 
 int main()
@@ -8533,6 +8642,7 @@ int main()
 	TestLocalLightingMathAndSelection(Tests);
 	TestEditorViewportMath(Tests);
 	TestEditorInteractionPolicy(Tests);
+	TestEditorAssetPreviewPolicy(Tests);
 	TestEditorWorkspacePanelState(Tests);
 	TestEditorWorkspaceViewHelpers(Tests);
 	TestViewportMouseCaptureState(Tests);

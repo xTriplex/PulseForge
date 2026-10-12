@@ -10,6 +10,7 @@
 #include "Events/KeyEvent.h"
 #include "Events/MouseEvent.h"
 #include "Assets/AssetOperations.h"
+#include "Assets/AssetPathResolver.h"
 #include "Assets/MaterialAssetService.h"
 #include "Assets/PrefabAssetService.h"
 #include "Assets/Project.h"
@@ -22,6 +23,8 @@
 #include "Runtime/SceneRuntime.h"
 #include "Window/Window.h"
 #include "Editor/EditorImGuiRenderer.h"
+#include "Editor/EditorAssetPreviewService.h"
+#include "Editor/EditorAssetPreviewPolicy.h"
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorCommandHistory.h"
@@ -653,6 +656,7 @@ namespace
 				ShutdownImGui();
 				throw std::runtime_error(Message);
 			}
+			m_AssetPreviews.Initialize(Runtime, *m_ImGuiRenderer);
 			#endif
 			AttachConsoleSink();
 
@@ -688,6 +692,16 @@ namespace
 
 		void OnUpdate(PulseForge::Timestep DeltaTime) override
 		{
+			if (m_AssetPreviewProjectPending)
+			{
+				m_AssetPreviews.SetProject(m_Project ? m_Project->GetDescription().ID.ToString() : std::string{});
+				m_AssetPreviewProjectPending = false;
+			}
+			if (m_AssetPreviewAssetsPending)
+			{
+				m_AssetPreviews.InvalidateAll();
+				m_AssetPreviewAssetsPending = false;
+			}
 			UpdateEditorCamera(DeltaTime);
 			if (m_SceneRuntime && m_RuntimeScene)
 			{
@@ -699,6 +713,7 @@ namespace
 				}
 			}
 			PrepareViewportScene();
+			m_AssetPreviews.PumpUploads();
 		}
 
 		void OnRender() override
@@ -709,6 +724,7 @@ namespace
 			#endif
 			ImGui_ImplGlfw_NewFrame();
 			ImGui::NewFrame();
+			m_AssetPreviews.BeginRequestFrame();
 			m_EditorStyle.ApplyTheme(GetEditorUiColorEncoding(
 				PulseForge::Application::Get().GetOutputColorEncoding()));
 			CompleteReleasedGizmoInteractionBeforeShortcuts();
@@ -2574,6 +2590,7 @@ namespace
 		{
 			ClearScene();
 			ResetViewportSceneRenderer();
+			m_AssetPreviewProjectPending = true;
 			m_Project.reset();
 			m_OpenedMaterialAsset.reset();
 			m_FocusMaterialEditorNextFrame = false;
@@ -7090,9 +7107,41 @@ namespace
 						const AssetBrowserPresentation& Presentation = m_AssetBrowserPresentations[SourceIndex];
 						ImGui::PushID(Presentation.Identifier.c_str());
 						const bool IsSelected = m_SelectedAsset && *m_SelectedAsset == Asset.ID;
+						uint64_t PreviewID = 0;
+						uint32_t PreviewWidth = 0;
+						uint32_t PreviewHeight = 0;
+						#ifndef PF_EDITOR_RENDERER_OPENGL
+						const bool IsImagePreview = PulseForgeEditor::IsSupportedImagePreviewExtension(Asset.ProjectRelativePath);
+						const bool IsMaterialPreview = Presentation.Extension == ".material";
+						if (m_Project && (IsImagePreview || IsMaterialPreview))
+						{
+							const std::string ProjectID = m_Project->GetDescription().ID.ToString();
+							const std::string AssetID = Asset.ID.ToString();
+							if (!m_AssetPreviews.HasEntry(ProjectID, AssetID))
+							{
+								auto SourcePath = PulseForge::AssetPathResolver::ResolveManagedSourcePath(
+									m_Project->GetRootPath(), Asset.ProjectRelativePath);
+								if (SourcePath)
+								{
+									if (IsMaterialPreview)
+										m_AssetPreviews.RequestMaterialSwatch(ProjectID, AssetID, *SourcePath);
+									else
+										m_AssetPreviews.RequestImage(ProjectID, AssetID, *SourcePath);
+								}
+								else
+									m_AssetPreviews.MarkUnavailable(ProjectID, AssetID);
+							}
+							if (const auto Preview = m_AssetPreviews.FindPreview(ProjectID, AssetID))
+							{
+								PreviewID = Preview->TextureID;
+								PreviewWidth = Preview->Width;
+								PreviewHeight = Preview->Height;
+							}
+						}
+						#endif
 						const bool Activated = m_EditorStyle.AssetTile(Presentation.Icon, Presentation.Name, IsSelected,
 							ImVec2((std::max)(ImGui::GetContentRegionAvail().x - 2.0f, 1.0f), TileHeight),
-							ImGuiSelectableFlags_AllowDoubleClick);
+							ImGuiSelectableFlags_AllowDoubleClick, PreviewID, PreviewWidth, PreviewHeight);
 						HandleAssetBrowserItem(Asset, Presentation, Activated, DeferredAction);
 						ImGui::PopID();
 					}
@@ -7423,6 +7472,7 @@ namespace
 					{
 						m_DirtyMaterialDrafts.erase(Key);
 						m_MaterialEditorErrors.erase(Key);
+						m_AssetPreviewAssetsPending = true;
 						if (m_SceneRenderer)
 							m_SceneRenderer->RefreshMaterialAssets();
 						SetStatus("Saved material " + PathToUtf8(Asset.ProjectRelativePath.filename()) + ".");
@@ -7772,6 +7822,8 @@ namespace
 
 		void UpdateAssetList()
 		{
+			m_AssetPreviewProjectPending = true;
+			m_AssetPreviewAssetsPending = true;
 			m_PickingMeshCache.clear();
 			m_PickingMeshErrors.clear();
 			if (m_Project)
@@ -7827,6 +7879,7 @@ namespace
 
 		void ShutdownImGui() noexcept
 		{
+			m_AssetPreviews.Shutdown();
 			if (m_ImGuiRenderer)
 			{
 				m_ImGuiRenderer->Shutdown();
@@ -7864,6 +7917,9 @@ namespace
 		PulseForgeEditor::EditorLayout m_Layout;
 		PulseForgeEditor::EditorStyle m_EditorStyle;
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
+		PulseForgeEditor::EditorAssetPreviewService m_AssetPreviews;
+		bool m_AssetPreviewProjectPending = false;
+		bool m_AssetPreviewAssetsPending = false;
 		bool m_GlfwBackendActive = false;
 		bool m_OpenGLBackendActive = false;
 		bool m_FileDialogActive = false;

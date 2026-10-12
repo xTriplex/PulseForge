@@ -58,6 +58,10 @@ namespace PulseForge
 			const AssetID& Asset,
 			const std::filesystem::path& ProjectRoot,
 			const AssetRegistry& Registry);
+		// Decodes a bounded UI preview from a previously validated managed source path. This performs CPU work only.
+		[[nodiscard]] static std::expected<ImportedImage, ImageAssetImportError> DecodePreviewRGBA8(
+			const std::filesystem::path& SourcePath,
+			uint32_t MaximumEdge = 192);
 		// Imports managed Radiance .hdr assets as linear RGBA32F data without gamma conversion or clamping.
 		[[nodiscard]] static std::expected<ImportedFloatImage, ImageAssetImportError> ImportRGBA32F(
 			const AssetID& Asset,

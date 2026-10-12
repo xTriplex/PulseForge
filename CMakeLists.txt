@@ -300,6 +300,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorMain.cpp
 		PulseForgeEditor/Source/Private/EditorApplication.cpp
 		PulseForgeEditor/Source/Private/EditorProjectOpening.cpp
+		PulseForgeEditor/Source/Private/EditorAssetPreviewService.cpp
 		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
 		PulseForgeEditor/Source/Private/EditorLayout.cpp
 		PulseForgeEditor/Source/Private/EditorStyle.cpp
