@@ -55,7 +55,7 @@ namespace PulseForgeEditor
 		void Initialize(PulseForge::Application& Runtime, EditorImGuiRenderer& Renderer);
 		void SetProject(std::string ProjectID);
 		void BeginRequestFrame();
-		[[nodiscard]] bool HasEntry(std::string_view ProjectID, std::string_view AssetID) const;
+		[[nodiscard]] bool TouchPreview(std::string_view ProjectID, std::string_view AssetID);
 		void RequestImage(std::string_view ProjectID, std::string AssetID, const std::filesystem::path& SourcePath);
 		void RequestMaterialSwatch(
 			std::string_view ProjectID,
@@ -110,7 +110,10 @@ namespace PulseForgeEditor
 
 		void WorkerMain();
 		[[nodiscard]] static std::optional<CpuPreview> Decode(const Request& Work);
-		void EvictToFit(size_t RequiredBytes);
+		[[nodiscard]] bool EvictToFit(
+			size_t RequiredBytes,
+			std::string_view ProtectedKey = {},
+			size_t RequiredEntrySlots = 0);
 		void ClearEntries() noexcept;
 
 		PulseForge::Application* m_Runtime = nullptr;

@@ -6,10 +6,14 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <limits>
+#include <optional>
+#include <span>
 #include <ranges>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace PulseForgeEditor
 {
@@ -96,6 +100,88 @@ namespace PulseForgeEditor
 		float Width = 0.0f;
 		float Height = 0.0f;
 	};
+
+	struct AssetPreviewEvictionCandidate
+	{
+		std::string Key;
+		bool Visible = false;
+		bool InFlight = false;
+		uint64_t LastUse = 0;
+		size_t GpuBytes = 0;
+	};
+
+	inline void BeginAssetPreviewFrame(bool& Visible) noexcept
+	{
+		Visible = false;
+	}
+
+	inline void TouchAssetPreviewEntry(bool& Visible, uint64_t& LastUse, uint64_t& UseCounter) noexcept
+	{
+		Visible = true;
+		LastUse = ++UseCounter;
+	}
+
+	[[nodiscard]] inline std::optional<std::vector<std::string>> PlanAssetPreviewEvictions(
+		std::span<const AssetPreviewEvictionCandidate> Candidates,
+		size_t CurrentEntries,
+		size_t MaximumEntries,
+		size_t UsedGpuBytes,
+		size_t MaximumGpuBytes,
+		size_t RequiredGpuBytes,
+		size_t RequiredEntrySlots,
+		std::string_view ProtectedKey = {})
+	{
+		if (RequiredGpuBytes > MaximumGpuBytes || RequiredEntrySlots > MaximumEntries)
+			return std::nullopt;
+
+		size_t EntriesAfterRequired = CurrentEntries;
+		if (RequiredEntrySlots > (std::numeric_limits<size_t>::max)() - EntriesAfterRequired)
+			return std::nullopt;
+		EntriesAfterRequired += RequiredEntrySlots;
+		size_t EntriesToRemove = EntriesAfterRequired > MaximumEntries
+			? EntriesAfterRequired - MaximumEntries
+			: 0;
+		size_t BytesToReclaim = UsedGpuBytes > MaximumGpuBytes - RequiredGpuBytes
+			? UsedGpuBytes - (MaximumGpuBytes - RequiredGpuBytes)
+			: 0;
+		if (EntriesToRemove == 0 && BytesToReclaim == 0)
+			return std::vector<std::string>{};
+
+		std::vector<const AssetPreviewEvictionCandidate*> Ordered;
+		Ordered.reserve(Candidates.size());
+		for (const AssetPreviewEvictionCandidate& Candidate : Candidates)
+			if (!Candidate.Visible && !Candidate.InFlight && Candidate.Key != ProtectedKey)
+				Ordered.push_back(&Candidate);
+		std::ranges::sort(Ordered, [](const auto* Left, const auto* Right)
+		{
+			if (Left->LastUse != Right->LastUse)
+				return Left->LastUse < Right->LastUse;
+			return Left->Key < Right->Key;
+		});
+
+		std::vector<std::string> Evictions;
+		size_t ReclaimedBytes = 0;
+		for (const AssetPreviewEvictionCandidate* Candidate : Ordered)
+		{
+			Evictions.push_back(Candidate->Key);
+			if (EntriesToRemove > 0)
+				--EntriesToRemove;
+			const size_t RemainingBytes = BytesToReclaim - ReclaimedBytes;
+			ReclaimedBytes += (std::min)(Candidate->GpuBytes, RemainingBytes);
+			if (EntriesToRemove == 0 && ReclaimedBytes == BytesToReclaim)
+				return Evictions;
+		}
+		return std::nullopt;
+	}
+
+	[[nodiscard]] inline bool IsCurrentAssetPreviewResult(
+		uint64_t WorkGeneration,
+		uint64_t EntryGeneration,
+		uint64_t CurrentGeneration,
+		bool Stopping) noexcept
+	{
+		return !Stopping && WorkGeneration == CurrentGeneration && EntryGeneration == WorkGeneration;
+	}
 
 	[[nodiscard]] inline AssetPreviewRect FitAssetPreview(
 		float RegionX,

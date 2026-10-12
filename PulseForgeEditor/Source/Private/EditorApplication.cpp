@@ -7117,7 +7117,7 @@ namespace
 						{
 							const std::string ProjectID = m_Project->GetDescription().ID.ToString();
 							const std::string AssetID = Asset.ID.ToString();
-							if (!m_AssetPreviews.HasEntry(ProjectID, AssetID))
+							if (!m_AssetPreviews.TouchPreview(ProjectID, AssetID))
 							{
 								auto SourcePath = PulseForge::AssetPathResolver::ResolveManagedSourcePath(
 									m_Project->GetRootPath(), Asset.ProjectRelativePath);

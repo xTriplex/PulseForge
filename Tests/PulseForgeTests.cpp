@@ -8613,6 +8613,72 @@ end
 		PF_CHECK(Tests, IsSupportedImagePreviewExtension("sample.ppm"));
 		PF_CHECK(Tests, !IsSupportedImagePreviewExtension("sample.hdr"));
 		PF_CHECK(Tests, !IsSupportedImagePreviewExtension("sample.material"));
+
+		bool Visible = false;
+		uint64_t LastUse = 0;
+		uint64_t UseCounter = 0;
+		TouchAssetPreviewEntry(Visible, LastUse, UseCounter);
+		PF_CHECK(Tests, Visible && LastUse == 1);
+		BeginAssetPreviewFrame(Visible);
+		PF_CHECK(Tests, !Visible);
+		TouchAssetPreviewEntry(Visible, LastUse, UseCounter);
+		PF_CHECK(Tests, Visible && LastUse == 2);
+		std::array<bool, 4> StateVisibility{}; // Queued, Decoding, Ready, and Failed entries use the same touch path.
+		for (bool& StateVisible : StateVisibility)
+		{
+			BeginAssetPreviewFrame(StateVisible);
+			TouchAssetPreviewEntry(StateVisible, LastUse, UseCounter);
+		}
+		PF_CHECK(Tests, std::ranges::all_of(StateVisibility, [](bool StateVisible) { return StateVisible; }));
+
+		const std::array<AssetPreviewEvictionCandidate, 3> VisibilityCandidates = {{
+			{ "ready", true, false, LastUse, 8 },
+			{ "queued", true, true, 1, 0 },
+			{ "unused", false, false, 0, 8 }
+		}};
+		const auto ProtectedVisible = PlanAssetPreviewEvictions(
+			VisibilityCandidates, 3, 2, 16, 16, 0, 0);
+		PF_CHECK(Tests, ProtectedVisible && ProtectedVisible->size() == 1 && (*ProtectedVisible)[0] == "unused");
+		const std::array<AssetPreviewEvictionCandidate, 2> FullCacheCandidates = {{
+			{ "old-cache-entry", false, false, 1, 0 },
+			{ "visible-cache-entry", true, false, 2, 0 }
+		}};
+		const auto FullEntryCache = PlanAssetPreviewEvictions(
+			FullCacheCandidates, 2, 2, 0, 0, 0, 1);
+		PF_CHECK(Tests, FullEntryCache && FullEntryCache->size() == 1 && (*FullEntryCache)[0] == "old-cache-entry");
+
+		const std::array<AssetPreviewEvictionCandidate, 3> UploadCandidates = {{
+			{ "uploading", false, false, 1, 4 },
+			{ "recent-unused", false, false, 9, 8 },
+			{ "old-unused", false, false, 2, 8 }
+		}};
+		const auto UploadEviction = PlanAssetPreviewEvictions(
+			UploadCandidates, 3, 3, 20, 20, 12, 0, "uploading");
+		PF_CHECK(Tests, UploadEviction && UploadEviction->size() == 2 &&
+			(*UploadEviction)[0] == "old-unused" && (*UploadEviction)[1] == "recent-unused");
+		const auto NoUploadVictim = PlanAssetPreviewEvictions(
+			UploadCandidates, 3, 3, 20, 20, 17, 0, "uploading");
+		PF_CHECK(Tests, !NoUploadVictim);
+
+		const std::array<AssetPreviewEvictionCandidate, 2> BusyCache = {{
+			{ "visible", true, false, 4, 10 },
+			{ "decoding", false, true, 1, 0 }
+		}};
+		PF_CHECK(Tests, !PlanAssetPreviewEvictions(BusyCache, 2, 2, 10, 10, 1, 0));
+		const auto StaleQueuedResult = [](uint64_t Work, uint64_t Entry, uint64_t Current, bool Stopping)
+		{
+			return IsCurrentAssetPreviewResult(Work, Entry, Current, Stopping);
+		};
+		PF_CHECK(Tests, StaleQueuedResult(5, 5, 5, false));
+		PF_CHECK(Tests, !StaleQueuedResult(4, 4, 5, false));
+		PF_CHECK(Tests, !StaleQueuedResult(5, 4, 5, false));
+		PF_CHECK(Tests, !StaleQueuedResult(5, 5, 5, true));
+
+		const std::array<AssetPreviewEvictionCandidate, 1> AfterEviction = {{
+			{ "remaining", true, false, 5, 0 }
+		}};
+		const auto ReRequest = PlanAssetPreviewEvictions(AfterEviction, 1, 2, 0, 0, 0, 1);
+		PF_CHECK(Tests, ReRequest && ReRequest->empty());
 	}
 }
 
