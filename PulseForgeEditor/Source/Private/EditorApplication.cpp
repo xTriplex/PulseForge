@@ -5586,11 +5586,10 @@ namespace
 			const auto Children = Entity.GetChildren();
 			const PulseForgeEditor::EditorIcon Icon = GetEntityIcon(Entity);
 			const std::string Identifier = Entity.GetUUID().ToString();
+			const bool IsSelected = IsEntitySelected(Entity.GetUUID());
 			m_HierarchyVisibleOrderCurrent.push_back(Entity.GetUUID());
 			ImGui::PushID(Identifier.c_str());
 			ImGuiTreeNodeFlags Flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanLabelWidth;
-			if (IsEntitySelected(Entity.GetUUID()))
-				Flags |= ImGuiTreeNodeFlags_Selected;
 			if (!Children || Children->empty())
 				Flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
 			Flags |= ImGuiTreeNodeFlags_FramePadding;
@@ -5621,10 +5620,40 @@ namespace
 				DisplayName = TruncatedNameStorage;
 			}
 			const bool NameTruncated = !TruncatedNameStorage.empty() || DisplayName.size() != Tag->Name.size();
+			const ImVec2 RowScreenMinimum = ImGui::GetCursorScreenPos();
+			const float DisplayNameWidth = ImGui::CalcTextSize(DisplayName.data(), DisplayName.data() + DisplayName.size()).x;
+			const float ExpectedTreeItemHitRightX = LabelStartX + DisplayNameWidth + Style.FramePadding.x;
+			const auto BackgroundRowLayout = PulseForgeEditor::ComputeEditorHierarchyRowLayout(
+				RowStartX,
+				ContentRightX,
+				LabelStartX,
+				ExpectedTreeItemHitRightX,
+				RowStartX,
+				Style.FramePadding.x);
+			const float BackgroundWidth = (std::max)(
+				0.0f,
+				BackgroundRowLayout.EyeStartX - RowStartX - PulseForgeEditor::EditorHierarchyHitRegionGap);
+			const ImVec2 RowScreenMaximum(
+				RowScreenMinimum.x + BackgroundWidth,
+				RowScreenMinimum.y + PulseForgeEditor::EditorHierarchyEyeButtonHeight);
+			const bool SelectionRegionHovered = ImGui::IsWindowHovered() &&
+				ImGui::IsMouseHoveringRect(RowScreenMinimum, RowScreenMaximum);
+			if (IsSelected || SelectionRegionHovered)
+			{
+				const ImGuiCol Background = IsSelected ? ImGuiCol_Header : ImGuiCol_HeaderHovered;
+				ImGui::GetWindowDrawList()->AddRectFilled(
+					RowScreenMinimum,
+					RowScreenMaximum,
+					ImGui::GetColorU32(ImGui::GetStyleColorVec4(Background)));
+			}
 			const float RowFramePaddingY = (std::max)(
 				0.0f, (PulseForgeEditor::EditorHierarchyEyeButtonHeight - ImGui::GetFontSize()) * 0.5f);
 			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(Style.FramePadding.x, RowFramePaddingY));
+			ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+			ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+			ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
 			const bool IsOpen = m_EditorStyle.TreeNode(Icon, DisplayName, "Entity", Flags);
+			ImGui::PopStyleColor(3);
 			ImGui::PopStyleVar();
 			const bool TreeItemClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
 			const bool TreeItemRightClicked = ImGui::IsItemClicked(ImGuiMouseButton_Right);
@@ -5648,7 +5677,6 @@ namespace
 			bool GutterHovered = false;
 			if (RowLayout.SelectionGutterWidth > 0.0f)
 			{
-				const bool IsSelected = IsEntitySelected(Entity.GetUUID());
 				ImGui::SetCursorScreenPos(ImVec2(
 					ImGui::GetWindowPos().x + RowLayout.SelectionGutterStartX, TreeItemRectMin.y));
 				(void)ImGui::InvisibleButton(
@@ -5658,16 +5686,6 @@ namespace
 				GutterClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
 				GutterRightClicked = ImGui::IsItemClicked(ImGuiMouseButton_Right);
 				GutterHovered = ImGui::IsItemHovered();
-				const ImVec2 GutterMin = ImGui::GetItemRectMin();
-				const ImVec2 GutterMax = ImGui::GetItemRectMax();
-				if (IsSelected || GutterHovered)
-				{
-					const ImGuiCol Background = IsSelected ? ImGuiCol_Header : ImGuiCol_HeaderHovered;
-					ImGui::GetWindowDrawList()->AddRectFilled(
-						GutterMin,
-						GutterMax,
-						ImGui::GetColorU32(ImGui::GetStyleColorVec4(Background)));
-				}
 			}
 			const bool RowClicked = TreeItemClicked || GutterClicked;
 			if (NameTruncated && (TreeItemHovered || GutterHovered) &&
