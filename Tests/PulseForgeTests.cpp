@@ -27,6 +27,7 @@
 #include "Core/Timestep.h"
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
+#include "Editor/EditorMaterialPropertyLayoutPolicy.h"
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorCommandLine.h"
 #include "Editor/EditorContentBrowserPolicy.h"
@@ -2191,6 +2192,43 @@ namespace
 		PF_CHECK(Tests, GetEditorPropertyLabelWidth(100.0f) == EditorStyleMetrics::PropertyLabelWidthMinimum);
 		PF_CHECK(Tests, GetEditorPropertyLabelWidth(300.0f) == 90.0f);
 		PF_CHECK(Tests, GetEditorPropertyLabelWidth(1000.0f) == EditorStyleMetrics::PropertyLabelWidthMaximum);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(260.0f) == MaterialPropertyLayout::Stacked);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(360.0f) == MaterialPropertyLayout::Stacked);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(500.0f) == MaterialPropertyLayout::Stacked);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(559.0f) == MaterialPropertyLayout::Stacked);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(560.0f) == MaterialPropertyLayout::TwoColumn);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(700.0f) == MaterialPropertyLayout::TwoColumn);
+		PF_CHECK(Tests, GetMaterialPropertyLabelWidth(700.0f) == 264.0f);
+		PF_CHECK(Tests, GetMaterialPropertyLabelWidth(1000.0f) == 264.0f);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(-1.0f) == MaterialPropertyLayout::Stacked);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(std::numeric_limits<float>::quiet_NaN()) ==
+			MaterialPropertyLayout::Stacked);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(std::numeric_limits<float>::infinity()) ==
+			MaterialPropertyLayout::Stacked);
+		const MaterialValuePairLayout NarrowMaterialValuePair = GetMaterialValuePairLayout(260.0f, 8.0f);
+		PF_CHECK(Tests, NarrowMaterialValuePair.Stacked && NarrowMaterialValuePair.FirstWidth == 260.0f &&
+			NarrowMaterialValuePair.SecondWidth == 260.0f);
+		const MaterialValuePairLayout RegularMaterialValuePair = GetMaterialValuePairLayout(360.0f, 8.0f);
+		PF_CHECK(Tests, !RegularMaterialValuePair.Stacked && RegularMaterialValuePair.FirstWidth == 176.0f &&
+			RegularMaterialValuePair.SecondWidth == 176.0f &&
+			RegularMaterialValuePair.FirstWidth + RegularMaterialValuePair.SecondWidth + 8.0f <= 360.0f);
+		const MaterialValuePairLayout BrowserWidthMaterialValuePair = GetMaterialValuePairLayout(500.0f, 8.0f);
+		PF_CHECK(Tests, !BrowserWidthMaterialValuePair.Stacked && BrowserWidthMaterialValuePair.FirstWidth == 246.0f &&
+			BrowserWidthMaterialValuePair.SecondWidth == 246.0f &&
+			BrowserWidthMaterialValuePair.FirstWidth + BrowserWidthMaterialValuePair.SecondWidth + 8.0f <= 500.0f);
+		const MaterialValuePairLayout WideMaterialValuePair = GetMaterialValuePairLayout(700.0f, 8.0f);
+		PF_CHECK(Tests, !WideMaterialValuePair.Stacked && WideMaterialValuePair.FirstWidth == 346.0f &&
+			WideMaterialValuePair.SecondWidth == 346.0f);
+		const MaterialValuePairLayout InvalidMaterialValuePair = GetMaterialValuePairLayout(
+			std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity());
+		PF_CHECK(Tests, InvalidMaterialValuePair.Stacked && InvalidMaterialValuePair.FirstWidth == 0.0f &&
+			InvalidMaterialValuePair.SecondWidth == 0.0f);
+		for (const MaterialValuePairLayout Layout : { NarrowMaterialValuePair, RegularMaterialValuePair,
+			BrowserWidthMaterialValuePair, WideMaterialValuePair, InvalidMaterialValuePair })
+		{
+			PF_CHECK(Tests, std::isfinite(Layout.FirstWidth) && Layout.FirstWidth >= 0.0f);
+			PF_CHECK(Tests, std::isfinite(Layout.SecondWidth) && Layout.SecondWidth >= 0.0f);
+		}
 		PF_CHECK(Tests, EditorStyleMetrics::PanelToolbarHeight == 36.0f);
 		PF_CHECK(Tests, EditorStyleMetrics::PanelToolbarPaddingX == 7.0f);
 		PF_CHECK(Tests, EditorStyleMetrics::PanelToolbarPaddingY == 4.0f);

@@ -34,6 +34,7 @@
 #include "Editor/EditorEntityIconPolicy.h"
 #include "Editor/EditorHierarchyRowPolicy.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
+#include "Editor/EditorMaterialPropertyLayoutPolicy.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
 #include "Editor/EditorViewportToolbarPolicy.h"
@@ -7212,98 +7213,185 @@ namespace
 
 			PulseForge::MaterialAssetDesc& Material = Draft->second;
 			bool Changed = false;
-			if (m_EditorStyle.BeginPropertyTable("MaterialAssetProperties"))
+			bool UseTwoColumnLayout = PulseForgeEditor::GetMaterialPropertyLayout(
+				ImGui::GetContentRegionAvail().x) == PulseForgeEditor::MaterialPropertyLayout::TwoColumn;
+			bool PropertyTableOpen = false;
+			if (UseTwoColumnLayout)
 			{
-				if (m_EditorStyle.BeginPropertyRow("Base Color Factor"))
-					Changed |= ImGui::DragFloat4("##MaterialBaseColorFactor", &Material.BaseColorFactor.x, 0.01f, 0.0f, 1.0f, "%.3f");
-				if (m_EditorStyle.BeginPropertyRow("Alpha Mode"))
+				ImGui::PushStyleColor(ImGuiCol_TableBorderLight,
+					m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Border));
+				PropertyTableOpen = ImGui::BeginTable("MaterialAssetProperties", 2,
+					ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_NoSavedSettings);
+				if (PropertyTableOpen)
+				{
+					const float AvailableWidth = ImGui::GetContentRegionAvail().x;
+					ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthFixed,
+						PulseForgeEditor::GetMaterialPropertyLabelWidth(AvailableWidth));
+					ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+				}
+				else
+				{
+					ImGui::PopStyleColor();
+					UseTwoColumnLayout = false;
+				}
+			}
+
+			const auto BeginMaterialPropertyRow = [this, UseTwoColumnLayout](std::string_view Label)
+			{
+				if (UseTwoColumnLayout)
+					return m_EditorStyle.BeginPropertyRow(Label);
+
+				m_EditorStyle.TextMuted(Label);
+				const float LabelWidth = ImGui::CalcTextSize(Label.data(), Label.data() + Label.size()).x;
+				if (LabelWidth > ImGui::GetContentRegionAvail().x && ImGui::IsItemHovered())
+					ImGui::SetTooltip("%.*s", static_cast<int>(Label.size()), Label.data());
+				return true;
+			};
+			const auto DrawMaterialPropertyRow = [UseTwoColumnLayout, &BeginMaterialPropertyRow](
+				std::string_view Label,
+				auto&& DrawValue)
+			{
+				if (!BeginMaterialPropertyRow(Label))
+					return;
+				DrawValue();
+				if (!UseTwoColumnLayout)
+					ImGui::Spacing();
+			};
+
+			if (!UseTwoColumnLayout || PropertyTableOpen)
+			{
+				DrawMaterialPropertyRow("Base Color Factor", [&]
+				{
+					ImGui::SetNextItemWidth(-FLT_MIN);
+					Changed |= ImGui::DragFloat4("##MaterialBaseColorFactor", &Material.BaseColorFactor.x,
+						0.01f, 0.0f, 1.0f, "%.3f");
+				});
+				DrawMaterialPropertyRow("Alpha Mode", [&]
 				{
 					int AlphaMode = static_cast<int>(Material.AlphaMode);
+					ImGui::SetNextItemWidth(-FLT_MIN);
 					if (ImGui::Combo("##MaterialAlphaMode", &AlphaMode, "Opaque\0Mask\0Blend\0"))
 					{
 						Material.AlphaMode = static_cast<PulseForge::MaterialAlphaMode>(AlphaMode);
 						Changed = true;
 					}
-				}
-				if (Material.AlphaMode == PulseForge::MaterialAlphaMode::Mask &&
-					m_EditorStyle.BeginPropertyRow("Alpha Cutoff"))
-					Changed |= ImGui::DragFloat("##MaterialAlphaCutoff", &Material.AlphaCutoff, 0.01f, 0.0f, 1.0f, "%.3f");
-				if (m_EditorStyle.BeginPropertyRow("Double Sided"))
+				});
+				if (Material.AlphaMode == PulseForge::MaterialAlphaMode::Mask)
+					DrawMaterialPropertyRow("Alpha Cutoff", [&]
+					{
+						ImGui::SetNextItemWidth(-FLT_MIN);
+						Changed |= ImGui::DragFloat("##MaterialAlphaCutoff", &Material.AlphaCutoff,
+							0.01f, 0.0f, 1.0f, "%.3f");
+					});
+				DrawMaterialPropertyRow("Double Sided", [&]
+				{
 					Changed |= ImGui::Checkbox("##MaterialDoubleSided", &Material.DoubleSided);
-				if (m_EditorStyle.BeginPropertyRow("Base Color Texture"))
+				});
+				DrawMaterialPropertyRow("Base Color Texture", [&]
 				{
 					std::optional<PulseForge::AssetID> Texture = Material.BaseColorTexture.IsNil()
 						? std::nullopt : std::optional<PulseForge::AssetID>(Material.BaseColorTexture);
+					ImGui::SetNextItemWidth(-FLT_MIN);
 					if (DrawAssetSelector("##MaterialBaseColorTexture", Texture,
 						{ ".png", ".jpg", ".jpeg", ".bmp", ".ppm" }, true))
 					{
 						Material.BaseColorTexture = Texture.value_or(PulseForge::AssetID{});
 						Changed = true;
 					}
-				}
-				if (m_EditorStyle.BeginPropertyRow("Metallic / Roughness"))
+				});
+				DrawMaterialPropertyRow("Metallic / Roughness", [&]
 				{
-					Changed |= ImGui::DragFloat("##MaterialMetallic", &Material.MetallicFactor, 0.01f, 0.0f, 1.0f, "M %.3f");
-					ImGui::SameLine();
-					Changed |= ImGui::DragFloat("##MaterialRoughness", &Material.RoughnessFactor, 0.01f, 0.0f, 1.0f, "R %.3f");
-				}
-				if (m_EditorStyle.BeginPropertyRow("Metallic-Roughness Map"))
+					const float AvailableWidth = ImGui::GetContentRegionAvail().x;
+					const float ItemSpacing = ImGui::GetStyle().ItemSpacing.x;
+					const PulseForgeEditor::MaterialValuePairLayout PairLayout =
+						PulseForgeEditor::GetMaterialValuePairLayout(AvailableWidth, ItemSpacing);
+					ImGui::SetNextItemWidth(PairLayout.FirstWidth);
+					Changed |= ImGui::DragFloat("##MaterialMetallic", &Material.MetallicFactor,
+						0.01f, 0.0f, 1.0f, "M %.3f");
+					if (!PairLayout.Stacked)
+						ImGui::SameLine(0.0f, ItemSpacing);
+					ImGui::SetNextItemWidth(PairLayout.SecondWidth);
+					Changed |= ImGui::DragFloat("##MaterialRoughness", &Material.RoughnessFactor,
+						0.01f, 0.0f, 1.0f, "R %.3f");
+				});
+				DrawMaterialPropertyRow("Metallic-Roughness Map", [&]
 				{
 					std::optional<PulseForge::AssetID> Texture = Material.MetallicRoughnessTexture.IsNil()
 						? std::nullopt : std::optional<PulseForge::AssetID>(Material.MetallicRoughnessTexture);
+					ImGui::SetNextItemWidth(-FLT_MIN);
 					if (DrawAssetSelector("##MaterialMetallicRoughnessTexture", Texture,
 						{ ".png", ".jpg", ".jpeg", ".bmp", ".ppm" }, true))
 					{
 						Material.MetallicRoughnessTexture = Texture.value_or(PulseForge::AssetID{});
 						Changed = true;
 					}
-				}
-				if (m_EditorStyle.BeginPropertyRow("Normal Map"))
+				});
+				DrawMaterialPropertyRow("Normal Map", [&]
 				{
 					std::optional<PulseForge::AssetID> Texture = Material.NormalTexture.IsNil()
 						? std::nullopt : std::optional<PulseForge::AssetID>(Material.NormalTexture);
+					ImGui::SetNextItemWidth(-FLT_MIN);
 					if (DrawAssetSelector("##MaterialNormalTexture", Texture,
 						{ ".png", ".jpg", ".jpeg", ".bmp", ".ppm" }, true))
 					{
 						Material.NormalTexture = Texture.value_or(PulseForge::AssetID{});
 						Changed = true;
 					}
-				}
-				if (m_EditorStyle.BeginPropertyRow("Normal Scale"))
-					Changed |= ImGui::DragFloat("##MaterialNormalScale", &Material.NormalScale, 0.02f, 0.0f, 4.0f, "%.3f");
-				if (m_EditorStyle.BeginPropertyRow("Occlusion Map"))
+				});
+				DrawMaterialPropertyRow("Normal Scale", [&]
+				{
+					ImGui::SetNextItemWidth(-FLT_MIN);
+					Changed |= ImGui::DragFloat("##MaterialNormalScale", &Material.NormalScale,
+						0.02f, 0.0f, 4.0f, "%.3f");
+				});
+				DrawMaterialPropertyRow("Occlusion Map", [&]
 				{
 					std::optional<PulseForge::AssetID> Texture = Material.OcclusionTexture.IsNil()
 						? std::nullopt : std::optional<PulseForge::AssetID>(Material.OcclusionTexture);
+					ImGui::SetNextItemWidth(-FLT_MIN);
 					if (DrawAssetSelector("##MaterialOcclusionTexture", Texture,
 						{ ".png", ".jpg", ".jpeg", ".bmp", ".ppm" }, true))
 					{
 						Material.OcclusionTexture = Texture.value_or(PulseForge::AssetID{});
 						Changed = true;
 					}
-				}
-				if (m_EditorStyle.BeginPropertyRow("Occlusion Strength"))
-					Changed |= ImGui::DragFloat("##MaterialOcclusionStrength", &Material.OcclusionStrength, 0.01f, 0.0f, 1.0f, "%.3f");
-				if (m_EditorStyle.BeginPropertyRow("Emissive Texture"))
+				});
+				DrawMaterialPropertyRow("Occlusion Strength", [&]
+				{
+					ImGui::SetNextItemWidth(-FLT_MIN);
+					Changed |= ImGui::DragFloat("##MaterialOcclusionStrength", &Material.OcclusionStrength,
+						0.01f, 0.0f, 1.0f, "%.3f");
+				});
+				DrawMaterialPropertyRow("Emissive Texture", [&]
 				{
 					std::optional<PulseForge::AssetID> Texture = Material.EmissiveTexture.IsNil()
 						? std::nullopt : std::optional<PulseForge::AssetID>(Material.EmissiveTexture);
+					ImGui::SetNextItemWidth(-FLT_MIN);
 					if (DrawAssetSelector("##MaterialEmissiveTexture", Texture,
 						{ ".png", ".jpg", ".jpeg", ".bmp", ".ppm" }, true))
 					{
 						Material.EmissiveTexture = Texture.value_or(PulseForge::AssetID{});
 						Changed = true;
 					}
-				}
-				if (m_EditorStyle.BeginPropertyRow("Emissive Factor (Linear)"))
-					Changed |= ImGui::DragFloat3("##MaterialEmissiveFactor", &Material.EmissiveFactor.x, 0.05f, 0.0f, 1000.0f, "%.3f");
-				m_EditorStyle.EndPropertyTable();
+				});
+				DrawMaterialPropertyRow("Emissive Factor (Linear)", [&]
+				{
+					ImGui::SetNextItemWidth(-FLT_MIN);
+					Changed |= ImGui::DragFloat3("##MaterialEmissiveFactor", &Material.EmissiveFactor.x,
+						0.05f, 0.0f, 1000.0f, "%.3f");
+				});
 			}
+			if (PropertyTableOpen)
+				m_EditorStyle.EndPropertyTable();
+
+			ImGui::PushStyleColor(ImGuiCol_Text,
+				m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::TextMuted));
+			ImGui::TextWrapped("Base color and emissive maps use sRGB; normal, metallic-roughness and occlusion maps use linear data.");
+			ImGui::TextWrapped("Mask clips below Alpha Cutoff and casts cutout shadows. Blend is sorted back-to-front and does not cast shadows.");
+			ImGui::PopStyleColor();
 
 			if (Changed)
 				m_DirtyMaterialDrafts.insert(Key);
-			m_EditorStyle.TextMuted("Base color and emissive maps use sRGB; normal, metallic-roughness and occlusion maps use linear data.");
-			m_EditorStyle.TextMuted("Mask clips below Alpha Cutoff and casts cutout shadows. Blend is sorted back-to-front and does not cast shadows.");
 			return true;
 		}
 
