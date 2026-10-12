@@ -6781,6 +6781,57 @@ namespace
 			}
 		}
 
+		void DrawContentBreadcrumbs()
+		{
+			std::vector<std::pair<std::filesystem::path, std::string>> Breadcrumbs;
+			std::filesystem::path Breadcrumb = "Assets";
+			for (auto Component = m_CurrentContentFolder.begin(); Component != m_CurrentContentFolder.end(); ++Component)
+			{
+				if (*Component == "Assets")
+					continue;
+				Breadcrumb /= *Component;
+				Breadcrumbs.emplace_back(Breadcrumb, PathToUtf8(*Component));
+			}
+
+			if (ImGui::SmallButton("Assets##BreadcrumbRoot"))
+				m_CurrentContentFolder = "Assets";
+			if (Breadcrumbs.empty())
+				return;
+
+			ImGui::SameLine();
+			m_EditorStyle.TextMuted("/");
+			if (Breadcrumbs.size() > 1)
+			{
+				ImGui::SameLine();
+				if (ImGui::SmallButton("...##BreadcrumbAncestors"))
+					ImGui::OpenPopup("ContentBreadcrumbAncestors");
+				if (ImGui::BeginPopup("ContentBreadcrumbAncestors"))
+				{
+					for (const auto& BreadcrumbEntry : Breadcrumbs)
+					{
+						const std::filesystem::path& Path = BreadcrumbEntry.first;
+						const std::string FullPath = PathToUtf8(Path);
+						if (ImGui::Selectable(FullPath.c_str(), Path == m_CurrentContentFolder))
+							m_CurrentContentFolder = Path;
+					}
+					ImGui::EndPopup();
+				}
+				ImGui::SameLine();
+				m_EditorStyle.TextMuted("/");
+			}
+
+			const std::string& CurrentFolderName = Breadcrumbs.back().second;
+			const float LabelWidth = (std::max)(ImGui::GetContentRegionAvail().x -
+				ImGui::GetStyle().FramePadding.x * 2.0f, 0.0f);
+			const std::string VisibleLabel = FitEditorContextLabel(CurrentFolderName, LabelWidth);
+			const std::string CurrentLabel = (VisibleLabel.empty() ? "..." : VisibleLabel) +
+				"##BreadcrumbCurrent";
+			if (ImGui::SmallButton(CurrentLabel.c_str()))
+				m_CurrentContentFolder = Breadcrumbs.back().first;
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("%s", PathToUtf8(m_CurrentContentFolder).c_str());
+		}
+
 		void HandleAssetBrowserItem(
 			const PulseForge::AssetRecord& Asset,
 			const AssetBrowserPresentation& Presentation,
@@ -7239,25 +7290,7 @@ namespace
 
 					ImGui::BeginChild("ContentAssetArea", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
 					if (ShowFolderTree)
-					{
-						std::filesystem::path Breadcrumb = "Assets";
-						const std::string RootLabel = "Assets";
-						if (ImGui::SmallButton((RootLabel + "##BreadcrumbRoot").c_str()))
-							m_CurrentContentFolder = "Assets";
-						for (auto Component = m_CurrentContentFolder.begin(); Component != m_CurrentContentFolder.end(); ++Component)
-						{
-							if (*Component == "Assets")
-								continue;
-							Breadcrumb /= *Component;
-							ImGui::SameLine();
-							m_EditorStyle.TextMuted(">");
-							ImGui::SameLine();
-							const std::string Label = PathToUtf8(*Component);
-							const std::string StableLabel = Label + "##Breadcrumb" + PathToUtf8(Breadcrumb);
-							if (ImGui::SmallButton(StableLabel.c_str()))
-								m_CurrentContentFolder = Breadcrumb;
-						}
-					}
+						DrawContentBreadcrumbs();
 					else
 					{
 						const std::string CurrentFolder = PathToUtf8(m_CurrentContentFolder);
