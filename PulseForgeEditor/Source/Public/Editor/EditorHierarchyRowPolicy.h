@@ -16,6 +16,7 @@ namespace PulseForgeEditor
 		float MaximumNameWidth;
 		float SelectionGutterStartX;
 		float SelectionGutterWidth;
+		float SelectionBackgroundWidth;
 	};
 
 	[[nodiscard]] constexpr EditorHierarchyRowLayout ComputeEditorHierarchyRowLayout(
@@ -41,7 +42,8 @@ namespace PulseForgeEditor
 			EyeStartX,
 			MaximumNameWidth,
 			SelectionGutterStartX,
-			SelectionGutterEndX - SelectionGutterStartX
+			SelectionGutterEndX - SelectionGutterStartX,
+			(std::max)(0.0f, EyeStartX - RowStartX - EditorHierarchyHitRegionGap)
 		};
 	}
 }

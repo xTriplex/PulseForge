@@ -8317,6 +8317,10 @@ end
 		PF_CHECK(Tests, WideRow.SelectionGutterStartX >= 100.0f);
 		PF_CHECK(Tests, WideRow.SelectionGutterStartX + WideRow.SelectionGutterWidth <=
 			WideRow.EyeStartX - EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, 8.0f + WideRow.SelectionBackgroundWidth ==
+			WideRow.EyeStartX - EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, WideRow.SelectionGutterStartX + WideRow.SelectionGutterWidth ==
+			8.0f + WideRow.SelectionBackgroundWidth);
 		const float LongNameTreeItemRightX = TextStartX + WideRow.MaximumNameWidth + TreeTrailingHitWidth;
 		PF_CHECK(Tests, LongNameTreeItemRightX <= WideRow.EyeStartX - EditorHierarchyHitRegionGap -
 			EditorHierarchyHitRegionSafetyInset);
@@ -8329,12 +8333,16 @@ end
 		PF_CHECK(Tests, NarrowRow.SelectionGutterStartX >= 94.0f);
 		PF_CHECK(Tests, NarrowRow.SelectionGutterStartX + NarrowRow.SelectionGutterWidth <=
 			NarrowRow.EyeStartX - EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, 8.0f + NarrowRow.SelectionBackgroundWidth ==
+			NarrowRow.EyeStartX - EditorHierarchyHitRegionGap);
 
 		const auto DeepRow = ComputeEditorHierarchyRowLayout(
 			98.0f, 240.0f, 140.0f, 175.0f, 183.0f, FramePaddingX);
 		PF_CHECK(Tests, DeepRow.EyeStartX == 210.0f);
 		PF_CHECK(Tests, DeepRow.SelectionGutterStartX >= 175.0f);
 		PF_CHECK(Tests, DeepRow.SelectionGutterStartX + DeepRow.SelectionGutterWidth <=
+			DeepRow.EyeStartX - EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, 98.0f + DeepRow.SelectionBackgroundWidth ==
 			DeepRow.EyeStartX - EditorHierarchyHitRegionGap);
 
 		const auto ConstrainedDeepRow = ComputeEditorHierarchyRowLayout(
@@ -8343,6 +8351,8 @@ end
 		PF_CHECK(Tests, ConstrainedDeepRow.EyeStartX + EditorHierarchyEyeButtonWidth <= 260.0f);
 		PF_CHECK(Tests, ConstrainedDeepRow.SelectionGutterWidth == 0.0f);
 		PF_CHECK(Tests, ConstrainedDeepRow.EyeStartX >= 230.0f + EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, 170.0f + ConstrainedDeepRow.SelectionBackgroundWidth ==
+			ConstrainedDeepRow.EyeStartX - EditorHierarchyHitRegionGap);
 	}
 
 	void TestSceneCommandHistoryRestoresIdentity(TestRunner& Tests)

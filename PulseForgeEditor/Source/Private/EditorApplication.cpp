@@ -5630,11 +5630,8 @@ namespace
 				ExpectedTreeItemHitRightX,
 				RowStartX,
 				Style.FramePadding.x);
-			const float BackgroundWidth = (std::max)(
-				0.0f,
-				BackgroundRowLayout.EyeStartX - RowStartX - PulseForgeEditor::EditorHierarchyHitRegionGap);
 			const ImVec2 RowScreenMaximum(
-				RowScreenMinimum.x + BackgroundWidth,
+				RowScreenMinimum.x + BackgroundRowLayout.SelectionBackgroundWidth,
 				RowScreenMinimum.y + PulseForgeEditor::EditorHierarchyEyeButtonHeight);
 			const bool SelectionRegionHovered = ImGui::IsWindowHovered() &&
 				ImGui::IsMouseHoveringRect(RowScreenMinimum, RowScreenMaximum);
