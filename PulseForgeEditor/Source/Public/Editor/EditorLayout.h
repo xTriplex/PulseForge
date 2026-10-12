@@ -20,6 +20,7 @@ namespace PulseForgeEditor
 		ContentBrowser,
 		Console,
 		Scene,
+		MaterialEditor,
 		Count
 	};
 
@@ -37,7 +38,8 @@ namespace PulseForgeEditor
 		{
 			case EditorPanel::Hierarchy: return EditorDefaultDockRegion::Left;
 			case EditorPanel::SceneViewport: return EditorDefaultDockRegion::Center;
-			case EditorPanel::Inspector: return EditorDefaultDockRegion::Right;
+			case EditorPanel::Inspector:
+			case EditorPanel::MaterialEditor: return EditorDefaultDockRegion::Right;
 			case EditorPanel::ContentBrowser:
 			case EditorPanel::Console:
 			case EditorPanel::Scene: return EditorDefaultDockRegion::Bottom;
@@ -60,7 +62,8 @@ namespace PulseForgeEditor
 		{ EditorPanel::Inspector, "Inspector", "Inspector", true },
 		{ EditorPanel::ContentBrowser, "ContentBrowser", "Content Browser", true },
 		{ EditorPanel::Console, "Console", "Console", true },
-		{ EditorPanel::Scene, "Scene", "Scene", false }
+		{ EditorPanel::Scene, "Scene", "Scene", false },
+		{ EditorPanel::MaterialEditor, "MaterialEditor", "Material Editor", false }
 	}};
 
 	class EditorPanelVisibility final
@@ -113,6 +116,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] bool IsPanelVisible(EditorPanel Panel) const noexcept;
 		[[nodiscard]] bool* GetPanelVisibility(EditorPanel Panel) noexcept;
 		[[nodiscard]] bool SetPanelVisible(EditorPanel Panel, bool Visible) noexcept;
+		[[nodiscard]] bool DockPanelBesideIfUnplaced(EditorPanel Panel, EditorPanel ReferencePanel);
 		void MarkSettingsDirty() noexcept;
 		void RequestReset() noexcept;
 

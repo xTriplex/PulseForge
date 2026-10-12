@@ -33,6 +33,7 @@
 #include "Editor/EditorVisibility.h"
 #include "Editor/EditorEntityIconPolicy.h"
 #include "Editor/EditorHierarchyRowPolicy.h"
+#include "Editor/EditorMaterialEditorPolicy.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
 #include "Editor/EditorViewportToolbarPolicy.h"
@@ -1779,6 +1780,9 @@ namespace
 			StopRuntime();
 			ResetViewportSceneRenderer();
 			m_Project.emplace(std::move(Opened->Project));
+			m_OpenedMaterialAsset.reset();
+			m_FocusMaterialEditorNextFrame = false;
+			m_InitialMaterialEditorDockPending = false;
 			ResetContentBrowserNavigation();
 			m_Scene = std::move(Opened->StartupScene);
 			m_SceneAsset = Opened->StartupSceneAsset;
@@ -2218,6 +2222,11 @@ namespace
 			}
 
 			UpdateAssetList();
+			if (m_OpenedMaterialAsset && *m_OpenedMaterialAsset == Identifier)
+			{
+				ForgetMaterialDraft(Identifier);
+				m_OpenedMaterialAsset.reset();
+			}
 			if (m_SelectedAsset && *m_SelectedAsset == Identifier)
 				m_SelectedAsset.reset();
 			SetStatus("Deleted asset " + Identifier.ToString() + ".");
@@ -2565,6 +2574,9 @@ namespace
 			ClearScene();
 			ResetViewportSceneRenderer();
 			m_Project.reset();
+			m_OpenedMaterialAsset.reset();
+			m_FocusMaterialEditorNextFrame = false;
+			m_InitialMaterialEditorDockPending = false;
 			m_Assets.clear();
 			m_AssetBrowserPresentations.clear();
 			ResetContentBrowserNavigation();
@@ -2920,6 +2932,14 @@ namespace
 			DrawHierarchyPanel();
 			DrawInspectorPanel();
 			DrawContentBrowserPanel();
+			if (m_InitialMaterialEditorDockPending)
+			{
+				(void)m_Layout.DockPanelBesideIfUnplaced(
+					PulseForgeEditor::EditorPanel::MaterialEditor,
+					PulseForgeEditor::EditorPanel::Inspector);
+				m_InitialMaterialEditorDockPending = false;
+			}
+			DrawMaterialEditorPanel();
 			DrawDeleteAssetDialog();
 			DrawConsolePanel();
 		}
@@ -2948,6 +2968,11 @@ namespace
 
 		void SetEditorPanelVisible(PulseForgeEditor::EditorPanel Panel, bool Visible)
 		{
+			if (Panel == PulseForgeEditor::EditorPanel::MaterialEditor && Visible)
+			{
+				m_InitialMaterialEditorDockPending = true;
+				m_FocusMaterialEditorNextFrame = true;
+			}
 			if (m_Layout.SetPanelVisible(Panel, Visible))
 				HandleEditorPanelVisibilityChange(Panel);
 		}
@@ -6841,8 +6866,23 @@ namespace
 			if (Activated)
 			{
 				m_SelectedAsset = Asset.ID;
-				if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && Presentation.Extension == ".scene")
-					OpenScene(Asset.ID);
+				switch (PulseForgeEditor::ResolveAssetBrowserOpenAction(
+					Presentation.Extension,
+					Activated,
+					ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)))
+				{
+					case PulseForgeEditor::AssetBrowserOpenAction::OpenScene:
+						OpenScene(Asset.ID);
+						break;
+					case PulseForgeEditor::AssetBrowserOpenAction::OpenMaterialEditor:
+					{
+						const PulseForge::AssetID Identifier = Asset.ID;
+						DeferredAction = [this, Identifier] { OpenMaterialEditor(Identifier); };
+						break;
+					}
+					case PulseForgeEditor::AssetBrowserOpenAction::None:
+						break;
+				}
 			}
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("%s\nUUID: %s", Presentation.FullPath.c_str(), Presentation.Identifier.c_str());
@@ -6851,6 +6891,9 @@ namespace
 
 			m_SelectedAsset = Asset.ID;
 			const PulseForge::AssetID Identifier = Asset.ID;
+			if (Presentation.Extension == ".material" && m_EditorStyle.MenuItem(
+				PulseForgeEditor::EditorIcon::Material, "Open in Material Editor"))
+				DeferredAction = [this, Identifier] { OpenMaterialEditor(Identifier); };
 			if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Rename, "Move / Rename..."))
 				DeferredAction = [this, Identifier] { MoveAsset(Identifier); };
 			if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Duplicate, "Duplicate..."))
@@ -6866,6 +6909,22 @@ namespace
 			if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Delete, "Delete..."))
 				DeferredAction = [this, Identifier] { RequestDeleteAsset(Identifier); };
 			ImGui::EndPopup();
+		}
+
+		void OpenMaterialEditor(const PulseForge::AssetID& Identifier)
+		{
+			if (!m_Project)
+				return;
+
+			const auto Asset = m_Project->GetAssetRegistry().Find(Identifier);
+			if (!Asset || NormalizedExtension(Asset->ProjectRelativePath) != ".material")
+			{
+				SetError("The selected material is no longer registered.");
+				return;
+			}
+
+			m_OpenedMaterialAsset = Identifier;
+			SetEditorPanelVisible(PulseForgeEditor::EditorPanel::MaterialEditor, true);
 		}
 
 		void DrawFolderList(const std::vector<ContentFolderNode>& Folders)
@@ -7056,6 +7115,9 @@ namespace
 			const std::string FullPath = PathToUtf8(Asset->ProjectRelativePath);
 			const std::string Identifier = Asset->ID.ToString();
 			const std::string Extension = NormalizedExtension(Asset->ProjectRelativePath);
+			if (Extension == ".material")
+				return;
+
 			ImGui::Separator();
 			{
 				[[maybe_unused]] const auto Emphasis = m_EditorStyle.PushEmphasisFont();
@@ -7068,8 +7130,6 @@ namespace
 				ImGui::SetTooltip("%s\nUUID: %s", FullPath.c_str(), Identifier.c_str());
 			ImGui::PopStyleColor();
 
-			if (Extension == ".material")
-				DrawMaterialAssetEditor(*Asset);
 			if (Extension == ".scene")
 			{
 				const bool IsStartupScene = m_Project->GetDescription().StartScene &&
@@ -7107,18 +7167,30 @@ namespace
 
 		std::string GetMaterialDraftKey(const PulseForge::AssetID& Asset) const
 		{
-			return PathToUtf8(m_Project->GetRootPath().lexically_normal()) + ":" + Asset.ToString();
+			return PulseForgeEditor::MakeMaterialDraftKey(
+				PathToUtf8(m_Project->GetRootPath().lexically_normal()), Asset.ToString());
 		}
 
-		void DrawMaterialAssetEditor(const PulseForge::AssetRecord& Asset)
+		void ForgetMaterialDraft(const PulseForge::AssetID& Asset)
+		{
+			if (!m_Project)
+				return;
+			const std::string Key = GetMaterialDraftKey(Asset);
+			m_MaterialDrafts.erase(Key);
+			m_DirtyMaterialDrafts.erase(Key);
+			m_MaterialEditorErrors.erase(Key);
+		}
+
+		bool DrawMaterialAssetProperties(const PulseForge::AssetRecord& Asset)
 		{
 			const std::string Key = GetMaterialDraftKey(Asset.ID);
 			if (const auto Error = m_MaterialEditorErrors.find(Key); Error != m_MaterialEditorErrors.end())
 			{
-				m_EditorStyle.TextMuted("Material could not be loaded: " + Error->second);
+				ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error),
+					"Material could not be loaded: %s", Error->second.c_str());
 				if (ImGui::SmallButton("Retry Material Load"))
 					m_MaterialEditorErrors.erase(Error);
-				return;
+				return false;
 			}
 
 			auto Draft = m_MaterialDrafts.find(Key);
@@ -7129,10 +7201,11 @@ namespace
 				if (!Loaded)
 				{
 					m_MaterialEditorErrors.emplace(Key, Loaded.error().Message);
-					m_EditorStyle.TextMuted("Material could not be loaded: " + Loaded.error().Message);
+					ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error),
+						"Material could not be loaded: %s", Loaded.error().Message.c_str());
 					if (ImGui::SmallButton("Retry Material Load"))
 						m_MaterialEditorErrors.erase(Key);
-					return;
+					return false;
 				}
 				Draft = m_MaterialDrafts.emplace(Key, std::move(*Loaded)).first;
 			}
@@ -7231,13 +7304,31 @@ namespace
 				m_DirtyMaterialDrafts.insert(Key);
 			m_EditorStyle.TextMuted("Base color and emissive maps use sRGB; normal, metallic-roughness and occlusion maps use linear data.");
 			m_EditorStyle.TextMuted("Mask clips below Alpha Cutoff and casts cutout shadows. Blend is sorted back-to-front and does not cast shadows.");
-			if (m_DirtyMaterialDrafts.contains(Key))
+			return true;
+		}
+
+		void DrawMaterialEditorActions(const PulseForge::AssetRecord& Asset)
+		{
+			const std::string Key = GetMaterialDraftKey(Asset.ID);
+			const bool HasDraft = m_MaterialDrafts.contains(Key);
+			const bool IsDirty = m_DirtyMaterialDrafts.contains(Key);
+			if (IsDirty)
+				ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning),
+					"Unsaved material draft");
+			else
+				m_EditorStyle.TextMuted("No unsaved changes");
+
+			const float AvailableWidth = ImGui::GetContentRegionAvail().x;
+			const bool StackButtons = AvailableWidth < 320.0f;
+			const float ButtonWidth = StackButtons ? -1.0f : (AvailableWidth - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+			ImGui::BeginDisabled(!HasDraft || !IsDirty);
+			if (ImGui::Button("Save Material", ImVec2(ButtonWidth, 0.0f)))
 			{
-				m_EditorStyle.TextMuted("Unsaved material draft");
-				if (ImGui::SmallButton("Save Material"))
+				auto Draft = m_MaterialDrafts.find(Key);
+				if (Draft != m_MaterialDrafts.end())
 				{
 					auto Saved = PulseForge::MaterialAssetService::Save(
-						Asset.ID, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), Material);
+						Asset.ID, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), Draft->second);
 					if (!Saved)
 						SetError("Material save failed: " + Saved.error().Message);
 					else
@@ -7249,8 +7340,10 @@ namespace
 						SetStatus("Saved material " + PathToUtf8(Asset.ProjectRelativePath.filename()) + ".");
 					}
 				}
-				ImGui::SameLine();
-				if (ImGui::SmallButton("Revert Material"))
+			}
+			if (StackButtons)
+			{
+				if (ImGui::Button("Revert Material", ImVec2(-1.0f, 0.0f)))
 				{
 					auto Loaded = PulseForge::MaterialAssetService::Load(
 						Asset.ID, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
@@ -7258,11 +7351,87 @@ namespace
 						SetError("Material reload failed: " + Loaded.error().Message);
 					else
 					{
-						Material = std::move(*Loaded);
+						m_MaterialDrafts[Key] = std::move(*Loaded);
 						m_DirtyMaterialDrafts.erase(Key);
 					}
 				}
 			}
+			else
+			{
+				ImGui::SameLine();
+				if (ImGui::Button("Revert Material", ImVec2(ButtonWidth, 0.0f)))
+				{
+					auto Loaded = PulseForge::MaterialAssetService::Load(
+						Asset.ID, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
+					if (!Loaded)
+						SetError("Material reload failed: " + Loaded.error().Message);
+					else
+					{
+						m_MaterialDrafts[Key] = std::move(*Loaded);
+						m_DirtyMaterialDrafts.erase(Key);
+					}
+				}
+			}
+			ImGui::EndDisabled();
+		}
+
+		void DrawMaterialEditorPanel()
+		{
+			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::MaterialEditor))
+				return;
+			if (m_FocusMaterialEditorNextFrame)
+			{
+				ImGui::SetNextWindowFocus();
+				m_FocusMaterialEditorNextFrame = false;
+			}
+			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::MaterialEditor))
+			{
+				if (!m_Project)
+					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Material,
+						"Open a project to edit a material.");
+				else if (!m_OpenedMaterialAsset)
+					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Material,
+						"Open a material from the Content Browser.");
+				else
+				{
+					const auto Asset = m_Project->GetAssetRegistry().Find(*m_OpenedMaterialAsset);
+					if (!Asset || NormalizedExtension(Asset->ProjectRelativePath) != ".material")
+					{
+						m_OpenedMaterialAsset.reset();
+						m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Warning,
+							"The opened material is no longer registered. Select it again in the Content Browser.");
+					}
+					else
+					{
+						const std::string Name = PathToUtf8(Asset->ProjectRelativePath.filename());
+						const std::string FullPath = PathToUtf8(Asset->ProjectRelativePath);
+						const std::string Identifier = Asset->ID.ToString();
+						m_EditorStyle.IconText(PulseForgeEditor::EditorIcon::Material, Name);
+						if (m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(Asset->ID)))
+						{
+							ImGui::SameLine();
+							ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning), "Unsaved");
+						}
+						ImGui::TextWrapped("%s", FullPath.c_str());
+						if (ImGui::IsItemHovered())
+							ImGui::SetTooltip("%s\nUUID: %s", FullPath.c_str(), Identifier.c_str());
+						ImGui::Separator();
+
+						const bool StackActions = ImGui::GetContentRegionAvail().x < 320.0f;
+						const float FooterHeight =
+							ImGui::GetFrameHeightWithSpacing() * (StackActions ? 3.0f : 2.0f) + 8.0f;
+						const float PropertiesHeight = (std::max)(
+							ImGui::GetContentRegionAvail().y - FooterHeight, 0.0f);
+						if (ImGui::BeginChild("MaterialEditorProperties", ImVec2(0.0f, PropertiesHeight),
+							ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar))
+							(void)DrawMaterialAssetProperties(*Asset);
+						ImGui::EndChild();
+						ImGui::Separator();
+						DrawMaterialEditorActions(*Asset);
+					}
+				}
+			}
+			ImGui::End();
 		}
 
 		void DrawContentBrowserPanel()
@@ -7407,13 +7576,25 @@ namespace
 							? PathToUtf8(SelectedRecord->ProjectRelativePath.filename()) : "Selected asset";
 						if (SelectedMaterial && m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(*m_SelectedAsset)))
 							SelectedName += " — Unsaved draft";
+						const float ActionWidth = SelectedMaterial ? 154.0f : 112.0f;
+						const float SummaryWidth = (std::max)(
+							ImGui::GetContentRegionAvail().x - ActionWidth - ImGui::GetStyle().ItemSpacing.x, 20.0f);
 						const std::string Summary = FitEditorContextLabel(SelectedName,
-							(std::max)(ImGui::GetContentRegionAvail().x - 112.0f, 20.0f));
+							SummaryWidth);
 						ImGui::TextUnformatted(Summary.c_str());
-						if (Summary != SelectedName && ImGui::IsItemHovered())
-							ImGui::SetTooltip("%s", SelectedName.c_str());
+						if (ImGui::IsItemHovered() && SelectedRecord)
+						{
+							const std::string FullPath = PathToUtf8(SelectedRecord->ProjectRelativePath);
+							const std::string Identifier = SelectedRecord->ID.ToString();
+							ImGui::SetTooltip("%s\nUUID: %s", FullPath.c_str(), Identifier.c_str());
+						}
 						ImGui::SameLine();
-						if (ImGui::SmallButton(m_ContentDetailsExpandedCompact ? "Hide Details" : "Details"))
+						if (SelectedMaterial)
+						{
+							if (ImGui::Button("Open Material Editor", ImVec2(ActionWidth, 0.0f)))
+								OpenMaterialEditor(*m_SelectedAsset);
+						}
+						else if (ImGui::SmallButton(m_ContentDetailsExpandedCompact ? "Hide Details" : "Details"))
 							m_ContentDetailsExpandedCompact = !m_ContentDetailsExpandedCompact;
 					}
 					if (!HasDeferredAction && SelectedAssetVisible && VerticalLayout.DetailsHeight > 0.0f)
@@ -7633,6 +7814,8 @@ namespace
 		bool m_ConsoleSelectableAutoScrollSuspended = false;
 		bool m_ContentGridView = true;
 		bool m_ContentDetailsExpandedCompact = false;
+		bool m_InitialMaterialEditorDockPending = false;
+		bool m_FocusMaterialEditorNextFrame = false;
 		uint64_t m_ConsoleRevision = 0;
 		uint64_t m_ConsoleSelectableTextRevision = 0;
 		std::string m_ConsoleSelectableText;
@@ -7677,6 +7860,7 @@ namespace
 		std::optional<PulseForge::UUID> m_SelectedEntity;
 		std::optional<EntityClipboard> m_EntityClipboard;
 		std::optional<PulseForge::AssetID> m_SelectedAsset;
+		std::optional<PulseForge::AssetID> m_OpenedMaterialAsset;
 		std::optional<PulseForge::AssetID> m_PendingDeleteAsset;
 		std::unordered_map<std::string, PulseForge::MaterialAssetDesc> m_MaterialDrafts;
 		std::unordered_map<std::string, std::string> m_MaterialEditorErrors;

@@ -26,6 +26,7 @@
 #include "Core/LayerStack.h"
 #include "Core/Timestep.h"
 #include "Editor/EditorLayout.h"
+#include "Editor/EditorMaterialEditorPolicy.h"
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorCommandLine.h"
 #include "Editor/EditorContentBrowserPolicy.h"
@@ -1969,9 +1970,10 @@ namespace
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Console) == EditorDefaultDockRegion::Bottom);
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Scene) == EditorDefaultDockRegion::Bottom);
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Inspector) == EditorDefaultDockRegion::Right);
+		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::MaterialEditor) == EditorDefaultDockRegion::Right);
 		PF_CHECK(Tests, EditorPanelDescriptors.size() == static_cast<size_t>(EditorPanel::Count));
 		constexpr std::array<std::string_view, static_cast<size_t>(EditorPanel::Count)> StablePanelNames = {
-			"Scene Viewport", "Hierarchy", "Inspector", "Content Browser", "Console", "Scene"
+			"Scene Viewport", "Hierarchy", "Inspector", "Content Browser", "Console", "Scene", "Material Editor"
 		};
 
 		EditorPanelVisibility Panels;
@@ -1981,6 +1983,7 @@ namespace
 		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::ContentBrowser));
 		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::Console));
 		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Scene));
+		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::MaterialEditor));
 
 		for (size_t Index = 0; Index < EditorPanelDescriptors.size(); ++Index)
 		{
@@ -2003,10 +2006,23 @@ namespace
 		Panels.ResetToDefaults();
 		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::Console));
 		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Scene));
+		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::MaterialEditor));
 		PF_CHECK(Tests, Panels.GetVisibility(EditorPanel::Scene) != nullptr);
 		PF_CHECK(Tests, Panels.GetVisibility(EditorPanel::Count) == nullptr);
 		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Count));
 		PF_CHECK(Tests, !Panels.SetVisible(EditorPanel::Count, true));
+		PF_CHECK(Tests, !ShouldApplyFirstOpenPanelDocking(true, true));
+		PF_CHECK(Tests, !ShouldApplyFirstOpenPanelDocking(false, false));
+		PF_CHECK(Tests, ShouldApplyFirstOpenPanelDocking(false, true));
+		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".material", true, false) == AssetBrowserOpenAction::None);
+		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".material", true, true) == AssetBrowserOpenAction::OpenMaterialEditor);
+		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".scene", true, true) == AssetBrowserOpenAction::OpenScene);
+		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".png", true, true) == AssetBrowserOpenAction::None);
+		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".scene", false, true) == AssetBrowserOpenAction::None);
+		const std::string DraftKey = MakeMaterialDraftKey("C:/Project", "material-uuid");
+		PF_CHECK(Tests, DraftKey == MakeMaterialDraftKey("C:/Project", "material-uuid"));
+		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("D:/Project", "material-uuid"));
+		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("C:/Project", "other-material-uuid"));
 	}
 
 	void TestEditorWorkspaceViewHelpers(TestRunner& Tests)
@@ -2190,16 +2206,16 @@ namespace
 		const ContentBrowserVerticalLayout ExpandedCompactSelection =
 			GetContentBrowserVerticalLayout(120.0f, true, true, true);
 		PF_CHECK(Tests, ExpandedCompactSelection.SelectionSummaryHeight == 28.0f);
-		PF_CHECK(Tests, ExpandedCompactSelection.DetailsHeight > 0.0f && ExpandedCompactSelection.AssetItemsHeight > 0.0f);
+		PF_CHECK(Tests, ExpandedCompactSelection.DetailsHeight == 0.0f && ExpandedCompactSelection.AssetItemsHeight == 92.0f);
 		const ContentBrowserVerticalLayout RegularAssetDetails = GetContentBrowserVerticalLayout(320.0f, true, false);
 		PF_CHECK(Tests, RegularAssetDetails.DetailsHeight == ContentBrowserLayoutMetrics::RegularDetailsMaximumHeight);
 		PF_CHECK(Tests, RegularAssetDetails.AssetItemsHeight >= ContentBrowserLayoutMetrics::MinimumAssetItemsHeight);
-		const ContentBrowserVerticalLayout ShortMaterialDetails = GetContentBrowserVerticalLayout(180.0f, true, true);
-		PF_CHECK(Tests, ShortMaterialDetails.DetailsHeight > 0.0f && ShortMaterialDetails.DetailsHeight < 390.0f);
-		PF_CHECK(Tests, ShortMaterialDetails.AssetItemsHeight >= ContentBrowserLayoutMetrics::MinimumAssetItemsHeight);
-		const ContentBrowserVerticalLayout TallMaterialDetails = GetContentBrowserVerticalLayout(840.0f, true, true);
-		PF_CHECK(Tests, TallMaterialDetails.DetailsHeight == ContentBrowserLayoutMetrics::MaterialDetailsMaximumHeight);
-		PF_CHECK(Tests, TallMaterialDetails.AssetItemsHeight + TallMaterialDetails.DetailsHeight == 840.0f);
+		const ContentBrowserVerticalLayout ShortMaterialSummary = GetContentBrowserVerticalLayout(180.0f, true, true);
+		PF_CHECK(Tests, ShortMaterialSummary.SelectionSummaryHeight == 28.0f);
+		PF_CHECK(Tests, ShortMaterialSummary.DetailsHeight == 0.0f && ShortMaterialSummary.AssetItemsHeight == 152.0f);
+		const ContentBrowserVerticalLayout TallMaterialSummary = GetContentBrowserVerticalLayout(840.0f, true, true);
+		PF_CHECK(Tests, TallMaterialSummary.SelectionSummaryHeight == 28.0f);
+		PF_CHECK(Tests, TallMaterialSummary.DetailsHeight == 0.0f && TallMaterialSummary.AssetItemsHeight == 812.0f);
 		const ContentBrowserVerticalLayout InvalidContentHeight = GetContentBrowserVerticalLayout(
 			std::numeric_limits<float>::quiet_NaN(), true, true);
 		PF_CHECK(Tests, InvalidContentHeight.AssetItemsHeight == 0.0f && InvalidContentHeight.SelectionSummaryHeight == 0.0f);
