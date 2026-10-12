@@ -1,7 +1,6 @@
 #define GLFW_EXPOSE_NATIVE_WIN32
 
 #include "Core/Application.h"
-#include "Core/EntryPoint.h"
 #include "Core/Layer.h"
 #include "Core/Log.h"
 #include "Core/ScopedProfileTimer.h"
@@ -26,6 +25,8 @@
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorCommandHistory.h"
+#include "Editor/EditorProjectOpening.h"
+#include "EditorApplicationFactory.h"
 #include "Editor/EditorInteractionPolicy.h"
 #include "Editor/EditorSelection.h"
 #include "Editor/EditorVisibility.h"
@@ -508,8 +509,8 @@ namespace
 		};
 
 	public:
-		EditorLayer()
-			: Layer("Editor")
+		explicit EditorLayer(std::optional<std::filesystem::path> StartupProject = std::nullopt)
+			: Layer("Editor"), m_StartupProjectPath(std::move(StartupProject))
 		{
 		}
 
@@ -585,6 +586,13 @@ namespace
 			}
 			else
 				SetError(NfdError("Could not initialize the native file dialog"));
+
+			if (m_StartupProjectPath)
+			{
+				auto Opened = OpenProjectAt(*m_StartupProjectPath);
+				if (!Opened)
+					throw std::runtime_error("Startup project load failed: " + Opened.error());
+			}
 		}
 
 		void OnDetach() override
@@ -1673,10 +1681,10 @@ namespace
 			if (!ProjectFile)
 				return;
 			const std::filesystem::path ChosenPath = *ProjectFile;
-			QueueAfterSave([this, ChosenPath] { OpenProjectAt(ChosenPath); });
+			QueueAfterSave([this, ChosenPath] { (void)OpenProjectAt(ChosenPath); });
 		}
 
-		void OpenProjectAt(const std::filesystem::path& ProjectFile)
+		std::expected<void, std::string> OpenProjectAt(const std::filesystem::path& ProjectFile)
 		{
 			m_ProjectOpenStartedAt = std::chrono::steady_clock::now();
 			m_ProjectOpenTimingActive = true;
@@ -1685,50 +1693,31 @@ namespace
 			m_LoggedEnvironmentReady = false;
 			m_EnvironmentLightingPending = false;
 			PulseForge::Detail::ScopedProfileTimer OpenTimer("Editor project open + startup scene load");
-			auto Opened = PulseForge::Project::Open(ProjectFile);
+			auto Opened = PulseForgeEditor::OpenEditorProject(ProjectFile);
 			if (!Opened)
 			{
-				SetError("Project could not be opened: " + Opened.error().Message);
-				return;
+				SetError(Opened.error().Message);
+				return std::unexpected(Opened.error().Message);
 			}
 
-			std::unique_ptr<PulseForge::Scene> LoadedScene;
-			std::optional<PulseForge::AssetID> LoadedSceneAsset;
-			std::string SceneLoadWarning;
-			if (const auto StartScene = Opened->GetDescription().StartScene)
-			{
-				LoadedScene = std::make_unique<PulseForge::Scene>();
-				const auto Result = PulseForge::SceneAssetService::Load(
-					*StartScene,
-					Opened->GetRootPath(),
-					Opened->GetAssetRegistry(),
-					*LoadedScene);
-				if (Result)
-					LoadedSceneAsset = *StartScene;
-				else
-				{
-					SceneLoadWarning = "Project opened, but its startup scene could not be loaded: " + Result.error().Message;
-					LoadedScene.reset();
-				}
-			}
-
-			const std::string ProjectName = Opened->GetDescription().Name;
+			const std::string ProjectName = Opened->Project.GetDescription().Name;
 			StopRuntime();
 			ResetViewportSceneRenderer();
-			m_Project.emplace(std::move(*Opened));
+			m_Project.emplace(std::move(Opened->Project));
 			ResetContentBrowserNavigation();
-			m_Scene = std::move(LoadedScene);
-			m_SceneAsset = LoadedSceneAsset;
+			m_Scene = std::move(Opened->StartupScene);
+			m_SceneAsset = Opened->StartupSceneAsset;
 			SelectSingleEntity(std::nullopt);
-			m_SelectedAsset = LoadedSceneAsset;
+			m_SelectedAsset = Opened->StartupSceneAsset;
 			m_PendingDeleteAsset.reset();
 			m_OpenDeleteAssetDialog = false;
 			ResetSceneHistory();
 			UpdateAssetList();
-			if (SceneLoadWarning.empty())
+			if (Opened->StartupSceneWarning.empty())
 				SetStatus("Opened project " + ProjectName + ".");
 			else
-				SetWarning(std::move(SceneLoadWarning));
+				SetWarning(std::move(Opened->StartupSceneWarning));
+			return {};
 		}
 
 		void ImportAsset()
@@ -7292,6 +7281,7 @@ namespace
 		std::vector<EditorConsoleMessage> m_ConsoleMessages;
 		std::vector<std::shared_ptr<spdlog::logger>> m_ConsoleLoggers;
 		std::function<void()> m_PendingAction;
+		std::optional<std::filesystem::path> m_StartupProjectPath;
 		std::optional<PulseForge::Project> m_Project;
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::optional<std::string> m_SavedSceneSnapshot;
@@ -7355,14 +7345,14 @@ namespace
 	class PulseForgeEditorApplication final : public PulseForge::Application
 	{
 	public:
-		PulseForgeEditorApplication()
+		explicit PulseForgeEditorApplication(std::optional<std::filesystem::path> StartupProject)
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			: Application(PulseForge::RendererAPI::OpenGL)
 #else
 			: Application(PulseForge::RendererAPI::Vulkan)
 #endif
 		{
-			PushLayer(std::make_unique<EditorLayer>());
+			PushLayer(std::make_unique<EditorLayer>(std::move(StartupProject)));
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			PF_INFO("PulseForge editor started with the OpenGL ImGui backend");
 #else
@@ -7374,5 +7364,11 @@ namespace
 
 std::unique_ptr<PulseForge::Application> PulseForge::CreateApplication()
 {
-	return std::make_unique<PulseForgeEditorApplication>();
+	return PulseForgeEditor::CreateEditorApplication(std::nullopt);
+}
+
+std::unique_ptr<PulseForge::Application> PulseForgeEditor::CreateEditorApplication(
+	std::optional<std::filesystem::path> StartupProject)
+{
+	return std::make_unique<PulseForgeEditorApplication>(std::move(StartupProject));
 }

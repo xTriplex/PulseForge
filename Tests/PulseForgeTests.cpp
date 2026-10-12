@@ -27,7 +27,9 @@
 #include "Core/Timestep.h"
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorCommandHistory.h"
+#include "Editor/EditorCommandLine.h"
 #include "Editor/EditorInteractionPolicy.h"
+#include "Editor/EditorProjectOpening.h"
 #include "Editor/EditorSelection.h"
 #include "Editor/EditorVisibility.h"
 #include "Editor/ConsoleFormatting.h"
@@ -3983,6 +3985,112 @@ namespace
 		PF_CHECK(Tests, RelocatedProject.has_value());
 		PF_CHECK(Tests, RelocatedProject && RelocatedProject->GetAssetRegistry().Find(SceneMetadata->ID).has_value());
 		PF_CHECK(Tests, RelocatedProject && RelocatedProject->GetRootPath() == RelocatedRoot);
+	}
+
+	void TestEditorCommandLineAndStartupProjectLoading(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		const auto Identifier = UUID::Generate();
+		PF_CHECK(Tests, Identifier.has_value());
+		if (!Identifier)
+			return;
+
+		std::error_code FileError;
+		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const std::filesystem::path Root =
+			TemporaryDirectory / ("PulseForge CLI Test " + Identifier->ToString());
+		struct DirectoryCleanup
+		{
+			std::filesystem::path Path;
+			~DirectoryCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} Cleanup{ Root };
+
+		std::filesystem::create_directories(Root, FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const std::filesystem::path ProjectFile = Root / "Project With Spaces.pfproj";
+		auto Created = Project::Create(ProjectFile, "CLI Project With Spaces");
+		PF_CHECK(Tests, Created.has_value());
+		if (!Created)
+			return;
+
+		const std::span<const std::string_view> NoArguments;
+		const auto DefaultOptions = ParseEditorCommandLine(NoArguments, Root);
+		PF_CHECK(Tests, DefaultOptions.has_value());
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->ProjectFile.has_value());
+
+		const std::string AbsoluteProjectPath = ProjectFile.string();
+		const std::array AbsoluteArguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath) };
+		const auto AbsoluteOptions = ParseEditorCommandLine(AbsoluteArguments, Root);
+		PF_CHECK(Tests, AbsoluteOptions.has_value());
+		PF_CHECK(Tests, AbsoluteOptions && AbsoluteOptions->ProjectFile == ProjectFile);
+
+		const std::string RelativeProjectPath = ProjectFile.filename().string();
+		const std::array RelativeArguments = { std::string_view("--project"), std::string_view(RelativeProjectPath) };
+		const auto RelativeOptions = ParseEditorCommandLine(RelativeArguments, Root);
+		PF_CHECK(Tests, RelativeOptions.has_value());
+		PF_CHECK(Tests, RelativeOptions && RelativeOptions->ProjectFile == ProjectFile);
+
+		const std::array MissingValue = { std::string_view("--project") };
+		const auto MissingValueResult = ParseEditorCommandLine(MissingValue, Root);
+		PF_CHECK(Tests, !MissingValueResult);
+		PF_CHECK(Tests, !MissingValueResult &&
+			MissingValueResult.error().Code == EditorCommandLineErrorCode::MissingProjectPath);
+
+		const std::array Unexpected = { std::string_view("--unknown") };
+		const auto UnexpectedResult = ParseEditorCommandLine(Unexpected, Root);
+		PF_CHECK(Tests, !UnexpectedResult);
+		PF_CHECK(Tests, !UnexpectedResult &&
+			UnexpectedResult.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+
+		const std::array Duplicate = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath) };
+		const auto DuplicateResult = ParseEditorCommandLine(Duplicate, Root);
+		PF_CHECK(Tests, !DuplicateResult);
+		PF_CHECK(Tests, !DuplicateResult &&
+			DuplicateResult.error().Code == EditorCommandLineErrorCode::DuplicateProjectOption);
+
+		const std::string MissingProjectPath = (Root / "Missing.pfproj").string();
+		const std::array InvalidProject = { std::string_view("--project"), std::string_view(MissingProjectPath) };
+		const auto InvalidProjectResult = ParseEditorCommandLine(InvalidProject, Root);
+		PF_CHECK(Tests, !InvalidProjectResult);
+		PF_CHECK(Tests, !InvalidProjectResult &&
+			InvalidProjectResult.error().Code == EditorCommandLineErrorCode::InvalidProjectPath);
+
+		auto Loaded = OpenEditorProject(ProjectFile);
+		PF_CHECK(Tests, Loaded.has_value());
+		PF_CHECK(Tests, Loaded && Loaded->Project.GetDescription().Name == "CLI Project With Spaces");
+		PF_CHECK(Tests, Loaded && !Loaded->StartupScene && !Loaded->StartupSceneAsset);
+
+		const std::filesystem::path BrokenProjectFile = Root / "Broken Project.pfproj";
+		{
+			std::ofstream BrokenProject(BrokenProjectFile, std::ios::binary | std::ios::trunc);
+			BrokenProject << "{broken";
+			PF_CHECK(Tests, static_cast<bool>(BrokenProject));
+		}
+		const std::string BrokenProjectPath = BrokenProjectFile.string();
+		const std::array BrokenArguments = {
+			std::string_view("--project"), std::string_view(BrokenProjectPath) };
+		const auto BrokenOptions = ParseEditorCommandLine(BrokenArguments, Root);
+		PF_CHECK(Tests, BrokenOptions.has_value());
+		if (BrokenOptions)
+		{
+			const auto BrokenLoad = OpenEditorProject(*BrokenOptions->ProjectFile);
+			PF_CHECK(Tests, !BrokenLoad);
+			PF_CHECK(Tests, !BrokenLoad && BrokenLoad.error().Message.find("could not be opened") != std::string::npos);
+		}
 	}
 
 	void TestBundledValidationProjectAssetRegistry(TestRunner& Tests)
@@ -8280,6 +8388,7 @@ int main()
 	TestAssetImportOperation(Tests);
 	TestMaterialAssets(Tests);
 	TestProjectFiles(Tests);
+	TestEditorCommandLineAndStartupProjectLoading(Tests);
 	TestBundledValidationProjectAssetRegistry(Tests);
 	TestAssetReferenceValidation(Tests);
 	TestGltfMeshImport(Tests);
