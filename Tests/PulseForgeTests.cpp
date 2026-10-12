@@ -28,6 +28,7 @@
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorCommandLine.h"
+#include "Editor/EditorEntityIconPolicy.h"
 #include "Editor/EditorInteractionPolicy.h"
 #include "Editor/EditorProjectOpening.h"
 #include "Editor/EditorSelection.h"
@@ -36,6 +37,7 @@
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
 #include "Editor/ViewportMouseCapture.h"
+#include "Editor/EditorViewportToolbarPolicy.h"
 #include "Editor/ImGuiRendererMath.h"
 #include "Editor/ViewportMath.h"
 #include "Audio/AudioEngine.h"
@@ -2161,6 +2163,28 @@ namespace
 	void TestEditorFontAndIconDescriptors(TestRunner& Tests)
 	{
 		using namespace PulseForgeEditor;
+		PF_CHECK(Tests, GetEditorViewportToolbarLayout(590.0f) == EditorViewportToolbarLayout::Full);
+		PF_CHECK(Tests, GetEditorViewportToolbarLayout(589.0f) == EditorViewportToolbarLayout::Compact);
+		PF_CHECK(Tests, GetEditorViewportToolbarLayout(300.0f) == EditorViewportToolbarLayout::Compact);
+		PF_CHECK(Tests, GetEditorViewportToolbarLayout(299.0f) == EditorViewportToolbarLayout::Overflow);
+		PF_CHECK(Tests, GetEditorViewportToolbarLayout(-1.0f) == EditorViewportToolbarLayout::Overflow);
+		PF_CHECK(Tests, GetEditorViewportToolbarLayout(std::numeric_limits<float>::quiet_NaN()) ==
+			EditorViewportToolbarLayout::Overflow);
+		PF_CHECK(Tests, GetEditorPropertyLabelWidth(100.0f) == EditorStyleMetrics::PropertyLabelWidthMinimum);
+		PF_CHECK(Tests, GetEditorPropertyLabelWidth(300.0f) == 90.0f);
+		PF_CHECK(Tests, GetEditorPropertyLabelWidth(1000.0f) == EditorStyleMetrics::PropertyLabelWidthMaximum);
+		PF_CHECK(Tests, UseCompactVector3PropertyInput(229.0f));
+		PF_CHECK(Tests, !UseCompactVector3PropertyInput(230.0f));
+		PF_CHECK(Tests, UseCompactVector3PropertyInput(std::numeric_limits<float>::quiet_NaN()));
+		PF_CHECK(Tests, GetEditorEntityIcon({}) == EditorIcon::Entity);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasCamera = true, .HasMesh = true }) == EditorIcon::Camera);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasMesh = true, .HasPointLight = true }) == EditorIcon::Cube);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasSpotLight = true, .HasPointLight = true }) == EditorIcon::SpotLight);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasPointLight = true, .HasDirectionalLight = true }) == EditorIcon::PointLight);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasDirectionalLight = true }) == EditorIcon::DirectionalLight);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasEnvironmentLight = true }) == EditorIcon::Environment);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasAudioSource = true, .HasAudioListener = true }) == EditorIcon::AudioSource);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasAudioListener = true }) == EditorIcon::AudioListener);
 		PF_CHECK(Tests, EditorFontDescriptors.size() == 3);
 		PF_CHECK(Tests, EditorFontDescriptors[0].Role == EditorFontRole::Interface);
 		PF_CHECK(Tests, EditorFontDescriptors[1].Role == EditorFontRole::Emphasis);

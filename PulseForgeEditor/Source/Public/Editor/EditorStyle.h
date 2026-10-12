@@ -19,6 +19,33 @@ struct ImVec4;
 
 namespace PulseForgeEditor
 {
+	namespace EditorStyleMetrics
+	{
+		inline constexpr float PropertyLabelWidthRatio = 0.30f;
+		inline constexpr float PropertyLabelWidthMinimum = 60.0f;
+		inline constexpr float PropertyLabelWidthMaximum = 104.0f;
+		inline constexpr float ComponentBodyPadding = 6.0f;
+		inline constexpr float Vector3AxisInputMinimumWidth = 230.0f;
+		inline constexpr float ViewportToolbarHeight = 36.0f;
+		inline constexpr float ViewportToolbarButtonSize = 28.0f;
+		inline constexpr float ViewportToolbarGroupSpacing = 8.0f;
+	}
+
+	[[nodiscard]] constexpr bool UseCompactVector3PropertyInput(float AvailableWidth) noexcept
+	{
+		return !(AvailableWidth >= EditorStyleMetrics::Vector3AxisInputMinimumWidth);
+	}
+
+	[[nodiscard]] constexpr float GetEditorPropertyLabelWidth(float AvailableWidth) noexcept
+	{
+		const float ScaledWidth = AvailableWidth * EditorStyleMetrics::PropertyLabelWidthRatio;
+		return ScaledWidth < EditorStyleMetrics::PropertyLabelWidthMinimum
+			? EditorStyleMetrics::PropertyLabelWidthMinimum
+			: ScaledWidth > EditorStyleMetrics::PropertyLabelWidthMaximum
+				? EditorStyleMetrics::PropertyLabelWidthMaximum
+				: ScaledWidth;
+	}
+
 	enum class EditorFontRole : uint8_t
 	{
 		Interface,

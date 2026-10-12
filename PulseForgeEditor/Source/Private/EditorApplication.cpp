@@ -30,8 +30,10 @@
 #include "Editor/EditorInteractionPolicy.h"
 #include "Editor/EditorSelection.h"
 #include "Editor/EditorVisibility.h"
+#include "Editor/EditorEntityIconPolicy.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
+#include "Editor/EditorViewportToolbarPolicy.h"
 #include "Editor/ViewportMouseCapture.h"
 #include "Editor/ViewportMath.h"
 
@@ -175,15 +177,68 @@ namespace
 
 	PulseForgeEditor::EditorIcon GetEntityIcon(const PulseForge::Entity& Entity)
 	{
+		PulseForgeEditor::EditorEntityIconComponents Components;
 		const auto Camera = Entity.GetCamera();
-		if (Camera && Camera->has_value())
-			return PulseForgeEditor::EditorIcon::Camera;
+		Components.HasCamera = Camera && Camera->has_value();
 
 		const auto Mesh = Entity.GetMeshRenderer();
-		if (Mesh && Mesh->has_value())
-			return PulseForgeEditor::EditorIcon::Cube;
+		Components.HasMesh = Mesh && Mesh->has_value();
+		if (Components.HasCamera || Components.HasMesh)
+			return PulseForgeEditor::GetEditorEntityIcon(Components);
 
-		return PulseForgeEditor::EditorIcon::Entity;
+		const auto SpotLight = Entity.GetSpotLight();
+		Components.HasSpotLight = SpotLight && SpotLight->has_value();
+		if (Components.HasSpotLight)
+			return PulseForgeEditor::GetEditorEntityIcon(Components);
+
+		const auto PointLight = Entity.GetPointLight();
+		Components.HasPointLight = PointLight && PointLight->has_value();
+		if (Components.HasPointLight)
+			return PulseForgeEditor::GetEditorEntityIcon(Components);
+
+		const auto DirectionalLight = Entity.GetDirectionalLight();
+		Components.HasDirectionalLight = DirectionalLight && DirectionalLight->has_value();
+		if (Components.HasDirectionalLight)
+			return PulseForgeEditor::GetEditorEntityIcon(Components);
+
+		const auto EnvironmentLight = Entity.GetEnvironmentLight();
+		Components.HasEnvironmentLight = EnvironmentLight && EnvironmentLight->has_value();
+		if (Components.HasEnvironmentLight)
+			return PulseForgeEditor::GetEditorEntityIcon(Components);
+
+		const auto AudioSource = Entity.GetAudioSource();
+		Components.HasAudioSource = AudioSource && AudioSource->has_value();
+		if (Components.HasAudioSource)
+			return PulseForgeEditor::GetEditorEntityIcon(Components);
+
+		const auto AudioListener = Entity.GetAudioListener();
+		Components.HasAudioListener = AudioListener && AudioListener->has_value();
+
+		return PulseForgeEditor::GetEditorEntityIcon(Components);
+	}
+
+	std::string FitHierarchyEntityName(std::string_view Name, float AvailableWidth)
+	{
+		constexpr std::string_view Ellipsis = "\xe2\x80\xa6";
+		constexpr size_t MaximumLabelBytes = 480;
+		size_t PrefixLength = PulseForgeEditor::Utf8SafePrefixLength(Name, MaximumLabelBytes);
+		while (PrefixLength > 0)
+		{
+			const std::string_view Prefix = Name.substr(0, PrefixLength);
+			const float Width = ImGui::CalcTextSize(Prefix.data(), Prefix.data() + Prefix.size()).x +
+				ImGui::CalcTextSize(Ellipsis.data(), Ellipsis.data() + Ellipsis.size()).x;
+			if (Width <= AvailableWidth)
+			{
+				std::string Result(Prefix);
+				Result.append(Ellipsis);
+				return Result;
+			}
+			PrefixLength = PulseForgeEditor::Utf8SafePrefixLength(Name, PrefixLength - 1);
+		}
+
+		return ImGui::CalcTextSize(Ellipsis.data(), Ellipsis.data() + Ellipsis.size()).x <= AvailableWidth
+			? std::string(Ellipsis)
+			: std::string{};
 	}
 
 	class DialogPath final
@@ -2826,9 +2881,6 @@ namespace
 			DrawContentBrowserPanel();
 			DrawDeleteAssetDialog();
 			DrawConsolePanel();
-#ifndef PF_EDITOR_RENDERER_OPENGL
-			DrawViewportTransformTabTools();
-#endif
 		}
 
 		bool BeginEditorPanel(PulseForgeEditor::EditorPanel Panel)
@@ -2967,10 +3019,7 @@ namespace
 					m_EditorStyle.TextMuted(
 						"The OpenGL fallback retains the editor shell; the scene viewport requires Vulkan.");
 #else
-					ImGui::SetNextItemWidth(150.0f);
-					(void)ImGui::DragFloat("Exposure (EV)", &m_ExposureEV, 0.05f, -8.0f, 8.0f, "%.2f EV",
-						ImGuiSliderFlags_AlwaysClamp);
-					DrawViewportPrecisionControls();
+					DrawViewportToolbar();
 					const ImVec2 Available = ImGui::GetContentRegionAvail();
 					if (Available.x <= 1.0f || Available.y <= 1.0f)
 					{
@@ -3081,63 +3130,97 @@ namespace
 		}
 
 #ifndef PF_EDITOR_RENDERER_OPENGL
-		void DrawViewportTransformTabTools()
+		void DrawViewportToolbar()
 		{
-			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport))
+			if (!m_EditorStyle.BeginToolbar(
+				"ViewportToolbar", PulseForgeEditor::EditorStyleMetrics::ViewportToolbarHeight))
+			{
+				m_EditorStyle.EndToolbar();
 				return;
+			}
 
-			ImGuiWindow* ViewportWindow = ImGui::FindWindowByName(
-				PulseForgeEditor::EditorPanelDescriptors[
-					static_cast<size_t>(PulseForgeEditor::EditorPanel::SceneViewport)].WindowName.data());
-			if (!ViewportWindow || !ViewportWindow->DockNode)
-				return;
-
-			ImGuiDockNode* DockNode = ViewportWindow->DockNode;
-			if (!DockNode->TabBar || DockNode->IsHiddenTabBar() || DockNode->IsNoTabBar())
-				return;
-
-			const ImRect& TabBarRect = DockNode->TabBar->BarRect;
-			const ImRect& ViewportTabRect = ViewportWindow->DC.DockTabItemRect;
-			constexpr float ButtonSize = 28.0f;
-			constexpr float GroupWidth = ButtonSize * 4.0f + 4.0f * 3.0f + 8.0f + 72.0f;
-			const float ToolbarLeft = ViewportTabRect.Max.x + 5.0f;
-			if (ViewportTabRect.GetWidth() <= 1.0f || TabBarRect.GetHeight() < ButtonSize ||
-				TabBarRect.Max.x - ToolbarLeft < GroupWidth ||
-				!ImGui::DockNodeBeginAmendTabBar(DockNode))
-				return;
-
-			ImGui::SetCursorScreenPos(ImVec2(
-				ToolbarLeft,
-				TabBarRect.Min.y + (TabBarRect.GetHeight() - ButtonSize) * 0.5f));
+			const PulseForgeEditor::EditorViewportToolbarLayout Layout =
+				PulseForgeEditor::GetEditorViewportToolbarLayout(ImGui::GetContentRegionAvail().x);
 			const bool CanEditViewport = m_Scene && !m_SceneRuntime;
-			if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Select, "Select", "ViewportSelectTool",
-				"Select entities in the viewport (Q)", m_ViewportTool == PulseForgeEditor::ViewportTool::Select,
-				CanEditViewport, ButtonSize))
+			if (Layout == PulseForgeEditor::EditorViewportToolbarLayout::Overflow)
 			{
-				SetViewportTool(PulseForgeEditor::ViewportTool::Select);
+				ImGui::BeginDisabled(!CanEditViewport);
+				ImGui::SetNextItemWidth((std::max)(76.0f,
+					ImGui::GetContentRegionAvail().x - PulseForgeEditor::EditorStyleMetrics::ViewportToolbarButtonSize - 5.0f));
+				if (ImGui::BeginCombo("##ViewportToolOverflow", GetViewportToolName()))
+				{
+					DrawViewportToolMenuItems(CanEditViewport);
+					ImGui::EndCombo();
+				}
+				ImGui::EndDisabled();
+				ImGui::SameLine(0.0f, 4.0f);
+				DrawViewportToolbarMoreButton();
+				DrawViewportOptionsPopup(true, true);
 			}
-			ImGui::SameLine(0.0f, 4.0f);
-			if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Translate, "Move", "ViewportMoveTool",
-				"Move selected entity (W)", m_ViewportTool == PulseForgeEditor::ViewportTool::Move,
-				CanEditViewport, ButtonSize))
+			else
 			{
-				SetViewportTool(PulseForgeEditor::ViewportTool::Move);
+				DrawViewportToolButton(PulseForgeEditor::ViewportTool::Select,
+					PulseForgeEditor::EditorIcon::Select, "Select", "ViewportSelectTool", "Select entities (1 / Q).");
+				ImGui::SameLine(0.0f, 3.0f);
+				DrawViewportToolButton(PulseForgeEditor::ViewportTool::Move,
+					PulseForgeEditor::EditorIcon::Translate, "Move", "ViewportMoveTool", "Move entities (2 / W).");
+				ImGui::SameLine(0.0f, 3.0f);
+				DrawViewportToolButton(PulseForgeEditor::ViewportTool::Rotate,
+					PulseForgeEditor::EditorIcon::Rotate, "Rotate", "ViewportRotateTool", "Rotate entities (3 / E).");
+				ImGui::SameLine(0.0f, 3.0f);
+				DrawViewportToolButton(PulseForgeEditor::ViewportTool::Scale,
+					PulseForgeEditor::EditorIcon::Scale, "Scale", "ViewportScaleTool", "Scale entities (4 / R).");
+
+				DrawViewportToolbarSeparator();
+				DrawViewportCoordinateSpaceControl();
+				DrawViewportToolbarSeparator();
+				DrawViewportSnapToggle();
+
+				if (Layout == PulseForgeEditor::EditorViewportToolbarLayout::Full)
+				{
+					ImGui::SameLine(0.0f, 5.0f);
+					DrawViewportSnapIncrementControl(false);
+					DrawViewportToolbarSeparator();
+					DrawViewportExposureControl(false);
+				}
+				else
+				{
+					ImGui::SameLine(0.0f, 4.0f);
+					DrawViewportToolbarMoreButton();
+					DrawViewportOptionsPopup(false, false);
+				}
 			}
-			ImGui::SameLine(0.0f, 4.0f);
-			if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Rotate, "Rotate", "ViewportRotateTool",
-				"Rotate selected entity (E)", m_ViewportTool == PulseForgeEditor::ViewportTool::Rotate,
-				CanEditViewport, ButtonSize))
+
+			m_EditorStyle.EndToolbar();
+		}
+
+		void DrawViewportToolButton(
+			PulseForgeEditor::ViewportTool Tool,
+			PulseForgeEditor::EditorIcon Icon,
+			std::string_view Label,
+			std::string_view StableID,
+			std::string_view Tooltip)
+		{
+			if (m_EditorStyle.ToolIconButton(
+				Icon, Label, StableID, Tooltip, m_ViewportTool == Tool, m_Scene && !m_SceneRuntime,
+				PulseForgeEditor::EditorStyleMetrics::ViewportToolbarButtonSize))
+				SetViewportTool(Tool);
+		}
+
+		const char* GetViewportToolName() const noexcept
+		{
+			switch (m_ViewportTool)
 			{
-				SetViewportTool(PulseForgeEditor::ViewportTool::Rotate);
+			case PulseForgeEditor::ViewportTool::Select: return "Select";
+			case PulseForgeEditor::ViewportTool::Move: return "Move";
+			case PulseForgeEditor::ViewportTool::Rotate: return "Rotate";
+			case PulseForgeEditor::ViewportTool::Scale: return "Scale";
 			}
-			ImGui::SameLine(0.0f, 4.0f);
-			if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Scale, "Scale", "ViewportScaleTool",
-				"Scale selected entity (R)", m_ViewportTool == PulseForgeEditor::ViewportTool::Scale,
-				CanEditViewport, ButtonSize))
-			{
-				SetViewportTool(PulseForgeEditor::ViewportTool::Scale);
-			}
-			ImGui::SameLine(0.0f, 8.0f);
+			return "Select";
+		}
+
+		void DrawViewportCoordinateSpaceControl()
+		{
 			if (ImGui::SmallButton(m_GizmoLocalSpace ? "Local##ViewportCoordinateSpace" : "World##ViewportCoordinateSpace"))
 			{
 				CancelGizmoInteraction();
@@ -3145,10 +3228,71 @@ namespace
 			}
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("Toggle Local and World gizmo axes.");
-			ImGui::DockNodeEndAmendTabBar();
 		}
 
-		void DrawViewportPrecisionControls()
+		void DrawViewportToolbarSeparator()
+		{
+			ImGui::SameLine(0.0f, PulseForgeEditor::EditorStyleMetrics::ViewportToolbarGroupSpacing);
+			const ImVec2 Cursor = ImGui::GetCursorScreenPos();
+			ImGui::GetWindowDrawList()->AddLine(
+				ImVec2(Cursor.x + 0.5f, Cursor.y + 3.0f),
+				ImVec2(Cursor.x + 0.5f, Cursor.y + 23.0f),
+				ImGui::GetColorU32(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::BorderStrong)));
+			ImGui::Dummy(ImVec2(1.0f, 26.0f));
+			ImGui::SameLine(0.0f, PulseForgeEditor::EditorStyleMetrics::ViewportToolbarGroupSpacing);
+		}
+
+		void DrawViewportToolbarMoreButton()
+		{
+			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Settings, "More", "ViewportToolbarOptions",
+				"More viewport and transform options", false,
+				PulseForgeEditor::EditorStyleMetrics::ViewportToolbarButtonSize,
+				PulseForgeEditor::EditorStyleMetrics::ViewportToolbarButtonSize))
+				ImGui::OpenPopup("ViewportOptionsPopup");
+		}
+
+		void DrawViewportToolMenuItems(bool CanEditViewport)
+		{
+			const auto ToolItem = [this, CanEditViewport](
+				PulseForgeEditor::EditorIcon Icon,
+				const char* Label,
+				const char* Shortcut,
+				PulseForgeEditor::ViewportTool Tool)
+			{
+				if (m_EditorStyle.MenuItem(Icon, Label, Shortcut, m_ViewportTool == Tool, CanEditViewport))
+					SetViewportTool(Tool);
+			};
+			ToolItem(PulseForgeEditor::EditorIcon::Select, "Select", "1", PulseForgeEditor::ViewportTool::Select);
+			ToolItem(PulseForgeEditor::EditorIcon::Translate, "Move", "2", PulseForgeEditor::ViewportTool::Move);
+			ToolItem(PulseForgeEditor::EditorIcon::Rotate, "Rotate", "3", PulseForgeEditor::ViewportTool::Rotate);
+			ToolItem(PulseForgeEditor::EditorIcon::Scale, "Scale", "4", PulseForgeEditor::ViewportTool::Scale);
+		}
+
+		void DrawViewportOptionsPopup(bool IncludeCoordinateSpace, bool IncludeSnapToggle)
+		{
+			if (!ImGui::BeginPopup("ViewportOptionsPopup"))
+				return;
+
+			if (IncludeCoordinateSpace)
+				DrawViewportCoordinateSpaceControl();
+			if (IncludeCoordinateSpace && IncludeSnapToggle)
+				ImGui::Separator();
+			if (IncludeSnapToggle)
+				DrawViewportSnapToggle();
+			DrawViewportSnapIncrementControl(true);
+			ImGui::Separator();
+			DrawViewportExposureControl(true);
+			ImGui::EndPopup();
+		}
+
+		void DrawViewportSnapToggle()
+		{
+			ImGui::Checkbox("Snap", &m_TransformSnapping);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Snap during gizmo drags. Hold Ctrl to temporarily enable snapping.");
+		}
+
+		void DrawViewportSnapIncrementControl(bool ShowLabel)
 		{
 			struct SnapPreset
 			{
@@ -3167,30 +3311,23 @@ namespace
 
 			float* Increment = &m_TranslationSnapIncrement;
 			const std::array<SnapPreset, 5>* Presets = &TranslationPresets;
-			const char* Operation = "Translation";
 			if (m_ViewportTool == PulseForgeEditor::ViewportTool::Rotate)
 			{
 				Increment = &m_RotationSnapDegrees;
 				Presets = &RotationPresets;
-				Operation = "Rotation";
 			}
 			else if (m_ViewportTool == PulseForgeEditor::ViewportTool::Scale)
 			{
 				Increment = &m_ScaleSnapIncrement;
 				Presets = &ScalePresets;
-				Operation = "Scale";
 			}
 
-			ImGui::Checkbox("Snap", &m_TransformSnapping);
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Snap %s during gizmo drags. Hold Ctrl to temporarily enable snapping.", Operation);
-			ImGui::SameLine();
 			const char* CurrentLabel = (*Presets)[0].Label;
 			for (const SnapPreset& Preset : *Presets)
 				if (std::abs(Preset.Value - *Increment) < 1.0e-5f)
 					CurrentLabel = Preset.Label;
-			ImGui::SetNextItemWidth(112.0f);
-			if (ImGui::BeginCombo("##TransformSnapIncrement", CurrentLabel))
+			ImGui::SetNextItemWidth(ShowLabel ? 156.0f : 112.0f);
+			if (ImGui::BeginCombo(ShowLabel ? "Snap Increment" : "##TransformSnapIncrement", CurrentLabel))
 			{
 				for (const SnapPreset& Preset : *Presets)
 				{
@@ -3202,6 +3339,26 @@ namespace
 				}
 				ImGui::EndCombo();
 			}
+		}
+
+		void DrawViewportExposureControl(bool ShowLabel)
+		{
+			if (!ShowLabel)
+			{
+				m_EditorStyle.TextMuted("Exposure");
+				ImGui::SameLine(0.0f, 4.0f);
+			}
+			ImGui::SetNextItemWidth(ShowLabel ? 144.0f : 98.0f);
+			(void)ImGui::DragFloat(
+				ShowLabel ? "Exposure (EV)" : "##ViewportExposureEV",
+				&m_ExposureEV,
+				0.05f,
+				-8.0f,
+				8.0f,
+				"%.2f EV",
+				ImGuiSliderFlags_AlwaysClamp);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Adjust viewport exposure from -8 to +8 EV. This does not modify the scene.");
 		}
 #endif
 
@@ -5440,11 +5597,27 @@ namespace
 				ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 			const bool IsEffectivelyVisible = IsEntityEffectivelyVisible(Entity);
 			ImGui::PushStyleVar(ImGuiStyleVar_Alpha, IsEffectivelyVisible ? 1.0f : 0.48f);
-			const bool IsOpen = m_EditorStyle.TreeNode(Icon, Tag->Name, "Entity", Flags);
+			const float RowStartX = ImGui::GetCursorPosX();
+			const float EyeColumnX = (std::max)(ImGui::GetWindowContentRegionMax().x - 30.0f, RowStartX);
+			const float LabelStartX = RowStartX + ImGui::GetTreeNodeToLabelSpacing() + ImGui::GetFontSize() +
+				ImGui::CalcTextSize(" ").x;
+			const float MaximumNameWidth = (std::max)(0.0f, EyeColumnX - LabelStartX - 4.0f);
+			std::string TruncatedNameStorage;
+			std::string_view DisplayName = Tag->Name;
+			if (Tag->Name.size() > 480 ||
+				ImGui::CalcTextSize(Tag->Name.data(), Tag->Name.data() + Tag->Name.size()).x > MaximumNameWidth)
+			{
+				TruncatedNameStorage = FitHierarchyEntityName(Tag->Name, MaximumNameWidth);
+				DisplayName = TruncatedNameStorage;
+			}
+			const bool NameTruncated = !TruncatedNameStorage.empty() || DisplayName.size() != Tag->Name.size();
+			const bool IsOpen = m_EditorStyle.TreeNode(Icon, DisplayName, "Entity", Flags);
 			const bool RowClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+			if (NameTruncated && ImGui::IsItemHovered() && ImGui::GetIO().MousePos.x < ImGui::GetWindowPos().x + EyeColumnX)
+				ImGui::SetTooltip("%s", Tag->Name.c_str());
 			if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
 				ImGui::OpenPopup("Entity Actions");
-			ImGui::SameLine((std::max)(ImGui::GetWindowContentRegionMax().x - 30.0f, ImGui::GetCursorPosX()));
+			ImGui::SameLine((std::max)(EyeColumnX, ImGui::GetCursorPosX()));
 			const bool LocallyVisible = m_EditorVisibility.IsLocallyVisible(Entity.GetUUID());
 			if (m_EditorStyle.IconButton(
 				LocallyVisible ? PulseForgeEditor::EditorIcon::Eye : PulseForgeEditor::EditorIcon::EyeSlash,
@@ -5992,7 +6165,7 @@ namespace
 			if (!Result || !Result->has_value())
 				return;
 			PulseForge::PointLightComponent Component = **Result;
-			const bool Expanded = m_EditorStyle.SectionHeader(PulseForgeEditor::EditorIcon::DirectionalLight, "Point Light");
+			const bool Expanded = m_EditorStyle.SectionHeader(PulseForgeEditor::EditorIcon::PointLight, "Point Light");
 			ImGui::SameLine();
 			ImGui::SetCursorPosX((std::max)(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 31.0f));
 			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Delete, "Remove", "RemovePointLight",
@@ -6041,7 +6214,7 @@ namespace
 			if (!Result || !Result->has_value())
 				return;
 			PulseForge::SpotLightComponent Component = **Result;
-			const bool Expanded = m_EditorStyle.SectionHeader(PulseForgeEditor::EditorIcon::DirectionalLight, "Spot Light");
+			const bool Expanded = m_EditorStyle.SectionHeader(PulseForgeEditor::EditorIcon::SpotLight, "Spot Light");
 			ImGui::SameLine();
 			ImGui::SetCursorPosX((std::max)(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 31.0f));
 			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Delete, "Remove", "RemoveSpotLight",
