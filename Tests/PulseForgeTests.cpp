@@ -2168,8 +2168,8 @@ namespace
 		PF_CHECK(Tests, EditorFontDescriptors[0].RelativePath == "Fonts/Inter-Regular.ttf");
 		PF_CHECK(Tests, EditorFontDescriptors[1].RelativePath == "Fonts/Inter-SemiBold.ttf");
 		PF_CHECK(Tests, EditorFontDescriptors[2].RelativePath == "Fonts/JetBrainsMono-Regular.ttf");
-		PF_CHECK(Tests, EditorFontDescriptors[0].PixelSize == 17.0f);
-		PF_CHECK(Tests, EditorFontDescriptors[1].PixelSize == 17.0f);
+		PF_CHECK(Tests, EditorFontDescriptors[0].PixelSize == 16.0f);
+		PF_CHECK(Tests, EditorFontDescriptors[1].PixelSize == 16.0f);
 		PF_CHECK(Tests, EditorFontDescriptors[2].PixelSize == 16.0f);
 		PF_CHECK(Tests, EditorIconFontPixelSize == EditorFontDescriptors[0].PixelSize);
 		PF_CHECK(Tests, IsValidEditorTextGlyphRanges());
