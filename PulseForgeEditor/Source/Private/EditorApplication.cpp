@@ -25,6 +25,7 @@
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorCommandHistory.h"
+#include "Editor/EditorContentBrowserPolicy.h"
 #include "Editor/EditorProjectOpening.h"
 #include "EditorApplicationFactory.h"
 #include "Editor/EditorInteractionPolicy.h"
@@ -240,6 +241,24 @@ namespace
 		return ImGui::CalcTextSize(Ellipsis.data(), Ellipsis.data() + Ellipsis.size()).x <= AvailableWidth
 			? std::string(Ellipsis)
 			: std::string{};
+	}
+
+	std::string FitEditorContextLabel(std::string_view Label, float AvailableWidth)
+	{
+		constexpr std::string_view Ellipsis = "\xe2\x80\xa6";
+		if (ImGui::CalcTextSize(Label.data(), Label.data() + Label.size()).x <= AvailableWidth)
+			return std::string(Label);
+
+		size_t PrefixLength = PulseForgeEditor::Utf8SafePrefixLength(Label, 480);
+		const float EllipsisWidth = ImGui::CalcTextSize(Ellipsis.data(), Ellipsis.data() + Ellipsis.size()).x;
+		while (PrefixLength > 0)
+		{
+			const std::string_view Prefix = Label.substr(0, PrefixLength);
+			if (ImGui::CalcTextSize(Prefix.data(), Prefix.data() + Prefix.size()).x + EllipsisWidth <= AvailableWidth)
+				return std::string(Prefix) + std::string(Ellipsis);
+			PrefixLength = PulseForgeEditor::Utf8SafePrefixLength(Label, PrefixLength - 1);
+		}
+		return EllipsisWidth <= AvailableWidth ? std::string(Ellipsis) : std::string{};
 	}
 
 	class DialogPath final
@@ -2140,7 +2159,9 @@ namespace
 			bool PopupOpen = true;
 			if (ImGui::BeginPopupModal("Delete Managed Asset", &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize))
 			{
-				ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 9.0f));
+				ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(
+					PulseForgeEditor::EditorStyleMetrics::DialogItemSpacingX,
+					PulseForgeEditor::EditorStyleMetrics::DialogItemSpacingY));
 				const auto Asset = m_Project && m_PendingDeleteAsset
 					? m_Project->GetAssetRegistry().Find(*m_PendingDeleteAsset)
 					: std::optional<PulseForge::AssetRecord>{};
@@ -2506,7 +2527,9 @@ namespace
 			bool PopupOpen = true;
 			if (ImGui::BeginPopupModal("Unsaved Scene Changes", &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize))
 			{
-				ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 9.0f));
+				ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(
+					PulseForgeEditor::EditorStyleMetrics::DialogItemSpacingX,
+					PulseForgeEditor::EditorStyleMetrics::DialogItemSpacingY));
 				ImGui::TextUnformatted("The current scene has unsaved changes.");
 				ImGui::TextUnformatted("Save before continuing?");
 				if (ImGui::Button("Save", ImVec2(120.0f, 0.0f)))
@@ -2703,19 +2726,26 @@ namespace
 				ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings))
 			{
 				ImGui::TableSetupColumn("Tools", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-				ImGui::TableSetupColumn("Runtime", ImGuiTableColumnFlags_WidthFixed, 188.0f);
+				const float RuntimeColumnWidth = ContentWidth < 720.0f ? 136.0f : 188.0f;
+				ImGui::TableSetupColumn("Runtime", ImGuiTableColumnFlags_WidthFixed, RuntimeColumnWidth);
 				ImGui::TableSetupColumn("Save", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 				ImGui::TableNextRow(ImGuiTableRowFlags_None, 50.0f);
 
 				ImGui::TableSetColumnIndex(0);
-				if (m_Project && ContentWidth >= 1450.0f)
+				if (m_Project)
 				{
 					const std::string& ProjectName = m_Project->GetDescription().Name;
+					const float ContextWidth = ImGui::GetContentRegionAvail().x;
+					const float ProjectWidth = (std::max)(36.0f, (ContextWidth - 44.0f) * 0.48f);
+					const float SceneWidth = (std::max)(36.0f, ContextWidth - ProjectWidth - 44.0f);
+					const std::string ProjectLabel = FitEditorContextLabel(ProjectName, ProjectWidth);
 					ImGui::AlignTextToFramePadding();
 					{
 						[[maybe_unused]] const auto Emphasis = m_EditorStyle.PushEmphasisFont();
-						ImGui::TextUnformatted(ProjectName.c_str());
+						ImGui::TextUnformatted(ProjectLabel.c_str());
 					}
+					if (ProjectLabel != ProjectName && ImGui::IsItemHovered())
+						ImGui::SetTooltip("Project: %s", ProjectName.c_str());
 					ImGui::SameLine();
 					m_EditorStyle.TextMuted("/");
 					ImGui::SameLine();
@@ -2725,7 +2755,10 @@ namespace
 							SceneName = PathToUtf8(Record->ProjectRelativePath.filename());
 					if (m_SceneDirty)
 						SceneName.push_back('*');
-					ImGui::TextUnformatted(SceneName.c_str());
+					const std::string SceneLabel = FitEditorContextLabel(SceneName, SceneWidth);
+					ImGui::TextUnformatted(SceneLabel.c_str());
+					if (SceneLabel != SceneName && ImGui::IsItemHovered())
+						ImGui::SetTooltip("Scene: %s%s", SceneName.c_str(), m_SceneDirty ? " (unsaved changes)" : "");
 					ImGui::SameLine(0.0f, 12.0f);
 					ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
 					ImGui::SameLine(0.0f, 10.0f);
@@ -2805,10 +2838,17 @@ namespace
 					: m_StatusIsWarning
 						? m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning)
 						: m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::TextMuted);
+				const float MessageWidth = ImGui::GetContentRegionAvail().x;
 				ImGui::TextColored(MessageColor, "%s", m_StatusMessage.c_str());
+				if (ImGui::IsItemHovered() && ImGui::CalcTextSize(m_StatusMessage.c_str()).x > MessageWidth)
+					ImGui::SetTooltip("%s", m_StatusMessage.c_str());
 
 				ImGui::TableSetColumnIndex(1);
-				m_EditorStyle.TextMuted(!m_Scene ? "No scene" : m_SceneDirty ? "Unsaved scene" : "Scene saved");
+				const bool ShowDirtyState = m_Scene && m_SceneDirty;
+				if (ShowDirtyState)
+					ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning), "Unsaved scene");
+				else
+					m_EditorStyle.TextMuted(!m_Scene ? "No scene" : "Scene saved");
 				if (m_SceneRuntime)
 				{
 					ImGui::SameLine();
@@ -4967,7 +5007,8 @@ namespace
 				{
 					// Refresh before toolbar actions so Copy All uses a coherent current sink snapshot.
 					RefreshConsoleSnapshot();
-					if (m_EditorStyle.BeginToolbar("ConsoleToolbar", 34.0f))
+					if (m_EditorStyle.BeginToolbar("ConsoleToolbar",
+						PulseForgeEditor::EditorStyleMetrics::PanelToolbarHeight))
 					{
 						if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Clear, "Clear"))
 						{
@@ -5001,7 +5042,10 @@ namespace
 						ImGuiWindowFlags_HorizontalScrollbar))
 					{
 						[[maybe_unused]] const auto MonospaceFont = m_EditorStyle.PushMonospaceFont();
-						if (m_ConsoleSelectableView)
+						if (m_ConsoleMessages.empty())
+							m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Terminal,
+								"No console messages yet.");
+						else if (m_ConsoleSelectableView)
 						{
 							const bool TextViewHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
 							if (TextViewHovered && ImGui::GetIO().MouseWheel != 0.0f)
@@ -5032,13 +5076,14 @@ namespace
 						else
 						{
 							const bool WasAtBottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
-							const float PrefixWidth = std::clamp(
-								ImGui::GetContentRegionAvail().x * 0.28f, 112.0f, 190.0f);
-							if (ImGui::BeginTable("ConsoleMessageRows", 2,
+							const float SourceWidth = std::clamp(
+								ImGui::GetContentRegionAvail().x * 0.20f, 90.0f, 156.0f);
+							if (ImGui::BeginTable("ConsoleMessageRows", 3,
 								ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
 								ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_NoSavedSettings))
 							{
-								ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthFixed, PrefixWidth);
+								ImGui::TableSetupColumn("Severity", ImGuiTableColumnFlags_WidthFixed, 88.0f);
+								ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthFixed, SourceWidth);
 								ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 								ImGuiListClipper Clipper;
 								Clipper.Begin(static_cast<int>(m_ConsoleMessages.size()));
@@ -5067,11 +5112,16 @@ namespace
 										}
 										ImGui::TableSetColumnIndex(0);
 										ImGui::TextColored(LogLevelColor(Message.Level), "[%s]", LogLevelName(Message.Level));
-										ImGui::SameLine();
-										m_EditorStyle.TextMuted(Message.Logger);
 										ImGui::TableSetColumnIndex(1);
+										const float LoggerWidth = ImGui::GetContentRegionAvail().x;
+										m_EditorStyle.TextMuted(Message.Logger);
+										if (ImGui::IsItemHovered() && ImGui::CalcTextSize(Message.Logger.c_str()).x > LoggerWidth)
+											ImGui::SetTooltip("%s", Message.Logger.c_str());
+										ImGui::TableSetColumnIndex(2);
 										ImGui::TextUnformatted(
 											Message.Text.data(), Message.Text.data() + Message.Text.size());
+										if (ImGui::IsItemHovered())
+											ImGui::SetTooltip("%s", Message.Text.c_str());
 										ImGui::PopID();
 										ImGui::PopID();
 									}
@@ -7226,7 +7276,8 @@ namespace
 						}
 					}
 
-					if (m_EditorStyle.BeginToolbar("ContentBrowserToolbar", 37.0f))
+					if (m_EditorStyle.BeginToolbar("ContentBrowserToolbar",
+						PulseForgeEditor::EditorStyleMetrics::PanelToolbarHeight))
 					{
 						const bool Compact = ImGui::GetWindowWidth() < 440.0f;
 						if (Compact
@@ -7280,15 +7331,21 @@ namespace
 						SelectedAssetVisible = std::any_of(m_FilteredAssetIndices.begin(), m_FilteredAssetIndices.end(),
 							[this](size_t Index) { return m_Assets[Index].ID == *m_SelectedAsset; });
 
-					float DetailHeight = SelectedAssetVisible ? 108.0f : 0.0f;
+					bool SelectedMaterial = false;
 					if (SelectedAssetVisible && m_SelectedAsset)
 					{
 						const auto SelectedRecord = m_Project->GetAssetRegistry().Find(*m_SelectedAsset);
-						if (SelectedRecord && NormalizedExtension(SelectedRecord->ProjectRelativePath) == ".material")
-							DetailHeight = 390.0f;
+						SelectedMaterial = SelectedRecord &&
+							NormalizedExtension(SelectedRecord->ProjectRelativePath) == ".material";
 					}
-					const float ItemRegionHeight = (std::max)(ImGui::GetContentRegionAvail().y - DetailHeight, 50.0f);
-					ImGui::BeginChild("ContentAssetItems", ImVec2(0.0f, ItemRegionHeight), ImGuiChildFlags_None);
+					const PulseForgeEditor::ContentBrowserVerticalLayout VerticalLayout =
+						PulseForgeEditor::GetContentBrowserVerticalLayout(
+							ImGui::GetContentRegionAvail().y,
+							SelectedAssetVisible,
+							SelectedMaterial,
+							m_ContentDetailsExpandedCompact);
+					ImGui::BeginChild("ContentAssetItems", ImVec2(0.0f, VerticalLayout.AssetItemsHeight),
+						ImGuiChildFlags_None);
 					if (VisibleFolders && !VisibleFolders->empty())
 					{
 						if (m_ContentGridView)
@@ -7310,8 +7367,29 @@ namespace
 					const bool HasDeferredAction = static_cast<bool>(DeferredAction);
 					if (DeferredAction)
 						DeferredAction();
-					if (!HasDeferredAction && SelectedAssetVisible)
+					if (!HasDeferredAction && SelectedAssetVisible && VerticalLayout.SelectionSummaryHeight > 0.0f)
+					{
+						const auto SelectedRecord = m_Project->GetAssetRegistry().Find(*m_SelectedAsset);
+						std::string SelectedName = SelectedRecord
+							? PathToUtf8(SelectedRecord->ProjectRelativePath.filename()) : "Selected asset";
+						if (SelectedMaterial && m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(*m_SelectedAsset)))
+							SelectedName += " — Unsaved draft";
+						const std::string Summary = FitEditorContextLabel(SelectedName,
+							(std::max)(ImGui::GetContentRegionAvail().x - 112.0f, 20.0f));
+						ImGui::TextUnformatted(Summary.c_str());
+						if (Summary != SelectedName && ImGui::IsItemHovered())
+							ImGui::SetTooltip("%s", SelectedName.c_str());
+						ImGui::SameLine();
+						if (ImGui::SmallButton(m_ContentDetailsExpandedCompact ? "Hide Details" : "Details"))
+							m_ContentDetailsExpandedCompact = !m_ContentDetailsExpandedCompact;
+					}
+					if (!HasDeferredAction && SelectedAssetVisible && VerticalLayout.DetailsHeight > 0.0f)
+					{
+						ImGui::BeginChild("SelectedAssetDetails", ImVec2(0.0f, VerticalLayout.DetailsHeight),
+							ImGuiChildFlags_Borders, ImGuiWindowFlags_AlwaysVerticalScrollbar);
 						DrawSelectedAssetDetails();
+						ImGui::EndChild();
+					}
 					ImGui::EndChild();
 				}
 			}
@@ -7521,6 +7599,7 @@ namespace
 		bool m_ConsoleSelectableTextInitialized = false;
 		bool m_ConsoleSelectableAutoScrollSuspended = false;
 		bool m_ContentGridView = true;
+		bool m_ContentDetailsExpandedCompact = false;
 		uint64_t m_ConsoleRevision = 0;
 		uint64_t m_ConsoleSelectableTextRevision = 0;
 		std::string m_ConsoleSelectableText;

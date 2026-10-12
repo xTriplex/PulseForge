@@ -28,6 +28,7 @@
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorCommandLine.h"
+#include "Editor/EditorContentBrowserPolicy.h"
 #include "Editor/EditorEntityIconPolicy.h"
 #include "Editor/EditorHierarchyRowPolicy.h"
 #include "Editor/EditorInteractionPolicy.h"
@@ -2174,9 +2175,34 @@ namespace
 		PF_CHECK(Tests, GetEditorPropertyLabelWidth(100.0f) == EditorStyleMetrics::PropertyLabelWidthMinimum);
 		PF_CHECK(Tests, GetEditorPropertyLabelWidth(300.0f) == 90.0f);
 		PF_CHECK(Tests, GetEditorPropertyLabelWidth(1000.0f) == EditorStyleMetrics::PropertyLabelWidthMaximum);
+		PF_CHECK(Tests, EditorStyleMetrics::PanelToolbarHeight == 36.0f);
+		PF_CHECK(Tests, EditorStyleMetrics::PanelToolbarPaddingX == 7.0f);
+		PF_CHECK(Tests, EditorStyleMetrics::PanelToolbarPaddingY == 4.0f);
 		PF_CHECK(Tests, UseCompactVector3PropertyInput(229.0f));
 		PF_CHECK(Tests, !UseCompactVector3PropertyInput(230.0f));
 		PF_CHECK(Tests, UseCompactVector3PropertyInput(std::numeric_limits<float>::quiet_NaN()));
+		const ContentBrowserVerticalLayout NoSelection = GetContentBrowserVerticalLayout(320.0f, false, true);
+		PF_CHECK(Tests, NoSelection.AssetItemsHeight == 320.0f && NoSelection.DetailsHeight == 0.0f);
+		const ContentBrowserVerticalLayout CompactSelection = GetContentBrowserVerticalLayout(120.0f, true, true);
+		PF_CHECK(Tests, CompactSelection.SelectionSummaryHeight ==
+			ContentBrowserLayoutMetrics::CompactSelectionSummaryHeight);
+		PF_CHECK(Tests, CompactSelection.AssetItemsHeight == 92.0f && CompactSelection.DetailsHeight == 0.0f);
+		const ContentBrowserVerticalLayout ExpandedCompactSelection =
+			GetContentBrowserVerticalLayout(120.0f, true, true, true);
+		PF_CHECK(Tests, ExpandedCompactSelection.SelectionSummaryHeight == 28.0f);
+		PF_CHECK(Tests, ExpandedCompactSelection.DetailsHeight > 0.0f && ExpandedCompactSelection.AssetItemsHeight > 0.0f);
+		const ContentBrowserVerticalLayout RegularAssetDetails = GetContentBrowserVerticalLayout(320.0f, true, false);
+		PF_CHECK(Tests, RegularAssetDetails.DetailsHeight == ContentBrowserLayoutMetrics::RegularDetailsMaximumHeight);
+		PF_CHECK(Tests, RegularAssetDetails.AssetItemsHeight >= ContentBrowserLayoutMetrics::MinimumAssetItemsHeight);
+		const ContentBrowserVerticalLayout ShortMaterialDetails = GetContentBrowserVerticalLayout(180.0f, true, true);
+		PF_CHECK(Tests, ShortMaterialDetails.DetailsHeight > 0.0f && ShortMaterialDetails.DetailsHeight < 390.0f);
+		PF_CHECK(Tests, ShortMaterialDetails.AssetItemsHeight >= ContentBrowserLayoutMetrics::MinimumAssetItemsHeight);
+		const ContentBrowserVerticalLayout TallMaterialDetails = GetContentBrowserVerticalLayout(840.0f, true, true);
+		PF_CHECK(Tests, TallMaterialDetails.DetailsHeight == ContentBrowserLayoutMetrics::MaterialDetailsMaximumHeight);
+		PF_CHECK(Tests, TallMaterialDetails.AssetItemsHeight + TallMaterialDetails.DetailsHeight == 840.0f);
+		const ContentBrowserVerticalLayout InvalidContentHeight = GetContentBrowserVerticalLayout(
+			std::numeric_limits<float>::quiet_NaN(), true, true);
+		PF_CHECK(Tests, InvalidContentHeight.AssetItemsHeight == 0.0f && InvalidContentHeight.SelectionSummaryHeight == 0.0f);
 		PF_CHECK(Tests, GetEditorEntityIcon({}) == EditorIcon::Entity);
 		PF_CHECK(Tests, GetEditorEntityIcon({ .HasCamera = true, .HasMesh = true }) == EditorIcon::Camera);
 		PF_CHECK(Tests, GetEditorEntityIcon({ .HasMesh = true, .HasPointLight = true }) == EditorIcon::Cube);

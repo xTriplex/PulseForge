@@ -25,6 +25,11 @@ namespace PulseForgeEditor
 		inline constexpr float PropertyLabelWidthMinimum = 60.0f;
 		inline constexpr float PropertyLabelWidthMaximum = 104.0f;
 		inline constexpr float ComponentBodyPadding = 6.0f;
+		inline constexpr float PanelToolbarHeight = 36.0f;
+		inline constexpr float PanelToolbarPaddingX = 7.0f;
+		inline constexpr float PanelToolbarPaddingY = 4.0f;
+		inline constexpr float DialogItemSpacingX = 10.0f;
+		inline constexpr float DialogItemSpacingY = 9.0f;
 		inline constexpr float Vector3AxisInputMinimumWidth = 230.0f;
 		inline constexpr float ViewportToolbarHeight = 36.0f;
 		inline constexpr float ViewportToolbarButtonSize = 28.0f;
@@ -340,7 +345,7 @@ namespace PulseForgeEditor
 			const char* Shortcut = nullptr,
 			bool Selected = false,
 			bool Enabled = true) const;
-		[[nodiscard]] bool BeginToolbar(const char* ID, float Height = 32.0f) const;
+		[[nodiscard]] bool BeginToolbar(const char* ID, float Height = EditorStyleMetrics::PanelToolbarHeight) const;
 		void EndToolbar() const;
 		[[nodiscard]] bool BeginPropertyTable(const char* ID) const;
 		[[nodiscard]] bool BeginPropertyRow(std::string_view Label) const;

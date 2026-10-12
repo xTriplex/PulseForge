@@ -672,7 +672,8 @@ namespace PulseForgeEditor
 	{
 		ImGui::PushStyleColor(ImGuiCol_ChildBg, GetColor(EditorColorToken::PanelRaised));
 		ImGui::PushStyleColor(ImGuiCol_Border, GetColor(EditorColorToken::Border));
-		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(7.0f, 4.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+			ImVec2(EditorStyleMetrics::PanelToolbarPaddingX, EditorStyleMetrics::PanelToolbarPaddingY));
 		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 2.0f);
 		return ImGui::BeginChild(ID, ImVec2(0.0f, Height), ImGuiChildFlags_Borders,
 			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings);
