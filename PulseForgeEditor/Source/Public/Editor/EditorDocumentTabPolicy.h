@@ -1,18 +1,43 @@
 #pragma once
 
+#include <cstdint>
+
 namespace PulseForgeEditor
 {
-	[[nodiscard]] constexpr bool ShouldDetachDocumentTab(
+	enum class DocumentTabReleaseAction : uint8_t
+	{
+		None,
+		TransferToStrip,
+		CreateNativeHost
+	};
+
+	[[nodiscard]] constexpr bool ShouldCaptureDocumentTabDrag(
+		bool TabHovered,
+		bool CloseButtonHovered,
+		bool LeftButtonPressed) noexcept
+	{
+		return TabHovered && !CloseButtonHovered && LeftButtonPressed;
+	}
+
+	[[nodiscard]] constexpr DocumentTabReleaseAction ResolveDocumentTabReleaseAction(
 		bool MouseReleased,
 		bool HasActiveTabDrag,
 		bool TransferQueued,
 		float DragDistanceSquared,
-		float DragThreshold) noexcept
+		float DragThreshold,
+		bool SourceIsMainHost,
+		bool IsAssetDocument,
+		bool IsOverRegisteredDocumentStrip) noexcept
 	{
-		// Only a registered document strip is a valid docking destination. Releasing over
-		// any other editor viewport is therefore a tear-off, just like releasing on desktop.
-		// The explicit threshold also supports outside releases where ImGui clears its payload.
-		return MouseReleased && HasActiveTabDrag && !TransferQueued &&
-			DragDistanceSquared >= DragThreshold * DragThreshold;
+		if (!MouseReleased || !HasActiveTabDrag || TransferQueued ||
+			!(DragDistanceSquared >= DragThreshold * DragThreshold))
+			return DocumentTabReleaseAction::None;
+		if (!IsAssetDocument)
+			return DocumentTabReleaseAction::None;
+		if (IsOverRegisteredDocumentStrip)
+			return DocumentTabReleaseAction::TransferToStrip;
+		return SourceIsMainHost
+			? DocumentTabReleaseAction::CreateNativeHost
+			: DocumentTabReleaseAction::None;
 	}
 }

@@ -4008,12 +4008,31 @@ namespace
 		const auto CleanBatch = FilterDirtyDocumentIdentities(BatchDocuments,
 			[](int) { return false; });
 		PF_CHECK(Tests, CleanBatch.empty());
-		// A captured tab drag may outlive ImGui's payload on the release frame.
-		PF_CHECK(Tests, ShouldDetachDocumentTab(true, true, false, 100.0f, 6.0f));
-		PF_CHECK(Tests, !ShouldDetachDocumentTab(true, true, false, 35.0f, 6.0f));
-		PF_CHECK(Tests, !ShouldDetachDocumentTab(false, true, false, 100.0f, 6.0f));
-		PF_CHECK(Tests, !ShouldDetachDocumentTab(true, false, false, 100.0f, 6.0f));
-		PF_CHECK(Tests, !ShouldDetachDocumentTab(true, true, true, 100.0f, 6.0f));
+		// Tab capture must start from a hovered press, even when ImGui does not activate the item.
+		PF_CHECK(Tests, ShouldCaptureDocumentTabDrag(true, false, true));
+		PF_CHECK(Tests, !ShouldCaptureDocumentTabDrag(false, false, true));
+		PF_CHECK(Tests, !ShouldCaptureDocumentTabDrag(true, true, true));
+		PF_CHECK(Tests, !ShouldCaptureDocumentTabDrag(true, false, false));
+		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
+			false, true, true) == DocumentTabReleaseAction::TransferToStrip);
+		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
+			true, true, true) == DocumentTabReleaseAction::TransferToStrip);
+		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
+			true, true, false) == DocumentTabReleaseAction::CreateNativeHost);
+		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
+			false, true, false) == DocumentTabReleaseAction::None);
+		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
+			true, false, false) == DocumentTabReleaseAction::None);
+		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 100.0f, 6.0f,
+			true, false, true) == DocumentTabReleaseAction::None);
+		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, true, 100.0f, 6.0f,
+			true, true, false) == DocumentTabReleaseAction::None);
+		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(false, true, false, 100.0f, 6.0f,
+			true, true, true) == DocumentTabReleaseAction::None);
+		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, false, false, 100.0f, 6.0f,
+			true, true, true) == DocumentTabReleaseAction::None);
+		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 35.0f, 6.0f,
+			true, true, true) == DocumentTabReleaseAction::None);
 		const EditorDocumentIdentity MaterialA{ *Project, *Material, EditorDocumentKind::Material };
 		const EditorDocumentIdentity MaterialB{ *Project, *OtherMaterial, EditorDocumentKind::Material };
 		const EditorDocumentIdentity SameNameOtherFolder{ *Project, *Scene, EditorDocumentKind::Material };
@@ -4963,6 +4982,7 @@ namespace
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTestFixture);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostResetLayoutTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTabTearOffTest);
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTabReattachTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostPresentationFailureTest);
 
 		const std::string AbsoluteProjectPath = ProjectFile.string();
@@ -5022,6 +5042,26 @@ namespace
 		const auto TabTearOffWithoutFixtureOptions = ParseEditorCommandLine(TabTearOffWithoutFixture, Root);
 		PF_CHECK(Tests, !TabTearOffWithoutFixtureOptions &&
 			TabTearOffWithoutFixtureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+		const std::array TabReattachFixtureArguments = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-test-tab-reattach") };
+		const auto TabReattachFixtureOptions = ParseEditorCommandLine(TabReattachFixtureArguments, Root);
+		PF_CHECK(Tests, TabReattachFixtureOptions && TabReattachFixtureOptions->EnableDocumentHostTabReattachTest);
+		const std::array TabReattachWithoutFixture = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-tab-reattach") };
+		const auto TabReattachWithoutFixtureOptions = ParseEditorCommandLine(TabReattachWithoutFixture, Root);
+		PF_CHECK(Tests, !TabReattachWithoutFixtureOptions &&
+			TabReattachWithoutFixtureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+		const std::array ConflictingTabTransferFixtures = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-test-tab-tear-off"),
+			std::string_view("--document-host-test-tab-reattach") };
+		const auto ConflictingTabTransferOptions = ParseEditorCommandLine(ConflictingTabTransferFixtures, Root);
+		PF_CHECK(Tests, !ConflictingTabTransferOptions &&
+			ConflictingTabTransferOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
 		const std::array PresentationFailureFixtureArguments = {
 			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
 			std::string_view("--document-host-test-fixture"),
