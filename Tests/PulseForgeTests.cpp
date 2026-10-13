@@ -4033,6 +4033,23 @@ namespace
 			true, true, true) == DocumentTabReleaseAction::None);
 		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, 35.0f, 6.0f,
 			true, true, true) == DocumentTabReleaseAction::None);
+		const DocumentTabPointerPosition DragStart{ 100.0f, 100.0f };
+		const DocumentTabPointerPosition LastPointer{ 117.0f, 112.0f };
+		const std::optional<DocumentTabPointerPosition> NoPointer;
+		const std::optional<DocumentTabPointerPosition> LastValidPointer = LastPointer;
+		PF_CHECK(Tests, IsUsableDocumentTabPointerPosition(LastPointer.X, LastPointer.Y));
+		PF_CHECK(Tests, !IsUsableDocumentTabPointerPosition(-100001.0f, -100001.0f));
+		const auto ReleasePointer = ResolveDocumentTabReleasePosition(
+			-100001.0f, -100001.0f, LastValidPointer);
+		PF_CHECK(Tests, ReleasePointer && ReleasePointer->X == LastPointer.X && ReleasePointer->Y == LastPointer.Y);
+		PF_CHECK(Tests, !ResolveDocumentTabReleasePosition(-100001.0f, -100001.0f, NoPointer));
+		const float LastObservedDragDistance = CalculateDocumentTabDragDistanceSquared(
+			DragStart, NoPointer, LastValidPointer, 0.0f);
+		PF_CHECK(Tests, LastObservedDragDistance == 433.0f);
+		PF_CHECK(Tests, CalculateDocumentTabDragDistanceSquared(
+			DragStart, NoPointer, LastValidPointer, 900.0f) == 900.0f);
+		PF_CHECK(Tests, ResolveDocumentTabReleaseAction(true, true, false, LastObservedDragDistance, 6.0f,
+			true, true, false) == DocumentTabReleaseAction::CreateNativeHost);
 		const EditorDocumentIdentity MaterialA{ *Project, *Material, EditorDocumentKind::Material };
 		const EditorDocumentIdentity MaterialB{ *Project, *OtherMaterial, EditorDocumentKind::Material };
 		const EditorDocumentIdentity SameNameOtherFolder{ *Project, *Scene, EditorDocumentKind::Material };

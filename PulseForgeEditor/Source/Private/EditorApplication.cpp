@@ -3182,7 +3182,7 @@ namespace
 							break;
 						}
 						m_DocumentHostTabTearOffTestDrop = ImVec2(
-							MainViewport->Pos.x + MainViewport->Size.x * 0.5f,
+							MainViewport->Pos.x + MainViewport->Size.x + 24.0f,
 							MainViewport->Pos.y + MainViewport->Size.y * 0.5f);
 						const float DeltaX = m_DocumentHostTabTearOffTestDrop.x - m_DocumentHostTabTearOffTestStart.x;
 						const float DeltaY = m_DocumentHostTabTearOffTestDrop.y - m_DocumentHostTabTearOffTestStart.y;
@@ -3202,7 +3202,8 @@ namespace
 					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::DragQueued;
 					break;
 				case DocumentTabTearOffTestPhase::DragQueued:
-					IO.AddMousePosEvent(m_DocumentHostTabTearOffTestDrop.x, m_DocumentHostTabTearOffTestDrop.y);
+					IO.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+					IO.AddMouseViewportEvent(0);
 					IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
 					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::ReleaseQueued;
 					break;
@@ -6134,12 +6135,20 @@ namespace
 		void ProcessReleasedDocumentTabDrag()
 		{
 			const ImGuiIO& IO = ImGui::GetIO();
+			const auto CurrentPosition = PulseForgeEditor::IsUsableDocumentTabPointerPosition(
+				IO.MousePos.x, IO.MousePos.y)
+				? std::optional<PulseForgeEditor::DocumentTabPointerPosition>(
+					PulseForgeEditor::DocumentTabPointerPosition{ IO.MousePos.x, IO.MousePos.y })
+				: std::nullopt;
 			if (!IO.MouseReleased[ImGuiMouseButton_Left])
 			{
+				if (m_ActiveDocumentTabDrag && IO.MouseDown[ImGuiMouseButton_Left] && CurrentPosition)
+					m_ActiveDocumentTabDragLastPosition = CurrentPosition;
 				if (!IO.MouseDown[ImGuiMouseButton_Left] && !ImGui::GetDragDropPayload())
 				{
 					m_ActiveDocumentTabDrag.reset();
 					m_ActiveDocumentTabDragStart.reset();
+					m_ActiveDocumentTabDragLastPosition.reset();
 				}
 				return;
 			}
@@ -6149,22 +6158,28 @@ namespace
 			// The captured identity remains authoritative when a cross-viewport release clears ImGui's payload.
 			const PulseForgeEditor::EditorDocumentIdentity Identity = *m_ActiveDocumentTabDrag;
 			m_ActiveDocumentTabDrag.reset();
-			const ImVec2 MousePosition = IO.MousePos;
-			const ImVec2 DragStart = m_ActiveDocumentTabDragStart.value_or(MousePosition);
+			const auto LastValidPosition = m_ActiveDocumentTabDragLastPosition;
+			const auto ReleasePosition = PulseForgeEditor::ResolveDocumentTabReleasePosition(
+				IO.MousePos.x, IO.MousePos.y, LastValidPosition);
+			const ImVec2 DragStart = m_ActiveDocumentTabDragStart.value_or(
+				ReleasePosition ? ImVec2(ReleasePosition->X, ReleasePosition->Y) : ImVec2(-FLT_MAX, -FLT_MAX));
 			m_ActiveDocumentTabDragStart.reset();
-			if (!std::isfinite(MousePosition.x) || !std::isfinite(MousePosition.y) ||
-				!std::isfinite(DragStart.x) || !std::isfinite(DragStart.y) ||
-				std::abs(MousePosition.x) > 100000.0f || std::abs(MousePosition.y) > 100000.0f)
+			m_ActiveDocumentTabDragLastPosition.reset();
+			if (!ReleasePosition || !PulseForgeEditor::IsUsableDocumentTabPointerPosition(DragStart.x, DragStart.y))
 				return;
-			const float DragDeltaX = MousePosition.x - DragStart.x;
-			const float DragDeltaY = MousePosition.y - DragStart.y;
-			const float DragDistanceSquared = DragDeltaX * DragDeltaX + DragDeltaY * DragDeltaY;
+			const ImVec2 MousePosition(ReleasePosition->X, ReleasePosition->Y);
+			const auto StartPosition = PulseForgeEditor::DocumentTabPointerPosition{ DragStart.x, DragStart.y };
+			const float DragDistanceSquared = PulseForgeEditor::CalculateDocumentTabDragDistanceSquared(
+				StartPosition, CurrentPosition, LastValidPosition,
+				IO.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left]);
 
 			const bool TransferQueued = m_PendingDocumentTransfer &&
 				m_PendingDocumentTransfer->Identity == Identity;
 			const auto* Session = m_Documents.Find(Identity);
 			const auto* SourceHost = Session ? m_Documents.FindHost(Session->HostID) : nullptr;
-			const auto DropTarget = FindDocumentTabDropTarget(MousePosition, IO.MouseHoveredViewport);
+			const auto DropTarget = CurrentPosition
+				? FindDocumentTabDropTarget(MousePosition, IO.MouseHoveredViewport)
+				: std::nullopt;
 			const PulseForgeEditor::DocumentTabReleaseAction Action =
 				PulseForgeEditor::ResolveDocumentTabReleaseAction(
 					true,
@@ -6309,9 +6324,9 @@ namespace
 				const bool HasCloseButton = Session->Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level;
 				constexpr float TabHeight = 25.0f;
 				constexpr float LeftPadding = 10.0f;
-				constexpr float LabelToCloseGap = 4.0f;
-				constexpr float CloseRegionWidth = 24.0f;
-				constexpr float RightPadding = 6.0f;
+				constexpr float LabelToCloseGap = 2.0f;
+				constexpr float CloseRegionWidth = 28.0f;
+				constexpr float RightPadding = 4.0f;
 				const ImVec2 LabelSize = ImGui::CalcTextSize(Label.c_str());
 				const float TabWidth = LeftPadding + LabelSize.x +
 					(HasCloseButton ? LabelToCloseGap + CloseRegionWidth + RightPadding : LeftPadding);
@@ -6397,8 +6412,8 @@ namespace
 				const bool TabHovered = ImGui::IsItemHovered();
 				const ImVec2 MousePosition = ImGui::GetIO().MousePos;
 				const float CloseRegionMinimumX = TabMinimum.x + LeftPadding + LabelSize.x + LabelToCloseGap;
-				const ImVec2 CloseButtonMinimum(CloseRegionMinimumX, TabMinimum.y + 2.0f);
-				const ImVec2 CloseButtonMaximum(CloseRegionMinimumX + CloseRegionWidth, TabMaximum.y - 2.0f);
+				const ImVec2 CloseButtonMinimum(CloseRegionMinimumX, TabMinimum.y + 1.0f);
+				const ImVec2 CloseButtonMaximum(CloseRegionMinimumX + CloseRegionWidth, TabMaximum.y - 1.0f);
 				const bool CloseHovered = HasCloseButton && TabHovered &&
 					MousePosition.x >= CloseButtonMinimum.x && MousePosition.x < CloseButtonMaximum.x &&
 					MousePosition.y >= CloseButtonMinimum.y && MousePosition.y < CloseButtonMaximum.y;
@@ -6408,6 +6423,9 @@ namespace
 				{
 					m_ActiveDocumentTabDrag = Session->Identity;
 					m_ActiveDocumentTabDragStart = ImGui::GetIO().MouseClickedPos[ImGuiMouseButton_Left];
+					if (PulseForgeEditor::IsUsableDocumentTabPointerPosition(MousePosition.x, MousePosition.y))
+						m_ActiveDocumentTabDragLastPosition = PulseForgeEditor::DocumentTabPointerPosition{
+							MousePosition.x, MousePosition.y };
 				}
 				if (Pressed && CloseHovered)
 					QueueDocumentTabClose(Session->Identity);
@@ -6430,15 +6448,15 @@ namespace
 					if (CloseHovered)
 						DrawList->AddRectFilled(CloseButtonMinimum, CloseButtonMaximum,
 							ImGui::GetColorU32(ImGuiCol_ButtonHovered), 4.0f);
-					constexpr float CloseHalfExtent = 8.0f;
+					constexpr float CloseHalfExtent = 10.0f;
 					const ImU32 CloseColor = ImGui::GetColorU32(
 						CloseHovered ? ImGuiCol_Text : ImGuiCol_TextDisabled);
 					DrawList->AddLine(
 						ImVec2(CloseCenter.x - CloseHalfExtent, CloseCenter.y - CloseHalfExtent),
-						ImVec2(CloseCenter.x + CloseHalfExtent, CloseCenter.y + CloseHalfExtent), CloseColor, 2.0f);
+						ImVec2(CloseCenter.x + CloseHalfExtent, CloseCenter.y + CloseHalfExtent), CloseColor, 2.25f);
 					DrawList->AddLine(
 						ImVec2(CloseCenter.x + CloseHalfExtent, CloseCenter.y - CloseHalfExtent),
-						ImVec2(CloseCenter.x - CloseHalfExtent, CloseCenter.y + CloseHalfExtent), CloseColor, 2.0f);
+						ImVec2(CloseCenter.x - CloseHalfExtent, CloseCenter.y + CloseHalfExtent), CloseColor, 2.25f);
 					if (CloseHovered)
 						ImGui::SetTooltip("Close %s", Session->DisplayName.c_str());
 				}
@@ -6498,6 +6516,9 @@ namespace
 					if (std::isfinite(PressPosition.x) && std::isfinite(PressPosition.y) &&
 						std::abs(PressPosition.x) < 100000.0f && std::abs(PressPosition.y) < 100000.0f)
 						m_ActiveDocumentTabDragStart = PressPosition;
+					if (PulseForgeEditor::IsUsableDocumentTabPointerPosition(MousePosition.x, MousePosition.y))
+						m_ActiveDocumentTabDragLastPosition = PulseForgeEditor::DocumentTabPointerPosition{
+							MousePosition.x, MousePosition.y };
 					const std::string Payload = GetDocumentPayload(Session->Identity);
 					ImGui::SetDragDropPayload("PF_EDITOR_DOCUMENT", Payload.c_str(), Payload.size() + 1);
 					ImGui::TextUnformatted(Label.c_str());
@@ -11990,6 +12011,7 @@ namespace
 		std::optional<PendingDocumentTransfer> m_PendingDocumentTransfer;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_ActiveDocumentTabDrag;
 		std::optional<ImVec2> m_ActiveDocumentTabDragStart;
+		std::optional<PulseForgeEditor::DocumentTabPointerPosition> m_ActiveDocumentTabDragLastPosition;
 		std::vector<DocumentTabDropTarget> m_DocumentTabDropTargets;
 		std::string m_DocumentCloseDialogHostID;
 		std::unordered_set<std::string> m_DocumentHostFocusRequests;
