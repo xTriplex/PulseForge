@@ -112,7 +112,10 @@ namespace
 		return ImHashStr("DockSpace", 0, ImHashStr(HostWindowName));
 	}
 
-	void AppendPanelState(std::string& Contents, const PulseForgeEditor::EditorPanelVisibility& Panels)
+	void AppendPanelState(
+		std::string& Contents,
+		const PulseForgeEditor::EditorPanelVisibility& Panels,
+		uint32_t DocumentOpeningPreference)
 	{
 		if (!Contents.empty() && Contents.back() != '\n')
 			Contents.push_back('\n');
@@ -123,6 +126,8 @@ namespace
 		Contents.append(std::to_string(WorkspaceSettingsFormat));
 		Contents.append("\nDefaultLayoutVersion=");
 		Contents.append(std::to_string(PulseForgeEditor::CurrentDefaultEditorLayoutVersion));
+		Contents.append("\nDocumentOpeningPreference=");
+		Contents.append(std::to_string(DocumentOpeningPreference));
 		Contents.push_back('\n');
 		for (const PulseForgeEditor::EditorPanelDescriptor& Descriptor : PulseForgeEditor::EditorPanelDescriptors)
 		{
@@ -344,6 +349,22 @@ namespace PulseForgeEditor
 		return true;
 	}
 
+	bool EditorLayout::SetDocumentOpeningPreference(uint32_t Preference) noexcept
+	{
+		if (Preference > 2 || m_DocumentOpeningPreference == Preference)
+			return false;
+		m_DocumentOpeningPreference = Preference;
+		MarkSettingsDirty();
+		return true;
+	}
+
+	std::filesystem::path EditorLayout::GetDocumentWorkspacePath(std::string_view ProjectID) const
+	{
+		if (m_SettingsPath.empty() || ProjectID.empty())
+			return {};
+		return m_SettingsPath.parent_path() / ("documents-" + std::string(ProjectID) + ".json");
+	}
+
 	bool EditorLayout::DockPanelBesideIfUnplaced(EditorPanel Panel, EditorPanel ReferencePanel)
 	{
 		if (!m_Initialized || !m_LayoutInitialized || !ImGui::GetCurrentContext() || Panel == ReferencePanel)
@@ -410,7 +431,7 @@ namespace PulseForgeEditor
 		const char* IniData = ImGui::SaveIniSettingsToMemory(&IniSize);
 		(void)IniSize;
 		std::string Contents(IniData ? IniData : "");
-		AppendPanelState(Contents, m_Panels);
+		AppendPanelState(Contents, m_Panels, m_DocumentOpeningPreference);
 		return WriteAtomically(m_SettingsPath, Contents);
 	}
 
@@ -452,6 +473,13 @@ namespace PulseForgeEditor
 			if (Key == "DefaultLayoutVersion")
 			{
 				(void)ParseUnsigned(Value, m_LoadedDefaultLayoutVersion);
+				continue;
+			}
+			if (Key == "DocumentOpeningPreference")
+			{
+				uint32_t Preference = 0;
+				if (ParseUnsigned(Value, Preference) && Preference <= 2)
+					m_DocumentOpeningPreference = Preference;
 				continue;
 			}
 			for (const EditorPanelDescriptor& Descriptor : EditorPanelDescriptors)

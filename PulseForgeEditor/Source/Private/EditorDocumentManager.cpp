@@ -26,7 +26,7 @@ namespace PulseForgeEditor
 	{
 		if (FindHost(ID))
 			return nullptr;
-		m_Hosts.push_back({ std::move(ID), Role, PlacementKind, {}, std::nullopt });
+		m_Hosts.push_back({ std::move(ID), Role, PlacementKind, {}, {}, std::nullopt });
 		return &m_Hosts.back();
 	}
 
@@ -36,10 +36,18 @@ namespace PulseForgeEditor
 		const auto HostUUID = PulseForge::UUID::Generate();
 		if (!HostUUID)
 			return std::unexpected(HostUUID.error().Message);
-		std::string ID = "native:" + HostUUID->ToString();
-		if (!CreateHost(ID, EditorDocumentHostRole::Native, PlacementKind))
+		return CreateNativeHost("native:" + HostUUID->ToString(), PlacementKind);
+	}
+
+	std::expected<std::string, std::string> EditorDocumentManager::CreateNativeHost(
+		std::string HostID,
+		EditorDocumentKind PlacementKind)
+	{
+		if (HostID.empty() || HostID == MainHostID || PlacementKind == EditorDocumentKind::Level || FindHost(HostID))
+			return std::unexpected("The native document host identity or editor kind is invalid");
+		if (!CreateHost(HostID, EditorDocumentHostRole::Native, PlacementKind))
 			return std::unexpected("Could not register a unique native document host");
-		return ID;
+		return HostID;
 	}
 
 	std::expected<EditorDocumentOpenResult, std::string> EditorDocumentManager::Open(
@@ -63,10 +71,10 @@ namespace PulseForgeEditor
 		{
 			if (Preference == EditorDocumentOpenPreference::NewNativeWindow)
 			{
-				auto Host = CreateNativeHost(Identity.Kind);
-				if (!Host)
-					return std::unexpected(Host.error());
-				HostID = std::move(*Host);
+				HostID = "native:" + Identity.Project.ToString() + ":" + Identity.Asset.ToString() + ":" +
+					std::to_string(static_cast<uint32_t>(Identity.Kind));
+				if (!CreateHost(HostID, EditorDocumentHostRole::Native, Identity.Kind))
+					return std::unexpected("Could not register a unique native document host");
 			}
 			else if (Preference == EditorDocumentOpenPreference::RememberedPlacement)
 			{
@@ -195,6 +203,34 @@ namespace PulseForgeEditor
 		if (!FindHost(HostID))
 			return false;
 		m_FocusedHostID = HostID;
+		return true;
+	}
+
+	bool EditorDocumentManager::SetRememberedHost(EditorDocumentKind Kind, std::string_view HostID) noexcept
+	{
+		if (Kind == EditorDocumentKind::Level)
+			return false;
+		const EditorDocumentHost* Host = FindHost(HostID);
+		if (!Host || Host->Role != EditorDocumentHostRole::Native || Host->PlacementKind != Kind)
+			return false;
+		m_RememberedHosts[Kind] = Host->ID;
+		return true;
+	}
+
+	bool EditorDocumentManager::SetHostBounds(
+		std::string_view HostID,
+		EditorDocumentHost::WindowBounds Bounds) noexcept
+	{
+		EditorDocumentHost* Host = FindHost(HostID);
+		if (!Host || Host->Role != EditorDocumentHostRole::Native)
+			return false;
+		const auto& Current = Host->Bounds;
+		if (Current.X == Bounds.X && Current.Y == Bounds.Y && Current.Width == Bounds.Width &&
+			Current.Height == Bounds.Height && Current.DpiScale == Bounds.DpiScale &&
+			Current.MonitorName == Bounds.MonitorName && Current.Maximized == Bounds.Maximized &&
+			Current.HasValue == Bounds.HasValue)
+			return false;
+		Host->Bounds = std::move(Bounds);
 		return true;
 	}
 

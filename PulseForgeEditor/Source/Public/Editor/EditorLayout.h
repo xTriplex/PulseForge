@@ -116,6 +116,9 @@ namespace PulseForgeEditor
 		[[nodiscard]] bool IsPanelVisible(EditorPanel Panel) const noexcept;
 		[[nodiscard]] bool* GetPanelVisibility(EditorPanel Panel) noexcept;
 		[[nodiscard]] bool SetPanelVisible(EditorPanel Panel, bool Visible) noexcept;
+		[[nodiscard]] uint32_t GetDocumentOpeningPreference() const noexcept { return m_DocumentOpeningPreference; }
+		[[nodiscard]] std::filesystem::path GetDocumentWorkspacePath(std::string_view ProjectID) const;
+		[[nodiscard]] bool SetDocumentOpeningPreference(uint32_t Preference) noexcept;
 		[[nodiscard]] bool DockPanelBesideIfUnplaced(EditorPanel Panel, EditorPanel ReferencePanel);
 		void MarkSettingsDirty() noexcept;
 		void RequestReset() noexcept;
@@ -132,6 +135,7 @@ namespace PulseForgeEditor
 		EditorPanelVisibility m_Panels;
 		std::filesystem::path m_SettingsPath;
 		uint32_t m_LoadedDefaultLayoutVersion = CurrentDefaultEditorLayoutVersion;
+		uint32_t m_DocumentOpeningPreference = 0;
 		bool m_Initialized = false;
 		bool m_LayoutInitialized = false;
 		bool m_HasSavedPanelState = false;

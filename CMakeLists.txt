@@ -302,6 +302,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorProjectOpening.cpp
 		PulseForgeEditor/Source/Private/EditorAssetPreviewService.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentManager.cpp
+		PulseForgeEditor/Source/Private/EditorDocumentWorkspace.cpp
 		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
 		PulseForgeEditor/Source/Private/EditorLayout.cpp
 		PulseForgeEditor/Source/Private/EditorStyle.cpp
@@ -786,6 +787,7 @@ if(BUILD_TESTING)
 	target_sources(PulseForgeTests PRIVATE
 		PulseForgeEditor/Source/Private/EditorProjectOpening.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentManager.cpp
+		PulseForgeEditor/Source/Private/EditorDocumentWorkspace.cpp
 	)
 	target_include_directories(PulseForgeTests PRIVATE PulseForgeEditor/Source/Public PulseForge/Vendor/json/include)
 	target_compile_definitions(PulseForgeTests PRIVATE PF_PLATFORM_WINDOWS)

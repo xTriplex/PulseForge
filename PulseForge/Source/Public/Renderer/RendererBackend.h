@@ -7,6 +7,9 @@
 #include "Renderer/DepthCubemap.h"
 
 #include <memory>
+#include <expected>
+#include <string>
+#include <cstdint>
 #include "Renderer/RendererAPI.h"
 
 namespace PulseForge
@@ -21,6 +24,24 @@ namespace PulseForge
 		[[nodiscard]] virtual OutputColorEncoding GetOutputColorEncoding() const noexcept = 0;
 		virtual bool BeginFrame() = 0;
 		virtual void EndFrame() = 0;
+		[[nodiscard]] virtual std::expected<uint64_t, std::string> CreatePlatformPresentationTarget(void* NativeWindow)
+		{
+			(void)NativeWindow;
+			return std::unexpected("This renderer does not support native platform-window presentation");
+		}
+		[[nodiscard]] virtual bool BeginPlatformPresentationTarget(uint64_t TargetID)
+		{
+			(void)TargetID;
+			return false;
+		}
+		virtual void EndPlatformPresentationTarget(uint64_t TargetID) { (void)TargetID; }
+		[[nodiscard]] virtual bool DestroyPlatformPresentationTarget(uint64_t TargetID)
+		{
+			(void)TargetID;
+			return true;
+		}
+		[[nodiscard]] virtual bool HasPlatformPresentationTargets() const noexcept { return false; }
+		virtual void SetExternalPlatformPresentationTargetCount(uint32_t Count) noexcept { (void)Count; }
 		virtual RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description) = 0;
 		virtual DepthCubemapCreateResult CreateDepthCubemap(uint32_t Resolution, const std::string& DebugName) = 0;
 		virtual GraphicsResult BeginRenderTarget(

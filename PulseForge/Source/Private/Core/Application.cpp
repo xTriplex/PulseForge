@@ -49,6 +49,36 @@ namespace PulseForge
 		return m_Renderer->GetOutputColorEncoding();
 	}
 
+	std::expected<uint64_t, std::string> Application::CreatePlatformPresentationTarget(void* NativeWindow)
+	{
+		return m_Renderer->CreatePlatformPresentationTarget(NativeWindow);
+	}
+
+	bool Application::BeginPlatformPresentationTarget(uint64_t TargetID)
+	{
+		return m_Renderer->BeginPlatformPresentationTarget(TargetID);
+	}
+
+	void Application::EndPlatformPresentationTarget(uint64_t TargetID)
+	{
+		m_Renderer->EndPlatformPresentationTarget(TargetID);
+	}
+
+	bool Application::DestroyPlatformPresentationTarget(uint64_t TargetID)
+	{
+		return m_Renderer->DestroyPlatformPresentationTarget(TargetID);
+	}
+
+	bool Application::HasPlatformPresentationTargets() const noexcept
+	{
+		return m_Renderer->HasPlatformPresentationTargets();
+	}
+
+	void Application::SetExternalPlatformPresentationTargetCount(uint32_t Count) noexcept
+	{
+		m_Renderer->SetExternalPlatformPresentationTargetCount(Count);
+	}
+
 	void Application::Run()
 	{
 		auto PreviousFrameTime = std::chrono::steady_clock::now();
@@ -67,8 +97,10 @@ namespace PulseForge
 
 			// Resource preparation during updates must happen before the renderer opens its frame command list.
 			const bool bCanRender = m_Renderer->BeginFrame();
+			m_MainFrameActive = bCanRender;
 
-			if (bCanRender)
+			const bool bHasPlatformPresentationTargets = m_Renderer->HasPlatformPresentationTargets();
+			if (bCanRender || bHasPlatformPresentationTargets)
 			{
 				for (const auto& Layer : m_LayerStack)
 					Layer->OnRender();
@@ -76,6 +108,13 @@ namespace PulseForge
 
 			if (bCanRender)
 				m_Renderer->EndFrame();
+			m_MainFrameActive = false;
+
+			if (bCanRender || bHasPlatformPresentationTargets)
+			{
+				for (const auto& Layer : m_LayerStack)
+					Layer->OnRenderPlatformWindows();
+			}
 			else
 				m_Window->WaitEventsTimeout(0.05);
 		}

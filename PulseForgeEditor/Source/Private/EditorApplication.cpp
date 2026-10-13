@@ -45,8 +45,13 @@
 #include "Editor/EditorVisibility.h"
 #include "Editor/EditorEntityIconPolicy.h"
 #include "Editor/EditorHierarchyRowPolicy.h"
+#include "Editor/EditorGlfwViewportPolicy.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
+#include "Editor/EditorPlatformViewportPolicy.h"
 #include "Editor/EditorMaterialPropertyLayoutPolicy.h"
+#include "Editor/EditorDocumentManager.h"
+#include "Editor/EditorDocumentWorkspace.h"
+#include "Editor/EditorSnapshotHistory.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
 #include "Editor/EditorViewportToolbarPolicy.h"
@@ -132,6 +137,124 @@ namespace
 			PF_INFO("Dark native caption styling is unavailable on this Windows version; using the system caption style");
 	}
 
+	GLFWmonitor* FindMonitorForBounds(float X, float Y, float Width, float Height)
+	{
+		int MonitorCount = 0;
+		GLFWmonitor** Monitors = glfwGetMonitors(&MonitorCount);
+		GLFWmonitor* BestMonitor = nullptr;
+		double BestArea = 0.0;
+		for (int Index = 0; Monitors && Index < MonitorCount; ++Index)
+		{
+			int MonitorX = 0;
+			int MonitorY = 0;
+			glfwGetMonitorPos(Monitors[Index], &MonitorX, &MonitorY);
+			const GLFWvidmode* Mode = glfwGetVideoMode(Monitors[Index]);
+			if (!Mode)
+				continue;
+			const double IntersectionWidth = (std::max)(0.0,
+				(std::min)(static_cast<double>(X + Width), static_cast<double>(MonitorX + Mode->width)) -
+				(std::max)(static_cast<double>(X), static_cast<double>(MonitorX)));
+			const double IntersectionHeight = (std::max)(0.0,
+				(std::min)(static_cast<double>(Y + Height), static_cast<double>(MonitorY + Mode->height)) -
+				(std::max)(static_cast<double>(Y), static_cast<double>(MonitorY)));
+			const double Area = IntersectionWidth * IntersectionHeight;
+			if (Area > BestArea)
+			{
+				BestArea = Area;
+				BestMonitor = Monitors[Index];
+			}
+		}
+		return BestArea >= 100.0 * 60.0 ? BestMonitor : nullptr;
+	}
+
+	struct ResolvedNativeWindowBounds
+	{
+		ImVec2 Position;
+		ImVec2 Size;
+	};
+
+	ResolvedNativeWindowBounds ResolveRestoredNativeWindowBounds(
+		const PulseForgeEditor::EditorDocumentHost::WindowBounds& Saved)
+	{
+		GLFWmonitor* Monitor = nullptr;
+		int MonitorCount = 0;
+		GLFWmonitor** Monitors = glfwGetMonitors(&MonitorCount);
+		if (!Saved.MonitorName.empty())
+			for (int Index = 0; Monitors && Index < MonitorCount; ++Index)
+				if (Saved.MonitorName == (glfwGetMonitorName(Monitors[Index]) ? glfwGetMonitorName(Monitors[Index]) : ""))
+				{
+					Monitor = Monitors[Index];
+					break;
+				}
+		if (!Monitor)
+			Monitor = FindMonitorForBounds(Saved.X, Saved.Y, Saved.Width, Saved.Height);
+		float X = Saved.X;
+		float Y = Saved.Y;
+		float Width = Saved.Width;
+		float Height = Saved.Height;
+		if (!Monitor)
+		{
+			const ImGuiViewport* MainViewport = ImGui::GetMainViewport();
+			X = MainViewport->WorkPos.x + 80.0f;
+			Y = MainViewport->WorkPos.y + 80.0f;
+			Width = (std::min)(Width, (std::max)(320.0f, MainViewport->WorkSize.x - 120.0f));
+			Height = (std::min)(Height, (std::max)(240.0f, MainViewport->WorkSize.y - 120.0f));
+			Monitor = FindMonitorForBounds(MainViewport->Pos.x, MainViewport->Pos.y,
+				MainViewport->Size.x, MainViewport->Size.y);
+			if (!Monitor)
+				Monitor = glfwGetPrimaryMonitor();
+		}
+		if (Monitor)
+		{
+			int WorkX = 0;
+			int WorkY = 0;
+			int WorkWidth = 0;
+			int WorkHeight = 0;
+			glfwGetMonitorWorkarea(Monitor, &WorkX, &WorkY, &WorkWidth, &WorkHeight);
+			if (WorkWidth <= 0 || WorkHeight <= 0)
+			{
+				int MonitorX = 0;
+				int MonitorY = 0;
+				glfwGetMonitorPos(Monitor, &MonitorX, &MonitorY);
+				const GLFWvidmode* Mode = glfwGetVideoMode(Monitor);
+				if (Mode)
+				{
+					WorkX = MonitorX;
+					WorkY = MonitorY;
+					WorkWidth = Mode->width;
+					WorkHeight = Mode->height;
+				}
+			}
+			if (WorkWidth > 0 && WorkHeight > 0)
+			{
+				Width = (std::min)(Width, (std::max)(320.0f, static_cast<float>(WorkWidth)));
+				Height = (std::min)(Height, (std::max)(240.0f, static_cast<float>(WorkHeight)));
+			}
+			float ScaleX = 1.0f;
+			float ScaleY = 1.0f;
+			glfwGetMonitorContentScale(Monitor, &ScaleX, &ScaleY);
+			const float CurrentScale = (std::max)(ScaleX, ScaleY);
+			if (std::isfinite(CurrentScale) && std::isfinite(Saved.DpiScale) && Saved.DpiScale > 0.0f)
+			{
+				const float ScaleRatio = std::clamp(CurrentScale / Saved.DpiScale, 0.5f, 2.0f);
+				Width *= ScaleRatio;
+				Height *= ScaleRatio;
+			}
+			if (WorkWidth > 0 && WorkHeight > 0)
+			{
+				Width = (std::min)(Width, static_cast<float>(WorkWidth));
+				Height = (std::min)(Height, static_cast<float>(WorkHeight));
+				const float VisibleTitleWidth = (std::min)(64.0f, Width);
+				const float VisibleTitleHeight = (std::min)(40.0f, Height);
+				X = std::clamp(X, static_cast<float>(WorkX) - Width + VisibleTitleWidth,
+					static_cast<float>(WorkX + WorkWidth) - VisibleTitleWidth);
+				Y = std::clamp(Y, static_cast<float>(WorkY),
+					static_cast<float>(WorkY + WorkHeight) - VisibleTitleHeight);
+			}
+		}
+		return { ImVec2(X, Y), ImVec2((std::max)(Width, 320.0f), (std::max)(Height, 240.0f)) };
+	}
+
 	bool BeginEditorChromeBar(
 		const char* ID,
 		ImGuiDir Direction,
@@ -169,6 +292,64 @@ namespace
 	{
 		const std::u8string UTF8Path = Path.generic_u8string();
 		return { reinterpret_cast<const char*>(UTF8Path.data()), UTF8Path.size() };
+	}
+
+	std::expected<std::optional<std::string>, std::string> ReadDocumentWorkspaceFile(
+		const std::filesystem::path& Path)
+	{
+		std::error_code Error;
+		if (!std::filesystem::exists(Path, Error))
+		{
+			if (Error)
+				return std::unexpected("Could not inspect document workspace: " + Error.message());
+			return std::optional<std::string>{};
+		}
+		const uintmax_t Size = std::filesystem::file_size(Path, Error);
+		if (Error || Size > 2u * 1024u * 1024u)
+			return std::unexpected(Error ? "Could not inspect document workspace: " + Error.message()
+				: "Document workspace exceeds the 2 MiB safety limit");
+		std::ifstream Input(Path, std::ios::binary);
+		if (!Input)
+			return std::unexpected("Could not open the document workspace for reading");
+		std::string Contents(static_cast<size_t>(Size), '\0');
+		if (!Contents.empty())
+			Input.read(Contents.data(), static_cast<std::streamsize>(Contents.size()));
+		if (!Input && !Input.eof())
+			return std::unexpected("Could not read the complete document workspace");
+		return std::optional<std::string>(std::move(Contents));
+	}
+
+	std::expected<void, std::string> WriteDocumentWorkspaceFileAtomically(
+		const std::filesystem::path& Path,
+		std::string_view Contents)
+	{
+		if (Path.empty())
+			return std::unexpected("The document workspace path is unavailable");
+		std::filesystem::path TemporaryPath = Path;
+		TemporaryPath += L".tmp";
+		{
+			std::ofstream Output(TemporaryPath, std::ios::binary | std::ios::trunc);
+			if (!Output)
+				return std::unexpected("Could not create a temporary document workspace file");
+			Output.write(Contents.data(), static_cast<std::streamsize>(Contents.size()));
+			Output.flush();
+			if (!Output)
+			{
+				Output.close();
+				std::error_code RemoveError;
+				std::filesystem::remove(TemporaryPath, RemoveError);
+				return std::unexpected("Could not write the document workspace");
+			}
+		}
+		if (!MoveFileExW(TemporaryPath.c_str(), Path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+		{
+			const DWORD ErrorCode = GetLastError();
+			std::error_code RemoveError;
+			std::filesystem::remove(TemporaryPath, RemoveError);
+			return std::unexpected("Could not atomically replace document workspace (Windows error " +
+				std::to_string(ErrorCode) + ")");
+		}
+		return {};
 	}
 
 	std::string NormalizedExtension(const std::filesystem::path& Path)
@@ -504,6 +685,12 @@ namespace
 
 	class EditorLayer final : public PulseForge::Layer
 	{
+		struct PlatformViewportRendererData
+		{
+			uint64_t TargetID = 0;
+			bool FrameActive = false;
+		};
+
 		struct CpuPickingMesh
 		{
 			std::vector<glm::vec3> Positions;
@@ -603,6 +790,78 @@ namespace
 		{
 		}
 
+		static EditorLayer* GetPlatformCallbackLayer() noexcept
+		{
+			ImGuiContext* Context = ImGui::GetCurrentContext();
+			return Context ? static_cast<EditorLayer*>(ImGui::GetIO().UserData) : nullptr;
+		}
+
+		static void OnRendererCreateViewport(ImGuiViewport* Viewport)
+		{
+			EditorLayer* Layer = GetPlatformCallbackLayer();
+			if (!Layer || !Viewport || !Viewport->PlatformHandle)
+				return;
+			auto Target = PulseForge::Application::Get().CreatePlatformPresentationTarget(Viewport->PlatformHandle);
+			if (!Target)
+			{
+				if (Layer)
+					Layer->HandlePlatformPresentationFailure(Viewport, Target.error());
+				else
+					PF_ERROR("Could not create native editor presentation target: {}", Target.error());
+				return;
+			}
+			try
+			{
+				Viewport->RendererUserData = new PlatformViewportRendererData{ *Target, false };
+			}
+			catch (const std::exception& Exception)
+			{
+				(void)PulseForge::Application::Get().DestroyPlatformPresentationTarget(*Target);
+				PF_ERROR("Could not allocate native editor renderer state: {}", Exception.what());
+			}
+		}
+
+		static void OnRendererDestroyViewport(ImGuiViewport* Viewport)
+		{
+			if (!Viewport || !Viewport->RendererUserData)
+				return;
+			auto* Data = static_cast<PlatformViewportRendererData*>(Viewport->RendererUserData);
+			if (Data->FrameActive)
+				PulseForge::Application::Get().EndPlatformPresentationTarget(Data->TargetID);
+			const bool Retired = PulseForge::Application::Get().DestroyPlatformPresentationTarget(Data->TargetID);
+			if (!Retired)
+				PF_ERROR("Native Vulkan presentation retirement is deferred until renderer shutdown.");
+			if (EditorLayer* Layer = GetPlatformCallbackLayer(); Layer && Layer->m_ImGuiRenderer)
+				if (Retired)
+					Layer->m_ImGuiRenderer->RetirePresentationTarget(Data->TargetID);
+			delete Data;
+			Viewport->RendererUserData = nullptr;
+		}
+
+		static void OnRendererRenderViewport(ImGuiViewport* Viewport, void*)
+		{
+			EditorLayer* Layer = GetPlatformCallbackLayer();
+			if (!Layer || !Layer->m_ImGuiRenderer || !Viewport || !Viewport->RendererUserData)
+				return;
+			auto* Data = static_cast<PlatformViewportRendererData*>(Viewport->RendererUserData);
+			if (!PulseForge::Application::Get().BeginPlatformPresentationTarget(Data->TargetID))
+				return;
+			Data->FrameActive = true;
+			if (auto Result = Layer->m_ImGuiRenderer->RenderDrawData(Viewport->DrawData, Data->TargetID); !Result)
+				PF_ERROR("Native editor window ImGui rendering failed: {}", Result.error());
+		}
+
+		static void OnRendererSwapViewport(ImGuiViewport* Viewport, void*)
+		{
+			if (!Viewport || !Viewport->RendererUserData)
+				return;
+			auto* Data = static_cast<PlatformViewportRendererData*>(Viewport->RendererUserData);
+			if (!Data->FrameActive)
+				return;
+			PulseForge::Application::Get().EndPlatformPresentationTarget(Data->TargetID);
+			Data->FrameActive = false;
+		}
+
 		~EditorLayer() override
 		{
 			EndEditorCameraNavigation();
@@ -621,6 +880,8 @@ namespace
 
 			ImGui::SetCurrentContext(m_Context);
 			ImGuiIO& IO = ImGui::GetIO();
+			m_PreviousImGuiUserData = IO.UserData;
+			IO.UserData = this;
 			IO.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
 			IO.ConfigDragClickToInputText = true;
 			#ifdef PF_EDITOR_RENDERER_OPENGL
@@ -635,13 +896,15 @@ namespace
 				PulseForge::Application::Get().GetOutputColorEncoding()));
 			if (auto Result = m_Layout.Initialize(); !Result)
 				ReportLayoutPersistenceError(Result.error());
+			m_Documents.SetOpeningPreference(static_cast<PulseForgeEditor::EditorDocumentOpenPreference>(
+				m_Layout.GetDocumentOpeningPreference()));
 
 			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
 			RequestDarkNativeCaption(Window);
 			#ifdef PF_EDITOR_RENDERER_OPENGL
 			if (!ImGui_ImplGlfw_InitForOpenGL(Window, true))
 			#else
-			if (!ImGui_ImplGlfw_InitForOther(Window, true))
+			if (!ImGui_ImplGlfw_InitForVulkan(Window, true))
 			#endif
 			{
 				ShutdownImGui();
@@ -688,6 +951,13 @@ namespace
 			m_AssetPreviews.Initialize(Runtime, *m_ImGuiRenderer, PreviewLimits);
 			if (m_AssetPreviewStressManifest)
 				InitializeAssetPreviewStress();
+			IO.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+			ImGuiPlatformIO& PlatformIO = ImGui::GetPlatformIO();
+			PlatformIO.Renderer_CreateWindow = &OnRendererCreateViewport;
+			PlatformIO.Renderer_DestroyWindow = &OnRendererDestroyViewport;
+			PlatformIO.Renderer_RenderWindow = &OnRendererRenderViewport;
+			PlatformIO.Renderer_SwapBuffers = &OnRendererSwapViewport;
+			IO.BackendFlags |= ImGuiBackendFlags_RendererHasViewports;
 			#endif
 			AttachConsoleSink();
 
@@ -716,13 +986,23 @@ namespace
 			ResetViewportSceneRenderer();
 			ResetViewportTarget();
 			m_Scene.reset();
-			m_Project.reset();
 			ShutdownImGui();
 			ShutdownFileDialog();
+			m_Project.reset();
 		}
 
 		void OnUpdate(PulseForge::Timestep DeltaTime) override
 		{
+			#ifdef PF_EDITOR_RENDERER_OPENGL
+			if (m_Context)
+			{
+				ImGui::SetCurrentContext(m_Context);
+				const ImGuiPlatformIO& PlatformIO = ImGui::GetPlatformIO();
+				const uint32_t SecondaryViewportCount = PlatformIO.Viewports.Size > 1
+					? static_cast<uint32_t>(PlatformIO.Viewports.Size - 1) : 0;
+				PulseForge::Application::Get().SetExternalPlatformPresentationTargetCount(SecondaryViewportCount);
+			}
+			#endif
 			if (m_AssetPreviewProjectPending)
 			{
 				if (!m_AssetPreviewStressManifest)
@@ -953,9 +1233,16 @@ namespace
 					Viewport ? Viewport->Size.x : 0.0f,
 					Viewport ? Viewport->Size.y : 0.0f,
 					VertexCount);
-				if (Index == 0 || !Viewport || !Viewport->PlatformHandleRaw)
+				if (Index == 0 || !Viewport)
 					continue;
-				GLFWwindow* PlatformWindow = static_cast<GLFWwindow*>(Viewport->PlatformHandleRaw);
+				const PulseForgeEditor::EditorGlfwViewportHandles Handles{
+					.GlfwWindow = Viewport->PlatformHandle,
+					.NativeWindow = Viewport->PlatformHandleRaw
+				};
+				GLFWwindow* PlatformWindow = static_cast<GLFWwindow*>(
+					PulseForgeEditor::GetGlfwContextWindow(Handles));
+				if (!PlatformWindow)
+					continue;
 				glfwMakeContextCurrent(PlatformWindow);
 				std::filesystem::path OutputPath = m_OpenGLDiagnosticCapturePath;
 				OutputPath.replace_filename(OutputPath.stem().string() + "_viewport_" +
@@ -1051,6 +1338,7 @@ namespace
 			#endif
 			ImGui_ImplGlfw_NewFrame();
 			ImGui::NewFrame();
+			FinalizePendingMaterialEdits();
 			m_AssetPreviews.BeginRequestFrame();
 			if (m_AssetPreviewStressManifest)
 				DrawAssetPreviewStress();
@@ -1063,6 +1351,7 @@ namespace
 
 			DrawMainMenu();
 			DrawEditorToolbar();
+			DrawMainDocumentStrip();
 			DrawStatusBar();
 			if (m_Layout.SubmitDockspace())
 				CancelViewportInteractionForLayoutChange();
@@ -1094,7 +1383,8 @@ namespace
 				}
 			}
 			#endif
-			RenderViewportScene();
+			if (PulseForge::Application::Get().IsMainFrameActive())
+				RenderViewportScene();
 			UpdateWindowTitle();
 			if (PulseForgeEditor::ShouldFinishSceneEditForInspector(
 				m_SceneHistory.IsActive(), m_InspectorHistoryItem, GImGui ? GImGui->ActiveId : 0))
@@ -1104,20 +1394,13 @@ namespace
 			if (auto Result = m_Layout.SaveIfRequested(); !Result)
 				ReportLayoutPersistenceError(Result.error());
 			#ifdef PF_EDITOR_RENDERER_OPENGL
-			ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-			CaptureOpenGLFrameForValidation();
-
-			ImGuiIO& IO = ImGui::GetIO();
-			if (IO.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+			if (PulseForge::Application::Get().IsMainFrameActive())
 			{
-				GLFWwindow* MainContext = glfwGetCurrentContext();
-				ImGui::UpdatePlatformWindows();
-				ImGui::RenderPlatformWindowsDefault();
-				CaptureOpenGLPlatformFramesForValidation(MainContext);
-				glfwMakeContextCurrent(MainContext);
+				ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+				CaptureOpenGLFrameForValidation();
 			}
 			#else
-			if (m_ImGuiRenderer)
+			if (PulseForge::Application::Get().IsMainFrameActive() && m_ImGuiRenderer)
 			{
 				if (auto Result = m_ImGuiRenderer->RenderDrawData(); !Result)
 				{
@@ -1132,6 +1415,55 @@ namespace
 				else
 					m_ImGuiRenderingError.clear();
 			}
+			#endif
+			SaveDocumentWorkspaceIfNeeded();
+		}
+
+		void OnRenderPlatformWindows() override
+		{
+			ImGui::SetCurrentContext(m_Context);
+			if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+			{
+				HandleNativePlatformCloseRequests();
+				#ifdef PF_EDITOR_RENDERER_OPENGL
+				GLFWwindow* MainContext = glfwGetCurrentContext();
+				#endif
+				ImGui::UpdatePlatformWindows();
+				ImGuiPlatformIO& PlatformIO = ImGui::GetPlatformIO();
+				for (int Index = 1; Index < PlatformIO.Viewports.Size; ++Index)
+				{
+					ImGuiViewport* Viewport = PlatformIO.Viewports[Index];
+					if (!Viewport || (Viewport->Flags & ImGuiViewportFlags_IsMinimized))
+						continue;
+
+					PulseForgeEditor::RenderPlatformViewportSequentially(
+						[&]
+						{
+							if (PlatformIO.Platform_RenderWindow)
+								PlatformIO.Platform_RenderWindow(Viewport, nullptr);
+						},
+						[&]
+						{
+							if (PlatformIO.Renderer_RenderWindow)
+								PlatformIO.Renderer_RenderWindow(Viewport, nullptr);
+						},
+						[&]
+						{
+							if (PlatformIO.Platform_SwapBuffers)
+								PlatformIO.Platform_SwapBuffers(Viewport, nullptr);
+						},
+						[&]
+						{
+							if (PlatformIO.Renderer_SwapBuffers)
+								PlatformIO.Renderer_SwapBuffers(Viewport, nullptr);
+						});
+				}
+				#ifdef PF_EDITOR_RENDERER_OPENGL
+				CaptureOpenGLPlatformFramesForValidation(MainContext);
+				glfwMakeContextCurrent(MainContext);
+				#endif
+			}
+			#ifndef PF_EDITOR_RENDERER_OPENGL
 			if (m_AssetPreviewStressManifest)
 				AdvanceAssetPreviewStressFrame();
 			#endif
@@ -1141,10 +1473,10 @@ namespace
 		{
 			const bool NavigationOwnedMouseBeforeEvent = m_ViewportMouseCapture.OwnsMouse();
 			bool BeganNavigationForEvent = false;
-			if (Event.GetEventType() == PulseForge::EEventType::WindowClose && m_SceneDirty)
+			if (Event.GetEventType() == PulseForge::EEventType::WindowClose &&
+				(m_SceneDirty || !GetDirtyAssetDocuments().empty()))
 			{
-				m_PendingAction = [] { PulseForge::Application::Get().RequestClose(); };
-				m_OpenUnsavedDialog = true;
+				QueueAfterSave([] { PulseForge::Application::Get().RequestClose(); });
 				Event.bHandled = true;
 				return;
 			}
@@ -1816,11 +2148,12 @@ namespace
 		void HandleEditorHistoryShortcuts()
 		{
 			const ImGuiIO& IO = ImGui::GetIO();
+			const bool MaterialDocumentFocused = IsFocusedMaterialDocument();
 			if (!PulseForgeEditor::CanRouteEditorHistoryShortcut({
-				.SceneAvailable = m_Scene != nullptr,
-				.RuntimeActive = m_SceneRuntime != nullptr,
-				.CameraNavigationActive = m_EditorCameraNavigationActive,
-				.GizmoInteractionActive = m_GizmoDrag.has_value(),
+				.SceneAvailable = MaterialDocumentFocused || m_Scene != nullptr,
+				.RuntimeActive = !MaterialDocumentFocused && m_SceneRuntime != nullptr,
+				.CameraNavigationActive = !MaterialDocumentFocused && m_EditorCameraNavigationActive,
+				.GizmoInteractionActive = !MaterialDocumentFocused && m_GizmoDrag.has_value(),
 				.TextInputActive = IO.WantTextInput,
 				.ImGuiItemActive = ImGui::IsAnyItemActive(),
 				.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup),
@@ -1831,6 +2164,15 @@ namespace
 
 			if (!IO.KeyCtrl || IO.KeyAlt || IO.KeySuper)
 				return;
+			if (MaterialDocumentFocused)
+			{
+				if (ImGui::IsKeyPressed(ImGuiKey_Y, false) ||
+					(ImGui::IsKeyPressed(ImGuiKey_Z, false) && IO.KeyShift))
+					(void)ApplyMaterialHistoryStep(true);
+				else if (ImGui::IsKeyPressed(ImGuiKey_Z, false))
+					(void)ApplyMaterialHistoryStep(false);
+				return;
+			}
 			if (ImGui::IsKeyPressed(ImGuiKey_Y, false))
 				RedoSceneEdit();
 			else if (ImGui::IsKeyPressed(ImGuiKey_Z, false) && IO.KeyShift)
@@ -1856,6 +2198,42 @@ namespace
 			const ImGuiWindow* Root = GImGui->NavWindow->RootWindow;
 			return Root && std::string_view(Root->Name) ==
 				PulseForgeEditor::EditorPanelDescriptors[static_cast<size_t>(Panel)].WindowName;
+		}
+
+		[[nodiscard]] const PulseForgeEditor::EditorDocumentIdentity* GetFocusedDocumentIdentity() const noexcept
+		{
+			const auto* Host = m_Documents.GetFocusedHost();
+			return Host && Host->ActiveDocument ? &*Host->ActiveDocument : nullptr;
+		}
+
+		[[nodiscard]] bool IsFocusedMaterialDocument() const noexcept
+		{
+			const auto* Identity = GetFocusedDocumentIdentity();
+			return Identity && Identity->Kind == PulseForgeEditor::EditorDocumentKind::Material && m_Project &&
+				Identity->Project == m_Project->GetDescription().ID;
+		}
+
+		void FocusDocumentHostIfChanged(std::string_view HostID)
+		{
+			const auto* Current = m_Documents.GetFocusedHost();
+			if ((!Current || Current->ID != HostID) && m_Documents.FocusHost(HostID))
+				MarkDocumentWorkspaceDirty();
+		}
+
+		bool SaveFocusedDocument()
+		{
+			const auto* Identity = GetFocusedDocumentIdentity();
+			if (Identity && Identity->Project == (m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{}))
+			{
+				if (Identity->Kind == PulseForgeEditor::EditorDocumentKind::Material)
+					return SaveMaterialDraft(Identity->Asset);
+				if (Identity->Kind != PulseForgeEditor::EditorDocumentKind::Level)
+				{
+					SetWarning("Saving this document type is not supported yet.");
+					return false;
+				}
+			}
+			return SaveScene();
 		}
 
 		void FocusActivePanelSearch()
@@ -1891,6 +2269,20 @@ namespace
 			if (CanFocusSearch && IO.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false))
 			{
 				FocusActivePanelSearch();
+				return;
+			}
+			if (IsFocusedMaterialDocument())
+			{
+				if (!IO.WantTextInput && !ImGui::IsAnyItemActive() &&
+					!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
+					GImGui->NavLayer != ImGuiNavLayer_Menu && GImGui->NavWindowingTarget == nullptr &&
+					IO.KeyCtrl && !IO.KeyAlt && !IO.KeySuper && ImGui::IsKeyPressed(ImGuiKey_S, false))
+				{
+					if (IO.KeyShift)
+						SetWarning("Save As is available for scenes; material documents use Save Material.");
+					else
+						(void)SaveFocusedDocument();
+				}
 				return;
 			}
 			if (!CanRouteEditorShortcut())
@@ -1932,7 +2324,7 @@ namespace
 					if (Shift)
 						CreateScene(true);
 					else
-						SaveScene();
+						(void)SaveFocusedDocument();
 				}
 				else if (ImGui::IsKeyPressed(ImGuiKey_N, false) && Shift)
 					CreateEntityFromEditor();
@@ -2063,6 +2455,36 @@ namespace
 			QueueAfterSave([this, ChosenPath] { CreateProjectAt(ChosenPath); });
 		}
 
+		void ClearCurrentProjectDocumentState()
+		{
+			if (m_Project)
+			{
+				SaveDocumentWorkspaceNow();
+				(void)m_Documents.ClearProject(m_Project->GetDescription().ID);
+				ClearMaterialDraftsForProject();
+			}
+			m_LevelDocumentIdentity.reset();
+			m_DocumentWorkspacePath.clear();
+			m_DocumentWorkspaceLastContents.clear();
+			m_DocumentWorkspaceImmediateDirty = false;
+			m_DocumentWorkspaceBoundsDirty = false;
+			m_RestoredHostBoundsPending.clear();
+			m_AssetPreviewProjectPending = true;
+		}
+
+		void RegisterLevelDocument()
+		{
+			if (!m_Project)
+				return;
+			m_LevelDocumentIdentity = PulseForgeEditor::EditorDocumentIdentity{
+				m_Project->GetDescription().ID, PulseForge::UUID{}, PulseForgeEditor::EditorDocumentKind::Level
+			};
+			auto LevelDocument = m_Documents.Open(*m_LevelDocumentIdentity, {}, "Level Editor",
+				PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip);
+			if (!LevelDocument)
+				SetWarning("The Level Editor document session could not be registered: " + LevelDocument.error());
+		}
+
 		void CreateProjectAt(const std::filesystem::path& ProjectFile)
 		{
 			const std::string ProjectName = PathToUtf8(ProjectFile.stem());
@@ -2081,12 +2503,15 @@ namespace
 				*NewScene);
 			if (!MainScene && !MainScene.error().CommittedAsset)
 			{
+				ClearCurrentProjectDocumentState();
 				StopRuntime();
 				ResetViewportSceneRenderer();
 				m_Project.emplace(std::move(*Created));
+				RegisterLevelDocument();
 				ClearScene();
 				ResetContentBrowserNavigation();
 				UpdateAssetList();
+				RestoreDocumentWorkspace();
 				SetError("Project was created, but its initial scene could not be created: " + MainScene.error().Message);
 				return;
 			}
@@ -2094,9 +2519,11 @@ namespace
 			const PulseForge::AssetRecord MainSceneRecord = MainScene
 				? *MainScene
 				: *MainScene.error().CommittedAsset;
+			ClearCurrentProjectDocumentState();
 			StopRuntime();
 			ResetViewportSceneRenderer();
 			m_Project.emplace(std::move(*Created));
+			RegisterLevelDocument();
 			ResetContentBrowserNavigation();
 			m_Scene = std::move(NewScene);
 			m_SceneAsset = MainSceneRecord.ID;
@@ -2116,6 +2543,7 @@ namespace
 			else
 				SetStatus("Created project " + ProjectName + " with Assets/Main.scene.");
 			UpdateAssetList();
+			RestoreDocumentWorkspace();
 
 			if (auto StartScene = m_Project->SetStartScene(MainSceneRecord.ID); !StartScene)
 			{
@@ -2156,12 +2584,11 @@ namespace
 			}
 
 			const std::string ProjectName = Opened->Project.GetDescription().Name;
+			ClearCurrentProjectDocumentState();
 			StopRuntime();
 			ResetViewportSceneRenderer();
 			m_Project.emplace(std::move(Opened->Project));
-			m_OpenedMaterialAsset.reset();
-			m_FocusMaterialEditorNextFrame = false;
-			m_InitialMaterialEditorDockPending = false;
+			RegisterLevelDocument();
 			ResetContentBrowserNavigation();
 			m_Scene = std::move(Opened->StartupScene);
 			m_SceneAsset = Opened->StartupSceneAsset;
@@ -2171,11 +2598,206 @@ namespace
 			m_OpenDeleteAssetDialog = false;
 			ResetSceneHistory();
 			UpdateAssetList();
+			RestoreDocumentWorkspace();
 			if (Opened->StartupSceneWarning.empty())
 				SetStatus("Opened project " + ProjectName + ".");
 			else
 				SetWarning(std::move(Opened->StartupSceneWarning));
 			return {};
+		}
+
+		void MarkDocumentWorkspaceDirty(bool BoundsOnly = false)
+		{
+			if (!m_Project || m_DocumentWorkspacePath.empty())
+				return;
+			if (BoundsOnly)
+			{
+				m_DocumentWorkspaceBoundsDirty = true;
+				m_DocumentWorkspaceSaveAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+			}
+			else
+				m_DocumentWorkspaceImmediateDirty = true;
+		}
+
+		void RestoreDocumentWorkspace()
+		{
+			if (!m_Project)
+				return;
+			m_DocumentWorkspacePath = m_Layout.GetDocumentWorkspacePath(
+				m_Project->GetDescription().ID.ToString());
+			m_DocumentWorkspaceLastContents.clear();
+			auto File = ReadDocumentWorkspaceFile(m_DocumentWorkspacePath);
+			if (!File)
+			{
+				PF_WARN("Could not read document workspace: {}", File.error());
+				m_DocumentWorkspaceImmediateDirty = false;
+				m_DocumentWorkspaceBoundsDirty = false;
+				return;
+			}
+			if (!*File)
+			{
+				m_DocumentWorkspaceImmediateDirty = true;
+				return;
+			}
+
+			const std::string Contents = **File;
+			auto Workspace = PulseForgeEditor::EditorDocumentWorkspaceCodec::Deserialize(
+				Contents, m_Project->GetDescription().ID);
+			if (!Workspace)
+			{
+				std::filesystem::path RecoveryPath = m_DocumentWorkspacePath;
+				RecoveryPath += L".recovery";
+				std::error_code CopyError;
+				if (!std::filesystem::exists(RecoveryPath, CopyError) && !CopyError)
+					(void)std::filesystem::copy_file(m_DocumentWorkspacePath, RecoveryPath, CopyError);
+				PF_WARN("Document workspace was rejected and will be rebuilt from registered documents: {}",
+					Workspace.error());
+				m_DocumentWorkspaceImmediateDirty = true;
+				return;
+			}
+
+			m_DocumentWorkspaceLastContents = Contents;
+			std::unordered_set<std::string> RestoredHosts;
+			for (const auto& SavedHost : Workspace->Hosts)
+			{
+				if (SavedHost.Role != PulseForgeEditor::EditorDocumentHostRole::Native)
+					continue;
+				auto Created = m_Documents.CreateNativeHost(SavedHost.ID, SavedHost.PlacementKind);
+				if (!Created)
+				{
+					PF_WARN("Could not restore document host {}: {}", SavedHost.ID, Created.error());
+					continue;
+				}
+				RestoredHosts.insert(SavedHost.ID);
+				if (SavedHost.Bounds.HasValue)
+				{
+					(void)m_Documents.SetHostBounds(SavedHost.ID, SavedHost.Bounds);
+					m_RestoredHostBoundsPending.insert(SavedHost.ID);
+				}
+			}
+
+			bool SkippedDocument = false;
+			for (const auto& SavedHost : Workspace->Hosts)
+			{
+				const bool IsNativeHost = SavedHost.Role == PulseForgeEditor::EditorDocumentHostRole::Native;
+				if (IsNativeHost && !RestoredHosts.contains(SavedHost.ID))
+				{
+					SkippedDocument |= !SavedHost.Documents.empty();
+					continue;
+				}
+				for (const auto& Identity : SavedHost.Documents)
+				{
+					if (Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level)
+					{
+						if (!m_Documents.Find(Identity))
+							SkippedDocument = true;
+						continue;
+					}
+					if (Identity.Kind != PulseForgeEditor::EditorDocumentKind::Material)
+					{
+						SkippedDocument = true;
+						continue;
+					}
+					const auto Asset = m_Project->GetAssetRegistry().Find(Identity.Asset);
+					if (!Asset || NormalizedExtension(Asset->ProjectRelativePath) != ".material")
+					{
+						PF_WARN("Skipping missing or incompatible asset document {} during workspace restore",
+							Identity.Asset.ToString());
+						SkippedDocument = true;
+						continue;
+					}
+					auto Opened = m_Documents.Open(Identity, Asset->ProjectRelativePath,
+						PathToUtf8(Asset->ProjectRelativePath.filename()),
+						PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip);
+					if (!Opened)
+					{
+						PF_WARN("Could not restore asset document {}: {}", Identity.Asset.ToString(), Opened.error());
+						SkippedDocument = true;
+						continue;
+					}
+					if (IsNativeHost)
+					{
+						auto Moved = m_Documents.Transfer(Identity, SavedHost.ID, SavedHost.Documents.size());
+						if (!Moved)
+						{
+							(void)m_Documents.Close(Identity,
+								PulseForgeEditor::EditorDocumentCloseChoice::Discard,
+								[](const auto&, uint64_t) { return true; }, [](const auto&) { return true; });
+							PF_WARN("Could not place document {} in its saved host: {}",
+								Identity.Asset.ToString(), Moved.error());
+							SkippedDocument = true;
+							continue;
+						}
+					}
+				}
+			}
+
+			for (const auto& SavedHost : Workspace->Hosts)
+			{
+				const auto* Host = m_Documents.FindHost(SavedHost.ID);
+				if (Host && SavedHost.ActiveDocument && m_Documents.Find(*SavedHost.ActiveDocument))
+					(void)m_Documents.Activate(*SavedHost.ActiveDocument);
+				if (Host && Host->Role == PulseForgeEditor::EditorDocumentHostRole::Native && Host->Documents.empty())
+					(void)m_Documents.RemoveEmptyNativeHost(Host->ID);
+			}
+		for (const auto& [Kind, HostID] : Workspace->RememberedHosts)
+			if (RestoredHosts.contains(HostID))
+				(void)m_Documents.SetRememberedHost(Kind, HostID);
+			if (!m_Documents.FocusHost(Workspace->FocusedHostID))
+				FocusDocumentHostIfChanged(PulseForgeEditor::EditorDocumentManager::MainHostID);
+			m_DocumentWorkspaceImmediateDirty = SkippedDocument;
+			m_DocumentWorkspaceBoundsDirty = false;
+		}
+
+		void SaveDocumentWorkspaceIfNeeded()
+		{
+			if (!m_Project || m_DocumentWorkspacePath.empty() ||
+				(!m_DocumentWorkspaceImmediateDirty && !m_DocumentWorkspaceBoundsDirty))
+				return;
+			if (!m_DocumentWorkspaceImmediateDirty &&
+				std::chrono::steady_clock::now() < m_DocumentWorkspaceSaveAt)
+				return;
+
+			PulseForgeEditor::EditorDocumentWorkspaceState Workspace;
+			Workspace.Project = m_Project->GetDescription().ID;
+			if (const auto* FocusedHost = m_Documents.GetFocusedHost())
+				Workspace.FocusedHostID = FocusedHost->ID;
+			for (const auto& Host : m_Documents.GetHosts())
+				if (Host.Role == PulseForgeEditor::EditorDocumentHostRole::Main || !Host.Documents.empty())
+					Workspace.Hosts.push_back(Host);
+			for (const auto& [Kind, HostID] : m_Documents.GetRememberedHosts())
+				Workspace.RememberedHosts.emplace_back(Kind, HostID);
+			std::sort(Workspace.RememberedHosts.begin(), Workspace.RememberedHosts.end(),
+				[](const auto& Left, const auto& Right)
+				{
+					return static_cast<uint8_t>(Left.first) < static_cast<uint8_t>(Right.first);
+				});
+			auto Serialized = PulseForgeEditor::EditorDocumentWorkspaceCodec::Serialize(Workspace);
+			if (!Serialized)
+			{
+				PF_WARN("Could not serialize editor document workspace: {}", Serialized.error());
+				return;
+			}
+			if (*Serialized != m_DocumentWorkspaceLastContents)
+			{
+				auto Written = WriteDocumentWorkspaceFileAtomically(m_DocumentWorkspacePath, *Serialized);
+				if (!Written)
+				{
+					PF_WARN("Could not persist editor document workspace: {}", Written.error());
+					return;
+				}
+				m_DocumentWorkspaceLastContents = std::move(*Serialized);
+			}
+			m_DocumentWorkspaceImmediateDirty = false;
+			m_DocumentWorkspaceBoundsDirty = false;
+		}
+
+		void SaveDocumentWorkspaceNow()
+		{
+			if (!m_Project || m_DocumentWorkspacePath.empty())
+				return;
+			m_DocumentWorkspaceImmediateDirty = true;
+			SaveDocumentWorkspaceIfNeeded();
 		}
 
 		void ImportAsset()
@@ -2278,32 +2900,171 @@ namespace
 				SetError(std::move(Message));
 				return;
 			}
+			OpenAssetDestinationDialog(Identifier, false);
+		}
 
-			const std::string DefaultName = PathToUtf8(Asset->ProjectRelativePath.filename());
-			auto Destination = ShowSaveDialog(
-				nullptr,
-				m_Project->GetRootPath() / Asset->ProjectRelativePath.parent_path(),
-				DefaultName.c_str());
-			if (!Destination)
+		void OpenAssetDestinationDialog(const PulseForge::AssetID& Identifier, bool Duplicate)
+		{
+			if (!m_Project)
 				return;
-			if (Destination->extension().empty())
-				*Destination += Asset->ProjectRelativePath.extension();
-			if (Destination->extension() != Asset->ProjectRelativePath.extension())
+			const auto Asset = m_Project->GetAssetRegistry().Find(Identifier);
+			if (!Asset)
 			{
-				SetError("Moving an asset cannot change its file extension.");
+				SetError("The selected asset is no longer registered.");
 				return;
 			}
-			if (HasReservedMetadataExtension(*Destination))
-			{
-				SetError("Asset destinations cannot use the reserved .meta extension.");
-				return;
-			}
+			m_AssetDestinationAsset = Identifier;
+			m_AssetDestinationDuplicate = Duplicate;
+			m_AssetDestinationFolder = PathToUtf8(Asset->ProjectRelativePath.parent_path());
+			std::string Filename = PathToUtf8(Asset->ProjectRelativePath.filename());
+			if (Duplicate)
+				Filename = PathToUtf8(Asset->ProjectRelativePath.stem()) + " Copy" +
+					PathToUtf8(Asset->ProjectRelativePath.extension());
+			m_AssetDestinationFilename.fill('\0');
+			std::copy_n(Filename.data(), (std::min)(Filename.size(), m_AssetDestinationFilename.size() - 1),
+				m_AssetDestinationFilename.data());
+			m_AssetDestinationSearch.fill('\0');
+			m_AssetDestinationValidationError.clear();
+			m_OpenAssetDestinationDialog = true;
+		}
 
-			const auto RelativeDestination = GetProjectRelativePath(*Destination, "asset move");
-			if (!RelativeDestination)
+		void CollectContentFolders(
+			const ContentFolderNode& Node,
+			std::vector<std::filesystem::path>& Folders) const
+		{
+			Folders.push_back(Node.RelativePath);
+			for (const ContentFolderNode& Child : Node.Children)
+				CollectContentFolders(Child, Folders);
+		}
+
+		void DrawAssetDestinationDialog()
+		{
+			if (m_OpenAssetDestinationDialog)
+			{
+				ImGui::OpenPopup("Project Asset Destination");
+				m_OpenAssetDestinationDialog = false;
+			}
+			bool PopupOpen = true;
+			if (!ImGui::BeginPopupModal("Project Asset Destination", &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize))
 				return;
-			const std::filesystem::path Target = *RelativeDestination;
-			QueueAfterSave([this, Identifier, Target] { MoveAssetAt(Identifier, Target); });
+
+			const auto Asset = m_Project && m_AssetDestinationAsset
+				? m_Project->GetAssetRegistry().Find(*m_AssetDestinationAsset)
+				: std::optional<PulseForge::AssetRecord>{};
+			if (!Asset)
+				ImGui::TextUnformatted("The asset is no longer registered.");
+			else
+			{
+				const std::string Operation = m_AssetDestinationDuplicate ? "Duplicate" : "Move / Rename";
+				ImGui::Text("%s %s", Operation.c_str(),
+					PathToUtf8(Asset->ProjectRelativePath.filename()).c_str());
+				ImGui::TextDisabled("Choose a project folder and keep the asset type unchanged.");
+				ImGui::SetNextItemWidth(420.0f);
+				ImGui::InputTextWithHint("##AssetDestinationSearch", "Search project folders...",
+					m_AssetDestinationSearch.data(), m_AssetDestinationSearch.size());
+
+				std::vector<std::filesystem::path> Folders;
+			CollectContentFolders(m_ContentFolderRoot, Folders);
+			std::string Search = m_AssetDestinationSearch.data();
+			std::transform(Search.begin(), Search.end(), Search.begin(), [](unsigned char Character)
+			{
+				return static_cast<char>(std::tolower(Character));
+			});
+			if (ImGui::BeginChild("AssetDestinationFolderResults", ImVec2(420.0f, 180.0f), ImGuiChildFlags_Borders))
+			{
+				bool AnyFolder = false;
+				for (const auto& Folder : Folders)
+				{
+					const std::string FolderText = PathToUtf8(Folder);
+					std::string Searchable = FolderText;
+					std::transform(Searchable.begin(), Searchable.end(), Searchable.begin(), [](unsigned char Character)
+					{
+						return static_cast<char>(std::tolower(Character));
+					});
+					if (!Search.empty() && Searchable.find(Search) == std::string::npos)
+						continue;
+					AnyFolder = true;
+					if (ImGui::Selectable(FolderText.c_str(), m_AssetDestinationFolder == FolderText))
+					{
+						m_AssetDestinationFolder = FolderText;
+						m_AssetDestinationValidationError.clear();
+					}
+				}
+				if (!AnyFolder)
+					ImGui::TextDisabled("No matching project folders.");
+			}
+			ImGui::EndChild();
+			ImGui::TextWrapped("Destination: %s", m_AssetDestinationFolder.c_str());
+			ImGui::SetNextItemWidth(420.0f);
+			const bool EnterPressed = ImGui::InputText("Asset filename", m_AssetDestinationFilename.data(),
+				m_AssetDestinationFilename.size(), ImGuiInputTextFlags_EnterReturnsTrue);
+			ImGui::TextDisabled("Extension: %s", Asset->ProjectRelativePath.extension().string().c_str());
+			if (!m_AssetDestinationValidationError.empty())
+				ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error),
+					"%s", m_AssetDestinationValidationError.c_str());
+
+			if (ImGui::Button(m_AssetDestinationDuplicate ? "Duplicate" : "Move", ImVec2(132.0f, 0.0f)) ||
+				EnterPressed)
+			{
+				const std::string FilenameText = m_AssetDestinationFilename.data();
+				const std::filesystem::path Filename = std::filesystem::u8path(FilenameText);
+				if (FilenameText.empty() || FilenameText == "." || FilenameText == ".." ||
+					Filename.has_parent_path() || FilenameText.find('/') != std::string::npos ||
+					FilenameText.find_first_of("\\<>:\"|?*") != std::string::npos ||
+					FilenameText.back() == '.' || FilenameText.back() == ' ')
+					m_AssetDestinationValidationError = "Enter a single valid filename without a folder path.";
+				else if (!m_Project || !m_AssetDestinationAsset || !IsKnownContentFolder(
+					std::filesystem::u8path(m_AssetDestinationFolder)))
+					m_AssetDestinationValidationError = "Choose a folder that belongs to the open project.";
+				else
+				{
+					std::filesystem::path FinalFilename = Filename;
+					if (FinalFilename.extension().empty())
+						FinalFilename += Asset->ProjectRelativePath.extension();
+					const auto Lower = [](std::string Value)
+					{
+						std::transform(Value.begin(), Value.end(), Value.begin(), [](unsigned char Character)
+						{
+							return static_cast<char>(std::tolower(Character));
+						});
+						return Value;
+					};
+					if (Lower(FinalFilename.extension().string()) !=
+						Lower(Asset->ProjectRelativePath.extension().string()))
+						m_AssetDestinationValidationError = "The destination must keep the original asset extension.";
+					else if (Lower(FinalFilename.extension().string()) == ".meta")
+						m_AssetDestinationValidationError = "The .meta extension is reserved for asset sidecars.";
+					else
+					{
+						const PulseForge::AssetID Identifier = *m_AssetDestinationAsset;
+						const std::filesystem::path Target =
+							std::filesystem::u8path(m_AssetDestinationFolder) / FinalFilename;
+						const bool Duplicate = m_AssetDestinationDuplicate;
+						m_AssetDestinationAsset.reset();
+						m_AssetDestinationValidationError.clear();
+						ImGui::CloseCurrentPopup();
+						if (Duplicate)
+							QueueAfterSave([this, Identifier, Target] { DuplicateAssetAt(Identifier, Target); });
+						else
+							QueueAfterSave([this, Identifier, Target] { MoveAssetAt(Identifier, Target); });
+					}
+				}
+			}
+			}
+			ImGui::SameLine();
+			const bool EscapePressed = ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+			if (ImGui::Button("Cancel", ImVec2(112.0f, 0.0f)) || EscapePressed)
+			{
+				m_AssetDestinationAsset.reset();
+				m_AssetDestinationValidationError.clear();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+			if (!PopupOpen)
+			{
+				m_AssetDestinationAsset.reset();
+				m_AssetDestinationValidationError.clear();
+			}
 		}
 
 		void MoveAssetAt(
@@ -2385,33 +3146,7 @@ namespace
 				return;
 			}
 
-			const std::filesystem::path Filename = Asset->ProjectRelativePath.filename();
-			const std::string DefaultName =
-				PathToUtf8(Filename.stem()) + " Copy" + PathToUtf8(Filename.extension());
-			auto Destination = ShowSaveDialog(
-				nullptr,
-				m_Project->GetRootPath() / Asset->ProjectRelativePath.parent_path(),
-				DefaultName.c_str());
-			if (!Destination)
-				return;
-			if (Destination->extension().empty())
-				*Destination += Asset->ProjectRelativePath.extension();
-			if (Destination->extension() != Asset->ProjectRelativePath.extension())
-			{
-				SetError("Duplicating an asset cannot change its file extension.");
-				return;
-			}
-			if (HasReservedMetadataExtension(*Destination))
-			{
-				SetError("Asset destinations cannot use the reserved .meta extension.");
-				return;
-			}
-
-			const auto RelativeDestination = GetProjectRelativePath(*Destination, "asset duplication");
-			if (!RelativeDestination)
-				return;
-			const std::filesystem::path Target = *RelativeDestination;
-			QueueAfterSave([this, Identifier, Target] { DuplicateAssetAt(Identifier, Target); });
+			OpenAssetDestinationDialog(Identifier, true);
 		}
 
 		void DuplicateAssetAt(
@@ -2629,6 +3364,8 @@ namespace
 				SetError("The open or configured startup scene cannot be deleted. Choose another startup scene first.");
 				return;
 			}
+			const auto Asset = m_Project->GetAssetRegistry().Find(Identifier);
+			const bool DeletedMaterial = Asset && NormalizedExtension(Asset->ProjectRelativePath) == ".material";
 
 			auto Deleted = PulseForge::AssetOperations::Delete(
 				m_Project->GetAssetRegistry(),
@@ -2643,11 +3380,17 @@ namespace
 			}
 
 			UpdateAssetList();
-			if (m_OpenedMaterialAsset && *m_OpenedMaterialAsset == Identifier)
+			std::vector<PulseForgeEditor::EditorDocumentIdentity> DeletedDocuments;
+			for (const auto& [Identity, Session] : m_Documents.GetSessions())
 			{
-				ForgetMaterialDraft(Identifier);
-				m_OpenedMaterialAsset.reset();
+				(void)Session;
+				if (Identity.Project == m_Project->GetDescription().ID && Identity.Asset == Identifier)
+					DeletedDocuments.push_back(Identity);
 			}
+			for (const auto& Identity : DeletedDocuments)
+				(void)CloseDocumentClean(Identity);
+			if (DeletedMaterial)
+				ForgetMaterialDraft(Identifier);
 			if (m_SelectedAsset && *m_SelectedAsset == Identifier)
 				m_SelectedAsset.reset();
 			SetStatus("Deleted asset " + Identifier.ToString() + ".");
@@ -2897,11 +3640,14 @@ namespace
 
 			if (!m_SceneDirty)
 			{
-				Action();
+				QueueAfterDocuments(std::move(Action));
 				return;
 			}
 
-			m_PendingAction = std::move(Action);
+			m_PendingAction = [this, Action = std::move(Action)]() mutable
+			{
+				QueueAfterDocuments(std::move(Action));
+			};
 			m_OpenUnsavedDialog = true;
 		}
 
@@ -2992,13 +3738,10 @@ namespace
 
 		void CloseProjectNow()
 		{
+			ClearCurrentProjectDocumentState();
 			ClearScene();
 			ResetViewportSceneRenderer();
-			m_AssetPreviewProjectPending = true;
 			m_Project.reset();
-			m_OpenedMaterialAsset.reset();
-			m_FocusMaterialEditorNextFrame = false;
-			m_InitialMaterialEditorDockPending = false;
 			m_Assets.clear();
 			m_AssetBrowserPresentations.clear();
 			ResetContentBrowserNavigation();
@@ -3010,6 +3753,10 @@ namespace
 		{
 			if (!ImGui::BeginMainMenuBar())
 				return;
+			if (ImGui::GetWindowViewport() && ImGui::GetMainViewport() &&
+				ImGui::GetWindowViewport()->ID == ImGui::GetMainViewport()->ID &&
+				ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+				FocusDocumentHostIfChanged(PulseForgeEditor::EditorDocumentManager::MainHostID);
 			if (ImGui::BeginMenu("File"))
 			{
 				if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::NewDocument, "New Project..."))
@@ -3024,23 +3771,47 @@ namespace
 				ImGui::EndMenu();
 			}
 
-			if (ImGui::BeginMenu("Edit", m_Scene != nullptr))
+			const bool MaterialDocumentFocused = IsFocusedMaterialDocument();
+			const bool SceneDocumentFocused = !GetFocusedDocumentIdentity() ||
+				GetFocusedDocumentIdentity()->Kind == PulseForgeEditor::EditorDocumentKind::Level;
+			if (ImGui::BeginMenu("Edit", m_Scene != nullptr || MaterialDocumentFocused))
 			{
 				const auto UndoCommand = m_SceneHistory.GetUndoCommand();
 				const auto RedoCommand = m_SceneHistory.GetRedoCommand();
-				const bool CanEditScene = m_Scene != nullptr && m_SceneRuntime == nullptr;
+				const bool CanEditScene = SceneDocumentFocused && m_Scene != nullptr && m_SceneRuntime == nullptr;
+				bool CanUndoDocument = CanEditScene && m_SceneHistory.CanUndo();
+				bool CanRedoDocument = CanEditScene && m_SceneHistory.CanRedo();
+				if (MaterialDocumentFocused)
+				{
+					const auto* Identity = GetFocusedDocumentIdentity();
+					if (Identity)
+					{
+						const auto History = m_MaterialHistories.find(GetMaterialDraftKey(Identity->Asset));
+					CanUndoDocument = History != m_MaterialHistories.end() && History->second.CanUndo();
+					CanRedoDocument = History != m_MaterialHistories.end() && History->second.CanRedo();
+					}
+				}
 				const bool HasSelection = !m_Selection.GetEntities().empty();
-				const std::string UndoLabel = UndoCommand
+				const std::string UndoLabel = MaterialDocumentFocused
+					? "Undo Material Edit"
+					: UndoCommand
 					? "Undo " + std::string(UndoCommand->Description)
 					: "Undo";
-				const std::string RedoLabel = RedoCommand
+				const std::string RedoLabel = MaterialDocumentFocused
+					? "Redo Material Edit"
+					: RedoCommand
 					? "Redo " + std::string(RedoCommand->Description)
 					: "Redo";
-				if (ImGui::MenuItem(UndoLabel.c_str(), "Ctrl+Z", false, CanEditScene && m_SceneHistory.CanUndo()))
-					UndoSceneEdit();
-				if (ImGui::MenuItem(RedoLabel.c_str(), "Ctrl+Y / Ctrl+Shift+Z", false,
-					CanEditScene && m_SceneHistory.CanRedo()))
-					RedoSceneEdit();
+				if (ImGui::MenuItem(UndoLabel.c_str(), "Ctrl+Z", false, CanUndoDocument))
+					if (MaterialDocumentFocused)
+						(void)ApplyMaterialHistoryStep(false);
+					else
+						UndoSceneEdit();
+				if (ImGui::MenuItem(RedoLabel.c_str(), "Ctrl+Y / Ctrl+Shift+Z", false, CanRedoDocument))
+					if (MaterialDocumentFocused)
+						(void)ApplyMaterialHistoryStep(true);
+					else
+						RedoSceneEdit();
 				ImGui::Separator();
 				if (ImGui::MenuItem("Cut", "Ctrl+X", false, CanEditScene && HasSelection))
 					CutSelectedEntities();
@@ -3119,9 +3890,35 @@ namespace
 				for (const PulseForgeEditor::EditorPanelDescriptor& Descriptor :
 					PulseForgeEditor::EditorPanelDescriptors)
 				{
+					if (Descriptor.Panel == PulseForgeEditor::EditorPanel::MaterialEditor)
+						continue;
 					const bool IsVisible = m_Layout.IsPanelVisible(Descriptor.Panel);
 					if (ImGui::MenuItem(Descriptor.WindowName.data(), nullptr, IsVisible))
 						SetEditorPanelVisible(Descriptor.Panel, !IsVisible);
+				}
+				ImGui::Separator();
+				if (ImGui::BeginMenu("New asset documents open in"))
+				{
+					auto Preference = m_Documents.GetOpeningPreference();
+					if (ImGui::MenuItem("New native window", nullptr,
+						Preference == PulseForgeEditor::EditorDocumentOpenPreference::NewNativeWindow))
+					{
+						m_Documents.SetOpeningPreference(PulseForgeEditor::EditorDocumentOpenPreference::NewNativeWindow);
+						(void)m_Layout.SetDocumentOpeningPreference(0);
+					}
+					if (ImGui::MenuItem("Main document strip", nullptr,
+						Preference == PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip))
+					{
+						m_Documents.SetOpeningPreference(PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip);
+						(void)m_Layout.SetDocumentOpeningPreference(1);
+					}
+					if (ImGui::MenuItem("Remembered placement", nullptr,
+						Preference == PulseForgeEditor::EditorDocumentOpenPreference::RememberedPlacement))
+					{
+						m_Documents.SetOpeningPreference(PulseForgeEditor::EditorDocumentOpenPreference::RememberedPlacement);
+						(void)m_Layout.SetDocumentOpeningPreference(2);
+					}
+					ImGui::EndMenu();
 				}
 				ImGui::Separator();
 				if (ImGui::MenuItem("Reset Layout"))
@@ -3220,10 +4017,15 @@ namespace
 				const float SaveWidth = 42.0f;
 				ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
 					(std::max)(0.0f, ImGui::GetContentRegionAvail().x - SaveWidth));
-				ImGui::BeginDisabled(!m_Scene || !m_SceneAsset || m_SceneRuntime);
+				const auto* FocusedDocument = GetFocusedDocumentIdentity();
+				const bool MaterialCanSave = IsFocusedMaterialDocument() && FocusedDocument &&
+					m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(FocusedDocument->Asset));
+				ImGui::BeginDisabled(IsFocusedMaterialDocument() ? !MaterialCanSave :
+					(!m_Scene || !m_SceneAsset || m_SceneRuntime));
 				if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Save, "Save", "GlobalSaveScene",
-					"Save the current scene", false, SaveWidth, 40.0f))
-					SaveScene();
+					IsFocusedMaterialDocument() ? "Save the focused material document" : "Save the current scene",
+					false, SaveWidth, 40.0f))
+					(void)SaveFocusedDocument();
 				ImGui::EndDisabled();
 				ImGui::EndTable();
 			}
@@ -3300,6 +4102,598 @@ namespace
 			EndEditorChromeBar();
 		}
 
+		std::string GetDocumentPayload(const PulseForgeEditor::EditorDocumentIdentity& Identity) const
+		{
+			return Identity.Project.ToString() + "|" + Identity.Asset.ToString() + "|" +
+				std::to_string(static_cast<uint32_t>(Identity.Kind));
+		}
+
+		bool SaveMaterialDraft(const PulseForge::AssetID& Identifier)
+		{
+			if (!m_Project)
+			{
+				SetError("Cannot save a material document without an open project.");
+				return false;
+			}
+			auto Asset = m_Project->GetAssetRegistry().Find(Identifier);
+			if (!Asset || NormalizedExtension(Asset->ProjectRelativePath) != ".material")
+			{
+				SetError("The material document's asset is no longer registered.");
+				return false;
+			}
+			const std::string Key = GetMaterialDraftKey(Identifier);
+			auto Draft = m_MaterialDrafts.find(Key);
+			if (Draft == m_MaterialDrafts.end() || !m_DirtyMaterialDrafts.contains(Key))
+				return true;
+
+			const auto Saved = PulseForge::MaterialAssetService::Save(
+				Identifier, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), Draft->second);
+			if (!Saved)
+			{
+				SetError("Material save failed: " + Saved.error().Message);
+				return false;
+			}
+			m_DirtyMaterialDrafts.erase(Key);
+			m_MaterialEditorErrors.erase(Key);
+			if (auto History = m_MaterialHistories.find(Key); History != m_MaterialHistories.end())
+				History->second.MarkSaved();
+			const PulseForgeEditor::EditorDocumentIdentity Identity{
+				m_Project->GetDescription().ID, Identifier, PulseForgeEditor::EditorDocumentKind::Material
+			};
+			if (const auto* Session = m_Documents.Find(Identity))
+				(void)m_Documents.MarkSaved(Identity, Session->Revision);
+			m_AssetPreviewAssetsPending = true;
+			if (m_SceneRenderer)
+				m_SceneRenderer->RefreshMaterialAssets();
+			SetStatus("Saved material " + PathToUtf8(Asset->ProjectRelativePath.filename()) + ".");
+			return true;
+		}
+
+		bool ReloadMaterialDraft(const PulseForge::AssetID& Identifier)
+		{
+			if (!m_Project)
+				return false;
+			auto Loaded = PulseForge::MaterialAssetService::Load(
+				Identifier, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
+			if (!Loaded)
+			{
+				SetError("Material reload failed: " + Loaded.error().Message);
+				return false;
+			}
+			const std::string Key = GetMaterialDraftKey(Identifier);
+			m_MaterialDrafts[Key] = std::move(*Loaded);
+			m_DirtyMaterialDrafts.erase(Key);
+			m_MaterialEditStarts.erase(Key);
+			m_MaterialEditorErrors.erase(Key);
+			m_MaterialHistories[Key].Reset(m_MaterialDrafts[Key]);
+			const PulseForgeEditor::EditorDocumentIdentity Identity{
+				m_Project->GetDescription().ID, Identifier, PulseForgeEditor::EditorDocumentKind::Material
+			};
+			if (auto* Session = m_Documents.Find(Identity))
+				Session->Revision = Session->SavedRevision;
+			return true;
+		}
+
+		std::vector<PulseForgeEditor::EditorDocumentIdentity> GetDirtyAssetDocuments() const
+		{
+			std::vector<PulseForgeEditor::EditorDocumentIdentity> Dirty;
+			for (const auto& [Identity, Session] : m_Documents.GetSessions())
+				if (Session.IsDirty())
+					Dirty.push_back(Identity);
+			return Dirty;
+		}
+
+		bool CloseDocumentClean(const PulseForgeEditor::EditorDocumentIdentity& Identity)
+		{
+			const auto* Session = m_Documents.Find(Identity);
+			if (!Session)
+				return false;
+			const std::string HostID = Session->HostID;
+			const auto Status = m_Documents.Close(Identity, PulseForgeEditor::EditorDocumentCloseChoice::Discard,
+				[](const auto&, uint64_t) { return true; },
+				[](const auto&) { return true; });
+			if (Status != PulseForgeEditor::EditorDocumentCloseStatus::Closed)
+				return false;
+			(void)m_Documents.RemoveEmptyNativeHost(HostID);
+			MarkDocumentWorkspaceDirty();
+			return true;
+		}
+
+		void RequestDocumentClose(const PulseForgeEditor::EditorDocumentIdentity& Identity)
+		{
+			const auto* Session = m_Documents.Find(Identity);
+			if (!Session || Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level)
+				return;
+			if (!Session->IsDirty())
+			{
+				(void)CloseDocumentClean(Identity);
+				return;
+			}
+			m_PendingDocumentClose = Identity;
+			m_PendingDocumentHostClose.reset();
+			m_PendingDocumentCloseAction = {};
+			m_OpenDocumentCloseDialog = true;
+		}
+
+		void RequestDocumentHostClose(std::string_view HostID)
+		{
+			const auto* Host = m_Documents.FindHost(HostID);
+			if (!Host || Host->Role != PulseForgeEditor::EditorDocumentHostRole::Native)
+				return;
+			const auto Documents = Host->Documents;
+			const bool HasDirty = std::any_of(Documents.begin(), Documents.end(), [this](const auto& Identity)
+			{
+				const auto* Session = m_Documents.Find(Identity);
+				return Session && Session->IsDirty();
+			});
+			if (!HasDirty)
+			{
+				for (const auto& Identity : Documents)
+					(void)CloseDocumentClean(Identity);
+				(void)m_Documents.RemoveEmptyNativeHost(HostID);
+				return;
+			}
+			m_PendingDocumentClose.reset();
+			m_PendingDocumentHostClose = std::string(HostID);
+			m_PendingDocumentCloseAction = {};
+			m_OpenDocumentCloseDialog = true;
+		}
+
+		void QueueAfterDocuments(std::function<void()> Action)
+		{
+			if (!Action)
+				return;
+			if (GetDirtyAssetDocuments().empty())
+			{
+				Action();
+				return;
+			}
+			m_PendingDocumentClose.reset();
+			m_PendingDocumentHostClose.reset();
+			m_PendingDocumentCloseAction = std::move(Action);
+			m_OpenDocumentCloseDialog = true;
+		}
+
+		bool ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice Choice)
+		{
+			std::vector<PulseForgeEditor::EditorDocumentIdentity> Documents;
+			if (m_PendingDocumentClose)
+				Documents.push_back(*m_PendingDocumentClose);
+			else if (m_PendingDocumentHostClose)
+			{
+				if (const auto* Host = m_Documents.FindHost(*m_PendingDocumentHostClose))
+					Documents = Host->Documents;
+			}
+			else
+				Documents = GetDirtyAssetDocuments();
+
+			if (Choice == PulseForgeEditor::EditorDocumentCloseChoice::Save)
+			{
+				for (const auto& Identity : Documents)
+				{
+					const auto* Session = m_Documents.Find(Identity);
+					if (Session && Session->IsDirty() &&
+						(Identity.Kind != PulseForgeEditor::EditorDocumentKind::Material ||
+							!SaveMaterialDraft(Identity.Asset)))
+						return false;
+				}
+			}
+			else if (Choice == PulseForgeEditor::EditorDocumentCloseChoice::Discard)
+			{
+				std::vector<std::pair<PulseForgeEditor::EditorDocumentIdentity, PulseForge::MaterialAssetDesc>> Reloaded;
+				for (const auto& Identity : Documents)
+				{
+					const auto* Session = m_Documents.Find(Identity);
+					if (!Session || !Session->IsDirty())
+						continue;
+					if (Identity.Kind != PulseForgeEditor::EditorDocumentKind::Material || !m_Project)
+					{
+						SetError("Discard is unavailable for this document type.");
+						return false;
+					}
+					auto Loaded = PulseForge::MaterialAssetService::Load(
+						Identity.Asset, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
+					if (!Loaded)
+					{
+						SetError("Material reload failed; unsaved draft was preserved: " + Loaded.error().Message);
+						return false;
+					}
+					Reloaded.emplace_back(Identity, std::move(*Loaded));
+				}
+				for (auto& [Identity, Material] : Reloaded)
+				{
+					const std::string Key = GetMaterialDraftKey(Identity.Asset);
+					m_MaterialDrafts[Key] = std::move(Material);
+					m_DirtyMaterialDrafts.erase(Key);
+					m_MaterialEditStarts.erase(Key);
+					m_MaterialHistories[Key].Reset(m_MaterialDrafts[Key]);
+					if (auto* Session = m_Documents.Find(Identity))
+						Session->Revision = Session->SavedRevision;
+				}
+			}
+
+			if (m_PendingDocumentClose)
+				(void)CloseDocumentClean(*m_PendingDocumentClose);
+			else if (m_PendingDocumentHostClose)
+			{
+				const std::string HostID = *m_PendingDocumentHostClose;
+				for (const auto& Identity : Documents)
+					(void)CloseDocumentClean(Identity);
+				(void)m_Documents.RemoveEmptyNativeHost(HostID);
+			}
+			auto Continuation = std::move(m_PendingDocumentCloseAction);
+			m_PendingDocumentClose.reset();
+			m_PendingDocumentHostClose.reset();
+			m_PendingDocumentCloseAction = {};
+			m_OpenDocumentCloseDialog = false;
+			ImGui::CloseCurrentPopup();
+			if (Continuation)
+				Continuation();
+			return true;
+		}
+
+		void DrawDocumentCloseDialog()
+		{
+			if (m_OpenDocumentCloseDialog)
+			{
+				ImGui::OpenPopup("Unsaved Asset Documents");
+				m_OpenDocumentCloseDialog = false;
+			}
+			bool PopupOpen = true;
+			const bool PopupVisible = ImGui::BeginPopupModal(
+				"Unsaved Asset Documents", &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize);
+			if (!PopupVisible)
+				return;
+			const auto DirtyDocuments = m_PendingDocumentClose
+				? std::vector<PulseForgeEditor::EditorDocumentIdentity>{ *m_PendingDocumentClose }
+				: m_PendingDocumentHostClose
+					? (m_Documents.FindHost(*m_PendingDocumentHostClose)
+						? m_Documents.FindHost(*m_PendingDocumentHostClose)->Documents
+						: std::vector<PulseForgeEditor::EditorDocumentIdentity>{})
+					: GetDirtyAssetDocuments();
+			ImGui::TextWrapped("%zu open asset document%s have unsaved changes.", DirtyDocuments.size(),
+				DirtyDocuments.size() == 1 ? "" : "s");
+			ImGui::TextUnformatted("Save or discard these drafts before continuing?");
+			if (ImGui::Button("Save", ImVec2(112.0f, 0.0f)))
+				(void)ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice::Save);
+			ImGui::SameLine();
+			if (m_EditorStyle.DangerButton(PulseForgeEditor::EditorIcon::Delete, "Discard"))
+				(void)ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice::Discard);
+			ImGui::SameLine();
+			if (ImGui::Button("Cancel", ImVec2(112.0f, 0.0f)))
+			{
+				m_PendingDocumentClose.reset();
+				m_PendingDocumentHostClose.reset();
+				m_PendingDocumentCloseAction = {};
+				m_OpenDocumentCloseDialog = false;
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+			if (!PopupOpen)
+			{
+				m_PendingDocumentClose.reset();
+				m_PendingDocumentHostClose.reset();
+				m_PendingDocumentCloseAction = {};
+				m_OpenDocumentCloseDialog = false;
+			}
+		}
+
+		void DrawMaterialDocument(const PulseForgeEditor::EditorDocumentIdentity& Identity)
+		{
+			if (Identity.Kind != PulseForgeEditor::EditorDocumentKind::Material)
+			{
+				m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Warning,
+					"This asset editor is not available yet.");
+				return;
+			}
+			if (!m_Project || Identity.Project != m_Project->GetDescription().ID)
+			{
+				m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Warning,
+					"The document belongs to a project that is not currently open.");
+				return;
+			}
+			auto Asset = m_Project->GetAssetRegistry().Find(Identity.Asset);
+			if (!Asset || NormalizedExtension(Asset->ProjectRelativePath) != ".material")
+			{
+				m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Warning,
+					"This material is no longer registered. Refresh the Content Browser or close this document.");
+				return;
+			}
+			if (auto* Session = m_Documents.Find(Identity))
+			{
+				Session->ProjectRelativePath = Asset->ProjectRelativePath;
+				Session->DisplayName = PathToUtf8(Asset->ProjectRelativePath.filename());
+			}
+			const std::string Name = PathToUtf8(Asset->ProjectRelativePath.filename());
+			const std::string FullPath = PathToUtf8(Asset->ProjectRelativePath);
+			const std::string IdentifierText = Asset->ID.ToString();
+			m_EditorStyle.IconText(PulseForgeEditor::EditorIcon::Material, Name);
+			if (m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(Asset->ID)))
+			{
+				ImGui::SameLine();
+				ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning), "Unsaved");
+			}
+			ImGui::TextWrapped("%s", FullPath.c_str());
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("%s\nUUID: %s", FullPath.c_str(), IdentifierText.c_str());
+			ImGui::Separator();
+			const bool StackActions = ImGui::GetContentRegionAvail().x < 320.0f;
+			const float FooterHeight = ImGui::GetFrameHeightWithSpacing() * (StackActions ? 3.0f : 2.0f) + 8.0f;
+			const float PropertiesHeight = (std::max)(ImGui::GetContentRegionAvail().y - FooterHeight, 0.0f);
+			if (ImGui::BeginChild("MaterialEditorProperties", ImVec2(0.0f, PropertiesHeight),
+				ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar))
+				(void)DrawMaterialAssetProperties(*Asset);
+			ImGui::EndChild();
+			ImGui::Separator();
+			DrawMaterialEditorActions(*Asset);
+		}
+
+		void DrawNativeDocumentHosts()
+		{
+			std::vector<std::string> HostIDs;
+			for (const auto& Host : m_Documents.GetHosts())
+				if (Host.Role == PulseForgeEditor::EditorDocumentHostRole::Native && !Host.Documents.empty())
+					HostIDs.push_back(Host.ID);
+			for (const std::string& HostID : HostIDs)
+			{
+				const auto* Host = m_Documents.FindHost(HostID);
+				if (!Host || !Host->ActiveDocument)
+					continue;
+				const auto* ActiveSession = m_Documents.Find(*Host->ActiveDocument);
+				if (!ActiveSession)
+					continue;
+				std::string WindowName = ActiveSession->DisplayName + "###PFDocumentHost_" + HostID;
+				if (m_DocumentHostFocusRequests.erase(HostID) != 0)
+					ImGui::SetNextWindowFocus();
+				const auto SavedBounds = Host->Bounds;
+				const bool RestoreBounds = SavedBounds.HasValue && m_RestoredHostBoundsPending.contains(HostID);
+				if (RestoreBounds)
+				{
+					const ResolvedNativeWindowBounds Bounds = ResolveRestoredNativeWindowBounds(SavedBounds);
+					ImGui::SetNextWindowPos(Bounds.Position, ImGuiCond_Always);
+					ImGui::SetNextWindowSize(Bounds.Size, ImGuiCond_Always);
+				}
+				else if (ImGuiViewport* MainViewport = ImGui::GetMainViewport())
+				{
+					ImGui::SetNextWindowPos(ImVec2(MainViewport->Pos.x + 80.0f,
+						MainViewport->Pos.y + 84.0f), ImGuiCond_FirstUseEver);
+					ImGui::SetNextWindowSize(ImVec2(560.0f, 760.0f), ImGuiCond_FirstUseEver);
+				}
+				ImGuiWindowClass DocumentWindowClass;
+				DocumentWindowClass.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge;
+				ImGui::SetNextWindowClass(&DocumentWindowClass);
+				bool IsOpen = true;
+				const bool Visible = ImGui::Begin(WindowName.c_str(), &IsOpen, ImGuiWindowFlags_NoDocking);
+				if (RestoreBounds)
+				{
+					m_RestoredHostBoundsPending.erase(HostID);
+					if (SavedBounds.Maximized && ImGui::GetWindowViewport()->PlatformHandle)
+						glfwMaximizeWindow(static_cast<GLFWwindow*>(ImGui::GetWindowViewport()->PlatformHandle));
+					ImGui::MarkIniSettingsDirty();
+				}
+				if (!IsOpen)
+					RequestDocumentHostClose(HostID);
+				if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+				{
+					if (m_ViewportKeyboardFocused || m_ViewportMouseCapture.OwnsMouse() ||
+						m_ViewportCameraGesture != ViewportCameraGesture::None)
+						ResetViewportPanelInteraction();
+					FocusDocumentHostIfChanged(HostID);
+				}
+				if (auto* CurrentHost = m_Documents.FindHost(HostID))
+				{
+					const ImVec2 Position = ImGui::GetWindowPos();
+					const ImVec2 Size = ImGui::GetWindowSize();
+					PulseForgeEditor::EditorDocumentHost::WindowBounds Bounds;
+					Bounds.X = Position.x;
+					Bounds.Y = Position.y;
+					Bounds.Width = Size.x;
+					Bounds.Height = Size.y;
+					Bounds.HasValue = true;
+					ImGuiViewport* WindowViewport = ImGui::GetWindowViewport();
+					if (WindowViewport)
+						Bounds.DpiScale = WindowViewport->DpiScale;
+					if (GLFWwindow* NativeWindow = WindowViewport
+						? static_cast<GLFWwindow*>(WindowViewport->PlatformHandle) : nullptr)
+					{
+						Bounds.Maximized = glfwGetWindowAttrib(NativeWindow, GLFW_MAXIMIZED) == GLFW_TRUE;
+						if (GLFWmonitor* Monitor = FindMonitorForBounds(
+							Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height))
+							if (const char* MonitorName = glfwGetMonitorName(Monitor))
+								Bounds.MonitorName = MonitorName;
+					}
+					if (m_Documents.SetHostBounds(HostID, std::move(Bounds)))
+						MarkDocumentWorkspaceDirty(true);
+				}
+				if (Visible && IsOpen)
+				{
+					DrawDocumentTabStrip(HostID);
+					ImGui::Separator();
+					const auto* CurrentHost = m_Documents.FindHost(HostID);
+					if (CurrentHost && CurrentHost->ActiveDocument)
+						DrawMaterialDocument(*CurrentHost->ActiveDocument);
+				}
+				ImGui::End();
+			}
+		}
+
+		void HandlePlatformPresentationFailure(ImGuiViewport* Viewport, std::string_view Error)
+		{
+			if (Viewport)
+			{
+				for (const auto& Host : m_Documents.GetHosts())
+				{
+					if (Host.Role != PulseForgeEditor::EditorDocumentHostRole::Native || Host.Documents.empty())
+						continue;
+					const auto* Session = Host.ActiveDocument ? m_Documents.Find(*Host.ActiveDocument) : nullptr;
+					if (!Session)
+						continue;
+					const std::string WindowName = Session->DisplayName + "###PFDocumentHost_" + Host.ID;
+					ImGuiWindow* Window = ImGui::FindWindowByName(WindowName.c_str());
+					if (!Window || Window->Viewport != Viewport)
+						continue;
+
+					const std::vector<PulseForgeEditor::EditorDocumentIdentity> Documents = Host.Documents;
+					for (const auto& Identity : Documents)
+					{
+						const auto* MainHost = m_Documents.FindHost(
+							PulseForgeEditor::EditorDocumentManager::MainHostID);
+						const size_t DestinationIndex = MainHost ? MainHost->Documents.size() : 0;
+						auto Moved = m_Documents.Transfer(Identity,
+							PulseForgeEditor::EditorDocumentManager::MainHostID, DestinationIndex);
+						if (!Moved)
+							PF_ERROR("Could not retain asset document after native presentation failure: {}", Moved.error());
+					}
+					(void)m_Documents.RemoveEmptyNativeHost(Host.ID);
+					MarkDocumentWorkspaceDirty();
+					SetWarning("Native document window creation failed; its open documents were retained in the main document strip.");
+					Viewport->PlatformRequestClose = true;
+					return;
+				}
+				Viewport->PlatformRequestClose = true;
+			}
+			PF_ERROR("Could not create native editor presentation target: {}", Error);
+		}
+
+		void HandleNativePlatformCloseRequests()
+		{
+			if (!m_Context || !(ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable))
+				return;
+			ImGuiViewport* MainViewport = ImGui::GetMainViewport();
+			std::vector<std::string> HostIDs;
+			for (const auto& Host : m_Documents.GetHosts())
+				if (Host.Role == PulseForgeEditor::EditorDocumentHostRole::Native && !Host.Documents.empty())
+					HostIDs.push_back(Host.ID);
+			for (const std::string& HostID : HostIDs)
+			{
+				const auto* Host = m_Documents.FindHost(HostID);
+				if (!Host || Host->Role != PulseForgeEditor::EditorDocumentHostRole::Native || Host->Documents.empty())
+					continue;
+				const auto* Session = Host->ActiveDocument ? m_Documents.Find(*Host->ActiveDocument) : nullptr;
+				if (!Session)
+					continue;
+				const std::string WindowName = Session->DisplayName + "###PFDocumentHost_" + HostID;
+				ImGuiWindow* Window = ImGui::FindWindowByName(WindowName.c_str());
+				ImGuiViewport* Viewport = Window ? Window->Viewport : nullptr;
+				if (!Viewport || Viewport == MainViewport || !Viewport->PlatformRequestClose)
+					continue;
+				Viewport->PlatformRequestClose = false;
+				RequestDocumentHostClose(HostID);
+			}
+		}
+
+		void TryTransferDocumentPayload(const ImGuiPayload* Payload, std::string_view DestinationHostID, size_t Index)
+		{
+			if (!Payload || !Payload->IsDelivery() || !Payload->Data || Payload->DataSize <= 1)
+				return;
+			const std::string_view Encoded(static_cast<const char*>(Payload->Data),
+				static_cast<size_t>(Payload->DataSize - 1));
+			std::optional<PulseForgeEditor::EditorDocumentIdentity> Identity;
+			for (const auto& [Candidate, Session] : m_Documents.GetSessions())
+			{
+				(void)Session;
+				if (GetDocumentPayload(Candidate) == Encoded)
+				{
+					Identity = Candidate;
+					break;
+				}
+			}
+			if (!Identity)
+				return;
+
+			auto Moved = m_Documents.Transfer(*Identity, DestinationHostID, Index,
+				[](const auto&, const auto&) { return true; });
+			if (!Moved)
+			{
+				SetWarning("Document transfer was rejected: " + Moved.error());
+				return;
+			}
+			if (Moved->Changed)
+				MarkDocumentWorkspaceDirty();
+			if (Moved->EmptiedSourceHost)
+				(void)m_Documents.RemoveEmptyNativeHost(*Moved->EmptiedSourceHost);
+			m_DocumentHostFocusRequests.insert(std::string(DestinationHostID));
+		}
+
+		void DrawDocumentTabStrip(std::string_view HostID)
+		{
+			const auto* Host = m_Documents.FindHost(HostID);
+			if (!Host)
+				return;
+			const std::vector<PulseForgeEditor::EditorDocumentIdentity> Documents = Host->Documents;
+			for (size_t Index = 0; Index < Documents.size(); ++Index)
+			{
+				const auto* Session = m_Documents.Find(Documents[Index]);
+				if (!Session)
+					continue;
+				ImGui::PushID(GetDocumentPayload(Session->Identity).c_str());
+				std::string Label = Session->Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level
+					? "Level Editor" : Session->DisplayName;
+				if (Session->IsDirty())
+					Label += " *";
+				const float LabelWidth = ImGui::CalcTextSize(Label.c_str()).x + 20.0f;
+				const bool Active = Host->ActiveDocument == Session->Identity;
+				if (ImGui::Selectable(Label.c_str(), Active, ImGuiSelectableFlags_None, ImVec2(LabelWidth, 25.0f)))
+				{
+					(void)m_Documents.Activate(Session->Identity);
+					MarkDocumentWorkspaceDirty();
+					m_DocumentHostFocusRequests.insert(std::string(HostID));
+				}
+				if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+				{
+					const std::string Payload = GetDocumentPayload(Session->Identity);
+					ImGui::SetDragDropPayload("PF_EDITOR_DOCUMENT", Payload.c_str(), Payload.size() + 1);
+					ImGui::TextUnformatted(Label.c_str());
+					ImGui::EndDragDropSource();
+				}
+				if (ImGui::BeginDragDropTarget())
+				{
+					if (const ImGuiPayload* Payload = ImGui::AcceptDragDropPayload("PF_EDITOR_DOCUMENT"))
+						TryTransferDocumentPayload(Payload, HostID, Index);
+					ImGui::EndDragDropTarget();
+				}
+				if (ImGui::IsItemHovered() && !Session->ProjectRelativePath.empty())
+					ImGui::SetTooltip("%s", PathToUtf8(Session->ProjectRelativePath).c_str());
+				if (Session->Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level)
+				{
+					ImGui::SameLine(0.0f, 2.0f);
+					if (ImGui::SmallButton("x"))
+						RequestDocumentClose(Session->Identity);
+				}
+				ImGui::SameLine(0.0f, 4.0f);
+				ImGui::PopID();
+			}
+
+			const float DropWidth = ImGui::GetContentRegionAvail().x;
+			if (DropWidth > 24.0f)
+			{
+				ImGui::InvisibleButton("DocumentStripDropTarget", ImVec2(DropWidth, 25.0f));
+				if (ImGui::BeginDragDropTarget())
+				{
+					if (const ImGuiPayload* Payload = ImGui::AcceptDragDropPayload("PF_EDITOR_DOCUMENT"))
+						TryTransferDocumentPayload(Payload, HostID, Documents.size());
+					ImGui::EndDragDropTarget();
+				}
+			}
+		}
+
+		void DrawMainDocumentStrip()
+		{
+			if (!BeginEditorChromeBar("##PulseForgeDocumentStrip", ImGuiDir_Up, 34.0f,
+				PulseForgeEditor::EditorColorToken::PanelRaised, m_EditorStyle))
+				return;
+			if (ImGui::GetWindowViewport() && ImGui::GetMainViewport() &&
+				ImGui::GetWindowViewport()->ID == ImGui::GetMainViewport()->ID &&
+				ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+				FocusDocumentHostIfChanged(PulseForgeEditor::EditorDocumentManager::MainHostID);
+			if (const auto* MainHost = m_Documents.FindHost(PulseForgeEditor::EditorDocumentManager::MainHostID);
+				MainHost && !MainHost->Documents.empty())
+				DrawDocumentTabStrip(MainHost->ID);
+			else
+				m_EditorStyle.IconText(PulseForgeEditor::EditorIcon::Scene, "Level Editor");
+			EndEditorChromeBar();
+		}
+
 		void DrawWorkspacePanels()
 		{
 			if (m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Scene))
@@ -3349,6 +4743,7 @@ namespace
 				ImGui::End();
 			}
 			DrawUnsavedChangesDialog();
+			DrawDocumentCloseDialog();
 
 			DrawSceneViewportPanel();
 			DrawHierarchyPanel();
@@ -3358,28 +4753,28 @@ namespace
 				ImGui::SetNextWindowFocus();
 			#endif
 			DrawContentBrowserPanel();
-			if (m_InitialMaterialEditorDockPending)
-			{
-				(void)m_Layout.DockPanelBesideIfUnplaced(
-					PulseForgeEditor::EditorPanel::MaterialEditor,
-					PulseForgeEditor::EditorPanel::Inspector);
-				m_InitialMaterialEditorDockPending = false;
-			}
-			DrawMaterialEditorPanel();
 			DrawDeleteAssetDialog();
+			DrawAssetDestinationDialog();
 			DrawConsolePanel();
+			DrawNativeDocumentHosts();
 		}
 
-		bool BeginEditorPanel(PulseForgeEditor::EditorPanel Panel)
+		bool BeginEditorPanel(PulseForgeEditor::EditorPanel Panel, std::string_view DisplayTitle = {})
 		{
 			bool* IsOpen = m_Layout.GetPanelVisibility(Panel);
 			if (!IsOpen || !*IsOpen)
 				return false;
 
 			const bool WasOpen = *IsOpen;
-			const bool ContentsVisible = ImGui::Begin(
-				PulseForgeEditor::EditorPanelDescriptors[static_cast<size_t>(Panel)].WindowName.data(),
-				IsOpen);
+			const auto& Descriptor = PulseForgeEditor::EditorPanelDescriptors[static_cast<size_t>(Panel)];
+			const std::string WindowName = DisplayTitle.empty()
+				? std::string(Descriptor.WindowName)
+				: std::string(DisplayTitle) + "###" + std::string(Descriptor.WindowName);
+			const bool ContentsVisible = ImGui::Begin(WindowName.c_str(), IsOpen);
+			if (ImGui::GetWindowViewport() && ImGui::GetMainViewport() &&
+				ImGui::GetWindowViewport()->ID == ImGui::GetMainViewport()->ID &&
+				ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+				FocusDocumentHostIfChanged(PulseForgeEditor::EditorDocumentManager::MainHostID);
 			if (Panel != PulseForgeEditor::EditorPanel::SceneViewport &&
 				ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
 				m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
@@ -3394,11 +4789,8 @@ namespace
 
 		void SetEditorPanelVisible(PulseForgeEditor::EditorPanel Panel, bool Visible)
 		{
-			if (Panel == PulseForgeEditor::EditorPanel::MaterialEditor && Visible)
-			{
-				m_InitialMaterialEditorDockPending = true;
-				m_FocusMaterialEditorNextFrame = true;
-			}
+			if (Panel == PulseForgeEditor::EditorPanel::MaterialEditor)
+				return;
 			if (m_Layout.SetPanelVisible(Panel, Visible))
 				HandleEditorPanelVisibilityChange(Panel);
 		}
@@ -3498,9 +4890,21 @@ namespace
 				return;
 			}
 
-			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::SceneViewport))
+			const auto* MainHost = m_Documents.FindHost(PulseForgeEditor::EditorDocumentManager::MainHostID);
+			const auto* MainDocument = MainHost && MainHost->ActiveDocument
+				? m_Documents.Find(*MainHost->ActiveDocument) : nullptr;
+			const bool ShowMainAssetDocument = MainDocument &&
+				MainDocument->Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level;
+			const std::string MainDocumentTitle = ShowMainAssetDocument
+				? MainDocument->DisplayName : std::string{};
+			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::SceneViewport, MainDocumentTitle))
 			{
-				if (!m_Project)
+				if (ShowMainAssetDocument)
+				{
+					ResetViewportPanelInteraction();
+					DrawMaterialDocument(MainDocument->Identity);
+				}
+				else if (!m_Project)
 					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::FolderOpen,
 						"Open a project to render a scene.");
 				else if (!m_Scene)
@@ -7429,8 +8833,21 @@ namespace
 				return;
 			}
 
-			m_OpenedMaterialAsset = Identifier;
-			SetEditorPanelVisible(PulseForgeEditor::EditorPanel::MaterialEditor, true);
+			const PulseForgeEditor::EditorDocumentIdentity Identity{
+				m_Project->GetDescription().ID, Identifier, PulseForgeEditor::EditorDocumentKind::Material
+			};
+			auto Opened = m_Documents.Open(
+				Identity,
+				Asset->ProjectRelativePath,
+				PathToUtf8(Asset->ProjectRelativePath.filename()),
+					m_Documents.GetOpeningPreference());
+			if (!Opened)
+			{
+				SetError("Could not open material document: " + Opened.error());
+				return;
+			}
+			MarkDocumentWorkspaceDirty();
+			m_DocumentHostFocusRequests.insert(Opened->HostID);
 		}
 
 		void DrawFolderList(
@@ -7717,12 +9134,112 @@ namespace
 				PathToUtf8(m_Project->GetRootPath().lexically_normal()), Asset.ToString());
 		}
 
+		void ClearMaterialDraftsForProject()
+		{
+			if (!m_Project)
+				return;
+			const std::string Prefix = PathToUtf8(m_Project->GetRootPath().lexically_normal()) + ":";
+			const auto EraseProjectEntries = [&Prefix](auto& Entries)
+			{
+				for (auto Entry = Entries.begin(); Entry != Entries.end();)
+				{
+					if (Entry->first.starts_with(Prefix))
+						Entry = Entries.erase(Entry);
+					else
+						++Entry;
+				}
+			};
+			EraseProjectEntries(m_MaterialDrafts);
+			EraseProjectEntries(m_MaterialHistories);
+			EraseProjectEntries(m_MaterialEditStarts);
+			EraseProjectEntries(m_MaterialEditorErrors);
+			for (auto Dirty = m_DirtyMaterialDrafts.begin(); Dirty != m_DirtyMaterialDrafts.end();)
+			{
+				if (Dirty->starts_with(Prefix))
+					Dirty = m_DirtyMaterialDrafts.erase(Dirty);
+				else
+					++Dirty;
+			}
+		}
+
+		PulseForgeEditor::EditorSnapshotHistory<PulseForge::MaterialAssetDesc>& EnsureMaterialHistory(
+			const std::string& Key,
+			const PulseForge::MaterialAssetDesc& Material)
+		{
+			auto& History = m_MaterialHistories[Key];
+			if (History.IsEmpty())
+				History.Reset(Material);
+			return History;
+		}
+
+		void UpdateMaterialDirtyMarker(const std::string& Key)
+		{
+			const auto History = m_MaterialHistories.find(Key);
+			if (History != m_MaterialHistories.end() && !History->second.IsDirty())
+				m_DirtyMaterialDrafts.erase(Key);
+			else
+				m_DirtyMaterialDrafts.insert(Key);
+		}
+
+		void RecordMaterialEdit(const std::string& Key, const PulseForge::MaterialAssetDesc& Material)
+		{
+			EnsureMaterialHistory(Key, Material).Record(Material);
+			UpdateMaterialDirtyMarker(Key);
+		}
+
+		void FinalizePendingMaterialEdits()
+		{
+			if (m_MaterialEditStarts.empty() || ImGui::IsAnyItemActive())
+				return;
+
+			auto PendingEdits = std::move(m_MaterialEditStarts);
+			m_MaterialEditStarts.clear();
+			for (const auto& [Key, InitialState] : PendingEdits)
+			{
+				(void)InitialState;
+				const auto Draft = m_MaterialDrafts.find(Key);
+				if (Draft != m_MaterialDrafts.end())
+					RecordMaterialEdit(Key, Draft->second);
+			}
+		}
+
+		bool ApplyMaterialHistoryStep(bool Redo)
+		{
+			const auto* Host = m_Documents.GetFocusedHost();
+			if (!Host || !Host->ActiveDocument ||
+				Host->ActiveDocument->Kind != PulseForgeEditor::EditorDocumentKind::Material || !m_Project)
+				return false;
+			const auto Identity = *Host->ActiveDocument;
+			if (Identity.Project != m_Project->GetDescription().ID)
+				return false;
+			const std::string Key = GetMaterialDraftKey(Identity.Asset);
+			auto History = m_MaterialHistories.find(Key);
+			auto Draft = m_MaterialDrafts.find(Key);
+			if (History == m_MaterialHistories.end() || Draft == m_MaterialDrafts.end())
+				return false;
+			const bool Changed = Redo ? History->second.Redo() : History->second.Undo();
+			if (!Changed)
+				return true;
+			Draft->second = History->second.GetCurrent();
+			UpdateMaterialDirtyMarker(Key);
+			const bool Marked = m_Documents.MarkEdited(Identity);
+			if (!Marked)
+				return false;
+			if (!m_DirtyMaterialDrafts.contains(Key))
+				if (auto* Session = m_Documents.Find(Identity))
+					Session->SavedRevision = Session->Revision;
+			SetStatus(Redo ? "Redid material edit." : "Undid material edit.");
+			return true;
+		}
+
 		void ForgetMaterialDraft(const PulseForge::AssetID& Asset)
 		{
 			if (!m_Project)
 				return;
 			const std::string Key = GetMaterialDraftKey(Asset);
 			m_MaterialDrafts.erase(Key);
+			m_MaterialHistories.erase(Key);
+			m_MaterialEditStarts.erase(Key);
 			m_DirtyMaterialDrafts.erase(Key);
 			m_MaterialEditorErrors.erase(Key);
 		}
@@ -7756,6 +9273,8 @@ namespace
 				Draft = m_MaterialDrafts.emplace(Key, std::move(*Loaded)).first;
 			}
 
+			(void)EnsureMaterialHistory(Key, Draft->second);
+			const PulseForge::MaterialAssetDesc MaterialBeforeEdit = Draft->second;
 			PulseForge::MaterialAssetDesc& Material = Draft->second;
 			bool Changed = false;
 			bool UseTwoColumnLayout = PulseForgeEditor::GetMaterialPropertyLayout(
@@ -7936,7 +9455,15 @@ namespace
 			ImGui::PopStyleColor();
 
 			if (Changed)
+			{
+				auto [Pending, Added] = m_MaterialEditStarts.try_emplace(Key, MaterialBeforeEdit);
+				(void)Pending;
 				m_DirtyMaterialDrafts.insert(Key);
+				if (Added && m_Project)
+					(void)m_Documents.MarkEdited({
+						m_Project->GetDescription().ID, Asset.ID, PulseForgeEditor::EditorDocumentKind::Material
+					});
+			}
 			return true;
 		}
 
@@ -7956,116 +9483,19 @@ namespace
 			const float ButtonWidth = StackButtons ? -1.0f : (AvailableWidth - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
 			ImGui::BeginDisabled(!HasDraft || !IsDirty);
 			if (ImGui::Button("Save Material", ImVec2(ButtonWidth, 0.0f)))
-			{
-				auto Draft = m_MaterialDrafts.find(Key);
-				if (Draft != m_MaterialDrafts.end())
-				{
-					auto Saved = PulseForge::MaterialAssetService::Save(
-						Asset.ID, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), Draft->second);
-					if (!Saved)
-						SetError("Material save failed: " + Saved.error().Message);
-					else
-					{
-						m_DirtyMaterialDrafts.erase(Key);
-						m_MaterialEditorErrors.erase(Key);
-						m_AssetPreviewAssetsPending = true;
-						if (m_SceneRenderer)
-							m_SceneRenderer->RefreshMaterialAssets();
-						SetStatus("Saved material " + PathToUtf8(Asset.ProjectRelativePath.filename()) + ".");
-					}
-				}
-			}
+				(void)SaveMaterialDraft(Asset.ID);
 			if (StackButtons)
 			{
 				if (ImGui::Button("Revert Material", ImVec2(-1.0f, 0.0f)))
-				{
-					auto Loaded = PulseForge::MaterialAssetService::Load(
-						Asset.ID, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
-					if (!Loaded)
-						SetError("Material reload failed: " + Loaded.error().Message);
-					else
-					{
-						m_MaterialDrafts[Key] = std::move(*Loaded);
-						m_DirtyMaterialDrafts.erase(Key);
-					}
-				}
+					(void)ReloadMaterialDraft(Asset.ID);
 			}
 			else
 			{
 				ImGui::SameLine();
 				if (ImGui::Button("Revert Material", ImVec2(ButtonWidth, 0.0f)))
-				{
-					auto Loaded = PulseForge::MaterialAssetService::Load(
-						Asset.ID, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
-					if (!Loaded)
-						SetError("Material reload failed: " + Loaded.error().Message);
-					else
-					{
-						m_MaterialDrafts[Key] = std::move(*Loaded);
-						m_DirtyMaterialDrafts.erase(Key);
-					}
-				}
+					(void)ReloadMaterialDraft(Asset.ID);
 			}
 			ImGui::EndDisabled();
-		}
-
-		void DrawMaterialEditorPanel()
-		{
-			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::MaterialEditor))
-				return;
-			if (m_FocusMaterialEditorNextFrame)
-			{
-				ImGui::SetNextWindowFocus();
-				m_FocusMaterialEditorNextFrame = false;
-			}
-			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::MaterialEditor))
-			{
-				if (!m_Project)
-					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Material,
-						"Open a project to edit a material.");
-				else if (!m_OpenedMaterialAsset)
-					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Material,
-						"Open a material from the Content Browser.");
-				else
-				{
-					const auto Asset = m_Project->GetAssetRegistry().Find(*m_OpenedMaterialAsset);
-					if (!Asset || NormalizedExtension(Asset->ProjectRelativePath) != ".material")
-					{
-						m_OpenedMaterialAsset.reset();
-						m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Warning,
-							"The opened material is no longer registered. Select it again in the Content Browser.");
-					}
-					else
-					{
-						const std::string Name = PathToUtf8(Asset->ProjectRelativePath.filename());
-						const std::string FullPath = PathToUtf8(Asset->ProjectRelativePath);
-						const std::string Identifier = Asset->ID.ToString();
-						m_EditorStyle.IconText(PulseForgeEditor::EditorIcon::Material, Name);
-						if (m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(Asset->ID)))
-						{
-							ImGui::SameLine();
-							ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning), "Unsaved");
-						}
-						ImGui::TextWrapped("%s", FullPath.c_str());
-						if (ImGui::IsItemHovered())
-							ImGui::SetTooltip("%s\nUUID: %s", FullPath.c_str(), Identifier.c_str());
-						ImGui::Separator();
-
-						const bool StackActions = ImGui::GetContentRegionAvail().x < 320.0f;
-						const float FooterHeight =
-							ImGui::GetFrameHeightWithSpacing() * (StackActions ? 3.0f : 2.0f) + 8.0f;
-						const float PropertiesHeight = (std::max)(
-							ImGui::GetContentRegionAvail().y - FooterHeight, 0.0f);
-						if (ImGui::BeginChild("MaterialEditorProperties", ImVec2(0.0f, PropertiesHeight),
-							ImGuiChildFlags_None, ImGuiWindowFlags_AlwaysVerticalScrollbar))
-							(void)DrawMaterialAssetProperties(*Asset);
-						ImGui::EndChild();
-						ImGui::Separator();
-						DrawMaterialEditorActions(*Asset);
-					}
-				}
-			}
-			ImGui::End();
 		}
 
 		void DrawContentBrowserPanel()
@@ -8375,6 +9805,25 @@ namespace
 
 		void ShutdownImGui() noexcept
 		{
+			if (!m_Context)
+				return;
+
+			ImGui::SetCurrentContext(m_Context);
+			if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+				ImGui::DestroyPlatformWindows();
+			if (m_Project)
+			{
+				m_DocumentWorkspaceImmediateDirty = true;
+				SaveDocumentWorkspaceIfNeeded();
+			}
+			#ifndef PF_EDITOR_RENDERER_OPENGL
+			ImGuiPlatformIO& PlatformIO = ImGui::GetPlatformIO();
+			PlatformIO.Renderer_CreateWindow = nullptr;
+			PlatformIO.Renderer_DestroyWindow = nullptr;
+			PlatformIO.Renderer_RenderWindow = nullptr;
+			PlatformIO.Renderer_SwapBuffers = nullptr;
+			ImGui::GetIO().BackendFlags &= ~ImGuiBackendFlags_RendererHasViewports;
+			#endif
 			m_AssetPreviews.Shutdown();
 			WriteAssetPreviewStressReport();
 			if (m_ImGuiRenderer)
@@ -8382,10 +9831,6 @@ namespace
 				m_ImGuiRenderer->Shutdown();
 				m_ImGuiRenderer.reset();
 			}
-			if (!m_Context)
-				return;
-
-			ImGui::SetCurrentContext(m_Context);
 			if (auto Result = m_Layout.SaveNow(); !Result)
 				ReportLayoutPersistenceError(Result.error());
 			else
@@ -8396,6 +9841,7 @@ namespace
 			#endif
 			if (m_GlfwBackendActive)
 				ImGui_ImplGlfw_Shutdown();
+			ImGui::GetIO().UserData = m_PreviousImGuiUserData;
 			m_EditorStyle.Reset();
 			ImGui::DestroyContext(m_Context);
 			m_Context = nullptr;
@@ -8411,7 +9857,9 @@ namespace
 		}
 
 		ImGuiContext* m_Context = nullptr;
+		void* m_PreviousImGuiUserData = nullptr;
 		PulseForgeEditor::EditorLayout m_Layout;
+		PulseForgeEditor::EditorDocumentManager m_Documents;
 		PulseForgeEditor::EditorStyle m_EditorStyle;
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
 		PulseForgeEditor::EditorAssetPreviewService m_AssetPreviews;
@@ -8474,6 +9922,9 @@ namespace
 		bool m_FocusHierarchySearchNextFrame = false;
 		bool m_FocusContentSearchNextFrame = false;
 		bool m_OpenUnsavedDialog = false;
+		bool m_OpenDocumentCloseDialog = false;
+		bool m_OpenAssetDestinationDialog = false;
+		bool m_AssetDestinationDuplicate = false;
 		bool m_ConsoleAutoScroll = true;
 		bool m_ConsoleSelectableView = false;
 		bool m_ConsoleSelectableTextInteracting = false;
@@ -8490,6 +9941,16 @@ namespace
 		std::vector<EditorConsoleMessage> m_ConsoleMessages;
 		std::vector<std::shared_ptr<spdlog::logger>> m_ConsoleLoggers;
 		std::function<void()> m_PendingAction;
+		std::function<void()> m_PendingDocumentCloseAction;
+		std::optional<PulseForge::AssetID> m_AssetDestinationAsset;
+		std::array<char, 1024> m_AssetDestinationFilename{};
+		std::array<char, 256> m_AssetDestinationSearch{};
+		std::string m_AssetDestinationFolder = "Assets";
+		std::string m_AssetDestinationValidationError;
+		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_LevelDocumentIdentity;
+		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentClose;
+		std::optional<std::string> m_PendingDocumentHostClose;
+		std::unordered_set<std::string> m_DocumentHostFocusRequests;
 		std::optional<std::filesystem::path> m_StartupProjectPath;
 		std::optional<PulseForge::Project> m_Project;
 		std::unique_ptr<PulseForge::Scene> m_Scene;
@@ -8527,9 +9988,11 @@ namespace
 		std::optional<PulseForge::UUID> m_SelectedEntity;
 		std::optional<EntityClipboard> m_EntityClipboard;
 		std::optional<PulseForge::AssetID> m_SelectedAsset;
-		std::optional<PulseForge::AssetID> m_OpenedMaterialAsset;
 		std::optional<PulseForge::AssetID> m_PendingDeleteAsset;
 		std::unordered_map<std::string, PulseForge::MaterialAssetDesc> m_MaterialDrafts;
+		std::unordered_map<std::string,
+			PulseForgeEditor::EditorSnapshotHistory<PulseForge::MaterialAssetDesc>> m_MaterialHistories;
+		std::unordered_map<std::string, PulseForge::MaterialAssetDesc> m_MaterialEditStarts;
 		std::unordered_map<std::string, std::string> m_MaterialEditorErrors;
 		std::unordered_set<std::string> m_DirtyMaterialDrafts;
 		std::vector<PulseForge::AssetRecord> m_Assets;
@@ -8545,6 +10008,12 @@ namespace
 		std::string m_ViewportSceneError;
 		std::string m_ImGuiRenderingError;
 		std::string m_LayoutPersistenceError;
+		std::filesystem::path m_DocumentWorkspacePath;
+		std::string m_DocumentWorkspaceLastContents;
+		std::unordered_set<std::string> m_RestoredHostBoundsPending;
+		std::chrono::steady_clock::time_point m_DocumentWorkspaceSaveAt{};
+		bool m_DocumentWorkspaceImmediateDirty = false;
+		bool m_DocumentWorkspaceBoundsDirty = false;
 		std::chrono::steady_clock::time_point m_ProjectOpenStartedAt{};
 		std::string m_StatusMessage = "Create or open a project to begin.";
 		bool m_StatusIsError = false;

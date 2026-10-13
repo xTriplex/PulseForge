@@ -27,6 +27,8 @@
 #include "Core/Timestep.h"
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
+#include "Editor/EditorGlfwViewportPolicy.h"
+#include "Editor/EditorPlatformViewportPolicy.h"
 #include "Editor/EditorMaterialPropertyLayoutPolicy.h"
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorCommandLine.h"
@@ -37,6 +39,8 @@
 #include "Editor/EditorInteractionPolicy.h"
 #include "Editor/EditorProjectOpening.h"
 #include "Editor/EditorDocumentManager.h"
+#include "Editor/EditorDocumentWorkspace.h"
+#include "Editor/EditorSnapshotHistory.h"
 #include "Editor/EditorSelection.h"
 #include "Editor/EditorVisibility.h"
 #include "Editor/ConsoleFormatting.h"
@@ -2181,9 +2185,33 @@ namespace
 		PF_CHECK(Tests, !ClipRectToScissor({ 0.0f, 0.0f }, { 1.0f, 1.0f }, {}, { 1.0f, 1.0f }, {}));
 	}
 
+	void TestEditorPlatformViewportSubmissionOrder(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		std::vector<int> Events;
+		for (int ViewportID : { 1, 3 })
+		{
+			RenderPlatformViewportSequentially(
+				[&] { Events.push_back(ViewportID * 10 + 1); },
+				[&] { Events.push_back(ViewportID * 10 + 2); },
+				[&] { Events.push_back(ViewportID * 10 + 3); },
+				[&] { Events.push_back(ViewportID * 10 + 4); });
+		}
+		const std::vector<int> Expected{ 11, 12, 13, 14, 31, 32, 33, 34 };
+		PF_CHECK(Tests, Events == Expected);
+	}
+
 	void TestEditorFontAndIconDescriptors(TestRunner& Tests)
 	{
 		using namespace PulseForgeEditor;
+		int GlfwWindowMarker = 0;
+		int NativeWindowMarker = 0;
+		const EditorGlfwViewportHandles ViewportHandles{
+			.GlfwWindow = &GlfwWindowMarker,
+			.NativeWindow = &NativeWindowMarker
+		};
+		PF_CHECK(Tests, GetGlfwContextWindow(ViewportHandles) == &GlfwWindowMarker);
+		PF_CHECK(Tests, GetGlfwContextWindow(ViewportHandles) != &NativeWindowMarker);
 		PF_CHECK(Tests, GetEditorViewportToolbarLayout(590.0f) == EditorViewportToolbarLayout::Full);
 		PF_CHECK(Tests, GetEditorViewportToolbarLayout(589.0f) == EditorViewportToolbarLayout::Compact);
 		PF_CHECK(Tests, GetEditorViewportToolbarLayout(300.0f) == EditorViewportToolbarLayout::Compact);
@@ -3821,6 +3849,101 @@ namespace
 		PF_CHECK(Tests, !Manager.Find(OtherProjectTexture));
 		PF_CHECK(Tests, !Manager.FindHost(OtherProjectTextureOpen->HostID));
 		PF_CHECK(Tests, !Manager.Find(MaterialA) && !Manager.Find(MaterialB));
+	}
+
+	void TestEditorSnapshotHistory(TestRunner& Tests)
+	{
+		using PulseForgeEditor::EditorSnapshotHistory;
+		EditorSnapshotHistory<int> History;
+		History.Reset(10);
+		PF_CHECK(Tests, !History.IsDirty() && !History.CanUndo() && !History.CanRedo());
+		History.Record(11);
+		PF_CHECK(Tests, History.IsDirty() && History.GetCurrent() == 11 && History.CanUndo());
+		PF_CHECK(Tests, History.Undo());
+		PF_CHECK(Tests, History.GetCurrent() == 10 && !History.IsDirty() && History.CanRedo());
+		PF_CHECK(Tests, History.Redo());
+		History.MarkSaved();
+		PF_CHECK(Tests, History.GetCurrent() == 11 && !History.IsDirty());
+		PF_CHECK(Tests, History.Undo() && History.IsDirty());
+		History.Record(12);
+		PF_CHECK(Tests, History.GetCurrent() == 12 && !History.CanRedo() && History.IsDirty());
+
+		History.Reset(0);
+		History.Record(1, 3);
+		History.MarkSaved();
+		History.Record(2, 3);
+		History.Record(3, 3);
+		PF_CHECK(Tests, History.GetStateCount() == 3 && History.GetCurrent() == 3 && History.IsDirty());
+		PF_CHECK(Tests, History.Undo() && History.GetCurrent() == 2 && History.IsDirty());
+		PF_CHECK(Tests, History.Undo() && History.GetCurrent() == 1 && !History.IsDirty());
+		History.Record(4, 3);
+		PF_CHECK(Tests, History.GetStateCount() == 2 && History.GetCurrent() == 4 && !History.CanRedo());
+		History.Record(5, 1);
+		PF_CHECK(Tests, History.GetStateCount() == 1 && History.GetCurrent() == 5 && History.IsDirty());
+	}
+
+	void TestEditorDocumentWorkspaceCodec(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		const auto Project = UUID::Generate();
+		const auto MaterialA = UUID::Generate();
+		const auto MaterialB = UUID::Generate();
+		PF_CHECK(Tests, Project && MaterialA && MaterialB);
+		if (!Project || !MaterialA || !MaterialB)
+			return;
+
+		const EditorDocumentIdentity Level{ *Project, UUID{}, EditorDocumentKind::Level };
+		const EditorDocumentIdentity Amber{ *Project, *MaterialA, EditorDocumentKind::Material };
+		const EditorDocumentIdentity Blue{ *Project, *MaterialB, EditorDocumentKind::Material };
+		EditorDocumentHost Main;
+		Main.ID = std::string(EditorDocumentManager::MainHostID);
+		Main.Role = EditorDocumentHostRole::Main;
+		Main.PlacementKind = EditorDocumentKind::Level;
+		Main.Documents = { Level };
+		Main.ActiveDocument = Level;
+		EditorDocumentHost Native;
+		Native.ID = "native:01234567-89ab-cdef-0123-456789abcdef";
+		Native.Role = EditorDocumentHostRole::Native;
+		Native.PlacementKind = EditorDocumentKind::Material;
+		Native.Documents = { Amber, Blue };
+		Native.ActiveDocument = Blue;
+		Native.Bounds = { -1920.0f, 80.0f, 900.0f, 760.0f, 1.5f, "Display-Left", true, true };
+
+		EditorDocumentWorkspaceState State;
+		State.Project = *Project;
+		State.Hosts = { Main, Native };
+		State.RememberedHosts.emplace_back(EditorDocumentKind::Material, Native.ID);
+		State.FocusedHostID = Native.ID;
+		const auto Serialized = EditorDocumentWorkspaceCodec::Serialize(State);
+		PF_CHECK(Tests, Serialized.has_value());
+		if (!Serialized)
+			return;
+
+		const auto Restored = EditorDocumentWorkspaceCodec::Deserialize(*Serialized, *Project);
+		PF_CHECK(Tests, Restored.has_value());
+		if (Restored)
+		{
+			PF_CHECK(Tests, Restored->Hosts.size() == 2 && Restored->Hosts[1].Documents.size() == 2);
+			PF_CHECK(Tests, Restored->Hosts[1].ActiveDocument == Blue);
+			PF_CHECK(Tests, Restored->Hosts[1].Bounds.X == -1920.0f && Restored->Hosts[1].Bounds.Maximized);
+			PF_CHECK(Tests, Restored->FocusedHostID == Native.ID && Restored->RememberedHosts.size() == 1);
+		}
+		const auto OtherProject = UUID::Generate();
+		PF_CHECK(Tests, OtherProject &&
+			!EditorDocumentWorkspaceCodec::Deserialize(*Serialized, *OtherProject));
+		PF_CHECK(Tests, !EditorDocumentWorkspaceCodec::Deserialize("{not-json", *Project));
+
+		auto Duplicate = nlohmann::json::parse(*Serialized);
+		Duplicate["hosts"][1]["documents"].push_back(Duplicate["hosts"][1]["documents"][0]);
+		PF_CHECK(Tests, !EditorDocumentWorkspaceCodec::Deserialize(Duplicate.dump(), *Project));
+		auto InvalidBounds = nlohmann::json::parse(*Serialized);
+		InvalidBounds["hosts"][1]["bounds"]["width"] = 0.0f;
+		PF_CHECK(Tests, !EditorDocumentWorkspaceCodec::Deserialize(InvalidBounds.dump(), *Project));
+		auto MissingLevel = nlohmann::json::parse(*Serialized);
+		MissingLevel["hosts"][0]["documents"] = nlohmann::json::array();
+		MissingLevel["hosts"][0]["active"] = nullptr;
+		PF_CHECK(Tests, !EditorDocumentWorkspaceCodec::Deserialize(MissingLevel.dump(), *Project));
 	}
 
 	void TestAssetImportOperation(TestRunner& Tests)
@@ -8968,6 +9091,7 @@ int main()
 	TestViewportMouseCaptureState(Tests);
 	TestEditorFontAndIconDescriptors(Tests);
 	TestEditorImGuiRendererMath(Tests);
+	TestEditorPlatformViewportSubmissionOrder(Tests);
 	TestSceneSerializationRoundTrip(Tests);
 	TestSceneSerializerClone(Tests);
 	TestSceneAssetsByUUID(Tests);
@@ -8977,6 +9101,8 @@ int main()
 	TestAssetOperations(Tests);
 	TestAssetFolderOperations(Tests);
 	TestEditorDocumentManager(Tests);
+	TestEditorSnapshotHistory(Tests);
+	TestEditorDocumentWorkspaceCodec(Tests);
 	TestAssetImportOperation(Tests);
 	TestMaterialAssets(Tests);
 	TestProjectFiles(Tests);

@@ -84,6 +84,18 @@ namespace PulseForgeEditor
 		std::string ID;
 		EditorDocumentHostRole Role = EditorDocumentHostRole::Native;
 		EditorDocumentKind PlacementKind = EditorDocumentKind::Material;
+		struct WindowBounds
+		{
+			float X = 0.0f;
+			float Y = 0.0f;
+			float Width = 0.0f;
+			float Height = 0.0f;
+			float DpiScale = 1.0f;
+			std::string MonitorName;
+			bool Maximized = false;
+			bool HasValue = false;
+		};
+		WindowBounds Bounds;
 		std::vector<EditorDocumentIdentity> Documents;
 		std::optional<EditorDocumentIdentity> ActiveDocument;
 
@@ -120,6 +132,9 @@ namespace PulseForgeEditor
 			std::string DisplayName,
 			EditorDocumentOpenPreference Preference);
 		[[nodiscard]] std::expected<std::string, std::string> CreateNativeHost(EditorDocumentKind PlacementKind);
+		[[nodiscard]] std::expected<std::string, std::string> CreateNativeHost(
+			std::string HostID,
+			EditorDocumentKind PlacementKind);
 		[[nodiscard]] bool RemoveEmptyNativeHost(std::string_view HostID) noexcept;
 		[[nodiscard]] std::expected<EditorDocumentTransferResult, std::string> Transfer(
 			const EditorDocumentIdentity& Identity,
@@ -128,6 +143,8 @@ namespace PulseForgeEditor
 			const TransferPreparation& Prepare = {});
 		[[nodiscard]] bool Activate(const EditorDocumentIdentity& Identity) noexcept;
 		[[nodiscard]] bool FocusHost(std::string_view HostID) noexcept;
+		[[nodiscard]] bool SetRememberedHost(EditorDocumentKind Kind, std::string_view HostID) noexcept;
+		[[nodiscard]] bool SetHostBounds(std::string_view HostID, EditorDocumentHost::WindowBounds Bounds) noexcept;
 		[[nodiscard]] bool MarkEdited(const EditorDocumentIdentity& Identity) noexcept;
 		[[nodiscard]] bool MarkSaved(const EditorDocumentIdentity& Identity, uint64_t Revision) noexcept;
 		[[nodiscard]] std::vector<std::string> ClearProject(const PulseForge::UUID& Project);
@@ -147,6 +164,10 @@ namespace PulseForgeEditor
 		[[nodiscard]] const std::vector<EditorDocumentHost>& GetHosts() const noexcept { return m_Hosts; }
 		[[nodiscard]] EditorDocumentOpenPreference GetOpeningPreference() const noexcept { return m_OpeningPreference; }
 		void SetOpeningPreference(EditorDocumentOpenPreference Preference) noexcept { m_OpeningPreference = Preference; }
+		[[nodiscard]] const std::unordered_map<EditorDocumentKind, std::string>& GetRememberedHosts() const noexcept
+		{
+			return m_RememberedHosts;
+		}
 
 	private:
 		[[nodiscard]] EditorDocumentHost* CreateHost(std::string ID, EditorDocumentHostRole Role,
