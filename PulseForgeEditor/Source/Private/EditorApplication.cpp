@@ -4928,7 +4928,10 @@ namespace
 			if (!ImGui::IsMouseReleased(ImGuiMouseButton_Left))
 			{
 				if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGui::GetDragDropPayload())
+				{
 					m_ActiveDocumentTabDrag.reset();
+					m_ActiveDocumentTabDragStart.reset();
+				}
 				return;
 			}
 
@@ -4938,17 +4941,23 @@ namespace
 			const bool HasCapturedTabDrag = m_ActiveDocumentTabDrag.has_value();
 			const PulseForgeEditor::EditorDocumentIdentity Identity = *m_ActiveDocumentTabDrag;
 			m_ActiveDocumentTabDrag.reset();
+			const ImVec2 MousePosition = ImGui::GetIO().MousePos;
+			const ImVec2 DragStart = m_ActiveDocumentTabDragStart.value_or(MousePosition);
+			m_ActiveDocumentTabDragStart.reset();
+			const float DragDeltaX = MousePosition.x - DragStart.x;
+			const float DragDeltaY = MousePosition.y - DragStart.y;
+			const float DragDistanceSquared = DragDeltaX * DragDeltaX + DragDeltaY * DragDeltaY;
 
 			const bool TransferQueued = m_PendingDocumentTransfer &&
 				m_PendingDocumentTransfer->Identity == Identity;
-			if (!PulseForgeEditor::ShouldDetachDocumentTab(true, HasCapturedTabDrag, TransferQueued))
+			if (!PulseForgeEditor::ShouldDetachDocumentTab(
+				true, HasCapturedTabDrag, TransferQueued, DragDistanceSquared, ImGui::GetIO().MouseDragThreshold))
 				return;
 
 			const auto* Session = m_Documents.Find(Identity);
 			if (!Session || Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level)
 				return;
 
-			const ImVec2 MousePosition = ImGui::GetIO().MousePos;
 			if (!std::isfinite(MousePosition.x) || !std::isfinite(MousePosition.y) ||
 				MousePosition.x < -100000.0f || MousePosition.y < -100000.0f)
 				return;
@@ -5070,6 +5079,11 @@ namespace
 				const ImVec2 MousePosition = ImGui::GetIO().MousePos;
 				const float CloseRegionMinimumX = TabMinimum.x + LeftPadding + LabelSize.x + LabelToCloseGap;
 				const bool CloseHovered = HasCloseButton && TabHovered && MousePosition.x >= CloseRegionMinimumX;
+				if (ImGui::IsItemActivated() && !CloseHovered)
+				{
+					m_ActiveDocumentTabDrag = Session->Identity;
+					m_ActiveDocumentTabDragStart = MousePosition;
+				}
 				if (Pressed && CloseHovered)
 					QueueDocumentTabClose(Session->Identity);
 				else if (Pressed)
@@ -10551,6 +10565,7 @@ namespace
 		std::optional<std::string> m_PendingDocumentHostClose;
 		std::optional<PendingDocumentTransfer> m_PendingDocumentTransfer;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_ActiveDocumentTabDrag;
+		std::optional<ImVec2> m_ActiveDocumentTabDragStart;
 		std::string m_DocumentCloseDialogHostID;
 		std::unordered_set<std::string> m_DocumentHostFocusRequests;
 		std::optional<std::filesystem::path> m_StartupProjectPath;
