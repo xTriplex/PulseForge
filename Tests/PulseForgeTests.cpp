@@ -4874,6 +4874,7 @@ namespace
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->ProjectFile.has_value());
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTestFixture);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostResetLayoutTest);
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTabTearOffTest);
 
 		const std::string AbsoluteProjectPath = ProjectFile.string();
 		const std::array AbsoluteArguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath) };
@@ -4920,6 +4921,18 @@ namespace
 		PF_CHECK(Tests, !ResetLayoutWithoutFixtureOptions);
 		PF_CHECK(Tests, !ResetLayoutWithoutFixtureOptions &&
 			ResetLayoutWithoutFixtureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+		const std::array TabTearOffFixtureArguments = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-test-tab-tear-off") };
+		const auto TabTearOffFixtureOptions = ParseEditorCommandLine(TabTearOffFixtureArguments, Root);
+		PF_CHECK(Tests, TabTearOffFixtureOptions && TabTearOffFixtureOptions->EnableDocumentHostTabTearOffTest);
+		const std::array TabTearOffWithoutFixture = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-tab-tear-off") };
+		const auto TabTearOffWithoutFixtureOptions = ParseEditorCommandLine(TabTearOffWithoutFixture, Root);
+		PF_CHECK(Tests, !TabTearOffWithoutFixtureOptions &&
+			TabTearOffWithoutFixtureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
 
 		const std::filesystem::path StressManifest = Root / "stress.manifest";
 		{

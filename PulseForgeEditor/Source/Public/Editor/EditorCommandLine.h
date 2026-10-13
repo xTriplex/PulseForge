@@ -37,6 +37,7 @@ namespace PulseForgeEditor
 		std::string AssetPreviewStressBudget;
 		bool EnableDocumentHostTestFixture = false;
 		bool EnableDocumentHostResetLayoutTest = false;
+		bool EnableDocumentHostTabTearOffTest = false;
 	};
 
 	[[nodiscard]] inline std::expected<EditorCommandLineOptions, EditorCommandLineError> ParseEditorCommandLine(
@@ -62,6 +63,15 @@ namespace PulseForgeEditor
 						EditorCommandLineErrorCode::DuplicateOption,
 						"The --document-host-reset-layout-test option may be specified only once." });
 				Options.EnableDocumentHostResetLayoutTest = true;
+				continue;
+			}
+			if (Arguments[Index] == "--document-host-test-tab-tear-off")
+			{
+				if (Options.EnableDocumentHostTabTearOffTest)
+					return std::unexpected(EditorCommandLineError{
+						EditorCommandLineErrorCode::DuplicateOption,
+						"The --document-host-test-tab-tear-off option may be specified only once." });
+				Options.EnableDocumentHostTabTearOffTest = true;
 				continue;
 			}
 			if (Arguments[Index] == "--asset-preview-stress")
@@ -98,7 +108,7 @@ namespace PulseForgeEditor
 					"Unexpected argument '" + std::string(Arguments[Index]) +
 					"'. Supported options include --project <path>, --asset-preview-stress, "
 					"the Debug-only --document-host-test-fixture, and the Debug-only "
-					"--document-host-reset-layout-test." });
+					"--document-host-reset-layout-test and --document-host-test-tab-tear-off." });
 
 			if (Options.ProjectFile)
 				return std::unexpected(EditorCommandLineError{
@@ -148,6 +158,14 @@ namespace PulseForgeEditor
 			return std::unexpected(EditorCommandLineError{
 				EditorCommandLineErrorCode::UnexpectedArgument,
 				"The --document-host-reset-layout-test option requires --document-host-test-fixture." });
+		if (Options.EnableDocumentHostTabTearOffTest && !Options.EnableDocumentHostTestFixture)
+			return std::unexpected(EditorCommandLineError{
+				EditorCommandLineErrorCode::UnexpectedArgument,
+				"The --document-host-test-tab-tear-off option requires --document-host-test-fixture." });
+		if (Options.EnableDocumentHostTabTearOffTest && Options.EnableDocumentHostResetLayoutTest)
+			return std::unexpected(EditorCommandLineError{
+				EditorCommandLineErrorCode::UnexpectedArgument,
+				"The document tab tear-off and reset-layout fixture tests cannot run together." });
 
 		return Options;
 	}

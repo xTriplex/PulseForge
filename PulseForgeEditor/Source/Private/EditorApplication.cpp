@@ -749,6 +749,17 @@ namespace
 			std::optional<PulseForgeEditor::EditorDocumentHost::WindowBounds> NativeHostBounds;
 		};
 
+		enum class DocumentTabTearOffTestPhase : uint8_t
+		{
+			Disabled,
+			WaitingForTab,
+			PressQueued,
+			DragQueued,
+			ReleaseQueued,
+			Complete,
+			Failed
+		};
+
 		struct GizmoAxisScreen
 		{
 			glm::vec3 WorldDirection{ 0.0f };
@@ -816,7 +827,8 @@ namespace
 			  m_AssetPreviewStressManifest(std::move(Options.AssetPreviewStressManifest)),
 			  m_AssetPreviewStressBudget(std::move(Options.AssetPreviewStressBudget)),
 			  m_DocumentHostTestFixture(Options.EnableDocumentHostTestFixture),
-			  m_DocumentHostResetLayoutTest(Options.EnableDocumentHostResetLayoutTest)
+			  m_DocumentHostResetLayoutTest(Options.EnableDocumentHostResetLayoutTest),
+			  m_DocumentHostTabTearOffTest(Options.EnableDocumentHostTabTearOffTest)
 		{
 		}
 
@@ -1367,6 +1379,7 @@ namespace
 			ImGui_ImplOpenGL3_NewFrame();
 			#endif
 			ImGui_ImplGlfw_NewFrame();
+			QueueDocumentHostTabTearOffTestInput();
 			ImGui::NewFrame();
 			FinalizePendingMaterialEdits();
 			m_AssetPreviews.BeginRequestFrame();
@@ -2786,6 +2799,43 @@ namespace
 				"host state, {} total across {} hosts; "
 				"fixture tabs have no asset editor or editable content.",
 				static_cast<uint32_t>(Preference), RestoredCount, OpenedCount, FixtureHosts.size());
+			if (m_DocumentHostTabTearOffTest)
+			{
+				if (m_DocumentHostFixtureSessions.empty())
+				{
+					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Failed;
+					PF_ERROR("Document tab tear-off fixture could not find a synthetic session.");
+				}
+				else
+				{
+					m_DocumentHostTabTearOffTestIdentity = m_DocumentHostFixtureSessions.front().first;
+					if (const auto* Session = m_Documents.Find(m_DocumentHostTabTearOffTestIdentity);
+						Session && Session->HostID != PulseForgeEditor::EditorDocumentManager::MainHostID)
+					{
+						const auto* MainHost = m_Documents.FindHost(
+							PulseForgeEditor::EditorDocumentManager::MainHostID);
+						const size_t DestinationIndex = MainHost ? MainHost->Documents.size() : 0;
+						const std::string SourceHostID = Session->HostID;
+						const auto Transfer = m_Documents.Transfer(
+							m_DocumentHostTabTearOffTestIdentity,
+							PulseForgeEditor::EditorDocumentManager::MainHostID,
+							DestinationIndex);
+						if (!Transfer)
+						{
+							m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Failed;
+							PF_ERROR("Document tab tear-off fixture could not prepare its source tab: {}", Transfer.error());
+						}
+						else
+						{
+							if (Transfer->EmptiedSourceHost)
+								(void)m_Documents.RemoveEmptyNativeHost(SourceHostID);
+							m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::WaitingForTab;
+						}
+					}
+					else
+						m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::WaitingForTab;
+				}
+			}
 			if (m_DocumentHostResetLayoutTest && OpenedCount == FixtureAssetIDs.size())
 			{
 				m_DocumentHostResetLayoutExpectedHostCount = m_Documents.GetHosts().size();
@@ -2793,6 +2843,86 @@ namespace
 				m_Layout.RequestReset();
 			}
 			#endif
+		}
+
+		void QueueDocumentHostTabTearOffTestInput()
+		{
+			if (!m_DocumentHostTabTearOffTest)
+				return;
+#ifndef _DEBUG
+			PF_ERROR("The document tab tear-off UI fixture is available only in Debug builds.");
+			m_DocumentHostTabTearOffTest = false;
+#else
+			ImGuiIO& IO = ImGui::GetIO();
+			switch (m_DocumentHostTabTearOffTestPhase)
+			{
+				case DocumentTabTearOffTestPhase::WaitingForTab:
+					if (m_DocumentHostTabTearOffTestTabCenterValid)
+					{
+						m_DocumentHostTabTearOffTestStart = m_DocumentHostTabTearOffTestTabCenter;
+						const ImGuiViewport* MainViewport = ImGui::GetMainViewport();
+						if (!MainViewport || MainViewport->Size.x <= 0.0f || MainViewport->Size.y <= 0.0f)
+						{
+							m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Failed;
+							PF_ERROR("Document tab tear-off UI fixture has no visible main viewport.");
+							break;
+						}
+						m_DocumentHostTabTearOffTestDrop = ImVec2(
+							MainViewport->Pos.x + MainViewport->Size.x * 0.5f,
+							MainViewport->Pos.y + MainViewport->Size.y * 0.5f);
+						const float DeltaX = m_DocumentHostTabTearOffTestDrop.x - m_DocumentHostTabTearOffTestStart.x;
+						const float DeltaY = m_DocumentHostTabTearOffTestDrop.y - m_DocumentHostTabTearOffTestStart.y;
+						if (DeltaX * DeltaX + DeltaY * DeltaY <= IO.MouseDragThreshold * IO.MouseDragThreshold)
+						{
+							m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Failed;
+							PF_ERROR("Document tab tear-off UI fixture could not place a drop point past the drag threshold.");
+							break;
+						}
+						IO.AddMousePosEvent(m_DocumentHostTabTearOffTestStart.x, m_DocumentHostTabTearOffTestStart.y);
+						IO.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+						m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::PressQueued;
+					}
+					break;
+				case DocumentTabTearOffTestPhase::PressQueued:
+					IO.AddMousePosEvent(m_DocumentHostTabTearOffTestDrop.x, m_DocumentHostTabTearOffTestDrop.y);
+					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::DragQueued;
+					break;
+				case DocumentTabTearOffTestPhase::DragQueued:
+					IO.AddMousePosEvent(m_DocumentHostTabTearOffTestDrop.x, m_DocumentHostTabTearOffTestDrop.y);
+					IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::ReleaseQueued;
+					break;
+				case DocumentTabTearOffTestPhase::ReleaseQueued:
+				{
+					const auto* Session = m_Documents.Find(m_DocumentHostTabTearOffTestIdentity);
+					const auto* Host = Session ? m_Documents.FindHost(Session->HostID) : nullptr;
+					const auto* MainHost = m_Documents.FindHost(
+						PulseForgeEditor::EditorDocumentManager::MainHostID);
+					const bool LevelRetained = MainHost && std::any_of(
+						MainHost->Documents.begin(), MainHost->Documents.end(), [](const auto& Identity)
+						{
+							return Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level;
+						});
+					if (Session && Host && Host->Role == PulseForgeEditor::EditorDocumentHostRole::Native &&
+						Session->HostID != PulseForgeEditor::EditorDocumentManager::MainHostID && LevelRetained)
+					{
+						m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Complete;
+						PF_INFO("Document tab tear-off UI fixture passed: the captured tab drag created a native host and kept Level Editor in the main host.");
+					}
+					else
+					{
+						m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Failed;
+						PF_ERROR("Document tab tear-off UI fixture failed: the released tab did not enter a native host or Level Editor left the main host.");
+					}
+					m_DocumentHostTabTearOffTest = false;
+					break;
+				}
+				case DocumentTabTearOffTestPhase::Disabled:
+				case DocumentTabTearOffTestPhase::Complete:
+				case DocumentTabTearOffTestPhase::Failed:
+					break;
+			}
+#endif
 		}
 
 		void ValidateDocumentHostResetLayoutTest()
@@ -5075,6 +5205,15 @@ namespace
 					ImVec2(TabWidth, TabHeight));
 				const ImVec2 TabMinimum = ImGui::GetItemRectMin();
 				const ImVec2 TabMaximum = ImGui::GetItemRectMax();
+				if (m_DocumentHostTabTearOffTest &&
+					HostID == PulseForgeEditor::EditorDocumentManager::MainHostID &&
+					Session->Identity == m_DocumentHostTabTearOffTestIdentity)
+				{
+					m_DocumentHostTabTearOffTestTabCenter = ImVec2(
+						(TabMinimum.x + TabMaximum.x) * 0.5f,
+						(TabMinimum.y + TabMaximum.y) * 0.5f);
+					m_DocumentHostTabTearOffTestTabCenterValid = true;
+				}
 				const bool TabHovered = ImGui::IsItemHovered();
 				const ImVec2 MousePosition = ImGui::GetIO().MousePos;
 				const float CloseRegionMinimumX = TabMinimum.x + LeftPadding + LabelSize.x + LabelToCloseGap;
@@ -10571,9 +10710,16 @@ namespace
 		std::optional<std::filesystem::path> m_StartupProjectPath;
 		bool m_DocumentHostTestFixture = false;
 		bool m_DocumentHostResetLayoutTest = false;
+		bool m_DocumentHostTabTearOffTest = false;
 		bool m_DocumentHostResetLayoutTestPending = false;
 		size_t m_DocumentHostResetLayoutExpectedHostCount = 0;
 		std::vector<std::pair<PulseForgeEditor::EditorDocumentIdentity, std::string>> m_DocumentHostFixtureSessions;
+		DocumentTabTearOffTestPhase m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Disabled;
+		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabTearOffTestIdentity;
+		ImVec2 m_DocumentHostTabTearOffTestTabCenter{ 0.0f, 0.0f };
+		ImVec2 m_DocumentHostTabTearOffTestStart{ 0.0f, 0.0f };
+		ImVec2 m_DocumentHostTabTearOffTestDrop{ 0.0f, 0.0f };
+		bool m_DocumentHostTabTearOffTestTabCenterValid = false;
 		std::optional<PulseForge::Project> m_Project;
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::optional<std::string> m_SavedSceneSnapshot;
