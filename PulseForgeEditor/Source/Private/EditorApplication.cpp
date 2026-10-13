@@ -7248,13 +7248,13 @@ namespace
 										ImGui::PushID(static_cast<int>(Message.Sequence & 0xffffffffu));
 										ImGui::TableNextRow();
 										ImGui::TableNextColumn();
+										const ImVec2 RowStart = ImGui::GetCursorScreenPos();
+										const float RowHeight = ImGui::GetTextLineHeightWithSpacing();
 										char SeverityLabel[16]{};
 										std::snprintf(SeverityLabel, sizeof(SeverityLabel), "[%s]", LogLevelName(Message.Level));
-										ImGui::PushStyleColor(ImGuiCol_Text, LogLevelColor(Message.Level));
-										ImGui::Selectable(SeverityLabel, false,
+										ImGui::Selectable("##ConsoleMessageRow", false,
 											ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
-											ImVec2(0.0f, ImGui::GetTextLineHeightWithSpacing()));
-										ImGui::PopStyleColor();
+											ImVec2(0.0f, RowHeight));
 										if (ImGui::BeginPopupContextItem("ConsoleEntryContextMenu"))
 										{
 											if (ImGui::MenuItem("Copy Message"))
@@ -7266,6 +7266,10 @@ namespace
 											}
 											ImGui::EndPopup();
 										}
+										ImGui::SetCursorScreenPos(RowStart);
+										ImGui::PushStyleColor(ImGuiCol_Text, LogLevelColor(Message.Level));
+										ImGui::TextUnformatted(SeverityLabel);
+										ImGui::PopStyleColor();
 										ImGui::TableNextColumn();
 										const float LoggerWidth = ImGui::GetContentRegionAvail().x;
 										m_EditorStyle.TextMuted(Message.Logger);
