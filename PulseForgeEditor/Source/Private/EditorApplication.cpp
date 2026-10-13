@@ -5358,10 +5358,10 @@ namespace
 				const ImVec2 MousePosition = ImGui::GetIO().MousePos;
 				const float CloseRegionMinimumX = TabMinimum.x + LeftPadding + LabelSize.x + LabelToCloseGap;
 				const bool CloseHovered = HasCloseButton && TabHovered && MousePosition.x >= CloseRegionMinimumX;
-				if (ImGui::IsItemActivated() && !CloseHovered)
+				if (ImGui::IsItemActivated() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !CloseHovered)
 				{
 					m_ActiveDocumentTabDrag = Session->Identity;
-					m_ActiveDocumentTabDragStart = MousePosition;
+					m_ActiveDocumentTabDragStart = ImGui::GetIO().MouseClickedPos[ImGuiMouseButton_Left];
 				}
 				if (Pressed && CloseHovered)
 					QueueDocumentTabClose(Session->Identity);
@@ -5379,22 +5379,16 @@ namespace
 				DrawList->AddText(LabelPosition, ImGui::GetColorU32(ImGuiCol_Text), Label.c_str());
 				if (HasCloseButton)
 				{
-					const float CloseMarkSize = std::min(ImGui::GetFontSize() * 0.9f, TabHeight * 0.72f);
-					const float CloseMarkHalfSize = CloseMarkSize * 0.5f;
-					const float CloseMarkThickness = std::max(1.5f, CloseMarkSize * 0.12f);
-					const ImVec2 CloseCenter(
-						CloseRegionMinimumX + CloseRegionWidth * 0.5f,
-						TabMinimum.y + TabHeight * 0.5f);
-					const ImU32 CloseColor = ImGui::GetColorU32(
-						CloseHovered ? ImGuiCol_Text : ImGuiCol_TextDisabled);
-					DrawList->AddLine(
-						ImVec2(CloseCenter.x - CloseMarkHalfSize, CloseCenter.y - CloseMarkHalfSize),
-						ImVec2(CloseCenter.x + CloseMarkHalfSize, CloseCenter.y + CloseMarkHalfSize),
-						CloseColor, CloseMarkThickness);
-					DrawList->AddLine(
-						ImVec2(CloseCenter.x + CloseMarkHalfSize, CloseCenter.y - CloseMarkHalfSize),
-						ImVec2(CloseCenter.x - CloseMarkHalfSize, CloseCenter.y + CloseMarkHalfSize),
-						CloseColor, CloseMarkThickness);
+					const char* CloseGlyph = "×";
+					ImFont* CloseGlyphFont = ImGui::GetFont();
+					const float CloseGlyphFontSize = ImGui::GetFontSize() * 2.5f;
+					const ImVec2 CloseGlyphSize = CloseGlyphFont->CalcTextSizeA(
+						CloseGlyphFontSize, (std::numeric_limits<float>::max)(), 0.0f, CloseGlyph);
+					const ImVec2 ClosePosition(
+						CloseRegionMinimumX + (CloseRegionWidth - CloseGlyphSize.x) * 0.5f,
+						TabMinimum.y + (TabHeight - CloseGlyphSize.y) * 0.5f);
+					DrawList->AddText(CloseGlyphFont, CloseGlyphFontSize, ClosePosition,
+						ImGui::GetColorU32(CloseHovered ? ImGuiCol_Text : ImGuiCol_TextDisabled), CloseGlyph);
 					if (CloseHovered)
 						ImGui::SetTooltip("Close %s", Session->DisplayName.c_str());
 				}
@@ -5445,6 +5439,13 @@ namespace
 				if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
 				{
 					m_ActiveDocumentTabDrag = Session->Identity;
+					// Preserve the original press coordinate as the drag source starts. If
+					// item activation was not observed, using the release position as the
+					// fallback would produce a zero-length drag and suppress tear-off.
+					const ImVec2 PressPosition = ImGui::GetIO().MouseClickedPos[ImGuiMouseButton_Left];
+					if (std::isfinite(PressPosition.x) && std::isfinite(PressPosition.y) &&
+						std::abs(PressPosition.x) < 100000.0f && std::abs(PressPosition.y) < 100000.0f)
+						m_ActiveDocumentTabDragStart = PressPosition;
 					const std::string Payload = GetDocumentPayload(Session->Identity);
 					ImGui::SetDragDropPayload("PF_EDITOR_DOCUMENT", Payload.c_str(), Payload.size() + 1);
 					ImGui::TextUnformatted(Label.c_str());
