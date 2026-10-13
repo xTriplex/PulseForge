@@ -793,6 +793,21 @@ namespace
 			Failed
 		};
 
+		enum class DocumentTabReorderTestPhase : uint8_t
+		{
+			Disabled,
+			WaitingForTabs,
+			ForwardPressQueued,
+			ForwardPositionQueued,
+			ForwardReleaseQueued,
+			WaitingForReverse,
+			ReversePressQueued,
+			ReversePositionQueued,
+			ReverseReleaseQueued,
+			Complete,
+			Failed
+		};
+
 		static constexpr size_t DocumentTabTestDropPointsPerPanel = 5;
 		static constexpr std::array<const char*, 4> DocumentTabTestInvalidDropPanelNames = {
 			"Hierarchy", "Inspector", "Scene Viewport", "Content Browser"
@@ -886,6 +901,7 @@ namespace
 			  m_DocumentHostResetLayoutTest(Options.EnableDocumentHostResetLayoutTest),
 			  m_DocumentHostTabTearOffTest(Options.EnableDocumentHostTabTearOffTest),
 			  m_DocumentHostTabReattachTest(Options.EnableDocumentHostTabReattachTest),
+			  m_DocumentHostTabReorderTest(Options.EnableDocumentHostTabReorderTest),
 			  m_DocumentHostPresentationFailureTest(Options.EnableDocumentHostPresentationFailureTest),
 			  m_DocumentHostAcquireOutOfDateTest(Options.EnableDocumentHostAcquireOutOfDateTest),
 			  m_DocumentHostImageAllocationFailureTest(Options.EnableDocumentHostImageAllocationFailureTest)
@@ -1471,10 +1487,14 @@ namespace
 			ImGui_ImplGlfw_NewFrame();
 			QueueDocumentHostTabTearOffTestInput();
 			QueueDocumentHostTabReattachTestInput();
+			QueueDocumentTabReorderTestInput();
 			ImGui::NewFrame();
 			m_DocumentTabDropTargets.clear();
 			for (DocumentTabTestPointerTarget& Target : m_DocumentHostTabReattachInvalidDropTargets)
 				Target.Available = false;
+			m_DocumentHostTabReorderTestFirstTabCenterValid = false;
+			m_DocumentHostTabReorderTestSecondBeforePositionValid = false;
+			m_DocumentHostTabReorderTestSecondAfterPositionValid = false;
 			FinalizePendingMaterialEdits();
 			m_AssetPreviews.BeginRequestFrame();
 			if (m_AssetPreviewStressManifest)
@@ -2888,6 +2908,56 @@ namespace
 					!m_Documents.MarkEdited(Identity))
 					PF_WARN("Could not mark development fixture {} dirty for its document-host test.", DisplayName);
 			}
+			if (m_DocumentHostTabReorderTest)
+			{
+				bool Prepared = m_DocumentHostFixtureSessions.size() >= 2;
+				for (const auto& [Identity, OriginalHostID] : m_DocumentHostFixtureSessions)
+				{
+					(void)OriginalHostID;
+					const auto* Session = m_Documents.Find(Identity);
+					const auto* MainHost = m_Documents.FindHost(
+						PulseForgeEditor::EditorDocumentManager::MainHostID);
+					if (!Session || !MainHost)
+					{
+						Prepared = false;
+						break;
+					}
+					const std::string SourceHostID = Session->HostID;
+					const auto Transfer = m_Documents.Transfer(
+						Identity,
+						PulseForgeEditor::EditorDocumentManager::MainHostID,
+						MainHost->Documents.size());
+					if (!Transfer)
+					{
+						Prepared = false;
+						PF_ERROR("Document tab reorder fixture could not place its synthetic session in the main strip: {}",
+							Transfer.error());
+						break;
+					}
+					if (Transfer->EmptiedSourceHost)
+					{
+						m_RestoredHostBoundsPending.erase(*Transfer->EmptiedSourceHost);
+						(void)m_Documents.RemoveEmptyNativeHost(SourceHostID);
+					}
+				}
+				if (Prepared)
+				{
+					m_DocumentHostTabReorderTestFirst = m_DocumentHostFixtureSessions[0].first;
+					m_DocumentHostTabReorderTestSecond = m_DocumentHostFixtureSessions[1].first;
+					Prepared = m_Documents.Activate(m_DocumentHostTabReorderTestFirst);
+				}
+				if (Prepared)
+				{
+					m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::WaitingForTabs;
+					PF_INFO("Document tab reorder fixture placed two synthetic sessions in the main strip.");
+				}
+				else
+				{
+					m_DocumentHostTabReorderTest = false;
+					m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::Failed;
+					PF_ERROR("Document tab reorder fixture could not prepare two sessions in the main strip.");
+				}
+			}
 			MarkDocumentWorkspaceDirty();
 			PF_WARN(
 				"Development document-host fixture enabled with opening preference {}: {} sessions restored from saved "
@@ -3237,6 +3307,150 @@ namespace
 				case DocumentTabReattachTestPhase::Disabled:
 				case DocumentTabReattachTestPhase::Complete:
 				case DocumentTabReattachTestPhase::Failed:
+					break;
+			}
+#endif
+		}
+
+		void QueueDocumentTabReorderTestInput()
+		{
+			if (!m_DocumentHostTabReorderTest)
+				return;
+#ifndef _DEBUG
+			PF_ERROR("The document tab reorder UI fixture is available only in Debug builds.");
+			m_DocumentHostTabReorderTest = false;
+#else
+			ImGuiIO& IO = ImGui::GetIO();
+			if (++m_DocumentHostTabReorderTestFrameCount > 600)
+			{
+				m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::Failed;
+				m_DocumentHostTabReorderTest = false;
+				PF_ERROR("Document tab reorder UI fixture timed out before restoring the original tab order.");
+				return;
+			}
+
+			const auto HasExpectedOrder = [this](bool Reversed)
+			{
+				const auto* MainHost = m_Documents.FindHost(
+					PulseForgeEditor::EditorDocumentManager::MainHostID);
+				const auto* FirstSession = m_Documents.Find(m_DocumentHostTabReorderTestFirst);
+				const auto* SecondSession = m_Documents.Find(m_DocumentHostTabReorderTestSecond);
+				if (!MainHost || !FirstSession || !SecondSession ||
+					FirstSession->HostID != MainHost->ID || SecondSession->HostID != MainHost->ID ||
+					MainHost->ActiveDocument != m_DocumentHostTabReorderTestFirst)
+					return false;
+				const auto First = std::find(
+					MainHost->Documents.begin(), MainHost->Documents.end(), m_DocumentHostTabReorderTestFirst);
+				const auto Second = std::find(
+					MainHost->Documents.begin(), MainHost->Documents.end(), m_DocumentHostTabReorderTestSecond);
+				const bool HasLevel = std::any_of(
+					MainHost->Documents.begin(), MainHost->Documents.end(), [](const auto& Identity)
+					{
+						return Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level;
+					});
+				return HasLevel && First != MainHost->Documents.end() && Second != MainHost->Documents.end() &&
+					(Reversed ? Second < First : First < Second);
+			};
+			const auto QueuePointer = [&IO](ImVec2 Position, ImGuiID ViewportID)
+			{
+				IO.AddMousePosEvent(Position.x, Position.y);
+				IO.AddMouseViewportEvent(ViewportID);
+			};
+
+			switch (m_DocumentHostTabReorderTestPhase)
+			{
+				case DocumentTabReorderTestPhase::WaitingForTabs:
+					if (!m_DocumentHostTabReorderTestFirstTabCenterValid ||
+						!m_DocumentHostTabReorderTestSecondAfterPositionValid)
+						break;
+					QueuePointer(m_DocumentHostTabReorderTestFirstTabCenter,
+						m_DocumentHostTabReorderTestFirstTabViewportID);
+					IO.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+					m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::ForwardPressQueued;
+					break;
+				case DocumentTabReorderTestPhase::ForwardPressQueued:
+				{
+					const float DeltaX = m_DocumentHostTabReorderTestSecondAfterPosition.x -
+						m_DocumentHostTabReorderTestFirstTabCenter.x;
+					const float DeltaY = m_DocumentHostTabReorderTestSecondAfterPosition.y -
+						m_DocumentHostTabReorderTestFirstTabCenter.y;
+					if (DeltaX * DeltaX + DeltaY * DeltaY <= IO.MouseDragThreshold * IO.MouseDragThreshold)
+					{
+						m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::Failed;
+						m_DocumentHostTabReorderTest = false;
+						PF_ERROR("Document tab reorder fixture could not drag the first tab past the threshold.");
+						break;
+					}
+					QueuePointer(m_DocumentHostTabReorderTestSecondAfterPosition,
+						m_DocumentHostTabReorderTestFirstTabViewportID);
+					m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::ForwardPositionQueued;
+					break;
+				}
+				case DocumentTabReorderTestPhase::ForwardPositionQueued:
+					QueuePointer(m_DocumentHostTabReorderTestSecondAfterPosition,
+						m_DocumentHostTabReorderTestFirstTabViewportID);
+					IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+					m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::ForwardReleaseQueued;
+					break;
+				case DocumentTabReorderTestPhase::ForwardReleaseQueued:
+					if (!HasExpectedOrder(true))
+					{
+						m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::Failed;
+						m_DocumentHostTabReorderTest = false;
+						PF_ERROR("Document tab reorder fixture did not move the first session after its neighbor.");
+						break;
+					}
+					PF_INFO("Document tab reorder fixture moved the synthetic session after its neighbor.");
+					m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::WaitingForReverse;
+					break;
+				case DocumentTabReorderTestPhase::WaitingForReverse:
+					if (!m_DocumentHostTabReorderTestFirstTabCenterValid ||
+						!m_DocumentHostTabReorderTestSecondBeforePositionValid)
+						break;
+					QueuePointer(m_DocumentHostTabReorderTestFirstTabCenter,
+						m_DocumentHostTabReorderTestFirstTabViewportID);
+					IO.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+					m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::ReversePressQueued;
+					break;
+				case DocumentTabReorderTestPhase::ReversePressQueued:
+				{
+					const float DeltaX = m_DocumentHostTabReorderTestSecondBeforePosition.x -
+						m_DocumentHostTabReorderTestFirstTabCenter.x;
+					const float DeltaY = m_DocumentHostTabReorderTestSecondBeforePosition.y -
+						m_DocumentHostTabReorderTestFirstTabCenter.y;
+					if (DeltaX * DeltaX + DeltaY * DeltaY <= IO.MouseDragThreshold * IO.MouseDragThreshold)
+					{
+						m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::Failed;
+						m_DocumentHostTabReorderTest = false;
+						PF_ERROR("Document tab reorder fixture could not drag the first tab back past the threshold.");
+						break;
+					}
+					QueuePointer(m_DocumentHostTabReorderTestSecondBeforePosition,
+						m_DocumentHostTabReorderTestFirstTabViewportID);
+					m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::ReversePositionQueued;
+					break;
+				}
+				case DocumentTabReorderTestPhase::ReversePositionQueued:
+					QueuePointer(m_DocumentHostTabReorderTestSecondBeforePosition,
+						m_DocumentHostTabReorderTestFirstTabViewportID);
+					IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+					m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::ReverseReleaseQueued;
+					break;
+				case DocumentTabReorderTestPhase::ReverseReleaseQueued:
+					if (!HasExpectedOrder(false))
+					{
+						m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::Failed;
+						m_DocumentHostTabReorderTest = false;
+						PF_ERROR("Document tab reorder fixture did not restore the original session order.");
+						break;
+					}
+					m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::Complete;
+					m_DocumentHostTabReorderTest = false;
+					PF_INFO("Document tab reorder UI fixture passed: the same synthetic session moved after and before its neighbor, preserving the active session and Level Editor tab.");
+					break;
+				case DocumentTabReorderTestPhase::Disabled:
+				case DocumentTabReorderTestPhase::Complete:
+				case DocumentTabReorderTestPhase::Failed:
 					break;
 			}
 #endif
@@ -5862,6 +6076,29 @@ namespace
 						(TabMinimum.y + TabMaximum.y) * 0.5f);
 					m_DocumentHostTabReattachTestTabViewportID = TabViewportID;
 					m_DocumentHostTabReattachTestTabCenterValid = true;
+				}
+				if (m_DocumentHostTabReorderTest)
+				{
+					if (Session->Identity == m_DocumentHostTabReorderTestFirst)
+					{
+						m_DocumentHostTabReorderTestFirstTabCenter = ImVec2(
+							(TabMinimum.x + TabMaximum.x) * 0.5f,
+							(TabMinimum.y + TabMaximum.y) * 0.5f);
+						m_DocumentHostTabReorderTestFirstTabViewportID = TabViewportID;
+						m_DocumentHostTabReorderTestFirstTabCenterValid = true;
+					}
+					else if (Session->Identity == m_DocumentHostTabReorderTestSecond)
+					{
+						const float TabWidth = TabMaximum.x - TabMinimum.x;
+						m_DocumentHostTabReorderTestSecondBeforePosition = ImVec2(
+							TabMinimum.x + TabWidth * 0.35f,
+							(TabMinimum.y + TabMaximum.y) * 0.5f);
+						m_DocumentHostTabReorderTestSecondAfterPosition = ImVec2(
+							TabMinimum.x + TabWidth * 0.65f,
+							(TabMinimum.y + TabMaximum.y) * 0.5f);
+						m_DocumentHostTabReorderTestSecondBeforePositionValid = true;
+						m_DocumentHostTabReorderTestSecondAfterPositionValid = true;
+					}
 				}
 				if (m_DocumentHostTabReattachTest &&
 					HostID == PulseForgeEditor::EditorDocumentManager::MainHostID &&
@@ -11472,6 +11709,7 @@ namespace
 		bool m_DocumentHostResetLayoutTest = false;
 		bool m_DocumentHostTabTearOffTest = false;
 		bool m_DocumentHostTabReattachTest = false;
+		bool m_DocumentHostTabReorderTest = false;
 		bool m_DocumentHostPresentationFailureTest = false;
 		bool m_DocumentHostAcquireOutOfDateTest = false;
 		bool m_DocumentHostImageAllocationFailureTest = false;
@@ -11487,7 +11725,11 @@ namespace
 		bool m_DocumentHostTabTearOffTestTabCenterValid = false;
 		DocumentTabReattachTestPhase m_DocumentHostTabReattachTestPhase =
 			DocumentTabReattachTestPhase::Disabled;
+		DocumentTabReorderTestPhase m_DocumentHostTabReorderTestPhase =
+			DocumentTabReorderTestPhase::Disabled;
 		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabReattachTestIdentity;
+		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabReorderTestFirst;
+		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabReorderTestSecond;
 		std::string m_DocumentHostTabReattachTestSourceHostID;
 		ImVec2 m_DocumentHostTabReattachTestTabCenter{ 0.0f, 0.0f };
 		ImGuiID m_DocumentHostTabReattachTestTabViewportID = 0;
@@ -11499,6 +11741,14 @@ namespace
 		ImVec2 m_DocumentHostTabReattachTestMainDropPosition{ 0.0f, 0.0f };
 		ImGuiID m_DocumentHostTabReattachTestMainViewportID = 0;
 		bool m_DocumentHostTabReattachTestMainDropPositionValid = false;
+		ImVec2 m_DocumentHostTabReorderTestFirstTabCenter{ 0.0f, 0.0f };
+		ImGuiID m_DocumentHostTabReorderTestFirstTabViewportID = 0;
+		bool m_DocumentHostTabReorderTestFirstTabCenterValid = false;
+		ImVec2 m_DocumentHostTabReorderTestSecondBeforePosition{ 0.0f, 0.0f };
+		ImVec2 m_DocumentHostTabReorderTestSecondAfterPosition{ 0.0f, 0.0f };
+		bool m_DocumentHostTabReorderTestSecondBeforePositionValid = false;
+		bool m_DocumentHostTabReorderTestSecondAfterPositionValid = false;
+		size_t m_DocumentHostTabReorderTestFrameCount = 0;
 		std::optional<PulseForge::Project> m_Project;
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::optional<std::string> m_SavedSceneSnapshot;

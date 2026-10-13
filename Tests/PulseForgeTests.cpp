@@ -4983,6 +4983,7 @@ namespace
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostResetLayoutTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTabTearOffTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTabReattachTest);
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTabReorderTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostPresentationFailureTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostAcquireOutOfDateTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostImageAllocationFailureTest);
@@ -5064,6 +5065,34 @@ namespace
 		const auto ConflictingTabTransferOptions = ParseEditorCommandLine(ConflictingTabTransferFixtures, Root);
 		PF_CHECK(Tests, !ConflictingTabTransferOptions &&
 			ConflictingTabTransferOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+		const std::array TabReorderFixtureArguments = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-test-tab-reorder") };
+		const auto TabReorderFixtureOptions = ParseEditorCommandLine(TabReorderFixtureArguments, Root);
+		PF_CHECK(Tests, TabReorderFixtureOptions && TabReorderFixtureOptions->EnableDocumentHostTabReorderTest);
+		const std::array TabReorderWithoutFixture = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-tab-reorder") };
+		const auto TabReorderWithoutFixtureOptions = ParseEditorCommandLine(TabReorderWithoutFixture, Root);
+		PF_CHECK(Tests, !TabReorderWithoutFixtureOptions &&
+			TabReorderWithoutFixtureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+		const std::array DuplicateTabReorderFixture = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-test-tab-reorder"),
+			std::string_view("--document-host-test-tab-reorder") };
+		const auto DuplicateTabReorderOptions = ParseEditorCommandLine(DuplicateTabReorderFixture, Root);
+		PF_CHECK(Tests, !DuplicateTabReorderOptions &&
+			DuplicateTabReorderOptions.error().Code == EditorCommandLineErrorCode::DuplicateOption);
+		const std::array ConflictingTabReorderFixture = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-test-tab-reattach"),
+			std::string_view("--document-host-test-tab-reorder") };
+		const auto ConflictingTabReorderOptions = ParseEditorCommandLine(ConflictingTabReorderFixture, Root);
+		PF_CHECK(Tests, !ConflictingTabReorderOptions &&
+			ConflictingTabReorderOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
 		const std::array PresentationFailureFixtureArguments = {
 			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
 			std::string_view("--document-host-test-fixture"),
