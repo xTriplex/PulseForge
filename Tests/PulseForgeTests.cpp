@@ -37,6 +37,7 @@
 #include "Editor/EditorCommandLine.h"
 #include "Editor/EditorContentBrowserPolicy.h"
 #include "Editor/EditorAssetDestinationPolicy.h"
+#include "Editor/EditorAssetSelectorPolicy.h"
 #include "Editor/EditorAssetPreviewPolicy.h"
 #include "Editor/EditorEntityIconPolicy.h"
 #include "Editor/EditorHierarchyRowPolicy.h"
@@ -2114,6 +2115,17 @@ namespace
 			AssetDestinationConflict::ExistingDestination);
 		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, false, false, false, false, true) ==
 			AssetDestinationConflict::InspectionFailed);
+	}
+
+	void TestEditorAssetSelectorPolicy(TestRunner& Tests)
+	{
+		using PulseForgeEditor::AssetSelectorMatchesSearch;
+		PF_CHECK(Tests, AssetSelectorMatchesSearch("Assets/Textures/Stone_BaseColor.png", ""));
+		PF_CHECK(Tests, AssetSelectorMatchesSearch("Assets/Textures/Stone_BaseColor.png", "stone"));
+		PF_CHECK(Tests, AssetSelectorMatchesSearch("Assets/Textures/Stone_BaseColor.png", "TEXTURES"));
+		PF_CHECK(Tests, AssetSelectorMatchesSearch("Assets/Materials/青い.material", "青い"));
+		PF_CHECK(Tests, !AssetSelectorMatchesSearch("Assets/Textures/Stone_BaseColor.png", "roughness"));
+		PF_CHECK(Tests, !AssetSelectorMatchesSearch("Assets/Textures/Stone_BaseColor.png", "Assets/Models"));
 	}
 
 	void TestEditorLayoutOpeningPreferencePersistence(TestRunner& Tests)
@@ -9533,6 +9545,7 @@ int main()
 	TestEditorAssetPreviewPolicy(Tests);
 	TestEditorWorkspacePanelState(Tests);
 	TestEditorAssetDestinationPolicy(Tests);
+	TestEditorAssetSelectorPolicy(Tests);
 	TestEditorLayoutOpeningPreferencePersistence(Tests);
 	TestEditorWorkspaceViewHelpers(Tests);
 	TestViewportMouseCaptureState(Tests);

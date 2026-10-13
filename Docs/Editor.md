@@ -53,3 +53,5 @@ Build the target with the default `PULSEFORGE_BUILD_EDITOR=ON` CMake option, or 
 ## Project asset destination dialogs
 
 The in-editor project-folder destination picker is shared by asset Move/Rename, Duplicate, New Scene, Save Scene As, and Create Prefab. It supports project-folder search and selection, filename validation against the required asset extension, destination and metadata-sidecar collision feedback, Enter to submit, and Escape to cancel. Scene and prefab creation still use the existing asset services and run after the normal unsaved-scene decision. Importing external files and selecting project directories continue to use native filesystem dialogs.
+
+Inspector and Material Details asset-reference selectors filter by compatible asset type and accept an ASCII-case-insensitive search against the UTF-8 project-relative asset path. This keeps large project registries navigable without changing UUID-based assignment behavior; non-ASCII path segments can be matched exactly.

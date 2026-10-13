@@ -40,6 +40,7 @@
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorContentBrowserPolicy.h"
 #include "Editor/EditorAssetDestinationPolicy.h"
+#include "Editor/EditorAssetSelectorPolicy.h"
 #include "Editor/EditorProjectOpening.h"
 #include "EditorApplicationFactory.h"
 #include "Editor/EditorInteractionPolicy.h"
@@ -8611,6 +8612,18 @@ namespace
 			if (!IsOpen)
 				return false;
 
+			const bool Activated = ImGui::IsItemActivated();
+			if (Activated || m_AssetSelectorSearchOwner != Label)
+			{
+				m_AssetSelectorSearch.fill('\0');
+				m_AssetSelectorSearchOwner = Label;
+			}
+			if (Activated)
+				ImGui::SetKeyboardFocusHere();
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			ImGui::InputTextWithHint("##AssetSelectorSearch", "Search compatible assets by name or folder...",
+				m_AssetSelectorSearch.data(), m_AssetSelectorSearch.size());
+
 			if (AllowNone)
 			{
 				const bool IsSelected = !Current;
@@ -8624,6 +8637,7 @@ namespace
 			}
 
 			bool HasCandidates = false;
+			bool HasVisibleCandidates = false;
 			if (m_Project)
 			{
 				for (const PulseForge::AssetRecord& Asset : m_Assets)
@@ -8633,6 +8647,9 @@ namespace
 					HasCandidates = true;
 					const std::string Identifier = Asset.ID.ToString();
 					const std::string Path = PathToUtf8(Asset.ProjectRelativePath);
+					if (!PulseForgeEditor::AssetSelectorMatchesSearch(Path, m_AssetSelectorSearch.data()))
+						continue;
+					HasVisibleCandidates = true;
 					const bool IsSelected = Current && *Current == Asset.ID;
 					ImGui::PushID(Identifier.c_str());
 					if (ImGui::Selectable(Path.c_str(), IsSelected))
@@ -8647,6 +8664,8 @@ namespace
 			}
 			if (!HasCandidates)
 				ImGui::TextDisabled("No compatible managed assets are available.");
+			else if (!HasVisibleCandidates)
+				ImGui::TextDisabled("No compatible assets match this search.");
 
 			ImGui::EndCombo();
 			return Changed;
@@ -10785,8 +10804,10 @@ namespace
 		std::optional<PulseForge::AssetID> m_AssetDestinationAsset;
 		std::array<char, 1024> m_AssetDestinationFilename{};
 		std::array<char, 256> m_AssetDestinationSearch{};
+		std::array<char, 256> m_AssetSelectorSearch{};
 		std::string m_AssetDestinationFolder = "Assets";
 		std::string m_AssetDestinationValidationError;
+		std::string m_AssetSelectorSearchOwner;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_LevelDocumentIdentity;
 		std::optional<PulseForge::AssetID> m_MaterialDetailsAsset;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentClose;
