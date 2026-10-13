@@ -162,7 +162,7 @@ Material Details is an Inspector-side utility. Document hosts are reserved for f
 |---|---|---|
 | R01 | Passed (runtime) | `NativeWindowResize_20261013_Bounded` repeatedly resizes a secondary host under Vulkan validation. |
 | R02 | Passed (runtime) | `NativeWindowLifecycle_20261013` records successful minimize/restore and secondary-window recreation. |
-| R03 | Unverified (synthetic host runtime) | The available `ManualAcceptance_20261013` capture has an `Amber.material` native window from before Material Details was reclassified as a utility, so it does not establish current secondary-host behavior. A minimized-main run with a synthetic document host remains to be recorded. |
+| R03 | Passed (bounded synthetic-host runtime) | `MainMinimizedSyntheticHost_20261013` minimizes the main window, confirms a secondary GLFW30 host remains visible, and captures its fixture UI with GDI+ `PrintWindow` flag 2. The fixture contains no production editor; see `Build/CMake/VS2022-x64/Diagnostics/MainMinimizedSyntheticHost_20261013/`. |
 | R04 | Unverified (hardware) | DPI-scale and window-bound policies are tested, but movement between physical mixed-DPI monitors has not been exercised. |
 | R05 | Unverified (hardware) | Bounds policy accepts negative coordinates; placement and pointer geometry on a physical negative-coordinate monitor have not been tested. |
 | R06 | Passed (bounded runtime) | Native-window lifecycle/transfer runs exercise presentation retirement with submitted frames; Khronos and NVRHI logs contain no VUID or validation errors. |
