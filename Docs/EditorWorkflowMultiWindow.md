@@ -188,7 +188,25 @@ Material Details is an Inspector-side utility. Document hosts are reserved for f
 
 ### Manual checks still required
 
-Use a Debug build and an isolated `PULSEFORGE_EDITOR_SETTINGS_DIR`. Synthetic host fixtures are not production asset editors.
+Run the following from the repository root. The Debug-only synthetic host fixture checks pointer-driven tab movement without opening or modifying project assets:
+
+```powershell
+cmake --build Build/CMake/VS2022-x64 --config Debug --target PulseForgeEditor --parallel 1
+
+$repo = (Get-Location).Path
+$env:PULSEFORGE_EDITOR_SETTINGS_DIR = Join-Path $env:TEMP ("PulseForge-DocumentHost-Manual-" + [guid]::NewGuid())
+Push-Location (Join-Path $repo 'Build/CMake/VS2022-x64/Debug')
+try {
+	$project = Join-Path $repo 'Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj'
+	.\PulseForgeEditor.exe --project $project --document-host-test-fixture
+}
+finally {
+	Pop-Location
+	Remove-Item Env:\PULSEFORGE_EDITOR_SETTINGS_DIR -ErrorAction SilentlyContinue
+}
+```
+
+The fixture creates three synthetic, unregistered document sessions with no editable asset content. Use a tab's context menu to move it to the main document strip, then drag that top-strip tab outside the editor window and release it. The same session should appear in a native window. Repeat the transfer in both directions and confirm that Level Editor stays in the main host. The fixture does not validate editing, saving, or dirty-document prompts for a production asset editor.
 
 - Use real mouse input to detach, reattach, reorder, and group document tabs. Confirm utility panels and workspace edges reject drops.
 - Use each opening preference and confirm Material Details opens beside Inspector while Level Editor remains active and the Scene Viewport stays available.
