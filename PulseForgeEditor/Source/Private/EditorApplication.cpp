@@ -4268,12 +4268,13 @@ namespace
 			if (!Host || Host->Role != PulseForgeEditor::EditorDocumentHostRole::Native)
 				return;
 			const auto Documents = Host->Documents;
-			const bool HasDirty = std::any_of(Documents.begin(), Documents.end(), [this](const auto& Identity)
+			const auto DirtyDocuments = PulseForgeEditor::FilterDirtyDocumentIdentities(
+				Documents, [this](const auto& Identity)
 			{
 				const auto* Session = m_Documents.Find(Identity);
 				return Session && Session->IsDirty();
 			});
-			if (!HasDirty)
+			if (DirtyDocuments.empty())
 			{
 				for (const auto& Identity : Documents)
 					(void)CloseDocumentClean(Identity);
@@ -4398,13 +4399,21 @@ namespace
 				PopupName.c_str(), &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize);
 			if (!PopupVisible)
 				return;
-			const auto DirtyDocuments = m_PendingDocumentClose
-				? std::vector<PulseForgeEditor::EditorDocumentIdentity>{ *m_PendingDocumentClose }
-				: m_PendingDocumentHostClose
-					? (m_Documents.FindHost(*m_PendingDocumentHostClose)
-						? m_Documents.FindHost(*m_PendingDocumentHostClose)->Documents
-						: std::vector<PulseForgeEditor::EditorDocumentIdentity>{})
-					: GetDirtyAssetDocuments();
+			std::vector<PulseForgeEditor::EditorDocumentIdentity> DirtyDocuments;
+			if (m_PendingDocumentClose)
+				DirtyDocuments.push_back(*m_PendingDocumentClose);
+			else if (m_PendingDocumentHostClose)
+			{
+				if (const auto* Host = m_Documents.FindHost(*m_PendingDocumentHostClose))
+					DirtyDocuments = PulseForgeEditor::FilterDirtyDocumentIdentities(
+						Host->Documents, [this](const auto& Identity)
+						{
+							const auto* Session = m_Documents.Find(Identity);
+							return Session && Session->IsDirty();
+						});
+			}
+			else
+				DirtyDocuments = GetDirtyAssetDocuments();
 			ImGui::TextWrapped("%zu open asset document%s have unsaved changes.", DirtyDocuments.size(),
 				DirtyDocuments.size() == 1 ? "" : "s");
 			ImGui::TextUnformatted("Save or discard these drafts before continuing?");

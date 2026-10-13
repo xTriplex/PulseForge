@@ -3875,6 +3875,13 @@ namespace
 		EditorDocumentManager Manager;
 		PF_CHECK(Tests, ShouldProcessNativeDocumentHostCloseRequests(false));
 		PF_CHECK(Tests, !ShouldProcessNativeDocumentHostCloseRequests(true));
+		const std::vector<int> BatchDocuments{ 1, 2, 3, 4 };
+		const auto DirtyBatch = FilterDirtyDocumentIdentities(BatchDocuments,
+			[](int Document) { return Document == 2 || Document == 4; });
+		PF_CHECK(Tests, DirtyBatch.size() == 2 && DirtyBatch[0] == 2 && DirtyBatch[1] == 4);
+		const auto CleanBatch = FilterDirtyDocumentIdentities(BatchDocuments,
+			[](int) { return false; });
+		PF_CHECK(Tests, CleanBatch.empty());
 		// A captured tab drag may outlive ImGui's payload on the release frame.
 		PF_CHECK(Tests, ShouldDetachDocumentTab(true, true, false, false));
 		PF_CHECK(Tests, !ShouldDetachDocumentTab(false, true, false, false));
