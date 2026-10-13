@@ -3909,6 +3909,17 @@ namespace
 		PF_CHECK(Tests, Manager.Find(MaterialA)->ProjectRelativePath ==
 			std::filesystem::path("Assets/OtherFolder/Amber.material"));
 		PF_CHECK(Tests, Manager.GetFocusedHost() && Manager.GetFocusedHost()->ID == First->HostID);
+		const auto* FocusedMaterialHost = Manager.GetFocusedHost();
+		const auto* FocusedMaterialIdentity = FocusedMaterialHost && FocusedMaterialHost->ActiveDocument
+			? &*FocusedMaterialHost->ActiveDocument : nullptr;
+		PF_CHECK(Tests, ResolveEditorDocumentCommandTarget(FocusedMaterialIdentity, *Project) ==
+			EditorDocumentCommandTarget::Material);
+		PF_CHECK(Tests, ResolveEditorDocumentCommandTarget(nullptr, *Project) == EditorDocumentCommandTarget::Level);
+		const EditorDocumentIdentity TextureCommandDocument{ *Project, *Material, EditorDocumentKind::Texture };
+		PF_CHECK(Tests, ResolveEditorDocumentCommandTarget(&TextureCommandDocument, *Project) ==
+			EditorDocumentCommandTarget::Unsupported);
+		PF_CHECK(Tests, ResolveEditorDocumentCommandTarget(&OtherProjectMaterial, *Project) ==
+			EditorDocumentCommandTarget::Unsupported);
 		PF_CHECK(Tests, Manager.MarkEdited(MaterialA));
 		const uint64_t LocationUpdateRevision = Manager.Find(MaterialA)->Revision;
 		const bool LocationUpdated = Manager.UpdateAssetLocation(
@@ -4010,6 +4021,11 @@ namespace
 
 		const auto LevelOpen = Manager.Open(Level, {}, "Level Editor", EditorDocumentOpenPreference::NewNativeWindow);
 		PF_CHECK(Tests, LevelOpen && LevelOpen->HostID == EditorDocumentManager::MainHostID);
+		const auto* FocusedLevelHost = Manager.GetFocusedHost();
+		const auto* FocusedLevelIdentity = FocusedLevelHost && FocusedLevelHost->ActiveDocument
+			? &*FocusedLevelHost->ActiveDocument : nullptr;
+		PF_CHECK(Tests, ResolveEditorDocumentCommandTarget(FocusedLevelIdentity, *Project) ==
+			EditorDocumentCommandTarget::Level);
 		const auto ProtectedTransfer = Manager.Transfer(Level, First->HostID, 0);
 		PF_CHECK(Tests, !ProtectedTransfer);
 

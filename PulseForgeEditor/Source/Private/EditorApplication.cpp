@@ -2194,9 +2194,16 @@ namespace
 		void HandleEditorHistoryShortcuts()
 		{
 			const ImGuiIO& IO = ImGui::GetIO();
-			const bool MaterialDocumentFocused = IsFocusedMaterialDocument();
+			const PulseForge::UUID CurrentProject = m_Project
+				? m_Project->GetDescription().ID : PulseForge::UUID{};
+			const auto CommandTarget = PulseForgeEditor::ResolveEditorDocumentCommandTarget(
+				GetFocusedDocumentIdentity(), CurrentProject);
+			const bool MaterialDocumentFocused =
+				CommandTarget == PulseForgeEditor::EditorDocumentCommandTarget::Material;
+			const bool UnsupportedDocumentFocused =
+				CommandTarget == PulseForgeEditor::EditorDocumentCommandTarget::Unsupported;
 			if (!PulseForgeEditor::CanRouteEditorHistoryShortcut({
-				.SceneAvailable = MaterialDocumentFocused || m_Scene != nullptr,
+				.SceneAvailable = MaterialDocumentFocused || (!UnsupportedDocumentFocused && m_Scene != nullptr),
 				.RuntimeActive = !MaterialDocumentFocused && m_SceneRuntime != nullptr,
 				.CameraNavigationActive = !MaterialDocumentFocused && m_EditorCameraNavigationActive,
 				.GizmoInteractionActive = !MaterialDocumentFocused && m_GizmoDrag.has_value(),
@@ -2219,6 +2226,8 @@ namespace
 					(void)ApplyMaterialHistoryStep(false);
 				return;
 			}
+			if (UnsupportedDocumentFocused)
+				return;
 			if (ImGui::IsKeyPressed(ImGuiKey_Y, false))
 				RedoSceneEdit();
 			else if (ImGui::IsKeyPressed(ImGuiKey_Z, false) && IO.KeyShift)
@@ -2254,9 +2263,11 @@ namespace
 
 		[[nodiscard]] bool IsFocusedMaterialDocument() const noexcept
 		{
-			const auto* Identity = GetFocusedDocumentIdentity();
-			return Identity && Identity->Kind == PulseForgeEditor::EditorDocumentKind::Material && m_Project &&
-				Identity->Project == m_Project->GetDescription().ID;
+			const PulseForge::UUID CurrentProject = m_Project
+				? m_Project->GetDescription().ID : PulseForge::UUID{};
+			return PulseForgeEditor::ResolveEditorDocumentCommandTarget(
+				GetFocusedDocumentIdentity(), CurrentProject) ==
+				PulseForgeEditor::EditorDocumentCommandTarget::Material;
 		}
 
 		void FocusDocumentHostIfChanged(std::string_view HostID)
@@ -2269,15 +2280,19 @@ namespace
 		bool SaveFocusedDocument()
 		{
 			const auto* Identity = GetFocusedDocumentIdentity();
-			if (Identity && Identity->Project == (m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{}))
+			const PulseForge::UUID CurrentProject = m_Project
+				? m_Project->GetDescription().ID : PulseForge::UUID{};
+			switch (PulseForgeEditor::ResolveEditorDocumentCommandTarget(Identity, CurrentProject))
 			{
-				if (Identity->Kind == PulseForgeEditor::EditorDocumentKind::Material)
+				case PulseForgeEditor::EditorDocumentCommandTarget::Material:
 					return SaveMaterialDraft(Identity->Asset);
-				if (Identity->Kind != PulseForgeEditor::EditorDocumentKind::Level)
+				case PulseForgeEditor::EditorDocumentCommandTarget::Unsupported:
 				{
 					SetWarning("Saving this document type is not supported yet.");
 					return false;
 				}
+				case PulseForgeEditor::EditorDocumentCommandTarget::Level:
+					break;
 			}
 			return SaveScene();
 		}
@@ -2331,6 +2346,12 @@ namespace
 				}
 				return;
 			}
+			const PulseForge::UUID CurrentProject = m_Project
+				? m_Project->GetDescription().ID : PulseForge::UUID{};
+			if (PulseForgeEditor::ResolveEditorDocumentCommandTarget(
+				GetFocusedDocumentIdentity(), CurrentProject) ==
+				PulseForgeEditor::EditorDocumentCommandTarget::Unsupported)
+				return;
 			if (!CanRouteEditorShortcut())
 				return;
 			const bool HasUnsupportedModifier = IO.KeyAlt || IO.KeySuper;
