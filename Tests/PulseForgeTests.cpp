@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <numbers>
@@ -35,6 +36,7 @@
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorCommandLine.h"
 #include "Editor/EditorContentBrowserPolicy.h"
+#include "Editor/EditorAssetDestinationPolicy.h"
 #include "Editor/EditorAssetPreviewPolicy.h"
 #include "Editor/EditorEntityIconPolicy.h"
 #include "Editor/EditorHierarchyRowPolicy.h"
@@ -2055,6 +2057,29 @@ namespace
 		PF_CHECK(Tests, DraftKey == MakeMaterialDraftKey("C:/Project", "material-uuid"));
 		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("D:/Project", "material-uuid"));
 		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("C:/Project", "other-material-uuid"));
+	}
+
+	void TestEditorAssetDestinationPolicy(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		const std::filesystem::path Source = "Assets/Materials/Amber.material";
+		const auto Extensionless = ResolveAssetDestinationFilename("Amber Copy", Source);
+		PF_CHECK(Tests, Extensionless && *Extensionless == "Amber Copy.material");
+		const auto MatchingExtension = ResolveAssetDestinationFilename("Amber-Renamed.MATERIAL", Source);
+		PF_CHECK(Tests, MatchingExtension && *MatchingExtension == "Amber-Renamed.MATERIAL");
+		const auto EmptyName = ResolveAssetDestinationFilename("", Source);
+		PF_CHECK(Tests, !EmptyName && EmptyName.error() == AssetDestinationNameError::InvalidFilename);
+		const auto RelativePath = ResolveAssetDestinationFilename("nested/Amber.material", Source);
+		PF_CHECK(Tests, !RelativePath && RelativePath.error() == AssetDestinationNameError::InvalidFilename);
+		const auto InvalidCharacter = ResolveAssetDestinationFilename("Amber?.material", Source);
+		PF_CHECK(Tests, !InvalidCharacter && InvalidCharacter.error() == AssetDestinationNameError::InvalidFilename);
+		const auto TrailingSpace = ResolveAssetDestinationFilename("Amber .material ", Source);
+		PF_CHECK(Tests, !TrailingSpace && TrailingSpace.error() == AssetDestinationNameError::InvalidFilename);
+		const auto MismatchedExtension = ResolveAssetDestinationFilename("Amber.png", Source);
+		PF_CHECK(Tests, !MismatchedExtension && MismatchedExtension.error() == AssetDestinationNameError::ExtensionMismatch);
+		const auto ReservedExtension = ResolveAssetDestinationFilename("Amber.meta", Source);
+		PF_CHECK(Tests, !ReservedExtension &&
+			ReservedExtension.error() == AssetDestinationNameError::ReservedSidecarExtension);
 	}
 
 	void TestEditorLayoutOpeningPreferencePersistence(TestRunner& Tests)
@@ -9407,6 +9432,7 @@ int main()
 	TestEditorInteractionPolicy(Tests);
 	TestEditorAssetPreviewPolicy(Tests);
 	TestEditorWorkspacePanelState(Tests);
+	TestEditorAssetDestinationPolicy(Tests);
 	TestEditorLayoutOpeningPreferencePersistence(Tests);
 	TestEditorWorkspaceViewHelpers(Tests);
 	TestViewportMouseCaptureState(Tests);

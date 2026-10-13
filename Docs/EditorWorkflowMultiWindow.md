@@ -250,6 +250,8 @@ The subsequent keyboard-routing refactor uses a single `EditorShortcutContext` p
 
 After enabling opt-in fixture restoration, all six Vulkan/OpenGL Debug/Release/Dist configurations were rebuilt. Each freshly built test executable passed 4,261 checks and CTest passed 2/2; logs are under `Build/CMake/VS2022-x64/Diagnostics/WorkspaceFixtureRestoreMatrix_20261013/`.
 
+The in-editor asset destination dialog now uses a deterministic filename policy for single-component validation, type-extension preservation, case-insensitive extensions, and reserved `.meta` handling. Eight focused cases cover accepted extensionless/case-varied names and invalid paths, characters, extensions, and trailing spaces. All six Vulkan/OpenGL Debug/Release/Dist configurations passed 4,269 checks and CTest 2/2; logs are under `Build/CMake/VS2022-x64/Diagnostics/AssetDestinationPolicyMatrix_20261013/`. Folder traversal, keyboard accept/cancel, and error presentation still require direct UI acceptance.
+
 ## Acceptance tracking at implementation checkpoint
 
 `Pass` means the listed evidence directly covers the behavior. `Partial` means a policy or bounded smoke check passed while the complete user-facing scenario remains unverified. `Unverified` means no suitable evidence has been collected. Screenshots and runtime startup do not prove pointer/keyboard behavior.
@@ -301,7 +303,7 @@ After enabling opt-in fixture restoration, all six Vulkan/OpenGL Debug/Release/D
 | P07 name collision and case-only path checks | Pass | Move operation tests cover collisions and normalized paths. |
 | P08 symlink/reparse and project-boundary move checks | Pass | Move validation rejects reparse paths and traversal. |
 | P09 floating-host asset dialogs route results to the caller | Unverified | Direct dialog invocation from a native editor remains. |
-| P10 asset destination dialog navigation/validation | Partial | Dialog implementation exists; keyboard, collision and error presentation need manual acceptance. |
+| P10 asset destination dialog navigation/validation | Partial | Search, project-folder selection, filename/extension validation, and managed operation routing are implemented. Deterministic filename-policy checks pass; folder traversal, keyboard accept/cancel, collision feedback, and error presentation remain manual. |
 
 ## Manual acceptance still required
 
@@ -335,4 +337,5 @@ No physical multi-monitor transition or direct pointer-driven document drag has 
 - C07's shared focus-gate policy now covers text input, active ImGui items, popup/modal state, menu navigation, and window navigation for both history and scene commands. Six backends/configurations passed 4,261 checks and CTest 2/2. Actual keypress behavior remains manual.
 - The Debug-only fixture now restores its exact synthetic document identities/host records only when its explicit fixture flag is supplied. Isolated seed/restart restored two native hosts, and desktop enumeration found two `GLFW30` fixture windows plus the main editor; ordinary startup without the flag recovered to zero native placeholder hosts. After this change, Vulkan/OpenGL Debug/Release/Dist each passed 4,261 checks and CTest 2/2. Runtime evidence is under `Build/CMake/VS2022-x64/Diagnostics/DocumentWorkspaceFixtureRestore_20261013/`.
 - The feature branch remains local, unpushed, and unmerged.
+- Move/Duplicate destination filename validation is now isolated in `EditorAssetDestinationPolicy.h` and covered by eight deterministic checks. Fresh Vulkan/OpenGL Debug/Release/Dist builds pass 4,269 checks and CTest 2/2. The dialog itself was not keyboard/mouse automated.
 - The deleted Spotlight research document, modified validation scene and `EmissiveStudy`, `PackedAndNormal`, and `BlueGlass` materials, and untracked `CMakeSettings.json` remain outside the commit. Root `AGENTS.md` remains absent.

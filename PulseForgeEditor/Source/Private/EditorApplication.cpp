@@ -38,6 +38,7 @@
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorContentBrowserPolicy.h"
+#include "Editor/EditorAssetDestinationPolicy.h"
 #include "Editor/EditorProjectOpening.h"
 #include "EditorApplicationFactory.h"
 #include "Editor/EditorInteractionPolicy.h"
@@ -3275,47 +3276,39 @@ namespace
 				EnterPressed)
 			{
 				const std::string FilenameText = m_AssetDestinationFilename.data();
-				const std::filesystem::path Filename = std::filesystem::u8path(FilenameText);
-				if (FilenameText.empty() || FilenameText == "." || FilenameText == ".." ||
-					Filename.has_parent_path() || FilenameText.find('/') != std::string::npos ||
-					FilenameText.find_first_of("\\<>:\"|?*") != std::string::npos ||
-					FilenameText.back() == '.' || FilenameText.back() == ' ')
-					m_AssetDestinationValidationError = "Enter a single valid filename without a folder path.";
+				const auto FinalFilename = PulseForgeEditor::ResolveAssetDestinationFilename(
+					FilenameText, Asset->ProjectRelativePath);
+				if (!FinalFilename)
+				{
+					switch (FinalFilename.error())
+					{
+						case PulseForgeEditor::AssetDestinationNameError::InvalidFilename:
+							m_AssetDestinationValidationError = "Enter a single valid filename without a folder path.";
+							break;
+						case PulseForgeEditor::AssetDestinationNameError::ExtensionMismatch:
+							m_AssetDestinationValidationError = "The destination must keep the original asset extension.";
+							break;
+						case PulseForgeEditor::AssetDestinationNameError::ReservedSidecarExtension:
+							m_AssetDestinationValidationError = "The .meta extension is reserved for asset sidecars.";
+							break;
+					}
+				}
 				else if (!m_Project || !m_AssetDestinationAsset || !IsKnownContentFolder(
 					std::filesystem::u8path(m_AssetDestinationFolder)))
 					m_AssetDestinationValidationError = "Choose a folder that belongs to the open project.";
 				else
 				{
-					std::filesystem::path FinalFilename = Filename;
-					if (FinalFilename.extension().empty())
-						FinalFilename += Asset->ProjectRelativePath.extension();
-					const auto Lower = [](std::string Value)
-					{
-						std::transform(Value.begin(), Value.end(), Value.begin(), [](unsigned char Character)
-						{
-							return static_cast<char>(std::tolower(Character));
-						});
-						return Value;
-					};
-					if (Lower(FinalFilename.extension().string()) !=
-						Lower(Asset->ProjectRelativePath.extension().string()))
-						m_AssetDestinationValidationError = "The destination must keep the original asset extension.";
-					else if (Lower(FinalFilename.extension().string()) == ".meta")
-						m_AssetDestinationValidationError = "The .meta extension is reserved for asset sidecars.";
+					const PulseForge::AssetID Identifier = *m_AssetDestinationAsset;
+					const std::filesystem::path Target =
+						std::filesystem::u8path(m_AssetDestinationFolder) / *FinalFilename;
+					const bool Duplicate = m_AssetDestinationDuplicate;
+					m_AssetDestinationAsset.reset();
+					m_AssetDestinationValidationError.clear();
+					ImGui::CloseCurrentPopup();
+					if (Duplicate)
+						QueueAfterSave([this, Identifier, Target] { DuplicateAssetAt(Identifier, Target); });
 					else
-					{
-						const PulseForge::AssetID Identifier = *m_AssetDestinationAsset;
-						const std::filesystem::path Target =
-							std::filesystem::u8path(m_AssetDestinationFolder) / FinalFilename;
-						const bool Duplicate = m_AssetDestinationDuplicate;
-						m_AssetDestinationAsset.reset();
-						m_AssetDestinationValidationError.clear();
-						ImGui::CloseCurrentPopup();
-						if (Duplicate)
-							QueueAfterSave([this, Identifier, Target] { DuplicateAssetAt(Identifier, Target); });
-						else
-							QueueAfterSave([this, Identifier, Target] { MoveAssetAt(Identifier, Target); });
-					}
+						QueueAfterSave([this, Identifier, Target] { MoveAssetAt(Identifier, Target); });
 				}
 			}
 			}
