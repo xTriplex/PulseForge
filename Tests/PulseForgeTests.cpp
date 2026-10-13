@@ -2081,6 +2081,23 @@ namespace
 		const auto ReservedExtension = ResolveAssetDestinationFilename("Amber.meta", Source);
 		PF_CHECK(Tests, !ReservedExtension &&
 			ReservedExtension.error() == AssetDestinationNameError::ReservedSidecarExtension);
+		const auto NewSceneName = ResolveAssetDestinationFilename(
+			"Overview", std::filesystem::path("Assets/Scenes/NewScene.scene"));
+		PF_CHECK(Tests, NewSceneName && *NewSceneName == "Overview.scene");
+		const auto SavedSceneName = ResolveAssetDestinationFilename(
+			"Overview Copy.scene", std::filesystem::path("Assets/Scenes/NewScene.scene"));
+		PF_CHECK(Tests, SavedSceneName && *SavedSceneName == "Overview Copy.scene");
+		const auto NewPrefabName = ResolveAssetDestinationFilename(
+			"Environment", std::filesystem::path("Assets/Prefabs/NewPrefab.prefab"));
+		PF_CHECK(Tests, NewPrefabName && *NewPrefabName == "Environment.prefab");
+		const auto WrongSceneExtension = ResolveAssetDestinationFilename(
+			"Overview.prefab", std::filesystem::path("Assets/Scenes/NewScene.scene"));
+		PF_CHECK(Tests, !WrongSceneExtension &&
+			WrongSceneExtension.error() == AssetDestinationNameError::ExtensionMismatch);
+		const auto WrongPrefabExtension = ResolveAssetDestinationFilename(
+			"Environment.scene", std::filesystem::path("Assets/Prefabs/NewPrefab.prefab"));
+		PF_CHECK(Tests, !WrongPrefabExtension &&
+			WrongPrefabExtension.error() == AssetDestinationNameError::ExtensionMismatch);
 		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, false, false, false, false, false) ==
 			AssetDestinationConflict::None);
 		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, true, false, true, true, false) ==

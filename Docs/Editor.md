@@ -49,3 +49,7 @@ For visual acceptance, use the dedicated [`PointLightShadows` project](../Sample
 `PulseForgeEditor.exe --project "C:\path with spaces\Example.pfproj"` opens the specified existing project at startup through the same project and startup-scene loading path as File > Open Project. Relative paths resolve against the process working directory. The argument must name an existing `.pfproj` file; unknown options, duplicate `--project` options, missing values, and invalid paths exit with a clear error rather than starting an empty editor. With no `--project` option, normal empty-editor startup is unchanged. Project startup does not change the editor workspace settings directory or docking layout.
 
 Build the target with the default `PULSEFORGE_BUILD_EDITOR=ON` CMake option, or set it to `OFF` for runtime-only builds. The editor currently targets Windows. To use the transitional OpenGL shell instead of Vulkan, configure with `-DPULSEFORGE_EDITOR_RENDERER=OpenGL`.
+
+## Project asset destination dialogs
+
+The in-editor project-folder destination picker is shared by asset Move/Rename, Duplicate, New Scene, Save Scene As, and Create Prefab. It supports project-folder search and selection, filename validation against the required asset extension, destination and metadata-sidecar collision feedback, Enter to submit, and Escape to cancel. Scene and prefab creation still use the existing asset services and run after the normal unsaved-scene decision. Importing external files and selecting project directories continue to use native filesystem dialogs.
