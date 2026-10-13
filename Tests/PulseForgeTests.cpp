@@ -4068,6 +4068,17 @@ namespace
 		PF_CHECK(Tests, Manager.FindHost(EditorDocumentManager::MainHostID)->Documents.size() == 1);
 		PF_CHECK(Tests, OtherProjectOpen && OtherProjectOpen->HostID != OtherFolderOpen->HostID);
 		PF_CHECK(Tests, !Manager.Transfer(MaterialA, OtherProjectOpen->HostID, 0));
+		if (OtherProjectOpen)
+		{
+			const auto RejectedRecovery = Manager.TransferAll(
+				OtherProjectOpen->HostID, EditorDocumentManager::MainHostID);
+			PF_CHECK(Tests, !RejectedRecovery);
+			PF_CHECK(Tests, Manager.Find(OtherProjectMaterial)->HostID == OtherProjectOpen->HostID);
+			const auto* RejectedRecoveryHost = Manager.FindHost(OtherProjectOpen->HostID);
+			PF_CHECK(Tests, RejectedRecoveryHost && RejectedRecoveryHost->Documents.size() == 1 &&
+				RejectedRecoveryHost->Documents.front() == OtherProjectMaterial);
+			PF_CHECK(Tests, Manager.FindHost(EditorDocumentManager::MainHostID)->Documents.size() == 1);
+		}
 
 		uint64_t TextureIdentity = 90;
 		const auto ManagerPreferenceOpen = [&Manager, &Project, &TextureIdentity]()
@@ -4086,6 +4097,47 @@ namespace
 			EditorDocumentOpenPreference::NewNativeWindow);
 		PF_CHECK(Tests, OtherProjectTextureOpen && OtherProjectTextureOpen->HostID != EditorDocumentManager::MainHostID);
 		PF_CHECK(Tests, !Manager.Transfer(MaterialA, OtherProjectTextureOpen->HostID, 0));
+
+		const auto RecoveryTextureAID = UUID::Generate();
+		const auto RecoveryTextureBID = UUID::Generate();
+		PF_CHECK(Tests, RecoveryTextureAID && RecoveryTextureBID);
+		if (RecoveryTextureAID && RecoveryTextureBID)
+		{
+			const EditorDocumentIdentity RecoveryTextureA{ *Project, *RecoveryTextureAID, EditorDocumentKind::Texture };
+			const EditorDocumentIdentity RecoveryTextureB{ *Project, *RecoveryTextureBID, EditorDocumentKind::Texture };
+			const auto RecoveryAOpen = Manager.Open(RecoveryTextureA, "Assets/Textures/A.png", "A.png",
+				EditorDocumentOpenPreference::NewNativeWindow);
+			PF_CHECK(Tests, RecoveryAOpen.has_value());
+			if (RecoveryAOpen)
+			{
+				PF_CHECK(Tests, Manager.SetRememberedHost(EditorDocumentKind::Texture, RecoveryAOpen->HostID));
+				const auto RecoveryBOpen = Manager.Open(RecoveryTextureB, "Assets/Textures/B.png", "B.png",
+					EditorDocumentOpenPreference::RememberedPlacement);
+				PF_CHECK(Tests, RecoveryBOpen && RecoveryBOpen->HostID == RecoveryAOpen->HostID);
+				if (RecoveryBOpen)
+				{
+					PF_CHECK(Tests, Manager.MarkEdited(RecoveryTextureA));
+					PF_CHECK(Tests, Manager.MarkEdited(RecoveryTextureB));
+					const uint64_t RevisionA = Manager.Find(RecoveryTextureA)->Revision;
+					const uint64_t RevisionB = Manager.Find(RecoveryTextureB)->Revision;
+					PF_CHECK(Tests, Manager.Activate(RecoveryTextureA));
+					const auto RecoveredCount = Manager.TransferAll(
+						RecoveryAOpen->HostID, EditorDocumentManager::MainHostID);
+					PF_CHECK(Tests, RecoveredCount && *RecoveredCount == 2);
+					PF_CHECK(Tests, Manager.Find(RecoveryTextureA)->HostID == EditorDocumentManager::MainHostID);
+					PF_CHECK(Tests, Manager.Find(RecoveryTextureB)->HostID == EditorDocumentManager::MainHostID);
+					PF_CHECK(Tests, Manager.Find(RecoveryTextureA)->Revision == RevisionA &&
+						Manager.Find(RecoveryTextureA)->IsDirty());
+					PF_CHECK(Tests, Manager.Find(RecoveryTextureB)->Revision == RevisionB &&
+						Manager.Find(RecoveryTextureB)->IsDirty());
+					const auto* MainHost = Manager.FindHost(EditorDocumentManager::MainHostID);
+					PF_CHECK(Tests, MainHost && MainHost->ActiveDocument == RecoveryTextureA);
+					const auto* RecoveredSource = Manager.FindHost(RecoveryAOpen->HostID);
+					PF_CHECK(Tests, RecoveredSource && RecoveredSource->Documents.empty());
+					PF_CHECK(Tests, Manager.RemoveEmptyNativeHost(RecoveryAOpen->HostID));
+				}
+			}
+		}
 
 		const auto DetachAsset = UUID::Generate();
 		PF_CHECK(Tests, DetachAsset.has_value());
@@ -4212,7 +4264,7 @@ namespace
 				RemovedProjectHosts.end() &&
 			std::find(RemovedProjectHosts.begin(), RemovedProjectHosts.end(), OtherProjectOpen->HostID) !=
 				RemovedProjectHosts.end());
-		PF_CHECK(Tests, Manager.GetSessions().size() == 5);
+		PF_CHECK(Tests, Manager.GetSessions().size() == 7);
 		PF_CHECK(Tests, !Manager.Find(OtherProjectMaterial));
 		PF_CHECK(Tests, !Manager.Find(OtherProjectTexture));
 		PF_CHECK(Tests, !Manager.FindHost(OtherProjectTextureOpen->HostID));
@@ -4911,6 +4963,7 @@ namespace
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTestFixture);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostResetLayoutTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTabTearOffTest);
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostPresentationFailureTest);
 
 		const std::string AbsoluteProjectPath = ProjectFile.string();
 		const std::array AbsoluteArguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath) };
@@ -4969,6 +5022,35 @@ namespace
 		const auto TabTearOffWithoutFixtureOptions = ParseEditorCommandLine(TabTearOffWithoutFixture, Root);
 		PF_CHECK(Tests, !TabTearOffWithoutFixtureOptions &&
 			TabTearOffWithoutFixtureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+		const std::array PresentationFailureFixtureArguments = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-test-presentation-failure") };
+		const auto PresentationFailureFixtureOptions = ParseEditorCommandLine(PresentationFailureFixtureArguments, Root);
+		PF_CHECK(Tests, PresentationFailureFixtureOptions &&
+			PresentationFailureFixtureOptions->EnableDocumentHostPresentationFailureTest);
+		const std::array PresentationFailureWithoutFixture = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-presentation-failure") };
+		const auto PresentationFailureWithoutFixtureOptions = ParseEditorCommandLine(PresentationFailureWithoutFixture, Root);
+		PF_CHECK(Tests, !PresentationFailureWithoutFixtureOptions &&
+			PresentationFailureWithoutFixtureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+		const std::array DuplicatePresentationFailureFixture = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-test-presentation-failure"),
+			std::string_view("--document-host-test-presentation-failure") };
+		const auto DuplicatePresentationFailureOptions = ParseEditorCommandLine(DuplicatePresentationFailureFixture, Root);
+		PF_CHECK(Tests, !DuplicatePresentationFailureOptions &&
+			DuplicatePresentationFailureOptions.error().Code == EditorCommandLineErrorCode::DuplicateOption);
+		const std::array ConflictingPresentationFailureFixture = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-test-presentation-failure"),
+			std::string_view("--document-host-reset-layout-test") };
+		const auto ConflictingPresentationFailureOptions = ParseEditorCommandLine(ConflictingPresentationFailureFixture, Root);
+		PF_CHECK(Tests, !ConflictingPresentationFailureOptions &&
+			ConflictingPresentationFailureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
 
 		const std::filesystem::path StressManifest = Root / "stress.manifest";
 		{

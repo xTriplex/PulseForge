@@ -145,6 +145,9 @@ namespace PulseForgeEditor
 			std::string_view DestinationHostID,
 			size_t DestinationIndex,
 			const TransferPreparation& Prepare = {});
+		[[nodiscard]] std::expected<size_t, std::string> TransferAll(
+			std::string_view SourceHostID,
+			std::string_view DestinationHostID);
 		[[nodiscard]] bool Activate(const EditorDocumentIdentity& Identity) noexcept;
 		[[nodiscard]] bool FocusHost(std::string_view HostID) noexcept;
 		[[nodiscard]] bool SetRememberedHost(EditorDocumentKind Kind, std::string_view HostID) noexcept;

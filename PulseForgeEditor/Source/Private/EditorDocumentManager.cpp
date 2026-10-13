@@ -204,6 +204,74 @@ namespace PulseForgeEditor
 		};
 	}
 
+	std::expected<size_t, std::string> EditorDocumentManager::TransferAll(
+		std::string_view SourceHostID,
+		std::string_view DestinationHostID)
+	{
+		EditorDocumentHost* Source = FindHost(SourceHostID);
+		EditorDocumentHost* Destination = FindHost(DestinationHostID);
+		if (!Source || !Destination || Source == Destination)
+			return std::unexpected("Batch transfer requires distinct registered source and destination hosts");
+		if (Source->Documents.empty())
+			return size_t{ 0 };
+		if (Source->Documents.size() > Destination->Documents.max_size() - Destination->Documents.size())
+			return std::unexpected("The destination host cannot hold every document from the failed native window");
+
+		std::optional<PulseForge::UUID> SourceProject;
+		for (size_t Index = 0; Index < Source->Documents.size(); ++Index)
+		{
+			const EditorDocumentIdentity& Identity = Source->Documents[Index];
+			const auto Session = m_Sessions.find(Identity);
+			if (Identity.Kind == EditorDocumentKind::Level || Session == m_Sessions.end() ||
+				Session->second.HostID != Source->ID)
+				return std::unexpected("The source host contains a document that cannot be transferred safely");
+			if (std::find(Source->Documents.begin(), Source->Documents.begin() + static_cast<std::ptrdiff_t>(Index),
+				Identity) != Source->Documents.begin() + static_cast<std::ptrdiff_t>(Index))
+				return std::unexpected("The source host contains a duplicate document identity");
+			if (std::find(Destination->Documents.begin(), Destination->Documents.end(), Identity) !=
+				Destination->Documents.end())
+				return std::unexpected("The destination host already contains a source document identity");
+			if (SourceProject && *SourceProject != Identity.Project)
+				return std::unexpected("Documents from different projects cannot share a host");
+			SourceProject = Identity.Project;
+			for (const EditorDocumentIdentity& Existing : Destination->Documents)
+				if (Existing.Project != Identity.Project)
+					return std::unexpected("Documents from different projects cannot share a host");
+		}
+		if (Source->ActiveDocument &&
+			std::find(Source->Documents.begin(), Source->Documents.end(), *Source->ActiveDocument) ==
+			Source->Documents.end())
+			return std::unexpected("The source host's active document is not in its document list");
+
+		try
+		{
+			Destination->Documents.reserve(Destination->Documents.size() + Source->Documents.size());
+			m_FocusedHostID.reserve(Destination->ID.size());
+			for (const EditorDocumentIdentity& Identity : Source->Documents)
+				m_Sessions.find(Identity)->second.HostID.reserve(Destination->ID.size());
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(std::string("Could not reserve space for a safe document-host recovery: ") +
+				Exception.what());
+		}
+
+		const size_t TransferCount = Source->Documents.size();
+		const std::optional<EditorDocumentIdentity> ActiveDocument = Source->ActiveDocument
+			? Source->ActiveDocument
+			: std::optional<EditorDocumentIdentity>(Source->Documents.back());
+		for (const EditorDocumentIdentity& Identity : Source->Documents)
+		{
+			Destination->Documents.push_back(Identity);
+			m_Sessions.find(Identity)->second.HostID.assign(Destination->ID);
+		}
+		Destination->ActiveDocument = ActiveDocument;
+		Source->Documents.clear();
+		Source->ActiveDocument.reset();
+		m_FocusedHostID.assign(Destination->ID);
+		return TransferCount;
+	}
+
 	bool EditorDocumentManager::Activate(const EditorDocumentIdentity& Identity) noexcept
 	{
 		const auto Session = m_Sessions.find(Identity);

@@ -837,7 +837,8 @@ namespace
 			  m_AssetPreviewStressBudget(std::move(Options.AssetPreviewStressBudget)),
 			  m_DocumentHostTestFixture(Options.EnableDocumentHostTestFixture),
 			  m_DocumentHostResetLayoutTest(Options.EnableDocumentHostResetLayoutTest),
-			  m_DocumentHostTabTearOffTest(Options.EnableDocumentHostTabTearOffTest)
+			  m_DocumentHostTabTearOffTest(Options.EnableDocumentHostTabTearOffTest),
+			  m_DocumentHostPresentationFailureTest(Options.EnableDocumentHostPresentationFailureTest)
 		{
 		}
 
@@ -852,6 +853,11 @@ namespace
 			EditorLayer* Layer = GetPlatformCallbackLayer();
 			if (!Layer || !Viewport || !Viewport->PlatformHandle)
 				return;
+			if (Layer->ShouldInjectDocumentPresentationFailure(Viewport))
+			{
+				Layer->HandlePlatformPresentationFailure(Viewport, "Debug fixture injected a presentation failure");
+				return;
+			}
 			auto Target = PulseForge::Application::Get().CreatePlatformPresentationTarget(Viewport->PlatformHandle);
 			if (!Target)
 			{
@@ -2799,8 +2805,9 @@ namespace
 				++OpenedCount;
 				FixtureHosts.insert(HostID);
 				m_DocumentHostFixtureSessions.emplace_back(Identity, HostID);
-				if (m_DocumentHostResetLayoutTest && !m_Documents.MarkEdited(Identity))
-					PF_WARN("Could not mark development fixture {} dirty for the reset-layout test.", DisplayName);
+				if ((m_DocumentHostResetLayoutTest || (m_DocumentHostPresentationFailureTest && Index == 0)) &&
+					!m_Documents.MarkEdited(Identity))
+					PF_WARN("Could not mark development fixture {} dirty for its document-host test.", DisplayName);
 			}
 			MarkDocumentWorkspaceDirty();
 			PF_WARN(
@@ -5099,6 +5106,74 @@ namespace
 			}
 		}
 
+		bool ShouldInjectDocumentPresentationFailure(ImGuiViewport* Viewport)
+		{
+#ifndef _DEBUG
+			(void)Viewport;
+			return false;
+#else
+			if (!m_DocumentHostTestFixture || !m_DocumentHostPresentationFailureTest || !Viewport)
+				return false;
+			for (const auto& Host : m_Documents.GetHosts())
+			{
+				if (Host.Role != PulseForgeEditor::EditorDocumentHostRole::Native || Host.Documents.empty())
+					continue;
+				const auto* Session = Host.ActiveDocument ? m_Documents.Find(*Host.ActiveDocument) : nullptr;
+				if (!Session)
+					continue;
+				const std::string WindowName = Session->DisplayName + "###PFDocumentHost_" + Host.ID;
+				ImGuiWindow* Window = ImGui::FindWindowByName(WindowName.c_str());
+				if (!Window || Window->Viewport != Viewport)
+					continue;
+				m_DocumentHostPresentationFailureTest = false;
+				m_DocumentHostPresentationFailureInjected = true;
+				PF_WARN("Injecting Debug-only native document presentation failure for host {}", Host.ID);
+				return true;
+			}
+			return false;
+#endif
+		}
+
+		void CompleteDocumentPresentationFailureTest(
+			std::string_view SourceHostID,
+			const std::vector<PulseForgeEditor::EditorDocumentIdentity>& OriginalDocuments,
+			size_t MovedCount,
+			bool SourceHostRetired)
+		{
+			if (!m_DocumentHostPresentationFailureInjected)
+				return;
+			const auto* MainHost = m_Documents.FindHost(
+				PulseForgeEditor::EditorDocumentManager::MainHostID);
+			bool Recovered = SourceHostRetired && !m_Documents.FindHost(SourceHostID) && MainHost &&
+				MovedCount == OriginalDocuments.size();
+			for (const auto& Identity : OriginalDocuments)
+			{
+				const auto* Session = m_Documents.Find(Identity);
+				Recovered = Recovered && Session &&
+					Session->HostID == PulseForgeEditor::EditorDocumentManager::MainHostID && Session->IsDirty() &&
+					MainHost && std::find(MainHost->Documents.begin(), MainHost->Documents.end(), Identity) !=
+						MainHost->Documents.end();
+			}
+			Recovered = Recovered && MainHost && std::any_of(
+				MainHost->Documents.begin(), MainHost->Documents.end(), [](const auto& Identity)
+				{
+					return Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level;
+				});
+			if (Recovered)
+				PF_INFO("Document presentation-failure fixture passed: {} dirty sessions were recovered in the main strip and Level Editor remained available.",
+					OriginalDocuments.size());
+			else
+				PF_ERROR("Document presentation-failure fixture failed: dirty sessions, source-host retirement, or Level Editor retention was incorrect.");
+
+			// The fixture creates synthetic sessions; mark them clean so automated shutdown
+			// can validate teardown without opening a user-facing dirty-close prompt.
+			for (const auto& Identity : OriginalDocuments)
+				if (IsDocumentHostTestFixtureIdentity(Identity))
+					if (const auto* Session = m_Documents.Find(Identity))
+						(void)m_Documents.MarkSaved(Identity, Session->Revision);
+			m_DocumentHostPresentationFailureInjected = false;
+		}
+
 		void HandlePlatformPresentationFailure(ImGuiViewport* Viewport, std::string_view Error)
 		{
 			if (Viewport)
@@ -5115,24 +5190,41 @@ namespace
 					if (!Window || Window->Viewport != Viewport)
 						continue;
 
-					const std::vector<PulseForgeEditor::EditorDocumentIdentity> Documents = Host.Documents;
-					for (const auto& Identity : Documents)
+					PF_ERROR("Could not create native editor presentation target: {}", Error);
+					const std::string FailedHostID = Host.ID;
+					const std::vector<PulseForgeEditor::EditorDocumentIdentity> FailedHostDocuments = Host.Documents;
+					auto Moved = m_Documents.TransferAll(
+						FailedHostID, PulseForgeEditor::EditorDocumentManager::MainHostID);
+					if (!Moved)
 					{
-						const auto* MainHost = m_Documents.FindHost(
-							PulseForgeEditor::EditorDocumentManager::MainHostID);
-						const size_t DestinationIndex = MainHost ? MainHost->Documents.size() : 0;
-						auto Moved = m_Documents.Transfer(Identity,
-							PulseForgeEditor::EditorDocumentManager::MainHostID, DestinationIndex);
-						if (!Moved)
-							PF_ERROR("Could not retain asset document after native presentation failure: {}", Moved.error());
+						PF_ERROR("Could not recover all documents from failed native host {}: {}", FailedHostID, Moved.error());
+						CompleteDocumentPresentationFailureTest(FailedHostID, FailedHostDocuments, 0, false);
+						SetWarning("Native document presentation failed; its open sessions were preserved, but could not be moved to the main document strip.");
+						Viewport->PlatformRequestClose = false;
+						return;
 					}
-					(void)m_Documents.RemoveEmptyNativeHost(Host.ID);
+					if (m_Documents.FindHost(FailedHostID) && !m_Documents.RemoveEmptyNativeHost(FailedHostID))
+					{
+						PF_ERROR("Native host {} was emptied but could not be retired after presentation failure", FailedHostID);
+						CompleteDocumentPresentationFailureTest(FailedHostID, FailedHostDocuments, *Moved, false);
+						SetWarning("Native document presentation failed; the documents were recovered, but the empty host could not be retired.");
+						Viewport->PlatformRequestClose = false;
+						MarkDocumentWorkspaceDirty();
+						return;
+					}
+					CompleteDocumentPresentationFailureTest(FailedHostID, FailedHostDocuments, *Moved,
+						!m_Documents.FindHost(FailedHostID));
 					MarkDocumentWorkspaceDirty();
 					SetWarning("Native document window creation failed; its open documents were retained in the main document strip.");
 					Viewport->PlatformRequestClose = true;
 					return;
 				}
 				Viewport->PlatformRequestClose = true;
+			}
+			if (m_DocumentHostPresentationFailureInjected)
+			{
+				PF_ERROR("Document presentation-failure fixture could not match its viewport to an open native host.");
+				m_DocumentHostPresentationFailureInjected = false;
 			}
 			PF_ERROR("Could not create native editor presentation target: {}", Error);
 		}
@@ -10874,6 +10966,8 @@ namespace
 		bool m_DocumentHostTestFixture = false;
 		bool m_DocumentHostResetLayoutTest = false;
 		bool m_DocumentHostTabTearOffTest = false;
+		bool m_DocumentHostPresentationFailureTest = false;
+		bool m_DocumentHostPresentationFailureInjected = false;
 		bool m_DocumentHostResetLayoutTestPending = false;
 		size_t m_DocumentHostResetLayoutExpectedHostCount = 0;
 		std::vector<std::pair<PulseForgeEditor::EditorDocumentIdentity, std::string>> m_DocumentHostFixtureSessions;
