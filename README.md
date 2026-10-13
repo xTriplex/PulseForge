@@ -81,4 +81,4 @@ Managed files under a project's `Assets` directory use adjacent `.meta` sidecars
 
 ## Tests
 
-`PulseForgeTests` is the first-party test target and runs through CTest. It covers core lifecycle, scene/prefab persistence, assets, physics/audio/scripting runtimes, Vulkan selection helpers, and renderer validation. GPU and window behavior is exercised by running the sample.
+`PulseForgeTests` is the first-party test target and runs through CTest. It covers core lifecycle, scene/prefab persistence, assets, physics/audio/scripting runtimes, Vulkan selection helpers, and renderer validation. Use the opt-in GPU validation executable for Vulkan rendering paths and the editor's Debug host fixtures for native-window behavior; see [Scene Rendering](Docs/SceneRendering.md) and [Editor Documents and Native Windows](Docs/EditorWorkflowMultiWindow.md).

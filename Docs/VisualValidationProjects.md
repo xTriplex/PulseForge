@@ -16,13 +16,13 @@ For downloaded or third-party content, verify the actual source, author, redistr
 
 ## Current demonstration projects
 
-| Project | Demonstrates | Status |
+| Project | Demonstrates | Inspection notes |
 |---|---|---|
-| [`Spotlight Shadows`](../Samples/VisualValidation/SpotlightShadows/README.md) | Persistent spotlight shadow maps, bias, PCF softness, multiple lights, and the four-map limit. | Includes Overview and preconfigured Shadow Limits scenes; interactive visual acceptance is requested in its README. |
-| [`Point Light Shadows`](../Samples/VisualValidation/PointLightShadows/README.md) | Omnidirectional point-light shadows, six cube faces, face boundaries, bias/softness, multiple lights, and the two-map limit. | Startup Overview plus Faces, Bias, and Limits scenes; interactive visual acceptance is requested in its README. |
+| [`Spotlight Shadows`](../Samples/VisualValidation/SpotlightShadows/README.md) | Persistent spotlight shadow maps, bias, PCF softness, multiple lights, and the four-map limit. | Includes Overview and preconfigured Shadow Limits scenes; the README describes the visual checks. |
+| [`Point Light Shadows`](../Samples/VisualValidation/PointLightShadows/README.md) | Omnidirectional point-light shadows, six cube faces, face boundaries, bias/softness, multiple lights, and the two-map limit. | Includes Overview, Faces, Bias, and Limits scenes; the README describes the visual checks. |
 | [`PBR Materials`](../Samples/VisualValidation/PBRMaterials/README.md) | Textured base color, packed metallic-roughness, tangent-space normal mapping, material occlusion, HDR emission, and Material Details. | Startup workbench has seven indexed meshes; GPU validation renders the project through the production output path. Material tiles show base-color-factor swatches, not rendered PBR previews. |
 | [`Transparency`](../Samples/VisualValidation/Transparency/README.md) | OPAQUE, alpha-masked, and straight-alpha BLEND materials; double-sided shading; and cutout shadows. | Startup workbench includes a cutout fence and transparent colored panels; Vulkan image validation compares masked spotlight, point-light, and directional shadows. |
-| [`Editor Workflow`](../Samples/VisualValidation/EditorWorkflow/README.md) | Editor selection, multiselection, hierarchy clipboard and duplication, visibility, focus, viewport navigation, transform snapping, and End surface placement. | Startup workbench includes flat ground, raised and sloped supports, centered-pivot objects, and a parent/child hierarchy for interactive acceptance. |
+| [`Editor Workflow`](../Samples/VisualValidation/EditorWorkflow/README.md) | Editor selection, multiselection, hierarchy clipboard and duplication, visibility, focus, viewport navigation, transform snapping, and End surface placement. | Startup workbench includes flat ground, raised and sloped supports, centered-pivot objects, and a parent/child hierarchy; the README lists interaction checks. |
 
 ## Validation
 
