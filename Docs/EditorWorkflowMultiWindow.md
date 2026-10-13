@@ -74,7 +74,7 @@ This decision is implemented through the application-managed `EditorDocumentMana
 
 `PulseForge::AssetOperations::MoveFolder` moves an entire managed folder while preserving its `.meta` files and all contained UUIDs. It validates normalized project-relative paths, all directory components, destination collision, source-tree links/reparse points, and self/descendant moves. A unique sibling staging path allows a same-volume rename; registry rebuild failure attempts to roll the directory back and reports recovery-required if rollback fails. The Content Browser now uses distinct `PF_MANAGED_ASSET_MOVE` and `PF_MANAGED_FOLDER_MOVE` payloads; payload delivery is converted to a deferred action so the registry/tree is not mutated during item traversal. Existing single-asset move semantics remain unchanged. `Docs/Editor.md` records the behavior. `git diff --check` passed. Latest fresh target tests: Debug 4,081 checks / CTest 2/2; Release 4,081 / 2/2; Dist 4,081 / 2/2. Temporary per-config test logs are build artifacts and are not staged.
 
-The initial audit phase is complete. The initial UI implementation was subsequently expanded into native document hosts, the persistent top strip, per-document material state, project-scoped workspace persistence, close routing, and asset destination dialogs. The feature implementation is still being stabilized and accepted; these source changes are part of the active feature worktree and have not all been committed.
+The initial audit phase is complete. The initial UI implementation was subsequently expanded into native document hosts, the persistent top strip, per-document material state, project-scoped workspace persistence, close routing, and asset destination dialogs. Implementation checkpoint `22d256866c7622a4391309fba4473513ea1f5182` is committed on `feat/editor-workflow-multi-window`; final acceptance and scenario coverage remain in progress.
 
 ### Phase 2 model prototype
 
@@ -108,3 +108,66 @@ An isolated Vulkan Debug run restored one native `Mint.material` window, then a 
 An isolated OpenGL Debug run restored two native material windows, captured the main editor and both actual OpenGL framebuffers, showed the documented Vulkan-only Scene Viewport fallback, emitted no OpenGL errors or Vulkan-preview operations, and exited with code 0. The captured main editor and both material windows were opened and visually inspected. The BMPs are under `Build/CMake/VS2022-x64-OpenGL/Diagnostics/OpenGLFrameSchedule/Settings/`. The dedicated CMake tree reports `PULSEFORGE_EDITOR_RENDERER=OpenGL`; its Debug, Release, and Dist builds/tests all passed. These test artifacts are ignored build outputs and are not source deliverables.
 
 The Vulkan loader also printed three `Loader Message` warnings for optional third-party layer manifests that were missing on this machine (TikTok LIVE Studio and RivaTuner). They are distinct from Khronos validation messages; the test's captured VUID and NVRHI command-list error counts were both zero.
+
+## Acceptance tracking at implementation checkpoint
+
+`Pass` means the listed evidence directly covers the behavior. `Partial` means a policy or bounded smoke check passed while the complete user-facing scenario remains unverified. `Unverified` means no suitable evidence has been collected. Screenshots and runtime startup do not prove pointer/keyboard behavior.
+
+| Scenario | Status | Evidence / remaining check |
+|---|---|---|
+| D01 Level Editor remains in main host | Pass | Document-manager policy and captured main workspace. |
+| D02 supported material documents open in native windows by default | Pass | Isolated Vulkan and OpenGL runs created actual material windows. |
+| D03 document transfer occurs through the top strip | Partial | Transfer API and strip UI are implemented; manually drag a document through the strip. |
+| D04 utility panels/workspace body reject document docking | Unverified | Exercise Inspector, Hierarchy, viewport, browser and console drop targets. |
+| D05 side/bottom-edge drops cannot split a document host | Unverified | Direct native docking interaction check remains. |
+| D06 detach, reattach and regroup retain the same session | Partial | Transfer commit/rollback is unit-tested; real tab drag and state retention are not. |
+| D07 equal basenames remain distinct by asset identity | Pass | Document-manager identity tests include same-name/different-folder identities. |
+| D08 move/rename keeps an open session attached to its asset | Unverified | Perform a managed move with the asset editor open. |
+| D09 Level Editor cannot be moved out of the main host | Pass | Document-manager protection test. |
+| D10 multiple real documents share one editor process | Pass | Two native material windows observed under one process on both backends. |
+| D11 tab/native close uses dirty-document policy | Partial | Close policy is unit-tested; dirty native-X interaction remains. |
+| D12 saved document arrangement restores | Partial | A valid isolated versioned workspace restored two native hosts; save, restart and compare order/bounds next. |
+| D13 opening preference options and default behavior | Unverified | Exercise preference menu and each placement choice. |
+| D14 activating another document preserves Level Editor availability | Pass | Main Level Editor remained present alongside two material hosts. |
+| C01 dirty tab close offers Save/Discard/Cancel | Partial | Policy tests cover choices; actual dialog controls remain unverified. |
+| C02 native X and Alt+F4 request document-aware close | Unverified | Exercise native close and host close. |
+| C03 Cancel keeps the session open | Pass | Document-manager close policy test. |
+| C04 failed Save preserves the dirty session | Pass | Save-failure policy test. |
+| C05 multi-document host close resolves all dirty sessions | Unverified | No batch-close interaction test yet. |
+| C06 focused document receives Save/Undo commands | Unverified | Test commands while a floating material document is focused. |
+| C07 text fields and modals isolate shortcuts | Unverified | Keyboard interaction check remains. |
+| C08 camera capture releases on focus/document changes | Partial | Existing capture policy tests pass; multi-window focus transitions remain untested. |
+| C09 edits arriving during Save remain dirty | Pass | Revision test simulates a later edit during save. |
+| C10 layout reset preserves unsaved documents | Unverified | Direct reset-layout and dirty-document check remains. |
+| R01 multiple native windows create and close independently | Pass | Two-window Vulkan and OpenGL startup and clean shutdown. |
+| R02 native minimize/restore and resize handling | Unverified | No resize/minimize cycle run yet. |
+| R03 secondary rendering continues with main minimized | Unverified | Requires direct window interaction. |
+| R04 negative desktop coordinates and mixed DPI | Partial | Negative coordinates are accepted by workspace validation; physical mixed-DPI movement is untested. |
+| R05 resources retire while frames are in flight | Partial | Bounded validation observed clean normal presentation and close; no forced resize/close churn. |
+| R06 independent asset preview targets/state | Unverified | Material contents render in separate windows; independent preview-target behavior needs a dedicated check. |
+| R07 Vulkan Khronos/NVRHI validation | Pass | Both layers enabled; two-host run had zero VUID and NVRHI command-list errors. |
+| R08 OpenGL native windows and ImGui contexts | Pass | Two actual OpenGL material framebuffers captured and inspected; exit code 0. |
+| R09 injected presentation/resource failures recover safely | Unverified | Failure injection is not implemented or exercised. |
+| R10 concurrent native resize generations remain valid | Unverified | No repeated resize validation yet. |
+| R11 surface/device loss handling | Unverified | Hardware/backend failure path not exercised. |
+| R12 in-flight resource retirement on native close | Partial | Ordinary clean close passed; close during submitted work still needs a targeted test. |
+| P01 valid document workspace restores | Pass | Isolated workspace file restored real native material sessions. |
+| P02 removed/unavailable monitor recovery | Unverified | Requires monitor-topology testing. |
+| P03 corrupt workspace/missing asset recovery | Partial | Codec rejects malformed/duplicate state in tests; missing-asset restart recovery remains. |
+| P04 opening preference persistence | Unverified | Preference UI and restart persistence remain. |
+| P05 project-internal asset/folder move preserves managed identity | Pass | Move operation and folder transaction tests pass. |
+| P06 self/descendant folder moves reject | Pass | Asset-folder policy tests. |
+| P07 name collision and case-only path checks | Pass | Move operation tests cover collisions and normalized paths. |
+| P08 symlink/reparse and project-boundary move checks | Pass | Move validation rejects reparse paths and traversal. |
+| P09 floating-host asset dialogs route results to the caller | Unverified | Direct dialog invocation from a native editor remains. |
+| P10 asset destination dialog navigation/validation | Partial | Dialog implementation exists; keyboard, collision and error presentation need manual acceptance. |
+
+Manual acceptance still required for document dragging/reattachment, dirty native close, command focus, shortcut isolation, input/camera capture, mixed DPI, window resize/minimize, and native-host dialogs. No physical multi-monitor behavior is claimed as tested.
+
+## Git checkpoint
+
+- Integrated local/remote `main` baseline: `e702e44c1a7e653c0af45dd3a398ee8d3931070e`.
+- Feature branch: `feat/editor-workflow-multi-window`.
+- Implementation checkpoint: `22d256866c7622a4391309fba4473513ea1f5182` (`Implement native editor document workflows`).
+- The checkpoint is local; the feature branch was not pushed or merged.
+- The deleted Spotlight research document, modified validation scene/materials, and untracked `CMakeSettings.json` remain outside the commit. Root `AGENTS.md` remains absent.
