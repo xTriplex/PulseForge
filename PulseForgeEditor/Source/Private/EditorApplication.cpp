@@ -4719,11 +4719,13 @@ namespace
 					Label += " *";
 				const bool HasCloseButton = Session->Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level;
 				constexpr float TabHeight = 25.0f;
-				constexpr float HorizontalPadding = 10.0f;
-				constexpr float CloseRegionWidth = 22.0f;
+				constexpr float LeftPadding = 10.0f;
+				constexpr float LabelToCloseGap = 5.0f;
+				constexpr float CloseRegionWidth = 18.0f;
+				constexpr float RightPadding = 6.0f;
 				const ImVec2 LabelSize = ImGui::CalcTextSize(Label.c_str());
-				const float TabWidth = LabelSize.x + HorizontalPadding * 2.0f +
-					(HasCloseButton ? CloseRegionWidth : 0.0f);
+				const float TabWidth = LeftPadding + LabelSize.x +
+					(HasCloseButton ? LabelToCloseGap + CloseRegionWidth + RightPadding : LeftPadding);
 				const bool Active = Host->ActiveDocument == Session->Identity;
 				const bool Pressed = ImGui::Selectable("##DocumentTab", Active, ImGuiSelectableFlags_None,
 					ImVec2(TabWidth, TabHeight));
@@ -4731,8 +4733,8 @@ namespace
 				const ImVec2 TabMaximum = ImGui::GetItemRectMax();
 				const bool TabHovered = ImGui::IsItemHovered();
 				const ImVec2 MousePosition = ImGui::GetIO().MousePos;
-				const bool CloseHovered = HasCloseButton && TabHovered &&
-					MousePosition.x >= TabMaximum.x - CloseRegionWidth;
+				const float CloseRegionMinimumX = TabMinimum.x + LeftPadding + LabelSize.x + LabelToCloseGap;
+				const bool CloseHovered = HasCloseButton && TabHovered && MousePosition.x >= CloseRegionMinimumX;
 				if (Pressed && CloseHovered)
 					QueueDocumentTabClose(Session->Identity);
 				else if (Pressed)
@@ -4744,23 +4746,20 @@ namespace
 
 				ImDrawList* DrawList = ImGui::GetWindowDrawList();
 				const ImVec2 LabelPosition(
-					TabMinimum.x + HorizontalPadding,
+					TabMinimum.x + LeftPadding,
 					TabMinimum.y + (TabHeight - LabelSize.y) * 0.5f);
 				DrawList->AddText(LabelPosition, ImGui::GetColorU32(ImGuiCol_Text), Label.c_str());
 				if (HasCloseButton)
 				{
-					const ImVec2 CloseMinimum(TabMaximum.x - CloseRegionWidth + 3.0f, TabMinimum.y + 3.0f);
-					const ImVec2 CloseMaximum(TabMaximum.x - 3.0f, TabMaximum.y - 3.0f);
-					if (CloseHovered)
-						DrawList->AddRectFilled(CloseMinimum, CloseMaximum,
-							ImGui::GetColorU32(ImGuiCol_ButtonHovered), 3.0f);
-					const char* CloseGlyph = "x";
+					const char* CloseGlyph = "×";
 					const ImVec2 CloseGlyphSize = ImGui::CalcTextSize(CloseGlyph);
 					const ImVec2 ClosePosition(
-						(CloseMinimum.x + CloseMaximum.x - CloseGlyphSize.x) * 0.5f,
+						CloseRegionMinimumX + (CloseRegionWidth - CloseGlyphSize.x) * 0.5f,
 						TabMinimum.y + (TabHeight - CloseGlyphSize.y) * 0.5f);
 					DrawList->AddText(ClosePosition,
 						ImGui::GetColorU32(CloseHovered ? ImGuiCol_Text : ImGuiCol_TextDisabled), CloseGlyph);
+					if (CloseHovered)
+						ImGui::SetTooltip("Close %s", Session->DisplayName.c_str());
 				}
 
 				if (ImGui::BeginPopupContextItem("DocumentTabContext"))
