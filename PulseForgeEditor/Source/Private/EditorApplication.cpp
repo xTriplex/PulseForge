@@ -3078,6 +3078,17 @@ namespace
 			m_DocumentHostTabTearOffTest = false;
 #else
 			ImGuiIO& IO = ImGui::GetIO();
+			if (++m_DocumentHostTabTearOffTestFrameCount > 600)
+			{
+				m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Failed;
+				m_DocumentHostTabTearOffTest = false;
+				if (m_DocumentHostTabRoundTripTearOffPending)
+					PF_ERROR("Document tab native-window round-trip fixture timed out before tearing off the reattached session.");
+				else
+					PF_ERROR("Document tab tear-off UI fixture timed out before creating its native host.");
+				m_DocumentHostTabRoundTripTearOffPending = false;
+				return;
+			}
 			switch (m_DocumentHostTabTearOffTestPhase)
 			{
 				case DocumentTabTearOffTestPhase::WaitingForTab:
@@ -3131,12 +3142,28 @@ namespace
 						Session->HostID != PulseForgeEditor::EditorDocumentManager::MainHostID && LevelRetained)
 					{
 						m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Complete;
-						PF_INFO("Document tab tear-off UI fixture passed: the captured tab drag created a native host and kept Level Editor in the main host.");
+						if (m_DocumentHostTabRoundTripTearOffPending)
+						{
+							m_DocumentHostTabRoundTripTearOffPending = false;
+							PF_INFO(
+								"Document tab native-window round-trip UI fixture passed: the same session was dragged into the "
+								"main strip and back into a native host, while Level Editor remained in the main host.");
+						}
+						else
+						{
+							PF_INFO(
+								"Document tab tear-off UI fixture passed: the captured tab drag created a native host and kept "
+								"Level Editor in the main host.");
+						}
 					}
 					else
 					{
 						m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Failed;
-						PF_ERROR("Document tab tear-off UI fixture failed: the released tab did not enter a native host or Level Editor left the main host.");
+						if (m_DocumentHostTabRoundTripTearOffPending)
+							PF_ERROR("Document tab native-window round-trip fixture failed: the reattached session did not return to a native host or Level Editor left the main host.");
+						else
+							PF_ERROR("Document tab tear-off UI fixture failed: the released tab did not enter a native host or Level Editor left the main host.");
+						m_DocumentHostTabRoundTripTearOffPending = false;
 					}
 					m_DocumentHostTabTearOffTest = false;
 					break;
@@ -3293,8 +3320,15 @@ namespace
 						EmptySourceRetired && LevelRetained)
 					{
 						m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Complete;
-						PF_INFO("Document tab reattachment UI fixture passed: {} non-strip drops were rejected, then the tab returned to the main strip and its empty source host was retired.",
+						PF_INFO(
+							"Document tab reattachment UI fixture passed: {} non-strip drops were rejected, then the tab "
+							"returned to the main strip and its empty source host was retired. Testing whether it can be "
+							"dragged back into a native host.",
 							m_DocumentHostTabReattachInvalidDropIndex);
+						m_DocumentHostTabTearOffTestIdentity = m_DocumentHostTabReattachTestIdentity;
+						m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::WaitingForTab;
+						m_DocumentHostTabTearOffTest = true;
+						m_DocumentHostTabRoundTripTearOffPending = true;
 					}
 					else
 					{
@@ -6146,7 +6180,7 @@ namespace
 					if (CloseHovered)
 						DrawList->AddRectFilled(CloseButtonMinimum, CloseButtonMaximum,
 							ImGui::GetColorU32(ImGuiCol_ButtonHovered), 4.0f);
-					constexpr float CloseHalfExtent = 6.0f;
+					constexpr float CloseHalfExtent = 8.0f;
 					const ImU32 CloseColor = ImGui::GetColorU32(
 						CloseHovered ? ImGuiCol_Text : ImGuiCol_TextDisabled);
 					DrawList->AddLine(
@@ -11709,6 +11743,8 @@ namespace
 		bool m_DocumentHostResetLayoutTest = false;
 		bool m_DocumentHostTabTearOffTest = false;
 		bool m_DocumentHostTabReattachTest = false;
+		size_t m_DocumentHostTabTearOffTestFrameCount = 0;
+		bool m_DocumentHostTabRoundTripTearOffPending = false;
 		bool m_DocumentHostTabReorderTest = false;
 		bool m_DocumentHostPresentationFailureTest = false;
 		bool m_DocumentHostAcquireOutOfDateTest = false;
