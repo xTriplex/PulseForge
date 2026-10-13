@@ -3,6 +3,7 @@
 #include "Editor/EditorDocumentManager.h"
 
 #include <expected>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -11,8 +12,9 @@ namespace PulseForgeEditor
 {
 	struct EditorDocumentWorkspaceState
 	{
-		uint32_t Version = 1;
+		uint32_t Version = 2;
 		PulseForge::UUID Project;
+		std::optional<PulseForge::UUID> MaterialDetailsAsset;
 		std::vector<EditorDocumentHost> Hosts;
 		std::vector<std::pair<EditorDocumentKind, std::string>> RememberedHosts;
 		std::string FocusedHostID = std::string(EditorDocumentManager::MainHostID);

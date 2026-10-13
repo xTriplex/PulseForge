@@ -49,7 +49,8 @@ namespace
 
 	std::expected<void, std::string> ValidateWorkspace(const EditorDocumentWorkspaceState& State)
 	{
-		if (State.Version != 1 || State.Project.IsNil())
+		if (State.Version != 2 || State.Project.IsNil() ||
+			(State.MaterialDetailsAsset && State.MaterialDetailsAsset->IsNil()))
 			return std::unexpected("Document workspace version or project identity is invalid");
 		if (State.Hosts.empty() || State.Hosts.size() > MaximumWorkspaceHosts)
 			return std::unexpected("Document workspace host count is invalid");
@@ -145,6 +146,8 @@ namespace PulseForgeEditor
 		Json Root;
 		Root["version"] = State.Version;
 		Root["project"] = State.Project.ToString();
+		Root["materialDetailsAsset"] = State.MaterialDetailsAsset
+			? Json(State.MaterialDetailsAsset->ToString()) : Json(nullptr);
 		Root["focusedHost"] = State.FocusedHostID;
 		Root["hosts"] = Json::array();
 		for (const EditorDocumentHost& Host : State.Hosts)
@@ -203,6 +206,24 @@ namespace PulseForgeEditor
 				return std::unexpected("Document workspace belongs to a different or invalid project");
 			EditorDocumentWorkspaceState State;
 			State.Version = Root["version"].get<uint32_t>();
+			if (State.Version != 1 && State.Version != 2)
+				return std::unexpected("Document workspace version is unsupported");
+			if (State.Version == 2)
+			{
+				if (!Root.contains("materialDetailsAsset"))
+					return std::unexpected("Document workspace Material Details state is missing");
+				if (!Root["materialDetailsAsset"].is_null())
+				{
+					if (!Root["materialDetailsAsset"].is_string())
+						return std::unexpected("Document workspace Material Details identity is malformed");
+					const auto Asset = PulseForge::UUID::Parse(Root["materialDetailsAsset"].get<std::string>());
+					if (!Asset || Asset->IsNil())
+						return std::unexpected("Document workspace Material Details identity is invalid");
+					State.MaterialDetailsAsset = *Asset;
+				}
+			}
+			else
+				State.Version = 2;
 			State.Project = *Project;
 			State.FocusedHostID = Root["focusedHost"].get<std::string>();
 			if (Root["hosts"].size() > MaximumWorkspaceHosts)

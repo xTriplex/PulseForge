@@ -263,7 +263,6 @@ namespace PulseForgeEditor
 		{
 			if (!HasSavedWorkspace(DockspaceID))
 			{
-				m_Panels.ResetToDefaults();
 				BuildDefaultDockspace(DockspaceID);
 				ImGui::MarkIniSettingsDirty();
 			}
@@ -329,6 +328,7 @@ namespace PulseForgeEditor
 		DockPanel(EditorPanel::Scene, "Scene");
 		DockPanel(EditorPanel::Console, "Console");
 		DockPanel(EditorPanel::ContentBrowser, "Content Browser");
+		DockPanel(EditorPanel::MaterialDetails, "Material Editor");
 		ImGui::DockBuilderFinish(DockspaceID);
 	}
 
@@ -391,6 +391,47 @@ namespace PulseForgeEditor
 		ImGui::DockBuilderDockWindow(PanelName.c_str(), ReferenceSettings->DockId);
 		const ImGuiDockNode* RootNode = ImGui::DockNodeGetRootNode(ReferenceNode);
 		ImGui::DockBuilderFinish(RootNode->ID);
+		MarkSettingsDirty();
+		return true;
+	}
+
+	bool EditorLayout::DockPanelBeside(EditorPanel Panel, EditorPanel ReferencePanel)
+	{
+		if (!m_Initialized || !m_LayoutInitialized || !ImGui::GetCurrentContext() || Panel == ReferencePanel)
+			return false;
+		const size_t PanelIndex = static_cast<size_t>(Panel);
+		const size_t ReferenceIndex = static_cast<size_t>(ReferencePanel);
+		if (PanelIndex >= EditorPanelDescriptors.size() || ReferenceIndex >= EditorPanelDescriptors.size())
+			return false;
+		const std::string PanelName(EditorPanelDescriptors[PanelIndex].WindowName);
+		const std::string ReferenceName(EditorPanelDescriptors[ReferenceIndex].WindowName);
+		const ImGuiWindowSettings* ReferenceSettings =
+			ImGui::FindWindowSettingsByID(ImHashStr(ReferenceName.c_str()));
+		if (!ReferenceSettings || ReferenceSettings->DockId == 0 ||
+			!ImGui::DockBuilderGetNode(ReferenceSettings->DockId))
+			return false;
+		ImGui::DockBuilderDockWindow(PanelName.c_str(), ReferenceSettings->DockId);
+		ImGui::DockBuilderFinish(ImGui::DockNodeGetRootNode(
+			ImGui::DockBuilderGetNode(ReferenceSettings->DockId))->ID);
+		MarkSettingsDirty();
+		return true;
+	}
+
+	bool EditorLayout::ActivatePanel(EditorPanel Panel)
+	{
+		const size_t PanelIndex = static_cast<size_t>(Panel);
+		if (!m_Initialized || !ImGui::GetCurrentContext() || PanelIndex >= EditorPanelDescriptors.size())
+			return false;
+		const std::string WindowName(EditorPanelDescriptors[PanelIndex].WindowName);
+		ImGuiWindow* Window = ImGui::FindWindowByName(WindowName.c_str());
+		if (!Window)
+			return false;
+		if (ImGuiDockNode* Node = Window->DockNode; Node && Node->TabBar)
+		{
+			Node->SelectedTabId = Window->TabId;
+			Node->TabBar->NextSelectedTabId = Window->TabId;
+		}
+		ImGui::FocusWindow(Window);
 		MarkSettingsDirty();
 		return true;
 	}

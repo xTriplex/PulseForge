@@ -2,11 +2,24 @@
 
 #include "Editor/EditorDocumentManager.h"
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
 namespace PulseForgeEditor
 {
+	// Asset document workspaces are enabled only by explicit editor registration. The current
+	// material property form is a utility panel, and no full asset editor is registered yet.
+	inline constexpr std::array<EditorDocumentKind, 0> RegisteredAssetDocumentEditors{};
+
+	[[nodiscard]] constexpr bool IsRegisteredAssetDocumentEditor(EditorDocumentKind Kind) noexcept
+	{
+		for (const EditorDocumentKind RegisteredKind : RegisteredAssetDocumentEditors)
+			if (RegisteredKind == Kind)
+				return true;
+		return false;
+	}
+
 	enum class EditorDocumentCommandTarget : uint8_t
 	{
 		Level,

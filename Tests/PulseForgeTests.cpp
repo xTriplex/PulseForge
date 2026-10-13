@@ -1979,7 +1979,7 @@ namespace
 	{
 		using namespace PulseForgeEditor;
 
-		PF_CHECK(Tests, CurrentDefaultEditorLayoutVersion == 3);
+		PF_CHECK(Tests, CurrentDefaultEditorLayoutVersion == 4);
 		PF_CHECK(Tests, ParseDocumentOpeningPreference("0") == 0);
 		PF_CHECK(Tests, ParseDocumentOpeningPreference("1") == 1);
 		PF_CHECK(Tests, ParseDocumentOpeningPreference("01") == 1);
@@ -1996,7 +1996,7 @@ namespace
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Console) == EditorDefaultDockRegion::Bottom);
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Scene) == EditorDefaultDockRegion::Bottom);
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Inspector) == EditorDefaultDockRegion::Right);
-		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::MaterialEditor) == EditorDefaultDockRegion::Right);
+		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::MaterialDetails) == EditorDefaultDockRegion::Right);
 		PF_CHECK(Tests, EditorPanelDescriptors.size() == static_cast<size_t>(EditorPanel::Count));
 		constexpr std::array<std::string_view, static_cast<size_t>(EditorPanel::Count)> StablePanelNames = {
 			"Scene Viewport", "Hierarchy", "Inspector", "Content Browser", "Console", "Scene", "Material Editor"
@@ -2009,7 +2009,7 @@ namespace
 		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::ContentBrowser));
 		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::Console));
 		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Scene));
-		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::MaterialEditor));
+		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::MaterialDetails));
 
 		for (size_t Index = 0; Index < EditorPanelDescriptors.size(); ++Index)
 		{
@@ -2017,6 +2017,9 @@ namespace
 			PF_CHECK(Tests, Descriptor.WindowName == StablePanelNames[Index]);
 			PF_CHECK(Tests, !Descriptor.SettingsKey.empty());
 			PF_CHECK(Tests, !Descriptor.WindowName.empty());
+			if (Descriptor.Panel == EditorPanel::MaterialDetails)
+				PF_CHECK(Tests, Descriptor.IsUtilityPanel && !Descriptor.DefaultVisible &&
+					Descriptor.SettingsKey == "MaterialEditor");
 			for (size_t OtherIndex = Index + 1; OtherIndex < EditorPanelDescriptors.size(); ++OtherIndex)
 			{
 				PF_CHECK(Tests, Descriptor.SettingsKey != EditorPanelDescriptors[OtherIndex].SettingsKey);
@@ -2032,7 +2035,7 @@ namespace
 		Panels.ResetToDefaults();
 		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::Console));
 		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Scene));
-		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::MaterialEditor));
+		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::MaterialDetails));
 		PF_CHECK(Tests, Panels.GetVisibility(EditorPanel::Scene) != nullptr);
 		PF_CHECK(Tests, Panels.GetVisibility(EditorPanel::Count) == nullptr);
 		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Count));
@@ -2041,10 +2044,13 @@ namespace
 		PF_CHECK(Tests, !ShouldApplyFirstOpenPanelDocking(false, false));
 		PF_CHECK(Tests, ShouldApplyFirstOpenPanelDocking(false, true));
 		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".material", true, false) == AssetBrowserOpenAction::None);
-		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".material", true, true) == AssetBrowserOpenAction::OpenMaterialEditor);
+		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".material", true, true) == AssetBrowserOpenAction::ShowMaterialDetails);
+		// Utility-panel opening is intentionally independent of document-host preferences.
 		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".scene", true, true) == AssetBrowserOpenAction::OpenScene);
 		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".png", true, true) == AssetBrowserOpenAction::None);
 		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".scene", false, true) == AssetBrowserOpenAction::None);
+		PF_CHECK(Tests, !IsRegisteredAssetDocumentEditor(EditorDocumentKind::Material));
+		PF_CHECK(Tests, !IsRegisteredAssetDocumentEditor(EditorDocumentKind::Texture));
 		const std::string DraftKey = MakeMaterialDraftKey("C:/Project", "material-uuid");
 		PF_CHECK(Tests, DraftKey == MakeMaterialDraftKey("C:/Project", "material-uuid"));
 		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("D:/Project", "material-uuid"));
@@ -4155,6 +4161,7 @@ namespace
 
 		EditorDocumentWorkspaceState State;
 		State.Project = *Project;
+		State.MaterialDetailsAsset = *MaterialA;
 		State.Hosts = { Main, Native };
 		State.RememberedHosts.emplace_back(EditorDocumentKind::Material, Native.ID);
 		State.FocusedHostID = Native.ID;
@@ -4168,9 +4175,20 @@ namespace
 		if (Restored)
 		{
 			PF_CHECK(Tests, Restored->Hosts.size() == 2 && Restored->Hosts[1].Documents.size() == 2);
+			PF_CHECK(Tests, Restored->MaterialDetailsAsset == MaterialA);
 			PF_CHECK(Tests, Restored->Hosts[1].ActiveDocument == Blue);
 			PF_CHECK(Tests, Restored->Hosts[1].Bounds.X == -1920.0f && Restored->Hosts[1].Bounds.Maximized);
 			PF_CHECK(Tests, Restored->FocusedHostID == Native.ID && Restored->RememberedHosts.size() == 1);
+		}
+		auto LegacyWorkspace = nlohmann::json::parse(*Serialized);
+		LegacyWorkspace["version"] = 1;
+		LegacyWorkspace.erase("materialDetailsAsset");
+		const auto MigratedLegacy = EditorDocumentWorkspaceCodec::Deserialize(LegacyWorkspace.dump(), *Project);
+		PF_CHECK(Tests, MigratedLegacy.has_value());
+		if (MigratedLegacy)
+		{
+			PF_CHECK(Tests, MigratedLegacy->Version == 2 && !MigratedLegacy->MaterialDetailsAsset);
+			PF_CHECK(Tests, MigratedLegacy->Hosts[1].Documents.size() == 2);
 		}
 		const auto OtherProject = UUID::Generate();
 		PF_CHECK(Tests, OtherProject &&
