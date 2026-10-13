@@ -818,7 +818,8 @@ namespace
 			: Layer("Editor"),
 			  m_StartupProjectPath(std::move(Options.ProjectFile)),
 			  m_AssetPreviewStressManifest(std::move(Options.AssetPreviewStressManifest)),
-			  m_AssetPreviewStressBudget(std::move(Options.AssetPreviewStressBudget))
+			  m_AssetPreviewStressBudget(std::move(Options.AssetPreviewStressBudget)),
+			  m_DocumentHostTestFixture(Options.EnableDocumentHostTestFixture)
 		{
 		}
 
@@ -2688,11 +2689,44 @@ namespace
 			ResetSceneHistory();
 			UpdateAssetList();
 			RestoreDocumentWorkspace();
+			InitializeDocumentHostTestFixture();
 			if (Opened->StartupSceneWarning.empty())
 				SetStatus("Opened project " + ProjectName + ".");
 			else
 				SetWarning(std::move(Opened->StartupSceneWarning));
 			return {};
+		}
+
+		void InitializeDocumentHostTestFixture()
+		{
+			#ifndef _DEBUG
+			return;
+			#else
+			if (!m_DocumentHostTestFixture || !m_Project)
+				return;
+
+			// These synthetic Texture-kind identities exist only to exercise the host shell.
+			// They deliberately render the unregistered-editor placeholder; no asset UI is exposed.
+			static constexpr std::array<std::string_view, 2> FixtureAssetIDs = {
+				"d3110000-0000-4000-8000-000000000001",
+				"d3110000-0000-4000-8000-000000000002"
+			};
+			for (size_t Index = 0; Index < FixtureAssetIDs.size(); ++Index)
+			{
+				const auto AssetID = PulseForge::UUID::Parse(FixtureAssetIDs[Index]);
+				if (!AssetID)
+					continue;
+				const PulseForgeEditor::EditorDocumentIdentity Identity{
+					m_Project->GetDescription().ID, *AssetID, PulseForgeEditor::EditorDocumentKind::Texture };
+				const std::string DisplayName = "Host Test Fixture " + std::to_string(Index + 1);
+				auto Opened = m_Documents.Open(Identity, {}, DisplayName,
+					PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip);
+				if (!Opened)
+					PF_WARN("Could not open development document-host fixture {}: {}", DisplayName, Opened.error());
+			}
+			MarkDocumentWorkspaceDirty();
+			PF_WARN("Development document-host fixture enabled; fixture tabs have no asset editor or editable content.");
+			#endif
 		}
 
 		void MarkDocumentWorkspaceDirty(bool BoundsOnly = false)
@@ -10343,6 +10377,7 @@ namespace
 		std::string m_DocumentCloseDialogHostID;
 		std::unordered_set<std::string> m_DocumentHostFocusRequests;
 		std::optional<std::filesystem::path> m_StartupProjectPath;
+		bool m_DocumentHostTestFixture = false;
 		std::optional<PulseForge::Project> m_Project;
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::optional<std::string> m_SavedSceneSnapshot;

@@ -34,6 +34,13 @@ int main(int ArgumentCount, char** Arguments)
 			PF_CORE_CRITICAL("Editor command-line error: {0}", Options.error().Message);
 			return EXIT_FAILURE;
 		}
+		#ifndef _DEBUG
+		if (Options->EnableDocumentHostTestFixture)
+		{
+			std::cerr << "PulseForgeEditor: --document-host-test-fixture is available only in Debug builds.\n";
+			return EXIT_FAILURE;
+		}
+		#endif
 
 		auto Application = PulseForgeEditor::CreateEditorApplication(*Options);
 		if (!Application)

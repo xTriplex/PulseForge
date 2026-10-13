@@ -4753,6 +4753,7 @@ namespace
 		const auto DefaultOptions = ParseEditorCommandLine(NoArguments, Root);
 		PF_CHECK(Tests, DefaultOptions.has_value());
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->ProjectFile.has_value());
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTestFixture);
 
 		const std::string AbsoluteProjectPath = ProjectFile.string();
 		const std::array AbsoluteArguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath) };
@@ -4765,6 +4766,26 @@ namespace
 		const auto RelativeOptions = ParseEditorCommandLine(RelativeArguments, Root);
 		PF_CHECK(Tests, RelativeOptions.has_value());
 		PF_CHECK(Tests, RelativeOptions && RelativeOptions->ProjectFile == ProjectFile);
+
+		const std::array HostFixtureArguments = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture") };
+		const auto HostFixtureOptions = ParseEditorCommandLine(HostFixtureArguments, Root);
+		PF_CHECK(Tests, HostFixtureOptions.has_value());
+		PF_CHECK(Tests, HostFixtureOptions && HostFixtureOptions->EnableDocumentHostTestFixture);
+		const std::array HostFixtureWithoutProject = { std::string_view("--document-host-test-fixture") };
+		const auto HostFixtureWithoutProjectResult = ParseEditorCommandLine(HostFixtureWithoutProject, Root);
+		PF_CHECK(Tests, !HostFixtureWithoutProjectResult);
+		PF_CHECK(Tests, !HostFixtureWithoutProjectResult &&
+			HostFixtureWithoutProjectResult.error().Code == EditorCommandLineErrorCode::MissingProjectPath);
+		const std::array DuplicateHostFixtureArguments = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-test-fixture") };
+		const auto DuplicateHostFixtureOptions = ParseEditorCommandLine(DuplicateHostFixtureArguments, Root);
+		PF_CHECK(Tests, !DuplicateHostFixtureOptions);
+		PF_CHECK(Tests, !DuplicateHostFixtureOptions &&
+			DuplicateHostFixtureOptions.error().Code == EditorCommandLineErrorCode::DuplicateOption);
 
 		const std::filesystem::path StressManifest = Root / "stress.manifest";
 		{

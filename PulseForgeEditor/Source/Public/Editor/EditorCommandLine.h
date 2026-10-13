@@ -19,6 +19,7 @@ namespace PulseForgeEditor
 	{
 		MissingProjectPath,
 		DuplicateProjectOption,
+		DuplicateOption,
 		UnexpectedArgument,
 		InvalidProjectPath
 	};
@@ -34,6 +35,7 @@ namespace PulseForgeEditor
 		std::optional<std::filesystem::path> ProjectFile;
 		std::optional<std::filesystem::path> AssetPreviewStressManifest;
 		std::string AssetPreviewStressBudget;
+		bool EnableDocumentHostTestFixture = false;
 	};
 
 	[[nodiscard]] inline std::expected<EditorCommandLineOptions, EditorCommandLineError> ParseEditorCommandLine(
@@ -43,6 +45,15 @@ namespace PulseForgeEditor
 		EditorCommandLineOptions Options;
 		for (std::size_t Index = 0; Index < Arguments.size(); ++Index)
 		{
+			if (Arguments[Index] == "--document-host-test-fixture")
+			{
+				if (Options.EnableDocumentHostTestFixture)
+					return std::unexpected(EditorCommandLineError{
+						EditorCommandLineErrorCode::DuplicateOption,
+						"The --document-host-test-fixture option may be specified only once." });
+				Options.EnableDocumentHostTestFixture = true;
+				continue;
+			}
 			if (Arguments[Index] == "--asset-preview-stress")
 			{
 				if (Options.AssetPreviewStressManifest)
@@ -74,7 +85,9 @@ namespace PulseForgeEditor
 			if (Arguments[Index] != "--project")
 				return std::unexpected(EditorCommandLineError{
 					EditorCommandLineErrorCode::UnexpectedArgument,
-					"Unexpected argument '" + std::string(Arguments[Index]) + "'. Supported option: --project <path>." });
+					"Unexpected argument '" + std::string(Arguments[Index]) +
+					"'. Supported options include --project <path>, --asset-preview-stress, "
+					"and the Debug-only --document-host-test-fixture." });
 
 			if (Options.ProjectFile)
 				return std::unexpected(EditorCommandLineError{
@@ -116,6 +129,10 @@ namespace PulseForgeEditor
 
 			Options.ProjectFile = std::move(ProjectFile);
 		}
+		if (Options.EnableDocumentHostTestFixture && !Options.ProjectFile)
+			return std::unexpected(EditorCommandLineError{
+				EditorCommandLineErrorCode::MissingProjectPath,
+				"The --document-host-test-fixture option requires --project <path>." });
 
 		return Options;
 	}
