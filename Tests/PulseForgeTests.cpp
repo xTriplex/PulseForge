@@ -36,6 +36,7 @@
 #include "Editor/EditorHierarchyRowPolicy.h"
 #include "Editor/EditorInteractionPolicy.h"
 #include "Editor/EditorProjectOpening.h"
+#include "Editor/EditorDocumentManager.h"
 #include "Editor/EditorSelection.h"
 #include "Editor/EditorVisibility.h"
 #include "Editor/ConsoleFormatting.h"
@@ -3692,6 +3693,120 @@ namespace
 			std::filesystem::remove(LinkPath, Error);
 			PF_CHECK(Tests, !Error);
 		}
+	}
+
+	void TestEditorDocumentManager(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		const auto Project = UUID::Generate();
+		const auto OtherProject = UUID::Generate();
+		const auto Material = UUID::Generate();
+		const auto OtherMaterial = UUID::Generate();
+		const auto Scene = UUID::Generate();
+		PF_CHECK(Tests, Project && OtherProject && Material && OtherMaterial && Scene);
+		if (!Project || !OtherProject || !Material || !OtherMaterial || !Scene)
+			return;
+
+		EditorDocumentManager Manager;
+		const EditorDocumentIdentity MaterialA{ *Project, *Material, EditorDocumentKind::Material };
+		const EditorDocumentIdentity MaterialB{ *Project, *OtherMaterial, EditorDocumentKind::Material };
+		const EditorDocumentIdentity SameNameOtherFolder{ *Project, *Scene, EditorDocumentKind::Material };
+		const EditorDocumentIdentity OtherProjectMaterial{ *OtherProject, *Material, EditorDocumentKind::Material };
+		const EditorDocumentIdentity Level{ *Project, UUID{}, EditorDocumentKind::Level };
+		const auto First = Manager.Open(MaterialA, "Assets/Materials/Amber.material", "Amber.material",
+			EditorDocumentOpenPreference::NewNativeWindow);
+		const auto Second = Manager.Open(MaterialB, "Assets/Materials/Blue.material", "Blue.material",
+			EditorDocumentOpenPreference::NewNativeWindow);
+		PF_CHECK(Tests, First && Second && First->Created && Second->Created);
+		PF_CHECK(Tests, First && Second && First->HostID != Second->HostID);
+		PF_CHECK(Tests, Manager.GetHosts().size() == 3);
+
+		const auto Reopened = Manager.Open(MaterialA, "Assets/OtherFolder/Amber.material", "Amber.material",
+			EditorDocumentOpenPreference::NewNativeWindow);
+		PF_CHECK(Tests, Reopened && !Reopened->Created);
+		PF_CHECK(Tests, Reopened && Reopened->HostID == First->HostID);
+		PF_CHECK(Tests, Manager.GetSessions().size() == 2);
+		PF_CHECK(Tests, Manager.Find(MaterialA)->ProjectRelativePath ==
+			std::filesystem::path("Assets/OtherFolder/Amber.material"));
+		PF_CHECK(Tests, Manager.GetFocusedHost() && Manager.GetFocusedHost()->ID == First->HostID);
+
+		const auto OtherFolderOpen = Manager.Open(SameNameOtherFolder, "Assets/Sub/Amber.material", "Amber.material",
+			EditorDocumentOpenPreference::MainDocumentStrip);
+		const auto OtherProjectOpen = Manager.Open(OtherProjectMaterial, "Assets/Amber.material", "Amber.material",
+			EditorDocumentOpenPreference::MainDocumentStrip);
+		PF_CHECK(Tests, OtherFolderOpen && OtherProjectOpen);
+		PF_CHECK(Tests, Manager.GetSessions().size() == 4);
+		PF_CHECK(Tests, Manager.Find(MaterialA) != Manager.Find(SameNameOtherFolder));
+		PF_CHECK(Tests, Manager.Find(MaterialA) != Manager.Find(OtherProjectMaterial));
+
+		uint64_t TextureIdentity = 90;
+		const auto ManagerPreferenceOpen = [&Manager, &Project, &TextureIdentity]()
+		{
+			const UUID PreferenceAsset(0, TextureIdentity++);
+			return Manager.Open({ *Project, PreferenceAsset, EditorDocumentKind::Texture },
+				"Assets/Textures/Albedo.png", "Albedo.png",
+				EditorDocumentOpenPreference::RememberedPlacement);
+		};
+		const auto RememberedOne = ManagerPreferenceOpen();
+		const auto RememberedTwo = ManagerPreferenceOpen();
+		PF_CHECK(Tests, RememberedOne && RememberedTwo);
+		PF_CHECK(Tests, RememberedOne && RememberedTwo && RememberedOne->HostID == RememberedTwo->HostID);
+
+		const auto LevelOpen = Manager.Open(Level, {}, "Level Editor", EditorDocumentOpenPreference::NewNativeWindow);
+		PF_CHECK(Tests, LevelOpen && LevelOpen->HostID == EditorDocumentManager::MainHostID);
+		const auto ProtectedTransfer = Manager.Transfer(Level, First->HostID, 0);
+		PF_CHECK(Tests, !ProtectedTransfer);
+
+		PF_CHECK(Tests, Manager.MarkEdited(MaterialA));
+		const uint64_t DirtyRevision = Manager.Find(MaterialA)->Revision;
+		const auto RejectedTransfer = Manager.Transfer(MaterialA, Second->HostID, 0,
+			[](const EditorDocumentSession&, const EditorDocumentHost&) { return false; });
+		PF_CHECK(Tests, !RejectedTransfer);
+		PF_CHECK(Tests, Manager.Find(MaterialA)->HostID == First->HostID);
+		PF_CHECK(Tests, Manager.Find(MaterialA)->Revision == DirtyRevision);
+
+		const auto Moved = Manager.Transfer(MaterialA, Second->HostID, 0,
+			[](const EditorDocumentSession&, const EditorDocumentHost&) { return true; });
+		PF_CHECK(Tests, Moved && Moved->Changed);
+		PF_CHECK(Tests, Moved && Moved->EmptiedSourceHost == First->HostID);
+		PF_CHECK(Tests, Manager.Find(MaterialA)->HostID == Second->HostID);
+		PF_CHECK(Tests, Manager.Find(MaterialA)->Revision == DirtyRevision && Manager.Find(MaterialA)->IsDirty());
+		PF_CHECK(Tests, Manager.RemoveEmptyNativeHost(First->HostID));
+		PF_CHECK(Tests, !Manager.FindHost(First->HostID));
+		PF_CHECK(Tests, Manager.Find(MaterialA) && Manager.Find(MaterialA)->HostID == Second->HostID);
+
+		PF_CHECK(Tests, Manager.MarkSaved(MaterialA, DirtyRevision));
+		PF_CHECK(Tests, !Manager.Find(MaterialA)->IsDirty());
+		PF_CHECK(Tests, Manager.MarkEdited(MaterialA));
+		const uint64_t LaterRevision = Manager.Find(MaterialA)->Revision;
+		const auto Cancelled = Manager.Close(MaterialA, EditorDocumentCloseChoice::Cancel, {}, {});
+		PF_CHECK(Tests, Cancelled == EditorDocumentCloseStatus::Cancelled);
+		PF_CHECK(Tests, Manager.Find(MaterialA) && Manager.Find(MaterialA)->Revision == LaterRevision);
+		const auto SaveFailed = Manager.Close(MaterialA, EditorDocumentCloseChoice::Save,
+			[](const EditorDocumentSession&, uint64_t) { return false; }, {});
+		PF_CHECK(Tests, SaveFailed == EditorDocumentCloseStatus::SaveFailed);
+		PF_CHECK(Tests, Manager.Find(MaterialA) && Manager.Find(MaterialA)->IsDirty());
+		const auto SavedOlderRevision = Manager.Close(MaterialA, EditorDocumentCloseChoice::Save,
+			[&Tests, &Manager, &MaterialA](const EditorDocumentSession&, uint64_t Revision)
+			{
+				PF_CHECK(Tests, Revision == Manager.Find(MaterialA)->Revision);
+				PF_CHECK(Tests, Manager.MarkEdited(MaterialA));
+				return true;
+			}, {});
+		PF_CHECK(Tests, SavedOlderRevision == EditorDocumentCloseStatus::StillDirty);
+		PF_CHECK(Tests, Manager.Find(MaterialA) && Manager.Find(MaterialA)->IsDirty());
+		const auto Saved = Manager.Close(MaterialA, EditorDocumentCloseChoice::Save,
+			[](const EditorDocumentSession&, uint64_t) { return true; }, {});
+		PF_CHECK(Tests, Saved == EditorDocumentCloseStatus::Closed);
+		PF_CHECK(Tests, !Manager.Find(MaterialA));
+
+		PF_CHECK(Tests, Manager.MarkEdited(MaterialB));
+		const auto Discarded = Manager.Close(MaterialB, EditorDocumentCloseChoice::Discard, {},
+			[](const EditorDocumentSession&) { return true; });
+		PF_CHECK(Tests, Discarded == EditorDocumentCloseStatus::Closed);
+		PF_CHECK(Tests, Manager.Close(Level, EditorDocumentCloseChoice::Discard, {}, {}) ==
+			EditorDocumentCloseStatus::Protected);
 	}
 
 	void TestAssetImportOperation(TestRunner& Tests)
@@ -8847,6 +8962,7 @@ int main()
 	TestAssetMetadataAndRegistry(Tests);
 	TestAssetOperations(Tests);
 	TestAssetFolderOperations(Tests);
+	TestEditorDocumentManager(Tests);
 	TestAssetImportOperation(Tests);
 	TestMaterialAssets(Tests);
 	TestProjectFiles(Tests);
