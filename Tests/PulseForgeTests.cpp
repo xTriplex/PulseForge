@@ -3755,6 +3755,7 @@ namespace
 		EditorDocumentManager Manager;
 		PF_CHECK(Tests, ShouldProcessNativeDocumentHostCloseRequests(false));
 		PF_CHECK(Tests, !ShouldProcessNativeDocumentHostCloseRequests(true));
+		// A captured tab drag may outlive ImGui's payload on the release frame.
 		PF_CHECK(Tests, ShouldDetachDocumentTab(true, true, false, false));
 		PF_CHECK(Tests, !ShouldDetachDocumentTab(false, true, false, false));
 		PF_CHECK(Tests, !ShouldDetachDocumentTab(true, false, false, false));

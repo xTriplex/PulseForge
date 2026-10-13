@@ -4679,15 +4679,15 @@ namespace
 
 			if (!m_ActiveDocumentTabDrag)
 				return;
+			// ImGui clears the payload on an outside release; the captured tab identity owns tear-off.
+			const bool HasCapturedTabDrag = m_ActiveDocumentTabDrag.has_value();
 			const PulseForgeEditor::EditorDocumentIdentity Identity = *m_ActiveDocumentTabDrag;
 			m_ActiveDocumentTabDrag.reset();
 
-			const ImGuiPayload* Payload = ImGui::GetDragDropPayload();
-			const bool HasDocumentPayload = Payload && Payload->IsDataType("PF_EDITOR_DOCUMENT");
 			const bool TransferQueued = m_PendingDocumentTransfer &&
 				m_PendingDocumentTransfer->Identity == Identity;
 			if (!PulseForgeEditor::ShouldDetachDocumentTab(
-				true, HasDocumentPayload, TransferQueued, ImGui::GetIO().MouseHoveredViewport != 0))
+				true, HasCapturedTabDrag, TransferQueued, ImGui::GetIO().MouseHoveredViewport != 0))
 				return;
 
 			const auto* Session = m_Documents.Find(Identity);
@@ -4802,7 +4802,7 @@ namespace
 				constexpr float TabHeight = 25.0f;
 				constexpr float LeftPadding = 10.0f;
 				constexpr float LabelToCloseGap = 4.0f;
-				constexpr float CloseRegionWidth = 20.0f;
+				constexpr float CloseRegionWidth = 24.0f;
 				constexpr float RightPadding = 6.0f;
 				const ImVec2 LabelSize = ImGui::CalcTextSize(Label.c_str());
 				const float TabWidth = LeftPadding + LabelSize.x +
@@ -4834,7 +4834,7 @@ namespace
 				{
 					const char* CloseGlyph = "×";
 					ImFont* CloseGlyphFont = ImGui::GetFont();
-					const float CloseGlyphFontSize = ImGui::GetFontSize() * 1.75f;
+					const float CloseGlyphFontSize = ImGui::GetFontSize() * 2.5f;
 					const ImVec2 CloseGlyphSize = CloseGlyphFont->CalcTextSizeA(
 						CloseGlyphFontSize, (std::numeric_limits<float>::max)(), 0.0f, CloseGlyph);
 					const ImVec2 ClosePosition(
