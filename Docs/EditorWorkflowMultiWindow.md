@@ -323,7 +323,7 @@ No physical multi-monitor transition or direct pointer-driven document drag has 
 
 - Integrated local/remote `main` baseline: `e702e44c1a7e653c0af45dd3a398ee8d3931070e`.
 - Feature branch: `feat/editor-workflow-multi-window`.
-- Current local feature HEAD: `755eb87eab9aaf2a7d8319aaa6f393fc6d4fc533` (`Document fixture workspace recovery boundary`). The preceding focused commits are `43d57fc` (`Restore debug document host fixture layouts`), `8801672` (`Unify editor shortcut focus guards`), and `a573318` (`Test dirty documents across layout reset`). These commits remain local and the milestone is unmerged.
+- Current local feature HEAD at this record: `c715a72` (`Make document tab tear-off resilient to outside release`). The immediately preceding commit `cb954f6` adds transactional case-only asset rename support. Earlier focused commits include `e17018e` (Material Details utility-role correction), `635727e`/`deb678c` (native bounds recovery and validation), and `634e30e` (asset destination collision validation). The branch remains local and unmerged.
 - Implementation checkpoint: `22d256866c7622a4391309fba4473513ea1f5182` (`Implement native editor document workflows`).
 - Frame-order correction: `22d256866c7622a4391309fba4473513ea1f5182` (`Implement native editor document workflows`); dirty-close prompt routing: `0c41a7e0a1e09b9c8a5227301185ff2f64a8ca19` (`Route dirty document prompts to their host`). Later commits update this validation record.
 - Tab/transfer correction: `96782c3` (`Defer document transfers and integrate tab close affordance`) integrates the close glyph into the selectable tab and adds deferred transfer/context-menu actions; `42f23f9` (`Defer document tab close until after UI traversal`) also defers close mutation until tab/host traversal has finished.
@@ -339,6 +339,7 @@ No physical multi-monitor transition or direct pointer-driven document drag has 
 - The feature branch remains local, unpushed, and unmerged.
 - Move/Duplicate destination filename validation is now isolated in `EditorAssetDestinationPolicy.h` and covered by eight deterministic checks. Fresh Vulkan/OpenGL Debug/Release/Dist builds pass 4,269 checks and CTest 2/2. The dialog itself was not keyboard/mouse automated.
 - The deleted Spotlight research document, modified validation scene and `EmissiveStudy`, `PackedAndNormal`, and `BlueGlass` materials, and untracked `CMakeSettings.json` remain outside the commit. Root `AGENTS.md` remains absent.
+- At `c715a72`, fresh Vulkan and OpenGL Debug/Release/Dist `PulseForgeEditor` and `PulseForgeTests` builds passed; all six test executables passed 4,295 checks and CTest passed 2/2. `git diff --check` passed. Protected changes remain outside commits, `CMakeSettings.json` remains untracked, and root `AGENTS.md` remains absent.
 
 ### Outside-release document tab tear-off fallback (2026-10-13)
 
