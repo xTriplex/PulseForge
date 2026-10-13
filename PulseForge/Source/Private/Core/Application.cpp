@@ -79,6 +79,18 @@ namespace PulseForge
 		m_Renderer->SetExternalPlatformPresentationTargetCount(Count);
 	}
 
+#if defined(PF_DEBUG)
+	bool Application::InjectNextPlatformAcquireOutOfDateForTesting(uint64_t TargetID) noexcept
+	{
+		return m_Renderer->InjectNextPlatformAcquireOutOfDateForTesting(TargetID);
+	}
+
+	bool Application::InjectNextPlatformImageAllocationFailureForTesting() noexcept
+	{
+		return m_Renderer->InjectNextPlatformImageAllocationFailureForTesting();
+	}
+#endif
+
 	void Application::Run()
 	{
 		auto PreviousFrameTime = std::chrono::steady_clock::now();

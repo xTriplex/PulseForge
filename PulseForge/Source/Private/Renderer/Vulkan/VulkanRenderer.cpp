@@ -20,6 +20,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace PulseForge
@@ -756,6 +757,9 @@ namespace PulseForge
 
 			auto Host = std::make_unique<PlatformPresentationHost>();
 			Host->Window = Window;
+#if defined(PF_DEBUG)
+			Host->InjectImageAllocationFailure = std::exchange(m_InjectNextPlatformImageAllocationFailure, false);
+#endif
 			VkSurfaceKHR NativeSurface = VK_NULL_HANDLE;
 			const VkResult SurfaceResult = glfwCreateWindowSurface(
 				static_cast<VkInstance>(m_Instance), Window, nullptr, &NativeSurface);
@@ -827,13 +831,28 @@ namespace PulseForge
 			FrameContext& Frame = Host.Frames[Host.CurrentFrame];
 			WaitForFrame(Frame);
 			uint32_t ImageIndex = 0;
-			const VkResult AcquireResult = VULKAN_HPP_DEFAULT_DISPATCHER.vkAcquireNextImageKHR(
-				static_cast<VkDevice>(m_Device),
-				static_cast<VkSwapchainKHR>(Host.Swapchain),
-				std::numeric_limits<uint64_t>::max(),
-				static_cast<VkSemaphore>(Frame.ImageAvailable),
-				VK_NULL_HANDLE,
-				&ImageIndex);
+			VkResult AcquireResult = VK_SUCCESS;
+#if defined(PF_DEBUG)
+			if (Host.InjectAcquireOutOfDate)
+			{
+				Host.InjectAcquireOutOfDate = false;
+				Host.InjectedAcquireOutOfDatePendingRecovery = true;
+				AcquireResult = VK_ERROR_OUT_OF_DATE_KHR;
+				PF_CORE_INFO(
+					"Debug fixture injected VK_ERROR_OUT_OF_DATE_KHR for native host {}; no image was acquired and no command list was opened",
+					TargetID);
+			}
+			else
+#endif
+			{
+				AcquireResult = VULKAN_HPP_DEFAULT_DISPATCHER.vkAcquireNextImageKHR(
+					static_cast<VkDevice>(m_Device),
+					static_cast<VkSwapchainKHR>(Host.Swapchain),
+					std::numeric_limits<uint64_t>::max(),
+					static_cast<VkSemaphore>(Frame.ImageAvailable),
+					VK_NULL_HANDLE,
+					&ImageIndex);
+			}
 			if (AcquireResult == VK_ERROR_OUT_OF_DATE_KHR)
 			{
 				Host.RecreateNeeded = true;
@@ -848,6 +867,15 @@ namespace PulseForge
 			}
 			if (ImageIndex >= Host.Images.size())
 				throw std::runtime_error("Vulkan returned an invalid native-window swapchain image index");
+#if defined(PF_DEBUG)
+			if (Host.InjectedAcquireOutOfDatePendingRecovery)
+			{
+				Host.InjectedAcquireOutOfDatePendingRecovery = false;
+				Host.InjectedAcquireOutOfDateRecoveryFramePending = true;
+				PF_CORE_INFO("Native host {} recovered from the injected out-of-date acquire and acquired a swapchain image",
+					TargetID);
+			}
+#endif
 
 			Host.AcquiredImageIndex = ImageIndex;
 			Host.AcquiredSuboptimal = AcquireResult == VK_SUBOPTIMAL_KHR;
@@ -895,6 +923,17 @@ namespace PulseForge
 				static_cast<VkQueue>(m_PresentQueue), &PresentInfo);
 			Host.RecreateNeeded = Host.AcquiredSuboptimal || PresentResult == VK_SUBOPTIMAL_KHR ||
 				PresentResult == VK_ERROR_OUT_OF_DATE_KHR;
+#if defined(PF_DEBUG)
+			if (Host.InjectedAcquireOutOfDateRecoveryFramePending)
+			{
+				Host.InjectedAcquireOutOfDateRecoveryFramePending = false;
+				if (PresentResult == VK_SUCCESS)
+					PF_CORE_INFO("Native host {} submitted and presented a frame after out-of-date acquire recovery", TargetID);
+				else
+					PF_CORE_ERROR("Native host {} did not present its first frame after out-of-date acquire recovery: {}",
+						TargetID, vk::to_string(static_cast<vk::Result>(PresentResult)));
+			}
+#endif
 			if (PresentResult != VK_SUCCESS && !Host.RecreateNeeded)
 				PF_CORE_ERROR("Native editor window presentation failed: {}",
 					vk::to_string(static_cast<vk::Result>(PresentResult)));
@@ -938,6 +977,27 @@ namespace PulseForge
 		{
 			return !m_PlatformTargets.empty();
 		}
+
+#if defined(PF_DEBUG)
+		bool InjectNextPlatformAcquireOutOfDateForTesting(uint64_t TargetID) noexcept override
+		{
+			const auto Entry = m_PlatformTargets.find(TargetID);
+			if (Entry == m_PlatformTargets.end() || Entry->second->InjectAcquireOutOfDate ||
+				Entry->second->InjectedAcquireOutOfDatePendingRecovery ||
+				Entry->second->InjectedAcquireOutOfDateRecoveryFramePending)
+				return false;
+			Entry->second->InjectAcquireOutOfDate = true;
+			return true;
+		}
+
+		bool InjectNextPlatformImageAllocationFailureForTesting() noexcept override
+		{
+			if (m_InjectNextPlatformImageAllocationFailure)
+				return false;
+			m_InjectNextPlatformImageAllocationFailure = true;
+			return true;
+		}
+#endif
 
 		GraphicsResult BeginRenderTarget(
 			const RenderTarget& Target,
@@ -2311,6 +2371,12 @@ namespace PulseForge
 			uint32_t AcquiredImageIndex = 0;
 			bool RecreateNeeded = false;
 			bool AcquiredSuboptimal = false;
+#if defined(PF_DEBUG)
+			bool InjectAcquireOutOfDate = false;
+			bool InjectedAcquireOutOfDatePendingRecovery = false;
+			bool InjectedAcquireOutOfDateRecoveryFramePending = false;
+			bool InjectImageAllocationFailure = false;
+#endif
 		};
 
 		void Initialize()
@@ -2882,6 +2948,17 @@ namespace PulseForge
 				const auto* NativeDepth = dynamic_cast<const VulkanTexture*>(Image.DepthTarget.get());
 				if (!NativeDepth)
 					throw std::runtime_error("Native editor swapchain depth texture has an incompatible backend");
+#if defined(PF_DEBUG)
+				if (Index == 0 && Host.InjectImageAllocationFailure)
+				{
+					Host.InjectImageAllocationFailure = false;
+					PF_CORE_WARN(
+						"Debug fixture injected a native presentation allocation failure after creating swapchain image {} and its depth target",
+						Index);
+					throw std::runtime_error(
+						"Debug fixture injected allocation failure after native swapchain image and depth-target creation");
+				}
+#endif
 				nvrhi::FramebufferDesc FramebufferDescription;
 				FramebufferDescription.addColorAttachment(Image.Texture);
 				FramebufferDescription.setDepthAttachment(NativeDepth->GetNativeTexture());
@@ -3103,6 +3180,9 @@ namespace PulseForge
 		bool m_LoggedFirstPresentedFrameForSwapchain = false;
 		bool m_LoggedFirstDraw = false;
 		bool m_FrameActive = false;
+#if defined(PF_DEBUG)
+		bool m_InjectNextPlatformImageAllocationFailure = false;
+#endif
 	};
 
 	std::unique_ptr<RendererBackend> CreateVulkanRenderer(Window& Window)

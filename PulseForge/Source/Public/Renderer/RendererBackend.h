@@ -42,6 +42,14 @@ namespace PulseForge
 		}
 		[[nodiscard]] virtual bool HasPlatformPresentationTargets() const noexcept { return false; }
 		virtual void SetExternalPlatformPresentationTargetCount(uint32_t Count) noexcept { (void)Count; }
+#if defined(PF_DEBUG)
+		[[nodiscard]] virtual bool InjectNextPlatformAcquireOutOfDateForTesting(uint64_t TargetID) noexcept
+		{
+			(void)TargetID;
+			return false;
+		}
+		[[nodiscard]] virtual bool InjectNextPlatformImageAllocationFailureForTesting() noexcept { return false; }
+#endif
 		virtual RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description) = 0;
 		virtual DepthCubemapCreateResult CreateDepthCubemap(uint32_t Resolution, const std::string& DebugName) = 0;
 		virtual GraphicsResult BeginRenderTarget(

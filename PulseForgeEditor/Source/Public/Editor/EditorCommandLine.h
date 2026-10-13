@@ -40,6 +40,8 @@ namespace PulseForgeEditor
 		bool EnableDocumentHostTabTearOffTest = false;
 		bool EnableDocumentHostTabReattachTest = false;
 		bool EnableDocumentHostPresentationFailureTest = false;
+		bool EnableDocumentHostAcquireOutOfDateTest = false;
+		bool EnableDocumentHostImageAllocationFailureTest = false;
 	};
 
 	[[nodiscard]] inline std::expected<EditorCommandLineOptions, EditorCommandLineError> ParseEditorCommandLine(
@@ -94,6 +96,24 @@ namespace PulseForgeEditor
 				Options.EnableDocumentHostPresentationFailureTest = true;
 				continue;
 			}
+			if (Arguments[Index] == "--document-host-test-acquire-out-of-date")
+			{
+				if (Options.EnableDocumentHostAcquireOutOfDateTest)
+					return std::unexpected(EditorCommandLineError{
+						EditorCommandLineErrorCode::DuplicateOption,
+						"The --document-host-test-acquire-out-of-date option may be specified only once." });
+				Options.EnableDocumentHostAcquireOutOfDateTest = true;
+				continue;
+			}
+			if (Arguments[Index] == "--document-host-test-image-allocation-failure")
+			{
+				if (Options.EnableDocumentHostImageAllocationFailureTest)
+					return std::unexpected(EditorCommandLineError{
+						EditorCommandLineErrorCode::DuplicateOption,
+						"The --document-host-test-image-allocation-failure option may be specified only once." });
+				Options.EnableDocumentHostImageAllocationFailureTest = true;
+				continue;
+			}
 			if (Arguments[Index] == "--asset-preview-stress")
 			{
 				if (Options.AssetPreviewStressManifest)
@@ -130,7 +150,8 @@ namespace PulseForgeEditor
 					"the Debug-only --document-host-test-fixture, and the Debug-only "
 					"--document-host-reset-layout-test, --document-host-test-tab-tear-off, "
 					"--document-host-test-tab-reattach, and "
-					"--document-host-test-presentation-failure." });
+					"--document-host-test-presentation-failure, --document-host-test-acquire-out-of-date, "
+					"and --document-host-test-image-allocation-failure." });
 
 			if (Options.ProjectFile)
 				return std::unexpected(EditorCommandLineError{
@@ -192,6 +213,14 @@ namespace PulseForgeEditor
 			return std::unexpected(EditorCommandLineError{
 				EditorCommandLineErrorCode::UnexpectedArgument,
 				"The --document-host-test-presentation-failure option requires --document-host-test-fixture." });
+		if (Options.EnableDocumentHostAcquireOutOfDateTest && !Options.EnableDocumentHostTestFixture)
+			return std::unexpected(EditorCommandLineError{
+				EditorCommandLineErrorCode::UnexpectedArgument,
+				"The --document-host-test-acquire-out-of-date option requires --document-host-test-fixture." });
+		if (Options.EnableDocumentHostImageAllocationFailureTest && !Options.EnableDocumentHostTestFixture)
+			return std::unexpected(EditorCommandLineError{
+				EditorCommandLineErrorCode::UnexpectedArgument,
+				"The --document-host-test-image-allocation-failure option requires --document-host-test-fixture." });
 		if (Options.EnableDocumentHostTabTearOffTest && Options.EnableDocumentHostResetLayoutTest)
 			return std::unexpected(EditorCommandLineError{
 				EditorCommandLineErrorCode::UnexpectedArgument,
@@ -201,12 +230,15 @@ namespace PulseForgeEditor
 			return std::unexpected(EditorCommandLineError{
 				EditorCommandLineErrorCode::UnexpectedArgument,
 				"The document tab reattachment fixture cannot run with another document-host UI fixture." });
-		if (Options.EnableDocumentHostPresentationFailureTest &&
-			(Options.EnableDocumentHostTabTearOffTest || Options.EnableDocumentHostTabReattachTest ||
-				Options.EnableDocumentHostResetLayoutTest))
+		const uint32_t FailureFixtureCount = static_cast<uint32_t>(Options.EnableDocumentHostPresentationFailureTest) +
+			static_cast<uint32_t>(Options.EnableDocumentHostAcquireOutOfDateTest) +
+			static_cast<uint32_t>(Options.EnableDocumentHostImageAllocationFailureTest);
+		if (FailureFixtureCount > 1 ||
+			(FailureFixtureCount != 0 && (Options.EnableDocumentHostTabTearOffTest ||
+				Options.EnableDocumentHostTabReattachTest || Options.EnableDocumentHostResetLayoutTest)))
 			return std::unexpected(EditorCommandLineError{
 				EditorCommandLineErrorCode::UnexpectedArgument,
-				"The document presentation-failure fixture cannot run with another document-host UI fixture." });
+				"Native presentation failure fixtures cannot run with each other or another document-host UI fixture." });
 
 		return Options;
 	}

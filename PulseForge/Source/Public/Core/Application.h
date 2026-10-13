@@ -37,6 +37,10 @@ namespace PulseForge
 		[[nodiscard]] bool DestroyPlatformPresentationTarget(uint64_t TargetID);
 		[[nodiscard]] bool HasPlatformPresentationTargets() const noexcept;
 		void SetExternalPlatformPresentationTargetCount(uint32_t Count) noexcept;
+#if defined(PF_DEBUG)
+		[[nodiscard]] bool InjectNextPlatformAcquireOutOfDateForTesting(uint64_t TargetID) noexcept;
+		[[nodiscard]] bool InjectNextPlatformImageAllocationFailureForTesting() noexcept;
+#endif
 		[[nodiscard]] bool IsMainFrameActive() const noexcept { return m_MainFrameActive; }
 		void OnEvent(Event& E);
 		Layer& PushLayer(std::unique_ptr<Layer> Layer);

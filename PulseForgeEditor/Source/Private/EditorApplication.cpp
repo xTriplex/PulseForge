@@ -875,7 +875,9 @@ namespace
 			  m_DocumentHostResetLayoutTest(Options.EnableDocumentHostResetLayoutTest),
 			  m_DocumentHostTabTearOffTest(Options.EnableDocumentHostTabTearOffTest),
 			  m_DocumentHostTabReattachTest(Options.EnableDocumentHostTabReattachTest),
-			  m_DocumentHostPresentationFailureTest(Options.EnableDocumentHostPresentationFailureTest)
+			  m_DocumentHostPresentationFailureTest(Options.EnableDocumentHostPresentationFailureTest),
+			  m_DocumentHostAcquireOutOfDateTest(Options.EnableDocumentHostAcquireOutOfDateTest),
+			  m_DocumentHostImageAllocationFailureTest(Options.EnableDocumentHostImageAllocationFailureTest)
 		{
 		}
 
@@ -895,6 +897,17 @@ namespace
 				Layer->HandlePlatformPresentationFailure(Viewport, "Debug fixture injected a presentation failure");
 				return;
 			}
+			bool InjectAcquireOutOfDate = false;
+#if defined(PF_DEBUG)
+			InjectAcquireOutOfDate = Layer->ShouldInjectDocumentAcquireOutOfDate(Viewport);
+			if (Layer->ShouldInjectDocumentImageAllocationFailure(Viewport) &&
+				!PulseForge::Application::Get().InjectNextPlatformImageAllocationFailureForTesting())
+			{
+				Layer->HandlePlatformPresentationFailure(
+					Viewport, "The active renderer does not support the image-allocation failure fixture");
+				return;
+			}
+#endif
 			auto Target = PulseForge::Application::Get().CreatePlatformPresentationTarget(Viewport->PlatformHandle);
 			if (!Target)
 			{
@@ -907,6 +920,20 @@ namespace
 			try
 			{
 				Viewport->RendererUserData = new PlatformViewportRendererData{ *Target, false };
+#if defined(PF_DEBUG)
+				if (InjectAcquireOutOfDate &&
+					!PulseForge::Application::Get().InjectNextPlatformAcquireOutOfDateForTesting(*Target))
+				{
+					PF_ERROR("The active renderer could not arm the native-host acquire out-of-date fixture");
+					auto* RendererData = static_cast<PlatformViewportRendererData*>(Viewport->RendererUserData);
+					Viewport->RendererUserData = nullptr;
+					delete RendererData;
+					(void)PulseForge::Application::Get().DestroyPlatformPresentationTarget(*Target);
+					Layer->HandlePlatformPresentationFailure(
+						Viewport, "The active renderer could not arm the acquire out-of-date fixture");
+					return;
+				}
+#endif
 			}
 			catch (const std::exception& Exception)
 			{
@@ -5391,6 +5418,72 @@ namespace
 				m_DocumentHostPresentationFailureTest = false;
 				m_DocumentHostPresentationFailureInjected = true;
 				PF_WARN("Injecting Debug-only native document presentation failure for host {}", Host.ID);
+				return true;
+			}
+			return false;
+#endif
+		}
+
+		bool ShouldInjectDocumentImageAllocationFailure(ImGuiViewport* Viewport)
+		{
+#ifndef _DEBUG
+			(void)Viewport;
+			return false;
+#else
+			if (!m_DocumentHostTestFixture || !m_DocumentHostImageAllocationFailureTest || !Viewport ||
+				PulseForge::Application::Get().GetRendererAPI() != PulseForge::RendererAPI::Vulkan)
+				return false;
+			for (const auto& Host : m_Documents.GetHosts())
+			{
+				if (Host.Role != PulseForgeEditor::EditorDocumentHostRole::Native || Host.Documents.empty())
+					continue;
+				const auto* Session = Host.ActiveDocument ? m_Documents.Find(*Host.ActiveDocument) : nullptr;
+				if (!Session)
+					continue;
+				const std::string WindowName = Session->DisplayName + "###PFDocumentHost_" + Host.ID;
+				ImGuiWindow* Window = ImGui::FindWindowByName(WindowName.c_str());
+				if (!Window || Window->Viewport != Viewport)
+					continue;
+				m_DocumentHostImageAllocationFailureTest = false;
+				m_DocumentHostPresentationFailureInjected = true;
+				bool AllSessionsMarkedDirty = true;
+				for (const auto& Identity : Host.Documents)
+					AllSessionsMarkedDirty = m_Documents.MarkEdited(Identity) && AllSessionsMarkedDirty;
+				if (!AllSessionsMarkedDirty)
+				{
+					m_DocumentHostPresentationFailureInjected = false;
+					PF_ERROR("Could not mark every synthetic document dirty for the allocation-failure test.");
+					return false;
+				}
+				PF_WARN("Injecting Debug-only native swapchain image/depth allocation failure for host {}", Host.ID);
+				return true;
+			}
+			return false;
+#endif
+		}
+
+		bool ShouldInjectDocumentAcquireOutOfDate(ImGuiViewport* Viewport)
+		{
+#ifndef _DEBUG
+			(void)Viewport;
+			return false;
+#else
+			if (!m_DocumentHostTestFixture || !m_DocumentHostAcquireOutOfDateTest || !Viewport ||
+				PulseForge::Application::Get().GetRendererAPI() != PulseForge::RendererAPI::Vulkan)
+				return false;
+			for (const auto& Host : m_Documents.GetHosts())
+			{
+				if (Host.Role != PulseForgeEditor::EditorDocumentHostRole::Native || Host.Documents.empty())
+					continue;
+				const auto* Session = Host.ActiveDocument ? m_Documents.Find(*Host.ActiveDocument) : nullptr;
+				if (!Session)
+					continue;
+				const std::string WindowName = Session->DisplayName + "###PFDocumentHost_" + Host.ID;
+				ImGuiWindow* Window = ImGui::FindWindowByName(WindowName.c_str());
+				if (!Window || Window->Viewport != Viewport)
+					continue;
+				m_DocumentHostAcquireOutOfDateTest = false;
+				PF_WARN("Scheduling a Debug-only out-of-date acquire for native document host {}", Host.ID);
 				return true;
 			}
 			return false;
@@ -11346,6 +11439,8 @@ namespace
 		bool m_DocumentHostTabTearOffTest = false;
 		bool m_DocumentHostTabReattachTest = false;
 		bool m_DocumentHostPresentationFailureTest = false;
+		bool m_DocumentHostAcquireOutOfDateTest = false;
+		bool m_DocumentHostImageAllocationFailureTest = false;
 		bool m_DocumentHostPresentationFailureInjected = false;
 		bool m_DocumentHostResetLayoutTestPending = false;
 		size_t m_DocumentHostResetLayoutExpectedHostCount = 0;

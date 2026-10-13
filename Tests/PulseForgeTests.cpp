@@ -4984,6 +4984,8 @@ namespace
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTabTearOffTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTabReattachTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostPresentationFailureTest);
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostAcquireOutOfDateTest);
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostImageAllocationFailureTest);
 
 		const std::string AbsoluteProjectPath = ProjectFile.string();
 		const std::array AbsoluteArguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath) };
@@ -5091,6 +5093,52 @@ namespace
 		const auto ConflictingPresentationFailureOptions = ParseEditorCommandLine(ConflictingPresentationFailureFixture, Root);
 		PF_CHECK(Tests, !ConflictingPresentationFailureOptions &&
 			ConflictingPresentationFailureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+		const std::array AcquireOutOfDateFixtureArguments = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-test-acquire-out-of-date") };
+		const auto AcquireOutOfDateFixtureOptions = ParseEditorCommandLine(AcquireOutOfDateFixtureArguments, Root);
+		PF_CHECK(Tests, AcquireOutOfDateFixtureOptions &&
+			AcquireOutOfDateFixtureOptions->EnableDocumentHostAcquireOutOfDateTest);
+		const std::array AcquireOutOfDateWithoutFixture = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-acquire-out-of-date") };
+		const auto AcquireOutOfDateWithoutFixtureOptions = ParseEditorCommandLine(AcquireOutOfDateWithoutFixture, Root);
+		PF_CHECK(Tests, !AcquireOutOfDateWithoutFixtureOptions &&
+			AcquireOutOfDateWithoutFixtureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+		const std::array DuplicateAcquireOutOfDateFixture = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-test-acquire-out-of-date"),
+			std::string_view("--document-host-test-acquire-out-of-date") };
+		const auto DuplicateAcquireOutOfDateFixtureOptions =
+			ParseEditorCommandLine(DuplicateAcquireOutOfDateFixture, Root);
+		PF_CHECK(Tests, !DuplicateAcquireOutOfDateFixtureOptions &&
+			DuplicateAcquireOutOfDateFixtureOptions.error().Code == EditorCommandLineErrorCode::DuplicateOption);
+		const std::array ImageAllocationFailureFixtureArguments = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-test-image-allocation-failure") };
+		const auto ImageAllocationFailureFixtureOptions =
+			ParseEditorCommandLine(ImageAllocationFailureFixtureArguments, Root);
+		PF_CHECK(Tests, ImageAllocationFailureFixtureOptions &&
+			ImageAllocationFailureFixtureOptions->EnableDocumentHostImageAllocationFailureTest);
+		const std::array ImageAllocationFailureWithoutFixture = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-image-allocation-failure") };
+		const auto ImageAllocationFailureWithoutFixtureOptions =
+			ParseEditorCommandLine(ImageAllocationFailureWithoutFixture, Root);
+		PF_CHECK(Tests, !ImageAllocationFailureWithoutFixtureOptions &&
+			ImageAllocationFailureWithoutFixtureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+		const std::array ConflictingPresentationFailureFixtures = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-test-acquire-out-of-date"),
+			std::string_view("--document-host-test-image-allocation-failure") };
+		const auto ConflictingAllocationFailureOptions =
+			ParseEditorCommandLine(ConflictingPresentationFailureFixtures, Root);
+		PF_CHECK(Tests, !ConflictingAllocationFailureOptions &&
+			ConflictingAllocationFailureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
 
 		const std::filesystem::path StressManifest = Root / "stress.manifest";
 		{
