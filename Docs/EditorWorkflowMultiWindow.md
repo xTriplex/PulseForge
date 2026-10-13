@@ -179,7 +179,7 @@ Material Details is an Inspector-side utility. Document hosts are reserved for f
 
 | ID | Status | Evidence and limits |
 |---|---|---|
-| P01 | Passed (persistence policy) | `TestEditorDocumentWorkspaceCodec` round-trips synthetic host membership and ordering and rejects invalid project/layout data. This does not establish application restart restoration. |
+| P01 | Passed (bounded synthetic-host restart) | `DocumentWorkspaceRestart_20261013` launches the Debug editor twice with the same isolated settings. The first run saves two synthetic document identities in separate native hosts; the second restores both host windows and reports two restored sessions. Both processes exit cleanly. This does not verify restoration of production asset editors or unsaved crash recovery. |
 | P02 | Unverified (hardware) | Missing-monitor bounds recovery is tested against a simulated monitor list; physical monitor removal and restart have not been performed. |
 | P03 | Passed (policy/runtime) | `WorkspaceRecoveryMatrix_20261013` and `CorruptWorkspaceDockRecovery_20261013` cover obsolete/corrupt settings recovery without discarding valid document state. |
 | P04 | Passed (runtime) | `WorkspaceMissingAssetRestore_20261013` verifies that missing asset records are skipped while valid workspace state remains available. |
