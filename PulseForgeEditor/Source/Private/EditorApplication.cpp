@@ -5451,8 +5451,9 @@ namespace
 				const float CloseRegionMinimumX = TabMinimum.x + LeftPadding + LabelSize.x + LabelToCloseGap;
 				const ImVec2 CloseButtonMinimum(CloseRegionMinimumX, TabMinimum.y + 2.0f);
 				const ImVec2 CloseButtonMaximum(CloseRegionMinimumX + CloseRegionWidth, TabMaximum.y - 2.0f);
-				const bool CloseHovered = HasCloseButton && TabHovered && ImGui::IsMouseHoveringRect(
-					CloseButtonMinimum, CloseButtonMaximum, false);
+				const bool CloseHovered = HasCloseButton && TabHovered &&
+					MousePosition.x >= CloseButtonMinimum.x && MousePosition.x < CloseButtonMaximum.x &&
+					MousePosition.y >= CloseButtonMinimum.y && MousePosition.y < CloseButtonMaximum.y;
 				if (ImGui::IsItemActivated() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !CloseHovered)
 				{
 					m_ActiveDocumentTabDrag = Session->Identity;
