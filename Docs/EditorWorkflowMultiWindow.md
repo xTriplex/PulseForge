@@ -138,7 +138,7 @@ Material Details is an Inspector-side utility. Document hosts are reserved for f
 | D08 | Unverified (repeated UI interaction) | Manager tests cover detach/reattach cycles and the Debug fixture completes one native-to-main return. Repeated real drags with editor state are not tested. |
 | D09 | Passed (synthetic application path) | The Debug `--document-host-test-tab-reorder` fixture drags one synthetic session after and before its neighbor through production tab-strip input handling in Vulkan and OpenGL runs, then verifies order, active session, and Level Editor availability. Real mouse-driven reordering has not been verified. |
 | D10 | Unverified (full-editor switching) | Material Details preference captures show the Level Editor workspace remains available. Switching among multiple production asset editors is deferred. |
-| D11 | Unverified (grouped UI transfer) | Manager tests exercise host membership and transfer policy; grouped native tabs have not been dragged and regrouped through real input. |
+| D11 | Passed (synthetic application path) | The Debug `--document-host-test-tab-reattach` fixture reattaches a synthetic session to the main strip, detaches it again, then moves the same session into a second compatible native host through production tab-strip input handling. It verifies both sessions share the destination host, the moved session becomes active, and the empty source host is retired. Vulkan and OpenGL runs passed. Physical mouse-driven grouping remains unverified. |
 | D12 | Unverified (utility drag) | Default placement, visibility, persistence, and Reset Layout have policy/runtime coverage. Pointer-driven utility-panel rearrangement remains a manual check. |
 | D13 | Passed (policy) | `TestEditorDocumentManager` uses same-project, same-basename identities from different folders and verifies distinct sessions. |
 | D14 | Unverified (integrated UI) | `TestAssetOperations` covers moves/renames and `TestEditorDocumentManager` preserves a moved session's identity and dirty revision; an open production asset editor has not been moved in the UI. |
@@ -195,7 +195,7 @@ Material Details is an Inspector-side utility. Document hosts are reserved for f
 Use a Debug build and an isolated `PULSEFORGE_EDITOR_SETTINGS_DIR`. The host fixture creates synthetic tabs and is not a substitute for a production asset editor.
 
 - Use real mouse input to tear a fixture document off the main strip and reattach it. Confirm drops over utility panels and workspace edges do not change host membership; the synthetic fixture covers four panel centers.
-- Reorder and group native document tabs, close/reopen the host, and confirm order and active-tab restoration.
+- Use real mouse input to reorder and group native document tabs, then close and reopen the host to confirm order and active-tab restoration. Synthetic tab-strip fixtures cover reorder and grouping, but not physical pointer interaction.
 - Use each opening preference and confirm Material Details opens beside Inspector while Level Editor remains active and the Scene Viewport stays available.
 - Exercise dirty-close Cancel/Save/Discard with a real editable document when a full editor is registered.
 - Move hosts between mixed-DPI monitors and a monitor with negative desktop coordinates, then remove a monitor and restart.

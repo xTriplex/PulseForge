@@ -808,6 +808,17 @@ namespace
 			Failed
 		};
 
+		enum class DocumentTabGroupTestPhase : uint8_t
+		{
+			Disabled,
+			WaitingForTabs,
+			PressQueued,
+			PositionQueued,
+			ReleaseQueued,
+			Complete,
+			Failed
+		};
+
 		static constexpr size_t DocumentTabTestDropPointsPerPanel = 5;
 		static constexpr std::array<const char*, 4> DocumentTabTestInvalidDropPanelNames = {
 			"Hierarchy", "Inspector", "Scene Viewport", "Content Browser"
@@ -1488,6 +1499,7 @@ namespace
 			QueueDocumentHostTabTearOffTestInput();
 			QueueDocumentHostTabReattachTestInput();
 			QueueDocumentTabReorderTestInput();
+			QueueDocumentTabGroupTestInput();
 			ImGui::NewFrame();
 			m_DocumentTabDropTargets.clear();
 			for (DocumentTabTestPointerTarget& Target : m_DocumentHostTabReattachInvalidDropTargets)
@@ -1495,6 +1507,8 @@ namespace
 			m_DocumentHostTabReorderTestFirstTabCenterValid = false;
 			m_DocumentHostTabReorderTestSecondBeforePositionValid = false;
 			m_DocumentHostTabReorderTestSecondAfterPositionValid = false;
+			m_DocumentHostTabGroupSourceCenterValid = false;
+			m_DocumentHostTabGroupTargetCenterValid = false;
 			FinalizePendingMaterialEdits();
 			m_AssetPreviews.BeginRequestFrame();
 			if (m_AssetPreviewStressManifest)
@@ -3148,6 +3162,23 @@ namespace
 							PF_INFO(
 								"Document tab native-window round-trip UI fixture passed: the same session was dragged into the "
 								"main strip and back into a native host, while Level Editor remained in the main host.");
+							const bool HasGroupTarget = m_DocumentHostFixtureSessions.size() >= 2;
+							const auto* GroupTargetSession = HasGroupTarget
+								? m_Documents.Find(m_DocumentHostFixtureSessions[1].first) : nullptr;
+							const auto* GroupTargetHost = GroupTargetSession
+								? m_Documents.FindHost(GroupTargetSession->HostID) : nullptr;
+							if (GroupTargetSession && GroupTargetHost &&
+								GroupTargetHost->Role == PulseForgeEditor::EditorDocumentHostRole::Native &&
+								GroupTargetHost->ID != Host->ID &&
+								GroupTargetSession->Identity.Kind == Session->Identity.Kind)
+							{
+								m_DocumentHostTabGroupTargetIdentity = GroupTargetSession->Identity;
+								m_DocumentHostTabGroupTestPhase = DocumentTabGroupTestPhase::WaitingForTabs;
+								m_DocumentHostTabGroupTest = true;
+								PF_INFO("Document tab group fixture is moving the reattached session into a second native host.");
+							}
+							else
+								PF_ERROR("Document tab group fixture could not find a second compatible native host.");
 						}
 						else
 						{
@@ -3485,6 +3516,113 @@ namespace
 				case DocumentTabReorderTestPhase::Disabled:
 				case DocumentTabReorderTestPhase::Complete:
 				case DocumentTabReorderTestPhase::Failed:
+					break;
+			}
+#endif
+		}
+
+		void QueueDocumentTabGroupTestInput()
+		{
+			if (!m_DocumentHostTabGroupTest)
+				return;
+#ifndef _DEBUG
+			PF_ERROR("The document tab group UI fixture is available only in Debug builds.");
+			m_DocumentHostTabGroupTest = false;
+#else
+			ImGuiIO& IO = ImGui::GetIO();
+			const auto Fail = [this](const char* Message)
+			{
+				m_DocumentHostTabGroupTestPhase = DocumentTabGroupTestPhase::Failed;
+				m_DocumentHostTabGroupTest = false;
+				PF_ERROR("Document tab group UI fixture failed: {}", Message);
+			};
+			if (++m_DocumentHostTabGroupTestFrameCount > 600)
+			{
+				Fail("timed out before the native document tabs were grouped.");
+				return;
+			}
+
+			switch (m_DocumentHostTabGroupTestPhase)
+			{
+				case DocumentTabGroupTestPhase::WaitingForTabs:
+				{
+					if (!m_DocumentHostTabGroupSourceCenterValid || !m_DocumentHostTabGroupTargetCenterValid)
+						break;
+					const auto* SourceSession = m_Documents.Find(m_DocumentHostTabTearOffTestIdentity);
+					const auto* TargetSession = m_Documents.Find(m_DocumentHostTabGroupTargetIdentity);
+					const auto* SourceHost = SourceSession ? m_Documents.FindHost(SourceSession->HostID) : nullptr;
+					const auto* TargetHost = TargetSession ? m_Documents.FindHost(TargetSession->HostID) : nullptr;
+					if (!SourceSession || !TargetSession || !SourceHost || !TargetHost ||
+						SourceHost->Role != PulseForgeEditor::EditorDocumentHostRole::Native ||
+						TargetHost->Role != PulseForgeEditor::EditorDocumentHostRole::Native ||
+						SourceHost->ID == TargetHost->ID ||
+						SourceSession->Identity.Kind != TargetSession->Identity.Kind)
+					{
+						Fail("source and destination are not separate compatible native hosts.");
+						break;
+					}
+					const float DeltaX = m_DocumentHostTabGroupTargetCenter.x - m_DocumentHostTabGroupSourceCenter.x;
+					const float DeltaY = m_DocumentHostTabGroupTargetCenter.y - m_DocumentHostTabGroupSourceCenter.y;
+					if (DeltaX * DeltaX + DeltaY * DeltaY <= IO.MouseDragThreshold * IO.MouseDragThreshold)
+					{
+						Fail("source and destination tabs are too close to create a drag.");
+						break;
+					}
+					m_DocumentHostTabGroupSourceHostID = SourceHost->ID;
+					m_DocumentHostTabGroupTargetHostID = TargetHost->ID;
+					IO.AddMousePosEvent(
+						m_DocumentHostTabGroupSourceCenter.x,
+						m_DocumentHostTabGroupSourceCenter.y);
+					IO.AddMouseViewportEvent(m_DocumentHostTabGroupSourceViewportID);
+					IO.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+					m_DocumentHostTabGroupTestPhase = DocumentTabGroupTestPhase::PressQueued;
+					break;
+				}
+				case DocumentTabGroupTestPhase::PressQueued:
+					IO.AddMousePosEvent(
+						m_DocumentHostTabGroupTargetCenter.x,
+						m_DocumentHostTabGroupTargetCenter.y);
+					IO.AddMouseViewportEvent(m_DocumentHostTabGroupTargetViewportID);
+					m_DocumentHostTabGroupTestPhase = DocumentTabGroupTestPhase::PositionQueued;
+					break;
+				case DocumentTabGroupTestPhase::PositionQueued:
+					IO.AddMousePosEvent(
+						m_DocumentHostTabGroupTargetCenter.x,
+						m_DocumentHostTabGroupTargetCenter.y);
+					IO.AddMouseViewportEvent(m_DocumentHostTabGroupTargetViewportID);
+					IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+					m_DocumentHostTabGroupTestPhase = DocumentTabGroupTestPhase::ReleaseQueued;
+					break;
+				case DocumentTabGroupTestPhase::ReleaseQueued:
+				{
+					const auto* SourceSession = m_Documents.Find(m_DocumentHostTabTearOffTestIdentity);
+					const auto* TargetSession = m_Documents.Find(m_DocumentHostTabGroupTargetIdentity);
+					const auto* TargetHost = m_Documents.FindHost(m_DocumentHostTabGroupTargetHostID);
+					const auto* MainHost = m_Documents.FindHost(
+						PulseForgeEditor::EditorDocumentManager::MainHostID);
+					const bool BothSessionsGrouped = TargetHost && SourceSession && TargetSession &&
+						SourceSession->HostID == TargetHost->ID && TargetSession->HostID == TargetHost->ID &&
+						TargetHost->Documents.size() == 2 && TargetHost->ActiveDocument == SourceSession->Identity;
+					const bool SourceHostRetired =
+						m_Documents.FindHost(m_DocumentHostTabGroupSourceHostID) == nullptr;
+					const bool LevelRetained = MainHost && std::any_of(
+						MainHost->Documents.begin(), MainHost->Documents.end(), [](const auto& Identity)
+						{
+							return Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level;
+						});
+					if (!BothSessionsGrouped || !SourceHostRetired || !LevelRetained)
+					{
+						Fail("the same session did not join the target native tab stack or the empty host was not retired.");
+						break;
+					}
+					m_DocumentHostTabGroupTestPhase = DocumentTabGroupTestPhase::Complete;
+					m_DocumentHostTabGroupTest = false;
+					PF_INFO("Document tab group UI fixture passed: the same session joined an existing native tab stack and the empty source host was retired.");
+					break;
+				}
+				case DocumentTabGroupTestPhase::Disabled:
+				case DocumentTabGroupTestPhase::Complete:
+				case DocumentTabGroupTestPhase::Failed:
 					break;
 			}
 #endif
@@ -6132,6 +6270,25 @@ namespace
 							(TabMinimum.y + TabMaximum.y) * 0.5f);
 						m_DocumentHostTabReorderTestSecondBeforePositionValid = true;
 						m_DocumentHostTabReorderTestSecondAfterPositionValid = true;
+					}
+				}
+				if (m_DocumentHostTabGroupTest)
+				{
+					if (Session->Identity == m_DocumentHostTabTearOffTestIdentity)
+					{
+						m_DocumentHostTabGroupSourceCenter = ImVec2(
+							(TabMinimum.x + TabMaximum.x) * 0.5f,
+							(TabMinimum.y + TabMaximum.y) * 0.5f);
+						m_DocumentHostTabGroupSourceViewportID = TabViewportID;
+						m_DocumentHostTabGroupSourceCenterValid = true;
+					}
+					else if (Session->Identity == m_DocumentHostTabGroupTargetIdentity)
+					{
+						m_DocumentHostTabGroupTargetCenter = ImVec2(
+							(TabMinimum.x + TabMaximum.x) * 0.5f,
+							(TabMinimum.y + TabMaximum.y) * 0.5f);
+						m_DocumentHostTabGroupTargetViewportID = TabViewportID;
+						m_DocumentHostTabGroupTargetCenterValid = true;
 					}
 				}
 				if (m_DocumentHostTabReattachTest &&
@@ -11746,6 +11903,8 @@ namespace
 		size_t m_DocumentHostTabTearOffTestFrameCount = 0;
 		bool m_DocumentHostTabRoundTripTearOffPending = false;
 		bool m_DocumentHostTabReorderTest = false;
+		bool m_DocumentHostTabGroupTest = false;
+		size_t m_DocumentHostTabGroupTestFrameCount = 0;
 		bool m_DocumentHostPresentationFailureTest = false;
 		bool m_DocumentHostAcquireOutOfDateTest = false;
 		bool m_DocumentHostImageAllocationFailureTest = false;
@@ -11763,10 +11922,14 @@ namespace
 			DocumentTabReattachTestPhase::Disabled;
 		DocumentTabReorderTestPhase m_DocumentHostTabReorderTestPhase =
 			DocumentTabReorderTestPhase::Disabled;
+		DocumentTabGroupTestPhase m_DocumentHostTabGroupTestPhase = DocumentTabGroupTestPhase::Disabled;
 		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabReattachTestIdentity;
 		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabReorderTestFirst;
 		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabReorderTestSecond;
+		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabGroupTargetIdentity;
 		std::string m_DocumentHostTabReattachTestSourceHostID;
+		std::string m_DocumentHostTabGroupSourceHostID;
+		std::string m_DocumentHostTabGroupTargetHostID;
 		ImVec2 m_DocumentHostTabReattachTestTabCenter{ 0.0f, 0.0f };
 		ImGuiID m_DocumentHostTabReattachTestTabViewportID = 0;
 		bool m_DocumentHostTabReattachTestTabCenterValid = false;
@@ -11785,6 +11948,12 @@ namespace
 		bool m_DocumentHostTabReorderTestSecondBeforePositionValid = false;
 		bool m_DocumentHostTabReorderTestSecondAfterPositionValid = false;
 		size_t m_DocumentHostTabReorderTestFrameCount = 0;
+		ImVec2 m_DocumentHostTabGroupSourceCenter{ 0.0f, 0.0f };
+		ImVec2 m_DocumentHostTabGroupTargetCenter{ 0.0f, 0.0f };
+		ImGuiID m_DocumentHostTabGroupSourceViewportID = 0;
+		ImGuiID m_DocumentHostTabGroupTargetViewportID = 0;
+		bool m_DocumentHostTabGroupSourceCenterValid = false;
+		bool m_DocumentHostTabGroupTargetCenterValid = false;
 		std::optional<PulseForge::Project> m_Project;
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::optional<std::string> m_SavedSceneSnapshot;
