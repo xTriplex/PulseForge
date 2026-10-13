@@ -13,7 +13,7 @@ This record tracks the implementation authorized by `C:\Users\kaan_\Desktop\Puls
 | Document sessions and top strip | Implemented; interaction acceptance remains | The Editor uses project/asset/editor-kind identities, a persistent Level Editor document strip, per-host tabs, duplicate activation, dirty revisions, and the existing material draft/history state. |
 | Native hosts and backend presentation | Implemented; runtime smoke passed | Vulkan uses per-window swapchain targets on the existing NVRHI device; OpenGL uses GLFW shared contexts and ImGui's OpenGL3 renderer. Isolated one-host and two-host startup/shutdown checks passed on both backends. |
 | Transfer/preferences/persistence/dialogs | Implemented; acceptance matrix remains | Explicit top-strip transfers, opening preferences, versioned project workspace records, host bounds, dirty close routing, and in-editor asset destination workflows are present. Tab transfers are deferred until panel traversal ends; a tab context menu can detach to a new native host or reattach/regroup. Continue focused regression checks against dossier scenarios. |
-| Final regression and handoff | In progress | Vulkan frame ordering and dirty-close prompt routing are corrected. Native minimize/restore, resize while the main window is minimized, and fresh EditorWorkflow project-load runs are recorded below. The latest tab-close presentation and deferred transfer changes pass Vulkan Debug tests; native transfer and dirty-close UI acceptance remain. |
+| Final regression and handoff | In progress | Vulkan frame ordering and dirty-close prompt routing are corrected. Native minimize/restore, resize while the main window is minimized, and fresh EditorWorkflow project-load runs are recorded below. The deferred transfer and integrated tab-close changes pass the full Vulkan/OpenGL Debug/Release/Dist test matrix; native transfer and dirty-close UI acceptance remain. |
 
 ## Repository and protected-state baseline
 
@@ -133,7 +133,20 @@ Document transfer requests from tab drops and the new tab context menu are queue
 
 The tab close affordance is now drawn inside the same selectable rectangle and item identity as its document label. The close region has a subdued glyph and hover backing, so it reads as part of the tab rather than as a neighboring button/tab. An isolated EditorWorkflow run restored four material documents into the main strip and captured the resulting UI at 2048×1152, 120 DPI, on `WinSta0\\CodexSandboxDesktop-26df385c4bfa1d48642b940a93416f14`. Capture used the canonical GDI+ `Format32bppArgb` / `PrintWindow` flags 2 script; manifest: `Build/CMake/VS2022-x64/Diagnostics/DocumentTabCosmetic_20261013/material-tabs-after.json`; image: `Build/CMake/VS2022-x64/Diagnostics/DocumentTabCosmetic_20261013/material-tabs-after.png`. The image was opened and inspected. This is visual evidence for the tab appearance, not proof of close-click or transfer interaction.
 
-After these changes, Visual Studio 2022 x64 Vulkan Debug rebuilt `PulseForgeEditor` and `PulseForgeTests`; the fresh test executable passed 4,182 checks and CTest passed 2/2. A further isolated EditorWorkflow launch reached a submitted first frame with Khronos and NVRHI validation enabled. The logs contain zero NVRHI immediate-command-list state errors, zero VUID/UNASSIGNED errors, and empty stderr. Vulkan loader warning messages for optional missing TikTok LIVE Studio and RivaTuner layer manifests remain external to the editor validation. The editor received a normal close request and no `PulseForgeEditor` process remained. Runtime evidence is under `Build/CMake/VS2022-x64/Diagnostics/DocumentTabCosmetic_20261013/`.
+The close glyph appearance was captured again at 2048×1152 on the verified private desktop. A targeted message-based click was attempted at the tab close region, but the document list did not change, so close-click behavior remains unverified and needs ordinary user interaction.
+
+After these changes, Visual Studio 2022 x64 rebuilt `PulseForgeEditor` and `PulseForgeTests` for both configured renderers and all three configurations. Each freshly built test executable passed 4,182 checks and CTest passed 2/2:
+
+| Configuration | PulseForgeTests | CTest |
+|---|---:|---:|
+| Vulkan Debug | 4,182 | 2/2 |
+| Vulkan Release | 4,182 | 2/2 |
+| Vulkan Dist | 4,182 | 2/2 |
+| OpenGL Debug | 4,182 | 2/2 |
+| OpenGL Release | 4,182 | 2/2 |
+| OpenGL Dist | 4,182 | 2/2 |
+
+A further isolated EditorWorkflow launch reached a submitted first frame with Khronos and NVRHI validation enabled. The logs contain zero NVRHI immediate-command-list state errors, zero VUID/UNASSIGNED errors, and empty stderr. Vulkan loader warning messages for optional missing TikTok LIVE Studio and RivaTuner layer manifests remain external to the editor validation. The editor received a normal close request and no `PulseForgeEditor` process remained. Runtime screenshot and logs are under `Build/CMake/VS2022-x64/Diagnostics/DocumentTabCosmetic_20261013/`; per-configuration test logs are `PulseForgeTests-document-workflow-matrix.log` in each build configuration directory.
 
 ## Acceptance tracking at implementation checkpoint
 
@@ -196,5 +209,6 @@ Manual acceptance still required for document dragging/reattachment, dirty nativ
 - Feature branch: `feat/editor-workflow-multi-window`.
 - Implementation checkpoint: `22d256866c7622a4391309fba4473513ea1f5182` (`Implement native editor document workflows`).
 - Frame-order correction: `22d256866c7622a4391309fba4473513ea1f5182` (`Implement native editor document workflows`); dirty-close prompt routing: `0c41a7e0a1e09b9c8a5227301185ff2f64a8ca19` (`Route dirty document prompts to their host`). Later commits update this validation record.
+- Latest code correction: `96782c3` (`Defer document transfers and integrate tab close affordance`), covering deferred transfer mutation, project/type isolation checks, and an integrated tab close visual. Latest validation record update is pending commit.
 - The feature branch remains local, unpushed, and unmerged.
 - The deleted Spotlight research document, modified validation scene/materials, and untracked `CMakeSettings.json` remain outside the commit. Root `AGENTS.md` remains absent.
