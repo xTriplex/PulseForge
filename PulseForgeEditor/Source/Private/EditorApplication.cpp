@@ -4841,16 +4841,22 @@ namespace
 				DrawList->AddText(LabelPosition, ImGui::GetColorU32(ImGuiCol_Text), Label.c_str());
 				if (HasCloseButton)
 				{
-					const char* CloseGlyph = "×";
-					ImFont* CloseGlyphFont = ImGui::GetFont();
-					const float CloseGlyphFontSize = ImGui::GetFontSize() * 2.5f;
-					const ImVec2 CloseGlyphSize = CloseGlyphFont->CalcTextSizeA(
-						CloseGlyphFontSize, (std::numeric_limits<float>::max)(), 0.0f, CloseGlyph);
-					const ImVec2 ClosePosition(
-						CloseRegionMinimumX + (CloseRegionWidth - CloseGlyphSize.x) * 0.5f,
-						TabMinimum.y + (TabHeight - CloseGlyphSize.y) * 0.5f);
-					DrawList->AddText(CloseGlyphFont, CloseGlyphFontSize, ClosePosition,
-						ImGui::GetColorU32(CloseHovered ? ImGuiCol_Text : ImGuiCol_TextDisabled), CloseGlyph);
+					const float CloseMarkSize = std::min(ImGui::GetFontSize() * 0.9f, TabHeight * 0.72f);
+					const float CloseMarkHalfSize = CloseMarkSize * 0.5f;
+					const float CloseMarkThickness = std::max(1.5f, CloseMarkSize * 0.12f);
+					const ImVec2 CloseCenter(
+						CloseRegionMinimumX + CloseRegionWidth * 0.5f,
+						TabMinimum.y + TabHeight * 0.5f);
+					const ImU32 CloseColor = ImGui::GetColorU32(
+						CloseHovered ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+					DrawList->AddLine(
+						ImVec2(CloseCenter.x - CloseMarkHalfSize, CloseCenter.y - CloseMarkHalfSize),
+						ImVec2(CloseCenter.x + CloseMarkHalfSize, CloseCenter.y + CloseMarkHalfSize),
+						CloseColor, CloseMarkThickness);
+					DrawList->AddLine(
+						ImVec2(CloseCenter.x + CloseMarkHalfSize, CloseCenter.y - CloseMarkHalfSize),
+						ImVec2(CloseCenter.x - CloseMarkHalfSize, CloseCenter.y + CloseMarkHalfSize),
+						CloseColor, CloseMarkThickness);
 					if (CloseHovered)
 						ImGui::SetTooltip("Close %s", Session->DisplayName.c_str());
 				}
