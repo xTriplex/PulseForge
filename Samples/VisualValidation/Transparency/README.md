@@ -7,9 +7,9 @@ This self-contained project demonstrates material alpha masking, straight-alpha 
 1. Launch PulseForgeEditor using the Vulkan renderer.
 2. Choose **File → Open Project** and open `Transparency.pfproj`.
 3. Open `Assets/Scenes/TransparencyOverview.scene` if it is not selected automatically.
-4. Compare `Fence - alpha-masked and shadow casting` with `Opaque alpha-ignored fence reference`. Then select the masked fence and toggle its material's `Alpha Mode` between **MASK** and **OPAQUE**.
-5. Select the blue and amber panels and compare **BLEND** with **OPAQUE**. Adjust the base-color alpha factor to see the background mix change.
-6. Toggle `Double Sided` on the fence material and inspect the panel from its back in the Scene View.
+4. Compare `Fence - alpha-masked and shadow casting` with `Opaque alpha-ignored fence reference`. Open the masked fence material's **Material Details** utility and toggle `Alpha Mode` between **MASK** and **OPAQUE**.
+5. Open the blue and amber panel materials in **Material Details** and compare **BLEND** with **OPAQUE**. Adjust the base-color alpha factor to see the background mix change.
+6. Toggle `Double Sided` in the fence's Material Details and inspect the panel from its back in the Scene View.
 
 ## Expected behavior
 
@@ -42,4 +42,4 @@ The fence's transparent grid openings reveal the colored object behind it, and i
 
 ## Requirements
 
-Use the PulseForge build containing the alpha-mask and transparency rendering milestone. Project assets are bundled for offline use; see `ASSET_CREDITS.md` for the included CC0 HDRI provenance.
+Use a PulseForge Vulkan build with alpha masking and transparency support. Project assets are bundled for offline use; see `ASSET_CREDITS.md` for the included CC0 HDRI provenance.

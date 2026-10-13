@@ -1,6 +1,6 @@
 # Visual Validation Projects
 
-PulseForge's visual features should be inspectable in a project the user can open immediately, not only in an automated triangle test or a developer's private scene. This workflow makes a compact interactive demonstration part of the implementation deliverable whenever visual inspection is a meaningful acceptance requirement. PulseForge-specific agent guidance is maintained in the user's global Codex instructions rather than in a repository-local `AGENTS.md`.
+Visible engine and editor features should have a small project that can be opened and inspected directly. A focused sample complements automated tests when visual behavior is part of acceptance.
 
 ## When a demonstration is required
 
@@ -20,14 +20,10 @@ For downloaded or third-party content, verify the actual source, author, redistr
 |---|---|---|
 | [`Spotlight Shadows`](../Samples/VisualValidation/SpotlightShadows/README.md) | Persistent spotlight shadow maps, bias, PCF softness, multiple lights, and the four-map limit. | Includes Overview and preconfigured Shadow Limits scenes; interactive visual acceptance is requested in its README. |
 | [`Point Light Shadows`](../Samples/VisualValidation/PointLightShadows/README.md) | Omnidirectional point-light shadows, six cube faces, face boundaries, bias/softness, multiple lights, and the two-map limit. | Startup Overview plus Faces, Bias, and Limits scenes; interactive visual acceptance is requested in its README. |
-| [`PBR Materials`](../Samples/VisualValidation/PBRMaterials/README.md) | Textured base color, packed metallic-roughness, tangent-space normal mapping, material occlusion, HDR emission, and the material asset editor. | Startup workbench has seven indexed meshes; Debug GPU validation loads the project and captures an inspected 960×540 sRGB output image. |
+| [`PBR Materials`](../Samples/VisualValidation/PBRMaterials/README.md) | Textured base color, packed metallic-roughness, tangent-space normal mapping, material occlusion, HDR emission, and Material Details. | Startup workbench has seven indexed meshes; GPU validation renders the project through the production output path. Material tiles show base-color-factor swatches, not rendered PBR previews. |
 | [`Transparency`](../Samples/VisualValidation/Transparency/README.md) | OPAQUE, alpha-masked, and straight-alpha BLEND materials; double-sided shading; and cutout shadows. | Startup workbench includes a cutout fence and transparent colored panels; Vulkan image validation compares masked spotlight, point-light, and directional shadows. |
 | [`Editor Workflow`](../Samples/VisualValidation/EditorWorkflow/README.md) | Editor selection, multiselection, hierarchy clipboard and duplication, visibility, focus, viewport navigation, transform snapping, and End surface placement. | Startup workbench includes flat ground, raised and sloped supports, centered-pivot objects, and a parent/child hierarchy for interactive acceptance. |
 
-## Handoff checklist
+## Validation
 
-1. State why the milestone does or does not need an interactive demonstration.
-2. Include the project and assets in the same implementation change when required.
-3. Give the exact project path, startup scene, and opening steps in the final report.
-4. Report asset/reference and application validation separately from manual visual acceptance.
-5. Preserve existing demos and all unrelated user project/settings data.
+When changing visible behavior, update the relevant sample in the same change where practical. Document the project path, startup scene, and inspection steps in its README. Validate asset registration, references, and project loading separately from visual appearance. Automated rendering or command submission does not establish visual acceptance; state which interactions still need direct inspection.

@@ -29,7 +29,7 @@ Save/reload to check component persistence. Enter Play and move lights/casters u
 
 ## Assets and limitations
 
-All models, materials, textures, metadata, and scenes are project-local. `ASSET_CREDITS.md` records the HDRI provenance. The demonstration uses supported static glTF cube geometry and the bundled PPM texture. The first-generation renderer uses two 512×512 D32 depth cubemaps (about 12 MiB raw); each assigned light renders six depth passes. The filter is a modest PCF approximation. Transparent/alpha-masked shadow casters, point-light shadow caching, adaptive resolution, and OpenGL scene rendering are not supported. Face-edge appearance requires visual inspection; automated command validation is not pixel-accuracy proof.
+All models, materials, textures, metadata, and scenes are project-local. `ASSET_CREDITS.md` records the HDRI provenance. The demonstration uses supported static glTF cube geometry and the bundled PPM texture. The first-generation renderer uses two 512×512 D32 depth cubemaps (about 12 MiB raw); each assigned light renders six depth passes. The filter is a modest PCF approximation. Opaque and alpha-masked materials cast point-light shadows; BLEND materials do not. Point-shadow caching, adaptive resolution, and OpenGL scene rendering are not supported. Face-edge appearance requires visual inspection; automated command validation is not pixel-accuracy proof.
 
 ## Troubleshooting
 

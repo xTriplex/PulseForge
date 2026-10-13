@@ -2,11 +2,11 @@
 
 ## Purpose
 
-A small lighting room for inspecting Phase D's real-time spotlight shadow maps in the Vulkan renderer. The startup scene has a broad floor and back wall, matte and metallic block casters, two differently colored shadow-casting spotlights, three additional spotlights for slot/overflow tests, a modest HDR environment, and an authored game camera.
+A small lighting room for inspecting real-time spotlight shadow maps in the Vulkan renderer. The startup scene has a broad floor and back wall, matte and metallic block casters, two differently colored shadow-casting spotlights, three additional spotlights for slot/overflow tests, a modest HDR environment, and an authored game camera.
 
 ## Requirements and opening
 
-Use a PulseForge build containing commit `6d167831b7c2aef3167fbfe852e04ffa1d5a760a` or later, with the Vulkan renderer and its normal deployed shader assets.
+Use a PulseForge build with Vulkan spotlight-shadow support and its deployed shader assets.
 
 1. Launch `PulseForgeEditor` from a logged-in Windows desktop session.
 2. Use **File → Open Project...** and choose `SpotlightShadows.pfproj` in this directory.
