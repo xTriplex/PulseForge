@@ -5449,7 +5449,10 @@ namespace
 				const bool TabHovered = ImGui::IsItemHovered();
 				const ImVec2 MousePosition = ImGui::GetIO().MousePos;
 				const float CloseRegionMinimumX = TabMinimum.x + LeftPadding + LabelSize.x + LabelToCloseGap;
-				const bool CloseHovered = HasCloseButton && TabHovered && MousePosition.x >= CloseRegionMinimumX;
+				const ImVec2 CloseButtonMinimum(CloseRegionMinimumX, TabMinimum.y + 2.0f);
+				const ImVec2 CloseButtonMaximum(CloseRegionMinimumX + CloseRegionWidth, TabMaximum.y - 2.0f);
+				const bool CloseHovered = HasCloseButton && TabHovered && ImGui::IsMouseHoveringRect(
+					CloseButtonMinimum, CloseButtonMaximum, false);
 				if (ImGui::IsItemActivated() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !CloseHovered)
 				{
 					m_ActiveDocumentTabDrag = Session->Identity;
@@ -5471,16 +5474,20 @@ namespace
 				DrawList->AddText(LabelPosition, ImGui::GetColorU32(ImGuiCol_Text), Label.c_str());
 				if (HasCloseButton)
 				{
-					const char* CloseGlyph = "×";
-					ImFont* CloseGlyphFont = ImGui::GetFont();
-					const float CloseGlyphFontSize = ImGui::GetFontSize() * 2.5f;
-					const ImVec2 CloseGlyphSize = CloseGlyphFont->CalcTextSizeA(
-						CloseGlyphFontSize, (std::numeric_limits<float>::max)(), 0.0f, CloseGlyph);
-					const ImVec2 ClosePosition(
-						CloseRegionMinimumX + (CloseRegionWidth - CloseGlyphSize.x) * 0.5f,
-						TabMinimum.y + (TabHeight - CloseGlyphSize.y) * 0.5f);
-					DrawList->AddText(CloseGlyphFont, CloseGlyphFontSize, ClosePosition,
-						ImGui::GetColorU32(CloseHovered ? ImGuiCol_Text : ImGuiCol_TextDisabled), CloseGlyph);
+					const ImVec2 CloseCenter(CloseRegionMinimumX + CloseRegionWidth * 0.5f,
+						TabMinimum.y + TabHeight * 0.5f);
+					if (CloseHovered)
+						DrawList->AddRectFilled(CloseButtonMinimum, CloseButtonMaximum,
+							ImGui::GetColorU32(ImGuiCol_ButtonHovered), 4.0f);
+					constexpr float CloseHalfExtent = 6.0f;
+					const ImU32 CloseColor = ImGui::GetColorU32(
+						CloseHovered ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+					DrawList->AddLine(
+						ImVec2(CloseCenter.x - CloseHalfExtent, CloseCenter.y - CloseHalfExtent),
+						ImVec2(CloseCenter.x + CloseHalfExtent, CloseCenter.y + CloseHalfExtent), CloseColor, 2.0f);
+					DrawList->AddLine(
+						ImVec2(CloseCenter.x + CloseHalfExtent, CloseCenter.y - CloseHalfExtent),
+						ImVec2(CloseCenter.x - CloseHalfExtent, CloseCenter.y + CloseHalfExtent), CloseColor, 2.0f);
 					if (CloseHovered)
 						ImGui::SetTooltip("Close %s", Session->DisplayName.c_str());
 				}
