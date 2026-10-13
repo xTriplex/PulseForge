@@ -5,9 +5,10 @@ namespace PulseForgeEditor
 	[[nodiscard]] constexpr bool ShouldDetachDocumentTab(
 		bool MouseReleased,
 		bool HasActiveTabDrag,
-		bool TransferQueued,
-		bool PointerOverEditorViewport) noexcept
+		bool TransferQueued) noexcept
 	{
-		return MouseReleased && HasActiveTabDrag && !TransferQueued && !PointerOverEditorViewport;
+		// Only a registered document strip is a valid docking destination. Releasing over
+		// any other editor viewport is therefore a tear-off, just like releasing on desktop.
+		return MouseReleased && HasActiveTabDrag && !TransferQueued;
 	}
 }

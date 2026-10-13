@@ -3889,11 +3889,10 @@ namespace
 			[](int) { return false; });
 		PF_CHECK(Tests, CleanBatch.empty());
 		// A captured tab drag may outlive ImGui's payload on the release frame.
-		PF_CHECK(Tests, ShouldDetachDocumentTab(true, true, false, false));
-		PF_CHECK(Tests, !ShouldDetachDocumentTab(false, true, false, false));
-		PF_CHECK(Tests, !ShouldDetachDocumentTab(true, false, false, false));
-		PF_CHECK(Tests, !ShouldDetachDocumentTab(true, true, true, false));
-		PF_CHECK(Tests, !ShouldDetachDocumentTab(true, true, false, true));
+		PF_CHECK(Tests, ShouldDetachDocumentTab(true, true, false));
+		PF_CHECK(Tests, !ShouldDetachDocumentTab(false, true, false));
+		PF_CHECK(Tests, !ShouldDetachDocumentTab(true, false, false));
+		PF_CHECK(Tests, !ShouldDetachDocumentTab(true, true, true));
 		const EditorDocumentIdentity MaterialA{ *Project, *Material, EditorDocumentKind::Material };
 		const EditorDocumentIdentity MaterialB{ *Project, *OtherMaterial, EditorDocumentKind::Material };
 		const EditorDocumentIdentity SameNameOtherFolder{ *Project, *Scene, EditorDocumentKind::Material };

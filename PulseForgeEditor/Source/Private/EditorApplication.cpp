@@ -4730,8 +4730,7 @@ namespace
 
 			const bool TransferQueued = m_PendingDocumentTransfer &&
 				m_PendingDocumentTransfer->Identity == Identity;
-			if (!PulseForgeEditor::ShouldDetachDocumentTab(
-				true, HasCapturedTabDrag, TransferQueued, ImGui::GetIO().MouseHoveredViewport != 0))
+			if (!PulseForgeEditor::ShouldDetachDocumentTab(true, HasCapturedTabDrag, TransferQueued))
 				return;
 
 			const auto* Session = m_Documents.Find(Identity);
