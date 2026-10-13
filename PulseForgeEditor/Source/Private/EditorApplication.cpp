@@ -2208,7 +2208,7 @@ namespace
 			const bool UnsupportedDocumentFocused =
 				CommandTarget == PulseForgeEditor::EditorDocumentCommandTarget::Unsupported ||
 				(MaterialDetailsFocused && !MaterialDocumentFocused);
-			if (!PulseForgeEditor::CanRouteEditorHistoryShortcut({
+			if (!PulseForgeEditor::CanRouteEditorShortcut({
 				.SceneAvailable = MaterialDocumentFocused || (!UnsupportedDocumentFocused && m_Scene != nullptr),
 				.RuntimeActive = !MaterialDocumentFocused && m_SceneRuntime != nullptr,
 				.CameraNavigationActive = !MaterialDocumentFocused && m_EditorCameraNavigationActive,
@@ -2334,19 +2334,29 @@ namespace
 
 		[[nodiscard]] bool CanRouteEditorShortcut() const
 		{
-			return m_Scene && !m_SceneRuntime && !m_EditorCameraNavigationActive && !m_GizmoDrag &&
-				!ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() &&
-				!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
-				GImGui->NavLayer != ImGuiNavLayer_Menu && GImGui->NavWindowingTarget == nullptr;
+			return CanRouteEditorInputShortcut(m_Scene != nullptr);
+		}
+
+		[[nodiscard]] bool CanRouteEditorInputShortcut(bool CommandTargetAvailable) const
+		{
+			const ImGuiIO& IO = ImGui::GetIO();
+			return PulseForgeEditor::CanRouteEditorShortcut({
+				.SceneAvailable = CommandTargetAvailable,
+				.RuntimeActive = m_SceneRuntime != nullptr,
+				.CameraNavigationActive = m_EditorCameraNavigationActive,
+				.GizmoInteractionActive = m_GizmoDrag.has_value(),
+				.TextInputActive = IO.WantTextInput,
+				.ImGuiItemActive = ImGui::IsAnyItemActive(),
+				.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup),
+				.MenuNavigationActive = GImGui && GImGui->NavLayer == ImGuiNavLayer_Menu,
+				.WindowNavigationActive = GImGui && GImGui->NavWindowingTarget != nullptr
+			});
 		}
 
 		void HandleSceneEditingShortcuts()
 		{
 			const ImGuiIO& IO = ImGui::GetIO();
-			const bool CanFocusSearch = m_Project && !m_SceneRuntime && !m_EditorCameraNavigationActive && !m_GizmoDrag &&
-				!IO.WantTextInput && !ImGui::IsAnyItemActive() &&
-				!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) &&
-				GImGui->NavLayer != ImGuiNavLayer_Menu && GImGui->NavWindowingTarget == nullptr &&
+			const bool CanFocusSearch = m_Project && CanRouteEditorInputShortcut(true) &&
 				!IO.KeyAlt && !IO.KeySuper;
 			if (CanFocusSearch && IO.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false))
 			{

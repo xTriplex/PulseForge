@@ -8612,17 +8612,17 @@ end
 	void TestEditorInteractionPolicy(TestRunner& Tests)
 	{
 		using namespace PulseForgeEditor;
-		const EditorHistoryShortcutContext OrdinarySceneFocus{ .SceneAvailable = true };
-		PF_CHECK(Tests, CanRouteEditorHistoryShortcut(OrdinarySceneFocus));
-		PF_CHECK(Tests, CanRouteEditorHistoryShortcut({ .SceneAvailable = true, .GizmoInteractionActive = false }));
-		PF_CHECK(Tests, !CanRouteEditorHistoryShortcut({ .SceneAvailable = true, .GizmoInteractionActive = true }));
-		PF_CHECK(Tests, !CanRouteEditorHistoryShortcut({ .SceneAvailable = true, .TextInputActive = true }));
-		PF_CHECK(Tests, !CanRouteEditorHistoryShortcut({ .SceneAvailable = true, .ImGuiItemActive = true }));
-		PF_CHECK(Tests, !CanRouteEditorHistoryShortcut({ .SceneAvailable = true, .PopupOpen = true }));
-		PF_CHECK(Tests, !CanRouteEditorHistoryShortcut({ .SceneAvailable = true, .MenuNavigationActive = true }));
-		PF_CHECK(Tests, !CanRouteEditorHistoryShortcut({ .SceneAvailable = true, .WindowNavigationActive = true }));
-		PF_CHECK(Tests, !CanRouteEditorHistoryShortcut({ .SceneAvailable = true, .RuntimeActive = true }));
-		PF_CHECK(Tests, !CanRouteEditorHistoryShortcut({ .SceneAvailable = true, .CameraNavigationActive = true }));
+		const EditorShortcutContext OrdinarySceneFocus{ .SceneAvailable = true };
+		PF_CHECK(Tests, CanRouteEditorShortcut(OrdinarySceneFocus));
+		PF_CHECK(Tests, CanRouteEditorShortcut({ .SceneAvailable = true, .GizmoInteractionActive = false }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .GizmoInteractionActive = true }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .TextInputActive = true }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .ImGuiItemActive = true }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .PopupOpen = true }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .MenuNavigationActive = true }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .WindowNavigationActive = true }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .RuntimeActive = true }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .CameraNavigationActive = true }));
 
 		PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ true, true, false }, false) ==
 			ViewportGizmoPointerOutcome::Continue);
@@ -8785,7 +8785,7 @@ end
 			PF_CHECK(Tests, !History.IsActive() && History.GetCommandCount() == 1 && History.GetCursor() == 1);
 			PF_CHECK(Tests, History.CanUndo() && History.GetUndoCommand() &&
 				History.GetUndoCommand()->Description == Description);
-			PF_CHECK(Tests, CanRouteEditorHistoryShortcut({ .SceneAvailable = true }) && History.CanUndo());
+			PF_CHECK(Tests, CanRouteEditorShortcut({ .SceneAvailable = true }) && History.CanUndo());
 
 			const auto Undone = History.Undo([&](std::string_view State) { return Restore(State, SceneValue, Selection); });
 			PF_CHECK(Tests, Undone && *Undone);
