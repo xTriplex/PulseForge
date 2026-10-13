@@ -1364,6 +1364,7 @@ namespace
 			if (m_Layout.SubmitDockspace())
 				CancelViewportInteractionForLayoutChange();
 			DrawWorkspacePanels();
+			ProcessPendingDocumentTabClose();
 			ProcessPendingDocumentTransfer();
 			#ifdef PF_EDITOR_RENDERER_OPENGL
 			if (!m_OpenGLDiagnosticCapturePath.empty())
@@ -4602,6 +4603,22 @@ namespace
 			}
 		}
 
+		void QueueDocumentTabClose(const PulseForgeEditor::EditorDocumentIdentity& Identity)
+		{
+			if (!m_PendingDocumentTabClose)
+				m_PendingDocumentTabClose = Identity;
+		}
+
+		void ProcessPendingDocumentTabClose()
+		{
+			if (!m_PendingDocumentTabClose)
+				return;
+
+			const PulseForgeEditor::EditorDocumentIdentity Identity = *m_PendingDocumentTabClose;
+			m_PendingDocumentTabClose.reset();
+			RequestDocumentClose(Identity);
+		}
+
 		void QueueDocumentTransfer(
 			const PulseForgeEditor::EditorDocumentIdentity& Identity,
 			std::string DestinationHostID,
@@ -4717,7 +4734,7 @@ namespace
 				const bool CloseHovered = HasCloseButton && TabHovered &&
 					MousePosition.x >= TabMaximum.x - CloseRegionWidth;
 				if (Pressed && CloseHovered)
-					RequestDocumentClose(Session->Identity);
+					QueueDocumentTabClose(Session->Identity);
 				else if (Pressed)
 				{
 					(void)m_Documents.Activate(Session->Identity);
@@ -10093,6 +10110,7 @@ namespace
 		std::string m_AssetDestinationValidationError;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_LevelDocumentIdentity;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentClose;
+		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentTabClose;
 		std::optional<std::string> m_PendingDocumentHostClose;
 		std::optional<PendingDocumentTransfer> m_PendingDocumentTransfer;
 		std::string m_DocumentCloseDialogHostID;
