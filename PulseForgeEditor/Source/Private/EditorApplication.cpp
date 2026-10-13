@@ -75,6 +75,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <fstream>
 #include <charconv>
 #include <cmath>
@@ -5503,10 +5504,14 @@ namespace
 										ImGui::PushID(static_cast<int>(Message.Sequence >> 32));
 										ImGui::PushID(static_cast<int>(Message.Sequence & 0xffffffffu));
 										ImGui::TableNextRow();
-										ImGui::TableSetColumnIndex(0);
-										ImGui::Selectable("##ConsoleEntryContext", false,
+										ImGui::TableNextColumn();
+										char SeverityLabel[16]{};
+										std::snprintf(SeverityLabel, sizeof(SeverityLabel), "[%s]", LogLevelName(Message.Level));
+										ImGui::PushStyleColor(ImGuiCol_Text, LogLevelColor(Message.Level));
+										ImGui::Selectable(SeverityLabel, false,
 											ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
 											ImVec2(0.0f, ImGui::GetTextLineHeightWithSpacing()));
+										ImGui::PopStyleColor();
 										if (ImGui::BeginPopupContextItem("ConsoleEntryContextMenu"))
 										{
 											if (ImGui::MenuItem("Copy Message"))
@@ -5518,14 +5523,12 @@ namespace
 											}
 											ImGui::EndPopup();
 										}
-										ImGui::TableSetColumnIndex(0);
-										ImGui::TextColored(LogLevelColor(Message.Level), "[%s]", LogLevelName(Message.Level));
-										ImGui::TableSetColumnIndex(1);
+										ImGui::TableNextColumn();
 										const float LoggerWidth = ImGui::GetContentRegionAvail().x;
 										m_EditorStyle.TextMuted(Message.Logger);
 										if (ImGui::IsItemHovered() && ImGui::CalcTextSize(Message.Logger.c_str()).x > LoggerWidth)
 											ImGui::SetTooltip("%s", Message.Logger.c_str());
-										ImGui::TableSetColumnIndex(2);
+										ImGui::TableNextColumn();
 										ImGui::TextUnformatted(
 											Message.Text.data(), Message.Text.data() + Message.Text.size());
 										if (ImGui::IsItemHovered())
