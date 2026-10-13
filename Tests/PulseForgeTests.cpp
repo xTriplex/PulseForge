@@ -46,6 +46,7 @@
 #include "Editor/EditorDocumentHostPolicy.h"
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
+#include "Editor/EditorNativeWindowBoundsPolicy.h"
 #include "Editor/EditorSnapshotHistory.h"
 #include "Editor/EditorSelection.h"
 #include "Editor/EditorVisibility.h"
@@ -4253,6 +4254,40 @@ namespace
 		MissingLevel["hosts"][0]["documents"] = nlohmann::json::array();
 		MissingLevel["hosts"][0]["active"] = nullptr;
 		PF_CHECK(Tests, !EditorDocumentWorkspaceCodec::Deserialize(MissingLevel.dump(), *Project));
+	}
+
+	void TestEditorNativeWindowBoundsPolicy(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+
+		EditorDocumentHost::WindowBounds Saved;
+		Saved.X = -1900.0f;
+		Saved.Y = -80.0f;
+		Saved.Width = 800.0f;
+		Saved.Height = 600.0f;
+		Saved.DpiScale = 1.0f;
+		Saved.HasValue = true;
+
+		const EditorNativeWindowWorkArea LeftMonitor{ -1920.0f, -40.0f, 1920.0f, 1040.0f };
+		const EditorNativeWindowRect NegativeCoordinate = ResolveNativeWindowRect(Saved, LeftMonitor, 1.5f);
+		PF_CHECK(Tests, NegativeCoordinate.X == -1900.0f && NegativeCoordinate.Y == -40.0f);
+		PF_CHECK(Tests, NegativeCoordinate.Width == 1200.0f && NegativeCoordinate.Height == 900.0f);
+
+		Saved.X = 4000.0f;
+		Saved.Y = -1000.0f;
+		const EditorNativeWindowRect Recovered = ResolveNativeWindowRect(Saved, LeftMonitor, 1.0f);
+		PF_CHECK(Tests, Recovered.X == -64.0f && Recovered.Y == -40.0f);
+		PF_CHECK(Tests, Recovered.Width == 800.0f && Recovered.Height == 600.0f);
+
+		Saved.DpiScale = 0.5f;
+		const EditorNativeWindowRect BoundedScale = ResolveNativeWindowRect(Saved,
+			{ -2000.0f, -100.0f, 3000.0f, 2000.0f }, 4.0f);
+		PF_CHECK(Tests, BoundedScale.Width == 1600.0f && BoundedScale.Height == 1200.0f);
+
+		Saved.DpiScale = 0.0f;
+		const EditorNativeWindowRect InvalidScale = ResolveNativeWindowRect(Saved, {}, 2.0f);
+		PF_CHECK(Tests, InvalidScale.Width == 800.0f && InvalidScale.Height == 600.0f);
+		PF_CHECK(Tests, InvalidScale.X == 4000.0f && InvalidScale.Y == -1000.0f);
 	}
 
 	void TestAssetImportOperation(TestRunner& Tests)
@@ -9450,6 +9485,7 @@ int main()
 	TestEditorDocumentManager(Tests);
 	TestEditorSnapshotHistory(Tests);
 	TestEditorDocumentWorkspaceCodec(Tests);
+	TestEditorNativeWindowBoundsPolicy(Tests);
 	TestAssetImportOperation(Tests);
 	TestMaterialAssets(Tests);
 	TestProjectFiles(Tests);

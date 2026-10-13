@@ -51,6 +51,7 @@
 #include "Editor/EditorPlatformViewportPolicy.h"
 #include "Editor/EditorMaterialPropertyLayoutPolicy.h"
 #include "Editor/EditorDocumentManager.h"
+#include "Editor/EditorNativeWindowBoundsPolicy.h"
 #include "Editor/EditorDocumentHostPolicy.h"
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
@@ -228,34 +229,27 @@ namespace
 					WorkHeight = Mode->height;
 				}
 			}
-			if (WorkWidth > 0 && WorkHeight > 0)
-			{
-				Width = (std::min)(Width, (std::max)(320.0f, static_cast<float>(WorkWidth)));
-				Height = (std::min)(Height, (std::max)(240.0f, static_cast<float>(WorkHeight)));
-			}
 			float ScaleX = 1.0f;
 			float ScaleY = 1.0f;
 			glfwGetMonitorContentScale(Monitor, &ScaleX, &ScaleY);
-			const float CurrentScale = (std::max)(ScaleX, ScaleY);
-			if (std::isfinite(CurrentScale) && std::isfinite(Saved.DpiScale) && Saved.DpiScale > 0.0f)
-			{
-				const float ScaleRatio = std::clamp(CurrentScale / Saved.DpiScale, 0.5f, 2.0f);
-				Width *= ScaleRatio;
-				Height *= ScaleRatio;
-			}
-			if (WorkWidth > 0 && WorkHeight > 0)
-			{
-				Width = (std::min)(Width, static_cast<float>(WorkWidth));
-				Height = (std::min)(Height, static_cast<float>(WorkHeight));
-				const float VisibleTitleWidth = (std::min)(64.0f, Width);
-				const float VisibleTitleHeight = (std::min)(40.0f, Height);
-				X = std::clamp(X, static_cast<float>(WorkX) - Width + VisibleTitleWidth,
-					static_cast<float>(WorkX + WorkWidth) - VisibleTitleWidth);
-				Y = std::clamp(Y, static_cast<float>(WorkY),
-					static_cast<float>(WorkY + WorkHeight) - VisibleTitleHeight);
-			}
+			auto PlacementBounds = Saved;
+			PlacementBounds.X = X;
+			PlacementBounds.Y = Y;
+			PlacementBounds.Width = Width;
+			PlacementBounds.Height = Height;
+			const auto Resolved = PulseForgeEditor::ResolveNativeWindowRect(PlacementBounds,
+				{ static_cast<float>(WorkX), static_cast<float>(WorkY),
+					static_cast<float>(WorkWidth), static_cast<float>(WorkHeight) },
+				(std::max)(ScaleX, ScaleY));
+			return { ImVec2(Resolved.X, Resolved.Y), ImVec2(Resolved.Width, Resolved.Height) };
 		}
-		return { ImVec2(X, Y), ImVec2((std::max)(Width, 320.0f), (std::max)(Height, 240.0f)) };
+		auto FallbackBounds = Saved;
+		FallbackBounds.X = X;
+		FallbackBounds.Y = Y;
+		FallbackBounds.Width = Width;
+		FallbackBounds.Height = Height;
+		const auto Resolved = PulseForgeEditor::ResolveNativeWindowRect(FallbackBounds, {}, Saved.DpiScale);
+		return { ImVec2(Resolved.X, Resolved.Y), ImVec2(Resolved.Width, Resolved.Height) };
 	}
 
 	PulseForgeEditor::EditorDocumentHost::WindowBounds MakeDocumentDropWindowBounds(ImVec2 MousePosition)
