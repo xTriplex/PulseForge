@@ -63,6 +63,13 @@ namespace PulseForge
 			const std::filesystem::path& ProjectRoot,
 			const AssetID& SourceAsset,
 			const std::filesystem::path& DestinationPath);
+		// Moves a managed Assets subdirectory beneath another existing managed directory. The folder's
+		// asset sidecars move with it, preserving every AssetID. Source and destination are project-relative.
+		[[nodiscard]] static std::expected<std::filesystem::path, AssetOperationError> MoveFolder(
+			AssetRegistry& Registry,
+			const std::filesystem::path& ProjectRoot,
+			const std::filesystem::path& SourceFolderPath,
+			const std::filesystem::path& DestinationParentPath);
 		[[nodiscard]] static std::expected<AssetRecord, AssetOperationError> Duplicate(
 			AssetRegistry& Registry,
 			const std::filesystem::path& ProjectRoot,

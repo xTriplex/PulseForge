@@ -2330,6 +2330,48 @@ namespace
 			SetStatus("Moved " + PathToUtf8(Moved->ProjectRelativePath) + ".");
 		}
 
+		void MoveFolderAt(
+			const std::filesystem::path& Source,
+			const std::filesystem::path& DestinationParent)
+		{
+			if (!m_Project)
+				return;
+			auto Moved = PulseForge::AssetOperations::MoveFolder(
+				m_Project->GetAssetRegistry(),
+				m_Project->GetRootPath(),
+				Source,
+				DestinationParent);
+			if (!Moved)
+			{
+				std::string Message = DescribeAssetOperationError("Folder move failed", Moved.error());
+				RefreshAssetsAfterOperationFailure(Message);
+				SetError(std::move(Message));
+				return;
+			}
+
+			const auto RebaseFolder = [&Source, &Moved](const std::filesystem::path& Folder)
+				-> std::optional<std::filesystem::path>
+			{
+				if (Folder == Source)
+					return *Moved;
+				const std::filesystem::path Relative = Folder.lexically_relative(Source);
+				if (Relative.empty() || Relative.is_absolute() ||
+					(Relative.begin() != Relative.end() && *Relative.begin() == ".."))
+				{
+					return std::nullopt;
+				}
+				return *Moved / Relative;
+			};
+			if (const auto Rebased = RebaseFolder(m_CurrentContentFolder))
+				m_CurrentContentFolder = *Rebased;
+			if (m_SelectedContentFolder)
+				if (const auto Rebased = RebaseFolder(*m_SelectedContentFolder))
+					m_SelectedContentFolder = *Rebased;
+
+			UpdateAssetList();
+			SetStatus("Moved folder to " + PathToUtf8(*Moved) + ". Asset identities were preserved.");
+		}
+
 		void DuplicateAsset(const PulseForge::AssetID& Identifier)
 		{
 			if (!m_Project)
@@ -7165,7 +7207,10 @@ namespace
 			return nullptr;
 		}
 
-		void DrawContentFolderNode(const ContentFolderNode& Node, bool IsRoot = false)
+		void DrawContentFolderNode(
+			const ContentFolderNode& Node,
+			std::function<void()>& DeferredAction,
+			bool IsRoot = false)
 		{
 			if (IsRoot)
 				ImGui::SetNextItemOpen(true, ImGuiCond_Once);
@@ -7184,12 +7229,80 @@ namespace
 				Flags);
 			if (ImGui::IsItemClicked())
 				m_CurrentContentFolder = Node.RelativePath;
+			BeginFolderDragSource(Node.RelativePath, Node.Name);
+			HandleManagedFolderDropTarget(Node.RelativePath, DeferredAction);
 			if (IsOpen && !Node.Children.empty())
 			{
 				for (const ContentFolderNode& Child : Node.Children)
-					DrawContentFolderNode(Child);
+					DrawContentFolderNode(Child, DeferredAction);
 				ImGui::TreePop();
 			}
+		}
+
+		void BeginFolderDragSource(const std::filesystem::path& Folder, std::string_view Name)
+		{
+			if (!ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+				return;
+			const std::string Payload = PathToUtf8(Folder);
+			ImGui::SetDragDropPayload("PF_MANAGED_FOLDER_MOVE", Payload.c_str(), Payload.size() + 1);
+			ImGui::Text("Move folder: %.*s", static_cast<int>(Name.size()), Name.data());
+			ImGui::EndDragDropSource();
+		}
+
+		void HandleManagedFolderDropTarget(
+			const std::filesystem::path& DestinationFolder,
+			std::function<void()>& DeferredAction)
+		{
+			if (DeferredAction || !ImGui::BeginDragDropTarget())
+				return;
+
+			if (const ImGuiPayload* Payload = ImGui::AcceptDragDropPayload("PF_MANAGED_ASSET_MOVE"))
+			{
+				if (Payload->IsDelivery() && Payload->Data && Payload->DataSize > 1)
+				{
+					std::string_view IdentifierText(static_cast<const char*>(Payload->Data),
+						static_cast<size_t>(Payload->DataSize));
+					if (!IdentifierText.empty() && IdentifierText.back() == '\0')
+						IdentifierText.remove_suffix(1);
+					if (const auto Identifier = PulseForge::AssetID::Parse(IdentifierText))
+					{
+						const auto Record = m_Project
+							? m_Project->GetAssetRegistry().Find(*Identifier) : std::nullopt;
+						if (Record)
+						{
+							const std::filesystem::path Destination =
+								DestinationFolder / Record->ProjectRelativePath.filename();
+							DeferredAction = [this, Identifier = *Identifier, Destination]
+							{
+								QueueAfterSave([this, Identifier, Destination]
+								{
+									MoveAssetAt(Identifier, Destination);
+								});
+							};
+						}
+					}
+				}
+			}
+			else if (const ImGuiPayload* Payload = ImGui::AcceptDragDropPayload("PF_MANAGED_FOLDER_MOVE"))
+			{
+				if (Payload->IsDelivery() && Payload->Data && Payload->DataSize > 1)
+				{
+					std::string_view SourceText(static_cast<const char*>(Payload->Data),
+						static_cast<size_t>(Payload->DataSize));
+					if (!SourceText.empty() && SourceText.back() == '\0')
+						SourceText.remove_suffix(1);
+					const std::string SourceString(SourceText);
+					const std::filesystem::path Source = std::filesystem::u8path(SourceString);
+					DeferredAction = [this, Source, DestinationFolder]
+					{
+						QueueAfterSave([this, Source, DestinationFolder]
+						{
+							MoveFolderAt(Source, DestinationFolder);
+						});
+					};
+				}
+			}
+			ImGui::EndDragDropTarget();
 		}
 
 		void DrawContentBreadcrumbs()
@@ -7270,6 +7383,13 @@ namespace
 						break;
 				}
 			}
+			if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+			{
+				const std::string Identifier = Asset.ID.ToString();
+				ImGui::SetDragDropPayload("PF_MANAGED_ASSET_MOVE", Identifier.c_str(), Identifier.size() + 1);
+				ImGui::Text("Move asset: %s", Presentation.Name.c_str());
+				ImGui::EndDragDropSource();
+			}
 			if (ImGui::IsItemHovered())
 				ImGui::SetTooltip("%s\nUUID: %s", Presentation.FullPath.c_str(), Presentation.Identifier.c_str());
 			if (!ImGui::BeginPopupContextItem("Asset Actions"))
@@ -7313,7 +7433,9 @@ namespace
 			SetEditorPanelVisible(PulseForgeEditor::EditorPanel::MaterialEditor, true);
 		}
 
-		void DrawFolderList(const std::vector<ContentFolderNode>& Folders)
+		void DrawFolderList(
+			const std::vector<ContentFolderNode>& Folders,
+			std::function<void()>& DeferredAction)
 		{
 			if (Folders.empty())
 				return;
@@ -7339,6 +7461,8 @@ namespace
 					if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 						m_CurrentContentFolder = Folder.RelativePath;
 				}
+				BeginFolderDragSource(Folder.RelativePath, Folder.Name);
+				HandleManagedFolderDropTarget(Folder.RelativePath, DeferredAction);
 				if (ImGui::IsItemHovered())
 					ImGui::SetTooltip("%s", StableID.c_str());
 				ImGui::PopID();
@@ -7346,7 +7470,9 @@ namespace
 			ImGui::EndTable();
 		}
 
-		void DrawFolderGrid(const std::vector<ContentFolderNode>& Folders)
+		void DrawFolderGrid(
+			const std::vector<ContentFolderNode>& Folders,
+			std::function<void()>& DeferredAction)
 		{
 			if (Folders.empty())
 				return;
@@ -7393,6 +7519,8 @@ namespace
 							if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 								m_CurrentContentFolder = Folder.RelativePath;
 						}
+						BeginFolderDragSource(Folder.RelativePath, Folder.Name);
+						HandleManagedFolderDropTarget(Folder.RelativePath, DeferredAction);
 						if (ImGui::IsItemHovered())
 							ImGui::SetTooltip("%s", StableID.c_str());
 						ImGui::PopID();
@@ -7958,7 +8086,7 @@ namespace
 					{
 						const float FolderWidth = std::clamp(Available.x * 0.24f, 145.0f, 205.0f);
 						ImGui::BeginChild("ContentFolderTree", ImVec2(FolderWidth, 0.0f), ImGuiChildFlags_Borders);
-						DrawContentFolderNode(m_ContentFolderRoot, true);
+						DrawContentFolderNode(m_ContentFolderRoot, DeferredAction, true);
 						ImGui::EndChild();
 						ImGui::SameLine(0.0f, 6.0f);
 					}
@@ -8057,9 +8185,9 @@ namespace
 					if (VisibleFolders && !VisibleFolders->empty())
 					{
 						if (m_ContentGridView)
-							DrawFolderGrid(*VisibleFolders);
+							DrawFolderGrid(*VisibleFolders, DeferredAction);
 						else
-							DrawFolderList(*VisibleFolders);
+							DrawFolderList(*VisibleFolders, DeferredAction);
 						if (!m_FilteredAssetIndices.empty())
 							ImGui::Separator();
 					}

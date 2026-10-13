@@ -3588,6 +3588,112 @@ namespace
 		PF_CHECK(Tests, !std::filesystem::exists(ProjectRoot / "Assets/Models/untracked.gltf"));
 	}
 
+	void TestAssetFolderOperations(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		std::error_code Error;
+		const auto ProjectIdentifier = UUID::Generate();
+		PF_CHECK(Tests, ProjectIdentifier.has_value());
+		if (!ProjectIdentifier)
+			return;
+
+		const std::filesystem::path ProjectRoot = std::filesystem::temp_directory_path() /
+			("PulseForgeAssetFolderOperations-" + ProjectIdentifier->ToString());
+		struct ProjectDirectoryCleanup
+		{
+			std::filesystem::path Path;
+			~ProjectDirectoryCleanup()
+			{
+				std::error_code CleanupError;
+				std::filesystem::remove_all(Path, CleanupError);
+			}
+		} Cleanup{ ProjectRoot };
+
+		std::filesystem::create_directories(ProjectRoot / "Assets" / "Source" / "Nested", Error);
+		std::filesystem::create_directories(ProjectRoot / "Assets" / "Destination", Error);
+		PF_CHECK(Tests, !Error);
+		if (Error)
+			return;
+
+		const auto WriteManagedAsset = [](const std::filesystem::path& Path, std::string_view Contents)
+			-> std::optional<AssetID>
+		{
+			std::ofstream Output(Path, std::ios::binary | std::ios::trunc);
+			if (!Output)
+				return std::nullopt;
+			Output.write(Contents.data(), static_cast<std::streamsize>(Contents.size()));
+			Output.close();
+			if (!Output)
+				return std::nullopt;
+			const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(Path);
+			return Metadata ? std::optional<AssetID>(Metadata->ID) : std::nullopt;
+		};
+
+		const auto RootAsset = WriteManagedAsset(ProjectRoot / "Assets" / "Source" / "root.material", "root");
+		const auto NestedAsset = WriteManagedAsset(
+			ProjectRoot / "Assets" / "Source" / "Nested" / "nested.png", "nested");
+		PF_CHECK(Tests, RootAsset.has_value() && NestedAsset.has_value());
+		if (!RootAsset || !NestedAsset)
+			return;
+
+		AssetRegistry Registry;
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		PF_CHECK(Tests, Registry.GetAssetCount() == 2);
+
+		const auto SelfMove = AssetOperations::MoveFolder(
+			Registry, ProjectRoot, "Assets/Source", "Assets/Source");
+		PF_CHECK(Tests, !SelfMove && SelfMove.error().Code == AssetOperationErrorCode::InvalidPath);
+		const auto DescendantMove = AssetOperations::MoveFolder(
+			Registry, ProjectRoot, "Assets/Source", "Assets/Source/Nested");
+		PF_CHECK(Tests, !DescendantMove && DescendantMove.error().Code == AssetOperationErrorCode::InvalidPath);
+		const auto TraversalMove = AssetOperations::MoveFolder(
+			Registry, ProjectRoot, "Assets/Source", "Assets/../Destination");
+		PF_CHECK(Tests, !TraversalMove && TraversalMove.error().Code == AssetOperationErrorCode::InvalidPath);
+		PF_CHECK(Tests, std::filesystem::exists(ProjectRoot / "Assets" / "Source" / "root.material"));
+
+		const auto Moved = AssetOperations::MoveFolder(
+			Registry, ProjectRoot, "Assets/Source", "Assets/Destination");
+		PF_CHECK(Tests, Moved.has_value());
+		PF_CHECK(Tests, Moved && *Moved == std::filesystem::path("Assets/Destination/Source"));
+		PF_CHECK(Tests, !std::filesystem::exists(ProjectRoot / "Assets" / "Source"));
+		PF_CHECK(Tests, std::filesystem::exists(ProjectRoot / "Assets" / "Destination" / "Source" / "Nested" / "nested.png"));
+		const auto MovedRootRecord = Registry.Find(*RootAsset);
+		const auto MovedNestedRecord = Registry.Find(*NestedAsset);
+		PF_CHECK(Tests, MovedRootRecord && MovedRootRecord->ProjectRelativePath ==
+			std::filesystem::path("Assets/Destination/Source/root.material"));
+		PF_CHECK(Tests, MovedNestedRecord && MovedNestedRecord->ProjectRelativePath ==
+			std::filesystem::path("Assets/Destination/Source/Nested/nested.png"));
+		PF_CHECK(Tests, MovedRootRecord && MovedRootRecord->ID == *RootAsset);
+		PF_CHECK(Tests, MovedNestedRecord && MovedNestedRecord->ID == *NestedAsset);
+
+		std::filesystem::create_directories(ProjectRoot / "Assets" / "Other" / "Source", Error);
+		PF_CHECK(Tests, !Error);
+		const auto Collision = AssetOperations::MoveFolder(
+			Registry, ProjectRoot, "Assets/Other/Source", "Assets/Destination");
+		PF_CHECK(Tests, !Collision && Collision.error().Code == AssetOperationErrorCode::DestinationExists);
+		PF_CHECK(Tests, std::filesystem::exists(ProjectRoot / "Assets" / "Destination" / "Source" / "root.material"));
+
+		const auto EmptySource = AssetOperations::MoveFolder(
+			Registry, ProjectRoot, "Assets/Destination/Source", "Assets");
+		PF_CHECK(Tests, EmptySource.has_value());
+		PF_CHECK(Tests, EmptySource && *EmptySource == std::filesystem::path("Assets/Source"));
+		const auto ReturnedToRoot = Registry.Find(*RootAsset);
+		PF_CHECK(Tests, ReturnedToRoot && ReturnedToRoot->ProjectRelativePath ==
+			std::filesystem::path("Assets/Source/root.material"));
+
+		const std::filesystem::path LinkPath = ProjectRoot / "Assets" / "Linked";
+		Error.clear();
+		std::filesystem::create_directory_symlink(ProjectRoot / "Assets" / "Destination", LinkPath, Error);
+		if (!Error)
+		{
+			const auto ReparseTarget = AssetOperations::MoveFolder(
+				Registry, ProjectRoot, "Assets/Source", "Assets/Linked");
+			PF_CHECK(Tests, !ReparseTarget && ReparseTarget.error().Code == AssetOperationErrorCode::InvalidPath);
+			std::filesystem::remove(LinkPath, Error);
+			PF_CHECK(Tests, !Error);
+		}
+	}
+
 	void TestAssetImportOperation(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -8740,6 +8846,7 @@ int main()
 	TestPrefabAssetsByUUID(Tests);
 	TestAssetMetadataAndRegistry(Tests);
 	TestAssetOperations(Tests);
+	TestAssetFolderOperations(Tests);
 	TestAssetImportOperation(Tests);
 	TestMaterialAssets(Tests);
 	TestProjectFiles(Tests);
