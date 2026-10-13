@@ -26,14 +26,22 @@
 #include "Core/LayerStack.h"
 #include "Core/Timestep.h"
 #include "Editor/EditorLayout.h"
+#include "Editor/EditorMaterialEditorPolicy.h"
+#include "Editor/EditorMaterialPropertyLayoutPolicy.h"
 #include "Editor/EditorCommandHistory.h"
+#include "Editor/EditorCommandLine.h"
+#include "Editor/EditorContentBrowserPolicy.h"
+#include "Editor/EditorEntityIconPolicy.h"
+#include "Editor/EditorHierarchyRowPolicy.h"
 #include "Editor/EditorInteractionPolicy.h"
+#include "Editor/EditorProjectOpening.h"
 #include "Editor/EditorSelection.h"
 #include "Editor/EditorVisibility.h"
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
 #include "Editor/ViewportMouseCapture.h"
+#include "Editor/EditorViewportToolbarPolicy.h"
 #include "Editor/ImGuiRendererMath.h"
 #include "Editor/ViewportMath.h"
 #include "Audio/AudioEngine.h"
@@ -1963,9 +1971,10 @@ namespace
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Console) == EditorDefaultDockRegion::Bottom);
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Scene) == EditorDefaultDockRegion::Bottom);
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Inspector) == EditorDefaultDockRegion::Right);
+		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::MaterialEditor) == EditorDefaultDockRegion::Right);
 		PF_CHECK(Tests, EditorPanelDescriptors.size() == static_cast<size_t>(EditorPanel::Count));
 		constexpr std::array<std::string_view, static_cast<size_t>(EditorPanel::Count)> StablePanelNames = {
-			"Scene Viewport", "Hierarchy", "Inspector", "Content Browser", "Console", "Scene"
+			"Scene Viewport", "Hierarchy", "Inspector", "Content Browser", "Console", "Scene", "Material Editor"
 		};
 
 		EditorPanelVisibility Panels;
@@ -1975,6 +1984,7 @@ namespace
 		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::ContentBrowser));
 		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::Console));
 		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Scene));
+		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::MaterialEditor));
 
 		for (size_t Index = 0; Index < EditorPanelDescriptors.size(); ++Index)
 		{
@@ -1997,10 +2007,23 @@ namespace
 		Panels.ResetToDefaults();
 		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::Console));
 		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Scene));
+		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::MaterialEditor));
 		PF_CHECK(Tests, Panels.GetVisibility(EditorPanel::Scene) != nullptr);
 		PF_CHECK(Tests, Panels.GetVisibility(EditorPanel::Count) == nullptr);
 		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Count));
 		PF_CHECK(Tests, !Panels.SetVisible(EditorPanel::Count, true));
+		PF_CHECK(Tests, !ShouldApplyFirstOpenPanelDocking(true, true));
+		PF_CHECK(Tests, !ShouldApplyFirstOpenPanelDocking(false, false));
+		PF_CHECK(Tests, ShouldApplyFirstOpenPanelDocking(false, true));
+		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".material", true, false) == AssetBrowserOpenAction::None);
+		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".material", true, true) == AssetBrowserOpenAction::OpenMaterialEditor);
+		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".scene", true, true) == AssetBrowserOpenAction::OpenScene);
+		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".png", true, true) == AssetBrowserOpenAction::None);
+		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".scene", false, true) == AssetBrowserOpenAction::None);
+		const std::string DraftKey = MakeMaterialDraftKey("C:/Project", "material-uuid");
+		PF_CHECK(Tests, DraftKey == MakeMaterialDraftKey("C:/Project", "material-uuid"));
+		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("D:/Project", "material-uuid"));
+		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("C:/Project", "other-material-uuid"));
 	}
 
 	void TestEditorWorkspaceViewHelpers(TestRunner& Tests)
@@ -2159,6 +2182,90 @@ namespace
 	void TestEditorFontAndIconDescriptors(TestRunner& Tests)
 	{
 		using namespace PulseForgeEditor;
+		PF_CHECK(Tests, GetEditorViewportToolbarLayout(590.0f) == EditorViewportToolbarLayout::Full);
+		PF_CHECK(Tests, GetEditorViewportToolbarLayout(589.0f) == EditorViewportToolbarLayout::Compact);
+		PF_CHECK(Tests, GetEditorViewportToolbarLayout(300.0f) == EditorViewportToolbarLayout::Compact);
+		PF_CHECK(Tests, GetEditorViewportToolbarLayout(299.0f) == EditorViewportToolbarLayout::Overflow);
+		PF_CHECK(Tests, GetEditorViewportToolbarLayout(-1.0f) == EditorViewportToolbarLayout::Overflow);
+		PF_CHECK(Tests, GetEditorViewportToolbarLayout(std::numeric_limits<float>::quiet_NaN()) ==
+			EditorViewportToolbarLayout::Overflow);
+		PF_CHECK(Tests, GetEditorPropertyLabelWidth(100.0f) == EditorStyleMetrics::PropertyLabelWidthMinimum);
+		PF_CHECK(Tests, GetEditorPropertyLabelWidth(300.0f) == 90.0f);
+		PF_CHECK(Tests, GetEditorPropertyLabelWidth(1000.0f) == EditorStyleMetrics::PropertyLabelWidthMaximum);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(260.0f) == MaterialPropertyLayout::Stacked);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(360.0f) == MaterialPropertyLayout::Stacked);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(500.0f) == MaterialPropertyLayout::Stacked);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(559.0f) == MaterialPropertyLayout::Stacked);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(560.0f) == MaterialPropertyLayout::TwoColumn);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(700.0f) == MaterialPropertyLayout::TwoColumn);
+		PF_CHECK(Tests, GetMaterialPropertyLabelWidth(700.0f) == 264.0f);
+		PF_CHECK(Tests, GetMaterialPropertyLabelWidth(1000.0f) == 264.0f);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(-1.0f) == MaterialPropertyLayout::Stacked);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(std::numeric_limits<float>::quiet_NaN()) ==
+			MaterialPropertyLayout::Stacked);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(std::numeric_limits<float>::infinity()) ==
+			MaterialPropertyLayout::Stacked);
+		const MaterialValuePairLayout NarrowMaterialValuePair = GetMaterialValuePairLayout(260.0f, 8.0f);
+		PF_CHECK(Tests, NarrowMaterialValuePair.Stacked && NarrowMaterialValuePair.FirstWidth == 260.0f &&
+			NarrowMaterialValuePair.SecondWidth == 260.0f);
+		const MaterialValuePairLayout RegularMaterialValuePair = GetMaterialValuePairLayout(360.0f, 8.0f);
+		PF_CHECK(Tests, !RegularMaterialValuePair.Stacked && RegularMaterialValuePair.FirstWidth == 176.0f &&
+			RegularMaterialValuePair.SecondWidth == 176.0f &&
+			RegularMaterialValuePair.FirstWidth + RegularMaterialValuePair.SecondWidth + 8.0f <= 360.0f);
+		const MaterialValuePairLayout BrowserWidthMaterialValuePair = GetMaterialValuePairLayout(500.0f, 8.0f);
+		PF_CHECK(Tests, !BrowserWidthMaterialValuePair.Stacked && BrowserWidthMaterialValuePair.FirstWidth == 246.0f &&
+			BrowserWidthMaterialValuePair.SecondWidth == 246.0f &&
+			BrowserWidthMaterialValuePair.FirstWidth + BrowserWidthMaterialValuePair.SecondWidth + 8.0f <= 500.0f);
+		const MaterialValuePairLayout WideMaterialValuePair = GetMaterialValuePairLayout(700.0f, 8.0f);
+		PF_CHECK(Tests, !WideMaterialValuePair.Stacked && WideMaterialValuePair.FirstWidth == 346.0f &&
+			WideMaterialValuePair.SecondWidth == 346.0f);
+		const MaterialValuePairLayout InvalidMaterialValuePair = GetMaterialValuePairLayout(
+			std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity());
+		PF_CHECK(Tests, InvalidMaterialValuePair.Stacked && InvalidMaterialValuePair.FirstWidth == 0.0f &&
+			InvalidMaterialValuePair.SecondWidth == 0.0f);
+		for (const MaterialValuePairLayout Layout : { NarrowMaterialValuePair, RegularMaterialValuePair,
+			BrowserWidthMaterialValuePair, WideMaterialValuePair, InvalidMaterialValuePair })
+		{
+			PF_CHECK(Tests, std::isfinite(Layout.FirstWidth) && Layout.FirstWidth >= 0.0f);
+			PF_CHECK(Tests, std::isfinite(Layout.SecondWidth) && Layout.SecondWidth >= 0.0f);
+		}
+		PF_CHECK(Tests, EditorStyleMetrics::PanelToolbarHeight == 36.0f);
+		PF_CHECK(Tests, EditorStyleMetrics::PanelToolbarPaddingX == 7.0f);
+		PF_CHECK(Tests, EditorStyleMetrics::PanelToolbarPaddingY == 4.0f);
+		PF_CHECK(Tests, UseCompactVector3PropertyInput(229.0f));
+		PF_CHECK(Tests, !UseCompactVector3PropertyInput(230.0f));
+		PF_CHECK(Tests, UseCompactVector3PropertyInput(std::numeric_limits<float>::quiet_NaN()));
+		const ContentBrowserVerticalLayout NoSelection = GetContentBrowserVerticalLayout(320.0f, false, true);
+		PF_CHECK(Tests, NoSelection.AssetItemsHeight == 320.0f && NoSelection.DetailsHeight == 0.0f);
+		const ContentBrowserVerticalLayout CompactSelection = GetContentBrowserVerticalLayout(120.0f, true, true);
+		PF_CHECK(Tests, CompactSelection.SelectionSummaryHeight ==
+			ContentBrowserLayoutMetrics::CompactSelectionSummaryHeight);
+		PF_CHECK(Tests, CompactSelection.AssetItemsHeight == 92.0f && CompactSelection.DetailsHeight == 0.0f);
+		const ContentBrowserVerticalLayout ExpandedCompactSelection =
+			GetContentBrowserVerticalLayout(120.0f, true, true, true);
+		PF_CHECK(Tests, ExpandedCompactSelection.SelectionSummaryHeight == 28.0f);
+		PF_CHECK(Tests, ExpandedCompactSelection.DetailsHeight == 0.0f && ExpandedCompactSelection.AssetItemsHeight == 92.0f);
+		const ContentBrowserVerticalLayout RegularAssetDetails = GetContentBrowserVerticalLayout(320.0f, true, false);
+		PF_CHECK(Tests, RegularAssetDetails.DetailsHeight == ContentBrowserLayoutMetrics::RegularDetailsMaximumHeight);
+		PF_CHECK(Tests, RegularAssetDetails.AssetItemsHeight >= ContentBrowserLayoutMetrics::MinimumAssetItemsHeight);
+		const ContentBrowserVerticalLayout ShortMaterialSummary = GetContentBrowserVerticalLayout(180.0f, true, true);
+		PF_CHECK(Tests, ShortMaterialSummary.SelectionSummaryHeight == 28.0f);
+		PF_CHECK(Tests, ShortMaterialSummary.DetailsHeight == 0.0f && ShortMaterialSummary.AssetItemsHeight == 152.0f);
+		const ContentBrowserVerticalLayout TallMaterialSummary = GetContentBrowserVerticalLayout(840.0f, true, true);
+		PF_CHECK(Tests, TallMaterialSummary.SelectionSummaryHeight == 28.0f);
+		PF_CHECK(Tests, TallMaterialSummary.DetailsHeight == 0.0f && TallMaterialSummary.AssetItemsHeight == 812.0f);
+		const ContentBrowserVerticalLayout InvalidContentHeight = GetContentBrowserVerticalLayout(
+			std::numeric_limits<float>::quiet_NaN(), true, true);
+		PF_CHECK(Tests, InvalidContentHeight.AssetItemsHeight == 0.0f && InvalidContentHeight.SelectionSummaryHeight == 0.0f);
+		PF_CHECK(Tests, GetEditorEntityIcon({}) == EditorIcon::Entity);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasCamera = true, .HasMesh = true }) == EditorIcon::Camera);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasMesh = true, .HasPointLight = true }) == EditorIcon::Cube);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasSpotLight = true, .HasPointLight = true }) == EditorIcon::SpotLight);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasPointLight = true, .HasDirectionalLight = true }) == EditorIcon::PointLight);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasDirectionalLight = true }) == EditorIcon::DirectionalLight);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasEnvironmentLight = true }) == EditorIcon::Environment);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasAudioSource = true, .HasAudioListener = true }) == EditorIcon::AudioSource);
+		PF_CHECK(Tests, GetEditorEntityIcon({ .HasAudioListener = true }) == EditorIcon::AudioListener);
 		PF_CHECK(Tests, EditorFontDescriptors.size() == 3);
 		PF_CHECK(Tests, EditorFontDescriptors[0].Role == EditorFontRole::Interface);
 		PF_CHECK(Tests, EditorFontDescriptors[1].Role == EditorFontRole::Emphasis);
@@ -2166,8 +2273,8 @@ namespace
 		PF_CHECK(Tests, EditorFontDescriptors[0].RelativePath == "Fonts/Inter-Regular.ttf");
 		PF_CHECK(Tests, EditorFontDescriptors[1].RelativePath == "Fonts/Inter-SemiBold.ttf");
 		PF_CHECK(Tests, EditorFontDescriptors[2].RelativePath == "Fonts/JetBrainsMono-Regular.ttf");
-		PF_CHECK(Tests, EditorFontDescriptors[0].PixelSize == 17.0f);
-		PF_CHECK(Tests, EditorFontDescriptors[1].PixelSize == 17.0f);
+		PF_CHECK(Tests, EditorFontDescriptors[0].PixelSize == 16.0f);
+		PF_CHECK(Tests, EditorFontDescriptors[1].PixelSize == 16.0f);
 		PF_CHECK(Tests, EditorFontDescriptors[2].PixelSize == 16.0f);
 		PF_CHECK(Tests, EditorIconFontPixelSize == EditorFontDescriptors[0].PixelSize);
 		PF_CHECK(Tests, IsValidEditorTextGlyphRanges());
@@ -3983,6 +4090,112 @@ namespace
 		PF_CHECK(Tests, RelocatedProject.has_value());
 		PF_CHECK(Tests, RelocatedProject && RelocatedProject->GetAssetRegistry().Find(SceneMetadata->ID).has_value());
 		PF_CHECK(Tests, RelocatedProject && RelocatedProject->GetRootPath() == RelocatedRoot);
+	}
+
+	void TestEditorCommandLineAndStartupProjectLoading(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		const auto Identifier = UUID::Generate();
+		PF_CHECK(Tests, Identifier.has_value());
+		if (!Identifier)
+			return;
+
+		std::error_code FileError;
+		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const std::filesystem::path Root =
+			TemporaryDirectory / ("PulseForge CLI Test " + Identifier->ToString());
+		struct DirectoryCleanup
+		{
+			std::filesystem::path Path;
+			~DirectoryCleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} Cleanup{ Root };
+
+		std::filesystem::create_directories(Root, FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError)
+			return;
+
+		const std::filesystem::path ProjectFile = Root / "Project With Spaces.pfproj";
+		auto Created = Project::Create(ProjectFile, "CLI Project With Spaces");
+		PF_CHECK(Tests, Created.has_value());
+		if (!Created)
+			return;
+
+		const std::span<const std::string_view> NoArguments;
+		const auto DefaultOptions = ParseEditorCommandLine(NoArguments, Root);
+		PF_CHECK(Tests, DefaultOptions.has_value());
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->ProjectFile.has_value());
+
+		const std::string AbsoluteProjectPath = ProjectFile.string();
+		const std::array AbsoluteArguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath) };
+		const auto AbsoluteOptions = ParseEditorCommandLine(AbsoluteArguments, Root);
+		PF_CHECK(Tests, AbsoluteOptions.has_value());
+		PF_CHECK(Tests, AbsoluteOptions && AbsoluteOptions->ProjectFile == ProjectFile);
+
+		const std::string RelativeProjectPath = ProjectFile.filename().string();
+		const std::array RelativeArguments = { std::string_view("--project"), std::string_view(RelativeProjectPath) };
+		const auto RelativeOptions = ParseEditorCommandLine(RelativeArguments, Root);
+		PF_CHECK(Tests, RelativeOptions.has_value());
+		PF_CHECK(Tests, RelativeOptions && RelativeOptions->ProjectFile == ProjectFile);
+
+		const std::array MissingValue = { std::string_view("--project") };
+		const auto MissingValueResult = ParseEditorCommandLine(MissingValue, Root);
+		PF_CHECK(Tests, !MissingValueResult);
+		PF_CHECK(Tests, !MissingValueResult &&
+			MissingValueResult.error().Code == EditorCommandLineErrorCode::MissingProjectPath);
+
+		const std::array Unexpected = { std::string_view("--unknown") };
+		const auto UnexpectedResult = ParseEditorCommandLine(Unexpected, Root);
+		PF_CHECK(Tests, !UnexpectedResult);
+		PF_CHECK(Tests, !UnexpectedResult &&
+			UnexpectedResult.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+
+		const std::array Duplicate = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath) };
+		const auto DuplicateResult = ParseEditorCommandLine(Duplicate, Root);
+		PF_CHECK(Tests, !DuplicateResult);
+		PF_CHECK(Tests, !DuplicateResult &&
+			DuplicateResult.error().Code == EditorCommandLineErrorCode::DuplicateProjectOption);
+
+		const std::string MissingProjectPath = (Root / "Missing.pfproj").string();
+		const std::array InvalidProject = { std::string_view("--project"), std::string_view(MissingProjectPath) };
+		const auto InvalidProjectResult = ParseEditorCommandLine(InvalidProject, Root);
+		PF_CHECK(Tests, !InvalidProjectResult);
+		PF_CHECK(Tests, !InvalidProjectResult &&
+			InvalidProjectResult.error().Code == EditorCommandLineErrorCode::InvalidProjectPath);
+
+		auto Loaded = OpenEditorProject(ProjectFile);
+		PF_CHECK(Tests, Loaded.has_value());
+		PF_CHECK(Tests, Loaded && Loaded->Project.GetDescription().Name == "CLI Project With Spaces");
+		PF_CHECK(Tests, Loaded && !Loaded->StartupScene && !Loaded->StartupSceneAsset);
+
+		const std::filesystem::path BrokenProjectFile = Root / "Broken Project.pfproj";
+		{
+			std::ofstream BrokenProject(BrokenProjectFile, std::ios::binary | std::ios::trunc);
+			BrokenProject << "{broken";
+			PF_CHECK(Tests, static_cast<bool>(BrokenProject));
+		}
+		const std::string BrokenProjectPath = BrokenProjectFile.string();
+		const std::array BrokenArguments = {
+			std::string_view("--project"), std::string_view(BrokenProjectPath) };
+		const auto BrokenOptions = ParseEditorCommandLine(BrokenArguments, Root);
+		PF_CHECK(Tests, BrokenOptions.has_value());
+		if (BrokenOptions)
+		{
+			const auto BrokenLoad = OpenEditorProject(*BrokenOptions->ProjectFile);
+			PF_CHECK(Tests, !BrokenLoad);
+			PF_CHECK(Tests, !BrokenLoad && BrokenLoad.error().Message.find("could not be opened") != std::string::npos);
+		}
 	}
 
 	void TestBundledValidationProjectAssetRegistry(TestRunner& Tests)
@@ -8167,6 +8380,61 @@ end
 		}) == false);
 	}
 
+	void TestEditorHierarchyRowLayout(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		constexpr float FramePaddingX = 7.0f;
+		constexpr float TextStartX = 50.0f;
+		constexpr float TreeTrailingHitWidth = FramePaddingX;
+
+		const auto WideRow = ComputeEditorHierarchyRowLayout(
+			8.0f, 240.0f, TextStartX, 100.0f, 108.0f, FramePaddingX);
+		PF_CHECK(Tests, WideRow.EyeStartX == 210.0f);
+		PF_CHECK(Tests, WideRow.EyeStartX >= 100.0f + EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, WideRow.EyeStartX + EditorHierarchyEyeButtonWidth <= 240.0f);
+		PF_CHECK(Tests, WideRow.MaximumNameWidth > 80.0f);
+		PF_CHECK(Tests, WideRow.SelectionGutterStartX == 108.0f && WideRow.SelectionGutterWidth > 0.0f);
+		PF_CHECK(Tests, WideRow.SelectionGutterStartX >= 100.0f);
+		PF_CHECK(Tests, WideRow.SelectionGutterStartX + WideRow.SelectionGutterWidth <=
+			WideRow.EyeStartX - EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, 8.0f + WideRow.SelectionBackgroundWidth ==
+			WideRow.EyeStartX - EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, WideRow.SelectionGutterStartX + WideRow.SelectionGutterWidth ==
+			8.0f + WideRow.SelectionBackgroundWidth);
+		const float LongNameTreeItemRightX = TextStartX + WideRow.MaximumNameWidth + TreeTrailingHitWidth;
+		PF_CHECK(Tests, LongNameTreeItemRightX <= WideRow.EyeStartX - EditorHierarchyHitRegionGap -
+			EditorHierarchyHitRegionSafetyInset);
+
+		const auto NarrowRow = ComputeEditorHierarchyRowLayout(
+			8.0f, 150.0f, 50.0f, 94.0f, 102.0f, FramePaddingX);
+		PF_CHECK(Tests, NarrowRow.EyeStartX >= 94.0f + EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, NarrowRow.EyeStartX + EditorHierarchyEyeButtonWidth <= 150.0f);
+		PF_CHECK(Tests, NarrowRow.MaximumNameWidth >= 0.0f && NarrowRow.SelectionGutterWidth >= 0.0f);
+		PF_CHECK(Tests, NarrowRow.SelectionGutterStartX >= 94.0f);
+		PF_CHECK(Tests, NarrowRow.SelectionGutterStartX + NarrowRow.SelectionGutterWidth <=
+			NarrowRow.EyeStartX - EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, 8.0f + NarrowRow.SelectionBackgroundWidth ==
+			NarrowRow.EyeStartX - EditorHierarchyHitRegionGap);
+
+		const auto DeepRow = ComputeEditorHierarchyRowLayout(
+			98.0f, 240.0f, 140.0f, 175.0f, 183.0f, FramePaddingX);
+		PF_CHECK(Tests, DeepRow.EyeStartX == 210.0f);
+		PF_CHECK(Tests, DeepRow.SelectionGutterStartX >= 175.0f);
+		PF_CHECK(Tests, DeepRow.SelectionGutterStartX + DeepRow.SelectionGutterWidth <=
+			DeepRow.EyeStartX - EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, 98.0f + DeepRow.SelectionBackgroundWidth ==
+			DeepRow.EyeStartX - EditorHierarchyHitRegionGap);
+
+		const auto ConstrainedDeepRow = ComputeEditorHierarchyRowLayout(
+			170.0f, 260.0f, 215.0f, 230.0f, 238.0f, FramePaddingX);
+		PF_CHECK(Tests, ConstrainedDeepRow.EyeStartX >= 234.0f);
+		PF_CHECK(Tests, ConstrainedDeepRow.EyeStartX + EditorHierarchyEyeButtonWidth <= 260.0f);
+		PF_CHECK(Tests, ConstrainedDeepRow.SelectionGutterWidth == 0.0f);
+		PF_CHECK(Tests, ConstrainedDeepRow.EyeStartX >= 230.0f + EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, 170.0f + ConstrainedDeepRow.SelectionBackgroundWidth ==
+			ConstrainedDeepRow.EyeStartX - EditorHierarchyHitRegionGap);
+	}
+
 	void TestSceneCommandHistoryRestoresIdentity(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -8280,6 +8548,7 @@ int main()
 	TestAssetImportOperation(Tests);
 	TestMaterialAssets(Tests);
 	TestProjectFiles(Tests);
+	TestEditorCommandLineAndStartupProjectLoading(Tests);
 	TestBundledValidationProjectAssetRegistry(Tests);
 	TestAssetReferenceValidation(Tests);
 	TestGltfMeshImport(Tests);
@@ -8304,6 +8573,7 @@ int main()
 	TestAltGizmoDragHistoryIntegration(Tests);
 	TestEditorSelection(Tests);
 	TestEditorVisibility(Tests);
+	TestEditorHierarchyRowLayout(Tests);
 	TestSceneCommandHistoryRestoresIdentity(Tests);
 	return Tests.Finish();
 }

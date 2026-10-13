@@ -1,4 +1,5 @@
 #include "Editor/EditorLayout.h"
+#include "Editor/EditorMaterialEditorPolicy.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -339,6 +340,35 @@ namespace PulseForgeEditor
 	{
 		if (!m_Panels.SetVisible(Panel, Visible))
 			return false;
+		MarkSettingsDirty();
+		return true;
+	}
+
+	bool EditorLayout::DockPanelBesideIfUnplaced(EditorPanel Panel, EditorPanel ReferencePanel)
+	{
+		if (!m_Initialized || !m_LayoutInitialized || !ImGui::GetCurrentContext() || Panel == ReferencePanel)
+			return false;
+
+		const size_t PanelIndex = static_cast<size_t>(Panel);
+		const size_t ReferenceIndex = static_cast<size_t>(ReferencePanel);
+		if (PanelIndex >= EditorPanelDescriptors.size() || ReferenceIndex >= EditorPanelDescriptors.size())
+			return false;
+
+		const std::string PanelName(EditorPanelDescriptors[PanelIndex].WindowName);
+		const std::string ReferenceName(EditorPanelDescriptors[ReferenceIndex].WindowName);
+		const bool HasPanelWindowSettings =
+			ImGui::FindWindowSettingsByID(ImHashStr(PanelName.c_str())) != nullptr;
+		const ImGuiWindowSettings* ReferenceSettings =
+			ImGui::FindWindowSettingsByID(ImHashStr(ReferenceName.c_str()));
+		ImGuiDockNode* ReferenceNode = ReferenceSettings && ReferenceSettings->DockId != 0
+			? ImGui::DockBuilderGetNode(ReferenceSettings->DockId)
+			: nullptr;
+		if (!ShouldApplyFirstOpenPanelDocking(HasPanelWindowSettings, ReferenceNode != nullptr))
+			return false;
+
+		ImGui::DockBuilderDockWindow(PanelName.c_str(), ReferenceSettings->DockId);
+		const ImGuiDockNode* RootNode = ImGui::DockNodeGetRootNode(ReferenceNode);
+		ImGui::DockBuilderFinish(RootNode->ID);
 		MarkSettingsDirty();
 		return true;
 	}

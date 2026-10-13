@@ -19,6 +19,38 @@ struct ImVec4;
 
 namespace PulseForgeEditor
 {
+	namespace EditorStyleMetrics
+	{
+		inline constexpr float PropertyLabelWidthRatio = 0.30f;
+		inline constexpr float PropertyLabelWidthMinimum = 60.0f;
+		inline constexpr float PropertyLabelWidthMaximum = 104.0f;
+		inline constexpr float ComponentBodyPadding = 6.0f;
+		inline constexpr float PanelToolbarHeight = 36.0f;
+		inline constexpr float PanelToolbarPaddingX = 7.0f;
+		inline constexpr float PanelToolbarPaddingY = 4.0f;
+		inline constexpr float DialogItemSpacingX = 10.0f;
+		inline constexpr float DialogItemSpacingY = 9.0f;
+		inline constexpr float Vector3AxisInputMinimumWidth = 230.0f;
+		inline constexpr float ViewportToolbarHeight = 36.0f;
+		inline constexpr float ViewportToolbarButtonSize = 28.0f;
+		inline constexpr float ViewportToolbarGroupSpacing = 8.0f;
+	}
+
+	[[nodiscard]] constexpr bool UseCompactVector3PropertyInput(float AvailableWidth) noexcept
+	{
+		return !(AvailableWidth >= EditorStyleMetrics::Vector3AxisInputMinimumWidth);
+	}
+
+	[[nodiscard]] constexpr float GetEditorPropertyLabelWidth(float AvailableWidth) noexcept
+	{
+		const float ScaledWidth = AvailableWidth * EditorStyleMetrics::PropertyLabelWidthRatio;
+		return ScaledWidth < EditorStyleMetrics::PropertyLabelWidthMinimum
+			? EditorStyleMetrics::PropertyLabelWidthMinimum
+			: ScaledWidth > EditorStyleMetrics::PropertyLabelWidthMaximum
+				? EditorStyleMetrics::PropertyLabelWidthMaximum
+				: ScaledWidth;
+	}
+
 	enum class EditorFontRole : uint8_t
 	{
 		Interface,
@@ -233,10 +265,10 @@ namespace PulseForgeEditor
 		return Length;
 	}
 
-	inline constexpr float EditorIconFontPixelSize = 17.0f;
+	inline constexpr float EditorIconFontPixelSize = 16.0f;
 	inline constexpr std::array<EditorFontDescriptor, 3> EditorFontDescriptors = {{
-		{ EditorFontRole::Interface, "Fonts/Inter-Regular.ttf", 17.0f },
-		{ EditorFontRole::Emphasis, "Fonts/Inter-SemiBold.ttf", 17.0f },
+		{ EditorFontRole::Interface, "Fonts/Inter-Regular.ttf", 16.0f },
+		{ EditorFontRole::Emphasis, "Fonts/Inter-SemiBold.ttf", 16.0f },
 		{ EditorFontRole::Monospace, "Fonts/JetBrainsMono-Regular.ttf", 16.0f }
 	}};
 
@@ -313,7 +345,7 @@ namespace PulseForgeEditor
 			const char* Shortcut = nullptr,
 			bool Selected = false,
 			bool Enabled = true) const;
-		[[nodiscard]] bool BeginToolbar(const char* ID, float Height = 32.0f) const;
+		[[nodiscard]] bool BeginToolbar(const char* ID, float Height = EditorStyleMetrics::PanelToolbarHeight) const;
 		void EndToolbar() const;
 		[[nodiscard]] bool BeginPropertyTable(const char* ID) const;
 		[[nodiscard]] bool BeginPropertyRow(std::string_view Label) const;

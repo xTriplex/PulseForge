@@ -297,7 +297,9 @@ target_link_libraries(PulseForgeGame PRIVATE PulseForge)
 
 if(PULSEFORGE_BUILD_EDITOR)
 	add_executable(PulseForgeEditor
+		PulseForgeEditor/Source/Private/EditorMain.cpp
 		PulseForgeEditor/Source/Private/EditorApplication.cpp
+		PulseForgeEditor/Source/Private/EditorProjectOpening.cpp
 		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
 		PulseForgeEditor/Source/Private/EditorLayout.cpp
 		PulseForgeEditor/Source/Private/EditorStyle.cpp
@@ -778,6 +780,7 @@ endif()
 include(CTest)
 if(BUILD_TESTING)
 	add_executable(PulseForgeTests Tests/PulseForgeTests.cpp)
+	target_sources(PulseForgeTests PRIVATE PulseForgeEditor/Source/Private/EditorProjectOpening.cpp)
 	target_include_directories(PulseForgeTests PRIVATE PulseForgeEditor/Source/Public PulseForge/Vendor/json/include)
 	target_compile_definitions(PulseForgeTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeTests PRIVATE PulseForge)

@@ -672,7 +672,8 @@ namespace PulseForgeEditor
 	{
 		ImGui::PushStyleColor(ImGuiCol_ChildBg, GetColor(EditorColorToken::PanelRaised));
 		ImGui::PushStyleColor(ImGuiCol_Border, GetColor(EditorColorToken::Border));
-		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(7.0f, 4.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+			ImVec2(EditorStyleMetrics::PanelToolbarPaddingX, EditorStyleMetrics::PanelToolbarPaddingY));
 		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 2.0f);
 		return ImGui::BeginChild(ID, ImVec2(0.0f, Height), ImGuiChildFlags_Borders,
 			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings);
@@ -697,7 +698,7 @@ namespace PulseForgeEditor
 		}
 
 		const float AvailableWidth = ImGui::GetContentRegionAvail().x;
-		const float LabelWidth = std::clamp(AvailableWidth * 0.34f, 66.0f, 104.0f);
+		const float LabelWidth = GetEditorPropertyLabelWidth(AvailableWidth);
 		ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthFixed, LabelWidth);
 		ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 		return true;
@@ -708,7 +709,11 @@ namespace PulseForgeEditor
 		ImGui::TableNextRow();
 		if (!ImGui::TableSetColumnIndex(0))
 			return false;
+		const float AvailableLabelWidth = ImGui::GetContentRegionAvail().x;
+		const float LabelWidth = ImGui::CalcTextSize(Label.data(), Label.data() + Label.size()).x;
 		TextMuted(Label);
+		if (LabelWidth > AvailableLabelWidth && ImGui::IsItemHovered())
+			ImGui::SetTooltip("%.*s", static_cast<int>(Label.size()), Label.data());
 		return ImGui::TableSetColumnIndex(1);
 	}
 
@@ -722,7 +727,7 @@ namespace PulseForgeEditor
 			return false;
 
 		const float AvailableWidth = ImGui::GetContentRegionAvail().x;
-		if (AvailableWidth < 190.0f)
+		if (UseCompactVector3PropertyInput(AvailableWidth))
 			return ImGui::DragFloat3("##Vector3", Values, Speed, 0.0f, 0.0f, Format);
 
 		bool Changed = false;
@@ -767,12 +772,12 @@ namespace PulseForgeEditor
 	void EditorStyle::BeginComponentBody(const char* ID) const
 	{
 		ImGui::PushStyleColor(ImGuiCol_ChildBg, GetColor(EditorColorToken::Panel));
-		ImGui::PushStyleColor(ImGuiCol_Border, GetColor(EditorColorToken::Border));
-		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 8.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+			ImVec2(EditorStyleMetrics::ComponentBodyPadding, EditorStyleMetrics::ComponentBodyPadding));
 		ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 2.0f);
 		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(7.0f, 6.0f));
 		(void)ImGui::BeginChild(ID, ImVec2(0.0f, 0.0f),
-			ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
+			ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding,
 			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings);
 	}
 
@@ -780,7 +785,7 @@ namespace PulseForgeEditor
 	{
 		ImGui::EndChild();
 		ImGui::PopStyleVar(3);
-		ImGui::PopStyleColor(2);
+		ImGui::PopStyleColor();
 		ImGui::Spacing();
 	}
 
