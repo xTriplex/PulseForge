@@ -1,5 +1,6 @@
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
+#include "Editor/EditorLayoutSettingsPolicy.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -442,6 +443,7 @@ namespace PulseForgeEditor
 		bool InWorkspaceSection = false;
 		bool FormatWasValid = false;
 		bool HasRecognizedState = false;
+		std::optional<uint32_t> LoadedDocumentOpeningPreference;
 
 		std::istringstream Input{ std::string(IniContents) };
 		std::string Line;
@@ -477,9 +479,7 @@ namespace PulseForgeEditor
 			}
 			if (Key == "DocumentOpeningPreference")
 			{
-				uint32_t Preference = 0;
-				if (ParseUnsigned(Value, Preference) && Preference <= 2)
-					m_DocumentOpeningPreference = Preference;
+				LoadedDocumentOpeningPreference = ParseDocumentOpeningPreference(Value);
 				continue;
 			}
 			for (const EditorPanelDescriptor& Descriptor : EditorPanelDescriptors)
@@ -495,6 +495,8 @@ namespace PulseForgeEditor
 
 		if (HasRecognizedState && !FormatWasValid)
 			m_Panels.ResetToDefaults();
+		m_DocumentOpeningPreference = ResolveDocumentOpeningPreference(
+			HasRecognizedState, FormatWasValid, LoadedDocumentOpeningPreference);
 		m_HasSavedPanelState = HasRecognizedState;
 	}
 }

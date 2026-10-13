@@ -181,6 +181,10 @@ Two restored EditorWorkflow material hosts were resized together through four bo
 
 The resize path is synchronized in `VulkanRenderer.cpp`: it waits each native host's frame contexts and idles the present queue before releasing the old swapchain images; native-host retirement follows the same frame/present completion rule. The bounded test allowed the normal frame loop to process each resize pair; those host frame and queue waits provide the resource-lifetime guarantee, not the test's 900 ms spacing. This is scoped to swapchain recreation/host retirement, although the present-queue wait can pause presentation during a resize.
 
+### Opening preference parsing and recovery
+
+`EditorLayout::LoadPanelState()` now applies `DocumentOpeningPreference` only after the complete recognized workspace state has been checked. A missing or invalid state format, absent preference, malformed value, or value outside the supported range resolves to the default placement instead of leaking a partially parsed preference from rejected state. Deterministic tests cover all three supported values, leading-zero compatibility, malformed and out-of-range values, and invalid/missing-state fallback. The actual preference menu and restart round trip remain manual acceptance items.
+
 ## Acceptance tracking at implementation checkpoint
 
 `Pass` means the listed evidence directly covers the behavior. `Partial` means a policy or bounded smoke check passed while the complete user-facing scenario remains unverified. `Unverified` means no suitable evidence has been collected. Screenshots and runtime startup do not prove pointer/keyboard behavior.
@@ -226,7 +230,7 @@ The resize path is synchronized in `VulkanRenderer.cpp`: it waits each native ho
 | P01 valid document workspace restores | Pass | Isolated workspace file restored real native material sessions. |
 | P02 removed/unavailable monitor recovery | Unverified | Requires monitor-topology testing. |
 | P03 corrupt workspace/missing asset recovery | Pass | Codec rejects malformed/duplicate state in tests; an isolated restart restored the valid material host, omitted the missing-asset host, and preserved the valid host on normal shutdown. |
-| P04 opening preference persistence | Unverified | Preference UI and restart persistence remain. |
+| P04 opening preference persistence | Partial | Preference parsing, range checks, and invalid/missing workspace-state fallback are covered in deterministic tests; selecting each menu option and verifying restart persistence remain manual. |
 | P05 project-internal asset/folder move preserves managed identity | Pass | Move operation and folder transaction tests pass. |
 | P06 self/descendant folder moves reject | Pass | Asset-folder policy tests. |
 | P07 name collision and case-only path checks | Pass | Move operation tests cover collisions and normalized paths. |
@@ -255,5 +259,6 @@ No physical multi-monitor transition or direct pointer-driven document drag has 
 - Frame-order correction: `22d256866c7622a4391309fba4473513ea1f5182` (`Implement native editor document workflows`); dirty-close prompt routing: `0c41a7e0a1e09b9c8a5227301185ff2f64a8ca19` (`Route dirty document prompts to their host`). Later commits update this validation record.
 - Tab/transfer correction: `96782c3` (`Defer document transfers and integrate tab close affordance`) integrates the close glyph into the selectable tab and adds deferred transfer/context-menu actions; `42f23f9` (`Defer document tab close until after UI traversal`) also defers close mutation until tab/host traversal has finished.
 - Vulkan/OpenGL Debug, Release and Dist were rebuilt after `42f23f9`; each test executable passed 4,182 checks and CTest passed 2/2.
+- Opening preference recovery policy is covered by 12 additional checks. Fresh Vulkan and OpenGL Debug/Release/Dist editor and test targets built; each test executable passed 4,212 checks and CTest passed 2/2. Logs are under the corresponding build tree's `Diagnostics/P04-preference-validation/` directory.
 - The feature branch remains local, unpushed, and unmerged.
 - The deleted Spotlight research document, modified validation scene/materials, and untracked `CMakeSettings.json` remain outside the commit. Root `AGENTS.md` remains absent.

@@ -4,6 +4,7 @@
 #include <iostream>
 #include <limits>
 #include <numbers>
+#include <optional>
 #include <string_view>
 
 #include "Assets/AssetMetadata.h"
@@ -26,6 +27,7 @@
 #include "Core/LayerStack.h"
 #include "Core/Timestep.h"
 #include "Editor/EditorLayout.h"
+#include "Editor/EditorLayoutSettingsPolicy.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
 #include "Editor/EditorGlfwViewportPolicy.h"
 #include "Editor/EditorPlatformViewportPolicy.h"
@@ -1975,6 +1977,18 @@ namespace
 		using namespace PulseForgeEditor;
 
 		PF_CHECK(Tests, CurrentDefaultEditorLayoutVersion == 3);
+		PF_CHECK(Tests, ParseDocumentOpeningPreference("0") == 0);
+		PF_CHECK(Tests, ParseDocumentOpeningPreference("1") == 1);
+		PF_CHECK(Tests, ParseDocumentOpeningPreference("01") == 1);
+		PF_CHECK(Tests, ParseDocumentOpeningPreference("2") == 2);
+		PF_CHECK(Tests, !ParseDocumentOpeningPreference("3"));
+		PF_CHECK(Tests, !ParseDocumentOpeningPreference("4294967296"));
+		PF_CHECK(Tests, !ParseDocumentOpeningPreference("remembered"));
+		PF_CHECK(Tests, !ParseDocumentOpeningPreference(" 1"));
+		PF_CHECK(Tests, ResolveDocumentOpeningPreference(true, true, 2) == 2);
+		PF_CHECK(Tests, ResolveDocumentOpeningPreference(true, false, 2) == DefaultDocumentOpeningPreference);
+		PF_CHECK(Tests, ResolveDocumentOpeningPreference(false, true, 1) == DefaultDocumentOpeningPreference);
+		PF_CHECK(Tests, ResolveDocumentOpeningPreference(true, true, std::nullopt) == DefaultDocumentOpeningPreference);
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::ContentBrowser) == EditorDefaultDockRegion::Bottom);
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Console) == EditorDefaultDockRegion::Bottom);
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Scene) == EditorDefaultDockRegion::Bottom);
