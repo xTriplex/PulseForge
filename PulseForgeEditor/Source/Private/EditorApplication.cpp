@@ -4211,6 +4211,7 @@ namespace
 			}
 			m_PendingDocumentClose = Identity;
 			m_PendingDocumentHostClose.reset();
+			m_DocumentCloseDialogHostID = Session->HostID;
 			m_PendingDocumentCloseAction = {};
 			m_OpenDocumentCloseDialog = true;
 		}
@@ -4235,6 +4236,7 @@ namespace
 			}
 			m_PendingDocumentClose.reset();
 			m_PendingDocumentHostClose = std::string(HostID);
+			m_DocumentCloseDialogHostID = std::string(HostID);
 			m_PendingDocumentCloseAction = {};
 			m_OpenDocumentCloseDialog = true;
 		}
@@ -4250,6 +4252,7 @@ namespace
 			}
 			m_PendingDocumentClose.reset();
 			m_PendingDocumentHostClose.reset();
+			m_DocumentCloseDialogHostID = std::string(PulseForgeEditor::EditorDocumentManager::MainHostID);
 			m_PendingDocumentCloseAction = std::move(Action);
 			m_OpenDocumentCloseDialog = true;
 		}
@@ -4324,6 +4327,7 @@ namespace
 			auto Continuation = std::move(m_PendingDocumentCloseAction);
 			m_PendingDocumentClose.reset();
 			m_PendingDocumentHostClose.reset();
+			m_DocumentCloseDialogHostID.clear();
 			m_PendingDocumentCloseAction = {};
 			m_OpenDocumentCloseDialog = false;
 			ImGui::CloseCurrentPopup();
@@ -4332,16 +4336,20 @@ namespace
 			return true;
 		}
 
-		void DrawDocumentCloseDialog()
+		void DrawDocumentCloseDialog(std::string_view HostID)
 		{
+			if (HostID != m_DocumentCloseDialogHostID)
+				return;
+
+			const std::string PopupName = "Unsaved Asset Documents###PFDocumentClose_" + std::string(HostID);
 			if (m_OpenDocumentCloseDialog)
 			{
-				ImGui::OpenPopup("Unsaved Asset Documents");
+				ImGui::OpenPopup(PopupName.c_str());
 				m_OpenDocumentCloseDialog = false;
 			}
 			bool PopupOpen = true;
 			const bool PopupVisible = ImGui::BeginPopupModal(
-				"Unsaved Asset Documents", &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize);
+				PopupName.c_str(), &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize);
 			if (!PopupVisible)
 				return;
 			const auto DirtyDocuments = m_PendingDocumentClose
@@ -4364,6 +4372,7 @@ namespace
 			{
 				m_PendingDocumentClose.reset();
 				m_PendingDocumentHostClose.reset();
+				m_DocumentCloseDialogHostID.clear();
 				m_PendingDocumentCloseAction = {};
 				m_OpenDocumentCloseDialog = false;
 				ImGui::CloseCurrentPopup();
@@ -4373,6 +4382,7 @@ namespace
 			{
 				m_PendingDocumentClose.reset();
 				m_PendingDocumentHostClose.reset();
+				m_DocumentCloseDialogHostID.clear();
 				m_PendingDocumentCloseAction = {};
 				m_OpenDocumentCloseDialog = false;
 			}
@@ -4513,6 +4523,7 @@ namespace
 					if (CurrentHost && CurrentHost->ActiveDocument)
 						DrawMaterialDocument(*CurrentHost->ActiveDocument);
 				}
+				DrawDocumentCloseDialog(HostID);
 				ImGui::End();
 			}
 		}
@@ -4743,7 +4754,7 @@ namespace
 				ImGui::End();
 			}
 			DrawUnsavedChangesDialog();
-			DrawDocumentCloseDialog();
+			DrawDocumentCloseDialog(PulseForgeEditor::EditorDocumentManager::MainHostID);
 
 			DrawSceneViewportPanel();
 			DrawHierarchyPanel();
@@ -9950,6 +9961,7 @@ namespace
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_LevelDocumentIdentity;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentClose;
 		std::optional<std::string> m_PendingDocumentHostClose;
+		std::string m_DocumentCloseDialogHostID;
 		std::unordered_set<std::string> m_DocumentHostFocusRequests;
 		std::optional<std::filesystem::path> m_StartupProjectPath;
 		std::optional<PulseForge::Project> m_Project;
