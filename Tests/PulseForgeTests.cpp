@@ -39,6 +39,7 @@
 #include "Editor/EditorInteractionPolicy.h"
 #include "Editor/EditorProjectOpening.h"
 #include "Editor/EditorDocumentManager.h"
+#include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
 #include "Editor/EditorSnapshotHistory.h"
 #include "Editor/EditorSelection.h"
@@ -3737,6 +3738,11 @@ namespace
 			return;
 
 		EditorDocumentManager Manager;
+		PF_CHECK(Tests, ShouldDetachDocumentTab(true, true, false, false));
+		PF_CHECK(Tests, !ShouldDetachDocumentTab(false, true, false, false));
+		PF_CHECK(Tests, !ShouldDetachDocumentTab(true, false, false, false));
+		PF_CHECK(Tests, !ShouldDetachDocumentTab(true, true, true, false));
+		PF_CHECK(Tests, !ShouldDetachDocumentTab(true, true, false, true));
 		const EditorDocumentIdentity MaterialA{ *Project, *Material, EditorDocumentKind::Material };
 		const EditorDocumentIdentity MaterialB{ *Project, *OtherMaterial, EditorDocumentKind::Material };
 		const EditorDocumentIdentity SameNameOtherFolder{ *Project, *Scene, EditorDocumentKind::Material };
@@ -3758,6 +3764,16 @@ namespace
 		PF_CHECK(Tests, Manager.Find(MaterialA)->ProjectRelativePath ==
 			std::filesystem::path("Assets/OtherFolder/Amber.material"));
 		PF_CHECK(Tests, Manager.GetFocusedHost() && Manager.GetFocusedHost()->ID == First->HostID);
+		PF_CHECK(Tests, Manager.MarkEdited(MaterialA));
+		const uint64_t LocationUpdateRevision = Manager.Find(MaterialA)->Revision;
+		const bool LocationUpdated = Manager.UpdateAssetLocation(
+			MaterialA, "Assets/Renamed/Amber-Renamed.material", "Amber-Renamed.material");
+		PF_CHECK(Tests, LocationUpdated);
+		PF_CHECK(Tests, Manager.Find(MaterialA)->ProjectRelativePath ==
+			std::filesystem::path("Assets/Renamed/Amber-Renamed.material"));
+		PF_CHECK(Tests, Manager.Find(MaterialA)->DisplayName == "Amber-Renamed.material");
+		PF_CHECK(Tests, Manager.Find(MaterialA)->HostID == First->HostID);
+		PF_CHECK(Tests, Manager.Find(MaterialA)->Revision == LocationUpdateRevision && Manager.Find(MaterialA)->IsDirty());
 
 		const auto OtherFolderOpen = Manager.Open(SameNameOtherFolder, "Assets/Sub/Amber.material", "Amber.material",
 			EditorDocumentOpenPreference::MainDocumentStrip);
@@ -3830,7 +3846,20 @@ namespace
 				PF_CHECK(Tests, Manager.Find(DetachMaterial)->HostID == EditorDocumentManager::MainHostID);
 				PF_CHECK(Tests, Manager.Find(DetachMaterial)->Revision == DetachRevision &&
 					Manager.Find(DetachMaterial)->IsDirty());
-				PF_CHECK(Tests, Manager.RemoveEmptyNativeHost(*PreparedHost));
+
+				const auto Redetached = Manager.Transfer(DetachMaterial, *PreparedHost, 0);
+				PF_CHECK(Tests, Redetached && Redetached->Changed);
+				const auto TearOffHost = Manager.CreateNativeHost(EditorDocumentKind::Material);
+				PF_CHECK(Tests, TearOffHost.has_value());
+				if (TearOffHost)
+				{
+					const auto TearOff = Manager.Transfer(DetachMaterial, *TearOffHost, 0);
+					PF_CHECK(Tests, TearOff && TearOff->EmptiedSourceHost == *PreparedHost);
+					PF_CHECK(Tests, Manager.Find(DetachMaterial)->HostID == *TearOffHost);
+					PF_CHECK(Tests, Manager.Find(DetachMaterial)->Revision == DetachRevision &&
+						Manager.Find(DetachMaterial)->IsDirty());
+					PF_CHECK(Tests, Manager.RemoveEmptyNativeHost(*PreparedHost));
+				}
 			}
 		}
 

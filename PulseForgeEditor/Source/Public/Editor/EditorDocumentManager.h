@@ -131,6 +131,10 @@ namespace PulseForgeEditor
 			const std::filesystem::path& ProjectRelativePath,
 			std::string DisplayName,
 			EditorDocumentOpenPreference Preference);
+		[[nodiscard]] bool UpdateAssetLocation(
+			const EditorDocumentIdentity& Identity,
+			const std::filesystem::path& ProjectRelativePath,
+			std::string DisplayName);
 		[[nodiscard]] std::expected<std::string, std::string> CreateNativeHost(EditorDocumentKind PlacementKind);
 		[[nodiscard]] std::expected<std::string, std::string> CreateNativeHost(
 			std::string HostID,

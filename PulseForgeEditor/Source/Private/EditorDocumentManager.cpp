@@ -108,6 +108,19 @@ namespace PulseForgeEditor
 		return EditorDocumentOpenResult{ Identity, std::move(HostID), true };
 	}
 
+	bool EditorDocumentManager::UpdateAssetLocation(
+		const EditorDocumentIdentity& Identity,
+		const std::filesystem::path& ProjectRelativePath,
+		std::string DisplayName)
+	{
+		EditorDocumentSession* Session = Find(Identity);
+		if (!Session || Identity.Kind == EditorDocumentKind::Level)
+			return false;
+		Session->ProjectRelativePath = ProjectRelativePath;
+		Session->DisplayName = std::move(DisplayName);
+		return true;
+	}
+
 	bool EditorDocumentManager::RemoveEmptyNativeHost(std::string_view HostID) noexcept
 	{
 		const auto Host = std::find_if(m_Hosts.begin(), m_Hosts.end(), [HostID](const EditorDocumentHost& Candidate)

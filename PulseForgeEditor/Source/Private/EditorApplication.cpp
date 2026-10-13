@@ -50,6 +50,7 @@
 #include "Editor/EditorPlatformViewportPolicy.h"
 #include "Editor/EditorMaterialPropertyLayoutPolicy.h"
 #include "Editor/EditorDocumentManager.h"
+#include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
 #include "Editor/EditorSnapshotHistory.h"
 #include "Editor/EditorStyle.h"
@@ -253,6 +254,27 @@ namespace
 			}
 		}
 		return { ImVec2(X, Y), ImVec2((std::max)(Width, 320.0f), (std::max)(Height, 240.0f)) };
+	}
+
+	PulseForgeEditor::EditorDocumentHost::WindowBounds MakeDocumentDropWindowBounds(ImVec2 MousePosition)
+	{
+		PulseForgeEditor::EditorDocumentHost::WindowBounds Bounds;
+		Bounds.X = MousePosition.x - 24.0f;
+		Bounds.Y = MousePosition.y - 12.0f;
+		Bounds.Width = 560.0f;
+		Bounds.Height = 760.0f;
+		Bounds.DpiScale = 1.0f;
+		Bounds.HasValue = true;
+		if (GLFWmonitor* Monitor = FindMonitorForBounds(Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height))
+		{
+			if (const char* MonitorName = glfwGetMonitorName(Monitor))
+				Bounds.MonitorName = MonitorName;
+			float ScaleX = 1.0f;
+			float ScaleY = 1.0f;
+			glfwGetMonitorContentScale(Monitor, &ScaleX, &ScaleY);
+			Bounds.DpiScale = (std::max)(ScaleX, ScaleY);
+		}
+		return Bounds;
 	}
 
 	bool BeginEditorChromeBar(
@@ -727,6 +749,7 @@ namespace
 			std::string DestinationHostID;
 			size_t DestinationIndex = 0;
 			bool CreateNativeHost = false;
+			std::optional<PulseForgeEditor::EditorDocumentHost::WindowBounds> NativeHostBounds;
 		};
 
 		struct GizmoAxisScreen
@@ -1364,6 +1387,7 @@ namespace
 			if (m_Layout.SubmitDockspace())
 				CancelViewportInteractionForLayoutChange();
 			DrawWorkspacePanels();
+			ProcessReleasedDocumentTabDrag();
 			ProcessPendingDocumentTabClose();
 			ProcessPendingDocumentTransfer();
 			#ifdef PF_EDITOR_RENDERER_OPENGL
@@ -4623,12 +4647,46 @@ namespace
 			const PulseForgeEditor::EditorDocumentIdentity& Identity,
 			std::string DestinationHostID,
 			size_t Index,
-			bool CreateNativeHost = false)
+			bool CreateNativeHost = false,
+			std::optional<PulseForgeEditor::EditorDocumentHost::WindowBounds> NativeHostBounds = std::nullopt)
 		{
 			if (m_PendingDocumentTransfer)
 				return;
 			m_PendingDocumentTransfer = PendingDocumentTransfer{
-				Identity, std::move(DestinationHostID), Index, CreateNativeHost };
+				Identity, std::move(DestinationHostID), Index, CreateNativeHost, std::move(NativeHostBounds) };
+		}
+
+		void ProcessReleasedDocumentTabDrag()
+		{
+			if (!ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+			{
+				if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGui::GetDragDropPayload())
+					m_ActiveDocumentTabDrag.reset();
+				return;
+			}
+
+			if (!m_ActiveDocumentTabDrag)
+				return;
+			const PulseForgeEditor::EditorDocumentIdentity Identity = *m_ActiveDocumentTabDrag;
+			m_ActiveDocumentTabDrag.reset();
+
+			const ImGuiPayload* Payload = ImGui::GetDragDropPayload();
+			const bool HasDocumentPayload = Payload && Payload->IsDataType("PF_EDITOR_DOCUMENT");
+			const bool TransferQueued = m_PendingDocumentTransfer &&
+				m_PendingDocumentTransfer->Identity == Identity;
+			if (!PulseForgeEditor::ShouldDetachDocumentTab(
+				true, HasDocumentPayload, TransferQueued, ImGui::GetIO().MouseHoveredViewport != 0))
+				return;
+
+			const auto* Session = m_Documents.Find(Identity);
+			if (!Session || Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level)
+				return;
+
+			const ImVec2 MousePosition = ImGui::GetIO().MousePos;
+			if (!std::isfinite(MousePosition.x) || !std::isfinite(MousePosition.y) ||
+				MousePosition.x < -100000.0f || MousePosition.y < -100000.0f)
+				return;
+			QueueDocumentTransfer(Identity, {}, 0, true, MakeDocumentDropWindowBounds(MousePosition));
 		}
 
 		void ProcessPendingDocumentTransfer()
@@ -4647,9 +4705,9 @@ namespace
 			if (Pending.CreateNativeHost)
 			{
 				const auto* Source = m_Documents.FindHost(Session->HostID);
-				if (!Source || Source->Role != PulseForgeEditor::EditorDocumentHostRole::Main)
+				if (!Source || Pending.Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level)
 				{
-					SetWarning("Only documents in the main strip can be detached to a new native window.");
+					SetWarning("Only open asset documents can be detached to a new native window.");
 					return;
 				}
 
@@ -4661,6 +4719,11 @@ namespace
 				}
 				DestinationHostID = std::move(*Host);
 				CreatedHost = true;
+				if (Pending.NativeHostBounds)
+				{
+					(void)m_Documents.SetHostBounds(DestinationHostID, std::move(*Pending.NativeHostBounds));
+					m_RestoredHostBoundsPending.insert(DestinationHostID);
+				}
 			}
 
 			const auto Moved = m_Documents.Transfer(Pending.Identity, DestinationHostID, Pending.DestinationIndex,
@@ -4668,7 +4731,10 @@ namespace
 			if (!Moved)
 			{
 				if (CreatedHost)
+				{
+					m_RestoredHostBoundsPending.erase(DestinationHostID);
 					(void)m_Documents.RemoveEmptyNativeHost(DestinationHostID);
+				}
 				SetWarning("Document transfer was rejected: " + Moved.error());
 				return;
 			}
@@ -4676,7 +4742,10 @@ namespace
 			if (Moved->Changed)
 				MarkDocumentWorkspaceDirty();
 			if (Moved->EmptiedSourceHost)
+			{
+				m_RestoredHostBoundsPending.erase(*Moved->EmptiedSourceHost);
 				(void)m_Documents.RemoveEmptyNativeHost(*Moved->EmptiedSourceHost);
+			}
 			m_DocumentHostFocusRequests.insert(std::move(DestinationHostID));
 		}
 
@@ -4720,8 +4789,8 @@ namespace
 				const bool HasCloseButton = Session->Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level;
 				constexpr float TabHeight = 25.0f;
 				constexpr float LeftPadding = 10.0f;
-				constexpr float LabelToCloseGap = 5.0f;
-				constexpr float CloseRegionWidth = 18.0f;
+				constexpr float LabelToCloseGap = 4.0f;
+				constexpr float CloseRegionWidth = 20.0f;
 				constexpr float RightPadding = 6.0f;
 				const ImVec2 LabelSize = ImGui::CalcTextSize(Label.c_str());
 				const float TabWidth = LeftPadding + LabelSize.x +
@@ -4752,11 +4821,14 @@ namespace
 				if (HasCloseButton)
 				{
 					const char* CloseGlyph = "×";
-					const ImVec2 CloseGlyphSize = ImGui::CalcTextSize(CloseGlyph);
+					ImFont* CloseGlyphFont = ImGui::GetFont();
+					const float CloseGlyphFontSize = ImGui::GetFontSize() * 1.75f;
+					const ImVec2 CloseGlyphSize = CloseGlyphFont->CalcTextSizeA(
+						CloseGlyphFontSize, (std::numeric_limits<float>::max)(), 0.0f, CloseGlyph);
 					const ImVec2 ClosePosition(
 						CloseRegionMinimumX + (CloseRegionWidth - CloseGlyphSize.x) * 0.5f,
 						TabMinimum.y + (TabHeight - CloseGlyphSize.y) * 0.5f);
-					DrawList->AddText(ClosePosition,
+					DrawList->AddText(CloseGlyphFont, CloseGlyphFontSize, ClosePosition,
 						ImGui::GetColorU32(CloseHovered ? ImGuiCol_Text : ImGuiCol_TextDisabled), CloseGlyph);
 					if (CloseHovered)
 						ImGui::SetTooltip("Close %s", Session->DisplayName.c_str());
@@ -4807,6 +4879,7 @@ namespace
 				}
 				if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
 				{
+					m_ActiveDocumentTabDrag = Session->Identity;
 					const std::string Payload = GetDocumentPayload(Session->Identity);
 					ImGui::SetDragDropPayload("PF_EDITOR_DOCUMENT", Payload.c_str(), Payload.size() + 1);
 					ImGui::TextUnformatted(Label.c_str());
@@ -9916,6 +9989,7 @@ namespace
 				m_Assets = m_Project->GetAssetRegistry().GetAssets();
 			else
 				m_Assets.clear();
+			SynchronizeOpenDocumentAssetLocations();
 
 			m_AssetBrowserPresentations.clear();
 			m_AssetBrowserPresentations.reserve(m_Assets.size());
@@ -9929,6 +10003,31 @@ namespace
 					PulseForgeEditor::GetAssetBrowserIcon(Asset.ProjectRelativePath) });
 			}
 			RebuildContentFolderTree();
+		}
+
+		void SynchronizeOpenDocumentAssetLocations()
+		{
+			if (!m_Project)
+				return;
+
+			const PulseForge::UUID ProjectID = m_Project->GetDescription().ID;
+			for (const auto& [Identity, ExistingSession] : m_Documents.GetSessions())
+			{
+				if (Identity.Project != ProjectID || Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level)
+					continue;
+
+				const auto Asset = m_Project->GetAssetRegistry().Find(Identity.Asset);
+				if (!Asset)
+					continue;
+
+				const std::string DisplayName = PathToUtf8(Asset->ProjectRelativePath.filename());
+				if (ExistingSession.ProjectRelativePath == Asset->ProjectRelativePath &&
+					ExistingSession.DisplayName == DisplayName)
+					continue;
+
+				(void)m_Documents.UpdateAssetLocation(
+					Identity, Asset->ProjectRelativePath, DisplayName);
+			}
 		}
 
 		void SetWarning(std::string Message)
@@ -10112,6 +10211,7 @@ namespace
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentTabClose;
 		std::optional<std::string> m_PendingDocumentHostClose;
 		std::optional<PendingDocumentTransfer> m_PendingDocumentTransfer;
+		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_ActiveDocumentTabDrag;
 		std::string m_DocumentCloseDialogHostID;
 		std::unordered_set<std::string> m_DocumentHostFocusRequests;
 		std::optional<std::filesystem::path> m_StartupProjectPath;
