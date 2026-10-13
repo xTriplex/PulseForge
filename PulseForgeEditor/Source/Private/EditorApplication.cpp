@@ -2711,6 +2711,33 @@ namespace
 			return {};
 		}
 
+		[[nodiscard]] static constexpr std::array<std::string_view, 2> GetDocumentHostTestFixtureAssetIDs() noexcept
+		{
+			return {
+				"d3110000-0000-4000-8000-000000000001",
+				"d3110000-0000-4000-8000-000000000002"
+			};
+		}
+
+		[[nodiscard]] bool IsDocumentHostTestFixtureIdentity(
+			const PulseForgeEditor::EditorDocumentIdentity& Identity) const
+		{
+			#ifndef _DEBUG
+			(void)Identity;
+			return false;
+			#else
+			if (!m_DocumentHostTestFixture || !m_Project ||
+				Identity.Project != m_Project->GetDescription().ID ||
+				Identity.Kind != PulseForgeEditor::EditorDocumentKind::Texture)
+				return false;
+
+			for (const std::string_view FixtureID : GetDocumentHostTestFixtureAssetIDs())
+				if (const auto Parsed = PulseForge::UUID::Parse(FixtureID); Parsed && *Parsed == Identity.Asset)
+					return true;
+			return false;
+			#endif
+		}
+
 		void InitializeDocumentHostTestFixture()
 		{
 			#ifndef _DEBUG
@@ -2721,14 +2748,12 @@ namespace
 
 			// These synthetic Texture-kind identities exist only to exercise the host shell.
 			// They deliberately render the unregistered-editor placeholder; no asset UI is exposed.
-			static constexpr std::array<std::string_view, 2> FixtureAssetIDs = {
-				"d3110000-0000-4000-8000-000000000001",
-				"d3110000-0000-4000-8000-000000000002"
-			};
+			const auto FixtureAssetIDs = GetDocumentHostTestFixtureAssetIDs();
 			const auto Preference = m_Documents.GetOpeningPreference();
 			std::unordered_set<std::string> FixtureHosts;
 			m_DocumentHostFixtureSessions.clear();
 			size_t OpenedCount = 0;
+			size_t RestoredCount = 0;
 			for (size_t Index = 0; Index < FixtureAssetIDs.size(); ++Index)
 			{
 				const auto AssetID = PulseForge::UUID::Parse(FixtureAssetIDs[Index]);
@@ -2737,23 +2762,34 @@ namespace
 				const PulseForgeEditor::EditorDocumentIdentity Identity{
 					m_Project->GetDescription().ID, *AssetID, PulseForgeEditor::EditorDocumentKind::Texture };
 				const std::string DisplayName = "Host Test Fixture " + std::to_string(Index + 1);
-				auto Opened = m_Documents.Open(Identity, {}, DisplayName, Preference);
-				if (!Opened)
-					PF_WARN("Could not open development document-host fixture {}: {}", DisplayName, Opened.error());
+				std::string HostID;
+				if (const auto* Existing = m_Documents.Find(Identity))
+				{
+					HostID = Existing->HostID;
+					++RestoredCount;
+				}
 				else
 				{
-					++OpenedCount;
-					FixtureHosts.insert(Opened->HostID);
-					m_DocumentHostFixtureSessions.emplace_back(Identity, Opened->HostID);
-					if (m_DocumentHostResetLayoutTest && !m_Documents.MarkEdited(Identity))
-						PF_WARN("Could not mark development fixture {} dirty for the reset-layout test.", DisplayName);
+					auto Opened = m_Documents.Open(Identity, {}, DisplayName, Preference);
+					if (!Opened)
+					{
+						PF_WARN("Could not open development document-host fixture {}: {}", DisplayName, Opened.error());
+						continue;
+					}
+					HostID = Opened->HostID;
 				}
+				++OpenedCount;
+				FixtureHosts.insert(HostID);
+				m_DocumentHostFixtureSessions.emplace_back(Identity, HostID);
+				if (m_DocumentHostResetLayoutTest && !m_Documents.MarkEdited(Identity))
+					PF_WARN("Could not mark development fixture {} dirty for the reset-layout test.", DisplayName);
 			}
 			MarkDocumentWorkspaceDirty();
 			PF_WARN(
-				"Development document-host fixture enabled with opening preference {}: {} sessions across {} hosts; "
+				"Development document-host fixture enabled with opening preference {}: {} sessions restored from saved "
+				"host state, {} total across {} hosts; "
 				"fixture tabs have no asset editor or editable content.",
-				static_cast<uint32_t>(Preference), OpenedCount, FixtureHosts.size());
+				static_cast<uint32_t>(Preference), RestoredCount, OpenedCount, FixtureHosts.size());
 			if (m_DocumentHostResetLayoutTest && OpenedCount == FixtureAssetIDs.size())
 			{
 				m_DocumentHostResetLayoutExpectedHostCount = m_Documents.GetHosts().size();
@@ -2915,7 +2951,40 @@ namespace
 					}
 					if (!PulseForgeEditor::IsRegisteredAssetDocumentEditor(Identity.Kind))
 					{
-						SkippedDocument = true;
+						if (!IsDocumentHostTestFixtureIdentity(Identity))
+						{
+							SkippedDocument = true;
+							continue;
+						}
+
+						const auto FixtureIDs = GetDocumentHostTestFixtureAssetIDs();
+						const std::string AssetIDText = Identity.Asset.ToString();
+						const auto FixtureID = std::find(FixtureIDs.begin(), FixtureIDs.end(), AssetIDText);
+						if (FixtureID == FixtureIDs.end())
+						{
+							SkippedDocument = true;
+							continue;
+						}
+						const size_t FixtureIndex = static_cast<size_t>(std::distance(FixtureIDs.begin(), FixtureID));
+						auto Opened = m_Documents.Open(Identity, {},
+							"Host Test Fixture " + std::to_string(FixtureIndex + 1),
+							PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip);
+						if (!Opened)
+						{
+							SkippedDocument = true;
+							PF_WARN("Could not restore development document-host fixture: {}", Opened.error());
+							continue;
+						}
+						const auto SavedDocument = std::find(SavedHost.Documents.begin(), SavedHost.Documents.end(), Identity);
+						const size_t DestinationIndex = static_cast<size_t>(
+							std::distance(SavedHost.Documents.begin(), SavedDocument));
+						if (!m_Documents.Transfer(Identity, SavedHost.ID, DestinationIndex))
+						{
+							(void)m_Documents.Close(Identity,
+								PulseForgeEditor::EditorDocumentCloseChoice::Discard, {}, {});
+							SkippedDocument = true;
+							PF_WARN("Could not restore development document-host fixture placement");
+						}
 						continue;
 					}
 					SkippedDocument = true;
