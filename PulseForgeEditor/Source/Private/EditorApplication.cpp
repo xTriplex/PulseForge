@@ -3820,29 +3820,27 @@ namespace
 					SkippedDocument = true;
 			}
 			bool RecoveredMaterialDetails = false;
-			auto RecoverMaterialDetails = [this, &SkippedDocument, &RecoveredMaterialDetails, &Workspace](const auto& SavedHost)
+			std::optional<PulseForge::AssetID> FocusedActiveMaterial;
+			for (const auto& Host : Workspace->Hosts)
+				if (Host.ID == Workspace->FocusedHostID && Host.ActiveDocument &&
+					Host.ActiveDocument->Kind == PulseForgeEditor::EditorDocumentKind::Material)
+					FocusedActiveMaterial = Host.ActiveDocument->Asset;
+			for (const PulseForge::AssetID& Candidate :
+				PulseForgeEditor::GetMaterialDetailsMigrationCandidates(*Workspace))
 			{
-				for (const auto& Identity : SavedHost.Documents)
-				{
-					if (Identity.Kind != PulseForgeEditor::EditorDocumentKind::Material)
-						continue;
-					const auto Asset = m_Project->GetAssetRegistry().Find(Identity.Asset);
-					if (!Asset || NormalizedExtension(Asset->ProjectRelativePath) != ".material")
-						continue;
-					const bool IsFocusedActiveMaterial = SavedHost.ID == Workspace->FocusedHostID &&
-						SavedHost.ActiveDocument && *SavedHost.ActiveDocument == Identity;
-					if (IsFocusedActiveMaterial || !m_MaterialDetailsAsset)
-						m_MaterialDetailsAsset = Identity.Asset;
-					SkippedDocument = true;
-					RecoveredMaterialDetails = true;
-				}
-			};
+				const auto Asset = m_Project->GetAssetRegistry().Find(Candidate);
+				if (!Asset || NormalizedExtension(Asset->ProjectRelativePath) != ".material")
+					continue;
+				if (FocusedActiveMaterial == Candidate || !m_MaterialDetailsAsset)
+					m_MaterialDetailsAsset = Candidate;
+				SkippedDocument = true;
+				RecoveredMaterialDetails = true;
+			}
 			std::unordered_set<std::string> RestoredHosts;
 			for (const auto& SavedHost : Workspace->Hosts)
 			{
 				if (SavedHost.Role != PulseForgeEditor::EditorDocumentHostRole::Native)
 					continue;
-				RecoverMaterialDetails(SavedHost);
 				auto Created = m_Documents.CreateNativeHost(SavedHost.ID, SavedHost.PlacementKind);
 				if (!Created)
 				{
@@ -3863,8 +3861,6 @@ namespace
 				if (IsNativeHost && !RestoredHosts.contains(SavedHost.ID))
 				{
 					SkippedDocument |= !SavedHost.Documents.empty();
-					if (!m_MaterialDetailsAsset)
-						RecoverMaterialDetails(SavedHost);
 					continue;
 				}
 				for (const auto& Identity : SavedHost.Documents)
@@ -11442,14 +11438,19 @@ namespace
 				return;
 			const bool FocusMaterialDetails = m_FocusMaterialDetailsNextFrame;
 			if (FocusMaterialDetails)
-			{
 				ImGui::SetNextWindowFocus();
-				m_FocusMaterialDetailsNextFrame = false;
-			}
 			const bool ContentsVisible = BeginEditorPanel(PulseForgeEditor::EditorPanel::MaterialDetails,
 				"Material Details###Material Editor");
 			if (FocusMaterialDetails)
-				(void)m_Layout.ActivatePanel(PulseForgeEditor::EditorPanel::MaterialDetails);
+			{
+				const bool Activated = m_Layout.ActivatePanel(PulseForgeEditor::EditorPanel::MaterialDetails);
+				const ImGuiWindow* Window = ImGui::GetCurrentWindow();
+				const ImGuiDockNode* Node = Window->DockNode;
+				const bool IsActive = Node && Node->TabBar
+					? Node->SelectedTabId == Window->TabId
+					: ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+				m_FocusMaterialDetailsNextFrame = !Activated || !IsActive;
+			}
 			if (ContentsVisible)
 			{
 				if (!m_Project)

@@ -29,4 +29,7 @@ namespace PulseForgeEditor
 			std::string_view Contents,
 			const PulseForge::UUID& ExpectedProject);
 	};
+
+	[[nodiscard]] std::vector<PulseForge::AssetID> GetMaterialDetailsMigrationCandidates(
+		const EditorDocumentWorkspaceState& State);
 }

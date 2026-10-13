@@ -4370,6 +4370,8 @@ namespace
 			PF_CHECK(Tests, Restored->Hosts[1].ActiveDocument == Blue);
 			PF_CHECK(Tests, Restored->Hosts[1].Bounds.X == -1920.0f && Restored->Hosts[1].Bounds.Maximized);
 			PF_CHECK(Tests, Restored->FocusedHostID == Native.ID && Restored->RememberedHosts.size() == 1);
+			const auto Candidates = GetMaterialDetailsMigrationCandidates(*Restored);
+			PF_CHECK(Tests, Candidates.size() == 2 && Candidates[0] == *MaterialB && Candidates[1] == *MaterialA);
 		}
 		auto LegacyWorkspace = nlohmann::json::parse(*Serialized);
 		LegacyWorkspace["version"] = 1;
@@ -4380,6 +4382,32 @@ namespace
 		{
 			PF_CHECK(Tests, MigratedLegacy->Version == 2 && !MigratedLegacy->MaterialDetailsAsset);
 			PF_CHECK(Tests, MigratedLegacy->Hosts[1].Documents.size() == 2);
+		}
+
+		EditorDocumentWorkspaceState LegacyMainStripState = State;
+		LegacyMainStripState.MaterialDetailsAsset.reset();
+		LegacyMainStripState.Hosts[0].Documents = { Level, Amber, Blue };
+		LegacyMainStripState.Hosts[0].ActiveDocument = Blue;
+		LegacyMainStripState.Hosts.erase(LegacyMainStripState.Hosts.begin() + 1);
+		LegacyMainStripState.RememberedHosts.clear();
+		LegacyMainStripState.FocusedHostID = std::string(EditorDocumentManager::MainHostID);
+		const auto LegacyMainStripJSON = EditorDocumentWorkspaceCodec::Serialize(LegacyMainStripState);
+		PF_CHECK(Tests, LegacyMainStripJSON.has_value());
+		if (LegacyMainStripJSON)
+		{
+			auto LegacyMainStrip = nlohmann::json::parse(*LegacyMainStripJSON);
+			LegacyMainStrip["version"] = 1;
+			LegacyMainStrip.erase("materialDetailsAsset");
+			const auto MigratedMainStrip = EditorDocumentWorkspaceCodec::Deserialize(
+				LegacyMainStrip.dump(), *Project);
+			PF_CHECK(Tests, MigratedMainStrip.has_value());
+			if (MigratedMainStrip)
+			{
+				const auto Candidates = GetMaterialDetailsMigrationCandidates(*MigratedMainStrip);
+				PF_CHECK(Tests, Candidates.size() == 2 && Candidates[0] == *MaterialB && Candidates[1] == *MaterialA);
+				PF_CHECK(Tests, MigratedMainStrip->Hosts.size() == 1 &&
+					MigratedMainStrip->Hosts[0].Documents[0] == Level);
+			}
 		}
 		const auto OtherProject = UUID::Generate();
 		PF_CHECK(Tests, OtherProject &&

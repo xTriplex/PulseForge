@@ -137,6 +137,27 @@ namespace
 
 namespace PulseForgeEditor
 {
+	std::vector<PulseForge::AssetID> GetMaterialDetailsMigrationCandidates(
+		const EditorDocumentWorkspaceState& State)
+	{
+		std::vector<PulseForge::AssetID> Candidates;
+		std::unordered_set<PulseForge::AssetID, PulseForge::UUIDHash> Added;
+		const auto AddMaterial = [&Candidates, &Added](const EditorDocumentIdentity& Identity)
+		{
+			if (Identity.Kind == EditorDocumentKind::Material && Added.insert(Identity.Asset).second)
+				Candidates.push_back(Identity.Asset);
+		};
+
+		for (const EditorDocumentHost& Host : State.Hosts)
+			if (Host.ID == State.FocusedHostID && Host.ActiveDocument)
+				AddMaterial(*Host.ActiveDocument);
+		for (const EditorDocumentHost& Host : State.Hosts)
+			for (const EditorDocumentIdentity& Identity : Host.Documents)
+				AddMaterial(Identity);
+
+		return Candidates;
+	}
+
 	std::expected<std::string, std::string> EditorDocumentWorkspaceCodec::Serialize(
 		const EditorDocumentWorkspaceState& State)
 	{
