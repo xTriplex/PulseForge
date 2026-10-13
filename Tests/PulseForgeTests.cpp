@@ -2082,6 +2082,13 @@ namespace
 		const auto ReservedExtension = ResolveAssetDestinationFilename("Amber.meta", Source);
 		PF_CHECK(Tests, !ReservedExtension &&
 			ReservedExtension.error() == AssetDestinationNameError::ReservedSidecarExtension);
+		const auto DestinationBreadcrumbs = BuildAssetDestinationBreadcrumbs("Assets/Materials/Props");
+		PF_CHECK(Tests, DestinationBreadcrumbs.size() == 3);
+		PF_CHECK(Tests, DestinationBreadcrumbs[0] == std::filesystem::path("Assets"));
+		PF_CHECK(Tests, DestinationBreadcrumbs[1] == std::filesystem::path("Assets/Materials"));
+		PF_CHECK(Tests, DestinationBreadcrumbs[2] == std::filesystem::path("Assets/Materials/Props"));
+		const auto RootBreadcrumb = BuildAssetDestinationBreadcrumbs("Assets");
+		PF_CHECK(Tests, RootBreadcrumb.size() == 1 && RootBreadcrumb.front() == std::filesystem::path("Assets"));
 		const auto NewSceneName = ResolveAssetDestinationFilename(
 			"Overview", std::filesystem::path("Assets/Scenes/NewScene.scene"));
 		PF_CHECK(Tests, NewSceneName && *NewSceneName == "Overview.scene");

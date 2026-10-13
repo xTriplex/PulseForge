@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace PulseForgeEditor
 {
@@ -24,6 +25,21 @@ namespace PulseForgeEditor
 		CaseOnlyRename,
 		InspectionFailed
 	};
+
+	[[nodiscard]] inline std::vector<std::filesystem::path> BuildAssetDestinationBreadcrumbs(
+		const std::filesystem::path& RelativeFolder)
+	{
+		std::vector<std::filesystem::path> Breadcrumbs;
+		std::filesystem::path Prefix;
+		for (const auto& Component : RelativeFolder.lexically_normal())
+		{
+			if (Component.empty() || Component == ".")
+				continue;
+			Prefix /= Component;
+			Breadcrumbs.push_back(Prefix);
+		}
+		return Breadcrumbs;
+	}
 
 	[[nodiscard]] constexpr AssetDestinationConflict ResolveAssetDestinationConflict(
 		bool IsDuplicate,

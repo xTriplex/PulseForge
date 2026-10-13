@@ -3392,6 +3392,56 @@ namespace
 			m_OpenAssetDestinationDialog = true;
 		}
 
+		void DrawAssetDestinationBreadcrumbs()
+		{
+			const std::filesystem::path CurrentFolder =
+				std::filesystem::u8path(m_AssetDestinationFolder).lexically_normal();
+			const std::vector<std::filesystem::path> Breadcrumbs =
+				PulseForgeEditor::BuildAssetDestinationBreadcrumbs(CurrentFolder);
+			if (Breadcrumbs.empty())
+				return;
+
+			if (ImGui::SmallButton("Assets##AssetDestinationBreadcrumbRoot"))
+			{
+				m_AssetDestinationFolder = "Assets";
+				m_AssetDestinationValidationError.clear();
+			}
+			if (Breadcrumbs.size() == 1)
+				return;
+			if (Breadcrumbs.size() > 1)
+			{
+				ImGui::SameLine();
+				m_EditorStyle.TextMuted("/");
+				ImGui::SameLine();
+				if (ImGui::SmallButton("...##AssetDestinationBreadcrumbAncestors"))
+					ImGui::OpenPopup("AssetDestinationBreadcrumbAncestors");
+				if (ImGui::BeginPopup("AssetDestinationBreadcrumbAncestors"))
+				{
+					for (size_t Index = 0; Index + 1 < Breadcrumbs.size(); ++Index)
+					{
+						const auto& Path = Breadcrumbs[Index];
+						const std::string PathText = PathToUtf8(Path);
+						if (ImGui::Selectable(PathText.c_str(), Path == CurrentFolder))
+						{
+							m_AssetDestinationFolder = PathText;
+							m_AssetDestinationValidationError.clear();
+						}
+					}
+					ImGui::EndPopup();
+				}
+				ImGui::SameLine();
+				m_EditorStyle.TextMuted("/");
+				ImGui::SameLine();
+			}
+
+			const std::string CurrentLabel = PathToUtf8(Breadcrumbs.back().filename());
+			const float LabelWidth = (std::max)(ImGui::GetContentRegionAvail().x -
+				ImGui::GetStyle().FramePadding.x * 2.0f, 0.0f);
+			ImGui::TextUnformatted(FitEditorContextLabel(CurrentLabel, LabelWidth).c_str());
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("%s", PathToUtf8(CurrentFolder).c_str());
+		}
+
 		void CollectContentFolders(
 			const ContentFolderNode& Node,
 			std::vector<std::filesystem::path>& Folders) const
@@ -3440,6 +3490,7 @@ namespace
 				ImGui::Text("%s%s%s", Operation.c_str(), Asset ? " " : "",
 					Asset ? PathToUtf8(Asset->ProjectRelativePath.filename()).c_str() : "");
 				ImGui::TextDisabled("Choose a project folder and use the required asset extension.");
+				DrawAssetDestinationBreadcrumbs();
 				ImGui::SetNextItemWidth(420.0f);
 				ImGui::InputTextWithHint("##AssetDestinationSearch", "Search project folders...",
 					m_AssetDestinationSearch.data(), m_AssetDestinationSearch.size());
