@@ -760,6 +760,14 @@ namespace
 			size_t AfterIndex = 0;
 		};
 
+		struct DocumentTabTestPointerTarget
+		{
+			const char* Name = nullptr;
+			ImVec2 Position{ 0.0f, 0.0f };
+			ImGuiID ViewportID = 0;
+			bool Available = false;
+		};
+
 		enum class DocumentTabTearOffTestPhase : uint8_t
 		{
 			Disabled,
@@ -775,11 +783,18 @@ namespace
 		{
 			Disabled,
 			WaitingForTab,
-			PressQueued,
-			DragQueued,
-			ReleaseQueued,
+			InvalidDropPressQueued,
+			InvalidDropPositionQueued,
+			InvalidDropReleaseQueued,
+			ValidDropPressQueued,
+			ValidDropPositionQueued,
+			ValidDropReleaseQueued,
 			Complete,
 			Failed
+		};
+
+		static constexpr std::array<const char*, 4> DocumentTabTestInvalidDropPanelNames = {
+			"Hierarchy", "Inspector", "Scene Viewport", "Content Browser"
 		};
 
 		enum class ProjectAssetDestinationCreateKind : uint8_t
@@ -1420,6 +1435,8 @@ namespace
 			QueueDocumentHostTabReattachTestInput();
 			ImGui::NewFrame();
 			m_DocumentTabDropTargets.clear();
+			for (DocumentTabTestPointerTarget& Target : m_DocumentHostTabReattachInvalidDropTargets)
+				Target.Available = false;
 			FinalizePendingMaterialEdits();
 			m_AssetPreviews.BeginRequestFrame();
 			if (m_AssetPreviewStressManifest)
@@ -3033,11 +3050,44 @@ namespace
 			m_DocumentHostTabReattachTest = false;
 #else
 			ImGuiIO& IO = ImGui::GetIO();
+			if (++m_DocumentHostTabReattachTestFrameCount > 600)
+			{
+				m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
+				m_DocumentHostTabReattachTest = false;
+				PF_ERROR("Document tab reattachment UI fixture timed out before validating all drop targets.");
+				return;
+			}
 			switch (m_DocumentHostTabReattachTestPhase)
 			{
 				case DocumentTabReattachTestPhase::WaitingForTab:
-					if (m_DocumentHostTabReattachTestTabCenterValid &&
-						m_DocumentHostTabReattachTestMainDropPositionValid)
+					if (!m_DocumentHostTabReattachTestTabCenterValid)
+						break;
+					if (m_DocumentHostTabReattachInvalidDropIndex <
+						m_DocumentHostTabReattachInvalidDropTargets.size())
+					{
+						DocumentTabTestPointerTarget& Target = m_DocumentHostTabReattachInvalidDropTargets[
+							m_DocumentHostTabReattachInvalidDropIndex];
+						if (!Target.Available)
+							break;
+						const float DeltaX = Target.Position.x - m_DocumentHostTabReattachTestTabCenter.x;
+						const float DeltaY = Target.Position.y - m_DocumentHostTabReattachTestTabCenter.y;
+						if (DeltaX * DeltaX + DeltaY * DeltaY <=
+							IO.MouseDragThreshold * IO.MouseDragThreshold)
+						{
+							m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
+							PF_ERROR("Document tab reattachment fixture could not place a drag over {} past the threshold.",
+								Target.Name);
+							break;
+						}
+						IO.AddMousePosEvent(
+							m_DocumentHostTabReattachTestTabCenter.x,
+							m_DocumentHostTabReattachTestTabCenter.y);
+						IO.AddMouseViewportEvent(m_DocumentHostTabReattachTestTabViewportID);
+						IO.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+						m_DocumentHostTabReattachTestPhase =
+							DocumentTabReattachTestPhase::InvalidDropPressQueued;
+					}
+					else if (m_DocumentHostTabReattachTestMainDropPositionValid)
 					{
 						const float DeltaX = m_DocumentHostTabReattachTestMainDropPosition.x -
 							m_DocumentHostTabReattachTestTabCenter.x;
@@ -3047,7 +3097,7 @@ namespace
 							IO.MouseDragThreshold * IO.MouseDragThreshold)
 						{
 							m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
-							PF_ERROR("Document tab reattachment fixture could not place a drop point past the drag threshold.");
+							PF_ERROR("Document tab reattachment fixture could not place a valid strip drop past the drag threshold.");
 							break;
 						}
 						IO.AddMousePosEvent(
@@ -3055,27 +3105,70 @@ namespace
 							m_DocumentHostTabReattachTestTabCenter.y);
 						IO.AddMouseViewportEvent(m_DocumentHostTabReattachTestTabViewportID);
 						IO.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
-						m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::PressQueued;
-						PF_INFO("Document tab reattachment fixture is dragging from native host '{}' to the main strip.",
-							m_DocumentHostTabReattachTestSourceHostID);
+						m_DocumentHostTabReattachTestPhase =
+							DocumentTabReattachTestPhase::ValidDropPressQueued;
+						PF_INFO("Document tab reattachment fixture is returning the native tab to the main strip.");
 					}
 					break;
-				case DocumentTabReattachTestPhase::PressQueued:
+				case DocumentTabReattachTestPhase::InvalidDropPressQueued:
+				{
+					const auto& Target = m_DocumentHostTabReattachInvalidDropTargets[
+						m_DocumentHostTabReattachInvalidDropIndex];
+					IO.AddMousePosEvent(Target.Position.x, Target.Position.y);
+					IO.AddMouseViewportEvent(Target.ViewportID);
+					m_DocumentHostTabReattachTestPhase =
+						DocumentTabReattachTestPhase::InvalidDropPositionQueued;
+					break;
+				}
+				case DocumentTabReattachTestPhase::InvalidDropPositionQueued:
+				{
+					const auto& Target = m_DocumentHostTabReattachInvalidDropTargets[
+						m_DocumentHostTabReattachInvalidDropIndex];
+					IO.AddMousePosEvent(Target.Position.x, Target.Position.y);
+					IO.AddMouseViewportEvent(Target.ViewportID);
+					IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+					m_DocumentHostTabReattachTestPhase =
+						DocumentTabReattachTestPhase::InvalidDropReleaseQueued;
+					break;
+				}
+				case DocumentTabReattachTestPhase::InvalidDropReleaseQueued:
+				{
+					const auto& Target = m_DocumentHostTabReattachInvalidDropTargets[
+						m_DocumentHostTabReattachInvalidDropIndex];
+					const auto* Session = m_Documents.Find(m_DocumentHostTabReattachTestIdentity);
+					const bool StillInSourceHost = Session &&
+						Session->HostID == m_DocumentHostTabReattachTestSourceHostID;
+					const bool NoRegisteredStripTarget =
+						!FindDocumentTabDropTarget(Target.Position, Target.ViewportID);
+					if (!StillInSourceHost || !NoRegisteredStripTarget)
+					{
+						m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
+						PF_ERROR("Document tab drag over {} changed document membership or matched a registered strip.",
+							Target.Name);
+						break;
+					}
+					PF_INFO("Document tab drag over {} was rejected without changing host membership.", Target.Name);
+					++m_DocumentHostTabReattachInvalidDropIndex;
+					m_DocumentHostTabReattachTestTabCenterValid = false;
+					m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::WaitingForTab;
+					break;
+				}
+				case DocumentTabReattachTestPhase::ValidDropPressQueued:
 					IO.AddMousePosEvent(
 						m_DocumentHostTabReattachTestMainDropPosition.x,
 						m_DocumentHostTabReattachTestMainDropPosition.y);
 					IO.AddMouseViewportEvent(m_DocumentHostTabReattachTestMainViewportID);
-					m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::DragQueued;
+					m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::ValidDropPositionQueued;
 					break;
-				case DocumentTabReattachTestPhase::DragQueued:
+				case DocumentTabReattachTestPhase::ValidDropPositionQueued:
 					IO.AddMousePosEvent(
 						m_DocumentHostTabReattachTestMainDropPosition.x,
 						m_DocumentHostTabReattachTestMainDropPosition.y);
 					IO.AddMouseViewportEvent(m_DocumentHostTabReattachTestMainViewportID);
 					IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
-					m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::ReleaseQueued;
+					m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::ValidDropReleaseQueued;
 					break;
-				case DocumentTabReattachTestPhase::ReleaseQueued:
+				case DocumentTabReattachTestPhase::ValidDropReleaseQueued:
 				{
 					const auto* Session = m_Documents.Find(m_DocumentHostTabReattachTestIdentity);
 					const auto* Host = Session ? m_Documents.FindHost(Session->HostID) : nullptr;
@@ -3092,7 +3185,8 @@ namespace
 						EmptySourceRetired && LevelRetained)
 					{
 						m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Complete;
-						PF_INFO("Document tab reattachment UI fixture passed: the native tab returned to the main strip and its empty host was retired.");
+						PF_INFO("Document tab reattachment UI fixture passed: {} non-strip drops were rejected, then the tab returned to the main strip and its empty source host was retired.",
+							m_DocumentHostTabReattachInvalidDropIndex);
 					}
 					else
 					{
@@ -5909,6 +6003,40 @@ namespace
 			DrawNativeDocumentHosts();
 		}
 
+		void CaptureDocumentTabTestInvalidDropTarget(PulseForgeEditor::EditorPanel Panel)
+		{
+			if (!m_DocumentHostTabReattachTest)
+				return;
+
+			size_t TargetIndex = m_DocumentHostTabReattachInvalidDropTargets.size();
+			switch (Panel)
+			{
+				case PulseForgeEditor::EditorPanel::Hierarchy: TargetIndex = 0; break;
+				case PulseForgeEditor::EditorPanel::Inspector: TargetIndex = 1; break;
+				case PulseForgeEditor::EditorPanel::SceneViewport: TargetIndex = 2; break;
+				case PulseForgeEditor::EditorPanel::ContentBrowser: TargetIndex = 3; break;
+				case PulseForgeEditor::EditorPanel::Console:
+				case PulseForgeEditor::EditorPanel::Scene:
+				case PulseForgeEditor::EditorPanel::MaterialDetails:
+				case PulseForgeEditor::EditorPanel::Count:
+					return;
+			}
+			if (TargetIndex >= m_DocumentHostTabReattachInvalidDropTargets.size())
+				return;
+
+			ImGuiViewport* Viewport = ImGui::GetWindowViewport();
+			const ImVec2 Position = ImGui::GetWindowPos();
+			const ImVec2 Size = ImGui::GetWindowSize();
+			if (!Viewport || Size.x < 100.0f || Size.y < 100.0f)
+				return;
+
+			auto& Target = m_DocumentHostTabReattachInvalidDropTargets[TargetIndex];
+			Target.Name = DocumentTabTestInvalidDropPanelNames[TargetIndex];
+			Target.Position = ImVec2(Position.x + Size.x * 0.5f, Position.y + Size.y * 0.5f);
+			Target.ViewportID = Viewport->ID;
+			Target.Available = true;
+		}
+
 		bool BeginEditorPanel(PulseForgeEditor::EditorPanel Panel, std::string_view DisplayTitle = {})
 		{
 			bool* IsOpen = m_Layout.GetPanelVisibility(Panel);
@@ -5921,6 +6049,8 @@ namespace
 				? std::string(Descriptor.WindowName)
 				: std::string(DisplayTitle) + "###" + std::string(Descriptor.WindowName);
 			const bool ContentsVisible = ImGui::Begin(WindowName.c_str(), IsOpen);
+			if (ContentsVisible)
+				CaptureDocumentTabTestInvalidDropTarget(Panel);
 			if (ImGui::GetWindowViewport() && ImGui::GetMainViewport() &&
 				ImGui::GetWindowViewport()->ID == ImGui::GetMainViewport()->ID &&
 				ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
@@ -11233,6 +11363,10 @@ namespace
 		ImVec2 m_DocumentHostTabReattachTestTabCenter{ 0.0f, 0.0f };
 		ImGuiID m_DocumentHostTabReattachTestTabViewportID = 0;
 		bool m_DocumentHostTabReattachTestTabCenterValid = false;
+		std::array<DocumentTabTestPointerTarget, DocumentTabTestInvalidDropPanelNames.size()>
+			m_DocumentHostTabReattachInvalidDropTargets{};
+		size_t m_DocumentHostTabReattachInvalidDropIndex = 0;
+		size_t m_DocumentHostTabReattachTestFrameCount = 0;
 		ImVec2 m_DocumentHostTabReattachTestMainDropPosition{ 0.0f, 0.0f };
 		ImGuiID m_DocumentHostTabReattachTestMainViewportID = 0;
 		bool m_DocumentHostTabReattachTestMainDropPositionValid = false;

@@ -114,23 +114,87 @@ Do not register Material Details as a document editor. A future full Material Ed
 
 ## Validation and known limitations
 
-`PulseForgeTests` covers document identity, duplicate activation, host placement, transfer preparation and rollback, dirty revisions, save/discard/cancel policy, command focus, workspace migration, native-bound recovery, asset moves, and project destination policies. A Debug-only `--document-host-test-fixture` option creates two synthetic unregistered document sessions for host and transfer testing; it requires `--project` and is rejected outside Debug. The fixture does not provide an asset editor or test real asset editing state. `--document-host-reset-layout-test`, `--document-host-test-tab-tear-off`, `--document-host-test-tab-reattach`, and `--document-host-test-presentation-failure` are opt-in Debug fixture modes.
+On 2026-10-13, the Visual Studio 2022 x64 Debug, Release, and Dist builds each passed 4,351 `PulseForgeTests` checks and CTest 2/2. The tests cover document identity and transfer policy, dirty revisions and close decisions, focused commands, layout migration and bounds recovery, asset operations, and destination-dialog policy. The Debug-only `--document-host-test-fixture` creates two synthetic, unregistered sessions; it tests the host shell and does not provide editable asset content.
 
-On 2026-10-13, Debug, Release, and Dist builds each passed 4,351 `PulseForgeTests` checks and CTest 2/2. The Vulkan Debug tear-off and reattachment fixtures exercise synthetic pointer events through the production tab-strip capture and transfer path. They verify that a tab can move from the main strip into a native host and back, including retirement of an emptied source host. Runtime logs confirm that Khronos and NVRHI validation were enabled; no VUID or validation errors were reported. These fixtures do not establish real OS pointer-driven interaction.
+The Debug tab fixture feeds synthetic ImGui pointer events through production tab-strip code. Vulkan and OpenGL runs rejected drops over Hierarchy, Inspector, Scene Viewport, and Content Browser, then reattached the same fixture session to the main strip and retired its empty native host. The Vulkan log and screenshot are under `Build/CMake/VS2022-x64/Diagnostics/DocumentStripTargetPolicy_20261013/`; the OpenGL log is under the matching `Build/CMake/VS2022-x64-OpenGL/Diagnostics/` directory. These runs validate the application input path, not delivery of real OS mouse input.
 
-Native-window startup, resize, minimize/restore, main-window minimization, workspace restart, and OpenGL host rendering have bounded runtime coverage. A Debug OpenGL fixture rendered two secondary document-host windows and the PBR Content Browser showed image and material type icons. The OpenGL framebuffer capture hook read the main back buffer and each secondary front buffer; the standard PrintWindow capture showed a white client area and was not used to judge GL rendering.
+Bounded runtime checks also cover Vulkan native-window startup and resize, minimize/restore, main-window minimization, workspace restoration, presentation-creation failure, and OpenGL host rendering. Vulkan runs report both Khronos and NVRHI validation enabled and no VUID or validation errors. OpenGL keeps the editor shell and document-host windows; its Scene Viewport displays the fallback message and its Content Browser uses asset icons instead of Vulkan previews. The OpenGL framebuffer capture hook reads the main and secondary back buffers because Windows `PrintWindow` returned a white client area for this backend.
 
-The tab fixtures do not test real mouse-driven tear-off or reattachment. Native tabs also expose a context-menu command to move a document to the main strip. No production full asset editor exists, so material editing inside document hosts, asset-specific undo, asset previews in native documents, and dirty asset-document close behavior remain unverified.
+Material Details is an Inspector-side utility. Document hosts are reserved for full specialized editors, and no production full asset editor is currently registered. The matrix below distinguishes policy tests, synthetic application-path tests, runtime presentation checks, and unverified pointer or hardware interaction.
 
-### Manual checks
+### Documents and docking
 
-Use a Debug build and an isolated `PULSEFORGE_EDITOR_SETTINGS_DIR` for document-host checks. The host fixture creates synthetic tabs without editable asset content; it validates the host shell, not a full editor.
+| ID | Status | Evidence and limits |
+|---|---|---|
+| D01 | Unverified (full editor deferred; utility partly verified) | The preference matrix stored only Level Editor in the document host and placed Material Details in Inspector's dock node for all three preferences. The Preference 0 screenshot shows the adjacent tabs and central workspace; the other two screenshots contain black client pixels, so their visual placement is unverified. No full Material Editor is registered. |
+| D02 | Unverified (deferred) | `TestEditorDocumentManager` distinguishes asset identities, but no two production asset editors exist to test independent editing histories. |
+| D03 | Passed (policy) | `TestEditorDocumentManager` verifies that opening an existing identity activates its existing session. A production editor UI is not registered. |
+| D04 | Passed (synthetic application path) | Debug tear-off/reattachment fixtures transfer the same synthetic session between main and native hosts; this is not a material-editor test. |
+| D05 | Passed (synthetic application path) | `DocumentStripTargetPolicy_20261013` rejects releases over Hierarchy, Inspector, Scene Viewport, and Content Browser without changing host membership. Real pointer delivery remains unverified. |
+| D06 | Unverified (edge interaction) | The fixture tests panel centers, not every workspace edge or physical docking indicator. Document hit regions are registered only for top strips; real edge drops need manual testing. |
+| D07 | Unverified (deferred) | Transfer-policy tests preserve dirty revisions. There is no full asset editor with dirty edits, undo history, selection, or preview state to detach. |
+| D08 | Unverified (repeated UI interaction) | Manager tests cover detach/reattach cycles and the Debug fixture completes one native-to-main return. Repeated real drags with editor state are not tested. |
+| D09 | Unverified (UI reorder) | `TestEditorDocumentManager` and `TestEditorDocumentWorkspaceCodec` cover ordering and persistence data; real tab reordering has not been manually verified. |
+| D10 | Unverified (full-editor switching) | Material Details preference captures show the Level Editor workspace remains available. Switching among multiple production asset editors is deferred. |
+| D11 | Unverified (grouped UI transfer) | Manager tests exercise host membership and transfer policy; grouped native tabs have not been dragged and regrouped through real input. |
+| D12 | Unverified (utility drag) | Default placement, visibility, persistence, and Reset Layout have policy/runtime coverage. Pointer-driven utility-panel rearrangement remains a manual check. |
+| D13 | Passed (policy) | `TestEditorDocumentManager` uses same-project, same-basename identities from different folders and verifies distinct sessions. |
+| D14 | Unverified (integrated UI) | `TestAssetOperations` covers moves/renames and `TestEditorDocumentManager` preserves a moved session's identity and dirty revision; an open production asset editor has not been moved in the UI. |
 
-- Open the fixture with each document-opening preference. Confirm Level Editor remains available in the main strip and newly opened fixture sessions use the selected placement.
-- Drag a fixture tab between the main and native document strips. Release it over Hierarchy, Inspector, Content Browser, Console, workspace bodies, and side or bottom edges; those locations must not accept a document transfer or split a workspace.
-- Reorder tabs, group same-kind sessions in a native host, move a tab to the main strip, and tear it off again. Confirm the session remains singular and the Level Editor stays in the main host.
-- Resize and minimize/restore a secondary host, then minimize the main window while a secondary host remains visible. Close each host and restart to inspect saved order and reachable bounds.
-- Open Material Details from the Content Browser with each opening preference. It must appear beside Inspector as a utility tab, leave the Level Editor workspace active, and create no native host or top-strip document.
-- Test host movement on monitors with different DPI scales and, where available, a monitor positioned at negative desktop coordinates. This physical monitor coverage has not been completed.
+### Close and focus
 
-The fixture has no editable document content, so Save/Undo targeting, dirty-close prompts, and per-asset editing state require a registered full editor before they can be accepted in the UI. Their current policy tests do not replace that interaction test.
+| ID | Status | Evidence and limits |
+|---|---|---|
+| C01 | Unverified (UI) | `TestEditorDocumentManager` verifies Cancel preserves a dirty session. No production asset document exists for a real tab-close prompt. |
+| C02 | Unverified (dirty native close) | Native-window lifecycle and close-policy tests cover host shutdown separately; dirty Alt-F4 cancellation has not been exercised in a real editor window. |
+| C03 | Passed (policy) | `TestEditorDocumentManager` verifies a failed save leaves the document open and dirty. |
+| C04 | Unverified (batch UI) | Dirty-batch selection is tested by `TestEditorDocumentManager`; a host close dialog with multiple editable documents is not available. |
+| C05 | Unverified (dirty application shutdown) | Shutdown preservation has runtime coverage for host/layout state, but not for multiple dirty production asset documents. |
+| C06 | Unverified (deferred) | No full Material Editor is registered to test focused Save or Undo against a floating material document. |
+| C07 | Passed (policy) | `TestEditorInteractionPolicy` and `ShortcutIsolationMatrix_20261013` cover command suppression while text input or modal UI owns focus; real typing workflows still need manual confirmation. |
+| C08 | Passed (policy) | Viewport capture and focus-loss policies are covered by deterministic tests. Physical focus changes across native windows remain unverified. |
+| C09 | Passed (policy) | `TestEditorDocumentManager` verifies saving an earlier revision does not clear a later edit. |
+| C10 | Passed (synthetic application path) | `ResetLayoutDirtyDocuments_20261013` resets the layout while retaining dirty fixture sessions and their host membership. |
+
+### Renderer and platform
+
+| ID | Status | Evidence and limits |
+|---|---|---|
+| R01 | Passed (runtime) | `NativeWindowResize_20261013_Bounded` repeatedly resizes a secondary host under Vulkan validation. |
+| R02 | Passed (runtime) | `NativeWindowLifecycle_20261013` records successful minimize/restore and secondary-window recreation. |
+| R03 | Unverified (synthetic host runtime) | The available `ManualAcceptance_20261013` capture has an `Amber.material` native window from before Material Details was reclassified as a utility, so it does not establish current secondary-host behavior. A minimized-main run with a synthetic document host remains to be recorded. |
+| R04 | Unverified (hardware) | DPI-scale and window-bound policies are tested, but movement between physical mixed-DPI monitors has not been exercised. |
+| R05 | Unverified (hardware) | Bounds policy accepts negative coordinates; placement and pointer geometry on a physical negative-coordinate monitor have not been tested. |
+| R06 | Passed (bounded runtime) | Native-window lifecycle/transfer runs exercise presentation retirement with submitted frames; Khronos and NVRHI logs contain no VUID or validation errors. |
+| R07 | Unverified (deferred) | The Scene Viewport and Content Browser can render together, but two specialized asset-document previews do not exist. |
+| R08 | Passed (bounded Vulkan Debug) | Current resize, presentation-failure, and document-strip fixture logs confirm both validation layers were enabled and contain no VUID or validation errors. |
+| R09 | Passed (bounded OpenGL runtime) | OpenGL host fixtures render secondary windows and the PBR browser uses type icons. OpenGL does not provide Vulkan thumbnails or a rendered Scene Viewport. |
+| R10 | Passed (synthetic failure injection) | `PresentationFailureRecovery_20261013` injects native presentation creation failure and verifies dirty fixture sessions remain usable in the main host. |
+| R11 | Unverified (failure injection) | Source handles `VK_ERROR_OUT_OF_DATE_KHR` before command-list submission and swapchain recreation; no deterministic acquire-result injection test exists. |
+| R12 | Unverified (failure injection) | Presentation creation failure is tested, but allocation/descriptor exhaustion has no dedicated controlled runtime injection. |
+
+### Persistence and assets
+
+| ID | Status | Evidence and limits |
+|---|---|---|
+| P01 | Passed (persistence policy) | `TestEditorDocumentWorkspaceCodec` round-trips synthetic host membership and ordering and rejects invalid project/layout data. This does not establish application restart restoration. |
+| P02 | Unverified (hardware) | Missing-monitor bounds recovery is tested against a simulated monitor list; physical monitor removal and restart have not been performed. |
+| P03 | Passed (policy/runtime) | `WorkspaceRecoveryMatrix_20261013` and `CorruptWorkspaceDockRecovery_20261013` cover obsolete/corrupt settings recovery without discarding valid document state. |
+| P04 | Passed (runtime) | `WorkspaceMissingAssetRestore_20261013` verifies that missing asset records are skipped while valid workspace state remains available. |
+| P05 | Passed (runtime) | `DocumentOpeningPreferenceRuntime_20261013` checks new-document placement for the main-strip preference; Material Details remains a utility under all preferences. |
+| P06 | Passed (policy/runtime) | `TestEditorDocumentManager` and the opening-preference runtime matrix cover remembered host reuse and deterministic fallback. |
+| P07 | Unverified (integrated UI) | Asset-operation tests preserve UUIDs and document-manager tests refresh paths without changing dirty revision; moving a referenced asset with a production editor open has not been tested. |
+| P08 | Passed (policy) | `TestAssetOperations` covers collisions, invalid paths, rollback, and registry-refresh failure handling. |
+| P09 | Passed (policy) | `TestAssetOperations` rejects moving a folder into itself or a descendant before mutation. |
+| P10 | Unverified (deferred) | Shared project-asset dialogs run in the main workspace. No floating full Material Editor exists to verify host-modal ownership or result routing. |
+
+### Manual checks still required
+
+Use a Debug build and an isolated `PULSEFORGE_EDITOR_SETTINGS_DIR`. The host fixture creates synthetic tabs and is not a substitute for a production asset editor.
+
+- Use real mouse input to tear a fixture document off the main strip and reattach it. Confirm drops over utility panels and workspace edges do not change host membership; the synthetic fixture covers four panel centers.
+- Reorder and group native document tabs, close/reopen the host, and confirm order and active-tab restoration.
+- Use each opening preference and confirm Material Details opens beside Inspector while Level Editor remains active and the Scene Viewport stays available.
+- Exercise dirty-close Cancel/Save/Discard with a real editable document when a full editor is registered.
+- Move hosts between mixed-DPI monitors and a monitor with negative desktop coordinates, then remove a monitor and restart.
+- Confirm shared asset dialogs behave correctly from a floating full editor when one is available.
