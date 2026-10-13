@@ -160,6 +160,12 @@ The corrected run restored only `native:valid-recovery-check`; after a graceful 
 
 After this correction, fresh Vulkan Debug and OpenGL Debug builds rebuilt `PulseForgeEditor` and `PulseForgeTests`; both test executables passed 4,200 checks and CTest passed 2/2. The six-configuration table above is the immediately preceding complete matrix (4,198 checks); Release and Dist are included in final regression validation after the remaining implementation changes.
 
+### Native material load and multi-host restart validation
+
+The earlier user-reported `RoughClay.material` open failure and NVRHI/Vulkan presentation errors were retested on the current Vulkan Debug editor. A disposable copy of the PBRMaterials project restored `RoughClay.material` into a real native document host while the main `PBRMaterialsOverview.scene` window was active. The process reached the first presented Vulkan frame, had Khronos and NVRHI validation enabled, produced no VUID, NVRHI command-list, semaphore, or presentation-layout errors, wrote zero stderr bytes, and exited after a graceful main-window close. Evidence: `Build/CMake/VS2022-x64/Diagnostics/NativeMaterialDocumentRuntime_20261013/` (PID 14800 on the private sandbox desktop).
+
+A copied EditorWorkflow project then restored `Amber.material` and `Blue.material` into separate native GLFW windows alongside the main `EditorWorkflowOverview.scene` host. The run was closed cleanly, and its saved workspace was copied to a fresh settings directory and opened again. The restart enumerated the same two material windows and main scene host, with the same validation layers enabled and no VUID, NVRHI command-list, semaphore, or stderr errors. Both runs used one editor process; PIDs were 23704 and 12156 on `WinSta0\\CodexSandboxDesktop-26df385c4bfa1d48642b940a93416f14`. Logs, project copy, and saved/restarted settings are under `Build/CMake/VS2022-x64/Diagnostics/EditorWorkflowMultiHostRuntime_20261013/`.
+
 ## Acceptance tracking at implementation checkpoint
 
 `Pass` means the listed evidence directly covers the behavior. `Partial` means a policy or bounded smoke check passed while the complete user-facing scenario remains unverified. `Unverified` means no suitable evidence has been collected. Screenshots and runtime startup do not prove pointer/keyboard behavior.
@@ -177,7 +183,7 @@ After this correction, fresh Vulkan Debug and OpenGL Debug builds rebuilt `Pulse
 | D09 Level Editor cannot be moved out of the main host | Pass | Document-manager protection test. |
 | D10 multiple real documents share one editor process | Pass | Two native material windows observed under one process on both backends. |
 | D11 tab/native close uses dirty-document policy | Partial | Close policy is unit-tested; dirty native-X interaction remains. |
-| D12 saved document arrangement restores | Partial | A valid isolated versioned workspace restored two native hosts; save, restart and compare order/bounds next. |
+| D12 saved document arrangement restores | Pass | Two native material hosts restored from an isolated versioned workspace, were saved on clean close, and restored again on a fresh process; host membership, active host, order, and native bounds remained in the workspace record. |
 | D13 opening preference options and default behavior | Unverified | Exercise preference menu and each placement choice. |
 | D14 activating another document preserves Level Editor availability | Pass | Main Level Editor remained present alongside two material hosts. |
 | C01 dirty tab close offers Save/Discard/Cancel | Partial | Policy tests cover choices and prompt routing is implemented per host; actual dirty native-host dialog remains unverified. |
