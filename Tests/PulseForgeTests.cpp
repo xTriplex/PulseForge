@@ -2081,6 +2081,18 @@ namespace
 		const auto ReservedExtension = ResolveAssetDestinationFilename("Amber.meta", Source);
 		PF_CHECK(Tests, !ReservedExtension &&
 			ReservedExtension.error() == AssetDestinationNameError::ReservedSidecarExtension);
+		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, false, false, false, false, false) ==
+			AssetDestinationConflict::None);
+		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, true, false, true, true, false) ==
+			AssetDestinationConflict::SamePath);
+		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, true, false, false, false, false) ==
+			AssetDestinationConflict::ExistingDestination);
+		PF_CHECK(Tests, ResolveAssetDestinationConflict(true, false, true, false, false, false) ==
+			AssetDestinationConflict::ExistingDestination);
+		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, true, false, true, false, false) ==
+			AssetDestinationConflict::CaseOnlyRenameUnsupported);
+		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, false, false, false, false, true) ==
+			AssetDestinationConflict::InspectionFailed);
 	}
 
 	void TestEditorLayoutOpeningPreferencePersistence(TestRunner& Tests)

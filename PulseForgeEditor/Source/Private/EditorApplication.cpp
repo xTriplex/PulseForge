@@ -19,6 +19,7 @@
 #include "Events/KeyEvent.h"
 #include "Events/MouseEvent.h"
 #include "Assets/AssetOperations.h"
+#include "Assets/AssetMetadata.h"
 #include "Assets/AssetPathResolver.h"
 #include "Assets/MaterialAssetService.h"
 #include "Assets/PrefabAssetService.h"
@@ -3227,84 +3228,136 @@ namespace
 					m_AssetDestinationSearch.data(), m_AssetDestinationSearch.size());
 
 				std::vector<std::filesystem::path> Folders;
-			CollectContentFolders(m_ContentFolderRoot, Folders);
-			std::string Search = m_AssetDestinationSearch.data();
-			std::transform(Search.begin(), Search.end(), Search.begin(), [](unsigned char Character)
-			{
-				return static_cast<char>(std::tolower(Character));
-			});
-			if (ImGui::BeginChild("AssetDestinationFolderResults", ImVec2(420.0f, 180.0f), ImGuiChildFlags_Borders))
-			{
-				bool AnyFolder = false;
-				for (const auto& Folder : Folders)
+				CollectContentFolders(m_ContentFolderRoot, Folders);
+				std::string Search = m_AssetDestinationSearch.data();
+				std::transform(Search.begin(), Search.end(), Search.begin(), [](unsigned char Character)
 				{
-					const std::string FolderText = PathToUtf8(Folder);
-					std::string Searchable = FolderText;
-					std::transform(Searchable.begin(), Searchable.end(), Searchable.begin(), [](unsigned char Character)
+					return static_cast<char>(std::tolower(Character));
+				});
+				if (ImGui::BeginChild("AssetDestinationFolderResults", ImVec2(420.0f, 180.0f), ImGuiChildFlags_Borders))
+				{
+					bool AnyFolder = false;
+					for (const auto& Folder : Folders)
 					{
-						return static_cast<char>(std::tolower(Character));
-					});
-					if (!Search.empty() && Searchable.find(Search) == std::string::npos)
-						continue;
-					AnyFolder = true;
-					if (ImGui::Selectable(FolderText.c_str(), m_AssetDestinationFolder == FolderText))
-					{
-						m_AssetDestinationFolder = FolderText;
-						m_AssetDestinationValidationError.clear();
+						const std::string FolderText = PathToUtf8(Folder);
+						std::string Searchable = FolderText;
+						std::transform(Searchable.begin(), Searchable.end(), Searchable.begin(), [](unsigned char Character)
+						{
+							return static_cast<char>(std::tolower(Character));
+						});
+						if (!Search.empty() && Searchable.find(Search) == std::string::npos)
+							continue;
+						AnyFolder = true;
+						if (ImGui::Selectable(FolderText.c_str(), m_AssetDestinationFolder == FolderText))
+						{
+							m_AssetDestinationFolder = FolderText;
+							m_AssetDestinationValidationError.clear();
+						}
 					}
+					if (!AnyFolder)
+						ImGui::TextDisabled("No matching project folders.");
 				}
-				if (!AnyFolder)
-					ImGui::TextDisabled("No matching project folders.");
-			}
-			ImGui::EndChild();
-			ImGui::TextWrapped("Destination: %s", m_AssetDestinationFolder.c_str());
-			ImGui::SetNextItemWidth(420.0f);
-			const bool EnterPressed = ImGui::InputText("Asset filename", m_AssetDestinationFilename.data(),
-				m_AssetDestinationFilename.size(), ImGuiInputTextFlags_EnterReturnsTrue);
-			ImGui::TextDisabled("Extension: %s", Asset->ProjectRelativePath.extension().string().c_str());
-			if (!m_AssetDestinationValidationError.empty())
-				ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error),
-					"%s", m_AssetDestinationValidationError.c_str());
+				ImGui::EndChild();
+				ImGui::TextWrapped("Destination: %s", m_AssetDestinationFolder.c_str());
+				ImGui::SetNextItemWidth(420.0f);
+				const bool EnterPressed = ImGui::InputText("Asset filename", m_AssetDestinationFilename.data(),
+					m_AssetDestinationFilename.size(), ImGuiInputTextFlags_EnterReturnsTrue);
+				ImGui::TextDisabled("Extension: %s", Asset->ProjectRelativePath.extension().string().c_str());
+				if (!m_AssetDestinationValidationError.empty())
+					ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error),
+						"%s", m_AssetDestinationValidationError.c_str());
 
-			if (ImGui::Button(m_AssetDestinationDuplicate ? "Duplicate" : "Move", ImVec2(132.0f, 0.0f)) ||
-				EnterPressed)
-			{
-				const std::string FilenameText = m_AssetDestinationFilename.data();
-				const auto FinalFilename = PulseForgeEditor::ResolveAssetDestinationFilename(
-					FilenameText, Asset->ProjectRelativePath);
-				if (!FinalFilename)
+				if (ImGui::Button(m_AssetDestinationDuplicate ? "Duplicate" : "Move", ImVec2(132.0f, 0.0f)) ||
+					EnterPressed)
 				{
-					switch (FinalFilename.error())
+					const std::string FilenameText = m_AssetDestinationFilename.data();
+					const auto FinalFilename = PulseForgeEditor::ResolveAssetDestinationFilename(
+						FilenameText, Asset->ProjectRelativePath);
+					if (!FinalFilename)
 					{
-						case PulseForgeEditor::AssetDestinationNameError::InvalidFilename:
-							m_AssetDestinationValidationError = "Enter a single valid filename without a folder path.";
-							break;
-						case PulseForgeEditor::AssetDestinationNameError::ExtensionMismatch:
-							m_AssetDestinationValidationError = "The destination must keep the original asset extension.";
-							break;
-						case PulseForgeEditor::AssetDestinationNameError::ReservedSidecarExtension:
-							m_AssetDestinationValidationError = "The .meta extension is reserved for asset sidecars.";
-							break;
+						switch (FinalFilename.error())
+						{
+							case PulseForgeEditor::AssetDestinationNameError::InvalidFilename:
+								m_AssetDestinationValidationError = "Enter a single valid filename without a folder path.";
+								break;
+							case PulseForgeEditor::AssetDestinationNameError::ExtensionMismatch:
+								m_AssetDestinationValidationError = "The destination must keep the original asset extension.";
+								break;
+							case PulseForgeEditor::AssetDestinationNameError::ReservedSidecarExtension:
+								m_AssetDestinationValidationError = "The .meta extension is reserved for asset sidecars.";
+								break;
+						}
+					}
+					else if (!m_Project || !m_AssetDestinationAsset || !IsKnownContentFolder(
+						std::filesystem::u8path(m_AssetDestinationFolder)))
+						m_AssetDestinationValidationError = "Choose a folder that belongs to the open project.";
+					else
+					{
+						const std::filesystem::path Target =
+							std::filesystem::u8path(m_AssetDestinationFolder) / *FinalFilename;
+						const std::filesystem::path AbsoluteTarget = m_Project->GetRootPath() / Target;
+						const std::filesystem::path AbsoluteSidecar =
+							PulseForge::AssetMetadataSerializer::GetSidecarPath(AbsoluteTarget);
+						const std::filesystem::path AbsoluteSource =
+							m_Project->GetRootPath() / Asset->ProjectRelativePath;
+						const auto Inspect = [](const std::filesystem::path& Path, bool& Exists, std::error_code& Error)
+						{
+							const auto Status = std::filesystem::symlink_status(Path, Error);
+							if (Error == std::errc::no_such_file_or_directory)
+							{
+								Error.clear();
+								Exists = false;
+							}
+							else
+								Exists = !Error && Status.type() != std::filesystem::file_type::not_found;
+						};
+						std::error_code DestinationError;
+						std::error_code SidecarError;
+						bool DestinationExists = false;
+						bool SidecarExists = false;
+						Inspect(AbsoluteTarget, DestinationExists, DestinationError);
+						Inspect(AbsoluteSidecar, SidecarExists, SidecarError);
+						bool SameAsset = false;
+						std::error_code EquivalentError;
+						if (!m_AssetDestinationDuplicate && DestinationExists)
+							SameAsset = std::filesystem::equivalent(AbsoluteSource, AbsoluteTarget, EquivalentError);
+						const bool InspectionFailed = static_cast<bool>(DestinationError) ||
+							static_cast<bool>(SidecarError) || static_cast<bool>(EquivalentError);
+						const std::string SourceSpelling = PathToUtf8(Asset->ProjectRelativePath.lexically_normal());
+						const std::string TargetSpelling = PathToUtf8(Target.lexically_normal());
+						const auto Conflict = PulseForgeEditor::ResolveAssetDestinationConflict(
+							m_AssetDestinationDuplicate, DestinationExists, SidecarExists, SameAsset,
+							SourceSpelling == TargetSpelling, InspectionFailed);
+						switch (Conflict)
+						{
+							case PulseForgeEditor::AssetDestinationConflict::SamePath:
+								m_AssetDestinationValidationError = "The selected folder and filename are already the source asset location.";
+								break;
+							case PulseForgeEditor::AssetDestinationConflict::ExistingDestination:
+								m_AssetDestinationValidationError = "An asset or metadata sidecar already exists at that destination.";
+								break;
+							case PulseForgeEditor::AssetDestinationConflict::CaseOnlyRenameUnsupported:
+								m_AssetDestinationValidationError = "Case-only asset renames are not supported; choose a distinct filename.";
+								break;
+							case PulseForgeEditor::AssetDestinationConflict::InspectionFailed:
+								m_AssetDestinationValidationError = "Could not inspect the destination. Check project folder permissions and try again.";
+								break;
+							case PulseForgeEditor::AssetDestinationConflict::None:
+							{
+								const PulseForge::AssetID Identifier = *m_AssetDestinationAsset;
+								const bool Duplicate = m_AssetDestinationDuplicate;
+								m_AssetDestinationAsset.reset();
+								m_AssetDestinationValidationError.clear();
+								ImGui::CloseCurrentPopup();
+								if (Duplicate)
+									QueueAfterSave([this, Identifier, Target] { DuplicateAssetAt(Identifier, Target); });
+								else
+									QueueAfterSave([this, Identifier, Target] { MoveAssetAt(Identifier, Target); });
+								break;
+							}
+						}
 					}
 				}
-				else if (!m_Project || !m_AssetDestinationAsset || !IsKnownContentFolder(
-					std::filesystem::u8path(m_AssetDestinationFolder)))
-					m_AssetDestinationValidationError = "Choose a folder that belongs to the open project.";
-				else
-				{
-					const PulseForge::AssetID Identifier = *m_AssetDestinationAsset;
-					const std::filesystem::path Target =
-						std::filesystem::u8path(m_AssetDestinationFolder) / *FinalFilename;
-					const bool Duplicate = m_AssetDestinationDuplicate;
-					m_AssetDestinationAsset.reset();
-					m_AssetDestinationValidationError.clear();
-					ImGui::CloseCurrentPopup();
-					if (Duplicate)
-						QueueAfterSave([this, Identifier, Target] { DuplicateAssetAt(Identifier, Target); });
-					else
-						QueueAfterSave([this, Identifier, Target] { MoveAssetAt(Identifier, Target); });
-				}
-			}
 			}
 			ImGui::SameLine();
 			const bool EscapePressed = ImGui::IsKeyPressed(ImGuiKey_Escape, false);

@@ -16,6 +16,34 @@ namespace PulseForgeEditor
 		ReservedSidecarExtension
 	};
 
+	enum class AssetDestinationConflict
+	{
+		None,
+		SamePath,
+		ExistingDestination,
+		CaseOnlyRenameUnsupported,
+		InspectionFailed
+	};
+
+	[[nodiscard]] constexpr AssetDestinationConflict ResolveAssetDestinationConflict(
+		bool IsDuplicate,
+		bool DestinationExists,
+		bool SidecarExists,
+		bool DestinationIsSourceAsset,
+		bool SamePathSpelling,
+		bool InspectionFailed) noexcept
+	{
+		if (InspectionFailed)
+			return AssetDestinationConflict::InspectionFailed;
+		if (!IsDuplicate && DestinationExists && DestinationIsSourceAsset && !SamePathSpelling)
+			return AssetDestinationConflict::CaseOnlyRenameUnsupported;
+		if (!IsDuplicate && SamePathSpelling)
+			return AssetDestinationConflict::SamePath;
+		if (DestinationExists || SidecarExists)
+			return AssetDestinationConflict::ExistingDestination;
+		return AssetDestinationConflict::None;
+	}
+
 	[[nodiscard]] inline std::expected<std::filesystem::path, AssetDestinationNameError>
 	ResolveAssetDestinationFilename(std::string_view FilenameText, const std::filesystem::path& SourcePath)
 	{
