@@ -185,7 +185,7 @@ The resize path is synchronized in `VulkanRenderer.cpp`: it waits each native ho
 
 ### Opening preference parsing and recovery
 
-`EditorLayout::LoadPanelState()` now applies `DocumentOpeningPreference` only after the complete recognized workspace state has been checked. A missing or invalid state format, absent preference, malformed value, or value outside the supported range resolves to the default placement instead of leaking a partially parsed preference from rejected state. Deterministic tests cover all three supported values, leading-zero compatibility, malformed and out-of-range values, and invalid/missing-state fallback. The actual preference menu and restart round trip remain manual acceptance items.
+`EditorLayout::LoadPanelState()` now applies `DocumentOpeningPreference` only after the complete recognized workspace state has been checked. A missing or invalid state format, absent preference, malformed value, or value outside the supported range resolves to the default placement instead of leaking a partially parsed preference from rejected state. Deterministic tests cover all three supported values, leading-zero compatibility, malformed and out-of-range values, invalid/missing-state fallback, and an `EditorLayout` save/reload round trip across fresh ImGui contexts using a unique temporary settings directory. The preference menu choice and a full editor-process restart remain manual acceptance items.
 
 ## Acceptance tracking at implementation checkpoint
 
@@ -232,7 +232,7 @@ The resize path is synchronized in `VulkanRenderer.cpp`: it waits each native ho
 | P01 valid document workspace restores | Pass | Isolated workspace file restored real native material sessions. |
 | P02 removed/unavailable monitor recovery | Unverified | Requires monitor-topology testing. |
 | P03 corrupt workspace/missing asset recovery | Pass | Codec rejects malformed/duplicate state in tests; an isolated restart restored the valid material host, omitted the missing-asset host, and preserved the valid host on normal shutdown. |
-| P04 opening preference persistence | Partial | Preference parsing, range checks, and invalid/missing workspace-state fallback are covered in deterministic tests; selecting each menu option and verifying restart persistence remain manual. |
+| P04 opening preference persistence | Partial | Parsing, range checks, bad-version fallback, and `EditorLayout` save/reload are covered in deterministic tests; selecting each menu option and verifying a full editor-process restart remain manual. |
 | P05 project-internal asset/folder move preserves managed identity | Pass | Move operation and folder transaction tests pass. |
 | P06 self/descendant folder moves reject | Pass | Asset-folder policy tests. |
 | P07 name collision and case-only path checks | Pass | Move operation tests cover collisions and normalized paths. |
@@ -262,5 +262,6 @@ No physical multi-monitor transition or direct pointer-driven document drag has 
 - Tab/transfer correction: `96782c3` (`Defer document transfers and integrate tab close affordance`) integrates the close glyph into the selectable tab and adds deferred transfer/context-menu actions; `42f23f9` (`Defer document tab close until after UI traversal`) also defers close mutation until tab/host traversal has finished.
 - Vulkan/OpenGL Debug, Release and Dist were rebuilt after `42f23f9`; each test executable passed 4,182 checks and CTest passed 2/2.
 - Opening preference recovery policy is covered by 12 additional checks. Fresh Vulkan and OpenGL Debug/Release/Dist editor and test targets built; each test executable passed 4,212 checks and CTest passed 2/2. Logs are under the corresponding build tree's `Diagnostics/P04-preference-validation/` directory.
+- `PulseForgeTests` now compiles `EditorLayout.cpp` and links the existing ImGui core so its preference save/reload path can run with fresh contexts. The round-trip and invalid-format recovery add 17 deterministic checks. Fresh Vulkan and OpenGL Debug/Release/Dist editor and test targets each pass 4,229 checks; CTest remains 2/2 in all six configurations. Full logs are under each build tree's `Diagnostics/P04-preference-validation/` directory.
 - The feature branch remains local, unpushed, and unmerged.
 - The deleted Spotlight research document, modified validation scene/materials, and untracked `CMakeSettings.json` remain outside the commit. Root `AGENTS.md` remains absent.

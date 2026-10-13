@@ -785,13 +785,14 @@ include(CTest)
 if(BUILD_TESTING)
 	add_executable(PulseForgeTests Tests/PulseForgeTests.cpp)
 	target_sources(PulseForgeTests PRIVATE
+		PulseForgeEditor/Source/Private/EditorLayout.cpp
 		PulseForgeEditor/Source/Private/EditorProjectOpening.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentManager.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentWorkspace.cpp
 	)
 	target_include_directories(PulseForgeTests PRIVATE PulseForgeEditor/Source/Public PulseForge/Vendor/json/include)
 	target_compile_definitions(PulseForgeTests PRIVATE PF_PLATFORM_WINDOWS)
-	target_link_libraries(PulseForgeTests PRIVATE PulseForge)
+	target_link_libraries(PulseForgeTests PRIVATE PulseForge PulseForgeImGui shell32 ole32)
 	add_test(NAME PulseForge.Core COMMAND PulseForgeTests)
 
 	add_executable(PulseForgeBufferUpdateTests Tests/BufferUpdateValidationTests.cpp)

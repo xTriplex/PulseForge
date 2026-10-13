@@ -87,9 +87,11 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -103,6 +105,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <imgui.h>
 
 namespace
 {
@@ -2046,6 +2049,123 @@ namespace
 		PF_CHECK(Tests, DraftKey == MakeMaterialDraftKey("C:/Project", "material-uuid"));
 		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("D:/Project", "material-uuid"));
 		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("C:/Project", "other-material-uuid"));
+	}
+
+	void TestEditorLayoutOpeningPreferencePersistence(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+
+		const auto TestID = PulseForge::UUID::Generate();
+		PF_CHECK(Tests, TestID.has_value());
+		if (!TestID)
+			return;
+
+		std::error_code Error;
+		const std::filesystem::path SettingsDirectory = std::filesystem::temp_directory_path() /
+			("PulseForgeEditorLayoutPreference_" + TestID->ToString());
+		const bool DirectoryCreated = std::filesystem::create_directory(SettingsDirectory, Error);
+		PF_CHECK(Tests, DirectoryCreated && !Error);
+		if (!DirectoryCreated || Error)
+			return;
+		struct ScopedDirectoryCleanup
+		{
+			std::filesystem::path Path;
+			~ScopedDirectoryCleanup()
+			{
+				std::error_code CleanupError;
+				std::filesystem::remove_all(Path, CleanupError);
+			}
+		} Cleanup{ SettingsDirectory };
+
+		const wchar_t* ExistingSettingsDirectory = _wgetenv(L"PULSEFORGE_EDITOR_SETTINGS_DIR");
+		const std::optional<std::wstring> PreviousSettingsDirectory = ExistingSettingsDirectory
+			? std::optional<std::wstring>(ExistingSettingsDirectory) : std::nullopt;
+		const std::wstring SettingsDirectoryValue = SettingsDirectory.native();
+		const errno_t EnvironmentResult = _wputenv_s(
+			L"PULSEFORGE_EDITOR_SETTINGS_DIR", SettingsDirectoryValue.c_str());
+		PF_CHECK(Tests, EnvironmentResult == 0);
+		if (EnvironmentResult != 0)
+			return;
+		struct ScopedSettingsEnvironment
+		{
+			std::optional<std::wstring> PreviousValue;
+			~ScopedSettingsEnvironment()
+			{
+				(void)_wputenv_s(L"PULSEFORGE_EDITOR_SETTINGS_DIR",
+					PreviousValue ? PreviousValue->c_str() : L"");
+			}
+		} EnvironmentCleanup{ PreviousSettingsDirectory };
+
+		struct ScopedImGuiContext
+		{
+			ImGuiContext* Previous = ImGui::GetCurrentContext();
+			ImGuiContext* Context = ImGui::CreateContext();
+			~ScopedImGuiContext()
+			{
+				if (Context)
+					ImGui::DestroyContext(Context);
+				ImGui::SetCurrentContext(Previous);
+			}
+		};
+
+		const std::filesystem::path SettingsFile = SettingsDirectory / L"imgui.ini";
+		{
+			ScopedImGuiContext Context;
+			PF_CHECK(Tests, Context.Context != nullptr);
+			if (!Context.Context)
+				return;
+
+			EditorLayout Layout;
+			const auto Initialized = Layout.Initialize();
+			PF_CHECK(Tests, Initialized.has_value());
+			if (!Initialized)
+				return;
+			PF_CHECK(Tests, Layout.GetDocumentOpeningPreference() == DefaultDocumentOpeningPreference);
+			PF_CHECK(Tests, Layout.SetDocumentOpeningPreference(2));
+			const auto Saved = Layout.SaveNow();
+			PF_CHECK(Tests, Saved.has_value());
+		}
+
+		std::ifstream SavedSettingsInput(SettingsFile, std::ios::binary);
+		const std::string SavedSettings(
+			(std::istreambuf_iterator<char>(SavedSettingsInput)), std::istreambuf_iterator<char>());
+		PF_CHECK(Tests, SavedSettings.find("DocumentOpeningPreference=2") != std::string::npos);
+
+		{
+			ScopedImGuiContext Context;
+			PF_CHECK(Tests, Context.Context != nullptr);
+			if (!Context.Context)
+				return;
+
+			EditorLayout Layout;
+			const auto Initialized = Layout.Initialize();
+			PF_CHECK(Tests, Initialized.has_value());
+			if (Initialized)
+				PF_CHECK(Tests, Layout.GetDocumentOpeningPreference() == 2);
+		}
+
+		{
+			std::ofstream InvalidSettingsOutput(SettingsFile, std::ios::binary | std::ios::trunc);
+			InvalidSettingsOutput << "[PulseForgeWorkspace][State]\n"
+				"StateFormat=99\nDocumentOpeningPreference=1\nHierarchy=0\n";
+			PF_CHECK(Tests, static_cast<bool>(InvalidSettingsOutput));
+		}
+
+		{
+			ScopedImGuiContext Context;
+			PF_CHECK(Tests, Context.Context != nullptr);
+			if (!Context.Context)
+				return;
+
+			EditorLayout Layout;
+			const auto Initialized = Layout.Initialize();
+			PF_CHECK(Tests, Initialized.has_value());
+			if (Initialized)
+			{
+				PF_CHECK(Tests, Layout.GetDocumentOpeningPreference() == DefaultDocumentOpeningPreference);
+				PF_CHECK(Tests, Layout.IsPanelVisible(EditorPanel::Hierarchy));
+			}
+		}
 	}
 
 	void TestEditorWorkspaceViewHelpers(TestRunner& Tests)
@@ -9187,6 +9307,7 @@ int main()
 	TestEditorInteractionPolicy(Tests);
 	TestEditorAssetPreviewPolicy(Tests);
 	TestEditorWorkspacePanelState(Tests);
+	TestEditorLayoutOpeningPreferencePersistence(Tests);
 	TestEditorWorkspaceViewHelpers(Tests);
 	TestViewportMouseCaptureState(Tests);
 	TestEditorFontAndIconDescriptors(Tests);
