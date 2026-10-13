@@ -3318,16 +3318,21 @@ namespace
 						Inspect(AbsoluteTarget, DestinationExists, DestinationError);
 						Inspect(AbsoluteSidecar, SidecarExists, SidecarError);
 						bool SameAsset = false;
+						bool SameSidecar = false;
 						std::error_code EquivalentError;
 						if (!m_AssetDestinationDuplicate && DestinationExists)
 							SameAsset = std::filesystem::equivalent(AbsoluteSource, AbsoluteTarget, EquivalentError);
+						EquivalentError.clear();
+						if (!m_AssetDestinationDuplicate && SidecarExists)
+							SameSidecar = std::filesystem::equivalent(
+								PulseForge::AssetMetadataSerializer::GetSidecarPath(AbsoluteSource), AbsoluteSidecar, EquivalentError);
 						const bool InspectionFailed = static_cast<bool>(DestinationError) ||
 							static_cast<bool>(SidecarError) || static_cast<bool>(EquivalentError);
 						const std::string SourceSpelling = PathToUtf8(Asset->ProjectRelativePath.lexically_normal());
 						const std::string TargetSpelling = PathToUtf8(Target.lexically_normal());
 						const auto Conflict = PulseForgeEditor::ResolveAssetDestinationConflict(
 							m_AssetDestinationDuplicate, DestinationExists, SidecarExists, SameAsset,
-							SourceSpelling == TargetSpelling, InspectionFailed);
+							SourceSpelling == TargetSpelling, InspectionFailed, SameSidecar);
 						switch (Conflict)
 						{
 							case PulseForgeEditor::AssetDestinationConflict::SamePath:
@@ -3336,12 +3341,9 @@ namespace
 							case PulseForgeEditor::AssetDestinationConflict::ExistingDestination:
 								m_AssetDestinationValidationError = "An asset or metadata sidecar already exists at that destination.";
 								break;
-							case PulseForgeEditor::AssetDestinationConflict::CaseOnlyRenameUnsupported:
-								m_AssetDestinationValidationError = "Case-only asset renames are not supported; choose a distinct filename.";
-								break;
-							case PulseForgeEditor::AssetDestinationConflict::InspectionFailed:
-								m_AssetDestinationValidationError = "Could not inspect the destination. Check project folder permissions and try again.";
-								break;
+							case PulseForgeEditor::AssetDestinationConflict::CaseOnlyRename:
+								// The asset operation stages the asset and its sidecar to support Windows case-only renames.
+								[[fallthrough]];
 							case PulseForgeEditor::AssetDestinationConflict::None:
 							{
 								const PulseForge::AssetID Identifier = *m_AssetDestinationAsset;
@@ -3355,6 +3357,9 @@ namespace
 									QueueAfterSave([this, Identifier, Target] { MoveAssetAt(Identifier, Target); });
 								break;
 							}
+							case PulseForgeEditor::AssetDestinationConflict::InspectionFailed:
+								m_AssetDestinationValidationError = "Could not inspect the destination. Check project folder permissions and try again.";
+								break;
 						}
 					}
 				}

@@ -21,7 +21,7 @@ namespace PulseForgeEditor
 		None,
 		SamePath,
 		ExistingDestination,
-		CaseOnlyRenameUnsupported,
+		CaseOnlyRename,
 		InspectionFailed
 	};
 
@@ -31,14 +31,18 @@ namespace PulseForgeEditor
 		bool SidecarExists,
 		bool DestinationIsSourceAsset,
 		bool SamePathSpelling,
-		bool InspectionFailed) noexcept
+		bool InspectionFailed,
+		bool SidecarIsSourceSidecar = false) noexcept
 	{
 		if (InspectionFailed)
 			return AssetDestinationConflict::InspectionFailed;
-		if (!IsDuplicate && DestinationExists && DestinationIsSourceAsset && !SamePathSpelling)
-			return AssetDestinationConflict::CaseOnlyRenameUnsupported;
 		if (!IsDuplicate && SamePathSpelling)
 			return AssetDestinationConflict::SamePath;
+		if (!IsDuplicate && DestinationExists && SidecarExists && DestinationIsSourceAsset && SidecarIsSourceSidecar &&
+			!SamePathSpelling)
+		{
+			return AssetDestinationConflict::CaseOnlyRename;
+		}
 		if (DestinationExists || SidecarExists)
 			return AssetDestinationConflict::ExistingDestination;
 		return AssetDestinationConflict::None;

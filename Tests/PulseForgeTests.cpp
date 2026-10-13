@@ -2090,7 +2090,11 @@ namespace
 		PF_CHECK(Tests, ResolveAssetDestinationConflict(true, false, true, false, false, false) ==
 			AssetDestinationConflict::ExistingDestination);
 		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, true, false, true, false, false) ==
-			AssetDestinationConflict::CaseOnlyRenameUnsupported);
+			AssetDestinationConflict::ExistingDestination);
+		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, true, true, true, false, false, true) ==
+			AssetDestinationConflict::CaseOnlyRename);
+		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, true, true, true, false, false, false) ==
+			AssetDestinationConflict::ExistingDestination);
 		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, false, false, false, false, true) ==
 			AssetDestinationConflict::InspectionFailed);
 	}
@@ -3783,6 +3787,24 @@ namespace
 		const auto InvalidTraversal = AssetOperations::Move(InitialRegistry, ProjectRoot, SourceMetadata->ID, "Assets/../escaped.gltf");
 		PF_CHECK(Tests, !InvalidTraversal.has_value());
 		PF_CHECK(Tests, !InvalidTraversal && InvalidTraversal.error().Code == AssetOperationErrorCode::InvalidPath);
+
+		const std::filesystem::path CaseChangedPath = "Assets/Models/SHIP-RENAMED.gltf";
+		const auto CaseChangedMove = AssetOperations::Move(InitialRegistry, ProjectRoot, SourceMetadata->ID, CaseChangedPath);
+		PF_CHECK(Tests, CaseChangedMove && CaseChangedMove->ID == SourceMetadata->ID);
+		PF_CHECK(Tests, CaseChangedMove && CaseChangedMove->ProjectRelativePath == CaseChangedPath);
+		const std::filesystem::path CaseChangedSource = ProjectRoot / CaseChangedPath;
+		PF_CHECK(Tests, std::filesystem::exists(CaseChangedSource));
+		PF_CHECK(Tests, ReadFile(CaseChangedSource) == std::optional<std::string>("managed model source"));
+		PF_CHECK(Tests, ReadFile(AssetMetadataSerializer::GetSidecarPath(CaseChangedSource)) ==
+			std::optional<std::string>(MetadataWithImportSettings));
+		const auto CaseChangedRecord = InitialRegistry.Find(SourceMetadata->ID);
+		PF_CHECK(Tests, CaseChangedRecord && CaseChangedRecord->ProjectRelativePath == CaseChangedPath);
+
+		const auto CaseRestoredMove = AssetOperations::Move(InitialRegistry, ProjectRoot, SourceMetadata->ID, MovedPath);
+		PF_CHECK(Tests, CaseRestoredMove && CaseRestoredMove->ID == SourceMetadata->ID);
+		PF_CHECK(Tests, CaseRestoredMove && CaseRestoredMove->ProjectRelativePath == MovedPath);
+		PF_CHECK(Tests, ReadFile(MovedSource) == std::optional<std::string>("managed model source"));
+		PF_CHECK(Tests, ReadFile(MovedSidecarPath) == std::optional<std::string>(MetadataWithImportSettings));
 
 		PF_CHECK(Tests, DuplicateMetadata && AssetOperations::Delete(InitialRegistry, ProjectRoot, DuplicateMetadata->ID).has_value());
 		PF_CHECK(Tests, !std::filesystem::exists(DuplicateSource));

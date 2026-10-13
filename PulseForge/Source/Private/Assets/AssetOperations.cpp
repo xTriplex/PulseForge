@@ -176,6 +176,166 @@ namespace PulseForge
 			return true;
 		}
 
+		bool AreCaseInsensitivePathComponentsEqual(const FilesystemPath& Left, const FilesystemPath& Right)
+		{
+			auto LeftComponent = Left.begin();
+			auto RightComponent = Right.begin();
+			for (; LeftComponent != Left.end() && RightComponent != Right.end(); ++LeftComponent, ++RightComponent)
+			{
+#if defined(_WIN32)
+				if (CompareStringOrdinal(
+					LeftComponent->c_str(), static_cast<int>(LeftComponent->native().size()),
+					RightComponent->c_str(), static_cast<int>(RightComponent->native().size()), TRUE) != CSTR_EQUAL)
+				{
+					return false;
+				}
+#else
+				if (*LeftComponent != *RightComponent)
+					return false;
+#endif
+			}
+			return LeftComponent == Left.end() && RightComponent == Right.end();
+		}
+
+		std::expected<AssetRecord, AssetOperationError> RenameCaseOnlyAsset(
+			AssetRegistry& Registry,
+			const ProjectPaths& Project,
+			const AssetID& Asset,
+			const FilesystemPath& SourcePath,
+			const FilesystemPath& DestinationPath,
+			const FilesystemPath& Source,
+			const FilesystemPath& Destination,
+			const FilesystemPath& SourceSidecar,
+			const FilesystemPath& DestinationSidecar)
+		{
+			const auto TransactionID = UUID::Generate();
+			if (!TransactionID)
+			{
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::FilesystemFailure,
+					SourcePath,
+					"Could not create a unique temporary name for the case-only asset rename"));
+			}
+
+			const FilesystemPath StagingAsset = Source.parent_path() /
+				(Source.filename().native() + std::filesystem::path(L".pulseforge-move-").native() +
+					std::filesystem::path(TransactionID->ToString()).native());
+			const FilesystemPath StagingSidecar = AssetMetadataSerializer::GetSidecarPath(StagingAsset);
+			std::error_code Error;
+			if (std::filesystem::exists(StagingAsset, Error) || Error || std::filesystem::exists(StagingSidecar, Error) || Error)
+			{
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::FilesystemFailure,
+					SourcePath,
+					"Could not reserve unique temporary paths for the case-only asset rename"));
+			}
+
+			std::filesystem::rename(Source, StagingAsset, Error);
+			if (Error)
+			{
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::FilesystemFailure,
+					SourcePath,
+					"Could not stage the asset for a case-only rename: " + Error.message()));
+			}
+
+			Error.clear();
+			std::filesystem::rename(SourceSidecar, StagingSidecar, Error);
+			if (Error)
+			{
+				const std::string Failure = Error.message();
+				Error.clear();
+				std::filesystem::rename(StagingAsset, Source, Error);
+				if (Error)
+				{
+					return std::unexpected(MakeError(
+						AssetOperationErrorCode::RecoveryRequired,
+						SourcePath,
+						"Could not stage the asset sidecar (" + Failure + ") and could not restore the asset. Recovery path: " +
+							StagingAsset.generic_string() + "; restore failure: " + Error.message()));
+				}
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::FilesystemFailure,
+					SourcePath,
+					"Could not stage the sidecar for a case-only rename: " + Failure));
+			}
+
+			const auto RestoreStagedPair = [&]() -> std::string
+			{
+				std::error_code RestoreError;
+				if (std::filesystem::exists(Destination, RestoreError) && !RestoreError)
+					std::filesystem::rename(Destination, StagingAsset, RestoreError);
+				if (RestoreError)
+					return "asset staging restore failed: " + RestoreError.message();
+				RestoreError.clear();
+				if (std::filesystem::exists(DestinationSidecar, RestoreError) && !RestoreError)
+					std::filesystem::rename(DestinationSidecar, StagingSidecar, RestoreError);
+				if (RestoreError)
+					return "sidecar staging restore failed: " + RestoreError.message();
+				RestoreError.clear();
+				std::filesystem::rename(StagingAsset, Source, RestoreError);
+				if (RestoreError)
+					return "asset source restore failed: " + RestoreError.message();
+				RestoreError.clear();
+				std::filesystem::rename(StagingSidecar, SourceSidecar, RestoreError);
+				if (RestoreError)
+					return "sidecar source restore failed: " + RestoreError.message();
+				return {};
+			};
+
+			Error.clear();
+			std::filesystem::rename(StagingAsset, Destination, Error);
+			if (!Error)
+			{
+				Error.clear();
+				std::filesystem::rename(StagingSidecar, DestinationSidecar, Error);
+			}
+			if (Error)
+			{
+				const std::string Failure = Error.message();
+				const std::string RestoreFailure = RestoreStagedPair();
+				if (!RestoreFailure.empty())
+				{
+					return std::unexpected(MakeError(
+						AssetOperationErrorCode::RecoveryRequired,
+						DestinationPath,
+						"Case-only rename failed (" + Failure + ") and rollback failed: " + RestoreFailure + ". Recovery path: " +
+							StagingAsset.generic_string()));
+				}
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::FilesystemFailure,
+					DestinationPath,
+					"Could not complete the case-only rename: " + Failure));
+			}
+
+			if (auto RegistryResult = ValidateProjectRegistry(Registry, Project.Root); !RegistryResult)
+			{
+				const std::string RefreshFailure = RegistryResult.error().Message;
+				const std::string RestoreFailure = RestoreStagedPair();
+				if (RestoreFailure.empty())
+				{
+					if (auto RollbackRefresh = ValidateProjectRegistry(Registry, Project.Root); !RollbackRefresh)
+					{
+						return std::unexpected(MakeError(
+							AssetOperationErrorCode::RecoveryRequired,
+							SourcePath,
+							"Case-only rename was rolled back, but the source registry could not be restored: " +
+								RollbackRefresh.error().Message));
+					}
+				}
+				else
+				{
+					return std::unexpected(MakeError(
+						AssetOperationErrorCode::RecoveryRequired,
+						DestinationPath,
+						"Registry refresh failed (" + RefreshFailure + ") and rollback failed: " + RestoreFailure));
+				}
+				return std::unexpected(MakeRegistryRefreshError(RegistryResult.error(), "Case-only asset rename"));
+			}
+
+			return AssetRecord{ Asset, DestinationPath };
+		}
+
 		std::expected<void, AssetOperationError> ValidateManagedDirectory(
 			const ProjectPaths& Project,
 			const FilesystemPath& ProjectRelativePath,
@@ -757,8 +917,42 @@ namespace PulseForge
 		if (!Source)
 			return std::unexpected(Source.error());
 		const auto Destination = ResolveAssetPath(*Project, DestinationPath, false);
+		const FilesystemPath AbsoluteDestination = Project->Root / DestinationPath;
+		const FilesystemPath SourceSidecar = AssetMetadataSerializer::GetSidecarPath(*Source);
+		const FilesystemPath DestinationSidecar = AssetMetadataSerializer::GetSidecarPath(AbsoluteDestination);
 		if (!Destination)
-			return std::unexpected(Destination.error());
+		{
+			if (Destination.error().Code != AssetOperationErrorCode::DestinationExists ||
+				!AreCaseInsensitivePathComponentsEqual(SourcePath.parent_path(), DestinationPath.parent_path()) ||
+				!AreCaseInsensitivePathComponentsEqual(SourcePath, DestinationPath) ||
+				SourcePath.filename() == DestinationPath.filename())
+			{
+				return std::unexpected(Destination.error());
+			}
+
+			std::error_code EquivalentError;
+			const bool SameAsset = std::filesystem::equivalent(*Source, AbsoluteDestination, EquivalentError);
+			if (EquivalentError || !SameAsset)
+				return std::unexpected(Destination.error());
+			EquivalentError.clear();
+			const bool SameSidecar = std::filesystem::equivalent(SourceSidecar, DestinationSidecar, EquivalentError);
+			if (EquivalentError || !SameSidecar)
+				return std::unexpected(Destination.error());
+
+			const auto Metadata = LoadManagedMetadata(*Source, SourcePath);
+			if (!Metadata)
+				return std::unexpected(Metadata.error());
+			if (Metadata->ID != SourceAsset)
+			{
+				return std::unexpected(MakeError(
+					AssetOperationErrorCode::InvalidProjectAssets,
+					SourcePath,
+					"Asset sidecar identity changed while preparing the move; expected UUID " + SourceAsset.ToString()));
+			}
+			return RenameCaseOnlyAsset(
+				Registry, *Project, SourceAsset, SourcePath, DestinationPath, *Source,
+				AbsoluteDestination, SourceSidecar, DestinationSidecar);
+		}
 		const auto Metadata = LoadManagedMetadata(*Source, SourcePath);
 		if (!Metadata)
 			return std::unexpected(Metadata.error());
@@ -770,9 +964,8 @@ namespace PulseForge
 				"Asset sidecar identity changed while preparing the move; expected UUID " + SourceAsset.ToString()));
 		}
 
-		const FilesystemPath SourceSidecar = AssetMetadataSerializer::GetSidecarPath(*Source);
-		const FilesystemPath DestinationSidecar = AssetMetadataSerializer::GetSidecarPath(*Destination);
-		if (auto SidecarResult = RequireAbsent(DestinationSidecar, DestinationPath); !SidecarResult)
+		const FilesystemPath NormalizedDestinationSidecar = AssetMetadataSerializer::GetSidecarPath(*Destination);
+		if (auto SidecarResult = RequireAbsent(NormalizedDestinationSidecar, DestinationPath); !SidecarResult)
 			return std::unexpected(SidecarResult.error());
 
 		std::error_code Error;
@@ -802,13 +995,13 @@ namespace PulseForge
 		}
 
 		Error.clear();
-		if (!std::filesystem::copy_file(SourceSidecar, DestinationSidecar, std::filesystem::copy_options::none, Error) || Error)
+		if (!std::filesystem::copy_file(SourceSidecar, NormalizedDestinationSidecar, std::filesystem::copy_options::none, Error) || Error)
 		{
 			std::string RollbackFailure;
 			const bool DestinationRemoved = RemoveFile(*Destination, RollbackFailure);
 			std::string SidecarRollbackFailure;
 			const bool PartialSidecarRemoved = Error == std::errc::file_exists ||
-				RemoveFileIfPresent(DestinationSidecar, SidecarRollbackFailure);
+				RemoveFileIfPresent(NormalizedDestinationSidecar, SidecarRollbackFailure);
 			if (!DestinationRemoved || !PartialSidecarRemoved)
 			{
 				return std::unexpected(MakeError(
