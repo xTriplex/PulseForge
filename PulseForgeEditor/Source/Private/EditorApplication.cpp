@@ -1,4 +1,13 @@
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <Windows.h>
+#include <dwmapi.h>
+
 #define GLFW_EXPOSE_NATIVE_WIN32
+#ifdef PF_EDITOR_RENDERER_OPENGL
+#define GLFW_INCLUDE_NONE
+#include <glad/glad.h>
+#endif
 
 #include "Core/Application.h"
 #include "Core/Layer.h"
@@ -10,6 +19,7 @@
 #include "Events/KeyEvent.h"
 #include "Events/MouseEvent.h"
 #include "Assets/AssetOperations.h"
+#include "Assets/AssetPathResolver.h"
 #include "Assets/MaterialAssetService.h"
 #include "Assets/PrefabAssetService.h"
 #include "Assets/Project.h"
@@ -22,6 +32,8 @@
 #include "Runtime/SceneRuntime.h"
 #include "Window/Window.h"
 #include "Editor/EditorImGuiRenderer.h"
+#include "Editor/EditorAssetPreviewService.h"
+#include "Editor/EditorAssetPreviewPolicy.h"
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorCommandHistory.h"
@@ -61,13 +73,10 @@
 #include <spdlog/sinks/base_sink.h>
 #include <spdlog/spdlog.h>
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
-#include <dwmapi.h>
-
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <fstream>
 #include <charconv>
 #include <cmath>
 #include <cfloat>
@@ -586,8 +595,11 @@ namespace
 		};
 
 	public:
-		explicit EditorLayer(std::optional<std::filesystem::path> StartupProject = std::nullopt)
-			: Layer("Editor"), m_StartupProjectPath(std::move(StartupProject))
+		explicit EditorLayer(PulseForgeEditor::EditorCommandLineOptions Options)
+			: Layer("Editor"),
+			  m_StartupProjectPath(std::move(Options.ProjectFile)),
+			  m_AssetPreviewStressManifest(std::move(Options.AssetPreviewStressManifest)),
+			  m_AssetPreviewStressBudget(std::move(Options.AssetPreviewStressBudget))
 		{
 		}
 
@@ -644,6 +656,8 @@ namespace
 				throw std::runtime_error("Could not initialize the editor OpenGL ImGui backend");
 			}
 			m_OpenGLBackendActive = true;
+			if (const char* CapturePath = std::getenv("PULSEFORGE_EDITOR_OPENGL_FRAME_CAPTURE"))
+				m_OpenGLDiagnosticCapturePath = std::filesystem::u8path(CapturePath);
 			#else
 			m_ImGuiRenderer = std::make_unique<PulseForgeEditor::EditorImGuiRenderer>();
 			auto& Runtime = PulseForge::Application::Get();
@@ -653,6 +667,27 @@ namespace
 				ShutdownImGui();
 				throw std::runtime_error(Message);
 			}
+			PulseForgeEditor::AssetPreviewServiceLimits PreviewLimits;
+			if (m_AssetPreviewStressManifest)
+			{
+				PreviewLimits.MaximumQueuedRequests = 32;
+				PreviewLimits.MaximumCpuBytes = 2ull * 1024ull * 1024ull;
+				PreviewLimits.MaximumUploadsPerUpdate = 4;
+				PreviewLimits.MaximumUploadBytesPerUpdate = 1024ull * 1024ull;
+				if (m_AssetPreviewStressBudget == "entries")
+				{
+					PreviewLimits.MaximumEntries = 8;
+					PreviewLimits.MaximumGpuBytes = 64ull * 1024ull * 1024ull;
+				}
+				else
+				{
+					PreviewLimits.MaximumEntries = 512;
+					PreviewLimits.MaximumGpuBytes = 4ull * 192ull * 192ull * 4ull;
+				}
+			}
+			m_AssetPreviews.Initialize(Runtime, *m_ImGuiRenderer, PreviewLimits);
+			if (m_AssetPreviewStressManifest)
+				InitializeAssetPreviewStress();
 			#endif
 			AttachConsoleSink();
 
@@ -688,6 +723,17 @@ namespace
 
 		void OnUpdate(PulseForge::Timestep DeltaTime) override
 		{
+			if (m_AssetPreviewProjectPending)
+			{
+				if (!m_AssetPreviewStressManifest)
+					m_AssetPreviews.SetProject(m_Project ? m_Project->GetDescription().ID.ToString() : std::string{});
+				m_AssetPreviewProjectPending = false;
+			}
+			if (m_AssetPreviewAssetsPending)
+			{
+				m_AssetPreviews.InvalidateAll();
+				m_AssetPreviewAssetsPending = false;
+			}
 			UpdateEditorCamera(DeltaTime);
 			if (m_SceneRuntime && m_RuntimeScene)
 			{
@@ -699,16 +745,315 @@ namespace
 				}
 			}
 			PrepareViewportScene();
+			m_AssetPreviews.PumpUploads();
 		}
+
+		void InitializeAssetPreviewStress()
+		{
+			if (m_AssetPreviewStressBudget != "entries" && m_AssetPreviewStressBudget != "gpu")
+				throw std::runtime_error("Asset preview stress is supported only by the Vulkan editor build");
+			std::ifstream Manifest(*m_AssetPreviewStressManifest, std::ios::binary);
+			if (!Manifest)
+				throw std::runtime_error("Could not open asset preview stress manifest");
+			std::string Line;
+			while (std::getline(Manifest, Line))
+			{
+				if (!Line.empty() && Line.back() == '\r')
+					Line.pop_back();
+				const size_t Separator = Line.find('|');
+				if (Separator == std::string::npos || Separator == 0 || Separator + 1 >= Line.size())
+					throw std::runtime_error("Invalid asset preview stress manifest row");
+				m_AssetPreviewStressAssets.emplace_back(
+					Line.substr(0, Separator), std::filesystem::u8path(Line.substr(Separator + 1)));
+			}
+			if (m_AssetPreviewStressAssets.size() < 32 || m_AssetPreviewStressAssets.size() > 256)
+				throw std::runtime_error("Stress manifest must contain between 32 and 256 deterministic assets");
+			m_AssetPreviewStressReportPath = m_AssetPreviewStressManifest->parent_path() /
+				("vulkan_stress_" + m_AssetPreviewStressBudget + ".json");
+			m_AssetPreviews.SetProject(m_AssetPreviewStressProject);
+			PF_INFO("Asset preview Vulkan stress enabled: {} assets, {} budget", m_AssetPreviewStressAssets.size(),
+				m_AssetPreviewStressBudget);
+		}
+
+		void DrawAssetPreviewStress()
+		{
+			if (m_AssetPreviewStressFinished)
+				return;
+			constexpr size_t BatchSize = 4;
+			const size_t BatchCount = m_AssetPreviewStressAssets.size() / BatchSize;
+			if (m_AssetPreviewStressBatch >= BatchCount)
+				return;
+			const size_t First = m_AssetPreviewStressBatch * BatchSize;
+			ImGui::SetNextWindowSize(ImVec2(500.0f, 210.0f), ImGuiCond_FirstUseEver);
+			if (!ImGui::Begin("Asset Preview GPU Stress (opt-in)"))
+			{
+				ImGui::End();
+				return;
+			}
+			ImGui::Text("Budget: %s | Batch: %zu / %zu", m_AssetPreviewStressBudget.c_str(),
+				m_AssetPreviewStressBatch + 1, BatchCount);
+			bool AllReady = true;
+			for (size_t Offset = 0; Offset < BatchSize; ++Offset)
+			{
+				const auto& [AssetID, Path] = m_AssetPreviewStressAssets[First + Offset];
+				m_AssetPreviews.RequestImage(m_AssetPreviewStressProject, AssetID, Path);
+				const auto Preview = m_AssetPreviews.FindPreview(m_AssetPreviewStressProject, AssetID);
+				if (Preview)
+				{
+					if (Offset != 0)
+						ImGui::SameLine();
+					ImGui::Image(ImTextureRef(static_cast<ImTextureID>(Preview->TextureID)), ImVec2(88.0f, 88.0f));
+					ImGui::Text("%s", AssetID.c_str());
+					++m_AssetPreviewStressDraws;
+				}
+				else
+				{
+					AllReady = false;
+					ImGui::Text("Waiting: %s", AssetID.c_str());
+					ImGui::SameLine();
+					ImGui::Dummy(ImVec2(4.0f, 1.0f));
+				}
+			}
+			ImGui::End();
+			m_AssetPreviewStressReadyThisFrame = AllReady;
+		}
+
+		void AdvanceAssetPreviewStressFrame()
+		{
+			if (m_AssetPreviewStressFinished)
+				return;
+			if (m_AssetPreviewStressRenderFailedThisFrame)
+			{
+				m_AssetPreviewStressFailed = true;
+				m_AssetPreviewStressFinished = true;
+				PulseForge::Application::Get().RequestClose();
+				return;
+			}
+			if (m_AssetPreviewStressBatch == 0 && !m_AssetPreviewStressInvalidatedQueued)
+			{
+				m_AssetPreviews.InvalidateAll();
+				m_AssetPreviewStressInvalidatedQueued = true;
+			}
+			if (!m_AssetPreviewStressReadyThisFrame)
+				return;
+			++m_AssetPreviewStressSubmissions;
+			++m_AssetPreviewStressFrames;
+			if (m_AssetPreviewStressFrames < 4)
+				return;
+			m_AssetPreviewStressFrames = 0;
+			const size_t BatchCount = m_AssetPreviewStressAssets.size() / 4;
+			++m_AssetPreviewStressBatch;
+			if (!m_AssetPreviewStressRefreshed && m_AssetPreviewStressBatch >= BatchCount / 5)
+			{
+				m_AssetPreviews.InvalidateAll();
+				m_AssetPreviewStressRefreshed = true;
+			}
+			if (!m_AssetPreviewStressSwitchedProject && m_AssetPreviewStressBatch >= BatchCount / 3)
+			{
+				m_AssetPreviews.InvalidateAll();
+				m_AssetPreviews.SetProject("Phase5StressProjectB");
+				m_AssetPreviewStressProject = "Phase5StressProjectB";
+				m_AssetPreviewStressSwitchedProject = true;
+			}
+			if (m_AssetPreviewStressBatch >= BatchCount)
+			{
+				if (m_AssetPreviewStressPass == 0)
+				{
+					m_AssetPreviewStressPass = 1;
+					m_AssetPreviewStressBatch = 0;
+				}
+				else
+				{
+					m_AssetPreviews.InvalidateAll();
+					for (size_t Index = 0; Index < 8; ++Index)
+					{
+						const auto& [AssetID, Path] = m_AssetPreviewStressAssets[Index];
+						m_AssetPreviews.RequestImage(m_AssetPreviewStressProject, "shutdown-" + AssetID, Path);
+					}
+					m_AssetPreviewStressShutdownPendingRequests = m_AssetPreviews.GetStats().PendingRequests;
+					PF_INFO("Asset preview stress queued {} requests immediately before shutdown",
+						m_AssetPreviewStressShutdownPendingRequests);
+					m_AssetPreviewStressFinished = true;
+					PF_INFO("Asset preview stress workload completed; requesting clean editor close");
+					PulseForge::Application::Get().RequestClose();
+				}
+			}
+		}
+
+		void WriteAssetPreviewStressReport() noexcept
+		{
+			if (m_AssetPreviewStressReportPath.empty() || m_AssetPreviewStressReportWritten)
+				return;
+			m_AssetPreviewStressReportWritten = true;
+			try
+			{
+				const auto Stats = m_AssetPreviews.GetStats();
+				std::ofstream Report(m_AssetPreviewStressReportPath, std::ios::binary | std::ios::trunc);
+				if (!Report)
+					return;
+				Report << "{\n"
+					<< "  \"budget_mode\": \"" << m_AssetPreviewStressBudget << "\",\n"
+					<< "  \"fixtures\": " << m_AssetPreviewStressAssets.size() << ",\n"
+					<< "  \"project_switch\": " << (m_AssetPreviewStressSwitchedProject ? "true" : "false") << ",\n"
+					<< "  \"queued_result_invalidation\": " << (m_AssetPreviewStressInvalidatedQueued ? "true" : "false") << ",\n"
+					<< "  \"refresh_invalidation\": " << (m_AssetPreviewStressRefreshed ? "true" : "false") << ",\n"
+					<< "  \"rendered_preview_images\": " << m_AssetPreviewStressDraws << ",\n"
+					<< "  \"render_frames\": " << m_AssetPreviewStressSubmissions << ",\n"
+					<< "  \"shutdown_pending_requests_before_close\": " << m_AssetPreviewStressShutdownPendingRequests << ",\n"
+					<< "  \"cache_hits\": " << Stats.CacheHits << ",\n"
+					<< "  \"cache_misses\": " << Stats.CacheMisses << ",\n"
+					<< "  \"decodes_succeeded\": " << Stats.DecodesSucceeded << ",\n"
+					<< "  \"decodes_failed\": " << Stats.DecodesFailed << ",\n"
+					<< "  \"uploads\": " << Stats.Uploads << ",\n"
+					<< "  \"evictions\": " << Stats.Evictions << ",\n"
+					<< "  \"binding_registrations\": " << Stats.BindingRegistrations << ",\n"
+					<< "  \"binding_unregistrations\": " << Stats.BindingUnregistrations << ",\n"
+					<< "  \"stale_results_discarded\": " << Stats.StaleResultsDiscarded << ",\n"
+					<< "  \"peak_entries\": " << Stats.PeakEntries << ",\n"
+					<< "  \"peak_cpu_bytes\": " << Stats.PeakCpuBytes << ",\n"
+					<< "  \"peak_gpu_bytes\": " << Stats.PeakGpuBytes << ",\n"
+					<< "  \"final_entries\": " << Stats.ActiveEntries << ",\n"
+					<< "  \"final_gpu_bytes\": " << Stats.GpuBytes << ",\n"
+					<< "  \"final_pending_requests\": " << Stats.PendingRequests << ",\n"
+					<< "  \"renderer_registered_textures_after_service_shutdown\": "
+					<< (m_ImGuiRenderer ? m_ImGuiRenderer->GetRegisteredTextureCount() : 0) << ",\n"
+					<< "  \"render_failed\": " << (m_AssetPreviewStressFailed ? "true" : "false") << ",\n"
+					<< "  \"completed\": " << (m_AssetPreviewStressFinished && !m_AssetPreviewStressFailed
+						? "true" : "false") << "\n}\n";
+			}
+			catch (...)
+			{
+			}
+		}
+
+		#ifdef PF_EDITOR_RENDERER_OPENGL
+		void CaptureOpenGLFrameForValidation() noexcept
+		{
+			if (m_OpenGLDiagnosticCapturePath.empty() || m_OpenGLDiagnosticCaptureWritten ||
+				m_OpenGLDiagnosticFramesSeen < 3)
+				return;
+			m_OpenGLDiagnosticCaptureWritten = true;
+			CaptureOpenGLFramebuffer(m_OpenGLDiagnosticCapturePath, GL_BACK);
+		}
+
+		void CaptureOpenGLPlatformFramesForValidation(GLFWwindow* MainContext) noexcept
+		{
+			if (m_OpenGLDiagnosticCapturePath.empty() || m_OpenGLDiagnosticPlatformCaptureWritten ||
+				m_OpenGLDiagnosticFramesSeen < 3)
+				return;
+			m_OpenGLDiagnosticPlatformCaptureWritten = true;
+			ImGuiPlatformIO& PlatformIO = ImGui::GetPlatformIO();
+			for (int Index = 0; Index < PlatformIO.Viewports.Size; ++Index)
+			{
+				ImGuiViewport* Viewport = PlatformIO.Viewports[Index];
+				const int VertexCount = Viewport && Viewport->DrawData ? Viewport->DrawData->TotalVtxCount : 0;
+				PF_INFO("OpenGL platform viewport {}: id 0x{:08X}, {}x{}, ImGui vertices {}",
+					Index,
+					Viewport ? Viewport->ID : 0,
+					Viewport ? Viewport->Size.x : 0.0f,
+					Viewport ? Viewport->Size.y : 0.0f,
+					VertexCount);
+				if (Index == 0 || !Viewport || !Viewport->PlatformHandleRaw)
+					continue;
+				GLFWwindow* PlatformWindow = static_cast<GLFWwindow*>(Viewport->PlatformHandleRaw);
+				glfwMakeContextCurrent(PlatformWindow);
+				std::filesystem::path OutputPath = m_OpenGLDiagnosticCapturePath;
+				OutputPath.replace_filename(OutputPath.stem().string() + "_viewport_" +
+					std::to_string(Viewport->ID) + OutputPath.extension().string());
+				CaptureOpenGLFramebuffer(OutputPath, GL_FRONT);
+			}
+			glfwMakeContextCurrent(MainContext);
+		}
+
+		void CaptureOpenGLFramebuffer(const std::filesystem::path& OutputPath, GLenum ReadBuffer) noexcept
+		{
+			GLint Viewport[4]{};
+			GLint PreviousReadBuffer = GL_BACK;
+			GLint PreviousPackAlignment = 4;
+			glGetIntegerv(GL_VIEWPORT, Viewport);
+			glGetIntegerv(GL_READ_BUFFER, &PreviousReadBuffer);
+			glGetIntegerv(GL_PACK_ALIGNMENT, &PreviousPackAlignment);
+			if (Viewport[2] <= 0 || Viewport[3] <= 0 ||
+				static_cast<uint64_t>(Viewport[2]) * static_cast<uint64_t>(Viewport[3]) > 16'777'216ull)
+			{
+				PF_ERROR("OpenGL validation framebuffer has invalid or excessive dimensions");
+				return;
+			}
+			const size_t PixelBytes = static_cast<size_t>(Viewport[2]) * static_cast<size_t>(Viewport[3]) * 4;
+			std::vector<uint8_t> Rgba(PixelBytes);
+			std::vector<uint8_t> Bgra(PixelBytes);
+			glReadBuffer(ReadBuffer);
+			glPixelStorei(GL_PACK_ALIGNMENT, 1);
+			glReadPixels(Viewport[0], Viewport[1], Viewport[2], Viewport[3], GL_RGBA, GL_UNSIGNED_BYTE, Rgba.data());
+			const GLenum ReadError = glGetError();
+			glReadBuffer(static_cast<GLenum>(PreviousReadBuffer));
+			glPixelStorei(GL_PACK_ALIGNMENT, PreviousPackAlignment);
+			if (ReadError != GL_NO_ERROR)
+			{
+				PF_ERROR("OpenGL validation framebuffer readback failed with GL error 0x{:04X}", ReadError);
+				return;
+			}
+			for (int Row = 0; Row < Viewport[3]; ++Row)
+			{
+				const size_t SourceRow = static_cast<size_t>(Viewport[3] - 1 - Row);
+				for (int Column = 0; Column < Viewport[2]; ++Column)
+				{
+					const size_t Source = (SourceRow * static_cast<size_t>(Viewport[2]) + Column) * 4;
+					const size_t Target = (static_cast<size_t>(Row) * static_cast<size_t>(Viewport[2]) + Column) * 4;
+					Bgra[Target + 0] = Rgba[Source + 2];
+					Bgra[Target + 1] = Rgba[Source + 1];
+					Bgra[Target + 2] = Rgba[Source + 0];
+					Bgra[Target + 3] = 255;
+				}
+			}
+			const auto Put16 = [](std::array<uint8_t, 54>& Header, size_t Offset, uint16_t Value)
+			{
+				Header[Offset] = static_cast<uint8_t>(Value);
+				Header[Offset + 1] = static_cast<uint8_t>(Value >> 8);
+			};
+			const auto Put32 = [](std::array<uint8_t, 54>& Header, size_t Offset, uint32_t Value)
+			{
+				for (size_t Byte = 0; Byte < 4; ++Byte)
+					Header[Offset + Byte] = static_cast<uint8_t>(Value >> (Byte * 8));
+			};
+			std::array<uint8_t, 54> Header{};
+			Header[0] = 'B'; Header[1] = 'M';
+			Put32(Header, 2, static_cast<uint32_t>(Header.size() + Bgra.size()));
+			Put32(Header, 10, static_cast<uint32_t>(Header.size()));
+			Put32(Header, 14, 40);
+			Put32(Header, 18, static_cast<uint32_t>(Viewport[2]));
+			Put32(Header, 22, static_cast<uint32_t>(-Viewport[3]));
+			Put16(Header, 26, 1);
+			Put16(Header, 28, 32);
+			Put32(Header, 34, static_cast<uint32_t>(Bgra.size()));
+			std::ofstream Output(OutputPath, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(Header.data()), static_cast<std::streamsize>(Header.size()));
+			Output.write(reinterpret_cast<const char*>(Bgra.data()), static_cast<std::streamsize>(Bgra.size()));
+			if (!Output)
+				PF_ERROR("Could not write OpenGL validation framebuffer capture to {}",
+					OutputPath.string());
+			else
+				PF_INFO("OpenGL validation framebuffer captured to {}: {}x{}",
+					OutputPath.string(), Viewport[2], Viewport[3]);
+		}
+		#endif
 
 		void OnRender() override
 		{
+			#ifdef PF_EDITOR_RENDERER_OPENGL
+			if (!m_OpenGLDiagnosticCapturePath.empty())
+				++m_OpenGLDiagnosticFramesSeen;
+			#endif
+			m_AssetPreviewStressRenderFailedThisFrame = false;
 			ImGui::SetCurrentContext(m_Context);
 			#ifdef PF_EDITOR_RENDERER_OPENGL
 			ImGui_ImplOpenGL3_NewFrame();
 			#endif
 			ImGui_ImplGlfw_NewFrame();
 			ImGui::NewFrame();
+			m_AssetPreviews.BeginRequestFrame();
+			if (m_AssetPreviewStressManifest)
+				DrawAssetPreviewStress();
 			m_EditorStyle.ApplyTheme(GetEditorUiColorEncoding(
 				PulseForge::Application::Get().GetOutputColorEncoding()));
 			CompleteReleasedGizmoInteractionBeforeShortcuts();
@@ -722,6 +1067,33 @@ namespace
 			if (m_Layout.SubmitDockspace())
 				CancelViewportInteractionForLayoutChange();
 			DrawWorkspacePanels();
+			#ifdef PF_EDITOR_RENDERER_OPENGL
+			if (!m_OpenGLDiagnosticCapturePath.empty())
+			{
+				if (const char* Folder = std::getenv("PULSEFORGE_EDITOR_OPENGL_CONTENT_FOLDER");
+					Folder && *Folder)
+				{
+					const std::filesystem::path RequestedFolder = std::filesystem::u8path(Folder);
+					if (IsKnownContentFolder(RequestedFolder))
+						m_CurrentContentFolder = RequestedFolder;
+				}
+				if (ImGuiWindow* ContentBrowser = ImGui::FindWindowByName("Content Browser"); ContentBrowser)
+				{
+					ImGui::SetWindowFocus("Content Browser");
+					if (ContentBrowser->DockNode)
+						ContentBrowser->DockNode->SelectedTabId = ContentBrowser->TabId;
+					ImGui::MarkIniSettingsDirty();
+					if (!m_OpenGLDiagnosticContentBrowserSelected)
+					{
+						PF_INFO("OpenGL validation selected Content Browser: window 0x{:08X}, tab 0x{:08X}, node 0x{:08X}",
+							ContentBrowser->ID,
+							ContentBrowser->TabId,
+							ContentBrowser->DockNode ? ContentBrowser->DockNode->ID : 0);
+						m_OpenGLDiagnosticContentBrowserSelected = true;
+					}
+				}
+			}
+			#endif
 			RenderViewportScene();
 			UpdateWindowTitle();
 			if (PulseForgeEditor::ShouldFinishSceneEditForInspector(
@@ -733,6 +1105,7 @@ namespace
 				ReportLayoutPersistenceError(Result.error());
 			#ifdef PF_EDITOR_RENDERER_OPENGL
 			ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+			CaptureOpenGLFrameForValidation();
 
 			ImGuiIO& IO = ImGui::GetIO();
 			if (IO.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
@@ -740,6 +1113,7 @@ namespace
 				GLFWwindow* MainContext = glfwGetCurrentContext();
 				ImGui::UpdatePlatformWindows();
 				ImGui::RenderPlatformWindowsDefault();
+				CaptureOpenGLPlatformFramesForValidation(MainContext);
 				glfwMakeContextCurrent(MainContext);
 			}
 			#else
@@ -747,6 +1121,8 @@ namespace
 			{
 				if (auto Result = m_ImGuiRenderer->RenderDrawData(); !Result)
 				{
+					if (m_AssetPreviewStressManifest)
+						m_AssetPreviewStressRenderFailedThisFrame = true;
 					if (m_ImGuiRenderingError != Result.error())
 					{
 						m_ImGuiRenderingError = Result.error();
@@ -756,6 +1132,8 @@ namespace
 				else
 					m_ImGuiRenderingError.clear();
 			}
+			if (m_AssetPreviewStressManifest)
+				AdvanceAssetPreviewStressFrame();
 			#endif
 		}
 
@@ -2574,6 +2952,7 @@ namespace
 		{
 			ClearScene();
 			ResetViewportSceneRenderer();
+			m_AssetPreviewProjectPending = true;
 			m_Project.reset();
 			m_OpenedMaterialAsset.reset();
 			m_FocusMaterialEditorNextFrame = false;
@@ -2932,6 +3311,10 @@ namespace
 			DrawSceneViewportPanel();
 			DrawHierarchyPanel();
 			DrawInspectorPanel();
+			#ifdef PF_EDITOR_RENDERER_OPENGL
+			if (!m_OpenGLDiagnosticCapturePath.empty() && !m_OpenGLDiagnosticContentBrowserSelected)
+				ImGui::SetNextWindowFocus();
+			#endif
 			DrawContentBrowserPanel();
 			if (m_InitialMaterialEditorDockPending)
 			{
@@ -5121,10 +5504,14 @@ namespace
 										ImGui::PushID(static_cast<int>(Message.Sequence >> 32));
 										ImGui::PushID(static_cast<int>(Message.Sequence & 0xffffffffu));
 										ImGui::TableNextRow();
-										ImGui::TableSetColumnIndex(0);
-										ImGui::Selectable("##ConsoleEntryContext", false,
+										ImGui::TableNextColumn();
+										char SeverityLabel[16]{};
+										std::snprintf(SeverityLabel, sizeof(SeverityLabel), "[%s]", LogLevelName(Message.Level));
+										ImGui::PushStyleColor(ImGuiCol_Text, LogLevelColor(Message.Level));
+										ImGui::Selectable(SeverityLabel, false,
 											ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
 											ImVec2(0.0f, ImGui::GetTextLineHeightWithSpacing()));
+										ImGui::PopStyleColor();
 										if (ImGui::BeginPopupContextItem("ConsoleEntryContextMenu"))
 										{
 											if (ImGui::MenuItem("Copy Message"))
@@ -5136,14 +5523,12 @@ namespace
 											}
 											ImGui::EndPopup();
 										}
-										ImGui::TableSetColumnIndex(0);
-										ImGui::TextColored(LogLevelColor(Message.Level), "[%s]", LogLevelName(Message.Level));
-										ImGui::TableSetColumnIndex(1);
+										ImGui::TableNextColumn();
 										const float LoggerWidth = ImGui::GetContentRegionAvail().x;
 										m_EditorStyle.TextMuted(Message.Logger);
 										if (ImGui::IsItemHovered() && ImGui::CalcTextSize(Message.Logger.c_str()).x > LoggerWidth)
 											ImGui::SetTooltip("%s", Message.Logger.c_str());
-										ImGui::TableSetColumnIndex(2);
+										ImGui::TableNextColumn();
 										ImGui::TextUnformatted(
 											Message.Text.data(), Message.Text.data() + Message.Text.size());
 										if (ImGui::IsItemHovered())
@@ -7090,9 +7475,41 @@ namespace
 						const AssetBrowserPresentation& Presentation = m_AssetBrowserPresentations[SourceIndex];
 						ImGui::PushID(Presentation.Identifier.c_str());
 						const bool IsSelected = m_SelectedAsset && *m_SelectedAsset == Asset.ID;
+						uint64_t PreviewID = 0;
+						uint32_t PreviewWidth = 0;
+						uint32_t PreviewHeight = 0;
+						#ifndef PF_EDITOR_RENDERER_OPENGL
+						const bool IsImagePreview = PulseForgeEditor::IsSupportedImagePreviewExtension(Asset.ProjectRelativePath);
+						const bool IsMaterialPreview = Presentation.Extension == ".material";
+						if (m_Project && (IsImagePreview || IsMaterialPreview))
+						{
+							const std::string ProjectID = m_Project->GetDescription().ID.ToString();
+							const std::string AssetID = Asset.ID.ToString();
+							if (!m_AssetPreviews.TouchPreview(ProjectID, AssetID))
+							{
+								auto SourcePath = PulseForge::AssetPathResolver::ResolveManagedSourcePath(
+									m_Project->GetRootPath(), Asset.ProjectRelativePath);
+								if (SourcePath)
+								{
+									if (IsMaterialPreview)
+										m_AssetPreviews.RequestMaterialSwatch(ProjectID, AssetID, *SourcePath);
+									else
+										m_AssetPreviews.RequestImage(ProjectID, AssetID, *SourcePath);
+								}
+								else
+									m_AssetPreviews.MarkUnavailable(ProjectID, AssetID);
+							}
+							if (const auto Preview = m_AssetPreviews.FindPreview(ProjectID, AssetID))
+							{
+								PreviewID = Preview->TextureID;
+								PreviewWidth = Preview->Width;
+								PreviewHeight = Preview->Height;
+							}
+						}
+						#endif
 						const bool Activated = m_EditorStyle.AssetTile(Presentation.Icon, Presentation.Name, IsSelected,
 							ImVec2((std::max)(ImGui::GetContentRegionAvail().x - 2.0f, 1.0f), TileHeight),
-							ImGuiSelectableFlags_AllowDoubleClick);
+							ImGuiSelectableFlags_AllowDoubleClick, PreviewID, PreviewWidth, PreviewHeight);
 						HandleAssetBrowserItem(Asset, Presentation, Activated, DeferredAction);
 						ImGui::PopID();
 					}
@@ -7423,6 +7840,7 @@ namespace
 					{
 						m_DirtyMaterialDrafts.erase(Key);
 						m_MaterialEditorErrors.erase(Key);
+						m_AssetPreviewAssetsPending = true;
 						if (m_SceneRenderer)
 							m_SceneRenderer->RefreshMaterialAssets();
 						SetStatus("Saved material " + PathToUtf8(Asset.ProjectRelativePath.filename()) + ".");
@@ -7772,6 +8190,8 @@ namespace
 
 		void UpdateAssetList()
 		{
+			m_AssetPreviewProjectPending = true;
+			m_AssetPreviewAssetsPending = true;
 			m_PickingMeshCache.clear();
 			m_PickingMeshErrors.clear();
 			if (m_Project)
@@ -7827,6 +8247,8 @@ namespace
 
 		void ShutdownImGui() noexcept
 		{
+			m_AssetPreviews.Shutdown();
+			WriteAssetPreviewStressReport();
 			if (m_ImGuiRenderer)
 			{
 				m_ImGuiRenderer->Shutdown();
@@ -7864,8 +8286,37 @@ namespace
 		PulseForgeEditor::EditorLayout m_Layout;
 		PulseForgeEditor::EditorStyle m_EditorStyle;
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
+		PulseForgeEditor::EditorAssetPreviewService m_AssetPreviews;
+		std::optional<std::filesystem::path> m_AssetPreviewStressManifest;
+		std::string m_AssetPreviewStressBudget;
+		std::vector<std::pair<std::string, std::filesystem::path>> m_AssetPreviewStressAssets;
+		std::string m_AssetPreviewStressProject = "Phase5StressProjectA";
+		std::filesystem::path m_AssetPreviewStressReportPath;
+		size_t m_AssetPreviewStressBatch = 0;
+		size_t m_AssetPreviewStressFrames = 0;
+		size_t m_AssetPreviewStressDraws = 0;
+		size_t m_AssetPreviewStressSubmissions = 0;
+		size_t m_AssetPreviewStressShutdownPendingRequests = 0;
+		bool m_AssetPreviewStressSwitchedProject = false;
+		bool m_AssetPreviewStressFinished = false;
+		bool m_AssetPreviewStressReadyThisFrame = false;
+		bool m_AssetPreviewStressRenderFailedThisFrame = false;
+		bool m_AssetPreviewStressFailed = false;
+		bool m_AssetPreviewStressInvalidatedQueued = false;
+		bool m_AssetPreviewStressRefreshed = false;
+		size_t m_AssetPreviewStressPass = 0;
+		bool m_AssetPreviewStressReportWritten = false;
+		bool m_AssetPreviewProjectPending = false;
+		bool m_AssetPreviewAssetsPending = false;
 		bool m_GlfwBackendActive = false;
 		bool m_OpenGLBackendActive = false;
+		#ifdef PF_EDITOR_RENDERER_OPENGL
+		std::filesystem::path m_OpenGLDiagnosticCapturePath;
+		bool m_OpenGLDiagnosticCaptureWritten = false;
+		bool m_OpenGLDiagnosticPlatformCaptureWritten = false;
+		bool m_OpenGLDiagnosticContentBrowserSelected = false;
+		uint32_t m_OpenGLDiagnosticFramesSeen = 0;
+		#endif
 		bool m_FileDialogActive = false;
 		bool m_ViewportSceneReady = false;
 		bool m_ViewportImageHovered = false;
@@ -7976,14 +8427,14 @@ namespace
 	class PulseForgeEditorApplication final : public PulseForge::Application
 	{
 	public:
-		explicit PulseForgeEditorApplication(std::optional<std::filesystem::path> StartupProject)
+		explicit PulseForgeEditorApplication(PulseForgeEditor::EditorCommandLineOptions Options)
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			: Application(PulseForge::RendererAPI::OpenGL)
 #else
 			: Application(PulseForge::RendererAPI::Vulkan)
 #endif
 		{
-			PushLayer(std::make_unique<EditorLayer>(std::move(StartupProject)));
+			PushLayer(std::make_unique<EditorLayer>(std::move(Options)));
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			PF_INFO("PulseForge editor started with the OpenGL ImGui backend");
 #else
@@ -7995,11 +8446,11 @@ namespace
 
 std::unique_ptr<PulseForge::Application> PulseForge::CreateApplication()
 {
-	return PulseForgeEditor::CreateEditorApplication(std::nullopt);
+	return PulseForgeEditor::CreateEditorApplication({});
 }
 
 std::unique_ptr<PulseForge::Application> PulseForgeEditor::CreateEditorApplication(
-	std::optional<std::filesystem::path> StartupProject)
+	EditorCommandLineOptions Options)
 {
-	return std::make_unique<PulseForgeEditorApplication>(std::move(StartupProject));
+	return std::make_unique<PulseForgeEditorApplication>(std::move(Options));
 }

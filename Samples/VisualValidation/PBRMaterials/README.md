@@ -8,7 +8,7 @@ This compact workbench demonstrates textured metallic-roughness shading, tangent
 
 Open `PBRMaterials.pfproj` in the Vulkan PulseForgeEditor, then load `Assets/Scenes/PBRMaterialsOverview.scene` if it is not selected automatically. The project startup UUID points to this scene. The authored camera also frames the scene for standalone-game rendering.
 
-The top row compares rough clay, satin ceramic, and polished metal using the same base-color map and lighting. The lower row shows packed metallic/roughness channels plus a normal map, a material-occlusion pattern, and a bright emissive texture. Select an entity and edit its Material Asset in the Content Browser details panel to compare factors, maps, and strengths. Save explicitly in the material editor; scene mesh references retain stable material UUIDs.
+The top row compares rough clay, satin ceramic, and polished metal using the same base-color map and lighting. The lower row shows packed metallic/roughness channels plus a normal map, a material-occlusion pattern, and a bright emissive texture. Select an entity and open its Material Editor from the Content Browser to compare factors, maps, and strengths. Save explicitly in the Material Editor; scene mesh references retain stable material UUIDs. Content Browser material tiles show a saved base-color swatch, not a physically rendered PBR preview.
 
 ## Expected behavior
 

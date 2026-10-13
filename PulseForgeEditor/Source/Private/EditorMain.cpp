@@ -35,7 +35,7 @@ int main(int ArgumentCount, char** Arguments)
 			return EXIT_FAILURE;
 		}
 
-		auto Application = PulseForgeEditor::CreateEditorApplication(Options->ProjectFile);
+		auto Application = PulseForgeEditor::CreateEditorApplication(*Options);
 		if (!Application)
 			throw std::runtime_error("The editor application factory returned null");
 

@@ -320,7 +320,10 @@ namespace PulseForgeEditor
 			std::string_view Label,
 			bool Selected,
 			const ImVec2& Size,
-			int Flags = 0) const;
+			int Flags = 0,
+			uint64_t PreviewTextureID = 0,
+			uint32_t PreviewWidth = 0,
+			uint32_t PreviewHeight = 0) const;
 		[[nodiscard]] bool TreeNode(EditorIcon Icon, std::string_view Label, std::string_view StableID, int Flags) const;
 		[[nodiscard]] bool SectionHeader(
 			EditorIcon Icon,

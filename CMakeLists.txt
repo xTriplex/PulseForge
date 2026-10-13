@@ -300,6 +300,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorMain.cpp
 		PulseForgeEditor/Source/Private/EditorApplication.cpp
 		PulseForgeEditor/Source/Private/EditorProjectOpening.cpp
+		PulseForgeEditor/Source/Private/EditorAssetPreviewService.cpp
 		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
 		PulseForgeEditor/Source/Private/EditorLayout.cpp
 		PulseForgeEditor/Source/Private/EditorStyle.cpp
@@ -312,6 +313,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	)
 	target_compile_definitions(PulseForgeEditor PRIVATE PF_PLATFORM_WINDOWS)
 	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
+		target_include_directories(PulseForgeEditor PRIVATE PulseForge/Vendor/Glad/include)
 		target_compile_definitions(PulseForgeEditor PRIVATE PF_EDITOR_RENDERER_OPENGL)
 	else()
 		target_compile_definitions(PulseForgeEditor PRIVATE PF_EDITOR_SHADER_DIRECTORY="Shaders")
