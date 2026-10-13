@@ -819,7 +819,8 @@ namespace
 			  m_StartupProjectPath(std::move(Options.ProjectFile)),
 			  m_AssetPreviewStressManifest(std::move(Options.AssetPreviewStressManifest)),
 			  m_AssetPreviewStressBudget(std::move(Options.AssetPreviewStressBudget)),
-			  m_DocumentHostTestFixture(Options.EnableDocumentHostTestFixture)
+			  m_DocumentHostTestFixture(Options.EnableDocumentHostTestFixture),
+			  m_DocumentHostResetLayoutTest(Options.EnableDocumentHostResetLayoutTest)
 		{
 		}
 
@@ -1387,7 +1388,10 @@ namespace
 			DrawMainDocumentStrip();
 			DrawStatusBar();
 			if (m_Layout.SubmitDockspace())
+			{
 				CancelViewportInteractionForLayoutChange();
+				ValidateDocumentHostResetLayoutTest();
+			}
 			DrawWorkspacePanels();
 			ProcessReleasedDocumentTabDrag();
 			ProcessPendingDocumentTabClose();
@@ -2713,6 +2717,7 @@ namespace
 			};
 			const auto Preference = m_Documents.GetOpeningPreference();
 			std::unordered_set<std::string> FixtureHosts;
+			m_DocumentHostFixtureSessions.clear();
 			size_t OpenedCount = 0;
 			for (size_t Index = 0; Index < FixtureAssetIDs.size(); ++Index)
 			{
@@ -2729,6 +2734,9 @@ namespace
 				{
 					++OpenedCount;
 					FixtureHosts.insert(Opened->HostID);
+					m_DocumentHostFixtureSessions.emplace_back(Identity, Opened->HostID);
+					if (m_DocumentHostResetLayoutTest && !m_Documents.MarkEdited(Identity))
+						PF_WARN("Could not mark development fixture {} dirty for the reset-layout test.", DisplayName);
 				}
 			}
 			MarkDocumentWorkspaceDirty();
@@ -2736,7 +2744,42 @@ namespace
 				"Development document-host fixture enabled with opening preference {}: {} sessions across {} hosts; "
 				"fixture tabs have no asset editor or editable content.",
 				static_cast<uint32_t>(Preference), OpenedCount, FixtureHosts.size());
+			if (m_DocumentHostResetLayoutTest && OpenedCount == FixtureAssetIDs.size())
+			{
+				m_DocumentHostResetLayoutExpectedHostCount = m_Documents.GetHosts().size();
+				m_DocumentHostResetLayoutTestPending = true;
+				m_Layout.RequestReset();
+			}
 			#endif
+		}
+
+		void ValidateDocumentHostResetLayoutTest()
+		{
+			if (!m_DocumentHostResetLayoutTestPending)
+				return;
+			m_DocumentHostResetLayoutTestPending = false;
+
+			bool SessionsPreserved = m_Documents.GetHosts().size() == m_DocumentHostResetLayoutExpectedHostCount;
+			for (const auto& [Identity, ExpectedHostID] : m_DocumentHostFixtureSessions)
+			{
+				const auto* Session = m_Documents.Find(Identity);
+				SessionsPreserved = SessionsPreserved && Session && Session->HostID == ExpectedHostID &&
+					Session->IsDirty() && Session->Revision == Session->SavedRevision + 1;
+			}
+
+			if (SessionsPreserved)
+				PF_INFO("Document host reset-layout test passed: {} dirty fixture sessions retained their hosts.",
+					m_DocumentHostFixtureSessions.size());
+			else
+				PF_ERROR("Document host reset-layout test failed: dirty fixture sessions or host membership changed.");
+
+			// These synthetic sessions must not trigger a dirty-close dialog during test cleanup.
+			for (const auto& [Identity, ExpectedHostID] : m_DocumentHostFixtureSessions)
+			{
+				(void)ExpectedHostID;
+				if (const auto* Session = m_Documents.Find(Identity))
+					(void)m_Documents.MarkSaved(Identity, Session->Revision);
+			}
 		}
 
 		void MarkDocumentWorkspaceDirty(bool BoundsOnly = false)
@@ -10388,6 +10431,10 @@ namespace
 		std::unordered_set<std::string> m_DocumentHostFocusRequests;
 		std::optional<std::filesystem::path> m_StartupProjectPath;
 		bool m_DocumentHostTestFixture = false;
+		bool m_DocumentHostResetLayoutTest = false;
+		bool m_DocumentHostResetLayoutTestPending = false;
+		size_t m_DocumentHostResetLayoutExpectedHostCount = 0;
+		std::vector<std::pair<PulseForgeEditor::EditorDocumentIdentity, std::string>> m_DocumentHostFixtureSessions;
 		std::optional<PulseForge::Project> m_Project;
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::optional<std::string> m_SavedSceneSnapshot;

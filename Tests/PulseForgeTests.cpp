@@ -4778,6 +4778,7 @@ namespace
 		PF_CHECK(Tests, DefaultOptions.has_value());
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->ProjectFile.has_value());
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTestFixture);
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostResetLayoutTest);
 
 		const std::string AbsoluteProjectPath = ProjectFile.string();
 		const std::array AbsoluteArguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath) };
@@ -4810,6 +4811,20 @@ namespace
 		PF_CHECK(Tests, !DuplicateHostFixtureOptions);
 		PF_CHECK(Tests, !DuplicateHostFixtureOptions &&
 			DuplicateHostFixtureOptions.error().Code == EditorCommandLineErrorCode::DuplicateOption);
+		const std::array ResetLayoutFixtureArguments = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-host-reset-layout-test") };
+		const auto ResetLayoutFixtureOptions = ParseEditorCommandLine(ResetLayoutFixtureArguments, Root);
+		PF_CHECK(Tests, ResetLayoutFixtureOptions.has_value());
+		PF_CHECK(Tests, ResetLayoutFixtureOptions && ResetLayoutFixtureOptions->EnableDocumentHostResetLayoutTest);
+		const std::array ResetLayoutWithoutFixture = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-reset-layout-test") };
+		const auto ResetLayoutWithoutFixtureOptions = ParseEditorCommandLine(ResetLayoutWithoutFixture, Root);
+		PF_CHECK(Tests, !ResetLayoutWithoutFixtureOptions);
+		PF_CHECK(Tests, !ResetLayoutWithoutFixtureOptions &&
+			ResetLayoutWithoutFixtureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
 
 		const std::filesystem::path StressManifest = Root / "stress.manifest";
 		{

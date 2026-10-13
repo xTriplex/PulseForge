@@ -36,6 +36,7 @@ namespace PulseForgeEditor
 		std::optional<std::filesystem::path> AssetPreviewStressManifest;
 		std::string AssetPreviewStressBudget;
 		bool EnableDocumentHostTestFixture = false;
+		bool EnableDocumentHostResetLayoutTest = false;
 	};
 
 	[[nodiscard]] inline std::expected<EditorCommandLineOptions, EditorCommandLineError> ParseEditorCommandLine(
@@ -52,6 +53,15 @@ namespace PulseForgeEditor
 						EditorCommandLineErrorCode::DuplicateOption,
 						"The --document-host-test-fixture option may be specified only once." });
 				Options.EnableDocumentHostTestFixture = true;
+				continue;
+			}
+			if (Arguments[Index] == "--document-host-reset-layout-test")
+			{
+				if (Options.EnableDocumentHostResetLayoutTest)
+					return std::unexpected(EditorCommandLineError{
+						EditorCommandLineErrorCode::DuplicateOption,
+						"The --document-host-reset-layout-test option may be specified only once." });
+				Options.EnableDocumentHostResetLayoutTest = true;
 				continue;
 			}
 			if (Arguments[Index] == "--asset-preview-stress")
@@ -87,7 +97,8 @@ namespace PulseForgeEditor
 					EditorCommandLineErrorCode::UnexpectedArgument,
 					"Unexpected argument '" + std::string(Arguments[Index]) +
 					"'. Supported options include --project <path>, --asset-preview-stress, "
-					"and the Debug-only --document-host-test-fixture." });
+					"the Debug-only --document-host-test-fixture, and the Debug-only "
+					"--document-host-reset-layout-test." });
 
 			if (Options.ProjectFile)
 				return std::unexpected(EditorCommandLineError{
@@ -133,6 +144,10 @@ namespace PulseForgeEditor
 			return std::unexpected(EditorCommandLineError{
 				EditorCommandLineErrorCode::MissingProjectPath,
 				"The --document-host-test-fixture option requires --project <path>." });
+		if (Options.EnableDocumentHostResetLayoutTest && !Options.EnableDocumentHostTestFixture)
+			return std::unexpected(EditorCommandLineError{
+				EditorCommandLineErrorCode::UnexpectedArgument,
+				"The --document-host-reset-layout-test option requires --document-host-test-fixture." });
 
 		return Options;
 	}

@@ -240,6 +240,8 @@ The reported RoughClay load crash and NVRHI/Vulkan present errors were retested 
 
 Fresh Visual Studio 2022 x64 builds of `PulseForgeEditor` and `PulseForgeTests` passed for Vulkan and OpenGL in Debug, Release, and Dist. Each freshly built test executable passed 4,236 checks and CTest passed 2/2 in all six configurations. The command-routing build logs are under each build tree's `Diagnostics/FocusedDocumentCommandRouting_20261013/` directory.
 
+After adding the Debug-only reset-layout fixture and its command-line regression checks, the same six-configuration Visual Studio matrix was rebuilt: Vulkan and OpenGL Debug/Release/Dist each passed 4,261 checks and CTest 2/2. Logs are under `Build/CMake/VS2022-x64/Diagnostics/ResetLayoutDirtyDocuments_20261013/Matrix/`. The bounded Vulkan Debug runtime emitted `Document host reset-layout test passed: 2 dirty fixture sessions retained their hosts.`, captured the intact Level Editor workspace, and exited cleanly. Its only Vulkan loader messages were missing optional third-party overlay layer manifests; no Khronos validation VUID or NVRHI command-list errors appeared.
+
 ## Acceptance tracking at implementation checkpoint
 
 `Pass` means the listed evidence directly covers the behavior. `Partial` means a policy or bounded smoke check passed while the complete user-facing scenario remains unverified. `Unverified` means no suitable evidence has been collected. Screenshots and runtime startup do not prove pointer/keyboard behavior.
@@ -269,7 +271,7 @@ Fresh Visual Studio 2022 x64 builds of `PulseForgeEditor` and `PulseForgeTests` 
 | C07 text fields and modals isolate shortcuts | Unverified | Keyboard interaction check remains. |
 | C08 camera capture releases on focus/document changes | Partial | Existing capture policy tests pass; multi-window focus transitions remain untested. |
 | C09 edits arriving during Save remain dirty | Pass | Revision test simulates a later edit during save. |
-| C10 layout reset preserves unsaved documents | Unverified | Direct reset-layout and dirty-document check remains. |
+| C10 layout reset preserves unsaved documents | Pass (deterministic runtime fixture) | Debug-only `--document-host-test-fixture --document-host-reset-layout-test` dirties two synthetic sessions, requests the production Reset Layout path, then verifies both identities remain dirty at the same revision and in the same hosts. Runtime log and captured workspace: `Build/CMake/VS2022-x64/Diagnostics/ResetLayoutDirtyDocuments_20261013/`. The test marks only its synthetic sessions clean after asserting, so shutdown is prompt-free. The user-facing Window > Reset Layout menu interaction remains a manual check. |
 | R01 multiple native windows create and close independently | Pass | Two-window Vulkan and OpenGL startup and clean shutdown. |
 | R02 native minimize/restore and resize handling | Pass | Private-desktop run directly minimized/restored a material window and resized a second host; new swapchain extent was logged. |
 | R03 secondary rendering continues with main minimized | Pass | Material host rendered and was captured after the main editor was minimized; see `NativeWindowLifecycle_20261013/material-while-main-minimized.png` and capture manifest. |
@@ -300,6 +302,7 @@ Fresh Visual Studio 2022 x64 builds of `PulseForgeEditor` and `PulseForgeTests` 
 - After a full editor is registered, focus two document windows and verify Save/Undo target the focused document. Check text entry and modal dialogs do not trigger editor shortcuts.
 - In Window preferences, select new native window, main document strip, and remembered placement; restart and verify the choice and host arrangement persist.
 - Reset the utility layout with an unsaved material open; verify the document and draft remain. Close/reopen utility panels and confirm their saved layout.
+- For deterministic document-session coverage, run the Debug editor with `--document-host-test-fixture --document-host-reset-layout-test`; the fixture itself verifies dirty revisions and host membership through the production reset request. The actual menu interaction with a real unsaved document remains manual.
 - Move or rename an open material through the Content Browser; verify its UUID, open session, label, draft, and references remain correct. Exercise destination dialogs from a floating material editor.
 - Test mixed-DPI and negative desktop coordinates on physical monitors, including monitor removal if available. Verify native windows remain reachable after minimize/restore and main-window minimization.
 - Recheck viewport picking, gizmos, camera capture/focus loss, Play/Stop, Inspector editing, Content Browser navigation, and Console shortcuts after switching among hosts.
