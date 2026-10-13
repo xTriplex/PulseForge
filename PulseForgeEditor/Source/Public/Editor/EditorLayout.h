@@ -131,7 +131,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] std::expected<void, std::string> SaveNow();
 
 	private:
-		[[nodiscard]] bool HasSavedWorkspace(uint32_t DockspaceID) const;
+		[[nodiscard]] bool HasRestorableDockspace(uint32_t DockspaceID) const;
 		void BuildDefaultDockspace(uint32_t DockspaceID);
 		[[nodiscard]] std::expected<void, std::string> SaveSettings();
 		void LoadPanelState(std::string_view IniContents);
@@ -142,7 +142,6 @@ namespace PulseForgeEditor
 		uint32_t m_DocumentOpeningPreference = 0;
 		bool m_Initialized = false;
 		bool m_LayoutInitialized = false;
-		bool m_HasSavedPanelState = false;
 		bool m_ResetRequested = false;
 		bool m_MigrateLegacySettings = false;
 	};

@@ -253,7 +253,6 @@ namespace PulseForgeEditor
 		{
 			ImGui::ClearIniSettings();
 			m_Panels.ResetToDefaults();
-			m_HasSavedPanelState = false;
 			m_LayoutInitialized = false;
 			m_ResetRequested = false;
 			ResetApplied = true;
@@ -261,7 +260,7 @@ namespace PulseForgeEditor
 
 		if (!m_LayoutInitialized)
 		{
-			if (!HasSavedWorkspace(DockspaceID))
+			if (ShouldBuildDefaultDockspace(HasRestorableDockspace(DockspaceID)))
 			{
 				BuildDefaultDockspace(DockspaceID);
 				ImGui::MarkIniSettingsDirty();
@@ -275,18 +274,12 @@ namespace PulseForgeEditor
 		return ResetApplied;
 	}
 
-	bool EditorLayout::HasSavedWorkspace(uint32_t DockspaceID) const
+	bool EditorLayout::HasRestorableDockspace(uint32_t DockspaceID) const
 	{
-		if (ImGui::DockBuilderGetNode(DockspaceID) || m_HasSavedPanelState)
-			return true;
-
-		for (const EditorPanelDescriptor& Descriptor : EditorPanelDescriptors)
-		{
-			const std::string WindowName(Descriptor.WindowName);
-			if (ImGui::FindWindowSettingsByID(ImHashStr(WindowName.c_str())))
-				return true;
-		}
-		return false;
+		// Panel visibility/preference metadata alone is not a restorable dock layout. A
+		// truncated ini file can retain the state section while losing all Docking data.
+		// In that case rebuild only the default dockspace and keep the parsed panel settings.
+		return ImGui::DockBuilderGetNode(DockspaceID) != nullptr;
 	}
 
 	void EditorLayout::BuildDefaultDockspace(uint32_t DockspaceID)
@@ -480,7 +473,6 @@ namespace PulseForgeEditor
 	void EditorLayout::LoadPanelState(std::string_view IniContents)
 	{
 		m_Panels.ResetToDefaults();
-		m_HasSavedPanelState = false;
 		bool InWorkspaceSection = false;
 		bool FormatWasValid = false;
 		bool HasRecognizedState = false;
@@ -538,6 +530,5 @@ namespace PulseForgeEditor
 			m_Panels.ResetToDefaults();
 		m_DocumentOpeningPreference = ResolveDocumentOpeningPreference(
 			HasRecognizedState, FormatWasValid, LoadedDocumentOpeningPreference);
-		m_HasSavedPanelState = HasRecognizedState;
 	}
 }

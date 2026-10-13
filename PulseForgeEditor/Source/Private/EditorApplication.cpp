@@ -2711,6 +2711,9 @@ namespace
 				"d3110000-0000-4000-8000-000000000001",
 				"d3110000-0000-4000-8000-000000000002"
 			};
+			const auto Preference = m_Documents.GetOpeningPreference();
+			std::unordered_set<std::string> FixtureHosts;
+			size_t OpenedCount = 0;
 			for (size_t Index = 0; Index < FixtureAssetIDs.size(); ++Index)
 			{
 				const auto AssetID = PulseForge::UUID::Parse(FixtureAssetIDs[Index]);
@@ -2719,13 +2722,20 @@ namespace
 				const PulseForgeEditor::EditorDocumentIdentity Identity{
 					m_Project->GetDescription().ID, *AssetID, PulseForgeEditor::EditorDocumentKind::Texture };
 				const std::string DisplayName = "Host Test Fixture " + std::to_string(Index + 1);
-				auto Opened = m_Documents.Open(Identity, {}, DisplayName,
-					PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip);
+				auto Opened = m_Documents.Open(Identity, {}, DisplayName, Preference);
 				if (!Opened)
 					PF_WARN("Could not open development document-host fixture {}: {}", DisplayName, Opened.error());
+				else
+				{
+					++OpenedCount;
+					FixtureHosts.insert(Opened->HostID);
+				}
 			}
 			MarkDocumentWorkspaceDirty();
-			PF_WARN("Development document-host fixture enabled; fixture tabs have no asset editor or editable content.");
+			PF_WARN(
+				"Development document-host fixture enabled with opening preference {}: {} sessions across {} hosts; "
+				"fixture tabs have no asset editor or editable content.",
+				static_cast<uint32_t>(Preference), OpenedCount, FixtureHosts.size());
 			#endif
 		}
 

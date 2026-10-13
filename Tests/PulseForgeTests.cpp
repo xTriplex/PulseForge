@@ -2060,6 +2060,8 @@ namespace
 	void TestEditorLayoutOpeningPreferencePersistence(TestRunner& Tests)
 	{
 		using namespace PulseForgeEditor;
+		PF_CHECK(Tests, ShouldBuildDefaultDockspace(false));
+		PF_CHECK(Tests, !ShouldBuildDefaultDockspace(true));
 
 		const auto TestID = PulseForge::UUID::Generate();
 		PF_CHECK(Tests, TestID.has_value());
@@ -2148,6 +2150,28 @@ namespace
 			PF_CHECK(Tests, Initialized.has_value());
 			if (Initialized)
 				PF_CHECK(Tests, Layout.GetDocumentOpeningPreference() == 2);
+		}
+
+		{
+			std::ofstream IncompleteSettingsOutput(SettingsFile, std::ios::binary | std::ios::trunc);
+			IncompleteSettingsOutput << "[PulseForgeWorkspace][State]\n"
+				"StateFormat=1\nDocumentOpeningPreference=1\nHierarchy=0\n";
+			PF_CHECK(Tests, static_cast<bool>(IncompleteSettingsOutput));
+		}
+
+		{
+			ScopedImGuiContext Context;
+			PF_CHECK(Tests, Context.Context != nullptr);
+			if (!Context.Context)
+				return;
+
+			EditorLayout Layout;
+			const auto Initialized = Layout.Initialize();
+			PF_CHECK(Tests, Initialized.has_value());
+			if (!Initialized)
+				return;
+			PF_CHECK(Tests, Layout.GetDocumentOpeningPreference() == 1);
+			PF_CHECK(Tests, !Layout.IsPanelVisible(EditorPanel::Hierarchy));
 		}
 
 		{

@@ -10,6 +10,11 @@ namespace PulseForgeEditor
 {
 	inline constexpr uint32_t DefaultDocumentOpeningPreference = 0;
 
+	[[nodiscard]] constexpr bool ShouldBuildDefaultDockspace(bool HasRestorableDockspace) noexcept
+	{
+		return !HasRestorableDockspace;
+	}
+
 	[[nodiscard]] inline std::optional<uint32_t> ParseDocumentOpeningPreference(
 		std::string_view Value) noexcept
 	{
