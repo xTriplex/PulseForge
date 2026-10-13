@@ -216,6 +216,34 @@ namespace PulseForgeEditor
 		return true;
 	}
 
+	std::vector<std::string> EditorDocumentManager::ClearProject(const PulseForge::UUID& Project)
+	{
+		std::vector<std::string> CandidateHosts;
+		for (auto Session = m_Sessions.begin(); Session != m_Sessions.end();)
+		{
+			if (Session->first.Project != Project)
+			{
+				++Session;
+				continue;
+			}
+
+			const std::string HostID = Session->second.HostID;
+			RemoveSessionFromHost(Session->first, HostID);
+			if (HostID != MainHostID &&
+				std::find(CandidateHosts.begin(), CandidateHosts.end(), HostID) == CandidateHosts.end())
+				CandidateHosts.push_back(HostID);
+			Session = m_Sessions.erase(Session);
+		}
+
+		std::vector<std::string> EmptyHosts;
+		for (const std::string& HostID : CandidateHosts)
+		{
+			if (RemoveEmptyNativeHost(HostID))
+				EmptyHosts.push_back(HostID);
+		}
+		return EmptyHosts;
+	}
+
 	EditorDocumentCloseStatus EditorDocumentManager::Close(
 		const EditorDocumentIdentity& Identity,
 		EditorDocumentCloseChoice Choice,

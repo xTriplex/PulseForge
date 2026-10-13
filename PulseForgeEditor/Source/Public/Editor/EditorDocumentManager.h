@@ -130,6 +130,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] bool FocusHost(std::string_view HostID) noexcept;
 		[[nodiscard]] bool MarkEdited(const EditorDocumentIdentity& Identity) noexcept;
 		[[nodiscard]] bool MarkSaved(const EditorDocumentIdentity& Identity, uint64_t Revision) noexcept;
+		[[nodiscard]] std::vector<std::string> ClearProject(const PulseForge::UUID& Project);
 		[[nodiscard]] EditorDocumentCloseStatus Close(
 			const EditorDocumentIdentity& Identity,
 			EditorDocumentCloseChoice Choice,

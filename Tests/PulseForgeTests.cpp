@@ -3739,6 +3739,7 @@ namespace
 		PF_CHECK(Tests, Manager.GetSessions().size() == 4);
 		PF_CHECK(Tests, Manager.Find(MaterialA) != Manager.Find(SameNameOtherFolder));
 		PF_CHECK(Tests, Manager.Find(MaterialA) != Manager.Find(OtherProjectMaterial));
+		PF_CHECK(Tests, Manager.FindHost(EditorDocumentManager::MainHostID)->Documents.size() == 2);
 
 		uint64_t TextureIdentity = 90;
 		const auto ManagerPreferenceOpen = [&Manager, &Project, &TextureIdentity]()
@@ -3752,6 +3753,10 @@ namespace
 		const auto RememberedTwo = ManagerPreferenceOpen();
 		PF_CHECK(Tests, RememberedOne && RememberedTwo);
 		PF_CHECK(Tests, RememberedOne && RememberedTwo && RememberedOne->HostID == RememberedTwo->HostID);
+		const EditorDocumentIdentity OtherProjectTexture{ *OtherProject, *Scene, EditorDocumentKind::Texture };
+		const auto OtherProjectTextureOpen = Manager.Open(OtherProjectTexture, "Assets/Textures/Normal.png", "Normal.png",
+			EditorDocumentOpenPreference::NewNativeWindow);
+		PF_CHECK(Tests, OtherProjectTextureOpen && OtherProjectTextureOpen->HostID != EditorDocumentManager::MainHostID);
 
 		const auto LevelOpen = Manager.Open(Level, {}, "Level Editor", EditorDocumentOpenPreference::NewNativeWindow);
 		PF_CHECK(Tests, LevelOpen && LevelOpen->HostID == EditorDocumentManager::MainHostID);
@@ -3807,6 +3812,15 @@ namespace
 		PF_CHECK(Tests, Discarded == EditorDocumentCloseStatus::Closed);
 		PF_CHECK(Tests, Manager.Close(Level, EditorDocumentCloseChoice::Discard, {}, {}) ==
 			EditorDocumentCloseStatus::Protected);
+
+		const auto RemovedProjectHosts = Manager.ClearProject(*OtherProject);
+		PF_CHECK(Tests, RemovedProjectHosts.size() == 1);
+		PF_CHECK(Tests, OtherProjectTextureOpen && RemovedProjectHosts.front() == OtherProjectTextureOpen->HostID);
+		PF_CHECK(Tests, Manager.GetSessions().size() == 4);
+		PF_CHECK(Tests, !Manager.Find(OtherProjectMaterial));
+		PF_CHECK(Tests, !Manager.Find(OtherProjectTexture));
+		PF_CHECK(Tests, !Manager.FindHost(OtherProjectTextureOpen->HostID));
+		PF_CHECK(Tests, !Manager.Find(MaterialA) && !Manager.Find(MaterialB));
 	}
 
 	void TestAssetImportOperation(TestRunner& Tests)
