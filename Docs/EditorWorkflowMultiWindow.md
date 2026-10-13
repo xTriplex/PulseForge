@@ -353,9 +353,21 @@ The existing searchable project-folder/name modal now also serves New Scene, Sav
 
 Inspector and Material Details asset selectors now expose a focused search field inside the existing combo. The current extension filter remains authoritative, while an ASCII-case-insensitive query against the UTF-8 project-relative path narrows visible candidates without changing selection identity or assignment semantics; non-ASCII segments can be matched exactly. Empty query, path/name matches, mixed ASCII case, Unicode path text, and non-matches have deterministic policy coverage. The complete Debug/Release/Dist matrix for both Vulkan and OpenGL, including the destination breadcrumb code, passed 4,314 checks per executable and CTest 2/2. Actual typing, keyboard focus, and selection remain manual UI acceptance; the policy test does not establish pointer behavior.
 
+### Fresh project-load shell capture after picker changes (2026-10-13)
+
+The rebuilt Vulkan Debug editor opened `Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj` with isolated settings, logged a successful first presented frame and project load, and exited normally after a clean window-close request. I opened the 1600×900 PrintWindow capture and verified it contains the rendered Scene Viewport and editor panels. `AssetPickerShellSmoke_20261013/workspace.json` records the visible, non-minimized `GLFW30` window (PID 18732, HWND `0x1720718`), 120 DPI, capture and window on `WinSta0\CodexSandboxDesktop-26df385c4bfa1d48642b940a93416f14`, per-monitor-v2 capture context, and PrintWindow flag 2. The runtime log contains zero VUID, NVRHI command-list, or device-loss messages; stderr is empty. Image and logs: `Build/CMake/VS2022-x64/Diagnostics/AssetPickerShellSmoke_20261013/`. This verifies project startup and shell rendering after the code changes; the asset selector popup and destination picker interactions were not shown or exercised.
+
 ### Outside-release document tab tear-off fallback (2026-10-13)
 
 Document tabs now capture their initial ImGui press position. When the left button is released, an unqueued tab drag that exceeded `MouseDragThreshold` creates a native host even if ImGui already cleared its drag-drop payload because release occurred outside any registered strip. A click below the threshold and a drop already queued to another strip do not detach. Vulkan and OpenGL Debug/Release/Dist editor/test builds passed; each test executable passed 4,295 checks and CTest passed 2/2. This fixes the outside-release fallback in code; actual OS pointer-driven drag and reattach remains manual because the sandbox rejects pointer injection.
+
+## Latest continuation checkpoint (2026-10-13)
+
+- Branch `feat/editor-workflow-multi-window`; current source HEAD before this documentation checkpoint: `290699fb03025200a8dd1c353fe67a62e2b95309`.
+- Recent commits: `9738867` shares the destination picker with scene/prefab creation; `c56c5cf` adds searchable asset-reference selectors; `290699f` adds navigable destination breadcrumbs.
+- Fresh Vulkan/OpenGL Debug, Release, and Dist `PulseForgeEditor`/`PulseForgeTests` matrix passed after the source changes. Each test binary passed 4,314 checks; CTest passed 2/2 in all six configurations. Logs: `Build/CMake/VS2022-x64/Diagnostics/AssetSelectorAndDestinationNavigation_20261013/` and the corresponding OpenGL build-tree directory.
+- A private-desktop Vulkan Debug EditorWorkflow startup/capture after those changes succeeded and was visually inspected as described above. No test of live selector typing, destination folder selection, creation, or pointer-driven document reattachment was claimed.
+- No merge or push of this feature branch occurred. Protected local files remain untouched and unstaged; root `AGENTS.md` remains absent. Continue with the remaining acceptance rows; manual pointer, keyboard, and physical multi-monitor checks remain outstanding.
 
 ## Native-window bounds recovery policy (2026-10-13)
 
