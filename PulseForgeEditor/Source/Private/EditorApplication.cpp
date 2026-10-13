@@ -820,6 +820,7 @@ namespace
 		};
 
 		static constexpr size_t DocumentTabTestDropPointsPerPanel = 5;
+		static constexpr size_t DocumentTabRoundTripCycleCount = 3;
 		static constexpr std::array<const char*, 4> DocumentTabTestInvalidDropPanelNames = {
 			"Hierarchy", "Inspector", "Scene Viewport", "Content Browser"
 		};
@@ -3017,20 +3018,78 @@ namespace
 			}
 			if (m_DocumentHostTabReattachTest)
 			{
-				if (m_DocumentHostFixtureSessions.empty())
+				if (m_DocumentHostFixtureSessions.size() < 2)
 				{
 					m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
-					PF_ERROR("Document tab reattachment fixture could not find a synthetic session.");
+					m_DocumentHostTabReattachTest = false;
+					PF_ERROR("Document tab reattachment UI fixture failed: it requires two synthetic sessions.");
 				}
 				else
 				{
+					if (m_DocumentHostFixtureSessions.size() >= 2)
+					{
+						const auto TargetIdentity = m_DocumentHostFixtureSessions[1].first;
+						const auto* TargetSession = m_Documents.Find(TargetIdentity);
+						const auto* TargetHost = TargetSession ? m_Documents.FindHost(TargetSession->HostID) : nullptr;
+						const auto* SourceSession = m_Documents.Find(m_DocumentHostFixtureSessions.front().first);
+						if (!TargetSession || !TargetHost || !SourceSession)
+						{
+							m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
+							m_DocumentHostTabReattachTest = false;
+							PF_ERROR(
+								"Document tab reattachment UI fixture failed: it could not resolve two synthetic sessions and "
+								"their hosts.");
+						}
+						else if (TargetHost->Role != PulseForgeEditor::EditorDocumentHostRole::Native ||
+							TargetHost->ID == SourceSession->HostID)
+						{
+							auto NativeHost = m_Documents.CreateNativeHost(TargetIdentity.Kind);
+							if (!NativeHost)
+							{
+								m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
+								m_DocumentHostTabReattachTest = false;
+								PF_ERROR(
+									"Document tab reattachment UI fixture failed to create a separate grouping host: {}",
+									NativeHost.error());
+							}
+							else
+							{
+								const std::string PreviousHostID = TargetSession->HostID;
+								const auto Transfer = m_Documents.Transfer(TargetIdentity, *NativeHost, 0);
+								if (!Transfer)
+								{
+									(void)m_Documents.RemoveEmptyNativeHost(*NativeHost);
+									m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
+									m_DocumentHostTabReattachTest = false;
+									PF_ERROR(
+										"Document tab reattachment UI fixture failed to prepare a separate grouping host: {}",
+										Transfer.error());
+								}
+								else
+								{
+									if (Transfer->EmptiedSourceHost)
+									{
+										m_RestoredHostBoundsPending.erase(*Transfer->EmptiedSourceHost);
+										(void)m_Documents.RemoveEmptyNativeHost(PreviousHostID);
+									}
+									m_DocumentHostFixtureSessions[1].second = *NativeHost;
+									m_DocumentHostFocusRequests.insert(*NativeHost);
+									MarkDocumentWorkspaceDirty();
+								}
+							}
+						}
+					}
+					if (!m_DocumentHostTabReattachTest)
+						return;
 					m_DocumentHostTabReattachTestIdentity = m_DocumentHostFixtureSessions.front().first;
 					const auto* Session = m_Documents.Find(m_DocumentHostTabReattachTestIdentity);
 					const auto* Host = Session ? m_Documents.FindHost(Session->HostID) : nullptr;
 					if (!Session || !Host)
 					{
 						m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
-						PF_ERROR("Document tab reattachment fixture could not resolve its synthetic session host.");
+						m_DocumentHostTabReattachTest = false;
+						PF_ERROR(
+							"Document tab reattachment UI fixture failed to resolve its synthetic session host.");
 					}
 					else if (Host->Role == PulseForgeEditor::EditorDocumentHostRole::Main)
 					{
@@ -3038,26 +3097,30 @@ namespace
 						if (!NativeHost)
 						{
 							m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
-							PF_ERROR("Document tab reattachment fixture could not create a native source host: {}",
+							m_DocumentHostTabReattachTest = false;
+							PF_ERROR("Document tab reattachment UI fixture failed to create a native source host: {}",
 								NativeHost.error());
 						}
 						else
 						{
 							m_DocumentHostTabReattachTestSourceHostID = *NativeHost;
+							m_DocumentHostTabReattachExpectSourceHostRetired = true;
 							const auto Transfer = m_Documents.Transfer(
 								m_DocumentHostTabReattachTestIdentity, *NativeHost, 0);
 							if (!Transfer)
 							{
 								(void)m_Documents.RemoveEmptyNativeHost(*NativeHost);
 								m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
+								m_DocumentHostTabReattachTest = false;
 								PF_ERROR(
-									"Document tab reattachment fixture could not prepare its native source host: {}",
+									"Document tab reattachment UI fixture failed to prepare its native source host: {}",
 									Transfer.error());
 							}
 							else
 							{
 								MarkDocumentWorkspaceDirty();
 								m_DocumentHostFocusRequests.insert(*NativeHost);
+								m_DocumentHostFixtureSessions.front().second = *NativeHost;
 								m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::WaitingForTab;
 							}
 						}
@@ -3065,12 +3128,14 @@ namespace
 					else if (Host->Role == PulseForgeEditor::EditorDocumentHostRole::Native)
 					{
 						m_DocumentHostTabReattachTestSourceHostID = Host->ID;
+						m_DocumentHostTabReattachExpectSourceHostRetired = Host->Documents.size() == 1;
 						m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::WaitingForTab;
 					}
 					else
 					{
 						m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
-						PF_ERROR("Document tab reattachment fixture resolved an unsupported source host.");
+						m_DocumentHostTabReattachTest = false;
+						PF_ERROR("Document tab reattachment UI fixture failed: the source has an unsupported host role.");
 					}
 				}
 			}
@@ -3159,9 +3224,11 @@ namespace
 						if (m_DocumentHostTabRoundTripTearOffPending)
 						{
 							m_DocumentHostTabRoundTripTearOffPending = false;
+							++m_DocumentHostTabRoundTripCount;
 							PF_INFO(
-								"Document tab native-window round-trip UI fixture passed: the same session was dragged into the "
-								"main strip and back into a native host, while Level Editor remained in the main host.");
+								"Document tab native-window round-trip {}/{} passed: the same session was dragged into the main "
+								"strip and back into a native host, while Level Editor remained in the main host.",
+								m_DocumentHostTabRoundTripCount, DocumentTabRoundTripCycleCount);
 							const bool HasGroupTarget = m_DocumentHostFixtureSessions.size() >= 2;
 							const auto* GroupTargetSession = HasGroupTarget
 								? m_Documents.Find(m_DocumentHostFixtureSessions[1].first) : nullptr;
@@ -3173,12 +3240,16 @@ namespace
 								GroupTargetSession->Identity.Kind == Session->Identity.Kind)
 							{
 								m_DocumentHostTabGroupTargetIdentity = GroupTargetSession->Identity;
+								m_DocumentHostTabGroupTestFrameCount = 0;
 								m_DocumentHostTabGroupTestPhase = DocumentTabGroupTestPhase::WaitingForTabs;
 								m_DocumentHostTabGroupTest = true;
 								PF_INFO("Document tab group fixture is moving the reattached session into a second native host.");
 							}
 							else
+							{
+								m_DocumentHostTabGroupTestPhase = DocumentTabGroupTestPhase::Failed;
 								PF_ERROR("Document tab group fixture could not find a second compatible native host.");
+							}
 						}
 						else
 						{
@@ -3345,17 +3416,21 @@ namespace
 						{
 							return Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level;
 						});
-					const bool EmptySourceRetired =
+					const bool SourceHostRetired =
 						m_Documents.FindHost(m_DocumentHostTabReattachTestSourceHostID) == nullptr;
+					const bool SourceHostStateMatches = m_DocumentHostTabReattachExpectSourceHostRetired
+						? SourceHostRetired : !SourceHostRetired;
 					if (Session && Host && Host->Role == PulseForgeEditor::EditorDocumentHostRole::Main &&
-						EmptySourceRetired && LevelRetained)
+						SourceHostStateMatches && LevelRetained)
 					{
 						m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Complete;
 						PF_INFO(
 							"Document tab reattachment UI fixture passed: {} non-strip drops were rejected, then the tab "
-							"returned to the main strip and its empty source host was retired. Testing whether it can be "
-							"dragged back into a native host.",
-							m_DocumentHostTabReattachInvalidDropIndex);
+							"returned to the main strip; source-host retirement matched its remaining membership. Testing "
+							"whether it can be dragged back into a native host (round trip {}/{}).",
+							m_DocumentHostTabReattachInvalidDropIndex,
+							m_DocumentHostTabRoundTripCount + 1,
+							DocumentTabRoundTripCycleCount);
 						m_DocumentHostTabTearOffTestIdentity = m_DocumentHostTabReattachTestIdentity;
 						m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::WaitingForTab;
 						m_DocumentHostTabTearOffTest = true;
@@ -3617,7 +3692,29 @@ namespace
 					}
 					m_DocumentHostTabGroupTestPhase = DocumentTabGroupTestPhase::Complete;
 					m_DocumentHostTabGroupTest = false;
-					PF_INFO("Document tab group UI fixture passed: the same session joined an existing native tab stack and the empty source host was retired.");
+					++m_DocumentHostTabGroupCycleCount;
+					PF_INFO(
+						"Document tab group UI fixture passed for round trip {}: the same session joined an existing native "
+						"tab stack and the empty source host was retired.",
+						m_DocumentHostTabGroupCycleCount);
+					if (m_DocumentHostTabGroupCycleCount < DocumentTabRoundTripCycleCount)
+					{
+						m_DocumentHostTabReattachTestIdentity = m_DocumentHostTabTearOffTestIdentity;
+						m_DocumentHostTabReattachTestSourceHostID = TargetHost->ID;
+						m_DocumentHostTabReattachExpectSourceHostRetired = false;
+						m_DocumentHostTabReattachInvalidDropIndex = 0;
+						m_DocumentHostTabReattachTestFrameCount = 0;
+						m_DocumentHostTabReattachTestTabCenterValid = false;
+						m_DocumentHostTabReattachTestMainDropPositionValid = false;
+						m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::WaitingForTab;
+						m_DocumentHostTabReattachTest = true;
+						PF_INFO("Starting the next bounded native/main transfer cycle with the same document identity.");
+					}
+					else
+						PF_INFO(
+							"Document tab repeated-transfer UI fixture passed: the same session completed {} native/main "
+							"round trips and grouping operations.",
+							m_DocumentHostTabGroupCycleCount);
 					break;
 				}
 				case DocumentTabGroupTestPhase::Disabled:
@@ -11902,9 +11999,11 @@ namespace
 		bool m_DocumentHostTabReattachTest = false;
 		size_t m_DocumentHostTabTearOffTestFrameCount = 0;
 		bool m_DocumentHostTabRoundTripTearOffPending = false;
+		size_t m_DocumentHostTabRoundTripCount = 0;
 		bool m_DocumentHostTabReorderTest = false;
 		bool m_DocumentHostTabGroupTest = false;
 		size_t m_DocumentHostTabGroupTestFrameCount = 0;
+		size_t m_DocumentHostTabGroupCycleCount = 0;
 		bool m_DocumentHostPresentationFailureTest = false;
 		bool m_DocumentHostAcquireOutOfDateTest = false;
 		bool m_DocumentHostImageAllocationFailureTest = false;
@@ -11930,6 +12029,7 @@ namespace
 		std::string m_DocumentHostTabReattachTestSourceHostID;
 		std::string m_DocumentHostTabGroupSourceHostID;
 		std::string m_DocumentHostTabGroupTargetHostID;
+		bool m_DocumentHostTabReattachExpectSourceHostRetired = true;
 		ImVec2 m_DocumentHostTabReattachTestTabCenter{ 0.0f, 0.0f };
 		ImGuiID m_DocumentHostTabReattachTestTabViewportID = 0;
 		bool m_DocumentHostTabReattachTestTabCenterValid = false;
