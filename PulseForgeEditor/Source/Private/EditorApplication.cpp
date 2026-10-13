@@ -721,6 +721,14 @@ namespace
 			PulseForgeEditor::EditorIcon Icon = PulseForgeEditor::EditorIcon::File;
 		};
 
+		struct PendingDocumentTransfer
+		{
+			PulseForgeEditor::EditorDocumentIdentity Identity;
+			std::string DestinationHostID;
+			size_t DestinationIndex = 0;
+			bool CreateNativeHost = false;
+		};
+
 		struct GizmoAxisScreen
 		{
 			glm::vec3 WorldDirection{ 0.0f };
@@ -1356,6 +1364,7 @@ namespace
 			if (m_Layout.SubmitDockspace())
 				CancelViewportInteractionForLayoutChange();
 			DrawWorkspacePanels();
+			ProcessPendingDocumentTransfer();
 			#ifdef PF_EDITOR_RENDERER_OPENGL
 			if (!m_OpenGLDiagnosticCapturePath.empty())
 			{
@@ -4593,6 +4602,67 @@ namespace
 			}
 		}
 
+		void QueueDocumentTransfer(
+			const PulseForgeEditor::EditorDocumentIdentity& Identity,
+			std::string DestinationHostID,
+			size_t Index,
+			bool CreateNativeHost = false)
+		{
+			if (m_PendingDocumentTransfer)
+				return;
+			m_PendingDocumentTransfer = PendingDocumentTransfer{
+				Identity, std::move(DestinationHostID), Index, CreateNativeHost };
+		}
+
+		void ProcessPendingDocumentTransfer()
+		{
+			if (!m_PendingDocumentTransfer)
+				return;
+
+			PendingDocumentTransfer Pending = std::move(*m_PendingDocumentTransfer);
+			m_PendingDocumentTransfer.reset();
+			const auto* Session = m_Documents.Find(Pending.Identity);
+			if (!Session)
+				return;
+
+			std::string DestinationHostID = std::move(Pending.DestinationHostID);
+			bool CreatedHost = false;
+			if (Pending.CreateNativeHost)
+			{
+				const auto* Source = m_Documents.FindHost(Session->HostID);
+				if (!Source || Source->Role != PulseForgeEditor::EditorDocumentHostRole::Main)
+				{
+					SetWarning("Only documents in the main strip can be detached to a new native window.");
+					return;
+				}
+
+				auto Host = m_Documents.CreateNativeHost(Pending.Identity.Kind);
+				if (!Host)
+				{
+					SetWarning("Could not create a native document host: " + Host.error());
+					return;
+				}
+				DestinationHostID = std::move(*Host);
+				CreatedHost = true;
+			}
+
+			const auto Moved = m_Documents.Transfer(Pending.Identity, DestinationHostID, Pending.DestinationIndex,
+				[](const auto&, const auto&) { return true; });
+			if (!Moved)
+			{
+				if (CreatedHost)
+					(void)m_Documents.RemoveEmptyNativeHost(DestinationHostID);
+				SetWarning("Document transfer was rejected: " + Moved.error());
+				return;
+			}
+
+			if (Moved->Changed)
+				MarkDocumentWorkspaceDirty();
+			if (Moved->EmptiedSourceHost)
+				(void)m_Documents.RemoveEmptyNativeHost(*Moved->EmptiedSourceHost);
+			m_DocumentHostFocusRequests.insert(std::move(DestinationHostID));
+		}
+
 		void TryTransferDocumentPayload(const ImGuiPayload* Payload, std::string_view DestinationHostID, size_t Index)
 		{
 			if (!Payload || !Payload->IsDelivery() || !Payload->Data || Payload->DataSize <= 1)
@@ -4611,19 +4681,7 @@ namespace
 			}
 			if (!Identity)
 				return;
-
-			auto Moved = m_Documents.Transfer(*Identity, DestinationHostID, Index,
-				[](const auto&, const auto&) { return true; });
-			if (!Moved)
-			{
-				SetWarning("Document transfer was rejected: " + Moved.error());
-				return;
-			}
-			if (Moved->Changed)
-				MarkDocumentWorkspaceDirty();
-			if (Moved->EmptiedSourceHost)
-				(void)m_Documents.RemoveEmptyNativeHost(*Moved->EmptiedSourceHost);
-			m_DocumentHostFocusRequests.insert(std::string(DestinationHostID));
+			QueueDocumentTransfer(*Identity, std::string(DestinationHostID), Index);
 		}
 
 		void DrawDocumentTabStrip(std::string_view HostID)
@@ -4642,13 +4700,94 @@ namespace
 					? "Level Editor" : Session->DisplayName;
 				if (Session->IsDirty())
 					Label += " *";
-				const float LabelWidth = ImGui::CalcTextSize(Label.c_str()).x + 20.0f;
+				const bool HasCloseButton = Session->Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level;
+				constexpr float TabHeight = 25.0f;
+				constexpr float HorizontalPadding = 10.0f;
+				constexpr float CloseRegionWidth = 22.0f;
+				const ImVec2 LabelSize = ImGui::CalcTextSize(Label.c_str());
+				const float TabWidth = LabelSize.x + HorizontalPadding * 2.0f +
+					(HasCloseButton ? CloseRegionWidth : 0.0f);
 				const bool Active = Host->ActiveDocument == Session->Identity;
-				if (ImGui::Selectable(Label.c_str(), Active, ImGuiSelectableFlags_None, ImVec2(LabelWidth, 25.0f)))
+				const bool Pressed = ImGui::Selectable("##DocumentTab", Active, ImGuiSelectableFlags_None,
+					ImVec2(TabWidth, TabHeight));
+				const ImVec2 TabMinimum = ImGui::GetItemRectMin();
+				const ImVec2 TabMaximum = ImGui::GetItemRectMax();
+				const bool TabHovered = ImGui::IsItemHovered();
+				const ImVec2 MousePosition = ImGui::GetIO().MousePos;
+				const bool CloseHovered = HasCloseButton && TabHovered &&
+					MousePosition.x >= TabMaximum.x - CloseRegionWidth;
+				if (Pressed && CloseHovered)
+					RequestDocumentClose(Session->Identity);
+				else if (Pressed)
 				{
 					(void)m_Documents.Activate(Session->Identity);
 					MarkDocumentWorkspaceDirty();
 					m_DocumentHostFocusRequests.insert(std::string(HostID));
+				}
+
+				ImDrawList* DrawList = ImGui::GetWindowDrawList();
+				const ImVec2 LabelPosition(
+					TabMinimum.x + HorizontalPadding,
+					TabMinimum.y + (TabHeight - LabelSize.y) * 0.5f);
+				DrawList->AddText(LabelPosition, ImGui::GetColorU32(ImGuiCol_Text), Label.c_str());
+				if (HasCloseButton)
+				{
+					const ImVec2 CloseMinimum(TabMaximum.x - CloseRegionWidth + 3.0f, TabMinimum.y + 3.0f);
+					const ImVec2 CloseMaximum(TabMaximum.x - 3.0f, TabMaximum.y - 3.0f);
+					if (CloseHovered)
+						DrawList->AddRectFilled(CloseMinimum, CloseMaximum,
+							ImGui::GetColorU32(ImGuiCol_ButtonHovered), 3.0f);
+					const char* CloseGlyph = "x";
+					const ImVec2 CloseGlyphSize = ImGui::CalcTextSize(CloseGlyph);
+					const ImVec2 ClosePosition(
+						(CloseMinimum.x + CloseMaximum.x - CloseGlyphSize.x) * 0.5f,
+						TabMinimum.y + (TabHeight - CloseGlyphSize.y) * 0.5f);
+					DrawList->AddText(ClosePosition,
+						ImGui::GetColorU32(CloseHovered ? ImGuiCol_Text : ImGuiCol_TextDisabled), CloseGlyph);
+				}
+
+				if (ImGui::BeginPopupContextItem("DocumentTabContext"))
+				{
+					if (const auto* CurrentHost = m_Documents.FindHost(HostID))
+					{
+						if (CurrentHost->Role == PulseForgeEditor::EditorDocumentHostRole::Main)
+						{
+							if (ImGui::MenuItem("Move to New Native Window"))
+								QueueDocumentTransfer(Session->Identity, {}, 0, true);
+						}
+						else if (ImGui::MenuItem("Move to Main Document Strip"))
+							QueueDocumentTransfer(Session->Identity,
+								std::string(PulseForgeEditor::EditorDocumentManager::MainHostID), 0);
+
+						if (CurrentHost->Role == PulseForgeEditor::EditorDocumentHostRole::Native &&
+							ImGui::BeginMenu("Move to Existing Document Window"))
+						{
+							for (const auto& CandidateHost : m_Documents.GetHosts())
+							{
+								if (CandidateHost.Role != PulseForgeEditor::EditorDocumentHostRole::Native ||
+									CandidateHost.ID == HostID ||
+									CandidateHost.PlacementKind != Session->Identity.Kind)
+									continue;
+								const bool SameProject = std::all_of(
+									CandidateHost.Documents.begin(), CandidateHost.Documents.end(),
+									[&Session](const auto& CandidateIdentity)
+									{
+										return CandidateIdentity.Project == Session->Identity.Project;
+									});
+								if (!SameProject)
+									continue;
+								const auto* ActiveSession = CandidateHost.ActiveDocument
+									? m_Documents.Find(*CandidateHost.ActiveDocument) : nullptr;
+								std::string ItemLabel = ActiveSession ? ActiveSession->DisplayName : CandidateHost.ID;
+								ItemLabel += "##" + CandidateHost.ID;
+								if (ImGui::MenuItem(ItemLabel.c_str()))
+									QueueDocumentTransfer(Session->Identity, CandidateHost.ID,
+										CandidateHost.Documents.size());
+							}
+							ImGui::EndMenu();
+						}
+					}
+					ImGui::EndPopup();
 				}
 				if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
 				{
@@ -4663,14 +4802,8 @@ namespace
 						TryTransferDocumentPayload(Payload, HostID, Index);
 					ImGui::EndDragDropTarget();
 				}
-				if (ImGui::IsItemHovered() && !Session->ProjectRelativePath.empty())
+				if (TabHovered && !Session->ProjectRelativePath.empty())
 					ImGui::SetTooltip("%s", PathToUtf8(Session->ProjectRelativePath).c_str());
-				if (Session->Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level)
-				{
-					ImGui::SameLine(0.0f, 2.0f);
-					if (ImGui::SmallButton("x"))
-						RequestDocumentClose(Session->Identity);
-				}
 				ImGui::SameLine(0.0f, 4.0f);
 				ImGui::PopID();
 			}
@@ -9961,6 +10094,7 @@ namespace
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_LevelDocumentIdentity;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentClose;
 		std::optional<std::string> m_PendingDocumentHostClose;
+		std::optional<PendingDocumentTransfer> m_PendingDocumentTransfer;
 		std::string m_DocumentCloseDialogHostID;
 		std::unordered_set<std::string> m_DocumentHostFocusRequests;
 		std::optional<std::filesystem::path> m_StartupProjectPath;

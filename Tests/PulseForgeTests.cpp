@@ -3761,13 +3761,15 @@ namespace
 
 		const auto OtherFolderOpen = Manager.Open(SameNameOtherFolder, "Assets/Sub/Amber.material", "Amber.material",
 			EditorDocumentOpenPreference::MainDocumentStrip);
-		const auto OtherProjectOpen = Manager.Open(OtherProjectMaterial, "Assets/Amber.material", "Amber.material",
-			EditorDocumentOpenPreference::MainDocumentStrip);
+		const auto OtherProjectOpen = Manager.Open(OtherProjectMaterial, "Assets/Materials/Amber.material", "Amber.material",
+			EditorDocumentOpenPreference::NewNativeWindow);
 		PF_CHECK(Tests, OtherFolderOpen && OtherProjectOpen);
 		PF_CHECK(Tests, Manager.GetSessions().size() == 4);
 		PF_CHECK(Tests, Manager.Find(MaterialA) != Manager.Find(SameNameOtherFolder));
 		PF_CHECK(Tests, Manager.Find(MaterialA) != Manager.Find(OtherProjectMaterial));
-		PF_CHECK(Tests, Manager.FindHost(EditorDocumentManager::MainHostID)->Documents.size() == 2);
+		PF_CHECK(Tests, Manager.FindHost(EditorDocumentManager::MainHostID)->Documents.size() == 1);
+		PF_CHECK(Tests, OtherProjectOpen && OtherProjectOpen->HostID != OtherFolderOpen->HostID);
+		PF_CHECK(Tests, !Manager.Transfer(MaterialA, OtherProjectOpen->HostID, 0));
 
 		uint64_t TextureIdentity = 90;
 		const auto ManagerPreferenceOpen = [&Manager, &Project, &TextureIdentity]()
@@ -3785,6 +3787,52 @@ namespace
 		const auto OtherProjectTextureOpen = Manager.Open(OtherProjectTexture, "Assets/Textures/Normal.png", "Normal.png",
 			EditorDocumentOpenPreference::NewNativeWindow);
 		PF_CHECK(Tests, OtherProjectTextureOpen && OtherProjectTextureOpen->HostID != EditorDocumentManager::MainHostID);
+		PF_CHECK(Tests, !Manager.Transfer(MaterialA, OtherProjectTextureOpen->HostID, 0));
+
+		const auto DetachAsset = UUID::Generate();
+		PF_CHECK(Tests, DetachAsset.has_value());
+		if (!DetachAsset)
+			return;
+		const EditorDocumentIdentity DetachMaterial{ *Project, *DetachAsset, EditorDocumentKind::Material };
+		const auto DetachOpen = Manager.Open(DetachMaterial, "Assets/Materials/Detach.material", "Detach.material",
+			EditorDocumentOpenPreference::MainDocumentStrip);
+		const auto NewMaterialHost = Manager.CreateNativeHost(EditorDocumentKind::Material);
+		PF_CHECK(Tests, DetachOpen && DetachOpen->HostID == EditorDocumentManager::MainHostID);
+		PF_CHECK(Tests, NewMaterialHost.has_value());
+		if (DetachOpen && NewMaterialHost)
+		{
+			PF_CHECK(Tests, Manager.MarkEdited(DetachMaterial));
+			const uint64_t DetachRevision = Manager.Find(DetachMaterial)->Revision;
+			const auto RejectedDetach = Manager.Transfer(DetachMaterial, *NewMaterialHost, 0,
+				[](const EditorDocumentSession&, const EditorDocumentHost&) { return false; });
+			PF_CHECK(Tests, !RejectedDetach);
+			PF_CHECK(Tests, Manager.Find(DetachMaterial)->HostID == EditorDocumentManager::MainHostID);
+			PF_CHECK(Tests, Manager.Find(DetachMaterial)->Revision == DetachRevision);
+			PF_CHECK(Tests, Manager.RemoveEmptyNativeHost(*NewMaterialHost));
+
+			const auto PreparedHost = Manager.CreateNativeHost(EditorDocumentKind::Material);
+			PF_CHECK(Tests, PreparedHost.has_value());
+			if (PreparedHost)
+			{
+				const auto Detached = Manager.Transfer(DetachMaterial, *PreparedHost, 0,
+					[](const EditorDocumentSession& Session, const EditorDocumentHost& Host)
+					{
+						return Host.Role == EditorDocumentHostRole::Native &&
+							Host.PlacementKind == Session.Identity.Kind;
+					});
+				PF_CHECK(Tests, Detached && Detached->Changed);
+				PF_CHECK(Tests, Manager.Find(DetachMaterial)->HostID == *PreparedHost);
+				PF_CHECK(Tests, Manager.Find(DetachMaterial)->Revision == DetachRevision &&
+					Manager.Find(DetachMaterial)->IsDirty());
+				const auto Reattached = Manager.Transfer(
+					DetachMaterial, EditorDocumentManager::MainHostID, 0);
+				PF_CHECK(Tests, Reattached && Reattached->Changed);
+				PF_CHECK(Tests, Manager.Find(DetachMaterial)->HostID == EditorDocumentManager::MainHostID);
+				PF_CHECK(Tests, Manager.Find(DetachMaterial)->Revision == DetachRevision &&
+					Manager.Find(DetachMaterial)->IsDirty());
+				PF_CHECK(Tests, Manager.RemoveEmptyNativeHost(*PreparedHost));
+			}
+		}
 
 		const auto LevelOpen = Manager.Open(Level, {}, "Level Editor", EditorDocumentOpenPreference::NewNativeWindow);
 		PF_CHECK(Tests, LevelOpen && LevelOpen->HostID == EditorDocumentManager::MainHostID);
@@ -3842,12 +3890,17 @@ namespace
 			EditorDocumentCloseStatus::Protected);
 
 		const auto RemovedProjectHosts = Manager.ClearProject(*OtherProject);
-		PF_CHECK(Tests, RemovedProjectHosts.size() == 1);
-		PF_CHECK(Tests, OtherProjectTextureOpen && RemovedProjectHosts.front() == OtherProjectTextureOpen->HostID);
-		PF_CHECK(Tests, Manager.GetSessions().size() == 4);
+		PF_CHECK(Tests, RemovedProjectHosts.size() == 2);
+		PF_CHECK(Tests, OtherProjectTextureOpen && OtherProjectOpen &&
+			std::find(RemovedProjectHosts.begin(), RemovedProjectHosts.end(), OtherProjectTextureOpen->HostID) !=
+				RemovedProjectHosts.end() &&
+			std::find(RemovedProjectHosts.begin(), RemovedProjectHosts.end(), OtherProjectOpen->HostID) !=
+				RemovedProjectHosts.end());
+		PF_CHECK(Tests, Manager.GetSessions().size() == 5);
 		PF_CHECK(Tests, !Manager.Find(OtherProjectMaterial));
 		PF_CHECK(Tests, !Manager.Find(OtherProjectTexture));
 		PF_CHECK(Tests, !Manager.FindHost(OtherProjectTextureOpen->HostID));
+		PF_CHECK(Tests, OtherProjectOpen && !Manager.FindHost(OtherProjectOpen->HostID));
 		PF_CHECK(Tests, !Manager.Find(MaterialA) && !Manager.Find(MaterialB));
 	}
 

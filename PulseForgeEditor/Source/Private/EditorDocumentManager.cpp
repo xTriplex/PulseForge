@@ -97,6 +97,9 @@ namespace PulseForgeEditor
 		EditorDocumentHost* Host = FindHost(HostID);
 		if (!Host)
 			return std::unexpected("The target document host is no longer registered");
+		for (const EditorDocumentIdentity& ExistingDocument : Host->Documents)
+			if (ExistingDocument.Project != Identity.Project)
+				return std::unexpected("Documents from different projects cannot share a host");
 		EditorDocumentSession Session{ Identity, ProjectRelativePath, std::move(DisplayName), HostID, 0, 0 };
 		m_Sessions.emplace(Identity, std::move(Session));
 		Host->Documents.push_back(Identity);
@@ -143,14 +146,20 @@ namespace PulseForgeEditor
 		EditorDocumentHost* Source = FindHost(SessionIt->second.HostID);
 		if (!Destination || !Source)
 			return std::unexpected("Document transfer requires registered source and destination strips");
+		const auto Existing = std::find(Source->Documents.begin(), Source->Documents.end(), Identity);
+		if (Existing == Source->Documents.end())
+			return std::unexpected("The source host does not contain the document session");
+		if (Destination->Role == EditorDocumentHostRole::Native &&
+			Destination->PlacementKind != Identity.Kind)
+			return std::unexpected("The destination native host does not support this document type");
+		for (const EditorDocumentIdentity& ExistingDocument : Destination->Documents)
+			if (ExistingDocument.Project != Identity.Project)
+				return std::unexpected("Documents from different projects cannot share a host");
 		if (Prepare && !Prepare(SessionIt->second, *Destination))
 			return std::unexpected("The destination host could not prepare the document presentation");
 
 		if (Source == Destination)
 		{
-			const auto Existing = std::find(Source->Documents.begin(), Source->Documents.end(), Identity);
-			if (Existing == Source->Documents.end())
-				return std::unexpected("The source host does not contain the document session");
 			const size_t OldIndex = static_cast<size_t>(std::distance(Source->Documents.begin(), Existing));
 			Source->Documents.erase(Existing);
 			DestinationIndex = (std::min)(DestinationIndex, Source->Documents.size());
@@ -161,9 +170,6 @@ namespace PulseForgeEditor
 		}
 
 		const std::string SourceID = Source->ID;
-		const auto Existing = std::find(Source->Documents.begin(), Source->Documents.end(), Identity);
-		if (Existing == Source->Documents.end())
-			return std::unexpected("The source host does not contain the document session");
 		const size_t OldIndex = static_cast<size_t>(std::distance(Source->Documents.begin(), Existing));
 		Source->Documents.erase(Existing);
 		if (Source->ActiveDocument == Identity)
