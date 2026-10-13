@@ -793,9 +793,20 @@ namespace
 			Failed
 		};
 
+		static constexpr size_t DocumentTabTestDropPointsPerPanel = 5;
 		static constexpr std::array<const char*, 4> DocumentTabTestInvalidDropPanelNames = {
 			"Hierarchy", "Inspector", "Scene Viewport", "Content Browser"
 		};
+		static constexpr std::array<const char*,
+			DocumentTabTestInvalidDropPanelNames.size() * DocumentTabTestDropPointsPerPanel>
+			DocumentTabTestInvalidDropTargetNames = {
+				"Hierarchy body", "Hierarchy top edge", "Hierarchy left edge", "Hierarchy right edge", "Hierarchy bottom edge",
+				"Inspector body", "Inspector top edge", "Inspector left edge", "Inspector right edge", "Inspector bottom edge",
+				"Scene Viewport body", "Scene Viewport top edge", "Scene Viewport left edge",
+				"Scene Viewport right edge", "Scene Viewport bottom edge",
+				"Content Browser body", "Content Browser top edge", "Content Browser left edge",
+				"Content Browser right edge", "Content Browser bottom edge"
+			};
 
 		enum class ProjectAssetDestinationCreateKind : uint8_t
 		{
@@ -6101,20 +6112,20 @@ namespace
 			if (!m_DocumentHostTabReattachTest)
 				return;
 
-			size_t TargetIndex = m_DocumentHostTabReattachInvalidDropTargets.size();
+			size_t PanelIndex = m_DocumentHostTabReattachInvalidDropTargets.size();
 			switch (Panel)
 			{
-				case PulseForgeEditor::EditorPanel::Hierarchy: TargetIndex = 0; break;
-				case PulseForgeEditor::EditorPanel::Inspector: TargetIndex = 1; break;
-				case PulseForgeEditor::EditorPanel::SceneViewport: TargetIndex = 2; break;
-				case PulseForgeEditor::EditorPanel::ContentBrowser: TargetIndex = 3; break;
+				case PulseForgeEditor::EditorPanel::Hierarchy: PanelIndex = 0; break;
+				case PulseForgeEditor::EditorPanel::Inspector: PanelIndex = 1; break;
+				case PulseForgeEditor::EditorPanel::SceneViewport: PanelIndex = 2; break;
+				case PulseForgeEditor::EditorPanel::ContentBrowser: PanelIndex = 3; break;
 				case PulseForgeEditor::EditorPanel::Console:
 				case PulseForgeEditor::EditorPanel::Scene:
 				case PulseForgeEditor::EditorPanel::MaterialDetails:
 				case PulseForgeEditor::EditorPanel::Count:
 					return;
 			}
-			if (TargetIndex >= m_DocumentHostTabReattachInvalidDropTargets.size())
+			if (PanelIndex >= DocumentTabTestInvalidDropPanelNames.size())
 				return;
 
 			ImGuiViewport* Viewport = ImGui::GetWindowViewport();
@@ -6123,11 +6134,34 @@ namespace
 			if (!Viewport || Size.x < 100.0f || Size.y < 100.0f)
 				return;
 
-			auto& Target = m_DocumentHostTabReattachInvalidDropTargets[TargetIndex];
-			Target.Name = DocumentTabTestInvalidDropPanelNames[TargetIndex];
-			Target.Position = ImVec2(Position.x + Size.x * 0.5f, Position.y + Size.y * 0.5f);
-			Target.ViewportID = Viewport->ID;
-			Target.Available = true;
+			const ImVec2 RegionMinimum = ImGui::GetWindowContentRegionMin();
+			const ImVec2 RegionMaximum = ImGui::GetWindowContentRegionMax();
+			const float MinimumX = Position.x + RegionMinimum.x;
+			const float MinimumY = Position.y + RegionMinimum.y;
+			const float MaximumX = Position.x + RegionMaximum.x;
+			const float MaximumY = Position.y + RegionMaximum.y;
+			if (MaximumX - MinimumX < 12.0f || MaximumY - MinimumY < 12.0f)
+				return;
+
+			const float CenterX = (MinimumX + MaximumX) * 0.5f;
+			const float CenterY = (MinimumY + MaximumY) * 0.5f;
+			constexpr float EdgeInset = 3.0f;
+			const std::array<ImVec2, DocumentTabTestDropPointsPerPanel> Positions = {
+				ImVec2(CenterX, CenterY),
+				ImVec2(CenterX, MinimumY + EdgeInset),
+				ImVec2(MinimumX + EdgeInset, CenterY),
+				ImVec2(MaximumX - EdgeInset, CenterY),
+				ImVec2(CenterX, MaximumY - EdgeInset)
+			};
+			const size_t FirstTargetIndex = PanelIndex * DocumentTabTestDropPointsPerPanel;
+			for (size_t PointIndex = 0; PointIndex < Positions.size(); ++PointIndex)
+			{
+				auto& Target = m_DocumentHostTabReattachInvalidDropTargets[FirstTargetIndex + PointIndex];
+				Target.Name = DocumentTabTestInvalidDropTargetNames[FirstTargetIndex + PointIndex];
+				Target.Position = Positions[PointIndex];
+				Target.ViewportID = Viewport->ID;
+				Target.Available = true;
+			}
 		}
 
 		bool BeginEditorPanel(PulseForgeEditor::EditorPanel Panel, std::string_view DisplayTitle = {})
@@ -11458,7 +11492,7 @@ namespace
 		ImVec2 m_DocumentHostTabReattachTestTabCenter{ 0.0f, 0.0f };
 		ImGuiID m_DocumentHostTabReattachTestTabViewportID = 0;
 		bool m_DocumentHostTabReattachTestTabCenterValid = false;
-		std::array<DocumentTabTestPointerTarget, DocumentTabTestInvalidDropPanelNames.size()>
+		std::array<DocumentTabTestPointerTarget, DocumentTabTestInvalidDropTargetNames.size()>
 			m_DocumentHostTabReattachInvalidDropTargets{};
 		size_t m_DocumentHostTabReattachInvalidDropIndex = 0;
 		size_t m_DocumentHostTabReattachTestFrameCount = 0;
