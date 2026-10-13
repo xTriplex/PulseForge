@@ -13,7 +13,7 @@ This record tracks the implementation authorized by `C:\Users\kaan_\Desktop\Puls
 | Document sessions and top strip | Implemented; interaction acceptance remains | The Editor uses project/asset/editor-kind identities, a persistent Level Editor document strip, per-host tabs, duplicate activation, dirty revisions, and the existing material draft/history state. |
 | Native hosts and backend presentation | Implemented; runtime smoke passed | Vulkan uses per-window swapchain targets on the existing NVRHI device; OpenGL uses GLFW shared contexts and ImGui's OpenGL3 renderer. Isolated one-host and two-host startup/shutdown checks passed on both backends. |
 | Transfer/preferences/persistence/dialogs | Implemented; acceptance matrix remains | Explicit top-strip transfers, opening preferences, versioned project workspace records, host bounds, dirty close routing, and in-editor asset destination workflows are present. Tab transfers are deferred until panel traversal ends; a tab context menu can detach to a new native host or reattach/regroup. Continue focused regression checks against dossier scenarios. |
-| Final regression and handoff | In progress | Vulkan frame ordering and dirty-close prompt routing are corrected. Native minimize/restore, resize while the main window is minimized, fresh EditorWorkflow project-load runs, and missing-asset workspace recovery are recorded below. Application shutdown now suppresses collateral native-host close notifications until workspace state is saved; the fix passes Vulkan Debug and its isolated runtime recovery check. Native transfer and dirty-close UI acceptance remain. |
+| Final regression and handoff | In progress | Vulkan frame ordering and dirty-close prompt routing are corrected. Native minimize/restore, resize while the main window is minimized, fresh EditorWorkflow project-load runs, missing-asset workspace recovery, and native-host restart are recorded below. Application shutdown now suppresses collateral native-host close notifications until workspace state is saved; the fix passes all six Vulkan/OpenGL Debug/Release/Dist configurations. Pointer-driven transfer and dirty-close UI acceptance remain. |
 
 ## Repository and protected-state baseline
 
@@ -158,13 +158,28 @@ An isolated workspace containing one valid material document and one document wh
 
 The corrected run restored only `native:valid-recovery-check`; after a graceful main-window close, `documents-f0111111-1111-4111-8111-111111111111.json` still contained that host and its material UUID. The missing host was absent from the post-restore workspace. Khronos validation was enabled, stderr was empty, and the runtime log contained no Vulkan VUID or NVRHI command-list errors. Evidence is under `Build/CMake/VS2022-x64/Diagnostics/WorkspaceMissingAssetRestore_20261013/absolute-path-rerun/`; the pre-close snapshot is `workspace-after-restore-before-close.json`. The test process was closed by posting `WM_CLOSE` to its identified main `GLFW30` project window on `WinSta0\\CodexSandboxDesktop-26df385c4bfa1d48642b940a93416f14`; it exited normally.
 
-After this correction, fresh Vulkan Debug and OpenGL Debug builds rebuilt `PulseForgeEditor` and `PulseForgeTests`; both test executables passed 4,200 checks and CTest passed 2/2. The six-configuration table above is the immediately preceding complete matrix (4,198 checks); Release and Dist are included in final regression validation after the remaining implementation changes.
+After this correction, Visual Studio 2022 x64 rebuilt `PulseForgeEditor` and `PulseForgeTests` for Vulkan and OpenGL in Debug, Release, and Dist. Every fresh test executable passed 4,200 checks and CTest passed 2/2. The Vulkan cache is configured with `PULSEFORGE_EDITOR_RENDERER=Vulkan`; the separate OpenGL build tree is configured with `PULSEFORGE_EDITOR_RENDERER=OpenGL`.
+
+| Configuration | PulseForgeTests | CTest |
+|---|---:|---:|
+| Vulkan Debug | 4,200 | 2/2 |
+| Vulkan Release | 4,200 | 2/2 |
+| Vulkan Dist | 4,200 | 2/2 |
+| OpenGL Debug | 4,200 | 2/2 |
+| OpenGL Release | 4,200 | 2/2 |
+| OpenGL Dist | 4,200 | 2/2 |
 
 ### Native material load and multi-host restart validation
 
 The earlier user-reported `RoughClay.material` open failure and NVRHI/Vulkan presentation errors were retested on the current Vulkan Debug editor. A disposable copy of the PBRMaterials project restored `RoughClay.material` into a real native document host while the main `PBRMaterialsOverview.scene` window was active. The process reached the first presented Vulkan frame, had Khronos and NVRHI validation enabled, produced no VUID, NVRHI command-list, semaphore, or presentation-layout errors, wrote zero stderr bytes, and exited after a graceful main-window close. Evidence: `Build/CMake/VS2022-x64/Diagnostics/NativeMaterialDocumentRuntime_20261013/` (PID 14800 on the private sandbox desktop).
 
 A copied EditorWorkflow project then restored `Amber.material` and `Blue.material` into separate native GLFW windows alongside the main `EditorWorkflowOverview.scene` host. The run was closed cleanly, and its saved workspace was copied to a fresh settings directory and opened again. The restart enumerated the same two material windows and main scene host, with the same validation layers enabled and no VUID, NVRHI command-list, semaphore, or stderr errors. Both runs used one editor process; PIDs were 23704 and 12156 on `WinSta0\\CodexSandboxDesktop-26df385c4bfa1d48642b940a93416f14`. Logs, project copy, and saved/restarted settings are under `Build/CMake/VS2022-x64/Diagnostics/EditorWorkflowMultiHostRuntime_20261013/`.
+
+### Native swapchain resize and retirement
+
+Two restored EditorWorkflow material hosts were resized together through four bounded size pairs while the main window and normal frame loop remained active. All eight `SetWindowPos` requests succeeded, both native windows survived all cycles, Khronos and NVRHI validation were enabled, and the run produced no VUID, command-list, semaphore, device-loss, or stderr errors. The main window then closed the editor cleanly. Machine-readable results and complete logs are under `Build/CMake/VS2022-x64/Diagnostics/NativeWindowResize_20261013_Bounded/`.
+
+The resize path is synchronized in `VulkanRenderer.cpp`: it waits each native host's frame contexts and idles the present queue before releasing the old swapchain images; native-host retirement follows the same frame/present completion rule. The bounded test allowed the normal frame loop to process each resize pair; those host frame and queue waits provide the resource-lifetime guarantee, not the test's 900 ms spacing. This is scoped to swapchain recreation/host retirement, although the present-queue wait can pause presentation during a resize.
 
 ## Acceptance tracking at implementation checkpoint
 
@@ -175,8 +190,8 @@ A copied EditorWorkflow project then restored `Amber.material` and `Blue.materia
 | D01 Level Editor remains in main host | Pass | Document-manager policy and captured main workspace. |
 | D02 supported material documents open in native windows by default | Pass | Isolated Vulkan and OpenGL runs created actual material windows. |
 | D03 document transfer occurs through the top strip | Partial | Strip transfer targets remain the only docking targets; releasing a tab outside all editor viewports now queues native detachment. Policy tests pass; direct drag/reattach pointer use remains manual because sandbox pointer movement was denied. |
-| D04 utility panels/workspace body reject document docking | Unverified | Exercise Inspector, Hierarchy, viewport, browser and console drop targets. |
-| D05 side/bottom-edge drops cannot split a document host | Unverified | Direct native docking interaction check remains. |
+| D04 utility panels/workspace body reject document docking | Partial | Native hosts use `ImGuiWindowFlags_NoDocking`, and document payloads are accepted only by explicit document-strip targets; a pointer-driven negative drop remains manual. |
+| D05 side/bottom-edge drops cannot split a document host | Partial | The host-level NoDocking flag prevents document-host splits; a pointer-driven edge-drop attempt remains manual. |
 | D06 detach, reattach and regroup retain the same session | Partial | Transfer rollback and dirty revision retention are unit-tested, including a native-to-new-native tear-off. Real drag/reattach pointer state retention remains manual. |
 | D07 equal basenames remain distinct by asset identity | Pass | Document-manager identity tests include same-name/different-folder identities. |
 | D08 move/rename keeps an open session attached to its asset | Partial | Registry refresh updates the open session label/path by UUID without changing dirty revision or host; managed move with the editor open remains manual. |
@@ -200,14 +215,14 @@ A copied EditorWorkflow project then restored `Amber.material` and `Blue.materia
 | R02 native minimize/restore and resize handling | Pass | Private-desktop run directly minimized/restored a material window and resized a second host; new swapchain extent was logged. |
 | R03 secondary rendering continues with main minimized | Pass | Material host rendered and was captured after the main editor was minimized; see `NativeWindowLifecycle_20261013/material-while-main-minimized.png` and capture manifest. |
 | R04 negative desktop coordinates and mixed DPI | Partial | Negative coordinates are accepted by workspace validation; physical mixed-DPI movement is untested. |
-| R05 resources retire while frames are in flight | Partial | Bounded validation observed clean normal presentation and close; no forced resize/close churn. |
+| R05 resources retire while frames are in flight | Pass | Native swapchain recreation/host retirement waits the host frame contexts and presentation queue; two-window resize cycles and shutdown completed with validation enabled and no errors. |
 | R06 independent asset preview targets/state | Unverified | Material contents render in separate windows; independent preview-target behavior needs a dedicated check. |
 | R07 Vulkan Khronos/NVRHI validation | Pass | Both layers enabled; two-host run had zero VUID and NVRHI command-list errors. |
 | R08 OpenGL native windows and ImGui contexts | Pass | Two actual OpenGL material framebuffers captured and inspected; exit code 0. |
 | R09 injected presentation/resource failures recover safely | Unverified | Failure injection is not implemented or exercised. |
-| R10 concurrent native resize generations remain valid | Unverified | No repeated resize validation yet. |
+| R10 concurrent native resize generations remain valid | Pass | Two native windows were resized together in four bounded cycles; all resize calls succeeded, both hosts remained present, and validation stayed clean. |
 | R11 surface/device loss handling | Unverified | Hardware/backend failure path not exercised. |
-| R12 in-flight resource retirement on native close | Partial | Two-host close during ordinary rendering exited cleanly with validation enabled; a targeted close during known submitted work remains. |
+| R12 in-flight resource retirement on native close | Pass | The Vulkan host-destroy path waits per-host frame completion and presentation-queue idle before releasing swapchain resources; the multi-host runtime closed cleanly after normal frame submissions with validation enabled. |
 | P01 valid document workspace restores | Pass | Isolated workspace file restored real native material sessions. |
 | P02 removed/unavailable monitor recovery | Unverified | Requires monitor-topology testing. |
 | P03 corrupt workspace/missing asset recovery | Pass | Codec rejects malformed/duplicate state in tests; an isolated restart restored the valid material host, omitted the missing-asset host, and preserved the valid host on normal shutdown. |
@@ -219,7 +234,18 @@ A copied EditorWorkflow project then restored `Amber.material` and `Blue.materia
 | P09 floating-host asset dialogs route results to the caller | Unverified | Direct dialog invocation from a native editor remains. |
 | P10 asset destination dialog navigation/validation | Partial | Dialog implementation exists; keyboard, collision and error presentation need manual acceptance. |
 
-Manual acceptance still required for document dragging/reattachment, dirty native close, command focus, shortcut isolation, input/camera capture, mixed DPI, window resize/minimize, and native-host dialogs. No physical multi-monitor behavior is claimed as tested.
+## Manual acceptance still required
+
+- Drag a material tab from a native window to the main document strip, then drag it back out onto the desktop to create a native window. Reattach it and regroup it; verify the same dirty draft and undo history remain.
+- Click the enlarged tab close mark; test dirty native-window X and Alt+F4 with Save, Discard, and Cancel, plus a failed Save and a multi-document host close.
+- Focus two different material windows and verify Save/Undo target the focused document. Check text entry and modal dialogs do not trigger editor shortcuts.
+- In Window preferences, select new native window, main document strip, and remembered placement; restart and verify the choice and host arrangement persist.
+- Reset the utility layout with an unsaved material open; verify the document and draft remain. Close/reopen utility panels and confirm their saved layout.
+- Move or rename an open material through the Content Browser; verify its UUID, open session, label, draft, and references remain correct. Exercise destination dialogs from a floating material editor.
+- Test mixed-DPI and negative desktop coordinates on physical monitors, including monitor removal if available. Verify native windows remain reachable after minimize/restore and main-window minimization.
+- Recheck viewport picking, gizmos, camera capture/focus loss, Play/Stop, Inspector editing, Content Browser navigation, and Console shortcuts after switching among hosts.
+
+No physical multi-monitor transition or direct pointer-driven document drag has been claimed as tested in the isolated Codex desktop.
 
 ## Git checkpoint
 
