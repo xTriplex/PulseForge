@@ -131,6 +131,21 @@ The `EditorDocumentManager` model lives in
 
 Deterministic tests in `TestEditorDocumentManager` cover duplicate activation, project isolation, remembered host placement, Level host protection, transfer rejection/commit, dirty save/discard/cancel, failed save, an edit arriving during save, and project cleanup returning empty native hosts for renderer retirement. The Editor consumes these records only for explicitly registered full documents; Material Details uses a utility-panel lifecycle. Native host smoke tests below validate hosting infrastructure, not the current material properties workflow.
 
+### Adding a future full asset-document editor
+
+The current host layer is reusable, but there is no production full asset editor registered. A future editor must integrate as an explicit workspace, not by relabeling an existing details panel:
+
+1. Add a stable `EditorDocumentKind` value without renumbering persisted kinds. Update workspace codec validation and migration when the serialized enum range changes.
+2. Explicitly register that kind in `RegisteredAssetDocumentEditors` in `EditorDocumentHostPolicy.h`. File extensions and asset UUIDs identify data; they do not grant document eligibility. Add a deliberate Content Browser command for **Open Full Editor** while retaining utility operations such as **Show Material Details** separately.
+3. Open the existing `(project UUID, asset UUID, editor kind)` identity through `EditorDocumentManager::Open`. Repeated opens must activate the existing session. Keep the editable model, independent undo/history and preview/controller state in an editor-session owner keyed by that identity, not in a path-keyed UI local.
+4. Replace the current `DrawUnregisteredAssetDocument()` placeholder with explicit kind-to-workspace dispatch. The active session draws inside its existing host body; `DrawDocumentTabStrip`, native presentation, transfer, and host persistence remain shared infrastructure. Do not make utility dock nodes valid document targets.
+5. Provide save/discard/dirty-revision behavior to the common close policy. A failed save leaves the session open; edits after the captured save revision stay dirty. Route commands by focused document and gate them while text input or a modal owns the keyboard.
+6. Register editor-specific utility panels under stable scoped ImGui/settings IDs. Detach/reattach transfers the same session and its utility workspace. Asset move/rename updates its displayed path by UUID.
+7. Give each independently rendered preview an explicit target identity and resize/retirement contract. Retain its UI texture bindings until all host draw data and submitted work that references them have retired.
+8. Add deterministic registration, duplicate-open, save/revision, close, restoration, and transfer tests, then test the real editor in both Vulkan and OpenGL hosts before making the kind a supported production editor.
+
+This contract does not register a placeholder editor or turn Material Details into a document. Until a real full Material Editor exists, material double-click and **Show Material Details** continue to reveal the Inspector-side utility regardless of the full-editor opening preference.
+
 ## Vulkan frame-ordering defect and correction (2026-10-13)
 
 When opening `EditorWorkflow` with a restored floating material document, Khronos validation reported NVRHI's “Two or more immediate command lists cannot be open at the same time” followed by commands issued on an `INITIAL` list, an unsignaled present semaphore, an unconsumed acquire semaphore, and a presented image still in `UNDEFINED` layout.
@@ -261,7 +276,7 @@ The in-editor asset destination dialog now uses a deterministic filename policy 
 | Scenario | Status | Evidence / remaining check |
 |---|---|---|
 | D01 Level Editor remains in main host | Pass | Document-manager policy and captured main workspace. |
-| D02 supported full asset editors open natively by default | Unverified | Current Material Details is explicitly excluded as a utility and no full asset editor is registered. Hosting policy/runtime is present; validate once a legitimate full editor is registered. |
+| D02 supported full asset editors open natively by default | Not applicable to current production editors | There is no full asset editor registered; Material Details is explicitly an Inspector-side utility. The Debug-only document fixture validates opening preferences/host placement. Recheck native-default behavior when a real full editor is registered. |
 | D03 document transfer occurs through the top strip | Partial | Only registered document strips accept transfers; the opt-in Debug ImGui-path fixture now drives a main-host tab beyond the drag threshold and confirms it enters a native host while Level Editor remains in the main host. A synthetic cross-native-window drop back onto the main strip did not deliver a transfer, so real pointer-driven reattach/regroup remains manual; this is not evidence of a product defect. |
 | D04 utility panels/workspace body reject document docking | Partial | Native hosts use `ImGuiWindowFlags_NoDocking`, and document payloads are accepted only by explicit document-strip targets; a pointer-driven negative drop remains manual. |
 | D05 side/bottom-edge drops cannot split a document host | Partial | The host-level NoDocking flag prevents document-host splits; a pointer-driven edge-drop attempt remains manual. |
@@ -269,11 +284,11 @@ The in-editor asset destination dialog now uses a deterministic filename policy 
 | D07 equal basenames remain distinct by asset identity | Pass | Document-manager identity tests include same-name/different-folder identities. |
 | D08 move/rename keeps an open session attached to its asset | Partial | Registry refresh updates the open session label/path by UUID without changing dirty revision or host; managed move with the editor open remains manual. |
 | D09 Level Editor cannot be moved out of the main host | Pass | Document-manager protection test. |
-| D10 multiple legitimate document sessions share one editor process | Partial | Generic session/host policy tests cover multiple sessions; there are currently no production asset document integrations. Earlier Material property-panel host screenshots do not count as product acceptance. |
+| D10 multiple legitimate document sessions share one editor process | Not applicable to current production editors | Generic session/host policy tests and the opt-in two-session fixture cover shared-process hosting. There are currently no production full asset document integrations; Material Details is not a document. |
 | D11 tab/native close uses dirty-document policy | Partial | Close policy is unit-tested; dirty native-X interaction remains. |
-| D12 saved document arrangement restores | Partial | Versioned codec and Debug-only fixture restart now restore two persisted native hosts, with private-desktop enumeration confirming both `GLFW30` windows. The utility migration also restores directly. Valid registered-editor restoration remains unavailable until a production document editor is registered. |
+| D12 saved document arrangement restores | Partial | Versioned codec and Debug-only fixture restart restore two persisted native hosts, with private-desktop enumeration confirming both `GLFW30` windows. The utility migration also restores directly. Production full-editor restoration cannot be exercised until a real document editor is registered. |
 | D13 opening preference options and default behavior | Partial | Isolated Vulkan Debug launches confirmed default New Native Window (two native hosts), persisted Main Document Strip (two tabs), and Remembered Placement fallback (one shared native host). Screenshots/logs under `DocumentOpeningPreferenceRuntime_20261013/`; selecting each Window-menu option and restarting remains manual. |
-| D14 activating another document preserves Level Editor availability | Pass | Main Level Editor remained present alongside two material hosts. |
+| D14 activating another document preserves Level Editor availability | Pass (host fixture) | The Debug-only two-session fixture leaves the Level Editor in the main host while opening its synthetic document sessions in separate native hosts; isolated window enumeration confirms the main `GLFW30` plus both native `GLFW30` hosts. This verifies host preservation, not a production asset-editor workspace. |
 | C01 dirty tab close offers Save/Discard/Cancel | Partial | Policy tests cover choices and prompt routing is implemented per host; actual dirty native-host dialog remains unverified. |
 | C02 native X and Alt+F4 request document-aware close | Partial | Clean `WM_CLOSE` requests for two native hosts and the main host exited normally; dirty native X and Alt+F4 behavior remain unverified. |
 | C03 Cancel keeps the session open | Pass | Document-manager close policy test. |
@@ -289,14 +304,14 @@ The in-editor asset destination dialog now uses a deterministic filename policy 
 | R03 secondary rendering continues with main minimized | Pass | Material host rendered and was captured after the main editor was minimized; see `NativeWindowLifecycle_20261013/material-while-main-minimized.png` and capture manifest. |
 | R04 negative desktop coordinates and mixed DPI | Partial | Negative coordinates are accepted by workspace validation; physical mixed-DPI movement is untested. |
 | R05 resources retire while frames are in flight | Pass | Native swapchain recreation/host retirement waits the host frame contexts and presentation queue; two-window resize cycles and shutdown completed with validation enabled and no errors. |
-| R06 independent asset preview targets/state | Unverified | Material contents render in separate windows; independent preview-target behavior needs a dedicated check. |
+| R06 independent asset preview targets/state | Not applicable to current production editors | No full asset document currently owns a preview viewport; Material Details is a utility. Independent document preview targets must be validated when a real full editor is registered. |
 | R07 Vulkan Khronos/NVRHI validation | Pass | Both layers enabled; two-host run had zero VUID and NVRHI command-list errors. |
 | R08 OpenGL native windows and ImGui contexts | Pass | Two actual OpenGL material framebuffers captured and inspected; exit code 0. |
 | R09 injected presentation/resource failures recover safely | Unverified | Failure injection is not implemented or exercised. |
 | R10 concurrent native resize generations remain valid | Pass | Two native windows were resized together in four bounded cycles; all resize calls succeeded, both hosts remained present, and validation stayed clean. |
 | R11 surface/device loss handling | Unverified | Hardware/backend failure path not exercised. |
 | R12 in-flight resource retirement on native close | Pass | The Vulkan host-destroy path waits per-host frame completion and presentation-queue idle before releasing swapchain resources; the multi-host runtime closed cleanly after normal frame submissions with validation enabled. |
-| P01 valid document workspace restores | Partial | Schema-v1 migration restored Material Details as a utility; Debug-only fixture restart restored two persisted native host windows from schema-v2. A valid registered full document still needs a production editor integration. |
+| P01 valid document workspace restores | Partial | Schema-v1 migration restored Material Details as a utility; Debug-only fixture restart restored two persisted native host windows from schema-v2. Production full-document restoration remains pending a real registered editor. |
 | P02 removed/unavailable monitor recovery | Partial | Isolated fixture state with a missing saved monitor name and far-off-screen coordinates restored both hosts inside the available work area; physical monitor removal/topology change remains unverified. Evidence: `Build/CMake/VS2022-x64/Diagnostics/NativeBoundsRecovery_20261013/`. |
 | P03 corrupt workspace/missing asset recovery | Pass | Codec rejects malformed/duplicate state in tests; an isolated restart restored the valid material host, omitted the missing-asset host, and preserved the valid host on normal shutdown. |
 | P04 opening preference persistence | Partial | Parsing, range checks, bad-version fallback, and `EditorLayout` save/reload are covered in deterministic tests; selecting each menu option and verifying a full editor-process restart remain manual. |
@@ -304,7 +319,7 @@ The in-editor asset destination dialog now uses a deterministic filename policy 
 | P06 self/descendant folder moves reject | Pass | Asset-folder policy tests. |
 | P07 name collision and case-only path checks | Pass | Move operation tests cover collisions, normalized paths, and a case-only asset rename in both directions while preserving the UUID and metadata sidecar. On Windows, the engine stages the asset/sidecar pair before applying the requested spelling; other files remain collision-protected. |
 | P08 symlink/reparse and project-boundary move checks | Pass | Move validation rejects reparse paths and traversal. |
-| P09 floating-host asset dialogs route results to the caller | Unverified | Direct dialog invocation from a native editor remains. |
+| P09 floating-host asset dialogs route results to the caller | Not applicable to current production editors | No full asset document exists to own a floating-host dialog; current Material Details is in the main Level utility workspace. Recheck when a production document editor is registered. |
 | P10 asset destination dialog navigation/validation | Partial | Search, project-folder selection, filename/extension validation, managed operation routing, and inline destination/sidecar collision and inspection-error feedback are implemented. The shared picker now also routes New Scene, Save Scene As, and Create Prefab into the existing asset services. True case-only rename is accepted only when both target paths resolve to the source asset and its sidecar; the engine stages the pair transactionally and preserves UUID identity. Deterministic filename/conflict policies pass; direct folder navigation, keyboard accept/cancel, collision messages, and successful creation remain manual. |
 
 ## Manual acceptance still required
