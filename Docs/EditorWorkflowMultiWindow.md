@@ -13,7 +13,7 @@ This record tracks the implementation authorized by `C:\Users\kaan_\Desktop\Puls
 | Document sessions and top strip | Implemented; interaction acceptance remains | The Editor uses project/asset/editor-kind identities, a persistent Level Editor document strip, per-host tabs, duplicate activation, dirty revisions, and the existing material draft/history state. |
 | Native hosts and backend presentation | Implemented; runtime smoke passed | Vulkan uses per-window swapchain targets on the existing NVRHI device; OpenGL uses GLFW shared contexts and ImGui's OpenGL3 renderer. Isolated one-host and two-host startup/shutdown checks passed on both backends. |
 | Transfer/preferences/persistence/dialogs | Implemented; acceptance matrix remains | Explicit top-strip transfers, opening preferences, versioned project workspace records, host bounds, dirty close routing, and in-editor asset destination workflows are present. Tab transfers are deferred until panel traversal ends; a tab context menu can detach to a new native host or reattach/regroup. Continue focused regression checks against dossier scenarios. |
-| Final regression and handoff | In progress | Vulkan frame ordering and dirty-close prompt routing are corrected. Native minimize/restore, resize while the main window is minimized, and fresh EditorWorkflow project-load runs are recorded below. The deferred transfer and integrated tab-close changes pass the full Vulkan/OpenGL Debug/Release/Dist test matrix; native transfer and dirty-close UI acceptance remain. |
+| Final regression and handoff | In progress | Vulkan frame ordering and dirty-close prompt routing are corrected. Native minimize/restore, resize while the main window is minimized, fresh EditorWorkflow project-load runs, and missing-asset workspace recovery are recorded below. Application shutdown now suppresses collateral native-host close notifications until workspace state is saved; the fix passes Vulkan Debug and its isolated runtime recovery check. Native transfer and dirty-close UI acceptance remain. |
 
 ## Repository and protected-state baseline
 
@@ -152,6 +152,14 @@ A fresh isolated OpenGL EditorWorkflow launch rendered and captured four materia
 
 After the final glyph-size adjustment, Vulkan Debug and OpenGL Debug both rebuilt `PulseForgeEditor`; each configuration's fresh `PulseForgeTests` executable passed 4,198 checks and CTest passed 2/2. OpenGL runtime capture exited with code 0. The earlier complete Vulkan/OpenGL Debug/Release/Dist matrix remains current for the tab-transfer and asset-location behavior; this last adjustment changes only close-glyph sizing and spacing.
 
+### Shutdown persistence correction
+
+An isolated workspace containing one valid material document and one document whose asset UUID was absent from the reopened project's registry was used for a Vulkan Debug restart check. The editor restored the valid native host and ignored the missing asset. A normal close initially proved risky because the main-window close can deliver platform-viewport close requests during the same shutdown frame; processing those requests could retire the restored hosts before the final workspace snapshot. `m_ApplicationShutdownRequested` now gates native viewport close-request handling after an accepted application-wide close. Dirty-close cancellation leaves the gate off, and accepting a dirty close sets it through the same close helper. This preserves native host membership for the final workspace save without rebuilding the dock layout.
+
+The corrected run restored only `native:valid-recovery-check`; after a graceful main-window close, `documents-f0111111-1111-4111-8111-111111111111.json` still contained that host and its material UUID. The missing host was absent from the post-restore workspace. Khronos validation was enabled, stderr was empty, and the runtime log contained no Vulkan VUID or NVRHI command-list errors. Evidence is under `Build/CMake/VS2022-x64/Diagnostics/WorkspaceMissingAssetRestore_20261013/absolute-path-rerun/`; the pre-close snapshot is `workspace-after-restore-before-close.json`. The test process was closed by posting `WM_CLOSE` to its identified main `GLFW30` project window on `WinSta0\\CodexSandboxDesktop-26df385c4bfa1d48642b940a93416f14`; it exited normally.
+
+After this correction, fresh Vulkan Debug and OpenGL Debug builds rebuilt `PulseForgeEditor` and `PulseForgeTests`; both test executables passed 4,200 checks and CTest passed 2/2. The six-configuration table above is the immediately preceding complete matrix (4,198 checks); Release and Dist are included in final regression validation after the remaining implementation changes.
+
 ## Acceptance tracking at implementation checkpoint
 
 `Pass` means the listed evidence directly covers the behavior. `Partial` means a policy or bounded smoke check passed while the complete user-facing scenario remains unverified. `Unverified` means no suitable evidence has been collected. Screenshots and runtime startup do not prove pointer/keyboard behavior.
@@ -196,7 +204,7 @@ After the final glyph-size adjustment, Vulkan Debug and OpenGL Debug both rebuil
 | R12 in-flight resource retirement on native close | Partial | Two-host close during ordinary rendering exited cleanly with validation enabled; a targeted close during known submitted work remains. |
 | P01 valid document workspace restores | Pass | Isolated workspace file restored real native material sessions. |
 | P02 removed/unavailable monitor recovery | Unverified | Requires monitor-topology testing. |
-| P03 corrupt workspace/missing asset recovery | Partial | Codec rejects malformed/duplicate state in tests; missing-asset restart recovery remains. |
+| P03 corrupt workspace/missing asset recovery | Pass | Codec rejects malformed/duplicate state in tests; an isolated restart restored the valid material host, omitted the missing-asset host, and preserved the valid host on normal shutdown. |
 | P04 opening preference persistence | Unverified | Preference UI and restart persistence remain. |
 | P05 project-internal asset/folder move preserves managed identity | Pass | Move operation and folder transaction tests pass. |
 | P06 self/descendant folder moves reject | Pass | Asset-folder policy tests. |

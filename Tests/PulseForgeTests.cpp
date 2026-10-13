@@ -39,6 +39,7 @@
 #include "Editor/EditorInteractionPolicy.h"
 #include "Editor/EditorProjectOpening.h"
 #include "Editor/EditorDocumentManager.h"
+#include "Editor/EditorDocumentHostPolicy.h"
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
 #include "Editor/EditorSnapshotHistory.h"
@@ -3738,6 +3739,8 @@ namespace
 			return;
 
 		EditorDocumentManager Manager;
+		PF_CHECK(Tests, ShouldProcessNativeDocumentHostCloseRequests(false));
+		PF_CHECK(Tests, !ShouldProcessNativeDocumentHostCloseRequests(true));
 		PF_CHECK(Tests, ShouldDetachDocumentTab(true, true, false, false));
 		PF_CHECK(Tests, !ShouldDetachDocumentTab(false, true, false, false));
 		PF_CHECK(Tests, !ShouldDetachDocumentTab(true, false, false, false));

@@ -50,6 +50,7 @@
 #include "Editor/EditorPlatformViewportPolicy.h"
 #include "Editor/EditorMaterialPropertyLayoutPolicy.h"
 #include "Editor/EditorDocumentManager.h"
+#include "Editor/EditorDocumentHostPolicy.h"
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
 #include "Editor/EditorSnapshotHistory.h"
@@ -1137,7 +1138,7 @@ namespace
 			{
 				m_AssetPreviewStressFailed = true;
 				m_AssetPreviewStressFinished = true;
-				PulseForge::Application::Get().RequestClose();
+				RequestEditorApplicationClose();
 				return;
 			}
 			if (m_AssetPreviewStressBatch == 0 && !m_AssetPreviewStressInvalidatedQueued)
@@ -1186,7 +1187,7 @@ namespace
 						m_AssetPreviewStressShutdownPendingRequests);
 					m_AssetPreviewStressFinished = true;
 					PF_INFO("Asset preview stress workload completed; requesting clean editor close");
-					PulseForge::Application::Get().RequestClose();
+					RequestEditorApplicationClose();
 				}
 			}
 		}
@@ -1458,7 +1459,9 @@ namespace
 			ImGui::SetCurrentContext(m_Context);
 			if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
 			{
-				HandleNativePlatformCloseRequests();
+				if (PulseForgeEditor::ShouldProcessNativeDocumentHostCloseRequests(
+					m_ApplicationShutdownRequested))
+					HandleNativePlatformCloseRequests();
 				#ifdef PF_EDITOR_RENDERER_OPENGL
 				GLFWwindow* MainContext = glfwGetCurrentContext();
 				#endif
@@ -1507,12 +1510,15 @@ namespace
 		{
 			const bool NavigationOwnedMouseBeforeEvent = m_ViewportMouseCapture.OwnsMouse();
 			bool BeganNavigationForEvent = false;
-			if (Event.GetEventType() == PulseForge::EEventType::WindowClose &&
-				(m_SceneDirty || !GetDirtyAssetDocuments().empty()))
+			if (Event.GetEventType() == PulseForge::EEventType::WindowClose)
 			{
-				QueueAfterSave([] { PulseForge::Application::Get().RequestClose(); });
-				Event.bHandled = true;
-				return;
+				if (m_SceneDirty || !GetDirtyAssetDocuments().empty())
+				{
+					QueueAfterSave([this] { RequestEditorApplicationClose(); });
+					Event.bHandled = true;
+					return;
+				}
+				m_ApplicationShutdownRequested = true;
 			}
 
 			if (Event.GetEventType() == PulseForge::EEventType::WindowLostFocus)
@@ -1579,6 +1585,12 @@ namespace
 		}
 
 	private:
+		void RequestEditorApplicationClose()
+		{
+			m_ApplicationShutdownRequested = true;
+			PulseForge::Application::Get().RequestClose();
+		}
+
 		[[nodiscard]] std::expected<std::string, std::string> CaptureSceneState() const
 		{
 			if (!m_Scene)
@@ -3801,7 +3813,7 @@ namespace
 					QueueAfterSave([this] { CloseProjectNow(); });
 				ImGui::Separator();
 				if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Close, "Exit"))
-					QueueAfterSave([] { PulseForge::Application::Get().RequestClose(); });
+					QueueAfterSave([this] { RequestEditorApplicationClose(); });
 				ImGui::EndMenu();
 			}
 
@@ -10182,6 +10194,7 @@ namespace
 		bool m_FocusContentSearchNextFrame = false;
 		bool m_OpenUnsavedDialog = false;
 		bool m_OpenDocumentCloseDialog = false;
+		bool m_ApplicationShutdownRequested = false;
 		bool m_OpenAssetDestinationDialog = false;
 		bool m_AssetDestinationDuplicate = false;
 		bool m_ConsoleAutoScroll = true;
