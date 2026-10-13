@@ -13,7 +13,7 @@ This record tracks the implementation authorized by `C:\Users\kaan_\Desktop\Puls
 | Document sessions and top strip | Implemented; interaction acceptance remains | The Editor uses project/asset/editor-kind identities, a persistent Level Editor document strip, per-host tabs, duplicate activation, dirty revisions, and the existing material draft/history state. |
 | Native hosts and backend presentation | Implemented; runtime smoke passed | Vulkan uses per-window swapchain targets on the existing NVRHI device; OpenGL uses GLFW shared contexts and ImGui's OpenGL3 renderer. Isolated one-host and two-host startup/shutdown checks passed on both backends. |
 | Transfer/preferences/persistence/dialogs | Implemented; acceptance matrix remains | Explicit top-strip transfers, opening preferences, versioned project workspace records, host bounds, dirty close routing, and in-editor asset destination workflows are present. Continue focused regression checks against dossier scenarios. |
-| Final regression and handoff | In progress | Correct a Vulkan immediate-command-list/frame-ordering defect; repeat targeted checks, review the full diff, refresh this record, and list unverified manual/hardware-dependent cases. |
+| Final regression and handoff | In progress | Vulkan frame ordering and dirty-close prompt routing are corrected. Native minimize/restore, resize while the main window is minimized, and a fresh EditorWorkflow project-load run are recorded below. Six Vulkan/OpenGL configuration test matrices pass; native transfer and dirty-close UI acceptance remain. |
 
 ## Repository and protected-state baseline
 
@@ -109,6 +109,20 @@ An isolated OpenGL Debug run restored two native material windows, captured the 
 
 The Vulkan loader also printed three `Loader Message` warnings for optional third-party layer manifests that were missing on this machine (TikTok LIVE Studio and RivaTuner). They are distinct from Khronos validation messages; the test's captured VUID and NVRHI command-list error counts were both zero.
 
+### EditorWorkflow project-load rerun (2026-10-13)
+
+The Debug executable at `Build/CMake/VS2022-x64/Debug/PulseForgeEditor.exe` (built 2026-10-13 10:16) was launched with the `EditorWorkflow.pfproj` project and an isolated settings directory under `Build/CMake/VS2022-x64/Diagnostics/EditorWorkflow_ProjectLoad_20261013/`. It reached the first rendered viewport frame; project-open-to-first-frame profiling reported 156.63 ms. Khronos validation and NVRHI validation both logged that they were enabled. The process closed through its normal window-close path.
+
+The captured output contains zero NVRHI immediate-command-list state errors, zero Vulkan VUID/UNASSIGNED validation errors, and zero stderr lines. Three Vulkan loader error-severity messages report missing optional TikTok LIVE Studio and RivaTuner layer manifest files; they are external loader warnings and did not prevent validation-layer or renderer startup. Full logs are `stdout.log` and `stderr.log` in that diagnostics directory. This run confirms the current Debug binary's EditorWorkflow project-load path; native-window frame ordering is additionally covered by the two-host Vulkan run above. The user's 09:31 messages match the frame-order defect corrected in commit `22d2568`; because those messages predate the 10:16 Debug executable, the evidence is consistent with a pre-correction binary, but the exact executable path from that earlier run was not captured.
+
+### Native-window lifecycle regression run (2026-10-13)
+
+On the verified private desktop `WinSta0\CodexSandboxDesktop-26df385c4bfa1d48642b940a93416f14`, Debug PID 17580 hosted the main editor and two material windows. The test minimized/restored a native material window, minimized the main editor, resized another material host from 560×760 to 624×808, and captured the visible material UI while the main editor remained minimized. Renderer output created the resized native swapchain depth images. Both native hosts and then the main window received clean close requests; the process exited with code 0. Khronos and NVRHI validation were enabled. Counts for VUID/UNASSIGNED messages, NVRHI command-list state errors, and stderr lines were all zero. Artifacts are in `Build/CMake/VS2022-x64/Diagnostics/NativeWindowLifecycle_20261013/`, including `material-while-main-minimized.png`, `lifecycle-capture.json`, `lifecycle-result.json`, and the Vulkan stdout/stderr logs. The screenshot is direct evidence that the material host rendered while the main window was minimized; no pointer drag was completed in this run.
+
+### Dirty-close prompt routing correction (2026-10-13)
+
+Commit `0c41a7e0a1e09b9c8a5227301185ff2f64a8ca19` routes a document-close prompt to the host that initiated the close. A native material-window close now presents Save/Discard/Cancel in that material host; application-wide close prompts remain in the main host. The popup identity is scoped per host and the route clears on resolution or dismissal. This avoids hiding the decision behind a minimized main window. The correction builds and passes the full six-configuration test matrix below; rendering and interaction of a dirty native-host prompt still require manual acceptance.
+
 ## Acceptance tracking at implementation checkpoint
 
 `Pass` means the listed evidence directly covers the behavior. `Partial` means a policy or bounded smoke check passed while the complete user-facing scenario remains unverified. `Unverified` means no suitable evidence has been collected. Screenshots and runtime startup do not prove pointer/keyboard behavior.
@@ -129,8 +143,8 @@ The Vulkan loader also printed three `Loader Message` warnings for optional thir
 | D12 saved document arrangement restores | Partial | A valid isolated versioned workspace restored two native hosts; save, restart and compare order/bounds next. |
 | D13 opening preference options and default behavior | Unverified | Exercise preference menu and each placement choice. |
 | D14 activating another document preserves Level Editor availability | Pass | Main Level Editor remained present alongside two material hosts. |
-| C01 dirty tab close offers Save/Discard/Cancel | Partial | Policy tests cover choices; actual dialog controls remain unverified. |
-| C02 native X and Alt+F4 request document-aware close | Unverified | Exercise native close and host close. |
+| C01 dirty tab close offers Save/Discard/Cancel | Partial | Policy tests cover choices and prompt routing is implemented per host; actual dirty native-host dialog remains unverified. |
+| C02 native X and Alt+F4 request document-aware close | Partial | Clean `WM_CLOSE` requests for two native hosts and the main host exited normally; dirty native X and Alt+F4 behavior remain unverified. |
 | C03 Cancel keeps the session open | Pass | Document-manager close policy test. |
 | C04 failed Save preserves the dirty session | Pass | Save-failure policy test. |
 | C05 multi-document host close resolves all dirty sessions | Unverified | No batch-close interaction test yet. |
@@ -140,8 +154,8 @@ The Vulkan loader also printed three `Loader Message` warnings for optional thir
 | C09 edits arriving during Save remain dirty | Pass | Revision test simulates a later edit during save. |
 | C10 layout reset preserves unsaved documents | Unverified | Direct reset-layout and dirty-document check remains. |
 | R01 multiple native windows create and close independently | Pass | Two-window Vulkan and OpenGL startup and clean shutdown. |
-| R02 native minimize/restore and resize handling | Unverified | No resize/minimize cycle run yet. |
-| R03 secondary rendering continues with main minimized | Unverified | Requires direct window interaction. |
+| R02 native minimize/restore and resize handling | Pass | Private-desktop run directly minimized/restored a material window and resized a second host; new swapchain extent was logged. |
+| R03 secondary rendering continues with main minimized | Pass | Material host rendered and was captured after the main editor was minimized; see `NativeWindowLifecycle_20261013/material-while-main-minimized.png` and capture manifest. |
 | R04 negative desktop coordinates and mixed DPI | Partial | Negative coordinates are accepted by workspace validation; physical mixed-DPI movement is untested. |
 | R05 resources retire while frames are in flight | Partial | Bounded validation observed clean normal presentation and close; no forced resize/close churn. |
 | R06 independent asset preview targets/state | Unverified | Material contents render in separate windows; independent preview-target behavior needs a dedicated check. |
@@ -150,7 +164,7 @@ The Vulkan loader also printed three `Loader Message` warnings for optional thir
 | R09 injected presentation/resource failures recover safely | Unverified | Failure injection is not implemented or exercised. |
 | R10 concurrent native resize generations remain valid | Unverified | No repeated resize validation yet. |
 | R11 surface/device loss handling | Unverified | Hardware/backend failure path not exercised. |
-| R12 in-flight resource retirement on native close | Partial | Ordinary clean close passed; close during submitted work still needs a targeted test. |
+| R12 in-flight resource retirement on native close | Partial | Two-host close during ordinary rendering exited cleanly with validation enabled; a targeted close during known submitted work remains. |
 | P01 valid document workspace restores | Pass | Isolated workspace file restored real native material sessions. |
 | P02 removed/unavailable monitor recovery | Unverified | Requires monitor-topology testing. |
 | P03 corrupt workspace/missing asset recovery | Partial | Codec rejects malformed/duplicate state in tests; missing-asset restart recovery remains. |
@@ -169,5 +183,6 @@ Manual acceptance still required for document dragging/reattachment, dirty nativ
 - Integrated local/remote `main` baseline: `e702e44c1a7e653c0af45dd3a398ee8d3931070e`.
 - Feature branch: `feat/editor-workflow-multi-window`.
 - Implementation checkpoint: `22d256866c7622a4391309fba4473513ea1f5182` (`Implement native editor document workflows`).
+- Latest feature commit: `0c41a7e0a1e09b9c8a5227301185ff2f64a8ca19` (`Route dirty document prompts to their host`). The preceding acceptance/evidence update is `6c1413f`.
 - The checkpoint is local; the feature branch was not pushed or merged.
 - The deleted Spotlight research document, modified validation scene/materials, and untracked `CMakeSettings.json` remain outside the commit. Root `AGENTS.md` remains absent.
