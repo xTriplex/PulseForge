@@ -301,10 +301,11 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 		PulseForgeEditor/Source/Private/EditorProjectOpening.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentManager.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentWorkspace.cpp
+		PulseForgeEditor/Source/Private/EditorViewportCamera.cpp
 	)
 	target_include_directories(PulseForgeEditorCore
 		PUBLIC PulseForgeEditor/Source/Public
-		PRIVATE PulseForge/Vendor/json/include
+		PRIVATE PulseForge/Source/Public PulseForgeEditor/Source/Private PulseForge/Vendor/json/include
 	)
 	target_compile_definitions(PulseForgeEditorCore PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorCore PUBLIC PulseForge)
@@ -809,7 +810,11 @@ if(BUILD_TESTING)
 	target_sources(PulseForgeTests PRIVATE
 		PulseForgeEditor/Source/Private/EditorLayout.cpp
 	)
-	target_include_directories(PulseForgeTests PRIVATE PulseForgeEditor/Source/Public PulseForge/Vendor/json/include)
+	target_include_directories(PulseForgeTests PRIVATE
+		PulseForgeEditor/Source/Public
+		PulseForgeEditor/Source/Private
+		PulseForge/Vendor/json/include
+	)
 	target_compile_definitions(PulseForgeTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeTests PRIVATE PulseForgeEditorCore PulseForge PulseForgeImGui shell32 ole32)
 	add_test(NAME PulseForge.Core COMMAND PulseForgeTests)

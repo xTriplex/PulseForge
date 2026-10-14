@@ -1111,11 +1111,47 @@ namespace
 		const EditorIconDescriptor* SelectIcon = FindEditorIcon(EditorIcon::Select);
 		PF_CHECK(Tests, SelectIcon && SelectIcon->Codepoint == 0xf245);
 	}
+
+	void TestEditorViewportCameraController(TestRunner& Tests)
+	{
+		PulseForgeEditor::EditorViewportCamera Camera;
+		PF_CHECK(Tests, glm::all(glm::equal(Camera.GetPosition(), glm::vec3(0.0f, 0.0f, 3.1f))));
+		PF_CHECK(Tests, Camera.GetViewProjection(16.0f / 9.0f).has_value());
+
+		Camera.Focus(glm::vec3(1.0f, 2.0f, -3.0f), 2.0f, 16.0f / 9.0f);
+		const glm::vec3 FocusedPosition = Camera.GetPosition();
+		PF_CHECK(Tests, glm::length(FocusedPosition - glm::vec3(1.0f, 2.0f, -3.0f)) > 0.001f);
+		PF_CHECK(Tests, std::isfinite(glm::length(FocusedPosition - glm::vec3(1.0f, 2.0f, -3.0f))));
+
+		Camera.Orbit(15.0f, -8.0f);
+		const glm::vec3 OrbitPosition = Camera.GetPosition();
+		PF_CHECK(Tests, glm::length(OrbitPosition - FocusedPosition) > 0.001f);
+		Camera.Pan(12.0f, -7.0f, 720.0f);
+		const glm::vec3 PanPosition = Camera.GetPosition();
+		PF_CHECK(Tests, glm::length(PanPosition - OrbitPosition) > 0.001f);
+		Camera.Dolly(0.5f);
+		const glm::vec3 DollyPosition = Camera.GetPosition();
+		PF_CHECK(Tests, glm::length(DollyPosition - PanPosition) > 0.001f);
+
+		const PulseForgeEditor::ViewportCameraMoveKeys MoveKeys{ .Forward = true };
+		Camera.Move(MoveKeys, 0.1);
+		PF_CHECK(Tests, glm::length(Camera.GetPosition() - DollyPosition) > 0.001f);
+
+		const glm::vec3 BeforeInvalidFocus = Camera.GetPosition();
+		Camera.Focus(glm::vec3(0.0f), std::numeric_limits<float>::quiet_NaN(), 1.0f);
+		Camera.Focus(glm::vec3(0.0f), 1.0f, 0.0f);
+		PF_CHECK(Tests, glm::all(glm::equal(Camera.GetPosition(), BeforeInvalidFocus)));
+
+		Camera.Reset();
+		PF_CHECK(Tests, glm::all(glm::equal(Camera.GetPosition(), glm::vec3(0.0f, 0.0f, 3.1f))));
+		PF_CHECK(Tests, glm::length(Camera.GetForward() - glm::vec3(0.0f, 0.0f, -1.0f)) < 0.0001f);
+	}
 }
 
 void RunEditorTests(TestRunner& Tests)
 {
 	TestEditorViewportMath(Tests);
+	TestEditorViewportCameraController(Tests);
 	TestEditorWorkspacePanelState(Tests);
 	TestEditorDeferredOperationQueue(Tests);
 	TestEditorAssetDestinationPolicy(Tests);

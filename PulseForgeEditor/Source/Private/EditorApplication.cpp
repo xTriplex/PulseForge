@@ -38,6 +38,7 @@
 #include "Editor/EditorDeferredOperationQueue.h"
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorLayout.h"
+#include "EditorViewportCamera.h"
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorContentBrowserPolicy.h"
 #include "Editor/EditorAssetDestinationPolicy.h"
@@ -555,155 +556,6 @@ namespace
 		std::deque<EditorConsoleMessage> m_Messages;
 		uint64_t m_Revision = 0;
 		uint64_t m_NextSequence = 0;
-	};
-
-	class EditorViewportCamera final
-	{
-	public:
-		void Reset() noexcept
-		{
-			m_Position = { 0.0f, 0.0f, 3.1f };
-			m_YawDegrees = -90.0f;
-			m_PitchDegrees = 0.0f;
-			m_MoveSpeed = 5.0f;
-			m_HasFocusPivot = false;
-		}
-
-		void Rotate(float DeltaX, float DeltaY) noexcept
-		{
-			constexpr float Sensitivity = 0.1f;
-			m_YawDegrees = std::remainder(m_YawDegrees + DeltaX * Sensitivity, 360.0f);
-			m_PitchDegrees = std::clamp(m_PitchDegrees - DeltaY * Sensitivity, -89.0f, 89.0f);
-			m_HasFocusPivot = false;
-		}
-
-		void Focus(const glm::vec3& Pivot, float Radius, float AspectRatio) noexcept
-		{
-			if (!PulseForgeEditor::Detail::IsFinite(Pivot) || !std::isfinite(Radius) || Radius < 0.0f ||
-				!std::isfinite(AspectRatio) || AspectRatio <= 0.0f)
-				return;
-			constexpr float VerticalFov = glm::radians(45.0f);
-			const float HorizontalFov = 2.0f * std::atan(std::tan(VerticalFov * 0.5f) * AspectRatio);
-			const float LimitingFov = (std::min)(VerticalFov, HorizontalFov);
-			const float Distance = std::clamp(Radius / std::sin(LimitingFov * 0.5f) * 1.2f, 0.2f, 100000.0f);
-			if (!std::isfinite(Distance))
-				return;
-			m_FocusPivot = Pivot;
-			m_HasFocusPivot = true;
-			m_Position = Pivot - GetForward() * Distance;
-		}
-
-		void Orbit(float DeltaX, float DeltaY) noexcept
-		{
-			if (!m_HasFocusPivot)
-				return;
-			const float Distance = glm::length(m_Position - m_FocusPivot);
-			constexpr float Sensitivity = 0.1f;
-			m_YawDegrees = std::remainder(m_YawDegrees + DeltaX * Sensitivity, 360.0f);
-			m_PitchDegrees = std::clamp(m_PitchDegrees - DeltaY * Sensitivity, -89.0f, 89.0f);
-			m_Position = m_FocusPivot - GetForward() * Distance;
-		}
-
-		void Pan(float DeltaX, float DeltaY, float ViewportHeight) noexcept
-		{
-			if (!m_HasFocusPivot || !std::isfinite(ViewportHeight) || ViewportHeight < 1.0f)
-				return;
-			const float Distance = glm::length(m_Position - m_FocusPivot);
-			const float UnitsPerPixel = 2.0f * Distance * std::tan(glm::radians(45.0f) * 0.5f) / ViewportHeight;
-			const glm::vec3 Right = glm::normalize(glm::cross(GetForward(), glm::vec3(0.0f, 1.0f, 0.0f)));
-			const glm::vec3 Up = glm::normalize(glm::cross(Right, GetForward()));
-			const glm::vec3 Offset = (-Right * DeltaX + Up * DeltaY) * UnitsPerPixel;
-			m_Position += Offset;
-			m_FocusPivot += Offset;
-		}
-
-		void Dolly(float Delta) noexcept
-		{
-			if (!std::isfinite(Delta) || std::abs(Delta) < 1.0e-6f)
-				return;
-			const std::optional<glm::vec3> ExistingPivot = m_HasFocusPivot
-				? std::optional<glm::vec3>{ m_FocusPivot }
-				: std::nullopt;
-			const auto Dolly = PulseForgeEditor::CalculateViewportCameraDolly(
-				m_Position, GetForward(), ExistingPivot, m_MoveSpeed, Delta);
-			if (!Dolly)
-				return;
-			m_Position = Dolly->Position;
-			m_FocusPivot = Dolly->FocusPivot;
-			m_HasFocusPivot = true;
-		}
-
-		void AdjustMoveSpeed(float WheelDelta) noexcept
-		{
-			if (!std::isfinite(WheelDelta))
-				return;
-			m_MoveSpeed = std::clamp(m_MoveSpeed * std::pow(1.2f, WheelDelta), 0.2f, 80.0f);
-		}
-
-		void Move(const PulseForge::Input& Input, double DeltaSeconds) noexcept
-		{
-			const glm::vec3 Forward = GetForward();
-			const glm::vec3 Right = glm::normalize(glm::cross(Forward, glm::vec3(0.0f, 1.0f, 0.0f)));
-			const PulseForgeEditor::ViewportCameraMoveKeys Keys{
-				.Forward = Input.IsKeyPressed(GLFW_KEY_W),
-				.Backward = Input.IsKeyPressed(GLFW_KEY_S),
-				.Left = Input.IsKeyPressed(GLFW_KEY_A),
-				.Right = Input.IsKeyPressed(GLFW_KEY_D),
-				.Down = Input.IsKeyPressed(GLFW_KEY_Q),
-				.Up = Input.IsKeyPressed(GLFW_KEY_E),
-				.Fast = Input.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) || Input.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT)
-			};
-			const glm::vec3 Offset = PulseForgeEditor::CalculateViewportCameraMoveOffset(
-				Forward, Right, Keys, m_MoveSpeed, DeltaSeconds);
-			if (glm::dot(Offset, Offset) < 1.0e-12f)
-				return;
-			m_Position += Offset;
-			if (m_HasFocusPivot)
-				m_FocusPivot += Offset;
-		}
-
-		[[nodiscard]] std::expected<glm::mat4, std::string> GetViewProjection(float AspectRatio) const
-		{
-			PulseForge::CameraComponent Camera;
-			auto Projection = Camera.GetProjectionMatrix(AspectRatio);
-			if (!Projection)
-				return std::unexpected(Projection.error().Message);
-			return *Projection * GetView();
-		}
-
-		[[nodiscard]] glm::mat4 GetView() const
-		{
-			return glm::lookAtRH(m_Position, m_Position + GetForward(), glm::vec3(0.0f, 1.0f, 0.0f));
-		}
-
-		[[nodiscard]] std::expected<glm::mat4, std::string> GetProjection(float AspectRatio) const
-		{
-			PulseForge::CameraComponent Camera;
-			auto Projection = Camera.GetProjectionMatrix(AspectRatio);
-			if (!Projection)
-				return std::unexpected(Projection.error().Message);
-			return *Projection;
-		}
-
-		[[nodiscard]] glm::vec3 GetPosition() const noexcept { return m_Position; }
-
-		[[nodiscard]] glm::vec3 GetForward() const noexcept
-		{
-			const float Yaw = glm::radians(m_YawDegrees);
-			const float Pitch = glm::radians(m_PitchDegrees);
-			return glm::normalize(glm::vec3(
-				std::cos(Yaw) * std::cos(Pitch),
-				std::sin(Pitch),
-				std::sin(Yaw) * std::cos(Pitch)));
-		}
-
-	private:
-		glm::vec3 m_Position{ 0.0f, 0.0f, 3.1f };
-		glm::vec3 m_FocusPivot{ 0.0f };
-		float m_YawDegrees = -90.0f;
-		float m_PitchDegrees = 0.0f;
-		float m_MoveSpeed = 5.0f;
-		bool m_HasFocusPivot = false;
 	};
 
 	class EditorLayer final : public PulseForge::Layer
@@ -9644,7 +9496,18 @@ namespace
 				.CameraGestureActive = m_ViewportCameraGesture != ViewportCameraGesture::None
 			};
 			if (PulseForgeEditor::CanNavigateViewportCamera(Context))
-				m_EditorCamera.Move(Input, DeltaTime.GetSeconds());
+			{
+				const PulseForgeEditor::ViewportCameraMoveKeys Keys{
+					.Forward = Input.IsKeyPressed(GLFW_KEY_W),
+					.Backward = Input.IsKeyPressed(GLFW_KEY_S),
+					.Left = Input.IsKeyPressed(GLFW_KEY_A),
+					.Right = Input.IsKeyPressed(GLFW_KEY_D),
+					.Down = Input.IsKeyPressed(GLFW_KEY_Q),
+					.Up = Input.IsKeyPressed(GLFW_KEY_E),
+					.Fast = Input.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) || Input.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT)
+				};
+				m_EditorCamera.Move(Keys, DeltaTime.GetSeconds());
+			}
 		}
 
 		void ResetViewportTarget() noexcept
@@ -13117,7 +12980,7 @@ namespace
 		float m_LastCursorY = 0.0f;
 		double m_CursorRestoreX = 0.0;
 		double m_CursorRestoreY = 0.0;
-		EditorViewportCamera m_EditorCamera;
+		PulseForgeEditor::EditorViewportCamera m_EditorCamera;
 		std::optional<PulseForge::AssetID> m_SceneAsset;
 		std::optional<PulseForge::UUID> m_SelectedEntity;
 		std::optional<EntityClipboard> m_EntityClipboard;
