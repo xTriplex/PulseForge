@@ -27,7 +27,8 @@
   },
   "editor_core_target": "PulseForgeEditorCore",
   "editor_core_allowed_dependencies": [
-    "PulseForgeAssetServices"
+    "PulseForgeAssetServices",
+    "PulseForgeSceneSerialization"
   ],
   "editor_ui_target": "PulseForgeEditorUI",
   "editor_ui_allowed_dependencies": [
@@ -44,7 +45,9 @@
   "owner_scoped_test_targets": [
     "PulseForgeTests",
     "PulseForgeEditorTests",
-    "PulseForgeBufferUpdateTests"
+    "PulseForgeBufferUpdateTests",
+    "PulseForgeAssetImportTests",
+    "PulseForgeAudioRuntimeTests"
   ],
   "editor_core_forbidden_includes": [
     "Core/PulseForgePCH.h",

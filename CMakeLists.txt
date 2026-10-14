@@ -218,7 +218,6 @@ add_library(PulseForgeScene STATIC
 	PulseForge/Source/Private/Scene/Components/SpotLightComponent.cpp
 	PulseForge/Source/Private/Scene/Scene.cpp
 	PulseForge/Source/Private/Scene/SceneRenderSnapshot.cpp
-	PulseForge/Source/Private/Scene/SceneSerializer.cpp
 	PulseForge/Source/Private/Scene/TransformComponent.cpp
 )
 target_include_directories(PulseForgeScene
@@ -227,6 +226,14 @@ target_include_directories(PulseForgeScene
 )
 target_compile_definitions(PulseForgeScene PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(PulseForgeScene PUBLIC PulseForgeCore)
+add_library(PulseForgeSceneSerialization STATIC PulseForge/Source/Private/Scene/SceneSerializer.cpp)
+target_include_directories(PulseForgeSceneSerialization
+	PUBLIC PulseForge/Source/Public
+	PRIVATE PulseForge/Vendor/json/include
+)
+target_compile_definitions(PulseForgeSceneSerialization PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(PulseForgeSceneSerialization PUBLIC PulseForgeScene)
+target_precompile_headers(PulseForgeSceneSerialization PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
 add_library(PulseForgeRenderMath STATIC
 	PulseForge/Source/Private/Renderer/DirectionalShadowMath.cpp
 	PulseForge/Source/Private/Renderer/SpotlightShadowMath.cpp
@@ -276,7 +283,10 @@ target_include_directories(PulseForgeAssetServices
 	PRIVATE PulseForge/Vendor/json/include PulseForge/Vendor/stb
 )
 target_compile_definitions(PulseForgeAssetServices PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(PulseForgeAssetServices PUBLIC PulseForgeAssetCatalog PulseForgeAudio)
+target_link_libraries(PulseForgeAssetServices
+	PUBLIC PulseForgeAssetCatalog PulseForgeAudio
+	PRIVATE PulseForgeSceneSerialization
+)
 target_precompile_headers(PulseForgeAssetServices PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
 add_library(PulseForgeAudioScene STATIC PulseForge/Source/Private/Audio/AudioSceneRuntime.cpp)
 target_include_directories(PulseForgeAudioScene PUBLIC PulseForge/Source/Public)
@@ -388,7 +398,8 @@ target_compile_definitions(PulseForge PRIVATE
 	MA_NO_WIN32_LEAN_AND_MEAN
 )
 target_link_libraries(PulseForge
-	PUBLIC PulseForgeApplication PulseForgeSceneRenderer PulseForgeAssetServices PulseForgeRenderMath PulseForgeRuntime PulseForgeWindow
+	PUBLIC PulseForgeApplication PulseForgeSceneRenderer PulseForgeSceneSerialization PulseForgeAssetServices
+		PulseForgeRenderMath PulseForgeRuntime PulseForgeWindow
 )
 target_precompile_headers(PulseForge PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
 
@@ -405,7 +416,8 @@ target_link_libraries(PulseForgeGame PRIVATE PulseForge)
 include(CTest)
 if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 	set(PULSEFORGE_ENGINE_TEST_LIBRARIES
-		PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeRenderMath PulseForgeAssetCatalog PulseForgeAudio
+		PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath
+		PulseForgeAssetCatalog PulseForgeAudio
 		PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeScripting PulseForgeRuntime
 		PulseForgeRenderer PulseForgeApplication PulseForgeSceneRenderer
 	)
@@ -429,7 +441,10 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 		PRIVATE PulseForge/Source/Public PulseForgeEditor/Source/Private PulseForge/Vendor/json/include
 	)
 	target_compile_definitions(PulseForgeEditorCore PRIVATE PF_PLATFORM_WINDOWS)
-	target_link_libraries(PulseForgeEditorCore PUBLIC PulseForgeAssetServices)
+	target_link_libraries(PulseForgeEditorCore
+		PUBLIC PulseForgeAssetServices
+		PRIVATE PulseForgeSceneSerialization
+	)
 	if(PULSEFORGE_ENABLE_MSVC_ANALYSIS)
 		if(NOT MSVC)
 			message(FATAL_ERROR "PULSEFORGE_ENABLE_MSVC_ANALYSIS requires MSVC")
