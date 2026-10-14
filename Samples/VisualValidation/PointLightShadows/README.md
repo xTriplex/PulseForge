@@ -6,7 +6,7 @@ This self-contained project demonstrates real-time omnidirectional point-light s
 
 ## Requirements and opening
 
-Use a PulseForge build containing point-shadow support (introduced in the point-shadow milestone). In PulseForgeEditor, choose **File → Open Project**, open `PointLightShadows.pfproj`, then open `PointLightShadowsOverview.scene` if it is not selected automatically. The `.pfproj` startup-scene UUID refers to the Overview scene.
+Use a PulseForge build with point-shadow support. In PulseForgeEditor, choose **File → Open Project**, open `PointLightShadows.pfproj`, then open `PointLightShadowsOverview.scene` if it is not selected automatically. The `.pfproj` startup-scene UUID refers to the Overview scene.
 
 ## Scenes
 

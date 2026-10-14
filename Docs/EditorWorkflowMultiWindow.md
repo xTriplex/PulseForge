@@ -120,9 +120,9 @@ On 2026-10-13, at source revision `61dcc905`, Debug, Release, and Dist passed 4,
 
 The Debug-only `--document-host-test-fixture` and related `--document-host-test-*` switches create two synthetic, unregistered document sessions or inject bounded renderer failures. They run through production host and tab-strip code but display placeholders instead of editable asset content. These checks do not establish real mouse-driven tab transfers or native pointer delivery.
 
-Material Details is an Inspector-side utility. No production full asset editor is registered, so independent asset-editor workspaces, per-document editing histories, and dirty-document prompts in a real asset editor remain unverified. Manual testing is also needed for pointer-driven detach, reattach, reorder, and utility docking; mixed-DPI and negative-coordinate monitor placement; and recovery after physically removing a monitor. OpenGL does not render scene snapshots or GPU asset previews. Asset changes made outside the editor are detected by an explicit Refresh, not a file watcher.
+Material Details is an Inspector-side utility. No production full asset editor is registered, so asset-editor workspaces, per-document editing histories, and dirty-document prompts for real asset editors remain unverified. OpenGL does not render scene snapshots or GPU asset previews. Asset changes made outside the editor are detected by an explicit Refresh, not a file watcher.
 
-### Manual document-host interaction
+### Manual document-host validation
 
 Run the following from the repository root to add synthetic document tabs for manual host testing. The Debug-only fixture does not open or modify project assets:
 
@@ -142,10 +142,6 @@ finally {
 }
 ```
 
-The fixture creates two synthetic, unregistered document sessions with no editable asset content. Use a tab's context menu to move one to the main document strip, then drag that top-strip tab outside the editor window and release it. The same session should appear in a native window. Repeat the transfer in both directions and confirm that Level Editor stays in the main host. The fixture does not synthesize OS pointer input, validate editing or saving, or exercise dirty-document prompts for a production asset editor.
+The fixture creates two synthetic, unregistered document sessions with no editable asset content. It does not generate OS pointer input. Use a real mouse to test tab reorder, grouping, detach, and reattach; confirm utility panels and workspace edges reject document drops. Repeat transfers in both directions and verify that Level Editor remains in the main host.
 
-- Use real mouse input to detach, reattach, reorder, and group document tabs. Confirm utility panels and workspace edges reject drops.
-- Use each opening preference and confirm Material Details opens beside Inspector while Level Editor remains active and the Scene Viewport stays available.
-- Exercise dirty-close Cancel/Save/Discard with a real editable document when a full editor is registered.
-- Move hosts between mixed-DPI monitors and a monitor with negative desktop coordinates, then remove a monitor and restart.
-- Confirm shared asset dialogs behave correctly from a floating full editor when one is available.
+Test all three opening preferences. Material Details should always open beside Inspector while Level Editor remains active and Scene Viewport remains available. Dirty-close decisions and shared dialogs inside a floating asset editor require a production full editor, which is not registered. Mixed-DPI monitor movement, negative desktop coordinates, and monitor-removal recovery also require manual testing.
