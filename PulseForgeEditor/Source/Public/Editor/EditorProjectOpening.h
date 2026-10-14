@@ -10,19 +10,24 @@
 
 namespace PulseForgeEditor
 {
-	struct OpenedEditorProject
+	struct PreparedEditorProject
 	{
 		PulseForge::Project Project;
 		std::unique_ptr<PulseForge::Scene> StartupScene;
 		std::optional<PulseForge::AssetID> StartupSceneAsset;
 		std::string StartupSceneWarning;
+		std::string StartupSceneError;
+		bool SaveStartupSceneOnCommit = false;
 	};
 
-	struct EditorProjectOpenError
+	struct EditorProjectPreparationError
 	{
 		std::string Message;
 	};
 
-	[[nodiscard]] std::expected<OpenedEditorProject, EditorProjectOpenError> OpenEditorProject(
+	[[nodiscard]] std::expected<PreparedEditorProject, EditorProjectPreparationError> PrepareEditorProjectOpen(
 		const std::filesystem::path& ProjectFile);
+	[[nodiscard]] std::expected<PreparedEditorProject, EditorProjectPreparationError> PrepareEditorProjectCreation(
+		const std::filesystem::path& ProjectFile);
+	[[nodiscard]] std::optional<std::string> CommitPreparedProjectSettings(PreparedEditorProject& Prepared);
 }

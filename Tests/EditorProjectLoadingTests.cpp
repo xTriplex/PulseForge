@@ -40,6 +40,29 @@ namespace
 		if (!Created)
 			return;
 
+		const std::filesystem::path CreatedProjectFile = Root / "Prepared Project" / "Prepared Project.pfproj";
+		auto PreparedCreation = PrepareEditorProjectCreation(CreatedProjectFile);
+		PF_CHECK(Tests, PreparedCreation.has_value());
+		PF_CHECK(Tests, PreparedCreation && PreparedCreation->StartupScene != nullptr);
+		PF_CHECK(Tests, PreparedCreation && PreparedCreation->StartupSceneAsset.has_value());
+		PF_CHECK(Tests, PreparedCreation && PreparedCreation->Project.GetDescription().Name == "Prepared Project");
+		if (PreparedCreation && PreparedCreation->StartupSceneAsset)
+		{
+			const AssetID MainSceneID = *PreparedCreation->StartupSceneAsset;
+			const auto MainSceneRecord = PreparedCreation->Project.GetAssetRegistry().Find(MainSceneID);
+			PF_CHECK(Tests, MainSceneRecord.has_value());
+			PF_CHECK(Tests, MainSceneRecord &&
+				MainSceneRecord->ProjectRelativePath == std::filesystem::path("Assets") / "Main.scene");
+			PF_CHECK(Tests, !PreparedCreation->Project.GetDescription().StartScene.has_value());
+			const auto StartSceneWarning = CommitPreparedProjectSettings(*PreparedCreation);
+			PF_CHECK(Tests, !StartSceneWarning.has_value());
+			PF_CHECK(Tests, PreparedCreation->Project.GetDescription().StartScene == MainSceneID);
+			const auto Reopened = PrepareEditorProjectOpen(CreatedProjectFile);
+			PF_CHECK(Tests, Reopened.has_value());
+			PF_CHECK(Tests, Reopened && Reopened->StartupScene != nullptr);
+			PF_CHECK(Tests, Reopened && Reopened->StartupSceneAsset == MainSceneID);
+		}
+
 		const std::span<const std::string_view> NoArguments;
 		const auto DefaultOptions = ParseEditorCommandLine(NoArguments, Root);
 		PF_CHECK(Tests, DefaultOptions.has_value());
@@ -326,7 +349,7 @@ namespace
 		PF_CHECK(Tests, !InvalidProjectResult &&
 			InvalidProjectResult.error().Code == EditorCommandLineErrorCode::InvalidProjectPath);
 
-		auto Loaded = OpenEditorProject(ProjectFile);
+		auto Loaded = PrepareEditorProjectOpen(ProjectFile);
 		PF_CHECK(Tests, Loaded.has_value());
 		PF_CHECK(Tests, Loaded && Loaded->Project.GetDescription().Name == "CLI Project With Spaces");
 		PF_CHECK(Tests, Loaded && !Loaded->StartupScene && !Loaded->StartupSceneAsset);
@@ -344,7 +367,7 @@ namespace
 		PF_CHECK(Tests, BrokenOptions.has_value());
 		if (BrokenOptions)
 		{
-			const auto BrokenLoad = OpenEditorProject(*BrokenOptions->ProjectFile);
+			const auto BrokenLoad = PrepareEditorProjectOpen(*BrokenOptions->ProjectFile);
 			PF_CHECK(Tests, !BrokenLoad);
 			PF_CHECK(Tests, !BrokenLoad && BrokenLoad.error().Message.find("could not be opened") != std::string::npos);
 		}

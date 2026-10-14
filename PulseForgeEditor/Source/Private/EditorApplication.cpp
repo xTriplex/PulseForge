@@ -2307,77 +2307,54 @@ namespace
 				SetWarning("The Level Editor document session could not be registered: " + LevelDocument.error());
 		}
 
-		void CreateProjectAt(const std::filesystem::path& ProjectFile)
+		void ActivatePreparedProject(PulseForgeEditor::PreparedEditorProject&& Prepared, bool ClearSceneWhenMissing)
 		{
-			const std::string ProjectName = PathToUtf8(ProjectFile.stem());
-			auto Created = PulseForge::Project::Create(ProjectFile, ProjectName);
-			if (!Created)
-			{
-				SetError("Project creation failed: " + Created.error().Message);
-				return;
-			}
-
-			auto NewScene = std::make_unique<PulseForge::Scene>();
-			auto MainScene = PulseForge::SceneAssetService::Create(
-				Created->GetAssetRegistry(),
-				Created->GetRootPath(),
-				std::filesystem::path("Assets") / "Main.scene",
-				*NewScene);
-			if (!MainScene && !MainScene.error().CommittedAsset)
-			{
-				if (!ClearCurrentProjectDocumentState([this, ProjectFile] { (void)OpenProjectAt(ProjectFile); }))
-					return;
-				StopRuntime();
-				ResetViewportSceneRenderer();
-				m_Project.emplace(std::move(*Created));
-				RegisterLevelDocument();
-				ClearScene();
-				ResetContentBrowserNavigation();
-				UpdateAssetList();
-				RestoreDocumentWorkspace();
-				SetError("Project was created, but its initial scene could not be created: " + MainScene.error().Message);
-				return;
-			}
-
-			const PulseForge::AssetRecord MainSceneRecord = MainScene
-				? *MainScene
-				: *MainScene.error().CommittedAsset;
-			if (!ClearCurrentProjectDocumentState([this, ProjectFile] { (void)OpenProjectAt(ProjectFile); }))
-				return;
+			auto StartupScene = std::move(Prepared.StartupScene);
+			const auto StartupSceneAsset = Prepared.StartupSceneAsset;
 			StopRuntime();
 			ResetViewportSceneRenderer();
-			m_Project.emplace(std::move(*Created));
+			m_Project.emplace(std::move(Prepared.Project));
 			RegisterLevelDocument();
 			ResetContentBrowserNavigation();
-			m_Scene = std::move(NewScene);
-			m_SceneAsset = MainSceneRecord.ID;
-			SelectSingleEntity(std::nullopt);
-			m_ContentBrowser.SelectedAsset() = MainSceneRecord.ID;
-			m_AssetWorkflow.DismissDelete();
-			ResetSceneHistory();
-			if (!MainScene)
-			{
-				std::string Message = "Project and Main.scene were created, but temporary cleanup needs attention: ";
-				Message += MainScene.error().Message;
-				if (MainScene.error().RecoveryPath)
-					Message += " Recovery data: " + PathToUtf8(*MainScene.error().RecoveryPath);
-				SetWarning(std::move(Message));
-			}
+			if (ClearSceneWhenMissing && !StartupScene)
+				ClearScene();
 			else
-				SetStatus("Created project " + ProjectName + " with Assets/Main.scene.");
+			{
+				m_Scene = std::move(StartupScene);
+				m_SceneAsset = StartupSceneAsset;
+				SelectSingleEntity(std::nullopt);
+				m_ContentBrowser.SelectedAsset() = StartupSceneAsset;
+				m_AssetWorkflow.DismissDelete();
+				ResetSceneHistory();
+			}
 			UpdateAssetList();
 			RestoreDocumentWorkspace();
+		}
 
-			if (auto StartScene = m_Project->SetStartScene(MainSceneRecord.ID); !StartScene)
+		void CreateProjectAt(const std::filesystem::path& ProjectFile)
+		{
+			auto Created = PulseForgeEditor::PrepareEditorProjectCreation(ProjectFile);
+			if (!Created)
 			{
-				std::string Message = "Project and scene are open, but the startup scene could not be saved: ";
-				Message += StartScene.error().Message;
-				if (!MainScene)
-					Message += " Temporary cleanup also needs attention: " + MainScene.error().Message;
-				if (!MainScene && MainScene.error().RecoveryPath)
-					Message += " Recovery data: " + PathToUtf8(*MainScene.error().RecoveryPath);
-				SetWarning(std::move(Message));
+				SetError(Created.error().Message);
+				return;
 			}
+
+			const std::string ProjectName = Created->Project.GetDescription().Name;
+			if (!ClearCurrentProjectDocumentState([this, ProjectFile] { (void)OpenProjectAt(ProjectFile); }))
+				return;
+
+			if (auto StartSceneWarning = PulseForgeEditor::CommitPreparedProjectSettings(*Created))
+				Created->StartupSceneWarning = std::move(*StartSceneWarning);
+			std::string SceneError = std::move(Created->StartupSceneError);
+			std::string SceneWarning = std::move(Created->StartupSceneWarning);
+			ActivatePreparedProject(std::move(*Created), true);
+			if (!SceneError.empty())
+				SetError(std::move(SceneError));
+			else if (!SceneWarning.empty())
+				SetWarning(std::move(SceneWarning));
+			else
+				SetStatus("Created project " + ProjectName + " with Assets/Main.scene.");
 		}
 
 		void OpenProject()
@@ -2399,7 +2376,7 @@ namespace
 			m_LoggedEnvironmentReady = false;
 			m_EnvironmentLightingPending = false;
 			PulseForge::Detail::ScopedProfileTimer OpenTimer("Editor project open + startup scene load");
-			auto Opened = PulseForgeEditor::OpenEditorProject(ProjectFile);
+			auto Opened = PulseForgeEditor::PrepareEditorProjectOpen(ProjectFile);
 			if (!Opened)
 			{
 				SetError(Opened.error().Message);
@@ -2409,24 +2386,13 @@ namespace
 			const std::string ProjectName = Opened->Project.GetDescription().Name;
 			if (!ClearCurrentProjectDocumentState([this, ProjectFile] { (void)OpenProjectAt(ProjectFile); }))
 				return std::unexpected("The current project has a document session that could not close");
-			StopRuntime();
-			ResetViewportSceneRenderer();
-			m_Project.emplace(std::move(Opened->Project));
-			RegisterLevelDocument();
-			ResetContentBrowserNavigation();
-			m_Scene = std::move(Opened->StartupScene);
-			m_SceneAsset = Opened->StartupSceneAsset;
-			SelectSingleEntity(std::nullopt);
-			m_ContentBrowser.SelectedAsset() = Opened->StartupSceneAsset;
-			m_AssetWorkflow.DismissDelete();
-			ResetSceneHistory();
-			UpdateAssetList();
-			RestoreDocumentWorkspace();
+			std::string StartupSceneWarning = std::move(Opened->StartupSceneWarning);
+			ActivatePreparedProject(std::move(*Opened), false);
 			InitializeDocumentHostTestFixture();
-			if (Opened->StartupSceneWarning.empty())
+			if (StartupSceneWarning.empty())
 				SetStatus("Opened project " + ProjectName + ".");
 			else
-				SetWarning(std::move(Opened->StartupSceneWarning));
+				SetWarning(std::move(StartupSceneWarning));
 			return {};
 		}
 
