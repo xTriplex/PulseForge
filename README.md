@@ -8,11 +8,9 @@ PulseForge is a C++23 game engine under active development. Windows is the suppo
 - Visual Studio 2022 with the Desktop development with C++ workload and a Windows SDK
 - CMake 3.24 or newer and Git with submodule support
 - A Vulkan 1.3-capable driver/runtime to run the default sample
-- Network access on the first configure to fetch the pinned NVRHI, Vulkan-Headers, and DXC dependencies
+- Network access on first configure to fetch pinned NVRHI, Vulkan-Headers, Lua, and DXC dependencies
 
 The Vulkan SDK is not required to build or run PulseForge. Khronos validation layers are optional and used for Debug validation when installed. PulseForge currently has no Linux or macOS build target.
-
-The project has been built with Visual Studio Community 2022 17.14.37, MSVC 14.44, Windows SDK 10.0.26100.0, and CMake 4.0.0.
 
 ## Getting Started
 
@@ -28,7 +26,7 @@ Configure from the repository root using an x64 Visual Studio developer environm
 cmake -S . -B Build/CMake/VS2022-x64 -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
 ```
 
-CMake builds the editor by default. Set `-DPULSEFORGE_BUILD_EDITOR=OFF` for a runtime-only build. Configure also fetches pinned NVRHI/Vulkan-Headers and Lua sources, plus Microsoft DXC. DXC compiles the sample's HLSL shaders to SPIR-V at build time; the generated shader files are copied beside the sample executable. DXC and Lua source are build-time dependencies, not runtime requirements.
+CMake builds the editor by default. Set `-DPULSEFORGE_BUILD_EDITOR=OFF` for a runtime-only build. Configure fetches the pinned NVRHI and Vulkan-Headers sources plus Lua 5.5.1. When either target uses Vulkan, configure also downloads the pinned Microsoft DXC compiler. Lua is compiled into the engine, so a separate Lua runtime installation is not required. DXC compiles HLSL shaders to SPIR-V at build time; generated shader files are copied beside the corresponding executable.
 
 ## Building
 
