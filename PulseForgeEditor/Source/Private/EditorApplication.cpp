@@ -40,6 +40,7 @@
 #include "Editor/EditorConsolePanel.h"
 #include "Editor/EditorAssetSelector.h"
 #include "Editor/EditorContentBrowserNavigation.h"
+#include "Editor/EditorContentBrowserAssetView.h"
 #include "Editor/EditorHierarchyPanel.h"
 #include "Editor/EditorMaterialDetailsPanel.h"
 #include "EditorWorkspacePresentation.h"
@@ -9619,67 +9620,6 @@ namespace
 			m_ContentBrowser.ResetNavigation();
 		}
 
-		void HandleAssetBrowserItem(
-			const PulseForge::AssetRecord& Asset,
-			const AssetBrowserPresentation& Presentation,
-			bool Activated,
-			std::function<void()>& DeferredAction)
-		{
-			if (Activated)
-			{
-				m_ContentBrowser.SelectedAsset() = Asset.ID;
-				switch (PulseForgeEditor::ResolveAssetBrowserOpenAction(
-					Presentation.Extension,
-					Activated,
-					ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)))
-				{
-					case PulseForgeEditor::AssetBrowserOpenAction::OpenScene:
-						OpenScene(Asset.ID);
-						break;
-					case PulseForgeEditor::AssetBrowserOpenAction::ShowMaterialDetails:
-					{
-						const PulseForge::AssetID Identifier = Asset.ID;
-						DeferredAction = [this, Identifier] { ShowMaterialDetails(Identifier); };
-						break;
-					}
-					case PulseForgeEditor::AssetBrowserOpenAction::None:
-						break;
-				}
-			}
-			if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
-			{
-				const std::string Identifier = Asset.ID.ToString();
-				ImGui::SetDragDropPayload("PF_MANAGED_ASSET_MOVE", Identifier.c_str(), Identifier.size() + 1);
-				ImGui::Text("Move asset: %s", Presentation.Name.c_str());
-				ImGui::EndDragDropSource();
-			}
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("%s\nUUID: %s", Presentation.FullPath.c_str(), Presentation.Identifier.c_str());
-			if (!ImGui::BeginPopupContextItem("Asset Actions"))
-				return;
-
-			m_ContentBrowser.SelectedAsset() = Asset.ID;
-			const PulseForge::AssetID Identifier = Asset.ID;
-			if (Presentation.Extension == ".material" && m_EditorStyle.MenuItem(
-				PulseForgeEditor::EditorIcon::Material, "Show Material Details"))
-				DeferredAction = [this, Identifier] { ShowMaterialDetails(Identifier); };
-			if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Rename, "Move / Rename..."))
-				DeferredAction = [this, Identifier] { MoveAsset(Identifier); };
-			if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Duplicate, "Duplicate..."))
-				DeferredAction = [this, Identifier] { DuplicateAsset(Identifier); };
-			if (Presentation.Extension == ".prefab" && m_EditorStyle.MenuItem(
-				PulseForgeEditor::EditorIcon::Cube, "Instantiate in Scene", nullptr, false, m_Scene != nullptr))
-				DeferredAction = [this, Identifier] { InstantiatePrefab(Identifier); };
-			const bool IsStartupScene = m_Project->GetDescription().StartScene &&
-				*m_Project->GetDescription().StartScene == Identifier;
-			if (Presentation.Extension == ".scene" && ImGui::MenuItem(
-				"Set as Startup Scene", nullptr, IsStartupScene, !IsStartupScene))
-				DeferredAction = [this, Identifier] { SetStartupScene(Identifier); };
-			if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Delete, "Delete..."))
-				DeferredAction = [this, Identifier] { RequestDeleteAsset(Identifier); };
-			ImGui::EndPopup();
-		}
-
 		void ShowMaterialDetails(const PulseForge::AssetID& Identifier)
 		{
 			if (!m_Project)
@@ -9696,122 +9636,6 @@ namespace
 			MarkDocumentWorkspaceDirty();
 			m_ContentBrowser.SelectedAsset() = Identifier;
 			SetEditorPanelVisible(PulseForgeEditor::EditorPanel::MaterialDetails, true);
-		}
-
-		void DrawAssetList(std::function<void()>& DeferredAction)
-		{
-			if (m_ContentBrowser.FilteredAssetIndices().empty())
-				return;
-
-			if (!ImGui::BeginTable("ManagedAssetList", 2,
-				ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
-				ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_NoSavedSettings))
-				return;
-			ImGui::TableSetupColumn("Asset", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-			ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 72.0f);
-			ImGuiListClipper Clipper;
-			Clipper.Begin(static_cast<int>(m_ContentBrowser.FilteredAssetIndices().size()));
-			while (Clipper.Step())
-			{
-				for (int Row = Clipper.DisplayStart; Row < Clipper.DisplayEnd; ++Row)
-				{
-					const size_t AssetIndex = m_ContentBrowser.FilteredAssetIndices()[static_cast<size_t>(Row)];
-					const PulseForge::AssetRecord& Asset = m_ContentBrowser.Assets()[AssetIndex];
-					const AssetBrowserPresentation& Presentation = m_ContentBrowser.AssetPresentations()[AssetIndex];
-					ImGui::PushID(Presentation.Identifier.c_str());
-					ImGui::TableNextRow();
-					ImGui::TableSetColumnIndex(0);
-					const bool IsSelected = m_ContentBrowser.SelectedAsset() && *m_ContentBrowser.SelectedAsset() == Asset.ID;
-					const bool Activated = m_EditorStyle.Selectable(Presentation.Icon, Presentation.Name, IsSelected,
-						ImGuiSelectableFlags_AllowDoubleClick);
-					HandleAssetBrowserItem(Asset, Presentation, Activated, DeferredAction);
-					ImGui::TableSetColumnIndex(1);
-					m_EditorStyle.TextMuted(Presentation.Extension.empty()
-						? "File" : std::string_view(Presentation.Extension).substr(1));
-					ImGui::PopID();
-				}
-			}
-			ImGui::EndTable();
-		}
-
-		void DrawAssetGrid(std::function<void()>& DeferredAction)
-		{
-			if (m_ContentBrowser.FilteredAssetIndices().empty())
-				return;
-
-			const float AvailableWidth = ImGui::GetContentRegionAvail().x;
-			const float DesiredTileWidth = 124.0f;
-			const float Spacing = ImGui::GetStyle().ItemSpacing.x;
-			const int ColumnCount = (std::max)(1, static_cast<int>((AvailableWidth + Spacing) /
-				(DesiredTileWidth + Spacing)));
-			const int RowCount = static_cast<int>((m_ContentBrowser.FilteredAssetIndices().size() +
-				static_cast<size_t>(ColumnCount) - 1) / static_cast<size_t>(ColumnCount));
-			if (!ImGui::BeginTable("ManagedAssetGrid", ColumnCount,
-				ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings |
-				ImGuiTableFlags_NoBordersInBody))
-				return;
-
-			constexpr float TileHeight = 102.0f;
-			ImGuiListClipper Clipper;
-			Clipper.Begin(RowCount, TileHeight + Spacing);
-			while (Clipper.Step())
-			{
-				for (int Row = Clipper.DisplayStart; Row < Clipper.DisplayEnd; ++Row)
-				{
-					ImGui::TableNextRow(ImGuiTableRowFlags_None, TileHeight);
-					for (int Column = 0; Column < ColumnCount; ++Column)
-					{
-						const size_t AssetIndex = static_cast<size_t>(Row) * static_cast<size_t>(ColumnCount) +
-							static_cast<size_t>(Column);
-						if (AssetIndex >= m_ContentBrowser.FilteredAssetIndices().size())
-							break;
-						ImGui::TableSetColumnIndex(Column);
-						const size_t SourceIndex = m_ContentBrowser.FilteredAssetIndices()[AssetIndex];
-						const PulseForge::AssetRecord& Asset = m_ContentBrowser.Assets()[SourceIndex];
-						const AssetBrowserPresentation& Presentation = m_ContentBrowser.AssetPresentations()[SourceIndex];
-						ImGui::PushID(Presentation.Identifier.c_str());
-						const bool IsSelected = m_ContentBrowser.SelectedAsset() && *m_ContentBrowser.SelectedAsset() == Asset.ID;
-						uint64_t PreviewID = 0;
-						uint32_t PreviewWidth = 0;
-						uint32_t PreviewHeight = 0;
-						#ifndef PF_EDITOR_RENDERER_OPENGL
-						const bool IsImagePreview = PulseForgeEditor::IsSupportedImagePreviewExtension(Asset.ProjectRelativePath);
-						const bool IsMaterialPreview = Presentation.Extension == ".material";
-						if (m_Project && (IsImagePreview || IsMaterialPreview))
-						{
-							const std::string ProjectID = m_Project->GetDescription().ID.ToString();
-							const std::string AssetID = Asset.ID.ToString();
-							if (!m_AssetPreviews.TouchPreview(ProjectID, AssetID))
-							{
-								auto SourcePath = PulseForge::AssetPathResolver::ResolveManagedSourcePath(
-									m_Project->GetRootPath(), Asset.ProjectRelativePath);
-								if (SourcePath)
-								{
-									if (IsMaterialPreview)
-										m_AssetPreviews.RequestMaterialSwatch(ProjectID, AssetID, *SourcePath);
-									else
-										m_AssetPreviews.RequestImage(ProjectID, AssetID, *SourcePath);
-								}
-								else
-									m_AssetPreviews.MarkUnavailable(ProjectID, AssetID);
-							}
-							if (const auto Preview = m_AssetPreviews.FindPreview(ProjectID, AssetID))
-							{
-								PreviewID = Preview->TextureID;
-								PreviewWidth = Preview->Width;
-								PreviewHeight = Preview->Height;
-							}
-						}
-						#endif
-						const bool Activated = m_EditorStyle.AssetTile(Presentation.Icon, Presentation.Name, IsSelected,
-							ImVec2((std::max)(ImGui::GetContentRegionAvail().x - 2.0f, 1.0f), TileHeight),
-							ImGuiSelectableFlags_AllowDoubleClick, PreviewID, PreviewWidth, PreviewHeight);
-						HandleAssetBrowserItem(Asset, Presentation, Activated, DeferredAction);
-						ImGui::PopID();
-					}
-				}
-			}
-			ImGui::EndTable();
 		}
 
 		void DrawSelectedAssetDetails()
@@ -9977,6 +9801,35 @@ namespace
 				else
 				{
 					std::function<void()> DeferredAction;
+					const PulseForgeEditor::EditorContentBrowserAssetActionHandler AssetActionHandler =
+						[this](PulseForgeEditor::EditorContentBrowserAssetAction Action,
+							const PulseForge::AssetID& Identifier)
+						{
+							switch (Action)
+							{
+							case PulseForgeEditor::EditorContentBrowserAssetAction::OpenScene:
+								OpenScene(Identifier);
+								break;
+							case PulseForgeEditor::EditorContentBrowserAssetAction::ShowMaterialDetails:
+								ShowMaterialDetails(Identifier);
+								break;
+							case PulseForgeEditor::EditorContentBrowserAssetAction::Move:
+								MoveAsset(Identifier);
+								break;
+							case PulseForgeEditor::EditorContentBrowserAssetAction::Duplicate:
+								DuplicateAsset(Identifier);
+								break;
+							case PulseForgeEditor::EditorContentBrowserAssetAction::InstantiatePrefab:
+								InstantiatePrefab(Identifier);
+								break;
+							case PulseForgeEditor::EditorContentBrowserAssetAction::SetStartupScene:
+								SetStartupScene(Identifier);
+								break;
+							case PulseForgeEditor::EditorContentBrowserAssetAction::Delete:
+								RequestDeleteAsset(Identifier);
+								break;
+							}
+						};
 					const ImVec2 Available = ImGui::GetContentRegionAvail();
 					const PulseForgeEditor::ContentBrowserHorizontalLayout HorizontalLayout =
 						PulseForgeEditor::GetContentBrowserHorizontalLayout(Available.x);
@@ -10067,9 +9920,14 @@ namespace
 							ImGui::Separator();
 					}
 					if (m_ContentBrowser.GridView())
-						DrawAssetGrid(DeferredAction);
+						m_ContentBrowserAssetView.DrawGrid(m_ContentBrowser,
+							m_Project ? &*m_Project : nullptr, m_Scene != nullptr,
+							m_AssetPreviews, m_EditorStyle,
+							AssetActionHandler, DeferredAction);
 					else
-						DrawAssetList(DeferredAction);
+						m_ContentBrowserAssetView.DrawList(m_ContentBrowser,
+							m_Project ? &*m_Project : nullptr, m_Scene != nullptr,
+							m_EditorStyle, AssetActionHandler, DeferredAction);
 					if ((!VisibleFolders || VisibleFolders->empty()) && m_ContentBrowser.FilteredAssetIndices().empty())
 						m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Search,
 							m_ContentBrowser.Assets().empty() ? "The project has no managed assets." :
@@ -10394,6 +10252,7 @@ namespace
 		PulseForgeEditor::EditorHierarchyPanel m_HierarchyPanel;
 		PulseForgeEditor::EditorAssetSelector m_AssetSelector;
 		PulseForgeEditor::EditorContentBrowserNavigation m_ContentBrowserNavigation;
+		PulseForgeEditor::EditorContentBrowserAssetView m_ContentBrowserAssetView;
 		PulseForgeEditor::EditorMaterialDetailsPanel m_MaterialDetailsPanel;
 		PulseForgeEditor::EditorContentBrowserState m_ContentBrowser;
 		bool m_ContentDetailsExpandedCompact = false;
