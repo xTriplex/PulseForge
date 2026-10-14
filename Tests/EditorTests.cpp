@@ -1,6 +1,7 @@
 #include "EditorConsoleHistory.h"
 #include "Editor/EditorContentBrowserState.h"
 #include "Editor/EditorAssetWorkflowState.h"
+#include "Editor/EditorSceneWorkspaceState.h"
 #include "EditorMaterialDraftStore.h"
 #include "EditorViewportCamera.h"
 #include "TestSupport.h"
@@ -1293,7 +1294,44 @@ namespace
 		PF_CHECK(Tests, !Workflow.PendingDeleteAsset());
 	}
 
-	void TestEditorMaterialDraftStore(TestRunner& Tests)
+	void TestEditorSceneWorkspaceState(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		const auto First = PulseForge::UUID::Generate();
+		const auto Second = PulseForge::UUID::Generate();
+		const auto Third = PulseForge::UUID::Generate();
+		PF_CHECK(Tests, First.has_value() && Second.has_value() && Third.has_value());
+		if (!First || !Second || !Third)
+			return;
+
+		EditorSceneWorkspaceState State;
+		State.BeginHierarchyFrame();
+		State.RecordVisibleHierarchyEntity(*First);
+		State.RecordVisibleHierarchyEntity(*Second);
+		PF_CHECK(Tests, State.VisibleHierarchyOrder().empty());
+		State.CompleteHierarchyFrame();
+		PF_CHECK(Tests, State.VisibleHierarchyOrder().size() == 2);
+		PF_CHECK(Tests, State.VisibleHierarchyOrder()[0] == *First);
+		PF_CHECK(Tests, State.VisibleHierarchyOrder()[1] == *Second);
+
+		State.Selection().SelectSingle(*Second);
+		State.BeginHierarchyFrame();
+		State.RecordVisibleHierarchyEntity(*Second);
+		State.RecordVisibleHierarchyEntity(*Third);
+		PF_CHECK(Tests, State.VisibleHierarchyOrder()[0] == *First);
+		State.CompleteHierarchyFrame();
+		PF_CHECK(Tests, State.Selection().SelectRange(State.VisibleHierarchyOrder(), *Third));
+		PF_CHECK(Tests, State.Selection().GetEntities().size() == 2);
+		PF_CHECK(Tests, State.Selection().GetEntities()[0] == *Second);
+		PF_CHECK(Tests, State.Selection().GetEntities()[1] == *Third);
+
+		State.Visibility().SetVisible(*First, false);
+		PF_CHECK(Tests, !State.Visibility().IsLocallyVisible(*First));
+		State.Reset();
+		PF_CHECK(Tests, State.Selection().GetEntities().empty());
+		PF_CHECK(Tests, State.Visibility().IsLocallyVisible(*First));
+		PF_CHECK(Tests, State.VisibleHierarchyOrder().empty());
+\t}`r`n`r`n\tvoid TestEditorMaterialDraftStore(TestRunner& Tests)
 	{
 		PulseForgeEditor::EditorMaterialDraftStore Drafts;
 		const std::string FirstKey = "project-a:material-1";
@@ -1359,6 +1397,7 @@ void RunEditorTests(TestRunner& Tests)
 	TestEditorConsoleHistory(Tests);
 	TestEditorContentBrowserState(Tests);
 	TestEditorAssetWorkflowState(Tests);
+	TestEditorSceneWorkspaceState(Tests);
 	TestEditorMaterialDraftStore(Tests);
 	TestEditorWorkspacePanelState(Tests);
 	TestEditorDeferredOperationQueue(Tests);

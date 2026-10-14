@@ -303,6 +303,7 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 		PulseForgeEditor/Source/Private/EditorContentBrowserState.cpp
 		PulseForgeEditor/Source/Private/EditorMaterialDraftStore.cpp
 		PulseForgeEditor/Source/Private/EditorProjectOpening.cpp
+		PulseForgeEditor/Source/Private/EditorSceneWorkspaceState.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentManager.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentWorkspace.cpp
 		PulseForgeEditor/Source/Private/EditorViewportCamera.cpp
