@@ -55,7 +55,7 @@ Cleanup is optional and manual; normal builds retain their outputs.
 
 ## Running
 
-Run `PulseForgeEditor` from its output directory for the editor. Vulkan is the default; its Scene Viewport renders the active authored or runtime scene through the PulseForge renderer. The transitional OpenGL editor shell can be selected with `-DPULSEFORGE_EDITOR_RENDERER=OpenGL` at configure time, but it has no scene viewport. See [the editor guide](Docs/Editor.md) and [document-hosting architecture](Docs/EditorWorkflowMultiWindow.md).
+Run `PulseForgeEditor` from its output directory for the editor. Vulkan is the default; its Scene Viewport renders the active authored or runtime scene through the PulseForge renderer. The transitional OpenGL editor shell can be selected with `-DPULSEFORGE_EDITOR_RENDERER=OpenGL` at configure time, but it has no scene viewport.
 
 `PulseForgeGame` uses Vulkan by default. Run it from its output directory so it can find the generated `Shaders` folder. To build the sample with the OpenGL fallback, configure with:
 
@@ -67,18 +67,18 @@ The OpenGL fallback supports the renderer bootstrap; the newer shader, binding, 
 
 ## Scene API
 
-The engine provides UUID-backed `Scene` and non-owning `Entity` handles with tags, transforms, perspective cameras, mesh-asset references, parent/child relationships, duplication, and deterministic entity enumeration. `SceneRenderSnapshotBuilder` produces camera and mesh-instance data for rendering. `SceneSerializer` reads and writes versioned JSON scenes in memory or to files; see [the scene format](Docs/SceneFormat.md).
+The engine provides UUID-backed `Scene` and non-owning `Entity` handles with tags, transforms, perspective cameras, mesh-asset references, parent/child relationships, duplication, and deterministic entity enumeration. `SceneRenderSnapshotBuilder` produces camera and mesh-instance data for rendering. `SceneSerializer` reads and writes versioned JSON scenes in memory or to files.
 
-`PrefabSerializer` captures an entity subtree and instantiates it with fresh entity UUIDs while retaining asset UUID references. See [the prefab format](Docs/PrefabFormat.md).
+`PrefabSerializer` captures an entity subtree and instantiates it with fresh entity UUIDs while retaining asset UUID references.
 
-`ScriptRuntime` loads managed Lua assets by UUID and provides per-entity lifecycle callbacks plus entity, scene mutation, physics, audio, and input APIs. See [scripting](Docs/Scripting.md).
+`ScriptRuntime` loads managed Lua assets by UUID and provides per-entity lifecycle callbacks plus entity, scene mutation, physics, audio, and input APIs.
 
-`SceneRuntime` coordinates script updates, fixed-step physics, and spatial-audio synchronization before scene rendering. See [runtime lifecycle](Docs/RuntimeLifecycle.md).
+`SceneRuntime` coordinates script updates, fixed-step physics, and spatial-audio synchronization before scene rendering.
 
 ## Asset identity
 
-Managed files under a project's `Assets` directory use adjacent `.meta` sidecars as their stable UUID source. `AssetRegistry` rebuilds an in-memory UUID-to-project-relative-path index from those files. See [asset metadata](Docs/AssetMetadata.md).
+Managed files under a project's `Assets` directory use adjacent `.meta` sidecars as their stable UUID source. `AssetRegistry` rebuilds an in-memory UUID-to-project-relative-path index from those files.
 
 ## Tests
 
-`PulseForgeTests` is the first-party test target and runs through CTest. It covers core lifecycle, scene/prefab persistence, assets, physics/audio/scripting runtimes, Vulkan selection helpers, and renderer validation. Use the opt-in GPU validation executable for Vulkan rendering paths and the editor's Debug host fixtures for native-window behavior; see [Scene Rendering](Docs/SceneRendering.md) and [Editor Documents and Native Windows](Docs/EditorWorkflowMultiWindow.md).
+`PulseForgeTests` is the first-party test target and runs through CTest. It covers core lifecycle, scene/prefab persistence, assets, physics/audio/scripting runtimes, Vulkan selection helpers, and renderer validation. Use the opt-in GPU validation executable for Vulkan rendering paths and the editor's Debug host fixtures for native-window behavior.

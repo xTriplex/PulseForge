@@ -18,7 +18,7 @@ Content Browser material tiles display a saved base-color-factor swatch. The swa
 - Material occlusion affects indirect ambient response, not direct light or shadow casting.
 - Emissive stripes add scene-linear HDR radiance; they do not produce bloom or emissive global illumination.
 - Missing optional maps use neutral fallbacks. Older material versions remain loadable with defaults for newer fields.
-- OPAQUE, MASK, and BLEND materials follow the alpha behavior described in [Material Assets](../../../Docs/MaterialAssets.md).
+- OPAQUE, MASK, and BLEND are supported material alpha modes.
 
 The procedural cube includes authored normals and tangents. Its face-aligned UVs make tangent orientation and map channels easy to inspect. Importer-generated tangents are covered by CPU tests for mirrored UV islands and seam splitting.
 
