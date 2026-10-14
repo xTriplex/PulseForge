@@ -458,6 +458,7 @@ endif()
 if(PULSEFORGE_BUILD_EDITOR)
 	add_library(PulseForgeEditorUI STATIC
 		PulseForgeEditor/Source/Private/EditorAssetPreviewService.cpp
+		PulseForgeEditor/Source/Private/EditorConsolePanel.cpp
 		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
 		PulseForgeEditor/Source/Private/EditorLayout.cpp
 		PulseForgeEditor/Source/Private/EditorStyle.cpp
@@ -476,7 +477,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	target_link_libraries(PulseForgeEditorUI
 		PUBLIC PulseForgeRenderer
 		PRIVATE PulseForgeApplication PulseForgeAssetServices PulseForgeEditorCore
-			PulseForgeImGui freetype shell32 ole32
+			PulseForgeImGui freetype spdlog::spdlog shell32 ole32
 	)
 	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
 		target_compile_definitions(PulseForgeEditorUI PRIVATE PF_EDITOR_RENDERER_OPENGL)
@@ -485,7 +486,6 @@ if(PULSEFORGE_BUILD_EDITOR)
 	add_executable(PulseForgeEditor
 		PulseForgeEditor/Source/Private/EditorMain.cpp
 		PulseForgeEditor/Source/Private/EditorApplication.cpp
-		PulseForgeEditor/Source/Private/EditorConsolePanel.cpp
 	)
 	target_include_directories(PulseForgeEditor PRIVATE
 		PulseForgeEditor/Source/Public

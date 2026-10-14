@@ -1,4 +1,4 @@
-#include "EditorConsolePanel.h"
+#include "Editor/EditorConsolePanel.h"
 
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorStyle.h"

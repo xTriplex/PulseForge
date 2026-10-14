@@ -36,7 +36,7 @@
 #include "Editor/EditorAssetPreviewPolicy.h"
 #include "Editor/EditorMeshPickingCache.h"
 #include "Editor/EditorDeferredOperationQueue.h"
-#include "EditorConsolePanel.h"
+#include "Editor/EditorConsolePanel.h"
 #include "EditorWorkspacePresentation.h"
 #include "Editor/EditorLayout.h"
 #include "EditorViewportCamera.h"

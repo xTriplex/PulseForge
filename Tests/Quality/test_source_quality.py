@@ -102,6 +102,19 @@ target_link_libraries(PulseForgeTests PRIVATE PulseForge)
                 root, "add_library(PulseForgeCore STATIC PulseForge/Source/Private/Core.cpp)\n"
                 "add_library(PulseForgeTests STATIC PulseForge/Source/Private/Core.cpp)"))
 
+    def test_reviewed_source_owner_boundary_is_enforced(self):
+        cmake = """
+add_library(PulseForgeEditorUI STATIC
+    PulseForgeEditor/Source/Private/EditorConsolePanel.cpp)
+add_executable(PulseForgeEditor
+    PulseForgeEditor/Source/Private/EditorApplication.cpp)
+"""
+        expected = {"PulseForgeEditor/Source/Private/EditorConsolePanel.cpp": "PulseForgeEditorUI"}
+        self.assertEqual(source_quality.check_expected_source_targets(cmake, expected), [])
+        misowned = cmake.replace("PulseForgeEditor/Source/Private/EditorConsolePanel.cpp", "Other.cpp") + \
+            "\nadd_executable(PulseForgeEditor PulseForgeEditor/Source/Private/EditorConsolePanel.cpp)\n"
+        self.assertTrue(source_quality.check_expected_source_targets(misowned, expected))
+
 
 if __name__ == "__main__":
     unittest.main()

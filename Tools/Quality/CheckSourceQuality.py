@@ -141,6 +141,28 @@ def check_source_ownership(root: Path, cmake: str) -> list[str]:
     return issues
 
 
+def check_expected_source_targets(cmake: str, expected_owners: dict[str, str]) -> list[str]:
+    implementation_pattern = re.compile(
+        r"\b((?:PulseForge|PulseForgeEditor|PulseForgeGame)/Source/Private/[A-Za-z0-9_./-]+\.(?:c|cc|cpp|cxx))\b")
+    owners: dict[str, list[str]] = {}
+    for match in TARGET_CALL_RE.finditer(cmake):
+        if match.group(1) not in {"add_library", "add_executable"}:
+            continue
+        target = match.group(2)
+        for source in implementation_pattern.findall(match.group(3)):
+            owners.setdefault(normalize(source), []).append(target)
+
+    issues = []
+    for source, expected in expected_owners.items():
+        actual = owners.get(normalize(source), [])
+        if expected not in actual:
+            issues.append(f"{normalize(source)} must be owned by {expected}")
+        other_owners = sorted(set(actual) - {expected})
+        if other_owners:
+            issues.append(f"{normalize(source)} is also owned by: {', '.join(other_owners)}")
+    return issues
+
+
 def parse_target_dependencies(cmake: str, target: str) -> set[str] | None:
     body = parse_target_call(cmake, "target_link_libraries", target)
     if body is None:
@@ -254,6 +276,7 @@ def run(root: Path, rules: dict, include_git_checks: bool = True) -> list[str]:
     issues.extend(check_configuration_target_coverage(cmake))
     issues.extend(check_target_graph(cmake))
     issues.extend(check_source_ownership(root, cmake))
+    issues.extend(check_expected_source_targets(cmake, rules.get("source_target_ownership", {})))
     issues.extend(check_tests_avoid_aggregate_engine(
         cmake, rules["aggregate_engine_target"], rules["owner_scoped_test_targets"]))
     for key in ("editor_core_target", "editor_ui_target"):
