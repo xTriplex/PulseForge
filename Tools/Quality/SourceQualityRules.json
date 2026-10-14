@@ -11,7 +11,9 @@
     "PulseForge/Source/Private/Assets/AudioAssetCache.cpp": "PulseForgeAudioAssets",
     "PulseForgeEditor/Source/Private/EditorAssetDestinationDialog.cpp": "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorConsolePanel.cpp": "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorAssetSelector.cpp": "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorHierarchyPanel.cpp": "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorMaterialDetailsPanel.cpp": "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorViewportToolbar.cpp": "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorViewportToolState.cpp": "PulseForgeEditorCore"
   },

@@ -464,8 +464,10 @@ if(PULSEFORGE_BUILD_EDITOR)
 	add_library(PulseForgeEditorUI STATIC
 		PulseForgeEditor/Source/Private/EditorAssetDestinationDialog.cpp
 		PulseForgeEditor/Source/Private/EditorAssetPreviewService.cpp
+		PulseForgeEditor/Source/Private/EditorAssetSelector.cpp
 		PulseForgeEditor/Source/Private/EditorConsolePanel.cpp
 		PulseForgeEditor/Source/Private/EditorHierarchyPanel.cpp
+		PulseForgeEditor/Source/Private/EditorMaterialDetailsPanel.cpp
 		PulseForgeEditor/Source/Private/EditorViewportToolbar.cpp
 		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
 		PulseForgeEditor/Source/Private/EditorLayout.cpp

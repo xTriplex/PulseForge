@@ -175,7 +175,12 @@ namespace
 
 	void TestEditorAssetSelectorPolicy(TestRunner& Tests)
 	{
+		using PulseForgeEditor::AssetHasExtension;
 		using PulseForgeEditor::AssetSelectorMatchesSearch;
+		const PulseForge::AssetRecord TextureAsset{
+			PulseForge::AssetID{}, std::filesystem::path("Assets/Textures/Stone_BaseColor.png") };
+		PF_CHECK(Tests, AssetHasExtension(TextureAsset, { ".png", ".jpg" }));
+		PF_CHECK(Tests, !AssetHasExtension(TextureAsset, { ".material" }));
 		PF_CHECK(Tests, AssetSelectorMatchesSearch("Assets/Textures/Stone_BaseColor.png", ""));
 		PF_CHECK(Tests, AssetSelectorMatchesSearch("Assets/Textures/Stone_BaseColor.png", "stone"));
 		PF_CHECK(Tests, AssetSelectorMatchesSearch("Assets/Textures/Stone_BaseColor.png", "TEXTURES"));
