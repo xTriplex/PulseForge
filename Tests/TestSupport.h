@@ -41,6 +41,8 @@ void RunEditorTests(TestRunner& Tests);
 void RunEditorViewportTests(TestRunner& Tests);
 void RunEditorStateTests(TestRunner& Tests);
 void RunAssetsTests(TestRunner& Tests);
+void RunAssetRegistryTests(TestRunner& Tests);
+void RunAssetOperationsTests(TestRunner& Tests);
 void RunDocumentsTests(TestRunner& Tests);
 void RunProjectRuntimeTests(TestRunner& Tests);
 void RunImportsTests(TestRunner& Tests);

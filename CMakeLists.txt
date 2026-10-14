@@ -429,6 +429,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
 		PulseForgeEditor/Source/Private/EditorLayout.cpp
 		PulseForgeEditor/Source/Private/EditorStyle.cpp
+		PulseForgeEditor/Source/Private/EditorWorkspacePresentation.cpp
 		PulseForge/Vendor/imgui/misc/freetype/imgui_freetype.cpp
 	)
 	target_include_directories(PulseForgeEditorUI PUBLIC
@@ -442,7 +443,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	target_compile_definitions(PulseForgeEditorUI PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorUI
 		PUBLIC PulseForge
-		PRIVATE PulseForgeImGui freetype shell32 ole32
+		PRIVATE PulseForgeEditorCore PulseForgeImGui freetype shell32 ole32
 	)
 	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
 		target_compile_definitions(PulseForgeEditorUI PRIVATE PF_EDITOR_RENDERER_OPENGL)
@@ -452,7 +453,6 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorMain.cpp
 		PulseForgeEditor/Source/Private/EditorApplication.cpp
 		PulseForgeEditor/Source/Private/EditorConsolePanel.cpp
-		PulseForgeEditor/Source/Private/EditorWorkspacePresentation.cpp
 	)
 	target_include_directories(PulseForgeEditor PRIVATE
 		PulseForgeEditor/Source/Public
@@ -952,6 +952,8 @@ if(BUILD_TESTING)
 		Tests/SceneTests.cpp
 		Tests/SceneAssetTests.cpp
 		Tests/AssetsTests.cpp
+		Tests/AssetRegistryTests.cpp
+		Tests/AssetOperationsTests.cpp
 		Tests/ImportsTests.cpp
 		Tests/RendererTests.cpp
 	)

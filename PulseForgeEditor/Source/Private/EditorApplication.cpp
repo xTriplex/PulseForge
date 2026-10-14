@@ -63,7 +63,6 @@
 #include "Editor/EditorDocumentHostPolicy.h"
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
-#include "Editor/EditorWorkspaceFrameState.h"
 #include "Editor/EditorSnapshotHistory.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
