@@ -1,4 +1,5 @@
 #include "EditorConsoleHistory.h"
+#include "Editor/EditorContentBrowserState.h"
 #include "EditorMaterialDraftStore.h"
 #include "EditorViewportCamera.h"
 #include "TestSupport.h"
@@ -1182,6 +1183,63 @@ namespace
 		PF_CHECK(Tests, Messages.empty());
 	}
 
+	void TestEditorContentBrowserState(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		EditorContentBrowserState Browser;
+		Browser.SetAssets({
+			{ AssetID{ 0, 1 }, "Assets/Textures/Sky/blue.png" },
+			{ AssetID{ 0, 2 }, "Assets/Textures/red.png" },
+			{ AssetID{ 0, 3 }, "Assets/Materials/metal.material" },
+			{ AssetID{ 0, 4 }, "Outside/loose.scene" }
+		});
+
+		const EditorContentFolderNode& Root = Browser.FolderRoot();
+		PF_CHECK(Tests, Root.Name == "Assets");
+		PF_CHECK(Tests, Root.Children.size() == 2);
+		PF_CHECK(Tests, Root.Children[0].Name == "Materials");
+		PF_CHECK(Tests, Root.Children[1].Name == "Textures");
+		PF_CHECK(Tests, Browser.FindFolder("Assets/Textures/Sky") != nullptr);
+		PF_CHECK(Tests, !Browser.IsKnownFolder("Assets/Missing"));
+		PF_CHECK(Tests, Browser.Assets().size() == 4);
+
+		Browser.RebuildFilteredAssetIndices();
+		PF_CHECK(Tests, Browser.FilteredAssetIndices().empty());
+
+		Browser.SetCurrentFolder("Assets/Textures");
+		Browser.RebuildFilteredAssetIndices();
+		PF_CHECK(Tests, Browser.FilteredAssetIndices().size() == 1);
+		PF_CHECK(Tests, Browser.Assets()[Browser.FilteredAssetIndices()[0]].ProjectRelativePath ==
+			"Assets/Textures/red.png");
+
+		Browser.SearchText() = "BLUE";
+		Browser.RebuildFilteredAssetIndices();
+		PF_CHECK(Tests, Browser.FilteredAssetIndices().size() == 1);
+		PF_CHECK(Tests, Browser.Assets()[Browser.FilteredAssetIndices()[0]].ID == AssetID(0, 1));
+
+		Browser.SelectedFolder() = std::filesystem::path("Assets/Textures/Sky");
+		Browser.RebaseFoldersAfterMove("Assets/Textures", "Assets/Art/Textures");
+		PF_CHECK(Tests, Browser.CurrentFolder() == "Assets/Art/Textures");
+		PF_CHECK(Tests, Browser.SelectedFolder() &&
+			*Browser.SelectedFolder() == "Assets/Art/Textures/Sky");
+
+		Browser.SetAssets({ { AssetID{ 0, 3 }, "Assets/Materials/metal.material" } });
+		PF_CHECK(Tests, Browser.CurrentFolder() == "Assets");
+		PF_CHECK(Tests, !Browser.SelectedFolder());
+		Browser.GridView() = false;
+		Browser.ResetNavigation();
+		PF_CHECK(Tests, Browser.CurrentFolder() == "Assets");
+		PF_CHECK(Tests, Browser.SearchText().empty());
+		PF_CHECK(Tests, Browser.IsGridView());
+
+		Browser.SelectedAsset() = AssetID{ 0, 3 };
+		Browser.ClearProject();
+		PF_CHECK(Tests, Browser.Assets().empty());
+		PF_CHECK(Tests, !Browser.SelectedAsset());
+		PF_CHECK(Tests, Browser.FolderRoot().Children.empty());
+	}
+
 	void TestEditorMaterialDraftStore(TestRunner& Tests)
 	{
 		PulseForgeEditor::EditorMaterialDraftStore Drafts;
@@ -1246,6 +1304,7 @@ void RunEditorTests(TestRunner& Tests)
 	TestEditorViewportMath(Tests);
 	TestEditorViewportCameraController(Tests);
 	TestEditorConsoleHistory(Tests);
+	TestEditorContentBrowserState(Tests);
 	TestEditorMaterialDraftStore(Tests);
 	TestEditorWorkspacePanelState(Tests);
 	TestEditorDeferredOperationQueue(Tests);

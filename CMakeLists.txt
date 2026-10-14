@@ -299,6 +299,7 @@ include(CTest)
 if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 	add_library(PulseForgeEditorCore STATIC
 		PulseForgeEditor/Source/Private/EditorConsoleHistory.cpp
+		PulseForgeEditor/Source/Private/EditorContentBrowserState.cpp
 		PulseForgeEditor/Source/Private/EditorMaterialDraftStore.cpp
 		PulseForgeEditor/Source/Private/EditorProjectOpening.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentManager.cpp

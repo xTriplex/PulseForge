@@ -42,6 +42,7 @@
 #include "EditorMaterialDraftStore.h"
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorContentBrowserPolicy.h"
+#include "Editor/EditorContentBrowserState.h"
 #include "Editor/EditorAssetDestinationPolicy.h"
 #include "Editor/EditorAssetSelectorPolicy.h"
 #include "Editor/EditorProjectOpening.h"
@@ -512,12 +513,7 @@ namespace
 			std::vector<uint32_t> Indices;
 		};
 
-		struct ContentFolderNode
-		{
-			std::string Name;
-			std::filesystem::path RelativePath;
-			std::vector<ContentFolderNode> Children;
-		};
+		using ContentFolderNode = PulseForgeEditor::EditorContentFolderNode;
 
 		struct EntityClipboard
 		{
@@ -1376,8 +1372,7 @@ namespace
 					Folder && *Folder)
 				{
 					const std::filesystem::path RequestedFolder = std::filesystem::u8path(Folder);
-					if (IsKnownContentFolder(RequestedFolder))
-						m_CurrentContentFolder = RequestedFolder;
+					m_ContentBrowser.SetCurrentFolder(RequestedFolder);
 				}
 				if (ImGuiWindow* ContentBrowser = ImGui::FindWindowByName("Content Browser"); ContentBrowser)
 				{
@@ -2440,8 +2435,8 @@ namespace
 				{
 					if (ContentBrowser)
 					{
-						if (m_SelectedAsset)
-							DuplicateAsset(*m_SelectedAsset);
+						if (m_ContentBrowser.SelectedAsset())
+							DuplicateAsset(*m_ContentBrowser.SelectedAsset());
 					}
 					else
 						DuplicateSelectedEntity();
@@ -2462,14 +2457,14 @@ namespace
 				{
 					if (ContentBrowser)
 					{
-						if (m_SelectedAsset)
-							RequestDeleteAsset(*m_SelectedAsset);
+						if (m_ContentBrowser.SelectedAsset())
+							RequestDeleteAsset(*m_ContentBrowser.SelectedAsset());
 					}
 					else
 						DeleteSelectedEntity();
 				}
-				else if (ImGui::IsKeyPressed(ImGuiKey_F2, false) && ContentBrowser && m_SelectedAsset)
-					MoveAsset(*m_SelectedAsset);
+				else if (ImGui::IsKeyPressed(ImGuiKey_F2, false) && ContentBrowser && m_ContentBrowser.SelectedAsset())
+					MoveAsset(*m_ContentBrowser.SelectedAsset());
 				else if (ImGui::IsKeyPressed(ImGuiKey_F2, false) && m_SelectedEntity && !ContentBrowser)
 				{
 					m_FocusEntityNameNextFrame = true;
@@ -2677,7 +2672,7 @@ namespace
 			m_Scene = std::move(NewScene);
 			m_SceneAsset = MainSceneRecord.ID;
 			SelectSingleEntity(std::nullopt);
-			m_SelectedAsset = MainSceneRecord.ID;
+			m_ContentBrowser.SelectedAsset() = MainSceneRecord.ID;
 			m_PendingDeleteAsset.reset();
 			m_OpenDeleteAssetDialog = false;
 			ResetSceneHistory();
@@ -2743,7 +2738,7 @@ namespace
 			m_Scene = std::move(Opened->StartupScene);
 			m_SceneAsset = Opened->StartupSceneAsset;
 			SelectSingleEntity(std::nullopt);
-			m_SelectedAsset = Opened->StartupSceneAsset;
+			m_ContentBrowser.SelectedAsset() = Opened->StartupSceneAsset;
 			m_PendingDeleteAsset.reset();
 			m_OpenDeleteAssetDialog = false;
 			ResetSceneHistory();
@@ -4513,7 +4508,7 @@ namespace
 			}
 
 			UpdateAssetList();
-			m_SelectedAsset = Imported->ID;
+			m_ContentBrowser.SelectedAsset() = Imported->ID;
 			SetStatus(
 				"Imported " + PathToUtf8(Imported->ProjectRelativePath) +
 				" (UUID " + Imported->ID.ToString() + ").");
@@ -4724,7 +4719,7 @@ namespace
 					m_AssetDestinationSearch.data(), m_AssetDestinationSearch.size());
 
 				std::vector<std::filesystem::path> Folders;
-				CollectContentFolders(m_ContentFolderRoot, Folders);
+				CollectContentFolders(m_ContentBrowser.FolderRoot(), Folders);
 				std::string Search = m_AssetDestinationSearch.data();
 				std::transform(Search.begin(), Search.end(), Search.begin(), [](unsigned char Character)
 				{
@@ -4925,7 +4920,7 @@ namespace
 			}
 
 			UpdateAssetList();
-			m_SelectedAsset = Moved->ID;
+			m_ContentBrowser.SelectedAsset() = Moved->ID;
 			SetStatus("Moved " + PathToUtf8(Moved->ProjectRelativePath) + ".");
 		}
 
@@ -4948,24 +4943,7 @@ namespace
 				return;
 			}
 
-			const auto RebaseFolder = [&Source, &Moved](const std::filesystem::path& Folder)
-				-> std::optional<std::filesystem::path>
-			{
-				if (Folder == Source)
-					return *Moved;
-				const std::filesystem::path Relative = Folder.lexically_relative(Source);
-				if (Relative.empty() || Relative.is_absolute() ||
-					(Relative.begin() != Relative.end() && *Relative.begin() == ".."))
-				{
-					return std::nullopt;
-				}
-				return *Moved / Relative;
-			};
-			if (const auto Rebased = RebaseFolder(m_CurrentContentFolder))
-				m_CurrentContentFolder = *Rebased;
-			if (m_SelectedContentFolder)
-				if (const auto Rebased = RebaseFolder(*m_SelectedContentFolder))
-					m_SelectedContentFolder = *Rebased;
+			m_ContentBrowser.RebaseFoldersAfterMove(Source, *Moved);
 
 			UpdateAssetList();
 			SetStatus("Moved folder to " + PathToUtf8(*Moved) + ". Asset identities were preserved.");
@@ -5007,7 +4985,7 @@ namespace
 			}
 
 			UpdateAssetList();
-			m_SelectedAsset = Duplicated->ID;
+			m_ContentBrowser.SelectedAsset() = Duplicated->ID;
 			SetStatus(
 				"Duplicated " + PathToUtf8(Duplicated->ProjectRelativePath) +
 				" (new UUID " + Duplicated->ID.ToString() + ").");
@@ -5055,7 +5033,7 @@ namespace
 				if (Created.error().CommittedAsset)
 				{
 					UpdateAssetList();
-					m_SelectedAsset = Created.error().CommittedAsset->ID;
+					m_ContentBrowser.SelectedAsset() = Created.error().CommittedAsset->ID;
 					SetWarning(
 						"Prefab was created with UUID " + Created.error().CommittedAsset->ID.ToString() +
 						", but temporary cleanup failed: " + Message);
@@ -5068,7 +5046,7 @@ namespace
 			}
 
 			UpdateAssetList();
-			m_SelectedAsset = Created->ID;
+			m_ContentBrowser.SelectedAsset() = Created->ID;
 			SetStatus(
 				"Created prefab " + PathToUtf8(Created->ProjectRelativePath) +
 				" (UUID " + Created->ID.ToString() + ").");
@@ -5222,8 +5200,8 @@ namespace
 				return;
 			if (DeletedMaterial)
 				ForgetMaterialDraft(Identifier);
-			if (m_SelectedAsset && *m_SelectedAsset == Identifier)
-				m_SelectedAsset.reset();
+			if (m_ContentBrowser.SelectedAsset() && *m_ContentBrowser.SelectedAsset() == Identifier)
+				m_ContentBrowser.SelectedAsset().reset();
 			SetStatus("Deleted asset " + Identifier.ToString() + ".");
 		}
 
@@ -5407,7 +5385,7 @@ namespace
 			ResetEditorViewportCamera();
 			m_Scene = std::move(Loaded);
 			m_SceneAsset = Identifier;
-			m_SelectedAsset = Identifier;
+			m_ContentBrowser.SelectedAsset() = Identifier;
 			SelectSingleEntity(std::nullopt);
 			ResetSceneHistory();
 			const auto Record = m_Project->GetAssetRegistry().Find(Identifier);
@@ -5567,10 +5545,8 @@ namespace
 			ClearScene();
 			ResetViewportSceneRenderer();
 			m_Project.reset();
-			m_Assets.clear();
+			m_ContentBrowser.ClearProject();
 			m_AssetBrowserPresentations.clear();
-			ResetContentBrowserNavigation();
-			RebuildContentFolderTree();
 			SetStatus("Project closed.");
 		}
 
@@ -5718,7 +5694,7 @@ namespace
 				if (ImGui::BeginMenu("Open Scene", m_Project.has_value()))
 				{
 					bool HasScenes = false;
-					for (const PulseForge::AssetRecord& Asset : m_Assets)
+					for (const PulseForge::AssetRecord& Asset : m_ContentBrowser.Assets())
 					{
 						if (Asset.ProjectRelativePath.extension() != ".scene")
 							continue;
@@ -10350,7 +10326,7 @@ namespace
 			bool HasVisibleCandidates = false;
 			if (m_Project)
 			{
-				for (const PulseForge::AssetRecord& Asset : m_Assets)
+				for (const PulseForge::AssetRecord& Asset : m_ContentBrowser.Assets())
 				{
 					if (!IsAssetExtension(Asset, Extensions))
 						continue;
@@ -10416,7 +10392,7 @@ namespace
 				if (EnvironmentLight && !EnvironmentLight->has_value() && ImGui::BeginMenu("Environment Light"))
 				{
 					bool HasHdrImages = false;
-					for (const PulseForge::AssetRecord& Asset : m_Assets)
+					for (const PulseForge::AssetRecord& Asset : m_ContentBrowser.Assets())
 					{
 						if (!IsAssetExtension(Asset, { ".hdr" }))
 							continue;
@@ -10453,7 +10429,7 @@ namespace
 				if (Mesh && !Mesh->has_value() && ImGui::BeginMenu("Mesh Renderer"))
 				{
 					bool HasMeshAssets = false;
-					for (const PulseForge::AssetRecord& Asset : m_Assets)
+					for (const PulseForge::AssetRecord& Asset : m_ContentBrowser.Assets())
 					{
 						if (!IsAssetExtension(Asset, { ".gltf", ".glb" }))
 							continue;
@@ -10476,7 +10452,7 @@ namespace
 				if (AudioSource && !AudioSource->has_value() && ImGui::BeginMenu("Audio Source"))
 				{
 					bool HasAudioAssets = false;
-					for (const PulseForge::AssetRecord& Asset : m_Assets)
+					for (const PulseForge::AssetRecord& Asset : m_ContentBrowser.Assets())
 					{
 						if (!IsAssetExtension(Asset, { ".wav", ".mp3", ".flac", ".ogg" }))
 							continue;
@@ -10499,7 +10475,7 @@ namespace
 				if (Script && !Script->has_value() && ImGui::BeginMenu("Script"))
 				{
 					bool HasScripts = false;
-					for (const PulseForge::AssetRecord& Asset : m_Assets)
+					for (const PulseForge::AssetRecord& Asset : m_ContentBrowser.Assets())
 					{
 						if (!IsAssetExtension(Asset, { ".lua" }))
 							continue;
@@ -11016,81 +10992,12 @@ namespace
 
 		void ResetContentBrowserNavigation()
 		{
-			m_CurrentContentFolder = "Assets";
-			m_ContentSearch.clear();
-			m_ContentGridView = true;
-		}
-
-		void RebuildContentFolderTree()
-		{
-			m_ContentFolderRoot = { "Assets", "Assets", {} };
-			for (const PulseForge::AssetRecord& Asset : m_Assets)
-			{
-				const std::filesystem::path Normalized = Asset.ProjectRelativePath.lexically_normal();
-				const std::filesystem::path ParentPath = Normalized.parent_path();
-				auto Component = ParentPath.begin();
-				if (Component == ParentPath.end() || *Component != "Assets")
-					continue;
-				++Component;
-				std::filesystem::path CurrentPath = "Assets";
-				ContentFolderNode* CurrentNode = &m_ContentFolderRoot;
-				for (; Component != ParentPath.end(); ++Component)
-				{
-					CurrentPath /= *Component;
-					auto Child = std::find_if(CurrentNode->Children.begin(), CurrentNode->Children.end(),
-						[&Component](const ContentFolderNode& Candidate)
-						{
-							return Candidate.Name == PathToUtf8(*Component);
-						});
-					if (Child == CurrentNode->Children.end())
-					{
-						CurrentNode->Children.push_back({ PathToUtf8(*Component), CurrentPath, {} });
-						Child = std::prev(CurrentNode->Children.end());
-					}
-					CurrentNode = &*Child;
-				}
-			}
-
-			const auto SortChildren = [](auto&& Self, ContentFolderNode& Node) -> void
-			{
-				std::sort(Node.Children.begin(), Node.Children.end(), [](const ContentFolderNode& Left,
-					const ContentFolderNode& Right)
-				{
-					return Left.Name < Right.Name;
-				});
-				for (ContentFolderNode& Child : Node.Children)
-					Self(Self, Child);
-			};
-			SortChildren(SortChildren, m_ContentFolderRoot);
-			if (!IsKnownContentFolder(m_CurrentContentFolder))
-				m_CurrentContentFolder = "Assets";
+			m_ContentBrowser.ResetNavigation();
 		}
 
 		bool IsKnownContentFolder(const std::filesystem::path& Folder) const
 		{
-			const auto ContainsFolder = [](auto&& Self, const ContentFolderNode& Node,
-				const std::filesystem::path& Candidate) -> bool
-			{
-				if (Node.RelativePath == Candidate)
-					return true;
-				return std::any_of(Node.Children.begin(), Node.Children.end(), [&](const ContentFolderNode& Child)
-				{
-					return Self(Self, Child, Candidate);
-				});
-			};
-			return ContainsFolder(ContainsFolder, m_ContentFolderRoot, Folder.lexically_normal());
-		}
-
-		const ContentFolderNode* FindContentFolderNode(
-			const ContentFolderNode& Node,
-			const std::filesystem::path& Folder) const
-		{
-			if (Node.RelativePath.lexically_normal() == Folder.lexically_normal())
-				return &Node;
-			for (const ContentFolderNode& Child : Node.Children)
-				if (const ContentFolderNode* Found = FindContentFolderNode(Child, Folder))
-					return Found;
-			return nullptr;
+			return m_ContentBrowser.IsKnownFolder(Folder);
 		}
 
 		void DrawContentFolderNode(
@@ -11101,20 +11008,20 @@ namespace
 			if (IsRoot)
 				ImGui::SetNextItemOpen(true, ImGuiCond_Once);
 			ImGuiTreeNodeFlags Flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
-			if (Node.RelativePath == m_CurrentContentFolder)
+			if (Node.RelativePath == m_ContentBrowser.CurrentFolder())
 				Flags |= ImGuiTreeNodeFlags_Selected;
 			if (Node.Children.empty())
 				Flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
 			const std::string StableID = PathToUtf8(Node.RelativePath);
 			const bool IsOpen = m_EditorStyle.TreeNode(
-				Node.RelativePath == m_CurrentContentFolder
+				Node.RelativePath == m_ContentBrowser.CurrentFolder()
 					? PulseForgeEditor::EditorIcon::FolderOpen
 					: PulseForgeEditor::EditorIcon::Folder,
 				Node.Name,
 				StableID,
 				Flags);
 			if (ImGui::IsItemClicked())
-				m_CurrentContentFolder = Node.RelativePath;
+				m_ContentBrowser.SetCurrentFolder(Node.RelativePath);
 			BeginFolderDragSource(Node.RelativePath, Node.Name);
 			HandleManagedFolderDropTarget(Node.RelativePath, DeferredAction);
 			if (IsOpen && !Node.Children.empty())
@@ -11195,7 +11102,7 @@ namespace
 		{
 			std::vector<std::pair<std::filesystem::path, std::string>> Breadcrumbs;
 			std::filesystem::path Breadcrumb = "Assets";
-			for (auto Component = m_CurrentContentFolder.begin(); Component != m_CurrentContentFolder.end(); ++Component)
+			for (auto Component = m_ContentBrowser.CurrentFolder().begin(); Component != m_ContentBrowser.CurrentFolder().end(); ++Component)
 			{
 				if (*Component == "Assets")
 					continue;
@@ -11204,7 +11111,7 @@ namespace
 			}
 
 			if (ImGui::SmallButton("Assets##BreadcrumbRoot"))
-				m_CurrentContentFolder = "Assets";
+				m_ContentBrowser.SetCurrentFolder("Assets");
 			if (Breadcrumbs.empty())
 				return;
 
@@ -11221,8 +11128,8 @@ namespace
 					{
 						const std::filesystem::path& Path = BreadcrumbEntry.first;
 						const std::string FullPath = PathToUtf8(Path);
-						if (ImGui::Selectable(FullPath.c_str(), Path == m_CurrentContentFolder))
-							m_CurrentContentFolder = Path;
+						if (ImGui::Selectable(FullPath.c_str(), Path == m_ContentBrowser.CurrentFolder()))
+							m_ContentBrowser.SetCurrentFolder(Path);
 					}
 					ImGui::EndPopup();
 				}
@@ -11237,9 +11144,9 @@ namespace
 			const std::string CurrentLabel = (VisibleLabel.empty() ? "..." : VisibleLabel) +
 				"##BreadcrumbCurrent";
 			if (ImGui::SmallButton(CurrentLabel.c_str()))
-				m_CurrentContentFolder = Breadcrumbs.back().first;
+				m_ContentBrowser.SetCurrentFolder(Breadcrumbs.back().first);
 			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("%s", PathToUtf8(m_CurrentContentFolder).c_str());
+				ImGui::SetTooltip("%s", PathToUtf8(m_ContentBrowser.CurrentFolder()).c_str());
 		}
 
 		void HandleAssetBrowserItem(
@@ -11250,7 +11157,7 @@ namespace
 		{
 			if (Activated)
 			{
-				m_SelectedAsset = Asset.ID;
+				m_ContentBrowser.SelectedAsset() = Asset.ID;
 				switch (PulseForgeEditor::ResolveAssetBrowserOpenAction(
 					Presentation.Extension,
 					Activated,
@@ -11281,7 +11188,7 @@ namespace
 			if (!ImGui::BeginPopupContextItem("Asset Actions"))
 				return;
 
-			m_SelectedAsset = Asset.ID;
+			m_ContentBrowser.SelectedAsset() = Asset.ID;
 			const PulseForge::AssetID Identifier = Asset.ID;
 			if (Presentation.Extension == ".material" && m_EditorStyle.MenuItem(
 				PulseForgeEditor::EditorIcon::Material, "Show Material Details"))
@@ -11317,7 +11224,7 @@ namespace
 
 			m_MaterialDetailsAsset = Identifier;
 			MarkDocumentWorkspaceDirty();
-			m_SelectedAsset = Identifier;
+			m_ContentBrowser.SelectedAsset() = Identifier;
 			SetEditorPanelVisible(PulseForgeEditor::EditorPanel::MaterialDetails, true);
 		}
 
@@ -11339,15 +11246,15 @@ namespace
 				ImGui::PushID(StableID.c_str());
 				ImGui::TableNextRow();
 				ImGui::TableSetColumnIndex(0);
-				const bool IsSelected = m_SelectedContentFolder &&
-					m_SelectedContentFolder->lexically_normal() == Folder.RelativePath.lexically_normal();
+				const bool IsSelected = m_ContentBrowser.SelectedFolder() &&
+					m_ContentBrowser.SelectedFolder()->lexically_normal() == Folder.RelativePath.lexically_normal();
 				const bool Activated = m_EditorStyle.Selectable(PulseForgeEditor::EditorIcon::Folder,
 					Folder.Name, IsSelected, ImGuiSelectableFlags_AllowDoubleClick | ImGuiSelectableFlags_SpanAllColumns);
 				if (Activated)
 				{
-					m_SelectedContentFolder = Folder.RelativePath;
+					m_ContentBrowser.SelectedFolder() = Folder.RelativePath;
 					if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-						m_CurrentContentFolder = Folder.RelativePath;
+						m_ContentBrowser.SetCurrentFolder(Folder.RelativePath);
 				}
 				BeginFolderDragSource(Folder.RelativePath, Folder.Name);
 				HandleManagedFolderDropTarget(Folder.RelativePath, DeferredAction);
@@ -11395,17 +11302,17 @@ namespace
 						const ContentFolderNode& Folder = Folders[Index];
 						const std::string StableID = PathToUtf8(Folder.RelativePath);
 						ImGui::PushID(StableID.c_str());
-						const bool IsSelected = m_SelectedContentFolder &&
-							m_SelectedContentFolder->lexically_normal() == Folder.RelativePath.lexically_normal();
+						const bool IsSelected = m_ContentBrowser.SelectedFolder() &&
+							m_ContentBrowser.SelectedFolder()->lexically_normal() == Folder.RelativePath.lexically_normal();
 						const bool Activated = m_EditorStyle.AssetTile(PulseForgeEditor::EditorIcon::Folder,
 							Folder.Name, IsSelected,
 							ImVec2((std::max)(ImGui::GetContentRegionAvail().x - 2.0f, 1.0f), TileHeight),
 							ImGuiSelectableFlags_AllowDoubleClick);
 						if (Activated)
 						{
-							m_SelectedContentFolder = Folder.RelativePath;
+							m_ContentBrowser.SelectedFolder() = Folder.RelativePath;
 							if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-								m_CurrentContentFolder = Folder.RelativePath;
+								m_ContentBrowser.SetCurrentFolder(Folder.RelativePath);
 						}
 						BeginFolderDragSource(Folder.RelativePath, Folder.Name);
 						HandleManagedFolderDropTarget(Folder.RelativePath, DeferredAction);
@@ -11420,7 +11327,7 @@ namespace
 
 		void DrawAssetList(std::function<void()>& DeferredAction)
 		{
-			if (m_FilteredAssetIndices.empty())
+			if (m_ContentBrowser.FilteredAssetIndices().empty())
 				return;
 
 			if (!ImGui::BeginTable("ManagedAssetList", 2,
@@ -11430,18 +11337,18 @@ namespace
 			ImGui::TableSetupColumn("Asset", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 			ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 72.0f);
 			ImGuiListClipper Clipper;
-			Clipper.Begin(static_cast<int>(m_FilteredAssetIndices.size()));
+			Clipper.Begin(static_cast<int>(m_ContentBrowser.FilteredAssetIndices().size()));
 			while (Clipper.Step())
 			{
 				for (int Row = Clipper.DisplayStart; Row < Clipper.DisplayEnd; ++Row)
 				{
-					const size_t AssetIndex = m_FilteredAssetIndices[static_cast<size_t>(Row)];
-					const PulseForge::AssetRecord& Asset = m_Assets[AssetIndex];
+					const size_t AssetIndex = m_ContentBrowser.FilteredAssetIndices()[static_cast<size_t>(Row)];
+					const PulseForge::AssetRecord& Asset = m_ContentBrowser.Assets()[AssetIndex];
 					const AssetBrowserPresentation& Presentation = m_AssetBrowserPresentations[AssetIndex];
 					ImGui::PushID(Presentation.Identifier.c_str());
 					ImGui::TableNextRow();
 					ImGui::TableSetColumnIndex(0);
-					const bool IsSelected = m_SelectedAsset && *m_SelectedAsset == Asset.ID;
+					const bool IsSelected = m_ContentBrowser.SelectedAsset() && *m_ContentBrowser.SelectedAsset() == Asset.ID;
 					const bool Activated = m_EditorStyle.Selectable(Presentation.Icon, Presentation.Name, IsSelected,
 						ImGuiSelectableFlags_AllowDoubleClick);
 					HandleAssetBrowserItem(Asset, Presentation, Activated, DeferredAction);
@@ -11456,7 +11363,7 @@ namespace
 
 		void DrawAssetGrid(std::function<void()>& DeferredAction)
 		{
-			if (m_FilteredAssetIndices.empty())
+			if (m_ContentBrowser.FilteredAssetIndices().empty())
 				return;
 
 			const float AvailableWidth = ImGui::GetContentRegionAvail().x;
@@ -11464,7 +11371,7 @@ namespace
 			const float Spacing = ImGui::GetStyle().ItemSpacing.x;
 			const int ColumnCount = (std::max)(1, static_cast<int>((AvailableWidth + Spacing) /
 				(DesiredTileWidth + Spacing)));
-			const int RowCount = static_cast<int>((m_FilteredAssetIndices.size() +
+			const int RowCount = static_cast<int>((m_ContentBrowser.FilteredAssetIndices().size() +
 				static_cast<size_t>(ColumnCount) - 1) / static_cast<size_t>(ColumnCount));
 			if (!ImGui::BeginTable("ManagedAssetGrid", ColumnCount,
 				ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings |
@@ -11483,14 +11390,14 @@ namespace
 					{
 						const size_t AssetIndex = static_cast<size_t>(Row) * static_cast<size_t>(ColumnCount) +
 							static_cast<size_t>(Column);
-						if (AssetIndex >= m_FilteredAssetIndices.size())
+						if (AssetIndex >= m_ContentBrowser.FilteredAssetIndices().size())
 							break;
 						ImGui::TableSetColumnIndex(Column);
-						const size_t SourceIndex = m_FilteredAssetIndices[AssetIndex];
-						const PulseForge::AssetRecord& Asset = m_Assets[SourceIndex];
+						const size_t SourceIndex = m_ContentBrowser.FilteredAssetIndices()[AssetIndex];
+						const PulseForge::AssetRecord& Asset = m_ContentBrowser.Assets()[SourceIndex];
 						const AssetBrowserPresentation& Presentation = m_AssetBrowserPresentations[SourceIndex];
 						ImGui::PushID(Presentation.Identifier.c_str());
-						const bool IsSelected = m_SelectedAsset && *m_SelectedAsset == Asset.ID;
+						const bool IsSelected = m_ContentBrowser.SelectedAsset() && *m_ContentBrowser.SelectedAsset() == Asset.ID;
 						uint64_t PreviewID = 0;
 						uint32_t PreviewWidth = 0;
 						uint32_t PreviewHeight = 0;
@@ -11536,12 +11443,12 @@ namespace
 
 		void DrawSelectedAssetDetails()
 		{
-			if (!m_SelectedAsset || !m_Project)
+			if (!m_ContentBrowser.SelectedAsset() || !m_Project)
 				return;
-			const auto Asset = m_Project->GetAssetRegistry().Find(*m_SelectedAsset);
+			const auto Asset = m_Project->GetAssetRegistry().Find(*m_ContentBrowser.SelectedAsset());
 			if (!Asset)
 			{
-				m_SelectedAsset.reset();
+				m_ContentBrowser.SelectedAsset().reset();
 				return;
 			}
 
@@ -11996,7 +11903,7 @@ namespace
 					{
 						const float FolderWidth = std::clamp(Available.x * 0.24f, 145.0f, 205.0f);
 						ImGui::BeginChild("ContentFolderTree", ImVec2(FolderWidth, 0.0f), ImGuiChildFlags_Borders);
-						DrawContentFolderNode(m_ContentFolderRoot, DeferredAction, true);
+						DrawContentFolderNode(m_ContentBrowser.FolderRoot(), DeferredAction, true);
 						ImGui::EndChild();
 						ImGui::SameLine(0.0f, 6.0f);
 					}
@@ -12006,18 +11913,18 @@ namespace
 						DrawContentBreadcrumbs();
 					else
 					{
-						const std::string CurrentFolder = PathToUtf8(m_CurrentContentFolder);
+						const std::string CurrentFolder = PathToUtf8(m_ContentBrowser.CurrentFolder());
 						if (ImGui::BeginCombo("##ContentFolder", CurrentFolder.c_str()))
 						{
 							const auto DrawFolderOptions = [this](auto&& Self, const ContentFolderNode& Node) -> void
 							{
 								const std::string Path = PathToUtf8(Node.RelativePath);
-								if (ImGui::Selectable(Path.c_str(), Node.RelativePath == m_CurrentContentFolder))
-									m_CurrentContentFolder = Node.RelativePath;
+								if (ImGui::Selectable(Path.c_str(), Node.RelativePath == m_ContentBrowser.CurrentFolder()))
+									m_ContentBrowser.SetCurrentFolder(Node.RelativePath);
 								for (const ContentFolderNode& Child : Node.Children)
 									Self(Self, Child);
 							};
-							DrawFolderOptions(DrawFolderOptions, m_ContentFolderRoot);
+							DrawFolderOptions(DrawFolderOptions, m_ContentBrowser.FolderRoot());
 							ImGui::EndCombo();
 						}
 					}
@@ -12045,42 +11952,35 @@ namespace
 							ImGui::SetKeyboardFocusHere();
 							m_FocusContentSearchNextFrame = false;
 						}
-						ImGui::InputTextWithHint("##AssetSearch", "Search assets...", &m_ContentSearch);
+						ImGui::InputTextWithHint("##AssetSearch", "Search assets...", &m_ContentBrowser.SearchText());
 						ImGui::SameLine();
 						if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Grid, "Grid", "AssetGridMode",
-							"Grid view", m_ContentGridView))
-							m_ContentGridView = true;
+							"Grid view", m_ContentBrowser.GridView()))
+							m_ContentBrowser.GridView() = true;
 						ImGui::SameLine();
 						if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::List, "List", "AssetListMode",
-							"List view", !m_ContentGridView))
-							m_ContentGridView = false;
+							"List view", !m_ContentBrowser.GridView()))
+							m_ContentBrowser.GridView() = false;
 					}
 					m_EditorStyle.EndToolbar();
 
-					m_FilteredAssetIndices.clear();
-					for (size_t Index = 0; Index < m_Assets.size(); ++Index)
-					{
-						if (!PulseForgeEditor::MatchesManagedAssetFolderSearch(
-							m_Assets[Index].ProjectRelativePath, m_CurrentContentFolder, m_ContentSearch))
-							continue;
-						m_FilteredAssetIndices.push_back(Index);
-					}
+					m_ContentBrowser.RebuildFilteredAssetIndices();
 
 					const ContentFolderNode* CurrentFolderNode =
-						FindContentFolderNode(m_ContentFolderRoot, m_CurrentContentFolder);
-					const bool ShowFolderTiles = m_ContentSearch.empty() && CurrentFolderNode &&
+						m_ContentBrowser.FindFolder(m_ContentBrowser.CurrentFolder());
+					const bool ShowFolderTiles = m_ContentBrowser.SearchText().empty() && CurrentFolderNode &&
 						!CurrentFolderNode->Children.empty();
 					const std::vector<ContentFolderNode>* VisibleFolders = ShowFolderTiles
 						? &CurrentFolderNode->Children : nullptr;
 					bool SelectedAssetVisible = false;
-					if (m_SelectedAsset)
-						SelectedAssetVisible = std::any_of(m_FilteredAssetIndices.begin(), m_FilteredAssetIndices.end(),
-							[this](size_t Index) { return m_Assets[Index].ID == *m_SelectedAsset; });
+					if (m_ContentBrowser.SelectedAsset())
+						SelectedAssetVisible = std::any_of(m_ContentBrowser.FilteredAssetIndices().begin(), m_ContentBrowser.FilteredAssetIndices().end(),
+							[this](size_t Index) { return m_ContentBrowser.Assets()[Index].ID == *m_ContentBrowser.SelectedAsset(); });
 
 					bool SelectedMaterial = false;
-					if (SelectedAssetVisible && m_SelectedAsset)
+					if (SelectedAssetVisible && m_ContentBrowser.SelectedAsset())
 					{
-						const auto SelectedRecord = m_Project->GetAssetRegistry().Find(*m_SelectedAsset);
+						const auto SelectedRecord = m_Project->GetAssetRegistry().Find(*m_ContentBrowser.SelectedAsset());
 						SelectedMaterial = SelectedRecord &&
 							NormalizedExtension(SelectedRecord->ProjectRelativePath) == ".material";
 					}
@@ -12094,20 +11994,20 @@ namespace
 						ImGuiChildFlags_None);
 					if (VisibleFolders && !VisibleFolders->empty())
 					{
-						if (m_ContentGridView)
+						if (m_ContentBrowser.GridView())
 							DrawFolderGrid(*VisibleFolders, DeferredAction);
 						else
 							DrawFolderList(*VisibleFolders, DeferredAction);
-						if (!m_FilteredAssetIndices.empty())
+						if (!m_ContentBrowser.FilteredAssetIndices().empty())
 							ImGui::Separator();
 					}
-					if (m_ContentGridView)
+					if (m_ContentBrowser.GridView())
 						DrawAssetGrid(DeferredAction);
 					else
 						DrawAssetList(DeferredAction);
-					if ((!VisibleFolders || VisibleFolders->empty()) && m_FilteredAssetIndices.empty())
+					if ((!VisibleFolders || VisibleFolders->empty()) && m_ContentBrowser.FilteredAssetIndices().empty())
 						m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Search,
-							m_Assets.empty() ? "The project has no managed assets." :
+							m_ContentBrowser.Assets().empty() ? "The project has no managed assets." :
 							"No assets or folders match this location.");
 					ImGui::EndChild();
 					const bool HasDeferredAction = static_cast<bool>(DeferredAction);
@@ -12115,10 +12015,10 @@ namespace
 						DeferredAction();
 					if (!HasDeferredAction && SelectedAssetVisible && VerticalLayout.SelectionSummaryHeight > 0.0f)
 					{
-						const auto SelectedRecord = m_Project->GetAssetRegistry().Find(*m_SelectedAsset);
+						const auto SelectedRecord = m_Project->GetAssetRegistry().Find(*m_ContentBrowser.SelectedAsset());
 						std::string SelectedName = SelectedRecord
 							? PathToUtf8(SelectedRecord->ProjectRelativePath.filename()) : "Selected asset";
-						if (SelectedMaterial && m_MaterialDraftStore.IsDirty(GetMaterialDraftKey(*m_SelectedAsset)))
+						if (SelectedMaterial && m_MaterialDraftStore.IsDirty(GetMaterialDraftKey(*m_ContentBrowser.SelectedAsset())))
 							SelectedName += " — Unsaved draft";
 						const float ActionWidth = SelectedMaterial ? 154.0f : 112.0f;
 						const float SummaryWidth = (std::max)(
@@ -12136,7 +12036,7 @@ namespace
 						if (SelectedMaterial)
 						{
 							if (ImGui::Button("Open Material Details", ImVec2(ActionWidth, 0.0f)))
-								ShowMaterialDetails(*m_SelectedAsset);
+								ShowMaterialDetails(*m_ContentBrowser.SelectedAsset());
 						}
 						else if (ImGui::SmallButton(m_ContentDetailsExpandedCompact ? "Hide Details" : "Details"))
 							m_ContentDetailsExpandedCompact = !m_ContentDetailsExpandedCompact;
@@ -12232,15 +12132,14 @@ namespace
 			m_AssetPreviewAssetsPending = true;
 			m_PickingMeshCache.clear();
 			m_PickingMeshErrors.clear();
-			if (m_Project)
-				m_Assets = m_Project->GetAssetRegistry().GetAssets();
-			else
-				m_Assets.clear();
+			m_ContentBrowser.SetAssets(m_Project
+				? m_Project->GetAssetRegistry().GetAssets()
+				: std::vector<PulseForge::AssetRecord>{});
 			SynchronizeOpenDocumentAssetLocations();
 
 			m_AssetBrowserPresentations.clear();
-			m_AssetBrowserPresentations.reserve(m_Assets.size());
-			for (const PulseForge::AssetRecord& Asset : m_Assets)
+			m_AssetBrowserPresentations.reserve(m_ContentBrowser.Assets().size());
+			for (const PulseForge::AssetRecord& Asset : m_ContentBrowser.Assets())
 			{
 				m_AssetBrowserPresentations.push_back({
 					Asset.ID.ToString(),
@@ -12249,7 +12148,6 @@ namespace
 					NormalizedExtension(Asset.ProjectRelativePath),
 					PulseForgeEditor::GetAssetBrowserIcon(Asset.ProjectRelativePath) });
 			}
-			RebuildContentFolderTree();
 		}
 
 		void SynchronizeOpenDocumentAssetLocations()
@@ -12315,7 +12213,7 @@ namespace
 			m_Scene.reset();
 			m_SceneAsset.reset();
 			SelectSingleEntity(std::nullopt);
-			m_SelectedAsset.reset();
+			m_ContentBrowser.SelectedAsset().reset();
 			m_PendingDeleteAsset.reset();
 			m_OpenDeleteAssetDialog = false;
 			ResetSceneHistory();
@@ -12450,7 +12348,7 @@ namespace
 		ProjectAssetDestinationCreateKind m_AssetDestinationCreateKind = ProjectAssetDestinationCreateKind::None;
 		std::optional<PulseForge::UUID> m_AssetDestinationPrefabRoot;
 		PulseForgeEditor::EditorConsolePanel m_ConsolePanel;
-		bool m_ContentGridView = true;
+		PulseForgeEditor::EditorContentBrowserState m_ContentBrowser;
 		bool m_ContentDetailsExpandedCompact = false;
 		bool m_InitialMaterialDetailsDockPending = false;
 		bool m_ForceMaterialDetailsDock = false;
@@ -12604,16 +12502,9 @@ namespace
 		std::optional<PulseForge::AssetID> m_SceneAsset;
 		std::optional<PulseForge::UUID> m_SelectedEntity;
 		std::optional<EntityClipboard> m_EntityClipboard;
-		std::optional<PulseForge::AssetID> m_SelectedAsset;
 		std::optional<PulseForge::AssetID> m_PendingDeleteAsset;
 		PulseForgeEditor::EditorMaterialDraftStore m_MaterialDraftStore;
-		std::vector<PulseForge::AssetRecord> m_Assets;
 		std::vector<AssetBrowserPresentation> m_AssetBrowserPresentations;
-		std::vector<size_t> m_FilteredAssetIndices;
-		ContentFolderNode m_ContentFolderRoot{ "Assets", "Assets", {} };
-		std::filesystem::path m_CurrentContentFolder{ "Assets" };
-		std::optional<std::filesystem::path> m_SelectedContentFolder;
-		std::string m_ContentSearch;
 		std::string m_HierarchySearch;
 		std::string m_WindowTitle;
 		std::string m_ViewportTargetError;
