@@ -197,6 +197,25 @@ add_library(PulseForgeCore STATIC
 target_include_directories(PulseForgeCore PUBLIC PulseForge/Source/Public)
 target_compile_definitions(PulseForgeCore PRIVATE PF_PLATFORM_WINDOWS)
 target_link_libraries(PulseForgeCore PRIVATE spdlog::spdlog)
+add_library(PulseForgeScene STATIC
+	PulseForge/Source/Private/Scene/CameraComponent.cpp
+	PulseForge/Source/Private/Scene/Components/AudioSourceComponent.cpp
+	PulseForge/Source/Private/Scene/Components/BoxColliderComponent.cpp
+	PulseForge/Source/Private/Scene/Components/PointLightComponent.cpp
+	PulseForge/Source/Private/Scene/Components/RigidbodyComponent.cpp
+	PulseForge/Source/Private/Scene/Components/ScriptComponent.cpp
+	PulseForge/Source/Private/Scene/Components/SpotLightComponent.cpp
+	PulseForge/Source/Private/Scene/Scene.cpp
+	PulseForge/Source/Private/Scene/SceneRenderSnapshot.cpp
+	PulseForge/Source/Private/Scene/SceneSerializer.cpp
+	PulseForge/Source/Private/Scene/TransformComponent.cpp
+)
+target_include_directories(PulseForgeScene
+	PUBLIC PulseForge/Source/Public PulseForge/Vendor/glm
+	PRIVATE PulseForge/Vendor/entt/src PulseForge/Vendor/json/include
+)
+target_compile_definitions(PulseForgeScene PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(PulseForgeScene PUBLIC PulseForgeCore)
 add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/PulseForgePCH.cpp
 	PulseForge/Source/Private/Audio/AudioEngine.cpp
@@ -241,18 +260,7 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanSupport.cpp
 	PulseForge/Source/Private/Runtime/SceneRuntime.cpp
 	PulseForge/Source/Private/Scripting/ScriptRuntime.cpp
-	PulseForge/Source/Private/Scene/CameraComponent.cpp
-	PulseForge/Source/Private/Scene/Components/PointLightComponent.cpp
-	PulseForge/Source/Private/Scene/Components/SpotLightComponent.cpp
-	PulseForge/Source/Private/Scene/Components/AudioSourceComponent.cpp
-	PulseForge/Source/Private/Scene/Components/ScriptComponent.cpp
-	PulseForge/Source/Private/Scene/Components/RigidbodyComponent.cpp
-	PulseForge/Source/Private/Scene/Components/BoxColliderComponent.cpp
-	PulseForge/Source/Private/Scene/Scene.cpp
 	PulseForge/Source/Private/Physics/PhysicsSceneRuntime.cpp
-	PulseForge/Source/Private/Scene/SceneRenderSnapshot.cpp
-	PulseForge/Source/Private/Scene/SceneSerializer.cpp
-	PulseForge/Source/Private/Scene/TransformComponent.cpp
 	PulseForge/Source/Private/Utils/stb_image.cpp
 	PulseForge/Source/Private/Window/Window.cpp
 	PulseForge/Source/Private/Window/Platform/Windows/WindowsWindow.cpp
@@ -276,7 +284,7 @@ target_compile_definitions(PulseForge PRIVATE
 	GLFW_INCLUDE_NONE
 	MA_NO_WIN32_LEAN_AND_MEAN
 )
-target_link_libraries(PulseForge PUBLIC PulseForgeCore)
+target_link_libraries(PulseForge PUBLIC PulseForgeCore PulseForgeScene)
 target_link_libraries(PulseForge PRIVATE
 	PulseForgeLua
 	glfw
@@ -868,7 +876,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	set_property(TARGET PulseForgeGpuValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGpuValidation>")
 endif()
 
-foreach(Target PulseForgeCore PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI
+foreach(Target PulseForgeCore PulseForgeScene PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI
 		PulseForgeTests PulseForgeBufferUpdateTests PulseForgeGpuValidation)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE
