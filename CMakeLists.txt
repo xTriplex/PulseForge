@@ -337,15 +337,36 @@ target_link_libraries(PulseForgeRenderer
 	PRIVATE PulseForgeWindow glfw PulseForgeGlad opengl32 nvrhi nvrhi_vk Vulkan-Headers
 )
 target_precompile_headers(PulseForgeRenderer PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
-add_library(PulseForge STATIC
-	PulseForge/Source/Private/Core/PulseForgePCH.cpp
+add_library(PulseForgeApplication STATIC PulseForge/Source/Private/Core/Application.cpp)
+target_include_directories(PulseForgeApplication
+	PUBLIC PulseForge/Source/Public
+	PRIVATE PulseForge/Source PulseForge/Source/Private
+)
+target_compile_definitions(PulseForgeApplication PRIVATE PF_PLATFORM_WINDOWS)
+target_link_libraries(PulseForgeApplication PUBLIC PulseForgeCore PulseForgeRenderer PulseForgeWindow)
+target_precompile_headers(PulseForgeApplication PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
+add_library(PulseForgeSceneRenderer STATIC
 	PulseForge/Source/Private/Assets/MeshAssetCache.cpp
 	PulseForge/Source/Private/Assets/TextureAssetCache.cpp
-	PulseForge/Source/Private/Core/Application.cpp
-	PulseForge/Source/Private/Core/Core.cpp
-	PulseForge/Source/Private/Core/EntryPoint.cpp
 	PulseForge/Source/Private/Renderer/EnvironmentLightingCache.cpp
 	PulseForge/Source/Private/Renderer/SceneRenderer.cpp
+)
+target_include_directories(PulseForgeSceneRenderer
+	PUBLIC PulseForge/Source/Public PulseForge/Vendor/glm
+	PRIVATE
+		PulseForge/Source
+		PulseForge/Source/Private
+		PulseForge/Vendor/json/include
+)
+target_compile_definitions(PulseForgeSceneRenderer PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(PulseForgeSceneRenderer
+	PUBLIC PulseForgeApplication PulseForgeAssetServices PulseForgeRenderMath PulseForgeScene PulseForgeRenderer
+)
+target_precompile_headers(PulseForgeSceneRenderer PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
+add_library(PulseForge STATIC
+	PulseForge/Source/Private/Core/PulseForgePCH.cpp
+	PulseForge/Source/Private/Core/Core.cpp
+	PulseForge/Source/Private/Core/EntryPoint.cpp
 )
 target_include_directories(PulseForge
 	PUBLIC PulseForge/Source/Public
@@ -366,8 +387,7 @@ target_compile_definitions(PulseForge PRIVATE
 	MA_NO_WIN32_LEAN_AND_MEAN
 )
 target_link_libraries(PulseForge
-	PUBLIC PulseForgeAssetServices PulseForgeRenderMath PulseForgeRuntime PulseForgeWindow
-	PRIVATE PulseForgeRenderer
+	PUBLIC PulseForgeApplication PulseForgeSceneRenderer PulseForgeAssetServices PulseForgeRenderMath PulseForgeRuntime PulseForgeWindow
 )
 target_precompile_headers(PulseForge PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
 
@@ -985,6 +1005,7 @@ endif()
 
 foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeRenderMath PulseForgeAssetCatalog PulseForgeAudio
 		PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeScripting PulseForgeRuntime PulseForgeRenderer
+		PulseForgeApplication PulseForgeSceneRenderer
 		PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI PulseForgeRendererTests PulseForgeRenderMathTests
 		PulseForgeTests PulseForgeEditorTests PulseForgeBufferUpdateTests PulseForgeGpuValidation)
 	if(TARGET ${Target})
