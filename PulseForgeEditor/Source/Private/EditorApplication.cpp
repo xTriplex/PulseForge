@@ -41,6 +41,7 @@
 #include "EditorWorkspacePresentation.h"
 #include "Editor/EditorLayout.h"
 #include "EditorViewportCamera.h"
+#include "Editor/EditorViewportToolbar.h"
 #include "EditorMaterialDraftStore.h"
 #include "Editor/EditorContentBrowserPolicy.h"
 #include "Editor/EditorContentBrowserState.h"
@@ -68,7 +69,6 @@
 #include "Editor/EditorSceneHierarchyOperations.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
-#include "Editor/EditorViewportToolbarPolicy.h"
 #include "Editor/ViewportMouseCapture.h"
 #include "Editor/ViewportMath.h"
 
@@ -6947,256 +6947,24 @@ namespace
 #ifndef PF_EDITOR_RENDERER_OPENGL
 		void DrawViewportToolbar()
 		{
-			if (!m_EditorStyle.BeginToolbar(
-				"ViewportToolbar", PulseForgeEditor::EditorStyleMetrics::ViewportToolbarHeight))
-			{
-				m_EditorStyle.EndToolbar();
-				return;
-			}
-
-			const PulseForgeEditor::EditorViewportToolbarLayout Layout =
-				PulseForgeEditor::GetEditorViewportToolbarLayout(ImGui::GetContentRegionAvail().x);
-			const bool CanEditViewport = m_Scene && !m_SceneRuntime;
-			if (Layout == PulseForgeEditor::EditorViewportToolbarLayout::Overflow)
-			{
-				ImGui::BeginDisabled(!CanEditViewport);
-				ImGui::SetNextItemWidth((std::max)(76.0f,
-					ImGui::GetContentRegionAvail().x - PulseForgeEditor::EditorStyleMetrics::ViewportToolbarButtonSize - 5.0f));
-				if (ImGui::BeginCombo("##ViewportToolOverflow", GetViewportToolName()))
-				{
-					DrawViewportToolMenuItems(CanEditViewport);
-					ImGui::EndCombo();
-				}
-				ImGui::EndDisabled();
-				ImGui::SameLine(0.0f, 4.0f);
-				DrawViewportToolbarMoreButton();
-				DrawViewportOptionsPopup(true, true);
-			}
-			else
-			{
-				DrawViewportToolButton(PulseForgeEditor::ViewportTool::Select,
-					PulseForgeEditor::EditorIcon::Select, "Select", "ViewportSelectTool", "Select entities (1 / Q).");
-				ImGui::SameLine(0.0f, 3.0f);
-				DrawViewportToolButton(PulseForgeEditor::ViewportTool::Move,
-					PulseForgeEditor::EditorIcon::Translate, "Move", "ViewportMoveTool", "Move entities (2 / W).");
-				ImGui::SameLine(0.0f, 3.0f);
-				DrawViewportToolButton(PulseForgeEditor::ViewportTool::Rotate,
-					PulseForgeEditor::EditorIcon::Rotate, "Rotate", "ViewportRotateTool", "Rotate entities (3 / E).");
-				ImGui::SameLine(0.0f, 3.0f);
-				DrawViewportToolButton(PulseForgeEditor::ViewportTool::Scale,
-					PulseForgeEditor::EditorIcon::Scale, "Scale", "ViewportScaleTool", "Scale entities (4 / R).");
-
-				DrawViewportToolbarSeparator();
-				DrawViewportCoordinateSpaceControl();
-				DrawViewportToolbarSeparator();
-				DrawViewportSnapToggle();
-
-				if (Layout == PulseForgeEditor::EditorViewportToolbarLayout::Full)
-				{
-					ImGui::SameLine(0.0f, 5.0f);
-					DrawViewportSnapIncrementControl(false);
-					DrawViewportToolbarSeparator();
-					DrawViewportExposureControl(false);
-				}
-				else
-				{
-					ImGui::SameLine(0.0f, 4.0f);
-					DrawViewportToolbarMoreButton();
-					DrawViewportOptionsPopup(false, false);
-				}
-			}
-
-			m_EditorStyle.EndToolbar();
-		}
-
-		void DrawViewportToolButton(
-			PulseForgeEditor::ViewportTool Tool,
-			PulseForgeEditor::EditorIcon Icon,
-			std::string_view Label,
-			std::string_view StableID,
-			std::string_view Tooltip)
-		{
-			if (m_EditorStyle.ToolIconButton(
-				Icon, Label, StableID, Tooltip, m_ViewportTool == Tool, m_Scene && !m_SceneRuntime,
-				PulseForgeEditor::EditorStyleMetrics::ViewportToolbarButtonSize))
-				SetViewportTool(Tool);
-		}
-
-		const char* GetViewportToolName() const noexcept
-		{
-			switch (m_ViewportTool)
-			{
-			case PulseForgeEditor::ViewportTool::Select: return "Select";
-			case PulseForgeEditor::ViewportTool::Move: return "Move";
-			case PulseForgeEditor::ViewportTool::Rotate: return "Rotate";
-			case PulseForgeEditor::ViewportTool::Scale: return "Scale";
-			}
-			return "Select";
-		}
-
-		void DrawViewportCoordinateSpaceControl()
-		{
-			if (ImGui::SmallButton(m_GizmoLocalSpace ? "Local##ViewportCoordinateSpace" : "World##ViewportCoordinateSpace"))
+			const PulseForgeEditor::EditorViewportToolbarActions Actions =
+				m_ViewportToolbar.Draw(m_EditorStyle, m_ViewportTools, m_Scene && !m_SceneRuntime);
+			if (Actions.SelectedTool)
+				SetViewportTool(*Actions.SelectedTool);
+			if (Actions.ToggleCoordinateSpace)
 			{
 				CancelGizmoInteraction();
-				m_GizmoLocalSpace = !m_GizmoLocalSpace;
+				m_ViewportTools.ToggleCoordinateSpace();
 			}
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Toggle Local and World gizmo axes.");
-		}
-
-		void DrawViewportToolbarSeparator()
-		{
-			ImGui::SameLine(0.0f, PulseForgeEditor::EditorStyleMetrics::ViewportToolbarGroupSpacing);
-			const ImVec2 Cursor = ImGui::GetCursorScreenPos();
-			ImGui::GetWindowDrawList()->AddLine(
-				ImVec2(Cursor.x + 0.5f, Cursor.y + 3.0f),
-				ImVec2(Cursor.x + 0.5f, Cursor.y + 23.0f),
-				ImGui::GetColorU32(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::BorderStrong)));
-			ImGui::Dummy(ImVec2(1.0f, 26.0f));
-			ImGui::SameLine(0.0f, PulseForgeEditor::EditorStyleMetrics::ViewportToolbarGroupSpacing);
-		}
-
-		void DrawViewportToolbarMoreButton()
-		{
-			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Settings, "More", "ViewportToolbarOptions",
-				"More viewport and transform options", false,
-				PulseForgeEditor::EditorStyleMetrics::ViewportToolbarButtonSize,
-				PulseForgeEditor::EditorStyleMetrics::ViewportToolbarButtonSize))
-				ImGui::OpenPopup("ViewportOptionsPopup");
-		}
-
-		void DrawViewportToolMenuItems(bool CanEditViewport)
-		{
-			const auto ToolItem = [this, CanEditViewport](
-				PulseForgeEditor::EditorIcon Icon,
-				const char* Label,
-				const char* Shortcut,
-				PulseForgeEditor::ViewportTool Tool)
-			{
-				if (m_EditorStyle.MenuItem(Icon, Label, Shortcut, m_ViewportTool == Tool, CanEditViewport))
-					SetViewportTool(Tool);
-			};
-			ToolItem(PulseForgeEditor::EditorIcon::Select, "Select", "1", PulseForgeEditor::ViewportTool::Select);
-			ToolItem(PulseForgeEditor::EditorIcon::Translate, "Move", "2", PulseForgeEditor::ViewportTool::Move);
-			ToolItem(PulseForgeEditor::EditorIcon::Rotate, "Rotate", "3", PulseForgeEditor::ViewportTool::Rotate);
-			ToolItem(PulseForgeEditor::EditorIcon::Scale, "Scale", "4", PulseForgeEditor::ViewportTool::Scale);
-		}
-
-		void DrawViewportOptionsPopup(bool IncludeCoordinateSpace, bool IncludeSnapToggle)
-		{
-			if (!ImGui::BeginPopup("ViewportOptionsPopup"))
-				return;
-
-			if (IncludeCoordinateSpace)
-				DrawViewportCoordinateSpaceControl();
-			if (IncludeCoordinateSpace && IncludeSnapToggle)
-				ImGui::Separator();
-			if (IncludeSnapToggle)
-				DrawViewportSnapToggle();
-			DrawViewportSnapIncrementControl(true);
-			ImGui::Separator();
-			DrawViewportExposureControl(true);
-			ImGui::EndPopup();
-		}
-
-		void DrawViewportSnapToggle()
-		{
-			ImGui::Checkbox("Snap", &m_TransformSnapping);
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Snap during gizmo drags. Hold Ctrl to temporarily enable snapping.");
-		}
-
-		void DrawViewportSnapIncrementControl(bool ShowLabel)
-		{
-			struct SnapPreset
-			{
-				const char* Label;
-				float Value;
-			};
-			constexpr std::array<SnapPreset, 5> TranslationPresets{{
-				{ "0.1 units", 0.1f }, { "0.5 units", 0.5f }, { "1 unit", 1.0f },
-				{ "5 units", 5.0f }, { "10 units", 10.0f } }};
-			constexpr std::array<SnapPreset, 5> RotationPresets{{
-				{ "5 degrees", 5.0f }, { "10 degrees", 10.0f }, { "15 degrees", 15.0f },
-				{ "45 degrees", 45.0f }, { "90 degrees", 90.0f } }};
-			constexpr std::array<SnapPreset, 5> ScalePresets{{
-				{ "0.05 scale", 0.05f }, { "0.1 scale", 0.1f }, { "0.25 scale", 0.25f },
-				{ "0.5 scale", 0.5f }, { "1.0 scale", 1.0f } }};
-
-			float* Increment = &m_TranslationSnapIncrement;
-			const std::array<SnapPreset, 5>* Presets = &TranslationPresets;
-			if (m_ViewportTool == PulseForgeEditor::ViewportTool::Rotate)
-			{
-				Increment = &m_RotationSnapDegrees;
-				Presets = &RotationPresets;
-			}
-			else if (m_ViewportTool == PulseForgeEditor::ViewportTool::Scale)
-			{
-				Increment = &m_ScaleSnapIncrement;
-				Presets = &ScalePresets;
-			}
-
-			const char* CurrentLabel = (*Presets)[0].Label;
-			for (const SnapPreset& Preset : *Presets)
-				if (std::abs(Preset.Value - *Increment) < 1.0e-5f)
-					CurrentLabel = Preset.Label;
-			ImGui::SetNextItemWidth(ShowLabel ? 156.0f : 112.0f);
-			if (ImGui::BeginCombo(ShowLabel ? "Snap Increment" : "##TransformSnapIncrement", CurrentLabel))
-			{
-				for (const SnapPreset& Preset : *Presets)
-				{
-					const bool Selected = std::abs(Preset.Value - *Increment) < 1.0e-5f;
-					if (ImGui::Selectable(Preset.Label, Selected))
-						*Increment = Preset.Value;
-					if (Selected)
-						ImGui::SetItemDefaultFocus();
-				}
-				ImGui::EndCombo();
-			}
-		}
-
-		void DrawViewportExposureControl(bool ShowLabel)
-		{
-			if (!ShowLabel)
-			{
-				m_EditorStyle.TextMuted("Exposure");
-				ImGui::SameLine(0.0f, 4.0f);
-			}
-			ImGui::SetNextItemWidth(ShowLabel ? 144.0f : 98.0f);
-			(void)ImGui::DragFloat(
-				ShowLabel ? "Exposure (EV)" : "##ViewportExposureEV",
-				&m_ExposureEV,
-				0.05f,
-				-8.0f,
-				8.0f,
-				"%.2f EV",
-				ImGuiSliderFlags_AlwaysClamp);
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("Adjust viewport exposure from -8 to +8 EV. This does not modify the scene.");
 		}
 #endif
 
 		void SetViewportTool(PulseForgeEditor::ViewportTool Tool)
 		{
-			if (m_ViewportTool == Tool)
+			if (m_ViewportTools.GetTool() == Tool)
 				return;
 			CancelGizmoInteraction();
-			m_ViewportTool = Tool;
-			switch (Tool)
-			{
-			case PulseForgeEditor::ViewportTool::Move:
-				m_GizmoOperation = PulseForgeEditor::TransformGizmoOperation::Translate;
-				break;
-			case PulseForgeEditor::ViewportTool::Rotate:
-				m_GizmoOperation = PulseForgeEditor::TransformGizmoOperation::Rotate;
-				break;
-			case PulseForgeEditor::ViewportTool::Scale:
-				m_GizmoOperation = PulseForgeEditor::TransformGizmoOperation::Scale;
-				break;
-			case PulseForgeEditor::ViewportTool::Select:
-				break;
-			}
+			(void)m_ViewportTools.SetTool(Tool);
 		}
 
 		void HandleViewportToolShortcuts()
@@ -7337,7 +7105,7 @@ namespace
 			}
 
 			std::optional<ViewportGizmoGeometry> Geometry;
-			if (SelectedEntity() && m_ViewportTool != PulseForgeEditor::ViewportTool::Select)
+			if (SelectedEntity() && m_ViewportTools.GetTool() != PulseForgeEditor::ViewportTool::Select)
 			{
 				if (const auto Selected = m_Scene->FindEntity(*SelectedEntity()))
 					if (IsEntityEffectivelyVisible(*Selected))
@@ -7445,7 +7213,7 @@ namespace
 			for (uint32_t AxisIndex = 0; AxisIndex < 3; ++AxisIndex)
 			{
 				const auto Axis = PulseForgeEditor::GetGizmoAxis(
-					ParentWorld, Transform->Rotation, AxisIndex, m_GizmoLocalSpace);
+					ParentWorld, Transform->Rotation, AxisIndex, m_ViewportTools.GetValues().LocalSpace);
 				if (!Axis)
 					continue;
 				const auto Endpoint = ProjectToViewportImage(
@@ -7513,7 +7281,7 @@ namespace
 			constexpr float HitRadiusSquared = 8.0f * 8.0f;
 			float ClosestDistance = HitRadiusSquared;
 			std::optional<GizmoHandle> Closest;
-			if (m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Rotate)
+			if (m_ViewportTools.GetOperation() == PulseForgeEditor::TransformGizmoOperation::Rotate)
 			{
 				for (uint32_t Axis = 0; Axis < 3; ++Axis)
 				{
@@ -7526,7 +7294,7 @@ namespace
 						if (Distance < ClosestDistance)
 						{
 							ClosestDistance = Distance;
-							Closest = GizmoHandle{ m_GizmoOperation, Axis };
+							Closest = GizmoHandle{ m_ViewportTools.GetOperation(), Axis };
 						}
 					}
 				}
@@ -7546,7 +7314,7 @@ namespace
 				if (Distance < ClosestDistance)
 				{
 					ClosestDistance = Distance;
-					Closest = GizmoHandle{ m_GizmoOperation, Axis };
+					Closest = GizmoHandle{ m_ViewportTools.GetOperation(), Axis };
 				}
 			}
 			return Closest;
@@ -7569,7 +7337,7 @@ namespace
 				ImGui::ColorConvertFloat4ToU32(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::GizmoAxisZ)) };
 			const ImU32 HighlightColor = ImGui::ColorConvertFloat4ToU32(
 				m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::GizmoHighlight));
-			if (m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Rotate)
+			if (m_ViewportTools.GetOperation() == PulseForgeEditor::TransformGizmoOperation::Rotate)
 			{
 				for (uint32_t Axis = 0; Axis < 3; ++Axis)
 				{
@@ -7600,7 +7368,7 @@ namespace
 						ImVec2(End.x, End.y),
 						Color,
 						IsHighlighted ? 4.0f : 3.0f);
-					if (m_GizmoOperation == PulseForgeEditor::TransformGizmoOperation::Scale)
+					if (m_ViewportTools.GetOperation() == PulseForgeEditor::TransformGizmoOperation::Scale)
 						DrawList->AddRectFilled(ImVec2(End.x - 5.0f, End.y - 5.0f), ImVec2(End.x + 5.0f, End.y + 5.0f), Color);
 					else
 						DrawList->AddCircleFilled(ImVec2(End.x, End.y), IsHighlighted ? 6.0f : 4.5f, Color);
@@ -7769,9 +7537,9 @@ namespace
 				if (!std::isfinite(Drag.WorldUnitsPerLocalUnit) || Drag.WorldUnitsPerLocalUnit < 1.0e-7f)
 					return;
 				if (Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Translate &&
-					(m_TransformSnapping || ImGui::GetIO().KeyCtrl))
+					(m_ViewportTools.GetValues().TransformSnapping || ImGui::GetIO().KeyCtrl))
 				{
-					const auto Snapped = PulseForgeEditor::SnapValueToIncrement(WorldDelta, m_TranslationSnapIncrement);
+					const auto Snapped = PulseForgeEditor::SnapValueToIncrement(WorldDelta, m_ViewportTools.GetValues().TranslationSnapIncrement);
 					if (!Snapped)
 						return;
 					WorldDelta = *Snapped;
@@ -7780,10 +7548,10 @@ namespace
 			}
 			if (!std::isfinite(Delta))
 				return;
-			if (m_TransformSnapping || ImGui::GetIO().KeyCtrl)
+			if (m_ViewportTools.GetValues().TransformSnapping || ImGui::GetIO().KeyCtrl)
 			{
 				const float Increment = Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Rotate
-					? glm::radians(m_RotationSnapDegrees) : m_ScaleSnapIncrement;
+					? glm::radians(m_ViewportTools.GetValues().RotationSnapDegrees) : m_ViewportTools.GetValues().ScaleSnapIncrement;
 				if (Drag.Operation != PulseForgeEditor::TransformGizmoOperation::Translate)
 				{
 					const auto Snapped = PulseForgeEditor::SnapValueToIncrement(Delta, Increment);
@@ -7838,7 +7606,7 @@ namespace
 				return;
 			}
 
-			if (Drag.Targets.size() == 1 && !Drag.HasDuplicated && m_GizmoLocalSpace)
+			if (Drag.Targets.size() == 1 && !Drag.HasDuplicated && m_ViewportTools.GetValues().LocalSpace)
 			{
 				const auto Entity = m_Scene->FindEntity(Drag.Targets.front().Identifier);
 				const auto Updated = PulseForgeEditor::ApplyLocalGizmoDelta(
@@ -7879,7 +7647,7 @@ namespace
 			{
 				const auto Entity = m_Scene->FindEntity(Target.Identifier);
 				std::optional<PulseForge::TransformComponent> Updated;
-				if (Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Scale && m_GizmoLocalSpace)
+				if (Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Scale && m_ViewportTools.GetValues().LocalSpace)
 				{
 					const float Factor = 1.0f + Delta;
 					PulseForge::TransformComponent Scaled = Target.LocalTransform;
@@ -8407,7 +8175,7 @@ namespace
 			if (m_SceneRenderer && m_ViewportSceneReady)
 			{
 				PulseForge::ToneMappingSettings ToneSettings;
-				ToneSettings.ExposureEV = m_ExposureEV;
+				ToneSettings.ExposureEV = m_ViewportTools.GetValues().ExposureEV;
 				if (!m_SceneRenderer->SetToneMappingSettings(ToneSettings))
 				{
 					SetViewportSceneError("The viewport exposure value is outside the supported range");
@@ -8493,7 +8261,7 @@ namespace
 			CancelGizmoInteraction();
 			ResetEditorViewportCamera();
 			m_SceneRenderer.reset();
-			m_ExposureEV = 0.0f;
+			m_ViewportTools.ResetExposure();
 			m_MeshPickingCache.Clear();
 			m_ViewportSceneReady = false;
 			m_SceneRendererInitializationFailed = false;
@@ -11654,21 +11422,14 @@ namespace
 		glm::mat4 m_ViewportViewProjection{ 1.0f };
 		PulseForgeEditor::ViewportImageRect m_ViewportImageRect;
 		std::optional<GizmoDrag> m_GizmoDrag;
-		PulseForgeEditor::TransformGizmoOperation m_GizmoOperation =
-			PulseForgeEditor::TransformGizmoOperation::Translate;
-		PulseForgeEditor::ViewportTool m_ViewportTool = PulseForgeEditor::ViewportTool::Move;
-		bool m_GizmoLocalSpace = true;
-		bool m_TransformSnapping = false;
-		float m_TranslationSnapIncrement = 1.0f;
-		float m_RotationSnapDegrees = 15.0f;
-		float m_ScaleSnapIncrement = 0.1f;
+		PulseForgeEditor::EditorViewportToolState m_ViewportTools;
+		PulseForgeEditor::EditorViewportToolbar m_ViewportToolbar;
 		ViewportCameraGesture m_ViewportCameraGesture = ViewportCameraGesture::None;
 		bool m_ShowEditorOverlays = true;
 		PulseForgeEditor::EditorMeshPickingCache m_MeshPickingCache;
 		uint64_t m_ViewportTextureID = 0;
 		uint32_t m_ViewportWidth = 0;
 		uint32_t m_ViewportHeight = 0;
-		float m_ExposureEV = 0.0f;
 		int m_PreviousCursorMode = GLFW_CURSOR_NORMAL;
 		float m_LastCursorX = 0.0f;
 		float m_LastCursorY = 0.0f;

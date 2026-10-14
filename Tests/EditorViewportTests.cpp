@@ -1,5 +1,6 @@
 #include "TestEditorSupport.h"
 #include "EditorViewportCamera.h"
+#include "Editor/EditorViewportToolState.h"
 
 namespace
 {
@@ -521,6 +522,47 @@ namespace
 		PF_CHECK(Tests, glm::length(Camera.GetForward() - glm::vec3(0.0f, 0.0f, -1.0f)) < 0.0001f);
 	}
 
+	void TestEditorViewportToolState(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		EditorViewportToolState Tools;
+		PF_CHECK(Tests, Tools.GetTool() == ViewportTool::Move);
+		PF_CHECK(Tests, Tools.GetOperation() == TransformGizmoOperation::Translate);
+		PF_CHECK(Tests, Tools.GetValues().LocalSpace);
+		PF_CHECK(Tests, !Tools.GetValues().TransformSnapping);
+		PF_CHECK(Tests, Tools.GetValues().TranslationSnapIncrement == 1.0f);
+		PF_CHECK(Tests, Tools.GetValues().RotationSnapDegrees == 15.0f);
+		PF_CHECK(Tests, Tools.GetValues().ScaleSnapIncrement == 0.1f);
+		PF_CHECK(Tests, Tools.GetValues().ExposureEV == 0.0f);
+
+		PF_CHECK(Tests, Tools.SetTool(ViewportTool::Rotate));
+		PF_CHECK(Tests, Tools.GetTool() == ViewportTool::Rotate);
+		PF_CHECK(Tests, Tools.GetOperation() == TransformGizmoOperation::Rotate);
+		PF_CHECK(Tests, !Tools.SetTool(ViewportTool::Rotate));
+		PF_CHECK(Tests, Tools.SetTool(ViewportTool::Scale));
+		PF_CHECK(Tests, Tools.GetOperation() == TransformGizmoOperation::Scale);
+		PF_CHECK(Tests, Tools.SetTool(ViewportTool::Select));
+		PF_CHECK(Tests, Tools.GetTool() == ViewportTool::Select);
+		PF_CHECK(Tests, Tools.GetOperation() == TransformGizmoOperation::Scale);
+		PF_CHECK(Tests, Tools.SetTool(ViewportTool::Move));
+		PF_CHECK(Tests, Tools.GetOperation() == TransformGizmoOperation::Translate);
+
+		Tools.GetValues().LocalSpace = false;
+		Tools.GetValues().TransformSnapping = true;
+		Tools.GetValues().TranslationSnapIncrement = 0.5f;
+		Tools.GetValues().RotationSnapDegrees = 45.0f;
+		Tools.GetValues().ScaleSnapIncrement = 0.25f;
+		Tools.GetValues().ExposureEV = 2.5f;
+		Tools.ToggleCoordinateSpace();
+		PF_CHECK(Tests, Tools.GetValues().LocalSpace);
+		Tools.ResetExposure();
+		PF_CHECK(Tests, Tools.GetValues().ExposureEV == 0.0f);
+		PF_CHECK(Tests, Tools.GetValues().TransformSnapping);
+		PF_CHECK(Tests, Tools.GetValues().TranslationSnapIncrement == 0.5f);
+		PF_CHECK(Tests, Tools.GetValues().RotationSnapDegrees == 45.0f);
+		PF_CHECK(Tests, Tools.GetValues().ScaleSnapIncrement == 0.25f);
+	}
+
 }
 
 void RunEditorViewportTests(TestRunner& Tests)
@@ -529,4 +571,5 @@ void RunEditorViewportTests(TestRunner& Tests)
 	TestEditorViewportMath(Tests);
 	TestViewportMouseCaptureState(Tests);
 	TestEditorViewportCameraController(Tests);
+	TestEditorViewportToolState(Tests);
 }

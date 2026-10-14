@@ -9,7 +9,9 @@
   "default_header_line_limit": 800,
   "source_target_ownership": {
     "PulseForgeEditor/Source/Private/EditorAssetDestinationDialog.cpp": "PulseForgeEditorUI",
-    "PulseForgeEditor/Source/Private/EditorConsolePanel.cpp": "PulseForgeEditorUI"
+    "PulseForgeEditor/Source/Private/EditorConsolePanel.cpp": "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorViewportToolbar.cpp": "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorViewportToolState.cpp": "PulseForgeEditorCore"
   },
   "size_exceptions": {
     "PulseForgeEditor/Source/Private/EditorApplication.cpp": {
