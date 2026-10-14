@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Core/Log.h"
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Scene/Scene.h"

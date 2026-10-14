@@ -238,6 +238,15 @@ target_include_directories(PulseForgeAssetCatalog
 )
 target_compile_definitions(PulseForgeAssetCatalog PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_link_libraries(PulseForgeAssetCatalog PUBLIC PulseForgeCore PulseForgeScene)
+add_library(PulseForgeAudio STATIC
+	PulseForge/Source/Private/Audio/AudioEngine.cpp
+	PulseForge/Source/Private/Audio/MiniAudio/MiniAudio.cpp
+)
+target_include_directories(PulseForgeAudio
+	PUBLIC PulseForge/Source/Public PulseForge/Vendor/glm
+	PRIVATE PulseForge/Vendor/miniaudio
+)
+target_compile_definitions(PulseForgeAudio PRIVATE PF_PLATFORM_WINDOWS MA_NO_WIN32_LEAN_AND_MEAN)
 add_library(PulseForgeAssetServices STATIC
 	PulseForge/Source/Private/Assets/AudioAssetCache.cpp
 	PulseForge/Source/Private/Assets/GltfMeshImporter.cpp
@@ -256,13 +265,38 @@ target_include_directories(PulseForgeAssetServices
 	PRIVATE PulseForge/Vendor/json/include PulseForge/Vendor/stb
 )
 target_compile_definitions(PulseForgeAssetServices PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(PulseForgeAssetServices PUBLIC PulseForgeAssetCatalog)
+target_link_libraries(PulseForgeAssetServices PUBLIC PulseForgeAssetCatalog PulseForgeAudio)
 target_precompile_headers(PulseForgeAssetServices PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
+add_library(PulseForgeAudioScene STATIC PulseForge/Source/Private/Audio/AudioSceneRuntime.cpp)
+target_include_directories(PulseForgeAudioScene PUBLIC PulseForge/Source/Public)
+target_compile_definitions(PulseForgeAudioScene PRIVATE PF_PLATFORM_WINDOWS)
+target_link_libraries(PulseForgeAudioScene
+	PUBLIC PulseForgeAudio
+	PRIVATE PulseForgeAssetServices PulseForgeScene
+)
+add_library(PulseForgePhysics STATIC PulseForge/Source/Private/Physics/PhysicsSceneRuntime.cpp)
+target_include_directories(PulseForgePhysics PUBLIC PulseForge/Source/Public)
+target_compile_definitions(PulseForgePhysics PRIVATE PF_PLATFORM_WINDOWS NOMINMAX)
+target_link_libraries(PulseForgePhysics PUBLIC PulseForgeScene PRIVATE Jolt spdlog::spdlog)
+add_library(PulseForgeScripting STATIC PulseForge/Source/Private/Scripting/ScriptRuntime.cpp)
+target_include_directories(PulseForgeScripting
+	PUBLIC PulseForge/Source/Public
+	PRIVATE PulseForge/Vendor/json/include
+)
+target_compile_definitions(PulseForgeScripting PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS NOMINMAX)
+target_link_libraries(PulseForgeScripting
+	PUBLIC PulseForgeAssetCatalog
+	PRIVATE PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeCore PulseForgeLua spdlog::spdlog
+)
+add_library(PulseForgeRuntime STATIC PulseForge/Source/Private/Runtime/SceneRuntime.cpp)
+target_include_directories(PulseForgeRuntime PUBLIC PulseForge/Source/Public)
+target_compile_definitions(PulseForgeRuntime PRIVATE PF_PLATFORM_WINDOWS)
+target_link_libraries(PulseForgeRuntime
+	PUBLIC PulseForgeAudio PulseForgePhysics PulseForgeScripting
+	PRIVATE PulseForgeAssetServices PulseForgeAudioScene PulseForgeScene
+)
 add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/PulseForgePCH.cpp
-	PulseForge/Source/Private/Audio/AudioEngine.cpp
-	PulseForge/Source/Private/Audio/AudioSceneRuntime.cpp
-	PulseForge/Source/Private/Audio/MiniAudio/MiniAudio.cpp
 	PulseForge/Source/Private/Assets/MeshAssetCache.cpp
 	PulseForge/Source/Private/Assets/TextureAssetCache.cpp
 	PulseForge/Source/Private/Core/Application.cpp
@@ -281,9 +315,6 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/SceneRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanSupport.cpp
-	PulseForge/Source/Private/Runtime/SceneRuntime.cpp
-	PulseForge/Source/Private/Scripting/ScriptRuntime.cpp
-	PulseForge/Source/Private/Physics/PhysicsSceneRuntime.cpp
 	PulseForge/Source/Private/Window/Window.cpp
 	PulseForge/Source/Private/Window/Platform/Windows/WindowsWindow.cpp
 )
@@ -297,7 +328,6 @@ target_include_directories(PulseForge
 		PulseForge/Vendor/json/include
 		PulseForge/Vendor/Glfw/include
 		PulseForge/Vendor/Glad/include
-		PulseForge/Vendor/miniaudio
 		PulseForge/Vendor/stb
 )
 target_compile_definitions(PulseForge PRIVATE
@@ -306,16 +336,14 @@ target_compile_definitions(PulseForge PRIVATE
 	GLFW_INCLUDE_NONE
 	MA_NO_WIN32_LEAN_AND_MEAN
 )
-target_link_libraries(PulseForge PUBLIC PulseForgeAssetServices PulseForgeRenderMath)
+target_link_libraries(PulseForge PUBLIC PulseForgeAssetServices PulseForgeRenderMath PulseForgeRuntime)
 target_link_libraries(PulseForge PRIVATE
-	PulseForgeLua
 	glfw
 	PulseForgeGlad
 	opengl32
 	nvrhi
 	nvrhi_vk
 	Vulkan-Headers
-	Jolt
 )
 target_precompile_headers(PulseForge PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
 

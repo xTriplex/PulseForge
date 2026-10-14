@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Scripting/ScriptRuntime.h"
 
 #include "Assets/AssetPathResolver.h"
