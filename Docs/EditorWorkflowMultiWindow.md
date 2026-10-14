@@ -120,9 +120,79 @@ Debug transfer fixtures ran on both backends. They exercised reattachment, nativ
 
 Separate Vulkan Debug fixtures recovered from presentation creation failure, swapchain image/depth allocation failure, and out-of-date image acquisition. In a bounded lifecycle run, the secondary host was resized four times, then resized again while the main window was minimized. Both secondary hosts remained visible. The secondary host also minimized and restored, then rendered a valid UI capture. A targeted native close retired one synthetic host while the main editor and sibling host remained open; the sibling continued to render. Khronos and NVRHI validation were enabled; these lifecycle runs reported no VUID or NVRHI validation errors, had empty standard error, and exited cleanly.
 
-OpenGL Debug readbacks showed the editor shell, Content Browser type icons for images and materials, and the Vulkan-only viewport fallback. A bounded tear-off fixture rendered a secondary native document viewport through its shared OpenGL context. Canonical `PrintWindow` captures were blank, while internal readbacks taken after the OpenGL ImGui draw calls showed real UI pixels. An isolated Vulkan capture with Material Details restored as the selected asset confirmed that its tab shares Inspector's right-side stack, Level Editor remains active, and the Scene Viewport still displays the validation scene. A separate Debug fixture capture showed the document strip and close control. These captures were not committed.
+OpenGL Debug readbacks showed the editor shell, Content Browser type icons for images and materials, and the Vulkan-only viewport fallback. A bounded tear-off fixture rendered a secondary native document viewport through its shared OpenGL context. `PrintWindow` captures were blank, while internal readbacks taken after the OpenGL ImGui draw calls showed real UI pixels. A Vulkan runtime capture with Material Details selected confirmed that its tab shares Inspector's right-side stack, Level Editor remains active, and the Scene Viewport still displays the validation scene. A separate Debug fixture capture showed the document strip and close control.
 
 Pointer-driven tab reordering, detachment, grouping, and reattachment still need manual testing. Physical multi-monitor movement, mixed-DPI transitions, and monitor-removal recovery are unverified. No production full asset editor is registered, so multiple real asset sessions, their independent histories, and their dirty-close prompts remain unverified. OpenGL does not render scene snapshots or GPU asset previews.
+
+### Acceptance coverage
+
+The scenario IDs below match the editor workflow and native-window acceptance matrix. **Passed** means the listed evidence covers the scenario's current scope. **Partial** means policy, synthetic, or bounded runtime coverage exists but a required real interaction or production editor path remains unverified. **Unverified** means the available evidence is insufficient. **Deferred** items require a production full asset editor, which is not registered.
+
+#### Documents and docking
+
+| ID | Status | Evidence and limits |
+|---|---|---|
+| D01 - Open Material Details with the default preference | Passed (policy and runtime layout) | The asset-open policy routes materials to Material Details. A Vulkan runtime capture showed it beside Inspector while Level Editor and Scene Viewport remained available. A real pointer-driven Content Browser double-click remains unverified. |
+| D02 - Switch materials with unsaved drafts | Unverified (manual) | Drafts are keyed by project and asset identity in `EditorApplication.cpp`; tests cover key isolation, not editing and switching drafts in the UI. |
+| D03 - Open an already-open asset document | Partial (policy) | `TestEditorDocumentManager` verifies duplicate identity activation and asset-location refresh. No production full asset document is registered. |
+| D04 - Transfer a document to the main strip | Passed (synthetic application path) | Debug fixtures transfer the same session between native and main hosts. They queue ImGui events rather than operating-system pointer input. |
+| D05 - Drop over utility panels | Passed (synthetic application path) | Fixtures reject drops over Hierarchy, Inspector, Scene Viewport, Content Browser, and Console. Pointer-driven rejection remains unverified. |
+| D06 - Drop over workspace bodies or edges | Passed (synthetic application path) | Fixtures reject panel bodies and the tested edges; they do not prove behavior from physical mouse input. |
+| D07 - Detach a dirty document with its editor state | Partial (policy) | Session transfer tests preserve dirty revisions and host membership. A production asset editor is needed to verify real undo, selection, preview, and model state through transfer. |
+| D08 - Reattach repeatedly | Passed (synthetic application path) | Repeated native/main transfer fixtures preserve session identity and retire empty hosts. Physical reattachment remains unverified. |
+| D09 - Reorder tabs and persist order | Passed (policy and synthetic application path) | Tab-strip fixtures reorder sessions; workspace codec tests cover persisted order. Physical pointer-driven reordering remains unverified. |
+| D10 - Switch between Level Editor and asset workspaces | Partial (utility runtime) | Material Details leaves the Level Editor and Scene Viewport available. Switching among production full asset editors is deferred. |
+| D11 - Group and regroup document tabs | Passed (synthetic application path) | Fixtures group sessions, move one tab from a grouped native host, and retain the other tab. Physical grouping remains unverified. |
+| D12 - Rearrange utility panels | Partial (layout policy and runtime) | Default placement, visibility, persistence, and Reset Layout have coverage. Pointer-driven utility rearrangement has not been tested. |
+| D13 - Distinguish same-basename assets | Passed (policy) | `TestEditorDocumentManager` distinguishes asset and project identities independently of displayed filenames. |
+| D14 - Move or rename an open asset | Partial (service and policy) | Asset-operation tests preserve UUIDs; document-manager tests refresh paths without changing identity or dirty revision. An open production editor cannot be exercised until one is registered. |
+
+#### Close and focus
+
+| ID | Status | Evidence and limits |
+|---|---|---|
+| C01 - Cancel closing a dirty tab | Partial (policy) | `TestEditorDocumentManager` verifies Cancel preserves the session and revision. A real dirty asset-tab close prompt is unavailable without a production editor. |
+| C02 - Cancel native close or Alt-F4 for a dirty host | Unverified (production editor) | Native close routing is present, but dirty-close interaction in a real asset workspace has not been exercised. |
+| C03 - Keep a document dirty after save failure | Passed (policy) | `TestEditorDocumentManager` injects a failed save callback and verifies the session remains open and dirty. |
+| C04 - Resolve several dirty documents as a batch | Partial (policy) | Dirty-session filtering and batch close policies are tested; a real multi-document host dialog is not available. |
+| C05 - Close the application with dirty secondary documents | Unverified (production editor) | Shutdown ordering is implemented, but there are no registered production asset documents to exercise a batch dirty shutdown. |
+| C06 - Save or undo Material Details while Level Editor remains active | Unverified (manual interaction) | Material Details is a utility, not a floating document. Save/Revert and focus routing are implemented, but this interaction has not been tested directly. |
+| C07 - Prevent text fields and dialogs from leaking shortcuts | Passed (policy) | `TestEditorInteractionPolicy` covers text, popup, menu, and modal ownership. Real typing workflows still need manual checking. |
+| C08 - Release viewport capture on focus loss | Partial (policy) | Viewport capture and focus-loss policies are tested; physical focus transitions among native windows remain unverified. |
+| C09 - Preserve later edits after saving an earlier revision | Passed (policy) | Document revision tests verify that saving revision N leaves a subsequent revision dirty. |
+| C10 - Reset layout without discarding edits | Passed (synthetic application path) | The Debug reset-layout fixture verifies dirty synthetic sessions and host membership survive. |
+
+#### Renderer and platform
+
+| ID | Status | Evidence and limits |
+|---|---|---|
+| R01 - Resize a secondary host repeatedly | Passed (bounded Vulkan runtime) | A Debug runtime resized a secondary host four times and recorded new swapchain depth-target extents. |
+| R02 - Minimize and restore a secondary host | Passed (bounded Vulkan runtime) | The secondary host minimized and restored, then rendered a valid capture without a validation error. |
+| R03 - Keep secondary rendering active when main is minimized | Partial (bounded Vulkan runtime) | Both secondary hosts remained visible; one was resized and captured while the main window was minimized. Pointer response while minimized was not tested. |
+| R04 - Move windows between mixed-DPI monitors | Unverified (hardware) | DPI and geometry policies are tested, but physical mixed-DPI monitor movement is unavailable in this validation environment. |
+| R05 - Restore a window on negative desktop coordinates | Partial (policy) | `TestEditorNativeWindowBoundsPolicy` covers negative coordinates with a simulated monitor work area. Physical placement on a negative-coordinate monitor is unverified. |
+| R06 - Retire resources during close and transfer | Passed (bounded Vulkan runtime) | Native close retired one host while the main and sibling host remained rendered. Khronos and NVRHI validation reported no VUID or NVRHI errors. |
+| R07 - Show scene and multiple asset previews together | Partial (visual) | The Vulkan capture showed the Scene Viewport with material swatches in the Content Browser. Simultaneous full asset-editor previews are deferred until such editors exist. |
+| R08 - Run Vulkan Debug with validation enabled | Passed (bounded Vulkan Debug) | Khronos and NVRHI validation were active during document-host, resize, minimize, close, and failure-recovery runs; no VUID or NVRHI validation errors were reported. |
+| R09 - Run native-host flows on OpenGL | Passed (bounded OpenGL runtime) | Internal framebuffer readbacks showed the main shell, material and image type icons, and a secondary native host. OpenGL does not render the Scene Viewport or Vulkan previews. |
+| R10 - Recover from presentation creation failure | Passed (failure injection) | The Debug fixture injected native presentation and swapchain-allocation failures and retained the source session in the main host. |
+| R11 - Recover from out-of-date acquisition | Passed (failure injection) | The Debug fixture injected `VK_ERROR_OUT_OF_DATE_KHR` before acquisition and presented a subsequent frame. |
+| R12 - Recover from swapchain allocation failure | Passed (failure injection) | Partial swapchain image/depth allocation was injected; setup rolled back and the session remained usable. Allocator-level reclamation counters were not measured. |
+
+#### Persistence and assets
+
+| ID | Status | Evidence and limits |
+|---|---|---|
+| P01 - Restore main and secondary hosts after restart | Passed (bounded synthetic-host restart) | Two synthetic document hosts restored across an editor restart with isolated settings. Production asset-editor restoration and unsaved crash recovery are not covered. |
+| P02 - Recover after removing a monitor | Partial (policy) | Missing-monitor placement recovery is tested against simulated monitor data. Physical monitor removal and restart are unverified. |
+| P03 - Recover from corrupt or obsolete workspace data | Passed (policy and runtime) | Workspace codec tests and bounded recovery runs reject corrupt state while retaining valid document state. |
+| P04 - Skip missing asset records | Passed (runtime) | Missing-asset workspace restoration skips invalid records while preserving valid state. |
+| P05 - Keep Material Details independent of opening preference | Passed (policy and runtime layout) | Material opening resolves to the utility operation regardless of full-editor preference; the runtime capture confirmed Inspector-side placement. No full editor is registered to exercise the other half of the preference. |
+| P06 - Resolve remembered placement by editor kind | Passed (policy) | Manager and workspace tests cover remembered-host reuse and deterministic fallback. |
+| P07 - Move a referenced asset while its editor is open | Partial (service and identity policy) | Asset operations and stable-identity path updates are tested; end-to-end editor and reference behavior needs a production asset editor. |
+| P08 - Reject collisions and recover from move failures | Passed (service tests) | `TestAssetOperations` covers collision, invalid-path, registry-refresh, and rollback cases. |
+| P09 - Reject moving a folder into itself or a descendant | Passed (service tests) | `TestAssetOperations` verifies rejection before filesystem mutation. |
+| P10 - Route asset dialogs from a floating full editor | Deferred | Shared dialogs work in the main workspace. No production full asset editor exists to test native-host ownership and result routing. |
 
 ### Manual document-host checks
 
