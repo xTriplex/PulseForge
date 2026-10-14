@@ -508,6 +508,7 @@ namespace
 		};
 
 		using ContentFolderNode = PulseForgeEditor::EditorContentFolderNode;
+		using AssetBrowserPresentation = PulseForgeEditor::EditorContentBrowserAssetPresentation;
 		using ProjectAssetDestinationCreateKind = PulseForgeEditor::ProjectAssetDestinationCreateKind;
 
 		struct EntityClipboard
@@ -516,15 +517,6 @@ namespace
 			std::optional<PulseForge::AssetID> Scene;
 			std::vector<PulseForge::UUID> Roots;
 			std::vector<EditorJson> Records;
-		};
-
-		struct AssetBrowserPresentation
-		{
-			std::string Identifier;
-			std::string Name;
-			std::string FullPath;
-			std::string Extension;
-			PulseForgeEditor::EditorIcon Icon = PulseForgeEditor::EditorIcon::File;
 		};
 
 		struct PendingDocumentTransfer
@@ -5222,7 +5214,6 @@ namespace
 			ResetViewportSceneRenderer();
 			m_Project.reset();
 			m_ContentBrowser.ClearProject();
-			m_AssetBrowserPresentations.clear();
 			SetStatus("Project closed.");
 		}
 
@@ -10923,7 +10914,7 @@ namespace
 				{
 					const size_t AssetIndex = m_ContentBrowser.FilteredAssetIndices()[static_cast<size_t>(Row)];
 					const PulseForge::AssetRecord& Asset = m_ContentBrowser.Assets()[AssetIndex];
-					const AssetBrowserPresentation& Presentation = m_AssetBrowserPresentations[AssetIndex];
+					const AssetBrowserPresentation& Presentation = m_ContentBrowser.AssetPresentations()[AssetIndex];
 					ImGui::PushID(Presentation.Identifier.c_str());
 					ImGui::TableNextRow();
 					ImGui::TableSetColumnIndex(0);
@@ -10974,7 +10965,7 @@ namespace
 						ImGui::TableSetColumnIndex(Column);
 						const size_t SourceIndex = m_ContentBrowser.FilteredAssetIndices()[AssetIndex];
 						const PulseForge::AssetRecord& Asset = m_ContentBrowser.Assets()[SourceIndex];
-						const AssetBrowserPresentation& Presentation = m_AssetBrowserPresentations[SourceIndex];
+						const AssetBrowserPresentation& Presentation = m_ContentBrowser.AssetPresentations()[SourceIndex];
 						ImGui::PushID(Presentation.Identifier.c_str());
 						const bool IsSelected = m_ContentBrowser.SelectedAsset() && *m_ContentBrowser.SelectedAsset() == Asset.ID;
 						uint64_t PreviewID = 0;
@@ -11714,18 +11705,6 @@ namespace
 				? m_Project->GetAssetRegistry().GetAssets()
 				: std::vector<PulseForge::AssetRecord>{});
 			SynchronizeOpenDocumentAssetLocations();
-
-			m_AssetBrowserPresentations.clear();
-			m_AssetBrowserPresentations.reserve(m_ContentBrowser.Assets().size());
-			for (const PulseForge::AssetRecord& Asset : m_ContentBrowser.Assets())
-			{
-				m_AssetBrowserPresentations.push_back({
-					Asset.ID.ToString(),
-					PathToUtf8(Asset.ProjectRelativePath.filename()),
-					PathToUtf8(Asset.ProjectRelativePath),
-					NormalizedExtension(Asset.ProjectRelativePath),
-					PulseForgeEditor::GetAssetBrowserIcon(Asset.ProjectRelativePath) });
-			}
 		}
 
 		void SynchronizeOpenDocumentAssetLocations()
@@ -12061,7 +12040,6 @@ namespace
 		std::optional<PulseForge::AssetID> m_SceneAsset;
 		std::optional<EntityClipboard> m_EntityClipboard;
 		PulseForgeEditor::EditorMaterialDraftStore m_MaterialDraftStore;
-		std::vector<AssetBrowserPresentation> m_AssetBrowserPresentations;
 		std::string m_HierarchySearch;
 		std::string m_WindowTitle;
 		std::string m_ViewportTargetError;

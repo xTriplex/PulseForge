@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Assets/AssetRegistry.h"
+#include "Editor/EditorIcons.h"
 
 #include <cstddef>
 #include <filesystem>
@@ -17,10 +18,23 @@ namespace PulseForgeEditor
 		std::vector<EditorContentFolderNode> Children;
 	};
 
+	struct EditorContentBrowserAssetPresentation
+	{
+		std::string Identifier;
+		std::string Name;
+		std::string FullPath;
+		std::string Extension;
+		EditorIcon Icon = EditorIcon::File;
+	};
+
 	class EditorContentBrowserState final
 	{
 	public:
 		[[nodiscard]] const std::vector<PulseForge::AssetRecord>& Assets() const noexcept { return m_Assets; }
+		[[nodiscard]] const std::vector<EditorContentBrowserAssetPresentation>& AssetPresentations() const noexcept
+		{
+			return m_AssetPresentations;
+		}
 		[[nodiscard]] const std::vector<size_t>& FilteredAssetIndices() const noexcept
 		{
 			return m_FilteredAssetIndices;
@@ -55,6 +69,7 @@ namespace PulseForgeEditor
 
 	private:
 		void RebuildFolderTree();
+		void RebuildAssetPresentations();
 		[[nodiscard]] static bool ContainsFolder(
 			const EditorContentFolderNode& Node,
 			const std::filesystem::path& Candidate);
@@ -63,6 +78,7 @@ namespace PulseForgeEditor
 			const std::filesystem::path& Folder);
 
 		std::vector<PulseForge::AssetRecord> m_Assets;
+		std::vector<EditorContentBrowserAssetPresentation> m_AssetPresentations;
 		std::vector<size_t> m_FilteredAssetIndices;
 		EditorContentFolderNode m_FolderRoot{ "Assets", "Assets", {} };
 		std::filesystem::path m_CurrentFolder{ "Assets" };

@@ -56,6 +56,13 @@ namespace
 		PF_CHECK(Tests, Browser.FindFolder("Assets/Textures/Sky") != nullptr);
 		PF_CHECK(Tests, !Browser.IsKnownFolder("Assets/Missing"));
 		PF_CHECK(Tests, Browser.Assets().size() == 4);
+		PF_CHECK(Tests, Browser.AssetPresentations().size() == Browser.Assets().size());
+		PF_CHECK(Tests, Browser.AssetPresentations()[0].Identifier == Browser.Assets()[0].ID.ToString());
+		PF_CHECK(Tests, Browser.AssetPresentations()[0].Name == "blue.png");
+		PF_CHECK(Tests, Browser.AssetPresentations()[0].FullPath == "Assets/Textures/Sky/blue.png");
+		PF_CHECK(Tests, Browser.AssetPresentations()[0].Extension == ".png");
+		PF_CHECK(Tests, Browser.AssetPresentations()[0].Icon == EditorIcon::Image);
+		PF_CHECK(Tests, Browser.AssetPresentations()[2].Icon == EditorIcon::Material);
 
 		Browser.RebuildFilteredAssetIndices();
 		PF_CHECK(Tests, Browser.FilteredAssetIndices().empty());
@@ -78,6 +85,8 @@ namespace
 			*Browser.SelectedFolder() == "Assets/Art/Textures/Sky");
 
 		Browser.SetAssets({ { AssetID{ 0, 3 }, "Assets/Materials/metal.material" } });
+		PF_CHECK(Tests, Browser.AssetPresentations().size() == 1);
+		PF_CHECK(Tests, Browser.AssetPresentations()[0].Name == "metal.material");
 		PF_CHECK(Tests, Browser.CurrentFolder() == "Assets");
 		PF_CHECK(Tests, !Browser.SelectedFolder());
 		Browser.GridView() = false;
@@ -89,6 +98,7 @@ namespace
 		Browser.SelectedAsset() = AssetID{ 0, 3 };
 		Browser.ClearProject();
 		PF_CHECK(Tests, Browser.Assets().empty());
+		PF_CHECK(Tests, Browser.AssetPresentations().empty());
 		PF_CHECK(Tests, !Browser.SelectedAsset());
 		PF_CHECK(Tests, Browser.FolderRoot().Children.empty());
 	}

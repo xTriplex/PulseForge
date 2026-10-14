@@ -13,12 +13,38 @@ namespace PulseForgeEditor
 			const std::u8string UTF8Path = Path.generic_u8string();
 			return { reinterpret_cast<const char*>(UTF8Path.data()), UTF8Path.size() };
 		}
+
+		std::string NormalizedExtension(const std::filesystem::path& Path)
+		{
+			std::string Extension = PathToUtf8(Path.extension());
+			std::transform(Extension.begin(), Extension.end(), Extension.begin(), [](unsigned char Character)
+			{
+				return Character >= 'A' && Character <= 'Z'
+					? static_cast<char>(Character - 'A' + 'a')
+					: static_cast<char>(Character);
+			});
+			return Extension;
+		}
 	}
 
 	void EditorContentBrowserState::SetAssets(std::vector<PulseForge::AssetRecord> Assets)
 	{
 		m_Assets = std::move(Assets);
+		RebuildAssetPresentations();
 		RebuildFolderTree();
+	}
+
+	void EditorContentBrowserState::RebuildAssetPresentations()
+	{
+		m_AssetPresentations.clear();
+		m_AssetPresentations.reserve(m_Assets.size());
+		for (const PulseForge::AssetRecord& Asset : m_Assets)
+			m_AssetPresentations.push_back({
+				Asset.ID.ToString(),
+				PathToUtf8(Asset.ProjectRelativePath.filename()),
+				PathToUtf8(Asset.ProjectRelativePath),
+				NormalizedExtension(Asset.ProjectRelativePath),
+				GetAssetBrowserIcon(Asset.ProjectRelativePath) });
 	}
 
 	void EditorContentBrowserState::RebuildFolderTree()
@@ -83,6 +109,7 @@ namespace PulseForgeEditor
 	void EditorContentBrowserState::ClearProject()
 	{
 		m_Assets.clear();
+		m_AssetPresentations.clear();
 		m_SelectedAsset.reset();
 		m_FolderRoot = { "Assets", "Assets", {} };
 		ResetNavigation();
