@@ -305,13 +305,7 @@ target_link_libraries(PulseForgeRuntime
 	PUBLIC PulseForgeAudio PulseForgePhysics PulseForgeScripting
 	PRIVATE PulseForgeAssetServices PulseForgeAudioScene PulseForgeScene
 )
-add_library(PulseForge STATIC
-	PulseForge/Source/Private/Core/PulseForgePCH.cpp
-	PulseForge/Source/Private/Assets/MeshAssetCache.cpp
-	PulseForge/Source/Private/Assets/TextureAssetCache.cpp
-	PulseForge/Source/Private/Core/Application.cpp
-	PulseForge/Source/Private/Core/Core.cpp
-	PulseForge/Source/Private/Core/EntryPoint.cpp
+add_library(PulseForgeRenderer STATIC
 	PulseForge/Source/Private/Renderer/OpenGLRenderer.cpp
 	PulseForge/Source/Private/Renderer/Buffer.cpp
 	PulseForge/Source/Private/Renderer/Mesh.cpp
@@ -320,11 +314,38 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/Binding.cpp
 	PulseForge/Source/Private/Renderer/Graphics.cpp
 	PulseForge/Source/Private/Renderer/EnvironmentLighting.cpp
-	PulseForge/Source/Private/Renderer/EnvironmentLightingCache.cpp
 	PulseForge/Source/Private/Renderer/RendererBackend.cpp
-	PulseForge/Source/Private/Renderer/SceneRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanSupport.cpp
+)
+target_include_directories(PulseForgeRenderer
+	PUBLIC PulseForge/Source/Public PulseForge/Vendor/glm
+	PRIVATE
+		PulseForge/Source
+		PulseForge/Source/Private
+		PulseForge/Vendor/Glfw/include
+		PulseForge/Vendor/Glad/include
+		PulseForge/Vendor/stb
+)
+target_compile_definitions(PulseForgeRenderer PRIVATE
+	PF_PLATFORM_WINDOWS
+	_CRT_SECURE_NO_WARNINGS
+	GLFW_INCLUDE_NONE
+)
+target_link_libraries(PulseForgeRenderer
+	PUBLIC PulseForgeCore
+	PRIVATE PulseForgeWindow glfw PulseForgeGlad opengl32 nvrhi nvrhi_vk Vulkan-Headers
+)
+target_precompile_headers(PulseForgeRenderer PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
+add_library(PulseForge STATIC
+	PulseForge/Source/Private/Core/PulseForgePCH.cpp
+	PulseForge/Source/Private/Assets/MeshAssetCache.cpp
+	PulseForge/Source/Private/Assets/TextureAssetCache.cpp
+	PulseForge/Source/Private/Core/Application.cpp
+	PulseForge/Source/Private/Core/Core.cpp
+	PulseForge/Source/Private/Core/EntryPoint.cpp
+	PulseForge/Source/Private/Renderer/EnvironmentLightingCache.cpp
+	PulseForge/Source/Private/Renderer/SceneRenderer.cpp
 )
 target_include_directories(PulseForge
 	PUBLIC PulseForge/Source/Public
@@ -344,14 +365,9 @@ target_compile_definitions(PulseForge PRIVATE
 	GLFW_INCLUDE_NONE
 	MA_NO_WIN32_LEAN_AND_MEAN
 )
-target_link_libraries(PulseForge PUBLIC PulseForgeAssetServices PulseForgeRenderMath PulseForgeRuntime PulseForgeWindow)
-target_link_libraries(PulseForge PRIVATE
-	glfw
-	PulseForgeGlad
-	opengl32
-	nvrhi
-	nvrhi_vk
-	Vulkan-Headers
+target_link_libraries(PulseForge
+	PUBLIC PulseForgeAssetServices PulseForgeRenderMath PulseForgeRuntime PulseForgeWindow
+	PRIVATE PulseForgeRenderer
 )
 target_precompile_headers(PulseForge PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
 
@@ -891,6 +907,15 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 endif()
 
 if(BUILD_TESTING)
+	add_executable(PulseForgeRendererTests
+		Tests/PulseForgeRendererTests.cpp
+		Tests/RendererPolicyTests.cpp
+	)
+	target_include_directories(PulseForgeRendererTests PRIVATE Tests)
+	target_compile_definitions(PulseForgeRendererTests PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeRendererTests PRIVATE PulseForgeRenderer)
+	add_test(NAME PulseForge.RendererPolicy COMMAND PulseForgeRendererTests)
+
 	add_executable(PulseForgeRenderMathTests
 		Tests/PulseForgeRenderMathTests.cpp
 		Tests/RenderMathTests.cpp
@@ -958,7 +983,9 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	set_property(TARGET PulseForgeGpuValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGpuValidation>")
 endif()
 
-foreach(Target PulseForgeCore PulseForgeScene PulseForgeAssetCatalog PulseForgeAssetServices PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI
+foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeRenderMath PulseForgeAssetCatalog PulseForgeAudio
+		PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeScripting PulseForgeRuntime PulseForgeRenderer
+		PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI PulseForgeRendererTests PulseForgeRenderMathTests
 		PulseForgeTests PulseForgeEditorTests PulseForgeBufferUpdateTests PulseForgeGpuValidation)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE

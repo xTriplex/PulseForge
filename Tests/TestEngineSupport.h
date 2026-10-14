@@ -35,7 +35,6 @@
 #include "Renderer/Graphics.h"
 #include "Renderer/Mesh.h"
 #include "Renderer/RenderTarget.h"
-#include "Renderer/Vulkan/VulkanSupport.h"
 #include "Runtime/SceneRuntime.h"
 #include "Scene/Scene.h"
 #include "Scene/SceneRenderSnapshot.h"
