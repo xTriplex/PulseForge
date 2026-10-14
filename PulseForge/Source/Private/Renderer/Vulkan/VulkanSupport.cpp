@@ -5,6 +5,38 @@
 
 namespace PulseForge::VulkanSupport
 {
+	SwapchainFrameStartAction ResolveSwapchainFrameStartAction(
+		bool HasCurrentGeneration,
+		bool RecreationRequested,
+		bool CanCreateGeneration) noexcept
+	{
+		if (RecreationRequested && CanCreateGeneration)
+			return SwapchainFrameStartAction::Recreate;
+		return HasCurrentGeneration
+			? SwapchainFrameStartAction::PresentCurrent
+			: SwapchainFrameStartAction::Skip;
+	}
+
+	bool CanCreateSwapchainGeneration(
+		bool PresentationFencesEnabled,
+		bool HasCurrentGeneration,
+		std::size_t DeferredGenerationCount) noexcept
+	{
+		return PresentationFencesEnabled || !HasCurrentGeneration ||
+			DeferredGenerationCount < MaximumDeferredSwapchainGenerations;
+	}
+
+	bool ShouldRetireDeferredSwapchains(
+		bool PresentationFencesEnabled,
+		bool FirstPresentationPending,
+		uint32_t FirstPresentationImageIndex,
+		uint32_t AcquiredImageIndex,
+		bool AcquireSemaphoreWaitSubmitted) noexcept
+	{
+		return !PresentationFencesEnabled && FirstPresentationPending &&
+			FirstPresentationImageIndex == AcquiredImageIndex && AcquireSemaphoreWaitSubmitted;
+	}
+
 	bool SupportsRequiredDeviceFeatures(const RequiredDeviceFeatures& Features)
 	{
 		return Features.TimelineSemaphore && Features.Synchronization2 && Features.DynamicRendering &&

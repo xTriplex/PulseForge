@@ -1,5 +1,6 @@
 #include "Core/PulseForgePCH.h"
 #include "Editor/EditorDocumentManager.h"
+#include "Editor/EditorNativeWindowBoundsPolicy.h"
 
 #include <algorithm>
 #include <limits>
@@ -11,6 +12,13 @@ namespace PulseForgeEditor
 		size_t Hash = PulseForge::UUIDHash{}(Identity.Project);
 		Hash ^= PulseForge::UUIDHash{}(Identity.Asset) + 0x9e3779b9u + (Hash << 6u) + (Hash >> 2u);
 		Hash ^= static_cast<size_t>(Identity.Kind) + 0x9e3779b9u + (Hash << 6u) + (Hash >> 2u);
+		return Hash;
+	}
+
+	size_t EditorDocumentPlacementKeyHash::operator()(const EditorDocumentPlacementKey& Key) const noexcept
+	{
+		size_t Hash = PulseForge::UUIDHash{}(Key.Project);
+		Hash ^= static_cast<size_t>(Key.Kind) + 0x9e3779b9u + (Hash << 6u) + (Hash >> 2u);
 		return Hash;
 	}
 
@@ -26,7 +34,7 @@ namespace PulseForgeEditor
 	{
 		if (FindHost(ID))
 			return nullptr;
-		m_Hosts.push_back({ std::move(ID), Role, PlacementKind, {}, {}, std::nullopt });
+		m_Hosts.push_back({ std::move(ID), Role, PlacementKind, {}, std::nullopt, {}, std::nullopt });
 		return &m_Hosts.back();
 	}
 
@@ -41,12 +49,15 @@ namespace PulseForgeEditor
 
 	std::expected<std::string, std::string> EditorDocumentManager::CreateNativeHost(
 		std::string HostID,
-		EditorDocumentKind PlacementKind)
+		EditorDocumentKind PlacementKind,
+		EditorDocumentHost::WindowBounds Bounds)
 	{
 		if (HostID.empty() || HostID == MainHostID || PlacementKind == EditorDocumentKind::Level || FindHost(HostID))
 			return std::unexpected("The native document host identity or editor kind is invalid");
-		if (!CreateHost(HostID, EditorDocumentHostRole::Native, PlacementKind))
+		EditorDocumentHost* Host = CreateHost(HostID, EditorDocumentHostRole::Native, PlacementKind);
+		if (!Host)
 			return std::unexpected("Could not register a unique native document host");
+		Host->Bounds = std::move(Bounds);
 		return HostID;
 	}
 
@@ -75,21 +86,53 @@ namespace PulseForgeEditor
 					std::to_string(static_cast<uint32_t>(Identity.Kind));
 				if (!CreateHost(HostID, EditorDocumentHostRole::Native, Identity.Kind))
 					return std::unexpected("Could not register a unique native document host");
+				const auto ExistingPlacement = m_RememberedPlacements.find({ Identity.Project, Identity.Kind });
+				const EditorDocumentHost::WindowBounds Bounds = ExistingPlacement == m_RememberedPlacements.end()
+					? EditorDocumentHost::WindowBounds{} : ExistingPlacement->second.Bounds;
+				if (EditorDocumentHost* NativeHost = FindHost(HostID))
+					NativeHost->Bounds = Bounds;
+				const EditorDocumentHostRole RememberedRole = ExistingPlacement == m_RememberedPlacements.end()
+					? EditorDocumentHostRole::Native : ExistingPlacement->second.Role;
+				(void)SetRememberedPlacement(Identity.Project, Identity.Kind, RememberedRole, Bounds, HostID);
 			}
 			else if (Preference == EditorDocumentOpenPreference::RememberedPlacement)
 			{
-				const auto Remembered = m_RememberedHosts.find(Identity.Kind);
-				const EditorDocumentHost* Host = Remembered == m_RememberedHosts.end()
-					? nullptr : FindHost(Remembered->second);
-				if (Host && Host->Role == EditorDocumentHostRole::Native && Host->PlacementKind == Identity.Kind)
-					HostID = Host->ID;
+				const auto Remembered = m_RememberedPlacements.find({ Identity.Project, Identity.Kind });
+				if (Remembered != m_RememberedPlacements.end() &&
+					Remembered->second.Role == EditorDocumentHostRole::Main)
+					HostID = std::string(MainHostID);
 				else
 				{
-					auto CreatedHost = CreateNativeHost(Identity.Kind);
-					if (!CreatedHost)
-						return std::unexpected(CreatedHost.error());
-					HostID = std::move(*CreatedHost);
-					m_RememberedHosts[Identity.Kind] = HostID;
+					const EditorDocumentPlacement* Placement = Remembered == m_RememberedPlacements.end()
+						? nullptr : &Remembered->second;
+					EditorDocumentHost* ReusableHost = Placement && Placement->LiveHostID
+						? FindHost(*Placement->LiveHostID) : nullptr;
+					const bool Reusable = ReusableHost && ReusableHost->Role == EditorDocumentHostRole::Native &&
+						ReusableHost->PlacementKind == Identity.Kind &&
+						(!ReusableHost->Project || *ReusableHost->Project == Identity.Project) &&
+						std::all_of(ReusableHost->Documents.begin(), ReusableHost->Documents.end(),
+							[&Identity](const EditorDocumentIdentity& Existing)
+							{
+								return Existing.Project == Identity.Project;
+							});
+					if (Reusable)
+						HostID = ReusableHost->ID;
+					else
+					{
+						EditorDocumentHost::WindowBounds Bounds = Placement ? Placement->Bounds
+							: EditorDocumentHost::WindowBounds{};
+						if (!IsValidNativeWindowBounds(Bounds))
+							Bounds.HasValue = false;
+						auto CreatedHost = CreateNativeHost(Identity.Kind);
+						if (!CreatedHost)
+							return std::unexpected(CreatedHost.error());
+						HostID = std::move(*CreatedHost);
+						EditorDocumentHost* Created = FindHost(HostID);
+						if (Created)
+							Created->Bounds = Bounds;
+						(void)SetRememberedPlacement(Identity.Project, Identity.Kind,
+							EditorDocumentHostRole::Native, Bounds, HostID);
+					}
 				}
 			}
 		}
@@ -97,12 +140,17 @@ namespace PulseForgeEditor
 		EditorDocumentHost* Host = FindHost(HostID);
 		if (!Host)
 			return std::unexpected("The target document host is no longer registered");
+		if (Host->Project && *Host->Project != Identity.Project)
+			return std::unexpected("Documents from different projects cannot share a host");
 		for (const EditorDocumentIdentity& ExistingDocument : Host->Documents)
 			if (ExistingDocument.Project != Identity.Project)
 				return std::unexpected("Documents from different projects cannot share a host");
+		if (Host->Role == EditorDocumentHostRole::Native && Host->PlacementKind != Identity.Kind)
+			return std::unexpected("The target native document host does not support this document type");
 		EditorDocumentSession Session{ Identity, ProjectRelativePath, std::move(DisplayName), HostID, 0, 0 };
 		m_Sessions.emplace(Identity, std::move(Session));
 		Host->Documents.push_back(Identity);
+		Host->Project = Identity.Project;
 		Host->ActiveDocument = Identity;
 		m_FocusedHostID = HostID;
 		return EditorDocumentOpenResult{ Identity, std::move(HostID), true };
@@ -121,7 +169,7 @@ namespace PulseForgeEditor
 		return true;
 	}
 
-	bool EditorDocumentManager::RemoveEmptyNativeHost(std::string_view HostID) noexcept
+	bool EditorDocumentManager::RemoveEmptyNativeHost(std::string_view HostID)
 	{
 		const auto Host = std::find_if(m_Hosts.begin(), m_Hosts.end(), [HostID](const EditorDocumentHost& Candidate)
 		{
@@ -130,12 +178,14 @@ namespace PulseForgeEditor
 		if (Host == m_Hosts.end() || Host->Role != EditorDocumentHostRole::Native || !Host->Documents.empty())
 			return false;
 
-		for (auto Remembered = m_RememberedHosts.begin(); Remembered != m_RememberedHosts.end();)
+		for (auto& [Key, Placement] : m_RememberedPlacements)
 		{
-			if (Remembered->second == Host->ID)
-				Remembered = m_RememberedHosts.erase(Remembered);
-			else
-				++Remembered;
+			(void)Key;
+			if (Placement.LiveHostID && *Placement.LiveHostID == Host->ID)
+			{
+				Placement.Bounds = Host->Bounds;
+				Placement.LiveHostID.reset();
+			}
 		}
 		if (m_FocusedHostID == Host->ID)
 			m_FocusedHostID = MainHostID;
@@ -147,7 +197,8 @@ namespace PulseForgeEditor
 		const EditorDocumentIdentity& Identity,
 		std::string_view DestinationHostID,
 		size_t DestinationIndex,
-		const TransferPreparation& Prepare)
+		const TransferPreparation& Prepare,
+		EditorDocumentTransferCause Cause)
 	{
 		auto SessionIt = m_Sessions.find(Identity);
 		if (SessionIt == m_Sessions.end())
@@ -165,11 +216,40 @@ namespace PulseForgeEditor
 		if (Destination->Role == EditorDocumentHostRole::Native &&
 			Destination->PlacementKind != Identity.Kind)
 			return std::unexpected("The destination native host does not support this document type");
+		if (Destination->Project && *Destination->Project != Identity.Project)
+			return std::unexpected("Documents from different projects cannot share a host");
 		for (const EditorDocumentIdentity& ExistingDocument : Destination->Documents)
 			if (ExistingDocument.Project != Identity.Project)
 				return std::unexpected("Documents from different projects cannot share a host");
 		if (Prepare && !Prepare(SessionIt->second, *Destination))
 			return std::unexpected("The destination host could not prepare the document presentation");
+
+		std::optional<decltype(m_RememberedPlacements)::iterator> PlacementToUpdate;
+		EditorDocumentPlacement UpdatedPlacement;
+		if (Cause == EditorDocumentTransferCause::User)
+		{
+			UpdatedPlacement.Role = Destination->Role;
+			const auto ExistingPlacement = m_RememberedPlacements.find({ Identity.Project, Identity.Kind });
+			UpdatedPlacement.Bounds = Destination->Role == EditorDocumentHostRole::Native
+				? Destination->Bounds
+				: (Source->Role == EditorDocumentHostRole::Native
+					? Source->Bounds
+					: (ExistingPlacement == m_RememberedPlacements.end()
+						? EditorDocumentHost::WindowBounds{} : ExistingPlacement->second.Bounds));
+			if (Destination->Role == EditorDocumentHostRole::Native)
+				UpdatedPlacement.LiveHostID = Destination->ID;
+			try
+			{
+				auto [Placement, Inserted] = m_RememberedPlacements.try_emplace(
+					EditorDocumentPlacementKey{ Identity.Project, Identity.Kind }, UpdatedPlacement);
+				(void)Inserted;
+				PlacementToUpdate = Placement;
+			}
+			catch (const std::exception& Exception)
+			{
+				return std::unexpected(std::string("Could not reserve remembered document placement: ") + Exception.what());
+			}
+		}
 
 		if (Source == Destination)
 		{
@@ -179,6 +259,8 @@ namespace PulseForgeEditor
 			Source->Documents.insert(Source->Documents.begin() + static_cast<std::ptrdiff_t>(DestinationIndex), Identity);
 			Source->ActiveDocument = Identity;
 			m_FocusedHostID = Source->ID;
+			if (PlacementToUpdate)
+				(*PlacementToUpdate)->second = std::move(UpdatedPlacement);
 			return EditorDocumentTransferResult{ OldIndex != DestinationIndex, std::nullopt };
 		}
 
@@ -194,9 +276,12 @@ namespace PulseForgeEditor
 		DestinationIndex = (std::min)(DestinationIndex, Destination->Documents.size());
 		Destination->Documents.insert(
 			Destination->Documents.begin() + static_cast<std::ptrdiff_t>(DestinationIndex), Identity);
+		Destination->Project = Identity.Project;
 		Destination->ActiveDocument = Identity;
 		SessionIt->second.HostID = Destination->ID;
 		m_FocusedHostID = Destination->ID;
+		if (PlacementToUpdate)
+			(*PlacementToUpdate)->second = std::move(UpdatedPlacement);
 		return EditorDocumentTransferResult{
 			true,
 			Source->Role == EditorDocumentHostRole::Native && Source->Documents.empty()
@@ -204,18 +289,16 @@ namespace PulseForgeEditor
 		};
 	}
 
-	std::expected<size_t, std::string> EditorDocumentManager::TransferAll(
-		std::string_view SourceHostID,
-		std::string_view DestinationHostID)
+	std::expected<size_t, std::string> EditorDocumentManager::RecoverAllToMain(std::string_view SourceHostID)
 	{
 		EditorDocumentHost* Source = FindHost(SourceHostID);
-		EditorDocumentHost* Destination = FindHost(DestinationHostID);
-		if (!Source || !Destination || Source == Destination)
-			return std::unexpected("Batch transfer requires distinct registered source and destination hosts");
+		EditorDocumentHost* Destination = FindHost(MainHostID);
+		if (!Source || !Destination || Source == Destination || Source->Role != EditorDocumentHostRole::Native)
+			return std::unexpected("Batch recovery is restricted to a registered native host returning to Main");
 		if (Source->Documents.empty())
 			return size_t{ 0 };
 		if (Source->Documents.size() > Destination->Documents.max_size() - Destination->Documents.size())
-			return std::unexpected("The destination host cannot hold every document from the failed native window");
+			return std::unexpected("The main document host cannot hold every document from the failed native window");
 
 		std::optional<PulseForge::UUID> SourceProject;
 		for (size_t Index = 0; Index < Source->Documents.size(); ++Index)
@@ -234,6 +317,8 @@ namespace PulseForgeEditor
 			if (SourceProject && *SourceProject != Identity.Project)
 				return std::unexpected("Documents from different projects cannot share a host");
 			SourceProject = Identity.Project;
+			if (Destination->Project && *Destination->Project != Identity.Project)
+				return std::unexpected("Documents from different projects cannot share a host");
 			for (const EditorDocumentIdentity& Existing : Destination->Documents)
 				if (Existing.Project != Identity.Project)
 					return std::unexpected("Documents from different projects cannot share a host");
@@ -266,6 +351,8 @@ namespace PulseForgeEditor
 			m_Sessions.find(Identity)->second.HostID.assign(Destination->ID);
 		}
 		Destination->ActiveDocument = ActiveDocument;
+		if (SourceProject)
+			Destination->Project = *SourceProject;
 		Source->Documents.clear();
 		Source->ActiveDocument.reset();
 		m_FocusedHostID.assign(Destination->ID);
@@ -293,20 +380,56 @@ namespace PulseForgeEditor
 		return true;
 	}
 
-	bool EditorDocumentManager::SetRememberedHost(EditorDocumentKind Kind, std::string_view HostID) noexcept
+	bool EditorDocumentManager::SetRememberedPlacement(
+		const PulseForge::UUID& Project,
+		EditorDocumentKind Kind,
+		EditorDocumentHostRole Role,
+		EditorDocumentHost::WindowBounds Bounds,
+		std::optional<std::string> LiveHostID)
 	{
-		if (Kind == EditorDocumentKind::Level)
+		if (Project.IsNil() || Kind == EditorDocumentKind::Level ||
+			(Role != EditorDocumentHostRole::Main && Role != EditorDocumentHostRole::Native))
 			return false;
-		const EditorDocumentHost* Host = FindHost(HostID);
-		if (!Host || Host->Role != EditorDocumentHostRole::Native || Host->PlacementKind != Kind)
-			return false;
-		m_RememberedHosts[Kind] = Host->ID;
+		if (Role == EditorDocumentHostRole::Main)
+		{
+			if (LiveHostID)
+			{
+				const EditorDocumentHost* Host = FindHost(*LiveHostID);
+				if (!Host || Host->Role != EditorDocumentHostRole::Native || Host->PlacementKind != Kind ||
+					(Host->Project && *Host->Project != Project) ||
+					!std::all_of(Host->Documents.begin(), Host->Documents.end(), [&Project](const auto& Identity)
+					{
+						return Identity.Project == Project;
+					}))
+					return false;
+			}
+			if (!IsValidNativeWindowBounds(Bounds))
+				Bounds = {};
+			m_RememberedPlacements[{ Project, Kind }] =
+				EditorDocumentPlacement{ Role, std::move(Bounds), std::move(LiveHostID) };
+			return true;
+		}
+		if (LiveHostID)
+		{
+			const EditorDocumentHost* Host = FindHost(*LiveHostID);
+			if (!Host || Host->Role != EditorDocumentHostRole::Native || Host->PlacementKind != Kind ||
+				(Host->Project && *Host->Project != Project) ||
+				!std::all_of(Host->Documents.begin(), Host->Documents.end(), [&Project](const auto& Identity)
+				{
+					return Identity.Project == Project;
+				}))
+				return false;
+		}
+		if (!IsValidNativeWindowBounds(Bounds))
+			Bounds.HasValue = false;
+		m_RememberedPlacements[{ Project, Kind }] =
+			EditorDocumentPlacement{ Role, std::move(Bounds), std::move(LiveHostID) };
 		return true;
 	}
 
 	bool EditorDocumentManager::SetHostBounds(
 		std::string_view HostID,
-		EditorDocumentHost::WindowBounds Bounds) noexcept
+		EditorDocumentHost::WindowBounds Bounds)
 	{
 		EditorDocumentHost* Host = FindHost(HostID);
 		if (!Host || Host->Role != EditorDocumentHostRole::Native)
@@ -318,7 +441,25 @@ namespace PulseForgeEditor
 			Current.HasValue == Bounds.HasValue)
 			return false;
 		Host->Bounds = std::move(Bounds);
+		for (auto& [Key, Placement] : m_RememberedPlacements)
+			if (Placement.LiveHostID && *Placement.LiveHostID == Host->ID &&
+				Key.Kind == Host->PlacementKind)
+				Placement.Bounds = Host->Bounds;
 		return true;
+	}
+
+	std::vector<std::pair<EditorDocumentKind, EditorDocumentPlacement>>
+	EditorDocumentManager::GetRememberedPlacements(const PulseForge::UUID& Project) const
+	{
+		std::vector<std::pair<EditorDocumentKind, EditorDocumentPlacement>> Placements;
+		for (const auto& [Key, Placement] : m_RememberedPlacements)
+			if (Key.Project == Project)
+			{
+				EditorDocumentPlacement Persisted = Placement;
+				Persisted.LiveHostID.reset();
+				Placements.emplace_back(Key.Kind, std::move(Persisted));
+			}
+		return Placements;
 	}
 
 	bool EditorDocumentManager::MarkEdited(const EditorDocumentIdentity& Identity) noexcept
@@ -357,6 +498,9 @@ namespace PulseForgeEditor
 				CandidateHosts.push_back(HostID);
 			Session = m_Sessions.erase(Session);
 		}
+		if (EditorDocumentHost* MainHost = FindHost(MainHostID);
+			MainHost && MainHost->Project == Project && MainHost->Documents.empty())
+			MainHost->Project.reset();
 
 		std::vector<std::string> EmptyHosts;
 		for (const std::string& HostID : CandidateHosts)

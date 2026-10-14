@@ -7,6 +7,19 @@
 
 namespace PulseForgeEditor
 {
+	[[nodiscard]] inline bool IsValidNativeWindowBounds(
+		const EditorDocumentHost::WindowBounds& Bounds) noexcept
+	{
+		if (!Bounds.HasValue)
+			return true;
+		return std::isfinite(Bounds.X) && std::isfinite(Bounds.Y) &&
+			std::isfinite(Bounds.Width) && std::isfinite(Bounds.Height) &&
+			std::isfinite(Bounds.DpiScale) && std::abs(Bounds.X) <= 100000.0f &&
+			std::abs(Bounds.Y) <= 100000.0f && Bounds.Width >= 160.0f && Bounds.Width <= 16384.0f &&
+			Bounds.Height >= 120.0f && Bounds.Height <= 16384.0f &&
+			Bounds.DpiScale >= 0.5f && Bounds.DpiScale <= 8.0f && Bounds.MonitorName.size() <= 256;
+	}
+
 	struct EditorNativeWindowRect
 	{
 		float X = 0.0f;

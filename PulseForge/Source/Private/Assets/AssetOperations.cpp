@@ -68,9 +68,11 @@ namespace PulseForge
 
 		std::expected<void, AssetOperationError> ValidateProjectRegistry(
 			AssetRegistry& Registry,
-			const FilesystemPath& ProjectRoot)
+			const FilesystemPath& ProjectRoot,
+			const AssetOperations::RegistryRefresh& Refresh)
 		{
-			const auto RebuildResult = Registry.Rebuild(ProjectRoot);
+			(void)Registry;
+			const auto RebuildResult = Refresh(ProjectRoot);
 			if (RebuildResult)
 				return {};
 
@@ -86,6 +88,16 @@ namespace PulseForge
 				AssetOperationErrorCode::InvalidProjectAssets,
 				std::move(Path),
 				std::move(Message)));
+		}
+
+		std::expected<void, AssetOperationError> ValidateProjectRegistry(
+			AssetRegistry& Registry,
+			const FilesystemPath& ProjectRoot)
+		{
+			return ValidateProjectRegistry(Registry, ProjectRoot, [&Registry](const FilesystemPath& Root)
+			{
+				return Registry.Rebuild(Root);
+			});
 		}
 
 		AssetOperationError MakeRegistryRefreshError(
@@ -891,10 +903,38 @@ namespace PulseForge
 		const AssetID& SourceAsset,
 		const std::filesystem::path& DestinationPath)
 	{
+		return MoveImpl(Registry, ProjectRoot, SourceAsset, DestinationPath, [&Registry](const auto& Root)
+		{
+			return Registry.Rebuild(Root);
+		});
+	}
+
+#if defined(PF_DEBUG)
+	std::expected<AssetRecord, AssetOperationError> AssetOperations::MoveWithRegistryRefreshForTesting(
+		AssetRegistry& Registry,
+		const std::filesystem::path& ProjectRoot,
+		const AssetID& SourceAsset,
+		const std::filesystem::path& DestinationPath,
+		const RegistryRefresh& Refresh)
+	{
+		if (!Refresh)
+			return std::unexpected(MakeError(AssetOperationErrorCode::FilesystemFailure, DestinationPath,
+				"The test registry refresh callback is empty"));
+		return MoveImpl(Registry, ProjectRoot, SourceAsset, DestinationPath, Refresh);
+	}
+#endif
+
+	std::expected<AssetRecord, AssetOperationError> AssetOperations::MoveImpl(
+		AssetRegistry& Registry,
+		const std::filesystem::path& ProjectRoot,
+		const AssetID& SourceAsset,
+		const std::filesystem::path& DestinationPath,
+		const RegistryRefresh& Refresh)
+	{
 		const auto Project = OpenProject(ProjectRoot);
 		if (!Project)
 			return std::unexpected(Project.error());
-		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
+		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root, Refresh); !RegistryResult)
 			return std::unexpected(RegistryResult.error());
 		const auto SourceRecord = Registry.Find(SourceAsset);
 		if (!SourceRecord)
@@ -1062,8 +1102,91 @@ namespace PulseForge
 				"Could not remove the original sidecar; the source asset was restored: " + RemoveFailure));
 		}
 
-		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
-			return std::unexpected(MakeRegistryRefreshError(RegistryResult.error(), "Asset move"));
+		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root, Refresh); !RegistryResult)
+		{
+			const AssetOperationError OriginalRegistryError = RegistryResult.error();
+			const auto IsAbsent = [](const FilesystemPath& Path, std::error_code& StatusError)
+			{
+				const auto Status = std::filesystem::symlink_status(Path, StatusError);
+				return StatusError == std::errc::no_such_file_or_directory ||
+					(!StatusError && Status.type() == std::filesystem::file_type::not_found);
+			};
+			std::error_code SourceStatusError;
+			std::error_code SidecarStatusError;
+			const bool SourceAbsent = IsAbsent(*Source, SourceStatusError);
+			const bool SidecarAbsent = IsAbsent(SourceSidecar, SidecarStatusError);
+			std::string RollbackFailure;
+			if ((SourceStatusError && SourceStatusError != std::errc::no_such_file_or_directory) ||
+				(SidecarStatusError && SidecarStatusError != std::errc::no_such_file_or_directory) ||
+				!SourceAbsent || !SidecarAbsent)
+			{
+				RollbackFailure = "the original asset path or sidecar path is occupied or cannot be inspected";
+			}
+			else
+			{
+				const auto DestinationMetadata = LoadManagedMetadata(*Destination, DestinationPath);
+				if (!DestinationMetadata || DestinationMetadata->ID != SourceAsset)
+				{
+					RollbackFailure = DestinationMetadata
+						? "the destination sidecar no longer has the moved asset UUID"
+						: "the destination pair could not be verified: " + DestinationMetadata.error().Message;
+				}
+				else
+				{
+					Error.clear();
+					std::filesystem::rename(*Destination, *Source, Error);
+					if (Error)
+						RollbackFailure = "could not restore the original asset file: " + Error.message();
+					else
+					{
+						Error.clear();
+						std::filesystem::rename(NormalizedDestinationSidecar, SourceSidecar, Error);
+						if (Error)
+						{
+							const std::string SidecarFailure = Error.message();
+							std::error_code RestoreMovedAssetError;
+							std::filesystem::rename(*Source, *Destination, RestoreMovedAssetError);
+							RollbackFailure = "could not restore the original sidecar: " + SidecarFailure;
+							if (RestoreMovedAssetError)
+								RollbackFailure += "; could not return the asset file to the destination: " +
+									RestoreMovedAssetError.message();
+							RollbackFailure += "; inspect source " + SourcePath.generic_string() +
+								" and destination " + DestinationPath.generic_string();
+						}
+					}
+				}
+			}
+
+			if (!RollbackFailure.empty())
+			{
+				AssetOperationError Recovery = MakeError(
+					AssetOperationErrorCode::RecoveryRequired,
+					DestinationPath,
+					"The move could not be committed to a coherent registry after refresh failed (" +
+						OriginalRegistryError.Message + "). Recovery is required: " + RollbackFailure +
+						". Remaining paths: source=" + (Project->Root / SourcePath).generic_string() +
+						", destination=" + (Project->Root / DestinationPath).generic_string() +
+						", destination sidecar=" + AssetMetadataSerializer::GetSidecarPath(*Destination).generic_string());
+				Recovery.RecoveryPath = *Destination;
+				return std::unexpected(std::move(Recovery));
+			}
+
+			if (auto RollbackRefresh = ValidateProjectRegistry(Registry, Project->Root, Refresh); !RollbackRefresh)
+			{
+				AssetOperationError Recovery = MakeError(
+					AssetOperationErrorCode::RecoveryRequired,
+					SourcePath,
+					"The asset files were restored to their original paths, but the registry could not confirm recovery: " +
+						RollbackRefresh.error().Message);
+				Recovery.RecoveryPath = *Source;
+				return std::unexpected(std::move(Recovery));
+			}
+			return std::unexpected(MakeError(
+				AssetOperationErrorCode::RegistryRefreshFailed,
+				OriginalRegistryError.Path,
+				"The asset move was rolled back because the post-move registry refresh failed: " +
+					OriginalRegistryError.Message));
+		}
 
 		return AssetRecord{ Metadata->ID, DestinationPath };
 	}

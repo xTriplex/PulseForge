@@ -1,4 +1,5 @@
 #include "Editor/EditorDocumentWorkspace.h"
+#include "Editor/EditorNativeWindowBoundsPolicy.h"
 
 #include <nlohmann/json.hpp>
 
@@ -37,19 +38,12 @@ namespace
 
 	bool IsValidBounds(const EditorDocumentHost::WindowBounds& Bounds)
 	{
-		if (!Bounds.HasValue)
-			return true;
-		return std::isfinite(Bounds.X) && std::isfinite(Bounds.Y) &&
-			std::isfinite(Bounds.Width) && std::isfinite(Bounds.Height) &&
-			std::isfinite(Bounds.DpiScale) && std::abs(Bounds.X) <= 100000.0f &&
-			std::abs(Bounds.Y) <= 100000.0f && Bounds.Width >= 160.0f && Bounds.Width <= 16384.0f &&
-			Bounds.Height >= 120.0f && Bounds.Height <= 16384.0f &&
-			Bounds.DpiScale >= 0.5f && Bounds.DpiScale <= 8.0f && Bounds.MonitorName.size() <= 256;
+		return IsValidNativeWindowBounds(Bounds);
 	}
 
 	std::expected<void, std::string> ValidateWorkspace(const EditorDocumentWorkspaceState& State)
 	{
-		if (State.Version != 2 || State.Project.IsNil() ||
+		if (State.Version != 3 || State.Project.IsNil() ||
 			(State.MaterialDetailsAsset && State.MaterialDetailsAsset->IsNil()))
 			return std::unexpected("Document workspace version or project identity is invalid");
 		if (State.Hosts.empty() || State.Hosts.size() > MaximumWorkspaceHosts)
@@ -82,6 +76,7 @@ namespace
 			{
 				if (Identity.Project != State.Project ||
 					static_cast<uint8_t>(Identity.Kind) > static_cast<uint8_t>(EditorDocumentKind::Texture) ||
+					(Host.Role == EditorDocumentHostRole::Native && Identity.Kind != Host.PlacementKind) ||
 					(Identity.Kind == EditorDocumentKind::Level &&
 						(Host.Role != EditorDocumentHostRole::Main || !Identity.Asset.IsNil())) ||
 					(Identity.Kind != EditorDocumentKind::Level && Identity.Asset.IsNil()) ||
@@ -98,16 +93,14 @@ namespace
 			return std::unexpected("Document workspace has no main host or references an unknown focused host");
 
 		std::unordered_set<uint8_t> RememberedKinds;
-		for (const auto& [Kind, HostID] : State.RememberedHosts)
+		for (const auto& [Kind, Placement] : State.RememberedPlacements)
 		{
-			if (Kind == EditorDocumentKind::Level || !RememberedKinds.insert(static_cast<uint8_t>(Kind)).second)
+			if (Kind == EditorDocumentKind::Level ||
+				!RememberedKinds.insert(static_cast<uint8_t>(Kind)).second ||
+				(Placement.Role != EditorDocumentHostRole::Main && Placement.Role != EditorDocumentHostRole::Native) ||
+				!IsValidBounds(Placement.Bounds) ||
+				Placement.LiveHostID)
 				return std::unexpected("Document workspace contains an invalid remembered placement");
-			const auto Host = std::find_if(State.Hosts.begin(), State.Hosts.end(), [&HostID](const auto& Candidate)
-			{
-				return Candidate.ID == HostID && Candidate.Role == EditorDocumentHostRole::Native;
-			});
-			if (Host == State.Hosts.end() || Host->PlacementKind != Kind)
-				return std::unexpected("Document workspace remembered placement references an incompatible host");
 		}
 		return {};
 	}
@@ -189,9 +182,21 @@ namespace PulseForgeEditor
 			};
 			Root["hosts"].push_back(std::move(HostJSON));
 		}
-		Root["rememberedHosts"] = Json::array();
-		for (const auto& [Kind, HostID] : State.RememberedHosts)
-			Root["rememberedHosts"].push_back({ { "kind", static_cast<uint8_t>(Kind) }, { "host", HostID } });
+		Root["rememberedPlacements"] = Json::array();
+		for (const auto& [Kind, Placement] : State.RememberedPlacements)
+		{
+			const auto& Bounds = Placement.Bounds;
+			Root["rememberedPlacements"].push_back({
+				{ "kind", static_cast<uint8_t>(Kind) },
+				{ "role", static_cast<uint8_t>(Placement.Role) },
+				{ "bounds", {
+					{ "valid", Bounds.HasValue }, { "x", Bounds.X }, { "y", Bounds.Y },
+					{ "width", Bounds.Width }, { "height", Bounds.Height },
+					{ "dpiScale", Bounds.DpiScale }, { "monitor", Bounds.MonitorName },
+					{ "maximized", Bounds.Maximized }
+				} }
+			});
+		}
 
 		try
 		{
@@ -218,8 +223,7 @@ namespace PulseForgeEditor
 			if (!Root.is_object() || !Root.contains("version") || !Root["version"].is_number_unsigned() ||
 				!Root.contains("project") || !Root["project"].is_string() ||
 				!Root.contains("focusedHost") || !Root["focusedHost"].is_string() ||
-				!Root.contains("hosts") || !Root["hosts"].is_array() ||
-				!Root.contains("rememberedHosts") || !Root["rememberedHosts"].is_array())
+				!Root.contains("hosts") || !Root["hosts"].is_array())
 				return std::unexpected("Document workspace root fields are malformed");
 
 			const auto Project = PulseForge::UUID::Parse(Root["project"].get<std::string>());
@@ -227,9 +231,9 @@ namespace PulseForgeEditor
 				return std::unexpected("Document workspace belongs to a different or invalid project");
 			EditorDocumentWorkspaceState State;
 			State.Version = Root["version"].get<uint32_t>();
-			if (State.Version != 1 && State.Version != 2)
+			if (State.Version != 1 && State.Version != 2 && State.Version != 3)
 				return std::unexpected("Document workspace version is unsupported");
-			if (State.Version == 2)
+			if (State.Version >= 2)
 			{
 				if (!Root.contains("materialDetailsAsset"))
 					return std::unexpected("Document workspace Material Details state is missing");
@@ -303,23 +307,87 @@ namespace PulseForgeEditor
 				Host.Bounds.Height = BoundsJSON["height"].get<float>();
 				Host.Bounds.DpiScale = BoundsJSON["dpiScale"].get<float>();
 				Host.Bounds.MonitorName = BoundsJSON["monitor"].get<std::string>();
+				if (!IsValidNativeWindowBounds(Host.Bounds))
+					Host.Bounds = {};
 				State.Hosts.push_back(std::move(Host));
 			}
 
-			if (Root["rememberedHosts"].size() > MaximumWorkspaceHosts)
-				return std::unexpected("Remembered document host count exceeds the safety limit");
-			for (const Json& RememberedJSON : Root["rememberedHosts"])
+			std::unordered_set<uint8_t> RestoredPlacementKinds;
+			if (State.Version >= 3)
 			{
-				if (!RememberedJSON.is_object() || !RememberedJSON.contains("kind") ||
-					!RememberedJSON["kind"].is_number_integer() || !RememberedJSON.contains("host") ||
-					!RememberedJSON["host"].is_string())
-					return std::unexpected("A remembered document placement is malformed");
-				const int64_t KindValue = RememberedJSON["kind"].get<int64_t>();
-				if (!IsValidKind(KindValue))
-					return std::unexpected("A remembered document editor kind is invalid");
-				State.RememberedHosts.emplace_back(
-					static_cast<EditorDocumentKind>(KindValue), RememberedJSON["host"].get<std::string>());
+				if (!Root.contains("rememberedPlacements") || !Root["rememberedPlacements"].is_array() ||
+					Root["rememberedPlacements"].size() > MaximumWorkspaceHosts)
+					return std::unexpected("Remembered document placements are malformed or exceed the safety limit");
+				for (const Json& PlacementJSON : Root["rememberedPlacements"])
+				{
+					if (!PlacementJSON.is_object() || !PlacementJSON.contains("kind") ||
+						!PlacementJSON["kind"].is_number_integer() || !PlacementJSON.contains("role") ||
+						!PlacementJSON["role"].is_number_integer() || !PlacementJSON.contains("bounds") ||
+						!PlacementJSON["bounds"].is_object())
+						continue;
+					const int64_t KindValue = PlacementJSON["kind"].get<int64_t>();
+					const int64_t RoleValue = PlacementJSON["role"].get<int64_t>();
+					if (!IsValidKind(KindValue) || KindValue == static_cast<int64_t>(EditorDocumentKind::Level) ||
+						RoleValue < 0 || RoleValue > static_cast<int64_t>(EditorDocumentHostRole::Native) ||
+						!RestoredPlacementKinds.insert(static_cast<uint8_t>(KindValue)).second)
+						continue;
+
+					EditorDocumentPlacement Placement;
+					Placement.Role = static_cast<EditorDocumentHostRole>(RoleValue);
+					const Json& BoundsJSON = PlacementJSON["bounds"];
+					if (BoundsJSON.contains("valid") && BoundsJSON["valid"].is_boolean() &&
+						BoundsJSON.contains("maximized") && BoundsJSON["maximized"].is_boolean() &&
+						BoundsJSON.contains("x") && BoundsJSON["x"].is_number() &&
+						BoundsJSON.contains("y") && BoundsJSON["y"].is_number() &&
+						BoundsJSON.contains("width") && BoundsJSON["width"].is_number() &&
+						BoundsJSON.contains("height") && BoundsJSON["height"].is_number() &&
+						BoundsJSON.contains("dpiScale") && BoundsJSON["dpiScale"].is_number() &&
+						BoundsJSON.contains("monitor") && BoundsJSON["monitor"].is_string())
+					{
+						Placement.Bounds.HasValue = BoundsJSON["valid"].get<bool>();
+						Placement.Bounds.Maximized = BoundsJSON["maximized"].get<bool>();
+						Placement.Bounds.X = BoundsJSON["x"].get<float>();
+						Placement.Bounds.Y = BoundsJSON["y"].get<float>();
+						Placement.Bounds.Width = BoundsJSON["width"].get<float>();
+						Placement.Bounds.Height = BoundsJSON["height"].get<float>();
+						Placement.Bounds.DpiScale = BoundsJSON["dpiScale"].get<float>();
+						Placement.Bounds.MonitorName = BoundsJSON["monitor"].get<std::string>();
+					}
+					if (!IsValidNativeWindowBounds(Placement.Bounds))
+						Placement.Bounds = {};
+					Placement.LiveHostID.reset();
+					State.RememberedPlacements.emplace_back(
+						static_cast<EditorDocumentKind>(KindValue), std::move(Placement));
+				}
 			}
+			else
+			{
+				if (!Root.contains("rememberedHosts") || !Root["rememberedHosts"].is_array() ||
+					Root["rememberedHosts"].size() > MaximumWorkspaceHosts)
+					return std::unexpected("Legacy remembered document placements are malformed");
+				for (const Json& Legacy : Root["rememberedHosts"])
+				{
+					if (!Legacy.is_object() || !Legacy.contains("kind") || !Legacy["kind"].is_number_integer() ||
+						!Legacy.contains("host") || !Legacy["host"].is_string())
+						continue;
+					const int64_t KindValue = Legacy["kind"].get<int64_t>();
+					if (!IsValidKind(KindValue) || KindValue == static_cast<int64_t>(EditorDocumentKind::Level) ||
+						!RestoredPlacementKinds.insert(static_cast<uint8_t>(KindValue)).second)
+						continue;
+					const std::string HostID = Legacy["host"].get<std::string>();
+					const auto Host = std::find_if(State.Hosts.begin(), State.Hosts.end(),
+						[&HostID, KindValue](const EditorDocumentHost& Candidate)
+						{
+							return Candidate.ID == HostID && Candidate.Role == EditorDocumentHostRole::Native &&
+								static_cast<int64_t>(Candidate.PlacementKind) == KindValue;
+						});
+					if (Host == State.Hosts.end())
+						continue;
+					State.RememberedPlacements.emplace_back(static_cast<EditorDocumentKind>(KindValue),
+						EditorDocumentPlacement{ EditorDocumentHostRole::Native, Host->Bounds, std::nullopt });
+				}
+			}
+			State.Version = 3;
 
 			auto Valid = ValidateWorkspace(State);
 			if (!Valid)

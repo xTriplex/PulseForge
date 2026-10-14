@@ -12,11 +12,11 @@ namespace PulseForgeEditor
 {
 	struct EditorDocumentWorkspaceState
 	{
-		uint32_t Version = 2;
+		uint32_t Version = 3;
 		PulseForge::UUID Project;
 		std::optional<PulseForge::UUID> MaterialDetailsAsset;
 		std::vector<EditorDocumentHost> Hosts;
-		std::vector<std::pair<EditorDocumentKind, std::string>> RememberedHosts;
+		std::vector<std::pair<EditorDocumentKind, EditorDocumentPlacement>> RememberedPlacements;
 		std::string FocusedHostID = std::string(EditorDocumentManager::MainHostID);
 	};
 

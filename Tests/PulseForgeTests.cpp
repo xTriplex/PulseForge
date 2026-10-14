@@ -47,6 +47,7 @@
 #include "Editor/EditorProjectOpening.h"
 #include "Editor/EditorDocumentManager.h"
 #include "Editor/EditorDocumentHostPolicy.h"
+#include "Editor/EditorDocumentEditorRegistry.h"
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
 #include "Editor/EditorNativeWindowBoundsPolicy.h"
@@ -2055,8 +2056,6 @@ namespace
 		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".scene", true, true) == AssetBrowserOpenAction::OpenScene);
 		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".png", true, true) == AssetBrowserOpenAction::None);
 		PF_CHECK(Tests, ResolveAssetBrowserOpenAction(".scene", false, true) == AssetBrowserOpenAction::None);
-		PF_CHECK(Tests, !IsRegisteredAssetDocumentEditor(EditorDocumentKind::Material));
-		PF_CHECK(Tests, !IsRegisteredAssetDocumentEditor(EditorDocumentKind::Texture));
 		const std::string DraftKey = MakeMaterialDraftKey("C:/Project", "material-uuid");
 		PF_CHECK(Tests, DraftKey == MakeMaterialDraftKey("C:/Project", "material-uuid"));
 		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("D:/Project", "material-uuid"));
@@ -3827,6 +3826,68 @@ namespace
 		const auto MovedRecord = InitialRegistry.Find(SourceMetadata->ID);
 		PF_CHECK(Tests, MovedRecord && MovedRecord->ProjectRelativePath == MovedPath);
 
+#if defined(PF_DEBUG)
+		{
+			const std::filesystem::path RollbackPath = "Assets/Models/registry-rollback.gltf";
+			uint32_t RefreshCount = 0;
+			const AssetOperations::RegistryRefresh FailPostMoveRefresh = [&](const auto& Root)
+				-> std::expected<void, AssetRegistryError>
+			{
+				if (++RefreshCount == 2)
+				{
+					AssetRegistryError Failure;
+					Failure.Issues.push_back({ AssetRegistryIssueCode::AssetScanFailed, "Assets", {},
+						"Injected final registry refresh failure" });
+					return std::unexpected(std::move(Failure));
+				}
+				return InitialRegistry.Rebuild(Root);
+			};
+			const auto RolledBackMove = AssetOperations::MoveWithRegistryRefreshForTesting(
+				InitialRegistry, ProjectRoot, SourceMetadata->ID, RollbackPath, FailPostMoveRefresh);
+			const auto RolledBackRecord = InitialRegistry.Find(SourceMetadata->ID);
+			PF_CHECK(Tests, !RolledBackMove &&
+				RolledBackMove.error().Code == AssetOperationErrorCode::RegistryRefreshFailed);
+			PF_CHECK(Tests, RefreshCount == 3 && std::filesystem::exists(MovedSource) &&
+				!std::filesystem::exists(ProjectRoot / RollbackPath));
+			PF_CHECK(Tests, RolledBackRecord && RolledBackRecord->ProjectRelativePath == MovedPath);
+			PF_CHECK(Tests, ReadFile(MovedSidecarPath) == std::optional<std::string>(MetadataWithImportSettings));
+
+			const std::filesystem::path RecoveryPath = "Assets/Models/registry-recovery.gltf";
+			bool ConflictCreated = false;
+			RefreshCount = 0;
+			const AssetOperations::RegistryRefresh FailRollbackRefresh = [&](const auto& Root)
+				-> std::expected<void, AssetRegistryError>
+			{
+				if (++RefreshCount == 2)
+				{
+					ConflictCreated = WriteFile(MovedSource, "concurrent source path");
+					AssetRegistryError Failure;
+					Failure.Issues.push_back({ AssetRegistryIssueCode::AssetScanFailed, "Assets", {},
+						"Injected final registry refresh failure" });
+					return std::unexpected(std::move(Failure));
+				}
+				return InitialRegistry.Rebuild(Root);
+			};
+			const auto RecoveryMove = AssetOperations::MoveWithRegistryRefreshForTesting(
+				InitialRegistry, ProjectRoot, SourceMetadata->ID, RecoveryPath, FailRollbackRefresh);
+			const auto RecoveryAsset = ProjectRoot / RecoveryPath;
+			PF_CHECK(Tests, !RecoveryMove && RecoveryMove.error().Code == AssetOperationErrorCode::RecoveryRequired);
+			PF_CHECK(Tests, ConflictCreated && ReadFile(MovedSource) == std::optional<std::string>("concurrent source path"));
+			PF_CHECK(Tests, std::filesystem::exists(RecoveryAsset) &&
+				std::filesystem::exists(AssetMetadataSerializer::GetSidecarPath(RecoveryAsset)));
+			PF_CHECK(Tests, !RecoveryMove && RecoveryMove.error().RecoveryPath == RecoveryAsset);
+			std::filesystem::remove(MovedSource, FileError);
+			PF_CHECK(Tests, !FileError);
+			std::filesystem::rename(RecoveryAsset, MovedSource, FileError);
+			PF_CHECK(Tests, !FileError);
+			std::filesystem::rename(AssetMetadataSerializer::GetSidecarPath(RecoveryAsset), MovedSidecarPath, FileError);
+			PF_CHECK(Tests, !FileError);
+			PF_CHECK(Tests, InitialRegistry.Rebuild(ProjectRoot).has_value());
+			const auto RecoveredRecord = InitialRegistry.Find(SourceMetadata->ID);
+			PF_CHECK(Tests, RecoveredRecord && RecoveredRecord->ProjectRelativePath == MovedPath);
+		}
+#endif
+
 		const std::filesystem::path DuplicatePath = "Assets/Models/ship-copy.gltf";
 		const auto DuplicateResult = AssetOperations::Duplicate(InitialRegistry, ProjectRoot, SourceMetadata->ID, DuplicatePath);
 		PF_CHECK(Tests, DuplicateResult.has_value());
@@ -4150,8 +4211,7 @@ namespace
 		PF_CHECK(Tests, !Manager.Transfer(MaterialA, OtherProjectOpen->HostID, 0));
 		if (OtherProjectOpen)
 		{
-			const auto RejectedRecovery = Manager.TransferAll(
-				OtherProjectOpen->HostID, EditorDocumentManager::MainHostID);
+			const auto RejectedRecovery = Manager.RecoverAllToMain(OtherProjectOpen->HostID);
 			PF_CHECK(Tests, !RejectedRecovery);
 			PF_CHECK(Tests, Manager.Find(OtherProjectMaterial)->HostID == OtherProjectOpen->HostID);
 			const auto* RejectedRecoveryHost = Manager.FindHost(OtherProjectOpen->HostID);
@@ -4190,7 +4250,8 @@ namespace
 			PF_CHECK(Tests, RecoveryAOpen.has_value());
 			if (RecoveryAOpen)
 			{
-				PF_CHECK(Tests, Manager.SetRememberedHost(EditorDocumentKind::Texture, RecoveryAOpen->HostID));
+				PF_CHECK(Tests, Manager.SetRememberedPlacement(*Project, EditorDocumentKind::Texture,
+					EditorDocumentHostRole::Native, {}, RecoveryAOpen->HostID));
 				const auto RecoveryBOpen = Manager.Open(RecoveryTextureB, "Assets/Textures/B.png", "B.png",
 					EditorDocumentOpenPreference::RememberedPlacement);
 				PF_CHECK(Tests, RecoveryBOpen && RecoveryBOpen->HostID == RecoveryAOpen->HostID);
@@ -4201,8 +4262,7 @@ namespace
 					const uint64_t RevisionA = Manager.Find(RecoveryTextureA)->Revision;
 					const uint64_t RevisionB = Manager.Find(RecoveryTextureB)->Revision;
 					PF_CHECK(Tests, Manager.Activate(RecoveryTextureA));
-					const auto RecoveredCount = Manager.TransferAll(
-						RecoveryAOpen->HostID, EditorDocumentManager::MainHostID);
+					const auto RecoveredCount = Manager.RecoverAllToMain(RecoveryAOpen->HostID);
 					PF_CHECK(Tests, RecoveredCount && *RecoveredCount == 2);
 					PF_CHECK(Tests, Manager.Find(RecoveryTextureA)->HostID == EditorDocumentManager::MainHostID);
 					PF_CHECK(Tests, Manager.Find(RecoveryTextureB)->HostID == EditorDocumentManager::MainHostID);
@@ -4215,6 +4275,12 @@ namespace
 					const auto* RecoveredSource = Manager.FindHost(RecoveryAOpen->HostID);
 					PF_CHECK(Tests, RecoveredSource && RecoveredSource->Documents.empty());
 					PF_CHECK(Tests, Manager.RemoveEmptyNativeHost(RecoveryAOpen->HostID));
+					const auto RecoveryPlacements = Manager.GetRememberedPlacements(*Project);
+					const auto TexturePlacement = std::find_if(RecoveryPlacements.begin(), RecoveryPlacements.end(),
+						[](const auto& Entry) { return Entry.first == EditorDocumentKind::Texture; });
+					PF_CHECK(Tests, TexturePlacement != RecoveryPlacements.end() &&
+						TexturePlacement->second.Role == EditorDocumentHostRole::Native &&
+						!TexturePlacement->second.LiveHostID);
 				}
 			}
 		}
@@ -4350,6 +4416,173 @@ namespace
 		PF_CHECK(Tests, !Manager.FindHost(OtherProjectTextureOpen->HostID));
 		PF_CHECK(Tests, OtherProjectOpen && !Manager.FindHost(OtherProjectOpen->HostID));
 		PF_CHECK(Tests, !Manager.Find(MaterialA) && !Manager.Find(MaterialB));
+
+		const auto PlacementProject = UUID::Generate();
+		const auto PlacementAssetA = UUID::Generate();
+		const auto PlacementAssetB = UUID::Generate();
+		const auto PlacementAssetC = UUID::Generate();
+		PF_CHECK(Tests, PlacementProject && PlacementAssetA && PlacementAssetB && PlacementAssetC);
+		if (PlacementProject && PlacementAssetA && PlacementAssetB && PlacementAssetC)
+		{
+			EditorDocumentManager PlacementManager;
+			const EditorDocumentIdentity PlacementA{ *PlacementProject, *PlacementAssetA, EditorDocumentKind::Material };
+			const EditorDocumentIdentity PlacementB{ *PlacementProject, *PlacementAssetB, EditorDocumentKind::Material };
+			const EditorDocumentIdentity PlacementC{ *PlacementProject, *PlacementAssetC, EditorDocumentKind::Material };
+			const auto MainOpen = PlacementManager.Open(PlacementA, "Assets/Materials/A.material", "A.material",
+				EditorDocumentOpenPreference::MainDocumentStrip);
+			PF_CHECK(Tests, MainOpen && MainOpen->HostID == EditorDocumentManager::MainHostID);
+			const auto NativeHost = PlacementManager.CreateNativeHost(EditorDocumentKind::Material);
+			PF_CHECK(Tests, NativeHost.has_value());
+			EditorDocumentHost::WindowBounds SavedBounds{
+				-1700.0f, 120.0f, 880.0f, 720.0f, 1.5f, "Left Display", true, true };
+			if (MainOpen && NativeHost)
+			{
+				PF_CHECK(Tests, PlacementManager.SetHostBounds(*NativeHost, SavedBounds));
+				PF_CHECK(Tests, PlacementManager.Transfer(PlacementA, *NativeHost, 0));
+				const auto DetachedPlacement = PlacementManager.GetRememberedPlacements(*PlacementProject);
+				PF_CHECK(Tests, DetachedPlacement.size() == 1);
+				if (!DetachedPlacement.empty())
+				{
+					PF_CHECK(Tests, DetachedPlacement.front().second.Role == EditorDocumentHostRole::Native);
+					PF_CHECK(Tests, !DetachedPlacement.front().second.LiveHostID);
+				}
+				const auto LiveReuse = PlacementManager.Open(PlacementB,
+					"Assets/Materials/B.material", "B.material", EditorDocumentOpenPreference::RememberedPlacement);
+				PF_CHECK(Tests, LiveReuse && LiveReuse->HostID == *NativeHost);
+				PF_CHECK(Tests, PlacementManager.Close(PlacementA, EditorDocumentCloseChoice::Discard, {},
+					[](const auto&) { return true; }) == EditorDocumentCloseStatus::Closed);
+				if (LiveReuse)
+					PF_CHECK(Tests, PlacementManager.Close(PlacementB, EditorDocumentCloseChoice::Discard, {},
+						[](const auto&) { return true; }) == EditorDocumentCloseStatus::Closed);
+				PF_CHECK(Tests, PlacementManager.RemoveEmptyNativeHost(*NativeHost));
+				const auto ClosedPlacement = PlacementManager.GetRememberedPlacements(*PlacementProject);
+				PF_CHECK(Tests, ClosedPlacement.size() == 1 && !ClosedPlacement.front().second.LiveHostID &&
+					ClosedPlacement.front().second.Bounds.MonitorName == "Left Display" &&
+					ClosedPlacement.front().second.Bounds.Maximized);
+				const auto RememberedOpen = PlacementManager.Open(PlacementB, "Assets/Materials/B.material", "B.material",
+					EditorDocumentOpenPreference::RememberedPlacement);
+				PF_CHECK(Tests, RememberedOpen && RememberedOpen->HostID != *NativeHost);
+				const auto* RestoredNative = RememberedOpen ? PlacementManager.FindHost(RememberedOpen->HostID) : nullptr;
+				PF_CHECK(Tests, RestoredNative && RestoredNative->Bounds.X == SavedBounds.X &&
+					RestoredNative->Bounds.MonitorName == SavedBounds.MonitorName && RestoredNative->Bounds.Maximized);
+				PF_CHECK(Tests, PlacementManager.Transfer(PlacementB, EditorDocumentManager::MainHostID, 0));
+				const auto MainRememberedOpen = PlacementManager.Open(PlacementC,
+					"Assets/Materials/C.material", "C.material", EditorDocumentOpenPreference::RememberedPlacement);
+				PF_CHECK(Tests, MainRememberedOpen && MainRememberedOpen->HostID == EditorDocumentManager::MainHostID);
+				const auto MainPlacement = PlacementManager.GetRememberedPlacements(*PlacementProject);
+				PF_CHECK(Tests, MainPlacement.size() == 1 &&
+					MainPlacement.front().second.Role == EditorDocumentHostRole::Main &&
+					MainPlacement.front().second.Bounds.MonitorName == "Left Display" &&
+					MainPlacement.front().second.Bounds.Maximized);
+
+				const auto IsolatedPlacementProject = UUID::Generate();
+				const auto IsolatedPlacementAsset = UUID::Generate();
+				PF_CHECK(Tests, IsolatedPlacementProject && IsolatedPlacementAsset);
+				if (IsolatedPlacementProject && IsolatedPlacementAsset)
+				{
+					PF_CHECK(Tests, PlacementManager.SetRememberedPlacement(*IsolatedPlacementProject,
+						EditorDocumentKind::Material, EditorDocumentHostRole::Native, SavedBounds));
+					const EditorDocumentIdentity IsolatedIdentity{
+						*IsolatedPlacementProject, *IsolatedPlacementAsset, EditorDocumentKind::Material };
+					const auto IsolatedOpen = PlacementManager.Open(IsolatedIdentity,
+						"Assets/Materials/Isolated.material", "Isolated.material",
+						EditorDocumentOpenPreference::RememberedPlacement);
+					const auto* IsolatedHost = IsolatedOpen
+						? PlacementManager.FindHost(IsolatedOpen->HostID) : nullptr;
+					PF_CHECK(Tests, IsolatedOpen && IsolatedOpen->HostID != EditorDocumentManager::MainHostID &&
+						IsolatedHost && IsolatedHost->Bounds.MonitorName == "Left Display");
+					PF_CHECK(Tests, PlacementManager.GetRememberedPlacements(*PlacementProject).front().second.Role ==
+						EditorDocumentHostRole::Main);
+				}
+			}
+
+			const auto CrossProjectA = UUID::Generate();
+			const auto CrossProjectB = UUID::Generate();
+			const auto CrossProjectAssetA = UUID::Generate();
+			const auto CrossProjectAssetB = UUID::Generate();
+			PF_CHECK(Tests, CrossProjectA && CrossProjectB && CrossProjectAssetA && CrossProjectAssetB);
+			if (CrossProjectA && CrossProjectB && CrossProjectAssetA && CrossProjectAssetB)
+			{
+				EditorDocumentManager CrossProjectManager;
+				const EditorDocumentIdentity ProjectTexture{
+					*CrossProjectA, *CrossProjectAssetA, EditorDocumentKind::Texture };
+				const EditorDocumentIdentity OtherProjectTexture{
+					*CrossProjectB, *CrossProjectAssetB, EditorDocumentKind::Texture };
+				const auto OriginalOpen = CrossProjectManager.Open(ProjectTexture, "Assets/Textures/A.png", "A.png",
+					EditorDocumentOpenPreference::NewNativeWindow);
+				PF_CHECK(Tests, OriginalOpen.has_value());
+				if (OriginalOpen)
+				{
+					PF_CHECK(Tests, CrossProjectManager.Close(ProjectTexture, EditorDocumentCloseChoice::Discard, {}, {}) ==
+						EditorDocumentCloseStatus::Closed);
+					const auto OtherOpen = CrossProjectManager.Open(OtherProjectTexture,
+					"Assets/Textures/B.png", "B.png", EditorDocumentOpenPreference::RememberedPlacement);
+				PF_CHECK(Tests, OtherOpen && OtherOpen->HostID != OriginalOpen->HostID);
+					if (OtherOpen)
+					{
+						const auto DestinationBefore = CrossProjectManager.FindHost(OriginalOpen->HostID)->Documents;
+						const auto SourceBefore = CrossProjectManager.FindHost(OtherOpen->HostID)->Documents;
+						const auto FocusedBefore = CrossProjectManager.GetFocusedHost()->ID;
+						const auto Rejected = CrossProjectManager.Transfer(
+							OtherProjectTexture, OriginalOpen->HostID, 0);
+						PF_CHECK(Tests, !Rejected);
+						PF_CHECK(Tests, CrossProjectManager.FindHost(OriginalOpen->HostID)->Documents == DestinationBefore &&
+							CrossProjectManager.FindHost(OtherOpen->HostID)->Documents == SourceBefore &&
+							CrossProjectManager.GetFocusedHost()->ID == FocusedBefore);
+					}
+				}
+			}
+
+			const auto InvalidProject = UUID::Generate();
+			const auto InvalidPlacementAsset = UUID::Generate();
+			PF_CHECK(Tests, InvalidProject && InvalidPlacementAsset);
+			if (InvalidProject && InvalidPlacementAsset)
+			{
+				EditorDocumentManager InvalidPlacementManager;
+				EditorDocumentHost::WindowBounds InvalidBounds;
+				InvalidBounds.X = std::numeric_limits<float>::quiet_NaN();
+				InvalidBounds.HasValue = true;
+				PF_CHECK(Tests, InvalidPlacementManager.SetRememberedPlacement(*InvalidProject,
+					EditorDocumentKind::Texture, EditorDocumentHostRole::Native, InvalidBounds));
+				const EditorDocumentIdentity InvalidPlacementIdentity{
+					*InvalidProject, *InvalidPlacementAsset, EditorDocumentKind::Texture };
+				const auto Fallback = InvalidPlacementManager.Open(InvalidPlacementIdentity,
+					"Assets/Textures/T.png", "T.png", EditorDocumentOpenPreference::RememberedPlacement);
+				PF_CHECK(Tests, Fallback && Fallback->HostID != EditorDocumentManager::MainHostID);
+				const auto* FallbackHost = Fallback ? InvalidPlacementManager.FindHost(Fallback->HostID) : nullptr;
+				PF_CHECK(Tests, FallbackHost && !FallbackHost->Bounds.HasValue);
+			}
+
+			EditorDocumentManager InvalidBatchManager;
+			const auto BatchAID = UUID::Generate();
+			const auto BatchBID = UUID::Generate();
+			PF_CHECK(Tests, BatchAID && BatchBID);
+			if (BatchAID && BatchBID)
+			{
+				const EditorDocumentIdentity BatchA{ *PlacementProject, *BatchAID, EditorDocumentKind::Texture };
+				const EditorDocumentIdentity BatchB{ *PlacementProject, *BatchBID, EditorDocumentKind::Texture };
+				const auto BatchHost = InvalidBatchManager.CreateNativeHost(EditorDocumentKind::Texture);
+				const auto BatchOpenA = InvalidBatchManager.Open(BatchA, {}, "A", EditorDocumentOpenPreference::NewNativeWindow);
+				const auto BatchOpenB = InvalidBatchManager.Open(BatchB, {}, "B", EditorDocumentOpenPreference::NewNativeWindow);
+				PF_CHECK(Tests, BatchHost && BatchOpenA && BatchOpenB);
+				if (BatchHost && BatchOpenA && BatchOpenB)
+				{
+					const auto MoveA = InvalidBatchManager.Transfer(BatchA, *BatchHost, 0);
+					const auto MoveB = InvalidBatchManager.Transfer(BatchB, *BatchHost, 1);
+					PF_CHECK(Tests, MoveA && MoveB);
+					const auto Before = InvalidBatchManager.FindHost(*BatchHost)->Documents;
+					InvalidBatchManager.FindHost(*BatchHost)->Documents.push_back(BatchA);
+					const auto DuplicateRejected = InvalidBatchManager.RecoverAllToMain(*BatchHost);
+					PF_CHECK(Tests, !DuplicateRejected &&
+						InvalidBatchManager.FindHost(*BatchHost)->Documents.size() == Before.size() + 1 &&
+						InvalidBatchManager.Find(BatchA)->HostID == *BatchHost &&
+						InvalidBatchManager.Find(BatchB)->HostID == *BatchHost);
+					const auto MainRecoveryRejected = InvalidBatchManager.RecoverAllToMain(
+						EditorDocumentManager::MainHostID);
+					PF_CHECK(Tests, !MainRecoveryRejected);
+				}
+			}
+		}
 	}
 
 	void TestEditorSnapshotHistory(TestRunner& Tests)
@@ -4381,6 +4614,185 @@ namespace
 		PF_CHECK(Tests, History.GetStateCount() == 2 && History.GetCurrent() == 4 && !History.CanRedo());
 		History.Record(5, 1);
 		PF_CHECK(Tests, History.GetStateCount() == 1 && History.GetCurrent() == 5 && History.IsDirty());
+	}
+
+	void TestEditorDocumentEditorRegistry(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		struct Model final : EditorDocumentEditorState
+		{
+			int Value = 0;
+			std::vector<int> Undo;
+			std::vector<int> Redo;
+			bool FailSave = false;
+			bool EditDuringSave = false;
+		};
+
+		const auto Project = UUID::Generate();
+		const auto AssetA = UUID::Generate();
+		const auto AssetB = UUID::Generate();
+		PF_CHECK(Tests, Project && AssetA && AssetB);
+		if (!Project || !AssetA || !AssetB)
+			return;
+
+		std::unordered_map<UUID, int, UUIDHash> SavedValues;
+		EditorDocumentEditorRegistry Registry;
+		EditorDocumentEditorAdapter Adapter;
+		Adapter.Kind = EditorDocumentKind::Texture;
+		Adapter.IsEligible = [](const EditorDocumentEditorContext& Context)
+		{
+			return Context.Identity.Kind == EditorDocumentKind::Texture &&
+				Context.ProjectRelativePath.extension() == ".fixture";
+		};
+		Adapter.LoadSession = [&SavedValues](const EditorDocumentEditorContext& Context)
+			-> std::expected<std::unique_ptr<EditorDocumentEditorState>, std::string>
+		{
+			auto State = std::make_unique<Model>();
+			if (const auto Saved = SavedValues.find(Context.Identity.Asset); Saved != SavedValues.end())
+				State->Value = Saved->second;
+			return std::unique_ptr<EditorDocumentEditorState>(std::move(State));
+		};
+		Adapter.DrawWorkspace = [](EditorDocumentSession&) {};
+		Adapter.Save = [&SavedValues](EditorDocumentSession& Session, uint64_t)
+		{
+			auto* State = dynamic_cast<Model*>(Session.EditorState.get());
+			if (!State || State->FailSave)
+				return false;
+			SavedValues[Session.Identity.Asset] = State->Value;
+			if (State->EditDuringSave)
+			{
+				State->EditDuringSave = false;
+				State->Undo.push_back(State->Value);
+				++State->Value;
+				++Session.Revision;
+			}
+			return true;
+		};
+		Adapter.Discard = [&SavedValues](EditorDocumentSession& Session)
+		{
+			auto* State = dynamic_cast<Model*>(Session.EditorState.get());
+			if (!State)
+				return false;
+			State->Value = SavedValues[Session.Identity.Asset];
+			State->Undo.clear();
+			State->Redo.clear();
+			return true;
+		};
+		Adapter.FocusedCommand = [](EditorDocumentSession& Session, EditorDocumentCommand Command)
+		{
+			auto* State = dynamic_cast<Model*>(Session.EditorState.get());
+			if (!State)
+				return false;
+			if (Command == EditorDocumentCommand::Undo && !State->Undo.empty())
+			{
+				State->Redo.push_back(State->Value);
+				State->Value = State->Undo.back();
+				State->Undo.pop_back();
+				++Session.Revision;
+				return true;
+			}
+			if (Command == EditorDocumentCommand::Redo && !State->Redo.empty())
+			{
+				State->Undo.push_back(State->Value);
+				State->Value = State->Redo.back();
+				State->Redo.pop_back();
+				++Session.Revision;
+				return true;
+			}
+			return false;
+		};
+		Adapter.AssetLocationChanged = [](EditorDocumentSession&, const std::filesystem::path&, std::string_view)
+		{
+			return true;
+		};
+		Adapter.Close = [](EditorDocumentSession&) { return true; };
+		PF_CHECK(Tests, !Registry.IsRegistered(EditorDocumentKind::Texture));
+		PF_CHECK(Tests, Registry.Register(Adapter).has_value());
+		PF_CHECK(Tests, Registry.IsRegistered(EditorDocumentKind::Texture));
+		PF_CHECK(Tests, !Registry.Register(Adapter));
+
+		const EditorDocumentIdentity IdentityA{ *Project, *AssetA, EditorDocumentKind::Texture };
+		const EditorDocumentIdentity IdentityB{ *Project, *AssetB, EditorDocumentKind::Texture };
+		EditorDocumentEditorContext ContextA{ IdentityA, "Projects/Fixture", "Assets/A.fixture", "A.fixture", nullptr };
+		EditorDocumentEditorContext ContextB{ IdentityB, "Projects/Fixture", "Assets/B.fixture", "B.fixture", nullptr };
+		PF_CHECK(Tests, Registry.CanOpen(ContextA));
+		ContextA.ProjectRelativePath = "Assets/A.png";
+		PF_CHECK(Tests, !Registry.CanOpen(ContextA));
+		ContextA.ProjectRelativePath = "Assets/A.fixture";
+
+		EditorDocumentManager Manager;
+		const auto OpenA = Manager.Open(IdentityA, ContextA.ProjectRelativePath, ContextA.DisplayName,
+			EditorDocumentOpenPreference::MainDocumentStrip);
+		const auto OpenB = Manager.Open(IdentityB, ContextB.ProjectRelativePath, ContextB.DisplayName,
+			EditorDocumentOpenPreference::MainDocumentStrip);
+		PF_CHECK(Tests, OpenA && OpenB);
+		auto* SessionA = Manager.Find(IdentityA);
+		auto* SessionB = Manager.Find(IdentityB);
+		PF_CHECK(Tests, SessionA && SessionB && Registry.Load(*SessionA, ContextA) &&
+			Registry.Load(*SessionB, ContextB));
+		auto* StateA = SessionA ? dynamic_cast<Model*>(SessionA->EditorState.get()) : nullptr;
+		auto* StateB = SessionB ? dynamic_cast<Model*>(SessionB->EditorState.get()) : nullptr;
+		PF_CHECK(Tests, StateA && StateB && StateA != StateB);
+		if (!StateA || !StateB || !SessionA || !SessionB)
+			return;
+		StateA->Value = 11;
+		StateA->Undo.push_back(0);
+		PF_CHECK(Tests, Manager.MarkEdited(IdentityA));
+		StateB->Value = 22;
+		StateB->Undo.push_back(0);
+		PF_CHECK(Tests, Manager.MarkEdited(IdentityB));
+		StateA->FailSave = true;
+		PF_CHECK(Tests, !Registry.Save(*SessionA) && SessionA->IsDirty());
+		StateA->FailSave = false;
+		StateA->EditDuringSave = true;
+		PF_CHECK(Tests, Registry.Save(*SessionA) && SessionA->IsDirty() && SavedValues[*AssetA] == 11);
+		PF_CHECK(Tests, Registry.Save(*SessionA) && !SessionA->IsDirty());
+		StateA->Value = 99;
+		PF_CHECK(Tests, Manager.MarkEdited(IdentityA));
+		PF_CHECK(Tests, Registry.Discard(*SessionA) && StateA->Value == 12 && !SessionA->IsDirty());
+		StateA->Undo.push_back(StateA->Value);
+		StateA->Value = 0;
+		PF_CHECK(Tests, Manager.MarkEdited(IdentityA));
+
+		const auto NativeHost = Manager.CreateNativeHost(EditorDocumentKind::Texture);
+		PF_CHECK(Tests, NativeHost.has_value());
+		const EditorDocumentEditorState* OriginalStateAddress = SessionA->EditorState.get();
+		if (NativeHost)
+		{
+			PF_CHECK(Tests, Manager.Transfer(IdentityA, *NativeHost, 0).has_value());
+			PF_CHECK(Tests, Manager.Find(IdentityA)->EditorState.get() == OriginalStateAddress && StateA->Value == 0);
+		}
+		PF_CHECK(Tests, Manager.Activate(IdentityA));
+		PF_CHECK(Tests, Registry.DispatchFocusedCommand(*SessionA, EditorDocumentCommand::Undo));
+		PF_CHECK(Tests, StateA->Value == 12 && StateB->Value == 22);
+		const uint64_t BeforeLocationChangeRevision = SessionA->Revision;
+		PF_CHECK(Tests, Registry.UpdateAssetLocation(*SessionA, "Assets/Renamed/A.fixture", "Renamed.fixture"));
+		PF_CHECK(Tests, SessionA->ProjectRelativePath == "Assets/Renamed/A.fixture" &&
+			SessionA->Revision == BeforeLocationChangeRevision);
+
+		PF_CHECK(Tests, Manager.MarkEdited(IdentityA));
+		PF_CHECK(Tests, Manager.Close(IdentityA, EditorDocumentCloseChoice::Cancel,
+			[&Registry](const auto&, uint64_t) { return false; },
+			[&Registry](const auto&) { return false; }) == EditorDocumentCloseStatus::Cancelled);
+		PF_CHECK(Tests, Manager.Find(IdentityA) && Manager.Find(IdentityA)->EditorState.get() == OriginalStateAddress);
+
+		EditorDocumentEditorRegistry RestartRegistry;
+		PF_CHECK(Tests, RestartRegistry.Register(Adapter).has_value());
+		EditorDocumentManager RestartManager;
+		const auto RestoredOpen = RestartManager.Open(IdentityA, "Assets/Renamed/A.fixture", "Renamed.fixture",
+			EditorDocumentOpenPreference::MainDocumentStrip);
+		PF_CHECK(Tests, RestoredOpen.has_value());
+		if (RestoredOpen)
+		{
+			auto* RestoredSession = RestartManager.Find(IdentityA);
+			EditorDocumentEditorContext RestoredContext = ContextA;
+			RestoredContext.ProjectRelativePath = "Assets/Renamed/A.fixture";
+			PF_CHECK(Tests, RestoredSession && RestartRegistry.Load(*RestoredSession, RestoredContext));
+			const auto* RestoredModel = RestoredSession
+				? dynamic_cast<const Model*>(RestoredSession->EditorState.get()) : nullptr;
+			PF_CHECK(Tests, RestoredModel && RestoredModel->Value == 12);
+		}
 	}
 
 	void TestEditorDocumentWorkspaceCodec(TestRunner& Tests)
@@ -4415,7 +4827,10 @@ namespace
 		State.Project = *Project;
 		State.MaterialDetailsAsset = *MaterialA;
 		State.Hosts = { Main, Native };
-		State.RememberedHosts.emplace_back(EditorDocumentKind::Material, Native.ID);
+		State.RememberedPlacements.emplace_back(EditorDocumentKind::Material,
+			EditorDocumentPlacement{ EditorDocumentHostRole::Native, Native.Bounds, std::nullopt });
+		State.RememberedPlacements.emplace_back(EditorDocumentKind::Texture,
+			EditorDocumentPlacement{ EditorDocumentHostRole::Main, Native.Bounds, std::nullopt });
 		State.FocusedHostID = Native.ID;
 		const auto Serialized = EditorDocumentWorkspaceCodec::Serialize(State);
 		PF_CHECK(Tests, Serialized.has_value());
@@ -4430,19 +4845,43 @@ namespace
 			PF_CHECK(Tests, Restored->MaterialDetailsAsset == MaterialA);
 			PF_CHECK(Tests, Restored->Hosts[1].ActiveDocument == Blue);
 			PF_CHECK(Tests, Restored->Hosts[1].Bounds.X == -1920.0f && Restored->Hosts[1].Bounds.Maximized);
-			PF_CHECK(Tests, Restored->FocusedHostID == Native.ID && Restored->RememberedHosts.size() == 1);
+			PF_CHECK(Tests, Restored->FocusedHostID == Native.ID && Restored->RememberedPlacements.size() == 2);
+			const auto NativePlacement = std::find_if(Restored->RememberedPlacements.begin(),
+				Restored->RememberedPlacements.end(), [](const auto& Entry)
+				{
+					return Entry.first == EditorDocumentKind::Material;
+				});
+			const auto MainPlacement = std::find_if(Restored->RememberedPlacements.begin(),
+				Restored->RememberedPlacements.end(), [](const auto& Entry)
+				{
+					return Entry.first == EditorDocumentKind::Texture;
+				});
+			PF_CHECK(Tests, NativePlacement != Restored->RememberedPlacements.end() &&
+				NativePlacement->second.Role == EditorDocumentHostRole::Native &&
+				NativePlacement->second.Bounds.MonitorName == "Display-Left" &&
+				!NativePlacement->second.LiveHostID);
+			PF_CHECK(Tests, MainPlacement != Restored->RememberedPlacements.end() &&
+				MainPlacement->second.Role == EditorDocumentHostRole::Main &&
+				MainPlacement->second.Bounds.MonitorName == "Display-Left" &&
+				MainPlacement->second.Bounds.Maximized);
 			const auto Candidates = GetMaterialDetailsMigrationCandidates(*Restored);
 			PF_CHECK(Tests, Candidates.size() == 2 && Candidates[0] == *MaterialB && Candidates[1] == *MaterialA);
 		}
 		auto LegacyWorkspace = nlohmann::json::parse(*Serialized);
-		LegacyWorkspace["version"] = 1;
-		LegacyWorkspace.erase("materialDetailsAsset");
+		LegacyWorkspace["version"] = 2;
+		LegacyWorkspace.erase("rememberedPlacements");
+		LegacyWorkspace["rememberedHosts"] = nlohmann::json::array({
+			{ { "kind", static_cast<uint8_t>(EditorDocumentKind::Material) }, { "host", Native.ID } },
+			{ { "kind", static_cast<uint8_t>(EditorDocumentKind::Texture) }, { "host", "native:missing" } }
+		});
 		const auto MigratedLegacy = EditorDocumentWorkspaceCodec::Deserialize(LegacyWorkspace.dump(), *Project);
 		PF_CHECK(Tests, MigratedLegacy.has_value());
 		if (MigratedLegacy)
 		{
-			PF_CHECK(Tests, MigratedLegacy->Version == 2 && !MigratedLegacy->MaterialDetailsAsset);
+			PF_CHECK(Tests, MigratedLegacy->Version == 3 && MigratedLegacy->MaterialDetailsAsset == MaterialA);
 			PF_CHECK(Tests, MigratedLegacy->Hosts[1].Documents.size() == 2);
+			PF_CHECK(Tests, MigratedLegacy->RememberedPlacements.size() == 1 &&
+				MigratedLegacy->RememberedPlacements.front().second.Bounds.Maximized);
 		}
 
 		EditorDocumentWorkspaceState LegacyMainStripState = State;
@@ -4450,7 +4889,7 @@ namespace
 		LegacyMainStripState.Hosts[0].Documents = { Level, Amber, Blue };
 		LegacyMainStripState.Hosts[0].ActiveDocument = Blue;
 		LegacyMainStripState.Hosts.erase(LegacyMainStripState.Hosts.begin() + 1);
-		LegacyMainStripState.RememberedHosts.clear();
+		LegacyMainStripState.RememberedPlacements.clear();
 		LegacyMainStripState.FocusedHostID = std::string(EditorDocumentManager::MainHostID);
 		const auto LegacyMainStripJSON = EditorDocumentWorkspaceCodec::Serialize(LegacyMainStripState);
 		PF_CHECK(Tests, LegacyMainStripJSON.has_value());
@@ -4459,6 +4898,8 @@ namespace
 			auto LegacyMainStrip = nlohmann::json::parse(*LegacyMainStripJSON);
 			LegacyMainStrip["version"] = 1;
 			LegacyMainStrip.erase("materialDetailsAsset");
+			LegacyMainStrip.erase("rememberedPlacements");
+			LegacyMainStrip["rememberedHosts"] = nlohmann::json::array();
 			const auto MigratedMainStrip = EditorDocumentWorkspaceCodec::Deserialize(
 				LegacyMainStrip.dump(), *Project);
 			PF_CHECK(Tests, MigratedMainStrip.has_value());
@@ -4480,7 +4921,9 @@ namespace
 		PF_CHECK(Tests, !EditorDocumentWorkspaceCodec::Deserialize(Duplicate.dump(), *Project));
 		auto InvalidBounds = nlohmann::json::parse(*Serialized);
 		InvalidBounds["hosts"][1]["bounds"]["width"] = 0.0f;
-		PF_CHECK(Tests, !EditorDocumentWorkspaceCodec::Deserialize(InvalidBounds.dump(), *Project));
+		const auto RecoveredBounds = EditorDocumentWorkspaceCodec::Deserialize(InvalidBounds.dump(), *Project);
+		PF_CHECK(Tests, RecoveredBounds && !RecoveredBounds->Hosts[1].Bounds.HasValue &&
+			RecoveredBounds->Hosts[1].Documents.size() == 2);
 		auto MissingLevel = nlohmann::json::parse(*Serialized);
 		MissingLevel["hosts"][0]["documents"] = nlohmann::json::array();
 		MissingLevel["hosts"][0]["active"] = nullptr;
@@ -8563,6 +9006,26 @@ end
 		PF_CHECK(Tests, !SupportsRequiredDeviceFeatures({ true, true, true, false }));
 	}
 
+	void TestVulkanSwapchainRetirementPolicy(TestRunner& Tests)
+	{
+		using namespace PulseForge::VulkanSupport;
+		PF_CHECK(Tests, ResolveSwapchainFrameStartAction(false, true, false) == SwapchainFrameStartAction::Skip);
+		PF_CHECK(Tests, ResolveSwapchainFrameStartAction(false, true, true) == SwapchainFrameStartAction::Recreate);
+		PF_CHECK(Tests, ResolveSwapchainFrameStartAction(true, true, false) == SwapchainFrameStartAction::PresentCurrent);
+		PF_CHECK(Tests, ResolveSwapchainFrameStartAction(true, true, true) == SwapchainFrameStartAction::Recreate);
+		PF_CHECK(Tests, ResolveSwapchainFrameStartAction(true, false, false) == SwapchainFrameStartAction::PresentCurrent);
+		PF_CHECK(Tests, CanCreateSwapchainGeneration(true, true, MaximumDeferredSwapchainGenerations));
+		PF_CHECK(Tests, CanCreateSwapchainGeneration(false, true, 0));
+		PF_CHECK(Tests, CanCreateSwapchainGeneration(false, true, MaximumDeferredSwapchainGenerations - 1));
+		PF_CHECK(Tests, !CanCreateSwapchainGeneration(false, true, MaximumDeferredSwapchainGenerations));
+		PF_CHECK(Tests, CanCreateSwapchainGeneration(false, false, MaximumDeferredSwapchainGenerations));
+		PF_CHECK(Tests, !ShouldRetireDeferredSwapchains(false, false, 2, 2, true));
+		PF_CHECK(Tests, !ShouldRetireDeferredSwapchains(false, true, 2, 1, true));
+		PF_CHECK(Tests, !ShouldRetireDeferredSwapchains(false, true, 2, 2, false));
+		PF_CHECK(Tests, !ShouldRetireDeferredSwapchains(true, true, 2, 2, true));
+		PF_CHECK(Tests, ShouldRetireDeferredSwapchains(false, true, 2, 2, true));
+	}
+
 	void TestVulkanFormatUsageCapabilities(TestRunner& Tests)
 	{
 		using namespace PulseForge::VulkanSupport;
@@ -9888,6 +10351,7 @@ int main()
 	TestAssetOperations(Tests);
 	TestAssetFolderOperations(Tests);
 	TestEditorDocumentManager(Tests);
+	TestEditorDocumentEditorRegistry(Tests);
 	TestEditorSnapshotHistory(Tests);
 	TestEditorDocumentWorkspaceCodec(Tests);
 	TestEditorNativeWindowBoundsPolicy(Tests);
@@ -9910,6 +10374,7 @@ int main()
 	TestTextureSamplerAndBufferBindingValidation(Tests);
 	TestVulkanQueueFamilySelection(Tests);
 	TestVulkanRequiredDeviceFeatures(Tests);
+	TestVulkanSwapchainRetirementPolicy(Tests);
 	TestVulkanFormatUsageCapabilities(Tests);
 	TestVulkanSurfaceAndPresentationSelection(Tests);
 	TestVulkanExtentAndImageCountSelection(Tests);

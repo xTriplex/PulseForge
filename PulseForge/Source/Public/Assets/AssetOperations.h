@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -43,6 +44,7 @@ namespace PulseForge
 	class PULSEFORGE_API AssetOperations final
 	{
 	public:
+		using RegistryRefresh = std::function<std::expected<void, AssetRegistryError>(const std::filesystem::path&)>;
 		// Destination paths are project-relative. Existing source assets are selected by UUID and resolved through the registry.
 		// Operations validate and refresh the supplied registry; move preserves identity and duplicate creates a new UUID.
 		// Import copies an external regular file into Assets and creates a fresh sidecar UUID.
@@ -63,6 +65,16 @@ namespace PulseForge
 			const std::filesystem::path& ProjectRoot,
 			const AssetID& SourceAsset,
 			const std::filesystem::path& DestinationPath);
+#if defined(PF_DEBUG)
+		// The refresh callback is available only in Debug builds so tests can deterministically exercise
+		// post-move registry failure and recovery without changing normal production behavior.
+		[[nodiscard]] static std::expected<AssetRecord, AssetOperationError> MoveWithRegistryRefreshForTesting(
+			AssetRegistry& Registry,
+			const std::filesystem::path& ProjectRoot,
+			const AssetID& SourceAsset,
+			const std::filesystem::path& DestinationPath,
+			const RegistryRefresh& Refresh);
+#endif
 		// Moves a managed Assets subdirectory beneath another existing managed directory. The folder's
 		// asset sidecars move with it, preserving every AssetID. Source and destination are project-relative.
 		[[nodiscard]] static std::expected<std::filesystem::path, AssetOperationError> MoveFolder(
@@ -80,5 +92,12 @@ namespace PulseForge
 			AssetRegistry& Registry,
 			const std::filesystem::path& ProjectRoot,
 			const AssetID& SourceAsset);
+	private:
+		[[nodiscard]] static std::expected<AssetRecord, AssetOperationError> MoveImpl(
+			AssetRegistry& Registry,
+			const std::filesystem::path& ProjectRoot,
+			const AssetID& SourceAsset,
+			const std::filesystem::path& DestinationPath,
+			const RegistryRefresh& Refresh);
 	};
 }
