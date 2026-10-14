@@ -1,7 +1,6 @@
 #pragma once
 
 #include "Assets/AssetRegistry.h"
-#include "Core/Core.h"
 #include "Renderer/Texture.h"
 
 #include <cstddef>
@@ -34,7 +33,7 @@ namespace PulseForge
 
 	// Per-project runtime GPU cache. Application, project registry, and renderer must outlive this cache.
 	// Returned texture references remain valid until Clear() or cache destruction. The cache is not thread-safe.
-	class PULSEFORGE_API TextureAssetCache final
+	class TextureAssetCache final
 	{
 	public:
 		TextureAssetCache(Application& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry);

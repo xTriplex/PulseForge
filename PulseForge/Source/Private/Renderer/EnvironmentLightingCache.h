@@ -1,31 +1,26 @@
 #pragma once
 
 #include "Assets/AssetRegistry.h"
-#include "Core/Core.h"
 #include "Renderer/EnvironmentLighting.h"
-#include "Renderer/Texture.h"
+#include "Renderer/EnvironmentLightingTextures.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <condition_variable>
+#include <deque>
 #include <expected>
 #include <filesystem>
 #include <functional>
-#include <condition_variable>
-#include <deque>
 #include <mutex>
 #include <optional>
+#include <stop_token>
+#include <string>
 #include <thread>
 #include <unordered_map>
 
 namespace PulseForge
 {
 	class Application;
-
-	struct EnvironmentLightingTextures
-	{
-		TextureHandle Environment;
-		TextureHandle DiffuseIrradiance;
-		TextureHandle PrefilteredSpecular;
-		TextureHandle BrdfIntegrationLut;
-	};
 
 	struct EnvironmentLightingCacheError
 	{
@@ -34,7 +29,7 @@ namespace PulseForge
 	};
 
 	// CPU decoding/preprocessing is asynchronous; GPU upload and texture ownership stay on the renderer thread.
-	class PULSEFORGE_API EnvironmentLightingCache final
+	class EnvironmentLightingCache final
 	{
 	public:
 		EnvironmentLightingCache(Application& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry);

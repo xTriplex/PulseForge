@@ -347,8 +347,8 @@ target_compile_definitions(PulseForgeApplication PRIVATE PF_PLATFORM_WINDOWS)
 target_link_libraries(PulseForgeApplication PUBLIC PulseForgeCore PulseForgeRenderer PulseForgeWindow)
 target_precompile_headers(PulseForgeApplication PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
 add_library(PulseForgeSceneRenderer STATIC
-	PulseForge/Source/Private/Assets/MeshAssetCache.cpp
-	PulseForge/Source/Private/Assets/TextureAssetCache.cpp
+	PulseForge/Source/Private/Renderer/AssetCache/MeshAssetCache.cpp
+	PulseForge/Source/Private/Renderer/AssetCache/TextureAssetCache.cpp
 	PulseForge/Source/Private/Renderer/EnvironmentLightingCache.cpp
 	PulseForge/Source/Private/Renderer/SceneRenderer.cpp
 )

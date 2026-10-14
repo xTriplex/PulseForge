@@ -1,7 +1,6 @@
 #pragma once
 
 #include "Assets/AssetRegistry.h"
-#include "Core/Core.h"
 #include "Renderer/Mesh.h"
 
 #include <cstddef>
@@ -33,7 +32,7 @@ namespace PulseForge
 
 	// Per-project runtime GPU cache. Application, project registry, and renderer must outlive this cache.
 	// Returned mesh references remain valid until Clear() or cache destruction. The cache is not thread-safe.
-	class PULSEFORGE_API MeshAssetCache final
+	class MeshAssetCache final
 	{
 	public:
 		MeshAssetCache(Application& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry);

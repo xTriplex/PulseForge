@@ -3,7 +3,7 @@
 #include "Core/Core.h"
 #include "Renderer/Graphics.h"
 #include "Renderer/Binding.h"
-#include "Renderer/EnvironmentLightingCache.h"
+#include "Renderer/EnvironmentLightingTextures.h"
 #include "Renderer/RenderTarget.h"
 #include "Renderer/DepthCubemap.h"
 #include "Renderer/DirectionalShadowMath.h"
@@ -30,11 +30,8 @@ namespace PulseForge
 {
 	class Application;
 	struct MaterialAssetDesc;
-	class MaterialAssetCache;
-	class MeshAssetCache;
 	class Project;
 	class Scene;
-	class TextureAssetCache;
 
 	enum class SceneRendererErrorCode : uint8_t
 	{
@@ -169,6 +166,8 @@ namespace PulseForge
 		[[nodiscard]] const Texture* GetPointShadowFaceTextureForValidation(size_t Slot, uint32_t Face) const noexcept;
 
 	private:
+		struct ProjectAssetCaches;
+
 		SceneRenderer(Application& Runtime, const Project& SourceProject);
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
 			const std::filesystem::path& CompiledShaderDirectory);
@@ -314,10 +313,7 @@ namespace PulseForge
 
 		Application& m_Runtime;
 		const Project& m_Project;
-		std::unique_ptr<MeshAssetCache> m_MeshAssetCache;
-		std::unique_ptr<TextureAssetCache> m_TextureAssetCache;
-		std::unique_ptr<MaterialAssetCache> m_MaterialAssetCache;
-		std::unique_ptr<EnvironmentLightingCache> m_EnvironmentLightingCache;
+		std::unique_ptr<ProjectAssetCaches> m_ProjectAssetCaches;
 		ShaderHandle m_VertexShader;
 		ShaderHandle m_FragmentShader;
 		ShaderHandle m_BackgroundVertexShader;

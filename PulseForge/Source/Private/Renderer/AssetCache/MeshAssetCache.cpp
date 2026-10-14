@@ -1,5 +1,5 @@
 #include "Core/PulseForgePCH.h"
-#include "Assets/MeshAssetCache.h"
+#include "Renderer/AssetCache/MeshAssetCache.h"
 
 #include "Assets/GltfMeshImporter.h"
 #include "Core/Application.h"

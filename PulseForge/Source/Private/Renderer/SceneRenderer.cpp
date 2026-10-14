@@ -2,9 +2,10 @@
 #include "Renderer/SceneRenderer.h"
 
 #include "Assets/MaterialAssetCache.h"
-#include "Assets/MeshAssetCache.h"
+#include "Renderer/AssetCache/MeshAssetCache.h"
 #include "Assets/Project.h"
-#include "Assets/TextureAssetCache.h"
+#include "Renderer/AssetCache/TextureAssetCache.h"
+#include "Renderer/EnvironmentLightingCache.h"
 #include "Core/Application.h"
 #include "Core/Log.h"
 #include "Core/ScopedProfileTimer.h"
@@ -185,13 +186,26 @@ namespace PulseForge
 		};
 	}
 
+	struct SceneRenderer::ProjectAssetCaches final
+	{
+		MeshAssetCache Meshes;
+		TextureAssetCache Textures;
+		MaterialAssetCache Materials;
+		EnvironmentLightingCache EnvironmentLighting;
+
+		ProjectAssetCaches(Application& Runtime, const Project& SourceProject)
+			: Meshes(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry()),
+			  Textures(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry()),
+			  Materials(SourceProject.GetRootPath(), SourceProject.GetAssetRegistry()),
+			  EnvironmentLighting(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry())
+		{
+		}
+	};
+
 	SceneRenderer::SceneRenderer(Application& Runtime, const Project& SourceProject)
 		: m_Runtime(Runtime),
 		  m_Project(SourceProject),
-		  m_MeshAssetCache(std::make_unique<MeshAssetCache>(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry())),
-		  m_TextureAssetCache(std::make_unique<TextureAssetCache>(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry())),
-		  m_MaterialAssetCache(std::make_unique<MaterialAssetCache>(SourceProject.GetRootPath(), SourceProject.GetAssetRegistry())),
-		  m_EnvironmentLightingCache(std::make_unique<EnvironmentLightingCache>(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry()))
+		  m_ProjectAssetCaches(std::make_unique<ProjectAssetCaches>(Runtime, SourceProject))
 	{
 	}
 
@@ -856,7 +870,7 @@ namespace PulseForge
 			return {};
 		Detail::ScopedProfileTimer Timer("PBR material/texture binding first creation");
 
-		auto Material = m_MaterialAssetCache->GetOrLoad(MaterialAsset);
+		auto Material = m_ProjectAssetCaches->Materials.GetOrLoad(MaterialAsset);
 		if (!Material)
 		{
 			return std::unexpected(SceneRendererError{
@@ -875,7 +889,7 @@ namespace PulseForge
 		{
 			if (TextureAsset.IsNil())
 				return std::cref(Fallback);
-			auto Texture = m_TextureAssetCache->GetOrLoad(TextureAsset, Format);
+			auto Texture = m_ProjectAssetCaches->Textures.GetOrLoad(TextureAsset, Format);
 			if (!Texture)
 			{
 				return std::unexpected(SceneRendererError{
@@ -1098,7 +1112,7 @@ namespace PulseForge
 		std::optional<AssetID> BindingEnvironmentAsset = EnvironmentAsset;
 		if (EnvironmentAsset)
 		{
-			auto LoadedEnvironment = m_EnvironmentLightingCache->GetOrLoad(*EnvironmentAsset);
+			auto LoadedEnvironment = m_ProjectAssetCaches->EnvironmentLighting.GetOrLoad(*EnvironmentAsset);
 			if (!LoadedEnvironment)
 				return std::unexpected(SceneRendererError{
 					SceneRendererErrorCode::AssetLoadFailed,
@@ -1123,7 +1137,7 @@ namespace PulseForge
 		std::optional<VertexLayoutDesc> SceneVertexLayout;
 		for (const SceneMeshInstance& Instance : Snapshot->Meshes)
 		{
-			auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
+			auto Mesh = m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
 			if (!Mesh)
 			{
 				return std::unexpected(SceneRendererError{
@@ -1210,7 +1224,7 @@ namespace PulseForge
 				Instance.Entity,
 				Instance.MeshAsset,
 				"Visible mesh entity has no material asset assigned" });
-		auto Material = m_MaterialAssetCache->GetOrLoad(*Instance.MaterialAsset);
+		auto Material = m_ProjectAssetCaches->Materials.GetOrLoad(*Instance.MaterialAsset);
 		if (!Material)
 			return std::unexpected(SceneRendererError{
 				SceneRendererErrorCode::AssetLoadFailed,
@@ -1672,7 +1686,7 @@ namespace PulseForge
 				const auto Pipeline = m_ShadowPipelines.find({ 1, (*Material)->DoubleSided });
 				if (Pipeline == m_ShadowPipelines.end())
 					return std::unexpected(MakeResourceError("Spotlight alpha-tested shadow pipeline was not prepared"));
-				auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
+				auto Mesh = m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
 				if (!Mesh)
 					return std::unexpected(MakeDrawError("Spotlight shadow caster mesh became unavailable: " + Mesh.error().Message));
 				const glm::mat4 ShadowTransform = m_PreparedSpotShadowMatrices[Slot] * Instance.WorldTransform;
@@ -1740,7 +1754,7 @@ namespace PulseForge
 					const size_t PipelineIndex = (*Material)->DoubleSided ? 1u : 0u;
 					if (!m_PointShadowPipelines[PipelineIndex])
 						return std::unexpected(MakeResourceError("Point-shadow alpha-tested pipeline was not prepared"));
-					auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
+					auto Mesh = m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
 					if (!Mesh)
 						return std::unexpected(MakeDrawError("Point-shadow caster mesh became unavailable: " + Mesh.error().Message));
 					const PointShadowObjectConstants Object{
@@ -1806,7 +1820,7 @@ namespace PulseForge
 				const auto Pipeline = m_ShadowPipelines.find({ RasterBias, (*Material)->DoubleSided });
 				if (Pipeline == m_ShadowPipelines.end())
 					return std::unexpected(MakeResourceError("Directional alpha-tested shadow pipeline was not prepared"));
-				auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
+				auto Mesh = m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
 				if (!Mesh)
 					return std::unexpected(MakeDrawError("Shadow pass mesh became unavailable: " + Mesh.error().Message));
 				const glm::mat4 ShadowTransform = m_PreparedCascades->Cascades[CascadeIndex].ViewProjection * Instance.WorldTransform;
@@ -2036,7 +2050,7 @@ namespace PulseForge
 			auto MaterialBinding = ResolveMaterialBinding(Instance);
 			if (!MaterialBinding)
 				return std::unexpected(std::move(MaterialBinding.error()));
-			auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
+			auto Mesh = m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
 			if (!Mesh)
 				return std::unexpected(MakeDrawError("SSAO prepass mesh became unavailable: " + Mesh.error().Message));
 			const glm::mat4 ViewModel = m_PreparedSnapshot->View * Instance.WorldTransform;
@@ -2119,8 +2133,7 @@ namespace PulseForge
 	void SceneRenderer::RefreshMaterialAssets() noexcept
 	{
 		m_MaterialBindings.clear();
-		if (m_MaterialAssetCache)
-			m_MaterialAssetCache->Clear();
+		m_ProjectAssetCaches->Materials.Clear();
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::EnsureBackgroundPipeline(ColorTargetFormat ColorFormat)
@@ -2569,7 +2582,7 @@ namespace PulseForge
 			auto MaterialBinding = ResolveMaterialBinding(Instance);
 			if (!MaterialBinding)
 				return std::unexpected(std::move(MaterialBinding.error()));
-			auto Mesh = m_MeshAssetCache->GetOrLoad(Instance.MeshAsset);
+			auto Mesh = m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
 			if (!Mesh)
 			{
 				return std::unexpected(SceneRendererError{

@@ -1,5 +1,5 @@
 #include "Core/PulseForgePCH.h"
-#include "Assets/TextureAssetCache.h"
+#include "Renderer/AssetCache/TextureAssetCache.h"
 
 #include "Assets/ImageAssetImporter.h"
 #include "Core/Application.h"
