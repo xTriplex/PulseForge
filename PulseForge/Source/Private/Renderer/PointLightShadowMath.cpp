@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Renderer/PointLightShadowMath.h"
 
 #include <cmath>

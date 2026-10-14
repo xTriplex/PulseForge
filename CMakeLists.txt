@@ -216,6 +216,15 @@ target_include_directories(PulseForgeScene
 )
 target_compile_definitions(PulseForgeScene PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(PulseForgeScene PUBLIC PulseForgeCore)
+add_library(PulseForgeRenderMath STATIC
+	PulseForge/Source/Private/Renderer/DirectionalShadowMath.cpp
+	PulseForge/Source/Private/Renderer/SpotlightShadowMath.cpp
+	PulseForge/Source/Private/Renderer/PointLightShadowMath.cpp
+	PulseForge/Source/Private/Renderer/ScreenSpaceAmbientOcclusion.cpp
+)
+target_include_directories(PulseForgeRenderMath PUBLIC PulseForge/Source/Public)
+target_compile_definitions(PulseForgeRenderMath PRIVATE PF_PLATFORM_WINDOWS)
+target_link_libraries(PulseForgeRenderMath PUBLIC PulseForgeScene)
 add_library(PulseForgeAssetCatalog STATIC
 	PulseForge/Source/Private/Assets/AssetMetadata.cpp
 	PulseForge/Source/Private/Assets/AssetOperations.cpp
@@ -266,10 +275,6 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/RenderTarget.cpp
 	PulseForge/Source/Private/Renderer/Binding.cpp
 	PulseForge/Source/Private/Renderer/Graphics.cpp
-	PulseForge/Source/Private/Renderer/DirectionalShadowMath.cpp
-	PulseForge/Source/Private/Renderer/SpotlightShadowMath.cpp
-	PulseForge/Source/Private/Renderer/PointLightShadowMath.cpp
-	PulseForge/Source/Private/Renderer/ScreenSpaceAmbientOcclusion.cpp
 	PulseForge/Source/Private/Renderer/EnvironmentLighting.cpp
 	PulseForge/Source/Private/Renderer/EnvironmentLightingCache.cpp
 	PulseForge/Source/Private/Renderer/RendererBackend.cpp
@@ -301,7 +306,7 @@ target_compile_definitions(PulseForge PRIVATE
 	GLFW_INCLUDE_NONE
 	MA_NO_WIN32_LEAN_AND_MEAN
 )
-target_link_libraries(PulseForge PUBLIC PulseForgeAssetServices)
+target_link_libraries(PulseForge PUBLIC PulseForgeAssetServices PulseForgeRenderMath)
 target_link_libraries(PulseForge PRIVATE
 	PulseForgeLua
 	glfw
