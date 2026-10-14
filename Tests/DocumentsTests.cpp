@@ -1,4 +1,5 @@
 #include "TestEditorSupport.h"
+#include "Editor/EditorWorkspaceFrameState.h"
 
 namespace
 {
@@ -1182,6 +1183,42 @@ namespace
 		PF_CHECK(Tests, !RefusedByRegistry && RefusedByRegistry.error().Code == AssetOperationErrorCode::InvalidProjectAssets);
 		PF_CHECK(Tests, !std::filesystem::exists(ProjectRoot / "Assets" / "Imported" / "refused.bin"));
 	}
+
+	void TestEditorWorkspaceFrameState(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		const auto Project = UUID::Generate();
+		const auto OtherProject = UUID::Generate();
+		const auto Asset = UUID::Generate();
+		PF_CHECK(Tests, Project && OtherProject && Asset);
+		if (!Project || !OtherProject || !Asset)
+			return;
+
+		const EditorDocumentIdentity Level{ *Project, UUID{}, EditorDocumentKind::Level };
+		const EditorDocumentIdentity Material{ *Project, *Asset, EditorDocumentKind::Material };
+		const EditorDocumentIdentity OtherProjectMaterial{ *OtherProject, *Asset, EditorDocumentKind::Material };
+		const EditorDocumentIdentity Texture{ *Project, *Asset, EditorDocumentKind::Texture };
+		const std::string MaterialKey = EditorWorkspaceFrameState::GetWorkspaceKey(Material);
+		PF_CHECK(Tests, MaterialKey.starts_with("PulseForge.DocumentWorkspace/"));
+		PF_CHECK(Tests, EditorWorkspaceFrameState::GetWorkspaceKey(Material) !=
+			EditorWorkspaceFrameState::GetWorkspaceKey(OtherProjectMaterial));
+		PF_CHECK(Tests, EditorWorkspaceFrameState::GetWorkspaceKey(Material) !=
+			EditorWorkspaceFrameState::GetWorkspaceKey(Texture));
+
+		EditorWorkspaceFrameState Frame;
+		PF_CHECK(Tests, !Frame.BeginFrame(std::nullopt) && Frame.IsLevelWorkspaceActive());
+		PF_CHECK(Tests, Frame.BeginFrame(Material) && !Frame.IsLevelWorkspaceActive());
+		Frame.MarkDockspaceDrawn(Material);
+		Frame.MarkWorkspaceDrawn(Material, "Native/1");
+		PF_CHECK(Tests, Frame.WasDockspaceDrawn(Material));
+		PF_CHECK(Tests, Frame.WasWorkspaceDrawn(Material, "Native/1"));
+		PF_CHECK(Tests, !Frame.WasWorkspaceDrawn(Material, "Main"));
+		PF_CHECK(Tests, !Frame.BeginFrame(Material));
+		PF_CHECK(Tests, !Frame.WasDockspaceDrawn(Material) && !Frame.WasWorkspaceDrawn(Material, "Native/1"));
+		PF_CHECK(Tests, Frame.BeginFrame(Level) && Frame.IsLevelWorkspaceActive());
+		PF_CHECK(Tests, Frame.BeginFrame(std::nullopt) && Frame.IsLevelWorkspaceActive());
+	}
 }
 
 void RunDocumentsTests(TestRunner& Tests)
@@ -1190,6 +1227,7 @@ void RunDocumentsTests(TestRunner& Tests)
 	TestEditorDocumentEditorRegistry(Tests);
 	TestEditorSnapshotHistory(Tests);
 	TestEditorDocumentWorkspaceCodec(Tests);
+	TestEditorWorkspaceFrameState(Tests);
 	TestEditorNativeWindowBoundsPolicy(Tests);
 	TestAssetImportOperation(Tests);
 }

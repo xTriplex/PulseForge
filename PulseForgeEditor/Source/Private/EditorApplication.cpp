@@ -37,6 +37,7 @@
 #include "Editor/EditorAssetPreviewPolicy.h"
 #include "Editor/EditorDeferredOperationQueue.h"
 #include "EditorConsolePanel.h"
+#include "EditorWorkspacePresentation.h"
 #include "Editor/EditorLayout.h"
 #include "EditorViewportCamera.h"
 #include "EditorMaterialDraftStore.h"
@@ -62,6 +63,7 @@
 #include "Editor/EditorDocumentHostPolicy.h"
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
+#include "Editor/EditorWorkspaceFrameState.h"
 #include "Editor/EditorSnapshotHistory.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
@@ -3134,9 +3136,7 @@ namespace
 			};
 			const auto HasWorkspaceDrawn = [this](const auto& Identity, std::string_view HostID)
 			{
-				const auto Found = m_DocumentWorkspaceContentsDrawnThisFrame.find(
-					GetDocumentWorkspaceDockspaceID(Identity));
-				return Found != m_DocumentWorkspaceContentsDrawnThisFrame.end() && Found->second == HostID;
+				return m_WorkspacePresentation.WasWorkspaceDrawn(Identity, HostID);
 			};
 			const auto ViewportInteractionReleased = [this]
 			{
@@ -3186,7 +3186,8 @@ namespace
 					}
 					break;
 				case DocumentWorkspaceSwitchTestPhase::WaitingForLevel:
-					if (MainHostActive() == m_DocumentWorkspaceSwitchLevelIdentity && m_LevelWorkspaceDrawnThisFrame)
+					if (MainHostActive() == m_DocumentWorkspaceSwitchLevelIdentity &&
+						m_WorkspacePresentation.IsLevelWorkspaceActive())
 					{
 						if (!ViewportInteractionReleased() || !MainLayoutRetained())
 						{
@@ -3265,7 +3266,7 @@ namespace
 							m_DocumentWorkspaceSwitchNativeHostID))
 					{
 						if (MainHostActive() != m_DocumentWorkspaceSwitchLevelIdentity ||
-							!m_LevelWorkspaceDrawnThisFrame || !ViewportInteractionReleased())
+							!m_WorkspacePresentation.IsLevelWorkspaceActive() || !ViewportInteractionReleased())
 						{
 							Fail("the Level Editor did not remain available while the native fixture workspace was active");
 							break;
@@ -3284,7 +3285,8 @@ namespace
 						MarkDocumentWorkspaceDirty(true);
 						m_DocumentWorkspaceSwitchTestPhase = DocumentWorkspaceSwitchTestPhase::WaitingForMainTransfer;
 					}
-					else if (MainHostActive() == m_DocumentWorkspaceSwitchLevelIdentity && m_LevelWorkspaceDrawnThisFrame &&
+					else if (MainHostActive() == m_DocumentWorkspaceSwitchLevelIdentity &&
+						m_WorkspacePresentation.IsLevelWorkspaceActive() &&
 						!ViewportInteractionReleased())
 						Fail("viewport navigation or gizmo state remained captured after the workspace transfer");
 					break;
@@ -6208,7 +6210,7 @@ namespace
 						auto* Session = m_Documents.Find(*CurrentHost->ActiveDocument);
 						if (Session && m_DocumentEditors.IsRegistered(Session->Identity.Kind) && Session->EditorState)
 						{
-							DrawRegisteredDocumentWorkspaceDockspace(*Session);
+							m_WorkspacePresentation.DrawWorkspaceDockspace(*Session);
 							RegisteredWorkspaceToDraw = Session->Identity;
 						}
 						else
@@ -6219,7 +6221,11 @@ namespace
 				ImGui::End();
 				if (Visible && IsOpen && RegisteredWorkspaceToDraw)
 					if (auto* Session = m_Documents.Find(*RegisteredWorkspaceToDraw))
-						DrawRegisteredDocumentWorkspaceContent(*Session);
+						m_WorkspacePresentation.DrawWorkspaceContent(*Session, m_DocumentEditors,
+							[](void* Context, const auto& Identity)
+							{
+								static_cast<EditorLayer*>(Context)->DrawUnregisteredAssetDocument(Identity);
+							}, this);
 			}
 		}
 
@@ -6915,16 +6921,11 @@ namespace
 		const auto* MainHost = m_Documents.FindHost(PulseForgeEditor::EditorDocumentManager::MainHostID);
 		const std::optional<PulseForgeEditor::EditorDocumentIdentity> MainActive =
 			MainHost ? MainHost->ActiveDocument : std::nullopt;
-		if (MainActive != m_LastMainWorkspaceIdentity)
+		if (m_WorkspacePresentation.BeginMainFrame(MainActive))
 		{
 			ResetViewportPanelInteraction();
-			m_LastMainWorkspaceIdentity = MainActive;
 		}
-		const bool LevelWorkspaceActive = !MainActive ||
-			MainActive->Kind == PulseForgeEditor::EditorDocumentKind::Level;
-		m_DocumentWorkspacesDrawnThisFrame.clear();
-			m_DocumentWorkspaceContentsDrawnThisFrame.clear();
-			m_LevelWorkspaceDrawnThisFrame = LevelWorkspaceActive;
+		const bool LevelWorkspaceActive = m_WorkspacePresentation.IsLevelWorkspaceActive();
 
 			DrawUnsavedChangesDialog();
 			DrawDocumentCloseDialog(PulseForgeEditor::EditorDocumentManager::MainHostID);
@@ -6942,7 +6943,7 @@ namespace
 					{
 						if (m_DocumentEditors.IsRegistered(Session->Identity.Kind) && Session->EditorState)
 						{
-							DrawRegisteredDocumentWorkspaceDockspace(*Session);
+							m_WorkspacePresentation.DrawWorkspaceDockspace(*Session);
 							DrawDocumentWorkspaceContent = true;
 						}
 						else
@@ -6951,7 +6952,11 @@ namespace
 				ImGui::End();
 				if (DrawDocumentWorkspaceContent)
 					if (auto* Session = m_Documents.Find(*MainActive))
-						DrawRegisteredDocumentWorkspaceContent(*Session);
+						m_WorkspacePresentation.DrawWorkspaceContent(*Session, m_DocumentEditors,
+							[](void* Context, const auto& Identity)
+							{
+								static_cast<EditorLayer*>(Context)->DrawUnregisteredAssetDocument(Identity);
+							}, this);
 			}
 			if (LevelWorkspaceActive)
 			{
@@ -7026,78 +7031,7 @@ namespace
 			DrawConsolePanel();
 			}
 			DrawNativeDocumentHosts();
-			KeepInactiveDocumentWorkspacesAlive();
-		}
-
-		[[nodiscard]] ImGuiID GetDocumentWorkspaceDockspaceID(
-			const PulseForgeEditor::EditorDocumentIdentity& Identity) const
-		{
-			const std::string Key = "PulseForge.DocumentWorkspace/" + Identity.Project.ToString() + "/" +
-				Identity.Asset.ToString() + "/" + std::to_string(static_cast<uint32_t>(Identity.Kind));
-			return ImHashStr(Key.c_str());
-		}
-
-		[[nodiscard]] std::string GetDocumentWorkspaceWindowName(
-			const PulseForgeEditor::EditorDocumentIdentity& Identity) const
-		{
-			return "Document Workspace###PFDocumentWorkspace_" + Identity.Project.ToString() + "_" +
-				Identity.Asset.ToString() + "_" + std::to_string(static_cast<uint32_t>(Identity.Kind));
-		}
-
-		void DrawRegisteredDocumentWorkspaceDockspace(PulseForgeEditor::EditorDocumentSession& Session)
-		{
-			const ImGuiID DockspaceID = GetDocumentWorkspaceDockspaceID(Session.Identity);
-			const std::string WindowName = GetDocumentWorkspaceWindowName(Session.Identity);
-			const ImVec2 Position = ImGui::GetCursorScreenPos();
-			const ImVec2 Size = ImGui::GetContentRegionAvail();
-			if (!ImGui::DockBuilderGetNode(DockspaceID))
-			{
-				ImGui::DockBuilderAddNode(DockspaceID, ImGuiDockNodeFlags_DockSpace);
-				ImGui::DockBuilderSetNodePos(DockspaceID, Position);
-				ImGui::DockBuilderSetNodeSize(DockspaceID,
-					ImVec2((std::max)(Size.x, 1.0f), (std::max)(Size.y, 1.0f)));
-				ImGui::DockBuilderDockWindow(WindowName.c_str(), DockspaceID);
-				ImGui::DockBuilderFinish(DockspaceID);
-			}
-			ImGui::DockSpace(DockspaceID, Size);
-			m_DocumentWorkspacesDrawnThisFrame.insert(DockspaceID);
-		}
-
-		void DrawRegisteredDocumentWorkspaceContent(PulseForgeEditor::EditorDocumentSession& Session)
-		{
-			const std::string WindowName = GetDocumentWorkspaceWindowName(Session.Identity);
-			if (ImGui::Begin(WindowName.c_str(), nullptr, ImGuiWindowFlags_NoCollapse))
-			{
-				if (m_DocumentEditors.DrawWorkspace(Session))
-					m_DocumentWorkspaceContentsDrawnThisFrame.insert_or_assign(
-						GetDocumentWorkspaceDockspaceID(Session.Identity), Session.HostID);
-				else
-					DrawUnregisteredAssetDocument(Session.Identity);
-			}
-			ImGui::End();
-		}
-
-		void KeepInactiveDocumentWorkspacesAlive()
-		{
-			ImGui::SetNextWindowPos(ImVec2(-10000.0f, -10000.0f), ImGuiCond_Always);
-			ImGui::SetNextWindowSize(ImVec2(1.0f, 1.0f), ImGuiCond_Always);
-			if (!ImGui::Begin("##PFInactiveDocumentWorkspaceKeepAlive", nullptr,
-				ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
-					ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBackground))
-			{
-				ImGui::End();
-				return;
-			}
-			for (const auto& [Identity, Session] : m_Documents.GetSessions())
-			{
-				(void)Session;
-				if (!m_DocumentEditors.IsRegistered(Identity.Kind))
-					continue;
-				const ImGuiID DockspaceID = GetDocumentWorkspaceDockspaceID(Identity);
-				if (!m_DocumentWorkspacesDrawnThisFrame.contains(DockspaceID))
-					ImGui::DockSpace(DockspaceID, ImVec2(1.0f, 1.0f), ImGuiDockNodeFlags_KeepAliveOnly);
-			}
-			ImGui::End();
+			m_WorkspacePresentation.KeepInactiveWorkspacesAlive(m_Documents, m_DocumentEditors);
 		}
 
 		void CaptureDocumentTabTestInvalidDropTarget(PulseForgeEditor::EditorPanel Panel)
@@ -12025,6 +11959,7 @@ namespace
 		PulseForgeEditor::EditorLayout m_Layout;
 		PulseForgeEditor::EditorDocumentManager m_Documents;
 		PulseForgeEditor::EditorDocumentEditorRegistry m_DocumentEditors;
+		PulseForgeEditor::EditorWorkspacePresentation m_WorkspacePresentation;
 		PulseForgeEditor::EditorDeferredOperationQueue m_DeferredEditorOperations;
 		PulseForgeEditor::EditorStyle m_EditorStyle;
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
@@ -12104,8 +12039,6 @@ namespace
 		std::optional<std::string> m_PendingDocumentHostClose;
 		std::vector<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentCloseBatch;
 		std::string m_DocumentCloseError;
-		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_LastMainWorkspaceIdentity;
-		std::unordered_set<ImGuiID> m_DocumentWorkspacesDrawnThisFrame;
 		std::optional<PendingDocumentTransfer> m_PendingDocumentTransfer;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_ActiveDocumentTabDrag;
 		std::optional<ImVec2> m_ActiveDocumentTabDragStart;
@@ -12168,8 +12101,6 @@ namespace
 		bool m_DocumentWorkspaceSwitchContentBrowserVisible = false;
 		std::string m_DocumentWorkspaceSwitchNativeHostID;
 		ImGuiID m_DocumentWorkspaceSwitchMainDockspaceID = 0;
-		bool m_LevelWorkspaceDrawnThisFrame = false;
-		std::unordered_map<ImGuiID, std::string> m_DocumentWorkspaceContentsDrawnThisFrame;
 		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabReattachTestIdentity;
 		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabReorderTestFirst;
 		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabReorderTestSecond;

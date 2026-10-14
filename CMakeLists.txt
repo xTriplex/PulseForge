@@ -452,6 +452,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorMain.cpp
 		PulseForgeEditor/Source/Private/EditorApplication.cpp
 		PulseForgeEditor/Source/Private/EditorConsolePanel.cpp
+		PulseForgeEditor/Source/Private/EditorWorkspacePresentation.cpp
 	)
 	target_include_directories(PulseForgeEditor PRIVATE
 		PulseForgeEditor/Source/Public
