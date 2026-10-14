@@ -821,9 +821,11 @@ namespace
 
 		static constexpr size_t DocumentTabTestDropPointsPerPanel = 5;
 		static constexpr size_t DocumentTabRoundTripCycleCount = 3;
-		static constexpr std::array<const char*, 4> DocumentTabTestInvalidDropPanelNames = {
-			"Hierarchy", "Inspector", "Scene Viewport", "Content Browser"
+		static constexpr std::array<const char*, 5> DocumentTabTestInvalidDropPanelNames = {
+			"Hierarchy", "Inspector", "Scene Viewport", "Content Browser", "Console"
 		};
+		static constexpr size_t DocumentTabTestConsolePanelIndex =
+			DocumentTabTestInvalidDropPanelNames.size() - 1;
 		static constexpr std::array<const char*,
 			DocumentTabTestInvalidDropPanelNames.size() * DocumentTabTestDropPointsPerPanel>
 			DocumentTabTestInvalidDropTargetNames = {
@@ -832,7 +834,8 @@ namespace
 				"Scene Viewport body", "Scene Viewport top edge", "Scene Viewport left edge",
 				"Scene Viewport right edge", "Scene Viewport bottom edge",
 				"Content Browser body", "Content Browser top edge", "Content Browser left edge",
-				"Content Browser right edge", "Content Browser bottom edge"
+				"Content Browser right edge", "Content Browser bottom edge",
+				"Console body", "Console top edge", "Console left edge", "Console right edge", "Console bottom edge"
 			};
 
 		enum class ProjectAssetDestinationCreateKind : uint8_t
@@ -6661,7 +6664,7 @@ namespace
 				case PulseForgeEditor::EditorPanel::Inspector: PanelIndex = 1; break;
 				case PulseForgeEditor::EditorPanel::SceneViewport: PanelIndex = 2; break;
 				case PulseForgeEditor::EditorPanel::ContentBrowser: PanelIndex = 3; break;
-				case PulseForgeEditor::EditorPanel::Console:
+				case PulseForgeEditor::EditorPanel::Console: PanelIndex = 4; break;
 				case PulseForgeEditor::EditorPanel::Scene:
 				case PulseForgeEditor::EditorPanel::MaterialDetails:
 				case PulseForgeEditor::EditorPanel::Count:
@@ -8793,6 +8796,12 @@ namespace
 		{
 			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Console))
 				return;
+			if (m_DocumentHostTabReattachTest &&
+				m_DocumentHostTabReattachInvalidDropIndex >=
+					(DocumentTabTestDropPointsPerPanel * DocumentTabTestConsolePanelIndex) &&
+				m_DocumentHostTabReattachInvalidDropIndex <
+					(DocumentTabTestDropPointsPerPanel * DocumentTabTestInvalidDropPanelNames.size()))
+				ImGui::SetNextWindowFocus();
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Console))
 			{
 				if (!m_ConsoleSink)
@@ -11526,6 +11535,11 @@ namespace
 		{
 			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::ContentBrowser))
 				return;
+			// The default layout stacks Content Browser and Console; select each while its drop targets are tested.
+			if (m_DocumentHostTabReattachTest &&
+				m_DocumentHostTabReattachInvalidDropIndex <
+					(DocumentTabTestDropPointsPerPanel * DocumentTabTestConsolePanelIndex))
+				ImGui::SetNextWindowFocus();
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::ContentBrowser))
 			{
 				if (!m_Project)
