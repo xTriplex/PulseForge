@@ -44,7 +44,7 @@
 #include "Editor/EditorContentBrowserPolicy.h"
 #include "Editor/EditorContentBrowserState.h"
 #include "Editor/EditorAssetWorkflowState.h"
-#include "Editor/EditorSceneHistoryState.h"
+#include "Editor/EditorSceneEditController.h"
 #include "Editor/EditorAssetDestinationPolicy.h"
 #include "Editor/EditorAssetSelectorPolicy.h"
 #include "Editor/EditorProjectOpening.h"
@@ -1388,7 +1388,7 @@ namespace
 				RenderViewportScene();
 			UpdateWindowTitle();
 			if (PulseForgeEditor::ShouldFinishSceneEditForInspector(
-				m_SceneHistory.IsActive(), m_SceneHistory.InspectorHistoryItem(), GImGui ? GImGui->ActiveId : 0))
+				m_SceneEditController.IsActive(), m_SceneEditController.InspectorHistoryItem(), GImGui ? GImGui->ActiveId : 0))
 				FinishSceneEdit();
 
 			ImGui::Render();
@@ -1577,22 +1577,15 @@ namespace
 			PulseForge::Application::Get().RequestClose();
 		}
 
-		[[nodiscard]] std::expected<std::string, std::string> CaptureSceneState() const
-		{
-			if (!m_Scene)
-				return std::unexpected("There is no active authored scene to capture");
-			return PulseForgeEditor::EditorSceneHistoryState::CaptureSnapshot(*m_Scene, m_SceneWorkspace);
-		}
-
 		[[nodiscard]] std::expected<void, std::string> RestoreSceneState(std::string_view State)
 		{
 			if (!m_Scene || m_SceneRuntime)
 				return std::unexpected("Scene history is available only for the authored scene in Edit mode");
-			auto Restored = PulseForgeEditor::EditorSceneHistoryState::RestoreSnapshot(State, *m_Scene, m_SceneWorkspace);
+			auto Restored = m_SceneEditController.Restore(State, *m_Scene, m_SceneWorkspace);
 			if (!Restored)
 				return std::unexpected(Restored.error());
 			m_GizmoDrag.reset();
-			m_SceneHistory.InspectorHistoryItem() = 0;
+			m_SceneEditController.InspectorHistoryItem() = 0;
 			UpdateSceneDirty();
 			return {};
 		}
@@ -1851,127 +1844,65 @@ namespace
 
 		void UpdateSceneDirty()
 		{
-			m_SceneHistory.UpdateDirty(m_Scene.get());
+			m_SceneEditController.UpdateDirty(m_Scene.get());
 		}
 
 		void ResetSceneHistory()
 		{
-			m_SceneHistory.Reset(m_Scene.get());
+			m_SceneEditController.Reset(m_Scene.get());
 			m_SceneWorkspace.Visibility().ShowAll();
 		}
 
 		void CancelSceneEdit()
 		{
-			if (m_SceneHistory.IsActive())
-			{
-				const auto Result = m_SceneHistory.Cancel(
-					[this](std::string_view State) { return RestoreSceneState(State); });
-				if (!Result)
-					SetError("Scene edit rollback failed: " + Result.error());
-			}
-			m_SceneHistory.InspectorHistoryItem() = 0;
-			UpdateSceneDirty();
+			const auto Result = m_SceneEditController.Cancel(
+				m_Scene.get(), m_SceneWorkspace,
+				[this](std::string_view State) { return RestoreSceneState(State); });
+			if (!Result)
+				SetError("Scene edit rollback failed: " + Result.error());
 		}
 
 		bool BeginSceneEdit(std::string Description)
 		{
-			if (m_SceneHistory.IsActive())
-				FinishSceneEdit();
-			if (!m_Scene || m_SceneRuntime)
-				return false;
-			auto Before = CaptureSceneState();
-			if (!Before)
-			{
-				SetError("Could not begin the scene edit: " + Before.error());
-				return false;
-			}
-			if (auto Begun = m_SceneHistory.Begin(std::move(Description), std::move(*Before)); !Begun)
+			if (auto Begun = m_SceneEditController.Begin(
+				m_Scene.get(), m_SceneWorkspace, m_SceneRuntime != nullptr, std::move(Description),
+				[this](std::string_view State) { return RestoreSceneState(State); }); !Begun)
 			{
 				SetError("Could not begin the scene edit: " + Begun.error());
 				return false;
 			}
-			m_SceneHistory.InspectorHistoryItem() = PulseForgeEditor::NoInspectorHistoryItem;
 			return true;
 		}
 
 		void MarkSceneSaved()
 		{
-			m_SceneHistory.MarkSaved(m_Scene.get());
+			m_SceneEditController.MarkSaved(m_Scene.get());
 		}
 
 		void FinishSceneEdit()
 		{
-			if (!m_SceneHistory.IsActive())
-			{
-				m_SceneHistory.InspectorHistoryItem() = 0;
-				return;
-			}
-
-			auto After = CaptureSceneState();
-			if (!After)
-			{
-				const std::string Error = After.error();
-				(void)m_SceneHistory.Cancel([this](std::string_view State) { return RestoreSceneState(State); });
-				m_SceneHistory.InspectorHistoryItem() = 0;
-				SetError("Could not finish the scene edit transaction: " + Error);
-				return;
-			}
-
-			const auto Committed = m_SceneHistory.Commit(std::move(*After));
-			if (!Committed)
-			{
-				const std::string Error = Committed.error();
-				(void)m_SceneHistory.Cancel([this](std::string_view State) { return RestoreSceneState(State); });
-				m_SceneHistory.InspectorHistoryItem() = 0;
-				SetError("Scene edit was rolled back because it could not be stored in history: " + Error);
-				return;
-			}
-			m_SceneHistory.InspectorHistoryItem() = 0;
-			UpdateSceneDirty();
+			if (auto Result = m_SceneEditController.Finish(
+				m_Scene.get(), m_SceneWorkspace,
+				[this](std::string_view State) { return RestoreSceneState(State); }); !Result)
+				SetError(Result.error());
 		}
 
 		template<typename Action>
 		[[nodiscard]] std::expected<void, std::string> RunSceneEdit(std::string Description, Action&& Operation)
 		{
-			if (!m_Scene || m_SceneRuntime)
-				return std::unexpected("Scene editing is unavailable while the runtime scene is active");
-
 			const uint32_t ActiveItem = GImGui ? GImGui->ActiveId : 0;
-			if (m_SceneHistory.IsActive() && m_SceneHistory.InspectorHistoryItem() != ActiveItem)
-				FinishSceneEdit();
-			if (!m_SceneHistory.IsActive())
-			{
-				auto Before = CaptureSceneState();
-				if (!Before)
-					return std::unexpected("Could not begin the scene edit: " + Before.error());
-				if (auto Begun = m_SceneHistory.Begin(std::move(Description), std::move(*Before)); !Begun)
-					return std::unexpected(Begun.error());
-				m_SceneHistory.InspectorHistoryItem() = ActiveItem;
-			}
-
-			auto Result = std::forward<Action>(Operation)();
-			if (!Result)
-			{
-				const std::string Error = Result.error().Message;
-				(void)m_SceneHistory.Cancel([this](std::string_view State) { return RestoreSceneState(State); });
-				m_SceneHistory.InspectorHistoryItem() = 0;
-				UpdateSceneDirty();
-				return std::unexpected(Error);
-			}
-
-			if (ActiveItem == 0 || !GImGui || GImGui->ActiveId != ActiveItem)
-				FinishSceneEdit();
-			else
-				m_SceneHistory.MarkDirty();
-			return {};
+			return m_SceneEditController.Run(
+				m_Scene.get(), m_SceneWorkspace, m_SceneRuntime != nullptr, ActiveItem,
+				[] { return GImGui ? GImGui->ActiveId : 0; }, std::move(Description), std::forward<Action>(Operation),
+				[this](std::string_view State) { return RestoreSceneState(State); });
 		}
 
 		void UndoSceneEdit()
 		{
 			if (!m_Scene || m_SceneRuntime)
 				return;
-			FinishSceneEdit();
-			const auto Result = m_SceneHistory.Undo(
+			const auto Result = m_SceneEditController.Undo(
+				m_Scene.get(), m_SceneWorkspace, m_SceneRuntime != nullptr,
 				[this](std::string_view State) { return RestoreSceneState(State); });
 			if (!Result)
 			{
@@ -1987,8 +1918,8 @@ namespace
 		{
 			if (!m_Scene || m_SceneRuntime)
 				return;
-			FinishSceneEdit();
-			const auto Result = m_SceneHistory.Redo(
+			const auto Result = m_SceneEditController.Redo(
+				m_Scene.get(), m_SceneWorkspace, m_SceneRuntime != nullptr,
 				[this](std::string_view State) { return RestoreSceneState(State); });
 			if (!Result)
 			{
@@ -5191,7 +5122,7 @@ namespace
 				return;
 			}
 
-			if (!m_SceneHistory.IsDirty())
+			if (!m_SceneEditController.IsDirty())
 			{
 				QueueAfterDocuments(std::move(Action));
 				return;
@@ -5206,7 +5137,7 @@ namespace
 
 		bool DiscardSceneChanges()
 		{
-			if (!m_SceneHistory.IsDirty())
+			if (!m_SceneEditController.IsDirty())
 				return true;
 			if (!m_Project || !m_Scene || !m_SceneAsset)
 			{
@@ -5330,11 +5261,11 @@ namespace
 				GetFocusedDocumentIdentity()->Kind == PulseForgeEditor::EditorDocumentKind::Level);
 			if (ImGui::BeginMenu("Edit", m_Scene != nullptr || MaterialDocumentFocused || RegisteredDocumentFocused))
 			{
-				const auto UndoCommand = m_SceneHistory.GetUndoCommand();
-				const auto RedoCommand = m_SceneHistory.GetRedoCommand();
+				const auto UndoCommand = m_SceneEditController.GetUndoCommand();
+				const auto RedoCommand = m_SceneEditController.GetRedoCommand();
 				const bool CanEditScene = SceneDocumentFocused && m_Scene != nullptr && m_SceneRuntime == nullptr;
-				bool CanUndoDocument = CanEditScene && m_SceneHistory.CanUndo();
-				bool CanRedoDocument = CanEditScene && m_SceneHistory.CanRedo();
+				bool CanUndoDocument = CanEditScene && m_SceneEditController.CanUndo();
+				bool CanRedoDocument = CanEditScene && m_SceneEditController.CanRedo();
 				if (RegisteredDocumentFocused)
 					CanUndoDocument = CanRedoDocument = true;
 				if (MaterialDocumentFocused)
@@ -5560,12 +5491,12 @@ namespace
 					if (m_SceneAsset)
 						if (const auto Record = m_Project->GetAssetRegistry().Find(*m_SceneAsset))
 							SceneName = PathToUtf8(Record->ProjectRelativePath.filename());
-					if (m_SceneHistory.IsDirty())
+					if (m_SceneEditController.IsDirty())
 						SceneName.push_back('*');
 					const std::string SceneLabel = FitEditorContextLabel(SceneName, SceneWidth);
 					ImGui::TextUnformatted(SceneLabel.c_str());
 					if (SceneLabel != SceneName && ImGui::IsItemHovered())
-						ImGui::SetTooltip("Scene: %s%s", SceneName.c_str(), m_SceneHistory.IsDirty() ? " (unsaved changes)" : "");
+						ImGui::SetTooltip("Scene: %s%s", SceneName.c_str(), m_SceneEditController.IsDirty() ? " (unsaved changes)" : "");
 					ImGui::SameLine(0.0f, 12.0f);
 					ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
 					ImGui::SameLine(0.0f, 10.0f);
@@ -5618,7 +5549,7 @@ namespace
 				if (const auto SceneRecord = m_Project->GetAssetRegistry().Find(*m_SceneAsset))
 				{
 					Title = PathToUtf8(SceneRecord->ProjectRelativePath.filename());
-					if (m_SceneHistory.IsDirty())
+					if (m_SceneEditController.IsDirty())
 						Title.push_back('*');
 					Title += " - PulseForge Editor";
 				}
@@ -5658,7 +5589,7 @@ namespace
 					ImGui::SetTooltip("%s", m_StatusMessage.c_str());
 
 				ImGui::TableSetColumnIndex(1);
-				const bool ShowDirtyState = m_Scene && m_SceneHistory.IsDirty();
+				const bool ShowDirtyState = m_Scene && m_SceneEditController.IsDirty();
 				if (ShowDirtyState)
 					ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning), "Unsaved scene");
 				else
@@ -6976,7 +6907,7 @@ namespace
 							(void)m_EditorStyle.SectionHeader(PulseForgeEditor::EditorIcon::Scene, "Scene");
 							ImGui::TextUnformatted(SceneName.c_str());
 							ImGui::SameLine();
-							m_EditorStyle.TextMuted(m_SceneHistory.IsDirty() ? "Unsaved" : "Saved");
+							m_EditorStyle.TextMuted(m_SceneEditController.IsDirty() ? "Unsaved" : "Saved");
 							ImGui::Text("Entities  %zu", m_Scene->GetEntityCount());
 							if (m_SceneRuntime && m_RuntimeScene)
 							{
@@ -8256,7 +8187,7 @@ namespace
 					CancelGizmoInteraction();
 					return;
 				}
-				m_SceneHistory.MarkDirty();
+				m_SceneEditController.MarkDirty();
 				return;
 			}
 
@@ -8318,7 +8249,7 @@ namespace
 					return;
 				}
 			}
-			m_SceneHistory.MarkDirty();
+			m_SceneEditController.MarkDirty();
 		}
 
 		[[nodiscard]] static bool TransformsDiffer(
@@ -9781,7 +9712,7 @@ namespace
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Inspector))
 			{
 				if (PulseForgeEditor::ShouldFinishSceneEditForInspector(
-					m_SceneHistory.IsActive(), m_SceneHistory.InspectorHistoryItem(), GImGui ? GImGui->ActiveId : 0))
+					m_SceneEditController.IsActive(), m_SceneEditController.InspectorHistoryItem(), GImGui ? GImGui->ActiveId : 0))
 					FinishSceneEdit();
 				if (!m_Scene || !SelectedEntity())
 					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Entity, "Select an entity in the Hierarchy.");
@@ -12011,7 +11942,7 @@ namespace
 		bool m_RawMouseMotionChanged = false;
 		bool m_CursorRestoreValid = false;
 		bool m_SceneRendererInitializationFailed = false;
-		PulseForgeEditor::EditorSceneHistoryState m_SceneHistory;
+		PulseForgeEditor::EditorSceneEditController m_SceneEditController;
 		PulseForgeEditor::EditorSceneWorkspaceState m_SceneWorkspace;
 		bool m_FocusEntityNameNextFrame = false;
 		bool m_FocusHierarchySearchNextFrame = false;

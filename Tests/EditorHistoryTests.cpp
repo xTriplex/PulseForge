@@ -1,4 +1,5 @@
 #include "TestEditorSupport.h"
+#include "Editor/EditorSceneEditController.h"
 
 namespace
 {
@@ -782,6 +783,108 @@ namespace
 		PF_CHECK(Tests, !History.IsDirty());
 	}
 
+	void TestEditorSceneEditController(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+
+		Scene SceneValue;
+		EditorSceneWorkspaceState Workspace;
+		EditorSceneEditController Controller;
+		auto Created = SceneValue.CreateEntity("Controller target");
+		PF_CHECK(Tests, Created.has_value());
+		if (!Created)
+			return;
+		const UUID Identifier = Created->GetUUID();
+		Workspace.Selection().SelectSingle(Identifier);
+		TransformComponent Initial;
+		Initial.Translation = { 1.0f, 2.0f, 3.0f };
+		PF_CHECK(Tests, Created->SetTransform(Initial));
+		Controller.Reset(&SceneValue);
+
+		size_t RestoreCount = 0;
+		const EditorSceneEditController::RestoreCallback Restore =
+			[&](std::string_view State) -> std::expected<void, std::string>
+		{
+			++RestoreCount;
+			return Controller.Restore(State, SceneValue, Workspace);
+		};
+		const auto SetTransform = [&](const TransformComponent& Value) -> std::expected<void, SceneError>
+		{
+			const auto Target = SceneValue.FindEntity(Identifier);
+			if (!Target)
+				return std::unexpected(SceneError{ SceneErrorCode::InvalidEntity, "Edit target no longer exists" });
+			return Target->SetTransform(Value);
+		};
+		const auto ReadTranslation = [&]() -> std::optional<glm::vec3>
+		{
+			const auto Target = SceneValue.FindEntity(Identifier);
+			if (!Target)
+				return std::nullopt;
+			const auto Value = Target->GetTransform();
+			return Value ? std::optional<glm::vec3>{ Value->Translation } : std::nullopt;
+		};
+
+		TransformComponent FirstEdit = Initial;
+		FirstEdit.Translation.x = 4.0f;
+		const auto First = Controller.Run(
+			&SceneValue, Workspace, false, 0, [] { return 0u; }, "Move target",
+			[&] { return SetTransform(FirstEdit); }, Restore);
+		PF_CHECK(Tests, First && !Controller.IsActive() && Controller.CanUndo() && Controller.IsDirty());
+		PF_CHECK(Tests, ReadTranslation() == std::optional<glm::vec3>{ FirstEdit.Translation });
+		PF_CHECK(Tests, Workspace.Selection().GetPrimary() == std::optional<UUID>{ Identifier });
+
+		const auto Undone = Controller.Undo(&SceneValue, Workspace, false, Restore);
+		PF_CHECK(Tests, Undone && *Undone && !Controller.IsDirty());
+		PF_CHECK(Tests, ReadTranslation() == std::optional<glm::vec3>{ Initial.Translation });
+		const auto Redone = Controller.Redo(&SceneValue, Workspace, false, Restore);
+		PF_CHECK(Tests, Redone && *Redone && Controller.IsDirty());
+		PF_CHECK(Tests, ReadTranslation() == std::optional<glm::vec3>{ FirstEdit.Translation });
+		Controller.MarkSaved(&SceneValue);
+		PF_CHECK(Tests, !Controller.IsDirty());
+
+		uint32_t ActiveItem = 41;
+		TransformComponent GroupedEdit = FirstEdit;
+		GroupedEdit.Translation.y = 8.0f;
+		const auto GroupStart = Controller.Run(
+			&SceneValue, Workspace, false, ActiveItem, [&] { return ActiveItem; }, "Adjust target",
+			[&] { return SetTransform(GroupedEdit); }, Restore);
+		PF_CHECK(Tests, GroupStart && Controller.IsActive() && !Controller.CanUndo());
+		ActiveItem = 42;
+		TransformComponent NextEdit = GroupedEdit;
+		NextEdit.Translation.z = 9.0f;
+		const auto GroupBoundary = Controller.Run(
+			&SceneValue, Workspace, false, ActiveItem, [] { return 0u; }, "Adjust target",
+			[&] { return SetTransform(NextEdit); }, Restore);
+		PF_CHECK(Tests, GroupBoundary && !Controller.IsActive() && Controller.CanUndo());
+		PF_CHECK(Tests, ReadTranslation() == std::optional<glm::vec3>{ NextEdit.Translation });
+		const auto UndoSecond = Controller.Undo(&SceneValue, Workspace, false, Restore);
+		PF_CHECK(Tests, UndoSecond && *UndoSecond && ReadTranslation() ==
+			std::optional<glm::vec3>{ GroupedEdit.Translation });
+		const auto UndoFirst = Controller.Undo(&SceneValue, Workspace, false, Restore);
+		PF_CHECK(Tests, UndoFirst && *UndoFirst && ReadTranslation() ==
+			std::optional<glm::vec3>{ FirstEdit.Translation });
+
+		Controller.Reset(&SceneValue);
+		TransformComponent FailedEdit = FirstEdit;
+		FailedEdit.Translation = { 13.0f, 14.0f, 15.0f };
+		const auto Failed = Controller.Run(
+			&SceneValue, Workspace, false, 0, [] { return 0u; }, "Failing edit",
+			[&]() -> std::expected<void, SceneError>
+			{
+				if (auto Updated = SetTransform(FailedEdit); !Updated)
+					return Updated;
+				return std::unexpected(SceneError{ SceneErrorCode::InvalidEntity, "Injected edit failure" });
+			}, Restore);
+		PF_CHECK(Tests, !Failed && !Controller.IsActive() && !Controller.IsDirty() && !Controller.CanUndo());
+		PF_CHECK(Tests, ReadTranslation() == std::optional<glm::vec3>{ FirstEdit.Translation });
+		PF_CHECK(Tests, RestoreCount >= 4);
+		const auto RuntimeEdit = Controller.Run(
+			&SceneValue, Workspace, true, 0, [] { return 0u; }, "Runtime edit",
+			[&] { return SetTransform(Initial); }, Restore);
+		PF_CHECK(Tests, !RuntimeEdit && !Controller.IsActive());
+	}
+
 	void TestEditorAssetPreviewPolicy(TestRunner& Tests)
 	{
 		using namespace PulseForgeEditor;
@@ -906,4 +1009,5 @@ void RunEditorHistoryTests(TestRunner& Tests)
 	TestEditorVisibility(Tests);
 	TestEditorHierarchyRowLayout(Tests);
 	TestSceneCommandHistoryRestoresIdentity(Tests);
+	TestEditorSceneEditController(Tests);
 }
