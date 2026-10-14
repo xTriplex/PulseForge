@@ -314,15 +314,34 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 endif()
 
 if(PULSEFORGE_BUILD_EDITOR)
-	add_executable(PulseForgeEditor
-		PulseForgeEditor/Source/Private/EditorMain.cpp
-		PulseForgeEditor/Source/Private/EditorApplication.cpp
-		PulseForgeEditor/Source/Private/EditorConsolePanel.cpp
+	add_library(PulseForgeEditorUI STATIC
 		PulseForgeEditor/Source/Private/EditorAssetPreviewService.cpp
 		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
 		PulseForgeEditor/Source/Private/EditorLayout.cpp
 		PulseForgeEditor/Source/Private/EditorStyle.cpp
 		PulseForge/Vendor/imgui/misc/freetype/imgui_freetype.cpp
+	)
+	target_include_directories(PulseForgeEditorUI PUBLIC
+		PulseForgeEditor/Source/Public
+	)
+	target_include_directories(PulseForgeEditorUI PRIVATE
+		PulseForgeEditor/Source/Private
+		PulseForge/Vendor/json/include
+		PulseForge/Vendor/imgui/misc/freetype
+	)
+	target_compile_definitions(PulseForgeEditorUI PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeEditorUI
+		PUBLIC PulseForge
+		PRIVATE PulseForgeImGui freetype shell32 ole32
+	)
+	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
+		target_compile_definitions(PulseForgeEditorUI PRIVATE PF_EDITOR_RENDERER_OPENGL)
+	endif()
+
+	add_executable(PulseForgeEditor
+		PulseForgeEditor/Source/Private/EditorMain.cpp
+		PulseForgeEditor/Source/Private/EditorApplication.cpp
+		PulseForgeEditor/Source/Private/EditorConsolePanel.cpp
 	)
 	target_include_directories(PulseForgeEditor PRIVATE
 		PulseForgeEditor/Source/Public
@@ -337,7 +356,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		target_compile_definitions(PulseForgeEditor PRIVATE PF_EDITOR_SHADER_DIRECTORY="Shaders")
 	endif()
 	target_link_libraries(PulseForgeEditor PRIVATE
-		PulseForgeEditorCore PulseForge PulseForgeImGui nfd::nfd spdlog::spdlog freetype shell32 ole32 dwmapi)
+		PulseForgeEditorCore PulseForgeEditorUI PulseForge PulseForgeImGui nfd::nfd spdlog::spdlog shell32 ole32 dwmapi)
 	add_custom_command(TARGET PulseForgeEditor POST_BUILD
 		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeEditor>/EditorAssets"
 		COMMAND "${CMAKE_COMMAND}" -E copy_directory
@@ -810,16 +829,14 @@ if(BUILD_TESTING)
 		Tests/RendererTests.cpp
 		Tests/EditorHistoryTests.cpp
 	)
-	target_sources(PulseForgeTests PRIVATE
-		PulseForgeEditor/Source/Private/EditorLayout.cpp
-	)
 	target_include_directories(PulseForgeTests PRIVATE
 		PulseForgeEditor/Source/Public
 		PulseForgeEditor/Source/Private
 		PulseForge/Vendor/json/include
 	)
 	target_compile_definitions(PulseForgeTests PRIVATE PF_PLATFORM_WINDOWS)
-	target_link_libraries(PulseForgeTests PRIVATE PulseForgeEditorCore PulseForge PulseForgeImGui shell32 ole32)
+	target_link_libraries(PulseForgeTests PRIVATE
+		PulseForgeEditorCore PulseForgeEditorUI PulseForge PulseForgeImGui)
 	add_test(NAME PulseForge.Core COMMAND PulseForgeTests)
 
 	add_executable(PulseForgeBufferUpdateTests Tests/BufferUpdateValidationTests.cpp)
@@ -843,7 +860,8 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	set_property(TARGET PulseForgeGpuValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGpuValidation>")
 endif()
 
-foreach(Target PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeTests PulseForgeBufferUpdateTests PulseForgeGpuValidation)
+foreach(Target PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI
+		PulseForgeTests PulseForgeBufferUpdateTests PulseForgeGpuValidation)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE
 			$<$<CXX_COMPILER_ID:MSVC>:/EHsc>
