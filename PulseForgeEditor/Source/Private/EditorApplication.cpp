@@ -6369,8 +6369,8 @@ namespace
 				constexpr float TabHeight = 25.0f;
 				constexpr float LeftPadding = 10.0f;
 				constexpr float LabelToCloseGap = 1.0f;
-				constexpr float CloseRegionWidth = 24.0f;
-				constexpr float RightPadding = 4.0f;
+				constexpr float CloseRegionWidth = 26.0f;
+				constexpr float RightPadding = 2.0f;
 				const ImVec2 LabelSize = ImGui::CalcTextSize(Label.c_str());
 				const float TabWidth = LeftPadding + LabelSize.x +
 					(HasCloseButton ? LabelToCloseGap + CloseRegionWidth + RightPadding : LeftPadding);
@@ -6489,7 +6489,7 @@ namespace
 				{
 					const ImVec2 CloseCenter(CloseRegionMinimumX + CloseRegionWidth * 0.5f,
 						TabMinimum.y + TabHeight * 0.5f);
-					constexpr float CloseHalfExtent = 7.0f;
+					constexpr float CloseHalfExtent = 8.5f;
 					const ImU32 CloseColor = ImGui::GetColorU32(
 						CloseHovered ? ImGuiCol_Text : ImGuiCol_TextDisabled);
 					DrawList->AddLine(
