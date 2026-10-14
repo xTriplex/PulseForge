@@ -187,6 +187,16 @@ if(PULSEFORGE_BUILD_EDITOR)
 	)
 endif()
 
+add_library(PulseForgeCore STATIC
+	PulseForge/Source/Private/Core/Log.cpp
+	PulseForge/Source/Private/Core/Input.cpp
+	PulseForge/Source/Private/Core/Layer.cpp
+	PulseForge/Source/Private/Core/LayerStack.cpp
+	PulseForge/Source/Private/Scene/UUID.cpp
+)
+target_include_directories(PulseForgeCore PUBLIC PulseForge/Source/Public)
+target_compile_definitions(PulseForgeCore PRIVATE PF_PLATFORM_WINDOWS)
+target_link_libraries(PulseForgeCore PRIVATE spdlog::spdlog)
 add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/PulseForgePCH.cpp
 	PulseForge/Source/Private/Audio/AudioEngine.cpp
@@ -212,10 +222,6 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/Application.cpp
 	PulseForge/Source/Private/Core/Core.cpp
 	PulseForge/Source/Private/Core/EntryPoint.cpp
-	PulseForge/Source/Private/Core/Input.cpp
-	PulseForge/Source/Private/Core/Layer.cpp
-	PulseForge/Source/Private/Core/LayerStack.cpp
-	PulseForge/Source/Private/Core/Log.cpp
 	PulseForge/Source/Private/Renderer/OpenGLRenderer.cpp
 	PulseForge/Source/Private/Renderer/Buffer.cpp
 	PulseForge/Source/Private/Renderer/Mesh.cpp
@@ -247,7 +253,6 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Scene/SceneRenderSnapshot.cpp
 	PulseForge/Source/Private/Scene/SceneSerializer.cpp
 	PulseForge/Source/Private/Scene/TransformComponent.cpp
-	PulseForge/Source/Private/Scene/UUID.cpp
 	PulseForge/Source/Private/Utils/stb_image.cpp
 	PulseForge/Source/Private/Window/Window.cpp
 	PulseForge/Source/Private/Window/Platform/Windows/WindowsWindow.cpp
@@ -263,7 +268,6 @@ target_include_directories(PulseForge
 		PulseForge/Vendor/Glfw/include
 		PulseForge/Vendor/Glad/include
 		PulseForge/Vendor/miniaudio
-		PulseForge/Vendor/spdlog/include
 		PulseForge/Vendor/stb
 )
 target_compile_definitions(PulseForge PRIVATE
@@ -272,11 +276,11 @@ target_compile_definitions(PulseForge PRIVATE
 	GLFW_INCLUDE_NONE
 	MA_NO_WIN32_LEAN_AND_MEAN
 )
+target_link_libraries(PulseForge PUBLIC PulseForgeCore)
 target_link_libraries(PulseForge PRIVATE
 	PulseForgeLua
 	glfw
 	PulseForgeGlad
-	spdlog::spdlog
 	opengl32
 	nvrhi
 	nvrhi_vk
@@ -864,7 +868,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	set_property(TARGET PulseForgeGpuValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGpuValidation>")
 endif()
 
-foreach(Target PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI
+foreach(Target PulseForgeCore PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI
 		PulseForgeTests PulseForgeBufferUpdateTests PulseForgeGpuValidation)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE

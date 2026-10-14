@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Core/LayerStack.h"
 
 #include <cstdio>
