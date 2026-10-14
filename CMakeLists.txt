@@ -1025,7 +1025,6 @@ if(BUILD_TESTING)
 		Tests/AssetsTests.cpp
 		Tests/AssetRegistryTests.cpp
 		Tests/AssetOperationsTests.cpp
-		Tests/ImportsTests.cpp
 		Tests/RendererTests.cpp
 	)
 	target_include_directories(PulseForgeTests PRIVATE
@@ -1036,6 +1035,30 @@ if(BUILD_TESTING)
 	target_link_libraries(PulseForgeTests PRIVATE ${PULSEFORGE_ENGINE_TEST_LIBRARIES})
 	add_dependencies(PulseForgeTests PulseForgePublicHeaderChecks)
 	add_test(NAME PulseForge.Engine COMMAND PulseForgeTests)
+
+	add_executable(PulseForgeAssetImportTests
+		Tests/PulseForgeAssetImportTests.cpp
+		Tests/AssetImportTests.cpp
+	)
+	target_include_directories(PulseForgeAssetImportTests PRIVATE Tests PulseForge/Vendor/json/include)
+	target_compile_definitions(PulseForgeAssetImportTests PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeAssetImportTests PRIVATE PulseForgeAssetServices PulseForgeRenderer)
+	add_dependencies(PulseForgeAssetImportTests PulseForgePublicHeaderChecks)
+	add_test(NAME PulseForge.AssetImports COMMAND PulseForgeAssetImportTests)
+
+	add_executable(PulseForgeAudioRuntimeTests
+		Tests/PulseForgeAudioRuntimeTests.cpp
+		Tests/AudioRuntimeTests.cpp
+	)
+	target_include_directories(PulseForgeAudioRuntimeTests PRIVATE Tests PulseForge/Vendor/json/include)
+	target_compile_definitions(PulseForgeAudioRuntimeTests PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeAudioRuntimeTests PRIVATE
+		PulseForgeAssetServices
+		PulseForgeAudioScene
+		PulseForgeScripting
+	)
+	add_dependencies(PulseForgeAudioRuntimeTests PulseForgePublicHeaderChecks)
+	add_test(NAME PulseForge.AudioRuntime COMMAND PulseForgeAudioRuntimeTests)
 
 	add_executable(PulseForgeEditorTests
 		Tests/PulseForgeEditorTests.cpp

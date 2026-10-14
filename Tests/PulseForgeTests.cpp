@@ -9,6 +9,5 @@ int main()
 	RunAssetsTests(Tests);
 	RunSceneAssetTests(Tests);
 	RunRendererTests(Tests);
-	RunImportsTests(Tests);
 	return Tests.Finish();
 }
