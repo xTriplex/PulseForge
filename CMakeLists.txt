@@ -265,8 +265,12 @@ target_include_directories(PulseForgeAudio
 	PRIVATE PulseForge/Vendor/miniaudio
 )
 target_compile_definitions(PulseForgeAudio PRIVATE PF_PLATFORM_WINDOWS MA_NO_WIN32_LEAN_AND_MEAN)
+add_library(PulseForgeAudioAssets STATIC PulseForge/Source/Private/Assets/AudioAssetCache.cpp)
+target_include_directories(PulseForgeAudioAssets PUBLIC PulseForge/Source/Public)
+target_compile_definitions(PulseForgeAudioAssets PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(PulseForgeAudioAssets PUBLIC PulseForgeAssetCatalog PulseForgeAudio)
+target_precompile_headers(PulseForgeAudioAssets PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
 add_library(PulseForgeAssetServices STATIC
-	PulseForge/Source/Private/Assets/AudioAssetCache.cpp
 	PulseForge/Source/Private/Assets/GltfMeshImporter.cpp
 	PulseForge/Source/Private/Assets/ImageAssetImporter.cpp
 	PulseForge/Source/Private/Assets/MaterialAsset.cpp
@@ -284,7 +288,7 @@ target_include_directories(PulseForgeAssetServices
 )
 target_compile_definitions(PulseForgeAssetServices PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(PulseForgeAssetServices
-	PUBLIC PulseForgeAssetCatalog PulseForgeAudio
+	PUBLIC PulseForgeAssetCatalog
 	PRIVATE PulseForgeSceneSerialization
 )
 target_precompile_headers(PulseForgeAssetServices PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
@@ -293,7 +297,7 @@ target_include_directories(PulseForgeAudioScene PUBLIC PulseForge/Source/Public)
 target_compile_definitions(PulseForgeAudioScene PRIVATE PF_PLATFORM_WINDOWS)
 target_link_libraries(PulseForgeAudioScene
 	PUBLIC PulseForgeAudio
-	PRIVATE PulseForgeAssetServices PulseForgeScene
+	PRIVATE PulseForgeAudioAssets PulseForgeScene
 )
 add_library(PulseForgePhysics STATIC PulseForge/Source/Private/Physics/PhysicsSceneRuntime.cpp)
 target_include_directories(PulseForgePhysics PUBLIC PulseForge/Source/Public)
@@ -314,7 +318,7 @@ target_include_directories(PulseForgeRuntime PUBLIC PulseForge/Source/Public)
 target_compile_definitions(PulseForgeRuntime PRIVATE PF_PLATFORM_WINDOWS)
 target_link_libraries(PulseForgeRuntime
 	PUBLIC PulseForgeAudio PulseForgePhysics PulseForgeScripting
-	PRIVATE PulseForgeAssetServices PulseForgeAudioScene PulseForgeScene
+	PRIVATE PulseForgeAssetServices PulseForgeAudioAssets PulseForgeAudioScene PulseForgeScene
 )
 add_library(PulseForgeRenderer STATIC
 	PulseForge/Source/Private/Renderer/OpenGLRenderer.cpp
@@ -418,7 +422,7 @@ include(CTest)
 if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 	set(PULSEFORGE_ENGINE_TEST_LIBRARIES
 		PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath
-		PulseForgeAssetCatalog PulseForgeAudio
+		PulseForgeAssetCatalog PulseForgeAudio PulseForgeAudioAssets
 		PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeScripting PulseForgeRuntime
 		PulseForgeRenderer PulseForgeApplication PulseForgeSceneRenderer
 	)
@@ -1074,6 +1078,7 @@ if(BUILD_TESTING)
 	target_compile_definitions(PulseForgeAudioRuntimeTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeAudioRuntimeTests PRIVATE
 		PulseForgeAssetServices
+		PulseForgeAudioAssets
 		PulseForgeAudioScene
 		PulseForgeScripting
 	)
@@ -1127,7 +1132,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 endif()
 
 foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath
-		PulseForgeAssetCatalog PulseForgeAudio PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics
+		PulseForgeAssetCatalog PulseForgeAudio PulseForgeAudioAssets PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics
 		PulseForgeScripting PulseForgeRuntime PulseForgeRenderer
 		PulseForgeApplication PulseForgeSceneRenderer
 		PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI PulseForgeRendererTests PulseForgeRenderMathTests

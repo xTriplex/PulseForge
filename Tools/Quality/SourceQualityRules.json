@@ -8,6 +8,7 @@
   "default_cpp_line_limit": 1700,
   "default_header_line_limit": 800,
   "source_target_ownership": {
+    "PulseForge/Source/Private/Assets/AudioAssetCache.cpp": "PulseForgeAudioAssets",
     "PulseForgeEditor/Source/Private/EditorAssetDestinationDialog.cpp": "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorConsolePanel.cpp": "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorViewportToolbar.cpp": "PulseForgeEditorUI",
