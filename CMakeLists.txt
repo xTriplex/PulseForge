@@ -855,10 +855,20 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 endif()
 
 if(BUILD_TESTING)
+	add_executable(PulseForgeRenderMathTests
+		Tests/PulseForgeRenderMathTests.cpp
+		Tests/RenderMathTests.cpp
+	)
+	target_include_directories(PulseForgeRenderMathTests PRIVATE Tests)
+	target_compile_definitions(PulseForgeRenderMathTests PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeRenderMathTests PRIVATE PulseForgeRenderMath)
+	add_test(NAME PulseForge.RenderMath COMMAND PulseForgeRenderMathTests)
+
 	add_executable(PulseForgeTests
 		Tests/PulseForgeTests.cpp
 		Tests/CoreTests.cpp
 		Tests/SceneTests.cpp
+		Tests/SceneAssetTests.cpp
 		Tests/AssetsTests.cpp
 		Tests/ImportsTests.cpp
 		Tests/RendererTests.cpp
@@ -874,6 +884,8 @@ if(BUILD_TESTING)
 	add_executable(PulseForgeEditorTests
 		Tests/PulseForgeEditorTests.cpp
 		Tests/EditorTests.cpp
+		Tests/EditorViewportTests.cpp
+		Tests/EditorStateTests.cpp
 		Tests/DocumentsTests.cpp
 		Tests/ProjectRuntimeTests.cpp
 		Tests/EditorHistoryTests.cpp

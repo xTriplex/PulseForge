@@ -36,10 +36,14 @@ private:
 
 void RunCoreTests(TestRunner& Tests);
 void RunSceneTests(TestRunner& Tests);
+void RunSceneAssetTests(TestRunner& Tests);
 void RunEditorTests(TestRunner& Tests);
+void RunEditorViewportTests(TestRunner& Tests);
+void RunEditorStateTests(TestRunner& Tests);
 void RunAssetsTests(TestRunner& Tests);
 void RunDocumentsTests(TestRunner& Tests);
 void RunProjectRuntimeTests(TestRunner& Tests);
 void RunImportsTests(TestRunner& Tests);
 void RunRendererTests(TestRunner& Tests);
+void RunRenderMathTests(TestRunner& Tests);
 void RunEditorHistoryTests(TestRunner& Tests);
