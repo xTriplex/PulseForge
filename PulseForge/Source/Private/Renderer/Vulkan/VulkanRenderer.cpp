@@ -1157,21 +1157,28 @@ namespace PulseForge
 
 				if (!InitialData.empty())
 				{
-					nvrhi::CommandListHandle UploadCommandList = m_ActiveNvrhiDevice->createCommandList();
-					if (!UploadCommandList)
+					if (m_Recording.Frame)
 					{
-						const std::string Message = "NVRHI failed to create a buffer upload command list";
-						PF_CORE_ERROR("{0}", Message);
-						return std::unexpected(BufferCreateError{
-							BufferCreateErrorCode::BackendFailure,
-							Message
-						});
+						m_Recording.Frame->CommandList->writeBuffer(NativeBuffer, InitialData.data(), InitialData.size());
 					}
+					else
+					{
+						nvrhi::CommandListHandle UploadCommandList = m_ActiveNvrhiDevice->createCommandList();
+						if (!UploadCommandList)
+						{
+							const std::string Message = "NVRHI failed to create a buffer upload command list";
+							PF_CORE_ERROR("{0}", Message);
+							return std::unexpected(BufferCreateError{
+								BufferCreateErrorCode::BackendFailure,
+								Message
+							});
+						}
 
-					UploadCommandList->open();
-					UploadCommandList->writeBuffer(NativeBuffer, InitialData.data(), InitialData.size());
-					UploadCommandList->close();
-					m_ActiveNvrhiDevice->executeCommandList(UploadCommandList, nvrhi::CommandQueue::Graphics);
+						UploadCommandList->open();
+						UploadCommandList->writeBuffer(NativeBuffer, InitialData.data(), InitialData.size());
+						UploadCommandList->close();
+						m_ActiveNvrhiDevice->executeCommandList(UploadCommandList, nvrhi::CommandQueue::Graphics);
+					}
 				}
 
 				BufferHandle EngineBuffer = std::make_unique<VulkanBuffer>(Description, std::move(NativeBuffer));
@@ -1394,38 +1401,53 @@ namespace PulseForge
 				if (InitialData.empty())
 					return TextureHandle(std::make_unique<VulkanTexture>(Description, std::move(NativeTexture)));
 
-				nvrhi::CommandListHandle UploadCommandList = m_ActiveNvrhiDevice->createCommandList();
-				if (!UploadCommandList)
+				const auto RecordTextureUpload = [&](auto& CommandList)
 				{
-					const std::string Message = "NVRHI failed to create a texture upload command list";
-					PF_CORE_ERROR("{0}", Message);
-					return std::unexpected(TextureError{ TextureErrorCode::BackendFailure, Message });
-				}
-
-				UploadCommandList->open();
-				UploadCommandList->setTextureState(NativeTexture, nvrhi::TextureSubresourceSet(), nvrhi::ResourceStates::CopyDest);
-				UploadCommandList->commitBarriers();
-				for (const TextureSubresourceData& Subresource : InitialData)
-				{
-					const size_t BytesPerPixel = *GetTextureFormatBytesPerPixel(Description.Format);
-					const size_t RowPitch = Subresource.RowPitch == 0
-						? static_cast<size_t>(std::max(1u, Description.Width >> Subresource.MipLevel)) * BytesPerPixel
-						: Subresource.RowPitch;
-					UploadCommandList->writeTexture(
+					CommandList.setTextureState(
 						NativeTexture,
-						Subresource.ArraySlice,
-						Subresource.MipLevel,
-						Subresource.Data.data(),
-						RowPitch,
-						0);
+						nvrhi::TextureSubresourceSet(),
+						nvrhi::ResourceStates::CopyDest);
+					CommandList.commitBarriers();
+					for (const TextureSubresourceData& Subresource : InitialData)
+					{
+						const size_t BytesPerPixel = *GetTextureFormatBytesPerPixel(Description.Format);
+						const size_t RowPitch = Subresource.RowPitch == 0
+							? static_cast<size_t>(std::max(1u, Description.Width >> Subresource.MipLevel)) * BytesPerPixel
+							: Subresource.RowPitch;
+						CommandList.writeTexture(
+							NativeTexture,
+							Subresource.ArraySlice,
+							Subresource.MipLevel,
+							Subresource.Data.data(),
+							RowPitch,
+							0);
+					}
+					CommandList.setTextureState(
+						NativeTexture,
+						nvrhi::TextureSubresourceSet(),
+						IsShaderResource ? nvrhi::ResourceStates::ShaderResource : nvrhi::ResourceStates::RenderTarget);
+					CommandList.commitBarriers();
+				};
+
+				if (m_Recording.Frame)
+				{
+					RecordTextureUpload(*m_Recording.Frame->CommandList);
 				}
-				UploadCommandList->setTextureState(
-					NativeTexture,
-					nvrhi::TextureSubresourceSet(),
-					IsShaderResource ? nvrhi::ResourceStates::ShaderResource : nvrhi::ResourceStates::RenderTarget);
-				UploadCommandList->commitBarriers();
-				UploadCommandList->close();
-				m_ActiveNvrhiDevice->executeCommandList(UploadCommandList, nvrhi::CommandQueue::Graphics);
+				else
+				{
+					nvrhi::CommandListHandle UploadCommandList = m_ActiveNvrhiDevice->createCommandList();
+					if (!UploadCommandList)
+					{
+						const std::string Message = "NVRHI failed to create a texture upload command list";
+						PF_CORE_ERROR("{0}", Message);
+						return std::unexpected(TextureError{ TextureErrorCode::BackendFailure, Message });
+					}
+
+					UploadCommandList->open();
+					RecordTextureUpload(*UploadCommandList);
+					UploadCommandList->close();
+					m_ActiveNvrhiDevice->executeCommandList(UploadCommandList, nvrhi::CommandQueue::Graphics);
+				}
 
 				PF_CORE_INFO("Uploaded Vulkan/NVRHI {0}x{1} texture '{2}'",
 					Description.Width,
