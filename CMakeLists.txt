@@ -229,23 +229,33 @@ target_include_directories(PulseForgeAssetCatalog
 )
 target_compile_definitions(PulseForgeAssetCatalog PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_link_libraries(PulseForgeAssetCatalog PUBLIC PulseForgeCore PulseForgeScene)
+add_library(PulseForgeAssetServices STATIC
+	PulseForge/Source/Private/Assets/AudioAssetCache.cpp
+	PulseForge/Source/Private/Assets/GltfMeshImporter.cpp
+	PulseForge/Source/Private/Assets/ImageAssetImporter.cpp
+	PulseForge/Source/Private/Assets/MaterialAsset.cpp
+	PulseForge/Source/Private/Assets/MaterialAssetCache.cpp
+	PulseForge/Source/Private/Assets/MaterialAssetService.cpp
+	PulseForge/Source/Private/Assets/PrefabAssetService.cpp
+	PulseForge/Source/Private/Assets/PrefabSerializer.cpp
+	PulseForge/Source/Private/Assets/Project.cpp
+	PulseForge/Source/Private/Assets/SceneAssetService.cpp
+	PulseForge/Source/Private/Utils/stb_image.cpp
+)
+target_include_directories(PulseForgeAssetServices
+	PUBLIC PulseForge/Source/Public
+	PRIVATE PulseForge/Vendor/json/include PulseForge/Vendor/stb
+)
+target_compile_definitions(PulseForgeAssetServices PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(PulseForgeAssetServices PUBLIC PulseForgeAssetCatalog)
+target_precompile_headers(PulseForgeAssetServices PRIVATE PulseForge/Source/Public/Core/PulseForgePCH.h)
 add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/PulseForgePCH.cpp
 	PulseForge/Source/Private/Audio/AudioEngine.cpp
 	PulseForge/Source/Private/Audio/AudioSceneRuntime.cpp
 	PulseForge/Source/Private/Audio/MiniAudio/MiniAudio.cpp
-	PulseForge/Source/Private/Assets/AudioAssetCache.cpp
-	PulseForge/Source/Private/Assets/MaterialAsset.cpp
-	PulseForge/Source/Private/Assets/MaterialAssetCache.cpp
-	PulseForge/Source/Private/Assets/MaterialAssetService.cpp
-	PulseForge/Source/Private/Assets/Project.cpp
-	PulseForge/Source/Private/Assets/GltfMeshImporter.cpp
-	PulseForge/Source/Private/Assets/ImageAssetImporter.cpp
 	PulseForge/Source/Private/Assets/MeshAssetCache.cpp
-	PulseForge/Source/Private/Assets/PrefabAssetService.cpp
-	PulseForge/Source/Private/Assets/SceneAssetService.cpp
 	PulseForge/Source/Private/Assets/TextureAssetCache.cpp
-	PulseForge/Source/Private/Assets/PrefabSerializer.cpp
 	PulseForge/Source/Private/Core/Application.cpp
 	PulseForge/Source/Private/Core/Core.cpp
 	PulseForge/Source/Private/Core/EntryPoint.cpp
@@ -269,7 +279,6 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Runtime/SceneRuntime.cpp
 	PulseForge/Source/Private/Scripting/ScriptRuntime.cpp
 	PulseForge/Source/Private/Physics/PhysicsSceneRuntime.cpp
-	PulseForge/Source/Private/Utils/stb_image.cpp
 	PulseForge/Source/Private/Window/Window.cpp
 	PulseForge/Source/Private/Window/Platform/Windows/WindowsWindow.cpp
 )
@@ -292,7 +301,7 @@ target_compile_definitions(PulseForge PRIVATE
 	GLFW_INCLUDE_NONE
 	MA_NO_WIN32_LEAN_AND_MEAN
 )
-target_link_libraries(PulseForge PUBLIC PulseForgeAssetCatalog)
+target_link_libraries(PulseForge PUBLIC PulseForgeAssetServices)
 target_link_libraries(PulseForge PRIVATE
 	PulseForgeLua
 	glfw
@@ -896,7 +905,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	set_property(TARGET PulseForgeGpuValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGpuValidation>")
 endif()
 
-foreach(Target PulseForgeCore PulseForgeScene PulseForgeAssetCatalog PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI
+foreach(Target PulseForgeCore PulseForgeScene PulseForgeAssetCatalog PulseForgeAssetServices PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI
 		PulseForgeTests PulseForgeEditorTests PulseForgeBufferUpdateTests PulseForgeGpuValidation)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE
