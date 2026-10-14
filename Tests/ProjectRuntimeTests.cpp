@@ -1,4 +1,4 @@
-#include "TestSupport.h"
+#include "TestEditorSupport.h"
 
 namespace
 {

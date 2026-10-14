@@ -5,7 +5,7 @@
 #include "Editor/EditorSceneWorkspaceState.h"
 #include "EditorMaterialDraftStore.h"
 #include "EditorViewportCamera.h"
-#include "TestSupport.h"
+#include "TestEditorSupport.h"
 
 namespace
 {

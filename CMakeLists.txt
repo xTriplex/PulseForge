@@ -837,23 +837,35 @@ if(BUILD_TESTING)
 		Tests/PulseForgeTests.cpp
 		Tests/CoreTests.cpp
 		Tests/SceneTests.cpp
-		Tests/EditorTests.cpp
 		Tests/AssetsTests.cpp
-		Tests/DocumentsTests.cpp
-		Tests/ProjectRuntimeTests.cpp
 		Tests/ImportsTests.cpp
 		Tests/RendererTests.cpp
-		Tests/EditorHistoryTests.cpp
 	)
 	target_include_directories(PulseForgeTests PRIVATE
+		Tests
+		PulseForge/Vendor/json/include
+	)
+	target_compile_definitions(PulseForgeTests PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeTests PRIVATE PulseForge)
+	add_test(NAME PulseForge.Engine COMMAND PulseForgeTests)
+
+	add_executable(PulseForgeEditorTests
+		Tests/PulseForgeEditorTests.cpp
+		Tests/EditorTests.cpp
+		Tests/DocumentsTests.cpp
+		Tests/ProjectRuntimeTests.cpp
+		Tests/EditorHistoryTests.cpp
+	)
+	target_include_directories(PulseForgeEditorTests PRIVATE
+		Tests
 		PulseForgeEditor/Source/Public
 		PulseForgeEditor/Source/Private
 		PulseForge/Vendor/json/include
 	)
-	target_compile_definitions(PulseForgeTests PRIVATE PF_PLATFORM_WINDOWS)
-	target_link_libraries(PulseForgeTests PRIVATE
+	target_compile_definitions(PulseForgeEditorTests PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeEditorTests PRIVATE
 		PulseForgeEditorCore PulseForgeEditorUI PulseForge PulseForgeImGui)
-	add_test(NAME PulseForge.Core COMMAND PulseForgeTests)
+	add_test(NAME PulseForge.Editor COMMAND PulseForgeEditorTests)
 
 	add_executable(PulseForgeBufferUpdateTests Tests/BufferUpdateValidationTests.cpp)
 	target_compile_definitions(PulseForgeBufferUpdateTests PRIVATE PF_PLATFORM_WINDOWS)
@@ -877,7 +889,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 endif()
 
 foreach(Target PulseForgeCore PulseForgeScene PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI
-		PulseForgeTests PulseForgeBufferUpdateTests PulseForgeGpuValidation)
+		PulseForgeTests PulseForgeEditorTests PulseForgeBufferUpdateTests PulseForgeGpuValidation)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE
 			$<$<CXX_COMPILER_ID:MSVC>:/EHsc>

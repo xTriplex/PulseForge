@@ -1,4 +1,4 @@
-#include "TestSupport.h"
+#include "TestEngineSupport.h"
 
 int main()
 {
@@ -6,12 +6,8 @@ int main()
 	TestRunner Tests;
 	RunCoreTests(Tests);
 	RunSceneTests(Tests);
-	RunEditorHistoryTests(Tests);
-	RunEditorTests(Tests);
 	RunAssetsTests(Tests);
 	RunRendererTests(Tests);
-	RunDocumentsTests(Tests);
-	RunProjectRuntimeTests(Tests);
 	RunImportsTests(Tests);
 	return Tests.Finish();
 }
