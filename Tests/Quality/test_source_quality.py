@@ -48,6 +48,37 @@ class SourceQualityRulesTests(unittest.TestCase):
         self.assertTrue(source_quality.check_includes(
             "Public.h", '#include "PulseForge/Source/Private/Renderer.h"', forbidden))
 
+    def test_first_party_target_graph_rejects_cycles(self):
+        cmake = """
+add_library(PulseForgeCore STATIC Core.cpp)
+add_library(PulseForgeScene STATIC Scene.cpp)
+target_link_libraries(PulseForgeCore PUBLIC PulseForgeScene)
+target_link_libraries(PulseForgeScene PUBLIC PulseForgeCore)
+"""
+        self.assertTrue(source_quality.check_target_graph(cmake))
+
+    def test_engine_target_cannot_depend_on_editor(self):
+        cmake = """
+add_library(PulseForgeCore STATIC Core.cpp)
+add_library(PulseForgeEditorUI STATIC UI.cpp)
+target_link_libraries(PulseForgeCore PRIVATE PulseForgeEditorUI)
+"""
+        self.assertTrue(source_quality.check_target_graph(cmake))
+
+    def test_first_party_implementation_must_have_one_owner(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "PulseForge" / "Source" / "Private" / "Core.cpp"
+            source.parent.mkdir(parents=True)
+            source.write_text("", encoding="utf-8")
+            self.assertEqual(source_quality.check_source_ownership(
+                root, "add_library(PulseForgeCore STATIC PulseForge/Source/Private/Core.cpp)"), [])
+            self.assertTrue(source_quality.check_source_ownership(
+                root, "add_library(PulseForgeCore STATIC PulseForge/Source/Private/Core.cpp)\n"
+                "add_library(PulseForgeTests STATIC PulseForge/Source/Private/Core.cpp)"))
+
 
 if __name__ == "__main__":
     unittest.main()

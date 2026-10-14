@@ -10,7 +10,9 @@ from pathlib import Path
 
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".inl"}
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]([^">]+)', re.MULTILINE)
-TARGET_CALL_RE = re.compile(r"\b(add_library|target_link_libraries)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\b(.*?)\)", re.DOTALL)
+TARGET_CALL_RE = re.compile(
+    r"\b(add_library|add_executable|target_link_libraries)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\b(.*?)\)",
+    re.DOTALL)
 VISIBILITY = {"PUBLIC", "PRIVATE", "INTERFACE", "debug", "optimized", "general"}
 
 
@@ -40,6 +42,85 @@ def parse_target_call(cmake: str, call: str, target: str) -> str | None:
         if match.group(1) == call and match.group(2) == target:
             return match.group(3)
     return None
+
+
+def parse_first_party_targets(cmake: str) -> set[str]:
+    return {
+        match.group(2) for match in TARGET_CALL_RE.finditer(cmake)
+        if match.group(1) in {"add_library", "add_executable"} and match.group(2).startswith("PulseForge")
+    }
+
+
+def check_target_graph(cmake: str) -> list[str]:
+    targets = parse_first_party_targets(cmake)
+    graph = {target: set() for target in targets}
+    for match in TARGET_CALL_RE.finditer(cmake):
+        if match.group(1) != "target_link_libraries" or match.group(2) not in graph:
+            continue
+        linked_names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", match.group(3)))
+        graph[match.group(2)].update(linked_names & targets)
+
+    issues = []
+    complete = set()
+    active = []
+
+    def visit(target: str) -> None:
+        if target in complete:
+            return
+        if target in active:
+            cycle_start = active.index(target)
+            cycle = active[cycle_start:] + [target]
+            issues.append("CMake PulseForge target dependency cycle: " + " -> ".join(cycle))
+            return
+        active.append(target)
+        for dependency in sorted(graph[target]):
+            visit(dependency)
+        active.pop()
+        complete.add(target)
+
+    for target in sorted(graph):
+        visit(target)
+
+    engine_targets = {target for target in targets if target.startswith("PulseForge") and
+        not target.startswith("PulseForgeEditor") and not target.startswith("PulseForgeGame") and
+        not target.startswith("PulseForgeTests") and not target.startswith("PulseForgeRendererTests") and
+        not target.startswith("PulseForgeRenderMathTests") and not target.startswith("PulseForgeBufferUpdateTests") and
+        not target.startswith("PulseForgeGpuValidation")}
+    for target in sorted(engine_targets):
+        forbidden = sorted(dependency for dependency in graph[target]
+            if dependency.startswith("PulseForgeEditor") or dependency.startswith("PulseForgeGame"))
+        if forbidden:
+            issues.append(f"Engine target {target} depends on editor/client targets: {', '.join(forbidden)}")
+    return issues
+
+
+def check_source_ownership(root: Path, cmake: str) -> list[str]:
+    owners: dict[str, list[str]] = {}
+    implementation_pattern = re.compile(
+        r"\b((?:PulseForge|PulseForgeEditor|PulseForgeGame)/Source/Private/[A-Za-z0-9_./-]+\.(?:c|cc|cpp|cxx))\b")
+    for match in TARGET_CALL_RE.finditer(cmake):
+        if match.group(1) not in {"add_library", "add_executable"}:
+            continue
+        target = match.group(2)
+        for source in implementation_pattern.findall(match.group(3)):
+            owners.setdefault(normalize(source), []).append(target)
+
+    issues = []
+    for source, source_owners in sorted(owners.items()):
+        if len(source_owners) != 1:
+            issues.append(f"First-party implementation {source} has multiple CMake owners: {', '.join(source_owners)}")
+
+    roots = ("PulseForge/Source/Private", "PulseForgeEditor/Source/Private", "PulseForgeGame/Source/Private")
+    for source_root in roots:
+        directory = root / source_root
+        if not directory.exists():
+            continue
+        for path in directory.rglob("*"):
+            if path.is_file() and path.suffix.lower() in {".c", ".cc", ".cpp", ".cxx"}:
+                relative = normalize(path.relative_to(root))
+                if relative not in owners:
+                    issues.append(f"First-party implementation {relative} has no explicit CMake owner")
+    return issues
 
 
 def parse_target_dependencies(cmake: str, target: str) -> set[str] | None:
@@ -141,6 +222,8 @@ def run(root: Path, rules: dict, include_git_checks: bool = True) -> list[str]:
 
     cmake_path = root / "CMakeLists.txt"
     cmake = cmake_path.read_text(encoding="utf-8")
+    issues.extend(check_target_graph(cmake))
+    issues.extend(check_source_ownership(root, cmake))
     for key in ("editor_core_target", "editor_ui_target"):
         target = rules[key]
         issues.extend(check_dependencies(cmake, target, rules[key.replace("target", "allowed_dependencies")]))
