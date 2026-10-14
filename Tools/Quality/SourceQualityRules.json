@@ -1,0 +1,72 @@
+{
+  "source_roots": [
+    "PulseForge/Source",
+    "PulseForgeEditor/Source",
+    "PulseForgeGame/Source",
+    "Tests"
+  ],
+  "default_cpp_line_limit": 1700,
+  "default_header_line_limit": 800,
+  "size_exceptions": {
+    "PulseForgeEditor/Source/Private/EditorApplication.cpp": {
+      "max_lines": 12164,
+      "reason": "Legacy editor coordinator being reduced through focused state-owner extractions."
+    },
+    "PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp": {
+      "max_lines": 3813,
+      "reason": "Legacy backend implementation with presentation ownership still being decomposed."
+    },
+    "Tests/GpuRendererValidation.cpp": {
+      "max_lines": 3707,
+      "reason": "Legacy GPU validation executable pending suite decomposition."
+    },
+    "PulseForge/Source/Private/Renderer/SceneRenderer.cpp": {
+      "max_lines": 2684,
+      "reason": "Legacy scene rendering implementation pending responsibility extraction."
+    }
+  },
+  "editor_core_target": "PulseForgeEditorCore",
+  "editor_core_allowed_dependencies": [
+    "PulseForgeAssetServices"
+  ],
+  "editor_ui_target": "PulseForgeEditorUI",
+  "editor_ui_allowed_dependencies": [
+    "PulseForgeRenderer",
+    "PulseForgeApplication",
+    "PulseForgeAssetServices",
+    "PulseForgeEditorCore",
+    "PulseForgeImGui",
+    "freetype",
+    "shell32",
+    "ole32"
+  ],
+  "editor_core_forbidden_includes": [
+    "Core/PulseForgePCH.h",
+    "Core/Application.h",
+    "Renderer/Vulkan/",
+    "imgui.h",
+    "backends/",
+    "nvrhi/",
+    "vulkan/",
+    "GLFW/",
+    "glad/"
+  ],
+  "public_header_roots": {
+    "PulseForge/Source/Public": [
+      "PulseForge/Source/Private/",
+      "PulseForgeEditor/Source/",
+      "PulseForgeGame/Source/Private/",
+      "Core/PulseForgePCH.h"
+    ],
+    "PulseForgeEditor/Source/Public": [
+      "PulseForgeEditor/Source/Private/",
+      "PulseForge/Source/Private/",
+      "Core/PulseForgePCH.h"
+    ],
+    "PulseForgeGame/Source/Public": [
+      "PulseForgeGame/Source/Private/",
+      "PulseForge/Source/Private/",
+      "Core/PulseForgePCH.h"
+    ]
+  }
+}

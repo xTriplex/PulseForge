@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Editor/EditorDocumentManager.h"
 #include "Editor/EditorNativeWindowBoundsPolicy.h"
 

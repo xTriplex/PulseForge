@@ -6,6 +6,7 @@ set(PULSEFORGE_SAMPLE_RENDERER "Vulkan" CACHE STRING "Renderer used by PulseForg
 set_property(CACHE PULSEFORGE_SAMPLE_RENDERER PROPERTY STRINGS Vulkan OpenGL)
 option(PULSEFORGE_BUILD_EDITOR "Build the experimental PulseForge editor shell" ON)
 option(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS "Build opt-in Vulkan GPU validation smoke tests" OFF)
+option(PULSEFORGE_ENABLE_MSVC_ANALYSIS "Enable MSVC static analysis for PulseForgeEditorCore" OFF)
 set(PULSEFORGE_EDITOR_RENDERER "Vulkan" CACHE STRING "Renderer used by PulseForgeEditor (Vulkan or OpenGL)")
 set_property(CACHE PULSEFORGE_EDITOR_RENDERER PROPERTY STRINGS Vulkan OpenGL)
 
@@ -422,6 +423,12 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 	)
 	target_compile_definitions(PulseForgeEditorCore PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorCore PUBLIC PulseForgeAssetServices)
+	if(PULSEFORGE_ENABLE_MSVC_ANALYSIS)
+		if(NOT MSVC)
+			message(FATAL_ERROR "PULSEFORGE_ENABLE_MSVC_ANALYSIS requires MSVC")
+		endif()
+		target_compile_options(PulseForgeEditorCore PRIVATE /analyze)
+	endif()
 endif()
 
 if(PULSEFORGE_BUILD_EDITOR)
@@ -930,6 +937,53 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 endif()
 
 if(BUILD_TESTING)
+	function(pf_add_public_header_check_target Target PublicRoot)
+		file(GLOB_RECURSE PublicHeaders CONFIGURE_DEPENDS
+			"${CMAKE_CURRENT_SOURCE_DIR}/${PublicRoot}/*.h"
+			"${CMAKE_CURRENT_SOURCE_DIR}/${PublicRoot}/*.hpp"
+		)
+		set(CheckSources)
+		foreach(Header IN LISTS PublicHeaders)
+			file(RELATIVE_PATH IncludePath "${CMAKE_CURRENT_SOURCE_DIR}/${PublicRoot}" "${Header}")
+			string(MD5 HeaderID "${IncludePath}")
+			set(CheckSource "${CMAKE_CURRENT_BINARY_DIR}/PublicHeaderChecks/${Target}/${HeaderID}.cpp")
+			get_filename_component(CheckDirectory "${CheckSource}" DIRECTORY)
+			file(MAKE_DIRECTORY "${CheckDirectory}")
+			file(WRITE "${CheckSource}" "#include \"${IncludePath}\"\n")
+			list(APPEND CheckSources "${CheckSource}")
+		endforeach()
+		add_library(${Target} OBJECT ${CheckSources})
+		target_include_directories(${Target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/${PublicRoot}")
+		target_compile_definitions(${Target} PRIVATE PF_PLATFORM_WINDOWS)
+		target_link_libraries(${Target} PRIVATE ${ARGN})
+	endfunction()
+
+	pf_add_public_header_check_target(PulseForgeEnginePublicHeaders PulseForge/Source/Public PulseForge)
+	pf_add_public_header_check_target(PulseForgeGamePublicHeaders PulseForgeGame/Source/Public PulseForge)
+	set(PULSEFORGE_PUBLIC_HEADER_CHECK_TARGETS
+		PulseForgeEnginePublicHeaders
+		PulseForgeGamePublicHeaders
+	)
+	if(PULSEFORGE_BUILD_EDITOR)
+		pf_add_public_header_check_target(PulseForgeEditorPublicHeaders PulseForgeEditor/Source/Public
+			PulseForgeEditorCore PulseForgeEditorUI)
+		list(APPEND PULSEFORGE_PUBLIC_HEADER_CHECK_TARGETS PulseForgeEditorPublicHeaders)
+	endif()
+	add_custom_target(PulseForgePublicHeaderChecks DEPENDS ${PULSEFORGE_PUBLIC_HEADER_CHECK_TARGETS})
+
+	find_package(Python3 3.9 QUIET COMPONENTS Interpreter)
+	if(Python3_Interpreter_FOUND)
+		add_test(NAME PulseForge.SourceQuality
+			COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Quality/CheckSourceQuality.py"
+				--root "${CMAKE_CURRENT_SOURCE_DIR}"
+				--rules "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Quality/SourceQualityRules.json")
+		add_test(NAME PulseForge.SourceQualityRules
+			COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover
+				-s "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Quality" -p test_*.py)
+		set_tests_properties(PulseForge.SourceQuality PulseForge.SourceQualityRules PROPERTIES
+			ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+	endif()
+
 	add_executable(PulseForgeRendererTests
 		Tests/PulseForgeRendererTests.cpp
 		Tests/RendererPolicyTests.cpp
@@ -965,6 +1019,7 @@ if(BUILD_TESTING)
 	)
 	target_compile_definitions(PulseForgeTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeTests PRIVATE PulseForge)
+	add_dependencies(PulseForgeTests PulseForgePublicHeaderChecks)
 	add_test(NAME PulseForge.Engine COMMAND PulseForgeTests)
 
 	add_executable(PulseForgeEditorTests
@@ -985,6 +1040,7 @@ if(BUILD_TESTING)
 	target_compile_definitions(PulseForgeEditorTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorTests PRIVATE
 		PulseForgeEditorCore PulseForgeEditorUI PulseForge PulseForgeImGui)
+	add_dependencies(PulseForgeEditorTests PulseForgePublicHeaderChecks)
 	add_test(NAME PulseForge.Editor COMMAND PulseForgeEditorTests)
 
 	add_executable(PulseForgeBufferUpdateTests Tests/BufferUpdateValidationTests.cpp)
@@ -1012,7 +1068,8 @@ foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeRenderM
 		PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeScripting PulseForgeRuntime PulseForgeRenderer
 		PulseForgeApplication PulseForgeSceneRenderer
 		PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI PulseForgeRendererTests PulseForgeRenderMathTests
-		PulseForgeTests PulseForgeEditorTests PulseForgeBufferUpdateTests PulseForgeGpuValidation)
+		PulseForgeTests PulseForgeEditorTests PulseForgeBufferUpdateTests PulseForgeGpuValidation
+		PulseForgeEnginePublicHeaders PulseForgeEditorPublicHeaders PulseForgeGamePublicHeaders)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE
 			$<$<CXX_COMPILER_ID:MSVC>:/EHsc>
