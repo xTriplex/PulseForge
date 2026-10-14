@@ -1,4 +1,4 @@
-#include "Core/PulseForgePCH.h"
+#include "Core/Log.h"
 #include "Window/Window.h"
 
 #ifdef PF_PLATFORM_WINDOWS

@@ -197,6 +197,16 @@ add_library(PulseForgeCore STATIC
 target_include_directories(PulseForgeCore PUBLIC PulseForge/Source/Public)
 target_compile_definitions(PulseForgeCore PRIVATE PF_PLATFORM_WINDOWS)
 target_link_libraries(PulseForgeCore PRIVATE spdlog::spdlog)
+add_library(PulseForgeWindow STATIC
+	PulseForge/Source/Private/Window/Window.cpp
+	PulseForge/Source/Private/Window/Platform/Windows/WindowsWindow.cpp
+)
+target_include_directories(PulseForgeWindow
+	PUBLIC PulseForge/Source/Public
+	PRIVATE PulseForge/Vendor/Glfw/include
+)
+target_compile_definitions(PulseForgeWindow PRIVATE PF_PLATFORM_WINDOWS GLFW_INCLUDE_NONE)
+target_link_libraries(PulseForgeWindow PUBLIC PulseForgeCore PRIVATE glfw spdlog::spdlog)
 add_library(PulseForgeScene STATIC
 	PulseForge/Source/Private/Scene/CameraComponent.cpp
 	PulseForge/Source/Private/Scene/Components/AudioSourceComponent.cpp
@@ -315,8 +325,6 @@ add_library(PulseForge STATIC
 	PulseForge/Source/Private/Renderer/SceneRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanSupport.cpp
-	PulseForge/Source/Private/Window/Window.cpp
-	PulseForge/Source/Private/Window/Platform/Windows/WindowsWindow.cpp
 )
 target_include_directories(PulseForge
 	PUBLIC PulseForge/Source/Public
@@ -336,7 +344,7 @@ target_compile_definitions(PulseForge PRIVATE
 	GLFW_INCLUDE_NONE
 	MA_NO_WIN32_LEAN_AND_MEAN
 )
-target_link_libraries(PulseForge PUBLIC PulseForgeAssetServices PulseForgeRenderMath PulseForgeRuntime)
+target_link_libraries(PulseForge PUBLIC PulseForgeAssetServices PulseForgeRenderMath PulseForgeRuntime PulseForgeWindow)
 target_link_libraries(PulseForge PRIVATE
 	glfw
 	PulseForgeGlad
