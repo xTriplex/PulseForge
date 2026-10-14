@@ -34,6 +34,7 @@
 #include "Editor/EditorImGuiRenderer.h"
 #include "Editor/EditorAssetPreviewService.h"
 #include "Editor/EditorAssetPreviewPolicy.h"
+#include "Editor/EditorAssetDestinationDialog.h"
 #include "Editor/EditorMeshPickingCache.h"
 #include "Editor/EditorDeferredOperationQueue.h"
 #include "Editor/EditorConsolePanel.h"
@@ -4249,275 +4250,41 @@ namespace
 			m_AssetWorkflow.BeginPrefabDestination(Root);
 		}
 
-		void DrawAssetDestinationBreadcrumbs()
-		{
-			const std::filesystem::path CurrentFolder =
-				std::filesystem::u8path(m_AssetWorkflow.DestinationFolder()).lexically_normal();
-			const std::vector<std::filesystem::path> Breadcrumbs =
-				PulseForgeEditor::BuildAssetDestinationBreadcrumbs(CurrentFolder);
-			if (Breadcrumbs.empty())
-				return;
-
-			if (ImGui::SmallButton("Assets##AssetDestinationBreadcrumbRoot"))
-			{
-				m_AssetWorkflow.DestinationFolder() = "Assets";
-				m_AssetWorkflow.ValidationError().clear();
-			}
-			if (Breadcrumbs.size() == 1)
-				return;
-			if (Breadcrumbs.size() > 1)
-			{
-				ImGui::SameLine();
-				m_EditorStyle.TextMuted("/");
-				ImGui::SameLine();
-				if (ImGui::SmallButton("...##AssetDestinationBreadcrumbAncestors"))
-					ImGui::OpenPopup("AssetDestinationBreadcrumbAncestors");
-				if (ImGui::BeginPopup("AssetDestinationBreadcrumbAncestors"))
-				{
-					for (size_t Index = 0; Index + 1 < Breadcrumbs.size(); ++Index)
-					{
-						const auto& Path = Breadcrumbs[Index];
-						const std::string PathText = PathToUtf8(Path);
-						if (ImGui::Selectable(PathText.c_str(), Path == CurrentFolder))
-						{
-							m_AssetWorkflow.DestinationFolder() = PathText;
-							m_AssetWorkflow.ValidationError().clear();
-						}
-					}
-					ImGui::EndPopup();
-				}
-				ImGui::SameLine();
-				m_EditorStyle.TextMuted("/");
-				ImGui::SameLine();
-			}
-
-			const std::string CurrentLabel = PathToUtf8(Breadcrumbs.back().filename());
-			const float LabelWidth = (std::max)(ImGui::GetContentRegionAvail().x -
-				ImGui::GetStyle().FramePadding.x * 2.0f, 0.0f);
-			ImGui::TextUnformatted(FitEditorContextLabel(CurrentLabel, LabelWidth).c_str());
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("%s", PathToUtf8(CurrentFolder).c_str());
-		}
-
-		void CollectContentFolders(
-			const ContentFolderNode& Node,
-			std::vector<std::filesystem::path>& Folders) const
-		{
-			Folders.push_back(Node.RelativePath);
-			for (const ContentFolderNode& Child : Node.Children)
-				CollectContentFolders(Child, Folders);
-		}
-
 		void DrawAssetDestinationDialog()
 		{
-			if (m_AssetWorkflow.TakeDestinationDialogRequest())
-				ImGui::OpenPopup("Project Asset Destination");
-			bool PopupOpen = true;
-			if (!ImGui::BeginPopupModal("Project Asset Destination", &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize))
+			const auto Operation = PulseForgeEditor::EditorAssetDestinationDialog::Draw(
+				m_EditorStyle, m_AssetWorkflow, m_Project ? &*m_Project : nullptr, m_ContentBrowser);
+			if (!Operation || !m_Project)
 				return;
 
-			const auto Asset = m_Project && m_AssetWorkflow.DestinationAsset()
-				? m_Project->GetAssetRegistry().Find(*m_AssetWorkflow.DestinationAsset())
-				: std::optional<PulseForge::AssetRecord>{};
-			const bool IsProjectAssetCreation =
-				m_AssetWorkflow.CreateKind() != ProjectAssetDestinationCreateKind::None;
-			if (!m_Project || (!IsProjectAssetCreation && !Asset))
-				ImGui::TextUnformatted(m_Project
-					? "The asset is no longer registered."
-					: "The project is no longer open.");
-			else
+			const std::filesystem::path Target = Operation->ProjectRelativeDestination;
+			switch (Operation->Kind)
 			{
-				const std::filesystem::path SourcePath = Asset
-					? Asset->ProjectRelativePath
-					: m_AssetWorkflow.CreateKind() == ProjectAssetDestinationCreateKind::Prefab
-						? std::filesystem::path("Assets/NewPrefab.prefab")
-						: std::filesystem::path("Assets/NewScene.scene");
-				std::string Operation;
-				if (Asset)
-					Operation = m_AssetWorkflow.IsDuplicate() ? "Duplicate" : "Move / Rename";
-				else if (m_AssetWorkflow.CreateKind() == ProjectAssetDestinationCreateKind::SaveSceneAs)
-					Operation = "Save Scene As";
-				else if (m_AssetWorkflow.CreateKind() == ProjectAssetDestinationCreateKind::Prefab)
-					Operation = "Create Prefab";
-				else
-					Operation = "Create Scene";
-				ImGui::Text("%s%s%s", Operation.c_str(), Asset ? " " : "",
-					Asset ? PathToUtf8(Asset->ProjectRelativePath.filename()).c_str() : "");
-				ImGui::TextDisabled("Choose a project folder and use the required asset extension.");
-				DrawAssetDestinationBreadcrumbs();
-				ImGui::SetNextItemWidth(420.0f);
-				ImGui::InputTextWithHint("##AssetDestinationSearch", "Search project folders...",
-					m_AssetWorkflow.SearchBuffer().data(), m_AssetWorkflow.SearchBuffer().size());
-
-				std::vector<std::filesystem::path> Folders;
-				CollectContentFolders(m_ContentBrowser.FolderRoot(), Folders);
-				std::string Search = m_AssetWorkflow.SearchBuffer().data();
-				std::transform(Search.begin(), Search.end(), Search.begin(), [](unsigned char Character)
+				case PulseForgeEditor::EditorAssetDestinationOperationKind::MoveAsset:
+					if (Operation->Asset)
+						QueueAfterSave([this, ID = *Operation->Asset, Target] { MoveAssetAt(ID, Target); });
+					break;
+				case PulseForgeEditor::EditorAssetDestinationOperationKind::DuplicateAsset:
+					if (Operation->Asset)
+						QueueAfterSave([this, ID = *Operation->Asset, Target] { DuplicateAssetAt(ID, Target); });
+					break;
+				case PulseForgeEditor::EditorAssetDestinationOperationKind::CreateScene:
+				case PulseForgeEditor::EditorAssetDestinationOperationKind::SaveSceneAs:
 				{
-					return static_cast<char>(std::tolower(Character));
-				});
-				if (ImGui::BeginChild("AssetDestinationFolderResults", ImVec2(420.0f, 180.0f), ImGuiChildFlags_Borders))
-				{
-					bool AnyFolder = false;
-					for (const auto& Folder : Folders)
+					const bool SaveAs = Operation->Kind == PulseForgeEditor::EditorAssetDestinationOperationKind::SaveSceneAs;
+					QueueAfterSave([this, Target, SaveAs]
 					{
-						const std::string FolderText = PathToUtf8(Folder);
-						std::string Searchable = FolderText;
-						std::transform(Searchable.begin(), Searchable.end(), Searchable.begin(), [](unsigned char Character)
-						{
-							return static_cast<char>(std::tolower(Character));
-						});
-						if (!Search.empty() && Searchable.find(Search) == std::string::npos)
-							continue;
-						AnyFolder = true;
-						if (ImGui::Selectable(FolderText.c_str(), m_AssetWorkflow.DestinationFolder() == FolderText))
-						{
-							m_AssetWorkflow.DestinationFolder() = FolderText;
-							m_AssetWorkflow.ValidationError().clear();
-						}
-					}
-					if (!AnyFolder)
-						ImGui::TextDisabled("No matching project folders.");
+						const std::filesystem::path AbsoluteTarget = m_Project
+							? m_Project->GetRootPath() / Target : Target;
+						CreateSceneAt(AbsoluteTarget, SaveAs);
+					});
+					break;
 				}
-				ImGui::EndChild();
-				ImGui::TextWrapped("Destination: %s", m_AssetWorkflow.DestinationFolder().c_str());
-				ImGui::SetNextItemWidth(420.0f);
-				const bool EnterPressed = ImGui::InputText("Asset filename", m_AssetWorkflow.FilenameBuffer().data(),
-					m_AssetWorkflow.FilenameBuffer().size(), ImGuiInputTextFlags_EnterReturnsTrue);
-				ImGui::TextDisabled("Extension: %s", SourcePath.extension().string().c_str());
-				if (!m_AssetWorkflow.ValidationError().empty())
-					ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error),
-						"%s", m_AssetWorkflow.ValidationError().c_str());
-
-				const char* SubmitLabel = m_AssetWorkflow.IsDuplicate() ? "Duplicate" :
-					m_AssetWorkflow.CreateKind() == ProjectAssetDestinationCreateKind::Prefab ? "Create Prefab" :
-					m_AssetWorkflow.CreateKind() == ProjectAssetDestinationCreateKind::SaveSceneAs ? "Save Scene As" :
-					m_AssetWorkflow.CreateKind() == ProjectAssetDestinationCreateKind::NewScene ? "Create Scene" : "Move";
-				if (ImGui::Button(SubmitLabel, ImVec2(132.0f, 0.0f)) ||
-					EnterPressed)
-				{
-					const std::string FilenameText = m_AssetWorkflow.FilenameBuffer().data();
-					const auto FinalFilename = PulseForgeEditor::ResolveAssetDestinationFilename(
-						FilenameText, SourcePath);
-					if (!FinalFilename)
-					{
-						switch (FinalFilename.error())
-						{
-							case PulseForgeEditor::AssetDestinationNameError::InvalidFilename:
-								m_AssetWorkflow.ValidationError() = "Enter a single valid filename without a folder path.";
-								break;
-							case PulseForgeEditor::AssetDestinationNameError::ExtensionMismatch:
-								m_AssetWorkflow.ValidationError() = "The destination must keep the original asset extension.";
-								break;
-							case PulseForgeEditor::AssetDestinationNameError::ReservedSidecarExtension:
-								m_AssetWorkflow.ValidationError() = "The .meta extension is reserved for asset sidecars.";
-								break;
-						}
-					}
-					else if (!m_Project || (!IsProjectAssetCreation && !m_AssetWorkflow.DestinationAsset()) || !IsKnownContentFolder(
-						std::filesystem::u8path(m_AssetWorkflow.DestinationFolder())))
-						m_AssetWorkflow.ValidationError() = "Choose a folder that belongs to the open project.";
-					else
-					{
-						const std::filesystem::path Target =
-							std::filesystem::u8path(m_AssetWorkflow.DestinationFolder()) / *FinalFilename;
-						const std::filesystem::path AbsoluteTarget = m_Project->GetRootPath() / Target;
-						const std::filesystem::path AbsoluteSidecar =
-							PulseForge::AssetMetadataSerializer::GetSidecarPath(AbsoluteTarget);
-						const std::filesystem::path AbsoluteSource = Asset
-							? m_Project->GetRootPath() / Asset->ProjectRelativePath
-							: std::filesystem::path{};
-						const auto Inspect = [](const std::filesystem::path& Path, bool& Exists, std::error_code& Error)
-						{
-							const auto Status = std::filesystem::symlink_status(Path, Error);
-							if (Error == std::errc::no_such_file_or_directory)
-							{
-								Error.clear();
-								Exists = false;
-							}
-							else
-								Exists = !Error && Status.type() != std::filesystem::file_type::not_found;
-						};
-						std::error_code DestinationError;
-						std::error_code SidecarError;
-						bool DestinationExists = false;
-						bool SidecarExists = false;
-						Inspect(AbsoluteTarget, DestinationExists, DestinationError);
-						Inspect(AbsoluteSidecar, SidecarExists, SidecarError);
-						bool SameAsset = false;
-						bool SameSidecar = false;
-						std::error_code EquivalentError;
-						if (!m_AssetWorkflow.IsDuplicate() && Asset && DestinationExists)
-							SameAsset = std::filesystem::equivalent(AbsoluteSource, AbsoluteTarget, EquivalentError);
-						EquivalentError.clear();
-						if (!m_AssetWorkflow.IsDuplicate() && Asset && SidecarExists)
-							SameSidecar = std::filesystem::equivalent(
-								PulseForge::AssetMetadataSerializer::GetSidecarPath(AbsoluteSource), AbsoluteSidecar, EquivalentError);
-						const bool InspectionFailed = static_cast<bool>(DestinationError) ||
-							static_cast<bool>(SidecarError) || static_cast<bool>(EquivalentError);
-						const std::string SourceSpelling = Asset
-							? PathToUtf8(Asset->ProjectRelativePath.lexically_normal()) : std::string{};
-						const std::string TargetSpelling = PathToUtf8(Target.lexically_normal());
-						const auto Conflict = PulseForgeEditor::ResolveAssetDestinationConflict(
-							m_AssetWorkflow.IsDuplicate() || IsProjectAssetCreation,
-							DestinationExists, SidecarExists, SameAsset,
-							Asset && SourceSpelling == TargetSpelling, InspectionFailed, SameSidecar);
-						switch (Conflict)
-						{
-							case PulseForgeEditor::AssetDestinationConflict::SamePath:
-								m_AssetWorkflow.ValidationError() = "The selected folder and filename are already the source asset location.";
-								break;
-							case PulseForgeEditor::AssetDestinationConflict::ExistingDestination:
-								m_AssetWorkflow.ValidationError() = "An asset or metadata sidecar already exists at that destination.";
-								break;
-							case PulseForgeEditor::AssetDestinationConflict::CaseOnlyRename:
-								// The asset operation stages the asset and its sidecar to support Windows case-only renames.
-								[[fallthrough]];
-							case PulseForgeEditor::AssetDestinationConflict::None:
-							{
-								const std::optional<PulseForge::AssetID> Identifier = m_AssetWorkflow.DestinationAsset();
-								const bool Duplicate = m_AssetWorkflow.IsDuplicate();
-								const ProjectAssetDestinationCreateKind CreateKind = m_AssetWorkflow.CreateKind();
-								const std::optional<PulseForge::UUID> PrefabRoot = m_AssetWorkflow.PrefabRoot();
-								m_AssetWorkflow.DismissDestination();
-								ImGui::CloseCurrentPopup();
-								if (Identifier)
-								{
-									if (Duplicate)
-										QueueAfterSave([this, ID = *Identifier, Target] { DuplicateAssetAt(ID, Target); });
-									else
-										QueueAfterSave([this, ID = *Identifier, Target] { MoveAssetAt(ID, Target); });
-								}
-								else if (CreateKind == ProjectAssetDestinationCreateKind::NewScene ||
-									CreateKind == ProjectAssetDestinationCreateKind::SaveSceneAs)
-									QueueAfterSave([this, Target, CreateKind]
-									{
-										const std::filesystem::path AbsoluteTarget = m_Project
-											? m_Project->GetRootPath() / Target : Target;
-										CreateSceneAt(AbsoluteTarget,
-											CreateKind == ProjectAssetDestinationCreateKind::SaveSceneAs);
-									});
-								else if (CreateKind == ProjectAssetDestinationCreateKind::Prefab && PrefabRoot)
-									QueueAfterSave([this, Root = *PrefabRoot, Target] { CreatePrefabAt(Root, Target); });
-								break;
-							}
-							case PulseForgeEditor::AssetDestinationConflict::InspectionFailed:
-								m_AssetWorkflow.ValidationError() = "Could not inspect the destination. Check project folder permissions and try again.";
-								break;
-						}
-					}
-				}
+				case PulseForgeEditor::EditorAssetDestinationOperationKind::CreatePrefab:
+					if (Operation->PrefabRoot)
+						QueueAfterSave([this, Root = *Operation->PrefabRoot, Target] { CreatePrefabAt(Root, Target); });
+					break;
 			}
-			ImGui::SameLine();
-			const bool EscapePressed = ImGui::IsKeyPressed(ImGuiKey_Escape, false);
-			if (ImGui::Button("Cancel", ImVec2(112.0f, 0.0f)) || EscapePressed)
-			{
-				m_AssetWorkflow.DismissDestination();
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::EndPopup();
-			if (!PopupOpen)
-				m_AssetWorkflow.DismissDestination();
 		}
 
 		void MoveAssetAt(
