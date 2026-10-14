@@ -36,7 +36,8 @@ namespace PulseForgeEditor
 		std::function<bool(EditorDocumentSession&)> Discard;
 		std::function<bool(EditorDocumentSession&, EditorDocumentCommand)> FocusedCommand;
 		std::function<bool(EditorDocumentSession&, const std::filesystem::path&, std::string_view)> AssetLocationChanged;
-		std::function<bool(EditorDocumentSession&)> Close;
+		std::function<std::expected<void, std::string>(const EditorDocumentSession&)> PrepareClose;
+		std::function<void(EditorDocumentSession&)> Close;
 	};
 
 	class EditorDocumentEditorRegistry final
@@ -46,7 +47,7 @@ namespace PulseForgeEditor
 		{
 			if (Adapter.Kind == EditorDocumentKind::Level || !Adapter.IsEligible || !Adapter.LoadSession ||
 				!Adapter.DrawWorkspace || !Adapter.Save || !Adapter.Discard || !Adapter.FocusedCommand ||
-				!Adapter.AssetLocationChanged || !Adapter.Close)
+				!Adapter.AssetLocationChanged || !Adapter.PrepareClose || !Adapter.Close)
 				return std::unexpected("A specialized document registration is incomplete");
 			if (m_Adapters.contains(Adapter.Kind))
 				return std::unexpected("A specialized editor is already registered for this document kind");
@@ -133,10 +134,19 @@ namespace PulseForgeEditor
 			return true;
 		}
 
-		[[nodiscard]] bool Close(EditorDocumentSession& Session) const
+		[[nodiscard]] std::expected<void, std::string> PrepareClose(const EditorDocumentSession& Session) const
 		{
 			const auto Adapter = m_Adapters.find(Session.Identity.Kind);
-			return Adapter != m_Adapters.end() && Session.EditorState && Adapter->second.Close(Session);
+			if (Adapter == m_Adapters.end() || !Session.EditorState)
+				return std::unexpected("The document editor session is unavailable");
+			return Adapter->second.PrepareClose(Session);
+		}
+
+		void Close(EditorDocumentSession& Session) const
+		{
+			const auto Adapter = m_Adapters.find(Session.Identity.Kind);
+			if (Adapter != m_Adapters.end() && Session.EditorState)
+				Adapter->second.Close(Session);
 		}
 
 	private:

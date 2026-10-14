@@ -55,6 +55,7 @@
 #include "Editor/EditorMaterialPropertyLayoutPolicy.h"
 #include "Editor/EditorDocumentManager.h"
 #include "Editor/EditorDocumentEditorRegistry.h"
+#include "Editor/EditorDocumentCloseBatch.h"
 #include "Editor/EditorNativeWindowBoundsPolicy.h"
 #include "Editor/EditorDocumentHostPolicy.h"
 #include "Editor/EditorDocumentTabPolicy.h"
@@ -711,6 +712,7 @@ namespace
 		{
 			int Value = 0;
 			bool FailNextSave = false;
+			bool FailClose = false;
 			std::vector<int> Undo;
 			std::vector<int> Redo;
 		};
@@ -829,6 +831,19 @@ namespace
 			Failed
 		};
 
+		enum class DocumentWorkspaceSwitchTestPhase : uint8_t
+		{
+			Disabled,
+			WaitingForFirstFixture,
+			WaitingForLevel,
+			WaitingForFirstFixtureAgain,
+			WaitingForSecondFixture,
+			WaitingForNativeTransfer,
+			WaitingForMainTransfer,
+			Complete,
+			Failed
+		};
+
 		static constexpr size_t DocumentTabTestDropPointsPerPanel = 5;
 		static constexpr size_t DocumentTabRoundTripCycleCount = 3;
 		static constexpr std::array<const char*, 5> DocumentTabTestInvalidDropPanelNames = {
@@ -928,6 +943,7 @@ namespace
 			  m_DocumentHostTabTearOffTest(Options.EnableDocumentHostTabTearOffTest),
 			  m_DocumentHostTabReattachTest(Options.EnableDocumentHostTabReattachTest),
 			  m_DocumentHostTabReorderTest(Options.EnableDocumentHostTabReorderTest),
+			  m_DocumentWorkspaceSwitchTest(Options.EnableDocumentWorkspaceSwitchTest),
 			  m_DocumentHostPresentationFailureTest(Options.EnableDocumentHostPresentationFailureTest),
 			  m_DocumentHostAcquireOutOfDateTest(Options.EnableDocumentHostAcquireOutOfDateTest),
 			  m_DocumentHostImageAllocationFailureTest(Options.EnableDocumentHostImageAllocationFailureTest)
@@ -1557,12 +1573,16 @@ namespace
 			DrawEditorToolbar();
 			DrawMainDocumentStrip();
 			DrawStatusBar();
-			if (m_Layout.SubmitDockspace())
+			const auto* MainDocumentHost = m_Documents.FindHost(PulseForgeEditor::EditorDocumentManager::MainHostID);
+			const bool MainLevelWorkspaceActive = !MainDocumentHost || !MainDocumentHost->ActiveDocument ||
+				MainDocumentHost->ActiveDocument->Kind == PulseForgeEditor::EditorDocumentKind::Level;
+			if (m_Layout.SubmitDockspace(!MainLevelWorkspaceActive))
 			{
 				CancelViewportInteractionForLayoutChange();
 				ValidateDocumentHostResetLayoutTest();
 			}
 			DrawWorkspacePanels();
+			AdvanceDocumentWorkspaceSwitchTest();
 			ProcessReleasedDocumentTabDrag();
 			ProcessPendingDocumentTabClose();
 			ProcessPendingDocumentTransfer();
@@ -1687,13 +1707,9 @@ namespace
 			bool BeganNavigationForEvent = false;
 			if (Event.GetEventType() == PulseForge::EEventType::WindowClose)
 			{
-				if (m_SceneDirty || !GetDirtyAssetDocuments().empty())
-				{
-					QueueAfterSave([this] { RequestEditorApplicationClose(); });
-					Event.bHandled = true;
-					return;
-				}
-				m_ApplicationShutdownRequested = true;
+				QueueAfterSave([this] { RequestEditorApplicationClose(); });
+				Event.bHandled = true;
+				return;
 			}
 
 			if (Event.GetEventType() == PulseForge::EEventType::WindowLostFocus)
@@ -1761,6 +1777,30 @@ namespace
 
 	private:
 		void RequestEditorApplicationClose()
+		{
+			if (m_ApplicationShutdownRequested)
+				return;
+			std::vector<PulseForgeEditor::EditorDocumentIdentity> Documents;
+			for (const auto& [Identity, Session] : m_Documents.GetSessions())
+				if (Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level)
+					Documents.push_back(Identity);
+			if (GetDirtyAssetDocuments().empty() && CloseDocumentBatchClean(Documents))
+			{
+				CompleteEditorApplicationClose();
+				return;
+			}
+			m_PendingDocumentClose.reset();
+			m_PendingDocumentHostClose.reset();
+			m_PendingDocumentCloseBatch = std::move(Documents);
+			m_PendingCloseAllDocuments = true;
+			m_DocumentCloseDialogHostID = std::string(PulseForgeEditor::EditorDocumentManager::MainHostID);
+			m_PendingDocumentCloseAction = [this] { CompleteEditorApplicationClose(); };
+			m_OpenDocumentCloseDialog = true;
+			if (m_DocumentCloseError.empty())
+				m_DocumentCloseError = "Resolve open documents before closing PulseForge.";
+		}
+
+		void CompleteEditorApplicationClose()
 		{
 			m_ApplicationShutdownRequested = true;
 			PulseForge::Application::Get().RequestClose();
@@ -2759,7 +2799,7 @@ namespace
 			QueueAfterSave([this, ChosenPath] { CreateProjectAt(ChosenPath); });
 		}
 
-		bool ClearCurrentProjectDocumentState()
+		bool ClearCurrentProjectDocumentState(std::function<void()> OnDocumentsClosed = {})
 		{
 			if (m_Project)
 			{
@@ -2769,9 +2809,16 @@ namespace
 					if (Identity.Project == m_Project->GetDescription().ID &&
 						Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level)
 						ProjectDocuments.push_back(Identity);
-				for (const auto& Identity : ProjectDocuments)
-					if (!CloseDocumentClean(Identity))
-						return false;
+				if (!CloseDocumentBatchClean(ProjectDocuments))
+				{
+					m_PendingDocumentClose.reset();
+					m_PendingDocumentHostClose.reset();
+					m_PendingDocumentCloseBatch = std::move(ProjectDocuments);
+					m_DocumentCloseDialogHostID = std::string(PulseForgeEditor::EditorDocumentManager::MainHostID);
+					m_PendingDocumentCloseAction = std::move(OnDocumentsClosed);
+					m_OpenDocumentCloseDialog = true;
+					return false;
+				}
 				(void)m_Documents.ClearProject(m_Project->GetDescription().ID);
 				ClearMaterialDraftsForProject();
 			}
@@ -2820,7 +2867,7 @@ namespace
 				*NewScene);
 			if (!MainScene && !MainScene.error().CommittedAsset)
 			{
-				if (!ClearCurrentProjectDocumentState())
+				if (!ClearCurrentProjectDocumentState([this, ProjectFile] { (void)OpenProjectAt(ProjectFile); }))
 					return;
 				StopRuntime();
 				ResetViewportSceneRenderer();
@@ -2837,7 +2884,7 @@ namespace
 			const PulseForge::AssetRecord MainSceneRecord = MainScene
 				? *MainScene
 				: *MainScene.error().CommittedAsset;
-			if (!ClearCurrentProjectDocumentState())
+			if (!ClearCurrentProjectDocumentState([this, ProjectFile] { (void)OpenProjectAt(ProjectFile); }))
 				return;
 			StopRuntime();
 			ResetViewportSceneRenderer();
@@ -2903,7 +2950,7 @@ namespace
 			}
 
 			const std::string ProjectName = Opened->Project.GetDescription().Name;
-			if (!ClearCurrentProjectDocumentState())
+			if (!ClearCurrentProjectDocumentState([this, ProjectFile] { (void)OpenProjectAt(ProjectFile); }))
 				return std::unexpected("The current project has a document session that could not close");
 			StopRuntime();
 			ResetViewportSceneRenderer();
@@ -2976,7 +3023,9 @@ namespace
 				auto* State = dynamic_cast<DocumentHostTestState*>(Session.EditorState.get());
 				if (!State)
 					return;
-				ImGui::TextUnformatted("Debug-only document host session fixture");
+				(void)m_EditorStyle.SectionHeader(PulseForgeEditor::EditorIcon::File,
+					"Registered Document Workspace Fixture");
+				m_EditorStyle.TextMuted("This independent workspace is not part of the Level Editor panels.");
 				ImGui::Text("Asset %s", Session.Identity.Asset.ToString().c_str());
 				int Candidate = State->Value;
 				if (ImGui::InputInt("Editable value", &Candidate))
@@ -2994,6 +3043,10 @@ namespace
 				ImGui::SameLine();
 				if (ImGui::Button("Fail next save"))
 					State->FailNextSave = true;
+				ImGui::SameLine();
+				if (ImGui::Button(State->FailClose ? "Allow close" : "Fail close"))
+					State->FailClose = !State->FailClose;
+				ImGui::Text("Undo %zu  |  Redo %zu", State->Undo.size(), State->Redo.size());
 				ImGui::TextUnformatted(Session.IsDirty() ? "Unsaved fixture changes" : "Fixture saved");
 			};
 			Adapter.Save = [this](auto& Session, uint64_t)
@@ -3041,7 +3094,14 @@ namespace
 				return true;
 			};
 			Adapter.AssetLocationChanged = [](auto&, const auto&, std::string_view) { return true; };
-			Adapter.Close = [](auto&) { return true; };
+			Adapter.PrepareClose = [](const auto& Session) -> std::expected<void, std::string>
+			{
+				const auto* State = dynamic_cast<const DocumentHostTestState*>(Session.EditorState.get());
+				if (State && State->FailClose)
+					return std::unexpected("The Debug fixture is configured to reject close.");
+				return {};
+			};
+			Adapter.Close = [](auto&) {};
 			if (auto Result = m_DocumentEditors.Register(std::move(Adapter)); !Result)
 				PF_ERROR("Could not register the debug document-host fixture editor: {}", Result.error());
 		}
@@ -3169,11 +3229,13 @@ namespace
 					PF_ERROR("Document tab reorder fixture could not prepare two sessions in the main strip.");
 				}
 			}
+			if (m_DocumentWorkspaceSwitchTest)
+				PrepareDocumentWorkspaceSwitchTest();
 			MarkDocumentWorkspaceDirty();
 			PF_WARN(
 				"Development document-host fixture enabled with opening preference {}: {} sessions restored from saved "
 				"host state, {} total across {} hosts; "
-				"fixture tabs have no asset editor or editable content.",
+				"fixture sessions use a Debug-only registered workspace adapter.",
 				static_cast<uint32_t>(Preference), RestoredCount, OpenedCount, FixtureHosts.size());
 			if (m_DocumentHostTabTearOffTest)
 			{
@@ -3342,6 +3404,337 @@ namespace
 				m_Layout.RequestReset();
 			}
 			#endif
+		}
+
+		void PrepareDocumentWorkspaceSwitchTest()
+		{
+#ifndef _DEBUG
+			m_DocumentWorkspaceSwitchTest = false;
+			m_DocumentWorkspaceSwitchTestPhase = DocumentWorkspaceSwitchTestPhase::Failed;
+#else
+			const auto Fail = [this](std::string_view Message)
+			{
+				m_DocumentWorkspaceSwitchTest = false;
+				m_DocumentWorkspaceSwitchTestPhase = DocumentWorkspaceSwitchTestPhase::Failed;
+				PF_ERROR("Document workspace switch fixture failed during setup: {}", Message);
+			};
+			if (m_DocumentHostFixtureSessions.size() < 2 || !m_Project)
+			{
+				Fail("two registered fixture sessions and an open project are required");
+				return;
+			}
+
+			for (const auto& [Identity, OriginalHostID] : m_DocumentHostFixtureSessions)
+			{
+				(void)OriginalHostID;
+				const auto* Session = m_Documents.Find(Identity);
+				const auto* MainHost = m_Documents.FindHost(PulseForgeEditor::EditorDocumentManager::MainHostID);
+				if (!Session || !MainHost)
+				{
+					Fail("a fixture session or the main document host is unavailable");
+					return;
+				}
+				const std::string SourceHostID = Session->HostID;
+				const auto Transfer = m_Documents.Transfer(
+					Identity, PulseForgeEditor::EditorDocumentManager::MainHostID, MainHost->Documents.size());
+				if (!Transfer)
+				{
+					Fail(Transfer.error());
+					return;
+				}
+				if (Transfer->EmptiedSourceHost)
+				{
+					m_RestoredHostBoundsPending.erase(*Transfer->EmptiedSourceHost);
+					(void)m_Documents.RemoveEmptyNativeHost(SourceHostID);
+				}
+			}
+
+			m_DocumentWorkspaceSwitchLevelIdentity = {};
+			for (const auto& [Identity, Session] : m_Documents.GetSessions())
+				if (Identity.Project == m_Project->GetDescription().ID &&
+					Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level)
+				{
+					m_DocumentWorkspaceSwitchLevelIdentity = Identity;
+					break;
+				}
+			if (m_DocumentWorkspaceSwitchLevelIdentity.Project.IsNil())
+			{
+				Fail("the Level Editor session is missing");
+				return;
+			}
+
+			m_DocumentWorkspaceSwitchFirstIdentity = m_DocumentHostFixtureSessions[0].first;
+			m_DocumentWorkspaceSwitchSecondIdentity = m_DocumentHostFixtureSessions[1].first;
+			const auto InitializeModel = [this](const auto& Identity, int Value)
+			{
+				auto* Session = m_Documents.Find(Identity);
+				auto* State = Session ? dynamic_cast<DocumentHostTestState*>(Session->EditorState.get()) : nullptr;
+				if (!Session || !State)
+					return false;
+				State->Value = Value;
+				State->Undo.push_back(0);
+				if (!m_Documents.MarkEdited(Identity) || !m_DocumentEditors.Save(*Session))
+					return false;
+				return true;
+			};
+			if (!InitializeModel(m_DocumentWorkspaceSwitchFirstIdentity, 41) ||
+				!InitializeModel(m_DocumentWorkspaceSwitchSecondIdentity, 82))
+			{
+				Fail("the fixture editor could not establish independent saved models and history");
+				return;
+			}
+
+			const auto* FirstSession = m_Documents.Find(m_DocumentWorkspaceSwitchFirstIdentity);
+			const auto* SecondSession = m_Documents.Find(m_DocumentWorkspaceSwitchSecondIdentity);
+			m_DocumentWorkspaceSwitchFirstSession = FirstSession;
+			m_DocumentWorkspaceSwitchFirstState = FirstSession ? FirstSession->EditorState.get() : nullptr;
+			m_DocumentWorkspaceSwitchSecondState = SecondSession ? SecondSession->EditorState.get() : nullptr;
+			if (!FirstSession || !SecondSession ||
+				!m_Documents.Activate(m_DocumentWorkspaceSwitchFirstIdentity))
+			{
+				Fail("the first fixture could not be activated in the main document strip");
+				return;
+			}
+
+			const ImGuiViewport* MainViewport = ImGui::GetMainViewport();
+			if (!MainViewport)
+			{
+				Fail("the main ImGui viewport is unavailable");
+				return;
+			}
+			char HostWindowName[32]{};
+			ImFormatString(HostWindowName, IM_ARRAYSIZE(HostWindowName), "WindowOverViewport_%08X", MainViewport->ID);
+			m_DocumentWorkspaceSwitchMainDockspaceID = ImHashStr("DockSpace", 0, ImHashStr(HostWindowName));
+			m_DocumentWorkspaceSwitchScene = m_Scene.get();
+			m_DocumentWorkspaceSwitchRuntimeScene = m_RuntimeScene.get();
+			m_DocumentWorkspaceSwitchSelectedEntity = m_SelectedEntity;
+			m_DocumentWorkspaceSwitchCameraPosition = m_EditorCamera.GetPosition();
+			m_DocumentWorkspaceSwitchSceneViewportVisible =
+				m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport);
+			m_DocumentWorkspaceSwitchHierarchyVisible =
+				m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Hierarchy);
+			m_DocumentWorkspaceSwitchInspectorVisible =
+				m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Inspector);
+			m_DocumentWorkspaceSwitchContentBrowserVisible =
+				m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::ContentBrowser);
+			m_DocumentWorkspaceSwitchTestPhase = DocumentWorkspaceSwitchTestPhase::WaitingForFirstFixture;
+			PF_INFO("Document workspace switch fixture opened two independent registered sessions in the main document strip.");
+#endif
+		}
+
+		void AdvanceDocumentWorkspaceSwitchTest()
+		{
+			if (!m_DocumentWorkspaceSwitchTest ||
+				m_DocumentWorkspaceSwitchTestPhase == DocumentWorkspaceSwitchTestPhase::Disabled)
+				return;
+#ifndef _DEBUG
+			m_DocumentWorkspaceSwitchTest = false;
+#else
+			const auto Fail = [this](std::string_view Message)
+			{
+				m_DocumentWorkspaceSwitchTest = false;
+				m_DocumentWorkspaceSwitchTestPhase = DocumentWorkspaceSwitchTestPhase::Failed;
+				PF_ERROR("Document workspace switch fixture failed: {}", Message);
+			};
+			const auto MainHostActive = [this]() -> std::optional<PulseForgeEditor::EditorDocumentIdentity>
+			{
+				const auto* Host = m_Documents.FindHost(PulseForgeEditor::EditorDocumentManager::MainHostID);
+				return Host ? Host->ActiveDocument : std::nullopt;
+			};
+			const auto HasWorkspaceDrawn = [this](const auto& Identity, std::string_view HostID)
+			{
+				const auto Found = m_DocumentWorkspaceContentsDrawnThisFrame.find(
+					GetDocumentWorkspaceDockspaceID(Identity));
+				return Found != m_DocumentWorkspaceContentsDrawnThisFrame.end() && Found->second == HostID;
+			};
+			const auto ViewportInteractionReleased = [this]
+			{
+				return !m_EditorCameraNavigationActive && !m_ViewportKeyboardFocused &&
+					!m_ViewportMouseCapture.OwnsMouse() && m_ViewportCameraGesture == ViewportCameraGesture::None &&
+					!m_GizmoDrag.has_value();
+			};
+			const auto MainLayoutRetained = [this]
+			{
+				return m_DocumentWorkspaceSwitchMainDockspaceID != 0 &&
+					ImGui::DockBuilderGetNode(m_DocumentWorkspaceSwitchMainDockspaceID) != nullptr;
+			};
+			const auto FixtureStatePreserved = [this](const auto& Identity, const auto* ExpectedState, int ExpectedValue)
+			{
+				const auto* Session = m_Documents.Find(Identity);
+				const auto* State = Session
+					? dynamic_cast<const DocumentHostTestState*>(Session->EditorState.get()) : nullptr;
+				return Session && ExpectedState && Session->EditorState.get() == ExpectedState && State &&
+					State->Value == ExpectedValue && State->Undo.size() == 1 && State->Undo.front() == 0 &&
+					State->Redo.empty() && !Session->IsDirty();
+			};
+			const auto Activate = [this, &Fail](const auto& Identity, std::string_view Name)
+			{
+				if (!m_Documents.Activate(Identity))
+				{
+					Fail(Name);
+					return false;
+				}
+			return true;
+			};
+
+			switch (m_DocumentWorkspaceSwitchTestPhase)
+			{
+				case DocumentWorkspaceSwitchTestPhase::WaitingForFirstFixture:
+					if (MainHostActive() == m_DocumentWorkspaceSwitchFirstIdentity &&
+						HasWorkspaceDrawn(m_DocumentWorkspaceSwitchFirstIdentity,
+							PulseForgeEditor::EditorDocumentManager::MainHostID))
+					{
+						if (!MainLayoutRetained())
+						{
+							Fail("the Level Editor dockspace was lost while the fixture workspace was active");
+						break;
+						}
+						if (!Activate(m_DocumentWorkspaceSwitchLevelIdentity, "the Level Editor could not be activated"))
+							break;
+						m_DocumentWorkspaceSwitchTestPhase = DocumentWorkspaceSwitchTestPhase::WaitingForLevel;
+					}
+					break;
+				case DocumentWorkspaceSwitchTestPhase::WaitingForLevel:
+					if (MainHostActive() == m_DocumentWorkspaceSwitchLevelIdentity && m_LevelWorkspaceDrawnThisFrame)
+					{
+						if (!ViewportInteractionReleased() || !MainLayoutRetained())
+						{
+							Fail("viewport interaction or the Level Editor layout was not preserved on return");
+						break;
+						}
+						if (!Activate(m_DocumentWorkspaceSwitchFirstIdentity, "the first fixture could not be reactivated"))
+							break;
+						m_DocumentWorkspaceSwitchTestPhase =
+							DocumentWorkspaceSwitchTestPhase::WaitingForFirstFixtureAgain;
+					}
+					break;
+				case DocumentWorkspaceSwitchTestPhase::WaitingForFirstFixtureAgain:
+					if (MainHostActive() == m_DocumentWorkspaceSwitchFirstIdentity &&
+						HasWorkspaceDrawn(m_DocumentWorkspaceSwitchFirstIdentity,
+							PulseForgeEditor::EditorDocumentManager::MainHostID))
+					{
+						if (!FixtureStatePreserved(m_DocumentWorkspaceSwitchFirstIdentity,
+							m_DocumentWorkspaceSwitchFirstState, 41) || !ViewportInteractionReleased())
+						{
+							Fail("the first session's identity, value, history, or input isolation changed");
+						break;
+						}
+						if (!Activate(m_DocumentWorkspaceSwitchSecondIdentity, "the second fixture could not be activated"))
+							break;
+						m_DocumentWorkspaceSwitchTestPhase = DocumentWorkspaceSwitchTestPhase::WaitingForSecondFixture;
+					}
+					break;
+				case DocumentWorkspaceSwitchTestPhase::WaitingForSecondFixture:
+					if (MainHostActive() == m_DocumentWorkspaceSwitchSecondIdentity &&
+						HasWorkspaceDrawn(m_DocumentWorkspaceSwitchSecondIdentity,
+							PulseForgeEditor::EditorDocumentManager::MainHostID))
+					{
+						if (!FixtureStatePreserved(m_DocumentWorkspaceSwitchSecondIdentity,
+							m_DocumentWorkspaceSwitchSecondState, 82) || !ViewportInteractionReleased())
+						{
+							Fail("the second session did not retain independent state and history");
+						break;
+						}
+						if (!Activate(m_DocumentWorkspaceSwitchFirstIdentity, "the first fixture could not be activated before transfer"))
+							break;
+						m_DocumentWorkspaceSwitchTestPhase =
+							DocumentWorkspaceSwitchTestPhase::WaitingForNativeTransfer;
+					}
+					break;
+				case DocumentWorkspaceSwitchTestPhase::WaitingForNativeTransfer:
+					if (MainHostActive() == m_DocumentWorkspaceSwitchFirstIdentity &&
+						HasWorkspaceDrawn(m_DocumentWorkspaceSwitchFirstIdentity,
+							PulseForgeEditor::EditorDocumentManager::MainHostID))
+					{
+						const auto NativeHost = m_Documents.CreateNativeHost(
+							PulseForgeEditor::EditorDocumentKind::Texture);
+						if (!NativeHost)
+						{
+							Fail(NativeHost.error());
+						break;
+						}
+						const auto Transfer = m_Documents.Transfer(m_DocumentWorkspaceSwitchFirstIdentity, *NativeHost, 0);
+						if (!Transfer || !m_Documents.Activate(m_DocumentWorkspaceSwitchLevelIdentity))
+						{
+							(void)m_Documents.RemoveEmptyNativeHost(*NativeHost);
+							Fail("the first fixture could not transfer to a native host while preserving the Level Editor");
+							break;
+						}
+						m_DocumentWorkspaceSwitchNativeHostID = *NativeHost;
+						MarkDocumentWorkspaceDirty(true);
+						m_DocumentWorkspaceSwitchTestPhase =
+							DocumentWorkspaceSwitchTestPhase::WaitingForMainTransfer;
+					}
+					break;
+				case DocumentWorkspaceSwitchTestPhase::WaitingForMainTransfer:
+				{
+					const auto* Session = m_Documents.Find(m_DocumentWorkspaceSwitchFirstIdentity);
+					if (Session && Session->HostID == m_DocumentWorkspaceSwitchNativeHostID &&
+						HasWorkspaceDrawn(m_DocumentWorkspaceSwitchFirstIdentity,
+							m_DocumentWorkspaceSwitchNativeHostID))
+					{
+						if (MainHostActive() != m_DocumentWorkspaceSwitchLevelIdentity ||
+							!m_LevelWorkspaceDrawnThisFrame || !ViewportInteractionReleased())
+						{
+							Fail("the Level Editor did not remain available while the native fixture workspace was active");
+							break;
+						}
+						const auto Transfer = m_Documents.Transfer(m_DocumentWorkspaceSwitchFirstIdentity,
+							PulseForgeEditor::EditorDocumentManager::MainHostID, 1);
+						if (!Transfer || !Transfer->EmptiedSourceHost)
+						{
+							Fail("the native fixture host did not reattach cleanly to the main document strip");
+							break;
+						}
+						(void)m_Documents.RemoveEmptyNativeHost(*Transfer->EmptiedSourceHost);
+						if (!Activate(m_DocumentWorkspaceSwitchFirstIdentity,
+							"the reattached fixture could not be activated"))
+							break;
+						MarkDocumentWorkspaceDirty(true);
+						m_DocumentWorkspaceSwitchTestPhase = DocumentWorkspaceSwitchTestPhase::WaitingForMainTransfer;
+					}
+					else if (MainHostActive() == m_DocumentWorkspaceSwitchLevelIdentity && m_LevelWorkspaceDrawnThisFrame &&
+						!ViewportInteractionReleased())
+						Fail("viewport navigation or gizmo state remained captured after the workspace transfer");
+					break;
+				}
+				case DocumentWorkspaceSwitchTestPhase::Complete:
+				case DocumentWorkspaceSwitchTestPhase::Failed:
+					break;
+				case DocumentWorkspaceSwitchTestPhase::Disabled:
+					break;
+			}
+			if (m_DocumentWorkspaceSwitchTestPhase == DocumentWorkspaceSwitchTestPhase::WaitingForMainTransfer &&
+				MainHostActive() == m_DocumentWorkspaceSwitchFirstIdentity &&
+				m_Documents.Find(m_DocumentWorkspaceSwitchFirstIdentity)->HostID ==
+					PulseForgeEditor::EditorDocumentManager::MainHostID &&
+				HasWorkspaceDrawn(m_DocumentWorkspaceSwitchFirstIdentity,
+					PulseForgeEditor::EditorDocumentManager::MainHostID))
+			{
+				if (m_Documents.Find(m_DocumentWorkspaceSwitchFirstIdentity) != m_DocumentWorkspaceSwitchFirstSession ||
+					!FixtureStatePreserved(m_DocumentWorkspaceSwitchFirstIdentity,
+						m_DocumentWorkspaceSwitchFirstState, 41) || !ViewportInteractionReleased() ||
+					!MainLayoutRetained() || m_Scene.get() != m_DocumentWorkspaceSwitchScene ||
+					m_RuntimeScene.get() != m_DocumentWorkspaceSwitchRuntimeScene ||
+					m_SelectedEntity != m_DocumentWorkspaceSwitchSelectedEntity ||
+					glm::length(m_EditorCamera.GetPosition() - m_DocumentWorkspaceSwitchCameraPosition) > 0.0001f ||
+					m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport) !=
+						m_DocumentWorkspaceSwitchSceneViewportVisible ||
+					m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Hierarchy) !=
+						m_DocumentWorkspaceSwitchHierarchyVisible ||
+					m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Inspector) !=
+						m_DocumentWorkspaceSwitchInspectorVisible ||
+					m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::ContentBrowser) !=
+						m_DocumentWorkspaceSwitchContentBrowserVisible)
+				{
+					Fail("document transfer changed workspace state, scene state, camera, selection, or panel visibility");
+					return;
+				}
+				m_DocumentWorkspaceSwitchTestPhase = DocumentWorkspaceSwitchTestPhase::Complete;
+				m_DocumentWorkspaceSwitchTest = false;
+				PF_INFO("Document workspace switch fixture passed: Level -> fixture 1 -> Level -> fixture 1 -> fixture 2, then native/main transfer preserved session, model history, viewport state, and the hidden Level layout");
+			}
+#endif
 		}
 
 		void QueueDocumentHostTabTearOffTestInput()
@@ -5008,6 +5401,26 @@ namespace
 			}
 			const auto Asset = m_Project->GetAssetRegistry().Find(Identifier);
 			const bool DeletedMaterial = Asset && NormalizedExtension(Asset->ProjectRelativePath) == ".material";
+			std::vector<PulseForgeEditor::EditorDocumentIdentity> DeletedDocuments;
+			for (const auto& [Identity, Session] : m_Documents.GetSessions())
+			{
+				(void)Session;
+				if (Identity.Project == m_Project->GetDescription().ID && Identity.Asset == Identifier)
+					DeletedDocuments.push_back(Identity);
+			}
+			auto PreparedClose = PrepareDocumentCloseBatch(DeletedDocuments);
+			if (!PreparedClose)
+			{
+				m_DocumentCloseError = PreparedClose.error();
+				m_PendingDocumentClose.reset();
+				m_PendingDocumentHostClose.reset();
+				m_PendingDocumentCloseBatch = DeletedDocuments;
+				m_DocumentCloseDialogHostID = std::string(PulseForgeEditor::EditorDocumentManager::MainHostID);
+				m_PendingDocumentCloseAction = [this, Identifier] { DeleteAssetAt(Identifier); };
+				m_OpenDocumentCloseDialog = true;
+				SetError(m_DocumentCloseError);
+				return;
+			}
 
 			auto Deleted = PulseForge::AssetOperations::Delete(
 				m_Project->GetAssetRegistry(),
@@ -5022,15 +5435,8 @@ namespace
 			}
 
 			UpdateAssetList();
-			std::vector<PulseForgeEditor::EditorDocumentIdentity> DeletedDocuments;
-			for (const auto& [Identity, Session] : m_Documents.GetSessions())
-			{
-				(void)Session;
-				if (Identity.Project == m_Project->GetDescription().ID && Identity.Asset == Identifier)
-					DeletedDocuments.push_back(Identity);
-			}
-			for (const auto& Identity : DeletedDocuments)
-				(void)CloseDocumentClean(Identity);
+			if (!CommitPreparedDocumentCloseBatch(std::move(*PreparedClose)))
+				return;
 			if (DeletedMaterial)
 				ForgetMaterialDraft(Identifier);
 			if (m_SelectedAsset && *m_SelectedAsset == Identifier)
@@ -5373,7 +5779,7 @@ namespace
 
 		void CloseProjectNow()
 		{
-			if (!ClearCurrentProjectDocumentState())
+			if (!ClearCurrentProjectDocumentState([this] { CloseProjectNow(); }))
 				return;
 			ClearScene();
 			ResetViewportSceneRenderer();
@@ -5862,26 +6268,34 @@ namespace
 			return Dirty;
 		}
 
-		bool CloseDocumentClean(const PulseForgeEditor::EditorDocumentIdentity& Identity)
+		std::expected<PulseForgeEditor::EditorDocumentCloseBatch, std::string> PrepareDocumentCloseBatch(
+			const std::vector<PulseForgeEditor::EditorDocumentIdentity>& Documents) const
 		{
-			auto* Session = m_Documents.Find(Identity);
-			if (!Session)
-				return false;
-			const std::string HostID = Session->HostID;
-			if (m_DocumentEditors.IsRegistered(Identity.Kind) && Session->EditorState &&
-				!m_DocumentEditors.Close(*Session))
+			return PulseForgeEditor::EditorDocumentCloseBatch::Prepare(m_Documents, m_DocumentEditors, Documents);
+		}
+
+		bool CommitPreparedDocumentCloseBatch(PulseForgeEditor::EditorDocumentCloseBatch&& Prepared)
+		{
+			if (auto Result = std::move(Prepared).Commit(m_Documents, m_DocumentEditors); !Result)
 			{
-				SetError("The document editor could not release its session for closing.");
+				m_DocumentCloseError = Result.error();
+				SetError(m_DocumentCloseError);
 				return false;
 			}
-			const auto Status = m_Documents.Close(Identity, PulseForgeEditor::EditorDocumentCloseChoice::Discard,
-				[](const auto&, uint64_t) { return true; },
-				[](const auto&) { return true; });
-			if (Status != PulseForgeEditor::EditorDocumentCloseStatus::Closed)
-				return false;
-			(void)m_Documents.RemoveEmptyNativeHost(HostID);
 			MarkDocumentWorkspaceDirty();
 			return true;
+		}
+
+		bool CloseDocumentBatchClean(const std::vector<PulseForgeEditor::EditorDocumentIdentity>& Documents)
+		{
+			auto Prepared = PrepareDocumentCloseBatch(Documents);
+			if (!Prepared)
+			{
+				m_DocumentCloseError = Prepared.error();
+				SetError(m_DocumentCloseError);
+				return false;
+			}
+			return CommitPreparedDocumentCloseBatch(std::move(*Prepared));
 		}
 
 		void RequestDocumentClose(const PulseForgeEditor::EditorDocumentIdentity& Identity)
@@ -5891,11 +6305,20 @@ namespace
 				return;
 			if (!Session->IsDirty())
 			{
-				(void)CloseDocumentClean(Identity);
+				if (CloseDocumentBatchClean({ Identity }))
+					return;
+				m_PendingDocumentClose = Identity;
+				m_PendingDocumentHostClose.reset();
+				m_PendingDocumentCloseBatch = { Identity };
+				m_DocumentCloseDialogHostID = Session->HostID;
+				m_PendingDocumentCloseAction = {};
+				m_OpenDocumentCloseDialog = true;
 				return;
 			}
+			m_DocumentCloseError.clear();
 			m_PendingDocumentClose = Identity;
 			m_PendingDocumentHostClose.reset();
+			m_PendingDocumentCloseBatch = { Identity };
 			m_DocumentCloseDialogHostID = Session->HostID;
 			m_PendingDocumentCloseAction = {};
 			m_OpenDocumentCloseDialog = true;
@@ -5915,13 +6338,19 @@ namespace
 			});
 			if (DirtyDocuments.empty())
 			{
-				for (const auto& Identity : Documents)
-					(void)CloseDocumentClean(Identity);
-				(void)m_Documents.RemoveEmptyNativeHost(HostID);
+				if (CloseDocumentBatchClean(Documents))
+					return;
+				m_PendingDocumentHostClose = std::string(HostID);
+				m_PendingDocumentCloseBatch = Documents;
+				m_DocumentCloseDialogHostID = std::string(HostID);
+				m_PendingDocumentCloseAction = {};
+				m_OpenDocumentCloseDialog = true;
 				return;
 			}
+			m_DocumentCloseError.clear();
 			m_PendingDocumentClose.reset();
 			m_PendingDocumentHostClose = std::string(HostID);
+			m_PendingDocumentCloseBatch = Documents;
 			m_DocumentCloseDialogHostID = std::string(HostID);
 			m_PendingDocumentCloseAction = {};
 			m_OpenDocumentCloseDialog = true;
@@ -5938,6 +6367,9 @@ namespace
 			}
 			m_PendingDocumentClose.reset();
 			m_PendingDocumentHostClose.reset();
+			m_PendingDocumentCloseBatch.clear();
+			m_PendingCloseAllDocuments = false;
+			m_DocumentCloseError.clear();
 			m_DocumentCloseDialogHostID = std::string(PulseForgeEditor::EditorDocumentManager::MainHostID);
 			m_PendingDocumentCloseAction = std::move(Action);
 			m_OpenDocumentCloseDialog = true;
@@ -5945,8 +6377,17 @@ namespace
 
 		bool ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice Choice)
 		{
+			if (Choice != PulseForgeEditor::EditorDocumentCloseChoice::Save &&
+				Choice != PulseForgeEditor::EditorDocumentCloseChoice::Discard)
+				return false;
+
 			std::vector<PulseForgeEditor::EditorDocumentIdentity> Documents;
-			if (m_PendingDocumentClose)
+			const bool ClosingDocuments = m_PendingDocumentClose.has_value() ||
+				m_PendingDocumentHostClose.has_value() || !m_PendingDocumentCloseBatch.empty() ||
+				m_PendingCloseAllDocuments;
+			if (!m_PendingDocumentCloseBatch.empty())
+				Documents = m_PendingDocumentCloseBatch;
+			else if (m_PendingDocumentClose)
 				Documents.push_back(*m_PendingDocumentClose);
 			else if (m_PendingDocumentHostClose)
 			{
@@ -5955,95 +6396,135 @@ namespace
 			}
 			else
 				Documents = GetDirtyAssetDocuments();
+			if (m_PendingCloseAllDocuments)
+				for (const auto& Identity : GetDirtyAssetDocuments())
+					if (std::find(Documents.begin(), Documents.end(), Identity) == Documents.end())
+						Documents.push_back(Identity);
 
-			if (Choice == PulseForgeEditor::EditorDocumentCloseChoice::Save)
-			{
+			std::vector<PulseForgeEditor::EditorDocumentIdentity> CloseableDocuments;
+			if (ClosingDocuments)
 				for (const auto& Identity : Documents)
-				{
-					auto* Session = m_Documents.Find(Identity);
-					const bool DirtyMaterial = Identity.Kind == PulseForgeEditor::EditorDocumentKind::Material &&
-						m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(Identity.Asset));
-					if (Session && Session->IsDirty())
-					{
-						if (m_DocumentEditors.IsRegistered(Identity.Kind) && Session->EditorState)
-						{
-							if (!m_DocumentEditors.Save(*Session) || Session->IsDirty())
-								return false;
-						}
-						else if (Identity.Kind == PulseForgeEditor::EditorDocumentKind::Material &&
-							!SaveMaterialDraft(Identity.Asset))
-							return false;
-						else if (Identity.Kind != PulseForgeEditor::EditorDocumentKind::Material)
-							return false;
-					}
-					if (DirtyMaterial && !SaveMaterialDraft(Identity.Asset))
-						return false;
-				}
-			}
-			else if (Choice == PulseForgeEditor::EditorDocumentCloseChoice::Discard)
-			{
-				std::vector<std::pair<PulseForgeEditor::EditorDocumentIdentity, PulseForge::MaterialAssetDesc>> Reloaded;
-				for (const auto& Identity : Documents)
-				{
-					auto* Session = m_Documents.Find(Identity);
-					const bool DirtyMaterial = Identity.Kind == PulseForgeEditor::EditorDocumentKind::Material &&
-						m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(Identity.Asset));
-					if ((!Session || !Session->IsDirty()) && !DirtyMaterial)
-						continue;
-					if (Session && Session->IsDirty() && m_DocumentEditors.IsRegistered(Identity.Kind) &&
-						Session->EditorState)
-					{
-						if (!m_DocumentEditors.Discard(*Session))
-						{
-							SetError("The document editor could not restore its saved state; unsaved edits were preserved.");
-							return false;
-						}
-						continue;
-					}
-					if (Identity.Kind != PulseForgeEditor::EditorDocumentKind::Material || !m_Project)
-					{
-						SetError("Discard is unavailable for this document type.");
-						return false;
-					}
-					auto Loaded = PulseForge::MaterialAssetService::Load(
-						Identity.Asset, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
-					if (!Loaded)
-					{
-						SetError("Material reload failed; unsaved draft was preserved: " + Loaded.error().Message);
-						return false;
-					}
-					Reloaded.emplace_back(Identity, std::move(*Loaded));
-				}
-				for (auto& [Identity, Material] : Reloaded)
-				{
-					const std::string Key = GetMaterialDraftKey(Identity.Asset);
-					m_MaterialDrafts[Key] = std::move(Material);
-					m_DirtyMaterialDrafts.erase(Key);
-					m_MaterialEditStarts.erase(Key);
-					m_MaterialHistories[Key].Reset(m_MaterialDrafts[Key]);
-					if (auto* Session = m_Documents.Find(Identity))
-						Session->Revision = Session->SavedRevision;
-				}
-			}
+					if (m_Documents.Find(Identity))
+						CloseableDocuments.push_back(Identity);
 
-			if (m_PendingDocumentClose)
-				(void)CloseDocumentClean(*m_PendingDocumentClose);
-			else if (m_PendingDocumentHostClose)
+			auto ResolveDirtyChanges = [this, &Documents, Choice]() -> std::expected<void, std::string>
 			{
-				const std::string HostID = *m_PendingDocumentHostClose;
-				for (const auto& Identity : Documents)
-					(void)CloseDocumentClean(Identity);
-				(void)m_Documents.RemoveEmptyNativeHost(HostID);
+				if (Choice == PulseForgeEditor::EditorDocumentCloseChoice::Save)
+				{
+					for (const auto& Identity : Documents)
+					{
+						auto* Session = m_Documents.Find(Identity);
+						const bool DirtyMaterial = Identity.Kind == PulseForgeEditor::EditorDocumentKind::Material &&
+							m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(Identity.Asset));
+						if (Session && Session->IsDirty())
+						{
+							if (m_DocumentEditors.IsRegistered(Identity.Kind) && Session->EditorState)
+							{
+								if (!m_DocumentEditors.Save(*Session) || Session->IsDirty())
+									return std::unexpected("The document could not be saved; it remains open.");
+							}
+							else if (Identity.Kind == PulseForgeEditor::EditorDocumentKind::Material &&
+								!SaveMaterialDraft(Identity.Asset))
+								return std::unexpected("The material could not be saved; its draft remains open.");
+							else if (Identity.Kind != PulseForgeEditor::EditorDocumentKind::Material)
+								return std::unexpected("This document type does not provide a save operation.");
+						}
+						if (DirtyMaterial && !SaveMaterialDraft(Identity.Asset))
+							return std::unexpected("The material could not be saved; its draft remains open.");
+					}
+				}
+				else if (Choice == PulseForgeEditor::EditorDocumentCloseChoice::Discard)
+				{
+					std::vector<std::pair<PulseForgeEditor::EditorDocumentIdentity, PulseForge::MaterialAssetDesc>> Reloaded;
+					for (const auto& Identity : Documents)
+					{
+						auto* Session = m_Documents.Find(Identity);
+						const bool DirtyMaterial = Identity.Kind == PulseForgeEditor::EditorDocumentKind::Material &&
+							m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(Identity.Asset));
+						if ((!Session || !Session->IsDirty()) && !DirtyMaterial)
+							continue;
+						if (Session && Session->IsDirty() && m_DocumentEditors.IsRegistered(Identity.Kind) &&
+							Session->EditorState)
+						{
+							if (!m_DocumentEditors.Discard(*Session))
+								return std::unexpected(
+									"The document editor could not restore its saved state; unsaved edits were preserved.");
+							continue;
+						}
+						if (Identity.Kind != PulseForgeEditor::EditorDocumentKind::Material || !m_Project)
+							return std::unexpected("Discard is unavailable for this document type.");
+						auto Loaded = PulseForge::MaterialAssetService::Load(
+							Identity.Asset, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
+						if (!Loaded)
+							return std::unexpected(
+								"Material reload failed; unsaved draft was preserved: " + Loaded.error().Message);
+						Reloaded.emplace_back(Identity, std::move(*Loaded));
+					}
+					for (auto& [Identity, Material] : Reloaded)
+					{
+						const std::string Key = GetMaterialDraftKey(Identity.Asset);
+						m_MaterialDrafts[Key] = std::move(Material);
+						m_DirtyMaterialDrafts.erase(Key);
+						m_MaterialEditStarts.erase(Key);
+						m_MaterialHistories[Key].Reset(m_MaterialDrafts[Key]);
+						if (auto* Session = m_Documents.Find(Identity))
+							Session->Revision = Session->SavedRevision;
+					}
+				}
+				return {};
+			};
+
+			bool CloseContinuationQueued = false;
+			if (ClosingDocuments)
+			{
+				auto CloseResult = PulseForgeEditor::ResolveDocumentCloseBatchWithChanges(
+					m_Documents, m_DocumentEditors, CloseableDocuments,
+					Choice == PulseForgeEditor::EditorDocumentCloseChoice::Discard,
+					ResolveDirtyChanges, m_PendingDocumentCloseAction,
+					[this](std::function<void()> Continuation)
+					{
+						m_DeferredEditorOperations.Enqueue(std::move(Continuation));
+					});
+				if (!CloseResult)
+				{
+					m_DocumentCloseError = CloseResult.error();
+					SetError(m_DocumentCloseError);
+					if (m_DocumentCloseDialogHostID.empty())
+					{
+						if (m_PendingDocumentHostClose)
+							m_DocumentCloseDialogHostID = *m_PendingDocumentHostClose;
+						else if (!Documents.empty())
+							if (const auto* Session = m_Documents.Find(Documents.front()))
+								m_DocumentCloseDialogHostID = Session->HostID;
+						if (m_DocumentCloseDialogHostID.empty())
+							m_DocumentCloseDialogHostID =
+								std::string(PulseForgeEditor::EditorDocumentManager::MainHostID);
+					}
+					return false;
+				}
+				CloseContinuationQueued = true;
+				MarkDocumentWorkspaceDirty();
 			}
-			auto Continuation = std::move(m_PendingDocumentCloseAction);
+			else if (auto Resolved = ResolveDirtyChanges(); !Resolved)
+			{
+				m_DocumentCloseError = Resolved.error();
+				SetError(m_DocumentCloseError);
+				return false;
+			}
 			m_PendingDocumentClose.reset();
 			m_PendingDocumentHostClose.reset();
+			m_PendingDocumentCloseBatch.clear();
+			m_PendingCloseAllDocuments = false;
+			m_DocumentCloseError.clear();
 			m_DocumentCloseDialogHostID.clear();
-			m_PendingDocumentCloseAction = {};
 			m_OpenDocumentCloseDialog = false;
 			ImGui::CloseCurrentPopup();
-			if (Continuation)
-				m_DeferredEditorOperations.Enqueue(std::move(Continuation));
+			if (!CloseContinuationQueued)
+				(void)PulseForgeEditor::QueueDocumentCloseContinuation(true, m_PendingDocumentCloseAction,
+					[this](std::function<void()> Continuation)
+					{
+						m_DeferredEditorOperations.Enqueue(std::move(Continuation));
+					});
 			return true;
 		}
 
@@ -6064,8 +6545,17 @@ namespace
 			if (!PopupVisible)
 				return;
 			std::vector<PulseForgeEditor::EditorDocumentIdentity> DirtyDocuments;
-			if (m_PendingDocumentClose)
+			if (m_PendingCloseAllDocuments)
+				DirtyDocuments = GetDirtyAssetDocuments();
+			else if (m_PendingDocumentClose)
 				DirtyDocuments.push_back(*m_PendingDocumentClose);
+			else if (!m_PendingDocumentCloseBatch.empty())
+				DirtyDocuments = PulseForgeEditor::FilterDirtyDocumentIdentities(
+					m_PendingDocumentCloseBatch, [this](const auto& Identity)
+					{
+						const auto* Session = m_Documents.Find(Identity);
+						return Session && Session->IsDirty();
+					});
 			else if (m_PendingDocumentHostClose)
 			{
 				if (const auto* Host = m_Documents.FindHost(*m_PendingDocumentHostClose))
@@ -6080,7 +6570,18 @@ namespace
 				DirtyDocuments = GetDirtyAssetDocuments();
 			ImGui::TextWrapped("%zu unsaved asset draft%s have changes.", DirtyDocuments.size(),
 				DirtyDocuments.size() == 1 ? "" : "s");
-			ImGui::TextUnformatted("Save or discard these drafts before continuing?");
+			ImGui::TextUnformatted(DirtyDocuments.empty()
+				? "The close request is still pending. Retry it or cancel."
+				: "Save or discard these drafts before continuing?");
+			if (!m_DocumentCloseError.empty())
+				ImGui::TextWrapped("%s", m_DocumentCloseError.c_str());
+			if (DirtyDocuments.empty() && (!m_PendingDocumentCloseBatch.empty() ||
+				m_PendingDocumentClose || m_PendingDocumentHostClose || m_PendingCloseAllDocuments))
+			{
+				if (ImGui::Button("Retry Close", ImVec2(112.0f, 0.0f)))
+					(void)ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice::Save);
+				ImGui::SameLine();
+			}
 			if (ImGui::Button("Save", ImVec2(112.0f, 0.0f)))
 				(void)ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice::Save);
 			ImGui::SameLine();
@@ -6091,8 +6592,11 @@ namespace
 			{
 				m_PendingDocumentClose.reset();
 				m_PendingDocumentHostClose.reset();
+				m_PendingDocumentCloseBatch.clear();
+				m_PendingCloseAllDocuments = false;
 				m_DocumentCloseDialogHostID.clear();
 				m_PendingDocumentCloseAction = {};
+				m_DocumentCloseError.clear();
 				m_OpenDocumentCloseDialog = false;
 				ImGui::CloseCurrentPopup();
 			}
@@ -6101,8 +6605,11 @@ namespace
 			{
 				m_PendingDocumentClose.reset();
 				m_PendingDocumentHostClose.reset();
+				m_PendingDocumentCloseBatch.clear();
+				m_PendingCloseAllDocuments = false;
 				m_DocumentCloseDialogHostID.clear();
 				m_PendingDocumentCloseAction = {};
+				m_DocumentCloseError.clear();
 				m_OpenDocumentCloseDialog = false;
 			}
 		}
@@ -6191,6 +6698,7 @@ namespace
 					if (m_Documents.SetHostBounds(HostID, std::move(Bounds)))
 						MarkDocumentWorkspaceDirty(true);
 				}
+				std::optional<PulseForgeEditor::EditorDocumentIdentity> RegisteredWorkspaceToDraw;
 				if (Visible && IsOpen)
 				{
 					DrawDocumentTabStrip(HostID);
@@ -6199,12 +6707,20 @@ namespace
 					if (CurrentHost && CurrentHost->ActiveDocument)
 					{
 						auto* Session = m_Documents.Find(*CurrentHost->ActiveDocument);
-						if (!Session || !m_DocumentEditors.DrawWorkspace(*Session))
+						if (Session && m_DocumentEditors.IsRegistered(Session->Identity.Kind) && Session->EditorState)
+						{
+							DrawRegisteredDocumentWorkspaceDockspace(*Session);
+							RegisteredWorkspaceToDraw = Session->Identity;
+						}
+						else
 							DrawUnregisteredAssetDocument(*CurrentHost->ActiveDocument);
 					}
 				}
 				DrawDocumentCloseDialog(HostID);
 				ImGui::End();
+				if (Visible && IsOpen && RegisteredWorkspaceToDraw)
+					if (auto* Session = m_Documents.Find(*RegisteredWorkspaceToDraw))
+						DrawRegisteredDocumentWorkspaceContent(*Session);
 			}
 		}
 
@@ -6897,6 +7413,49 @@ namespace
 
 		void DrawWorkspacePanels()
 		{
+		const auto* MainHost = m_Documents.FindHost(PulseForgeEditor::EditorDocumentManager::MainHostID);
+		const std::optional<PulseForgeEditor::EditorDocumentIdentity> MainActive =
+			MainHost ? MainHost->ActiveDocument : std::nullopt;
+		if (MainActive != m_LastMainWorkspaceIdentity)
+		{
+			ResetViewportPanelInteraction();
+			m_LastMainWorkspaceIdentity = MainActive;
+		}
+		const bool LevelWorkspaceActive = !MainActive ||
+			MainActive->Kind == PulseForgeEditor::EditorDocumentKind::Level;
+		m_DocumentWorkspacesDrawnThisFrame.clear();
+			m_DocumentWorkspaceContentsDrawnThisFrame.clear();
+			m_LevelWorkspaceDrawnThisFrame = LevelWorkspaceActive;
+
+			DrawUnsavedChangesDialog();
+			DrawDocumentCloseDialog(PulseForgeEditor::EditorDocumentManager::MainHostID);
+			if (!LevelWorkspaceActive && MainActive)
+			{
+				ResetViewportPanelInteraction();
+				ImGuiViewport* Viewport = ImGui::GetMainViewport();
+				ImGui::SetNextWindowPos(Viewport->WorkPos, ImGuiCond_Always);
+				ImGui::SetNextWindowSize(Viewport->WorkSize, ImGuiCond_Always);
+				bool DrawDocumentWorkspaceContent = false;
+				if (ImGui::Begin("##PFMainDocumentWorkspace", nullptr,
+					ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+						ImGuiWindowFlags_NoDocking))
+					if (auto* Session = m_Documents.Find(*MainActive))
+					{
+						if (m_DocumentEditors.IsRegistered(Session->Identity.Kind) && Session->EditorState)
+						{
+							DrawRegisteredDocumentWorkspaceDockspace(*Session);
+							DrawDocumentWorkspaceContent = true;
+						}
+						else
+							DrawUnregisteredAssetDocument(Session->Identity);
+					}
+				ImGui::End();
+				if (DrawDocumentWorkspaceContent)
+					if (auto* Session = m_Documents.Find(*MainActive))
+						DrawRegisteredDocumentWorkspaceContent(*Session);
+			}
+			if (LevelWorkspaceActive)
+			{
 			if (m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Scene))
 			{
 				if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Scene))
@@ -6943,9 +7502,6 @@ namespace
 				}
 				ImGui::End();
 			}
-			DrawUnsavedChangesDialog();
-			DrawDocumentCloseDialog(PulseForgeEditor::EditorDocumentManager::MainHostID);
-
 			DrawSceneViewportPanel();
 			DrawHierarchyPanel();
 			DrawInspectorPanel();
@@ -6969,7 +7525,80 @@ namespace
 			DrawDeleteAssetDialog();
 			DrawAssetDestinationDialog();
 			DrawConsolePanel();
+			}
 			DrawNativeDocumentHosts();
+			KeepInactiveDocumentWorkspacesAlive();
+		}
+
+		[[nodiscard]] ImGuiID GetDocumentWorkspaceDockspaceID(
+			const PulseForgeEditor::EditorDocumentIdentity& Identity) const
+		{
+			const std::string Key = "PulseForge.DocumentWorkspace/" + Identity.Project.ToString() + "/" +
+				Identity.Asset.ToString() + "/" + std::to_string(static_cast<uint32_t>(Identity.Kind));
+			return ImHashStr(Key.c_str());
+		}
+
+		[[nodiscard]] std::string GetDocumentWorkspaceWindowName(
+			const PulseForgeEditor::EditorDocumentIdentity& Identity) const
+		{
+			return "Document Workspace###PFDocumentWorkspace_" + Identity.Project.ToString() + "_" +
+				Identity.Asset.ToString() + "_" + std::to_string(static_cast<uint32_t>(Identity.Kind));
+		}
+
+		void DrawRegisteredDocumentWorkspaceDockspace(PulseForgeEditor::EditorDocumentSession& Session)
+		{
+			const ImGuiID DockspaceID = GetDocumentWorkspaceDockspaceID(Session.Identity);
+			const std::string WindowName = GetDocumentWorkspaceWindowName(Session.Identity);
+			const ImVec2 Position = ImGui::GetCursorScreenPos();
+			const ImVec2 Size = ImGui::GetContentRegionAvail();
+			if (!ImGui::DockBuilderGetNode(DockspaceID))
+			{
+				ImGui::DockBuilderAddNode(DockspaceID, ImGuiDockNodeFlags_DockSpace);
+				ImGui::DockBuilderSetNodePos(DockspaceID, Position);
+				ImGui::DockBuilderSetNodeSize(DockspaceID,
+					ImVec2((std::max)(Size.x, 1.0f), (std::max)(Size.y, 1.0f)));
+				ImGui::DockBuilderDockWindow(WindowName.c_str(), DockspaceID);
+				ImGui::DockBuilderFinish(DockspaceID);
+			}
+			ImGui::DockSpace(DockspaceID, Size);
+			m_DocumentWorkspacesDrawnThisFrame.insert(DockspaceID);
+		}
+
+		void DrawRegisteredDocumentWorkspaceContent(PulseForgeEditor::EditorDocumentSession& Session)
+		{
+			const std::string WindowName = GetDocumentWorkspaceWindowName(Session.Identity);
+			if (ImGui::Begin(WindowName.c_str(), nullptr, ImGuiWindowFlags_NoCollapse))
+			{
+				if (m_DocumentEditors.DrawWorkspace(Session))
+					m_DocumentWorkspaceContentsDrawnThisFrame.insert_or_assign(
+						GetDocumentWorkspaceDockspaceID(Session.Identity), Session.HostID);
+				else
+					DrawUnregisteredAssetDocument(Session.Identity);
+			}
+			ImGui::End();
+		}
+
+		void KeepInactiveDocumentWorkspacesAlive()
+		{
+			ImGui::SetNextWindowPos(ImVec2(-10000.0f, -10000.0f), ImGuiCond_Always);
+			ImGui::SetNextWindowSize(ImVec2(1.0f, 1.0f), ImGuiCond_Always);
+			if (!ImGui::Begin("##PFInactiveDocumentWorkspaceKeepAlive", nullptr,
+				ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+					ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBackground))
+			{
+				ImGui::End();
+				return;
+			}
+			for (const auto& [Identity, Session] : m_Documents.GetSessions())
+			{
+				(void)Session;
+				if (!m_DocumentEditors.IsRegistered(Identity.Kind))
+					continue;
+				const ImGuiID DockspaceID = GetDocumentWorkspaceDockspaceID(Identity);
+				if (!m_DocumentWorkspacesDrawnThisFrame.contains(DockspaceID))
+					ImGui::DockSpace(DockspaceID, ImVec2(1.0f, 1.0f), ImGuiDockNodeFlags_KeepAliveOnly);
+			}
+			ImGui::End();
 		}
 
 		void CaptureDocumentTabTestInvalidDropTarget(PulseForgeEditor::EditorPanel Panel)
@@ -7167,17 +7796,7 @@ namespace
 
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::SceneViewport))
 			{
-				const auto* MainHost = m_Documents.FindHost(PulseForgeEditor::EditorDocumentManager::MainHostID);
-				const auto* ActiveDocument = MainHost && MainHost->ActiveDocument
-					? &*MainHost->ActiveDocument : nullptr;
-				if (ActiveDocument && ActiveDocument->Kind != PulseForgeEditor::EditorDocumentKind::Level)
-				{
-					ResetViewportPanelInteraction();
-					auto* Session = m_Documents.Find(*ActiveDocument);
-					if (!Session || !m_DocumentEditors.DrawWorkspace(*Session))
-						DrawUnregisteredAssetDocument(*ActiveDocument);
-				}
-				else if (!m_Project)
+				if (!m_Project)
 					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::FolderOpen,
 						"Open a project to render a scene.");
 				else if (!m_Scene)
@@ -12332,6 +12951,7 @@ namespace
 		bool m_OpenUnsavedDialog = false;
 		bool m_OpenDocumentCloseDialog = false;
 		bool m_ApplicationShutdownRequested = false;
+		bool m_PendingCloseAllDocuments = false;
 		bool m_OpenAssetDestinationDialog = false;
 		bool m_AssetDestinationDuplicate = false;
 		ProjectAssetDestinationCreateKind m_AssetDestinationCreateKind = ProjectAssetDestinationCreateKind::None;
@@ -12366,6 +12986,10 @@ namespace
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentClose;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentTabClose;
 		std::optional<std::string> m_PendingDocumentHostClose;
+		std::vector<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentCloseBatch;
+		std::string m_DocumentCloseError;
+		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_LastMainWorkspaceIdentity;
+		std::unordered_set<ImGuiID> m_DocumentWorkspacesDrawnThisFrame;
 		std::optional<PendingDocumentTransfer> m_PendingDocumentTransfer;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_ActiveDocumentTabDrag;
 		std::optional<ImVec2> m_ActiveDocumentTabDragStart;
@@ -12385,6 +13009,7 @@ namespace
 		bool m_DocumentHostTabRoundTripTearOffPending = false;
 		size_t m_DocumentHostTabRoundTripCount = 0;
 		bool m_DocumentHostTabReorderTest = false;
+		bool m_DocumentWorkspaceSwitchTest = false;
 		bool m_DocumentHostTabGroupTest = false;
 		size_t m_DocumentHostTabGroupTestFrameCount = 0;
 		size_t m_DocumentHostTabGroupCycleCount = 0;
@@ -12409,6 +13034,26 @@ namespace
 		DocumentTabReorderTestPhase m_DocumentHostTabReorderTestPhase =
 			DocumentTabReorderTestPhase::Disabled;
 		DocumentTabGroupTestPhase m_DocumentHostTabGroupTestPhase = DocumentTabGroupTestPhase::Disabled;
+		DocumentWorkspaceSwitchTestPhase m_DocumentWorkspaceSwitchTestPhase =
+			DocumentWorkspaceSwitchTestPhase::Disabled;
+		PulseForgeEditor::EditorDocumentIdentity m_DocumentWorkspaceSwitchLevelIdentity;
+		PulseForgeEditor::EditorDocumentIdentity m_DocumentWorkspaceSwitchFirstIdentity;
+		PulseForgeEditor::EditorDocumentIdentity m_DocumentWorkspaceSwitchSecondIdentity;
+		const PulseForgeEditor::EditorDocumentSession* m_DocumentWorkspaceSwitchFirstSession = nullptr;
+		const PulseForgeEditor::EditorDocumentEditorState* m_DocumentWorkspaceSwitchFirstState = nullptr;
+		const PulseForgeEditor::EditorDocumentEditorState* m_DocumentWorkspaceSwitchSecondState = nullptr;
+		const PulseForge::Scene* m_DocumentWorkspaceSwitchScene = nullptr;
+		const PulseForge::Scene* m_DocumentWorkspaceSwitchRuntimeScene = nullptr;
+		std::optional<PulseForge::UUID> m_DocumentWorkspaceSwitchSelectedEntity;
+		glm::vec3 m_DocumentWorkspaceSwitchCameraPosition{ 0.0f };
+		bool m_DocumentWorkspaceSwitchSceneViewportVisible = false;
+		bool m_DocumentWorkspaceSwitchHierarchyVisible = false;
+		bool m_DocumentWorkspaceSwitchInspectorVisible = false;
+		bool m_DocumentWorkspaceSwitchContentBrowserVisible = false;
+		std::string m_DocumentWorkspaceSwitchNativeHostID;
+		ImGuiID m_DocumentWorkspaceSwitchMainDockspaceID = 0;
+		bool m_LevelWorkspaceDrawnThisFrame = false;
+		std::unordered_map<ImGuiID, std::string> m_DocumentWorkspaceContentsDrawnThisFrame;
 		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabReattachTestIdentity;
 		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabReorderTestFirst;
 		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabReorderTestSecond;

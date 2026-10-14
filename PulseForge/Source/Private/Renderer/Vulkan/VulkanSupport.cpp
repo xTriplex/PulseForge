@@ -8,11 +8,12 @@ namespace PulseForge::VulkanSupport
 	SwapchainFrameStartAction ResolveSwapchainFrameStartAction(
 		bool HasCurrentGeneration,
 		bool RecreationRequested,
-		bool CanCreateGeneration) noexcept
+		bool CanCreateGeneration,
+		bool CurrentGenerationUsable) noexcept
 	{
 		if (RecreationRequested && CanCreateGeneration)
 			return SwapchainFrameStartAction::Recreate;
-		return HasCurrentGeneration
+		return HasCurrentGeneration && CurrentGenerationUsable
 			? SwapchainFrameStartAction::PresentCurrent
 			: SwapchainFrameStartAction::Skip;
 	}
@@ -20,10 +21,17 @@ namespace PulseForge::VulkanSupport
 	bool CanCreateSwapchainGeneration(
 		bool PresentationFencesEnabled,
 		bool HasCurrentGeneration,
-		std::size_t DeferredGenerationCount) noexcept
+		std::size_t DeferredGenerationCount,
+		bool CurrentGenerationOutOfDate) noexcept
 	{
-		return PresentationFencesEnabled || !HasCurrentGeneration ||
-			DeferredGenerationCount < MaximumDeferredSwapchainGenerations;
+		if (PresentationFencesEnabled)
+			return true;
+		if (DeferredGenerationCount < MaximumDeferredSwapchainGenerations)
+			return true;
+		if (DeferredGenerationCount > MaximumDeferredSwapchainGenerations)
+			return false;
+		return !HasCurrentGeneration ||
+			(CurrentGenerationOutOfDate && MaximumOutOfDateRecoveryGenerations > 0);
 	}
 
 	bool ShouldRetireDeferredSwapchains(

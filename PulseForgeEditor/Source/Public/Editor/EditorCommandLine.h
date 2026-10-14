@@ -41,6 +41,7 @@ namespace PulseForgeEditor
 		bool EnableDocumentHostTabTearOffTest = false;
 		bool EnableDocumentHostTabReattachTest = false;
 		bool EnableDocumentHostTabReorderTest = false;
+		bool EnableDocumentWorkspaceSwitchTest = false;
 		bool EnableDocumentHostPresentationFailureTest = false;
 		bool EnableDocumentHostAcquireOutOfDateTest = false;
 		bool EnableDocumentHostImageAllocationFailureTest = false;
@@ -96,6 +97,15 @@ namespace PulseForgeEditor
 						EditorCommandLineErrorCode::DuplicateOption,
 						"The --document-host-test-tab-reorder option may be specified only once." });
 				Options.EnableDocumentHostTabReorderTest = true;
+				continue;
+			}
+			if (Arguments[Index] == "--document-workspace-test-switch")
+			{
+				if (Options.EnableDocumentWorkspaceSwitchTest)
+					return std::unexpected(EditorCommandLineError{
+						EditorCommandLineErrorCode::DuplicateOption,
+						"The --document-workspace-test-switch option may be specified only once." });
+				Options.EnableDocumentWorkspaceSwitchTest = true;
 				continue;
 			}
 			if (Arguments[Index] == "--document-host-test-presentation-failure")
@@ -191,6 +201,7 @@ namespace PulseForgeEditor
 					"the Debug-only --document-host-test-fixture, and the Debug-only "
 					"--document-host-reset-layout-test, --document-host-test-tab-tear-off, "
 					"--document-host-test-tab-reattach, --document-host-test-tab-reorder, and "
+					"--document-workspace-test-switch, and "
 					"--document-host-test-presentation-failure, --document-host-test-acquire-out-of-date, "
 					"and --document-host-test-image-allocation-failure." });
 
@@ -238,6 +249,10 @@ namespace PulseForgeEditor
 			return std::unexpected(EditorCommandLineError{
 				EditorCommandLineErrorCode::MissingProjectPath,
 				"The --document-host-test-fixture option requires --project <path>." });
+		if (Options.EnableDocumentWorkspaceSwitchTest && !Options.EnableDocumentHostTestFixture)
+			return std::unexpected(EditorCommandLineError{
+				EditorCommandLineErrorCode::UnexpectedArgument,
+				"The --document-workspace-test-switch option requires --document-host-test-fixture." });
 		if (Options.EnableDocumentHostResetLayoutTest && !Options.EnableDocumentHostTestFixture)
 			return std::unexpected(EditorCommandLineError{
 				EditorCommandLineErrorCode::UnexpectedArgument,
@@ -281,6 +296,14 @@ namespace PulseForgeEditor
 			return std::unexpected(EditorCommandLineError{
 				EditorCommandLineErrorCode::UnexpectedArgument,
 				"The document tab reorder fixture cannot run with another document-host UI fixture." });
+		if (Options.EnableDocumentWorkspaceSwitchTest &&
+			(Options.EnableDocumentHostTabTearOffTest || Options.EnableDocumentHostTabReattachTest ||
+				Options.EnableDocumentHostTabReorderTest || Options.EnableDocumentHostResetLayoutTest ||
+				Options.EnableDocumentHostPresentationFailureTest || Options.EnableDocumentHostAcquireOutOfDateTest ||
+				Options.EnableDocumentHostImageAllocationFailureTest))
+			return std::unexpected(EditorCommandLineError{
+				EditorCommandLineErrorCode::UnexpectedArgument,
+				"The document workspace switch fixture cannot run with another document-host test fixture." });
 		const uint32_t FailureFixtureCount = static_cast<uint32_t>(Options.EnableDocumentHostPresentationFailureTest) +
 			static_cast<uint32_t>(Options.EnableDocumentHostAcquireOutOfDateTest) +
 			static_cast<uint32_t>(Options.EnableDocumentHostImageAllocationFailureTest);

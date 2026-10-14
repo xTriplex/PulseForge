@@ -240,7 +240,7 @@ namespace PulseForgeEditor
 		return {};
 	}
 
-	bool EditorLayout::SubmitDockspace()
+	bool EditorLayout::SubmitDockspace(bool KeepAliveOnly)
 	{
 		if (!m_Initialized || !ImGui::GetCurrentContext())
 			return false;
@@ -270,7 +270,8 @@ namespace PulseForgeEditor
 			m_LayoutInitialized = true;
 		}
 
-		ImGui::DockSpaceOverViewport(DockspaceID, Viewport);
+		ImGui::DockSpaceOverViewport(DockspaceID, Viewport,
+			KeepAliveOnly ? ImGuiDockNodeFlags_KeepAliveOnly : ImGuiDockNodeFlags_None);
 		return ResetApplied;
 	}
 

@@ -113,7 +113,7 @@ namespace PulseForgeEditor
 	{
 	public:
 		[[nodiscard]] std::expected<void, std::string> Initialize();
-		[[nodiscard]] bool SubmitDockspace();
+		[[nodiscard]] bool SubmitDockspace(bool KeepAliveOnly = false);
 
 		[[nodiscard]] bool IsPanelVisible(EditorPanel Panel) const noexcept;
 		[[nodiscard]] bool* GetPanelVisibility(EditorPanel Panel) noexcept;

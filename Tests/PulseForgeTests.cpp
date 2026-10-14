@@ -48,6 +48,7 @@
 #include "Editor/EditorDocumentManager.h"
 #include "Editor/EditorDocumentHostPolicy.h"
 #include "Editor/EditorDocumentEditorRegistry.h"
+#include "Editor/EditorDocumentCloseBatch.h"
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
 #include "Editor/EditorNativeWindowBoundsPolicy.h"
@@ -4626,6 +4627,7 @@ namespace
 			std::vector<int> Undo;
 			std::vector<int> Redo;
 			bool FailSave = false;
+			bool FailClose = false;
 			bool EditDuringSave = false;
 		};
 
@@ -4706,7 +4708,15 @@ namespace
 		{
 			return true;
 		};
-		Adapter.Close = [](EditorDocumentSession&) { return true; };
+		Adapter.PrepareClose = [](const EditorDocumentSession& Session) -> std::expected<void, std::string>
+		{
+			const auto* State = dynamic_cast<const Model*>(Session.EditorState.get());
+			if (State && State->FailClose)
+				return std::unexpected("close rejected by test fixture");
+			return {};
+		};
+		size_t CloseCount = 0;
+		Adapter.Close = [&CloseCount](EditorDocumentSession&) { ++CloseCount; };
 		PF_CHECK(Tests, !Registry.IsRegistered(EditorDocumentKind::Texture));
 		PF_CHECK(Tests, Registry.Register(Adapter).has_value());
 		PF_CHECK(Tests, Registry.IsRegistered(EditorDocumentKind::Texture));
@@ -4771,7 +4781,34 @@ namespace
 		PF_CHECK(Tests, SessionA->ProjectRelativePath == "Assets/Renamed/A.fixture" &&
 			SessionA->Revision == BeforeLocationChangeRevision);
 
+		StateA->Value = 13;
 		PF_CHECK(Tests, Manager.MarkEdited(IdentityA));
+		StateA->FailClose = true;
+		const std::array<EditorDocumentIdentity, 1> SingleCloseIdentity = { IdentityA };
+		size_t DestructiveDiscardCount = 0;
+		std::function<void()> PendingDiscardContinuation = [] {};
+		std::vector<std::function<void()>> DiscardContinuations;
+		const auto RejectedDirtyDiscard = ResolveDocumentCloseBatchWithChanges(
+			Manager, Registry, SingleCloseIdentity, true,
+			[&]() -> std::expected<void, std::string>
+			{
+				++DestructiveDiscardCount;
+				return Registry.Discard(*SessionA)
+					? std::expected<void, std::string>{}
+					: std::unexpected("discard rejected by test fixture");
+			},
+			PendingDiscardContinuation,
+			[&DiscardContinuations](std::function<void()> Action)
+			{
+				DiscardContinuations.push_back(std::move(Action));
+			});
+		PF_CHECK(Tests, !RejectedDirtyDiscard && DestructiveDiscardCount == 0 && PendingDiscardContinuation);
+		PF_CHECK(Tests, Manager.Find(IdentityA) == SessionA && StateA->Value == 13 && SessionA->IsDirty());
+		PF_CHECK(Tests, DiscardContinuations.empty() && CloseCount == 0);
+		const auto FailedPreparation = Registry.PrepareClose(*SessionA);
+		PF_CHECK(Tests, !FailedPreparation && CloseCount == 0 && Manager.Find(IdentityA) == SessionA && StateA->Value == 13);
+		StateA->FailClose = false;
+		PF_CHECK(Tests, Registry.PrepareClose(*SessionA).has_value() && CloseCount == 0);
 		PF_CHECK(Tests, Manager.Close(IdentityA, EditorDocumentCloseChoice::Cancel,
 			[&Registry](const auto&, uint64_t) { return false; },
 			[&Registry](const auto&) { return false; }) == EditorDocumentCloseStatus::Cancelled);
@@ -4793,6 +4830,98 @@ namespace
 				? dynamic_cast<const Model*>(RestoredSession->EditorState.get()) : nullptr;
 			PF_CHECK(Tests, RestoredModel && RestoredModel->Value == 12);
 		}
+
+		PF_CHECK(Tests, Registry.Save(*SessionA));
+		StateA->Value = 77;
+		PF_CHECK(Tests, Manager.MarkEdited(IdentityA) && Registry.Save(*SessionA));
+		StateA->Undo.push_back(StateA->Value);
+		StateA->Value = 78;
+		PF_CHECK(Tests, Manager.MarkEdited(IdentityA) && SessionA->IsDirty());
+		PF_CHECK(Tests, Registry.Save(*SessionA) && !SessionA->IsDirty() && SavedValues[*AssetA] == 78);
+		StateA->FailClose = true;
+		size_t SingleCloseContinuationCount = 0;
+		std::function<void()> PendingSingleCloseContinuation = [&SingleCloseContinuationCount]
+		{
+			++SingleCloseContinuationCount;
+		};
+		std::vector<std::function<void()>> SingleCloseContinuations;
+		const auto FailedSavedDirtyTabClose = ResolveDocumentCloseBatch(
+			Manager, Registry, SingleCloseIdentity, PendingSingleCloseContinuation,
+			[&SingleCloseContinuations](std::function<void()> Action)
+			{
+				SingleCloseContinuations.push_back(std::move(Action));
+			});
+		PF_CHECK(Tests, !FailedSavedDirtyTabClose && PendingSingleCloseContinuation &&
+			SingleCloseContinuations.empty() && SingleCloseContinuationCount == 0);
+		PF_CHECK(Tests, Manager.Find(IdentityA) == SessionA && SessionA->EditorState.get() == OriginalStateAddress &&
+			!SessionA->IsDirty() && StateA->Value == 78 && SavedValues[*AssetA] == 78);
+		PendingSingleCloseContinuation = {};
+		PF_CHECK(Tests, Manager.Find(IdentityA) == SessionA && StateA->Value == 78 && SingleCloseContinuationCount == 0);
+		StateA->FailClose = false;
+		PF_CHECK(Tests, Registry.Save(*SessionB));
+		if (NativeHost)
+		{
+			const auto* Host = Manager.FindHost(*NativeHost);
+			const size_t DestinationIndex = Host ? Host->Documents.size() : 0;
+			PF_CHECK(Tests, Manager.Transfer(IdentityB, *NativeHost, DestinationIndex).has_value());
+		}
+		StateB->FailClose = true;
+		const auto* SharedHostBeforeClose = Manager.FindHost(SessionA->HostID);
+		const auto HostOrderBeforeClose = SharedHostBeforeClose ? SharedHostBeforeClose->Documents
+			: std::vector<EditorDocumentIdentity>{};
+		const auto ActiveBeforeClose = SharedHostBeforeClose ? SharedHostBeforeClose->ActiveDocument
+			: std::optional<EditorDocumentIdentity>{};
+		const std::array<EditorDocumentIdentity, 2> BatchIdentities = { IdentityA, IdentityB };
+		auto RejectedBatch = EditorDocumentCloseBatch::Prepare(Manager, Registry, BatchIdentities);
+		PF_CHECK(Tests, !RejectedBatch && CloseCount == 0);
+		PF_CHECK(Tests, SharedHostBeforeClose && HostOrderBeforeClose.size() == 2 &&
+			SessionA->HostID == SessionB->HostID);
+		PF_CHECK(Tests, SavedValues[*AssetA] == 78 && Manager.Find(IdentityA) == SessionA && !SessionA->IsDirty());
+		PF_CHECK(Tests, Manager.Find(IdentityB) == SessionB && StateB->Value == 22);
+		const auto* SharedHostAfterFailure = Manager.FindHost(SessionA->HostID);
+		PF_CHECK(Tests, SharedHostAfterFailure && SharedHostAfterFailure->Documents == HostOrderBeforeClose &&
+			SharedHostAfterFailure->ActiveDocument == ActiveBeforeClose);
+		size_t ProjectSwitchContinuationCount = 0;
+		size_t ShutdownContinuationCount = 0;
+		std::vector<std::function<void()>> QueuedContinuations;
+		std::function<void()> PendingProjectSwitchContinuation = [&ProjectSwitchContinuationCount]
+		{
+			++ProjectSwitchContinuationCount;
+		};
+		const auto EnqueueContinuation = [&QueuedContinuations](std::function<void()> Action)
+		{
+			QueuedContinuations.push_back(std::move(Action));
+		};
+		const auto FailedProjectSwitchClose = ResolveDocumentCloseBatch(
+			Manager, Registry, BatchIdentities, PendingProjectSwitchContinuation, EnqueueContinuation);
+		PF_CHECK(Tests, !FailedProjectSwitchClose && PendingProjectSwitchContinuation && QueuedContinuations.empty());
+		PF_CHECK(Tests, ProjectSwitchContinuationCount == 0 && ShutdownContinuationCount == 0 &&
+			CloseCount == 0 && Manager.Find(IdentityA) == SessionA &&
+			Manager.Find(IdentityB) == SessionB);
+		PendingProjectSwitchContinuation = {};
+		PF_CHECK(Tests, Manager.Find(IdentityA) == SessionA && Manager.Find(IdentityB) == SessionB &&
+			ProjectSwitchContinuationCount == 0);
+		std::function<void()> PendingShutdownContinuation = [&ShutdownContinuationCount]
+		{
+			++ShutdownContinuationCount;
+		};
+		const auto FailedShutdownClose = ResolveDocumentCloseBatch(
+			Manager, Registry, BatchIdentities, PendingShutdownContinuation, EnqueueContinuation);
+		PF_CHECK(Tests, !FailedShutdownClose && PendingShutdownContinuation && QueuedContinuations.empty() &&
+			ShutdownContinuationCount == 0 && Manager.Find(IdentityA) == SessionA && Manager.Find(IdentityB) == SessionB);
+		StateB->FailClose = false;
+		const auto RetriedCoordinatedClose = ResolveDocumentCloseBatch(
+			Manager, Registry, BatchIdentities, PendingShutdownContinuation, EnqueueContinuation);
+		PF_CHECK(Tests, RetriedCoordinatedClose.has_value());
+		PF_CHECK(Tests, !PendingShutdownContinuation && QueuedContinuations.size() == 1 &&
+			ProjectSwitchContinuationCount == 0 && ShutdownContinuationCount == 0);
+		PF_CHECK(Tests, CloseCount == 2 && !Manager.Find(IdentityA) && !Manager.Find(IdentityB));
+		QueuedContinuations.front()();
+		PF_CHECK(Tests, ShutdownContinuationCount == 1 && ProjectSwitchContinuationCount == 0);
+		PendingShutdownContinuation = [&ShutdownContinuationCount] { ShutdownContinuationCount += 100; };
+		PendingShutdownContinuation = {};
+		PF_CHECK(Tests, QueueDocumentCloseContinuation(true, PendingShutdownContinuation, EnqueueContinuation));
+		PF_CHECK(Tests, QueuedContinuations.size() == 1 && ShutdownContinuationCount == 1);
 	}
 
 	void TestEditorDocumentWorkspaceCodec(TestRunner& Tests)
@@ -5574,6 +5703,21 @@ namespace
 		PF_CHECK(Tests, !HostFixtureWithoutProjectResult);
 		PF_CHECK(Tests, !HostFixtureWithoutProjectResult &&
 			HostFixtureWithoutProjectResult.error().Code == EditorCommandLineErrorCode::MissingProjectPath);
+		const std::array DocumentWorkspaceSwitchFixtureArguments = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-test-fixture"),
+			std::string_view("--document-workspace-test-switch") };
+		const auto DocumentWorkspaceSwitchFixtureOptions =
+			ParseEditorCommandLine(DocumentWorkspaceSwitchFixtureArguments, Root);
+		PF_CHECK(Tests, DocumentWorkspaceSwitchFixtureOptions.has_value());
+		PF_CHECK(Tests, DocumentWorkspaceSwitchFixtureOptions &&
+			DocumentWorkspaceSwitchFixtureOptions->EnableDocumentWorkspaceSwitchTest);
+		const std::array DocumentWorkspaceSwitchWithoutFixture = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-workspace-test-switch") };
+		const auto DocumentWorkspaceSwitchWithoutFixtureOptions =
+			ParseEditorCommandLine(DocumentWorkspaceSwitchWithoutFixture, Root);
+		PF_CHECK(Tests, !DocumentWorkspaceSwitchWithoutFixtureOptions);
 		const std::array DuplicateHostFixtureArguments = {
 			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
 			std::string_view("--document-host-test-fixture"),
@@ -9019,6 +9163,13 @@ end
 		PF_CHECK(Tests, CanCreateSwapchainGeneration(false, true, MaximumDeferredSwapchainGenerations - 1));
 		PF_CHECK(Tests, !CanCreateSwapchainGeneration(false, true, MaximumDeferredSwapchainGenerations));
 		PF_CHECK(Tests, CanCreateSwapchainGeneration(false, false, MaximumDeferredSwapchainGenerations));
+		PF_CHECK(Tests, CanCreateSwapchainGeneration(false, true, MaximumDeferredSwapchainGenerations, true));
+		PF_CHECK(Tests, !CanCreateSwapchainGeneration(false, true,
+			MaximumDeferredSwapchainGenerations + MaximumOutOfDateRecoveryGenerations, true));
+		PF_CHECK(Tests, ResolveSwapchainFrameStartAction(true, true, false, false) ==
+			SwapchainFrameStartAction::Skip);
+		PF_CHECK(Tests, ResolveSwapchainFrameStartAction(true, true, false, true) ==
+			SwapchainFrameStartAction::PresentCurrent);
 		PF_CHECK(Tests, !ShouldRetireDeferredSwapchains(false, false, 2, 2, true));
 		PF_CHECK(Tests, !ShouldRetireDeferredSwapchains(false, true, 2, 1, true));
 		PF_CHECK(Tests, !ShouldRetireDeferredSwapchains(false, true, 2, 2, false));
