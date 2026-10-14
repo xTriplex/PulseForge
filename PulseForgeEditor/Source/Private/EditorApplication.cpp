@@ -38,6 +38,7 @@
 #include "Editor/EditorMeshPickingCache.h"
 #include "Editor/EditorDeferredOperationQueue.h"
 #include "Editor/EditorConsolePanel.h"
+#include "Editor/EditorHierarchyPanel.h"
 #include "EditorWorkspacePresentation.h"
 #include "Editor/EditorLayout.h"
 #include "EditorViewportCamera.h"
@@ -52,8 +53,6 @@
 #include "Editor/EditorProjectOpening.h"
 #include "EditorApplicationFactory.h"
 #include "Editor/EditorInteractionPolicy.h"
-#include "Editor/EditorEntityIconPolicy.h"
-#include "Editor/EditorHierarchyRowPolicy.h"
 #include "Editor/EditorGlfwViewportPolicy.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
 #include "Editor/EditorPlatformViewportPolicy.h"
@@ -392,72 +391,6 @@ namespace
 		return NormalizedExtension(Path) == ".meta";
 	}
 
-	PulseForgeEditor::EditorIcon GetEntityIcon(const PulseForge::Entity& Entity)
-	{
-		PulseForgeEditor::EditorEntityIconComponents Components;
-		const auto Camera = Entity.GetCamera();
-		Components.HasCamera = Camera && Camera->has_value();
-
-		const auto Mesh = Entity.GetMeshRenderer();
-		Components.HasMesh = Mesh && Mesh->has_value();
-		if (Components.HasCamera || Components.HasMesh)
-			return PulseForgeEditor::GetEditorEntityIcon(Components);
-
-		const auto SpotLight = Entity.GetSpotLight();
-		Components.HasSpotLight = SpotLight && SpotLight->has_value();
-		if (Components.HasSpotLight)
-			return PulseForgeEditor::GetEditorEntityIcon(Components);
-
-		const auto PointLight = Entity.GetPointLight();
-		Components.HasPointLight = PointLight && PointLight->has_value();
-		if (Components.HasPointLight)
-			return PulseForgeEditor::GetEditorEntityIcon(Components);
-
-		const auto DirectionalLight = Entity.GetDirectionalLight();
-		Components.HasDirectionalLight = DirectionalLight && DirectionalLight->has_value();
-		if (Components.HasDirectionalLight)
-			return PulseForgeEditor::GetEditorEntityIcon(Components);
-
-		const auto EnvironmentLight = Entity.GetEnvironmentLight();
-		Components.HasEnvironmentLight = EnvironmentLight && EnvironmentLight->has_value();
-		if (Components.HasEnvironmentLight)
-			return PulseForgeEditor::GetEditorEntityIcon(Components);
-
-		const auto AudioSource = Entity.GetAudioSource();
-		Components.HasAudioSource = AudioSource && AudioSource->has_value();
-		if (Components.HasAudioSource)
-			return PulseForgeEditor::GetEditorEntityIcon(Components);
-
-		const auto AudioListener = Entity.GetAudioListener();
-		Components.HasAudioListener = AudioListener && AudioListener->has_value();
-
-		return PulseForgeEditor::GetEditorEntityIcon(Components);
-	}
-
-	std::string FitHierarchyEntityName(std::string_view Name, float AvailableWidth)
-	{
-		constexpr std::string_view Ellipsis = "\xe2\x80\xa6";
-		constexpr size_t MaximumLabelBytes = 480;
-		size_t PrefixLength = PulseForgeEditor::Utf8SafePrefixLength(Name, MaximumLabelBytes);
-		while (PrefixLength > 0)
-		{
-			const std::string_view Prefix = Name.substr(0, PrefixLength);
-			const float Width = ImGui::CalcTextSize(Prefix.data(), Prefix.data() + Prefix.size()).x +
-				ImGui::CalcTextSize(Ellipsis.data(), Ellipsis.data() + Ellipsis.size()).x;
-			if (Width <= AvailableWidth)
-			{
-				std::string Result(Prefix);
-				Result.append(Ellipsis);
-				return Result;
-			}
-			PrefixLength = PulseForgeEditor::Utf8SafePrefixLength(Name, PrefixLength - 1);
-		}
-
-		return ImGui::CalcTextSize(Ellipsis.data(), Ellipsis.data() + Ellipsis.size()).x <= AvailableWidth
-			? std::string(Ellipsis)
-			: std::string{};
-	}
-
 	std::string FitEditorContextLabel(std::string_view Label, float AvailableWidth)
 	{
 		constexpr std::string_view Ellipsis = "\xe2\x80\xa6";
@@ -492,7 +425,7 @@ namespace
 		nfdu8char_t* m_Path = nullptr;
 	};
 
-	class EditorLayer final : public PulseForge::Layer
+	class EditorLayer final : public PulseForge::Layer, public PulseForgeEditor::EditorHierarchyPanelActionSink
 	{
 		struct DocumentHostTestState final : PulseForgeEditor::EditorDocumentEditorState
 		{
@@ -712,6 +645,39 @@ namespace
 			if (m_DocumentHostTestFixture)
 				RegisterDocumentHostTestEditor();
 			#endif
+		}
+
+		void HandleHierarchyPanelAction(
+			const PulseForgeEditor::EditorHierarchyPanelAction& Action) override
+		{
+			using PulseForgeEditor::EditorHierarchyPanelActionKind;
+			switch (Action.Kind)
+			{
+			case EditorHierarchyPanelActionKind::CreateEntity:
+				CreateEntityFromEditor();
+				break;
+			case EditorHierarchyPanelActionKind::DuplicateSelection:
+				DuplicateSelectedEntity();
+				break;
+			case EditorHierarchyPanelActionKind::DeleteSelection:
+				DeleteSelectedEntity();
+				break;
+			case EditorHierarchyPanelActionKind::CreatePrefab:
+				CreatePrefabFromSelectedEntity();
+				break;
+			case EditorHierarchyPanelActionKind::ToggleVisibility:
+				ToggleEntityVisibility(Action.Entity);
+				break;
+			case EditorHierarchyPanelActionKind::MakeRoot:
+				ReparentEntity(Action.Entity, std::nullopt);
+				break;
+			case EditorHierarchyPanelActionKind::ParentUnderSelection:
+				ReparentEntity(Action.Entity, Action.Parent);
+				break;
+			case EditorHierarchyPanelActionKind::ReportError:
+				SetError(Action.Message);
+				break;
+			}
 		}
 
 		static EditorLayer* GetPlatformCallbackLayer() noexcept
@@ -1600,11 +1566,6 @@ namespace
 			}
 		}
 
-		[[nodiscard]] bool IsEntitySelected(const PulseForge::UUID& Identifier) const noexcept
-		{
-			return m_SceneWorkspace.Selection().Contains(Identifier);
-		}
-
 		[[nodiscard]] bool IsEntityEffectivelyVisible(const PulseForge::Entity& Entity) const
 		{
 			std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Visited;
@@ -1636,12 +1597,6 @@ namespace
 		void ToggleEntitySelection(const PulseForge::UUID& Identifier)
 		{
 			m_SceneWorkspace.Selection().Toggle(Identifier);
-		}
-
-		void SelectHierarchyRange(const PulseForge::UUID& Identifier, bool AddToSelection)
-		{
-			(void)m_SceneWorkspace.Selection().SelectRange(
-				m_SceneWorkspace.VisibleHierarchyOrder(), Identifier, AddToSelection);
 		}
 
 		[[nodiscard]] std::expected<std::vector<PulseForge::Entity>, std::string> GetTopLevelSelectedEntities() const
@@ -2016,7 +1971,7 @@ namespace
 			else
 			{
 				SetEditorPanelVisible(PulseForgeEditor::EditorPanel::Hierarchy, true);
-				m_FocusHierarchySearchNextFrame = true;
+				m_HierarchyPanel.FocusSearchNextFrame();
 			}
 		}
 
@@ -8457,100 +8412,9 @@ namespace
 			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Hierarchy))
 				return;
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Hierarchy))
-			{
-				m_SceneWorkspace.BeginHierarchyFrame();
-				if (m_EditorStyle.BeginToolbar("HierarchyToolbar", 44.0f))
-				{
-					ImGui::BeginDisabled(!m_Scene);
-					if (m_EditorStyle.IconButton(
-						PulseForgeEditor::EditorIcon::Add, "Create", "CreateEntity", "Create a new entity", false, 38.0f, 34.0f))
-						CreateEntityFromEditor();
-					ImGui::SameLine();
-					ImGui::BeginDisabled(!SelectedEntity());
-					if (m_EditorStyle.IconButton(
-						PulseForgeEditor::EditorIcon::Duplicate, "Duplicate", "DuplicateEntity", "Duplicate selected entity",
-						false, 38.0f, 34.0f))
-						DuplicateSelectedEntity();
-					ImGui::SameLine();
-					if (m_EditorStyle.IconButton(
-						PulseForgeEditor::EditorIcon::Delete, "Delete", "DeleteEntity", "Delete selected entity", true,
-						34.0f, 32.0f))
-						DeleteSelectedEntity();
-					ImGui::SameLine();
-					if (m_EditorStyle.IconButton(
-						PulseForgeEditor::EditorIcon::Prefab,
-						"Prefab",
-						"CreatePrefab",
-						"Create a prefab from the selection",
-						false,
-						38.0f,
-						34.0f))
-						CreatePrefabFromSelectedEntity();
-					ImGui::EndDisabled();
-					ImGui::EndDisabled();
-				}
-				m_EditorStyle.EndToolbar();
-				ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-				ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 7.0f));
-				if (m_FocusHierarchySearchNextFrame)
-				{
-					ImGui::SetKeyboardFocusHere();
-					m_FocusHierarchySearchNextFrame = false;
-				}
-				ImGui::InputTextWithHint("##HierarchySearch", "Search hierarchy...", &m_HierarchySearch);
-				ImGui::PopStyleVar();
-				ImGui::Separator();
-
-				if (!m_Scene)
-					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Scene, "No scene is open.");
-				else if (m_Scene->GetEntityCount() == 0)
-					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Entity, "This scene has no entities.");
-				else
-				{
-					std::function<void()> HierarchyAction;
-					const std::vector<PulseForge::Entity> Entities = m_Scene->GetEntities();
-					std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> VisibleEntities;
-					if (!m_HierarchySearch.empty())
-					{
-						VisibleEntities.reserve(Entities.size());
-						for (const PulseForge::Entity& Candidate : Entities)
-						{
-							const auto CandidateTag = Candidate.GetTag();
-							if (!CandidateTag || !PulseForgeEditor::ContainsCaseInsensitive(
-								CandidateTag->Name, m_HierarchySearch))
-								continue;
-
-							PulseForge::Entity Ancestor = Candidate;
-							while (Ancestor)
-							{
-								if (!VisibleEntities.insert(Ancestor.GetUUID()).second)
-									break;
-								const auto Parent = Ancestor.GetParent();
-								if (!Parent || !Parent->has_value())
-									break;
-								Ancestor = **Parent;
-							}
-						}
-					}
-					const auto* Visible = m_HierarchySearch.empty() ? nullptr : &VisibleEntities;
-					ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(7.0f, 6.0f));
-					for (const PulseForge::Entity& Entity : Entities)
-					{
-						const auto Parent = Entity.GetParent();
-						if (Parent && !Parent->has_value() && (!Visible || Visible->contains(Entity.GetUUID())))
-							DrawEntityTree(Entity, HierarchyAction, Visible);
-					}
-					ImGui::PopStyleVar();
-					if (HierarchyAction)
-						HierarchyAction();
-					if (Visible && Visible->empty())
-						m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Search, "No entities match this search.");
-				}
-				m_SceneWorkspace.CompleteHierarchyFrame();
-			}
+				m_HierarchyPanel.DrawContents(m_Scene.get(), m_SceneWorkspace, m_EditorStyle, *this);
 			ImGui::End();
 		}
-
 		void CreateEntityFromEditor()
 		{
 			if (!m_Scene)
@@ -8891,183 +8755,6 @@ namespace
 				SetError("Entity reparenting failed: " + Recorded.error());
 		}
 
-		void DrawEntityTree(
-			const PulseForge::Entity& Entity,
-			std::function<void()>& DeferredHierarchyAction,
-			const std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash>* VisibleEntities = nullptr)
-		{
-			const auto Tag = Entity.GetTag();
-			if (!Tag)
-				return;
-
-			const auto Parent = Entity.GetParent();
-			if (!Parent)
-			{
-				SetError("Could not inspect an entity's hierarchy: " + Parent.error().Message);
-				return;
-			}
-			const auto Children = Entity.GetChildren();
-			const PulseForgeEditor::EditorIcon Icon = GetEntityIcon(Entity);
-			const std::string Identifier = Entity.GetUUID().ToString();
-			const bool IsSelected = IsEntitySelected(Entity.GetUUID());
-			m_SceneWorkspace.RecordVisibleHierarchyEntity(Entity.GetUUID());
-			ImGui::PushID(Identifier.c_str());
-			ImGuiTreeNodeFlags Flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanLabelWidth;
-			if (!Children || Children->empty())
-				Flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
-			Flags |= ImGuiTreeNodeFlags_FramePadding;
-
-			if (VisibleEntities && Children && !Children->empty())
-				ImGui::SetNextItemOpen(true, ImGuiCond_Always);
-			const bool IsEffectivelyVisible = IsEntityEffectivelyVisible(Entity);
-			ImGui::PushStyleVar(ImGuiStyleVar_Alpha, IsEffectivelyVisible ? 1.0f : 0.48f);
-			const float RowStartX = ImGui::GetCursorPosX();
-			const float ContentRightX = ImGui::GetWindowContentRegionMax().x;
-			const float LabelStartX = RowStartX + ImGui::GetTreeNodeToLabelSpacing() + ImGui::GetFontSize() +
-				ImGui::CalcTextSize(" ").x;
-			const ImGuiStyle& Style = ImGui::GetStyle();
-			const auto InitialRowLayout = PulseForgeEditor::ComputeEditorHierarchyRowLayout(
-				RowStartX,
-				ContentRightX,
-				LabelStartX,
-				RowStartX,
-				RowStartX,
-				Style.FramePadding.x);
-			const float MaximumNameWidth = InitialRowLayout.MaximumNameWidth;
-			std::string TruncatedNameStorage;
-			std::string_view DisplayName = Tag->Name;
-			if (Tag->Name.size() > 480 ||
-				ImGui::CalcTextSize(Tag->Name.data(), Tag->Name.data() + Tag->Name.size()).x > MaximumNameWidth)
-			{
-				TruncatedNameStorage = FitHierarchyEntityName(Tag->Name, MaximumNameWidth);
-				DisplayName = TruncatedNameStorage;
-			}
-			const bool NameTruncated = !TruncatedNameStorage.empty() || DisplayName.size() != Tag->Name.size();
-			const ImVec2 RowScreenMinimum = ImGui::GetCursorScreenPos();
-			const float DisplayNameWidth = ImGui::CalcTextSize(DisplayName.data(), DisplayName.data() + DisplayName.size()).x;
-			const float ExpectedTreeItemHitRightX = LabelStartX + DisplayNameWidth + Style.FramePadding.x;
-			const auto BackgroundRowLayout = PulseForgeEditor::ComputeEditorHierarchyRowLayout(
-				RowStartX,
-				ContentRightX,
-				LabelStartX,
-				ExpectedTreeItemHitRightX,
-				RowStartX,
-				Style.FramePadding.x);
-			const ImVec2 RowScreenMaximum(
-				RowScreenMinimum.x + BackgroundRowLayout.SelectionBackgroundWidth,
-				RowScreenMinimum.y + PulseForgeEditor::EditorHierarchyEyeButtonHeight);
-			const bool SelectionRegionHovered = ImGui::IsWindowHovered() &&
-				ImGui::IsMouseHoveringRect(RowScreenMinimum, RowScreenMaximum);
-			if (IsSelected || SelectionRegionHovered)
-			{
-				const ImGuiCol Background = IsSelected ? ImGuiCol_Header : ImGuiCol_HeaderHovered;
-				ImGui::GetWindowDrawList()->AddRectFilled(
-					RowScreenMinimum,
-					RowScreenMaximum,
-					ImGui::GetColorU32(ImGui::GetStyleColorVec4(Background)));
-			}
-			const float RowFramePaddingY = (std::max)(
-				0.0f, (PulseForgeEditor::EditorHierarchyEyeButtonHeight - ImGui::GetFontSize()) * 0.5f);
-			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(Style.FramePadding.x, RowFramePaddingY));
-			ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-			ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-			ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-			const bool IsOpen = m_EditorStyle.TreeNode(Icon, DisplayName, "Entity", Flags);
-			ImGui::PopStyleColor(3);
-			ImGui::PopStyleVar();
-			const bool TreeItemClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
-			const bool TreeItemRightClicked = ImGui::IsItemClicked(ImGuiMouseButton_Right);
-			const bool TreeItemHovered = ImGui::IsItemHovered();
-			const ImVec2 TreeItemRectMin = ImGui::GetItemRectMin();
-			const ImVec2 TreeItemRectMax = ImGui::GetItemRectMax();
-			const float TreeItemHitRightX = TreeItemRectMax.x - ImGui::GetWindowPos().x;
-			if (TreeItemRightClicked)
-				ImGui::OpenPopup("Entity Actions");
-
-			ImGui::SameLine(0.0f, 0.0f);
-			const auto RowLayout = PulseForgeEditor::ComputeEditorHierarchyRowLayout(
-				RowStartX,
-				ContentRightX,
-				LabelStartX,
-				TreeItemHitRightX,
-				ImGui::GetCursorPosX(),
-				Style.FramePadding.x);
-			bool GutterClicked = false;
-			bool GutterRightClicked = false;
-			bool GutterHovered = false;
-			if (RowLayout.SelectionGutterWidth > 0.0f)
-			{
-				ImGui::SetCursorScreenPos(ImVec2(
-					ImGui::GetWindowPos().x + RowLayout.SelectionGutterStartX, TreeItemRectMin.y));
-				(void)ImGui::InvisibleButton(
-					"##EntitySelectionGutter",
-					ImVec2(RowLayout.SelectionGutterWidth, PulseForgeEditor::EditorHierarchyEyeButtonHeight),
-					ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_NoNavFocus);
-				GutterClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
-				GutterRightClicked = ImGui::IsItemClicked(ImGuiMouseButton_Right);
-				GutterHovered = ImGui::IsItemHovered();
-			}
-			const bool RowClicked = TreeItemClicked || GutterClicked;
-			if (NameTruncated && (TreeItemHovered || GutterHovered) &&
-				ImGui::GetIO().MousePos.x < ImGui::GetWindowPos().x + RowLayout.EyeStartX)
-				ImGui::SetTooltip("%s", Tag->Name.c_str());
-			if (TreeItemRightClicked || GutterRightClicked)
-				ImGui::OpenPopup("Entity Actions");
-
-			ImGui::SameLine(RowLayout.EyeStartX);
-			const bool LocallyVisible = m_SceneWorkspace.Visibility().IsLocallyVisible(Entity.GetUUID());
-			if (m_EditorStyle.IconButton(
-				LocallyVisible ? PulseForgeEditor::EditorIcon::Eye : PulseForgeEditor::EditorIcon::EyeSlash,
-				LocallyVisible ? "Visible" : "Hidden",
-				"EntityVisibility",
-				LocallyVisible ? "Hide this entity in the editor viewport" : "Show this entity in the editor viewport",
-				false,
-				PulseForgeEditor::EditorHierarchyEyeButtonWidth,
-				PulseForgeEditor::EditorHierarchyEyeButtonHeight))
-				ToggleEntityVisibility(Entity.GetUUID());
-			ImGui::PopStyleVar();
-			if (RowClicked)
-			{
-				const ImGuiIO& IO = ImGui::GetIO();
-				if (IO.KeyShift)
-					SelectHierarchyRange(Entity.GetUUID(), IO.KeyCtrl);
-				else if (IO.KeyCtrl)
-					ToggleEntitySelection(Entity.GetUUID());
-				else
-					SelectSingleEntity(Entity.GetUUID());
-			}
-			if (ImGui::BeginPopup("Entity Actions"))
-			{
-				if (!IsEntitySelected(Entity.GetUUID()))
-					SelectSingleEntity(Entity.GetUUID());
-				const PulseForge::UUID ChildIdentifier = Entity.GetUUID();
-				const bool HasParent = Parent && Parent->has_value();
-				if (ImGui::MenuItem("Make Root", nullptr, false, HasParent))
-					DeferredHierarchyAction = [this, ChildIdentifier] { ReparentEntity(ChildIdentifier, std::nullopt); };
-				if (ImGui::MenuItem(LocallyVisible ? "Hide in Viewport" : "Show in Viewport"))
-					DeferredHierarchyAction = [this, ChildIdentifier] { ToggleEntityVisibility(ChildIdentifier); };
-
-				const std::optional<PulseForge::UUID> ParentIdentifier = SelectedEntity();
-				const bool CanParentUnderSelection = ParentIdentifier && *ParentIdentifier != ChildIdentifier;
-				if (ImGui::MenuItem("Parent Under Selected", nullptr, false, CanParentUnderSelection))
-				{
-					DeferredHierarchyAction = [this, ChildIdentifier, ParentIdentifier]
-					{
-						ReparentEntity(ChildIdentifier, ParentIdentifier);
-					};
-				}
-				ImGui::EndPopup();
-			}
-			if (IsOpen && Children && !Children->empty())
-			{
-				for (const PulseForge::Entity& Child : *Children)
-					if (!VisibleEntities || VisibleEntities->contains(Child.GetUUID()))
-						DrawEntityTree(Child, DeferredHierarchyAction, VisibleEntities);
-				ImGui::TreePop();
-			}
-			ImGui::PopID();
-		}
-
 		void DrawInspectorPanel()
 		{
 			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Inspector))
@@ -9092,7 +8779,7 @@ namespace
 					{
 						if (m_EditorStyle.BeginToolbar("InspectorEntityHeader", 74.0f))
 						{
-							m_EditorStyle.IconText(GetEntityIcon(*Entity), {});
+							m_EditorStyle.IconText(PulseForgeEditor::GetEditorEntityIcon(*Entity), {});
 							ImGui::SameLine();
 							const float NameWidth = (std::max)(ImGui::GetContentRegionAvail().x, 1.0f);
 							ImGui::SetNextItemWidth(NameWidth);
@@ -11295,7 +10982,6 @@ namespace
 		PulseForgeEditor::EditorSceneEditController m_SceneEditController;
 		PulseForgeEditor::EditorSceneWorkspaceState m_SceneWorkspace;
 		bool m_FocusEntityNameNextFrame = false;
-		bool m_FocusHierarchySearchNextFrame = false;
 		bool m_FocusContentSearchNextFrame = false;
 		bool m_OpenUnsavedDialog = false;
 		bool m_OpenDocumentCloseDialog = false;
@@ -11303,6 +10989,7 @@ namespace
 		bool m_PendingCloseAllDocuments = false;
 		PulseForgeEditor::EditorAssetWorkflowState m_AssetWorkflow;
 		PulseForgeEditor::EditorConsolePanel m_ConsolePanel;
+		PulseForgeEditor::EditorHierarchyPanel m_HierarchyPanel;
 		PulseForgeEditor::EditorContentBrowserState m_ContentBrowser;
 		bool m_ContentDetailsExpandedCompact = false;
 		bool m_InitialMaterialDetailsDockPending = false;
@@ -11439,7 +11126,6 @@ namespace
 		std::optional<PulseForge::AssetID> m_SceneAsset;
 		std::optional<EntityClipboard> m_EntityClipboard;
 		PulseForgeEditor::EditorMaterialDraftStore m_MaterialDraftStore;
-		std::string m_HierarchySearch;
 		std::string m_WindowTitle;
 		std::string m_ViewportTargetError;
 		std::string m_ViewportSceneError;

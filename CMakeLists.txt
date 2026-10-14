@@ -465,6 +465,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorAssetDestinationDialog.cpp
 		PulseForgeEditor/Source/Private/EditorAssetPreviewService.cpp
 		PulseForgeEditor/Source/Private/EditorConsolePanel.cpp
+		PulseForgeEditor/Source/Private/EditorHierarchyPanel.cpp
 		PulseForgeEditor/Source/Private/EditorViewportToolbar.cpp
 		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
 		PulseForgeEditor/Source/Private/EditorLayout.cpp

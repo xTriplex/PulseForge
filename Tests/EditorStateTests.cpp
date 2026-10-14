@@ -1,5 +1,6 @@
 #include "TestEditorSupport.h"
 #include "EditorConsoleHistory.h"
+#include "Editor/EditorHierarchyPanelPolicy.h"
 #include "EditorMaterialDraftStore.h"
 
 namespace
@@ -172,6 +173,30 @@ namespace
 					PF_CHECK(Tests, RepeatedChildren->front().GetTag()->Name == "Child Copy 2");
 			}
 		}
+	}
+
+	void TestEditorHierarchySearchPolicy(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		Scene SceneValue;
+		auto Root = SceneValue.CreateEntity("Material props");
+		auto Child = SceneValue.CreateEntity("Packed Metal");
+		auto Grandchild = SceneValue.CreateEntity("Nested mesh");
+		auto Separate = SceneValue.CreateEntity("Camera rig");
+		PF_CHECK(Tests, Root && Child && Grandchild && Separate);
+		if (!Root || !Child || !Grandchild || !Separate)
+			return;
+		PF_CHECK(Tests, Child->SetParent(*Root));
+		PF_CHECK(Tests, Grandchild->SetParent(*Child));
+
+		const auto Visible = GetVisibleHierarchyEntities(SceneValue, "pAcKeD");
+		PF_CHECK(Tests, Visible.contains(Root->GetUUID()));
+		PF_CHECK(Tests, Visible.contains(Child->GetUUID()));
+		PF_CHECK(Tests, !Visible.contains(Grandchild->GetUUID()));
+		PF_CHECK(Tests, !Visible.contains(Separate->GetUUID()));
+		PF_CHECK(Tests, GetVisibleHierarchyEntities(SceneValue, "missing").empty());
+		PF_CHECK(Tests, GetVisibleHierarchyEntities(SceneValue, "").empty());
 	}
 
 	void TestEditorAssetWorkflowState(TestRunner& Tests)
@@ -377,6 +402,7 @@ void RunEditorStateTests(TestRunner& Tests)
 	TestEditorConsoleHistory(Tests);
 	TestEditorContentBrowserState(Tests);
 	TestEditorSceneHierarchyOperations(Tests);
+	TestEditorHierarchySearchPolicy(Tests);
 	TestEditorAssetWorkflowState(Tests);
 	TestEditorSceneWorkspaceState(Tests);
 	TestEditorSceneHistoryState(Tests);
