@@ -361,6 +361,7 @@ add_library(PulseForgeSceneRenderer STATIC
 	PulseForge/Source/Private/Renderer/AssetCache/TextureAssetCache.cpp
 	PulseForge/Source/Private/Renderer/EnvironmentLightingCache.cpp
 	PulseForge/Source/Private/Renderer/SceneRenderer.cpp
+	PulseForge/Source/Private/Renderer/SceneRendererToneMappingStage.cpp
 )
 target_include_directories(PulseForgeSceneRenderer
 	PUBLIC PulseForge/Source/Public PulseForge/Vendor/glm
