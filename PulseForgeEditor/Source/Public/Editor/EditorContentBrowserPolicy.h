@@ -5,6 +5,12 @@
 
 namespace PulseForgeEditor
 {
+	struct ContentBrowserHorizontalLayout
+	{
+		bool ShowFolderTree = false;
+		float FolderTreeWidth = 0.0f;
+	};
+
 	struct ContentBrowserVerticalLayout
 	{
 		float AssetItemsHeight = 0.0f;
@@ -14,10 +20,29 @@ namespace PulseForgeEditor
 
 	namespace ContentBrowserLayoutMetrics
 	{
+		inline constexpr float FolderTreeThreshold = 520.0f;
+		inline constexpr float FolderTreeWidthRatio = 0.24f;
+		inline constexpr float MinimumFolderTreeWidth = 145.0f;
+		inline constexpr float MaximumFolderTreeWidth = 205.0f;
 		inline constexpr float CompactDetailsThreshold = 164.0f;
 		inline constexpr float CompactSelectionSummaryHeight = 28.0f;
 		inline constexpr float MinimumAssetItemsHeight = 72.0f;
 		inline constexpr float RegularDetailsMaximumHeight = 108.0f;
+	}
+
+	[[nodiscard]] inline ContentBrowserHorizontalLayout GetContentBrowserHorizontalLayout(
+		float AvailableWidth) noexcept
+	{
+		AvailableWidth = std::isfinite(AvailableWidth) ? std::max(AvailableWidth, 0.0f) : 0.0f;
+		if (AvailableWidth < ContentBrowserLayoutMetrics::FolderTreeThreshold)
+			return {};
+		return {
+			.ShowFolderTree = true,
+			.FolderTreeWidth = std::clamp(
+				AvailableWidth * ContentBrowserLayoutMetrics::FolderTreeWidthRatio,
+				ContentBrowserLayoutMetrics::MinimumFolderTreeWidth,
+				ContentBrowserLayoutMetrics::MaximumFolderTreeWidth)
+		};
 	}
 
 	[[nodiscard]] inline ContentBrowserVerticalLayout GetContentBrowserVerticalLayout(

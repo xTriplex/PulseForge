@@ -39,6 +39,7 @@
 #include "Editor/EditorDeferredOperationQueue.h"
 #include "Editor/EditorConsolePanel.h"
 #include "Editor/EditorAssetSelector.h"
+#include "Editor/EditorContentBrowserNavigation.h"
 #include "Editor/EditorHierarchyPanel.h"
 #include "Editor/EditorMaterialDetailsPanel.h"
 #include "EditorWorkspacePresentation.h"
@@ -428,7 +429,8 @@ namespace
 
 	class EditorLayer final : public PulseForge::Layer,
 		public PulseForgeEditor::EditorHierarchyPanelActionSink,
-		public PulseForgeEditor::EditorMaterialDetailsActionSink
+		public PulseForgeEditor::EditorMaterialDetailsActionSink,
+		public PulseForgeEditor::EditorContentBrowserNavigationActions
 	{
 		struct DocumentHostTestState final : PulseForgeEditor::EditorDocumentEditorState
 		{
@@ -702,6 +704,20 @@ namespace
 			};
 			if (m_Documents.Find(Identity))
 				(void)m_Documents.MarkEdited(Identity);
+		}
+
+		void QueueAssetMoveAfterSave(
+			const PulseForge::AssetID& Asset,
+			const std::filesystem::path& Destination) override
+		{
+			QueueAfterSave([this, Asset, Destination] { MoveAssetAt(Asset, Destination); });
+		}
+
+		void QueueFolderMoveAfterSave(
+			const std::filesystem::path& Source,
+			const std::filesystem::path& Destination) override
+		{
+			QueueAfterSave([this, Source, Destination] { MoveFolderAt(Source, Destination); });
 		}
 
 		static EditorLayer* GetPlatformCallbackLayer() noexcept
@@ -9603,160 +9619,6 @@ namespace
 			m_ContentBrowser.ResetNavigation();
 		}
 
-		bool IsKnownContentFolder(const std::filesystem::path& Folder) const
-		{
-			return m_ContentBrowser.IsKnownFolder(Folder);
-		}
-
-		void DrawContentFolderNode(
-			const ContentFolderNode& Node,
-			std::function<void()>& DeferredAction,
-			bool IsRoot = false)
-		{
-			if (IsRoot)
-				ImGui::SetNextItemOpen(true, ImGuiCond_Once);
-			ImGuiTreeNodeFlags Flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
-			if (Node.RelativePath == m_ContentBrowser.CurrentFolder())
-				Flags |= ImGuiTreeNodeFlags_Selected;
-			if (Node.Children.empty())
-				Flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
-			const std::string StableID = PathToUtf8(Node.RelativePath);
-			const bool IsOpen = m_EditorStyle.TreeNode(
-				Node.RelativePath == m_ContentBrowser.CurrentFolder()
-					? PulseForgeEditor::EditorIcon::FolderOpen
-					: PulseForgeEditor::EditorIcon::Folder,
-				Node.Name,
-				StableID,
-				Flags);
-			if (ImGui::IsItemClicked())
-				m_ContentBrowser.SetCurrentFolder(Node.RelativePath);
-			BeginFolderDragSource(Node.RelativePath, Node.Name);
-			HandleManagedFolderDropTarget(Node.RelativePath, DeferredAction);
-			if (IsOpen && !Node.Children.empty())
-			{
-				for (const ContentFolderNode& Child : Node.Children)
-					DrawContentFolderNode(Child, DeferredAction);
-				ImGui::TreePop();
-			}
-		}
-
-		void BeginFolderDragSource(const std::filesystem::path& Folder, std::string_view Name)
-		{
-			if (!ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
-				return;
-			const std::string Payload = PathToUtf8(Folder);
-			ImGui::SetDragDropPayload("PF_MANAGED_FOLDER_MOVE", Payload.c_str(), Payload.size() + 1);
-			ImGui::Text("Move folder: %.*s", static_cast<int>(Name.size()), Name.data());
-			ImGui::EndDragDropSource();
-		}
-
-		void HandleManagedFolderDropTarget(
-			const std::filesystem::path& DestinationFolder,
-			std::function<void()>& DeferredAction)
-		{
-			if (DeferredAction || !ImGui::BeginDragDropTarget())
-				return;
-
-			if (const ImGuiPayload* Payload = ImGui::AcceptDragDropPayload("PF_MANAGED_ASSET_MOVE"))
-			{
-				if (Payload->IsDelivery() && Payload->Data && Payload->DataSize > 1)
-				{
-					std::string_view IdentifierText(static_cast<const char*>(Payload->Data),
-						static_cast<size_t>(Payload->DataSize));
-					if (!IdentifierText.empty() && IdentifierText.back() == '\0')
-						IdentifierText.remove_suffix(1);
-					if (const auto Identifier = PulseForge::AssetID::Parse(IdentifierText))
-					{
-						const auto Record = m_Project
-							? m_Project->GetAssetRegistry().Find(*Identifier) : std::nullopt;
-						if (Record)
-						{
-							const std::filesystem::path Destination =
-								DestinationFolder / Record->ProjectRelativePath.filename();
-							DeferredAction = [this, Identifier = *Identifier, Destination]
-							{
-								QueueAfterSave([this, Identifier, Destination]
-								{
-									MoveAssetAt(Identifier, Destination);
-								});
-							};
-						}
-					}
-				}
-			}
-			else if (const ImGuiPayload* Payload = ImGui::AcceptDragDropPayload("PF_MANAGED_FOLDER_MOVE"))
-			{
-				if (Payload->IsDelivery() && Payload->Data && Payload->DataSize > 1)
-				{
-					std::string_view SourceText(static_cast<const char*>(Payload->Data),
-						static_cast<size_t>(Payload->DataSize));
-					if (!SourceText.empty() && SourceText.back() == '\0')
-						SourceText.remove_suffix(1);
-					const std::string SourceString(SourceText);
-					const std::filesystem::path Source = std::filesystem::u8path(SourceString);
-					DeferredAction = [this, Source, DestinationFolder]
-					{
-						QueueAfterSave([this, Source, DestinationFolder]
-						{
-							MoveFolderAt(Source, DestinationFolder);
-						});
-					};
-				}
-			}
-			ImGui::EndDragDropTarget();
-		}
-
-		void DrawContentBreadcrumbs()
-		{
-			std::vector<std::pair<std::filesystem::path, std::string>> Breadcrumbs;
-			std::filesystem::path Breadcrumb = "Assets";
-			for (auto Component = m_ContentBrowser.CurrentFolder().begin(); Component != m_ContentBrowser.CurrentFolder().end(); ++Component)
-			{
-				if (*Component == "Assets")
-					continue;
-				Breadcrumb /= *Component;
-				Breadcrumbs.emplace_back(Breadcrumb, PathToUtf8(*Component));
-			}
-
-			if (ImGui::SmallButton("Assets##BreadcrumbRoot"))
-				m_ContentBrowser.SetCurrentFolder("Assets");
-			if (Breadcrumbs.empty())
-				return;
-
-			ImGui::SameLine();
-			m_EditorStyle.TextMuted("/");
-			if (Breadcrumbs.size() > 1)
-			{
-				ImGui::SameLine();
-				if (ImGui::SmallButton("...##BreadcrumbAncestors"))
-					ImGui::OpenPopup("ContentBreadcrumbAncestors");
-				if (ImGui::BeginPopup("ContentBreadcrumbAncestors"))
-				{
-					for (const auto& BreadcrumbEntry : Breadcrumbs)
-					{
-						const std::filesystem::path& Path = BreadcrumbEntry.first;
-						const std::string FullPath = PathToUtf8(Path);
-						if (ImGui::Selectable(FullPath.c_str(), Path == m_ContentBrowser.CurrentFolder()))
-							m_ContentBrowser.SetCurrentFolder(Path);
-					}
-					ImGui::EndPopup();
-				}
-				ImGui::SameLine();
-				m_EditorStyle.TextMuted("/");
-			}
-
-			const std::string& CurrentFolderName = Breadcrumbs.back().second;
-			const float LabelWidth = (std::max)(ImGui::GetContentRegionAvail().x -
-				ImGui::GetStyle().FramePadding.x * 2.0f, 0.0f);
-			const std::string VisibleLabel = FitEditorContextLabel(CurrentFolderName, LabelWidth);
-			const std::string CurrentLabel = (VisibleLabel.empty() ? "..." : VisibleLabel) +
-				"##BreadcrumbCurrent";
-			if (ImGui::SmallButton(CurrentLabel.c_str()))
-				m_ContentBrowser.SetCurrentFolder(Breadcrumbs.back().first);
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("%s", PathToUtf8(m_ContentBrowser.CurrentFolder()).c_str());
-		}
-
 		void HandleAssetBrowserItem(
 			const PulseForge::AssetRecord& Asset,
 			const AssetBrowserPresentation& Presentation,
@@ -9834,103 +9696,6 @@ namespace
 			MarkDocumentWorkspaceDirty();
 			m_ContentBrowser.SelectedAsset() = Identifier;
 			SetEditorPanelVisible(PulseForgeEditor::EditorPanel::MaterialDetails, true);
-		}
-
-		void DrawFolderList(
-			const std::vector<ContentFolderNode>& Folders,
-			std::function<void()>& DeferredAction)
-		{
-			if (Folders.empty())
-				return;
-
-			if (!ImGui::BeginTable("ManagedFolderList", 1,
-				ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
-				ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_NoSavedSettings))
-				return;
-			ImGui::TableSetupColumn("Folders", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-			for (const ContentFolderNode& Folder : Folders)
-			{
-				const std::string StableID = PathToUtf8(Folder.RelativePath);
-				ImGui::PushID(StableID.c_str());
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0);
-				const bool IsSelected = m_ContentBrowser.SelectedFolder() &&
-					m_ContentBrowser.SelectedFolder()->lexically_normal() == Folder.RelativePath.lexically_normal();
-				const bool Activated = m_EditorStyle.Selectable(PulseForgeEditor::EditorIcon::Folder,
-					Folder.Name, IsSelected, ImGuiSelectableFlags_AllowDoubleClick | ImGuiSelectableFlags_SpanAllColumns);
-				if (Activated)
-				{
-					m_ContentBrowser.SelectedFolder() = Folder.RelativePath;
-					if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-						m_ContentBrowser.SetCurrentFolder(Folder.RelativePath);
-				}
-				BeginFolderDragSource(Folder.RelativePath, Folder.Name);
-				HandleManagedFolderDropTarget(Folder.RelativePath, DeferredAction);
-				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip("%s", StableID.c_str());
-				ImGui::PopID();
-			}
-			ImGui::EndTable();
-		}
-
-		void DrawFolderGrid(
-			const std::vector<ContentFolderNode>& Folders,
-			std::function<void()>& DeferredAction)
-		{
-			if (Folders.empty())
-				return;
-
-			const float AvailableWidth = ImGui::GetContentRegionAvail().x;
-			const float DesiredTileWidth = 122.0f;
-			const float Spacing = ImGui::GetStyle().ItemSpacing.x;
-			const int ColumnCount = (std::max)(1, static_cast<int>((AvailableWidth + Spacing) /
-				(DesiredTileWidth + Spacing)));
-			if (!ImGui::BeginTable("ManagedFolderGrid", ColumnCount,
-				ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings |
-				ImGuiTableFlags_NoBordersInBody))
-				return;
-
-			constexpr float TileHeight = 96.0f;
-			const int RowCount = static_cast<int>((Folders.size() + static_cast<size_t>(ColumnCount) - 1) /
-				static_cast<size_t>(ColumnCount));
-			ImGuiListClipper Clipper;
-			Clipper.Begin(RowCount, TileHeight + Spacing);
-			while (Clipper.Step())
-			{
-				for (int Row = Clipper.DisplayStart; Row < Clipper.DisplayEnd; ++Row)
-				{
-					ImGui::TableNextRow(ImGuiTableRowFlags_None, TileHeight);
-					for (int Column = 0; Column < ColumnCount; ++Column)
-					{
-						const size_t Index = static_cast<size_t>(Row) * static_cast<size_t>(ColumnCount) +
-							static_cast<size_t>(Column);
-						if (Index >= Folders.size())
-							break;
-						ImGui::TableSetColumnIndex(Column);
-						const ContentFolderNode& Folder = Folders[Index];
-						const std::string StableID = PathToUtf8(Folder.RelativePath);
-						ImGui::PushID(StableID.c_str());
-						const bool IsSelected = m_ContentBrowser.SelectedFolder() &&
-							m_ContentBrowser.SelectedFolder()->lexically_normal() == Folder.RelativePath.lexically_normal();
-						const bool Activated = m_EditorStyle.AssetTile(PulseForgeEditor::EditorIcon::Folder,
-							Folder.Name, IsSelected,
-							ImVec2((std::max)(ImGui::GetContentRegionAvail().x - 2.0f, 1.0f), TileHeight),
-							ImGuiSelectableFlags_AllowDoubleClick);
-						if (Activated)
-						{
-							m_ContentBrowser.SelectedFolder() = Folder.RelativePath;
-							if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-								m_ContentBrowser.SetCurrentFolder(Folder.RelativePath);
-						}
-						BeginFolderDragSource(Folder.RelativePath, Folder.Name);
-						HandleManagedFolderDropTarget(Folder.RelativePath, DeferredAction);
-						if (ImGui::IsItemHovered())
-							ImGui::SetTooltip("%s", StableID.c_str());
-						ImGui::PopID();
-					}
-				}
-			}
-			ImGui::EndTable();
 		}
 
 		void DrawAssetList(std::function<void()>& DeferredAction)
@@ -10213,36 +9978,23 @@ namespace
 				{
 					std::function<void()> DeferredAction;
 					const ImVec2 Available = ImGui::GetContentRegionAvail();
-					const bool ShowFolderTree = Available.x >= 520.0f;
-					if (ShowFolderTree)
+					const PulseForgeEditor::ContentBrowserHorizontalLayout HorizontalLayout =
+						PulseForgeEditor::GetContentBrowserHorizontalLayout(Available.x);
+					if (HorizontalLayout.ShowFolderTree)
 					{
-						const float FolderWidth = std::clamp(Available.x * 0.24f, 145.0f, 205.0f);
-						ImGui::BeginChild("ContentFolderTree", ImVec2(FolderWidth, 0.0f), ImGuiChildFlags_Borders);
-						DrawContentFolderNode(m_ContentBrowser.FolderRoot(), DeferredAction, true);
+						ImGui::BeginChild("ContentFolderTree",
+							ImVec2(HorizontalLayout.FolderTreeWidth, 0.0f), ImGuiChildFlags_Borders);
+						m_ContentBrowserNavigation.DrawFolderTree(
+							m_ContentBrowser, m_EditorStyle, *this, DeferredAction);
 						ImGui::EndChild();
 						ImGui::SameLine(0.0f, 6.0f);
 					}
 
 					ImGui::BeginChild("ContentAssetArea", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
-					if (ShowFolderTree)
-						DrawContentBreadcrumbs();
+					if (HorizontalLayout.ShowFolderTree)
+						m_ContentBrowserNavigation.DrawBreadcrumbs(m_ContentBrowser, m_EditorStyle);
 					else
-					{
-						const std::string CurrentFolder = PathToUtf8(m_ContentBrowser.CurrentFolder());
-						if (ImGui::BeginCombo("##ContentFolder", CurrentFolder.c_str()))
-						{
-							const auto DrawFolderOptions = [this](auto&& Self, const ContentFolderNode& Node) -> void
-							{
-								const std::string Path = PathToUtf8(Node.RelativePath);
-								if (ImGui::Selectable(Path.c_str(), Node.RelativePath == m_ContentBrowser.CurrentFolder()))
-									m_ContentBrowser.SetCurrentFolder(Node.RelativePath);
-								for (const ContentFolderNode& Child : Node.Children)
-									Self(Self, Child);
-							};
-							DrawFolderOptions(DrawFolderOptions, m_ContentBrowser.FolderRoot());
-							ImGui::EndCombo();
-						}
-					}
+						m_ContentBrowserNavigation.DrawCompactFolderPicker(m_ContentBrowser);
 
 					if (m_EditorStyle.BeginToolbar("ContentBrowserToolbar",
 						PulseForgeEditor::EditorStyleMetrics::PanelToolbarHeight))
@@ -10309,10 +10061,8 @@ namespace
 						ImGuiChildFlags_None);
 					if (VisibleFolders && !VisibleFolders->empty())
 					{
-						if (m_ContentBrowser.GridView())
-							DrawFolderGrid(*VisibleFolders, DeferredAction);
-						else
-							DrawFolderList(*VisibleFolders, DeferredAction);
+						m_ContentBrowserNavigation.DrawFolderItems(
+							m_ContentBrowser, *VisibleFolders, m_EditorStyle, *this, DeferredAction);
 						if (!m_ContentBrowser.FilteredAssetIndices().empty())
 							ImGui::Separator();
 					}
@@ -10643,6 +10393,7 @@ namespace
 		PulseForgeEditor::EditorConsolePanel m_ConsolePanel;
 		PulseForgeEditor::EditorHierarchyPanel m_HierarchyPanel;
 		PulseForgeEditor::EditorAssetSelector m_AssetSelector;
+		PulseForgeEditor::EditorContentBrowserNavigation m_ContentBrowserNavigation;
 		PulseForgeEditor::EditorMaterialDetailsPanel m_MaterialDetailsPanel;
 		PulseForgeEditor::EditorContentBrowserState m_ContentBrowser;
 		bool m_ContentDetailsExpandedCompact = false;

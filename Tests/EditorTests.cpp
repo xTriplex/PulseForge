@@ -542,6 +542,17 @@ namespace
 		PF_CHECK(Tests, EditorStyleMetrics::PanelToolbarHeight == 36.0f);
 		PF_CHECK(Tests, EditorStyleMetrics::PanelToolbarPaddingX == 7.0f);
 		PF_CHECK(Tests, EditorStyleMetrics::PanelToolbarPaddingY == 4.0f);
+		const ContentBrowserHorizontalLayout CompactBrowser = GetContentBrowserHorizontalLayout(519.0f);
+		PF_CHECK(Tests, !CompactBrowser.ShowFolderTree && CompactBrowser.FolderTreeWidth == 0.0f);
+		const ContentBrowserHorizontalLayout MinimumFolderTree = GetContentBrowserHorizontalLayout(520.0f);
+		PF_CHECK(Tests, MinimumFolderTree.ShowFolderTree && MinimumFolderTree.FolderTreeWidth == 145.0f);
+		const ContentBrowserHorizontalLayout RegularFolderTree = GetContentBrowserHorizontalLayout(800.0f);
+		PF_CHECK(Tests, RegularFolderTree.ShowFolderTree && RegularFolderTree.FolderTreeWidth == 192.0f);
+		const ContentBrowserHorizontalLayout MaximumFolderTree = GetContentBrowserHorizontalLayout(1200.0f);
+		PF_CHECK(Tests, MaximumFolderTree.ShowFolderTree && MaximumFolderTree.FolderTreeWidth == 205.0f);
+		const ContentBrowserHorizontalLayout InvalidBrowserWidth = GetContentBrowserHorizontalLayout(
+			std::numeric_limits<float>::quiet_NaN());
+		PF_CHECK(Tests, !InvalidBrowserWidth.ShowFolderTree && InvalidBrowserWidth.FolderTreeWidth == 0.0f);
 		PF_CHECK(Tests, UseCompactVector3PropertyInput(229.0f));
 		PF_CHECK(Tests, !UseCompactVector3PropertyInput(230.0f));
 		PF_CHECK(Tests, UseCompactVector3PropertyInput(std::numeric_limits<float>::quiet_NaN()));
