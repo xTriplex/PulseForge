@@ -1,5 +1,6 @@
 #include "EditorConsoleHistory.h"
 #include "Editor/EditorContentBrowserState.h"
+#include "Editor/EditorAssetWorkflowState.h"
 #include "EditorMaterialDraftStore.h"
 #include "EditorViewportCamera.h"
 #include "TestSupport.h"
@@ -1240,6 +1241,58 @@ namespace
 		PF_CHECK(Tests, Browser.FolderRoot().Children.empty());
 	}
 
+	void TestEditorAssetWorkflowState(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		EditorAssetWorkflowState Workflow;
+		const AssetRecord Material{ AssetID{ 2, 1 }, "Assets/Materials/Rough Clay.material" };
+
+		Workflow.BeginAssetDestination(Material, false);
+		PF_CHECK(Tests, Workflow.TakeDestinationDialogRequest());
+		PF_CHECK(Tests, !Workflow.TakeDestinationDialogRequest());
+		PF_CHECK(Tests, Workflow.DestinationAsset() == Material.ID);
+		PF_CHECK(Tests, !Workflow.IsDuplicate());
+		PF_CHECK(Tests, Workflow.CreateKind() == ProjectAssetDestinationCreateKind::None);
+		PF_CHECK(Tests, Workflow.DestinationFolder() == "Assets/Materials");
+		PF_CHECK(Tests, std::string(Workflow.FilenameBuffer().data()) == "Rough Clay.material");
+		Workflow.ValidationError() = "invalid destination";
+
+		Workflow.BeginAssetDestination(Material, true);
+		PF_CHECK(Tests, Workflow.TakeDestinationDialogRequest());
+		PF_CHECK(Tests, Workflow.IsDuplicate());
+		PF_CHECK(Tests, std::string(Workflow.FilenameBuffer().data()) == "Rough Clay Copy.material");
+		PF_CHECK(Tests, Workflow.ValidationError().empty());
+
+		Workflow.BeginSceneDestination(false, std::nullopt);
+		PF_CHECK(Tests, Workflow.CreateKind() == ProjectAssetDestinationCreateKind::NewScene);
+		PF_CHECK(Tests, Workflow.DestinationFolder() == "Assets");
+		PF_CHECK(Tests, std::string(Workflow.FilenameBuffer().data()) == "NewScene.scene");
+
+		const AssetRecord Scene{ AssetID{ 2, 2 }, "Assets/Scenes/Overview.scene" };
+		Workflow.BeginSceneDestination(true, Scene);
+		PF_CHECK(Tests, Workflow.CreateKind() == ProjectAssetDestinationCreateKind::SaveSceneAs);
+		PF_CHECK(Tests, Workflow.DestinationFolder() == "Assets/Scenes");
+		PF_CHECK(Tests, std::string(Workflow.FilenameBuffer().data()) == "Overview Copy.scene");
+
+		Workflow.BeginPrefabDestination(UUID{ 9, 4 });
+		PF_CHECK(Tests, Workflow.CreateKind() == ProjectAssetDestinationCreateKind::Prefab);
+		PF_CHECK(Tests, (Workflow.PrefabRoot() == UUID{ 9, 4 }));
+		PF_CHECK(Tests, std::string(Workflow.FilenameBuffer().data()) == "NewPrefab.prefab");
+		Workflow.DismissDestination();
+		PF_CHECK(Tests, !Workflow.DestinationAsset());
+		PF_CHECK(Tests, !Workflow.PrefabRoot());
+		PF_CHECK(Tests, Workflow.CreateKind() == ProjectAssetDestinationCreateKind::None);
+		PF_CHECK(Tests, Workflow.ValidationError().empty());
+
+		Workflow.BeginDelete(Material.ID);
+		PF_CHECK(Tests, Workflow.TakeDeleteDialogRequest());
+		PF_CHECK(Tests, Workflow.PendingDeleteAsset() == Material.ID);
+		PF_CHECK(Tests, !Workflow.TakeDeleteDialogRequest());
+		Workflow.DismissDelete();
+		PF_CHECK(Tests, !Workflow.PendingDeleteAsset());
+	}
+
 	void TestEditorMaterialDraftStore(TestRunner& Tests)
 	{
 		PulseForgeEditor::EditorMaterialDraftStore Drafts;
@@ -1305,6 +1358,7 @@ void RunEditorTests(TestRunner& Tests)
 	TestEditorViewportCameraController(Tests);
 	TestEditorConsoleHistory(Tests);
 	TestEditorContentBrowserState(Tests);
+	TestEditorAssetWorkflowState(Tests);
 	TestEditorMaterialDraftStore(Tests);
 	TestEditorWorkspacePanelState(Tests);
 	TestEditorDeferredOperationQueue(Tests);

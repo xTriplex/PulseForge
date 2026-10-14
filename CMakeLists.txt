@@ -298,6 +298,7 @@ target_link_libraries(PulseForgeGame PRIVATE PulseForge)
 include(CTest)
 if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 	add_library(PulseForgeEditorCore STATIC
+		PulseForgeEditor/Source/Private/EditorAssetWorkflowState.cpp
 		PulseForgeEditor/Source/Private/EditorConsoleHistory.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserState.cpp
 		PulseForgeEditor/Source/Private/EditorMaterialDraftStore.cpp
