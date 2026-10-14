@@ -28,6 +28,7 @@
   "editor_core_target": "PulseForgeEditorCore",
   "editor_core_allowed_dependencies": [
     "PulseForgeAssetServices",
+    "PulseForgeScene",
     "PulseForgeSceneSerialization"
   ],
   "editor_ui_target": "PulseForgeEditorUI",

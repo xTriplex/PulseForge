@@ -64,6 +64,7 @@
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
 #include "Editor/EditorSnapshotHistory.h"
+#include "Editor/EditorSceneHierarchyOperations.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
 #include "Editor/EditorViewportToolbarPolicy.h"
@@ -1646,57 +1647,14 @@ namespace
 		{
 			if (!m_Scene)
 				return std::unexpected("There is no active scene");
-
-			const std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Selected(
-				m_SceneWorkspace.Selection().GetEntities().begin(), m_SceneWorkspace.Selection().GetEntities().end());
-			std::vector<PulseForge::Entity> Roots;
-			for (const PulseForge::UUID& Identifier : m_SceneWorkspace.Selection().GetEntities())
-			{
-				const auto Candidate = m_Scene->FindEntity(Identifier);
-				if (!Candidate)
-					continue;
-				bool HasSelectedAncestor = false;
-				auto Parent = Candidate->GetParent();
-				while (Parent && Parent->has_value())
-				{
-					if (Selected.contains((**Parent).GetUUID()))
-					{
-						HasSelectedAncestor = true;
-						break;
-					}
-					Parent = (**Parent).GetParent();
-				}
-				if (!Parent)
-					return std::unexpected("Could not inspect the selected entity hierarchy: " + Parent.error().Message);
-				if (!HasSelectedAncestor)
-					Roots.push_back(*Candidate);
-			}
-			return Roots;
+			return PulseForgeEditor::EditorSceneHierarchyOperations::GetTopLevelSelection(
+				*m_Scene, m_SceneWorkspace.Selection().GetEntities());
 		}
 
 		[[nodiscard]] std::expected<std::vector<PulseForge::Entity>, std::string> CollectEntitySubtrees(
 			const std::vector<PulseForge::Entity>& Roots) const
 		{
-			std::vector<PulseForge::Entity> Subtree;
-			std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Visited;
-			std::function<std::expected<void, std::string>(const PulseForge::Entity&)> Visit =
-				[&](const PulseForge::Entity& Current) -> std::expected<void, std::string>
-			{
-				if (!Visited.insert(Current.GetUUID()).second)
-					return {};
-				Subtree.push_back(Current);
-				auto Children = Current.GetChildren();
-				if (!Children)
-					return std::unexpected(Children.error().Message);
-				for (const PulseForge::Entity& Child : *Children)
-					if (auto Result = Visit(Child); !Result)
-						return Result;
-				return {};
-			};
-			for (const PulseForge::Entity& Root : Roots)
-				if (auto Result = Visit(Root); !Result)
-					return std::unexpected(Result.error());
-			return Subtree;
+			return PulseForgeEditor::EditorSceneHierarchyOperations::CollectSubtrees(Roots);
 		}
 
 		[[nodiscard]] std::string MakeUniqueEntityName(
@@ -1705,20 +1663,8 @@ namespace
 		{
 			if (!m_Scene)
 				return BaseName;
-			std::unordered_set<std::string> ExistingNames;
-			for (const PulseForge::Entity& Entity : m_Scene->GetEntities())
-				if ((!IgnoredEntity || Entity.GetUUID() != *IgnoredEntity))
-					if (const auto Tag = Entity.GetTag())
-						ExistingNames.insert(Tag->Name);
-			if (!ExistingNames.contains(BaseName))
-				return BaseName;
-			for (uint32_t Suffix = 2; Suffix < (std::numeric_limits<uint32_t>::max)(); ++Suffix)
-			{
-				std::string Candidate = BaseName + " " + std::to_string(Suffix);
-				if (!ExistingNames.contains(Candidate))
-					return Candidate;
-			}
-			return BaseName;
+			return PulseForgeEditor::EditorSceneHierarchyOperations::MakeUniqueName(
+				*m_Scene, std::move(BaseName), IgnoredEntity);
 		}
 
 		void ToggleEntityVisibility(const PulseForge::UUID& Identifier)
@@ -9123,51 +9069,10 @@ namespace
 		[[nodiscard]] std::expected<std::vector<PulseForge::UUID>, PulseForge::SceneError>
 		DuplicateEntityRootsRaw(const std::vector<PulseForge::Entity>& Roots)
 		{
-			std::vector<PulseForge::UUID> DuplicatedRoots;
-			std::function<std::expected<PulseForge::Entity, PulseForge::SceneError>(
-				const PulseForge::Entity&, std::optional<PulseForge::UUID>)> DuplicateSubtree;
-			DuplicateSubtree = [this, &DuplicateSubtree](
-				const PulseForge::Entity& Source,
-				std::optional<PulseForge::UUID> DuplicatedParent)
-				-> std::expected<PulseForge::Entity, PulseForge::SceneError>
-			{
-				auto Duplicated = m_Scene->DuplicateEntity(Source);
-				if (!Duplicated)
-					return std::unexpected(Duplicated.error());
-				auto Tag = Duplicated->GetTag();
-				if (!Tag)
-					return std::unexpected(Tag.error());
-				Tag->Name = MakeUniqueEntityName(Tag->Name, Duplicated->GetUUID());
-				if (auto Result = Duplicated->SetTag(*Tag); !Result)
-					return std::unexpected(Result.error());
-				if (DuplicatedParent)
-				{
-					const auto Parent = m_Scene->FindEntity(*DuplicatedParent);
-					if (!Parent)
-						return std::unexpected(PulseForge::SceneError{
-							PulseForge::SceneErrorCode::InvalidEntity,
-							"A duplicated parent entity could not be resolved" });
-					if (auto Result = Duplicated->SetParent(*Parent); !Result)
-						return std::unexpected(Result.error());
-				}
-
-				auto Children = Source.GetChildren();
-				if (!Children)
-					return std::unexpected(Children.error());
-				for (const PulseForge::Entity& Child : *Children)
-					if (auto Result = DuplicateSubtree(Child, Duplicated->GetUUID()); !Result)
-						return std::unexpected(Result.error());
-				return *Duplicated;
-			};
-
-			for (const PulseForge::Entity& Root : Roots)
-			{
-				auto Duplicated = DuplicateSubtree(Root, std::nullopt);
-				if (!Duplicated)
-					return std::unexpected(Duplicated.error());
-				DuplicatedRoots.push_back(Duplicated->GetUUID());
-			}
-			return DuplicatedRoots;
+			if (!m_Scene)
+				return std::unexpected(PulseForge::SceneError{
+					PulseForge::SceneErrorCode::InvalidEntity, "There is no active scene" });
+			return PulseForgeEditor::EditorSceneHierarchyOperations::DuplicateSubtrees(*m_Scene, Roots);
 		}
 
 		void DuplicateSelectedEntity()

@@ -34,6 +34,7 @@
 #include "Editor/EditorPlatformViewportPolicy.h"
 #include "Editor/EditorProjectOpening.h"
 #include "Editor/EditorSceneHistoryState.h"
+#include "Editor/EditorSceneHierarchyOperations.h"
 #include "Editor/EditorSceneWorkspaceState.h"
 #include "Editor/EditorSelection.h"
 #include "Editor/EditorSnapshotHistory.h"

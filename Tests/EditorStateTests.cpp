@@ -103,6 +103,77 @@ namespace
 		PF_CHECK(Tests, Browser.FolderRoot().Children.empty());
 	}
 
+	void TestEditorSceneHierarchyOperations(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		Scene SceneValue;
+		auto Root = SceneValue.CreateEntity("Root");
+		auto Child = SceneValue.CreateEntity("Child");
+		auto Grandchild = SceneValue.CreateEntity("Grandchild");
+		auto Separate = SceneValue.CreateEntity("Separate");
+		PF_CHECK(Tests, Root && Child && Grandchild && Separate);
+		if (!Root || !Child || !Grandchild || !Separate)
+			return;
+		PF_CHECK(Tests, Child->SetParent(*Root));
+		PF_CHECK(Tests, Grandchild->SetParent(*Child));
+
+		const std::array Selected{ Root->GetUUID(), Child->GetUUID(), Separate->GetUUID() };
+		const auto Roots = EditorSceneHierarchyOperations::GetTopLevelSelection(SceneValue, Selected);
+		PF_CHECK(Tests, Roots && Roots->size() == 2);
+		if (!Roots)
+			return;
+		PF_CHECK(Tests, (*Roots)[0].GetUUID() == Root->GetUUID());
+		PF_CHECK(Tests, (*Roots)[1].GetUUID() == Separate->GetUUID());
+		const auto Subtree = EditorSceneHierarchyOperations::CollectSubtrees(
+			std::span<const Entity>(&(*Roots)[0], 1));
+		PF_CHECK(Tests, Subtree && Subtree->size() == 3);
+		if (Subtree)
+		{
+			PF_CHECK(Tests, (*Subtree)[0].GetUUID() == Root->GetUUID());
+			PF_CHECK(Tests, (*Subtree)[1].GetUUID() == Child->GetUUID());
+			PF_CHECK(Tests, (*Subtree)[2].GetUUID() == Grandchild->GetUUID());
+		}
+		PF_CHECK(Tests, EditorSceneHierarchyOperations::MakeUniqueName(SceneValue, "Root") == "Root 2");
+
+		const std::array DuplicationRoots{ *Root };
+		const auto Duplicated = EditorSceneHierarchyOperations::DuplicateSubtrees(SceneValue, DuplicationRoots);
+		PF_CHECK(Tests, Duplicated && Duplicated->size() == 1);
+		PF_CHECK(Tests, SceneValue.GetEntityCount() == 7);
+		if (!Duplicated || Duplicated->empty())
+			return;
+		const auto DuplicatedRoot = SceneValue.FindEntity(Duplicated->front());
+		PF_CHECK(Tests, DuplicatedRoot.has_value());
+		if (!DuplicatedRoot)
+			return;
+		PF_CHECK(Tests, DuplicatedRoot->GetTag()->Name == "Root Copy");
+		const auto DuplicatedChildren = DuplicatedRoot->GetChildren();
+		PF_CHECK(Tests, DuplicatedChildren && DuplicatedChildren->size() == 1);
+		if (!DuplicatedChildren || DuplicatedChildren->empty())
+			return;
+		PF_CHECK(Tests, DuplicatedChildren->front().GetTag()->Name == "Child Copy");
+		const auto DuplicatedGrandchildren = DuplicatedChildren->front().GetChildren();
+		PF_CHECK(Tests, DuplicatedGrandchildren && DuplicatedGrandchildren->size() == 1);
+		if (DuplicatedGrandchildren && !DuplicatedGrandchildren->empty())
+			PF_CHECK(Tests, DuplicatedGrandchildren->front().GetTag()->Name == "Grandchild Copy");
+
+		const auto RepeatedDuplicate = EditorSceneHierarchyOperations::DuplicateSubtrees(SceneValue, DuplicationRoots);
+		PF_CHECK(Tests, RepeatedDuplicate && RepeatedDuplicate->size() == 1);
+		PF_CHECK(Tests, SceneValue.GetEntityCount() == 10);
+		if (RepeatedDuplicate && !RepeatedDuplicate->empty())
+		{
+			const auto RepeatedRoot = SceneValue.FindEntity(RepeatedDuplicate->front());
+			PF_CHECK(Tests, RepeatedRoot && RepeatedRoot->GetTag()->Name == "Root Copy 2");
+			if (RepeatedRoot)
+			{
+				const auto RepeatedChildren = RepeatedRoot->GetChildren();
+				PF_CHECK(Tests, RepeatedChildren && RepeatedChildren->size() == 1);
+				if (RepeatedChildren && !RepeatedChildren->empty())
+					PF_CHECK(Tests, RepeatedChildren->front().GetTag()->Name == "Child Copy 2");
+			}
+		}
+	}
+
 	void TestEditorAssetWorkflowState(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -305,6 +376,7 @@ void RunEditorStateTests(TestRunner& Tests)
 {
 	TestEditorConsoleHistory(Tests);
 	TestEditorContentBrowserState(Tests);
+	TestEditorSceneHierarchyOperations(Tests);
 	TestEditorAssetWorkflowState(Tests);
 	TestEditorSceneWorkspaceState(Tests);
 	TestEditorSceneHistoryState(Tests);

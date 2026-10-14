@@ -431,6 +431,7 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 		PulseForgeEditor/Source/Private/EditorSceneWorkspaceState.cpp
 		PulseForgeEditor/Source/Private/EditorSceneHistoryState.cpp
 		PulseForgeEditor/Source/Private/EditorSceneEditController.cpp
+		PulseForgeEditor/Source/Private/EditorSceneHierarchyOperations.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentManager.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentWorkspace.cpp
 		PulseForgeEditor/Source/Private/EditorMeshPickingCache.cpp
@@ -442,7 +443,7 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 	)
 	target_compile_definitions(PulseForgeEditorCore PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorCore
-		PUBLIC PulseForgeAssetServices
+		PUBLIC PulseForgeAssetServices PulseForgeScene
 		PRIVATE PulseForgeSceneSerialization
 	)
 	if(PULSEFORGE_ENABLE_MSVC_ANALYSIS)
