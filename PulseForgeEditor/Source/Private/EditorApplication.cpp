@@ -40,16 +40,15 @@
 #include "Editor/EditorLayout.h"
 #include "EditorViewportCamera.h"
 #include "EditorMaterialDraftStore.h"
-#include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorContentBrowserPolicy.h"
 #include "Editor/EditorContentBrowserState.h"
 #include "Editor/EditorAssetWorkflowState.h"
+#include "Editor/EditorSceneHistoryState.h"
 #include "Editor/EditorAssetDestinationPolicy.h"
 #include "Editor/EditorAssetSelectorPolicy.h"
 #include "Editor/EditorProjectOpening.h"
 #include "EditorApplicationFactory.h"
 #include "Editor/EditorInteractionPolicy.h"
-#include "Editor/EditorSceneWorkspaceState.h"
 #include "Editor/EditorEntityIconPolicy.h"
 #include "Editor/EditorHierarchyRowPolicy.h"
 #include "Editor/EditorGlfwViewportPolicy.h"
@@ -1388,7 +1387,7 @@ namespace
 				RenderViewportScene();
 			UpdateWindowTitle();
 			if (PulseForgeEditor::ShouldFinishSceneEditForInspector(
-				m_SceneHistory.IsActive(), m_InspectorHistoryItem, GImGui ? GImGui->ActiveId : 0))
+				m_SceneHistory.IsActive(), m_SceneHistory.InspectorHistoryItem(), GImGui ? GImGui->ActiveId : 0))
 				FinishSceneEdit();
 
 			ImGui::Render();
@@ -1581,182 +1580,21 @@ namespace
 		{
 			if (!m_Scene)
 				return std::unexpected("There is no active authored scene to capture");
-			auto Serialized = PulseForge::SceneSerializer::Serialize(*m_Scene);
-			if (!Serialized)
-				return std::unexpected(Serialized.error().Message);
-
-			std::string State = std::to_string(Serialized->size());
-			State.push_back('\n');
-			State.append(*Serialized);
-			State.push_back('\n');
-			if (SelectedEntity())
-				State.append(SelectedEntity()->ToString());
-			State.push_back('\n');
-			State.append(std::to_string(m_SceneWorkspace.Selection().GetEntities().size()));
-			State.push_back('\n');
-			for (const PulseForge::UUID& Identifier : m_SceneWorkspace.Selection().GetEntities())
-			{
-				State.append(Identifier.ToString());
-				State.push_back('\n');
-			}
-			const auto AppendVisibilitySet = [&State](
-				const std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash>& Identifiers)
-			{
-				std::vector<std::string> SortedIdentifiers;
-				SortedIdentifiers.reserve(Identifiers.size());
-				for (const PulseForge::UUID& Identifier : Identifiers)
-					SortedIdentifiers.push_back(Identifier.ToString());
-				std::sort(SortedIdentifiers.begin(), SortedIdentifiers.end());
-				State.append(std::to_string(SortedIdentifiers.size()));
-				State.push_back('\n');
-				for (const std::string& Identifier : SortedIdentifiers)
-				{
-					State.append(Identifier);
-					State.push_back('\n');
-				}
-			};
-			AppendVisibilitySet(m_SceneWorkspace.Visibility().GetHiddenEntities());
-			const auto IsolationBaseline = m_SceneWorkspace.Visibility().GetIsolationBaseline();
-			State.append(IsolationBaseline ? "1\n" : "0\n");
-			if (IsolationBaseline)
-				AppendVisibilitySet(*IsolationBaseline);
-			return State;
+			return PulseForgeEditor::EditorSceneHistoryState::CaptureSnapshot(*m_Scene, m_SceneWorkspace);
 		}
 
 		[[nodiscard]] std::expected<void, std::string> RestoreSceneState(std::string_view State)
 		{
 			if (!m_Scene || m_SceneRuntime)
 				return std::unexpected("Scene history is available only for the authored scene in Edit mode");
-			const size_t LengthTerminator = State.find('\n');
-			if (LengthTerminator == std::string_view::npos)
-				return std::unexpected("Scene history snapshot is malformed");
-			size_t SceneLength = 0;
-			const auto ParsedLength = std::from_chars(
-				State.data(), State.data() + LengthTerminator, SceneLength);
-			if (ParsedLength.ec != std::errc{} || ParsedLength.ptr != State.data() + LengthTerminator ||
-				State.size() < LengthTerminator + 2 ||
-				SceneLength > State.size() - LengthTerminator - 2)
-				return std::unexpected("Scene history snapshot has an invalid payload length");
-			const size_t SceneStart = LengthTerminator + 1;
-			const std::string_view SceneData = State.substr(SceneStart, SceneLength);
-			const size_t SelectionStart = SceneStart + SceneLength + 1;
-			if (State[SelectionStart - 1] != '\n')
-				return std::unexpected("Scene history snapshot has an invalid editor-state separator");
-			const std::string_view EditorState = State.substr(SelectionStart);
-			const size_t PrimaryTerminator = EditorState.find('\n');
-			if (PrimaryTerminator == std::string_view::npos)
-				return std::unexpected("Scene history snapshot has no selection primary separator");
-			const std::string_view PrimaryData = EditorState.substr(0, PrimaryTerminator);
-			const size_t CountStart = PrimaryTerminator + 1;
-			const size_t CountTerminator = EditorState.find('\n', CountStart);
-			if (CountTerminator == std::string_view::npos)
-				return std::unexpected("Scene history snapshot has no selection count separator");
-			size_t SelectionCount = 0;
-			const auto ParsedCount = std::from_chars(
-				EditorState.data() + CountStart, EditorState.data() + CountTerminator, SelectionCount);
-			if (ParsedCount.ec != std::errc{} || ParsedCount.ptr != EditorState.data() + CountTerminator ||
-				SelectionCount > (EditorState.size() - CountTerminator - 1) / 37)
-				return std::unexpected("Scene history snapshot has an invalid selection count");
-			std::vector<PulseForge::UUID> Selection;
-			Selection.reserve(SelectionCount);
-			size_t SelectionCursor = CountTerminator + 1;
-			for (size_t Index = 0; Index < SelectionCount; ++Index)
-			{
-				const size_t IdentifierEnd = EditorState.find('\n', SelectionCursor);
-				if (IdentifierEnd == std::string_view::npos)
-					return std::unexpected("Scene history snapshot contains a truncated selection identifier");
-				const auto Identifier = PulseForge::UUID::Parse(
-					EditorState.substr(SelectionCursor, IdentifierEnd - SelectionCursor));
-				if (!Identifier || std::find(Selection.begin(), Selection.end(), *Identifier) != Selection.end())
-					return std::unexpected("Scene history snapshot contains an invalid or duplicate selection identifier");
-				Selection.push_back(*Identifier);
-				SelectionCursor = IdentifierEnd + 1;
-			}
-			const auto ParseVisibilitySet = [&](size_t& Cursor, std::string_view FieldName)
-				-> std::expected<std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash>, std::string>
-			{
-				const size_t CountEnd = EditorState.find('\n', Cursor);
-				if (CountEnd == std::string_view::npos)
-					return std::unexpected("Scene history snapshot has no " + std::string(FieldName) + " count");
-				size_t Count = 0;
-				const auto Parsed = std::from_chars(EditorState.data() + Cursor, EditorState.data() + CountEnd, Count);
-				if (Parsed.ec != std::errc{} || Parsed.ptr != EditorState.data() + CountEnd ||
-					Count > (EditorState.size() - CountEnd - 1) / 37)
-					return std::unexpected("Scene history snapshot has an invalid " + std::string(FieldName) + " count");
-				Cursor = CountEnd + 1;
-				std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Identifiers;
-				for (size_t Index = 0; Index < Count; ++Index)
-				{
-					const size_t IdentifierEnd = EditorState.find('\n', Cursor);
-					if (IdentifierEnd == std::string_view::npos)
-						return std::unexpected("Scene history snapshot has a truncated " + std::string(FieldName) + " identifier");
-					const auto Identifier = PulseForge::UUID::Parse(EditorState.substr(Cursor, IdentifierEnd - Cursor));
-					if (!Identifier || !Identifiers.insert(*Identifier).second)
-						return std::unexpected("Scene history snapshot has an invalid or duplicate " +
-							std::string(FieldName) + " identifier");
-					Cursor = IdentifierEnd + 1;
-				}
-				return Identifiers;
-			};
-			auto HiddenEntities = ParseVisibilitySet(SelectionCursor, "hidden-entity");
-			if (!HiddenEntities)
-				return std::unexpected(HiddenEntities.error());
-			const size_t IsolationFlagEnd = EditorState.find('\n', SelectionCursor);
-			if (IsolationFlagEnd == std::string_view::npos)
-				return std::unexpected("Scene history snapshot has no isolation-state flag");
-			const std::string_view IsolationFlag = EditorState.substr(SelectionCursor, IsolationFlagEnd - SelectionCursor);
-			if (IsolationFlag != "0" && IsolationFlag != "1")
-				return std::unexpected("Scene history snapshot has an invalid isolation-state flag");
-			SelectionCursor = IsolationFlagEnd + 1;
-			std::optional<std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash>> IsolationBaseline;
-			if (IsolationFlag == "1")
-			{
-				auto ParsedBaseline = ParseVisibilitySet(SelectionCursor, "isolation-baseline");
-				if (!ParsedBaseline)
-					return std::unexpected(ParsedBaseline.error());
-				IsolationBaseline = std::move(*ParsedBaseline);
-			}
-			if (SelectionCursor != EditorState.size())
-				return std::unexpected("Scene history snapshot contains trailing editor-state data");
-			std::optional<PulseForge::UUID> Primary;
-			if (!PrimaryData.empty())
-			{
-				const auto ParsedPrimary = PulseForge::UUID::Parse(PrimaryData);
-				if (!ParsedPrimary)
-					return std::unexpected("Scene history snapshot contains an invalid selection primary");
-				Primary = *ParsedPrimary;
-				if (!Primary || std::find(Selection.begin(), Selection.end(), *Primary) == Selection.end())
-					return std::unexpected("Scene history snapshot contains an invalid selection primary");
-			}
-			if ((Selection.empty() && Primary) || (!Selection.empty() && !Primary))
-				return std::unexpected("Scene history snapshot selection primary does not match its selection");
-			if (auto Result = PulseForge::SceneSerializer::Deserialize(SceneData, *m_Scene); !Result)
-				return std::unexpected(Result.error().Message);
-			std::erase_if(Selection, [this](const PulseForge::UUID& Identifier)
-			{
-				return !m_Scene->FindEntity(Identifier).has_value();
-			});
-			if (Primary && std::find(Selection.begin(), Selection.end(), *Primary) == Selection.end())
-				Primary.reset();
-			const auto RemoveMissingEntities = [this](
-				std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash>& Identifiers)
-			{
-				std::erase_if(Identifiers, [this](const PulseForge::UUID& Identifier)
-				{
-					return !m_Scene->FindEntity(Identifier).has_value();
-				});
-			};
-			RemoveMissingEntities(*HiddenEntities);
-			if (IsolationBaseline)
-				RemoveMissingEntities(*IsolationBaseline);
-			m_SceneWorkspace.Selection().Set(std::move(Selection), Primary);
-			m_SceneWorkspace.Visibility().RestoreState(std::move(*HiddenEntities), std::move(IsolationBaseline));
+			auto Restored = PulseForgeEditor::EditorSceneHistoryState::RestoreSnapshot(State, *m_Scene, m_SceneWorkspace);
+			if (!Restored)
+				return std::unexpected(Restored.error());
 			m_GizmoDrag.reset();
-			m_InspectorHistoryItem = 0;
+			m_SceneHistory.InspectorHistoryItem() = 0;
 			UpdateSceneDirty();
 			return {};
 		}
-
 		[[nodiscard]] const std::optional<PulseForge::UUID>& SelectedEntity() const noexcept
 		{
 			return m_SceneWorkspace.Selection().GetPrimary();
@@ -2012,25 +1850,13 @@ namespace
 
 		void UpdateSceneDirty()
 		{
-			if (!m_Scene)
-			{
-				m_SceneDirty = false;
-				return;
-			}
-			auto Serialized = PulseForge::SceneSerializer::Serialize(*m_Scene);
-			m_SceneDirty = !Serialized || !m_SavedSceneSnapshot || *Serialized != *m_SavedSceneSnapshot;
+			m_SceneHistory.UpdateDirty(m_Scene.get());
 		}
 
 		void ResetSceneHistory()
 		{
-			m_SceneHistory.Reset();
-			m_InspectorHistoryItem = 0;
+			m_SceneHistory.Reset(m_Scene.get());
 			m_SceneWorkspace.Visibility().ShowAll();
-			m_SavedSceneSnapshot.reset();
-			if (m_Scene)
-				if (auto Serialized = PulseForge::SceneSerializer::Serialize(*m_Scene))
-					m_SavedSceneSnapshot = std::move(*Serialized);
-			UpdateSceneDirty();
 		}
 
 		void CancelSceneEdit()
@@ -2042,7 +1868,7 @@ namespace
 				if (!Result)
 					SetError("Scene edit rollback failed: " + Result.error());
 			}
-			m_InspectorHistoryItem = 0;
+			m_SceneHistory.InspectorHistoryItem() = 0;
 			UpdateSceneDirty();
 		}
 
@@ -2063,24 +1889,20 @@ namespace
 				SetError("Could not begin the scene edit: " + Begun.error());
 				return false;
 			}
-			m_InspectorHistoryItem = PulseForgeEditor::NoInspectorHistoryItem;
+			m_SceneHistory.InspectorHistoryItem() = PulseForgeEditor::NoInspectorHistoryItem;
 			return true;
 		}
 
 		void MarkSceneSaved()
 		{
-			m_SceneHistory.MarkSaved();
-			if (m_Scene)
-				if (auto Serialized = PulseForge::SceneSerializer::Serialize(*m_Scene))
-					m_SavedSceneSnapshot = std::move(*Serialized);
-			UpdateSceneDirty();
+			m_SceneHistory.MarkSaved(m_Scene.get());
 		}
 
 		void FinishSceneEdit()
 		{
 			if (!m_SceneHistory.IsActive())
 			{
-				m_InspectorHistoryItem = 0;
+				m_SceneHistory.InspectorHistoryItem() = 0;
 				return;
 			}
 
@@ -2089,7 +1911,7 @@ namespace
 			{
 				const std::string Error = After.error();
 				(void)m_SceneHistory.Cancel([this](std::string_view State) { return RestoreSceneState(State); });
-				m_InspectorHistoryItem = 0;
+				m_SceneHistory.InspectorHistoryItem() = 0;
 				SetError("Could not finish the scene edit transaction: " + Error);
 				return;
 			}
@@ -2099,11 +1921,11 @@ namespace
 			{
 				const std::string Error = Committed.error();
 				(void)m_SceneHistory.Cancel([this](std::string_view State) { return RestoreSceneState(State); });
-				m_InspectorHistoryItem = 0;
+				m_SceneHistory.InspectorHistoryItem() = 0;
 				SetError("Scene edit was rolled back because it could not be stored in history: " + Error);
 				return;
 			}
-			m_InspectorHistoryItem = 0;
+			m_SceneHistory.InspectorHistoryItem() = 0;
 			UpdateSceneDirty();
 		}
 
@@ -2114,7 +1936,7 @@ namespace
 				return std::unexpected("Scene editing is unavailable while the runtime scene is active");
 
 			const uint32_t ActiveItem = GImGui ? GImGui->ActiveId : 0;
-			if (m_SceneHistory.IsActive() && m_InspectorHistoryItem != ActiveItem)
+			if (m_SceneHistory.IsActive() && m_SceneHistory.InspectorHistoryItem() != ActiveItem)
 				FinishSceneEdit();
 			if (!m_SceneHistory.IsActive())
 			{
@@ -2123,7 +1945,7 @@ namespace
 					return std::unexpected("Could not begin the scene edit: " + Before.error());
 				if (auto Begun = m_SceneHistory.Begin(std::move(Description), std::move(*Before)); !Begun)
 					return std::unexpected(Begun.error());
-				m_InspectorHistoryItem = ActiveItem;
+				m_SceneHistory.InspectorHistoryItem() = ActiveItem;
 			}
 
 			auto Result = std::forward<Action>(Operation)();
@@ -2131,7 +1953,7 @@ namespace
 			{
 				const std::string Error = Result.error().Message;
 				(void)m_SceneHistory.Cancel([this](std::string_view State) { return RestoreSceneState(State); });
-				m_InspectorHistoryItem = 0;
+				m_SceneHistory.InspectorHistoryItem() = 0;
 				UpdateSceneDirty();
 				return std::unexpected(Error);
 			}
@@ -2139,7 +1961,7 @@ namespace
 			if (ActiveItem == 0 || !GImGui || GImGui->ActiveId != ActiveItem)
 				FinishSceneEdit();
 			else
-				m_SceneDirty = true;
+				m_SceneHistory.MarkDirty();
 			return {};
 		}
 
@@ -5368,7 +5190,7 @@ namespace
 				return;
 			}
 
-			if (!m_SceneDirty)
+			if (!m_SceneHistory.IsDirty())
 			{
 				QueueAfterDocuments(std::move(Action));
 				return;
@@ -5383,7 +5205,7 @@ namespace
 
 		bool DiscardSceneChanges()
 		{
-			if (!m_SceneDirty)
+			if (!m_SceneHistory.IsDirty())
 				return true;
 			if (!m_Project || !m_Scene || !m_SceneAsset)
 			{
@@ -5737,12 +5559,12 @@ namespace
 					if (m_SceneAsset)
 						if (const auto Record = m_Project->GetAssetRegistry().Find(*m_SceneAsset))
 							SceneName = PathToUtf8(Record->ProjectRelativePath.filename());
-					if (m_SceneDirty)
+					if (m_SceneHistory.IsDirty())
 						SceneName.push_back('*');
 					const std::string SceneLabel = FitEditorContextLabel(SceneName, SceneWidth);
 					ImGui::TextUnformatted(SceneLabel.c_str());
 					if (SceneLabel != SceneName && ImGui::IsItemHovered())
-						ImGui::SetTooltip("Scene: %s%s", SceneName.c_str(), m_SceneDirty ? " (unsaved changes)" : "");
+						ImGui::SetTooltip("Scene: %s%s", SceneName.c_str(), m_SceneHistory.IsDirty() ? " (unsaved changes)" : "");
 					ImGui::SameLine(0.0f, 12.0f);
 					ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
 					ImGui::SameLine(0.0f, 10.0f);
@@ -5795,7 +5617,7 @@ namespace
 				if (const auto SceneRecord = m_Project->GetAssetRegistry().Find(*m_SceneAsset))
 				{
 					Title = PathToUtf8(SceneRecord->ProjectRelativePath.filename());
-					if (m_SceneDirty)
+					if (m_SceneHistory.IsDirty())
 						Title.push_back('*');
 					Title += " - PulseForge Editor";
 				}
@@ -5835,7 +5657,7 @@ namespace
 					ImGui::SetTooltip("%s", m_StatusMessage.c_str());
 
 				ImGui::TableSetColumnIndex(1);
-				const bool ShowDirtyState = m_Scene && m_SceneDirty;
+				const bool ShowDirtyState = m_Scene && m_SceneHistory.IsDirty();
 				if (ShowDirtyState)
 					ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning), "Unsaved scene");
 				else
@@ -7150,7 +6972,7 @@ namespace
 							(void)m_EditorStyle.SectionHeader(PulseForgeEditor::EditorIcon::Scene, "Scene");
 							ImGui::TextUnformatted(SceneName.c_str());
 							ImGui::SameLine();
-							m_EditorStyle.TextMuted(m_SceneDirty ? "Unsaved" : "Saved");
+							m_EditorStyle.TextMuted(m_SceneHistory.IsDirty() ? "Unsaved" : "Saved");
 							ImGui::Text("Entities  %zu", m_Scene->GetEntityCount());
 							if (m_SceneRuntime && m_RuntimeScene)
 							{
@@ -8501,7 +8323,7 @@ namespace
 					CancelGizmoInteraction();
 					return;
 				}
-				m_SceneDirty = true;
+				m_SceneHistory.MarkDirty();
 				return;
 			}
 
@@ -8563,7 +8385,7 @@ namespace
 					return;
 				}
 			}
-			m_SceneDirty = true;
+			m_SceneHistory.MarkDirty();
 		}
 
 		[[nodiscard]] static bool TransformsDiffer(
@@ -10026,7 +9848,7 @@ namespace
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Inspector))
 			{
 				if (PulseForgeEditor::ShouldFinishSceneEditForInspector(
-					m_SceneHistory.IsActive(), m_InspectorHistoryItem, GImGui ? GImGui->ActiveId : 0))
+					m_SceneHistory.IsActive(), m_SceneHistory.InspectorHistoryItem(), GImGui ? GImGui->ActiveId : 0))
 					FinishSceneEdit();
 				if (!m_Scene || !SelectedEntity())
 					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Entity, "Select an entity in the Hierarchy.");
@@ -12255,10 +12077,8 @@ namespace
 		bool m_RawMouseMotionChanged = false;
 		bool m_CursorRestoreValid = false;
 		bool m_SceneRendererInitializationFailed = false;
-		bool m_SceneDirty = false;
-		PulseForgeEditor::EditorCommandHistory m_SceneHistory;
+		PulseForgeEditor::EditorSceneHistoryState m_SceneHistory;
 		PulseForgeEditor::EditorSceneWorkspaceState m_SceneWorkspace;
-		uint32_t m_InspectorHistoryItem = 0;
 		bool m_FocusEntityNameNextFrame = false;
 		bool m_FocusHierarchySearchNextFrame = false;
 		bool m_FocusContentSearchNextFrame = false;
@@ -12384,7 +12204,6 @@ namespace
 		bool m_DocumentHostTabGroupTargetCenterValid = false;
 		std::optional<PulseForge::Project> m_Project;
 		std::unique_ptr<PulseForge::Scene> m_Scene;
-		std::optional<std::string> m_SavedSceneSnapshot;
 		std::unique_ptr<PulseForge::Scene> m_RuntimeScene;
 		std::unique_ptr<PulseForge::SceneRuntime> m_SceneRuntime;
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;

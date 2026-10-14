@@ -1,6 +1,7 @@
 #include "EditorConsoleHistory.h"
 #include "Editor/EditorContentBrowserState.h"
 #include "Editor/EditorAssetWorkflowState.h"
+#include "Editor/EditorSceneHistoryState.h"
 #include "Editor/EditorSceneWorkspaceState.h"
 #include "EditorMaterialDraftStore.h"
 #include "EditorViewportCamera.h"
@@ -1331,7 +1332,57 @@ namespace
 		PF_CHECK(Tests, State.Selection().GetEntities().empty());
 		PF_CHECK(Tests, State.Visibility().IsLocallyVisible(*First));
 		PF_CHECK(Tests, State.VisibleHierarchyOrder().empty());
-\t}`r`n`r`n\tvoid TestEditorMaterialDraftStore(TestRunner& Tests)
+	}
+
+	void TestEditorSceneHistoryState(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		PulseForge::Scene SceneValue;
+		const auto Original = SceneValue.CreateEntity("Original");
+		PF_CHECK(Tests, Original.has_value());
+		if (!Original)
+			return;
+
+		EditorSceneWorkspaceState Workspace;
+		Workspace.Selection().SelectSingle(Original->GetUUID());
+		Workspace.Visibility().SetVisible(Original->GetUUID(), false);
+		const auto Snapshot = EditorSceneHistoryState::CaptureSnapshot(SceneValue, Workspace);
+		PF_CHECK(Tests, Snapshot.has_value());
+		if (!Snapshot)
+			return;
+
+		EditorSceneHistoryState History;
+		History.Reset(&SceneValue);
+		PF_CHECK(Tests, !History.IsDirty());
+		const auto Additional = SceneValue.CreateEntity("Additional");
+		PF_CHECK(Tests, Additional.has_value());
+		if (!Additional)
+			return;
+		Workspace.Selection().SelectSingle(Additional->GetUUID());
+		Workspace.Visibility().SetVisible(Original->GetUUID(), true);
+		History.UpdateDirty(&SceneValue);
+		PF_CHECK(Tests, History.IsDirty());
+
+		PF_CHECK(Tests, EditorSceneHistoryState::RestoreSnapshot(*Snapshot, SceneValue, Workspace).has_value());
+		PF_CHECK(Tests, SceneValue.GetEntityCount() == 1);
+		PF_CHECK(Tests, Workspace.Selection().GetPrimary() == Original->GetUUID());
+		PF_CHECK(Tests, !Workspace.Visibility().IsLocallyVisible(Original->GetUUID()));
+
+		const auto Invalid = EditorSceneHistoryState::RestoreSnapshot("invalid snapshot", SceneValue, Workspace);
+		PF_CHECK(Tests, !Invalid);
+		PF_CHECK(Tests, SceneValue.GetEntityCount() == 1);
+		PF_CHECK(Tests, Workspace.Selection().GetPrimary() == Original->GetUUID());
+
+		const auto Changed = SceneValue.CreateEntity("Changed");
+		PF_CHECK(Tests, Changed.has_value());
+		History.UpdateDirty(&SceneValue);
+		PF_CHECK(Tests, History.IsDirty());
+		History.MarkSaved(&SceneValue);
+		PF_CHECK(Tests, !History.IsDirty());
+		History.Reset(nullptr);
+		PF_CHECK(Tests, !History.IsDirty());
+	}
+	void TestEditorMaterialDraftStore(TestRunner& Tests)
 	{
 		PulseForgeEditor::EditorMaterialDraftStore Drafts;
 		const std::string FirstKey = "project-a:material-1";
@@ -1398,6 +1449,7 @@ void RunEditorTests(TestRunner& Tests)
 	TestEditorContentBrowserState(Tests);
 	TestEditorAssetWorkflowState(Tests);
 	TestEditorSceneWorkspaceState(Tests);
+	TestEditorSceneHistoryState(Tests);
 	TestEditorMaterialDraftStore(Tests);
 	TestEditorWorkspacePanelState(Tests);
 	TestEditorDeferredOperationQueue(Tests);
