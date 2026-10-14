@@ -13,7 +13,6 @@
 #include "Core/Layer.h"
 #include "Core/Log.h"
 #include "Core/ScopedProfileTimer.h"
-#include "Assets/GltfMeshImporter.h"
 #include "Events/ApplicationEvent.h"
 #include "Events/Event.h"
 #include "Events/KeyEvent.h"
@@ -35,6 +34,7 @@
 #include "Editor/EditorImGuiRenderer.h"
 #include "Editor/EditorAssetPreviewService.h"
 #include "Editor/EditorAssetPreviewPolicy.h"
+#include "Editor/EditorMeshPickingCache.h"
 #include "Editor/EditorDeferredOperationQueue.h"
 #include "EditorConsolePanel.h"
 #include "EditorWorkspacePresentation.h"
@@ -505,12 +505,6 @@ namespace
 		{
 			uint64_t TargetID = 0;
 			bool FrameActive = false;
-		};
-
-		struct CpuPickingMesh
-		{
-			std::vector<glm::vec3> Positions;
-			std::vector<uint32_t> Indices;
 		};
 
 		using ContentFolderNode = PulseForgeEditor::EditorContentFolderNode;
@@ -8300,39 +8294,12 @@ namespace
 			m_GizmoDrag.reset();
 		}
 
-		[[nodiscard]] std::expected<const CpuPickingMesh*, std::string> GetCpuPickingMesh(
-			const PulseForge::AssetID& Asset)
+		[[nodiscard]] std::expected<const PulseForgeEditor::EditorMeshPickingGeometry*, std::string>
+			GetCpuPickingMesh(const PulseForge::AssetID& Asset)
 		{
-			if (const auto Existing = m_PickingMeshCache.find(Asset); Existing != m_PickingMeshCache.end())
-				return &Existing->second;
-			if (const auto ExistingError = m_PickingMeshErrors.find(Asset); ExistingError != m_PickingMeshErrors.end())
-				return std::unexpected(ExistingError->second);
 			if (!m_Project)
 				return std::unexpected("There is no open project for mesh picking");
-
-			auto Imported = PulseForge::GltfMeshImporter::ImportStaticPrimitive(
-				Asset, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
-			if (!Imported)
-			{
-				const std::string Message = "Mesh " + Asset.ToString() + " could not be loaded for viewport picking: " +
-					Imported.error().Message;
-				m_PickingMeshErrors.emplace(Asset, Message);
-				return std::unexpected(Message);
-			}
-
-			CpuPickingMesh Geometry;
-			Geometry.Positions.reserve(Imported->Vertices.size());
-			for (const PulseForge::GltfMeshVertex& Vertex : Imported->Vertices)
-			{
-				const glm::vec3 Position{ Vertex.Position[0], Vertex.Position[1], Vertex.Position[2] };
-				if (!PulseForgeEditor::Detail::IsFinite(Position))
-					return std::unexpected("The imported mesh contains a non-finite vertex position");
-				Geometry.Positions.push_back(Position);
-			}
-			Geometry.Indices = Imported->Indices;
-			auto [Inserted, WasInserted] = m_PickingMeshCache.emplace(Asset, std::move(Geometry));
-			(void)WasInserted;
-			return &Inserted->second;
+			return m_MeshPickingCache.Get(*m_Project, Asset);
 		}
 
 		void PickEntityAt(const glm::vec2& Mouse, bool Control, bool Shift)
@@ -8857,8 +8824,7 @@ namespace
 			ResetEditorViewportCamera();
 			m_SceneRenderer.reset();
 			m_ExposureEV = 0.0f;
-			m_PickingMeshCache.clear();
-			m_PickingMeshErrors.clear();
+			m_MeshPickingCache.Clear();
 			m_ViewportSceneReady = false;
 			m_SceneRendererInitializationFailed = false;
 			ClearViewportSceneError();
@@ -11743,8 +11709,7 @@ namespace
 		{
 			m_AssetPreviewProjectPending = true;
 			m_AssetPreviewAssetsPending = true;
-			m_PickingMeshCache.clear();
-			m_PickingMeshErrors.clear();
+			m_MeshPickingCache.Clear();
 			m_ContentBrowser.SetAssets(m_Project
 				? m_Project->GetAssetRegistry().GetAssets()
 				: std::vector<PulseForge::AssetRecord>{});
@@ -12082,8 +12047,7 @@ namespace
 		float m_ScaleSnapIncrement = 0.1f;
 		ViewportCameraGesture m_ViewportCameraGesture = ViewportCameraGesture::None;
 		bool m_ShowEditorOverlays = true;
-		std::unordered_map<PulseForge::AssetID, CpuPickingMesh, PulseForge::UUIDHash> m_PickingMeshCache;
-		std::unordered_map<PulseForge::AssetID, std::string, PulseForge::UUIDHash> m_PickingMeshErrors;
+		PulseForgeEditor::EditorMeshPickingCache m_MeshPickingCache;
 		uint64_t m_ViewportTextureID = 0;
 		uint32_t m_ViewportWidth = 0;
 		uint32_t m_ViewportHeight = 0;

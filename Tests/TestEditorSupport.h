@@ -24,6 +24,7 @@
 #include "Editor/EditorGlfwViewportPolicy.h"
 #include "Editor/EditorHierarchyRowPolicy.h"
 #include "Editor/EditorInteractionPolicy.h"
+#include "Editor/EditorMeshPickingCache.h"
 #include "Editor/EditorIcons.h"
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorLayoutSettingsPolicy.h"

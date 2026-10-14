@@ -3,6 +3,76 @@
 
 namespace
 {
+	void TestEditorMeshPickingCache(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		const std::filesystem::path RepositoryRoot = std::filesystem::path(__FILE__).parent_path().parent_path();
+		const std::filesystem::path FirstProjectFile = RepositoryRoot / "PulseForgeGame" / "PulseForgeGame.pfproj";
+		auto FirstProject = Project::Open(FirstProjectFile);
+		PF_CHECK(Tests, FirstProject.has_value());
+		if (!FirstProject)
+			return;
+
+		const auto FindGltfAsset = [](const Project& OpenProject) -> std::optional<AssetRecord>
+		{
+			const auto Assets = OpenProject.GetAssetRegistry().GetAssets();
+			const auto Found = std::find_if(Assets.begin(), Assets.end(), [](const AssetRecord& Asset)
+			{
+				return Asset.ProjectRelativePath.extension() == ".gltf";
+			});
+			return Found == Assets.end() ? std::nullopt : std::optional<AssetRecord>(*Found);
+		};
+		const auto FirstMesh = FindGltfAsset(*FirstProject);
+		PF_CHECK(Tests, FirstMesh.has_value());
+		if (!FirstMesh)
+			return;
+
+		EditorMeshPickingCache Cache;
+		const auto FirstGeometry = Cache.Get(*FirstProject, FirstMesh->ID);
+		PF_CHECK(Tests, FirstGeometry.has_value());
+		PF_CHECK(Tests, FirstGeometry && !(*FirstGeometry)->Positions.empty() && !(*FirstGeometry)->Indices.empty());
+		const auto CachedGeometry = Cache.Get(*FirstProject, FirstMesh->ID);
+		PF_CHECK(Tests, CachedGeometry && FirstGeometry && *CachedGeometry == *FirstGeometry);
+		PF_CHECK(Tests, Cache.GetGeometryCount() == 1 && Cache.GetFailureCount() == 0);
+
+		const auto FirstProjectAssets = FirstProject->GetAssetRegistry().GetAssets();
+		const auto NonMeshAsset = std::find_if(FirstProjectAssets.begin(), FirstProjectAssets.end(),
+			[](const AssetRecord& Asset) { return Asset.ProjectRelativePath.extension() == ".material"; });
+		PF_CHECK(Tests, NonMeshAsset != FirstProjectAssets.end());
+		if (NonMeshAsset != FirstProjectAssets.end())
+		{
+			const auto FailedLoad = Cache.Get(*FirstProject, NonMeshAsset->ID);
+			const auto CachedFailure = Cache.Get(*FirstProject, NonMeshAsset->ID);
+			PF_CHECK(Tests, !FailedLoad && !CachedFailure && FailedLoad.error() == CachedFailure.error());
+			PF_CHECK(Tests, Cache.GetFailureCount() == 1);
+			Cache.Invalidate(NonMeshAsset->ID);
+			PF_CHECK(Tests, Cache.GetFailureCount() == 0);
+		}
+
+		Cache.Invalidate(FirstMesh->ID);
+		PF_CHECK(Tests, Cache.GetGeometryCount() == 0);
+		const auto ReloadedGeometry = Cache.Get(*FirstProject, FirstMesh->ID);
+		PF_CHECK(Tests, ReloadedGeometry && !(*ReloadedGeometry)->Positions.empty());
+		PF_CHECK(Tests, Cache.GetGeometryCount() == 1);
+
+		const std::filesystem::path SecondProjectFile = RepositoryRoot / "Samples" / "VisualValidation" /
+			"PointLightShadows" / "PointLightShadows.pfproj";
+		auto SecondProject = Project::Open(SecondProjectFile);
+		PF_CHECK(Tests, SecondProject.has_value());
+		if (!SecondProject)
+			return;
+		const auto SecondMesh = FindGltfAsset(*SecondProject);
+		PF_CHECK(Tests, SecondMesh.has_value());
+		if (!SecondMesh)
+			return;
+		const auto SecondGeometry = Cache.Get(*SecondProject, SecondMesh->ID);
+		PF_CHECK(Tests, SecondGeometry && !(*SecondGeometry)->Positions.empty());
+		PF_CHECK(Tests, Cache.GetGeometryCount() == 1 && Cache.GetFailureCount() == 0);
+		Cache.Clear();
+		PF_CHECK(Tests, Cache.GetGeometryCount() == 0 && Cache.GetFailureCount() == 0);
+	}
+
 	void TestEditorViewportMath(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -455,6 +525,7 @@ namespace
 
 void RunEditorViewportTests(TestRunner& Tests)
 {
+	TestEditorMeshPickingCache(Tests);
 	TestEditorViewportMath(Tests);
 	TestViewportMouseCaptureState(Tests);
 	TestEditorViewportCameraController(Tests);
