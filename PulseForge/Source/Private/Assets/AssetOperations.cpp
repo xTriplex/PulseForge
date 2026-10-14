@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Assets/AssetOperations.h"
 
 #include "Assets/AssetMetadata.h"

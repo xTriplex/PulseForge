@@ -216,16 +216,24 @@ target_include_directories(PulseForgeScene
 )
 target_compile_definitions(PulseForgeScene PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(PulseForgeScene PUBLIC PulseForgeCore)
+add_library(PulseForgeAssetCatalog STATIC
+	PulseForge/Source/Private/Assets/AssetMetadata.cpp
+	PulseForge/Source/Private/Assets/AssetOperations.cpp
+	PulseForge/Source/Private/Assets/AssetPathResolver.cpp
+	PulseForge/Source/Private/Assets/AssetReferenceValidator.cpp
+	PulseForge/Source/Private/Assets/AssetRegistry.cpp
+)
+target_include_directories(PulseForgeAssetCatalog
+	PUBLIC PulseForge/Source/Public
+	PRIVATE PulseForge/Vendor/json/include
+)
+target_compile_definitions(PulseForgeAssetCatalog PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS NOMINMAX)
+target_link_libraries(PulseForgeAssetCatalog PUBLIC PulseForgeCore PulseForgeScene)
 add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/PulseForgePCH.cpp
 	PulseForge/Source/Private/Audio/AudioEngine.cpp
 	PulseForge/Source/Private/Audio/AudioSceneRuntime.cpp
 	PulseForge/Source/Private/Audio/MiniAudio/MiniAudio.cpp
-	PulseForge/Source/Private/Assets/AssetPathResolver.cpp
-	PulseForge/Source/Private/Assets/AssetMetadata.cpp
-	PulseForge/Source/Private/Assets/AssetOperations.cpp
-	PulseForge/Source/Private/Assets/AssetReferenceValidator.cpp
-	PulseForge/Source/Private/Assets/AssetRegistry.cpp
 	PulseForge/Source/Private/Assets/AudioAssetCache.cpp
 	PulseForge/Source/Private/Assets/MaterialAsset.cpp
 	PulseForge/Source/Private/Assets/MaterialAssetCache.cpp
@@ -284,7 +292,7 @@ target_compile_definitions(PulseForge PRIVATE
 	GLFW_INCLUDE_NONE
 	MA_NO_WIN32_LEAN_AND_MEAN
 )
-target_link_libraries(PulseForge PUBLIC PulseForgeCore PulseForgeScene)
+target_link_libraries(PulseForge PUBLIC PulseForgeAssetCatalog)
 target_link_libraries(PulseForge PRIVATE
 	PulseForgeLua
 	glfw
@@ -888,7 +896,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	set_property(TARGET PulseForgeGpuValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGpuValidation>")
 endif()
 
-foreach(Target PulseForgeCore PulseForgeScene PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI
+foreach(Target PulseForgeCore PulseForgeScene PulseForgeAssetCatalog PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI
 		PulseForgeTests PulseForgeEditorTests PulseForgeBufferUpdateTests PulseForgeGpuValidation)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE

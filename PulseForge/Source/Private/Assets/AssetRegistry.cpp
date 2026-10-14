@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Assets/AssetRegistry.h"
 #include "Core/ScopedProfileTimer.h"
 
