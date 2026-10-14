@@ -35,6 +35,7 @@
 #include "Editor/EditorImGuiRenderer.h"
 #include "Editor/EditorAssetPreviewService.h"
 #include "Editor/EditorAssetPreviewPolicy.h"
+#include "Editor/EditorDeferredOperationQueue.h"
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorCommandHistory.h"
@@ -909,9 +910,10 @@ namespace
 	public:
 		explicit EditorLayer(PulseForgeEditor::EditorCommandLineOptions Options)
 			: Layer("Editor"),
-			  m_StartupProjectPath(std::move(Options.ProjectFile)),
 			  m_AssetPreviewStressManifest(std::move(Options.AssetPreviewStressManifest)),
 			  m_AssetPreviewStressBudget(std::move(Options.AssetPreviewStressBudget)),
+			  m_StartupProjectPath(std::move(Options.ProjectFile)),
+			  m_ProjectOpenRenderTestFile(std::move(Options.ProjectOpenRenderTestFile)),
 			  m_DocumentHostTestFixture(Options.EnableDocumentHostTestFixture),
 			  m_DocumentHostResetLayoutTest(Options.EnableDocumentHostResetLayoutTest),
 			  m_DocumentHostTabTearOffTest(Options.EnableDocumentHostTabTearOffTest),
@@ -1142,6 +1144,7 @@ namespace
 
 		void OnDetach() override
 		{
+			m_DeferredEditorOperations.Clear();
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
 			StopRuntime();
@@ -1156,6 +1159,7 @@ namespace
 
 		void OnUpdate(PulseForge::Timestep DeltaTime) override
 		{
+			(void)m_DeferredEditorOperations.ExecuteNext();
 			#ifdef PF_EDITOR_RENDERER_OPENGL
 			if (m_Context)
 			{
@@ -1525,6 +1529,18 @@ namespace
 			HandleSceneEditingShortcuts();
 
 			DrawMainMenu();
+			if (m_ProjectOpenRenderTestFile && !m_ProjectOpenRenderTestRequested)
+			{
+				m_ProjectOpenRenderTestRequested = true;
+				const std::filesystem::path ProjectFile = *m_ProjectOpenRenderTestFile;
+				PF_INFO("Project-open render-stage fixture queued a project load from the editor frame.");
+				QueueAfterSave([this, ProjectFile]
+				{
+					PF_INFO("Project-open render-stage fixture executing the queued project load.");
+					if (auto Result = OpenProjectAt(ProjectFile); !Result)
+						PF_ERROR("Project-open render-stage fixture failed: {}", Result.error());
+				});
+			}
 			DrawEditorToolbar();
 			DrawMainDocumentStrip();
 			DrawStatusBar();
@@ -5675,7 +5691,7 @@ namespace
 				return;
 			if (GetDirtyAssetDocuments().empty())
 			{
-				Action();
+				m_DeferredEditorOperations.Enqueue(std::move(Action));
 				return;
 			}
 			m_PendingDocumentClose.reset();
@@ -5764,7 +5780,7 @@ namespace
 			m_OpenDocumentCloseDialog = false;
 			ImGui::CloseCurrentPopup();
 			if (Continuation)
-				Continuation();
+				m_DeferredEditorOperations.Enqueue(std::move(Continuation));
 			return true;
 		}
 
@@ -11962,6 +11978,7 @@ namespace
 		void* m_PreviousImGuiUserData = nullptr;
 		PulseForgeEditor::EditorLayout m_Layout;
 		PulseForgeEditor::EditorDocumentManager m_Documents;
+		PulseForgeEditor::EditorDeferredOperationQueue m_DeferredEditorOperations;
 		PulseForgeEditor::EditorStyle m_EditorStyle;
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
 		PulseForgeEditor::EditorAssetPreviewService m_AssetPreviews;
@@ -12068,6 +12085,8 @@ namespace
 		std::string m_DocumentCloseDialogHostID;
 		std::unordered_set<std::string> m_DocumentHostFocusRequests;
 		std::optional<std::filesystem::path> m_StartupProjectPath;
+		std::optional<std::filesystem::path> m_ProjectOpenRenderTestFile;
+		bool m_ProjectOpenRenderTestRequested = false;
 		bool m_DocumentHostTestFixture = false;
 		bool m_DocumentHostResetLayoutTest = false;
 		bool m_DocumentHostTabTearOffTest = false;

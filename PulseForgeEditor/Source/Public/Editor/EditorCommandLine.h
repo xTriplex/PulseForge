@@ -33,6 +33,7 @@ namespace PulseForgeEditor
 	struct EditorCommandLineOptions
 	{
 		std::optional<std::filesystem::path> ProjectFile;
+		std::optional<std::filesystem::path> ProjectOpenRenderTestFile;
 		std::optional<std::filesystem::path> AssetPreviewStressManifest;
 		std::string AssetPreviewStressBudget;
 		bool EnableDocumentHostTestFixture = false;
@@ -152,11 +153,41 @@ namespace PulseForgeEditor
 						"Asset preview stress budget must be 'entries' or 'gpu'." });
 				continue;
 			}
+			if (Arguments[Index] == "--project-open-render-test")
+			{
+				if (Options.ProjectOpenRenderTestFile)
+					return std::unexpected(EditorCommandLineError{
+						EditorCommandLineErrorCode::DuplicateOption,
+						"The --project-open-render-test option may be specified only once." });
+				if (Index + 1 >= Arguments.size() || Arguments[Index + 1].starts_with("--"))
+					return std::unexpected(EditorCommandLineError{
+						EditorCommandLineErrorCode::MissingProjectPath,
+						"The --project-open-render-test option requires a .pfproj path." });
+				std::filesystem::path ProjectFile = std::filesystem::u8path(Arguments[++Index]);
+				if (ProjectFile.is_relative())
+					ProjectFile = WorkingDirectory / ProjectFile;
+				std::error_code Error;
+				ProjectFile = std::filesystem::absolute(ProjectFile, Error).lexically_normal();
+				std::string Extension = ProjectFile.extension().string();
+				std::transform(Extension.begin(), Extension.end(), Extension.begin(),
+					[](unsigned char Character)
+					{
+						return static_cast<char>(std::tolower(Character));
+					});
+				if (Error || Extension != ".pfproj" ||
+					!std::filesystem::is_regular_file(ProjectFile, Error) || Error)
+					return std::unexpected(EditorCommandLineError{
+						EditorCommandLineErrorCode::InvalidProjectPath,
+						"The project-open render test requires an existing .pfproj file." });
+				Options.ProjectOpenRenderTestFile = std::move(ProjectFile);
+				continue;
+			}
 			if (Arguments[Index] != "--project")
 				return std::unexpected(EditorCommandLineError{
 					EditorCommandLineErrorCode::UnexpectedArgument,
 					"Unexpected argument '" + std::string(Arguments[Index]) +
 					"'. Supported options include --project <path>, --asset-preview-stress, "
+					"and the Debug-only --project-open-render-test <path>, "
 					"the Debug-only --document-host-test-fixture, and the Debug-only "
 					"--document-host-reset-layout-test, --document-host-test-tab-tear-off, "
 					"--document-host-test-tab-reattach, --document-host-test-tab-reorder, and "

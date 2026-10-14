@@ -7,6 +7,7 @@
 #include <numbers>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 #include "Assets/AssetMetadata.h"
 #include "Assets/AssetOperations.h"
@@ -35,6 +36,7 @@
 #include "Editor/EditorMaterialPropertyLayoutPolicy.h"
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorCommandLine.h"
+#include "Editor/EditorDeferredOperationQueue.h"
 #include "Editor/EditorContentBrowserPolicy.h"
 #include "Editor/EditorAssetDestinationPolicy.h"
 #include "Editor/EditorAssetSelectorPolicy.h"
@@ -2059,6 +2061,34 @@ namespace
 		PF_CHECK(Tests, DraftKey == MakeMaterialDraftKey("C:/Project", "material-uuid"));
 		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("D:/Project", "material-uuid"));
 		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("C:/Project", "other-material-uuid"));
+	}
+
+	void TestEditorDeferredOperationQueue(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		EditorDeferredOperationQueue Operations;
+		std::vector<int> ExecutionOrder;
+		Operations.Enqueue([&ExecutionOrder] { ExecutionOrder.push_back(1); });
+		Operations.Enqueue([&ExecutionOrder, &Operations]
+		{
+			ExecutionOrder.push_back(2);
+			Operations.Enqueue([&ExecutionOrder] { ExecutionOrder.push_back(4); });
+		});
+
+		PF_CHECK(Tests, ExecutionOrder.empty());
+		PF_CHECK(Tests, Operations.Size() == 2);
+		PF_CHECK(Tests, Operations.ExecuteNext());
+		PF_CHECK(Tests, ExecutionOrder == std::vector<int>{ 1 });
+		PF_CHECK(Tests, Operations.ExecuteNext());
+		PF_CHECK(Tests, ExecutionOrder == (std::vector<int>{ 1, 2 }));
+		PF_CHECK(Tests, Operations.Size() == 1);
+		PF_CHECK(Tests, Operations.ExecuteNext());
+		PF_CHECK(Tests, ExecutionOrder == (std::vector<int>{ 1, 2, 4 }));
+		PF_CHECK(Tests, !Operations.ExecuteNext());
+		Operations.Enqueue([] {});
+		Operations.Clear();
+		PF_CHECK(Tests, Operations.Size() == 0);
+		PF_CHECK(Tests, !Operations.ExecuteNext());
 	}
 
 	void TestEditorAssetDestinationPolicy(TestRunner& Tests)
@@ -5046,8 +5076,39 @@ namespace
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostPresentationFailureTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostAcquireOutOfDateTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostImageAllocationFailureTest);
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->ProjectOpenRenderTestFile);
 
 		const std::string AbsoluteProjectPath = ProjectFile.string();
+		const std::array ProjectOpenRenderTestArguments = {
+			std::string_view("--project-open-render-test"), std::string_view(AbsoluteProjectPath) };
+		const auto ProjectOpenRenderTestOptions = ParseEditorCommandLine(ProjectOpenRenderTestArguments, Root);
+		PF_CHECK(Tests, ProjectOpenRenderTestOptions.has_value());
+		PF_CHECK(Tests, ProjectOpenRenderTestOptions &&
+			ProjectOpenRenderTestOptions->ProjectOpenRenderTestFile == ProjectFile);
+		const std::array MissingProjectOpenRenderTestValue = {
+			std::string_view("--project-open-render-test") };
+		const auto MissingProjectOpenRenderTestOptions =
+			ParseEditorCommandLine(MissingProjectOpenRenderTestValue, Root);
+		PF_CHECK(Tests, !MissingProjectOpenRenderTestOptions);
+		PF_CHECK(Tests, !MissingProjectOpenRenderTestOptions &&
+			MissingProjectOpenRenderTestOptions.error().Code == EditorCommandLineErrorCode::MissingProjectPath);
+		const std::array StartupAndProjectOpenRenderTestArguments = {
+			std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--project-open-render-test"), std::string_view(AbsoluteProjectPath) };
+		const auto StartupAndProjectOpenRenderTestOptions =
+			ParseEditorCommandLine(StartupAndProjectOpenRenderTestArguments, Root);
+		PF_CHECK(Tests, StartupAndProjectOpenRenderTestOptions.has_value());
+		PF_CHECK(Tests, StartupAndProjectOpenRenderTestOptions &&
+			StartupAndProjectOpenRenderTestOptions->ProjectFile == ProjectFile &&
+			StartupAndProjectOpenRenderTestOptions->ProjectOpenRenderTestFile == ProjectFile);
+		const std::array DuplicateProjectOpenRenderTestArguments = {
+			std::string_view("--project-open-render-test"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--project-open-render-test"), std::string_view(AbsoluteProjectPath) };
+		const auto DuplicateProjectOpenRenderTestOptions =
+			ParseEditorCommandLine(DuplicateProjectOpenRenderTestArguments, Root);
+		PF_CHECK(Tests, !DuplicateProjectOpenRenderTestOptions);
+		PF_CHECK(Tests, !DuplicateProjectOpenRenderTestOptions &&
+			DuplicateProjectOpenRenderTestOptions.error().Code == EditorCommandLineErrorCode::DuplicateOption);
 		const std::array AbsoluteArguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath) };
 		const auto AbsoluteOptions = ParseEditorCommandLine(AbsoluteArguments, Root);
 		PF_CHECK(Tests, AbsoluteOptions.has_value());
@@ -9809,6 +9870,7 @@ int main()
 	TestEditorInteractionPolicy(Tests);
 	TestEditorAssetPreviewPolicy(Tests);
 	TestEditorWorkspacePanelState(Tests);
+	TestEditorDeferredOperationQueue(Tests);
 	TestEditorAssetDestinationPolicy(Tests);
 	TestEditorAssetSelectorPolicy(Tests);
 	TestEditorLayoutOpeningPreferencePersistence(Tests);

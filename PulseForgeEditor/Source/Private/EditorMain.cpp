@@ -35,9 +35,9 @@ int main(int ArgumentCount, char** Arguments)
 			return EXIT_FAILURE;
 		}
 		#ifndef _DEBUG
-		if (Options->EnableDocumentHostTestFixture)
+		if (Options->EnableDocumentHostTestFixture || Options->ProjectOpenRenderTestFile)
 		{
-			std::cerr << "PulseForgeEditor: --document-host-test-fixture is available only in Debug builds.\n";
+			std::cerr << "PulseForgeEditor: editor runtime test fixtures are available only in Debug builds.\n";
 			return EXIT_FAILURE;
 		}
 		#endif
