@@ -130,6 +130,7 @@ Run the following from the repository root to add synthetic document tabs for ma
 cmake --build Build/CMake/VS2022-x64 --config Debug --target PulseForgeEditor --parallel 1
 
 $repo = (Get-Location).Path
+$previousSettingsDir = $env:PULSEFORGE_EDITOR_SETTINGS_DIR
 $env:PULSEFORGE_EDITOR_SETTINGS_DIR = Join-Path $env:TEMP ("PulseForge-DocumentHost-Manual-" + [guid]::NewGuid())
 Push-Location (Join-Path $repo 'Build/CMake/VS2022-x64/Debug')
 try {
@@ -138,7 +139,12 @@ try {
 }
 finally {
 	Pop-Location
-	Remove-Item Env:\PULSEFORGE_EDITOR_SETTINGS_DIR -ErrorAction SilentlyContinue
+	if ($null -eq $previousSettingsDir) {
+		Remove-Item Env:\PULSEFORGE_EDITOR_SETTINGS_DIR -ErrorAction SilentlyContinue
+	}
+	else {
+		$env:PULSEFORGE_EDITOR_SETTINGS_DIR = $previousSettingsDir
+	}
 }
 ```
 
