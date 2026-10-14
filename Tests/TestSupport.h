@@ -53,7 +53,6 @@
 #include "Editor/EditorDocumentCloseBatch.h"
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
-#include "EditorViewportCamera.h"
 #include "Editor/EditorNativeWindowBoundsPolicy.h"
 #include "Editor/EditorSnapshotHistory.h"
 #include "Editor/EditorSelection.h"

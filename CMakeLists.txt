@@ -298,6 +298,7 @@ target_link_libraries(PulseForgeGame PRIVATE PulseForge)
 include(CTest)
 if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 	add_library(PulseForgeEditorCore STATIC
+		PulseForgeEditor/Source/Private/EditorConsoleHistory.cpp
 		PulseForgeEditor/Source/Private/EditorProjectOpening.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentManager.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentWorkspace.cpp
@@ -315,6 +316,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	add_executable(PulseForgeEditor
 		PulseForgeEditor/Source/Private/EditorMain.cpp
 		PulseForgeEditor/Source/Private/EditorApplication.cpp
+		PulseForgeEditor/Source/Private/EditorConsolePanel.cpp
 		PulseForgeEditor/Source/Private/EditorAssetPreviewService.cpp
 		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
 		PulseForgeEditor/Source/Private/EditorLayout.cpp

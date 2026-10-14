@@ -36,7 +36,7 @@
 #include "Editor/EditorAssetPreviewService.h"
 #include "Editor/EditorAssetPreviewPolicy.h"
 #include "Editor/EditorDeferredOperationQueue.h"
-#include "Editor/ConsoleFormatting.h"
+#include "EditorConsolePanel.h"
 #include "Editor/EditorLayout.h"
 #include "EditorViewportCamera.h"
 #include "Editor/EditorCommandHistory.h"
@@ -85,19 +85,15 @@
 #include <backends/imgui_impl_opengl3.h>
 #endif
 #include <glm/gtc/quaternion.hpp>
-#include <spdlog/sinks/base_sink.h>
-#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <array>
-#include <cstdio>
 #include <fstream>
 #include <charconv>
 #include <cmath>
 #include <cfloat>
 #include <cstdint>
 #include <chrono>
-#include <deque>
 #include <expected>
 #include <filesystem>
 #include <functional>
@@ -105,7 +101,6 @@
 #include <iterator>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -493,71 +488,6 @@ namespace
 		nfdu8char_t* m_Path = nullptr;
 	};
 
-	struct EditorConsoleMessage
-	{
-		uint64_t Sequence = 0;
-		std::string Logger;
-		spdlog::level::level_enum Level;
-		std::string Text;
-	};
-
-	class EditorConsoleSink final : public spdlog::sinks::base_sink<std::mutex>
-	{
-	public:
-		static constexpr size_t Capacity = 2000;
-		static constexpr size_t MaxMessageBytes = 8192;
-
-		bool CopyMessagesIfChanged(
-			uint64_t PreviousRevision,
-			std::vector<EditorConsoleMessage>& Destination,
-			uint64_t& CurrentRevision)
-		{
-			std::lock_guard<std::mutex> Lock(mutex_);
-			CurrentRevision = m_Revision;
-			if (CurrentRevision == PreviousRevision)
-				return false;
-
-			Destination.assign(m_Messages.begin(), m_Messages.end());
-			return true;
-		}
-
-		void Clear()
-		{
-			std::lock_guard<std::mutex> Lock(mutex_);
-			m_Messages.clear();
-			++m_Revision;
-		}
-
-	protected:
-		void sink_it_(const spdlog::details::log_msg& Message) override
-		{
-			const size_t MessageSize = (std::min)(Message.payload.size(), MaxMessageBytes);
-			std::string Text = MessageSize == 0
-				? std::string{}
-				: std::string(Message.payload.data(), MessageSize);
-			if (Message.payload.size() > MaxMessageBytes)
-				Text += " [truncated]";
-			std::replace(Text.begin(), Text.end(), '\r', ' ');
-			std::replace(Text.begin(), Text.end(), '\n', ' ');
-
-			m_Messages.push_back({
-				++m_NextSequence,
-				std::string(Message.logger_name.data(), Message.logger_name.size()),
-				Message.level,
-				std::move(Text) });
-			if (m_Messages.size() > Capacity)
-				m_Messages.pop_front();
-			++m_Revision;
-		}
-
-		void flush_() override { }
-
-	private:
-		std::deque<EditorConsoleMessage> m_Messages;
-		uint64_t m_Revision = 0;
-		uint64_t m_NextSequence = 0;
-	};
-
 	class EditorLayer final : public PulseForge::Layer
 	{
 		struct DocumentHostTestState final : PulseForgeEditor::EditorDocumentEditorState
@@ -913,7 +843,7 @@ namespace
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
 			StopRuntime();
-			DetachConsoleSink();
+			m_ConsolePanel.Detach();
 			ShutdownImGui();
 			ShutdownFileDialog();
 		}
@@ -1005,7 +935,7 @@ namespace
 			PlatformIO.Renderer_SwapBuffers = &OnRendererSwapViewport;
 			IO.BackendFlags |= ImGuiBackendFlags_RendererHasViewports;
 			#endif
-			AttachConsoleSink();
+			m_ConsolePanel.Attach();
 
 			if (NFD_Init() == NFD_OKAY)
 			{
@@ -1029,7 +959,7 @@ namespace
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
 			StopRuntime();
-			DetachConsoleSink();
+			m_ConsolePanel.Detach();
 			ResetViewportSceneRenderer();
 			ResetViewportTarget();
 			m_Scene.reset();
@@ -9524,86 +9454,6 @@ namespace
 			ClearViewportTargetError();
 		}
 
-		void AttachConsoleSink()
-		{
-			m_ConsoleSink = std::make_shared<EditorConsoleSink>();
-			for (const char* LoggerName : { "PULSEFORGE", "APP" })
-			{
-				if (auto Logger = spdlog::get(LoggerName))
-				{
-					Logger->sinks().push_back(m_ConsoleSink);
-					m_ConsoleLoggers.push_back(std::move(Logger));
-				}
-			}
-			if (m_ConsoleLoggers.empty())
-				m_ConsoleSink.reset();
-		}
-
-		void DetachConsoleSink() noexcept
-		{
-			if (!m_ConsoleSink)
-				return;
-
-			const std::shared_ptr<spdlog::sinks::sink> Sink = m_ConsoleSink;
-			for (const std::shared_ptr<spdlog::logger>& Logger : m_ConsoleLoggers)
-				std::erase(Logger->sinks(), Sink);
-			m_ConsoleLoggers.clear();
-			m_ConsoleSink.reset();
-		}
-
-		static const char* LogLevelName(spdlog::level::level_enum Level)
-		{
-			switch (Level)
-			{
-			case spdlog::level::trace: return "trace";
-			case spdlog::level::debug: return "debug";
-			case spdlog::level::info: return "info";
-			case spdlog::level::warn: return "warning";
-			case spdlog::level::err: return "error";
-			case spdlog::level::critical: return "critical";
-			default: return "unknown";
-			}
-		}
-
-		ImVec4 LogLevelColor(spdlog::level::level_enum Level) const
-		{
-			switch (Level)
-			{
-			case spdlog::level::warn:
-				return m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning);
-			case spdlog::level::err:
-			case spdlog::level::critical:
-				return m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error);
-			default:
-				return m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::TextMuted);
-			}
-		}
-
-		bool RefreshConsoleSnapshot()
-		{
-			if (!m_ConsoleSink)
-				return false;
-			uint64_t CurrentRevision = m_ConsoleRevision;
-			if (!m_ConsoleSink->CopyMessagesIfChanged(m_ConsoleRevision, m_ConsoleMessages, CurrentRevision))
-				return false;
-			m_ConsoleRevision = CurrentRevision;
-			return true;
-		}
-
-		std::string FormatConsoleMessages() const
-		{
-			std::vector<PulseForgeEditor::ConsoleEntryView> Entries;
-			Entries.reserve(m_ConsoleMessages.size());
-			for (const EditorConsoleMessage& Message : m_ConsoleMessages)
-				Entries.push_back({ LogLevelName(Message.Level), Message.Logger, Message.Text });
-			return PulseForgeEditor::FormatConsoleHistory(Entries);
-		}
-
-		std::string FormatConsoleMessage(const EditorConsoleMessage& Message) const
-		{
-			return PulseForgeEditor::FormatConsoleEntry({ LogLevelName(Message.Level), Message.Logger, Message.Text });
-		}
-
 		void DrawConsolePanel()
 		{
 			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Console))
@@ -9615,151 +9465,9 @@ namespace
 					(DocumentTabTestDropPointsPerPanel * DocumentTabTestInvalidDropPanelNames.size()))
 				ImGui::SetNextWindowFocus();
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Console))
-			{
-				if (!m_ConsoleSink)
-					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Warning,
-						"The editor could not connect to the engine loggers.");
-				else
-				{
-					// Refresh before toolbar actions so Copy All uses a coherent current sink snapshot.
-					RefreshConsoleSnapshot();
-					if (m_EditorStyle.BeginToolbar("ConsoleToolbar",
-						PulseForgeEditor::EditorStyleMetrics::PanelToolbarHeight))
-					{
-						if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Clear, "Clear"))
-						{
-							m_ConsoleSink->Clear();
-							RefreshConsoleSnapshot();
-							m_ConsoleSelectableText.clear();
-							m_ConsoleSelectableTextRevision = m_ConsoleRevision;
-							m_ConsoleSelectableTextInitialized = true;
-							m_ConsoleSelectableTextInteracting = false;
-							m_ConsoleSelectableAutoScrollSuspended = false;
-						}
-						ImGui::SameLine();
-						if (ImGui::Checkbox("Auto-scroll", &m_ConsoleAutoScroll) && m_ConsoleAutoScroll)
-							m_ConsoleSelectableAutoScrollSuspended = false;
-						ImGui::SameLine();
-						ImGui::BeginDisabled(m_ConsoleMessages.empty());
-						if (ImGui::Button("Copy All"))
-						{
-							const std::string Formatted = FormatConsoleMessages();
-							if (!Formatted.empty())
-								ImGui::SetClipboardText(Formatted.c_str());
-						}
-						ImGui::EndDisabled();
-						ImGui::SameLine();
-						if (ImGui::Checkbox("Select text", &m_ConsoleSelectableView))
-							m_ConsoleSelectableTextInteracting = false;
-					}
-					m_EditorStyle.EndToolbar();
-
-					if (ImGui::BeginChild("ConsoleMessages", ImVec2(0.0f, 0.0f), true,
-						ImGuiWindowFlags_HorizontalScrollbar))
-					{
-						[[maybe_unused]] const auto MonospaceFont = m_EditorStyle.PushMonospaceFont();
-						if (m_ConsoleMessages.empty())
-							m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Terminal,
-								"No console messages yet.");
-						else if (m_ConsoleSelectableView)
-						{
-							const bool TextViewHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
-							if (TextViewHovered && ImGui::GetIO().MouseWheel != 0.0f)
-								m_ConsoleSelectableAutoScrollSuspended = true;
-							const bool CanReplaceText = !m_ConsoleSelectableTextInteracting;
-							const bool TextNeedsRefresh = !m_ConsoleSelectableTextInitialized ||
-								m_ConsoleSelectableTextRevision != m_ConsoleRevision;
-							const bool TextChanged = CanReplaceText && TextNeedsRefresh;
-							if (TextChanged)
-							{
-								m_ConsoleSelectableText = FormatConsoleMessages();
-								m_ConsoleSelectableTextRevision = m_ConsoleRevision;
-								m_ConsoleSelectableTextInitialized = true;
-							}
-							if (TextChanged && m_ConsoleAutoScroll && !m_ConsoleSelectableAutoScrollSuspended)
-								ImGui::SetNextWindowScroll(ImVec2(-1.0f, FLT_MAX));
-
-							const ImVec2 TextViewSize = ImGui::GetContentRegionAvail();
-							ImGui::InputTextMultiline(
-								"##ConsoleSelectableText",
-								m_ConsoleSelectableText.data(),
-								m_ConsoleSelectableText.size() + 1,
-								TextViewSize,
-								ImGuiInputTextFlags_ReadOnly);
-							const bool TextViewActive = ImGui::IsItemActive();
-							m_ConsoleSelectableTextInteracting = TextViewActive;
-						}
-						else
-						{
-							const bool WasAtBottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
-							const float SourceWidth = std::clamp(
-								ImGui::GetContentRegionAvail().x * 0.20f, 90.0f, 156.0f);
-							if (ImGui::BeginTable("ConsoleMessageRows", 3,
-								ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
-								ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_NoSavedSettings))
-							{
-								ImGui::TableSetupColumn("Severity", ImGuiTableColumnFlags_WidthFixed, 88.0f);
-								ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthFixed, SourceWidth);
-								ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-								ImGuiListClipper Clipper;
-								Clipper.Begin(static_cast<int>(m_ConsoleMessages.size()));
-								while (Clipper.Step())
-								{
-									for (int Index = Clipper.DisplayStart; Index < Clipper.DisplayEnd; ++Index)
-									{
-										const EditorConsoleMessage& Message = m_ConsoleMessages[static_cast<size_t>(Index)];
-										ImGui::PushID(static_cast<int>(Message.Sequence >> 32));
-										ImGui::PushID(static_cast<int>(Message.Sequence & 0xffffffffu));
-										ImGui::TableNextRow();
-										ImGui::TableNextColumn();
-										const ImVec2 RowStart = ImGui::GetCursorScreenPos();
-										const float RowHeight = ImGui::GetTextLineHeightWithSpacing();
-										char SeverityLabel[16]{};
-										std::snprintf(SeverityLabel, sizeof(SeverityLabel), "[%s]", LogLevelName(Message.Level));
-										ImGui::Selectable("##ConsoleMessageRow", false,
-											ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
-											ImVec2(0.0f, RowHeight));
-										if (ImGui::BeginPopupContextItem("ConsoleEntryContextMenu"))
-										{
-											if (ImGui::MenuItem("Copy Message"))
-												ImGui::SetClipboardText(Message.Text.c_str());
-											if (ImGui::MenuItem("Copy Entry"))
-											{
-												const std::string Formatted = FormatConsoleMessage(Message);
-												ImGui::SetClipboardText(Formatted.c_str());
-											}
-											ImGui::EndPopup();
-										}
-										ImGui::SetCursorScreenPos(RowStart);
-										ImGui::PushStyleColor(ImGuiCol_Text, LogLevelColor(Message.Level));
-										ImGui::TextUnformatted(SeverityLabel);
-										ImGui::PopStyleColor();
-										ImGui::TableNextColumn();
-										const float LoggerWidth = ImGui::GetContentRegionAvail().x;
-										m_EditorStyle.TextMuted(Message.Logger);
-										if (ImGui::IsItemHovered() && ImGui::CalcTextSize(Message.Logger.c_str()).x > LoggerWidth)
-											ImGui::SetTooltip("%s", Message.Logger.c_str());
-										ImGui::TableNextColumn();
-										ImGui::TextUnformatted(
-											Message.Text.data(), Message.Text.data() + Message.Text.size());
-										if (ImGui::IsItemHovered())
-											ImGui::SetTooltip("%s", Message.Text.c_str());
-										ImGui::PopID();
-										ImGui::PopID();
-									}
-								}
-								ImGui::EndTable();
-							}
-							if (m_ConsoleAutoScroll && WasAtBottom)
-								ImGui::SetScrollHereY(1.0f);
-						}
-					}
-					ImGui::EndChild();
-				}
-			}
+				m_ConsolePanel.DrawContents(m_EditorStyle);
 			ImGui::End();
 		}
-
 		void DrawHierarchyPanel()
 		{
 			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Hierarchy))
@@ -12819,22 +12527,12 @@ namespace
 		bool m_AssetDestinationDuplicate = false;
 		ProjectAssetDestinationCreateKind m_AssetDestinationCreateKind = ProjectAssetDestinationCreateKind::None;
 		std::optional<PulseForge::UUID> m_AssetDestinationPrefabRoot;
-		bool m_ConsoleAutoScroll = true;
-		bool m_ConsoleSelectableView = false;
-		bool m_ConsoleSelectableTextInteracting = false;
-		bool m_ConsoleSelectableTextInitialized = false;
-		bool m_ConsoleSelectableAutoScrollSuspended = false;
+		PulseForgeEditor::EditorConsolePanel m_ConsolePanel;
 		bool m_ContentGridView = true;
 		bool m_ContentDetailsExpandedCompact = false;
 		bool m_InitialMaterialDetailsDockPending = false;
 		bool m_ForceMaterialDetailsDock = false;
 		bool m_FocusMaterialDetailsNextFrame = false;
-		uint64_t m_ConsoleRevision = 0;
-		uint64_t m_ConsoleSelectableTextRevision = 0;
-		std::string m_ConsoleSelectableText;
-		std::shared_ptr<EditorConsoleSink> m_ConsoleSink;
-		std::vector<EditorConsoleMessage> m_ConsoleMessages;
-		std::vector<std::shared_ptr<spdlog::logger>> m_ConsoleLoggers;
 		std::function<void()> m_PendingAction;
 		std::function<void()> m_PendingDocumentCloseAction;
 		std::optional<PulseForge::AssetID> m_AssetDestinationAsset;

@@ -1,3 +1,5 @@
+#include "EditorConsoleHistory.h"
+#include "EditorViewportCamera.h"
 #include "TestSupport.h"
 
 namespace
@@ -1146,12 +1148,45 @@ namespace
 		PF_CHECK(Tests, glm::all(glm::equal(Camera.GetPosition(), glm::vec3(0.0f, 0.0f, 3.1f))));
 		PF_CHECK(Tests, glm::length(Camera.GetForward() - glm::vec3(0.0f, 0.0f, -1.0f)) < 0.0001f);
 	}
+
+	void TestEditorConsoleHistory(TestRunner& Tests)
+	{
+		PulseForgeEditor::EditorConsoleHistory History;
+		std::vector<PulseForgeEditor::EditorConsoleMessage> Messages;
+		uint64_t Revision = 0;
+		History.Append("APP", PulseForgeEditor::EditorConsoleSeverity::Info, "first\r\nmessage");
+		PF_CHECK(Tests, History.CopyMessagesIfChanged(Revision, Messages, Revision));
+		PF_CHECK(Tests, Messages.size() == 1);
+		PF_CHECK(Tests, Messages[0].Sequence == 1);
+		PF_CHECK(Tests, Messages[0].Logger == "APP");
+		PF_CHECK(Tests, Messages[0].Severity == PulseForgeEditor::EditorConsoleSeverity::Info);
+		PF_CHECK(Tests, Messages[0].Text == "first  message");
+		PF_CHECK(Tests, !History.CopyMessagesIfChanged(Revision, Messages, Revision));
+
+		const std::string Oversized(PulseForgeEditor::EditorConsoleHistory::MaxMessageBytes + 32, 'x');
+		History.Append("PULSEFORGE", PulseForgeEditor::EditorConsoleSeverity::Error, Oversized);
+		PF_CHECK(Tests, History.CopyMessagesIfChanged(Revision, Messages, Revision));
+		PF_CHECK(Tests, Messages.back().Text.size() == PulseForgeEditor::EditorConsoleHistory::MaxMessageBytes + 12);
+		PF_CHECK(Tests, Messages.back().Text.ends_with(" [truncated]"));
+
+		for (size_t Index = 0; Index < PulseForgeEditor::EditorConsoleHistory::Capacity + 1; ++Index)
+			History.Append("TEST", PulseForgeEditor::EditorConsoleSeverity::Debug, "entry");
+		PF_CHECK(Tests, History.CopyMessagesIfChanged(Revision, Messages, Revision));
+		PF_CHECK(Tests, Messages.size() == PulseForgeEditor::EditorConsoleHistory::Capacity);
+		PF_CHECK(Tests, Messages.front().Sequence == 4);
+		PF_CHECK(Tests, Messages.back().Sequence == PulseForgeEditor::EditorConsoleHistory::Capacity + 3);
+
+		History.Clear();
+		PF_CHECK(Tests, History.CopyMessagesIfChanged(Revision, Messages, Revision));
+		PF_CHECK(Tests, Messages.empty());
+	}
 }
 
 void RunEditorTests(TestRunner& Tests)
 {
 	TestEditorViewportMath(Tests);
 	TestEditorViewportCameraController(Tests);
+	TestEditorConsoleHistory(Tests);
 	TestEditorWorkspacePanelState(Tests);
 	TestEditorDeferredOperationQueue(Tests);
 	TestEditorAssetDestinationPolicy(Tests);
