@@ -421,7 +421,7 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 		PRIVATE PulseForge/Source/Public PulseForgeEditor/Source/Private PulseForge/Vendor/json/include
 	)
 	target_compile_definitions(PulseForgeEditorCore PRIVATE PF_PLATFORM_WINDOWS)
-	target_link_libraries(PulseForgeEditorCore PUBLIC PulseForge)
+	target_link_libraries(PulseForgeEditorCore PUBLIC PulseForgeAssetServices)
 endif()
 
 if(PULSEFORGE_BUILD_EDITOR)
@@ -443,8 +443,9 @@ if(PULSEFORGE_BUILD_EDITOR)
 	)
 	target_compile_definitions(PulseForgeEditorUI PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorUI
-		PUBLIC PulseForge
-		PRIVATE PulseForgeEditorCore PulseForgeImGui freetype shell32 ole32
+		PUBLIC PulseForgeRenderer
+		PRIVATE PulseForgeApplication PulseForgeAssetServices PulseForgeEditorCore
+			PulseForgeImGui freetype shell32 ole32
 	)
 	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
 		target_compile_definitions(PulseForgeEditorUI PRIVATE PF_EDITOR_RENDERER_OPENGL)
