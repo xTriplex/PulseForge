@@ -39,6 +39,7 @@
 #include "EditorConsolePanel.h"
 #include "Editor/EditorLayout.h"
 #include "EditorViewportCamera.h"
+#include "EditorMaterialDraftStore.h"
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorContentBrowserPolicy.h"
 #include "Editor/EditorAssetDestinationPolicy.h"
@@ -5614,9 +5615,9 @@ namespace
 					const auto Material = GetFocusedMaterialAsset();
 					if (Material)
 					{
-						const auto History = m_MaterialHistories.find(GetMaterialDraftKey(*Material));
-						CanUndoDocument = History != m_MaterialHistories.end() && History->second.CanUndo();
-						CanRedoDocument = History != m_MaterialHistories.end() && History->second.CanRedo();
+						const std::string Key = GetMaterialDraftKey(*Material);
+						CanUndoDocument = m_MaterialDraftStore.CanUndo(Key);
+						CanRedoDocument = m_MaterialDraftStore.CanRedo(Key);
 					}
 				}
 				const bool HasSelection = !m_Selection.GetEntities().empty();
@@ -5867,7 +5868,7 @@ namespace
 					(std::max)(0.0f, ImGui::GetContentRegionAvail().x - SaveWidth));
 				const auto* FocusedDocument = GetFocusedDocumentIdentity();
 				const bool MaterialCanSave = IsFocusedMaterialDocument() && FocusedDocument &&
-					m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(FocusedDocument->Asset));
+					m_MaterialDraftStore.IsDirty(GetMaterialDraftKey(FocusedDocument->Asset));
 				const bool RegisteredDocumentFocused = GetFocusedRegisteredDocument() != nullptr;
 				ImGui::BeginDisabled(RegisteredDocumentFocused ? false : IsFocusedMaterialDocument() ? !MaterialCanSave :
 					(!m_Scene || !m_SceneAsset || m_SceneRuntime));
@@ -5972,21 +5973,18 @@ namespace
 				return false;
 			}
 			const std::string Key = GetMaterialDraftKey(Identifier);
-			auto Draft = m_MaterialDrafts.find(Key);
-			if (Draft == m_MaterialDrafts.end() || !m_DirtyMaterialDrafts.contains(Key))
+			PulseForge::MaterialAssetDesc* const Draft = m_MaterialDraftStore.FindDraft(Key);
+			if (!Draft || !m_MaterialDraftStore.IsDirty(Key))
 				return true;
 
 			const auto Saved = PulseForge::MaterialAssetService::Save(
-				Identifier, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), Draft->second);
+				Identifier, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), *Draft);
 			if (!Saved)
 			{
 				SetError("Material save failed: " + Saved.error().Message);
 				return false;
 			}
-			m_DirtyMaterialDrafts.erase(Key);
-			m_MaterialEditorErrors.erase(Key);
-			if (auto History = m_MaterialHistories.find(Key); History != m_MaterialHistories.end())
-				History->second.MarkSaved();
+			m_MaterialDraftStore.MarkSaved(Key);
 			const PulseForgeEditor::EditorDocumentIdentity Identity{
 				m_Project->GetDescription().ID, Identifier, PulseForgeEditor::EditorDocumentKind::Material
 			};
@@ -6011,11 +6009,7 @@ namespace
 				return false;
 			}
 			const std::string Key = GetMaterialDraftKey(Identifier);
-			m_MaterialDrafts[Key] = std::move(*Loaded);
-			m_DirtyMaterialDrafts.erase(Key);
-			m_MaterialEditStarts.erase(Key);
-			m_MaterialEditorErrors.erase(Key);
-			m_MaterialHistories[Key].Reset(m_MaterialDrafts[Key]);
+			m_MaterialDraftStore.ReplaceDraft(Key, std::move(*Loaded));
 			const PulseForgeEditor::EditorDocumentIdentity Identity{
 				m_Project->GetDescription().ID, Identifier, PulseForgeEditor::EditorDocumentKind::Material
 			};
@@ -6033,7 +6027,7 @@ namespace
 			if (m_Project)
 			{
 				const PulseForge::UUID ProjectID = m_Project->GetDescription().ID;
-				for (const std::string& Key : m_DirtyMaterialDrafts)
+				for (const std::string& Key : m_MaterialDraftStore.GetDirtyKeys())
 				{
 					const size_t Separator = Key.rfind(':');
 					if (Separator == std::string::npos)
@@ -6197,7 +6191,7 @@ namespace
 					{
 						auto* Session = m_Documents.Find(Identity);
 						const bool DirtyMaterial = Identity.Kind == PulseForgeEditor::EditorDocumentKind::Material &&
-							m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(Identity.Asset));
+							m_MaterialDraftStore.IsDirty(GetMaterialDraftKey(Identity.Asset));
 						if (Session && Session->IsDirty())
 						{
 							if (m_DocumentEditors.IsRegistered(Identity.Kind) && Session->EditorState)
@@ -6222,7 +6216,7 @@ namespace
 					{
 						auto* Session = m_Documents.Find(Identity);
 						const bool DirtyMaterial = Identity.Kind == PulseForgeEditor::EditorDocumentKind::Material &&
-							m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(Identity.Asset));
+							m_MaterialDraftStore.IsDirty(GetMaterialDraftKey(Identity.Asset));
 						if ((!Session || !Session->IsDirty()) && !DirtyMaterial)
 							continue;
 						if (Session && Session->IsDirty() && m_DocumentEditors.IsRegistered(Identity.Kind) &&
@@ -6245,10 +6239,7 @@ namespace
 					for (auto& [Identity, Material] : Reloaded)
 					{
 						const std::string Key = GetMaterialDraftKey(Identity.Asset);
-						m_MaterialDrafts[Key] = std::move(Material);
-						m_DirtyMaterialDrafts.erase(Key);
-						m_MaterialEditStarts.erase(Key);
-						m_MaterialHistories[Key].Reset(m_MaterialDrafts[Key]);
+						m_MaterialDraftStore.ReplaceDraft(Key, std::move(Material));
 						if (auto* Session = m_Documents.Find(Identity))
 							Session->Revision = Session->SavedRevision;
 					}
@@ -11619,68 +11610,12 @@ namespace
 			if (!m_Project)
 				return;
 			const std::string Prefix = PathToUtf8(m_Project->GetRootPath().lexically_normal()) + ":";
-			const auto EraseProjectEntries = [&Prefix](auto& Entries)
-			{
-				for (auto Entry = Entries.begin(); Entry != Entries.end();)
-				{
-					if (Entry->first.starts_with(Prefix))
-						Entry = Entries.erase(Entry);
-					else
-						++Entry;
-				}
-			};
-			EraseProjectEntries(m_MaterialDrafts);
-			EraseProjectEntries(m_MaterialHistories);
-			EraseProjectEntries(m_MaterialEditStarts);
-			EraseProjectEntries(m_MaterialEditorErrors);
-			for (auto Dirty = m_DirtyMaterialDrafts.begin(); Dirty != m_DirtyMaterialDrafts.end();)
-			{
-				if (Dirty->starts_with(Prefix))
-					Dirty = m_DirtyMaterialDrafts.erase(Dirty);
-				else
-					++Dirty;
-			}
-		}
-
-		PulseForgeEditor::EditorSnapshotHistory<PulseForge::MaterialAssetDesc>& EnsureMaterialHistory(
-			const std::string& Key,
-			const PulseForge::MaterialAssetDesc& Material)
-		{
-			auto& History = m_MaterialHistories[Key];
-			if (History.IsEmpty())
-				History.Reset(Material);
-			return History;
-		}
-
-		void UpdateMaterialDirtyMarker(const std::string& Key)
-		{
-			const auto History = m_MaterialHistories.find(Key);
-			if (History != m_MaterialHistories.end() && !History->second.IsDirty())
-				m_DirtyMaterialDrafts.erase(Key);
-			else
-				m_DirtyMaterialDrafts.insert(Key);
-		}
-
-		void RecordMaterialEdit(const std::string& Key, const PulseForge::MaterialAssetDesc& Material)
-		{
-			EnsureMaterialHistory(Key, Material).Record(Material);
-			UpdateMaterialDirtyMarker(Key);
+			m_MaterialDraftStore.ClearProject(Prefix);
 		}
 
 		void FinalizePendingMaterialEdits()
 		{
-			if (m_MaterialEditStarts.empty() || ImGui::IsAnyItemActive())
-				return;
-
-			auto PendingEdits = std::move(m_MaterialEditStarts);
-			m_MaterialEditStarts.clear();
-			for (const auto& [Key, InitialState] : PendingEdits)
-			{
-				(void)InitialState;
-				const auto Draft = m_MaterialDrafts.find(Key);
-				if (Draft != m_MaterialDrafts.end())
-					RecordMaterialEdit(Key, Draft->second);
-			}
+			m_MaterialDraftStore.FinalizePendingEdits(ImGui::IsAnyItemActive());
 		}
 
 		bool ApplyMaterialHistoryStep(bool Redo)
@@ -11689,15 +11624,12 @@ namespace
 			if (!Asset || !m_Project)
 				return false;
 			const std::string Key = GetMaterialDraftKey(*Asset);
-			auto History = m_MaterialHistories.find(Key);
-			auto Draft = m_MaterialDrafts.find(Key);
-			if (History == m_MaterialHistories.end() || Draft == m_MaterialDrafts.end())
-				return false;
-			const bool Changed = Redo ? History->second.Redo() : History->second.Undo();
+			const auto Changed = m_MaterialDraftStore.ApplyHistoryStep(Key, Redo);
 			if (!Changed)
+				return false;
+			if (!*Changed)
 				return true;
-			Draft->second = History->second.GetCurrent();
-			UpdateMaterialDirtyMarker(Key);
+
 			const PulseForgeEditor::EditorDocumentIdentity Identity{
 				m_Project->GetDescription().ID, *Asset, PulseForgeEditor::EditorDocumentKind::Material
 			};
@@ -11705,9 +11637,9 @@ namespace
 			{
 				if (!m_Documents.MarkEdited(Identity))
 					return false;
-				if (!m_DirtyMaterialDrafts.contains(Key))
+				if (!m_MaterialDraftStore.IsDirty(Key))
 					if (auto* Session = m_Documents.Find(Identity))
-					Session->SavedRevision = Session->Revision;
+						Session->SavedRevision = Session->Revision;
 			}
 			SetStatus(Redo ? "Redid material edit." : "Undid material edit.");
 			return true;
@@ -11715,48 +11647,40 @@ namespace
 
 		void ForgetMaterialDraft(const PulseForge::AssetID& Asset)
 		{
-			if (!m_Project)
-				return;
-			const std::string Key = GetMaterialDraftKey(Asset);
-			m_MaterialDrafts.erase(Key);
-			m_MaterialHistories.erase(Key);
-			m_MaterialEditStarts.erase(Key);
-			m_DirtyMaterialDrafts.erase(Key);
-			m_MaterialEditorErrors.erase(Key);
+			if (m_Project)
+				m_MaterialDraftStore.Forget(GetMaterialDraftKey(Asset));
 		}
-
 		bool DrawMaterialAssetProperties(const PulseForge::AssetRecord& Asset)
 		{
 			const std::string Key = GetMaterialDraftKey(Asset.ID);
-			if (const auto Error = m_MaterialEditorErrors.find(Key); Error != m_MaterialEditorErrors.end())
+			if (const std::string* Error = m_MaterialDraftStore.FindError(Key))
 			{
 				ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error),
-					"Material could not be loaded: %s", Error->second.c_str());
+					"Material could not be loaded: %s", Error->c_str());
 				if (ImGui::SmallButton("Retry Material Load"))
-					m_MaterialEditorErrors.erase(Error);
+					m_MaterialDraftStore.ClearError(Key);
 				return false;
 			}
 
-			auto Draft = m_MaterialDrafts.find(Key);
-			if (Draft == m_MaterialDrafts.end())
+			PulseForge::MaterialAssetDesc* Draft = m_MaterialDraftStore.FindDraft(Key);
+			if (!Draft)
 			{
 				auto Loaded = PulseForge::MaterialAssetService::Load(
 					Asset.ID, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
 				if (!Loaded)
 				{
-					m_MaterialEditorErrors.emplace(Key, Loaded.error().Message);
+					m_MaterialDraftStore.SetError(Key, Loaded.error().Message);
 					ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error),
 						"Material could not be loaded: %s", Loaded.error().Message.c_str());
 					if (ImGui::SmallButton("Retry Material Load"))
-						m_MaterialEditorErrors.erase(Key);
+						m_MaterialDraftStore.ClearError(Key);
 					return false;
 				}
-				Draft = m_MaterialDrafts.emplace(Key, std::move(*Loaded)).first;
+				Draft = &m_MaterialDraftStore.PutDraft(Key, std::move(*Loaded));
 			}
 
-			(void)EnsureMaterialHistory(Key, Draft->second);
-			const PulseForge::MaterialAssetDesc MaterialBeforeEdit = Draft->second;
-			PulseForge::MaterialAssetDesc& Material = Draft->second;
+			const PulseForge::MaterialAssetDesc MaterialBeforeEdit = *Draft;
+			PulseForge::MaterialAssetDesc& Material = *Draft;
 			bool Changed = false;
 			bool UseTwoColumnLayout = PulseForgeEditor::GetMaterialPropertyLayout(
 				ImGui::GetContentRegionAvail().x) == PulseForgeEditor::MaterialPropertyLayout::TwoColumn;
@@ -11937,9 +11861,7 @@ namespace
 
 			if (Changed)
 			{
-				auto [Pending, Added] = m_MaterialEditStarts.try_emplace(Key, MaterialBeforeEdit);
-				(void)Pending;
-				m_DirtyMaterialDrafts.insert(Key);
+				const bool Added = m_MaterialDraftStore.BeginEdit(Key, MaterialBeforeEdit);
 				if (Added && m_Project)
 				{
 					const PulseForgeEditor::EditorDocumentIdentity Identity{
@@ -11954,8 +11876,8 @@ namespace
 		void DrawMaterialEditorActions(const PulseForge::AssetRecord& Asset)
 		{
 			const std::string Key = GetMaterialDraftKey(Asset.ID);
-			const bool HasDraft = m_MaterialDrafts.contains(Key);
-			const bool IsDirty = m_DirtyMaterialDrafts.contains(Key);
+			const bool HasDraft = m_MaterialDraftStore.ContainsDraft(Key);
+			const bool IsDirty = m_MaterialDraftStore.IsDirty(Key);
 			if (IsDirty)
 				ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning),
 					"Unsaved material draft");
@@ -12024,7 +11946,7 @@ namespace
 						const std::string FullPath = PathToUtf8(Asset->ProjectRelativePath);
 						const std::string Identifier = Asset->ID.ToString();
 						m_EditorStyle.IconText(PulseForgeEditor::EditorIcon::Material, Name);
-						if (m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(Asset->ID)))
+						if (m_MaterialDraftStore.IsDirty(GetMaterialDraftKey(Asset->ID)))
 						{
 							ImGui::SameLine();
 							ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning),
@@ -12196,7 +12118,7 @@ namespace
 						const auto SelectedRecord = m_Project->GetAssetRegistry().Find(*m_SelectedAsset);
 						std::string SelectedName = SelectedRecord
 							? PathToUtf8(SelectedRecord->ProjectRelativePath.filename()) : "Selected asset";
-						if (SelectedMaterial && m_DirtyMaterialDrafts.contains(GetMaterialDraftKey(*m_SelectedAsset)))
+						if (SelectedMaterial && m_MaterialDraftStore.IsDirty(GetMaterialDraftKey(*m_SelectedAsset)))
 							SelectedName += " — Unsaved draft";
 						const float ActionWidth = SelectedMaterial ? 154.0f : 112.0f;
 						const float SummaryWidth = (std::max)(
@@ -12684,12 +12606,7 @@ namespace
 		std::optional<EntityClipboard> m_EntityClipboard;
 		std::optional<PulseForge::AssetID> m_SelectedAsset;
 		std::optional<PulseForge::AssetID> m_PendingDeleteAsset;
-		std::unordered_map<std::string, PulseForge::MaterialAssetDesc> m_MaterialDrafts;
-		std::unordered_map<std::string,
-			PulseForgeEditor::EditorSnapshotHistory<PulseForge::MaterialAssetDesc>> m_MaterialHistories;
-		std::unordered_map<std::string, PulseForge::MaterialAssetDesc> m_MaterialEditStarts;
-		std::unordered_map<std::string, std::string> m_MaterialEditorErrors;
-		std::unordered_set<std::string> m_DirtyMaterialDrafts;
+		PulseForgeEditor::EditorMaterialDraftStore m_MaterialDraftStore;
 		std::vector<PulseForge::AssetRecord> m_Assets;
 		std::vector<AssetBrowserPresentation> m_AssetBrowserPresentations;
 		std::vector<size_t> m_FilteredAssetIndices;

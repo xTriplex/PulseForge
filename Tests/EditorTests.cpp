@@ -1,4 +1,5 @@
 #include "EditorConsoleHistory.h"
+#include "EditorMaterialDraftStore.h"
 #include "EditorViewportCamera.h"
 #include "TestSupport.h"
 
@@ -1180,6 +1181,64 @@ namespace
 		PF_CHECK(Tests, History.CopyMessagesIfChanged(Revision, Messages, Revision));
 		PF_CHECK(Tests, Messages.empty());
 	}
+
+	void TestEditorMaterialDraftStore(TestRunner& Tests)
+	{
+		PulseForgeEditor::EditorMaterialDraftStore Drafts;
+		const std::string FirstKey = "project-a:material-1";
+		const std::string SecondKey = "project-a:material-2";
+		const std::string OtherProjectKey = "project-b:material-1";
+		PulseForge::MaterialAssetDesc FirstMaterial;
+		FirstMaterial.BaseColorFactor = { 0.2f, 0.4f, 0.6f, 1.0f };
+		PulseForge::MaterialAssetDesc SecondMaterial;
+		SecondMaterial.RoughnessFactor = 0.35f;
+		Drafts.PutDraft(FirstKey, FirstMaterial);
+		Drafts.PutDraft(SecondKey, SecondMaterial);
+		PF_CHECK(Tests, Drafts.ContainsDraft(FirstKey));
+		PF_CHECK(Tests, !Drafts.IsDirty(FirstKey));
+
+		PF_CHECK(Tests, Drafts.BeginEdit(FirstKey, FirstMaterial));
+		Drafts.FindDraft(FirstKey)->BaseColorFactor.x = 0.8f;
+		Drafts.FinalizePendingEdits(true);
+		PF_CHECK(Tests, Drafts.IsDirty(FirstKey));
+		PF_CHECK(Tests, !Drafts.CanUndo(FirstKey));
+		Drafts.FinalizePendingEdits(false);
+		PF_CHECK(Tests, Drafts.CanUndo(FirstKey));
+		PF_CHECK(Tests, Drafts.IsDirty(FirstKey));
+
+		const auto UndoChanged = Drafts.ApplyHistoryStep(FirstKey, false);
+		PF_CHECK(Tests, UndoChanged.has_value() && *UndoChanged);
+		PF_CHECK(Tests, !Drafts.IsDirty(FirstKey));
+		PF_CHECK(Tests, Drafts.FindDraft(FirstKey)->BaseColorFactor.x == 0.2f);
+		const auto RedoChanged = Drafts.ApplyHistoryStep(FirstKey, true);
+		PF_CHECK(Tests, RedoChanged.has_value() && *RedoChanged);
+		PF_CHECK(Tests, Drafts.IsDirty(FirstKey));
+		PF_CHECK(Tests, Drafts.FindDraft(FirstKey)->BaseColorFactor.x == 0.8f);
+		Drafts.MarkSaved(FirstKey);
+		PF_CHECK(Tests, !Drafts.IsDirty(FirstKey));
+
+		PulseForge::MaterialAssetDesc Replacement;
+		Replacement.BaseColorFactor = { 0.7f, 0.1f, 0.3f, 1.0f };
+		Drafts.ReplaceDraft(FirstKey, Replacement);
+		PF_CHECK(Tests, !Drafts.IsDirty(FirstKey));
+		PF_CHECK(Tests, !Drafts.CanUndo(FirstKey));
+		PF_CHECK(Tests, Drafts.FindDraft(FirstKey)->BaseColorFactor.x == 0.7f);
+
+		Drafts.SetError(FirstKey, "load failed");
+		PF_CHECK(Tests, Drafts.FindError(FirstKey) && *Drafts.FindError(FirstKey) == "load failed");
+		Drafts.ClearError(FirstKey);
+		PF_CHECK(Tests, Drafts.FindError(FirstKey) == nullptr);
+
+		Drafts.PutDraft(OtherProjectKey, FirstMaterial);
+		PF_CHECK(Tests, Drafts.BeginEdit(OtherProjectKey, FirstMaterial));
+		Drafts.FindDraft(OtherProjectKey)->MetallicFactor = 0.9f;
+		Drafts.FinalizePendingEdits(false);
+		Drafts.ClearProject("project-a:");
+		PF_CHECK(Tests, !Drafts.ContainsDraft(FirstKey));
+		PF_CHECK(Tests, !Drafts.ContainsDraft(SecondKey));
+		PF_CHECK(Tests, Drafts.ContainsDraft(OtherProjectKey));
+		PF_CHECK(Tests, Drafts.IsDirty(OtherProjectKey));
+	}
 }
 
 void RunEditorTests(TestRunner& Tests)
@@ -1187,6 +1246,7 @@ void RunEditorTests(TestRunner& Tests)
 	TestEditorViewportMath(Tests);
 	TestEditorViewportCameraController(Tests);
 	TestEditorConsoleHistory(Tests);
+	TestEditorMaterialDraftStore(Tests);
 	TestEditorWorkspacePanelState(Tests);
 	TestEditorDeferredOperationQueue(Tests);
 	TestEditorAssetDestinationPolicy(Tests);
