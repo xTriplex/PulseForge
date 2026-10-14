@@ -1,134 +1,126 @@
 # Editor Documents and Native Windows
 
-This guide describes the editor's document-hosting, native-window, persistence, and asset-workflow infrastructure. The Level Editor remains the main workspace. Full asset editors use a separate document system; utility panels remain part of their workspace.
+The Level Editor is the primary workspace. Its document strip hosts the Level Editor and future full asset editors; utility panels remain in workspace docks. Native document hosts use the same editor process, project, and ImGui context.
 
 ## Current scope
 
-The editor has a persistent top document strip, a main Level Editor host, native-window presentation support, per-project document-host records, transfer and close policies, and shared project-asset destination dialogs. The hosting layer is ready for full specialized editors, but no full asset editor is currently registered.
+The editor provides a top document strip, native-window presentation, per-project document-host persistence, document transfer and close policies, and shared project-asset destination dialogs. No full asset editor is currently registered.
 
-The existing material property form is **Material Details**, a utility panel docked beside Inspector. It edits saved-material drafts and exposes Save and Revert. Opening a material in the Content Browser selects and reveals this utility. It does not create a document session or native window, does not add a top-strip tab, and ignores the full-editor opening preference. The stable ImGui window/settings identity remains `Material Editor` for compatibility with existing layouts.
+The existing material property form is **Material Details**, a utility panel docked beside Inspector. Opening a material in the Content Browser selects it and reveals Material Details. It does not create a document session or native window, add a top-strip tab, or follow the full-editor opening preference. The stable ImGui identity remains `Material Editor` for compatibility with saved layouts.
 
-Material Details drafts are keyed by project and asset UUID and remain in memory for the editor session. Switching the selected material or hiding the panel preserves a draft. The selected Material Details asset and utility layout are persisted, but draft values are not restored after an application restart. Project/application close uses the existing Save, Discard, or Cancel flow for dirty scene and material edits.
+Material Details keeps drafts by project UUID and asset UUID. Selecting another material or hiding the panel preserves the draft for the current editor session. The selected material and utility layout persist across application restarts; draft values do not. Closing the project or application uses the existing Save, Discard, or Cancel flow for dirty scene and material edits.
 
 ## Documents, hosts, and utility panels
 
-`EditorDocumentManager` stores document identities, host membership, ordering, active documents, remembered placements, bounds, and edit/saved revisions. A document identity is the tuple `(project UUID, asset UUID, editor kind)`, so equal filenames or asset UUIDs in different projects remain distinct. Opening an existing identity activates its existing session and updates its displayed asset location without changing the session revision. The Level Editor remains in the main host.
+`EditorDocumentManager` tracks document identities, host membership, order, active documents, remembered placement, bounds, and edit/saved revisions. A document identity is `(project UUID, asset UUID, editor kind)`, so equal filenames and asset UUIDs in different projects remain distinct. Opening an existing identity activates its session and refreshes its displayed asset location without changing its revision. The Level Editor remains in the main host.
 
-Asset-document eligibility is explicit in [`EditorDocumentHostPolicy.h`](../PulseForgeEditor/Source/Public/Editor/EditorDocumentHostPolicy.h). A file extension, asset UUID, or UI panel name does not make an interface a document editor. Register a kind only when it has a complete editor workspace and document lifecycle. `EditorDocumentManager` is shared infrastructure; it does not provide an asset editor's editable model, preview state, or undo history by itself.
+Document eligibility is explicit in [`EditorDocumentHostPolicy.h`](../PulseForgeEditor/Source/Public/Editor/EditorDocumentHostPolicy.h). A file extension, asset UUID, or panel name does not make an interface a document editor. Register an editor kind only when it provides a full workspace and document lifecycle. The shared document manager does not own an editor's model, preview state, or undo history.
 
-The dedicated top strip is the only document-transfer target. Utility panels and workspace bodies do not accept document tabs. The application captures a press on a document tab outside its close region and tracks registered strip hit regions across viewports. Releasing over a registered strip transfers the same session. Dragging a main-host asset tab outside the registered strips creates a native host; if the pointer leaves all ImGui viewports, the editor uses its last valid drag position. Dragging a native-host tab outside the registered strips leaves it in its current host. Transfers are queued until panel traversal finishes, then validate the destination before changing host membership. A failed preparation leaves the source session in place. A successful transfer preserves identity, revision, and dirty state. Empty native hosts are retired after successful transfer.
+The top document strip is the only document-transfer target. Utility panels and workspace bodies do not accept document tabs. Pressing a tab outside its close control starts a drag; releasing over a registered document strip transfers the same session. Dragging a main-host asset tab outside registered strips creates a native host, using the last valid drag position if the pointer leaves ImGui viewports. Dragging a native-host tab outside registered strips leaves it in its current host. Transfers are queued until panel traversal finishes and the destination is validated. Failed preparation leaves the source unchanged; successful transfers preserve document identity, revision, and dirty state. Empty native hosts are retired after successful transfers.
 
-Document opening preferences apply only to registered full editors:
+Opening preferences apply only to registered full editors:
 
-| Preference | Placement |
+| Preference | Behavior |
 |---|---|
 | New Native Window | Opens each new document in a native host. This is the default. |
-| Main Document Strip | Adds the document to the main host's top strip. |
-| Remembered Placement | Reuses the remembered host for that editor kind when it is still valid; otherwise it creates a native host. |
+| Main Document Strip | Opens each new document in the main host's top strip. |
+| Remembered Placement | Reuses a valid remembered host for that editor kind; otherwise opens in a native host. |
 
-Changing the preference affects later opens and does not move documents that are already open. Material Details always follows utility-panel docking, regardless of the preference.
+Changing the preference affects documents opened later; it does not move existing documents. The preference is stored per user. Project workspace state stores host membership and document order, so remembered placement is restored only with a compatible host in that project. Material Details always follows utility-panel docking.
 
-The opening preference is a per-user editor setting. Remembered host membership and document order belong to the project workspace record, so a remembered placement is restored only when a compatible host exists in the active project.
-
-Panels are described by `EditorPanelDescriptors` in [`EditorLayout.h`](../PulseForgeEditor/Source/Public/Editor/EditorLayout.h). The default workspace places Hierarchy on the left, Scene Viewport in the center, Inspector and Material Details in the right-side utility dock, and Content Browser, Console, and Scene utilities in the bottom dock. Material Details starts hidden. First opening docks it beside Inspector only if it has no saved location; a saved user location is respected. Recovery of a legacy Material document record moves the utility beside Inspector once. **Window > Reset Layout** restores the default utility layout without closing document sessions or clearing material drafts.
+Panel descriptors in [`EditorLayout.h`](../PulseForgeEditor/Source/Public/Editor/EditorLayout.h) define the default workspace: Hierarchy on the left, Scene Viewport in the center, Inspector and Material Details in the right utility dock, and Content Browser, Console, and Scene in the bottom dock. Material Details starts hidden. First opening places it beside Inspector if no saved location exists; a valid user placement is retained. Recovery from a legacy material-document record places it beside Inspector once. **Window > Reset Layout** restores the default utility layout without closing documents or clearing material drafts.
 
 ## Native presentation and frame scheduling
 
-The editor uses one ImGui context. Dear ImGui's GLFW platform backend creates and updates native platform windows; PulseForge supplies renderer callbacks for their presentation. The Vulkan and OpenGL paths are implemented separately:
+The editor uses one ImGui context. Dear ImGui's GLFW platform backend owns secondary native windows; PulseForge supplies their renderer callbacks.
 
-| Backend | Presentation path | Current limitation |
+| Backend | Presentation path | Limitation |
 |---|---|---|
-| Vulkan | The editor's custom ImGui renderer uses PulseForge's NVRHI device. Each secondary native window has its own Vulkan surface, swapchain, swapchain images, frame contexts, and acquire/present synchronization while sharing the renderer's Vulkan instance, device, and queues. | Full specialized asset editors are not registered yet. |
-| OpenGL | GLFW secondary windows use shared OpenGL contexts and Dear ImGui's OpenGL3 renderer. The editor restores the main context after rendering secondary windows. | The editor shell and document-host windows render, but the Scene Viewport does not render a scene. Image thumbnails use asset icons. |
+| Vulkan | The custom ImGui renderer uses the PulseForge NVRHI device. Each secondary window has a Vulkan surface, swapchain, swapchain images, frame contexts, and acquire/present synchronization. Windows share the renderer's Vulkan instance, device, and queues. | No production full asset editor is registered. |
+| OpenGL | GLFW secondary windows use shared OpenGL contexts and Dear ImGui's OpenGL3 renderer. The main context is restored after secondary rendering. | The editor shell and document-host windows render, but the Scene Viewport does not render a scene. Asset previews use type icons. |
 
-The application submits the main Vulkan frame before rendering platform windows. It then processes each secondary viewport in sequence: platform update, renderer target begin, UI draw submission, target end, and buffer swap. NVRHI permits only one immediate command list to be open at a time. The earlier schedule rendered platform windows before closing the main frame and could produce `Two or more immediate command lists cannot be open at the same time`, commands against an `INITIAL` list, and invalid present semaphores/layouts. Keeping main and secondary submissions sequential fixes that ordering failure. `Application::Run()` continues layer rendering while secondary presentation targets exist even if the main window cannot render.
+The application submits the main Vulkan frame before rendering platform windows. It processes each secondary viewport in sequence: update the platform window, begin its renderer target, submit UI draw data, end the target, and swap buffers. NVRHI permits one immediate command list at a time. Rendering secondary windows before closing the main frame caused `Two or more immediate command lists cannot be open at the same time`, commands against an `INITIAL` list, and invalid present semaphores or image layouts. Sequential main and secondary submissions fix that ordering failure. `Application::Run()` continues rendering while secondary targets exist even when the main window cannot render.
 
-The Vulkan renderer checks present-queue support, surface formats, FIFO presentation support, and nonzero framebuffer extents when creating a secondary target. Out-of-date or suboptimal swapchains are recreated. A zero-sized or minimized native viewport is skipped. Swapchain recreation waits for that host's frame contexts and idles the present queue before releasing images; native-host retirement uses the same presentation-completion rule. The queue idle is limited to resize and host retirement, where graphics completion alone does not prove presentation has finished. If a native presentation target cannot be created, the editor transfers all sessions from that host to the main document strip before retiring the empty host; a batch validation failure leaves the source host and its sessions intact.
+The Vulkan renderer checks present-queue support, surface formats, FIFO presentation support, and nonzero framebuffer extent when creating a secondary target. It recreates out-of-date or suboptimal swapchains and skips minimized or zero-sized viewports. Resize and host retirement wait for that host's frame contexts and idle the present queue before releasing swapchain resources; graphics completion alone does not prove presentation has finished. These waits are limited to resize and retirement. If a native target cannot be created, the editor transfers its sessions to the main strip before retiring the host. A failed batch validation leaves the source host intact.
 
 ### Resource ownership
 
-| Resource | Owner and use | Retirement rule |
+| Resource | Owner | Retirement condition |
 |---|---|---|
-| Main GLFW window | `Application`/`WindowsWindow`; main ImGui platform viewport | Outlives editor layers and secondary platform windows. |
-| Secondary GLFW windows | Dear ImGui GLFW platform backend; editor viewport callbacks | Close is treated as a document-host request. Renderer resources are retired before the platform window is destroyed. |
-| Vulkan instance, device, queues | `VulkanRenderer`; NVRHI and Vulkan presentation | Shared across native windows. Queue calls follow the renderer's serialized submission path. |
-| Secondary Vulkan surface and swapchain | `VulkanRenderer::CreatePlatformPresentationTarget` | Retire per host after frame contexts complete and the present queue is idle. |
-| Swapchain image wrappers, depth targets, semaphores, frame contexts | Per-host Vulkan presentation record | Retained for that swapchain generation and released after graphics and presentation work completes. |
-| ImGui context and UI texture bindings | `EditorLayer` and `EditorImGuiRenderer` | Remain alive while draw data or submitted frames can reference them; renderer teardown precedes device teardown. |
-| OpenGL shared contexts | GLFW platform backend and current-context callbacks | Restore the main context after each secondary viewport; destroy viewports before the main context. |
+| Main GLFW window | `Application` / `WindowsWindow` | Outlives editor layers and secondary platform windows. |
+| Secondary GLFW windows | Dear ImGui GLFW platform backend | Renderer resources retire before the platform window is destroyed. |
+| Vulkan instance, device, and queues | `VulkanRenderer` | Shared by native windows; queue submissions use the renderer's serialized path. |
+| Secondary Vulkan surface and swapchain | `VulkanRenderer::CreatePlatformPresentationTarget` | Host frame work completes and the present queue is idle. |
+| Swapchain image wrappers, depth targets, semaphores, frame contexts | Per-host Vulkan presentation record | Retained for a swapchain generation until graphics and presentation work completes. |
+| ImGui context and UI texture bindings | `EditorLayer` / `EditorImGuiRenderer` | Remain valid while draw data or submitted frames can reference them; released before the device. |
+| OpenGL shared contexts | GLFW platform backend and context callbacks | Restore the main context after each secondary viewport; destroy secondary viewports before the main context. |
 
-The Vulkan implementation lives in [`VulkanRenderer.cpp`](../PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp), the OpenGL fallback in [`OpenGLRenderer.cpp`](../PulseForge/Source/Private/Renderer/OpenGLRenderer.cpp), and the editor callbacks and frame schedule in [`EditorApplication.cpp`](../PulseForgeEditor/Source/Private/EditorApplication.cpp). The engine-facing presentation API is in [`RendererBackend.h`](../PulseForge/Source/Public/Renderer/RendererBackend.h).
+Implementation references: [`VulkanRenderer.cpp`](../PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp), [`OpenGLRenderer.cpp`](../PulseForge/Source/Private/Renderer/OpenGLRenderer.cpp), [`EditorApplication.cpp`](../PulseForgeEditor/Source/Private/EditorApplication.cpp), and [`RendererBackend.h`](../PulseForge/Source/Public/Renderer/RendererBackend.h).
 
 ### Pinned dependencies
 
-| Dependency | Repository pin | Use in the editor |
+| Dependency | Repository pin | Editor use |
 |---|---|---|
 | Dear ImGui | `60d7fb207eeb46d6363dd4bde10b35991bae0ce7` (1.92.7 WIP, `IMGUI_VERSION_NUM 19265`) | Docking, platform viewports, GLFW integration, and OpenGL3 backend. |
 | GLFW | 3.4.0 | Main and secondary native windows and OpenGL contexts. |
-| NVRHI | `6b96fb03e07539f08327aea76c56d55f1de9d906` | Vulkan renderer device and command submission. |
+| NVRHI | `6b96fb03e07539f08327aea76c56d55f1de9d906` | Vulkan device and command submission. |
 | Vulkan-Headers | `v1.4.352` | Vulkan API declarations fetched by NVRHI. |
-| DXC | 1.9.2602.24 | Build-time HLSL to SPIR-V compilation. |
+| DXC | 1.9.2602.24 | Build-time HLSL-to-SPIR-V compilation. |
 
-These versions are pinned by the repository; the ImGui gitlink and GLFW headers are under `PulseForge/Vendor`, and the NVRHI, Vulkan-Headers, and DXC pins are declared in the root `CMakeLists.txt`.
+The repository pins these versions. ImGui and GLFW sources are under `PulseForge/Vendor`; the NVRHI, Vulkan-Headers, and DXC pins are declared in the root `CMakeLists.txt`.
 
 ## Focus, commands, and close behavior
 
-Document commands resolve against the focused document identity and current project. With no focused document, commands retain the Level Editor fallback. A stale identity from another project is rejected. Current tests cover Level, Material-kind fixture, unsupported Texture-kind fixture, and stale-project routing; a production full asset editor is needed to verify commands against multiple real editors.
+Document commands resolve against the focused document identity and active project. With no focused document, commands use the Level Editor. Commands reject stale identities from another project. Policy tests cover Level, synthetic Material-kind and unsupported Texture-kind documents, and stale-project routing. A production full asset editor is needed to validate commands across multiple real asset workspaces.
 
-The editor shortcut policy suppresses scene/history commands while text input, active ImGui controls, menus, popups, or modals own interaction. The Scene Viewport remains attached to the Level Editor host; native asset windows do not take over its camera navigation or gizmos.
+Scene and history shortcuts are suppressed while text input, active ImGui controls, menus, popups, or modals own interaction. The Scene Viewport remains with the Level Editor; floating document hosts do not own its camera or gizmos.
 
-Document tab close, native-window close, project switch, and application shutdown use Save, Discard, or Cancel policy. `EditorDocumentSession` stores edit and saved revisions. Saving revision N marks the document clean only through N, so a later edit remains dirty. A failed save or cancelled close preserves the session. Host close filters its members to dirty documents; shutdown prevents secondary close callbacks from deleting saved host state before the final workspace snapshot.
+Document-tab close, native-window close, project switch, and application shutdown use Save, Discard, or Cancel decisions. `EditorDocumentSession` tracks edit and saved revisions. Saving revision N marks the session clean only through N, so a later edit remains dirty. Failed saves and cancelled closes preserve the session. Host close resolves dirty documents before retiring the host; shutdown retains host state until the final workspace snapshot is written.
 
-The current Material Details utility uses the same application-level dirty decision for its in-memory draft. Revert reloads the serialized material and resets its edit history; migration of an old material document record selects the material for the utility without saving or discarding the draft.
+Material Details uses the application's dirty-state decision for its in-memory draft. Revert reloads the serialized material and resets its edit history. Migrating a legacy material document record selects that material for the utility without saving or discarding its draft.
 
 ## Workspace persistence and recovery
 
-`EditorLayout` stores the user docking layout and panel state under `%LOCALAPPDATA%/PulseForge/Editor`. Set `PULSEFORGE_EDITOR_SETTINGS_DIR` to use an isolated settings directory for tests; isolated settings do not import the legacy working-directory `imgui.ini`.
+`EditorLayout` stores utility layout and panel state under `%LOCALAPPDATA%/PulseForge/Editor`. Set `PULSEFORGE_EDITOR_SETTINGS_DIR` to use isolated settings for tests. Isolated settings do not import the legacy working-directory `imgui.ini`.
 
-Document state is stored separately in `documents-<project UUID>.json` beside the ImGui workspace settings. Schema version 2 records project identity, document hosts and order, active documents, remembered placement by editor kind, host bounds, and the selected Material Details asset. Schema version 1 is migrated. Raw window, GPU, and viewport pointers are not persisted. Malformed, duplicate, foreign-project, missing-asset, or unregistered-editor records are rejected or skipped during restore. A saved Material-kind record is migrated to the Material Details utility; obsolete empty hosts are removed while the utility layout and unrelated valid state remain available.
+Document state is stored in `documents-<project UUID>.json` beside the ImGui settings. Schema version 2 records project identity, document hosts and order, active documents, remembered placement by editor kind, host bounds, and the selected Material Details asset. Version 1 is migrated. Raw window, GPU, and viewport pointers are not persisted. Malformed, duplicate, foreign-project, missing-asset, or unregistered-editor records are rejected or skipped. A legacy Material-kind document record is migrated to the Material Details utility; obsolete empty hosts are removed without discarding unrelated valid state.
 
-Saved native bounds include monitor name, position, size, DPI scale, and maximized state. Invalid geometry is clamped to a usable work area; valid negative desktop coordinates are accepted. When the saved monitor is unavailable, restoration falls back to an available monitor. These recovery rules have deterministic tests and a single-monitor missing-monitor runtime check. Physical monitor removal and mixed-DPI movement have not been verified.
+Saved native bounds include monitor name, position, size, DPI scale, and maximized state. Invalid geometry is clamped to a usable work area; valid negative desktop coordinates are accepted. If a saved monitor is unavailable, restoration uses an available monitor. Deterministic tests and a single-monitor runtime check cover this recovery. Physical monitor removal and mixed-DPI movement have not been verified.
 
-Reset Layout rebuilds the utility dock without clearing document membership or edit state. Saved layouts are not replaced just because the source default-layout version changes. A missing or incomplete ImGui dockspace falls back to the default layout while retaining independently parsed panel state where valid.
+Reset Layout rebuilds the utility dock without clearing document membership or edit state. A changed default-layout version does not replace a saved workspace. If the saved ImGui dockspace is missing or incomplete, the editor creates the default dockspace and retains valid panel state where possible.
 
-## Asset moves and destination dialogs
+## Asset moves and project dialogs
 
-Content Browser asset and folder moves use separate drag payloads and the asset-operation service. `AssetOperations::MoveFolder` moves the directory on the same volume, carries `.meta` sidecars, preserves UUIDs, and rebuilds the registry. It rejects traversal, reparse points, collisions, and moves into the source folder or its descendants. If registry rebuilding fails, it attempts to roll back the directory and reports when recovery is still required. Open document labels and paths are refreshed by UUID without changing document identity or dirty revision.
+Content Browser moves use separate drag payloads for asset and folder moves. `AssetOperations::MoveFolder` moves a directory on the same volume, carries `.meta` sidecars, preserves UUIDs, and rebuilds the registry. It rejects traversal, reparse points, collisions, and moves into the source or its descendants. If registry rebuilding fails, the service attempts rollback and reports when recovery is still needed. Open document paths and labels refresh by UUID without changing identity or dirty revision.
 
-The shared project-folder/name dialog is used for asset Move/Rename, Duplicate, New Scene, Save Scene As, and Create Prefab. It provides project-folder search, breadcrumbs, filename and extension validation, sidecar collision feedback, Enter to accept, and Escape to cancel. External image import and project-directory selection continue to use native file dialogs. The asset registry refresh is explicit; PulseForge does not continuously watch asset files for external changes.
+The shared project-folder/name dialog supports asset Move/Rename, Duplicate, New Scene, Save Scene As, and Create Prefab. It provides folder search, breadcrumbs, filename and extension validation, collision feedback for files and sidecars, Enter to accept, and Escape to cancel. External image import and project-directory selection use native file dialogs. Asset changes made outside the editor are detected by explicit Refresh; continuous file watching is not implemented.
 
 ## Adding a full specialized editor
 
-Future Material, Blueprint, and other specialized editors must register a document kind explicitly in `RegisteredAssetDocumentEditors`. An editor integration should:
+Future Material, Blueprint, and other specialized editors must register a document kind explicitly in `RegisteredAssetDocumentEditors`. Each integration should:
 
-1. Add a stable `EditorDocumentKind` and update workspace schema validation or migration if persisted enum values change.
-2. Define a session owner keyed by project UUID, asset UUID, and editor kind. Keep editable data, independent undo/redo, selection, preview state, and asynchronous operations with that session rather than in transient panel locals.
-3. Open and activate the identity through `EditorDocumentManager`; repeated opens should focus the existing session.
-4. Render the full editor workspace inside its document host. Keep utility panels in the workspace's utility docking system and out of the top-strip transfer target.
-5. Supply save, discard, dirty-revision, close, and focused-command behavior to the shared lifecycle policies.
-6. Register stable utility and workspace layout identities. Transfer the same document session when it detaches, reattaches, or moves to another host.
-7. Give every preview target and UI texture a generation and retirement policy that keeps resources alive through every consuming host's in-flight draw work.
-8. Add deterministic registration, persistence, close, transfer, and failure tests, then validate the real editor in the supported Vulkan and OpenGL presentation paths.
+1. Add a stable `EditorDocumentKind` and update workspace schema validation or migration if persisted values change.
+2. Own editable data, undo/redo, selection, preview state, and pending operations in a session keyed by project UUID, asset UUID, and editor kind.
+3. Open and activate sessions through `EditorDocumentManager`; repeated opens should activate the existing session.
+4. Render a complete editor workspace in its document host. Keep utility panels outside the top-strip transfer target.
+5. Implement save, discard, dirty revisions, close decisions, and focused-document commands through the shared lifecycle policies.
+6. Register stable utility and workspace layout identities. Detach, reattach, and regroup the same session without reopening it.
+7. Assign preview targets and UI textures a generation and retirement policy that covers in-flight draw work from every consuming host.
+8. Add deterministic registration, persistence, close, transfer, and failure tests, then validate the editor through the supported Vulkan and OpenGL presentation paths.
 
-Do not register Material Details as a document editor. A future full Material Editor is a separate workspace and opening operation.
+Material Details is not a document editor. A future full Material Editor is a separate workspace and opening operation.
 
 ## Validation and known limitations
 
-The document model and policy tests cover stable identities, duplicate opens, host membership, transfer preparation, close decisions, save revisions, focused commands, layout migration and recovery, placement preferences, path bounds, asset operations, destination dialogs, and command-line parsing.
+Automated tests cover document identity, duplicate opens, host membership, transfer preparation, close decisions, save revisions, focused commands, layout migration and recovery, placement preferences, path bounds, asset operations, dialogs, and command-line parsing. The synthetic `--document-host-test-fixture` and related `--document-host-test-*` switches exercise the production host and tab-strip code with unregistered placeholder sessions or bounded renderer failures; they do not open editable asset content.
 
-At source revision `61dcc905`, Debug, Release, and Dist passed 4,376 `PulseForgeTests` checks each, with CTest passing 2/2 in each configuration. The Vulkan and OpenGL editor configurations were built. Bounded Debug Vulkan runs used Khronos and NVRHI validation and exercised native-host presentation, resize, minimize/restore, main-window minimization, workspace restoration, transfer fixtures, and injected presentation failures. No Vulkan validation errors were reported in those runs. Bounded OpenGL runs exercised secondary document-host rendering and the fallback editor shell.
+On 2026-10-14, the Vulkan and OpenGL Visual Studio 2022 x64 Debug, Release, and Dist editor/test configurations built successfully. `PulseForgeTests` passed 4,376 checks and CTest passed 2/2 in each configuration. Three-round Debug transfer fixtures ran on both backends. The Vulkan fixture used Khronos and NVRHI validation, rejected the bodies and four edges of Hierarchy, Inspector, Scene Viewport, Content Browser, and Console, and exercised reattachment, native detachment, and grouping. It reported no fixture failures or Vulkan/NVRHI validation errors and exited cleanly. The OpenGL fixture confirmed backend startup and completed the same transfer sequence. These fixtures queue ImGui events through the application path; they do not deliver operating-system pointer input or verify rendered pixels.
 
-A Debug Vulkan run on 2026-10-14 repeated the document-host transfer fixture for three rounds. Each round rejected 20 drops over utility panels and workspace edges, reattached the same session to the main strip, detached it into a native host, and grouped it with a document in another native host. The run reported no fixture failures, VUIDs, Vulkan validation errors, or NVRHI command-list errors, and the editor exited cleanly. The fixture queues ImGui mouse events through the production tab-strip path; it does not deliver OS pointer input. Pointer-driven tab movement and physical multi-monitor/DPI movement still need manual testing.
+Pointer-driven tab reordering, detachment, grouping, and reattachment still need manual testing. Physical multi-monitor movement, mixed-DPI transitions, and monitor-removal recovery are unverified. The OpenGL shell's visual output is not established by the automated fixture. No production full asset editor is registered, so multiple real asset sessions, their independent histories, and their dirty-close prompts remain unverified. OpenGL does not render scene snapshots or GPU asset previews.
 
-On 2026-10-14, Debug Vulkan startup runs restored a saved workspace containing an obsolete native Material document. With each document-opening preference, the application selected the material in Material Details, kept Level Editor as the main document, removed the empty legacy host, and saved Inspector and Material Details in the same utility dock. Each run exited with code 0 and reported no Vulkan VUIDs, Vulkan validation errors, or NVRHI command-list errors. A captured frame shows the Material Details tab beside Inspector while Scene Viewport remains visible. This validates startup migration and utility placement; it does not validate pointer-driven document transfers or physical multi-monitor movement.
+### Manual document-host checks
 
-The Debug-only `--document-host-test-fixture` and related `--document-host-test-*` switches create two synthetic, unregistered document sessions or inject bounded renderer failures. They run through production host and tab-strip code but display placeholders instead of editable asset content. Their queued ImGui events do not establish OS pointer delivery or physical mouse-driven behavior.
-
-Material Details is an Inspector-side utility. No production full asset editor is registered, so asset-editor workspaces, per-document editing histories, and dirty-document prompts for real asset editors remain unverified. OpenGL does not render scene snapshots or GPU asset previews. Asset changes made outside the editor are detected by an explicit Refresh, not a file watcher.
-
-### Manual document-host validation
-
-Run the following from the repository root to add synthetic document tabs for manual host testing. The Debug-only fixture does not open or modify project assets:
+Run the Debug-only fixture from the repository root to open synthetic document tabs without modifying project assets:
 
 ```powershell
 cmake --build Build/CMake/VS2022-x64 --config Debug --target PulseForgeEditor --parallel 1
@@ -152,6 +144,4 @@ finally {
 }
 ```
 
-The fixture creates two synthetic, unregistered document sessions with no editable asset content. It does not generate OS pointer input. Use a real mouse to test tab reorder, grouping, detach, and reattach; confirm utility panels and workspace edges reject document drops. Repeat transfers in both directions and verify that Level Editor remains in the main host.
-
-Test all three opening preferences. Material Details should always open beside Inspector while Level Editor remains active and Scene Viewport remains available. Dirty-close decisions and shared dialogs inside a floating asset editor require a production full editor, which is not registered. Mixed-DPI monitor movement, negative desktop coordinates, and monitor-removal recovery also require manual testing.
+Use a mouse to test tab reorder, grouping, detachment, and reattachment in both directions. Confirm that utility panels and workspace edges reject document drops, and that Level Editor remains in the main host. Test all three opening preferences with a registered full editor when one is available. Material Details should always open beside Inspector while the Scene Viewport remains available. Test dirty-close decisions and dialogs in a floating asset editor after a production full editor is registered.
