@@ -10,7 +10,7 @@
 
 namespace PulseForgeEditor
 {
-	inline constexpr uint32_t CurrentDefaultEditorLayoutVersion = 3;
+	inline constexpr uint32_t CurrentDefaultEditorLayoutVersion = 4;
 
 	enum class EditorPanel : uint8_t
 	{
@@ -20,7 +20,7 @@ namespace PulseForgeEditor
 		ContentBrowser,
 		Console,
 		Scene,
-		MaterialEditor,
+		MaterialDetails,
 		Count
 	};
 
@@ -39,7 +39,7 @@ namespace PulseForgeEditor
 			case EditorPanel::Hierarchy: return EditorDefaultDockRegion::Left;
 			case EditorPanel::SceneViewport: return EditorDefaultDockRegion::Center;
 			case EditorPanel::Inspector:
-			case EditorPanel::MaterialEditor: return EditorDefaultDockRegion::Right;
+			case EditorPanel::MaterialDetails: return EditorDefaultDockRegion::Right;
 			case EditorPanel::ContentBrowser:
 			case EditorPanel::Console:
 			case EditorPanel::Scene: return EditorDefaultDockRegion::Bottom;
@@ -53,17 +53,19 @@ namespace PulseForgeEditor
 		EditorPanel Panel;
 		std::string_view SettingsKey;
 		std::string_view WindowName;
+		bool IsUtilityPanel;
 		bool DefaultVisible;
 	};
 
 	inline constexpr std::array<EditorPanelDescriptor, static_cast<size_t>(EditorPanel::Count)> EditorPanelDescriptors = {{
-		{ EditorPanel::SceneViewport, "SceneViewport", "Scene Viewport", true },
-		{ EditorPanel::Hierarchy, "Hierarchy", "Hierarchy", true },
-		{ EditorPanel::Inspector, "Inspector", "Inspector", true },
-		{ EditorPanel::ContentBrowser, "ContentBrowser", "Content Browser", true },
-		{ EditorPanel::Console, "Console", "Console", true },
-		{ EditorPanel::Scene, "Scene", "Scene", false },
-		{ EditorPanel::MaterialEditor, "MaterialEditor", "Material Editor", false }
+		{ EditorPanel::SceneViewport, "SceneViewport", "Scene Viewport", true, true },
+		{ EditorPanel::Hierarchy, "Hierarchy", "Hierarchy", true, true },
+		{ EditorPanel::Inspector, "Inspector", "Inspector", true, true },
+		{ EditorPanel::ContentBrowser, "ContentBrowser", "Content Browser", true, true },
+		{ EditorPanel::Console, "Console", "Console", true, true },
+		{ EditorPanel::Scene, "Scene", "Scene", true, false },
+		// Keep the settings key and ImGui window name stable for existing workspaces.
+		{ EditorPanel::MaterialDetails, "MaterialEditor", "Material Editor", true, false }
 	}};
 
 	class EditorPanelVisibility final
@@ -111,12 +113,17 @@ namespace PulseForgeEditor
 	{
 	public:
 		[[nodiscard]] std::expected<void, std::string> Initialize();
-		[[nodiscard]] bool SubmitDockspace();
+		[[nodiscard]] bool SubmitDockspace(bool KeepAliveOnly = false);
 
 		[[nodiscard]] bool IsPanelVisible(EditorPanel Panel) const noexcept;
 		[[nodiscard]] bool* GetPanelVisibility(EditorPanel Panel) noexcept;
 		[[nodiscard]] bool SetPanelVisible(EditorPanel Panel, bool Visible) noexcept;
+		[[nodiscard]] uint32_t GetDocumentOpeningPreference() const noexcept { return m_DocumentOpeningPreference; }
+		[[nodiscard]] std::filesystem::path GetDocumentWorkspacePath(std::string_view ProjectID) const;
+		[[nodiscard]] bool SetDocumentOpeningPreference(uint32_t Preference) noexcept;
 		[[nodiscard]] bool DockPanelBesideIfUnplaced(EditorPanel Panel, EditorPanel ReferencePanel);
+		[[nodiscard]] bool DockPanelBeside(EditorPanel Panel, EditorPanel ReferencePanel);
+		[[nodiscard]] bool ActivatePanel(EditorPanel Panel);
 		void MarkSettingsDirty() noexcept;
 		void RequestReset() noexcept;
 
@@ -124,7 +131,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] std::expected<void, std::string> SaveNow();
 
 	private:
-		[[nodiscard]] bool HasSavedWorkspace(uint32_t DockspaceID) const;
+		[[nodiscard]] bool HasRestorableDockspace(uint32_t DockspaceID) const;
 		void BuildDefaultDockspace(uint32_t DockspaceID);
 		[[nodiscard]] std::expected<void, std::string> SaveSettings();
 		void LoadPanelState(std::string_view IniContents);
@@ -132,9 +139,9 @@ namespace PulseForgeEditor
 		EditorPanelVisibility m_Panels;
 		std::filesystem::path m_SettingsPath;
 		uint32_t m_LoadedDefaultLayoutVersion = CurrentDefaultEditorLayoutVersion;
+		uint32_t m_DocumentOpeningPreference = 0;
 		bool m_Initialized = false;
 		bool m_LayoutInitialized = false;
-		bool m_HasSavedPanelState = false;
 		bool m_ResetRequested = false;
 		bool m_MigrateLegacySettings = false;
 	};

@@ -1,5 +1,6 @@
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
+#include "Editor/EditorLayoutSettingsPolicy.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -112,7 +113,10 @@ namespace
 		return ImHashStr("DockSpace", 0, ImHashStr(HostWindowName));
 	}
 
-	void AppendPanelState(std::string& Contents, const PulseForgeEditor::EditorPanelVisibility& Panels)
+	void AppendPanelState(
+		std::string& Contents,
+		const PulseForgeEditor::EditorPanelVisibility& Panels,
+		uint32_t DocumentOpeningPreference)
 	{
 		if (!Contents.empty() && Contents.back() != '\n')
 			Contents.push_back('\n');
@@ -123,6 +127,8 @@ namespace
 		Contents.append(std::to_string(WorkspaceSettingsFormat));
 		Contents.append("\nDefaultLayoutVersion=");
 		Contents.append(std::to_string(PulseForgeEditor::CurrentDefaultEditorLayoutVersion));
+		Contents.append("\nDocumentOpeningPreference=");
+		Contents.append(std::to_string(DocumentOpeningPreference));
 		Contents.push_back('\n');
 		for (const PulseForgeEditor::EditorPanelDescriptor& Descriptor : PulseForgeEditor::EditorPanelDescriptors)
 		{
@@ -234,7 +240,7 @@ namespace PulseForgeEditor
 		return {};
 	}
 
-	bool EditorLayout::SubmitDockspace()
+	bool EditorLayout::SubmitDockspace(bool KeepAliveOnly)
 	{
 		if (!m_Initialized || !ImGui::GetCurrentContext())
 			return false;
@@ -247,7 +253,6 @@ namespace PulseForgeEditor
 		{
 			ImGui::ClearIniSettings();
 			m_Panels.ResetToDefaults();
-			m_HasSavedPanelState = false;
 			m_LayoutInitialized = false;
 			m_ResetRequested = false;
 			ResetApplied = true;
@@ -255,9 +260,8 @@ namespace PulseForgeEditor
 
 		if (!m_LayoutInitialized)
 		{
-			if (!HasSavedWorkspace(DockspaceID))
+			if (ShouldBuildDefaultDockspace(HasRestorableDockspace(DockspaceID)))
 			{
-				m_Panels.ResetToDefaults();
 				BuildDefaultDockspace(DockspaceID);
 				ImGui::MarkIniSettingsDirty();
 			}
@@ -266,22 +270,17 @@ namespace PulseForgeEditor
 			m_LayoutInitialized = true;
 		}
 
-		ImGui::DockSpaceOverViewport(DockspaceID, Viewport);
+		ImGui::DockSpaceOverViewport(DockspaceID, Viewport,
+			KeepAliveOnly ? ImGuiDockNodeFlags_KeepAliveOnly : ImGuiDockNodeFlags_None);
 		return ResetApplied;
 	}
 
-	bool EditorLayout::HasSavedWorkspace(uint32_t DockspaceID) const
+	bool EditorLayout::HasRestorableDockspace(uint32_t DockspaceID) const
 	{
-		if (ImGui::DockBuilderGetNode(DockspaceID) || m_HasSavedPanelState)
-			return true;
-
-		for (const EditorPanelDescriptor& Descriptor : EditorPanelDescriptors)
-		{
-			const std::string WindowName(Descriptor.WindowName);
-			if (ImGui::FindWindowSettingsByID(ImHashStr(WindowName.c_str())))
-				return true;
-		}
-		return false;
+		// Panel visibility/preference metadata alone is not a restorable dock layout. A
+		// truncated ini file can retain the state section while losing all Docking data.
+		// In that case rebuild only the default dockspace and keep the parsed panel settings.
+		return ImGui::DockBuilderGetNode(DockspaceID) != nullptr;
 	}
 
 	void EditorLayout::BuildDefaultDockspace(uint32_t DockspaceID)
@@ -323,6 +322,7 @@ namespace PulseForgeEditor
 		DockPanel(EditorPanel::Scene, "Scene");
 		DockPanel(EditorPanel::Console, "Console");
 		DockPanel(EditorPanel::ContentBrowser, "Content Browser");
+		DockPanel(EditorPanel::MaterialDetails, "Material Editor");
 		ImGui::DockBuilderFinish(DockspaceID);
 	}
 
@@ -342,6 +342,22 @@ namespace PulseForgeEditor
 			return false;
 		MarkSettingsDirty();
 		return true;
+	}
+
+	bool EditorLayout::SetDocumentOpeningPreference(uint32_t Preference) noexcept
+	{
+		if (Preference > 2 || m_DocumentOpeningPreference == Preference)
+			return false;
+		m_DocumentOpeningPreference = Preference;
+		MarkSettingsDirty();
+		return true;
+	}
+
+	std::filesystem::path EditorLayout::GetDocumentWorkspacePath(std::string_view ProjectID) const
+	{
+		if (m_SettingsPath.empty() || ProjectID.empty())
+			return {};
+		return m_SettingsPath.parent_path() / ("documents-" + std::string(ProjectID) + ".json");
 	}
 
 	bool EditorLayout::DockPanelBesideIfUnplaced(EditorPanel Panel, EditorPanel ReferencePanel)
@@ -369,6 +385,47 @@ namespace PulseForgeEditor
 		ImGui::DockBuilderDockWindow(PanelName.c_str(), ReferenceSettings->DockId);
 		const ImGuiDockNode* RootNode = ImGui::DockNodeGetRootNode(ReferenceNode);
 		ImGui::DockBuilderFinish(RootNode->ID);
+		MarkSettingsDirty();
+		return true;
+	}
+
+	bool EditorLayout::DockPanelBeside(EditorPanel Panel, EditorPanel ReferencePanel)
+	{
+		if (!m_Initialized || !m_LayoutInitialized || !ImGui::GetCurrentContext() || Panel == ReferencePanel)
+			return false;
+		const size_t PanelIndex = static_cast<size_t>(Panel);
+		const size_t ReferenceIndex = static_cast<size_t>(ReferencePanel);
+		if (PanelIndex >= EditorPanelDescriptors.size() || ReferenceIndex >= EditorPanelDescriptors.size())
+			return false;
+		const std::string PanelName(EditorPanelDescriptors[PanelIndex].WindowName);
+		const std::string ReferenceName(EditorPanelDescriptors[ReferenceIndex].WindowName);
+		const ImGuiWindowSettings* ReferenceSettings =
+			ImGui::FindWindowSettingsByID(ImHashStr(ReferenceName.c_str()));
+		if (!ReferenceSettings || ReferenceSettings->DockId == 0 ||
+			!ImGui::DockBuilderGetNode(ReferenceSettings->DockId))
+			return false;
+		ImGui::DockBuilderDockWindow(PanelName.c_str(), ReferenceSettings->DockId);
+		ImGui::DockBuilderFinish(ImGui::DockNodeGetRootNode(
+			ImGui::DockBuilderGetNode(ReferenceSettings->DockId))->ID);
+		MarkSettingsDirty();
+		return true;
+	}
+
+	bool EditorLayout::ActivatePanel(EditorPanel Panel)
+	{
+		const size_t PanelIndex = static_cast<size_t>(Panel);
+		if (!m_Initialized || !ImGui::GetCurrentContext() || PanelIndex >= EditorPanelDescriptors.size())
+			return false;
+		const std::string WindowName(EditorPanelDescriptors[PanelIndex].WindowName);
+		ImGuiWindow* Window = ImGui::FindWindowByName(WindowName.c_str());
+		if (!Window)
+			return false;
+		if (ImGuiDockNode* Node = Window->DockNode; Node && Node->TabBar)
+		{
+			Node->SelectedTabId = Window->TabId;
+			Node->TabBar->NextSelectedTabId = Window->TabId;
+		}
+		ImGui::FocusWindow(Window);
 		MarkSettingsDirty();
 		return true;
 	}
@@ -410,17 +467,17 @@ namespace PulseForgeEditor
 		const char* IniData = ImGui::SaveIniSettingsToMemory(&IniSize);
 		(void)IniSize;
 		std::string Contents(IniData ? IniData : "");
-		AppendPanelState(Contents, m_Panels);
+		AppendPanelState(Contents, m_Panels, m_DocumentOpeningPreference);
 		return WriteAtomically(m_SettingsPath, Contents);
 	}
 
 	void EditorLayout::LoadPanelState(std::string_view IniContents)
 	{
 		m_Panels.ResetToDefaults();
-		m_HasSavedPanelState = false;
 		bool InWorkspaceSection = false;
 		bool FormatWasValid = false;
 		bool HasRecognizedState = false;
+		std::optional<uint32_t> LoadedDocumentOpeningPreference;
 
 		std::istringstream Input{ std::string(IniContents) };
 		std::string Line;
@@ -454,6 +511,11 @@ namespace PulseForgeEditor
 				(void)ParseUnsigned(Value, m_LoadedDefaultLayoutVersion);
 				continue;
 			}
+			if (Key == "DocumentOpeningPreference")
+			{
+				LoadedDocumentOpeningPreference = ParseDocumentOpeningPreference(Value);
+				continue;
+			}
 			for (const EditorPanelDescriptor& Descriptor : EditorPanelDescriptors)
 			{
 				if (Key != Descriptor.SettingsKey)
@@ -467,6 +529,7 @@ namespace PulseForgeEditor
 
 		if (HasRecognizedState && !FormatWasValid)
 			m_Panels.ResetToDefaults();
-		m_HasSavedPanelState = HasRecognizedState;
+		m_DocumentOpeningPreference = ResolveDocumentOpeningPreference(
+			HasRecognizedState, FormatWasValid, LoadedDocumentOpeningPreference);
 	}
 }

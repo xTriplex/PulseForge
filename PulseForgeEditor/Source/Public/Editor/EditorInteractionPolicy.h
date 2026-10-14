@@ -16,7 +16,7 @@ namespace PulseForgeEditor
 			InspectorHistoryItem != ActiveItem;
 	}
 
-	struct EditorHistoryShortcutContext
+	struct EditorShortcutContext
 	{
 		bool SceneAvailable = false;
 		bool RuntimeActive = false;
@@ -29,8 +29,7 @@ namespace PulseForgeEditor
 		bool WindowNavigationActive = false;
 	};
 
-	[[nodiscard]] constexpr bool CanRouteEditorHistoryShortcut(
-		const EditorHistoryShortcutContext& Context) noexcept
+	[[nodiscard]] constexpr bool CanRouteEditorShortcut(const EditorShortcutContext& Context) noexcept
 	{
 		return Context.SceneAvailable && !Context.RuntimeActive && !Context.CameraNavigationActive &&
 			!Context.GizmoInteractionActive && !Context.TextInputActive && !Context.ImGuiItemActive &&

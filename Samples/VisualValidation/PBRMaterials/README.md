@@ -1,32 +1,33 @@
 # PulseForge PBR Materials
 
-## Purpose
-
-This compact workbench demonstrates textured metallic-roughness shading, tangent-space normal mapping, material occlusion, emissive HDR output, and the material asset editor. The startup scene is already arranged as a comparison board; no manual scene construction is needed.
+This project is a compact workbench for textured metallic/roughness shading, tangent-space normal mapping, material occlusion, emissive HDR output, and alpha modes. Its startup scene is arranged as a comparison board.
 
 ## Open and inspect
 
-Open `PBRMaterials.pfproj` in the Vulkan PulseForgeEditor, then load `Assets/Scenes/PBRMaterialsOverview.scene` if it is not selected automatically. The project startup UUID points to this scene. The authored camera also frames the scene for standalone-game rendering.
+Open `PBRMaterials.pfproj` in the Vulkan editor. The project startup UUID selects `Assets/Scenes/PBRMaterialsOverview.scene`; open that scene from the Content Browser if another scene is active. The authored camera also frames the scene for standalone-game rendering.
 
-The top row compares rough clay, satin ceramic, and polished metal using the same base-color map and lighting. The lower row shows packed metallic/roughness channels plus a normal map, a material-occlusion pattern, and a bright emissive texture. Select an entity and open its Material Editor from the Content Browser to compare factors, maps, and strengths. Save explicitly in the Material Editor; scene mesh references retain stable material UUIDs. Content Browser material tiles show a saved base-color swatch, not a physically rendered PBR preview.
+The top row compares rough clay, satin ceramic, and polished metal with a shared base-color map and lighting. The lower row shows packed metallic/roughness channels, a normal map, material occlusion, and an emissive texture. Select a material in the Content Browser and choose **Show Material Details** to edit its saved-asset draft. Use **Save Material** to commit changes or **Revert Material** to reload the asset. Mesh references retain the material UUID when it is saved.
+
+Content Browser material tiles display a saved base-color-factor swatch. The swatch does not render the base-color map, metallic/roughness response, normal detail, or scene lighting.
 
 ## Expected behavior
 
-- Rough surfaces show broad, subdued highlights; smoother materials show tighter, stronger reflections.
-- Metallic response changes with `metallicFactor` and the packed map's blue channel; roughness uses the green channel.
-- Normal-map grooves alter directional highlights without replacing the geometric silhouette.
-- The occlusion pattern affects indirect ambient response, not direct light or cast shadows.
-- Emissive stripes contribute scene-linear HDR radiance and are not attenuated by direct-light shadows. The current renderer has no bloom or emissive global illumination yet.
-- Missing optional maps use neutral fallbacks. The included v2 compatibility material remains loadable with default values for newer fields.
+- Rough surfaces show broad, subdued highlights; smoother materials show tighter highlights.
+- Metallic response changes with the material's `metallicFactor` and the packed map's blue channel. Roughness uses the green channel.
+- Normal-map grooves alter directional highlights without changing the geometric silhouette.
+- Material occlusion affects indirect ambient response, not direct light or shadow casting.
+- Emissive stripes add scene-linear HDR radiance; they do not produce bloom or emissive global illumination.
+- Missing optional maps use neutral fallbacks. Older material versions remain loadable with defaults for newer fields.
+- OPAQUE, MASK, and BLEND are supported material alpha modes.
 
-The procedural cube includes authored normals and tangents. Its face-aligned UVs make tangent orientation and map-channel behavior easy to inspect. For importer-generated tangents, the CPU tests include mirrored UV islands and seam splitting.
+The procedural cube includes authored normals and tangents. Its face-aligned UVs make tangent orientation and map channels easy to inspect. Importer-generated tangents are covered by CPU tests for mirrored UV islands and seam splitting.
 
 ## Materials and limitations
 
-Material version 3 retains v1/v2 loading. Color textures use sRGB decoding; normal, occlusion, and packed metallic-roughness data use linear UNORM. Imported image textures receive a full CPU-generated mip chain with sRGB-aware color filtering. The current material path is opaque-only; alpha masking and blending are a separate upcoming stage. Material AO and SSAO combine conservatively using the lower visibility value to avoid over-darkening indirect light.
+Material versions 1 through 4 are readable; the current serializer writes version 4. Color textures use sRGB decoding, while normal, occlusion, and packed metallic/roughness maps use linear UNORM. Imported image textures receive a CPU-generated mip chain with sRGB-aware color filtering. Material AO and SSAO combine conservatively using the lower visibility value to avoid over-darkening indirect light.
 
-Only static glTF triangle primitives and supported image formats are imported. Transparent transmission, alpha-masked shadows, material graphs, and emissive global illumination are not implemented. Editor Scene View camera framing may differ from the authored game camera; use normal viewport focus/navigation if needed.
+Only static glTF triangle primitives and supported image formats are imported. The renderer does not implement physical transmission, refraction, order-independent transparency, material graphs, or emissive global illumination. Scene View camera framing may differ from the authored game camera; use the viewport's focus and navigation controls as needed.
 
 ## Asset generation and attribution
 
-The local procedural `.ppm` maps and flat-shaded glTF cube can be recreated with `GenerateAssets.ps1`; it refuses to overwrite existing files. HDRI source and license are recorded in `ASSET_CREDITS.md`. All assets are included locally, so opening the project does not require network access.
+The procedural `.ppm` maps and flat-shaded glTF cube can be recreated with `Assets/GenerateAssets.ps1`; the script refuses to overwrite existing files. HDRI source and license are recorded in [ASSET_CREDITS.md](ASSET_CREDITS.md). All assets are included locally, so the project opens offline.

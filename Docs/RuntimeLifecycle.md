@@ -1,7 +1,0 @@
-# Scene runtime lifecycle
-
-`SceneRuntime` coordinates one loaded scene and one project. Both objects must outlive the runtime, and the scene must not move while it is started. Startup creates an audio device/cache, starts physics and scene audio, then starts scripts with those services available to `OnCreate`. If any subsystem fails, already-started services are torn down.
-
-Each `Advance` runs script `OnUpdate` callbacks, advances Jolt by its configured fixed step and substep limit, then updates audio listener/source positions. Call it before preparing the scene renderer so physics-synchronized transforms are included in the frame snapshot. A runtime-level failure identifies the failing subsystem; script callback faults remain diagnostics and do not abort the remaining scene update.
-
-`Stop` releases scripts before physics/audio and keeps the scene/project alive through script `OnDestroy`. Scripts can apply force to an active dynamic body and control an entity's audio source; those services are non-owning and are valid only while the coordinated scene runtime runs. Script updates precede physics reconciliation and fixed-step simulation, so a newly added complete physics pair is available to scripts on the following update, and applied forces are consumed by the next physics step; audio positions are synchronized afterward. Changes to an already-active body's settings and script transform writes are not physics rebuild/teleport APIs; restart the runtime after changing body configuration.

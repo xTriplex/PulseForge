@@ -87,6 +87,16 @@ namespace PulseForge
 			m_FrameActive = false;
 		}
 
+		bool HasPlatformPresentationTargets() const noexcept override
+		{
+			return m_ExternalPlatformPresentationTargetCount != 0;
+		}
+
+		void SetExternalPlatformPresentationTargetCount(uint32_t Count) noexcept override
+		{
+			m_ExternalPlatformPresentationTargetCount = Count;
+		}
+
 		RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc&) override
 		{
 			return std::unexpected(RenderTargetError{
@@ -310,6 +320,7 @@ namespace PulseForge
 
 	private:
 		GLFWwindow* m_NativeWindow = nullptr;
+		uint32_t m_ExternalPlatformPresentationTargetCount = 0;
 		bool m_FrameActive = false;
 	};
 

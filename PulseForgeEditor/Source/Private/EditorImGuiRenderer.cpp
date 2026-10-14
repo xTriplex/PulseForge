@@ -249,7 +249,10 @@ namespace PulseForgeEditor
 			m_TextureBindings.erase(TextureID);
 	}
 
-	std::expected<void, std::string> EditorImGuiRenderer::EnsureBuffers(size_t VertexBytes, size_t IndexBytes)
+	std::expected<void, std::string> EditorImGuiRenderer::EnsureBuffers(
+		PresentationResources& Resources,
+		size_t VertexBytes,
+		size_t IndexBytes)
 	{
 		const auto Ensure = [this](
 			PulseForge::BufferHandle& Buffer,
@@ -287,31 +290,34 @@ namespace PulseForgeEditor
 		};
 
 		if (auto Result = Ensure(
-			m_VertexBuffer,
-			m_VertexBufferCapacity,
+			Resources.VertexBuffer,
+			Resources.VertexBufferCapacity,
 			static_cast<uint64_t>(VertexBytes),
 			PulseForge::BufferUsage::Vertex,
 			"ImGui dynamic vertices"); !Result)
 			return Result;
 
 		return Ensure(
-			m_IndexBuffer,
-			m_IndexBufferCapacity,
+			Resources.IndexBuffer,
+			Resources.IndexBufferCapacity,
 			static_cast<uint64_t>(IndexBytes),
 			PulseForge::BufferUsage::Index,
 			"ImGui dynamic indices");
 	}
 
-	std::expected<void, std::string> EditorImGuiRenderer::EnsureUnormCompositionTarget(uint32_t Width, uint32_t Height)
+	std::expected<void, std::string> EditorImGuiRenderer::EnsureUnormCompositionTarget(
+		PresentationResources& Resources,
+		uint32_t Width,
+		uint32_t Height)
 	{
 		if (!m_Runtime || !m_BindingLayout || !m_Sampler)
 			return std::unexpected("Editor UI presentation resources are not initialized");
 		if (Width == 0 || Height == 0)
 			return std::unexpected("Editor UI composition target dimensions must be nonzero");
 		if (IsEditorUiCompositionTargetReusable(
-			m_UnormCompositionTarget && m_UnormPresentationBindingSet,
-			m_UnormCompositionWidth,
-			m_UnormCompositionHeight,
+			Resources.UnormCompositionTarget && Resources.UnormPresentationBindingSet,
+			Resources.UnormCompositionWidth,
+			Resources.UnormCompositionHeight,
 			Width,
 			Height))
 			return {};
@@ -337,18 +343,19 @@ namespace PulseForgeEditor
 		if (!Binding)
 			return std::unexpected("Could not create editor UI presentation binding: " + Binding.error().Message);
 
-		m_UnormPresentationBindingSet = std::move(*Binding);
-		m_UnormCompositionTarget = std::move(*Target);
-		m_UnormCompositionWidth = Width;
-		m_UnormCompositionHeight = Height;
+		Resources.UnormPresentationBindingSet = std::move(*Binding);
+		Resources.UnormCompositionTarget = std::move(*Target);
+		Resources.UnormCompositionWidth = Width;
+		Resources.UnormCompositionHeight = Height;
 		return {};
 	}
 
-	std::expected<void, std::string> EditorImGuiRenderer::RenderUnormCompositionTarget()
+	std::expected<void, std::string> EditorImGuiRenderer::RenderUnormCompositionTarget(PresentationResources& Resources)
 	{
-		if (!m_Runtime || !m_UnormPresentationPipeline || !m_FullscreenVertexBuffer || !m_UnormPresentationBindingSet)
+		if (!m_Runtime || !m_UnormPresentationPipeline || !m_FullscreenVertexBuffer ||
+			!Resources.UnormPresentationBindingSet)
 			return std::unexpected("Editor UNORM presentation resources are unavailable");
-		const std::array<const PulseForge::BindingSet*, 1> Bindings = { m_UnormPresentationBindingSet.get() };
+		const std::array<const PulseForge::BindingSet*, 1> Bindings = { Resources.UnormPresentationBindingSet.get() };
 		PulseForge::DrawArguments Arguments;
 		Arguments.VertexCount = 3;
 		const PulseForge::GraphicsResult Draw = m_Runtime->Draw(
@@ -358,26 +365,36 @@ namespace PulseForgeEditor
 		return {};
 	}
 
+	EditorImGuiRenderer::PresentationResources& EditorImGuiRenderer::GetPresentationResources(uint64_t PresentationTargetID)
+	{
+		return m_PresentationResources.try_emplace(PresentationTargetID).first->second;
+	}
+
+	void EditorImGuiRenderer::RetirePresentationTarget(uint64_t PresentationTargetID) noexcept
+	{
+		if (PresentationTargetID != 0)
+			m_PresentationResources.erase(PresentationTargetID);
+	}
+
 	std::expected<void, std::string> EditorImGuiRenderer::RenderDrawData()
+	{
+		return RenderDrawData(ImGui::GetDrawData(), 0);
+	}
+
+	std::expected<void, std::string> EditorImGuiRenderer::RenderDrawData(
+		const ImDrawData* DrawData,
+		uint64_t PresentationTargetID)
 	{
 		if (!m_Initialized || !m_Runtime || !m_Pipeline)
 			return std::unexpected("Editor ImGui renderer is not initialized");
 
-		const ImDrawData* DrawData = ImGui::GetDrawData();
 		if (!DrawData || DrawData->DisplaySize.x <= 0.0f || DrawData->DisplaySize.y <= 0.0f)
 			return {};
+		PresentationResources& Resources = GetPresentationResources(PresentationTargetID);
 		const auto CompositionPath = SelectEditorUiCompositionPath(m_Runtime->GetOutputColorEncoding());
 		if (!CompositionPath)
 			return std::unexpected("The active renderer reported an unsupported editor UI output encoding");
 		const bool UseUnormComposition = *CompositionPath == EditorUiCompositionPath::SrgbIntermediateToUnormSwapchain;
-		if (!UseUnormComposition)
-		{
-			m_UnormPresentationBindingSet.reset();
-			m_UnormCompositionTarget.reset();
-			m_UnormCompositionWidth = 0;
-			m_UnormCompositionHeight = 0;
-		}
-
 		const glm::vec2 DisplaySize{ DrawData->DisplaySize.x, DrawData->DisplaySize.y };
 		const glm::vec2 DisplayPosition{ DrawData->DisplayPos.x, DrawData->DisplayPos.y };
 		const glm::vec2 FramebufferScale{ DrawData->FramebufferScale.x, DrawData->FramebufferScale.y };
@@ -484,17 +501,17 @@ namespace PulseForgeEditor
 		{
 			const size_t VertexBytes = m_Vertices.size() * sizeof(Vertex);
 			const size_t IndexBytes = m_Indices.size() * sizeof(uint32_t);
-			if (auto Result = EnsureBuffers(VertexBytes, IndexBytes); !Result)
+			if (auto Result = EnsureBuffers(Resources, VertexBytes, IndexBytes); !Result)
 				return Result;
 
 			const auto VertexUpload = m_Runtime->WriteBuffer(
-				*m_VertexBuffer,
+				*Resources.VertexBuffer,
 				0,
 				std::as_bytes(std::span(m_Vertices)));
 			if (!VertexUpload)
 				return std::unexpected("Could not upload editor vertices: " + VertexUpload.error().Message);
 			const auto IndexUpload = m_Runtime->WriteBuffer(
-				*m_IndexBuffer,
+				*Resources.IndexBuffer,
 				0,
 				std::as_bytes(std::span(m_Indices)));
 			if (!IndexUpload)
@@ -504,13 +521,13 @@ namespace PulseForgeEditor
 		const PulseForge::GraphicsPipeline* UiPipeline = m_Pipeline.get();
 		if (UseUnormComposition)
 		{
-			if (auto Result = EnsureUnormCompositionTarget(TargetWidth, TargetHeight); !Result)
+			if (auto Result = EnsureUnormCompositionTarget(Resources, TargetWidth, TargetHeight); !Result)
 				return Result;
 			const EditorColorValue Background = ConvertEditorColorForOutput(
 				GetEditorColorValue(EditorColorToken::Background), PulseForge::OutputColorEncoding::SrgbAttachment);
 			PulseForge::RenderTargetClearValue ClearValue;
 			ClearValue.Color = { Background.Red, Background.Green, Background.Blue, 1.0f };
-			const PulseForge::GraphicsResult Begin = m_Runtime->BeginRenderTarget(*m_UnormCompositionTarget, ClearValue);
+			const PulseForge::GraphicsResult Begin = m_Runtime->BeginRenderTarget(*Resources.UnormCompositionTarget, ClearValue);
 			if (!Begin)
 				return std::unexpected("Could not begin editor UI sRGB composition target: " + Begin.error().Message);
 			UiPipeline = m_SrgbIntermediatePipeline.get();
@@ -539,8 +556,8 @@ namespace PulseForgeEditor
 			Arguments.Scissor = Batch.Scissor;
 			const PulseForge::GraphicsResult Draw = m_Runtime->DrawIndexed(
 				*UiPipeline,
-				*m_VertexBuffer,
-				*m_IndexBuffer,
+				*Resources.VertexBuffer,
+				*Resources.IndexBuffer,
 				Arguments,
 				Bindings);
 			if (!Draw)
@@ -551,7 +568,7 @@ namespace PulseForgeEditor
 			const PulseForge::GraphicsResult End = m_Runtime->EndRenderTarget();
 			if (!End)
 				return std::unexpected("Could not end editor UI sRGB composition target: " + End.error().Message);
-			return RenderUnormCompositionTarget();
+			return RenderUnormCompositionTarget(Resources);
 		}
 
 		return {};
@@ -560,16 +577,11 @@ namespace PulseForgeEditor
 	void EditorImGuiRenderer::Shutdown() noexcept
 	{
 		m_TextureBindings.clear();
-		m_UnormPresentationBindingSet.reset();
-		m_UnormCompositionTarget.reset();
-		m_UnormCompositionWidth = 0;
-		m_UnormCompositionHeight = 0;
+		m_PresentationResources.clear();
 		m_UnormPresentationPipeline.reset();
 		m_SrgbIntermediatePipeline.reset();
 		m_Pipeline.reset();
 		m_FullscreenVertexBuffer.reset();
-		m_VertexBuffer.reset();
-		m_IndexBuffer.reset();
 		m_FontTexture.reset();
 		m_Sampler.reset();
 		m_BindingLayout.reset();
@@ -580,8 +592,6 @@ namespace PulseForgeEditor
 		m_Vertices.clear();
 		m_Indices.clear();
 		m_Batches.clear();
-		m_VertexBufferCapacity = 0;
-		m_IndexBufferCapacity = 0;
 		m_FontTextureID = 0;
 		m_NextTextureID = 1;
 		m_Runtime = nullptr;

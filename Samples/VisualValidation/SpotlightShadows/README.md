@@ -2,11 +2,11 @@
 
 ## Purpose
 
-A small lighting room for inspecting Phase D's real-time spotlight shadow maps in the Vulkan renderer. The startup scene has a broad floor and back wall, matte and metallic block casters, two differently colored shadow-casting spotlights, three additional spotlights for slot/overflow tests, a modest HDR environment, and an authored game camera.
+A small lighting room for inspecting real-time spotlight shadow maps in the Vulkan renderer. The startup scene has a broad floor and back wall, matte and metallic block casters, two differently colored shadow-casting spotlights, three additional spotlights for slot/overflow tests, a modest HDR environment, and an authored game camera.
 
 ## Requirements and opening
 
-Use a PulseForge build containing commit `6d167831b7c2aef3167fbfe852e04ffa1d5a760a` or later, with the Vulkan renderer and its normal deployed shader assets.
+Use a PulseForge build with Vulkan spotlight-shadow support and its deployed shader assets.
 
 1. Launch `PulseForgeEditor` from a logged-in Windows desktop session.
 2. Use **File → Open Project...** and choose `SpotlightShadows.pfproj` in this directory.
@@ -15,7 +15,7 @@ Use a PulseForge build containing commit `6d167831b7c2aef3167fbfe852e04ffa1d5a76
 
 The Scene Viewport uses the editor's transient viewport camera, not the authored primary camera. Frame the room with the existing viewport navigation if necessary. The primary camera is positioned for the standalone game's authored-camera path.
 
-The current standalone sample client looks for a file named `PulseForgeGame.pfproj` and a deployed `Shaders` directory in its working directory; it does not yet accept an arbitrary project path. The editor is the supported way to open this named demo directly. The project was separately smoke-tested through the game path using a disposable runtime copy with the expected filename and the build's deployed `Shaders` directory; the repository demo itself was not renamed or altered.
+The standalone sample client looks for a file named `PulseForgeGame.pfproj` and a deployed `Shaders` directory in its working directory; it does not accept an arbitrary project path. Use the editor to open this sample directly.
 
 ## Scene and checks
 
@@ -50,6 +50,6 @@ Cast Shadows is opt-in and the project explicitly enables it on A/B. PulseForge 
 - Shaders are the engine's deployed `Triangle.hlsl` and shadow shaders. Do not copy an older shader into the project; rebuild/deploy the engine from a compatible revision if shader behavior does not match.
 - This project contains no generated environment cache. The bundled HDR source can be processed offline on first use; subsequent use follows PulseForge's normal derived-cache behavior.
 
-## Validation status
+## Validation
 
-The project manifest, scene, UUID registry, managed references, material documents, mesh import, HDR asset, snapshot preparation, and actual GPU rendering should be checked with the documented workflow. The existing `--scene-spot-shadows` GPU test verifies shadow passes/resource behavior but does not read pixels. Automated frame submission is not visual acceptance; inspect the loaded viewport and game view interactively.
+The `--scene-spot-shadows` GPU test exercises production spotlight shadow passes, slot assignment, and resource reuse, but does not read rendered pixels. Use the inspection steps above to assess visual shadow quality in the editor; successful GPU submission alone does not establish the appearance of the shadows.

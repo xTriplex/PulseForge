@@ -14,6 +14,9 @@
 #include "Renderer/DepthCubemap.h"
 
 #include <memory>
+#include <expected>
+#include <string>
+#include <cstdint>
 
 namespace PulseForge
 {
@@ -28,6 +31,17 @@ namespace PulseForge
 		void Run();
 		// Stops the main loop after the current iteration.
 		void RequestClose() noexcept { m_Running = false; }
+		[[nodiscard]] std::expected<uint64_t, std::string> CreatePlatformPresentationTarget(void* NativeWindow);
+		[[nodiscard]] bool BeginPlatformPresentationTarget(uint64_t TargetID);
+		void EndPlatformPresentationTarget(uint64_t TargetID);
+		[[nodiscard]] bool DestroyPlatformPresentationTarget(uint64_t TargetID);
+		[[nodiscard]] bool HasPlatformPresentationTargets() const noexcept;
+		void SetExternalPlatformPresentationTargetCount(uint32_t Count) noexcept;
+#if defined(PF_DEBUG)
+		[[nodiscard]] bool InjectNextPlatformAcquireOutOfDateForTesting(uint64_t TargetID) noexcept;
+		[[nodiscard]] bool InjectNextPlatformImageAllocationFailureForTesting() noexcept;
+#endif
+		[[nodiscard]] bool IsMainFrameActive() const noexcept { return m_MainFrameActive; }
 		void OnEvent(Event& E);
 		Layer& PushLayer(std::unique_ptr<Layer> Layer);
 		Layer& PushOverlay(std::unique_ptr<Layer> Overlay);
@@ -90,6 +104,7 @@ namespace PulseForge
 		std::unique_ptr<Window> m_Window;
 		std::unique_ptr<RendererBackend> m_Renderer;
 		bool m_Running = true;
+		bool m_MainFrameActive = false;
 		LayerStack m_LayerStack;
 		Input m_Input;
 		RendererAPI m_RendererAPI;

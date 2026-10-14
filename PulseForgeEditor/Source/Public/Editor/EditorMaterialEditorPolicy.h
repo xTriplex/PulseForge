@@ -10,7 +10,7 @@ namespace PulseForgeEditor
 	{
 		None,
 		OpenScene,
-		OpenMaterialEditor
+		ShowMaterialDetails
 	};
 
 	[[nodiscard]] constexpr AssetBrowserOpenAction ResolveAssetBrowserOpenAction(
@@ -23,7 +23,7 @@ namespace PulseForgeEditor
 		if (Extension == ".scene")
 			return AssetBrowserOpenAction::OpenScene;
 		if (Extension == ".material")
-			return AssetBrowserOpenAction::OpenMaterialEditor;
+			return AssetBrowserOpenAction::ShowMaterialDetails;
 		return AssetBrowserOpenAction::None;
 	}
 

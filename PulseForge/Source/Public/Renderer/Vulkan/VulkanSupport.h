@@ -1,11 +1,41 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <optional>
 #include <span>
 
 namespace PulseForge::VulkanSupport
 {
+	inline constexpr std::size_t MaximumDeferredSwapchainGenerations = 4;
+	inline constexpr std::size_t MaximumOutOfDateRecoveryGenerations = 1;
+
+	enum class SwapchainFrameStartAction : uint8_t
+	{
+		Skip,
+		Recreate,
+		PresentCurrent
+	};
+
+	[[nodiscard]] SwapchainFrameStartAction ResolveSwapchainFrameStartAction(
+		bool HasCurrentGeneration,
+		bool RecreationRequested,
+		bool CanCreateGeneration,
+		bool CurrentGenerationUsable = true) noexcept;
+
+	[[nodiscard]] bool CanCreateSwapchainGeneration(
+		bool PresentationFencesEnabled,
+		bool HasCurrentGeneration,
+		std::size_t DeferredGenerationCount,
+		bool CurrentGenerationOutOfDate = false) noexcept;
+
+	[[nodiscard]] bool ShouldRetireDeferredSwapchains(
+		bool PresentationFencesEnabled,
+		bool FirstPresentationPending,
+		uint32_t FirstPresentationImageIndex,
+		uint32_t AcquiredImageIndex,
+		bool AcquireSemaphoreWaitSubmitted) noexcept;
+
 	struct RequiredDeviceFeatures
 	{
 		bool TimelineSemaphore = false;
