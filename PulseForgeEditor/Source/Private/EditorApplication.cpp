@@ -3184,9 +3184,11 @@ namespace
 							PF_ERROR("Document tab tear-off UI fixture has no visible main viewport.");
 							break;
 						}
-						m_DocumentHostTabTearOffTestDrop = ImVec2(
-							MainViewport->Pos.x + MainViewport->Size.x + 24.0f,
-							MainViewport->Pos.y + MainViewport->Size.y * 0.5f);
+						m_DocumentHostTabTearOffTestDrop = m_DocumentHostTabTearOffFromNativeHost
+							? ImVec2(m_DocumentHostTabTearOffTestStart.x + IO.MouseDragThreshold + 24.0f,
+								m_DocumentHostTabTearOffTestStart.y)
+							: ImVec2(MainViewport->Pos.x + MainViewport->Size.x + 24.0f,
+								MainViewport->Pos.y + MainViewport->Size.y * 0.5f);
 						const float DeltaX = m_DocumentHostTabTearOffTestDrop.x - m_DocumentHostTabTearOffTestStart.x;
 						const float DeltaY = m_DocumentHostTabTearOffTestDrop.y - m_DocumentHostTabTearOffTestStart.y;
 						if (DeltaX * DeltaX + DeltaY * DeltaY <= IO.MouseDragThreshold * IO.MouseDragThreshold)
@@ -3196,12 +3198,15 @@ namespace
 							break;
 						}
 						IO.AddMousePosEvent(m_DocumentHostTabTearOffTestStart.x, m_DocumentHostTabTearOffTestStart.y);
+						IO.AddMouseViewportEvent(m_DocumentHostTabTearOffTestTabViewportID);
 						IO.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
 						m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::PressQueued;
 					}
 					break;
 				case DocumentTabTearOffTestPhase::PressQueued:
 					IO.AddMousePosEvent(m_DocumentHostTabTearOffTestDrop.x, m_DocumentHostTabTearOffTestDrop.y);
+					if (m_DocumentHostTabTearOffFromNativeHost)
+						IO.AddMouseViewportEvent(0);
 					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::DragQueued;
 					break;
 				case DocumentTabTearOffTestPhase::DragQueued:
@@ -3221,11 +3226,25 @@ namespace
 						{
 							return Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level;
 						});
-					if (Session && Host && Host->Role == PulseForgeEditor::EditorDocumentHostRole::Native &&
-						Session->HostID != PulseForgeEditor::EditorDocumentManager::MainHostID && LevelRetained)
+					const std::string_view ExpectedPreviousHostID = m_DocumentHostTabTearOffFromNativeHost
+						? std::string_view(m_DocumentHostTabTearOffSourceHostID)
+						: PulseForgeEditor::EditorDocumentManager::MainHostID;
+					const bool EnteredDifferentNativeHost = Session && Host &&
+						Host->Role == PulseForgeEditor::EditorDocumentHostRole::Native &&
+						Session->HostID != ExpectedPreviousHostID;
+					const auto* PreviousNativeHost = m_DocumentHostTabTearOffFromNativeHost
+						? m_Documents.FindHost(m_DocumentHostTabTearOffSourceHostID) : nullptr;
+					const bool PreviousNativeGroupIntact = !m_DocumentHostTabTearOffFromNativeHost ||
+						(PreviousNativeHost && PreviousNativeHost->Role ==
+							PulseForgeEditor::EditorDocumentHostRole::Native &&
+						PreviousNativeHost->Documents.size() == 1 &&
+						PreviousNativeHost->Documents.front() == m_DocumentHostTabGroupTargetIdentity);
+					if (EnteredDifferentNativeHost && PreviousNativeGroupIntact && LevelRetained)
 					{
 						m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Complete;
-						if (m_DocumentHostTabRoundTripTearOffPending)
+						if (m_DocumentHostTabTearOffFromNativeHost)
+							PF_INFO("Document tab native-group tear-off UI fixture passed: the tab entered a new native host and the original group remained intact.");
+						else if (m_DocumentHostTabRoundTripTearOffPending)
 						{
 							m_DocumentHostTabRoundTripTearOffPending = false;
 							++m_DocumentHostTabRoundTripCount;
@@ -3261,15 +3280,21 @@ namespace
 								"Document tab tear-off UI fixture passed: the captured tab drag created a native host and kept "
 								"Level Editor in the main host.");
 						}
+						m_DocumentHostTabTearOffFromNativeHost = false;
+						m_DocumentHostTabTearOffSourceHostID.clear();
 					}
 					else
 					{
 						m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Failed;
-						if (m_DocumentHostTabRoundTripTearOffPending)
+						if (m_DocumentHostTabTearOffFromNativeHost)
+							PF_ERROR("Document tab native-group tear-off fixture failed: the tab did not enter a separate native host or the original group changed.");
+						else if (m_DocumentHostTabRoundTripTearOffPending)
 							PF_ERROR("Document tab native-window round-trip fixture failed: the reattached session did not return to a native host or Level Editor left the main host.");
 						else
 							PF_ERROR("Document tab tear-off UI fixture failed: the released tab did not enter a native host or Level Editor left the main host.");
 						m_DocumentHostTabRoundTripTearOffPending = false;
+						m_DocumentHostTabTearOffFromNativeHost = false;
+						m_DocumentHostTabTearOffSourceHostID.clear();
 					}
 					m_DocumentHostTabTearOffTest = false;
 					break;
@@ -3719,6 +3744,16 @@ namespace
 							"Document tab repeated-transfer UI fixture passed: the same session completed {} native/main "
 							"round trips and grouping operations.",
 							m_DocumentHostTabGroupCycleCount);
+					if (m_DocumentHostTabGroupCycleCount == DocumentTabRoundTripCycleCount)
+					{
+						m_DocumentHostTabTearOffFromNativeHost = true;
+						m_DocumentHostTabTearOffSourceHostID = TargetHost->ID;
+						m_DocumentHostTabTearOffTestFrameCount = 0;
+						m_DocumentHostTabTearOffTestTabCenterValid = false;
+						m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::WaitingForTab;
+						m_DocumentHostTabTearOffTest = true;
+						PF_INFO("Document tab native-group tear-off fixture is detaching the same session outside all editor windows.");
+					}
 					break;
 				}
 				case DocumentTabGroupTestPhase::Disabled:
@@ -6183,16 +6218,22 @@ namespace
 			const auto DropTarget = CurrentPosition
 				? FindDocumentTabDropTarget(MousePosition, IO.MouseHoveredViewport)
 				: std::nullopt;
+			const bool SourceIsMainHost = SourceHost &&
+				SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Main;
+			const bool SourceIsNativeHost = SourceHost &&
+				SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Native;
+			const bool CanCreateNativeHost = PulseForgeEditor::CanDetachDocumentTabToNativeHost(
+				SourceIsMainHost, SourceIsNativeHost, IO.MouseHoveredViewport == 0);
 			const PulseForgeEditor::DocumentTabReleaseAction Action =
 				PulseForgeEditor::ResolveDocumentTabReleaseAction(
 					true,
-				true,
-				TransferQueued,
-				DragDistanceSquared,
-				IO.MouseDragThreshold,
-				SourceHost && SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Main,
-				Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level,
-				DropTarget.has_value());
+					true,
+					TransferQueued,
+					DragDistanceSquared,
+					IO.MouseDragThreshold,
+					CanCreateNativeHost,
+					Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level,
+					DropTarget.has_value());
 			if (Action == PulseForgeEditor::DocumentTabReleaseAction::TransferToStrip && DropTarget)
 			{
 				QueueDocumentTransfer(Identity, DropTarget->first, DropTarget->second);
@@ -6327,8 +6368,8 @@ namespace
 				const bool HasCloseButton = Session->Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level;
 				constexpr float TabHeight = 25.0f;
 				constexpr float LeftPadding = 10.0f;
-				constexpr float LabelToCloseGap = 2.0f;
-				constexpr float CloseRegionWidth = 28.0f;
+				constexpr float LabelToCloseGap = 1.0f;
+				constexpr float CloseRegionWidth = 24.0f;
 				constexpr float RightPadding = 4.0f;
 				const ImVec2 LabelSize = ImGui::CalcTextSize(Label.c_str());
 				const float TabWidth = LeftPadding + LabelSize.x +
@@ -6343,12 +6384,12 @@ namespace
 				m_DocumentTabDropTargets.push_back(DocumentTabDropTarget{
 					std::string(HostID), TabViewportID, TabMinimum, TabMaximum, Index, Index + 1 });
 				if (m_DocumentHostTabTearOffTest &&
-					HostID == PulseForgeEditor::EditorDocumentManager::MainHostID &&
 					Session->Identity == m_DocumentHostTabTearOffTestIdentity)
 				{
 					m_DocumentHostTabTearOffTestTabCenter = ImVec2(
 						(TabMinimum.x + TabMaximum.x) * 0.5f,
 						(TabMinimum.y + TabMaximum.y) * 0.5f);
+					m_DocumentHostTabTearOffTestTabViewportID = TabViewportID;
 					m_DocumentHostTabTearOffTestTabCenterValid = true;
 				}
 				if (m_DocumentHostTabReattachTest &&
@@ -6448,18 +6489,15 @@ namespace
 				{
 					const ImVec2 CloseCenter(CloseRegionMinimumX + CloseRegionWidth * 0.5f,
 						TabMinimum.y + TabHeight * 0.5f);
-					if (CloseHovered)
-						DrawList->AddRectFilled(CloseButtonMinimum, CloseButtonMaximum,
-							ImGui::GetColorU32(ImGuiCol_ButtonHovered), 4.0f);
-					constexpr float CloseHalfExtent = 10.0f;
+					constexpr float CloseHalfExtent = 7.0f;
 					const ImU32 CloseColor = ImGui::GetColorU32(
 						CloseHovered ? ImGuiCol_Text : ImGuiCol_TextDisabled);
 					DrawList->AddLine(
 						ImVec2(CloseCenter.x - CloseHalfExtent, CloseCenter.y - CloseHalfExtent),
-						ImVec2(CloseCenter.x + CloseHalfExtent, CloseCenter.y + CloseHalfExtent), CloseColor, 2.25f);
+						ImVec2(CloseCenter.x + CloseHalfExtent, CloseCenter.y + CloseHalfExtent), CloseColor, 2.0f);
 					DrawList->AddLine(
 						ImVec2(CloseCenter.x + CloseHalfExtent, CloseCenter.y - CloseHalfExtent),
-						ImVec2(CloseCenter.x - CloseHalfExtent, CloseCenter.y + CloseHalfExtent), CloseColor, 2.25f);
+						ImVec2(CloseCenter.x - CloseHalfExtent, CloseCenter.y + CloseHalfExtent), CloseColor, 2.0f);
 					if (CloseHovered)
 						ImGui::SetTooltip("Close %s", Session->DisplayName.c_str());
 				}
@@ -12033,6 +12071,7 @@ namespace
 		bool m_DocumentHostTestFixture = false;
 		bool m_DocumentHostResetLayoutTest = false;
 		bool m_DocumentHostTabTearOffTest = false;
+		bool m_DocumentHostTabTearOffFromNativeHost = false;
 		bool m_DocumentHostTabReattachTest = false;
 		size_t m_DocumentHostTabTearOffTestFrameCount = 0;
 		bool m_DocumentHostTabRoundTripTearOffPending = false;
@@ -12053,6 +12092,8 @@ namespace
 		ImVec2 m_DocumentHostTabTearOffTestTabCenter{ 0.0f, 0.0f };
 		ImVec2 m_DocumentHostTabTearOffTestStart{ 0.0f, 0.0f };
 		ImVec2 m_DocumentHostTabTearOffTestDrop{ 0.0f, 0.0f };
+		ImGuiID m_DocumentHostTabTearOffTestTabViewportID = 0;
+		std::string m_DocumentHostTabTearOffSourceHostID;
 		bool m_DocumentHostTabTearOffTestTabCenterValid = false;
 		DocumentTabReattachTestPhase m_DocumentHostTabReattachTestPhase =
 			DocumentTabReattachTestPhase::Disabled;

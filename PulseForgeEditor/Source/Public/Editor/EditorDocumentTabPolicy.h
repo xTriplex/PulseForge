@@ -71,13 +71,21 @@ namespace PulseForgeEditor
 		return TabHovered && !CloseButtonHovered && LeftButtonPressed;
 	}
 
+	[[nodiscard]] constexpr bool CanDetachDocumentTabToNativeHost(
+		bool SourceIsMainHost,
+		bool SourceIsNativeHost,
+		bool PointerOutsideAllEditorWindows) noexcept
+	{
+		return (SourceIsMainHost || SourceIsNativeHost) && PointerOutsideAllEditorWindows;
+	}
+
 	[[nodiscard]] constexpr DocumentTabReleaseAction ResolveDocumentTabReleaseAction(
 		bool MouseReleased,
 		bool HasActiveTabDrag,
 		bool TransferQueued,
 		float DragDistanceSquared,
 		float DragThreshold,
-		bool SourceIsMainHost,
+		bool CanCreateNativeHost,
 		bool IsAssetDocument,
 		bool IsOverRegisteredDocumentStrip) noexcept
 	{
@@ -88,7 +96,7 @@ namespace PulseForgeEditor
 			return DocumentTabReleaseAction::None;
 		if (IsOverRegisteredDocumentStrip)
 			return DocumentTabReleaseAction::TransferToStrip;
-		return SourceIsMainHost
+		return CanCreateNativeHost
 			? DocumentTabReleaseAction::CreateNativeHost
 			: DocumentTabReleaseAction::None;
 	}
