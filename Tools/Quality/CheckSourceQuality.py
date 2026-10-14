@@ -148,6 +148,17 @@ def check_dependencies(cmake: str, target: str, allowed: list[str]) -> list[str]
     return issues
 
 
+def check_tests_avoid_aggregate_engine(cmake: str, aggregate: str, test_targets: list[str]) -> list[str]:
+    issues = []
+    for target in test_targets:
+        dependencies = parse_target_dependencies(cmake, target)
+        if dependencies is None:
+            issues.append(f"CMake has no target_link_libraries call for owner-scoped test target {target}")
+        elif aggregate in dependencies:
+            issues.append(f"Owner-scoped test target {target} must link implementation owners, not {aggregate}")
+    return issues
+
+
 def check_includes(source_name: str, content: str, forbidden: list[str]) -> list[str]:
     lowered = [(name, name.lower()) for name in forbidden]
     issues = []
@@ -224,6 +235,8 @@ def run(root: Path, rules: dict, include_git_checks: bool = True) -> list[str]:
     cmake = cmake_path.read_text(encoding="utf-8")
     issues.extend(check_target_graph(cmake))
     issues.extend(check_source_ownership(root, cmake))
+    issues.extend(check_tests_avoid_aggregate_engine(
+        cmake, rules["aggregate_engine_target"], rules["owner_scoped_test_targets"]))
     for key in ("editor_core_target", "editor_ui_target"):
         target = rules[key]
         issues.extend(check_dependencies(cmake, target, rules[key.replace("target", "allowed_dependencies")]))

@@ -65,6 +65,15 @@ target_link_libraries(PulseForgeCore PRIVATE PulseForgeEditorUI)
 """
         self.assertTrue(source_quality.check_target_graph(cmake))
 
+    def test_owner_scoped_tests_cannot_link_the_engine_aggregate(self):
+        cmake = """
+add_library(PulseForge STATIC Engine.cpp)
+add_executable(PulseForgeTests Tests.cpp)
+target_link_libraries(PulseForgeTests PRIVATE PulseForge)
+"""
+        self.assertTrue(source_quality.check_tests_avoid_aggregate_engine(
+            cmake, "PulseForge", ["PulseForgeTests"]))
+
     def test_first_party_implementation_must_have_one_owner(self):
         import tempfile
 

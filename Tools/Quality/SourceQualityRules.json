@@ -40,6 +40,12 @@
     "shell32",
     "ole32"
   ],
+  "aggregate_engine_target": "PulseForge",
+  "owner_scoped_test_targets": [
+    "PulseForgeTests",
+    "PulseForgeEditorTests",
+    "PulseForgeBufferUpdateTests"
+  ],
   "editor_core_forbidden_includes": [
     "Core/PulseForgePCH.h",
     "Core/Application.h",
