@@ -949,7 +949,15 @@ if(BUILD_TESTING)
 			set(CheckSource "${CMAKE_CURRENT_BINARY_DIR}/PublicHeaderChecks/${Target}/${HeaderID}.cpp")
 			get_filename_component(CheckDirectory "${CheckSource}" DIRECTORY)
 			file(MAKE_DIRECTORY "${CheckDirectory}")
-			file(WRITE "${CheckSource}" "#include \"${IncludePath}\"\n")
+			set(CheckContent "#include \"${IncludePath}\"\n")
+			if(EXISTS "${CheckSource}")
+				file(READ "${CheckSource}" ExistingCheckContent)
+				if(NOT "${ExistingCheckContent}" STREQUAL "${CheckContent}")
+					file(WRITE "${CheckSource}" "${CheckContent}")
+				endif()
+			else()
+				file(WRITE "${CheckSource}" "${CheckContent}")
+			endif()
 			list(APPEND CheckSources "${CheckSource}")
 		endforeach()
 		add_library(${Target} OBJECT ${CheckSources})
@@ -1028,6 +1036,10 @@ if(BUILD_TESTING)
 		Tests/EditorViewportTests.cpp
 		Tests/EditorStateTests.cpp
 		Tests/DocumentsTests.cpp
+		Tests/EditorMaterialProjectTests.cpp
+		Tests/EditorProjectLoadingTests.cpp
+		Tests/EditorAssetReferenceTests.cpp
+		Tests/ScriptRuntimeTests.cpp
 		Tests/ProjectRuntimeTests.cpp
 		Tests/EditorHistoryTests.cpp
 	)
