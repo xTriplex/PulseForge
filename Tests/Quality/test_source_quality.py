@@ -57,6 +57,20 @@ target_link_libraries(PulseForgeScene PUBLIC PulseForgeCore)
 """
         self.assertTrue(source_quality.check_target_graph(cmake))
 
+    def test_first_party_targets_receive_configuration_scoped_options(self):
+        cmake = """
+add_library(PulseForgeScene STATIC PulseForge/Source/Private/Scene.cpp)
+add_executable(PulseForgeTests Tests/PulseForgeTests.cpp)
+foreach(Target PulseForgeScene PulseForgeTests)
+    if(TARGET ${Target})
+        target_compile_options(${Target} PRIVATE /EHsc)
+    endif()
+endforeach()
+"""
+        self.assertEqual(source_quality.check_configuration_target_coverage(cmake), [])
+        incomplete = cmake.replace(" PulseForgeTests)", ")")
+        self.assertTrue(source_quality.check_configuration_target_coverage(incomplete))
+
     def test_engine_target_cannot_depend_on_editor(self):
         cmake = """
 add_library(PulseForgeCore STATIC Core.cpp)

@@ -51,6 +51,24 @@ def parse_first_party_targets(cmake: str) -> set[str]:
     }
 
 
+def check_configuration_target_coverage(cmake: str) -> list[str]:
+    match = re.search(r"\bforeach\s*\(\s*Target\b(.*?)\)", cmake, re.DOTALL)
+    if match is None:
+        return ["CMake has no target-scoped configuration options foreach(Target ...) block"]
+    configured = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", match.group(1)))
+    first_party_source = re.compile(
+        r"(?:PulseForge|PulseForgeEditor|PulseForgeGame)/Source/[A-Za-z0-9_./-]+\.(?:c|cc|cpp|cxx)|"
+        r"Tests/[A-Za-z0-9_./-]+\.(?:c|cc|cpp|cxx)")
+    first_party_targets = {
+        call.group(2) for call in TARGET_CALL_RE.finditer(cmake)
+        if call.group(1) in {"add_library", "add_executable"} and first_party_source.search(call.group(3))
+    }
+    missing = sorted(first_party_targets - configured)
+    if missing:
+        return ["First-party targets are missing from the configuration-options loop: " + ", ".join(missing)]
+    return []
+
+
 def check_target_graph(cmake: str) -> list[str]:
     targets = parse_first_party_targets(cmake)
     graph = {target: set() for target in targets}
@@ -233,6 +251,7 @@ def run(root: Path, rules: dict, include_git_checks: bool = True) -> list[str]:
 
     cmake_path = root / "CMakeLists.txt"
     cmake = cmake_path.read_text(encoding="utf-8")
+    issues.extend(check_configuration_target_coverage(cmake))
     issues.extend(check_target_graph(cmake))
     issues.extend(check_source_ownership(root, cmake))
     issues.extend(check_tests_avoid_aggregate_engine(

@@ -1121,11 +1121,13 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	set_property(TARGET PulseForgeGpuValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGpuValidation>")
 endif()
 
-foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeRenderMath PulseForgeAssetCatalog PulseForgeAudio
-		PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeScripting PulseForgeRuntime PulseForgeRenderer
+foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath
+		PulseForgeAssetCatalog PulseForgeAudio PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics
+		PulseForgeScripting PulseForgeRuntime PulseForgeRenderer
 		PulseForgeApplication PulseForgeSceneRenderer
 		PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI PulseForgeRendererTests PulseForgeRenderMathTests
-		PulseForgeTests PulseForgeEditorTests PulseForgeBufferUpdateTests PulseForgeGpuValidation
+		PulseForgeTests PulseForgeAssetImportTests PulseForgeAudioRuntimeTests PulseForgeEditorTests
+		PulseForgeBufferUpdateTests PulseForgeGpuValidation
 		PulseForgeEnginePublicHeaders PulseForgeEditorPublicHeaders PulseForgeGamePublicHeaders)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE
