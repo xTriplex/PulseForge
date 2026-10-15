@@ -4,6 +4,7 @@
 #include "Editor/EditorHierarchyPanelPolicy.h"
 #include "Editor/EditorHierarchyRowPolicy.h"
 #include "Editor/EditorSceneWorkspaceState.h"
+#include "Editor/EditorSceneVisibilityCommands.h"
 #include "Editor/EditorStyle.h"
 
 #include <imgui.h>
@@ -45,23 +46,6 @@ namespace PulseForgeEditor
 				: std::string{};
 		}
 
-		bool IsEntityEffectivelyVisible(
-			const PulseForge::Entity& Entity,
-			const EditorVisibility& Visibility)
-		{
-			std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> Visited;
-			PulseForge::Entity Current = Entity;
-			while (Current)
-			{
-				if (!Visited.insert(Current.GetUUID()).second || !Visibility.IsLocallyVisible(Current.GetUUID()))
-					return false;
-				const auto Parent = Current.GetParent();
-				if (!Parent || !Parent->has_value())
-					return Parent.has_value();
-				Current = **Parent;
-			}
-			return false;
-		}
 	}
 
 	EditorIcon GetEditorEntityIcon(const PulseForge::Entity& Entity)
@@ -225,7 +209,7 @@ namespace PulseForgeEditor
 
 		if (VisibleEntities && Children && !Children->empty())
 			ImGui::SetNextItemOpen(true, ImGuiCond_Always);
-		const bool IsEffectivelyVisible = IsEntityEffectivelyVisible(Entity, Workspace.Visibility());
+		const bool IsEffectivelyVisible = EditorSceneVisibilityCommands::IsEntityEffectivelyVisible(Entity, Workspace.Visibility());
 		ImGui::PushStyleVar(ImGuiStyleVar_Alpha, IsEffectivelyVisible ? 1.0f : 0.48f);
 		const float RowStartX = ImGui::GetCursorPosX();
 		const float ContentRightX = ImGui::GetWindowContentRegionMax().x;

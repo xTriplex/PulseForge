@@ -2,6 +2,7 @@
 #include "EditorConsoleHistory.h"
 #include "Editor/EditorHierarchyPanelPolicy.h"
 #include "Editor/EditorEntityClipboard.h"
+#include "Editor/EditorSceneVisibilityCommands.h"
 #include "Editor/EditorStatusPanel.h"
 #include "EditorMaterialDraftStore.h"
 
@@ -9,6 +10,36 @@
 
 namespace
 {
+	class TestEditorSceneVisibilityActions final : public PulseForgeEditor::EditorSceneVisibilityActions
+	{
+	public:
+		[[nodiscard]] std::expected<void, std::string> RunVisibilitySceneEdit(
+			std::string Description,
+			std::function<std::expected<void, PulseForge::SceneError>()> Operation) override
+		{
+			++EditCount;
+			EditDescriptions.push_back(std::move(Description));
+			if (FailNextEdit)
+			{
+				FailNextEdit = false;
+				return std::unexpected("injected visibility edit failure");
+			}
+			auto Result = Operation();
+			if (!Result)
+				return std::unexpected(Result.error().Message);
+			return {};
+		}
+
+		void ReportVisibilityError(std::string Message) override { Errors.push_back(std::move(Message)); }
+		void SetVisibilityStatus(std::string Message) override { Statuses.push_back(std::move(Message)); }
+
+		size_t EditCount = 0;
+		bool FailNextEdit = false;
+		std::vector<std::string> EditDescriptions;
+		std::vector<std::string> Errors;
+		std::vector<std::string> Statuses;
+	};
+
 	void TestEditorConsoleHistory(TestRunner& Tests)
 	{
 		PulseForgeEditor::EditorConsoleHistory History;
@@ -241,6 +272,64 @@ namespace
 		Status.SetError("Scene save failed.");
 		PF_CHECK(Tests, Status.Message() == "Scene save failed.");
 		PF_CHECK(Tests, Status.Severity() == EditorStatusSeverity::Error);
+	}
+
+	void TestEditorSceneVisibilityCommands(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		Scene SceneValue;
+		auto Root = SceneValue.CreateEntity("Root");
+		auto Child = SceneValue.CreateEntity("Child");
+		auto Grandchild = SceneValue.CreateEntity("Grandchild");
+		auto Separate = SceneValue.CreateEntity("Separate");
+		PF_CHECK(Tests, Root && Child && Grandchild && Separate);
+		if (!Root || !Child || !Grandchild || !Separate)
+			return;
+		PF_CHECK(Tests, Child->SetParent(*Root));
+		PF_CHECK(Tests, Grandchild->SetParent(*Child));
+
+		EditorSceneWorkspaceState Workspace;
+		Workspace.Selection().SelectSingle(Child->GetUUID());
+		EditorSceneVisibilityCommands Commands;
+		TestEditorSceneVisibilityActions Actions;
+		Commands.HideSelectedEntities(&SceneValue, Workspace, false, Actions);
+		PF_CHECK(Tests, !Workspace.Visibility().IsLocallyVisible(Child->GetUUID()));
+		PF_CHECK(Tests, Actions.EditCount == 1 && Actions.EditDescriptions.back() == "Hide Selected");
+		PF_CHECK(Tests, Actions.Statuses.size() == 1);
+
+		const auto Hidden = EditorSceneVisibilityCommands::GetEffectivelyHiddenEntities(
+			&SceneValue, Workspace.Visibility());
+		PF_CHECK(Tests, Hidden.size() == 2);
+		PF_CHECK(Tests, std::find(Hidden.begin(), Hidden.end(), Child->GetUUID()) != Hidden.end());
+		PF_CHECK(Tests, std::find(Hidden.begin(), Hidden.end(), Grandchild->GetUUID()) != Hidden.end());
+
+		Commands.ToggleEntityVisibility(&SceneValue, Workspace, Child->GetUUID(), false, Actions);
+		PF_CHECK(Tests, Workspace.Visibility().IsLocallyVisible(Child->GetUUID()));
+		PF_CHECK(Tests, Actions.EditCount == 2 && Actions.EditDescriptions.back() == "Show Entity");
+
+		Commands.IsolateSelectedEntities(&SceneValue, Workspace, false, Actions);
+		PF_CHECK(Tests, Workspace.Visibility().IsLocallyVisible(Root->GetUUID()));
+		PF_CHECK(Tests, Workspace.Visibility().IsLocallyVisible(Child->GetUUID()));
+		PF_CHECK(Tests, Workspace.Visibility().IsLocallyVisible(Grandchild->GetUUID()));
+		PF_CHECK(Tests, !Workspace.Visibility().IsLocallyVisible(Separate->GetUUID()));
+		PF_CHECK(Tests, Workspace.Visibility().GetIsolationBaseline().has_value());
+
+		Commands.RestoreIsolatedVisibility(&SceneValue, Workspace, false, Actions);
+		PF_CHECK(Tests, Workspace.Visibility().GetHiddenEntities().empty());
+		PF_CHECK(Tests, !Workspace.Visibility().GetIsolationBaseline());
+
+		Actions.FailNextEdit = true;
+		Commands.HideSelectedEntities(&SceneValue, Workspace, false, Actions);
+		PF_CHECK(Tests, Workspace.Visibility().IsLocallyVisible(Child->GetUUID()));
+		PF_CHECK(Tests, Actions.Errors.size() == 1 &&
+			Actions.Errors.front().find("injected visibility edit failure") != std::string::npos);
+
+		const size_t EditsBeforeRuntime = Actions.EditCount;
+		Commands.HideSelectedEntities(&SceneValue, Workspace, true, Actions);
+		Commands.ToggleEntityVisibility(&SceneValue, Workspace, Child->GetUUID(), true, Actions);
+		PF_CHECK(Tests, Actions.EditCount == EditsBeforeRuntime);
+		PF_CHECK(Tests, EditorSceneVisibilityCommands::GetEffectivelyHiddenEntities(nullptr, Workspace.Visibility()).empty());
 	}
 
 	void TestEditorSceneHierarchyOperations(TestRunner& Tests)
@@ -542,6 +631,7 @@ void RunEditorStateTests(TestRunner& Tests)
 	TestEditorContentBrowserState(Tests);
 	TestEditorEntityClipboard(Tests);
 	TestEditorStatusPanel(Tests);
+	TestEditorSceneVisibilityCommands(Tests);
 	TestEditorSceneHierarchyOperations(Tests);
 	TestEditorHierarchySearchPolicy(Tests);
 	TestEditorAssetWorkflowState(Tests);

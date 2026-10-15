@@ -437,6 +437,7 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 		PulseForgeEditor/Source/Private/EditorSceneWorkspaceState.cpp
 		PulseForgeEditor/Source/Private/EditorSceneHistoryState.cpp
 		PulseForgeEditor/Source/Private/EditorSceneEditController.cpp
+		PulseForgeEditor/Source/Private/EditorSceneVisibilityCommands.cpp
 		PulseForgeEditor/Source/Private/EditorSceneHierarchyOperations.cpp
 		PulseForgeEditor/Source/Private/EditorViewportToolState.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentManager.cpp
