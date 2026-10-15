@@ -40,6 +40,7 @@
   },
   "editor_core_target": "PulseForgeEditorCore",
   "editor_core_allowed_dependencies": [
+    "PulseForgeAssetImporters",
     "PulseForgeAssetServices",
     "PulseForgeScene",
     "PulseForgeSceneSerialization"
@@ -48,6 +49,7 @@
   "editor_ui_allowed_dependencies": [
     "PulseForgeRenderer",
     "PulseForgeApplication",
+    "PulseForgeAssetImporters",
     "PulseForgeAssetServices",
     "PulseForgeEditorCore",
     "PulseForgeImGui",
