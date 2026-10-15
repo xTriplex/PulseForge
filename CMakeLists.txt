@@ -462,6 +462,7 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 		PulseForgeEditor/Source/Private/EditorSceneHierarchyOperations.cpp
 		PulseForgeEditor/Source/Private/EditorViewportToolState.cpp
 		PulseForgeEditor/Source/Private/ViewportGizmoGeometry.cpp
+		PulseForgeEditor/Source/Private/EditorViewportGizmoInteraction.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentManager.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentWorkspace.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentWorkspaceStore.cpp
@@ -1338,6 +1339,7 @@ if(BUILD_TESTING)
 		Tests/EditorSceneEntityCommandTests.cpp
 		Tests/EditorSceneViewportInteractionTests.cpp
 		Tests/EditorViewportGizmoGeometryTests.cpp
+		Tests/EditorViewportGizmoInteractionTests.cpp
 	)
 	target_include_directories(PulseForgeEditorCoreTests PRIVATE Tests PulseForgeEditor/Source/Private)
 	target_compile_definitions(PulseForgeEditorCoreTests PRIVATE PF_PLATFORM_WINDOWS)

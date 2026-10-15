@@ -10,6 +10,7 @@ int main()
 	RunEditorSceneEntityCommandTests(Tests);
 	RunEditorSceneViewportInteractionTests(Tests);
 	RunEditorViewportGizmoGeometryTests(Tests);
+	RunEditorViewportGizmoInteractionTests(Tests);
 	PulseForgeEditor::EditorConsoleHistory Console;
 	std::vector<PulseForgeEditor::EditorConsoleMessage> Messages;
 	uint64_t Revision = 0;

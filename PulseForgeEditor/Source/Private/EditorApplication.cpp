@@ -49,6 +49,7 @@
 #include "EditorViewportCamera.h"
 #include "EditorViewportSceneRenderView.h"
 #include "Editor/EditorViewportToolbar.h"
+#include "Editor/EditorViewportGizmoInteraction.h"
 #include "Editor/EditorMaterialDraftController.h"
 #include "Editor/EditorContentBrowserPolicy.h"
 #include "Editor/EditorContentBrowserState.h"
@@ -84,10 +85,6 @@
 
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
-#include <glm/gtc/constants.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#define GLM_ENABLE_EXPERIMENTAL
-#include <glm/gtx/matrix_decompose.hpp>
 #include <nfd.h>
 #include <nfd_glfw3.h>
 #include <imgui.h>
@@ -98,8 +95,6 @@
 #ifdef PF_EDITOR_RENDERER_OPENGL
 #include <backends/imgui_impl_opengl3.h>
 #endif
-#include <glm/gtc/quaternion.hpp>
-
 #include <algorithm>
 #include <array>
 #include <fstream>
@@ -523,33 +518,6 @@ namespace
 			Orbit,
 			Pan,
 			Dolly
-		};
-
-		struct GizmoEntityStart
-		{
-			PulseForge::UUID Identifier;
-			PulseForge::TransformComponent LocalTransform;
-			glm::mat4 WorldTransform{ 1.0f };
-			glm::mat4 ParentWorldTransform{ 1.0f };
-		};
-
-		struct GizmoDrag
-		{
-			PulseForge::UUID Entity;
-			const PulseForge::Scene* SceneIdentity = nullptr;
-			PulseForge::TransformComponent InitialTransform;
-			std::vector<GizmoEntityStart> Targets;
-			std::vector<PulseForge::UUID> SourceRoots;
-			PulseForgeEditor::TransformGizmoOperation Operation;
-			uint32_t Axis = 0;
-			glm::vec3 PivotWorld{ 0.0f };
-			glm::vec3 WorldAxis{ 0.0f };
-			glm::vec3 PlaneNormal{ 0.0f };
-			glm::vec3 StartPoint{ 0.0f };
-			glm::vec2 StartMouse{ 0.0f };
-			float WorldUnitsPerLocalUnit = 0.0f;
-			bool DuplicateOnDrag = false;
-			bool HasDuplicated = false;
 		};
 
 	public:
@@ -1346,7 +1314,7 @@ namespace
 				return std::unexpected("Scene history is available only for the authored scene in Edit mode");
 			auto Restored = m_SceneEditController.Restore(State, *m_Scene, m_SceneWorkspace);
 			if (!Restored) return std::unexpected(Restored.error());
-			m_GizmoDrag.reset();
+			m_ViewportGizmoInteraction.DiscardActiveState();
 			m_SceneEditController.InspectorHistoryItem() = 0;
 			UpdateSceneDirty();
 			return {};
@@ -1525,7 +1493,7 @@ namespace
 					(!UnsupportedDocumentFocused && m_Scene != nullptr),
 				.RuntimeActive = !RegisteredDocumentFocused && !MaterialDocumentFocused && m_SceneRuntime != nullptr,
 				.CameraNavigationActive = !RegisteredDocumentFocused && !MaterialDocumentFocused && m_EditorCameraNavigationActive,
-				.GizmoInteractionActive = !RegisteredDocumentFocused && !MaterialDocumentFocused && m_GizmoDrag.has_value(),
+				.GizmoInteractionActive = !RegisteredDocumentFocused && !MaterialDocumentFocused && m_ViewportGizmoInteraction.IsActive(),
 				.TextInputActive = IO.WantTextInput,
 				.ImGuiItemActive = ImGui::IsAnyItemActive(),
 				.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup),
@@ -1674,7 +1642,7 @@ namespace
 				.SceneAvailable = CommandTargetAvailable,
 				.RuntimeActive = m_SceneRuntime != nullptr,
 				.CameraNavigationActive = m_EditorCameraNavigationActive,
-				.GizmoInteractionActive = m_GizmoDrag.has_value(),
+				.GizmoInteractionActive = m_ViewportGizmoInteraction.IsActive(),
 				.TextInputActive = IO.WantTextInput,
 				.ImGuiItemActive = ImGui::IsAnyItemActive(),
 				.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup),
@@ -2599,7 +2567,7 @@ namespace
 			{
 				return !m_EditorCameraNavigationActive && !m_ViewportKeyboardFocused &&
 					!m_ViewportMouseCapture.OwnsMouse() && m_ViewportCameraGesture == ViewportCameraGesture::None &&
-					!m_GizmoDrag.has_value();
+					!m_ViewportGizmoInteraction.IsActive();
 			};
 			const auto MainLayoutRetained = [this]
 			{
@@ -6457,14 +6425,14 @@ namespace
 
 			const glm::vec2 Mouse{ IO.MousePos.x, IO.MousePos.y };
 			if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) &&
-				(m_ViewportCameraGesture != ViewportCameraGesture::None || m_GizmoDrag.has_value()))
+				(m_ViewportCameraGesture != ViewportCameraGesture::None || m_ViewportGizmoInteraction.IsActive()))
 			{
 				m_ViewportCameraGesture = ViewportCameraGesture::None;
-				if (m_GizmoDrag)
+				if (m_ViewportGizmoInteraction.IsActive())
 					CancelGizmoInteraction();
 				return;
 			}
-			if (m_GizmoDrag)
+			if (m_ViewportGizmoInteraction.IsActive())
 			{
 				UpdateGizmoDrag(Mouse);
 				if (SelectedEntity())
@@ -6473,7 +6441,7 @@ namespace
 						if (const auto Geometry = BuildViewportGizmoGeometry(*Selected)) DrawViewportGizmo(*Geometry, std::nullopt);
 				}
 				if (PulseForgeEditor::GetViewportGizmoPointerOutcome({
-					m_GizmoDrag.has_value(),
+					m_ViewportGizmoInteraction.IsActive(),
 					IO.MouseDown[ImGuiMouseButton_Left],
 					IO.MouseReleased[ImGuiMouseButton_Left]
 				}, false) == PulseForgeEditor::ViewportGizmoPointerOutcome::Complete)
@@ -6637,337 +6605,63 @@ namespace
 			DrawList->PopClipRect();
 		}
 
-		[[nodiscard]] std::optional<std::vector<GizmoEntityStart>> CaptureGizmoTargets(
-			const std::vector<PulseForge::UUID>& Identifiers) const
-		{
-			if (!m_Scene || Identifiers.empty())
-				return std::nullopt;
-			std::vector<GizmoEntityStart> Targets;
-			Targets.reserve(Identifiers.size());
-			for (const PulseForge::UUID& Identifier : Identifiers)
-			{
-				const auto Entity = m_Scene->FindEntity(Identifier);
-				if (!Entity)
-					return std::nullopt;
-				const auto Transform = Entity->GetTransform();
-				const auto World = Entity->GetWorldMatrix();
-				const auto Parent = Entity->GetParent();
-				if (!Transform || !World || !Parent || !PulseForgeEditor::Detail::IsFinite(*World))
-					return std::nullopt;
-				glm::mat4 ParentWorld(1.0f);
-				if (Parent->has_value())
-				{
-					const auto ParentMatrix = Parent->value().GetWorldMatrix();
-					if (!ParentMatrix || !PulseForgeEditor::Detail::IsFinite(*ParentMatrix) ||
-						std::abs(glm::determinant(*ParentMatrix)) < 1.0e-8f)
-						return std::nullopt;
-					ParentWorld = *ParentMatrix;
-				}
-				Targets.push_back({ Identifier, *Transform, *World, ParentWorld });
-			}
-			return Targets;
-		}
-
-		[[nodiscard]] static std::optional<PulseForge::TransformComponent> DecomposeLocalTransform(
-			const glm::mat4& LocalMatrix)
-		{
-			if (!PulseForgeEditor::Detail::IsFinite(LocalMatrix))
-				return std::nullopt;
-			glm::vec3 Scale(1.0f);
-			glm::quat Rotation(1.0f, 0.0f, 0.0f, 0.0f);
-			glm::vec3 Translation(0.0f);
-			glm::vec3 Skew(0.0f);
-			glm::vec4 Perspective(0.0f, 0.0f, 0.0f, 1.0f);
-			if (!glm::decompose(LocalMatrix, Scale, Rotation, Translation, Skew, Perspective))
-				return std::nullopt;
-			const bool PerspectiveFinite = std::isfinite(Perspective.x) && std::isfinite(Perspective.y) &&
-				std::isfinite(Perspective.z) && std::isfinite(Perspective.w);
-			if (
-				!PulseForgeEditor::Detail::IsFinite(Scale) || !PulseForgeEditor::Detail::IsFinite(Rotation) ||
-				!PulseForgeEditor::Detail::IsFinite(Translation) || !PulseForgeEditor::Detail::IsFinite(Skew) ||
-				!PerspectiveFinite || glm::length(Skew) > 1.0e-3f ||
-				glm::length(glm::vec3(Perspective)) > 1.0e-3f || std::abs(Perspective.w - 1.0f) > 1.0e-3f ||
-				std::abs(Scale.x) < 1.0e-5f || std::abs(Scale.y) < 1.0e-5f || std::abs(Scale.z) < 1.0e-5f)
-				return std::nullopt;
-			PulseForge::TransformComponent Transform;
-			Transform.Translation = Translation;
-			Transform.Rotation = glm::normalize(Rotation);
-			Transform.Scale = Scale;
-			return Transform;
-		}
-
 		bool BeginGizmoDrag(const GizmoHandle& Handle, const ViewportGizmoGeometry& Geometry, const glm::vec2& Mouse)
 		{
-			if (!m_Scene || !SelectedEntity() || m_SceneRuntime || m_EditorCameraNavigationActive || Handle.Axis >= Geometry.Axes.size() ||
-				!Geometry.Axes[Handle.Axis].IsValid || !m_ViewportRenderView.IsViewProjectionValid())
+			if (!m_Scene)
 				return false;
-			const auto Entity = m_Scene->FindEntity(*SelectedEntity());
-			if (!Entity)
-				return false;
-			const auto Transform = Entity->GetTransform();
-			const auto Ray = PulseForgeEditor::MakeViewportRay(Mouse, m_ViewportImageRect, m_ViewportRenderView.GetViewProjection());
-			if (!Transform || !Ray)
-				return false;
-
-			const glm::vec3 WorldAxis = Geometry.Axes[Handle.Axis].WorldDirection;
-			glm::vec3 PlaneNormal = WorldAxis;
-			if (Handle.Operation != PulseForgeEditor::TransformGizmoOperation::Rotate)
+			PulseForgeEditor::EditorViewportGizmoBeginInput Input;
+			Input.Handle = Handle;
+			Input.Geometry = Geometry;
+			Input.MousePosition = Mouse;
+			Input.ImageRect = m_ViewportImageRect;
+			Input.ViewProjection = m_ViewportRenderView.GetViewProjection();
+			Input.CameraPosition = m_EditorCamera.GetPosition();
+			Input.ViewProjectionValid = m_ViewportRenderView.IsViewProjectionValid();
+			Input.RuntimeActive = m_SceneRuntime != nullptr;
+			Input.CameraNavigationActive = m_EditorCameraNavigationActive;
+			Input.DuplicateOnDrag = ImGui::GetIO().KeyAlt;
+			auto Started = m_ViewportGizmoInteraction.Begin(*m_Scene, m_SceneWorkspace, m_SceneEditController, Input,
+				[this](std::string_view State) { return RestoreSceneState(State); });
+			if (!Started)
 			{
-				const glm::vec3 ToCamera = m_EditorCamera.GetPosition() - Geometry.PivotWorld;
-				PlaneNormal = ToCamera - WorldAxis * glm::dot(ToCamera, WorldAxis);
+				SetError("Could not begin viewport gizmo interaction: " + Started.error());
+				return false;
 			}
-			const float PlaneNormalLength = glm::length(PlaneNormal);
-			if (!std::isfinite(PlaneNormalLength) || PlaneNormalLength < 1.0e-5f)
-				return false;
-			PlaneNormal /= PlaneNormalLength;
-			const auto StartPoint = PulseForgeEditor::IntersectRayPlane(*Ray, Geometry.PivotWorld, PlaneNormal);
-			if (!StartPoint)
-				return false;
-			auto Roots = GetTopLevelSelectedEntities();
-			if (!Roots || Roots->empty())
-				return false;
-			std::vector<PulseForge::UUID> RootIdentifiers;
-			RootIdentifiers.reserve(Roots->size());
-			for (const PulseForge::Entity& Root : *Roots)
-				RootIdentifiers.push_back(Root.GetUUID());
-			auto Targets = CaptureGizmoTargets(RootIdentifiers);
-			if (!Targets)
-				return false;
-			if (!BeginSceneEdit(Handle.Operation == PulseForgeEditor::TransformGizmoOperation::Translate
-				? "Move Selection"
-				: Handle.Operation == PulseForgeEditor::TransformGizmoOperation::Rotate
-					? "Rotate Selection" : "Scale Selection"))
-				return false;
-			GizmoDrag Drag;
-			Drag.Entity = *SelectedEntity();
-			Drag.SceneIdentity = m_Scene.get();
-			Drag.InitialTransform = *Transform;
-			Drag.Targets = std::move(*Targets);
-			Drag.SourceRoots = std::move(RootIdentifiers);
-			Drag.Operation = Handle.Operation;
-			Drag.Axis = Handle.Axis;
-			Drag.PivotWorld = Geometry.PivotWorld;
-			Drag.WorldAxis = WorldAxis;
-			Drag.PlaneNormal = PlaneNormal;
-			Drag.StartPoint = *StartPoint;
-			Drag.StartMouse = Mouse;
-			Drag.WorldUnitsPerLocalUnit = Geometry.Axes[Handle.Axis].WorldUnitsPerLocalUnit;
-			Drag.DuplicateOnDrag = ImGui::GetIO().KeyAlt;
-			m_GizmoDrag = std::move(Drag);
-			return true;
+			return *Started;
 		}
 
 		void UpdateGizmoDrag(const glm::vec2& Mouse)
 		{
-			if (!m_GizmoDrag)
-				return;
-			GizmoDrag& Drag = *m_GizmoDrag;
-			if (!m_Scene || m_Scene.get() != Drag.SceneIdentity || m_SceneRuntime || !SelectedEntity())
-			{
-				CancelGizmoInteraction();
-				return;
-			}
-
-			const auto Ray = PulseForgeEditor::MakeViewportRay(Mouse, m_ViewportImageRect, m_ViewportRenderView.GetViewProjection(), true);
-			if (!Ray)
-				return;
-			const auto CurrentPoint = PulseForgeEditor::IntersectRayPlane(*Ray, Drag.PivotWorld, Drag.PlaneNormal);
-			if (!CurrentPoint)
-				return;
-
-			float Delta = 0.0f;
-			float WorldDelta = 0.0f;
-			if (Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Rotate)
-			{
-				const glm::vec3 StartVector = glm::normalize(Drag.StartPoint - Drag.PivotWorld);
-				const glm::vec3 CurrentVector = glm::normalize(*CurrentPoint - Drag.PivotWorld);
-				Delta = std::atan2(
-					glm::dot(Drag.WorldAxis, glm::cross(StartVector, CurrentVector)),
-					glm::dot(StartVector, CurrentVector));
-			}
-			else
-			{
-				WorldDelta = glm::dot(*CurrentPoint - Drag.StartPoint, Drag.WorldAxis);
-				if (!std::isfinite(Drag.WorldUnitsPerLocalUnit) || Drag.WorldUnitsPerLocalUnit < 1.0e-7f)
-					return;
-				if (Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Translate &&
-					(m_ViewportTools.GetValues().TransformSnapping || ImGui::GetIO().KeyCtrl))
-				{
-					const auto Snapped =
-						PulseForgeEditor::SnapValueToIncrement(WorldDelta, m_ViewportTools.GetValues().TranslationSnapIncrement);
-					if (!Snapped)
-						return;
-					WorldDelta = *Snapped;
-				}
-				Delta = WorldDelta / Drag.WorldUnitsPerLocalUnit;
-			}
-			if (!std::isfinite(Delta))
-				return;
-			if (m_ViewportTools.GetValues().TransformSnapping || ImGui::GetIO().KeyCtrl)
-			{
-				const float Increment = Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Rotate
-											? glm::radians(m_ViewportTools.GetValues().RotationSnapDegrees)
-											: m_ViewportTools.GetValues().ScaleSnapIncrement;
-				if (Drag.Operation != PulseForgeEditor::TransformGizmoOperation::Translate)
-				{
-					const auto Snapped = PulseForgeEditor::SnapValueToIncrement(Delta, Increment);
-					if (!Snapped)
-						return;
-					Delta = *Snapped;
-				}
-			}
-
-			const glm::vec2 MouseDelta = Mouse - Drag.StartMouse;
-			if (Drag.DuplicateOnDrag && !ImGui::GetIO().KeyAlt)
-				Drag.DuplicateOnDrag = false;
-			if (Drag.DuplicateOnDrag && !Drag.HasDuplicated && glm::length(MouseDelta) >= 3.0f)
-			{
-				std::vector<PulseForge::Entity> Sources;
-				Sources.reserve(Drag.SourceRoots.size());
-				for (const PulseForge::UUID& Identifier : Drag.SourceRoots)
-				{
-					const auto Source = m_Scene->FindEntity(Identifier);
-					if (!Source)
-					{
-						CancelGizmoInteraction();
-						return;
-					}
-					Sources.push_back(*Source);
-				}
-				auto Duplicated = DuplicateEntityRootsRaw(Sources);
-				if (!Duplicated)
-				{
-					SetError("Alt-drag duplication failed: " + Duplicated.error().Message);
-					CancelGizmoInteraction();
-					return;
-				}
-				SetEditorSelection(*Duplicated);
-				auto DuplicatedTargets = CaptureGizmoTargets(*Duplicated);
-				if (!DuplicatedTargets)
-				{
-					SetError("Could not initialize the duplicated selection for the gizmo drag.");
-					CancelGizmoInteraction();
-					return;
-				}
-				Drag.Targets = std::move(*DuplicatedTargets);
-				Drag.Entity = *SelectedEntity();
-				Drag.InitialTransform = Drag.Targets.back().LocalTransform;
-				Drag.HasDuplicated = true;
-				Drag.DuplicateOnDrag = false;
-			}
-
-			if (Drag.Targets.empty())
-			{
-				CancelGizmoInteraction();
-				return;
-			}
-
-			if (Drag.Targets.size() == 1 && !Drag.HasDuplicated && m_ViewportTools.GetValues().LocalSpace)
-			{
-				const auto Entity = m_Scene->FindEntity(Drag.Targets.front().Identifier);
-				const auto Updated = PulseForgeEditor::ApplyLocalGizmoDelta(
-					Drag.InitialTransform, Drag.Operation, Drag.Axis, Delta);
-				if (!Entity || !Updated || !TransformsDiffer(Drag.InitialTransform, *Updated))
-					return;
-				if (auto Result = Entity->SetTransform(*Updated); !Result)
-				{
-					SetError("Viewport transform manipulation failed: " + Result.error().Message);
-					CancelGizmoInteraction();
-					return;
-				}
-				m_SceneEditController.MarkDirty();
-				return;
-			}
-
-			glm::mat4 WorldOperation(1.0f);
-			if (Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Translate)
-				WorldOperation = glm::translate(glm::mat4(1.0f), Drag.WorldAxis * WorldDelta);
-			else if (Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Rotate)
-			{
-				const glm::quat Rotation = glm::angleAxis(Delta, glm::normalize(Drag.WorldAxis));
-				WorldOperation = glm::translate(glm::mat4(1.0f), Drag.PivotWorld) * glm::mat4_cast(Rotation) *
-					glm::translate(glm::mat4(1.0f), -Drag.PivotWorld);
-			}
-			else if (Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Scale)
-			{
-				const float Factor = 1.0f + Delta;
-				if (!std::isfinite(Factor) || Factor <= 1.0e-4f)
-					return;
-				const glm::vec3 Scale = Drag.Axis == 0 ? glm::vec3(Factor, 1.0f, 1.0f)
-					: Drag.Axis == 1 ? glm::vec3(1.0f, Factor, 1.0f) : glm::vec3(1.0f, 1.0f, Factor);
-				WorldOperation = glm::translate(glm::mat4(1.0f), Drag.PivotWorld) * glm::scale(glm::mat4(1.0f), Scale) *
-					glm::translate(glm::mat4(1.0f), -Drag.PivotWorld);
-			}
-
-			for (const GizmoEntityStart& Target : Drag.Targets)
-			{
-				const auto Entity = m_Scene->FindEntity(Target.Identifier);
-				std::optional<PulseForge::TransformComponent> Updated;
-				if (Drag.Operation == PulseForgeEditor::TransformGizmoOperation::Scale && m_ViewportTools.GetValues().LocalSpace)
-				{
-					const float Factor = 1.0f + Delta;
-					PulseForge::TransformComponent Scaled = Target.LocalTransform;
-					Scaled.Scale[Drag.Axis] *= Factor;
-					const glm::vec3 Position(Target.WorldTransform[3]);
-					const float AlongAxis = glm::dot(Position - Drag.PivotWorld, Drag.WorldAxis);
-					const glm::vec3 ScaledPosition = Position + Drag.WorldAxis * AlongAxis * (Factor - 1.0f);
-					const glm::vec3 LocalPosition(glm::inverse(Target.ParentWorldTransform) * glm::vec4(ScaledPosition, 1.0f));
-					Scaled.Translation = LocalPosition;
-					if (std::abs(Scaled.Scale[Drag.Axis]) >= 1.0e-4f &&
-						PulseForgeEditor::Detail::IsFinite(Scaled.Translation) &&
-						PulseForgeEditor::Detail::IsFinite(Scaled.Scale))
-						Updated = Scaled;
-				}
-				else
-				{
-					const glm::mat4 LocalMatrix = glm::inverse(Target.ParentWorldTransform) *
-						WorldOperation * Target.WorldTransform;
-					Updated = DecomposeLocalTransform(LocalMatrix);
-				}
-				if (!Entity || !Updated)
-				{
-					SetError("The multi-object transform would require an unsupported shear or singular transform.");
-					CancelGizmoInteraction();
-					return;
-				}
-				if (auto Result = Entity->SetTransform(*Updated); !Result)
-				{
-					SetError("Viewport transform manipulation failed: " + Result.error().Message);
-					CancelGizmoInteraction();
-					return;
-				}
-			}
-			m_SceneEditController.MarkDirty();
+			PulseForgeEditor::EditorViewportGizmoUpdateInput Input;
+			Input.MousePosition = Mouse;
+			Input.ImageRect = m_ViewportImageRect;
+			Input.ViewProjection = m_ViewportRenderView.GetViewProjection();
+			Input.ToolValues = m_ViewportTools.GetValues();
+			Input.RuntimeActive = m_SceneRuntime != nullptr;
+			Input.ControlDown = ImGui::GetIO().KeyCtrl;
+			Input.AltDown = ImGui::GetIO().KeyAlt;
+			if (auto Updated = m_ViewportGizmoInteraction.Update(m_Scene.get(), m_SceneWorkspace, m_SceneEditController, Input,
+					[this](std::string_view State) { return RestoreSceneState(State); });
+				!Updated)
+				SetError(Updated.error());
 		}
 
-		[[nodiscard]] static bool TransformsDiffer(
-			const PulseForge::TransformComponent& First,
-			const PulseForge::TransformComponent& Second)
+		void CancelGizmoInteraction()
 		{
-			constexpr float Epsilon = 1.0e-6f;
-			if (glm::length(First.Translation - Second.Translation) > Epsilon ||
-				glm::length(First.Scale - Second.Scale) > Epsilon)
-				return true;
-			const glm::quat FirstRotation = glm::normalize(First.Rotation);
-			const glm::quat SecondRotation = glm::normalize(Second.Rotation);
-			return 1.0f - std::abs(glm::dot(FirstRotation, SecondRotation)) > Epsilon;
-		}
-
-		void CancelGizmoInteraction() noexcept
-		{
-			if (m_GizmoDrag)
-				CancelSceneEdit();
-			m_GizmoDrag.reset();
+			if (auto Cancelled = m_ViewportGizmoInteraction.Cancel(m_Scene.get(), m_SceneWorkspace, m_SceneEditController,
+					[this](std::string_view State) { return RestoreSceneState(State); });
+				!Cancelled)
+				SetError("Scene edit rollback failed: " + Cancelled.error());
 		}
 
 		void CompleteReleasedGizmoInteractionBeforeShortcuts()
 		{
-			if (!m_GizmoDrag)
+			if (!m_ViewportGizmoInteraction.IsActive())
 				return;
 
 			const ImGuiIO& IO = ImGui::GetIO();
 			const auto Outcome = PulseForgeEditor::GetViewportGizmoPointerOutcome({
-				m_GizmoDrag.has_value(),
+				m_ViewportGizmoInteraction.IsActive(),
 				IO.MouseDown[ImGuiMouseButton_Left],
 				IO.MouseReleased[ImGuiMouseButton_Left]
 			}, ImGui::IsKeyPressed(ImGuiKey_Escape, false));
@@ -6977,17 +6671,17 @@ namespace
 			// The viewport image normally consumes release later in this frame; finish first so
 			// the history shortcut router and Edit menu observe the committed gesture immediately.
 			UpdateGizmoDrag({ IO.MousePos.x, IO.MousePos.y });
-			if (m_GizmoDrag)
+			if (m_ViewportGizmoInteraction.IsActive())
 				CompleteGizmoInteraction();
 		}
 
 		void CompleteGizmoInteraction()
 		{
-			if (m_GizmoDrag)
-				FinishSceneEdit();
-			m_GizmoDrag.reset();
+			if (auto Completed = m_ViewportGizmoInteraction.Complete(m_Scene.get(), m_SceneWorkspace, m_SceneEditController,
+					[this](std::string_view State) { return RestoreSceneState(State); });
+				!Completed)
+				SetError(Completed.error());
 		}
-
 		[[nodiscard]] std::expected<const PulseForgeEditor::EditorMeshPickingGeometry*, std::string> GetCpuPickingMesh(
 			const PulseForge::AssetID& Asset)
 		{
@@ -7127,7 +6821,7 @@ namespace
 				return false;
 			const bool Focused = Window && glfwGetWindowAttrib(Window, GLFW_FOCUSED) == GLFW_TRUE;
 			if (!m_ViewportMouseCapture.Begin(true, IsCursorOverViewportImage(), Focused,
-				m_GizmoDrag.has_value(), m_SceneRuntime != nullptr))
+				m_ViewportGizmoInteraction.IsActive(), m_SceneRuntime != nullptr))
 				return false;
 
 			m_PreviousCursorMode = glfwGetInputMode(Window, GLFW_CURSOR);
@@ -7253,7 +6947,7 @@ namespace
 				.MenuNavigationActive = GImGui->NavLayer == ImGuiNavLayer_Menu ||
 					GImGui->NavWindowingTarget != nullptr,
 				.ModifierHeld = IO.KeyCtrl || IO.KeyAlt || IO.KeySuper,
-				.GizmoInteractionActive = m_GizmoDrag.has_value(),
+				.GizmoInteractionActive = m_ViewportGizmoInteraction.IsActive(),
 				.CameraGestureActive = m_ViewportCameraGesture != ViewportCameraGesture::None
 			};
 			if (PulseForgeEditor::CanNavigateViewportCamera(Context))
@@ -7767,7 +7461,7 @@ namespace
 		std::unique_ptr<PulseForge::Scene> m_RuntimeScene;
 		std::unique_ptr<PulseForge::SceneRuntime> m_SceneRuntime;
 		PulseForgeEditor::ViewportImageRect m_ViewportImageRect;
-		std::optional<GizmoDrag> m_GizmoDrag;
+		PulseForgeEditor::EditorViewportGizmoInteraction m_ViewportGizmoInteraction;
 		PulseForgeEditor::EditorViewportToolState m_ViewportTools;
 		PulseForgeEditor::EditorViewportToolbar m_ViewportToolbar;
 		ViewportCameraGesture m_ViewportCameraGesture = ViewportCameraGesture::None;
