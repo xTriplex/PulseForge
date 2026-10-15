@@ -1,0 +1,87 @@
+#include "EditorWorkspacePresentation.h"
+
+#include <imgui.h>
+#include <imgui_internal.h>
+
+#include <algorithm>
+
+namespace PulseForgeEditor
+{
+	bool EditorWorkspacePresentation::BeginMainFrame(const std::optional<EditorDocumentIdentity>& ActiveDocument)
+	{
+		return m_FrameState.BeginFrame(ActiveDocument);
+	}
+
+	bool EditorWorkspacePresentation::IsLevelWorkspaceActive() const noexcept
+	{
+		return m_FrameState.IsLevelWorkspaceActive();
+	}
+
+	bool EditorWorkspacePresentation::WasWorkspaceDrawn(const EditorDocumentIdentity& Identity, std::string_view HostID) const
+	{
+		return m_FrameState.WasWorkspaceDrawn(Identity, HostID);
+	}
+
+	void EditorWorkspacePresentation::DrawWorkspaceDockspace(EditorDocumentSession& Session)
+	{
+		const ImGuiID DockspaceID = GetDockspaceID(Session.Identity);
+		const std::string WindowName = GetWindowName(Session.Identity);
+		const ImVec2 Position = ImGui::GetCursorScreenPos();
+		const ImVec2 Size = ImGui::GetContentRegionAvail();
+		if (!ImGui::DockBuilderGetNode(DockspaceID))
+		{
+			ImGui::DockBuilderAddNode(DockspaceID, ImGuiDockNodeFlags_DockSpace);
+			ImGui::DockBuilderSetNodePos(DockspaceID, Position);
+			ImGui::DockBuilderSetNodeSize(DockspaceID, ImVec2((std::max)(Size.x, 1.0f), (std::max)(Size.y, 1.0f)));
+			ImGui::DockBuilderDockWindow(WindowName.c_str(), DockspaceID);
+			ImGui::DockBuilderFinish(DockspaceID);
+		}
+		ImGui::DockSpace(DockspaceID, Size);
+		m_FrameState.MarkDockspaceDrawn(Session.Identity);
+	}
+
+	void EditorWorkspacePresentation::DrawWorkspaceContent(
+		EditorDocumentSession& Session, const EditorDocumentEditorRegistry& Editors, FallbackDrawer DrawFallback, void* FallbackContext)
+	{
+		const std::string WindowName = GetWindowName(Session.Identity);
+		if (ImGui::Begin(WindowName.c_str(), nullptr, ImGuiWindowFlags_NoCollapse))
+		{
+			if (Editors.DrawWorkspace(Session)) m_FrameState.MarkWorkspaceDrawn(Session.Identity, Session.HostID);
+			else if (DrawFallback) DrawFallback(FallbackContext, Session.Identity);
+		}
+		ImGui::End();
+	}
+
+	void EditorWorkspacePresentation::KeepInactiveWorkspacesAlive(
+		const EditorDocumentManager& Documents, const EditorDocumentEditorRegistry& Editors)
+	{
+		ImGui::SetNextWindowPos(ImVec2(-10000.0f, -10000.0f), ImGuiCond_Always);
+		ImGui::SetNextWindowSize(ImVec2(1.0f, 1.0f), ImGuiCond_Always);
+		if (!ImGui::Begin("##PFInactiveDocumentWorkspaceKeepAlive", nullptr,
+				ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings |
+					ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBackground))
+		{
+			ImGui::End();
+			return;
+		}
+		for (const auto& [Identity, Session] : Documents.GetSessions())
+		{
+			(void)Session;
+			if (!Editors.IsRegistered(Identity.Kind) || m_FrameState.WasDockspaceDrawn(Identity)) continue;
+			ImGui::DockSpace(GetDockspaceID(Identity), ImVec2(1.0f, 1.0f), ImGuiDockNodeFlags_KeepAliveOnly);
+		}
+		ImGui::End();
+	}
+
+	uint32_t EditorWorkspacePresentation::GetDockspaceID(const EditorDocumentIdentity& Identity)
+	{
+		const std::string Key = EditorWorkspaceFrameState::GetWorkspaceKey(Identity);
+		return ImHashStr(Key.c_str());
+	}
+
+	std::string EditorWorkspacePresentation::GetWindowName(const EditorDocumentIdentity& Identity)
+	{
+		return "Document Workspace###PFDocumentWorkspace_" + Identity.Project.ToString() + "_" + Identity.Asset.ToString() + "_" +
+			   std::to_string(static_cast<uint32_t>(Identity.Kind));
+	}
+} // namespace PulseForgeEditor

@@ -22,26 +22,6 @@ namespace PulseForge
 			return Stage == ShaderStage::Vertex || Stage == ShaderStage::Fragment;
 		}
 
-		std::optional<uint32_t> GetVertexFormatSize(VertexFormat Format)
-		{
-			switch (Format)
-			{
-				case VertexFormat::Float2: return static_cast<uint32_t>(sizeof(float) * 2);
-				case VertexFormat::Float3: return static_cast<uint32_t>(sizeof(float) * 3);
-				case VertexFormat::Float4: return static_cast<uint32_t>(sizeof(float) * 4);
-				default: return std::nullopt;
-			}
-		}
-
-		bool IsValidSemantic(VertexSemantic Semantic)
-		{
-			return Semantic == VertexSemantic::Position ||
-				Semantic == VertexSemantic::Color ||
-				Semantic == VertexSemantic::TexCoord ||
-				Semantic == VertexSemantic::Normal ||
-				Semantic == VertexSemantic::Tangent;
-		}
-
 		bool IsValidDepthComparison(DepthCompareOperation Operation)
 		{
 			return Operation == DepthCompareOperation::Never ||
@@ -83,34 +63,8 @@ namespace PulseForge
 
 	GraphicsResult ValidateVertexLayout(const VertexLayoutDesc& Description)
 	{
-		if (Description.Stride == 0)
-			return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex layout stride must be non-zero");
-
-		if (Description.Attributes.empty())
-			return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex layout must contain at least one attribute");
-
-		if (Description.Attributes.size() > 16)
-			return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex layout exceeds PulseForge's 16-attribute limit");
-
-		std::array<bool, 5> SeenSemantics = {};
-		for (const VertexAttributeDesc& Attribute : Description.Attributes)
-		{
-			if (!IsValidSemantic(Attribute.Semantic))
-				return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex layout contains an unsupported semantic");
-
-			const size_t SemanticIndex = static_cast<size_t>(Attribute.Semantic);
-			if (SeenSemantics[SemanticIndex])
-				return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex layout contains a duplicate semantic");
-			SeenSemantics[SemanticIndex] = true;
-
-			const auto AttributeSize = GetVertexFormatSize(Attribute.Format);
-			if (!AttributeSize)
-				return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex layout contains an unsupported attribute format");
-
-			if (Attribute.Offset > Description.Stride || *AttributeSize > Description.Stride - Attribute.Offset)
-				return MakeError(GraphicsErrorCode::InvalidVertexLayout, "Vertex attribute extends beyond the declared vertex stride");
-		}
-
+		const auto Validation = ValidateVertexLayoutData(Description);
+		if (!Validation) return MakeError(GraphicsErrorCode::InvalidVertexLayout, Validation.error().Message.c_str());
 		return {};
 	}
 

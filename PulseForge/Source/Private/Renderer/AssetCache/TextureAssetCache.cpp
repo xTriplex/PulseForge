@@ -1,8 +1,7 @@
 #include "Core/PulseForgePCH.h"
-#include "Assets/TextureAssetCache.h"
+#include "Renderer/AssetCache/TextureAssetCache.h"
 
 #include "Assets/ImageAssetImporter.h"
-#include "Core/Application.h"
 
 #include <exception>
 #include <functional>
@@ -30,17 +29,11 @@ namespace PulseForge
 		uint8_t LinearToSrgbByte(float Value)
 		{
 			Value = std::clamp(Value, 0.0f, 1.0f);
-			const float Encoded = Value <= 0.0031308f
-				? Value * 12.92f
-				: 1.055f * std::pow(Value, 1.0f / 2.4f) - 0.055f;
+			const float Encoded = Value <= 0.0031308f ? Value * 12.92f : 1.055f * std::pow(Value, 1.0f / 2.4f) - 0.055f;
 			return static_cast<uint8_t>(std::lround(Encoded * 255.0f));
 		}
 
-		std::vector<OwnedMipLevel> BuildMipChain(
-			uint32_t Width,
-			uint32_t Height,
-			std::span<const uint8_t> SourcePixels,
-			bool IsSrgb)
+		std::vector<OwnedMipLevel> BuildMipChain(uint32_t Width, uint32_t Height, std::span<const uint8_t> SourcePixels, bool IsSrgb)
 		{
 			std::vector<OwnedMipLevel> Levels;
 			Levels.push_back({ Width, Height, { SourcePixels.begin(), SourcePixels.end() } });
@@ -68,18 +61,16 @@ namespace PulseForge
 							{
 								const size_t Source = (static_cast<size_t>(SourceY) * Width + SourceX) * 4;
 								for (size_t Channel = 0; Channel < 4; ++Channel)
-									Sum[Channel] += IsSrgb && Channel < 3
-										? SrgbToLinear(Previous.Pixels[Source + Channel])
-										: static_cast<float>(Previous.Pixels[Source + Channel]) / 255.0f;
+									Sum[Channel] += IsSrgb && Channel < 3 ? SrgbToLinear(Previous.Pixels[Source + Channel])
+																		  : static_cast<float>(Previous.Pixels[Source + Channel]) / 255.0f;
 								++SampleCount;
 							}
 						const size_t Destination = (static_cast<size_t>(Y) * NextWidth + X) * 4;
 						for (size_t Channel = 0; Channel < 4; ++Channel)
 						{
 							const float Average = Sum[Channel] / static_cast<float>(SampleCount);
-						Next.Pixels[Destination + Channel] = IsSrgb && Channel < 3
-							? LinearToSrgbByte(Average)
-							: static_cast<uint8_t>(std::lround(Average * 255.0f));
+							Next.Pixels[Destination + Channel] =
+								IsSrgb && Channel < 3 ? LinearToSrgbByte(Average) : static_cast<uint8_t>(std::lround(Average * 255.0f));
 						}
 					}
 				}
@@ -89,12 +80,9 @@ namespace PulseForge
 			}
 			return Levels;
 		}
-	}
+	} // namespace
 
-	TextureAssetCache::TextureAssetCache(
-		Application& Runtime,
-		std::filesystem::path ProjectRoot,
-		const AssetRegistry& Registry)
+	TextureAssetCache::TextureAssetCache(RenderDevice& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry)
 		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_Registry(Registry)
 	{
 	}
@@ -102,49 +90,36 @@ namespace PulseForge
 	TextureAssetCache::~TextureAssetCache() = default;
 
 	std::expected<std::reference_wrapper<const Texture>, TextureAssetError> TextureAssetCache::GetOrLoad(
-		const AssetID& Asset,
-		TextureFormat Format)
+		const AssetID& Asset, TextureFormat Format)
 	{
 		if (Asset.IsNil() || !m_Registry.Find(Asset))
 		{
-			return std::unexpected(TextureAssetError{
-				TextureAssetErrorCode::AssetNotFound,
-				Asset,
-				Asset.IsNil()
-					? "Cannot load a texture with a nil asset UUID"
-					: "Texture asset UUID " + Asset.ToString() + " is not present in the project asset registry" });
+			return std::unexpected(TextureAssetError{ TextureAssetErrorCode::AssetNotFound, Asset,
+				Asset.IsNil() ? "Cannot load a texture with a nil asset UUID"
+							  : "Texture asset UUID " + Asset.ToString() + " is not present in the project asset registry" });
 		}
 
 		if (Format != TextureFormat::RGBA8_UNorm && Format != TextureFormat::RGBA8_Srgb)
 		{
 			return std::unexpected(TextureAssetError{
-				TextureAssetErrorCode::UnsupportedFormat,
-				Asset,
-				"Image assets can only be loaded as RGBA8_UNorm or RGBA8_Srgb textures" });
+				TextureAssetErrorCode::UnsupportedFormat, Asset, "Image assets can only be loaded as RGBA8_UNorm or RGBA8_Srgb textures" });
 		}
 
 		const CacheKey Key{ Asset, Format };
-		if (const auto Existing = m_Textures.find(Key); Existing != m_Textures.end())
-			return std::cref(*Existing->second);
+		if (const auto Existing = m_Textures.find(Key); Existing != m_Textures.end()) return std::cref(*Existing->second);
 
 		auto ImportedImage = ImageAssetImporter::ImportRGBA8(Asset, m_ProjectRoot, m_Registry);
 		if (!ImportedImage)
 		{
-			return std::unexpected(TextureAssetError{
-				TextureAssetErrorCode::ImportFailed,
-				Asset,
-				ImportedImage.error().Message });
+			return std::unexpected(TextureAssetError{ TextureAssetErrorCode::ImportFailed, Asset, ImportedImage.error().Message });
 		}
 
 		TextureDesc Description;
 		Description.Width = ImportedImage->Width;
 		Description.Height = ImportedImage->Height;
 		Description.Format = Format;
-		auto MipLevels = BuildMipChain(
-			ImportedImage->Width,
-			ImportedImage->Height,
-			ImportedImage->RGBA8Pixels,
-			Format == TextureFormat::RGBA8_Srgb);
+		auto MipLevels =
+			BuildMipChain(ImportedImage->Width, ImportedImage->Height, ImportedImage->RGBA8Pixels, Format == TextureFormat::RGBA8_Srgb);
 		Description.MipLevels = static_cast<uint32_t>(MipLevels.size());
 		Description.DebugName = "Image asset " + Asset.ToString();
 		std::vector<TextureSubresourceData> InitialData;
@@ -157,10 +132,8 @@ namespace PulseForge
 		auto CreatedTexture = m_Runtime.CreateTexture(Description, InitialData);
 		if (!CreatedTexture)
 		{
-			return std::unexpected(TextureAssetError{
-				TextureAssetErrorCode::TextureCreationFailed,
-				Asset,
-				CreatedTexture.error().Message });
+			return std::unexpected(
+				TextureAssetError{ TextureAssetErrorCode::TextureCreationFailed, Asset, CreatedTexture.error().Message });
 		}
 
 		try
@@ -168,18 +141,14 @@ namespace PulseForge
 			auto [Inserted, WasInserted] = m_Textures.try_emplace(Key, std::move(CreatedTexture.value()));
 			if (!WasInserted)
 			{
-				return std::unexpected(TextureAssetError{
-					TextureAssetErrorCode::CacheFailure,
-					Asset,
+				return std::unexpected(TextureAssetError{ TextureAssetErrorCode::CacheFailure, Asset,
 					"Texture asset UUID and format were already present during cache insertion" });
 			}
 			return std::cref(*Inserted->second);
 		}
 		catch (const std::exception& Exception)
 		{
-			return std::unexpected(TextureAssetError{
-				TextureAssetErrorCode::CacheFailure,
-				Asset,
+			return std::unexpected(TextureAssetError{ TextureAssetErrorCode::CacheFailure, Asset,
 				std::string("Could not retain the uploaded texture resource: ") + Exception.what() });
 		}
 	}
@@ -200,4 +169,4 @@ namespace PulseForge
 		const size_t FormatHash = std::hash<uint8_t>{}(static_cast<uint8_t>(Key.Format));
 		return AssetHash ^ (FormatHash + static_cast<size_t>(0x9e3779b9) + (AssetHash << 6) + (AssetHash >> 2));
 	}
-}
+} // namespace PulseForge

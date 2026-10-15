@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Scene/Components/CameraComponent.h"
 
 #include <cmath>

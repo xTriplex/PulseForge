@@ -63,8 +63,11 @@ namespace
 		return Ranges;
 	}
 
-	void AppendCodepoint(std::array<char, LabelBufferSize>& Buffer, size_t& Offset, uint32_t Codepoint)
+	bool AppendCodepoint(std::array<char, LabelBufferSize>& Buffer, size_t& Offset, uint32_t Codepoint)
 	{
+		const size_t EncodedLength = Codepoint <= 0x7f ? 1 : Codepoint <= 0x7ff ? 2 : Codepoint <= 0xffff ? 3 : 4;
+		if (Offset > Buffer.size() || EncodedLength > Buffer.size() - Offset) return false;
+
 		if (Codepoint <= 0x7f)
 			Buffer[Offset++] = static_cast<char>(Codepoint);
 		else if (Codepoint <= 0x7ff)
@@ -85,6 +88,7 @@ namespace
 			Buffer[Offset++] = static_cast<char>(0x80 | ((Codepoint >> 6) & 0x3f));
 			Buffer[Offset++] = static_cast<char>(0x80 | (Codepoint & 0x3f));
 		}
+		return true;
 	}
 
 	std::array<char, LabelBufferSize> MakeLabel(
@@ -99,28 +103,29 @@ namespace
 		{
 			if (const PulseForgeEditor::EditorIconDescriptor* Descriptor = PulseForgeEditor::FindEditorIcon(Icon))
 			{
-				AppendCodepoint(Buffer, Offset, Descriptor->Codepoint);
-				Buffer[Offset++] = ' ';
+				if (AppendCodepoint(Buffer, Offset, Descriptor->Codepoint) && Offset < Buffer.size()) Buffer[Offset++] = ' ';
 			}
 		}
 
+		if (Offset > Buffer.size() - 4) return Buffer;
 		const size_t MaximumIDLength = Buffer.size() - Offset - 4;
 		const size_t IDLength = (std::min)(StableID.size(), MaximumIDLength);
 		const size_t SuffixLength = StableID.empty() ? 0 : IDLength + 3;
 		const size_t AvailableLabelLength = Buffer.size() - Offset - SuffixLength - 1;
-		const size_t CopyLength = PulseForgeEditor::Utf8SafePrefixLength(Label, AvailableLabelLength);
+		const size_t CopyLength = (std::min)(PulseForgeEditor::Utf8SafePrefixLength(Label, AvailableLabelLength), AvailableLabelLength);
 		if (CopyLength > 0)
 			std::memcpy(Buffer.data() + Offset, Label.data(), CopyLength);
 		Offset += CopyLength;
 		if (!StableID.empty())
 		{
+			if (Offset > Buffer.size() - 4 || IDLength > Buffer.size() - Offset - 4) return Buffer;
 			Buffer[Offset++] = '#';
 			Buffer[Offset++] = '#';
 			Buffer[Offset++] = '#';
 			std::memcpy(Buffer.data() + Offset, StableID.data(), IDLength);
 			Offset += IDLength;
 		}
-		Buffer[Offset] = '\0';
+		if (Offset < Buffer.size()) Buffer[Offset] = '\0';
 		return Buffer;
 	}
 

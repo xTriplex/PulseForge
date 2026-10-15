@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Scene/Components/TransformComponent.h"
 
 #include <glm/gtc/matrix_transform.hpp>

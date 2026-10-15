@@ -2,7 +2,7 @@
 
 #include "Assets/AssetRegistry.h"
 #include "Core/Core.h"
-#include "Renderer/Mesh.h"
+#include "Renderer/MeshData.h"
 
 #include <cstdint>
 #include <array>

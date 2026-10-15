@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Assets/AssetMetadata.h"
 
 #include <nlohmann/json.hpp>

@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Renderer/ScreenSpaceAmbientOcclusion.h"
 
 #include <algorithm>

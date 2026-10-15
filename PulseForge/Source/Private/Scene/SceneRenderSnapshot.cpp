@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Scene/SceneRenderSnapshot.h"
 
 #include <cmath>

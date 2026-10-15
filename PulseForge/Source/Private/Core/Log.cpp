@@ -1,5 +1,4 @@
-#include "Core/PulseForgePCH.h"
-#include "Core/Core.h"
+#include "Core/Log.h"
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>

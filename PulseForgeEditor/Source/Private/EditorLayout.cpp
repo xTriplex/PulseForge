@@ -379,8 +379,7 @@ namespace PulseForgeEditor
 		ImGuiDockNode* ReferenceNode = ReferenceSettings && ReferenceSettings->DockId != 0
 			? ImGui::DockBuilderGetNode(ReferenceSettings->DockId)
 			: nullptr;
-		if (!ShouldApplyFirstOpenPanelDocking(HasPanelWindowSettings, ReferenceNode != nullptr))
-			return false;
+		if (!ReferenceSettings || !ReferenceNode || !ShouldApplyFirstOpenPanelDocking(HasPanelWindowSettings, true)) return false;
 
 		ImGui::DockBuilderDockWindow(PanelName.c_str(), ReferenceSettings->DockId);
 		const ImGuiDockNode* RootNode = ImGui::DockNodeGetRootNode(ReferenceNode);

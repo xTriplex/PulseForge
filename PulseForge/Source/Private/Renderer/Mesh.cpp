@@ -2,7 +2,6 @@
 #include "Renderer/Mesh.h"
 
 #include <algorithm>
-#include <limits>
 
 namespace PulseForge
 {
@@ -50,64 +49,6 @@ namespace PulseForge
 		  m_VertexBuffer(std::move(VertexBuffer)),
 		  m_IndexBuffer(std::move(IndexBuffer))
 	{
-	}
-
-	MeshValidationResult ValidateMeshDescription(const MeshDesc& Description)
-	{
-		const auto LayoutValidation = ValidateVertexLayout(Description.VertexLayout);
-		if (!LayoutValidation)
-		{
-			return std::unexpected(MeshError{
-				MeshErrorCode::InvalidVertexLayout,
-				LayoutValidation.error().Message
-			});
-		}
-
-		if (Description.VertexData.empty())
-		{
-			return std::unexpected(MeshError{
-				MeshErrorCode::InvalidVertexData,
-				"Mesh vertex data must not be empty"
-			});
-		}
-
-		if (Description.VertexData.size() % Description.VertexLayout.Stride != 0)
-		{
-			return std::unexpected(MeshError{
-				MeshErrorCode::InvalidVertexData,
-				"Mesh vertex data size must be a multiple of the vertex stride"
-			});
-		}
-
-		const size_t VertexCount = Description.VertexData.size() / Description.VertexLayout.Stride;
-		if (VertexCount == 0 || VertexCount > std::numeric_limits<uint32_t>::max())
-		{
-			return std::unexpected(MeshError{
-				MeshErrorCode::InvalidVertexData,
-				"Mesh vertex count exceeds the supported 32-bit draw range"
-			});
-		}
-
-		if (Description.Indices.size() > std::numeric_limits<uint32_t>::max())
-		{
-			return std::unexpected(MeshError{
-				MeshErrorCode::InvalidIndexData,
-				"Mesh index count exceeds the supported 32-bit draw range"
-			});
-		}
-
-		for (const uint32_t Index : Description.Indices)
-		{
-			if (Index >= VertexCount)
-			{
-				return std::unexpected(MeshError{
-					MeshErrorCode::InvalidIndexData,
-					"Mesh index references a vertex outside the supplied vertex data"
-				});
-			}
-		}
-
-		return MeshCounts{ static_cast<uint32_t>(VertexCount), static_cast<uint32_t>(Description.Indices.size()) };
 	}
 
 	GraphicsResult ValidateMeshDrawArguments(
