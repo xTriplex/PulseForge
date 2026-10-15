@@ -1,4 +1,5 @@
 #include "TestEditorSupport.h"
+#include "Editor/EditorMaterialDraftController.h"
 
 namespace
 {
@@ -256,6 +257,118 @@ namespace
 			PF_CHECK(Tests, !Broken && Broken.error().Code == MaterialAssetErrorCode::InvalidDocument);
 		}
 	}
+
+	void TestMaterialDraftController(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const auto Identifier = UUID::Generate();
+		PF_CHECK(Tests, Identifier.has_value());
+		if (!Identifier)
+			return;
+
+		std::error_code Error;
+		const std::filesystem::path Root = std::filesystem::temp_directory_path(Error) /
+			("PulseForgeMaterialDraft-" + Identifier->ToString());
+		PF_CHECK(Tests, !Error);
+		if (Error)
+			return;
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} RemoveProject{ Root };
+
+		auto ProjectResult = Project::Create(Root / "Drafts.pfproj", "Material Draft Test");
+		PF_CHECK(Tests, ProjectResult.has_value());
+		if (!ProjectResult)
+			return;
+		Project& ProjectValue = *ProjectResult;
+		std::filesystem::create_directories(Root / "Assets" / "Materials", Error);
+		PF_CHECK(Tests, !Error);
+		if (Error)
+			return;
+		MaterialAssetDesc Initial;
+		Initial.BaseColorFactor = { 0.2f, 0.3f, 0.4f, 1.0f };
+		auto Material = MaterialAssetService::Create(
+			ProjectValue.GetAssetRegistry(), ProjectValue.GetRootPath(), "Assets/Materials/draft.material", Initial);
+		PF_CHECK(Tests, Material.has_value());
+		if (!Material)
+			return;
+
+		PulseForgeEditor::EditorDocumentManager Documents;
+		const PulseForgeEditor::EditorDocumentIdentity Identity{
+			ProjectValue.GetDescription().ID, Material->ID, PulseForgeEditor::EditorDocumentKind::Material
+		};
+		auto Opened = Documents.Open(
+			Identity, Material->ProjectRelativePath, "draft.material",
+			PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip);
+		PF_CHECK(Tests, Opened.has_value());
+		if (!Opened)
+			return;
+
+		PulseForgeEditor::EditorMaterialDraftController Drafts;
+		auto Loaded = Drafts.LoadDraft(ProjectValue, Material->ID);
+		PF_CHECK(Tests, Loaded.has_value());
+		if (!Loaded)
+			return;
+		const MaterialAssetDesc EditStart = Loaded->get();
+		PF_CHECK(Tests, Drafts.BeginEdit(ProjectValue, Material->ID, EditStart));
+		Loaded->get().BaseColorFactor.r = 0.85f;
+		Drafts.FinalizePendingEdits(false);
+		PF_CHECK(Tests, Drafts.IsDirty(ProjectValue, Material->ID));
+		PF_CHECK(Tests, Documents.MarkEdited(Identity));
+		PF_CHECK(Tests, Drafts.CanUndo(ProjectValue, Material->ID));
+
+		const auto Undone = Drafts.ApplyHistoryStep(ProjectValue, Material->ID, false, Documents);
+		PF_CHECK(Tests, Undone.has_value() && *Undone);
+		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, Material->ID));
+		PF_CHECK(Tests, !Documents.Find(Identity)->IsDirty());
+		PF_CHECK(Tests, std::abs(Drafts.FindDraft(ProjectValue, Material->ID)->BaseColorFactor.r - 0.2f) < 1.0e-5f);
+
+		const auto Redone = Drafts.ApplyHistoryStep(ProjectValue, Material->ID, true, Documents);
+		PF_CHECK(Tests, Redone.has_value() && *Redone);
+		PF_CHECK(Tests, Drafts.IsDirty(ProjectValue, Material->ID));
+		PF_CHECK(Tests, Documents.Find(Identity)->IsDirty());
+		const auto Saved = Drafts.Save(ProjectValue, Material->ID, Documents);
+		PF_CHECK(Tests, Saved.has_value());
+		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, Material->ID));
+		PF_CHECK(Tests, !Documents.Find(Identity)->IsDirty());
+		auto Persisted = MaterialAssetService::Load(Material->ID, ProjectValue.GetRootPath(), ProjectValue.GetAssetRegistry());
+		PF_CHECK(Tests, Persisted && std::abs(Persisted->BaseColorFactor.r - 0.85f) < 1.0e-5f);
+
+		const MaterialAssetDesc SavedState = *Drafts.FindDraft(ProjectValue, Material->ID);
+		PF_CHECK(Tests, Drafts.BeginEdit(ProjectValue, Material->ID, SavedState));
+		Drafts.FindDraft(ProjectValue, Material->ID)->MetallicFactor = 0.7f;
+		Drafts.FinalizePendingEdits(false);
+		PF_CHECK(Tests, Documents.MarkEdited(Identity));
+		PF_CHECK(Tests, Drafts.Reload(ProjectValue, Material->ID, Documents).has_value());
+		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, Material->ID));
+		PF_CHECK(Tests, !Documents.Find(Identity)->IsDirty());
+		PF_CHECK(Tests, Drafts.FindDraft(ProjectValue, Material->ID)->MetallicFactor == Initial.MetallicFactor);
+
+		const MaterialAssetDesc RevertStart = *Drafts.FindDraft(ProjectValue, Material->ID);
+		PF_CHECK(Tests, Drafts.BeginEdit(ProjectValue, Material->ID, RevertStart));
+		Drafts.FindDraft(ProjectValue, Material->ID)->RoughnessFactor = 0.15f;
+		Drafts.FinalizePendingEdits(false);
+		PF_CHECK(Tests, Documents.MarkEdited(Identity));
+		const auto MaterialPath = Root / Material->ProjectRelativePath;
+		std::filesystem::remove(MaterialPath, Error);
+		PF_CHECK(Tests, !Error);
+		std::filesystem::create_directory(MaterialPath, Error);
+		PF_CHECK(Tests, !Error);
+		const auto FailedSave = Drafts.Save(ProjectValue, Material->ID, Documents);
+		PF_CHECK(Tests, !FailedSave);
+		PF_CHECK(Tests, Drafts.IsDirty(ProjectValue, Material->ID));
+		PF_CHECK(Tests, Documents.Find(Identity)->IsDirty());
+		PF_CHECK(Tests, !Drafts.Reload(ProjectValue, Material->ID, Documents));
+		PF_CHECK(Tests, Drafts.IsDirty(ProjectValue, Material->ID));
+		const auto DirtyAssets = Drafts.GetDirtyAssets(ProjectValue);
+		PF_CHECK(Tests, DirtyAssets.size() == 1 && DirtyAssets.front() == Material->ID);
+	}
 	void TestProjectFiles(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -345,5 +458,6 @@ namespace
 void RunEditorMaterialProjectTests(TestRunner& Tests)
 {
 	TestMaterialAssets(Tests);
+	TestMaterialDraftController(Tests);
 	TestProjectFiles(Tests);
 }

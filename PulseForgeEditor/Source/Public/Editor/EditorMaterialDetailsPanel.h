@@ -13,7 +13,7 @@ namespace PulseForge
 namespace PulseForgeEditor
 {
 	class EditorAssetSelector;
-	class EditorMaterialDraftStore;
+	class EditorMaterialDraftController;
 	class EditorStyle;
 
 	class EditorMaterialDetailsActionSink
@@ -34,7 +34,7 @@ namespace PulseForgeEditor
 			const PulseForge::Project* Project,
 			std::optional<PulseForge::AssetID>& SelectedAsset,
 			const std::vector<PulseForge::AssetRecord>& Assets,
-			EditorMaterialDraftStore& Drafts,
+			EditorMaterialDraftController& Drafts,
 			EditorAssetSelector& AssetSelector,
 			EditorStyle& Style,
 			EditorMaterialDetailsActionSink& Actions);
@@ -44,14 +44,14 @@ namespace PulseForgeEditor
 			const PulseForge::Project& Project,
 			const PulseForge::AssetRecord& Asset,
 			const std::vector<PulseForge::AssetRecord>& Assets,
-			EditorMaterialDraftStore& Drafts,
+			EditorMaterialDraftController& Drafts,
 			EditorAssetSelector& AssetSelector,
 			EditorStyle& Style,
 			EditorMaterialDetailsActionSink& Actions);
 		void DrawMaterialActions(
 			const PulseForge::AssetRecord& Asset,
 			const PulseForge::Project& Project,
-			EditorMaterialDraftStore& Drafts,
+			EditorMaterialDraftController& Drafts,
 			EditorStyle& Style,
 			EditorMaterialDetailsActionSink& Actions);
 	};

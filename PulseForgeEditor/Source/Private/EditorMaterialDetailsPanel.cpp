@@ -1,10 +1,9 @@
 #include "Editor/EditorMaterialDetailsPanel.h"
 
-#include "Assets/MaterialAssetService.h"
 #include "Assets/Project.h"
 #include "Editor/EditorAssetSelector.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
-#include "EditorMaterialDraftStore.h"
+#include "Editor/EditorMaterialDraftController.h"
 #include "Editor/EditorMaterialPropertyLayoutPolicy.h"
 #include "Editor/EditorStyle.h"
 
@@ -27,12 +26,6 @@ namespace PulseForgeEditor
 			return std::string(reinterpret_cast<const char*>(Encoded.data()), Encoded.size());
 		}
 
-		std::string GetDraftKey(const PulseForge::Project& Project, const PulseForge::AssetID& Asset)
-		{
-			return MakeMaterialDraftKey(
-				PathToUtf8(Project.GetRootPath().lexically_normal()), Asset.ToString());
-		}
-
 		std::string NormalizedExtension(const std::filesystem::path& Path)
 		{
 			std::string Extension = Path.extension().string();
@@ -48,7 +41,7 @@ namespace PulseForgeEditor
 		const PulseForge::Project* ProjectValue,
 		std::optional<PulseForge::AssetID>& SelectedAsset,
 		const std::vector<PulseForge::AssetRecord>& Assets,
-		EditorMaterialDraftStore& Drafts,
+		EditorMaterialDraftController& Drafts,
 		EditorAssetSelector& AssetSelector,
 		EditorStyle& Style,
 		EditorMaterialDetailsActionSink& Actions)
@@ -77,7 +70,7 @@ namespace PulseForgeEditor
 		const std::string FullPath = PathToUtf8(Asset->ProjectRelativePath);
 		const std::string Identifier = Asset->ID.ToString();
 		Style.IconText(EditorIcon::Material, Name);
-		if (Drafts.IsDirty(GetDraftKey(*ProjectValue, Asset->ID)))
+		if (Drafts.IsDirty(*ProjectValue, Asset->ID))
 		{
 			ImGui::SameLine();
 			ImGui::TextColored(Style.GetColor(EditorColorToken::Warning), "Unsaved");
@@ -102,37 +95,30 @@ namespace PulseForgeEditor
 		const PulseForge::Project& ProjectValue,
 		const PulseForge::AssetRecord& Asset,
 		const std::vector<PulseForge::AssetRecord>& Assets,
-		EditorMaterialDraftStore& Drafts,
+		EditorMaterialDraftController& Drafts,
 		EditorAssetSelector& AssetSelector,
 		EditorStyle& Style,
 		EditorMaterialDetailsActionSink& Actions)
 	{
-		const std::string Key = GetDraftKey(ProjectValue, Asset.ID);
-		if (const std::string* Error = Drafts.FindError(Key))
+		if (const std::string* Error = Drafts.FindError(ProjectValue, Asset.ID))
 		{
 			ImGui::TextColored(Style.GetColor(EditorColorToken::Error), "Material could not be loaded: %s", Error->c_str());
 			if (ImGui::SmallButton("Retry Material Load"))
-				Drafts.ClearError(Key);
+				Drafts.ClearLoadError(ProjectValue, Asset.ID);
 			return false;
 		}
 
-		PulseForge::MaterialAssetDesc* Draft = Drafts.FindDraft(Key);
-		if (!Draft)
+		auto Loaded = Drafts.LoadDraft(ProjectValue, Asset.ID);
+		if (!Loaded)
 		{
-			auto Loaded = PulseForge::MaterialAssetService::Load(
-				Asset.ID, ProjectValue.GetRootPath(), ProjectValue.GetAssetRegistry());
-			if (!Loaded)
-			{
-				Drafts.SetError(Key, Loaded.error().Message);
-				ImGui::TextColored(Style.GetColor(EditorColorToken::Error),
-					"Material could not be loaded: %s", Loaded.error().Message.c_str());
-				if (ImGui::SmallButton("Retry Material Load"))
-					Drafts.ClearError(Key);
-				return false;
-			}
-			Draft = &Drafts.PutDraft(Key, std::move(*Loaded));
+			ImGui::TextColored(Style.GetColor(EditorColorToken::Error),
+				"Material could not be loaded: %s", Loaded.error().c_str());
+			if (ImGui::SmallButton("Retry Material Load"))
+				Drafts.ClearLoadError(ProjectValue, Asset.ID);
+			return false;
 		}
 
+		PulseForge::MaterialAssetDesc* Draft = &Loaded->get();
 		const PulseForge::MaterialAssetDesc MaterialBeforeEdit = *Draft;
 		PulseForge::MaterialAssetDesc& Material = *Draft;
 		bool Changed = false;
@@ -310,7 +296,7 @@ namespace PulseForgeEditor
 		ImGui::TextWrapped("Mask clips below Alpha Cutoff and casts cutout shadows. Blend is sorted back-to-front and does not cast shadows.");
 		ImGui::PopStyleColor();
 
-		if (Changed && Drafts.BeginEdit(Key, MaterialBeforeEdit))
+		if (Changed && Drafts.BeginEdit(ProjectValue, Asset.ID, MaterialBeforeEdit))
 			Actions.MaterialDetailsDraftEdited(ProjectValue.GetDescription().ID, Asset.ID);
 		return true;
 	}
@@ -318,13 +304,12 @@ namespace PulseForgeEditor
 	void EditorMaterialDetailsPanel::DrawMaterialActions(
 		const PulseForge::AssetRecord& Asset,
 		const PulseForge::Project& ProjectValue,
-		EditorMaterialDraftStore& Drafts,
+		EditorMaterialDraftController& Drafts,
 		EditorStyle& Style,
 		EditorMaterialDetailsActionSink& Actions)
 	{
-		const std::string Key = GetDraftKey(ProjectValue, Asset.ID);
-		const bool HasDraft = Drafts.ContainsDraft(Key);
-		const bool IsDirty = Drafts.IsDirty(Key);
+		const bool HasDraft = Drafts.ContainsDraft(ProjectValue, Asset.ID);
+		const bool IsDirty = Drafts.IsDirty(ProjectValue, Asset.ID);
 		if (IsDirty)
 			ImGui::TextColored(Style.GetColor(EditorColorToken::Warning), "Unsaved material draft");
 		else

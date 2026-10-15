@@ -1,6 +1,6 @@
 #include "TestEditorSupport.h"
 #include "EditorConsoleHistory.h"
-#include "EditorMaterialDraftStore.h"
+#include "Editor/EditorMaterialDraftStore.h"
 #include "Editor/EditorStatusPanel.h"
 
 namespace

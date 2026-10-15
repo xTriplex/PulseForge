@@ -48,7 +48,7 @@
 #include "EditorViewportCamera.h"
 #include "EditorViewportSceneRenderView.h"
 #include "Editor/EditorViewportToolbar.h"
-#include "EditorMaterialDraftStore.h"
+#include "Editor/EditorMaterialDraftController.h"
 #include "Editor/EditorContentBrowserPolicy.h"
 #include "Editor/EditorContentBrowserState.h"
 #include "Editor/EditorAssetWorkflowState.h"
@@ -779,7 +779,7 @@ namespace
 
 		bool IsContentBrowserMaterialDraftDirty(const PulseForge::AssetID& Identifier) const override
 		{
-			return m_MaterialDraftStore.IsDirty(GetMaterialDraftKey(Identifier));
+			return m_Project && m_MaterialDrafts.IsDirty(*m_Project, Identifier);
 		}
 
 		bool SaveMaterialFromDetails(const PulseForge::AssetID& Asset) override
@@ -4936,9 +4936,8 @@ namespace
 					const auto Material = GetFocusedMaterialAsset();
 					if (Material)
 					{
-						const std::string Key = GetMaterialDraftKey(*Material);
-						CanUndoDocument = m_MaterialDraftStore.CanUndo(Key);
-						CanRedoDocument = m_MaterialDraftStore.CanRedo(Key);
+						CanUndoDocument = m_Project && m_MaterialDrafts.CanUndo(*m_Project, *Material);
+						CanRedoDocument = m_Project && m_MaterialDrafts.CanRedo(*m_Project, *Material);
 					}
 				}
 				const bool HasSelection = !m_SceneWorkspace.Selection().GetEntities().empty();
@@ -5189,7 +5188,7 @@ namespace
 					(std::max)(0.0f, ImGui::GetContentRegionAvail().x - SaveWidth));
 				const auto* FocusedDocument = GetFocusedDocumentIdentity();
 				const bool MaterialCanSave = IsFocusedMaterialDocument() && FocusedDocument &&
-					m_MaterialDraftStore.IsDirty(GetMaterialDraftKey(FocusedDocument->Asset));
+					m_Project && m_MaterialDrafts.IsDirty(*m_Project, FocusedDocument->Asset);
 				const bool RegisteredDocumentFocused = GetFocusedRegisteredDocument() != nullptr;
 				ImGui::BeginDisabled(RegisteredDocumentFocused ? false : IsFocusedMaterialDocument() ? !MaterialCanSave :
 					(!m_Scene || !m_SceneAsset || m_SceneRuntime));
@@ -5256,33 +5255,17 @@ namespace
 				SetError("Cannot save a material document without an open project.");
 				return false;
 			}
-			auto Asset = m_Project->GetAssetRegistry().Find(Identifier);
-			if (!Asset || NormalizedExtension(Asset->ProjectRelativePath) != ".material")
-			{
-				SetError("The material document's asset is no longer registered.");
-				return false;
-			}
-			const std::string Key = GetMaterialDraftKey(Identifier);
-			PulseForge::MaterialAssetDesc* const Draft = m_MaterialDraftStore.FindDraft(Key);
-			if (!Draft || !m_MaterialDraftStore.IsDirty(Key))
+			if (!m_MaterialDrafts.IsDirty(*m_Project, Identifier))
 				return true;
-
-			const auto Saved = PulseForge::MaterialAssetService::Save(
-				Identifier, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), *Draft);
-			if (!Saved)
+			auto SavedPath = m_MaterialDrafts.Save(*m_Project, Identifier, m_Documents);
+			if (!SavedPath)
 			{
-				SetError("Material save failed: " + Saved.error().Message);
+				SetError("Material save failed: " + SavedPath.error());
 				return false;
 			}
-			m_MaterialDraftStore.MarkSaved(Key);
-			const PulseForgeEditor::EditorDocumentIdentity Identity{
-				m_Project->GetDescription().ID, Identifier, PulseForgeEditor::EditorDocumentKind::Material
-			};
-			if (const auto* Session = m_Documents.Find(Identity))
-				(void)m_Documents.MarkSaved(Identity, Session->Revision);
 			m_AssetPreviewAssetsPending = true;
 			m_ViewportRenderView.RefreshMaterialAssets();
-			SetStatus("Saved material " + PathToUtf8(Asset->ProjectRelativePath.filename()) + ".");
+			SetStatus("Saved material " + PathToUtf8(SavedPath->filename()) + ".");
 			return true;
 		}
 
@@ -5290,20 +5273,11 @@ namespace
 		{
 			if (!m_Project)
 				return false;
-			auto Loaded = PulseForge::MaterialAssetService::Load(
-				Identifier, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
-			if (!Loaded)
+			if (auto Reloaded = m_MaterialDrafts.Reload(*m_Project, Identifier, m_Documents); !Reloaded)
 			{
-				SetError("Material reload failed: " + Loaded.error().Message);
+				SetError("Material reload failed: " + Reloaded.error());
 				return false;
 			}
-			const std::string Key = GetMaterialDraftKey(Identifier);
-			m_MaterialDraftStore.ReplaceDraft(Key, std::move(*Loaded));
-			const PulseForgeEditor::EditorDocumentIdentity Identity{
-				m_Project->GetDescription().ID, Identifier, PulseForgeEditor::EditorDocumentKind::Material
-			};
-			if (auto* Session = m_Documents.Find(Identity))
-				Session->Revision = Session->SavedRevision;
 			return true;
 		}
 
@@ -5316,16 +5290,10 @@ namespace
 			if (m_Project)
 			{
 				const PulseForge::UUID ProjectID = m_Project->GetDescription().ID;
-				for (const std::string& Key : m_MaterialDraftStore.GetDirtyKeys())
+				for (const PulseForge::AssetID& Asset : m_MaterialDrafts.GetDirtyAssets(*m_Project))
 				{
-					const size_t Separator = Key.rfind(':');
-					if (Separator == std::string::npos)
-						continue;
-					const auto Asset = PulseForge::UUID::Parse(std::string_view(Key).substr(Separator + 1));
-					if (!Asset)
-						continue;
 					const PulseForgeEditor::EditorDocumentIdentity Identity{
-						ProjectID, *Asset, PulseForgeEditor::EditorDocumentKind::Material };
+						ProjectID, Asset, PulseForgeEditor::EditorDocumentKind::Material };
 					if (std::find(Dirty.begin(), Dirty.end(), Identity) == Dirty.end())
 						Dirty.push_back(Identity);
 				}
@@ -5480,7 +5448,7 @@ namespace
 					{
 						auto* Session = m_Documents.Find(Identity);
 						const bool DirtyMaterial = Identity.Kind == PulseForgeEditor::EditorDocumentKind::Material &&
-							m_MaterialDraftStore.IsDirty(GetMaterialDraftKey(Identity.Asset));
+							m_Project && m_MaterialDrafts.IsDirty(*m_Project, Identity.Asset);
 						if (Session && Session->IsDirty())
 						{
 							if (m_DocumentEditors.IsRegistered(Identity.Kind) && Session->EditorState)
@@ -5505,7 +5473,7 @@ namespace
 					{
 						auto* Session = m_Documents.Find(Identity);
 						const bool DirtyMaterial = Identity.Kind == PulseForgeEditor::EditorDocumentKind::Material &&
-							m_MaterialDraftStore.IsDirty(GetMaterialDraftKey(Identity.Asset));
+							m_Project && m_MaterialDrafts.IsDirty(*m_Project, Identity.Asset);
 						if ((!Session || !Session->IsDirty()) && !DirtyMaterial)
 							continue;
 						if (Session && Session->IsDirty() && m_DocumentEditors.IsRegistered(Identity.Kind) &&
@@ -5527,8 +5495,7 @@ namespace
 					}
 					for (auto& [Identity, Material] : Reloaded)
 					{
-						const std::string Key = GetMaterialDraftKey(Identity.Asset);
-						m_MaterialDraftStore.ReplaceDraft(Key, std::move(Material));
+						m_MaterialDrafts.ReplaceDraft(*m_Project, Identity.Asset, std::move(Material));
 						if (auto* Session = m_Documents.Find(Identity))
 							Session->Revision = Session->SavedRevision;
 					}
@@ -8360,23 +8327,16 @@ namespace
 			SetEditorPanelVisible(PulseForgeEditor::EditorPanel::MaterialDetails, true);
 		}
 
-		std::string GetMaterialDraftKey(const PulseForge::AssetID& Asset) const
-		{
-			return PulseForgeEditor::MakeMaterialDraftKey(
-				PathToUtf8(m_Project->GetRootPath().lexically_normal()), Asset.ToString());
-		}
-
 		void ClearMaterialDraftsForProject()
 		{
 			if (!m_Project)
 				return;
-			const std::string Prefix = PathToUtf8(m_Project->GetRootPath().lexically_normal()) + ":";
-			m_MaterialDraftStore.ClearProject(Prefix);
+			m_MaterialDrafts.ClearProject(*m_Project);
 		}
 
 		void FinalizePendingMaterialEdits()
 		{
-			m_MaterialDraftStore.FinalizePendingEdits(ImGui::IsAnyItemActive());
+			m_MaterialDrafts.FinalizePendingEdits(ImGui::IsAnyItemActive());
 		}
 
 		bool ApplyMaterialHistoryStep(bool Redo)
@@ -8384,24 +8344,11 @@ namespace
 			const auto Asset = GetFocusedMaterialAsset();
 			if (!Asset || !m_Project)
 				return false;
-			const std::string Key = GetMaterialDraftKey(*Asset);
-			const auto Changed = m_MaterialDraftStore.ApplyHistoryStep(Key, Redo);
+			const auto Changed = m_MaterialDrafts.ApplyHistoryStep(*m_Project, *Asset, Redo, m_Documents);
 			if (!Changed)
 				return false;
 			if (!*Changed)
 				return true;
-
-			const PulseForgeEditor::EditorDocumentIdentity Identity{
-				m_Project->GetDescription().ID, *Asset, PulseForgeEditor::EditorDocumentKind::Material
-			};
-			if (m_Documents.Find(Identity))
-			{
-				if (!m_Documents.MarkEdited(Identity))
-					return false;
-				if (!m_MaterialDraftStore.IsDirty(Key))
-					if (auto* Session = m_Documents.Find(Identity))
-						Session->SavedRevision = Session->Revision;
-			}
 			SetStatus(Redo ? "Redid material edit." : "Undid material edit.");
 			return true;
 		}
@@ -8409,7 +8356,7 @@ namespace
 		void ForgetMaterialDraft(const PulseForge::AssetID& Asset)
 		{
 			if (m_Project)
-				m_MaterialDraftStore.Forget(GetMaterialDraftKey(Asset));
+				m_MaterialDrafts.Forget(*m_Project, Asset);
 		}
 		void DrawMaterialDetailsPanel()
 		{
@@ -8435,7 +8382,7 @@ namespace
 					m_Project ? &*m_Project : nullptr,
 					m_MaterialDetailsAsset,
 					m_ContentBrowser.Assets(),
-					m_MaterialDraftStore,
+					m_MaterialDrafts,
 					m_AssetSelector,
 					m_EditorStyle,
 					*this);
@@ -8853,7 +8800,7 @@ namespace
 		PulseForgeEditor::EditorViewportCamera m_EditorCamera;
 		std::optional<PulseForge::AssetID> m_SceneAsset;
 		PulseForgeEditor::EditorSceneEntityCommands m_SceneEntityCommands;
-		PulseForgeEditor::EditorMaterialDraftStore m_MaterialDraftStore;
+		PulseForgeEditor::EditorMaterialDraftController m_MaterialDrafts;
 		std::string m_WindowTitle;
 		std::string m_ImGuiRenderingError;
 		std::string m_LayoutPersistenceError;
