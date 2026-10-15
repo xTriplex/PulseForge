@@ -1424,12 +1424,19 @@ namespace
 
 		void MarkSceneSaved() { m_SceneEditController.MarkSaved(m_Scene.get()); }
 
-		void FinishSceneEdit()
+		bool FinishSceneEdit()
 		{
-			if (auto Result = m_SceneEditController.Finish(
-					m_Scene.get(), m_SceneWorkspace, [this](std::string_view State) { return RestoreSceneState(State); });
-				!Result)
+			const auto Restore = [this](std::string_view State) { return RestoreSceneState(State); };
+			std::expected<void, std::string> Result;
+			if (m_ViewportGizmoInteraction.IsActive())
+				Result = m_ViewportGizmoInteraction.Complete(m_Scene.get(), m_SceneWorkspace, m_SceneEditController, Restore);
+			else Result = m_SceneEditController.Finish(m_Scene.get(), m_SceneWorkspace, Restore);
+			if (!Result)
+			{
 				SetError(Result.error());
+				return false;
+			}
+			return true;
 		}
 
 		template<typename Action>
@@ -1867,13 +1874,13 @@ namespace
 
 		bool ClearCurrentProjectDocumentState(std::function<void()> OnDocumentsClosed = {})
 		{
+			if (!FinishSceneEdit()) return false;
 			if (m_Project)
 			{
 				SaveDocumentWorkspaceNow();
 				std::vector<PulseForgeEditor::EditorDocumentIdentity> ProjectDocuments;
 				for (const auto& [Identity, Session] : m_Documents.GetSessions())
-					if (Identity.Project == m_Project->GetDescription().ID &&
-						Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level)
+					if (Identity.Project == m_Project->GetDescription().ID && Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level)
 						ProjectDocuments.push_back(Identity);
 				if (!CloseDocumentBatchClean(ProjectDocuments))
 				{
@@ -1912,8 +1919,9 @@ namespace
 				SetWarning("The Level Editor document session could not be registered: " + LevelDocument.error());
 		}
 
-		void ActivatePreparedProject(PulseForgeEditor::PreparedEditorProject&& Prepared, bool ClearSceneWhenMissing)
+		bool ActivatePreparedProject(PulseForgeEditor::PreparedEditorProject&& Prepared, bool ClearSceneWhenMissing)
 		{
+			if (!FinishSceneEdit()) return false;
 			auto StartupScene = std::move(Prepared.StartupScene);
 			const auto StartupSceneAsset = Prepared.StartupSceneAsset;
 			StopRuntime();
@@ -1933,6 +1941,7 @@ namespace
 			}
 			UpdateAssetList();
 			RestoreDocumentWorkspace();
+			return true;
 		}
 
 		void CreateProjectAt(const std::filesystem::path& ProjectFile)
@@ -1951,7 +1960,7 @@ namespace
 				Created->StartupSceneWarning = std::move(*StartSceneWarning);
 			std::string SceneError = std::move(Created->StartupSceneError);
 			std::string SceneWarning = std::move(Created->StartupSceneWarning);
-			ActivatePreparedProject(std::move(*Created), true);
+			if (!ActivatePreparedProject(std::move(*Created), true)) return;
 			if (!SceneError.empty()) SetError(std::move(SceneError));
 			else if (!SceneWarning.empty()) SetWarning(std::move(SceneWarning));
 			else SetStatus("Created project " + ProjectName + " with Assets/Main.scene.");
@@ -1987,7 +1996,8 @@ namespace
 			if (!ClearCurrentProjectDocumentState([this, ProjectFile] { (void)OpenProjectAt(ProjectFile); }))
 				return std::unexpected("The current project has a document session that could not close");
 			std::string StartupSceneWarning = std::move(Opened->StartupSceneWarning);
-			ActivatePreparedProject(std::move(*Opened), false);
+			if (!ActivatePreparedProject(std::move(*Opened), false))
+				return std::unexpected("The current scene edit could not be completed before project activation");
 			InitializeDocumentHostTestFixture();
 			if (StartupSceneWarning.empty()) SetStatus("Opened project " + ProjectName + ".");
 			else SetWarning(std::move(StartupSceneWarning));
@@ -4186,15 +4196,12 @@ namespace
 				return;
 			}
 			const std::filesystem::path RelativePath = AbsolutePath.lexically_relative(m_Project->GetRootPath());
+			if (!FinishSceneEdit()) return;
 			std::unique_ptr<PulseForge::Scene> NewScene;
-			if (!SaveAs)
-				NewScene = std::make_unique<PulseForge::Scene>();
+			if (!SaveAs) NewScene = std::make_unique<PulseForge::Scene>();
 			const PulseForge::Scene& Source = SaveAs ? *m_Scene : *NewScene;
-			auto Created = PulseForge::SceneAssetService::Create(
-				m_Project->GetAssetRegistry(),
-				m_Project->GetRootPath(),
-				RelativePath,
-				Source);
+			auto Created =
+				PulseForge::SceneAssetService::Create(m_Project->GetAssetRegistry(), m_Project->GetRootPath(), RelativePath, Source);
 			if (!Created && !Created.error().CommittedAsset)
 			{
 				SetError("Scene asset creation failed: " + Created.error().Message);
@@ -4210,31 +4217,25 @@ namespace
 			}
 			m_SceneAsset = Record.ID;
 			SelectSingleEntity(std::nullopt);
-			if (SaveAs)
-				MarkSceneSaved();
-			else
-				ResetSceneHistory();
+			if (SaveAs) MarkSceneSaved();
+			else ResetSceneHistory();
 			UpdateAssetList();
 			if (auto StartScene = m_Project->SetStartScene(Record.ID); !StartScene)
 			{
 				std::string Message = "Scene was created, but the project startup scene could not be updated: ";
 				Message += StartScene.error().Message;
-				if (!Created)
-					Message += " Temporary cleanup also needs attention: " + Created.error().Message;
-				if (!Created && Created.error().RecoveryPath)
-					Message += " Recovery data: " + PathToUtf8(*Created.error().RecoveryPath);
+				if (!Created) Message += " Temporary cleanup also needs attention: " + Created.error().Message;
+				if (!Created && Created.error().RecoveryPath) Message += " Recovery data: " + PathToUtf8(*Created.error().RecoveryPath);
 				SetWarning(std::move(Message));
 			}
 			else if (!Created)
 			{
 				std::string Message = "Scene was created, but temporary cleanup needs attention: ";
 				Message += Created.error().Message;
-				if (Created.error().RecoveryPath)
-					Message += " Recovery data: " + PathToUtf8(*Created.error().RecoveryPath);
+				if (Created.error().RecoveryPath) Message += " Recovery data: " + PathToUtf8(*Created.error().RecoveryPath);
 				SetWarning(std::move(Message));
 			}
-			else
-				SetStatus("Created scene " + PathToUtf8(Record.ProjectRelativePath) + ".");
+			else SetStatus("Created scene " + PathToUtf8(Record.ProjectRelativePath) + ".");
 		}
 
 		void OpenScene(const PulseForge::AssetID& Identifier)
@@ -4244,19 +4245,16 @@ namespace
 
 		void OpenSceneNow(const PulseForge::AssetID& Identifier)
 		{
-			if (!m_Project)
-				return;
+			if (!m_Project) return;
 			auto Loaded = std::make_unique<PulseForge::Scene>();
-			const auto Result = PulseForge::SceneAssetService::Load(
-				Identifier,
-				m_Project->GetRootPath(),
-				m_Project->GetAssetRegistry(),
-				*Loaded);
+			const auto Result =
+				PulseForge::SceneAssetService::Load(Identifier, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), *Loaded);
 			if (!Result)
 			{
 				SetError("Scene could not be opened: " + Result.error().Message);
 				return;
 			}
+			if (!FinishSceneEdit()) return;
 
 			StopRuntime();
 			ResetEditorViewportCamera();
@@ -4283,18 +4281,15 @@ namespace
 
 		bool SaveScene()
 		{
-			FinishSceneEdit();
+			if (!FinishSceneEdit()) return false;
 			if (!m_Project || !m_Scene || !m_SceneAsset)
 			{
 				SetError("There is no managed scene asset to save.");
 				return false;
 			}
 
-			const auto Result = PulseForge::SceneAssetService::Save(
-				*m_SceneAsset,
-				m_Project->GetRootPath(),
-				m_Project->GetAssetRegistry(),
-				*m_Scene);
+			const auto Result =
+				PulseForge::SceneAssetService::Save(*m_SceneAsset, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), *m_Scene);
 			if (!Result)
 			{
 				SetError("Scene save failed: " + Result.error().Message);
@@ -4310,7 +4305,7 @@ namespace
 
 		void QueueAfterSave(std::function<void()> Action)
 		{
-			FinishSceneEdit();
+			if (!FinishSceneEdit()) return;
 			if (m_SceneTransitionQueue.HasPendingDecision())
 			{
 				SetWarning("Resolve the current unsaved-scene prompt before starting another editor operation.");
@@ -4330,6 +4325,7 @@ namespace
 
 		bool DiscardSceneChanges()
 		{
+			if (!FinishSceneEdit()) return false;
 			if (!m_SceneEditController.IsDirty()) return true;
 			if (!m_Project || !m_Scene || !m_SceneAsset)
 			{
@@ -4338,11 +4334,8 @@ namespace
 			}
 
 			auto ReloadedScene = std::make_unique<PulseForge::Scene>();
-			const auto Result = PulseForge::SceneAssetService::Load(
-				*m_SceneAsset,
-				m_Project->GetRootPath(),
-				m_Project->GetAssetRegistry(),
-				*ReloadedScene);
+			const auto Result =
+				PulseForge::SceneAssetService::Load(*m_SceneAsset, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), *ReloadedScene);
 			if (!Result)
 			{
 				SetError("Unsaved changes were preserved because the saved scene could not be reloaded: " + Result.error().Message);
@@ -4413,8 +4406,7 @@ namespace
 
 		void CloseProjectNow()
 		{
-			if (!ClearCurrentProjectDocumentState([this] { CloseProjectNow(); }))
-				return;
+			if (!ClearCurrentProjectDocumentState([this] { CloseProjectNow(); })) return;
 			ClearScene();
 			ResetViewportSceneRenderer();
 			m_Project.reset();
