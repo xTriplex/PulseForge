@@ -61,8 +61,8 @@ namespace PulseForgeEditor
 		DragState Drag;
 		Drag.Entity = *SelectedIdentifier;
 		Drag.SceneIdentity = &SceneValue;
-		Drag.InitialTransform = *Transform;
 		Drag.Targets = std::move(*Targets);
+		Drag.InitialTransform = Drag.Targets.size() == 1 ? Drag.Targets.front().LocalTransform : *Transform;
 		Drag.SourceRoots = std::move(RootIdentifiers);
 		Drag.Operation = Input.Handle.Operation;
 		Drag.Axis = Input.Handle.Axis;
@@ -82,9 +82,11 @@ namespace PulseForgeEditor
 		const RestoreCallback& RestoreState)
 	{
 		if (!m_Drag) return {};
+		if (!SceneValue || SceneValue != m_Drag->SceneIdentity)
+			return std::unexpected(
+				"The scene changed during the viewport transform; the active transaction must be cancelled against its original scene.");
 		const auto SelectedIdentifier = Workspace.Selection().GetPrimary();
-		if (!SceneValue || SceneValue != m_Drag->SceneIdentity || Input.RuntimeActive || !SelectedIdentifier ||
-			*SelectedIdentifier != m_Drag->Entity)
+		if (Input.RuntimeActive || !SelectedIdentifier || *SelectedIdentifier != m_Drag->Entity)
 		{
 			if (auto Cancelled = Cancel(SceneValue, Workspace, EditController, RestoreState); !Cancelled)
 				return std::unexpected("Scene edit rollback failed: " + Cancelled.error());
@@ -244,6 +246,8 @@ namespace PulseForgeEditor
 		EditorSceneWorkspaceState& Workspace, EditorSceneEditController& EditController, const RestoreCallback& RestoreState)
 	{
 		if (!m_Drag) return {};
+		if (!SceneValue || SceneValue != m_Drag->SceneIdentity)
+			return std::unexpected("The scene changed during the viewport transform; rollback must use the original scene.");
 		auto Cancelled = EditController.Cancel(SceneValue, Workspace, RestoreState);
 		if (!EditController.IsActive()) m_Drag.reset();
 		return Cancelled;
@@ -253,6 +257,8 @@ namespace PulseForgeEditor
 		EditorSceneWorkspaceState& Workspace, EditorSceneEditController& EditController, const RestoreCallback& RestoreState)
 	{
 		if (!m_Drag) return {};
+		if (!SceneValue || SceneValue != m_Drag->SceneIdentity)
+			return std::unexpected("The scene changed during the viewport transform; completion must use the original scene.");
 		auto Completed = EditController.Finish(SceneValue, Workspace, RestoreState);
 		if (!EditController.IsActive()) m_Drag.reset();
 		return Completed;

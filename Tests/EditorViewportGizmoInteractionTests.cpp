@@ -17,6 +17,8 @@ namespace
 	using namespace PulseForge;
 	using namespace PulseForgeEditor;
 
+	ViewportGizmoGeometry MakeTestGeometry();
+
 	bool SameTransform(const TransformComponent& First, const TransformComponent& Second)
 	{
 		constexpr float Epsilon = 1.0e-5f;
@@ -88,6 +90,10 @@ namespace
 		const auto Displaced = GetTransform();
 		PF_CHECK(Tests, Displaced.has_value() && !SameTransform(*Displaced, Initial));
 		PF_CHECK(Tests, Edits.IsDirty());
+		PF_CHECK(Tests, Interaction.Update(&SceneValue, Workspace, Edits, MakeUpdateInput(StartMouse), Restore));
+		const auto ReturnedToPointerOrigin = GetTransform();
+		PF_CHECK(Tests, ReturnedToPointerOrigin.has_value() && SameTransform(*ReturnedToPointerOrigin, Initial));
+		PF_CHECK(Tests, Interaction.Update(&SceneValue, Workspace, Edits, MakeUpdateInput(MovedMouse), Restore));
 		PF_CHECK(Tests, Interaction.Update(&SceneValue, Workspace, Edits, MakeUpdateInput(SnappedReturnMouse), Restore));
 		const auto Returned = GetTransform();
 		PF_CHECK(Tests, Returned.has_value() && SameTransform(*Returned, Initial));
@@ -109,6 +115,107 @@ namespace
 		PF_CHECK(Tests, !Edits.CanUndo());
 	}
 
+	void RunParentChildLocalTransformCase(TestRunner& Tests, TransformGizmoOperation Operation)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		Scene SceneValue;
+		auto Parent = SceneValue.CreateEntity("Selected parent root");
+		auto Child = SceneValue.CreateEntity("Primary selected child");
+		PF_CHECK(Tests, Parent && Child);
+		if (!Parent || !Child) return;
+
+		TransformComponent ParentInitial = *Parent->GetTransform();
+		ParentInitial.Rotation = glm::angleAxis(glm::radians(45.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+		ParentInitial.Scale = { 2.0f, 1.0f, 1.0f };
+		PF_CHECK(Tests, Parent->SetTransform(ParentInitial));
+		PF_CHECK(Tests, Child->SetParent(*Parent));
+		TransformComponent ChildInitial = *Child->GetTransform();
+		ChildInitial.Translation = { 0.5f, 0.25f, 0.0f };
+		ChildInitial.Rotation = glm::angleAxis(glm::radians(75.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+		ChildInitial.Scale = { 0.5f, 1.25f, 0.75f };
+		PF_CHECK(Tests, Child->SetTransform(ChildInitial));
+
+		EditorSceneWorkspaceState Workspace;
+		Workspace.Selection().Set({ Parent->GetUUID(), Child->GetUUID() }, Child->GetUUID());
+		EditorSceneEditController Edits;
+		Edits.Reset(&SceneValue);
+		EditorViewportGizmoInteraction Interaction;
+		const glm::mat4 View = glm::lookAtRH(glm::vec3(0.0f, 0.0f, 5.0f), glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+		const glm::mat4 Projection = glm::perspectiveRH_ZO(glm::radians(45.0f), 1.0f, 0.1f, 100.0f);
+		const glm::mat4 ViewProjection = Projection * View;
+		const ViewportImageRect ImageRect{ { 0.0f, 0.0f }, { 100.0f, 100.0f } };
+		const glm::vec3 AxisX = glm::normalize(ParentInitial.Rotation * glm::vec3(1.0f, 0.0f, 0.0f));
+		ViewportGizmoGeometry Geometry = MakeTestGeometry();
+		Geometry.PivotWorld = { 0.0f, 0.0f, 0.0f };
+		Geometry.Axes[0].WorldDirection = AxisX;
+		Geometry.Axes[0].WorldUnitsPerLocalUnit = 2.0f;
+		Geometry.Axes[2].WorldDirection = { 0.0f, 0.0f, 1.0f };
+		const uint32_t Axis = Operation == TransformGizmoOperation::Rotate ? 2u : 0u;
+		const glm::vec2 StartMouse = Operation == TransformGizmoOperation::Rotate ? glm::vec2{ 75.0f, 50.0f } : glm::vec2{ 50.0f, 50.0f };
+		const glm::vec2 MovedMouse = Operation == TransformGizmoOperation::Rotate ? glm::vec2{ 50.0f, 75.0f } : glm::vec2{ 75.0f, 25.0f };
+		EditorViewportGizmoBeginInput BeginInput;
+		BeginInput.Handle = { Operation, Axis };
+		BeginInput.Geometry = Geometry;
+		BeginInput.MousePosition = StartMouse;
+		BeginInput.ImageRect = ImageRect;
+		BeginInput.ViewProjection = ViewProjection;
+		BeginInput.CameraPosition = { 0.0f, 0.0f, 5.0f };
+		BeginInput.ViewProjectionValid = true;
+		const auto Restore = [&Edits, &SceneValue, &Workspace](std::string_view Snapshot) -> std::expected<void, std::string>
+		{ return Edits.Restore(Snapshot, SceneValue, Workspace); };
+		const auto Began = Interaction.Begin(SceneValue, Workspace, Edits, BeginInput, Restore);
+		PF_CHECK(Tests, Began && *Began);
+		if (!Began || !*Began) return;
+		EditorViewportGizmoUpdateInput UpdateInput;
+		UpdateInput.MousePosition = MovedMouse;
+		UpdateInput.ImageRect = ImageRect;
+		UpdateInput.ViewProjection = ViewProjection;
+		UpdateInput.ToolValues.LocalSpace = true;
+		PF_CHECK(Tests, Interaction.Update(&SceneValue, Workspace, Edits, UpdateInput, Restore));
+
+		const auto UpdatedParent = SceneValue.FindEntity(Parent->GetUUID());
+		const auto UpdatedChild = SceneValue.FindEntity(Child->GetUUID());
+		PF_CHECK(Tests, UpdatedParent && UpdatedChild);
+		if (!UpdatedParent || !UpdatedChild) return;
+		const auto ParentTransform = UpdatedParent->GetTransform();
+		const auto ChildTransform = UpdatedChild->GetTransform();
+		PF_CHECK(Tests, ParentTransform && ChildTransform && SameTransform(*ChildTransform, ChildInitial));
+		if (!ParentTransform || !ChildTransform) return;
+		if (Operation == TransformGizmoOperation::Translate)
+		{
+			PF_CHECK(Tests, glm::length(ParentTransform->Translation - ParentInitial.Translation) > 1.0e-3f);
+			PF_CHECK(Tests, glm::length(ParentTransform->Scale - ParentInitial.Scale) < 1.0e-5f);
+			PF_CHECK(Tests, 1.0f - std::abs(glm::dot(ParentTransform->Rotation, ParentInitial.Rotation)) < 1.0e-5f);
+		}
+		else if (Operation == TransformGizmoOperation::Rotate)
+		{
+			PF_CHECK(Tests, glm::length(ParentTransform->Translation - ParentInitial.Translation) < 1.0e-5f);
+			PF_CHECK(Tests, glm::length(ParentTransform->Scale - ParentInitial.Scale) < 1.0e-5f);
+			PF_CHECK(Tests, 1.0f - std::abs(glm::dot(ParentTransform->Rotation, ParentInitial.Rotation)) > 1.0e-3f);
+		}
+		else
+		{
+			PF_CHECK(Tests, glm::length(ParentTransform->Translation - ParentInitial.Translation) < 1.0e-5f);
+			PF_CHECK(Tests, 1.0f - std::abs(glm::dot(ParentTransform->Rotation, ParentInitial.Rotation)) < 1.0e-5f);
+			PF_CHECK(Tests, std::abs(ParentTransform->Scale.x - ParentInitial.Scale.x) > 1.0e-3f);
+			PF_CHECK(Tests, glm::length(glm::vec2(ParentTransform->Scale.y, ParentTransform->Scale.z) -
+										glm::vec2(ParentInitial.Scale.y, ParentInitial.Scale.z)) < 1.0e-5f);
+		}
+		PF_CHECK(Tests, Edits.IsDirty());
+		PF_CHECK(Tests, Interaction.Complete(&SceneValue, Workspace, Edits, Restore));
+		const auto Undone = Edits.Undo(&SceneValue, Workspace, false, Restore);
+		const auto RestoredParent = SceneValue.FindEntity(Parent->GetUUID());
+		const auto RestoredChild = SceneValue.FindEntity(Child->GetUUID());
+		PF_CHECK(Tests, Undone && *Undone && RestoredParent && RestoredChild);
+		if (RestoredParent && RestoredChild)
+		{
+			PF_CHECK(Tests, SameTransform(*RestoredParent->GetTransform(), ParentInitial));
+			PF_CHECK(Tests, SameTransform(*RestoredChild->GetTransform(), ChildInitial));
+		}
+		PF_CHECK(Tests, !Edits.IsDirty() && !Edits.IsActive());
+	}
+
 	ViewportGizmoGeometry MakeTestGeometry()
 	{
 		ViewportGizmoGeometry Geometry;
@@ -124,14 +231,18 @@ namespace
 	{
 		Scene SceneValue;
 		auto Entity = SceneValue.CreateEntity("World-space target");
-		PF_CHECK(Tests, Entity.has_value());
-		if (!Entity) return;
+		auto OtherEntity = SceneValue.CreateEntity("Second world-space target");
+		PF_CHECK(Tests, Entity.has_value() && OtherEntity.has_value());
+		if (!Entity || !OtherEntity) return;
 		TransformComponent Initial = *Entity->GetTransform();
 		Initial.Translation.x = 1.0f;
 		PF_CHECK(Tests, Entity->SetTransform(Initial));
+		TransformComponent OtherInitial = *OtherEntity->GetTransform();
+		OtherInitial.Translation.y = 1.0f;
+		PF_CHECK(Tests, OtherEntity->SetTransform(OtherInitial));
 
 		EditorSceneWorkspaceState Workspace;
-		Workspace.Selection().SelectSingle(Entity->GetUUID());
+		Workspace.Selection().Set({ Entity->GetUUID(), OtherEntity->GetUUID() }, Entity->GetUUID());
 		EditorSceneEditController Edits;
 		Edits.Reset(&SceneValue);
 		EditorViewportGizmoInteraction Interaction;
@@ -163,15 +274,27 @@ namespace
 		const auto UpdatedTransform = UpdatedEntity ? UpdatedEntity->GetTransform()
 													: std::expected<TransformComponent, SceneError>(std::unexpected(
 														  SceneError{ SceneErrorCode::InvalidEntity, "test target disappeared" }));
+		const auto UpdatedOtherEntity = SceneValue.FindEntity(OtherEntity->GetUUID());
+		const auto UpdatedOtherTransform =
+			UpdatedOtherEntity ? UpdatedOtherEntity->GetTransform()
+							   : std::expected<TransformComponent, SceneError>(
+									 std::unexpected(SceneError{ SceneErrorCode::InvalidEntity, "second test target disappeared" }));
 		PF_CHECK(Tests, UpdatedTransform && !SameTransform(*UpdatedTransform, Initial));
+		PF_CHECK(Tests, UpdatedOtherTransform && !SameTransform(*UpdatedOtherTransform, OtherInitial));
 		PF_CHECK(Tests, Interaction.Complete(&SceneValue, Workspace, Edits, Restore));
 		PF_CHECK(Tests, Edits.CanUndo() && Edits.IsDirty());
 		const auto Undone = Edits.Undo(&SceneValue, Workspace, false, Restore);
 		const auto RestoredEntity = SceneValue.FindEntity(Entity->GetUUID());
+		const auto RestoredOtherEntity = SceneValue.FindEntity(OtherEntity->GetUUID());
 		const auto RestoredTransform = RestoredEntity ? RestoredEntity->GetTransform()
 													  : std::expected<TransformComponent, SceneError>(std::unexpected(
 															SceneError{ SceneErrorCode::InvalidEntity, "test target disappeared" }));
-		PF_CHECK(Tests, Undone && *Undone && RestoredTransform && SameTransform(*RestoredTransform, Initial) && !Edits.IsDirty());
+		const auto RestoredOtherTransform =
+			RestoredOtherEntity ? RestoredOtherEntity->GetTransform()
+								: std::expected<TransformComponent, SceneError>(
+									  std::unexpected(SceneError{ SceneErrorCode::InvalidEntity, "second test target disappeared" }));
+		PF_CHECK(Tests, Undone && *Undone && RestoredTransform && SameTransform(*RestoredTransform, Initial));
+		PF_CHECK(Tests, RestoredOtherTransform && SameTransform(*RestoredOtherTransform, OtherInitial) && !Edits.IsDirty());
 	}
 
 	void RunHierarchyAndFailureCases(TestRunner& Tests)
@@ -410,6 +533,29 @@ void RunEditorViewportGizmoInteractionTests(TestRunner& Tests)
 	if (!RetriedRollback) return;
 	const auto RetriedTransform = RetriedRollback->GetTransform();
 	PF_CHECK(Tests, RetriedTransform && glm::length(RetriedTransform->Translation) < 1.0e-5f);
+	Edits.MarkSaved(&SceneValue);
+
+	const auto BeganCompletionRetry = Interaction.Begin(SceneValue, Workspace, Edits, BeginInput(false), Restore);
+	PF_CHECK(Tests, BeganCompletionRetry && *BeganCompletionRetry);
+	if (!BeganCompletionRetry || !*BeganCompletionRetry) return;
+	PF_CHECK(Tests, Interaction.Update(&SceneValue, Workspace, Edits, UpdateInput(72.0f, false), Restore));
+	const auto FailedCompletion = Interaction.Complete(nullptr, Workspace, Edits, Restore);
+	PF_CHECK(Tests, !FailedCompletion && Interaction.IsActive() && Edits.IsActive() && Edits.IsDirty());
+	const auto RetainedCompletionTarget = SceneValue.FindEntity(Entity->GetUUID());
+	PF_CHECK(Tests, RetainedCompletionTarget.has_value());
+	if (!RetainedCompletionTarget) return;
+	const auto RetainedCompletionTransform = RetainedCompletionTarget->GetTransform();
+	PF_CHECK(Tests, RetainedCompletionTransform && RetainedCompletionTransform->Translation.x > 0.1f);
+	PF_CHECK(Tests, Interaction.Complete(&SceneValue, Workspace, Edits, Restore));
+	PF_CHECK(Tests, !Interaction.IsActive() && !Edits.IsActive() && Edits.CanUndo() && Edits.IsDirty());
+	const auto CompletionUndo = Edits.Undo(&SceneValue, Workspace, false, Restore);
+	const auto CompletionUndoTarget = SceneValue.FindEntity(Entity->GetUUID());
+	PF_CHECK(Tests, CompletionUndo && *CompletionUndo && CompletionUndoTarget.has_value());
+	if (CompletionUndoTarget)
+	{
+		const auto CompletionUndoTransform = CompletionUndoTarget->GetTransform();
+		PF_CHECK(Tests, CompletionUndoTransform && glm::length(CompletionUndoTransform->Translation) < 1.0e-5f && !Edits.IsDirty());
+	}
 
 	auto OtherEntity = SceneValue.CreateEntity("Other selection");
 	PF_CHECK(Tests, OtherEntity.has_value());
@@ -427,6 +573,49 @@ void RunEditorViewportGizmoInteractionTests(TestRunner& Tests)
 	PF_CHECK(Tests, !Interaction.IsActive() && !Edits.IsActive() && SelectionChangeTransform &&
 						glm::length(SelectionChangeTransform->Translation) < 1.0e-5f);
 	Edits.MarkSaved(&SceneValue);
+
+	Workspace.Selection().SelectSingle(Entity->GetUUID());
+	Scene ReplacementScene;
+	auto ReplacementEntity = ReplacementScene.CreateEntity("Replacement scene sentinel");
+	PF_CHECK(Tests, ReplacementEntity.has_value());
+	if (!ReplacementEntity) return;
+	TransformComponent ReplacementInitial = *ReplacementEntity->GetTransform();
+	ReplacementInitial.Translation = { 3.0f, 2.0f, 1.0f };
+	PF_CHECK(Tests, ReplacementEntity->SetTransform(ReplacementInitial));
+	EditorSceneWorkspaceState ReplacementWorkspace;
+	Scene* ActiveScene = &SceneValue;
+	EditorSceneWorkspaceState* ActiveWorkspace = &Workspace;
+	uint32_t RestoreCalls = 0;
+	const auto RestoreActiveScene = [&](std::string_view Snapshot) -> std::expected<void, std::string>
+	{
+		++RestoreCalls;
+		return Edits.Restore(Snapshot, *ActiveScene, *ActiveWorkspace);
+	};
+	const auto BeganSceneChange = Interaction.Begin(SceneValue, Workspace, Edits, BeginInput(false), RestoreActiveScene);
+	PF_CHECK(Tests, BeganSceneChange && *BeganSceneChange);
+	if (!BeganSceneChange || !*BeganSceneChange) return;
+	PF_CHECK(Tests, Interaction.Update(&SceneValue, Workspace, Edits, UpdateInput(75.0f, false), RestoreActiveScene));
+	const uint32_t RestoreCallsBeforeChange = RestoreCalls;
+	ActiveScene = &ReplacementScene;
+	ActiveWorkspace = &ReplacementWorkspace;
+	const auto RejectedSceneUpdate =
+		Interaction.Update(&ReplacementScene, ReplacementWorkspace, Edits, UpdateInput(50.0f, false), RestoreActiveScene);
+	PF_CHECK(Tests, !RejectedSceneUpdate && Interaction.IsActive() && Edits.IsActive());
+	PF_CHECK(Tests, RestoreCalls == RestoreCallsBeforeChange);
+	const auto ReplacementAfterRejectedUpdate = ReplacementScene.FindEntity(ReplacementEntity->GetUUID());
+	PF_CHECK(Tests, ReplacementAfterRejectedUpdate && SameTransform(*ReplacementAfterRejectedUpdate->GetTransform(), ReplacementInitial));
+	const auto RejectedSceneCompletion = Interaction.Complete(&ReplacementScene, ReplacementWorkspace, Edits, RestoreActiveScene);
+	const auto RejectedSceneCancellation = Interaction.Cancel(&ReplacementScene, ReplacementWorkspace, Edits, RestoreActiveScene);
+	PF_CHECK(Tests, !RejectedSceneCompletion && !RejectedSceneCancellation && Interaction.IsActive() && Edits.IsActive());
+	PF_CHECK(Tests, RestoreCalls == RestoreCallsBeforeChange);
+	ActiveScene = &SceneValue;
+	ActiveWorkspace = &Workspace;
+	PF_CHECK(Tests, Interaction.Cancel(&SceneValue, Workspace, Edits, RestoreActiveScene));
+	PF_CHECK(Tests, !Interaction.IsActive() && !Edits.IsActive() && !Edits.IsDirty());
+	const auto OriginalAfterSceneChange = SceneValue.FindEntity(Entity->GetUUID());
+	const auto ReplacementAfterRollback = ReplacementScene.FindEntity(ReplacementEntity->GetUUID());
+	PF_CHECK(Tests, OriginalAfterSceneChange && glm::length(OriginalAfterSceneChange->GetTransform()->Translation) < 1.0e-5f);
+	PF_CHECK(Tests, ReplacementAfterRollback && SameTransform(*ReplacementAfterRollback->GetTransform(), ReplacementInitial));
 
 	const auto BeganDuplicate = Interaction.Begin(SceneValue, Workspace, Edits, BeginInput(true), Restore);
 	PF_CHECK(Tests, BeganDuplicate && *BeganDuplicate);
@@ -463,5 +652,8 @@ void RunEditorViewportGizmoInteractionTests(TestRunner& Tests)
 	RunLocalReturnToOriginCase(Tests, TransformGizmoOperation::Scale, 0, { 50.0f, 50.0f }, { 75.0f, 50.0f }, { 51.0f, 50.0f });
 	RunWorldOperationHistoryCase(Tests, TransformGizmoOperation::Rotate, 2, { 75.0f, 50.0f }, { 50.0f, 75.0f });
 	RunWorldOperationHistoryCase(Tests, TransformGizmoOperation::Scale, 0, { 50.0f, 50.0f }, { 75.0f, 50.0f });
+	RunParentChildLocalTransformCase(Tests, TransformGizmoOperation::Translate);
+	RunParentChildLocalTransformCase(Tests, TransformGizmoOperation::Rotate);
+	RunParentChildLocalTransformCase(Tests, TransformGizmoOperation::Scale);
 	RunHierarchyAndFailureCases(Tests);
 }
