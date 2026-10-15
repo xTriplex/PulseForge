@@ -35,8 +35,8 @@
       "reason": "Legacy GPU validation executable pending suite decomposition."
     },
     "PulseForge/Source/Private/Renderer/SceneRenderer.cpp": {
-      "max_lines": 2684,
-      "reason": "Legacy scene rendering implementation pending responsibility extraction."
+      "max_lines": 2300,
+      "reason": "Scene orchestration remains while shadow and output responsibilities await extraction."
     }
   },
   "editor_core_target": "PulseForgeEditorCore",
