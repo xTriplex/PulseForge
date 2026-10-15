@@ -44,6 +44,7 @@ void RunDocumentsTests(TestRunner& Tests);
 void RunProjectRuntimeTests(TestRunner& Tests);
 void RunRendererTests(TestRunner& Tests);
 void RunRenderMathTests(TestRunner& Tests);
+void RunPointShadowImageAnalysisTests(TestRunner& Tests);
 void RunEditorHistoryTests(TestRunner& Tests);
 void RunAssetImportTests(TestRunner& Tests);
 void RunAudioRuntimeTests(TestRunner& Tests);

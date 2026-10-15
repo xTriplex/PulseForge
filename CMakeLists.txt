@@ -1001,6 +1001,14 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 	endif()
 endif()
 
+
+if(BUILD_TESTING OR PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
+	add_library(PulseForgeGpuValidationAnalysis STATIC Tests/GpuValidation/PointShadowImageAnalysis.cpp)
+	target_include_directories(PulseForgeGpuValidationAnalysis PUBLIC Tests)
+	target_compile_definitions(PulseForgeGpuValidationAnalysis PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeGpuValidationAnalysis PUBLIC PulseForgeRenderMath)
+endif()
+
 if(BUILD_TESTING)
 	find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
 	set(PULSEFORGE_QUALITY_PYTHON_EXECUTABLE "" CACHE FILEPATH
@@ -1235,6 +1243,15 @@ if(BUILD_TESTING)
 	target_link_libraries(PulseForgeRenderMathTests PRIVATE PulseForgeRenderMath)
 	add_test(NAME PulseForge.RenderMath COMMAND PulseForgeRenderMathTests)
 
+	add_executable(PulseForgeGpuValidationAnalysisTests
+		Tests/PulseForgeGpuValidationAnalysisTests.cpp
+		Tests/GpuValidation/PointShadowImageAnalysisTests.cpp
+	)
+	target_include_directories(PulseForgeGpuValidationAnalysisTests PRIVATE Tests)
+	target_compile_definitions(PulseForgeGpuValidationAnalysisTests PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeGpuValidationAnalysisTests PRIVATE PulseForgeGpuValidationAnalysis)
+	add_test(NAME PulseForge.GpuValidationAnalysis COMMAND PulseForgeGpuValidationAnalysisTests)
+
 	add_executable(PulseForgeTests
 		Tests/PulseForgeTests.cpp
 		Tests/CoreTests.cpp
@@ -1357,9 +1374,37 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 		PF_TRANSPARENCY_DEMO_PROJECT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/Transparency/Transparency.pfproj"
 		PF_POINT_SHADOW_DEMO_PROJECT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/PointLightShadows/PointLightShadows.pfproj"
 		PF_GPU_VALIDATION_SCENE_SHADER_DIRECTORY="${PULSEFORGE_SHADER_OUTPUT_DIR}")
-	target_link_libraries(PulseForgeGpuValidation PRIVATE PulseForge)
+	target_link_libraries(PulseForgeGpuValidation PRIVATE PulseForge PulseForgeGpuValidationAnalysis)
 	add_dependencies(PulseForgeGpuValidation PulseForgeGpuValidationShaders PulseForgeSceneShaderAssets)
 	set_property(TARGET PulseForgeGpuValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGpuValidation>")
+	if(BUILD_TESTING)
+		add_test(NAME PulseForge.GPU.RGBA16F COMMAND PulseForgeGpuValidation)
+		add_test(NAME PulseForge.GPU.SceneHDR COMMAND PulseForgeGpuValidation --scene-hdr)
+		add_test(NAME PulseForge.GPU.SceneToneMapping COMMAND PulseForgeGpuValidation --scene-tonemap)
+		add_test(NAME PulseForge.GPU.EditorUIUnorm COMMAND PulseForgeGpuValidation --editor-ui-unorm)
+		add_test(NAME PulseForge.GPU.LocalLights COMMAND PulseForgeGpuValidation --scene-local-lights)
+		add_test(NAME PulseForge.GPU.SpotlightShadows COMMAND PulseForgeGpuValidation --scene-spot-shadows)
+		add_test(NAME PulseForge.GPU.PointShadows COMMAND PulseForgeGpuValidation --scene-point-shadows)
+		add_test(NAME PulseForge.GPU.PBRMaterials COMMAND PulseForgeGpuValidation --scene-pbr-materials)
+		add_test(NAME PulseForge.GPU.Transparency COMMAND PulseForgeGpuValidation --scene-transparency)
+		add_test(NAME PulseForge.GPU.PointShadowImages
+			COMMAND PulseForgeGpuValidation --scene-point-shadow-images
+				"${CMAKE_BINARY_DIR}/Diagnostics/PointShadowDirection")
+		add_test(NAME PulseForge.GPU.ActiveFrameUploads COMMAND PulseForgeGpuValidation --active-frame-resource-upload)
+		set_tests_properties(
+			PulseForge.GPU.RGBA16F
+			PulseForge.GPU.SceneHDR
+			PulseForge.GPU.SceneToneMapping
+			PulseForge.GPU.EditorUIUnorm
+			PulseForge.GPU.LocalLights
+			PulseForge.GPU.SpotlightShadows
+			PulseForge.GPU.PointShadows
+			PulseForge.GPU.PBRMaterials
+			PulseForge.GPU.Transparency
+			PulseForge.GPU.PointShadowImages
+			PulseForge.GPU.ActiveFrameUploads
+			PROPERTIES RUN_SERIAL TRUE TIMEOUT 180 LABELS "gpu;renderer")
+	endif()
 endif()
 
 if(BUILD_TESTING)
@@ -1379,7 +1424,7 @@ foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSe
 		PulseForgeAssetCatalog PulseForgeAssetImporters PulseForgeAudio PulseForgeAudioAssets PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics
 		PulseForgeScripting PulseForgeRuntime PulseForgeRenderer PulseForgeMeshData
 		PulseForgeApplication PulseForgeSceneRenderer
-		PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI PulseForgeRendererTests PulseForgeRenderMathTests
+		PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI PulseForgeRendererTests PulseForgeRenderMathTests PulseForgeGpuValidationAnalysis PulseForgeGpuValidationAnalysisTests
                                 PulseForgeTests PulseForgeAssetImportTests PulseForgeAssetImporterConsumer PulseForgeAudioRuntimeTests
 				PulseForgeSceneRendererConsumer
                                 PulseForgeEditorTests PulseForgeEditorWorkspacePresentationTests PulseForgeEditorCoreTests

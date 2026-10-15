@@ -66,6 +66,7 @@
     "PulseForgeEditorTests",
     "PulseForgeEditorCoreTests",
     "PulseForgeBufferUpdateTests",
+	  "PulseForgeGpuValidationAnalysisTests",
     "PulseForgeAssetImportTests",
     "PulseForgeAssetImporterConsumer",
 	"PulseForgeSceneRendererConsumer",
