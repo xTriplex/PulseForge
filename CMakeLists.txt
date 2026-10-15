@@ -456,6 +456,7 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 		PulseForgeEditor/Source/Private/EditorSceneTransitionQueue.cpp
 		PulseForgeEditor/Source/Private/EditorSceneEditController.cpp
 		PulseForgeEditor/Source/Private/EditorSceneEntityCommands.cpp
+		PulseForgeEditor/Source/Private/EditorSceneViewportInteraction.cpp
 		PulseForgeEditor/Source/Private/EditorSceneVisibilityCommands.cpp
 		PulseForgeEditor/Source/Private/EditorSceneHierarchyOperations.cpp
 		PulseForgeEditor/Source/Private/EditorViewportToolState.cpp
@@ -1309,6 +1310,7 @@ if(BUILD_TESTING)
 	add_executable(PulseForgeEditorCoreTests
 		Tests/PulseForgeEditorCoreTests.cpp
 		Tests/EditorSceneEntityCommandTests.cpp
+		Tests/EditorSceneViewportInteractionTests.cpp
 	)
 	target_include_directories(PulseForgeEditorCoreTests PRIVATE Tests PulseForgeEditor/Source/Private)
 	target_compile_definitions(PulseForgeEditorCoreTests PRIVATE PF_PLATFORM_WINDOWS)

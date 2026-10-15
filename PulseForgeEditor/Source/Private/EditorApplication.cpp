@@ -26,7 +26,6 @@
 #include "Assets/SceneAssetService.h"
 #include "Scene/Components/CameraComponent.h"
 #include "Scene/Scene.h"
-#include "Scene/SceneRenderSnapshot.h"
 #include "Scene/SceneSerializer.h"
 #include "Runtime/SceneRuntime.h"
 #include "Window/Window.h"
@@ -55,6 +54,7 @@
 #include "Editor/EditorAssetWorkflowState.h"
 #include "Editor/EditorSceneEditController.h"
 #include "Editor/EditorSceneEntityCommands.h"
+#include "Editor/EditorSceneViewportInteraction.h"
 #include "Editor/EditorSceneVisibilityCommands.h"
 #include "Editor/EditorAssetDestinationPolicy.h"
 #include "Editor/EditorAssetSelectorPolicy.h"
@@ -1417,20 +1417,12 @@ namespace
 				m_Scene.get(), m_SceneWorkspace.Visibility());
 		}
 
-		void ToggleEntitySelection(const PulseForge::UUID& Identifier) { m_SceneWorkspace.Selection().Toggle(Identifier); }
-
 		[[nodiscard]] std::expected<std::vector<PulseForge::Entity>, std::string> GetTopLevelSelectedEntities() const
 		{
 			if (!m_Scene)
 				return std::unexpected("There is no active scene");
 			return PulseForgeEditor::EditorSceneHierarchyOperations::GetTopLevelSelection(
 				*m_Scene, m_SceneWorkspace.Selection().GetEntities());
-		}
-
-		[[nodiscard]] std::expected<std::vector<PulseForge::Entity>, std::string> CollectEntitySubtrees(
-			const std::vector<PulseForge::Entity>& Roots) const
-		{
-			return PulseForgeEditor::EditorSceneHierarchyOperations::CollectSubtrees(Roots);
 		}
 
 		[[nodiscard]] std::string MakeUniqueEntityName(
@@ -6508,16 +6500,11 @@ namespace
 			// With no viewport keyboard focus, Q/W/E/R retain their established editor-wide tool bindings.
 			if (!PulseForgeEditor::CanHandleViewportToolShortcuts(ShortcutContext)) return;
 
-			constexpr std::array<std::pair<ImGuiKey, char>, 4> Shortcuts = {{
-				{ ImGuiKey_Q, 'Q' },
-				{ ImGuiKey_W, 'W' },
-				{ ImGuiKey_E, 'E' },
-				{ ImGuiKey_R, 'R' }
-			}};
+			constexpr std::array<std::pair<ImGuiKey, char>, 4> Shortcuts = { { { ImGuiKey_Q, 'Q' }, { ImGuiKey_W, 'W' },
+				{ ImGuiKey_E, 'E' }, { ImGuiKey_R, 'R' } } };
 			for (const auto& [Key, Character] : Shortcuts)
 				if (ImGui::IsKeyPressed(Key, false))
-					if (const auto Tool = PulseForgeEditor::GetViewportToolForShortcut(Character))
-						SetViewportTool(*Tool);
+					if (const auto Tool = PulseForgeEditor::GetViewportToolForShortcut(Character)) SetViewportTool(*Tool);
 #endif
 		}
 
@@ -7235,57 +7222,19 @@ namespace
 
 		void PickEntityAt(const glm::vec2& Mouse, bool Control, bool Shift)
 		{
-			if (!m_Scene || m_SceneRuntime || !m_ViewportRenderView.IsViewProjectionValid())
+			const auto ResolveMesh =
+				[this](const PulseForge::AssetID& Asset) -> std::expected<const PulseForgeEditor::EditorMeshPickingGeometry*, std::string>
+			{ return GetCpuPickingMesh(Asset); };
+			auto Result = m_ViewportInteraction.PickEntityAt(m_Scene.get(), m_SceneWorkspace, m_SceneRuntime != nullptr,
+				m_ViewportRenderView.IsViewProjectionValid(), m_ViewportImageRect, m_ViewportRenderView.GetViewProjection(),
+				m_EditorCamera.GetPosition(), Mouse, Control, Shift, ResolveMesh);
+			if (!Result)
 			{
-				SelectSingleEntity(std::nullopt);
+				SetError(Result.error());
 				return;
 			}
-			const auto Ray = PulseForgeEditor::MakeViewportRay(Mouse, m_ViewportImageRect, m_ViewportRenderView.GetViewProjection());
-			if (!Ray)
-				return;
-			auto Snapshot = PulseForge::SceneRenderSnapshotBuilder::BuildForView(
-				*m_Scene, m_ViewportRenderView.GetViewProjection(), m_EditorCamera.GetPosition());
-			if (!Snapshot)
-			{
-				SetError("Viewport picking could not inspect the scene: " + Snapshot.error().Message);
-				return;
-			}
-			std::erase_if(Snapshot->Meshes, [this](const PulseForge::SceneMeshInstance& Instance)
-			{
-				const auto Entity = m_Scene->FindEntity(Instance.Entity);
-				return !Entity || !IsEntityEffectivelyVisible(*Entity);
-			});
-
-			std::vector<PulseForgeEditor::PickableMesh> Meshes;
-			Meshes.reserve(Snapshot->Meshes.size());
-			for (const PulseForge::SceneMeshInstance& Instance : Snapshot->Meshes)
-			{
-				const auto Geometry = GetCpuPickingMesh(Instance.MeshAsset);
-				if (!Geometry)
-				{
-					SetWarning(Geometry.error());
-					continue;
-				}
-				Meshes.push_back({
-					Instance.Entity,
-					Instance.WorldTransform,
-					(*Geometry)->Positions,
-					(*Geometry)->Indices });
-			}
-			const auto Hit = PulseForgeEditor::RaycastMeshes(*Ray, Meshes);
-			if (Hit)
-			{
-				if (Control)
-					ToggleEntitySelection(Hit->Entity);
-				else if (Shift)
-				{
-					m_SceneWorkspace.Selection().Add(Hit->Entity);
-				}
-				else
-					SelectSingleEntity(Hit->Entity);
-			}
-			else if (!Control && !Shift)
-				SelectSingleEntity(std::nullopt);
+			for (std::string& Warning : *Result)
+				SetWarning(std::move(Warning));
 		}
 
 		void SnapSelectionToSurface()
@@ -7298,70 +7247,23 @@ namespace
 
 		void FocusSelection()
 		{
-			if (!m_Scene || m_SceneRuntime || m_SceneWorkspace.Selection().GetEntities().empty()) return;
-			auto Roots = GetTopLevelSelectedEntities();
-			if (!Roots || Roots->empty())
-				return;
-			auto Subtree = CollectEntitySubtrees(*Roots);
-			if (!Subtree)
+			if (!m_Scene || m_SceneRuntime) return;
+			const auto ResolveMesh =
+				[this](const PulseForge::AssetID& Asset) -> std::expected<const PulseForgeEditor::EditorMeshPickingGeometry*, std::string>
+			{ return GetCpuPickingMesh(Asset); };
+			auto Result = m_ViewportInteraction.FindSelectionFocus(*m_Scene, m_SceneWorkspace, ResolveMesh);
+			if (!Result)
 			{
-				SetError("Could not frame the selection: " + Subtree.error());
+				SetError(Result.error());
 				return;
 			}
-			glm::vec3 Minimum((std::numeric_limits<float>::max)());
-			glm::vec3 Maximum(-(std::numeric_limits<float>::max)());
-			bool HasBounds = false;
-			for (const PulseForge::Entity& Entity : *Subtree)
-			{
-				if (!IsEntityEffectivelyVisible(Entity))
-					continue;
-				const auto World = Entity.GetWorldMatrix();
-				if (!World || !PulseForgeEditor::Detail::IsFinite(*World))
-					continue;
-				const auto MeshRenderer = Entity.GetMeshRenderer();
-				if (!MeshRenderer || !MeshRenderer->has_value())
-					continue;
-				auto Geometry = GetCpuPickingMesh(MeshRenderer->value().MeshAsset);
-				if (!Geometry)
-				{
-					SetWarning(Geometry.error());
-					continue;
-				}
-				for (const glm::vec3& Vertex : (*Geometry)->Positions)
-				{
-					const glm::vec3 Position(*World * glm::vec4(Vertex, 1.0f));
-					if (!PulseForgeEditor::Detail::IsFinite(Position))
-						continue;
-					for (glm::length_t Axis = 0; Axis < 3; ++Axis)
-					{
-						Minimum[Axis] = (std::min)(Minimum[Axis], Position[Axis]);
-						Maximum[Axis] = (std::max)(Maximum[Axis], Position[Axis]);
-					}
-					HasBounds = true;
-				}
-			}
-			if (!HasBounds)
-			{
-				for (const PulseForge::Entity& Root : *Roots)
-					if (const auto World = Root.GetWorldMatrix(); World && PulseForgeEditor::Detail::IsFinite(*World))
-					{
-						const glm::vec3 Position((*World)[3]);
-						for (glm::length_t Axis = 0; Axis < 3; ++Axis)
-						{
-							Minimum[Axis] = (std::min)(Minimum[Axis], Position[Axis]);
-							Maximum[Axis] = (std::max)(Maximum[Axis], Position[Axis]);
-						}
-						HasBounds = true;
-					}
-			}
-			if (!HasBounds)
-				return;
-			const glm::vec3 Center = (Minimum + Maximum) * 0.5f;
-			const float Radius = (std::max)(glm::length(Maximum - Minimum) * 0.5f, 0.35f);
+			for (std::string& Warning : Result->Warnings)
+				SetWarning(std::move(Warning));
+			if (!Result->Focus) return;
 			const float AspectRatio = m_ViewportRenderView.GetHeight() > 0 ? static_cast<float>(m_ViewportRenderView.GetWidth()) /
 																				 static_cast<float>(m_ViewportRenderView.GetHeight())
 																		   : 1.0f;
-			m_EditorCamera.Focus(Center, Radius, AspectRatio);
+			m_EditorCamera.Focus(Result->Focus->Center, Result->Focus->Radius, AspectRatio);
 			SetStatus("Focused the selection.");
 		}
 
@@ -7781,23 +7683,20 @@ namespace
 		{
 			CancelGizmoInteraction();
 			EndEditorCameraNavigation();
-			if (m_SceneRuntime)
-				m_SceneRuntime->Stop();
+			if (m_SceneRuntime) m_SceneRuntime->Stop();
 			m_SceneRuntime.reset();
 			m_RuntimeScene.reset();
 		}
 
 		void RefreshAssets()
 		{
-			if (!m_Project)
-				return;
+			if (!m_Project) return;
 
 			const auto Rebuild = m_Project->GetAssetRegistry().Rebuild(m_Project->GetRootPath());
 			if (!Rebuild)
 			{
 				std::string Message = "Asset registry refresh failed:";
-				if (Rebuild.error().Issues.empty())
-					Message += " unknown registry error";
+				if (Rebuild.error().Issues.empty()) Message += " unknown registry error";
 				for (const PulseForge::AssetRegistryIssue& Issue : Rebuild.error().Issues)
 					Message += "\n - " + Issue.Message;
 				SetError(std::move(Message));
@@ -8086,6 +7985,7 @@ namespace
 		bool m_DocumentHostTabGroupTargetCenterValid = false;
 		std::optional<PulseForge::Project> m_Project;
 		PulseForgeEditor::EditorViewportSceneRenderView m_ViewportRenderView;
+		PulseForgeEditor::EditorSceneViewportInteraction m_ViewportInteraction;
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::unique_ptr<PulseForge::Scene> m_RuntimeScene;
 		std::unique_ptr<PulseForge::SceneRuntime> m_SceneRuntime;

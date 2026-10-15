@@ -1,22 +1,19 @@
 #pragma once
 
 #include "Editor/EditorEntityClipboard.h"
+#include "Editor/EditorMeshPickingGeometry.h"
 #include "Editor/EditorSceneCommandActions.h"
 #include "Assets/AssetID.h"
 #include "Scene/Scene.h"
 #include "Scene/UUID.h"
 
 #include <expected>
-#include <functional>
 #include <optional>
 #include <string>
 
 namespace PulseForgeEditor
 {
-	struct EditorMeshPickingGeometry;
 	class EditorSceneWorkspaceState;
-	using EditorMeshGeometryResolver =
-		std::function<std::expected<const EditorMeshPickingGeometry*, std::string>(const PulseForge::AssetID&)>;
 
 	class EditorSceneEntityCommands final
 	{

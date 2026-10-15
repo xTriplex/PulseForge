@@ -8,6 +8,7 @@ int main()
 {
 	TestRunner Tests;
 	RunEditorSceneEntityCommandTests(Tests);
+	RunEditorSceneViewportInteractionTests(Tests);
 	PulseForgeEditor::EditorConsoleHistory Console;
 	std::vector<PulseForgeEditor::EditorConsoleMessage> Messages;
 	uint64_t Revision = 0;
