@@ -28,7 +28,7 @@ namespace PulseForgeEditor
 			const PulseForge::AssetID& Identifier) = 0;
 		[[nodiscard]] virtual bool IsContentBrowserMaterialDraftDirty(
 			const PulseForge::AssetID& Identifier) const = 0;
-		virtual void DrawSelectedContentBrowserAssetDetails() = 0;
+		[[nodiscard]] virtual bool IsProtectedSceneAsset(const PulseForge::AssetID& Identifier) const = 0;
 	};
 
 	class EditorContentBrowserPanel final
@@ -48,5 +48,11 @@ namespace PulseForgeEditor
 		EditorContentBrowserAssetView m_AssetView;
 		bool m_FocusSearchNextFrame = false;
 		bool m_DetailsExpandedCompact = false;
+		void DrawSelectedAssetDetails(
+			EditorContentBrowserState& State,
+			const PulseForge::Project& Project,
+			bool SceneAvailable,
+			EditorStyle& Style,
+			EditorContentBrowserPanelActions& Actions);
 	};
 }

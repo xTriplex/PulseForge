@@ -5,6 +5,7 @@
 #include "Editor/EditorAssetPreviewService.h"
 #include "Editor/EditorContentBrowserPolicy.h"
 #include "Editor/EditorStyle.h"
+#include "Editor/EditorWorkspaceView.h"
 
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -180,9 +181,81 @@ namespace PulseForgeEditor
 		{
 			ImGui::BeginChild("SelectedAssetDetails", ImVec2(0.0f, VerticalLayout.DetailsHeight),
 				ImGuiChildFlags_Borders, ImGuiWindowFlags_AlwaysVerticalScrollbar);
-			Actions.DrawSelectedContentBrowserAssetDetails();
+			DrawSelectedAssetDetails(State, Project, SceneAvailable, Style, Actions);
 			ImGui::EndChild();
 		}
 		ImGui::EndChild();
+	}
+
+	void EditorContentBrowserPanel::DrawSelectedAssetDetails(
+		EditorContentBrowserState& State,
+		const PulseForge::Project& Project,
+		bool SceneAvailable,
+		EditorStyle& Style,
+		EditorContentBrowserPanelActions& Actions)
+	{
+		if (!State.SelectedAsset())
+			return;
+		const auto RegisteredAsset = Project.GetAssetRegistry().Find(*State.SelectedAsset());
+		if (!RegisteredAsset)
+		{
+			State.SelectedAsset().reset();
+			return;
+		}
+		const auto AssetIterator = std::find_if(State.Assets().begin(), State.Assets().end(),
+			[&RegisteredAsset](const PulseForge::AssetRecord& Asset) { return Asset.ID == RegisteredAsset->ID; });
+		if (AssetIterator == State.Assets().end())
+			return;
+
+		const size_t AssetIndex = static_cast<size_t>(std::distance(State.Assets().begin(), AssetIterator));
+		if (AssetIndex >= State.AssetPresentations().size())
+			return;
+		const PulseForge::AssetRecord& Asset = *RegisteredAsset;
+		const EditorContentBrowserAssetPresentation& Presentation = State.AssetPresentations()[AssetIndex];
+		if (Presentation.Extension == ".material")
+			return;
+
+		ImGui::Separator();
+		{
+			[[maybe_unused]] const auto Emphasis = Style.PushEmphasisFont();
+			Style.IconText(GetAssetBrowserIcon(Asset.ProjectRelativePath), Presentation.Name);
+		}
+		ImGui::PushStyleColor(ImGuiCol_Text, Style.GetColor(EditorColorToken::TextMuted));
+		ImGui::TextWrapped("%s", Presentation.FullPath.c_str());
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("%s\nUUID: %s", Presentation.FullPath.c_str(), Presentation.Identifier.c_str());
+		ImGui::PopStyleColor();
+
+		if (Presentation.Extension == ".scene")
+		{
+			const bool IsStartupScene = Project.GetDescription().StartScene &&
+				*Project.GetDescription().StartScene == Asset.ID;
+			if (IsStartupScene)
+				Style.TextMuted("Project startup scene");
+			else if (Style.SmallButton(EditorIcon::Settings, "Set as Startup Scene"))
+				Actions.HandleContentBrowserAssetAction(EditorContentBrowserAssetAction::SetStartupScene, Asset.ID);
+		}
+		if (Style.IconButton(EditorIcon::Rename, "Move", "SelectedAssetMove", "Move or rename selected asset"))
+			Actions.HandleContentBrowserAssetAction(EditorContentBrowserAssetAction::Move, Asset.ID);
+		ImGui::SameLine();
+		if (Style.IconButton(EditorIcon::Duplicate, "Duplicate", "SelectedAssetDuplicate",
+			"Duplicate selected asset"))
+			Actions.HandleContentBrowserAssetAction(EditorContentBrowserAssetAction::Duplicate, Asset.ID);
+		ImGui::SameLine();
+		const bool IsProtectedScene = Actions.IsProtectedSceneAsset(Asset.ID);
+		ImGui::BeginDisabled(IsProtectedScene);
+		if (Style.IconButton(EditorIcon::Delete, "Delete", "SelectedAssetDelete", "Delete selected asset", true))
+			Actions.HandleContentBrowserAssetAction(EditorContentBrowserAssetAction::Delete, Asset.ID);
+		ImGui::EndDisabled();
+		if (Presentation.Extension == ".prefab")
+		{
+			ImGui::SameLine();
+			ImGui::BeginDisabled(!SceneAvailable);
+			if (Style.SmallButton(EditorIcon::Cube, "Instantiate"))
+				Actions.HandleContentBrowserAssetAction(EditorContentBrowserAssetAction::InstantiatePrefab, Asset.ID);
+			ImGui::EndDisabled();
+		}
+		if (IsProtectedScene)
+			Style.TextMuted("Open and startup scenes cannot be deleted.");
 	}
 }

@@ -4597,7 +4597,7 @@ namespace
 			SetStatus("Deleted asset " + Identifier.ToString() + ".");
 		}
 
-		bool IsProtectedSceneAsset(const PulseForge::AssetID& Identifier) const
+		bool IsProtectedSceneAsset(const PulseForge::AssetID& Identifier) const override
 		{
 			return (m_SceneAsset && *m_SceneAsset == Identifier) ||
 				(m_Project && m_Project->GetDescription().StartScene &&
@@ -9685,71 +9685,6 @@ namespace
 			MarkDocumentWorkspaceDirty();
 			m_ContentBrowser.SelectedAsset() = Identifier;
 			SetEditorPanelVisible(PulseForgeEditor::EditorPanel::MaterialDetails, true);
-		}
-
-		void DrawSelectedContentBrowserAssetDetails() override
-		{
-			if (!m_ContentBrowser.SelectedAsset() || !m_Project)
-				return;
-			const auto Asset = m_Project->GetAssetRegistry().Find(*m_ContentBrowser.SelectedAsset());
-			if (!Asset)
-			{
-				m_ContentBrowser.SelectedAsset().reset();
-				return;
-			}
-
-			const std::string Name = PathToUtf8(Asset->ProjectRelativePath.filename());
-			const std::string FullPath = PathToUtf8(Asset->ProjectRelativePath);
-			const std::string Identifier = Asset->ID.ToString();
-			const std::string Extension = NormalizedExtension(Asset->ProjectRelativePath);
-			if (Extension == ".material")
-				return;
-
-			ImGui::Separator();
-			{
-				[[maybe_unused]] const auto Emphasis = m_EditorStyle.PushEmphasisFont();
-				m_EditorStyle.IconText(PulseForgeEditor::GetAssetBrowserIcon(Asset->ProjectRelativePath), Name);
-			}
-			ImGui::PushStyleColor(ImGuiCol_Text,
-				m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::TextMuted));
-			ImGui::TextWrapped("%s", FullPath.c_str());
-			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("%s\nUUID: %s", FullPath.c_str(), Identifier.c_str());
-			ImGui::PopStyleColor();
-
-			if (Extension == ".scene")
-			{
-				const bool IsStartupScene = m_Project->GetDescription().StartScene &&
-					*m_Project->GetDescription().StartScene == Asset->ID;
-				if (IsStartupScene)
-					m_EditorStyle.TextMuted("Project startup scene");
-				else if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Settings, "Set as Startup Scene"))
-					SetStartupScene(Asset->ID);
-			}
-			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Rename, "Move", "SelectedAssetMove",
-				"Move or rename selected asset"))
-				MoveAsset(Asset->ID);
-			ImGui::SameLine();
-			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Duplicate, "Duplicate",
-				"SelectedAssetDuplicate", "Duplicate selected asset"))
-				DuplicateAsset(Asset->ID);
-			ImGui::SameLine();
-			const bool IsProtectedScene = IsProtectedSceneAsset(Asset->ID);
-			ImGui::BeginDisabled(IsProtectedScene);
-			if (m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Delete, "Delete",
-				"SelectedAssetDelete", "Delete selected asset", true))
-				RequestDeleteAsset(Asset->ID);
-			ImGui::EndDisabled();
-			if (Extension == ".prefab")
-			{
-				ImGui::SameLine();
-				ImGui::BeginDisabled(!m_Scene);
-				if (m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Cube, "Instantiate"))
-					InstantiatePrefab(Asset->ID);
-				ImGui::EndDisabled();
-			}
-			if (IsProtectedScene)
-				m_EditorStyle.TextMuted("Open and startup scenes cannot be deleted.");
 		}
 
 		std::string GetMaterialDraftKey(const PulseForge::AssetID& Asset) const
