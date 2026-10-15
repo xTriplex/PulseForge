@@ -103,6 +103,7 @@ function New-Fixture
 	Set-FixtureFile $path 'Project.vcxproj.user' 'user project settings'
 	Set-FixtureFile $path 'Build\Diagnostics\preserved.txt' 'local diagnostic input'
 	Set-FixtureFile $path 'Build\IntegrationEvidence\preserved.txt' 'local validation input'
+	Set-FixtureFile $path 'Build\QualityTools\.venv\pyvenv.cfg' 'shared quality environment'
 	Set-FixtureFile $path 'PulseForgeGame\.pulseforge\derived\cache.bin' 'must remain'
 	Set-FixtureFile $path 'PulseForge\Vendor\JoltPhysics\Build\CMakeLists.txt' 'upstream build config'
 	Set-FixtureFile $path 'Source.cpp' 'source must remain'
@@ -163,6 +164,7 @@ function Assert-ProtectedFixtureData
 	$paths = @(
 		'CMakeSettings.json', 'imgui.ini', '.git\config', 'Project.vcxproj.user', 'Source.cpp',
 		'Build\Diagnostics\preserved.txt', 'Build\IntegrationEvidence\preserved.txt',
+		'Build\QualityTools\.venv\pyvenv.cfg',
 		'PulseForgeGame\.pulseforge\derived\cache.bin',
 		'PulseForge\Vendor\JoltPhysics\Build\CMakeLists.txt',
 		'.vs\ProjectSettings.json', '.vs\CopilotSnapshots\snapshot.mpack',
@@ -250,6 +252,7 @@ try
 	Assert-True ($result.Succeeded -eq 3 -and (Test-Path (Join-Path $root $vulkanPath))) 'build action cleans the two VS trees and validated Out tree'
 	Assert-True (-not (Test-Path -LiteralPath $cachePath)) 'CMake cache is removed last'
 	Assert-True (-not (Test-Path -LiteralPath (Join-Path $root 'Out'))) 'validated Out build, install, and fetched dependency files are removed together'
+	Assert-True (Test-Path -LiteralPath (Join-Path $root 'Build\QualityTools\.venv\pyvenv.cfg')) 'shared quality tools remain outside configuration cleanup targets'
 	Assert-True (Test-Path -LiteralPath (Join-Path $root "$vulkanPath\QualityTools\.venv\pyvenv.cfg")) 'quality tool environment survives'
 	Assert-True (Test-Path -LiteralPath (Join-Path $root "$vulkanPath\QualityReports\summary.csv")) 'quality reports survive'
 	Assert-True (Test-Path -LiteralPath (Join-Path $root "$vulkanPath\CMakeUserPresets.json")) 'local CMake presets survive'

@@ -18,7 +18,7 @@
 			"inheritEnvironments": [ "msvc_x64_x64" ],
 			"buildRoot": "${projectDir}\\Out\\build\\${name}",
 			"installRoot": "${projectDir}\\Out\\install\\${name}",
-			"cmakeCommandArgs": "-DPULSEFORGE_QUALITY_PYTHON_EXECUTABLE:FILEPATH=\"${projectDir}/Out/build/x64-Debug/QualityTools/.venv/Scripts/python.exe\"",
+			"cmakeCommandArgs": "",
 			"buildCommandArgs": "-j 4",
 			"ctestCommandArgs": ""
 		},
@@ -29,7 +29,7 @@
 			"inheritEnvironments": [ "msvc_x64_x64" ],
 			"buildRoot": "${projectDir}\\Out\\build\\${name}",
 			"installRoot": "${projectDir}\\Out\\install\\${name}",
-			"cmakeCommandArgs": "-DPULSEFORGE_QUALITY_PYTHON_EXECUTABLE:FILEPATH=\"${projectDir}/Out/build/x64-Debug/QualityTools/.venv/Scripts/python.exe\"",
+			"cmakeCommandArgs": "",
 			"buildCommandArgs": "-j 4",
 			"ctestCommandArgs": ""
 		}

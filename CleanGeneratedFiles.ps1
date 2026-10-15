@@ -8,7 +8,9 @@ $script:RepoRoot = $null
 $script:HadCleanupFailure = $false
 # Mutating operations may target only these exact repository-relative paths.
 # Visual Studio build trees are cleaned by recognized generator outputs while
-# preserving local quality data. The isolated CMakeSettings Out tree is removed
+# preserving per-build local quality data. The shared Build\QualityTools
+# environment is outside every cleanup target and survives all cleanup actions.
+# The isolated CMakeSettings Out tree is removed
 # only after its exact layout, source directory, generator, and links are checked.
 $script:TargetManifest = @(
 	@{ Path = 'Build\CMake\VS2022-x64'; Category = 'CMake build outputs'; Kind = 'CMakeBuildDirectory'; AllowedExtensions = $null },
@@ -40,7 +42,7 @@ $script:ActionManifest = @{
 	Build = @{ Label = 'Vulkan, OpenGL, and CMakeSettings build outputs'; Paths = @($script:TargetManifest | Where-Object { $_.Category -eq 'CMake build outputs' } | ForEach-Object { $_.Path }); Confirm = 'DELETE CMAKE BUILD OUTPUTS' }
 	Legacy = @{ Label = 'legacy generated outputs'; Paths = @($script:TargetManifest | Where-Object { $_.Category -eq 'Legacy outputs' } | ForEach-Object { $_.Path }); Confirm = 'DELETE LEGACY OUTPUTS' }
 	VisualStudio = @{ Label = 'selected Visual Studio regenerable caches'; Paths = @($script:TargetManifest | Where-Object { $_.Category -eq 'Visual Studio caches' } | ForEach-Object { $_.Path }); Confirm = 'DELETE VISUAL STUDIO CACHES' }
-	Comprehensive = @{ Label = 'approved CMake outputs, legacy outputs, and selected VS caches'; Paths = @($script:TargetManifest | ForEach-Object { $_.Path }); Confirm = 'DELETE ALL APPROVED GENERATED FILES INCLUDING OUT DEPENDENCIES' }
+	Comprehensive = @{ Label = 'approved CMake outputs, legacy outputs, and selected VS caches (shared Build\QualityTools retained)'; Paths = @($script:TargetManifest | ForEach-Object { $_.Path }); Confirm = 'DELETE ALL APPROVED GENERATED FILES INCLUDING OUT DEPENDENCIES' }
 }
 
 $script:PreservedCMakeBuildChildren = @('QualityTools', 'QualityReports')
@@ -602,6 +604,7 @@ function Show-CleanupPreview
 	$action = $script:ActionManifest[$ActionName]
 	$total = [long]0
 	Write-Host ("Preview: {0}" -f $action.Label)
+	Write-Host '  retain Build\QualityTools (shared quality environment; not a cleanup target)'
 	foreach ($relativePath in $action.Paths)
 	{
 		$inspection = Get-TargetInspection -RelativePath $relativePath
@@ -790,7 +793,7 @@ function Invoke-CleanupAction
 			return [pscustomobject]@{ Succeeded = 0; Failed = $invalid.Count; Skipped = $inspections.Count }
 		}
 	}
-		Write-Host 'User data outside the allowlist includes .git, CMakeSettings.json, imgui.ini, *.vcxproj.user, source/assets, CMakeUserPresets.json, QualityTools, QualityReports, Build\Diagnostics, Build\IntegrationEvidence, and PulseForgeGame\.pulseforge\derived.'
+	Write-Host 'User data outside the allowlist includes .git, CMakeSettings.json, imgui.ini, *.vcxproj.user, source/assets, CMakeUserPresets.json, Build\QualityTools (shared quality environment), per-build QualityTools and QualityReports, Build\Diagnostics, Build\IntegrationEvidence, and PulseForgeGame\.pulseforge\derived.'
 	if ($action.Paths -contains 'Out')
 	{
 		Write-Warning 'Cleaning Out removes its validated Ninja build/install outputs and any fetched dependency sources or downloads inside them. A later configure may need network access to fetch pinned dependencies again.'

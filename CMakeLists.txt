@@ -6,7 +6,8 @@ set(PULSEFORGE_SAMPLE_RENDERER "Vulkan" CACHE STRING "Renderer used by PulseForg
 set_property(CACHE PULSEFORGE_SAMPLE_RENDERER PROPERTY STRINGS Vulkan OpenGL)
 option(PULSEFORGE_BUILD_EDITOR "Build the experimental PulseForge editor shell" ON)
 option(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS "Build opt-in Vulkan GPU validation smoke tests" OFF)
-option(PULSEFORGE_ENABLE_MSVC_ANALYSIS "Enable selected MSVC static analysis checks" ON)
+option(PULSEFORGE_ENABLE_QUALITY_CHECKS "Enable explicitly requested source, architecture, formatting, and analysis checks" OFF)
+option(PULSEFORGE_ENABLE_MSVC_ANALYSIS "Enable selected MSVC static analysis checks" OFF)
 set(PULSEFORGE_EDITOR_RENDERER "Vulkan" CACHE STRING "Renderer used by PulseForgeEditor (Vulkan or OpenGL)")
 set_property(CACHE PULSEFORGE_EDITOR_RENDERER PROPERTY STRINGS Vulkan OpenGL)
 
@@ -1010,60 +1011,70 @@ if(BUILD_TESTING OR PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	target_link_libraries(PulseForgeGpuValidationAnalysis PUBLIC PulseForgeRenderMath)
 endif()
 
-if(BUILD_TESTING)
-	find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
-	set(PULSEFORGE_QUALITY_PYTHON_EXECUTABLE "" CACHE FILEPATH
-		"Optional Python override with the pinned PulseForge quality tools installed")
-	set(LocalQualityPython "${CMAKE_BINARY_DIR}/QualityTools/.venv/Scripts/python.exe")
-	set(QualityPythonCandidates)
-	if(PULSEFORGE_QUALITY_PYTHON_EXECUTABLE STREQUAL "" OR
-		PULSEFORGE_QUALITY_PYTHON_EXECUTABLE STREQUAL Python3_EXECUTABLE)
-		# An earlier configure cached Python3_EXECUTABLE as an automatic fallback.
-		# Prefer the build-local pinned environment when it becomes available later.
-		if(EXISTS "${LocalQualityPython}")
-			list(APPEND QualityPythonCandidates "${LocalQualityPython}")
-		endif()
-		list(APPEND QualityPythonCandidates "${Python3_EXECUTABLE}")
-	else()
-		list(APPEND QualityPythonCandidates "${PULSEFORGE_QUALITY_PYTHON_EXECUTABLE}")
+if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+	if(NOT BUILD_TESTING)
+		message(FATAL_ERROR "PULSEFORGE_ENABLE_QUALITY_CHECKS requires BUILD_TESTING=ON")
+	endif()
+	if(NOT MSVC)
+		message(FATAL_ERROR "PulseForge quality validation requires the supported MSVC /analyze workflow")
+	endif()
+	if(NOT PULSEFORGE_ENABLE_MSVC_ANALYSIS)
+		message(FATAL_ERROR
+			"PULSEFORGE_ENABLE_QUALITY_CHECKS requires PULSEFORGE_ENABLE_MSVC_ANALYSIS=ON; "
+			"ordinary builds leave compiler analysis disabled by default.")
 	endif()
 
-	set(QualityPythonVersion "")
-	set(QualityPythonSelected "")
-	set(QualityPythonDiagnostics "No candidate interpreter was available.")
-	foreach(QualityPythonCandidate IN LISTS QualityPythonCandidates)
-		if(NOT EXISTS "${QualityPythonCandidate}")
-			set(QualityPythonDiagnostics "Interpreter does not exist: ${QualityPythonCandidate}")
-			continue()
+	set(PULSEFORGE_QUALITY_PYTHON_EXECUTABLE "" CACHE FILEPATH
+		"Optional explicit Python override with pinned PulseForge quality tools installed")
+	set(QualityToolRoot "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Quality")
+	set(QualityRequiredFiles
+		"${QualityToolRoot}/BootstrapQualityTools.py"
+		"${QualityToolRoot}/CheckSourceQuality.py"
+		"${QualityToolRoot}/CheckCodeQualityTools.py"
+		"${QualityToolRoot}/ExportConfiguredTargetGraph.cmake"
+		"${QualityToolRoot}/SourceQualityRules.json"
+		"${QualityToolRoot}/requirements.txt"
+	)
+	foreach(QualityFile IN LISTS QualityRequiredFiles)
+		if(NOT EXISTS "${QualityFile}")
+			message(FATAL_ERROR
+				"Explicit quality validation is unavailable because required file '${QualityFile}' is missing. "
+				"Restore Tools/Quality or disable PULSEFORGE_ENABLE_QUALITY_CHECKS.")
 		endif()
-		execute_process(
-			COMMAND "${QualityPythonCandidate}" -c
-				"import importlib.metadata as m, sys; print(f'{sys.version_info.major}.{sys.version_info.minor} lizard {m.version(\"lizard\")}')"
-			OUTPUT_VARIABLE CandidateQualityPythonVersion
-			ERROR_VARIABLE CandidateQualityPythonError
-			OUTPUT_STRIP_TRAILING_WHITESPACE
-			RESULT_VARIABLE CandidateQualityPythonResult
-		)
-		if("${CandidateQualityPythonResult}" STREQUAL "0" AND
-			CandidateQualityPythonVersion MATCHES "^3\\.(9|[1-9][0-9]) lizard 1\\.24\\.1$")
-			set(QualityPythonVersion "${CandidateQualityPythonVersion}")
-			set(QualityPythonSelected "${QualityPythonCandidate}")
-			break()
-		endif()
-		string(STRIP "${CandidateQualityPythonError}" CandidateQualityPythonError)
-		set(QualityPythonDiagnostics
-			"${QualityPythonCandidate} exited with '${CandidateQualityPythonResult}': ${CandidateQualityPythonError}")
 	endforeach()
-	if(QualityPythonSelected STREQUAL "")
-		message(FATAL_ERROR
-			"Required quality tools are unavailable or have the wrong version. ${QualityPythonDiagnostics} "
-			"Bootstrap the build-local pinned environment with: python Tools/Quality/BootstrapQualityTools.py "
-			"--venv ${CMAKE_BINARY_DIR}/QualityTools/.venv, then reconfigure. "
-			"For a custom interpreter, set PULSEFORGE_QUALITY_PYTHON_EXECUTABLE to its executable path.")
+
+	set(QualityPythonDefault "${CMAKE_CURRENT_SOURCE_DIR}/Build/QualityTools/.venv/Scripts/python.exe")
+	if(PULSEFORGE_QUALITY_PYTHON_EXECUTABLE STREQUAL "")
+		set(QualityPythonSelected "${QualityPythonDefault}")
+	else()
+		set(QualityPythonSelected "${PULSEFORGE_QUALITY_PYTHON_EXECUTABLE}")
 	endif()
-	set(PULSEFORGE_QUALITY_PYTHON_EXECUTABLE "${QualityPythonSelected}" CACHE FILEPATH
-		"Optional Python override with the pinned PulseForge quality tools installed" FORCE)
-	message(STATUS "PulseForge quality tools: Python/Lizard ${QualityPythonVersion}")
+	if(NOT EXISTS "${QualityPythonSelected}")
+		message(FATAL_ERROR
+			"Explicit quality validation requires Python at '${QualityPythonSelected}'. "
+			"Bootstrap the shared pinned environment with: "
+			"python Tools/Quality/BootstrapQualityTools.py --venv Build/QualityTools/.venv "
+			"or set PULSEFORGE_QUALITY_PYTHON_EXECUTABLE to a compatible interpreter. "
+			"An explicitly supplied invalid override is not replaced automatically.")
+	endif()
+	execute_process(
+		COMMAND "${QualityPythonSelected}" -c
+			"import importlib.metadata as m, sys; print(f'{sys.version_info.major}.{sys.version_info.minor} lizard {m.version(\"lizard\")}, pathspec {m.version(\"pathspec\")}, Pygments {m.version(\"Pygments\")}')"
+		OUTPUT_VARIABLE QualityPythonVersion
+		ERROR_VARIABLE QualityPythonError
+		OUTPUT_STRIP_TRAILING_WHITESPACE
+		RESULT_VARIABLE QualityPythonResult
+	)
+	if(NOT "${QualityPythonResult}" STREQUAL "0" OR
+		NOT QualityPythonVersion MATCHES "^3\\.(9|[1-9][0-9]) lizard 1\\.24\\.1, pathspec 1\\.1\\.1, Pygments 2\\.21\\.0$")
+		string(STRIP "${QualityPythonError}" QualityPythonError)
+		message(FATAL_ERROR
+			"Quality Python at '${QualityPythonSelected}' is missing required packages or versions. "
+			"Expected Python >=3.9 with Lizard 1.24.1, pathspec 1.1.1, and Pygments 2.21.0; "
+			"received '${QualityPythonVersion}' (exit ${QualityPythonResult}): ${QualityPythonError}. "
+			"Bootstrap Build/QualityTools/.venv or correct the explicit interpreter override.")
+	endif()
+	message(STATUS "PulseForge quality tools: Python ${QualityPythonVersion} (${QualityPythonSelected})")
 
 	set(ClangFormatHints
 		"$ENV{VSINSTALLDIR}/VC/Tools/Llvm/bin"
@@ -1100,12 +1111,6 @@ if(BUILD_TESTING)
 			"${PULSEFORGE_CLANG_FORMAT_EXECUTABLE}")
 	endif()
 	message(STATUS "PulseForge changed-code formatter: ${ClangFormatVersion} (${PULSEFORGE_CLANG_FORMAT_EXECUTABLE})")
-	if(NOT MSVC)
-		message(FATAL_ERROR "PulseForge's required selected Code Analysis checks require MSVC /analyze")
-	endif()
-	if(NOT PULSEFORGE_ENABLE_MSVC_ANALYSIS)
-		message(FATAL_ERROR "BUILD_TESTING requires PULSEFORGE_ENABLE_MSVC_ANALYSIS=ON")
-	endif()
 	message(STATUS "MSVC Code Analysis is enabled for importer, mesh-data, editor-core, editor-UI and scene-render owners")
 
 	file(READ "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Quality/SourceQualityRules.json" PULSEFORGE_QUALITY_RULES_JSON)
@@ -1208,16 +1213,16 @@ if(BUILD_TESTING)
 	endif()
 	message(STATUS "PulseForge source quality comparison base: ${PULSEFORGE_QUALITY_COMPARISON_BASE}")
 	add_test(NAME PulseForge.SourceQuality
-		COMMAND "${PULSEFORGE_QUALITY_PYTHON_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Quality/CheckSourceQuality.py"
+		COMMAND "${QualityPythonSelected}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Quality/CheckSourceQuality.py"
 			--root "${CMAKE_CURRENT_SOURCE_DIR}"
 			--rules "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Quality/SourceQualityRules.json"
 			--graph-manifest "${CMAKE_BINARY_DIR}/PulseForgeTargetGraph-$<CONFIG>.txt"
 			--comparison-base "${PULSEFORGE_QUALITY_COMPARISON_BASE}")
 	add_test(NAME PulseForge.SourceQualityRules
-		COMMAND "${PULSEFORGE_QUALITY_PYTHON_EXECUTABLE}" -B -m unittest discover
+		COMMAND "${QualityPythonSelected}" -B -m unittest discover
 			-s "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Quality" -p test_*.py)
 	add_test(NAME PulseForge.CodeQualityTools
-		COMMAND "${PULSEFORGE_QUALITY_PYTHON_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Quality/CheckCodeQualityTools.py"
+		COMMAND "${QualityPythonSelected}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Quality/CheckCodeQualityTools.py"
 			--root "${CMAKE_CURRENT_SOURCE_DIR}"
 			--comparison-base "${PULSEFORGE_QUALITY_COMPARISON_BASE}"
 			--configuration "$<CONFIG>"
@@ -1225,6 +1230,15 @@ if(BUILD_TESTING)
 			--metrics-output "${CMAKE_BINARY_DIR}/QualityReports/FunctionMetrics-$<CONFIG>.json")
 	set_tests_properties(PulseForge.SourceQuality PulseForge.SourceQualityRules PulseForge.CodeQualityTools PROPERTIES
 		ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1;PULSEFORGE_QUALITY_CMAKE_COMMAND=${CMAKE_COMMAND};PULSEFORGE_QUALITY_GENERATOR=${CMAKE_GENERATOR};PULSEFORGE_QUALITY_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM};PULSEFORGE_QUALITY_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM};PULSEFORGE_CLANG_FORMAT_EXECUTABLE=${PULSEFORGE_CLANG_FORMAT_EXECUTABLE}")
+endif()
+
+if(BUILD_TESTING)
+	if(NOT PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_test(NAME PulseForge.CMakeBuildMode
+			COMMAND "${CMAKE_COMMAND}"
+				"-DPULSEFORGE_BUILD_TREE=${CMAKE_BINARY_DIR}"
+				-P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/CMake/CheckNormalBuildMode.cmake")
+	endif()
 
 	add_executable(PulseForgeRendererTests
 		Tests/PulseForgeRendererTests.cpp
@@ -1269,7 +1283,9 @@ if(BUILD_TESTING)
 	)
 	target_compile_definitions(PulseForgeTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeTests PRIVATE ${PULSEFORGE_ENGINE_TEST_LIBRARIES})
-	add_dependencies(PulseForgeTests PulseForgePublicHeaderChecks)
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeTests PulseForgePublicHeaderChecks)
+	endif()
 	add_test(NAME PulseForge.Engine COMMAND PulseForgeTests)
 
 	add_executable(PulseForgeAssetImportTests
@@ -1279,7 +1295,9 @@ if(BUILD_TESTING)
 	target_include_directories(PulseForgeAssetImportTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_compile_definitions(PulseForgeAssetImportTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeAssetImportTests PRIVATE PulseForgeAssetImporters PulseForgeAssetServices)
-	add_dependencies(PulseForgeAssetImportTests PulseForgePublicHeaderChecks)
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeAssetImportTests PulseForgePublicHeaderChecks)
+	endif()
 	add_test(NAME PulseForge.AssetImports COMMAND PulseForgeAssetImportTests)
 
         add_executable(PulseForgeAssetImporterConsumer Tests/ModuleConsumers/AssetImporterConsumer.cpp)
@@ -1304,7 +1322,9 @@ if(BUILD_TESTING)
 		PulseForgeAudioScene
 		PulseForgeScripting
 	)
-	add_dependencies(PulseForgeAudioRuntimeTests PulseForgePublicHeaderChecks)
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeAudioRuntimeTests PulseForgePublicHeaderChecks)
+	endif()
 	add_test(NAME PulseForge.AudioRuntime COMMAND PulseForgeAudioRuntimeTests)
 
 	add_executable(PulseForgeEditorCoreTests
@@ -1315,7 +1335,9 @@ if(BUILD_TESTING)
 	target_include_directories(PulseForgeEditorCoreTests PRIVATE Tests PulseForgeEditor/Source/Private)
 	target_compile_definitions(PulseForgeEditorCoreTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorCoreTests PRIVATE PulseForgeEditorCore)
-	add_dependencies(PulseForgeEditorCoreTests PulseForgePublicHeaderChecks)
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeEditorCoreTests PulseForgePublicHeaderChecks)
+	endif()
 	add_test(NAME PulseForge.EditorCore COMMAND PulseForgeEditorCoreTests)
 
 	if(PULSEFORGE_BUILD_EDITOR)
@@ -1348,7 +1370,9 @@ if(BUILD_TESTING)
 	endif()
 	target_link_libraries(PulseForgeEditorTests PRIVATE
 		PulseForgeEditorCore PulseForgeEditorUI ${PULSEFORGE_ENGINE_TEST_LIBRARIES} PulseForgeImGui spdlog::spdlog)
-	add_dependencies(PulseForgeEditorTests PulseForgePublicHeaderChecks)
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeEditorTests PulseForgePublicHeaderChecks)
+	endif()
 	add_test(NAME PulseForge.Editor COMMAND PulseForgeEditorTests)
 	add_executable(PulseForgeEditorWorkspacePresentationTests
 		Tests/EditorWorkspacePresentationTestMain.cpp
@@ -1363,7 +1387,9 @@ if(BUILD_TESTING)
 	target_compile_definitions(PulseForgeEditorWorkspacePresentationTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorWorkspacePresentationTests PRIVATE
 		PulseForgeEditorCore PulseForgeEditorUI ${PULSEFORGE_ENGINE_TEST_LIBRARIES} PulseForgeImGui spdlog::spdlog)
-	add_dependencies(PulseForgeEditorWorkspacePresentationTests PulseForgePublicHeaderChecks)
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeEditorWorkspacePresentationTests PulseForgePublicHeaderChecks)
+	endif()
 	add_test(NAME PulseForge.EditorWorkspacePresentation COMMAND PulseForgeEditorWorkspacePresentationTests)
 	endif()
 
@@ -1456,6 +1482,6 @@ foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSe
 	endif()
 endforeach()
 
-if(BUILD_TESTING)
+if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 	include(Tools/Quality/ExportConfiguredTargetGraph.cmake)
 endif()
