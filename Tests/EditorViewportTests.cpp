@@ -4,6 +4,7 @@
 #include "Editor/EditorViewportToolState.h"
 
 #include <chrono>
+#include <limits>
 
 namespace
 {

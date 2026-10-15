@@ -49,5 +49,6 @@ void RunPointShadowImageAnalysisTests(TestRunner& Tests);
 void RunEditorHistoryTests(TestRunner& Tests);
 void RunEditorSceneEntityCommandTests(TestRunner& Tests);
 void RunEditorSceneViewportInteractionTests(TestRunner& Tests);
+void RunEditorViewportGizmoGeometryTests(TestRunner& Tests);
 void RunAssetImportTests(TestRunner& Tests);
 void RunAudioRuntimeTests(TestRunner& Tests);

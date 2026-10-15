@@ -80,6 +80,7 @@
 #include "Editor/EditorWorkspaceView.h"
 #include "Editor/ViewportMouseCapture.h"
 #include "Editor/ViewportMath.h"
+#include "Editor/ViewportGizmoGeometry.h"
 
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
@@ -513,30 +514,8 @@ namespace
 				"Console body", "Console top edge", "Console left edge", "Console right edge", "Console bottom edge"
 			};
 
-		struct GizmoAxisScreen
-		{
-			glm::vec3 WorldDirection{ 0.0f };
-			float WorldUnitsPerLocalUnit = 0.0f;
-			glm::vec2 Endpoint{ 0.0f };
-			bool IsValid = false;
-		};
-
-		struct ViewportGizmoGeometry
-		{
-			glm::vec3 PivotWorld{ 0.0f };
-			glm::vec2 PivotScreen{ 0.0f };
-			float HandleLengthWorld = 0.0f;
-			std::array<GizmoAxisScreen, 3> Axes{};
-			std::array<std::array<glm::vec2, 49>, 3> RotationRings{};
-			std::array<bool, 3> RotationRingValid{};
-			bool IsValid = false;
-		};
-
-		struct GizmoHandle
-		{
-			PulseForgeEditor::TransformGizmoOperation Operation;
-			uint32_t Axis = 0;
-		};
+		using GizmoHandle = PulseForgeEditor::ViewportGizmoHandle;
+		using ViewportGizmoGeometry = PulseForgeEditor::ViewportGizmoGeometry;
 
 		enum class ViewportCameraGesture : uint8_t
 		{
@@ -973,20 +952,17 @@ namespace
 			m_AssetPreviews.PumpUploads();
 		}
 
-		#ifdef PF_EDITOR_RENDERER_OPENGL
+#ifdef PF_EDITOR_RENDERER_OPENGL
 		void CaptureOpenGLFrameForValidation() noexcept
 		{
-			if (m_OpenGLDiagnosticCapturePath.empty() || m_OpenGLDiagnosticCaptureWritten ||
-				m_OpenGLDiagnosticFramesSeen < 3)
-				return;
+			if (m_OpenGLDiagnosticCapturePath.empty() || m_OpenGLDiagnosticCaptureWritten || m_OpenGLDiagnosticFramesSeen < 3) return;
 			m_OpenGLDiagnosticCaptureWritten = true;
 			CaptureOpenGLFramebuffer(m_OpenGLDiagnosticCapturePath, GL_BACK);
 		}
 
 		void CaptureOpenGLPlatformFramesForValidation(GLFWwindow* MainContext) noexcept
 		{
-			if (m_OpenGLDiagnosticCapturePath.empty() || m_OpenGLDiagnosticPlatformCaptureWritten ||
-				m_OpenGLDiagnosticFramesSeen < 3)
+			if (m_OpenGLDiagnosticCapturePath.empty() || m_OpenGLDiagnosticPlatformCaptureWritten || m_OpenGLDiagnosticFramesSeen < 3)
 				return;
 			m_OpenGLDiagnosticPlatformCaptureWritten = true;
 			ImGuiPlatformIO& PlatformIO = ImGui::GetPlatformIO();
@@ -994,26 +970,17 @@ namespace
 			{
 				ImGuiViewport* Viewport = PlatformIO.Viewports[Index];
 				const int VertexCount = Viewport && Viewport->DrawData ? Viewport->DrawData->TotalVtxCount : 0;
-				PF_INFO("OpenGL platform viewport {}: id 0x{:08X}, {}x{}, ImGui vertices {}",
-					Index,
-					Viewport ? Viewport->ID : 0,
-					Viewport ? Viewport->Size.x : 0.0f,
-					Viewport ? Viewport->Size.y : 0.0f,
-					VertexCount);
-				if (Index == 0 || !Viewport)
-					continue;
-				const PulseForgeEditor::EditorGlfwViewportHandles Handles{
-					.GlfwWindow = Viewport->PlatformHandle,
-					.NativeWindow = Viewport->PlatformHandleRaw
-				};
-				GLFWwindow* PlatformWindow = static_cast<GLFWwindow*>(
-					PulseForgeEditor::GetGlfwContextWindow(Handles));
-				if (!PlatformWindow)
-					continue;
+				PF_INFO("OpenGL platform viewport {}: id 0x{:08X}, {}x{}, ImGui vertices {}", Index, Viewport ? Viewport->ID : 0,
+					Viewport ? Viewport->Size.x : 0.0f, Viewport ? Viewport->Size.y : 0.0f, VertexCount);
+				if (Index == 0 || !Viewport) continue;
+				const PulseForgeEditor::EditorGlfwViewportHandles Handles{ .GlfwWindow = Viewport->PlatformHandle,
+					.NativeWindow = Viewport->PlatformHandleRaw };
+				GLFWwindow* PlatformWindow = static_cast<GLFWwindow*>(PulseForgeEditor::GetGlfwContextWindow(Handles));
+				if (!PlatformWindow) continue;
 				glfwMakeContextCurrent(PlatformWindow);
 				std::filesystem::path OutputPath = m_OpenGLDiagnosticCapturePath;
-				OutputPath.replace_filename(OutputPath.stem().string() + "_viewport_" +
-					std::to_string(Viewport->ID) + OutputPath.extension().string());
+				OutputPath.replace_filename(
+					OutputPath.stem().string() + "_viewport_" + std::to_string(Viewport->ID) + OutputPath.extension().string());
 				CaptureOpenGLFramebuffer(OutputPath, GL_FRONT);
 			}
 			glfwMakeContextCurrent(MainContext);
@@ -1090,7 +1057,7 @@ namespace
 				PF_INFO("OpenGL validation framebuffer captured to {}: {}x{}",
 					OutputPath.string(), Viewport[2], Viewport[3]);
 		}
-		#endif
+#endif
 
 		void OnRender() override
 		{
@@ -6014,8 +5981,8 @@ namespace
 						*Session, m_DocumentEditors, [](void* Context, const auto& Identity)
 						{ static_cast<EditorLayer*>(Context)->DrawUnregisteredAssetDocument(Identity); }, this);
 		}
-			if (LevelWorkspaceActive)
-			{
+		if (LevelWorkspaceActive)
+		{
 			if (m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::Scene))
 			{
 				if (BeginEditorPanel(PulseForgeEditor::EditorPanel::Scene))
@@ -6069,8 +6036,8 @@ namespace
 					(void)m_Layout.DockPanelBeside(PulseForgeEditor::EditorPanel::MaterialDetails,
 						PulseForgeEditor::EditorPanel::Inspector);
 				else
-					(void)m_Layout.DockPanelBesideIfUnplaced(PulseForgeEditor::EditorPanel::MaterialDetails,
-						PulseForgeEditor::EditorPanel::Inspector);
+					(void)m_Layout.DockPanelBesideIfUnplaced(
+						PulseForgeEditor::EditorPanel::MaterialDetails, PulseForgeEditor::EditorPanel::Inspector);
 				m_InitialMaterialDetailsDockPending = false;
 				m_ForceMaterialDetailsDock = false;
 			}
@@ -6078,9 +6045,9 @@ namespace
 			DrawDeleteAssetDialog();
 			DrawAssetDestinationDialog();
 			DrawConsolePanel();
-			}
-			DrawNativeDocumentHosts();
-			m_WorkspacePresentation.KeepInactiveWorkspacesAlive(m_Documents, m_DocumentEditors);
+		}
+		DrawNativeDocumentHosts();
+		m_WorkspacePresentation.KeepInactiveWorkspacesAlive(m_Documents, m_DocumentEditors);
 		}
 
 		void CaptureDocumentTabTestInvalidDropTarget(PulseForgeEditor::EditorPanel Panel)
@@ -6502,7 +6469,8 @@ namespace
 				UpdateGizmoDrag(Mouse);
 				if (SelectedEntity())
 				{
-					if (const auto Selected = m_Scene->FindEntity(*SelectedEntity())) DrawViewportGizmo(*Selected, std::nullopt);
+					if (const auto Selected = m_Scene->FindEntity(*SelectedEntity()))
+						if (const auto Geometry = BuildViewportGizmoGeometry(*Selected)) DrawViewportGizmo(*Geometry, std::nullopt);
 				}
 				if (PulseForgeEditor::GetViewportGizmoPointerOutcome({
 					m_GizmoDrag.has_value(),
@@ -6542,14 +6510,14 @@ namespace
 						Geometry = BuildViewportGizmoGeometry(*Selected);
 			}
 
-			const std::optional<GizmoHandle> HoveredHandle = Geometry && m_ViewportImageHovered
-				? FindGizmoHandle(*Geometry, Mouse)
-				: std::nullopt;
+			const std::optional<GizmoHandle> HoveredHandle =
+				Geometry && m_ViewportImageHovered
+					? PulseForgeEditor::FindViewportGizmoHandle(*Geometry, m_ViewportTools.GetOperation(), Mouse)
+					: std::nullopt;
 			if (Geometry)
 			{
 				const auto Selected = m_Scene->FindEntity(*SelectedEntity());
-				if (Selected)
-					DrawViewportGizmo(*Selected, HoveredHandle);
+				if (Selected) DrawViewportGizmo(*Geometry, HoveredHandle);
 			}
 
 			const bool CameraGestureClicked = IO.KeyAlt &&
@@ -6576,12 +6544,6 @@ namespace
 			PickEntityAt(Mouse, IO.KeyCtrl, IO.KeyShift);
 		}
 
-		[[nodiscard]] std::optional<glm::vec2> ProjectToViewportImage(const glm::vec3& Position) const
-		{
-			if (!m_ViewportRenderView.IsViewProjectionValid()) return std::nullopt;
-			return PulseForgeEditor::ProjectWorldToViewportImage(Position, m_ViewportRenderView.GetViewProjection(), m_ViewportImageRect);
-		}
-
 		[[nodiscard]] std::optional<ViewportGizmoGeometry> BuildViewportGizmoGeometry(
 			const PulseForge::Entity& Entity) const
 		{
@@ -6601,156 +6563,32 @@ namespace
 				ParentWorld = *ParentTransform;
 			}
 
-			ViewportGizmoGeometry Geometry;
-			Geometry.PivotWorld = glm::vec3((*World)[3]);
-			if (const auto Roots = GetTopLevelSelectedEntities(); Roots && Roots->size() > 1)
+			std::vector<glm::vec3> SelectedRootPositions;
+			const auto Roots = GetTopLevelSelectedEntities();
+			const bool HasMultipleSelectedRoots = Roots && Roots->size() > 1;
+			if (HasMultipleSelectedRoots)
 			{
-				glm::vec3 Minimum((std::numeric_limits<float>::max)());
-				glm::vec3 Maximum(-(std::numeric_limits<float>::max)());
-				bool HasPosition = false;
+				SelectedRootPositions.reserve(Roots->size());
 				for (const PulseForge::Entity& Root : *Roots)
 					if (const auto RootWorld = Root.GetWorldMatrix(); RootWorld && PulseForgeEditor::Detail::IsFinite(*RootWorld))
-					{
-						const glm::vec3 Position((*RootWorld)[3]);
-						for (glm::length_t Axis = 0; Axis < 3; ++Axis)
-						{
-							Minimum[Axis] = (std::min)(Minimum[Axis], Position[Axis]);
-							Maximum[Axis] = (std::max)(Maximum[Axis], Position[Axis]);
-						}
-						HasPosition = true;
-					}
-				if (HasPosition)
-					Geometry.PivotWorld = (Minimum + Maximum) * 0.5f;
+						SelectedRootPositions.emplace_back((*RootWorld)[3]);
 			}
-			const auto PivotScreen = ProjectToViewportImage(Geometry.PivotWorld);
-			if (!PivotScreen)
-				return std::nullopt;
-			Geometry.PivotScreen = *PivotScreen;
 
-			const float CameraDistance = glm::length(m_EditorCamera.GetPosition() - Geometry.PivotWorld);
-			const float ImageHeight = m_ViewportImageRect.Maximum.y - m_ViewportImageRect.Minimum.y;
-			if (!std::isfinite(CameraDistance) || CameraDistance < 1.0e-4f || ImageHeight <= 1.0f)
-				return std::nullopt;
-			Geometry.HandleLengthWorld = CameraDistance * 2.0f * std::tan(glm::radians(45.0f) * 0.5f) * 82.0f / ImageHeight;
-			if (!std::isfinite(Geometry.HandleLengthWorld) || Geometry.HandleLengthWorld <= 1.0e-6f)
-				return std::nullopt;
-
-			for (uint32_t AxisIndex = 0; AxisIndex < 3; ++AxisIndex)
-			{
-				const auto Axis =
-					PulseForgeEditor::GetGizmoAxis(ParentWorld, Transform->Rotation, AxisIndex, m_ViewportTools.GetValues().LocalSpace);
-				if (!Axis)
-					continue;
-				const auto Endpoint = ProjectToViewportImage(
-					Geometry.PivotWorld + Axis->Direction * Geometry.HandleLengthWorld);
-				if (!Endpoint)
-					continue;
-				Geometry.Axes[AxisIndex] = { Axis->Direction, Axis->WorldUnitsPerLocalUnit, *Endpoint, true };
-
-				const glm::vec3 WorldAxis = Axis->Direction;
-				const glm::vec3 CameraForward = m_EditorCamera.GetForward();
-				glm::vec3 RingU = glm::cross(WorldAxis, CameraForward);
-				if (glm::length(RingU) < 1.0e-4f)
-				{
-					const glm::vec3 Fallback = std::abs(WorldAxis.y) < 0.9f
-						? glm::vec3(0.0f, 1.0f, 0.0f)
-						: glm::vec3(1.0f, 0.0f, 0.0f);
-					RingU = glm::cross(WorldAxis, Fallback);
-				}
-				const float RingULength = glm::length(RingU);
-				if (std::isfinite(RingULength) && RingULength > 1.0e-5f)
-				{
-					RingU /= RingULength;
-					const glm::vec3 RingV = glm::normalize(glm::cross(WorldAxis, RingU));
-					bool RingValid = true;
-					for (size_t PointIndex = 0; PointIndex < Geometry.RotationRings[AxisIndex].size(); ++PointIndex)
-					{
-						const float Angle = glm::two_pi<float>() * static_cast<float>(PointIndex) / 48.0f;
-						const glm::vec3 Point = Geometry.PivotWorld + Geometry.HandleLengthWorld * 0.82f *
-							(RingU * std::cos(Angle) + RingV * std::sin(Angle));
-						const auto ScreenPoint = ProjectToViewportImage(Point);
-						if (!ScreenPoint)
-						{
-							RingValid = false;
-							break;
-						}
-						Geometry.RotationRings[AxisIndex][PointIndex] = *ScreenPoint;
-					}
-					Geometry.RotationRingValid[AxisIndex] = RingValid;
-				}
-			}
-			Geometry.IsValid = true;
-			return Geometry;
+			PulseForgeEditor::ViewportGizmoGeometryInput Input;
+			Input.ViewProjection = m_ViewportRenderView.GetViewProjection();
+			Input.CameraPosition = m_EditorCamera.GetPosition();
+			Input.CameraForward = m_EditorCamera.GetForward();
+			Input.ParentWorldTransform = ParentWorld;
+			Input.LocalRotation = Transform->Rotation;
+			Input.EntityWorldPosition = glm::vec3((*World)[3]);
+			Input.SelectedRootWorldPositions = SelectedRootPositions;
+			Input.ImageRect = { m_ViewportImageRect.Minimum, m_ViewportImageRect.Maximum };
+			Input.LocalSpace = m_ViewportTools.GetValues().LocalSpace;
+			Input.HasMultipleSelectedRoots = HasMultipleSelectedRoots;
+			return PulseForgeEditor::BuildViewportGizmoGeometry(Input);
 		}
-
-		[[nodiscard]] static float DistanceSquaredToSegment(
-			const glm::vec2& Point,
-			const glm::vec2& Start,
-			const glm::vec2& End)
+		void DrawViewportGizmo(const ViewportGizmoGeometry& Geometry, std::optional<GizmoHandle> Hovered)
 		{
-			const glm::vec2 Segment = End - Start;
-			const float LengthSquared = glm::dot(Segment, Segment);
-			const float Parameter = LengthSquared > 1.0e-6f
-				? std::clamp(glm::dot(Point - Start, Segment) / LengthSquared, 0.0f, 1.0f)
-				: 0.0f;
-			const glm::vec2 Difference = Point - (Start + Segment * Parameter);
-			return glm::dot(Difference, Difference);
-		}
-
-		[[nodiscard]] std::optional<GizmoHandle> FindGizmoHandle(
-			const ViewportGizmoGeometry& Geometry,
-			const glm::vec2& Mouse) const
-		{
-			if (!Geometry.IsValid || !PulseForgeEditor::Detail::IsFinite(Mouse))
-				return std::nullopt;
-			constexpr float HitRadiusSquared = 8.0f * 8.0f;
-			float ClosestDistance = HitRadiusSquared;
-			std::optional<GizmoHandle> Closest;
-			if (m_ViewportTools.GetOperation() == PulseForgeEditor::TransformGizmoOperation::Rotate)
-			{
-				for (uint32_t Axis = 0; Axis < 3; ++Axis)
-				{
-					if (!Geometry.RotationRingValid[Axis])
-						continue;
-					const auto& Ring = Geometry.RotationRings[Axis];
-					for (size_t Point = 0; Point + 1 < Ring.size(); ++Point)
-					{
-						const float Distance = DistanceSquaredToSegment(Mouse, Ring[Point], Ring[Point + 1]);
-						if (Distance < ClosestDistance)
-						{
-							ClosestDistance = Distance;
-							Closest = GizmoHandle{ m_ViewportTools.GetOperation(), Axis };
-						}
-					}
-				}
-				return Closest;
-			}
-
-			for (uint32_t Axis = 0; Axis < 3; ++Axis)
-			{
-				if (!Geometry.Axes[Axis].IsValid)
-					continue;
-				const glm::vec2 ScreenAxis = Geometry.Axes[Axis].Endpoint - Geometry.PivotScreen;
-				if (glm::dot(ScreenAxis, ScreenAxis) < 14.0f * 14.0f)
-					continue;
-				const glm::vec2 Start = Geometry.PivotScreen +
-					(Geometry.Axes[Axis].Endpoint - Geometry.PivotScreen) * 0.12f;
-				const float Distance = DistanceSquaredToSegment(Mouse, Start, Geometry.Axes[Axis].Endpoint);
-				if (Distance < ClosestDistance)
-				{
-					ClosestDistance = Distance;
-					Closest = GizmoHandle{ m_ViewportTools.GetOperation(), Axis };
-				}
-			}
-			return Closest;
-		}
-
-		void DrawViewportGizmo(const PulseForge::Entity& Entity, std::optional<GizmoHandle> Hovered)
-		{
-			const auto Geometry = BuildViewportGizmoGeometry(Entity);
-			if (!Geometry)
-				return;
-
 			ImDrawList* DrawList = ImGui::GetWindowDrawList();
 			DrawList->PushClipRect(
 				ImVec2(m_ViewportImageRect.Minimum.x, m_ViewportImageRect.Minimum.y),
@@ -6766,11 +6604,10 @@ namespace
 			{
 				for (uint32_t Axis = 0; Axis < 3; ++Axis)
 				{
-					if (!Geometry->RotationRingValid[Axis])
-						continue;
+					if (!Geometry.RotationRingValid[Axis]) continue;
 					const bool IsHighlighted = Hovered && Hovered->Axis == Axis;
 					const ImU32 Color = IsHighlighted ? HighlightColor : AxisColors[Axis];
-					const auto& Ring = Geometry->RotationRings[Axis];
+					const auto& Ring = Geometry.RotationRings[Axis];
 					for (size_t Point = 0; Point + 1 < Ring.size(); ++Point)
 						DrawList->AddLine(
 							ImVec2(Ring[Point].x, Ring[Point].y),
@@ -6783,27 +6620,20 @@ namespace
 			{
 				for (uint32_t Axis = 0; Axis < 3; ++Axis)
 				{
-					if (!Geometry->Axes[Axis].IsValid)
-						continue;
+					if (!Geometry.Axes[Axis].IsValid) continue;
 					const bool IsHighlighted = Hovered && Hovered->Axis == Axis;
 					const ImU32 Color = IsHighlighted ? HighlightColor : AxisColors[Axis];
-					const glm::vec2 End = Geometry->Axes[Axis].Endpoint;
+					const glm::vec2 End = Geometry.Axes[Axis].Endpoint;
 					DrawList->AddLine(
-						ImVec2(Geometry->PivotScreen.x, Geometry->PivotScreen.y),
-						ImVec2(End.x, End.y),
-						Color,
-						IsHighlighted ? 4.0f : 3.0f);
+						ImVec2(Geometry.PivotScreen.x, Geometry.PivotScreen.y), ImVec2(End.x, End.y), Color, IsHighlighted ? 4.0f : 3.0f);
 					if (m_ViewportTools.GetOperation() == PulseForgeEditor::TransformGizmoOperation::Scale)
 						DrawList->AddRectFilled(ImVec2(End.x - 5.0f, End.y - 5.0f), ImVec2(End.x + 5.0f, End.y + 5.0f), Color);
 					else
 						DrawList->AddCircleFilled(ImVec2(End.x, End.y), IsHighlighted ? 6.0f : 4.5f, Color);
 				}
 			}
-			DrawList->AddCircleFilled(
-				ImVec2(Geometry->PivotScreen.x, Geometry->PivotScreen.y),
-				5.0f,
-				ImGui::ColorConvertFloat4ToU32(
-					m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Text)));
+			DrawList->AddCircleFilled(ImVec2(Geometry.PivotScreen.x, Geometry.PivotScreen.y), 5.0f,
+				ImGui::ColorConvertFloat4ToU32(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Text)));
 			DrawList->PopClipRect();
 		}
 

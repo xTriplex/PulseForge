@@ -219,6 +219,7 @@
     "PulseForgeEditor/Source/Public/Editor/EditorWorkspaceFrameState.h" : "PulseForgeEditorCore",
     "PulseForgeEditor/Source/Public/Editor/EditorWorkspaceView.h" : "PulseForgeEditorCore",
     "PulseForgeEditor/Source/Public/Editor/ImGuiRendererMath.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/ViewportGizmoGeometry.h" : "PulseForgeEditorCore",
     "PulseForgeEditor/Source/Public/Editor/ViewportMath.h" : "PulseForgeEditorCore",
     "PulseForgeEditor/Source/Public/Editor/ViewportMouseCapture.h" : "PulseForgeEditorCore"
   },
@@ -287,6 +288,7 @@
     "PulseForgeEditor/Source/Private/EditorAssetPreviewStressHarness.cpp" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorViewportSceneRenderView.cpp" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorViewportToolState.cpp" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Private/ViewportGizmoGeometry.cpp" : "PulseForgeEditorCore",
     "PulseForgeEditor/Source/Private/EditorViewportToolbar.cpp" : "PulseForgeEditorUI"
   }
 }
