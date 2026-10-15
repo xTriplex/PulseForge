@@ -1100,6 +1100,8 @@ if(BUILD_TESTING)
 		Tests/EditorTests.cpp
 		Tests/EditorViewportTests.cpp
 		Tests/EditorStateTests.cpp
+		Tests/EditorPanelStateTests.cpp
+		Tests/EditorSceneStateTests.cpp
 		Tests/DocumentsTests.cpp
 		Tests/EditorMaterialProjectTests.cpp
 		Tests/EditorProjectLoadingTests.cpp
