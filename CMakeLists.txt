@@ -526,10 +526,14 @@ if(PULSEFORGE_BUILD_EDITOR)
 	target_precompile_headers(PulseForgeEditorUI PRIVATE
 		"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Source/Private/EditorUIPCH.h")
 
-	add_executable(PulseForgeEditor
+	add_executable(PulseForgeEditor WIN32
 		PulseForgeEditor/Source/Private/EditorMain.cpp
 		PulseForgeEditor/Source/Private/EditorApplication.cpp
 	)
+	get_target_property(PULSEFORGE_EDITOR_GUI_SUBSYSTEM PulseForgeEditor WIN32_EXECUTABLE)
+	if(NOT PULSEFORGE_EDITOR_GUI_SUBSYSTEM)
+		message(FATAL_ERROR "PulseForgeEditor must use the Windows GUI subsystem to avoid a separate console window.")
+	endif()
 	target_include_directories(PulseForgeEditor PRIVATE
 		PulseForgeEditor/Source/Public
 		PulseForge/Vendor/json/include
