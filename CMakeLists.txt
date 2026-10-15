@@ -515,6 +515,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	add_executable(PulseForgeEditor
 		PulseForgeEditor/Source/Private/EditorMain.cpp
 		PulseForgeEditor/Source/Private/EditorApplication.cpp
+		PulseForgeEditor/Source/Private/EditorViewportSceneRenderView.cpp
 	)
 	target_include_directories(PulseForgeEditor PRIVATE
 		PulseForgeEditor/Source/Public

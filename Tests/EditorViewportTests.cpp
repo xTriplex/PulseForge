@@ -1,5 +1,6 @@
 #include "TestEditorSupport.h"
 #include "EditorViewportCamera.h"
+#include "Editor/EditorViewportPolicy.h"
 #include "Editor/EditorViewportToolState.h"
 
 namespace
@@ -469,6 +470,36 @@ namespace
 			std::numeric_limits<float>::infinity()));
 	}
 
+	void TestEditorViewportTargetExtent(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		const auto AtScaleOne = CalculateEditorViewportTargetExtent(130.0, 65.0, 1.0, 1.0);
+		PF_CHECK(Tests, AtScaleOne && AtScaleOne->Width == 160 && AtScaleOne->Height == 96);
+
+		const auto AtHighDpi = CalculateEditorViewportTargetExtent(130.0, 65.0, 1.5, 1.5);
+		PF_CHECK(Tests, AtHighDpi && AtHighDpi->Width == 224 && AtHighDpi->Height == 128);
+
+		const auto InvalidScaleFallsBackToOne = CalculateEditorViewportTargetExtent(130.0, 65.0, 0.0, -1.0);
+		PF_CHECK(Tests, InvalidScaleFallsBackToOne && InvalidScaleFallsBackToOne->Width == 160 &&
+			InvalidScaleFallsBackToOne->Height == 96);
+		PF_CHECK(Tests, !CalculateEditorViewportTargetExtent(0.0, 65.0, 1.0, 1.0));
+		PF_CHECK(Tests, !CalculateEditorViewportTargetExtent(
+			std::numeric_limits<double>::infinity(), 65.0, 1.0, 1.0));
+		PF_CHECK(Tests, !CalculateEditorViewportTargetExtent(
+			1.0, 1.0, std::numeric_limits<double>::infinity(), 1.0));
+		PF_CHECK(Tests, !CalculateEditorViewportTargetExtent(
+			static_cast<double>((std::numeric_limits<uint32_t>::max)()), 1.0, 1.0, 1.0));
+
+		const auto ActiveRuntime = GetEditorViewportSceneMode(true, true, true);
+		PF_CHECK(Tests, ActiveRuntime.UseRuntimeScene && !ActiveRuntime.ViewProjectionValid);
+		const auto MissingRuntimeScene = GetEditorViewportSceneMode(true, true, false);
+		PF_CHECK(Tests, !MissingRuntimeScene.UseRuntimeScene && !MissingRuntimeScene.ViewProjectionValid);
+		const auto InactiveRuntimeScene = GetEditorViewportSceneMode(false, true, true);
+		PF_CHECK(Tests, !InactiveRuntimeScene.UseRuntimeScene && InactiveRuntimeScene.ViewProjectionValid);
+		const auto NoScene = GetEditorViewportSceneMode(false, false, false);
+		PF_CHECK(Tests, !NoScene.UseRuntimeScene && !NoScene.ViewProjectionValid);
+	}
+
 	void TestViewportMouseCaptureState(TestRunner& Tests)
 	{
 		PulseForgeEditor::Detail::ViewportMouseCaptureState Capture;
@@ -569,6 +600,7 @@ void RunEditorViewportTests(TestRunner& Tests)
 {
 	TestEditorMeshPickingCache(Tests);
 	TestEditorViewportMath(Tests);
+	TestEditorViewportTargetExtent(Tests);
 	TestViewportMouseCaptureState(Tests);
 	TestEditorViewportCameraController(Tests);
 	TestEditorViewportToolState(Tests);

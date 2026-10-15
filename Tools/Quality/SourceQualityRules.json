@@ -18,12 +18,13 @@
     "PulseForgeEditor/Source/Private/EditorMaterialDetailsPanel.cpp": "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorContentBrowserNavigation.cpp": "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorViewportToolbar.cpp": "PulseForgeEditorUI",
-    "PulseForgeEditor/Source/Private/EditorViewportToolState.cpp": "PulseForgeEditorCore"
+    "PulseForgeEditor/Source/Private/EditorViewportToolState.cpp": "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Private/EditorViewportSceneRenderView.cpp": "PulseForgeEditor"
   },
   "size_exceptions": {
     "PulseForgeEditor/Source/Private/EditorApplication.cpp": {
-      "max_lines": 12164,
-      "reason": "Legacy editor coordinator being reduced through focused state-owner extractions."
+      "max_lines": 9200,
+      "reason": "Editor lifecycle coordination remains, while viewport, panel, workflow and state owners are extracted."
     },
     "PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp": {
       "max_lines": 3813,

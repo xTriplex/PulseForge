@@ -24,7 +24,6 @@
 #include "Assets/PrefabAssetService.h"
 #include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
-#include "Renderer/SceneRenderer.h"
 #include "Scene/Components/CameraComponent.h"
 #include "Scene/Scene.h"
 #include "Scene/SceneRenderSnapshot.h"
@@ -47,6 +46,7 @@
 #include "EditorWorkspacePresentation.h"
 #include "Editor/EditorLayout.h"
 #include "EditorViewportCamera.h"
+#include "EditorViewportSceneRenderView.h"
 #include "Editor/EditorViewportToolbar.h"
 #include "EditorMaterialDraftStore.h"
 #include "Editor/EditorContentBrowserPolicy.h"
@@ -2373,7 +2373,7 @@ namespace
 			m_LoggedFirstViewportPrepared = false;
 			m_LoggedFirstViewportRendered = false;
 			m_LoggedEnvironmentReady = false;
-			m_EnvironmentLightingPending = false;
+			m_ViewportRenderView.ClearEnvironmentLightingPending();
 			PulseForge::Detail::ScopedProfileTimer OpenTimer("Editor project open + startup scene load");
 			auto Opened = PulseForgeEditor::PrepareEditorProjectOpen(ProjectFile);
 			if (!Opened)
@@ -5281,8 +5281,7 @@ namespace
 			if (const auto* Session = m_Documents.Find(Identity))
 				(void)m_Documents.MarkSaved(Identity, Session->Revision);
 			m_AssetPreviewAssetsPending = true;
-			if (m_SceneRenderer)
-				m_SceneRenderer->RefreshMaterialAssets();
+			m_ViewportRenderView.RefreshMaterialAssets();
 			SetStatus("Saved material " + PathToUtf8(Asset->ProjectRelativePath.filename()) + ".");
 			return true;
 		}
@@ -6806,14 +6805,11 @@ namespace
 					}
 					else
 					{
-						if (auto Result = EnsureViewportTarget(Available); !Result)
-							SetViewportTargetError("Could not resize the scene viewport: " + Result.error());
-						else
-							ClearViewportTargetError();
-						if (m_ViewportTarget && m_ViewportTextureID != 0)
+						(void)EnsureViewportTarget(Available);
+						if (m_ViewportRenderView.HasTarget() && m_ViewportRenderView.GetTextureID() != 0)
 						{
-							const float TargetAspect = static_cast<float>(m_ViewportWidth) /
-								static_cast<float>(m_ViewportHeight);
+							const float TargetAspect = static_cast<float>(m_ViewportRenderView.GetWidth()) /
+								static_cast<float>(m_ViewportRenderView.GetHeight());
 							ImVec2 ImageSize = Available;
 							if (ImageSize.x / ImageSize.y > TargetAspect)
 								ImageSize.x = ImageSize.y * TargetAspect;
@@ -6824,7 +6820,7 @@ namespace
 								Cursor.x + (Available.x - ImageSize.x) * 0.5f,
 								Cursor.y + (Available.y - ImageSize.y) * 0.5f));
 							ImGui::Image(
-								ImTextureRef(static_cast<ImTextureID>(m_ViewportTextureID)),
+								ImTextureRef(static_cast<ImTextureID>(m_ViewportRenderView.GetTextureID())),
 								ImageSize);
 							const bool ImageHovered = ImGui::IsItemHovered();
 							const bool ImageClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
@@ -6870,7 +6866,7 @@ namespace
 							HandleViewportImage(ImageClicked && !OverHelp && !OverOrientationWidget);
 							if (ShowEditorOverlays)
 								DrawViewportOrientationWidget(ImGui::GetWindowDrawList(), ImageMinimum, ImageMaximum);
-							if (m_EnvironmentLightingPending)
+							if (m_ViewportRenderView.IsEnvironmentLightingPending())
 								ImGui::GetWindowDrawList()->AddText(ImVec2(ImageMinimum.x + 12.0f, ImageMinimum.y + 12.0f),
 									ImGui::GetColorU32(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::TextMuted)),
 									"Preparing environment lighting...");
@@ -6885,17 +6881,17 @@ namespace
 								"The scene viewport render target is unavailable.");
 						}
 
-						if (!m_ViewportTargetError.empty())
+						if (!m_ViewportRenderView.GetTargetError().empty())
 						{
 							ImGui::Separator();
 							ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error),
-								"%s", m_ViewportTargetError.c_str());
+								"%s", m_ViewportRenderView.GetTargetError().c_str());
 						}
-						if (!m_ViewportSceneError.empty())
+						if (!m_ViewportRenderView.GetSceneError().empty())
 						{
 							ImGui::Separator();
 							ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning),
-								"%s", m_ViewportSceneError.c_str());
+								"%s", m_ViewportRenderView.GetSceneError().c_str());
 						}
 					}
 #endif
@@ -7110,18 +7106,18 @@ namespace
 
 		[[nodiscard]] std::optional<glm::vec2> ProjectToViewportImage(const glm::vec3& Position) const
 		{
-			if (!m_ViewportViewProjectionValid)
+			if (!m_ViewportRenderView.IsViewProjectionValid())
 				return std::nullopt;
 			return PulseForgeEditor::ProjectWorldToViewportImage(
 				Position,
-				m_ViewportViewProjection,
+				m_ViewportRenderView.GetViewProjection(),
 				m_ViewportImageRect);
 		}
 
 		[[nodiscard]] std::optional<ViewportGizmoGeometry> BuildViewportGizmoGeometry(
 			const PulseForge::Entity& Entity) const
 		{
-			if (!m_ViewportViewProjectionValid)
+			if (!m_ViewportRenderView.IsViewProjectionValid())
 				return std::nullopt;
 			const auto Transform = Entity.GetTransform();
 			const auto World = Entity.GetWorldMatrix();
@@ -7406,13 +7402,15 @@ namespace
 		bool BeginGizmoDrag(const GizmoHandle& Handle, const ViewportGizmoGeometry& Geometry, const glm::vec2& Mouse)
 		{
 			if (!m_Scene || !SelectedEntity() || m_SceneRuntime || m_EditorCameraNavigationActive ||
-				Handle.Axis >= Geometry.Axes.size() || !Geometry.Axes[Handle.Axis].IsValid || !m_ViewportViewProjectionValid)
+				Handle.Axis >= Geometry.Axes.size() || !Geometry.Axes[Handle.Axis].IsValid ||
+				!m_ViewportRenderView.IsViewProjectionValid())
 				return false;
 			const auto Entity = m_Scene->FindEntity(*SelectedEntity());
 			if (!Entity)
 				return false;
 			const auto Transform = Entity->GetTransform();
-			const auto Ray = PulseForgeEditor::MakeViewportRay(Mouse, m_ViewportImageRect, m_ViewportViewProjection);
+			const auto Ray = PulseForgeEditor::MakeViewportRay(
+				Mouse, m_ViewportImageRect, m_ViewportRenderView.GetViewProjection());
 			if (!Transform || !Ray)
 				return false;
 
@@ -7476,7 +7474,7 @@ namespace
 			}
 
 			const auto Ray = PulseForgeEditor::MakeViewportRay(
-				Mouse, m_ViewportImageRect, m_ViewportViewProjection, true);
+				Mouse, m_ViewportImageRect, m_ViewportRenderView.GetViewProjection(), true);
 			if (!Ray)
 				return;
 			const auto CurrentPoint = PulseForgeEditor::IntersectRayPlane(*Ray, Drag.PivotWorld, Drag.PlaneNormal);
@@ -7704,16 +7702,17 @@ namespace
 
 		void PickEntityAt(const glm::vec2& Mouse, bool Control, bool Shift)
 		{
-			if (!m_Scene || m_SceneRuntime || !m_ViewportViewProjectionValid)
+			if (!m_Scene || m_SceneRuntime || !m_ViewportRenderView.IsViewProjectionValid())
 			{
 				SelectSingleEntity(std::nullopt);
 				return;
 			}
-			const auto Ray = PulseForgeEditor::MakeViewportRay(Mouse, m_ViewportImageRect, m_ViewportViewProjection);
+			const auto Ray = PulseForgeEditor::MakeViewportRay(
+				Mouse, m_ViewportImageRect, m_ViewportRenderView.GetViewProjection());
 			if (!Ray)
 				return;
 			auto Snapshot = PulseForge::SceneRenderSnapshotBuilder::BuildForView(
-				*m_Scene, m_ViewportViewProjection, m_EditorCamera.GetPosition());
+				*m_Scene, m_ViewportRenderView.GetViewProjection(), m_EditorCamera.GetPosition());
 			if (!Snapshot)
 			{
 				SetError("Viewport picking could not inspect the scene: " + Snapshot.error().Message);
@@ -7981,8 +7980,9 @@ namespace
 				return;
 			const glm::vec3 Center = (Minimum + Maximum) * 0.5f;
 			const float Radius = (std::max)(glm::length(Maximum - Minimum) * 0.5f, 0.35f);
-			const float AspectRatio = m_ViewportHeight > 0
-				? static_cast<float>(m_ViewportWidth) / static_cast<float>(m_ViewportHeight)
+			const float AspectRatio = m_ViewportRenderView.GetHeight() > 0
+				? static_cast<float>(m_ViewportRenderView.GetWidth()) /
+					static_cast<float>(m_ViewportRenderView.GetHeight())
 				: 1.0f;
 			m_EditorCamera.Focus(Center, Radius, AspectRatio);
 			SetStatus("Focused the selection.");
@@ -7995,128 +7995,50 @@ namespace
 			return std::unexpected("The OpenGL fallback does not support the engine scene viewport");
 #else
 			const ImVec2 FramebufferScale = ImGui::GetIO().DisplayFramebufferScale;
-			const double WidthInPixels = std::ceil(static_cast<double>(LogicalSize.x) *
-				(FramebufferScale.x > 0.0f ? FramebufferScale.x : 1.0f));
-			const double HeightInPixels = std::ceil(static_cast<double>(LogicalSize.y) *
-				(FramebufferScale.y > 0.0f ? FramebufferScale.y : 1.0f));
-			constexpr uint32_t ResolutionQuantum = 32;
-			if (!std::isfinite(WidthInPixels) || !std::isfinite(HeightInPixels) ||
-				WidthInPixels < 1.0 || HeightInPixels < 1.0 ||
-				WidthInPixels > (std::numeric_limits<uint32_t>::max)() - ResolutionQuantum ||
-				HeightInPixels > (std::numeric_limits<uint32_t>::max)() - ResolutionQuantum)
-			{
-				return std::unexpected("Viewport dimensions are outside the supported range");
-			}
-
-			const auto Quantize = [ResolutionQuantum](double Dimension)
-			{
-				return static_cast<uint32_t>(std::ceil(Dimension / ResolutionQuantum) * ResolutionQuantum);
-			};
-			const uint32_t Width = Quantize(WidthInPixels);
-			const uint32_t Height = Quantize(HeightInPixels);
-			if (m_ViewportTarget && m_ViewportWidth == Width && m_ViewportHeight == Height)
-				return {};
-
-			PulseForge::RenderTargetDesc Description;
-			Description.Width = Width;
-			Description.Height = Height;
-			Description.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
-			Description.DebugName = "PulseForge editor scene viewport";
-			auto Created = PulseForge::Application::Get().CreateRenderTarget(Description);
-			if (!Created)
-				return std::unexpected(Created.error().Message);
-
 			if (!m_ImGuiRenderer)
 				return std::unexpected("The Vulkan editor UI renderer is unavailable");
-			const PulseForge::Texture* ColorTexture = (*Created)->GetColorTexture();
-			if (!ColorTexture)
-				return std::unexpected("The editor scene viewport requires a color attachment");
-			auto TextureID = m_ImGuiRenderer->RegisterTexture(*ColorTexture);
-			if (!TextureID)
-				return std::unexpected(TextureID.error());
-
-			if (m_ViewportTextureID != 0)
-				m_ImGuiRenderer->UnregisterTexture(m_ViewportTextureID);
-			CancelGizmoInteraction();
-			m_ViewportTarget = std::move(*Created);
-			m_ViewportTextureID = *TextureID;
-			m_ViewportWidth = Width;
-			m_ViewportHeight = Height;
-			m_ViewportSceneReady = false;
+			auto Result = m_ViewportRenderView.EnsureTarget(
+				LogicalSize.x,
+				LogicalSize.y,
+				FramebufferScale.x,
+				FramebufferScale.y,
+				PulseForge::Application::Get(),
+				*m_ImGuiRenderer);
+			if (!Result)
+				return std::unexpected(Result.error());
+			if (*Result)
+				CancelGizmoInteraction();
 			return {};
 #endif
 		}
 
 		void PrepareViewportScene()
 		{
-			m_ViewportSceneReady = false;
-			m_ViewportViewProjectionValid = false;
-			m_EnvironmentLightingPending = false;
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			return;
 #else
-			if (!m_Project || !m_Scene || m_ViewportWidth == 0 || m_ViewportHeight == 0)
-				return;
-			if (m_SceneRendererInitializationFailed)
-				return;
-
-			if (!m_SceneRenderer)
-			{
-				auto Created = PulseForge::SceneRenderer::Create(
-					PulseForge::Application::Get(),
-					*m_Project,
-					std::filesystem::path(PF_EDITOR_SHADER_DIRECTORY));
-				if (!Created)
-				{
-					m_SceneRendererInitializationFailed = true;
-					SetViewportSceneError("Could not initialize the scene renderer: " + Created.error().Message);
-					return;
-				}
-				m_SceneRenderer = std::move(*Created);
-			}
-
-			const PulseForge::Scene& ActiveScene = m_SceneRuntime && m_RuntimeScene ? *m_RuntimeScene : *m_Scene;
-			const float AspectRatio = static_cast<float>(m_ViewportWidth) / static_cast<float>(m_ViewportHeight);
-			std::expected<void, PulseForge::SceneRendererError> Prepared;
-			if (m_SceneRuntime && m_RuntimeScene)
-				Prepared = m_SceneRenderer->PrepareScene(ActiveScene, AspectRatio);
-			else
-			{
-				auto ViewProjection = m_EditorCamera.GetViewProjection(AspectRatio);
-				if (!ViewProjection)
-				{
-					SetViewportSceneError("Could not prepare the editor camera: " + ViewProjection.error());
-					return;
-				}
-				m_ViewportViewProjection = *ViewProjection;
-				auto Projection = m_EditorCamera.GetProjection(AspectRatio);
-				if (!Projection)
-				{
-					SetViewportSceneError("Could not prepare the editor camera projection: " + Projection.error());
-					return;
-				}
-				const std::vector<PulseForge::UUID> HiddenEntities = GetEffectivelyHiddenEntities();
-				Prepared = m_SceneRenderer->PrepareSceneFiltered(
-					ActiveScene, m_EditorCamera.GetView(), *Projection, m_EditorCamera.GetPosition(),
-					0.1f, 1000.0f, HiddenEntities);
-			}
-			if (!Prepared)
-			{
-				SetViewportSceneError("Could not prepare the scene viewport: " + Prepared.error().Message);
-				return;
-			}
-			ClearViewportSceneError();
-			m_ViewportViewProjectionValid = !m_SceneRuntime && m_Scene != nullptr;
-			m_ViewportSceneReady = true;
-			m_EnvironmentLightingPending = m_SceneRenderer->IsEnvironmentLightingPending();
-			if (m_ProjectOpenTimingActive && !m_LoggedFirstViewportPrepared)
+			std::vector<PulseForge::UUID> HiddenEntities;
+			if (!m_SceneRuntime)
+				HiddenEntities = GetEffectivelyHiddenEntities();
+			m_ViewportRenderView.PrepareScene(
+				PulseForge::Application::Get(),
+				m_Project ? &*m_Project : nullptr,
+				m_Scene.get(),
+				m_RuntimeScene.get(),
+				m_SceneRuntime != nullptr,
+				m_EditorCamera,
+				HiddenEntities,
+				std::filesystem::path(PF_EDITOR_SHADER_DIRECTORY));
+			if (m_ProjectOpenTimingActive && !m_LoggedFirstViewportPrepared && m_ViewportRenderView.IsSceneReady())
 			{
 				m_LoggedFirstViewportPrepared = true;
 				const double Milliseconds = std::chrono::duration<double, std::milli>(
 					std::chrono::steady_clock::now() - m_ProjectOpenStartedAt).count();
 				PF_INFO("Profile: Project open to first renderable viewport preparation took {:.2f} ms", Milliseconds);
 			}
-			if (m_ProjectOpenTimingActive && m_SceneRenderer->HasPreparedEnvironmentLighting() && !m_LoggedEnvironmentReady)
+			if (m_ProjectOpenTimingActive && m_ViewportRenderView.IsSceneReady() &&
+				m_ViewportRenderView.HasPreparedEnvironmentLighting() &&
+				!m_LoggedEnvironmentReady)
 			{
 				m_LoggedEnvironmentReady = true;
 				const double Milliseconds = std::chrono::duration<double, std::milli>(
@@ -8131,105 +8053,33 @@ namespace
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			return;
 #else
-			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport) || !m_ViewportTarget)
-				return;
-
-			if (m_SceneRenderer && m_ViewportSceneReady)
-			{
-				PulseForge::ToneMappingSettings ToneSettings;
-				ToneSettings.ExposureEV = m_ViewportTools.GetValues().ExposureEV;
-				if (!m_SceneRenderer->SetToneMappingSettings(ToneSettings))
-				{
-					SetViewportSceneError("The viewport exposure value is outside the supported range");
-					return;
-				}
-				if (auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_ViewportTarget); !Rendered)
-				{
-					SetViewportSceneError("Scene viewport rendering failed: " + Rendered.error().Message);
-					PulseForge::RenderTargetClearValue Clear;
-					const auto Background = PulseForgeEditor::GetEditorColorValue(
-						PulseForgeEditor::EditorColorToken::ViewportBackground);
-					Clear.Color = { Background.Red, Background.Green, Background.Blue, Background.Alpha };
-					if (const auto Begin = PulseForge::Application::Get().BeginRenderTarget(*m_ViewportTarget, Clear); Begin)
-					{
-						if (const auto End = PulseForge::Application::Get().EndRenderTarget(); !End)
-							SetViewportSceneError("Could not clear the scene viewport after rendering failed: " + End.error().Message);
-					}
-					else
-						SetViewportSceneError("Could not clear the scene viewport after rendering failed: " + Begin.error().Message);
-				}
-				else
-				{
-					ClearViewportSceneError();
-					if (m_ProjectOpenTimingActive && !m_LoggedFirstViewportRendered)
-					{
-						m_LoggedFirstViewportRendered = true;
-						const double Milliseconds = std::chrono::duration<double, std::milli>(
-							std::chrono::steady_clock::now() - m_ProjectOpenStartedAt).count();
-						PF_INFO("Profile: Project open to first rendered viewport frame took {:.2f} ms", Milliseconds);
-					}
-				}
-				return;
-			}
-
 			PulseForge::RenderTargetClearValue Clear;
-			const PulseForgeEditor::EditorColorValue ViewportBackground =
-				PulseForgeEditor::GetEditorColorValue(PulseForgeEditor::EditorColorToken::ViewportBackground);
-			Clear.Color = {
-				ViewportBackground.Red,
-				ViewportBackground.Green,
-				ViewportBackground.Blue,
-				ViewportBackground.Alpha
-			};
-			const auto Begin = PulseForge::Application::Get().BeginRenderTarget(*m_ViewportTarget, Clear);
-			if (!Begin)
+			const auto Background = PulseForgeEditor::GetEditorColorValue(
+				PulseForgeEditor::EditorColorToken::ViewportBackground);
+			Clear.Color = { Background.Red, Background.Green, Background.Blue, Background.Alpha };
+			if (m_ViewportRenderView.Render(
+				PulseForge::Application::Get(),
+				m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport),
+				m_ViewportTools.GetValues().ExposureEV,
+				Clear) &&
+				m_ProjectOpenTimingActive && !m_LoggedFirstViewportRendered)
 			{
-				SetViewportSceneError("Could not clear the scene viewport: " + Begin.error().Message);
-				return;
+				m_LoggedFirstViewportRendered = true;
+				const double Milliseconds = std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - m_ProjectOpenStartedAt).count();
+				PF_INFO("Profile: Project open to first rendered viewport frame took {:.2f} ms", Milliseconds);
 			}
-			if (const auto End = PulseForge::Application::Get().EndRenderTarget(); !End)
-				SetViewportSceneError("Could not finish clearing the scene viewport: " + End.error().Message);
 #endif
-		}
-
-		void SetViewportTargetError(std::string Message)
-		{
-			if (m_ViewportTargetError == Message)
-				return;
-			m_ViewportTargetError = std::move(Message);
-			PF_WARN("{}", m_ViewportTargetError);
-		}
-
-		void ClearViewportTargetError()
-		{
-			m_ViewportTargetError.clear();
-		}
-
-		void SetViewportSceneError(std::string Message)
-		{
-			if (m_ViewportSceneError == Message)
-				return;
-			m_ViewportSceneError = std::move(Message);
-			PF_WARN("{}", m_ViewportSceneError);
-		}
-
-		void ClearViewportSceneError()
-		{
-			m_ViewportSceneError.clear();
 		}
 
 		void ResetViewportSceneRenderer() noexcept
 		{
 			CancelGizmoInteraction();
 			ResetEditorViewportCamera();
-			m_SceneRenderer.reset();
+			m_ViewportRenderView.ResetScene();
 			m_ViewportTools.ResetExposure();
 			m_MeshPickingCache.Clear();
-			m_ViewportSceneReady = false;
-			m_SceneRendererInitializationFailed = false;
-			ClearViewportSceneError();
 		}
-
 		bool BeginEditorCameraNavigation()
 		{
 #ifdef PF_EDITOR_RENDERER_OPENGL
@@ -8390,14 +8240,7 @@ namespace
 		{
 			CancelGizmoInteraction();
 			m_ViewportImageRect = {};
-			if (m_ImGuiRenderer && m_ViewportTextureID != 0)
-				m_ImGuiRenderer->UnregisterTexture(m_ViewportTextureID);
-			m_ViewportTextureID = 0;
-			m_ViewportTarget.reset();
-			m_ViewportWidth = 0;
-			m_ViewportHeight = 0;
-			m_ViewportSceneReady = false;
-			ClearViewportTargetError();
+			m_ViewportRenderView.ResetTarget();
 		}
 
 		void DrawConsolePanel()
@@ -8751,8 +8594,7 @@ namespace
 			CancelGizmoInteraction();
 			ResetEditorViewportCamera();
 			StopRuntime();
-			m_ViewportSceneReady = false;
-			ClearViewportSceneError();
+			m_ViewportRenderView.InvalidatePreparedScene();
 			m_Scene.reset();
 			m_SceneAsset.reset();
 			SelectSingleEntity(std::nullopt);
@@ -8767,6 +8609,7 @@ namespace
 				return;
 
 			ImGui::SetCurrentContext(m_Context);
+			m_ViewportRenderView.ResetTarget();
 			if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
 				ImGui::DestroyPlatformWindows();
 			if (m_Project)
@@ -8855,10 +8698,7 @@ namespace
 		uint32_t m_OpenGLDiagnosticFramesSeen = 0;
 		#endif
 		bool m_FileDialogActive = false;
-		bool m_ViewportSceneReady = false;
 		bool m_ViewportImageHovered = false;
-		bool m_ViewportViewProjectionValid = false;
-		bool m_EnvironmentLightingPending = false;
 		bool m_ProjectOpenTimingActive = false;
 		bool m_LoggedFirstViewportPrepared = false;
 		bool m_LoggedFirstViewportRendered = false;
@@ -8871,7 +8711,6 @@ namespace
 		bool m_PreviousRawMouseMotion = false;
 		bool m_RawMouseMotionChanged = false;
 		bool m_CursorRestoreValid = false;
-		bool m_SceneRendererInitializationFailed = false;
 		PulseForgeEditor::EditorSceneEditController m_SceneEditController;
 		PulseForgeEditor::EditorSceneWorkspaceState m_SceneWorkspace;
 		PulseForgeEditor::EditorSceneVisibilityCommands m_SceneVisibilityCommands;
@@ -8995,12 +8834,10 @@ namespace
 		bool m_DocumentHostTabGroupSourceCenterValid = false;
 		bool m_DocumentHostTabGroupTargetCenterValid = false;
 		std::optional<PulseForge::Project> m_Project;
+		PulseForgeEditor::EditorViewportSceneRenderView m_ViewportRenderView;
 		std::unique_ptr<PulseForge::Scene> m_Scene;
 		std::unique_ptr<PulseForge::Scene> m_RuntimeScene;
 		std::unique_ptr<PulseForge::SceneRuntime> m_SceneRuntime;
-		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
-		PulseForge::RenderTargetHandle m_ViewportTarget;
-		glm::mat4 m_ViewportViewProjection{ 1.0f };
 		PulseForgeEditor::ViewportImageRect m_ViewportImageRect;
 		std::optional<GizmoDrag> m_GizmoDrag;
 		PulseForgeEditor::EditorViewportToolState m_ViewportTools;
@@ -9008,9 +8845,6 @@ namespace
 		ViewportCameraGesture m_ViewportCameraGesture = ViewportCameraGesture::None;
 		bool m_ShowEditorOverlays = true;
 		PulseForgeEditor::EditorMeshPickingCache m_MeshPickingCache;
-		uint64_t m_ViewportTextureID = 0;
-		uint32_t m_ViewportWidth = 0;
-		uint32_t m_ViewportHeight = 0;
 		int m_PreviousCursorMode = GLFW_CURSOR_NORMAL;
 		float m_LastCursorX = 0.0f;
 		float m_LastCursorY = 0.0f;
@@ -9021,8 +8855,6 @@ namespace
 		PulseForgeEditor::EditorSceneEntityCommands m_SceneEntityCommands;
 		PulseForgeEditor::EditorMaterialDraftStore m_MaterialDraftStore;
 		std::string m_WindowTitle;
-		std::string m_ViewportTargetError;
-		std::string m_ViewportSceneError;
 		std::string m_ImGuiRenderingError;
 		std::string m_LayoutPersistenceError;
 		std::filesystem::path m_DocumentWorkspacePath;
