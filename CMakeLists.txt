@@ -1323,6 +1323,7 @@ if(BUILD_TESTING)
 		Tests/PulseForgeEditorTests.cpp
 		Tests/EditorTests.cpp
 		Tests/EditorViewportTests.cpp
+		Tests/EditorViewportSceneRenderViewTests.cpp
 		Tests/EditorAssetPreviewStressHarnessTests.cpp
 		Tests/EditorStateTests.cpp
 		Tests/EditorPanelStateTests.cpp
@@ -1342,6 +1343,9 @@ if(BUILD_TESTING)
 		PulseForge/Vendor/json/include
 	)
 	target_compile_definitions(PulseForgeEditorTests PRIVATE PF_PLATFORM_WINDOWS)
+	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
+		target_compile_definitions(PulseForgeEditorTests PRIVATE PF_EDITOR_RENDERER_OPENGL)
+	endif()
 	target_link_libraries(PulseForgeEditorTests PRIVATE
 		PulseForgeEditorCore PulseForgeEditorUI ${PULSEFORGE_ENGINE_TEST_LIBRARIES} PulseForgeImGui spdlog::spdlog)
 	add_dependencies(PulseForgeEditorTests PulseForgePublicHeaderChecks)

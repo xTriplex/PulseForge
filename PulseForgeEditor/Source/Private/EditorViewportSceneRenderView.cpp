@@ -2,7 +2,6 @@
 
 #include "Assets/Project.h"
 #include "Core/Log.h"
-#include "Editor/EditorImGuiRenderer.h"
 #include "Editor/EditorViewportPolicy.h"
 #include "EditorViewportCamera.h"
 #include "Renderer/SceneRenderer.h"
@@ -20,7 +19,7 @@ namespace PulseForgeEditor
 	}
 
 	std::expected<bool, std::string> EditorViewportSceneRenderView::EnsureTarget(float LogicalWidth, float LogicalHeight, float ScaleX,
-		float ScaleY, PulseForge::RenderDevice& Runtime, EditorImGuiRenderer& ImGuiRenderer)
+		float ScaleY, PulseForge::RenderDevice& Runtime, EditorTextureRegistry& TextureRegistry)
 	{
 #ifdef PF_EDITOR_RENDERER_OPENGL
 		(void)LogicalWidth;
@@ -28,7 +27,7 @@ namespace PulseForgeEditor
 		(void)ScaleX;
 		(void)ScaleY;
 		(void)Runtime;
-		(void)ImGuiRenderer;
+		(void)TextureRegistry;
 		return std::unexpected("The OpenGL fallback does not support the engine scene viewport");
 #else
 		const auto Extent = CalculateEditorViewportTargetExtent(LogicalWidth, LogicalHeight, ScaleX, ScaleY);
@@ -64,20 +63,22 @@ namespace PulseForgeEditor
 			return std::unexpected(std::string(Error));
 		}
 
-		auto TextureID = ImGuiRenderer.RegisterTexture(*ColorTexture);
+		auto TextureID = TextureRegistry.RegisterTexture(*ColorTexture);
 		if (!TextureID)
 		{
 			SetTargetError("Could not resize the scene viewport: " + TextureID.error());
 			return std::unexpected(TextureID.error());
 		}
 
-		if (m_TextureID != 0 && m_ImGuiRenderer) m_ImGuiRenderer->UnregisterTexture(m_TextureID);
+		if (m_TextureID != 0 && m_TextureRegistry) m_TextureRegistry->UnregisterTexture(m_TextureID);
 		m_Target = std::move(*Created);
-		m_ImGuiRenderer = &ImGuiRenderer;
+		m_TextureRegistry = &TextureRegistry;
 		m_TextureID = *TextureID;
 		m_Width = Extent->Width;
 		m_Height = Extent->Height;
 		m_SceneReady = false;
+		m_ViewProjectionValid = false;
+		m_EnvironmentLightingPending = false;
 		ClearTargetError();
 		return true;
 #endif
@@ -225,13 +226,15 @@ namespace PulseForgeEditor
 
 	void EditorViewportSceneRenderView::ResetTarget() noexcept
 	{
-		if (m_ImGuiRenderer && m_TextureID != 0) m_ImGuiRenderer->UnregisterTexture(m_TextureID);
+		if (m_TextureRegistry && m_TextureID != 0) m_TextureRegistry->UnregisterTexture(m_TextureID);
 		m_TextureID = 0;
-		m_ImGuiRenderer = nullptr;
+		m_TextureRegistry = nullptr;
 		m_Target.reset();
 		m_Width = 0;
 		m_Height = 0;
 		m_SceneReady = false;
+		m_ViewProjectionValid = false;
+		m_EnvironmentLightingPending = false;
 		ClearTargetError();
 	}
 

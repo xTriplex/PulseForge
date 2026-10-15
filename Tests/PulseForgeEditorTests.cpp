@@ -6,6 +6,7 @@ int main()
 	TestRunner Tests;
 	RunEditorHistoryTests(Tests);
 	RunEditorViewportTests(Tests);
+	RunEditorViewportSceneRenderViewTests(Tests);
 	RunEditorAssetPreviewStressHarnessTests(Tests);
 	RunEditorTests(Tests);
 	RunEditorStateTests(Tests);

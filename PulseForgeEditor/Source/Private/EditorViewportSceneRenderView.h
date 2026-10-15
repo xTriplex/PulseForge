@@ -4,6 +4,7 @@
 #include "Renderer/RenderDevice.h"
 #include "Scene/UUID.h"
 #include "Editor/EditorViewportPolicy.h"
+#include "Editor/EditorTextureRegistry.h"
 
 #include <expected>
 #include <filesystem>
@@ -22,7 +23,6 @@ namespace PulseForge
 
 namespace PulseForgeEditor
 {
-	class EditorImGuiRenderer;
 	class EditorViewportCamera;
 
 	class EditorViewportSceneRenderView final
@@ -34,7 +34,7 @@ namespace PulseForgeEditor
 		~EditorViewportSceneRenderView();
 
 		[[nodiscard]] std::expected<bool, std::string> EnsureTarget(float LogicalWidth, float LogicalHeight, float ScaleX, float ScaleY,
-			PulseForge::RenderDevice& Runtime, EditorImGuiRenderer& ImGuiRenderer);
+			PulseForge::RenderDevice& Runtime, EditorTextureRegistry& TextureRegistry);
 		void PrepareScene(PulseForge::RenderDevice& Runtime, const PulseForge::Project* Project, const PulseForge::Scene* EditScene,
 			const PulseForge::Scene* RuntimeScene, bool RuntimeActive, const EditorViewportCamera& Camera,
 			std::span<const PulseForge::UUID> HiddenEntities, const std::filesystem::path& CompiledShaderDirectory);
@@ -70,7 +70,7 @@ namespace PulseForgeEditor
 
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
 		PulseForge::RenderTargetHandle m_Target;
-		EditorImGuiRenderer* m_ImGuiRenderer = nullptr;
+		EditorTextureRegistry* m_TextureRegistry = nullptr;
 		glm::mat4 m_ViewProjection{ 1.0f };
 		uint64_t m_TextureID = 0;
 		uint32_t m_Width = 0;

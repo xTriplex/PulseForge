@@ -2,6 +2,7 @@
 
 #include "Renderer/Texture.h"
 #include "Editor/EditorAssetPreviewPolicy.h"
+#include "Editor/EditorTextureRegistry.h"
 
 #include <array>
 #include <atomic>
@@ -19,12 +20,11 @@
 
 namespace PulseForge
 {
-	class Application;
+	class RenderDevice;
 }
 
 namespace PulseForgeEditor
 {
-	class EditorImGuiRenderer;
 	struct AssetPreviewServiceLimits
 	{
 		size_t MaximumQueuedRequests = 96;
@@ -72,10 +72,7 @@ namespace PulseForgeEditor
 		EditorAssetPreviewService& operator=(const EditorAssetPreviewService&) = delete;
 		~EditorAssetPreviewService();
 
-		void Initialize(
-			PulseForge::Application& Runtime,
-			EditorImGuiRenderer& Renderer,
-			AssetPreviewServiceLimits Limits = {});
+		void Initialize(PulseForge::RenderDevice& Runtime, EditorTextureRegistry& TextureRegistry, AssetPreviewServiceLimits Limits = {});
 		void SetProject(std::string ProjectID);
 		void BeginRequestFrame();
 		[[nodiscard]] bool TouchPreview(std::string_view ProjectID, std::string_view AssetID);
@@ -133,14 +130,11 @@ namespace PulseForgeEditor
 
 		void WorkerMain();
 		[[nodiscard]] static std::optional<CpuPreview> Decode(const Request& Work);
-		[[nodiscard]] bool EvictToFit(
-			size_t RequiredBytes,
-			std::string_view ProtectedKey = {},
-			size_t RequiredEntrySlots = 0);
+		[[nodiscard]] bool EvictToFit(size_t RequiredBytes, std::string_view ProtectedKey = {}, size_t RequiredEntrySlots = 0);
 		void ClearEntries() noexcept;
 
-		PulseForge::Application* m_Runtime = nullptr;
-		EditorImGuiRenderer* m_Renderer = nullptr;
+		PulseForge::RenderDevice* m_Runtime = nullptr;
+		EditorTextureRegistry* m_TextureRegistry = nullptr;
 		mutable std::mutex m_Mutex;
 		std::condition_variable m_WorkAvailable;
 		std::deque<Request> m_Requests;

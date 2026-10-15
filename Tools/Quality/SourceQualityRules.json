@@ -209,6 +209,7 @@
     "PulseForgeEditor/Source/Public/Editor/EditorSnapshotHistory.h" : "PulseForgeEditorCore",
     "PulseForgeEditor/Source/Public/Editor/EditorStatusPanel.h" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Public/Editor/EditorStyle.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorTextureRegistry.h" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Public/Editor/EditorViewportPolicy.h" : "PulseForgeEditorCore",
     "PulseForgeEditor/Source/Public/Editor/EditorViewportToolState.h" : "PulseForgeEditorCore",
     "PulseForgeEditor/Source/Public/Editor/EditorViewportToolbar.h" : "PulseForgeEditorUI",
