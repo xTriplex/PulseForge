@@ -212,6 +212,7 @@
     "PulseForgeEditor/Source/Public/Editor/EditorStyle.h" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Public/Editor/EditorTextureRegistry.h" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Public/Editor/EditorViewportPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorViewportGizmoInteraction.h" : "PulseForgeEditorCore",
     "PulseForgeEditor/Source/Public/Editor/EditorViewportToolState.h" : "PulseForgeEditorCore",
     "PulseForgeEditor/Source/Public/Editor/EditorViewportToolbar.h" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Public/Editor/EditorViewportToolbarPolicy.h" : "PulseForgeEditorCore",
@@ -249,17 +250,17 @@
   {
     "PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp" :
     {
-      "max_lines" : 3797,
+      "max_lines" : 3790,
       "reason" : "Legacy renderer implementation; new responsibilities require a separate owner."
     },
     "PulseForgeEditor/Source/Private/EditorApplication.cpp" :
     {
-      "max_lines" : 8752,
+      "max_lines" : 6958,
       "reason" : "Legacy application coordinator; no growth allowance remains while responsibility extraction continues."
     },
     "Tests/GpuRendererValidation.cpp" :
     {
-      "max_lines" : 3691,
+      "max_lines" : 3526,
       "reason" : "Legacy GPU validation entry point; scenarios should move into focused validation suites."
     }
   },
