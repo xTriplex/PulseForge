@@ -1,5 +1,6 @@
 #include "TestEditorSupport.h"
 
+#include "Editor/EditorMainMenuPanel.h"
 #include "EditorWorkspacePresentation.h"
 
 #include <imgui_internal.h>
@@ -298,6 +299,32 @@ namespace
 void RunEditorWorkspacePresentationTests(TestRunner& Tests)
 {
 	using namespace PulseForgeEditor;
+	{
+		FakeViewportBackend Backend;
+		ScopedWorkspaceImGuiContext Context(Backend);
+		EditorMainMenuPanel Panel;
+		EditorStyle Style;
+		EditorMainMenuState State;
+		State.ProjectOpen = true;
+		State.EditMenuEnabled = true;
+		State.CanEditScene = true;
+		State.CanSaveScene = true;
+		State.CanSaveSceneAs = true;
+		std::array<PulseForge::AssetRecord, 1> Assets{};
+		Assets[0].ID = PulseForge::AssetID{ 12, 34 };
+		Assets[0].ProjectRelativePath = "Assets/Main.scene";
+		State.Assets = Assets;
+		State.ActiveSceneAsset = Assets[0].ID;
+		ImGui::NewFrame();
+		const auto DrawResult = Panel.Draw(State, Style);
+		ImGui::Render();
+		ImGui::UpdatePlatformWindows();
+		PF_CHECK(Tests, !DrawResult.Action);
+		PF_CHECK(Tests, ImGui::GetCurrentContext() != nullptr);
+		PF_CHECK(Tests, ImGui::GetPlatformIO().Viewports.Size == 1);
+		PF_CHECK(Tests, Backend.CreatedPlatformWindows.empty());
+		PF_CHECK(Tests, Backend.CreatedPresentationTargets.empty());
+	}
 
 	EditorDocumentManager Documents;
 	EditorDocumentEditorRegistry Editors;

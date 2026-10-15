@@ -45,6 +45,7 @@
 #include "Editor/EditorMaterialDetailsPanel.h"
 #include "EditorWorkspacePresentation.h"
 #include "Editor/EditorLayout.h"
+#include "Editor/EditorMainMenuPanel.h"
 #include "EditorViewportCamera.h"
 #include "EditorViewportSceneRenderView.h"
 #include "Editor/EditorViewportToolbar.h"
@@ -4486,229 +4487,174 @@ namespace
 			SetStatus("Project closed.");
 		}
 
-		void DrawMainMenu()
+		PulseForgeEditor::EditorMainMenuState BuildMainMenuState()
 		{
-			if (!ImGui::BeginMainMenuBar())
-				return;
-			if (ImGui::GetWindowViewport() && ImGui::GetMainViewport() &&
-				ImGui::GetWindowViewport()->ID == ImGui::GetMainViewport()->ID &&
-				ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
-				FocusDocumentHostIfChanged(PulseForgeEditor::EditorDocumentManager::MainHostID);
-			if (ImGui::BeginMenu("File"))
-			{
-				if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::NewDocument, "New Project..."))
-					CreateProject();
-				if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::FolderOpen, "Open Project..."))
-					OpenProject();
-				if (m_Project && m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Close, "Close Project"))
-					QueueAfterSave([this] { CloseProjectNow(); });
-				ImGui::Separator();
-				if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::Close, "Exit"))
-					QueueAfterSave([this] { RequestEditorApplicationClose(); });
-				ImGui::EndMenu();
-			}
+			PulseForgeEditor::EditorMainMenuState State;
+			State.ProjectOpen = m_Project.has_value();
+			State.Assets = m_ContentBrowser.Assets();
+			State.ActiveSceneAsset = m_SceneAsset;
+			State.OpeningPreference = m_Documents.GetOpeningPreference();
+			for (const auto& Descriptor : PulseForgeEditor::EditorPanelDescriptors)
+				State.PanelVisibility[static_cast<size_t>(Descriptor.Panel)] = m_Layout.IsPanelVisible(Descriptor.Panel);
 
 			const bool MaterialDocumentFocused = IsFocusedMaterialDocument();
 			const bool RegisteredDocumentFocused = GetFocusedRegisteredDocument() != nullptr;
+			const auto* FocusedIdentity = GetFocusedDocumentIdentity();
 			const bool SceneDocumentFocused = !IsEditorPanelFocused(PulseForgeEditor::EditorPanel::MaterialDetails) &&
-				(!GetFocusedDocumentIdentity() ||
-				GetFocusedDocumentIdentity()->Kind == PulseForgeEditor::EditorDocumentKind::Level);
-			if (ImGui::BeginMenu("Edit", m_Scene != nullptr || MaterialDocumentFocused || RegisteredDocumentFocused))
+											  (!FocusedIdentity || FocusedIdentity->Kind == PulseForgeEditor::EditorDocumentKind::Level);
+			State.EditMenuEnabled = m_Scene != nullptr || MaterialDocumentFocused || RegisteredDocumentFocused;
+			State.CanEditScene = SceneDocumentFocused && m_Scene != nullptr && m_SceneRuntime == nullptr;
+
+			const auto UndoCommand = m_SceneEditController.GetUndoCommand();
+			const auto RedoCommand = m_SceneEditController.GetRedoCommand();
+			State.CanUndo = State.CanEditScene && m_SceneEditController.CanUndo();
+			State.CanRedo = State.CanEditScene && m_SceneEditController.CanRedo();
+			if (RegisteredDocumentFocused) State.CanUndo = State.CanRedo = true;
+			if (MaterialDocumentFocused)
 			{
-				const auto UndoCommand = m_SceneEditController.GetUndoCommand();
-				const auto RedoCommand = m_SceneEditController.GetRedoCommand();
-				const bool CanEditScene = SceneDocumentFocused && m_Scene != nullptr && m_SceneRuntime == nullptr;
-				bool CanUndoDocument = CanEditScene && m_SceneEditController.CanUndo();
-				bool CanRedoDocument = CanEditScene && m_SceneEditController.CanRedo();
-				if (RegisteredDocumentFocused)
-					CanUndoDocument = CanRedoDocument = true;
-				if (MaterialDocumentFocused)
+				const auto Material = GetFocusedMaterialAsset();
+				if (Material)
 				{
-					const auto Material = GetFocusedMaterialAsset();
-					if (Material)
-					{
-						CanUndoDocument = m_Project && m_MaterialDrafts.CanUndo(*m_Project, *Material);
-						CanRedoDocument = m_Project && m_MaterialDrafts.CanRedo(*m_Project, *Material);
-					}
+					State.CanUndo = m_Project && m_MaterialDrafts.CanUndo(*m_Project, *Material);
+					State.CanRedo = m_Project && m_MaterialDrafts.CanRedo(*m_Project, *Material);
 				}
-				const bool HasSelection = !m_SceneWorkspace.Selection().GetEntities().empty();
-				const std::string UndoLabel = RegisteredDocumentFocused
-					? "Undo Document"
-					: MaterialDocumentFocused
-					? "Undo Material Edit"
-					: UndoCommand
-					? "Undo " + std::string(UndoCommand->Description)
-					: "Undo";
-				const std::string RedoLabel = RegisteredDocumentFocused
-					? "Redo Document"
-					: MaterialDocumentFocused
-					? "Redo Material Edit"
-					: RedoCommand
-					? "Redo " + std::string(RedoCommand->Description)
-					: "Redo";
-				if (ImGui::MenuItem(UndoLabel.c_str(), "Ctrl+Z", false, CanUndoDocument))
-				{
-					if (RegisteredDocumentFocused)
-					{
-						if (auto* Session = GetFocusedRegisteredDocument())
-							(void)m_DocumentEditors.DispatchFocusedCommand(
-								*Session, PulseForgeEditor::EditorDocumentCommand::Undo);
-					}
-					else if (MaterialDocumentFocused)
-						(void)ApplyMaterialHistoryStep(false);
-					else
-						UndoSceneEdit();
-				}
-				if (ImGui::MenuItem(RedoLabel.c_str(), "Ctrl+Y / Ctrl+Shift+Z", false, CanRedoDocument))
-				{
-					if (RegisteredDocumentFocused)
-					{
-						if (auto* Session = GetFocusedRegisteredDocument())
-							(void)m_DocumentEditors.DispatchFocusedCommand(
-								*Session, PulseForgeEditor::EditorDocumentCommand::Redo);
-					}
-					else if (MaterialDocumentFocused)
-						(void)ApplyMaterialHistoryStep(true);
-					else
-						RedoSceneEdit();
-				}
-				ImGui::Separator();
-				if (ImGui::MenuItem("Cut", "Ctrl+X", false, CanEditScene && HasSelection))
-					CutSelectedEntities();
-				if (ImGui::MenuItem("Copy", "Ctrl+C", false, CanEditScene && HasSelection))
-					(void)CopySelectedEntities();
-				const bool CanPasteEntities = CanEditScene && m_Project && m_SceneEntityCommands.CanPaste(m_Project->GetDescription().ID);
-				if (ImGui::MenuItem("Paste", "Ctrl+V", false, CanPasteEntities))
-					PasteEntities();
-				if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, CanEditScene && HasSelection))
-					DuplicateSelectedEntity();
-				if (ImGui::MenuItem("Delete", "Delete", false, CanEditScene && HasSelection))
-					DeleteSelectedEntity();
-				ImGui::Separator();
-				if (ImGui::MenuItem("Select All", "Ctrl+A", false, CanEditScene && m_Scene->GetEntityCount() > 0))
-				{
-					std::vector<PulseForge::UUID> Identifiers;
+			}
+			State.UndoLabel = RegisteredDocumentFocused ? "Undo Document"
+							  : MaterialDocumentFocused ? "Undo Material Edit"
+							  : UndoCommand				? "Undo " + std::string(UndoCommand->Description)
+														: "Undo";
+			State.RedoLabel = RegisteredDocumentFocused ? "Redo Document"
+							  : MaterialDocumentFocused ? "Redo Material Edit"
+							  : RedoCommand				? "Redo " + std::string(RedoCommand->Description)
+														: "Redo";
+
+			State.HasSelection = !m_SceneWorkspace.Selection().GetEntities().empty();
+			State.CanPaste = State.CanEditScene && m_Project && m_SceneEntityCommands.CanPaste(m_Project->GetDescription().ID);
+			State.HasSceneEntities = m_Scene && m_Scene->GetEntityCount() > 0;
+			State.CanRename = SelectedEntity().has_value();
+			State.CanFocusSelection = State.HasSelection;
+			State.CanSnapSelection = State.HasSelection;
+			State.CanHideSelection = State.HasSelection;
+			State.CanShowAll = !m_SceneWorkspace.Visibility().GetHiddenEntities().empty();
+			State.CanIsolateSelection = State.HasSelection;
+			State.CanRestoreIsolation = m_SceneWorkspace.Visibility().GetIsolationBaseline().has_value();
+			State.CanSaveScene = m_Scene && m_SceneAsset;
+			State.CanSaveSceneAs = m_Scene != nullptr;
+			return State;
+		}
+
+		void DrawMainMenu()
+		{
+			const auto Result = m_MainMenuPanel.Draw(BuildMainMenuState(), m_EditorStyle);
+			if (Result.FocusMainDocumentHost) FocusDocumentHostIfChanged(PulseForgeEditor::EditorDocumentManager::MainHostID);
+			if (Result.Action) ExecuteMainMenuAction(*Result.Action);
+		}
+
+		void ExecuteMainMenuAction(const PulseForgeEditor::EditorMainMenuAction& Action)
+		{
+			using PulseForgeEditor::EditorMainMenuActionKind;
+			switch (Action.Kind)
+			{
+			case EditorMainMenuActionKind::NewProject:
+				CreateProject();
+				break;
+			case EditorMainMenuActionKind::OpenProject:
+				OpenProject();
+				break;
+			case EditorMainMenuActionKind::CloseProject:
+				QueueAfterSave([this] { CloseProjectNow(); });
+				break;
+			case EditorMainMenuActionKind::Exit:
+				QueueAfterSave([this] { RequestEditorApplicationClose(); });
+				break;
+			case EditorMainMenuActionKind::Undo:
+			case EditorMainMenuActionKind::Redo:
+			{
+				const bool Redo = Action.Kind == EditorMainMenuActionKind::Redo;
+				if (auto* Session = GetFocusedRegisteredDocument())
+					(void)m_DocumentEditors.DispatchFocusedCommand(
+						*Session, Redo ? PulseForgeEditor::EditorDocumentCommand::Redo : PulseForgeEditor::EditorDocumentCommand::Undo);
+				else if (IsFocusedMaterialDocument()) (void)ApplyMaterialHistoryStep(Redo);
+				else if (Redo) RedoSceneEdit();
+				else UndoSceneEdit();
+				break;
+			}
+			case EditorMainMenuActionKind::Cut:
+				CutSelectedEntities();
+				break;
+			case EditorMainMenuActionKind::Copy:
+				(void)CopySelectedEntities();
+				break;
+			case EditorMainMenuActionKind::Paste:
+				PasteEntities();
+				break;
+			case EditorMainMenuActionKind::Duplicate:
+				DuplicateSelectedEntity();
+				break;
+			case EditorMainMenuActionKind::Delete:
+				DeleteSelectedEntity();
+				break;
+			case EditorMainMenuActionKind::SelectAll:
+			{
+				std::vector<PulseForge::UUID> Identifiers;
+				if (m_Scene)
 					for (const PulseForge::Entity& Entity : m_Scene->GetEntities())
 						Identifiers.push_back(Entity.GetUUID());
-					SetEditorSelection(std::move(Identifiers));
-				}
-				if (ImGui::MenuItem("Rename", "F2", false, CanEditScene && SelectedEntity().has_value()))
-				{
-					m_InspectorPanel.FocusEntityNameNextFrame();
-					SetEditorPanelVisible(PulseForgeEditor::EditorPanel::Inspector, true);
-				}
-				if (ImGui::MenuItem("Focus Selected", "F", false, CanEditScene && HasSelection))
-					FocusSelection();
-				if (ImGui::MenuItem("Snap to Supporting Surface", "End", false,
-					CanEditScene && HasSelection))
-					SnapSelectionToSurface();
-				if (ImGui::MenuItem("Hide Selected", "H", false, CanEditScene && HasSelection))
-					HideSelectedEntities();
-				if (ImGui::MenuItem(
-						"Show All", "Ctrl+H", false, CanEditScene && !m_SceneWorkspace.Visibility().GetHiddenEntities().empty()))
-					ShowAllEntities();
-				if (ImGui::MenuItem("Isolate Selection", "Shift+H", false, CanEditScene && HasSelection))
-					IsolateSelectedEntities();
-				if (ImGui::MenuItem("Restore Isolation Visibility", nullptr, false,
-						CanEditScene && m_SceneWorkspace.Visibility().GetIsolationBaseline().has_value()))
-					RestoreIsolatedVisibility();
-				ImGui::EndMenu();
+				SetEditorSelection(std::move(Identifiers));
+				break;
 			}
-
-			if (ImGui::BeginMenu("Scene", m_Project.has_value()))
-			{
-				if (m_EditorStyle.MenuItem(PulseForgeEditor::EditorIcon::NewDocument, "New Scene..."))
-					CreateScene(false);
-				if (m_EditorStyle.MenuItem(
-					PulseForgeEditor::EditorIcon::Save, "Save Scene", nullptr, false, m_Scene && m_SceneAsset))
-					SaveScene();
-				if (m_EditorStyle.MenuItem(
-					PulseForgeEditor::EditorIcon::Save, "Save Scene As...", nullptr, false, m_Scene != nullptr))
-					CreateScene(true);
-				if (ImGui::BeginMenu("Open Scene", m_Project.has_value()))
-				{
-					bool HasScenes = false;
-					for (const PulseForge::AssetRecord& Asset : m_ContentBrowser.Assets())
-					{
-						if (Asset.ProjectRelativePath.extension() != ".scene")
-							continue;
-						HasScenes = true;
-						const bool IsOpen = m_SceneAsset && *m_SceneAsset == Asset.ID;
-						if (ImGui::MenuItem(PathToUtf8(Asset.ProjectRelativePath.filename()).c_str(), nullptr, IsOpen))
-							OpenScene(Asset.ID);
-					}
-					if (!HasScenes)
-						ImGui::MenuItem("No scene assets", nullptr, false, false);
-					ImGui::EndMenu();
-				}
-				ImGui::EndMenu();
+			case EditorMainMenuActionKind::Rename:
+				m_InspectorPanel.FocusEntityNameNextFrame();
+				SetEditorPanelVisible(PulseForgeEditor::EditorPanel::Inspector, true);
+				break;
+			case EditorMainMenuActionKind::FocusSelection:
+				FocusSelection();
+				break;
+			case EditorMainMenuActionKind::SnapSelection:
+				SnapSelectionToSurface();
+				break;
+			case EditorMainMenuActionKind::HideSelection:
+				HideSelectedEntities();
+				break;
+			case EditorMainMenuActionKind::ShowAll:
+				ShowAllEntities();
+				break;
+			case EditorMainMenuActionKind::IsolateSelection:
+				IsolateSelectedEntities();
+				break;
+			case EditorMainMenuActionKind::RestoreIsolation:
+				RestoreIsolatedVisibility();
+				break;
+			case EditorMainMenuActionKind::NewScene:
+				CreateScene(false);
+				break;
+			case EditorMainMenuActionKind::SaveScene:
+				(void)SaveScene();
+				break;
+			case EditorMainMenuActionKind::SaveSceneAs:
+				CreateScene(true);
+				break;
+			case EditorMainMenuActionKind::OpenScene:
+				if (Action.Asset) OpenScene(*Action.Asset);
+				break;
+			case EditorMainMenuActionKind::SetPanelVisible:
+				(void)SetEditorPanelVisible(Action.Panel, Action.PanelVisible);
+				break;
+			case EditorMainMenuActionKind::SetOpeningPreference:
+				m_Documents.SetOpeningPreference(Action.OpeningPreference);
+				(void)m_Layout.SetDocumentOpeningPreference(static_cast<uint32_t>(Action.OpeningPreference));
+				break;
+			case EditorMainMenuActionKind::ResetLayout:
+				m_Layout.RequestReset();
+				break;
 			}
-
-			if (ImGui::BeginMenu("Window"))
-			{
-				for (const PulseForgeEditor::EditorPanelDescriptor& Descriptor :
-					PulseForgeEditor::EditorPanelDescriptors)
-				{
-					const bool IsVisible = m_Layout.IsPanelVisible(Descriptor.Panel);
-					const char* PanelLabel = Descriptor.Panel == PulseForgeEditor::EditorPanel::MaterialDetails
-						? "Material Details" : Descriptor.WindowName.data();
-					if (ImGui::MenuItem(PanelLabel, nullptr, IsVisible))
-						SetEditorPanelVisible(Descriptor.Panel, !IsVisible);
-				}
-				ImGui::Separator();
-				if (ImGui::BeginMenu("New asset documents open in"))
-				{
-					auto Preference = m_Documents.GetOpeningPreference();
-					if (ImGui::MenuItem("New native window", nullptr,
-						Preference == PulseForgeEditor::EditorDocumentOpenPreference::NewNativeWindow))
-					{
-						m_Documents.SetOpeningPreference(PulseForgeEditor::EditorDocumentOpenPreference::NewNativeWindow);
-						(void)m_Layout.SetDocumentOpeningPreference(0);
-					}
-					if (ImGui::MenuItem("Main document strip", nullptr,
-						Preference == PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip))
-					{
-						m_Documents.SetOpeningPreference(PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip);
-						(void)m_Layout.SetDocumentOpeningPreference(1);
-					}
-					if (ImGui::MenuItem("Remembered placement", nullptr,
-						Preference == PulseForgeEditor::EditorDocumentOpenPreference::RememberedPlacement))
-					{
-						m_Documents.SetOpeningPreference(PulseForgeEditor::EditorDocumentOpenPreference::RememberedPlacement);
-						(void)m_Layout.SetDocumentOpeningPreference(2);
-					}
-					ImGui::EndMenu();
-				}
-				ImGui::Separator();
-				if (ImGui::MenuItem("Reset Layout"))
-					m_Layout.RequestReset();
-				ImGui::EndMenu();
-			}
-			if (ImGui::BeginMenu("Help"))
-			{
-				if (ImGui::BeginMenu("Keyboard Shortcuts"))
-				{
-					ImGui::MenuItem("Select / Move / Rotate / Scale", "Q / W / E / R", false, false);
-					ImGui::MenuItem("Focus selection / Snap to surface", "F / End", false, false);
-					ImGui::MenuItem("Undo / Redo", "Ctrl+Z / Ctrl+Y", false, false);
-					ImGui::MenuItem("Copy / Cut / Paste / Duplicate", "Ctrl+C / X / V / D", false, false);
-					ImGui::MenuItem("Delete / Rename / Create entity", "Delete / F2 / Ctrl+Shift+N", false, false);
-					ImGui::MenuItem("Hide / Isolate / Show all", "H / Shift+H / Ctrl+H", false, false);
-					ImGui::MenuItem("Save / Save Scene As", "Ctrl+S / Ctrl+Shift+S", false, false);
-					ImGui::MenuItem("Viewport orbit / pan / dolly", "Alt+LMB / MMB / RMB drag", false, false);
-					ImGui::MenuItem("Duplicate while moving or rotating", "Alt+gizmo drag", false, false);
-					ImGui::EndMenu();
-				}
-				ImGui::EndMenu();
-			}
-			ImGui::EndMainMenuBar();
 		}
 
 		void DrawEditorToolbar()
 		{
 			constexpr float Height = 60.0f;
-			if (!BeginEditorChromeBar("##PulseForgeGlobalToolbar", ImGuiDir_Up, Height,
-				PulseForgeEditor::EditorColorToken::PanelRaised, m_EditorStyle))
+			if (!BeginEditorChromeBar(
+					"##PulseForgeGlobalToolbar", ImGuiDir_Up, Height, PulseForgeEditor::EditorColorToken::PanelRaised, m_EditorStyle))
 				return;
 
 			const float ContentWidth = ImGui::GetContentRegionAvail().x;
@@ -7296,16 +7242,16 @@ namespace
 			if (m_ProjectOpenTimingActive && !m_LoggedFirstViewportPrepared && m_ViewportRenderView.IsSceneReady())
 			{
 				m_LoggedFirstViewportPrepared = true;
-				const double Milliseconds = std::chrono::duration<double, std::milli>(
-					std::chrono::steady_clock::now() - m_ProjectOpenStartedAt).count();
+				const double Milliseconds =
+					std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_ProjectOpenStartedAt).count();
 				PF_INFO("Profile: Project open to first renderable viewport preparation took {:.2f} ms", Milliseconds);
 			}
 			if (m_ProjectOpenTimingActive && m_ViewportRenderView.IsSceneReady() && m_ViewportRenderView.HasPreparedEnvironmentLighting() &&
 				!m_LoggedEnvironmentReady)
 			{
 				m_LoggedEnvironmentReady = true;
-				const double Milliseconds = std::chrono::duration<double, std::milli>(
-					std::chrono::steady_clock::now() - m_ProjectOpenStartedAt).count();
+				const double Milliseconds =
+					std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_ProjectOpenStartedAt).count();
 				PF_INFO("Profile: Project open to HDR environment-ready viewport preparation took {:.2f} ms", Milliseconds);
 			}
 #endif
@@ -7872,6 +7818,7 @@ namespace
 		PulseForgeEditor::EditorConsolePanel m_ConsolePanel;
 		PulseForgeEditor::EditorStatusPanel m_StatusPanel;
 		PulseForgeEditor::EditorHierarchyPanel m_HierarchyPanel;
+		PulseForgeEditor::EditorMainMenuPanel m_MainMenuPanel;
 		PulseForgeEditor::EditorInspectorPanel m_InspectorPanel;
 		PulseForgeEditor::EditorAssetSelector m_AssetSelector;
 		PulseForgeEditor::EditorContentBrowserPanel m_ContentBrowserPanel;
