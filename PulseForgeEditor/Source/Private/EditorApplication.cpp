@@ -4424,12 +4424,25 @@ namespace
 			for (const auto& Descriptor : PulseForgeEditor::EditorPanelDescriptors)
 				State.PanelVisibility[static_cast<size_t>(Descriptor.Panel)] = m_Layout.IsPanelVisible(Descriptor.Panel);
 
-			const bool MaterialDocumentFocused = IsFocusedMaterialDocument();
-			const bool RegisteredDocumentFocused = GetFocusedRegisteredDocument() != nullptr;
-			const auto* FocusedIdentity = GetFocusedDocumentIdentity();
-			const bool SceneDocumentFocused = !IsEditorPanelFocused(PulseForgeEditor::EditorPanel::MaterialDetails) &&
-											  (!FocusedIdentity || FocusedIdentity->Kind == PulseForgeEditor::EditorDocumentKind::Level);
-			State.EditMenuEnabled = m_Scene != nullptr || MaterialDocumentFocused || RegisteredDocumentFocused;
+			const auto* FocusedIdentityPointer = GetFocusedDocumentIdentity();
+			const std::optional<PulseForgeEditor::EditorDocumentIdentity> FocusedIdentity =
+				FocusedIdentityPointer ? std::optional<PulseForgeEditor::EditorDocumentIdentity>(*FocusedIdentityPointer) : std::nullopt;
+			const PulseForge::UUID CurrentProject = m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{};
+			const bool LevelDocumentAvailable = m_LevelDocumentIdentity && m_Documents.Find(*m_LevelDocumentIdentity);
+			auto* FocusedRegisteredSession = GetFocusedRegisteredDocument();
+			const std::optional<PulseForgeEditor::EditorDocumentIdentity> RegisteredDocument =
+				FocusedRegisteredSession ? std::optional<PulseForgeEditor::EditorDocumentIdentity>(FocusedRegisteredSession->Identity)
+										 : std::nullopt;
+			State.LevelDocumentTarget = PulseForgeEditor::CaptureEditorCommandContext(
+				std::nullopt, CurrentProject, false, std::nullopt, std::nullopt, m_LevelDocumentIdentity, LevelDocumentAvailable);
+			State.FocusedCommandTarget = PulseForgeEditor::CaptureEditorCommandContext(FocusedIdentity, CurrentProject,
+				IsEditorPanelFocused(PulseForgeEditor::EditorPanel::MaterialDetails), m_MaterialDetailsAsset, RegisteredDocument,
+				m_LevelDocumentIdentity, LevelDocumentAvailable);
+			const auto FocusedCommandKind = State.FocusedCommandTarget.Kind;
+			const bool MaterialDocumentFocused = FocusedCommandKind == PulseForgeEditor::EditorCommandContextKind::MaterialDetails;
+			const bool RegisteredDocumentFocused = FocusedCommandKind == PulseForgeEditor::EditorCommandContextKind::RegisteredDocument;
+			const bool SceneDocumentFocused = FocusedCommandKind == PulseForgeEditor::EditorCommandContextKind::Level;
+			State.EditMenuEnabled = FocusedCommandKind != PulseForgeEditor::EditorCommandContextKind::Unavailable;
 			State.CanEditScene = SceneDocumentFocused && m_Scene != nullptr && m_SceneRuntime == nullptr;
 
 			const auto UndoCommand = m_SceneEditController.GetUndoCommand();
@@ -4439,21 +4452,20 @@ namespace
 			if (RegisteredDocumentFocused) State.CanUndo = State.CanRedo = true;
 			if (MaterialDocumentFocused)
 			{
-				const auto Material = GetFocusedMaterialAsset();
-				if (Material)
+				if (State.FocusedCommandTarget.MaterialAsset)
 				{
-					State.CanUndo = m_Project && m_MaterialDrafts.CanUndo(*m_Project, *Material);
-					State.CanRedo = m_Project && m_MaterialDrafts.CanRedo(*m_Project, *Material);
+					State.CanUndo = m_Project && m_MaterialDrafts.CanUndo(*m_Project, *State.FocusedCommandTarget.MaterialAsset);
+					State.CanRedo = m_Project && m_MaterialDrafts.CanRedo(*m_Project, *State.FocusedCommandTarget.MaterialAsset);
 				}
 			}
 			State.UndoLabel = RegisteredDocumentFocused ? "Undo Document"
 							  : MaterialDocumentFocused ? "Undo Material Edit"
-							  : UndoCommand				? "Undo " + std::string(UndoCommand->Description)
-														: "Undo";
+							  : SceneDocumentFocused && UndoCommand ? "Undo " + std::string(UndoCommand->Description)
+															 : "Undo";
 			State.RedoLabel = RegisteredDocumentFocused ? "Redo Document"
 							  : MaterialDocumentFocused ? "Redo Material Edit"
-							  : RedoCommand				? "Redo " + std::string(RedoCommand->Description)
-														: "Redo";
+							  : SceneDocumentFocused && RedoCommand ? "Redo " + std::string(RedoCommand->Description)
+															 : "Redo";
 
 			State.HasSelection = !m_SceneWorkspace.Selection().GetEntities().empty();
 			State.CanPaste = State.CanEditScene && m_Project && m_SceneEntityCommands.CanPaste(m_Project->GetDescription().ID);
@@ -4465,21 +4477,70 @@ namespace
 			State.CanShowAll = !m_SceneWorkspace.Visibility().GetHiddenEntities().empty();
 			State.CanIsolateSelection = State.HasSelection;
 			State.CanRestoreIsolation = m_SceneWorkspace.Visibility().GetIsolationBaseline().has_value();
-			State.CanSaveScene = m_Scene && m_SceneAsset;
-			State.CanSaveSceneAs = m_Scene != nullptr;
+			State.CanSaveScene =
+				State.LevelDocumentTarget.Kind == PulseForgeEditor::EditorCommandContextKind::Level && m_Scene && m_SceneAsset;
+			State.CanSaveSceneAs =
+				State.LevelDocumentTarget.Kind == PulseForgeEditor::EditorCommandContextKind::Level && m_Scene != nullptr;
 			return State;
+		}
+
+		[[nodiscard]] std::optional<PulseForgeEditor::EditorCommandContext> ResolveMainMenuCommandTarget(
+			const PulseForgeEditor::EditorCommandContext& Target) const
+		{
+			const PulseForge::UUID CurrentProject = m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{};
+			const bool LevelAvailable = m_LevelDocumentIdentity && m_Documents.Find(*m_LevelDocumentIdentity);
+			const auto* Session = Target.Document ? m_Documents.Find(*Target.Document) : nullptr;
+			const bool RegisteredAvailable = Session && Session->EditorState && m_DocumentEditors.IsRegistered(Session->Identity.Kind) &&
+											 Session->Identity.Project == CurrentProject;
+			const bool MaterialAvailable =
+				m_Project && Target.MaterialAsset && m_MaterialDrafts.ContainsDraft(*m_Project, *Target.MaterialAsset);
+			return PulseForgeEditor::ResolveEditorCommandContext(
+				Target, CurrentProject, m_LevelDocumentIdentity, LevelAvailable, RegisteredAvailable, MaterialAvailable);
 		}
 
 		void DrawMainMenu()
 		{
-			const auto Result = m_MainMenuPanel.Draw(BuildMainMenuState(), m_EditorStyle);
-			if (Result.FocusMainDocumentHost) FocusDocumentHostIfChanged(PulseForgeEditor::EditorDocumentManager::MainHostID);
+			const auto State = BuildMainMenuState();
+			const auto Result = m_MainMenuPanel.Draw(State, m_EditorStyle);
 			if (Result.Action) ExecuteMainMenuAction(*Result.Action);
+			if (Result.FocusMainDocumentHost) FocusDocumentHostIfChanged(PulseForgeEditor::EditorDocumentManager::MainHostID);
 		}
 
 		void ExecuteMainMenuAction(const PulseForgeEditor::EditorMainMenuAction& Action)
 		{
 			using PulseForgeEditor::EditorMainMenuActionKind;
+			const auto IsLevelSceneAction = [&Action]
+			{
+				switch (Action.Kind)
+				{
+				case EditorMainMenuActionKind::Cut:
+				case EditorMainMenuActionKind::Copy:
+				case EditorMainMenuActionKind::Paste:
+				case EditorMainMenuActionKind::Duplicate:
+				case EditorMainMenuActionKind::Delete:
+				case EditorMainMenuActionKind::SelectAll:
+				case EditorMainMenuActionKind::Rename:
+				case EditorMainMenuActionKind::FocusSelection:
+				case EditorMainMenuActionKind::SnapSelection:
+				case EditorMainMenuActionKind::HideSelection:
+				case EditorMainMenuActionKind::ShowAll:
+				case EditorMainMenuActionKind::IsolateSelection:
+				case EditorMainMenuActionKind::RestoreIsolation:
+				case EditorMainMenuActionKind::NewScene:
+				case EditorMainMenuActionKind::SaveScene:
+				case EditorMainMenuActionKind::SaveSceneAs:
+				case EditorMainMenuActionKind::OpenScene:
+					return true;
+				default:
+					return false;
+				}
+			};
+			const auto ResolvedTarget = ResolveMainMenuCommandTarget(Action.CommandTarget);
+			if (IsLevelSceneAction() && (Action.CommandTarget.Kind != PulseForgeEditor::EditorCommandContextKind::Level || !ResolvedTarget))
+			{
+				SetWarning("The Level Editor command target is no longer available.");
+				return;
+			}
 			switch (Action.Kind)
 			{
 			case EditorMainMenuActionKind::NewProject:
@@ -4498,12 +4559,33 @@ namespace
 			case EditorMainMenuActionKind::Redo:
 			{
 				const bool Redo = Action.Kind == EditorMainMenuActionKind::Redo;
-				if (auto* Session = GetFocusedRegisteredDocument())
-					(void)m_DocumentEditors.DispatchFocusedCommand(
-						*Session, Redo ? PulseForgeEditor::EditorDocumentCommand::Redo : PulseForgeEditor::EditorDocumentCommand::Undo);
-				else if (IsFocusedMaterialDocument()) (void)ApplyMaterialHistoryStep(Redo);
-				else if (Redo) RedoSceneEdit();
-				else UndoSceneEdit();
+				if (!ResolvedTarget)
+				{
+					SetWarning("The document targeted by the menu command is no longer available.");
+					break;
+				}
+				switch (ResolvedTarget->Kind)
+				{
+				case PulseForgeEditor::EditorCommandContextKind::RegisteredDocument:
+				{
+					auto* Session = ResolvedTarget->Document ? m_Documents.Find(*ResolvedTarget->Document) : nullptr;
+					if (!Session ||
+						!m_DocumentEditors.DispatchFocusedCommand(
+							*Session, Redo ? PulseForgeEditor::EditorDocumentCommand::Redo : PulseForgeEditor::EditorDocumentCommand::Undo))
+						SetWarning("The targeted editor no longer accepts this history command.");
+					break;
+				}
+				case PulseForgeEditor::EditorCommandContextKind::MaterialDetails:
+					if (!ResolvedTarget->MaterialAsset || !ApplyMaterialHistoryStep(*ResolvedTarget->MaterialAsset, Redo))
+						SetWarning("Material Details no longer has the requested history step.");
+					break;
+				case PulseForgeEditor::EditorCommandContextKind::Level:
+					if (Redo) RedoSceneEdit();
+					else UndoSceneEdit();
+					break;
+				case PulseForgeEditor::EditorCommandContextKind::Unavailable:
+					break;
+				}
 				break;
 			}
 			case EditorMainMenuActionKind::Cut:
@@ -7056,8 +7138,13 @@ namespace
 		bool ApplyMaterialHistoryStep(bool Redo)
 		{
 			const auto Asset = GetFocusedMaterialAsset();
-			if (!Asset || !m_Project) return false;
-			const auto Changed = m_MaterialDrafts.ApplyHistoryStep(*m_Project, *Asset, Redo, m_Documents);
+			return Asset && ApplyMaterialHistoryStep(*Asset, Redo);
+		}
+
+		bool ApplyMaterialHistoryStep(const PulseForge::AssetID& Asset, bool Redo)
+		{
+			if (!m_Project || !m_MaterialDrafts.ContainsDraft(*m_Project, Asset)) return false;
+			const auto Changed = m_MaterialDrafts.ApplyHistoryStep(*m_Project, Asset, Redo, m_Documents);
 			if (!Changed) return false;
 			if (!*Changed) return true;
 			SetStatus(Redo ? "Redid material edit." : "Undid material edit.");

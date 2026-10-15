@@ -300,6 +300,97 @@ void RunEditorWorkspacePresentationTests(TestRunner& Tests)
 {
 	using namespace PulseForgeEditor;
 	{
+		const PulseForge::UUID Project{ 0x1100220033004400ull, 0x5500660077008800ull };
+		const PulseForge::UUID OtherProject{ 0x9900aa00bb00cc00ull, 0xdd00ee00ff001100ull };
+		const EditorDocumentIdentity Level{ Project, PulseForge::AssetID{ 1, 10 }, EditorDocumentKind::Level };
+		const EditorDocumentIdentity Fixture{ Project, PulseForge::AssetID{ 2, 20 }, EditorDocumentKind::Texture };
+		const PulseForge::AssetID Material{ 3, 30 };
+		const auto LevelTarget = CaptureEditorCommandContext(Level, Project, false, std::nullopt, std::nullopt, Level, true);
+		PF_CHECK(Tests, LevelTarget.Kind == EditorCommandContextKind::Level);
+		PF_CHECK(Tests, LevelTarget.Document == Level);
+		PF_CHECK(Tests, ResolveEditorCommandContext(LevelTarget, Project, Level, true, false, false).has_value());
+		PF_CHECK(Tests, !ResolveEditorCommandContext(LevelTarget, Project, Level, false, false, false));
+
+		const auto DetachedTarget = CaptureEditorCommandContext(Fixture, Project, false, std::nullopt, Fixture, Level, true);
+		const auto MainStripTarget = CaptureEditorCommandContext(Fixture, Project, false, std::nullopt, Fixture, Level, true);
+		PF_CHECK(Tests, DetachedTarget.Kind == EditorCommandContextKind::RegisteredDocument);
+		PF_CHECK(Tests, DetachedTarget.Document == Fixture);
+		PF_CHECK(Tests, MainStripTarget.Document == Fixture);
+
+		EditorDocumentManager RoutedDocuments;
+		EditorDocumentEditorRegistry RoutedEditors;
+		std::optional<EditorDocumentIdentity> CommandRecipient;
+		EditorDocumentEditorAdapter FixtureAdapter;
+		FixtureAdapter.Kind = EditorDocumentKind::Texture;
+		FixtureAdapter.IsEligible = [](const EditorDocumentEditorContext& Context)
+		{ return Context.ProjectRelativePath.extension() == ".fixture"; };
+		FixtureAdapter.LoadSession =
+			[](const EditorDocumentEditorContext&) -> std::expected<std::unique_ptr<EditorDocumentEditorState>, std::string>
+		{ return std::unique_ptr<EditorDocumentEditorState>(std::make_unique<WorkspaceFixtureState>()); };
+		FixtureAdapter.DrawWorkspace = [](EditorDocumentSession&) {};
+		FixtureAdapter.Save = [](EditorDocumentSession&, uint64_t) { return true; };
+		FixtureAdapter.Discard = [](EditorDocumentSession&) { return true; };
+		FixtureAdapter.FocusedCommand = [&CommandRecipient](EditorDocumentSession& Session, EditorDocumentCommand)
+		{
+			CommandRecipient = Session.Identity;
+			return true;
+		};
+		FixtureAdapter.AssetLocationChanged = [](EditorDocumentSession&, const std::filesystem::path&, std::string_view) { return true; };
+		FixtureAdapter.PrepareClose = [](const EditorDocumentSession&) -> std::expected<void, std::string> { return {}; };
+		FixtureAdapter.Close = [](EditorDocumentSession&) {};
+		PF_CHECK(Tests, RoutedEditors.Register(std::move(FixtureAdapter)));
+		const auto NativeOpen =
+			RoutedDocuments.Open(Fixture, "Assets/Fixture.fixture", "Fixture.fixture", EditorDocumentOpenPreference::NewNativeWindow);
+		PF_CHECK(Tests, NativeOpen && NativeOpen->HostID != EditorDocumentManager::MainHostID);
+		if (!NativeOpen) return;
+		const EditorDocumentEditorContext FixtureContext{ Fixture, {}, "Assets/Fixture.fixture", "Fixture.fixture", nullptr };
+		auto* OpenedSession = RoutedDocuments.Find(Fixture);
+		PF_CHECK(Tests, OpenedSession && RoutedEditors.Load(*OpenedSession, FixtureContext));
+		PF_CHECK(Tests, RoutedDocuments.Activate(Fixture));
+		const auto NativeCommandTarget = CaptureEditorCommandContext(Fixture, Project, false, std::nullopt, Fixture, Level, true);
+		const auto* OriginalSession = RoutedDocuments.Find(Fixture);
+		PF_CHECK(Tests, OriginalSession && OriginalSession->HostID == NativeOpen->HostID);
+		PF_CHECK(Tests, RoutedDocuments.FocusHost(EditorDocumentManager::MainHostID));
+
+		const EditorMainMenuAction Undo = MakeEditorMainMenuAction(EditorMainMenuActionKind::Undo, NativeCommandTarget);
+		const auto ResolvedAfterMainMenuTakesFocus = ResolveEditorCommandContext(Undo.CommandTarget, Project, Level, true, true, false);
+		PF_CHECK(Tests, ResolvedAfterMainMenuTakesFocus.has_value());
+		PF_CHECK(Tests, ResolvedAfterMainMenuTakesFocus && ResolvedAfterMainMenuTakesFocus->Document == Fixture);
+		auto* RoutedSession = ResolvedAfterMainMenuTakesFocus && ResolvedAfterMainMenuTakesFocus->Document
+								  ? RoutedDocuments.Find(*ResolvedAfterMainMenuTakesFocus->Document)
+								  : nullptr;
+		PF_CHECK(Tests, RoutedSession == OriginalSession);
+		PF_CHECK(Tests, RoutedSession && RoutedSession->HostID == NativeOpen->HostID);
+		PF_CHECK(Tests, RoutedSession && RoutedEditors.DispatchFocusedCommand(*RoutedSession, EditorDocumentCommand::Undo));
+		PF_CHECK(Tests, CommandRecipient == Fixture);
+		const auto ClosedDocument = ResolveEditorCommandContext(Undo.CommandTarget, Project, Level, true, false, false);
+		PF_CHECK(Tests, !ClosedDocument);
+		const auto ReplacedProject = ResolveEditorCommandContext(Undo.CommandTarget, OtherProject, Level, true, true, false);
+		PF_CHECK(Tests, !ReplacedProject);
+		const auto MovedToMain = RoutedDocuments.Transfer(Fixture, EditorDocumentManager::MainHostID, 0);
+		PF_CHECK(Tests, MovedToMain.has_value());
+		const auto MainPlacementTarget = CaptureEditorCommandContext(Fixture, Project, false, std::nullopt, Fixture, Level, true);
+		PF_CHECK(Tests, MainPlacementTarget.Document == Fixture);
+		PF_CHECK(Tests, RoutedDocuments.Find(Fixture) == OriginalSession);
+		PF_CHECK(Tests, RoutedDocuments.Find(Fixture)->HostID == EditorDocumentManager::MainHostID);
+		const auto ResolvedMainPlacement = ResolveEditorCommandContext(MainPlacementTarget, Project, Level, true, true, false);
+		PF_CHECK(Tests, ResolvedMainPlacement && ResolvedMainPlacement->Document == Fixture);
+		PF_CHECK(Tests, RoutedDocuments.Close(Fixture, EditorDocumentCloseChoice::Cancel, {}, {}) == EditorDocumentCloseStatus::Closed);
+		PF_CHECK(Tests, !RoutedDocuments.Find(Fixture));
+		PF_CHECK(Tests, !ResolveEditorCommandContext(Undo.CommandTarget, Project, Level, true, false, false));
+
+		const auto MaterialDetailsTarget = CaptureEditorCommandContext(Level, Project, true, Material, std::nullopt, Level, true);
+		PF_CHECK(Tests, MaterialDetailsTarget.Kind == EditorCommandContextKind::MaterialDetails);
+		PF_CHECK(Tests, MaterialDetailsTarget.MaterialAsset == Material);
+		const EditorMainMenuAction MaterialUndo = MakeEditorMainMenuAction(EditorMainMenuActionKind::Undo, MaterialDetailsTarget);
+		const auto ResolvedMaterial = ResolveEditorCommandContext(MaterialUndo.CommandTarget, Project, Level, true, false, true);
+		PF_CHECK(Tests, ResolvedMaterial && ResolvedMaterial->Kind == EditorCommandContextKind::MaterialDetails);
+		PF_CHECK(Tests, !ResolveEditorCommandContext(MaterialUndo.CommandTarget, Project, Level, true, false, false));
+		PF_CHECK(Tests, CaptureEditorCommandContext(Fixture, Project, false, std::nullopt, std::nullopt, Level, true).Kind ==
+							EditorCommandContextKind::Unavailable);
+	}
+
+	{
 		FakeViewportBackend Backend;
 		ScopedWorkspaceImGuiContext Context(Backend);
 		EditorMainMenuPanel Panel;

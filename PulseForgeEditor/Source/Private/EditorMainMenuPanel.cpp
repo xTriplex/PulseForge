@@ -28,9 +28,13 @@ namespace PulseForgeEditor
 		Result.FocusMainDocumentHost = WindowViewport && MainViewport && WindowViewport->ID == MainViewport->ID &&
 									   ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 
-		const auto Submit = [&Result](EditorMainMenuActionKind Kind)
+		const auto Submit = [&Result, &State](EditorMainMenuActionKind Kind)
 		{
-			if (!Result.Action) Result.Action = EditorMainMenuAction{ .Kind = Kind };
+			if (!Result.Action) Result.Action = MakeEditorMainMenuAction(Kind, State.FocusedCommandTarget);
+		};
+		const auto SubmitScene = [&Result, &State](EditorMainMenuActionKind Kind)
+		{
+			if (!Result.Action) Result.Action = MakeEditorMainMenuAction(Kind, State.LevelDocumentTarget);
 		};
 		if (ImGui::BeginMenu("File"))
 		{
@@ -76,11 +80,11 @@ namespace PulseForgeEditor
 
 		if (ImGui::BeginMenu("Scene", State.ProjectOpen))
 		{
-			if (Style.MenuItem(EditorIcon::NewDocument, "New Scene...")) Submit(EditorMainMenuActionKind::NewScene);
+			if (Style.MenuItem(EditorIcon::NewDocument, "New Scene...")) SubmitScene(EditorMainMenuActionKind::NewScene);
 			if (Style.MenuItem(EditorIcon::Save, "Save Scene", nullptr, false, State.CanSaveScene))
-				Submit(EditorMainMenuActionKind::SaveScene);
+				SubmitScene(EditorMainMenuActionKind::SaveScene);
 			if (Style.MenuItem(EditorIcon::Save, "Save Scene As...", nullptr, false, State.CanSaveSceneAs))
-				Submit(EditorMainMenuActionKind::SaveSceneAs);
+				SubmitScene(EditorMainMenuActionKind::SaveSceneAs);
 			if (ImGui::BeginMenu("Open Scene", State.ProjectOpen))
 			{
 				bool HasScenes = false;
@@ -93,7 +97,8 @@ namespace PulseForgeEditor
 					if (ImGui::MenuItem(Label.c_str(), nullptr, IsOpen))
 					{
 						if (!Result.Action)
-							Result.Action = EditorMainMenuAction{ .Kind = EditorMainMenuActionKind::OpenScene, .Asset = Asset.ID };
+							Result.Action = MakeEditorMainMenuAction(EditorMainMenuActionKind::OpenScene, State.LevelDocumentTarget);
+						if (Result.Action && Result.Action->Kind == EditorMainMenuActionKind::OpenScene) Result.Action->Asset = Asset.ID;
 					}
 				}
 				if (!HasScenes) ImGui::MenuItem("No scene assets", nullptr, false, false);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Assets/AssetRegistry.h"
+#include "Editor/EditorDocumentHostPolicy.h"
 #include "Editor/EditorDocumentManager.h"
 #include "Editor/EditorLayout.h"
 
@@ -48,16 +49,25 @@ namespace PulseForgeEditor
 	struct EditorMainMenuAction final
 	{
 		EditorMainMenuActionKind Kind = EditorMainMenuActionKind::Exit;
+		EditorCommandContext CommandTarget;
 		std::optional<PulseForge::AssetID> Asset;
 		EditorPanel Panel = EditorPanel::SceneViewport;
 		EditorDocumentOpenPreference OpeningPreference = EditorDocumentOpenPreference::NewNativeWindow;
 		bool PanelVisible = false;
 	};
 
+	[[nodiscard]] inline EditorMainMenuAction MakeEditorMainMenuAction(
+		EditorMainMenuActionKind Kind, const EditorCommandContext& CommandTarget)
+	{
+		return { .Kind = Kind, .CommandTarget = CommandTarget };
+	}
+
 	struct EditorMainMenuState final
 	{
 		std::span<const PulseForge::AssetRecord> Assets;
 		std::optional<PulseForge::AssetID> ActiveSceneAsset;
+		EditorCommandContext FocusedCommandTarget;
+		EditorCommandContext LevelDocumentTarget;
 		std::array<bool, static_cast<size_t>(EditorPanel::Count)> PanelVisibility{};
 		EditorDocumentOpenPreference OpeningPreference = EditorDocumentOpenPreference::NewNativeWindow;
 		std::string UndoLabel = "Undo";
