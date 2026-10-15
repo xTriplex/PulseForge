@@ -55,18 +55,14 @@ namespace PulseForgeEditor
 		[[nodiscard]] bool IsActive() const noexcept { return m_Drag.has_value(); }
 		void DiscardActiveState() noexcept { m_Drag.reset(); }
 
-		[[nodiscard]] std::expected<bool, std::string> Begin(PulseForge::Scene& SceneValue,
-			EditorSceneWorkspaceState& Workspace, EditorSceneEditController& EditController,
-			const EditorViewportGizmoBeginInput& Input, const RestoreCallback& RestoreState);
-		[[nodiscard]] std::expected<void, std::string> Update(PulseForge::Scene* SceneValue,
-			EditorSceneWorkspaceState& Workspace, EditorSceneEditController& EditController,
-			const EditorViewportGizmoUpdateInput& Input, const RestoreCallback& RestoreState);
-		[[nodiscard]] std::expected<void, std::string> Cancel(PulseForge::Scene* SceneValue,
-			EditorSceneWorkspaceState& Workspace, EditorSceneEditController& EditController,
-			const RestoreCallback& RestoreState);
-		[[nodiscard]] std::expected<void, std::string> Complete(PulseForge::Scene* SceneValue,
-			EditorSceneWorkspaceState& Workspace, EditorSceneEditController& EditController,
-			const RestoreCallback& RestoreState);
+		[[nodiscard]] std::expected<bool, std::string> Begin(PulseForge::Scene& SceneValue, EditorSceneWorkspaceState& Workspace,
+			EditorSceneEditController& EditController, const EditorViewportGizmoBeginInput& Input, const RestoreCallback& RestoreState);
+		[[nodiscard]] std::expected<void, std::string> Update(PulseForge::Scene* SceneValue, EditorSceneWorkspaceState& Workspace,
+			EditorSceneEditController& EditController, const EditorViewportGizmoUpdateInput& Input, const RestoreCallback& RestoreState);
+		[[nodiscard]] std::expected<void, std::string> Cancel(PulseForge::Scene* SceneValue, EditorSceneWorkspaceState& Workspace,
+			EditorSceneEditController& EditController, const RestoreCallback& RestoreState);
+		[[nodiscard]] std::expected<void, std::string> Complete(PulseForge::Scene* SceneValue, EditorSceneWorkspaceState& Workspace,
+			EditorSceneEditController& EditController, const RestoreCallback& RestoreState);
 
 	private:
 		struct EntityStart
@@ -102,8 +98,8 @@ namespace PulseForgeEditor
 		[[nodiscard]] static bool TransformsDiffer(
 			const PulseForge::TransformComponent& First, const PulseForge::TransformComponent& Second);
 		[[nodiscard]] std::expected<void, std::string> CancelAfterFailure(PulseForge::Scene* SceneValue,
-			EditorSceneWorkspaceState& Workspace, EditorSceneEditController& EditController,
-			const RestoreCallback& RestoreState, std::string Error);
+			EditorSceneWorkspaceState& Workspace, EditorSceneEditController& EditController, const RestoreCallback& RestoreState,
+			std::string Error);
 
 		std::optional<DragState> m_Drag;
 	};
