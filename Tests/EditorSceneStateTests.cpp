@@ -3,10 +3,45 @@
 #include "Editor/EditorEntityClipboard.h"
 #include "Editor/EditorHierarchyPanelPolicy.h"
 #include "Editor/EditorSceneEntityCommands.h"
+#include "Editor/EditorSceneTransitionQueue.h"
 #include "Editor/EditorSceneVisibilityCommands.h"
 
 namespace
 {
+	void TestEditorSceneTransitionQueue(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		EditorSceneTransitionQueue Queue;
+		size_t Continuations = 0;
+		auto Ready = Queue.Request(false, [&] { ++Continuations; });
+		PF_CHECK(Tests, Ready.Status == EditorSceneTransitionQueue::RequestStatus::Ready);
+		PF_CHECK(Tests, static_cast<bool>(Ready.ReadyAction));
+		if (Ready.ReadyAction)
+			Ready.ReadyAction();
+		PF_CHECK(Tests, Continuations == 1 && !Queue.HasPendingDecision());
+
+		auto Pending = Queue.Request(true, [&] { ++Continuations; });
+		PF_CHECK(Tests, Pending.Status == EditorSceneTransitionQueue::RequestStatus::AwaitingDecision);
+		PF_CHECK(Tests, Queue.HasPendingDecision());
+		auto Rejected = Queue.Request(false, [&] { ++Continuations; });
+		PF_CHECK(Tests, Rejected.Status == EditorSceneTransitionQueue::RequestStatus::Rejected);
+		PF_CHECK(Tests, !Queue.Resolve(false));
+		PF_CHECK(Tests, Queue.HasPendingDecision() && Continuations == 1);
+		auto Resolved = Queue.Resolve(true);
+		PF_CHECK(Tests, Resolved.has_value() && !Queue.HasPendingDecision());
+		if (Resolved && *Resolved)
+			(*Resolved)();
+		PF_CHECK(Tests, Continuations == 2);
+		PF_CHECK(Tests, !Queue.Resolve(true));
+
+		Pending = Queue.Request(true, [&] { ++Continuations; });
+		PF_CHECK(Tests, Pending.Status == EditorSceneTransitionQueue::RequestStatus::AwaitingDecision);
+		Queue.Cancel();
+		PF_CHECK(Tests, !Queue.HasPendingDecision() && !Queue.Resolve(true));
+		PF_CHECK(Tests, Continuations == 2);
+		PF_CHECK(Tests, Queue.Request(false, {}).Status == EditorSceneTransitionQueue::RequestStatus::Rejected);
+	}
+
 	class TestEditorSceneVisibilityActions final : public PulseForgeEditor::EditorSceneCommandActions
 	{
 	public:
@@ -553,6 +588,7 @@ namespace
 
 void RunEditorSceneStateTests(TestRunner& Tests)
 {
+	TestEditorSceneTransitionQueue(Tests);
 	TestEditorEntityClipboard(Tests);
 	TestEditorSceneVisibilityCommands(Tests);
 	TestEditorSceneEntityCommands(Tests);

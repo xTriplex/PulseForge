@@ -72,6 +72,7 @@
 #include "Editor/EditorDocumentWorkspace.h"
 #include "Editor/EditorDocumentWorkspaceStore.h"
 #include "Editor/EditorSnapshotHistory.h"
+#include "Editor/EditorSceneTransitionQueue.h"
 #include "Editor/EditorSceneHierarchyOperations.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
@@ -4686,23 +4687,27 @@ namespace
 		void QueueAfterSave(std::function<void()> Action)
 		{
 			FinishSceneEdit();
-			if (m_PendingAction)
+			if (m_SceneTransitionQueue.HasPendingDecision())
 			{
 				SetWarning("Resolve the current unsaved-scene prompt before starting another editor operation.");
 				return;
 			}
 
-			if (!m_SceneEditController.IsDirty())
+			auto Request = m_SceneTransitionQueue.Request(
+				m_SceneEditController.IsDirty(),
+				[this, Action = std::move(Action)]() mutable
 			{
 				QueueAfterDocuments(std::move(Action));
+			});
+			if (Request.Status == PulseForgeEditor::EditorSceneTransitionQueue::RequestStatus::Rejected)
+			{
+				SetWarning("The editor could not queue the requested scene transition.");
 				return;
 			}
-
-			m_PendingAction = [this, Action = std::move(Action)]() mutable
-			{
-				QueueAfterDocuments(std::move(Action));
-			};
-			m_OpenUnsavedDialog = true;
+			if (Request.Status == PulseForgeEditor::EditorSceneTransitionQueue::RequestStatus::AwaitingDecision)
+				m_OpenUnsavedDialog = true;
+			else if (Request.ReadyAction)
+				Request.ReadyAction();
 		}
 
 		bool DiscardSceneChanges()
@@ -4738,12 +4743,12 @@ namespace
 
 		void ExecutePendingAction()
 		{
-			auto Action = std::move(m_PendingAction);
-			m_PendingAction = {};
+			auto Action = m_SceneTransitionQueue.Resolve(true);
+			if (!Action)
+				return;
 			m_OpenUnsavedDialog = false;
 			ImGui::CloseCurrentPopup();
-			if (Action)
-				Action();
+			(*Action)();
 		}
 
 		void DrawUnsavedChangesDialog()
@@ -4776,7 +4781,7 @@ namespace
 				ImGui::SameLine();
 				if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)))
 				{
-					m_PendingAction = {};
+					m_SceneTransitionQueue.Cancel();
 					m_OpenUnsavedDialog = false;
 					ImGui::CloseCurrentPopup();
 				}
@@ -4785,7 +4790,7 @@ namespace
 			}
 			if (!PopupOpen)
 			{
-				m_PendingAction = {};
+				m_SceneTransitionQueue.Cancel();
 				m_OpenUnsavedDialog = false;
 			}
 		}
@@ -8584,7 +8589,7 @@ namespace
 		bool m_InitialMaterialDetailsDockPending = false;
 		bool m_ForceMaterialDetailsDock = false;
 		bool m_FocusMaterialDetailsNextFrame = false;
-		std::function<void()> m_PendingAction;
+		PulseForgeEditor::EditorSceneTransitionQueue m_SceneTransitionQueue;
 		std::function<void()> m_PendingDocumentCloseAction;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_LevelDocumentIdentity;
 		std::optional<PulseForge::AssetID> m_MaterialDetailsAsset;
