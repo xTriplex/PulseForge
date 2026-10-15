@@ -1301,6 +1301,21 @@ if(BUILD_TESTING)
 		PulseForgeEditorCore PulseForgeEditorUI ${PULSEFORGE_ENGINE_TEST_LIBRARIES} PulseForgeImGui spdlog::spdlog)
 	add_dependencies(PulseForgeEditorTests PulseForgePublicHeaderChecks)
 	add_test(NAME PulseForge.Editor COMMAND PulseForgeEditorTests)
+	add_executable(PulseForgeEditorWorkspacePresentationTests
+		Tests/EditorWorkspacePresentationTestMain.cpp
+		Tests/EditorWorkspacePresentationTests.cpp
+	)
+	target_include_directories(PulseForgeEditorWorkspacePresentationTests PRIVATE
+		Tests
+		PulseForgeEditor/Source/Public
+		PulseForgeEditor/Source/Private
+		PulseForge/Vendor/json/include
+	)
+	target_compile_definitions(PulseForgeEditorWorkspacePresentationTests PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeEditorWorkspacePresentationTests PRIVATE
+		PulseForgeEditorCore PulseForgeEditorUI ${PULSEFORGE_ENGINE_TEST_LIBRARIES} PulseForgeImGui spdlog::spdlog)
+	add_dependencies(PulseForgeEditorWorkspacePresentationTests PulseForgePublicHeaderChecks)
+	add_test(NAME PulseForge.EditorWorkspacePresentation COMMAND PulseForgeEditorWorkspacePresentationTests)
 	endif()
 
 	add_executable(PulseForgeBufferUpdateTests Tests/BufferUpdateValidationTests.cpp)
@@ -1344,7 +1359,7 @@ foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSe
 		PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI PulseForgeRendererTests PulseForgeRenderMathTests
                                 PulseForgeTests PulseForgeAssetImportTests PulseForgeAssetImporterConsumer PulseForgeAudioRuntimeTests
 				PulseForgeSceneRendererConsumer
-                                PulseForgeEditorTests PulseForgeEditorCoreTests
+                                PulseForgeEditorTests PulseForgeEditorWorkspacePresentationTests PulseForgeEditorCoreTests
 				PulseForgeBufferUpdateTests PulseForgeGpuValidation)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE
