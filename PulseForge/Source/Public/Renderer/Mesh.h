@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Renderer/Graphics.h"
+#include "Renderer/MeshData.h"
 
 #include <cstdint>
 #include <expected>
@@ -10,36 +11,6 @@
 
 namespace PulseForge
 {
-	struct MeshDesc
-	{
-		VertexLayoutDesc VertexLayout;
-		// Input spans are borrowed during CreateMesh and copied into renderer-owned buffers.
-		std::span<const std::byte> VertexData;
-		// This initial mesh API uses 32-bit indices.
-		std::span<const uint32_t> Indices;
-		std::string DebugName;
-	};
-
-	struct MeshCounts
-	{
-		uint32_t VertexCount = 0;
-		uint32_t IndexCount = 0;
-	};
-
-	enum class MeshErrorCode : uint8_t
-	{
-		InvalidVertexLayout,
-		InvalidVertexData,
-		InvalidIndexData,
-		BufferCreationFailed
-	};
-
-	struct MeshError
-	{
-		MeshErrorCode Code;
-		std::string Message;
-	};
-
 	class PULSEFORGE_API Mesh final
 	{
 	public:
@@ -55,6 +26,7 @@ namespace PulseForge
 
 	private:
 		friend class Application;
+		friend class RenderDevice;
 		[[nodiscard]] const Buffer& GetVertexBuffer() const noexcept { return *m_VertexBuffer; }
 		[[nodiscard]] const Buffer* GetIndexBuffer() const noexcept { return m_IndexBuffer.get(); }
 
@@ -74,9 +46,6 @@ namespace PulseForge
 
 	using MeshHandle = std::unique_ptr<Mesh>;
 	using MeshCreateResult = std::expected<MeshHandle, MeshError>;
-	using MeshValidationResult = std::expected<MeshCounts, MeshError>;
-
-	[[nodiscard]] PULSEFORGE_API MeshValidationResult ValidateMeshDescription(const MeshDesc& Description);
 	[[nodiscard]] PULSEFORGE_API GraphicsResult ValidateMeshDrawArguments(
 		const DrawArguments& Arguments,
 		const GraphicsPipelineDesc& Pipeline,

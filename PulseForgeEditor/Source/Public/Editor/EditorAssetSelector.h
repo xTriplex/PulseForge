@@ -14,15 +14,11 @@ namespace PulseForgeEditor
 	class EditorAssetSelector final
 	{
 	public:
-		[[nodiscard]] bool Draw(
-			const char* Label,
-			std::optional<PulseForge::AssetID>& Current,
-			const std::vector<PulseForge::AssetRecord>& Assets,
-			std::initializer_list<std::string_view> Extensions,
-			bool AllowNone);
+		[[nodiscard]] bool Draw(const char* Label, std::optional<PulseForge::AssetID>& Current,
+			const std::vector<PulseForge::AssetRecord>& Assets, std::initializer_list<std::string_view> Extensions, bool AllowNone);
 
 	private:
 		std::array<char, 256> m_Search{};
 		std::string m_SearchOwner;
 	};
-}
+} // namespace PulseForgeEditor

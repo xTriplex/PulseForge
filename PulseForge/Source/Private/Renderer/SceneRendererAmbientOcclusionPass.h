@@ -12,10 +12,8 @@ namespace PulseForge
 	class SceneRenderer::AmbientOcclusionPass final
 	{
 	public:
-		using MaterialResolver = std::function<std::expected<const MaterialAssetDesc*, SceneRendererError>(
-			const SceneMeshInstance&)>;
-		using BindingResolver = std::function<std::expected<const BindingSet*, SceneRendererError>(
-			const SceneMeshInstance&)>;
+		using MaterialResolver = std::function<std::expected<const MaterialAssetDesc*, SceneRendererError>(const SceneMeshInstance&)>;
+		using BindingResolver = std::function<std::expected<const BindingSet*, SceneRendererError>(const SceneMeshInstance&)>;
 
 		struct RenderInputs final
 		{
@@ -28,18 +26,10 @@ namespace PulseForge
 			const BindingResolver& ResolveBindings;
 		};
 
-		explicit AmbientOcclusionPass(Application& Runtime) noexcept;
-		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
-			ShaderHandle PrepassVertex,
-			ShaderHandle PrepassFragment,
-			ShaderHandle EvaluationVertex,
-			ShaderHandle EvaluationFragment,
-			ShaderHandle BlurVertex,
-			ShaderHandle BlurFragment);
-		[[nodiscard]] std::expected<void, SceneRendererError> Render(
-			const RenderInputs& Inputs,
-			uint32_t Width,
-			uint32_t Height);
+		explicit AmbientOcclusionPass(RenderDevice& Runtime) noexcept;
+		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(ShaderHandle PrepassVertex, ShaderHandle PrepassFragment,
+			ShaderHandle EvaluationVertex, ShaderHandle EvaluationFragment, ShaderHandle BlurVertex, ShaderHandle BlurFragment);
+		[[nodiscard]] std::expected<void, SceneRendererError> Render(const RenderInputs& Inputs, uint32_t Width, uint32_t Height);
 		[[nodiscard]] bool SetSettings(const AmbientOcclusionSettings& Settings) noexcept;
 		[[nodiscard]] const AmbientOcclusionSettings& GetSettings() const noexcept { return m_Settings; }
 		[[nodiscard]] const Texture* GetFallbackOcclusionTexture() const noexcept;
@@ -77,10 +67,9 @@ namespace PulseForge
 
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureResources(uint32_t Width, uint32_t Height);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePipelines(
-			const BindingLayoutHandle& SceneMaterialLayout,
-			const std::optional<VertexLayoutDesc>& SceneVertexLayout);
+			const BindingLayoutHandle& SceneMaterialLayout, const std::optional<VertexLayoutDesc>& SceneVertexLayout);
 
-		Application& m_Runtime;
+		RenderDevice& m_Runtime;
 		ShaderHandle m_PrepassVertexShader;
 		ShaderHandle m_PrepassFragmentShader;
 		ShaderHandle m_EvaluationVertexShader;
@@ -112,4 +101,4 @@ namespace PulseForge
 		uint32_t m_Height = 0;
 		bool m_FrameAvailable = false;
 	};
-}
+} // namespace PulseForge

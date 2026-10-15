@@ -31,4 +31,4 @@ namespace PulseForgeEditor
 		std::vector<PulseForge::UUID> m_VisibleHierarchyOrder;
 		std::vector<PulseForge::UUID> m_CurrentHierarchyOrder;
 	};
-}
+} // namespace PulseForgeEditor

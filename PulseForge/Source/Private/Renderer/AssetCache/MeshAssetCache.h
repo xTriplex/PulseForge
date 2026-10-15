@@ -2,6 +2,7 @@
 
 #include "Assets/AssetRegistry.h"
 #include "Renderer/Mesh.h"
+#include "Renderer/RenderDevice.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -13,8 +14,6 @@
 
 namespace PulseForge
 {
-	class Application;
-
 	enum class MeshAssetErrorCode : uint8_t
 	{
 		AssetNotFound,
@@ -30,12 +29,12 @@ namespace PulseForge
 		std::string Message;
 	};
 
-	// Per-project runtime GPU cache. Application, project registry, and renderer must outlive this cache.
+	// Per-project runtime GPU cache. The rendering device and project registry must outlive this cache.
 	// Returned mesh references remain valid until Clear() or cache destruction. The cache is not thread-safe.
 	class MeshAssetCache final
 	{
 	public:
-		MeshAssetCache(Application& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry);
+		MeshAssetCache(RenderDevice& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry);
 		~MeshAssetCache();
 		MeshAssetCache(const MeshAssetCache&) = delete;
 		MeshAssetCache& operator=(const MeshAssetCache&) = delete;
@@ -47,9 +46,9 @@ namespace PulseForge
 		[[nodiscard]] size_t GetLoadedCount() const noexcept { return m_Meshes.size(); }
 
 	private:
-		Application& m_Runtime;
+		RenderDevice& m_Runtime;
 		std::filesystem::path m_ProjectRoot;
 		const AssetRegistry& m_Registry;
 		std::unordered_map<AssetID, MeshHandle, UUIDHash> m_Meshes;
 	};
-}
+} // namespace PulseForge

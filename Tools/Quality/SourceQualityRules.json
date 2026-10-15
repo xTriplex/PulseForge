@@ -1,53 +1,51 @@
 {
-  "source_roots": [
-    "PulseForge/Source",
-    "PulseForgeEditor/Source",
-    "PulseForgeGame/Source",
-    "Tests"
-  ],
-  "default_cpp_line_limit": 1700,
-  "default_header_line_limit": 800,
-  "source_target_ownership": {
-    "PulseForge/Source/Private/Assets/AudioAssetCache.cpp": "PulseForgeAudioAssets",
-    "PulseForgeEditor/Source/Private/EditorAssetDestinationDialog.cpp": "PulseForgeEditorUI",
-    "PulseForgeEditor/Source/Private/EditorConsolePanel.cpp": "PulseForgeEditorUI",
-    "PulseForgeEditor/Source/Private/EditorAssetSelector.cpp": "PulseForgeEditorUI",
-    "PulseForgeEditor/Source/Private/EditorContentBrowserAssetView.cpp": "PulseForgeEditorUI",
-    "PulseForgeEditor/Source/Private/EditorContentBrowserPanel.cpp": "PulseForgeEditorUI",
-    "PulseForgeEditor/Source/Private/EditorHierarchyPanel.cpp": "PulseForgeEditorUI",
-    "PulseForgeEditor/Source/Private/EditorMaterialDetailsPanel.cpp": "PulseForgeEditorUI",
-    "PulseForgeEditor/Source/Private/EditorContentBrowserNavigation.cpp": "PulseForgeEditorUI",
-    "PulseForgeEditor/Source/Private/EditorViewportToolbar.cpp": "PulseForgeEditorUI",
-    "PulseForgeEditor/Source/Private/EditorViewportToolState.cpp": "PulseForgeEditorCore",
-    "PulseForgeEditor/Source/Private/EditorViewportSceneRenderView.cpp": "PulseForgeEditor"
+  "aggregate_engine_target" : "PulseForge",
+  "forbidden_dependency_closures" :
+  {
+    "PulseForgeAssetImporters" :
+    [
+      "PulseForgeApplication",
+      "PulseForgeRenderer",
+      "PulseForgeSceneRenderer"
+    ],
+    "PulseForgeEditorCore" :
+    [
+      "PulseForgeApplication",
+      "PulseForgeRenderer",
+      "PulseForgeSceneRenderer"
+    ]
   },
-  "size_exceptions": {
-    "PulseForgeEditor/Source/Private/EditorApplication.cpp": {
-      "max_lines": 9200,
-      "reason": "Editor lifecycle coordination remains, while viewport, panel, workflow and state owners are extracted."
-    },
-    "PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp": {
-      "max_lines": 3813,
-      "reason": "Legacy backend implementation with presentation ownership still being decomposed."
-    },
-    "Tests/GpuRendererValidation.cpp": {
-      "max_lines": 3707,
-      "reason": "Legacy GPU validation executable pending suite decomposition."
-    },
-    "PulseForge/Source/Private/Renderer/SceneRenderer.cpp": {
-      "max_lines": 2300,
-      "reason": "Scene orchestration remains while shadow and output responsibilities await extraction."
-    }
+  "conditional_target_options" :
+  {
+    "PulseForgeEditor" : "PULSEFORGE_BUILD_EDITOR",
+    "PulseForgeEditorTests" : "PULSEFORGE_BUILD_EDITOR",
+    "PulseForgeEditorUI" : "PULSEFORGE_BUILD_EDITOR"
   },
-  "editor_core_target": "PulseForgeEditorCore",
-  "editor_core_allowed_dependencies": [
+  "cpp_responsibility_review_threshold" : 1200,
+  "default_cpp_hard_limit" : 2500,
+  "default_header_hard_limit" : 800,
+  "editor_core_allowed_dependencies" :
+  [
     "PulseForgeAssetImporters",
     "PulseForgeAssetServices",
     "PulseForgeScene",
     "PulseForgeSceneSerialization"
   ],
-  "editor_ui_target": "PulseForgeEditorUI",
-  "editor_ui_allowed_dependencies": [
+  "editor_core_forbidden_includes" :
+  [
+    "Core/PulseForgePCH.h",
+    "Core/Application.h",
+    "Renderer/Vulkan/",
+    "imgui.h",
+    "backends/",
+    "nvrhi/",
+    "vulkan/",
+    "GLFW/",
+    "glad/"
+  ],
+  "editor_core_target" : "PulseForgeEditorCore",
+  "editor_ui_allowed_dependencies" :
+  [
     "PulseForgeRenderer",
     "PulseForgeApplication",
     "PulseForgeAssetImporters",
@@ -59,41 +57,228 @@
     "shell32",
     "ole32"
   ],
-  "aggregate_engine_target": "PulseForge",
-  "owner_scoped_test_targets": [
+  "editor_ui_target" : "PulseForgeEditorUI",
+  "non_api_public_headers" : [ "PulseForge/Source/Public/Core/PulseForgePCH.h" ],
+  "owner_scoped_test_targets" :
+  [
     "PulseForgeTests",
     "PulseForgeEditorTests",
+    "PulseForgeEditorCoreTests",
     "PulseForgeBufferUpdateTests",
     "PulseForgeAssetImportTests",
+    "PulseForgeAssetImporterConsumer",
+	"PulseForgeSceneRendererConsumer",
     "PulseForgeAudioRuntimeTests"
   ],
-  "editor_core_forbidden_includes": [
-    "Core/PulseForgePCH.h",
-    "Core/Application.h",
-    "Renderer/Vulkan/",
-    "imgui.h",
-    "backends/",
-    "nvrhi/",
-    "vulkan/",
-    "GLFW/",
-    "glad/"
-  ],
-  "public_header_roots": {
-    "PulseForge/Source/Public": [
+  "public_header_owners" :
+  {
+    "PulseForge/Source/Public/Assets/AssetID.h" : "PulseForgeAssetCatalog",
+    "PulseForge/Source/Public/Assets/AssetMetadata.h" : "PulseForgeAssetCatalog",
+    "PulseForge/Source/Public/Assets/AssetOperations.h" : "PulseForgeAssetCatalog",
+    "PulseForge/Source/Public/Assets/AssetPathResolver.h" : "PulseForgeAssetCatalog",
+    "PulseForge/Source/Public/Assets/AssetReferenceValidator.h" : "PulseForgeAssetCatalog",
+    "PulseForge/Source/Public/Assets/AssetRegistry.h" : "PulseForgeAssetCatalog",
+    "PulseForge/Source/Public/Assets/AudioAssetCache.h" : "PulseForgeAudioAssets",
+    "PulseForge/Source/Public/Assets/GltfMeshImporter.h" : "PulseForgeAssetImporters",
+    "PulseForge/Source/Public/Assets/ImageAssetImporter.h" : "PulseForgeAssetImporters",
+    "PulseForge/Source/Public/Assets/MaterialAsset.h" : "PulseForgeAssetServices",
+    "PulseForge/Source/Public/Assets/MaterialAssetCache.h" : "PulseForgeAssetServices",
+    "PulseForge/Source/Public/Assets/MaterialAssetService.h" : "PulseForgeAssetServices",
+    "PulseForge/Source/Public/Assets/PrefabAssetService.h" : "PulseForgeAssetServices",
+    "PulseForge/Source/Public/Assets/PrefabSerializer.h" : "PulseForgeAssetServices",
+    "PulseForge/Source/Public/Assets/Project.h" : "PulseForgeAssetServices",
+    "PulseForge/Source/Public/Assets/SceneAssetService.h" : "PulseForgeAssetServices",
+    "PulseForge/Source/Public/Audio/AudioEngine.h" : "PulseForgeAudio",
+    "PulseForge/Source/Public/Audio/AudioSceneRuntime.h" : "PulseForgeAudioScene",
+    "PulseForge/Source/Public/Core/Application.h" : "PulseForgeApplication",
+    "PulseForge/Source/Public/Core/Core.h" : "PulseForgeCore",
+    "PulseForge/Source/Public/Core/EntryPoint.h" : "PulseForgeApplication",
+    "PulseForge/Source/Public/Core/Input.h" : "PulseForgeCore",
+    "PulseForge/Source/Public/Core/Layer.h" : "PulseForgeCore",
+    "PulseForge/Source/Public/Core/LayerStack.h" : "PulseForgeCore",
+    "PulseForge/Source/Public/Core/Log.h" : "PulseForgeCore",
+    "PulseForge/Source/Public/Core/ScopedProfileTimer.h" : "PulseForgeCore",
+    "PulseForge/Source/Public/Core/Timestep.h" : "PulseForgeCore",
+    "PulseForge/Source/Public/Events/ApplicationEvent.h" : "PulseForgeCore",
+    "PulseForge/Source/Public/Events/Event.h" : "PulseForgeCore",
+    "PulseForge/Source/Public/Events/KeyEvent.h" : "PulseForgeCore",
+    "PulseForge/Source/Public/Events/MouseEvent.h" : "PulseForgeCore",
+    "PulseForge/Source/Public/Physics/PhysicsSceneRuntime.h" : "PulseForgePhysics",
+    "PulseForge/Source/Public/Renderer/Binding.h" : "PulseForgeRenderer",
+    "PulseForge/Source/Public/Renderer/Buffer.h" : "PulseForgeRenderer",
+    "PulseForge/Source/Public/Renderer/DepthCubemap.h" : "PulseForgeRenderer",
+    "PulseForge/Source/Public/Renderer/DirectionalShadowMath.h" : "PulseForgeRenderMath",
+    "PulseForge/Source/Public/Renderer/EnvironmentLighting.h" : "PulseForgeRenderer",
+    "PulseForge/Source/Public/Renderer/EnvironmentLightingTextures.h" : "PulseForgeRenderer",
+    "PulseForge/Source/Public/Renderer/Graphics.h" : "PulseForgeRenderer",
+    "PulseForge/Source/Public/Renderer/LocalLighting.h" : "PulseForgeRenderer",
+    "PulseForge/Source/Public/Renderer/Mesh.h" : "PulseForgeRenderer",
+    "PulseForge/Source/Public/Renderer/MeshData.h" : "PulseForgeMeshData",
+    "PulseForge/Source/Public/Renderer/PointLightShadowMath.h" : "PulseForgeRenderMath",
+    "PulseForge/Source/Public/Renderer/RenderTarget.h" : "PulseForgeRenderer",
+	"PulseForge/Source/Public/Renderer/RenderDevice.h" : "PulseForgeRenderer",
+    "PulseForge/Source/Public/Renderer/RendererAPI.h" : "PulseForgeRenderer",
+    "PulseForge/Source/Public/Renderer/RendererBackend.h" : "PulseForgeRenderer",
+    "PulseForge/Source/Public/Renderer/SceneRenderer.h" : "PulseForgeSceneRenderer",
+    "PulseForge/Source/Public/Renderer/ScreenSpaceAmbientOcclusion.h" : "PulseForgeRenderMath",
+    "PulseForge/Source/Public/Renderer/SpotlightShadowMath.h" : "PulseForgeRenderMath",
+    "PulseForge/Source/Public/Renderer/Texture.h" : "PulseForgeRenderer",
+    "PulseForge/Source/Public/Renderer/ToneMapping.h" : "PulseForgeRenderer",
+    "PulseForge/Source/Public/Renderer/Vulkan/VulkanSupport.h" : "PulseForgeRenderer",
+    "PulseForge/Source/Public/Runtime/SceneRuntime.h" : "PulseForgeRuntime",
+    "PulseForge/Source/Public/Scene/Components/AudioListenerComponent.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/Components/AudioSourceComponent.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/Components/BoxColliderComponent.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/Components/CameraComponent.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/Components/DirectionalLightComponent.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/Components/EnvironmentLightComponent.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/Components/MeshRendererComponent.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/Components/PointLightComponent.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/Components/RigidbodyComponent.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/Components/ScriptComponent.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/Components/SpotLightComponent.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/Components/TagComponent.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/Components/TransformComponent.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/Entity.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/Scene.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/SceneError.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/SceneRenderSnapshot.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scene/SceneSerializer.h" : "PulseForgeSceneSerialization",
+    "PulseForge/Source/Public/Scene/UUID.h" : "PulseForgeScene",
+    "PulseForge/Source/Public/Scripting/ScriptRuntime.h" : "PulseForgeScripting",
+    "PulseForge/Source/Public/Window/Platform/Windows/WindowsWindow.h" : "PulseForgeWindow",
+    "PulseForge/Source/Public/Window/Window.h" : "PulseForgeWindow",
+    "PulseForgeEditor/Source/Public/Editor/ConsoleFormatting.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorAssetDestinationDialog.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorAssetDestinationPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorAssetPreviewPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorAssetPreviewService.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorAssetSelector.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorAssetSelectorPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorAssetWorkflowState.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorCommandHistory.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorCommandLine.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorConsolePanel.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorContentBrowserAssetView.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorContentBrowserNavigation.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorContentBrowserPanel.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorContentBrowserPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorContentBrowserState.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorDeferredOperationQueue.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorDocumentCloseBatch.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorDocumentEditorRegistry.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorDocumentHostPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorDocumentManager.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorDocumentTabPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorDocumentWorkspace.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorDocumentWorkspaceStore.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorEntityClipboard.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorEntityIconPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorGlfwViewportPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorHierarchyPanel.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorHierarchyPanelPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorHierarchyRowPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorIcons.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorImGuiRenderer.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorInspectorPanel.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorInteractionPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorLayout.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorLayoutSettingsPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorMaterialDetailsPanel.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorMaterialDraftController.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorMaterialDraftStore.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorMaterialEditorPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorMaterialPropertyLayoutPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorMeshPickingCache.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorNativeWindowBoundsPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorPlatformViewportPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorProjectOpening.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorSceneCommandActions.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorSceneEditController.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorSceneEntityCommands.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorSceneHierarchyOperations.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorSceneHistoryState.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorSceneTransitionQueue.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorSceneVisibilityCommands.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorSceneWorkspaceState.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorSelection.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorSnapshotHistory.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorStatusPanel.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorStyle.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorViewportPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorViewportToolState.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorViewportToolbar.h" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Public/Editor/EditorViewportToolbarPolicy.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorVisibility.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorWorkspaceFrameState.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/EditorWorkspaceView.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/ImGuiRendererMath.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/ViewportMath.h" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Public/Editor/ViewportMouseCapture.h" : "PulseForgeEditorCore"
+  },
+  "public_header_roots" :
+  {
+    "PulseForge/Source/Public" :
+    [
       "PulseForge/Source/Private/",
       "PulseForgeEditor/Source/",
       "PulseForgeGame/Source/Private/",
       "Core/PulseForgePCH.h"
     ],
-    "PulseForgeEditor/Source/Public": [
+    "PulseForgeEditor/Source/Public" :
+    [
       "PulseForgeEditor/Source/Private/",
       "PulseForge/Source/Private/",
       "Core/PulseForgePCH.h"
     ],
-    "PulseForgeGame/Source/Public": [
+    "PulseForgeGame/Source/Public" :
+    [
       "PulseForgeGame/Source/Private/",
       "PulseForge/Source/Private/",
       "Core/PulseForgePCH.h"
     ]
+  },
+  "size_exceptions" :
+  {
+    "PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp" :
+    {
+      "max_lines" : 3797,
+      "reason" : "Legacy renderer implementation; new responsibilities require a separate owner."
+    },
+    "PulseForgeEditor/Source/Private/EditorApplication.cpp" :
+    {
+      "max_lines" : 8752,
+      "reason" : "Legacy application coordinator; no growth allowance remains while responsibility extraction continues."
+    },
+    "Tests/GpuRendererValidation.cpp" :
+    {
+      "max_lines" : 3691,
+      "reason" : "Legacy GPU validation entry point; scenarios should move into focused validation suites."
+    }
+  },
+  "source_roots" :
+  [
+    "PulseForge/Source",
+    "PulseForgeEditor/Source",
+    "PulseForgeGame/Source",
+    "Tests"
+  ],
+  "source_target_ownership" :
+  {
+    "PulseForge/Source/Private/Assets/AudioAssetCache.cpp" : "PulseForgeAudioAssets",
+    "PulseForge/Source/Private/Renderer/MeshData.cpp" : "PulseForgeMeshData",
+	"PulseForge/Source/Private/Renderer/RenderDevice.cpp" : "PulseForgeRenderer",
+    "PulseForgeEditor/Source/Private/EditorAssetDestinationDialog.cpp" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorAssetSelector.cpp" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorConsolePanel.cpp" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorConsoleSeverity.cpp" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorContentBrowserAssetView.cpp" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorContentBrowserNavigation.cpp" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorContentBrowserPanel.cpp" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorHierarchyPanel.cpp" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorMaterialDetailsPanel.cpp" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorViewportSceneRenderView.cpp" : "PulseForgeEditor",
+    "PulseForgeEditor/Source/Private/EditorViewportToolState.cpp" : "PulseForgeEditorCore",
+    "PulseForgeEditor/Source/Private/EditorViewportToolbar.cpp" : "PulseForgeEditorUI"
   }
 }

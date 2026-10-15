@@ -8,13 +8,11 @@ namespace
 		std::error_code FileError;
 		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
 		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
+		if (FileError) return;
 
 		const auto ProjectIdentifier = UUID::Generate();
 		PF_CHECK(Tests, ProjectIdentifier.has_value());
-		if (!ProjectIdentifier)
-			return;
+		if (!ProjectIdentifier) return;
 
 		const std::filesystem::path ProjectRoot = TemporaryDirectory / ("PulseForgeGltfImport-" + ProjectIdentifier->ToString());
 		struct ProjectDirectoryCleanup
@@ -30,8 +28,7 @@ namespace
 		const std::filesystem::path ModelDirectory = ProjectRoot / "Assets" / "Models";
 		std::filesystem::create_directories(ModelDirectory, FileError);
 		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
+		if (FileError) return;
 
 		std::filesystem::path SourcePath = ModelDirectory / "Triangle.gltf";
 		const std::filesystem::path BufferPath = ModelDirectory / "Triangle.bin";
@@ -60,10 +57,7 @@ namespace
 			for (size_t Byte = 0; Byte < sizeof(Value); ++Byte)
 				BufferBytes.push_back(static_cast<std::byte>((Value >> (Byte * 8)) & 0xff));
 		};
-		const auto AppendFloatLE = [&AppendUInt32LE](float Value)
-		{
-			AppendUInt32LE(std::bit_cast<uint32_t>(Value));
-		};
+		const auto AppendFloatLE = [&AppendUInt32LE](float Value) { AppendUInt32LE(std::bit_cast<uint32_t>(Value)); };
 		for (const float Value : { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f })
 			AppendFloatLE(Value);
 		for (const float Value : { 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f })
@@ -83,23 +77,21 @@ namespace
 		const auto SourceMetadata = AssetMetadataSerializer::CreateForNewAsset(SourcePath);
 		const auto BufferMetadata = AssetMetadataSerializer::CreateForNewAsset(BufferPath);
 		PF_CHECK(Tests, SourceMetadata.has_value() && BufferMetadata.has_value());
-		if (!SourceMetadata || !BufferMetadata)
-			return;
+		if (!SourceMetadata || !BufferMetadata) return;
 
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
 		const auto Imported = GltfMeshImporter::ImportStaticPrimitive(SourceMetadata->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, Imported.has_value());
-		if (!Imported)
-			return;
+		if (!Imported) return;
 
 		PF_CHECK(Tests, Imported->Vertices.size() == 3);
 		PF_CHECK(Tests, Imported->Indices == std::vector<uint32_t>({ 0, 1, 2 }));
 		PF_CHECK(Tests, Imported->Vertices[1].Position[0] == 1.0f);
 		PF_CHECK(Tests, Imported->Vertices[2].TexCoord[1] == 1.0f);
 		PF_CHECK(Tests, Imported->Vertices[0].Color[0] == 1.0f && Imported->Vertices[0].Color[1] == 1.0f);
-		PF_CHECK(Tests, Imported->Vertices[0].Normal[0] == 0.0f && Imported->Vertices[0].Normal[1] == 0.0f &&
-			Imported->Vertices[0].Normal[2] == 1.0f);
+		PF_CHECK(Tests,
+			Imported->Vertices[0].Normal[0] == 0.0f && Imported->Vertices[0].Normal[1] == 0.0f && Imported->Vertices[0].Normal[2] == 1.0f);
 		for (const GltfMeshVertex& Vertex : Imported->Vertices)
 			PF_CHECK(Tests, std::abs(glm::length(glm::vec3(Vertex.Normal[0], Vertex.Normal[1], Vertex.Normal[2])) - 1.0f) < 1.0e-6f);
 		PF_CHECK(Tests, Imported->GetMeshDescription().VertexLayout.Attributes.size() == 5);
@@ -107,8 +99,8 @@ namespace
 		PF_CHECK(Tests, Imported->GetMeshDescription().VertexLayout.Attributes[4].Semantic == VertexSemantic::Tangent);
 		for (const GltfMeshVertex& Vertex : Imported->Vertices)
 		{
-			PF_CHECK(Tests, std::abs(Vertex.Tangent[0] - 1.0f) < 1.0e-5f &&
-				std::abs(Vertex.Tangent[1]) < 1.0e-5f && std::abs(Vertex.Tangent[2]) < 1.0e-5f);
+			PF_CHECK(Tests, std::abs(Vertex.Tangent[0] - 1.0f) < 1.0e-5f && std::abs(Vertex.Tangent[1]) < 1.0e-5f &&
+								std::abs(Vertex.Tangent[2]) < 1.0e-5f);
 			PF_CHECK(Tests, Vertex.Tangent[3] == 1.0f);
 		}
 		PF_CHECK(Tests, ValidateMeshDescription(Imported->GetMeshDescription()).has_value());
@@ -146,10 +138,7 @@ namespace
 			AppendVertexAlphaFloat(Value);
 		for (const float Value : { 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f })
 			AppendVertexAlphaFloat(Value);
-		for (const float Value : {
-			1.0f, 1.0f, 1.0f, 0.0f,
-			0.5f, 0.75f, 1.0f, 0.5f,
-			0.25f, 0.5f, 0.75f, 1.0f })
+		for (const float Value : { 1.0f, 1.0f, 1.0f, 0.0f, 0.5f, 0.75f, 1.0f, 0.5f, 0.25f, 0.5f, 0.75f, 1.0f })
 			AppendVertexAlphaFloat(Value);
 		for (const uint16_t Value : { 0, 1, 2 })
 		{
@@ -159,8 +148,7 @@ namespace
 		PF_CHECK(Tests, VertexAlphaBytes.size() == 114);
 		{
 			std::ofstream Output(VertexAlphaBufferPath, std::ios::binary | std::ios::trunc);
-			Output.write(reinterpret_cast<const char*>(VertexAlphaBytes.data()),
-				static_cast<std::streamsize>(VertexAlphaBytes.size()));
+			Output.write(reinterpret_cast<const char*>(VertexAlphaBytes.data()), static_cast<std::streamsize>(VertexAlphaBytes.size()));
 			PF_CHECK(Tests, static_cast<bool>(Output));
 		}
 		const auto VertexAlphaMetadata = AssetMetadataSerializer::CreateForNewAsset(VertexAlphaPath);
@@ -175,7 +163,7 @@ namespace
 			{
 				PF_CHECK(Tests, VertexAlpha->Vertices[0].Color[3] == 0.0f);
 				PF_CHECK(Tests, VertexAlpha->Vertices[1].Color[0] == 0.5f && VertexAlpha->Vertices[1].Color[1] == 0.75f &&
-					VertexAlpha->Vertices[1].Color[3] == 0.5f);
+									VertexAlpha->Vertices[1].Color[3] == 0.5f);
 				PF_CHECK(Tests, VertexAlpha->Vertices[2].Color[3] == 1.0f);
 				PF_CHECK(Tests, VertexAlpha->GetMeshDescription().VertexLayout.Attributes[1].Format == VertexFormat::Float4);
 			}
@@ -216,8 +204,8 @@ namespace
 		PF_CHECK(Tests, AuthoredTangentBytes.size() == 114);
 		{
 			std::ofstream Output(AuthoredTangentBufferPath, std::ios::binary | std::ios::trunc);
-			Output.write(reinterpret_cast<const char*>(AuthoredTangentBytes.data()),
-				static_cast<std::streamsize>(AuthoredTangentBytes.size()));
+			Output.write(
+				reinterpret_cast<const char*>(AuthoredTangentBytes.data()), static_cast<std::streamsize>(AuthoredTangentBytes.size()));
 			PF_CHECK(Tests, static_cast<bool>(Output));
 		}
 		const auto AuthoredTangentMetadata = AssetMetadataSerializer::CreateForNewAsset(AuthoredTangentPath);
@@ -226,16 +214,14 @@ namespace
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
 		if (AuthoredTangentMetadata)
 		{
-			const auto AuthoredTangent = GltfMeshImporter::ImportStaticPrimitive(
-				AuthoredTangentMetadata->ID, ProjectRoot, Registry);
+			const auto AuthoredTangent = GltfMeshImporter::ImportStaticPrimitive(AuthoredTangentMetadata->ID, ProjectRoot, Registry);
 			PF_CHECK(Tests, AuthoredTangent.has_value());
 			if (AuthoredTangent)
 			{
 				PF_CHECK(Tests, AuthoredTangent->Vertices.size() == 3);
 				for (const GltfMeshVertex& Vertex : AuthoredTangent->Vertices)
-					PF_CHECK(Tests, std::abs(Vertex.Tangent[0] - 1.0f) < 1.0e-5f &&
-						std::abs(Vertex.Tangent[1]) < 1.0e-5f && std::abs(Vertex.Tangent[2]) < 1.0e-5f &&
-						Vertex.Tangent[3] == -1.0f);
+					PF_CHECK(Tests, std::abs(Vertex.Tangent[0] - 1.0f) < 1.0e-5f && std::abs(Vertex.Tangent[1]) < 1.0e-5f &&
+										std::abs(Vertex.Tangent[2]) < 1.0e-5f && Vertex.Tangent[3] == -1.0f);
 			}
 		}
 
@@ -266,9 +252,8 @@ namespace
 			for (size_t Byte = 0; Byte < sizeof(Bits); ++Byte)
 				MirroredBytes.push_back(static_cast<std::byte>((Bits >> (Byte * 8)) & 0xff));
 		};
-		for (const float Value : {
-			0.0f, 0.0f, 0.0f,  1.0f, 0.0f, 0.0f,  0.0f, 1.0f, 0.0f,  1.0f, 1.0f, 0.0f,
-			0.0f, 0.0f,  1.0f, 0.0f,  0.0f, 1.0f,  0.0f, 0.0f })
+		for (const float Value :
+			{ 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f })
 			AppendMirroredFloatLE(Value);
 		for (const uint16_t Value : { 0, 1, 2, 1, 3, 2 })
 		{
@@ -320,19 +305,15 @@ namespace
 		if (ExplicitBufferUri != std::string::npos)
 			ExplicitNormalDocument.replace(ExplicitBufferUri, std::string("Triangle.bin").size(), "ExplicitNormals.bin");
 		ExplicitNormalDocument.replace(ExplicitNormalDocument.find("\"byteLength\":66"), 15, "\"byteLength\":104");
-		ExplicitNormalDocument.replace(
-			ExplicitNormalDocument.find("{\"buffer\":0,\"byteOffset\":60,\"byteLength\":6}"),
+		ExplicitNormalDocument.replace(ExplicitNormalDocument.find("{\"buffer\":0,\"byteOffset\":60,\"byteLength\":6}"),
 			std::string("{\"buffer\":0,\"byteOffset\":60,\"byteLength\":6}").size(),
 			"{\"buffer\":0,\"byteOffset\":60,\"byteLength\":6},{\"buffer\":0,\"byteOffset\":68,\"byteLength\":36}");
-		ExplicitNormalDocument.replace(
-			ExplicitNormalDocument.find("{\"bufferView\":2,\"componentType\":5123,"),
+		ExplicitNormalDocument.replace(ExplicitNormalDocument.find("{\"bufferView\":2,\"componentType\":5123,"),
 			std::string("{\"bufferView\":2,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}").size(),
 			"{\"bufferView\":2,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"},"
 			"{\"bufferView\":3,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}");
-		ExplicitNormalDocument.replace(
-			ExplicitNormalDocument.find("\"POSITION\":0,\"TEXCOORD_0\":1"),
-			std::string("\"POSITION\":0,\"TEXCOORD_0\":1").size(),
-			"\"POSITION\":0,\"TEXCOORD_0\":1,\"NORMAL\":3");
+		ExplicitNormalDocument.replace(ExplicitNormalDocument.find("\"POSITION\":0,\"TEXCOORD_0\":1"),
+			std::string("\"POSITION\":0,\"TEXCOORD_0\":1").size(), "\"POSITION\":0,\"TEXCOORD_0\":1,\"NORMAL\":3");
 		const std::filesystem::path ExplicitNormalPath = ModelDirectory / "ExplicitNormals.gltf";
 		std::vector<std::byte> ExplicitNormalBytes = BufferBytes;
 		BufferBytes.push_back(std::byte{ 0 });
@@ -349,8 +330,8 @@ namespace
 		}
 		{
 			std::ofstream Output(ExplicitNormalBufferPath, std::ios::binary | std::ios::trunc);
-			Output.write(reinterpret_cast<const char*>(ExplicitNormalBytes.data()),
-				static_cast<std::streamsize>(ExplicitNormalBytes.size()));
+			Output.write(
+				reinterpret_cast<const char*>(ExplicitNormalBytes.data()), static_cast<std::streamsize>(ExplicitNormalBytes.size()));
 			PF_CHECK(Tests, static_cast<bool>(Output));
 		}
 		const auto ExplicitNormalMetadata = AssetMetadataSerializer::CreateForNewAsset(ExplicitNormalPath);
@@ -359,25 +340,21 @@ namespace
 		PF_CHECK(Tests, ExplicitNormalBufferMetadata.has_value());
 		const auto ExplicitRegistryResult = Registry.Rebuild(ProjectRoot);
 		PF_CHECK(Tests, ExplicitRegistryResult.has_value());
-		if (!ExplicitNormalMetadata)
-			return;
-		const auto ExplicitNormals = GltfMeshImporter::ImportStaticPrimitive(
-			ExplicitNormalMetadata->ID, ProjectRoot, Registry);
+		if (!ExplicitNormalMetadata) return;
+		const auto ExplicitNormals = GltfMeshImporter::ImportStaticPrimitive(ExplicitNormalMetadata->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, ExplicitNormals.has_value());
 		PF_CHECK(Tests, ExplicitNormals && std::abs(ExplicitNormals->Vertices[0].Normal[2] - 1.0f) < 1.0e-6f);
 		std::string InvalidNormalDocument = ExplicitNormalDocument;
 		const size_t NormalAccessor = InvalidNormalDocument.find("\"bufferView\":3,\"componentType\":5126");
 		const size_t NormalType = InvalidNormalDocument.find("\"type\":\"VEC3\"", NormalAccessor);
 		PF_CHECK(Tests, NormalAccessor != std::string::npos && NormalType != std::string::npos);
-		if (NormalType == std::string::npos)
-			return;
+		if (NormalType == std::string::npos) return;
 		InvalidNormalDocument.replace(NormalType + std::string("\"type\":\"").size(), 4, "VEC2");
 		{
 			std::ofstream Output(ExplicitNormalPath, std::ios::binary | std::ios::trunc);
 			Output.write(InvalidNormalDocument.data(), static_cast<std::streamsize>(InvalidNormalDocument.size()));
 		}
-		const auto InvalidNormals = GltfMeshImporter::ImportStaticPrimitive(
-			ExplicitNormalMetadata->ID, ProjectRoot, Registry);
+		const auto InvalidNormals = GltfMeshImporter::ImportStaticPrimitive(ExplicitNormalMetadata->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, !InvalidNormals && InvalidNormals.error().Code == GltfMeshImportErrorCode::UnsupportedFeature);
 		{
 			std::ofstream Output(ExplicitNormalPath, std::ios::binary | std::ios::trunc);
@@ -389,22 +366,16 @@ namespace
 		ExplicitNormalBytes[71] = static_cast<std::byte>(0x7f);
 		{
 			std::ofstream Output(ExplicitNormalBufferPath, std::ios::binary | std::ios::trunc);
-			Output.write(reinterpret_cast<const char*>(ExplicitNormalBytes.data()),
-				static_cast<std::streamsize>(ExplicitNormalBytes.size()));
+			Output.write(
+				reinterpret_cast<const char*>(ExplicitNormalBytes.data()), static_cast<std::streamsize>(ExplicitNormalBytes.size()));
 		}
-		const auto NonFiniteNormals = GltfMeshImporter::ImportStaticPrimitive(
-			ExplicitNormalMetadata->ID, ProjectRoot, Registry);
+		const auto NonFiniteNormals = GltfMeshImporter::ImportStaticPrimitive(ExplicitNormalMetadata->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, !NonFiniteNormals && NonFiniteNormals.error().Code == GltfMeshImportErrorCode::InvalidAccessor);
 
 		const std::filesystem::path RenamedSourcePath = ModelDirectory / "RenamedTriangle.gltf";
-		const auto MovedSource = AssetOperations::Move(
-			Registry,
-			ProjectRoot,
-			SourceMetadata->ID,
-			"Assets/Models/RenamedTriangle.gltf");
+		const auto MovedSource = AssetOperations::Move(Registry, ProjectRoot, SourceMetadata->ID, "Assets/Models/RenamedTriangle.gltf");
 		PF_CHECK(Tests, MovedSource.has_value() && MovedSource->ID == SourceMetadata->ID);
-		if (!MovedSource)
-			return;
+		if (!MovedSource) return;
 		SourcePath = RenamedSourcePath;
 		const auto ImportedAfterMove = GltfMeshImporter::ImportStaticPrimitive(SourceMetadata->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, ImportedAfterMove.has_value());
@@ -413,12 +384,10 @@ namespace
 		std::string EmbeddedGltfDocument = GltfDocument;
 		const size_t EmbeddedUriPosition = EmbeddedGltfDocument.find("Triangle.bin");
 		PF_CHECK(Tests, EmbeddedUriPosition != std::string::npos);
-		if (EmbeddedUriPosition == std::string::npos)
-			return;
-		EmbeddedGltfDocument.replace(
-			EmbeddedUriPosition,
-			std::string("Triangle.bin").size(),
-			"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAABAAIA");
+		if (EmbeddedUriPosition == std::string::npos) return;
+		EmbeddedGltfDocument.replace(EmbeddedUriPosition, std::string("Triangle.bin").size(),
+			"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/"
+			"AAABAAIA");
 		const std::filesystem::path EmbeddedSourcePath = ModelDirectory / "Embedded.gltf";
 		{
 			std::ofstream Output(EmbeddedSourcePath, std::ios::binary | std::ios::trunc);
@@ -427,8 +396,7 @@ namespace
 		}
 		const auto EmbeddedMetadata = AssetMetadataSerializer::CreateForNewAsset(EmbeddedSourcePath);
 		PF_CHECK(Tests, EmbeddedMetadata.has_value());
-		if (!EmbeddedMetadata)
-			return;
+		if (!EmbeddedMetadata) return;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
 		const auto ImportedEmbedded = GltfMeshImporter::ImportStaticPrimitive(EmbeddedMetadata->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, ImportedEmbedded && ImportedEmbedded->Vertices.size() == 3 && ImportedEmbedded->Indices.size() == 3);
@@ -436,8 +404,7 @@ namespace
 		std::string GlbDocument = GltfDocument;
 		const size_t ExternalUriPosition = GlbDocument.find("\"uri\":\"Triangle.bin\",");
 		PF_CHECK(Tests, ExternalUriPosition != std::string::npos);
-		if (ExternalUriPosition == std::string::npos)
-			return;
+		if (ExternalUriPosition == std::string::npos) return;
 		GlbDocument.erase(ExternalUriPosition, std::string("\"uri\":\"Triangle.bin\",").size());
 		while (GlbDocument.size() % 4 != 0)
 			GlbDocument.push_back(' ');
@@ -471,8 +438,7 @@ namespace
 		}
 		const auto GlbMetadata = AssetMetadataSerializer::CreateForNewAsset(GlbPath);
 		PF_CHECK(Tests, GlbMetadata.has_value());
-		if (!GlbMetadata)
-			return;
+		if (!GlbMetadata) return;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
 		const auto ImportedGlb = GltfMeshImporter::ImportStaticPrimitive(GlbMetadata->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, ImportedGlb.has_value());
@@ -491,33 +457,24 @@ namespace
 		const std::filesystem::path OverpaddedGlbPath = ModelDirectory / "Overpadded.glb";
 		{
 			std::ofstream Output(OverpaddedGlbPath, std::ios::binary | std::ios::trunc);
-			Output.write(reinterpret_cast<const char*>(OverpaddedGlb.data()),
-				static_cast<std::streamsize>(OverpaddedGlb.size()));
+			Output.write(reinterpret_cast<const char*>(OverpaddedGlb.data()), static_cast<std::streamsize>(OverpaddedGlb.size()));
 			PF_CHECK(Tests, static_cast<bool>(Output));
 		}
 		const auto OverpaddedGlbMetadata = AssetMetadataSerializer::CreateForNewAsset(OverpaddedGlbPath);
 		PF_CHECK(Tests, OverpaddedGlbMetadata.has_value());
-		if (!OverpaddedGlbMetadata)
-			return;
+		if (!OverpaddedGlbMetadata) return;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
-		const auto OverpaddedGlbImport = GltfMeshImporter::ImportStaticPrimitive(
-			OverpaddedGlbMetadata->ID,
-			ProjectRoot,
-			Registry);
+		const auto OverpaddedGlbImport = GltfMeshImporter::ImportStaticPrimitive(OverpaddedGlbMetadata->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, !OverpaddedGlbImport.has_value());
-		PF_CHECK(Tests, !OverpaddedGlbImport &&
-			OverpaddedGlbImport.error().Code == GltfMeshImportErrorCode::InvalidBuffer);
+		PF_CHECK(Tests, !OverpaddedGlbImport && OverpaddedGlbImport.error().Code == GltfMeshImportErrorCode::InvalidBuffer);
 
 		std::string OverflowingAccessor = GltfDocument;
 		const size_t AccessorsStart = OverflowingAccessor.find("\"accessors\"");
 		const size_t FirstAccessor = OverflowingAccessor.find("{\"bufferView\":0,", AccessorsStart);
 		PF_CHECK(Tests, AccessorsStart != std::string::npos && FirstAccessor != std::string::npos);
-		if (AccessorsStart == std::string::npos || FirstAccessor == std::string::npos)
-			return;
+		if (AccessorsStart == std::string::npos || FirstAccessor == std::string::npos) return;
 		OverflowingAccessor.replace(
-			FirstAccessor,
-			std::string("{\"bufferView\":0,").size(),
-			"{\"bufferView\":0,\"byteOffset\":18446744073709551615,");
+			FirstAccessor, std::string("{\"bufferView\":0,").size(), "{\"bufferView\":0,\"byteOffset\":18446744073709551615,");
 		{
 			std::ofstream Output(SourcePath, std::ios::binary | std::ios::trunc);
 			Output.write(OverflowingAccessor.data(), static_cast<std::streamsize>(OverflowingAccessor.size()));
@@ -525,15 +482,11 @@ namespace
 		}
 		const auto OverflowingAccessorImport = GltfMeshImporter::ImportStaticPrimitive(SourceMetadata->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, !OverflowingAccessorImport.has_value());
-		PF_CHECK(Tests, !OverflowingAccessorImport &&
-			OverflowingAccessorImport.error().Code == GltfMeshImportErrorCode::InvalidAccessor);
+		PF_CHECK(Tests, !OverflowingAccessorImport && OverflowingAccessorImport.error().Code == GltfMeshImportErrorCode::InvalidAccessor);
 
 		std::string SparseAccessor = GltfDocument;
 		const size_t SparseFirstAccessor = SparseAccessor.find("{\"bufferView\":0,", SparseAccessor.find("\"accessors\""));
-		SparseAccessor.replace(
-			SparseFirstAccessor,
-			std::string("{\"bufferView\":0,").size(),
-			"{\"bufferView\":0,\"sparse\":{},");
+		SparseAccessor.replace(SparseFirstAccessor, std::string("{\"bufferView\":0,").size(), "{\"bufferView\":0,\"sparse\":{},");
 		{
 			std::ofstream Output(SourcePath, std::ios::binary | std::ios::trunc);
 			Output.write(SparseAccessor.data(), static_cast<std::streamsize>(SparseAccessor.size()));
@@ -546,11 +499,8 @@ namespace
 		std::string RequiredExtension = GltfDocument;
 		const size_t AssetHeaderPosition = RequiredExtension.find("\"asset\":{\"version\":\"2.0\"},");
 		PF_CHECK(Tests, AssetHeaderPosition != std::string::npos);
-		if (AssetHeaderPosition == std::string::npos)
-			return;
-		RequiredExtension.replace(
-			AssetHeaderPosition,
-			std::string("\"asset\":{\"version\":\"2.0\"},").size(),
+		if (AssetHeaderPosition == std::string::npos) return;
+		RequiredExtension.replace(AssetHeaderPosition, std::string("\"asset\":{\"version\":\"2.0\"},").size(),
 			"\"asset\":{\"version\":\"2.0\"},\"extensionsRequired\":[\"EXT_unknown_required\"],");
 		{
 			std::ofstream Output(SourcePath, std::ios::binary | std::ios::trunc);
@@ -559,14 +509,12 @@ namespace
 		}
 		const auto RequiredExtensionImport = GltfMeshImporter::ImportStaticPrimitive(SourceMetadata->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, !RequiredExtensionImport.has_value());
-		PF_CHECK(Tests, !RequiredExtensionImport &&
-			RequiredExtensionImport.error().Code == GltfMeshImportErrorCode::UnsupportedFeature);
+		PF_CHECK(Tests, !RequiredExtensionImport && RequiredExtensionImport.error().Code == GltfMeshImportErrorCode::UnsupportedFeature);
 
 		std::string NullBufferUri = GltfDocument;
 		const size_t NullUriPosition = NullBufferUri.find("Triangle.bin");
 		PF_CHECK(Tests, NullUriPosition != std::string::npos);
-		if (NullUriPosition == std::string::npos)
-			return;
+		if (NullUriPosition == std::string::npos) return;
 		NullBufferUri.replace(NullUriPosition, std::string("Triangle.bin").size(), "Triangle\\u0000.bin");
 		{
 			std::ofstream Output(SourcePath, std::ios::binary | std::ios::trunc);
@@ -580,8 +528,7 @@ namespace
 		std::string AmbiguousBufferUri = GltfDocument;
 		const size_t AmbiguousUriPosition = AmbiguousBufferUri.find("Triangle.bin");
 		PF_CHECK(Tests, AmbiguousUriPosition != std::string::npos);
-		if (AmbiguousUriPosition == std::string::npos)
-			return;
+		if (AmbiguousUriPosition == std::string::npos) return;
 		AmbiguousBufferUri.replace(AmbiguousUriPosition, std::string("Triangle.bin").size(), "Triangle.bin.");
 		{
 			std::ofstream Output(SourcePath, std::ios::binary | std::ios::trunc);
@@ -590,8 +537,7 @@ namespace
 		}
 		const auto AmbiguousUriImport = GltfMeshImporter::ImportStaticPrimitive(SourceMetadata->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, !AmbiguousUriImport.has_value());
-		PF_CHECK(Tests, !AmbiguousUriImport &&
-			AmbiguousUriImport.error().Code == GltfMeshImportErrorCode::InvalidBuffer);
+		PF_CHECK(Tests, !AmbiguousUriImport && AmbiguousUriImport.error().Code == GltfMeshImportErrorCode::InvalidBuffer);
 
 		std::string TruncatedBufferReference = GltfDocument;
 		const size_t BufferLengthPosition = TruncatedBufferReference.find("\"byteLength\":66");
@@ -628,13 +574,11 @@ namespace
 		std::error_code FileError;
 		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
 		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
+		if (FileError) return;
 
 		const auto ProjectIdentifier = UUID::Generate();
 		PF_CHECK(Tests, ProjectIdentifier.has_value());
-		if (!ProjectIdentifier)
-			return;
+		if (!ProjectIdentifier) return;
 
 		const std::filesystem::path ProjectRoot = TemporaryDirectory / ("PulseForgeImageImport-" + ProjectIdentifier->ToString());
 		struct ProjectDirectoryCleanup
@@ -650,8 +594,7 @@ namespace
 		const std::filesystem::path TextureDirectory = ProjectRoot / "Assets" / "Textures";
 		std::filesystem::create_directories(TextureDirectory, FileError);
 		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
+		if (FileError) return;
 
 		std::vector<uint8_t> Bitmap;
 		const auto AppendUInt16 = [&Bitmap](uint16_t Value)
@@ -692,27 +635,23 @@ namespace
 		}
 		const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(SourcePath);
 		PF_CHECK(Tests, Metadata.has_value());
-		if (!Metadata)
-			return;
+		if (!Metadata) return;
 
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
 		const auto Imported = ImageAssetImporter::ImportRGBA8(Metadata->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, Imported.has_value());
-		if (!Imported)
-			return;
+		if (!Imported) return;
 		PF_CHECK(Tests, Imported->Width == 2 && Imported->Height == 2);
 		PF_CHECK(Tests, Imported->RGBA8Pixels.size() == 16);
-		PF_CHECK(Tests, Imported->RGBA8Pixels == std::vector<uint8_t>({
-			0, 0, 255, 255, 255, 255, 255, 255,
-			255, 0, 0, 255, 0, 255, 0, 255 }));
+		PF_CHECK(
+			Tests, Imported->RGBA8Pixels == std::vector<uint8_t>({ 0, 0, 255, 255, 255, 255, 255, 255, 255, 0, 0, 255, 0, 255, 0, 255 }));
 		const auto Preview = ImageAssetImporter::DecodePreviewRGBA8(SourcePath, 192);
 		PF_CHECK(Tests, Preview && Preview->Width == 2 && Preview->Height == 2);
 		PF_CHECK(Tests, Preview && Preview->RGBA8Pixels == Imported->RGBA8Pixels);
 		PF_CHECK(Tests, Preview && Preview->SourceFingerprint == Imported->SourceFingerprint);
 		const auto ZeroEdgePreview = ImageAssetImporter::DecodePreviewRGBA8(SourcePath, 0);
-		PF_CHECK(Tests, !ZeroEdgePreview &&
-			ZeroEdgePreview.error().Code == ImageAssetImportErrorCode::ResourceLimitExceeded);
+		PF_CHECK(Tests, !ZeroEdgePreview && ZeroEdgePreview.error().Code == ImageAssetImportErrorCode::ResourceLimitExceeded);
 
 		const auto MissingAssetID = UUID::Generate();
 		PF_CHECK(Tests, MissingAssetID.has_value());
@@ -723,11 +662,7 @@ namespace
 		}
 
 		const std::filesystem::path RenamedPath = TextureDirectory / "checker-renamed.bmp";
-		const auto Move = AssetOperations::Move(
-			Registry,
-			ProjectRoot,
-			Metadata->ID,
-			"Assets/Textures/checker-renamed.bmp");
+		const auto Move = AssetOperations::Move(Registry, ProjectRoot, Metadata->ID, "Assets/Textures/checker-renamed.bmp");
 		PF_CHECK(Tests, Move.has_value() && Move->ID == Metadata->ID);
 		if (Move)
 		{
@@ -776,7 +711,7 @@ namespace
 			Tga[14] = 1;
 			Tga[16] = 32;
 			Tga[17] = 0x28;
-			Tga[18] = 255;	// Blue, fully transparent.
+			Tga[18] = 255; // Blue, fully transparent.
 			Tga[23] = 0;
 			Tga[24] = 255;
 			Tga[25] = 128;
@@ -788,7 +723,8 @@ namespace
 		const auto AlphaPreview = ImageAssetImporter::DecodePreviewRGBA8(AlphaPreviewPath);
 		PF_CHECK(Tests, AlphaPreview && AlphaPreview->Width == 2 && AlphaPreview->Height == 1);
 		PF_CHECK(Tests, AlphaPreview && AlphaPreview->RGBA8Pixels[0] == 0 && AlphaPreview->RGBA8Pixels[2] == 255 &&
-			AlphaPreview->RGBA8Pixels[3] == 0 && AlphaPreview->RGBA8Pixels[4] == 255 && AlphaPreview->RGBA8Pixels[7] == 128);
+							AlphaPreview->RGBA8Pixels[3] == 0 && AlphaPreview->RGBA8Pixels[4] == 255 &&
+							AlphaPreview->RGBA8Pixels[7] == 128);
 
 		const std::filesystem::path InvalidImagePath = TextureDirectory / "invalid.bmp";
 		{
@@ -837,8 +773,7 @@ namespace
 		}
 	}
 
-
-}
+} // namespace
 
 void RunAssetImportTests(TestRunner& Tests)
 {

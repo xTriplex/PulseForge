@@ -10,22 +10,14 @@ namespace PulseForge
 	class SceneRenderer::ToneMappingStage final
 	{
 	public:
-		explicit ToneMappingStage(Application& Runtime) noexcept;
+		explicit ToneMappingStage(RenderDevice& Runtime) noexcept;
 
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
-			std::span<const std::byte> VertexBytecode,
-			std::span<const std::byte> FragmentBytecode);
+			std::span<const std::byte> VertexBytecode, std::span<const std::byte> FragmentBytecode);
 		[[nodiscard]] std::expected<void, SceneRendererError> Prepare(
-			const Texture& HdrTexture,
-			uint64_t Generation,
-			ColorTargetFormat DestinationFormat,
-			bool DepthAttachmentEnabled);
-		[[nodiscard]] std::expected<size_t, SceneRendererError> Draw(
-			const Texture& HdrTexture,
-			uint64_t Generation,
-			ColorTargetFormat DestinationFormat,
-			bool DepthAttachmentEnabled,
-			const Buffer& FullscreenTriangle);
+			const Texture& HdrTexture, uint64_t Generation, ColorTargetFormat DestinationFormat, bool DepthAttachmentEnabled);
+		[[nodiscard]] std::expected<size_t, SceneRendererError> Draw(const Texture& HdrTexture, uint64_t Generation,
+			ColorTargetFormat DestinationFormat, bool DepthAttachmentEnabled, const Buffer& FullscreenTriangle);
 		void InvalidateBindings() noexcept;
 		[[nodiscard]] bool SetSettings(const ToneMappingSettings& Settings) noexcept;
 		[[nodiscard]] const ToneMappingSettings& GetSettings() const noexcept;
@@ -39,14 +31,10 @@ namespace PulseForge
 		};
 		static_assert(sizeof(Constants) == 16);
 
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePipeline(
-			ColorTargetFormat ColorFormat,
-			bool DepthAttachmentEnabled);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBindings(
-			const Texture& HdrTexture,
-			uint64_t Generation);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePipeline(ColorTargetFormat ColorFormat, bool DepthAttachmentEnabled);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBindings(const Texture& HdrTexture, uint64_t Generation);
 
-		Application& m_Runtime;
+		RenderDevice& m_Runtime;
 		ShaderHandle m_VertexShader;
 		ShaderHandle m_FragmentShader;
 		SamplerHandle m_Sampler;
@@ -59,4 +47,4 @@ namespace PulseForge
 		uint64_t m_BindingGeneration = 0;
 		bool m_HasUploadedConstants = false;
 	};
-}
+} // namespace PulseForge

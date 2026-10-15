@@ -2,6 +2,7 @@
 
 #include "Core/Core.h"
 #include "Renderer/Buffer.h"
+#include "Renderer/MeshData.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -34,35 +35,6 @@ namespace PulseForge
 		ShaderBytecodeFormat BytecodeFormat = ShaderBytecodeFormat::SpirV;
 		std::string EntryPoint = "main";
 		std::string DebugName;
-	};
-
-	enum class VertexSemantic : uint8_t
-	{
-		Position,
-		Color,
-		TexCoord,
-		Normal,
-		Tangent
-	};
-
-	enum class VertexFormat : uint8_t
-	{
-		Float2,
-		Float3,
-		Float4
-	};
-
-	struct VertexAttributeDesc
-	{
-		VertexSemantic Semantic = VertexSemantic::Position;
-		VertexFormat Format = VertexFormat::Float3;
-		uint32_t Offset = 0;
-	};
-
-	struct VertexLayoutDesc
-	{
-		uint32_t Stride = 0;
-		std::vector<VertexAttributeDesc> Attributes;
 	};
 
 	enum class PrimitiveTopology : uint8_t

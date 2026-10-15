@@ -1,7 +1,6 @@
 #include "EditorViewportSceneRenderView.h"
 
 #include "Assets/Project.h"
-#include "Core/Application.h"
 #include "Core/Log.h"
 #include "Editor/EditorImGuiRenderer.h"
 #include "Editor/EditorViewportPolicy.h"
@@ -21,13 +20,8 @@ namespace PulseForgeEditor
 		ResetTarget();
 	}
 
-	std::expected<bool, std::string> EditorViewportSceneRenderView::EnsureTarget(
-		float LogicalWidth,
-		float LogicalHeight,
-		float ScaleX,
-		float ScaleY,
-		PulseForge::Application& Runtime,
-		EditorImGuiRenderer& ImGuiRenderer)
+	std::expected<bool, std::string> EditorViewportSceneRenderView::EnsureTarget(float LogicalWidth, float LogicalHeight, float ScaleX,
+		float ScaleY, PulseForge::RenderDevice& Runtime, EditorImGuiRenderer& ImGuiRenderer)
 	{
 #ifdef PF_EDITOR_RENDERER_OPENGL
 		(void)LogicalWidth;
@@ -78,8 +72,7 @@ namespace PulseForgeEditor
 			return std::unexpected(TextureID.error());
 		}
 
-		if (m_TextureID != 0 && m_ImGuiRenderer)
-			m_ImGuiRenderer->UnregisterTexture(m_TextureID);
+		if (m_TextureID != 0 && m_ImGuiRenderer) m_ImGuiRenderer->UnregisterTexture(m_TextureID);
 		m_Target = std::move(*Created);
 		m_ImGuiRenderer = &ImGuiRenderer;
 		m_TextureID = *TextureID;
@@ -91,15 +84,9 @@ namespace PulseForgeEditor
 #endif
 	}
 
-	void EditorViewportSceneRenderView::PrepareScene(
-		PulseForge::Application& Runtime,
-		const PulseForge::Project* SourceProject,
-		const PulseForge::Scene* EditScene,
-		const PulseForge::Scene* RuntimeScene,
-		bool RuntimeActive,
-		const EditorViewportCamera& Camera,
-		std::span<const PulseForge::UUID> HiddenEntities,
-		const std::filesystem::path& CompiledShaderDirectory)
+	void EditorViewportSceneRenderView::PrepareScene(PulseForge::RenderDevice& Runtime, const PulseForge::Project* SourceProject,
+		const PulseForge::Scene* EditScene, const PulseForge::Scene* RuntimeScene, bool RuntimeActive, const EditorViewportCamera& Camera,
+		std::span<const PulseForge::UUID> HiddenEntities, const std::filesystem::path& CompiledShaderDirectory)
 	{
 		m_SceneReady = false;
 		m_ViewProjectionValid = false;
@@ -114,8 +101,7 @@ namespace PulseForgeEditor
 		(void)HiddenEntities;
 		(void)CompiledShaderDirectory;
 #else
-		if (!SourceProject || !EditScene || m_Width == 0 || m_Height == 0 || m_SceneRendererInitializationFailed)
-			return;
+		if (!SourceProject || !EditScene || m_Width == 0 || m_Height == 0 || m_SceneRendererInitializationFailed) return;
 
 		if (!m_SceneRenderer)
 		{
@@ -133,8 +119,7 @@ namespace PulseForgeEditor
 		const PulseForge::Scene& ActiveScene = SceneMode.UseRuntimeScene ? *RuntimeScene : *EditScene;
 		const float AspectRatio = static_cast<float>(m_Width) / static_cast<float>(m_Height);
 		std::expected<void, PulseForge::SceneRendererError> Prepared;
-		if (SceneMode.UseRuntimeScene)
-			Prepared = m_SceneRenderer->PrepareScene(ActiveScene, AspectRatio);
+		if (SceneMode.UseRuntimeScene) Prepared = m_SceneRenderer->PrepareScene(ActiveScene, AspectRatio);
 		else
 		{
 			auto ViewProjection = Camera.GetViewProjection(AspectRatio);
@@ -151,13 +136,7 @@ namespace PulseForgeEditor
 				return;
 			}
 			Prepared = m_SceneRenderer->PrepareSceneFiltered(
-				ActiveScene,
-				Camera.GetView(),
-				*Projection,
-				Camera.GetPosition(),
-				0.1f,
-				1000.0f,
-				HiddenEntities);
+				ActiveScene, Camera.GetView(), *Projection, Camera.GetPosition(), 0.1f, 1000.0f, HiddenEntities);
 		}
 		if (!Prepared)
 		{
@@ -173,10 +152,7 @@ namespace PulseForgeEditor
 	}
 
 	bool EditorViewportSceneRenderView::Render(
-		PulseForge::Application& Runtime,
-		bool PanelVisible,
-		float ExposureEV,
-		const PulseForge::RenderTargetClearValue& Background)
+		PulseForge::RenderDevice& Runtime, bool PanelVisible, float ExposureEV, const PulseForge::RenderTargetClearValue& Background)
 	{
 #ifdef PF_EDITOR_RENDERER_OPENGL
 		(void)Runtime;
@@ -185,8 +161,7 @@ namespace PulseForgeEditor
 		(void)Background;
 		return false;
 #else
-		if (!PanelVisible || !m_Target)
-			return false;
+		if (!PanelVisible || !m_Target) return false;
 
 		if (m_SceneRenderer && m_SceneReady)
 		{
@@ -237,14 +212,12 @@ namespace PulseForgeEditor
 
 	void EditorViewportSceneRenderView::RefreshMaterialAssets() noexcept
 	{
-		if (m_SceneRenderer)
-			m_SceneRenderer->RefreshMaterialAssets();
+		if (m_SceneRenderer) m_SceneRenderer->RefreshMaterialAssets();
 	}
 
 	void EditorViewportSceneRenderView::ResetTarget() noexcept
 	{
-		if (m_ImGuiRenderer && m_TextureID != 0)
-			m_ImGuiRenderer->UnregisterTexture(m_TextureID);
+		if (m_ImGuiRenderer && m_TextureID != 0) m_ImGuiRenderer->UnregisterTexture(m_TextureID);
 		m_TextureID = 0;
 		m_ImGuiRenderer = nullptr;
 		m_Target.reset();
@@ -261,8 +234,7 @@ namespace PulseForgeEditor
 
 	void EditorViewportSceneRenderView::SetTargetError(std::string Message)
 	{
-		if (m_TargetError == Message)
-			return;
+		if (m_TargetError == Message) return;
 		m_TargetError = std::move(Message);
 		PF_WARN("{}", m_TargetError);
 	}
@@ -274,8 +246,7 @@ namespace PulseForgeEditor
 
 	void EditorViewportSceneRenderView::SetSceneError(std::string Message)
 	{
-		if (m_SceneError == Message)
-			return;
+		if (m_SceneError == Message) return;
 		m_SceneError = std::move(Message);
 		PF_WARN("{}", m_SceneError);
 	}
@@ -286,9 +257,7 @@ namespace PulseForgeEditor
 	}
 
 	bool EditorViewportSceneRenderView::ClearTarget(
-		PulseForge::Application& Runtime,
-		const PulseForge::RenderTargetClearValue& Clear,
-		std::string_view FailureContext)
+		PulseForge::RenderDevice& Runtime, const PulseForge::RenderTargetClearValue& Clear, std::string_view FailureContext)
 	{
 		if (auto Begin = Runtime.BeginRenderTarget(*m_Target, Clear); !Begin)
 		{
@@ -302,4 +271,4 @@ namespace PulseForgeEditor
 		}
 		return true;
 	}
-}
+} // namespace PulseForgeEditor

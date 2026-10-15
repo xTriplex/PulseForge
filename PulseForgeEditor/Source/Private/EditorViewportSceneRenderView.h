@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Renderer/RenderTarget.h"
+#include "Renderer/RenderDevice.h"
 #include "Scene/UUID.h"
 
 #include <expected>
@@ -13,11 +14,10 @@
 
 namespace PulseForge
 {
-	class Application;
 	class Project;
 	class Scene;
 	class SceneRenderer;
-}
+} // namespace PulseForge
 
 namespace PulseForgeEditor
 {
@@ -32,27 +32,13 @@ namespace PulseForgeEditor
 		EditorViewportSceneRenderView& operator=(const EditorViewportSceneRenderView&) = delete;
 		~EditorViewportSceneRenderView();
 
-		[[nodiscard]] std::expected<bool, std::string> EnsureTarget(
-			float LogicalWidth,
-			float LogicalHeight,
-			float ScaleX,
-			float ScaleY,
-			PulseForge::Application& Runtime,
-			EditorImGuiRenderer& ImGuiRenderer);
-		void PrepareScene(
-			PulseForge::Application& Runtime,
-			const PulseForge::Project* Project,
-			const PulseForge::Scene* EditScene,
-			const PulseForge::Scene* RuntimeScene,
-			bool RuntimeActive,
-			const EditorViewportCamera& Camera,
-			std::span<const PulseForge::UUID> HiddenEntities,
-			const std::filesystem::path& CompiledShaderDirectory);
+		[[nodiscard]] std::expected<bool, std::string> EnsureTarget(float LogicalWidth, float LogicalHeight, float ScaleX, float ScaleY,
+			PulseForge::RenderDevice& Runtime, EditorImGuiRenderer& ImGuiRenderer);
+		void PrepareScene(PulseForge::RenderDevice& Runtime, const PulseForge::Project* Project, const PulseForge::Scene* EditScene,
+			const PulseForge::Scene* RuntimeScene, bool RuntimeActive, const EditorViewportCamera& Camera,
+			std::span<const PulseForge::UUID> HiddenEntities, const std::filesystem::path& CompiledShaderDirectory);
 		[[nodiscard]] bool Render(
-			PulseForge::Application& Runtime,
-			bool PanelVisible,
-			float ExposureEV,
-			const PulseForge::RenderTargetClearValue& Background);
+			PulseForge::RenderDevice& Runtime, bool PanelVisible, float ExposureEV, const PulseForge::RenderTargetClearValue& Background);
 
 		void ResetScene() noexcept;
 		void InvalidatePreparedScene() noexcept;
@@ -79,9 +65,7 @@ namespace PulseForgeEditor
 		void SetSceneError(std::string Message);
 		void ClearSceneError() noexcept;
 		[[nodiscard]] bool ClearTarget(
-			PulseForge::Application& Runtime,
-			const PulseForge::RenderTargetClearValue& Clear,
-			std::string_view FailureContext);
+			PulseForge::RenderDevice& Runtime, const PulseForge::RenderTargetClearValue& Clear, std::string_view FailureContext);
 
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
 		PulseForge::RenderTargetHandle m_Target;
@@ -97,4 +81,4 @@ namespace PulseForgeEditor
 		std::string m_TargetError;
 		std::string m_SceneError;
 	};
-}
+} // namespace PulseForgeEditor

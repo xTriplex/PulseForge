@@ -33,14 +33,10 @@ namespace PulseForgeEditor
 
 		void DrawMessage(EditorStyle& Style, EditorStatusMessagePresentation Presentation) const;
 		void DrawStatusBarContents(
-			EditorStyle& Style,
-			bool HasScene,
-			bool SceneDirty,
-			bool RuntimeActive,
-			std::string_view RendererName) const;
+			EditorStyle& Style, bool HasScene, bool SceneDirty, bool RuntimeActive, std::string_view RendererName) const;
 
 	private:
 		std::string m_Message = "Create or open a project to begin.";
 		EditorStatusSeverity m_Severity = EditorStatusSeverity::Information;
 	};
-}
+} // namespace PulseForgeEditor

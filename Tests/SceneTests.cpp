@@ -38,8 +38,7 @@ namespace
 		auto ChildResult = TestScene.CreateEntityWithUUID(ChildId, "Child");
 		auto GrandchildResult = TestScene.CreateEntityWithUUID(GrandchildId, "Grandchild");
 		PF_CHECK(Tests, ParentResult.has_value() && ChildResult.has_value() && GrandchildResult.has_value());
-		if (!ParentResult || !ChildResult || !GrandchildResult)
-			return;
+		if (!ParentResult || !ChildResult || !GrandchildResult) return;
 
 		Entity Parent = *ParentResult;
 		Entity Child = *ChildResult;
@@ -134,21 +133,20 @@ namespace
 			PF_CHECK(Tests, DuplicateTag && DuplicateTag->Name == "Renamed child Copy");
 			PF_CHECK(Tests, DuplicateTransform && glm::all(glm::equal(DuplicateTransform->Translation, ChildTransform.Translation)));
 			PF_CHECK(Tests, DuplicatedCamera && DuplicatedCamera->has_value() &&
-				DuplicatedCamera->value().VerticalFieldOfViewRadians == DuplicateCamera.VerticalFieldOfViewRadians &&
-				!DuplicatedCamera->value().IsPrimary);
+								DuplicatedCamera->value().VerticalFieldOfViewRadians == DuplicateCamera.VerticalFieldOfViewRadians &&
+								!DuplicatedCamera->value().IsPrimary);
 			PF_CHECK(Tests, OriginalCamera && OriginalCamera->has_value() && OriginalCamera->value().IsPrimary);
 			PF_CHECK(Tests, DuplicatedListener && DuplicatedListener->has_value() && !DuplicatedListener->value().IsPrimary);
 			PF_CHECK(Tests, OriginalListener && OriginalListener->has_value() && OriginalListener->value().IsPrimary);
 			PF_CHECK(Tests, DuplicatedMeshRenderer && DuplicatedMeshRenderer->has_value() &&
-				DuplicatedMeshRenderer->value().MeshAsset == DuplicateMeshAsset);
+								DuplicatedMeshRenderer->value().MeshAsset == DuplicateMeshAsset);
 			PF_CHECK(Tests, DuplicateParent && DuplicateParent->has_value() && **DuplicateParent == Parent);
 			PF_CHECK(Tests, Duplicate.RemoveMeshRenderer().has_value());
 			const auto RemovedMeshRenderer = Duplicate.GetMeshRenderer();
 			PF_CHECK(Tests, RemovedMeshRenderer && !RemovedMeshRenderer->has_value());
 			const auto MissingMeshRendererRemoval = Duplicate.RemoveMeshRenderer();
 			PF_CHECK(Tests, !MissingMeshRendererRemoval.has_value());
-			PF_CHECK(Tests, !MissingMeshRendererRemoval &&
-				MissingMeshRendererRemoval.error().Code == SceneErrorCode::MissingComponent);
+			PF_CHECK(Tests, !MissingMeshRendererRemoval && MissingMeshRendererRemoval.error().Code == SceneErrorCode::MissingComponent);
 		}
 
 		Scene NonPrimaryScene;
@@ -188,10 +186,8 @@ namespace
 		PF_CHECK(Tests, !TestScene.DestroyEntity(Parent).has_value());
 
 		const auto OrderedEntities = TestScene.GetEntities();
-		PF_CHECK(Tests, std::is_sorted(OrderedEntities.begin(), OrderedEntities.end(), [](const Entity& First, const Entity& Second)
-		{
-			return First.GetUUID() < Second.GetUUID();
-		}));
+		PF_CHECK(Tests, std::is_sorted(OrderedEntities.begin(), OrderedEntities.end(),
+							[](const Entity& First, const Entity& Second) { return First.GetUUID() < Second.GetUUID(); }));
 	}
 
 	void TestPhysicsComponentsAndPersistence(TestRunner& Tests)
@@ -220,8 +216,7 @@ namespace
 		Scene Source;
 		const auto Body = Source.CreateEntity("Physics body");
 		PF_CHECK(Tests, Body.has_value());
-		if (!Body)
-			return;
+		if (!Body) return;
 
 		Rigidbody = { RigidbodyMotionType::Dynamic, 3.0f, 0.6f, 0.15f, false };
 		PF_CHECK(Tests, Body->SetRigidbody(Rigidbody).has_value());
@@ -240,16 +235,14 @@ namespace
 		{
 			const auto DuplicateRigidbody = Duplicated->GetRigidbody();
 			const auto DuplicateCollider = Duplicated->GetBoxCollider();
-			PF_CHECK(Tests, DuplicateRigidbody && DuplicateRigidbody->has_value() &&
-				DuplicateRigidbody->value().Mass == 3.0f);
-			PF_CHECK(Tests, DuplicateCollider && DuplicateCollider->has_value() &&
-				DuplicateCollider->value().HalfExtents == Collider.HalfExtents);
+			PF_CHECK(Tests, DuplicateRigidbody && DuplicateRigidbody->has_value() && DuplicateRigidbody->value().Mass == 3.0f);
+			PF_CHECK(Tests,
+				DuplicateCollider && DuplicateCollider->has_value() && DuplicateCollider->value().HalfExtents == Collider.HalfExtents);
 		}
 
 		const auto Serialized = SceneSerializer::Serialize(Source);
 		PF_CHECK(Tests, Serialized.has_value());
-		if (!Serialized)
-			return;
+		if (!Serialized) return;
 		PF_CHECK(Tests, Serialized->find("\"version\": 7") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"motionType\": \"dynamic\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"halfExtents\": [\n          0.75,") != std::string::npos);
@@ -262,11 +255,10 @@ namespace
 		{
 			const auto LoadedRigidbody = LoadedBody->GetRigidbody();
 			const auto LoadedCollider = LoadedBody->GetBoxCollider();
-			PF_CHECK(Tests, LoadedRigidbody && LoadedRigidbody->has_value() &&
-				LoadedRigidbody->value().Mass == 3.0f && LoadedRigidbody->value().Friction == 0.6f &&
-				LoadedRigidbody->value().Restitution == 0.15f && !LoadedRigidbody->value().AllowSleeping);
-			PF_CHECK(Tests, LoadedCollider && LoadedCollider->has_value() &&
-				LoadedCollider->value().HalfExtents == Collider.HalfExtents);
+			PF_CHECK(Tests, LoadedRigidbody && LoadedRigidbody->has_value() && LoadedRigidbody->value().Mass == 3.0f &&
+								LoadedRigidbody->value().Friction == 0.6f && LoadedRigidbody->value().Restitution == 0.15f &&
+								!LoadedRigidbody->value().AllowSleeping);
+			PF_CHECK(Tests, LoadedCollider && LoadedCollider->has_value() && LoadedCollider->value().HalfExtents == Collider.HalfExtents);
 		}
 
 		const auto PrefabData = PrefabSerializer::Serialize(Source, *Body);
@@ -281,10 +273,9 @@ namespace
 			{
 				const auto InstanceRigidbody = Instance->GetRigidbody();
 				const auto InstanceCollider = Instance->GetBoxCollider();
-				PF_CHECK(Tests, InstanceRigidbody && InstanceRigidbody->has_value() &&
-					InstanceRigidbody->value().Mass == 3.0f);
-				PF_CHECK(Tests, InstanceCollider && InstanceCollider->has_value() &&
-					InstanceCollider->value().HalfExtents == Collider.HalfExtents);
+				PF_CHECK(Tests, InstanceRigidbody && InstanceRigidbody->has_value() && InstanceRigidbody->value().Mass == 3.0f);
+				PF_CHECK(Tests,
+					InstanceCollider && InstanceCollider->has_value() && InstanceCollider->value().HalfExtents == Collider.HalfExtents);
 			}
 		}
 	}
@@ -296,8 +287,7 @@ namespace
 		const auto Floor = Source.CreateEntity("Floor");
 		const auto FallingBody = Source.CreateEntity("Falling body");
 		PF_CHECK(Tests, Floor.has_value() && FallingBody.has_value());
-		if (!Floor || !FallingBody)
-			return;
+		if (!Floor || !FallingBody) return;
 
 		TransformComponent FloorTransform;
 		FloorTransform.Translation.y = -0.5f;
@@ -360,9 +350,7 @@ namespace
 		PF_CHECK(Tests, !StaticForce && StaticForce.error().Code == PhysicsSceneRuntimeErrorCode::StaticBody);
 		const auto MissingBodyForce = Runtime.ApplyForce(UUID{ 0x5300000000000000ull, 3 }, { 0.0f, 1.0f, 0.0f });
 		PF_CHECK(Tests, !MissingBodyForce && MissingBodyForce.error().Code == PhysicsSceneRuntimeErrorCode::MissingBody);
-		const auto InvalidForce = Runtime.ApplyForce(
-			FallingBody->GetUUID(),
-			{ std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f });
+		const auto InvalidForce = Runtime.ApplyForce(FallingBody->GetUUID(), { std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f });
 		PF_CHECK(Tests, !InvalidForce && InvalidForce.error().Code == PhysicsSceneRuntimeErrorCode::InvalidForce);
 		PF_CHECK(Tests, Runtime.Advance(Source, Timestep(FixedStep)).has_value());
 		const auto ForcedTransform = FallingBody->GetTransform();
@@ -378,8 +366,7 @@ namespace
 			TransformComponent RuntimeAddedTransform;
 			RuntimeAddedTransform.Translation.y = 4.0f;
 			PF_CHECK(Tests, RuntimeAddedBody->SetTransform(RuntimeAddedTransform).has_value());
-			PF_CHECK(Tests, RuntimeAddedBody->SetRigidbody(
-				{ RigidbodyMotionType::Dynamic, 1.0f, 0.5f, 0.0f, true }).has_value());
+			PF_CHECK(Tests, RuntimeAddedBody->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.5f, 0.0f, true }).has_value());
 			PF_CHECK(Tests, RuntimeAddedBody->SetBoxCollider({ { 0.5f, 0.5f, 0.5f } }).has_value());
 
 			const auto ReconciledWithoutStep = Runtime.Advance(Source, Timestep(0.0));
@@ -391,11 +378,9 @@ namespace
 
 			PF_CHECK(Tests, RuntimeAddedBody->RemoveRigidbody().has_value());
 			const auto RejectedPartialPair = Runtime.Advance(Source, Timestep(0.0));
-			PF_CHECK(Tests, !RejectedPartialPair &&
-				RejectedPartialPair.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
+			PF_CHECK(Tests, !RejectedPartialPair && RejectedPartialPair.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
 			const auto RemovedPartialBodyForce = Runtime.ApplyForce(RuntimeAddedBody->GetUUID(), { 0.0f, 1.0f, 0.0f });
-			PF_CHECK(Tests, !RemovedPartialBodyForce &&
-				RemovedPartialBodyForce.error().Code == PhysicsSceneRuntimeErrorCode::MissingBody);
+			PF_CHECK(Tests, !RemovedPartialBodyForce && RemovedPartialBodyForce.error().Code == PhysicsSceneRuntimeErrorCode::MissingBody);
 			PF_CHECK(Tests, RuntimeAddedBody->RemoveBoxCollider().has_value());
 			PF_CHECK(Tests, Runtime.Advance(Source, Timestep(0.0)).has_value());
 		}
@@ -422,8 +407,7 @@ namespace
 			PF_CHECK(Tests, Child->SetBoxCollider({}).has_value());
 			PhysicsSceneRuntime InvalidRuntime;
 			const auto RejectedHierarchy = InvalidRuntime.Start(InvalidScene);
-			PF_CHECK(Tests, !RejectedHierarchy &&
-				RejectedHierarchy.error().Code == PhysicsSceneRuntimeErrorCode::UnsupportedHierarchy);
+			PF_CHECK(Tests, !RejectedHierarchy && RejectedHierarchy.error().Code == PhysicsSceneRuntimeErrorCode::UnsupportedHierarchy);
 			PF_CHECK(Tests, !InvalidRuntime.IsRunning());
 		}
 
@@ -435,24 +419,22 @@ namespace
 			PF_CHECK(Tests, IncompleteBody->SetRigidbody({}).has_value());
 			PhysicsSceneRuntime IncompleteRuntime;
 			const auto RejectedIncompletePair = IncompleteRuntime.Start(IncompleteScene);
-			PF_CHECK(Tests, !RejectedIncompletePair &&
-				RejectedIncompletePair.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
+			PF_CHECK(Tests,
+				!RejectedIncompletePair && RejectedIncompletePair.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
 			PF_CHECK(Tests, !IncompleteRuntime.IsRunning());
 		}
 
-		PhysicsSceneRuntime InvalidSettingsRuntime(
-			PhysicsSceneRuntimeDesc{ 0.0, 0, 0.0, glm::vec3(0.0f) });
+		PhysicsSceneRuntime InvalidSettingsRuntime(PhysicsSceneRuntimeDesc{ 0.0, 0, 0.0, glm::vec3(0.0f) });
 		const auto RejectedSettings = InvalidSettingsRuntime.Start(Source);
 		PF_CHECK(Tests, !RejectedSettings && RejectedSettings.error().Code == PhysicsSceneRuntimeErrorCode::InvalidSettings);
-		PhysicsSceneRuntime UnrepresentableStepRuntime(PhysicsSceneRuntimeDesc{
-			1.0e100, 1, 1.0e101, glm::vec3(0.0f) });
+		PhysicsSceneRuntime UnrepresentableStepRuntime(PhysicsSceneRuntimeDesc{ 1.0e100, 1, 1.0e101, glm::vec3(0.0f) });
 		const auto RejectedStep = UnrepresentableStepRuntime.Start(Source);
 		PF_CHECK(Tests, !RejectedStep && RejectedStep.error().Code == PhysicsSceneRuntimeErrorCode::InvalidSettings);
-		PhysicsSceneRuntime UnderflowingStepRuntime(PhysicsSceneRuntimeDesc{
-			std::numeric_limits<double>::denorm_min(), 1, 1.0, glm::vec3(0.0f) });
+		PhysicsSceneRuntime UnderflowingStepRuntime(
+			PhysicsSceneRuntimeDesc{ std::numeric_limits<double>::denorm_min(), 1, 1.0, glm::vec3(0.0f) });
 		const auto RejectedUnderflowingStep = UnderflowingStepRuntime.Start(Source);
-		PF_CHECK(Tests, !RejectedUnderflowingStep &&
-			RejectedUnderflowingStep.error().Code == PhysicsSceneRuntimeErrorCode::InvalidSettings);
+		PF_CHECK(
+			Tests, !RejectedUnderflowingStep && RejectedUnderflowingStep.error().Code == PhysicsSceneRuntimeErrorCode::InvalidSettings);
 
 		Scene ScaledExtentsOverflowScene;
 		const auto OverflowingBody = ScaledExtentsOverflowScene.CreateEntity("Overflowing collider");
@@ -466,8 +448,7 @@ namespace
 			PF_CHECK(Tests, OverflowingBody->SetBoxCollider({ glm::vec3(std::numeric_limits<float>::max()) }).has_value());
 			PhysicsSceneRuntime OverflowRuntime;
 			const auto RejectedOverflow = OverflowRuntime.Start(ScaledExtentsOverflowScene);
-			PF_CHECK(Tests, !RejectedOverflow &&
-				RejectedOverflow.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
+			PF_CHECK(Tests, !RejectedOverflow && RejectedOverflow.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
 			PF_CHECK(Tests, !OverflowRuntime.IsRunning());
 		}
 	}
@@ -480,8 +461,7 @@ namespace
 			Scene TemporaryScene;
 			auto Created = TemporaryScene.CreateEntity("Temporary");
 			PF_CHECK(Tests, Created.has_value());
-			if (Created)
-				StaleHandle = *Created;
+			if (Created) StaleHandle = *Created;
 			PF_CHECK(Tests, StaleHandle.IsValid());
 		}
 		PF_CHECK(Tests, !StaleHandle.IsValid());
@@ -492,8 +472,7 @@ namespace
 		const UUID ReusedIdentifier{ 0x6f00000000000000ull, 42 };
 		auto Original = ReuseScene.CreateEntityWithUUID(ReusedIdentifier, "Original incarnation");
 		PF_CHECK(Tests, Original.has_value());
-		if (!Original)
-			return;
+		if (!Original) return;
 
 		const Entity OldHandle = *Original;
 		PF_CHECK(Tests, OldHandle.IsValid());
@@ -513,8 +492,7 @@ namespace
 
 		auto Replacement = ReuseScene.CreateEntityWithUUID(ReusedIdentifier, "Replacement incarnation");
 		PF_CHECK(Tests, Replacement.has_value());
-		if (!Replacement)
-			return;
+		if (!Replacement) return;
 		const Entity NewHandle = *Replacement;
 		PF_CHECK(Tests, NewHandle.IsValid());
 		PF_CHECK(Tests, OldHandle.GetUUID() == NewHandle.GetUUID());
@@ -570,8 +548,7 @@ namespace
 		auto SecondMesh = TestScene.CreateEntityWithUUID(SecondMeshID, "Second mesh");
 		auto Light = TestScene.CreateEntityWithUUID(LightID, "Sun");
 		PF_CHECK(Tests, Camera && Parent && FirstMesh && SharedMesh && SecondMesh && Light);
-		if (!Camera || !Parent || !FirstMesh || !SharedMesh || !SecondMesh || !Light)
-			return;
+		if (!Camera || !Parent || !FirstMesh || !SharedMesh || !SecondMesh || !Light) return;
 
 		TransformComponent CameraTransform;
 		CameraTransform.Translation = { 0.0f, 0.0f, 5.0f };
@@ -638,8 +615,7 @@ namespace
 
 		const auto Snapshot = SceneRenderSnapshotBuilder::Build(TestScene, 16.0f / 9.0f);
 		PF_CHECK(Tests, Snapshot.has_value());
-		if (!Snapshot)
-			return;
+		if (!Snapshot) return;
 		PF_CHECK(Tests, Snapshot->CameraEntity == CameraID);
 		PF_CHECK(Tests, glm::all(glm::equal(Snapshot->CameraWorldPosition, glm::vec3(0.0f, 0.0f, 5.0f))));
 		PF_CHECK(Tests, Snapshot->DirectionalLight && Snapshot->DirectionalLight->Entity == LightID);
@@ -650,15 +626,16 @@ namespace
 		PF_CHECK(Tests, Snapshot->EnvironmentLight && Snapshot->EnvironmentLight->Entity == LightID);
 		PF_CHECK(Tests, Snapshot->EnvironmentLight && Snapshot->EnvironmentLight->HdrImage == EnvironmentAssetID);
 		PF_CHECK(Tests, Snapshot->EnvironmentLight && Snapshot->EnvironmentLight->Intensity == 1.5f);
-		PF_CHECK(Tests, Snapshot->EnvironmentLight && glm::abs((glm::mat3(
-			Snapshot->EnvironmentLight->WorldRotation) * glm::vec3(0.0f, 0.0f, -1.0f)).x + 1.0f) < 0.0001f);
+		PF_CHECK(
+			Tests, Snapshot->EnvironmentLight &&
+					   glm::abs((glm::mat3(Snapshot->EnvironmentLight->WorldRotation) * glm::vec3(0.0f, 0.0f, -1.0f)).x + 1.0f) < 0.0001f);
 		PF_CHECK(Tests, Snapshot->PointLights.size() == 1 && Snapshot->PointLights[0].Entity == LightID);
-		PF_CHECK(Tests, Snapshot->PointLights.size() == 1 && glm::all(glm::equal(
-			Snapshot->PointLights[0].WorldPosition, glm::vec3(2.0f, 1.0f, 0.0f))));
+		PF_CHECK(Tests,
+			Snapshot->PointLights.size() == 1 && glm::all(glm::equal(Snapshot->PointLights[0].WorldPosition, glm::vec3(2.0f, 1.0f, 0.0f))));
 		PF_CHECK(Tests, Snapshot->SpotLights.size() == 1 && Snapshot->SpotLights[0].Entity == LightID);
 		PF_CHECK(Tests, Snapshot->SpotLights.size() == 1 && glm::abs(Snapshot->SpotLights[0].WorldDirection.x + 1.0f) < 0.0001f);
 		PF_CHECK(Tests, Snapshot->SpotLights.size() == 1 && Snapshot->SpotLights[0].CastShadows &&
-			Snapshot->SpotLights[0].ShadowBias == 0.004f && Snapshot->SpotLights[0].ShadowSoftness == 1.5f);
+							Snapshot->SpotLights[0].ShadowBias == 0.004f && Snapshot->SpotLights[0].ShadowSoftness == 1.5f);
 		PF_CHECK(Tests, Snapshot->Meshes.size() == 3);
 		PF_CHECK(Tests, Snapshot->Meshes[0].Entity == FirstMeshID);
 		PF_CHECK(Tests, Snapshot->Meshes[1].Entity == SharedMeshID);
@@ -681,8 +658,8 @@ namespace
 		if (DuplicatedCamera)
 		{
 			const auto DuplicateCameraComponent = DuplicatedCamera->GetCamera();
-			PF_CHECK(Tests, DuplicateCameraComponent && DuplicateCameraComponent->has_value() &&
-				!DuplicateCameraComponent->value().IsPrimary);
+			PF_CHECK(
+				Tests, DuplicateCameraComponent && DuplicateCameraComponent->has_value() && !DuplicateCameraComponent->value().IsPrimary);
 			const auto SnapshotAfterCameraDuplication = SceneRenderSnapshotBuilder::Build(TestScene, 16.0f / 9.0f);
 			PF_CHECK(Tests, SnapshotAfterCameraDuplication && SnapshotAfterCameraDuplication->CameraEntity == CameraID);
 		}
@@ -701,8 +678,8 @@ namespace
 		{
 			PF_CHECK(Tests, SecondEnvironment->SetEnvironmentLight(EnvironmentLightComponent{ EnvironmentAssetID, 0.5f }).has_value());
 			const auto MultipleEnvironments = SceneRenderSnapshotBuilder::Build(TestScene, CameraID, 16.0f / 9.0f);
-			PF_CHECK(Tests, !MultipleEnvironments &&
-				MultipleEnvironments.error().Code == SceneRenderSnapshotErrorCode::MultipleEnvironmentLights);
+			PF_CHECK(Tests,
+				!MultipleEnvironments && MultipleEnvironments.error().Code == SceneRenderSnapshotErrorCode::MultipleEnvironmentLights);
 			(void)TestScene.DestroyEntity(*SecondEnvironment);
 		}
 		TransformComponent SingularMeshTransform;
@@ -715,9 +692,8 @@ namespace
 		const auto NonUniformNormal = BuildNormalTransform(glm::scale(glm::mat4(1.0f), glm::vec3(2.0f, 1.0f, 0.5f)));
 		PF_CHECK(Tests, NonUniformNormal.has_value());
 		if (NonUniformNormal)
-			PF_CHECK(Tests, glm::abs((*NonUniformNormal)[0][0] - 0.5f) < 1.0e-6f &&
-				glm::abs((*NonUniformNormal)[1][1] - 1.0f) < 1.0e-6f &&
-				glm::abs((*NonUniformNormal)[2][2] - 2.0f) < 1.0e-6f);
+			PF_CHECK(Tests, glm::abs((*NonUniformNormal)[0][0] - 0.5f) < 1.0e-6f && glm::abs((*NonUniformNormal)[1][1] - 1.0f) < 1.0e-6f &&
+								glm::abs((*NonUniformNormal)[2][2] - 2.0f) < 1.0e-6f);
 		PF_CHECK(Tests, !BuildNormalTransform(glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, 0.0f, 1.0f))));
 
 		const auto NilCamera = SceneRenderSnapshotBuilder::Build(TestScene, UUID{}, 1.0f);
@@ -729,8 +705,7 @@ namespace
 		CameraComponent NonPrimaryCameraComponent;
 		PF_CHECK(Tests, Camera->SetCamera(NonPrimaryCameraComponent).has_value());
 		const auto NoPrimaryCamera = SceneRenderSnapshotBuilder::Build(TestScene, 1.0f);
-		PF_CHECK(Tests, !NoPrimaryCamera &&
-			NoPrimaryCamera.error().Code == SceneRenderSnapshotErrorCode::MissingPrimaryCamera);
+		PF_CHECK(Tests, !NoPrimaryCamera && NoPrimaryCamera.error().Code == SceneRenderSnapshotErrorCode::MissingPrimaryCamera);
 		PF_CHECK(Tests, Camera->SetCamera(PrimaryCameraComponent).has_value());
 		auto AdditionalCamera = TestScene.CreateEntityWithUUID(UUID{ 0x1800000000000000ull, 18 }, "Second camera");
 		PF_CHECK(Tests, AdditionalCamera.has_value());
@@ -738,8 +713,8 @@ namespace
 		{
 			PF_CHECK(Tests, AdditionalCamera->SetCamera(PrimaryCameraComponent).has_value());
 			const auto MultiplePrimaryCameras = SceneRenderSnapshotBuilder::Build(TestScene, 1.0f);
-			PF_CHECK(Tests, !MultiplePrimaryCameras &&
-				MultiplePrimaryCameras.error().Code == SceneRenderSnapshotErrorCode::MultiplePrimaryCameras);
+			PF_CHECK(Tests,
+				!MultiplePrimaryCameras && MultiplePrimaryCameras.error().Code == SceneRenderSnapshotErrorCode::MultiplePrimaryCameras);
 		}
 
 		TransformComponent SingularCameraTransform = CameraTransform;
@@ -751,12 +726,11 @@ namespace
 		Scene CameraLessScene;
 		auto CameraLessMesh = CameraLessScene.CreateEntity("Editor view mesh");
 		PF_CHECK(Tests, CameraLessMesh.has_value());
-		if (CameraLessMesh)
-			PF_CHECK(Tests, CameraLessMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID }).has_value());
+		if (CameraLessMesh) PF_CHECK(Tests, CameraLessMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID }).has_value());
 
 		const glm::mat4 TransientViewProjection(1.0f);
-		const auto TransientView = SceneRenderSnapshotBuilder::BuildForView(
-			CameraLessScene, TransientViewProjection, glm::vec3(3.0f, 4.0f, 5.0f));
+		const auto TransientView =
+			SceneRenderSnapshotBuilder::BuildForView(CameraLessScene, TransientViewProjection, glm::vec3(3.0f, 4.0f, 5.0f));
 		PF_CHECK(Tests, TransientView.has_value());
 		PF_CHECK(Tests, TransientView && !TransientView->HasCameraFrustum);
 		if (TransientView)
@@ -776,11 +750,10 @@ namespace
 		if (CascadeProjection)
 		{
 			const auto ExplicitTransientView = SceneRenderSnapshotBuilder::BuildForView(
-				CameraLessScene, glm::mat4(1.0f), *CascadeProjection,
-				glm::vec3(3.0f, 4.0f, 5.0f), 0.1f, 100.0f);
+				CameraLessScene, glm::mat4(1.0f), *CascadeProjection, glm::vec3(3.0f, 4.0f, 5.0f), 0.1f, 100.0f);
 			PF_CHECK(Tests, ExplicitTransientView && ExplicitTransientView->HasCameraFrustum);
-			const auto Cascades = BuildDirectionalShadowCascades(
-				glm::mat4(1.0f), *CascadeProjection, 0.1f, 100.0f, 60.0f, glm::vec3(0.0f, 1.0f, 0.0f));
+			const auto Cascades =
+				BuildDirectionalShadowCascades(glm::mat4(1.0f), *CascadeProjection, 0.1f, 100.0f, 60.0f, glm::vec3(0.0f, 1.0f, 0.0f));
 			PF_CHECK(Tests, Cascades.has_value());
 			if (Cascades)
 			{
@@ -790,8 +763,7 @@ namespace
 				for (size_t Index = 0; Index < Cascades->Cascades.size(); ++Index)
 				{
 					PF_CHECK(Tests, Cascades->Cascades[Index].FarDistance > Cascades->Cascades[Index].NearDistance);
-					if (Index > 0)
-						PF_CHECK(Tests, Cascades->Cascades[Index].NearDistance == Cascades->Cascades[Index - 1].FarDistance);
+					if (Index > 0) PF_CHECK(Tests, Cascades->Cascades[Index].NearDistance == Cascades->Cascades[Index - 1].FarDistance);
 					for (int Column = 0; Column < 4; ++Column)
 						for (int Row = 0; Row < 4; ++Row)
 							PF_CHECK(Tests, std::isfinite(Cascades->Cascades[Index].ViewProjection[Column][Row]));
@@ -823,21 +795,20 @@ namespace
 				for (int Column = 0; Column < 4; ++Column)
 					for (int Row = 0; Row < 4; ++Row)
 						PF_CHECK(Tests, glm::abs(Cascades->Cascades[0].ViewProjection[Column][Row] -
-							StableCascades->Cascades[0].ViewProjection[Column][Row]) < 0.001f);
-			PF_CHECK(Tests, !BuildDirectionalShadowCascades(glm::mat4(1.0f), *CascadeProjection,
-				0.1f, 100.0f, 10.0f, glm::vec3(0.0f)).has_value());
-			PF_CHECK(Tests, !BuildDirectionalShadowCascades(glm::mat4(1.0f), *CascadeProjection,
-				0.1f, 100.0f, 0.05f, glm::vec3(0.0f, 1.0f, 0.0f)).has_value());
+												 StableCascades->Cascades[0].ViewProjection[Column][Row]) < 0.001f);
+			PF_CHECK(Tests,
+				!BuildDirectionalShadowCascades(glm::mat4(1.0f), *CascadeProjection, 0.1f, 100.0f, 10.0f, glm::vec3(0.0f)).has_value());
+			PF_CHECK(Tests,
+				!BuildDirectionalShadowCascades(glm::mat4(1.0f), *CascadeProjection, 0.1f, 100.0f, 0.05f, glm::vec3(0.0f, 1.0f, 0.0f))
+					.has_value());
 		}
 
 		glm::mat4 InvalidTransientView(1.0f);
 		InvalidTransientView[2][1] = std::numeric_limits<float>::quiet_NaN();
-		const auto InvalidView = SceneRenderSnapshotBuilder::BuildForView(
-			CameraLessScene, InvalidTransientView, glm::vec3(0.0f));
-		PF_CHECK(Tests, !InvalidView &&
-			InvalidView.error().Code == SceneRenderSnapshotErrorCode::InvalidViewProjection);
+		const auto InvalidView = SceneRenderSnapshotBuilder::BuildForView(CameraLessScene, InvalidTransientView, glm::vec3(0.0f));
+		PF_CHECK(Tests, !InvalidView && InvalidView.error().Code == SceneRenderSnapshotErrorCode::InvalidViewProjection);
 	}
-}
+} // namespace
 
 void RunSceneTests(TestRunner& Tests)
 {

@@ -8,7 +8,6 @@
 #include "Assets/Project.h"
 #include "Renderer/AssetCache/TextureAssetCache.h"
 #include "Renderer/EnvironmentLightingCache.h"
-#include "Core/Application.h"
 #include "Core/Log.h"
 #include "Core/ScopedProfileTimer.h"
 #include "Renderer/Mesh.h"
@@ -112,7 +111,7 @@ namespace PulseForge
 			return Material.ToString() + ":" + (Environment ? Environment->ToString() : std::string("none"));
 		}
 
-		std::expected<TextureHandle, TextureError> CreateBlackCube(Application& Runtime, std::string DebugName)
+		std::expected<TextureHandle, TextureError> CreateBlackCube(RenderDevice& Runtime, std::string DebugName)
 		{
 			const std::array<float, 4> Black{ 0.0f, 0.0f, 0.0f, 1.0f };
 			const std::span<const float> Pixel(Black);
@@ -128,7 +127,7 @@ namespace PulseForge
 			return Runtime.CreateTexture(Description, Faces);
 		}
 
-		std::expected<TextureHandle, TextureError> CreateWhiteCube(Application& Runtime, std::string DebugName)
+		std::expected<TextureHandle, TextureError> CreateWhiteCube(RenderDevice& Runtime, std::string DebugName)
 		{
 			const std::array<float, 4> White{ 1.0f, 1.0f, 1.0f, 1.0f };
 			const std::span<const float> Pixel(White);
@@ -147,10 +146,7 @@ namespace PulseForge
 		class RenderTargetFrameScope final
 		{
 		public:
-			explicit RenderTargetFrameScope(Application& Runtime)
-				: m_Runtime(Runtime)
-			{
-			}
+			explicit RenderTargetFrameScope(RenderDevice& Runtime) : m_Runtime(Runtime) {}
 
 			RenderTargetFrameScope(const RenderTargetFrameScope&) = delete;
 			RenderTargetFrameScope& operator=(const RenderTargetFrameScope&) = delete;
@@ -183,7 +179,7 @@ namespace PulseForge
 			}
 
 		private:
-			Application& m_Runtime;
+			RenderDevice& m_Runtime;
 			bool m_Active = true;
 		};
 	}
@@ -195,7 +191,7 @@ namespace PulseForge
 		MaterialAssetCache Materials;
 		EnvironmentLightingCache EnvironmentLighting;
 
-		ProjectAssetCaches(Application& Runtime, const Project& SourceProject)
+		ProjectAssetCaches(RenderDevice& Runtime, const Project& SourceProject)
 			: Meshes(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry()),
 			  Textures(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry()),
 			  Materials(SourceProject.GetRootPath(), SourceProject.GetAssetRegistry()),
@@ -204,10 +200,8 @@ namespace PulseForge
 		}
 	};
 
-	SceneRenderer::SceneRenderer(Application& Runtime, const Project& SourceProject)
-		: m_Runtime(Runtime),
-		  m_Project(SourceProject),
-		  m_ProjectAssetCaches(std::make_unique<ProjectAssetCaches>(Runtime, SourceProject)),
+	SceneRenderer::SceneRenderer(RenderDevice& Runtime, const Project& SourceProject)
+		: m_Runtime(Runtime), m_Project(SourceProject), m_ProjectAssetCaches(std::make_unique<ProjectAssetCaches>(Runtime, SourceProject)),
 		  m_ToneMappingStage(std::make_unique<ToneMappingStage>(Runtime)),
 		  m_AmbientOcclusionPass(std::make_unique<AmbientOcclusionPass>(Runtime))
 	{
@@ -223,9 +217,7 @@ namespace PulseForge
 	}
 
 	std::expected<std::unique_ptr<SceneRenderer>, SceneRendererError> SceneRenderer::Create(
-		Application& Runtime,
-		const Project& SourceProject,
-		const std::filesystem::path& CompiledShaderDirectory)
+		RenderDevice& Runtime, const Project& SourceProject, const std::filesystem::path& CompiledShaderDirectory)
 	{
 		Detail::ScopedProfileTimer Timer("SceneRenderer::Create");
 		auto Renderer = std::unique_ptr<SceneRenderer>(new SceneRenderer(Runtime, SourceProject));
@@ -455,8 +447,8 @@ namespace PulseForge
 		auto ToneMappingFragmentBytecode = ReadShaderBytecode(CompiledShaderDirectory / "Tonemapping.ps.spv");
 		if (!ToneMappingFragmentBytecode)
 			return std::unexpected(std::move(ToneMappingFragmentBytecode.error()));
-		if (auto ToneMappingInitialized = m_ToneMappingStage->Initialize(
-			*ToneMappingVertexBytecode, *ToneMappingFragmentBytecode); !ToneMappingInitialized)
+		if (auto ToneMappingInitialized = m_ToneMappingStage->Initialize(*ToneMappingVertexBytecode, *ToneMappingFragmentBytecode);
+			!ToneMappingInitialized)
 			return std::unexpected(std::move(ToneMappingInitialized.error()));
 
 		BindingLayoutDesc BindingLayoutDescription;
@@ -669,9 +661,9 @@ namespace PulseForge
 		if (!PointShadowSet)
 			return std::unexpected(MakeResourceError("Could not create fallback point-shadow bindings: " + PointShadowSet.error().Message));
 		m_PointShadowBindingSet = std::move(*PointShadowSet);
-		if (auto Initialized = m_AmbientOcclusionPass->Initialize(
-			std::move(*AoPrepassVs), std::move(*AoPrepassPs), std::move(*AoVs),
-			std::move(*AoPs), std::move(*AoBlurVs), std::move(*AoBlurPs)); !Initialized)
+		if (auto Initialized = m_AmbientOcclusionPass->Initialize(std::move(*AoPrepassVs), std::move(*AoPrepassPs), std::move(*AoVs),
+				std::move(*AoPs), std::move(*AoBlurVs), std::move(*AoBlurPs));
+			!Initialized)
 			return std::unexpected(std::move(Initialized.error()));
 		return {};
 	}
@@ -734,11 +726,8 @@ namespace PulseForge
 			Material->get().NormalTexture, TextureFormat::RGBA8_UNorm, *m_FallbackNormalTexture, "normal");
 		if (!NormalTexture)
 			return std::unexpected(std::move(NormalTexture.error()));
-		auto OcclusionTexture = LoadMaterialTexture(
-			Material->get().OcclusionTexture,
-			TextureFormat::RGBA8_UNorm,
-			*m_AmbientOcclusionPass->GetFallbackOcclusionTexture(),
-			"occlusion");
+		auto OcclusionTexture = LoadMaterialTexture(Material->get().OcclusionTexture, TextureFormat::RGBA8_UNorm,
+			*m_AmbientOcclusionPass->GetFallbackOcclusionTexture(), "occlusion");
 		if (!OcclusionTexture)
 			return std::unexpected(std::move(OcclusionTexture.error()));
 		auto EmissiveTexture = LoadMaterialTexture(
@@ -803,17 +792,13 @@ namespace PulseForge
 		Detail::ScopedProfileTimer Timer("Environment GPU binding creation");
 		BindingSetDesc Description;
 		Description.Layout = m_BindingLayout;
-		Description.Textures = {
-			{ 0, std::cref(*m_FallbackBaseColorTexture) },
+		Description.Textures = { { 0, std::cref(*m_FallbackBaseColorTexture) },
 			{ 1, std::cref(*EnvironmentTextures.DiffuseIrradiance), BindingResourceType::TextureCube },
 			{ 2, std::cref(*EnvironmentTextures.PrefilteredSpecular), BindingResourceType::TextureCube },
 			{ 3, std::cref(*EnvironmentTextures.BrdfIntegrationLut) },
 			{ 4, std::cref(*EnvironmentTextures.Environment), BindingResourceType::TextureCube },
-			{ 5, std::cref(*m_FallbackMetallicRoughnessTexture) },
-			{ 6, std::cref(*m_FallbackNormalTexture) },
-			{ 7, std::cref(*m_AmbientOcclusionPass->GetFallbackOcclusionTexture()) },
-			{ 8, std::cref(*m_FallbackEmissiveTexture) }
-		};
+			{ 5, std::cref(*m_FallbackMetallicRoughnessTexture) }, { 6, std::cref(*m_FallbackNormalTexture) },
+			{ 7, std::cref(*m_AmbientOcclusionPass->GetFallbackOcclusionTexture()) }, { 8, std::cref(*m_FallbackEmissiveTexture) } };
 		Description.Samplers = {
 			{ 0, std::cref(*m_Sampler) },
 			{ 1, std::cref(*m_EnvironmentSampler) }
@@ -1086,8 +1071,7 @@ namespace PulseForge
 		GraphicsPipelineDesc PipelineDescription;
 		PipelineDescription.VertexShader = m_VertexShader;
 		PipelineDescription.FragmentShader = m_FragmentShader;
-		PipelineDescription.BindingLayouts = {
-			m_BindingLayout, m_ShadowBindingLayout, m_AmbientOcclusionPass->GetFinalLayout(),
+		PipelineDescription.BindingLayouts = { m_BindingLayout, m_ShadowBindingLayout, m_AmbientOcclusionPass->GetFinalLayout(),
 			m_SpotShadowBindingLayout, m_PointShadowBindingLayout };
 		PipelineDescription.VertexLayout = *m_PipelineVertexLayout;
 		PipelineDescription.ColorFormat = ColorFormat;
@@ -1664,21 +1648,15 @@ namespace PulseForge
 			return {};
 		}
 
-		const auto ResolveMaterial = [this](const SceneMeshInstance& Instance)
-		{
-			return ResolveMaterialDescription(Instance);
-		};
-		const auto ResolveBindings = [this](const SceneMeshInstance& Instance)
-			-> std::expected<const BindingSet*, SceneRendererError>
+		const auto ResolveMaterial = [this](const SceneMeshInstance& Instance) { return ResolveMaterialDescription(Instance); };
+		const auto ResolveBindings = [this](const SceneMeshInstance& Instance) -> std::expected<const BindingSet*, SceneRendererError>
 		{
 			auto Bindings = ResolveMaterialBinding(Instance);
-			if (!Bindings)
-				return std::unexpected(std::move(Bindings.error()));
+			if (!Bindings) return std::unexpected(std::move(Bindings.error()));
 			return (*Bindings)->BindingSet.get();
 		};
 
-		const AmbientOcclusionPass::RenderInputs Inputs{
-			*m_PreparedSnapshot, m_PipelineVertexLayout, m_BindingLayout,
+		const AmbientOcclusionPass::RenderInputs Inputs{ *m_PreparedSnapshot, m_PipelineVertexLayout, m_BindingLayout,
 			m_ProjectAssetCaches->Meshes, *m_BackgroundTriangleBuffer, ResolveMaterial, ResolveBindings };
 		return m_AmbientOcclusionPass->Render(Inputs, Width, Height);
 	}
@@ -1815,14 +1793,15 @@ namespace PulseForge
 
 	std::expected<SceneRenderOutputResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToOutput()
 	{
-		const auto [Width, Height] = m_Runtime.GetWindow().GetFramebufferSize();
+		const auto [Width, Height] = m_Runtime.GetOutputFramebufferSize();
 		if (Width == 0 || Height == 0)
 			return SceneRenderOutputResult{};
 		auto Hdr = RenderPreparedSceneToHdr(Width, Height);
 		if (!Hdr)
 			return std::unexpected(std::move(Hdr.error()));
-		if (auto Tonemapped = m_ToneMappingStage->Draw(*Hdr->ColorTexture, Hdr->TargetGeneration,
-			ColorTargetFormat::Swapchain, true, *m_BackgroundTriangleBuffer); !Tonemapped)
+		if (auto Tonemapped = m_ToneMappingStage->Draw(
+				*Hdr->ColorTexture, Hdr->TargetGeneration, ColorTargetFormat::Swapchain, true, *m_BackgroundTriangleBuffer);
+			!Tonemapped)
 			return std::unexpected(std::move(Tonemapped.error()));
 		return SceneRenderOutputResult{
 			Hdr->GeometryDrawCount,
@@ -1851,8 +1830,9 @@ namespace PulseForge
 		auto Hdr = RenderPreparedSceneToHdr(Description.Width, Description.Height);
 		if (!Hdr)
 			return std::unexpected(std::move(Hdr.error()));
-		if (auto Prepared = m_ToneMappingStage->Prepare(*Hdr->ColorTexture, Hdr->TargetGeneration,
-			Description.ColorFormat, Description.DepthMode != DepthAttachmentMode::None); !Prepared)
+		if (auto Prepared = m_ToneMappingStage->Prepare(
+				*Hdr->ColorTexture, Hdr->TargetGeneration, Description.ColorFormat, Description.DepthMode != DepthAttachmentMode::None);
+			!Prepared)
 			return std::unexpected(std::move(Prepared.error()));
 
 		RenderTargetClearValue Clear;
@@ -1861,8 +1841,8 @@ namespace PulseForge
 		if (const GraphicsResult Begin = m_Runtime.BeginRenderTarget(Target, Clear); !Begin)
 			return std::unexpected(MakeDrawError("Could not begin tone-mapped output target: " + Begin.error().Message));
 		RenderTargetFrameScope Scope(m_Runtime);
-		auto Draw = m_ToneMappingStage->Draw(*Hdr->ColorTexture, Hdr->TargetGeneration,
-			Description.ColorFormat, Description.DepthMode != DepthAttachmentMode::None, *m_BackgroundTriangleBuffer);
+		auto Draw = m_ToneMappingStage->Draw(*Hdr->ColorTexture, Hdr->TargetGeneration, Description.ColorFormat,
+			Description.DepthMode != DepthAttachmentMode::None, *m_BackgroundTriangleBuffer);
 		const GraphicsResult End = Scope.End();
 		if (!Draw)
 		{
@@ -1902,7 +1882,7 @@ namespace PulseForge
 	{
 		if (auto Shadows = RenderShadowCascades(); !Shadows)
 			return std::unexpected(std::move(Shadows.error()));
-		const auto [Width, Height] = m_Runtime.GetWindow().GetFramebufferSize();
+		const auto [Width, Height] = m_Runtime.GetOutputFramebufferSize();
 		if (auto AmbientOcclusion = RenderAmbientOcclusion(Width, Height); !AmbientOcclusion)
 			return std::unexpected(std::move(AmbientOcclusion.error()));
 		return RenderPreparedSceneForFormat(ColorTargetFormat::Swapchain, Width, Height);

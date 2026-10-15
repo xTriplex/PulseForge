@@ -30,18 +30,12 @@ namespace PulseForgeEditor
 		[[nodiscard]] bool HasData() const noexcept { return !m_Records.empty(); }
 		[[nodiscard]] bool CanPaste(const PulseForge::UUID& Project) const noexcept;
 
-		[[nodiscard]] static std::expected<EditorEntityClipboard, std::string> Capture(
-			PulseForge::UUID Project,
-			std::optional<PulseForge::AssetID> Scene,
-			std::span<const PulseForge::UUID> Roots,
-			std::span<const PulseForge::UUID> IncludedEntities,
-			std::string_view SerializedScene);
+		[[nodiscard]] static std::expected<EditorEntityClipboard, std::string> Capture(PulseForge::UUID Project,
+			std::optional<PulseForge::AssetID> Scene, std::span<const PulseForge::UUID> Roots,
+			std::span<const PulseForge::UUID> IncludedEntities, std::string_view SerializedScene);
 
-		[[nodiscard]] std::expected<PreparedPaste, std::string> PreparePaste(
-			PulseForge::UUID TargetProject,
-			std::optional<PulseForge::AssetID> TargetScene,
-			std::string_view SerializedTargetScene,
-			const AssetAvailable& IsAssetAvailable,
+		[[nodiscard]] std::expected<PreparedPaste, std::string> PreparePaste(PulseForge::UUID TargetProject,
+			std::optional<PulseForge::AssetID> TargetScene, std::string_view SerializedTargetScene, const AssetAvailable& IsAssetAvailable,
 			IdentifierGenerator GenerateIdentifier = {}) const;
 
 	private:
@@ -50,4 +44,4 @@ namespace PulseForgeEditor
 		std::vector<PulseForge::UUID> m_Roots;
 		std::vector<std::string> m_Records;
 	};
-}
+} // namespace PulseForgeEditor

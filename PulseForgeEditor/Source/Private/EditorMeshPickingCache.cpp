@@ -9,8 +9,7 @@
 namespace PulseForgeEditor
 {
 	std::expected<const EditorMeshPickingGeometry*, std::string> EditorMeshPickingCache::Get(
-		const PulseForge::Project& Project,
-		const PulseForge::AssetID& Asset)
+		const PulseForge::Project& Project, const PulseForge::AssetID& Asset)
 	{
 		const PulseForge::UUID& ProjectID = Project.GetDescription().ID;
 		if (!m_ProjectID || *m_ProjectID != ProjectID)
@@ -18,17 +17,15 @@ namespace PulseForgeEditor
 			Clear();
 			m_ProjectID = ProjectID;
 		}
-		if (const auto Existing = m_Geometries.find(Asset); Existing != m_Geometries.end())
-			return &Existing->second;
+		if (const auto Existing = m_Geometries.find(Asset); Existing != m_Geometries.end()) return &Existing->second;
 		if (const auto ExistingError = m_Failures.find(Asset); ExistingError != m_Failures.end())
 			return std::unexpected(ExistingError->second);
 
-		auto Imported = PulseForge::GltfMeshImporter::ImportStaticPrimitive(
-			Asset, Project.GetRootPath(), Project.GetAssetRegistry());
+		auto Imported = PulseForge::GltfMeshImporter::ImportStaticPrimitive(Asset, Project.GetRootPath(), Project.GetAssetRegistry());
 		if (!Imported)
 		{
-			const std::string Message = "Mesh " + Asset.ToString() + " could not be loaded for viewport picking: " +
-				Imported.error().Message;
+			const std::string Message =
+				"Mesh " + Asset.ToString() + " could not be loaded for viewport picking: " + Imported.error().Message;
 			m_Failures.emplace(Asset, Message);
 			return std::unexpected(Message);
 		}
@@ -40,8 +37,7 @@ namespace PulseForgeEditor
 			const glm::vec3 Position{ Vertex.Position[0], Vertex.Position[1], Vertex.Position[2] };
 			if (!Detail::IsFinite(Position))
 			{
-				const std::string Message = "Mesh " + Asset.ToString() +
-					" contains a non-finite vertex position for viewport picking";
+				const std::string Message = "Mesh " + Asset.ToString() + " contains a non-finite vertex position for viewport picking";
 				m_Failures.emplace(Asset, Message);
 				return std::unexpected(Message);
 			}
@@ -65,4 +61,4 @@ namespace PulseForgeEditor
 		m_Geometries.clear();
 		m_Failures.clear();
 	}
-}
+} // namespace PulseForgeEditor

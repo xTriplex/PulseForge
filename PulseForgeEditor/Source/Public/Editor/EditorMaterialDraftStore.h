@@ -50,4 +50,4 @@ namespace PulseForgeEditor
 		[[nodiscard]] static bool KeyMatchesProject(std::string_view Key, std::string_view Prefix) noexcept;
 		std::unordered_map<std::string, Entry> m_Entries;
 	};
-}
+} // namespace PulseForgeEditor

@@ -8,8 +8,7 @@ namespace
 		using namespace PulseForge;
 		const auto TextureAsset = UUID::Generate();
 		PF_CHECK(Tests, TextureAsset.has_value());
-		if (!TextureAsset)
-			return;
+		if (!TextureAsset) return;
 
 		MaterialAssetDesc Description;
 		Description.BaseColorTexture = *TextureAsset;
@@ -18,28 +17,28 @@ namespace
 		Description.RoughnessFactor = 0.25f;
 		const auto Serialized = MaterialAssetSerializer::Serialize(Description);
 		PF_CHECK(Tests, Serialized.has_value());
-		if (!Serialized)
-			return;
+		if (!Serialized) return;
 		const auto Deserialized = MaterialAssetSerializer::Deserialize(*Serialized);
 		PF_CHECK(Tests, Deserialized && Deserialized->BaseColorTexture == Description.BaseColorTexture);
 		PF_CHECK(Tests, Deserialized && glm::all(glm::equal(Deserialized->BaseColorFactor, Description.BaseColorFactor)));
 		PF_CHECK(Tests, Deserialized && Deserialized->MetallicFactor == Description.MetallicFactor &&
-			Deserialized->RoughnessFactor == Description.RoughnessFactor);
+							Deserialized->RoughnessFactor == Description.RoughnessFactor);
 		PF_CHECK(Tests, Serialized && Serialized->find("\"version\": 4") != std::string::npos);
 		const std::string Version1Document = "{\"format\":\"PulseForgeMaterial\",\"version\":1,\"baseColorTexture\":\"" +
-			TextureAsset->ToString() + "\",\"baseColorFactor\":[1,1,1,1]}";
+											 TextureAsset->ToString() + "\",\"baseColorFactor\":[1,1,1,1]}";
 		const auto Version1Material = MaterialAssetSerializer::Deserialize(Version1Document);
-		PF_CHECK(Tests, Version1Material && Version1Material->MetallicFactor == 0.0f &&
-			Version1Material->RoughnessFactor == 1.0f);
+		PF_CHECK(Tests, Version1Material && Version1Material->MetallicFactor == 0.0f && Version1Material->RoughnessFactor == 1.0f);
 		const std::string Version2Document = "{\"format\":\"PulseForgeMaterial\",\"version\":2,\"baseColorTexture\":\"" +
-			TextureAsset->ToString() + "\",\"baseColorFactor\":[1,1,1,1],\"metallicFactor\":0.4,\"roughnessFactor\":0.6}";
+											 TextureAsset->ToString() +
+											 "\",\"baseColorFactor\":[1,1,1,1],\"metallicFactor\":0.4,\"roughnessFactor\":0.6}";
 		const auto Version2Material = MaterialAssetSerializer::Deserialize(Version2Document);
-		PF_CHECK(Tests, Version2Material && Version2Material->MetallicFactor == 0.4f &&
-			Version2Material->RoughnessFactor == 0.6f && Version2Material->NormalTexture.IsNil());
-		const std::string Version3Document = "{\"format\":\"PulseForgeMaterial\",\"version\":3,\"baseColorFactor\":[1,1,1,1],\"baseColorTexture\":null,\"metallicFactor\":0.4,\"roughnessFactor\":0.6}";
+		PF_CHECK(Tests, Version2Material && Version2Material->MetallicFactor == 0.4f && Version2Material->RoughnessFactor == 0.6f &&
+							Version2Material->NormalTexture.IsNil());
+		const std::string Version3Document = "{\"format\":\"PulseForgeMaterial\",\"version\":3,\"baseColorFactor\":[1,1,1,1],"
+											 "\"baseColorTexture\":null,\"metallicFactor\":0.4,\"roughnessFactor\":0.6}";
 		const auto Version3Material = MaterialAssetSerializer::Deserialize(Version3Document);
 		PF_CHECK(Tests, Version3Material && Version3Material->AlphaMode == MaterialAlphaMode::Opaque &&
-			Version3Material->AlphaCutoff == 0.5f && !Version3Material->DoubleSided);
+							Version3Material->AlphaCutoff == 0.5f && !Version3Material->DoubleSided);
 		MaterialAssetDesc TexturedDescription = Description;
 		TexturedDescription.BaseColorTexture = {};
 		TexturedDescription.MetallicRoughnessTexture = *TextureAsset;
@@ -54,19 +53,18 @@ namespace
 		TexturedDescription.DoubleSided = true;
 		const auto TexturedSerialized = MaterialAssetSerializer::Serialize(TexturedDescription);
 		PF_CHECK(Tests, TexturedSerialized.has_value());
-		if (!TexturedSerialized)
-			return;
+		if (!TexturedSerialized) return;
 		const auto TexturedDeserialized = MaterialAssetSerializer::Deserialize(*TexturedSerialized);
 		PF_CHECK(Tests, TexturedDeserialized && TexturedDeserialized->BaseColorTexture.IsNil() &&
-			TexturedDeserialized->MetallicRoughnessTexture == TexturedDescription.MetallicRoughnessTexture &&
-			TexturedDeserialized->NormalTexture == TexturedDescription.NormalTexture &&
-			TexturedDeserialized->OcclusionTexture == TexturedDescription.OcclusionTexture &&
-			TexturedDeserialized->EmissiveTexture == TexturedDescription.EmissiveTexture);
+							TexturedDeserialized->MetallicRoughnessTexture == TexturedDescription.MetallicRoughnessTexture &&
+							TexturedDeserialized->NormalTexture == TexturedDescription.NormalTexture &&
+							TexturedDeserialized->OcclusionTexture == TexturedDescription.OcclusionTexture &&
+							TexturedDeserialized->EmissiveTexture == TexturedDescription.EmissiveTexture);
 		PF_CHECK(Tests, TexturedDeserialized && TexturedDeserialized->NormalScale == 0.75f &&
-			TexturedDeserialized->OcclusionStrength == 0.35f &&
-			glm::all(glm::equal(TexturedDeserialized->EmissiveFactor, TexturedDescription.EmissiveFactor)));
+							TexturedDeserialized->OcclusionStrength == 0.35f &&
+							glm::all(glm::equal(TexturedDeserialized->EmissiveFactor, TexturedDescription.EmissiveFactor)));
 		PF_CHECK(Tests, TexturedDeserialized && TexturedDeserialized->AlphaMode == MaterialAlphaMode::Mask &&
-			TexturedDeserialized->AlphaCutoff == 0.42f && TexturedDeserialized->DoubleSided);
+							TexturedDeserialized->AlphaCutoff == 0.42f && TexturedDeserialized->DoubleSided);
 		MaterialAssetDesc BlendDescription = Description;
 		BlendDescription.AlphaMode = MaterialAlphaMode::Blend;
 		const auto BlendSerialized = MaterialAssetSerializer::Serialize(BlendDescription);
@@ -77,18 +75,18 @@ namespace
 			PF_CHECK(Tests, BlendDeserialized && BlendDeserialized->AlphaMode == MaterialAlphaMode::Blend);
 		}
 		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize(
-			"{\"format\":\"PulseForgeMaterial\",\"version\":4,\"baseColorFactor\":[1,1,1,1],\"alphaMode\":\"HASH\"}"));
+							"{\"format\":\"PulseForgeMaterial\",\"version\":4,\"baseColorFactor\":[1,1,1,1],\"alphaMode\":\"HASH\"}"));
 		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize(
-			"{\"format\":\"PulseForgeMaterial\",\"version\":3,\"baseColorFactor\":[1,1,1,1],\"normalTexture\":7}"));
+							"{\"format\":\"PulseForgeMaterial\",\"version\":3,\"baseColorFactor\":[1,1,1,1],\"normalTexture\":7}"));
 		std::string InvalidMetallicDocument = *Serialized;
 		const size_t MetallicField = InvalidMetallicDocument.find("\"metallicFactor\":");
-		const size_t MetallicValue = MetallicField == std::string::npos ? MetallicField :
-			InvalidMetallicDocument.find_first_not_of(" :", MetallicField + std::string("\"metallicFactor\"").size());
-		const size_t MetallicEnd = MetallicValue == std::string::npos ? MetallicValue :
-			InvalidMetallicDocument.find_first_of(",\n", MetallicValue);
+		const size_t MetallicValue = MetallicField == std::string::npos ? MetallicField
+																		: InvalidMetallicDocument.find_first_not_of(" :",
+																			  MetallicField + std::string("\"metallicFactor\"").size());
+		const size_t MetallicEnd =
+			MetallicValue == std::string::npos ? MetallicValue : InvalidMetallicDocument.find_first_of(",\n", MetallicValue);
 		PF_CHECK(Tests, MetallicValue != std::string::npos && MetallicEnd != std::string::npos);
-		if (MetallicEnd != std::string::npos)
-			InvalidMetallicDocument.replace(MetallicValue, MetallicEnd - MetallicValue, "-0.1");
+		if (MetallicEnd != std::string::npos) InvalidMetallicDocument.replace(MetallicValue, MetallicEnd - MetallicValue, "-0.1");
 		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize(InvalidMetallicDocument));
 
 		MaterialAssetDesc MissingTexture = Description;
@@ -136,12 +134,10 @@ namespace
 		std::error_code FileError;
 		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
 		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
+		if (FileError) return;
 		const auto ProjectIdentifier = UUID::Generate();
 		PF_CHECK(Tests, ProjectIdentifier.has_value());
-		if (!ProjectIdentifier)
-			return;
+		if (!ProjectIdentifier) return;
 
 		const std::filesystem::path ProjectRoot = TemporaryDirectory / ("PulseForgeMaterials-" + ProjectIdentifier->ToString());
 		struct ProjectCleanup
@@ -159,8 +155,7 @@ namespace
 		PF_CHECK(Tests, !FileError);
 		std::filesystem::create_directories(TexturesDirectory, FileError);
 		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
+		if (FileError) return;
 
 		const std::filesystem::path TexturePath = TexturesDirectory / "base-color.png";
 		{
@@ -170,21 +165,15 @@ namespace
 		}
 		const auto TextureMetadata = AssetMetadataSerializer::CreateForNewAsset(TexturePath);
 		PF_CHECK(Tests, TextureMetadata.has_value());
-		if (!TextureMetadata)
-			return;
+		if (!TextureMetadata) return;
 		Description.BaseColorTexture = TextureMetadata->ID;
 
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
-		const auto Created = MaterialAssetService::Create(
-			Registry,
-			ProjectRoot,
-			"Assets/Materials/validation.material",
-			Description);
+		const auto Created = MaterialAssetService::Create(Registry, ProjectRoot, "Assets/Materials/validation.material", Description);
 		PF_CHECK(Tests, Created.has_value());
 		PF_CHECK(Tests, Created && Created->ID != TextureMetadata->ID);
-		if (!Created)
-			return;
+		if (!Created) return;
 
 		const std::filesystem::path MaterialPath = ProjectRoot / "Assets" / "Materials" / "validation.material";
 		const auto Metadata = AssetMetadataSerializer::LoadFromFile(AssetMetadataSerializer::GetSidecarPath(MaterialPath));
@@ -205,8 +194,7 @@ namespace
 		MaterialAssetDesc Updated = Description;
 		Updated.BaseColorFactor = { 0.3f, 0.5f, 0.7f, 1.0f };
 		PF_CHECK(Tests, MaterialAssetService::Save(Created->ID, ProjectRoot, Registry, Updated).has_value());
-		const auto PreservedMetadata = AssetMetadataSerializer::LoadFromFile(
-			AssetMetadataSerializer::GetSidecarPath(MaterialPath));
+		const auto PreservedMetadata = AssetMetadataSerializer::LoadFromFile(AssetMetadataSerializer::GetSidecarPath(MaterialPath));
 		PF_CHECK(Tests, PreservedMetadata && PreservedMetadata->ID == Created->ID);
 		PF_CHECK(Tests, Cached && glm::all(glm::equal(Cached->get().BaseColorFactor, Description.BaseColorFactor)));
 		Cache.Clear();
@@ -218,17 +206,9 @@ namespace
 		const auto LoadedAfterMove = MaterialAssetService::Load(Created->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, LoadedAfterMove && glm::all(glm::equal(LoadedAfterMove->BaseColorFactor, Updated.BaseColorFactor)));
 
-		const auto InvalidExtension = MaterialAssetService::Create(
-			Registry,
-			ProjectRoot,
-			"Assets/Materials/invalid.json",
-			Description);
+		const auto InvalidExtension = MaterialAssetService::Create(Registry, ProjectRoot, "Assets/Materials/invalid.json", Description);
 		PF_CHECK(Tests, !InvalidExtension && InvalidExtension.error().Code == MaterialAssetErrorCode::UnsupportedAssetType);
-		const auto Duplicate = MaterialAssetService::Create(
-			Registry,
-			ProjectRoot,
-			"Assets/Materials/renamed.material",
-			Description);
+		const auto Duplicate = MaterialAssetService::Create(Registry, ProjectRoot, "Assets/Materials/renamed.material", Description);
 		PF_CHECK(Tests, !Duplicate && Duplicate.error().Code == MaterialAssetErrorCode::AssetOperationFailed);
 
 		const std::filesystem::path WrongTypePath = MaterialsDirectory / "not-material.txt";
@@ -263,15 +243,13 @@ namespace
 		using namespace PulseForge;
 		const auto Identifier = UUID::Generate();
 		PF_CHECK(Tests, Identifier.has_value());
-		if (!Identifier)
-			return;
+		if (!Identifier) return;
 
 		std::error_code Error;
-		const std::filesystem::path Root = std::filesystem::temp_directory_path(Error) /
-			("PulseForgeMaterialDraft-" + Identifier->ToString());
+		const std::filesystem::path Root =
+			std::filesystem::temp_directory_path(Error) / ("PulseForgeMaterialDraft-" + Identifier->ToString());
 		PF_CHECK(Tests, !Error);
-		if (Error)
-			return;
+		if (Error) return;
 		struct Cleanup final
 		{
 			std::filesystem::path Path;
@@ -284,37 +262,73 @@ namespace
 
 		auto ProjectResult = Project::Create(Root / "Drafts.pfproj", "Material Draft Test");
 		PF_CHECK(Tests, ProjectResult.has_value());
-		if (!ProjectResult)
-			return;
+		if (!ProjectResult) return;
 		Project& ProjectValue = *ProjectResult;
 		std::filesystem::create_directories(Root / "Assets" / "Materials", Error);
 		PF_CHECK(Tests, !Error);
-		if (Error)
-			return;
+		if (Error) return;
 		MaterialAssetDesc Initial;
 		Initial.BaseColorFactor = { 0.2f, 0.3f, 0.4f, 1.0f };
 		auto Material = MaterialAssetService::Create(
 			ProjectValue.GetAssetRegistry(), ProjectValue.GetRootPath(), "Assets/Materials/draft.material", Initial);
 		PF_CHECK(Tests, Material.has_value());
-		if (!Material)
-			return;
+		if (!Material) return;
 
 		PulseForgeEditor::EditorDocumentManager Documents;
-		const PulseForgeEditor::EditorDocumentIdentity Identity{
-			ProjectValue.GetDescription().ID, Material->ID, PulseForgeEditor::EditorDocumentKind::Material
-		};
+		const PulseForgeEditor::EditorDocumentIdentity Identity{ ProjectValue.GetDescription().ID, Material->ID,
+			PulseForgeEditor::EditorDocumentKind::Material };
 		auto Opened = Documents.Open(
-			Identity, Material->ProjectRelativePath, "draft.material",
-			PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip);
+			Identity, Material->ProjectRelativePath, "draft.material", PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip);
 		PF_CHECK(Tests, Opened.has_value());
-		if (!Opened)
-			return;
+		if (!Opened) return;
 
 		PulseForgeEditor::EditorMaterialDraftController Drafts;
 		auto Loaded = Drafts.LoadDraft(ProjectValue, Material->ID);
 		PF_CHECK(Tests, Loaded.has_value());
-		if (!Loaded)
-			return;
+		if (!Loaded) return;
+		const auto UnchangedSave = Drafts.Save(ProjectValue, Material->ID, Documents);
+		PF_CHECK(Tests, UnchangedSave.has_value());
+		PF_CHECK(Tests, Drafts.FindDraft(ProjectValue, Material->ID) != nullptr);
+		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, Material->ID));
+
+		auto UnknownAsset = UUID::Generate();
+		PF_CHECK(Tests, UnknownAsset.has_value());
+		if (UnknownAsset) PF_CHECK(Tests, !Drafts.Save(ProjectValue, *UnknownAsset, Documents));
+
+		const std::filesystem::path WrongTypePath = Root / "Assets" / "Materials" / "not-a-material.txt";
+		{
+			std::ofstream Output(WrongTypePath, std::ios::binary | std::ios::trunc);
+			Output << "not a material";
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto WrongTypeRecord = AssetMetadataSerializer::CreateForNewAsset(WrongTypePath);
+		PF_CHECK(Tests, WrongTypeRecord.has_value());
+		PF_CHECK(Tests, ProjectValue.GetAssetRegistry().Rebuild(Root).has_value());
+		if (WrongTypeRecord) PF_CHECK(Tests, !Drafts.Save(ProjectValue, WrongTypeRecord->ID, Documents));
+
+		auto RemovedAsset = MaterialAssetService::Create(
+			ProjectValue.GetAssetRegistry(), ProjectValue.GetRootPath(), "Assets/Materials/removed.material", Initial);
+		PF_CHECK(Tests, RemovedAsset.has_value());
+		if (!RemovedAsset) return;
+		auto RemovedDraft = Drafts.LoadDraft(ProjectValue, RemovedAsset->ID);
+		PF_CHECK(Tests, RemovedDraft.has_value());
+		const PulseForgeEditor::EditorDocumentIdentity RemovedIdentity{ ProjectValue.GetDescription().ID, RemovedAsset->ID,
+			PulseForgeEditor::EditorDocumentKind::Material };
+		PF_CHECK(Tests, Documents
+							.Open(RemovedIdentity, RemovedAsset->ProjectRelativePath, "removed.material",
+								PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip)
+							.has_value());
+		const std::filesystem::path RemovedPath = Root / RemovedAsset->ProjectRelativePath;
+		std::filesystem::remove(RemovedPath, Error);
+		PF_CHECK(Tests, !Error);
+		const std::filesystem::path RemovedSidecar = AssetMetadataSerializer::GetSidecarPath(RemovedPath);
+		std::filesystem::remove(RemovedSidecar, Error);
+		PF_CHECK(Tests, !Error);
+		PF_CHECK(Tests, ProjectValue.GetAssetRegistry().Rebuild(Root).has_value());
+		PF_CHECK(Tests, !Drafts.Save(ProjectValue, RemovedAsset->ID, Documents));
+		PF_CHECK(Tests, Drafts.FindDraft(ProjectValue, RemovedAsset->ID) != nullptr);
+		PF_CHECK(Tests, Documents.Find(RemovedIdentity) != nullptr);
+
 		const MaterialAssetDesc EditStart = Loaded->get();
 		PF_CHECK(Tests, Drafts.BeginEdit(ProjectValue, Material->ID, EditStart));
 		Loaded->get().BaseColorFactor.r = 0.85f;
@@ -374,14 +388,12 @@ namespace
 		using namespace PulseForge;
 		const auto ProjectIdentifier = UUID::Generate();
 		PF_CHECK(Tests, ProjectIdentifier.has_value());
-		if (!ProjectIdentifier)
-			return;
+		if (!ProjectIdentifier) return;
 
 		std::error_code FileError;
 		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
 		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
+		if (FileError) return;
 
 		const std::filesystem::path Root = TemporaryDirectory / ("PulseForgeProject-" + ProjectIdentifier->ToString());
 		const std::filesystem::path RelocatedRoot = Root.parent_path() / (Root.filename().string() + "-relocated");
@@ -401,8 +413,7 @@ namespace
 		const std::filesystem::path ProjectFile = Root / "Example.pfproj";
 		auto Created = Project::Create(ProjectFile, "Example Project");
 		PF_CHECK(Tests, Created.has_value());
-		if (!Created)
-			return;
+		if (!Created) return;
 		PF_CHECK(Tests, Created->GetDescription().Name == "Example Project");
 		PF_CHECK(Tests, !Created->GetDescription().StartScene.has_value());
 		PF_CHECK(Tests, std::filesystem::is_directory(Root / "Assets"));
@@ -421,8 +432,7 @@ namespace
 		}
 		const auto SceneMetadata = AssetMetadataSerializer::CreateForNewAsset(ScenePath);
 		PF_CHECK(Tests, SceneMetadata.has_value());
-		if (!SceneMetadata)
-			return;
+		if (!SceneMetadata) return;
 		PF_CHECK(Tests, Created->GetAssetRegistry().Rebuild(Root).has_value());
 		PF_CHECK(Tests, Created->SetStartScene(SceneMetadata->ID).has_value());
 		PF_CHECK(Tests, Created->GetDescription().StartScene == SceneMetadata->ID);
@@ -444,8 +454,7 @@ namespace
 
 		Created = Project::Open(ProjectFile);
 		PF_CHECK(Tests, Created && Created->GetDescription().StartScene == SceneMetadata->ID);
-		if (!Created)
-			return;
+		if (!Created) return;
 		std::filesystem::rename(Root, RelocatedRoot, FileError);
 		PF_CHECK(Tests, !FileError);
 		const auto RelocatedProject = Project::Open(RelocatedRoot / "Example.pfproj");
@@ -453,7 +462,7 @@ namespace
 		PF_CHECK(Tests, RelocatedProject && RelocatedProject->GetAssetRegistry().Find(SceneMetadata->ID).has_value());
 		PF_CHECK(Tests, RelocatedProject && RelocatedProject->GetRootPath() == RelocatedRoot);
 	}
-}
+} // namespace
 
 void RunEditorMaterialProjectTests(TestRunner& Tests)
 {

@@ -14,10 +14,7 @@ namespace
 	class TrackingLayer final : public PulseForge::Layer
 	{
 	public:
-		explicit TrackingLayer(LayerLifecycle& Lifecycle)
-			: Layer("TrackingLayer"), m_Lifecycle(Lifecycle)
-		{
-		}
+		explicit TrackingLayer(LayerLifecycle& Lifecycle) : Layer("TrackingLayer"), m_Lifecycle(Lifecycle) {}
 
 		~TrackingLayer() override { ++m_Lifecycle.DestroyCount; }
 		void OnAttach() override { ++m_Lifecycle.AttachCount; }
@@ -57,9 +54,9 @@ namespace
 		class OrderedLayer final : public PulseForge::Layer
 		{
 		public:
-			OrderedLayer(int Id, std::vector<int>& Order)
-				: Layer("OrderedLayer"), m_Id(Id), m_Order(Order) {}
+			OrderedLayer(int Id, std::vector<int>& Order) : Layer("OrderedLayer"), m_Id(Id), m_Order(Order) {}
 			void OnDetach() override { m_Order.push_back(m_Id); }
+
 		private:
 			int m_Id;
 			std::vector<int>& m_Order;
@@ -82,9 +79,9 @@ namespace
 		class VisitingLayer final : public PulseForge::Layer
 		{
 		public:
-			VisitingLayer(int Id, std::vector<int>& Order)
-				: Layer("VisitingLayer"), m_Id(Id), m_Order(Order) {}
+			VisitingLayer(int Id, std::vector<int>& Order) : Layer("VisitingLayer"), m_Id(Id), m_Order(Order) {}
 			void OnUpdate(PulseForge::Timestep) override { m_Order.push_back(m_Id); }
+
 		private:
 			int m_Id;
 			std::vector<int>& m_Order;
@@ -107,7 +104,11 @@ namespace
 		PulseForge::EventDispatcher Dispatcher(KeyEvent);
 		int CallbackCount = 0;
 		const bool WasDispatched = Dispatcher.Dispatch<PulseForge::KeyPressedEvent>(
-			[&CallbackCount](PulseForge::KeyPressedEvent&) { ++CallbackCount; return true; });
+			[&CallbackCount](PulseForge::KeyPressedEvent&)
+			{
+				++CallbackCount;
+				return true;
+			});
 		PF_CHECK(Tests, WasDispatched);
 		PF_CHECK(Tests, CallbackCount == 1);
 		PF_CHECK(Tests, KeyEvent.bHandled);
@@ -115,15 +116,18 @@ namespace
 		PulseForge::MouseMovedEvent MouseEvent(3.0f, 4.0f);
 		PulseForge::EventDispatcher MismatchedDispatcher(MouseEvent);
 		const bool MismatchedDispatch = MismatchedDispatcher.Dispatch<PulseForge::KeyPressedEvent>(
-			[&CallbackCount](PulseForge::KeyPressedEvent&) { ++CallbackCount; return true; });
+			[&CallbackCount](PulseForge::KeyPressedEvent&)
+			{
+				++CallbackCount;
+				return true;
+			});
 		PF_CHECK(Tests, !MismatchedDispatch);
 		PF_CHECK(Tests, CallbackCount == 1);
 		PF_CHECK(Tests, !MouseEvent.bHandled);
 
 		KeyEvent.bHandled = true;
 		PulseForge::EventDispatcher AlreadyHandledDispatcher(KeyEvent);
-		AlreadyHandledDispatcher.Dispatch<PulseForge::KeyPressedEvent>(
-			[](PulseForge::KeyPressedEvent&) { return false; });
+		AlreadyHandledDispatcher.Dispatch<PulseForge::KeyPressedEvent>([](PulseForge::KeyPressedEvent&) { return false; });
 		PF_CHECK(Tests, KeyEvent.bHandled);
 	}
 
@@ -133,10 +137,13 @@ namespace
 		{
 		public:
 			FailingLayer(int& DetachCount, int& DestroyCount)
-				: Layer("FailingLayer"), m_DetachCount(DetachCount), m_DestroyCount(DestroyCount) {}
+				: Layer("FailingLayer"), m_DetachCount(DetachCount), m_DestroyCount(DestroyCount)
+			{
+			}
 			~FailingLayer() override { ++m_DestroyCount; }
 			void OnAttach() override { throw std::runtime_error("expected attach failure"); }
 			void OnDetach() override { ++m_DetachCount; }
+
 		private:
 			int& m_DetachCount;
 			int& m_DestroyCount;
@@ -166,13 +173,16 @@ namespace
 		{
 		public:
 			ThrowingDetachLayer(std::string Name, int& DetachCount, int& DestroyCount)
-				: Layer(Name), m_DetachCount(DetachCount), m_DestroyCount(DestroyCount) {}
+				: Layer(Name), m_DetachCount(DetachCount), m_DestroyCount(DestroyCount)
+			{
+			}
 			~ThrowingDetachLayer() override { ++m_DestroyCount; }
 			void OnDetach() override
 			{
 				++m_DetachCount;
 				throw std::runtime_error("expected pop detach failure");
 			}
+
 		private:
 			int& m_DetachCount;
 			int& m_DestroyCount;
@@ -184,10 +194,10 @@ namespace
 		int OverlayDestroyCount = 0;
 		{
 			PulseForge::LayerStack Stack;
-			PulseForge::Layer& Layer = Stack.PushLayer(std::make_unique<ThrowingDetachLayer>(
-				"ThrowingLayer", LayerDetachCount, LayerDestroyCount));
-			PulseForge::Layer& Overlay = Stack.PushOverlay(std::make_unique<ThrowingDetachLayer>(
-				"ThrowingOverlay", OverlayDetachCount, OverlayDestroyCount));
+			PulseForge::Layer& Layer =
+				Stack.PushLayer(std::make_unique<ThrowingDetachLayer>("ThrowingLayer", LayerDetachCount, LayerDestroyCount));
+			PulseForge::Layer& Overlay =
+				Stack.PushOverlay(std::make_unique<ThrowingDetachLayer>("ThrowingOverlay", OverlayDetachCount, OverlayDestroyCount));
 
 			PF_CHECK(Tests, Stack.PopLayer(Layer));
 			PF_CHECK(Tests, LayerDetachCount == 1);
@@ -209,15 +219,16 @@ namespace
 		{
 		public:
 			DetachingLayer(int& DetachCount, int& DestroyCount, bool ShouldThrow)
-				: Layer("DetachingLayer"), m_DetachCount(DetachCount),
-				  m_DestroyCount(DestroyCount), m_ShouldThrow(ShouldThrow) {}
+				: Layer("DetachingLayer"), m_DetachCount(DetachCount), m_DestroyCount(DestroyCount), m_ShouldThrow(ShouldThrow)
+			{
+			}
 			~DetachingLayer() override { ++m_DestroyCount; }
 			void OnDetach() override
 			{
 				++m_DetachCount;
-				if (m_ShouldThrow)
-					throw std::runtime_error("expected detach failure");
+				if (m_ShouldThrow) throw std::runtime_error("expected detach failure");
 			}
+
 		private:
 			int& m_DetachCount;
 			int& m_DestroyCount;
@@ -348,10 +359,8 @@ namespace
 		using namespace PulseForge;
 		VertexLayoutDesc Layout;
 		Layout.Stride = sizeof(float) * 6;
-		Layout.Attributes = {
-			{ VertexSemantic::Position, VertexFormat::Float3, 0 },
-			{ VertexSemantic::Color, VertexFormat::Float3, sizeof(float) * 3 }
-		};
+		Layout.Attributes = { { VertexSemantic::Position, VertexFormat::Float3, 0 },
+			{ VertexSemantic::Color, VertexFormat::Float3, sizeof(float) * 3 } };
 		PF_CHECK(Tests, ValidateVertexLayout(Layout).has_value());
 		auto NormalLayout = Layout;
 		NormalLayout.Stride = sizeof(float) * 9;
@@ -386,11 +395,7 @@ namespace
 	void TestMeshDescriptionAndDrawValidation(TestRunner& Tests)
 	{
 		using namespace PulseForge;
-		const std::array<float, 9> Vertices = {
-			0.0f, 0.5f, 0.0f,
-			0.5f, -0.5f, 0.0f,
-			-0.5f, -0.5f, 0.0f
-		};
+		const std::array<float, 9> Vertices = { 0.0f, 0.5f, 0.0f, 0.5f, -0.5f, 0.0f, -0.5f, -0.5f, 0.0f };
 		const std::array<uint32_t, 3> Indices = { 0, 1, 2 };
 		MeshDesc Description;
 		Description.VertexLayout.Stride = sizeof(float) * 3;
@@ -429,40 +434,23 @@ namespace
 		GraphicsPipelineDesc Pipeline = MakeTestPipelineDescription();
 		Pipeline.VertexLayout = Description.VertexLayout;
 		const DrawIndexedArguments IndexedTriangle{ 3, 1, 0, 0 };
-		PF_CHECK(Tests, ValidateIndexedDrawArguments(
-			IndexedTriangle,
-			Pipeline,
-			Description.VertexLayout,
-			ValidatedIndexCount).has_value());
+		PF_CHECK(Tests, ValidateIndexedDrawArguments(IndexedTriangle, Pipeline, Description.VertexLayout, ValidatedIndexCount).has_value());
 
 		auto IndexRangePastEnd = IndexedTriangle;
 		IndexRangePastEnd.FirstIndex = 2;
-		PF_CHECK(Tests, !ValidateIndexedDrawArguments(
-			IndexRangePastEnd,
-			Pipeline,
-			Description.VertexLayout,
-			ValidatedIndexCount).has_value());
-		PF_CHECK(Tests, !ValidateIndexedDrawArguments(
-			IndexedTriangle,
-			Pipeline,
-			Description.VertexLayout,
-			0).has_value());
+		PF_CHECK(
+			Tests, !ValidateIndexedDrawArguments(IndexRangePastEnd, Pipeline, Description.VertexLayout, ValidatedIndexCount).has_value());
+		PF_CHECK(Tests, !ValidateIndexedDrawArguments(IndexedTriangle, Pipeline, Description.VertexLayout, 0).has_value());
 
 		auto ZeroIndexedInstances = IndexedTriangle;
 		ZeroIndexedInstances.InstanceCount = 0;
-		PF_CHECK(Tests, !ValidateIndexedDrawArguments(
-			ZeroIndexedInstances,
-			Pipeline,
-			Description.VertexLayout,
-			ValidatedIndexCount).has_value());
+		PF_CHECK(Tests,
+			!ValidateIndexedDrawArguments(ZeroIndexedInstances, Pipeline, Description.VertexLayout, ValidatedIndexCount).has_value());
 
 		auto MismatchedPipeline = Pipeline;
 		MismatchedPipeline.VertexLayout.Attributes[0].Offset = sizeof(float);
-		PF_CHECK(Tests, !ValidateIndexedDrawArguments(
-			IndexedTriangle,
-			MismatchedPipeline,
-			Description.VertexLayout,
-			ValidatedIndexCount).has_value());
+		PF_CHECK(Tests,
+			!ValidateIndexedDrawArguments(IndexedTriangle, MismatchedPipeline, Description.VertexLayout, ValidatedIndexCount).has_value());
 
 		const BufferDesc VertexBuffer{ Description.VertexData.size(), BufferUsage::Vertex, "Test mesh vertices" };
 		const DrawArguments Triangle{ 3, 1, 0, 0 };
@@ -470,27 +458,25 @@ namespace
 
 		VertexLayoutDesc FullMeshLayout;
 		FullMeshLayout.Stride = sizeof(float) * 6;
-		FullMeshLayout.Attributes = {
-			{ VertexSemantic::Position, VertexFormat::Float3, 0 },
-			{ VertexSemantic::Color, VertexFormat::Float3, sizeof(float) * 3 }
-		};
+		FullMeshLayout.Attributes = { { VertexSemantic::Position, VertexFormat::Float3, 0 },
+			{ VertexSemantic::Color, VertexFormat::Float3, sizeof(float) * 3 } };
 		VertexLayoutDesc PositionOnlyPipelineLayout;
 		PositionOnlyPipelineLayout.Stride = FullMeshLayout.Stride;
 		PositionOnlyPipelineLayout.Attributes = { { VertexSemantic::Position, VertexFormat::Float3, 0 } };
 		auto PositionOnlyPipeline = Pipeline;
 		PositionOnlyPipeline.VertexLayout = PositionOnlyPipelineLayout;
-		PF_CHECK(Tests, ValidateIndexedDrawArguments(
-			IndexedTriangle, PositionOnlyPipeline, FullMeshLayout, ValidatedIndexCount).has_value());
+		PF_CHECK(
+			Tests, ValidateIndexedDrawArguments(IndexedTriangle, PositionOnlyPipeline, FullMeshLayout, ValidatedIndexCount).has_value());
 		PositionOnlyPipeline.VertexLayout.Attributes[0].Format = VertexFormat::Float2;
-		PF_CHECK(Tests, !ValidateIndexedDrawArguments(
-			IndexedTriangle, PositionOnlyPipeline, FullMeshLayout, ValidatedIndexCount).has_value());
+		PF_CHECK(
+			Tests, !ValidateIndexedDrawArguments(IndexedTriangle, PositionOnlyPipeline, FullMeshLayout, ValidatedIndexCount).has_value());
 
 		auto NonIndexedDescription = Description;
 		NonIndexedDescription.Indices = {};
 		const auto NonIndexedMesh = ValidateMeshDescription(NonIndexedDescription);
 		PF_CHECK(Tests, NonIndexedMesh && NonIndexedMesh->VertexCount == 3 && NonIndexedMesh->IndexCount == 0);
 	}
-}
+} // namespace
 
 void RunCoreTests(TestRunner& Tests)
 {

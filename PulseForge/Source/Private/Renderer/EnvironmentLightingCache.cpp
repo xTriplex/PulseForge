@@ -3,7 +3,6 @@
 
 #include "Assets/AssetPathResolver.h"
 #include "Assets/ImageAssetImporter.h"
-#include "Core/Application.h"
 #include "Core/ScopedProfileTimer.h"
 
 #include <algorithm>
@@ -328,12 +327,8 @@ namespace PulseForge
 				PF_WARN("Could not persist environment derived-data cache for {}", Asset.ToString());
 		}
 
-		std::expected<TextureHandle, TextureError> CreateCubeTexture(
-			Application& Runtime,
-			const FloatCubeLevel& Level,
-			uint32_t MipLevels,
-			std::span<const FloatCubeLevel> Mips,
-			std::string DebugName)
+		std::expected<TextureHandle, TextureError> CreateCubeTexture(RenderDevice& Runtime, const FloatCubeLevel& Level, uint32_t MipLevels,
+			std::span<const FloatCubeLevel> Mips, std::string DebugName)
 		{
 			TextureDesc Description;
 			Description.Width = Mips.empty() ? Level.Size : Mips.front().Size;
@@ -364,12 +359,8 @@ namespace PulseForge
 	}
 
 	EnvironmentLightingCache::EnvironmentLightingCache(
-		Application& Runtime,
-		std::filesystem::path ProjectRoot,
-		const AssetRegistry& Registry)
-		: m_Runtime(Runtime),
-		  m_ProjectRoot(std::move(ProjectRoot)),
-		  m_Registry(Registry),
+		RenderDevice& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry)
+		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_Registry(Registry),
 		  m_Worker([this](std::stop_token StopToken) { WorkerMain(StopToken); })
 	{
 	}

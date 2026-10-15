@@ -31,15 +31,13 @@ namespace PulseForgeEditor
 
 	void EditorViewportCamera::Focus(const glm::vec3& Pivot, float Radius, float AspectRatio) noexcept
 	{
-		if (!Detail::IsFinite(Pivot) || !std::isfinite(Radius) || Radius < 0.0f ||
-			!std::isfinite(AspectRatio) || AspectRatio <= 0.0f)
+		if (!Detail::IsFinite(Pivot) || !std::isfinite(Radius) || Radius < 0.0f || !std::isfinite(AspectRatio) || AspectRatio <= 0.0f)
 			return;
 		constexpr float VerticalFov = glm::radians(45.0f);
 		const float HorizontalFov = 2.0f * std::atan(std::tan(VerticalFov * 0.5f) * AspectRatio);
 		const float LimitingFov = (std::min)(VerticalFov, HorizontalFov);
 		const float Distance = std::clamp(Radius / std::sin(LimitingFov * 0.5f) * 1.2f, 0.2f, 100000.0f);
-		if (!std::isfinite(Distance))
-			return;
+		if (!std::isfinite(Distance)) return;
 		m_FocusPivot = Pivot;
 		m_HasFocusPivot = true;
 		m_Position = Pivot - GetForward() * Distance;
@@ -47,8 +45,7 @@ namespace PulseForgeEditor
 
 	void EditorViewportCamera::Orbit(float DeltaX, float DeltaY) noexcept
 	{
-		if (!m_HasFocusPivot)
-			return;
+		if (!m_HasFocusPivot) return;
 		const float Distance = glm::length(m_Position - m_FocusPivot);
 		constexpr float Sensitivity = 0.1f;
 		m_YawDegrees = std::remainder(m_YawDegrees + DeltaX * Sensitivity, 360.0f);
@@ -58,8 +55,7 @@ namespace PulseForgeEditor
 
 	void EditorViewportCamera::Pan(float DeltaX, float DeltaY, float ViewportHeight) noexcept
 	{
-		if (!m_HasFocusPivot || !std::isfinite(ViewportHeight) || ViewportHeight < 1.0f)
-			return;
+		if (!m_HasFocusPivot || !std::isfinite(ViewportHeight) || ViewportHeight < 1.0f) return;
 		const float Distance = glm::length(m_Position - m_FocusPivot);
 		const float UnitsPerPixel = 2.0f * Distance * std::tan(glm::radians(45.0f) * 0.5f) / ViewportHeight;
 		const glm::vec3 Right = glm::normalize(glm::cross(GetForward(), glm::vec3(0.0f, 1.0f, 0.0f)));
@@ -71,14 +67,10 @@ namespace PulseForgeEditor
 
 	void EditorViewportCamera::Dolly(float Delta) noexcept
 	{
-		if (!std::isfinite(Delta) || std::abs(Delta) < 1.0e-6f)
-			return;
-		const std::optional<glm::vec3> ExistingPivot = m_HasFocusPivot
-			? std::optional<glm::vec3>{ m_FocusPivot }
-			: std::nullopt;
+		if (!std::isfinite(Delta) || std::abs(Delta) < 1.0e-6f) return;
+		const std::optional<glm::vec3> ExistingPivot = m_HasFocusPivot ? std::optional<glm::vec3>{ m_FocusPivot } : std::nullopt;
 		const auto DollyResult = CalculateViewportCameraDolly(m_Position, GetForward(), ExistingPivot, m_MoveSpeed, Delta);
-		if (!DollyResult)
-			return;
+		if (!DollyResult) return;
 		m_Position = DollyResult->Position;
 		m_FocusPivot = DollyResult->FocusPivot;
 		m_HasFocusPivot = true;
@@ -86,8 +78,7 @@ namespace PulseForgeEditor
 
 	void EditorViewportCamera::AdjustMoveSpeed(float WheelDelta) noexcept
 	{
-		if (!std::isfinite(WheelDelta))
-			return;
+		if (!std::isfinite(WheelDelta)) return;
 		m_MoveSpeed = std::clamp(m_MoveSpeed * std::pow(1.2f, WheelDelta), 0.2f, 80.0f);
 	}
 
@@ -96,19 +87,16 @@ namespace PulseForgeEditor
 		const glm::vec3 Forward = GetForward();
 		const glm::vec3 Right = glm::normalize(glm::cross(Forward, glm::vec3(0.0f, 1.0f, 0.0f)));
 		const glm::vec3 Offset = CalculateViewportCameraMoveOffset(Forward, Right, Keys, m_MoveSpeed, DeltaSeconds);
-		if (glm::dot(Offset, Offset) < 1.0e-12f)
-			return;
+		if (glm::dot(Offset, Offset) < 1.0e-12f) return;
 		m_Position += Offset;
-		if (m_HasFocusPivot)
-			m_FocusPivot += Offset;
+		if (m_HasFocusPivot) m_FocusPivot += Offset;
 	}
 
 	std::expected<glm::mat4, std::string> EditorViewportCamera::GetViewProjection(float AspectRatio) const
 	{
 		PulseForge::CameraComponent Camera;
 		auto Projection = Camera.GetProjectionMatrix(AspectRatio);
-		if (!Projection)
-			return std::unexpected(Projection.error().Message);
+		if (!Projection) return std::unexpected(Projection.error().Message);
 		return *Projection * GetView();
 	}
 
@@ -121,8 +109,7 @@ namespace PulseForgeEditor
 	{
 		PulseForge::CameraComponent Camera;
 		auto Projection = Camera.GetProjectionMatrix(AspectRatio);
-		if (!Projection)
-			return std::unexpected(Projection.error().Message);
+		if (!Projection) return std::unexpected(Projection.error().Message);
 		return *Projection;
 	}
 
@@ -135,9 +122,6 @@ namespace PulseForgeEditor
 	{
 		const float Yaw = glm::radians(m_YawDegrees);
 		const float Pitch = glm::radians(m_PitchDegrees);
-		return glm::normalize(glm::vec3(
-			std::cos(Yaw) * std::cos(Pitch),
-			std::sin(Pitch),
-			std::sin(Yaw) * std::cos(Pitch)));
+		return glm::normalize(glm::vec3(std::cos(Yaw) * std::cos(Pitch), std::sin(Pitch), std::sin(Yaw) * std::cos(Pitch)));
 	}
-}
+} // namespace PulseForgeEditor

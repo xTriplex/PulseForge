@@ -110,60 +110,37 @@ namespace
 		BufferDesc IndexedVertexBuffer{ sizeof(float) * 6 * 3, BufferUsage::Vertex, "Raw indexed draw vertices" };
 		BufferDesc RawIndexBuffer{ sizeof(uint32_t) * 6, BufferUsage::Index, "Raw indexed draw indices" };
 		const DrawIndexedArguments RawIndexedTriangle{ 3, 1, 0, 0 };
-		PF_CHECK(Tests, ValidateIndexedBufferDrawArguments(
-			RawIndexedTriangle,
-			Pipeline,
-			IndexedVertexBuffer,
-			RawIndexBuffer).has_value());
+		PF_CHECK(Tests, ValidateIndexedBufferDrawArguments(RawIndexedTriangle, Pipeline, IndexedVertexBuffer, RawIndexBuffer).has_value());
 
 		auto IndexRangePastEnd = RawIndexedTriangle;
 		IndexRangePastEnd.FirstIndex = 4;
-		PF_CHECK(Tests, !ValidateIndexedBufferDrawArguments(
-			IndexRangePastEnd,
-			Pipeline,
-			IndexedVertexBuffer,
-			RawIndexBuffer).has_value());
+		PF_CHECK(Tests, !ValidateIndexedBufferDrawArguments(IndexRangePastEnd, Pipeline, IndexedVertexBuffer, RawIndexBuffer).has_value());
 
 		auto WrongRawIndexBuffer = RawIndexBuffer;
 		WrongRawIndexBuffer.Usage = BufferUsage::Vertex;
-		PF_CHECK(Tests, !ValidateIndexedBufferDrawArguments(
-			RawIndexedTriangle,
-			Pipeline,
-			IndexedVertexBuffer,
-			WrongRawIndexBuffer).has_value());
+		PF_CHECK(
+			Tests, !ValidateIndexedBufferDrawArguments(RawIndexedTriangle, Pipeline, IndexedVertexBuffer, WrongRawIndexBuffer).has_value());
 
 		auto MisalignedIndexBuffer = RawIndexBuffer;
 		++MisalignedIndexBuffer.ByteSize;
-		PF_CHECK(Tests, !ValidateIndexedBufferDrawArguments(
-			RawIndexedTriangle,
-			Pipeline,
-			IndexedVertexBuffer,
-			MisalignedIndexBuffer).has_value());
+		PF_CHECK(Tests,
+			!ValidateIndexedBufferDrawArguments(RawIndexedTriangle, Pipeline, IndexedVertexBuffer, MisalignedIndexBuffer).has_value());
 
 		auto ScissoredPipeline = Pipeline;
 		ScissoredPipeline.Rasterizer.ScissorEnabled = true;
 		auto ScissoredDraw = RawIndexedTriangle;
 		ScissoredDraw.Scissor = ScissorRect{ 10, 12, 64, 48 };
-		PF_CHECK(Tests, ValidateIndexedBufferDrawArguments(
-			ScissoredDraw,
-			ScissoredPipeline,
-			IndexedVertexBuffer,
-			RawIndexBuffer).has_value());
+		PF_CHECK(
+			Tests, ValidateIndexedBufferDrawArguments(ScissoredDraw, ScissoredPipeline, IndexedVertexBuffer, RawIndexBuffer).has_value());
 
 		auto MissingScissorState = Pipeline;
-		PF_CHECK(Tests, !ValidateIndexedBufferDrawArguments(
-			ScissoredDraw,
-			MissingScissorState,
-			IndexedVertexBuffer,
-			RawIndexBuffer).has_value());
+		PF_CHECK(Tests,
+			!ValidateIndexedBufferDrawArguments(ScissoredDraw, MissingScissorState, IndexedVertexBuffer, RawIndexBuffer).has_value());
 
 		auto EmptyScissor = ScissoredDraw;
 		EmptyScissor.Scissor->Width = 0;
-		PF_CHECK(Tests, !ValidateIndexedBufferDrawArguments(
-			EmptyScissor,
-			ScissoredPipeline,
-			IndexedVertexBuffer,
-			RawIndexBuffer).has_value());
+		PF_CHECK(
+			Tests, !ValidateIndexedBufferDrawArguments(EmptyScissor, ScissoredPipeline, IndexedVertexBuffer, RawIndexBuffer).has_value());
 	}
 
 	void TestConstantBufferBindingValidation(TestRunner& Tests)
@@ -244,11 +221,8 @@ namespace
 		PF_CHECK(Tests, std::abs(NegativeZ.x - 0.25f) < 0.0001f);
 		PF_CHECK(Tests, std::abs(PositiveY.y) < 0.0001f && std::abs(NegativeY.y - 1.0f) < 0.0001f);
 
-		constexpr std::array<glm::vec3, 6> ExpectedFaceCenters = {
-			glm::vec3(1.0f, 0.0f, 0.0f), glm::vec3(-1.0f, 0.0f, 0.0f),
-			glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f),
-			glm::vec3(0.0f, 0.0f, 1.0f), glm::vec3(0.0f, 0.0f, -1.0f)
-		};
+		constexpr std::array<glm::vec3, 6> ExpectedFaceCenters = { glm::vec3(1.0f, 0.0f, 0.0f), glm::vec3(-1.0f, 0.0f, 0.0f),
+			glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f), glm::vec3(0.0f, 0.0f, -1.0f) };
 		for (uint32_t Face = 0; Face < ExpectedFaceCenters.size(); ++Face)
 		{
 			const glm::vec3 Direction = CubeFaceTexelDirection(static_cast<CubeFace>(Face), 0.5f, 0.5f);
@@ -298,8 +272,7 @@ namespace
 		std::stop_source CancelSource;
 		CancelSource.request_stop();
 		const auto CancelledProcessing = ProcessEnvironmentImage(ConstantEnvironment, Settings, CancelSource.get_token());
-		PF_CHECK(Tests, !CancelledProcessing &&
-			CancelledProcessing.error().Code == EnvironmentProcessingErrorCode::Cancelled);
+		PF_CHECK(Tests, !CancelledProcessing && CancelledProcessing.error().Code == EnvironmentProcessingErrorCode::Cancelled);
 		auto InvalidSize = Settings;
 		InvalidSize.EnvironmentFaceSize = 7;
 		PF_CHECK(Tests, !ProcessEnvironmentImage(ConstantEnvironment, InvalidSize).has_value());
@@ -346,34 +319,31 @@ namespace
 		HalfFloatDescription.Width = 2;
 		HalfFloatDescription.Height = 3;
 		const TextureSubresourceData HalfFloatSubresource{ 0, 0, HalfFloatUploadBytes, 24 };
-		PF_CHECK(Tests, ValidateTextureUpload(HalfFloatDescription,
-			std::span<const TextureSubresourceData>(&HalfFloatSubresource, 1)).has_value());
+		PF_CHECK(Tests,
+			ValidateTextureUpload(HalfFloatDescription, std::span<const TextureSubresourceData>(&HalfFloatSubresource, 1)).has_value());
 		const TextureSubresourceData InvalidHalfFloatPitch{ 0, 0, HalfFloatUploadBytes, 15 };
-		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription,
-			std::span<const TextureSubresourceData>(&InvalidHalfFloatPitch, 1)).has_value());
-		const TextureSubresourceData InvalidHalfFloatSize{ 0, 0,
-			std::span<const std::byte>(HalfFloatUploadBytes).first(71), 24 };
-		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription,
-			std::span<const TextureSubresourceData>(&InvalidHalfFloatSize, 1)).has_value());
+		PF_CHECK(Tests,
+			!ValidateTextureUpload(HalfFloatDescription, std::span<const TextureSubresourceData>(&InvalidHalfFloatPitch, 1)).has_value());
+		const TextureSubresourceData InvalidHalfFloatSize{ 0, 0, std::span<const std::byte>(HalfFloatUploadBytes).first(71), 24 };
+		PF_CHECK(Tests,
+			!ValidateTextureUpload(HalfFloatDescription, std::span<const TextureSubresourceData>(&InvalidHalfFloatSize, 1)).has_value());
 		const std::array<std::byte, 73> OversizedHalfFloatUploadBytes{};
 		const TextureSubresourceData OversizedHalfFloatSubresource{ 0, 0, OversizedHalfFloatUploadBytes, 24 };
-		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription,
-			std::span<const TextureSubresourceData>(&OversizedHalfFloatSubresource, 1)).has_value());
+		PF_CHECK(
+			Tests, !ValidateTextureUpload(HalfFloatDescription, std::span<const TextureSubresourceData>(&OversizedHalfFloatSubresource, 1))
+					   .has_value());
 		HalfFloatDescription.Width = 4;
 		HalfFloatDescription.Height = 4;
 		HalfFloatDescription.MipLevels = 3;
 		const std::array<std::byte, 168> HalfFloatMips{};
-		const std::array<TextureSubresourceData, 3> HalfFloatMipSubresources = {
-			TextureSubresourceData{ 0, 0, std::span(HalfFloatMips).first(128), 0 },
+		const std::array<TextureSubresourceData, 3> HalfFloatMipSubresources = { TextureSubresourceData{
+																					 0, 0, std::span(HalfFloatMips).first(128), 0 },
 			TextureSubresourceData{ 1, 0, std::span(HalfFloatMips).subspan(128, 32), 0 },
-			TextureSubresourceData{ 2, 0, std::span(HalfFloatMips).last(8), 0 }
-		};
+			TextureSubresourceData{ 2, 0, std::span(HalfFloatMips).last(8), 0 } };
 		PF_CHECK(Tests, ValidateTextureUpload(HalfFloatDescription, HalfFloatMipSubresources).has_value());
-		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription,
-			std::span(HalfFloatMipSubresources).first(2)).has_value());
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription, std::span(HalfFloatMipSubresources).first(2)).has_value());
 		HalfFloatDescription.MipLevels = 4;
-		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription,
-			std::span<const TextureSubresourceData>{}).has_value());
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription, std::span<const TextureSubresourceData>{}).has_value());
 		HalfFloatDescription.MipLevels = 1;
 		HalfFloatDescription.Usage = TextureUsage::ShaderResource | TextureUsage::ColorAttachment;
 		PF_CHECK(Tests, ValidateTextureUpload(HalfFloatDescription, 0).value() == 0);
@@ -382,8 +352,7 @@ namespace
 		HalfFloatDescription.Usage = TextureUsage::DepthStencilAttachment;
 		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription, 0).has_value());
 		HalfFloatDescription.Usage = static_cast<TextureUsage>(0x80);
-		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription,
-			std::span<const TextureSubresourceData>{}).has_value());
+		PF_CHECK(Tests, !ValidateTextureUpload(HalfFloatDescription, std::span<const TextureSubresourceData>{}).has_value());
 		HalfFloatDescription.Usage = TextureUsage::ShaderResource;
 		HalfFloatDescription.Dimension = TextureDimension::TextureCube;
 		HalfFloatDescription.Width = 1;
@@ -429,10 +398,9 @@ namespace
 		MippedFloat2D.Height = 2;
 		MippedFloat2D.MipLevels = 2;
 		const std::array<std::byte, 80> MippedUploadBytes{};
-		const std::array<TextureSubresourceData, 2> MippedSubresources = {
-			TextureSubresourceData{ 0, 0, std::span(MippedUploadBytes).first(64), 0 },
-			TextureSubresourceData{ 1, 0, std::span(MippedUploadBytes).last(16), 0 }
-		};
+		const std::array<TextureSubresourceData, 2> MippedSubresources = { TextureSubresourceData{
+																			   0, 0, std::span(MippedUploadBytes).first(64), 0 },
+			TextureSubresourceData{ 1, 0, std::span(MippedUploadBytes).last(16), 0 } };
 		PF_CHECK(Tests, ValidateTextureUpload(MippedFloat2D, MippedSubresources).has_value());
 		auto MissingMipUpload = MippedSubresources;
 		MissingMipUpload[1].MipLevel = 0;
@@ -514,24 +482,24 @@ namespace
 		TargetDescription.Width = 800;
 		TargetDescription.Height = 600;
 		PF_CHECK(Tests, ValidateRenderTargetDescription(TargetDescription).has_value());
-		PF_CHECK(Tests, MatchesRenderTargetConfiguration(
-			TargetDescription, 800, 600, ColorTargetFormat::RGBA8_Srgb, DepthAttachmentMode::Attachment));
+		PF_CHECK(Tests,
+			MatchesRenderTargetConfiguration(TargetDescription, 800, 600, ColorTargetFormat::RGBA8_Srgb, DepthAttachmentMode::Attachment));
+		PF_CHECK(Tests,
+			!MatchesRenderTargetConfiguration(TargetDescription, 0, 600, ColorTargetFormat::RGBA8_Srgb, DepthAttachmentMode::Attachment));
 		PF_CHECK(Tests, !MatchesRenderTargetConfiguration(
-			TargetDescription, 0, 600, ColorTargetFormat::RGBA8_Srgb, DepthAttachmentMode::Attachment));
-		PF_CHECK(Tests, !MatchesRenderTargetConfiguration(
-			TargetDescription, 800, 600, ColorTargetFormat::RGBA16_Float, DepthAttachmentMode::Attachment));
-		PF_CHECK(Tests, !MatchesRenderTargetConfiguration(
-			TargetDescription, 800, 600, ColorTargetFormat::RGBA8_Srgb, DepthAttachmentMode::None));
+							TargetDescription, 800, 600, ColorTargetFormat::RGBA16_Float, DepthAttachmentMode::Attachment));
+		PF_CHECK(Tests,
+			!MatchesRenderTargetConfiguration(TargetDescription, 800, 600, ColorTargetFormat::RGBA8_Srgb, DepthAttachmentMode::None));
 		auto HalfFloatColorTarget = TargetDescription;
 		HalfFloatColorTarget.ColorFormat = ColorTargetFormat::RGBA16_Float;
 		HalfFloatColorTarget.DepthMode = DepthAttachmentMode::None;
 		PF_CHECK(Tests, ValidateRenderTargetDescription(HalfFloatColorTarget).has_value());
-		PF_CHECK(Tests, MatchesRenderTargetConfiguration(
-			HalfFloatColorTarget, 800, 600, ColorTargetFormat::RGBA16_Float, DepthAttachmentMode::None));
+		PF_CHECK(Tests,
+			MatchesRenderTargetConfiguration(HalfFloatColorTarget, 800, 600, ColorTargetFormat::RGBA16_Float, DepthAttachmentMode::None));
 		HalfFloatColorTarget.DepthMode = DepthAttachmentMode::Attachment;
 		PF_CHECK(Tests, ValidateRenderTargetDescription(HalfFloatColorTarget).has_value());
 		PF_CHECK(Tests, MatchesRenderTargetConfiguration(
-			HalfFloatColorTarget, 800, 600, ColorTargetFormat::RGBA16_Float, DepthAttachmentMode::Attachment));
+							HalfFloatColorTarget, 800, 600, ColorTargetFormat::RGBA16_Float, DepthAttachmentMode::Attachment));
 		auto DepthOnlyTarget = TargetDescription;
 		DepthOnlyTarget.ColorFormat = ColorTargetFormat::None;
 		PF_CHECK(Tests, ValidateRenderTargetDescription(DepthOnlyTarget).has_value());
@@ -588,11 +556,8 @@ namespace
 		using namespace PulseForge;
 		BindingLayoutDesc LayoutDescription;
 		LayoutDescription.Visibility = ShaderVisibility::Fragment;
-		LayoutDescription.Items = {
-			{ BindingResourceType::Texture2D, 0 },
-			{ BindingResourceType::Sampler, 0 },
-			{ BindingResourceType::ConstantBuffer, 0 }
-		};
+		LayoutDescription.Items = { { BindingResourceType::Texture2D, 0 }, { BindingResourceType::Sampler, 0 },
+			{ BindingResourceType::ConstantBuffer, 0 } };
 		LayoutDescription.DebugName = "Test texture/sampler/constants";
 		PF_CHECK(Tests, ValidateBindingLayout(LayoutDescription).has_value());
 
@@ -664,7 +629,7 @@ namespace
 		PF_CHECK(Tests, !ValidateBindingSet(DuplicateSamplerSlot).has_value());
 	}
 
-}
+} // namespace
 
 void RunRendererTests(TestRunner& Tests)
 {

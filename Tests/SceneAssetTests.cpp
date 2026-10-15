@@ -14,8 +14,7 @@ namespace
 		auto Root = Source.CreateEntityWithUUID(RootIdentifier, "Runtime root");
 		auto Child = Source.CreateEntityWithUUID(ChildIdentifier, "Runtime child");
 		PF_CHECK(Tests, Root.has_value() && Child.has_value());
-		if (!Root || !Child)
-			return;
+		if (!Root || !Child) return;
 
 		TransformComponent RootTransform;
 		RootTransform.Translation = { 2.0f, 3.0f, 4.0f };
@@ -25,22 +24,20 @@ namespace
 
 		auto Clone = SceneSerializer::Clone(Source);
 		PF_CHECK(Tests, Clone.has_value() && Clone->get() != &Source);
-		if (!Clone)
-			return;
+		if (!Clone) return;
 
 		PF_CHECK(Tests, (*Clone)->GetEntityCount() == Source.GetEntityCount());
 		auto ClonedRoot = (*Clone)->FindEntity(RootIdentifier);
 		auto ClonedChild = (*Clone)->FindEntity(ChildIdentifier);
 		PF_CHECK(Tests, ClonedRoot.has_value() && ClonedChild.has_value());
-		if (!ClonedRoot || !ClonedChild)
-			return;
+		if (!ClonedRoot || !ClonedChild) return;
 
 		const auto ClonedTransform = ClonedRoot->GetTransform();
 		const auto ClonedRenderer = ClonedChild->GetMeshRenderer();
 		const auto ClonedParent = ClonedChild->GetParent();
 		PF_CHECK(Tests, ClonedTransform && glm::all(glm::equal(ClonedTransform->Translation, RootTransform.Translation)));
-		PF_CHECK(Tests, ClonedRenderer && ClonedRenderer->has_value() &&
-			ClonedRenderer->value().MeshAsset == MeshIdentifier && ClonedRenderer->value().MaterialAsset == MaterialIdentifier);
+		PF_CHECK(Tests, ClonedRenderer && ClonedRenderer->has_value() && ClonedRenderer->value().MeshAsset == MeshIdentifier &&
+							ClonedRenderer->value().MaterialAsset == MaterialIdentifier);
 		PF_CHECK(Tests, ClonedParent && ClonedParent->has_value() && **ClonedParent == *ClonedRoot);
 
 		TransformComponent RuntimeTransform = *ClonedTransform;
@@ -63,8 +60,7 @@ namespace
 		const auto Child = Source.CreateEntityWithUUID(UUID{ 0x7100000000000000ull, 7 }, "Prefab child");
 		const auto Grandchild = Source.CreateEntityWithUUID(UUID{ 0x7200000000000000ull, 7 }, "Prefab grandchild");
 		PF_CHECK(Tests, ExternalParent && Root && Child && Grandchild);
-		if (!ExternalParent || !Root || !Child || !Grandchild)
-			return;
+		if (!ExternalParent || !Root || !Child || !Grandchild) return;
 
 		PF_CHECK(Tests, Root->SetParent(*ExternalParent).has_value());
 		PF_CHECK(Tests, Child->SetParent(*Root).has_value());
@@ -98,8 +94,7 @@ namespace
 
 		const auto PrefabData = PrefabSerializer::Serialize(Source, *Root);
 		PF_CHECK(Tests, PrefabData.has_value());
-		if (!PrefabData)
-			return;
+		if (!PrefabData) return;
 		PF_CHECK(Tests, PrefabData->find("\"format\": \"PulseForgePrefab\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"version\": 3") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"root\": \"" + Root->GetUUID().ToString() + "\"") != std::string::npos);
@@ -122,8 +117,7 @@ namespace
 
 		std::string PrimaryRolePrefab = *PrefabData;
 		size_t PrimaryRoleCount = 0;
-		for (size_t PrimaryFlag = PrimaryRolePrefab.find("\"primary\": false");
-			PrimaryFlag != std::string::npos;
+		for (size_t PrimaryFlag = PrimaryRolePrefab.find("\"primary\": false"); PrimaryFlag != std::string::npos;
 			PrimaryFlag = PrimaryRolePrefab.find("\"primary\": false", PrimaryFlag))
 		{
 			PrimaryRolePrefab.replace(PrimaryFlag, std::string("\"primary\": false").size(), "\"primary\": true");
@@ -178,8 +172,7 @@ namespace
 		const auto FirstInstance = PrefabSerializer::Instantiate(*PrefabData, Destination);
 		PF_CHECK(Tests, FirstInstance.has_value());
 		PF_CHECK(Tests, Destination.GetEntityCount() == OriginalEntityCount + 3);
-		if (!FirstInstance)
-			return;
+		if (!FirstInstance) return;
 		PF_CHECK(Tests, FirstInstance->GetUUID() != Root->GetUUID());
 		const auto FirstParent = FirstInstance->GetParent();
 		PF_CHECK(Tests, FirstParent && !FirstParent->has_value());
@@ -189,23 +182,20 @@ namespace
 		const auto FirstPointLight = FirstInstance->GetPointLight();
 		const auto FirstAudioListener = FirstInstance->GetAudioListener();
 		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() &&
-			FirstCamera->value().VerticalFieldOfViewRadians == RootCamera.VerticalFieldOfViewRadians);
+							FirstCamera->value().VerticalFieldOfViewRadians == RootCamera.VerticalFieldOfViewRadians);
 		PF_CHECK(Tests, FirstCamera && FirstCamera->has_value() && !FirstCamera->value().IsPrimary);
-		PF_CHECK(Tests, FirstLight && FirstLight->has_value() &&
-			FirstLight->value().Intensity == PrefabLight.Intensity);
+		PF_CHECK(Tests, FirstLight && FirstLight->has_value() && FirstLight->value().Intensity == PrefabLight.Intensity);
 		PF_CHECK(Tests, FirstEnvironment && FirstEnvironment->has_value() &&
-			FirstEnvironment->value().HdrImage == PrefabEnvironment.HdrImage &&
-			FirstEnvironment->value().Intensity == PrefabEnvironment.Intensity);
-		PF_CHECK(Tests, FirstPointLight && FirstPointLight->has_value() &&
-			FirstPointLight->value().Range == 9.0f && FirstPointLight->value().CastShadows &&
-			FirstPointLight->value().ShadowBias == PrefabPoint.ShadowBias &&
-			FirstPointLight->value().ShadowNormalBias == PrefabPoint.ShadowNormalBias &&
-			FirstPointLight->value().ShadowSoftness == PrefabPoint.ShadowSoftness);
+							FirstEnvironment->value().HdrImage == PrefabEnvironment.HdrImage &&
+							FirstEnvironment->value().Intensity == PrefabEnvironment.Intensity);
+		PF_CHECK(Tests, FirstPointLight && FirstPointLight->has_value() && FirstPointLight->value().Range == 9.0f &&
+							FirstPointLight->value().CastShadows && FirstPointLight->value().ShadowBias == PrefabPoint.ShadowBias &&
+							FirstPointLight->value().ShadowNormalBias == PrefabPoint.ShadowNormalBias &&
+							FirstPointLight->value().ShadowSoftness == PrefabPoint.ShadowSoftness);
 		PF_CHECK(Tests, FirstAudioListener && FirstAudioListener->has_value() && !FirstAudioListener->value().IsPrimary);
 		const auto FirstChildren = FirstInstance->GetChildren();
 		PF_CHECK(Tests, FirstChildren && FirstChildren->size() == 1);
-		if (!FirstChildren || FirstChildren->size() != 1)
-			return;
+		if (!FirstChildren || FirstChildren->size() != 1) return;
 		const Entity FirstChild = FirstChildren->front();
 		const auto FirstChildTag = FirstChild.GetTag();
 		const auto FirstChildMesh = FirstChild.GetMeshRenderer();
@@ -216,16 +206,16 @@ namespace
 		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MeshAsset == MeshAssetID);
 		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MaterialAsset == MaterialAssetID);
 		PF_CHECK(Tests, FirstChildAudioSource && FirstChildAudioSource->has_value() &&
-			FirstChildAudioSource->value().AudioAsset == AudioAssetID && !FirstChildAudioSource->value().PlayOnStart);
-		PF_CHECK(Tests, FirstChildScript && FirstChildScript->has_value() &&
-			FirstChildScript->value().ScriptAsset == ScriptAssetID && !FirstChildScript->value().Enabled);
+							FirstChildAudioSource->value().AudioAsset == AudioAssetID && !FirstChildAudioSource->value().PlayOnStart);
+		PF_CHECK(Tests, FirstChildScript && FirstChildScript->has_value() && FirstChildScript->value().ScriptAsset == ScriptAssetID &&
+							!FirstChildScript->value().Enabled);
 		PF_CHECK(Tests, FirstGrandchildren && FirstGrandchildren->size() == 1);
 		if (FirstGrandchildren && FirstGrandchildren->size() == 1)
 		{
 			const auto FirstGrandchildSpot = FirstGrandchildren->front().GetSpotLight();
 			PF_CHECK(Tests, FirstGrandchildSpot && FirstGrandchildSpot->has_value() &&
-				FirstGrandchildSpot->value().OuterConeAngleDegrees == 22.0f &&
-				FirstGrandchildSpot->value().CastShadows && FirstGrandchildSpot->value().ShadowBias == 0.003f);
+								FirstGrandchildSpot->value().OuterConeAngleDegrees == 22.0f && FirstGrandchildSpot->value().CastShadows &&
+								FirstGrandchildSpot->value().ShadowBias == 0.003f);
 		}
 
 		const auto SecondInstance = PrefabSerializer::Instantiate(*PrefabData, Destination);
@@ -252,9 +242,7 @@ namespace
 		PF_CHECK(Tests, RootFieldPosition != std::string::npos && RootIdentifierPosition != std::string::npos);
 		if (RootIdentifierPosition != std::string::npos)
 			MissingPrefabRoot.replace(
-				RootIdentifierPosition,
-				Root->GetUUID().ToString().size(),
-				UUID{ 0x7400000000000000ull, 7 }.ToString());
+				RootIdentifierPosition, Root->GetUUID().ToString().size(), UUID{ 0x7400000000000000ull, 7 }.ToString());
 		const auto MissingRootResult = PrefabSerializer::Instantiate(MissingPrefabRoot, Destination);
 		PF_CHECK(Tests, !MissingRootResult.has_value());
 		PF_CHECK(Tests, !MissingRootResult && MissingRootResult.error().Code == PrefabErrorCode::InvalidDocument);
@@ -267,8 +255,7 @@ namespace
 			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 3").size(), "\"version\": 99");
 		const auto UnsupportedPrefabVersion = PrefabSerializer::Instantiate(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedPrefabVersion.has_value());
-		PF_CHECK(Tests, !UnsupportedPrefabVersion &&
-			UnsupportedPrefabVersion.error().Code == PrefabErrorCode::UnsupportedVersion);
+		PF_CHECK(Tests, !UnsupportedPrefabVersion && UnsupportedPrefabVersion.error().Code == PrefabErrorCode::UnsupportedVersion);
 		PF_CHECK(Tests, Destination.GetEntityCount() == CountBeforeFailure);
 
 		Scene OtherScene;
@@ -288,13 +275,11 @@ namespace
 		std::error_code FileError;
 		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
 		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
+		if (FileError) return;
 
 		const auto ProjectIdentifier = UUID::Generate();
 		PF_CHECK(Tests, ProjectIdentifier.has_value());
-		if (!ProjectIdentifier)
-			return;
+		if (!ProjectIdentifier) return;
 
 		const std::filesystem::path ProjectRoot = TemporaryDirectory / ("PulseForgePrefabAssets-" + ProjectIdentifier->ToString());
 		struct ProjectCleanup
@@ -310,22 +295,19 @@ namespace
 		const std::filesystem::path PrefabDirectory = ProjectRoot / "Assets" / "Prefabs";
 		std::filesystem::create_directories(PrefabDirectory, FileError);
 		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
+		if (FileError) return;
 
 		const auto RootID = UUID::Parse("15261902-2c12-4a92-9e99-0e355a16af4e");
 		const auto ChildID = UUID::Parse("df753d9d-1024-40f1-980f-5ca589fd87d8");
 		const auto MeshAssetID = UUID::Parse("d3ce3630-b87a-4dab-b8e0-59c1f258ae78");
 		PF_CHECK(Tests, RootID && ChildID && MeshAssetID);
-		if (!RootID || !ChildID || !MeshAssetID)
-			return;
+		if (!RootID || !ChildID || !MeshAssetID) return;
 
 		Scene Source;
 		const auto Root = Source.CreateEntityWithUUID(*RootID, "Prefab Root");
 		const auto Child = Source.CreateEntityWithUUID(*ChildID, "Prefab Child");
 		PF_CHECK(Tests, Root && Child);
-		if (!Root || !Child)
-			return;
+		if (!Root || !Child) return;
 		PF_CHECK(Tests, Child->SetParent(*Root).has_value());
 		PF_CHECK(Tests, Child->SetMeshRenderer(MeshRendererComponent{ *MeshAssetID }).has_value());
 
@@ -333,8 +315,7 @@ namespace
 		PF_CHECK(Tests, PrefabSerializer::SaveToFile(Source, *Root, SourcePath).has_value());
 		const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(SourcePath);
 		PF_CHECK(Tests, Metadata.has_value());
-		if (!Metadata)
-			return;
+		if (!Metadata) return;
 
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
@@ -345,28 +326,21 @@ namespace
 		PF_CHECK(Tests, FirstInstance.has_value());
 		PF_CHECK(Tests, FirstInstance && FirstInstance->GetUUID() != *RootID);
 		PF_CHECK(Tests, Destination.GetEntityCount() == 3);
-		if (!FirstInstance)
-			return;
+		if (!FirstInstance) return;
 		const auto FirstChildren = FirstInstance->GetChildren();
 		PF_CHECK(Tests, FirstChildren && FirstChildren->size() == 1);
-		if (!FirstChildren || FirstChildren->size() != 1)
-			return;
+		if (!FirstChildren || FirstChildren->size() != 1) return;
 		const auto ChildRenderer = FirstChildren->front().GetMeshRenderer();
 		PF_CHECK(Tests, ChildRenderer && ChildRenderer->has_value());
 		PF_CHECK(Tests, ChildRenderer && ChildRenderer->has_value() && ChildRenderer->value().MeshAsset == *MeshAssetID);
 
-		const auto MoveResult = AssetOperations::Move(
-			Registry,
-			ProjectRoot,
-			Metadata->ID,
-			"Assets/Prefabs/renamed.prefab");
+		const auto MoveResult = AssetOperations::Move(Registry, ProjectRoot, Metadata->ID, "Assets/Prefabs/renamed.prefab");
 		PF_CHECK(Tests, MoveResult && MoveResult->ID == Metadata->ID);
 		PF_CHECK(Tests, PrefabAssetService::Instantiate(Metadata->ID, ProjectRoot, Registry, Destination).has_value());
 
 		auto RootTag = Root->GetTag();
 		PF_CHECK(Tests, RootTag.has_value());
-		if (!RootTag)
-			return;
+		if (!RootTag) return;
 		RootTag->Name = "Saved through prefab UUID";
 		PF_CHECK(Tests, Root->SetTag(*RootTag).has_value());
 		PF_CHECK(Tests, PrefabAssetService::Save(Metadata->ID, ProjectRoot, Registry, Source, *Root).has_value());
@@ -382,28 +356,18 @@ namespace
 			PF_CHECK(Tests, UpdatedTag && UpdatedTag->Name == "Saved through prefab UUID");
 		}
 
-		const auto CreatedPrefab = PrefabAssetService::Create(
-			Registry,
-			ProjectRoot,
-			"Assets/Prefabs/generated.prefab",
-			Source,
-			*Root);
+		const auto CreatedPrefab = PrefabAssetService::Create(Registry, ProjectRoot, "Assets/Prefabs/generated.prefab", Source, *Root);
 		PF_CHECK(Tests, CreatedPrefab.has_value());
-		PF_CHECK(Tests, CreatedPrefab && CreatedPrefab->ID != Metadata->ID &&
-			CreatedPrefab->ProjectRelativePath == "Assets/Prefabs/generated.prefab");
+		PF_CHECK(Tests,
+			CreatedPrefab && CreatedPrefab->ID != Metadata->ID && CreatedPrefab->ProjectRelativePath == "Assets/Prefabs/generated.prefab");
 		if (CreatedPrefab)
 		{
-			const auto CreatedMetadata = AssetMetadataSerializer::LoadFromFile(
-				ProjectRoot / "Assets/Prefabs/generated.prefab.meta");
+			const auto CreatedMetadata = AssetMetadataSerializer::LoadFromFile(ProjectRoot / "Assets/Prefabs/generated.prefab.meta");
 			PF_CHECK(Tests, CreatedMetadata && CreatedMetadata->ID == CreatedPrefab->ID);
 			PF_CHECK(Tests, Registry.Find(CreatedPrefab->ID).has_value());
 
 			Scene CreatedPrefabScene;
-			const auto CreatedRoot = PrefabAssetService::Instantiate(
-				CreatedPrefab->ID,
-				ProjectRoot,
-				Registry,
-				CreatedPrefabScene);
+			const auto CreatedRoot = PrefabAssetService::Instantiate(CreatedPrefab->ID, ProjectRoot, Registry, CreatedPrefabScene);
 			PF_CHECK(Tests, CreatedRoot && CreatedRoot->GetUUID() != Root->GetUUID());
 			PF_CHECK(Tests, CreatedPrefabScene.GetEntityCount() == 2);
 			if (CreatedRoot)
@@ -412,30 +376,16 @@ namespace
 				PF_CHECK(Tests, CreatedChildren && CreatedChildren->size() == 1);
 			}
 
-			const auto DuplicateCreation = PrefabAssetService::Create(
-				Registry,
-				ProjectRoot,
-				"Assets/Prefabs/generated.prefab",
-				Source,
-				*Root);
-			PF_CHECK(Tests, !DuplicateCreation &&
-				DuplicateCreation.error().Code == PrefabAssetErrorCode::AssetOperationFailed);
+			const auto DuplicateCreation =
+				PrefabAssetService::Create(Registry, ProjectRoot, "Assets/Prefabs/generated.prefab", Source, *Root);
+			PF_CHECK(Tests, !DuplicateCreation && DuplicateCreation.error().Code == PrefabAssetErrorCode::AssetOperationFailed);
 			PF_CHECK(Tests, Registry.Find(CreatedPrefab->ID).has_value());
 		}
-		const auto InvalidPrefabCreation = PrefabAssetService::Create(
-			Registry,
-			ProjectRoot,
-			"Assets/Prefabs/generated.json",
-			Source,
-			*Root);
-		PF_CHECK(Tests, !InvalidPrefabCreation &&
-			InvalidPrefabCreation.error().Code == PrefabAssetErrorCode::UnsupportedAssetType);
+		const auto InvalidPrefabCreation =
+			PrefabAssetService::Create(Registry, ProjectRoot, "Assets/Prefabs/generated.json", Source, *Root);
+		PF_CHECK(Tests, !InvalidPrefabCreation && InvalidPrefabCreation.error().Code == PrefabAssetErrorCode::UnsupportedAssetType);
 
-		const auto Duplicate = AssetOperations::Duplicate(
-			Registry,
-			ProjectRoot,
-			Metadata->ID,
-			"Assets/Prefabs/copy.prefab");
+		const auto Duplicate = AssetOperations::Duplicate(Registry, ProjectRoot, Metadata->ID, "Assets/Prefabs/copy.prefab");
 		PF_CHECK(Tests, Duplicate.has_value());
 		PF_CHECK(Tests, Duplicate && Duplicate->ID != Metadata->ID);
 		PF_CHECK(Tests, Duplicate && PrefabAssetService::Instantiate(Duplicate->ID, ProjectRoot, Registry, UpdatedInstance).has_value());
@@ -481,7 +431,7 @@ namespace
 		}
 	}
 
-}
+} // namespace
 
 void RunSceneAssetTests(TestRunner& Tests)
 {

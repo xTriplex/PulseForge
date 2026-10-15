@@ -22,14 +22,11 @@ namespace PulseForgeEditor
 		return Found && Found->Draft ? &*Found->Draft : nullptr;
 	}
 
-	PulseForge::MaterialAssetDesc& EditorMaterialDraftStore::PutDraft(
-		std::string Key,
-		PulseForge::MaterialAssetDesc Draft)
+	PulseForge::MaterialAssetDesc& EditorMaterialDraftStore::PutDraft(std::string Key, PulseForge::MaterialAssetDesc Draft)
 	{
 		Entry& State = m_Entries[std::move(Key)];
 		State.Draft = std::move(Draft);
-		if (State.History.IsEmpty())
-			State.History.Reset(*State.Draft);
+		if (State.History.IsEmpty()) State.History.Reset(*State.Draft);
 		return *State.Draft;
 	}
 
@@ -56,8 +53,7 @@ namespace PulseForgeEditor
 
 	void EditorMaterialDraftStore::ClearError(std::string_view Key)
 	{
-		if (Entry* const Found = FindEntry(Key))
-			Found->Error.reset();
+		if (Entry* const Found = FindEntry(Key)) Found->Error.reset();
 	}
 
 	bool EditorMaterialDraftStore::IsDirty(std::string_view Key) const
@@ -70,8 +66,7 @@ namespace PulseForgeEditor
 	{
 		std::vector<std::string> Keys;
 		for (const auto& [Key, State] : m_Entries)
-			if (State.Dirty)
-				Keys.push_back(Key);
+			if (State.Dirty) Keys.push_back(Key);
 		return Keys;
 	}
 
@@ -87,33 +82,26 @@ namespace PulseForgeEditor
 		return Found && Found->Draft && Found->History.CanRedo();
 	}
 
-	bool EditorMaterialDraftStore::BeginEdit(
-		std::string_view Key,
-		const PulseForge::MaterialAssetDesc& InitialState)
+	bool EditorMaterialDraftStore::BeginEdit(std::string_view Key, const PulseForge::MaterialAssetDesc& InitialState)
 	{
 		Entry* const Found = FindEntry(Key);
-		if (!Found || !Found->Draft)
-			return false;
+		if (!Found || !Found->Draft) return false;
 		const bool NewEdit = !Found->EditStart.has_value();
-		if (NewEdit)
-			Found->EditStart = InitialState;
+		if (NewEdit) Found->EditStart = InitialState;
 		Found->Dirty = true;
 		return NewEdit;
 	}
 
 	void EditorMaterialDraftStore::FinalizePendingEdits(bool HasActiveImGuiItem)
 	{
-		if (HasActiveImGuiItem)
-			return;
+		if (HasActiveImGuiItem) return;
 		for (auto& [Key, State] : m_Entries)
 		{
 			(void)Key;
-			if (!State.EditStart)
-				continue;
+			if (!State.EditStart) continue;
 			if (State.Draft)
 			{
-				if (State.History.IsEmpty())
-					State.History.Reset(*State.EditStart);
+				if (State.History.IsEmpty()) State.History.Reset(*State.EditStart);
 				State.History.Record(*State.Draft);
 				State.Dirty = State.History.IsDirty();
 			}
@@ -124,8 +112,7 @@ namespace PulseForgeEditor
 	std::optional<bool> EditorMaterialDraftStore::ApplyHistoryStep(std::string_view Key, bool Redo)
 	{
 		Entry* const Found = FindEntry(Key);
-		if (!Found || !Found->Draft || Found->History.IsEmpty())
-			return std::nullopt;
+		if (!Found || !Found->Draft || Found->History.IsEmpty()) return std::nullopt;
 		const bool Changed = Redo ? Found->History.Redo() : Found->History.Undo();
 		if (Changed)
 		{
@@ -141,8 +128,7 @@ namespace PulseForgeEditor
 		{
 			Found->Dirty = false;
 			Found->Error.reset();
-			if (!Found->History.IsEmpty())
-				Found->History.MarkSaved();
+			if (!Found->History.IsEmpty()) Found->History.MarkSaved();
 		}
 	}
 
@@ -155,10 +141,8 @@ namespace PulseForgeEditor
 	{
 		for (auto Entry = m_Entries.begin(); Entry != m_Entries.end();)
 		{
-			if (KeyMatchesProject(Entry->first, ProjectKeyPrefix))
-				Entry = m_Entries.erase(Entry);
-			else
-				++Entry;
+			if (KeyMatchesProject(Entry->first, ProjectKeyPrefix)) Entry = m_Entries.erase(Entry);
+			else ++Entry;
 		}
 	}
 
@@ -178,4 +162,4 @@ namespace PulseForgeEditor
 	{
 		return Key.starts_with(Prefix);
 	}
-}
+} // namespace PulseForgeEditor

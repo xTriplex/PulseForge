@@ -22,4 +22,4 @@ namespace PulseForgeEditor
 		struct Impl;
 		std::unique_ptr<Impl> m_Impl;
 	};
-}
+} // namespace PulseForgeEditor

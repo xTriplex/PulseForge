@@ -19,12 +19,9 @@ namespace PulseForgeEditor
 	{
 	public:
 		[[nodiscard]] static std::expected<std::string, std::string> CaptureSnapshot(
-			const PulseForge::Scene& SceneValue,
-			const EditorSceneWorkspaceState& Workspace);
+			const PulseForge::Scene& SceneValue, const EditorSceneWorkspaceState& Workspace);
 		[[nodiscard]] static std::expected<void, std::string> RestoreSnapshot(
-			std::string_view State,
-			PulseForge::Scene& SceneValue,
-			EditorSceneWorkspaceState& Workspace);
+			std::string_view State, PulseForge::Scene& SceneValue, EditorSceneWorkspaceState& Workspace);
 
 		void Reset(const PulseForge::Scene* SceneValue);
 		void UpdateDirty(const PulseForge::Scene* SceneValue);
@@ -37,18 +34,15 @@ namespace PulseForgeEditor
 		void ResetCommands() noexcept { m_Commands.Reset(); }
 		[[nodiscard]] std::expected<void, std::string> Begin(std::string Description, std::string StateBefore);
 		[[nodiscard]] std::expected<bool, std::string> Commit(std::string StateAfter);
-		template<typename Restore>
-		[[nodiscard]] std::expected<void, std::string> Cancel(Restore&& RestoreState)
+		template <typename Restore> [[nodiscard]] std::expected<void, std::string> Cancel(Restore&& RestoreState)
 		{
 			return m_Commands.Cancel(std::forward<Restore>(RestoreState));
 		}
-		template<typename Restore>
-		[[nodiscard]] std::expected<bool, std::string> Undo(Restore&& RestoreState)
+		template <typename Restore> [[nodiscard]] std::expected<bool, std::string> Undo(Restore&& RestoreState)
 		{
 			return m_Commands.Undo(std::forward<Restore>(RestoreState));
 		}
-		template<typename Restore>
-		[[nodiscard]] std::expected<bool, std::string> Redo(Restore&& RestoreState)
+		template <typename Restore> [[nodiscard]] std::expected<bool, std::string> Redo(Restore&& RestoreState)
 		{
 			return m_Commands.Redo(std::forward<Restore>(RestoreState));
 		}
@@ -71,4 +65,4 @@ namespace PulseForgeEditor
 		uint32_t m_InspectorHistoryItem = 0;
 		bool m_Dirty = false;
 	};
-}
+} // namespace PulseForgeEditor

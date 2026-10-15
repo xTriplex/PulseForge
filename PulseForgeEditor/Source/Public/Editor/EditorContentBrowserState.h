@@ -35,34 +35,23 @@ namespace PulseForgeEditor
 		{
 			return m_AssetPresentations;
 		}
-		[[nodiscard]] const std::vector<size_t>& FilteredAssetIndices() const noexcept
-		{
-			return m_FilteredAssetIndices;
-		}
+		[[nodiscard]] const std::vector<size_t>& FilteredAssetIndices() const noexcept { return m_FilteredAssetIndices; }
 		[[nodiscard]] const EditorContentFolderNode& FolderRoot() const noexcept { return m_FolderRoot; }
 		[[nodiscard]] const std::filesystem::path& CurrentFolder() const noexcept { return m_CurrentFolder; }
-		[[nodiscard]] const std::optional<std::filesystem::path>& SelectedFolder() const noexcept
-		{
-			return m_SelectedFolder;
-		}
+		[[nodiscard]] const std::optional<std::filesystem::path>& SelectedFolder() const noexcept { return m_SelectedFolder; }
 		[[nodiscard]] std::optional<std::filesystem::path>& SelectedFolder() noexcept { return m_SelectedFolder; }
 		[[nodiscard]] const std::string& SearchText() const noexcept { return m_SearchText; }
 		[[nodiscard]] std::string& SearchText() noexcept { return m_SearchText; }
 		[[nodiscard]] bool IsGridView() const noexcept { return m_IsGridView; }
 		[[nodiscard]] bool& GridView() noexcept { return m_IsGridView; }
-		[[nodiscard]] const std::optional<PulseForge::AssetID>& SelectedAsset() const noexcept
-		{
-			return m_SelectedAsset;
-		}
+		[[nodiscard]] const std::optional<PulseForge::AssetID>& SelectedAsset() const noexcept { return m_SelectedAsset; }
 		[[nodiscard]] std::optional<PulseForge::AssetID>& SelectedAsset() noexcept { return m_SelectedAsset; }
 
 		void SetAssets(std::vector<PulseForge::AssetRecord> Assets);
 		void ResetNavigation();
 		void ClearProject();
 		void SetCurrentFolder(std::filesystem::path Folder);
-		void RebaseFoldersAfterMove(
-			const std::filesystem::path& Source,
-			const std::filesystem::path& Destination);
+		void RebaseFoldersAfterMove(const std::filesystem::path& Source, const std::filesystem::path& Destination);
 		void RebuildFilteredAssetIndices();
 		[[nodiscard]] bool IsKnownFolder(const std::filesystem::path& Folder) const;
 		[[nodiscard]] const EditorContentFolderNode* FindFolder(const std::filesystem::path& Folder) const;
@@ -70,12 +59,9 @@ namespace PulseForgeEditor
 	private:
 		void RebuildFolderTree();
 		void RebuildAssetPresentations();
-		[[nodiscard]] static bool ContainsFolder(
-			const EditorContentFolderNode& Node,
-			const std::filesystem::path& Candidate);
+		[[nodiscard]] static bool ContainsFolder(const EditorContentFolderNode& Node, const std::filesystem::path& Candidate);
 		[[nodiscard]] static const EditorContentFolderNode* FindFolder(
-			const EditorContentFolderNode& Node,
-			const std::filesystem::path& Folder);
+			const EditorContentFolderNode& Node, const std::filesystem::path& Folder);
 
 		std::vector<PulseForge::AssetRecord> m_Assets;
 		std::vector<EditorContentBrowserAssetPresentation> m_AssetPresentations;
@@ -87,4 +73,4 @@ namespace PulseForgeEditor
 		std::optional<PulseForge::AssetID> m_SelectedAsset;
 		bool m_IsGridView = true;
 	};
-}
+} // namespace PulseForgeEditor

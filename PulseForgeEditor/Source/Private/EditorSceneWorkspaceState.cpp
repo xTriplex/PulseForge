@@ -30,4 +30,4 @@ namespace PulseForgeEditor
 		m_VisibleHierarchyOrder.clear();
 		m_CurrentHierarchyOrder.clear();
 	}
-}
+} // namespace PulseForgeEditor

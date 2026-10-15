@@ -31,4 +31,4 @@ namespace PulseForgeEditor
 		TransformGizmoOperation m_Operation = TransformGizmoOperation::Translate;
 		EditorViewportToolValues m_Values;
 	};
-}
+} // namespace PulseForgeEditor

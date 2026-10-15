@@ -23,8 +23,7 @@ namespace PulseForgeEditor
 		virtual ~EditorInspectorPanelActions() = default;
 		virtual void FinishInspectorSceneEdit() = 0;
 		[[nodiscard]] virtual std::expected<void, std::string> RunInspectorSceneEdit(
-			std::string Description,
-			std::function<std::expected<void, PulseForge::SceneError>()> Operation) = 0;
+			std::string Description, std::function<std::expected<void, PulseForge::SceneError>()> Operation) = 0;
 		virtual void ReportInspectorError(std::string Message) = 0;
 	};
 
@@ -32,34 +31,20 @@ namespace PulseForgeEditor
 	{
 	public:
 		void FocusEntityNameNextFrame() noexcept { m_FocusEntityNameNextFrame = true; }
-		void DrawContents(
-			PulseForge::Scene* SceneValue,
-			EditorSceneWorkspaceState& Workspace,
-			EditorStyle& Style,
-			EditorAssetSelector& AssetSelector,
-			const std::vector<PulseForge::AssetRecord>& Assets,
-			bool ProjectAvailable,
-			bool FinishCurrentEdit,
-			EditorInspectorPanelActions& Actions);
+		void DrawContents(PulseForge::Scene* SceneValue, EditorSceneWorkspaceState& Workspace, EditorStyle& Style,
+			EditorAssetSelector& AssetSelector, const std::vector<PulseForge::AssetRecord>& Assets, bool ProjectAvailable,
+			bool FinishCurrentEdit, EditorInspectorPanelActions& Actions);
 
 	private:
 		struct Context;
 
-		template<typename Action>
-		void RecordComponentOperation(Context& Inspector, Action&& Operation, std::string_view Description);
-		void SetCameraComponent(Context& Inspector, const PulseForge::Entity& Target,
-			const PulseForge::CameraComponent& Camera);
-		void SetAudioListenerComponent(Context& Inspector, const PulseForge::Entity& Target,
-			const PulseForge::AudioListenerComponent& Listener);
-		[[nodiscard]] bool DrawAssetSelector(
-			Context& Inspector,
-			const char* Label,
-			std::optional<PulseForge::AssetID>& Current,
-			std::initializer_list<std::string_view> Extensions,
-			bool AllowNone);
-		[[nodiscard]] bool IsAssetExtension(
-			const PulseForge::AssetRecord& Asset,
-			std::initializer_list<std::string_view> Extensions) const;
+		template <typename Action> void RecordComponentOperation(Context& Inspector, Action&& Operation, std::string_view Description);
+		void SetCameraComponent(Context& Inspector, const PulseForge::Entity& Target, const PulseForge::CameraComponent& Camera);
+		void SetAudioListenerComponent(
+			Context& Inspector, const PulseForge::Entity& Target, const PulseForge::AudioListenerComponent& Listener);
+		[[nodiscard]] bool DrawAssetSelector(Context& Inspector, const char* Label, std::optional<PulseForge::AssetID>& Current,
+			std::initializer_list<std::string_view> Extensions, bool AllowNone);
+		[[nodiscard]] bool IsAssetExtension(const PulseForge::AssetRecord& Asset, std::initializer_list<std::string_view> Extensions) const;
 		void DrawAddComponentControl(Context& Inspector, const PulseForge::Entity& Entity);
 		void DrawExistingComponents(Context& Inspector, const PulseForge::Entity& Entity);
 		void DrawEnvironmentLightComponent(Context& Inspector, const PulseForge::Entity& Entity);
@@ -76,4 +61,4 @@ namespace PulseForgeEditor
 
 		bool m_FocusEntityNameNextFrame = false;
 	};
-}
+} // namespace PulseForgeEditor

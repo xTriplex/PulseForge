@@ -10,18 +10,12 @@ namespace
 
 	void TestQueueFamilySelection(TestRunner& Tests)
 	{
-		const std::vector<QueueFamily> SameFamily = {
-			{ 0, 0, true, true },
-			{ 1, 1, true, true }
-		};
+		const std::vector<QueueFamily> SameFamily = { { 0, 0, true, true }, { 1, 1, true, true } };
 		auto Same = ChooseQueueFamilies(SameFamily);
 		PF_CHECK(Tests, Same.has_value());
 		PF_CHECK(Tests, Same->GraphicsIndex == 1 && Same->PresentIndex == 1);
 
-		const std::vector<QueueFamily> SeparateFamilies = {
-			{ 3, 1, true, false },
-			{ 5, 1, false, true }
-		};
+		const std::vector<QueueFamily> SeparateFamilies = { { 3, 1, true, false }, { 5, 1, false, true } };
 		auto Separate = ChooseQueueFamilies(SeparateFamilies);
 		PF_CHECK(Tests, Separate.has_value());
 		PF_CHECK(Tests, Separate->GraphicsIndex == 3 && Separate->PresentIndex == 5);
@@ -52,12 +46,10 @@ namespace
 		PF_CHECK(Tests, !CanCreateSwapchainGeneration(false, true, MaximumDeferredSwapchainGenerations));
 		PF_CHECK(Tests, CanCreateSwapchainGeneration(false, false, MaximumDeferredSwapchainGenerations));
 		PF_CHECK(Tests, CanCreateSwapchainGeneration(false, true, MaximumDeferredSwapchainGenerations, true));
-		PF_CHECK(Tests, !CanCreateSwapchainGeneration(false, true,
-			MaximumDeferredSwapchainGenerations + MaximumOutOfDateRecoveryGenerations, true));
-		PF_CHECK(Tests, ResolveSwapchainFrameStartAction(true, true, false, false) ==
-			SwapchainFrameStartAction::Skip);
-		PF_CHECK(Tests, ResolveSwapchainFrameStartAction(true, true, false, true) ==
-			SwapchainFrameStartAction::PresentCurrent);
+		PF_CHECK(Tests,
+			!CanCreateSwapchainGeneration(false, true, MaximumDeferredSwapchainGenerations + MaximumOutOfDateRecoveryGenerations, true));
+		PF_CHECK(Tests, ResolveSwapchainFrameStartAction(true, true, false, false) == SwapchainFrameStartAction::Skip);
+		PF_CHECK(Tests, ResolveSwapchainFrameStartAction(true, true, false, true) == SwapchainFrameStartAction::PresentCurrent);
 		PF_CHECK(Tests, !ShouldRetireDeferredSwapchains(false, false, 2, 2, true));
 		PF_CHECK(Tests, !ShouldRetireDeferredSwapchains(false, true, 2, 1, true));
 		PF_CHECK(Tests, !ShouldRetireDeferredSwapchains(false, true, 2, 2, false));
@@ -92,9 +84,7 @@ namespace
 		PF_CHECK(Tests, ChosenForUndefined.has_value());
 		PF_CHECK(Tests, ChosenForUndefined->Format == 20 && ChosenForUndefined->ColorSpace == 5);
 
-		const std::vector<PresentMode> Modes = {
-			PresentMode::Immediate, PresentMode::Mailbox, PresentMode::Fifo
-		};
+		const std::vector<PresentMode> Modes = { PresentMode::Immediate, PresentMode::Mailbox, PresentMode::Fifo };
 		PF_CHECK(Tests, ChoosePresentMode(Modes, true) == PresentMode::Fifo);
 		PF_CHECK(Tests, ChoosePresentMode(Modes, false) == PresentMode::Mailbox);
 		const std::vector<PresentMode> NoMailbox = { PresentMode::Immediate, PresentMode::Fifo };
@@ -115,7 +105,7 @@ namespace
 		PF_CHECK(Tests, ChooseImageCount(2, 2) == 2);
 		PF_CHECK(Tests, ChooseImageCount(3, 5) == 4);
 	}
-}
+} // namespace
 
 void RunRendererPolicyTests(TestRunner& Tests)
 {

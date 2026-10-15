@@ -9,15 +9,10 @@
 
 namespace PulseForgeEditor
 {
-	[[nodiscard]] inline bool AssetHasExtension(
-		const PulseForge::AssetRecord& Asset,
-		std::initializer_list<std::string_view> Extensions)
+	[[nodiscard]] inline bool AssetHasExtension(const PulseForge::AssetRecord& Asset, std::initializer_list<std::string_view> Extensions)
 	{
 		const std::string Extension = Asset.ProjectRelativePath.extension().string();
-		return std::any_of(Extensions.begin(), Extensions.end(), [&](std::string_view Candidate)
-		{
-			return Extension == Candidate;
-		});
+		return std::any_of(Extensions.begin(), Extensions.end(), [&](std::string_view Candidate) { return Extension == Candidate; });
 	}
 
 	[[nodiscard]] inline bool AssetSelectorMatchesSearch(

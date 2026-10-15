@@ -10,6 +10,7 @@
 #include "Renderer/Binding.h"
 #include "Renderer/Graphics.h"
 #include "Renderer/Mesh.h"
+#include "Renderer/RenderDevice.h"
 #include "Renderer/RenderTarget.h"
 #include "Renderer/DepthCubemap.h"
 
@@ -22,7 +23,7 @@ namespace PulseForge
 {
 	class RendererBackend;
 
-	class PULSEFORGE_API Application
+	class PULSEFORGE_API Application : public RenderDevice
 	{
 	public:
 		explicit Application(RendererAPI API = RendererAPI::Vulkan);
@@ -49,46 +50,33 @@ namespace PulseForge
 		inline Window& GetWindow() { return *m_Window; }
 		Input& GetInput() { return m_Input; }
 		RendererAPI GetRendererAPI() const { return m_RendererAPI; }
-		[[nodiscard]] OutputColorEncoding GetOutputColorEncoding() const noexcept;
+		[[nodiscard]] std::pair<unsigned int, unsigned int> GetOutputFramebufferSize() const noexcept override;
+		[[nodiscard]] OutputColorEncoding GetOutputColorEncoding() const noexcept override;
 		// Renderer resources should be released before this Application is destroyed.
-		BufferCreateResult CreateBuffer(const BufferDesc& Description, std::span<const std::byte> InitialData = {});
+		BufferCreateResult CreateBuffer(const BufferDesc& Description, std::span<const std::byte> InitialData = {}) override;
 		// Records an aligned constant-buffer or dynamic geometry-buffer update on the active renderer frame.
-		BufferUpdateResult WriteBuffer(
-			const Buffer& Target,
-			uint64_t DestinationOffset,
-			std::span<const std::byte> Data);
+		BufferUpdateResult WriteBuffer(const Buffer& Target, uint64_t DestinationOffset, std::span<const std::byte> Data) override;
 		MeshCreateResult CreateMesh(const MeshDesc& Description);
-		RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description);
-		DepthCubemapCreateResult CreateDepthCubemap(uint32_t Resolution, const std::string& DebugName);
+		RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description) override;
+		DepthCubemapCreateResult CreateDepthCubemap(uint32_t Resolution, const std::string& DebugName) override;
 		// The target may be rendered only during a frame; EndFrame closes an unclosed target with a diagnostic.
-		GraphicsResult BeginRenderTarget(const RenderTarget& Target, const RenderTargetClearValue& ClearValue = {});
-		GraphicsResult EndRenderTarget();
+		GraphicsResult BeginRenderTarget(const RenderTarget& Target, const RenderTargetClearValue& ClearValue = {}) override;
+		GraphicsResult EndRenderTarget() override;
 		TextureCreateResult CreateTexture(const TextureDesc& Description, std::span<const std::byte> InitialData);
-		TextureCreateResult CreateTexture(
-			const TextureDesc& Description,
-			std::span<const TextureSubresourceData> InitialData);
+		TextureCreateResult CreateTexture(const TextureDesc& Description, std::span<const TextureSubresourceData> InitialData) override;
 		// Development/test-only blocking readback of one RGBA8 or D32 slice while the renderer is idle.
 		TextureReadbackResult ReadTextureForValidation(const Texture& Source, uint32_t ArraySlice = 0);
-		SamplerCreateResult CreateSampler(const SamplerDesc& Description);
-		BindingLayoutCreateResult CreateBindingLayout(const BindingLayoutDesc& Description);
-		BindingSetCreateResult CreateBindingSet(const BindingSetDesc& Description);
-		ShaderCreateResult CreateShader(const ShaderDesc& Description, std::span<const std::byte> Bytecode);
-		GraphicsPipelineCreateResult CreateGraphicsPipeline(const GraphicsPipelineDesc& Description);
-		GraphicsResult Draw(
-			const GraphicsPipeline& Pipeline,
-			const Buffer& VertexBuffer,
-			const DrawArguments& Arguments,
-			std::span<const BindingSet* const> BindingSets = {});
-		GraphicsResult Draw(
-			const GraphicsPipeline& Pipeline,
-			const Mesh& Geometry,
-			const DrawArguments& Arguments,
-			std::span<const BindingSet* const> BindingSets = {});
-		GraphicsResult DrawIndexed(
-			const GraphicsPipeline& Pipeline,
-			const Mesh& Geometry,
-			const DrawIndexedArguments& Arguments,
-			std::span<const BindingSet* const> BindingSets = {});
+		SamplerCreateResult CreateSampler(const SamplerDesc& Description) override;
+		BindingLayoutCreateResult CreateBindingLayout(const BindingLayoutDesc& Description) override;
+		BindingSetCreateResult CreateBindingSet(const BindingSetDesc& Description) override;
+		ShaderCreateResult CreateShader(const ShaderDesc& Description, std::span<const std::byte> Bytecode) override;
+		GraphicsPipelineCreateResult CreateGraphicsPipeline(const GraphicsPipelineDesc& Description) override;
+		GraphicsResult Draw(const GraphicsPipeline& Pipeline, const Buffer& VertexBuffer, const DrawArguments& Arguments,
+			std::span<const BindingSet* const> BindingSets = {}) override;
+		GraphicsResult Draw(const GraphicsPipeline& Pipeline, const Mesh& Geometry, const DrawArguments& Arguments,
+			std::span<const BindingSet* const> BindingSets = {}) override;
+		GraphicsResult DrawIndexed(const GraphicsPipeline& Pipeline, const Mesh& Geometry, const DrawIndexedArguments& Arguments,
+			std::span<const BindingSet* const> BindingSets = {}) override;
 		GraphicsResult DrawIndexed(
 			const GraphicsPipeline& Pipeline,
 			const Buffer& VertexBuffer,

@@ -3,6 +3,7 @@
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorStyle.h"
 #include "EditorConsoleHistory.h"
+#include "EditorConsoleSeverity.h"
 
 #include <imgui.h>
 #include <spdlog/sinks/base_sink.h>
@@ -21,31 +22,26 @@ namespace PulseForgeEditor
 {
 	namespace
 	{
-		EditorConsoleSeverity ConvertSeverity(spdlog::level::level_enum Level)
-		{
-			switch (Level)
-			{
-			case spdlog::level::trace: return EditorConsoleSeverity::Trace;
-			case spdlog::level::debug: return EditorConsoleSeverity::Debug;
-			case spdlog::level::warn: return EditorConsoleSeverity::Warning;
-			case spdlog::level::err: return EditorConsoleSeverity::Error;
-			case spdlog::level::critical: return EditorConsoleSeverity::Critical;
-			default: return EditorConsoleSeverity::Unknown;
-			}
-		}
-
 		const char* SeverityName(EditorConsoleSeverity Severity)
 		{
 			switch (Severity)
 			{
-			case EditorConsoleSeverity::Unknown: return "unknown";
-			case EditorConsoleSeverity::Trace: return "trace";
-			case EditorConsoleSeverity::Debug: return "debug";
-			case EditorConsoleSeverity::Info: return "info";
-			case EditorConsoleSeverity::Warning: return "warning";
-			case EditorConsoleSeverity::Error: return "error";
-			case EditorConsoleSeverity::Critical: return "critical";
-			default: return "unknown";
+			case EditorConsoleSeverity::Unknown:
+				return "unknown";
+			case EditorConsoleSeverity::Trace:
+				return "trace";
+			case EditorConsoleSeverity::Debug:
+				return "debug";
+			case EditorConsoleSeverity::Info:
+				return "info";
+			case EditorConsoleSeverity::Warning:
+				return "warning";
+			case EditorConsoleSeverity::Error:
+				return "error";
+			case EditorConsoleSeverity::Critical:
+				return "critical";
+			default:
+				return "unknown";
 			}
 		}
 
@@ -66,23 +62,21 @@ namespace PulseForgeEditor
 		class EditorConsoleSink final : public spdlog::sinks::base_sink<std::mutex>
 		{
 		public:
-			explicit EditorConsoleSink(EditorConsoleHistory& History) : m_History(History) { }
+			explicit EditorConsoleSink(EditorConsoleHistory& History) : m_History(History) {}
 
 		protected:
 			void sink_it_(const spdlog::details::log_msg& Message) override
 			{
-				m_History.Append(
-					std::string_view(Message.logger_name.data(), Message.logger_name.size()),
-					ConvertSeverity(Message.level),
-					std::string_view(Message.payload.data(), Message.payload.size()));
+				m_History.Append(std::string_view(Message.logger_name.data(), Message.logger_name.size()),
+					Detail::ConvertConsoleSeverity(Message.level), std::string_view(Message.payload.data(), Message.payload.size()));
 			}
 
-			void flush_() override { }
+			void flush_() override {}
 
 		private:
 			EditorConsoleHistory& m_History;
 		};
-	}
+	} // namespace
 
 	struct EditorConsolePanel::Impl final
 	{
@@ -101,11 +95,9 @@ namespace PulseForgeEditor
 
 		void Refresh()
 		{
-			if (!Sink)
-				return;
+			if (!Sink) return;
 			uint64_t CurrentRevision = Revision;
-			if (History.CopyMessagesIfChanged(Revision, Messages, CurrentRevision))
-				Revision = CurrentRevision;
+			if (History.CopyMessagesIfChanged(Revision, Messages, CurrentRevision)) Revision = CurrentRevision;
 		}
 
 		[[nodiscard]] std::string FormatMessages() const
@@ -123,7 +115,9 @@ namespace PulseForgeEditor
 		}
 	};
 
-	EditorConsolePanel::EditorConsolePanel() : m_Impl(std::make_unique<Impl>()) { }
+	EditorConsolePanel::EditorConsolePanel() : m_Impl(std::make_unique<Impl>())
+	{
+	}
 
 	EditorConsolePanel::~EditorConsolePanel()
 	{
@@ -142,14 +136,12 @@ namespace PulseForgeEditor
 				m_Impl->Loggers.push_back(std::move(Logger));
 			}
 		}
-		if (m_Impl->Loggers.empty())
-			m_Impl->Sink.reset();
+		if (m_Impl->Loggers.empty()) m_Impl->Sink.reset();
 	}
 
 	void EditorConsolePanel::Detach() noexcept
 	{
-		if (!m_Impl->Sink)
-			return;
+		if (!m_Impl->Sink) return;
 		const std::shared_ptr<spdlog::sinks::sink> Sink = m_Impl->Sink;
 		for (const std::shared_ptr<spdlog::logger>& Logger : m_Impl->Loggers)
 			std::erase(Logger->sinks(), Sink);
@@ -181,36 +173,30 @@ namespace PulseForgeEditor
 				State.SelectableAutoScrollSuspended = false;
 			}
 			ImGui::SameLine();
-			if (ImGui::Checkbox("Auto-scroll", &State.AutoScroll) && State.AutoScroll)
-				State.SelectableAutoScrollSuspended = false;
+			if (ImGui::Checkbox("Auto-scroll", &State.AutoScroll) && State.AutoScroll) State.SelectableAutoScrollSuspended = false;
 			ImGui::SameLine();
 			ImGui::BeginDisabled(State.Messages.empty());
 			if (ImGui::Button("Copy All"))
 			{
 				const std::string Formatted = State.FormatMessages();
-				if (!Formatted.empty())
-					ImGui::SetClipboardText(Formatted.c_str());
+				if (!Formatted.empty()) ImGui::SetClipboardText(Formatted.c_str());
 			}
 			ImGui::EndDisabled();
 			ImGui::SameLine();
-			if (ImGui::Checkbox("Select text", &State.SelectableView))
-				State.SelectableTextInteracting = false;
+			if (ImGui::Checkbox("Select text", &State.SelectableView)) State.SelectableTextInteracting = false;
 		}
 		Style.EndToolbar();
 
 		if (ImGui::BeginChild("ConsoleMessages", ImVec2(0.0f, 0.0f), true, ImGuiWindowFlags_HorizontalScrollbar))
 		{
 			[[maybe_unused]] const auto MonospaceFont = Style.PushMonospaceFont();
-			if (State.Messages.empty())
-				Style.EmptyState(EditorIcon::Terminal, "No console messages yet.");
+			if (State.Messages.empty()) Style.EmptyState(EditorIcon::Terminal, "No console messages yet.");
 			else if (State.SelectableView)
 			{
 				const bool TextViewHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
-				if (TextViewHovered && ImGui::GetIO().MouseWheel != 0.0f)
-					State.SelectableAutoScrollSuspended = true;
+				if (TextViewHovered && ImGui::GetIO().MouseWheel != 0.0f) State.SelectableAutoScrollSuspended = true;
 				const bool CanReplaceText = !State.SelectableTextInteracting;
-				const bool TextNeedsRefresh = !State.SelectableTextInitialized ||
-					State.SelectableTextRevision != State.Revision;
+				const bool TextNeedsRefresh = !State.SelectableTextInitialized || State.SelectableTextRevision != State.Revision;
 				const bool TextChanged = CanReplaceText && TextNeedsRefresh;
 				if (TextChanged)
 				{
@@ -222,23 +208,17 @@ namespace PulseForgeEditor
 					ImGui::SetNextWindowScroll(ImVec2(-1.0f, FLT_MAX));
 
 				const ImVec2 TextViewSize = ImGui::GetContentRegionAvail();
-				ImGui::InputTextMultiline(
-					"##ConsoleSelectableText",
-					State.SelectableText.data(),
-					State.SelectableText.size() + 1,
-					TextViewSize,
-					ImGuiInputTextFlags_ReadOnly);
+				ImGui::InputTextMultiline("##ConsoleSelectableText", State.SelectableText.data(), State.SelectableText.size() + 1,
+					TextViewSize, ImGuiInputTextFlags_ReadOnly);
 				State.SelectableTextInteracting = ImGui::IsItemActive();
 			}
 			else
 			{
 				const bool WasAtBottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 2.0f;
 				const float SourceWidth = std::clamp(ImGui::GetContentRegionAvail().x * 0.20f, 90.0f, 156.0f);
-				if (ImGui::BeginTable(
-					"ConsoleMessageRows",
-					3,
-					ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
-					ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_NoSavedSettings))
+				if (ImGui::BeginTable("ConsoleMessageRows", 3,
+						ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+							ImGuiTableFlags_NoSavedSettings))
 				{
 					ImGui::TableSetupColumn("Severity", ImGuiTableColumnFlags_WidthFixed, 88.0f);
 					ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthFixed, SourceWidth);
@@ -258,15 +238,11 @@ namespace PulseForgeEditor
 							const float RowHeight = ImGui::GetTextLineHeightWithSpacing();
 							char SeverityLabel[16]{};
 							std::snprintf(SeverityLabel, sizeof(SeverityLabel), "[%s]", SeverityName(Message.Severity));
-							ImGui::Selectable(
-								"##ConsoleMessageRow",
-								false,
-								ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
-								ImVec2(0.0f, RowHeight));
+							ImGui::Selectable("##ConsoleMessageRow", false,
+								ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap, ImVec2(0.0f, RowHeight));
 							if (ImGui::BeginPopupContextItem("ConsoleEntryContextMenu"))
 							{
-								if (ImGui::MenuItem("Copy Message"))
-									ImGui::SetClipboardText(Message.Text.c_str());
+								if (ImGui::MenuItem("Copy Message")) ImGui::SetClipboardText(Message.Text.c_str());
 								if (ImGui::MenuItem("Copy Entry"))
 								{
 									const std::string Formatted = State.FormatMessage(Message);
@@ -285,18 +261,16 @@ namespace PulseForgeEditor
 								ImGui::SetTooltip("%s", Message.Logger.c_str());
 							ImGui::TableNextColumn();
 							ImGui::TextUnformatted(Message.Text.data(), Message.Text.data() + Message.Text.size());
-							if (ImGui::IsItemHovered())
-								ImGui::SetTooltip("%s", Message.Text.c_str());
+							if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", Message.Text.c_str());
 							ImGui::PopID();
 							ImGui::PopID();
 						}
 					}
 					ImGui::EndTable();
 				}
-				if (State.AutoScroll && WasAtBottom)
-					ImGui::SetScrollHereY(1.0f);
+				if (State.AutoScroll && WasAtBottom) ImGui::SetScrollHereY(1.0f);
 			}
 		}
 		ImGui::EndChild();
 	}
-}
+} // namespace PulseForgeEditor

@@ -4,15 +4,11 @@
 
 namespace PulseForgeEditor
 {
-	EditorSceneTransitionQueue::RequestResult EditorSceneTransitionQueue::Request(
-		bool SceneDirty,
-		Action Continuation)
+	EditorSceneTransitionQueue::RequestResult EditorSceneTransitionQueue::Request(bool SceneDirty, Action Continuation)
 	{
-		if (!Continuation || m_PendingAction)
-			return {};
+		if (!Continuation || m_PendingAction) return {};
 
-		if (!SceneDirty)
-			return { RequestStatus::Ready, std::move(Continuation) };
+		if (!SceneDirty) return { RequestStatus::Ready, std::move(Continuation) };
 
 		m_PendingAction = std::move(Continuation);
 		return { RequestStatus::AwaitingDecision, {} };
@@ -20,8 +16,7 @@ namespace PulseForgeEditor
 
 	std::optional<EditorSceneTransitionQueue::Action> EditorSceneTransitionQueue::Resolve(bool SceneChangesResolved)
 	{
-		if (!SceneChangesResolved || !m_PendingAction)
-			return std::nullopt;
+		if (!SceneChangesResolved || !m_PendingAction) return std::nullopt;
 
 		return std::exchange(m_PendingAction, {});
 	}
@@ -30,4 +25,4 @@ namespace PulseForgeEditor
 	{
 		m_PendingAction = {};
 	}
-}
+} // namespace PulseForgeEditor

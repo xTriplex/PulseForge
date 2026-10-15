@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Assets/AssetRegistry.h"
+#include "Renderer/RenderDevice.h"
 #include "Renderer/Texture.h"
 
 #include <cstddef>
@@ -13,8 +14,6 @@
 
 namespace PulseForge
 {
-	class Application;
-
 	enum class TextureAssetErrorCode : uint8_t
 	{
 		AssetNotFound,
@@ -31,12 +30,12 @@ namespace PulseForge
 		std::string Message;
 	};
 
-	// Per-project runtime GPU cache. Application, project registry, and renderer must outlive this cache.
+	// Per-project runtime GPU cache. The rendering device and project registry must outlive this cache.
 	// Returned texture references remain valid until Clear() or cache destruction. The cache is not thread-safe.
 	class TextureAssetCache final
 	{
 	public:
-		TextureAssetCache(Application& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry);
+		TextureAssetCache(RenderDevice& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry);
 		~TextureAssetCache();
 		TextureAssetCache(const TextureAssetCache&) = delete;
 		TextureAssetCache& operator=(const TextureAssetCache&) = delete;
@@ -44,8 +43,7 @@ namespace PulseForge
 		TextureAssetCache& operator=(TextureAssetCache&&) = delete;
 
 		[[nodiscard]] std::expected<std::reference_wrapper<const Texture>, TextureAssetError> GetOrLoad(
-			const AssetID& Asset,
-			TextureFormat Format = TextureFormat::RGBA8_Srgb);
+			const AssetID& Asset, TextureFormat Format = TextureFormat::RGBA8_Srgb);
 		void Clear() noexcept;
 		[[nodiscard]] size_t GetLoadedCount() const noexcept;
 
@@ -63,9 +61,9 @@ namespace PulseForge
 			[[nodiscard]] size_t operator()(const CacheKey& Key) const noexcept;
 		};
 
-		Application& m_Runtime;
+		RenderDevice& m_Runtime;
 		std::filesystem::path m_ProjectRoot;
 		const AssetRegistry& m_Registry;
 		std::unordered_map<CacheKey, TextureHandle, CacheKeyHash> m_Textures;
 	};
-}
+} // namespace PulseForge

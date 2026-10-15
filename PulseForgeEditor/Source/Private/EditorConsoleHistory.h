@@ -37,9 +37,7 @@ namespace PulseForgeEditor
 
 		void Append(std::string_view Logger, EditorConsoleSeverity Severity, std::string_view Text);
 		[[nodiscard]] bool CopyMessagesIfChanged(
-			uint64_t PreviousRevision,
-			std::vector<EditorConsoleMessage>& Destination,
-			uint64_t& CurrentRevision) const;
+			uint64_t PreviousRevision, std::vector<EditorConsoleMessage>& Destination, uint64_t& CurrentRevision) const;
 		void Clear();
 
 	private:
@@ -48,4 +46,4 @@ namespace PulseForgeEditor
 		uint64_t m_Revision = 0;
 		uint64_t m_NextSequence = 0;
 	};
-}
+} // namespace PulseForgeEditor

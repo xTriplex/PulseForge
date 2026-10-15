@@ -16,8 +16,7 @@ namespace
 		auto Ready = Queue.Request(false, [&] { ++Continuations; });
 		PF_CHECK(Tests, Ready.Status == EditorSceneTransitionQueue::RequestStatus::Ready);
 		PF_CHECK(Tests, static_cast<bool>(Ready.ReadyAction));
-		if (Ready.ReadyAction)
-			Ready.ReadyAction();
+		if (Ready.ReadyAction) Ready.ReadyAction();
 		PF_CHECK(Tests, Continuations == 1 && !Queue.HasPendingDecision());
 
 		auto Pending = Queue.Request(true, [&] { ++Continuations; });
@@ -29,8 +28,7 @@ namespace
 		PF_CHECK(Tests, Queue.HasPendingDecision() && Continuations == 1);
 		auto Resolved = Queue.Resolve(true);
 		PF_CHECK(Tests, Resolved.has_value() && !Queue.HasPendingDecision());
-		if (Resolved && *Resolved)
-			(*Resolved)();
+		if (Resolved && *Resolved) (*Resolved)();
 		PF_CHECK(Tests, Continuations == 2);
 		PF_CHECK(Tests, !Queue.Resolve(true));
 
@@ -46,8 +44,7 @@ namespace
 	{
 	public:
 		[[nodiscard]] std::expected<void, std::string> RunEditorSceneEdit(
-			std::string Description,
-			std::function<std::expected<void, PulseForge::SceneError>()> Operation) override
+			std::string Description, std::function<std::expected<void, PulseForge::SceneError>()> Operation) override
 		{
 			++EditCount;
 			EditDescriptions.push_back(std::move(Description));
@@ -57,8 +54,7 @@ namespace
 				return std::unexpected("injected visibility edit failure");
 			}
 			auto Result = Operation();
-			if (!Result)
-				return std::unexpected(Result.error().Message);
+			if (!Result) return std::unexpected(Result.error().Message);
 			return {};
 		}
 
@@ -75,12 +71,10 @@ namespace
 	class TestEditorSceneEntityCommandActions final : public PulseForgeEditor::EditorSceneEntityCommandActions
 	{
 	public:
-		explicit TestEditorSceneEntityCommandActions(PulseForgeEditor::EditorSceneWorkspaceState& Workspace)
-			: m_Workspace(Workspace) { }
+		explicit TestEditorSceneEntityCommandActions(PulseForgeEditor::EditorSceneWorkspaceState& Workspace) : m_Workspace(Workspace) {}
 
 		[[nodiscard]] std::expected<void, std::string> RunEditorSceneEdit(
-			std::string Description,
-			std::function<std::expected<void, PulseForge::SceneError>()> Operation) override
+			std::string Description, std::function<std::expected<void, PulseForge::SceneError>()> Operation) override
 		{
 			++EditCount;
 			EditDescriptions.push_back(std::move(Description));
@@ -90,8 +84,7 @@ namespace
 				return std::unexpected("injected scene command failure");
 			}
 			auto Result = Operation();
-			if (!Result)
-				return std::unexpected(Result.error().Message);
+			if (!Result) return std::unexpected(Result.error().Message);
 			return {};
 		}
 
@@ -104,10 +97,8 @@ namespace
 		}
 		void SelectSingleEditorEntity(std::optional<PulseForge::UUID> Identifier) override
 		{
-			if (Identifier)
-				m_Workspace.Selection().SelectSingle(*Identifier);
-			else
-				m_Workspace.Selection().Clear();
+			if (Identifier) m_Workspace.Selection().SelectSingle(*Identifier);
+			else m_Workspace.Selection().Clear();
 		}
 
 		PulseForgeEditor::EditorSceneWorkspaceState& m_Workspace;
@@ -131,20 +122,17 @@ namespace
 		const UUID Other{ 55, 5 };
 		const UUID ExternalParent{ 66, 6 };
 		const std::string Source = Json{
-			{ "entities", Json::array({
-				Json{ { "uuid", Root.ToString() }, { "tag", Json{ { "name", "Root" } } },
-					{ "camera", Json{ { "primary", true } } } },
-				Json{ { "uuid", Child.ToString() }, { "tag", Json{ { "name", "Child" } } },
-					{ "parent", Root.ToString() }, { "audioListener", Json{ { "primary", true } } } },
-				Json{ { "uuid", Other.ToString() }, { "tag", Json{ { "name", "Other" } } } }
-			}) }
+			{ "entities", Json::array({ Json{ { "uuid", Root.ToString() }, { "tag", Json{ { "name", "Root" } } },
+											{ "camera", Json{ { "primary", true } } } },
+							  Json{ { "uuid", Child.ToString() }, { "tag", Json{ { "name", "Child" } } }, { "parent", Root.ToString() },
+								  { "audioListener", Json{ { "primary", true } } } },
+							  Json{ { "uuid", Other.ToString() }, { "tag", Json{ { "name", "Other" } } } } }) }
 		}.dump();
 		const std::array Roots{ Root };
 		const std::array Included{ Root, Child };
 		auto ClipboardResult = EditorEntityClipboard::Capture(Project, SourceScene, Roots, Included, Source);
 		PF_CHECK(Tests, ClipboardResult.has_value());
-		if (!ClipboardResult)
-			return;
+		if (!ClipboardResult) return;
 		EditorEntityClipboard Clipboard = std::move(*ClipboardResult);
 		PF_CHECK(Tests, Clipboard.HasData());
 		PF_CHECK(Tests, Clipboard.CanPaste(Project));
@@ -154,17 +142,12 @@ namespace
 		const UUID NewRoot{ 88, 8 };
 		const UUID NewChild{ 99, 9 };
 		const std::string Destination = Json{
-			{ "entities", Json::array({
-				Json{ { "uuid", Existing.ToString() }, { "tag", Json{ { "name", "Root Copy" } } } }
-			}) }
+			{ "entities", Json::array({ Json{ { "uuid", Existing.ToString() }, { "tag", Json{ { "name", "Root Copy" } } } } }) }
 		}.dump();
 		const std::array Generated{ Existing, NewRoot, NewChild };
 		size_t GeneratedIndex = 0;
-		auto Prepared = Clipboard.PreparePaste(Project, SourceScene, Destination, {}, [&]()
-			-> std::expected<UUID, std::string>
-		{
-			return Generated[GeneratedIndex++];
-		});
+		auto Prepared = Clipboard.PreparePaste(
+			Project, SourceScene, Destination, {}, [&]() -> std::expected<UUID, std::string> { return Generated[GeneratedIndex++]; });
 		PF_CHECK(Tests, Prepared.has_value());
 		if (Prepared)
 		{
@@ -180,47 +163,37 @@ namespace
 			PF_CHECK(Tests, Pasted["entities"][2]["audioListener"]["primary"] == false);
 		}
 		size_t CrossSceneIdentifierIndex = 0;
-		PF_CHECK(Tests, Clipboard.PreparePaste(Project, AssetID{ 23, 2 }, Destination, {}, [&]()
-			-> std::expected<UUID, std::string>
-		{
-			return Generated[CrossSceneIdentifierIndex++ + 1];
-		}).has_value());
+		PF_CHECK(Tests, Clipboard
+							.PreparePaste(Project, AssetID{ 23, 2 }, Destination, {},
+								[&]() -> std::expected<UUID, std::string> { return Generated[CrossSceneIdentifierIndex++ + 1]; })
+							.has_value());
 		PF_CHECK(Tests, !Clipboard.PreparePaste(UUID{ 12, 1 }, SourceScene, Destination, {}).has_value());
-		PF_CHECK(Tests, !Clipboard.PreparePaste(Project, SourceScene, Destination, {}, []()
-			-> std::expected<UUID, std::string>
-		{
-			return std::unexpected("identifier generation failed");
-		}).has_value());
+		PF_CHECK(Tests, !Clipboard
+							.PreparePaste(Project, SourceScene, Destination, {},
+								[]() -> std::expected<UUID, std::string> { return std::unexpected("identifier generation failed"); })
+							.has_value());
 
 		const std::string ExternalSource = Json{
-			{ "entities", Json::array({
-				Json{ { "uuid", ExternalParent.ToString() }, { "tag", Json{ { "name", "Parent" } } } },
-				Json{ { "uuid", Other.ToString() }, { "tag", Json{ { "name", "Child" } } },
-					{ "parent", ExternalParent.ToString() } }
-			}) }
+			{ "entities", Json::array({ Json{ { "uuid", ExternalParent.ToString() }, { "tag", Json{ { "name", "Parent" } } } },
+							  Json{ { "uuid", Other.ToString() }, { "tag", Json{ { "name", "Child" } } },
+								  { "parent", ExternalParent.ToString() } } }) }
 		}.dump();
 		const std::array ExternalRoots{ Other };
 		const std::array ExternalIncluded{ Other };
-		auto ExternalClipboard = EditorEntityClipboard::Capture(
-			Project, SourceScene, ExternalRoots, ExternalIncluded, ExternalSource);
+		auto ExternalClipboard = EditorEntityClipboard::Capture(Project, SourceScene, ExternalRoots, ExternalIncluded, ExternalSource);
 		PF_CHECK(Tests, ExternalClipboard.has_value());
 		if (ExternalClipboard)
 		{
 			const std::string TargetWithoutParent = Json{ { "entities", Json::array() } }.dump();
-			PF_CHECK(Tests, !ExternalClipboard->PreparePaste(
-				Project, AssetID{ 23, 2 }, TargetWithoutParent, {}).has_value());
-			const std::string TargetWithParent = Json{
-				{ "entities", Json::array({ Json{ { "uuid", ExternalParent.ToString() } } }) }
-			}.dump();
-			PF_CHECK(Tests, ExternalClipboard->PreparePaste(
-				Project, SourceScene, TargetWithParent, {}).has_value());
+			PF_CHECK(Tests, !ExternalClipboard->PreparePaste(Project, AssetID{ 23, 2 }, TargetWithoutParent, {}).has_value());
+			const std::string TargetWithParent =
+				Json{ { "entities", Json::array({ Json{ { "uuid", ExternalParent.ToString() } } }) } }.dump();
+			PF_CHECK(Tests, ExternalClipboard->PreparePaste(Project, SourceScene, TargetWithParent, {}).has_value());
 		}
 
 		const std::string AssetSource = Json{
 			{ "entities", Json::array({ Json{
-				{ "uuid", Other.ToString() },
-				{ "meshRenderer", Json{ { "meshAsset", UUID{ 101, 10 }.ToString() } } }
-			} }) }
+							  { "uuid", Other.ToString() }, { "meshRenderer", Json{ { "meshAsset", UUID{ 101, 10 }.ToString() } } } } }) }
 		}.dump();
 		const std::array AssetRoots{ Other };
 		auto AssetClipboard = EditorEntityClipboard::Capture(Project, SourceScene, AssetRoots, AssetRoots, AssetSource);
@@ -228,13 +201,10 @@ namespace
 		if (AssetClipboard)
 		{
 			const std::string EmptyScene = Json{ { "entities", Json::array() } }.dump();
-			PF_CHECK(Tests, !AssetClipboard->PreparePaste(
-				Project, SourceScene, EmptyScene, [](const UUID&) { return false; }).has_value());
-			PF_CHECK(Tests, AssetClipboard->PreparePaste(
-				Project, SourceScene, EmptyScene, [](const UUID&) { return true; }).has_value());
+			PF_CHECK(Tests, !AssetClipboard->PreparePaste(Project, SourceScene, EmptyScene, [](const UUID&) { return false; }).has_value());
+			PF_CHECK(Tests, AssetClipboard->PreparePaste(Project, SourceScene, EmptyScene, [](const UUID&) { return true; }).has_value());
 		}
-		PF_CHECK(Tests, !EditorEntityClipboard::Capture(
-			Project, SourceScene, Roots, Included, "not-json").has_value());
+		PF_CHECK(Tests, !EditorEntityClipboard::Capture(Project, SourceScene, Roots, Included, "not-json").has_value());
 	}
 
 	void TestEditorSceneVisibilityCommands(TestRunner& Tests)
@@ -247,8 +217,7 @@ namespace
 		auto Grandchild = SceneValue.CreateEntity("Grandchild");
 		auto Separate = SceneValue.CreateEntity("Separate");
 		PF_CHECK(Tests, Root && Child && Grandchild && Separate);
-		if (!Root || !Child || !Grandchild || !Separate)
-			return;
+		if (!Root || !Child || !Grandchild || !Separate) return;
 		PF_CHECK(Tests, Child->SetParent(*Root));
 		PF_CHECK(Tests, Grandchild->SetParent(*Child));
 
@@ -261,8 +230,7 @@ namespace
 		PF_CHECK(Tests, Actions.EditCount == 1 && Actions.EditDescriptions.back() == "Hide Selected");
 		PF_CHECK(Tests, Actions.Statuses.size() == 1);
 
-		const auto Hidden = EditorSceneVisibilityCommands::GetEffectivelyHiddenEntities(
-			&SceneValue, Workspace.Visibility());
+		const auto Hidden = EditorSceneVisibilityCommands::GetEffectivelyHiddenEntities(&SceneValue, Workspace.Visibility());
 		PF_CHECK(Tests, Hidden.size() == 2);
 		PF_CHECK(Tests, std::find(Hidden.begin(), Hidden.end(), Child->GetUUID()) != Hidden.end());
 		PF_CHECK(Tests, std::find(Hidden.begin(), Hidden.end(), Grandchild->GetUUID()) != Hidden.end());
@@ -285,8 +253,7 @@ namespace
 		Actions.FailNextEdit = true;
 		Commands.HideSelectedEntities(&SceneValue, Workspace, false, Actions);
 		PF_CHECK(Tests, Workspace.Visibility().IsLocallyVisible(Child->GetUUID()));
-		PF_CHECK(Tests, Actions.Errors.size() == 1 &&
-			Actions.Errors.front().find("injected visibility edit failure") != std::string::npos);
+		PF_CHECK(Tests, Actions.Errors.size() == 1 && Actions.Errors.front().find("injected visibility edit failure") != std::string::npos);
 
 		const size_t EditsBeforeRuntime = Actions.EditCount;
 		Commands.HideSelectedEntities(&SceneValue, Workspace, true, Actions);
@@ -304,8 +271,7 @@ namespace
 		auto Child = SceneValue.CreateEntity("Child");
 		auto Separate = SceneValue.CreateEntity("Separate");
 		PF_CHECK(Tests, Root && Child && Separate);
-		if (!Root || !Child || !Separate)
-			return;
+		if (!Root || !Child || !Separate) return;
 		PF_CHECK(Tests, Child->SetParent(*Root));
 		const UUID RootID = Root->GetUUID();
 		const UUID ChildID = Child->GetUUID();
@@ -336,50 +302,41 @@ namespace
 		PF_CHECK(Tests, Actions.EditDescriptions.back() == "Create Entity");
 
 		Workspace.Selection().SelectSingle(RootID);
-		PF_CHECK(Tests, Commands.CopySelectedEntities(
-			&SceneValue, ProjectID, SceneAsset, Workspace, Actions));
+		PF_CHECK(Tests, Commands.CopySelectedEntities(&SceneValue, ProjectID, SceneAsset, Workspace, Actions));
 		PF_CHECK(Tests, Commands.CanPaste(ProjectID));
 		const size_t BeforePaste = SceneValue.GetEntityCount();
-		Commands.PasteEntities(&SceneValue, ProjectID, SceneAsset, Workspace, false,
-			[](const UUID&) { return true; }, Actions);
+		Commands.PasteEntities(&SceneValue, ProjectID, SceneAsset, Workspace, false, [](const UUID&) { return true; }, Actions);
 		PF_CHECK(Tests, SceneValue.GetEntityCount() == BeforePaste + 2);
 		PF_CHECK(Tests, Workspace.Selection().GetEntities().size() == 1);
 		PF_CHECK(Tests, Actions.EditDescriptions.back() == "Paste Entities");
 
 		const size_t BeforeRejectedPaste = SceneValue.GetEntityCount();
-		Commands.PasteEntities(&SceneValue, UUID{ 99, 9 }, SceneAsset, Workspace, false,
-			[](const UUID&) { return true; }, Actions);
+		Commands.PasteEntities(&SceneValue, UUID{ 99, 9 }, SceneAsset, Workspace, false, [](const UUID&) { return true; }, Actions);
 		PF_CHECK(Tests, SceneValue.GetEntityCount() == BeforeRejectedPaste);
 		PF_CHECK(Tests, Actions.Warnings.size() == 1);
-		Commands.PasteEntities(&SceneValue, ProjectID, SceneAsset, Workspace, true,
-			[](const UUID&) { return true; }, Actions);
+		Commands.PasteEntities(&SceneValue, ProjectID, SceneAsset, Workspace, true, [](const UUID&) { return true; }, Actions);
 		PF_CHECK(Tests, SceneValue.GetEntityCount() == BeforeRejectedPaste);
 
 		const auto ChildAfterPaste = SceneValue.FindEntity(ChildID);
 		const auto SeparateAfterPaste = SceneValue.FindEntity(SeparateID);
 		PF_CHECK(Tests, ChildAfterPaste && SeparateAfterPaste);
-		if (!ChildAfterPaste || !SeparateAfterPaste)
-			return;
+		if (!ChildAfterPaste || !SeparateAfterPaste) return;
 		Workspace.Selection().SelectSingle(ChildID);
 		Commands.ReparentEntity(&SceneValue, ChildID, SeparateID, Actions);
 		auto ReparentedChild = SceneValue.FindEntity(ChildID);
 		PF_CHECK(Tests, ReparentedChild.has_value());
-		if (!ReparentedChild)
-			return;
+		if (!ReparentedChild) return;
 		const auto ReparentedParent = ReparentedChild->GetParent();
-		PF_CHECK(Tests, ReparentedParent && ReparentedParent->has_value() &&
-			(**ReparentedParent).GetUUID() == SeparateID);
+		PF_CHECK(Tests, ReparentedParent && ReparentedParent->has_value() && (**ReparentedParent).GetUUID() == SeparateID);
 		Commands.ReparentEntity(&SceneValue, ChildID, std::nullopt, Actions);
 		ReparentedChild = SceneValue.FindEntity(ChildID);
 		PF_CHECK(Tests, ReparentedChild.has_value());
-		if (!ReparentedChild)
-			return;
+		if (!ReparentedChild) return;
 		const auto ClearedParent = ReparentedChild->GetParent();
 		PF_CHECK(Tests, ClearedParent && !ClearedParent->has_value());
 		const auto RootAfterPaste = SceneValue.FindEntity(RootID);
 		PF_CHECK(Tests, RootAfterPaste.has_value());
-		if (!RootAfterPaste)
-			return;
+		if (!RootAfterPaste) return;
 		PF_CHECK(Tests, ReparentedChild->SetParent(*RootAfterPaste));
 		const size_t BeforeCut = SceneValue.GetEntityCount();
 		Workspace.Selection().SelectSingle(SeparateID);
@@ -412,20 +369,17 @@ namespace
 		auto Grandchild = SceneValue.CreateEntity("Grandchild");
 		auto Separate = SceneValue.CreateEntity("Separate");
 		PF_CHECK(Tests, Root && Child && Grandchild && Separate);
-		if (!Root || !Child || !Grandchild || !Separate)
-			return;
+		if (!Root || !Child || !Grandchild || !Separate) return;
 		PF_CHECK(Tests, Child->SetParent(*Root));
 		PF_CHECK(Tests, Grandchild->SetParent(*Child));
 
 		const std::array Selected{ Root->GetUUID(), Child->GetUUID(), Separate->GetUUID() };
 		const auto Roots = EditorSceneHierarchyOperations::GetTopLevelSelection(SceneValue, Selected);
 		PF_CHECK(Tests, Roots && Roots->size() == 2);
-		if (!Roots)
-			return;
+		if (!Roots) return;
 		PF_CHECK(Tests, (*Roots)[0].GetUUID() == Root->GetUUID());
 		PF_CHECK(Tests, (*Roots)[1].GetUUID() == Separate->GetUUID());
-		const auto Subtree = EditorSceneHierarchyOperations::CollectSubtrees(
-			std::span<const Entity>(&(*Roots)[0], 1));
+		const auto Subtree = EditorSceneHierarchyOperations::CollectSubtrees(std::span<const Entity>(&(*Roots)[0], 1));
 		PF_CHECK(Tests, Subtree && Subtree->size() == 3);
 		if (Subtree)
 		{
@@ -439,17 +393,14 @@ namespace
 		const auto Duplicated = EditorSceneHierarchyOperations::DuplicateSubtrees(SceneValue, DuplicationRoots);
 		PF_CHECK(Tests, Duplicated && Duplicated->size() == 1);
 		PF_CHECK(Tests, SceneValue.GetEntityCount() == 7);
-		if (!Duplicated || Duplicated->empty())
-			return;
+		if (!Duplicated || Duplicated->empty()) return;
 		const auto DuplicatedRoot = SceneValue.FindEntity(Duplicated->front());
 		PF_CHECK(Tests, DuplicatedRoot.has_value());
-		if (!DuplicatedRoot)
-			return;
+		if (!DuplicatedRoot) return;
 		PF_CHECK(Tests, DuplicatedRoot->GetTag()->Name == "Root Copy");
 		const auto DuplicatedChildren = DuplicatedRoot->GetChildren();
 		PF_CHECK(Tests, DuplicatedChildren && DuplicatedChildren->size() == 1);
-		if (!DuplicatedChildren || DuplicatedChildren->empty())
-			return;
+		if (!DuplicatedChildren || DuplicatedChildren->empty()) return;
 		PF_CHECK(Tests, DuplicatedChildren->front().GetTag()->Name == "Child Copy");
 		const auto DuplicatedGrandchildren = DuplicatedChildren->front().GetChildren();
 		PF_CHECK(Tests, DuplicatedGrandchildren && DuplicatedGrandchildren->size() == 1);
@@ -483,8 +434,7 @@ namespace
 		auto Grandchild = SceneValue.CreateEntity("Nested mesh");
 		auto Separate = SceneValue.CreateEntity("Camera rig");
 		PF_CHECK(Tests, Root && Child && Grandchild && Separate);
-		if (!Root || !Child || !Grandchild || !Separate)
-			return;
+		if (!Root || !Child || !Grandchild || !Separate) return;
 		PF_CHECK(Tests, Child->SetParent(*Root));
 		PF_CHECK(Tests, Grandchild->SetParent(*Child));
 
@@ -504,8 +454,7 @@ namespace
 		const auto Second = PulseForge::UUID::Generate();
 		const auto Third = PulseForge::UUID::Generate();
 		PF_CHECK(Tests, First.has_value() && Second.has_value() && Third.has_value());
-		if (!First || !Second || !Third)
-			return;
+		if (!First || !Second || !Third) return;
 
 		EditorSceneWorkspaceState State;
 		State.BeginHierarchyFrame();
@@ -542,24 +491,21 @@ namespace
 		PulseForge::Scene SceneValue;
 		const auto Original = SceneValue.CreateEntity("Original");
 		PF_CHECK(Tests, Original.has_value());
-		if (!Original)
-			return;
+		if (!Original) return;
 
 		EditorSceneWorkspaceState Workspace;
 		Workspace.Selection().SelectSingle(Original->GetUUID());
 		Workspace.Visibility().SetVisible(Original->GetUUID(), false);
 		const auto Snapshot = EditorSceneHistoryState::CaptureSnapshot(SceneValue, Workspace);
 		PF_CHECK(Tests, Snapshot.has_value());
-		if (!Snapshot)
-			return;
+		if (!Snapshot) return;
 
 		EditorSceneHistoryState History;
 		History.Reset(&SceneValue);
 		PF_CHECK(Tests, !History.IsDirty());
 		const auto Additional = SceneValue.CreateEntity("Additional");
 		PF_CHECK(Tests, Additional.has_value());
-		if (!Additional)
-			return;
+		if (!Additional) return;
 		Workspace.Selection().SelectSingle(Additional->GetUUID());
 		Workspace.Visibility().SetVisible(Original->GetUUID(), true);
 		History.UpdateDirty(&SceneValue);
@@ -584,7 +530,7 @@ namespace
 		History.Reset(nullptr);
 		PF_CHECK(Tests, !History.IsDirty());
 	}
-}
+} // namespace
 
 void RunEditorSceneStateTests(TestRunner& Tests)
 {

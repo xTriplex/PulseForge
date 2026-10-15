@@ -4,6 +4,7 @@
 #include "Renderer/Graphics.h"
 #include "Renderer/Binding.h"
 #include "Renderer/EnvironmentLightingTextures.h"
+#include "Renderer/RenderDevice.h"
 #include "Renderer/RenderTarget.h"
 #include "Renderer/DepthCubemap.h"
 #include "Renderer/DirectionalShadowMath.h"
@@ -27,7 +28,6 @@
 
 namespace PulseForge
 {
-	class Application;
 	struct MaterialAssetDesc;
 	class Project;
 	class Scene;
@@ -95,16 +95,14 @@ namespace PulseForge
 		float Strength = 1.15f;
 	};
 
-	// Runtime renderer for opaque, masked, and sorted alpha-blended PBR materials. The Application and unmoved Project must outlive it.
-	// Call PrepareScene before BeginFrame and RenderPreparedScene only during an active renderer frame.
+	// Runtime renderer for opaque, masked, and sorted alpha-blended PBR materials. The device and unmoved Project must outlive it.
+	// Call PrepareScene before the active frame and RenderPreparedScene only during a renderer frame.
 	class PULSEFORGE_API SceneRenderer final
 	{
 	public:
 		static constexpr size_t MaxLocalLights = MaxLocalLightCount;
 		[[nodiscard]] static std::expected<std::unique_ptr<SceneRenderer>, SceneRendererError> Create(
-			Application& Runtime,
-			const Project& SourceProject,
-			const std::filesystem::path& CompiledShaderDirectory);
+			RenderDevice& Runtime, const Project& SourceProject, const std::filesystem::path& CompiledShaderDirectory);
 
 		SceneRenderer(const SceneRenderer&) = delete;
 		SceneRenderer& operator=(const SceneRenderer&) = delete;
@@ -139,7 +137,7 @@ namespace PulseForge
 			float FarClipPlane,
 			std::span<const UUID> ExcludedEntities);
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene();
-		// Begins, clears, renders to, and ends Target during the active Application frame.
+		// Begins, clears, renders to, and ends Target during the active renderer frame.
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedScene(
 			const RenderTarget& Target,
 			const RenderTargetClearValue& ClearValue = {});
@@ -169,7 +167,7 @@ namespace PulseForge
 		class ToneMappingStage;
 		class AmbientOcclusionPass;
 
-		SceneRenderer(Application& Runtime, const Project& SourceProject);
+		SceneRenderer(RenderDevice& Runtime, const Project& SourceProject);
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
 			const std::filesystem::path& CompiledShaderDirectory);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureMaterialBindings(
@@ -265,7 +263,7 @@ namespace PulseForge
 			const ScenePointLight* Point = nullptr;
 		};
 
-		Application& m_Runtime;
+		RenderDevice& m_Runtime;
 		const Project& m_Project;
 		std::unique_ptr<ProjectAssetCaches> m_ProjectAssetCaches;
 		std::unique_ptr<ToneMappingStage> m_ToneMappingStage;

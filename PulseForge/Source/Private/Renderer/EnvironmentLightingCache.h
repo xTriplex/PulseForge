@@ -2,6 +2,7 @@
 
 #include "Assets/AssetRegistry.h"
 #include "Renderer/EnvironmentLighting.h"
+#include "Renderer/RenderDevice.h"
 #include "Renderer/EnvironmentLightingTextures.h"
 
 #include <cstddef>
@@ -20,8 +21,6 @@
 
 namespace PulseForge
 {
-	class Application;
-
 	struct EnvironmentLightingCacheError
 	{
 		AssetID Asset;
@@ -32,16 +31,24 @@ namespace PulseForge
 	class EnvironmentLightingCache final
 	{
 	public:
-		EnvironmentLightingCache(Application& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry);
+		EnvironmentLightingCache(RenderDevice& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry);
 		~EnvironmentLightingCache();
 		EnvironmentLightingCache(const EnvironmentLightingCache&) = delete;
 		EnvironmentLightingCache& operator=(const EnvironmentLightingCache&) = delete;
 		[[nodiscard]] std::expected<std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>, EnvironmentLightingCacheError>
-			GetOrLoad(const AssetID& Asset);
+		GetOrLoad(const AssetID& Asset);
 		[[nodiscard]] size_t GetLoadedCount() const noexcept { return m_Entries.size(); }
 
 	private:
-		enum class EntryState : uint8_t { Queued, Processing, CpuReady, Uploading, Ready, Failed };
+		enum class EntryState : uint8_t
+		{
+			Queued,
+			Processing,
+			CpuReady,
+			Uploading,
+			Ready,
+			Failed
+		};
 		struct Entry
 		{
 			mutable std::mutex Mutex;
@@ -60,10 +67,9 @@ namespace PulseForge
 
 		void WorkerMain(std::stop_token StopToken) noexcept;
 		[[nodiscard]] std::expected<EnvironmentLightingTextures, EnvironmentLightingCacheError> UploadProcessedData(
-			const AssetID& Asset,
-			EnvironmentLightingData Data);
+			const AssetID& Asset, EnvironmentLightingData Data);
 
-		Application& m_Runtime;
+		RenderDevice& m_Runtime;
 		std::filesystem::path m_ProjectRoot;
 		const AssetRegistry& m_Registry;
 		std::unordered_map<AssetID, std::unique_ptr<Entry>, UUIDHash> m_Entries;
@@ -72,4 +78,4 @@ namespace PulseForge
 		std::condition_variable_any m_QueueChanged;
 		std::jthread m_Worker;
 	};
-}
+} // namespace PulseForge

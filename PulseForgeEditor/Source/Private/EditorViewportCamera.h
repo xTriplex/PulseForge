@@ -36,4 +36,4 @@ namespace PulseForgeEditor
 		float m_MoveSpeed = 5.0f;
 		bool m_HasFocusPivot = false;
 	};
-}
+} // namespace PulseForgeEditor

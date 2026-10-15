@@ -25,9 +25,8 @@ namespace
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::Inspector) == EditorDefaultDockRegion::Right);
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::MaterialDetails) == EditorDefaultDockRegion::Right);
 		PF_CHECK(Tests, EditorPanelDescriptors.size() == static_cast<size_t>(EditorPanel::Count));
-		constexpr std::array<std::string_view, static_cast<size_t>(EditorPanel::Count)> StablePanelNames = {
-			"Scene Viewport", "Hierarchy", "Inspector", "Content Browser", "Console", "Scene", "Material Editor"
-		};
+		constexpr std::array<std::string_view, static_cast<size_t>(EditorPanel::Count)> StablePanelNames = { "Scene Viewport", "Hierarchy",
+			"Inspector", "Content Browser", "Console", "Scene", "Material Editor" };
 
 		EditorPanelVisibility Panels;
 		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::SceneViewport));
@@ -45,8 +44,7 @@ namespace
 			PF_CHECK(Tests, !Descriptor.SettingsKey.empty());
 			PF_CHECK(Tests, !Descriptor.WindowName.empty());
 			if (Descriptor.Panel == EditorPanel::MaterialDetails)
-				PF_CHECK(Tests, Descriptor.IsUtilityPanel && !Descriptor.DefaultVisible &&
-					Descriptor.SettingsKey == "MaterialEditor");
+				PF_CHECK(Tests, Descriptor.IsUtilityPanel && !Descriptor.DefaultVisible && Descriptor.SettingsKey == "MaterialEditor");
 			for (size_t OtherIndex = Index + 1; OtherIndex < EditorPanelDescriptors.size(); ++OtherIndex)
 			{
 				PF_CHECK(Tests, Descriptor.SettingsKey != EditorPanelDescriptors[OtherIndex].SettingsKey);
@@ -88,11 +86,12 @@ namespace
 		EditorDeferredOperationQueue Operations;
 		std::vector<int> ExecutionOrder;
 		Operations.Enqueue([&ExecutionOrder] { ExecutionOrder.push_back(1); });
-		Operations.Enqueue([&ExecutionOrder, &Operations]
-		{
-			ExecutionOrder.push_back(2);
-			Operations.Enqueue([&ExecutionOrder] { ExecutionOrder.push_back(4); });
-		});
+		Operations.Enqueue(
+			[&ExecutionOrder, &Operations]
+			{
+				ExecutionOrder.push_back(2);
+				Operations.Enqueue([&ExecutionOrder] { ExecutionOrder.push_back(4); });
+			});
 
 		PF_CHECK(Tests, ExecutionOrder.empty());
 		PF_CHECK(Tests, Operations.Size() == 2);
@@ -129,8 +128,7 @@ namespace
 		const auto MismatchedExtension = ResolveAssetDestinationFilename("Amber.png", Source);
 		PF_CHECK(Tests, !MismatchedExtension && MismatchedExtension.error() == AssetDestinationNameError::ExtensionMismatch);
 		const auto ReservedExtension = ResolveAssetDestinationFilename("Amber.meta", Source);
-		PF_CHECK(Tests, !ReservedExtension &&
-			ReservedExtension.error() == AssetDestinationNameError::ReservedSidecarExtension);
+		PF_CHECK(Tests, !ReservedExtension && ReservedExtension.error() == AssetDestinationNameError::ReservedSidecarExtension);
 		const auto DestinationBreadcrumbs = BuildAssetDestinationBreadcrumbs("Assets/Materials/Props");
 		PF_CHECK(Tests, DestinationBreadcrumbs.size() == 3);
 		PF_CHECK(Tests, DestinationBreadcrumbs[0] == std::filesystem::path("Assets"));
@@ -138,47 +136,40 @@ namespace
 		PF_CHECK(Tests, DestinationBreadcrumbs[2] == std::filesystem::path("Assets/Materials/Props"));
 		const auto RootBreadcrumb = BuildAssetDestinationBreadcrumbs("Assets");
 		PF_CHECK(Tests, RootBreadcrumb.size() == 1 && RootBreadcrumb.front() == std::filesystem::path("Assets"));
-		const auto NewSceneName = ResolveAssetDestinationFilename(
-			"Overview", std::filesystem::path("Assets/Scenes/NewScene.scene"));
+		const auto NewSceneName = ResolveAssetDestinationFilename("Overview", std::filesystem::path("Assets/Scenes/NewScene.scene"));
 		PF_CHECK(Tests, NewSceneName && *NewSceneName == "Overview.scene");
-		const auto SavedSceneName = ResolveAssetDestinationFilename(
-			"Overview Copy.scene", std::filesystem::path("Assets/Scenes/NewScene.scene"));
+		const auto SavedSceneName =
+			ResolveAssetDestinationFilename("Overview Copy.scene", std::filesystem::path("Assets/Scenes/NewScene.scene"));
 		PF_CHECK(Tests, SavedSceneName && *SavedSceneName == "Overview Copy.scene");
-		const auto NewPrefabName = ResolveAssetDestinationFilename(
-			"Environment", std::filesystem::path("Assets/Prefabs/NewPrefab.prefab"));
+		const auto NewPrefabName = ResolveAssetDestinationFilename("Environment", std::filesystem::path("Assets/Prefabs/NewPrefab.prefab"));
 		PF_CHECK(Tests, NewPrefabName && *NewPrefabName == "Environment.prefab");
-		const auto WrongSceneExtension = ResolveAssetDestinationFilename(
-			"Overview.prefab", std::filesystem::path("Assets/Scenes/NewScene.scene"));
-		PF_CHECK(Tests, !WrongSceneExtension &&
-			WrongSceneExtension.error() == AssetDestinationNameError::ExtensionMismatch);
-		const auto WrongPrefabExtension = ResolveAssetDestinationFilename(
-			"Environment.scene", std::filesystem::path("Assets/Prefabs/NewPrefab.prefab"));
-		PF_CHECK(Tests, !WrongPrefabExtension &&
-			WrongPrefabExtension.error() == AssetDestinationNameError::ExtensionMismatch);
-		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, false, false, false, false, false) ==
-			AssetDestinationConflict::None);
-		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, true, false, true, true, false) ==
-			AssetDestinationConflict::SamePath);
-		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, true, false, false, false, false) ==
-			AssetDestinationConflict::ExistingDestination);
-		PF_CHECK(Tests, ResolveAssetDestinationConflict(true, false, true, false, false, false) ==
-			AssetDestinationConflict::ExistingDestination);
-		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, true, false, true, false, false) ==
-			AssetDestinationConflict::ExistingDestination);
-		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, true, true, true, false, false, true) ==
-			AssetDestinationConflict::CaseOnlyRename);
-		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, true, true, true, false, false, false) ==
-			AssetDestinationConflict::ExistingDestination);
-		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, false, false, false, false, true) ==
-			AssetDestinationConflict::InspectionFailed);
+		const auto WrongSceneExtension =
+			ResolveAssetDestinationFilename("Overview.prefab", std::filesystem::path("Assets/Scenes/NewScene.scene"));
+		PF_CHECK(Tests, !WrongSceneExtension && WrongSceneExtension.error() == AssetDestinationNameError::ExtensionMismatch);
+		const auto WrongPrefabExtension =
+			ResolveAssetDestinationFilename("Environment.scene", std::filesystem::path("Assets/Prefabs/NewPrefab.prefab"));
+		PF_CHECK(Tests, !WrongPrefabExtension && WrongPrefabExtension.error() == AssetDestinationNameError::ExtensionMismatch);
+		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, false, false, false, false, false) == AssetDestinationConflict::None);
+		PF_CHECK(Tests, ResolveAssetDestinationConflict(false, true, false, true, true, false) == AssetDestinationConflict::SamePath);
+		PF_CHECK(Tests,
+			ResolveAssetDestinationConflict(false, true, false, false, false, false) == AssetDestinationConflict::ExistingDestination);
+		PF_CHECK(Tests,
+			ResolveAssetDestinationConflict(true, false, true, false, false, false) == AssetDestinationConflict::ExistingDestination);
+		PF_CHECK(Tests,
+			ResolveAssetDestinationConflict(false, true, false, true, false, false) == AssetDestinationConflict::ExistingDestination);
+		PF_CHECK(Tests,
+			ResolveAssetDestinationConflict(false, true, true, true, false, false, true) == AssetDestinationConflict::CaseOnlyRename);
+		PF_CHECK(Tests,
+			ResolveAssetDestinationConflict(false, true, true, true, false, false, false) == AssetDestinationConflict::ExistingDestination);
+		PF_CHECK(
+			Tests, ResolveAssetDestinationConflict(false, false, false, false, false, true) == AssetDestinationConflict::InspectionFailed);
 	}
 
 	void TestEditorAssetSelectorPolicy(TestRunner& Tests)
 	{
 		using PulseForgeEditor::AssetHasExtension;
 		using PulseForgeEditor::AssetSelectorMatchesSearch;
-		const PulseForge::AssetRecord TextureAsset{
-			PulseForge::AssetID{}, std::filesystem::path("Assets/Textures/Stone_BaseColor.png") };
+		const PulseForge::AssetRecord TextureAsset{ PulseForge::AssetID{}, std::filesystem::path("Assets/Textures/Stone_BaseColor.png") };
 		PF_CHECK(Tests, AssetHasExtension(TextureAsset, { ".png", ".jpg" }));
 		PF_CHECK(Tests, !AssetHasExtension(TextureAsset, { ".material" }));
 		PF_CHECK(Tests, AssetSelectorMatchesSearch("Assets/Textures/Stone_BaseColor.png", ""));
@@ -197,16 +188,14 @@ namespace
 
 		const auto TestID = PulseForge::UUID::Generate();
 		PF_CHECK(Tests, TestID.has_value());
-		if (!TestID)
-			return;
+		if (!TestID) return;
 
 		std::error_code Error;
-		const std::filesystem::path SettingsDirectory = std::filesystem::temp_directory_path() /
-			("PulseForgeEditorLayoutPreference_" + TestID->ToString());
+		const std::filesystem::path SettingsDirectory =
+			std::filesystem::temp_directory_path() / ("PulseForgeEditorLayoutPreference_" + TestID->ToString());
 		const bool DirectoryCreated = std::filesystem::create_directory(SettingsDirectory, Error);
 		PF_CHECK(Tests, DirectoryCreated && !Error);
-		if (!DirectoryCreated || Error)
-			return;
+		if (!DirectoryCreated || Error) return;
 		struct ScopedDirectoryCleanup
 		{
 			std::filesystem::path Path;
@@ -218,21 +207,18 @@ namespace
 		} Cleanup{ SettingsDirectory };
 
 		const wchar_t* ExistingSettingsDirectory = _wgetenv(L"PULSEFORGE_EDITOR_SETTINGS_DIR");
-		const std::optional<std::wstring> PreviousSettingsDirectory = ExistingSettingsDirectory
-			? std::optional<std::wstring>(ExistingSettingsDirectory) : std::nullopt;
+		const std::optional<std::wstring> PreviousSettingsDirectory =
+			ExistingSettingsDirectory ? std::optional<std::wstring>(ExistingSettingsDirectory) : std::nullopt;
 		const std::wstring SettingsDirectoryValue = SettingsDirectory.native();
-		const errno_t EnvironmentResult = _wputenv_s(
-			L"PULSEFORGE_EDITOR_SETTINGS_DIR", SettingsDirectoryValue.c_str());
+		const errno_t EnvironmentResult = _wputenv_s(L"PULSEFORGE_EDITOR_SETTINGS_DIR", SettingsDirectoryValue.c_str());
 		PF_CHECK(Tests, EnvironmentResult == 0);
-		if (EnvironmentResult != 0)
-			return;
+		if (EnvironmentResult != 0) return;
 		struct ScopedSettingsEnvironment
 		{
 			std::optional<std::wstring> PreviousValue;
 			~ScopedSettingsEnvironment()
 			{
-				(void)_wputenv_s(L"PULSEFORGE_EDITOR_SETTINGS_DIR",
-					PreviousValue ? PreviousValue->c_str() : L"");
+				(void)_wputenv_s(L"PULSEFORGE_EDITOR_SETTINGS_DIR", PreviousValue ? PreviousValue->c_str() : L"");
 			}
 		} EnvironmentCleanup{ PreviousSettingsDirectory };
 
@@ -242,8 +228,7 @@ namespace
 			ImGuiContext* Context = ImGui::CreateContext();
 			~ScopedImGuiContext()
 			{
-				if (Context)
-					ImGui::DestroyContext(Context);
+				if (Context) ImGui::DestroyContext(Context);
 				ImGui::SetCurrentContext(Previous);
 			}
 		};
@@ -252,14 +237,12 @@ namespace
 		{
 			ScopedImGuiContext Context;
 			PF_CHECK(Tests, Context.Context != nullptr);
-			if (!Context.Context)
-				return;
+			if (!Context.Context) return;
 
 			EditorLayout Layout;
 			const auto Initialized = Layout.Initialize();
 			PF_CHECK(Tests, Initialized.has_value());
-			if (!Initialized)
-				return;
+			if (!Initialized) return;
 			PF_CHECK(Tests, Layout.GetDocumentOpeningPreference() == DefaultDocumentOpeningPreference);
 			PF_CHECK(Tests, Layout.SetDocumentOpeningPreference(2));
 			const auto Saved = Layout.SaveNow();
@@ -267,41 +250,36 @@ namespace
 		}
 
 		std::ifstream SavedSettingsInput(SettingsFile, std::ios::binary);
-		const std::string SavedSettings(
-			(std::istreambuf_iterator<char>(SavedSettingsInput)), std::istreambuf_iterator<char>());
+		const std::string SavedSettings((std::istreambuf_iterator<char>(SavedSettingsInput)), std::istreambuf_iterator<char>());
 		PF_CHECK(Tests, SavedSettings.find("DocumentOpeningPreference=2") != std::string::npos);
 
 		{
 			ScopedImGuiContext Context;
 			PF_CHECK(Tests, Context.Context != nullptr);
-			if (!Context.Context)
-				return;
+			if (!Context.Context) return;
 
 			EditorLayout Layout;
 			const auto Initialized = Layout.Initialize();
 			PF_CHECK(Tests, Initialized.has_value());
-			if (Initialized)
-				PF_CHECK(Tests, Layout.GetDocumentOpeningPreference() == 2);
+			if (Initialized) PF_CHECK(Tests, Layout.GetDocumentOpeningPreference() == 2);
 		}
 
 		{
 			std::ofstream IncompleteSettingsOutput(SettingsFile, std::ios::binary | std::ios::trunc);
 			IncompleteSettingsOutput << "[PulseForgeWorkspace][State]\n"
-				"StateFormat=1\nDocumentOpeningPreference=1\nHierarchy=0\n";
+										"StateFormat=1\nDocumentOpeningPreference=1\nHierarchy=0\n";
 			PF_CHECK(Tests, static_cast<bool>(IncompleteSettingsOutput));
 		}
 
 		{
 			ScopedImGuiContext Context;
 			PF_CHECK(Tests, Context.Context != nullptr);
-			if (!Context.Context)
-				return;
+			if (!Context.Context) return;
 
 			EditorLayout Layout;
 			const auto Initialized = Layout.Initialize();
 			PF_CHECK(Tests, Initialized.has_value());
-			if (!Initialized)
-				return;
+			if (!Initialized) return;
 			PF_CHECK(Tests, Layout.GetDocumentOpeningPreference() == 1);
 			PF_CHECK(Tests, !Layout.IsPanelVisible(EditorPanel::Hierarchy));
 		}
@@ -309,15 +287,14 @@ namespace
 		{
 			std::ofstream InvalidSettingsOutput(SettingsFile, std::ios::binary | std::ios::trunc);
 			InvalidSettingsOutput << "[PulseForgeWorkspace][State]\n"
-				"StateFormat=99\nDocumentOpeningPreference=1\nHierarchy=0\n";
+									 "StateFormat=99\nDocumentOpeningPreference=1\nHierarchy=0\n";
 			PF_CHECK(Tests, static_cast<bool>(InvalidSettingsOutput));
 		}
 
 		{
 			ScopedImGuiContext Context;
 			PF_CHECK(Tests, Context.Context != nullptr);
-			if (!Context.Context)
-				return;
+			if (!Context.Context) return;
 
 			EditorLayout Layout;
 			const auto Initialized = Layout.Initialize();
@@ -383,8 +360,7 @@ namespace
 		}
 		const auto RotatedAxes = ProjectViewportOrientationAxes(glm::normalize(glm::vec3(1.0f, 1.0f, -1.0f)));
 		PF_CHECK(Tests, RotatedAxes.has_value());
-		if (RotatedAxes)
-			PF_CHECK(Tests, glm::length((*RotatedAxes)[2].ScreenDirection) > 0.1f);
+		if (RotatedAxes) PF_CHECK(Tests, glm::length((*RotatedAxes)[2].ScreenDirection) > 0.1f);
 		PF_CHECK(Tests, !ProjectViewportOrientationAxes(glm::vec3(0.0f)));
 	}
 
@@ -398,10 +374,10 @@ namespace
 
 		const auto ClippedToOldSwapchain = PulseForge::IntersectScissorRect({ 0, 0, 2560, 1361 }, 1280, 720);
 		PF_CHECK(Tests, ClippedToOldSwapchain && ClippedToOldSwapchain->X == 0 && ClippedToOldSwapchain->Y == 0 &&
-			ClippedToOldSwapchain->Width == 1280 && ClippedToOldSwapchain->Height == 720);
+							ClippedToOldSwapchain->Width == 1280 && ClippedToOldSwapchain->Height == 720);
 		const auto PartiallyVisible = PulseForge::IntersectScissorRect({ 1000, 600, 500, 300 }, 1280, 720);
-		PF_CHECK(Tests, PartiallyVisible && PartiallyVisible->X == 1000 && PartiallyVisible->Y == 600 &&
-			PartiallyVisible->Width == 280 && PartiallyVisible->Height == 120);
+		PF_CHECK(Tests, PartiallyVisible && PartiallyVisible->X == 1000 && PartiallyVisible->Y == 600 && PartiallyVisible->Width == 280 &&
+							PartiallyVisible->Height == 120);
 		PF_CHECK(Tests, !PulseForge::IntersectScissorRect({ 1280, 0, 1, 1 }, 1280, 720));
 		PF_CHECK(Tests, !PulseForge::IntersectScissorRect({ 0, 0, 1, 1 }, 0, 720));
 
@@ -428,39 +404,21 @@ namespace
 
 		const FramebufferExtent ScissorExtent{ 200, 100 };
 		const glm::vec2 Scale{ 2.0f, 2.0f };
-		const auto Full = ClipRectToScissor(
-			DisplayPosition,
-			DisplayPosition + DisplaySize,
-			DisplayPosition,
-			Scale,
-			ScissorExtent);
-		PF_CHECK(Tests, Full && *Full && (*Full)->X == 0 && (*Full)->Y == 0 &&
-			(*Full)->Width == 200 && (*Full)->Height == 100);
+		const auto Full = ClipRectToScissor(DisplayPosition, DisplayPosition + DisplaySize, DisplayPosition, Scale, ScissorExtent);
+		PF_CHECK(Tests, Full && *Full && (*Full)->X == 0 && (*Full)->Y == 0 && (*Full)->Width == 200 && (*Full)->Height == 100);
 
 		const auto Fractional = ClipRectToScissor(
-			DisplayPosition + glm::vec2(1.2f, 2.4f),
-			DisplayPosition + glm::vec2(5.1f, 6.2f),
-			DisplayPosition,
-			Scale,
-			ScissorExtent);
-		PF_CHECK(Tests, Fractional && *Fractional && (*Fractional)->X == 2 && (*Fractional)->Y == 4 &&
-			(*Fractional)->Width == 9 && (*Fractional)->Height == 9);
+			DisplayPosition + glm::vec2(1.2f, 2.4f), DisplayPosition + glm::vec2(5.1f, 6.2f), DisplayPosition, Scale, ScissorExtent);
+		PF_CHECK(Tests, Fractional && *Fractional && (*Fractional)->X == 2 && (*Fractional)->Y == 4 && (*Fractional)->Width == 9 &&
+							(*Fractional)->Height == 9);
 
 		const auto PartlyOutside = ClipRectToScissor(
-			DisplayPosition + glm::vec2(-10.0f, -5.0f),
-			DisplayPosition + glm::vec2(5.0f, 8.0f),
-			DisplayPosition,
-			Scale,
-			ScissorExtent);
+			DisplayPosition + glm::vec2(-10.0f, -5.0f), DisplayPosition + glm::vec2(5.0f, 8.0f), DisplayPosition, Scale, ScissorExtent);
 		PF_CHECK(Tests, PartlyOutside && *PartlyOutside && (*PartlyOutside)->X == 0 && (*PartlyOutside)->Y == 0 &&
-			(*PartlyOutside)->Width == 10 && (*PartlyOutside)->Height == 16);
+							(*PartlyOutside)->Width == 10 && (*PartlyOutside)->Height == 16);
 
 		const auto FullyOutside = ClipRectToScissor(
-			DisplayPosition + glm::vec2(150.0f, 10.0f),
-			DisplayPosition + glm::vec2(160.0f, 20.0f),
-			DisplayPosition,
-			Scale,
-			ScissorExtent);
+			DisplayPosition + glm::vec2(150.0f, 10.0f), DisplayPosition + glm::vec2(160.0f, 20.0f), DisplayPosition, Scale, ScissorExtent);
 		PF_CHECK(Tests, FullyOutside && !*FullyOutside);
 		PF_CHECK(Tests, !ClipRectToScissor({ 0.0f, 0.0f }, { 1.0f, 1.0f }, {}, { 1.0f, 1.0f }, {}));
 	}
@@ -471,10 +429,8 @@ namespace
 		std::vector<int> Events;
 		for (int ViewportID : { 1, 3 })
 		{
-			RenderPlatformViewportSequentially(
-				[&] { Events.push_back(ViewportID * 10 + 1); },
-				[&] { Events.push_back(ViewportID * 10 + 2); },
-				[&] { Events.push_back(ViewportID * 10 + 3); },
+			RenderPlatformViewportSequentially([&] { Events.push_back(ViewportID * 10 + 1); },
+				[&] { Events.push_back(ViewportID * 10 + 2); }, [&] { Events.push_back(ViewportID * 10 + 3); },
 				[&] { Events.push_back(ViewportID * 10 + 4); });
 		}
 		const std::vector<int> Expected{ 11, 12, 13, 14, 31, 32, 33, 34 };
@@ -486,10 +442,7 @@ namespace
 		using namespace PulseForgeEditor;
 		int GlfwWindowMarker = 0;
 		int NativeWindowMarker = 0;
-		const EditorGlfwViewportHandles ViewportHandles{
-			.GlfwWindow = &GlfwWindowMarker,
-			.NativeWindow = &NativeWindowMarker
-		};
+		const EditorGlfwViewportHandles ViewportHandles{ .GlfwWindow = &GlfwWindowMarker, .NativeWindow = &NativeWindowMarker };
 		PF_CHECK(Tests, GetGlfwContextWindow(ViewportHandles) == &GlfwWindowMarker);
 		PF_CHECK(Tests, GetGlfwContextWindow(ViewportHandles) != &NativeWindowMarker);
 		PF_CHECK(Tests, GetEditorViewportToolbarLayout(590.0f) == EditorViewportToolbarLayout::Full);
@@ -497,8 +450,7 @@ namespace
 		PF_CHECK(Tests, GetEditorViewportToolbarLayout(300.0f) == EditorViewportToolbarLayout::Compact);
 		PF_CHECK(Tests, GetEditorViewportToolbarLayout(299.0f) == EditorViewportToolbarLayout::Overflow);
 		PF_CHECK(Tests, GetEditorViewportToolbarLayout(-1.0f) == EditorViewportToolbarLayout::Overflow);
-		PF_CHECK(Tests, GetEditorViewportToolbarLayout(std::numeric_limits<float>::quiet_NaN()) ==
-			EditorViewportToolbarLayout::Overflow);
+		PF_CHECK(Tests, GetEditorViewportToolbarLayout(std::numeric_limits<float>::quiet_NaN()) == EditorViewportToolbarLayout::Overflow);
 		PF_CHECK(Tests, GetEditorPropertyLabelWidth(100.0f) == EditorStyleMetrics::PropertyLabelWidthMinimum);
 		PF_CHECK(Tests, GetEditorPropertyLabelWidth(300.0f) == 90.0f);
 		PF_CHECK(Tests, GetEditorPropertyLabelWidth(1000.0f) == EditorStyleMetrics::PropertyLabelWidthMaximum);
@@ -511,30 +463,28 @@ namespace
 		PF_CHECK(Tests, GetMaterialPropertyLabelWidth(700.0f) == 264.0f);
 		PF_CHECK(Tests, GetMaterialPropertyLabelWidth(1000.0f) == 264.0f);
 		PF_CHECK(Tests, GetMaterialPropertyLayout(-1.0f) == MaterialPropertyLayout::Stacked);
-		PF_CHECK(Tests, GetMaterialPropertyLayout(std::numeric_limits<float>::quiet_NaN()) ==
-			MaterialPropertyLayout::Stacked);
-		PF_CHECK(Tests, GetMaterialPropertyLayout(std::numeric_limits<float>::infinity()) ==
-			MaterialPropertyLayout::Stacked);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(std::numeric_limits<float>::quiet_NaN()) == MaterialPropertyLayout::Stacked);
+		PF_CHECK(Tests, GetMaterialPropertyLayout(std::numeric_limits<float>::infinity()) == MaterialPropertyLayout::Stacked);
 		const MaterialValuePairLayout NarrowMaterialValuePair = GetMaterialValuePairLayout(260.0f, 8.0f);
 		PF_CHECK(Tests, NarrowMaterialValuePair.Stacked && NarrowMaterialValuePair.FirstWidth == 260.0f &&
-			NarrowMaterialValuePair.SecondWidth == 260.0f);
+							NarrowMaterialValuePair.SecondWidth == 260.0f);
 		const MaterialValuePairLayout RegularMaterialValuePair = GetMaterialValuePairLayout(360.0f, 8.0f);
 		PF_CHECK(Tests, !RegularMaterialValuePair.Stacked && RegularMaterialValuePair.FirstWidth == 176.0f &&
-			RegularMaterialValuePair.SecondWidth == 176.0f &&
-			RegularMaterialValuePair.FirstWidth + RegularMaterialValuePair.SecondWidth + 8.0f <= 360.0f);
+							RegularMaterialValuePair.SecondWidth == 176.0f &&
+							RegularMaterialValuePair.FirstWidth + RegularMaterialValuePair.SecondWidth + 8.0f <= 360.0f);
 		const MaterialValuePairLayout BrowserWidthMaterialValuePair = GetMaterialValuePairLayout(500.0f, 8.0f);
 		PF_CHECK(Tests, !BrowserWidthMaterialValuePair.Stacked && BrowserWidthMaterialValuePair.FirstWidth == 246.0f &&
-			BrowserWidthMaterialValuePair.SecondWidth == 246.0f &&
-			BrowserWidthMaterialValuePair.FirstWidth + BrowserWidthMaterialValuePair.SecondWidth + 8.0f <= 500.0f);
+							BrowserWidthMaterialValuePair.SecondWidth == 246.0f &&
+							BrowserWidthMaterialValuePair.FirstWidth + BrowserWidthMaterialValuePair.SecondWidth + 8.0f <= 500.0f);
 		const MaterialValuePairLayout WideMaterialValuePair = GetMaterialValuePairLayout(700.0f, 8.0f);
-		PF_CHECK(Tests, !WideMaterialValuePair.Stacked && WideMaterialValuePair.FirstWidth == 346.0f &&
-			WideMaterialValuePair.SecondWidth == 346.0f);
-		const MaterialValuePairLayout InvalidMaterialValuePair = GetMaterialValuePairLayout(
-			std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity());
+		PF_CHECK(Tests,
+			!WideMaterialValuePair.Stacked && WideMaterialValuePair.FirstWidth == 346.0f && WideMaterialValuePair.SecondWidth == 346.0f);
+		const MaterialValuePairLayout InvalidMaterialValuePair =
+			GetMaterialValuePairLayout(std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity());
 		PF_CHECK(Tests, InvalidMaterialValuePair.Stacked && InvalidMaterialValuePair.FirstWidth == 0.0f &&
-			InvalidMaterialValuePair.SecondWidth == 0.0f);
-		for (const MaterialValuePairLayout Layout : { NarrowMaterialValuePair, RegularMaterialValuePair,
-			BrowserWidthMaterialValuePair, WideMaterialValuePair, InvalidMaterialValuePair })
+							InvalidMaterialValuePair.SecondWidth == 0.0f);
+		for (const MaterialValuePairLayout Layout : { NarrowMaterialValuePair, RegularMaterialValuePair, BrowserWidthMaterialValuePair,
+				 WideMaterialValuePair, InvalidMaterialValuePair })
 		{
 			PF_CHECK(Tests, std::isfinite(Layout.FirstWidth) && Layout.FirstWidth >= 0.0f);
 			PF_CHECK(Tests, std::isfinite(Layout.SecondWidth) && Layout.SecondWidth >= 0.0f);
@@ -550,8 +500,8 @@ namespace
 		PF_CHECK(Tests, RegularFolderTree.ShowFolderTree && RegularFolderTree.FolderTreeWidth == 192.0f);
 		const ContentBrowserHorizontalLayout MaximumFolderTree = GetContentBrowserHorizontalLayout(1200.0f);
 		PF_CHECK(Tests, MaximumFolderTree.ShowFolderTree && MaximumFolderTree.FolderTreeWidth == 205.0f);
-		const ContentBrowserHorizontalLayout InvalidBrowserWidth = GetContentBrowserHorizontalLayout(
-			std::numeric_limits<float>::quiet_NaN());
+		const ContentBrowserHorizontalLayout InvalidBrowserWidth =
+			GetContentBrowserHorizontalLayout(std::numeric_limits<float>::quiet_NaN());
 		PF_CHECK(Tests, !InvalidBrowserWidth.ShowFolderTree && InvalidBrowserWidth.FolderTreeWidth == 0.0f);
 		PF_CHECK(Tests, UseCompactVector3PropertyInput(229.0f));
 		PF_CHECK(Tests, !UseCompactVector3PropertyInput(230.0f));
@@ -559,11 +509,9 @@ namespace
 		const ContentBrowserVerticalLayout NoSelection = GetContentBrowserVerticalLayout(320.0f, false, true);
 		PF_CHECK(Tests, NoSelection.AssetItemsHeight == 320.0f && NoSelection.DetailsHeight == 0.0f);
 		const ContentBrowserVerticalLayout CompactSelection = GetContentBrowserVerticalLayout(120.0f, true, true);
-		PF_CHECK(Tests, CompactSelection.SelectionSummaryHeight ==
-			ContentBrowserLayoutMetrics::CompactSelectionSummaryHeight);
+		PF_CHECK(Tests, CompactSelection.SelectionSummaryHeight == ContentBrowserLayoutMetrics::CompactSelectionSummaryHeight);
 		PF_CHECK(Tests, CompactSelection.AssetItemsHeight == 92.0f && CompactSelection.DetailsHeight == 0.0f);
-		const ContentBrowserVerticalLayout ExpandedCompactSelection =
-			GetContentBrowserVerticalLayout(120.0f, true, true, true);
+		const ContentBrowserVerticalLayout ExpandedCompactSelection = GetContentBrowserVerticalLayout(120.0f, true, true, true);
 		PF_CHECK(Tests, ExpandedCompactSelection.SelectionSummaryHeight == 28.0f);
 		PF_CHECK(Tests, ExpandedCompactSelection.DetailsHeight == 0.0f && ExpandedCompactSelection.AssetItemsHeight == 92.0f);
 		const ContentBrowserVerticalLayout RegularAssetDetails = GetContentBrowserVerticalLayout(320.0f, true, false);
@@ -575,8 +523,8 @@ namespace
 		const ContentBrowserVerticalLayout TallMaterialSummary = GetContentBrowserVerticalLayout(840.0f, true, true);
 		PF_CHECK(Tests, TallMaterialSummary.SelectionSummaryHeight == 28.0f);
 		PF_CHECK(Tests, TallMaterialSummary.DetailsHeight == 0.0f && TallMaterialSummary.AssetItemsHeight == 812.0f);
-		const ContentBrowserVerticalLayout InvalidContentHeight = GetContentBrowserVerticalLayout(
-			std::numeric_limits<float>::quiet_NaN(), true, true);
+		const ContentBrowserVerticalLayout InvalidContentHeight =
+			GetContentBrowserVerticalLayout(std::numeric_limits<float>::quiet_NaN(), true, true);
 		PF_CHECK(Tests, InvalidContentHeight.AssetItemsHeight == 0.0f && InvalidContentHeight.SelectionSummaryHeight == 0.0f);
 		PF_CHECK(Tests, GetEditorEntityIcon({}) == EditorIcon::Entity);
 		PF_CHECK(Tests, GetEditorEntityIcon({ .HasCamera = true, .HasMesh = true }) == EditorIcon::Camera);
@@ -603,12 +551,10 @@ namespace
 		for (size_t Index = 0; Index + 1 < EditorTextGlyphRanges.size() - 1; Index += 2)
 		{
 			PF_CHECK(Tests, EditorTextGlyphRanges[Index] <= EditorTextGlyphRanges[Index + 1]);
-			if (Index > 0)
-				PF_CHECK(Tests, EditorTextGlyphRanges[Index - 1] < EditorTextGlyphRanges[Index]);
+			if (Index > 0) PF_CHECK(Tests, EditorTextGlyphRanges[Index - 1] < EditorTextGlyphRanges[Index]);
 		}
-		for (const uint32_t Codepoint : {
-			0x011e, 0x011f, 0x0130, 0x0131, 0x015e, 0x015f, 0x010c, 0x0141, 0x017d,
-			0x0150, 0x00c5, 0x00e9, 0x00df, 0x20ac, 0x03a9, 0x0416, 0x1e0a, 0x2014 })
+		for (const uint32_t Codepoint : { 0x011e, 0x011f, 0x0130, 0x0131, 0x015e, 0x015f, 0x010c, 0x0141, 0x017d, 0x0150, 0x00c5, 0x00e9,
+				 0x00df, 0x20ac, 0x03a9, 0x0416, 0x1e0a, 0x2014 })
 			PF_CHECK(Tests, EditorTextGlyphRangeContains(Codepoint));
 		PF_CHECK(Tests, !EditorTextGlyphRangeContains(0x4e2d));
 		PF_CHECK(Tests, EditorFontRoleHasIcons(EditorFontRole::Interface));
@@ -633,39 +579,31 @@ namespace
 			PF_CHECK(Tests, Color.Blue >= 0.0f && Color.Blue <= 1.0f);
 			PF_CHECK(Tests, Color.Alpha >= 0.0f && Color.Alpha <= 1.0f);
 		}
-		constexpr std::array<EditorColorToken, 4> GizmoColorTokens = {
-			EditorColorToken::GizmoAxisX,
-			EditorColorToken::GizmoAxisY,
-			EditorColorToken::GizmoAxisZ,
-			EditorColorToken::GizmoHighlight
-		};
+		constexpr std::array<EditorColorToken, 4> GizmoColorTokens = { EditorColorToken::GizmoAxisX, EditorColorToken::GizmoAxisY,
+			EditorColorToken::GizmoAxisZ, EditorColorToken::GizmoHighlight };
 		for (const EditorColorToken Token : GizmoColorTokens)
 		{
 			const EditorColorValue Color = GetEditorColorValue(Token);
-			const EditorColorValue SrgbOutput = ConvertEditorColorForOutput(
-				Color, PulseForge::OutputColorEncoding::SrgbAttachment);
-			const EditorColorValue UnormOutput = ConvertEditorColorForOutput(
-				Color, PulseForge::OutputColorEncoding::UnormAttachment);
+			const EditorColorValue SrgbOutput = ConvertEditorColorForOutput(Color, PulseForge::OutputColorEncoding::SrgbAttachment);
+			const EditorColorValue UnormOutput = ConvertEditorColorForOutput(Color, PulseForge::OutputColorEncoding::UnormAttachment);
 			PF_CHECK(Tests, SrgbOutput.Alpha == Color.Alpha);
-			PF_CHECK(Tests, UnormOutput.Red == Color.Red && UnormOutput.Green == Color.Green &&
-				UnormOutput.Blue == Color.Blue && UnormOutput.Alpha == Color.Alpha);
+			PF_CHECK(Tests, UnormOutput.Red == Color.Red && UnormOutput.Green == Color.Green && UnormOutput.Blue == Color.Blue &&
+								UnormOutput.Alpha == Color.Alpha);
 		}
 
 		const EditorColorValue DisplayColor{ 0.5f, 0.04045f, 1.0f, 0.37f };
-		const EditorColorValue LinearColor = ConvertEditorColorForOutput(
-			DisplayColor, PulseForge::OutputColorEncoding::SrgbAttachment);
+		const EditorColorValue LinearColor = ConvertEditorColorForOutput(DisplayColor, PulseForge::OutputColorEncoding::SrgbAttachment);
 		PF_CHECK(Tests, std::abs(LinearColor.Red - 0.21404114f) < 1.0e-6f);
 		PF_CHECK(Tests, std::abs(LinearColor.Green - 0.003130805f) < 1.0e-7f);
 		PF_CHECK(Tests, LinearColor.Blue == 1.0f);
 		PF_CHECK(Tests, LinearColor.Alpha == DisplayColor.Alpha);
-		const EditorColorValue UnormColor = ConvertEditorColorForOutput(
-			DisplayColor, PulseForge::OutputColorEncoding::UnormAttachment);
+		const EditorColorValue UnormColor = ConvertEditorColorForOutput(DisplayColor, PulseForge::OutputColorEncoding::UnormAttachment);
 		PF_CHECK(Tests, UnormColor.Red == DisplayColor.Red && UnormColor.Green == DisplayColor.Green &&
-			UnormColor.Blue == DisplayColor.Blue && UnormColor.Alpha == DisplayColor.Alpha);
-		PF_CHECK(Tests, SelectEditorUiCompositionPath(PulseForge::OutputColorEncoding::SrgbAttachment) ==
-			EditorUiCompositionPath::DirectSrgbSwapchain);
+							UnormColor.Blue == DisplayColor.Blue && UnormColor.Alpha == DisplayColor.Alpha);
+		PF_CHECK(Tests,
+			SelectEditorUiCompositionPath(PulseForge::OutputColorEncoding::SrgbAttachment) == EditorUiCompositionPath::DirectSrgbSwapchain);
 		PF_CHECK(Tests, SelectEditorUiCompositionPath(PulseForge::OutputColorEncoding::UnormAttachment) ==
-			EditorUiCompositionPath::SrgbIntermediateToUnormSwapchain);
+							EditorUiCompositionPath::SrgbIntermediateToUnormSwapchain);
 		PF_CHECK(Tests, !SelectEditorUiCompositionPath(static_cast<PulseForge::OutputColorEncoding>(255)));
 		PF_CHECK(Tests, !IsEditorUiCompositionTargetReusable(false, 1280, 720, 1280, 720));
 		PF_CHECK(Tests, IsEditorUiCompositionTargetReusable(true, 1280, 720, 1280, 720));
@@ -704,8 +642,7 @@ namespace
 			PF_CHECK(Tests, Descriptor.Codepoint >= 0xe000 && Descriptor.Codepoint <= 0xf8ff);
 			PF_CHECK(Tests, EditorIconGlyphRanges[Index * 2] == Descriptor.Codepoint);
 			PF_CHECK(Tests, EditorIconGlyphRanges[Index * 2 + 1] == Descriptor.Codepoint);
-			if (Index > 0)
-				PF_CHECK(Tests, EditorIconDescriptors[Index - 1].Codepoint < Descriptor.Codepoint);
+			if (Index > 0) PF_CHECK(Tests, EditorIconDescriptors[Index - 1].Codepoint < Descriptor.Codepoint);
 			PF_CHECK(Tests, FindEditorIcon(Descriptor.Icon) == &Descriptor);
 		}
 		PF_CHECK(Tests, std::all_of(SeenIcons.begin(), SeenIcons.end(), [](bool Seen) { return Seen; }));
@@ -715,8 +652,7 @@ namespace
 		PF_CHECK(Tests, SelectIcon && SelectIcon->Codepoint == 0xf245);
 	}
 
-
-}
+} // namespace
 
 void RunEditorTests(TestRunner& Tests)
 {

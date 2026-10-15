@@ -7,8 +7,7 @@
 
 namespace PulseForgeEditor
 {
-	bool EditorWorkspacePresentation::BeginMainFrame(
-		const std::optional<EditorDocumentIdentity>& ActiveDocument)
+	bool EditorWorkspacePresentation::BeginMainFrame(const std::optional<EditorDocumentIdentity>& ActiveDocument)
 	{
 		return m_FrameState.BeginFrame(ActiveDocument);
 	}
@@ -18,9 +17,7 @@ namespace PulseForgeEditor
 		return m_FrameState.IsLevelWorkspaceActive();
 	}
 
-	bool EditorWorkspacePresentation::WasWorkspaceDrawn(
-		const EditorDocumentIdentity& Identity,
-		std::string_view HostID) const
+	bool EditorWorkspacePresentation::WasWorkspaceDrawn(const EditorDocumentIdentity& Identity, std::string_view HostID) const
 	{
 		return m_FrameState.WasWorkspaceDrawn(Identity, HostID);
 	}
@@ -35,8 +32,7 @@ namespace PulseForgeEditor
 		{
 			ImGui::DockBuilderAddNode(DockspaceID, ImGuiDockNodeFlags_DockSpace);
 			ImGui::DockBuilderSetNodePos(DockspaceID, Position);
-			ImGui::DockBuilderSetNodeSize(DockspaceID,
-				ImVec2((std::max)(Size.x, 1.0f), (std::max)(Size.y, 1.0f)));
+			ImGui::DockBuilderSetNodeSize(DockspaceID, ImVec2((std::max)(Size.x, 1.0f), (std::max)(Size.y, 1.0f)));
 			ImGui::DockBuilderDockWindow(WindowName.c_str(), DockspaceID);
 			ImGui::DockBuilderFinish(DockspaceID);
 		}
@@ -45,31 +41,25 @@ namespace PulseForgeEditor
 	}
 
 	void EditorWorkspacePresentation::DrawWorkspaceContent(
-		EditorDocumentSession& Session,
-		const EditorDocumentEditorRegistry& Editors,
-		FallbackDrawer DrawFallback,
-		void* FallbackContext)
+		EditorDocumentSession& Session, const EditorDocumentEditorRegistry& Editors, FallbackDrawer DrawFallback, void* FallbackContext)
 	{
 		const std::string WindowName = GetWindowName(Session.Identity);
 		if (ImGui::Begin(WindowName.c_str(), nullptr, ImGuiWindowFlags_NoCollapse))
 		{
-			if (Editors.DrawWorkspace(Session))
-				m_FrameState.MarkWorkspaceDrawn(Session.Identity, Session.HostID);
-			else if (DrawFallback)
-				DrawFallback(FallbackContext, Session.Identity);
+			if (Editors.DrawWorkspace(Session)) m_FrameState.MarkWorkspaceDrawn(Session.Identity, Session.HostID);
+			else if (DrawFallback) DrawFallback(FallbackContext, Session.Identity);
 		}
 		ImGui::End();
 	}
 
 	void EditorWorkspacePresentation::KeepInactiveWorkspacesAlive(
-		const EditorDocumentManager& Documents,
-		const EditorDocumentEditorRegistry& Editors)
+		const EditorDocumentManager& Documents, const EditorDocumentEditorRegistry& Editors)
 	{
 		ImGui::SetNextWindowPos(ImVec2(-10000.0f, -10000.0f), ImGuiCond_Always);
 		ImGui::SetNextWindowSize(ImVec2(1.0f, 1.0f), ImGuiCond_Always);
 		if (!ImGui::Begin("##PFInactiveDocumentWorkspaceKeepAlive", nullptr,
-			ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
-				ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBackground))
+				ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings |
+					ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBackground))
 		{
 			ImGui::End();
 			return;
@@ -77,8 +67,7 @@ namespace PulseForgeEditor
 		for (const auto& [Identity, Session] : Documents.GetSessions())
 		{
 			(void)Session;
-			if (!Editors.IsRegistered(Identity.Kind) || m_FrameState.WasDockspaceDrawn(Identity))
-				continue;
+			if (!Editors.IsRegistered(Identity.Kind) || m_FrameState.WasDockspaceDrawn(Identity)) continue;
 			ImGui::DockSpace(GetDockspaceID(Identity), ImVec2(1.0f, 1.0f), ImGuiDockNodeFlags_KeepAliveOnly);
 		}
 		ImGui::End();
@@ -92,7 +81,7 @@ namespace PulseForgeEditor
 
 	std::string EditorWorkspacePresentation::GetWindowName(const EditorDocumentIdentity& Identity)
 	{
-		return "Document Workspace###PFDocumentWorkspace_" + Identity.Project.ToString() + "_" +
-			Identity.Asset.ToString() + "_" + std::to_string(static_cast<uint32_t>(Identity.Kind));
+		return "Document Workspace###PFDocumentWorkspace_" + Identity.Project.ToString() + "_" + Identity.Asset.ToString() + "_" +
+			   std::to_string(static_cast<uint32_t>(Identity.Kind));
 	}
-}
+} // namespace PulseForgeEditor

@@ -48,14 +48,12 @@ namespace
 		using namespace PulseForge;
 		const auto ProjectIdentifier = UUID::Generate();
 		PF_CHECK(Tests, ProjectIdentifier.has_value());
-		if (!ProjectIdentifier)
-			return;
+		if (!ProjectIdentifier) return;
 
 		std::error_code FileError;
 		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
 		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
+		if (FileError) return;
 
 		const std::filesystem::path ProjectRoot = TemporaryDirectory / ("PulseForgeAudio-" + ProjectIdentifier->ToString());
 		struct ProjectCleanup
@@ -70,20 +68,17 @@ namespace
 
 		std::filesystem::create_directories(ProjectRoot / "Assets" / "Audio", FileError);
 		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
+		if (FileError) return;
 		auto AudioProject = Project::Create(ProjectRoot / "AudioProject.pfproj", "Audio Script Tests");
 		PF_CHECK(Tests, AudioProject.has_value());
-		if (!AudioProject)
-			return;
+		if (!AudioProject) return;
 
 		const std::vector<std::byte> WaveData = MakeSilentWave(44100 * 5);
 		AudioPlayback Playback;
 		{
 			auto CreatedEngine = AudioEngine::Create({ AudioOutputBackend::Null });
 			PF_CHECK(Tests, CreatedEngine.has_value());
-			if (!CreatedEngine)
-				return;
+			if (!CreatedEngine) return;
 			AudioEngine Engine = std::move(*CreatedEngine);
 			PF_CHECK(Tests, Engine.IsInitialized());
 
@@ -92,8 +87,7 @@ namespace
 			PF_CHECK(Tests, !InvalidClip && InvalidClip.error().Code == AudioErrorCode::InvalidClip);
 			const auto Clip = Engine.CreateClip("Test WAV", WaveData);
 			PF_CHECK(Tests, Clip.has_value());
-			if (!Clip)
-				return;
+			if (!Clip) return;
 			PF_CHECK(Tests, Clip->IsValid() && Clip->GetDebugName() == "Test WAV");
 
 			AudioPlaybackDesc InvalidDescription;
@@ -106,14 +100,12 @@ namespace
 			Description.Volume = 0.5f;
 			auto StartedPlayback = Engine.Play(*Clip, Description);
 			PF_CHECK(Tests, StartedPlayback.has_value());
-			if (!StartedPlayback)
-				return;
+			if (!StartedPlayback) return;
 			Playback = std::move(*StartedPlayback);
 			PF_CHECK(Tests, Playback.IsValid());
 			auto ConcurrentPlayback = Engine.Play(*Clip, Description);
 			PF_CHECK(Tests, ConcurrentPlayback.has_value() && ConcurrentPlayback->IsValid());
-			if (ConcurrentPlayback)
-				PF_CHECK(Tests, ConcurrentPlayback->Stop().has_value());
+			if (ConcurrentPlayback) PF_CHECK(Tests, ConcurrentPlayback->Stop().has_value());
 			PF_CHECK(Tests, Playback.Pause().has_value());
 			PF_CHECK(Tests, Playback.Resume().has_value());
 			PF_CHECK(Tests, Playback.SetVolume(0.25f).has_value());
@@ -126,14 +118,9 @@ namespace
 			PF_CHECK(Tests, !Engine.SetListenerDirection({ 0.0f, 0.0f, 0.0f }));
 
 			AssetRegistry& Registry = AudioProject->GetAssetRegistry();
-			auto Imported = AssetOperations::CreateAssetFromBytes(
-				Registry,
-				ProjectRoot,
-				WaveData,
-				"Assets/Audio/test.wav");
+			auto Imported = AssetOperations::CreateAssetFromBytes(Registry, ProjectRoot, WaveData, "Assets/Audio/test.wav");
 			PF_CHECK(Tests, Imported.has_value());
-			if (!Imported)
-				return;
+			if (!Imported) return;
 
 			AudioAssetCache Cache(Engine, ProjectRoot, Registry);
 			const auto Loaded = Cache.GetOrLoad(Imported->ID);
@@ -142,11 +129,7 @@ namespace
 			const auto CachedAgain = Cache.GetOrLoad(Imported->ID);
 			PF_CHECK(Tests, CachedAgain && Cache.GetLoadedCount() == 1);
 
-			const auto Moved = AssetOperations::Move(
-				Registry,
-				ProjectRoot,
-				Imported->ID,
-				"Assets/Audio/renamed.wav");
+			const auto Moved = AssetOperations::Move(Registry, ProjectRoot, Imported->ID, "Assets/Audio/renamed.wav");
 			PF_CHECK(Tests, Moved && Moved->ID == Imported->ID);
 			Cache.Clear();
 			const auto LoadedAfterMove = Cache.GetOrLoad(Imported->ID);
@@ -157,8 +140,7 @@ namespace
 			Scene AudioScene;
 			auto EmitterResult = AudioScene.CreateEntity("Audio emitter and listener");
 			PF_CHECK(Tests, EmitterResult.has_value());
-			if (!EmitterResult)
-				return;
+			if (!EmitterResult) return;
 			Entity Emitter = *EmitterResult;
 			PF_CHECK(Tests, Emitter.SetAudioSource(AudioSourceComponent{ Imported->ID, 0.5f, true, true, true }).has_value());
 			PF_CHECK(Tests, Emitter.SetAudioListener(AudioListenerComponent{}).has_value());
@@ -186,8 +168,7 @@ namespace
 
 			std::filesystem::create_directories(ProjectRoot / "Assets" / "Scripts", FileError);
 			PF_CHECK(Tests, !FileError);
-			if (FileError)
-				return;
+			if (FileError) return;
 			constexpr std::string_view AudioControlSource = R"(
 function OnUpdate()
   assert(entity:stop_audio())
@@ -197,14 +178,10 @@ function OnUpdate()
 end
 )";
 			const auto AudioControlBytes = std::as_bytes(std::span(AudioControlSource.data(), AudioControlSource.size()));
-			const auto AudioControlAsset = AssetOperations::CreateAssetFromBytes(
-				Registry,
-				ProjectRoot,
-				AudioControlBytes,
-				"Assets/Scripts/audio_controls.lua");
+			const auto AudioControlAsset =
+				AssetOperations::CreateAssetFromBytes(Registry, ProjectRoot, AudioControlBytes, "Assets/Scripts/audio_controls.lua");
 			PF_CHECK(Tests, AudioControlAsset.has_value());
-			if (!AudioControlAsset)
-				return;
+			if (!AudioControlAsset) return;
 			PF_CHECK(Tests, Emitter.SetScript(ScriptComponent{ AudioControlAsset->ID }).has_value());
 			ScriptRuntimeServices AudioServices;
 			AudioServices.Audio = &Runtime;
@@ -230,8 +207,8 @@ end
 			if (ValidEmitterResult && MissingEmitterResult)
 			{
 				PF_CHECK(Tests, ValidEmitterResult->SetAudioSource(AudioSourceComponent{ Imported->ID }).has_value());
-				PF_CHECK(Tests, MissingEmitterResult->SetAudioSource(AudioSourceComponent{
-					AssetID{ 0x5300000000000000ull, 3 } }).has_value());
+				PF_CHECK(
+					Tests, MissingEmitterResult->SetAudioSource(AudioSourceComponent{ AssetID{ 0x5300000000000000ull, 3 } }).has_value());
 				AudioSceneRuntime RollbackRuntime(Engine, Cache);
 				const auto FailedStart = RollbackRuntime.Start(PartialStartScene);
 				PF_CHECK(Tests, !FailedStart && FailedStart.error().Code == AudioSceneRuntimeErrorCode::AssetLoadFailed);
@@ -252,8 +229,7 @@ end
 				PF_CHECK(Tests, SecondListener->SetAudioListener(AudioListenerComponent{}).has_value());
 				AudioSceneRuntime InvalidRuntime(Engine, Cache);
 				const auto InvalidStart = InvalidRuntime.Start(InvalidListenerScene);
-				PF_CHECK(Tests, !InvalidStart &&
-					InvalidStart.error().Code == AudioSceneRuntimeErrorCode::MultiplePrimaryListeners);
+				PF_CHECK(Tests, !InvalidStart && InvalidStart.error().Code == AudioSceneRuntimeErrorCode::MultiplePrimaryListeners);
 				PF_CHECK(Tests, !InvalidRuntime.IsRunning());
 			}
 
@@ -270,9 +246,9 @@ end
 					const auto OriginalListenerComponent = PrimaryListener->GetAudioListener();
 					const auto DuplicatedListenerComponent = DuplicatedListener->GetAudioListener();
 					PF_CHECK(Tests, OriginalListenerComponent && OriginalListenerComponent->has_value() &&
-						OriginalListenerComponent->value().IsPrimary);
+										OriginalListenerComponent->value().IsPrimary);
 					PF_CHECK(Tests, DuplicatedListenerComponent && DuplicatedListenerComponent->has_value() &&
-						!DuplicatedListenerComponent->value().IsPrimary);
+										!DuplicatedListenerComponent->value().IsPrimary);
 					AudioSceneRuntime RuntimeAfterListenerDuplication(Engine, Cache);
 					PF_CHECK(Tests, RuntimeAfterListenerDuplication.Start(DuplicatedPrimaryListenerScene).has_value());
 					PF_CHECK(Tests, RuntimeAfterListenerDuplication.Advance(DuplicatedPrimaryListenerScene).has_value());
@@ -284,7 +260,7 @@ end
 		PF_CHECK(Tests, Playback.SetVolume(0.75f).has_value());
 		PF_CHECK(Tests, Playback.Stop().has_value());
 	}
-}
+} // namespace
 
 void RunAudioRuntimeTests(TestRunner& Tests)
 {

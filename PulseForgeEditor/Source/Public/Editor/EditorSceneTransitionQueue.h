@@ -31,4 +31,4 @@ namespace PulseForgeEditor
 	private:
 		Action m_PendingAction;
 	};
-}
+} // namespace PulseForgeEditor

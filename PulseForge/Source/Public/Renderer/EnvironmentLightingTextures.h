@@ -11,4 +11,4 @@ namespace PulseForge
 		TextureHandle PrefilteredSpecular;
 		TextureHandle BrdfIntegrationLut;
 	};
-}
+} // namespace PulseForge

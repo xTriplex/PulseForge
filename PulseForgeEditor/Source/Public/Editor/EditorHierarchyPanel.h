@@ -43,19 +43,12 @@ namespace PulseForgeEditor
 	{
 	public:
 		void FocusSearchNextFrame() noexcept { m_FocusSearchNextFrame = true; }
-		void DrawContents(
-			PulseForge::Scene* SceneValue,
-			EditorSceneWorkspaceState& Workspace,
-			EditorStyle& Style,
+		void DrawContents(PulseForge::Scene* SceneValue, EditorSceneWorkspaceState& Workspace, EditorStyle& Style,
 			EditorHierarchyPanelActionSink& Actions);
 
 	private:
-		void DrawEntityTree(
-			const PulseForge::Entity& Entity,
-			EditorSceneWorkspaceState& Workspace,
-			EditorStyle& Style,
-			EditorHierarchyPanelActionSink& Actions,
-			std::optional<EditorHierarchyPanelAction>& DeferredAction,
+		void DrawEntityTree(const PulseForge::Entity& Entity, EditorSceneWorkspaceState& Workspace, EditorStyle& Style,
+			EditorHierarchyPanelActionSink& Actions, std::optional<EditorHierarchyPanelAction>& DeferredAction,
 			const std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash>* VisibleEntities);
 
 		std::string m_Search;
@@ -63,4 +56,4 @@ namespace PulseForgeEditor
 	};
 
 	[[nodiscard]] EditorIcon GetEditorEntityIcon(const PulseForge::Entity& Entity);
-}
+} // namespace PulseForgeEditor

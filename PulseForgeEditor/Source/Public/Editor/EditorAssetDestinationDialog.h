@@ -36,10 +36,7 @@ namespace PulseForgeEditor
 	class EditorAssetDestinationDialog final
 	{
 	public:
-		[[nodiscard]] static std::optional<EditorAssetDestinationOperation> Draw(
-			EditorStyle& Style,
-			EditorAssetWorkflowState& Workflow,
-			const PulseForge::Project* Project,
-			const EditorContentBrowserState& ContentBrowser);
+		[[nodiscard]] static std::optional<EditorAssetDestinationOperation> Draw(EditorStyle& Style, EditorAssetWorkflowState& Workflow,
+			const PulseForge::Project* Project, const EditorContentBrowserState& ContentBrowser);
 	};
-}
+} // namespace PulseForgeEditor

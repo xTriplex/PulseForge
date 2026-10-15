@@ -32,13 +32,10 @@ namespace PulseForgeEditor
 
 	void EditorStatusPanel::DrawMessage(EditorStyle& Style, EditorStatusMessagePresentation Presentation) const
 	{
-		const ImVec4 Color = m_Severity == EditorStatusSeverity::Error
-			? Style.GetColor(EditorColorToken::Error)
-			: m_Severity == EditorStatusSeverity::Warning
-				? Style.GetColor(EditorColorToken::Warning)
-				: Presentation == EditorStatusMessagePresentation::Wrapped
-					? Style.GetColor(EditorColorToken::Text)
-					: Style.GetColor(EditorColorToken::TextMuted);
+		const ImVec4 Color = m_Severity == EditorStatusSeverity::Error					? Style.GetColor(EditorColorToken::Error)
+							 : m_Severity == EditorStatusSeverity::Warning				? Style.GetColor(EditorColorToken::Warning)
+							 : Presentation == EditorStatusMessagePresentation::Wrapped ? Style.GetColor(EditorColorToken::Text)
+																						: Style.GetColor(EditorColorToken::TextMuted);
 
 		if (Presentation == EditorStatusMessagePresentation::Wrapped)
 		{
@@ -48,20 +45,13 @@ namespace PulseForgeEditor
 
 		const float MessageWidth = ImGui::GetContentRegionAvail().x;
 		ImGui::TextColored(Color, "%s", m_Message.c_str());
-		if (ImGui::IsItemHovered() && ImGui::CalcTextSize(m_Message.c_str()).x > MessageWidth)
-			ImGui::SetTooltip("%s", m_Message.c_str());
+		if (ImGui::IsItemHovered() && ImGui::CalcTextSize(m_Message.c_str()).x > MessageWidth) ImGui::SetTooltip("%s", m_Message.c_str());
 	}
 
 	void EditorStatusPanel::DrawStatusBarContents(
-		EditorStyle& Style,
-		bool HasScene,
-		bool SceneDirty,
-		bool RuntimeActive,
-		std::string_view RendererName) const
+		EditorStyle& Style, bool HasScene, bool SceneDirty, bool RuntimeActive, std::string_view RendererName) const
 	{
-		if (!ImGui::BeginTable("GlobalStatusLayout", 2,
-			ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings))
-			return;
+		if (!ImGui::BeginTable("GlobalStatusLayout", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings)) return;
 
 		ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 		ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 276.0f);
@@ -70,10 +60,8 @@ namespace PulseForgeEditor
 		DrawMessage(Style, EditorStatusMessagePresentation::SingleLine);
 
 		ImGui::TableSetColumnIndex(1);
-		if (SceneDirty)
-			ImGui::TextColored(Style.GetColor(EditorColorToken::Warning), "Unsaved scene");
-		else
-			Style.TextMuted(!HasScene ? "No scene" : "Scene saved");
+		if (SceneDirty) ImGui::TextColored(Style.GetColor(EditorColorToken::Warning), "Unsaved scene");
+		else Style.TextMuted(!HasScene ? "No scene" : "Scene saved");
 		if (RuntimeActive)
 		{
 			ImGui::SameLine();
@@ -87,4 +75,4 @@ namespace PulseForgeEditor
 		Style.TextMuted(RendererName);
 		ImGui::EndTable();
 	}
-}
+} // namespace PulseForgeEditor

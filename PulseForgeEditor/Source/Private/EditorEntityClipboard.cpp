@@ -18,23 +18,19 @@ namespace PulseForgeEditor
 		std::expected<PulseForge::UUID, std::string> GenerateUUID()
 		{
 			auto Generated = PulseForge::UUID::Generate();
-			if (!Generated)
-				return std::unexpected(Generated.error().Message);
+			if (!Generated) return std::unexpected(Generated.error().Message);
 			return *Generated;
 		}
-	}
+	} // namespace
 
 	bool EditorEntityClipboard::CanPaste(const PulseForge::UUID& Project) const noexcept
 	{
 		return HasData() && m_Project == Project;
 	}
 
-	std::expected<EditorEntityClipboard, std::string> EditorEntityClipboard::Capture(
-		PulseForge::UUID Project,
-		std::optional<PulseForge::AssetID> Scene,
-		std::span<const PulseForge::UUID> Roots,
-		std::span<const PulseForge::UUID> IncludedEntities,
-		std::string_view SerializedScene)
+	std::expected<EditorEntityClipboard, std::string> EditorEntityClipboard::Capture(PulseForge::UUID Project,
+		std::optional<PulseForge::AssetID> Scene, std::span<const PulseForge::UUID> Roots,
+		std::span<const PulseForge::UUID> IncludedEntities, std::string_view SerializedScene)
 	{
 		try
 		{
@@ -58,8 +54,7 @@ namespace PulseForgeEditor
 				const auto Identifier = Record.find("uuid");
 				if (Identifier == Record.end() || !Identifier->is_string())
 					return std::unexpected("A serialized entity has a missing or invalid UUID.");
-				if (IncludedIdentifiers.contains(Identifier->get<std::string>()))
-					Clipboard.m_Records.push_back(Record.dump());
+				if (IncludedIdentifiers.contains(Identifier->get<std::string>())) Clipboard.m_Records.push_back(Record.dump());
 			}
 
 			if (Clipboard.m_Records.size() != IncludedIdentifiers.size())
@@ -72,18 +67,14 @@ namespace PulseForgeEditor
 		}
 	}
 
-	std::expected<EditorEntityClipboard::PreparedPaste, std::string> EditorEntityClipboard::PreparePaste(
-		PulseForge::UUID TargetProject,
-		std::optional<PulseForge::AssetID> TargetScene,
-		std::string_view SerializedTargetScene,
-		const AssetAvailable& IsAssetAvailable,
+	std::expected<EditorEntityClipboard::PreparedPaste, std::string> EditorEntityClipboard::PreparePaste(PulseForge::UUID TargetProject,
+		std::optional<PulseForge::AssetID> TargetScene, std::string_view SerializedTargetScene, const AssetAvailable& IsAssetAvailable,
 		IdentifierGenerator GenerateIdentifier) const
 	{
 		if (!CanPaste(TargetProject))
 			return std::unexpected("The clipboard belongs to another project; copy the entities again in this project.");
 
-		if (!GenerateIdentifier)
-			GenerateIdentifier = GenerateUUID;
+		if (!GenerateIdentifier) GenerateIdentifier = GenerateUUID;
 
 		try
 		{
@@ -103,8 +94,7 @@ namespace PulseForgeEditor
 				if (IdentifierValue == Record.end() || !IdentifierValue->is_string())
 					return std::unexpected("The active scene contains an entity with a missing or invalid UUID.");
 				const auto Identifier = PulseForge::UUID::Parse(IdentifierValue->get<std::string>());
-				if (!Identifier)
-					return std::unexpected("The active scene contains an entity with an invalid UUID.");
+				if (!Identifier) return std::unexpected("The active scene contains an entity with an invalid UUID.");
 				ExistingIdentifiers.insert(*Identifier);
 				DestinationIdentifiers.insert(*Identifier);
 				const auto Tag = Record.find("tag");
@@ -130,16 +120,14 @@ namespace PulseForgeEditor
 				for (size_t Attempt = 0; Attempt < 64; ++Attempt)
 				{
 					auto Generated = GenerateIdentifier();
-					if (!Generated)
-						return std::unexpected(Generated.error());
+					if (!Generated) return std::unexpected(Generated.error());
 					if (!Generated->IsNil() && !ExistingIdentifiers.contains(*Generated))
 					{
 						NewIdentifier = *Generated;
 						break;
 					}
 				}
-				if (!NewIdentifier)
-					return std::unexpected("Could not generate a unique entity UUID for the paste operation.");
+				if (!NewIdentifier) return std::unexpected("Could not generate a unique entity UUID for the paste operation.");
 				ExistingIdentifiers.insert(*NewIdentifier);
 				RemappedIdentifiers.emplace(OldIdentifier, *NewIdentifier);
 				NewRecords.push_back(std::move(Record));
@@ -171,56 +159,42 @@ namespace PulseForgeEditor
 				if (Parent != Record.end() && Parent->is_string())
 				{
 					const std::string OldParent = Parent->get<std::string>();
-					if (const auto InternalParent = RemappedIdentifiers.find(OldParent);
-						InternalParent != RemappedIdentifiers.end())
+					if (const auto InternalParent = RemappedIdentifiers.find(OldParent); InternalParent != RemappedIdentifiers.end())
 						*Parent = InternalParent->second.ToString();
 					else
 					{
 						const auto ParentIdentifier = PulseForge::UUID::Parse(OldParent);
 						if (!SameScene || !ParentIdentifier || !DestinationIdentifiers.contains(*ParentIdentifier))
-							return std::unexpected(
-								"This hierarchy has an external parent that is unavailable in the destination scene.");
+							return std::unexpected("This hierarchy has an external parent that is unavailable in the destination scene.");
 					}
 				}
 
-				const auto CheckAsset = [&IsAssetAvailable](const EditorJson& Object, std::string_view Field)
-					-> std::optional<std::string>
+				const auto CheckAsset = [&IsAssetAvailable](const EditorJson& Object, std::string_view Field) -> std::optional<std::string>
 				{
 					const auto Value = Object.find(Field);
-					if (Value == Object.end())
-						return std::nullopt;
-					if (!Value->is_string())
-						return "A copied asset reference is malformed.";
+					if (Value == Object.end()) return std::nullopt;
+					if (!Value->is_string()) return "A copied asset reference is malformed.";
 					const auto Identifier = PulseForge::UUID::Parse(Value->get<std::string>());
 					if (!Identifier || !IsAssetAvailable || !IsAssetAvailable(*Identifier))
 						return "A copied entity references an asset that is not available in this project.";
 					return std::nullopt;
 				};
 				for (const auto& [ComponentName, Fields] : std::array{
-					std::pair<std::string_view, std::array<std::string_view, 2>>{
-						"meshRenderer", { "meshAsset", "materialAsset" }},
-					std::pair<std::string_view, std::array<std::string_view, 2>>{
-						"environmentLight", { "hdrImage", "" }},
-					std::pair<std::string_view, std::array<std::string_view, 2>>{
-						"audioSource", { "asset", "" }},
-					std::pair<std::string_view, std::array<std::string_view, 2>>{
-						"script", { "asset", "" } }})
+						 std::pair<std::string_view, std::array<std::string_view, 2>>{ "meshRenderer", { "meshAsset", "materialAsset" } },
+						 std::pair<std::string_view, std::array<std::string_view, 2>>{ "environmentLight", { "hdrImage", "" } },
+						 std::pair<std::string_view, std::array<std::string_view, 2>>{ "audioSource", { "asset", "" } },
+						 std::pair<std::string_view, std::array<std::string_view, 2>>{ "script", { "asset", "" } } })
 				{
 					const auto Component = Record.find(ComponentName);
-					if (Component == Record.end() || !Component->is_object())
-						continue;
+					if (Component == Record.end() || !Component->is_object()) continue;
 					for (const std::string_view Field : Fields)
 						if (!Field.empty())
-							if (const auto Error = CheckAsset(*Component, Field))
-								return std::unexpected(*Error);
+							if (const auto Error = CheckAsset(*Component, Field)) return std::unexpected(*Error);
 				}
 
-				if (RootIdentifiers.contains(OldIdentifier))
-					Prepared.RootIdentifiers.push_back(NewIdentifier);
-				if (auto Camera = Record.find("camera"); Camera != Record.end() && Camera->is_object())
-					(*Camera)["primary"] = false;
-				if (auto Listener = Record.find("audioListener");
-					Listener != Record.end() && Listener->is_object())
+				if (RootIdentifiers.contains(OldIdentifier)) Prepared.RootIdentifiers.push_back(NewIdentifier);
+				if (auto Camera = Record.find("camera"); Camera != Record.end() && Camera->is_object()) (*Camera)["primary"] = false;
+				if (auto Listener = Record.find("audioListener"); Listener != Record.end() && Listener->is_object())
 					(*Listener)["primary"] = false;
 			}
 
@@ -234,4 +208,4 @@ namespace PulseForgeEditor
 			return std::unexpected(Exception.what());
 		}
 	}
-}
+} // namespace PulseForgeEditor

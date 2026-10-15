@@ -1,5 +1,6 @@
 #include "TestEditorSupport.h"
 #include "EditorConsoleHistory.h"
+#include "EditorConsoleSeverity.h"
 #include "Editor/EditorMaterialDraftStore.h"
 #include "Editor/EditorStatusPanel.h"
 
@@ -37,17 +38,29 @@ namespace
 		PF_CHECK(Tests, Messages.empty());
 	}
 
+	void TestEditorConsoleSeverityConversion(TestRunner& Tests)
+	{
+		using PulseForgeEditor::EditorConsoleSeverity;
+		using PulseForgeEditor::Detail::ConvertConsoleSeverity;
+		using spdlog::level::level_enum;
+
+		PF_CHECK(Tests, ConvertConsoleSeverity(spdlog::level::trace) == EditorConsoleSeverity::Trace);
+		PF_CHECK(Tests, ConvertConsoleSeverity(spdlog::level::debug) == EditorConsoleSeverity::Debug);
+		PF_CHECK(Tests, ConvertConsoleSeverity(spdlog::level::info) == EditorConsoleSeverity::Info);
+		PF_CHECK(Tests, ConvertConsoleSeverity(spdlog::level::warn) == EditorConsoleSeverity::Warning);
+		PF_CHECK(Tests, ConvertConsoleSeverity(spdlog::level::err) == EditorConsoleSeverity::Error);
+		PF_CHECK(Tests, ConvertConsoleSeverity(spdlog::level::critical) == EditorConsoleSeverity::Critical);
+		PF_CHECK(Tests, ConvertConsoleSeverity(spdlog::level::off) == EditorConsoleSeverity::Unknown);
+		PF_CHECK(Tests, ConvertConsoleSeverity(static_cast<level_enum>(127)) == EditorConsoleSeverity::Unknown);
+	}
+
 	void TestEditorContentBrowserState(TestRunner& Tests)
 	{
 		using namespace PulseForge;
 		using namespace PulseForgeEditor;
 		EditorContentBrowserState Browser;
-		Browser.SetAssets({
-			{ AssetID{ 0, 1 }, "Assets/Textures/Sky/blue.png" },
-			{ AssetID{ 0, 2 }, "Assets/Textures/red.png" },
-			{ AssetID{ 0, 3 }, "Assets/Materials/metal.material" },
-			{ AssetID{ 0, 4 }, "Outside/loose.scene" }
-		});
+		Browser.SetAssets({ { AssetID{ 0, 1 }, "Assets/Textures/Sky/blue.png" }, { AssetID{ 0, 2 }, "Assets/Textures/red.png" },
+			{ AssetID{ 0, 3 }, "Assets/Materials/metal.material" }, { AssetID{ 0, 4 }, "Outside/loose.scene" } });
 
 		const EditorContentFolderNode& Root = Browser.FolderRoot();
 		PF_CHECK(Tests, Root.Name == "Assets");
@@ -71,8 +84,7 @@ namespace
 		Browser.SetCurrentFolder("Assets/Textures");
 		Browser.RebuildFilteredAssetIndices();
 		PF_CHECK(Tests, Browser.FilteredAssetIndices().size() == 1);
-		PF_CHECK(Tests, Browser.Assets()[Browser.FilteredAssetIndices()[0]].ProjectRelativePath ==
-			"Assets/Textures/red.png");
+		PF_CHECK(Tests, Browser.Assets()[Browser.FilteredAssetIndices()[0]].ProjectRelativePath == "Assets/Textures/red.png");
 
 		Browser.SearchText() = "BLUE";
 		Browser.RebuildFilteredAssetIndices();
@@ -82,8 +94,7 @@ namespace
 		Browser.SelectedFolder() = std::filesystem::path("Assets/Textures/Sky");
 		Browser.RebaseFoldersAfterMove("Assets/Textures", "Assets/Art/Textures");
 		PF_CHECK(Tests, Browser.CurrentFolder() == "Assets/Art/Textures");
-		PF_CHECK(Tests, Browser.SelectedFolder() &&
-			*Browser.SelectedFolder() == "Assets/Art/Textures/Sky");
+		PF_CHECK(Tests, Browser.SelectedFolder() && *Browser.SelectedFolder() == "Assets/Art/Textures/Sky");
 
 		Browser.SetAssets({ { AssetID{ 0, 3 }, "Assets/Materials/metal.material" } });
 		PF_CHECK(Tests, Browser.AssetPresentations().size() == 1);
@@ -230,11 +241,12 @@ namespace
 		PF_CHECK(Tests, Drafts.ContainsDraft(OtherProjectKey));
 		PF_CHECK(Tests, Drafts.IsDirty(OtherProjectKey));
 	}
-}
+} // namespace
 
 void RunEditorPanelStateTests(TestRunner& Tests)
 {
 	TestEditorConsoleHistory(Tests);
+	TestEditorConsoleSeverityConversion(Tests);
 	TestEditorContentBrowserState(Tests);
 	TestEditorStatusPanel(Tests);
 	TestEditorAssetWorkflowState(Tests);

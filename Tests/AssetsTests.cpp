@@ -15,8 +15,7 @@ namespace
 		auto ChildResult = Source.CreateEntityWithUUID(ChildId, "Child \"one\"");
 		auto RootResult = Source.CreateEntityWithUUID(RootId, "Root");
 		PF_CHECK(Tests, ChildResult.has_value() && RootResult.has_value());
-		if (!ChildResult || !RootResult)
-			return;
+		if (!ChildResult || !RootResult) return;
 
 		Entity Child = *ChildResult;
 		Entity Root = *RootResult;
@@ -80,8 +79,7 @@ namespace
 		PF_CHECK(Tests, SourceEnvironment.Validate().has_value());
 		const EnvironmentLightComponent MissingEnvironmentAsset{ AssetID{}, 1.0f };
 		const EnvironmentLightComponent NegativeEnvironmentIntensity{ SourceEnvironment.HdrImage, -1.0f };
-		const EnvironmentLightComponent InfiniteEnvironmentIntensity{
-			SourceEnvironment.HdrImage, std::numeric_limits<float>::infinity() };
+		const EnvironmentLightComponent InfiniteEnvironmentIntensity{ SourceEnvironment.HdrImage, std::numeric_limits<float>::infinity() };
 		PF_CHECK(Tests, !MissingEnvironmentAsset.Validate().has_value());
 		PF_CHECK(Tests, !NegativeEnvironmentIntensity.Validate().has_value());
 		PF_CHECK(Tests, !InfiniteEnvironmentIntensity.Validate().has_value());
@@ -103,8 +101,7 @@ namespace
 
 		const auto Serialized = SceneSerializer::Serialize(Source);
 		PF_CHECK(Tests, Serialized.has_value());
-		if (!Serialized)
-			return;
+		if (!Serialized) return;
 		PF_CHECK(Tests, Serialized->find("\"format\": \"PulseForgeScene\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"version\": 7") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"primary\": true") != std::string::npos);
@@ -126,17 +123,15 @@ namespace
 		const size_t ChildEntityPosition = Serialized->find("\"uuid\": \"" + ChildId.ToString() + "\"");
 		const size_t RootEntityPosition = Serialized->find("\"uuid\": \"" + RootId.ToString() + "\"");
 		PF_CHECK(Tests, ChildEntityPosition != std::string::npos && RootEntityPosition != std::string::npos &&
-			ChildEntityPosition < RootEntityPosition);
+							ChildEntityPosition < RootEntityPosition);
 
 		auto LegacyDocument = nlohmann::json::parse(*Serialized);
 		bool FoundLegacyLight = false;
 		for (auto& EntityRecord : LegacyDocument["entities"])
 		{
-			if (EntityRecord.value("uuid", std::string{}) != ChildId.ToString())
-				continue;
+			if (EntityRecord.value("uuid", std::string{}) != ChildId.ToString()) continue;
 			FoundLegacyLight = EntityRecord.contains("directionalLight");
-			if (!FoundLegacyLight)
-				break;
+			if (!FoundLegacyLight) break;
 			for (const std::string_view Key : { "castShadows", "shadowDistance", "shadowBias", "shadowNormalBias", "shadowSoftness" })
 				EntityRecord["directionalLight"].erase(std::string(Key));
 			break;
@@ -156,15 +151,14 @@ namespace
 				PF_CHECK(Tests, LegacyLight && LegacyLight->has_value() && LegacyLight->value().CastShadows);
 				PF_CHECK(Tests, LegacyLight && LegacyLight->has_value() && LegacyLight->value().ShadowDistance == 100.0f);
 				PF_CHECK(Tests, LegacyLight && LegacyLight->has_value() && LegacyLight->value().ShadowBias == 1.0f &&
-					LegacyLight->value().ShadowNormalBias == 0.025f && LegacyLight->value().ShadowSoftness == 1.5f);
+									LegacyLight->value().ShadowNormalBias == 0.025f && LegacyLight->value().ShadowSoftness == 1.5f);
 			}
 		}
 
 		Scene Destination;
 		auto PreviousResult = Destination.CreateEntity("Previous scene");
 		PF_CHECK(Tests, PreviousResult.has_value());
-		if (!PreviousResult)
-			return;
+		if (!PreviousResult) return;
 		Entity PreviousEntity = *PreviousResult;
 		const auto Loaded = SceneSerializer::Deserialize(*Serialized, Destination);
 		PF_CHECK(Tests, Loaded.has_value());
@@ -174,8 +168,7 @@ namespace
 		const auto LoadedRoot = Destination.FindEntity(RootId);
 		const auto LoadedChild = Destination.FindEntity(ChildId);
 		PF_CHECK(Tests, LoadedRoot.has_value() && LoadedChild.has_value());
-		if (!LoadedRoot || !LoadedChild)
-			return;
+		if (!LoadedRoot || !LoadedChild) return;
 
 		const auto LoadedTag = LoadedChild->GetTag();
 		const auto LoadedTransform = LoadedChild->GetTransform();
@@ -195,43 +188,41 @@ namespace
 		PF_CHECK(Tests, LoadedTransform && glm::abs(glm::length(LoadedTransform->Rotation) - 1.0f) < 0.0001f);
 		PF_CHECK(Tests, LoadedCamera && LoadedCamera->has_value());
 		PF_CHECK(Tests, LoadedCamera && LoadedCamera->has_value() &&
-			glm::abs(LoadedCamera->value().VerticalFieldOfViewRadians - SourceCamera.VerticalFieldOfViewRadians) < 0.0001f);
+							glm::abs(LoadedCamera->value().VerticalFieldOfViewRadians - SourceCamera.VerticalFieldOfViewRadians) < 0.0001f);
 		PF_CHECK(Tests, LoadedCamera && LoadedCamera->has_value() && LoadedCamera->value().IsPrimary);
-		PF_CHECK(Tests, LoadedLight && LoadedLight->has_value() &&
-			LoadedLight->value().Intensity == SourceLight.Intensity &&
-			glm::all(glm::equal(LoadedLight->value().Color, SourceLight.Color)));
-		PF_CHECK(Tests, LoadedLight && LoadedLight->has_value() &&
-			!LoadedLight->value().CastShadows && LoadedLight->value().ShadowDistance == 42.0f &&
-			LoadedLight->value().ShadowBias == 2.0f && LoadedLight->value().ShadowNormalBias == 0.04f &&
-			LoadedLight->value().ShadowSoftness == 3.0f);
+		PF_CHECK(Tests, LoadedLight && LoadedLight->has_value() && LoadedLight->value().Intensity == SourceLight.Intensity &&
+							glm::all(glm::equal(LoadedLight->value().Color, SourceLight.Color)));
+		PF_CHECK(Tests, LoadedLight && LoadedLight->has_value() && !LoadedLight->value().CastShadows &&
+							LoadedLight->value().ShadowDistance == 42.0f && LoadedLight->value().ShadowBias == 2.0f &&
+							LoadedLight->value().ShadowNormalBias == 0.04f && LoadedLight->value().ShadowSoftness == 3.0f);
 		PF_CHECK(Tests, LoadedEnvironment && LoadedEnvironment->has_value() &&
-			LoadedEnvironment->value().HdrImage == SourceEnvironment.HdrImage &&
-			LoadedEnvironment->value().Intensity == SourceEnvironment.Intensity);
-		PF_CHECK(Tests, LoadedPoint && LoadedPoint->has_value() &&
-			LoadedPoint->value().Intensity == SourcePointLight.Intensity && LoadedPoint->value().Range == SourcePointLight.Range &&
-			glm::all(glm::equal(LoadedPoint->value().Color, SourcePointLight.Color)) &&
-			LoadedPoint->value().CastShadows && LoadedPoint->value().ShadowBias == SourcePointLight.ShadowBias &&
-			LoadedPoint->value().ShadowNormalBias == SourcePointLight.ShadowNormalBias &&
-			LoadedPoint->value().ShadowSoftness == SourcePointLight.ShadowSoftness);
+							LoadedEnvironment->value().HdrImage == SourceEnvironment.HdrImage &&
+							LoadedEnvironment->value().Intensity == SourceEnvironment.Intensity);
+		PF_CHECK(Tests, LoadedPoint && LoadedPoint->has_value() && LoadedPoint->value().Intensity == SourcePointLight.Intensity &&
+							LoadedPoint->value().Range == SourcePointLight.Range &&
+							glm::all(glm::equal(LoadedPoint->value().Color, SourcePointLight.Color)) && LoadedPoint->value().CastShadows &&
+							LoadedPoint->value().ShadowBias == SourcePointLight.ShadowBias &&
+							LoadedPoint->value().ShadowNormalBias == SourcePointLight.ShadowNormalBias &&
+							LoadedPoint->value().ShadowSoftness == SourcePointLight.ShadowSoftness);
 		PF_CHECK(Tests, LoadedSpot && LoadedSpot->has_value() &&
-			LoadedSpot->value().InnerConeAngleDegrees == SourceSpotLight.InnerConeAngleDegrees &&
-			LoadedSpot->value().OuterConeAngleDegrees == SourceSpotLight.OuterConeAngleDegrees &&
-			LoadedSpot->value().Range == SourceSpotLight.Range && LoadedSpot->value().CastShadows &&
-			LoadedSpot->value().ShadowBias == SourceSpotLight.ShadowBias &&
-			LoadedSpot->value().ShadowNormalBias == SourceSpotLight.ShadowNormalBias &&
-			LoadedSpot->value().ShadowSoftness == SourceSpotLight.ShadowSoftness);
-		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
-			LoadedMeshRenderer->value().MeshAsset == MeshAssetIdentifier);
-		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
-			LoadedMeshRenderer->value().MaterialAsset == MaterialAssetIdentifier);
-		PF_CHECK(Tests, LoadedAudioSource && LoadedAudioSource->has_value() &&
-			LoadedAudioSource->value().AudioAsset == AudioAssetIdentifier);
-		PF_CHECK(Tests, LoadedAudioSource && LoadedAudioSource->has_value() &&
-			LoadedAudioSource->value().Volume == SourceAudio.Volume && LoadedAudioSource->value().Looping &&
-			!LoadedAudioSource->value().PlayOnStart && LoadedAudioSource->value().Spatialized);
+							LoadedSpot->value().InnerConeAngleDegrees == SourceSpotLight.InnerConeAngleDegrees &&
+							LoadedSpot->value().OuterConeAngleDegrees == SourceSpotLight.OuterConeAngleDegrees &&
+							LoadedSpot->value().Range == SourceSpotLight.Range && LoadedSpot->value().CastShadows &&
+							LoadedSpot->value().ShadowBias == SourceSpotLight.ShadowBias &&
+							LoadedSpot->value().ShadowNormalBias == SourceSpotLight.ShadowNormalBias &&
+							LoadedSpot->value().ShadowSoftness == SourceSpotLight.ShadowSoftness);
+		PF_CHECK(
+			Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() && LoadedMeshRenderer->value().MeshAsset == MeshAssetIdentifier);
+		PF_CHECK(Tests,
+			LoadedMeshRenderer && LoadedMeshRenderer->has_value() && LoadedMeshRenderer->value().MaterialAsset == MaterialAssetIdentifier);
+		PF_CHECK(
+			Tests, LoadedAudioSource && LoadedAudioSource->has_value() && LoadedAudioSource->value().AudioAsset == AudioAssetIdentifier);
+		PF_CHECK(Tests, LoadedAudioSource && LoadedAudioSource->has_value() && LoadedAudioSource->value().Volume == SourceAudio.Volume &&
+							LoadedAudioSource->value().Looping && !LoadedAudioSource->value().PlayOnStart &&
+							LoadedAudioSource->value().Spatialized);
 		PF_CHECK(Tests, LoadedAudioListener && LoadedAudioListener->has_value() && LoadedAudioListener->value().IsPrimary);
-		PF_CHECK(Tests, LoadedScript && LoadedScript->has_value() &&
-			LoadedScript->value().ScriptAsset == ScriptAssetIdentifier && !LoadedScript->value().Enabled);
+		PF_CHECK(Tests, LoadedScript && LoadedScript->has_value() && LoadedScript->value().ScriptAsset == ScriptAssetIdentifier &&
+							!LoadedScript->value().Enabled);
 		PF_CHECK(Tests, LoadedParent && LoadedParent->has_value() && **LoadedParent == *LoadedRoot);
 		auto LegacySpotDocument = nlohmann::json::parse(*Serialized);
 		for (auto& EntityRecord : LegacySpotDocument["entities"])
@@ -253,14 +244,13 @@ namespace
 			{
 				const auto LegacySpot = LegacySpotEntity->GetSpotLight();
 				PF_CHECK(Tests, LegacySpot && LegacySpot->has_value() && !LegacySpot->value().CastShadows &&
-					LegacySpot->value().ShadowBias == SpotLightComponent{}.ShadowBias);
+									LegacySpot->value().ShadowBias == SpotLightComponent{}.ShadowBias);
 			}
 		}
 		auto InvalidSpotDocument = nlohmann::json::parse(*Serialized);
 		for (auto& EntityRecord : InvalidSpotDocument["entities"])
 			if (EntityRecord.value("uuid", std::string{}) == ChildId.ToString())
-				EntityRecord["spotLight"]["innerConeAngleDegrees"] =
-					EntityRecord["spotLight"]["outerConeAngleDegrees"];
+				EntityRecord["spotLight"]["innerConeAngleDegrees"] = EntityRecord["spotLight"]["outerConeAngleDegrees"];
 		const auto InvalidSpotLoad = SceneSerializer::Deserialize(InvalidSpotDocument.dump(), Destination);
 		PF_CHECK(Tests, !InvalidSpotLoad);
 		PF_CHECK(Tests, Destination.FindEntity(ChildId).has_value() && Destination.GetEntityCount() == 2);
@@ -284,7 +274,8 @@ namespace
 			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 7").size(), "\"version\": 99");
 		const auto UnsupportedVersionResult = SceneSerializer::Deserialize(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedVersionResult.has_value());
-		PF_CHECK(Tests, !UnsupportedVersionResult && UnsupportedVersionResult.error().Code == SceneSerializationErrorCode::UnsupportedVersion);
+		PF_CHECK(
+			Tests, !UnsupportedVersionResult && UnsupportedVersionResult.error().Code == SceneSerializationErrorCode::UnsupportedVersion);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
 
 		std::string InvalidAudioVolume = *Serialized;
@@ -300,8 +291,8 @@ namespace
 				InvalidAudioVolume.replace(AudioVolumeValueStart, AudioVolumeValueEnd - AudioVolumeValueStart, "2.0");
 		}
 		const auto InvalidAudioVolumeResult = SceneSerializer::Deserialize(InvalidAudioVolume, Destination);
-		PF_CHECK(Tests, !InvalidAudioVolumeResult &&
-			InvalidAudioVolumeResult.error().Code == SceneSerializationErrorCode::InvalidEntityData);
+		PF_CHECK(
+			Tests, !InvalidAudioVolumeResult && InvalidAudioVolumeResult.error().Code == SceneSerializationErrorCode::InvalidEntityData);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
 
 		std::string LegacyVersionThree = *Serialized;
@@ -327,8 +318,7 @@ namespace
 		if (LegacyCamera)
 		{
 			const auto LegacyCameraComponent = LegacyCamera->GetCamera();
-			PF_CHECK(Tests, LegacyCameraComponent && LegacyCameraComponent->has_value() &&
-				!LegacyCameraComponent->value().IsPrimary);
+			PF_CHECK(Tests, LegacyCameraComponent && LegacyCameraComponent->has_value() && !LegacyCameraComponent->value().IsPrimary);
 		}
 
 		Scene LegacySource;
@@ -381,8 +371,8 @@ namespace
 		{
 			const auto LegacyMeshRenderer = LegacyVersionTwoChild->GetMeshRenderer();
 			PF_CHECK(Tests, LegacyMeshRenderer && LegacyMeshRenderer->has_value());
-			PF_CHECK(Tests, LegacyMeshRenderer && LegacyMeshRenderer->has_value() &&
-				!LegacyMeshRenderer->value().MaterialAsset.has_value());
+			PF_CHECK(
+				Tests, LegacyMeshRenderer && LegacyMeshRenderer->has_value() && !LegacyMeshRenderer->value().MaterialAsset.has_value());
 		}
 
 		std::string InvalidMeshAsset = *Serialized;
@@ -392,8 +382,7 @@ namespace
 			InvalidMeshAsset.replace(MeshAssetPosition, MeshAssetIdentifier.ToString().size(), "not-a-uuid");
 		const auto InvalidMeshAssetLoad = SceneSerializer::Deserialize(InvalidMeshAsset, Destination);
 		PF_CHECK(Tests, !InvalidMeshAssetLoad.has_value());
-		PF_CHECK(Tests, !InvalidMeshAssetLoad &&
-			InvalidMeshAssetLoad.error().Code == SceneSerializationErrorCode::InvalidEntityData);
+		PF_CHECK(Tests, !InvalidMeshAssetLoad && InvalidMeshAssetLoad.error().Code == SceneSerializationErrorCode::InvalidEntityData);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
 
 		std::string InvalidMaterialAsset = *Serialized;
@@ -409,8 +398,8 @@ namespace
 		const size_t CameraFieldPosition = InvalidCameraDocument.find("\"verticalFovRadians\": ");
 		const size_t CameraValuePosition = InvalidCameraDocument.find_first_of("0123456789", CameraFieldPosition);
 		const size_t CameraValueEnd = InvalidCameraDocument.find_first_of(",\r\n", CameraValuePosition);
-		PF_CHECK(Tests, CameraFieldPosition != std::string::npos && CameraValuePosition != std::string::npos &&
-			CameraValueEnd != std::string::npos);
+		PF_CHECK(Tests,
+			CameraFieldPosition != std::string::npos && CameraValuePosition != std::string::npos && CameraValueEnd != std::string::npos);
 		if (CameraValuePosition != std::string::npos && CameraValueEnd != std::string::npos)
 			InvalidCameraDocument.replace(CameraValuePosition, CameraValueEnd - CameraValuePosition, "0.0");
 		const auto InvalidCameraResult = SceneSerializer::Deserialize(InvalidCameraDocument, Destination);
@@ -424,8 +413,8 @@ namespace
 		if (PrimaryValuePosition != std::string::npos)
 			InvalidPrimaryCameraDocument.replace(PrimaryValuePosition, std::string("\"primary\": true").size(), "\"primary\": \"yes\"");
 		const auto InvalidPrimaryCameraResult = SceneSerializer::Deserialize(InvalidPrimaryCameraDocument, Destination);
-		PF_CHECK(Tests, !InvalidPrimaryCameraResult &&
-			InvalidPrimaryCameraResult.error().Code == SceneSerializationErrorCode::InvalidEntityData);
+		PF_CHECK(Tests,
+			!InvalidPrimaryCameraResult && InvalidPrimaryCameraResult.error().Code == SceneSerializationErrorCode::InvalidEntityData);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
 
 		std::string UnsupportedFormat = *Serialized;
@@ -442,8 +431,7 @@ namespace
 		const size_t TranslationPosition = InvalidTransform.find("\"translation\": [");
 		const size_t FirstTranslation = InvalidTransform.find("4.0", TranslationPosition);
 		PF_CHECK(Tests, TranslationPosition != std::string::npos && FirstTranslation != std::string::npos);
-		if (FirstTranslation != std::string::npos)
-			InvalidTransform.replace(FirstTranslation, 3, "\"bad\"");
+		if (FirstTranslation != std::string::npos) InvalidTransform.replace(FirstTranslation, 3, "\"bad\"");
 		const auto InvalidTransformResult = SceneSerializer::Deserialize(InvalidTransform, Destination);
 		PF_CHECK(Tests, !InvalidTransformResult.has_value());
 		PF_CHECK(Tests, !InvalidTransformResult && InvalidTransformResult.error().Code == SceneSerializationErrorCode::InvalidEntityData);
@@ -466,9 +454,7 @@ namespace
 		if (DetachedParentPosition != std::string::npos)
 		{
 			HierarchyCycle.replace(
-				DetachedParentPosition,
-				std::string("\"parent\": null").size(),
-				"\"parent\": \"" + ChildId.ToString() + "\"");
+				DetachedParentPosition, std::string("\"parent\": null").size(), "\"parent\": \"" + ChildId.ToString() + "\"");
 		}
 		const auto HierarchyCycleResult = SceneSerializer::Deserialize(HierarchyCycle, Destination);
 		PF_CHECK(Tests, !HierarchyCycleResult.has_value());
@@ -503,12 +489,10 @@ namespace
 		std::error_code TemporaryDirectoryError;
 		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(TemporaryDirectoryError);
 		PF_CHECK(Tests, !TemporaryDirectoryError);
-		if (TemporaryDirectoryError)
-			return;
+		if (TemporaryDirectoryError) return;
 		const auto FileIdentifier = UUID::Generate();
 		PF_CHECK(Tests, FileIdentifier.has_value());
-		if (!FileIdentifier)
-			return;
+		if (!FileIdentifier) return;
 
 		const std::filesystem::path ScenePath = TemporaryDirectory / ("PulseForgeScene-" + FileIdentifier->ToString() + ".json");
 		struct SceneFileCleanup
@@ -523,8 +507,7 @@ namespace
 
 		const auto SaveResult = SceneSerializer::SaveToFile(Source, ScenePath);
 		PF_CHECK(Tests, SaveResult.has_value());
-		if (!SaveResult)
-			return;
+		if (!SaveResult) return;
 
 		Scene FileLoadedScene;
 		const auto LoadResult = SceneSerializer::LoadFromFile(ScenePath, FileLoadedScene);
@@ -563,13 +546,11 @@ namespace
 		std::error_code FileError;
 		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
 		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
+		if (FileError) return;
 
 		const auto ProjectIdentifier = UUID::Generate();
 		PF_CHECK(Tests, ProjectIdentifier.has_value());
-		if (!ProjectIdentifier)
-			return;
+		if (!ProjectIdentifier) return;
 
 		const std::filesystem::path ProjectRoot = TemporaryDirectory / ("PulseForgeSceneAssets-" + ProjectIdentifier->ToString());
 		struct ProjectCleanup
@@ -585,22 +566,19 @@ namespace
 		const std::filesystem::path SceneDirectory = ProjectRoot / "Assets" / "Scenes";
 		std::filesystem::create_directories(SceneDirectory, FileError);
 		PF_CHECK(Tests, !FileError);
-		if (FileError)
-			return;
+		if (FileError) return;
 
 		const auto CameraID = UUID::Parse("1b6cafe2-0f30-44ea-b841-10cf66f3e517");
 		const auto MeshEntityID = UUID::Parse("2c76c6f7-e8f5-4936-9a24-61dbe7527e08");
 		const auto MeshAssetID = UUID::Parse("3d56dd08-fd22-4a47-9ddf-09f392f1a619");
 		PF_CHECK(Tests, CameraID && MeshEntityID && MeshAssetID);
-		if (!CameraID || !MeshEntityID || !MeshAssetID)
-			return;
+		if (!CameraID || !MeshEntityID || !MeshAssetID) return;
 
 		Scene Source;
 		const auto Camera = Source.CreateEntityWithUUID(*CameraID, "Camera");
 		const auto MeshEntity = Source.CreateEntityWithUUID(*MeshEntityID, "Mesh");
 		PF_CHECK(Tests, Camera && MeshEntity);
-		if (!Camera || !MeshEntity)
-			return;
+		if (!Camera || !MeshEntity) return;
 		PF_CHECK(Tests, Camera->SetCamera(CameraComponent{}).has_value());
 		PF_CHECK(Tests, MeshEntity->SetMeshRenderer(MeshRendererComponent{ *MeshAssetID }).has_value());
 
@@ -608,25 +586,18 @@ namespace
 		PF_CHECK(Tests, SceneSerializer::SaveToFile(Source, SourcePath).has_value());
 		const auto CreatedMetadata = AssetMetadataSerializer::CreateForNewAsset(SourcePath);
 		PF_CHECK(Tests, CreatedMetadata.has_value());
-		if (!CreatedMetadata)
-			return;
+		if (!CreatedMetadata) return;
 		const AssetID SceneID = CreatedMetadata->ID;
 
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
-		const auto CreatedScene = SceneAssetService::Create(
-			Registry,
-			ProjectRoot,
-			"Assets/Scenes/generated.scene",
-			Source);
+		const auto CreatedScene = SceneAssetService::Create(Registry, ProjectRoot, "Assets/Scenes/generated.scene", Source);
 		PF_CHECK(Tests, CreatedScene.has_value());
-		PF_CHECK(Tests, CreatedScene && !CreatedScene->ID.IsNil() &&
-			CreatedScene->ID != SceneID &&
-			CreatedScene->ProjectRelativePath == "Assets/Scenes/generated.scene");
+		PF_CHECK(Tests, CreatedScene && !CreatedScene->ID.IsNil() && CreatedScene->ID != SceneID &&
+							CreatedScene->ProjectRelativePath == "Assets/Scenes/generated.scene");
 		if (CreatedScene)
 		{
-			const auto CreatedMetadata = AssetMetadataSerializer::LoadFromFile(
-				ProjectRoot / "Assets/Scenes/generated.scene.meta");
+			const auto CreatedMetadata = AssetMetadataSerializer::LoadFromFile(ProjectRoot / "Assets/Scenes/generated.scene.meta");
 			PF_CHECK(Tests, CreatedMetadata && CreatedMetadata->ID == CreatedScene->ID);
 			PF_CHECK(Tests, Registry.Find(CreatedScene->ID).has_value());
 
@@ -635,26 +606,15 @@ namespace
 			PF_CHECK(Tests, GeneratedScene.GetEntityCount() == Source.GetEntityCount());
 			PF_CHECK(Tests, GeneratedScene.FindEntity(*MeshEntityID).has_value());
 
-			const auto DuplicateCreation = SceneAssetService::Create(
-				Registry,
-				ProjectRoot,
-				"Assets/Scenes/generated.scene",
-				Source);
-			PF_CHECK(Tests, !DuplicateCreation &&
-				DuplicateCreation.error().Code == SceneAssetErrorCode::AssetOperationFailed);
+			const auto DuplicateCreation = SceneAssetService::Create(Registry, ProjectRoot, "Assets/Scenes/generated.scene", Source);
+			PF_CHECK(Tests, !DuplicateCreation && DuplicateCreation.error().Code == SceneAssetErrorCode::AssetOperationFailed);
 			PF_CHECK(Tests, Registry.Find(CreatedScene->ID).has_value());
 		}
-		const auto InvalidSceneCreation = SceneAssetService::Create(
-			Registry,
-			ProjectRoot,
-			"Assets/Scenes/generated.json",
-			Source);
-		PF_CHECK(Tests, !InvalidSceneCreation &&
-			InvalidSceneCreation.error().Code == SceneAssetErrorCode::UnsupportedAssetType);
+		const auto InvalidSceneCreation = SceneAssetService::Create(Registry, ProjectRoot, "Assets/Scenes/generated.json", Source);
+		PF_CHECK(Tests, !InvalidSceneCreation && InvalidSceneCreation.error().Code == SceneAssetErrorCode::UnsupportedAssetType);
 
-		const auto ResolvedSource = AssetPathResolver::ResolveManagedSourcePath(
-			ProjectRoot,
-			std::filesystem::path("Assets/Scenes/validation.scene"));
+		const auto ResolvedSource =
+			AssetPathResolver::ResolveManagedSourcePath(ProjectRoot, std::filesystem::path("Assets/Scenes/validation.scene"));
 		PF_CHECK(Tests, ResolvedSource && *ResolvedSource == std::filesystem::absolute(SourcePath).lexically_normal());
 		PF_CHECK(Tests, !AssetPathResolver::ResolveManagedSourcePath(ProjectRoot, "Assets/../outside.scene"));
 		PF_CHECK(Tests, !AssetPathResolver::ResolveManagedSourcePath(ProjectRoot, SourcePath));
@@ -667,18 +627,12 @@ namespace
 		PF_CHECK(Tests, Loaded.GetEntityCount() == 2);
 		const auto LoadedMesh = Loaded.FindEntity(*MeshEntityID);
 		PF_CHECK(Tests, LoadedMesh.has_value());
-		if (!LoadedMesh)
-			return;
+		if (!LoadedMesh) return;
 		const auto LoadedMeshRenderer = LoadedMesh->GetMeshRenderer();
 		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value());
-		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() &&
-			LoadedMeshRenderer->value().MeshAsset == *MeshAssetID);
+		PF_CHECK(Tests, LoadedMeshRenderer && LoadedMeshRenderer->has_value() && LoadedMeshRenderer->value().MeshAsset == *MeshAssetID);
 
-		const auto MoveResult = AssetOperations::Move(
-			Registry,
-			ProjectRoot,
-			SceneID,
-			"Assets/Scenes/renamed.scene");
+		const auto MoveResult = AssetOperations::Move(Registry, ProjectRoot, SceneID, "Assets/Scenes/renamed.scene");
 		PF_CHECK(Tests, MoveResult && MoveResult->ID == SceneID);
 		const auto MovedRecord = Registry.Find(SceneID);
 		PF_CHECK(Tests, MovedRecord && MovedRecord->ProjectRelativePath == "Assets/Scenes/renamed.scene");
@@ -686,12 +640,10 @@ namespace
 
 		const auto UpdatedMesh = Loaded.FindEntity(*MeshEntityID);
 		PF_CHECK(Tests, UpdatedMesh.has_value());
-		if (!UpdatedMesh)
-			return;
+		if (!UpdatedMesh) return;
 		auto UpdatedTag = UpdatedMesh->GetTag();
 		PF_CHECK(Tests, UpdatedTag.has_value());
-		if (!UpdatedTag)
-			return;
+		if (!UpdatedTag) return;
 		UpdatedTag->Name = "Saved through stable scene UUID";
 		PF_CHECK(Tests, UpdatedMesh->SetTag(*UpdatedTag).has_value());
 		PF_CHECK(Tests, SceneAssetService::Save(SceneID, ProjectRoot, Registry, Loaded).has_value());
@@ -743,7 +695,7 @@ namespace
 		}
 	}
 
-}
+} // namespace
 
 void RunAssetsTests(TestRunner& Tests)
 {

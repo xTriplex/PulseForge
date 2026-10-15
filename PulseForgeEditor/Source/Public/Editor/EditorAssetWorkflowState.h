@@ -32,10 +32,7 @@ namespace PulseForgeEditor
 		void DismissDelete() noexcept;
 		[[nodiscard]] bool TakeDeleteDialogRequest() noexcept;
 
-		[[nodiscard]] const std::optional<PulseForge::AssetID>& DestinationAsset() const noexcept
-		{
-			return m_DestinationAsset;
-		}
+		[[nodiscard]] const std::optional<PulseForge::AssetID>& DestinationAsset() const noexcept { return m_DestinationAsset; }
 		[[nodiscard]] bool IsDuplicate() const noexcept { return m_IsDuplicate; }
 		[[nodiscard]] ProjectAssetDestinationCreateKind CreateKind() const noexcept { return m_CreateKind; }
 		[[nodiscard]] const std::optional<PulseForge::UUID>& PrefabRoot() const noexcept { return m_PrefabRoot; }
@@ -43,10 +40,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] std::array<char, 1024>& FilenameBuffer() noexcept { return m_Filename; }
 		[[nodiscard]] std::array<char, 256>& SearchBuffer() noexcept { return m_Search; }
 		[[nodiscard]] std::string& ValidationError() noexcept { return m_ValidationError; }
-		[[nodiscard]] const std::optional<PulseForge::AssetID>& PendingDeleteAsset() const noexcept
-		{
-			return m_PendingDeleteAsset;
-		}
+		[[nodiscard]] const std::optional<PulseForge::AssetID>& PendingDeleteAsset() const noexcept { return m_PendingDeleteAsset; }
 
 	private:
 		void InitializeDestination(std::string_view Folder, std::string_view Filename);
@@ -64,4 +58,4 @@ namespace PulseForgeEditor
 		bool m_DestinationDialogRequested = false;
 		bool m_DeleteDialogRequested = false;
 	};
-}
+} // namespace PulseForgeEditor

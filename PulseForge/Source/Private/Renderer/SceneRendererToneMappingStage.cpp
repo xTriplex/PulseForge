@@ -1,8 +1,6 @@
 #include "Core/PulseForgePCH.h"
 #include "Renderer/SceneRendererToneMappingStage.h"
 
-#include "Core/Application.h"
-
 namespace PulseForge
 {
 	namespace
@@ -16,16 +14,14 @@ namespace PulseForge
 		{
 			return { SceneRendererErrorCode::DrawFailed, {}, {}, std::move(Message) };
 		}
-	}
+	} // namespace
 
-	SceneRenderer::ToneMappingStage::ToneMappingStage(Application& Runtime) noexcept
-		: m_Runtime(Runtime)
+	SceneRenderer::ToneMappingStage::ToneMappingStage(RenderDevice& Runtime) noexcept : m_Runtime(Runtime)
 	{
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::ToneMappingStage::Initialize(
-		std::span<const std::byte> VertexBytecode,
-		std::span<const std::byte> FragmentBytecode)
+		std::span<const std::byte> VertexBytecode, std::span<const std::byte> FragmentBytecode)
 	{
 		ShaderDesc VertexDescription;
 		VertexDescription.Stage = ShaderStage::Vertex;
@@ -33,8 +29,7 @@ namespace PulseForge
 		VertexDescription.DebugName = "PulseForge tone mapping vertex shader";
 		auto Vertex = m_Runtime.CreateShader(VertexDescription, VertexBytecode);
 		if (!Vertex)
-			return std::unexpected(MakeToneMappingResourceError(
-				"Could not create tone mapping vertex shader: " + Vertex.error().Message));
+			return std::unexpected(MakeToneMappingResourceError("Could not create tone mapping vertex shader: " + Vertex.error().Message));
 		m_VertexShader = std::move(*Vertex);
 
 		ShaderDesc FragmentDescription;
@@ -43,22 +38,18 @@ namespace PulseForge
 		FragmentDescription.DebugName = "PulseForge tone mapping fragment shader";
 		auto Fragment = m_Runtime.CreateShader(FragmentDescription, FragmentBytecode);
 		if (!Fragment)
-			return std::unexpected(MakeToneMappingResourceError(
-				"Could not create tone mapping fragment shader: " + Fragment.error().Message));
+			return std::unexpected(
+				MakeToneMappingResourceError("Could not create tone mapping fragment shader: " + Fragment.error().Message));
 		m_FragmentShader = std::move(*Fragment);
 
 		BindingLayoutDesc LayoutDescription;
 		LayoutDescription.Visibility = ShaderVisibility::Fragment;
-		LayoutDescription.Items = {
-			{ BindingResourceType::Texture2D, 0 },
-			{ BindingResourceType::Sampler, 0 },
-			{ BindingResourceType::ConstantBuffer, 0 }
-		};
+		LayoutDescription.Items = { { BindingResourceType::Texture2D, 0 }, { BindingResourceType::Sampler, 0 },
+			{ BindingResourceType::ConstantBuffer, 0 } };
 		LayoutDescription.DebugName = "PulseForge tone mapping input and parameters";
 		auto Layout = m_Runtime.CreateBindingLayout(LayoutDescription);
 		if (!Layout)
-			return std::unexpected(MakeToneMappingResourceError(
-				"Could not create tone mapping binding layout: " + Layout.error().Message));
+			return std::unexpected(MakeToneMappingResourceError("Could not create tone mapping binding layout: " + Layout.error().Message));
 		m_BindingLayout = std::move(*Layout);
 
 		SamplerDesc SamplerDescription;
@@ -69,69 +60,51 @@ namespace PulseForge
 		SamplerDescription.DebugName = "PulseForge tone mapping HDR sampler";
 		auto Sampler = m_Runtime.CreateSampler(SamplerDescription);
 		if (!Sampler)
-			return std::unexpected(MakeToneMappingResourceError(
-				"Could not create tone mapping sampler: " + Sampler.error().Message));
+			return std::unexpected(MakeToneMappingResourceError("Could not create tone mapping sampler: " + Sampler.error().Message));
 		m_Sampler = std::move(*Sampler);
 
 		BufferDesc ConstantsDescription;
 		ConstantsDescription.ByteSize = sizeof(Constants);
 		ConstantsDescription.Usage = BufferUsage::Constant;
 		ConstantsDescription.DebugName = "PulseForge tone mapping constants";
-		auto ConstantsBuffer = m_Runtime.CreateBuffer(
-			ConstantsDescription, std::as_bytes(std::span(&m_UploadedConstants, 1)));
+		auto ConstantsBuffer = m_Runtime.CreateBuffer(ConstantsDescription, std::as_bytes(std::span(&m_UploadedConstants, 1)));
 		if (!ConstantsBuffer)
-			return std::unexpected(MakeToneMappingResourceError(
-				"Could not create tone mapping constants: " + ConstantsBuffer.error().Message));
+			return std::unexpected(
+				MakeToneMappingResourceError("Could not create tone mapping constants: " + ConstantsBuffer.error().Message));
 		m_ConstantsBuffer = std::move(*ConstantsBuffer);
 		return {};
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::ToneMappingStage::Prepare(
-		const Texture& HdrTexture,
-		uint64_t Generation,
-		ColorTargetFormat DestinationFormat,
-		bool DepthAttachmentEnabled)
+		const Texture& HdrTexture, uint64_t Generation, ColorTargetFormat DestinationFormat, bool DepthAttachmentEnabled)
 	{
 		if (auto Pipeline = EnsurePipeline(DestinationFormat, DepthAttachmentEnabled); !Pipeline)
 			return std::unexpected(std::move(Pipeline.error()));
 		return EnsureBindings(HdrTexture, Generation);
 	}
 
-	std::expected<size_t, SceneRendererError> SceneRenderer::ToneMappingStage::Draw(
-		const Texture& HdrTexture,
-		uint64_t Generation,
-		ColorTargetFormat DestinationFormat,
-		bool DepthAttachmentEnabled,
-		const Buffer& FullscreenTriangle)
+	std::expected<size_t, SceneRendererError> SceneRenderer::ToneMappingStage::Draw(const Texture& HdrTexture, uint64_t Generation,
+		ColorTargetFormat DestinationFormat, bool DepthAttachmentEnabled, const Buffer& FullscreenTriangle)
 	{
 		if (auto Ready = Prepare(HdrTexture, Generation, DestinationFormat, DepthAttachmentEnabled); !Ready)
 			return std::unexpected(std::move(Ready.error()));
 
-		const Constants ConstantsToUpload{
-			m_Settings.ExposureEV,
-			ShouldShaderEncodeSrgb(DestinationFormat, m_Runtime.GetOutputColorEncoding()) ? 1u : 0u,
-			{}
-		};
+		const Constants ConstantsToUpload{ m_Settings.ExposureEV,
+			ShouldShaderEncodeSrgb(DestinationFormat, m_Runtime.GetOutputColorEncoding()) ? 1u : 0u, {} };
 		if (!m_HasUploadedConstants || ConstantsToUpload.ExposureEV != m_UploadedConstants.ExposureEV ||
 			ConstantsToUpload.EncodeSrgbForUnorm != m_UploadedConstants.EncodeSrgbForUnorm)
 		{
-			if (const auto Update = m_Runtime.WriteBuffer(*m_ConstantsBuffer, 0,
-				std::as_bytes(std::span(&ConstantsToUpload, 1))); !Update)
-				return std::unexpected(MakeToneMappingDrawError(
-					"Could not update tone mapping constants: " + Update.error().Message));
+			if (const auto Update = m_Runtime.WriteBuffer(*m_ConstantsBuffer, 0, std::as_bytes(std::span(&ConstantsToUpload, 1))); !Update)
+				return std::unexpected(MakeToneMappingDrawError("Could not update tone mapping constants: " + Update.error().Message));
 			m_UploadedConstants = ConstantsToUpload;
 			m_HasUploadedConstants = true;
 		}
 
 		const std::array<const BindingSet*, 1> BindingSets = { m_BindingSet.get() };
-		const GraphicsResult DrawResult = m_Runtime.Draw(
-			*m_Pipelines.at({ DestinationFormat, DepthAttachmentEnabled }),
-			FullscreenTriangle,
-			{ 3, 1, 0, 0 },
-			BindingSets);
+		const GraphicsResult DrawResult =
+			m_Runtime.Draw(*m_Pipelines.at({ DestinationFormat, DepthAttachmentEnabled }), FullscreenTriangle, { 3, 1, 0, 0 }, BindingSets);
 		if (!DrawResult)
-			return std::unexpected(MakeToneMappingDrawError(
-				"Could not draw fullscreen tone mapping pass: " + DrawResult.error().Message));
+			return std::unexpected(MakeToneMappingDrawError("Could not draw fullscreen tone mapping pass: " + DrawResult.error().Message));
 		return size_t{ 1 };
 	}
 
@@ -152,12 +125,10 @@ namespace PulseForge
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::ToneMappingStage::EnsurePipeline(
-		ColorTargetFormat ColorFormat,
-		bool DepthAttachmentEnabled)
+		ColorTargetFormat ColorFormat, bool DepthAttachmentEnabled)
 	{
 		const auto Key = std::pair{ ColorFormat, DepthAttachmentEnabled };
-		if (m_Pipelines.contains(Key))
-			return {};
+		if (m_Pipelines.contains(Key)) return {};
 
 		GraphicsPipelineDesc Description;
 		Description.VertexShader = m_VertexShader;
@@ -172,18 +143,14 @@ namespace PulseForge
 		Description.DebugName = "PulseForge fullscreen SDR tone mapping pipeline";
 		auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
 		if (!Pipeline)
-			return std::unexpected(MakeToneMappingResourceError(
-				"Could not create tone mapping pipeline: " + Pipeline.error().Message));
+			return std::unexpected(MakeToneMappingResourceError("Could not create tone mapping pipeline: " + Pipeline.error().Message));
 		m_Pipelines.emplace(Key, std::move(*Pipeline));
 		return {};
 	}
 
-	std::expected<void, SceneRendererError> SceneRenderer::ToneMappingStage::EnsureBindings(
-		const Texture& HdrTexture,
-		uint64_t Generation)
+	std::expected<void, SceneRendererError> SceneRenderer::ToneMappingStage::EnsureBindings(const Texture& HdrTexture, uint64_t Generation)
 	{
-		if (IsToneMappingBindingCurrent(m_BindingGeneration, Generation) && m_BindingSet)
-			return {};
+		if (IsToneMappingBindingCurrent(m_BindingGeneration, Generation) && m_BindingSet) return {};
 		InvalidateBindings();
 
 		BindingSetDesc Description;
@@ -193,10 +160,10 @@ namespace PulseForge
 		Description.Buffers = { { 0, std::cref(*m_ConstantsBuffer) } };
 		auto Binding = m_Runtime.CreateBindingSet(Description);
 		if (!Binding)
-			return std::unexpected(MakeToneMappingResourceError(
-				"Could not bind HDR scene texture for tone mapping: " + Binding.error().Message));
+			return std::unexpected(
+				MakeToneMappingResourceError("Could not bind HDR scene texture for tone mapping: " + Binding.error().Message));
 		m_BindingSet = std::move(*Binding);
 		m_BindingGeneration = Generation;
 		return {};
 	}
-}
+} // namespace PulseForge

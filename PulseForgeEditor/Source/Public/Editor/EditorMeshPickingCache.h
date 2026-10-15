@@ -28,8 +28,7 @@ namespace PulseForgeEditor
 	{
 	public:
 		[[nodiscard]] std::expected<const EditorMeshPickingGeometry*, std::string> Get(
-			const PulseForge::Project& Project,
-			const PulseForge::AssetID& Asset);
+			const PulseForge::Project& Project, const PulseForge::AssetID& Asset);
 		void Invalidate(const PulseForge::AssetID& Asset) noexcept;
 		void Clear() noexcept;
 		[[nodiscard]] size_t GetGeometryCount() const noexcept { return m_Geometries.size(); }
@@ -40,4 +39,4 @@ namespace PulseForgeEditor
 		std::unordered_map<PulseForge::AssetID, EditorMeshPickingGeometry, PulseForge::UUIDHash> m_Geometries;
 		std::unordered_map<PulseForge::AssetID, std::string, PulseForge::UUIDHash> m_Failures;
 	};
-}
+} // namespace PulseForgeEditor

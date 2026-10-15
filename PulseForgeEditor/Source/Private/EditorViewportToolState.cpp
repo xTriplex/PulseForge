@@ -4,8 +4,7 @@ namespace PulseForgeEditor
 {
 	bool EditorViewportToolState::SetTool(ViewportTool Tool) noexcept
 	{
-		if (m_Tool == Tool)
-			return false;
+		if (m_Tool == Tool) return false;
 
 		m_Tool = Tool;
 		switch (Tool)
@@ -24,4 +23,4 @@ namespace PulseForgeEditor
 		}
 		return true;
 	}
-}
+} // namespace PulseForgeEditor
