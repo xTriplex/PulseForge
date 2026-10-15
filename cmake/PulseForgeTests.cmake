@@ -118,7 +118,10 @@ if(BUILD_TESTING)
 			Tests/EditorStateTests.cpp
 			Tests/EditorPanelStateTests.cpp
 			Tests/EditorSceneStateTests.cpp
-			Tests/DocumentsTests.cpp
+			Tests/EditorDocumentManagerTests.cpp
+			Tests/EditorDocumentEditorRegistryTests.cpp
+			Tests/EditorDocumentWorkspaceTests.cpp
+			Tests/EditorAssetImportOperationTests.cpp
 			Tests/EditorMaterialProjectTests.cpp
 			Tests/EditorProjectLoadingTests.cpp
 			Tests/EditorAssetReferenceTests.cpp

@@ -14,7 +14,11 @@ int main()
 	RunEditorAssetPreviewStressHarnessTests(Tests);
 	RunEditorTests(Tests);
 	RunEditorStateTests(Tests);
-	RunDocumentsTests(Tests);
+	RunEditorDocumentManagerTests(Tests);
+	RunEditorDocumentEditorRegistryTests(Tests);
+	RunEditorSnapshotHistoryTests(Tests);
+	RunEditorDocumentWorkspaceTests(Tests);
+	RunEditorAssetImportOperationTests(Tests);
 	RunProjectRuntimeTests(Tests);
 	return Tests.Finish();
 }
