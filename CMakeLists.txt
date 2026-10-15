@@ -428,6 +428,7 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 	)
 
 	add_library(PulseForgeEditorCore STATIC
+		PulseForgeEditor/Source/Private/EditorEntityClipboard.cpp
 		PulseForgeEditor/Source/Private/EditorAssetWorkflowState.cpp
 		PulseForgeEditor/Source/Private/EditorConsoleHistory.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserState.cpp

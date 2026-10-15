@@ -1,7 +1,10 @@
 #include "TestEditorSupport.h"
 #include "EditorConsoleHistory.h"
 #include "Editor/EditorHierarchyPanelPolicy.h"
+#include "Editor/EditorEntityClipboard.h"
 #include "EditorMaterialDraftStore.h"
+
+#include <nlohmann/json.hpp>
 
 namespace
 {
@@ -102,6 +105,124 @@ namespace
 		PF_CHECK(Tests, Browser.AssetPresentations().empty());
 		PF_CHECK(Tests, !Browser.SelectedAsset());
 		PF_CHECK(Tests, Browser.FolderRoot().Children.empty());
+	}
+
+	void TestEditorEntityClipboard(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		using Json = nlohmann::ordered_json;
+		const UUID Project{ 11, 1 };
+		const AssetID SourceScene{ 22, 2 };
+		const UUID Root{ 33, 3 };
+		const UUID Child{ 44, 4 };
+		const UUID Other{ 55, 5 };
+		const UUID ExternalParent{ 66, 6 };
+		const std::string Source = Json{
+			{ "entities", Json::array({
+				Json{ { "uuid", Root.ToString() }, { "tag", Json{ { "name", "Root" } } },
+					{ "camera", Json{ { "primary", true } } } },
+				Json{ { "uuid", Child.ToString() }, { "tag", Json{ { "name", "Child" } } },
+					{ "parent", Root.ToString() }, { "audioListener", Json{ { "primary", true } } } },
+				Json{ { "uuid", Other.ToString() }, { "tag", Json{ { "name", "Other" } } } }
+			}) }
+		}.dump();
+		const std::array Roots{ Root };
+		const std::array Included{ Root, Child };
+		auto ClipboardResult = EditorEntityClipboard::Capture(Project, SourceScene, Roots, Included, Source);
+		PF_CHECK(Tests, ClipboardResult.has_value());
+		if (!ClipboardResult)
+			return;
+		EditorEntityClipboard Clipboard = std::move(*ClipboardResult);
+		PF_CHECK(Tests, Clipboard.HasData());
+		PF_CHECK(Tests, Clipboard.CanPaste(Project));
+		PF_CHECK(Tests, !Clipboard.CanPaste(UUID{ 12, 1 }));
+
+		const UUID Existing{ 77, 7 };
+		const UUID NewRoot{ 88, 8 };
+		const UUID NewChild{ 99, 9 };
+		const std::string Destination = Json{
+			{ "entities", Json::array({
+				Json{ { "uuid", Existing.ToString() }, { "tag", Json{ { "name", "Root Copy" } } } }
+			}) }
+		}.dump();
+		const std::array Generated{ Existing, NewRoot, NewChild };
+		size_t GeneratedIndex = 0;
+		auto Prepared = Clipboard.PreparePaste(Project, SourceScene, Destination, {}, [&]()
+			-> std::expected<UUID, std::string>
+		{
+			return Generated[GeneratedIndex++];
+		});
+		PF_CHECK(Tests, Prepared.has_value());
+		if (Prepared)
+		{
+			PF_CHECK(Tests, Prepared->EntityCount == 2);
+			PF_CHECK(Tests, Prepared->RootIdentifiers == std::vector<UUID>{ NewRoot });
+			const Json Pasted = Json::parse(Prepared->SerializedScene);
+			PF_CHECK(Tests, Pasted["entities"].size() == 3);
+			PF_CHECK(Tests, Pasted["entities"][1]["uuid"] == NewRoot.ToString());
+			PF_CHECK(Tests, Pasted["entities"][1]["tag"]["name"] == "Root Copy 2");
+			PF_CHECK(Tests, Pasted["entities"][1]["camera"]["primary"] == false);
+			PF_CHECK(Tests, Pasted["entities"][2]["uuid"] == NewChild.ToString());
+			PF_CHECK(Tests, Pasted["entities"][2]["parent"] == NewRoot.ToString());
+			PF_CHECK(Tests, Pasted["entities"][2]["audioListener"]["primary"] == false);
+		}
+		size_t CrossSceneIdentifierIndex = 0;
+		PF_CHECK(Tests, Clipboard.PreparePaste(Project, AssetID{ 23, 2 }, Destination, {}, [&]()
+			-> std::expected<UUID, std::string>
+		{
+			return Generated[CrossSceneIdentifierIndex++ + 1];
+		}).has_value());
+		PF_CHECK(Tests, !Clipboard.PreparePaste(UUID{ 12, 1 }, SourceScene, Destination, {}).has_value());
+		PF_CHECK(Tests, !Clipboard.PreparePaste(Project, SourceScene, Destination, {}, []()
+			-> std::expected<UUID, std::string>
+		{
+			return std::unexpected("identifier generation failed");
+		}).has_value());
+
+		const std::string ExternalSource = Json{
+			{ "entities", Json::array({
+				Json{ { "uuid", ExternalParent.ToString() }, { "tag", Json{ { "name", "Parent" } } } },
+				Json{ { "uuid", Other.ToString() }, { "tag", Json{ { "name", "Child" } } },
+					{ "parent", ExternalParent.ToString() } }
+			}) }
+		}.dump();
+		const std::array ExternalRoots{ Other };
+		const std::array ExternalIncluded{ Other };
+		auto ExternalClipboard = EditorEntityClipboard::Capture(
+			Project, SourceScene, ExternalRoots, ExternalIncluded, ExternalSource);
+		PF_CHECK(Tests, ExternalClipboard.has_value());
+		if (ExternalClipboard)
+		{
+			const std::string TargetWithoutParent = Json{ { "entities", Json::array() } }.dump();
+			PF_CHECK(Tests, !ExternalClipboard->PreparePaste(
+				Project, AssetID{ 23, 2 }, TargetWithoutParent, {}).has_value());
+			const std::string TargetWithParent = Json{
+				{ "entities", Json::array({ Json{ { "uuid", ExternalParent.ToString() } } }) }
+			}.dump();
+			PF_CHECK(Tests, ExternalClipboard->PreparePaste(
+				Project, SourceScene, TargetWithParent, {}).has_value());
+		}
+
+		const std::string AssetSource = Json{
+			{ "entities", Json::array({ Json{
+				{ "uuid", Other.ToString() },
+				{ "meshRenderer", Json{ { "meshAsset", UUID{ 101, 10 }.ToString() } } }
+			} }) }
+		}.dump();
+		const std::array AssetRoots{ Other };
+		auto AssetClipboard = EditorEntityClipboard::Capture(Project, SourceScene, AssetRoots, AssetRoots, AssetSource);
+		PF_CHECK(Tests, AssetClipboard.has_value());
+		if (AssetClipboard)
+		{
+			const std::string EmptyScene = Json{ { "entities", Json::array() } }.dump();
+			PF_CHECK(Tests, !AssetClipboard->PreparePaste(
+				Project, SourceScene, EmptyScene, [](const UUID&) { return false; }).has_value());
+			PF_CHECK(Tests, AssetClipboard->PreparePaste(
+				Project, SourceScene, EmptyScene, [](const UUID&) { return true; }).has_value());
+		}
+		PF_CHECK(Tests, !EditorEntityClipboard::Capture(
+			Project, SourceScene, Roots, Included, "not-json").has_value());
 	}
 
 	void TestEditorSceneHierarchyOperations(TestRunner& Tests)
@@ -401,6 +522,7 @@ void RunEditorStateTests(TestRunner& Tests)
 {
 	TestEditorConsoleHistory(Tests);
 	TestEditorContentBrowserState(Tests);
+	TestEditorEntityClipboard(Tests);
 	TestEditorSceneHierarchyOperations(Tests);
 	TestEditorHierarchySearchPolicy(Tests);
 	TestEditorAssetWorkflowState(Tests);

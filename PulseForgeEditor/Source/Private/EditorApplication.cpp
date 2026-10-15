@@ -67,6 +67,7 @@
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
 #include "Editor/EditorSnapshotHistory.h"
+#include "Editor/EditorEntityClipboard.h"
 #include "Editor/EditorSceneHierarchyOperations.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
@@ -450,14 +451,6 @@ namespace
 		using ContentFolderNode = PulseForgeEditor::EditorContentFolderNode;
 		using AssetBrowserPresentation = PulseForgeEditor::EditorContentBrowserAssetPresentation;
 		using ProjectAssetDestinationCreateKind = PulseForgeEditor::ProjectAssetDestinationCreateKind;
-
-		struct EntityClipboard
-		{
-			PulseForge::UUID Project;
-			std::optional<PulseForge::AssetID> Scene;
-			std::vector<PulseForge::UUID> Roots;
-			std::vector<EditorJson> Records;
-		};
 
 		struct PendingDocumentTransfer
 		{
@@ -5033,8 +5026,8 @@ namespace
 					CutSelectedEntities();
 				if (ImGui::MenuItem("Copy", "Ctrl+C", false, CanEditScene && HasSelection))
 					(void)CopySelectedEntities();
-				const bool CanPasteEntities = CanEditScene && m_EntityClipboard && m_Project &&
-					m_EntityClipboard->Project == m_Project->GetDescription().ID;
+				const bool CanPasteEntities = CanEditScene && m_Project &&
+					m_EntityClipboard.CanPaste(m_Project->GetDescription().ID);
 				if (ImGui::MenuItem("Paste", "Ctrl+V", false, CanPasteEntities))
 					PasteEntities();
 				if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, CanEditScene && HasSelection))
@@ -8618,34 +8611,24 @@ namespace
 				return false;
 			}
 
-			try
+			std::vector<PulseForge::UUID> RootIdentifiers;
+			RootIdentifiers.reserve(Roots->size());
+			for (const PulseForge::Entity& Root : *Roots)
+				RootIdentifiers.push_back(Root.GetUUID());
+			std::vector<PulseForge::UUID> IncludedIdentifiers;
+			IncludedIdentifiers.reserve(Subtree->size());
+			for (const PulseForge::Entity& Entity : *Subtree)
+				IncludedIdentifiers.push_back(Entity.GetUUID());
+			auto Clipboard = PulseForgeEditor::EditorEntityClipboard::Capture(
+				m_Project->GetDescription().ID, m_SceneAsset, RootIdentifiers, IncludedIdentifiers, *Serialized);
+			if (!Clipboard)
 			{
-				const EditorJson Document = EditorJson::parse(*Serialized);
-				std::unordered_set<std::string> IncludedIdentifiers;
-				for (const PulseForge::Entity& Entity : *Subtree)
-					IncludedIdentifiers.insert(Entity.GetUUID().ToString());
-				EntityClipboard Clipboard;
-				Clipboard.Project = m_Project->GetDescription().ID;
-				Clipboard.Scene = m_SceneAsset;
-				for (const PulseForge::Entity& Root : *Roots)
-					Clipboard.Roots.push_back(Root.GetUUID());
-				for (const EditorJson& Record : Document.at("entities"))
-					if (IncludedIdentifiers.contains(Record.at("uuid").get<std::string>()))
-						Clipboard.Records.push_back(Record);
-				if (Clipboard.Records.size() != Subtree->size())
-				{
-					SetError("The serialized scene did not contain every selected hierarchy entity.");
-					return false;
-				}
-				m_EntityClipboard = std::move(Clipboard);
-				SetStatus("Copied " + std::to_string(Subtree->size()) + " entities.");
-				return true;
-			}
-			catch (const std::exception& Exception)
-			{
-				SetError(std::string("Could not encode the selection for the clipboard: ") + Exception.what());
+				SetError("Could not encode the selection for the clipboard: " + Clipboard.error());
 				return false;
 			}
+			m_EntityClipboard = std::move(*Clipboard);
+			SetStatus("Copied " + std::to_string(Subtree->size()) + " entities.");
+			return true;
 		}
 
 		void CutSelectedEntities()
@@ -8658,9 +8641,9 @@ namespace
 
 		void PasteEntities()
 		{
-			if (!m_Project || !m_Scene || !m_EntityClipboard)
+			if (!m_Project || !m_Scene || !m_EntityClipboard.HasData())
 				return;
-			if (m_EntityClipboard->Project != m_Project->GetDescription().ID)
+			if (!m_EntityClipboard.CanPaste(m_Project->GetDescription().ID))
 			{
 				SetWarning("The clipboard belongs to another project; copy the entities again in this project.");
 				return;
@@ -8674,139 +8657,38 @@ namespace
 				SetError("Could not prepare the active scene for paste: " + Serialized.error().Message);
 				return;
 			}
-			try
-			{
-				EditorJson Document = EditorJson::parse(*Serialized);
-				const bool SameScene = m_EntityClipboard->Scene == m_SceneAsset;
-				std::unordered_map<std::string, PulseForge::UUID> RemappedIdentifiers;
-				std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> ExistingIdentifiers;
-				std::unordered_set<std::string> ExistingNames;
-				for (const PulseForge::Entity& Entity : m_Scene->GetEntities())
+
+			auto Prepared = m_EntityClipboard.PreparePaste(
+				m_Project->GetDescription().ID,
+				m_SceneAsset,
+				*Serialized,
+				[this](const PulseForge::UUID& Identifier)
 				{
-					ExistingIdentifiers.insert(Entity.GetUUID());
-					if (const auto Tag = Entity.GetTag())
-						ExistingNames.insert(Tag->Name);
-				}
-				for (const EditorJson& Record : m_EntityClipboard->Records)
-				{
-					const std::string OldIdentifier = Record.at("uuid").get<std::string>();
-					auto GeneratedIdentifier = PulseForge::UUID::Generate();
-					if (!GeneratedIdentifier)
-						throw std::runtime_error(GeneratedIdentifier.error().Message);
-					PulseForge::UUID NewIdentifier = *GeneratedIdentifier;
-					while (ExistingIdentifiers.contains(NewIdentifier))
-					{
-						GeneratedIdentifier = PulseForge::UUID::Generate();
-						if (!GeneratedIdentifier)
-							throw std::runtime_error(GeneratedIdentifier.error().Message);
-						NewIdentifier = *GeneratedIdentifier;
-					}
-					ExistingIdentifiers.insert(NewIdentifier);
-					RemappedIdentifiers.emplace(OldIdentifier, NewIdentifier);
-				}
-
-				std::vector<EditorJson> NewRecords = m_EntityClipboard->Records;
-				std::vector<PulseForge::UUID> NewRoots;
-				for (EditorJson& Record : NewRecords)
-				{
-					const std::string OldIdentifier = Record.at("uuid").get<std::string>();
-					const auto NewIdentifier = RemappedIdentifiers.at(OldIdentifier);
-					Record["uuid"] = NewIdentifier.ToString();
-					const auto Tag = Record.find("tag");
-					if (Tag != Record.end() && Tag->is_object() && Tag->contains("name"))
-					{
-						const std::string BaseName = Tag->at("name").get<std::string>() + " Copy";
-						std::string Name = BaseName;
-						for (uint32_t Suffix = 2; ExistingNames.contains(Name); ++Suffix)
-							Name = BaseName + " " + std::to_string(Suffix);
-						ExistingNames.insert(Name);
-						(*Tag)["name"] = std::move(Name);
-					}
-
-					const auto Parent = Record.find("parent");
-					if (Parent != Record.end() && Parent->is_string())
-					{
-						const std::string OldParent = Parent->get<std::string>();
-						if (const auto InternalParent = RemappedIdentifiers.find(OldParent);
-							InternalParent != RemappedIdentifiers.end())
-							*Parent = InternalParent->second.ToString();
-						else
-						{
-							const auto ParentIdentifier = PulseForge::UUID::Parse(OldParent);
-							if (!SameScene || !ParentIdentifier || !m_Scene->FindEntity(*ParentIdentifier))
-								throw std::runtime_error(
-									"This hierarchy has an external parent that is unavailable in the destination scene.");
-							*Parent = OldParent;
-						}
-					}
-
-					if (const auto Camera = Record.find("camera"); Camera != Record.end() && Camera->is_object())
-						(*Camera)["primary"] = false;
-					if (const auto Listener = Record.find("audioListener");
-						Listener != Record.end() && Listener->is_object())
-						(*Listener)["primary"] = false;
-
-					const auto CheckAsset = [this](const EditorJson& Object, std::string_view Field)
-						-> std::optional<std::string>
-					{
-						const auto Value = Object.find(Field);
-						if (Value == Object.end())
-						return std::nullopt;
-						if (!Value->is_string())
-						return "A copied asset reference is malformed.";
-						const auto Identifier = PulseForge::UUID::Parse(Value->get<std::string>());
-						if (!Identifier || !m_Project->GetAssetRegistry().Find(*Identifier))
-							return "A copied entity references an asset that is not available in this project.";
-						return std::nullopt;
-					};
-					for (const auto& [ComponentName, Fields] : std::array{
-						std::pair<std::string_view, std::array<std::string_view, 2>>{
-							"meshRenderer", { "meshAsset", "materialAsset" }},
-						std::pair<std::string_view, std::array<std::string_view, 2>>{
-							"environmentLight", { "hdrImage", "" }},
-						std::pair<std::string_view, std::array<std::string_view, 2>>{
-							"audioSource", { "asset", "" }},
-						std::pair<std::string_view, std::array<std::string_view, 2>>{
-							"script", { "asset", "" } }})
-					{
-						const auto Component = Record.find(ComponentName);
-						if (Component == Record.end() || !Component->is_object())
-							continue;
-						for (const std::string_view Field : Fields)
-							if (!Field.empty())
-								if (const auto Error = CheckAsset(*Component, Field))
-									throw std::runtime_error(*Error);
-					}
-
-					if (std::find_if(m_EntityClipboard->Roots.begin(), m_EntityClipboard->Roots.end(),
-						[&](const PulseForge::UUID& Root) { return Root.ToString() == OldIdentifier; }) !=
-						m_EntityClipboard->Roots.end())
-						NewRoots.push_back(NewIdentifier);
-				}
-
-				for (EditorJson& Record : NewRecords)
-					Document["entities"].push_back(std::move(Record));
-				const std::string MergedScene = Document.dump(2) + "\n";
-				const size_t PastedCount = NewRecords.size();
-				const auto Recorded = RunSceneEdit("Paste Entities", [this, MergedScene, NewRoots]()
-				{
-					auto Result = PulseForge::SceneSerializer::Deserialize(MergedScene, *m_Scene);
-					if (!Result)
-						return Result;
-					SetEditorSelection(NewRoots);
-					return Result;
+					return m_Project->GetAssetRegistry().Find(Identifier).has_value();
 				});
-				if (!Recorded)
-				{
-					SetError("Paste failed: " + Recorded.error());
-					return;
-				}
-				SetStatus("Pasted " + std::to_string(PastedCount) + " entities.");
-			}
-			catch (const std::exception& Exception)
+			if (!Prepared)
 			{
-				SetError(std::string("Paste failed: ") + Exception.what());
+				SetError("Paste failed: " + Prepared.error());
+				return;
 			}
+
+			const size_t PastedCount = Prepared->EntityCount;
+			const std::string MergedScene = std::move(Prepared->SerializedScene);
+			const std::vector<PulseForge::UUID> NewRoots = std::move(Prepared->RootIdentifiers);
+			const auto Recorded = RunSceneEdit("Paste Entities", [this, MergedScene, NewRoots]()
+			{
+				auto Result = PulseForge::SceneSerializer::Deserialize(MergedScene, *m_Scene);
+				if (!Result)
+					return Result;
+				SetEditorSelection(NewRoots);
+				return Result;
+			});
+			if (!Recorded)
+			{
+				SetError("Paste failed: " + Recorded.error());
+				return;
+			}
+			SetStatus("Pasted " + std::to_string(PastedCount) + " entities.");
 		}
 
 		void ReparentEntity(
@@ -10195,7 +10077,7 @@ namespace
 		double m_CursorRestoreY = 0.0;
 		PulseForgeEditor::EditorViewportCamera m_EditorCamera;
 		std::optional<PulseForge::AssetID> m_SceneAsset;
-		std::optional<EntityClipboard> m_EntityClipboard;
+		PulseForgeEditor::EditorEntityClipboard m_EntityClipboard;
 		PulseForgeEditor::EditorMaterialDraftStore m_MaterialDraftStore;
 		std::string m_WindowTitle;
 		std::string m_ViewportTargetError;
