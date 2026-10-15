@@ -1306,7 +1306,10 @@ if(BUILD_TESTING)
 	add_dependencies(PulseForgeAudioRuntimeTests PulseForgePublicHeaderChecks)
 	add_test(NAME PulseForge.AudioRuntime COMMAND PulseForgeAudioRuntimeTests)
 
-	add_executable(PulseForgeEditorCoreTests Tests/PulseForgeEditorCoreTests.cpp)
+	add_executable(PulseForgeEditorCoreTests
+		Tests/PulseForgeEditorCoreTests.cpp
+		Tests/EditorSceneEntityCommandTests.cpp
+	)
 	target_include_directories(PulseForgeEditorCoreTests PRIVATE Tests PulseForgeEditor/Source/Private)
 	target_compile_definitions(PulseForgeEditorCoreTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorCoreTests PRIVATE PulseForgeEditorCore)

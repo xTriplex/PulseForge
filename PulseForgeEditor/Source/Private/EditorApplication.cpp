@@ -3872,7 +3872,7 @@ namespace
 					if (Operation->PrefabRoot)
 						QueueAfterSave([this, Root = *Operation->PrefabRoot, Target] { CreatePrefabAt(Root, Target); });
 					break;
-			}
+				}
 		}
 
 		void MoveAssetAt(const PulseForge::AssetID& Identifier, const std::filesystem::path& Destination)
@@ -3927,17 +3927,11 @@ namespace
 			OpenAssetDestinationDialog(Identifier, true);
 		}
 
-		void DuplicateAssetAt(
-			const PulseForge::AssetID& Identifier,
-			const std::filesystem::path& Destination)
+		void DuplicateAssetAt(const PulseForge::AssetID& Identifier, const std::filesystem::path& Destination)
 		{
-			if (!m_Project)
-				return;
-			auto Duplicated = PulseForge::AssetOperations::Duplicate(
-				m_Project->GetAssetRegistry(),
-				m_Project->GetRootPath(),
-				Identifier,
-				Destination);
+			if (!m_Project) return;
+			auto Duplicated =
+				PulseForge::AssetOperations::Duplicate(m_Project->GetAssetRegistry(), m_Project->GetRootPath(), Identifier, Destination);
 			if (!Duplicated)
 			{
 				std::string Message = DescribeAssetOperationError("Asset duplication failed", Duplicated.error());
@@ -6487,12 +6481,10 @@ namespace
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			return;
 #else
-			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport))
-				return;
+			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport)) return;
 
 			const ImGuiIO& IO = ImGui::GetIO();
-			const PulseForgeEditor::ViewportShortcutContext ShortcutContext{
-				.SceneAvailable = m_Scene != nullptr,
+			const PulseForgeEditor::ViewportShortcutContext ShortcutContext{ .SceneAvailable = m_Scene != nullptr,
 				.RuntimeActive = m_SceneRuntime != nullptr,
 				.CameraNavigationActive = m_EditorCameraNavigationActive,
 				.ViewportKeyboardFocused = m_ViewportKeyboardFocused,
@@ -6500,30 +6492,21 @@ namespace
 				.TextInputActive = IO.WantTextInput,
 				.ActiveImGuiItem = ImGui::IsAnyItemActive(),
 				.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup),
-				.MenuNavigationActive = GImGui->NavLayer == ImGuiNavLayer_Menu ||
-					GImGui->NavWindowingTarget != nullptr,
-				.ModifierHeld = IO.KeyCtrl || IO.KeyShift || IO.KeyAlt || IO.KeySuper
-			};
+				.MenuNavigationActive = GImGui->NavLayer == ImGuiNavLayer_Menu || GImGui->NavWindowingTarget != nullptr,
+				.ModifierHeld = IO.KeyCtrl || IO.KeyShift || IO.KeyAlt || IO.KeySuper };
 			if (m_ViewportKeyboardFocused)
 			{
-				if (!PulseForgeEditor::CanHandleFocusedViewportToolShortcuts(ShortcutContext))
-					return;
-				constexpr std::array<std::pair<ImGuiKey, char>, 4> FocusedShortcuts = {{
-					{ ImGuiKey_1, '1' },
-					{ ImGuiKey_2, '2' },
-					{ ImGuiKey_3, '3' },
-					{ ImGuiKey_4, '4' }
-				}};
+				if (!PulseForgeEditor::CanHandleFocusedViewportToolShortcuts(ShortcutContext)) return;
+				constexpr std::array<std::pair<ImGuiKey, char>, 4> FocusedShortcuts = { { { ImGuiKey_1, '1' }, { ImGuiKey_2, '2' },
+					{ ImGuiKey_3, '3' }, { ImGuiKey_4, '4' } } };
 				for (const auto& [Key, Character] : FocusedShortcuts)
 					if (ImGui::IsKeyPressed(Key, false))
-						if (const auto Tool = PulseForgeEditor::GetFocusedViewportToolForShortcut(Character))
-							SetViewportTool(*Tool);
+						if (const auto Tool = PulseForgeEditor::GetFocusedViewportToolForShortcut(Character)) SetViewportTool(*Tool);
 				return;
 			}
 
 			// With no viewport keyboard focus, Q/W/E/R retain their established editor-wide tool bindings.
-			if (!PulseForgeEditor::CanHandleViewportToolShortcuts(ShortcutContext))
-				return;
+			if (!PulseForgeEditor::CanHandleViewportToolShortcuts(ShortcutContext)) return;
 
 			constexpr std::array<std::pair<ImGuiKey, char>, 4> Shortcuts = {{
 				{ ImGuiKey_Q, 'Q' },
@@ -7307,162 +7290,10 @@ namespace
 
 		void SnapSelectionToSurface()
 		{
-			if (!m_Project || !m_Scene || m_SceneRuntime || m_SceneWorkspace.Selection().GetEntities().empty()) return;
-			auto Roots = GetTopLevelSelectedEntities();
-			if (!Roots || Roots->empty())
-				return;
-			auto MovingSubtrees = CollectEntitySubtrees(*Roots);
-			if (!MovingSubtrees)
-			{
-				SetError("Could not inspect the selected hierarchy for surface snapping: " + MovingSubtrees.error());
-				return;
-			}
-			std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> ExcludedEntities;
-			for (const PulseForge::Entity& Entity : *MovingSubtrees)
-				ExcludedEntities.insert(Entity.GetUUID());
-
-			std::vector<PulseForgeEditor::PickableMesh> CandidateMeshes;
-			for (const PulseForge::Entity& Entity : m_Scene->GetEntities())
-			{
-				if (ExcludedEntities.contains(Entity.GetUUID()) || !IsEntityEffectivelyVisible(Entity))
-					continue;
-				const auto MeshRenderer = Entity.GetMeshRenderer();
-				if (!MeshRenderer || !MeshRenderer->has_value())
-					continue;
-				const auto World = Entity.GetWorldMatrix();
-				if (!World || !PulseForgeEditor::Detail::IsFinite(*World))
-					continue;
-				auto Geometry = GetCpuPickingMesh(MeshRenderer->value().MeshAsset);
-				if (!Geometry)
-				{
-					SetWarning(Geometry.error());
-					continue;
-				}
-				CandidateMeshes.push_back({
-					Entity.GetUUID(), *World, (*Geometry)->Positions, (*Geometry)->Indices });
-			}
-			if (CandidateMeshes.empty())
-			{
-				SetStatus("No visible mesh surfaces are available below the selection.");
-				return;
-			}
-
-			std::vector<std::pair<PulseForge::UUID, PulseForge::TransformComponent>> UpdatedTransforms;
-			constexpr size_t MaximumContactCandidates = 2048;
-			constexpr size_t MaximumContactSamples = 128;
-			for (const PulseForge::Entity& Root : *Roots)
-			{
-				auto Subtree = CollectEntitySubtrees(std::vector<PulseForge::Entity>{ Root });
-				if (!Subtree)
-				{
-					SetError("Could not inspect a selected hierarchy for surface snapping: " + Subtree.error());
-					return;
-				}
-				std::vector<glm::vec3> ContactPoints;
-				for (const PulseForge::Entity& Entity : *Subtree)
-				{
-					if (!IsEntityEffectivelyVisible(Entity))
-						continue;
-					const auto MeshRenderer = Entity.GetMeshRenderer();
-					if (!MeshRenderer || !MeshRenderer->has_value())
-						continue;
-					const auto World = Entity.GetWorldMatrix();
-					if (!World || !PulseForgeEditor::Detail::IsFinite(*World))
-						continue;
-					auto Geometry = GetCpuPickingMesh(MeshRenderer->value().MeshAsset);
-					if (!Geometry)
-						continue;
-					for (const glm::vec3& Vertex : (*Geometry)->Positions)
-					{
-						const glm::vec3 Position(*World * glm::vec4(Vertex, 1.0f));
-						if (!PulseForgeEditor::Detail::IsFinite(Position))
-							continue;
-						if (ContactPoints.size() < MaximumContactCandidates)
-							if (std::none_of(ContactPoints.begin(), ContactPoints.end(), [&Position](const glm::vec3& Existing)
-							{
-								const glm::vec3 Difference = Existing - Position;
-								return glm::dot(Difference, Difference) < 1.0e-6f;
-							}))
-								ContactPoints.push_back(Position);
-					}
-				}
-				if (ContactPoints.empty())
-				{
-					if (const auto World = Root.GetWorldMatrix(); World && PulseForgeEditor::Detail::IsFinite(*World))
-						ContactPoints.push_back(glm::vec3((*World)[3]));
-				}
-				if (ContactPoints.size() > MaximumContactSamples)
-				{
-					std::vector<glm::vec3> Samples;
-					const size_t Stride = (ContactPoints.size() + MaximumContactSamples - 1) / MaximumContactSamples;
-					for (size_t Index = 0; Index < ContactPoints.size(); Index += Stride)
-						Samples.push_back(ContactPoints[Index]);
-					ContactPoints = std::move(Samples);
-				}
-
-				float BestDeltaY = -(std::numeric_limits<float>::infinity)();
-				for (const glm::vec3& Point : ContactPoints)
-				{
-					constexpr float RayStartOffset = 0.005f;
-					const auto Hit = PulseForgeEditor::RaycastSupportingSurface(
-						{ Point + glm::vec3(0.0f, RayStartOffset, 0.0f), { 0.0f, -1.0f, 0.0f } },
-						CandidateMeshes);
-					if (!Hit)
-						continue;
-					const float DeltaY = Hit->Position.y - Point.y;
-					if (DeltaY <= RayStartOffset)
-						BestDeltaY = (std::max)(BestDeltaY, DeltaY);
-				}
-				if (!std::isfinite(BestDeltaY) || BestDeltaY >= -0.001f)
-					continue;
-
-				const auto Transform = Root.GetTransform();
-				const auto World = Root.GetWorldMatrix();
-				const auto Parent = Root.GetParent();
-				if (!Transform || !World || !Parent)
-					continue;
-				glm::mat4 ParentWorld(1.0f);
-				if (Parent->has_value())
-				{
-					const auto ParentTransform = Parent->value().GetWorldMatrix();
-					if (!ParentTransform || !PulseForgeEditor::Detail::IsFinite(*ParentTransform) ||
-						std::abs(glm::determinant(*ParentTransform)) < 1.0e-8f)
-						continue;
-					ParentWorld = *ParentTransform;
-				}
-				const glm::vec3 WorldPosition((*World)[3]);
-				const glm::vec3 NewWorldPosition = WorldPosition + glm::vec3(0.0f, BestDeltaY, 0.0f);
-				PulseForge::TransformComponent Updated = *Transform;
-				Updated.Translation = glm::vec3(glm::inverse(ParentWorld) * glm::vec4(NewWorldPosition, 1.0f));
-				if (!PulseForgeEditor::Detail::IsFinite(Updated.Translation))
-					continue;
-				UpdatedTransforms.emplace_back(Root.GetUUID(), Updated);
-			}
-
-			if (UpdatedTransforms.empty())
-			{
-				SetStatus("No supporting surface was found below the selection.");
-				return;
-			}
-			const auto Recorded = RunSceneEdit("Snap Selection to Surface", [this, UpdatedTransforms]()
-				-> std::expected<void, PulseForge::SceneError>
-			{
-				for (const auto& [Identifier, Transform] : UpdatedTransforms)
-				{
-					const auto Entity = m_Scene->FindEntity(Identifier);
-					if (!Entity)
-						return std::unexpected(PulseForge::SceneError{
-							PulseForge::SceneErrorCode::InvalidEntity,
-							"A selected entity disappeared during surface snapping" });
-					if (auto Result = Entity->SetTransform(Transform); !Result)
-						return std::unexpected(Result.error());
-				}
-				return {};
-			});
-			if (!Recorded)
-				SetError("Surface snapping failed: " + Recorded.error());
-			else
-				SetStatus("Snapped " + std::to_string(UpdatedTransforms.size()) + " selected entities to supporting surfaces.");
+			if (!m_Project) return;
+			const PulseForgeEditor::EditorMeshGeometryResolver ResolveMesh = [this](const PulseForge::AssetID& Asset)
+			{ return m_MeshPickingCache.Get(*m_Project, Asset); };
+			m_SceneEntityCommands.SnapSelectionToSurface(m_Scene.get(), m_SceneWorkspace, m_SceneRuntime != nullptr, ResolveMesh, *this);
 		}
 
 		void FocusSelection()

@@ -6,12 +6,17 @@
 #include "Scene/Scene.h"
 #include "Scene/UUID.h"
 
+#include <expected>
 #include <functional>
 #include <optional>
+#include <string>
 
 namespace PulseForgeEditor
 {
+	struct EditorMeshPickingGeometry;
 	class EditorSceneWorkspaceState;
+	using EditorMeshGeometryResolver =
+		std::function<std::expected<const EditorMeshPickingGeometry*, std::string>(const PulseForge::AssetID&)>;
 
 	class EditorSceneEntityCommands final
 	{
@@ -30,6 +35,8 @@ namespace PulseForgeEditor
 			EditorSceneEntityCommandActions& Actions) const;
 		void ReparentEntity(PulseForge::Scene* SceneValue, const PulseForge::UUID& ChildIdentifier,
 			std::optional<PulseForge::UUID> ParentIdentifier, EditorSceneCommandActions& Actions) const;
+		void SnapSelectionToSurface(PulseForge::Scene* SceneValue, EditorSceneWorkspaceState& Workspace, bool RuntimeActive,
+			const EditorMeshGeometryResolver& ResolveMesh, EditorSceneEntityCommandActions& Actions) const;
 
 		[[nodiscard]] bool CanPaste(const PulseForge::UUID& ProjectID) const noexcept;
 

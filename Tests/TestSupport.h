@@ -46,5 +46,6 @@ void RunRendererTests(TestRunner& Tests);
 void RunRenderMathTests(TestRunner& Tests);
 void RunPointShadowImageAnalysisTests(TestRunner& Tests);
 void RunEditorHistoryTests(TestRunner& Tests);
+void RunEditorSceneEntityCommandTests(TestRunner& Tests);
 void RunAssetImportTests(TestRunner& Tests);
 void RunAudioRuntimeTests(TestRunner& Tests);
