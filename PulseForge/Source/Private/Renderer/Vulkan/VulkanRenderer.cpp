@@ -1,5 +1,3 @@
-#include "Core/PulseForgePCH.h"
-
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #include <vulkan/vulkan.hpp>
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
@@ -13,16 +11,11 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include <GLFW/glfw3.h>
 
-#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <optional>
-#include <string>
 #include <type_traits>
-#include <unordered_map>
-#include <utility>
-#include <vector>
 
 namespace PulseForge
 {

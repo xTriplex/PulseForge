@@ -1,9 +1,6 @@
-#include "Core/PulseForgePCH.h"
 #include "Renderer/Binding.h"
 #include "Renderer/Graphics.h"
 
-#include <algorithm>
-#include <array>
 #include <cmath>
 #include <limits>
 #include <optional>

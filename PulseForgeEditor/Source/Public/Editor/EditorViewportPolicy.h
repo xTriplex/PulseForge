@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <expected>
@@ -8,6 +10,36 @@
 
 namespace PulseForgeEditor
 {
+	class EditorViewportInitializationRetry final
+	{
+	public:
+		using Clock = std::chrono::steady_clock;
+		using TimePoint = Clock::time_point;
+
+		[[nodiscard]] bool CanAttempt(TimePoint Now) const noexcept { return !m_HasFailure || Now >= m_RetryAfter; }
+
+		void RecordFailure(TimePoint Now) noexcept
+		{
+			m_HasFailure = true;
+			m_RetryAfter = Now + m_NextDelay;
+			m_NextDelay = (std::min)(m_NextDelay * 2, MaximumDelay);
+		}
+
+		void Reset() noexcept
+		{
+			m_HasFailure = false;
+			m_RetryAfter = {};
+			m_NextDelay = InitialDelay;
+		}
+
+	private:
+		static constexpr std::chrono::milliseconds InitialDelay{ 250 };
+		static constexpr std::chrono::milliseconds MaximumDelay{ 5000 };
+		TimePoint m_RetryAfter{};
+		std::chrono::milliseconds m_NextDelay = InitialDelay;
+		bool m_HasFailure = false;
+	};
+
 	struct EditorViewportTargetExtent
 	{
 		uint32_t Width = 0;

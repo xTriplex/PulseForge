@@ -1,8 +1,6 @@
-#include "Core/PulseForgePCH.h"
 #include "Renderer/Texture.h"
 
 #include <limits>
-#include <algorithm>
 #include <cmath>
 
 namespace PulseForge

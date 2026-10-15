@@ -1,19 +1,15 @@
-#include "Core/PulseForgePCH.h"
 #include "Renderer/EnvironmentLightingCache.h"
 
 #include "Assets/AssetPathResolver.h"
 #include "Assets/ImageAssetImporter.h"
 #include "Core/ScopedProfileTimer.h"
 
-#include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <new>
 #include <span>
-#include <sstream>
 #include <system_error>
 
 namespace PulseForge

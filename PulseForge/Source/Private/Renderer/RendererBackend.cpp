@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Renderer/RendererBackend.h"
 #include "Window/Window.h"
 

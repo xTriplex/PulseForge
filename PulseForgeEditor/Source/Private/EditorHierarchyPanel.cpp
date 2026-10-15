@@ -7,16 +7,8 @@
 #include "Editor/EditorSceneVisibilityCommands.h"
 #include "Editor/EditorStyle.h"
 
-#include <imgui.h>
 #include <imgui_internal.h>
 #include <misc/cpp/imgui_stdlib.h>
-
-#include <algorithm>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <unordered_set>
-#include <utility>
 
 namespace PulseForgeEditor
 {

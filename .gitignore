@@ -7,7 +7,6 @@
 **/Out/
 /build/
 /cmake-build-*/
-/Tools/
 
 # =========================
 # Generated IDE files

@@ -35,6 +35,7 @@ void RunSceneTests(TestRunner& Tests);
 void RunSceneAssetTests(TestRunner& Tests);
 void RunEditorTests(TestRunner& Tests);
 void RunEditorViewportTests(TestRunner& Tests);
+void RunEditorAssetPreviewStressHarnessTests(TestRunner& Tests);
 void RunEditorStateTests(TestRunner& Tests);
 void RunAssetsTests(TestRunner& Tests);
 void RunAssetRegistryTests(TestRunner& Tests);

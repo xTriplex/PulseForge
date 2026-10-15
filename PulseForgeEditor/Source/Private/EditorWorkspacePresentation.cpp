@@ -1,9 +1,6 @@
 #include "EditorWorkspacePresentation.h"
 
-#include <imgui.h>
 #include <imgui_internal.h>
-
-#include <algorithm>
 
 namespace PulseForgeEditor
 {

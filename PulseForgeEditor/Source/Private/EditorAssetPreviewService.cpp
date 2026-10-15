@@ -5,7 +5,6 @@
 #include "Editor/EditorAssetPreviewPolicy.h"
 #include "Editor/EditorImGuiRenderer.h"
 
-#include <algorithm>
 #include <fstream>
 #include <span>
 

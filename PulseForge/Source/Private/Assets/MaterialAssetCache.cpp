@@ -1,11 +1,9 @@
-#include "Core/PulseForgePCH.h"
 #include "Assets/MaterialAssetCache.h"
 
 #include "Assets/MaterialAssetService.h"
 #include "Core/ScopedProfileTimer.h"
 
 #include <exception>
-#include <utility>
 
 namespace PulseForge
 {

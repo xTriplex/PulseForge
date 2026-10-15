@@ -4,10 +4,7 @@
 
 #include "Core/Application.h"
 
-#include <imgui.h>
 
-#include <algorithm>
-#include <array>
 #include <fstream>
 #include <limits>
 #include <span>

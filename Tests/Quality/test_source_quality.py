@@ -181,6 +181,7 @@ class SourceQualityRulesTests(unittest.TestCase):
         cmake = os.environ.get("PULSEFORGE_QUALITY_CMAKE_COMMAND", "cmake")
         generator = os.environ.get("PULSEFORGE_QUALITY_GENERATOR")
         platform = os.environ.get("PULSEFORGE_QUALITY_GENERATOR_PLATFORM")
+        make_program = os.environ.get("PULSEFORGE_QUALITY_MAKE_PROGRAM")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             (root / "A.cpp").write_text("int a;\n", encoding="utf-8")
@@ -191,20 +192,23 @@ class SourceQualityRulesTests(unittest.TestCase):
             cmake_target = "$" + "{Target}"
             cmakelists = "\n".join([
                 "cmake_minimum_required(VERSION 3.24)",
-                "project(PulseForgeGraphFixture LANGUAGES CXX)",
-                "add_library(PulseForgeA STATIC A.cpp)",
-                "add_library(PulseForgeB STATIC B.cpp)",
+                "project(PulseForgeGraphFixture NONE)",
+                "add_library(PulseForgeA INTERFACE)",
+                "add_library(PulseForgeB INTERFACE)",
                 "add_library(PulseForgeScene INTERFACE)",
                 "add_library(PulseForgeImGui INTERFACE)",
                 "add_library(PulseForgeEditorUI INTERFACE)",
-                "add_library(PulseForgeEditorCore STATIC Core.cpp)",
+                "add_library(PulseForgeEditorCore INTERFACE)",
+                "set_property(TARGET PulseForgeA PROPERTY SOURCES A.cpp)",
+                "set_property(TARGET PulseForgeB PROPERTY SOURCES B.cpp)",
+                "set_property(TARGET PulseForgeEditorCore PROPERTY SOURCES Core.cpp)",
                 "set(A_DEPS PulseForgeB)",
-                f"target_link_libraries(PulseForgeA PRIVATE {cmake_variable})",
-                "target_link_libraries(PulseForgeB PRIVATE PulseForgeA)",
-                "target_link_libraries(PulseForgeEditorCore PUBLIC PulseForgeScene)",
-                "target_link_libraries(PulseForgeEditorCore PRIVATE PulseForgeImGui)",
+                f"target_link_libraries(PulseForgeA INTERFACE {cmake_variable})",
+                "target_link_libraries(PulseForgeB INTERFACE PulseForgeA)",
+                "target_link_libraries(PulseForgeEditorCore INTERFACE PulseForgeScene)",
+                "target_link_libraries(PulseForgeEditorCore INTERFACE PulseForgeImGui)",
                 "foreach(Target PulseForgeA PulseForgeB PulseForgeEditorCore)",
-                f"    target_compile_definitions({cmake_target} PRIVATE PF_DEBUG)",
+                f"    set_property(TARGET {cmake_target} PROPERTY COMPILE_DEFINITIONS PF_DEBUG)",
                 "endforeach()",
                 f"include(\"{exporter}\")",
                 "",
@@ -232,10 +236,13 @@ class SourceQualityRulesTests(unittest.TestCase):
             }), encoding="utf-8")
             build = root / "build"
             command = [cmake, "-S", str(root), "-B", str(build)]
+            command.append("-DCMAKE_BUILD_TYPE:STRING=Debug")
             if generator:
                 command.extend(["-G", generator])
             if platform:
                 command.extend(["-A", platform])
+            if make_program:
+                command.append(f"-DCMAKE_MAKE_PROGRAM:FILEPATH={make_program}")
             configured = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             self.assertEqual(configured.returncode, 0, configured.stdout)
             manifest = build / "PulseForgeTargetGraph-Debug.txt"

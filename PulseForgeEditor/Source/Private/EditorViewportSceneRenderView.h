@@ -3,6 +3,7 @@
 #include "Renderer/RenderTarget.h"
 #include "Renderer/RenderDevice.h"
 #include "Scene/UUID.h"
+#include "Editor/EditorViewportPolicy.h"
 
 #include <expected>
 #include <filesystem>
@@ -77,7 +78,7 @@ namespace PulseForgeEditor
 		bool m_SceneReady = false;
 		bool m_ViewProjectionValid = false;
 		bool m_EnvironmentLightingPending = false;
-		bool m_SceneRendererInitializationFailed = false;
+		EditorViewportInitializationRetry m_SceneRendererInitializationRetry;
 		std::string m_TargetError;
 		std::string m_SceneError;
 	};

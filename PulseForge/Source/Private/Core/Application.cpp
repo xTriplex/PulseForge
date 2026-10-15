@@ -1,8 +1,9 @@
-#include "Core/PulseForgePCH.h"
 #include "Core/Application.h"
 #include "Renderer/RendererBackend.h"
-#include <stdexcept>
+
 #include <chrono>
+#include <functional>
+#include <stdexcept>
 
 namespace PulseForge
 {

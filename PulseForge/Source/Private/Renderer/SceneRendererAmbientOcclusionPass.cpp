@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Renderer/SceneRendererAmbientOcclusionPass.h"
 
 #include "Core/Log.h"
@@ -7,7 +6,6 @@
 #include "Renderer/AssetCache/MeshAssetCache.h"
 #include "Renderer/Mesh.h"
 
-#include <algorithm>
 #include <cmath>
 #include <exception>
 #include <span>

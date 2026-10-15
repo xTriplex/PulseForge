@@ -5,18 +5,12 @@
 #include "EditorConsoleHistory.h"
 #include "EditorConsoleSeverity.h"
 
-#include <imgui.h>
 #include <spdlog/sinks/base_sink.h>
 #include <spdlog/spdlog.h>
 
-#include <algorithm>
 #include <cfloat>
 #include <cstdio>
-#include <memory>
 #include <mutex>
-#include <string>
-#include <utility>
-#include <vector>
 
 namespace PulseForgeEditor
 {

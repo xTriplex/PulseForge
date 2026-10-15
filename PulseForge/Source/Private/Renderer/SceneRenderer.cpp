@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Renderer/SceneRenderer.h"
 #include "Renderer/SceneRendererAmbientOcclusionPass.h"
 #include "Renderer/SceneRendererToneMappingStage.h"
@@ -14,14 +13,11 @@
 #include "Scene/Scene.h"
 #include "Scene/Components/EnvironmentLightComponent.h"
 
-#include <array>
 #include <cmath>
 #include <fstream>
 #include <iterator>
 #include <span>
-#include <unordered_set>
 #include <exception>
-#include <algorithm>
 #include <limits>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/matrix_transform.hpp>

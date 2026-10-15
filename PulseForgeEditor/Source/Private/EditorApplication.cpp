@@ -32,6 +32,7 @@
 #include "Window/Window.h"
 #include "Editor/EditorImGuiRenderer.h"
 #include "Editor/EditorAssetPreviewService.h"
+#include "EditorAssetPreviewStressHarness.h"
 #include "Editor/EditorAssetPreviewPolicy.h"
 #include "Editor/EditorAssetDestinationDialog.h"
 #include "Editor/EditorMeshPickingCache.h"
@@ -574,8 +575,7 @@ namespace
 	public:
 		explicit EditorLayer(PulseForgeEditor::EditorCommandLineOptions Options)
 			: Layer("Editor"),
-			  m_AssetPreviewStressManifest(std::move(Options.AssetPreviewStressManifest)),
-			  m_AssetPreviewStressBudget(std::move(Options.AssetPreviewStressBudget)),
+			  m_AssetPreviewStress(std::move(Options.AssetPreviewStressManifest), std::move(Options.AssetPreviewStressBudget)),
 			  m_StartupProjectPath(std::move(Options.ProjectFile)),
 			  m_ProjectOpenRenderTestFile(std::move(Options.ProjectOpenRenderTestFile)),
 			  m_DocumentHostTestFixture(Options.EnableDocumentHostTestFixture),
@@ -890,27 +890,9 @@ namespace
 				ShutdownImGui();
 				throw std::runtime_error(Message);
 			}
-			PulseForgeEditor::AssetPreviewServiceLimits PreviewLimits;
-			if (m_AssetPreviewStressManifest)
-			{
-				PreviewLimits.MaximumQueuedRequests = 32;
-				PreviewLimits.MaximumCpuBytes = 2ull * 1024ull * 1024ull;
-				PreviewLimits.MaximumUploadsPerUpdate = 4;
-				PreviewLimits.MaximumUploadBytesPerUpdate = 1024ull * 1024ull;
-				if (m_AssetPreviewStressBudget == "entries")
-				{
-					PreviewLimits.MaximumEntries = 8;
-					PreviewLimits.MaximumGpuBytes = 64ull * 1024ull * 1024ull;
-				}
-				else
-				{
-					PreviewLimits.MaximumEntries = 512;
-					PreviewLimits.MaximumGpuBytes = 4ull * 192ull * 192ull * 4ull;
-				}
-			}
+			const PulseForgeEditor::AssetPreviewServiceLimits PreviewLimits = m_AssetPreviewStress.GetServiceLimits();
 			m_AssetPreviews.Initialize(Runtime, *m_ImGuiRenderer, PreviewLimits);
-			if (m_AssetPreviewStressManifest)
-				InitializeAssetPreviewStress();
+			if (m_AssetPreviewStress.IsEnabled()) m_AssetPreviewStress.Initialize(m_AssetPreviews);
 			IO.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 			ImGuiPlatformIO& PlatformIO = ImGui::GetPlatformIO();
 			PlatformIO.Renderer_CreateWindow = &OnRendererCreateViewport;
@@ -967,7 +949,7 @@ namespace
 			#endif
 			if (m_AssetPreviewProjectPending)
 			{
-				if (!m_AssetPreviewStressManifest)
+				if (!m_AssetPreviewStress.IsEnabled())
 					m_AssetPreviews.SetProject(m_Project ? m_Project->GetDescription().ID.ToString() : std::string{});
 				m_AssetPreviewProjectPending = false;
 			}
@@ -988,184 +970,6 @@ namespace
 			}
 			PrepareViewportScene();
 			m_AssetPreviews.PumpUploads();
-		}
-
-		void InitializeAssetPreviewStress()
-		{
-			if (m_AssetPreviewStressBudget != "entries" && m_AssetPreviewStressBudget != "gpu")
-				throw std::runtime_error("Asset preview stress is supported only by the Vulkan editor build");
-			std::ifstream Manifest(*m_AssetPreviewStressManifest, std::ios::binary);
-			if (!Manifest)
-				throw std::runtime_error("Could not open asset preview stress manifest");
-			std::string Line;
-			while (std::getline(Manifest, Line))
-			{
-				if (!Line.empty() && Line.back() == '\r')
-					Line.pop_back();
-				const size_t Separator = Line.find('|');
-				if (Separator == std::string::npos || Separator == 0 || Separator + 1 >= Line.size())
-					throw std::runtime_error("Invalid asset preview stress manifest row");
-				m_AssetPreviewStressAssets.emplace_back(
-					Line.substr(0, Separator), std::filesystem::u8path(Line.substr(Separator + 1)));
-			}
-			if (m_AssetPreviewStressAssets.size() < 32 || m_AssetPreviewStressAssets.size() > 256)
-				throw std::runtime_error("Stress manifest must contain between 32 and 256 deterministic assets");
-			m_AssetPreviewStressReportPath = m_AssetPreviewStressManifest->parent_path() /
-				("vulkan_stress_" + m_AssetPreviewStressBudget + ".json");
-			m_AssetPreviews.SetProject(m_AssetPreviewStressProject);
-			PF_INFO("Asset preview Vulkan stress enabled: {} assets, {} budget", m_AssetPreviewStressAssets.size(),
-				m_AssetPreviewStressBudget);
-		}
-
-		void DrawAssetPreviewStress()
-		{
-			if (m_AssetPreviewStressFinished)
-				return;
-			constexpr size_t BatchSize = 4;
-			const size_t BatchCount = m_AssetPreviewStressAssets.size() / BatchSize;
-			if (m_AssetPreviewStressBatch >= BatchCount)
-				return;
-			const size_t First = m_AssetPreviewStressBatch * BatchSize;
-			ImGui::SetNextWindowSize(ImVec2(500.0f, 210.0f), ImGuiCond_FirstUseEver);
-			if (!ImGui::Begin("Asset Preview GPU Stress (opt-in)"))
-			{
-				ImGui::End();
-				return;
-			}
-			ImGui::Text("Budget: %s | Batch: %zu / %zu", m_AssetPreviewStressBudget.c_str(),
-				m_AssetPreviewStressBatch + 1, BatchCount);
-			bool AllReady = true;
-			for (size_t Offset = 0; Offset < BatchSize; ++Offset)
-			{
-				const auto& [AssetID, Path] = m_AssetPreviewStressAssets[First + Offset];
-				m_AssetPreviews.RequestImage(m_AssetPreviewStressProject, AssetID, Path);
-				const auto Preview = m_AssetPreviews.FindPreview(m_AssetPreviewStressProject, AssetID);
-				if (Preview)
-				{
-					if (Offset != 0)
-						ImGui::SameLine();
-					ImGui::Image(ImTextureRef(static_cast<ImTextureID>(Preview->TextureID)), ImVec2(88.0f, 88.0f));
-					ImGui::Text("%s", AssetID.c_str());
-					++m_AssetPreviewStressDraws;
-				}
-				else
-				{
-					AllReady = false;
-					ImGui::Text("Waiting: %s", AssetID.c_str());
-					ImGui::SameLine();
-					ImGui::Dummy(ImVec2(4.0f, 1.0f));
-				}
-			}
-			ImGui::End();
-			m_AssetPreviewStressReadyThisFrame = AllReady;
-		}
-
-		void AdvanceAssetPreviewStressFrame()
-		{
-			if (m_AssetPreviewStressFinished)
-				return;
-			if (m_AssetPreviewStressRenderFailedThisFrame)
-			{
-				m_AssetPreviewStressFailed = true;
-				m_AssetPreviewStressFinished = true;
-				RequestEditorApplicationClose();
-				return;
-			}
-			if (m_AssetPreviewStressBatch == 0 && !m_AssetPreviewStressInvalidatedQueued)
-			{
-				m_AssetPreviews.InvalidateAll();
-				m_AssetPreviewStressInvalidatedQueued = true;
-			}
-			if (!m_AssetPreviewStressReadyThisFrame)
-				return;
-			++m_AssetPreviewStressSubmissions;
-			++m_AssetPreviewStressFrames;
-			if (m_AssetPreviewStressFrames < 4)
-				return;
-			m_AssetPreviewStressFrames = 0;
-			const size_t BatchCount = m_AssetPreviewStressAssets.size() / 4;
-			++m_AssetPreviewStressBatch;
-			if (!m_AssetPreviewStressRefreshed && m_AssetPreviewStressBatch >= BatchCount / 5)
-			{
-				m_AssetPreviews.InvalidateAll();
-				m_AssetPreviewStressRefreshed = true;
-			}
-			if (!m_AssetPreviewStressSwitchedProject && m_AssetPreviewStressBatch >= BatchCount / 3)
-			{
-				m_AssetPreviews.InvalidateAll();
-				m_AssetPreviews.SetProject("Phase5StressProjectB");
-				m_AssetPreviewStressProject = "Phase5StressProjectB";
-				m_AssetPreviewStressSwitchedProject = true;
-			}
-			if (m_AssetPreviewStressBatch >= BatchCount)
-			{
-				if (m_AssetPreviewStressPass == 0)
-				{
-					m_AssetPreviewStressPass = 1;
-					m_AssetPreviewStressBatch = 0;
-				}
-				else
-				{
-					m_AssetPreviews.InvalidateAll();
-					for (size_t Index = 0; Index < 8; ++Index)
-					{
-						const auto& [AssetID, Path] = m_AssetPreviewStressAssets[Index];
-						m_AssetPreviews.RequestImage(m_AssetPreviewStressProject, "shutdown-" + AssetID, Path);
-					}
-					m_AssetPreviewStressShutdownPendingRequests = m_AssetPreviews.GetStats().PendingRequests;
-					PF_INFO("Asset preview stress queued {} requests immediately before shutdown",
-						m_AssetPreviewStressShutdownPendingRequests);
-					m_AssetPreviewStressFinished = true;
-					PF_INFO("Asset preview stress workload completed; requesting clean editor close");
-					RequestEditorApplicationClose();
-				}
-			}
-		}
-
-		void WriteAssetPreviewStressReport() noexcept
-		{
-			if (m_AssetPreviewStressReportPath.empty() || m_AssetPreviewStressReportWritten)
-				return;
-			m_AssetPreviewStressReportWritten = true;
-			try
-			{
-				const auto Stats = m_AssetPreviews.GetStats();
-				std::ofstream Report(m_AssetPreviewStressReportPath, std::ios::binary | std::ios::trunc);
-				if (!Report)
-					return;
-				Report << "{\n"
-					<< "  \"budget_mode\": \"" << m_AssetPreviewStressBudget << "\",\n"
-					<< "  \"fixtures\": " << m_AssetPreviewStressAssets.size() << ",\n"
-					<< "  \"project_switch\": " << (m_AssetPreviewStressSwitchedProject ? "true" : "false") << ",\n"
-					<< "  \"queued_result_invalidation\": " << (m_AssetPreviewStressInvalidatedQueued ? "true" : "false") << ",\n"
-					<< "  \"refresh_invalidation\": " << (m_AssetPreviewStressRefreshed ? "true" : "false") << ",\n"
-					<< "  \"rendered_preview_images\": " << m_AssetPreviewStressDraws << ",\n"
-					<< "  \"render_frames\": " << m_AssetPreviewStressSubmissions << ",\n"
-					<< "  \"shutdown_pending_requests_before_close\": " << m_AssetPreviewStressShutdownPendingRequests << ",\n"
-					<< "  \"cache_hits\": " << Stats.CacheHits << ",\n"
-					<< "  \"cache_misses\": " << Stats.CacheMisses << ",\n"
-					<< "  \"decodes_succeeded\": " << Stats.DecodesSucceeded << ",\n"
-					<< "  \"decodes_failed\": " << Stats.DecodesFailed << ",\n"
-					<< "  \"uploads\": " << Stats.Uploads << ",\n"
-					<< "  \"evictions\": " << Stats.Evictions << ",\n"
-					<< "  \"binding_registrations\": " << Stats.BindingRegistrations << ",\n"
-					<< "  \"binding_unregistrations\": " << Stats.BindingUnregistrations << ",\n"
-					<< "  \"stale_results_discarded\": " << Stats.StaleResultsDiscarded << ",\n"
-					<< "  \"peak_entries\": " << Stats.PeakEntries << ",\n"
-					<< "  \"peak_cpu_bytes\": " << Stats.PeakCpuBytes << ",\n"
-					<< "  \"peak_gpu_bytes\": " << Stats.PeakGpuBytes << ",\n"
-					<< "  \"final_entries\": " << Stats.ActiveEntries << ",\n"
-					<< "  \"final_gpu_bytes\": " << Stats.GpuBytes << ",\n"
-					<< "  \"final_pending_requests\": " << Stats.PendingRequests << ",\n"
-					<< "  \"renderer_registered_textures_after_service_shutdown\": "
-					<< (m_ImGuiRenderer ? m_ImGuiRenderer->GetRegisteredTextureCount() : 0) << ",\n"
-					<< "  \"render_failed\": " << (m_AssetPreviewStressFailed ? "true" : "false") << ",\n"
-					<< "  \"completed\": " << (m_AssetPreviewStressFinished && !m_AssetPreviewStressFailed
-						? "true" : "false") << "\n}\n";
-			}
-			catch (...)
-			{
-			}
 		}
 
 		#ifdef PF_EDITOR_RENDERER_OPENGL
@@ -1293,7 +1097,7 @@ namespace
 			if (!m_OpenGLDiagnosticCapturePath.empty())
 				++m_OpenGLDiagnosticFramesSeen;
 			#endif
-			m_AssetPreviewStressRenderFailedThisFrame = false;
+			m_AssetPreviewStress.BeginFrame();
 			ImGui::SetCurrentContext(m_Context);
 			#ifdef PF_EDITOR_RENDERER_OPENGL
 			ImGui_ImplOpenGL3_NewFrame();
@@ -1314,8 +1118,7 @@ namespace
 			m_DocumentHostTabGroupTargetCenterValid = false;
 			FinalizePendingMaterialEdits();
 			m_AssetPreviews.BeginRequestFrame();
-			if (m_AssetPreviewStressManifest)
-				DrawAssetPreviewStress();
+			if (m_AssetPreviewStress.IsEnabled()) m_AssetPreviewStress.Draw(m_AssetPreviews);
 			m_EditorStyle.ApplyTheme(GetEditorUiColorEncoding(
 				PulseForge::Application::Get().GetOutputColorEncoding()));
 			CompleteReleasedGizmoInteractionBeforeShortcuts();
@@ -1399,8 +1202,7 @@ namespace
 			{
 				if (auto Result = m_ImGuiRenderer->RenderDrawData(); !Result)
 				{
-					if (m_AssetPreviewStressManifest)
-						m_AssetPreviewStressRenderFailedThisFrame = true;
+					if (m_AssetPreviewStress.IsEnabled()) m_AssetPreviewStress.MarkRenderFailure();
 					if (m_ImGuiRenderingError != Result.error())
 					{
 						m_ImGuiRenderingError = Result.error();
@@ -1461,9 +1263,8 @@ namespace
 				#endif
 			}
 			#ifndef PF_EDITOR_RENDERER_OPENGL
-			if (m_AssetPreviewStressManifest)
-				AdvanceAssetPreviewStressFrame();
-			#endif
+			if (m_AssetPreviewStress.IsEnabled() && m_AssetPreviewStress.AdvanceFrame(m_AssetPreviews)) RequestEditorApplicationClose();
+#endif
 		}
 
 		void OnEvent(PulseForge::Event& Event) override
@@ -4074,17 +3875,11 @@ namespace
 			}
 		}
 
-		void MoveAssetAt(
-			const PulseForge::AssetID& Identifier,
-			const std::filesystem::path& Destination)
+		void MoveAssetAt(const PulseForge::AssetID& Identifier, const std::filesystem::path& Destination)
 		{
-			if (!m_Project)
-				return;
-			auto Moved = PulseForge::AssetOperations::Move(
-				m_Project->GetAssetRegistry(),
-				m_Project->GetRootPath(),
-				Identifier,
-				Destination);
+			if (!m_Project) return;
+			auto Moved =
+				PulseForge::AssetOperations::Move(m_Project->GetAssetRegistry(), m_Project->GetRootPath(), Identifier, Destination);
 			if (!Moved)
 			{
 				std::string Message = DescribeAssetOperationError("Asset move failed", Moved.error());
@@ -4098,17 +3893,11 @@ namespace
 			SetStatus("Moved " + PathToUtf8(Moved->ProjectRelativePath) + ".");
 		}
 
-		void MoveFolderAt(
-			const std::filesystem::path& Source,
-			const std::filesystem::path& DestinationParent)
+		void MoveFolderAt(const std::filesystem::path& Source, const std::filesystem::path& DestinationParent)
 		{
-			if (!m_Project)
-				return;
-			auto Moved = PulseForge::AssetOperations::MoveFolder(
-				m_Project->GetAssetRegistry(),
-				m_Project->GetRootPath(),
-				Source,
-				DestinationParent);
+			if (!m_Project) return;
+			auto Moved =
+				PulseForge::AssetOperations::MoveFolder(m_Project->GetAssetRegistry(), m_Project->GetRootPath(), Source, DestinationParent);
 			if (!Moved)
 			{
 				std::string Message = DescribeAssetOperationError("Folder move failed", Moved.error());
@@ -4125,8 +3914,7 @@ namespace
 
 		void DuplicateAsset(const PulseForge::AssetID& Identifier)
 		{
-			if (!m_Project)
-				return;
+			if (!m_Project) return;
 			const auto Asset = m_Project->GetAssetRegistry().Find(Identifier);
 			if (!Asset)
 			{
@@ -7753,8 +7541,7 @@ namespace
 			return std::unexpected("The OpenGL fallback does not support the engine scene viewport");
 #else
 			const ImVec2 FramebufferScale = ImGui::GetIO().DisplayFramebufferScale;
-			if (!m_ImGuiRenderer)
-				return std::unexpected("The Vulkan editor UI renderer is unavailable");
+			if (!m_ImGuiRenderer) return std::unexpected("The Vulkan editor UI renderer is unavailable");
 			auto Result = m_ViewportRenderView.EnsureTarget(
 				LogicalSize.x, LogicalSize.y, FramebufferScale.x, FramebufferScale.y, PulseForge::Application::Get(), *m_ImGuiRenderer);
 			if (!Result) return std::unexpected(Result.error());
@@ -8091,16 +7878,15 @@ namespace
 			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::MaterialDetails)) return;
 			const bool FocusMaterialDetails = m_FocusMaterialDetailsNextFrame;
 			if (FocusMaterialDetails) ImGui::SetNextWindowFocus();
-			const bool ContentsVisible = BeginEditorPanel(PulseForgeEditor::EditorPanel::MaterialDetails,
-				"Material Details###Material Editor");
+			const bool ContentsVisible =
+				BeginEditorPanel(PulseForgeEditor::EditorPanel::MaterialDetails, "Material Details###Material Editor");
 			if (FocusMaterialDetails)
 			{
 				const bool Activated = m_Layout.ActivatePanel(PulseForgeEditor::EditorPanel::MaterialDetails);
 				const ImGuiWindow* Window = ImGui::GetCurrentWindow();
 				const ImGuiDockNode* Node = Window->DockNode;
-				const bool IsActive = Node && Node->TabBar
-					? Node->SelectedTabId == Window->TabId
-					: ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+				const bool IsActive = Node && Node->TabBar ? Node->SelectedTabId == Window->TabId
+														   : ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 				m_FocusMaterialDetailsNextFrame = !Activated || !IsActive;
 			}
 			if (ContentsVisible)
@@ -8110,18 +7896,15 @@ namespace
 		}
 		void DrawContentBrowserPanel()
 		{
-			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::ContentBrowser))
-				return;
+			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::ContentBrowser)) return;
 			// The default layout stacks Content Browser and Console; select each while its drop targets are tested.
 			if (m_DocumentHostTabReattachTest &&
-				m_DocumentHostTabReattachInvalidDropIndex <
-					(DocumentTabTestDropPointsPerPanel * DocumentTabTestConsolePanelIndex))
+				m_DocumentHostTabReattachInvalidDropIndex < (DocumentTabTestDropPointsPerPanel * DocumentTabTestConsolePanelIndex))
 				ImGui::SetNextWindowFocus();
 			if (BeginEditorPanel(PulseForgeEditor::EditorPanel::ContentBrowser))
 			{
 				if (!m_Project)
-					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::FolderOpen,
-						"Open a project to browse managed assets.");
+					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::FolderOpen, "Open a project to browse managed assets.");
 				else
 					m_ContentBrowserPanel.DrawContents(
 						m_ContentBrowser, *m_Project, m_Scene != nullptr, m_AssetPreviews, m_EditorStyle, *this);
@@ -8151,8 +7934,7 @@ namespace
 
 			PulseForge::SceneRuntimeServices Services;
 			Services.InputState = &PulseForge::Application::Get().GetInput();
-			auto CandidateRuntime = std::make_unique<PulseForge::SceneRuntime>(*m_Project,
-				PulseForge::SceneRuntimeDesc{}, Services);
+			auto CandidateRuntime = std::make_unique<PulseForge::SceneRuntime>(*m_Project, PulseForge::SceneRuntimeDesc{}, Services);
 			if (auto Result = CandidateRuntime->Start(**CandidateScene); !Result)
 			{
 				SetError("Could not start the scene runtime: " + Result.error().Message);
@@ -8281,7 +8063,7 @@ namespace
 			ImGui::GetIO().BackendFlags &= ~ImGuiBackendFlags_RendererHasViewports;
 			#endif
 			m_AssetPreviews.Shutdown();
-			WriteAssetPreviewStressReport();
+			m_AssetPreviewStress.WriteReport(m_AssetPreviews, m_ImGuiRenderer ? m_ImGuiRenderer->GetRegisteredTextureCount() : 0);
 			if (m_ImGuiRenderer)
 			{
 				m_ImGuiRenderer->Shutdown();
@@ -8323,25 +8105,7 @@ namespace
 		PulseForgeEditor::EditorStyle m_EditorStyle;
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
 		PulseForgeEditor::EditorAssetPreviewService m_AssetPreviews;
-		std::optional<std::filesystem::path> m_AssetPreviewStressManifest;
-		std::string m_AssetPreviewStressBudget;
-		std::vector<std::pair<std::string, std::filesystem::path>> m_AssetPreviewStressAssets;
-		std::string m_AssetPreviewStressProject = "Phase5StressProjectA";
-		std::filesystem::path m_AssetPreviewStressReportPath;
-		size_t m_AssetPreviewStressBatch = 0;
-		size_t m_AssetPreviewStressFrames = 0;
-		size_t m_AssetPreviewStressDraws = 0;
-		size_t m_AssetPreviewStressSubmissions = 0;
-		size_t m_AssetPreviewStressShutdownPendingRequests = 0;
-		bool m_AssetPreviewStressSwitchedProject = false;
-		bool m_AssetPreviewStressFinished = false;
-		bool m_AssetPreviewStressReadyThisFrame = false;
-		bool m_AssetPreviewStressRenderFailedThisFrame = false;
-		bool m_AssetPreviewStressFailed = false;
-		bool m_AssetPreviewStressInvalidatedQueued = false;
-		bool m_AssetPreviewStressRefreshed = false;
-		size_t m_AssetPreviewStressPass = 0;
-		bool m_AssetPreviewStressReportWritten = false;
+		PulseForgeEditor::EditorAssetPreviewStressHarness m_AssetPreviewStress;
 		bool m_AssetPreviewProjectPending = false;
 		bool m_AssetPreviewAssetsPending = false;
 		bool m_GlfwBackendActive = false;

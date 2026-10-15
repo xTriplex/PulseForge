@@ -3,6 +3,8 @@
 #include "Editor/EditorViewportPolicy.h"
 #include "Editor/EditorViewportToolState.h"
 
+#include <chrono>
+
 namespace
 {
 	void TestEditorMeshPickingCache(TestRunner& Tests)
@@ -439,6 +441,40 @@ namespace
 		PF_CHECK(Tests, !NoScene.UseRuntimeScene && !NoScene.ViewProjectionValid);
 	}
 
+	void TestEditorViewportInitializationRetry(TestRunner& Tests)
+	{
+		using Retry = PulseForgeEditor::EditorViewportInitializationRetry;
+		const Retry::TimePoint Start{};
+		Retry Schedule;
+		PF_CHECK(Tests, Schedule.CanAttempt(Start));
+
+		Schedule.RecordFailure(Start);
+		PF_CHECK(Tests, !Schedule.CanAttempt(Start));
+		PF_CHECK(Tests, !Schedule.CanAttempt(Start + std::chrono::milliseconds(249)));
+		PF_CHECK(Tests, Schedule.CanAttempt(Start + std::chrono::milliseconds(250)));
+
+		const Retry::TimePoint FirstRetry = Start + std::chrono::milliseconds(250);
+		Schedule.RecordFailure(FirstRetry);
+		PF_CHECK(Tests, !Schedule.CanAttempt(FirstRetry + std::chrono::milliseconds(499)));
+		PF_CHECK(Tests, Schedule.CanAttempt(FirstRetry + std::chrono::milliseconds(500)));
+
+		Retry::TimePoint Failure = FirstRetry + std::chrono::milliseconds(500);
+		for (const std::chrono::milliseconds Delay : { std::chrono::milliseconds(1000), std::chrono::milliseconds(2000),
+				 std::chrono::milliseconds(4000), std::chrono::milliseconds(5000) })
+		{
+			Schedule.RecordFailure(Failure);
+			PF_CHECK(Tests, !Schedule.CanAttempt(Failure + Delay - std::chrono::milliseconds(1)));
+			Failure += Delay;
+			PF_CHECK(Tests, Schedule.CanAttempt(Failure));
+		}
+
+		Schedule.RecordFailure(Failure);
+		Schedule.Reset();
+		PF_CHECK(Tests, Schedule.CanAttempt(Failure));
+		Schedule.RecordFailure(Failure);
+		PF_CHECK(Tests, !Schedule.CanAttempt(Failure));
+	}
+
 	void TestViewportMouseCaptureState(TestRunner& Tests)
 	{
 		PulseForgeEditor::Detail::ViewportMouseCaptureState Capture;
@@ -540,6 +576,7 @@ void RunEditorViewportTests(TestRunner& Tests)
 	TestEditorMeshPickingCache(Tests);
 	TestEditorViewportMath(Tests);
 	TestEditorViewportTargetExtent(Tests);
+	TestEditorViewportInitializationRetry(Tests);
 	TestViewportMouseCaptureState(Tests);
 	TestEditorViewportCameraController(Tests);
 	TestEditorViewportToolState(Tests);

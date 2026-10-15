@@ -8,7 +8,6 @@
 #include "Renderer/SceneRenderer.h"
 #include "Scene/Scene.h"
 
-#include <algorithm>
 #include <filesystem>
 
 namespace PulseForgeEditor
@@ -101,25 +100,34 @@ namespace PulseForgeEditor
 		(void)HiddenEntities;
 		(void)CompiledShaderDirectory;
 #else
-		if (!SourceProject || !EditScene || m_Width == 0 || m_Height == 0 || m_SceneRendererInitializationFailed) return;
+		if (!SourceProject || (!EditScene && !(RuntimeActive && RuntimeScene)) || m_Width == 0 || m_Height == 0) return;
 
 		if (!m_SceneRenderer)
 		{
+			const auto Now = EditorViewportInitializationRetry::Clock::now();
+			if (!m_SceneRendererInitializationRetry.CanAttempt(Now)) return;
+
 			auto Created = PulseForge::SceneRenderer::Create(Runtime, *SourceProject, CompiledShaderDirectory);
 			if (!Created)
 			{
-				m_SceneRendererInitializationFailed = true;
+				m_SceneRendererInitializationRetry.RecordFailure(Now);
 				SetSceneError("Could not initialize the scene renderer: " + Created.error().Message);
 				return;
 			}
 			m_SceneRenderer = std::move(*Created);
+			m_SceneRendererInitializationRetry.Reset();
 		}
 
 		const auto SceneMode = GetEditorViewportSceneMode(RuntimeActive, EditScene != nullptr, RuntimeScene != nullptr);
-		const PulseForge::Scene& ActiveScene = SceneMode.UseRuntimeScene ? *RuntimeScene : *EditScene;
+		const PulseForge::Scene* ActiveScene = SceneMode.UseRuntimeScene ? RuntimeScene : EditScene;
+		if (!ActiveScene)
+		{
+			SetSceneError("Could not prepare the viewport because its active scene is unavailable");
+			return;
+		}
 		const float AspectRatio = static_cast<float>(m_Width) / static_cast<float>(m_Height);
 		std::expected<void, PulseForge::SceneRendererError> Prepared;
-		if (SceneMode.UseRuntimeScene) Prepared = m_SceneRenderer->PrepareScene(ActiveScene, AspectRatio);
+		if (SceneMode.UseRuntimeScene) Prepared = m_SceneRenderer->PrepareScene(*ActiveScene, AspectRatio);
 		else
 		{
 			auto ViewProjection = Camera.GetViewProjection(AspectRatio);
@@ -136,7 +144,7 @@ namespace PulseForgeEditor
 				return;
 			}
 			Prepared = m_SceneRenderer->PrepareSceneFiltered(
-				ActiveScene, Camera.GetView(), *Projection, Camera.GetPosition(), 0.1f, 1000.0f, HiddenEntities);
+				*ActiveScene, Camera.GetView(), *Projection, Camera.GetPosition(), 0.1f, 1000.0f, HiddenEntities);
 		}
 		if (!Prepared)
 		{
@@ -193,7 +201,7 @@ namespace PulseForgeEditor
 		m_SceneReady = false;
 		m_ViewProjectionValid = false;
 		m_EnvironmentLightingPending = false;
-		m_SceneRendererInitializationFailed = false;
+		m_SceneRendererInitializationRetry.Reset();
 		ClearSceneError();
 	}
 

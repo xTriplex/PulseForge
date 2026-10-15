@@ -7,14 +7,9 @@
 #include "Editor/EditorMaterialPropertyLayoutPolicy.h"
 #include "Editor/EditorStyle.h"
 
-#include <imgui.h>
-
-#include <algorithm>
 #include <cfloat>
 #include <cctype>
 #include <filesystem>
-#include <string>
-#include <utility>
 
 namespace PulseForgeEditor
 {

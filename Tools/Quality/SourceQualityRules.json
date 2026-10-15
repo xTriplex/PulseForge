@@ -52,13 +52,14 @@
     "PulseForgeAssetServices",
     "PulseForgeEditorCore",
     "PulseForgeImGui",
+    "PulseForgeSceneRenderer",
     "freetype",
     "spdlog::spdlog",
     "shell32",
     "ole32"
   ],
   "editor_ui_target" : "PulseForgeEditorUI",
-  "non_api_public_headers" : [ "PulseForge/Source/Public/Core/PulseForgePCH.h" ],
+  "non_api_public_headers" : [],
   "owner_scoped_test_targets" :
   [
     "PulseForgeTests",
@@ -277,7 +278,8 @@
     "PulseForgeEditor/Source/Private/EditorContentBrowserPanel.cpp" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorHierarchyPanel.cpp" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorMaterialDetailsPanel.cpp" : "PulseForgeEditorUI",
-    "PulseForgeEditor/Source/Private/EditorViewportSceneRenderView.cpp" : "PulseForgeEditor",
+    "PulseForgeEditor/Source/Private/EditorAssetPreviewStressHarness.cpp" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorViewportSceneRenderView.cpp" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorViewportToolState.cpp" : "PulseForgeEditorCore",
     "PulseForgeEditor/Source/Private/EditorViewportToolbar.cpp" : "PulseForgeEditorUI"
   }
