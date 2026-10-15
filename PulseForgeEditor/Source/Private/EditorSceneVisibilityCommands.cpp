@@ -44,14 +44,14 @@ namespace PulseForgeEditor
 		EditorSceneWorkspaceState& Workspace,
 		const PulseForge::UUID& Identifier,
 		bool RuntimeActive,
-		EditorSceneVisibilityActions& Actions) const
+		EditorSceneCommandActions& Actions) const
 	{
 		const auto Entity = SceneValue ? SceneValue->FindEntity(Identifier) : std::nullopt;
 		if (!Entity || RuntimeActive)
 			return;
 
 		const bool MakeVisible = !Workspace.Visibility().IsLocallyVisible(Identifier);
-		const auto Recorded = Actions.RunVisibilitySceneEdit(
+		const auto Recorded = Actions.RunEditorSceneEdit(
 			MakeVisible ? "Show Entity" : "Hide Entity",
 			[&Workspace, Identifier, MakeVisible]() -> std::expected<void, PulseForge::SceneError>
 			{
@@ -59,20 +59,20 @@ namespace PulseForgeEditor
 				return {};
 			});
 		if (!Recorded)
-			Actions.ReportVisibilityError("Could not update editor visibility: " + Recorded.error());
+			Actions.ReportEditorSceneCommandError("Could not update editor visibility: " + Recorded.error());
 	}
 
 	void EditorSceneVisibilityCommands::HideSelectedEntities(
 		PulseForge::Scene* SceneValue,
 		EditorSceneWorkspaceState& Workspace,
 		bool RuntimeActive,
-		EditorSceneVisibilityActions& Actions) const
+		EditorSceneCommandActions& Actions) const
 	{
 		const std::vector<PulseForge::UUID> Identifiers = Workspace.Selection().GetEntities();
 		if (!SceneValue || RuntimeActive || Identifiers.empty())
 			return;
 
-		const auto Recorded = Actions.RunVisibilitySceneEdit(
+		const auto Recorded = Actions.RunEditorSceneEdit(
 			"Hide Selected",
 			[&Workspace, Identifiers]() -> std::expected<void, PulseForge::SceneError>
 			{
@@ -80,9 +80,9 @@ namespace PulseForgeEditor
 				return {};
 			});
 		if (!Recorded)
-			Actions.ReportVisibilityError("Could not hide the selection: " + Recorded.error());
+			Actions.ReportEditorSceneCommandError("Could not hide the selection: " + Recorded.error());
 		else
-			Actions.SetVisibilityStatus(
+			Actions.SetEditorSceneCommandStatus(
 				"Hid " + std::to_string(Identifiers.size()) + " selected entities in the editor viewport.");
 	}
 
@@ -90,13 +90,13 @@ namespace PulseForgeEditor
 		PulseForge::Scene* SceneValue,
 		EditorSceneWorkspaceState& Workspace,
 		bool RuntimeActive,
-		EditorSceneVisibilityActions& Actions) const
+		EditorSceneCommandActions& Actions) const
 	{
 		const size_t RestoredCount = Workspace.Visibility().GetHiddenEntities().size();
 		if (!SceneValue || RuntimeActive || RestoredCount == 0)
 			return;
 
-		const auto Recorded = Actions.RunVisibilitySceneEdit(
+		const auto Recorded = Actions.RunEditorSceneEdit(
 			"Show All Entities",
 			[&Workspace]() -> std::expected<void, PulseForge::SceneError>
 			{
@@ -104,16 +104,16 @@ namespace PulseForgeEditor
 				return {};
 			});
 		if (!Recorded)
-			Actions.ReportVisibilityError("Could not restore editor visibility: " + Recorded.error());
+			Actions.ReportEditorSceneCommandError("Could not restore editor visibility: " + Recorded.error());
 		else
-			Actions.SetVisibilityStatus("Restored visibility for " + std::to_string(RestoredCount) + " hidden entities.");
+			Actions.SetEditorSceneCommandStatus("Restored visibility for " + std::to_string(RestoredCount) + " hidden entities.");
 	}
 
 	void EditorSceneVisibilityCommands::IsolateSelectedEntities(
 		PulseForge::Scene* SceneValue,
 		EditorSceneWorkspaceState& Workspace,
 		bool RuntimeActive,
-		EditorSceneVisibilityActions& Actions) const
+		EditorSceneCommandActions& Actions) const
 	{
 		const std::vector<PulseForge::UUID> SelectedIdentifiers = Workspace.Selection().GetEntities();
 		if (!SceneValue || RuntimeActive || SelectedIdentifiers.empty())
@@ -146,7 +146,7 @@ namespace PulseForgeEditor
 		for (const PulseForge::Entity& Entity : SceneValue->GetEntities())
 			All.push_back(Entity.GetUUID());
 
-		const auto Recorded = Actions.RunVisibilitySceneEdit(
+		const auto Recorded = Actions.RunEditorSceneEdit(
 			"Isolate Selection",
 			[&Workspace, Keep = std::move(Keep), All = std::move(All)]()
 				-> std::expected<void, PulseForge::SceneError>
@@ -157,21 +157,21 @@ namespace PulseForgeEditor
 				return {};
 			});
 		if (!Recorded)
-			Actions.ReportVisibilityError("Could not isolate the selection: " + Recorded.error());
+			Actions.ReportEditorSceneCommandError("Could not isolate the selection: " + Recorded.error());
 		else
-			Actions.SetVisibilityStatus("Isolated the selection in the editor viewport.");
+			Actions.SetEditorSceneCommandStatus("Isolated the selection in the editor viewport.");
 	}
 
 	void EditorSceneVisibilityCommands::RestoreIsolatedVisibility(
 		PulseForge::Scene* SceneValue,
 		EditorSceneWorkspaceState& Workspace,
 		bool RuntimeActive,
-		EditorSceneVisibilityActions& Actions) const
+		EditorSceneCommandActions& Actions) const
 	{
 		if (!SceneValue || RuntimeActive || !Workspace.Visibility().GetIsolationBaseline())
 			return;
 
-		const auto Recorded = Actions.RunVisibilitySceneEdit(
+		const auto Recorded = Actions.RunEditorSceneEdit(
 			"Restore Isolated Visibility",
 			[&Workspace]() -> std::expected<void, PulseForge::SceneError>
 			{
@@ -179,8 +179,8 @@ namespace PulseForgeEditor
 				return {};
 			});
 		if (!Recorded)
-			Actions.ReportVisibilityError("Could not restore the prior visibility state: " + Recorded.error());
+			Actions.ReportEditorSceneCommandError("Could not restore the prior visibility state: " + Recorded.error());
 		else
-			Actions.SetVisibilityStatus("Restored visibility before isolation.");
+			Actions.SetEditorSceneCommandStatus("Restored visibility before isolation.");
 	}
 }

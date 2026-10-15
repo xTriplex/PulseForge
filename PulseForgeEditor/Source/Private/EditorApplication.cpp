@@ -53,6 +53,7 @@
 #include "Editor/EditorContentBrowserState.h"
 #include "Editor/EditorAssetWorkflowState.h"
 #include "Editor/EditorSceneEditController.h"
+#include "Editor/EditorSceneEntityCommands.h"
 #include "Editor/EditorSceneVisibilityCommands.h"
 #include "Editor/EditorAssetDestinationPolicy.h"
 #include "Editor/EditorAssetSelectorPolicy.h"
@@ -70,7 +71,6 @@
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
 #include "Editor/EditorSnapshotHistory.h"
-#include "Editor/EditorEntityClipboard.h"
 #include "Editor/EditorSceneHierarchyOperations.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
@@ -434,7 +434,7 @@ namespace
 	class EditorLayer final : public PulseForge::Layer,
 		public PulseForgeEditor::EditorHierarchyPanelActionSink,
 		public PulseForgeEditor::EditorInspectorPanelActions,
-		public PulseForgeEditor::EditorSceneVisibilityActions,
+		public PulseForgeEditor::EditorSceneEntityCommandActions,
 		public PulseForgeEditor::EditorMaterialDetailsActionSink,
 		public PulseForgeEditor::EditorContentBrowserPanelActions
 	{
@@ -700,21 +700,36 @@ namespace
 			SetError(std::move(Message));
 		}
 
-		[[nodiscard]] std::expected<void, std::string> RunVisibilitySceneEdit(
+		[[nodiscard]] std::expected<void, std::string> RunEditorSceneEdit(
 			std::string Description,
 			std::function<std::expected<void, PulseForge::SceneError>()> Operation) override
 		{
 			return RunSceneEdit(std::move(Description), std::move(Operation));
 		}
 
-		void ReportVisibilityError(std::string Message) override
+		void ReportEditorSceneCommandError(std::string Message) override
 		{
 			SetError(std::move(Message));
 		}
 
-		void SetVisibilityStatus(std::string Message) override
+		void SetEditorSceneCommandStatus(std::string Message) override
 		{
 			SetStatus(std::move(Message));
+		}
+
+		void ReportEditorSceneCommandWarning(std::string Message) override
+		{
+			SetWarning(std::move(Message));
+		}
+
+		void SetEditorSceneSelection(std::vector<PulseForge::UUID> Identifiers) override
+		{
+			SetEditorSelection(std::move(Identifiers));
+		}
+
+		void SelectSingleEditorEntity(std::optional<PulseForge::UUID> Identifier) override
+		{
+			SelectSingleEntity(Identifier);
 		}
 
 		void HandleContentBrowserToolbarAction(
@@ -4973,7 +4988,7 @@ namespace
 				if (ImGui::MenuItem("Copy", "Ctrl+C", false, CanEditScene && HasSelection))
 					(void)CopySelectedEntities();
 				const bool CanPasteEntities = CanEditScene && m_Project &&
-					m_EntityClipboard.CanPaste(m_Project->GetDescription().ID);
+					m_SceneEntityCommands.CanPaste(m_Project->GetDescription().ID);
 				if (ImGui::MenuItem("Paste", "Ctrl+V", false, CanPasteEntities))
 					PasteEntities();
 				if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, CanEditScene && HasSelection))
@@ -8409,18 +8424,7 @@ namespace
 		}
 		void CreateEntityFromEditor()
 		{
-			if (!m_Scene)
-				return;
-			const auto Recorded = RunSceneEdit("Create Entity", [this]() -> std::expected<void, PulseForge::SceneError>
-			{
-				auto Created = m_Scene->CreateEntity();
-				if (!Created)
-					return std::unexpected(Created.error());
-				SelectSingleEntity(Created->GetUUID());
-				return {};
-			});
-			if (!Recorded)
-				SetError("Entity creation failed: " + Recorded.error());
+			m_SceneEntityCommands.CreateEntity(m_Scene.get(), *this);
 		}
 
 		[[nodiscard]] std::expected<std::vector<PulseForge::UUID>, PulseForge::SceneError>
@@ -8434,206 +8438,44 @@ namespace
 
 		void DuplicateSelectedEntity()
 		{
-			if (!m_Scene || m_SceneWorkspace.Selection().GetEntities().empty())
-				return;
-			auto Roots = GetTopLevelSelectedEntities();
-			if (!Roots)
-			{
-				SetError("Could not duplicate the selection: " + Roots.error());
-				return;
-			}
-			std::vector<PulseForge::UUID> DuplicatedRoots;
-			const auto Recorded = RunSceneEdit("Duplicate Entities", [this, Roots = std::move(*Roots), &DuplicatedRoots]()
-				-> std::expected<void, PulseForge::SceneError>
-			{
-				auto Result = DuplicateEntityRootsRaw(Roots);
-				if (!Result)
-					return std::unexpected(Result.error());
-				DuplicatedRoots = std::move(*Result);
-				SetEditorSelection(DuplicatedRoots);
-				return {};
-			});
-			if (!Recorded)
-				SetError("Entity duplication failed: " + Recorded.error());
-			else
-				SetStatus("Duplicated " + std::to_string(DuplicatedRoots.size()) + " selected hierarchy root(s).");
+			m_SceneEntityCommands.DuplicateSelectedEntities(m_Scene.get(), m_SceneWorkspace, *this);
 		}
 
 		void DeleteSelectedEntity()
 		{
-			if (!m_Scene || m_SceneWorkspace.Selection().GetEntities().empty())
-				return;
-			auto Roots = GetTopLevelSelectedEntities();
-			if (!Roots)
-			{
-				SetError("Could not delete the selection: " + Roots.error());
-				return;
-			}
-			auto Subtree = CollectEntitySubtrees(*Roots);
-			if (!Subtree)
-			{
-				SetError("Could not delete the selection: " + Subtree.error());
-				return;
-			}
-			const size_t DeleteCount = Subtree->size();
-			const auto Recorded = RunSceneEdit("Delete Entities", [this, Subtree = std::move(*Subtree)]()
-				-> std::expected<void, PulseForge::SceneError>
-			{
-				for (auto Entity = Subtree.rbegin(); Entity != Subtree.rend(); ++Entity)
-				{
-					const auto Target = m_Scene->FindEntity(Entity->GetUUID());
-					if (!Target)
-						continue;
-					m_SceneWorkspace.Visibility().Remove(Entity->GetUUID());
-					if (auto Deleted = m_Scene->DestroyEntity(*Target); !Deleted)
-						return std::unexpected(Deleted.error());
-				}
-				SelectSingleEntity(std::nullopt);
-				return {};
-			});
-			if (!Recorded)
-				SetError("Entity deletion failed: " + Recorded.error());
-			else
-				SetStatus("Deleted " + std::to_string(DeleteCount) + " entities.");
+			m_SceneEntityCommands.DeleteSelectedEntities(m_Scene.get(), m_SceneWorkspace, *this);
 		}
 
 		[[nodiscard]] bool CopySelectedEntities()
 		{
-			if (!m_Project || !m_Scene || m_SceneWorkspace.Selection().GetEntities().empty())
+			if (!m_Project)
 				return false;
-			auto Roots = GetTopLevelSelectedEntities();
-			if (!Roots)
-			{
-				SetError("Could not copy the selection: " + Roots.error());
-				return false;
-			}
-			auto Subtree = CollectEntitySubtrees(*Roots);
-			if (!Subtree)
-			{
-				SetError("Could not copy the selection: " + Subtree.error());
-				return false;
-			}
-			auto Serialized = PulseForge::SceneSerializer::Serialize(*m_Scene);
-			if (!Serialized)
-			{
-				SetError("Could not serialize the selection for the clipboard: " + Serialized.error().Message);
-				return false;
-			}
-
-			std::vector<PulseForge::UUID> RootIdentifiers;
-			RootIdentifiers.reserve(Roots->size());
-			for (const PulseForge::Entity& Root : *Roots)
-				RootIdentifiers.push_back(Root.GetUUID());
-			std::vector<PulseForge::UUID> IncludedIdentifiers;
-			IncludedIdentifiers.reserve(Subtree->size());
-			for (const PulseForge::Entity& Entity : *Subtree)
-				IncludedIdentifiers.push_back(Entity.GetUUID());
-			auto Clipboard = PulseForgeEditor::EditorEntityClipboard::Capture(
-				m_Project->GetDescription().ID, m_SceneAsset, RootIdentifiers, IncludedIdentifiers, *Serialized);
-			if (!Clipboard)
-			{
-				SetError("Could not encode the selection for the clipboard: " + Clipboard.error());
-				return false;
-			}
-			m_EntityClipboard = std::move(*Clipboard);
-			SetStatus("Copied " + std::to_string(Subtree->size()) + " entities.");
-			return true;
+			return m_SceneEntityCommands.CopySelectedEntities(
+				m_Scene.get(), m_Project->GetDescription().ID, m_SceneAsset, m_SceneWorkspace, *this);
 		}
 
 		void CutSelectedEntities()
 		{
-			if (m_SceneWorkspace.Selection().GetEntities().empty())
+			if (!m_Project)
 				return;
-			if (CopySelectedEntities())
-				DeleteSelectedEntity();
+			m_SceneEntityCommands.CutSelectedEntities(
+				m_Scene.get(), m_Project->GetDescription().ID, m_SceneAsset, m_SceneWorkspace, *this);
 		}
 
 		void PasteEntities()
 		{
-			if (!m_Project || !m_Scene || !m_EntityClipboard.HasData())
+			if (!m_Project)
 				return;
-			if (!m_EntityClipboard.CanPaste(m_Project->GetDescription().ID))
-			{
-				SetWarning("The clipboard belongs to another project; copy the entities again in this project.");
-				return;
-			}
-			if (m_SceneRuntime)
-				return;
-
-			auto Serialized = PulseForge::SceneSerializer::Serialize(*m_Scene);
-			if (!Serialized)
-			{
-				SetError("Could not prepare the active scene for paste: " + Serialized.error().Message);
-				return;
-			}
-
-			auto Prepared = m_EntityClipboard.PreparePaste(
-				m_Project->GetDescription().ID,
-				m_SceneAsset,
-				*Serialized,
-				[this](const PulseForge::UUID& Identifier)
-				{
-					return m_Project->GetAssetRegistry().Find(Identifier).has_value();
-				});
-			if (!Prepared)
-			{
-				SetError("Paste failed: " + Prepared.error());
-				return;
-			}
-
-			const size_t PastedCount = Prepared->EntityCount;
-			const std::string MergedScene = std::move(Prepared->SerializedScene);
-			const std::vector<PulseForge::UUID> NewRoots = std::move(Prepared->RootIdentifiers);
-			const auto Recorded = RunSceneEdit("Paste Entities", [this, MergedScene, NewRoots]()
-			{
-				auto Result = PulseForge::SceneSerializer::Deserialize(MergedScene, *m_Scene);
-				if (!Result)
-					return Result;
-				SetEditorSelection(NewRoots);
-				return Result;
-			});
-			if (!Recorded)
-			{
-				SetError("Paste failed: " + Recorded.error());
-				return;
-			}
-			SetStatus("Pasted " + std::to_string(PastedCount) + " entities.");
+			m_SceneEntityCommands.PasteEntities(
+				m_Scene.get(), m_Project->GetDescription().ID, m_SceneAsset, m_SceneWorkspace,
+				m_SceneRuntime != nullptr, [this](const PulseForge::UUID& Identifier)
+				{ return m_Project->GetAssetRegistry().Find(Identifier).has_value(); }, *this);
 		}
 
 		void ReparentEntity(
-			const PulseForge::UUID& ChildIdentifier,
-			std::optional<PulseForge::UUID> ParentIdentifier)
+			const PulseForge::UUID& ChildIdentifier, std::optional<PulseForge::UUID> ParentIdentifier)
 		{
-			if (!m_Scene)
-				return;
-			const auto Child = m_Scene->FindEntity(ChildIdentifier);
-			if (!Child)
-			{
-				SetError("The hierarchy entity no longer exists.");
-				return;
-			}
-
-			if (ParentIdentifier && !m_Scene->FindEntity(*ParentIdentifier))
-			{
-				SetError("The selected parent entity no longer exists.");
-				return;
-			}
-
-			const auto Recorded = RunSceneEdit("Reparent Entity", [this, Child = *Child, ParentIdentifier]()
-				-> std::expected<void, PulseForge::SceneError>
-			{
-				if (ParentIdentifier)
-				{
-					const auto Parent = m_Scene->FindEntity(*ParentIdentifier);
-					if (!Parent)
-						return std::unexpected(PulseForge::SceneError{
-							PulseForge::SceneErrorCode::InvalidEntity, "The selected parent entity no longer exists" });
-					return Child.SetParent(*Parent);
-				}
-				return Child.ClearParent();
-			});
-			if (!Recorded)
-				SetError("Entity reparenting failed: " + Recorded.error());
+			m_SceneEntityCommands.ReparentEntity(m_Scene.get(), ChildIdentifier, ParentIdentifier, *this);
 		}
 
 		void DrawInspectorPanel()
@@ -9176,7 +9018,7 @@ namespace
 		double m_CursorRestoreY = 0.0;
 		PulseForgeEditor::EditorViewportCamera m_EditorCamera;
 		std::optional<PulseForge::AssetID> m_SceneAsset;
-		PulseForgeEditor::EditorEntityClipboard m_EntityClipboard;
+		PulseForgeEditor::EditorSceneEntityCommands m_SceneEntityCommands;
 		PulseForgeEditor::EditorMaterialDraftStore m_MaterialDraftStore;
 		std::string m_WindowTitle;
 		std::string m_ViewportTargetError;

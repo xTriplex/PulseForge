@@ -2,14 +2,15 @@
 #include "nlohmann/json.hpp"
 #include "Editor/EditorEntityClipboard.h"
 #include "Editor/EditorHierarchyPanelPolicy.h"
+#include "Editor/EditorSceneEntityCommands.h"
 #include "Editor/EditorSceneVisibilityCommands.h"
 
 namespace
 {
-	class TestEditorSceneVisibilityActions final : public PulseForgeEditor::EditorSceneVisibilityActions
+	class TestEditorSceneVisibilityActions final : public PulseForgeEditor::EditorSceneCommandActions
 	{
 	public:
-		[[nodiscard]] std::expected<void, std::string> RunVisibilitySceneEdit(
+		[[nodiscard]] std::expected<void, std::string> RunEditorSceneEdit(
 			std::string Description,
 			std::function<std::expected<void, PulseForge::SceneError>()> Operation) override
 		{
@@ -26,14 +27,61 @@ namespace
 			return {};
 		}
 
-		void ReportVisibilityError(std::string Message) override { Errors.push_back(std::move(Message)); }
-		void SetVisibilityStatus(std::string Message) override { Statuses.push_back(std::move(Message)); }
+		void ReportEditorSceneCommandError(std::string Message) override { Errors.push_back(std::move(Message)); }
+		void SetEditorSceneCommandStatus(std::string Message) override { Statuses.push_back(std::move(Message)); }
 
 		size_t EditCount = 0;
 		bool FailNextEdit = false;
 		std::vector<std::string> EditDescriptions;
 		std::vector<std::string> Errors;
 		std::vector<std::string> Statuses;
+	};
+
+	class TestEditorSceneEntityCommandActions final : public PulseForgeEditor::EditorSceneEntityCommandActions
+	{
+	public:
+		explicit TestEditorSceneEntityCommandActions(PulseForgeEditor::EditorSceneWorkspaceState& Workspace)
+			: m_Workspace(Workspace) { }
+
+		[[nodiscard]] std::expected<void, std::string> RunEditorSceneEdit(
+			std::string Description,
+			std::function<std::expected<void, PulseForge::SceneError>()> Operation) override
+		{
+			++EditCount;
+			EditDescriptions.push_back(std::move(Description));
+			if (FailNextEdit)
+			{
+				FailNextEdit = false;
+				return std::unexpected("injected scene command failure");
+			}
+			auto Result = Operation();
+			if (!Result)
+				return std::unexpected(Result.error().Message);
+			return {};
+		}
+
+		void ReportEditorSceneCommandError(std::string Message) override { Errors.push_back(std::move(Message)); }
+		void SetEditorSceneCommandStatus(std::string Message) override { Statuses.push_back(std::move(Message)); }
+		void ReportEditorSceneCommandWarning(std::string Message) override { Warnings.push_back(std::move(Message)); }
+		void SetEditorSceneSelection(std::vector<PulseForge::UUID> Identifiers) override
+		{
+			m_Workspace.Selection().Set(std::move(Identifiers));
+		}
+		void SelectSingleEditorEntity(std::optional<PulseForge::UUID> Identifier) override
+		{
+			if (Identifier)
+				m_Workspace.Selection().SelectSingle(*Identifier);
+			else
+				m_Workspace.Selection().Clear();
+		}
+
+		PulseForgeEditor::EditorSceneWorkspaceState& m_Workspace;
+		size_t EditCount = 0;
+		bool FailNextEdit = false;
+		std::vector<std::string> EditDescriptions;
+		std::vector<std::string> Errors;
+		std::vector<std::string> Statuses;
+		std::vector<std::string> Warnings;
 	};
 
 	void TestEditorEntityClipboard(TestRunner& Tests)
@@ -210,6 +258,113 @@ namespace
 		Commands.ToggleEntityVisibility(&SceneValue, Workspace, Child->GetUUID(), true, Actions);
 		PF_CHECK(Tests, Actions.EditCount == EditsBeforeRuntime);
 		PF_CHECK(Tests, EditorSceneVisibilityCommands::GetEffectivelyHiddenEntities(nullptr, Workspace.Visibility()).empty());
+	}
+
+	void TestEditorSceneEntityCommands(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		Scene SceneValue;
+		auto Root = SceneValue.CreateEntity("Root");
+		auto Child = SceneValue.CreateEntity("Child");
+		auto Separate = SceneValue.CreateEntity("Separate");
+		PF_CHECK(Tests, Root && Child && Separate);
+		if (!Root || !Child || !Separate)
+			return;
+		PF_CHECK(Tests, Child->SetParent(*Root));
+		const UUID RootID = Root->GetUUID();
+		const UUID ChildID = Child->GetUUID();
+		const UUID SeparateID = Separate->GetUUID();
+
+		const UUID ProjectID{ 41, 1 };
+		const AssetID SceneAsset{ 42, 2 };
+		EditorSceneWorkspaceState Workspace;
+		TestEditorSceneEntityCommandActions Actions(Workspace);
+		EditorSceneEntityCommands Commands;
+
+		Workspace.Selection().Set({ RootID, ChildID });
+		Commands.DuplicateSelectedEntities(&SceneValue, Workspace, Actions);
+		PF_CHECK(Tests, SceneValue.GetEntityCount() == 5);
+		PF_CHECK(Tests, Workspace.Selection().GetEntities().size() == 1);
+		PF_CHECK(Tests, Actions.EditDescriptions.back() == "Duplicate Entities");
+		const auto DuplicatedRoot = SceneValue.FindEntity(Workspace.Selection().GetEntities().front());
+		PF_CHECK(Tests, DuplicatedRoot.has_value());
+		if (DuplicatedRoot)
+		{
+			const auto DuplicatedChildren = DuplicatedRoot->GetChildren();
+			PF_CHECK(Tests, DuplicatedChildren && DuplicatedChildren->size() == 1);
+		}
+
+		Commands.CreateEntity(&SceneValue, Actions);
+		PF_CHECK(Tests, SceneValue.GetEntityCount() == 6);
+		PF_CHECK(Tests, Workspace.Selection().GetEntities().size() == 1);
+		PF_CHECK(Tests, Actions.EditDescriptions.back() == "Create Entity");
+
+		Workspace.Selection().SelectSingle(RootID);
+		PF_CHECK(Tests, Commands.CopySelectedEntities(
+			&SceneValue, ProjectID, SceneAsset, Workspace, Actions));
+		PF_CHECK(Tests, Commands.CanPaste(ProjectID));
+		const size_t BeforePaste = SceneValue.GetEntityCount();
+		Commands.PasteEntities(&SceneValue, ProjectID, SceneAsset, Workspace, false,
+			[](const UUID&) { return true; }, Actions);
+		PF_CHECK(Tests, SceneValue.GetEntityCount() == BeforePaste + 2);
+		PF_CHECK(Tests, Workspace.Selection().GetEntities().size() == 1);
+		PF_CHECK(Tests, Actions.EditDescriptions.back() == "Paste Entities");
+
+		const size_t BeforeRejectedPaste = SceneValue.GetEntityCount();
+		Commands.PasteEntities(&SceneValue, UUID{ 99, 9 }, SceneAsset, Workspace, false,
+			[](const UUID&) { return true; }, Actions);
+		PF_CHECK(Tests, SceneValue.GetEntityCount() == BeforeRejectedPaste);
+		PF_CHECK(Tests, Actions.Warnings.size() == 1);
+		Commands.PasteEntities(&SceneValue, ProjectID, SceneAsset, Workspace, true,
+			[](const UUID&) { return true; }, Actions);
+		PF_CHECK(Tests, SceneValue.GetEntityCount() == BeforeRejectedPaste);
+
+		const auto ChildAfterPaste = SceneValue.FindEntity(ChildID);
+		const auto SeparateAfterPaste = SceneValue.FindEntity(SeparateID);
+		PF_CHECK(Tests, ChildAfterPaste && SeparateAfterPaste);
+		if (!ChildAfterPaste || !SeparateAfterPaste)
+			return;
+		Workspace.Selection().SelectSingle(ChildID);
+		Commands.ReparentEntity(&SceneValue, ChildID, SeparateID, Actions);
+		auto ReparentedChild = SceneValue.FindEntity(ChildID);
+		PF_CHECK(Tests, ReparentedChild.has_value());
+		if (!ReparentedChild)
+			return;
+		const auto ReparentedParent = ReparentedChild->GetParent();
+		PF_CHECK(Tests, ReparentedParent && ReparentedParent->has_value() &&
+			(**ReparentedParent).GetUUID() == SeparateID);
+		Commands.ReparentEntity(&SceneValue, ChildID, std::nullopt, Actions);
+		ReparentedChild = SceneValue.FindEntity(ChildID);
+		PF_CHECK(Tests, ReparentedChild.has_value());
+		if (!ReparentedChild)
+			return;
+		const auto ClearedParent = ReparentedChild->GetParent();
+		PF_CHECK(Tests, ClearedParent && !ClearedParent->has_value());
+		const auto RootAfterPaste = SceneValue.FindEntity(RootID);
+		PF_CHECK(Tests, RootAfterPaste.has_value());
+		if (!RootAfterPaste)
+			return;
+		PF_CHECK(Tests, ReparentedChild->SetParent(*RootAfterPaste));
+		const size_t BeforeCut = SceneValue.GetEntityCount();
+		Workspace.Selection().SelectSingle(SeparateID);
+		Commands.CutSelectedEntities(&SceneValue, ProjectID, SceneAsset, Workspace, Actions);
+		PF_CHECK(Tests, SceneValue.GetEntityCount() == BeforeCut - 1);
+		PF_CHECK(Tests, !SceneValue.FindEntity(SeparateID));
+
+		Workspace.Visibility().SetVisible(RootID, false);
+		Workspace.Selection().SelectSingle(RootID);
+		const size_t BeforeDelete = SceneValue.GetEntityCount();
+		Commands.DeleteSelectedEntities(&SceneValue, Workspace, Actions);
+		PF_CHECK(Tests, SceneValue.GetEntityCount() == BeforeDelete - 2);
+		PF_CHECK(Tests, Workspace.Selection().GetEntities().empty());
+		PF_CHECK(Tests, Workspace.Visibility().IsLocallyVisible(RootID));
+
+		const size_t BeforeFailedCreate = SceneValue.GetEntityCount();
+		Actions.FailNextEdit = true;
+		Commands.CreateEntity(&SceneValue, Actions);
+		PF_CHECK(Tests, SceneValue.GetEntityCount() == BeforeFailedCreate);
+		PF_CHECK(Tests, !Actions.Errors.empty());
 	}
 
 	void TestEditorSceneHierarchyOperations(TestRunner& Tests)
@@ -400,6 +555,7 @@ void RunEditorSceneStateTests(TestRunner& Tests)
 {
 	TestEditorEntityClipboard(Tests);
 	TestEditorSceneVisibilityCommands(Tests);
+	TestEditorSceneEntityCommands(Tests);
 	TestEditorSceneHierarchyOperations(Tests);
 	TestEditorHierarchySearchPolicy(Tests);
 	TestEditorSceneWorkspaceState(Tests);
