@@ -468,6 +468,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorConsolePanel.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserAssetView.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserNavigation.cpp
+		PulseForgeEditor/Source/Private/EditorContentBrowserPanel.cpp
 		PulseForgeEditor/Source/Private/EditorHierarchyPanel.cpp
 		PulseForgeEditor/Source/Private/EditorMaterialDetailsPanel.cpp
 		PulseForgeEditor/Source/Private/EditorViewportToolbar.cpp

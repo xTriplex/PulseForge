@@ -13,6 +13,7 @@
     "PulseForgeEditor/Source/Private/EditorConsolePanel.cpp": "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorAssetSelector.cpp": "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorContentBrowserAssetView.cpp": "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorContentBrowserPanel.cpp": "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorHierarchyPanel.cpp": "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorMaterialDetailsPanel.cpp": "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorContentBrowserNavigation.cpp": "PulseForgeEditorUI",

@@ -39,8 +39,7 @@
 #include "Editor/EditorDeferredOperationQueue.h"
 #include "Editor/EditorConsolePanel.h"
 #include "Editor/EditorAssetSelector.h"
-#include "Editor/EditorContentBrowserNavigation.h"
-#include "Editor/EditorContentBrowserAssetView.h"
+#include "Editor/EditorContentBrowserPanel.h"
 #include "Editor/EditorHierarchyPanel.h"
 #include "Editor/EditorMaterialDetailsPanel.h"
 #include "EditorWorkspacePresentation.h"
@@ -431,7 +430,7 @@ namespace
 	class EditorLayer final : public PulseForge::Layer,
 		public PulseForgeEditor::EditorHierarchyPanelActionSink,
 		public PulseForgeEditor::EditorMaterialDetailsActionSink,
-		public PulseForgeEditor::EditorContentBrowserNavigationActions
+		public PulseForgeEditor::EditorContentBrowserPanelActions
 	{
 		struct DocumentHostTestState final : PulseForgeEditor::EditorDocumentEditorState
 		{
@@ -684,6 +683,56 @@ namespace
 				SetError(Action.Message);
 				break;
 			}
+		}
+
+		void HandleContentBrowserToolbarAction(
+			PulseForgeEditor::EditorContentBrowserToolbarAction Action) override
+		{
+			switch (Action)
+			{
+			case PulseForgeEditor::EditorContentBrowserToolbarAction::Import:
+				ImportAsset();
+				break;
+			case PulseForgeEditor::EditorContentBrowserToolbarAction::Refresh:
+				RefreshAssets();
+				break;
+			}
+		}
+
+		void HandleContentBrowserAssetAction(
+			PulseForgeEditor::EditorContentBrowserAssetAction Action,
+			const PulseForge::AssetID& Identifier) override
+		{
+			using PulseForgeEditor::EditorContentBrowserAssetAction;
+			switch (Action)
+			{
+			case EditorContentBrowserAssetAction::OpenScene:
+				OpenScene(Identifier);
+				break;
+			case EditorContentBrowserAssetAction::ShowMaterialDetails:
+				ShowMaterialDetails(Identifier);
+				break;
+			case EditorContentBrowserAssetAction::Move:
+				MoveAsset(Identifier);
+				break;
+			case EditorContentBrowserAssetAction::Duplicate:
+				DuplicateAsset(Identifier);
+				break;
+			case EditorContentBrowserAssetAction::InstantiatePrefab:
+				InstantiatePrefab(Identifier);
+				break;
+			case EditorContentBrowserAssetAction::SetStartupScene:
+				SetStartupScene(Identifier);
+				break;
+			case EditorContentBrowserAssetAction::Delete:
+				RequestDeleteAsset(Identifier);
+				break;
+			}
+		}
+
+		bool IsContentBrowserMaterialDraftDirty(const PulseForge::AssetID& Identifier) const override
+		{
+			return m_MaterialDraftStore.IsDirty(GetMaterialDraftKey(Identifier));
 		}
 
 		bool SaveMaterialFromDetails(const PulseForge::AssetID& Asset) override
@@ -2007,7 +2056,7 @@ namespace
 			if (IsContentBrowserFocused())
 			{
 				SetEditorPanelVisible(PulseForgeEditor::EditorPanel::ContentBrowser, true);
-				m_FocusContentSearchNextFrame = true;
+				m_ContentBrowserPanel.FocusSearch();
 			}
 			else
 			{
@@ -9638,7 +9687,7 @@ namespace
 			SetEditorPanelVisible(PulseForgeEditor::EditorPanel::MaterialDetails, true);
 		}
 
-		void DrawSelectedAssetDetails()
+		void DrawSelectedContentBrowserAssetDetails() override
 		{
 			if (!m_ContentBrowser.SelectedAsset() || !m_Project)
 				return;
@@ -9799,184 +9848,12 @@ namespace
 					m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::FolderOpen,
 						"Open a project to browse managed assets.");
 				else
-				{
-					std::function<void()> DeferredAction;
-					const PulseForgeEditor::EditorContentBrowserAssetActionHandler AssetActionHandler =
-						[this](PulseForgeEditor::EditorContentBrowserAssetAction Action,
-							const PulseForge::AssetID& Identifier)
-						{
-							switch (Action)
-							{
-							case PulseForgeEditor::EditorContentBrowserAssetAction::OpenScene:
-								OpenScene(Identifier);
-								break;
-							case PulseForgeEditor::EditorContentBrowserAssetAction::ShowMaterialDetails:
-								ShowMaterialDetails(Identifier);
-								break;
-							case PulseForgeEditor::EditorContentBrowserAssetAction::Move:
-								MoveAsset(Identifier);
-								break;
-							case PulseForgeEditor::EditorContentBrowserAssetAction::Duplicate:
-								DuplicateAsset(Identifier);
-								break;
-							case PulseForgeEditor::EditorContentBrowserAssetAction::InstantiatePrefab:
-								InstantiatePrefab(Identifier);
-								break;
-							case PulseForgeEditor::EditorContentBrowserAssetAction::SetStartupScene:
-								SetStartupScene(Identifier);
-								break;
-							case PulseForgeEditor::EditorContentBrowserAssetAction::Delete:
-								RequestDeleteAsset(Identifier);
-								break;
-							}
-						};
-					const ImVec2 Available = ImGui::GetContentRegionAvail();
-					const PulseForgeEditor::ContentBrowserHorizontalLayout HorizontalLayout =
-						PulseForgeEditor::GetContentBrowserHorizontalLayout(Available.x);
-					if (HorizontalLayout.ShowFolderTree)
-					{
-						ImGui::BeginChild("ContentFolderTree",
-							ImVec2(HorizontalLayout.FolderTreeWidth, 0.0f), ImGuiChildFlags_Borders);
-						m_ContentBrowserNavigation.DrawFolderTree(
-							m_ContentBrowser, m_EditorStyle, *this, DeferredAction);
-						ImGui::EndChild();
-						ImGui::SameLine(0.0f, 6.0f);
-					}
-
-					ImGui::BeginChild("ContentAssetArea", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
-					if (HorizontalLayout.ShowFolderTree)
-						m_ContentBrowserNavigation.DrawBreadcrumbs(m_ContentBrowser, m_EditorStyle);
-					else
-						m_ContentBrowserNavigation.DrawCompactFolderPicker(m_ContentBrowser);
-
-					if (m_EditorStyle.BeginToolbar("ContentBrowserToolbar",
-						PulseForgeEditor::EditorStyleMetrics::PanelToolbarHeight))
-					{
-						const bool Compact = ImGui::GetWindowWidth() < 440.0f;
-						if (Compact
-							? m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Import, "Import", "ImportAsset",
-								"Import asset into the project")
-							: m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Import, "Import"))
-							ImportAsset();
-						ImGui::SameLine();
-						if (Compact
-							? m_EditorStyle.IconButton(PulseForgeEditor::EditorIcon::Refresh, "Refresh", "RefreshAssets",
-								"Refresh the managed asset registry")
-							: m_EditorStyle.SmallButton(PulseForgeEditor::EditorIcon::Refresh, "Refresh"))
-							RefreshAssets();
-						ImGui::SameLine();
-						const float SearchWidth = (std::max)(ImGui::GetContentRegionAvail().x - 83.0f, 52.0f);
-						ImGui::SetNextItemWidth(SearchWidth);
-						if (m_FocusContentSearchNextFrame)
-						{
-							ImGui::SetKeyboardFocusHere();
-							m_FocusContentSearchNextFrame = false;
-						}
-						ImGui::InputTextWithHint("##AssetSearch", "Search assets...", &m_ContentBrowser.SearchText());
-						ImGui::SameLine();
-						if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::Grid, "Grid", "AssetGridMode",
-							"Grid view", m_ContentBrowser.GridView()))
-							m_ContentBrowser.GridView() = true;
-						ImGui::SameLine();
-						if (m_EditorStyle.ToolIconButton(PulseForgeEditor::EditorIcon::List, "List", "AssetListMode",
-							"List view", !m_ContentBrowser.GridView()))
-							m_ContentBrowser.GridView() = false;
-					}
-					m_EditorStyle.EndToolbar();
-
-					m_ContentBrowser.RebuildFilteredAssetIndices();
-
-					const ContentFolderNode* CurrentFolderNode =
-						m_ContentBrowser.FindFolder(m_ContentBrowser.CurrentFolder());
-					const bool ShowFolderTiles = m_ContentBrowser.SearchText().empty() && CurrentFolderNode &&
-						!CurrentFolderNode->Children.empty();
-					const std::vector<ContentFolderNode>* VisibleFolders = ShowFolderTiles
-						? &CurrentFolderNode->Children : nullptr;
-					bool SelectedAssetVisible = false;
-					if (m_ContentBrowser.SelectedAsset())
-						SelectedAssetVisible = std::any_of(m_ContentBrowser.FilteredAssetIndices().begin(), m_ContentBrowser.FilteredAssetIndices().end(),
-							[this](size_t Index) { return m_ContentBrowser.Assets()[Index].ID == *m_ContentBrowser.SelectedAsset(); });
-
-					bool SelectedMaterial = false;
-					if (SelectedAssetVisible && m_ContentBrowser.SelectedAsset())
-					{
-						const auto SelectedRecord = m_Project->GetAssetRegistry().Find(*m_ContentBrowser.SelectedAsset());
-						SelectedMaterial = SelectedRecord &&
-							NormalizedExtension(SelectedRecord->ProjectRelativePath) == ".material";
-					}
-					const PulseForgeEditor::ContentBrowserVerticalLayout VerticalLayout =
-						PulseForgeEditor::GetContentBrowserVerticalLayout(
-							ImGui::GetContentRegionAvail().y,
-							SelectedAssetVisible,
-							SelectedMaterial,
-							m_ContentDetailsExpandedCompact);
-					ImGui::BeginChild("ContentAssetItems", ImVec2(0.0f, VerticalLayout.AssetItemsHeight),
-						ImGuiChildFlags_None);
-					if (VisibleFolders && !VisibleFolders->empty())
-					{
-						m_ContentBrowserNavigation.DrawFolderItems(
-							m_ContentBrowser, *VisibleFolders, m_EditorStyle, *this, DeferredAction);
-						if (!m_ContentBrowser.FilteredAssetIndices().empty())
-							ImGui::Separator();
-					}
-					if (m_ContentBrowser.GridView())
-						m_ContentBrowserAssetView.DrawGrid(m_ContentBrowser,
-							m_Project ? &*m_Project : nullptr, m_Scene != nullptr,
-							m_AssetPreviews, m_EditorStyle,
-							AssetActionHandler, DeferredAction);
-					else
-						m_ContentBrowserAssetView.DrawList(m_ContentBrowser,
-							m_Project ? &*m_Project : nullptr, m_Scene != nullptr,
-							m_EditorStyle, AssetActionHandler, DeferredAction);
-					if ((!VisibleFolders || VisibleFolders->empty()) && m_ContentBrowser.FilteredAssetIndices().empty())
-						m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Search,
-							m_ContentBrowser.Assets().empty() ? "The project has no managed assets." :
-							"No assets or folders match this location.");
-					ImGui::EndChild();
-					const bool HasDeferredAction = static_cast<bool>(DeferredAction);
-					if (DeferredAction)
-						DeferredAction();
-					if (!HasDeferredAction && SelectedAssetVisible && VerticalLayout.SelectionSummaryHeight > 0.0f)
-					{
-						const auto SelectedRecord = m_Project->GetAssetRegistry().Find(*m_ContentBrowser.SelectedAsset());
-						std::string SelectedName = SelectedRecord
-							? PathToUtf8(SelectedRecord->ProjectRelativePath.filename()) : "Selected asset";
-						if (SelectedMaterial && m_MaterialDraftStore.IsDirty(GetMaterialDraftKey(*m_ContentBrowser.SelectedAsset())))
-							SelectedName += " — Unsaved draft";
-						const float ActionWidth = SelectedMaterial ? 154.0f : 112.0f;
-						const float SummaryWidth = (std::max)(
-							ImGui::GetContentRegionAvail().x - ActionWidth - ImGui::GetStyle().ItemSpacing.x, 20.0f);
-						const std::string Summary = FitEditorContextLabel(SelectedName,
-							SummaryWidth);
-						ImGui::TextUnformatted(Summary.c_str());
-						if (ImGui::IsItemHovered() && SelectedRecord)
-						{
-							const std::string FullPath = PathToUtf8(SelectedRecord->ProjectRelativePath);
-							const std::string Identifier = SelectedRecord->ID.ToString();
-							ImGui::SetTooltip("%s\nUUID: %s", FullPath.c_str(), Identifier.c_str());
-						}
-						ImGui::SameLine();
-						if (SelectedMaterial)
-						{
-							if (ImGui::Button("Open Material Details", ImVec2(ActionWidth, 0.0f)))
-								ShowMaterialDetails(*m_ContentBrowser.SelectedAsset());
-						}
-						else if (ImGui::SmallButton(m_ContentDetailsExpandedCompact ? "Hide Details" : "Details"))
-							m_ContentDetailsExpandedCompact = !m_ContentDetailsExpandedCompact;
-					}
-					if (!HasDeferredAction && SelectedAssetVisible && VerticalLayout.DetailsHeight > 0.0f)
-					{
-						ImGui::BeginChild("SelectedAssetDetails", ImVec2(0.0f, VerticalLayout.DetailsHeight),
-							ImGuiChildFlags_Borders, ImGuiWindowFlags_AlwaysVerticalScrollbar);
-						DrawSelectedAssetDetails();
-						ImGui::EndChild();
-					}
-					ImGui::EndChild();
-				}
+					m_ContentBrowserPanel.DrawContents(
+						m_ContentBrowser, *m_Project, m_Scene != nullptr,
+						m_AssetPreviews, m_EditorStyle, *this);
 			}
 			ImGui::End();
 		}
-
 		void SetStatus(std::string Message)
 		{
 			m_StatusMessage = std::move(Message);
@@ -10242,7 +10119,6 @@ namespace
 		PulseForgeEditor::EditorSceneEditController m_SceneEditController;
 		PulseForgeEditor::EditorSceneWorkspaceState m_SceneWorkspace;
 		bool m_FocusEntityNameNextFrame = false;
-		bool m_FocusContentSearchNextFrame = false;
 		bool m_OpenUnsavedDialog = false;
 		bool m_OpenDocumentCloseDialog = false;
 		bool m_ApplicationShutdownRequested = false;
@@ -10251,11 +10127,9 @@ namespace
 		PulseForgeEditor::EditorConsolePanel m_ConsolePanel;
 		PulseForgeEditor::EditorHierarchyPanel m_HierarchyPanel;
 		PulseForgeEditor::EditorAssetSelector m_AssetSelector;
-		PulseForgeEditor::EditorContentBrowserNavigation m_ContentBrowserNavigation;
-		PulseForgeEditor::EditorContentBrowserAssetView m_ContentBrowserAssetView;
+		PulseForgeEditor::EditorContentBrowserPanel m_ContentBrowserPanel;
 		PulseForgeEditor::EditorMaterialDetailsPanel m_MaterialDetailsPanel;
 		PulseForgeEditor::EditorContentBrowserState m_ContentBrowser;
-		bool m_ContentDetailsExpandedCompact = false;
 		bool m_InitialMaterialDetailsDockPending = false;
 		bool m_ForceMaterialDetailsDock = false;
 		bool m_FocusMaterialDetailsNextFrame = false;
