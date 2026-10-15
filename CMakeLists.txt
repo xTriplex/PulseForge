@@ -455,6 +455,7 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 		PulseForgeEditor/Source/Private/EditorViewportToolState.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentManager.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentWorkspace.cpp
+		PulseForgeEditor/Source/Private/EditorDocumentWorkspaceStore.cpp
 		PulseForgeEditor/Source/Private/EditorMeshPickingCache.cpp
 		PulseForgeEditor/Source/Private/EditorViewportCamera.cpp
 	)

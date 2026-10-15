@@ -70,6 +70,7 @@
 #include "Editor/EditorDocumentHostPolicy.h"
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
+#include "Editor/EditorDocumentWorkspaceStore.h"
 #include "Editor/EditorSnapshotHistory.h"
 #include "Editor/EditorSceneHierarchyOperations.h"
 #include "Editor/EditorStyle.h"
@@ -320,64 +321,6 @@ namespace
 	{
 		const std::u8string UTF8Path = Path.generic_u8string();
 		return { reinterpret_cast<const char*>(UTF8Path.data()), UTF8Path.size() };
-	}
-
-	std::expected<std::optional<std::string>, std::string> ReadDocumentWorkspaceFile(
-		const std::filesystem::path& Path)
-	{
-		std::error_code Error;
-		if (!std::filesystem::exists(Path, Error))
-		{
-			if (Error)
-				return std::unexpected("Could not inspect document workspace: " + Error.message());
-			return std::optional<std::string>{};
-		}
-		const uintmax_t Size = std::filesystem::file_size(Path, Error);
-		if (Error || Size > 2u * 1024u * 1024u)
-			return std::unexpected(Error ? "Could not inspect document workspace: " + Error.message()
-				: "Document workspace exceeds the 2 MiB safety limit");
-		std::ifstream Input(Path, std::ios::binary);
-		if (!Input)
-			return std::unexpected("Could not open the document workspace for reading");
-		std::string Contents(static_cast<size_t>(Size), '\0');
-		if (!Contents.empty())
-			Input.read(Contents.data(), static_cast<std::streamsize>(Contents.size()));
-		if (!Input && !Input.eof())
-			return std::unexpected("Could not read the complete document workspace");
-		return std::optional<std::string>(std::move(Contents));
-	}
-
-	std::expected<void, std::string> WriteDocumentWorkspaceFileAtomically(
-		const std::filesystem::path& Path,
-		std::string_view Contents)
-	{
-		if (Path.empty())
-			return std::unexpected("The document workspace path is unavailable");
-		std::filesystem::path TemporaryPath = Path;
-		TemporaryPath += L".tmp";
-		{
-			std::ofstream Output(TemporaryPath, std::ios::binary | std::ios::trunc);
-			if (!Output)
-				return std::unexpected("Could not create a temporary document workspace file");
-			Output.write(Contents.data(), static_cast<std::streamsize>(Contents.size()));
-			Output.flush();
-			if (!Output)
-			{
-				Output.close();
-				std::error_code RemoveError;
-				std::filesystem::remove(TemporaryPath, RemoveError);
-				return std::unexpected("Could not write the document workspace");
-			}
-		}
-		if (!MoveFileExW(TemporaryPath.c_str(), Path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-		{
-			const DWORD ErrorCode = GetLastError();
-			std::error_code RemoveError;
-			std::filesystem::remove(TemporaryPath, RemoveError);
-			return std::unexpected("Could not atomically replace document workspace (Windows error " +
-				std::to_string(ErrorCode) + ")");
-		}
-		return {};
 	}
 
 	std::string NormalizedExtension(const std::filesystem::path& Path)
@@ -2284,10 +2227,7 @@ namespace
 			m_InitialMaterialDetailsDockPending = false;
 			m_ForceMaterialDetailsDock = false;
 			m_FocusMaterialDetailsNextFrame = false;
-			m_DocumentWorkspacePath.clear();
-			m_DocumentWorkspaceLastContents.clear();
-			m_DocumentWorkspaceImmediateDirty = false;
-			m_DocumentWorkspaceBoundsDirty = false;
+			m_DocumentWorkspaceStore.Clear();
 			m_RestoredHostBoundsPending.clear();
 			m_AssetPreviewProjectPending = true;
 			return true;
@@ -3802,55 +3742,37 @@ namespace
 
 		void MarkDocumentWorkspaceDirty(bool BoundsOnly = false)
 		{
-			if (!m_Project || m_DocumentWorkspacePath.empty())
+			if (!m_Project || !m_DocumentWorkspaceStore.HasPath())
 				return;
-			if (BoundsOnly)
-			{
-				m_DocumentWorkspaceBoundsDirty = true;
-				m_DocumentWorkspaceSaveAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-			}
-			else
-				m_DocumentWorkspaceImmediateDirty = true;
+			m_DocumentWorkspaceStore.MarkDirty(BoundsOnly);
 		}
 
 		void RestoreDocumentWorkspace()
 		{
 			if (!m_Project)
 				return;
-			m_DocumentWorkspacePath = m_Layout.GetDocumentWorkspacePath(
-				m_Project->GetDescription().ID.ToString());
-			m_DocumentWorkspaceLastContents.clear();
-			auto File = ReadDocumentWorkspaceFile(m_DocumentWorkspacePath);
-			if (!File)
+			m_DocumentWorkspaceStore.Configure(m_Layout.GetDocumentWorkspacePath(
+				m_Project->GetDescription().ID.ToString()));
+			auto Loaded = m_DocumentWorkspaceStore.Load(m_Project->GetDescription().ID);
+			if (!Loaded)
 			{
-				PF_WARN("Could not read document workspace: {}", File.error());
-				m_DocumentWorkspaceImmediateDirty = false;
-				m_DocumentWorkspaceBoundsDirty = false;
+				PF_WARN("Could not read document workspace: {}", Loaded.error());
 				return;
 			}
-			if (!*File)
+			if (Loaded->Result == PulseForgeEditor::EditorDocumentWorkspaceLoadResult::Status::Missing)
+				return;
+			if (Loaded->Result == PulseForgeEditor::EditorDocumentWorkspaceLoadResult::Status::Rejected)
 			{
-				m_DocumentWorkspaceImmediateDirty = true;
+				PF_WARN("Document workspace was rejected and will be rebuilt from registered documents: {}",
+					Loaded->Error);
 				return;
 			}
-
-			const std::string Contents = **File;
-			auto Workspace = PulseForgeEditor::EditorDocumentWorkspaceCodec::Deserialize(
-				Contents, m_Project->GetDescription().ID);
+			auto Workspace = std::move(Loaded->Workspace);
 			if (!Workspace)
 			{
-				std::filesystem::path RecoveryPath = m_DocumentWorkspacePath;
-				RecoveryPath += L".recovery";
-				std::error_code CopyError;
-				if (!std::filesystem::exists(RecoveryPath, CopyError) && !CopyError)
-					(void)std::filesystem::copy_file(m_DocumentWorkspacePath, RecoveryPath, CopyError);
-				PF_WARN("Document workspace was rejected and will be rebuilt from registered documents: {}",
-					Workspace.error());
-				m_DocumentWorkspaceImmediateDirty = true;
+				PF_WARN("Document workspace load completed without state; rebuilding from registered documents.");
 				return;
 			}
-
-			m_DocumentWorkspaceLastContents = Contents;
 			bool SkippedDocument = false;
 			if (Workspace->MaterialDetailsAsset)
 			{
@@ -4014,19 +3936,12 @@ namespace
 		}
 			if (!m_Documents.FocusHost(Workspace->FocusedHostID))
 				FocusDocumentHostIfChanged(PulseForgeEditor::EditorDocumentManager::MainHostID);
-			m_DocumentWorkspaceImmediateDirty = SkippedDocument;
-			m_DocumentWorkspaceBoundsDirty = false;
+			if (SkippedDocument)
+				m_DocumentWorkspaceStore.MarkDirty(false);
 		}
 
-		void SaveDocumentWorkspaceIfNeeded()
+		PulseForgeEditor::EditorDocumentWorkspaceState CaptureDocumentWorkspace() const
 		{
-			if (!m_Project || m_DocumentWorkspacePath.empty() ||
-				(!m_DocumentWorkspaceImmediateDirty && !m_DocumentWorkspaceBoundsDirty))
-				return;
-			if (!m_DocumentWorkspaceImmediateDirty &&
-				std::chrono::steady_clock::now() < m_DocumentWorkspaceSaveAt)
-				return;
-
 			PulseForgeEditor::EditorDocumentWorkspaceState Workspace;
 			Workspace.Project = m_Project->GetDescription().ID;
 			Workspace.MaterialDetailsAsset = m_MaterialDetailsAsset;
@@ -4041,32 +3956,23 @@ namespace
 				{
 					return static_cast<uint8_t>(Left.first) < static_cast<uint8_t>(Right.first);
 				});
-			auto Serialized = PulseForgeEditor::EditorDocumentWorkspaceCodec::Serialize(Workspace);
-			if (!Serialized)
-			{
-				PF_WARN("Could not serialize editor document workspace: {}", Serialized.error());
+			return Workspace;
+		}
+
+		void SaveDocumentWorkspaceIfNeeded()
+		{
+			if (!m_Project || !m_DocumentWorkspaceStore.HasPath() || !m_DocumentWorkspaceStore.IsSaveDue())
 				return;
-			}
-			if (*Serialized != m_DocumentWorkspaceLastContents)
-			{
-				auto Written = WriteDocumentWorkspaceFileAtomically(m_DocumentWorkspacePath, *Serialized);
-				if (!Written)
-				{
-					PF_WARN("Could not persist editor document workspace: {}", Written.error());
-					return;
-				}
-				m_DocumentWorkspaceLastContents = std::move(*Serialized);
-			}
-			m_DocumentWorkspaceImmediateDirty = false;
-			m_DocumentWorkspaceBoundsDirty = false;
+			if (auto Saved = m_DocumentWorkspaceStore.SaveIfDue(CaptureDocumentWorkspace()); !Saved)
+				PF_WARN("Could not persist editor document workspace: {}", Saved.error());
 		}
 
 		void SaveDocumentWorkspaceNow()
 		{
-			if (!m_Project || m_DocumentWorkspacePath.empty())
+			if (!m_Project || !m_DocumentWorkspaceStore.HasPath())
 				return;
-			m_DocumentWorkspaceImmediateDirty = true;
-			SaveDocumentWorkspaceIfNeeded();
+			if (auto Saved = m_DocumentWorkspaceStore.SaveNow(CaptureDocumentWorkspace()); !Saved)
+				PF_WARN("Could not persist editor document workspace: {}", Saved.error());
 		}
 
 		void ImportAsset()
@@ -8561,7 +8467,7 @@ namespace
 				ImGui::DestroyPlatformWindows();
 			if (m_Project)
 			{
-				m_DocumentWorkspaceImmediateDirty = true;
+				m_DocumentWorkspaceStore.MarkDirty(false);
 				SaveDocumentWorkspaceIfNeeded();
 			}
 			#ifndef PF_EDITOR_RENDERER_OPENGL
@@ -8608,6 +8514,7 @@ namespace
 		void* m_PreviousImGuiUserData = nullptr;
 		PulseForgeEditor::EditorLayout m_Layout;
 		PulseForgeEditor::EditorDocumentManager m_Documents;
+		PulseForgeEditor::EditorDocumentWorkspaceStore m_DocumentWorkspaceStore;
 		PulseForgeEditor::EditorDocumentEditorRegistry m_DocumentEditors;
 		PulseForgeEditor::EditorWorkspacePresentation m_WorkspacePresentation;
 		PulseForgeEditor::EditorDeferredOperationQueue m_DeferredEditorOperations;
@@ -8804,12 +8711,7 @@ namespace
 		std::string m_WindowTitle;
 		std::string m_ImGuiRenderingError;
 		std::string m_LayoutPersistenceError;
-		std::filesystem::path m_DocumentWorkspacePath;
-		std::string m_DocumentWorkspaceLastContents;
 		std::unordered_set<std::string> m_RestoredHostBoundsPending;
-		std::chrono::steady_clock::time_point m_DocumentWorkspaceSaveAt{};
-		bool m_DocumentWorkspaceImmediateDirty = false;
-		bool m_DocumentWorkspaceBoundsDirty = false;
 		std::chrono::steady_clock::time_point m_ProjectOpenStartedAt{};
 	};
 

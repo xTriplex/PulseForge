@@ -1,4 +1,5 @@
 #include "TestEditorSupport.h"
+#include "Editor/EditorDocumentWorkspaceStore.h"
 #include "Editor/EditorWorkspaceFrameState.h"
 
 namespace
@@ -985,6 +986,101 @@ namespace
 		PF_CHECK(Tests, !EditorDocumentWorkspaceCodec::Deserialize(MissingLevel.dump(), *Project));
 	}
 
+	void TestEditorDocumentWorkspaceStore(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		const auto ProjectID = UUID::Generate();
+		const auto MaterialID = UUID::Generate();
+		PF_CHECK(Tests, ProjectID && MaterialID);
+		if (!ProjectID || !MaterialID)
+			return;
+
+		std::error_code Error;
+		const std::filesystem::path Root = std::filesystem::temp_directory_path(Error) /
+			("PulseForgeWorkspaceStore-" + ProjectID->ToString());
+		PF_CHECK(Tests, !Error);
+		if (Error)
+			return;
+		std::filesystem::create_directories(Root, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error)
+			return;
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} RemoveRoot{ Root };
+
+		const std::filesystem::path Path = Root / "workspace.json";
+		EditorDocumentWorkspaceStore Store;
+		Store.Configure(Path);
+		const auto Missing = Store.Load(*ProjectID);
+		PF_CHECK(Tests, Missing && Missing->Result == EditorDocumentWorkspaceLoadResult::Status::Missing);
+		PF_CHECK(Tests, Store.HasPendingChanges());
+
+		const EditorDocumentIdentity Level{ *ProjectID, AssetID{}, EditorDocumentKind::Level };
+		EditorDocumentHost Main;
+		Main.ID = std::string(EditorDocumentManager::MainHostID);
+		Main.Role = EditorDocumentHostRole::Main;
+		Main.PlacementKind = EditorDocumentKind::Level;
+		Main.Documents = { Level };
+		Main.ActiveDocument = Level;
+		EditorDocumentWorkspaceState Workspace;
+		Workspace.Project = *ProjectID;
+		Workspace.Hosts = { Main };
+		Workspace.FocusedHostID = Main.ID;
+		const auto InitialSave = Store.SaveIfDue(Workspace);
+		PF_CHECK(Tests, InitialSave && *InitialSave && !Store.HasPendingChanges());
+
+		EditorDocumentWorkspaceStore Reopened;
+		Reopened.Configure(Path);
+		const auto Restored = Reopened.Load(*ProjectID);
+		PF_CHECK(Tests, Restored && Restored->Result == EditorDocumentWorkspaceLoadResult::Status::Restored);
+		PF_CHECK(Tests, Restored && Restored->Workspace && Restored->Workspace->Hosts.size() == 1);
+
+		const auto Start = EditorDocumentWorkspaceStore::Clock::time_point{};
+		Reopened.MarkDirty(true, Start);
+		PF_CHECK(Tests, !Reopened.IsSaveDue(Start + std::chrono::milliseconds(499)));
+		PF_CHECK(Tests, Reopened.IsSaveDue(Start + std::chrono::milliseconds(500)));
+		Workspace.MaterialDetailsAsset = *MaterialID;
+		const auto TooEarly = Reopened.SaveIfDue(Workspace, Start + std::chrono::milliseconds(499));
+		PF_CHECK(Tests, TooEarly && !*TooEarly && Reopened.HasPendingChanges());
+		const auto Due = Reopened.SaveIfDue(Workspace, Start + std::chrono::milliseconds(500));
+		PF_CHECK(Tests, Due && *Due && !Reopened.HasPendingChanges());
+		const auto Updated = Reopened.Load(*ProjectID);
+		PF_CHECK(Tests, Updated && Updated->Workspace && Updated->Workspace->MaterialDetailsAsset == MaterialID);
+
+		{
+			std::ofstream Corrupt(Path, std::ios::binary | std::ios::trunc);
+			Corrupt << "{not-json";
+			PF_CHECK(Tests, static_cast<bool>(Corrupt));
+		}
+		EditorDocumentWorkspaceStore Recovery;
+		Recovery.Configure(Path);
+		const auto Rejected = Recovery.Load(*ProjectID);
+		PF_CHECK(Tests, Rejected && Rejected->Result == EditorDocumentWorkspaceLoadResult::Status::Rejected);
+		PF_CHECK(Tests, Rejected && !Rejected->Error.empty() && Recovery.HasPendingChanges());
+		const std::filesystem::path RecoveryPath = Path.wstring() + L".recovery";
+		PF_CHECK(Tests, std::filesystem::exists(RecoveryPath));
+		const auto Rebuilt = Recovery.SaveIfDue(Workspace);
+		PF_CHECK(Tests, Rebuilt && *Rebuilt && !Recovery.HasPendingChanges());
+
+		const std::filesystem::path BlockedPath = Root / "blocked.json";
+		std::filesystem::create_directory(BlockedPath, Error);
+		PF_CHECK(Tests, !Error);
+		EditorDocumentWorkspaceStore FailedWrite;
+		FailedWrite.Configure(BlockedPath);
+		FailedWrite.MarkDirty(false);
+		const auto WriteFailure = FailedWrite.SaveNow(Workspace);
+		PF_CHECK(Tests, !WriteFailure && FailedWrite.HasPendingChanges());
+		PF_CHECK(Tests, std::filesystem::is_directory(BlockedPath));
+	}
+
 	void TestEditorNativeWindowBoundsPolicy(TestRunner& Tests)
 	{
 		using namespace PulseForgeEditor;
@@ -1227,6 +1323,7 @@ void RunDocumentsTests(TestRunner& Tests)
 	TestEditorDocumentEditorRegistry(Tests);
 	TestEditorSnapshotHistory(Tests);
 	TestEditorDocumentWorkspaceCodec(Tests);
+	TestEditorDocumentWorkspaceStore(Tests);
 	TestEditorWorkspaceFrameState(Tests);
 	TestEditorNativeWindowBoundsPolicy(Tests);
 	TestAssetImportOperation(Tests);
