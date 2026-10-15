@@ -2,6 +2,7 @@
 #include "EditorConsoleHistory.h"
 #include "Editor/EditorHierarchyPanelPolicy.h"
 #include "Editor/EditorEntityClipboard.h"
+#include "Editor/EditorStatusPanel.h"
 #include "EditorMaterialDraftStore.h"
 
 #include <nlohmann/json.hpp>
@@ -223,6 +224,23 @@ namespace
 		}
 		PF_CHECK(Tests, !EditorEntityClipboard::Capture(
 			Project, SourceScene, Roots, Included, "not-json").has_value());
+	}
+
+	void TestEditorStatusPanel(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		EditorStatusPanel Status;
+		PF_CHECK(Tests, Status.Message() == "Create or open a project to begin.");
+		PF_CHECK(Tests, Status.Severity() == EditorStatusSeverity::Information);
+		Status.SetStatus("Scene saved.");
+		PF_CHECK(Tests, Status.Message() == "Scene saved.");
+		PF_CHECK(Tests, Status.Severity() == EditorStatusSeverity::Information);
+		Status.SetWarning("The startup scene is unavailable.");
+		PF_CHECK(Tests, Status.Message() == "The startup scene is unavailable.");
+		PF_CHECK(Tests, Status.Severity() == EditorStatusSeverity::Warning);
+		Status.SetError("Scene save failed.");
+		PF_CHECK(Tests, Status.Message() == "Scene save failed.");
+		PF_CHECK(Tests, Status.Severity() == EditorStatusSeverity::Error);
 	}
 
 	void TestEditorSceneHierarchyOperations(TestRunner& Tests)
@@ -523,6 +541,7 @@ void RunEditorStateTests(TestRunner& Tests)
 	TestEditorConsoleHistory(Tests);
 	TestEditorContentBrowserState(Tests);
 	TestEditorEntityClipboard(Tests);
+	TestEditorStatusPanel(Tests);
 	TestEditorSceneHierarchyOperations(Tests);
 	TestEditorHierarchySearchPolicy(Tests);
 	TestEditorAssetWorkflowState(Tests);

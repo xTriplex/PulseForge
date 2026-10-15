@@ -38,6 +38,7 @@
 #include "Editor/EditorMeshPickingCache.h"
 #include "Editor/EditorDeferredOperationQueue.h"
 #include "Editor/EditorConsolePanel.h"
+#include "Editor/EditorStatusPanel.h"
 #include "Editor/EditorAssetSelector.h"
 #include "Editor/EditorContentBrowserPanel.h"
 #include "Editor/EditorHierarchyPanel.h"
@@ -5273,43 +5274,12 @@ namespace
 				PulseForgeEditor::EditorColorToken::MenuBar, m_EditorStyle))
 				return;
 
-			if (ImGui::BeginTable("GlobalStatusLayout", 2,
-				ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings))
-			{
-				ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-				ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 276.0f);
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0);
-				const ImVec4 MessageColor = m_StatusIsError
-					? m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error)
-					: m_StatusIsWarning
-						? m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning)
-						: m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::TextMuted);
-				const float MessageWidth = ImGui::GetContentRegionAvail().x;
-				ImGui::TextColored(MessageColor, "%s", m_StatusMessage.c_str());
-				if (ImGui::IsItemHovered() && ImGui::CalcTextSize(m_StatusMessage.c_str()).x > MessageWidth)
-					ImGui::SetTooltip("%s", m_StatusMessage.c_str());
-
-				ImGui::TableSetColumnIndex(1);
-				const bool ShowDirtyState = m_Scene && m_SceneEditController.IsDirty();
-				if (ShowDirtyState)
-					ImGui::TextColored(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning), "Unsaved scene");
-				else
-					m_EditorStyle.TextMuted(!m_Scene ? "No scene" : "Scene saved");
-				if (m_SceneRuntime)
-				{
-					ImGui::SameLine();
-					m_EditorStyle.TextMuted("|");
-					ImGui::SameLine();
-					m_EditorStyle.TextMuted("Runtime");
-				}
-				ImGui::SameLine();
-				m_EditorStyle.TextMuted("|");
-				ImGui::SameLine();
-				m_EditorStyle.TextMuted(PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan
-					? "Vulkan" : "OpenGL");
-				ImGui::EndTable();
-			}
+			m_StatusPanel.DrawStatusBarContents(
+				m_EditorStyle,
+				m_Scene != nullptr,
+				m_Scene && m_SceneEditController.IsDirty(),
+				m_SceneRuntime != nullptr,
+				PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan ? "Vulkan" : "OpenGL");
 			EndEditorChromeBar();
 		}
 
@@ -6627,14 +6597,8 @@ namespace
 							"Create or open a project from the File menu.");
 
 					ImGui::Separator();
-					const ImVec4 Color = m_StatusIsError
-						? m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Error)
-						: m_StatusIsWarning
-							? m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Warning)
-							: m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::Text);
-					ImGui::PushStyleColor(ImGuiCol_Text, Color);
-					ImGui::TextWrapped("%s", m_StatusMessage.c_str());
-					ImGui::PopStyleColor();
+					m_StatusPanel.DrawMessage(
+						m_EditorStyle, PulseForgeEditor::EditorStatusMessagePresentation::Wrapped);
 				}
 				ImGui::End();
 			}
@@ -9673,10 +9637,7 @@ namespace
 		}
 		void SetStatus(std::string Message)
 		{
-			m_StatusMessage = std::move(Message);
-			m_StatusIsError = false;
-			m_StatusIsWarning = false;
-			PF_INFO("{}", m_StatusMessage);
+			m_StatusPanel.SetStatus(std::move(Message));
 		}
 
 		void StartRuntime()
@@ -9793,18 +9754,12 @@ namespace
 
 		void SetWarning(std::string Message)
 		{
-			m_StatusMessage = std::move(Message);
-			m_StatusIsError = false;
-			m_StatusIsWarning = true;
-			PF_WARN("{}", m_StatusMessage);
+			m_StatusPanel.SetWarning(std::move(Message));
 		}
 
 		void SetError(std::string Message)
 		{
-			m_StatusMessage = std::move(Message);
-			m_StatusIsError = true;
-			m_StatusIsWarning = false;
-			PF_ERROR("{}", m_StatusMessage);
+			m_StatusPanel.SetError(std::move(Message));
 		}
 
 		void ClearScene() noexcept
@@ -9942,6 +9897,7 @@ namespace
 		bool m_PendingCloseAllDocuments = false;
 		PulseForgeEditor::EditorAssetWorkflowState m_AssetWorkflow;
 		PulseForgeEditor::EditorConsolePanel m_ConsolePanel;
+		PulseForgeEditor::EditorStatusPanel m_StatusPanel;
 		PulseForgeEditor::EditorHierarchyPanel m_HierarchyPanel;
 		PulseForgeEditor::EditorAssetSelector m_AssetSelector;
 		PulseForgeEditor::EditorContentBrowserPanel m_ContentBrowserPanel;
@@ -10091,9 +10047,6 @@ namespace
 		bool m_DocumentWorkspaceImmediateDirty = false;
 		bool m_DocumentWorkspaceBoundsDirty = false;
 		std::chrono::steady_clock::time_point m_ProjectOpenStartedAt{};
-		std::string m_StatusMessage = "Create or open a project to begin.";
-		bool m_StatusIsError = false;
-		bool m_StatusIsWarning = false;
 	};
 
 	class PulseForgeEditorApplication final : public PulseForge::Application
