@@ -7,10 +7,13 @@ $ErrorActionPreference = 'Stop'
 $script:RepoRoot = $null
 $script:HadCleanupFailure = $false
 # Mutating operations may target only these exact repository-relative paths.
-# Restricted cache directories are removed only after every contained file passes its extension allowlist.
+# Visual Studio build trees are cleaned by recognized generator outputs while
+# preserving local quality data. The isolated CMakeSettings Out tree is removed
+# only after its exact layout, source directory, generator, and links are checked.
 $script:TargetManifest = @(
-	@{ Path = 'Build'; Category = 'Build'; Kind = 'Directory'; AllowedExtensions = $null },
-	@{ Path = 'out'; Category = 'Build'; Kind = 'Directory'; AllowedExtensions = $null },
+	@{ Path = 'Build\CMake\VS2022-x64'; Category = 'CMake build outputs'; Kind = 'CMakeBuildDirectory'; AllowedExtensions = $null },
+	@{ Path = 'Build\CMake\VS2022-x64-OpenGL'; Category = 'CMake build outputs'; Kind = 'CMakeBuildDirectory'; AllowedExtensions = $null },
+	@{ Path = 'Out'; Category = 'CMake build outputs'; Kind = 'CMakeSettingsOutputTree'; AllowedExtensions = $null },
 	@{ Path = 'Bin'; Category = 'Legacy outputs'; Kind = 'Directory'; AllowedExtensions = $null },
 	@{ Path = 'Int'; Category = 'Legacy outputs'; Kind = 'Directory'; AllowedExtensions = $null },
 	@{ Path = 'CMakeFiles'; Category = 'Legacy outputs'; Kind = 'Directory'; AllowedExtensions = $null },
@@ -32,13 +35,16 @@ $script:TargetManifest = @(
 )
 
 $script:ActionManifest = @{
-	Build = @{ Label = 'canonical Build directory'; Paths = @('Build'); Confirm = 'DELETE BUILD' }
-	Out = @{ Label = 'Visual Studio out directory'; Paths = @('out'); Confirm = 'DELETE OUT' }
-	BuildOut = @{ Label = 'Build and out directories'; Paths = @($script:TargetManifest | Where-Object { $_.Category -eq 'Build' } | ForEach-Object { $_.Path }); Confirm = 'DELETE BUILD AND OUT' }
+	Vulkan = @{ Label = 'Vulkan Visual Studio build outputs'; Paths = @('Build\CMake\VS2022-x64'); Confirm = 'DELETE VULKAN BUILD OUTPUTS' }
+	OpenGL = @{ Label = 'OpenGL Visual Studio build outputs'; Paths = @('Build\CMake\VS2022-x64-OpenGL'); Confirm = 'DELETE OPENGL BUILD OUTPUTS' }
+	Build = @{ Label = 'Vulkan, OpenGL, and CMakeSettings build outputs'; Paths = @($script:TargetManifest | Where-Object { $_.Category -eq 'CMake build outputs' } | ForEach-Object { $_.Path }); Confirm = 'DELETE CMAKE BUILD OUTPUTS' }
 	Legacy = @{ Label = 'legacy generated outputs'; Paths = @($script:TargetManifest | Where-Object { $_.Category -eq 'Legacy outputs' } | ForEach-Object { $_.Path }); Confirm = 'DELETE LEGACY OUTPUTS' }
 	VisualStudio = @{ Label = 'selected Visual Studio regenerable caches'; Paths = @($script:TargetManifest | Where-Object { $_.Category -eq 'Visual Studio caches' } | ForEach-Object { $_.Path }); Confirm = 'DELETE VISUAL STUDIO CACHES' }
-	Comprehensive = @{ Label = 'all approved generated outputs and selected caches'; Paths = @($script:TargetManifest | ForEach-Object { $_.Path }); Confirm = 'DELETE ALL APPROVED GENERATED FILES' }
+	Comprehensive = @{ Label = 'approved CMake outputs, legacy outputs, and selected VS caches'; Paths = @($script:TargetManifest | ForEach-Object { $_.Path }); Confirm = 'DELETE ALL APPROVED GENERATED FILES INCLUDING OUT DEPENDENCIES' }
 }
+
+$script:PreservedCMakeBuildChildren = @('QualityTools', 'QualityReports')
+$script:RegisteredWorktreeProvider = $null
 
 function Set-CleanerRoot
 {
@@ -75,6 +81,251 @@ function Get-ManifestEntry
 	return $matches[0]
 }
 
+function Get-RegisteredWorktreePaths
+{
+	if ($null -ne $script:RegisteredWorktreeProvider)
+	{
+		return @(& $script:RegisteredWorktreeProvider)
+	}
+
+	$output = @(& git -C $script:RepoRoot worktree list --porcelain 2>&1)
+	if ($LASTEXITCODE -ne 0)
+	{
+		throw "Cannot verify registered Git worktrees; cleanup is blocked. Git reported: $($output -join ' ')"
+	}
+
+	$paths = New-Object System.Collections.ArrayList
+	foreach ($line in $output)
+	{
+		if ([string]$line -match '^worktree (.+)$')
+		{
+			$path = [IO.Path]::GetFullPath($Matches[1]).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+			$null = $paths.Add($path)
+		}
+	}
+	return @($paths.ToArray())
+}
+
+function Test-PathContains
+{
+	param([Parameter(Mandatory = $true)][string]$Parent, [Parameter(Mandatory = $true)][string]$Child)
+
+	$parentPath = [IO.Path]::GetFullPath($Parent).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+	$childPath = [IO.Path]::GetFullPath($Child).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+	if ([StringComparer]::OrdinalIgnoreCase.Equals($parentPath, $childPath)) { return $true }
+	$prefix = $parentPath + [IO.Path]::DirectorySeparatorChar
+	return $childPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-OverlappingRegisteredWorktree
+{
+	param([Parameter(Mandatory = $true)][string]$TargetPath)
+
+	foreach ($worktreePath in (Get-RegisteredWorktreePaths))
+	{
+		# The active repository root is expected to contain cleanup targets.
+		if ([StringComparer]::OrdinalIgnoreCase.Equals($worktreePath, $script:RepoRoot)) { continue }
+		if ((Test-PathContains -Parent $TargetPath -Child $worktreePath) -or
+			(Test-PathContains -Parent $worktreePath -Child $TargetPath))
+		{
+			return $worktreePath
+		}
+	}
+	return $null
+}
+
+function Test-CMakeGeneratedBuildEntry
+{
+	param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][bool]$IsDirectory)
+
+	if ($IsDirectory)
+	{
+		if ($Name -in @('CMakeFiles', 'Testing', 'Debug', 'Release', 'Dist', 'MinSizeRel', 'RelWithDebInfo',
+			'Editor', 'Runtime', 'Assets', 'Shaders', 'GpuValidationShaders', 'PublicHeaderChecks', 'PulseForge', 'x64', '_deps'))
+		{
+			return $true
+		}
+		return $Name -match '^[A-Za-z0-9_.+-]+\.dir$'
+	}
+
+	if ($Name -in @('CMakeCache.txt', 'cmake_install.cmake', 'CTestTestfile.cmake', 'CPackConfig.cmake',
+		'CPackSourceConfig.cmake', 'DartConfiguration.tcl', 'compile_commands.json', '.ninja_deps', '.ninja_log', 'build.ninja'))
+	{
+		return $true
+	}
+	return $Name -match '^[A-Za-z0-9_.+-]+\.sln$' -or
+		$Name -match '^[A-Za-z0-9_.+-]+\.vcxproj(\.filters)?$' -or
+		$Name -match '^PulseForgeTargetGraph-[A-Za-z0-9_.+-]+\.txt$'
+}
+
+function Test-CMakeDependencyBuildDirectory
+{
+	param([Parameter(Mandatory = $true)][string]$Path)
+
+	# FetchContent uses "-src" for source checkouts and "-build"/"-subbuild"
+	# for generated build trees. Preserve the entire cache if any entry is not one
+	# of the generated forms so a future dependency source is never guessed away.
+	foreach ($itemPath in [IO.Directory]::EnumerateFileSystemEntries($Path))
+	{
+		$attributes = [IO.File]::GetAttributes($itemPath)
+		if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+			($attributes -band [IO.FileAttributes]::Directory) -eq 0)
+		{
+			return $false
+		}
+
+		$name = [IO.Path]::GetFileName($itemPath)
+		if ($name -notmatch '^[A-Za-z0-9_.+-]+-(build|subbuild)$')
+		{
+			return $false
+		}
+	}
+	return $true
+}
+
+function Assert-CMakeBuildDirectory
+{
+	param(
+		[Parameter(Mandatory = $true)][string]$Path,
+		[string[]]$AllowedGenerators = @('Visual Studio 17 2022')
+	)
+
+	$cachePath = Join-Path $Path 'CMakeCache.txt'
+	if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf))
+	{
+		throw "CMake ownership cannot be verified because '$cachePath' is missing. The target was preserved."
+	}
+	$cacheItem = Get-Item -LiteralPath $cachePath -Force
+	if (($cacheItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+	{
+		throw "Refusing CMake metadata that is a symbolic link or junction: '$cachePath'."
+	}
+	$cache = [IO.File]::ReadAllText($cachePath)
+	$homeMatch = [Regex]::Match($cache, '(?m)^CMAKE_HOME_DIRECTORY:INTERNAL=(.+)$')
+	$generatorMatch = [Regex]::Match($cache, '(?m)^CMAKE_GENERATOR:INTERNAL=(.+)$')
+	if (-not $homeMatch.Success -or -not $generatorMatch.Success)
+	{
+		throw "CMake source/generator metadata is incomplete in '$cachePath'. The target was preserved."
+	}
+		$sourceTreePath = [IO.Path]::GetFullPath($homeMatch.Groups[1].Value.Trim()).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+		if (-not [StringComparer]::OrdinalIgnoreCase.Equals($sourceTreePath, $script:RepoRoot))
+	{
+			throw "CMake target '$Path' belongs to source tree '$sourceTreePath', not '$script:RepoRoot'. The target was preserved."
+	}
+	if ($AllowedGenerators -notcontains $generatorMatch.Groups[1].Value.Trim())
+	{
+		throw "CMake target '$Path' uses unsupported generator '$($generatorMatch.Groups[1].Value.Trim())'. Allowed generators: $($AllowedGenerators -join ', '). The target was preserved."
+	}
+}
+
+function Get-CMakeSettingsOutputTreePlan
+{
+	param([Parameter(Mandatory = $true)][string]$Path)
+
+	$entry = [pscustomobject]@{ Kind = 'Directory'; AllowedExtensions = $null; Path = 'Out' }
+	$bytes = Get-TreeInspection -Path $Path -Entry $entry
+	$rootChildren = @([IO.Directory]::EnumerateFileSystemEntries($Path))
+	$rootNames = @($rootChildren | ForEach-Object { [IO.Path]::GetFileName($_) })
+	if ($rootNames -notcontains 'build' -or @($rootNames | Where-Object { $_ -notin @('build', 'install') }).Count -gt 0)
+	{
+		throw "The Out tree must contain only CMakeSettings 'build' and optional 'install' directories. The target was preserved."
+	}
+
+	$buildRoot = Join-Path $Path 'build'
+	if (-not (Test-Path -LiteralPath $buildRoot -PathType Container))
+	{
+		throw "The Out tree has no CMakeSettings build directory. The target was preserved."
+	}
+	$buildDirectories = @([IO.Directory]::EnumerateFileSystemEntries($buildRoot))
+	if ($buildDirectories.Count -eq 0)
+	{
+		throw "The Out build directory contains no configured build trees. The target was preserved."
+	}
+
+	$configurationNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+	foreach ($buildDirectory in $buildDirectories)
+	{
+		$attributes = [IO.File]::GetAttributes($buildDirectory)
+		if (($attributes -band [IO.FileAttributes]::Directory) -eq 0 -or [IO.Path]::GetFileName($buildDirectory) -notmatch '^[A-Za-z0-9_.+-]+$')
+		{
+			throw "Unexpected item in the Out CMakeSettings build directory: '$buildDirectory'. The target was preserved."
+		}
+		Assert-CMakeBuildDirectory -Path $buildDirectory -AllowedGenerators @('Ninja')
+		$null = $configurationNames.Add([IO.Path]::GetFileName($buildDirectory))
+	}
+
+	$installRoot = Join-Path $Path 'install'
+	if (Test-Path -LiteralPath $installRoot)
+	{
+		foreach ($installDirectory in [IO.Directory]::EnumerateFileSystemEntries($installRoot))
+		{
+			$attributes = [IO.File]::GetAttributes($installDirectory)
+			$name = [IO.Path]::GetFileName($installDirectory)
+			if (($attributes -band [IO.FileAttributes]::Directory) -eq 0 -or -not $configurationNames.Contains($name))
+			{
+				throw "Unexpected item in the Out CMakeSettings install directory: '$installDirectory'. The target was preserved."
+			}
+		}
+	}
+
+	$generatedDirectories = @($buildDirectories)
+	if (Test-Path -LiteralPath $installRoot)
+	{
+		$generatedDirectories += @([IO.Directory]::EnumerateFileSystemEntries($installRoot))
+	}
+	return [pscustomobject]@{ Bytes = [long]$bytes; GeneratedDirectories = $generatedDirectories }
+}
+
+function Get-CMakeBuildPlan
+{
+	param([Parameter(Mandatory = $true)][string]$Path)
+
+	Assert-CMakeBuildDirectory -Path $Path
+	$bytes = [long]0
+	$remove = New-Object System.Collections.ArrayList
+	$preserve = New-Object System.Collections.ArrayList
+	foreach ($itemPath in [IO.Directory]::EnumerateFileSystemEntries($Path))
+	{
+		$name = [IO.Path]::GetFileName($itemPath)
+		if ($script:PreservedCMakeBuildChildren -contains $name)
+		{
+			$null = $preserve.Add($itemPath)
+			continue
+		}
+		$attributes = [IO.File]::GetAttributes($itemPath)
+		if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+		{
+			throw "Refusing CMake output containing a symbolic link or junction: '$itemPath'."
+		}
+		$isDirectory = ($attributes -band [IO.FileAttributes]::Directory) -ne 0
+			if ($name -eq '_deps' -and -not (Test-CMakeDependencyBuildDirectory -Path $itemPath))
+			{
+				$null = $preserve.Add($itemPath)
+				continue
+			}
+		if (-not (Test-CMakeGeneratedBuildEntry -Name $name -IsDirectory $isDirectory))
+		{
+			$null = $preserve.Add($itemPath)
+			continue
+		}
+
+		if ($isDirectory)
+		{
+			$itemBytes = Get-TreeInspection -Path $itemPath -Entry ([pscustomobject]@{ Kind = 'Directory'; AllowedExtensions = $null; Path = $name })
+		}
+		else
+		{
+			$itemBytes = (New-Object IO.FileInfo($itemPath)).Length
+		}
+		$bytes += $itemBytes
+		$null = $remove.Add([pscustomobject]@{ Path = $itemPath; Bytes = [long]$itemBytes })
+	}
+		$orderedRemove = @($remove.ToArray() | Sort-Object `
+			@{ Expression = { if ([IO.Path]::GetFileName($_.Path) -eq 'CMakeCache.txt') { 1 } else { 0 } } },
+			@{ Expression = { $_.Path } })
+		return [pscustomobject]@{ Bytes = $bytes; ItemsToRemove = $orderedRemove; PreservedItems = @($preserve.ToArray()) }
+}
+
 function Get-TargetFullPath
 {
 	param([Parameter(Mandatory = $true)][string]$RelativePath)
@@ -89,6 +340,11 @@ function Get-TargetFullPath
 	if (-not [StringComparer]::OrdinalIgnoreCase.Equals($full, $expected))
 	{
 		throw "Resolved path did not match the exact allowlist entry '$RelativePath'."
+	}
+	$worktreeConflict = Get-OverlappingRegisteredWorktree -TargetPath $full
+	if ($worktreeConflict)
+	{
+		throw "Refusing cleanup target '$full' because it overlaps registered worktree '$worktreeConflict'."
 	}
 	$prefix = $script:RepoRoot + [IO.Path]::DirectorySeparatorChar
 	if (-not $full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase))
@@ -159,7 +415,16 @@ function Get-TargetInspection
 	$full = Get-TargetFullPath $RelativePath
 	if (-not (Test-Path -LiteralPath $full))
 	{
-		return [pscustomobject]@{ RelativePath = $entry.Path; FullPath = $full; Exists = $false; Bytes = [long]0; Entry = $entry; Error = $null }
+			return [pscustomobject]@{
+				RelativePath = $entry.Path
+				FullPath = $full
+				Exists = $false
+				Bytes = [long]0
+				Entry = $entry
+				GeneratedItems = @()
+				PreservedItems = @()
+				Error = $null
+			}
 	}
 	$item = Get-Item -LiteralPath $full -Force
 	if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
@@ -178,11 +443,48 @@ function Get-TargetInspection
 	{
 		$bytes = [long]$item.Length
 	}
+	elseif ($entry.Kind -eq 'CMakeBuildDirectory')
+	{
+		$plan = Get-CMakeBuildPlan -Path $full
+		return [pscustomobject]@{
+			RelativePath = $entry.Path
+			FullPath = $full
+			Exists = $true
+			Bytes = [long]$plan.Bytes
+			Entry = $entry
+			GeneratedItems = @($plan.ItemsToRemove)
+			PreservedItems = @($plan.PreservedItems)
+			Error = $null
+		}
+	}
+	elseif ($entry.Kind -eq 'CMakeSettingsOutputTree')
+	{
+		$plan = Get-CMakeSettingsOutputTreePlan -Path $full
+		return [pscustomobject]@{
+			RelativePath = $entry.Path
+			FullPath = $full
+			Exists = $true
+			Bytes = [long]$plan.Bytes
+			Entry = $entry
+			GeneratedItems = @($plan.GeneratedDirectories)
+			PreservedItems = @()
+			Error = $null
+		}
+	}
 	else
 	{
 		$bytes = Get-TreeInspection -Path $full -Entry $entry
 	}
-	return [pscustomobject]@{ RelativePath = $entry.Path; FullPath = $full; Exists = $true; Bytes = $bytes; Entry = $entry; Error = $null }
+	return [pscustomobject]@{
+		RelativePath = $entry.Path
+		FullPath = $full
+		Exists = $true
+		Bytes = $bytes
+		Entry = $entry
+		GeneratedItems = @()
+		PreservedItems = @()
+		Error = $null
+	}
 }
 
 function Format-Bytes
@@ -193,7 +495,8 @@ function Format-Bytes
 
 function Get-ActiveProcessWarnings
 {
-	$names = @('devenv', 'Code', 'codex', 'PulseForgeEditor', 'PulseForgeGame', 'cmake', 'cmake-gui', 'ninja', 'MSBuild', 'cl', 'link', 'VBCSCompiler', 'dotnet')
+	$names = @('devenv', 'Code', 'codex', 'PulseForgeEditor', 'PulseForgeGame', 'PulseForgeTests', 'PulseForgeEditorTests',
+		'PulseForgeGpuValidation', 'cmake', 'cmake-gui', 'ctest', 'ninja', 'MSBuild', 'cl', 'link', 'python', 'python3', 'VBCSCompiler', 'dotnet')
 	$found = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
 		($names -contains $_.ProcessName) -or ($_.ProcessName -like 'ServiceHub.*') -or ($_.ProcessName -like 'Microsoft.ServiceHub.*')
 	} | Sort-Object Id -Unique)
@@ -207,7 +510,7 @@ function Find-PulseForgeLauncherProcesses
 	$rootPattern = [Regex]::Escape($script:RepoRoot)
 	$launcherPatterns = @(
 		@{ Pattern = '(?i)\bPulseForge(Editor|Game)(\.exe)?\b'; Reason = 'command line names a PulseForge executable' },
-		@{ Pattern = '(?i)' + $rootPattern + '[\\/](Build|out[\\/]build)([\\/]|\b)'; Reason = 'command line references a repository build directory' }
+		@{ Pattern = '(?i)' + $rootPattern + '[\\/](Build|Out[\\/]build)([\\/]|\b)'; Reason = 'command line references a repository build directory' }
 	)
 	$results = New-Object System.Collections.ArrayList
 	foreach ($process in $ProcessMetadata)
@@ -280,7 +583,7 @@ function Show-SizeReport
 		}
 	}
 	Write-Host ''
-	foreach ($category in @('Build', 'Legacy outputs', 'Visual Studio caches'))
+	foreach ($category in @('CMake build outputs', 'Legacy outputs', 'Visual Studio caches'))
 	{
 		if ($categoryTotals.ContainsKey($category))
 		{
@@ -291,21 +594,125 @@ function Show-SizeReport
 	return [pscustomobject]@{ Entries = @($rows.ToArray()); TotalBytes = $total; CategoryTotals = $categoryTotals }
 }
 
+function Show-CleanupPreview
+{
+	param([Parameter(Mandatory = $true)][string]$ActionName)
+
+	if (-not $script:ActionManifest.ContainsKey($ActionName)) { throw "Unknown cleanup action '$ActionName'." }
+	$action = $script:ActionManifest[$ActionName]
+	$total = [long]0
+	Write-Host ("Preview: {0}" -f $action.Label)
+	foreach ($relativePath in $action.Paths)
+	{
+		$inspection = Get-TargetInspection -RelativePath $relativePath
+		if (-not $inspection.Exists)
+		{
+			Write-Host ('  {0}  not present' -f $inspection.FullPath)
+			continue
+		}
+		$total += $inspection.Bytes
+		Write-Host ('  {0}  {1}' -f $inspection.FullPath, (Format-Bytes $inspection.Bytes))
+		if ($inspection.Entry.Kind -eq 'CMakeBuildDirectory')
+		{
+			foreach ($item in $inspection.GeneratedItems)
+			{
+				Write-Host ('    remove {0}  {1}' -f $item.Path, (Format-Bytes $item.Bytes))
+			}
+			foreach ($item in $inspection.PreservedItems)
+			{
+				Write-Host ('    preserve {0}' -f $item)
+			}
+		}
+		elseif ($inspection.Entry.Kind -eq 'CMakeSettingsOutputTree')
+		{
+			Write-Host '    remove the validated Out CMakeSettings Ninja build/install tree, including any fetched dependency caches'
+		}
+	}
+	Write-Host ('Preview total: {0}. No files were changed.' -f (Format-Bytes $total))
+	return [pscustomobject]@{ TotalBytes = $total }
+}
+
 function Resolve-MenuSelection
 {
 	param([string]$Selection)
 	switch ($Selection)
 	{
-		'1' { return 'Build' }
-		'2' { return 'Out' }
-		'3' { return 'BuildOut' }
+		'1' { return 'Vulkan' }
+		'2' { return 'OpenGL' }
+		'3' { return 'Build' }
 		'4' { return 'Legacy' }
 		'5' { return 'VisualStudio' }
 		'6' { return 'Comprehensive' }
-		'7' { return 'Sizes' }
-		'8' { return 'Cancel' }
+		'7' { return 'Preview' }
+		'8' { return 'Sizes' }
+		'9' { return 'Cancel' }
 		default { return $null }
 	}
+}
+
+function Remove-InspectedTarget
+{
+	param([Parameter(Mandatory = $true)]$Inspection)
+
+	if ($Inspection.Entry.Kind -eq 'CMakeBuildDirectory')
+	{
+		$current = Get-TargetInspection -RelativePath $Inspection.RelativePath
+		$prefix = $current.FullPath + [IO.Path]::DirectorySeparatorChar
+		foreach ($generated in $current.GeneratedItems)
+		{
+			$generatedPath = [IO.Path]::GetFullPath($generated.Path)
+			if (-not $generatedPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase))
+			{
+				throw "Generated CMake entry escaped its validated build directory: '$generatedPath'."
+			}
+			$attributes = [IO.File]::GetAttributes($generatedPath)
+			if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+			{
+				throw "Refusing generated CMake entry that became a symbolic link or junction: '$generatedPath'."
+			}
+			if (($attributes -band [IO.FileAttributes]::Directory) -ne 0)
+			{
+				$null = Get-TreeInspection -Path $generatedPath -Entry ([pscustomobject]@{ Kind = 'Directory'; AllowedExtensions = $null; Path = [IO.Path]::GetFileName($generatedPath) })
+			}
+			Remove-Item -LiteralPath $generatedPath -Recurse -Force -ErrorAction Stop
+			if (Test-Path -LiteralPath $generatedPath) { throw "Generated CMake entry still exists after deletion: '$generatedPath'." }
+		}
+			if (-not (Test-Path -LiteralPath $current.FullPath -PathType Container))
+			{
+				throw 'CMake build directory disappeared during cleanup.'
+			}
+			foreach ($remainingPath in [IO.Directory]::EnumerateFileSystemEntries($current.FullPath))
+			{
+				$attributes = [IO.File]::GetAttributes($remainingPath)
+				if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+				{
+					throw "A symbolic link or junction appeared during cleanup: '$remainingPath'."
+				}
+				$isDirectory = ($attributes -band [IO.FileAttributes]::Directory) -ne 0
+				$remainingName = [IO.Path]::GetFileName($remainingPath)
+				if ($remainingName -eq '_deps' -and -not (Test-CMakeDependencyBuildDirectory -Path $remainingPath))
+				{
+					continue
+				}
+				if (Test-CMakeGeneratedBuildEntry -Name $remainingName -IsDirectory $isDirectory)
+				{
+					throw "Generated CMake output remains after cleanup: '$remainingPath'."
+				}
+			}
+		return
+	}
+
+	if ($Inspection.Entry.Kind -eq 'CMakeSettingsOutputTree')
+	{
+		$current = Get-TargetInspection -RelativePath $Inspection.RelativePath
+		if (-not $current.Exists) { return }
+		Remove-Item -LiteralPath $current.FullPath -Recurse -Force -ErrorAction Stop
+		if (Test-Path -LiteralPath $current.FullPath) { throw 'The validated Out build tree still exists after cleanup.' }
+		return
+	}
+
+	Remove-Item -LiteralPath $Inspection.FullPath -Recurse -Force -ErrorAction Stop
+	if (Test-Path -LiteralPath $Inspection.FullPath) { throw 'Target still exists after deletion.' }
 }
 
 function Invoke-CleanupAction
@@ -329,6 +736,15 @@ function Invoke-CleanupAction
 			$total += $inspection.Bytes
 			$state = if ($inspection.Exists) { Format-Bytes $inspection.Bytes } else { 'not present' }
 			Write-Host ('  {0}  {1}' -f $inspection.FullPath, $state)
+			if ($inspection.Entry.Kind -eq 'CMakeBuildDirectory')
+			{
+				foreach ($item in $inspection.GeneratedItems) { Write-Host ('    remove {0}  {1}' -f $item.Path, (Format-Bytes $item.Bytes)) }
+				foreach ($item in $inspection.PreservedItems) { Write-Host ('    preserve {0}' -f $item) }
+			}
+			elseif ($inspection.Entry.Kind -eq 'CMakeSettingsOutputTree')
+			{
+				Write-Host '    remove the validated CMakeSettings Ninja build/install tree, including any fetched dependency caches'
+			}
 		}
 		catch
 		{
@@ -374,7 +790,11 @@ function Invoke-CleanupAction
 			return [pscustomobject]@{ Succeeded = 0; Failed = $invalid.Count; Skipped = $inspections.Count }
 		}
 	}
-	Write-Host 'The following user data is explicitly outside the cleanup allowlist: .git, CMakeSettings.json, imgui.ini, *.vcxproj.user, all source/assets, and PulseForgeGame\.pulseforge\derived.'
+		Write-Host 'User data outside the allowlist includes .git, CMakeSettings.json, imgui.ini, *.vcxproj.user, source/assets, CMakeUserPresets.json, QualityTools, QualityReports, Build\Diagnostics, Build\IntegrationEvidence, and PulseForgeGame\.pulseforge\derived.'
+	if ($action.Paths -contains 'Out')
+	{
+		Write-Warning 'Cleaning Out removes its validated Ninja build/install outputs and any fetched dependency sources or downloads inside them. A later configure may need network access to fetch pinned dependencies again.'
+	}
 	if ($ActionName -eq 'VisualStudio' -or $ActionName -eq 'Comprehensive')
 	{
 		Write-Host 'This removes only listed IntelliSense PCH, FileContentIndex .vsidx files, Browse.VC.db, and Copilot index databases. CopilotSnapshots and Visual Studio settings are preserved.'
@@ -401,8 +821,7 @@ function Invoke-CleanupAction
 			{
 				throw 'Resolved target changed after confirmation.'
 			}
-			Remove-Item -LiteralPath $current.FullPath -Recurse -Force -ErrorAction Stop
-			if (Test-Path -LiteralPath $current.FullPath) { throw 'Target still exists after deletion.' }
+			Remove-InspectedTarget -Inspection $current
 			$succeeded++
 			Write-Host ('Removed {0} ({1}).' -f $current.FullPath, (Format-Bytes $current.Bytes))
 		}
@@ -431,21 +850,25 @@ function Invoke-CleanerMain
 	Write-Host 'PulseForge generated-files maintenance'
 	Write-Host ("Repository: {0}" -f $script:RepoRoot)
 	Write-Host ''
-	Write-Host 'Cleanup is never automatic. Build/out cleanup removes CMake outputs and may remove fetched dependencies.'
+	Write-Host 'Cleanup is never automatic. Only validated CMake build trees and exact legacy/cache paths are eligible.'
+	Write-Host 'The Out target is accepted only in the CMakeSettings build/install layout with repository-owned Ninja caches; registered worktrees are always protected.'
+	Write-Host 'Cleaning Out also removes fetched dependency caches. CMakeUserPresets.json, the root CMakeSettings.json, quality tools, and quality reports are preserved.'
 	Write-Host 'The legacy action is limited to explicitly allowlisted generated paths. Visual Studio cleanup preserves settings and Copilot snapshots.'
 	Write-Host ''
 	while ($true)
 	{
-		Write-Host '[1] Clean canonical Build directory'
-		Write-Host '[2] Clean Visual Studio out directory'
-		Write-Host '[3] Deep clean Build + out'
+		Write-Host '[1] Clean Vulkan Visual Studio CMake outputs'
+		Write-Host '[2] Clean OpenGL Visual Studio CMake outputs'
+		Write-Host '[3] Clean all CMake output trees (VS2022 and CMakeSettings/Ninja)'
 		Write-Host '[4] Clean legacy generated outputs (root + listed vendor Bin/Int + root CMakeFiles)'
 		Write-Host '[5] Clean selected Visual Studio regenerable caches'
-		Write-Host '[6] Comprehensive cleanup (Build, out, legacy outputs, selected VS caches)'
-		Write-Host '[7] Show sizes and totals for every supported cleanup target'
-		Write-Host '[8] Cancel'
+		Write-Host '[6] Comprehensive safe cleanup (CMake outputs including Out dependencies, legacy outputs, selected VS caches)'
+		Write-Host '[7] Preview comprehensive cleanup without changing files'
+		Write-Host '[8] Show sizes for every supported cleanup target'
+		Write-Host '[9] Cancel'
 		$selection = Read-Host 'Select an option'
 		$actionName = Resolve-MenuSelection -Selection $selection
+		if ($actionName -eq 'Preview') { $null = Show-CleanupPreview -ActionName Comprehensive; continue }
 		if ($actionName -eq 'Sizes') { $null = Show-SizeReport; continue }
 		if ($actionName -eq 'Cancel')
 		{
