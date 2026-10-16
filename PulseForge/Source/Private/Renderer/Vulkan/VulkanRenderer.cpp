@@ -3,6 +3,7 @@
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include "Renderer/RendererBackend.h"
+#include "Renderer/Vulkan/VulkanPresentationResources.h"
 #include "Renderer/Vulkan/VulkanResourceObjects.h"
 #include "Renderer/Vulkan/VulkanSupport.h"
 #include "Window/Window.h"
@@ -414,7 +415,7 @@ namespace PulseForge
 			SwapchainImage& Image = m_SwapchainImages[m_AcquiredImageIndex];
 			m_RetirePreviousGenerationsAfterSubmit = !m_PresentFenceMaintenanceEnabled &&
 				m_FirstPresentationPending && m_FirstPresentationImageIndex == m_AcquiredImageIndex;
-			WaitForPresentation(Image);
+			m_PresentationResources.WaitForPresentation(Image);
 			const auto* DepthTarget = dynamic_cast<const VulkanTexture*>(Image.DepthTarget.get());
 			if (!DepthTarget)
 				throw std::runtime_error("Vulkan swapchain image is missing its PulseForge depth target");
@@ -500,7 +501,7 @@ namespace PulseForge
 				m_RetirePreviousGenerationsAfterSubmit = false;
 			}
 
-			PreparePresentationFenceForReuse(Image);
+			m_PresentationResources.PrepareFenceForReuse(Image);
 			const VkSemaphore PresentSemaphore = static_cast<VkSemaphore>(Image.PresentReady);
 			const VkSwapchainKHR Swapchain = static_cast<VkSwapchainKHR>(m_Swapchain);
 			const VkFence NativePresentFence = static_cast<VkFence>(Image.PresentFence);
@@ -738,7 +739,7 @@ namespace PulseForge
 			Host.RetirePreviousGenerationsAfterSubmit = !m_PresentFenceMaintenanceEnabled &&
 				Host.FirstPresentationPending && Host.FirstPresentationImageIndex == ImageIndex;
 			SwapchainImage& Image = Host.Images[ImageIndex];
-			WaitForPresentation(Image);
+			m_PresentationResources.WaitForPresentation(Image);
 			Frame.CommandList->open();
 			const auto* DepthTarget = dynamic_cast<const VulkanTexture*>(Image.DepthTarget.get());
 			if (!DepthTarget)
@@ -787,7 +788,7 @@ namespace PulseForge
 					RetiredCount);
 				Host.RetirePreviousGenerationsAfterSubmit = false;
 			}
-			PreparePresentationFenceForReuse(Image);
+			m_PresentationResources.PrepareFenceForReuse(Image);
 			const VkSemaphore PresentSemaphore = static_cast<VkSemaphore>(Image.PresentReady);
 			const VkSwapchainKHR Swapchain = static_cast<VkSwapchainKHR>(Host.Swapchain);
 			const VkFence NativePresentFence = static_cast<VkFence>(Image.PresentFence);
@@ -869,9 +870,9 @@ namespace PulseForge
 					EndPlatformPresentationTarget(TargetID);
 				for (const FrameContext& Frame : Entry->second->Frames)
 					WaitForFrame(Frame);
-				WaitForPresentationRetirement(Entry->second->Images, "native-window swapchain");
+				m_PresentationResources.WaitForRetirement(Entry->second->Images, "native-window swapchain");
 				for (RetiredSwapchainGeneration& Generation : Entry->second->RetiredGenerations)
-					WaitForPresentationRetirement(Generation.Images, "retired native-window swapchain");
+					m_PresentationResources.WaitForRetirement(Generation.Images, "retired native-window swapchain");
 			}
 			catch (const std::exception& Exception)
 			{
@@ -2276,23 +2277,8 @@ namespace PulseForge
 			nvrhi::TextureSubresourceSet DepthSubresources;
 		};
 
-		struct SwapchainImage
-		{
-			vk::Image NativeImage;
-			nvrhi::TextureHandle Texture;
-			TextureHandle DepthTarget;
-			nvrhi::FramebufferHandle Framebuffer;
-			vk::Semaphore PresentReady;
-			vk::Fence PresentFence;
-			bool PresentFenceUsed = false;
-			bool PresentPending = false;
-		};
-
-		struct RetiredSwapchainGeneration
-		{
-			vk::SwapchainKHR Swapchain;
-			std::vector<SwapchainImage> Images;
-		};
+		using SwapchainImage = VulkanSwapchainImage;
+		using RetiredSwapchainGeneration = VulkanRetiredSwapchainGeneration;
 
 		struct RecordingContext
 		{
@@ -2352,6 +2338,7 @@ namespace PulseForge
 			SelectPhysicalDevice();
 			CreateLogicalDevice();
 			CreateNvrhiDevice();
+			m_PresentationResources.Initialize(m_Device, m_PresentQueue, m_ActiveNvrhiDevice, m_PresentFenceMaintenanceEnabled);
 			CreateFrameContexts();
 			(void)RecreateSwapchain();
 		}
@@ -2759,63 +2746,6 @@ namespace PulseForge
 				throw std::runtime_error("Vulkan frame synchronization wait failed: " + vk::to_string(WaitResult));
 		}
 
-		void WaitForPresentation(SwapchainImage& Image)
-		{
-			if (!m_PresentFenceMaintenanceEnabled)
-			{
-				// Reacquiring this image proves its previous present completed. The acquire
-				// semaphore is consumed by the graphics submission before its present semaphore
-				// is signaled again.
-				Image.PresentPending = false;
-				return;
-			}
-			if (!Image.PresentPending || !Image.PresentFence)
-				return;
-			const VkFence Fence = static_cast<VkFence>(Image.PresentFence);
-			const VkResult Result = VULKAN_HPP_DEFAULT_DISPATCHER.vkWaitForFences(
-				static_cast<VkDevice>(m_Device), 1, &Fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
-			if (Result != VK_SUCCESS)
-				throw std::runtime_error("Vulkan presentation-fence wait failed: " +
-					vk::to_string(static_cast<vk::Result>(Result)));
-			Image.PresentPending = false;
-		}
-
-		void WaitForPresentationRetirement(std::vector<SwapchainImage>& Images, std::string_view Label)
-		{
-			if (Images.empty())
-				return;
-			if (m_PresentFenceMaintenanceEnabled)
-			{
-				for (SwapchainImage& Image : Images)
-					WaitForPresentation(Image);
-				return;
-			}
-
-			if (!m_LoggedLegacyPresentRetirement)
-			{
-				PF_CORE_WARN(
-					"Retiring Vulkan {} without swapchain-maintenance fences. The present queue-idle fallback does not provide an explicit presentation-engine completion guarantee",
-					Label);
-				m_LoggedLegacyPresentRetirement = true;
-			}
-			m_PresentQueue.waitIdle();
-		}
-
-		void PreparePresentationFenceForReuse(SwapchainImage& Image)
-		{
-			if (!m_PresentFenceMaintenanceEnabled || !Image.PresentFence)
-				return;
-			WaitForPresentation(Image);
-			if (!Image.PresentFenceUsed)
-				return;
-			const VkFence Fence = static_cast<VkFence>(Image.PresentFence);
-			const VkResult Result = VULKAN_HPP_DEFAULT_DISPATCHER.vkResetFences(
-				static_cast<VkDevice>(m_Device), 1, &Fence);
-			if (Result != VK_SUCCESS)
-				throw std::runtime_error("Could not reset a completed Vulkan presentation fence: " +
-					vk::to_string(static_cast<vk::Result>(Result)));
-		}
-
 		std::optional<vk::Extent2D> ChooseSwapchainExtent(const vk::SurfaceCapabilitiesKHR& Capabilities) const
 		{
 			const auto [Width, Height] = m_Window.GetFramebufferSize();
@@ -2831,41 +2761,11 @@ namespace PulseForge
 			return vk::Extent2D(Extent.Width, Extent.Height);
 		}
 
-		void ReleaseSwapchainImages()
-		{
-			ReleaseSwapchainImages(m_SwapchainImages);
-		}
-
-		void ReleaseSwapchainImages(std::vector<SwapchainImage>& Images)
-		{
-			for (SwapchainImage& Image : Images)
-			{
-				if (Image.PresentFence)
-					m_Device.destroyFence(Image.PresentFence);
-				Image.PresentFence = vk::Fence();
-				if (Image.PresentReady)
-					m_Device.destroySemaphore(Image.PresentReady);
-				Image.PresentReady = vk::Semaphore();
-			}
-			Images.clear();
-			if (m_ActiveNvrhiDevice)
-				m_ActiveNvrhiDevice->runGarbageCollection();
-		}
-
-		void ReleaseRetiredSwapchainGenerations(std::vector<RetiredSwapchainGeneration>& Generations)
-		{
-			for (RetiredSwapchainGeneration& Generation : Generations)
-			{
-				ReleaseSwapchainImages(Generation.Images);
-				if (Generation.Swapchain)
-					m_Device.destroySwapchainKHR(Generation.Swapchain);
-			}
-			Generations.clear();
-		}
+		void ReleaseSwapchainImages() { m_PresentationResources.ReleaseImages(m_SwapchainImages); }
 
 		void RetireMainSwapchainsAfterReacquire()
 		{
-			ReleaseRetiredSwapchainGenerations(m_RetiredSwapchainGenerations);
+			m_PresentationResources.ReleaseGenerations(m_RetiredSwapchainGenerations);
 			m_FirstPresentationPending = false;
 			m_FirstPresentationCompleted = true;
 			m_DeferredRetirementLimitLogged = false;
@@ -2900,8 +2800,7 @@ namespace PulseForge
 
 			for (const FrameContext& Frame : m_Frames)
 				WaitForFrame(Frame);
-			if (m_PresentFenceMaintenanceEnabled)
-				WaitForPresentationRetirement(m_SwapchainImages, "main swapchain");
+			if (m_PresentFenceMaintenanceEnabled) m_PresentationResources.WaitForRetirement(m_SwapchainImages, "main swapchain");
 			else if (m_Swapchain)
 			{
 				try
@@ -3021,7 +2920,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
-				ReleaseSwapchainImages(NewImages);
+				m_PresentationResources.ReleaseImages(NewImages);
 				if (NewSwapchain)
 					m_Device.destroySwapchainKHR(NewSwapchain);
 				m_SwapchainRecreationNeeded = true;
@@ -3186,31 +3085,11 @@ namespace PulseForge
 			ReleasePlatformSwapchainImages(Host.Images);
 		}
 
-		void ReleasePlatformSwapchainImages(std::vector<SwapchainImage>& Images)
-		{
-			for (SwapchainImage& Image : Images)
-			{
-				if (Image.PresentFence)
-					m_Device.destroyFence(Image.PresentFence);
-				Image.PresentFence = vk::Fence();
-				if (Image.PresentReady)
-					m_Device.destroySemaphore(Image.PresentReady);
-				Image.PresentReady = vk::Semaphore();
-			}
-			Images.clear();
-			if (m_ActiveNvrhiDevice)
-				m_ActiveNvrhiDevice->runGarbageCollection();
-		}
+		void ReleasePlatformSwapchainImages(std::vector<SwapchainImage>& Images) { m_PresentationResources.ReleaseImages(Images); }
 
 		void ReleasePlatformRetiredGenerations(PlatformPresentationHost& Host)
 		{
-			for (RetiredSwapchainGeneration& Generation : Host.RetiredGenerations)
-			{
-				ReleasePlatformSwapchainImages(Generation.Images);
-				if (Generation.Swapchain)
-					m_Device.destroySwapchainKHR(Generation.Swapchain);
-			}
-			Host.RetiredGenerations.clear();
+			m_PresentationResources.ReleaseGenerations(Host.RetiredGenerations);
 			Host.FirstPresentationPending = false;
 			Host.FirstPresentationCompleted = true;
 			Host.DeferredRetirementLimitLogged = false;
@@ -3296,7 +3175,7 @@ namespace PulseForge
 				for (const FrameContext& Frame : Host.Frames)
 					WaitForFrame(Frame);
 				if (m_PresentFenceMaintenanceEnabled)
-					WaitForPresentationRetirement(Host.Images, "resized native-window swapchain");
+					m_PresentationResources.WaitForRetirement(Host.Images, "resized native-window swapchain");
 				else if (Host.Swapchain)
 					Host.RetiredGenerations.reserve(Host.RetiredGenerations.size() + 1);
 				const auto Capabilities = m_PhysicalDevice.getSurfaceCapabilitiesKHR(Host.Surface);
@@ -3370,9 +3249,9 @@ namespace PulseForge
 						if (!m_ActiveNvrhiDevice->waitForIdle())
 							throw std::runtime_error("NVRHI could not confirm graphics queue completion");
 					m_Device.waitIdle();
-					WaitForPresentationRetirement(m_SwapchainImages, "main swapchain during shutdown");
+					m_PresentationResources.WaitForRetirement(m_SwapchainImages, "main swapchain during shutdown");
 					for (RetiredSwapchainGeneration& Generation : m_RetiredSwapchainGenerations)
-						WaitForPresentationRetirement(Generation.Images, "retired main swapchain during shutdown");
+						m_PresentationResources.WaitForRetirement(Generation.Images, "retired main swapchain during shutdown");
 					DeviceIdle = true;
 				}
 				catch (const std::exception& Exception)
@@ -3395,7 +3274,7 @@ namespace PulseForge
 			if (m_Device)
 			{
 				ReleaseSwapchainImages();
-				ReleaseRetiredSwapchainGenerations(m_RetiredSwapchainGenerations);
+				m_PresentationResources.ReleaseGenerations(m_RetiredSwapchainGenerations);
 				for (FrameContext& Frame : m_Frames)
 					Frame.CommandList = nullptr;
 				m_ValidationDevice = nullptr;
@@ -3415,6 +3294,7 @@ namespace PulseForge
 				m_Device.destroy();
 				m_Device = vk::Device();
 			}
+			m_PresentationResources.Reset();
 
 			if (m_Instance && m_Surface)
 				m_Instance.destroySurfaceKHR(m_Surface);
@@ -3452,6 +3332,7 @@ namespace PulseForge
 		nvrhi::vulkan::DeviceHandle m_VulkanDevice;
 		nvrhi::DeviceHandle m_ValidationDevice;
 		nvrhi::IDevice* m_ActiveNvrhiDevice = nullptr;
+		VulkanPresentationResources m_PresentationResources;
 		std::vector<const char*> m_EnabledInstanceExtensions;
 		std::vector<const char*> m_EnabledLayers;
 		std::array<FrameContext, FramesInFlight> m_Frames;
@@ -3471,7 +3352,6 @@ namespace PulseForge
 		std::string m_SurfaceMaintenanceExtension;
 		bool m_PresentFenceMaintenanceEnabled = false;
 		bool m_ForceLegacyRetirementForTesting = false;
-		bool m_LoggedLegacyPresentRetirement = false;
 		bool m_FirstPresentationPending = false;
 		bool m_FirstPresentationCompleted = false;
 		bool m_RetirePreviousGenerationsAfterSubmit = false;
