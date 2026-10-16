@@ -196,6 +196,7 @@ add_library(PulseForgeSceneRenderer STATIC
 	PulseForge/Source/Private/Renderer/SceneRendererLocalLightingState.cpp
 	PulseForge/Source/Private/Renderer/SceneRendererMaterialBindingCache.cpp
 	PulseForge/Source/Private/Renderer/SceneRendererPipelineCache.cpp
+	PulseForge/Source/Private/Renderer/SceneRendererShadowPass.cpp
 	PulseForge/Source/Private/Renderer/SceneRendererShadowTargetCache.cpp
 	PulseForge/Source/Private/Renderer/SceneRenderer.cpp
 	PulseForge/Source/Private/Renderer/SceneRendererToneMappingStage.cpp

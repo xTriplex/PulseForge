@@ -124,8 +124,7 @@ namespace
 				if (m_ValidateTransparency)
 					InitializeTransparencyScenario();
 				if (m_ValidatePointShadowImages)
-					m_PointShadowImageValidation.Initialize(
-						m_Scene, *m_SceneRenderer, m_PointShadowImageDirectory);
+					m_PointShadowImageValidation.Initialize(m_Scene, *m_SceneRenderer, m_PointShadowImageDirectory);
 				PF_INFO("RGBA16F GPU validation resources initialized");
 			}
 			catch (const std::exception& Exception)
@@ -1199,22 +1198,6 @@ namespace
 			return true;
 		}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 		void RenderPbrMaterialFrame()
 		{
 			if (!m_Succeeded || !m_ScenePrepared || m_PbrMaterialCaptureComplete)
@@ -1628,8 +1611,6 @@ namespace
 			}
 			return true;
 		}
-
-
 
 		void UpdatePointShadowScenario()
 		{

@@ -4,6 +4,8 @@
 #include "Renderer/SceneRendererLocalLightingState.h"
 #include "Renderer/SceneRendererPipelineCache.h"
 #include "Renderer/SceneRendererShadowTargetCache.h"
+#include "Renderer/SceneRendererShadowPass.h"
+#include "Renderer/RenderTargetFrameScope.h"
 #include "Renderer/SceneRendererToneMappingStage.h"
 #include "Renderer/SceneRendererMaterialBindingCache.h"
 
@@ -121,45 +123,6 @@ namespace PulseForge
 			return Runtime.CreateTexture(Description, Faces);
 		}
 
-		class RenderTargetFrameScope final
-		{
-		public:
-			explicit RenderTargetFrameScope(RenderDevice& Runtime) : m_Runtime(Runtime) {}
-
-			RenderTargetFrameScope(const RenderTargetFrameScope&) = delete;
-			RenderTargetFrameScope& operator=(const RenderTargetFrameScope&) = delete;
-
-			~RenderTargetFrameScope() noexcept
-			{
-				if (!m_Active)
-					return;
-
-				try
-				{
-					const GraphicsResult EndResult = m_Runtime.EndRenderTarget();
-					if (!EndResult)
-						PF_CORE_ERROR("Could not close render target during scene-renderer unwinding: {0}", EndResult.error().Message);
-				}
-				catch (const std::exception& Exception)
-				{
-					PF_CORE_ERROR("Exception while closing render target during scene-renderer unwinding: {0}", Exception.what());
-				}
-				catch (...)
-				{
-					PF_CORE_ERROR("Unknown exception while closing render target during scene-renderer unwinding");
-				}
-			}
-
-			GraphicsResult End()
-			{
-				m_Active = false;
-				return m_Runtime.EndRenderTarget();
-			}
-
-		private:
-			RenderDevice& m_Runtime;
-			bool m_Active = true;
-		};
 	} // namespace
 
 	struct SceneRenderer::ProjectAssetCaches final
@@ -182,10 +145,9 @@ namespace PulseForge
 		: m_Runtime(Runtime), m_Project(SourceProject), m_ProjectAssetCaches(std::make_unique<ProjectAssetCaches>(Runtime, SourceProject)),
 		  m_PipelineCache(std::make_unique<SceneRendererPipelineCache>(Runtime)),
 		  m_ToneMappingStage(std::make_unique<ToneMappingStage>(Runtime)), m_HdrTargetCache(std::make_unique<HdrTargetCache>(Runtime)),
-		  m_ShadowTargetCache(std::make_unique<ShadowTargetCache>(Runtime)),
-		  m_LocalLightingState(std::make_unique<LocalLightingState>()),
+		  m_ShadowTargetCache(std::make_unique<ShadowTargetCache>(Runtime)), m_LocalLightingState(std::make_unique<LocalLightingState>()),
 		  m_AmbientOcclusionPass(std::make_unique<AmbientOcclusionPass>(Runtime)),
-		  m_MaterialBindingCache(std::make_unique<SceneRendererMaterialBindingCache>(Runtime))
+		  m_MaterialBindingCache(std::make_unique<SceneRendererMaterialBindingCache>(Runtime)), m_ShadowPass(std::make_unique<ShadowPass>())
 	{
 	}
 
@@ -530,15 +492,9 @@ namespace PulseForge
 				std::move(*AoPs), std::move(*AoBlurVs), std::move(*AoBlurPs));
 			!Initialized)
 			return std::unexpected(std::move(Initialized.error()));
-		const SceneRendererMaterialBindingCache::Resources MaterialBindingResources{
-			m_ProjectAssetCaches->Materials,
-			m_ProjectAssetCaches->Textures,
-			m_BindingLayout,
-			*m_AmbientOcclusionPass->GetFallbackOcclusionTexture(),
-			m_ObjectConstantsBuffer,
-			m_FrameConstantsBuffer,
-			m_LocalLightingConstantsBuffer
-		};
+		const SceneRendererMaterialBindingCache::Resources MaterialBindingResources{ m_ProjectAssetCaches->Materials,
+			m_ProjectAssetCaches->Textures, m_BindingLayout, *m_AmbientOcclusionPass->GetFallbackOcclusionTexture(),
+			m_ObjectConstantsBuffer, m_FrameConstantsBuffer, m_LocalLightingConstantsBuffer };
 		if (auto Initialized = m_MaterialBindingCache->Initialize(MaterialBindingResources); !Initialized)
 			return std::unexpected(std::move(Initialized.error()));
 		SceneRendererPipelineCache::Resources PipelineResources;
@@ -677,8 +633,9 @@ namespace PulseForge
 				EnvironmentTextures = &LoadedEnvironment->value().get();
 				m_PreparedEnvironmentReady = true;
 			}
-			if (auto Bindings = m_MaterialBindingCache->EnsureEnvironmentBindings(
-					*EnvironmentAsset, *EnvironmentTextures, m_PreparedEnvironmentReady); !Bindings)
+			if (auto Bindings =
+					m_MaterialBindingCache->EnsureEnvironmentBindings(*EnvironmentAsset, *EnvironmentTextures, m_PreparedEnvironmentReady);
+				!Bindings)
 				return std::unexpected(std::move(Bindings.error()));
 		}
 
@@ -717,8 +674,9 @@ namespace PulseForge
 					"Visible mesh entity has no material asset assigned"
 				});
 			}
-			if (auto Bindings = m_MaterialBindingCache->EnsureMaterialBindings(
-					*Instance.MaterialAsset, BindingEnvironmentAsset, *EnvironmentTextures); !Bindings)
+			if (auto Bindings =
+					m_MaterialBindingCache->EnsureMaterialBindings(*Instance.MaterialAsset, BindingEnvironmentAsset, *EnvironmentTextures);
+				!Bindings)
 			{
 				Bindings.error().Entity = Instance.Entity;
 				return std::unexpected(std::move(Bindings.error()));
@@ -762,212 +720,24 @@ namespace PulseForge
 		return m_MaterialBindingCache->ResolveMaterialBinding(Instance, BindingEnvironmentAsset);
 	}
 
-	std::expected<const MaterialAssetDesc*, SceneRendererError> SceneRenderer::ResolveMaterialDescription(
-		const SceneMeshInstance& Instance)
+	std::expected<const MaterialAssetDesc*, SceneRendererError> SceneRenderer::ResolveMaterialDescription(const SceneMeshInstance& Instance)
 	{
 		return m_MaterialBindingCache->ResolveMaterialDescription(Instance);
 	}
 
-	std::expected<void, SceneRendererError> SceneRenderer::PrepareLocalLighting()
-	{
-		auto Plan = m_LocalLightingState->BuildPlan(m_PreparedSnapshot ? &*m_PreparedSnapshot : nullptr);
-		if (!Plan)
-			return std::unexpected(std::move(Plan.error()));
-
-		if (Plan->RequiresSpotlightResources)
-		{
-			if (auto Resources = m_ShadowTargetCache->EnsureSpotlightMaps(m_SpotShadowBindingLayout, *m_ShadowSampler); !Resources)
-				return std::unexpected(std::move(Resources.error()));
-			if (auto Pipeline = m_PipelineCache->EnsureShadowPipeline(1.0f); !Pipeline)
-				return std::unexpected(std::move(Pipeline.error()));
-		}
-		if (Plan->RequiresPointShadowResources)
-		{
-			if (auto Resources = m_ShadowTargetCache->EnsurePointLightCubemaps(m_PointShadowBindingLayout, *m_ShadowSampler); !Resources)
-				return std::unexpected(std::move(Resources.error()));
-			if (auto Pipeline = m_PipelineCache->EnsurePointShadowPipeline(false); !Pipeline)
-				return std::unexpected(std::move(Pipeline.error()));
-			if (auto Pipeline = m_PipelineCache->EnsurePointShadowPipeline(true); !Pipeline)
-				return std::unexpected(std::move(Pipeline.error()));
-		}
-
-		return m_LocalLightingState->Commit();
-	}
-
-	std::expected<void, SceneRendererError> SceneRenderer::RenderSpotlightShadows()
-	{
-		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty() || !m_ShadowTargetCache->HasSpotlightMaps())
-			return RenderPointLightShadows();
-		for (size_t Slot = 0; Slot < m_LocalLightingState->SpotlightSlotOwners().size(); ++Slot)
-		{
-			if (!m_LocalLightingState->SpotlightSlotOwners()[Slot])
-				continue;
-			const GraphicsResult Begin = m_Runtime.BeginRenderTarget(*m_ShadowTargetCache->SpotlightTarget(Slot));
-			if (!Begin)
-				return std::unexpected(MakeDrawError("Could not begin spotlight shadow target: " + Begin.error().Message));
-			RenderTargetFrameScope TargetScope(m_Runtime);
-			for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
-			{
-				auto Material = m_MaterialBindingCache->ResolveMaterialDescription(Instance);
-				if (!Material)
-					return std::unexpected(std::move(Material.error()));
-				if ((*Material)->AlphaMode == MaterialAlphaMode::Blend)
-					continue;
-				auto MaterialBinding = ResolveMaterialBinding(Instance);
-				if (!MaterialBinding) return std::unexpected(std::move(MaterialBinding.error()));
-				if (auto PipelineResult = m_PipelineCache->EnsureShadowPipeline(1.0f, (*Material)->DoubleSided); !PipelineResult)
-					return std::unexpected(std::move(PipelineResult.error()));
-				const GraphicsPipeline* Pipeline = m_PipelineCache->FindShadowPipeline(1, (*Material)->DoubleSided);
-				if (!Pipeline) return std::unexpected(MakeResourceError("Spotlight alpha-tested shadow pipeline was not prepared"));
-				auto Mesh = m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
-				if (!Mesh)
-					return std::unexpected(MakeDrawError("Spotlight shadow caster mesh became unavailable: " + Mesh.error().Message));
-				const glm::mat4 ShadowTransform = m_LocalLightingState->SpotlightMatrices()[Slot] * Instance.WorldTransform;
-				const auto Update = m_Runtime.WriteBuffer(
-					*m_ShadowObjectConstantsBuffer, 0, std::as_bytes(std::span(&ShadowTransform, 1)));
-				if (!Update)
-					return std::unexpected(MakeDrawError("Could not update spotlight shadow object constants: " + Update.error().Message));
-				const std::array<const BindingSet*, 2> Bindings = {
-					*MaterialBinding, m_ShadowObjectBindingSet.get() };
-				const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
-				const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
-				if (!Draw) return std::unexpected(MakeDrawError("Could not draw spotlight shadow caster: " + Draw.error().Message));
-				++m_LastSpotShadowCasterDrawCount;
-			}
-			const GraphicsResult End = TargetScope.End();
-			if (!End)
-				return std::unexpected(MakeDrawError("Could not end spotlight shadow target: " + End.error().Message));
-			++m_LastSpotShadowPassCount;
-		}
-		return RenderPointLightShadows();
-	}
-
-	std::expected<void, SceneRendererError> SceneRenderer::RenderPointLightShadows()
-	{
-		const auto SelectedLights = m_LocalLightingState->SelectedLights();
-		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty() || !m_ShadowTargetCache->HasPointLightCubemaps()) return {};
-		if (!m_PipelineCache->FindPointShadowPipeline(false) && !m_PipelineCache->FindPointShadowPipeline(true))
-			return std::unexpected(MakeResourceError("Point-shadow pipeline was not prepared for active shadow owners"));
-
-		for (size_t Slot = 0; Slot < m_LocalLightingState->PointSlotOwners().size(); ++Slot)
-		{
-			if (!m_LocalLightingState->PointSlotOwners()[Slot])
-				continue;
-			const auto Selected = std::find_if(SelectedLights.begin(), SelectedLights.end(),
-				[&](const LocalLightingState::SelectedLight& Light)
-				{
-					return Light.Point && MatchesLocalLightIdentity(
-						Light.Relevance, *m_LocalLightingState->PointSlotOwners()[Slot], PointLocalLightTypeOrder);
-				});
-			if (Selected == SelectedLights.end() || !Selected->Point)
-				return std::unexpected(MakeDrawError("Point-shadow rendering found a stale slot owner"));
-
-			for (size_t Face = 0; Face < 6; ++Face)
-			{
-				const RenderTarget& Target = m_ShadowTargetCache->PointLightCubemap(Slot)->GetFaceTarget(static_cast<uint32_t>(Face));
-				RenderTargetClearValue ClearValue;
-				ClearValue.Depth = 1.0f;
-				const GraphicsResult Begin = m_Runtime.BeginRenderTarget(Target, ClearValue);
-				if (!Begin)
-					return std::unexpected(MakeDrawError("Could not begin point-shadow cubemap face: " + Begin.error().Message));
-				RenderTargetFrameScope TargetScope(m_Runtime);
-				for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
-				{
-					auto Material = ResolveMaterialDescription(Instance);
-					if (!Material)
-						return std::unexpected(std::move(Material.error()));
-					if ((*Material)->AlphaMode == MaterialAlphaMode::Blend)
-						continue;
-					auto MaterialBinding = ResolveMaterialBinding(Instance);
-					if (!MaterialBinding)
-						return std::unexpected(std::move(MaterialBinding.error()));
-					const size_t PipelineIndex = (*Material)->DoubleSided ? 1u : 0u;
-					const GraphicsPipeline* Pipeline = m_PipelineCache->FindPointShadowPipeline(PipelineIndex == 1);
-					if (!Pipeline) return std::unexpected(MakeResourceError("Point-shadow alpha-tested pipeline was not prepared"));
-					auto Mesh = m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
-					if (!Mesh)
-						return std::unexpected(MakeDrawError("Point-shadow caster mesh became unavailable: " + Mesh.error().Message));
-					const PointShadowObjectConstants Object{
-						m_LocalLightingState->PointMatrices()[Slot][Face],
-						glm::vec4(Selected->Point->WorldPosition, Selected->Point->Range),
-						Instance.WorldTransform };
-					const auto Update = m_Runtime.WriteBuffer(
-						*m_PointShadowObjectConstantsBuffer, 0, std::as_bytes(std::span(&Object, 1)));
-					if (!Update)
-						return std::unexpected(MakeDrawError("Could not update point-shadow constants: " + Update.error().Message));
-					const std::array<const BindingSet*, 2> Bindings = {
-						*MaterialBinding, m_PointShadowObjectBindingSet.get() };
-					const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
-					const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
-					if (!Draw) return std::unexpected(MakeDrawError("Could not draw point-shadow caster: " + Draw.error().Message));
-					++m_LastPointShadowCasterDrawCount;
-				}
-				const GraphicsResult End = TargetScope.End();
-				if (!End)
-					return std::unexpected(MakeDrawError("Could not end point-shadow cubemap face: " + End.error().Message));
-				++m_LastPointShadowPassCount;
-			}
-		}
-		return {};
-	}
-
 	std::expected<void, SceneRendererError> SceneRenderer::RenderShadowCascades()
 	{
-		m_LastSpotShadowPassCount = 0;
-		m_LastSpotShadowCasterDrawCount = 0;
-		m_LastPointShadowPassCount = 0;
-		m_LastPointShadowCasterDrawCount = 0;
-		if (auto LocalLighting = PrepareLocalLighting(); !LocalLighting)
-			return std::unexpected(std::move(LocalLighting.error()));
-		if (!m_PreparedSnapshot || !m_PreparedSnapshot->DirectionalLight ||
-			!m_PreparedSnapshot->DirectionalLight->CastShadows || m_PreparedSnapshot->Meshes.empty())
-			return RenderSpotlightShadows();
-		if (!m_PreparedCascades)
-			return std::unexpected(MakeDrawError("Prepared directional shadow cascades are unavailable"));
-		const int32_t RasterBias = static_cast<int32_t>(std::lround(m_PreparedSnapshot->DirectionalLight->ShadowBias));
-
-		for (size_t CascadeIndex = 0; CascadeIndex < m_PreparedCascades->Cascades.size(); ++CascadeIndex)
-		{
-			const GraphicsResult Begin = m_Runtime.BeginRenderTarget(m_ShadowTargetCache->DirectionalTarget(CascadeIndex));
-			if (!Begin)
-				return std::unexpected(MakeDrawError("Could not begin shadow cascade: " + Begin.error().Message));
-			RenderTargetFrameScope TargetScope(m_Runtime);
-			for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
-			{
-				auto Material = ResolveMaterialDescription(Instance);
-				if (!Material)
-					return std::unexpected(std::move(Material.error()));
-				if ((*Material)->AlphaMode == MaterialAlphaMode::Blend)
-					continue;
-				auto MaterialBinding = ResolveMaterialBinding(Instance);
-				if (!MaterialBinding) return std::unexpected(std::move(MaterialBinding.error()));
-				if (auto PipelineResult =
-						m_PipelineCache->EnsureShadowPipeline(m_PreparedSnapshot->DirectionalLight->ShadowBias, (*Material)->DoubleSided);
-					!PipelineResult)
-					return std::unexpected(std::move(PipelineResult.error()));
-				const GraphicsPipeline* Pipeline = m_PipelineCache->FindShadowPipeline(RasterBias, (*Material)->DoubleSided);
-				if (!Pipeline) return std::unexpected(MakeResourceError("Directional alpha-tested shadow pipeline was not prepared"));
-				auto Mesh = m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
-				if (!Mesh)
-					return std::unexpected(MakeDrawError("Shadow pass mesh became unavailable: " + Mesh.error().Message));
-				const glm::mat4 ShadowTransform = m_PreparedCascades->Cascades[CascadeIndex].ViewProjection * Instance.WorldTransform;
-				const auto Update = m_Runtime.WriteBuffer(
-					*m_ShadowObjectConstantsBuffer, 0, std::as_bytes(std::span(&ShadowTransform, 1)));
-				if (!Update)
-					return std::unexpected(MakeDrawError("Could not update shadow object constants: " + Update.error().Message));
-				const std::array<const BindingSet*, 2> Bindings = {
-					*MaterialBinding, m_ShadowObjectBindingSet.get() };
-				const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
-				const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
-				if (!Draw) return std::unexpected(MakeDrawError("Could not draw shadow caster: " + Draw.error().Message));
-			}
-			const GraphicsResult End = TargetScope.End();
-			if (!End)
-				return std::unexpected(MakeDrawError("Could not end shadow cascade: " + End.error().Message));
-		}
-		return RenderSpotlightShadows();
+		const std::optional<AssetID> EnvironmentAsset =
+			m_PreparedEnvironmentReady && m_PreparedSnapshot && m_PreparedSnapshot->EnvironmentLight
+				? std::optional<AssetID>{ m_PreparedSnapshot->EnvironmentLight->HdrImage }
+				: std::nullopt;
+		const ShadowPass::Resources Resources{ m_Runtime, m_PreparedSnapshot ? &*m_PreparedSnapshot : nullptr,
+			m_PreparedCascades ? &*m_PreparedCascades : nullptr, EnvironmentAsset, *m_LocalLightingState, *m_ShadowTargetCache,
+			*m_PipelineCache, *m_MaterialBindingCache, m_ProjectAssetCaches->Meshes, m_SpotShadowBindingLayout, m_PointShadowBindingLayout,
+			*m_ShadowSampler, m_ShadowObjectConstantsBuffer, m_ShadowObjectBindingSet, m_PointShadowObjectConstantsBuffer,
+			m_PointShadowObjectBindingSet };
+		return m_ShadowPass->Render(Resources);
 	}
-
 	std::expected<void, SceneRendererError> SceneRenderer::RenderAmbientOcclusion(uint32_t Width, uint32_t Height)
 	{
 		if (!m_PreparedSnapshot)
@@ -1024,10 +794,12 @@ namespace PulseForge
 
 		const Texture* Color = Target->Target->GetColorTexture();
 		if (!Color) return std::unexpected(MakeResourceError("HDR scene target color texture is unavailable after rendering"));
-		return HdrSceneRenderResult{ Color, Target->Target->GetDepthTexture(), Width, Height, *Rendered, m_LastSpotShadowPassCount,
-			m_LastSpotShadowCasterDrawCount, m_PreparedSnapshot->EnvironmentLight.has_value(), Target->Generation,
-			m_ShadowTargetCache->SpotlightResourceGeneration(), m_LastPointShadowPassCount, m_LastPointShadowCasterDrawCount,
-			m_ShadowTargetCache->PointLightResourceGeneration(), m_LocalLightingState->PointSlotOwners() };
+		const ShadowPass::Statistics& ShadowStatistics = m_ShadowPass->GetStatistics();
+		return HdrSceneRenderResult{ Color, Target->Target->GetDepthTexture(), Width, Height, *Rendered,
+			ShadowStatistics.SpotlightPassCount, ShadowStatistics.SpotlightCasterDrawCount,
+			m_PreparedSnapshot->EnvironmentLight.has_value(), Target->Generation, m_ShadowTargetCache->SpotlightResourceGeneration(),
+			ShadowStatistics.PointPassCount, ShadowStatistics.PointCasterDrawCount, m_ShadowTargetCache->PointLightResourceGeneration(),
+			m_LocalLightingState->PointSlotOwners() };
 	}
 
 	std::expected<SceneRenderOutputResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToOutput()
@@ -1042,20 +814,10 @@ namespace PulseForge
 				*Hdr->ColorTexture, Hdr->TargetGeneration, ColorTargetFormat::Swapchain, true, *m_BackgroundTriangleBuffer);
 			!Tonemapped)
 			return std::unexpected(std::move(Tonemapped.error()));
-		return SceneRenderOutputResult{
-			Hdr->GeometryDrawCount,
-			Hdr->TargetGeneration,
-			ColorTargetFormat::Swapchain,
-			ShouldShaderEncodeSrgb(ColorTargetFormat::Swapchain, m_Runtime.GetOutputColorEncoding()),
-			Hdr->SpotlightShadowPassCount,
-			Hdr->SpotlightShadowCasterDrawCount,
-			Hdr->SpotlightShadowResourceGeneration,
-			m_LocalLightingState->SpotlightSlotOwners(),
-			Hdr->PointShadowPassCount,
-			Hdr->PointShadowCasterDrawCount,
-			Hdr->PointShadowResourceGeneration,
-			Hdr->PointShadowSlotOwners
-		};
+		return SceneRenderOutputResult{ Hdr->GeometryDrawCount, Hdr->TargetGeneration, ColorTargetFormat::Swapchain,
+			ShouldShaderEncodeSrgb(ColorTargetFormat::Swapchain, m_Runtime.GetOutputColorEncoding()), Hdr->SpotlightShadowPassCount,
+			Hdr->SpotlightShadowCasterDrawCount, Hdr->SpotlightShadowResourceGeneration, m_LocalLightingState->SpotlightSlotOwners(),
+			Hdr->PointShadowPassCount, Hdr->PointShadowCasterDrawCount, Hdr->PointShadowResourceGeneration, Hdr->PointShadowSlotOwners };
 	}
 
 	std::expected<SceneRenderOutputResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToOutput(const RenderTarget& Target)
@@ -1091,20 +853,10 @@ namespace PulseForge
 		}
 		if (!End)
 			return std::unexpected(MakeDrawError("Could not end tone-mapped output target: " + End.error().Message));
-		return SceneRenderOutputResult{
-			Hdr->GeometryDrawCount,
-			Hdr->TargetGeneration,
-			Description.ColorFormat,
-			ShouldShaderEncodeSrgb(Description.ColorFormat, m_Runtime.GetOutputColorEncoding()),
-			Hdr->SpotlightShadowPassCount,
-			Hdr->SpotlightShadowCasterDrawCount,
-			Hdr->SpotlightShadowResourceGeneration,
-			m_LocalLightingState->SpotlightSlotOwners(),
-			Hdr->PointShadowPassCount,
-			Hdr->PointShadowCasterDrawCount,
-			Hdr->PointShadowResourceGeneration,
-			Hdr->PointShadowSlotOwners
-		};
+		return SceneRenderOutputResult{ Hdr->GeometryDrawCount, Hdr->TargetGeneration, Description.ColorFormat,
+			ShouldShaderEncodeSrgb(Description.ColorFormat, m_Runtime.GetOutputColorEncoding()), Hdr->SpotlightShadowPassCount,
+			Hdr->SpotlightShadowCasterDrawCount, Hdr->SpotlightShadowResourceGeneration, m_LocalLightingState->SpotlightSlotOwners(),
+			Hdr->PointShadowPassCount, Hdr->PointShadowCasterDrawCount, Hdr->PointShadowResourceGeneration, Hdr->PointShadowSlotOwners };
 	}
 
 	bool SceneRenderer::SetToneMappingSettings(const ToneMappingSettings& Settings) noexcept
@@ -1232,8 +984,8 @@ namespace PulseForge
 		Frame.SpotShadowViewProjection = m_LocalLightingState->SpotlightMatrices();
 		Frame.SpotShadowParameters = m_LocalLightingState->SpotlightParameters();
 		Frame.PointShadowParameters = m_LocalLightingState->PointParameters();
-		const auto LocalLightingUpdate = m_Runtime.WriteBuffer(
-			*m_LocalLightingConstantsBuffer, 0, std::as_bytes(std::span(&m_LocalLightingState->Constants(), 1)));
+		const auto LocalLightingUpdate =
+			m_Runtime.WriteBuffer(*m_LocalLightingConstantsBuffer, 0, std::as_bytes(std::span(&m_LocalLightingState->Constants(), 1)));
 		if (!LocalLightingUpdate)
 			return std::unexpected(MakeDrawError("Could not update local-light constants: " + LocalLightingUpdate.error().Message));
 
@@ -1243,10 +995,9 @@ namespace PulseForge
 
 		if (m_PreparedSnapshot->EnvironmentLight)
 		{
-			const BindingSet* BackgroundBindings = m_MaterialBindingCache->FindEnvironmentBindings(
-				m_PreparedSnapshot->EnvironmentLight->HdrImage, m_PreparedEnvironmentReady);
-			if (!BackgroundBindings)
-				return std::unexpected(MakeDrawError("Prepared environment background bindings are unavailable"));
+			const BindingSet* BackgroundBindings =
+				m_MaterialBindingCache->FindEnvironmentBindings(m_PreparedSnapshot->EnvironmentLight->HdrImage, m_PreparedEnvironmentReady);
+			if (!BackgroundBindings) return std::unexpected(MakeDrawError("Prepared environment background bindings are unavailable"));
 			const std::array<const BindingSet*, 1> BindingSets = { BackgroundBindings };
 			const DrawArguments BackgroundArguments{ 3, 1, 0, 0 };
 			const GraphicsPipeline* BackgroundPipeline = m_PipelineCache->FindBackgroundPipeline(ColorFormat);
@@ -1309,9 +1060,8 @@ namespace PulseForge
 
 			const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
 			const BindingSet* AmbientOcclusionBindings = m_AmbientOcclusionPass->GetSceneBindingSet();
-			const std::array<const BindingSet*, 5> BindingSets = { *MaterialBinding,
-				&m_ShadowTargetCache->DirectionalBindings(), AmbientOcclusionBindings, &m_ShadowTargetCache->SpotlightBindings(),
-				&m_ShadowTargetCache->PointLightBindings() };
+			const std::array<const BindingSet*, 5> BindingSets = { *MaterialBinding, &m_ShadowTargetCache->DirectionalBindings(),
+				AmbientOcclusionBindings, &m_ShadowTargetCache->SpotlightBindings(), &m_ShadowTargetCache->PointLightBindings() };
 			const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, BindingSets);
 			if (!Draw)
 			{

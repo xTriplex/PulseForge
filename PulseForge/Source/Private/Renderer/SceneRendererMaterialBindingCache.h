@@ -28,19 +28,14 @@ namespace PulseForge
 		explicit SceneRendererMaterialBindingCache(RenderDevice& Runtime) noexcept;
 
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(const Resources& Resources);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureMaterialBindings(
-			const AssetID& MaterialAsset,
-			const std::optional<AssetID>& EnvironmentAsset,
-			const EnvironmentLightingTextures& EnvironmentTextures);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureMaterialBindings(const AssetID& MaterialAsset,
+			const std::optional<AssetID>& EnvironmentAsset, const EnvironmentLightingTextures& EnvironmentTextures);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureEnvironmentBindings(
-			const AssetID& EnvironmentAsset,
-			const EnvironmentLightingTextures& EnvironmentTextures,
-			bool IsReady);
+			const AssetID& EnvironmentAsset, const EnvironmentLightingTextures& EnvironmentTextures, bool IsReady);
 		[[nodiscard]] std::expected<const MaterialAssetDesc*, SceneRendererError> ResolveMaterialDescription(
 			const SceneMeshInstance& Instance);
 		[[nodiscard]] std::expected<const BindingSet*, SceneRendererError> ResolveMaterialBinding(
-			const SceneMeshInstance& Instance,
-			const std::optional<AssetID>& EnvironmentAsset) const;
+			const SceneMeshInstance& Instance, const std::optional<AssetID>& EnvironmentAsset) const;
 		[[nodiscard]] const BindingSet* FindEnvironmentBindings(const AssetID& EnvironmentAsset, bool IsReady) const;
 		void RefreshMaterialAssets() noexcept;
 
@@ -63,8 +58,7 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneRendererError> RequireInitialized() const;
 		[[nodiscard]] static SceneRendererError MakeResourceError(std::string Message);
 		[[nodiscard]] static std::string MakeMaterialBindingKey(
-			const AssetID& MaterialAsset,
-			const std::optional<AssetID>& EnvironmentAsset);
+			const AssetID& MaterialAsset, const std::optional<AssetID>& EnvironmentAsset);
 		[[nodiscard]] static std::string MakeEnvironmentBindingKey(const AssetID& EnvironmentAsset, bool IsReady);
 
 		RenderDevice& m_Runtime;

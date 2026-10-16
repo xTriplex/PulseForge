@@ -168,13 +168,11 @@ namespace PulseForge
 		class HdrTargetCache;
 		class ShadowTargetCache;
 		class LocalLightingState;
+		class ShadowPass;
 
 		SceneRenderer(RenderDevice& Runtime, const Project& SourceProject);
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
 			const std::filesystem::path& CompiledShaderDirectory);
-		[[nodiscard]] std::expected<void, SceneRendererError> PrepareLocalLighting();
-		[[nodiscard]] std::expected<void, SceneRendererError> RenderSpotlightShadows();
-		[[nodiscard]] std::expected<void, SceneRendererError> RenderPointLightShadows();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderShadowCascades();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderAmbientOcclusion(uint32_t Width, uint32_t Height);
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedSceneForFormat(
@@ -186,8 +184,7 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareSnapshot(
 			std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot);
 
-		[[nodiscard]] std::expected<const BindingSet*, SceneRendererError> ResolveMaterialBinding(
-			const SceneMeshInstance& Instance);
+		[[nodiscard]] std::expected<const BindingSet*, SceneRendererError> ResolveMaterialBinding(const SceneMeshInstance& Instance);
 
 		struct alignas(16) ObjectConstants
 		{
@@ -258,10 +255,7 @@ namespace PulseForge
 		bool m_EnvironmentLightingPending = false;
 		bool m_PreparedEnvironmentReady = false;
 		bool m_LoggedFirstSnapshotPreparation = false;
-		size_t m_LastSpotShadowPassCount = 0;
-		size_t m_LastSpotShadowCasterDrawCount = 0;
-		size_t m_LastPointShadowPassCount = 0;
-		size_t m_LastPointShadowCasterDrawCount = 0;
 		std::unique_ptr<SceneRendererMaterialBindingCache> m_MaterialBindingCache;
+		std::unique_ptr<ShadowPass> m_ShadowPass;
 	};
 }
