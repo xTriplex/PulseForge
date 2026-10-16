@@ -531,10 +531,9 @@ namespace
 #ifdef _DEBUG
 			if (m_DocumentHostTestFixture)
 			{
-				m_DocumentHostTestEditor = std::make_unique<PulseForgeEditor::Detail::EditorDocumentHostTestEditor>(m_Documents,
-					m_DocumentEditors, m_EditorStyle, [this](std::string Message) { SetError(std::move(Message)); },
-					[this]
-					{ return m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{}; });
+				m_DocumentHostTestEditor = std::make_unique<PulseForgeEditor::Detail::EditorDocumentHostTestEditor>(
+					m_Documents, m_DocumentEditors, m_EditorStyle, [this](std::string Message) { SetError(std::move(Message)); },
+					[this] { return m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{}; });
 				if (auto Result = m_DocumentHostTestEditor->Register(); !Result)
 					PF_ERROR("Could not register the debug document-host fixture editor: {}", Result.error());
 			}
@@ -2455,7 +2454,7 @@ namespace
 			{
 				const auto* Session = m_Documents.Find(Identity);
 				return Session && m_DocumentHostTestEditor &&
-					m_DocumentHostTestEditor->MatchesSavedModel(*Session, ExpectedState, ExpectedValue);
+					   m_DocumentHostTestEditor->MatchesSavedModel(*Session, ExpectedState, ExpectedValue);
 			};
 			const auto Activate = [this, &Fail](const auto& Identity, std::string_view Name)
 			{

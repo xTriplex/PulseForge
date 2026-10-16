@@ -16,6 +16,18 @@ LIZARD_VERSION = "1.24.1"
 CLANG_FORMAT_VERSION = "19.1.5"
 MAX_REPORTED_FUNCTIONS = 10
 HUNK_PATTERN = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
+FORMAT_ERROR_PATTERN = re.compile(r"\berror: code should be clang-formatted\b")
+
+
+def formatting_diagnostic_preview(output: str, line_limit: int = 4) -> str:
+	lines = output.splitlines()
+	preview = lines[:line_limit]
+	shown_errors = sum(FORMAT_ERROR_PATTERN.search(line) is not None for line in preview)
+	total_errors = sum(FORMAT_ERROR_PATTERN.search(line) is not None for line in lines)
+	additional_errors = total_errors - shown_errors
+	if additional_errors > 0:
+		preview.append(f"... {additional_errors} additional formatting violations")
+	return "\n".join(preview)
 
 
 def _is_tracked(root: Path, relative: str) -> bool:
@@ -103,10 +115,7 @@ def check_formatting(root: Path, paths: list[str], comparison_base: str, executa
 		result = subprocess.run(arguments, cwd=root, text=True,
 			encoding="utf-8", errors="replace", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
 		if result.returncode != 0:
-			output_lines = result.stdout.splitlines()
-			preview = "\n".join(output_lines[:4])
-			if len(output_lines) > 4:
-				preview += f"\n... {len(output_lines) - 4} additional formatter diagnostics"
+			preview = formatting_diagnostic_preview(result.stdout)
 			issues.append(f"{relative} is not formatted by clang-format {CLANG_FORMAT_VERSION}:\n{preview}")
 	return issues
 

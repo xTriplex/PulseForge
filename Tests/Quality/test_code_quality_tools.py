@@ -67,6 +67,21 @@ class CodeQualityToolTests(unittest.TestCase):
 		self.source.write_text(formatted.stdout, encoding="utf-8")
 		self.assertEqual(quality_tools.check_formatting(self.root, paths, self.base, executable), [])
 
+	def test_formatting_preview_counts_violations_not_output_lines(self):
+		output_lines = []
+		for line in range(1, 5):
+			output_lines.extend(
+				[
+					f"Sample.cpp:{line}:4: error: code should be clang-formatted [-Wclang-format-violations]",
+					"source line",
+					"caret line",
+				]
+			)
+		output = "\n".join(output_lines)
+		preview = quality_tools.formatting_diagnostic_preview(output)
+		self.assertIn("... 2 additional formatting violations", preview)
+		self.assertNotIn("additional formatter diagnostics", preview)
+
 
 if __name__ == "__main__":
 	unittest.main()
