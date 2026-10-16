@@ -283,6 +283,7 @@
     "PulseForge/Source/Private/Assets/AudioAssetCache.cpp" : "PulseForgeAudioAssets",
     "PulseForge/Source/Private/Renderer/MeshData.cpp" : "PulseForgeMeshData",
 	"PulseForge/Source/Private/Renderer/SceneRendererHdrTargetCache.cpp" : "PulseForgeSceneRenderer",
+	"PulseForge/Source/Private/Renderer/SceneRendererPipelineCache.cpp" : "PulseForgeSceneRenderer",
 	"PulseForge/Source/Private/Renderer/RenderDevice.cpp" : "PulseForgeRenderer",
 	"PulseForge/Source/Private/Renderer/SceneRendererShadowTargetCache.cpp" : "PulseForgeSceneRenderer",
     "PulseForgeEditor/Source/Private/EditorAssetDestinationDialog.cpp" : "PulseForgeEditorUI",

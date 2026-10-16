@@ -17,12 +17,10 @@
 #include <expected>
 #include <array>
 #include <filesystem>
-#include <map>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
-#include <tuple>
 #include <unordered_map>
 #include <utility>
 
@@ -31,6 +29,7 @@ namespace PulseForge
 	struct MaterialAssetDesc;
 	class Project;
 	class Scene;
+	class SceneRendererPipelineCache;
 
 	enum class SceneRendererErrorCode : uint8_t
 	{
@@ -176,12 +175,6 @@ namespace PulseForge
 			const AssetID& MaterialAsset,
 			const std::optional<AssetID>& EnvironmentAsset,
 			const EnvironmentLightingTextures& EnvironmentTextures);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePipeline(
-			ColorTargetFormat ColorFormat,
-			bool AlphaBlend = false,
-			bool DoubleSided = false);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBackgroundPipeline(ColorTargetFormat ColorFormat);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureShadowPipeline(float DepthBias, bool DoubleSided = false);
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareLocalLighting();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderSpotlightShadows();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderPointLightShadows();
@@ -265,17 +258,10 @@ namespace PulseForge
 		RenderDevice& m_Runtime;
 		const Project& m_Project;
 		std::unique_ptr<ProjectAssetCaches> m_ProjectAssetCaches;
+		std::unique_ptr<SceneRendererPipelineCache> m_PipelineCache;
 		std::unique_ptr<ToneMappingStage> m_ToneMappingStage;
 		std::unique_ptr<HdrTargetCache> m_HdrTargetCache;
 		std::unique_ptr<ShadowTargetCache> m_ShadowTargetCache;
-		ShaderHandle m_VertexShader;
-		ShaderHandle m_FragmentShader;
-		ShaderHandle m_BackgroundVertexShader;
-		ShaderHandle m_BackgroundFragmentShader;
-		ShaderHandle m_ShadowVertexShader;
-		ShaderHandle m_ShadowFragmentShader;
-		ShaderHandle m_PointShadowVertexShader;
-		ShaderHandle m_PointShadowFragmentShader;
 		SamplerHandle m_Sampler;
 		SamplerHandle m_EnvironmentSampler;
 		SamplerHandle m_ShadowSampler;
@@ -287,8 +273,6 @@ namespace PulseForge
 		BindingLayoutHandle m_PointShadowObjectBindingLayout;
 		BindingSetHandle m_ShadowObjectBindingSet;
 		BindingSetHandle m_PointShadowObjectBindingSet;
-		std::map<std::pair<int32_t, bool>, GraphicsPipelineHandle> m_ShadowPipelines;
-		std::array<GraphicsPipelineHandle, 2> m_PointShadowPipelines;
 		BufferHandle m_ObjectConstantsBuffer;
 		BufferHandle m_ShadowObjectConstantsBuffer;
 		BufferHandle m_PointShadowObjectConstantsBuffer;
@@ -304,9 +288,6 @@ namespace PulseForge
 		EnvironmentLightingTextures m_FallbackEnvironmentTextures;
 		std::unordered_map<std::string, MaterialBindingResources> m_MaterialBindings;
 		std::unordered_map<std::string, BindingSetHandle> m_EnvironmentBindingSets;
-		std::map<std::tuple<ColorTargetFormat, bool, bool>, GraphicsPipelineHandle> m_Pipelines;
-		std::unordered_map<ColorTargetFormat, GraphicsPipelineHandle> m_BackgroundPipelines;
-		std::optional<VertexLayoutDesc> m_PipelineVertexLayout;
 		std::optional<SceneRenderSnapshot> m_PreparedSnapshot;
 		std::vector<const SceneMeshInstance*> m_TransparentDrawOrder;
 		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
