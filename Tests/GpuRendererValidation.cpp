@@ -1,6 +1,7 @@
 #include "Core/Application.h"
 #include "GpuValidation/PointShadowImageAnalysis.h"
 #include "GpuValidation/PointShadowImageValidation.h"
+#include "GpuValidation/TransparencyImageAnalysis.h"
 #include "Core/Layer.h"
 #include "Core/Log.h"
 #include "GpuValidation/ActiveFrameUploadValidation.h"
@@ -1351,71 +1352,29 @@ namespace
 
 		bool ValidateTransparencyShadowDifference()
 		{
-			if (m_TransparencyShadowOffPixels.size() != m_TransparencyShadowOnPixels.size() ||
-				m_TransparencyShadowOffPixels.empty())
+			const auto Difference = PulseForge::GpuValidation::TransparencyImageAnalysis::CompareRgba8(
+				{ 960, 540, m_TransparencyShadowOffPixels }, { 960, 540, m_TransparencyShadowOnPixels },
+				PulseForge::GpuValidation::TransparencyImageAnalysis::Region{ 185, 95, 350, 282 }, true);
+			if (!Difference)
 			{
-				Fail("Transparency shadow comparison images have inconsistent or empty pixel buffers");
+				Fail("Transparency shadow comparison failed: " + Difference.error());
 				return false;
 			}
-			size_t ChangedPixels = 0;
-			double AbsoluteDifference = 0.0;
-		std::vector<uint8_t> DifferenceImage(m_TransparencyShadowOnPixels.size());
-			for (size_t Pixel = 0; Pixel < m_TransparencyShadowOffPixels.size() / 4; ++Pixel)
-			{
-				const size_t Channel = Pixel * 4;
-				const int RedDifference = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel])) -
-					static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel])));
-				const int GreenDifference = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + 1])) -
-					static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel + 1])));
-				const int BlueDifference = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + 2])) -
-					static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel + 2])));
-				const int PixelDifference = (std::max)({ RedDifference, GreenDifference, BlueDifference });
-				AbsoluteDifference += RedDifference + GreenDifference + BlueDifference;
-				if (PixelDifference > 8)
-					++ChangedPixels;
-				DifferenceImage[Channel] = static_cast<uint8_t>((std::min)(RedDifference * 5, 255));
-				DifferenceImage[Channel + 1] = static_cast<uint8_t>((std::min)(GreenDifference * 5, 255));
-				DifferenceImage[Channel + 2] = static_cast<uint8_t>((std::min)(BlueDifference * 5, 255));
-				DifferenceImage[Channel + 3] = 255;
-			}
 			const std::filesystem::path DifferencePath = m_PointShadowImageDirectory / "Transparency" / "shadow_difference.png";
-			if (!stbi_write_png(DifferencePath.string().c_str(), 960, 540, 4, DifferenceImage.data(), 960 * 4))
+			if (!stbi_write_png(DifferencePath.string().c_str(), 960, 540, 4, Difference->DifferenceRgba.data(), 960 * 4))
 			{
 				Fail("Could not save actual transparency shadow-difference image");
 				return false;
 			}
-			const double MeanAbsoluteDifference = AbsoluteDifference /
-				static_cast<double>((m_TransparencyShadowOffPixels.size() / 4) * 3);
-			const auto CountChangedInRegion = [this](uint32_t MinX, uint32_t MinY, uint32_t MaxX, uint32_t MaxY)
-			{
-				size_t RegionChangedPixels = 0;
-				for (uint32_t Y = MinY; Y < MaxY; ++Y)
-				{
-					for (uint32_t X = MinX; X < MaxX; ++X)
-					{
-						const size_t Channel = (static_cast<size_t>(Y) * 960 + X) * 4;
-						const int Red = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel])) -
-							static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel])));
-						const int Green = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + 1])) -
-							static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel + 1])));
-						const int Blue = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + 2])) -
-							static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel + 2])));
-						if ((std::max)({ Red, Green, Blue }) > 8)
-							++RegionChangedPixels;
-					}
-				}
-				return RegionChangedPixels;
-			};
-			const size_t MaskedBackdropChanges = CountChangedInRegion(185, 95, 350, 282);
-			PF_INFO("TRANSPARENCY_SHADOW_IMAGE_DIFF=changed_pixels:{0}; mean_abs_rgb:{1:.3f}",
-				ChangedPixels, MeanAbsoluteDifference);
-			PF_INFO("TRANSPARENCY_MASKED_BACKDROP_DIFF=changed_pixels:{0}; roi=(185,95)-(350,282)", MaskedBackdropChanges);
-			if (ChangedPixels < 150 || MeanAbsoluteDifference < 0.15)
+			PF_INFO("TRANSPARENCY_SHADOW_IMAGE_DIFF=changed_pixels:{0}; mean_abs_rgb:{1:.3f}", Difference->ChangedPixels,
+				Difference->MeanAbsoluteRgb);
+			PF_INFO("TRANSPARENCY_MASKED_BACKDROP_DIFF=changed_pixels:{0}; roi=(185,95)-(350,282)", Difference->RegionChangedPixels);
+			if (Difference->ChangedPixels < 150 || Difference->MeanAbsoluteRgb < 0.15)
 			{
 				Fail("Enabling alpha-tested spotlight shadows did not produce a measurable image change");
 				return false;
 			}
-			if (MaskedBackdropChanges < 12)
+			if (Difference->RegionChangedPixels < 12)
 			{
 				Fail("Alpha-tested fence shadow did not change pixels in its projected backdrop region");
 				return false;
@@ -1423,47 +1382,21 @@ namespace
 			return true;
 		}
 
-		bool ValidateMaskedShadowImageDifference(
-			const std::vector<std::byte>& ShadowsOff,
-			const std::vector<std::byte>& ShadowsOn,
-			const char* ShadowType,
-			uint32_t MinX,
-			uint32_t MinY,
-			uint32_t MaxX,
-			uint32_t MaxY)
+		bool ValidateMaskedShadowImageDifference(const std::vector<std::byte>& ShadowsOff, const std::vector<std::byte>& ShadowsOn,
+			const char* ShadowType, uint32_t MinX, uint32_t MinY, uint32_t MaxX, uint32_t MaxY)
 		{
-			if (ShadowsOff.size() != ShadowsOn.size() || ShadowsOff.empty())
+			const auto Difference = PulseForge::GpuValidation::TransparencyImageAnalysis::CompareRgba8({ 960, 540, ShadowsOff },
+				{ 960, 540, ShadowsOn }, PulseForge::GpuValidation::TransparencyImageAnalysis::Region{ MinX, MinY, MaxX, MaxY });
+			if (!Difference)
 			{
-				Fail(std::string("Transparency ") + ShadowType + " comparison has inconsistent or empty pixel buffers");
+				Fail(std::string("Transparency ") + ShadowType + " comparison failed: " + Difference.error());
 				return false;
 			}
-			size_t ChangedPixels = 0;
-			double AbsoluteDifference = 0.0;
-			size_t BackdropChangedPixels = 0;
-			for (size_t Pixel = 0; Pixel < ShadowsOff.size() / 4; ++Pixel)
-			{
-				const size_t Channel = Pixel * 4;
-				int MaximumDifference = 0;
-				for (size_t Component = 0; Component < 3; ++Component)
-				{
-					const int Difference = std::abs(static_cast<int>(static_cast<uint8_t>(ShadowsOff[Channel + Component])) -
-						static_cast<int>(static_cast<uint8_t>(ShadowsOn[Channel + Component])));
-					AbsoluteDifference += Difference;
-					MaximumDifference = (std::max)(MaximumDifference, Difference);
-				}
-				if (MaximumDifference > 8)
-				{
-					++ChangedPixels;
-					const uint32_t X = static_cast<uint32_t>(Pixel % 960);
-					const uint32_t Y = static_cast<uint32_t>(Pixel / 960);
-					if (X >= MinX && X < MaxX && Y >= MinY && Y < MaxY)
-						++BackdropChangedPixels;
-				}
-			}
-			const double MeanAbsoluteDifference = AbsoluteDifference / static_cast<double>((ShadowsOff.size() / 4) * 3);
-			PF_INFO("TRANSPARENCY_{0}_SHADOW_IMAGE_DIFF=changed_pixels:{1}; mean_abs_rgb:{2:.3f}; receiver_roi_pixels:{3}; roi=({4},{5})-({6},{7})",
-				ShadowType, ChangedPixels, MeanAbsoluteDifference, BackdropChangedPixels, MinX, MinY, MaxX, MaxY);
-			if (ChangedPixels < 100 || MeanAbsoluteDifference < 0.1 || BackdropChangedPixels < 12)
+			PF_INFO("TRANSPARENCY_{0}_SHADOW_IMAGE_DIFF=changed_pixels:{1}; mean_abs_rgb:{2:.3f}; receiver_roi_pixels:{3}; "
+					"roi=({4},{5})-({6},{7})",
+				ShadowType, Difference->ChangedPixels, Difference->MeanAbsoluteRgb, Difference->RegionChangedPixels, MinX, MinY, MaxX,
+				MaxY);
+			if (Difference->ChangedPixels < 100 || Difference->MeanAbsoluteRgb < 0.1 || Difference->RegionChangedPixels < 12)
 			{
 				Fail(std::string("The alpha-masked backdrop did not show a measurable ") + ShadowType + " shadow difference");
 				return false;
@@ -1485,41 +1418,17 @@ namespace
 
 		bool ValidateTransparencyBlendDifference()
 		{
-			if (m_TransparencyDirectionalShadowOnPixels.size() != m_TransparencyOpaqueControlPixels.size() ||
-				m_TransparencyOpaqueControlPixels.empty())
+			const auto Difference = PulseForge::GpuValidation::TransparencyImageAnalysis::CompareRgba8(
+				{ 960, 540, m_TransparencyDirectionalShadowOnPixels }, { 960, 540, m_TransparencyOpaqueControlPixels },
+				PulseForge::GpuValidation::TransparencyImageAnalysis::Region{ 410, 190, 550, 325 });
+			if (!Difference)
 			{
-				Fail("Transparency and opaque-control images have inconsistent or empty pixel buffers");
+				Fail("Transparency blend comparison failed: " + Difference.error());
 				return false;
 			}
-			constexpr uint32_t MinX = 410;
-			constexpr uint32_t MinY = 190;
-			constexpr uint32_t MaxX = 550;
-			constexpr uint32_t MaxY = 325;
-			size_t ChangedPixels = 0;
-			double AbsoluteDifference = 0.0;
-			for (uint32_t Y = MinY; Y < MaxY; ++Y)
-			{
-				for (uint32_t X = MinX; X < MaxX; ++X)
-				{
-					const size_t Channel = (static_cast<size_t>(Y) * 960 + X) * 4;
-					int MaximumDifference = 0;
-					for (size_t Component = 0; Component < 3; ++Component)
-					{
-						const int Difference = std::abs(
-							static_cast<int>(static_cast<uint8_t>(m_TransparencyDirectionalShadowOnPixels[Channel + Component])) -
-							static_cast<int>(static_cast<uint8_t>(m_TransparencyOpaqueControlPixels[Channel + Component])));
-						AbsoluteDifference += Difference;
-						MaximumDifference = (std::max)(MaximumDifference, Difference);
-					}
-					if (MaximumDifference > 8)
-						++ChangedPixels;
-				}
-			}
-			const double MeanAbsoluteDifference = AbsoluteDifference /
-				static_cast<double>((MaxX - MinX) * (MaxY - MinY) * 3);
-			PF_INFO("TRANSPARENCY_BLEND_IMAGE_DIFF=changed_pixels:{0}; mean_abs_rgb:{1:.3f}; blue_panel_roi=({2},{3})-({4},{5})",
-				ChangedPixels, MeanAbsoluteDifference, MinX, MinY, MaxX, MaxY);
-			if (ChangedPixels < 1000 || MeanAbsoluteDifference < 1.0)
+			PF_INFO("TRANSPARENCY_BLEND_IMAGE_DIFF=changed_pixels:{0}; mean_abs_rgb:{1:.3f}; blue_panel_roi=(410,190)-(550,325)",
+				Difference->RegionChangedPixels, Difference->RegionMeanAbsoluteRgb);
+			if (Difference->RegionChangedPixels < 1000 || Difference->RegionMeanAbsoluteRgb < 1.0)
 			{
 				Fail("The BLEND blue panel did not differ from its matching OPAQUE control in the expected image region");
 				return false;
@@ -1529,53 +1438,23 @@ namespace
 
 		bool ValidateTransparencyLightDifference()
 		{
-			if (m_TransparencyNoSpotPixels.size() != m_TransparencyShadowOffPixels.size() ||
-				m_TransparencyNoSpotPixels.empty())
+			const auto Difference = PulseForge::GpuValidation::TransparencyImageAnalysis::CompareRgba8(
+				{ 960, 540, m_TransparencyNoSpotPixels }, { 960, 540, m_TransparencyShadowOffPixels });
+			if (!Difference)
 			{
-				Fail("Transparency spotlight comparison images have inconsistent or empty pixel buffers");
+				Fail("Transparency light comparison failed: " + Difference.error());
 				return false;
 			}
-			size_t ChangedPixels = 0;
-			double AbsoluteDifference = 0.0;
-			uint32_t MinX = 960;
-			uint32_t MinY = 540;
-			uint32_t MaxX = 0;
-			uint32_t MaxY = 0;
-			for (size_t Pixel = 0; Pixel < m_TransparencyNoSpotPixels.size() / 4; ++Pixel)
-			{
-				const size_t Channel = Pixel * 4;
-				int MaximumDifference = 0;
-				for (size_t Component = 0; Component < 3; ++Component)
-				{
-					const int Difference = std::abs(
-						static_cast<int>(static_cast<uint8_t>(m_TransparencyNoSpotPixels[Channel + Component])) -
-						static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + Component])));
-					AbsoluteDifference += Difference;
-					MaximumDifference = (std::max)(MaximumDifference, Difference);
-				}
-				if (MaximumDifference > 8)
-				{
-					++ChangedPixels;
-					const uint32_t X = static_cast<uint32_t>(Pixel % 960);
-					const uint32_t Y = static_cast<uint32_t>(Pixel / 960);
-					MinX = (std::min)(MinX, X);
-					MinY = (std::min)(MinY, Y);
-					MaxX = (std::max)(MaxX, X);
-					MaxY = (std::max)(MaxY, Y);
-				}
-			}
-			const double MeanAbsoluteDifference = AbsoluteDifference /
-				static_cast<double>((m_TransparencyNoSpotPixels.size() / 4) * 3);
 			PF_INFO("TRANSPARENCY_DIRECT_LIGHT_DIFF=changed_pixels:{0}; mean_abs_rgb:{1:.3f}; bounds=({2},{3})-({4},{5})",
-				ChangedPixels, MeanAbsoluteDifference, MinX, MinY, MaxX, MaxY);
-			if (ChangedPixels < 150 || MeanAbsoluteDifference < 0.15)
+				Difference->ChangedPixels, Difference->MeanAbsoluteRgb, Difference->MinX, Difference->MinY, Difference->MaxX,
+				Difference->MaxY);
+			if (Difference->ChangedPixels < 150 || Difference->MeanAbsoluteRgb < 0.15)
 			{
 				Fail("The configured transparency spotlight did not measurably illuminate the scene");
 				return false;
 			}
 			return true;
 		}
-
 		void UpdatePointShadowScenario()
 		{
 			const size_t Frame = m_PointShadowFrames;

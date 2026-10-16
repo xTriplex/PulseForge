@@ -29,6 +29,7 @@ if(BUILD_TESTING)
 	add_executable(PulseForgeGpuValidationAnalysisTests
 		Tests/PulseForgeGpuValidationAnalysisTests.cpp
 		Tests/GpuValidation/PointShadowImageAnalysisTests.cpp
+		Tests/GpuValidation/TransparencyImageAnalysisTests.cpp
 	)
 	target_include_directories(PulseForgeGpuValidationAnalysisTests PRIVATE Tests)
 	target_compile_definitions(PulseForgeGpuValidationAnalysisTests PRIVATE PF_PLATFORM_WINDOWS)

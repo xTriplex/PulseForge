@@ -1,5 +1,7 @@
 if(BUILD_TESTING OR PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
-	add_library(PulseForgeGpuValidationAnalysis STATIC Tests/GpuValidation/PointShadowImageAnalysis.cpp)
+	add_library(PulseForgeGpuValidationAnalysis STATIC
+		Tests/GpuValidation/PointShadowImageAnalysis.cpp
+		Tests/GpuValidation/TransparencyImageAnalysis.cpp)
 	target_include_directories(PulseForgeGpuValidationAnalysis PUBLIC Tests)
 	target_compile_definitions(PulseForgeGpuValidationAnalysis PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeGpuValidationAnalysis PUBLIC PulseForgeRenderMath)
