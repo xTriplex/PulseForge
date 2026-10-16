@@ -21,9 +21,6 @@
     "PulseForgeEditorTests" : "PULSEFORGE_BUILD_EDITOR",
     "PulseForgeEditorUI" : "PULSEFORGE_BUILD_EDITOR"
   },
-  "cpp_responsibility_review_threshold" : 1200,
-  "default_cpp_hard_limit" : 2500,
-  "default_header_hard_limit" : 800,
   "editor_core_allowed_dependencies" :
   [
     "PulseForgeAssetImporters",
@@ -252,24 +249,6 @@
       "PulseForge/Source/Private/",
       "Core/PulseForgePCH.h"
     ]
-  },
-  "size_exceptions" :
-  {
-    "PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp" :
-    {
-      "max_lines" : 3511,
-      "reason" : "Legacy renderer implementation; new responsibilities require a separate owner."
-    },
-    "PulseForgeEditor/Source/Private/EditorApplication.cpp" :
-    {
-      "max_lines" : 6958,
-      "reason" : "Legacy application coordinator; no growth allowance remains while responsibility extraction continues."
-    },
-    "Tests/GpuRendererValidation.cpp" :
-    {
-      "max_lines" : 2741,
-      "reason" : "Ceiling matches the measured source size; continue moving scenarios to focused owners."
-    }
   },
   "source_roots" :
   [

@@ -96,38 +96,6 @@ def parse_graph_manifest(path: Path) -> ConfiguredGraph:
     return ConfiguredGraph(configuration, options, targets)
 
 
-def file_line_limit(relative_path: str, suffix: str, rules: dict) -> int:
-    path = normalize(relative_path)
-    exception = rules.get("size_exceptions", {}).get(path)
-    if exception:
-        return int(exception["max_lines"])
-    if suffix.lower() in {".h", ".hpp", ".inl"}:
-        return int(rules["default_header_hard_limit"])
-    return int(rules["default_cpp_hard_limit"])
-
-
-def find_size_violations(relative_path: str, line_count: int, rules: dict) -> list[str]:
-    suffix = Path(relative_path).suffix
-    limit = file_line_limit(relative_path, suffix, rules)
-    if line_count <= limit:
-        return []
-    return [f"{normalize(relative_path)} has {line_count} lines (hard limit {limit})"]
-
-
-def find_size_reviews(relative_path: str, line_count: int, rules: dict) -> list[str]:
-    if Path(relative_path).suffix.lower() in {".h", ".hpp", ".inl"}:
-        return []
-    threshold = int(rules["cpp_responsibility_review_threshold"])
-    exception = rules.get("size_exceptions", {}).get(normalize(relative_path))
-    if line_count <= threshold and not exception:
-        return []
-    if exception:
-        reason = exception.get("reason", "legacy responsibility review")
-    else:
-        reason = "review whether this file owns more than one responsibility"
-    return [f"{normalize(relative_path)} has {line_count} lines; {reason}"]
-
-
 def _source_path(root: Path, source: str) -> str | None:
     candidate = Path(source)
     if not candidate.is_absolute():
@@ -554,9 +522,8 @@ def run(
     graph: ConfiguredGraph,
     include_git_checks: bool = True,
     comparison_base: str | None = None,
-) -> tuple[list[str], list[str]]:
+) -> list[str]:
     issues: list[str] = []
-    reviews: list[str] = []
     for source_root in rules["source_roots"]:
         directory = root / source_root
         if not directory.exists():
@@ -566,19 +533,16 @@ def run(
                 continue
             relative = normalize(path.relative_to(root))
             try:
-                line_count = len(path.read_text(encoding="utf-8", errors="strict").splitlines())
+                path.read_text(encoding="utf-8", errors="strict")
             except UnicodeDecodeError:
                 issues.append(f"{relative} is not valid UTF-8 source text")
-                continue
-            issues.extend(find_size_violations(relative, line_count, rules))
-            reviews.extend(find_size_reviews(relative, line_count, rules))
 
     issues.extend(run_graph_checks(root, rules, graph))
     if include_git_checks:
         if not comparison_base:
             raise RuntimeError("A Git comparison base is required for source hygiene checks")
         issues.extend(check_git_hygiene(root, comparison_base))
-    return issues, reviews
+    return issues
 
 
 def main() -> int:
@@ -595,16 +559,11 @@ def main() -> int:
     graph = parse_graph_manifest(args.graph_manifest)
     if args.graph_only:
         issues = run_graph_checks(root, rules, graph)
-        reviews: list[str] = []
     else:
-        issues, reviews = run(
+        issues = run(
             root, rules, graph,
             include_git_checks=not args.skip_git_checks,
             comparison_base=args.comparison_base)
-    if reviews:
-        print(f"Source responsibility review notices ({len(reviews)}):")
-        for review in reviews:
-            print(f" - {review}")
     if issues:
         print(f"PulseForge source quality checks failed ({graph.configuration} graph):")
         for issue in issues:

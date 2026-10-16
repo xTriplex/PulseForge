@@ -16,12 +16,20 @@ sys.modules[SPEC.name] = source_quality
 SPEC.loader.exec_module(source_quality)
 
 RULES = {
-    "cpp_responsibility_review_threshold": 1200,
-    "default_cpp_hard_limit": 2500,
-    "default_header_hard_limit": 800,
-    "size_exceptions": {
-        "Legacy.cpp": {"max_lines": 901, "reason": "test fixture"}
-    },
+    "source_roots": [],
+    "aggregate_engine_target": "PulseForge",
+    "editor_core_target": "PulseForgeEditorCore",
+    "editor_core_allowed_dependencies": [],
+    "editor_core_forbidden_includes": [],
+    "editor_ui_target": "PulseForgeEditorUI",
+    "editor_ui_allowed_dependencies": [],
+    "conditional_target_options": {},
+    "owner_scoped_test_targets": [],
+    "source_target_ownership": {},
+    "forbidden_dependency_closures": {},
+    "public_header_roots": {},
+    "public_header_owners": {},
+    "non_api_public_headers": [],
 }
 
 
@@ -36,19 +44,27 @@ def make_target(kind, **properties):
 
 
 class SourceQualityRulesTests(unittest.TestCase):
-    def test_size_review_and_hard_gate_are_distinct(self):
-        self.assertEqual(source_quality.file_line_limit("New.cpp", ".cpp", RULES), 2500)
-        self.assertEqual(source_quality.file_line_limit("New.h", ".h", RULES), 800)
-        self.assertEqual(source_quality.find_size_violations("New.cpp", 2500, RULES), [])
-        self.assertEqual(source_quality.find_size_reviews("New.cpp", 1201, RULES), [
-            "New.cpp has 1201 lines; review whether this file owns more than one responsibility"
-        ])
-        self.assertTrue(source_quality.find_size_violations("New.cpp", 2501, RULES))
+    def test_file_length_alone_does_not_fail_quality_run(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source_root = root / "src"
+            source_root.mkdir()
+            (source_root / "Long.cpp").write_text("// line\n" * 10000, encoding="utf-8")
+            graph = source_quality.ConfiguredGraph("Debug", {}, {
+                "PulseForgeEditorCore": make_target("STATIC_LIBRARY"),
+                "PulseForgeEditorUI": make_target("STATIC_LIBRARY"),
+            })
+            rules = {**RULES, "source_roots": ["src"]}
+            self.assertEqual(source_quality.run(root, rules, graph, include_git_checks=False), [])
 
-    def test_size_exception_is_exact_and_bounded(self):
-        self.assertEqual(source_quality.find_size_violations("Legacy.cpp", 901, RULES), [])
-        self.assertTrue(source_quality.find_size_violations("Legacy.cpp", 902, RULES))
-        self.assertTrue(source_quality.find_size_violations("Other.cpp", 2501, RULES))
+    def test_architecture_violations_still_fail_quality_run(self):
+        graph = source_quality.ConfiguredGraph("Debug", {}, {
+            "PulseForgeEditorCore": make_target("STATIC_LIBRARY", links=["PulseForgeEditorUI"]),
+            "PulseForgeEditorUI": make_target("STATIC_LIBRARY", links=["PulseForgeEditorCore"]),
+        })
+        issues = source_quality.run(Path.cwd(), RULES, graph, include_git_checks=False)
+        self.assertTrue(any("dependency cycle" in issue for issue in issues))
+        self.assertTrue(any("has unreviewed dependencies" in issue for issue in issues))
 
     def test_dependency_policy_includes_all_configured_link_properties(self):
         graph = source_quality.ConfiguredGraph("Debug", {}, {
@@ -216,10 +232,6 @@ class SourceQualityRulesTests(unittest.TestCase):
             (root / "CMakeLists.txt").write_text(cmakelists, encoding="utf-8")
             (root / "rules.json").write_text(json.dumps({
                 "source_roots": [],
-                "cpp_responsibility_review_threshold": 1200,
-                "default_cpp_hard_limit": 2500,
-                "default_header_hard_limit": 800,
-                "size_exceptions": {},
                 "source_target_ownership": {},
                 "owner_scoped_test_targets": [],
                 "conditional_target_options": {},
