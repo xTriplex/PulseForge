@@ -35,7 +35,7 @@ namespace PulseForge::GpuValidation
 	class GpuLightingValidation final
 	{
 	public:
-		GpuLightingValidation(Application& App, std::unique_ptr<Scene> Scenario, SceneRenderer& Renderer, LightingValidationMode Mode,
+		GpuLightingValidation(Application& App, const Scene& StartupScene, SceneRenderer& Renderer, LightingValidationMode Mode,
 			std::chrono::steady_clock::time_point StartedAt) noexcept;
 
 		void Initialize();
@@ -59,6 +59,7 @@ namespace PulseForge::GpuValidation
 		void Fail(std::string Message);
 
 		Application& m_Application;
+		const Scene& m_StartupScene;
 		std::unique_ptr<Scene> m_Scene;
 		SceneRenderer& m_SceneRenderer;
 		LightingValidationMode m_Mode;

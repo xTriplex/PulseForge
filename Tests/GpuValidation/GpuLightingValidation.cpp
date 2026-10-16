@@ -2,6 +2,7 @@
 
 #include "Core/Application.h"
 #include "Core/Log.h"
+#include "GpuValidation/GpuSceneScenario.h"
 #include "Renderer/SceneRenderer.h"
 #include "Scene/Components/PointLightComponent.h"
 #include "Scene/Components/SpotLightComponent.h"
@@ -22,14 +23,16 @@
 
 namespace PulseForge::GpuValidation
 {
-	GpuLightingValidation::GpuLightingValidation(Application& App, std::unique_ptr<Scene> Scenario, SceneRenderer& Renderer,
+	GpuLightingValidation::GpuLightingValidation(Application& App, const Scene& StartupScene, SceneRenderer& Renderer,
 		LightingValidationMode Mode, std::chrono::steady_clock::time_point StartedAt) noexcept
-		: m_Application(App), m_Scene(std::move(Scenario)), m_SceneRenderer(Renderer), m_Mode(Mode), m_StartedAt(StartedAt)
+		: m_Application(App), m_StartupScene(StartupScene), m_SceneRenderer(Renderer), m_Mode(Mode), m_StartedAt(StartedAt)
 	{
 	}
 
 	void GpuLightingValidation::Initialize()
 	{
+		m_Scene = std::make_unique<Scene>();
+		BuildGpuValidationSceneScenario(m_StartupScene, *m_Scene, true, true, true);
 		switch (m_Mode)
 		{
 		case LightingValidationMode::LocalLights:

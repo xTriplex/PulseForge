@@ -2,6 +2,8 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	add_executable(PulseForgeGpuValidation
 		Tests/GpuRendererValidation.cpp
 		Tests/GpuValidation/GpuLightingValidation.cpp
+		Tests/GpuValidation/GpuSceneScenario.cpp
+		Tests/GpuValidation/GpuSceneOutputValidation.cpp
 		Tests/GpuValidation/GpuProjectSceneValidation.cpp
 		Tests/GpuValidation/PointShadowImageValidation.cpp
 		Tests/GpuValidation/ActiveFrameUploadValidation.cpp
