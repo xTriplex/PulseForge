@@ -274,6 +274,7 @@
     "PulseForgeEditor/Source/Private/EditorContentBrowserAssetView.cpp" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorContentBrowserNavigation.cpp" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorContentBrowserPanel.cpp" : "PulseForgeEditorUI",
+    "PulseForgeEditor/Source/Private/EditorDocumentHostTestEditor.cpp" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorHierarchyPanel.cpp" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorMaterialDetailsPanel.cpp" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorMainMenuPanel.cpp" : "PulseForgeEditorUI",

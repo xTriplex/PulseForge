@@ -151,6 +151,7 @@ if(BUILD_TESTING)
 			Tests/EditorViewportTests.cpp
 			Tests/EditorViewportSceneRenderViewTests.cpp
 			Tests/EditorAssetPreviewStressHarnessTests.cpp
+			Tests/EditorDocumentHostTestEditorTests.cpp
 			Tests/EditorStateTests.cpp
 			Tests/EditorPanelStateTests.cpp
 			Tests/EditorSceneStateTests.cpp

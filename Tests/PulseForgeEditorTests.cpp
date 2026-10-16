@@ -2,6 +2,8 @@
 
 #include <spdlog/spdlog.h>
 
+void RunEditorDocumentHostTestEditorTests(TestRunner& Tests);
+
 int main()
 {
 	PulseForge::Log::Init();
@@ -12,6 +14,7 @@ int main()
 	RunEditorViewportTests(Tests);
 	RunEditorViewportSceneRenderViewTests(Tests);
 	RunEditorAssetPreviewStressHarnessTests(Tests);
+	RunEditorDocumentHostTestEditorTests(Tests);
 	RunEditorTests(Tests);
 	RunEditorStateTests(Tests);
 	RunEditorDocumentManagerTests(Tests);
