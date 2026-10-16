@@ -89,7 +89,8 @@ namespace
 			if (FailNextClearBegin)
 			{
 				FailNextClearBegin = false;
-				return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::BackendFailure, "injected begin failure" });
+				return std::unexpected(
+					PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::BackendFailure, "injected begin failure" });
 			}
 			return {};
 		}
@@ -250,6 +251,13 @@ namespace
 		PF_CHECK(Tests, Runtime.RenderTargetCreations == 1 && Registry.RegistrationAttempts == 1);
 
 		const PulseForge::RenderTarget* OriginalTarget = View.GetTarget();
+		const auto InvalidExtent = View.EnsureTarget(-1.0f, 80.0f, 1.25f, 1.0f, Runtime, Registry);
+		PF_CHECK(Tests, !InvalidExtent && !View.GetTargetError().empty());
+		PF_CHECK(Tests, View.GetTarget() == OriginalTarget && View.GetTextureID() == 1);
+		PF_CHECK(Tests, Registry.RegisteredCount() == 1);
+		const auto RecoveredExtent = View.EnsureTarget(100.0f, 80.0f, 1.25f, 1.0f, Runtime, Registry);
+		PF_CHECK(Tests, RecoveredExtent && !*RecoveredExtent && View.GetTargetError().empty());
+
 		Runtime.FailNextRenderTarget = true;
 		const auto TargetFailure = View.EnsureTarget(200.0f, 150.0f, 1.25f, 1.0f, Runtime, Registry);
 		PF_CHECK(Tests, !TargetFailure && !View.GetTargetError().empty());
@@ -283,6 +291,15 @@ namespace
 		PF_CHECK(Tests, Registry.RegisteredCount() == 0);
 		PF_CHECK(Tests, Registry.UnregisterSawLiveTexture.size() == 2 && Registry.UnregisterSawLiveTexture.back());
 		PF_CHECK(Tests, Registry.UnknownUnregistrations.empty());
+		FakeTextureRegistry ReplacementRegistry;
+		const auto ProjectReplacement = View.EnsureTarget(72.0f, 48.0f, 1.0f, 1.0f, Runtime, ReplacementRegistry);
+		PF_CHECK(Tests, ProjectReplacement && *ProjectReplacement && Registry.RegisteredCount() == 0);
+		PF_CHECK(Tests, ReplacementRegistry.RegisteredCount() == 1 && View.GetTextureID() == 1);
+		View.ResetScene();
+		View.ResetTarget();
+		PF_CHECK(Tests, ReplacementRegistry.RegisteredCount() == 0);
+		PF_CHECK(Tests, ReplacementRegistry.UnregisterSawLiveTexture.size() == 1 && ReplacementRegistry.UnregisterSawLiveTexture.front());
+		PF_CHECK(Tests, ReplacementRegistry.UnknownUnregistrations.empty());
 
 		{
 			PulseForgeEditor::EditorViewportSceneRenderView DestructedView;
