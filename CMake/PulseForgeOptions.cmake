@@ -27,9 +27,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-if(CMAKE_GENERATOR MATCHES "^Visual Studio")
-	list(FILTER CMAKE_VS_GLOBALS EXCLUDE REGEX "^BuildInParallel=")
-	list(APPEND CMAKE_VS_GLOBALS "BuildInParallel=false")
+if(CMAKE_GENERATOR STREQUAL "Visual Studio 17 2022" AND
+	CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" AND
+	CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "19.44" AND
+	CMAKE_CXX_COMPILER_VERSION VERSION_LESS "19.45")
+	set(PulseForgeBuildInParallelConfigured FALSE)
+	foreach(PulseForgeVSGlobal IN LISTS CMAKE_VS_GLOBALS)
+		if(PulseForgeVSGlobal MATCHES "^BuildInParallel=")
+			set(PulseForgeBuildInParallelConfigured TRUE)
+			break()
+		endif()
+	endforeach()
+	if(NOT PulseForgeBuildInParallelConfigured)
+		list(APPEND CMAKE_VS_GLOBALS "BuildInParallel=false")
+	endif()
+	unset(PulseForgeBuildInParallelConfigured)
+	unset(PulseForgeVSGlobal)
 endif()
 
 set(PULSEFORGE_ENGINE_PCH "${CMAKE_CURRENT_SOURCE_DIR}/PulseForge/Source/Private/Core/PulseForgePCH.h")
