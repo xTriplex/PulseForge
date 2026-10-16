@@ -21,7 +21,6 @@
 #include <optional>
 #include <span>
 #include <string>
-#include <unordered_map>
 #include <utility>
 
 namespace PulseForge
@@ -30,6 +29,7 @@ namespace PulseForge
 	class Project;
 	class Scene;
 	class SceneRendererPipelineCache;
+	class SceneRendererMaterialBindingCache;
 
 	enum class SceneRendererErrorCode : uint8_t
 	{
@@ -172,44 +172,22 @@ namespace PulseForge
 		SceneRenderer(RenderDevice& Runtime, const Project& SourceProject);
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
 			const std::filesystem::path& CompiledShaderDirectory);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureMaterialBindings(
-			const AssetID& MaterialAsset,
-			const std::optional<AssetID>& EnvironmentAsset,
-			const EnvironmentLightingTextures& EnvironmentTextures);
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareLocalLighting();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderSpotlightShadows();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderPointLightShadows();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderShadowCascades();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderAmbientOcclusion(uint32_t Width, uint32_t Height);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureEnvironmentBindings(
-			const AssetID& EnvironmentAsset,
-			const EnvironmentLightingTextures& EnvironmentTextures,
-			bool IsReady);
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedSceneForFormat(
 			ColorTargetFormat ColorFormat,
 			uint32_t Width,
 			uint32_t Height);
+		[[nodiscard]] std::expected<const MaterialAssetDesc*, SceneRendererError> ResolveMaterialDescription(
+			const SceneMeshInstance& Instance);
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareSnapshot(
 			std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot);
 
-		struct MaterialBindingResources
-		{
-			BufferHandle MaterialConstantsBuffer;
-			BindingSetHandle BindingSet;
-		};
-		[[nodiscard]] std::expected<const MaterialAssetDesc*, SceneRendererError> ResolveMaterialDescription(
+		[[nodiscard]] std::expected<const BindingSet*, SceneRendererError> ResolveMaterialBinding(
 			const SceneMeshInstance& Instance);
-		[[nodiscard]] std::expected<const MaterialBindingResources*, SceneRendererError> ResolveMaterialBinding(
-			const SceneMeshInstance& Instance);
-
-		struct alignas(16) MaterialConstants
-		{
-			float BaseColor[4];
-			float Surface[4];
-			float Emissive[4];
-			float Alpha[4];
-		};
-		static_assert(sizeof(MaterialConstants) == 64);
 
 		struct alignas(16) ObjectConstants
 		{
@@ -255,8 +233,6 @@ namespace PulseForge
 		std::unique_ptr<HdrTargetCache> m_HdrTargetCache;
 		std::unique_ptr<ShadowTargetCache> m_ShadowTargetCache;
 		std::unique_ptr<LocalLightingState> m_LocalLightingState;
-		SamplerHandle m_Sampler;
-		SamplerHandle m_EnvironmentSampler;
 		SamplerHandle m_ShadowSampler;
 		BindingLayoutHandle m_BindingLayout;
 		BindingLayoutHandle m_ShadowBindingLayout;
@@ -272,15 +248,8 @@ namespace PulseForge
 		BufferHandle m_FrameConstantsBuffer;
 		BufferHandle m_LocalLightingConstantsBuffer;
 		BufferHandle m_BackgroundTriangleBuffer;
-		BufferHandle m_FallbackMaterialConstantsBuffer;
-		TextureHandle m_FallbackBaseColorTexture;
-		TextureHandle m_FallbackMetallicRoughnessTexture;
-		TextureHandle m_FallbackNormalTexture;
-		TextureHandle m_FallbackEmissiveTexture;
 		TextureHandle m_FallbackPointShadowTexture;
 		EnvironmentLightingTextures m_FallbackEnvironmentTextures;
-		std::unordered_map<std::string, MaterialBindingResources> m_MaterialBindings;
-		std::unordered_map<std::string, BindingSetHandle> m_EnvironmentBindingSets;
 		std::optional<SceneRenderSnapshot> m_PreparedSnapshot;
 		std::vector<const SceneMeshInstance*> m_TransparentDrawOrder;
 		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
@@ -293,5 +262,6 @@ namespace PulseForge
 		size_t m_LastSpotShadowCasterDrawCount = 0;
 		size_t m_LastPointShadowPassCount = 0;
 		size_t m_LastPointShadowCasterDrawCount = 0;
+		std::unique_ptr<SceneRendererMaterialBindingCache> m_MaterialBindingCache;
 	};
 }

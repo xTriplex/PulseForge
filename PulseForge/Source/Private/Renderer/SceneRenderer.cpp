@@ -5,6 +5,7 @@
 #include "Renderer/SceneRendererPipelineCache.h"
 #include "Renderer/SceneRendererShadowTargetCache.h"
 #include "Renderer/SceneRendererToneMappingStage.h"
+#include "Renderer/SceneRendererMaterialBindingCache.h"
 
 #include "Assets/MaterialAssetCache.h"
 #include "Renderer/AssetCache/MeshAssetCache.h"
@@ -86,11 +87,6 @@ namespace PulseForge
 		SceneRendererError MakeDrawError(std::string Message)
 		{
 			return { SceneRendererErrorCode::DrawFailed, {}, {}, std::move(Message) };
-		}
-
-		std::string MakeMaterialBindingKey(const AssetID& Material, const std::optional<AssetID>& Environment)
-		{
-			return Material.ToString() + ":" + (Environment ? Environment->ToString() : std::string("none"));
 		}
 
 		std::expected<TextureHandle, TextureError> CreateBlackCube(RenderDevice& Runtime, std::string DebugName)
@@ -188,7 +184,8 @@ namespace PulseForge
 		  m_ToneMappingStage(std::make_unique<ToneMappingStage>(Runtime)), m_HdrTargetCache(std::make_unique<HdrTargetCache>(Runtime)),
 		  m_ShadowTargetCache(std::make_unique<ShadowTargetCache>(Runtime)),
 		  m_LocalLightingState(std::make_unique<LocalLightingState>()),
-		  m_AmbientOcclusionPass(std::make_unique<AmbientOcclusionPass>(Runtime))
+		  m_AmbientOcclusionPass(std::make_unique<AmbientOcclusionPass>(Runtime)),
+		  m_MaterialBindingCache(std::make_unique<SceneRendererMaterialBindingCache>(Runtime))
 	{
 	}
 
@@ -317,30 +314,6 @@ namespace PulseForge
 		PointShadowVertexShader = std::move(*PointShadowVs);
 		PointShadowFragmentShader = std::move(*PointShadowPs);
 
-		SamplerDesc SamplerDescription;
-		SamplerDescription.Minification = SamplerFilter::Linear;
-		SamplerDescription.Magnification = SamplerFilter::Linear;
-		SamplerDescription.Mip = SamplerMipFilter::Linear;
-		SamplerDescription.AddressU = SamplerAddressMode::Repeat;
-		SamplerDescription.AddressV = SamplerAddressMode::Repeat;
-		SamplerDescription.DebugName = "PulseForge material linear mip sampler";
-		auto Sampler = m_Runtime.CreateSampler(SamplerDescription);
-		if (!Sampler)
-			return std::unexpected(MakeResourceError("Could not create the scene sampler: " + Sampler.error().Message));
-		m_Sampler = std::move(Sampler.value());
-
-		SamplerDesc EnvironmentSamplerDescription;
-		EnvironmentSamplerDescription.Minification = SamplerFilter::Linear;
-		EnvironmentSamplerDescription.Magnification = SamplerFilter::Linear;
-		EnvironmentSamplerDescription.Mip = SamplerMipFilter::Linear;
-		EnvironmentSamplerDescription.AddressU = SamplerAddressMode::ClampToEdge;
-		EnvironmentSamplerDescription.AddressV = SamplerAddressMode::ClampToEdge;
-		EnvironmentSamplerDescription.DebugName = "PulseForge environment linear mip sampler";
-		auto EnvironmentSampler = m_Runtime.CreateSampler(EnvironmentSamplerDescription);
-		if (!EnvironmentSampler)
-			return std::unexpected(MakeResourceError("Could not create the environment sampler: " + EnvironmentSampler.error().Message));
-		m_EnvironmentSampler = std::move(EnvironmentSampler.value());
-
 		auto FallbackEnvironment = CreateBlackCube(m_Runtime, "PulseForge fallback environment cube");
 		auto FallbackIrradiance = CreateBlackCube(m_Runtime, "PulseForge fallback irradiance cube");
 		auto FallbackPrefiltered = CreateBlackCube(m_Runtime, "PulseForge fallback prefiltered cube");
@@ -361,64 +334,10 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Could not create fallback BRDF LUT: " + FallbackBrdf.error().Message));
 		m_FallbackEnvironmentTextures.BrdfIntegrationLut = std::move(*FallbackBrdf);
 
-		const std::array<uint8_t, 4> WhitePixel{ 255, 255, 255, 255 };
-		TextureDesc WhiteDescription;
-		WhiteDescription.Width = 1;
-		WhiteDescription.Height = 1;
-		WhiteDescription.Format = TextureFormat::RGBA8_Srgb;
-		WhiteDescription.DebugName = "PulseForge fallback white base-color texture";
-		auto WhiteTexture = m_Runtime.CreateTexture(WhiteDescription, std::as_bytes(std::span<const uint8_t>(WhitePixel)));
-		if (!WhiteTexture)
-			return std::unexpected(MakeResourceError("Could not create fallback base-color texture: " + WhiteTexture.error().Message));
-		m_FallbackBaseColorTexture = std::move(*WhiteTexture);
-		auto CreateMaterialFallback = [this](
-			const std::array<uint8_t, 4>& Pixel,
-			TextureFormat Format,
-			std::string DebugName)
-		{
-			TextureDesc Description;
-			Description.Width = 1;
-			Description.Height = 1;
-			Description.Format = Format;
-			Description.DebugName = std::move(DebugName);
-			return m_Runtime.CreateTexture(Description, std::as_bytes(std::span<const uint8_t>(Pixel)));
-		};
-		auto MetallicRoughnessFallback = CreateMaterialFallback(
-			WhitePixel, TextureFormat::RGBA8_UNorm, "PulseForge default metallic-roughness map");
-		if (!MetallicRoughnessFallback)
-			return std::unexpected(MakeResourceError(
-				"Could not create metallic-roughness fallback: " + MetallicRoughnessFallback.error().Message));
-		m_FallbackMetallicRoughnessTexture = std::move(*MetallicRoughnessFallback);
-		const std::array<uint8_t, 4> FlatNormalPixel{ 128, 128, 255, 255 };
-		auto NormalFallback = CreateMaterialFallback(
-			FlatNormalPixel, TextureFormat::RGBA8_UNorm, "PulseForge flat normal map fallback");
-		if (!NormalFallback)
-			return std::unexpected(MakeResourceError("Could not create normal-map fallback: " + NormalFallback.error().Message));
-		m_FallbackNormalTexture = std::move(*NormalFallback);
-		const std::array<uint8_t, 4> BlackPixel{ 0, 0, 0, 255 };
-		auto EmissiveFallback = CreateMaterialFallback(
-			BlackPixel, TextureFormat::RGBA8_Srgb, "PulseForge black emissive map fallback");
-		if (!EmissiveFallback)
-			return std::unexpected(MakeResourceError("Could not create emissive-map fallback: " + EmissiveFallback.error().Message));
-		m_FallbackEmissiveTexture = std::move(*EmissiveFallback);
 		auto FallbackPointShadow = CreateWhiteCube(m_Runtime, "PulseForge fully-lit point-shadow fallback cube");
 		if (!FallbackPointShadow)
 			return std::unexpected(MakeResourceError("Could not create fallback point-shadow cubemap: " + FallbackPointShadow.error().Message));
 		m_FallbackPointShadowTexture = std::move(*FallbackPointShadow);
-		const MaterialConstants FallbackMaterial{
-			{ 1.0f, 1.0f, 1.0f, 1.0f },
-			{ 0.0f, 1.0f, 1.0f, 1.0f },
-			{ 0.0f, 0.0f, 0.0f, 0.0f }
-		};
-		BufferDesc FallbackMaterialDescription;
-		FallbackMaterialDescription.ByteSize = sizeof(FallbackMaterial);
-		FallbackMaterialDescription.Usage = BufferUsage::Constant;
-		FallbackMaterialDescription.DebugName = "PulseForge fallback material constants";
-		auto FallbackMaterialBuffer = m_Runtime.CreateBuffer(
-			FallbackMaterialDescription, std::as_bytes(std::span(&FallbackMaterial, 1)));
-		if (!FallbackMaterialBuffer)
-			return std::unexpected(MakeResourceError("Could not create fallback material constants: " + FallbackMaterialBuffer.error().Message));
-		m_FallbackMaterialConstantsBuffer = std::move(*FallbackMaterialBuffer);
 		const std::array<float, 6> BackgroundVertices{ -1.0f, -1.0f, 3.0f, -1.0f, -1.0f, 3.0f };
 		BufferDesc BackgroundBufferDescription;
 		BackgroundBufferDescription.ByteSize = sizeof(BackgroundVertices);
@@ -611,6 +530,17 @@ namespace PulseForge
 				std::move(*AoPs), std::move(*AoBlurVs), std::move(*AoBlurPs));
 			!Initialized)
 			return std::unexpected(std::move(Initialized.error()));
+		const SceneRendererMaterialBindingCache::Resources MaterialBindingResources{
+			m_ProjectAssetCaches->Materials,
+			m_ProjectAssetCaches->Textures,
+			m_BindingLayout,
+			*m_AmbientOcclusionPass->GetFallbackOcclusionTexture(),
+			m_ObjectConstantsBuffer,
+			m_FrameConstantsBuffer,
+			m_LocalLightingConstantsBuffer
+		};
+		if (auto Initialized = m_MaterialBindingCache->Initialize(MaterialBindingResources); !Initialized)
+			return std::unexpected(std::move(Initialized.error()));
 		SceneRendererPipelineCache::Resources PipelineResources;
 		PipelineResources.SceneVertexShader = std::move(SceneVertexShader);
 		PipelineResources.SceneFragmentShader = std::move(SceneFragmentShader);
@@ -629,154 +559,6 @@ namespace PulseForge
 		PipelineResources.PointShadowObjectLayout = m_PointShadowObjectBindingLayout;
 		if (auto PipelineCache = m_PipelineCache->Initialize(std::move(PipelineResources)); !PipelineCache)
 			return std::unexpected(std::move(PipelineCache.error()));
-		return {};
-	}
-
-	std::expected<void, SceneRendererError> SceneRenderer::EnsureMaterialBindings(
-		const AssetID& MaterialAsset,
-		const std::optional<AssetID>& EnvironmentAsset,
-		const EnvironmentLightingTextures& EnvironmentTextures)
-	{
-		const std::string Key = MakeMaterialBindingKey(MaterialAsset, EnvironmentAsset);
-		if (m_MaterialBindings.contains(Key))
-			return {};
-		Detail::ScopedProfileTimer Timer("PBR material/texture binding first creation");
-
-		auto Material = m_ProjectAssetCaches->Materials.GetOrLoad(MaterialAsset);
-		if (!Material)
-		{
-			return std::unexpected(SceneRendererError{
-				SceneRendererErrorCode::AssetLoadFailed,
-				{},
-				MaterialAsset,
-				"Could not load scene material " + MaterialAsset.ToString() + ": " + Material.error().Message
-			});
-		}
-
-		const auto LoadMaterialTexture = [this, &MaterialAsset](
-			const AssetID& TextureAsset,
-			TextureFormat Format,
-			const Texture& Fallback,
-			std::string_view Name) -> std::expected<std::reference_wrapper<const Texture>, SceneRendererError>
-		{
-			if (TextureAsset.IsNil())
-				return std::cref(Fallback);
-			auto Texture = m_ProjectAssetCaches->Textures.GetOrLoad(TextureAsset, Format);
-			if (!Texture)
-			{
-				return std::unexpected(SceneRendererError{
-					SceneRendererErrorCode::AssetLoadFailed,
-					{},
-					TextureAsset,
-					"Could not load " + std::string(Name) + " texture for material " +
-						MaterialAsset.ToString() + ": " + Texture.error().Message
-				});
-			}
-			return std::cref(Texture->get());
-		};
-
-		auto BaseColorTexture = LoadMaterialTexture(
-			Material->get().BaseColorTexture, TextureFormat::RGBA8_Srgb, *m_FallbackBaseColorTexture, "base-color");
-		if (!BaseColorTexture)
-			return std::unexpected(std::move(BaseColorTexture.error()));
-		auto MetallicRoughnessTexture = LoadMaterialTexture(
-			Material->get().MetallicRoughnessTexture,
-			TextureFormat::RGBA8_UNorm,
-			*m_FallbackMetallicRoughnessTexture,
-			"metallic-roughness");
-		if (!MetallicRoughnessTexture)
-			return std::unexpected(std::move(MetallicRoughnessTexture.error()));
-		auto NormalTexture = LoadMaterialTexture(
-			Material->get().NormalTexture, TextureFormat::RGBA8_UNorm, *m_FallbackNormalTexture, "normal");
-		if (!NormalTexture)
-			return std::unexpected(std::move(NormalTexture.error()));
-		auto OcclusionTexture = LoadMaterialTexture(Material->get().OcclusionTexture, TextureFormat::RGBA8_UNorm,
-			*m_AmbientOcclusionPass->GetFallbackOcclusionTexture(), "occlusion");
-		if (!OcclusionTexture)
-			return std::unexpected(std::move(OcclusionTexture.error()));
-		auto EmissiveTexture = LoadMaterialTexture(
-			Material->get().EmissiveTexture, TextureFormat::RGBA8_Srgb, *m_FallbackEmissiveTexture, "emissive");
-		if (!EmissiveTexture)
-			return std::unexpected(std::move(EmissiveTexture.error()));
-
-		const MaterialConstants Constants{
-			{ Material->get().BaseColorFactor.r, Material->get().BaseColorFactor.g,
-				Material->get().BaseColorFactor.b, Material->get().BaseColorFactor.a },
-			{ Material->get().MetallicFactor, Material->get().RoughnessFactor,
-				Material->get().NormalScale, Material->get().OcclusionStrength },
-			{ Material->get().EmissiveFactor.r, Material->get().EmissiveFactor.g,
-				Material->get().EmissiveFactor.b, 0.0f },
-			{ static_cast<float>(Material->get().AlphaMode), Material->get().AlphaCutoff,
-				Material->get().DoubleSided ? 1.0f : 0.0f, 0.0f }
-		};
-		BufferDesc MaterialBufferDescription;
-		MaterialBufferDescription.ByteSize = sizeof(Constants);
-		MaterialBufferDescription.Usage = BufferUsage::Constant;
-		MaterialBufferDescription.DebugName = "PulseForge PBR material constants";
-		auto MaterialBuffer = m_Runtime.CreateBuffer(MaterialBufferDescription, std::as_bytes(std::span(&Constants, 1)));
-		if (!MaterialBuffer)
-			return std::unexpected(MakeResourceError("Could not create material constants: " + MaterialBuffer.error().Message));
-
-		BindingSetDesc BindingSetDescription;
-		BindingSetDescription.Layout = m_BindingLayout;
-		BindingSetDescription.Textures.push_back({ 0, *BaseColorTexture });
-		BindingSetDescription.Textures.push_back({ 1, std::cref(*EnvironmentTextures.DiffuseIrradiance), BindingResourceType::TextureCube });
-		BindingSetDescription.Textures.push_back({ 2, std::cref(*EnvironmentTextures.PrefilteredSpecular), BindingResourceType::TextureCube });
-		BindingSetDescription.Textures.push_back({ 3, std::cref(*EnvironmentTextures.BrdfIntegrationLut) });
-		BindingSetDescription.Textures.push_back({ 4, std::cref(*EnvironmentTextures.Environment), BindingResourceType::TextureCube });
-		BindingSetDescription.Textures.push_back({ 5, *MetallicRoughnessTexture });
-		BindingSetDescription.Textures.push_back({ 6, *NormalTexture });
-		BindingSetDescription.Textures.push_back({ 7, *OcclusionTexture });
-		BindingSetDescription.Textures.push_back({ 8, *EmissiveTexture });
-		BindingSetDescription.Samplers.push_back({ 0, std::cref(*m_Sampler) });
-		BindingSetDescription.Samplers.push_back({ 1, std::cref(*m_EnvironmentSampler) });
-		BindingSetDescription.Buffers.push_back({ 0, std::cref(*MaterialBuffer.value()) });
-		BindingSetDescription.Buffers.push_back({ 1, std::cref(*m_ObjectConstantsBuffer) });
-		BindingSetDescription.Buffers.push_back({ 2, std::cref(*m_FrameConstantsBuffer) });
-		BindingSetDescription.Buffers.push_back({ 3, std::cref(*m_LocalLightingConstantsBuffer) });
-		auto BindingSet = m_Runtime.CreateBindingSet(BindingSetDescription);
-		if (!BindingSet)
-			return std::unexpected(MakeResourceError("Could not create material bindings: " + BindingSet.error().Message));
-
-		MaterialBindingResources Resources;
-		Resources.MaterialConstantsBuffer = std::move(MaterialBuffer.value());
-		Resources.BindingSet = std::move(BindingSet.value());
-		m_MaterialBindings.emplace(Key, std::move(Resources));
-		return {};
-	}
-
-	std::expected<void, SceneRendererError> SceneRenderer::EnsureEnvironmentBindings(
-		const AssetID& EnvironmentAsset,
-		const EnvironmentLightingTextures& EnvironmentTextures,
-		bool IsReady)
-	{
-		const std::string Key = EnvironmentAsset.ToString() + (IsReady ? ":ready" : ":loading");
-		if (m_EnvironmentBindingSets.contains(Key))
-			return {};
-		Detail::ScopedProfileTimer Timer("Environment GPU binding creation");
-		BindingSetDesc Description;
-		Description.Layout = m_BindingLayout;
-		Description.Textures = { { 0, std::cref(*m_FallbackBaseColorTexture) },
-			{ 1, std::cref(*EnvironmentTextures.DiffuseIrradiance), BindingResourceType::TextureCube },
-			{ 2, std::cref(*EnvironmentTextures.PrefilteredSpecular), BindingResourceType::TextureCube },
-			{ 3, std::cref(*EnvironmentTextures.BrdfIntegrationLut) },
-			{ 4, std::cref(*EnvironmentTextures.Environment), BindingResourceType::TextureCube },
-			{ 5, std::cref(*m_FallbackMetallicRoughnessTexture) }, { 6, std::cref(*m_FallbackNormalTexture) },
-			{ 7, std::cref(*m_AmbientOcclusionPass->GetFallbackOcclusionTexture()) }, { 8, std::cref(*m_FallbackEmissiveTexture) } };
-		Description.Samplers = {
-			{ 0, std::cref(*m_Sampler) },
-			{ 1, std::cref(*m_EnvironmentSampler) }
-		};
-		Description.Buffers = {
-			{ 0, std::cref(*m_FallbackMaterialConstantsBuffer) },
-			{ 1, std::cref(*m_ObjectConstantsBuffer) },
-			{ 2, std::cref(*m_FrameConstantsBuffer) },
-			{ 3, std::cref(*m_LocalLightingConstantsBuffer) }
-		};
-		auto BindingSet = m_Runtime.CreateBindingSet(Description);
-		if (!BindingSet)
-			return std::unexpected(MakeResourceError("Could not create environment binding set: " + BindingSet.error().Message));
-		m_EnvironmentBindingSets.emplace(Key, std::move(*BindingSet));
 		return {};
 	}
 
@@ -895,7 +677,8 @@ namespace PulseForge
 				EnvironmentTextures = &LoadedEnvironment->value().get();
 				m_PreparedEnvironmentReady = true;
 			}
-			if (auto Bindings = EnsureEnvironmentBindings(*EnvironmentAsset, *EnvironmentTextures, m_PreparedEnvironmentReady); !Bindings)
+			if (auto Bindings = m_MaterialBindingCache->EnsureEnvironmentBindings(
+					*EnvironmentAsset, *EnvironmentTextures, m_PreparedEnvironmentReady); !Bindings)
 				return std::unexpected(std::move(Bindings.error()));
 		}
 
@@ -934,7 +717,8 @@ namespace PulseForge
 					"Visible mesh entity has no material asset assigned"
 				});
 			}
-			if (auto Bindings = EnsureMaterialBindings(*Instance.MaterialAsset, BindingEnvironmentAsset, *EnvironmentTextures); !Bindings)
+			if (auto Bindings = m_MaterialBindingCache->EnsureMaterialBindings(
+					*Instance.MaterialAsset, BindingEnvironmentAsset, *EnvironmentTextures); !Bindings)
 			{
 				Bindings.error().Entity = Instance.Entity;
 				return std::unexpected(std::move(Bindings.error()));
@@ -969,46 +753,19 @@ namespace PulseForge
 		return {};
 	}
 
-	std::expected<const MaterialAssetDesc*, SceneRendererError> SceneRenderer::ResolveMaterialDescription(
-		const SceneMeshInstance& Instance)
+	std::expected<const BindingSet*, SceneRendererError> SceneRenderer::ResolveMaterialBinding(const SceneMeshInstance& Instance)
 	{
-		if (!Instance.MaterialAsset)
-			return std::unexpected(SceneRendererError{
-				SceneRendererErrorCode::MissingMaterial,
-				Instance.Entity,
-				Instance.MeshAsset,
-				"Visible mesh entity has no material asset assigned" });
-		auto Material = m_ProjectAssetCaches->Materials.GetOrLoad(*Instance.MaterialAsset);
-		if (!Material)
-			return std::unexpected(SceneRendererError{
-				SceneRendererErrorCode::AssetLoadFailed,
-				Instance.Entity,
-				*Instance.MaterialAsset,
-				"Could not resolve material for mesh instance: " + Material.error().Message });
-		return &Material->get();
-	}
-
-	std::expected<const SceneRenderer::MaterialBindingResources*, SceneRendererError> SceneRenderer::ResolveMaterialBinding(
-		const SceneMeshInstance& Instance)
-	{
-		if (!Instance.MaterialAsset)
-			return std::unexpected(SceneRendererError{
-				SceneRendererErrorCode::MissingMaterial,
-				Instance.Entity,
-				Instance.MeshAsset,
-				"Visible mesh entity has no material asset assigned" });
 		const std::optional<AssetID> EnvironmentAsset = m_PreparedSnapshot && m_PreparedSnapshot->EnvironmentLight
 			? std::optional<AssetID>{ m_PreparedSnapshot->EnvironmentLight->HdrImage }
 			: std::nullopt;
 		const std::optional<AssetID> BindingEnvironmentAsset = m_PreparedEnvironmentReady ? EnvironmentAsset : std::nullopt;
-		const auto Binding = m_MaterialBindings.find(MakeMaterialBindingKey(*Instance.MaterialAsset, BindingEnvironmentAsset));
-		if (Binding == m_MaterialBindings.end())
-			return std::unexpected(SceneRendererError{
-				SceneRendererErrorCode::AssetLoadFailed,
-				Instance.Entity,
-				*Instance.MaterialAsset,
-				"Prepared material binding set is unavailable" });
-		return &Binding->second;
+		return m_MaterialBindingCache->ResolveMaterialBinding(Instance, BindingEnvironmentAsset);
+	}
+
+	std::expected<const MaterialAssetDesc*, SceneRendererError> SceneRenderer::ResolveMaterialDescription(
+		const SceneMeshInstance& Instance)
+	{
+		return m_MaterialBindingCache->ResolveMaterialDescription(Instance);
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::PrepareLocalLighting()
@@ -1051,7 +808,7 @@ namespace PulseForge
 			RenderTargetFrameScope TargetScope(m_Runtime);
 			for (const SceneMeshInstance& Instance : m_PreparedSnapshot->Meshes)
 			{
-				auto Material = ResolveMaterialDescription(Instance);
+				auto Material = m_MaterialBindingCache->ResolveMaterialDescription(Instance);
 				if (!Material)
 					return std::unexpected(std::move(Material.error()));
 				if ((*Material)->AlphaMode == MaterialAlphaMode::Blend)
@@ -1071,7 +828,7 @@ namespace PulseForge
 				if (!Update)
 					return std::unexpected(MakeDrawError("Could not update spotlight shadow object constants: " + Update.error().Message));
 				const std::array<const BindingSet*, 2> Bindings = {
-					(*MaterialBinding)->BindingSet.get(), m_ShadowObjectBindingSet.get() };
+					*MaterialBinding, m_ShadowObjectBindingSet.get() };
 				const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
 				const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
 				if (!Draw) return std::unexpected(MakeDrawError("Could not draw spotlight shadow caster: " + Draw.error().Message));
@@ -1139,7 +896,7 @@ namespace PulseForge
 					if (!Update)
 						return std::unexpected(MakeDrawError("Could not update point-shadow constants: " + Update.error().Message));
 					const std::array<const BindingSet*, 2> Bindings = {
-						(*MaterialBinding)->BindingSet.get(), m_PointShadowObjectBindingSet.get() };
+						*MaterialBinding, m_PointShadowObjectBindingSet.get() };
 					const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
 					const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
 					if (!Draw) return std::unexpected(MakeDrawError("Could not draw point-shadow caster: " + Draw.error().Message));
@@ -1199,7 +956,7 @@ namespace PulseForge
 				if (!Update)
 					return std::unexpected(MakeDrawError("Could not update shadow object constants: " + Update.error().Message));
 				const std::array<const BindingSet*, 2> Bindings = {
-					(*MaterialBinding)->BindingSet.get(), m_ShadowObjectBindingSet.get() };
+					*MaterialBinding, m_ShadowObjectBindingSet.get() };
 				const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
 				const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
 				if (!Draw) return std::unexpected(MakeDrawError("Could not draw shadow caster: " + Draw.error().Message));
@@ -1224,7 +981,7 @@ namespace PulseForge
 		{
 			auto Bindings = ResolveMaterialBinding(Instance);
 			if (!Bindings) return std::unexpected(std::move(Bindings.error()));
-			return (*Bindings)->BindingSet.get();
+			return *Bindings;
 		};
 
 		const AmbientOcclusionPass::RenderInputs Inputs{ *m_PreparedSnapshot, m_PipelineCache->GetVertexLayout(), m_BindingLayout,
@@ -1243,8 +1000,7 @@ namespace PulseForge
 
 	void SceneRenderer::RefreshMaterialAssets() noexcept
 	{
-		m_MaterialBindings.clear();
-		m_ProjectAssetCaches->Materials.Clear();
+		m_MaterialBindingCache->RefreshMaterialAssets();
 	}
 
 	std::expected<HdrSceneRenderResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToHdr(uint32_t Width, uint32_t Height)
@@ -1487,12 +1243,11 @@ namespace PulseForge
 
 		if (m_PreparedSnapshot->EnvironmentLight)
 		{
-			const std::string EnvironmentKey = m_PreparedSnapshot->EnvironmentLight->HdrImage.ToString() +
-				(m_PreparedEnvironmentReady ? ":ready" : ":loading");
-			const auto BackgroundBindings = m_EnvironmentBindingSets.find(EnvironmentKey);
-			if (BackgroundBindings == m_EnvironmentBindingSets.end())
+			const BindingSet* BackgroundBindings = m_MaterialBindingCache->FindEnvironmentBindings(
+				m_PreparedSnapshot->EnvironmentLight->HdrImage, m_PreparedEnvironmentReady);
+			if (!BackgroundBindings)
 				return std::unexpected(MakeDrawError("Prepared environment background bindings are unavailable"));
-			const std::array<const BindingSet*, 1> BindingSets = { BackgroundBindings->second.get() };
+			const std::array<const BindingSet*, 1> BindingSets = { BackgroundBindings };
 			const DrawArguments BackgroundArguments{ 3, 1, 0, 0 };
 			const GraphicsPipeline* BackgroundPipeline = m_PipelineCache->FindBackgroundPipeline(ColorFormat);
 			if (!BackgroundPipeline) return std::unexpected(MakeDrawError("Prepared environment background pipeline is unavailable"));
@@ -1554,7 +1309,7 @@ namespace PulseForge
 
 			const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
 			const BindingSet* AmbientOcclusionBindings = m_AmbientOcclusionPass->GetSceneBindingSet();
-			const std::array<const BindingSet*, 5> BindingSets = { (*MaterialBinding)->BindingSet.get(),
+			const std::array<const BindingSet*, 5> BindingSets = { *MaterialBinding,
 				&m_ShadowTargetCache->DirectionalBindings(), AmbientOcclusionBindings, &m_ShadowTargetCache->SpotlightBindings(),
 				&m_ShadowTargetCache->PointLightBindings() };
 			const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, BindingSets);
