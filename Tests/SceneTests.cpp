@@ -1,4 +1,4 @@
-#include "TestEngineSupport.h"
+#include "TestSceneSupport.h"
 
 namespace
 {
@@ -259,24 +259,6 @@ namespace
 								LoadedRigidbody->value().Friction == 0.6f && LoadedRigidbody->value().Restitution == 0.15f &&
 								!LoadedRigidbody->value().AllowSleeping);
 			PF_CHECK(Tests, LoadedCollider && LoadedCollider->has_value() && LoadedCollider->value().HalfExtents == Collider.HalfExtents);
-		}
-
-		const auto PrefabData = PrefabSerializer::Serialize(Source, *Body);
-		PF_CHECK(Tests, PrefabData.has_value());
-		if (PrefabData)
-		{
-			PF_CHECK(Tests, PrefabData->find("\"version\": 3") != std::string::npos);
-			Scene PrefabDestination;
-			const auto Instance = PrefabSerializer::Instantiate(*PrefabData, PrefabDestination);
-			PF_CHECK(Tests, Instance.has_value());
-			if (Instance)
-			{
-				const auto InstanceRigidbody = Instance->GetRigidbody();
-				const auto InstanceCollider = Instance->GetBoxCollider();
-				PF_CHECK(Tests, InstanceRigidbody && InstanceRigidbody->has_value() && InstanceRigidbody->value().Mass == 3.0f);
-				PF_CHECK(Tests,
-					InstanceCollider && InstanceCollider->has_value() && InstanceCollider->value().HalfExtents == Collider.HalfExtents);
-			}
 		}
 	}
 

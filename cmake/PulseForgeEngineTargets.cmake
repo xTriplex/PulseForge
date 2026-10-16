@@ -47,6 +47,8 @@ target_link_libraries(PulseForgeSceneSerialization PUBLIC PulseForgeScene)
 add_library(PulseForgeMeshData STATIC PulseForge/Source/Private/Renderer/MeshData.cpp)
 target_include_directories(PulseForgeMeshData PUBLIC PulseForge/Source/Public)
 target_compile_definitions(PulseForgeMeshData PRIVATE PF_PLATFORM_WINDOWS)
+add_library(PulseForgeImageData INTERFACE)
+target_include_directories(PulseForgeImageData INTERFACE PulseForge/Source/Public)
 add_library(PulseForgeRenderMath STATIC
 	PulseForge/Source/Private/Renderer/DirectionalShadowMath.cpp
 	PulseForge/Source/Private/Renderer/SpotlightShadowMath.cpp
@@ -158,7 +160,7 @@ target_compile_definitions(PulseForgeRenderer PRIVATE
 	GLFW_INCLUDE_NONE
 )
 target_link_libraries(PulseForgeRenderer
-	PUBLIC PulseForgeCore PulseForgeMeshData
+	PUBLIC PulseForgeCore PulseForgeMeshData PulseForgeImageData
 	PRIVATE PulseForgeWindow glfw PulseForgeGlad opengl32 nvrhi nvrhi_vk Vulkan-Headers
 )
 target_precompile_headers(PulseForgeRenderer PRIVATE "${PULSEFORGE_ENGINE_PCH}")
@@ -175,7 +177,7 @@ target_include_directories(PulseForgeAssetImporters SYSTEM PRIVATE
 	PulseForge/Vendor/stb
 )
 target_compile_definitions(PulseForgeAssetImporters PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(PulseForgeAssetImporters PUBLIC PulseForgeAssetCatalog PulseForgeMeshData)
+target_link_libraries(PulseForgeAssetImporters PUBLIC PulseForgeAssetCatalog PulseForgeMeshData PulseForgeImageData)
 target_precompile_headers(PulseForgeAssetImporters PRIVATE "${PULSEFORGE_ENGINE_PCH}")
 add_library(PulseForgeApplication STATIC PulseForge/Source/Private/Core/Application.cpp)
 target_include_directories(PulseForgeApplication

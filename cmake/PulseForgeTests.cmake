@@ -9,11 +9,13 @@ if(BUILD_TESTING)
 	add_executable(PulseForgeRendererTests
 		Tests/PulseForgeRendererTests.cpp
 		Tests/RendererPolicyTests.cpp
+		Tests/RendererContractTests.cpp
+		Tests/RendererTests.cpp
 	)
 	target_include_directories(PulseForgeRendererTests PRIVATE Tests)
 	target_compile_definitions(PulseForgeRendererTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeRendererTests PRIVATE PulseForgeRenderer)
-	add_test(NAME PulseForge.RendererPolicy COMMAND PulseForgeRendererTests)
+	add_test(NAME PulseForge.Renderer COMMAND PulseForgeRendererTests)
 
 	add_executable(PulseForgeRenderMathTests
 		Tests/PulseForgeRenderMathTests.cpp
@@ -33,26 +35,52 @@ if(BUILD_TESTING)
 	target_link_libraries(PulseForgeGpuValidationAnalysisTests PRIVATE PulseForgeGpuValidationAnalysis)
 	add_test(NAME PulseForge.GpuValidationAnalysis COMMAND PulseForgeGpuValidationAnalysisTests)
 
-	add_executable(PulseForgeTests
+	add_executable(PulseForgeCoreTests
 		Tests/PulseForgeTests.cpp
 		Tests/CoreTests.cpp
+	)
+	target_include_directories(PulseForgeCoreTests PRIVATE Tests)
+	target_compile_definitions(PulseForgeCoreTests PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeCoreTests PRIVATE PulseForgeCore)
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeCoreTests PulseForgePublicHeaderChecks)
+	endif()
+	add_test(NAME PulseForge.Core COMMAND PulseForgeCoreTests)
+
+	add_executable(PulseForgeSceneTests
+		Tests/PulseForgeSceneTests.cpp
 		Tests/SceneTests.cpp
-		Tests/SceneAssetTests.cpp
+	)
+	target_include_directories(PulseForgeSceneTests PRIVATE Tests)
+	target_compile_definitions(PulseForgeSceneTests PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeSceneTests PRIVATE
+		PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath PulseForgePhysics)
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeSceneTests PulseForgePublicHeaderChecks)
+	endif()
+	add_test(NAME PulseForge.Scene COMMAND PulseForgeSceneTests)
+
+	add_executable(PulseForgeAssetTests
+		Tests/PulseForgeAssetTests.cpp
 		Tests/AssetsTests.cpp
+		Tests/SceneAssetTests.cpp
 		Tests/AssetRegistryTests.cpp
 		Tests/AssetOperationsTests.cpp
-		Tests/RendererTests.cpp
 	)
-	target_include_directories(PulseForgeTests PRIVATE
-		Tests
-		PulseForge/Vendor/json/include
-	)
-	target_compile_definitions(PulseForgeTests PRIVATE PF_PLATFORM_WINDOWS)
-	target_link_libraries(PulseForgeTests PRIVATE ${PULSEFORGE_ENGINE_TEST_LIBRARIES})
+	target_include_directories(PulseForgeAssetTests PRIVATE Tests PulseForge/Vendor/json/include)
+	target_compile_definitions(PulseForgeAssetTests PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeAssetTests PRIVATE
+		PulseForgeAssetCatalog PulseForgeAssetServices PulseForgeSceneSerialization)
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeAssetTests PulseForgePublicHeaderChecks)
+	endif()
+	add_test(NAME PulseForge.Assets COMMAND PulseForgeAssetTests)
+
+	add_custom_target(PulseForgeTests)
+	add_dependencies(PulseForgeTests PulseForgeCoreTests PulseForgeSceneTests PulseForgeAssetTests PulseForgeRendererTests)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeTests PulseForgePublicHeaderChecks)
 	endif()
-	add_test(NAME PulseForge.Engine COMMAND PulseForgeTests)
 
 	add_executable(PulseForgeAssetImportTests
 		Tests/PulseForgeAssetImportTests.cpp
@@ -110,6 +138,12 @@ if(BUILD_TESTING)
 	add_test(NAME PulseForge.EditorCore COMMAND PulseForgeEditorCoreTests)
 
 	if(PULSEFORGE_BUILD_EDITOR)
+		set(PULSEFORGE_EDITOR_INTEGRATION_LIBRARIES
+			PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath
+			PulseForgeAssetCatalog PulseForgeAssetImporters PulseForgeAudio PulseForgeAudioAssets
+			PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeScripting PulseForgeRuntime
+			PulseForgeRenderer PulseForgeApplication PulseForgeSceneRenderer
+		)
 		add_executable(PulseForgeEditorTests
 			Tests/PulseForgeEditorTests.cpp
 			Tests/EditorTests.cpp
@@ -141,7 +175,7 @@ if(BUILD_TESTING)
 			target_compile_definitions(PulseForgeEditorTests PRIVATE PF_EDITOR_RENDERER_OPENGL)
 		endif()
 		target_link_libraries(PulseForgeEditorTests PRIVATE
-			PulseForgeEditorCore PulseForgeEditorUI ${PULSEFORGE_ENGINE_TEST_LIBRARIES} PulseForgeImGui spdlog::spdlog)
+			PulseForgeEditorCore PulseForgeEditorUI ${PULSEFORGE_EDITOR_INTEGRATION_LIBRARIES} PulseForgeImGui spdlog::spdlog)
 		if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 			add_dependencies(PulseForgeEditorTests PulseForgePublicHeaderChecks)
 		endif()
@@ -158,7 +192,7 @@ if(BUILD_TESTING)
 		)
 		target_compile_definitions(PulseForgeEditorWorkspacePresentationTests PRIVATE PF_PLATFORM_WINDOWS)
 		target_link_libraries(PulseForgeEditorWorkspacePresentationTests PRIVATE
-			PulseForgeEditorCore PulseForgeEditorUI ${PULSEFORGE_ENGINE_TEST_LIBRARIES} PulseForgeImGui spdlog::spdlog)
+			PulseForgeEditorCore PulseForgeEditorUI ${PULSEFORGE_EDITOR_INTEGRATION_LIBRARIES} PulseForgeImGui spdlog::spdlog)
 		if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 			add_dependencies(PulseForgeEditorWorkspacePresentationTests PulseForgePublicHeaderChecks)
 		endif()

@@ -497,7 +497,8 @@ function Format-Bytes
 
 function Get-ActiveProcessWarnings
 {
-	$names = @('devenv', 'Code', 'codex', 'PulseForgeEditor', 'PulseForgeGame', 'PulseForgeTests', 'PulseForgeEditorTests',
+	$names = @('devenv', 'Code', 'codex', 'PulseForgeEditor', 'PulseForgeGame', 'PulseForgeTests', 'PulseForgeCoreTests',
+		'PulseForgeSceneTests', 'PulseForgeAssetTests', 'PulseForgeRendererTests', 'PulseForgeEditorTests',
 		'PulseForgeGpuValidation', 'cmake', 'cmake-gui', 'ctest', 'ninja', 'MSBuild', 'cl', 'link', 'python', 'python3', 'VBCSCompiler', 'dotnet')
 	$found = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
 		($names -contains $_.ProcessName) -or ($_.ProcessName -like 'ServiceHub.*') -or ($_.ProcessName -like 'Microsoft.ServiceHub.*')

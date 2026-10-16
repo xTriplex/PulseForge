@@ -16,10 +16,9 @@ foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSe
 		PulseForgeScripting PulseForgeRuntime PulseForgeRenderer PulseForgeMeshData
 		PulseForgeApplication PulseForgeSceneRenderer
 		PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI PulseForgeRendererTests PulseForgeRenderMathTests PulseForgeGpuValidationAnalysis PulseForgeGpuValidationAnalysisTests
-                                PulseForgeTests PulseForgeAssetImportTests PulseForgeAssetImporterConsumer PulseForgeAudioRuntimeTests
-				PulseForgeSceneRendererConsumer
-                                PulseForgeEditorTests PulseForgeEditorWorkspacePresentationTests PulseForgeEditorCoreTests
-				PulseForgeBufferUpdateTests PulseForgeGpuValidation)
+		PulseForgeCoreTests PulseForgeSceneTests PulseForgeAssetTests PulseForgeAssetImportTests PulseForgeAssetImporterConsumer PulseForgeAudioRuntimeTests
+		PulseForgeSceneRendererConsumer PulseForgeEditorTests PulseForgeEditorWorkspacePresentationTests PulseForgeEditorCoreTests
+		PulseForgeBufferUpdateTests PulseForgeGpuValidation)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE
 			$<$<CXX_COMPILER_ID:MSVC>:/EHsc>

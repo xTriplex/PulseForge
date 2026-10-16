@@ -55,7 +55,7 @@ foreach(QualityTest PulseForge.SourceQuality PulseForge.SourceQualityRules Pulse
 	endif()
 endforeach()
 
-foreach(CppTest PulseForge.Engine PulseForge.AssetImports PulseForge.EditorCore)
+foreach(CppTest PulseForge.Core PulseForge.Scene PulseForge.Assets PulseForge.Renderer PulseForge.AssetImports PulseForge.EditorCore)
 	if(NOT CppTest IN_LIST RegisteredTests)
 		message(FATAL_ERROR "Quality separation removed ordinary C++ test ${CppTest}")
 	endif()

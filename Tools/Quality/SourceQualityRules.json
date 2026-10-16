@@ -63,6 +63,10 @@
   "owner_scoped_test_targets" :
   [
     "PulseForgeTests",
+    "PulseForgeCoreTests",
+    "PulseForgeSceneTests",
+    "PulseForgeAssetTests",
+    "PulseForgeRendererTests",
     "PulseForgeEditorTests",
     "PulseForgeEditorCoreTests",
     "PulseForgeBufferUpdateTests",
@@ -83,6 +87,7 @@
     "PulseForge/Source/Public/Assets/AudioAssetCache.h" : "PulseForgeAudioAssets",
     "PulseForge/Source/Public/Assets/GltfMeshImporter.h" : "PulseForgeAssetImporters",
     "PulseForge/Source/Public/Assets/ImageAssetImporter.h" : "PulseForgeAssetImporters",
+    "PulseForge/Source/Public/Assets/ImportedImageData.h" : "PulseForgeImageData",
     "PulseForge/Source/Public/Assets/MaterialAsset.h" : "PulseForgeAssetServices",
     "PulseForge/Source/Public/Assets/MaterialAssetCache.h" : "PulseForgeAssetServices",
     "PulseForge/Source/Public/Assets/MaterialAssetService.h" : "PulseForgeAssetServices",

@@ -1,11 +1,4 @@
 if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
-	set(PULSEFORGE_ENGINE_TEST_LIBRARIES
-		PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath
-		PulseForgeAssetCatalog PulseForgeAssetImporters PulseForgeAudio PulseForgeAudioAssets
-		PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeScripting PulseForgeRuntime
-		PulseForgeRenderer PulseForgeApplication PulseForgeSceneRenderer
-	)
-
 	add_library(PulseForgeEditorCore STATIC
 		PulseForgeEditor/Source/Private/EditorEntityClipboard.cpp
 		PulseForgeEditor/Source/Private/EditorAssetWorkflowState.cpp

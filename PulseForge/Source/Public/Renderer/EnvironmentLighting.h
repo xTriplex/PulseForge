@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Assets/ImageAssetImporter.h"
+#include "Assets/ImportedImageData.h"
 #include "Core/Core.h"
 
 #include <array>
