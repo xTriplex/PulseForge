@@ -1,5 +1,6 @@
 #include "Renderer/SceneRenderer.h"
 #include "Renderer/SceneRendererAmbientOcclusionPass.h"
+#include "Renderer/SceneRendererHdrTargetCache.h"
 #include "Renderer/SceneRendererToneMappingStage.h"
 
 #include "Assets/MaterialAssetCache.h"
@@ -198,7 +199,7 @@ namespace PulseForge
 
 	SceneRenderer::SceneRenderer(RenderDevice& Runtime, const Project& SourceProject)
 		: m_Runtime(Runtime), m_Project(SourceProject), m_ProjectAssetCaches(std::make_unique<ProjectAssetCaches>(Runtime, SourceProject)),
-		  m_ToneMappingStage(std::make_unique<ToneMappingStage>(Runtime)),
+		  m_ToneMappingStage(std::make_unique<ToneMappingStage>(Runtime)), m_HdrTargetCache(std::make_unique<HdrTargetCache>(Runtime)),
 		  m_AmbientOcclusionPass(std::make_unique<AmbientOcclusionPass>(Runtime))
 	{
 	}
@@ -1693,58 +1694,6 @@ namespace PulseForge
 		return {};
 	}
 
-	std::expected<void, SceneRendererError> SceneRenderer::EnsureHdrSceneTarget(uint32_t Width, uint32_t Height)
-	{
-		if (Width == 0 || Height == 0)
-			return std::unexpected(MakeResourceError("HDR scene target dimensions must be non-zero"));
-
-		if (m_HdrSceneTarget && MatchesRenderTargetConfiguration(
-			m_HdrSceneTarget->GetDescription(),
-			Width,
-			Height,
-			ColorTargetFormat::RGBA16_Float,
-			DepthAttachmentMode::Attachment))
-		{
-			const Texture* Color = m_HdrSceneTarget->GetColorTexture();
-			const Texture* Depth = m_HdrSceneTarget->GetDepthTexture();
-			if (Color && Depth && Color->GetDescription().Format == TextureFormat::RGBA16_Float &&
-				Depth->GetDescription().Format == TextureFormat::Depth32Float)
-				return {};
-		}
-
-		RenderTargetDesc Description;
-		Description.Width = Width;
-		Description.Height = Height;
-		Description.ColorFormat = ColorTargetFormat::RGBA16_Float;
-		Description.DepthMode = DepthAttachmentMode::Attachment;
-		Description.DebugName = "PulseForge persistent HDR scene target";
-		auto Replacement = m_Runtime.CreateRenderTarget(Description);
-		if (!Replacement)
-			return std::unexpected(MakeResourceError("Could not create HDR scene target: " + Replacement.error().Message));
-
-		const Texture* Color = (*Replacement)->GetColorTexture();
-		const Texture* Depth = (*Replacement)->GetDepthTexture();
-		if (!Color || !Depth || Color->GetDescription().Width != Width || Color->GetDescription().Height != Height ||
-			Color->GetDescription().Format != TextureFormat::RGBA16_Float ||
-			!HasTextureUsage(Color->GetDescription().Usage, TextureUsage::ColorAttachment) ||
-			!HasTextureUsage(Color->GetDescription().Usage, TextureUsage::ShaderResource) ||
-			Depth->GetDescription().Width != Width || Depth->GetDescription().Height != Height ||
-			Depth->GetDescription().Format != TextureFormat::Depth32Float ||
-			!HasTextureUsage(Depth->GetDescription().Usage, TextureUsage::DepthStencilAttachment))
-		{
-			return std::unexpected(MakeResourceError("HDR scene target returned incompatible color or depth attachments"));
-		}
-
-		m_ToneMappingStage->InvalidateBindings();
-		m_HdrSceneTarget = std::move(*Replacement);
-		if (m_HdrSceneTargetGeneration == (std::numeric_limits<uint64_t>::max)())
-			m_HdrSceneTargetGeneration = 1;
-		else
-			++m_HdrSceneTargetGeneration;
-		PF_CORE_INFO("Created/resized persistent RGBA16F HDR scene target to {0}x{1}", Width, Height);
-		return {};
-	}
-
 	std::expected<HdrSceneRenderResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToHdr(
 		uint32_t Width,
 		uint32_t Height)
@@ -1756,35 +1705,22 @@ namespace PulseForge
 				{},
 				"HDR scene rendering requires a successfully prepared scene snapshot" });
 
-		if (auto Target = EnsureHdrSceneTarget(Width, Height); !Target)
-			return std::unexpected(std::move(Target.error()));
+		if (m_HdrTargetCache->NeedsReplacement(Width, Height)) m_ToneMappingStage->InvalidateBindings();
+		auto Target = m_HdrTargetCache->Ensure(Width, Height);
+		if (!Target) return std::unexpected(std::move(Target.error()));
 
 		RenderTargetClearValue ClearValue;
 		ClearValue.Color = { 0.0f, 0.0f, 0.0f, 1.0f };
 		ClearValue.Depth = 1.0f;
-		auto Rendered = RenderPreparedScene(*m_HdrSceneTarget, ClearValue);
-		if (!Rendered)
-			return std::unexpected(std::move(Rendered.error()));
+		auto Rendered = RenderPreparedScene(*Target->Target, ClearValue);
+		if (!Rendered) return std::unexpected(std::move(Rendered.error()));
 
-		const Texture* Color = m_HdrSceneTarget->GetColorTexture();
-		if (!Color)
-			return std::unexpected(MakeResourceError("HDR scene target color texture is unavailable after rendering"));
-		return HdrSceneRenderResult{
-			Color,
-			m_HdrSceneTarget->GetDepthTexture(),
-			Width,
-			Height,
-			*Rendered,
-			m_LastSpotShadowPassCount,
-			m_LastSpotShadowCasterDrawCount,
-			m_PreparedSnapshot->EnvironmentLight.has_value(),
-			m_HdrSceneTargetGeneration,
-			m_SpotShadowResourceGeneration,
-			m_LastPointShadowPassCount,
-			m_LastPointShadowCasterDrawCount,
-			m_PointShadowResourceGeneration,
-			m_PointShadowSlotOwners
-		};
+		const Texture* Color = Target->Target->GetColorTexture();
+		if (!Color) return std::unexpected(MakeResourceError("HDR scene target color texture is unavailable after rendering"));
+		return HdrSceneRenderResult{ Color, Target->Target->GetDepthTexture(), Width, Height, *Rendered, m_LastSpotShadowPassCount,
+			m_LastSpotShadowCasterDrawCount, m_PreparedSnapshot->EnvironmentLight.has_value(), Target->Generation,
+			m_SpotShadowResourceGeneration, m_LastPointShadowPassCount, m_LastPointShadowCasterDrawCount, m_PointShadowResourceGeneration,
+			m_PointShadowSlotOwners };
 	}
 
 	std::expected<SceneRenderOutputResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToOutput()

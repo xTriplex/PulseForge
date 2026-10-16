@@ -166,6 +166,7 @@ namespace PulseForge
 		struct ProjectAssetCaches;
 		class ToneMappingStage;
 		class AmbientOcclusionPass;
+		class HdrTargetCache;
 
 		SceneRenderer(RenderDevice& Runtime, const Project& SourceProject);
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
@@ -179,7 +180,6 @@ namespace PulseForge
 			bool AlphaBlend = false,
 			bool DoubleSided = false);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBackgroundPipeline(ColorTargetFormat ColorFormat);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureHdrSceneTarget(uint32_t Width, uint32_t Height);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureShadowPipeline(float DepthBias, bool DoubleSided = false);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureSpotShadowResources();
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePointShadowResources();
@@ -267,6 +267,7 @@ namespace PulseForge
 		const Project& m_Project;
 		std::unique_ptr<ProjectAssetCaches> m_ProjectAssetCaches;
 		std::unique_ptr<ToneMappingStage> m_ToneMappingStage;
+		std::unique_ptr<HdrTargetCache> m_HdrTargetCache;
 		ShaderHandle m_VertexShader;
 		ShaderHandle m_FragmentShader;
 		ShaderHandle m_BackgroundVertexShader;
@@ -306,7 +307,6 @@ namespace PulseForge
 		std::array<RenderTargetHandle, 4> m_ShadowTargets;
 		std::array<RenderTargetHandle, MaxSpotlightShadowMapCount> m_SpotShadowTargets;
 		std::array<DepthCubemapHandle, MaxPointLightShadowCount> m_PointShadowCubemaps;
-		RenderTargetHandle m_HdrSceneTarget;
 		EnvironmentLightingTextures m_FallbackEnvironmentTextures;
 		std::unordered_map<std::string, MaterialBindingResources> m_MaterialBindings;
 		std::unordered_map<std::string, BindingSetHandle> m_EnvironmentBindingSets;
@@ -327,7 +327,6 @@ namespace PulseForge
 		size_t m_SelectedLocalLightCount = 0;
 		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;
 		std::unique_ptr<AmbientOcclusionPass> m_AmbientOcclusionPass;
-		uint64_t m_HdrSceneTargetGeneration = 0;
 		bool m_EnvironmentLightingPending = false;
 		bool m_PreparedEnvironmentReady = false;
 		bool m_LoggedFirstSnapshotPreparation = false;

@@ -282,6 +282,7 @@
   {
     "PulseForge/Source/Private/Assets/AudioAssetCache.cpp" : "PulseForgeAudioAssets",
     "PulseForge/Source/Private/Renderer/MeshData.cpp" : "PulseForgeMeshData",
+	"PulseForge/Source/Private/Renderer/SceneRendererHdrTargetCache.cpp" : "PulseForgeSceneRenderer",
 	"PulseForge/Source/Private/Renderer/RenderDevice.cpp" : "PulseForgeRenderer",
     "PulseForgeEditor/Source/Private/EditorAssetDestinationDialog.cpp" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorAssetSelector.cpp" : "PulseForgeEditorUI",
