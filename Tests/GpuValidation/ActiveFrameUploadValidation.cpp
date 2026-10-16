@@ -1,4 +1,5 @@
 #include "GpuValidation/ActiveFrameUploadValidation.h"
+#include "GpuValidation/ValidationShader.h"
 
 #include "Core/Application.h"
 #include "Core/Layer.h"
@@ -9,7 +10,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -25,22 +25,6 @@ namespace PulseForge::GpuValidation
 			float Position[2];
 			float TexCoord[2];
 		};
-
-		std::vector<std::byte> LoadShader(const std::filesystem::path& Path)
-		{
-			std::ifstream Input(Path, std::ios::binary | std::ios::ate);
-			if (!Input) throw std::runtime_error("Could not open GPU-validation shader: " + Path.string());
-
-			const std::streamoff FileSize = Input.tellg();
-			if (FileSize < 20 || FileSize > 16 * 1024 * 1024 || FileSize % sizeof(uint32_t) != 0)
-				throw std::runtime_error("GPU-validation shader has an invalid byte size: " + Path.string());
-
-			std::vector<std::byte> Bytecode(static_cast<size_t>(FileSize));
-			Input.seekg(0, std::ios::beg);
-			Input.read(reinterpret_cast<char*>(Bytecode.data()), static_cast<std::streamsize>(FileSize));
-			if (!Input) throw std::runtime_error("Could not read GPU-validation shader: " + Path.string());
-			return Bytecode;
-		}
 
 		class ActiveFrameUploadValidationLayer final : public Layer
 		{
@@ -164,8 +148,9 @@ namespace PulseForge::GpuValidation
 			{
 				Application& App = Application::Get();
 				const std::filesystem::path ShaderDirectory(PF_GPU_VALIDATION_SHADER_DIRECTORY);
-				const std::vector<std::byte> VertexBytecode = LoadShader(ShaderDirectory / "GpuRendererValidation.vs.spv");
-				const std::vector<std::byte> SamplingBytecode = LoadShader(ShaderDirectory / "GpuRendererValidation.sample.ps.spv");
+				const std::vector<std::byte> VertexBytecode = LoadValidationShader(ShaderDirectory / "GpuRendererValidation.vs.spv");
+				const std::vector<std::byte> SamplingBytecode =
+					LoadValidationShader(ShaderDirectory / "GpuRendererValidation.sample.ps.spv");
 
 				ShaderDesc VertexDescription;
 				VertexDescription.Stage = ShaderStage::Vertex;
