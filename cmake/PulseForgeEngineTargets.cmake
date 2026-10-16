@@ -142,6 +142,7 @@ add_library(PulseForgeRenderer STATIC
 	PulseForge/Source/Private/Renderer/Graphics.cpp
 	PulseForge/Source/Private/Renderer/EnvironmentLighting.cpp
 	PulseForge/Source/Private/Renderer/RendererBackend.cpp
+	PulseForge/Source/Private/Renderer/Vulkan/VulkanResourceObjects.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanSupport.cpp
 )
