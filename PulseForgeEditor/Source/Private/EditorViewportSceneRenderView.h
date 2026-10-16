@@ -61,10 +61,19 @@ namespace PulseForgeEditor
 		[[nodiscard]] const std::string& GetSceneError() const noexcept { return m_SceneError; }
 
 	private:
+		enum class SceneErrorOrigin
+		{
+			None,
+			Preparation,
+			Rendering,
+			TargetClear
+		};
+
 		void SetTargetError(std::string Message);
 		void ClearTargetError() noexcept;
-		void SetSceneError(std::string Message);
+		void SetSceneError(std::string Message, SceneErrorOrigin Origin = SceneErrorOrigin::Preparation);
 		void ClearSceneError() noexcept;
+		void ClearSceneErrorIf(SceneErrorOrigin Origin) noexcept;
 		[[nodiscard]] bool ClearTarget(
 			PulseForge::RenderDevice& Runtime, const PulseForge::RenderTargetClearValue& Clear, std::string_view FailureContext);
 
@@ -81,5 +90,6 @@ namespace PulseForgeEditor
 		EditorViewportInitializationRetry m_SceneRendererInitializationRetry;
 		std::string m_TargetError;
 		std::string m_SceneError;
+		SceneErrorOrigin m_SceneErrorOrigin = SceneErrorOrigin::None;
 	};
 } // namespace PulseForgeEditor

@@ -85,11 +85,23 @@ namespace
 		[[nodiscard]] PulseForge::GraphicsResult BeginRenderTarget(
 			const PulseForge::RenderTarget&, const PulseForge::RenderTargetClearValue&) override
 		{
-			return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::InvalidFrameState, "unused" });
+			++ClearBegins;
+			if (FailNextClearBegin)
+			{
+				FailNextClearBegin = false;
+				return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::BackendFailure, "injected begin failure" });
+			}
+			return {};
 		}
 		[[nodiscard]] PulseForge::GraphicsResult EndRenderTarget() override
 		{
-			return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::InvalidFrameState, "unused" });
+			++ClearEnds;
+			if (FailNextClearEnd)
+			{
+				FailNextClearEnd = false;
+				return std::unexpected(PulseForge::GraphicsError{ PulseForge::GraphicsErrorCode::BackendFailure, "injected end failure" });
+			}
+			return {};
 		}
 		[[nodiscard]] PulseForge::BufferCreateResult CreateBuffer(const PulseForge::BufferDesc&, std::span<const std::byte>) override
 		{
@@ -147,7 +159,11 @@ namespace
 
 		bool FailNextRenderTarget = false;
 		bool NextTargetWithoutColor = false;
+		bool FailNextClearBegin = false;
+		bool FailNextClearEnd = false;
 		size_t RenderTargetCreations = 0;
+		size_t ClearBegins = 0;
+		size_t ClearEnds = 0;
 		std::shared_ptr<FakeTextureLifetime> LastTextureLifetime;
 	};
 
@@ -218,6 +234,16 @@ namespace
 		PF_CHECK(Tests, View.HasTarget() && View.GetTextureID() == 1);
 		PF_CHECK(Tests, View.GetWidth() == 128 && View.GetHeight() == 96);
 		PF_CHECK(Tests, Registry.RegisteredCount() == 1);
+		PulseForge::RenderTargetClearValue Background;
+		Runtime.FailNextClearBegin = true;
+		PF_CHECK(Tests, !View.Render(Runtime, true, 0.0f, Background) && !View.GetSceneError().empty());
+		PF_CHECK(Tests, Runtime.ClearBegins == 1 && Runtime.ClearEnds == 0);
+		PF_CHECK(Tests, !View.Render(Runtime, true, 0.0f, Background) && View.GetSceneError().empty());
+		PF_CHECK(Tests, Runtime.ClearBegins == 2 && Runtime.ClearEnds == 1);
+		Runtime.FailNextClearEnd = true;
+		PF_CHECK(Tests, !View.Render(Runtime, true, 0.0f, Background) && !View.GetSceneError().empty());
+		PF_CHECK(Tests, !View.Render(Runtime, true, 0.0f, Background) && View.GetSceneError().empty());
+		PF_CHECK(Tests, Runtime.ClearBegins == 4 && Runtime.ClearEnds == 3);
 
 		const auto Unchanged = View.EnsureTarget(100.0f, 80.0f, 1.25f, 1.0f, Runtime, Registry);
 		PF_CHECK(Tests, Unchanged && !*Unchanged);

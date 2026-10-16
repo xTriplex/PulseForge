@@ -153,7 +153,7 @@ namespace PulseForgeEditor
 			return;
 		}
 
-		ClearSceneError();
+		ClearSceneErrorIf(SceneErrorOrigin::Preparation);
 		m_ViewProjectionValid = SceneMode.ViewProjectionValid;
 		m_SceneReady = true;
 		m_EnvironmentLightingPending = m_SceneRenderer->IsEnvironmentLightingPending();
@@ -178,12 +178,12 @@ namespace PulseForgeEditor
 			ToneSettings.ExposureEV = ExposureEV;
 			if (!m_SceneRenderer->SetToneMappingSettings(ToneSettings))
 			{
-				SetSceneError("The viewport exposure value is outside the supported range");
+				SetSceneError("The viewport exposure value is outside the supported range", SceneErrorOrigin::Rendering);
 				return false;
 			}
 			if (auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_Target); !Rendered)
 			{
-				SetSceneError("Scene viewport rendering failed: " + Rendered.error().Message);
+				SetSceneError("Scene viewport rendering failed: " + Rendered.error().Message, SceneErrorOrigin::Rendering);
 				(void)ClearTarget(Runtime, Background, "Could not clear the scene viewport after rendering failed");
 				return false;
 			}
@@ -255,8 +255,9 @@ namespace PulseForgeEditor
 		m_TargetError.clear();
 	}
 
-	void EditorViewportSceneRenderView::SetSceneError(std::string Message)
+	void EditorViewportSceneRenderView::SetSceneError(std::string Message, SceneErrorOrigin Origin)
 	{
+		m_SceneErrorOrigin = Origin;
 		if (m_SceneError == Message) return;
 		m_SceneError = std::move(Message);
 		PF_WARN("{}", m_SceneError);
@@ -265,6 +266,12 @@ namespace PulseForgeEditor
 	void EditorViewportSceneRenderView::ClearSceneError() noexcept
 	{
 		m_SceneError.clear();
+		m_SceneErrorOrigin = SceneErrorOrigin::None;
+	}
+
+	void EditorViewportSceneRenderView::ClearSceneErrorIf(SceneErrorOrigin Origin) noexcept
+	{
+		if (m_SceneErrorOrigin == Origin) ClearSceneError();
 	}
 
 	bool EditorViewportSceneRenderView::ClearTarget(
@@ -272,14 +279,15 @@ namespace PulseForgeEditor
 	{
 		if (auto Begin = Runtime.BeginRenderTarget(*m_Target, Clear); !Begin)
 		{
-			SetSceneError(std::string(FailureContext) + ": " + Begin.error().Message);
+			SetSceneError(std::string(FailureContext) + ": " + Begin.error().Message, SceneErrorOrigin::TargetClear);
 			return false;
 		}
 		if (auto End = Runtime.EndRenderTarget(); !End)
 		{
-			SetSceneError(std::string(FailureContext) + ": " + End.error().Message);
+			SetSceneError(std::string(FailureContext) + ": " + End.error().Message, SceneErrorOrigin::TargetClear);
 			return false;
 		}
+		ClearSceneErrorIf(SceneErrorOrigin::TargetClear);
 		return true;
 	}
 } // namespace PulseForgeEditor
