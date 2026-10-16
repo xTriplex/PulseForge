@@ -35,6 +35,40 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 		message(FATAL_ERROR "Pinned DXC archive did not contain the expected Windows x64 compiler: ${PULSEFORGE_DXC}")
 	endif()
 
+	function(pulseforge_add_spirv_shader Output Source Profile Entry)
+		cmake_parse_arguments(PARSE_ARGV 4 Shader "" "COMMENT" "OPTIONS")
+		if(NOT Output OR NOT Source OR NOT Profile OR NOT Entry OR NOT Shader_COMMENT)
+			message(FATAL_ERROR "pulseforge_add_spirv_shader requires output, source, profile, entry, and COMMENT")
+		endif()
+		if(Shader_UNPARSED_ARGUMENTS)
+			message(FATAL_ERROR "Unexpected arguments to pulseforge_add_spirv_shader: ${Shader_UNPARSED_ARGUMENTS}")
+		endif()
+
+		get_filename_component(ShaderOutputDirectory "${Output}" DIRECTORY)
+		add_custom_command(
+			OUTPUT "${Output}"
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "${ShaderOutputDirectory}"
+			COMMAND "${PULSEFORGE_DXC}" -spirv -T "${Profile}" -E "${Entry}" -fspv-target-env=vulkan1.3
+				${Shader_OPTIONS} -O3 -WX -Fo "${Output}" "${Source}"
+			DEPENDS "${Source}"
+			VERBATIM
+			COMMENT "${Shader_COMMENT}"
+		)
+	endfunction()
+
+	function(pulseforge_attach_shader_deployment Target OutputDirectory)
+		if(NOT TARGET "${Target}")
+			message(FATAL_ERROR "Cannot attach shader deployment to missing target '${Target}'")
+		endif()
+		set(ShaderDeploymentCommands COMMAND "${CMAKE_COMMAND}" -E make_directory "${OutputDirectory}")
+		foreach(ShaderOutput IN LISTS ARGN)
+			get_filename_component(ShaderFileName "${ShaderOutput}" NAME)
+			list(APPEND ShaderDeploymentCommands COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${ShaderOutput}" "${OutputDirectory}/${ShaderFileName}")
+		endforeach()
+		add_custom_command(TARGET "${Target}" POST_BUILD ${ShaderDeploymentCommands} VERBATIM)
+	endfunction()
+
 	set(PULSEFORGE_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/Runtime/Shaders")
 	set(PULSEFORGE_TRIANGLE_VERTEX_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/Triangle.vs.spv")
 	set(PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/Triangle.ps.spv")
@@ -60,80 +94,33 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 	set(PULSEFORGE_TONEMAPPING_VERTEX_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/Tonemapping.vs.spv")
 	set(PULSEFORGE_TONEMAPPING_FRAGMENT_SPIRV "${PULSEFORGE_SHADER_OUTPUT_DIR}/Tonemapping.ps.spv")
 	set(PULSEFORGE_TONEMAPPING_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Shaders/Tonemapping.hlsl")
-	add_custom_command(
-		OUTPUT "${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
-		COMMAND "${PULSEFORGE_DXC}" -spirv -T vs_6_0 -E VSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-			-Fo "${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "${PULSEFORGE_TRIANGLE_HLSL}"
-		DEPENDS "${PULSEFORGE_TRIANGLE_HLSL}"
-		VERBATIM
+	pulseforge_add_spirv_shader("${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "${PULSEFORGE_TRIANGLE_HLSL}" vs_6_0 VSMain
 		COMMENT "Compiling PulseForge triangle vertex shader to SPIR-V"
-	)
-	add_custom_command(
-		OUTPUT "${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
-		COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -fvk-b-shift 256 1 -fvk-t-shift 0 1 -fvk-s-shift 128 1 -fvk-b-shift 256 2 -fvk-t-shift 0 2 -fvk-s-shift 128 2 -fvk-t-shift 0 3 -fvk-s-shift 128 3 -fvk-t-shift 0 5 -fvk-s-shift 128 5 -O3 -WX
-			-Fo "${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}" "${PULSEFORGE_TRIANGLE_HLSL}"
-		DEPENDS "${PULSEFORGE_TRIANGLE_HLSL}"
-		VERBATIM
+		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+	pulseforge_add_spirv_shader("${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}" "${PULSEFORGE_TRIANGLE_HLSL}" ps_6_0 PSMain
 		COMMENT "Compiling PulseForge triangle fragment shader to SPIR-V"
-	)
-	add_custom_command(
-		OUTPUT "${PULSEFORGE_BACKGROUND_VERTEX_SPIRV}"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
-		COMMAND "${PULSEFORGE_DXC}" -spirv -T vs_6_0 -E VSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-			-Fo "${PULSEFORGE_BACKGROUND_VERTEX_SPIRV}" "${PULSEFORGE_BACKGROUND_HLSL}"
-		DEPENDS "${PULSEFORGE_BACKGROUND_HLSL}"
-		VERBATIM
+		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0
+			-fvk-b-shift 256 1 -fvk-t-shift 0 1 -fvk-s-shift 128 1
+			-fvk-b-shift 256 2 -fvk-t-shift 0 2 -fvk-s-shift 128 2
+			-fvk-t-shift 0 3 -fvk-s-shift 128 3 -fvk-t-shift 0 5 -fvk-s-shift 128 5)
+	pulseforge_add_spirv_shader("${PULSEFORGE_BACKGROUND_VERTEX_SPIRV}" "${PULSEFORGE_BACKGROUND_HLSL}" vs_6_0 VSMain
 		COMMENT "Compiling PulseForge environment background vertex shader to SPIR-V"
-	)
-	add_custom_command(
-		OUTPUT "${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
-		COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-			-Fo "${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}" "${PULSEFORGE_BACKGROUND_HLSL}"
-		DEPENDS "${PULSEFORGE_BACKGROUND_HLSL}"
-		VERBATIM
+		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+	pulseforge_add_spirv_shader("${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}" "${PULSEFORGE_BACKGROUND_HLSL}" ps_6_0 PSMain
 		COMMENT "Compiling PulseForge environment background fragment shader to SPIR-V"
-	)
-	add_custom_command(
-		OUTPUT "${PULSEFORGE_SHADOW_VERTEX_SPIRV}"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
-		COMMAND "${PULSEFORGE_DXC}" -spirv -T vs_6_0 -E VSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 4 -O3 -WX
-			-Fo "${PULSEFORGE_SHADOW_VERTEX_SPIRV}" "${PULSEFORGE_SHADOW_HLSL}"
-		DEPENDS "${PULSEFORGE_SHADOW_HLSL}"
-		VERBATIM
+		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+	pulseforge_add_spirv_shader("${PULSEFORGE_SHADOW_VERTEX_SPIRV}" "${PULSEFORGE_SHADOW_HLSL}" vs_6_0 VSMain
 		COMMENT "Compiling PulseForge directional-shadow vertex shader to SPIR-V"
-	)
-	add_custom_command(
-		OUTPUT "${PULSEFORGE_SHADOW_FRAGMENT_SPIRV}"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
-		COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3
-			-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-			-Fo "${PULSEFORGE_SHADOW_FRAGMENT_SPIRV}" "${PULSEFORGE_SHADOW_HLSL}"
-		DEPENDS "${PULSEFORGE_SHADOW_HLSL}"
-		VERBATIM
+		OPTIONS -fvk-b-shift 256 4)
+	pulseforge_add_spirv_shader("${PULSEFORGE_SHADOW_FRAGMENT_SPIRV}" "${PULSEFORGE_SHADOW_HLSL}" ps_6_0 PSMain
 		COMMENT "Compiling PulseForge alpha-tested directional/spot shadow fragment shader to SPIR-V"
-	)
-	add_custom_command(
-		OUTPUT "${PULSEFORGE_POINT_SHADOW_VERTEX_SPIRV}"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
-		COMMAND "${PULSEFORGE_DXC}" -spirv -T vs_6_0 -E VSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 4 -O3 -WX
-			-Fo "${PULSEFORGE_POINT_SHADOW_VERTEX_SPIRV}" "${PULSEFORGE_POINT_SHADOW_HLSL}"
-		DEPENDS "${PULSEFORGE_POINT_SHADOW_HLSL}"
-		VERBATIM
+		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+	pulseforge_add_spirv_shader("${PULSEFORGE_POINT_SHADOW_VERTEX_SPIRV}" "${PULSEFORGE_POINT_SHADOW_HLSL}" vs_6_0 VSMain
 		COMMENT "Compiling PulseForge point-shadow vertex shader to SPIR-V"
-	)
-	add_custom_command(
-		OUTPUT "${PULSEFORGE_POINT_SHADOW_FRAGMENT_SPIRV}"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
-		COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3
-			-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -fvk-b-shift 256 4 -O3 -WX
-			-Fo "${PULSEFORGE_POINT_SHADOW_FRAGMENT_SPIRV}" "${PULSEFORGE_POINT_SHADOW_HLSL}"
-		DEPENDS "${PULSEFORGE_POINT_SHADOW_HLSL}"
-		VERBATIM
+		OPTIONS -fvk-b-shift 256 4)
+	pulseforge_add_spirv_shader("${PULSEFORGE_POINT_SHADOW_FRAGMENT_SPIRV}" "${PULSEFORGE_POINT_SHADOW_HLSL}" ps_6_0 PSMain
 		COMMENT "Compiling PulseForge point-shadow fragment shader to SPIR-V"
-	)
+		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -fvk-b-shift 256 4)
 	foreach(PULSEFORGE_SSAO_SHADER IN ITEMS
 		"${PULSEFORGE_SSAO_PREPASS_HLSL}|${PULSEFORGE_SSAO_PREPASS_VERTEX_SPIRV}|vs_6_0|VSMain|normal-depth vertex"
 		"${PULSEFORGE_SSAO_PREPASS_HLSL}|${PULSEFORGE_SSAO_PREPASS_FRAGMENT_SPIRV}|ps_6_0|PSMain|normal-depth fragment"
@@ -153,47 +140,34 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 			list(APPEND PULSEFORGE_SSAO_REGISTER_SHIFTS
 				-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
 		endif()
-		add_custom_command(
-			OUTPUT "${PULSEFORGE_SSAO_OUTPUT}"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
-			COMMAND "${PULSEFORGE_DXC}" -spirv -T "${PULSEFORGE_SSAO_PROFILE}" -E "${PULSEFORGE_SSAO_ENTRY}"
-				-fspv-target-env=vulkan1.3 ${PULSEFORGE_SSAO_REGISTER_SHIFTS} -O3 -WX
-				-Fo "${PULSEFORGE_SSAO_OUTPUT}" "${PULSEFORGE_SSAO_SOURCE}"
-			DEPENDS "${PULSEFORGE_SSAO_SOURCE}"
-			VERBATIM
-			COMMENT "Compiling PulseForge ${PULSEFORGE_SSAO_LABEL} shader to SPIR-V"
-		)
+		pulseforge_add_spirv_shader("${PULSEFORGE_SSAO_OUTPUT}" "${PULSEFORGE_SSAO_SOURCE}" "${PULSEFORGE_SSAO_PROFILE}"
+			"${PULSEFORGE_SSAO_ENTRY}" COMMENT "Compiling PulseForge ${PULSEFORGE_SSAO_LABEL} shader to SPIR-V"
+			OPTIONS ${PULSEFORGE_SSAO_REGISTER_SHIFTS})
 	endforeach()
-	add_custom_command(
-		OUTPUT "${PULSEFORGE_TONEMAPPING_VERTEX_SPIRV}"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
-		COMMAND "${PULSEFORGE_DXC}" -spirv -T vs_6_0 -E VSMain -fspv-target-env=vulkan1.3
-			-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-			-Fo "${PULSEFORGE_TONEMAPPING_VERTEX_SPIRV}" "${PULSEFORGE_TONEMAPPING_HLSL}"
-		DEPENDS "${PULSEFORGE_TONEMAPPING_HLSL}"
-		VERBATIM
+	pulseforge_add_spirv_shader("${PULSEFORGE_TONEMAPPING_VERTEX_SPIRV}" "${PULSEFORGE_TONEMAPPING_HLSL}" vs_6_0 VSMain
 		COMMENT "Compiling PulseForge tone-mapping vertex shader to SPIR-V"
-	)
-	add_custom_command(
-		OUTPUT "${PULSEFORGE_TONEMAPPING_FRAGMENT_SPIRV}"
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_SHADER_OUTPUT_DIR}"
-		COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3
-			-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-			-Fo "${PULSEFORGE_TONEMAPPING_FRAGMENT_SPIRV}" "${PULSEFORGE_TONEMAPPING_HLSL}"
-		DEPENDS "${PULSEFORGE_TONEMAPPING_HLSL}"
-		VERBATIM
+		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+	pulseforge_add_spirv_shader("${PULSEFORGE_TONEMAPPING_FRAGMENT_SPIRV}" "${PULSEFORGE_TONEMAPPING_HLSL}" ps_6_0 PSMain
 		COMMENT "Compiling PulseForge tone-mapping fragment shader to SPIR-V"
-	)
-	add_custom_target(PulseForgeSceneShaderAssets
-		DEPENDS "${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}"
-			"${PULSEFORGE_BACKGROUND_VERTEX_SPIRV}" "${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}"
-			"${PULSEFORGE_SHADOW_VERTEX_SPIRV}" "${PULSEFORGE_SHADOW_FRAGMENT_SPIRV}"
-			"${PULSEFORGE_POINT_SHADOW_VERTEX_SPIRV}"
-			"${PULSEFORGE_POINT_SHADOW_FRAGMENT_SPIRV}"
-			"${PULSEFORGE_SSAO_PREPASS_VERTEX_SPIRV}" "${PULSEFORGE_SSAO_PREPASS_FRAGMENT_SPIRV}"
-			"${PULSEFORGE_SSAO_VERTEX_SPIRV}" "${PULSEFORGE_SSAO_FRAGMENT_SPIRV}"
-			"${PULSEFORGE_SSAO_BLUR_VERTEX_SPIRV}" "${PULSEFORGE_SSAO_BLUR_FRAGMENT_SPIRV}"
-			"${PULSEFORGE_TONEMAPPING_VERTEX_SPIRV}" "${PULSEFORGE_TONEMAPPING_FRAGMENT_SPIRV}")
+		OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+	set(PULSEFORGE_SCENE_SHADER_OUTPUTS
+		"${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}"
+		"${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}"
+		"${PULSEFORGE_BACKGROUND_VERTEX_SPIRV}"
+		"${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}"
+		"${PULSEFORGE_SHADOW_VERTEX_SPIRV}"
+		"${PULSEFORGE_SHADOW_FRAGMENT_SPIRV}"
+		"${PULSEFORGE_POINT_SHADOW_VERTEX_SPIRV}"
+		"${PULSEFORGE_POINT_SHADOW_FRAGMENT_SPIRV}"
+		"${PULSEFORGE_SSAO_PREPASS_VERTEX_SPIRV}"
+		"${PULSEFORGE_SSAO_PREPASS_FRAGMENT_SPIRV}"
+		"${PULSEFORGE_SSAO_VERTEX_SPIRV}"
+		"${PULSEFORGE_SSAO_FRAGMENT_SPIRV}"
+		"${PULSEFORGE_SSAO_BLUR_VERTEX_SPIRV}"
+		"${PULSEFORGE_SSAO_BLUR_FRAGMENT_SPIRV}"
+		"${PULSEFORGE_TONEMAPPING_VERTEX_SPIRV}"
+		"${PULSEFORGE_TONEMAPPING_FRAGMENT_SPIRV}")
+	add_custom_target(PulseForgeSceneShaderAssets DEPENDS ${PULSEFORGE_SCENE_SHADER_OUTPUTS})
 	if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 		set(PULSEFORGE_GPU_VALIDATION_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/GpuValidationShaders")
 		set(PULSEFORGE_GPU_VALIDATION_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/Tests/GpuRendererValidation.hlsl")
@@ -206,120 +180,43 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 		set(PULSEFORGE_GPU_VALIDATION_UI_PRESENT_VERTEX_SPIRV "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}/EditorImGuiPresent.vs.spv")
 		set(PULSEFORGE_GPU_VALIDATION_UI_PRESENT_FRAGMENT_SPIRV "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}/EditorImGuiPresent.ps.spv")
 		set(PULSEFORGE_GPU_VALIDATION_UI_PRESENT_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Shaders/EditorImGuiPresent.hlsl")
-		add_custom_command(
-			OUTPUT "${PULSEFORGE_GPU_VALIDATION_VERTEX_SPIRV}"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}"
-			COMMAND "${PULSEFORGE_DXC}" -spirv -T vs_6_0 -E VSMain -fspv-target-env=vulkan1.3
-				-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-				-Fo "${PULSEFORGE_GPU_VALIDATION_VERTEX_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_HLSL}"
-			DEPENDS "${PULSEFORGE_GPU_VALIDATION_HLSL}"
-			VERBATIM
+		set(PULSEFORGE_GPU_VALIDATION_SHADER_OUTPUTS
+			"${PULSEFORGE_GPU_VALIDATION_VERTEX_SPIRV}"
+			"${PULSEFORGE_GPU_VALIDATION_COLOR_SPIRV}"
+			"${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_VERTEX_SPIRV}"
+			"${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_FRAGMENT_SPIRV}"
+			"${PULSEFORGE_GPU_VALIDATION_SAMPLE_SPIRV}"
+			"${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_VERTEX_SPIRV}"
+			"${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_FRAGMENT_SPIRV}")
+		pulseforge_add_spirv_shader("${PULSEFORGE_GPU_VALIDATION_VERTEX_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_HLSL}" vs_6_0 VSMain
 			COMMENT "Compiling PulseForge GPU-validation vertex shader to SPIR-V"
-		)
-		add_custom_command(
-			OUTPUT "${PULSEFORGE_GPU_VALIDATION_COLOR_SPIRV}"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}"
-			COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSColor -fspv-target-env=vulkan1.3
-				-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-				-Fo "${PULSEFORGE_GPU_VALIDATION_COLOR_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_HLSL}"
-			DEPENDS "${PULSEFORGE_GPU_VALIDATION_HLSL}"
-			VERBATIM
+			OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+		pulseforge_add_spirv_shader("${PULSEFORGE_GPU_VALIDATION_COLOR_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_HLSL}" ps_6_0 PSColor
 			COMMENT "Compiling PulseForge GPU-validation color shader to SPIR-V"
-		)
-		add_custom_command(
-			OUTPUT "${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_VERTEX_SPIRV}"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}"
-			COMMAND "${PULSEFORGE_DXC}" -spirv -T vs_6_0 -E VSMain -fspv-target-env=vulkan1.3
-				-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-				-Fo "${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_VERTEX_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_HLSL}"
-			DEPENDS "${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_HLSL}"
-			VERBATIM
-			COMMENT "Compiling production editor ImGui vertex shader for GPU validation"
-		)
-		add_custom_command(
-			OUTPUT "${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_FRAGMENT_SPIRV}"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}"
-			COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3
-				-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-				-Fo "${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_FRAGMENT_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_HLSL}"
-			DEPENDS "${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_HLSL}"
-			VERBATIM
-			COMMENT "Compiling production editor ImGui fragment shader for GPU validation"
-		)
-		add_custom_command(
-			OUTPUT "${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_VERTEX_SPIRV}"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}"
-			COMMAND "${PULSEFORGE_DXC}" -spirv -T vs_6_0 -E VSMain -fspv-target-env=vulkan1.3
-				-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-				-Fo "${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_VERTEX_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_HLSL}"
-			DEPENDS "${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_HLSL}"
-			VERBATIM
-			COMMENT "Compiling editor UI presentation vertex shader for GPU validation"
-		)
-		add_custom_command(
-			OUTPUT "${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_FRAGMENT_SPIRV}"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}"
-			COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3
-				-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-				-Fo "${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_FRAGMENT_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_HLSL}"
-			DEPENDS "${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_HLSL}"
-			VERBATIM
-			COMMENT "Compiling editor UI presentation fragment shader for GPU validation"
-		)
-		add_custom_command(
-			OUTPUT "${PULSEFORGE_GPU_VALIDATION_SAMPLE_SPIRV}"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}"
-			COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSSample -fspv-target-env=vulkan1.3
-				-fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-				-Fo "${PULSEFORGE_GPU_VALIDATION_SAMPLE_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_HLSL}"
-			DEPENDS "${PULSEFORGE_GPU_VALIDATION_HLSL}"
-			VERBATIM
+			OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+		pulseforge_add_spirv_shader("${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_VERTEX_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_HLSL}"
+			vs_6_0 VSMain COMMENT "Compiling production editor ImGui vertex shader for GPU validation"
+			OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+		pulseforge_add_spirv_shader("${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_FRAGMENT_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_HLSL}"
+			ps_6_0 PSMain COMMENT "Compiling production editor ImGui fragment shader for GPU validation"
+			OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+		pulseforge_add_spirv_shader("${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_VERTEX_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_HLSL}"
+			vs_6_0 VSMain COMMENT "Compiling editor UI presentation vertex shader for GPU validation"
+			OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+		pulseforge_add_spirv_shader("${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_FRAGMENT_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_HLSL}"
+			ps_6_0 PSMain COMMENT "Compiling editor UI presentation fragment shader for GPU validation"
+			OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+		pulseforge_add_spirv_shader("${PULSEFORGE_GPU_VALIDATION_SAMPLE_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_HLSL}" ps_6_0 PSSample
 			COMMENT "Compiling PulseForge GPU-validation sampling shader to SPIR-V"
-		)
+			OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
 		add_custom_target(PulseForgeGpuValidationShaders
-			DEPENDS "${PULSEFORGE_GPU_VALIDATION_VERTEX_SPIRV}"
-				"${PULSEFORGE_GPU_VALIDATION_COLOR_SPIRV}"
-				"${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_VERTEX_SPIRV}"
-				"${PULSEFORGE_GPU_VALIDATION_EDITOR_IMGUI_FRAGMENT_SPIRV}"
-				"${PULSEFORGE_GPU_VALIDATION_SAMPLE_SPIRV}" "${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_VERTEX_SPIRV}"
-				"${PULSEFORGE_GPU_VALIDATION_UI_PRESENT_FRAGMENT_SPIRV}")
+			DEPENDS ${PULSEFORGE_GPU_VALIDATION_SHADER_OUTPUTS})
 	endif()
 	if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
 		add_dependencies(PulseForgeGame PulseForgeSceneShaderAssets)
+		pulseforge_attach_shader_deployment(PulseForgeGame "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders"
+			${PULSEFORGE_SCENE_SHADER_OUTPUTS})
 		add_custom_command(TARGET PulseForgeGame POST_BUILD
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Triangle.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Triangle.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_BACKGROUND_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/EnvironmentBackground.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/EnvironmentBackground.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SHADOW_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/DirectionalShadow.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SHADOW_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/DirectionalShadow.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_POINT_SHADOW_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/PointShadow.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_POINT_SHADOW_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/PointShadow.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SSAO_PREPASS_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/SsaoNormalDepth.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SSAO_PREPASS_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/SsaoNormalDepth.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SSAO_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Ssao.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SSAO_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Ssao.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SSAO_BLUR_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/SsaoBlur.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SSAO_BLUR_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/SsaoBlur.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_TONEMAPPING_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Tonemapping.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_TONEMAPPING_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders/Tonemapping.ps.spv"
 			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
 			COMMAND "${CMAKE_COMMAND}" -E copy_directory
 				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Models" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
@@ -353,89 +250,27 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 		set(PULSEFORGE_EDITOR_IMGUI_PRESENT_VERTEX_SPIRV "${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}/EditorImGuiPresent.vs.spv")
 		set(PULSEFORGE_EDITOR_IMGUI_PRESENT_FRAGMENT_SPIRV "${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}/EditorImGuiPresent.ps.spv")
 		set(PULSEFORGE_EDITOR_IMGUI_PRESENT_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Shaders/EditorImGuiPresent.hlsl")
-		add_custom_command(
-			OUTPUT "${PULSEFORGE_EDITOR_IMGUI_VERTEX_SPIRV}"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}"
-			COMMAND "${PULSEFORGE_DXC}" -spirv -T vs_6_0 -E VSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-				-Fo "${PULSEFORGE_EDITOR_IMGUI_VERTEX_SPIRV}" "${PULSEFORGE_EDITOR_IMGUI_HLSL}"
-			DEPENDS "${PULSEFORGE_EDITOR_IMGUI_HLSL}"
-			VERBATIM
+		set(PULSEFORGE_EDITOR_SHADER_OUTPUTS
+			"${PULSEFORGE_EDITOR_IMGUI_VERTEX_SPIRV}"
+			"${PULSEFORGE_EDITOR_IMGUI_FRAGMENT_SPIRV}"
+			"${PULSEFORGE_EDITOR_IMGUI_PRESENT_VERTEX_SPIRV}"
+			"${PULSEFORGE_EDITOR_IMGUI_PRESENT_FRAGMENT_SPIRV}")
+		pulseforge_add_spirv_shader("${PULSEFORGE_EDITOR_IMGUI_VERTEX_SPIRV}" "${PULSEFORGE_EDITOR_IMGUI_HLSL}" vs_6_0 VSMain
 			COMMENT "Compiling PulseForge editor ImGui vertex shader to SPIR-V"
-		)
-		add_custom_command(
-			OUTPUT "${PULSEFORGE_EDITOR_IMGUI_FRAGMENT_SPIRV}"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}"
-			COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-				-Fo "${PULSEFORGE_EDITOR_IMGUI_FRAGMENT_SPIRV}" "${PULSEFORGE_EDITOR_IMGUI_HLSL}"
-			DEPENDS "${PULSEFORGE_EDITOR_IMGUI_HLSL}"
-			VERBATIM
+			OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+		pulseforge_add_spirv_shader("${PULSEFORGE_EDITOR_IMGUI_FRAGMENT_SPIRV}" "${PULSEFORGE_EDITOR_IMGUI_HLSL}" ps_6_0 PSMain
 			COMMENT "Compiling PulseForge editor ImGui fragment shader to SPIR-V"
-		)
-		add_custom_command(
-			OUTPUT "${PULSEFORGE_EDITOR_IMGUI_PRESENT_VERTEX_SPIRV}"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}"
-			COMMAND "${PULSEFORGE_DXC}" -spirv -T vs_6_0 -E VSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-				-Fo "${PULSEFORGE_EDITOR_IMGUI_PRESENT_VERTEX_SPIRV}" "${PULSEFORGE_EDITOR_IMGUI_PRESENT_HLSL}"
-			DEPENDS "${PULSEFORGE_EDITOR_IMGUI_PRESENT_HLSL}"
-			VERBATIM
+			OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+		pulseforge_add_spirv_shader("${PULSEFORGE_EDITOR_IMGUI_PRESENT_VERTEX_SPIRV}" "${PULSEFORGE_EDITOR_IMGUI_PRESENT_HLSL}" vs_6_0 VSMain
 			COMMENT "Compiling PulseForge editor ImGui UNORM presentation vertex shader to SPIR-V"
-		)
-		add_custom_command(
-			OUTPUT "${PULSEFORGE_EDITOR_IMGUI_PRESENT_FRAGMENT_SPIRV}"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}"
-			COMMAND "${PULSEFORGE_DXC}" -spirv -T ps_6_0 -E PSMain -fspv-target-env=vulkan1.3 -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0 -O3 -WX
-				-Fo "${PULSEFORGE_EDITOR_IMGUI_PRESENT_FRAGMENT_SPIRV}" "${PULSEFORGE_EDITOR_IMGUI_PRESENT_HLSL}"
-			DEPENDS "${PULSEFORGE_EDITOR_IMGUI_PRESENT_HLSL}"
-			VERBATIM
+			OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
+		pulseforge_add_spirv_shader("${PULSEFORGE_EDITOR_IMGUI_PRESENT_FRAGMENT_SPIRV}" "${PULSEFORGE_EDITOR_IMGUI_PRESENT_HLSL}" ps_6_0 PSMain
 			COMMENT "Compiling PulseForge editor ImGui UNORM presentation fragment shader to SPIR-V"
-		)
+			OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
 		add_custom_target(PulseForgeEditorShaderAssets
-			DEPENDS "${PULSEFORGE_EDITOR_IMGUI_VERTEX_SPIRV}" "${PULSEFORGE_EDITOR_IMGUI_FRAGMENT_SPIRV}"
-				"${PULSEFORGE_EDITOR_IMGUI_PRESENT_VERTEX_SPIRV}" "${PULSEFORGE_EDITOR_IMGUI_PRESENT_FRAGMENT_SPIRV}")
+			DEPENDS ${PULSEFORGE_EDITOR_SHADER_OUTPUTS})
 		add_dependencies(PulseForgeEditor PulseForgeSceneShaderAssets PulseForgeEditorShaderAssets)
-		add_custom_command(TARGET PulseForgeEditor POST_BUILD
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_TRIANGLE_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/Triangle.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_TRIANGLE_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/Triangle.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_BACKGROUND_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/EnvironmentBackground.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_BACKGROUND_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/EnvironmentBackground.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SHADOW_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/DirectionalShadow.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SHADOW_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/DirectionalShadow.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_POINT_SHADOW_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/PointShadow.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_POINT_SHADOW_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/PointShadow.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SSAO_PREPASS_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/SsaoNormalDepth.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SSAO_PREPASS_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/SsaoNormalDepth.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SSAO_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/Ssao.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SSAO_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/Ssao.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SSAO_BLUR_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/SsaoBlur.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_SSAO_BLUR_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/SsaoBlur.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_TONEMAPPING_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/Tonemapping.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_TONEMAPPING_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/Tonemapping.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_EDITOR_IMGUI_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/EditorImGui.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_EDITOR_IMGUI_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/EditorImGui.ps.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_EDITOR_IMGUI_PRESENT_VERTEX_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/EditorImGuiPresent.vs.spv"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${PULSEFORGE_EDITOR_IMGUI_PRESENT_FRAGMENT_SPIRV}" "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders/EditorImGuiPresent.ps.spv"
-			VERBATIM
-		)
+		pulseforge_attach_shader_deployment(PulseForgeEditor "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders"
+			${PULSEFORGE_SCENE_SHADER_OUTPUTS} ${PULSEFORGE_EDITOR_SHADER_OUTPUTS})
 	endif()
 endif()
