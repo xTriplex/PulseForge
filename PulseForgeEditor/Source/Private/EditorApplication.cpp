@@ -68,6 +68,7 @@
 #include "Editor/EditorPlatformViewportPolicy.h"
 #include "Editor/EditorDocumentManager.h"
 #include "Editor/EditorDocumentEditorRegistry.h"
+#include "EditorDocumentHostTestEditor.h"
 #include "Editor/EditorDocumentCloseBatch.h"
 #include "Editor/EditorNativeWindowBoundsPolicy.h"
 #include "Editor/EditorDocumentHostPolicy.h"
@@ -380,15 +381,6 @@ namespace
 							  public PulseForgeEditor::EditorMaterialDetailsActionSink,
 							  public PulseForgeEditor::EditorContentBrowserPanelActions
 	{
-		struct DocumentHostTestState final : PulseForgeEditor::EditorDocumentEditorState
-		{
-			int Value = 0;
-			bool FailNextSave = false;
-			bool FailClose = false;
-			std::vector<int> Undo;
-			std::vector<int> Redo;
-		};
-
 		struct PlatformViewportRendererData
 		{
 			uint64_t TargetID = 0;
@@ -536,10 +528,17 @@ namespace
 			  m_DocumentHostAcquireOutOfDateTest(Options.EnableDocumentHostAcquireOutOfDateTest),
 			  m_DocumentHostImageAllocationFailureTest(Options.EnableDocumentHostImageAllocationFailureTest)
 		{
-			#ifdef _DEBUG
+#ifdef _DEBUG
 			if (m_DocumentHostTestFixture)
-				RegisterDocumentHostTestEditor();
-			#endif
+			{
+				m_DocumentHostTestEditor = std::make_unique<PulseForgeEditor::Detail::EditorDocumentHostTestEditor>(m_Documents,
+					m_DocumentEditors, m_EditorStyle, [this](std::string Message) { SetError(std::move(Message)); },
+					[this]
+					{ return m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{}; });
+				if (auto Result = m_DocumentHostTestEditor->Register(); !Result)
+					PF_ERROR("Could not register the debug document-host fixture editor: {}", Result.error());
+			}
+#endif
 		}
 
 		void HandleHierarchyPanelAction(const PulseForgeEditor::EditorHierarchyPanelAction& Action) override
@@ -2004,14 +2003,6 @@ namespace
 			return {};
 		}
 
-		[[nodiscard]] static constexpr std::array<std::string_view, 2> GetDocumentHostTestFixtureAssetIDs() noexcept
-		{
-			return {
-				"d3110000-0000-4000-8000-000000000001",
-				"d3110000-0000-4000-8000-000000000002"
-			};
-		}
-
 		[[nodiscard]] PulseForgeEditor::EditorDocumentEditorContext MakeDocumentEditorContext(
 			const PulseForgeEditor::EditorDocumentIdentity& Identity,
 			std::filesystem::path ProjectRelativePath,
@@ -2029,132 +2020,15 @@ namespace
 			return Context;
 		}
 
-		void RegisterDocumentHostTestEditor()
+		[[nodiscard]] bool IsDocumentHostTestFixtureIdentity(const PulseForgeEditor::EditorDocumentIdentity& Identity) const
 		{
-			PulseForgeEditor::EditorDocumentEditorAdapter Adapter;
-			Adapter.Kind = PulseForgeEditor::EditorDocumentKind::Texture;
-			Adapter.IsEligible = [this](const auto& Context)
-			{
-				return IsDocumentHostTestFixtureIdentity(Context.Identity);
-			};
-			Adapter.LoadSession = [this](const auto& Context)
-				-> std::expected<std::unique_ptr<PulseForgeEditor::EditorDocumentEditorState>, std::string>
-			{
-				if (!IsDocumentHostTestFixtureIdentity(Context.Identity))
-					return std::unexpected("The identity is not a document-host test fixture");
-				auto State = std::make_unique<DocumentHostTestState>();
-				if (const auto Saved = m_DocumentHostTestSavedValues.find(Context.Identity.Asset);
-					Saved != m_DocumentHostTestSavedValues.end())
-					State->Value = Saved->second;
-				return std::unique_ptr<PulseForgeEditor::EditorDocumentEditorState>(std::move(State));
-			};
-			Adapter.DrawWorkspace = [this](auto& Session)
-			{
-				auto* State = dynamic_cast<DocumentHostTestState*>(Session.EditorState.get());
-				if (!State)
-					return;
-				(void)m_EditorStyle.SectionHeader(PulseForgeEditor::EditorIcon::File,
-					"Registered Document Workspace Fixture");
-				m_EditorStyle.TextMuted("This independent workspace is not part of the Level Editor panels.");
-				ImGui::Text("Asset %s", Session.Identity.Asset.ToString().c_str());
-				int Candidate = State->Value;
-				if (ImGui::InputInt("Editable value", &Candidate))
-				{
-					State->Undo.push_back(State->Value);
-					State->Redo.clear();
-					State->Value = Candidate;
-					(void)m_Documents.MarkEdited(Session.Identity);
-				}
-				if (ImGui::Button("Save fixture"))
-					(void)m_DocumentEditors.Save(Session);
-				ImGui::SameLine();
-				if (ImGui::Button("Revert fixture"))
-					(void)m_DocumentEditors.Discard(Session);
-				ImGui::SameLine();
-				if (ImGui::Button("Fail next save"))
-					State->FailNextSave = true;
-				ImGui::SameLine();
-				if (ImGui::Button(State->FailClose ? "Allow close" : "Fail close"))
-					State->FailClose = !State->FailClose;
-				ImGui::Text("Undo %zu  |  Redo %zu", State->Undo.size(), State->Redo.size());
-				ImGui::TextUnformatted(Session.IsDirty() ? "Unsaved fixture changes" : "Fixture saved");
-			};
-			Adapter.Save = [this](auto& Session, uint64_t)
-			{
-				auto* State = dynamic_cast<DocumentHostTestState*>(Session.EditorState.get());
-				if (!State || State->FailNextSave)
-				{
-					if (State)
-						State->FailNextSave = false;
-					SetError("The document-host fixture save was rejected.");
-					return false;
-				}
-				m_DocumentHostTestSavedValues[Session.Identity.Asset] = State->Value;
-				return true;
-			};
-			Adapter.Discard = [this](auto& Session)
-			{
-				auto* State = dynamic_cast<DocumentHostTestState*>(Session.EditorState.get());
-				if (!State)
-					return false;
-				if (const auto Saved = m_DocumentHostTestSavedValues.find(Session.Identity.Asset);
-					Saved != m_DocumentHostTestSavedValues.end())
-					State->Value = Saved->second;
-				else
-					State->Value = 0;
-				State->Undo.clear();
-				State->Redo.clear();
-				return true;
-			};
-			Adapter.FocusedCommand = [](auto& Session, PulseForgeEditor::EditorDocumentCommand Command)
-			{
-				auto* State = dynamic_cast<DocumentHostTestState*>(Session.EditorState.get());
-				if (!State)
-					return false;
-				auto& Source = Command == PulseForgeEditor::EditorDocumentCommand::Undo
-					? State->Undo : State->Redo;
-				auto& Destination = Command == PulseForgeEditor::EditorDocumentCommand::Undo
-					? State->Redo : State->Undo;
-				if (Source.empty())
-					return false;
-				Destination.push_back(State->Value);
-				State->Value = Source.back();
-				Source.pop_back();
-				++Session.Revision;
-				return true;
-			};
-			Adapter.AssetLocationChanged = [](auto&, const auto&, std::string_view) { return true; };
-			Adapter.PrepareClose = [](const auto& Session) -> std::expected<void, std::string>
-			{
-				const auto* State = dynamic_cast<const DocumentHostTestState*>(Session.EditorState.get());
-				if (State && State->FailClose)
-					return std::unexpected("The Debug fixture is configured to reject close.");
-				return {};
-			};
-			Adapter.Close = [](auto&) {};
-			if (auto Result = m_DocumentEditors.Register(std::move(Adapter)); !Result)
-				PF_ERROR("Could not register the debug document-host fixture editor: {}", Result.error());
-		}
-
-		[[nodiscard]] bool IsDocumentHostTestFixtureIdentity(
-			const PulseForgeEditor::EditorDocumentIdentity& Identity) const
-		{
-			#ifndef _DEBUG
+#ifndef _DEBUG
 			(void)Identity;
 			return false;
-			#else
-			if (!m_DocumentHostTestFixture || !m_Project ||
-				Identity.Project != m_Project->GetDescription().ID ||
-				Identity.Kind != PulseForgeEditor::EditorDocumentKind::Texture)
-				return false;
-
-			for (const std::string_view FixtureID : GetDocumentHostTestFixtureAssetIDs())
-				if (const auto Parsed = PulseForge::UUID::Parse(FixtureID); Parsed && *Parsed == Identity.Asset)
-					return true;
-			return false;
-			#endif
+#else
+			return m_DocumentHostTestFixture && m_DocumentHostTestEditor && m_DocumentHostTestEditor->IsFixtureIdentity(Identity);
+#endif
 		}
-
 		void InitializeDocumentHostTestFixture()
 		{
 			#ifndef _DEBUG
@@ -2164,7 +2038,7 @@ namespace
 				return;
 
 			// These synthetic Texture-kind identities exercise registered document dispatch in Debug.
-			const auto FixtureAssetIDs = GetDocumentHostTestFixtureAssetIDs();
+			const auto FixtureAssetIDs = PulseForgeEditor::Detail::EditorDocumentHostTestEditor::FixtureAssetIDs();
 			const auto Preference = m_Documents.GetOpeningPreference();
 			std::unordered_set<std::string> FixtureHosts;
 			m_DocumentHostFixtureSessions.clear();
@@ -2498,14 +2372,7 @@ namespace
 			const auto InitializeModel = [this](const auto& Identity, int Value)
 			{
 				auto* Session = m_Documents.Find(Identity);
-				auto* State = Session ? dynamic_cast<DocumentHostTestState*>(Session->EditorState.get()) : nullptr;
-				if (!Session || !State)
-					return false;
-				State->Value = Value;
-				State->Undo.push_back(0);
-				if (!m_Documents.MarkEdited(Identity) || !m_DocumentEditors.Save(*Session))
-					return false;
-				return true;
+				return Session && m_DocumentHostTestEditor && m_DocumentHostTestEditor->InitializeSavedModel(*Session, Value);
 			};
 			if (!InitializeModel(m_DocumentWorkspaceSwitchFirstIdentity, 41) ||
 				!InitializeModel(m_DocumentWorkspaceSwitchSecondIdentity, 82))
@@ -2587,11 +2454,8 @@ namespace
 			const auto FixtureStatePreserved = [this](const auto& Identity, const auto* ExpectedState, int ExpectedValue)
 			{
 				const auto* Session = m_Documents.Find(Identity);
-				const auto* State = Session
-					? dynamic_cast<const DocumentHostTestState*>(Session->EditorState.get()) : nullptr;
-				return Session && ExpectedState && Session->EditorState.get() == ExpectedState && State &&
-					State->Value == ExpectedValue && State->Undo.size() == 1 && State->Undo.front() == 0 &&
-					State->Redo.empty() && !Session->IsDirty();
+				return Session && m_DocumentHostTestEditor &&
+					m_DocumentHostTestEditor->MatchesSavedModel(*Session, ExpectedState, ExpectedValue);
 			};
 			const auto Activate = [this, &Fail](const auto& Identity, std::string_view Name)
 			{
@@ -3505,16 +3369,13 @@ namespace
 					std::string DisplayName;
 					if (IsDocumentHostTestFixtureIdentity(Identity))
 					{
-						const auto FixtureIDs = GetDocumentHostTestFixtureAssetIDs();
-						const std::string AssetIDText = Identity.Asset.ToString();
-						const auto FixtureID = std::find(FixtureIDs.begin(), FixtureIDs.end(), AssetIDText);
-						if (FixtureID == FixtureIDs.end())
+						const auto FixtureIndex = PulseForgeEditor::Detail::EditorDocumentHostTestEditor::FindFixtureIndex(Identity.Asset);
+						if (!FixtureIndex)
 						{
 							SkippedDocument = true;
 							continue;
 						}
-						const size_t FixtureIndex = static_cast<size_t>(std::distance(FixtureIDs.begin(), FixtureID));
-						DisplayName = "Host Test Fixture " + std::to_string(FixtureIndex + 1);
+						DisplayName = "Host Test Fixture " + std::to_string(*FixtureIndex + 1);
 					}
 					else if (const auto Asset = m_Project->GetAssetRegistry().Find(Identity.Asset))
 					{
@@ -7473,7 +7334,7 @@ namespace
 		bool m_DocumentHostResetLayoutTestPending = false;
 		size_t m_DocumentHostResetLayoutExpectedHostCount = 0;
 		std::vector<std::pair<PulseForgeEditor::EditorDocumentIdentity, std::string>> m_DocumentHostFixtureSessions;
-		std::unordered_map<PulseForge::AssetID, int, PulseForge::UUIDHash> m_DocumentHostTestSavedValues;
+		std::unique_ptr<PulseForgeEditor::Detail::EditorDocumentHostTestEditor> m_DocumentHostTestEditor;
 		DocumentTabTearOffTestPhase m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Disabled;
 		PulseForgeEditor::EditorDocumentIdentity m_DocumentHostTabTearOffTestIdentity;
 		ImVec2 m_DocumentHostTabTearOffTestTabCenter{ 0.0f, 0.0f };
