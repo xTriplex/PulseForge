@@ -267,8 +267,8 @@
     },
     "Tests/GpuRendererValidation.cpp" :
     {
-      "max_lines" : 3417,
-      "reason" : "Legacy multi-scenario GPU validation harness; extracted scenarios should reduce this coordinator."
+      "max_lines" : 2740,
+      "reason" : "Remaining GPU validation scenarios are still being moved to focused owners."
     }
   },
   "source_roots" :

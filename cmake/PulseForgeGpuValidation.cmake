@@ -1,6 +1,7 @@
 if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	add_executable(PulseForgeGpuValidation
 		Tests/GpuRendererValidation.cpp
+		Tests/GpuValidation/PointShadowImageValidation.cpp
 		Tests/GpuValidation/ActiveFrameUploadValidation.cpp)
 	target_include_directories(PulseForgeGpuValidation PRIVATE Tests)
 	target_compile_definitions(PulseForgeGpuValidation PRIVATE
