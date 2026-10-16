@@ -56,7 +56,8 @@ if(BUILD_TESTING)
 
 	add_executable(PulseForgeAssetImportTests
 		Tests/PulseForgeAssetImportTests.cpp
-		Tests/AssetImportTests.cpp
+		Tests/GltfMeshImportTests.cpp
+		Tests/ImageAssetImportTests.cpp
 	)
 	target_include_directories(PulseForgeAssetImportTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_compile_definitions(PulseForgeAssetImportTests PRIVATE PF_PLATFORM_WINDOWS)
