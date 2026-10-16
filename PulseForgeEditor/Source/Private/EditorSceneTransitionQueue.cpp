@@ -14,8 +14,7 @@ namespace PulseForgeEditor
 		return { RequestStatus::AwaitingDecision, {} };
 	}
 
-	std::optional<EditorSceneTransitionQueue::Action> EditorSceneTransitionQueue::Resolve(
-		const std::function<bool()>& ResolveSceneChanges)
+	std::optional<EditorSceneTransitionQueue::Action> EditorSceneTransitionQueue::Resolve(const std::function<bool()>& ResolveSceneChanges)
 	{
 		if (!m_PendingAction || !ResolveSceneChanges || !ResolveSceneChanges()) return std::nullopt;
 

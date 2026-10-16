@@ -13,6 +13,14 @@ namespace
 		using namespace PulseForgeEditor;
 		EditorSceneTransitionQueue Queue;
 		size_t Continuations = 0;
+		auto Resolution = [](size_t& Attempts, bool Succeeds)
+		{
+			return [&Attempts, Succeeds]
+			{
+				++Attempts;
+				return Succeeds;
+			};
+		};
 		auto Ready = Queue.Request(false, [&] { ++Continuations; });
 		PF_CHECK(Tests, Ready.Status == EditorSceneTransitionQueue::RequestStatus::Ready);
 		PF_CHECK(Tests, static_cast<bool>(Ready.ReadyAction));
@@ -25,22 +33,22 @@ namespace
 		auto Rejected = Queue.Request(false, [&] { ++Continuations; });
 		PF_CHECK(Tests, Rejected.Status == EditorSceneTransitionQueue::RequestStatus::Rejected);
 		size_t SaveAttempts = 0;
-		PF_CHECK(Tests, !Queue.Resolve([&] { ++SaveAttempts; return false; }));
+		PF_CHECK(Tests, !Queue.Resolve(Resolution(SaveAttempts, false)));
 		PF_CHECK(Tests, Queue.HasPendingDecision() && Continuations == 1);
-		auto Resolved = Queue.Resolve([&] { ++SaveAttempts; return true; });
+		auto Resolved = Queue.Resolve(Resolution(SaveAttempts, true));
 		PF_CHECK(Tests, Resolved.has_value() && !Queue.HasPendingDecision());
 		if (Resolved && *Resolved) (*Resolved)();
 		PF_CHECK(Tests, Continuations == 2 && SaveAttempts == 2);
 		size_t UnexpectedResolutionAttempts = 0;
-		PF_CHECK(Tests, !Queue.Resolve([&] { ++UnexpectedResolutionAttempts; return true; }));
+		PF_CHECK(Tests, !Queue.Resolve(Resolution(UnexpectedResolutionAttempts, true)));
 		PF_CHECK(Tests, UnexpectedResolutionAttempts == 0);
 
 		Pending = Queue.Request(true, [&] { ++Continuations; });
 		PF_CHECK(Tests, Pending.Status == EditorSceneTransitionQueue::RequestStatus::AwaitingDecision);
 		size_t DiscardAttempts = 0;
-		PF_CHECK(Tests, !Queue.Resolve([&] { ++DiscardAttempts; return false; }));
+		PF_CHECK(Tests, !Queue.Resolve(Resolution(DiscardAttempts, false)));
 		PF_CHECK(Tests, Queue.HasPendingDecision() && Continuations == 2);
-		auto Discarded = Queue.Resolve([&] { ++DiscardAttempts; return true; });
+		auto Discarded = Queue.Resolve(Resolution(DiscardAttempts, true));
 		PF_CHECK(Tests, Discarded.has_value() && !Queue.HasPendingDecision());
 		if (Discarded && *Discarded) (*Discarded)();
 		PF_CHECK(Tests, Continuations == 3 && DiscardAttempts == 2);
@@ -48,7 +56,7 @@ namespace
 		Pending = Queue.Request(true, [&] { ++Continuations; });
 		PF_CHECK(Tests, Pending.Status == EditorSceneTransitionQueue::RequestStatus::AwaitingDecision);
 		Queue.Cancel();
-		PF_CHECK(Tests, !Queue.HasPendingDecision() && !Queue.Resolve([&] { ++UnexpectedResolutionAttempts; return true; }));
+		PF_CHECK(Tests, !Queue.HasPendingDecision() && !Queue.Resolve(Resolution(UnexpectedResolutionAttempts, true)));
 		PF_CHECK(Tests, UnexpectedResolutionAttempts == 0);
 		PF_CHECK(Tests, Continuations == 3);
 		PF_CHECK(Tests, Queue.Request(false, {}).Status == EditorSceneTransitionQueue::RequestStatus::Rejected);
