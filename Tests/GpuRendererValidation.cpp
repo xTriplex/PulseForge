@@ -2,6 +2,7 @@
 #include "GpuValidation/PointShadowImageAnalysis.h"
 #include "Core/Layer.h"
 #include "Core/Log.h"
+#include "GpuValidation/ActiveFrameUploadValidation.h"
 #include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
 #include "Renderer/SceneRenderer.h"
@@ -161,32 +162,24 @@ namespace
 	class GpuValidationLayer final : public PulseForge::Layer
 	{
 	public:
-		GpuValidationLayer(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm,
-			bool ValidateLocalLights, bool ValidateSpotlightShadows, bool ValidatePointShadows, bool ValidatePbrMaterials,
-			bool ValidateTransparency,
-			bool ValidatePointShadowImages, bool ValidateActiveFrameUploads,
-			std::filesystem::path PointShadowImageDirectory)
-			: Layer(ValidateActiveFrameUploads ? "Active-frame resource upload validation" :
-				ValidateTransparency ? "Transparency rendered-image validation" :
-				ValidatePbrMaterials ? "PBR material rendered-image validation" :
-				ValidatePointShadowImages ? "Point-shadow rendered-image investigation" :
-				ValidatePointShadows ? "SceneRenderer point-shadow GPU validation" :
-				ValidateSpotlightShadows ? "SceneRenderer spotlight-shadow GPU validation" :
-				ValidateEditorUiUnorm ? "Editor UNORM UI composition GPU validation" :
-				ValidateLocalLights ? "SceneRenderer local-light GPU validation" :
-				ValidateToneMapping ? "HDR tonemapping GPU validation" :
-				ValidateSceneHdr ? "SceneRenderer HDR GPU validation" : "RGBA16F GPU validation"),
-			  m_ValidateSceneHdr(ValidateSceneHdr),
-			  m_ValidateToneMapping(ValidateToneMapping),
-			  m_ValidateEditorUiUnorm(ValidateEditorUiUnorm),
-			  m_ValidateLocalLights(ValidateLocalLights),
-			  m_ValidateSpotlightShadows(ValidateSpotlightShadows),
-			  m_ValidatePointShadows(ValidatePointShadows),
-			  m_ValidatePbrMaterials(ValidatePbrMaterials),
-			  m_ValidateTransparency(ValidateTransparency),
-			  m_ValidatePointShadowImages(ValidatePointShadowImages),
-			  m_ValidateActiveFrameUploads(ValidateActiveFrameUploads),
-			  m_PointShadowImageDirectory(std::move(PointShadowImageDirectory))
+		GpuValidationLayer(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm, bool ValidateLocalLights,
+			bool ValidateSpotlightShadows, bool ValidatePointShadows, bool ValidatePbrMaterials, bool ValidateTransparency,
+			bool ValidatePointShadowImages, std::filesystem::path PointShadowImageDirectory)
+			: Layer(ValidateTransparency		? "Transparency rendered-image validation"
+					: ValidatePbrMaterials		? "PBR material rendered-image validation"
+					: ValidatePointShadowImages ? "Point-shadow rendered-image investigation"
+					: ValidatePointShadows		? "SceneRenderer point-shadow GPU validation"
+					: ValidateSpotlightShadows	? "SceneRenderer spotlight-shadow GPU validation"
+					: ValidateEditorUiUnorm		? "Editor UNORM UI composition GPU validation"
+					: ValidateLocalLights		? "SceneRenderer local-light GPU validation"
+					: ValidateToneMapping		? "HDR tonemapping GPU validation"
+					: ValidateSceneHdr			? "SceneRenderer HDR GPU validation"
+												: "RGBA16F GPU validation"),
+			  m_ValidateSceneHdr(ValidateSceneHdr), m_ValidateToneMapping(ValidateToneMapping),
+			  m_ValidateEditorUiUnorm(ValidateEditorUiUnorm), m_ValidateLocalLights(ValidateLocalLights),
+			  m_ValidateSpotlightShadows(ValidateSpotlightShadows), m_ValidatePointShadows(ValidatePointShadows),
+			  m_ValidatePbrMaterials(ValidatePbrMaterials), m_ValidateTransparency(ValidateTransparency),
+			  m_ValidatePointShadowImages(ValidatePointShadowImages), m_PointShadowImageDirectory(std::move(PointShadowImageDirectory))
 		{
 		}
 
@@ -225,18 +218,6 @@ namespace
 
 		void OnUpdate(PulseForge::Timestep) override
 		{
-			if (m_ValidateActiveFrameUploads)
-			{
-				if (m_ActiveFrameUploadFrames >= 3)
-				{
-					PF_INFO("GPU_VALIDATION_RESULT=PASS; initialized a vertex buffer and shader-resource texture on each of three active frame command lists, sampled and drew them, and submitted all frames");
-					PulseForge::Application::Get().RequestClose();
-					return;
-				}
-				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(15))
-					Fail("Timed out during active-frame resource upload validation");
-				return;
-			}
 			if (m_ValidateEditorUiUnorm)
 			{
 				if (m_EditorUiFrames >= 3)
@@ -679,11 +660,6 @@ namespace
 
 		void OnRender() override
 		{
-			if (m_ValidateActiveFrameUploads)
-			{
-				RenderActiveFrameUploadFrame();
-				return;
-			}
 			if (m_ValidateEditorUiUnorm)
 			{
 				RenderEditorUiUnormFrame();
@@ -780,9 +756,6 @@ namespace
 
 		void OnDetach() override
 		{
-			m_ActiveFrameUploadBindingSets.clear();
-			m_ActiveFrameUploadBuffers.clear();
-			m_ActiveFrameUploadTextures.clear();
 			m_PointShadowOutputTarget.reset();
 			m_PointShadowImageOutputTarget.reset();
 			m_PbrMaterialOutputTarget.reset();
@@ -815,93 +788,19 @@ namespace
 
 		[[nodiscard]] bool Succeeded() const noexcept
 		{
-			return m_Succeeded && (m_ValidateActiveFrameUploads ? m_ActiveFrameUploadFrames == 3 :
-				m_ValidateEditorUiUnorm ? m_EditorUiFrames == 3 && m_EditorUiTargetCreations == 2 :
-				m_ValidateTransparency ? m_TransparencyCaptureComplete :
-				m_ValidatePbrMaterials ? m_PbrMaterialCaptureComplete :
-				m_ValidatePointShadowImages ? m_PointShadowImageCase == PointShadowImageCases.size() :
-				m_ValidatePointShadows ? m_PointShadowFrames == 9 :
-				m_ValidateSpotlightShadows ? m_SpotShadowFrames == 9 :
-				m_ValidateLocalLights ? m_LocalLightFrames == 6 :
-				m_ValidateToneMapping ? m_ToneMappingFrame == 10 :
-				m_ValidateSceneHdr ? m_SceneCompletedFrames == 4 && m_ScenarioIndex == 4 : m_CompletedFrames == 3);
+			return m_Succeeded && (m_ValidateEditorUiUnorm			? m_EditorUiFrames == 3 && m_EditorUiTargetCreations == 2
+									  : m_ValidateTransparency		? m_TransparencyCaptureComplete
+									  : m_ValidatePbrMaterials		? m_PbrMaterialCaptureComplete
+									  : m_ValidatePointShadowImages ? m_PointShadowImageCase == PointShadowImageCases.size()
+									  : m_ValidatePointShadows		? m_PointShadowFrames == 9
+									  : m_ValidateSpotlightShadows	? m_SpotShadowFrames == 9
+									  : m_ValidateLocalLights		? m_LocalLightFrames == 6
+									  : m_ValidateToneMapping		? m_ToneMappingFrame == 10
+									  : m_ValidateSceneHdr			? m_SceneCompletedFrames == 4 && m_ScenarioIndex == 4
+																	: m_CompletedFrames == 3);
 		}
 
 	private:
-		void RenderActiveFrameUploadFrame()
-		{
-			if (!m_Succeeded || m_ActiveFrameUploadFrames >= 3)
-				return;
-
-			PulseForge::Application& App = PulseForge::Application::Get();
-			std::array<std::byte, 4 * 4 * 4> Pixels{};
-			for (size_t Pixel = 0; Pixel < Pixels.size() / 4; ++Pixel)
-			{
-				Pixels[Pixel * 4 + 0] = static_cast<std::byte>(48 + m_ActiveFrameUploadFrames * 64);
-				Pixels[Pixel * 4 + 1] = static_cast<std::byte>(192 - m_ActiveFrameUploadFrames * 32);
-				Pixels[Pixel * 4 + 2] = static_cast<std::byte>(96 + m_ActiveFrameUploadFrames * 24);
-				Pixels[Pixel * 4 + 3] = std::byte{ 0xff };
-			}
-
-			PulseForge::TextureDesc TextureDescription;
-			TextureDescription.Width = 4;
-			TextureDescription.Height = 4;
-			TextureDescription.Format = PulseForge::TextureFormat::RGBA8_UNorm;
-			TextureDescription.Usage = PulseForge::TextureUsage::ShaderResource;
-			TextureDescription.DebugName = "Active-frame upload validation texture " +
-				std::to_string(m_ActiveFrameUploadFrames);
-			const PulseForge::TextureSubresourceData Subresource{ 0, 0, Pixels, 0 };
-			auto TextureResult = App.CreateTexture(TextureDescription, std::span(&Subresource, 1));
-			if (!TextureResult)
-			{
-				Fail("Could not upload a texture while the frame command list was open: " + TextureResult.error().Message);
-				return;
-			}
-			PulseForge::TextureHandle Texture = std::move(*TextureResult);
-
-			const std::array<ValidationVertex, 3> Vertices = {
-				ValidationVertex{ { -1.0f, -1.0f }, { 0.0f, 1.0f } },
-				ValidationVertex{ { 3.0f, -1.0f }, { 2.0f, 1.0f } },
-				ValidationVertex{ { -1.0f, 3.0f }, { 0.0f, -1.0f } }
-			};
-			PulseForge::BufferDesc BufferDescription;
-			BufferDescription.ByteSize = sizeof(Vertices);
-			BufferDescription.Usage = PulseForge::BufferUsage::Vertex;
-			BufferDescription.DebugName = "Active-frame upload validation vertices " +
-				std::to_string(m_ActiveFrameUploadFrames);
-			auto BufferResult = App.CreateBuffer(BufferDescription, std::as_bytes(std::span(Vertices)));
-			if (!BufferResult)
-			{
-				Fail("Could not upload a vertex buffer while the frame command list was open: " + BufferResult.error().Message);
-				return;
-			}
-			PulseForge::BufferHandle Buffer = std::move(*BufferResult);
-
-			PulseForge::BindingSetDesc BindingDescription;
-			BindingDescription.Layout = m_BindingLayout;
-			BindingDescription.Textures.push_back({ 0, *Texture, PulseForge::BindingResourceType::Texture2D });
-			BindingDescription.Samplers.push_back({ 0, *m_Sampler });
-			auto BindingResult = App.CreateBindingSet(BindingDescription);
-			if (!BindingResult)
-			{
-				Fail("Could not bind the active-frame uploaded texture: " + BindingResult.error().Message);
-				return;
-			}
-			PulseForge::BindingSetHandle Binding = std::move(*BindingResult);
-			const std::array<const PulseForge::BindingSet*, 1> BindingSets = { Binding.get() };
-			if (const PulseForge::GraphicsResult Draw = App.Draw(
-				*m_SamplingPipeline, *Buffer, { 3, 1, 0, 0 }, BindingSets); !Draw)
-			{
-				Fail("Could not draw resources uploaded in the active frame: " + Draw.error().Message);
-				return;
-			}
-
-			m_ActiveFrameUploadTextures.push_back(std::move(Texture));
-			m_ActiveFrameUploadBuffers.push_back(std::move(Buffer));
-			m_ActiveFrameUploadBindingSets.push_back(std::move(Binding));
-			++m_ActiveFrameUploadFrames;
-		}
-
 		void Fail(const std::string& Message)
 		{
 			m_Succeeded = false;
@@ -3342,9 +3241,6 @@ namespace
 		PulseForge::BindingSetHandle m_SamplingBindingSet;
 		PulseForge::GraphicsPipelineHandle m_ColorPipeline;
 		PulseForge::GraphicsPipelineHandle m_SamplingPipeline;
-		std::vector<PulseForge::TextureHandle> m_ActiveFrameUploadTextures;
-		std::vector<PulseForge::BufferHandle> m_ActiveFrameUploadBuffers;
-		std::vector<PulseForge::BindingSetHandle> m_ActiveFrameUploadBindingSets;
 		PulseForge::RenderTargetHandle m_SdrTarget;
 		PulseForge::ShaderHandle m_EditorUiVertexShader;
 		PulseForge::ShaderHandle m_EditorUiFragmentShader;
@@ -3404,7 +3300,6 @@ namespace
 		const PulseForge::Texture* m_BoundOutputTexture = nullptr;
 		std::chrono::steady_clock::time_point m_StartedAt{};
 		uint32_t m_CompletedFrames = 0;
-		uint32_t m_ActiveFrameUploadFrames = 0;
 		uint32_t m_SceneCompletedFrames = 0;
 		uint32_t m_LocalLightFrames = 0;
 		uint32_t m_SpotShadowFrames = 0;
@@ -3432,7 +3327,6 @@ namespace
 		bool m_ValidatePbrMaterials = false;
 		bool m_ValidateTransparency = false;
 		bool m_ValidatePointShadowImages = false;
-		bool m_ValidateActiveFrameUploads = false;
 		bool m_ScenePrepared = false;
 		bool m_PointShadowScenarioUpdated = false;
 		bool m_PointShadowImageCapturePending = false;
@@ -3468,16 +3362,14 @@ namespace
 	class GpuValidationApplication final : public PulseForge::Application
 	{
 	public:
-		GpuValidationApplication(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm,
-			bool ValidateLocalLights, bool ValidateSpotlightShadows, bool ValidatePointShadows, bool ValidatePbrMaterials,
-			bool ValidateTransparency, bool ValidatePointShadowImages, bool ValidateActiveFrameUploads,
-			std::filesystem::path PointShadowImageDirectory)
+		GpuValidationApplication(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm, bool ValidateLocalLights,
+			bool ValidateSpotlightShadows, bool ValidatePointShadows, bool ValidatePbrMaterials, bool ValidateTransparency,
+			bool ValidatePointShadowImages, std::filesystem::path PointShadowImageDirectory)
 			: Application(PulseForge::RendererAPI::Vulkan)
 		{
 			auto Layer = std::make_unique<GpuValidationLayer>(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm,
-				ValidateLocalLights, ValidateSpotlightShadows, ValidatePointShadows, ValidatePbrMaterials,
-				ValidateTransparency,
-				ValidatePointShadowImages, ValidateActiveFrameUploads, std::move(PointShadowImageDirectory));
+				ValidateLocalLights, ValidateSpotlightShadows, ValidatePointShadows, ValidatePbrMaterials, ValidateTransparency,
+				ValidatePointShadowImages, std::move(PointShadowImageDirectory));
 			m_Layer = Layer.get();
 			PushLayer(std::move(Layer));
 		}
@@ -3491,7 +3383,7 @@ namespace
 	private:
 		GpuValidationLayer* m_Layer = nullptr;
 	};
-}
+} // namespace
 
 int main(int ArgumentCount, char** Arguments)
 {
@@ -3499,6 +3391,7 @@ int main(int ArgumentCount, char** Arguments)
 	try
 	{
 		const std::string_view Mode = ArgumentCount > 1 ? std::string_view(Arguments[1]) : std::string_view{};
+		if (Mode == "--active-frame-resource-upload") return PulseForge::GpuValidation::RunActiveFrameUploadValidation();
 		const bool ValidateSceneHdr = Mode == "--scene-hdr";
 		const bool ValidateToneMapping = Mode == "--scene-tonemap";
 		const bool ValidateEditorUiUnorm = Mode == "--editor-ui-unorm";
@@ -3508,14 +3401,12 @@ int main(int ArgumentCount, char** Arguments)
 		const bool ValidatePbrMaterials = Mode == "--scene-pbr-materials";
 		const bool ValidateTransparency = Mode == "--scene-transparency";
 		const bool ValidatePointShadowImages = Mode == "--scene-point-shadow-images";
-		const bool ValidateActiveFrameUploads = Mode == "--active-frame-resource-upload";
 		const std::filesystem::path PointShadowImageDirectory = ArgumentCount > 2
 			? std::filesystem::path(Arguments[2])
 			: std::filesystem::current_path() / "Diagnostics" / "PointShadowDirection";
 		GpuValidationApplication App(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm, ValidateLocalLights,
-			ValidateSpotlightShadows, ValidatePointShadows, ValidatePbrMaterials,
-			ValidateTransparency,
-			ValidatePointShadowImages, ValidateActiveFrameUploads, PointShadowImageDirectory);
+			ValidateSpotlightShadows, ValidatePointShadows, ValidatePbrMaterials, ValidateTransparency, ValidatePointShadowImages,
+			PointShadowImageDirectory);
 		return App.RunValidation();
 	}
 	catch (const std::exception& Exception)

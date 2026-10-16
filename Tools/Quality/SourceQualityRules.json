@@ -267,8 +267,8 @@
     },
     "Tests/GpuRendererValidation.cpp" :
     {
-      "max_lines" : 3526,
-      "reason" : "Legacy GPU validation entry point; scenarios should move into focused validation suites."
+      "max_lines" : 3417,
+      "reason" : "Legacy multi-scenario GPU validation harness; extracted scenarios should reduce this coordinator."
     }
   },
   "source_roots" :
