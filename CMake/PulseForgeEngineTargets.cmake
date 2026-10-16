@@ -114,7 +114,10 @@ add_library(PulseForgePhysics STATIC PulseForge/Source/Private/Physics/PhysicsSc
 target_include_directories(PulseForgePhysics PUBLIC PulseForge/Source/Public)
 target_compile_definitions(PulseForgePhysics PRIVATE PF_PLATFORM_WINDOWS NOMINMAX)
 target_link_libraries(PulseForgePhysics PUBLIC PulseForgeScene PRIVATE Jolt spdlog::spdlog)
-add_library(PulseForgeScripting STATIC PulseForge/Source/Private/Scripting/ScriptRuntime.cpp)
+add_library(PulseForgeScripting STATIC
+	PulseForge/Source/Private/Scripting/ScriptEnvironment.cpp
+	PulseForge/Source/Private/Scripting/ScriptRuntime.cpp
+)
 target_include_directories(PulseForgeScripting
 	PUBLIC PulseForge/Source/Public
 	PRIVATE PulseForge/Vendor/json/include
