@@ -257,7 +257,7 @@
   {
     "PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp" :
     {
-      "max_lines" : 3790,
+      "max_lines" : 3511,
       "reason" : "Legacy renderer implementation; new responsibilities require a separate owner."
     },
     "PulseForgeEditor/Source/Private/EditorApplication.cpp" :
@@ -283,6 +283,7 @@
     "PulseForge/Source/Private/Assets/AudioAssetCache.cpp" : "PulseForgeAudioAssets",
     "PulseForge/Source/Private/Renderer/MeshData.cpp" : "PulseForgeMeshData",
 	"PulseForge/Source/Private/Renderer/SceneRendererHdrTargetCache.cpp" : "PulseForgeSceneRenderer",
+	"PulseForge/Source/Private/Renderer/SceneRendererLocalLightingState.cpp" : "PulseForgeSceneRenderer",
 	"PulseForge/Source/Private/Renderer/SceneRendererPipelineCache.cpp" : "PulseForgeSceneRenderer",
 	"PulseForge/Source/Private/Renderer/Vulkan/VulkanResourceObjects.cpp" : "PulseForgeRenderer",
 	"PulseForge/Source/Private/Renderer/RenderDevice.cpp" : "PulseForgeRenderer",

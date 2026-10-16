@@ -1,6 +1,7 @@
 #include "Renderer/SceneRenderer.h"
 #include "Renderer/SceneRendererAmbientOcclusionPass.h"
 #include "Renderer/SceneRendererHdrTargetCache.h"
+#include "Renderer/SceneRendererLocalLightingState.h"
 #include "Renderer/SceneRendererPipelineCache.h"
 #include "Renderer/SceneRendererShadowTargetCache.h"
 #include "Renderer/SceneRendererToneMappingStage.h"
@@ -186,6 +187,7 @@ namespace PulseForge
 		  m_PipelineCache(std::make_unique<SceneRendererPipelineCache>(Runtime)),
 		  m_ToneMappingStage(std::make_unique<ToneMappingStage>(Runtime)), m_HdrTargetCache(std::make_unique<HdrTargetCache>(Runtime)),
 		  m_ShadowTargetCache(std::make_unique<ShadowTargetCache>(Runtime)),
+		  m_LocalLightingState(std::make_unique<LocalLightingState>()),
 		  m_AmbientOcclusionPass(std::make_unique<AmbientOcclusionPass>(Runtime))
 	{
 	}
@@ -1011,124 +1013,18 @@ namespace PulseForge
 
 	std::expected<void, SceneRendererError> SceneRenderer::PrepareLocalLighting()
 	{
-		m_PreparedLocalLighting = {};
-		m_SelectedLocalLightCount = 0;
-		m_PreparedSpotShadowMatrices.fill(glm::mat4(1.0f));
-		m_PreparedSpotShadowParameters.fill(glm::vec4(0.0f));
-		for (auto& FaceMatrices : m_PreparedPointShadowMatrices)
-			FaceMatrices.fill(glm::mat4(1.0f));
-		m_PreparedPointShadowParameters.fill(glm::vec4(0.0f));
-		if (!m_PreparedSnapshot)
-		{
-			m_SpotShadowSlotOwners.fill(std::nullopt);
-			m_PointShadowSlotOwners.fill(std::nullopt);
-			return {};
-		}
+		auto Plan = m_LocalLightingState->BuildPlan(m_PreparedSnapshot ? &*m_PreparedSnapshot : nullptr);
+		if (!Plan)
+			return std::unexpected(std::move(Plan.error()));
 
-		size_t ActiveLightCount = 0;
-		const auto ConsiderLocalLight = [&](const LocalLightRelevance& Relevance, const LocalLightGpuData& Data,
-			UUID Entity, const SceneSpotLight* Spot, const ScenePointLight* Point)
-		{
-			if (Relevance.Intensity <= 0.0f)
-				return;
-			++ActiveLightCount;
-			const SelectedLocalLight Candidate{ Relevance, Data, Entity, Spot, Point };
-			size_t InsertIndex = 0;
-			while (InsertIndex < m_SelectedLocalLightCount && !IsLocalLightMoreRelevant(
-				Candidate.Relevance, m_SelectedLocalLights[InsertIndex].Relevance, m_PreparedSnapshot->CameraWorldPosition))
-				++InsertIndex;
-			if (InsertIndex >= MaxLocalLightCount)
-				return;
-			const size_t NewCount = (std::min)(m_SelectedLocalLightCount + 1, MaxLocalLightCount);
-			for (size_t Index = NewCount - 1; Index > InsertIndex; --Index)
-				m_SelectedLocalLights[Index] = m_SelectedLocalLights[Index - 1];
-			m_SelectedLocalLights[InsertIndex] = Candidate;
-			m_SelectedLocalLightCount = NewCount;
-		};
-
-		for (const ScenePointLight& Light : m_PreparedSnapshot->PointLights)
-		{
-			LocalLightGpuData Data{};
-			Data.PositionRange = glm::vec4(Light.WorldPosition, Light.Range);
-			Data.ColorIntensity = glm::vec4(Light.Color, Light.Intensity);
-			Data.OuterCosAndType = glm::vec4(0.0f, -1.0f, 0.0f, 0.0f);
-			ConsiderLocalLight({ Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, PointLocalLightTypeOrder },
-				Data, Light.Entity, nullptr, &Light);
-		}
-		for (const SceneSpotLight& Light : m_PreparedSnapshot->SpotLights)
-		{
-			LocalLightGpuData Data{};
-			Data.PositionRange = glm::vec4(Light.WorldPosition, Light.Range);
-			Data.ColorIntensity = glm::vec4(Light.Color, Light.Intensity);
-			Data.DirectionInnerCos = glm::vec4(Light.WorldDirection, std::cos(glm::radians(Light.InnerConeAngleDegrees)));
-			Data.OuterCosAndType = glm::vec4(std::cos(glm::radians(Light.OuterConeAngleDegrees)), -1.0f, 0.0f, 1.0f);
-			ConsiderLocalLight({ Light.Entity, Light.WorldPosition, Light.Color, Light.Intensity, Light.Range, SpotLocalLightTypeOrder },
-				Data, Light.Entity, &Light, nullptr);
-		}
-
-		if (ActiveLightCount > MaxLocalLightCount && !m_LoggedLocalLightOverflow)
-		{
-			PF_CORE_WARN("Scene has {0} active local lights; rendering the {1} most camera-relevant lights (UUID and type break ties)",
-				ActiveLightCount, MaxLocalLightCount);
-			m_LoggedLocalLightOverflow = true;
-		}
-
-		std::array<SpotlightShadowCandidate, MaxLocalLightCount> ShadowCandidates{};
-		size_t ShadowCandidateCount = 0;
-		for (size_t Index = 0; Index < m_SelectedLocalLightCount; ++Index)
-		{
-			const SceneSpotLight* Spot = m_SelectedLocalLights[Index].Spot;
-			if (!Spot || !Spot->CastShadows || m_PreparedSnapshot->Meshes.empty())
-				continue;
-			auto Projection = BuildSpotlightShadowProjection(
-				Spot->WorldPosition, Spot->WorldDirection, Spot->Range, Spot->OuterConeAngleDegrees);
-			if (!Projection)
-			{
-				if (Spot->OuterConeAngleDegrees > MaxSpotlightShadowOuterHalfAngleDegrees && !m_LoggedUnsupportedSpotShadowCone)
-				{
-					PF_CORE_WARN("Spotlight shadow projection supports outer half-angles up to {0} degrees; wider spotlights remain "
-								 "illuminated without shadows",
-						MaxSpotlightShadowOuterHalfAngleDegrees);
-					m_LoggedUnsupportedSpotShadowCone = true;
-				}
-				continue;
-			}
-			ShadowCandidates[ShadowCandidateCount++] = { m_SelectedLocalLights[Index].Entity,
-				static_cast<uint32_t>(Index) };
-		}
-
-		if (ShadowCandidateCount > 0)
+		if (Plan->RequiresSpotlightResources)
 		{
 			if (auto Resources = m_ShadowTargetCache->EnsureSpotlightMaps(m_SpotShadowBindingLayout, *m_ShadowSampler); !Resources)
 				return std::unexpected(std::move(Resources.error()));
-			if (auto Pipeline = m_PipelineCache->EnsureShadowPipeline(1.0f); !Pipeline) return std::unexpected(std::move(Pipeline.error()));
+			if (auto Pipeline = m_PipelineCache->EnsureShadowPipeline(1.0f); !Pipeline)
+				return std::unexpected(std::move(Pipeline.error()));
 		}
-		const SpotlightShadowSlotAssignments SlotAssignments = AssignSpotlightShadowSlots(
-			std::span(ShadowCandidates.data(), ShadowCandidateCount), m_SpotShadowSlotOwners);
-		for (size_t Index = 0; Index < m_SelectedLocalLightCount; ++Index)
-			if (SlotAssignments[Index] >= 0)
-				m_SelectedLocalLights[Index].Data.OuterCosAndType.y = static_cast<float>(SlotAssignments[Index]);
-		if (ShadowCandidateCount > MaxSpotlightShadowMapCount && !m_LoggedSpotShadowOverflow)
-		{
-			PF_CORE_WARN("More than {0} selected spotlights request shadows; remaining lights render unshadowed",
-				MaxSpotlightShadowMapCount);
-			m_LoggedSpotShadowOverflow = true;
-		}
-
-		std::array<PointShadowCandidate, MaxLocalLightCount> PointCandidates{};
-		size_t PointCandidateCount = 0;
-		for (size_t Index = 0; Index < m_SelectedLocalLightCount; ++Index)
-		{
-			const ScenePointLight* Point = m_SelectedLocalLights[Index].Point;
-			if (!Point || !Point->CastShadows || m_PreparedSnapshot->Meshes.empty())
-				continue;
-			auto Projections = BuildPointShadowProjections(Point->WorldPosition, Point->Range);
-			if (!Projections)
-				return std::unexpected(MakeDrawError("Could not build point-shadow projections for entity " +
-					Point->Entity.ToString() + ": " + Projections.error().Message));
-			PointCandidates[PointCandidateCount++] = { Point->Entity, static_cast<uint32_t>(Index) };
-		}
-		if (PointCandidateCount > 0)
+		if (Plan->RequiresPointShadowResources)
 		{
 			if (auto Resources = m_ShadowTargetCache->EnsurePointLightCubemaps(m_PointShadowBindingLayout, *m_ShadowSampler); !Resources)
 				return std::unexpected(std::move(Resources.error()));
@@ -1137,77 +1033,17 @@ namespace PulseForge
 			if (auto Pipeline = m_PipelineCache->EnsurePointShadowPipeline(true); !Pipeline)
 				return std::unexpected(std::move(Pipeline.error()));
 		}
-		const PointShadowSlotAssignments PointAssignments = AssignPointShadowSlots(
-			std::span(PointCandidates.data(), PointCandidateCount), m_PointShadowSlotOwners);
-		for (size_t Index = 0; Index < m_SelectedLocalLightCount; ++Index)
-			if (m_SelectedLocalLights[Index].Point && PointAssignments[Index] >= 0)
-				m_SelectedLocalLights[Index].Data.OuterCosAndType.y = static_cast<float>(PointAssignments[Index]);
-		if (PointCandidateCount > MaxPointLightShadowCount && !m_LoggedPointShadowOverflow)
-		{
-			PF_CORE_WARN("More than {0} selected point lights request shadows; remaining lights continue unshadowed",
-				MaxPointLightShadowCount);
-			m_LoggedPointShadowOverflow = true;
-		}
 
-		m_PreparedLocalLighting.Counts.x = static_cast<uint32_t>(m_SelectedLocalLightCount);
-		for (size_t Index = 0; Index < m_SelectedLocalLightCount; ++Index)
-			m_PreparedLocalLighting.Lights[Index] = m_SelectedLocalLights[Index].Data;
-
-		for (size_t Slot = 0; Slot < m_SpotShadowSlotOwners.size(); ++Slot)
-		{
-			if (!m_SpotShadowSlotOwners[Slot])
-				continue;
-			const auto Selected = std::find_if(m_SelectedLocalLights.begin(),
-				m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount),
-				[&](const SelectedLocalLight& Light)
-				{
-					return Light.Spot && MatchesLocalLightIdentity(
-						Light.Relevance, *m_SpotShadowSlotOwners[Slot], SpotLocalLightTypeOrder);
-				});
-			if (Selected == m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount) || !Selected->Spot)
-				return std::unexpected(MakeDrawError("Spotlight shadow slot no longer identifies a selected spotlight"));
-			auto Projection = BuildSpotlightShadowProjection(
-				Selected->Spot->WorldPosition, Selected->Spot->WorldDirection,
-				Selected->Spot->Range, Selected->Spot->OuterConeAngleDegrees);
-			if (!Projection)
-				return std::unexpected(MakeDrawError("Could not build assigned spotlight shadow projection: " + Projection.error().Message));
-			m_PreparedSpotShadowMatrices[Slot] = Projection->ViewProjection;
-			m_PreparedSpotShadowParameters[Slot] = glm::vec4(
-				Selected->Spot->ShadowBias, Selected->Spot->ShadowNormalBias,
-				Selected->Spot->ShadowSoftness, 1.0f);
-		}
-		for (size_t Slot = 0; Slot < m_PointShadowSlotOwners.size(); ++Slot)
-		{
-			if (!m_PointShadowSlotOwners[Slot])
-				continue;
-			const auto Selected = std::find_if(m_SelectedLocalLights.begin(),
-				m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount),
-				[&](const SelectedLocalLight& Light)
-				{
-					return Light.Point && MatchesLocalLightIdentity(
-						Light.Relevance, *m_PointShadowSlotOwners[Slot], PointLocalLightTypeOrder);
-				});
-			if (Selected == m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount) || !Selected->Point)
-				return std::unexpected(MakeDrawError("Point-shadow slot no longer identifies a selected point light"));
-			auto Projections = BuildPointShadowProjections(Selected->Point->WorldPosition, Selected->Point->Range);
-			if (!Projections)
-				return std::unexpected(MakeDrawError("Could not build assigned point-shadow projections: " + Projections.error().Message));
-			for (size_t Face = 0; Face < Projections->Faces.size(); ++Face)
-				m_PreparedPointShadowMatrices[Slot][Face] = Projections->Faces[Face].ViewProjection;
-			m_PreparedPointShadowParameters[Slot] = glm::vec4(
-				Selected->Point->ShadowBias, Selected->Point->ShadowNormalBias,
-				Selected->Point->ShadowSoftness, 1.0f);
-		}
-		return {};
+		return m_LocalLightingState->Commit();
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::RenderSpotlightShadows()
 	{
 		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty() || !m_ShadowTargetCache->HasSpotlightMaps())
 			return RenderPointLightShadows();
-		for (size_t Slot = 0; Slot < m_SpotShadowSlotOwners.size(); ++Slot)
+		for (size_t Slot = 0; Slot < m_LocalLightingState->SpotlightSlotOwners().size(); ++Slot)
 		{
-			if (!m_SpotShadowSlotOwners[Slot])
+			if (!m_LocalLightingState->SpotlightSlotOwners()[Slot])
 				continue;
 			const GraphicsResult Begin = m_Runtime.BeginRenderTarget(*m_ShadowTargetCache->SpotlightTarget(Slot));
 			if (!Begin)
@@ -1229,7 +1065,7 @@ namespace PulseForge
 				auto Mesh = m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
 				if (!Mesh)
 					return std::unexpected(MakeDrawError("Spotlight shadow caster mesh became unavailable: " + Mesh.error().Message));
-				const glm::mat4 ShadowTransform = m_PreparedSpotShadowMatrices[Slot] * Instance.WorldTransform;
+				const glm::mat4 ShadowTransform = m_LocalLightingState->SpotlightMatrices()[Slot] * Instance.WorldTransform;
 				const auto Update = m_Runtime.WriteBuffer(
 					*m_ShadowObjectConstantsBuffer, 0, std::as_bytes(std::span(&ShadowTransform, 1)));
 				if (!Update)
@@ -1251,22 +1087,22 @@ namespace PulseForge
 
 	std::expected<void, SceneRendererError> SceneRenderer::RenderPointLightShadows()
 	{
+		const auto SelectedLights = m_LocalLightingState->SelectedLights();
 		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty() || !m_ShadowTargetCache->HasPointLightCubemaps()) return {};
 		if (!m_PipelineCache->FindPointShadowPipeline(false) && !m_PipelineCache->FindPointShadowPipeline(true))
 			return std::unexpected(MakeResourceError("Point-shadow pipeline was not prepared for active shadow owners"));
 
-		for (size_t Slot = 0; Slot < m_PointShadowSlotOwners.size(); ++Slot)
+		for (size_t Slot = 0; Slot < m_LocalLightingState->PointSlotOwners().size(); ++Slot)
 		{
-			if (!m_PointShadowSlotOwners[Slot])
+			if (!m_LocalLightingState->PointSlotOwners()[Slot])
 				continue;
-			const auto Selected = std::find_if(m_SelectedLocalLights.begin(),
-				m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount),
-				[&](const SelectedLocalLight& Light)
+			const auto Selected = std::find_if(SelectedLights.begin(), SelectedLights.end(),
+				[&](const LocalLightingState::SelectedLight& Light)
 				{
 					return Light.Point && MatchesLocalLightIdentity(
-						Light.Relevance, *m_PointShadowSlotOwners[Slot], PointLocalLightTypeOrder);
+						Light.Relevance, *m_LocalLightingState->PointSlotOwners()[Slot], PointLocalLightTypeOrder);
 				});
-			if (Selected == m_SelectedLocalLights.begin() + static_cast<std::ptrdiff_t>(m_SelectedLocalLightCount) || !Selected->Point)
+			if (Selected == SelectedLights.end() || !Selected->Point)
 				return std::unexpected(MakeDrawError("Point-shadow rendering found a stale slot owner"));
 
 			for (size_t Face = 0; Face < 6; ++Face)
@@ -1295,7 +1131,7 @@ namespace PulseForge
 					if (!Mesh)
 						return std::unexpected(MakeDrawError("Point-shadow caster mesh became unavailable: " + Mesh.error().Message));
 					const PointShadowObjectConstants Object{
-						m_PreparedPointShadowMatrices[Slot][Face],
+						m_LocalLightingState->PointMatrices()[Slot][Face],
 						glm::vec4(Selected->Point->WorldPosition, Selected->Point->Range),
 						Instance.WorldTransform };
 					const auto Update = m_Runtime.WriteBuffer(
@@ -1435,7 +1271,7 @@ namespace PulseForge
 		return HdrSceneRenderResult{ Color, Target->Target->GetDepthTexture(), Width, Height, *Rendered, m_LastSpotShadowPassCount,
 			m_LastSpotShadowCasterDrawCount, m_PreparedSnapshot->EnvironmentLight.has_value(), Target->Generation,
 			m_ShadowTargetCache->SpotlightResourceGeneration(), m_LastPointShadowPassCount, m_LastPointShadowCasterDrawCount,
-			m_ShadowTargetCache->PointLightResourceGeneration(), m_PointShadowSlotOwners };
+			m_ShadowTargetCache->PointLightResourceGeneration(), m_LocalLightingState->PointSlotOwners() };
 	}
 
 	std::expected<SceneRenderOutputResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToOutput()
@@ -1458,7 +1294,7 @@ namespace PulseForge
 			Hdr->SpotlightShadowPassCount,
 			Hdr->SpotlightShadowCasterDrawCount,
 			Hdr->SpotlightShadowResourceGeneration,
-			m_SpotShadowSlotOwners,
+			m_LocalLightingState->SpotlightSlotOwners(),
 			Hdr->PointShadowPassCount,
 			Hdr->PointShadowCasterDrawCount,
 			Hdr->PointShadowResourceGeneration,
@@ -1507,7 +1343,7 @@ namespace PulseForge
 			Hdr->SpotlightShadowPassCount,
 			Hdr->SpotlightShadowCasterDrawCount,
 			Hdr->SpotlightShadowResourceGeneration,
-			m_SpotShadowSlotOwners,
+			m_LocalLightingState->SpotlightSlotOwners(),
 			Hdr->PointShadowPassCount,
 			Hdr->PointShadowCasterDrawCount,
 			Hdr->PointShadowResourceGeneration,
@@ -1637,11 +1473,11 @@ namespace PulseForge
 				}
 			}
 		}
-		Frame.SpotShadowViewProjection = m_PreparedSpotShadowMatrices;
-		Frame.SpotShadowParameters = m_PreparedSpotShadowParameters;
-		Frame.PointShadowParameters = m_PreparedPointShadowParameters;
+		Frame.SpotShadowViewProjection = m_LocalLightingState->SpotlightMatrices();
+		Frame.SpotShadowParameters = m_LocalLightingState->SpotlightParameters();
+		Frame.PointShadowParameters = m_LocalLightingState->PointParameters();
 		const auto LocalLightingUpdate = m_Runtime.WriteBuffer(
-			*m_LocalLightingConstantsBuffer, 0, std::as_bytes(std::span(&m_PreparedLocalLighting, 1)));
+			*m_LocalLightingConstantsBuffer, 0, std::as_bytes(std::span(&m_LocalLightingState->Constants(), 1)));
 		if (!LocalLightingUpdate)
 			return std::unexpected(MakeDrawError("Could not update local-light constants: " + LocalLightingUpdate.error().Message));
 

@@ -167,6 +167,7 @@ namespace PulseForge
 		class AmbientOcclusionPass;
 		class HdrTargetCache;
 		class ShadowTargetCache;
+		class LocalLightingState;
 
 		SceneRenderer(RenderDevice& Runtime, const Project& SourceProject);
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
@@ -246,15 +247,6 @@ namespace PulseForge
 		};
 		static_assert(sizeof(PointShadowObjectConstants) == 144);
 
-		struct SelectedLocalLight
-		{
-			LocalLightRelevance Relevance;
-			LocalLightGpuData Data;
-			UUID Entity;
-			const SceneSpotLight* Spot = nullptr;
-			const ScenePointLight* Point = nullptr;
-		};
-
 		RenderDevice& m_Runtime;
 		const Project& m_Project;
 		std::unique_ptr<ProjectAssetCaches> m_ProjectAssetCaches;
@@ -262,6 +254,7 @@ namespace PulseForge
 		std::unique_ptr<ToneMappingStage> m_ToneMappingStage;
 		std::unique_ptr<HdrTargetCache> m_HdrTargetCache;
 		std::unique_ptr<ShadowTargetCache> m_ShadowTargetCache;
+		std::unique_ptr<LocalLightingState> m_LocalLightingState;
 		SamplerHandle m_Sampler;
 		SamplerHandle m_EnvironmentSampler;
 		SamplerHandle m_ShadowSampler;
@@ -291,24 +284,11 @@ namespace PulseForge
 		std::optional<SceneRenderSnapshot> m_PreparedSnapshot;
 		std::vector<const SceneMeshInstance*> m_TransparentDrawOrder;
 		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
-		std::array<SelectedLocalLight, MaxLocalLightCount> m_SelectedLocalLights{};
-		std::array<std::optional<UUID>, MaxSpotlightShadowMapCount> m_SpotShadowSlotOwners{};
-		PointShadowSlotOwners m_PointShadowSlotOwners{};
-		std::array<glm::mat4, MaxSpotlightShadowMapCount> m_PreparedSpotShadowMatrices{};
-		std::array<glm::vec4, MaxSpotlightShadowMapCount> m_PreparedSpotShadowParameters{};
-		std::array<std::array<glm::mat4, 6>, MaxPointLightShadowCount> m_PreparedPointShadowMatrices{};
-		std::array<glm::vec4, MaxPointLightShadowCount> m_PreparedPointShadowParameters{};
-		LocalLightingConstants m_PreparedLocalLighting{};
-		size_t m_SelectedLocalLightCount = 0;
 		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;
 		std::unique_ptr<AmbientOcclusionPass> m_AmbientOcclusionPass;
 		bool m_EnvironmentLightingPending = false;
 		bool m_PreparedEnvironmentReady = false;
 		bool m_LoggedFirstSnapshotPreparation = false;
-		bool m_LoggedLocalLightOverflow = false;
-		bool m_LoggedSpotShadowOverflow = false;
-		bool m_LoggedUnsupportedSpotShadowCone = false;
-		bool m_LoggedPointShadowOverflow = false;
 		size_t m_LastSpotShadowPassCount = 0;
 		size_t m_LastSpotShadowCasterDrawCount = 0;
 		size_t m_LastPointShadowPassCount = 0;
