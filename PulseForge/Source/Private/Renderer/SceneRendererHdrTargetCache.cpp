@@ -1,8 +1,8 @@
 #include "Renderer/SceneRendererHdrTargetCache.h"
+#include "Renderer/SceneRendererGeneration.h"
 
 #include "Core/Log.h"
 
-#include <limits>
 #include <utility>
 
 namespace PulseForge
@@ -66,7 +66,7 @@ namespace PulseForge
 		}
 
 		m_Target = std::move(*Replacement);
-		m_Generation = m_Generation == (std::numeric_limits<uint64_t>::max)() ? 1 : m_Generation + 1;
+		m_Generation = Detail::AdvanceSceneRendererGeneration(m_Generation);
 		PF_CORE_INFO("Created/resized persistent RGBA16F HDR scene target to {0}x{1}", Width, Height);
 		return EnsureResult{ .Target = m_Target.get(), .Generation = m_Generation };
 	}

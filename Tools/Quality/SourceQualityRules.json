@@ -284,6 +284,7 @@
     "PulseForge/Source/Private/Renderer/MeshData.cpp" : "PulseForgeMeshData",
 	"PulseForge/Source/Private/Renderer/SceneRendererHdrTargetCache.cpp" : "PulseForgeSceneRenderer",
 	"PulseForge/Source/Private/Renderer/RenderDevice.cpp" : "PulseForgeRenderer",
+	"PulseForge/Source/Private/Renderer/SceneRendererShadowTargetCache.cpp" : "PulseForgeSceneRenderer",
     "PulseForgeEditor/Source/Private/EditorAssetDestinationDialog.cpp" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorAssetSelector.cpp" : "PulseForgeEditorUI",
     "PulseForgeEditor/Source/Private/EditorConsolePanel.cpp" : "PulseForgeEditorUI",

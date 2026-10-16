@@ -1,6 +1,7 @@
 #include "Renderer/SceneRenderer.h"
 #include "Renderer/SceneRendererAmbientOcclusionPass.h"
 #include "Renderer/SceneRendererHdrTargetCache.h"
+#include "Renderer/SceneRendererShadowTargetCache.h"
 #include "Renderer/SceneRendererToneMappingStage.h"
 
 #include "Assets/MaterialAssetCache.h"
@@ -19,7 +20,6 @@
 #include <iterator>
 #include <span>
 #include <exception>
-#include <limits>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -200,6 +200,7 @@ namespace PulseForge
 	SceneRenderer::SceneRenderer(RenderDevice& Runtime, const Project& SourceProject)
 		: m_Runtime(Runtime), m_Project(SourceProject), m_ProjectAssetCaches(std::make_unique<ProjectAssetCaches>(Runtime, SourceProject)),
 		  m_ToneMappingStage(std::make_unique<ToneMappingStage>(Runtime)), m_HdrTargetCache(std::make_unique<HdrTargetCache>(Runtime)),
+		  m_ShadowTargetCache(std::make_unique<ShadowTargetCache>(Runtime)),
 		  m_AmbientOcclusionPass(std::make_unique<AmbientOcclusionPass>(Runtime))
 	{
 	}
@@ -208,9 +209,7 @@ namespace PulseForge
 
 	const Texture* SceneRenderer::GetPointShadowFaceTextureForValidation(size_t Slot, uint32_t Face) const noexcept
 	{
-		if (Slot >= m_PointShadowCubemaps.size() || Face >= 6 || !m_PointShadowCubemaps[Slot])
-			return nullptr;
-		return m_PointShadowCubemaps[Slot]->GetFaceTarget(Face).GetDepthTexture();
+		return m_ShadowTargetCache->PointShadowFaceTexture(Slot, Face);
 	}
 
 	std::expected<std::unique_ptr<SceneRenderer>, SceneRendererError> SceneRenderer::Create(
@@ -611,53 +610,10 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Could not create shadow sampler: " + ShadowSampler.error().Message));
 		m_ShadowSampler = std::move(*ShadowSampler);
 
-		constexpr uint32_t ShadowResolution = 1024;
-		for (size_t CascadeIndex = 0; CascadeIndex < m_ShadowTargets.size(); ++CascadeIndex)
-		{
-			RenderTargetDesc ShadowTargetDescription;
-			ShadowTargetDescription.Width = ShadowResolution;
-			ShadowTargetDescription.Height = ShadowResolution;
-			ShadowTargetDescription.ColorFormat = ColorTargetFormat::None;
-			ShadowTargetDescription.DepthMode = DepthAttachmentMode::ShaderReadableAttachment;
-			ShadowTargetDescription.DebugName = "PulseForge directional shadow cascade " + std::to_string(CascadeIndex);
-			auto ShadowTarget = m_Runtime.CreateRenderTarget(ShadowTargetDescription);
-			if (!ShadowTarget)
-				return std::unexpected(MakeResourceError("Could not create directional shadow target: " + ShadowTarget.error().Message));
-			m_ShadowTargets[CascadeIndex] = std::move(*ShadowTarget);
-		}
-
-		BindingSetDesc ShadowSetDescription;
-		ShadowSetDescription.Layout = m_ShadowBindingLayout;
-		for (uint32_t CascadeIndex = 0; CascadeIndex < m_ShadowTargets.size(); ++CascadeIndex)
-			ShadowSetDescription.Textures.push_back({ CascadeIndex,
-				std::cref(*m_ShadowTargets[CascadeIndex]->GetDepthTexture()) });
-		ShadowSetDescription.Samplers.push_back({ 0, std::cref(*m_ShadowSampler) });
-		auto ShadowSet = m_Runtime.CreateBindingSet(ShadowSetDescription);
-		if (!ShadowSet)
-			return std::unexpected(MakeResourceError("Could not create directional shadow bindings: " + ShadowSet.error().Message));
-		m_ShadowBindingSet = std::move(*ShadowSet);
-
-		BindingSetDesc SpotShadowSetDescription;
-		SpotShadowSetDescription.Layout = m_SpotShadowBindingLayout;
-		for (uint32_t ShadowIndex = 0; ShadowIndex < m_SpotShadowTargets.size(); ++ShadowIndex)
-			SpotShadowSetDescription.Textures.push_back({ ShadowIndex,
-				std::cref(*m_ShadowTargets[ShadowIndex]->GetDepthTexture()) });
-		SpotShadowSetDescription.Samplers.push_back({ 0, std::cref(*m_ShadowSampler) });
-		auto SpotShadowSet = m_Runtime.CreateBindingSet(SpotShadowSetDescription);
-		if (!SpotShadowSet)
-			return std::unexpected(MakeResourceError("Could not create safe initial spotlight shadow bindings: " + SpotShadowSet.error().Message));
-		m_SpotShadowBindingSet = std::move(*SpotShadowSet);
-		BindingSetDesc PointShadowSetDescription;
-		PointShadowSetDescription.Layout = m_PointShadowBindingLayout;
-		PointShadowSetDescription.Textures = {
-			{ 0, std::cref(*m_FallbackPointShadowTexture), BindingResourceType::TextureCube },
-			{ 1, std::cref(*m_FallbackPointShadowTexture), BindingResourceType::TextureCube }
-		};
-		PointShadowSetDescription.Samplers.push_back({ 0, std::cref(*m_ShadowSampler) });
-		auto PointShadowSet = m_Runtime.CreateBindingSet(PointShadowSetDescription);
-		if (!PointShadowSet)
-			return std::unexpected(MakeResourceError("Could not create fallback point-shadow bindings: " + PointShadowSet.error().Message));
-		m_PointShadowBindingSet = std::move(*PointShadowSet);
+		if (auto ShadowTargets = m_ShadowTargetCache->Initialize(m_ShadowBindingLayout, m_SpotShadowBindingLayout,
+				m_PointShadowBindingLayout, *m_ShadowSampler, *m_FallbackPointShadowTexture);
+			!ShadowTargets)
+			return std::unexpected(std::move(ShadowTargets.error()));
 		if (auto Initialized = m_AmbientOcclusionPass->Initialize(std::move(*AoPrepassVs), std::move(*AoPrepassPs), std::move(*AoVs),
 				std::move(*AoPs), std::move(*AoBlurVs), std::move(*AoBlurPs));
 			!Initialized)
@@ -1144,89 +1100,6 @@ namespace PulseForge
 		return {};
 	}
 
-	std::expected<void, SceneRendererError> SceneRenderer::EnsureSpotShadowResources()
-	{
-		if (m_SpotShadowTargets.front())
-			return {};
-
-		std::array<RenderTargetHandle, MaxSpotlightShadowMapCount> Targets;
-		for (size_t ShadowIndex = 0; ShadowIndex < Targets.size(); ++ShadowIndex)
-		{
-			RenderTargetDesc Description;
-			Description.Width = SpotlightShadowMapResolution;
-			Description.Height = SpotlightShadowMapResolution;
-			Description.ColorFormat = ColorTargetFormat::None;
-			Description.DepthMode = DepthAttachmentMode::ShaderReadableAttachment;
-			Description.DebugName = "PulseForge spotlight shadow map " + std::to_string(ShadowIndex);
-			auto Target = m_Runtime.CreateRenderTarget(Description);
-			if (!Target)
-				return std::unexpected(MakeResourceError("Could not create spotlight shadow map: " + Target.error().Message));
-			if (!(*Target)->GetDepthTexture() ||
-				(*Target)->GetDepthTexture()->GetDescription().Format != TextureFormat::Depth32Float)
-				return std::unexpected(MakeResourceError("Spotlight shadow target did not provide a shader-readable D32 depth texture"));
-			Targets[ShadowIndex] = std::move(*Target);
-		}
-
-		BindingSetDesc Description;
-		Description.Layout = m_SpotShadowBindingLayout;
-		for (uint32_t ShadowIndex = 0; ShadowIndex < Targets.size(); ++ShadowIndex)
-			Description.Textures.push_back({ ShadowIndex, std::cref(*Targets[ShadowIndex]->GetDepthTexture()) });
-		Description.Samplers.push_back({ 0, std::cref(*m_ShadowSampler) });
-		auto BindingSet = m_Runtime.CreateBindingSet(Description);
-		if (!BindingSet)
-			return std::unexpected(MakeResourceError("Could not create spotlight shadow bindings: " + BindingSet.error().Message));
-
-		m_SpotShadowTargets = std::move(Targets);
-		m_SpotShadowBindingSet = std::move(*BindingSet);
-		if (m_SpotShadowResourceGeneration == (std::numeric_limits<uint64_t>::max)())
-			m_SpotShadowResourceGeneration = 1;
-		else
-			++m_SpotShadowResourceGeneration;
-		PF_CORE_INFO("Created {0} persistent {1}x{1} D32 spotlight shadow maps ({2} MiB depth storage)",
-			MaxSpotlightShadowMapCount, SpotlightShadowMapResolution,
-			(MaxSpotlightShadowMapCount * SpotlightShadowMapResolution * SpotlightShadowMapResolution * sizeof(float)) / (1024 * 1024));
-		return {};
-	}
-
-	std::expected<void, SceneRendererError> SceneRenderer::EnsurePointShadowResources()
-	{
-		if (m_PointShadowCubemaps.front())
-			return {};
-
-		std::array<DepthCubemapHandle, MaxPointLightShadowCount> Cubemaps;
-		for (size_t Slot = 0; Slot < Cubemaps.size(); ++Slot)
-		{
-			auto Cubemap = m_Runtime.CreateDepthCubemap(PointLightShadowMapResolution,
-				"PulseForge point-shadow depth cubemap " + std::to_string(Slot));
-			if (!Cubemap)
-				return std::unexpected(MakeResourceError("Could not create point-shadow depth cubemap: " + Cubemap.error().Message));
-			if ((*Cubemap)->GetTexture().GetDescription().Format != TextureFormat::Depth32Float ||
-				(*Cubemap)->GetResolution() != PointLightShadowMapResolution)
-				return std::unexpected(MakeResourceError("Point-shadow cubemap has an incompatible depth format or resolution"));
-			Cubemaps[Slot] = std::move(*Cubemap);
-		}
-
-		BindingSetDesc Description;
-		Description.Layout = m_PointShadowBindingLayout;
-		for (uint32_t Slot = 0; Slot < Cubemaps.size(); ++Slot)
-			Description.Textures.push_back({ Slot, std::cref(Cubemaps[Slot]->GetTexture()), BindingResourceType::TextureCube });
-		Description.Samplers.push_back({ 0, std::cref(*m_ShadowSampler) });
-		auto BindingSet = m_Runtime.CreateBindingSet(Description);
-		if (!BindingSet)
-			return std::unexpected(MakeResourceError("Could not create point-shadow cubemap bindings: " + BindingSet.error().Message));
-
-		m_PointShadowCubemaps = std::move(Cubemaps);
-		m_PointShadowBindingSet = std::move(*BindingSet);
-		if (m_PointShadowResourceGeneration == (std::numeric_limits<uint64_t>::max)())
-			m_PointShadowResourceGeneration = 1;
-		else
-			++m_PointShadowResourceGeneration;
-		PF_CORE_INFO("Created {0} persistent {1}x{1} D32 point-shadow cubemaps ({2} MiB depth storage)",
-			MaxPointLightShadowCount, PointLightShadowMapResolution,
-			(MaxPointLightShadowCount * 6 * PointLightShadowMapResolution * PointLightShadowMapResolution * sizeof(float)) / (1024 * 1024));
-		return {};
-	}
-
 	std::expected<void, SceneRendererError> SceneRenderer::PrepareLocalLighting()
 	{
 		m_PreparedLocalLighting = {};
@@ -1316,7 +1189,7 @@ namespace PulseForge
 
 		if (ShadowCandidateCount > 0)
 		{
-			if (auto Resources = EnsureSpotShadowResources(); !Resources)
+			if (auto Resources = m_ShadowTargetCache->EnsureSpotlightMaps(m_SpotShadowBindingLayout, *m_ShadowSampler); !Resources)
 				return std::unexpected(std::move(Resources.error()));
 			if (auto Pipeline = EnsureShadowPipeline(1.0f); !Pipeline)
 				return std::unexpected(std::move(Pipeline.error()));
@@ -1348,7 +1221,7 @@ namespace PulseForge
 		}
 		if (PointCandidateCount > 0)
 		{
-			if (auto Resources = EnsurePointShadowResources(); !Resources)
+			if (auto Resources = m_ShadowTargetCache->EnsurePointLightCubemaps(m_PointShadowBindingLayout, *m_ShadowSampler); !Resources)
 				return std::unexpected(std::move(Resources.error()));
 			for (size_t DoubleSidedIndex = 0; DoubleSidedIndex < m_PointShadowPipelines.size(); ++DoubleSidedIndex)
 			{
@@ -1456,13 +1329,13 @@ namespace PulseForge
 
 	std::expected<void, SceneRendererError> SceneRenderer::RenderSpotlightShadows()
 	{
-		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty() || !m_SpotShadowTargets.front())
+		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty() || !m_ShadowTargetCache->HasSpotlightMaps())
 			return RenderPointLightShadows();
 		for (size_t Slot = 0; Slot < m_SpotShadowSlotOwners.size(); ++Slot)
 		{
 			if (!m_SpotShadowSlotOwners[Slot])
 				continue;
-			const GraphicsResult Begin = m_Runtime.BeginRenderTarget(*m_SpotShadowTargets[Slot]);
+			const GraphicsResult Begin = m_Runtime.BeginRenderTarget(*m_ShadowTargetCache->SpotlightTarget(Slot));
 			if (!Begin)
 				return std::unexpected(MakeDrawError("Could not begin spotlight shadow target: " + Begin.error().Message));
 			RenderTargetFrameScope TargetScope(m_Runtime);
@@ -1507,8 +1380,7 @@ namespace PulseForge
 
 	std::expected<void, SceneRendererError> SceneRenderer::RenderPointLightShadows()
 	{
-		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty() || !m_PointShadowCubemaps.front())
-			return {};
+		if (!m_PreparedSnapshot || m_PreparedSnapshot->Meshes.empty() || !m_ShadowTargetCache->HasPointLightCubemaps()) return {};
 		if (std::none_of(m_PointShadowPipelines.begin(), m_PointShadowPipelines.end(),
 			[](const GraphicsPipelineHandle& Pipeline) { return static_cast<bool>(Pipeline); }))
 			return std::unexpected(MakeResourceError("Point-shadow pipeline was not prepared for active shadow owners"));
@@ -1529,7 +1401,7 @@ namespace PulseForge
 
 			for (size_t Face = 0; Face < 6; ++Face)
 			{
-				const RenderTarget& Target = m_PointShadowCubemaps[Slot]->GetFaceTarget(static_cast<uint32_t>(Face));
+				const RenderTarget& Target = m_ShadowTargetCache->PointLightCubemap(Slot)->GetFaceTarget(static_cast<uint32_t>(Face));
 				RenderTargetClearValue ClearValue;
 				ClearValue.Depth = 1.0f;
 				const GraphicsResult Begin = m_Runtime.BeginRenderTarget(Target, ClearValue);
@@ -1595,7 +1467,7 @@ namespace PulseForge
 
 		for (size_t CascadeIndex = 0; CascadeIndex < m_PreparedCascades->Cascades.size(); ++CascadeIndex)
 		{
-			const GraphicsResult Begin = m_Runtime.BeginRenderTarget(*m_ShadowTargets[CascadeIndex]);
+			const GraphicsResult Begin = m_Runtime.BeginRenderTarget(m_ShadowTargetCache->DirectionalTarget(CascadeIndex));
 			if (!Begin)
 				return std::unexpected(MakeDrawError("Could not begin shadow cascade: " + Begin.error().Message));
 			RenderTargetFrameScope TargetScope(m_Runtime);
@@ -1719,8 +1591,8 @@ namespace PulseForge
 		if (!Color) return std::unexpected(MakeResourceError("HDR scene target color texture is unavailable after rendering"));
 		return HdrSceneRenderResult{ Color, Target->Target->GetDepthTexture(), Width, Height, *Rendered, m_LastSpotShadowPassCount,
 			m_LastSpotShadowCasterDrawCount, m_PreparedSnapshot->EnvironmentLight.has_value(), Target->Generation,
-			m_SpotShadowResourceGeneration, m_LastPointShadowPassCount, m_LastPointShadowCasterDrawCount, m_PointShadowResourceGeneration,
-			m_PointShadowSlotOwners };
+			m_ShadowTargetCache->SpotlightResourceGeneration(), m_LastPointShadowPassCount, m_LastPointShadowCasterDrawCount,
+			m_ShadowTargetCache->PointLightResourceGeneration(), m_PointShadowSlotOwners };
 	}
 
 	std::expected<SceneRenderOutputResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToOutput()
@@ -2002,9 +1874,9 @@ namespace PulseForge
 
 			const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
 			const BindingSet* AmbientOcclusionBindings = m_AmbientOcclusionPass->GetSceneBindingSet();
-			const std::array<const BindingSet*, 5> BindingSets = {
-				(*MaterialBinding)->BindingSet.get(), m_ShadowBindingSet.get(), AmbientOcclusionBindings,
-				m_SpotShadowBindingSet.get(), m_PointShadowBindingSet.get() };
+			const std::array<const BindingSet*, 5> BindingSets = { (*MaterialBinding)->BindingSet.get(),
+				&m_ShadowTargetCache->DirectionalBindings(), AmbientOcclusionBindings, &m_ShadowTargetCache->SpotlightBindings(),
+				&m_ShadowTargetCache->PointLightBindings() };
 			const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline->second, Mesh->get(), Arguments, BindingSets);
 			if (!Draw)
 			{

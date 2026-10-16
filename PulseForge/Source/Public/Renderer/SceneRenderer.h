@@ -167,6 +167,7 @@ namespace PulseForge
 		class ToneMappingStage;
 		class AmbientOcclusionPass;
 		class HdrTargetCache;
+		class ShadowTargetCache;
 
 		SceneRenderer(RenderDevice& Runtime, const Project& SourceProject);
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
@@ -181,8 +182,6 @@ namespace PulseForge
 			bool DoubleSided = false);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBackgroundPipeline(ColorTargetFormat ColorFormat);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureShadowPipeline(float DepthBias, bool DoubleSided = false);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureSpotShadowResources();
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePointShadowResources();
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareLocalLighting();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderSpotlightShadows();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderPointLightShadows();
@@ -268,6 +267,7 @@ namespace PulseForge
 		std::unique_ptr<ProjectAssetCaches> m_ProjectAssetCaches;
 		std::unique_ptr<ToneMappingStage> m_ToneMappingStage;
 		std::unique_ptr<HdrTargetCache> m_HdrTargetCache;
+		std::unique_ptr<ShadowTargetCache> m_ShadowTargetCache;
 		ShaderHandle m_VertexShader;
 		ShaderHandle m_FragmentShader;
 		ShaderHandle m_BackgroundVertexShader;
@@ -285,9 +285,6 @@ namespace PulseForge
 		BindingLayoutHandle m_PointShadowBindingLayout;
 		BindingLayoutHandle m_ShadowObjectBindingLayout;
 		BindingLayoutHandle m_PointShadowObjectBindingLayout;
-		BindingSetHandle m_ShadowBindingSet;
-		BindingSetHandle m_SpotShadowBindingSet;
-		BindingSetHandle m_PointShadowBindingSet;
 		BindingSetHandle m_ShadowObjectBindingSet;
 		BindingSetHandle m_PointShadowObjectBindingSet;
 		std::map<std::pair<int32_t, bool>, GraphicsPipelineHandle> m_ShadowPipelines;
@@ -304,9 +301,6 @@ namespace PulseForge
 		TextureHandle m_FallbackNormalTexture;
 		TextureHandle m_FallbackEmissiveTexture;
 		TextureHandle m_FallbackPointShadowTexture;
-		std::array<RenderTargetHandle, 4> m_ShadowTargets;
-		std::array<RenderTargetHandle, MaxSpotlightShadowMapCount> m_SpotShadowTargets;
-		std::array<DepthCubemapHandle, MaxPointLightShadowCount> m_PointShadowCubemaps;
 		EnvironmentLightingTextures m_FallbackEnvironmentTextures;
 		std::unordered_map<std::string, MaterialBindingResources> m_MaterialBindings;
 		std::unordered_map<std::string, BindingSetHandle> m_EnvironmentBindingSets;
@@ -338,7 +332,5 @@ namespace PulseForge
 		size_t m_LastSpotShadowCasterDrawCount = 0;
 		size_t m_LastPointShadowPassCount = 0;
 		size_t m_LastPointShadowCasterDrawCount = 0;
-		uint64_t m_SpotShadowResourceGeneration = 0;
-		uint64_t m_PointShadowResourceGeneration = 0;
 	};
 }
