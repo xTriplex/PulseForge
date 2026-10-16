@@ -6720,12 +6720,16 @@ namespace
 				SetError(Updated.error());
 		}
 
-		void CancelGizmoInteraction()
+		bool CancelGizmoInteraction()
 		{
 			if (auto Cancelled = m_ViewportGizmoInteraction.Cancel(m_Scene.get(), m_SceneWorkspace, m_SceneEditController,
 					[this](std::string_view State) { return RestoreSceneState(State); });
 				!Cancelled)
+			{
 				SetError("Scene edit rollback failed: " + Cancelled.error());
+				return false;
+			}
+			return true;
 		}
 
 		void CompleteReleasedGizmoInteractionBeforeShortcuts()
@@ -7197,15 +7201,15 @@ namespace
 
 		void StartRuntime()
 		{
-			CancelGizmoInteraction();
-			EndEditorCameraNavigation();
-			m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
-				m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::PlayModeStarted);
 			if (!m_Project || !m_Scene)
 			{
 				SetError("Open a project and scene before starting the runtime.");
 				return;
 			}
+			if (!CancelGizmoInteraction()) return;
+			EndEditorCameraNavigation();
+			m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
+				m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::PlayModeStarted);
 
 			auto CandidateScene = PulseForge::SceneSerializer::Clone(*m_Scene);
 			if (!CandidateScene)

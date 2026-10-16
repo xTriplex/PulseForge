@@ -519,8 +519,11 @@ void RunEditorViewportGizmoInteractionTests(TestRunner& Tests)
 	PF_CHECK(Tests, Interaction.Update(&SceneValue, Workspace, Edits, UpdateInput(75.0f, false), Restore));
 	const auto FailingRestore = [](std::string_view) -> std::expected<void, std::string>
 	{ return std::unexpected("Injected scene restore failure"); };
+	const uint32_t HistoryItemBeforeFailedCancel = Edits.InspectorHistoryItem();
 	const auto FailedCancel = Interaction.Cancel(&SceneValue, Workspace, Edits, FailingRestore);
 	PF_CHECK(Tests, !FailedCancel && Interaction.IsActive() && Edits.IsActive());
+	PF_CHECK(Tests, Edits.InspectorHistoryItem() == HistoryItemBeforeFailedCancel);
+	PF_CHECK(Tests, Edits.IsDirty());
 	const auto PendingRollback = SceneValue.FindEntity(Entity->GetUUID());
 	PF_CHECK(Tests, PendingRollback.has_value());
 	if (!PendingRollback) return;
@@ -528,6 +531,7 @@ void RunEditorViewportGizmoInteractionTests(TestRunner& Tests)
 	PF_CHECK(Tests, PendingTransform && PendingTransform->Translation.x > 0.1f);
 	PF_CHECK(Tests, Interaction.Cancel(&SceneValue, Workspace, Edits, Restore));
 	PF_CHECK(Tests, !Interaction.IsActive() && !Edits.IsActive());
+	PF_CHECK(Tests, Edits.InspectorHistoryItem() == 0);
 	const auto RetriedRollback = SceneValue.FindEntity(Entity->GetUUID());
 	PF_CHECK(Tests, RetriedRollback.has_value());
 	if (!RetriedRollback) return;
