@@ -24,19 +24,33 @@ namespace
 		PF_CHECK(Tests, Queue.HasPendingDecision());
 		auto Rejected = Queue.Request(false, [&] { ++Continuations; });
 		PF_CHECK(Tests, Rejected.Status == EditorSceneTransitionQueue::RequestStatus::Rejected);
-		PF_CHECK(Tests, !Queue.Resolve(false));
+		size_t SaveAttempts = 0;
+		PF_CHECK(Tests, !Queue.Resolve([&] { ++SaveAttempts; return false; }));
 		PF_CHECK(Tests, Queue.HasPendingDecision() && Continuations == 1);
-		auto Resolved = Queue.Resolve(true);
+		auto Resolved = Queue.Resolve([&] { ++SaveAttempts; return true; });
 		PF_CHECK(Tests, Resolved.has_value() && !Queue.HasPendingDecision());
 		if (Resolved && *Resolved) (*Resolved)();
-		PF_CHECK(Tests, Continuations == 2);
-		PF_CHECK(Tests, !Queue.Resolve(true));
+		PF_CHECK(Tests, Continuations == 2 && SaveAttempts == 2);
+		size_t UnexpectedResolutionAttempts = 0;
+		PF_CHECK(Tests, !Queue.Resolve([&] { ++UnexpectedResolutionAttempts; return true; }));
+		PF_CHECK(Tests, UnexpectedResolutionAttempts == 0);
+
+		Pending = Queue.Request(true, [&] { ++Continuations; });
+		PF_CHECK(Tests, Pending.Status == EditorSceneTransitionQueue::RequestStatus::AwaitingDecision);
+		size_t DiscardAttempts = 0;
+		PF_CHECK(Tests, !Queue.Resolve([&] { ++DiscardAttempts; return false; }));
+		PF_CHECK(Tests, Queue.HasPendingDecision() && Continuations == 2);
+		auto Discarded = Queue.Resolve([&] { ++DiscardAttempts; return true; });
+		PF_CHECK(Tests, Discarded.has_value() && !Queue.HasPendingDecision());
+		if (Discarded && *Discarded) (*Discarded)();
+		PF_CHECK(Tests, Continuations == 3 && DiscardAttempts == 2);
 
 		Pending = Queue.Request(true, [&] { ++Continuations; });
 		PF_CHECK(Tests, Pending.Status == EditorSceneTransitionQueue::RequestStatus::AwaitingDecision);
 		Queue.Cancel();
-		PF_CHECK(Tests, !Queue.HasPendingDecision() && !Queue.Resolve(true));
-		PF_CHECK(Tests, Continuations == 2);
+		PF_CHECK(Tests, !Queue.HasPendingDecision() && !Queue.Resolve([&] { ++UnexpectedResolutionAttempts; return true; }));
+		PF_CHECK(Tests, UnexpectedResolutionAttempts == 0);
+		PF_CHECK(Tests, Continuations == 3);
 		PF_CHECK(Tests, Queue.Request(false, {}).Status == EditorSceneTransitionQueue::RequestStatus::Rejected);
 	}
 

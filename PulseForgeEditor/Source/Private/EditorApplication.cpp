@@ -4212,9 +4212,9 @@ namespace
 			return true;
 		}
 
-		void ExecutePendingAction()
+		void ExecutePendingAction(const std::function<bool()>& ResolveSceneChanges)
 		{
-			auto Action = m_SceneTransitionQueue.Resolve(true);
+			auto Action = m_SceneTransitionQueue.Resolve(ResolveSceneChanges);
 			if (!Action) return;
 			m_OpenUnsavedDialog = false;
 			ImGui::CloseCurrentPopup();
@@ -4239,14 +4239,12 @@ namespace
 				ImGui::TextUnformatted("Save before continuing?");
 				if (ImGui::Button("Save", ImVec2(120.0f, 0.0f)))
 				{
-					if (SaveScene())
-						ExecutePendingAction();
+					ExecutePendingAction([this] { return SaveScene(); });
 				}
 				ImGui::SameLine();
 				if (m_EditorStyle.DangerButton(PulseForgeEditor::EditorIcon::Delete, "Discard"))
 				{
-					if (DiscardSceneChanges())
-						ExecutePendingAction();
+					ExecutePendingAction([this] { return DiscardSceneChanges(); });
 				}
 				ImGui::SameLine();
 				if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)))

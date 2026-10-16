@@ -24,7 +24,7 @@ namespace PulseForgeEditor
 		};
 
 		[[nodiscard]] RequestResult Request(bool SceneDirty, Action Continuation);
-		[[nodiscard]] std::optional<Action> Resolve(bool SceneChangesResolved);
+		[[nodiscard]] std::optional<Action> Resolve(const std::function<bool()>& ResolveSceneChanges);
 		void Cancel() noexcept;
 		[[nodiscard]] bool HasPendingDecision() const noexcept { return static_cast<bool>(m_PendingAction); }
 
