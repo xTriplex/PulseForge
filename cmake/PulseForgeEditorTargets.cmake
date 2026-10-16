@@ -36,7 +36,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	target_compile_definitions(PulseForgeEditorUI PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorUI
 		PUBLIC PulseForgeRenderer PulseForgeEditorCore
-		PRIVATE PulseForgeApplication PulseForgeAssetImporters PulseForgeAssetServices
+		PRIVATE PulseForgeCore PulseForgeApplication PulseForgeAssetImporters PulseForgeAssetServices
 			PulseForgeImGui PulseForgeSceneRenderer freetype spdlog::spdlog shell32 ole32
 	)
 	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")

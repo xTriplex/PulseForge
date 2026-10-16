@@ -4,6 +4,7 @@
 #include "Editor/EditorStyle.h"
 #include "EditorConsoleHistory.h"
 #include "EditorConsoleSeverity.h"
+#include "Core/Log.h"
 
 #include <spdlog/sinks/base_sink.h>
 #include <spdlog/spdlog.h>
@@ -77,6 +78,7 @@ namespace PulseForgeEditor
 		EditorConsoleHistory History;
 		std::shared_ptr<EditorConsoleSink> Sink;
 		std::vector<std::shared_ptr<spdlog::logger>> Loggers;
+		bool ReplayedStartupMessages = false;
 		std::vector<EditorConsoleMessage> Messages;
 		bool AutoScroll = true;
 		bool SelectableView = false;
@@ -121,6 +123,12 @@ namespace PulseForgeEditor
 	void EditorConsolePanel::Attach()
 	{
 		Detach();
+		if (!m_Impl->ReplayedStartupMessages)
+		{
+			m_Impl->History.AppendRecent(PulseForge::Log::GetRecentEntries());
+			m_Impl->ReplayedStartupMessages = true;
+		}
+
 		m_Impl->Sink = std::make_shared<EditorConsoleSink>(m_Impl->History);
 		for (const char* LoggerName : { "PULSEFORGE", "APP" })
 		{

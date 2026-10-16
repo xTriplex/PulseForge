@@ -1,5 +1,7 @@
 #include "EditorConsoleHistory.h"
 
+#include "Core/Log.h"
+
 #include <algorithm>
 #include <utility>
 
@@ -17,6 +19,42 @@ namespace PulseForgeEditor
 		m_Messages.push_back({ ++m_NextSequence, std::string(Logger), Severity, std::move(SafeText) });
 		if (m_Messages.size() > Capacity) m_Messages.pop_front();
 		++m_Revision;
+	}
+
+	void EditorConsoleHistory::Append(const PulseForge::LogEntry& Entry)
+	{
+		EditorConsoleSeverity Severity = EditorConsoleSeverity::Unknown;
+		switch (Entry.Level)
+		{
+		case PulseForge::LogLevel::Trace:
+			Severity = EditorConsoleSeverity::Trace;
+			break;
+		case PulseForge::LogLevel::Debug:
+			Severity = EditorConsoleSeverity::Debug;
+			break;
+		case PulseForge::LogLevel::Info:
+			Severity = EditorConsoleSeverity::Info;
+			break;
+		case PulseForge::LogLevel::Warning:
+			Severity = EditorConsoleSeverity::Warning;
+			break;
+		case PulseForge::LogLevel::Error:
+			Severity = EditorConsoleSeverity::Error;
+			break;
+		case PulseForge::LogLevel::Critical:
+			Severity = EditorConsoleSeverity::Critical;
+			break;
+		case PulseForge::LogLevel::Unknown:
+		default:
+			break;
+		}
+		Append(Entry.Logger, Severity, Entry.Message);
+	}
+
+	void EditorConsoleHistory::AppendRecent(const std::vector<PulseForge::LogEntry>& Entries)
+	{
+		for (const PulseForge::LogEntry& Entry : Entries)
+			Append(Entry);
 	}
 
 	bool EditorConsoleHistory::CopyMessagesIfChanged(

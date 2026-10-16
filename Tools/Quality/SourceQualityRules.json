@@ -28,6 +28,7 @@
   [
     "PulseForgeAssetImporters",
     "PulseForgeAssetServices",
+    "PulseForgeCore",
     "PulseForgeScene",
     "PulseForgeSceneSerialization"
   ],
@@ -50,6 +51,7 @@
     "PulseForgeApplication",
     "PulseForgeAssetImporters",
     "PulseForgeAssetServices",
+    "PulseForgeCore",
     "PulseForgeEditorCore",
     "PulseForgeImGui",
     "PulseForgeSceneRenderer",
