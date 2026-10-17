@@ -202,9 +202,8 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 			DEPENDS ${PULSEFORGE_GPU_VALIDATION_SHADER_OUTPUTS})
 	endif()
 	if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
-		add_dependencies(PulseForgeGame PulseForgeSceneShaderAssets)
 		pulseforge_attach_shader_deployment(PulseForgeGame "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders"
-			${PULSEFORGE_SCENE_SHADER_OUTPUTS})
+			ASSET_TARGETS PulseForgeSceneShaderAssets SHADERS ${PULSEFORGE_SCENE_SHADER_OUTPUTS})
 		add_custom_command(TARGET PulseForgeGame POST_BUILD
 			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
 			COMMAND "${CMAKE_COMMAND}" -E copy_directory
@@ -258,8 +257,8 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 			OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
 		add_custom_target(PulseForgeEditorShaderAssets
 			DEPENDS ${PULSEFORGE_EDITOR_SHADER_OUTPUTS})
-		add_dependencies(PulseForgeEditor PulseForgeSceneShaderAssets PulseForgeEditorShaderAssets)
 		pulseforge_attach_shader_deployment(PulseForgeEditor "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders"
-			${PULSEFORGE_SCENE_SHADER_OUTPUTS} ${PULSEFORGE_EDITOR_SHADER_OUTPUTS})
+			ASSET_TARGETS PulseForgeSceneShaderAssets PulseForgeEditorShaderAssets
+			SHADERS ${PULSEFORGE_SCENE_SHADER_OUTPUTS} ${PULSEFORGE_EDITOR_SHADER_OUTPUTS})
 	endif()
 endif()
