@@ -9,19 +9,31 @@ from pathlib import Path
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
-SCRIPT = REPOSITORY / "Tools" / "Quality" / "CheckSourceQuality.py"
+QUALITY_TOOLS_VALUE = os.environ.get("PULSEFORGE_QUALITY_TOOLS_DIR")
+if not QUALITY_TOOLS_VALUE:
+    raise RuntimeError("CMake must provide PULSEFORGE_QUALITY_TOOLS_DIR for quality tests")
+QUALITY_TOOLS = Path(QUALITY_TOOLS_VALUE).resolve()
+SCRIPT = QUALITY_TOOLS / "CheckSourceQuality.py"
 SPEC = importlib.util.spec_from_file_location("source_quality", SCRIPT)
 source_quality = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = source_quality
 SPEC.loader.exec_module(source_quality)
 
 RULES = {
-    "cpp_responsibility_review_threshold": 1200,
-    "default_cpp_hard_limit": 2500,
-    "default_header_hard_limit": 800,
-    "size_exceptions": {
-        "Legacy.cpp": {"max_lines": 901, "reason": "test fixture"}
-    },
+    "source_roots": [],
+    "aggregate_engine_target": "PulseForge",
+    "editor_core_target": "PulseForgeEditorCore",
+    "editor_core_allowed_dependencies": [],
+    "editor_core_forbidden_includes": [],
+    "editor_ui_target": "PulseForgeEditorUI",
+    "editor_ui_allowed_dependencies": [],
+    "conditional_target_options": {},
+    "owner_scoped_test_targets": [],
+    "source_target_ownership": {},
+    "forbidden_dependency_closures": {},
+    "public_header_roots": {},
+    "public_header_owners": {},
+    "non_api_public_headers": [],
 }
 
 
@@ -36,19 +48,27 @@ def make_target(kind, **properties):
 
 
 class SourceQualityRulesTests(unittest.TestCase):
-    def test_size_review_and_hard_gate_are_distinct(self):
-        self.assertEqual(source_quality.file_line_limit("New.cpp", ".cpp", RULES), 2500)
-        self.assertEqual(source_quality.file_line_limit("New.h", ".h", RULES), 800)
-        self.assertEqual(source_quality.find_size_violations("New.cpp", 2500, RULES), [])
-        self.assertEqual(source_quality.find_size_reviews("New.cpp", 1201, RULES), [
-            "New.cpp has 1201 lines; review whether this file owns more than one responsibility"
-        ])
-        self.assertTrue(source_quality.find_size_violations("New.cpp", 2501, RULES))
+    def test_file_length_alone_does_not_fail_quality_run(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source_root = root / "src"
+            source_root.mkdir()
+            (source_root / "Long.cpp").write_text("// line\n" * 10000, encoding="utf-8")
+            graph = source_quality.ConfiguredGraph("Debug", {}, {
+                "PulseForgeEditorCore": make_target("STATIC_LIBRARY"),
+                "PulseForgeEditorUI": make_target("STATIC_LIBRARY"),
+            })
+            rules = {**RULES, "source_roots": ["src"]}
+            self.assertEqual(source_quality.run(root, rules, graph, include_git_checks=False), [])
 
-    def test_size_exception_is_exact_and_bounded(self):
-        self.assertEqual(source_quality.find_size_violations("Legacy.cpp", 901, RULES), [])
-        self.assertTrue(source_quality.find_size_violations("Legacy.cpp", 902, RULES))
-        self.assertTrue(source_quality.find_size_violations("Other.cpp", 2501, RULES))
+    def test_architecture_violations_still_fail_quality_run(self):
+        graph = source_quality.ConfiguredGraph("Debug", {}, {
+            "PulseForgeEditorCore": make_target("STATIC_LIBRARY", links=["PulseForgeEditorUI"]),
+            "PulseForgeEditorUI": make_target("STATIC_LIBRARY", links=["PulseForgeEditorCore"]),
+        })
+        issues = source_quality.run(Path.cwd(), RULES, graph, include_git_checks=False)
+        self.assertTrue(any("dependency cycle" in issue for issue in issues))
+        self.assertTrue(any("has unreviewed dependencies" in issue for issue in issues))
 
     def test_dependency_policy_includes_all_configured_link_properties(self):
         graph = source_quality.ConfiguredGraph("Debug", {}, {
@@ -181,30 +201,34 @@ class SourceQualityRulesTests(unittest.TestCase):
         cmake = os.environ.get("PULSEFORGE_QUALITY_CMAKE_COMMAND", "cmake")
         generator = os.environ.get("PULSEFORGE_QUALITY_GENERATOR")
         platform = os.environ.get("PULSEFORGE_QUALITY_GENERATOR_PLATFORM")
+        make_program = os.environ.get("PULSEFORGE_QUALITY_MAKE_PROGRAM")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             (root / "A.cpp").write_text("int a;\n", encoding="utf-8")
             (root / "B.cpp").write_text("int b;\n", encoding="utf-8")
             (root / "Core.cpp").write_text("int core;\n", encoding="utf-8")
-            exporter = (REPOSITORY / "Tools" / "Quality" / "ExportConfiguredTargetGraph.cmake").as_posix()
+            exporter = (QUALITY_TOOLS / "ExportConfiguredTargetGraph.cmake").as_posix()
             cmake_variable = "$" + "{A_DEPS}"
             cmake_target = "$" + "{Target}"
             cmakelists = "\n".join([
                 "cmake_minimum_required(VERSION 3.24)",
-                "project(PulseForgeGraphFixture LANGUAGES CXX)",
-                "add_library(PulseForgeA STATIC A.cpp)",
-                "add_library(PulseForgeB STATIC B.cpp)",
+                "project(PulseForgeGraphFixture NONE)",
+                "add_library(PulseForgeA INTERFACE)",
+                "add_library(PulseForgeB INTERFACE)",
                 "add_library(PulseForgeScene INTERFACE)",
                 "add_library(PulseForgeImGui INTERFACE)",
                 "add_library(PulseForgeEditorUI INTERFACE)",
-                "add_library(PulseForgeEditorCore STATIC Core.cpp)",
+                "add_library(PulseForgeEditorCore INTERFACE)",
+                "set_property(TARGET PulseForgeA PROPERTY SOURCES A.cpp)",
+                "set_property(TARGET PulseForgeB PROPERTY SOURCES B.cpp)",
+                "set_property(TARGET PulseForgeEditorCore PROPERTY SOURCES Core.cpp)",
                 "set(A_DEPS PulseForgeB)",
-                f"target_link_libraries(PulseForgeA PRIVATE {cmake_variable})",
-                "target_link_libraries(PulseForgeB PRIVATE PulseForgeA)",
-                "target_link_libraries(PulseForgeEditorCore PUBLIC PulseForgeScene)",
-                "target_link_libraries(PulseForgeEditorCore PRIVATE PulseForgeImGui)",
+                f"target_link_libraries(PulseForgeA INTERFACE {cmake_variable})",
+                "target_link_libraries(PulseForgeB INTERFACE PulseForgeA)",
+                "target_link_libraries(PulseForgeEditorCore INTERFACE PulseForgeScene)",
+                "target_link_libraries(PulseForgeEditorCore INTERFACE PulseForgeImGui)",
                 "foreach(Target PulseForgeA PulseForgeB PulseForgeEditorCore)",
-                f"    target_compile_definitions({cmake_target} PRIVATE PF_DEBUG)",
+                f"    set_property(TARGET {cmake_target} PROPERTY COMPILE_DEFINITIONS PF_DEBUG)",
                 "endforeach()",
                 f"include(\"{exporter}\")",
                 "",
@@ -212,10 +236,6 @@ class SourceQualityRulesTests(unittest.TestCase):
             (root / "CMakeLists.txt").write_text(cmakelists, encoding="utf-8")
             (root / "rules.json").write_text(json.dumps({
                 "source_roots": [],
-                "cpp_responsibility_review_threshold": 1200,
-                "default_cpp_hard_limit": 2500,
-                "default_header_hard_limit": 800,
-                "size_exceptions": {},
                 "source_target_ownership": {},
                 "owner_scoped_test_targets": [],
                 "conditional_target_options": {},
@@ -232,10 +252,13 @@ class SourceQualityRulesTests(unittest.TestCase):
             }), encoding="utf-8")
             build = root / "build"
             command = [cmake, "-S", str(root), "-B", str(build)]
+            command.append("-DCMAKE_BUILD_TYPE:STRING=Debug")
             if generator:
                 command.extend(["-G", generator])
             if platform:
                 command.extend(["-A", platform])
+            if make_program:
+                command.append(f"-DCMAKE_MAKE_PROGRAM:FILEPATH={make_program}")
             configured = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             self.assertEqual(configured.returncode, 0, configured.stdout)
             manifest = build / "PulseForgeTargetGraph-Debug.txt"

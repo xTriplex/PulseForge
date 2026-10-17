@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Renderer/SceneRendererToneMappingStage.h"
 
 namespace PulseForge

@@ -1,13 +1,15 @@
 #pragma once
 
 #include "Editor/EditorEntityClipboard.h"
+#include "Editor/EditorMeshPickingGeometry.h"
 #include "Editor/EditorSceneCommandActions.h"
 #include "Assets/AssetID.h"
 #include "Scene/Scene.h"
 #include "Scene/UUID.h"
 
-#include <functional>
+#include <expected>
 #include <optional>
+#include <string>
 
 namespace PulseForgeEditor
 {
@@ -30,6 +32,8 @@ namespace PulseForgeEditor
 			EditorSceneEntityCommandActions& Actions) const;
 		void ReparentEntity(PulseForge::Scene* SceneValue, const PulseForge::UUID& ChildIdentifier,
 			std::optional<PulseForge::UUID> ParentIdentifier, EditorSceneCommandActions& Actions) const;
+		void SnapSelectionToSurface(PulseForge::Scene* SceneValue, EditorSceneWorkspaceState& Workspace, bool RuntimeActive,
+			const EditorMeshGeometryResolver& ResolveMesh, EditorSceneEntityCommandActions& Actions) const;
 
 		[[nodiscard]] bool CanPaste(const PulseForge::UUID& ProjectID) const noexcept;
 

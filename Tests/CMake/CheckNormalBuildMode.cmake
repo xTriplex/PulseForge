@@ -1,0 +1,84 @@
+cmake_minimum_required(VERSION 3.24)
+
+if(NOT DEFINED PULSEFORGE_BUILD_TREE OR NOT IS_DIRECTORY "${PULSEFORGE_BUILD_TREE}")
+	message(FATAL_ERROR "PULSEFORGE_BUILD_TREE must name the configured build directory")
+endif()
+
+set(CacheFile "${PULSEFORGE_BUILD_TREE}/CMakeCache.txt")
+set(TargetDirectoriesFile "${PULSEFORGE_BUILD_TREE}/CMakeFiles/TargetDirectories.txt")
+if(NOT EXISTS "${CacheFile}" OR NOT EXISTS "${TargetDirectoriesFile}")
+	message(FATAL_ERROR "Normal build-mode checks require CMakeCache.txt and CMakeFiles/TargetDirectories.txt")
+endif()
+
+file(STRINGS "${CacheFile}" QualityOptionLine REGEX "^PULSEFORGE_ENABLE_QUALITY_CHECKS:BOOL=")
+if(NOT QualityOptionLine STREQUAL "PULSEFORGE_ENABLE_QUALITY_CHECKS:BOOL=OFF")
+	message(FATAL_ERROR "This check must run from a configuration with quality checks disabled")
+endif()
+file(STRINGS "${CacheFile}" TestingOptionLine REGEX "^BUILD_TESTING:BOOL=")
+if(NOT TestingOptionLine STREQUAL "BUILD_TESTING:BOOL=ON")
+	message(FATAL_ERROR "This check requires BUILD_TESTING=ON")
+endif()
+
+file(STRINGS "${CacheFile}" CTestCommandLine REGEX "^CMAKE_CTEST_COMMAND:INTERNAL=")
+if(NOT CTestCommandLine MATCHES "^CMAKE_CTEST_COMMAND:INTERNAL=(.+)$")
+	message(FATAL_ERROR "CMakeCache.txt does not identify the CTest executable")
+endif()
+set(CTestCommand "${CMAKE_MATCH_1}")
+if(NOT EXISTS "${CTestCommand}")
+	message(FATAL_ERROR "The configured CTest executable is unavailable: ${CTestCommand}")
+endif()
+execute_process(
+	COMMAND "${CTestCommand}" --test-dir "${PULSEFORGE_BUILD_TREE}" -C Debug --show-only=json-v1
+	OUTPUT_VARIABLE CTestJSON
+	ERROR_VARIABLE CTestError
+	RESULT_VARIABLE CTestResult
+)
+if(NOT CTestResult EQUAL 0)
+	message(FATAL_ERROR "Could not inspect configured tests: ${CTestError}")
+endif()
+string(JSON CTestVersion ERROR_VARIABLE CTestJSONError GET "${CTestJSON}" version major)
+if(CTestJSONError)
+	message(FATAL_ERROR "CTest returned invalid JSON test metadata: ${CTestJSONError}")
+endif()
+string(JSON CTestCount LENGTH "${CTestJSON}" tests)
+set(RegisteredTests)
+if(CTestCount GREATER 0)
+	math(EXPR LastTestIndex "${CTestCount} - 1")
+	foreach(Index RANGE 0 ${LastTestIndex})
+		string(JSON TestName GET "${CTestJSON}" tests ${Index} name)
+		list(APPEND RegisteredTests "${TestName}")
+	endforeach()
+endif()
+foreach(QualityTest PulseForge.SourceQuality PulseForge.SourceQualityRules PulseForge.CodeQualityTools)
+	if(QualityTest IN_LIST RegisteredTests)
+		message(FATAL_ERROR "Normal C++ testing unexpectedly registered quality test ${QualityTest}")
+	endif()
+endforeach()
+
+foreach(CppTest PulseForge.Core PulseForge.Scene PulseForge.Assets PulseForge.Renderer PulseForge.AssetImports
+		PulseForge.ScriptingRuntime PulseForge.EditorCore)
+	if(NOT CppTest IN_LIST RegisteredTests)
+		message(FATAL_ERROR "Quality separation removed ordinary C++ test ${CppTest}")
+	endif()
+endforeach()
+
+set(QualityTargetNames
+	PulseForgePublicHeaderChecks
+	PulseForgeEnginePublicHeaders
+	PulseForgeGamePublicHeaders
+	PulseForgeEditorPublicHeaders)
+
+file(STRINGS "${TargetDirectoriesFile}" TargetDirectories)
+foreach(TargetDirectory IN LISTS TargetDirectories)
+	get_filename_component(TargetDirectoryName "${TargetDirectory}" NAME)
+	if(TargetDirectoryName MATCHES "^(.+)\\.dir$")
+		set(TargetName "${CMAKE_MATCH_1}")
+		foreach(QualityTargetPrefix IN LISTS QualityTargetNames)
+			if(TargetName STREQUAL QualityTargetPrefix OR TargetName MATCHES "^${QualityTargetPrefix}_")
+				message(FATAL_ERROR "A quality-only target is present in an ordinary build: ${TargetName}")
+			endif()
+		endforeach()
+	endif()
+endforeach()
+
+message(STATUS "CTest confirms ordinary C++ tests are registered without quality tests or quality-only targets")

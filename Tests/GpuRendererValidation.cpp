@@ -1,32 +1,26 @@
 #include "Core/Application.h"
+#include "GpuValidation/GpuProjectSceneValidation.h"
+#include "GpuValidation/PointShadowImageValidation.h"
 #include "Core/Layer.h"
 #include "Core/Log.h"
+#include "GpuValidation/ActiveFrameUploadValidation.h"
+#include "GpuValidation/EditorUiUnormValidation.h"
+#include "GpuValidation/GpuLightingValidation.h"
+#include "GpuValidation/GpuSceneOutputValidation.h"
+#include "GpuValidation/ValidationShader.h"
 #include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
 #include "Renderer/SceneRenderer.h"
-#include "Renderer/PointLightShadowMath.h"
 #include "Scene/Scene.h"
-#include "Scene/Components/PointLightComponent.h"
-#include "Scene/Components/SpotLightComponent.h"
-#include "Scene/Components/DirectionalLightComponent.h"
-
-#define STB_IMAGE_WRITE_STATIC
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "../PulseForge/Vendor/stb/stb_image_write.h"
 
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
-#include <initializer_list>
-#include <iterator>
 #include <memory>
-#include <numbers>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -34,324 +28,47 @@
 #include <string_view>
 #include <vector>
 
-#include <glm/gtc/matrix_inverse.hpp>
-
 namespace
 {
+	enum class LegacyRetirementScenario
+	{
+		None,
+		MainRecoveryFailure,
+		NativeRecoveryFailure
+	};
+
 	struct ValidationVertex
 	{
 		float Position[2];
 		float TexCoord[2];
 	};
 
-	struct EditorValidationVertex
-	{
-		float Position[2];
-		float TexCoord[2];
-		float Color[4];
-	};
-
-	struct PointShadowImageCase
-	{
-		const char* Name;
-		glm::vec3 LightPosition;
-		glm::vec3 ExpectedReceiver;
-		glm::vec3 ControlReceiver;
-		bool CastShadows;
-		bool UseCeiling;
-		bool PointLightRotated;
-		glm::vec3 CasterOffset{ 0.0f };
-	};
-
-	struct PointShadowOverviewImageCase
-	{
-		const char* Name;
-		glm::vec3 LightPosition;
-		bool CastShadows;
-	};
-
-	constexpr std::array<PointShadowOverviewImageCase, 4> PointShadowOverviewImageCases = {{
-		{ "overview_committed_position_shadows_off", { 0.0f, 3.2f, 1.3f }, false },
-		{ "overview_committed_position_shadows_on", { 0.0f, 3.2f, 1.3f }, true },
-		{ "overview_user_position_shadows_off", { 0.0f, 3.109f, -1.233f }, false },
-		{ "overview_user_position_shadows_on", { 0.0f, 3.109f, -1.233f }, true }
-	}};
-
-	constexpr std::array<PointShadowImageCase, 23> PointShadowImageCases = {{
-		{ "positive_x_shadows_off", { 2.0f, 3.0f, 0.0f }, { -1.5f, 0.0f, 0.0f }, { 1.5f, 0.0f, 0.0f }, false, false, false },
-		{ "positive_x_shadows_on", { 2.0f, 3.0f, 0.0f }, { -1.5f, 0.0f, 0.0f }, { 1.5f, 0.0f, 0.0f }, true, false, false },
-		{ "negative_x_shadows_off", { -2.0f, 3.0f, 0.0f }, { 1.5f, 0.0f, 0.0f }, { -1.5f, 0.0f, 0.0f }, false, false, false },
-		{ "negative_x_shadows_on", { -2.0f, 3.0f, 0.0f }, { 1.5f, 0.0f, 0.0f }, { -1.5f, 0.0f, 0.0f }, true, false, false },
-		{ "positive_z_shadows_off", { 0.0f, 3.0f, 2.0f }, { 0.0f, 0.0f, -2.0f }, { 0.0f, 0.0f, 2.0f }, false, false, false },
-		{ "positive_z_shadows_on", { 0.0f, 3.0f, 2.0f }, { 0.0f, 0.0f, -2.0f }, { 0.0f, 0.0f, 2.0f }, true, false, false },
-		{ "negative_z_shadows_off", { 0.0f, 3.0f, -2.0f }, { 0.0f, 0.0f, 2.0f }, { 0.0f, 0.0f, -2.0f }, false, false, false },
-		{ "negative_z_shadows_on", { 0.0f, 3.0f, -2.0f }, { 0.0f, 0.0f, 2.0f }, { 0.0f, 0.0f, -2.0f }, true, false, false },
-		{ "overhead_shadows_off", { 0.0f, 3.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 1.5f, 0.0f, 0.0f }, false, false, false },
-		{ "overhead_shadows_on", { 0.0f, 3.0f, 0.0f }, { 0.0f, 0.0f, 0.0f }, { 1.5f, 0.0f, 0.0f }, true, false, false },
-		{ "negative_y_shadows_off", { 0.0f, -2.0f, 0.0f }, { 0.0f, 3.0f, 0.0f }, { 2.0f, 3.0f, 0.0f }, false, true, false },
-		{ "negative_y_shadows_on", { 0.0f, -2.0f, 0.0f }, { 0.0f, 3.0f, 0.0f }, { 2.0f, 3.0f, 0.0f }, true, true, false },
-		{ "positive_z_off_axis_caster_shadows_off", { 0.0f, 3.0f, 2.0f }, { 1.25f, 0.0f, -1.0f }, { -1.5f, 0.0f, 1.5f }, false, false, false, { 0.5f, 0.0f, 0.0f } },
-		{ "positive_z_off_axis_caster_shadows_on", { 0.0f, 3.0f, 2.0f }, { 1.25f, 0.0f, -1.0f }, { -1.5f, 0.0f, 1.5f }, true, false, false, { 0.5f, 0.0f, 0.0f } },
-		{ "positive_x_off_axis_caster_shadows_off", { 2.0f, 3.0f, 0.0f }, { -1.0f, 0.0f, 0.375f }, { 1.5f, 0.0f, 1.5f }, false, false, false, { 0.0f, 0.0f, 0.25f } },
-		{ "positive_x_off_axis_caster_shadows_on", { 2.0f, 3.0f, 0.0f }, { -1.0f, 0.0f, 0.375f }, { 1.5f, 0.0f, 1.5f }, true, false, false, { 0.0f, 0.0f, 0.25f } },
-		{ "overhead_off_axis_caster_shadows_off", { 0.0f, 3.0f, 0.0f }, { 0.0f, 0.0f, 0.75f }, { 2.0f, 0.0f, 2.0f }, false, false, false, { 0.0f, 0.0f, 0.5f } },
-		{ "overhead_off_axis_caster_shadows_on", { 0.0f, 3.0f, 0.0f }, { 0.0f, 0.0f, 0.75f }, { 2.0f, 0.0f, 2.0f }, true, false, false, { 0.0f, 0.0f, 0.5f } },
-		{ "negative_x_negative_y_face_edge_shadows_off", { 1.0f, 2.0f, 0.0f }, { -1.0f, 0.0f, 0.0f }, { 1.5f, 0.0f, 1.5f }, false, false, false },
-		{ "negative_x_negative_y_face_edge_shadows_on", { 1.0f, 2.0f, 0.0f }, { -1.0f, 0.0f, 0.0f }, { 1.5f, 0.0f, 1.5f }, true, false, false },
-		{ "negative_x_negative_z_cube_corner_shadows_off", { 2.0f, 3.0f, 2.0f }, { -1.0f, 0.0f, -1.0f }, { 2.0f, 0.0f, 0.0f }, false, false, false },
-		{ "negative_x_negative_z_cube_corner_shadows_on", { 2.0f, 3.0f, 2.0f }, { -1.0f, 0.0f, -1.0f }, { 2.0f, 0.0f, 0.0f }, true, false, false },
-		{ "positive_x_rotated_point_light", { 2.0f, 3.0f, 0.0f }, { -1.5f, 0.0f, 0.0f }, { 1.5f, 0.0f, 0.0f }, true, false, true }
-	}};
-
-	bool SegmentIntersectsShadowCaster(
-		const glm::vec3& Start,
-		const glm::vec3& End,
-		const glm::vec3& CasterOffset = glm::vec3(0.0f)) noexcept
-	{
-		// Independent geometric oracle for a unit cube centered at y=1; bounds are not derived from shadow code.
-		const glm::vec3 Minimum = glm::vec3(-0.5f, 0.5f, -0.5f) + CasterOffset;
-		const glm::vec3 Maximum = glm::vec3(0.5f, 1.5f, 0.5f) + CasterOffset;
-		const glm::vec3 Direction = End - Start;
-		float Enter = 0.0f;
-		float Exit = 1.0f;
-		for (int Axis = 0; Axis < 3; ++Axis)
-		{
-			if (std::abs(Direction[Axis]) < 1.0e-6f)
-			{
-				if (Start[Axis] < Minimum[Axis] || Start[Axis] > Maximum[Axis])
-					return false;
-				continue;
-			}
-			float First = (Minimum[Axis] - Start[Axis]) / Direction[Axis];
-			float Second = (Maximum[Axis] - Start[Axis]) / Direction[Axis];
-			if (First > Second)
-				std::swap(First, Second);
-			Enter = (std::max)(Enter, First);
-			Exit = (std::min)(Exit, Second);
-			if (Enter > Exit)
-				return false;
-		}
-		return Enter < 1.0f && Exit > 0.0f;
-	}
-
-	float PixelLuminance(const PulseForge::TextureReadback& Image, size_t PixelIndex)
-	{
-		const size_t Offset = PixelIndex * 4;
-		const auto* Pixel = reinterpret_cast<const uint8_t*>(Image.Pixels.data() + Offset);
-		return static_cast<float>((0.2126 * Pixel[0] + 0.7152 * Pixel[1] + 0.0722 * Pixel[2]) / 255.0);
-	}
-
-	struct PointShadowImageMetrics
-	{
-		size_t ExpectedPixelCount = 0;
-		size_t ControlPixelCount = 0;
-		size_t ChangedPixelCount = 0;
-		size_t ChangedExpectedPixelCount = 0;
-		size_t ChangedOtherPixelCount = 0;
-		double ExpectedOff = 0.0;
-		double ExpectedOn = 0.0;
-		double ControlOff = 0.0;
-		double ControlOn = 0.0;
-		double ChangedMean = 0.0;
-		double ChangedWorldX = 0.0;
-		double ChangedWorldZ = 0.0;
-	};
-
-	struct PointShadowDepthProbe
-	{
-		uint32_t RenderedFace = 0;
-		uint32_t X = 0;
-		uint32_t Y = 0;
-		float ReceiverDepth = 1.0f;
-		float DirectDepth = 1.0f;
-		float VerticallyFlippedDepth = 1.0f;
-	};
-
-	PointShadowDepthProbe ProbePointShadowDepth(
-		const std::array<std::optional<PulseForge::TextureReadback>, 6>& Faces,
-		const glm::vec3& LightPosition,
-		const glm::vec3& Receiver,
-		float Range)
-	{
-		const glm::vec3 Direction = Receiver - LightPosition;
-		const glm::vec3 Absolute = glm::abs(Direction);
-		const uint32_t SemanticFace = Absolute.x >= Absolute.y && Absolute.x >= Absolute.z
-			? (Direction.x >= 0.0f ? 0u : 1u)
-			: Absolute.y >= Absolute.z
-				? (Direction.y >= 0.0f ? 2u : 3u)
-				: (Direction.z >= 0.0f ? 4u : 5u);
-		const uint32_t Face = SemanticFace;
-		const auto Projections = PulseForge::BuildPointShadowProjections(LightPosition, Range);
-		if (!Projections || !Faces[Face])
-			throw std::runtime_error("Could not probe the selected point-shadow cubemap face");
-
-		const glm::vec4 Clip = Projections->Faces[SemanticFace].ViewProjection * glm::vec4(Receiver, 1.0f);
-		const glm::vec2 Ndc = glm::vec2(Clip) / Clip.w;
-		const uint32_t Width = Faces[Face]->Width;
-		const uint32_t Height = Faces[Face]->Height;
-		const int CenterX = static_cast<int>((Ndc.x * 0.5f + 0.5f) * Width);
-		const int CenterY = static_cast<int>((0.5f - Ndc.y * 0.5f) * Height);
-		const auto MinimumNeighborhood = [&](int PixelY)
-		{
-			float Minimum = 1.0f;
-			for (int OffsetY = -1; OffsetY <= 1; ++OffsetY)
-				for (int OffsetX = -1; OffsetX <= 1; ++OffsetX)
-				{
-					const int X = CenterX + OffsetX;
-					const int Y = PixelY + OffsetY;
-					if (X < 0 || Y < 0 || X >= static_cast<int>(Width) || Y >= static_cast<int>(Height))
-						continue;
-					float Depth = 1.0f;
-					const size_t ByteOffset = (static_cast<size_t>(Y) * Width + static_cast<size_t>(X)) * sizeof(float);
-					std::memcpy(&Depth, Faces[Face]->Pixels.data() + ByteOffset, sizeof(float));
-					Minimum = (std::min)(Minimum, Depth);
-				}
-			return Minimum;
-		};
-		return {
-			Face,
-			static_cast<uint32_t>((std::clamp)(CenterX, 0, static_cast<int>(Width) - 1)),
-			static_cast<uint32_t>((std::clamp)(CenterY, 0, static_cast<int>(Height) - 1)),
-			glm::length(Direction) / Range,
-			MinimumNeighborhood(CenterY),
-			MinimumNeighborhood(static_cast<int>(Height) - CenterY)
-		};
-	}
-
-	PointShadowImageMetrics MeasurePointShadowImage(
-		const PulseForge::TextureReadback& Off,
-		const PulseForge::TextureReadback& On,
-		const glm::mat4& ViewProjection,
-		const glm::vec3& CameraPosition,
-		const glm::vec3& LightPosition,
-		float ReceiverPlaneY,
-		const glm::vec3& CasterOffset)
-	{
-		PointShadowImageMetrics Result;
-		const glm::mat4 InverseViewProjection = glm::inverse(ViewProjection);
-		for (uint32_t Y = 0; Y < Off.Height; ++Y)
-		{
-			for (uint32_t X = 0; X < Off.Width; ++X)
-			{
-				const float NdcX = (static_cast<float>(X) + 0.5f) * 2.0f / static_cast<float>(Off.Width) - 1.0f;
-				// PulseForge uses NVRHI's negative-height Vulkan viewport, so framebuffer row zero is +NDC Y.
-				const float NdcY = 1.0f - (static_cast<float>(Y) + 0.5f) * 2.0f / static_cast<float>(Off.Height);
-				const glm::vec4 NearH = InverseViewProjection * glm::vec4(NdcX, NdcY, 0.0f, 1.0f);
-				const glm::vec4 FarH = InverseViewProjection * glm::vec4(NdcX, NdcY, 1.0f, 1.0f);
-				if (std::abs(NearH.w) < 1.0e-6f || std::abs(FarH.w) < 1.0e-6f)
-					continue;
-				const glm::vec3 FarPoint = glm::vec3(FarH) / FarH.w;
-				const glm::vec3 Ray = glm::normalize(FarPoint - CameraPosition);
-				if (std::abs(Ray.y) < 1.0e-6f)
-					continue;
-				const float PlaneDistance = (ReceiverPlaneY - CameraPosition.y) / Ray.y;
-				if (PlaneDistance <= 0.0f)
-					continue;
-				const glm::vec3 Receiver = CameraPosition + Ray * PlaneDistance;
-				if (std::abs(Receiver.x) > 4.0f || std::abs(Receiver.z) > 4.0f)
-					continue;
-				// Exclude pixels where the camera sees the cube instead of the receiver.
-				if (SegmentIntersectsShadowCaster(CameraPosition, Receiver, CasterOffset))
-					continue;
-				if (glm::distance(LightPosition, Receiver) >= 10.0f)
-					continue;
-
-				const size_t PixelIndex = static_cast<size_t>(Y) * Off.Width + X;
-				const bool GeometricallyOccluded = SegmentIntersectsShadowCaster(LightPosition, Receiver, CasterOffset);
-				const double PixelDelta = static_cast<double>(PixelLuminance(Off, PixelIndex)) -
-					PixelLuminance(On, PixelIndex);
-				if (PixelDelta > 0.01)
-				{
-					++Result.ChangedPixelCount;
-					Result.ChangedMean += PixelDelta;
-					Result.ChangedWorldX += Receiver.x;
-					Result.ChangedWorldZ += Receiver.z;
-					if (GeometricallyOccluded)
-						++Result.ChangedExpectedPixelCount;
-					else
-						++Result.ChangedOtherPixelCount;
-				}
-				if (GeometricallyOccluded)
-				{
-					Result.ExpectedOff += PixelLuminance(Off, PixelIndex);
-					Result.ExpectedOn += PixelLuminance(On, PixelIndex);
-					++Result.ExpectedPixelCount;
-				}
-				else
-				{
-					Result.ControlOff += PixelLuminance(Off, PixelIndex);
-					Result.ControlOn += PixelLuminance(On, PixelIndex);
-					++Result.ControlPixelCount;
-				}
-			}
-		}
-		if (Result.ExpectedPixelCount > 0)
-		{
-			Result.ExpectedOff /= Result.ExpectedPixelCount;
-			Result.ExpectedOn /= Result.ExpectedPixelCount;
-		}
-		if (Result.ControlPixelCount > 0)
-		{
-			Result.ControlOff /= Result.ControlPixelCount;
-			Result.ControlOn /= Result.ControlPixelCount;
-		}
-		if (Result.ChangedPixelCount > 0)
-		{
-			const double Count = static_cast<double>(Result.ChangedPixelCount);
-			Result.ChangedMean /= Count;
-			Result.ChangedWorldX /= Count;
-			Result.ChangedWorldZ /= Count;
-		}
-		return Result;
-	}
-
-	std::vector<std::byte> LoadShader(const std::filesystem::path& Path)
-	{
-		std::ifstream Input(Path, std::ios::binary | std::ios::ate);
-		if (!Input)
-			throw std::runtime_error("Could not open GPU-validation shader: " + Path.string());
-
-		const std::streamoff FileSize = Input.tellg();
-		if (FileSize < 20 || FileSize > 16 * 1024 * 1024 || FileSize % sizeof(uint32_t) != 0)
-			throw std::runtime_error("GPU-validation shader has an invalid byte size: " + Path.string());
-
-		std::vector<std::byte> Bytecode(static_cast<size_t>(FileSize));
-		Input.seekg(0, std::ios::beg);
-		Input.read(reinterpret_cast<char*>(Bytecode.data()), static_cast<std::streamsize>(FileSize));
-		if (!Input)
-			throw std::runtime_error("Could not read GPU-validation shader: " + Path.string());
-		return Bytecode;
-	}
-
 	class GpuValidationLayer final : public PulseForge::Layer
 	{
 	public:
-		GpuValidationLayer(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm,
-			bool ValidateLocalLights, bool ValidateSpotlightShadows, bool ValidatePointShadows, bool ValidatePbrMaterials,
-			bool ValidateTransparency,
-			bool ValidatePointShadowImages, bool ValidateActiveFrameUploads,
-			std::filesystem::path PointShadowImageDirectory)
-			: Layer(ValidateActiveFrameUploads ? "Active-frame resource upload validation" :
-				ValidateTransparency ? "Transparency rendered-image validation" :
-				ValidatePbrMaterials ? "PBR material rendered-image validation" :
-				ValidatePointShadowImages ? "Point-shadow rendered-image investigation" :
-				ValidatePointShadows ? "SceneRenderer point-shadow GPU validation" :
-				ValidateSpotlightShadows ? "SceneRenderer spotlight-shadow GPU validation" :
-				ValidateEditorUiUnorm ? "Editor UNORM UI composition GPU validation" :
-				ValidateLocalLights ? "SceneRenderer local-light GPU validation" :
-				ValidateToneMapping ? "HDR tonemapping GPU validation" :
-				ValidateSceneHdr ? "SceneRenderer HDR GPU validation" : "RGBA16F GPU validation"),
-			  m_ValidateSceneHdr(ValidateSceneHdr),
-			  m_ValidateToneMapping(ValidateToneMapping),
-			  m_ValidateEditorUiUnorm(ValidateEditorUiUnorm),
-			  m_ValidateLocalLights(ValidateLocalLights),
-			  m_ValidateSpotlightShadows(ValidateSpotlightShadows),
-			  m_ValidatePointShadows(ValidatePointShadows),
-			  m_ValidatePbrMaterials(ValidatePbrMaterials),
-			  m_ValidateTransparency(ValidateTransparency),
-			  m_ValidatePointShadowImages(ValidatePointShadowImages),
-			  m_ValidateActiveFrameUploads(ValidateActiveFrameUploads),
-			  m_PointShadowImageDirectory(std::move(PointShadowImageDirectory))
+		GpuValidationLayer(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm, bool ValidateLocalLights,
+			bool ValidateSpotlightShadows, bool ValidatePointShadows, bool ValidatePbrMaterials, bool ValidateTransparency,
+			bool ValidatePointShadowImages, std::filesystem::path PointShadowImageDirectory, LegacyRetirementScenario RetirementScenario)
+			: Layer(RetirementScenario == LegacyRetirementScenario::MainRecoveryFailure
+						? "Main swapchain legacy-retirement recovery validation"
+					: RetirementScenario == LegacyRetirementScenario::NativeRecoveryFailure
+						? "Native swapchain legacy-retirement recovery validation"
+					: ValidateTransparency		? "Transparency rendered-image validation"
+					: ValidatePbrMaterials		? "PBR material rendered-image validation"
+					: ValidatePointShadowImages ? "Point-shadow rendered-image investigation"
+					: ValidatePointShadows		? "SceneRenderer point-shadow GPU validation"
+					: ValidateSpotlightShadows	? "SceneRenderer spotlight-shadow GPU validation"
+					: ValidateEditorUiUnorm		? "Editor UNORM UI composition GPU validation"
+					: ValidateLocalLights		? "SceneRenderer local-light GPU validation"
+					: ValidateToneMapping		? "HDR tonemapping GPU validation"
+					: ValidateSceneHdr			? "SceneRenderer HDR GPU validation"
+												: "RGBA16F GPU validation"),
+			  m_ValidateSceneHdr(ValidateSceneHdr), m_ValidateToneMapping(ValidateToneMapping),
+			  m_ValidateEditorUiUnorm(ValidateEditorUiUnorm), m_ValidateLocalLights(ValidateLocalLights),
+			  m_ValidateSpotlightShadows(ValidateSpotlightShadows), m_ValidatePointShadows(ValidatePointShadows),
+			  m_ValidatePbrMaterials(ValidatePbrMaterials), m_ValidateTransparency(ValidateTransparency),
+			  m_ValidatePointShadowImages(ValidatePointShadowImages), m_PointShadowImageDirectory(std::move(PointShadowImageDirectory)),
+			  m_LegacyRetirementScenario(RetirementScenario)
 		{
 		}
 
@@ -360,26 +77,53 @@ namespace
 			m_StartedAt = std::chrono::steady_clock::now();
 			try
 			{
+				if (m_LegacyRetirementScenario != LegacyRetirementScenario::None)
+				{
+					auto& App = PulseForge::Application::Get();
+					m_RetirementWindow = PulseForge::Window::Create(PulseForge::WindowProps("PulseForge legacy retirement fixture", 640,
+						480, PulseForge::EWindowStyle::Default, PulseForge::EWindowClientAPI::None));
+					if (!m_RetirementWindow)
+						throw std::runtime_error("Could not create the secondary window for legacy retirement validation");
+					auto PresentationTarget = App.CreatePlatformPresentationTarget(m_RetirementWindow->GetNativeWindow());
+					if (!PresentationTarget)
+						throw std::runtime_error("Could not create the secondary presentation target: " + PresentationTarget.error());
+					m_RetirementTargetID = *PresentationTarget;
+					return;
+				}
 				InitializeResources();
-				if (m_ValidateEditorUiUnorm)
-					InitializeEditorUiUnormResources();
+				if (m_ValidateEditorUiUnorm) m_EditorUiValidation.Initialize(PulseForge::Application::Get(), m_BindingLayout, *m_Sampler);
 				if (m_ValidateSceneHdr || m_ValidateToneMapping || m_ValidateLocalLights || m_ValidateSpotlightShadows ||
 					m_ValidatePointShadows || m_ValidatePbrMaterials || m_ValidateTransparency || m_ValidatePointShadowImages)
 					InitializeSceneResources();
-				if (m_ValidateLocalLights)
-					InitializeLocalLightScenario();
-				if (m_ValidateSpotlightShadows)
-					InitializeSpotlightShadowScenario();
-				if (m_ValidatePointShadows)
-					InitializePointShadowScenario();
-				if (m_ValidatePbrMaterials)
-					InitializePbrMaterialScenario();
-				if (m_ValidateTransparency)
-					InitializeTransparencyScenario();
+				if (m_ValidateSceneHdr || m_ValidateToneMapping)
+				{
+					const auto Mode = m_ValidateSceneHdr ? PulseForge::GpuValidation::SceneOutputValidationMode::Hdr
+														 : PulseForge::GpuValidation::SceneOutputValidationMode::ToneMapping;
+					m_SceneOutputValidation =
+						std::make_unique<PulseForge::GpuValidation::GpuSceneOutputValidation>(PulseForge::Application::Get(), m_Scene,
+							*m_SceneRenderer, m_BindingLayout, m_Sampler, m_SamplingPipeline, m_VertexBuffer, Mode, m_StartedAt);
+					m_SceneOutputValidation->Initialize();
+				}
+				if (m_ValidateLocalLights || m_ValidateSpotlightShadows || m_ValidatePointShadows)
+				{
+					PulseForge::GpuValidation::LightingValidationMode Mode =
+						m_ValidateLocalLights		 ? PulseForge::GpuValidation::LightingValidationMode::LocalLights
+						: m_ValidateSpotlightShadows ? PulseForge::GpuValidation::LightingValidationMode::SpotlightShadows
+													 : PulseForge::GpuValidation::LightingValidationMode::PointShadows;
+					m_LightingValidation = std::make_unique<PulseForge::GpuValidation::GpuLightingValidation>(
+						PulseForge::Application::Get(), m_Scene, *m_SceneRenderer, Mode, m_StartedAt);
+					m_LightingValidation->Initialize();
+				}
+				if (m_ValidatePbrMaterials || m_ValidateTransparency)
+				{
+					const auto Mode = m_ValidatePbrMaterials ? PulseForge::GpuValidation::ProjectSceneValidationMode::PbrMaterials
+															 : PulseForge::GpuValidation::ProjectSceneValidationMode::Transparency;
+					m_ProjectSceneValidation = std::make_unique<PulseForge::GpuValidation::GpuProjectSceneValidation>(
+						*m_Project, m_Scene, *m_SceneRenderer, Mode, m_PointShadowImageDirectory, m_StartedAt);
+					m_ProjectSceneValidation->Initialize();
+				}
 				if (m_ValidatePointShadowImages)
-					InitializePointShadowImageScenario();
-				if (m_ValidatePointShadowImages)
-					InitializePointShadowOverviewImageScenario();
+					m_PointShadowImageValidation.Initialize(m_Scene, *m_SceneRenderer, m_PointShadowImageDirectory);
 				PF_INFO("RGBA16F GPU validation resources initialized");
 			}
 			catch (const std::exception& Exception)
@@ -390,27 +134,21 @@ namespace
 
 		void OnUpdate(PulseForge::Timestep) override
 		{
-			if (m_ValidateActiveFrameUploads)
+			if (m_LegacyRetirementScenario != LegacyRetirementScenario::None)
 			{
-				if (m_ActiveFrameUploadFrames >= 3)
-				{
-					PF_INFO("GPU_VALIDATION_RESULT=PASS; initialized a vertex buffer and shader-resource texture on each of three active frame command lists, sampled and drew them, and submitted all frames");
-					PulseForge::Application::Get().RequestClose();
-					return;
-				}
-				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(15))
-					Fail("Timed out during active-frame resource upload validation");
+				UpdateLegacyRetirementValidation();
 				return;
 			}
 			if (m_ValidateEditorUiUnorm)
 			{
-				if (m_EditorUiFrames >= 3)
+				if (m_EditorUiValidation.CompletedFrames() >= 3)
 				{
-					if (m_EditorUiTargetCreations != 2)
+					if (m_EditorUiValidation.TargetCreations() != 2)
 						Fail("Editor UI intermediate was not reused at a stable extent and replaced after resize");
 					else
 					{
-						PF_INFO("GPU_VALIDATION_RESULT=PASS; editor UI rendered alpha-blended primitives to a persistent sRGB target, sampled it, and encoded to UNORM across reuse and resize");
+						PF_INFO("GPU_VALIDATION_RESULT=PASS; editor UI rendered alpha-blended primitives to a persistent sRGB target, "
+								"sampled it, and encoded to UNORM across reuse and resize");
 						PulseForge::Application::Get().RequestClose();
 					}
 					return;
@@ -419,417 +157,87 @@ namespace
 					Fail("Timed out during editor UI UNORM composition validation");
 				return;
 			}
-			if (m_ValidateLocalLights)
+			if (m_ValidateLocalLights || m_ValidateSpotlightShadows || m_ValidatePointShadows)
 			{
-				if (m_LocalLightFrames >= 6)
+				const auto Updated = m_LightingValidation->Update();
+				if (!Updated)
 				{
-					PF_INFO("GPU_VALIDATION_RESULT=PASS; SceneRenderer submitted real PBR geometry with mixed point/spot lights through HDR and SDR presentation across light updates");
+					Fail(Updated.error());
+					return;
+				}
+				if (*Updated)
+				{
+					PF_INFO("GPU_VALIDATION_RESULT=PASS; {0}", m_LightingValidation->CompletionSummary());
 					PulseForge::Application::Get().RequestClose();
-					return;
 				}
-				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(45))
-				{
-					Fail("Timed out preparing or rendering local-light scene");
-					return;
-				}
-				const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
-				if (Width == 0 || Height == 0)
-					return;
-				if (m_LocalLightFrames > 0)
-					UpdateLocalLightTransforms();
-				const auto Prepared = m_SceneRenderer->PrepareScene(
-					m_LocalLightsScene, static_cast<float>(Width) / static_cast<float>(Height));
-				if (!Prepared)
-				{
-					Fail("Could not prepare mixed local-light scene: " + Prepared.error().Message);
-					return;
-				}
-				if (m_SceneRenderer->IsEnvironmentLightingPending())
-					return;
-				m_ScenePrepared = true;
 				return;
 			}
-			if (m_ValidateSpotlightShadows)
+			if (m_ValidatePbrMaterials || m_ValidateTransparency)
 			{
-				if (m_SpotShadowFrames >= 9)
+				m_ProjectSceneValidation->Update();
+				if (auto Failure = m_ProjectSceneValidation->TakeFailure())
 				{
-					PF_INFO("GPU_VALIDATION_RESULT=PASS; spotlight slot ownership was deterministically reassigned through repeated oversubscribed Cast Shadows toggles, with directional-light absence and target resize coverage");
+					Fail(*Failure);
+					return;
+				}
+				if (m_ProjectSceneValidation->IsComplete())
+				{
+					PF_INFO("GPU_VALIDATION_RESULT=PASS; {0}; image: {1}", m_ProjectSceneValidation->CompletionSummary(),
+						m_ProjectSceneValidation->CapturePath().string());
 					PulseForge::Application::Get().RequestClose();
-					return;
 				}
-				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(45))
-				{
-					Fail("Timed out preparing or rendering spotlight-shadow scene");
-					return;
-				}
-				const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
-				if (Width == 0 || Height == 0)
-					return;
-				if (m_ScenePrepared)
-					return;
-				UpdateSpotlightShadowScenario();
-				const auto Prepared = m_SceneRenderer->PrepareScene(
-					m_SpotlightShadowScene, static_cast<float>(Width) / static_cast<float>(Height));
-				if (!Prepared)
-				{
-					Fail("Could not prepare spotlight-shadow scene: " + Prepared.error().Message);
-					return;
-				}
-				if (m_SceneRenderer->IsEnvironmentLightingPending())
-					return;
-				m_ScenePrepared = true;
-				return;
-			}
-			if (m_ValidatePointShadows)
-			{
-				if (m_PointShadowFrames >= 9)
-				{
-					PF_INFO("GPU_VALIDATION_RESULT=PASS; point-shadow cube faces rendered, persistent slots reassigned through live Cast Shadows changes, and point-only shadows rendered without directional CSM");
-					PulseForge::Application::Get().RequestClose();
-					return;
-				}
-				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(60))
-				{
-					Fail("Timed out preparing or rendering point-shadow scene");
-					return;
-				}
-				const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
-				if (Width == 0 || Height == 0 || m_ScenePrepared)
-					return;
-				if (!m_PointShadowScenarioUpdated)
-				{
-					UpdatePointShadowScenario();
-					m_PointShadowScenarioUpdated = true;
-				}
-				const auto Prepared = m_SceneRenderer->PrepareScene(
-					m_PointShadowScene, static_cast<float>(Width) / static_cast<float>(Height));
-				if (!Prepared)
-				{
-					Fail("Could not prepare point-shadow scene: " + Prepared.error().Message);
-					return;
-				}
-				if (m_SceneRenderer->IsEnvironmentLightingPending())
-					return;
-				m_ScenePrepared = true;
-				return;
-			}
-			if (m_ValidatePbrMaterials)
-			{
-				if (m_PbrMaterialCapturePending)
-				{
-					CapturePbrMaterialImage();
-					m_PbrMaterialCapturePending = false;
-					if (!m_Succeeded)
-						return;
-				}
-				if (m_PbrMaterialCaptureComplete)
-				{
-					PF_INFO("GPU_VALIDATION_RESULT=PASS; PBR project loaded, all seven indexed mesh instances rendered, and actual sRGB output was captured; image: {0}",
-						m_PbrMaterialImagePath.string());
-					PulseForge::Application::Get().RequestClose();
-					return;
-				}
-				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(60))
-				{
-					Fail("Timed out preparing or capturing the PBR material demonstration scene");
-					return;
-				}
-				const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
-				if (Width == 0 || Height == 0 || m_ScenePrepared)
-					return;
-				const auto Prepared = m_SceneRenderer->PrepareScene(
-					m_Scene,
-					static_cast<float>(m_PbrMaterialOutputTarget->GetDescription().Width) /
-						static_cast<float>(m_PbrMaterialOutputTarget->GetDescription().Height));
-				if (!Prepared)
-				{
-					Fail("Could not prepare the PBR project startup scene: " + Prepared.error().Message);
-					return;
-				}
-				if (m_SceneRenderer->IsEnvironmentLightingPending())
-					return;
-				m_ScenePrepared = true;
-				return;
-			}
-			if (m_ValidateTransparency)
-			{
-				if (m_TransparencyCapturePending)
-				{
-					CaptureTransparencyImage();
-					m_TransparencyCapturePending = false;
-					if (!m_Succeeded)
-						return;
-					if (m_TransparencyCaptureStage < 2)
-					{
-						const auto Spot = m_TransparencySpotLight.GetSpotLight();
-						if (!Spot || !Spot->has_value())
-						{
-							Fail("Transparency image comparison lost its spotlight component");
-							return;
-						}
-						PulseForge::SpotLightComponent Updated = Spot->value();
-						if (m_TransparencyCaptureStage == 0)
-						{
-							Updated.Intensity = m_TransparencySpotIntensity;
-							Updated.CastShadows = false;
-						}
-						else
-							Updated.CastShadows = true;
-						if (!m_TransparencySpotLight.SetSpotLight(Updated))
-						{
-							Fail("Could not update the spotlight for alpha-mask image comparison");
-							return;
-						}
-						PF_INFO("TRANSPARENCY_SPOTLIGHT_UPDATE next_stage={0}; intensity={1:.1f}; cast_shadows={2}",
-							m_TransparencyCaptureStage + 1, Updated.Intensity, Updated.CastShadows);
-						++m_TransparencyCaptureStage;
-						m_ScenePrepared = false;
-						return;
-					}
-					if (m_TransparencyCaptureStage == 2)
-					{
-						if (!ValidateTransparencyLightDifference() || !ValidateTransparencyShadowDifference() ||
-							!SetTransparencySpotShadows(false) || !CreateTransparencyPointLight())
-							return;
-						m_TransparencyCaptureStage = 3;
-					}
-					else if (m_TransparencyCaptureStage == 3)
-					{
-						if (!SetTransparencyPointShadows(true))
-							return;
-						m_TransparencyCaptureStage = 4;
-					}
-					else if (m_TransparencyCaptureStage == 4)
-					{
-						if (!ValidateTransparencyPointShadowDifference() || !PrepareTransparencyDirectionalShadowTest(false))
-							return;
-						m_TransparencyCaptureStage = 5;
-					}
-					else if (m_TransparencyCaptureStage == 5)
-					{
-						if (!PrepareTransparencyDirectionalShadowTest(true))
-							return;
-						m_TransparencyCaptureStage = 6;
-					}
-					else if (m_TransparencyCaptureStage == 6)
-					{
-						if (!ValidateTransparencyDirectionalShadowDifference() || !SetTransparencyBluePanelOpaqueControl())
-							return;
-						m_TransparencyCaptureStage = 7;
-					}
-					else
-					{
-						if (!ValidateTransparencyBlendDifference())
-							return;
-						m_TransparencyCaptureComplete = true;
-					}
-					m_ScenePrepared = false;
-					return;
-				}
-				if (m_TransparencyCaptureComplete)
-				{
-					PF_INFO("GPU_VALIDATION_RESULT=PASS; Transparency project rendered actual sRGB comparisons for masked spotlight, point-light, and directional shadows, plus HDR blending; startup image: {0}",
-						m_TransparencyImagePath.string());
-					PulseForge::Application::Get().RequestClose();
-					return;
-				}
-				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(60))
-				{
-					Fail("Timed out preparing or capturing the transparency demonstration scene");
-					return;
-				}
-				const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
-				if (Width == 0 || Height == 0 || m_ScenePrepared)
-					return;
-				const auto Prepared = m_SceneRenderer->PrepareScene(
-					m_Scene,
-					static_cast<float>(m_TransparencyOutputTarget->GetDescription().Width) /
-						static_cast<float>(m_TransparencyOutputTarget->GetDescription().Height));
-				if (!Prepared)
-				{
-					Fail("Could not prepare the transparency project startup scene: " + Prepared.error().Message);
-					return;
-				}
-				if (m_SceneRenderer->IsEnvironmentLightingPending())
-					return;
-				const auto Snapshot = PulseForge::SceneRenderSnapshotBuilder::Build(
-					m_Scene, static_cast<float>(m_TransparencyOutputTarget->GetDescription().Width) /
-						static_cast<float>(m_TransparencyOutputTarget->GetDescription().Height));
-				if (!Snapshot)
-				{
-					Fail("Could not inspect prepared transparency light values: " + Snapshot.error().Message);
-					return;
-				}
-				const auto Spot = std::find_if(Snapshot->SpotLights.begin(), Snapshot->SpotLights.end(),
-					[this](const PulseForge::SceneSpotLight& Light) { return Light.Entity == m_TransparencySpotLight.GetUUID(); });
-				if (Spot == Snapshot->SpotLights.end())
-				{
-					Fail("Transparency spotlight disappeared from the prepared scene snapshot");
-					return;
-				}
-				PF_INFO("TRANSPARENCY_PREPARED_LIGHT stage={0}; intensity={1:.1f}; cast_shadows={2}; direction=({3:.3f},{4:.3f},{5:.3f})",
-					m_TransparencyCaptureStage, Spot->Intensity, Spot->CastShadows,
-					Spot->WorldDirection.x, Spot->WorldDirection.y, Spot->WorldDirection.z);
-				m_ScenePrepared = true;
 				return;
 			}
 			if (m_ValidatePointShadowImages)
 			{
-				if (m_PointShadowImageCapturePending)
+				const auto Updated = m_PointShadowImageValidation.Update(m_StartedAt);
+				if (!Updated)
 				{
-					CapturePointShadowImage();
-					m_PointShadowImageCapturePending = false;
-					++m_PointShadowImageCase;
-					m_ScenePrepared = false;
-				}
-				if (m_PointShadowImageCase >= PointShadowImageCases.size())
-				{
-					if (!m_PointShadowImageValidationComplete)
-					{
-						if (!ValidatePointShadowImageResults())
-							return;
-						m_PointShadowImageValidationComplete = true;
-					}
-					if (!m_PointShadowOverviewSettingsRestored)
-					{
-						if (!m_SavedAmbientOcclusionSettings || !m_SavedToneMappingSettings ||
-							!m_SceneRenderer->SetAmbientOcclusionSettings(*m_SavedAmbientOcclusionSettings) ||
-							!m_SceneRenderer->SetToneMappingSettings(*m_SavedToneMappingSettings))
-						{
-							Fail("Could not restore the renderer settings for startup-scene image captures");
-							return;
-						}
-						m_PointShadowOverviewSettingsRestored = true;
-					}
-					if (m_PointShadowOverviewCapturePending)
-					{
-						CapturePointShadowOverviewImage();
-						m_PointShadowOverviewCapturePending = false;
-						++m_PointShadowOverviewImageCase;
-						m_ScenePrepared = false;
-					}
-					if (m_PointShadowOverviewImageCase >= PointShadowOverviewImageCases.size())
-					{
-						PF_INFO("GPU_VALIDATION_RESULT=PASS; captured real isolated and startup-scene point-shadow images, evaluated independent ray-box samples, and verified rotation invariance; images: {0}",
-							m_PointShadowImageDirectory.string());
-						PulseForge::Application::Get().RequestClose();
-						return;
-					}
-					if (m_ScenePrepared)
-						return;
-					if (!PreparePointShadowOverviewImageCase())
-						return;
+					Fail(Updated.error());
 					return;
 				}
-				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(90))
+				if (*Updated)
 				{
-					Fail("Timed out capturing point-shadow direction images");
-					return;
+					PF_INFO("GPU_VALIDATION_RESULT=PASS; captured real isolated and startup-scene point-shadow images, evaluated "
+							"independent ray-box samples, and verified rotation invariance; images: {0}",
+						m_PointShadowImageDirectory.string());
+					PulseForge::Application::Get().RequestClose();
 				}
-				if (m_ScenePrepared)
-					return;
-				if (!PreparePointShadowImageCase())
-					return;
 				return;
 			}
 			if (m_ValidateToneMapping)
 			{
-				if (m_ToneMappingFrame >= 10)
+				const auto Updated = m_SceneOutputValidation->Update();
+				if (!Updated)
 				{
-					PF_INFO("GPU_VALIDATION_RESULT=PASS; HDR scene tone mapping covered swapchain, sRGB and UNORM targets, exposure, resize, reuse, and scene variants");
+					Fail(Updated.error());
+					return;
+				}
+				if (*Updated)
+				{
+					PF_INFO("GPU_VALIDATION_RESULT=PASS; HDR scene tone mapping covered swapchain, sRGB and UNORM targets, exposure, "
+							"resize, reuse, and scene variants");
 					PulseForge::Application::Get().RequestClose();
 					return;
 				}
-				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(60))
-				{
-					Fail("Timed out preparing or rendering tone-mapped scene outputs");
-					return;
-				}
-				m_ScenePrepared = false;
-				const bool Offscreen = m_ToneMappingFrame >= 2;
-				uint32_t Width = 0;
-				uint32_t Height = 0;
-				if (Offscreen)
-				{
-					Width = m_ToneMappingFrame >= 4 ? 96u : 64u;
-					Height = 64;
-				}
-				else
-				{
-					const auto Extent = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
-					Width = Extent.first;
-					Height = Extent.second;
-				}
-				if (Width == 0 || Height == 0)
-					return;
-				PulseForge::Scene* SceneToPrepare = &m_Scene;
-				if (m_ToneMappingFrame == 6) SceneToPrepare = &m_EnvironmentOnlyScene;
-				if (m_ToneMappingFrame == 7) SceneToPrepare = &m_GeometryOnlyScene;
-				if (m_ToneMappingFrame == 8) SceneToPrepare = &m_EmptyScene;
-				if (m_ToneMappingFrame == 9) SceneToPrepare = &m_DirectionalOnlyScene;
-				const float AspectRatio = static_cast<float>(Width) / static_cast<float>(Height);
-				const auto Prepared = m_SceneRenderer->PrepareScene(*SceneToPrepare, AspectRatio);
-				if (!Prepared)
-				{
-					Fail("Could not prepare the scene for tone mapping: " + Prepared.error().Message);
-					return;
-				}
-				const bool HasEnvironment = m_ToneMappingFrame < 7;
-				if (HasEnvironment && m_SceneRenderer->IsEnvironmentLightingPending())
-					return;
-				if (HasEnvironment && !m_SceneRenderer->HasPreparedEnvironmentLighting())
-				{
-					Fail("Tone-mapping scenario did not prepare its environment lighting");
-					return;
-				}
-				m_ScenePrepared = true;
 				return;
 			}
 
 			if (m_ValidateSceneHdr)
 			{
-				if (m_SceneCompletedFrames >= 4 && m_ScenarioIndex >= 4)
+				const auto Updated = m_SceneOutputValidation->Update();
+				if (!Updated)
 				{
-					PF_INFO("GPU_VALIDATION_RESULT=PASS; SceneRenderer rendered and sampled persistent RGBA16F targets across reuse, resize, empty, environment-only, geometry-only, and directional-only cases");
+					Fail(Updated.error());
+					return;
+				}
+				if (*Updated)
+				{
+					PF_INFO("GPU_VALIDATION_RESULT=PASS; SceneRenderer rendered and sampled persistent RGBA16F targets across reuse, "
+							"resize, empty, environment-only, geometry-only, and directional-only cases");
 					PulseForge::Application::Get().RequestClose();
 					return;
 				}
-				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(40))
-				{
-					Fail("Timed out preparing or rendering the sample HDR scene");
-					return;
-				}
-				m_ScenePrepared = false;
-
-				const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
-				if (Width == 0 || Height == 0)
-					return;
-				PulseForge::Scene* SceneToPrepare = m_SceneCompletedFrames < 4
-					? &m_Scene
-					: &GetScenarioScene(m_ScenarioIndex);
-				PulseForge::AmbientOcclusionSettings AoSettings = m_SceneRenderer->GetAmbientOcclusionSettings();
-				AoSettings.Enabled = !(m_SceneCompletedFrames >= 4 && m_ScenarioIndex == 2);
-				if (!m_SceneRenderer->SetAmbientOcclusionSettings(AoSettings))
-				{
-					Fail("Could not select the validation scene's ambient-occlusion mode");
-					return;
-				}
-				const auto Prepared = m_SceneRenderer->PrepareScene(
-					*SceneToPrepare, static_cast<float>(Width) / static_cast<float>(Height));
-				if (!Prepared)
-				{
-					Fail("Could not prepare the bundled scene for HDR rendering: " + Prepared.error().Message);
-					return;
-				}
-				const bool SceneHasEnvironment = m_SceneCompletedFrames < 4 || m_ScenarioIndex == 1;
-				if (SceneHasEnvironment && m_SceneRenderer->IsEnvironmentLightingPending())
-					return;
-				if (SceneHasEnvironment && !m_SceneRenderer->HasPreparedEnvironmentLighting())
-				{
-					Fail("Bundled validation scene did not produce prepared environment lighting");
-					return;
-				}
-				m_ScenePrepared = true;
 				return;
 			}
 
@@ -844,67 +252,55 @@ namespace
 
 		void OnRender() override
 		{
-			if (m_ValidateActiveFrameUploads)
+			if (m_LegacyRetirementScenario != LegacyRetirementScenario::None)
 			{
-				RenderActiveFrameUploadFrame();
+				if (PulseForge::Application::Get().IsMainFrameActive())
+				{
+					++m_RetirementMainFrames;
+					if (m_LegacyRetirementScenario == LegacyRetirementScenario::MainRecoveryFailure)
+					{
+						if (m_RetirementValidationFrames < 5) m_SawMainFrameBeforeRecoveryFailure = true;
+						else if (m_RetirementValidationFrames >= 8) m_MainFrameResumedAfterRecoveryFailure = true;
+					}
+				}
 				return;
 			}
 			if (m_ValidateEditorUiUnorm)
 			{
-				RenderEditorUiUnormFrame();
+				if (const auto Result = m_EditorUiValidation.RenderFrame(PulseForge::Application::Get()); !Result) Fail(Result.error());
 				return;
 			}
-			if (m_ValidateLocalLights)
+			if (m_ValidateLocalLights || m_ValidateSpotlightShadows || m_ValidatePointShadows)
 			{
-				RenderLocalLightFrame();
+				if (auto Rendered = m_LightingValidation->Render(); !Rendered) Fail(Rendered.error());
 				return;
 			}
-			if (m_ValidateSpotlightShadows)
+			if (m_ValidatePbrMaterials || m_ValidateTransparency)
 			{
-				RenderSpotlightShadowFrame();
-				return;
-			}
-			if (m_ValidatePointShadows)
-			{
-				RenderPointShadowFrame();
-				return;
-			}
-			if (m_ValidatePbrMaterials)
-			{
-				RenderPbrMaterialFrame();
-				return;
-			}
-			if (m_ValidateTransparency)
-			{
-				RenderTransparencyFrame();
+				m_ProjectSceneValidation->Render();
+				if (auto Failure = m_ProjectSceneValidation->TakeFailure()) Fail(*Failure);
 				return;
 			}
 			if (m_ValidatePointShadowImages)
 			{
-				if (m_CapturingPointShadowOverview)
-					RenderPointShadowOverviewImageFrame();
-				else
-					RenderPointShadowImageFrame();
+				const auto Rendered = m_PointShadowImageValidation.Render();
+				if (!Rendered) Fail(Rendered.error());
 				return;
 			}
 			if (m_ValidateToneMapping)
 			{
-				RenderToneMappingFrame();
+				if (const auto Result = m_SceneOutputValidation->Render(); !Result) Fail(Result.error());
 				return;
 			}
 			if (m_ValidateSceneHdr)
 			{
-				RenderSceneHdrFrame();
+				if (const auto Result = m_SceneOutputValidation->Render(); !Result) Fail(Result.error());
 				return;
 			}
-			if (!m_Succeeded || m_CompletedFrames >= 3)
-				return;
+			if (!m_Succeeded || m_CompletedFrames >= 3) return;
 
 			PulseForge::Application& App = PulseForge::Application::Get();
-			const PulseForge::RenderTargetClearValue ClearValue{
-				.Color = { 2.0f, 0.25f, 0.125f, 1.0f },
-				.Depth = 1.0f
-			};
+			const PulseForge::RenderTargetClearValue ClearValue{ .Color = { 2.0f, 0.25f, 0.125f, 1.0f }, .Depth = 1.0f };
 			const PulseForge::GraphicsResult BeginResult = App.BeginRenderTarget(*m_Target, ClearValue);
 			if (!BeginResult)
 			{
@@ -927,11 +323,8 @@ namespace
 			}
 
 			const std::array<const PulseForge::BindingSet*, 1> BindingSets = { m_SamplingBindingSet.get() };
-			const PulseForge::GraphicsResult SamplingDrawResult = App.Draw(
-				*m_SamplingPipeline,
-				*m_VertexBuffer,
-				DrawArguments,
-				BindingSets);
+			const PulseForge::GraphicsResult SamplingDrawResult =
+				App.Draw(*m_SamplingPipeline, *m_VertexBuffer, DrawArguments, BindingSets);
 			if (!SamplingDrawResult)
 			{
 				Fail("RGBA16F shader-resource sampling draw failed: " + SamplingDrawResult.error().Message);
@@ -939,33 +332,35 @@ namespace
 			}
 
 			++m_CompletedFrames;
-			if (m_CompletedFrames == 1)
-				PF_INFO("RGBA16F attachment draw, shader-resource transition, and sampling draw recorded");
+			if (m_CompletedFrames == 1) PF_INFO("RGBA16F attachment draw, shader-resource transition, and sampling draw recorded");
+		}
+
+		void OnRenderPlatformWindows() override
+		{
+			if (m_RetirementTargetID == 0) return;
+			auto& App = PulseForge::Application::Get();
+			if (!App.BeginPlatformPresentationTarget(m_RetirementTargetID)) return;
+			App.EndPlatformPresentationTarget(m_RetirementTargetID);
+			++m_RetirementNativeSubmissions;
 		}
 
 		void OnDetach() override
 		{
-			m_ActiveFrameUploadBindingSets.clear();
-			m_ActiveFrameUploadBuffers.clear();
-			m_ActiveFrameUploadTextures.clear();
-			m_PointShadowOutputTarget.reset();
-			m_PointShadowImageOutputTarget.reset();
-			m_PbrMaterialOutputTarget.reset();
-			m_TransparencyOutputTarget.reset();
-			m_SpotlightShadowOutputTarget.reset();
-			m_EditorUiBindingSet.reset();
-			m_EditorUiDrawBindingSet.reset();
-			m_EditorUiUnormTarget.reset();
-			m_EditorUiSrgbTarget.reset();
-			m_EditorUiPresentationPipeline.reset();
-			m_EditorUiPipeline.reset();
-			m_EditorUiFullscreenBuffer.reset();
-			m_EditorUiVertexBuffer.reset();
-			m_EditorUiFontTexture.reset();
-			m_EditorUiPresentationFragmentShader.reset();
-			m_EditorUiPresentationVertexShader.reset();
-			m_EditorUiFragmentShader.reset();
-			m_EditorUiVertexShader.reset();
+			ReleaseRetirementFixture();
+			const auto ReleasedPointShadowImages = m_PointShadowImageValidation.Release();
+			if (!ReleasedPointShadowImages) Fail(ReleasedPointShadowImages.error());
+			if (m_LightingValidation)
+			{
+				m_LightingValidation->Reset();
+				m_LightingValidation.reset();
+			}
+			if (m_ProjectSceneValidation)
+			{
+				m_ProjectSceneValidation->Reset();
+				m_ProjectSceneValidation.reset();
+			}
+			m_EditorUiValidation.Reset();
+			m_SceneOutputValidation.reset();
 			m_SamplingBindingSet.reset();
 			m_SdrTarget.reset();
 			m_SceneRenderer.reset();
@@ -980,98 +375,78 @@ namespace
 
 		[[nodiscard]] bool Succeeded() const noexcept
 		{
-			return m_Succeeded && (m_ValidateActiveFrameUploads ? m_ActiveFrameUploadFrames == 3 :
-				m_ValidateEditorUiUnorm ? m_EditorUiFrames == 3 && m_EditorUiTargetCreations == 2 :
-				m_ValidateTransparency ? m_TransparencyCaptureComplete :
-				m_ValidatePbrMaterials ? m_PbrMaterialCaptureComplete :
-				m_ValidatePointShadowImages ? m_PointShadowImageCase == PointShadowImageCases.size() :
-				m_ValidatePointShadows ? m_PointShadowFrames == 9 :
-				m_ValidateSpotlightShadows ? m_SpotShadowFrames == 9 :
-				m_ValidateLocalLights ? m_LocalLightFrames == 6 :
-				m_ValidateToneMapping ? m_ToneMappingFrame == 10 :
-				m_ValidateSceneHdr ? m_SceneCompletedFrames == 4 && m_ScenarioIndex == 4 : m_CompletedFrames == 3);
+			return m_Succeeded && (m_LegacyRetirementScenario != LegacyRetirementScenario::None ? m_LegacyRetirementValidationComplete
+									  : m_ValidateEditorUiUnorm									? m_EditorUiValidation.IsComplete()
+									  : m_ValidateTransparency		? (m_ProjectSceneValidation && m_ProjectSceneValidation->Succeeded())
+									  : m_ValidatePbrMaterials		? (m_ProjectSceneValidation && m_ProjectSceneValidation->Succeeded())
+									  : m_ValidatePointShadowImages ? m_PointShadowImageValidation.IsComplete()
+									  : m_ValidatePointShadows || m_ValidateSpotlightShadows || m_ValidateLocalLights
+										  ? (m_LightingValidation && m_LightingValidation->IsComplete())
+									  : m_ValidateToneMapping ? (m_SceneOutputValidation && m_SceneOutputValidation->IsComplete())
+									  : m_ValidateSceneHdr	  ? (m_SceneOutputValidation && m_SceneOutputValidation->IsComplete())
+															  : m_CompletedFrames == 3);
 		}
 
 	private:
-		void RenderActiveFrameUploadFrame()
-		{
-			if (!m_Succeeded || m_ActiveFrameUploadFrames >= 3)
-				return;
-
-			PulseForge::Application& App = PulseForge::Application::Get();
-			std::array<std::byte, 4 * 4 * 4> Pixels{};
-			for (size_t Pixel = 0; Pixel < Pixels.size() / 4; ++Pixel)
-			{
-				Pixels[Pixel * 4 + 0] = static_cast<std::byte>(48 + m_ActiveFrameUploadFrames * 64);
-				Pixels[Pixel * 4 + 1] = static_cast<std::byte>(192 - m_ActiveFrameUploadFrames * 32);
-				Pixels[Pixel * 4 + 2] = static_cast<std::byte>(96 + m_ActiveFrameUploadFrames * 24);
-				Pixels[Pixel * 4 + 3] = std::byte{ 0xff };
-			}
-
-			PulseForge::TextureDesc TextureDescription;
-			TextureDescription.Width = 4;
-			TextureDescription.Height = 4;
-			TextureDescription.Format = PulseForge::TextureFormat::RGBA8_UNorm;
-			TextureDescription.Usage = PulseForge::TextureUsage::ShaderResource;
-			TextureDescription.DebugName = "Active-frame upload validation texture " +
-				std::to_string(m_ActiveFrameUploadFrames);
-			const PulseForge::TextureSubresourceData Subresource{ 0, 0, Pixels, 0 };
-			auto TextureResult = App.CreateTexture(TextureDescription, std::span(&Subresource, 1));
-			if (!TextureResult)
-			{
-				Fail("Could not upload a texture while the frame command list was open: " + TextureResult.error().Message);
-				return;
-			}
-			PulseForge::TextureHandle Texture = std::move(*TextureResult);
-
-			const std::array<ValidationVertex, 3> Vertices = {
-				ValidationVertex{ { -1.0f, -1.0f }, { 0.0f, 1.0f } },
-				ValidationVertex{ { 3.0f, -1.0f }, { 2.0f, 1.0f } },
-				ValidationVertex{ { -1.0f, 3.0f }, { 0.0f, -1.0f } }
-			};
-			PulseForge::BufferDesc BufferDescription;
-			BufferDescription.ByteSize = sizeof(Vertices);
-			BufferDescription.Usage = PulseForge::BufferUsage::Vertex;
-			BufferDescription.DebugName = "Active-frame upload validation vertices " +
-				std::to_string(m_ActiveFrameUploadFrames);
-			auto BufferResult = App.CreateBuffer(BufferDescription, std::as_bytes(std::span(Vertices)));
-			if (!BufferResult)
-			{
-				Fail("Could not upload a vertex buffer while the frame command list was open: " + BufferResult.error().Message);
-				return;
-			}
-			PulseForge::BufferHandle Buffer = std::move(*BufferResult);
-
-			PulseForge::BindingSetDesc BindingDescription;
-			BindingDescription.Layout = m_BindingLayout;
-			BindingDescription.Textures.push_back({ 0, *Texture, PulseForge::BindingResourceType::Texture2D });
-			BindingDescription.Samplers.push_back({ 0, *m_Sampler });
-			auto BindingResult = App.CreateBindingSet(BindingDescription);
-			if (!BindingResult)
-			{
-				Fail("Could not bind the active-frame uploaded texture: " + BindingResult.error().Message);
-				return;
-			}
-			PulseForge::BindingSetHandle Binding = std::move(*BindingResult);
-			const std::array<const PulseForge::BindingSet*, 1> BindingSets = { Binding.get() };
-			if (const PulseForge::GraphicsResult Draw = App.Draw(
-				*m_SamplingPipeline, *Buffer, { 3, 1, 0, 0 }, BindingSets); !Draw)
-			{
-				Fail("Could not draw resources uploaded in the active frame: " + Draw.error().Message);
-				return;
-			}
-
-			m_ActiveFrameUploadTextures.push_back(std::move(Texture));
-			m_ActiveFrameUploadBuffers.push_back(std::move(Buffer));
-			m_ActiveFrameUploadBindingSets.push_back(std::move(Binding));
-			++m_ActiveFrameUploadFrames;
-		}
-
 		void Fail(const std::string& Message)
 		{
 			m_Succeeded = false;
 			PF_ERROR("GPU_VALIDATION_RESULT=FAIL: {0}", Message);
 			PulseForge::Application::Get().RequestClose();
+		}
+
+		void UpdateLegacyRetirementValidation()
+		{
+			if (!m_Succeeded) return;
+			auto& App = PulseForge::Application::Get();
+			++m_RetirementValidationFrames;
+
+			if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(10))
+			{
+				Fail("Timed out while exercising bounded legacy swapchain recovery");
+				return;
+			}
+			if (m_RetirementValidationFrames < 16) return;
+
+			if (m_LegacyRetirementScenario == LegacyRetirementScenario::MainRecoveryFailure)
+			{
+				if (!m_SawMainFrameBeforeRecoveryFailure || m_MainFrameResumedAfterRecoveryFailure || m_RetirementNativeSubmissions < 12)
+				{
+					Fail("The failed main recovery was not bounded or the independent native host stopped submitting frames");
+					return;
+				}
+				PF_INFO("GPU_VALIDATION_RESULT=PASS; failed main cap recovery remained blocked while the native host submitted {} frames",
+					m_RetirementNativeSubmissions);
+			}
+			else if (m_RetirementMainFrames < 12 || m_RetirementNativeSubmissions != 0)
+			{
+				Fail("The failed native recovery retried instead of blocking or prevented main frame rendering");
+				return;
+			}
+			else
+				PF_INFO(
+					"GPU_VALIDATION_RESULT=PASS; failed native cap recovery remained blocked while the main host ran {} frame callbacks",
+					m_RetirementMainFrames);
+
+			if (!ReleaseRetirementFixture())
+			{
+				Fail("Could not release native presentation resources after the cap-recovery scenario");
+				return;
+			}
+			m_LegacyRetirementValidationComplete = true;
+			App.RequestClose();
+		}
+
+		bool ReleaseRetirementFixture()
+		{
+			if (m_RetirementTargetID != 0)
+			{
+				auto& App = PulseForge::Application::Get();
+				if (!App.DestroyPlatformPresentationTarget(m_RetirementTargetID)) return false;
+				m_RetirementTargetID = 0;
+			}
+			m_RetirementWindow.reset();
+			return !PulseForge::Application::Get().HasPlatformPresentationTargets();
 		}
 
 		void InitializeResources()
@@ -1084,8 +459,7 @@ namespace
 			TargetDescription.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
 			TargetDescription.DebugName = "RGBA16F GPU validation target";
 			auto TargetResult = App.CreateRenderTarget(TargetDescription);
-			if (!TargetResult)
-				throw std::runtime_error("RGBA16F render-target creation failed: " + TargetResult.error().Message);
+			if (!TargetResult) throw std::runtime_error("RGBA16F render-target creation failed: " + TargetResult.error().Message);
 			m_Target = std::move(TargetResult.value());
 
 			const PulseForge::Texture* ColorTexture = m_Target->GetColorTexture();
@@ -1103,9 +477,12 @@ namespace
 			PF_INFO("Created 32x32 RGBA16_Float color+shader-resource target with D32 attachment");
 
 			const std::filesystem::path ShaderDirectory(PF_GPU_VALIDATION_SHADER_DIRECTORY);
-			const std::vector<std::byte> VertexBytecode = LoadShader(ShaderDirectory / "GpuRendererValidation.vs.spv");
-			const std::vector<std::byte> ColorBytecode = LoadShader(ShaderDirectory / "GpuRendererValidation.color.ps.spv");
-			const std::vector<std::byte> SamplingBytecode = LoadShader(ShaderDirectory / "GpuRendererValidation.sample.ps.spv");
+			const std::vector<std::byte> VertexBytecode =
+				PulseForge::GpuValidation::LoadValidationShader(ShaderDirectory / "GpuRendererValidation.vs.spv");
+			const std::vector<std::byte> ColorBytecode =
+				PulseForge::GpuValidation::LoadValidationShader(ShaderDirectory / "GpuRendererValidation.color.ps.spv");
+			const std::vector<std::byte> SamplingBytecode =
+				PulseForge::GpuValidation::LoadValidationShader(ShaderDirectory / "GpuRendererValidation.sample.ps.spv");
 
 			PulseForge::ShaderDesc VertexShaderDescription;
 			VertexShaderDescription.Stage = PulseForge::ShaderStage::Vertex;
@@ -1132,14 +509,11 @@ namespace
 
 			PulseForge::BindingLayoutDesc LayoutDescription;
 			LayoutDescription.Visibility = PulseForge::ShaderVisibility::Fragment;
-			LayoutDescription.Items = {
-				{ PulseForge::BindingResourceType::Texture2D, 0 },
-				{ PulseForge::BindingResourceType::Sampler, 0 }
-			};
+			LayoutDescription.Items = { { PulseForge::BindingResourceType::Texture2D, 0 },
+				{ PulseForge::BindingResourceType::Sampler, 0 } };
 			LayoutDescription.DebugName = "RGBA16F validation sampling layout";
 			auto LayoutResult = App.CreateBindingLayout(LayoutDescription);
-			if (!LayoutResult)
-				throw std::runtime_error("GPU-validation binding-layout creation failed: " + LayoutResult.error().Message);
+			if (!LayoutResult) throw std::runtime_error("GPU-validation binding-layout creation failed: " + LayoutResult.error().Message);
 			m_BindingLayout = std::move(LayoutResult.value());
 
 			PulseForge::SamplerDesc SamplerDescription;
@@ -1149,8 +523,7 @@ namespace
 			SamplerDescription.AddressV = PulseForge::SamplerAddressMode::ClampToEdge;
 			SamplerDescription.DebugName = "RGBA16F validation linear sampler";
 			auto SamplerResult = App.CreateSampler(SamplerDescription);
-			if (!SamplerResult)
-				throw std::runtime_error("GPU-validation sampler creation failed: " + SamplerResult.error().Message);
+			if (!SamplerResult) throw std::runtime_error("GPU-validation sampler creation failed: " + SamplerResult.error().Message);
 			m_Sampler = std::move(SamplerResult.value());
 
 			PulseForge::BindingSetDesc BindingDescription;
@@ -1162,11 +535,8 @@ namespace
 				throw std::runtime_error("GPU-validation sampling binding creation failed: " + BindingResult.error().Message);
 			m_SamplingBindingSet = std::move(BindingResult.value());
 
-			const std::array<ValidationVertex, 3> Vertices = {
-				ValidationVertex{ { -1.0f, -1.0f }, { 0.0f, 1.0f } },
-				ValidationVertex{ { 3.0f, -1.0f }, { 2.0f, 1.0f } },
-				ValidationVertex{ { -1.0f, 3.0f }, { 0.0f, -1.0f } }
-			};
+			const std::array<ValidationVertex, 3> Vertices = { ValidationVertex{ { -1.0f, -1.0f }, { 0.0f, 1.0f } },
+				ValidationVertex{ { 3.0f, -1.0f }, { 2.0f, 1.0f } }, ValidationVertex{ { -1.0f, 3.0f }, { 0.0f, -1.0f } } };
 			PulseForge::BufferDesc VertexBufferDescription;
 			VertexBufferDescription.ByteSize = sizeof(Vertices);
 			VertexBufferDescription.Usage = PulseForge::BufferUsage::Vertex;
@@ -1180,10 +550,9 @@ namespace
 			ColorPipelineDescription.VertexShader = std::move(VertexShaderResult.value());
 			ColorPipelineDescription.FragmentShader = std::move(ColorShaderResult.value());
 			ColorPipelineDescription.VertexLayout.Stride = sizeof(ValidationVertex);
-			ColorPipelineDescription.VertexLayout.Attributes = {
-				{ PulseForge::VertexSemantic::Position, PulseForge::VertexFormat::Float2, offsetof(ValidationVertex, Position) },
-				{ PulseForge::VertexSemantic::TexCoord, PulseForge::VertexFormat::Float2, offsetof(ValidationVertex, TexCoord) }
-			};
+			ColorPipelineDescription.VertexLayout.Attributes = { { PulseForge::VertexSemantic::Position, PulseForge::VertexFormat::Float2,
+																	 offsetof(ValidationVertex, Position) },
+				{ PulseForge::VertexSemantic::TexCoord, PulseForge::VertexFormat::Float2, offsetof(ValidationVertex, TexCoord) } };
 			ColorPipelineDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA16_Float;
 			ColorPipelineDescription.DepthAttachmentEnabled = true;
 			ColorPipelineDescription.Depth.TestEnabled = true;
@@ -1209,39 +578,26 @@ namespace
 
 		void InitializeSceneResources()
 		{
-			const std::filesystem::path ProjectFile = m_ValidateTransparency
-				? std::filesystem::path(PF_TRANSPARENCY_DEMO_PROJECT_FILE)
-				: m_ValidatePbrMaterials
-					? std::filesystem::path(PF_PBR_DEMO_PROJECT_FILE)
-				: m_ValidatePointShadows || m_ValidatePointShadowImages
-					? std::filesystem::path(PF_POINT_SHADOW_DEMO_PROJECT_FILE)
-					: std::filesystem::path(PF_GPU_VALIDATION_PROJECT_FILE);
+			const std::filesystem::path ProjectFile = m_ValidateTransparency   ? std::filesystem::path(PF_TRANSPARENCY_DEMO_PROJECT_FILE)
+													  : m_ValidatePbrMaterials ? std::filesystem::path(PF_PBR_DEMO_PROJECT_FILE)
+													  : m_ValidatePointShadows || m_ValidatePointShadowImages
+														  ? std::filesystem::path(PF_POINT_SHADOW_DEMO_PROJECT_FILE)
+														  : std::filesystem::path(PF_GPU_VALIDATION_PROJECT_FILE);
 			auto OpenedProject = PulseForge::Project::Open(ProjectFile);
 			if (!OpenedProject)
-				throw std::runtime_error("Could not open GPU-validation project '" + ProjectFile.string() + "': " +
-					OpenedProject.error().Message);
+				throw std::runtime_error(
+					"Could not open GPU-validation project '" + ProjectFile.string() + "': " + OpenedProject.error().Message);
 			m_Project.emplace(std::move(*OpenedProject));
-			if (!m_Project->GetDescription().StartScene)
-				throw std::runtime_error("GPU-validation project has no start scene");
+			if (!m_Project->GetDescription().StartScene) throw std::runtime_error("GPU-validation project has no start scene");
 			const auto SceneLoad = PulseForge::SceneAssetService::Load(
-				*m_Project->GetDescription().StartScene,
-				m_Project->GetRootPath(),
-				m_Project->GetAssetRegistry(),
-				m_Scene);
-			if (!SceneLoad)
-				throw std::runtime_error("Could not load GPU-validation project startup scene: " + SceneLoad.error().Message);
+				*m_Project->GetDescription().StartScene, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), m_Scene);
+			if (!SceneLoad) throw std::runtime_error("Could not load GPU-validation project startup scene: " + SceneLoad.error().Message);
 
 			auto CreatedRenderer = PulseForge::SceneRenderer::Create(
-				PulseForge::Application::Get(),
-				*m_Project,
-				std::filesystem::path(PF_GPU_VALIDATION_SCENE_SHADER_DIRECTORY));
+				PulseForge::Application::Get(), *m_Project, std::filesystem::path(PF_GPU_VALIDATION_SCENE_SHADER_DIRECTORY));
 			if (!CreatedRenderer)
 				throw std::runtime_error("Could not create SceneRenderer for HDR validation: " + CreatedRenderer.error().Message);
 			m_SceneRenderer = std::move(*CreatedRenderer);
-			BuildScenario(m_EmptyScene, false, false, false);
-			BuildScenario(m_EnvironmentOnlyScene, false, true, false);
-			BuildScenario(m_GeometryOnlyScene, true, false, false);
-			BuildScenario(m_DirectionalOnlyScene, true, false, true);
 			ValidatePreparationFailureHandling();
 			const auto MissingSnapshot = m_SceneRenderer->RenderPreparedSceneToHdr(64, 64);
 			if (MissingSnapshot || MissingSnapshot.error().Code != PulseForge::SceneRendererErrorCode::SnapshotBuildFailed)
@@ -1249,2249 +605,18 @@ namespace
 			PF_INFO("SceneRenderer rejected HDR rendering before scene preparation as expected");
 		}
 
-		void InitializeLocalLightScenario()
-		{
-			BuildScenario(m_LocalLightsScene, true, true, true);
-			const std::array<PulseForge::PointLightComponent, 2> Points = {
-				PulseForge::PointLightComponent{ { 1.0f, 0.35f, 0.15f }, 18.0f, 12.0f },
-				PulseForge::PointLightComponent{ { 0.15f, 0.35f, 1.0f }, 12.0f, 10.0f }
-			};
-			for (size_t Index = 0; Index < Points.size(); ++Index)
-			{
-				auto Light = m_LocalLightsScene.CreateEntity("GPU validation point light");
-				if (!Light || !Light->SetPointLight(Points[Index]))
-					throw std::runtime_error("Could not create GPU validation point light");
-				auto Transform = Light->GetTransform();
-				if (!Transform)
-					throw std::runtime_error("Could not read GPU validation point-light transform");
-				Transform->Translation = { static_cast<float>(Index) * 2.0f - 1.0f, 2.0f, 1.0f };
-				if (!Light->SetTransform(*Transform))
-					throw std::runtime_error("Could not position GPU validation point light");
-				m_LocalLightEntities.push_back(*Light);
-			}
-			const std::array<PulseForge::SpotLightComponent, 2> Spots = {
-				PulseForge::SpotLightComponent{ { 0.3f, 1.0f, 0.4f }, 24.0f, 18.0f, 10.0f, 28.0f },
-				PulseForge::SpotLightComponent{ { 1.0f, 0.75f, 0.25f }, 20.0f, 16.0f, 12.0f, 32.0f }
-			};
-			for (size_t Index = 0; Index < Spots.size(); ++Index)
-			{
-				auto Light = m_LocalLightsScene.CreateEntity("GPU validation spot light");
-				if (!Light || !Light->SetSpotLight(Spots[Index]))
-					throw std::runtime_error("Could not create GPU validation spot light");
-				auto Transform = Light->GetTransform();
-				if (!Transform)
-					throw std::runtime_error("Could not read GPU validation spot-light transform");
-				Transform->Translation = { static_cast<float>(Index) * 3.0f - 1.5f, 3.0f, 1.5f };
-				if (!Light->SetTransform(*Transform))
-					throw std::runtime_error("Could not position GPU validation spot light");
-				m_LocalLightEntities.push_back(*Light);
-			}
-			for (size_t Index = 0; Index < 30; ++Index)
-			{
-				auto Light = m_LocalLightsScene.CreateEntity("GPU validation capacity point light");
-				if (!Light || !Light->SetPointLight(PulseForge::PointLightComponent{ { 0.4f, 0.5f, 0.6f }, 0.5f, 5.0f }))
-					throw std::runtime_error("Could not create GPU validation capacity light");
-				auto Transform = Light->GetTransform();
-				if (!Transform)
-					throw std::runtime_error("Could not read GPU validation capacity-light transform");
-				Transform->Translation = { 100.0f + static_cast<float>(Index), 0.0f, 0.0f };
-				if (!Light->SetTransform(*Transform))
-					throw std::runtime_error("Could not position GPU validation capacity light");
-				m_LocalLightEntities.push_back(*Light);
-			}
-			PulseForge::RenderTargetDesc OutputDescription;
-			OutputDescription.Width = 128;
-			OutputDescription.Height = 72;
-			OutputDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
-			OutputDescription.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
-			OutputDescription.DebugName = "Local-light GPU validation SDR output";
-			auto OutputTarget = PulseForge::Application::Get().CreateRenderTarget(OutputDescription);
-			if (!OutputTarget)
-				throw std::runtime_error("Could not create local-light SDR validation target: " + OutputTarget.error().Message);
-			m_LocalLightOutputTarget = std::move(*OutputTarget);
-			PF_INFO("Prepared GPU local-light scene with 32 point and 2 spot lights (over the combined 32-light budget) alongside bundled geometry, environment, and directional light");
-		}
-
-		void InitializeSpotlightShadowScenario()
-		{
-			BuildScenario(m_SpotlightShadowScene, true, true, true);
-			for (size_t Index = 0; Index < 5; ++Index)
-			{
-				PulseForge::SpotLightComponent Spot;
-				Spot.Color = Index % 2 == 0 ? glm::vec3(1.0f, 0.65f, 0.35f) : glm::vec3(0.35f, 0.65f, 1.0f);
-				static constexpr std::array<float, 5> Intensities = { 500.0f, 100.0f, 80.0f, 60.0f, 1.0f };
-				Spot.Intensity = Intensities[Index];
-				Spot.Range = 30.0f;
-				Spot.InnerConeAngleDegrees = 20.0f;
-				Spot.OuterConeAngleDegrees = 35.0f;
-				auto Light = m_SpotlightShadowScene.CreateEntity("GPU validation shadow spotlight");
-				if (!Light || !Light->SetSpotLight(Spot))
-					throw std::runtime_error("Could not create spotlight-shadow validation light");
-				auto Transform = Light->GetTransform();
-				if (!Transform)
-					throw std::runtime_error("Could not read spotlight-shadow validation transform");
-				Transform->Translation = { static_cast<float>(Index) * 2.0f - 4.0f, 5.0f, 3.0f };
-				Transform->Rotation = glm::angleAxis(glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-				if (!Light->SetTransform(*Transform))
-					throw std::runtime_error("Could not position spotlight-shadow validation light");
-				m_SpotlightShadowEntities.push_back(*Light);
-			}
-
-			PulseForge::RenderTargetDesc OutputDescription;
-			OutputDescription.Width = 128;
-			OutputDescription.Height = 72;
-			OutputDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
-			OutputDescription.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
-			OutputDescription.DebugName = "Spotlight-shadow GPU validation SDR output";
-			auto OutputTarget = PulseForge::Application::Get().CreateRenderTarget(OutputDescription);
-			if (!OutputTarget)
-				throw std::runtime_error("Could not create spotlight-shadow validation output: " + OutputTarget.error().Message);
-			m_SpotlightShadowOutputTarget = std::move(*OutputTarget);
-			PF_INFO("Prepared real SceneRenderer spotlight-shadow reassignment scenario: A-D outrank E; E must be evicted when A-D are all eligible; includes bundled geometry, IBL, directional CSM, and SSAO");
-		}
-
-		void InitializePointShadowScenario()
-		{
-			BuildScenario(m_PointShadowScene, true, true, true);
-			static constexpr std::array<float, 3> Intensities = { 300.0f, 200.0f, 100.0f };
-			for (size_t Index = 0; Index < Intensities.size(); ++Index)
-			{
-				PulseForge::PointLightComponent Point;
-				Point.Color = Index == 0 ? glm::vec3(1.0f, 0.72f, 0.45f) :
-					Index == 1 ? glm::vec3(0.45f, 0.72f, 1.0f) : glm::vec3(0.65f, 1.0f, 0.5f);
-				Point.Intensity = Intensities[Index];
-				Point.Range = 30.0f;
-				Point.CastShadows = true;
-				auto Light = m_PointShadowScene.CreateEntity("GPU validation shadow point light");
-				if (!Light || !Light->SetPointLight(Point))
-					throw std::runtime_error("Could not create point-shadow validation light");
-				auto Transform = Light->GetTransform();
-				if (!Transform)
-					throw std::runtime_error("Could not read point-shadow validation transform");
-				Transform->Translation = { static_cast<float>(Index) * 2.0f - 2.0f, 2.0f, -1.0f };
-				if (!Light->SetTransform(*Transform))
-					throw std::runtime_error("Could not position point-shadow validation light");
-				if (Index == 0)
-				{
-					PulseForge::SpotLightComponent Spot;
-					Spot.Color = { 0.8f, 0.7f, 1.0f };
-					Spot.Intensity = 1000.0f;
-					Spot.Range = 30.0f;
-					if (!Light->SetSpotLight(Spot))
-						throw std::runtime_error("Could not add the co-located spotlight to the point-shadow validation light");
-				}
-				m_PointShadowEntities.push_back(*Light);
-			}
-
-			PulseForge::RenderTargetDesc OutputDescription;
-			OutputDescription.Width = 128;
-			OutputDescription.Height = 72;
-			OutputDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
-			OutputDescription.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
-			OutputDescription.DebugName = "Point-shadow GPU validation SDR output";
-			auto OutputTarget = PulseForge::Application::Get().CreateRenderTarget(OutputDescription);
-			if (!OutputTarget)
-				throw std::runtime_error("Could not create point-shadow validation output: " + OutputTarget.error().Message);
-			m_PointShadowOutputTarget = std::move(*OutputTarget);
-			PF_INFO("Prepared point-shadow GPU scene with three differently weighted shadow-requesting points, mixed with directional CSM, IBL, SSAO, and bundled indexed geometry");
-		}
-
-		void InitializePbrMaterialScenario()
-		{
-			PulseForge::RenderTargetDesc Description;
-			Description.Width = 960;
-			Description.Height = 540;
-			Description.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
-			Description.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
-			Description.DebugName = "PBR material project validation image";
-			auto Target = PulseForge::Application::Get().CreateRenderTarget(Description);
-			if (!Target)
-				throw std::runtime_error("Could not create PBR material validation output: " + Target.error().Message);
-			m_PbrMaterialOutputTarget = std::move(*Target);
-			m_PbrMaterialImagePath = m_PointShadowImageDirectory / "PBRMaterials" / "overview.png";
-			std::filesystem::create_directories(m_PbrMaterialImagePath.parent_path());
-			PF_INFO("PBR validation will capture the actual project-owned 960x540 sRGB scene output");
-		}
-
-		void InitializeTransparencyScenario()
-		{
-			PulseForge::RenderTargetDesc Description;
-			Description.Width = 960;
-			Description.Height = 540;
-			Description.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
-			Description.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
-			Description.DebugName = "Transparency project validation image";
-			auto Target = PulseForge::Application::Get().CreateRenderTarget(Description);
-			if (!Target)
-				throw std::runtime_error("Could not create transparency validation output: " + Target.error().Message);
-			m_TransparencyOutputTarget = std::move(*Target);
-			m_TransparencyImagePath = m_PointShadowImageDirectory / "Transparency" / "overview.png";
-			std::filesystem::create_directories(m_TransparencyImagePath.parent_path());
-			for (const PulseForge::Entity Entity : m_Scene.GetEntities())
-			{
-				const auto Tag = Entity.GetTag();
-				if (Tag && Tag->Name == "Directional fill - no shadow test interference")
-				{
-					m_TransparencyDirectionalLight = Entity;
-					const auto Directional = Entity.GetDirectionalLight();
-					if (!Directional || !Directional->has_value() || Directional->value().CastShadows)
-						throw std::runtime_error("Transparency demo's directional fill must not cast test shadows");
-				}
-				if (Tag && Tag->Name == "Key spot - masked shadow on backdrop")
-				{
-					m_TransparencySpotLight = Entity;
-					const auto Spot = Entity.GetSpotLight();
-					if (!Spot || !Spot->has_value())
-						throw std::runtime_error("Transparency scene spotlight component could not be read");
-					PulseForge::SpotLightComponent Disabled = Spot->value();
-					Disabled.CastShadows = false;
-					// Keep the authored key strong enough for an sRGB shadow/image comparison.
-					m_TransparencySpotIntensity = Spot->value().Intensity;
-					Disabled.Intensity = 0.0f;
-					if (!Entity.SetSpotLight(Disabled))
-						throw std::runtime_error("Could not disable the spotlight for the no-light baseline image");
-				}
-				if (Tag && Tag->Name == "Blue glass - transparent depth test")
-					m_TransparencyBlueGlassPanel = Entity;
-			}
-			if (!m_TransparencyDirectionalLight || !m_TransparencySpotLight)
-				throw std::runtime_error("Transparency scene is missing its shadow-isolated key and fill lights");
-			if (!m_TransparencyBlueGlassPanel)
-				throw std::runtime_error("Transparency scene is missing its blue glass blend comparison mesh");
-			for (const PulseForge::AssetRecord& Record : m_Project->GetAssetRegistry().GetAssets())
-				if (Record.ProjectRelativePath.generic_string() == "Assets/Materials/BlueOpaqueControl.material")
-					m_TransparencyBlueOpaqueControlMaterial = Record.ID;
-			if (m_TransparencyBlueOpaqueControlMaterial.IsNil())
-				throw std::runtime_error("Transparency project is missing its matching opaque material control");
-			PF_INFO("Transparency validation will capture the actual project-owned 960x540 sRGB scene output");
-		}
-
-		bool SetTransparencyBluePanelOpaqueControl()
-		{
-			const auto Mesh = m_TransparencyBlueGlassPanel.GetMeshRenderer();
-			if (!Mesh || !*Mesh)
-			{
-				Fail("Could not read the blue panel mesh renderer for the blend material comparison");
-				return false;
-			}
-			PulseForge::MeshRendererComponent OpaqueControl = **Mesh;
-			OpaqueControl.MaterialAsset = m_TransparencyBlueOpaqueControlMaterial;
-			if (!m_TransparencyBlueGlassPanel.SetMeshRenderer(OpaqueControl))
-			{
-				Fail("Could not assign the matching opaque material control for blend comparison");
-				return false;
-			}
-			PF_INFO("TRANSPARENCY_BLEND_CONTROL=matching OPAQUE blue material assigned for pixel comparison");
-			return true;
-		}
-
-		bool SetTransparencySpotShadows(bool Enabled)
-		{
-			const auto Spot = m_TransparencySpotLight.GetSpotLight();
-			if (!Spot || !Spot->has_value())
-			{
-				Fail("Transparency spotlight component is unavailable while switching shadow tests");
-				return false;
-			}
-			PulseForge::SpotLightComponent Updated = Spot->value();
-			Updated.CastShadows = Enabled;
-			if (!m_TransparencySpotLight.SetSpotLight(Updated))
-			{
-				Fail("Could not update transparency spotlight shadow state");
-				return false;
-			}
-			return true;
-		}
-
-		bool CreateTransparencyPointLight()
-		{
-			if (m_TransparencyPointLight)
-				return true;
-			const auto SpotTransform = m_TransparencySpotLight.GetTransform();
-			if (!SpotTransform)
-			{
-				Fail("Could not read the transparency light transform for point-shadow testing");
-				return false;
-			}
-			auto PointEntity = m_Scene.CreateEntity("GPU alpha-mask point shadow light");
-			if (!PointEntity)
-			{
-				Fail("Could not create a runtime point light for alpha-mask shadow validation");
-				return false;
-			}
-			PulseForge::PointLightComponent Point;
-			Point.Color = { 1.0f, 0.82f, 0.58f };
-			Point.Intensity = m_TransparencySpotIntensity;
-			Point.Range = 8.0f;
-			Point.CastShadows = false;
-			if (!PointEntity->SetPointLight(Point) || !PointEntity->SetTransform(*SpotTransform))
-			{
-				Fail("Could not configure the runtime point light for alpha-mask shadow validation");
-				return false;
-			}
-			m_TransparencyPointLight = *PointEntity;
-			return true;
-		}
-
-		bool SetTransparencyPointShadows(bool Enabled)
-		{
-			const auto Point = m_TransparencyPointLight.GetPointLight();
-			if (!Point || !Point->has_value())
-			{
-				Fail("Transparency point-light component is unavailable while switching shadow tests");
-				return false;
-			}
-			PulseForge::PointLightComponent Updated = Point->value();
-			Updated.CastShadows = Enabled;
-			if (!m_TransparencyPointLight.SetPointLight(Updated))
-			{
-				Fail("Could not update transparency point-light shadow state");
-				return false;
-			}
-			return true;
-		}
-
-		bool PrepareTransparencyDirectionalShadowTest(bool Enabled)
-		{
-			if (m_TransparencyPointLight)
-			{
-				const auto Point = m_TransparencyPointLight.GetPointLight();
-				if (!Point || !Point->has_value())
-				{
-					Fail("Transparency point-light component is unavailable for directional shadow isolation");
-					return false;
-				}
-				PulseForge::PointLightComponent Disabled = Point->value();
-				Disabled.CastShadows = false;
-				Disabled.Intensity = 0.0f;
-				if (!m_TransparencyPointLight.SetPointLight(Disabled))
-				{
-					Fail("Could not disable the point light for directional shadow validation");
-					return false;
-				}
-			}
-			const auto Directional = m_TransparencyDirectionalLight.GetDirectionalLight();
-			if (!Directional || !Directional->has_value())
-			{
-				Fail("Transparency directional-light component is unavailable for masked shadow validation");
-				return false;
-			}
-			PulseForge::DirectionalLightComponent Updated = Directional->value();
-			Updated.Intensity = 4.0f;
-			Updated.CastShadows = Enabled;
-			Updated.ShadowDistance = 32.0f;
-			Updated.ShadowBias = 0.0f;
-			Updated.ShadowNormalBias = 0.01f;
-			Updated.ShadowSoftness = 1.0f;
-			if (!m_TransparencyDirectionalLight.SetDirectionalLight(Updated))
-			{
-				Fail("Could not configure the directional light for alpha-mask shadow validation");
-				return false;
-			}
-			PF_INFO("TRANSPARENCY_DIRECTIONAL_SHADOW_UPDATE cast_shadows={0}; intensity=4.0", Enabled);
-			return true;
-		}
-
-		void InitializePointShadowImageScenario()
-		{
-			std::filesystem::create_directories(m_PointShadowImageDirectory);
-			PulseForge::Entity CameraSource;
-			PulseForge::Entity FloorSource;
-			PulseForge::Entity CubeSource;
-			for (const PulseForge::Entity Source : m_Scene.GetEntities())
-			{
-				const auto Tag = Source.GetTag();
-				const auto Transform = Source.GetTransform();
-				const auto Camera = Source.GetCamera();
-				const auto Mesh = Source.GetMeshRenderer();
-				if (!Tag || !Transform || !Camera || !Mesh)
-					throw std::runtime_error("Could not inspect point-shadow image source scene");
-				if (*Camera)
-					CameraSource = Source;
-				if (*Mesh && Tag->Name == "Floor - broad shadow receiver")
-					FloorSource = Source;
-				if (*Mesh && Tag->Name == "Warm matte block")
-					CubeSource = Source;
-			}
-			if (!CameraSource || !FloorSource || !CubeSource)
-				throw std::runtime_error("Point-shadow image source scene lacks its camera, floor, or cube mesh");
-
-			const auto CopyMeshEntity = [&](const PulseForge::Entity& Source, const char* Name)
-			{
-				const auto Transform = Source.GetTransform();
-				const auto Mesh = Source.GetMeshRenderer();
-				if (!Transform || !Mesh || !*Mesh)
-					throw std::runtime_error("Could not copy controlled point-shadow image geometry");
-				auto Copy = m_PointShadowImageScene.CreateEntity(Name);
-				if (!Copy || !Copy->SetTransform(*Transform) || !Copy->SetMeshRenderer(**Mesh))
-					throw std::runtime_error("Could not create controlled point-shadow image geometry");
-				return *Copy;
-			};
-
-			const auto CameraTransform = CameraSource.GetTransform();
-			const auto Camera = CameraSource.GetCamera();
-			if (!CameraTransform || !Camera || !*Camera)
-				throw std::runtime_error("Could not copy point-shadow image camera");
-			auto ImageCamera = m_PointShadowImageScene.CreateEntity("Fixed camera for point-shadow direction captures");
-			if (!ImageCamera || !ImageCamera->SetTransform(*CameraTransform))
-				throw std::runtime_error("Could not create point-shadow image camera");
-			PulseForge::CameraComponent CameraComponent = **Camera;
-			CameraComponent.IsPrimary = true;
-			if (!ImageCamera->SetCamera(CameraComponent))
-				throw std::runtime_error("Could not configure point-shadow image camera");
-			m_PointShadowImageCamera = *ImageCamera;
-			m_PointShadowImageCameraTransform = *CameraTransform;
-
-			m_PointShadowImageFloor = CopyMeshEntity(FloorSource, "Only receiving floor");
-			const auto FloorMesh = m_PointShadowImageFloor.GetMeshRenderer();
-			if (!FloorMesh || !*FloorMesh)
-				throw std::runtime_error("Could not preserve the point-shadow image floor material reference");
-			m_PointShadowImageFloorMesh = **FloorMesh;
-			m_PointShadowImageCeiling = CopyMeshEntity(FloorSource, "Ceiling receiver for negative-Y face");
-			m_PointShadowImageCeilingTransform = *m_PointShadowImageCeiling.GetTransform();
-			m_PointShadowImageCeilingTransform.Translation = { 0.0f, 3.0f, 0.0f };
-			m_PointShadowImageCeilingTransform.Rotation = glm::angleAxis(std::numbers::pi_v<float>, glm::vec3(1.0f, 0.0f, 0.0f));
-			m_PointShadowImageCeilingTransform.Scale = { 8.0f, 0.12f, 8.0f };
-			if (!m_PointShadowImageCeiling.SetTransform(m_PointShadowImageCeilingTransform))
-				throw std::runtime_error("Could not orient the negative-Y shadow receiver");
-
-			m_PointShadowImageCube = CopyMeshEntity(CubeSource, "Single centered shadow-casting cube");
-			PulseForge::TransformComponent CubeTransform = *m_PointShadowImageCube.GetTransform();
-			CubeTransform.Translation = { 0.0f, 1.0f, 0.0f };
-			CubeTransform.Rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-			CubeTransform.Scale = { 1.0f, 1.0f, 1.0f };
-			if (!m_PointShadowImageCube.SetTransform(CubeTransform))
-				throw std::runtime_error("Could not center the point-shadow image cube");
-
-			PulseForge::PointLightComponent Point;
-			Point.Color = glm::vec3(1.0f);
-			Point.Intensity = 70.0f;
-			Point.Range = 10.0f;
-			Point.CastShadows = false;
-			auto Light = m_PointShadowImageScene.CreateEntity("Single omnidirectional point light");
-			if (!Light || !Light->SetPointLight(Point))
-				throw std::runtime_error("Could not create controlled point-shadow image light");
-			m_PointShadowImageLight = *Light;
-
-			m_SavedAmbientOcclusionSettings = m_SceneRenderer->GetAmbientOcclusionSettings();
-			m_SavedToneMappingSettings = m_SceneRenderer->GetToneMappingSettings();
-			PulseForge::AmbientOcclusionSettings Ao = *m_SavedAmbientOcclusionSettings;
-			Ao.Enabled = false;
-			if (!m_SceneRenderer->SetAmbientOcclusionSettings(Ao))
-				throw std::runtime_error("Could not disable SSAO for controlled point-shadow image captures");
-			PulseForge::ToneMappingSettings Tone = *m_SavedToneMappingSettings;
-			Tone.ExposureEV = 0.0f;
-			if (!m_SceneRenderer->SetToneMappingSettings(Tone))
-				throw std::runtime_error("Could not fix exposure for controlled point-shadow image captures");
-
-			PulseForge::RenderTargetDesc OutputDescription;
-			OutputDescription.Width = 512;
-			OutputDescription.Height = 512;
-			OutputDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
-			OutputDescription.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
-			OutputDescription.DebugName = "Point-shadow direction image readback output";
-			auto Output = PulseForge::Application::Get().CreateRenderTarget(OutputDescription);
-			if (!Output)
-				throw std::runtime_error("Could not create point-shadow image readback target: " + Output.error().Message);
-			m_PointShadowImageOutputTarget = std::move(*Output);
-			PF_INFO("Prepared isolated image test: one 70-intensity point light, a unit cube, one broad receiver, no IBL/CSM/SSAO, fixed EV 0; readback path: {0}",
-				m_PointShadowImageDirectory.string());
-		}
-
-		void InitializePointShadowOverviewImageScenario()
-		{
-			for (const PulseForge::Entity Entity : m_Scene.GetEntities())
-			{
-				const auto Tag = Entity.GetTag();
-				const auto Point = Entity.GetPointLight();
-				if (!Tag || !Point)
-					throw std::runtime_error("Could not inspect the startup scene's point lights for image capture");
-				if (*Point && Tag->Name == "Point Light A - Primary Shadow")
-					m_PointShadowOverviewPrimary = Entity;
-				if (*Point && Tag->Name == "Point Light B - Secondary Shadow")
-					m_PointShadowOverviewSecondary = Entity;
-			}
-			if (!m_PointShadowOverviewPrimary || !m_PointShadowOverviewSecondary)
-				throw std::runtime_error("Startup scene lacks the expected primary or secondary point light");
-
-			PulseForge::RenderTargetDesc Description;
-			Description.Width = 960;
-			Description.Height = 540;
-			Description.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
-			Description.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
-			Description.DebugName = "Point-shadow startup Overview image readback output";
-			auto Target = PulseForge::Application::Get().CreateRenderTarget(Description);
-			if (!Target)
-				throw std::runtime_error("Could not create startup Overview image target: " + Target.error().Message);
-			m_PointShadowOverviewOutputTarget = std::move(*Target);
-		}
-
-		bool PreparePointShadowOverviewImageCase()
-		{
-			const PointShadowOverviewImageCase& TestCase = PointShadowOverviewImageCases[m_PointShadowOverviewImageCase];
-			auto Point = m_PointShadowOverviewPrimary.GetPointLight();
-			auto Transform = m_PointShadowOverviewPrimary.GetTransform();
-			if (!Point || !*Point || !Transform)
-			{
-				Fail("Could not update the startup-scene primary point light for image capture");
-				return false;
-			}
-			Point->value().CastShadows = TestCase.CastShadows;
-			if (!m_PointShadowOverviewPrimary.SetPointLight(Point->value()))
-			{
-				Fail("Startup-scene point-light shadow toggle failed validation");
-				return false;
-			}
-			Transform->Translation = TestCase.LightPosition;
-			Transform->Rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-			if (!m_PointShadowOverviewPrimary.SetTransform(*Transform))
-			{
-				Fail("Could not set the startup-scene point-light transform for image capture");
-				return false;
-			}
-			const auto [Width, Height] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
-			if (Width == 0 || Height == 0)
-				return false;
-			const auto Prepared = m_SceneRenderer->PrepareScene(m_Scene,
-				static_cast<float>(m_PointShadowOverviewOutputTarget->GetDescription().Width) /
-					static_cast<float>(m_PointShadowOverviewOutputTarget->GetDescription().Height));
-			if (!Prepared)
-			{
-				Fail("Could not prepare the committed startup scene for image capture: " + Prepared.error().Message);
-				return false;
-			}
-			m_CapturingPointShadowOverview = true;
-			m_ScenePrepared = true;
-			PF_INFO("POINT_SHADOW_OVERVIEW_CASE={0}; primary_position=({1},{2},{3}); cast_shadows={4}; secondary_shadow_owner_retained=true",
-				TestCase.Name, TestCase.LightPosition.x, TestCase.LightPosition.y, TestCase.LightPosition.z,
-				TestCase.CastShadows);
-			return true;
-		}
-
-		bool PreparePointShadowImageCase()
-		{
-			const PointShadowImageCase& TestCase = PointShadowImageCases[m_PointShadowImageCase];
-			const auto Point = m_PointShadowImageLight.GetPointLight();
-			const auto Transform = m_PointShadowImageLight.GetTransform();
-			if (!Point || !*Point || !Transform)
-			{
-				Fail("Could not update the point-shadow image test light");
-				return false;
-			}
-			PulseForge::PointLightComponent UpdatedPoint = **Point;
-			UpdatedPoint.CastShadows = TestCase.CastShadows;
-			if (!m_PointShadowImageLight.SetPointLight(UpdatedPoint))
-			{
-				Fail("Point-shadow image test light failed component validation");
-				return false;
-			}
-			PulseForge::TransformComponent UpdatedTransform = *Transform;
-			UpdatedTransform.Translation = TestCase.LightPosition;
-			UpdatedTransform.Rotation = TestCase.PointLightRotated
-				? glm::angleAxis(glm::radians(137.0f), glm::normalize(glm::vec3(1.0f, 2.0f, -0.75f)))
-				: glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-			if (!m_PointShadowImageLight.SetTransform(UpdatedTransform))
-			{
-				Fail("Point-shadow image test light transform was rejected");
-				return false;
-			}
-			PulseForge::TransformComponent CubeTransform = *m_PointShadowImageCube.GetTransform();
-			CubeTransform.Translation = glm::vec3(0.0f, 1.0f, 0.0f) + TestCase.CasterOffset;
-			if (!m_PointShadowImageCube.SetTransform(CubeTransform))
-			{
-				Fail("Point-shadow image test caster transform was rejected");
-				return false;
-			}
-
-			const bool UseCeiling = TestCase.UseCeiling;
-			const auto FloorMesh = m_PointShadowImageFloor.GetMeshRenderer();
-			const auto CeilingMesh = m_PointShadowImageCeiling.GetMeshRenderer();
-			if (!FloorMesh || !CeilingMesh)
-			{
-				Fail("Could not resolve point-shadow image receiver mesh state");
-				return false;
-			}
-			if (!UseCeiling)
-			{
-				if (!*FloorMesh && !m_PointShadowImageFloor.SetMeshRenderer(m_PointShadowImageFloorMesh))
-				{
-					Fail("Could not restore the floor receiver");
-					return false;
-				}
-				if (*CeilingMesh && !m_PointShadowImageCeiling.RemoveMeshRenderer())
-				{
-					Fail("Could not disable the ceiling receiver");
-					return false;
-				}
-			}
-			if (UseCeiling)
-			{
-				if (*FloorMesh && !m_PointShadowImageFloor.RemoveMeshRenderer())
-				{
-					Fail("Could not disable the floor for the negative-Y point-shadow image case");
-					return false;
-				}
-				if (!*CeilingMesh)
-				{
-					if (!m_PointShadowImageCeiling.SetMeshRenderer(m_PointShadowImageFloorMesh))
-					{
-						Fail("Could not enable the ceiling receiver for the negative-Y image case");
-						return false;
-					}
-				}
-				PulseForge::TransformComponent CameraTransform = m_PointShadowImageCameraTransform;
-				CameraTransform.Translation = { 12.0f, -5.0f, 0.0f };
-				CameraTransform.Rotation = glm::angleAxis(std::numbers::pi_v<float> * 0.5f, glm::vec3(0.0f, 1.0f, 0.0f)) *
-					glm::angleAxis(0.588f, glm::vec3(1.0f, 0.0f, 0.0f));
-				if (!m_PointShadowImageCamera.SetTransform(CameraTransform))
-				{
-					Fail("Could not aim the camera at the negative-Y face receiver");
-					return false;
-				}
-			}
-			else if (std::abs(TestCase.LightPosition.z) > 0.0f)
-			{
-				PulseForge::TransformComponent CameraTransform = m_PointShadowImageCameraTransform;
-				CameraTransform.Translation = { 12.5f, 4.4f, 0.0f };
-				CameraTransform.Rotation = glm::angleAxis(std::numbers::pi_v<float> * 0.5f, glm::vec3(0.0f, 1.0f, 0.0f)) *
-					glm::angleAxis(-0.276f, glm::vec3(1.0f, 0.0f, 0.0f));
-				if (!m_PointShadowImageCamera.SetTransform(CameraTransform))
-				{
-					Fail("Could not orient the camera sideways for a Z-face shadow image");
-					return false;
-				}
-			}
-			else
-			{
-				if (!m_PointShadowImageCamera.SetTransform(m_PointShadowImageCameraTransform))
-				{
-					Fail("Could not restore the fixed camera for a horizontal/upward point-shadow case");
-					return false;
-				}
-			}
-
-			auto Snapshot = PulseForge::SceneRenderSnapshotBuilder::Build(
-				m_PointShadowImageScene, m_PointShadowImageCamera.GetUUID(), 1.0f);
-			if (!Snapshot)
-			{
-				Fail("Could not build point-shadow image camera reference: " + Snapshot.error().Message);
-				return false;
-			}
-			m_PointShadowImageViewProjections[m_PointShadowImageCase] = Snapshot->ViewProjection;
-			m_PointShadowImageCameraPositions[m_PointShadowImageCase] = Snapshot->CameraWorldPosition;
-			const auto Prepared = m_SceneRenderer->PrepareScene(m_PointShadowImageScene, 1.0f);
-			if (!Prepared)
-			{
-				Fail("Could not prepare point-shadow image case: " + Prepared.error().Message);
-				return false;
-			}
-			m_ScenePrepared = true;
-			PF_INFO("POINT_SHADOW_IMAGE_CASE={0}; light=({1},{2},{3}); cast_shadows={4}; rotation={5}",
-				TestCase.Name,
-				TestCase.LightPosition.x,
-				TestCase.LightPosition.y,
-				TestCase.LightPosition.z,
-				TestCase.CastShadows,
-				TestCase.PointLightRotated ? "rotated" : "identity");
-			return true;
-		}
-
-		void CapturePointShadowImage()
-		{
-			if (!m_PointShadowImageOutputTarget->GetColorTexture())
-			{
-				Fail("Point-shadow output target has no readable color texture");
-				return;
-			}
-			auto Readback = PulseForge::Application::Get().ReadTextureForValidation(*m_PointShadowImageOutputTarget->GetColorTexture());
-			if (!Readback)
-			{
-				Fail("Could not read actual point-shadow output pixels: " + Readback.error().Message);
-				return;
-			}
-			const PointShadowImageCase& TestCase = PointShadowImageCases[m_PointShadowImageCase];
-			const std::filesystem::path FilePath = m_PointShadowImageDirectory / (std::string(TestCase.Name) + ".png");
-			const int Written = stbi_write_png(
-				FilePath.string().c_str(),
-				static_cast<int>(Readback->Width),
-				static_cast<int>(Readback->Height),
-				4,
-				reinterpret_cast<const uint8_t*>(Readback->Pixels.data()),
-				static_cast<int>(Readback->Width * 4));
-			if (!Written)
-			{
-				Fail("Could not write rendered point-shadow PNG: " + FilePath.string());
-				return;
-			}
-			m_PointShadowImageResults[m_PointShadowImageCase] = std::move(*Readback);
-			PF_INFO("POINT_SHADOW_IMAGE_CAPTURE={0}; dimensions={1}x{2}; format=sRGB8; bytes={3}",
-				FilePath.string(),
-				m_PointShadowImageResults[m_PointShadowImageCase]->Width,
-				m_PointShadowImageResults[m_PointShadowImageCase]->Height,
-				m_PointShadowImageResults[m_PointShadowImageCase]->Pixels.size());
-			if (m_PointShadowImageCase == 5 || m_PointShadowImageCase == 7)
-			{
-				for (uint32_t Face = 0; Face < 6; ++Face)
-				{
-					const PulseForge::Texture* FaceDepth =
-						m_SceneRenderer->GetPointShadowFaceTextureForValidation(0, Face);
-					if (!FaceDepth)
-					{
-						Fail("Point-shadow cubemap did not expose the selected slot face for diagnostics");
-						return;
-					}
-					auto Depth = PulseForge::Application::Get().ReadTextureForValidation(*FaceDepth, Face);
-					if (!Depth || Depth->Format != PulseForge::TextureFormat::Depth32Float)
-					{
-						Fail("Could not read actual D32 point-shadow face pixels: " +
-							(Depth ? std::string("readback returned a non-depth format") : Depth.error().Message));
-						return;
-					}
-					std::vector<uint8_t> Grayscale(static_cast<size_t>(Depth->Width) * Depth->Height);
-					size_t NonClearPixels = 0;
-					float MinimumDepth = 1.0f;
-					for (size_t Pixel = 0; Pixel < Grayscale.size(); ++Pixel)
-					{
-						float Value = 1.0f;
-						std::memcpy(&Value, Depth->Pixels.data() + Pixel * sizeof(float), sizeof(float));
-						Value = std::isfinite(Value) ? std::clamp(Value, 0.0f, 1.0f) : 1.0f;
-						MinimumDepth = (std::min)(MinimumDepth, Value);
-						if (Value < 0.99999f)
-							++NonClearPixels;
-						Grayscale[Pixel] = static_cast<uint8_t>(std::lround(Value * 255.0f));
-					}
-					const std::string FaceLabel = m_PointShadowImageCase == 5 ? "positive_z_light" : "negative_z_light";
-					const std::filesystem::path FacePath = m_PointShadowImageDirectory /
-						(FaceLabel + "_cubeface_" + std::to_string(Face) + ".png");
-					if (!stbi_write_png(FacePath.string().c_str(), static_cast<int>(Depth->Width),
-						static_cast<int>(Depth->Height), 1, Grayscale.data(), static_cast<int>(Depth->Width)))
-					{
-						Fail("Could not write point-shadow depth-face PNG: " + FacePath.string());
-						return;
-					}
-				m_PointShadowCubemapDepths[m_PointShadowImageCase == 5 ? 0 : 1][Face] = std::move(*Depth);
-					PF_INFO("POINT_SHADOW_FACE_CAPTURE={0}; face={1}; non_clear_pixels={2}; minimum_radial_depth={3:.5f}",
-						FacePath.string(), Face, NonClearPixels, MinimumDepth);
-				}
-			}
-		}
-
-		void CapturePointShadowOverviewImage()
-		{
-			const PulseForge::Texture* Color = m_PointShadowOverviewOutputTarget->GetColorTexture();
-			if (!Color)
-			{
-				Fail("Startup-scene point-shadow output target has no readable color texture");
-				return;
-			}
-			auto Readback = PulseForge::Application::Get().ReadTextureForValidation(*Color);
-			if (!Readback)
-			{
-				Fail("Could not read the startup-scene point-shadow output: " + Readback.error().Message);
-				return;
-			}
-			const PointShadowOverviewImageCase& TestCase = PointShadowOverviewImageCases[m_PointShadowOverviewImageCase];
-			const std::filesystem::path FilePath = m_PointShadowImageDirectory / (std::string(TestCase.Name) + ".png");
-			if (!stbi_write_png(FilePath.string().c_str(), static_cast<int>(Readback->Width),
-				static_cast<int>(Readback->Height), 4, reinterpret_cast<const uint8_t*>(Readback->Pixels.data()),
-				static_cast<int>(Readback->Width * 4)))
-			{
-				Fail("Could not save the startup-scene point-shadow image: " + FilePath.string());
-				return;
-			}
-			PF_INFO("POINT_SHADOW_OVERVIEW_CAPTURE={0}; dimensions={1}x{2}; format=sRGB8",
-				FilePath.string(), Readback->Width, Readback->Height);
-		}
-
-		bool ValidatePointShadowImageResults()
-		{
-			bool AllDirectionsPass = true;
-			for (size_t Pair = 0; Pair < 11; ++Pair)
-			{
-				const size_t OffIndex = Pair * 2;
-				const size_t OnIndex = OffIndex + 1;
-				if (!m_PointShadowImageResults[OffIndex] || !m_PointShadowImageResults[OnIndex])
-				{
-					AllDirectionsPass = false;
-					continue;
-				}
-				const PointShadowImageCase& TestCase = PointShadowImageCases[OnIndex];
-				if (!SegmentIntersectsShadowCaster(TestCase.LightPosition, TestCase.ExpectedReceiver, TestCase.CasterOffset) ||
-					SegmentIntersectsShadowCaster(TestCase.LightPosition, TestCase.ControlReceiver, TestCase.CasterOffset))
-				{
-					PF_ERROR("POINT_SHADOW_ORACLE_SETUP_ERROR={0}", TestCase.Name);
-					AllDirectionsPass = false;
-					continue;
-				}
-				const PointShadowImageMetrics Metrics = MeasurePointShadowImage(
-					*m_PointShadowImageResults[OffIndex],
-					*m_PointShadowImageResults[OnIndex],
-					m_PointShadowImageViewProjections[OnIndex],
-					m_PointShadowImageCameraPositions[OnIndex],
-					TestCase.LightPosition,
-					TestCase.ExpectedReceiver.y,
-					TestCase.CasterOffset);
-				const double ShadowDelta = Metrics.ExpectedOff - Metrics.ExpectedOn;
-				const double ControlDelta = Metrics.ControlOff - Metrics.ControlOn;
-				PF_INFO("POINT_SHADOW_IMAGE_ORACLE={0}; expected_sample=({1},{2},{3}); visible_floor_pixels_expected/control=({4},{5}); mean_luma_expected_off_on=({6:.4f},{7:.4f}); mean_luma_control_off_on=({8:.4f},{9:.4f}); expected_delta={10:.4f}; control_delta={11:.4f}; changed_pixels={12}; changed_expected/other=({13},{14}); changed_centroid_world_xz=({15:.3f},{16:.3f}); mean_changed_luma={17:.4f}",
-					TestCase.Name,
-					TestCase.ExpectedReceiver.x,
-					TestCase.ExpectedReceiver.y,
-					TestCase.ExpectedReceiver.z,
-					Metrics.ExpectedPixelCount,
-					Metrics.ControlPixelCount,
-					Metrics.ExpectedOff,
-					Metrics.ExpectedOn,
-					Metrics.ControlOff,
-					Metrics.ControlOn,
-					ShadowDelta,
-					ControlDelta,
-					Metrics.ChangedPixelCount,
-					Metrics.ChangedExpectedPixelCount,
-					Metrics.ChangedOtherPixelCount,
-					Metrics.ChangedWorldX,
-					Metrics.ChangedWorldZ,
-					Metrics.ChangedMean);
-				if (Metrics.ExpectedPixelCount < 20 || Metrics.ControlPixelCount < 20 ||
-					Metrics.ExpectedOff < 0.025 || Metrics.ControlOff < 0.025 ||
-					ShadowDelta < 0.025 || ShadowDelta <= ControlDelta + 0.01)
-				{
-					AllDirectionsPass = false;
-				}
-				if (Pair == 2 || Pair == 3)
-				{
-					const size_t DepthSet = Pair == 2 ? 0 : 1;
-					const PointShadowDepthProbe Probe = ProbePointShadowDepth(
-						m_PointShadowCubemapDepths[DepthSet], TestCase.LightPosition, TestCase.ExpectedReceiver, 10.0f);
-					PF_INFO("POINT_SHADOW_DEPTH_PROBE={0}; rendered_depth_face={1}; texel=({2},{3}); receiver_radial_depth={4:.5f}; direct_uv_depth={5:.5f}; vertically_flipped_uv_depth={6:.5f}",
-						TestCase.Name, Probe.RenderedFace, Probe.X, Probe.Y, Probe.ReceiverDepth, Probe.DirectDepth,
-						Probe.VerticallyFlippedDepth);
-				}
-			}
-
-			if (!m_PointShadowImageResults[1] || !m_PointShadowImageResults[22])
-			{
-				Fail("Point-light rotation-invariance images are missing");
-				return false;
-			}
-			double TotalDifference = 0.0;
-			uint8_t MaximumDifference = 0;
-			for (size_t Index = 0; Index < m_PointShadowImageResults[1]->Pixels.size(); ++Index)
-			{
-				const uint8_t A = std::to_integer<uint8_t>(m_PointShadowImageResults[1]->Pixels[Index]);
-				const uint8_t B = std::to_integer<uint8_t>(m_PointShadowImageResults[22]->Pixels[Index]);
-				const uint8_t Difference = static_cast<uint8_t>(std::abs(static_cast<int>(A) - static_cast<int>(B)));
-				TotalDifference += Difference;
-				MaximumDifference = (std::max)(MaximumDifference, Difference);
-			}
-			const double MeanDifference = TotalDifference / static_cast<double>(m_PointShadowImageResults[1]->Pixels.size());
-			PF_INFO("POINT_LIGHT_ROTATION_PIXEL_CHECK=identity_vs_137deg; mean_channel_delta={0:.6f}; max_channel_delta={1}",
-				MeanDifference,
-				MaximumDifference);
-			if (MaximumDifference != 0)
-			{
-				AllDirectionsPass = false;
-			}
-			if (!AllDirectionsPass)
-				Fail("Rendered point-shadow image/analytic checks did not agree for every cube-face direction");
-			return AllDirectionsPass;
-		}
-
-		void RenderPointShadowImageFrame()
-		{
-			if (!m_Succeeded || !m_ScenePrepared || m_PointShadowImageCapturePending)
-				return;
-			auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_PointShadowImageOutputTarget);
-			const PointShadowImageCase& TestCase = PointShadowImageCases[m_PointShadowImageCase];
-			if (!Rendered || Rendered->GeometryDrawCount != 2 ||
-				Rendered->PointShadowPassCount != (TestCase.CastShadows ? 6u : 0u) ||
-				Rendered->PointShadowCasterDrawCount != (TestCase.CastShadows ? 12u : 0u))
-			{
-				Fail(Rendered ? "Point-shadow image case did not render the expected six depth faces and two casters" :
-					"Point-shadow image scene render failed: " + Rendered.error().Message);
-				return;
-			}
-			m_PointShadowImageCapturePending = true;
-		}
-
-		void RenderPbrMaterialFrame()
-		{
-			if (!m_Succeeded || !m_ScenePrepared || m_PbrMaterialCaptureComplete)
-				return;
-			const auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_PbrMaterialOutputTarget);
-			if (!Rendered || Rendered->GeometryDrawCount != 7)
-			{
-				Fail(Rendered ? "PBR material startup scene did not submit its seven indexed mesh instances" :
-					"PBR material scene render failed: " + Rendered.error().Message);
-				return;
-			}
-			m_PbrMaterialGeometryDrawCount = Rendered->GeometryDrawCount;
-			const PulseForge::Texture* Color = m_PbrMaterialOutputTarget->GetColorTexture();
-			if (!Color)
-			{
-				Fail("PBR material output target has no readable color texture");
-				return;
-			}
-			m_PbrMaterialCapturePending = true;
-		}
-
-		void CapturePbrMaterialImage()
-		{
-			const PulseForge::Texture* Color = m_PbrMaterialOutputTarget->GetColorTexture();
-			if (!Color)
-			{
-				Fail("PBR material output target has no readable color texture");
-				return;
-			}
-			const auto Readback = PulseForge::Application::Get().ReadTextureForValidation(*Color);
-			if (!Readback || Readback->Format != PulseForge::TextureFormat::RGBA8_Srgb)
-			{
-				Fail(Readback ? "PBR material output readback was not RGBA8 sRGB" :
-					"Could not read actual PBR material output pixels: " + Readback.error().Message);
-				return;
-			}
-			if (!stbi_write_png(m_PbrMaterialImagePath.string().c_str(), static_cast<int>(Readback->Width),
-				static_cast<int>(Readback->Height), 4,
-				reinterpret_cast<const uint8_t*>(Readback->Pixels.data()), static_cast<int>(Readback->Width * 4)))
-			{
-				Fail("Could not save actual PBR material scene pixels: " + m_PbrMaterialImagePath.string());
-				return;
-			}
-			double LuminanceSum = 0.0;
-			float MinimumLuminance = 1.0f;
-			float MaximumLuminance = 0.0f;
-			size_t LitPixelCount = 0;
-			for (size_t Pixel = 0; Pixel < static_cast<size_t>(Readback->Width) * Readback->Height; ++Pixel)
-			{
-				const float Luminance = PixelLuminance(*Readback, Pixel);
-				LuminanceSum += Luminance;
-				MinimumLuminance = (std::min)(MinimumLuminance, Luminance);
-				MaximumLuminance = (std::max)(MaximumLuminance, Luminance);
-				if (Luminance > 0.1f)
-					++LitPixelCount;
-			}
-			const double MeanLuminance = LuminanceSum /
-				static_cast<double>(static_cast<size_t>(Readback->Width) * Readback->Height);
-			PF_INFO("PBR_MATERIAL_IMAGE={0}; extent={1}x{2}; draws={3}; mean_luma={4:.4f}; min={5:.3f}; max={6:.3f}; lit_pixels={7}",
-				m_PbrMaterialImagePath.string(), Readback->Width, Readback->Height, m_PbrMaterialGeometryDrawCount,
-				MeanLuminance, MinimumLuminance, MaximumLuminance, LitPixelCount);
-			if (MaximumLuminance < 0.55f || MaximumLuminance - MinimumLuminance < 0.2f || LitPixelCount < 1000)
-			{
-				Fail("Captured PBR material image lacks the expected visible HDR/material contrast");
-				return;
-			}
-			m_PbrMaterialCaptureComplete = true;
-		}
-
-		void RenderTransparencyFrame()
-		{
-			if (!m_Succeeded || !m_ScenePrepared || m_TransparencyCaptureComplete || m_TransparencyCapturePending)
-				return;
-			const auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_TransparencyOutputTarget);
-			if (!Rendered || Rendered->GeometryDrawCount != 10)
-			{
-				Fail(Rendered ? "Transparency startup scene did not submit its ten indexed mesh instances" :
-					"Transparency scene render failed: " + Rendered.error().Message);
-				return;
-			}
-			const size_t ExpectedSpotShadowPasses = m_TransparencyCaptureStage == 2 ? 1u : 0u;
-			if (Rendered->SpotlightShadowPassCount != ExpectedSpotShadowPasses ||
-				(m_TransparencyCaptureStage < 2 && Rendered->SpotlightShadowCasterDrawCount != 0) ||
-				(m_TransparencyCaptureStage == 2 && Rendered->SpotlightShadowCasterDrawCount == 0))
-			{
-				Fail("Transparency capture did not submit the expected alpha-tested spotlight shadow pass and casters");
-				return;
-			}
-			const size_t ExpectedPointShadowPasses = m_TransparencyCaptureStage == 4 ? 6u : 0u;
-			if (Rendered->PointShadowPassCount != ExpectedPointShadowPasses ||
-				(m_TransparencyCaptureStage == 4 && Rendered->PointShadowCasterDrawCount == 0))
-			{
-				Fail("Transparency capture did not submit all six alpha-tested point-shadow faces and their casters");
-				return;
-			}
-			PF_INFO("TRANSPARENCY_RENDER_STAGE={0}; spot_shadow_passes={1}; spot_shadow_caster_draws={2}; point_shadow_passes={3}; point_shadow_caster_draws={4}; selected_shadow_owners={5}",
-				m_TransparencyCaptureStage, Rendered->SpotlightShadowPassCount,
-				Rendered->SpotlightShadowCasterDrawCount,
-				Rendered->PointShadowPassCount, Rendered->PointShadowCasterDrawCount,
-				static_cast<size_t>(std::count_if(Rendered->SpotlightShadowSlotOwners.begin(),
-					Rendered->SpotlightShadowSlotOwners.end(), [](const auto& Owner) { return Owner.has_value(); })));
-			m_TransparencyGeometryDrawCount = Rendered->GeometryDrawCount;
-			m_TransparencyCapturePending = true;
-		}
-
-		void CaptureTransparencyImage()
-		{
-			const PulseForge::Texture* Color = m_TransparencyOutputTarget->GetColorTexture();
-			if (!Color)
-			{
-				Fail("Transparency output target has no readable color texture");
-				return;
-			}
-			const auto Readback = PulseForge::Application::Get().ReadTextureForValidation(*Color);
-			if (!Readback || Readback->Format != PulseForge::TextureFormat::RGBA8_Srgb)
-			{
-				Fail(Readback ? "Transparency output readback was not RGBA8 sRGB" :
-					"Could not read actual transparency output pixels: " + Readback.error().Message);
-				return;
-			}
-			static constexpr std::array<const char*, 8> ComparisonNames = {
-				"spot_disabled.png", "spot_shadows_off.png", "spot_shadows_on.png",
-				"point_shadows_off.png", "point_shadows_on.png",
-				"directional_shadows_off.png", "directional_shadows_on.png", "opaque_control.png"
-			};
-			if (m_TransparencyCaptureStage >= ComparisonNames.size())
-			{
-				Fail("Transparency capture reached an invalid shadow test stage");
-				return;
-			}
-			const std::filesystem::path ComparisonPath = m_PointShadowImageDirectory / "Transparency" /
-				ComparisonNames[m_TransparencyCaptureStage];
-			const auto SaveImage = [&](const std::filesystem::path& Path)
-			{
-				return stbi_write_png(Path.string().c_str(), static_cast<int>(Readback->Width),
-					static_cast<int>(Readback->Height), 4,
-					reinterpret_cast<const uint8_t*>(Readback->Pixels.data()), static_cast<int>(Readback->Width * 4)) != 0;
-			};
-			if (!SaveImage(ComparisonPath) || (m_TransparencyCaptureStage == 2 && !SaveImage(m_TransparencyImagePath)))
-			{
-				Fail("Could not save actual transparency scene pixels: " + ComparisonPath.string());
-				return;
-			}
-			switch (m_TransparencyCaptureStage)
-			{
-				case 0: m_TransparencyNoSpotPixels = Readback->Pixels; break;
-				case 1: m_TransparencyShadowOffPixels = Readback->Pixels; break;
-				case 2: m_TransparencyShadowOnPixels = Readback->Pixels; break;
-				case 3: m_TransparencyPointShadowOffPixels = Readback->Pixels; break;
-				case 4: m_TransparencyPointShadowOnPixels = Readback->Pixels; break;
-				case 5: m_TransparencyDirectionalShadowOffPixels = Readback->Pixels; break;
-				case 6: m_TransparencyDirectionalShadowOnPixels = Readback->Pixels; break;
-				case 7: m_TransparencyOpaqueControlPixels = Readback->Pixels; break;
-			}
-			double LuminanceSum = 0.0;
-			float MinimumLuminance = 1.0f;
-			float MaximumLuminance = 0.0f;
-			size_t LitPixelCount = 0;
-			size_t DistinctColorPixels = 0;
-			for (size_t Pixel = 0; Pixel < static_cast<size_t>(Readback->Width) * Readback->Height; ++Pixel)
-			{
-				const float Luminance = PixelLuminance(*Readback, Pixel);
-				LuminanceSum += Luminance;
-				MinimumLuminance = (std::min)(MinimumLuminance, Luminance);
-				MaximumLuminance = (std::max)(MaximumLuminance, Luminance);
-				if (Luminance > 0.1f)
-					++LitPixelCount;
-				const size_t Channel = Pixel * 4;
-				const uint8_t Red = static_cast<uint8_t>(Readback->Pixels[Channel]);
-				const uint8_t Green = static_cast<uint8_t>(Readback->Pixels[Channel + 1]);
-				const uint8_t Blue = static_cast<uint8_t>(Readback->Pixels[Channel + 2]);
-				if (static_cast<uint8_t>((std::max)({ Red, Green, Blue }) - (std::min)({ Red, Green, Blue })) > 28)
-					++DistinctColorPixels;
-			}
-			const double MeanLuminance = LuminanceSum /
-				static_cast<double>(static_cast<size_t>(Readback->Width) * Readback->Height);
-			PF_INFO("TRANSPARENCY_IMAGE={0}; extent={1}x{2}; draws={3}; mean_luma={4:.4f}; range={5:.3f}-{6:.3f}; lit_pixels={7}; chromatic_pixels={8}",
-				ComparisonPath.string(), Readback->Width, Readback->Height, m_TransparencyGeometryDrawCount,
-				MeanLuminance, MinimumLuminance, MaximumLuminance, LitPixelCount, DistinctColorPixels);
-			if (MaximumLuminance < 0.35f || MaximumLuminance - MinimumLuminance < 0.15f ||
-				LitPixelCount < 1000 || DistinctColorPixels < 1000)
-			{
-				Fail("Captured transparency image lacks the expected visible geometry and color variation");
-				return;
-			}
-		}
-
-		bool ValidateTransparencyShadowDifference()
-		{
-			if (m_TransparencyShadowOffPixels.size() != m_TransparencyShadowOnPixels.size() ||
-				m_TransparencyShadowOffPixels.empty())
-			{
-				Fail("Transparency shadow comparison images have inconsistent or empty pixel buffers");
-				return false;
-			}
-			size_t ChangedPixels = 0;
-			double AbsoluteDifference = 0.0;
-		std::vector<uint8_t> DifferenceImage(m_TransparencyShadowOnPixels.size());
-			for (size_t Pixel = 0; Pixel < m_TransparencyShadowOffPixels.size() / 4; ++Pixel)
-			{
-				const size_t Channel = Pixel * 4;
-				const int RedDifference = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel])) -
-					static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel])));
-				const int GreenDifference = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + 1])) -
-					static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel + 1])));
-				const int BlueDifference = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + 2])) -
-					static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel + 2])));
-				const int PixelDifference = (std::max)({ RedDifference, GreenDifference, BlueDifference });
-				AbsoluteDifference += RedDifference + GreenDifference + BlueDifference;
-				if (PixelDifference > 8)
-					++ChangedPixels;
-				DifferenceImage[Channel] = static_cast<uint8_t>((std::min)(RedDifference * 5, 255));
-				DifferenceImage[Channel + 1] = static_cast<uint8_t>((std::min)(GreenDifference * 5, 255));
-				DifferenceImage[Channel + 2] = static_cast<uint8_t>((std::min)(BlueDifference * 5, 255));
-				DifferenceImage[Channel + 3] = 255;
-			}
-			const std::filesystem::path DifferencePath = m_PointShadowImageDirectory / "Transparency" / "shadow_difference.png";
-			if (!stbi_write_png(DifferencePath.string().c_str(), 960, 540, 4, DifferenceImage.data(), 960 * 4))
-			{
-				Fail("Could not save actual transparency shadow-difference image");
-				return false;
-			}
-			const double MeanAbsoluteDifference = AbsoluteDifference /
-				static_cast<double>((m_TransparencyShadowOffPixels.size() / 4) * 3);
-			const auto CountChangedInRegion = [this](uint32_t MinX, uint32_t MinY, uint32_t MaxX, uint32_t MaxY)
-			{
-				size_t RegionChangedPixels = 0;
-				for (uint32_t Y = MinY; Y < MaxY; ++Y)
-				{
-					for (uint32_t X = MinX; X < MaxX; ++X)
-					{
-						const size_t Channel = (static_cast<size_t>(Y) * 960 + X) * 4;
-						const int Red = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel])) -
-							static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel])));
-						const int Green = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + 1])) -
-							static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel + 1])));
-						const int Blue = std::abs(static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + 2])) -
-							static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOnPixels[Channel + 2])));
-						if ((std::max)({ Red, Green, Blue }) > 8)
-							++RegionChangedPixels;
-					}
-				}
-				return RegionChangedPixels;
-			};
-			const size_t MaskedBackdropChanges = CountChangedInRegion(185, 95, 350, 282);
-			PF_INFO("TRANSPARENCY_SHADOW_IMAGE_DIFF=changed_pixels:{0}; mean_abs_rgb:{1:.3f}",
-				ChangedPixels, MeanAbsoluteDifference);
-			PF_INFO("TRANSPARENCY_MASKED_BACKDROP_DIFF=changed_pixels:{0}; roi=(185,95)-(350,282)", MaskedBackdropChanges);
-			if (ChangedPixels < 150 || MeanAbsoluteDifference < 0.15)
-			{
-				Fail("Enabling alpha-tested spotlight shadows did not produce a measurable image change");
-				return false;
-			}
-			if (MaskedBackdropChanges < 12)
-			{
-				Fail("Alpha-tested fence shadow did not change pixels in its projected backdrop region");
-				return false;
-			}
-			return true;
-		}
-
-		bool ValidateMaskedShadowImageDifference(
-			const std::vector<std::byte>& ShadowsOff,
-			const std::vector<std::byte>& ShadowsOn,
-			const char* ShadowType,
-			uint32_t MinX,
-			uint32_t MinY,
-			uint32_t MaxX,
-			uint32_t MaxY)
-		{
-			if (ShadowsOff.size() != ShadowsOn.size() || ShadowsOff.empty())
-			{
-				Fail(std::string("Transparency ") + ShadowType + " comparison has inconsistent or empty pixel buffers");
-				return false;
-			}
-			size_t ChangedPixels = 0;
-			double AbsoluteDifference = 0.0;
-			size_t BackdropChangedPixels = 0;
-			for (size_t Pixel = 0; Pixel < ShadowsOff.size() / 4; ++Pixel)
-			{
-				const size_t Channel = Pixel * 4;
-				int MaximumDifference = 0;
-				for (size_t Component = 0; Component < 3; ++Component)
-				{
-					const int Difference = std::abs(static_cast<int>(static_cast<uint8_t>(ShadowsOff[Channel + Component])) -
-						static_cast<int>(static_cast<uint8_t>(ShadowsOn[Channel + Component])));
-					AbsoluteDifference += Difference;
-					MaximumDifference = (std::max)(MaximumDifference, Difference);
-				}
-				if (MaximumDifference > 8)
-				{
-					++ChangedPixels;
-					const uint32_t X = static_cast<uint32_t>(Pixel % 960);
-					const uint32_t Y = static_cast<uint32_t>(Pixel / 960);
-					if (X >= MinX && X < MaxX && Y >= MinY && Y < MaxY)
-						++BackdropChangedPixels;
-				}
-			}
-			const double MeanAbsoluteDifference = AbsoluteDifference / static_cast<double>((ShadowsOff.size() / 4) * 3);
-			PF_INFO("TRANSPARENCY_{0}_SHADOW_IMAGE_DIFF=changed_pixels:{1}; mean_abs_rgb:{2:.3f}; receiver_roi_pixels:{3}; roi=({4},{5})-({6},{7})",
-				ShadowType, ChangedPixels, MeanAbsoluteDifference, BackdropChangedPixels, MinX, MinY, MaxX, MaxY);
-			if (ChangedPixels < 100 || MeanAbsoluteDifference < 0.1 || BackdropChangedPixels < 12)
-			{
-				Fail(std::string("The alpha-masked backdrop did not show a measurable ") + ShadowType + " shadow difference");
-				return false;
-			}
-			return true;
-		}
-
-		bool ValidateTransparencyPointShadowDifference()
-		{
-			return ValidateMaskedShadowImageDifference(
-				m_TransparencyPointShadowOffPixels, m_TransparencyPointShadowOnPixels, "point-light", 180, 280, 370, 360);
-		}
-
-		bool ValidateTransparencyDirectionalShadowDifference()
-		{
-			return ValidateMaskedShadowImageDifference(
-				m_TransparencyDirectionalShadowOffPixels, m_TransparencyDirectionalShadowOnPixels, "directional", 185, 260, 350, 360);
-		}
-
-		bool ValidateTransparencyBlendDifference()
-		{
-			if (m_TransparencyDirectionalShadowOnPixels.size() != m_TransparencyOpaqueControlPixels.size() ||
-				m_TransparencyOpaqueControlPixels.empty())
-			{
-				Fail("Transparency and opaque-control images have inconsistent or empty pixel buffers");
-				return false;
-			}
-			constexpr uint32_t MinX = 410;
-			constexpr uint32_t MinY = 190;
-			constexpr uint32_t MaxX = 550;
-			constexpr uint32_t MaxY = 325;
-			size_t ChangedPixels = 0;
-			double AbsoluteDifference = 0.0;
-			for (uint32_t Y = MinY; Y < MaxY; ++Y)
-			{
-				for (uint32_t X = MinX; X < MaxX; ++X)
-				{
-					const size_t Channel = (static_cast<size_t>(Y) * 960 + X) * 4;
-					int MaximumDifference = 0;
-					for (size_t Component = 0; Component < 3; ++Component)
-					{
-						const int Difference = std::abs(
-							static_cast<int>(static_cast<uint8_t>(m_TransparencyDirectionalShadowOnPixels[Channel + Component])) -
-							static_cast<int>(static_cast<uint8_t>(m_TransparencyOpaqueControlPixels[Channel + Component])));
-						AbsoluteDifference += Difference;
-						MaximumDifference = (std::max)(MaximumDifference, Difference);
-					}
-					if (MaximumDifference > 8)
-						++ChangedPixels;
-				}
-			}
-			const double MeanAbsoluteDifference = AbsoluteDifference /
-				static_cast<double>((MaxX - MinX) * (MaxY - MinY) * 3);
-			PF_INFO("TRANSPARENCY_BLEND_IMAGE_DIFF=changed_pixels:{0}; mean_abs_rgb:{1:.3f}; blue_panel_roi=({2},{3})-({4},{5})",
-				ChangedPixels, MeanAbsoluteDifference, MinX, MinY, MaxX, MaxY);
-			if (ChangedPixels < 1000 || MeanAbsoluteDifference < 1.0)
-			{
-				Fail("The BLEND blue panel did not differ from its matching OPAQUE control in the expected image region");
-				return false;
-			}
-			return true;
-		}
-
-		bool ValidateTransparencyLightDifference()
-		{
-			if (m_TransparencyNoSpotPixels.size() != m_TransparencyShadowOffPixels.size() ||
-				m_TransparencyNoSpotPixels.empty())
-			{
-				Fail("Transparency spotlight comparison images have inconsistent or empty pixel buffers");
-				return false;
-			}
-			size_t ChangedPixels = 0;
-			double AbsoluteDifference = 0.0;
-			uint32_t MinX = 960;
-			uint32_t MinY = 540;
-			uint32_t MaxX = 0;
-			uint32_t MaxY = 0;
-			for (size_t Pixel = 0; Pixel < m_TransparencyNoSpotPixels.size() / 4; ++Pixel)
-			{
-				const size_t Channel = Pixel * 4;
-				int MaximumDifference = 0;
-				for (size_t Component = 0; Component < 3; ++Component)
-				{
-					const int Difference = std::abs(
-						static_cast<int>(static_cast<uint8_t>(m_TransparencyNoSpotPixels[Channel + Component])) -
-						static_cast<int>(static_cast<uint8_t>(m_TransparencyShadowOffPixels[Channel + Component])));
-					AbsoluteDifference += Difference;
-					MaximumDifference = (std::max)(MaximumDifference, Difference);
-				}
-				if (MaximumDifference > 8)
-				{
-					++ChangedPixels;
-					const uint32_t X = static_cast<uint32_t>(Pixel % 960);
-					const uint32_t Y = static_cast<uint32_t>(Pixel / 960);
-					MinX = (std::min)(MinX, X);
-					MinY = (std::min)(MinY, Y);
-					MaxX = (std::max)(MaxX, X);
-					MaxY = (std::max)(MaxY, Y);
-				}
-			}
-			const double MeanAbsoluteDifference = AbsoluteDifference /
-				static_cast<double>((m_TransparencyNoSpotPixels.size() / 4) * 3);
-			PF_INFO("TRANSPARENCY_DIRECT_LIGHT_DIFF=changed_pixels:{0}; mean_abs_rgb:{1:.3f}; bounds=({2},{3})-({4},{5})",
-				ChangedPixels, MeanAbsoluteDifference, MinX, MinY, MaxX, MaxY);
-			if (ChangedPixels < 150 || MeanAbsoluteDifference < 0.15)
-			{
-				Fail("The configured transparency spotlight did not measurably illuminate the scene");
-				return false;
-			}
-			return true;
-		}
-
-		void RenderPointShadowOverviewImageFrame()
-		{
-			if (!m_Succeeded || !m_ScenePrepared || m_PointShadowOverviewCapturePending)
-				return;
-			auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_PointShadowOverviewOutputTarget);
-			const PointShadowOverviewImageCase& TestCase = PointShadowOverviewImageCases[m_PointShadowOverviewImageCase];
-			const size_t ExpectedPasses = TestCase.CastShadows ? 12u : 6u;
-			if (!Rendered || Rendered->GeometryDrawCount == 0 || Rendered->PointShadowPassCount != ExpectedPasses ||
-				Rendered->PointShadowCasterDrawCount != ExpectedPasses * Rendered->GeometryDrawCount)
-			{
-				Fail(Rendered ? "Startup-scene capture did not render the expected independent point-shadow passes" :
-					"Startup-scene point-shadow render failed: " + Rendered.error().Message);
-				return;
-			}
-			PF_INFO("POINT_SHADOW_OVERVIEW_DRAWS={0}; point_shadow_face_passes={1}; caster_draws={2}; spotlight_passes={3}",
-				TestCase.Name, Rendered->PointShadowPassCount, Rendered->PointShadowCasterDrawCount,
-				Rendered->SpotlightShadowPassCount);
-			m_PointShadowOverviewCapturePending = true;
-		}
-
-		void UpdatePointShadowScenario()
-		{
-			const size_t Frame = m_PointShadowFrames;
-			auto DualSpot = m_PointShadowEntities.front().GetSpotLight();
-			if (!DualSpot || !DualSpot->has_value())
-				throw std::runtime_error("Could not read the co-located spotlight shadow state");
-			DualSpot->value().CastShadows = Frame == 1 || Frame == 2 || Frame == 3 ||
-				Frame == 5 || Frame == 6 || Frame == 7;
-			DualSpot->value().Intensity = Frame == 2 || Frame == 3 || Frame == 6 ? 25.0f : 1000.0f;
-			if (!m_PointShadowEntities.front().SetSpotLight(DualSpot->value()))
-				throw std::runtime_error("Could not update the co-located spotlight shadow state");
-
-			if (Frame == 0 || Frame == 8)
-			{
-				const std::array<size_t, 3> Lights = { 0, 1, 2 };
-				for (size_t Index : Lights)
-				{
-					auto Point = m_PointShadowEntities[Index].GetPointLight();
-					if (!Point || !Point->has_value())
-						throw std::runtime_error("Could not read point-shadow toggle state");
-					Point->value().CastShadows = false;
-					if (!m_PointShadowEntities[Index].SetPointLight(Point->value()))
-						throw std::runtime_error("Could not apply point-shadow toggle state");
-				}
-			}
-			else if (Frame == 1)
-			{
-				for (size_t Index = 0; Index < m_PointShadowEntities.size(); ++Index)
-				{
-					auto Point = m_PointShadowEntities[Index].GetPointLight();
-					if (!Point || !Point->has_value())
-						throw std::runtime_error("Could not read point light before enabling the shadow budget");
-					Point->value().CastShadows = true;
-					if (!m_PointShadowEntities[Index].SetPointLight(Point->value()))
-						throw std::runtime_error("Could not enable the point-shadow budget");
-				}
-			}
-			else
-			{
-				const size_t Toggled = Frame == 4 || Frame == 5 ? 1 : 0;
-				auto Point = m_PointShadowEntities[Toggled].GetPointLight();
-				if (!Point || !Point->has_value())
-					throw std::runtime_error("Could not read point light before shadow-slot reassignment");
-				Point->value().CastShadows = Frame == 3 || Frame == 5 || Frame == 7;
-				if (!m_PointShadowEntities[Toggled].SetPointLight(Point->value()))
-					throw std::runtime_error("Could not apply point-shadow reassignment");
-			}
-			if (Frame == 3)
-			{
-				auto Transform = m_PointShadowEntities[0].GetTransform();
-				if (!Transform)
-					throw std::runtime_error("Could not read moving point-light transform");
-				Transform->Translation.x += 0.25f;
-				if (!m_PointShadowEntities[0].SetTransform(*Transform))
-					throw std::runtime_error("Could not move point-shadow validation light");
-			}
-			if (Frame == 7)
-			{
-				for (const PulseForge::Entity Entity : m_PointShadowScene.GetEntities())
-				{
-					auto Directional = Entity.GetDirectionalLight();
-					if (!Directional)
-						throw std::runtime_error("Could not inspect directional light in point-shadow validation scene");
-					if (*Directional && !Entity.RemoveDirectionalLight())
-						throw std::runtime_error("Could not remove directional light for point-only shadow validation");
-				}
-				PulseForge::RenderTargetDesc Description;
-				Description.Width = 96;
-				Description.Height = 64;
-				Description.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
-				Description.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
-				Description.DebugName = "Resized point-shadow GPU validation output";
-				auto Target = PulseForge::Application::Get().CreateRenderTarget(Description);
-				if (!Target)
-					throw std::runtime_error("Could not resize point-shadow validation output: " + Target.error().Message);
-				m_PointShadowOutputTarget = std::move(*Target);
-			}
-		}
-
-		void RenderPointShadowFrame()
-		{
-			if (!m_Succeeded || !m_ScenePrepared || m_PointShadowFrames >= 9)
-				return;
-			auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_PointShadowOutputTarget);
-			if (!Rendered || Rendered->GeometryDrawCount == 0)
-			{
-				Fail(Rendered ? "Point-shadow validation rendered no indexed PBR geometry" :
-					"Point-shadow scene render failed: " + Rendered.error().Message);
-				return;
-			}
-			static constexpr std::array<size_t, 9> ExpectedPasses = { 0, 12, 12, 12, 12, 12, 12, 12, 0 };
-			const size_t Expected = ExpectedPasses[m_PointShadowFrames];
-			const bool ExpectSpotShadow = m_PointShadowFrames == 1 || m_PointShadowFrames == 2 ||
-				m_PointShadowFrames == 3 || m_PointShadowFrames == 5 || m_PointShadowFrames == 6 ||
-				m_PointShadowFrames == 7;
-			if (Rendered->PointShadowPassCount != Expected ||
-				Rendered->PointShadowCasterDrawCount != Expected * Rendered->GeometryDrawCount ||
-				Rendered->SpotlightShadowPassCount != static_cast<size_t>(ExpectSpotShadow) ||
-				Rendered->SpotlightShadowCasterDrawCount !=
-					static_cast<size_t>(ExpectSpotShadow) * Rendered->GeometryDrawCount)
-			{
-				Fail("Mixed point/spot shadow pass counts did not match the dual-component allocation");
-				return;
-			}
-			if ((ExpectSpotShadow && Rendered->SpotlightShadowSlotOwners[0] !=
-					std::optional<PulseForge::UUID>{ m_PointShadowEntities.front().GetUUID() }) ||
-				(!ExpectSpotShadow && Rendered->SpotlightShadowSlotOwners[0]))
-			{
-				Fail("Spotlight shadow ownership did not resolve to the spotlight on the dual-component entity");
-				return;
-			}
-			const uint64_t ExpectedGeneration = m_PointShadowFrames == 0 ? 0u : 1u;
-			if (Rendered->PointShadowResourceGeneration != ExpectedGeneration)
-			{
-				Fail("Point-shadow cubemaps were allocated eagerly or recreated after ownership changes");
-				return;
-			}
-			const auto OwnerIs = [&](size_t Slot, std::optional<size_t> LightIndex)
-			{
-				if (!LightIndex)
-					return !Rendered->PointShadowSlotOwners[Slot];
-				return Rendered->PointShadowSlotOwners[Slot] &&
-					*Rendered->PointShadowSlotOwners[Slot] == m_PointShadowEntities[*LightIndex].GetUUID();
-			};
-			static constexpr std::array<std::array<int32_t, 2>, 9> ExpectedOwners = {{
-				{{ -1, -1 }}, {{ 0, 1 }}, {{ 2, 1 }}, {{ 0, 1 }}, {{ 0, 2 }},
-				{{ 0, 1 }}, {{ 2, 1 }}, {{ 0, 1 }}, {{ -1, -1 }}
-			}};
-			for (size_t Slot = 0; Slot < 2; ++Slot)
-			{
-				const int32_t Owner = ExpectedOwners[m_PointShadowFrames][Slot];
-				if (!OwnerIs(Slot, Owner < 0 ? std::nullopt : std::optional<size_t>{ static_cast<size_t>(Owner) }))
-				{
-					Fail("Point-shadow cube slots did not match deterministic relevance selection after toggling");
-					return;
-				}
-			}
-			PF_INFO("POINT_SHADOW_FRAME={0}; face_passes={1}; caster_draws={2}; pbr_draws={3}; resource_generation={4}; owners=[{5},{6}]; hdr_generation={7}",
-				m_PointShadowFrames, Rendered->PointShadowPassCount, Rendered->PointShadowCasterDrawCount,
-				Rendered->GeometryDrawCount, Rendered->PointShadowResourceGeneration,
-				Rendered->PointShadowSlotOwners[0] ? Rendered->PointShadowSlotOwners[0]->ToString() : "none",
-				Rendered->PointShadowSlotOwners[1] ? Rendered->PointShadowSlotOwners[1]->ToString() : "none",
-				Rendered->HdrTargetGeneration);
-			++m_PointShadowFrames;
-			m_ScenePrepared = false;
-			m_PointShadowScenarioUpdated = false;
-		}
-
-		void UpdateSpotlightShadowScenario()
-		{
-			const size_t Frame = m_SpotShadowFrames;
-			if (Frame == 0)
-			{
-				for (size_t Index = 0; Index < m_SpotlightShadowEntities.size(); ++Index)
-				{
-					auto Spot = m_SpotlightShadowEntities[Index].GetSpotLight();
-					if (!Spot || !Spot->has_value())
-						throw std::runtime_error("Could not initialize spotlight-shadow validation settings");
-					Spot->value().CastShadows = false;
-					if (!m_SpotlightShadowEntities[Index].SetSpotLight(Spot->value()))
-						throw std::runtime_error("Could not initialize spotlight-shadow validation settings");
-				}
-			}
-			else if (Frame >= 2 && Frame <= 7)
-			{
-				const size_t ToggledIndex = Frame == 2 || Frame == 3 ? 0 : Frame == 4 || Frame == 5 ? 1 : 2;
-				auto Spot = m_SpotlightShadowEntities[ToggledIndex].GetSpotLight();
-				if (!Spot || !Spot->has_value())
-					throw std::runtime_error("Could not read spotlight before repeated shadow-slot reassignment");
-				Spot->value().CastShadows = Frame % 2 != 0;
-				if (!m_SpotlightShadowEntities[ToggledIndex].SetSpotLight(Spot->value()))
-					throw std::runtime_error("Could not apply repeated Cast Shadows change");
-				if (Frame == 2)
-				{
-					auto Transform = m_SpotlightShadowEntities[0].GetTransform();
-					if (!Transform)
-						throw std::runtime_error("Could not read moving spotlight-shadow transform");
-					Transform->Translation.x += 0.5f;
-					if (!m_SpotlightShadowEntities[0].SetTransform(*Transform))
-						throw std::runtime_error("Could not move spotlight-shadow validation light");
-				}
-			}
-			else if (Frame == 1)
-			{
-				for (size_t Index = 0; Index < m_SpotlightShadowEntities.size(); ++Index)
-				{
-					auto Spot = m_SpotlightShadowEntities[Index].GetSpotLight();
-					if (!Spot || !Spot->has_value())
-						throw std::runtime_error("Could not enable spotlight budget validation");
-					Spot->value().CastShadows = true;
-					if (!m_SpotlightShadowEntities[Index].SetSpotLight(Spot->value()))
-						throw std::runtime_error("Could not enable spotlight budget validation");
-				}
-			}
-			else if (Frame == 8)
-			{
-				for (const PulseForge::Entity Entity : m_SpotlightShadowScene.GetEntities())
-				{
-					auto Directional = Entity.GetDirectionalLight();
-					if (!Directional)
-						throw std::runtime_error("Could not inspect directional light in spotlight-shadow scenario");
-					if (*Directional && !Entity.RemoveDirectionalLight())
-						throw std::runtime_error("Could not remove directional light for spotlight-only shadow validation");
-				}
-				PulseForge::RenderTargetDesc OutputDescription;
-				OutputDescription.Width = 96;
-				OutputDescription.Height = 64;
-				OutputDescription.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
-				OutputDescription.DepthMode = PulseForge::DepthAttachmentMode::Attachment;
-				OutputDescription.DebugName = "Resized spotlight-shadow GPU validation output";
-				auto OutputTarget = PulseForge::Application::Get().CreateRenderTarget(OutputDescription);
-				if (!OutputTarget)
-					throw std::runtime_error("Could not resize spotlight-shadow validation output: " + OutputTarget.error().Message);
-				m_SpotlightShadowOutputTarget = std::move(*OutputTarget);
-			}
-		}
-
-		void RenderSpotlightShadowFrame()
-		{
-			if (!m_Succeeded || !m_ScenePrepared || m_SpotShadowFrames >= 9)
-				return;
-			auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_SpotlightShadowOutputTarget);
-			if (!Rendered || Rendered->GeometryDrawCount == 0)
-			{
-				Fail(Rendered ? "Spotlight-shadow validation rendered no PBR geometry" :
-					"Spotlight-shadow scene render failed: " + Rendered.error().Message);
-				return;
-			}
-
-			static constexpr std::array<size_t, 9> ExpectedShadowPasses = { 0, 4, 4, 4, 4, 4, 4, 4, 4 };
-			const size_t ExpectedPasses = ExpectedShadowPasses[m_SpotShadowFrames];
-			if (Rendered->SpotlightShadowPassCount != ExpectedPasses ||
-				Rendered->SpotlightShadowCasterDrawCount != ExpectedPasses * Rendered->GeometryDrawCount)
-			{
-				Fail("Spotlight shadow-pass or depth-only caster draw count did not match the scenario");
-				return;
-			}
-			if ((m_SpotShadowFrames == 0 && Rendered->SpotlightShadowResourceGeneration != 0) ||
-				(m_SpotShadowFrames > 0 && Rendered->SpotlightShadowResourceGeneration != 1))
-			{
-				Fail("Spotlight shadow targets were allocated eagerly or recreated during the scenario");
-				return;
-			}
-			const auto HasOwner = [&](size_t Index)
-			{
-				return std::ranges::find(Rendered->SpotlightShadowSlotOwners, m_SpotlightShadowEntities[Index].GetUUID()) !=
-					Rendered->SpotlightShadowSlotOwners.end();
-			};
-			const auto HasExpectedOwners = [&](std::initializer_list<size_t> Expected)
-			{
-				for (size_t Index = 0; Index < m_SpotlightShadowEntities.size(); ++Index)
-					if (HasOwner(Index) != (std::ranges::find(Expected, Index) != Expected.end()))
-						return false;
-				return true;
-			};
-			const auto HasExpectedSlotOrder = [&](const std::array<int32_t, 4>& Expected)
-			{
-				for (size_t Slot = 0; Slot < Expected.size(); ++Slot)
-				{
-					if (Expected[Slot] < 0)
-					{
-						if (Rendered->SpotlightShadowSlotOwners[Slot])
-							return false;
-					}
-					else if (!Rendered->SpotlightShadowSlotOwners[Slot] ||
-						*Rendered->SpotlightShadowSlotOwners[Slot] != m_SpotlightShadowEntities[static_cast<size_t>(Expected[Slot])].GetUUID())
-						return false;
-				}
-				return true;
-			};
-			if ((m_SpotShadowFrames == 0 && !HasExpectedOwners({})) ||
-				(m_SpotShadowFrames == 1 && !HasExpectedOwners({ 0, 1, 2, 3 })) ||
-				(m_SpotShadowFrames == 2 && !HasExpectedOwners({ 1, 2, 3, 4 })) ||
-				(m_SpotShadowFrames == 3 && !HasExpectedOwners({ 0, 1, 2, 3 })) ||
-				(m_SpotShadowFrames == 4 && !HasExpectedOwners({ 0, 2, 3, 4 })) ||
-				(m_SpotShadowFrames == 5 && !HasExpectedOwners({ 0, 1, 2, 3 })) ||
-				(m_SpotShadowFrames == 6 && !HasExpectedOwners({ 0, 1, 3, 4 })) ||
-				(m_SpotShadowFrames == 7 && !HasExpectedOwners({ 0, 1, 2, 3 })) ||
-				(m_SpotShadowFrames == 8 && !HasExpectedOwners({ 0, 1, 2, 3 })))
-			{
-				Fail("Spotlight shadow slot owners did not match deterministic top-four selection after Cast Shadows changes");
-				return;
-			}
-			static constexpr std::array<std::array<int32_t, 4>, 9> ExpectedSlotOwners = {{
-				{{ -1, -1, -1, -1 }},
-				{{ 0, 1, 2, 3 }},
-				{{ 4, 1, 2, 3 }},
-				{{ 0, 1, 2, 3 }},
-				{{ 0, 4, 2, 3 }},
-				{{ 0, 1, 2, 3 }},
-				{{ 0, 1, 4, 3 }},
-				{{ 0, 1, 2, 3 }},
-				{{ 0, 1, 2, 3 }}
-			}};
-			if (!HasExpectedSlotOrder(ExpectedSlotOwners[m_SpotShadowFrames]))
-			{
-				Fail("Spotlight shadow maps were not rebound to their exact deterministic slot owners");
-				return;
-			}
-			if (m_SpotShadowFrames == 0)
-				m_FirstSpotShadowHdrGeneration = Rendered->HdrTargetGeneration;
-			else if (m_SpotShadowFrames < 4 && Rendered->HdrTargetGeneration != m_FirstSpotShadowHdrGeneration)
-			{
-				Fail("Unchanged output extents did not reuse the HDR target during spotlight-shadow rendering");
-				return;
-			}
-			else if (m_SpotShadowFrames == 8 && Rendered->HdrTargetGeneration == m_FirstSpotShadowHdrGeneration)
-			{
-				Fail("Resizing the spotlight-shadow output did not replace the HDR target");
-				return;
-			}
-			PF_INFO("SPOT_SHADOW_FRAME={0}; shadow_passes={1}; caster_draws={2}; pbr_draws={3}; hdr_generation={4}; shadow_resource_generation={5}; slot_owners=[{6},{7},{8},{9}]",
-				m_SpotShadowFrames, Rendered->SpotlightShadowPassCount, Rendered->SpotlightShadowCasterDrawCount,
-				Rendered->GeometryDrawCount, Rendered->HdrTargetGeneration, Rendered->SpotlightShadowResourceGeneration,
-				Rendered->SpotlightShadowSlotOwners[0] ? Rendered->SpotlightShadowSlotOwners[0]->ToString() : "none",
-				Rendered->SpotlightShadowSlotOwners[1] ? Rendered->SpotlightShadowSlotOwners[1]->ToString() : "none",
-				Rendered->SpotlightShadowSlotOwners[2] ? Rendered->SpotlightShadowSlotOwners[2]->ToString() : "none",
-				Rendered->SpotlightShadowSlotOwners[3] ? Rendered->SpotlightShadowSlotOwners[3]->ToString() : "none");
-			++m_SpotShadowFrames;
-			m_ScenePrepared = false;
-		}
-
-		void UpdateLocalLightTransforms()
-		{
-			for (size_t Index = 0; Index < m_LocalLightEntities.size(); ++Index)
-			{
-				const auto Current = m_LocalLightEntities[Index].GetTransform();
-				if (!Current)
-					throw std::runtime_error("Could not read moving GPU validation light transform");
-				PulseForge::TransformComponent Updated = *Current;
-				Updated.Translation.x += 0.1f;
-				if (Index >= 2)
-				{
-					const float HalfAngle = 0.025f * static_cast<float>(m_LocalLightFrames);
-					Updated.Rotation = glm::quat(std::cos(HalfAngle), 0.0f, std::sin(HalfAngle), 0.0f);
-				}
-				if (!m_LocalLightEntities[Index].SetTransform(Updated))
-					throw std::runtime_error("Could not update moving GPU validation light transform");
-			}
-			if (m_LocalLightFrames == 1 || m_LocalLightFrames == 4)
-			{
-				auto Point = m_LocalLightEntities[0].GetPointLight();
-				if (!Point || !Point->has_value())
-					throw std::runtime_error("Could not update GPU validation point-light count");
-				Point->value().Intensity = m_LocalLightFrames == 1 ? 0.0f : 18.0f;
-				if (!m_LocalLightEntities[0].SetPointLight(Point->value()))
-					throw std::runtime_error("Could not change GPU validation point-light count");
-			}
-			if (m_LocalLightFrames == 2 || m_LocalLightFrames == 4)
-			{
-				if (m_LocalLightFrames == 2)
-				{
-					if (!m_LocalLightEntities[2].RemoveSpotLight())
-						throw std::runtime_error("Could not reduce GPU validation spotlight count");
-				}
-				else if (!m_LocalLightEntities[2].SetSpotLight(
-					PulseForge::SpotLightComponent{ { 0.3f, 1.0f, 0.4f }, 24.0f, 18.0f, 10.0f, 28.0f }))
-					throw std::runtime_error("Could not restore GPU validation spotlight count");
-			}
-		}
-
-		void RenderLocalLightFrame()
-		{
-			if (!m_Succeeded || !m_ScenePrepared || m_LocalLightFrames >= 6)
-				return;
-			auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_LocalLightOutputTarget);
-			if (!Rendered || Rendered->GeometryDrawCount == 0)
-			{
-				Fail(Rendered ? "Local-light validation rendered no PBR geometry" :
-					"Local-light scene render failed: " + Rendered.error().Message);
-				return;
-			}
-			PF_INFO("Local-light GPU validation frame {0}: {1} geometry draw(s), HDR generation {2}",
-				m_LocalLightFrames, Rendered->GeometryDrawCount, Rendered->HdrTargetGeneration);
-			++m_LocalLightFrames;
-			m_ScenePrepared = false;
-		}
-
-		void InitializeEditorUiUnormResources()
-		{
-			PulseForge::Application& App = PulseForge::Application::Get();
-			const std::filesystem::path ShaderDirectory(PF_GPU_VALIDATION_SHADER_DIRECTORY);
-			const auto VertexBytecode = LoadShader(ShaderDirectory / "EditorImGui.vs.spv");
-			const auto FragmentBytecode = LoadShader(ShaderDirectory / "EditorImGui.ps.spv");
-			const auto PresentVertexBytecode = LoadShader(ShaderDirectory / "EditorImGuiPresent.vs.spv");
-			const auto PresentFragmentBytecode = LoadShader(ShaderDirectory / "EditorImGuiPresent.ps.spv");
-
-			PulseForge::ShaderDesc Description;
-			Description.Stage = PulseForge::ShaderStage::Vertex;
-			Description.EntryPoint = "VSMain";
-			Description.DebugName = "Production editor ImGui vertex shader (GPU validation)";
-			auto Vertex = App.CreateShader(Description, VertexBytecode);
-			if (!Vertex)
-				throw std::runtime_error("Could not create production editor ImGui vertex shader: " + Vertex.error().Message);
-			m_EditorUiVertexShader = std::move(*Vertex);
-
-			Description.Stage = PulseForge::ShaderStage::Fragment;
-			Description.EntryPoint = "PSMain";
-			Description.DebugName = "Production editor ImGui fragment shader (GPU validation)";
-			auto Fragment = App.CreateShader(Description, FragmentBytecode);
-			if (!Fragment)
-				throw std::runtime_error("Could not create production editor ImGui fragment shader: " + Fragment.error().Message);
-			m_EditorUiFragmentShader = std::move(*Fragment);
-
-			Description.Stage = PulseForge::ShaderStage::Vertex;
-			Description.EntryPoint = "VSMain";
-			Description.DebugName = "Editor UI UNORM presentation vertex shader";
-			auto PresentVertex = App.CreateShader(Description, PresentVertexBytecode);
-			if (!PresentVertex)
-				throw std::runtime_error("Could not create UI presentation vertex shader: " + PresentVertex.error().Message);
-			m_EditorUiPresentationVertexShader = std::move(*PresentVertex);
-
-			Description.Stage = PulseForge::ShaderStage::Fragment;
-			Description.EntryPoint = "PSMain";
-			Description.DebugName = "Editor UI UNORM presentation fragment shader";
-			auto PresentFragment = App.CreateShader(Description, PresentFragmentBytecode);
-			if (!PresentFragment)
-				throw std::runtime_error("Could not create UI presentation fragment shader: " + PresentFragment.error().Message);
-			m_EditorUiPresentationFragmentShader = std::move(*PresentFragment);
-
-			constexpr std::array<std::byte, 4> WhitePixel = {
-				std::byte{ 0xff }, std::byte{ 0xff }, std::byte{ 0xff }, std::byte{ 0xff }
-			};
-			PulseForge::TextureDesc FontTextureDescription;
-			FontTextureDescription.Width = 1;
-			FontTextureDescription.Height = 1;
-			FontTextureDescription.Format = PulseForge::TextureFormat::RGBA8_UNorm;
-			FontTextureDescription.Usage = PulseForge::TextureUsage::ShaderResource;
-			FontTextureDescription.DebugName = "Editor UI validation white font texel";
-			auto FontTexture = App.CreateTexture(FontTextureDescription, WhitePixel);
-			if (!FontTexture)
-				throw std::runtime_error("Could not create the editor UI validation texel: " + FontTexture.error().Message);
-			m_EditorUiFontTexture = std::move(*FontTexture);
-
-			PulseForge::BindingSetDesc UiBindingDescription;
-			UiBindingDescription.Layout = m_BindingLayout;
-			UiBindingDescription.Textures.push_back({ 0, *m_EditorUiFontTexture, PulseForge::BindingResourceType::Texture2D });
-			UiBindingDescription.Samplers.push_back({ 0, *m_Sampler });
-			auto UiBinding = App.CreateBindingSet(UiBindingDescription);
-			if (!UiBinding)
-				throw std::runtime_error("Could not bind the editor UI validation texel: " + UiBinding.error().Message);
-			m_EditorUiDrawBindingSet = std::move(*UiBinding);
-
-			PulseForge::GraphicsPipelineDesc UiPipeline;
-			UiPipeline.VertexShader = m_EditorUiVertexShader;
-			UiPipeline.FragmentShader = m_EditorUiFragmentShader;
-			UiPipeline.BindingLayouts = { m_BindingLayout };
-			UiPipeline.VertexLayout.Stride = sizeof(EditorValidationVertex);
-			UiPipeline.VertexLayout.Attributes = {
-				{ PulseForge::VertexSemantic::Position, PulseForge::VertexFormat::Float2, offsetof(EditorValidationVertex, Position) },
-				{ PulseForge::VertexSemantic::Color, PulseForge::VertexFormat::Float4, offsetof(EditorValidationVertex, Color) },
-				{ PulseForge::VertexSemantic::TexCoord, PulseForge::VertexFormat::Float2, offsetof(EditorValidationVertex, TexCoord) }
-			};
-			UiPipeline.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
-			UiPipeline.DepthAttachmentEnabled = false;
-			UiPipeline.Blend.Enabled = true;
-			UiPipeline.DebugName = "Production editor ImGui linear-light sRGB composition validation";
-			auto UiPipelineResult = App.CreateGraphicsPipeline(UiPipeline);
-			if (!UiPipelineResult)
-				throw std::runtime_error("Could not create production editor ImGui pipeline: " + UiPipelineResult.error().Message);
-			m_EditorUiPipeline = std::move(*UiPipelineResult);
-			constexpr std::array<EditorValidationVertex, 3> UiVertices = {{
-				{{ -1.0f, -1.0f }, { 0.5f, 0.5f }, { 1.0f, 1.0f, 1.0f, 0.5f }},
-				{{ 3.0f, -1.0f }, { 0.5f, 0.5f }, { 1.0f, 1.0f, 1.0f, 0.5f }},
-				{{ -1.0f, 3.0f }, { 0.5f, 0.5f }, { 1.0f, 1.0f, 1.0f, 0.5f }}
-			}};
-			PulseForge::BufferDesc UiVertexDescription;
-			UiVertexDescription.ByteSize = sizeof(UiVertices);
-			UiVertexDescription.Usage = PulseForge::BufferUsage::Vertex;
-			UiVertexDescription.DebugName = "Production editor ImGui alpha-blend validation triangle";
-			auto UiVertexBuffer = App.CreateBuffer(UiVertexDescription, std::as_bytes(std::span(UiVertices)));
-			if (!UiVertexBuffer)
-				throw std::runtime_error("Could not create editor UI validation draw data: " + UiVertexBuffer.error().Message);
-			m_EditorUiVertexBuffer = std::move(*UiVertexBuffer);
-
-			PulseForge::GraphicsPipelineDesc PresentationPipeline;
-			PresentationPipeline.VertexShader = m_EditorUiPresentationVertexShader;
-			PresentationPipeline.FragmentShader = m_EditorUiPresentationFragmentShader;
-			PresentationPipeline.BindingLayouts = { m_BindingLayout };
-			PresentationPipeline.VertexLayout.Stride = sizeof(ValidationVertex);
-			PresentationPipeline.VertexLayout.Attributes = {
-				{ PulseForge::VertexSemantic::Position, PulseForge::VertexFormat::Float2, offsetof(ValidationVertex, Position) }
-			};
-			PresentationPipeline.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_UNorm;
-			PresentationPipeline.DepthAttachmentEnabled = false;
-			PresentationPipeline.DebugName = "Editor UI UNORM output transfer validation";
-			auto PresentationPipelineResult = App.CreateGraphicsPipeline(PresentationPipeline);
-			if (!PresentationPipelineResult)
-				throw std::runtime_error("Could not create UI presentation pipeline: " + PresentationPipelineResult.error().Message);
-			m_EditorUiPresentationPipeline = std::move(*PresentationPipelineResult);
-
-			constexpr std::array<ValidationVertex, 3> Fullscreen = {
-				ValidationVertex{ { -1.0f, -1.0f }, {} },
-				ValidationVertex{ { 3.0f, -1.0f }, {} },
-				ValidationVertex{ { -1.0f, 3.0f }, {} }
-			};
-			PulseForge::BufferDesc BufferDescription;
-			BufferDescription.ByteSize = sizeof(Fullscreen);
-			BufferDescription.Usage = PulseForge::BufferUsage::Vertex;
-			BufferDescription.DebugName = "Editor UI presentation fullscreen triangle validation";
-			auto Buffer = App.CreateBuffer(BufferDescription, std::as_bytes(std::span(Fullscreen)));
-			if (!Buffer)
-				throw std::runtime_error("Could not create UI presentation vertex buffer: " + Buffer.error().Message);
-			m_EditorUiFullscreenBuffer = std::move(*Buffer);
-		}
-
-		void EnsureEditorUiTargets(uint32_t Width, uint32_t Height)
-		{
-			if (m_EditorUiSrgbTarget && m_EditorUiUnormTarget && m_EditorUiBindingSet &&
-				m_EditorUiWidth == Width && m_EditorUiHeight == Height)
-				return;
-
-			PulseForge::Application& App = PulseForge::Application::Get();
-			PulseForge::RenderTargetDesc Description;
-			Description.Width = Width;
-			Description.Height = Height;
-			Description.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_Srgb;
-			Description.DepthMode = PulseForge::DepthAttachmentMode::None;
-			Description.DebugName = "Editor UI linear-light validation intermediate";
-			auto SrgbTarget = App.CreateRenderTarget(Description);
-			if (!SrgbTarget)
-				throw std::runtime_error("Could not create UI sRGB intermediate: " + SrgbTarget.error().Message);
-			const PulseForge::Texture* SrgbTexture = (*SrgbTarget)->GetColorTexture();
-			if (!SrgbTexture)
-				throw std::runtime_error("UI sRGB intermediate has no sampleable color texture");
-
-			Description.ColorFormat = PulseForge::ColorTargetFormat::RGBA8_UNorm;
-			Description.DebugName = "Editor UI UNORM validation output";
-			auto UnormTarget = App.CreateRenderTarget(Description);
-			if (!UnormTarget)
-				throw std::runtime_error("Could not create UI UNORM output target: " + UnormTarget.error().Message);
-
-			PulseForge::BindingSetDesc BindingDescription;
-			BindingDescription.Layout = m_BindingLayout;
-			BindingDescription.Textures.push_back({ 0, *SrgbTexture, PulseForge::BindingResourceType::Texture2D });
-			BindingDescription.Samplers.push_back({ 0, *m_Sampler });
-			auto Binding = App.CreateBindingSet(BindingDescription);
-			if (!Binding)
-				throw std::runtime_error("Could not bind UI sRGB intermediate: " + Binding.error().Message);
-
-			m_EditorUiBindingSet = std::move(*Binding);
-			m_EditorUiSrgbTarget = std::move(*SrgbTarget);
-			m_EditorUiUnormTarget = std::move(*UnormTarget);
-			m_EditorUiWidth = Width;
-			m_EditorUiHeight = Height;
-			++m_EditorUiTargetCreations;
-			PF_INFO("Created editor UI validation targets: {}x{} sRGB intermediate + UNORM output", Width, Height);
-		}
-
-		void RenderEditorUiUnormFrame()
-		{
-			if (!m_Succeeded || m_EditorUiFrames >= 3)
-				return;
-			const uint32_t Width = m_EditorUiFrames < 2 ? 32u : 48u;
-			const uint32_t Height = 32u;
-			try
-			{
-				EnsureEditorUiTargets(Width, Height);
-				const PulseForge::Texture* Source = m_EditorUiSrgbTarget->GetColorTexture();
-				const PulseForge::Texture* Destination = m_EditorUiUnormTarget->GetColorTexture();
-				if (!Source || !Destination || Source->GetDescription().Format != PulseForge::TextureFormat::RGBA8_Srgb ||
-					Destination->GetDescription().Format != PulseForge::TextureFormat::RGBA8_UNorm ||
-					Source->GetDescription().Width != Width || Source->GetDescription().Height != Height ||
-					Destination->GetDescription().Width != Width || Destination->GetDescription().Height != Height ||
-					m_EditorUiSrgbTarget->GetDescription().DepthMode != PulseForge::DepthAttachmentMode::None ||
-					m_EditorUiUnormTarget->GetDescription().DepthMode != PulseForge::DepthAttachmentMode::None)
-					throw std::runtime_error("Editor UI validation target format or extent was incorrect");
-				if (m_EditorUiFrames == 0)
-					m_EditorUiFirstTexture = Source;
-				else if (m_EditorUiFrames == 1 && Source != m_EditorUiFirstTexture)
-					throw std::runtime_error("Same-sized editor UI target was not reused");
-				if (m_EditorUiTargetCreations != (m_EditorUiFrames < 2 ? 1u : 2u))
-					throw std::runtime_error("Editor UI target reuse or resize recreation count was incorrect");
-
-				PulseForge::RenderTargetClearValue Clear;
-				Clear.Color = { 0.0f, 0.0f, 0.0f, 1.0f };
-				if (const auto Begin = PulseForge::Application::Get().BeginRenderTarget(*m_EditorUiSrgbTarget, Clear); !Begin)
-					throw std::runtime_error("Could not begin editor UI sRGB target: " + Begin.error().Message);
-				const std::array<const PulseForge::BindingSet*, 1> UiBindings = { m_EditorUiDrawBindingSet.get() };
-				const auto BlendDraw = PulseForge::Application::Get().Draw(
-					*m_EditorUiPipeline,
-					*m_EditorUiVertexBuffer,
-					{ 3, 1, 0, 0 },
-					UiBindings);
-				const auto BlendEnd = PulseForge::Application::Get().EndRenderTarget();
-				if (!BlendDraw)
-					throw std::runtime_error("Could not record alpha blend into sRGB UI target: " + BlendDraw.error().Message);
-				if (!BlendEnd)
-					throw std::runtime_error("Could not end editor UI sRGB target: " + BlendEnd.error().Message);
-
-				if (const auto Begin = PulseForge::Application::Get().BeginRenderTarget(*m_EditorUiUnormTarget, Clear); !Begin)
-					throw std::runtime_error("Could not begin editor UI UNORM output: " + Begin.error().Message);
-				const std::array<const PulseForge::BindingSet*, 1> Bindings = { m_EditorUiBindingSet.get() };
-				const auto PresentDraw = PulseForge::Application::Get().Draw(
-					*m_EditorUiPresentationPipeline, *m_EditorUiFullscreenBuffer, { 3, 1, 0, 0 }, Bindings);
-				const auto PresentEnd = PulseForge::Application::Get().EndRenderTarget();
-				if (!PresentDraw)
-					throw std::runtime_error("Could not record editor UI UNORM output-transfer draw: " + PresentDraw.error().Message);
-				if (!PresentEnd)
-					throw std::runtime_error("Could not end editor UI UNORM output: " + PresentEnd.error().Message);
-				++m_EditorUiFrames;
-			}
-			catch (const std::exception& Exception)
-			{
-				Fail(Exception.what());
-			}
-		}
-
-		void RenderSceneHdrFrame()
-		{
-			if (!m_Succeeded || !m_ScenePrepared || (m_SceneCompletedFrames >= 4 && m_ScenarioIndex >= 4))
-				return;
-
-			PulseForge::Application& App = PulseForge::Application::Get();
-			if (m_SceneCompletedFrames == 0)
-			{
-				const auto InvalidExtent = m_SceneRenderer->RenderPreparedSceneToHdr(0, 64);
-				if (InvalidExtent || InvalidExtent.error().Code != PulseForge::SceneRendererErrorCode::ResourceCreationFailed)
-				{
-					Fail("HDR target did not reject a zero-width extent");
-					return;
-				}
-			}
-			if (m_SceneCompletedFrames == 2)
-				m_SamplingBindingSet.reset();
-
-			const bool SampleValidationScene = m_SceneCompletedFrames < 4;
-			const uint32_t Width = SampleValidationScene && m_SceneCompletedFrames < 2 ? 64u : 96u;
-			const uint32_t Height = 64u;
-			auto Rendered = m_SceneRenderer->RenderPreparedSceneToHdr(Width, Height);
-			if (!Rendered)
-			{
-				Fail("SceneRenderer HDR rendering failed: " + Rendered.error().Message);
-				return;
-			}
-			const PulseForge::Texture* Color = Rendered->ColorTexture;
-			const bool ExpectedGeometry = SampleValidationScene || m_ScenarioIndex >= 2;
-			const bool ExpectedEnvironment = SampleValidationScene || m_ScenarioIndex == 1;
-			if (!Color || !Rendered->DepthTexture || Rendered->Width != Width || Rendered->Height != Height ||
-				(Rendered->GeometryDrawCount > 0) != ExpectedGeometry ||
-				Rendered->EnvironmentBackgroundDrawn != ExpectedEnvironment)
-			{
-				Fail("SceneRenderer HDR result did not match expected geometry/environment participation");
-				return;
-			}
-			const PulseForge::TextureDesc& ColorDescription = Color->GetDescription();
-			if (ColorDescription.Width != Width || ColorDescription.Height != Height ||
-				ColorDescription.Format != PulseForge::TextureFormat::RGBA16_Float ||
-				!PulseForge::HasTextureUsage(ColorDescription.Usage, PulseForge::TextureUsage::ShaderResource) ||
-				!PulseForge::HasTextureUsage(ColorDescription.Usage, PulseForge::TextureUsage::ColorAttachment))
-			{
-				Fail("SceneRenderer HDR color texture has incompatible metadata or usage");
-				return;
-			}
-			const PulseForge::TextureDesc& DepthDescription = Rendered->DepthTexture->GetDescription();
-			if (DepthDescription.Width != Width || DepthDescription.Height != Height ||
-				DepthDescription.Format != PulseForge::TextureFormat::Depth32Float ||
-				!PulseForge::HasTextureUsage(DepthDescription.Usage, PulseForge::TextureUsage::DepthStencilAttachment))
-			{
-				Fail("SceneRenderer HDR target has incompatible D32 depth attachment metadata");
-				return;
-			}
-
-			if (SampleValidationScene && m_SceneCompletedFrames == 0)
-				m_FirstHdrTexture = Color;
-			else if (SampleValidationScene && m_SceneCompletedFrames == 1 && Color != m_FirstHdrTexture)
-			{
-				Fail("SceneRenderer recreated its HDR target at an unchanged extent");
-				return;
-			}
-			else if (SampleValidationScene && m_SceneCompletedFrames == 2 && Color == m_FirstHdrTexture)
-			{
-				Fail("SceneRenderer did not replace its HDR target after resize");
-				return;
-			}
-			else if (SampleValidationScene && m_SceneCompletedFrames == 3 && Color != m_ResizedHdrTexture)
-			{
-				Fail("SceneRenderer recreated its resized HDR target at an unchanged extent");
-				return;
-			}
-			if (SampleValidationScene && m_SceneCompletedFrames == 2)
-				m_ResizedHdrTexture = Color;
-
-			if (m_BoundHdrTexture != Color)
-			{
-				m_SamplingBindingSet.reset();
-				PulseForge::BindingSetDesc SamplingDescription;
-				SamplingDescription.Layout = m_BindingLayout;
-				SamplingDescription.Textures.push_back({ 0, *Color, PulseForge::BindingResourceType::Texture2D });
-				SamplingDescription.Samplers.push_back({ 0, *m_Sampler });
-				auto SamplingSet = App.CreateBindingSet(SamplingDescription);
-				if (!SamplingSet)
-				{
-					Fail("Could not bind SceneRenderer HDR output for sampling: " + SamplingSet.error().Message);
-					return;
-				}
-				m_SamplingBindingSet = std::move(*SamplingSet);
-				m_BoundHdrTexture = Color;
-			}
-			const std::array<const PulseForge::BindingSet*, 1> BindingSets = { m_SamplingBindingSet.get() };
-			const PulseForge::GraphicsResult SamplingDraw = App.Draw(
-				*m_SamplingPipeline,
-				*m_VertexBuffer,
-				{ 3, 1, 0, 0 },
-				BindingSets);
-			if (!SamplingDraw)
-			{
-				Fail("Could not sample SceneRenderer HDR output: " + SamplingDraw.error().Message);
-				return;
-			}
-			if (SampleValidationScene)
-				++m_SceneCompletedFrames;
-			else
-				++m_ScenarioIndex;
-			PF_INFO("Scene HDR validation: scenario {0}, extent {1}x{2}, {3} indexed geometry draw(s), environment background {4}",
-				SampleValidationScene ? "bundled" : ScenarioNames[m_ScenarioIndex - 1], Width, Height, Rendered->GeometryDrawCount,
-				Rendered->EnvironmentBackgroundDrawn ? "drawn" : "not present");
-		}
-
-		void EnsureSdrValidationTarget(PulseForge::ColorTargetFormat Format, uint32_t Width, uint32_t Height)
-		{
-			if (m_SdrTarget && m_SdrTarget->GetDescription().Width == Width &&
-				m_SdrTarget->GetDescription().Height == Height && m_SdrTarget->GetDescription().ColorFormat == Format)
-				return;
-			m_SamplingBindingSet.reset();
-			m_BoundOutputTexture = nullptr;
-			PulseForge::RenderTargetDesc Description;
-			Description.Width = Width;
-			Description.Height = Height;
-			Description.ColorFormat = Format;
-			Description.DepthMode = Format == PulseForge::ColorTargetFormat::RGBA8_UNorm
-				? PulseForge::DepthAttachmentMode::None
-				: PulseForge::DepthAttachmentMode::Attachment;
-			Description.DebugName = Format == PulseForge::ColorTargetFormat::RGBA8_Srgb
-				? "Tone-mapping validation sRGB output"
-				: "Tone-mapping validation UNORM output";
-			auto Target = PulseForge::Application::Get().CreateRenderTarget(Description);
-			if (!Target)
-				throw std::runtime_error("Could not create SDR validation target: " + Target.error().Message);
-			m_SdrTarget = std::move(*Target);
-		}
-
-		void RenderToneMappingFrame()
-		{
-			if (!m_Succeeded || !m_ScenePrepared || m_ToneMappingFrame >= 10)
-				return;
-
-			PulseForge::Application& App = PulseForge::Application::Get();
-			const bool DirectToSwapchain = m_ToneMappingFrame < 2;
-			const bool UseUnormTarget = m_ToneMappingFrame == 5;
-			const uint32_t Width = DirectToSwapchain ? App.GetWindow().GetFramebufferSize().first :
-				(m_ToneMappingFrame >= 4 ? 96u : 64u);
-			const uint32_t Height = DirectToSwapchain ? App.GetWindow().GetFramebufferSize().second : 64u;
-			if (Width == 0 || Height == 0)
-				return;
-			const std::array<float, 10> Exposures = { 0.0f, 1.0f, -2.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
-			if (!m_SceneRenderer->SetToneMappingSettings({ Exposures[m_ToneMappingFrame] }))
-			{
-				Fail("SceneRenderer rejected a valid GPU-validation exposure setting");
-				return;
-			}
-
-			PulseForge::SceneRenderOutputResult Output;
-			const PulseForge::Texture* OutputTexture = nullptr;
-			if (DirectToSwapchain)
-			{
-				auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput();
-				if (!Rendered)
-				{
-					Fail("SceneRenderer swapchain tonemapping failed: " + Rendered.error().Message);
-					return;
-				}
-				Output = *Rendered;
-				if (Output.DestinationFormat != PulseForge::ColorTargetFormat::Swapchain ||
-					Output.ShaderSrgbEncoded != (App.GetOutputColorEncoding() == PulseForge::OutputColorEncoding::UnormAttachment))
-				{
-					Fail("Swapchain tone-mapping output encoding did not match the active attachment");
-					return;
-				}
-			}
-			else
-			{
-				const PulseForge::ColorTargetFormat Format = UseUnormTarget
-					? PulseForge::ColorTargetFormat::RGBA8_UNorm : PulseForge::ColorTargetFormat::RGBA8_Srgb;
-				EnsureSdrValidationTarget(Format, Width, Height);
-				auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_SdrTarget);
-				if (!Rendered)
-				{
-					Fail("SceneRenderer offscreen tonemapping failed: " + Rendered.error().Message);
-					return;
-				}
-				Output = *Rendered;
-				OutputTexture = m_SdrTarget->GetColorTexture();
-				const PulseForge::TextureFormat ExpectedFormat = UseUnormTarget
-					? PulseForge::TextureFormat::RGBA8_UNorm : PulseForge::TextureFormat::RGBA8_Srgb;
-				if (!OutputTexture || Output.DestinationFormat != Format ||
-					Output.ShaderSrgbEncoded != UseUnormTarget ||
-					m_SdrTarget->GetDescription().DepthMode != (UseUnormTarget
-						? PulseForge::DepthAttachmentMode::None
-						: PulseForge::DepthAttachmentMode::Attachment) ||
-					OutputTexture->GetDescription().Format != ExpectedFormat ||
-					OutputTexture->GetDescription().Width != Width || OutputTexture->GetDescription().Height != Height)
-				{
-					Fail("Tone-mapped SDR target format, extent, or transfer-function decision was incorrect");
-					return;
-				}
-				if (Output.GeometryDrawCount != ((m_ToneMappingFrame == 6 || m_ToneMappingFrame == 8) ? 0u : 3u))
-				{
-					Fail("Tone-mapping scene variant submitted an unexpected indexed geometry count");
-					return;
-				}
-				if (m_BoundOutputTexture != OutputTexture)
-				{
-					m_SamplingBindingSet.reset();
-					PulseForge::BindingSetDesc Description;
-					Description.Layout = m_BindingLayout;
-					Description.Textures.push_back({ 0, *OutputTexture, PulseForge::BindingResourceType::Texture2D });
-					Description.Samplers.push_back({ 0, *m_Sampler });
-					auto Set = App.CreateBindingSet(Description);
-					if (!Set)
-					{
-						Fail("Could not bind tone-mapped SDR output for validation sampling: " + Set.error().Message);
-						return;
-					}
-					m_SamplingBindingSet = std::move(*Set);
-					m_BoundOutputTexture = OutputTexture;
-				}
-				const std::array<const PulseForge::BindingSet*, 1> Sets = { m_SamplingBindingSet.get() };
-				if (const auto Draw = App.Draw(*m_SamplingPipeline, *m_VertexBuffer, { 3, 1, 0, 0 }, Sets); !Draw)
-				{
-					Fail("Could not sample tone-mapped SDR output: " + Draw.error().Message);
-					return;
-				}
-			}
-
-			if (m_ToneMappingFrame == 0)
-				m_SwapchainHdrGeneration = Output.HdrTargetGeneration;
-			else if (m_ToneMappingFrame == 1 && Output.HdrTargetGeneration != m_SwapchainHdrGeneration)
-			{
-				Fail("Unchanged swapchain extent recreated the HDR scene target");
-				return;
-			}
-			if (m_ToneMappingFrame == 2)
-				m_SrgbHdrGeneration = Output.HdrTargetGeneration;
-			else if (m_ToneMappingFrame == 3 && Output.HdrTargetGeneration != m_SrgbHdrGeneration)
-			{
-				Fail("Exposure changes recreated the unchanged HDR target");
-				return;
-			}
-			if (m_ToneMappingFrame == 4 && Output.HdrTargetGeneration == m_SrgbHdrGeneration)
-			{
-				Fail("HDR target generation did not change after the 64x64 to 96x64 resize");
-				return;
-			}
-			if (m_ToneMappingFrame == 4)
-				m_ResizedHdrGeneration = Output.HdrTargetGeneration;
-			else if (m_ToneMappingFrame >= 5 && Output.HdrTargetGeneration != m_ResizedHdrGeneration)
-			{
-				Fail("Changing output format or scene scenario recreated the same-size HDR target");
-				return;
-			}
-			PF_INFO("Tonemapping validation frame {0}: {1}, EV {2}, {3}x{4}, HDR generation {5}, shader sRGB encode {6}",
-				m_ToneMappingFrame,
-				DirectToSwapchain ? "swapchain" : UseUnormTarget ? "RGBA8_UNorm" : "RGBA8_Srgb",
-				Exposures[m_ToneMappingFrame], Width, Height, Output.HdrTargetGeneration, Output.ShaderSrgbEncoded);
-			++m_ToneMappingFrame;
-		}
-
-		PulseForge::Scene& GetScenarioScene(size_t Index)
-		{
-			switch (Index)
-			{
-				case 0: return m_EmptyScene;
-				case 1: return m_EnvironmentOnlyScene;
-				case 2: return m_GeometryOnlyScene;
-				default: return m_DirectionalOnlyScene;
-			}
-		}
-
-		void BuildScenario(PulseForge::Scene& Destination, bool IncludeGeometry, bool IncludeEnvironment, bool IncludeDirectional)
-		{
-			bool HasCamera = false;
-			for (const PulseForge::Entity Source : m_Scene.GetEntities())
-			{
-				const auto Transform = Source.GetTransform();
-				const auto Camera = Source.GetCamera();
-				if (!Transform || !Camera)
-					throw std::runtime_error("Could not inspect bundled scene entities for GPU validation scenarios");
-				if (!HasCamera && *Camera)
-				{
-					auto Entity = Destination.CreateEntity("GPU validation camera");
-					if (!Entity)
-						throw std::runtime_error("Could not create scenario camera: " + Entity.error().Message);
-					PulseForge::CameraComponent Component = **Camera;
-					Component.IsPrimary = true;
-					if (auto Result = Entity->SetTransform(*Transform); !Result)
-						throw std::runtime_error("Could not set scenario camera transform: " + Result.error().Message);
-					if (auto Result = Entity->SetCamera(Component); !Result)
-						throw std::runtime_error("Could not set scenario camera: " + Result.error().Message);
-					HasCamera = true;
-				}
-
-				const auto Environment = Source.GetEnvironmentLight();
-				const auto Directional = Source.GetDirectionalLight();
-				const auto Mesh = Source.GetMeshRenderer();
-				if (!Environment || !Directional || !Mesh)
-					throw std::runtime_error("Could not inspect bundled scene components for GPU validation scenarios");
-				if ((IncludeEnvironment && *Environment) || (IncludeDirectional && *Directional) || (IncludeGeometry && *Mesh))
-				{
-					auto Entity = Destination.CreateEntity("GPU validation scenario object");
-					if (!Entity)
-						throw std::runtime_error("Could not create scenario object: " + Entity.error().Message);
-					if (auto Result = Entity->SetTransform(*Transform); !Result)
-						throw std::runtime_error("Could not set scenario object transform: " + Result.error().Message);
-					if (IncludeEnvironment && *Environment)
-						if (auto Result = Entity->SetEnvironmentLight(**Environment); !Result)
-							throw std::runtime_error("Could not set scenario environment: " + Result.error().Message);
-					if (IncludeDirectional && *Directional)
-						if (auto Result = Entity->SetDirectionalLight(**Directional); !Result)
-							throw std::runtime_error("Could not set scenario directional light: " + Result.error().Message);
-					if (IncludeGeometry && *Mesh)
-						if (auto Result = Entity->SetMeshRenderer(**Mesh); !Result)
-							throw std::runtime_error("Could not set scenario mesh: " + Result.error().Message);
-				}
-			}
-			if (!HasCamera)
-				throw std::runtime_error("Bundled validation scene has no camera for GPU scenario setup");
-		}
-
 		void ValidatePreparationFailureHandling()
 		{
 			PulseForge::Scene InvalidScene;
 			auto CameraEntity = InvalidScene.CreateEntity("GPU validation invalid-scene camera");
-			if (!CameraEntity)
-				throw std::runtime_error("Could not create invalid-scene camera: " + CameraEntity.error().Message);
+			if (!CameraEntity) throw std::runtime_error("Could not create invalid-scene camera: " + CameraEntity.error().Message);
 			PulseForge::CameraComponent Camera;
 			Camera.IsPrimary = true;
 			if (auto Result = CameraEntity->SetCamera(Camera); !Result)
 				throw std::runtime_error("Could not set invalid-scene camera: " + Result.error().Message);
 			auto MeshEntity = InvalidScene.CreateEntity("GPU validation missing mesh");
-			if (!MeshEntity)
-				throw std::runtime_error("Could not create invalid-scene mesh entity: " + MeshEntity.error().Message);
-			const PulseForge::MeshRendererComponent MissingMesh{
-				PulseForge::AssetID{ 0x13579bdf2468ace0ull, 0x1029384756abcdefull }, {}};
+			if (!MeshEntity) throw std::runtime_error("Could not create invalid-scene mesh entity: " + MeshEntity.error().Message);
+			const PulseForge::MeshRendererComponent MissingMesh{ PulseForge::AssetID{ 0x13579bdf2468ace0ull, 0x1029384756abcdefull }, {} };
 			if (auto Result = MeshEntity->SetMeshRenderer(MissingMesh); !Result)
 				throw std::runtime_error("Could not set missing-mesh component: " + Result.error().Message);
 			const auto Preparation = m_SceneRenderer->PrepareScene(InvalidScene, 1.0f);
@@ -3507,87 +632,27 @@ namespace
 		PulseForge::BindingSetHandle m_SamplingBindingSet;
 		PulseForge::GraphicsPipelineHandle m_ColorPipeline;
 		PulseForge::GraphicsPipelineHandle m_SamplingPipeline;
-		std::vector<PulseForge::TextureHandle> m_ActiveFrameUploadTextures;
-		std::vector<PulseForge::BufferHandle> m_ActiveFrameUploadBuffers;
-		std::vector<PulseForge::BindingSetHandle> m_ActiveFrameUploadBindingSets;
 		PulseForge::RenderTargetHandle m_SdrTarget;
-		PulseForge::ShaderHandle m_EditorUiVertexShader;
-		PulseForge::ShaderHandle m_EditorUiFragmentShader;
-		PulseForge::ShaderHandle m_EditorUiPresentationVertexShader;
-		PulseForge::ShaderHandle m_EditorUiPresentationFragmentShader;
-		PulseForge::TextureHandle m_EditorUiFontTexture;
-		PulseForge::BindingSetHandle m_EditorUiDrawBindingSet;
-		PulseForge::BindingSetHandle m_EditorUiBindingSet;
-		PulseForge::GraphicsPipelineHandle m_EditorUiPipeline;
-		PulseForge::GraphicsPipelineHandle m_EditorUiPresentationPipeline;
-		PulseForge::RenderTargetHandle m_EditorUiSrgbTarget;
-		PulseForge::RenderTargetHandle m_EditorUiUnormTarget;
-		PulseForge::BufferHandle m_EditorUiVertexBuffer;
-		PulseForge::BufferHandle m_EditorUiFullscreenBuffer;
-		const PulseForge::Texture* m_EditorUiFirstTexture = nullptr;
+		PulseForge::GpuValidation::EditorUiUnormValidation m_EditorUiValidation;
 		std::optional<PulseForge::Project> m_Project;
 		PulseForge::Scene m_Scene;
-		PulseForge::Scene m_EmptyScene;
-		PulseForge::Scene m_EnvironmentOnlyScene;
-		PulseForge::Scene m_GeometryOnlyScene;
-		PulseForge::Scene m_DirectionalOnlyScene;
-		PulseForge::Scene m_LocalLightsScene;
-		PulseForge::Scene m_SpotlightShadowScene;
-		PulseForge::Scene m_PointShadowScene;
-		PulseForge::Scene m_PointShadowImageScene;
-		std::optional<PulseForge::AmbientOcclusionSettings> m_SavedAmbientOcclusionSettings;
-		std::optional<PulseForge::ToneMappingSettings> m_SavedToneMappingSettings;
-		std::vector<PulseForge::Entity> m_LocalLightEntities;
-		std::vector<PulseForge::Entity> m_SpotlightShadowEntities;
-		std::vector<PulseForge::Entity> m_PointShadowEntities;
-		PulseForge::RenderTargetHandle m_LocalLightOutputTarget;
-		PulseForge::RenderTargetHandle m_SpotlightShadowOutputTarget;
-		PulseForge::RenderTargetHandle m_PointShadowOutputTarget;
-		PulseForge::RenderTargetHandle m_PointShadowImageOutputTarget;
-		PulseForge::RenderTargetHandle m_PbrMaterialOutputTarget;
-		PulseForge::RenderTargetHandle m_PointShadowOverviewOutputTarget;
-		PulseForge::Entity m_PointShadowOverviewPrimary;
-		PulseForge::Entity m_PointShadowOverviewSecondary;
-		PulseForge::Entity m_PointShadowImageCamera;
-		PulseForge::Entity m_PointShadowImageFloor;
-		PulseForge::Entity m_PointShadowImageCeiling;
-		PulseForge::Entity m_PointShadowImageCube;
-		PulseForge::Entity m_PointShadowImageLight;
-		PulseForge::TransformComponent m_PointShadowImageCameraTransform;
-		PulseForge::TransformComponent m_PointShadowImageCeilingTransform;
-		PulseForge::MeshRendererComponent m_PointShadowImageFloorMesh;
-		std::array<glm::mat4, PointShadowImageCases.size()> m_PointShadowImageViewProjections{};
-		std::array<glm::vec3, PointShadowImageCases.size()> m_PointShadowImageCameraPositions{};
-		std::array<std::optional<PulseForge::TextureReadback>, PointShadowImageCases.size()> m_PointShadowImageResults{};
-		std::array<std::array<std::optional<PulseForge::TextureReadback>, 6>, 2> m_PointShadowCubemapDepths{};
 		std::filesystem::path m_PointShadowImageDirectory;
-		std::filesystem::path m_PbrMaterialImagePath;
+		std::unique_ptr<PulseForge::Window> m_RetirementWindow;
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
-		const PulseForge::Texture* m_FirstHdrTexture = nullptr;
-		const PulseForge::Texture* m_ResizedHdrTexture = nullptr;
-		const PulseForge::Texture* m_BoundHdrTexture = nullptr;
-		const PulseForge::Texture* m_BoundOutputTexture = nullptr;
+		std::unique_ptr<PulseForge::GpuValidation::GpuSceneOutputValidation> m_SceneOutputValidation;
+		PulseForge::GpuValidation::PointShadowImageValidation m_PointShadowImageValidation;
+		std::unique_ptr<PulseForge::GpuValidation::GpuLightingValidation> m_LightingValidation;
+		std::unique_ptr<PulseForge::GpuValidation::GpuProjectSceneValidation> m_ProjectSceneValidation;
 		std::chrono::steady_clock::time_point m_StartedAt{};
 		uint32_t m_CompletedFrames = 0;
-		uint32_t m_ActiveFrameUploadFrames = 0;
-		uint32_t m_SceneCompletedFrames = 0;
-		uint32_t m_LocalLightFrames = 0;
-		uint32_t m_SpotShadowFrames = 0;
-		uint32_t m_PointShadowFrames = 0;
-		size_t m_PointShadowImageCase = 0;
-		size_t m_PointShadowOverviewImageCase = 0;
-		uint32_t m_ToneMappingFrame = 0;
-		uint32_t m_EditorUiFrames = 0;
-		uint32_t m_EditorUiTargetCreations = 0;
-		uint32_t m_EditorUiWidth = 0;
-		uint32_t m_EditorUiHeight = 0;
-		size_t m_ScenarioIndex = 0;
-		uint64_t m_SwapchainHdrGeneration = 0;
-		uint64_t m_SrgbHdrGeneration = 0;
-		uint64_t m_ResizedHdrGeneration = 0;
-		uint64_t m_FirstSpotShadowHdrGeneration = 0;
-		const std::array<const char*, 4> ScenarioNames = { "empty", "environment-only", "geometry-only", "directional-only" };
+		uint32_t m_RetirementValidationFrames = 0;
+		uint32_t m_RetirementNativeSubmissions = 0;
+		uint32_t m_RetirementMainFrames = 0;
+		uint64_t m_RetirementTargetID = 0;
 		bool m_Succeeded = true;
+		bool m_SawMainFrameBeforeRecoveryFailure = false;
+		bool m_MainFrameResumedAfterRecoveryFailure = false;
+		bool m_LegacyRetirementValidationComplete = false;
 		bool m_ValidateSceneHdr = false;
 		bool m_ValidateToneMapping = false;
 		bool m_ValidateEditorUiUnorm = false;
@@ -3597,52 +662,20 @@ namespace
 		bool m_ValidatePbrMaterials = false;
 		bool m_ValidateTransparency = false;
 		bool m_ValidatePointShadowImages = false;
-		bool m_ValidateActiveFrameUploads = false;
-		bool m_ScenePrepared = false;
-		bool m_PointShadowScenarioUpdated = false;
-		bool m_PointShadowImageCapturePending = false;
-		bool m_PointShadowImageValidationComplete = false;
-		bool m_PointShadowOverviewCapturePending = false;
-		bool m_PointShadowOverviewSettingsRestored = false;
-		bool m_CapturingPointShadowOverview = false;
-		bool m_PbrMaterialCapturePending = false;
-		bool m_PbrMaterialCaptureComplete = false;
-		size_t m_PbrMaterialGeometryDrawCount = 0;
-		std::unique_ptr<PulseForge::RenderTarget> m_TransparencyOutputTarget;
-		std::filesystem::path m_TransparencyImagePath;
-		PulseForge::Entity m_TransparencyDirectionalLight;
-		PulseForge::Entity m_TransparencySpotLight;
-		PulseForge::Entity m_TransparencyPointLight;
-		PulseForge::Entity m_TransparencyBlueGlassPanel;
-		PulseForge::UUID m_TransparencyBlueOpaqueControlMaterial;
-		std::vector<std::byte> m_TransparencyShadowOffPixels;
-		std::vector<std::byte> m_TransparencyShadowOnPixels;
-		std::vector<std::byte> m_TransparencyNoSpotPixels;
-		std::vector<std::byte> m_TransparencyPointShadowOffPixels;
-		std::vector<std::byte> m_TransparencyPointShadowOnPixels;
-		std::vector<std::byte> m_TransparencyDirectionalShadowOffPixels;
-		std::vector<std::byte> m_TransparencyDirectionalShadowOnPixels;
-		std::vector<std::byte> m_TransparencyOpaqueControlPixels;
-		float m_TransparencySpotIntensity = 0.0f;
-		bool m_TransparencyCapturePending = false;
-		bool m_TransparencyCaptureComplete = false;
-		size_t m_TransparencyCaptureStage = 0;
-		size_t m_TransparencyGeometryDrawCount = 0;
+		LegacyRetirementScenario m_LegacyRetirementScenario = LegacyRetirementScenario::None;
 	};
 
 	class GpuValidationApplication final : public PulseForge::Application
 	{
 	public:
-		GpuValidationApplication(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm,
-			bool ValidateLocalLights, bool ValidateSpotlightShadows, bool ValidatePointShadows, bool ValidatePbrMaterials,
-			bool ValidateTransparency, bool ValidatePointShadowImages, bool ValidateActiveFrameUploads,
-			std::filesystem::path PointShadowImageDirectory)
+		GpuValidationApplication(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm, bool ValidateLocalLights,
+			bool ValidateSpotlightShadows, bool ValidatePointShadows, bool ValidatePbrMaterials, bool ValidateTransparency,
+			bool ValidatePointShadowImages, std::filesystem::path PointShadowImageDirectory, LegacyRetirementScenario RetirementScenario)
 			: Application(PulseForge::RendererAPI::Vulkan)
 		{
 			auto Layer = std::make_unique<GpuValidationLayer>(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm,
-				ValidateLocalLights, ValidateSpotlightShadows, ValidatePointShadows, ValidatePbrMaterials,
-				ValidateTransparency,
-				ValidatePointShadowImages, ValidateActiveFrameUploads, std::move(PointShadowImageDirectory));
+				ValidateLocalLights, ValidateSpotlightShadows, ValidatePointShadows, ValidatePbrMaterials, ValidateTransparency,
+				ValidatePointShadowImages, std::move(PointShadowImageDirectory), RetirementScenario);
 			m_Layer = Layer.get();
 			PushLayer(std::move(Layer));
 		}
@@ -3656,7 +689,7 @@ namespace
 	private:
 		GpuValidationLayer* m_Layer = nullptr;
 	};
-}
+} // namespace
 
 int main(int ArgumentCount, char** Arguments)
 {
@@ -3664,6 +697,7 @@ int main(int ArgumentCount, char** Arguments)
 	try
 	{
 		const std::string_view Mode = ArgumentCount > 1 ? std::string_view(Arguments[1]) : std::string_view{};
+		if (Mode == "--active-frame-resource-upload") return PulseForge::GpuValidation::RunActiveFrameUploadValidation();
 		const bool ValidateSceneHdr = Mode == "--scene-hdr";
 		const bool ValidateToneMapping = Mode == "--scene-tonemap";
 		const bool ValidateEditorUiUnorm = Mode == "--editor-ui-unorm";
@@ -3673,14 +707,16 @@ int main(int ArgumentCount, char** Arguments)
 		const bool ValidatePbrMaterials = Mode == "--scene-pbr-materials";
 		const bool ValidateTransparency = Mode == "--scene-transparency";
 		const bool ValidatePointShadowImages = Mode == "--scene-point-shadow-images";
-		const bool ValidateActiveFrameUploads = Mode == "--active-frame-resource-upload";
-		const std::filesystem::path PointShadowImageDirectory = ArgumentCount > 2
-			? std::filesystem::path(Arguments[2])
-			: std::filesystem::current_path() / "Diagnostics" / "PointShadowDirection";
+		const LegacyRetirementScenario RetirementScenario =
+			Mode == "--legacy-main-retirement-cap"	   ? LegacyRetirementScenario::MainRecoveryFailure
+			: Mode == "--legacy-native-retirement-cap" ? LegacyRetirementScenario::NativeRecoveryFailure
+													   : LegacyRetirementScenario::None;
+		const std::filesystem::path PointShadowImageDirectory =
+			ArgumentCount > 2 ? std::filesystem::path(Arguments[2])
+							  : std::filesystem::current_path() / "Diagnostics" / "PointShadowDirection";
 		GpuValidationApplication App(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm, ValidateLocalLights,
-			ValidateSpotlightShadows, ValidatePointShadows, ValidatePbrMaterials,
-			ValidateTransparency,
-			ValidatePointShadowImages, ValidateActiveFrameUploads, PointShadowImageDirectory);
+			ValidateSpotlightShadows, ValidatePointShadows, ValidatePbrMaterials, ValidateTransparency, ValidatePointShadowImages,
+			PointShadowImageDirectory, RetirementScenario);
 		return App.RunValidation();
 	}
 	catch (const std::exception& Exception)

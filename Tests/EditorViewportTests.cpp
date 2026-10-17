@@ -3,6 +3,10 @@
 #include "Editor/EditorViewportPolicy.h"
 #include "Editor/EditorViewportToolState.h"
 
+#include <chrono>
+#include <cmath>
+#include <limits>
+
 namespace
 {
 	void TestEditorMeshPickingCache(TestRunner& Tests)
@@ -439,6 +443,40 @@ namespace
 		PF_CHECK(Tests, !NoScene.UseRuntimeScene && !NoScene.ViewProjectionValid);
 	}
 
+	void TestEditorViewportInitializationRetry(TestRunner& Tests)
+	{
+		using Retry = PulseForgeEditor::EditorViewportInitializationRetry;
+		const Retry::TimePoint Start{};
+		Retry Schedule;
+		PF_CHECK(Tests, Schedule.CanAttempt(Start));
+
+		Schedule.RecordFailure(Start);
+		PF_CHECK(Tests, !Schedule.CanAttempt(Start));
+		PF_CHECK(Tests, !Schedule.CanAttempt(Start + std::chrono::milliseconds(249)));
+		PF_CHECK(Tests, Schedule.CanAttempt(Start + std::chrono::milliseconds(250)));
+
+		const Retry::TimePoint FirstRetry = Start + std::chrono::milliseconds(250);
+		Schedule.RecordFailure(FirstRetry);
+		PF_CHECK(Tests, !Schedule.CanAttempt(FirstRetry + std::chrono::milliseconds(499)));
+		PF_CHECK(Tests, Schedule.CanAttempt(FirstRetry + std::chrono::milliseconds(500)));
+
+		Retry::TimePoint Failure = FirstRetry + std::chrono::milliseconds(500);
+		for (const std::chrono::milliseconds Delay : { std::chrono::milliseconds(1000), std::chrono::milliseconds(2000),
+				 std::chrono::milliseconds(4000), std::chrono::milliseconds(5000) })
+		{
+			Schedule.RecordFailure(Failure);
+			PF_CHECK(Tests, !Schedule.CanAttempt(Failure + Delay - std::chrono::milliseconds(1)));
+			Failure += Delay;
+			PF_CHECK(Tests, Schedule.CanAttempt(Failure));
+		}
+
+		Schedule.RecordFailure(Failure);
+		Schedule.Reset();
+		PF_CHECK(Tests, Schedule.CanAttempt(Failure));
+		Schedule.RecordFailure(Failure);
+		PF_CHECK(Tests, !Schedule.CanAttempt(Failure));
+	}
+
 	void TestViewportMouseCaptureState(TestRunner& Tests)
 	{
 		PulseForgeEditor::Detail::ViewportMouseCaptureState Capture;
@@ -452,9 +490,28 @@ namespace
 		PF_CHECK(Tests, !Capture.Begin(true, true, true, false, false)); // No duplicate capture transition.
 		Capture.End(); // Same transition is used for RMB release, focus loss, and layout/project changes.
 		PF_CHECK(Tests, !Capture.OwnsMouse());
+		PF_CHECK(Tests, !Capture.UpdateCursorPosition(100.0f, 100.0f));
 		PF_CHECK(Tests, Capture.Begin(true, true, true, false, false));
+		PF_CHECK(Tests, !Capture.UpdateCursorPosition(30.0f, 40.0f)); // Ignore the warp generated when capture starts.
+		const auto FirstDelta = Capture.UpdateCursorPosition(33.5f, 38.0f);
+		PF_CHECK(Tests, FirstDelta.has_value());
+		if (FirstDelta)
+		{
+			PF_CHECK(Tests, std::abs(FirstDelta->first - 3.5f) < 1.0e-6f);
+			PF_CHECK(Tests, std::abs(FirstDelta->second + 2.0f) < 1.0e-6f);
+		}
+		PF_CHECK(Tests, !Capture.UpdateCursorPosition(std::numeric_limits<float>::infinity(), 42.0f));
+		PF_CHECK(Tests, !Capture.UpdateCursorPosition(45.0f, 42.0f)); // Rebase after invalid native cursor data.
+		const auto RebasedDelta = Capture.UpdateCursorPosition(46.0f, 43.0f);
+		PF_CHECK(Tests, RebasedDelta.has_value());
+		if (RebasedDelta)
+		{
+			PF_CHECK(Tests, std::abs(RebasedDelta->first - 1.0f) < 1.0e-6f);
+			PF_CHECK(Tests, std::abs(RebasedDelta->second - 1.0f) < 1.0e-6f);
+		}
 		Capture.End();
 		PF_CHECK(Tests, !Capture.OwnsMouse());
+		PF_CHECK(Tests, !Capture.UpdateCursorPosition(47.0f, 44.0f));
 	}
 
 	void TestEditorViewportCameraController(TestRunner& Tests)
@@ -540,6 +597,7 @@ void RunEditorViewportTests(TestRunner& Tests)
 	TestEditorMeshPickingCache(Tests);
 	TestEditorViewportMath(Tests);
 	TestEditorViewportTargetExtent(Tests);
+	TestEditorViewportInitializationRetry(Tests);
 	TestViewportMouseCaptureState(Tests);
 	TestEditorViewportCameraController(Tests);
 	TestEditorViewportToolState(Tests);

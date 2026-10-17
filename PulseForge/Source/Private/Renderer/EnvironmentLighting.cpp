@@ -1,8 +1,6 @@
-#include "Core/PulseForgePCH.h"
 #include "Renderer/EnvironmentLighting.h"
 #include "Core/ScopedProfileTimer.h"
 
-#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <numbers>

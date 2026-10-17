@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Renderer/Buffer.h"
 
 namespace PulseForge

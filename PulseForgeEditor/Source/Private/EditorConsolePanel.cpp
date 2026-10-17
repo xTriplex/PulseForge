@@ -3,20 +3,10 @@
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorStyle.h"
 #include "EditorConsoleHistory.h"
-#include "EditorConsoleSeverity.h"
+#include "Core/Log.h"
 
-#include <imgui.h>
-#include <spdlog/sinks/base_sink.h>
-#include <spdlog/spdlog.h>
-
-#include <algorithm>
 #include <cfloat>
 #include <cstdio>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <utility>
-#include <vector>
 
 namespace PulseForgeEditor
 {
@@ -59,30 +49,13 @@ namespace PulseForgeEditor
 			}
 		}
 
-		class EditorConsoleSink final : public spdlog::sinks::base_sink<std::mutex>
-		{
-		public:
-			explicit EditorConsoleSink(EditorConsoleHistory& History) : m_History(History) {}
-
-		protected:
-			void sink_it_(const spdlog::details::log_msg& Message) override
-			{
-				m_History.Append(std::string_view(Message.logger_name.data(), Message.logger_name.size()),
-					Detail::ConvertConsoleSeverity(Message.level), std::string_view(Message.payload.data(), Message.payload.size()));
-			}
-
-			void flush_() override {}
-
-		private:
-			EditorConsoleHistory& m_History;
-		};
 	} // namespace
 
 	struct EditorConsolePanel::Impl final
 	{
 		EditorConsoleHistory History;
-		std::shared_ptr<EditorConsoleSink> Sink;
-		std::vector<std::shared_ptr<spdlog::logger>> Loggers;
+		bool Attached = false;
+		uint64_t LastLogSequence = 0;
 		std::vector<EditorConsoleMessage> Messages;
 		bool AutoScroll = true;
 		bool SelectableView = false;
@@ -93,9 +66,20 @@ namespace PulseForgeEditor
 		uint64_t SelectableTextRevision = 0;
 		std::string SelectableText;
 
+		void CapturePendingLogs()
+		{
+			if (!Attached) return;
+			std::vector<PulseForge::LogEntry> Recent = PulseForge::Log::GetRecentEntriesAfter(LastLogSequence);
+			for (const PulseForge::LogEntry& Entry : Recent)
+			{
+				History.Append(Entry);
+				LastLogSequence = Entry.Sequence;
+			}
+		}
+
 		void Refresh()
 		{
-			if (!Sink) return;
+			CapturePendingLogs();
 			uint64_t CurrentRevision = Revision;
 			if (History.CopyMessagesIfChanged(Revision, Messages, CurrentRevision)) Revision = CurrentRevision;
 		}
@@ -127,32 +111,24 @@ namespace PulseForgeEditor
 	void EditorConsolePanel::Attach()
 	{
 		Detach();
-		m_Impl->Sink = std::make_shared<EditorConsoleSink>(m_Impl->History);
-		for (const char* LoggerName : { "PULSEFORGE", "APP" })
-		{
-			if (auto Logger = spdlog::get(LoggerName))
-			{
-				Logger->sinks().push_back(m_Impl->Sink);
-				m_Impl->Loggers.push_back(std::move(Logger));
-			}
-		}
-		if (m_Impl->Loggers.empty()) m_Impl->Sink.reset();
+		m_Impl->Attached = PulseForge::Log::IsInitialized();
+		m_Impl->Refresh();
 	}
 
 	void EditorConsolePanel::Detach() noexcept
 	{
-		if (!m_Impl->Sink) return;
-		const std::shared_ptr<spdlog::sinks::sink> Sink = m_Impl->Sink;
-		for (const std::shared_ptr<spdlog::logger>& Logger : m_Impl->Loggers)
-			std::erase(Logger->sinks(), Sink);
-		m_Impl->Loggers.clear();
-		m_Impl->Sink.reset();
+		m_Impl->Attached = false;
+	}
+
+	void EditorConsolePanel::CapturePendingLogs()
+	{
+		m_Impl->CapturePendingLogs();
 	}
 
 	void EditorConsolePanel::DrawContents(EditorStyle& Style)
 	{
 		Impl& State = *m_Impl;
-		if (!State.Sink)
+		if (!State.Attached)
 		{
 			Style.EmptyState(EditorIcon::Warning, "The editor could not connect to the engine loggers.");
 			return;

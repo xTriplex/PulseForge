@@ -7,7 +7,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "Tools" / "Quality"))
+QUALITY_TOOLS_VALUE = os.environ.get("PULSEFORGE_QUALITY_TOOLS_DIR")
+if not QUALITY_TOOLS_VALUE:
+	raise RuntimeError("CMake must provide PULSEFORGE_QUALITY_TOOLS_DIR for quality tests")
+QUALITY_TOOLS = Path(QUALITY_TOOLS_VALUE).resolve()
+sys.path.insert(0, str(QUALITY_TOOLS))
 
 import CheckCodeQualityTools as quality_tools
 
@@ -66,6 +70,21 @@ class CodeQualityToolTests(unittest.TestCase):
 			text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
 		self.source.write_text(formatted.stdout, encoding="utf-8")
 		self.assertEqual(quality_tools.check_formatting(self.root, paths, self.base, executable), [])
+
+	def test_formatting_preview_counts_violations_not_output_lines(self):
+		output_lines = []
+		for line in range(1, 5):
+			output_lines.extend(
+				[
+					f"Sample.cpp:{line}:4: error: code should be clang-formatted [-Wclang-format-violations]",
+					"source line",
+					"caret line",
+				]
+			)
+		output = "\n".join(output_lines)
+		preview = quality_tools.formatting_diagnostic_preview(output)
+		self.assertIn("... 2 additional formatting violations", preview)
+		self.assertNotIn("additional formatter diagnostics", preview)
 
 
 if __name__ == "__main__":

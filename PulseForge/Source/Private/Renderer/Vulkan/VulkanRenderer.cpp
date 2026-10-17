@@ -1,10 +1,10 @@
-#include "Core/PulseForgePCH.h"
-
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #include <vulkan/vulkan.hpp>
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include "Renderer/RendererBackend.h"
+#include "Renderer/Vulkan/VulkanPresentationResources.h"
+#include "Renderer/Vulkan/VulkanResourceObjects.h"
 #include "Renderer/Vulkan/VulkanSupport.h"
 #include "Window/Window.h"
 
@@ -13,19 +13,16 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include <GLFW/glfw3.h>
 
-#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <optional>
-#include <string>
 #include <type_traits>
-#include <unordered_map>
-#include <utility>
-#include <vector>
 
 namespace PulseForge
 {
+	using namespace VulkanDetail;
+
 	namespace
 	{
 		constexpr uint32_t VulkanApiVersion = VK_API_VERSION_1_3;
@@ -228,288 +225,6 @@ namespace PulseForge
 			}
 		};
 
-		class VulkanBuffer final : public Buffer
-		{
-		public:
-			VulkanBuffer(BufferDesc Description, nvrhi::BufferHandle Handle)
-				: m_Description(std::move(Description)),
-				  m_Handle(std::move(Handle))
-			{
-			}
-
-			const BufferDesc& GetDescription() const noexcept override
-			{
-				return m_Description;
-			}
-
-			nvrhi::IBuffer* GetNativeBuffer() const noexcept
-			{
-				return m_Handle.Get();
-			}
-
-		private:
-			BufferDesc m_Description;
-			nvrhi::BufferHandle m_Handle;
-		};
-
-		class VulkanTexture final : public Texture
-		{
-		public:
-			VulkanTexture(TextureDesc Description, nvrhi::TextureHandle Handle)
-				: m_Description(std::move(Description)),
-				  m_Handle(std::move(Handle))
-			{
-			}
-
-			const TextureDesc& GetDescription() const noexcept override
-			{
-				return m_Description;
-			}
-
-			nvrhi::ITexture* GetNativeTexture() const noexcept
-			{
-				return m_Handle.Get();
-			}
-
-			nvrhi::TextureHandle GetNativeTextureHandle() const noexcept
-			{
-				return m_Handle;
-			}
-
-		private:
-			TextureDesc m_Description;
-			nvrhi::TextureHandle m_Handle;
-		};
-
-		class VulkanRenderTarget final : public RenderTarget
-		{
-		public:
-			VulkanRenderTarget(
-				RenderTargetDesc Description,
-				TextureHandle ColorTexture,
-				TextureHandle DepthTexture,
-				nvrhi::FramebufferHandle Framebuffer,
-			const Texture* BorrowedDepthTexture = nullptr,
-			uint32_t DepthArraySlice = 0)
-				: m_Description(std::move(Description)),
-				  m_ColorTexture(std::move(ColorTexture)),
-				  m_DepthTexture(std::move(DepthTexture)),
-				  m_BorrowedDepthTexture(BorrowedDepthTexture),
-				  m_DepthArraySlice(DepthArraySlice),
-				  m_Framebuffer(std::move(Framebuffer))
-			{
-			}
-
-			const RenderTargetDesc& GetDescription() const noexcept override
-			{
-				return m_Description;
-			}
-
-			const Texture* GetColorTexture() const noexcept override
-			{
-				return m_ColorTexture.get();
-			}
-
-			const Texture* GetDepthTexture() const noexcept override
-			{
-				return m_DepthTexture ? m_DepthTexture.get() : m_BorrowedDepthTexture;
-			}
-
-			nvrhi::FramebufferHandle GetNativeFramebuffer() const noexcept
-			{
-				return m_Framebuffer;
-			}
-
-			nvrhi::TextureHandle GetNativeColorTexture() const noexcept
-			{
-				return m_ColorTexture
-					? static_cast<const VulkanTexture&>(*m_ColorTexture).GetNativeTextureHandle()
-					: nvrhi::TextureHandle{};
-			}
-
-			nvrhi::TextureHandle GetNativeDepthTexture() const noexcept
-			{
-				const Texture* DepthTexture = m_DepthTexture ? m_DepthTexture.get() : m_BorrowedDepthTexture;
-				return DepthTexture
-					? static_cast<const VulkanTexture&>(*DepthTexture).GetNativeTextureHandle()
-					: nvrhi::TextureHandle{};
-			}
-
-			nvrhi::TextureSubresourceSet GetDepthSubresources() const noexcept
-			{
-				return m_BorrowedDepthTexture
-					? nvrhi::TextureSubresourceSet(0, 1, m_DepthArraySlice, 1)
-					: nvrhi::TextureSubresourceSet();
-			}
-
-		private:
-			// Declaration order ensures the framebuffer releases its attachment references first.
-			RenderTargetDesc m_Description;
-			TextureHandle m_ColorTexture;
-			TextureHandle m_DepthTexture;
-			const Texture* m_BorrowedDepthTexture = nullptr;
-			uint32_t m_DepthArraySlice = 0;
-			nvrhi::FramebufferHandle m_Framebuffer;
-		};
-
-		class VulkanDepthCubemap final : public DepthCubemap
-		{
-		public:
-			VulkanDepthCubemap(TextureHandle Texture, uint32_t Resolution)
-				: m_Texture(std::move(Texture)), m_Resolution(Resolution)
-			{
-			}
-
-			const Texture& GetTexture() const noexcept override { return *m_Texture; }
-			const RenderTarget& GetFaceTarget(uint32_t Face) const override
-			{
-				if (Face >= m_FaceTargets.size() || !m_FaceTargets[Face])
-					throw std::out_of_range("Depth cubemap face index is not available");
-				return *m_FaceTargets[Face];
-			}
-			uint32_t GetResolution() const noexcept override { return m_Resolution; }
-
-			void SetFaceTarget(uint32_t Face, RenderTargetHandle Target)
-			{
-				m_FaceTargets.at(Face) = std::move(Target);
-			}
-
-		private:
-			// Face targets release their framebuffer references before the cube texture wrapper.
-			TextureHandle m_Texture;
-			std::array<RenderTargetHandle, 6> m_FaceTargets;
-			uint32_t m_Resolution = 0;
-		};
-
-		class VulkanSampler final : public Sampler
-		{
-		public:
-			VulkanSampler(SamplerDesc Description, nvrhi::SamplerHandle Handle)
-				: m_Description(std::move(Description)),
-				  m_Handle(std::move(Handle))
-			{
-			}
-
-			const SamplerDesc& GetDescription() const noexcept override
-			{
-				return m_Description;
-			}
-
-			nvrhi::ISampler* GetNativeSampler() const noexcept
-			{
-				return m_Handle.Get();
-			}
-
-		private:
-			SamplerDesc m_Description;
-			nvrhi::SamplerHandle m_Handle;
-		};
-
-		class VulkanShader final : public Shader
-		{
-		public:
-			VulkanShader(ShaderDesc Description, std::vector<std::byte> Bytecode, nvrhi::ShaderHandle Handle)
-				: m_Description(std::move(Description)),
-				  m_Bytecode(std::move(Bytecode)),
-				  m_Handle(std::move(Handle))
-			{
-			}
-
-			const ShaderDesc& GetDescription() const noexcept override
-			{
-				return m_Description;
-			}
-
-			nvrhi::IShader* GetNativeShader() const noexcept
-			{
-				return m_Handle.Get();
-			}
-
-		private:
-			ShaderDesc m_Description;
-			std::vector<std::byte> m_Bytecode;
-			nvrhi::ShaderHandle m_Handle;
-		};
-
-		class VulkanBindingLayout final : public BindingLayout
-		{
-		public:
-			VulkanBindingLayout(BindingLayoutDesc Description, nvrhi::BindingLayoutHandle Handle)
-				: m_Description(std::move(Description)),
-				  m_Handle(std::move(Handle))
-			{
-			}
-
-			const BindingLayoutDesc& GetDescription() const noexcept override
-			{
-				return m_Description;
-			}
-
-			nvrhi::IBindingLayout* GetNativeLayout() const noexcept
-			{
-				return m_Handle.Get();
-			}
-
-		private:
-			BindingLayoutDesc m_Description;
-			nvrhi::BindingLayoutHandle m_Handle;
-		};
-
-		class VulkanBindingSet final : public BindingSet
-		{
-		public:
-			VulkanBindingSet(BindingLayoutHandle Layout, nvrhi::BindingSetHandle Handle)
-				: m_Layout(std::move(Layout)),
-				  m_Handle(std::move(Handle))
-			{
-			}
-
-			const BindingLayout& GetLayout() const noexcept override
-			{
-				return *m_Layout;
-			}
-
-			nvrhi::IBindingSet* GetNativeBindingSet() const noexcept
-			{
-				return m_Handle.Get();
-			}
-
-		private:
-			// NVRHI retains the native resources referenced by the set; this retains its engine layout.
-			BindingLayoutHandle m_Layout;
-			nvrhi::BindingSetHandle m_Handle;
-		};
-
-		class VulkanGraphicsPipeline final : public GraphicsPipeline
-		{
-		public:
-			VulkanGraphicsPipeline(
-				GraphicsPipelineDesc Description,
-				nvrhi::InputLayoutHandle InputLayout,
-				nvrhi::GraphicsPipelineHandle Handle)
-				: m_Description(std::move(Description)),
-				  m_InputLayout(std::move(InputLayout)),
-				  m_Handle(std::move(Handle))
-			{
-			}
-
-			const GraphicsPipelineDesc& GetDescription() const noexcept override
-			{
-				return m_Description;
-			}
-
-			nvrhi::IGraphicsPipeline* GetNativePipeline() const noexcept
-			{
-				return m_Handle.Get();
-			}
-
-		private:
-			// Reverse member destruction releases the pipeline before the input layout and shaders.
-			GraphicsPipelineDesc m_Description;
-			nvrhi::InputLayoutHandle m_InputLayout;
-			nvrhi::GraphicsPipelineHandle m_Handle;
-		};
-
 		struct DeviceCandidate
 		{
 			vk::PhysicalDevice Device;
@@ -611,9 +326,7 @@ namespace PulseForge
 			if (m_DebugMainAcquireOutOfDateAfterNativeTargetFrames > 0 &&
 				--m_DebugMainAcquireOutOfDateAfterNativeTargetFrames == 0)
 			{
-				m_DebugMainAcquireOutOfDateRemaining = static_cast<uint32_t>(
-					VulkanSupport::MaximumDeferredSwapchainGenerations +
-					VulkanSupport::MaximumOutOfDateRecoveryGenerations + 1);
+				m_DebugMainAcquireOutOfDateRemaining = static_cast<uint32_t>(m_DebugMainAcquireOutOfDateAfterNativeTargetCount);
 				PF_CORE_WARN(
 					"Debug Vulkan presentation test will now inject {} main swapchain out-of-date acquisitions",
 					m_DebugMainAcquireOutOfDateRemaining);
@@ -621,11 +334,9 @@ namespace PulseForge
 #endif
 			const bool RecreationRequested = !m_Swapchain || m_SwapchainRecreationNeeded ||
 				FramebufferWidth != m_SwapchainExtent.width || FramebufferHeight != m_SwapchainExtent.height;
-			const bool CanCreateGeneration = VulkanSupport::CanCreateSwapchainGeneration(
-				m_PresentFenceMaintenanceEnabled,
-				m_Swapchain != vk::SwapchainKHR(),
-				m_RetiredSwapchainGenerations.size(),
-				m_SwapchainUnusable);
+			const bool CanCreateGeneration =
+				VulkanSupport::CanCreateSwapchainGeneration(m_PresentFenceMaintenanceEnabled, m_Swapchain != vk::SwapchainKHR(),
+					m_RetiredSwapchainGenerations.size(), m_SwapchainUnusable, m_LegacyRecoveryAttemptedAtLimit);
 			if (RecreationRequested && !CanCreateGeneration &&
 				(m_SwapchainUnusable || !m_Swapchain))
 			{
@@ -700,7 +411,7 @@ namespace PulseForge
 			SwapchainImage& Image = m_SwapchainImages[m_AcquiredImageIndex];
 			m_RetirePreviousGenerationsAfterSubmit = !m_PresentFenceMaintenanceEnabled &&
 				m_FirstPresentationPending && m_FirstPresentationImageIndex == m_AcquiredImageIndex;
-			WaitForPresentation(Image);
+			m_PresentationResources.WaitForPresentation(Image);
 			const auto* DepthTarget = dynamic_cast<const VulkanTexture*>(Image.DepthTarget.get());
 			if (!DepthTarget)
 				throw std::runtime_error("Vulkan swapchain image is missing its PulseForge depth target");
@@ -786,7 +497,7 @@ namespace PulseForge
 				m_RetirePreviousGenerationsAfterSubmit = false;
 			}
 
-			PreparePresentationFenceForReuse(Image);
+			m_PresentationResources.PrepareFenceForReuse(Image);
 			const VkSemaphore PresentSemaphore = static_cast<VkSemaphore>(Image.PresentReady);
 			const VkSwapchainKHR Swapchain = static_cast<VkSwapchainKHR>(m_Swapchain);
 			const VkFence NativePresentFence = static_cast<VkFence>(Image.PresentFence);
@@ -885,6 +596,7 @@ namespace PulseForge
 #if defined(PF_DEBUG)
 			Host->InjectImageAllocationFailure = std::exchange(m_InjectNextPlatformImageAllocationFailure, false);
 			Host->InjectAcquireOutOfDateCount = std::exchange(m_DebugNativeAcquireOutOfDateCount, 0u);
+			Host->InjectSwapchainCreationFailureAtDeferredCount = std::exchange(m_DebugNativeSwapchainCreationFailureAtDeferredCount, 0u);
 #endif
 			VkSurfaceKHR NativeSurface = VK_NULL_HANDLE;
 			const VkResult SurfaceResult = glfwCreateWindowSurface(
@@ -924,9 +636,10 @@ namespace PulseForge
 				if (m_DebugMainAcquireOutOfDateAfterNativeTarget)
 				{
 					m_DebugMainAcquireOutOfDateAfterNativeTarget = false;
-					m_DebugMainAcquireOutOfDateAfterNativeTargetFrames = 60;
+					m_DebugMainAcquireOutOfDateAfterNativeTargetFrames = m_DebugMainAcquireOutOfDateAfterNativeTargetDelayFrames;
 					PF_CORE_WARN(
-					"Debug Vulkan presentation test will inject out-of-date acquisitions 60 main frames after native target creation");
+						"Debug Vulkan presentation test will inject out-of-date acquisitions {} main frames after native target creation",
+						m_DebugMainAcquireOutOfDateAfterNativeTargetFrames);
 				}
 #endif
 				return TargetID;
@@ -1024,7 +737,7 @@ namespace PulseForge
 			Host.RetirePreviousGenerationsAfterSubmit = !m_PresentFenceMaintenanceEnabled &&
 				Host.FirstPresentationPending && Host.FirstPresentationImageIndex == ImageIndex;
 			SwapchainImage& Image = Host.Images[ImageIndex];
-			WaitForPresentation(Image);
+			m_PresentationResources.WaitForPresentation(Image);
 			Frame.CommandList->open();
 			const auto* DepthTarget = dynamic_cast<const VulkanTexture*>(Image.DepthTarget.get());
 			if (!DepthTarget)
@@ -1073,7 +786,7 @@ namespace PulseForge
 					RetiredCount);
 				Host.RetirePreviousGenerationsAfterSubmit = false;
 			}
-			PreparePresentationFenceForReuse(Image);
+			m_PresentationResources.PrepareFenceForReuse(Image);
 			const VkSemaphore PresentSemaphore = static_cast<VkSemaphore>(Image.PresentReady);
 			const VkSwapchainKHR Swapchain = static_cast<VkSwapchainKHR>(Host.Swapchain);
 			const VkFence NativePresentFence = static_cast<VkFence>(Image.PresentFence);
@@ -1155,9 +868,9 @@ namespace PulseForge
 					EndPlatformPresentationTarget(TargetID);
 				for (const FrameContext& Frame : Entry->second->Frames)
 					WaitForFrame(Frame);
-				WaitForPresentationRetirement(Entry->second->Images, "native-window swapchain");
+				m_PresentationResources.WaitForRetirement(Entry->second->Images, "native-window swapchain");
 				for (RetiredSwapchainGeneration& Generation : Entry->second->RetiredGenerations)
-					WaitForPresentationRetirement(Generation.Images, "retired native-window swapchain");
+					m_PresentationResources.WaitForRetirement(Generation.Images, "retired native-window swapchain");
 			}
 			catch (const std::exception& Exception)
 			{
@@ -2562,23 +2275,8 @@ namespace PulseForge
 			nvrhi::TextureSubresourceSet DepthSubresources;
 		};
 
-		struct SwapchainImage
-		{
-			vk::Image NativeImage;
-			nvrhi::TextureHandle Texture;
-			TextureHandle DepthTarget;
-			nvrhi::FramebufferHandle Framebuffer;
-			vk::Semaphore PresentReady;
-			vk::Fence PresentFence;
-			bool PresentFenceUsed = false;
-			bool PresentPending = false;
-		};
-
-		struct RetiredSwapchainGeneration
-		{
-			vk::SwapchainKHR Swapchain;
-			std::vector<SwapchainImage> Images;
-		};
+		using SwapchainImage = VulkanSwapchainImage;
+		using RetiredSwapchainGeneration = VulkanRetiredSwapchainGeneration;
 
 		struct RecordingContext
 		{
@@ -2613,6 +2311,7 @@ namespace PulseForge
 			bool SwapchainUnusable = false;
 			bool RetirementBlocked = false;
 			bool RetirementBlockedLogged = false;
+			bool LegacyRecoveryAttemptedAtLimit = false;
 			bool LoggedFirstPresent = false;
 			bool RetirePreviousGenerationsAfterSubmit = false;
 #if defined(PF_DEBUG)
@@ -2621,6 +2320,8 @@ namespace PulseForge
 			bool InjectedAcquireOutOfDatePendingRecovery = false;
 			bool InjectedAcquireOutOfDateRecoveryFramePending = false;
 			bool InjectImageAllocationFailure = false;
+			uint32_t InjectSwapchainCreationFailureAtDeferredCount = 0;
+			bool InjectSwapchainCreationFailureConsumed = false;
 #endif
 		};
 
@@ -2638,6 +2339,7 @@ namespace PulseForge
 			SelectPhysicalDevice();
 			CreateLogicalDevice();
 			CreateNvrhiDevice();
+			m_PresentationResources.Initialize(m_Device, m_PresentQueue, m_ActiveNvrhiDevice, m_PresentFenceMaintenanceEnabled);
 			CreateFrameContexts();
 			(void)RecreateSwapchain();
 		}
@@ -2653,26 +2355,37 @@ namespace PulseForge
 			m_ForceLegacyRetirementForTesting = IsEnabled("PULSEFORGE_VULKAN_FORCE_LEGACY_RETIREMENT");
 			m_DebugMainAcquireOutOfDateAfterNativeTarget =
 				IsEnabled("PULSEFORGE_VULKAN_TEST_MAIN_OUT_OF_DATE_AFTER_NATIVE_TARGET");
-			const auto ReadCount = [](const char* Name)
+			const auto ReadCount = [](const char* Name, unsigned long Maximum = 16ul)
 			{
 				const char* Value = std::getenv(Name);
 				if (!Value || !*Value)
 					return uint32_t{};
 				char* End = nullptr;
 				const unsigned long Parsed = std::strtoul(Value, &End, 10);
-				return End != Value && End && *End == '\0' && Parsed <= 16ul
-					? static_cast<uint32_t>(Parsed) : uint32_t{};
+				return End != Value && End && *End == '\0' && Parsed <= Maximum ? static_cast<uint32_t>(Parsed) : uint32_t{};
 			};
 			m_DebugMainAcquireOutOfDateRemaining = ReadCount("PULSEFORGE_VULKAN_TEST_MAIN_ACQUIRE_OUT_OF_DATE_COUNT");
 			m_DebugNativeAcquireOutOfDateCount = ReadCount("PULSEFORGE_VULKAN_TEST_NATIVE_ACQUIRE_OUT_OF_DATE_COUNT");
-			if (m_ForceLegacyRetirementForTesting || m_DebugMainAcquireOutOfDateRemaining ||
-				m_DebugMainAcquireOutOfDateAfterNativeTarget ||
-				m_DebugNativeAcquireOutOfDateCount)
+			m_DebugMainAcquireOutOfDateAfterNativeTargetCount =
+				ReadCount("PULSEFORGE_VULKAN_TEST_MAIN_ACQUIRE_OUT_OF_DATE_AFTER_NATIVE_TARGET_COUNT");
+			m_DebugMainAcquireOutOfDateAfterNativeTargetDelayFrames =
+				ReadCount("PULSEFORGE_VULKAN_TEST_MAIN_ACQUIRE_OUT_OF_DATE_AFTER_NATIVE_TARGET_DELAY_FRAMES", 600ul);
+			if (!m_DebugMainAcquireOutOfDateAfterNativeTargetDelayFrames) m_DebugMainAcquireOutOfDateAfterNativeTargetDelayFrames = 60;
+			if (m_DebugMainAcquireOutOfDateAfterNativeTarget && !m_DebugMainAcquireOutOfDateAfterNativeTargetCount)
+				m_DebugMainAcquireOutOfDateAfterNativeTargetCount = static_cast<uint32_t>(
+					VulkanSupport::MaximumDeferredSwapchainGenerations + VulkanSupport::MaximumOutOfDateRecoveryGenerations + 1);
+			m_DebugMainSwapchainCreationFailureAtDeferredCount = ReadCount("PULSEFORGE_VULKAN_TEST_MAIN_CREATE_FAILURE_AT_DEFERRED_COUNT");
+			m_DebugNativeSwapchainCreationFailureAtDeferredCount =
+				ReadCount("PULSEFORGE_VULKAN_TEST_NATIVE_CREATE_FAILURE_AT_DEFERRED_COUNT");
+			if (m_ForceLegacyRetirementForTesting || m_DebugMainAcquireOutOfDateRemaining || m_DebugMainAcquireOutOfDateAfterNativeTarget ||
+				m_DebugNativeAcquireOutOfDateCount || m_DebugMainSwapchainCreationFailureAtDeferredCount ||
+				m_DebugNativeSwapchainCreationFailureAtDeferredCount)
 				PF_CORE_WARN(
-					"Debug Vulkan presentation test enabled: legacy retirement forced={}, main acquire injections={}, main-after-native injection={}, first native host acquire injections={}",
+					"Debug Vulkan presentation test enabled: legacy retirement forced={}, main acquire injections={}, main-after-native "
+					"injection count={}, first native host acquire injections={}, main/native create-failure limits={}/{}",
 					m_ForceLegacyRetirementForTesting, m_DebugMainAcquireOutOfDateRemaining,
-					m_DebugMainAcquireOutOfDateAfterNativeTarget,
-					m_DebugNativeAcquireOutOfDateCount);
+					m_DebugMainAcquireOutOfDateAfterNativeTargetCount, m_DebugNativeAcquireOutOfDateCount,
+					m_DebugMainSwapchainCreationFailureAtDeferredCount, m_DebugNativeSwapchainCreationFailureAtDeferredCount);
 #endif
 		}
 
@@ -3045,63 +2758,6 @@ namespace PulseForge
 				throw std::runtime_error("Vulkan frame synchronization wait failed: " + vk::to_string(WaitResult));
 		}
 
-		void WaitForPresentation(SwapchainImage& Image)
-		{
-			if (!m_PresentFenceMaintenanceEnabled)
-			{
-				// Reacquiring this image proves its previous present completed. The acquire
-				// semaphore is consumed by the graphics submission before its present semaphore
-				// is signaled again.
-				Image.PresentPending = false;
-				return;
-			}
-			if (!Image.PresentPending || !Image.PresentFence)
-				return;
-			const VkFence Fence = static_cast<VkFence>(Image.PresentFence);
-			const VkResult Result = VULKAN_HPP_DEFAULT_DISPATCHER.vkWaitForFences(
-				static_cast<VkDevice>(m_Device), 1, &Fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
-			if (Result != VK_SUCCESS)
-				throw std::runtime_error("Vulkan presentation-fence wait failed: " +
-					vk::to_string(static_cast<vk::Result>(Result)));
-			Image.PresentPending = false;
-		}
-
-		void WaitForPresentationRetirement(std::vector<SwapchainImage>& Images, std::string_view Label)
-		{
-			if (Images.empty())
-				return;
-			if (m_PresentFenceMaintenanceEnabled)
-			{
-				for (SwapchainImage& Image : Images)
-					WaitForPresentation(Image);
-				return;
-			}
-
-			if (!m_LoggedLegacyPresentRetirement)
-			{
-				PF_CORE_WARN(
-					"Retiring Vulkan {} without swapchain-maintenance fences. The present queue-idle fallback does not provide an explicit presentation-engine completion guarantee",
-					Label);
-				m_LoggedLegacyPresentRetirement = true;
-			}
-			m_PresentQueue.waitIdle();
-		}
-
-		void PreparePresentationFenceForReuse(SwapchainImage& Image)
-		{
-			if (!m_PresentFenceMaintenanceEnabled || !Image.PresentFence)
-				return;
-			WaitForPresentation(Image);
-			if (!Image.PresentFenceUsed)
-				return;
-			const VkFence Fence = static_cast<VkFence>(Image.PresentFence);
-			const VkResult Result = VULKAN_HPP_DEFAULT_DISPATCHER.vkResetFences(
-				static_cast<VkDevice>(m_Device), 1, &Fence);
-			if (Result != VK_SUCCESS)
-				throw std::runtime_error("Could not reset a completed Vulkan presentation fence: " +
-					vk::to_string(static_cast<vk::Result>(Result)));
-		}
-
 		std::optional<vk::Extent2D> ChooseSwapchainExtent(const vk::SurfaceCapabilitiesKHR& Capabilities) const
 		{
 			const auto [Width, Height] = m_Window.GetFramebufferSize();
@@ -3117,53 +2773,23 @@ namespace PulseForge
 			return vk::Extent2D(Extent.Width, Extent.Height);
 		}
 
-		void ReleaseSwapchainImages()
-		{
-			ReleaseSwapchainImages(m_SwapchainImages);
-		}
-
-		void ReleaseSwapchainImages(std::vector<SwapchainImage>& Images)
-		{
-			for (SwapchainImage& Image : Images)
-			{
-				if (Image.PresentFence)
-					m_Device.destroyFence(Image.PresentFence);
-				Image.PresentFence = vk::Fence();
-				if (Image.PresentReady)
-					m_Device.destroySemaphore(Image.PresentReady);
-				Image.PresentReady = vk::Semaphore();
-			}
-			Images.clear();
-			if (m_ActiveNvrhiDevice)
-				m_ActiveNvrhiDevice->runGarbageCollection();
-		}
-
-		void ReleaseRetiredSwapchainGenerations(std::vector<RetiredSwapchainGeneration>& Generations)
-		{
-			for (RetiredSwapchainGeneration& Generation : Generations)
-			{
-				ReleaseSwapchainImages(Generation.Images);
-				if (Generation.Swapchain)
-					m_Device.destroySwapchainKHR(Generation.Swapchain);
-			}
-			Generations.clear();
-		}
+		void ReleaseSwapchainImages() { m_PresentationResources.ReleaseImages(m_SwapchainImages); }
 
 		void RetireMainSwapchainsAfterReacquire()
 		{
-			ReleaseRetiredSwapchainGenerations(m_RetiredSwapchainGenerations);
+			m_PresentationResources.ReleaseGenerations(m_RetiredSwapchainGenerations);
 			m_FirstPresentationPending = false;
 			m_FirstPresentationCompleted = true;
 			m_DeferredRetirementLimitLogged = false;
+			m_LegacyRecoveryAttemptedAtLimit = false;
 		}
 
 		bool RecreateSwapchain(bool OutOfDateRecovery = false)
 		{
 			if (!m_Device)
 				return false;
-			if (!VulkanSupport::CanCreateSwapchainGeneration(
-				m_PresentFenceMaintenanceEnabled, m_Swapchain != vk::SwapchainKHR(),
-				m_RetiredSwapchainGenerations.size(), OutOfDateRecovery))
+			if (!VulkanSupport::CanCreateSwapchainGeneration(m_PresentFenceMaintenanceEnabled, m_Swapchain != vk::SwapchainKHR(),
+					m_RetiredSwapchainGenerations.size(), OutOfDateRecovery, m_LegacyRecoveryAttemptedAtLimit))
 			{
 				if (!m_DeferredRetirementLimitLogged)
 				{
@@ -3186,8 +2812,7 @@ namespace PulseForge
 
 			for (const FrameContext& Frame : m_Frames)
 				WaitForFrame(Frame);
-			if (m_PresentFenceMaintenanceEnabled)
-				WaitForPresentationRetirement(m_SwapchainImages, "main swapchain");
+			if (m_PresentFenceMaintenanceEnabled) m_PresentationResources.WaitForRetirement(m_SwapchainImages, "main swapchain");
 			else if (m_Swapchain)
 			{
 				try
@@ -3232,8 +2857,21 @@ namespace PulseForge
 			std::vector<SwapchainImage> NewImages;
 			const bool HadPreviousGeneration = m_Swapchain != vk::SwapchainKHR();
 			bool PreviousGenerationRetired = false;
+			const bool RecoveryAtLegacyLimit = !m_PresentFenceMaintenanceEnabled &&
+											   m_RetiredSwapchainGenerations.size() == VulkanSupport::MaximumDeferredSwapchainGenerations &&
+											   (m_SwapchainUnusable || !HadPreviousGeneration);
 			try
 			{
+				if (RecoveryAtLegacyLimit) m_LegacyRecoveryAttemptedAtLimit = true;
+#if defined(PF_DEBUG)
+				if (RecoveryAtLegacyLimit && m_DebugMainSwapchainCreationFailureAtDeferredCount > 0 &&
+					!m_DebugMainSwapchainCreationFailureConsumed &&
+					m_DebugMainSwapchainCreationFailureAtDeferredCount == m_RetiredSwapchainGenerations.size())
+				{
+					m_DebugMainSwapchainCreationFailureConsumed = true;
+					throw std::runtime_error("Debug fixture injected a main swapchain creation failure at the legacy recovery limit");
+				}
+#endif
 				NewSwapchain = m_Device.createSwapchainKHR(PresentInfo);
 				if (m_Swapchain)
 				{
@@ -3307,7 +2945,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
-				ReleaseSwapchainImages(NewImages);
+				m_PresentationResources.ReleaseImages(NewImages);
 				if (NewSwapchain)
 					m_Device.destroySwapchainKHR(NewSwapchain);
 				m_SwapchainRecreationNeeded = true;
@@ -3331,6 +2969,7 @@ namespace PulseForge
 
 			m_SwapchainRecreationNeeded = false;
 			m_SwapchainUnusable = false;
+			m_LegacyRecoveryAttemptedAtLimit = false;
 			m_LoggedFirstPresentedFrameForSwapchain = false;
 			PF_CORE_INFO(
 				"Vulkan swapchain: {0}x{1}, {2} images, format {3}, present mode {4} (VSync enabled)",
@@ -3472,34 +3111,15 @@ namespace PulseForge
 			ReleasePlatformSwapchainImages(Host.Images);
 		}
 
-		void ReleasePlatformSwapchainImages(std::vector<SwapchainImage>& Images)
-		{
-			for (SwapchainImage& Image : Images)
-			{
-				if (Image.PresentFence)
-					m_Device.destroyFence(Image.PresentFence);
-				Image.PresentFence = vk::Fence();
-				if (Image.PresentReady)
-					m_Device.destroySemaphore(Image.PresentReady);
-				Image.PresentReady = vk::Semaphore();
-			}
-			Images.clear();
-			if (m_ActiveNvrhiDevice)
-				m_ActiveNvrhiDevice->runGarbageCollection();
-		}
+		void ReleasePlatformSwapchainImages(std::vector<SwapchainImage>& Images) { m_PresentationResources.ReleaseImages(Images); }
 
 		void ReleasePlatformRetiredGenerations(PlatformPresentationHost& Host)
 		{
-			for (RetiredSwapchainGeneration& Generation : Host.RetiredGenerations)
-			{
-				ReleasePlatformSwapchainImages(Generation.Images);
-				if (Generation.Swapchain)
-					m_Device.destroySwapchainKHR(Generation.Swapchain);
-			}
-			Host.RetiredGenerations.clear();
+			m_PresentationResources.ReleaseGenerations(Host.RetiredGenerations);
 			Host.FirstPresentationPending = false;
 			Host.FirstPresentationCompleted = true;
 			Host.DeferredRetirementLimitLogged = false;
+			Host.LegacyRecoveryAttemptedAtLimit = false;
 		}
 
 		void ReleasePlatformFrames(PlatformPresentationHost& Host)
@@ -3546,12 +3166,13 @@ namespace PulseForge
 
 		bool RecreatePlatformSwapchain(PlatformPresentationHost& Host, bool OutOfDateRecovery = false)
 		{
-			if (!VulkanSupport::CanCreateSwapchainGeneration(
-				m_PresentFenceMaintenanceEnabled, Host.Swapchain != vk::SwapchainKHR(),
-				Host.RetiredGenerations.size(), OutOfDateRecovery))
+			if (!VulkanSupport::CanCreateSwapchainGeneration(m_PresentFenceMaintenanceEnabled, Host.Swapchain != vk::SwapchainKHR(),
+					Host.RetiredGenerations.size(), OutOfDateRecovery, Host.LegacyRecoveryAttemptedAtLimit))
 			{
 				if ((Host.SwapchainUnusable || !Host.Swapchain) &&
-					Host.RetiredGenerations.size() > VulkanSupport::MaximumDeferredSwapchainGenerations)
+					(Host.RetiredGenerations.size() > VulkanSupport::MaximumDeferredSwapchainGenerations ||
+						(Host.RetiredGenerations.size() == VulkanSupport::MaximumDeferredSwapchainGenerations &&
+							Host.LegacyRecoveryAttemptedAtLimit)))
 				{
 					Host.RetirementBlocked = true;
 					if (!Host.RetirementBlockedLogged)
@@ -3582,10 +3203,25 @@ namespace PulseForge
 				for (const FrameContext& Frame : Host.Frames)
 					WaitForFrame(Frame);
 				if (m_PresentFenceMaintenanceEnabled)
-					WaitForPresentationRetirement(Host.Images, "resized native-window swapchain");
+					m_PresentationResources.WaitForRetirement(Host.Images, "resized native-window swapchain");
 				else if (Host.Swapchain)
 					Host.RetiredGenerations.reserve(Host.RetiredGenerations.size() + 1);
 				const auto Capabilities = m_PhysicalDevice.getSurfaceCapabilitiesKHR(Host.Surface);
+				const bool RecoveryAtLegacyLimit = !m_PresentFenceMaintenanceEnabled &&
+												   Host.RetiredGenerations.size() == VulkanSupport::MaximumDeferredSwapchainGenerations &&
+												   (Host.SwapchainUnusable || !Host.Swapchain);
+				if (RecoveryAtLegacyLimit) Host.LegacyRecoveryAttemptedAtLimit = true;
+#if defined(PF_DEBUG)
+				if (RecoveryAtLegacyLimit && Host.InjectSwapchainCreationFailureAtDeferredCount > 0 &&
+					!Host.InjectSwapchainCreationFailureConsumed &&
+					Host.InjectSwapchainCreationFailureAtDeferredCount == Host.RetiredGenerations.size())
+				{
+					Host.InjectSwapchainCreationFailureConsumed = true;
+					Host.RecreateNeeded = true;
+					PF_CORE_WARN("Debug fixture injected a native swapchain creation failure at the legacy recovery limit");
+					return false;
+				}
+#endif
 				if (!CreatePlatformSwapchain(Replacement, Capabilities, false, Host.Swapchain))
 				{
 					ReleasePlatformSwapchainImages(Replacement);
@@ -3612,6 +3248,7 @@ namespace PulseForge
 				Host.DeferredRetirementLimitLogged = false;
 				Host.RecreateNeeded = false;
 				Host.SwapchainUnusable = false;
+				Host.LegacyRecoveryAttemptedAtLimit = false;
 				return true;
 			}
 			catch (const std::exception& Exception)
@@ -3656,9 +3293,9 @@ namespace PulseForge
 						if (!m_ActiveNvrhiDevice->waitForIdle())
 							throw std::runtime_error("NVRHI could not confirm graphics queue completion");
 					m_Device.waitIdle();
-					WaitForPresentationRetirement(m_SwapchainImages, "main swapchain during shutdown");
+					m_PresentationResources.WaitForRetirement(m_SwapchainImages, "main swapchain during shutdown");
 					for (RetiredSwapchainGeneration& Generation : m_RetiredSwapchainGenerations)
-						WaitForPresentationRetirement(Generation.Images, "retired main swapchain during shutdown");
+						m_PresentationResources.WaitForRetirement(Generation.Images, "retired main swapchain during shutdown");
 					DeviceIdle = true;
 				}
 				catch (const std::exception& Exception)
@@ -3681,7 +3318,7 @@ namespace PulseForge
 			if (m_Device)
 			{
 				ReleaseSwapchainImages();
-				ReleaseRetiredSwapchainGenerations(m_RetiredSwapchainGenerations);
+				m_PresentationResources.ReleaseGenerations(m_RetiredSwapchainGenerations);
 				for (FrameContext& Frame : m_Frames)
 					Frame.CommandList = nullptr;
 				m_ValidationDevice = nullptr;
@@ -3701,6 +3338,7 @@ namespace PulseForge
 				m_Device.destroy();
 				m_Device = vk::Device();
 			}
+			m_PresentationResources.Reset();
 
 			if (m_Instance && m_Surface)
 				m_Instance.destroySurfaceKHR(m_Surface);
@@ -3738,6 +3376,7 @@ namespace PulseForge
 		nvrhi::vulkan::DeviceHandle m_VulkanDevice;
 		nvrhi::DeviceHandle m_ValidationDevice;
 		nvrhi::IDevice* m_ActiveNvrhiDevice = nullptr;
+		VulkanPresentationResources m_PresentationResources;
 		std::vector<const char*> m_EnabledInstanceExtensions;
 		std::vector<const char*> m_EnabledLayers;
 		std::array<FrameContext, FramesInFlight> m_Frames;
@@ -3757,7 +3396,6 @@ namespace PulseForge
 		std::string m_SurfaceMaintenanceExtension;
 		bool m_PresentFenceMaintenanceEnabled = false;
 		bool m_ForceLegacyRetirementForTesting = false;
-		bool m_LoggedLegacyPresentRetirement = false;
 		bool m_FirstPresentationPending = false;
 		bool m_FirstPresentationCompleted = false;
 		bool m_RetirePreviousGenerationsAfterSubmit = false;
@@ -3771,6 +3409,7 @@ namespace PulseForge
 		bool m_KhronosValidationEnabled = false;
 		bool m_SwapchainRecreationNeeded = false;
 		bool m_SwapchainUnusable = false;
+		bool m_LegacyRecoveryAttemptedAtLimit = false;
 		bool m_SwapchainRetirementBlocked = false;
 		bool m_SwapchainRetirementBlockedLogged = false;
 		bool m_LoggedMainPresentationDuringNativeRetirementBlock = false;
@@ -3786,6 +3425,11 @@ namespace PulseForge
 		uint32_t m_DebugMainAcquireOutOfDateRemaining = 0;
 		uint32_t m_DebugNativeAcquireOutOfDateCount = 0;
 		uint32_t m_DebugMainAcquireOutOfDateAfterNativeTargetFrames = 0;
+		uint32_t m_DebugMainAcquireOutOfDateAfterNativeTargetCount = 0;
+		uint32_t m_DebugMainAcquireOutOfDateAfterNativeTargetDelayFrames = 60;
+		uint32_t m_DebugMainSwapchainCreationFailureAtDeferredCount = 0;
+		uint32_t m_DebugNativeSwapchainCreationFailureAtDeferredCount = 0;
+		bool m_DebugMainSwapchainCreationFailureConsumed = false;
 		bool m_DebugMainAcquireOutOfDateAfterNativeTarget = false;
 #endif
 	};

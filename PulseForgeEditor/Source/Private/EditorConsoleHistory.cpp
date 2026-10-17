@@ -1,5 +1,8 @@
 #include "EditorConsoleHistory.h"
 
+#include "Core/Log.h"
+#include "EditorConsoleSeverity.h"
+
 #include <algorithm>
 #include <utility>
 
@@ -17,6 +20,17 @@ namespace PulseForgeEditor
 		m_Messages.push_back({ ++m_NextSequence, std::string(Logger), Severity, std::move(SafeText) });
 		if (m_Messages.size() > Capacity) m_Messages.pop_front();
 		++m_Revision;
+	}
+
+	void EditorConsoleHistory::Append(const PulseForge::LogEntry& Entry)
+	{
+		Append(Entry.Logger, Detail::ConvertConsoleSeverity(Entry.Level), Entry.Message);
+	}
+
+	void EditorConsoleHistory::AppendRecent(const std::vector<PulseForge::LogEntry>& Entries)
+	{
+		for (const PulseForge::LogEntry& Entry : Entries)
+			Append(Entry);
 	}
 
 	bool EditorConsoleHistory::CopyMessagesIfChanged(

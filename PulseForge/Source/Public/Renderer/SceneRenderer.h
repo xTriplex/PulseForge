@@ -17,13 +17,10 @@
 #include <expected>
 #include <array>
 #include <filesystem>
-#include <map>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
-#include <tuple>
-#include <unordered_map>
 #include <utility>
 
 namespace PulseForge
@@ -31,6 +28,8 @@ namespace PulseForge
 	struct MaterialAssetDesc;
 	class Project;
 	class Scene;
+	class SceneRendererPipelineCache;
+	class SceneRendererMaterialBindingCache;
 
 	enum class SceneRendererErrorCode : uint8_t
 	{
@@ -166,57 +165,26 @@ namespace PulseForge
 		struct ProjectAssetCaches;
 		class ToneMappingStage;
 		class AmbientOcclusionPass;
+		class HdrTargetCache;
+		class ShadowTargetCache;
+		class LocalLightingState;
+		class ShadowPass;
 
 		SceneRenderer(RenderDevice& Runtime, const Project& SourceProject);
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
 			const std::filesystem::path& CompiledShaderDirectory);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureMaterialBindings(
-			const AssetID& MaterialAsset,
-			const std::optional<AssetID>& EnvironmentAsset,
-			const EnvironmentLightingTextures& EnvironmentTextures);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePipeline(
-			ColorTargetFormat ColorFormat,
-			bool AlphaBlend = false,
-			bool DoubleSided = false);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureBackgroundPipeline(ColorTargetFormat ColorFormat);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureHdrSceneTarget(uint32_t Width, uint32_t Height);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureShadowPipeline(float DepthBias, bool DoubleSided = false);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureSpotShadowResources();
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsurePointShadowResources();
-		[[nodiscard]] std::expected<void, SceneRendererError> PrepareLocalLighting();
-		[[nodiscard]] std::expected<void, SceneRendererError> RenderSpotlightShadows();
-		[[nodiscard]] std::expected<void, SceneRendererError> RenderPointLightShadows();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderShadowCascades();
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderAmbientOcclusion(uint32_t Width, uint32_t Height);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureEnvironmentBindings(
-			const AssetID& EnvironmentAsset,
-			const EnvironmentLightingTextures& EnvironmentTextures,
-			bool IsReady);
 		[[nodiscard]] std::expected<size_t, SceneRendererError> RenderPreparedSceneForFormat(
 			ColorTargetFormat ColorFormat,
 			uint32_t Width,
 			uint32_t Height);
+		[[nodiscard]] std::expected<const MaterialAssetDesc*, SceneRendererError> ResolveMaterialDescription(
+			const SceneMeshInstance& Instance);
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareSnapshot(
 			std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot);
 
-		struct MaterialBindingResources
-		{
-			BufferHandle MaterialConstantsBuffer;
-			BindingSetHandle BindingSet;
-		};
-		[[nodiscard]] std::expected<const MaterialAssetDesc*, SceneRendererError> ResolveMaterialDescription(
-			const SceneMeshInstance& Instance);
-		[[nodiscard]] std::expected<const MaterialBindingResources*, SceneRendererError> ResolveMaterialBinding(
-			const SceneMeshInstance& Instance);
-
-		struct alignas(16) MaterialConstants
-		{
-			float BaseColor[4];
-			float Surface[4];
-			float Emissive[4];
-			float Alpha[4];
-		};
-		static_assert(sizeof(MaterialConstants) == 64);
+		[[nodiscard]] std::expected<const BindingSet*, SceneRendererError> ResolveMaterialBinding(const SceneMeshInstance& Instance);
 
 		struct alignas(16) ObjectConstants
 		{
@@ -254,29 +222,14 @@ namespace PulseForge
 		};
 		static_assert(sizeof(PointShadowObjectConstants) == 144);
 
-		struct SelectedLocalLight
-		{
-			LocalLightRelevance Relevance;
-			LocalLightGpuData Data;
-			UUID Entity;
-			const SceneSpotLight* Spot = nullptr;
-			const ScenePointLight* Point = nullptr;
-		};
-
 		RenderDevice& m_Runtime;
 		const Project& m_Project;
 		std::unique_ptr<ProjectAssetCaches> m_ProjectAssetCaches;
+		std::unique_ptr<SceneRendererPipelineCache> m_PipelineCache;
 		std::unique_ptr<ToneMappingStage> m_ToneMappingStage;
-		ShaderHandle m_VertexShader;
-		ShaderHandle m_FragmentShader;
-		ShaderHandle m_BackgroundVertexShader;
-		ShaderHandle m_BackgroundFragmentShader;
-		ShaderHandle m_ShadowVertexShader;
-		ShaderHandle m_ShadowFragmentShader;
-		ShaderHandle m_PointShadowVertexShader;
-		ShaderHandle m_PointShadowFragmentShader;
-		SamplerHandle m_Sampler;
-		SamplerHandle m_EnvironmentSampler;
+		std::unique_ptr<HdrTargetCache> m_HdrTargetCache;
+		std::unique_ptr<ShadowTargetCache> m_ShadowTargetCache;
+		std::unique_ptr<LocalLightingState> m_LocalLightingState;
 		SamplerHandle m_ShadowSampler;
 		BindingLayoutHandle m_BindingLayout;
 		BindingLayoutHandle m_ShadowBindingLayout;
@@ -284,62 +237,25 @@ namespace PulseForge
 		BindingLayoutHandle m_PointShadowBindingLayout;
 		BindingLayoutHandle m_ShadowObjectBindingLayout;
 		BindingLayoutHandle m_PointShadowObjectBindingLayout;
-		BindingSetHandle m_ShadowBindingSet;
-		BindingSetHandle m_SpotShadowBindingSet;
-		BindingSetHandle m_PointShadowBindingSet;
 		BindingSetHandle m_ShadowObjectBindingSet;
 		BindingSetHandle m_PointShadowObjectBindingSet;
-		std::map<std::pair<int32_t, bool>, GraphicsPipelineHandle> m_ShadowPipelines;
-		std::array<GraphicsPipelineHandle, 2> m_PointShadowPipelines;
 		BufferHandle m_ObjectConstantsBuffer;
 		BufferHandle m_ShadowObjectConstantsBuffer;
 		BufferHandle m_PointShadowObjectConstantsBuffer;
 		BufferHandle m_FrameConstantsBuffer;
 		BufferHandle m_LocalLightingConstantsBuffer;
 		BufferHandle m_BackgroundTriangleBuffer;
-		BufferHandle m_FallbackMaterialConstantsBuffer;
-		TextureHandle m_FallbackBaseColorTexture;
-		TextureHandle m_FallbackMetallicRoughnessTexture;
-		TextureHandle m_FallbackNormalTexture;
-		TextureHandle m_FallbackEmissiveTexture;
 		TextureHandle m_FallbackPointShadowTexture;
-		std::array<RenderTargetHandle, 4> m_ShadowTargets;
-		std::array<RenderTargetHandle, MaxSpotlightShadowMapCount> m_SpotShadowTargets;
-		std::array<DepthCubemapHandle, MaxPointLightShadowCount> m_PointShadowCubemaps;
-		RenderTargetHandle m_HdrSceneTarget;
 		EnvironmentLightingTextures m_FallbackEnvironmentTextures;
-		std::unordered_map<std::string, MaterialBindingResources> m_MaterialBindings;
-		std::unordered_map<std::string, BindingSetHandle> m_EnvironmentBindingSets;
-		std::map<std::tuple<ColorTargetFormat, bool, bool>, GraphicsPipelineHandle> m_Pipelines;
-		std::unordered_map<ColorTargetFormat, GraphicsPipelineHandle> m_BackgroundPipelines;
-		std::optional<VertexLayoutDesc> m_PipelineVertexLayout;
 		std::optional<SceneRenderSnapshot> m_PreparedSnapshot;
 		std::vector<const SceneMeshInstance*> m_TransparentDrawOrder;
 		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
-		std::array<SelectedLocalLight, MaxLocalLightCount> m_SelectedLocalLights{};
-		std::array<std::optional<UUID>, MaxSpotlightShadowMapCount> m_SpotShadowSlotOwners{};
-		PointShadowSlotOwners m_PointShadowSlotOwners{};
-		std::array<glm::mat4, MaxSpotlightShadowMapCount> m_PreparedSpotShadowMatrices{};
-		std::array<glm::vec4, MaxSpotlightShadowMapCount> m_PreparedSpotShadowParameters{};
-		std::array<std::array<glm::mat4, 6>, MaxPointLightShadowCount> m_PreparedPointShadowMatrices{};
-		std::array<glm::vec4, MaxPointLightShadowCount> m_PreparedPointShadowParameters{};
-		LocalLightingConstants m_PreparedLocalLighting{};
-		size_t m_SelectedLocalLightCount = 0;
 		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;
 		std::unique_ptr<AmbientOcclusionPass> m_AmbientOcclusionPass;
-		uint64_t m_HdrSceneTargetGeneration = 0;
 		bool m_EnvironmentLightingPending = false;
 		bool m_PreparedEnvironmentReady = false;
 		bool m_LoggedFirstSnapshotPreparation = false;
-		bool m_LoggedLocalLightOverflow = false;
-		bool m_LoggedSpotShadowOverflow = false;
-		bool m_LoggedUnsupportedSpotShadowCone = false;
-		bool m_LoggedPointShadowOverflow = false;
-		size_t m_LastSpotShadowPassCount = 0;
-		size_t m_LastSpotShadowCasterDrawCount = 0;
-		size_t m_LastPointShadowPassCount = 0;
-		size_t m_LastPointShadowCasterDrawCount = 0;
-		uint64_t m_SpotShadowResourceGeneration = 0;
-		uint64_t m_PointShadowResourceGeneration = 0;
+		std::unique_ptr<SceneRendererMaterialBindingCache> m_MaterialBindingCache;
+		std::unique_ptr<ShadowPass> m_ShadowPass;
 	};
 }

@@ -5,6 +5,7 @@
 #include "Renderer/Graphics.h"
 #include "Renderer/RenderTarget.h"
 #include "Renderer/Texture.h"
+#include "Editor/EditorTextureRegistry.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -23,7 +24,7 @@ namespace PulseForge
 
 namespace PulseForgeEditor
 {
-	class EditorImGuiRenderer final
+	class EditorImGuiRenderer final : public EditorTextureRegistry
 	{
 	public:
 		EditorImGuiRenderer() = default;
@@ -34,8 +35,8 @@ namespace PulseForgeEditor
 		[[nodiscard]] std::expected<void, std::string> Initialize(
 			PulseForge::Application& Runtime,
 			const std::filesystem::path& ShaderDirectory);
-		[[nodiscard]] std::expected<uint64_t, std::string> RegisterTexture(const PulseForge::Texture& Texture);
-		void UnregisterTexture(uint64_t TextureID) noexcept;
+		[[nodiscard]] std::expected<uint64_t, std::string> RegisterTexture(const PulseForge::Texture& Texture) override;
+		void UnregisterTexture(uint64_t TextureID) noexcept override;
 		[[nodiscard]] std::expected<void, std::string> RenderDrawData();
 		[[nodiscard]] std::expected<void, std::string> RenderDrawData(const ImDrawData* DrawData, uint64_t PresentationTargetID);
 		void RetirePresentationTarget(uint64_t PresentationTargetID) noexcept;
