@@ -208,7 +208,12 @@ namespace PulseForge
 		Scene* Source = nullptr;
 		LuaMemoryPool MemoryPool;
 		std::map<UUID, std::unique_ptr<ScriptInstance>> Scripts;
-		std::map<UUID, AssetID> FailedAttachments;
+		struct FailedAttachment
+		{
+			Entity BoundEntity;
+			AssetID Asset;
+		};
+		std::map<UUID, FailedAttachment> FailedAttachments;
 		std::vector<ScriptDiagnostic> Diagnostics;
 
 		Impl(const Project& ProjectValue, ScriptRuntimeDesc RuntimeDescription, ScriptRuntimeServices RuntimeServices)
@@ -298,6 +303,16 @@ namespace PulseForge
 
 		void InvokeDestroy(ScriptInstance& Instance)
 		{
+			if (Instance.DestroyInvoked)
+				return;
+			Instance.DestroyInvoked = true;
+			Instance.Destroying = true;
+			struct DestroyingReset final
+			{
+				ScriptInstance& Instance;
+				~DestroyingReset() { Instance.Destroying = false; }
+			} Reset{ Instance };
+
 			if (auto DestroyResult = RunCallback(Instance, 2); !DestroyResult)
 			{
 				RecordDiagnostic(MakeDiagnostic(
@@ -313,7 +328,8 @@ namespace PulseForge
 				if (!Instance)
 				{
 					RecordDiagnostic(std::move(Instance.error()));
-					FailedAttachments.insert_or_assign(EntityValue.GetUUID(), Component.ScriptAsset);
+					FailedAttachments.insert_or_assign(
+						EntityValue.GetUUID(), FailedAttachment{ EntityValue, Component.ScriptAsset });
 					return;
 				}
 				Scripts.insert_or_assign(EntityValue.GetUUID(), std::move(*Instance));
@@ -323,7 +339,8 @@ namespace PulseForge
 			{
 				RecordDiagnostic(MakeDiagnostic(EntityValue.GetUUID(), Component.ScriptAsset, ScriptDiagnosticCode::LuaInitializationFailed,
 					std::string("Could not initialize Lua script instance: ") + Exception.what()));
-				FailedAttachments.insert_or_assign(EntityValue.GetUUID(), Component.ScriptAsset);
+				FailedAttachments.insert_or_assign(
+					EntityValue.GetUUID(), FailedAttachment{ EntityValue, Component.ScriptAsset });
 			}
 		}
 
@@ -332,8 +349,8 @@ namespace PulseForge
 			for (auto Iterator = Scripts.begin(); Iterator != Scripts.end();)
 			{
 				const auto CurrentEntity = SceneValue.FindEntity(Iterator->first);
-				bool Remove = !CurrentEntity;
-				if (CurrentEntity)
+				bool Remove = !CurrentEntity || *CurrentEntity != Iterator->second->BoundEntity;
+				if (CurrentEntity && *CurrentEntity == Iterator->second->BoundEntity)
 				{
 					const auto Component = CurrentEntity->GetScript();
 					if (!Component)
@@ -361,23 +378,28 @@ namespace PulseForge
 			for (auto Iterator = FailedAttachments.begin(); Iterator != FailedAttachments.end();)
 			{
 				const auto CurrentEntity = SceneValue.FindEntity(Iterator->first);
-				const auto Component = CurrentEntity
+				const bool SameIncarnation = CurrentEntity && *CurrentEntity == Iterator->second.BoundEntity;
+				const auto Component = SameIncarnation
 										   ? CurrentEntity->GetScript()
 										   : std::expected<std::optional<ScriptComponent>, SceneError>(std::optional<ScriptComponent>{});
 				if (!Component || !Component->has_value() || !Component->value().Enabled ||
-					Component->value().ScriptAsset != Iterator->second)
+					Component->value().ScriptAsset != Iterator->second.Asset)
 					Iterator = FailedAttachments.erase(Iterator);
 				else ++Iterator;
 			}
 
 			for (const Entity& EntityValue : SceneValue.GetEntities())
 			{
+				if (!EntityValue.IsValid())
+					continue;
 				const auto Component = EntityValue.GetScript();
 				if (!Component || !Component->has_value() || !Component->value().Enabled || Scripts.contains(EntityValue.GetUUID()))
 					continue;
 
 				const auto Failed = FailedAttachments.find(EntityValue.GetUUID());
-				if (Failed != FailedAttachments.end() && Failed->second == Component->value().ScriptAsset) continue;
+				if (Failed != FailedAttachments.end() && Failed->second.BoundEntity == EntityValue &&
+					Failed->second.Asset == Component->value().ScriptAsset)
+					continue;
 				Attach(SceneValue, EntityValue, Component->value());
 			}
 		}
@@ -409,6 +431,8 @@ namespace PulseForge
 			Candidate->Source = &Source;
 			for (const Entity& EntityValue : Source.GetEntities())
 			{
+				if (!EntityValue.IsValid())
+					continue;
 				const auto Component = EntityValue.GetScript();
 				if (!Component)
 				{
@@ -483,16 +507,45 @@ namespace PulseForge
 		try
 		{
 			m_Impl->SynchronizeAttachments(Source);
-			for (auto& [Identifier, Instance] : m_Impl->Scripts)
+			for (auto Iterator = m_Impl->Scripts.begin(); Iterator != m_Impl->Scripts.end();)
 			{
-				(void)Identifier;
-				if (Instance->Faulted) continue;
-				if (auto UpdateResult = RunCallback(*Instance, 1, DeltaSeconds); !UpdateResult)
+				ScriptInstance& Instance = *Iterator->second;
+				const auto CurrentEntity = Source.FindEntity(Iterator->first);
+				bool Eligible = CurrentEntity && *CurrentEntity == Instance.BoundEntity;
+				if (Eligible)
 				{
-					Instance->Faulted = true;
-					m_Impl->RecordDiagnostic(MakeDiagnostic(Instance->BoundEntity.GetUUID(), Instance->Asset,
+					const auto Component = CurrentEntity->GetScript();
+					if (!Component)
+					{
+						m_Impl->RecordDiagnostic(MakeDiagnostic(
+							Iterator->first, Instance.Asset, ScriptDiagnosticCode::InvalidComponent, Component.error().Message));
+						Eligible = false;
+					}
+					else
+					{
+						Eligible = Component->has_value() && Component->value().Enabled &&
+							Component->value().ScriptAsset == Instance.Asset;
+					}
+				}
+
+				if (!Eligible)
+				{
+					m_Impl->InvokeDestroy(Instance);
+					Iterator = m_Impl->Scripts.erase(Iterator);
+					continue;
+				}
+				if (Instance.Faulted)
+				{
+					++Iterator;
+					continue;
+				}
+				if (auto UpdateResult = RunCallback(Instance, 1, DeltaSeconds); !UpdateResult)
+				{
+					Instance.Faulted = true;
+					m_Impl->RecordDiagnostic(MakeDiagnostic(Instance.BoundEntity.GetUUID(), Instance.Asset,
 						ScriptDiagnosticCode::UpdateFailed, std::move(UpdateResult.error())));
 				}
+				++Iterator;
 			}
 			return {};
 		}

@@ -44,6 +44,8 @@ namespace PulseForge::ScriptRuntimeDetail
 		int InstructionBudget = 0;
 		int MaximumInstructions = 0;
 		bool Faulted = false;
+		bool DestroyInvoked = false;
+		bool Destroying = false;
 
 		ScriptInstance() { CallbackNameReferences.fill(LUA_NOREF); }
 
