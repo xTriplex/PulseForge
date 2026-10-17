@@ -1,0 +1,11 @@
+foreach(RequiredVariable IN ITEMS PULSEFORGE_SHADER_SOURCE PULSEFORGE_SHADER_OUTPUT PULSEFORGE_SHADER_BUILD_COUNT)
+	if(NOT DEFINED ${RequiredVariable} OR "${${RequiredVariable}}" STREQUAL "")
+		message(FATAL_ERROR "${RequiredVariable} is required to generate the shader fixture")
+	endif()
+endforeach()
+
+get_filename_component(ShaderOutputDirectory "${PULSEFORGE_SHADER_OUTPUT}" DIRECTORY)
+file(MAKE_DIRECTORY "${ShaderOutputDirectory}")
+file(READ "${PULSEFORGE_SHADER_SOURCE}" ShaderContents)
+file(WRITE "${PULSEFORGE_SHADER_OUTPUT}" "${ShaderContents}")
+file(APPEND "${PULSEFORGE_SHADER_BUILD_COUNT}" "built\n")

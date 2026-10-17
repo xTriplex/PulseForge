@@ -2,12 +2,6 @@
 
 #include "Editor/EditorStyle.h"
 
-#include <imgui.h>
-
-#include <algorithm>
-#include <string>
-#include <string_view>
-
 namespace PulseForgeEditor
 {
 	namespace

@@ -3,6 +3,8 @@
 #include "Renderer/RenderTarget.h"
 #include "Renderer/RenderDevice.h"
 #include "Scene/UUID.h"
+#include "Editor/EditorViewportPolicy.h"
+#include "Editor/EditorTextureRegistry.h"
 
 #include <expected>
 #include <filesystem>
@@ -21,7 +23,6 @@ namespace PulseForge
 
 namespace PulseForgeEditor
 {
-	class EditorImGuiRenderer;
 	class EditorViewportCamera;
 
 	class EditorViewportSceneRenderView final
@@ -33,7 +34,7 @@ namespace PulseForgeEditor
 		~EditorViewportSceneRenderView();
 
 		[[nodiscard]] std::expected<bool, std::string> EnsureTarget(float LogicalWidth, float LogicalHeight, float ScaleX, float ScaleY,
-			PulseForge::RenderDevice& Runtime, EditorImGuiRenderer& ImGuiRenderer);
+			PulseForge::RenderDevice& Runtime, EditorTextureRegistry& TextureRegistry);
 		void PrepareScene(PulseForge::RenderDevice& Runtime, const PulseForge::Project* Project, const PulseForge::Scene* EditScene,
 			const PulseForge::Scene* RuntimeScene, bool RuntimeActive, const EditorViewportCamera& Camera,
 			std::span<const PulseForge::UUID> HiddenEntities, const std::filesystem::path& CompiledShaderDirectory);
@@ -60,16 +61,25 @@ namespace PulseForgeEditor
 		[[nodiscard]] const std::string& GetSceneError() const noexcept { return m_SceneError; }
 
 	private:
+		enum class SceneErrorOrigin
+		{
+			None,
+			Preparation,
+			Rendering,
+			TargetClear
+		};
+
 		void SetTargetError(std::string Message);
 		void ClearTargetError() noexcept;
-		void SetSceneError(std::string Message);
+		void SetSceneError(std::string Message, SceneErrorOrigin Origin = SceneErrorOrigin::Preparation);
 		void ClearSceneError() noexcept;
+		void ClearSceneErrorIf(SceneErrorOrigin Origin) noexcept;
 		[[nodiscard]] bool ClearTarget(
 			PulseForge::RenderDevice& Runtime, const PulseForge::RenderTargetClearValue& Clear, std::string_view FailureContext);
 
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
 		PulseForge::RenderTargetHandle m_Target;
-		EditorImGuiRenderer* m_ImGuiRenderer = nullptr;
+		EditorTextureRegistry* m_TextureRegistry = nullptr;
 		glm::mat4 m_ViewProjection{ 1.0f };
 		uint64_t m_TextureID = 0;
 		uint32_t m_Width = 0;
@@ -77,8 +87,9 @@ namespace PulseForgeEditor
 		bool m_SceneReady = false;
 		bool m_ViewProjectionValid = false;
 		bool m_EnvironmentLightingPending = false;
-		bool m_SceneRendererInitializationFailed = false;
+		EditorViewportInitializationRetry m_SceneRendererInitializationRetry;
 		std::string m_TargetError;
 		std::string m_SceneError;
+		SceneErrorOrigin m_SceneErrorOrigin = SceneErrorOrigin::None;
 	};
 } // namespace PulseForgeEditor

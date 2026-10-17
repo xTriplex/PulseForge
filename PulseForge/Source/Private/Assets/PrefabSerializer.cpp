@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Assets/PrefabSerializer.h"
 
 #include "Scene/Components/AudioListenerComponent.h"
@@ -11,15 +10,11 @@
 
 #include <nlohmann/json.hpp>
 
-#include <array>
 #include <cstdint>
 #include <exception>
 #include <fstream>
 #include <limits>
 #include <system_error>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
 
 namespace PulseForge
 {

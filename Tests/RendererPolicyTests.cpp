@@ -43,9 +43,12 @@ namespace
 		PF_CHECK(Tests, CanCreateSwapchainGeneration(true, true, MaximumDeferredSwapchainGenerations));
 		PF_CHECK(Tests, CanCreateSwapchainGeneration(false, true, 0));
 		PF_CHECK(Tests, CanCreateSwapchainGeneration(false, true, MaximumDeferredSwapchainGenerations - 1));
+		PF_CHECK(Tests, CanCreateSwapchainGeneration(false, false, MaximumDeferredSwapchainGenerations - 1, true, true));
 		PF_CHECK(Tests, !CanCreateSwapchainGeneration(false, true, MaximumDeferredSwapchainGenerations));
 		PF_CHECK(Tests, CanCreateSwapchainGeneration(false, false, MaximumDeferredSwapchainGenerations));
 		PF_CHECK(Tests, CanCreateSwapchainGeneration(false, true, MaximumDeferredSwapchainGenerations, true));
+		PF_CHECK(Tests, !CanCreateSwapchainGeneration(false, false, MaximumDeferredSwapchainGenerations, false, true));
+		PF_CHECK(Tests, !CanCreateSwapchainGeneration(false, true, MaximumDeferredSwapchainGenerations, true, true));
 		PF_CHECK(Tests,
 			!CanCreateSwapchainGeneration(false, true, MaximumDeferredSwapchainGenerations + MaximumOutOfDateRecoveryGenerations, true));
 		PF_CHECK(Tests, ResolveSwapchainFrameStartAction(true, true, false, false) == SwapchainFrameStartAction::Skip);

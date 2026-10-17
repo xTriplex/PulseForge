@@ -1,5 +1,4 @@
-#include "TestEngineSupport.h"
-#include "TestGraphicsSupport.h"
+#include "TestAssetSupport.h"
 
 namespace
 {
@@ -269,6 +268,34 @@ namespace
 		}
 	}
 
+	void TestPrefabSerializationPreservesPhysicsComponents(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		Scene Source;
+		const auto Body = Source.CreateEntity("Physics body");
+		PF_CHECK(Tests, Body.has_value());
+		if (!Body) return;
+
+		const RigidbodyComponent Rigidbody{ RigidbodyMotionType::Dynamic, 3.0f, 0.6f, 0.15f, false };
+		const BoxColliderComponent Collider{ { 0.75f, 0.5f, 0.25f } };
+		PF_CHECK(Tests, Body->SetRigidbody(Rigidbody).has_value());
+		PF_CHECK(Tests, Body->SetBoxCollider(Collider).has_value());
+
+		const auto PrefabData = PrefabSerializer::Serialize(Source, *Body);
+		PF_CHECK(Tests, PrefabData.has_value());
+		if (!PrefabData) return;
+		PF_CHECK(Tests, PrefabData->find("\"version\": 3") != std::string::npos);
+
+		Scene Destination;
+		const auto Instance = PrefabSerializer::Instantiate(*PrefabData, Destination);
+		PF_CHECK(Tests, Instance.has_value());
+		if (!Instance) return;
+		const auto InstanceRigidbody = Instance->GetRigidbody();
+		const auto InstanceCollider = Instance->GetBoxCollider();
+		PF_CHECK(Tests, InstanceRigidbody && InstanceRigidbody->has_value() && InstanceRigidbody->value().Mass == 3.0f);
+		PF_CHECK(Tests, InstanceCollider && InstanceCollider->has_value() && InstanceCollider->value().HalfExtents == Collider.HalfExtents);
+	}
+
 	void TestPrefabAssetsByUUID(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -437,5 +464,6 @@ void RunSceneAssetTests(TestRunner& Tests)
 {
 	TestSceneSerializerClone(Tests);
 	TestPrefabSerialization(Tests);
+	TestPrefabSerializationPreservesPhysicsComponents(Tests);
 	TestPrefabAssetsByUUID(Tests);
 }

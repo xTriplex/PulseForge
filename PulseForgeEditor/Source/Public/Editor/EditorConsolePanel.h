@@ -16,6 +16,7 @@ namespace PulseForgeEditor
 
 		void Attach();
 		void Detach() noexcept;
+		void CapturePendingLogs();
 		void DrawContents(EditorStyle& Style);
 
 	private:

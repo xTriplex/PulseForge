@@ -7,18 +7,11 @@
 #include "Editor/EditorSceneWorkspaceState.h"
 #include "Editor/EditorStyle.h"
 
-#include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
 
-#include <algorithm>
 #include <expected>
 #include <functional>
 #include <initializer_list>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
 
 namespace PulseForgeEditor
 {

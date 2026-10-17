@@ -1,7 +1,5 @@
-#include "Core/PulseForgePCH.h"
 #include "Renderer/Binding.h"
 
-#include <array>
 
 namespace PulseForge
 {

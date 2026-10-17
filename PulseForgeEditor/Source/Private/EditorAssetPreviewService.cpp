@@ -1,11 +1,9 @@
-#include "Core/Application.h"
+#include "Renderer/RenderDevice.h"
 #include "Assets/ImageAssetImporter.h"
 #include "Assets/MaterialAsset.h"
 #include "Editor/EditorAssetPreviewService.h"
 #include "Editor/EditorAssetPreviewPolicy.h"
-#include "Editor/EditorImGuiRenderer.h"
 
-#include <algorithm>
 #include <fstream>
 #include <span>
 
@@ -32,14 +30,11 @@ namespace PulseForgeEditor
 	}
 
 	void EditorAssetPreviewService::Initialize(
-		PulseForge::Application& Runtime,
-		EditorImGuiRenderer& Renderer,
-		AssetPreviewServiceLimits Limits)
+		PulseForge::RenderDevice& Runtime, EditorTextureRegistry& TextureRegistry, AssetPreviewServiceLimits Limits)
 	{
-		if (m_Worker.joinable())
-			return;
+		if (m_Worker.joinable()) return;
 		m_Runtime = &Runtime;
-		m_Renderer = &Renderer;
+		m_TextureRegistry = &TextureRegistry;
 		m_Limits = Limits;
 		m_GpuBudget.SetLimit(Limits.MaximumGpuBytes);
 		{
@@ -76,13 +71,9 @@ namespace PulseForgeEditor
 		return true;
 	}
 
-	void EditorAssetPreviewService::RequestImage(
-		std::string_view ProjectID,
-		std::string AssetID,
-		const std::filesystem::path& SourcePath)
+	void EditorAssetPreviewService::RequestImage(std::string_view ProjectID, std::string AssetID, const std::filesystem::path& SourcePath)
 	{
-		if (!m_Runtime || !m_Renderer || ProjectID != m_ProjectID || !IsSupportedImagePreviewExtension(SourcePath))
-			return;
+		if (!m_Runtime || !m_TextureRegistry || ProjectID != m_ProjectID || !IsSupportedImagePreviewExtension(SourcePath)) return;
 		const std::string Key = EntryKey(ProjectID, AssetID);
 		{
 			std::scoped_lock Lock(m_Mutex);
@@ -114,12 +105,9 @@ namespace PulseForgeEditor
 	}
 
 	void EditorAssetPreviewService::RequestMaterialSwatch(
-		std::string_view ProjectID,
-		std::string AssetID,
-		const std::filesystem::path& SourcePath)
+		std::string_view ProjectID, std::string AssetID, const std::filesystem::path& SourcePath)
 	{
-		if (!m_Runtime || !m_Renderer || ProjectID != m_ProjectID)
-			return;
+		if (!m_Runtime || !m_TextureRegistry || ProjectID != m_ProjectID) return;
 		const std::string Key = EntryKey(ProjectID, AssetID);
 		{
 			std::scoped_lock Lock(m_Mutex);
@@ -217,8 +205,7 @@ namespace PulseForgeEditor
 
 	void EditorAssetPreviewService::PumpUploads()
 	{
-		if (!m_Runtime || !m_Renderer)
-			return;
+		if (!m_Runtime || !m_TextureRegistry) return;
 		std::deque<CpuPreview> Completed;
 		{
 			std::scoped_lock Lock(m_Mutex);
@@ -299,7 +286,7 @@ namespace PulseForgeEditor
 				m_QueuedCpuBytes -= (std::min)(m_QueuedCpuBytes, ByteCount);
 				continue;
 			}
-			auto TextureID = m_Renderer->RegisterTexture(**Texture);
+			auto TextureID = m_TextureRegistry->RegisterTexture(**Texture);
 			if (!TextureID)
 			{
 				Found->second.Status = State::Failed;
@@ -309,7 +296,7 @@ namespace PulseForgeEditor
 			}
 			if (!m_GpuBudget.Add(ByteCount))
 			{
-				m_Renderer->UnregisterTexture(*TextureID);
+				m_TextureRegistry->UnregisterTexture(*TextureID);
 				Found->second.Status = State::Failed;
 				std::scoped_lock Lock(m_Mutex);
 				m_QueuedCpuBytes -= (std::min)(m_QueuedCpuBytes, ByteCount);
@@ -348,13 +335,13 @@ namespace PulseForgeEditor
 
 	void EditorAssetPreviewService::ClearEntries() noexcept
 	{
-		if (m_Renderer)
+		if (m_TextureRegistry)
 			for (const auto& [Key, Entry] : m_Entries)
 			{
 				(void)Key;
 				if (Entry.TextureID != 0)
 				{
-					m_Renderer->UnregisterTexture(Entry.TextureID);
+					m_TextureRegistry->UnregisterTexture(Entry.TextureID);
 					++m_Stats.BindingUnregistrations;
 				}
 			}
@@ -382,11 +369,10 @@ namespace PulseForgeEditor
 		for (const std::string& Key : *Planned)
 		{
 			auto Candidate = m_Entries.find(Key);
-			if (Candidate == m_Entries.end())
-				continue;
+			if (Candidate == m_Entries.end()) continue;
 			if (Candidate->second.TextureID != 0)
 			{
-				m_Renderer->UnregisterTexture(Candidate->second.TextureID);
+				m_TextureRegistry->UnregisterTexture(Candidate->second.TextureID);
 				++m_Stats.BindingUnregistrations;
 			}
 			m_GpuBudget.Remove(Candidate->second.GpuBytes);
@@ -510,10 +496,9 @@ namespace PulseForgeEditor
 			m_QueuedCpuBytes = 0;
 		}
 		m_WorkAvailable.notify_all();
-		if (m_Worker.joinable())
-			m_Worker.join();
+		if (m_Worker.joinable()) m_Worker.join();
 		ClearEntries();
-		m_Renderer = nullptr;
+		m_TextureRegistry = nullptr;
 		m_Runtime = nullptr;
 		m_ProjectID.clear();
 	}

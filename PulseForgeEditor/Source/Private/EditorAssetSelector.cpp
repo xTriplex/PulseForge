@@ -2,9 +2,6 @@
 
 #include "Editor/EditorAssetSelectorPolicy.h"
 
-#include <imgui.h>
-
-#include <algorithm>
 #include <cfloat>
 
 namespace PulseForgeEditor

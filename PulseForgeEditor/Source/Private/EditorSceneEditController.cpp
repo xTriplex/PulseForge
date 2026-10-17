@@ -88,7 +88,7 @@ namespace PulseForgeEditor
 				Result = m_History.Cancel([this, SceneValue, &Workspace, &RestoreState](std::string_view State)
 					{ return RestoreState ? RestoreState(State) : Restore(State, *SceneValue, Workspace); });
 		}
-		m_History.InspectorHistoryItem() = 0;
+		if (Result) m_History.InspectorHistoryItem() = 0;
 		UpdateDirty(SceneValue);
 		return Result;
 	}

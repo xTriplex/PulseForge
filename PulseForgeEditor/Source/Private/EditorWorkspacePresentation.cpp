@@ -1,9 +1,6 @@
 #include "EditorWorkspacePresentation.h"
 
-#include <imgui.h>
 #include <imgui_internal.h>
-
-#include <algorithm>
 
 namespace PulseForgeEditor
 {
@@ -55,6 +52,21 @@ namespace PulseForgeEditor
 	void EditorWorkspacePresentation::KeepInactiveWorkspacesAlive(
 		const EditorDocumentManager& Documents, const EditorDocumentEditorRegistry& Editors)
 	{
+		if (!ImGui::GetCurrentContext()) return;
+
+		bool HasInactiveWorkspace = false;
+		for (const auto& [Identity, Session] : Documents.GetSessions())
+		{
+			(void)Session;
+			if (!Editors.IsRegistered(Identity.Kind) || m_FrameState.WasDockspaceDrawn(Identity)) continue;
+			HasInactiveWorkspace = true;
+			break;
+		}
+		if (!HasInactiveWorkspace) return;
+
+		const ImGuiViewport* MainViewport = ImGui::GetMainViewport();
+		if (!MainViewport) return;
+		ImGui::SetNextWindowViewport(MainViewport->ID);
 		ImGui::SetNextWindowPos(ImVec2(-10000.0f, -10000.0f), ImGuiCond_Always);
 		ImGui::SetNextWindowSize(ImVec2(1.0f, 1.0f), ImGuiCond_Always);
 		if (!ImGui::Begin("##PFInactiveDocumentWorkspaceKeepAlive", nullptr,

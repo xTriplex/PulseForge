@@ -3,10 +3,6 @@
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorViewportToolbarPolicy.h"
 
-#include <imgui.h>
-
-#include <algorithm>
-#include <array>
 #include <cmath>
 
 namespace PulseForgeEditor

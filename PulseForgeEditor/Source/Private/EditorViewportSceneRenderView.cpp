@@ -2,13 +2,11 @@
 
 #include "Assets/Project.h"
 #include "Core/Log.h"
-#include "Editor/EditorImGuiRenderer.h"
 #include "Editor/EditorViewportPolicy.h"
 #include "EditorViewportCamera.h"
 #include "Renderer/SceneRenderer.h"
 #include "Scene/Scene.h"
 
-#include <algorithm>
 #include <filesystem>
 
 namespace PulseForgeEditor
@@ -21,7 +19,7 @@ namespace PulseForgeEditor
 	}
 
 	std::expected<bool, std::string> EditorViewportSceneRenderView::EnsureTarget(float LogicalWidth, float LogicalHeight, float ScaleX,
-		float ScaleY, PulseForge::RenderDevice& Runtime, EditorImGuiRenderer& ImGuiRenderer)
+		float ScaleY, PulseForge::RenderDevice& Runtime, EditorTextureRegistry& TextureRegistry)
 	{
 #ifdef PF_EDITOR_RENDERER_OPENGL
 		(void)LogicalWidth;
@@ -29,7 +27,7 @@ namespace PulseForgeEditor
 		(void)ScaleX;
 		(void)ScaleY;
 		(void)Runtime;
-		(void)ImGuiRenderer;
+		(void)TextureRegistry;
 		return std::unexpected("The OpenGL fallback does not support the engine scene viewport");
 #else
 		const auto Extent = CalculateEditorViewportTargetExtent(LogicalWidth, LogicalHeight, ScaleX, ScaleY);
@@ -65,20 +63,22 @@ namespace PulseForgeEditor
 			return std::unexpected(std::string(Error));
 		}
 
-		auto TextureID = ImGuiRenderer.RegisterTexture(*ColorTexture);
+		auto TextureID = TextureRegistry.RegisterTexture(*ColorTexture);
 		if (!TextureID)
 		{
 			SetTargetError("Could not resize the scene viewport: " + TextureID.error());
 			return std::unexpected(TextureID.error());
 		}
 
-		if (m_TextureID != 0 && m_ImGuiRenderer) m_ImGuiRenderer->UnregisterTexture(m_TextureID);
+		if (m_TextureID != 0 && m_TextureRegistry) m_TextureRegistry->UnregisterTexture(m_TextureID);
 		m_Target = std::move(*Created);
-		m_ImGuiRenderer = &ImGuiRenderer;
+		m_TextureRegistry = &TextureRegistry;
 		m_TextureID = *TextureID;
 		m_Width = Extent->Width;
 		m_Height = Extent->Height;
 		m_SceneReady = false;
+		m_ViewProjectionValid = false;
+		m_EnvironmentLightingPending = false;
 		ClearTargetError();
 		return true;
 #endif
@@ -101,25 +101,34 @@ namespace PulseForgeEditor
 		(void)HiddenEntities;
 		(void)CompiledShaderDirectory;
 #else
-		if (!SourceProject || !EditScene || m_Width == 0 || m_Height == 0 || m_SceneRendererInitializationFailed) return;
+		if (!SourceProject || (!EditScene && !(RuntimeActive && RuntimeScene)) || m_Width == 0 || m_Height == 0) return;
 
 		if (!m_SceneRenderer)
 		{
+			const auto Now = EditorViewportInitializationRetry::Clock::now();
+			if (!m_SceneRendererInitializationRetry.CanAttempt(Now)) return;
+
 			auto Created = PulseForge::SceneRenderer::Create(Runtime, *SourceProject, CompiledShaderDirectory);
 			if (!Created)
 			{
-				m_SceneRendererInitializationFailed = true;
+				m_SceneRendererInitializationRetry.RecordFailure(Now);
 				SetSceneError("Could not initialize the scene renderer: " + Created.error().Message);
 				return;
 			}
 			m_SceneRenderer = std::move(*Created);
+			m_SceneRendererInitializationRetry.Reset();
 		}
 
 		const auto SceneMode = GetEditorViewportSceneMode(RuntimeActive, EditScene != nullptr, RuntimeScene != nullptr);
-		const PulseForge::Scene& ActiveScene = SceneMode.UseRuntimeScene ? *RuntimeScene : *EditScene;
+		const PulseForge::Scene* ActiveScene = SceneMode.UseRuntimeScene ? RuntimeScene : EditScene;
+		if (!ActiveScene)
+		{
+			SetSceneError("Could not prepare the viewport because its active scene is unavailable");
+			return;
+		}
 		const float AspectRatio = static_cast<float>(m_Width) / static_cast<float>(m_Height);
 		std::expected<void, PulseForge::SceneRendererError> Prepared;
-		if (SceneMode.UseRuntimeScene) Prepared = m_SceneRenderer->PrepareScene(ActiveScene, AspectRatio);
+		if (SceneMode.UseRuntimeScene) Prepared = m_SceneRenderer->PrepareScene(*ActiveScene, AspectRatio);
 		else
 		{
 			auto ViewProjection = Camera.GetViewProjection(AspectRatio);
@@ -136,7 +145,7 @@ namespace PulseForgeEditor
 				return;
 			}
 			Prepared = m_SceneRenderer->PrepareSceneFiltered(
-				ActiveScene, Camera.GetView(), *Projection, Camera.GetPosition(), 0.1f, 1000.0f, HiddenEntities);
+				*ActiveScene, Camera.GetView(), *Projection, Camera.GetPosition(), 0.1f, 1000.0f, HiddenEntities);
 		}
 		if (!Prepared)
 		{
@@ -144,7 +153,7 @@ namespace PulseForgeEditor
 			return;
 		}
 
-		ClearSceneError();
+		ClearSceneErrorIf(SceneErrorOrigin::Preparation);
 		m_ViewProjectionValid = SceneMode.ViewProjectionValid;
 		m_SceneReady = true;
 		m_EnvironmentLightingPending = m_SceneRenderer->IsEnvironmentLightingPending();
@@ -169,12 +178,12 @@ namespace PulseForgeEditor
 			ToneSettings.ExposureEV = ExposureEV;
 			if (!m_SceneRenderer->SetToneMappingSettings(ToneSettings))
 			{
-				SetSceneError("The viewport exposure value is outside the supported range");
+				SetSceneError("The viewport exposure value is outside the supported range", SceneErrorOrigin::Rendering);
 				return false;
 			}
 			if (auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput(*m_Target); !Rendered)
 			{
-				SetSceneError("Scene viewport rendering failed: " + Rendered.error().Message);
+				SetSceneError("Scene viewport rendering failed: " + Rendered.error().Message, SceneErrorOrigin::Rendering);
 				(void)ClearTarget(Runtime, Background, "Could not clear the scene viewport after rendering failed");
 				return false;
 			}
@@ -193,7 +202,7 @@ namespace PulseForgeEditor
 		m_SceneReady = false;
 		m_ViewProjectionValid = false;
 		m_EnvironmentLightingPending = false;
-		m_SceneRendererInitializationFailed = false;
+		m_SceneRendererInitializationRetry.Reset();
 		ClearSceneError();
 	}
 
@@ -217,13 +226,15 @@ namespace PulseForgeEditor
 
 	void EditorViewportSceneRenderView::ResetTarget() noexcept
 	{
-		if (m_ImGuiRenderer && m_TextureID != 0) m_ImGuiRenderer->UnregisterTexture(m_TextureID);
+		if (m_TextureRegistry && m_TextureID != 0) m_TextureRegistry->UnregisterTexture(m_TextureID);
 		m_TextureID = 0;
-		m_ImGuiRenderer = nullptr;
+		m_TextureRegistry = nullptr;
 		m_Target.reset();
 		m_Width = 0;
 		m_Height = 0;
 		m_SceneReady = false;
+		m_ViewProjectionValid = false;
+		m_EnvironmentLightingPending = false;
 		ClearTargetError();
 	}
 
@@ -244,8 +255,9 @@ namespace PulseForgeEditor
 		m_TargetError.clear();
 	}
 
-	void EditorViewportSceneRenderView::SetSceneError(std::string Message)
+	void EditorViewportSceneRenderView::SetSceneError(std::string Message, SceneErrorOrigin Origin)
 	{
+		m_SceneErrorOrigin = Origin;
 		if (m_SceneError == Message) return;
 		m_SceneError = std::move(Message);
 		PF_WARN("{}", m_SceneError);
@@ -254,6 +266,12 @@ namespace PulseForgeEditor
 	void EditorViewportSceneRenderView::ClearSceneError() noexcept
 	{
 		m_SceneError.clear();
+		m_SceneErrorOrigin = SceneErrorOrigin::None;
+	}
+
+	void EditorViewportSceneRenderView::ClearSceneErrorIf(SceneErrorOrigin Origin) noexcept
+	{
+		if (m_SceneErrorOrigin == Origin) ClearSceneError();
 	}
 
 	bool EditorViewportSceneRenderView::ClearTarget(
@@ -261,14 +279,15 @@ namespace PulseForgeEditor
 	{
 		if (auto Begin = Runtime.BeginRenderTarget(*m_Target, Clear); !Begin)
 		{
-			SetSceneError(std::string(FailureContext) + ": " + Begin.error().Message);
+			SetSceneError(std::string(FailureContext) + ": " + Begin.error().Message, SceneErrorOrigin::TargetClear);
 			return false;
 		}
 		if (auto End = Runtime.EndRenderTarget(); !End)
 		{
-			SetSceneError(std::string(FailureContext) + ": " + End.error().Message);
+			SetSceneError(std::string(FailureContext) + ": " + End.error().Message, SceneErrorOrigin::TargetClear);
 			return false;
 		}
+		ClearSceneErrorIf(SceneErrorOrigin::TargetClear);
 		return true;
 	}
 } // namespace PulseForgeEditor

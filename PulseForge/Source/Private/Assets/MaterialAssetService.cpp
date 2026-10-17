@@ -1,11 +1,9 @@
-#include "Core/PulseForgePCH.h"
 #include "Assets/MaterialAssetService.h"
 
 #include "Assets/AssetOperations.h"
 #include "Assets/AssetPathResolver.h"
 
 #include <span>
-#include <utility>
 
 namespace PulseForge
 {

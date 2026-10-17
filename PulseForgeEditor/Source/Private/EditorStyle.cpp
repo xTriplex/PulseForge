@@ -3,22 +3,17 @@
 
 #include "Core/Log.h"
 
-#include <imgui.h>
 #include <imgui_freetype.h>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
 
-#include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <limits>
-#include <string>
 #include <system_error>
-#include <vector>
 
 namespace
 {

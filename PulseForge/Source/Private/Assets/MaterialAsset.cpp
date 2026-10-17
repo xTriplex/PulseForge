@@ -1,9 +1,7 @@
-#include "Core/PulseForgePCH.h"
 #include "Assets/MaterialAsset.h"
 
 #include <nlohmann/json.hpp>
 
-#include <array>
 #include <cmath>
 #include <exception>
 #include <fstream>

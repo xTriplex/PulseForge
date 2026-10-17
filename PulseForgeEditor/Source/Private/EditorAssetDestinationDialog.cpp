@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Editor/EditorAssetDestinationDialog.h"
 
 #include "Assets/AssetMetadata.h"
@@ -8,9 +7,6 @@
 #include "Editor/EditorContentBrowserState.h"
 #include "Editor/EditorStyle.h"
 
-#include <imgui.h>
-
-#include <algorithm>
 #include <cctype>
 #include <system_error>
 

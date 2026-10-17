@@ -1,4 +1,3 @@
-#include "Core/PulseForgePCH.h"
 #include "Renderer/RenderTarget.h"
 
 #include <cmath>

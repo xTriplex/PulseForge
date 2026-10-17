@@ -2,15 +2,39 @@
 #include "Core/Core.h"
 #include <memory>
 #include <format>
+#include <cstdint>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace PulseForge
 {
+	enum class LogLevel : uint8_t
+	{
+		Unknown,
+		Trace,
+		Debug,
+		Info,
+		Warning,
+		Error,
+		Critical
+	};
+
+	struct LogEntry
+	{
+		std::string Logger;
+		LogLevel Level = LogLevel::Unknown;
+		std::string Message;
+		uint64_t Sequence = 0;
+	};
+
 	class PULSEFORGE_API Log
 	{
 	public:
 		static void Init();
+		[[nodiscard]] static bool IsInitialized() noexcept;
+		[[nodiscard]] static std::vector<LogEntry> GetRecentEntries();
+		[[nodiscard]] static std::vector<LogEntry> GetRecentEntriesAfter(uint64_t Sequence);
 
 		// Actual functions implemented in Log.cpp that hide spdlog
 		static void PrintCoreTrace(const std::string& msg);

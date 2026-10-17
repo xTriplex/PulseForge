@@ -3,10 +3,6 @@
 #include "Core/Log.h"
 #include "Editor/EditorStyle.h"
 
-#include <imgui.h>
-
-#include <utility>
-
 namespace PulseForgeEditor
 {
 	void EditorStatusPanel::SetStatus(std::string Message)

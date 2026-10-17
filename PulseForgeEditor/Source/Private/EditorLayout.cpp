@@ -2,7 +2,6 @@
 #include "Editor/EditorMaterialEditorPolicy.h"
 #include "Editor/EditorLayoutSettingsPolicy.h"
 
-#include <imgui.h>
 #include <imgui_internal.h>
 
 #define WIN32_LEAN_AND_MEAN
@@ -11,7 +10,6 @@
 #include <Objbase.h>
 #include <ShlObj.h>
 
-#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
@@ -19,7 +17,6 @@
 #include <fstream>
 #include <sstream>
 #include <system_error>
-#include <utility>
 
 namespace
 {

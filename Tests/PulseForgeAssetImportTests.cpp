@@ -4,6 +4,7 @@ int main()
 {
 	PulseForge::Log::Init();
 	TestRunner Tests;
-	RunAssetImportTests(Tests);
+	RunGltfMeshImportTests(Tests);
+	RunImageAssetImportTests(Tests);
 	return Tests.Finish();
 }

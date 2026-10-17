@@ -8,6 +8,11 @@
 #include <string_view>
 #include <vector>
 
+namespace PulseForge
+{
+	struct LogEntry;
+}
+
 namespace PulseForgeEditor
 {
 	enum class EditorConsoleSeverity : uint8_t
@@ -36,6 +41,8 @@ namespace PulseForgeEditor
 		static constexpr size_t MaxMessageBytes = 8192;
 
 		void Append(std::string_view Logger, EditorConsoleSeverity Severity, std::string_view Text);
+		void Append(const PulseForge::LogEntry& Entry);
+		void AppendRecent(const std::vector<PulseForge::LogEntry>& Entries);
 		[[nodiscard]] bool CopyMessagesIfChanged(
 			uint64_t PreviousRevision, std::vector<EditorConsoleMessage>& Destination, uint64_t& CurrentRevision) const;
 		void Clear();

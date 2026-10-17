@@ -1,7 +1,5 @@
-#include "Core/PulseForgePCH.h"
 #include "Renderer/Mesh.h"
 
-#include <algorithm>
 
 namespace PulseForge
 {

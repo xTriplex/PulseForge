@@ -1,15 +1,14 @@
 #pragma once
 
 #include "Assets/AssetID.h"
+#include "Editor/EditorMeshPickingGeometry.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <expected>
-#include <glm/glm.hpp>
 #include <optional>
 #include <string>
 #include <unordered_map>
-#include <vector>
 
 namespace PulseForge
 {
@@ -18,12 +17,6 @@ namespace PulseForge
 
 namespace PulseForgeEditor
 {
-	struct EditorMeshPickingGeometry
-	{
-		std::vector<glm::vec3> Positions;
-		std::vector<uint32_t> Indices;
-	};
-
 	class EditorMeshPickingCache final
 	{
 	public:
