@@ -20,6 +20,7 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 		PulseForgeEditor/Source/Private/ViewportGizmoGeometry.cpp
 		PulseForgeEditor/Source/Private/EditorViewportGizmoInteraction.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentManager.cpp
+		PulseForgeEditor/Source/Private/EditorDocumentTabInteraction.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentCloseRequest.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentWorkspace.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentWorkspaceStore.cpp

@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 void RunEditorDocumentCloseRequestTests(TestRunner& Tests);
+void RunEditorDocumentTabInteractionTests(TestRunner& Tests);
 
 namespace
 {
@@ -114,6 +115,7 @@ int main()
 	RunEditorSceneViewportInteractionTests(Tests);
 	RunEditorViewportGizmoGeometryTests(Tests);
 	RunEditorViewportGizmoInteractionTests(Tests);
+	RunEditorDocumentTabInteractionTests(Tests);
 	PulseForgeEditor::EditorConsoleHistory Console;
 	std::vector<PulseForgeEditor::EditorConsoleMessage> Messages;
 	uint64_t Revision = 0;
