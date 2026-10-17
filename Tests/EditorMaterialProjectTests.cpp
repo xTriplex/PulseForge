@@ -427,6 +427,25 @@ namespace
 		PF_CHECK(Tests, !Project::Create(ProjectFile, "Duplicate Project"));
 		PF_CHECK(Tests, !ProjectSerializer::Deserialize("{broken"));
 		PF_CHECK(Tests, !ProjectSerializer::Deserialize("{\"format\":\"PulseForgeProject\",\"version\":99}"));
+		const auto SerializedDescription = ProjectSerializer::Serialize(Created->GetDescription());
+		PF_CHECK(Tests, SerializedDescription.has_value());
+		if (SerializedDescription)
+		{
+			std::string ExactBoundaryProject = *SerializedDescription;
+			ExactBoundaryProject.resize(ProjectSerializer::MaximumDocumentBytes, ' ');
+			PF_CHECK(Tests, ProjectSerializer::Deserialize(ExactBoundaryProject).has_value());
+			ExactBoundaryProject.push_back(' ');
+			const auto OversizedProject = ProjectSerializer::Deserialize(ExactBoundaryProject);
+			PF_CHECK(Tests, !OversizedProject && OversizedProject.error().Code == ProjectErrorCode::DocumentTooLarge);
+		}
+
+		const std::filesystem::path OversizedProjectFile = Root / "Oversized.pfproj";
+		std::ofstream(OversizedProjectFile, std::ios::binary | std::ios::trunc).close();
+		std::filesystem::resize_file(OversizedProjectFile, ProjectSerializer::MaximumDocumentBytes + 1, FileError);
+		PF_CHECK(Tests, !FileError);
+		const auto OversizedProjectLoad = Project::Open(OversizedProjectFile);
+		PF_CHECK(Tests, !OversizedProjectLoad && OversizedProjectLoad.error().Code == ProjectErrorCode::FileReadFailed);
+		PF_CHECK(Tests, OversizedProjectLoad.error().Message.find("1 MiB") != std::string::npos);
 
 		const std::filesystem::path ScenesDirectory = Root / "Assets" / "Scenes";
 		std::filesystem::create_directories(ScenesDirectory, FileError);

@@ -568,6 +568,52 @@ namespace
 		PF_CHECK(Tests, !MissingFileResult.has_value());
 		PF_CHECK(Tests, !MissingFileResult && MissingFileResult.error().Code == SceneSerializationErrorCode::FileOpenFailed);
 		PF_CHECK(Tests, Source.GetEntityCount() == 2);
+
+		std::string ExactBoundaryScene = *Serialized;
+		ExactBoundaryScene.resize(SceneSerializer::MaximumDocumentBytes, ' ');
+		{
+			std::ofstream Output(ScenePath, std::ios::binary | std::ios::trunc);
+			Output.write(ExactBoundaryScene.data(), static_cast<std::streamsize>(ExactBoundaryScene.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		Scene BoundaryLoadedScene;
+		const auto ExactBoundaryLoad = SceneSerializer::LoadFromFile(ScenePath, BoundaryLoadedScene);
+		PF_CHECK(Tests, ExactBoundaryLoad.has_value());
+		PF_CHECK(Tests, BoundaryLoadedScene.GetEntityCount() == 2);
+
+		const UUID PreservedEntityID = Child.GetUUID();
+		ExactBoundaryScene.push_back(' ');
+		const auto OversizedDeserialize = SceneSerializer::Deserialize(ExactBoundaryScene, BoundaryLoadedScene);
+		PF_CHECK(Tests, !OversizedDeserialize && OversizedDeserialize.error().Code == SceneSerializationErrorCode::DocumentTooLarge);
+		PF_CHECK(Tests, BoundaryLoadedScene.FindEntity(PreservedEntityID).has_value());
+		{
+			std::ofstream Output(ScenePath, std::ios::binary | std::ios::app);
+			Output.put(' ');
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto OversizedLoad = SceneSerializer::LoadFromFile(ScenePath, BoundaryLoadedScene);
+		PF_CHECK(Tests, !OversizedLoad && OversizedLoad.error().Code == SceneSerializationErrorCode::FileReadFailed);
+		PF_CHECK(Tests, OversizedLoad.error().Message.find("64 MiB") != std::string::npos);
+		PF_CHECK(Tests, BoundaryLoadedScene.FindEntity(PreservedEntityID).has_value());
+
+		{
+			std::ofstream Output(ScenePath, std::ios::binary | std::ios::trunc);
+			Output << "{\"format\":\"PulseForgeScene\",\"version\":7,\"entities\":[";
+		}
+		const auto TruncatedLoad = SceneSerializer::LoadFromFile(ScenePath, BoundaryLoadedScene);
+		PF_CHECK(Tests, !TruncatedLoad && TruncatedLoad.error().Code == SceneSerializationErrorCode::InvalidDocument);
+		PF_CHECK(Tests, BoundaryLoadedScene.FindEntity(PreservedEntityID).has_value());
+
+		std::string TooManyEntities = "{\"format\":\"PulseForgeScene\",\"version\":7,\"entities\":[";
+		for (size_t Index = 0; Index < SceneSerializer::MaximumEntityCount; ++Index)
+		{
+			if (Index != 0) TooManyEntities.push_back(',');
+			TooManyEntities += "null";
+		}
+		TooManyEntities += ",null]}";
+		const auto EntityLimitResult = SceneSerializer::Deserialize(TooManyEntities, BoundaryLoadedScene);
+		PF_CHECK(Tests, !EntityLimitResult && EntityLimitResult.error().Code == SceneSerializationErrorCode::DocumentTooLarge);
+		PF_CHECK(Tests, BoundaryLoadedScene.FindEntity(PreservedEntityID).has_value());
 	}
 
 	void TestSceneAssetsByUUID(TestRunner& Tests)
