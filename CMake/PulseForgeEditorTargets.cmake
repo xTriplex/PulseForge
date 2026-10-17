@@ -71,19 +71,11 @@ if(PULSEFORGE_BUILD_EDITOR)
 	endif()
 	target_link_libraries(PulseForgeEditor PRIVATE
 		PulseForgeEditorCore PulseForgeEditorUI PulseForge PulseForgeImGui nfd::nfd spdlog::spdlog shell32 ole32 dwmapi)
-	add_custom_command(TARGET PulseForgeEditor POST_BUILD
-		COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeEditor>/EditorAssets"
-		COMMAND "${CMAKE_COMMAND}" -E copy_directory
-			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Fonts"
-			"$<TARGET_FILE_DIR:PulseForgeEditor>/EditorAssets/Fonts"
-		COMMAND "${CMAKE_COMMAND}" -E copy_directory
-			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Icons"
-			"$<TARGET_FILE_DIR:PulseForgeEditor>/EditorAssets/Icons"
-		COMMAND "${CMAKE_COMMAND}" -E copy_directory
-			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/ThirdParty"
-			"$<TARGET_FILE_DIR:PulseForgeEditor>/EditorAssets/ThirdParty"
-		VERBATIM
-		COMMENT "Copying bundled PulseForge editor fonts, icons, and notices"
+	pulseforge_attach_asset_deployment(PulseForgeEditor "$<TARGET_FILE_DIR:PulseForgeEditor>/EditorAssets"
+		DIRECTORIES
+			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Fonts" "Fonts"
+			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Icons" "Icons"
+			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/ThirdParty" "ThirdParty"
 	)
 	set_property(TARGET PulseForgeEditor PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeEditor>")
 endif()

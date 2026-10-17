@@ -204,28 +204,16 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 	if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
 		pulseforge_attach_shader_deployment(PulseForgeGame "$<TARGET_FILE_DIR:PulseForgeGame>/Shaders"
 			ASSET_TARGETS PulseForgeSceneShaderAssets SHADERS ${PULSEFORGE_SCENE_SHADER_OUTPUTS})
-		add_custom_command(TARGET PulseForgeGame POST_BUILD
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
-			COMMAND "${CMAKE_COMMAND}" -E copy_directory
-				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Models" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Models"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Textures"
-			COMMAND "${CMAKE_COMMAND}" -E copy_directory
-				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Textures" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Textures"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Environments"
-			COMMAND "${CMAKE_COMMAND}" -E copy_directory
-				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Environments" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Environments"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scenes"
-			COMMAND "${CMAKE_COMMAND}" -E copy_directory
-				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Scenes" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scenes"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Materials"
-			COMMAND "${CMAKE_COMMAND}" -E copy_directory
-				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Materials" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Materials"
-			COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scripts"
-			COMMAND "${CMAKE_COMMAND}" -E copy_directory
-				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Scripts" "$<TARGET_FILE_DIR:PulseForgeGame>/Assets/Scripts"
-			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/PulseForgeGame.pfproj" "$<TARGET_FILE_DIR:PulseForgeGame>/PulseForgeGame.pfproj"
-			VERBATIM
+		pulseforge_attach_asset_deployment(PulseForgeGame "$<TARGET_FILE_DIR:PulseForgeGame>"
+			DIRECTORIES
+				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Models" "Assets/Models"
+				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Textures" "Assets/Textures"
+				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Environments" "Assets/Environments"
+				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Scenes" "Assets/Scenes"
+				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Materials" "Assets/Materials"
+				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Scripts" "Assets/Scripts"
+			FILES
+				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/PulseForgeGame.pfproj" "PulseForgeGame.pfproj"
 		)
 		set_property(TARGET PulseForgeGame PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGame>")
 	endif()
