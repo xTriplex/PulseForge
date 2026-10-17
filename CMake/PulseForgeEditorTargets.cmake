@@ -13,6 +13,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorInspectorPanel.cpp
 		PulseForgeEditor/Source/Private/EditorMaterialDetailsPanel.cpp
 		PulseForgeEditor/Source/Private/EditorStatusPanel.cpp
+		PulseForgeEditor/Source/Private/EditorViewportMouseCapture.cpp
 		PulseForgeEditor/Source/Private/EditorViewportSceneRenderView.cpp
 		PulseForgeEditor/Source/Private/EditorViewportToolbar.cpp
 		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
@@ -57,6 +58,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	endif()
 	target_include_directories(PulseForgeEditor PRIVATE
 		PulseForgeEditor/Source/Public
+		PulseForgeEditor/Source/Private
 		PulseForge/Vendor/json/include
 		PulseForge/Vendor/imgui/misc/freetype
 	)

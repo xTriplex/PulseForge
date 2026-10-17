@@ -4,6 +4,7 @@
 #include "Editor/EditorViewportToolState.h"
 
 #include <chrono>
+#include <cmath>
 #include <limits>
 
 namespace
@@ -489,9 +490,28 @@ namespace
 		PF_CHECK(Tests, !Capture.Begin(true, true, true, false, false)); // No duplicate capture transition.
 		Capture.End(); // Same transition is used for RMB release, focus loss, and layout/project changes.
 		PF_CHECK(Tests, !Capture.OwnsMouse());
+		PF_CHECK(Tests, !Capture.UpdateCursorPosition(100.0f, 100.0f));
 		PF_CHECK(Tests, Capture.Begin(true, true, true, false, false));
+		PF_CHECK(Tests, !Capture.UpdateCursorPosition(30.0f, 40.0f)); // Ignore the warp generated when capture starts.
+		const auto FirstDelta = Capture.UpdateCursorPosition(33.5f, 38.0f);
+		PF_CHECK(Tests, FirstDelta.has_value());
+		if (FirstDelta)
+		{
+			PF_CHECK(Tests, std::abs(FirstDelta->first - 3.5f) < 1.0e-6f);
+			PF_CHECK(Tests, std::abs(FirstDelta->second + 2.0f) < 1.0e-6f);
+		}
+		PF_CHECK(Tests, !Capture.UpdateCursorPosition(std::numeric_limits<float>::infinity(), 42.0f));
+		PF_CHECK(Tests, !Capture.UpdateCursorPosition(45.0f, 42.0f)); // Rebase after invalid native cursor data.
+		const auto RebasedDelta = Capture.UpdateCursorPosition(46.0f, 43.0f);
+		PF_CHECK(Tests, RebasedDelta.has_value());
+		if (RebasedDelta)
+		{
+			PF_CHECK(Tests, std::abs(RebasedDelta->first - 1.0f) < 1.0e-6f);
+			PF_CHECK(Tests, std::abs(RebasedDelta->second - 1.0f) < 1.0e-6f);
+		}
 		Capture.End();
 		PF_CHECK(Tests, !Capture.OwnsMouse());
+		PF_CHECK(Tests, !Capture.UpdateCursorPosition(47.0f, 44.0f));
 	}
 
 	void TestEditorViewportCameraController(TestRunner& Tests)
