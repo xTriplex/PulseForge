@@ -1,4 +1,5 @@
 add_library(PulseForgeCore STATIC
+	PulseForge/Source/Private/Core/BoundedInput.cpp
 	PulseForge/Source/Private/Core/Log.cpp
 	PulseForge/Source/Private/Core/Input.cpp
 	PulseForge/Source/Private/Core/Layer.cpp

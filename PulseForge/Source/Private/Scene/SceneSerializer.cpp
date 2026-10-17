@@ -1,4 +1,5 @@
 #include "Scene/SceneSerializer.h"
+#include "Core/BoundedInput.h"
 #include "Scene/Components/AudioListenerComponent.h"
 #include "Scene/Components/AudioSourceComponent.h"
 #include "Scene/Components/DirectionalLightComponent.h"
@@ -14,7 +15,6 @@
 #include <cmath>
 #include <exception>
 #include <fstream>
-#include <iterator>
 #include <limits>
 #include <optional>
 #include <span>
@@ -84,10 +84,13 @@ namespace PulseForge
 				std::filesystem::remove(Path, Error);
 			}
 		};
-	}
+	} // namespace
 
 	std::expected<std::string, SceneSerializationError> SceneSerializer::Serialize(const Scene& Source)
 	{
+		if (Source.GetEntityCount() > MaximumEntityCount)
+			return std::unexpected(MakeError(SceneSerializationErrorCode::DocumentTooLarge, "Scene exceeds the 250,000 entity limit"));
+
 		try
 		{
 			Json Document = Json::object();
@@ -229,24 +232,29 @@ namespace PulseForge
 						{ "enabled", Script->value().Enabled }
 					});
 				}
-				Record["parent"] = Parent->has_value()
-					? Json((**Parent).GetUUID().ToString())
-					: Json(nullptr);
+				Record["parent"] = Parent->has_value() ? Json((**Parent).GetUUID().ToString()) : Json(nullptr);
 				Document["entities"].push_back(std::move(Record));
 			}
 
-			return Document.dump(2) + "\n";
+			std::string Data = Document.dump(2) + "\n";
+			if (Data.size() > MaximumDocumentBytes)
+				return std::unexpected(
+					MakeError(SceneSerializationErrorCode::DocumentTooLarge, "Serialized scene exceeds the 64 MiB document limit"));
+			return Data;
 		}
 		catch (const std::exception& Exception)
 		{
 			return std::unexpected(MakeError(
-				SceneSerializationErrorCode::SceneOperationFailed,
-				std::string("Scene serialization failed: ") + Exception.what()));
+				SceneSerializationErrorCode::SceneOperationFailed, std::string("Scene serialization failed: ") + Exception.what()));
 		}
 	}
 
 	std::expected<void, SceneSerializationError> SceneSerializer::Deserialize(std::string_view Data, Scene& Destination)
 	{
+		if (Data.size() > MaximumDocumentBytes)
+			return std::unexpected(
+				MakeError(SceneSerializationErrorCode::DocumentTooLarge, "Scene document exceeds the 64 MiB document limit"));
+
 		try
 		{
 			const Json Document = Json::parse(Data.begin(), Data.end());
@@ -255,24 +263,30 @@ namespace PulseForge
 
 			const auto Format = Document.find("format");
 			if (Format == Document.end() || !Format->is_string())
-				return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidDocument, "Scene document is missing its format identifier"));
+				return std::unexpected(
+					MakeError(SceneSerializationErrorCode::InvalidDocument, "Scene document is missing its format identifier"));
 			if (Format->get<std::string>() != SceneFormatName)
 				return std::unexpected(MakeError(SceneSerializationErrorCode::UnsupportedFormat, "Document is not a PulseForge scene"));
 
 			const auto Version = Document.find("version");
 			if (Version == Document.end() || (!Version->is_number_integer() && !Version->is_number_unsigned()))
-				return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidDocument, "Scene document is missing a numeric format version"));
-			const bool SupportedVersion = Version->is_number_unsigned()
-				? Version->get<uint64_t>() >= static_cast<uint64_t>(MinimumSupportedSceneFormatVersion) &&
-					Version->get<uint64_t>() <= static_cast<uint64_t>(SceneFormatVersion)
-				: Version->get<int64_t>() >= MinimumSupportedSceneFormatVersion &&
-					Version->get<int64_t>() <= SceneFormatVersion;
+				return std::unexpected(
+					MakeError(SceneSerializationErrorCode::InvalidDocument, "Scene document is missing a numeric format version"));
+			const bool SupportedVersion =
+				Version->is_number_unsigned()
+					? Version->get<uint64_t>() >= static_cast<uint64_t>(MinimumSupportedSceneFormatVersion) &&
+						  Version->get<uint64_t>() <= static_cast<uint64_t>(SceneFormatVersion)
+					: Version->get<int64_t>() >= MinimumSupportedSceneFormatVersion && Version->get<int64_t>() <= SceneFormatVersion;
 			if (!SupportedVersion)
-				return std::unexpected(MakeError(SceneSerializationErrorCode::UnsupportedVersion, "Scene document version is not supported"));
+				return std::unexpected(
+					MakeError(SceneSerializationErrorCode::UnsupportedVersion, "Scene document version is not supported"));
 
 			const auto SerializedEntities = Document.find("entities");
 			if (SerializedEntities == Document.end() || !SerializedEntities->is_array())
 				return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidDocument, "Scene document entities must be an array"));
+			if (SerializedEntities->size() > MaximumEntityCount)
+				return std::unexpected(
+					MakeError(SceneSerializationErrorCode::DocumentTooLarge, "Scene document exceeds the 250,000 entity limit"));
 
 			struct PendingParent
 			{
@@ -887,24 +901,23 @@ namespace PulseForge
 			if (!Input.is_open())
 			{
 				return std::unexpected(MakeError(
-					SceneSerializationErrorCode::FileOpenFailed,
-					"Could not open scene file for reading: " + PathForMessage(Path)));
+					SceneSerializationErrorCode::FileOpenFailed, "Could not open scene file for reading: " + PathForMessage(Path)));
 			}
 
-			std::string Data{ std::istreambuf_iterator<char>(Input), std::istreambuf_iterator<char>() };
-			if (Input.bad())
+			auto Data = Detail::ReadBoundedInput(Input, MaximumDocumentBytes);
+			if (!Data)
 			{
-				return std::unexpected(MakeError(
-					SceneSerializationErrorCode::FileReadFailed,
-					"Could not read the complete scene file: " + PathForMessage(Path)));
+				return std::unexpected(MakeError(SceneSerializationErrorCode::FileReadFailed,
+					Data.error().Code == Detail::BoundedInputErrorCode::TooLarge
+						? "Scene file exceeds the 64 MiB document limit: " + PathForMessage(Path)
+						: "Could not read the complete scene file: " + PathForMessage(Path)));
 			}
-			return Deserialize(Data, Destination);
+			return Deserialize(*Data, Destination);
 		}
 		catch (const std::exception& Exception)
 		{
-			return std::unexpected(MakeError(
-				SceneSerializationErrorCode::FileReadFailed,
-				std::string("Scene file load failed: ") + Exception.what()));
+			return std::unexpected(
+				MakeError(SceneSerializationErrorCode::FileReadFailed, std::string("Scene file load failed: ") + Exception.what()));
 		}
 	}
-}
+} // namespace PulseForge

@@ -1,9 +1,79 @@
 #include "TestCoreSupport.h"
+#include "Core/BoundedInput.h"
 
+#include <algorithm>
 #include <functional>
+#include <istream>
+#include <sstream>
+#include <streambuf>
+#include <string>
+#include <utility>
 
 namespace
 {
+	class GrowingInputBuffer final : public std::streambuf
+	{
+	public:
+		GrowingInputBuffer(std::string InitialData, std::string GrowthData)
+			: m_Data(std::move(InitialData)), m_GrowthData(std::move(GrowthData))
+		{
+		}
+
+		[[nodiscard]] size_t GetBytesRead() const noexcept { return m_Position; }
+
+	protected:
+		std::streamsize xsgetn(char* Destination, std::streamsize Count) override
+		{
+			const size_t Requested = static_cast<size_t>(Count);
+			if (!m_GrowthAdded && Requested > m_Data.size() - m_Position)
+			{
+				m_Data += m_GrowthData;
+				m_GrowthAdded = true;
+			}
+
+			const size_t Available = m_Data.size() - m_Position;
+			const size_t BytesToCopy = std::min(Requested, Available);
+			std::copy_n(m_Data.data() + m_Position, BytesToCopy, Destination);
+			m_Position += BytesToCopy;
+			return static_cast<std::streamsize>(BytesToCopy);
+		}
+
+	private:
+		std::string m_Data;
+		std::string m_GrowthData;
+		size_t m_Position = 0;
+		bool m_GrowthAdded = false;
+	};
+
+	class FailingInputBuffer final : public std::streambuf
+	{
+	protected:
+		std::streamsize xsgetn(char*, std::streamsize) override { throw std::ios_base::failure("injected input failure"); }
+	};
+
+	void TestBoundedInputReader(TestRunner& Tests)
+	{
+		using namespace PulseForge::Detail;
+		std::istringstream ExactInput("1234");
+		const auto Exact = ReadBoundedInput(ExactInput, 4);
+		PF_CHECK(Tests, Exact && *Exact == "1234");
+
+		std::istringstream OversizedInput("12345");
+		const auto Oversized = ReadBoundedInput(OversizedInput, 4);
+		PF_CHECK(Tests, !Oversized && Oversized.error().Code == BoundedInputErrorCode::TooLarge);
+
+		GrowingInputBuffer GrowingBuffer("1234", "5");
+		std::istream GrowingInput(&GrowingBuffer);
+		const auto GrewDuringRead = ReadBoundedInput(GrowingInput, 4);
+		PF_CHECK(Tests, !GrewDuringRead && GrewDuringRead.error().Code == BoundedInputErrorCode::TooLarge);
+		PF_CHECK(Tests, GrowingBuffer.GetBytesRead() == 5);
+
+		FailingInputBuffer FailingBuffer;
+		std::istream FailingInput(&FailingBuffer);
+		const auto FailedRead = ReadBoundedInput(FailingInput, 4);
+		PF_CHECK(Tests, !FailedRead && FailedRead.error().Code == BoundedInputErrorCode::ReadFailed);
+	}
+
 	struct LayerLifecycle
 	{
 		int AttachCount = 0;
@@ -448,6 +518,7 @@ namespace
 
 void RunCoreTests(TestRunner& Tests)
 {
+	TestBoundedInputReader(Tests);
 	TestLayerStackOwnership(Tests);
 	TestLayerStackClearDetachesInReverseOrder(Tests);
 	TestLayerAndOverlayIterationOrder(Tests);
