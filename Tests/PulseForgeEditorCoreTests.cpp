@@ -10,6 +10,8 @@
 #include <thread>
 #include <unordered_set>
 
+void RunEditorDocumentCloseRequestTests(TestRunner& Tests);
+
 namespace
 {
 	void TestStartupLogReplay(TestRunner& Tests)
@@ -120,6 +122,7 @@ int main()
 	PF_CHECK(Tests, Messages.size() == 1 && Messages.front().Text == "engine ready");
 	TestStartupLogReplay(Tests);
 	TestConcurrentLogHistory(Tests);
+	RunEditorDocumentCloseRequestTests(Tests);
 
 	PulseForgeEditor::EditorCommandHistory History;
 	PF_CHECK(Tests, History.Begin("Rename", "before"));

@@ -75,6 +75,7 @@
 #include "Editor/EditorDocumentTabPolicy.h"
 #include "Editor/EditorDocumentWorkspace.h"
 #include "Editor/EditorDocumentWorkspaceStore.h"
+#include "Editor/EditorDocumentCloseRequest.h"
 #include "Editor/EditorSnapshotHistory.h"
 #include "Editor/EditorSceneTransitionQueue.h"
 #include "Editor/EditorSceneHierarchyOperations.h"
@@ -1283,22 +1284,26 @@ namespace
 				return;
 			std::vector<PulseForgeEditor::EditorDocumentIdentity> Documents;
 			for (const auto& [Identity, Session] : m_Documents.GetSessions())
-				if (Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level)
-					Documents.push_back(Identity);
-			if (GetDirtyAssetDocuments().empty() && CloseDocumentBatchClean(Documents))
+				if (Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level) Documents.push_back(Identity);
+			std::string CloseError;
+			if (GetDirtyAssetDocuments().empty())
 			{
-				CompleteEditorApplicationClose();
-				return;
+				if (CloseDocumentBatchClean(Documents))
+				{
+					CompleteEditorApplicationClose();
+					return;
+				}
+				CloseError = m_DocumentCloseRequest.GetError();
 			}
-			m_PendingDocumentClose.reset();
-			m_PendingDocumentHostClose.reset();
-			m_PendingDocumentCloseBatch = std::move(Documents);
-			m_PendingCloseAllDocuments = true;
-			m_DocumentCloseDialogHostID = std::string(PulseForgeEditor::EditorDocumentManager::MainHostID);
-			m_PendingDocumentCloseAction = [this] { CompleteEditorApplicationClose(); };
-			m_OpenDocumentCloseDialog = true;
-			if (m_DocumentCloseError.empty())
-				m_DocumentCloseError = "Resolve open documents before closing PulseForge.";
+			m_DocumentCloseRequest.BeginCloseAllDocuments(
+				std::move(Documents), std::string(PulseForgeEditor::EditorDocumentManager::MainHostID),
+				[this] { CompleteEditorApplicationClose(); });
+			if (!CloseError.empty()) m_DocumentCloseRequest.SetError(CloseError);
+			else
+			{
+				m_DocumentCloseRequest.SetError("Resolve open documents before closing PulseForge.");
+				SetError(m_DocumentCloseRequest.GetError());
+			}
 		}
 
 		void CompleteEditorApplicationClose()
@@ -1883,12 +1888,10 @@ namespace
 						ProjectDocuments.push_back(Identity);
 				if (!CloseDocumentBatchClean(ProjectDocuments))
 				{
-					m_PendingDocumentClose.reset();
-					m_PendingDocumentHostClose.reset();
-					m_PendingDocumentCloseBatch = std::move(ProjectDocuments);
-					m_DocumentCloseDialogHostID = std::string(PulseForgeEditor::EditorDocumentManager::MainHostID);
-					m_PendingDocumentCloseAction = std::move(OnDocumentsClosed);
-					m_OpenDocumentCloseDialog = true;
+					const std::string CloseError = m_DocumentCloseRequest.GetError();
+					m_DocumentCloseRequest.BeginCloseDocuments(std::move(ProjectDocuments),
+						std::string(PulseForgeEditor::EditorDocumentManager::MainHostID), std::move(OnDocumentsClosed));
+					m_DocumentCloseRequest.SetError(CloseError);
 					return false;
 				}
 				(void)m_Documents.ClearProject(m_Project->GetDescription().ID);
@@ -3920,14 +3923,11 @@ namespace
 			auto PreparedClose = PrepareDocumentCloseBatch(DeletedDocuments);
 			if (!PreparedClose)
 			{
-				m_DocumentCloseError = PreparedClose.error();
-				m_PendingDocumentClose.reset();
-				m_PendingDocumentHostClose.reset();
-				m_PendingDocumentCloseBatch = DeletedDocuments;
-				m_DocumentCloseDialogHostID = std::string(PulseForgeEditor::EditorDocumentManager::MainHostID);
-				m_PendingDocumentCloseAction = [this, Identifier] { DeleteAssetAt(Identifier); };
-				m_OpenDocumentCloseDialog = true;
-				SetError(m_DocumentCloseError);
+				m_DocumentCloseRequest.BeginCloseDocuments(DeletedDocuments,
+					std::string(PulseForgeEditor::EditorDocumentManager::MainHostID),
+					[this, Identifier] { DeleteAssetAt(Identifier); });
+				m_DocumentCloseRequest.SetError(PreparedClose.error());
+				SetError(m_DocumentCloseRequest.GetError());
 				return;
 			}
 
@@ -4712,8 +4712,8 @@ namespace
 		{
 			if (auto Result = std::move(Prepared).Commit(m_Documents, m_DocumentEditors); !Result)
 			{
-				m_DocumentCloseError = Result.error();
-				SetError(m_DocumentCloseError);
+				m_DocumentCloseRequest.SetError(Result.error());
+				SetError(m_DocumentCloseRequest.GetError());
 				return false;
 			}
 			MarkDocumentWorkspaceDirty();
@@ -4725,8 +4725,8 @@ namespace
 			auto Prepared = PrepareDocumentCloseBatch(Documents);
 			if (!Prepared)
 			{
-				m_DocumentCloseError = Prepared.error();
-				SetError(m_DocumentCloseError);
+				m_DocumentCloseRequest.SetError(Prepared.error());
+				SetError(m_DocumentCloseRequest.GetError());
 				return false;
 			}
 			return CommitPreparedDocumentCloseBatch(std::move(*Prepared));
@@ -4739,23 +4739,13 @@ namespace
 				return;
 			if (!Session->IsDirty())
 			{
-				if (CloseDocumentBatchClean({ Identity }))
-					return;
-				m_PendingDocumentClose = Identity;
-				m_PendingDocumentHostClose.reset();
-				m_PendingDocumentCloseBatch = { Identity };
-				m_DocumentCloseDialogHostID = Session->HostID;
-				m_PendingDocumentCloseAction = {};
-				m_OpenDocumentCloseDialog = true;
+				if (CloseDocumentBatchClean({ Identity })) return;
+				const std::string CloseError = m_DocumentCloseRequest.GetError();
+				m_DocumentCloseRequest.BeginCloseDocuments({ Identity }, Session->HostID);
+				m_DocumentCloseRequest.SetError(CloseError);
 				return;
 			}
-			m_DocumentCloseError.clear();
-			m_PendingDocumentClose = Identity;
-			m_PendingDocumentHostClose.reset();
-			m_PendingDocumentCloseBatch = { Identity };
-			m_DocumentCloseDialogHostID = Session->HostID;
-			m_PendingDocumentCloseAction = {};
-			m_OpenDocumentCloseDialog = true;
+			m_DocumentCloseRequest.BeginCloseDocuments({ Identity }, Session->HostID);
 		}
 
 		void RequestDocumentHostClose(std::string_view HostID)
@@ -4772,22 +4762,13 @@ namespace
 			});
 			if (DirtyDocuments.empty())
 			{
-				if (CloseDocumentBatchClean(Documents))
-					return;
-				m_PendingDocumentHostClose = std::string(HostID);
-				m_PendingDocumentCloseBatch = Documents;
-				m_DocumentCloseDialogHostID = std::string(HostID);
-				m_PendingDocumentCloseAction = {};
-				m_OpenDocumentCloseDialog = true;
+				if (CloseDocumentBatchClean(Documents)) return;
+				const std::string CloseError = m_DocumentCloseRequest.GetError();
+				m_DocumentCloseRequest.BeginCloseDocuments(Documents, std::string(HostID));
+				m_DocumentCloseRequest.SetError(CloseError);
 				return;
 			}
-			m_DocumentCloseError.clear();
-			m_PendingDocumentClose.reset();
-			m_PendingDocumentHostClose = std::string(HostID);
-			m_PendingDocumentCloseBatch = Documents;
-			m_DocumentCloseDialogHostID = std::string(HostID);
-			m_PendingDocumentCloseAction = {};
-			m_OpenDocumentCloseDialog = true;
+			m_DocumentCloseRequest.BeginCloseDocuments(Documents, std::string(HostID));
 		}
 
 		void QueueAfterDocuments(std::function<void()> Action)
@@ -4799,49 +4780,14 @@ namespace
 				m_DeferredEditorOperations.Enqueue(std::move(Action));
 				return;
 			}
-			m_PendingDocumentClose.reset();
-			m_PendingDocumentHostClose.reset();
-			m_PendingDocumentCloseBatch.clear();
-			m_PendingCloseAllDocuments = false;
-			m_DocumentCloseError.clear();
-			m_DocumentCloseDialogHostID = std::string(PulseForgeEditor::EditorDocumentManager::MainHostID);
-			m_PendingDocumentCloseAction = std::move(Action);
-			m_OpenDocumentCloseDialog = true;
+			m_DocumentCloseRequest.BeginResolveChanges(
+				std::string(PulseForgeEditor::EditorDocumentManager::MainHostID), std::move(Action));
 		}
 
 		bool ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice Choice)
 		{
-			if (Choice != PulseForgeEditor::EditorDocumentCloseChoice::Save &&
-				Choice != PulseForgeEditor::EditorDocumentCloseChoice::Discard)
-				return false;
-
-			std::vector<PulseForgeEditor::EditorDocumentIdentity> Documents;
-			const bool ClosingDocuments = m_PendingDocumentClose.has_value() ||
-				m_PendingDocumentHostClose.has_value() || !m_PendingDocumentCloseBatch.empty() ||
-				m_PendingCloseAllDocuments;
-			if (!m_PendingDocumentCloseBatch.empty())
-				Documents = m_PendingDocumentCloseBatch;
-			else if (m_PendingDocumentClose)
-				Documents.push_back(*m_PendingDocumentClose);
-			else if (m_PendingDocumentHostClose)
-			{
-				if (const auto* Host = m_Documents.FindHost(*m_PendingDocumentHostClose))
-					Documents = Host->Documents;
-			}
-			else
-				Documents = GetDirtyAssetDocuments();
-			if (m_PendingCloseAllDocuments)
-				for (const auto& Identity : GetDirtyAssetDocuments())
-					if (std::find(Documents.begin(), Documents.end(), Identity) == Documents.end())
-						Documents.push_back(Identity);
-
-			std::vector<PulseForgeEditor::EditorDocumentIdentity> CloseableDocuments;
-			if (ClosingDocuments)
-				for (const auto& Identity : Documents)
-					if (m_Documents.Find(Identity))
-						CloseableDocuments.push_back(Identity);
-
-			auto ResolveDirtyChanges = [this, &Documents, Choice]() -> std::expected<void, std::string>
+			auto ResolveDirtyChanges = [this](std::span<const PulseForgeEditor::EditorDocumentIdentity> Documents,
+													  PulseForgeEditor::EditorDocumentCloseChoice Choice) -> std::expected<void, std::string>
 			{
 				if (Choice == PulseForgeEditor::EditorDocumentCloseChoice::Save)
 				{
@@ -4903,110 +4849,43 @@ namespace
 				}
 				return {};
 			};
-
-			bool CloseContinuationQueued = false;
-			if (ClosingDocuments)
+			const std::vector<PulseForgeEditor::EditorDocumentIdentity> CurrentDirtyDocuments = GetDirtyAssetDocuments();
+			auto Resolved = m_DocumentCloseRequest.Resolve(
+				m_Documents, m_DocumentEditors, Choice, CurrentDirtyDocuments, ResolveDirtyChanges,
+				[this](std::function<void()> Continuation) { m_DeferredEditorOperations.Enqueue(std::move(Continuation)); });
+			if (!Resolved)
 			{
-				auto CloseResult = PulseForgeEditor::ResolveDocumentCloseBatchWithChanges(
-					m_Documents, m_DocumentEditors, CloseableDocuments,
-					Choice == PulseForgeEditor::EditorDocumentCloseChoice::Discard,
-					ResolveDirtyChanges, m_PendingDocumentCloseAction,
-					[this](std::function<void()> Continuation)
-					{
-						m_DeferredEditorOperations.Enqueue(std::move(Continuation));
-					});
-				if (!CloseResult)
-				{
-					m_DocumentCloseError = CloseResult.error();
-					SetError(m_DocumentCloseError);
-					if (m_DocumentCloseDialogHostID.empty())
-					{
-						if (m_PendingDocumentHostClose)
-							m_DocumentCloseDialogHostID = *m_PendingDocumentHostClose;
-						else if (!Documents.empty())
-							if (const auto* Session = m_Documents.Find(Documents.front()))
-								m_DocumentCloseDialogHostID = Session->HostID;
-						if (m_DocumentCloseDialogHostID.empty())
-							m_DocumentCloseDialogHostID =
-								std::string(PulseForgeEditor::EditorDocumentManager::MainHostID);
-					}
-					return false;
-				}
-				CloseContinuationQueued = true;
-				MarkDocumentWorkspaceDirty();
-			}
-			else if (auto Resolved = ResolveDirtyChanges(); !Resolved)
-			{
-				m_DocumentCloseError = Resolved.error();
-				SetError(m_DocumentCloseError);
+				SetError(Resolved.error());
+				m_DocumentCloseRequest.SetDialogHostIfEmpty(std::string(PulseForgeEditor::EditorDocumentManager::MainHostID));
 				return false;
 			}
-			m_PendingDocumentClose.reset();
-			m_PendingDocumentHostClose.reset();
-			m_PendingDocumentCloseBatch.clear();
-			m_PendingCloseAllDocuments = false;
-			m_DocumentCloseError.clear();
-			m_DocumentCloseDialogHostID.clear();
-			m_OpenDocumentCloseDialog = false;
+			if (Resolved->DocumentsClosed) MarkDocumentWorkspaceDirty();
 			ImGui::CloseCurrentPopup();
-			if (!CloseContinuationQueued)
-				(void)PulseForgeEditor::QueueDocumentCloseContinuation(true, m_PendingDocumentCloseAction,
-					[this](std::function<void()> Continuation)
-					{
-						m_DeferredEditorOperations.Enqueue(std::move(Continuation));
-					});
 			return true;
 		}
 
 		void DrawDocumentCloseDialog(std::string_view HostID)
 		{
-			if (HostID != m_DocumentCloseDialogHostID)
-				return;
+			if (HostID != m_DocumentCloseRequest.GetDialogHostID()) return;
 
 			const std::string PopupName = "Unsaved Asset Documents###PFDocumentClose_" + std::string(HostID);
-			if (m_OpenDocumentCloseDialog)
-			{
+			if (m_DocumentCloseRequest.ConsumeDialogOpenRequest())
 				ImGui::OpenPopup(PopupName.c_str());
-				m_OpenDocumentCloseDialog = false;
-			}
 			bool PopupOpen = true;
-			const bool PopupVisible = ImGui::BeginPopupModal(
-				PopupName.c_str(), &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize);
-			if (!PopupVisible)
-				return;
-			std::vector<PulseForgeEditor::EditorDocumentIdentity> DirtyDocuments;
-			if (m_PendingCloseAllDocuments)
-				DirtyDocuments = GetDirtyAssetDocuments();
-			else if (m_PendingDocumentClose)
-				DirtyDocuments.push_back(*m_PendingDocumentClose);
-			else if (!m_PendingDocumentCloseBatch.empty())
-				DirtyDocuments = PulseForgeEditor::FilterDirtyDocumentIdentities(
-					m_PendingDocumentCloseBatch, [this](const auto& Identity)
-					{
-						const auto* Session = m_Documents.Find(Identity);
-						return Session && Session->IsDirty();
-					});
-			else if (m_PendingDocumentHostClose)
-			{
-				if (const auto* Host = m_Documents.FindHost(*m_PendingDocumentHostClose))
-					DirtyDocuments = PulseForgeEditor::FilterDirtyDocumentIdentities(
-						Host->Documents, [this](const auto& Identity)
-						{
-							const auto* Session = m_Documents.Find(Identity);
-							return Session && Session->IsDirty();
-						});
-			}
-			else
-				DirtyDocuments = GetDirtyAssetDocuments();
-			ImGui::TextWrapped("%zu unsaved asset draft%s have changes.", DirtyDocuments.size(),
-				DirtyDocuments.size() == 1 ? "" : "s");
-			ImGui::TextUnformatted(DirtyDocuments.empty()
-				? "The close request is still pending. Retry it or cancel."
-				: "Save or discard these drafts before continuing?");
-			if (!m_DocumentCloseError.empty())
-				ImGui::TextWrapped("%s", m_DocumentCloseError.c_str());
-			if (DirtyDocuments.empty() && (!m_PendingDocumentCloseBatch.empty() ||
-				m_PendingDocumentClose || m_PendingDocumentHostClose || m_PendingCloseAllDocuments))
+			const bool PopupVisible = ImGui::BeginPopupModal(PopupName.c_str(), &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize);
+			if (!PopupVisible) return;
+			const std::vector<PulseForgeEditor::EditorDocumentIdentity> CurrentDirtyDocuments = GetDirtyAssetDocuments();
+			const auto DirtyDocuments = m_DocumentCloseRequest.GetDirtyPromptDocuments(CurrentDirtyDocuments,
+				[this](const auto& Identity)
+				{
+					const auto* Session = m_Documents.Find(Identity);
+					return Session && Session->IsDirty();
+				});
+			ImGui::TextWrapped("%zu unsaved asset draft%s have changes.", DirtyDocuments.size(), DirtyDocuments.size() == 1 ? "" : "s");
+			ImGui::TextUnformatted(DirtyDocuments.empty() ? "The close request is still pending. Retry it or cancel."
+														  : "Save or discard these drafts before continuing?");
+			if (!m_DocumentCloseRequest.GetError().empty()) ImGui::TextWrapped("%s", m_DocumentCloseRequest.GetError().c_str());
+			if (m_DocumentCloseRequest.ShouldOfferCloseRetry(DirtyDocuments.empty()))
 			{
 				if (ImGui::Button("Retry Close", ImVec2(112.0f, 0.0f)))
 					(void)ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice::Save);
@@ -5020,28 +4899,12 @@ namespace
 			ImGui::SameLine();
 			if (ImGui::Button("Cancel", ImVec2(112.0f, 0.0f)))
 			{
-				m_PendingDocumentClose.reset();
-				m_PendingDocumentHostClose.reset();
-				m_PendingDocumentCloseBatch.clear();
-				m_PendingCloseAllDocuments = false;
-				m_DocumentCloseDialogHostID.clear();
-				m_PendingDocumentCloseAction = {};
-				m_DocumentCloseError.clear();
-				m_OpenDocumentCloseDialog = false;
+				m_DocumentCloseRequest.Cancel();
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::EndPopup();
 			if (!PopupOpen)
-			{
-				m_PendingDocumentClose.reset();
-				m_PendingDocumentHostClose.reset();
-				m_PendingDocumentCloseBatch.clear();
-				m_PendingCloseAllDocuments = false;
-				m_DocumentCloseDialogHostID.clear();
-				m_PendingDocumentCloseAction = {};
-				m_DocumentCloseError.clear();
-				m_OpenDocumentCloseDialog = false;
-			}
+				m_DocumentCloseRequest.Cancel();
 		}
 
 		void DrawUnregisteredAssetDocument(const PulseForgeEditor::EditorDocumentIdentity& Identity)
@@ -7277,9 +7140,8 @@ namespace
 		PulseForgeEditor::EditorSceneWorkspaceState m_SceneWorkspace;
 		PulseForgeEditor::EditorSceneVisibilityCommands m_SceneVisibilityCommands;
 		bool m_OpenUnsavedDialog = false;
-		bool m_OpenDocumentCloseDialog = false;
 		bool m_ApplicationShutdownRequested = false;
-		bool m_PendingCloseAllDocuments = false;
+		PulseForgeEditor::EditorDocumentCloseRequest m_DocumentCloseRequest;
 		PulseForgeEditor::EditorAssetWorkflowState m_AssetWorkflow;
 		PulseForgeEditor::EditorConsolePanel m_ConsolePanel;
 		PulseForgeEditor::EditorStatusPanel m_StatusPanel;
@@ -7294,20 +7156,14 @@ namespace
 		bool m_ForceMaterialDetailsDock = false;
 		bool m_FocusMaterialDetailsNextFrame = false;
 		PulseForgeEditor::EditorSceneTransitionQueue m_SceneTransitionQueue;
-		std::function<void()> m_PendingDocumentCloseAction;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_LevelDocumentIdentity;
 		std::optional<PulseForge::AssetID> m_MaterialDetailsAsset;
-		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentClose;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentTabClose;
-		std::optional<std::string> m_PendingDocumentHostClose;
-		std::vector<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentCloseBatch;
-		std::string m_DocumentCloseError;
 		std::optional<PendingDocumentTransfer> m_PendingDocumentTransfer;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_ActiveDocumentTabDrag;
 		std::optional<ImVec2> m_ActiveDocumentTabDragStart;
 		std::optional<PulseForgeEditor::DocumentTabPointerPosition> m_ActiveDocumentTabDragLastPosition;
 		std::vector<DocumentTabDropTarget> m_DocumentTabDropTargets;
-		std::string m_DocumentCloseDialogHostID;
 		std::unordered_set<std::string> m_DocumentHostFocusRequests;
 		std::optional<std::filesystem::path> m_StartupProjectPath;
 		std::optional<std::filesystem::path> m_ProjectOpenRenderTestFile;
