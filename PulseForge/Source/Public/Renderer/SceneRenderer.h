@@ -156,6 +156,8 @@ namespace PulseForge
 		[[nodiscard]] const AmbientOcclusionSettings& GetAmbientOcclusionSettings() const noexcept;
 		// Clears cached material descriptions and binding sets after an explicit material-asset save.
 		void RefreshMaterialAssets() noexcept;
+		// Invalidates project asset data and dependent bindings at an update boundary before command recording.
+		void RefreshProjectAssets() noexcept;
 		[[nodiscard]] bool IsEnvironmentLightingPending() const noexcept { return m_EnvironmentLightingPending; }
 		[[nodiscard]] bool HasPreparedEnvironmentLighting() const noexcept { return m_PreparedEnvironmentReady; }
 		// Narrow diagnostic access used by the opt-in GPU validation harness to read actual cubemap face depth.

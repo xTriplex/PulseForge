@@ -12,6 +12,7 @@
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stop_token>
@@ -38,6 +39,7 @@ namespace PulseForge
 		[[nodiscard]] std::expected<std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>, EnvironmentLightingCacheError>
 		GetOrLoad(const AssetID& Asset);
 		[[nodiscard]] size_t GetLoadedCount() const noexcept { return m_Entries.size(); }
+		void Clear() noexcept;
 
 	private:
 		enum class EntryState : uint8_t
@@ -62,7 +64,7 @@ namespace PulseForge
 			AssetID Asset;
 			std::filesystem::path ProjectRoot;
 			AssetRegistry Registry;
-			Entry* Destination = nullptr;
+			std::shared_ptr<Entry> Destination;
 		};
 
 		void WorkerMain(std::stop_token StopToken) noexcept;
@@ -72,7 +74,7 @@ namespace PulseForge
 		RenderDevice& m_Runtime;
 		std::filesystem::path m_ProjectRoot;
 		const AssetRegistry& m_Registry;
-		std::unordered_map<AssetID, std::unique_ptr<Entry>, UUIDHash> m_Entries;
+		std::unordered_map<AssetID, std::shared_ptr<Entry>, UUIDHash> m_Entries;
 		std::deque<Request> m_Requests;
 		std::mutex m_QueueMutex;
 		std::condition_variable_any m_QueueChanged;

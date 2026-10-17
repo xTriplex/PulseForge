@@ -139,6 +139,14 @@ namespace PulseForge
 			  EnvironmentLighting(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry())
 		{
 		}
+
+		void Clear() noexcept
+		{
+			Meshes.Clear();
+			Textures.Clear();
+			Materials.Clear();
+			EnvironmentLighting.Clear();
+		}
 	};
 
 	SceneRenderer::SceneRenderer(RenderDevice& Runtime, const Project& SourceProject)
@@ -744,6 +752,18 @@ namespace PulseForge
 	void SceneRenderer::RefreshMaterialAssets() noexcept
 	{
 		m_MaterialBindingCache->RefreshMaterialAssets();
+	}
+
+	void SceneRenderer::RefreshProjectAssets() noexcept
+	{
+		m_TransparentDrawOrder.clear();
+		m_PreparedSnapshot.reset();
+		m_PreparedCascades.reset();
+		m_PreparedEnvironmentTextures = &m_FallbackEnvironmentTextures;
+		m_EnvironmentLightingPending = false;
+		m_PreparedEnvironmentReady = false;
+		m_MaterialBindingCache->RefreshProjectAssets();
+		m_ProjectAssetCaches->Clear();
 	}
 
 	std::expected<HdrSceneRenderResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToHdr(uint32_t Width, uint32_t Height)
