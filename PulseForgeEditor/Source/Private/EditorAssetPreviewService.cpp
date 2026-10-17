@@ -198,7 +198,6 @@ namespace PulseForgeEditor
 		}
 		Result.GpuBytes = m_GpuBudget.GetUsed();
 		Result.ActiveEntries = m_Entries.size();
-		Result.PeakCpuBytes = m_Stats.PeakCpuBytes;
 		Result.PeakGpuBytes = m_Stats.PeakGpuBytes;
 		return Result;
 	}

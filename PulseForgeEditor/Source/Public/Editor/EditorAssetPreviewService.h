@@ -85,6 +85,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] std::optional<AssetPreviewTexture> FindPreview(
 			std::string_view ProjectID,
 			std::string_view AssetID) const;
+		// Call on the service's owning UI/update thread; worker-owned statistics are snapshotted under m_Mutex.
 		[[nodiscard]] AssetPreviewStats GetStats() const;
 		void PumpUploads();
 		void InvalidateAll() noexcept;

@@ -167,6 +167,15 @@ if(BUILD_TESTING)
 	endif()
 	add_test(NAME PulseForge.EditorCore COMMAND PulseForgeEditorCoreTests)
 
+	add_executable(PulseForgeCommandHistoryFailureTests Tests/EditorCommandHistoryFailureTests.cpp)
+	target_include_directories(PulseForgeCommandHistoryFailureTests PRIVATE PulseForgeEditor/Source/Public)
+	if(MSVC)
+		# This isolated allocator-failure executable replaces global new/delete to inject failures.
+		# Keep it on the non-debug CRT so MSVC's debug-heap diagnostics do not intercept that probe.
+		set_property(TARGET PulseForgeCommandHistoryFailureTests PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
+	endif()
+	add_test(NAME PulseForge.CommandHistoryFailures COMMAND PulseForgeCommandHistoryFailureTests)
+
 	if(PULSEFORGE_BUILD_EDITOR)
 		set(PULSEFORGE_EDITOR_INTEGRATION_LIBRARIES
 			PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath
@@ -248,6 +257,7 @@ if(BUILD_TESTING)
 		PulseForgeAudioRuntimeTests
 		PulseForgeScriptingRuntimeTests
 		PulseForgeEditorCoreTests
+		PulseForgeCommandHistoryFailureTests
 		PulseForgeBufferUpdateTests
 	)
 	if(PULSEFORGE_BUILD_EDITOR)

@@ -1,8 +1,13 @@
 #include "TestEditorSupport.h"
+#include "Assets/MaterialAsset.h"
+#include "Editor/EditorAssetPreviewService.h"
 #include "EditorViewportSceneRenderView.h"
 
+#include <chrono>
+#include <fstream>
 #include <map>
 #include <memory>
+#include <thread>
 #include <vector>
 
 namespace
@@ -210,6 +215,77 @@ namespace
 		std::map<uint64_t, std::weak_ptr<FakeTextureLifetime>> m_Textures;
 	};
 
+	void TestPreviewStatisticsWhileWorkerDecodes(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+
+		const auto Identifier = UUID::Generate();
+		PF_CHECK(Tests, Identifier.has_value());
+		if (!Identifier) return;
+		std::error_code FileError;
+		const std::filesystem::path TemporaryRoot =
+			std::filesystem::temp_directory_path(FileError) / ("PulseForgePreviewStatistics-" + Identifier->ToString());
+		PF_CHECK(Tests, !FileError);
+		if (FileError) return;
+		std::filesystem::create_directories(TemporaryRoot, FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError) return;
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} CleanupTemporary{ TemporaryRoot };
+
+		const std::filesystem::path MaterialPath = TemporaryRoot / "preview.material";
+		MaterialAssetDesc Description;
+		const auto Serialized = MaterialAssetSerializer::Serialize(Description);
+		PF_CHECK(Tests, Serialized.has_value());
+		if (!Serialized) return;
+		{
+			std::ofstream Output(MaterialPath, std::ios::binary | std::ios::trunc);
+			Output.write(Serialized->data(), static_cast<std::streamsize>(Serialized->size()));
+			const std::string Padding(256u * 1024u, ' ');
+			Output.write(Padding.data(), static_cast<std::streamsize>(Padding.size()));
+			PF_CHECK(Tests, Output.good());
+			if (!Output.good()) return;
+		}
+
+		FakeRenderDevice Runtime;
+		FakeTextureRegistry Registry;
+		EditorAssetPreviewService Previews;
+		AssetPreviewServiceLimits Limits;
+		Limits.MaximumQueuedRequests = 48;
+		Limits.MaximumCpuBytes = 1024;
+		Previews.Initialize(Runtime, Registry, Limits);
+		const std::string ProjectID = "preview-statistics-project";
+		Previews.SetProject(ProjectID);
+		constexpr size_t RequestCount = 40;
+		for (size_t Index = 0; Index < RequestCount; ++Index)
+			Previews.RequestMaterialSwatch(ProjectID, "asset-" + std::to_string(Index), MaterialPath);
+
+		bool MonotonicPeak = true;
+		size_t PreviousPeak = 0;
+		const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+		while (std::chrono::steady_clock::now() < Deadline)
+		{
+			const AssetPreviewStats Stats = Previews.GetStats();
+			if (Stats.PeakCpuBytes < PreviousPeak) MonotonicPeak = false;
+			PreviousPeak = Stats.PeakCpuBytes;
+			if (Stats.PeakCpuBytes == RequestCount * 4 && Stats.PendingRequests == 0) break;
+			std::this_thread::yield();
+		}
+		const AssetPreviewStats FinalStats = Previews.GetStats();
+		PF_CHECK(Tests, MonotonicPeak);
+		PF_CHECK(Tests, FinalStats.PendingRequests == 0);
+		PF_CHECK(Tests, FinalStats.PeakCpuBytes == RequestCount * 4);
+		Previews.Shutdown();
+	}
+
 #ifdef PF_EDITOR_RENDERER_OPENGL
 	void TestOpenGLSceneViewportFallback(TestRunner& Tests)
 	{
@@ -315,6 +391,7 @@ namespace
 
 void RunEditorViewportSceneRenderViewTests(TestRunner& Tests)
 {
+	TestPreviewStatisticsWhileWorkerDecodes(Tests);
 #ifdef PF_EDITOR_RENDERER_OPENGL
 	TestOpenGLSceneViewportFallback(Tests);
 #else

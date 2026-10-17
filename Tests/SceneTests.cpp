@@ -1,5 +1,8 @@
 #include "TestSceneSupport.h"
 
+#include <algorithm>
+#include <array>
+
 namespace
 {
 	void TestUUIDBehavior(TestRunner& Tests)
@@ -653,6 +656,10 @@ namespace
 			PF_CHECK(Tests, SecondLight->SetDirectionalLight(DirectionalLightComponent{}).has_value());
 			const auto MultipleLights = SceneRenderSnapshotBuilder::Build(TestScene, CameraID, 16.0f / 9.0f);
 			PF_CHECK(Tests, !MultipleLights && MultipleLights.error().Code == SceneRenderSnapshotErrorCode::MultipleDirectionalLights);
+			const std::array ExcludedDirectional = { SecondLight->GetUUID() };
+			const auto FilteredLights = SceneRenderSnapshotBuilder::BuildForViewFiltered(
+				TestScene, glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f), 0.1f, 1000.0f, ExcludedDirectional);
+			PF_CHECK(Tests, FilteredLights && FilteredLights->DirectionalLight && FilteredLights->DirectionalLight->Entity == LightID);
 			(void)TestScene.DestroyEntity(*SecondLight);
 		}
 		auto SecondEnvironment = TestScene.CreateEntity("Second environment");
@@ -663,7 +670,30 @@ namespace
 			const auto MultipleEnvironments = SceneRenderSnapshotBuilder::Build(TestScene, CameraID, 16.0f / 9.0f);
 			PF_CHECK(Tests,
 				!MultipleEnvironments && MultipleEnvironments.error().Code == SceneRenderSnapshotErrorCode::MultipleEnvironmentLights);
+			const std::array ExcludedEnvironment = { SecondEnvironment->GetUUID() };
+			const auto FilteredEnvironments = SceneRenderSnapshotBuilder::BuildForViewFiltered(
+				TestScene, glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f), 0.1f, 1000.0f, ExcludedEnvironment);
+			PF_CHECK(Tests, FilteredEnvironments && FilteredEnvironments->EnvironmentLight &&
+								FilteredEnvironments->EnvironmentLight->Entity == LightID);
 			(void)TestScene.DestroyEntity(*SecondEnvironment);
+		}
+		PF_CHECK(Tests, Parent->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID }).has_value());
+		const std::array ExcludedParent = { Parent->GetUUID() };
+		const auto FilteredHierarchy = SceneRenderSnapshotBuilder::BuildForViewFiltered(
+			TestScene, glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f), 0.1f, 1000.0f, ExcludedParent);
+		PF_CHECK(Tests, FilteredHierarchy && FilteredHierarchy->Meshes.size() == 3);
+		if (FilteredHierarchy)
+		{
+			const auto ParentMesh = std::find_if(FilteredHierarchy->Meshes.begin(), FilteredHierarchy->Meshes.end(),
+				[&Parent](const SceneMeshInstance& Instance) { return Instance.Entity == Parent->GetUUID(); });
+			const auto VisibleChildMesh = std::find_if(FilteredHierarchy->Meshes.begin(), FilteredHierarchy->Meshes.end(),
+				[&FirstMeshID](const SceneMeshInstance& Instance) { return Instance.Entity == FirstMeshID; });
+			PF_CHECK(Tests, ParentMesh == FilteredHierarchy->Meshes.end());
+			PF_CHECK(Tests, VisibleChildMesh != FilteredHierarchy->Meshes.end());
+			if (VisibleChildMesh != FilteredHierarchy->Meshes.end())
+				PF_CHECK(Tests, glm::abs(VisibleChildMesh->WorldTransform[3].x - 1.0f) < 0.0001f &&
+									glm::abs(VisibleChildMesh->WorldTransform[3].y - 1.0f) < 0.0001f &&
+									glm::abs(VisibleChildMesh->WorldTransform[3].z + 2.0f) < 0.0001f);
 		}
 		TransformComponent SingularMeshTransform;
 		SingularMeshTransform.Scale.x = 0.0f;
