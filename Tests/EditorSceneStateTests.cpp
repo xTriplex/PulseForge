@@ -783,6 +783,61 @@ namespace
 		PF_CHECK(Tests, !RuntimeEdit && !Controller.IsActive());
 	}
 
+	void TestMeshMaterialAssignmentUndoRedo(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		Scene SceneValue;
+		EditorSceneWorkspaceState Workspace;
+		EditorSceneEditController Controller;
+		const AssetID MeshAsset{ 0x8300000000000000ull, 83 };
+		const AssetID MaterialAsset{ 0x8400000000000000ull, 84 };
+		auto Created = SceneValue.CreateEntity("Material assignment history target");
+		PF_CHECK(Tests, Created.has_value());
+		if (!Created) return;
+		const UUID EntityID = Created->GetUUID();
+		PF_CHECK(Tests, Created->SetMeshRenderer(MeshRendererComponent{ MeshAsset, MaterialAsset }).has_value());
+		Controller.Reset(&SceneValue);
+		Controller.MarkSaved(&SceneValue);
+		PF_CHECK(Tests, !Controller.IsDirty());
+
+		const auto ReadMaterial = [&]() -> std::optional<std::optional<AssetID>>
+		{
+			const auto Target = SceneValue.FindEntity(EntityID);
+			if (!Target) return std::nullopt;
+			const auto Mesh = Target->GetMeshRenderer();
+			if (!Mesh || !Mesh->has_value()) return std::nullopt;
+			return Mesh->value().MaterialAsset;
+		};
+		const EditorSceneEditController::RestoreCallback Restore = [&](std::string_view State)
+		{ return Controller.Restore(State, SceneValue, Workspace); };
+		const auto Cleared = Controller.Run(
+			&SceneValue, Workspace, false, 0, [] { return 0u; }, "Clear material assignment",
+			[&]() -> std::expected<void, SceneError>
+			{
+				const auto Target = SceneValue.FindEntity(EntityID);
+				if (!Target) return std::unexpected(SceneError{ SceneErrorCode::InvalidEntity, "Material target no longer exists" });
+				return Target->SetMeshRenderer(MeshRendererComponent{ MeshAsset, std::nullopt });
+			},
+			Restore);
+		PF_CHECK(Tests, Cleared.has_value());
+		const auto MaterialAfterClear = ReadMaterial();
+		PF_CHECK(Tests, MaterialAfterClear.has_value() && !MaterialAfterClear->has_value());
+		PF_CHECK(Tests, Controller.IsDirty() && Controller.CanUndo());
+
+		const auto Undone = Controller.Undo(&SceneValue, Workspace, false, Restore);
+		PF_CHECK(Tests, Undone && *Undone);
+		const auto MaterialAfterUndo = ReadMaterial();
+		PF_CHECK(Tests, MaterialAfterUndo.has_value() && *MaterialAfterUndo == MaterialAsset);
+		PF_CHECK(Tests, !Controller.IsDirty() && Controller.CanRedo());
+
+		const auto Redone = Controller.Redo(&SceneValue, Workspace, false, Restore);
+		PF_CHECK(Tests, Redone && *Redone);
+		const auto MaterialAfterRedo = ReadMaterial();
+		PF_CHECK(Tests, MaterialAfterRedo.has_value() && !MaterialAfterRedo->has_value());
+		PF_CHECK(Tests, Controller.IsDirty() && Controller.CanUndo());
+	}
+
 } // namespace
 
 void RunEditorSceneStateTests(TestRunner& Tests)
@@ -800,4 +855,5 @@ void RunEditorSceneStateTests(TestRunner& Tests)
 	TestEditorVisibility(Tests);
 	TestEditorHierarchyRowLayout(Tests);
 	TestEditorSceneEditController(Tests);
+	TestMeshMaterialAssignmentUndoRedo(Tests);
 }

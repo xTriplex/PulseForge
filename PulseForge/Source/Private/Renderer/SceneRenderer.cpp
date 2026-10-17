@@ -665,18 +665,12 @@ namespace PulseForge
 			}
 			SceneVertexLayout = Layout;
 
-			if (!Instance.MaterialAsset)
-			{
-				return std::unexpected(SceneRendererError{
-					SceneRendererErrorCode::MissingMaterial,
-					Instance.Entity,
-					Instance.MeshAsset,
-					"Visible mesh entity has no material asset assigned"
-				});
-			}
-			if (auto Bindings =
+			std::expected<void, SceneRendererError> Bindings;
+			if (Instance.MaterialAsset)
+				Bindings =
 					m_MaterialBindingCache->EnsureMaterialBindings(*Instance.MaterialAsset, BindingEnvironmentAsset, *EnvironmentTextures);
-				!Bindings)
+			else if (!BindingEnvironmentAsset) Bindings = m_MaterialBindingCache->EnsureDefaultMaterialBindings(*EnvironmentTextures);
+			if (!Bindings)
 			{
 				Bindings.error().Entity = Instance.Entity;
 				return std::unexpected(std::move(Bindings.error()));

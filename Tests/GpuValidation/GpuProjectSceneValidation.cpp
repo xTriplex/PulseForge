@@ -4,6 +4,7 @@
 #include "Core/Application.h"
 #include "Core/Log.h"
 #include "Scene/SceneRenderSnapshot.h"
+#include "Scene/SceneSerializer.h"
 #include "Renderer/SceneRenderer.h"
 #include "Scene/Components/DirectionalLightComponent.h"
 #include "Scene/Components/PointLightComponent.h"
@@ -17,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <span>
 #include <utility>
@@ -27,10 +29,80 @@ namespace PulseForge::GpuValidation
 
 	namespace
 	{
+		struct PixelBounds final
+		{
+			uint32_t Left;
+			uint32_t Top;
+			uint32_t Right;
+			uint32_t Bottom;
+
+			[[nodiscard]] bool Contains(uint32_t X, uint32_t Y) const noexcept
+			{
+				return X >= Left && X <= Right && Y >= Top && Y <= Bottom;
+			}
+		};
+
+		struct PixelDifference final
+		{
+			size_t Inside = 0;
+			size_t Outside = 0;
+		};
+
 		float PixelLuminance(const TextureReadback& Image, size_t PixelIndex)
 		{
 			const PointShadowAnalysis::ImageView ImageView{ Image.Width, Image.Height, std::span<const std::byte>(Image.Pixels) };
 			return PointShadowAnalysis::PixelLuminance(ImageView, PixelIndex);
+		}
+
+		std::expected<PixelBounds, std::string> ProjectMaterialValidationRegion(
+			const PulseForge::Scene& SceneValue, const PulseForge::UUID& Entity, uint32_t Width, uint32_t Height)
+		{
+			const auto Snapshot =
+				PulseForge::SceneRenderSnapshotBuilder::Build(SceneValue, static_cast<float>(Width) / static_cast<float>(Height));
+			if (!Snapshot) return std::unexpected("Could not build a snapshot for material image analysis: " + Snapshot.error().Message);
+			const auto Instance = std::find_if(Snapshot->Meshes.begin(), Snapshot->Meshes.end(),
+				[&Entity](const PulseForge::SceneMeshInstance& Candidate) { return Candidate.Entity == Entity; });
+			if (Instance == Snapshot->Meshes.end()) return std::unexpected("Material validation mesh is missing from its scene snapshot");
+
+			const glm::vec4 Clip = Snapshot->ViewProjection * Instance->WorldTransform[3];
+			if (!std::isfinite(Clip.w) || Clip.w <= 0.0f) return std::unexpected("Material validation mesh center is behind the camera");
+			const float ScreenX = (Clip.x / Clip.w * 0.5f + 0.5f) * static_cast<float>(Width);
+			const float ScreenY = (0.5f - Clip.y / Clip.w * 0.5f) * static_cast<float>(Height);
+			constexpr float HalfRegionWidth = 90.0f;
+			constexpr float HalfRegionHeight = 90.0f;
+			const int Left = static_cast<int>(std::floor(ScreenX - HalfRegionWidth));
+			const int Right = static_cast<int>(std::ceil(ScreenX + HalfRegionWidth));
+			const int Top = static_cast<int>(std::floor(ScreenY - HalfRegionHeight));
+			const int Bottom = static_cast<int>(std::ceil(ScreenY + HalfRegionHeight));
+			const int MaxX = static_cast<int>(Width) - 1;
+			const int MaxY = static_cast<int>(Height) - 1;
+			if (Right < 0 || Bottom < 0 || Left > MaxX || Top > MaxY)
+				return std::unexpected("Material validation mesh center is outside the image");
+			return PixelBounds{ static_cast<uint32_t>(std::clamp(Left, 0, MaxX)), static_cast<uint32_t>(std::clamp(Top, 0, MaxY)),
+				static_cast<uint32_t>(std::clamp(Right, 0, MaxX)), static_cast<uint32_t>(std::clamp(Bottom, 0, MaxY)) };
+		}
+
+		PixelDifference CompareImages(
+			std::span<const std::byte> Before, std::span<const std::byte> After, uint32_t Width, uint32_t Height, const PixelBounds& Bounds)
+		{
+			PixelDifference Difference;
+			const size_t PixelCount = static_cast<size_t>(Width) * Height;
+			for (size_t Pixel = 0; Pixel < PixelCount; ++Pixel)
+			{
+				bool Changed = false;
+				for (size_t Channel = 0; Channel < 4; ++Channel)
+				{
+					const int First = std::to_integer<uint8_t>(Before[Pixel * 4 + Channel]);
+					const int Second = std::to_integer<uint8_t>(After[Pixel * 4 + Channel]);
+					if (std::abs(First - Second) > 2) Changed = true;
+				}
+				if (!Changed) continue;
+				const uint32_t X = static_cast<uint32_t>(Pixel % Width);
+				const uint32_t Y = static_cast<uint32_t>(Pixel / Width);
+				if (Bounds.Contains(X, Y)) ++Difference.Inside;
+				else ++Difference.Outside;
+			}
+			return Difference;
 		}
 	} // namespace
 
@@ -61,27 +133,41 @@ namespace PulseForge::GpuValidation
 
 	void GpuProjectSceneValidation::UpdatePbrMaterial()
 	{
-		if (!m_Succeeded || m_PbrMaterialCaptureComplete) return;
+		if (!m_Succeeded || m_PbrMaterialStage == PbrMaterialCaptureStage::Complete) return;
 		if (m_PbrMaterialCapturePending)
 		{
 			CapturePbrMaterialImage();
 			m_PbrMaterialCapturePending = false;
 			if (!m_Succeeded) return;
+			if (!AdvancePbrMaterialCapture() || m_PbrMaterialStage == PbrMaterialCaptureStage::Complete) return;
 		}
-		if (m_PbrMaterialCaptureComplete) return;
 		if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(60))
 		{
-			Fail("Timed out preparing or capturing the PBR material demonstration scene");
+			Fail("Timed out preparing or capturing the PBR default-material transition scenario");
 			return;
 		}
 		const auto [Width, Height] = Application::Get().GetWindow().GetFramebufferSize();
 		if (Width == 0 || Height == 0 || m_ScenePrepared) return;
+		const auto SerializedBeforePreparation = SceneSerializer::Serialize(m_Scene);
+		const size_t AssetCountBeforePreparation = m_Project.GetAssetRegistry().GetAssets().size();
+		if (!SerializedBeforePreparation)
+		{
+			Fail("Could not serialize the PBR scene before renderer preparation: " + SerializedBeforePreparation.error().Message);
+			return;
+		}
 		const auto Prepared =
 			m_SceneRenderer.PrepareScene(m_Scene, static_cast<float>(m_PbrMaterialOutputTarget->GetDescription().Width) /
 													  static_cast<float>(m_PbrMaterialOutputTarget->GetDescription().Height));
 		if (!Prepared)
 		{
 			Fail("Could not prepare the PBR project startup scene: " + Prepared.error().Message);
+			return;
+		}
+		const auto SerializedAfterPreparation = SceneSerializer::Serialize(m_Scene);
+		if (!SerializedAfterPreparation || *SerializedAfterPreparation != *SerializedBeforePreparation ||
+			m_Project.GetAssetRegistry().GetAssets().size() != AssetCountBeforePreparation)
+		{
+			Fail("Scene renderer preparation changed serialized scene state or created a material asset");
 			return;
 		}
 		if (m_SceneRenderer.IsEnvironmentLightingPending()) return;
@@ -195,6 +281,10 @@ namespace PulseForge::GpuValidation
 	void GpuProjectSceneValidation::Reset() noexcept
 	{
 		m_PbrMaterialOutputTarget.reset();
+		m_PbrFloorEntity = {};
+		m_PbrTargetEntity = {};
+		m_PbrEnvironmentEntity = {};
+		m_PbrBaselinePixels.clear();
 		m_TransparencyOutputTarget.reset();
 		m_TransparencyDirectionalLight = {};
 		m_TransparencySpotLight = {};
@@ -213,7 +303,8 @@ namespace PulseForge::GpuValidation
 
 	bool GpuProjectSceneValidation::IsComplete() const noexcept
 	{
-		return m_Mode == ProjectSceneValidationMode::PbrMaterials ? m_PbrMaterialCaptureComplete : m_TransparencyCaptureComplete;
+		return m_Mode == ProjectSceneValidationMode::PbrMaterials ? m_PbrMaterialStage == PbrMaterialCaptureStage::Complete
+																  : m_TransparencyCaptureComplete;
 	}
 
 	bool GpuProjectSceneValidation::Succeeded() const noexcept
@@ -229,7 +320,8 @@ namespace PulseForge::GpuValidation
 	std::string_view GpuProjectSceneValidation::CompletionSummary() const noexcept
 	{
 		return m_Mode == ProjectSceneValidationMode::PbrMaterials
-				   ? "PBR project loaded, all seven indexed mesh instances rendered, and actual sRGB output was captured"
+				   ? "PBR rendering preserved unassigned mesh materials through color, AO, directional/local shadows, assignment "
+					 "transitions, and environment changes"
 				   : "Transparency project rendered actual sRGB comparisons for masked spotlight, point-light, and directional shadows, "
 					 "plus HDR blending";
 	}
@@ -257,7 +349,87 @@ namespace PulseForge::GpuValidation
 		m_PbrMaterialOutputTarget = std::move(*Target);
 		m_PbrMaterialImagePath = m_OutputRoot / "PBRMaterials" / "overview.png";
 		std::filesystem::create_directories(m_PbrMaterialImagePath.parent_path());
-		PF_INFO("PBR validation will capture the actual project-owned 960x540 sRGB scene output");
+
+		for (const PulseForge::Entity& Entity : m_Scene.GetEntities())
+		{
+			const auto Tag = Entity.GetTag();
+			if (!Tag) continue;
+			if (Tag->Name == "Studio floor")
+			{
+				const auto MeshRenderer = Entity.GetMeshRenderer();
+				if (!MeshRenderer || !MeshRenderer->has_value())
+					throw std::runtime_error("PBR default-material fixture has no floor mesh renderer");
+				m_PbrFloorEntity = Entity;
+				m_PbrFloorComponent = MeshRenderer->value();
+				m_PbrFloorComponent.MaterialAsset.reset();
+			}
+			else if (Tag->Name == "Rough clay - high roughness")
+			{
+				const auto MeshRenderer = Entity.GetMeshRenderer();
+				if (!MeshRenderer || !MeshRenderer->has_value() || !MeshRenderer->value().MaterialAsset)
+					throw std::runtime_error("PBR default-material fixture has no assigned target material");
+				m_PbrTargetEntity = Entity;
+				m_PbrTargetComponent = MeshRenderer->value();
+			}
+			else if (Tag->Name == "Polished metal - low roughness")
+			{
+				const auto MeshRenderer = Entity.GetMeshRenderer();
+				if (!MeshRenderer || !MeshRenderer->has_value() || !MeshRenderer->value().MaterialAsset)
+					throw std::runtime_error("PBR default-material fixture has no assigned unaffected-material mesh");
+				m_PbrUnaffectedEntity = Entity;
+			}
+			else if (Tag->Name == "Studio Small HDR environment")
+			{
+				const auto Environment = Entity.GetEnvironmentLight();
+				if (!Environment || !Environment->has_value())
+					throw std::runtime_error("PBR default-material fixture has no environment light");
+				m_PbrEnvironmentEntity = Entity;
+				m_PbrEnvironmentComponent = Environment->value();
+			}
+		}
+		if (!m_PbrFloorEntity || !m_PbrTargetEntity || !m_PbrUnaffectedEntity || !m_PbrEnvironmentEntity)
+			throw std::runtime_error("PBR scene is missing an expected floor, material target, unaffected mesh, or environment light");
+		if (!m_PbrFloorEntity.SetMeshRenderer(m_PbrFloorComponent))
+			throw std::runtime_error("Could not clear the PBR floor material for the initial default-material render");
+
+		const PulseForge::AssetID InvalidMaterial{ 0xfedcba9876543210ull, 0x0123456789abcdefull };
+		if (m_Project.GetAssetRegistry().Find(InvalidMaterial))
+			throw std::runtime_error("PBR invalid-material fixture identifier unexpectedly exists in the project registry");
+		PulseForge::MeshRendererComponent BrokenMaterial = m_PbrTargetComponent;
+		BrokenMaterial.MaterialAsset = InvalidMaterial;
+		if (!m_PbrTargetEntity.SetMeshRenderer(BrokenMaterial))
+			throw std::runtime_error("Could not install the invalid-material preparation fixture");
+		const auto InvalidMaterialPreparation = m_SceneRenderer.PrepareScene(m_Scene, 960.0f / 540.0f);
+		const auto RestoredMaterial = m_PbrTargetEntity.SetMeshRenderer(m_PbrTargetComponent);
+		if (!RestoredMaterial) throw std::runtime_error("Could not restore the PBR target material after invalid-reference validation");
+		if (InvalidMaterialPreparation || InvalidMaterialPreparation.error().Code != PulseForge::SceneRendererErrorCode::AssetLoadFailed ||
+			InvalidMaterialPreparation.error().Asset != InvalidMaterial)
+			throw std::runtime_error("SceneRenderer did not preserve failure behavior for a missing non-empty material asset");
+
+		auto Point = m_Scene.CreateEntity("GPU default material point-shadow fixture");
+		if (!Point) throw std::runtime_error("Could not create the default-material point-shadow fixture");
+		PulseForge::PointLightComponent PointLight;
+		PointLight.Intensity = 18.0f;
+		PointLight.Range = 20.0f;
+		PointLight.CastShadows = true;
+		if (!Point->SetPointLight(PointLight)) throw std::runtime_error("Could not configure the default-material point-shadow fixture");
+		PulseForge::TransformComponent PointTransform;
+		PointTransform.Translation = { 2.0f, 4.0f, 2.0f };
+		if (!Point->SetTransform(PointTransform)) throw std::runtime_error("Could not position the point-shadow fixture");
+
+		auto Spot = m_Scene.CreateEntity("GPU default material spotlight-shadow fixture");
+		if (!Spot) throw std::runtime_error("Could not create the default-material spotlight fixture");
+		PulseForge::SpotLightComponent SpotLight;
+		SpotLight.Intensity = 8.0f;
+		SpotLight.Range = 20.0f;
+		SpotLight.OuterConeAngleDegrees = 40.0f;
+		SpotLight.CastShadows = true;
+		if (!Spot->SetSpotLight(SpotLight)) throw std::runtime_error("Could not configure the default-material spotlight fixture");
+		PulseForge::TransformComponent SpotTransform;
+		SpotTransform.Translation = { 0.0f, 2.0f, 7.5f };
+		if (!Spot->SetTransform(SpotTransform)) throw std::runtime_error("Could not position the spotlight fixture");
+
+		PF_INFO("PBR GPU fixture will capture assigned/default transitions on seven meshes with directional, spot, and point shadows");
 	}
 
 	void GpuProjectSceneValidation::InitializeTransparency()
@@ -436,21 +608,23 @@ namespace PulseForge::GpuValidation
 
 	void GpuProjectSceneValidation::RenderPbrMaterial()
 	{
-		if (!m_Succeeded || !m_ScenePrepared || m_PbrMaterialCaptureComplete) return;
+		if (!m_Succeeded || !m_ScenePrepared || m_PbrMaterialStage == PbrMaterialCaptureStage::Complete || m_PbrMaterialCapturePending)
+			return;
 		const auto Rendered = m_SceneRenderer.RenderPreparedSceneToOutput(*m_PbrMaterialOutputTarget);
-		if (!Rendered || Rendered->GeometryDrawCount != 7)
+		const size_t ExpectedGeometryDrawCount = m_PbrMaterialStage == PbrMaterialCaptureStage::DefaultFloorRemoved ? 6u : 7u;
+		if (!Rendered || Rendered->GeometryDrawCount != ExpectedGeometryDrawCount)
 		{
-			Fail(Rendered ? "PBR material startup scene did not submit its seven indexed mesh instances"
+			Fail(Rendered ? "PBR default-material scene submitted an unexpected number of indexed mesh instances"
 						  : "PBR material scene render failed: " + Rendered.error().Message);
 			return;
 		}
-		m_PbrMaterialGeometryDrawCount = Rendered->GeometryDrawCount;
-		const PulseForge::Texture* Color = m_PbrMaterialOutputTarget->GetColorTexture();
-		if (!Color)
+		if (Rendered->SpotlightShadowPassCount != 1 || Rendered->SpotlightShadowCasterDrawCount == 0 ||
+			Rendered->PointShadowPassCount != 6 || Rendered->PointShadowCasterDrawCount == 0)
 		{
-			Fail("PBR material output target has no readable color texture");
+			Fail("PBR default-material scene did not submit geometry through directional, spotlight, point-shadow, and AO paths");
 			return;
 		}
+		m_PbrMaterialGeometryDrawCount = Rendered->GeometryDrawCount;
 		m_PbrMaterialCapturePending = true;
 	}
 
@@ -469,34 +643,200 @@ namespace PulseForge::GpuValidation
 						  : "Could not read actual PBR material output pixels: " + Readback.error().Message);
 			return;
 		}
-		if (!stbi_write_png(m_PbrMaterialImagePath.string().c_str(), static_cast<int>(Readback->Width), static_cast<int>(Readback->Height),
-				4, reinterpret_cast<const uint8_t*>(Readback->Pixels.data()), static_cast<int>(Readback->Width * 4)))
+		if (Readback->Width != 960 || Readback->Height != 540 || Readback->Pixels.size() != 960u * 540u * 4u)
 		{
-			Fail("Could not save actual PBR material scene pixels: " + m_PbrMaterialImagePath.string());
+			Fail("PBR material image readback had unexpected dimensions or byte count");
 			return;
 		}
-		double LuminanceSum = 0.0;
-		float MinimumLuminance = 1.0f;
-		float MaximumLuminance = 0.0f;
-		size_t LitPixelCount = 0;
-		for (size_t Pixel = 0; Pixel < static_cast<size_t>(Readback->Width) * Readback->Height; ++Pixel)
+
+		const PixelBounds FullImage{ 0, 0, Readback->Width - 1, Readback->Height - 1 };
+		switch (m_PbrMaterialStage)
 		{
-			const float Luminance = PixelLuminance(*Readback, Pixel);
-			LuminanceSum += Luminance;
-			MinimumLuminance = (std::min)(MinimumLuminance, Luminance);
-			MaximumLuminance = (std::max)(MaximumLuminance, Luminance);
-			if (Luminance > 0.1f) ++LitPixelCount;
+		case PbrMaterialCaptureStage::AssignedBaseline:
+		{
+			if (!stbi_write_png(m_PbrMaterialImagePath.string().c_str(), static_cast<int>(Readback->Width),
+					static_cast<int>(Readback->Height), 4, reinterpret_cast<const uint8_t*>(Readback->Pixels.data()),
+					static_cast<int>(Readback->Width * 4)))
+			{
+				Fail("Could not save actual PBR material scene pixels: " + m_PbrMaterialImagePath.string());
+				return;
+			}
+			double LuminanceSum = 0.0;
+			float MinimumLuminance = 1.0f;
+			float MaximumLuminance = 0.0f;
+			size_t LitPixelCount = 0;
+			for (size_t Pixel = 0; Pixel < static_cast<size_t>(Readback->Width) * Readback->Height; ++Pixel)
+			{
+				const float Luminance = PixelLuminance(*Readback, Pixel);
+				LuminanceSum += Luminance;
+				MinimumLuminance = (std::min)(MinimumLuminance, Luminance);
+				MaximumLuminance = (std::max)(MaximumLuminance, Luminance);
+				if (Luminance > 0.1f) ++LitPixelCount;
+			}
+			const double MeanLuminance = LuminanceSum / static_cast<double>(static_cast<size_t>(Readback->Width) * Readback->Height);
+			PF_INFO("PBR_MATERIAL_IMAGE={0}; extent={1}x{2}; draws={3}; mean_luma={4:.4f}; min={5:.3f}; max={6:.3f}; lit_pixels={7}",
+				m_PbrMaterialImagePath.string(), Readback->Width, Readback->Height, m_PbrMaterialGeometryDrawCount, MeanLuminance,
+				MinimumLuminance, MaximumLuminance, LitPixelCount);
+			if (MaximumLuminance < 0.55f || MaximumLuminance - MinimumLuminance < 0.2f || LitPixelCount < 1000)
+			{
+				Fail("Captured PBR material image lacks the expected visible HDR/material contrast");
+				return;
+			}
+			m_PbrBaselinePixels = Readback->Pixels;
+			break;
 		}
-		const double MeanLuminance = LuminanceSum / static_cast<double>(static_cast<size_t>(Readback->Width) * Readback->Height);
-		PF_INFO("PBR_MATERIAL_IMAGE={0}; extent={1}x{2}; draws={3}; mean_luma={4:.4f}; min={5:.3f}; max={6:.3f}; lit_pixels={7}",
-			m_PbrMaterialImagePath.string(), Readback->Width, Readback->Height, m_PbrMaterialGeometryDrawCount, MeanLuminance,
-			MinimumLuminance, MaximumLuminance, LitPixelCount);
-		if (MaximumLuminance < 0.55f || MaximumLuminance - MinimumLuminance < 0.2f || LitPixelCount < 1000)
+		case PbrMaterialCaptureStage::DefaultFloorRemoved:
 		{
-			Fail("Captured PBR material image lacks the expected visible HDR/material contrast");
+			const PixelDifference Difference =
+				CompareImages(m_PbrBaselinePixels, Readback->Pixels, Readback->Width, Readback->Height, FullImage);
+			if (Difference.Inside < 1000)
+			{
+				Fail("Initially unassigned PBR floor produced no measurable geometry in the rendered image");
+				return;
+			}
+			PF_INFO("PBR_DEFAULT_FLOOR_IMAGE_DIFF=visible pixels changed={0}", Difference.Inside);
+			break;
+		}
+		case PbrMaterialCaptureStage::DefaultFloorRestored:
+		case PbrMaterialCaptureStage::TargetMaterialRestored:
+		case PbrMaterialCaptureStage::TargetMaterialRestoredAgain:
+		case PbrMaterialCaptureStage::EnvironmentRestored:
+			if (Readback->Pixels != m_PbrBaselinePixels)
+			{
+				Fail("Restoring the PBR material, floor, or environment did not reproduce the original pixels");
+				return;
+			}
+			break;
+		case PbrMaterialCaptureStage::TargetMaterialCleared:
+		case PbrMaterialCaptureStage::TargetMaterialClearedAgain:
+		{
+			const auto Region = ProjectMaterialValidationRegion(m_Scene, m_PbrTargetEntity.GetUUID(), Readback->Width, Readback->Height);
+			if (!Region)
+			{
+				Fail(Region.error());
+				return;
+			}
+			const auto UnaffectedRegion =
+				ProjectMaterialValidationRegion(m_Scene, m_PbrUnaffectedEntity.GetUUID(), Readback->Width, Readback->Height);
+			if (!UnaffectedRegion)
+			{
+				Fail(UnaffectedRegion.error());
+				return;
+			}
+			const PixelDifference TargetDifference =
+				CompareImages(m_PbrBaselinePixels, Readback->Pixels, Readback->Width, Readback->Height, *Region);
+			const PixelDifference UnaffectedDifference =
+				CompareImages(m_PbrBaselinePixels, Readback->Pixels, Readback->Width, Readback->Height, *UnaffectedRegion);
+			if (TargetDifference.Inside < 200 || UnaffectedDifference.Inside != 0)
+			{
+				Fail("Clearing a material did not change its own visible mesh while preserving the separate assigned mesh; target pixels=" +
+					 std::to_string(TargetDifference.Inside) + "; unaffected pixels=" + std::to_string(UnaffectedDifference.Inside));
+				return;
+			}
+			PF_INFO("PBR_UNASSIGNED_MATERIAL_IMAGE_DIFF=target_pixels={0}; assigned_mesh_pixels={1}", TargetDifference.Inside,
+				UnaffectedDifference.Inside);
+			break;
+		}
+		case PbrMaterialCaptureStage::EnvironmentRemoved:
+		{
+			const PixelDifference Difference =
+				CompareImages(m_PbrBaselinePixels, Readback->Pixels, Readback->Width, Readback->Height, FullImage);
+			if (Difference.Inside < 1000)
+			{
+				Fail("Removing the environment did not exercise the fallback default-material binding");
+				return;
+			}
+			m_PbrEnvironmentFallbackPixels = Readback->Pixels;
+			break;
+		}
+		case PbrMaterialCaptureStage::EnvironmentFallbackRefreshed:
+			if (Readback->Pixels != m_PbrEnvironmentFallbackPixels)
+			{
+				Fail("Refreshing material assets invalidated the default material binding without an environment");
+				return;
+			}
+			break;
+		case PbrMaterialCaptureStage::Complete:
+			Fail("PBR material validation captured an unexpected frame after completion");
 			return;
 		}
-		m_PbrMaterialCaptureComplete = true;
+	}
+
+	bool GpuProjectSceneValidation::AdvancePbrMaterialCapture()
+	{
+		switch (m_PbrMaterialStage)
+		{
+		case PbrMaterialCaptureStage::AssignedBaseline:
+			if (!m_PbrFloorEntity.RemoveMeshRenderer())
+			{
+				Fail("Could not remove the initially unassigned floor for its image comparison");
+				return false;
+			}
+			m_PbrMaterialStage = PbrMaterialCaptureStage::DefaultFloorRemoved;
+			break;
+		case PbrMaterialCaptureStage::DefaultFloorRemoved:
+			if (!m_PbrFloorEntity.SetMeshRenderer(m_PbrFloorComponent))
+			{
+				Fail("Could not restore the unassigned floor after its image comparison");
+				return false;
+			}
+			m_PbrMaterialStage = PbrMaterialCaptureStage::DefaultFloorRestored;
+			break;
+		case PbrMaterialCaptureStage::DefaultFloorRestored:
+		case PbrMaterialCaptureStage::TargetMaterialRestored:
+		{
+			PulseForge::MeshRendererComponent ClearedMaterial = m_PbrTargetComponent;
+			ClearedMaterial.MaterialAsset.reset();
+			if (!m_PbrTargetEntity.SetMeshRenderer(ClearedMaterial))
+			{
+				Fail("Could not clear the PBR target material for its default-material image comparison");
+				return false;
+			}
+			m_PbrMaterialStage = m_PbrMaterialStage == PbrMaterialCaptureStage::DefaultFloorRestored
+									 ? PbrMaterialCaptureStage::TargetMaterialCleared
+									 : PbrMaterialCaptureStage::TargetMaterialClearedAgain;
+			break;
+		}
+		case PbrMaterialCaptureStage::TargetMaterialCleared:
+		case PbrMaterialCaptureStage::TargetMaterialClearedAgain:
+			if (!m_PbrTargetEntity.SetMeshRenderer(m_PbrTargetComponent))
+			{
+				Fail("Could not restore the PBR target material after its default-material image comparison");
+				return false;
+			}
+			m_PbrMaterialStage = m_PbrMaterialStage == PbrMaterialCaptureStage::TargetMaterialCleared
+									 ? PbrMaterialCaptureStage::TargetMaterialRestored
+									 : PbrMaterialCaptureStage::TargetMaterialRestoredAgain;
+			break;
+		case PbrMaterialCaptureStage::TargetMaterialRestoredAgain:
+			if (!m_PbrEnvironmentEntity.RemoveEnvironmentLight())
+			{
+				Fail("Could not remove the environment while exercising the default fallback binding");
+				return false;
+			}
+			m_PbrMaterialStage = PbrMaterialCaptureStage::EnvironmentRemoved;
+			break;
+		case PbrMaterialCaptureStage::EnvironmentRemoved:
+			m_SceneRenderer.RefreshMaterialAssets();
+			m_PbrMaterialStage = PbrMaterialCaptureStage::EnvironmentFallbackRefreshed;
+			break;
+		case PbrMaterialCaptureStage::EnvironmentFallbackRefreshed:
+			if (!m_PbrEnvironmentEntity.SetEnvironmentLight(m_PbrEnvironmentComponent))
+			{
+				Fail("Could not restore the environment after refreshing default-material bindings");
+				return false;
+			}
+			m_PbrMaterialStage = PbrMaterialCaptureStage::EnvironmentRestored;
+			break;
+		case PbrMaterialCaptureStage::EnvironmentRestored:
+			m_PbrMaterialStage = PbrMaterialCaptureStage::Complete;
+			PF_INFO("PBR default-material transitions passed for initial unassignment, repeated clear/restore, and environment fallback");
+			return true;
+		case PbrMaterialCaptureStage::Complete:
+			return true;
+		}
+		m_ScenePrepared = false;
+		return true;
 	}
 
 	void GpuProjectSceneValidation::RenderTransparency()

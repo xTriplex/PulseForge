@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Renderer/RenderTarget.h"
+#include "Scene/Components/EnvironmentLightComponent.h"
+#include "Scene/Components/MeshRendererComponent.h"
 #include "Scene/Entity.h"
 #include "Scene/UUID.h"
 
@@ -50,12 +52,28 @@ namespace PulseForge::GpuValidation
 		[[nodiscard]] const std::filesystem::path& CapturePath() const noexcept;
 
 	private:
+		enum class PbrMaterialCaptureStage : uint8_t
+		{
+			AssignedBaseline,
+			DefaultFloorRemoved,
+			DefaultFloorRestored,
+			TargetMaterialCleared,
+			TargetMaterialRestored,
+			TargetMaterialClearedAgain,
+			TargetMaterialRestoredAgain,
+			EnvironmentRemoved,
+			EnvironmentFallbackRefreshed,
+			EnvironmentRestored,
+			Complete
+		};
+
 		void InitializePbrMaterial();
 		void InitializeTransparency();
 		void UpdatePbrMaterial();
 		void UpdateTransparency();
 		void RenderPbrMaterial();
 		void CapturePbrMaterialImage();
+		bool AdvancePbrMaterialCapture();
 		void RenderTransparency();
 		void CaptureTransparencyImage();
 		void Fail(std::string Message);
@@ -80,6 +98,16 @@ namespace PulseForge::GpuValidation
 		std::chrono::steady_clock::time_point m_StartedAt;
 		std::unique_ptr<RenderTarget> m_PbrMaterialOutputTarget;
 		std::filesystem::path m_PbrMaterialImagePath;
+		Entity m_PbrFloorEntity;
+		Entity m_PbrTargetEntity;
+		Entity m_PbrUnaffectedEntity;
+		Entity m_PbrEnvironmentEntity;
+		MeshRendererComponent m_PbrFloorComponent;
+		MeshRendererComponent m_PbrTargetComponent;
+		EnvironmentLightComponent m_PbrEnvironmentComponent;
+		std::vector<std::byte> m_PbrBaselinePixels;
+		std::vector<std::byte> m_PbrEnvironmentFallbackPixels;
+		PbrMaterialCaptureStage m_PbrMaterialStage = PbrMaterialCaptureStage::AssignedBaseline;
 		std::filesystem::path m_TransparencyImagePath;
 		std::unique_ptr<RenderTarget> m_TransparencyOutputTarget;
 		Entity m_TransparencyDirectionalLight;
@@ -101,7 +129,6 @@ namespace PulseForge::GpuValidation
 		size_t m_TransparencyCaptureStage = 0;
 		bool m_ScenePrepared = false;
 		bool m_PbrMaterialCapturePending = false;
-		bool m_PbrMaterialCaptureComplete = false;
 		bool m_TransparencyCapturePending = false;
 		bool m_TransparencyCaptureComplete = false;
 		bool m_Succeeded = true;

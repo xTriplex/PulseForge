@@ -30,6 +30,8 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(const Resources& Resources);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureMaterialBindings(const AssetID& MaterialAsset,
 			const std::optional<AssetID>& EnvironmentAsset, const EnvironmentLightingTextures& EnvironmentTextures);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureDefaultMaterialBindings(
+			const EnvironmentLightingTextures& EnvironmentTextures);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureEnvironmentBindings(
 			const AssetID& EnvironmentAsset, const EnvironmentLightingTextures& EnvironmentTextures, bool IsReady);
 		[[nodiscard]] std::expected<const MaterialAssetDesc*, SceneRendererError> ResolveMaterialDescription(
@@ -69,6 +71,7 @@ namespace PulseForge
 		const BufferHandle* m_ObjectConstants = nullptr;
 		const BufferHandle* m_FrameConstants = nullptr;
 		const BufferHandle* m_LocalLightingConstants = nullptr;
+		MaterialAssetDesc m_DefaultMaterialDescription{};
 		SamplerHandle m_MaterialSampler;
 		SamplerHandle m_EnvironmentSampler;
 		TextureHandle m_FallbackBaseColor;
@@ -76,6 +79,7 @@ namespace PulseForge
 		TextureHandle m_FallbackNormal;
 		TextureHandle m_FallbackEmissive;
 		BufferHandle m_FallbackMaterialConstants;
+		BindingSetHandle m_DefaultMaterialBinding;
 		std::unordered_map<std::string, MaterialBinding> m_MaterialBindings;
 		std::unordered_map<std::string, BindingSetHandle> m_EnvironmentBindings;
 	};
