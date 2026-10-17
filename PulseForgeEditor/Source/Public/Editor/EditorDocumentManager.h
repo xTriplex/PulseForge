@@ -213,6 +213,9 @@ namespace PulseForgeEditor
 		[[nodiscard]] bool MarkEdited(const EditorDocumentIdentity& Identity) noexcept;
 		[[nodiscard]] bool MarkSaved(const EditorDocumentIdentity& Identity, uint64_t Revision) noexcept;
 		[[nodiscard]] std::expected<std::vector<std::string>, std::string> ClearProject(const PulseForge::UUID& Project);
+		// Resolution rejects structural changes across this manager. Save callbacks may report edits with MarkEdited;
+		// Close commits MarkSaved only for a successfully saved revision. The supplied session is read-only; callbacks may
+		// inspect other sessions through a const manager view. Callback-owned external effects are not rolled back on failure.
 		[[nodiscard]] EditorDocumentCloseStatus Close(
 			const EditorDocumentIdentity& Identity,
 			EditorDocumentCloseChoice Choice,
@@ -230,7 +233,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] EditorDocumentOpenPreference GetOpeningPreference() const noexcept { return m_OpeningPreference; }
 		bool SetOpeningPreference(EditorDocumentOpenPreference Preference) noexcept
 		{
-			if (m_CloseTransitionActive)
+			if (IsCloseOperationActive())
 				return false;
 			m_OpeningPreference = Preference;
 			return true;
@@ -241,11 +244,39 @@ namespace PulseForgeEditor
 	private:
 		friend class EditorDocumentCloseBatch;
 
+		[[nodiscard]] bool IsCloseOperationActive() const noexcept
+		{
+			return m_CloseCallbackActive || m_CloseTransitionActive;
+		}
+
+		class CloseCallbackScope final
+		{
+		public:
+			explicit CloseCallbackScope(const EditorDocumentManager& Manager) noexcept
+				: m_Manager(Manager), m_Entered(!Manager.IsCloseOperationActive())
+			{
+				if (m_Entered)
+					m_Manager.m_CloseCallbackActive = true;
+			}
+
+			~CloseCallbackScope()
+			{
+				if (m_Entered)
+					m_Manager.m_CloseCallbackActive = false;
+			}
+
+			[[nodiscard]] bool Entered() const noexcept { return m_Entered; }
+
+		private:
+			const EditorDocumentManager& m_Manager;
+			bool m_Entered = false;
+		};
+
 		class CloseMutationScope final
 		{
 		public:
 			explicit CloseMutationScope(const EditorDocumentManager& Manager) noexcept
-				: m_Manager(Manager), m_Entered(!Manager.m_CloseTransitionActive)
+				: m_Manager(Manager), m_Entered(!Manager.IsCloseOperationActive())
 			{
 				if (m_Entered)
 					m_Manager.m_CloseTransitionActive = true;
@@ -278,6 +309,7 @@ namespace PulseForgeEditor
 		std::string m_FocusedHostID = std::string(MainHostID);
 		EditorDocumentOpenPreference m_OpeningPreference = EditorDocumentOpenPreference::NewNativeWindow;
 		uint64_t m_NextSessionGeneration = 1;
+		mutable bool m_CloseCallbackActive = false;
 		mutable bool m_CloseTransitionActive = false;
 	};
 }
