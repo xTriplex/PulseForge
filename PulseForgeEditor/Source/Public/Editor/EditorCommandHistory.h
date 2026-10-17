@@ -3,9 +3,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <new>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -86,22 +88,30 @@ namespace PulseForgeEditor
 			if (EntryBytes > m_MaximumBytes - RetainedBytes)
 				return std::unexpected("The editor transaction does not fit in the bounded history");
 
+			std::optional<Command> Candidate;
+			try
+			{
+				Candidate.emplace(Command{ m_ActiveDescription, m_ActiveBefore, std::move(StateAfter), m_CurrentState, 0 });
+				if (m_Cursor >= m_Commands.max_size()) return std::unexpected("The editor command history has reached its storage limit");
+				m_Commands.reserve(m_Cursor + 1);
+			}
+			catch (const std::bad_alloc&)
+			{
+				return std::unexpected("Could not allocate storage for the editor command history");
+			}
+
+			// Candidate construction and capacity growth are the only throwing work. Keep both
+			// the redo branch and active rollback snapshot intact until they have succeeded.
+			Candidate->AfterState = NewStateIdentifier();
 			while (m_Commands.size() > m_Cursor)
 			{
 				m_Bytes -= m_Commands.back().Before.size() + m_Commands.back().After.size();
 				m_Commands.pop_back();
 			}
 
-			const uint64_t BeforeState = m_CurrentState;
-			const uint64_t AfterState = NewStateIdentifier();
-			m_Commands.push_back({
-				std::move(m_ActiveDescription),
-				std::move(m_ActiveBefore),
-				std::move(StateAfter),
-				BeforeState,
-				AfterState });
+			m_Commands.push_back(std::move(*Candidate));
 			m_Bytes += EntryBytes;
-			m_CurrentState = AfterState;
+			m_CurrentState = m_Commands.back().AfterState;
 			++m_Cursor;
 			ClearActive();
 
@@ -183,6 +193,8 @@ namespace PulseForgeEditor
 			uint64_t BeforeState = 0;
 			uint64_t AfterState = 0;
 		};
+		static_assert(std::is_nothrow_move_constructible_v<Command> && std::is_nothrow_move_assignable_v<Command>,
+			"Command-history commit and eviction rely on non-throwing command moves");
 
 		[[nodiscard]] uint64_t NewStateIdentifier() noexcept
 		{

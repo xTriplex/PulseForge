@@ -1,7 +1,26 @@
 #include "TestEditorSupport.h"
 
+#include <new>
+
 namespace
 {
+	struct ThrowingCopySnapshot final
+	{
+		int Value = 0;
+		inline static bool FailCopy = false;
+
+		ThrowingCopySnapshot() = default;
+		explicit ThrowingCopySnapshot(int ValueIn) : Value(ValueIn) {}
+		ThrowingCopySnapshot(const ThrowingCopySnapshot& Other)
+		{
+			if (FailCopy) throw std::bad_alloc();
+			Value = Other.Value;
+		}
+		ThrowingCopySnapshot(ThrowingCopySnapshot&&) noexcept = default;
+		ThrowingCopySnapshot& operator=(const ThrowingCopySnapshot&) = default;
+		ThrowingCopySnapshot& operator=(ThrowingCopySnapshot&&) noexcept = default;
+	};
+
 	void TestEditorDocumentManager(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -506,6 +525,28 @@ namespace
 		PF_CHECK(Tests, History.GetStateCount() == 2 && History.GetCurrent() == 4 && !History.CanRedo());
 		History.Record(5, 1);
 		PF_CHECK(Tests, History.GetStateCount() == 1 && History.GetCurrent() == 5 && History.IsDirty());
+
+		EditorSnapshotHistory<ThrowingCopySnapshot> ThrowingHistory;
+		ThrowingHistory.Reset(ThrowingCopySnapshot{ 0 });
+		ThrowingHistory.Record(ThrowingCopySnapshot{ 1 });
+		ThrowingHistory.MarkSaved();
+		ThrowingHistory.Record(ThrowingCopySnapshot{ 2 });
+		PF_CHECK(Tests, ThrowingHistory.Undo() && ThrowingHistory.GetCurrent().Value == 1 && !ThrowingHistory.IsDirty());
+		ThrowingCopySnapshot::FailCopy = true;
+		bool SnapshotCopyFailed = false;
+		try
+		{
+			ThrowingHistory.Record(ThrowingCopySnapshot{ 3 });
+		}
+		catch (const std::bad_alloc&)
+		{
+			SnapshotCopyFailed = true;
+		}
+		ThrowingCopySnapshot::FailCopy = false;
+		PF_CHECK(Tests, SnapshotCopyFailed);
+		PF_CHECK(Tests, ThrowingHistory.GetStateCount() == 3 && ThrowingHistory.GetCursor() == 1 &&
+							ThrowingHistory.GetCurrent().Value == 1 && ThrowingHistory.CanRedo() && !ThrowingHistory.IsDirty());
+		PF_CHECK(Tests, ThrowingHistory.Redo() && ThrowingHistory.GetCurrent().Value == 2 && ThrowingHistory.IsDirty());
 	}
 } // namespace
 

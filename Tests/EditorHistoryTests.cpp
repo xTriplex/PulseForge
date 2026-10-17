@@ -507,6 +507,30 @@ namespace
 		PF_CHECK(Tests, !History.IsDirty());
 	}
 
+	void TestEditControllerRollsBackWhenHistoryCannotStoreSnapshot(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+
+		Scene SceneValue;
+		const auto Existing = SceneValue.CreateEntity("Preserved entity");
+		PF_CHECK(Tests, Existing.has_value());
+		if (!Existing) return;
+		const UUID ExistingID = Existing->GetUUID();
+		EditorSceneWorkspaceState Workspace;
+		EditorSceneEditController Edits;
+		Edits.Reset(&SceneValue);
+		PF_CHECK(Tests, Edits.Begin(&SceneValue, Workspace, false, "Add oversized entity", {}));
+		const std::string OversizedName(EditorCommandHistory::MaximumTransactionBytes + 1, 'x');
+		PF_CHECK(Tests, SceneValue.CreateEntity(OversizedName).has_value());
+
+		const auto Finished = Edits.Finish(&SceneValue, Workspace, {});
+		PF_CHECK(Tests, !Finished && Finished.error().find("rolled back because it could not be stored") != std::string::npos);
+		PF_CHECK(Tests, !Edits.IsActive() && !Edits.CanUndo() && !Edits.CanRedo() && !Edits.IsDirty());
+		const auto Entities = SceneValue.GetEntities();
+		PF_CHECK(Tests, Entities.size() == 1 && Entities.front().GetUUID() == ExistingID);
+	}
+
 } // namespace
 
 void RunEditorHistoryTests(TestRunner& Tests)
@@ -514,4 +538,5 @@ void RunEditorHistoryTests(TestRunner& Tests)
 	TestEditorCommandHistory(Tests);
 	TestAltGizmoDragHistoryIntegration(Tests);
 	TestSceneCommandHistoryRestoresIdentity(Tests);
+	TestEditControllerRollsBackWhenHistoryCannotStoreSnapshot(Tests);
 }
