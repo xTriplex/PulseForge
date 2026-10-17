@@ -23,12 +23,8 @@ namespace PulseForge::VulkanSupport
 		bool CanCreateGeneration,
 		bool CurrentGenerationUsable = true) noexcept;
 
-	[[nodiscard]] bool CanCreateSwapchainGeneration(
-		bool PresentationFencesEnabled,
-		bool HasCurrentGeneration,
-		std::size_t DeferredGenerationCount,
-		bool CurrentGenerationOutOfDate = false,
-		bool RecoveryAttemptedAtLimit = false) noexcept;
+	[[nodiscard]] bool CanCreateSwapchainGeneration(bool PresentationFencesEnabled, bool HasCurrentGeneration,
+		std::size_t DeferredGenerationCount, bool CurrentGenerationOutOfDate = false, bool RecoveryAttemptedAtLimit = false) noexcept;
 
 	[[nodiscard]] bool ShouldRetireDeferredSwapchains(
 		bool PresentationFencesEnabled,

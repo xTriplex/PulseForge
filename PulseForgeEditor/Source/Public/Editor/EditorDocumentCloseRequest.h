@@ -14,8 +14,8 @@ namespace PulseForgeEditor
 	{
 	public:
 		using Action = std::function<void()>;
-		using ResolveChanges = std::function<std::expected<void, std::string>(
-			std::span<const EditorDocumentIdentity>, EditorDocumentCloseChoice)>;
+		using ResolveChanges =
+			std::function<std::expected<void, std::string>(std::span<const EditorDocumentIdentity>, EditorDocumentCloseChoice)>;
 		using EnqueueAction = std::function<void(Action)>;
 
 		struct ResolveResult final
@@ -23,14 +23,8 @@ namespace PulseForgeEditor
 			bool DocumentsClosed = false;
 		};
 
-		void BeginCloseDocuments(
-			std::vector<EditorDocumentIdentity> Documents,
-			std::string DialogHostID,
-			Action Continuation = {});
-		void BeginCloseAllDocuments(
-			std::vector<EditorDocumentIdentity> Documents,
-			std::string DialogHostID,
-			Action Continuation = {});
+		void BeginCloseDocuments(std::vector<EditorDocumentIdentity> Documents, std::string DialogHostID, Action Continuation = {});
+		void BeginCloseAllDocuments(std::vector<EditorDocumentIdentity> Documents, std::string DialogHostID, Action Continuation = {});
 		void BeginResolveChanges(std::string DialogHostID, Action Continuation);
 
 		[[nodiscard]] bool HasPendingRequest() const noexcept;
@@ -50,12 +44,9 @@ namespace PulseForgeEditor
 			std::span<const EditorDocumentIdentity> CurrentDirtyDocuments,
 			const std::function<bool(const EditorDocumentIdentity&)>& IsDirty) const;
 
-		[[nodiscard]] std::expected<ResolveResult, std::string> Resolve(
-			EditorDocumentManager& Documents,
-			const EditorDocumentEditorRegistry& Editors,
-			EditorDocumentCloseChoice Choice,
-			std::span<const EditorDocumentIdentity> CurrentDirtyDocuments,
-			const ResolveChanges& ResolveDirtyChanges,
+		[[nodiscard]] std::expected<ResolveResult, std::string> Resolve(EditorDocumentManager& Documents,
+			const EditorDocumentEditorRegistry& Editors, EditorDocumentCloseChoice Choice,
+			std::span<const EditorDocumentIdentity> CurrentDirtyDocuments, const ResolveChanges& ResolveDirtyChanges,
 			const EnqueueAction& Enqueue);
 
 	private:
