@@ -2,6 +2,36 @@
 
 namespace
 {
+	void TestUnassignedMeshMaterialRoundTrip(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		Scene Source;
+		const AssetID MeshAsset{ 0x8100000000000000ull, 81 };
+		const AssetID MaterialAsset{ 0x8200000000000000ull, 82 };
+		auto Created = Source.CreateEntity("Material assignment target");
+		PF_CHECK(Tests, Created.has_value());
+		if (!Created) return;
+		const UUID EntityID = Created->GetUUID();
+		PF_CHECK(Tests, Created->SetMeshRenderer(MeshRendererComponent{ MeshAsset, MaterialAsset }).has_value());
+		PF_CHECK(Tests, Created->SetMeshRenderer(MeshRendererComponent{ MeshAsset, std::nullopt }).has_value());
+		const auto Cleared = Created->GetMeshRenderer();
+		PF_CHECK(Tests, Cleared && Cleared->has_value() && !Cleared->value().MaterialAsset);
+
+		const auto Serialized = SceneSerializer::Serialize(Source);
+		PF_CHECK(Tests, Serialized.has_value());
+		if (!Serialized) return;
+		PF_CHECK(Tests, Serialized->find("\"materialAsset\"") == std::string::npos);
+
+		Scene Restored;
+		PF_CHECK(Tests, SceneSerializer::Deserialize(*Serialized, Restored).has_value());
+		const auto RestoredEntity = Restored.FindEntity(EntityID);
+		PF_CHECK(Tests, RestoredEntity.has_value());
+		if (!RestoredEntity) return;
+		const auto RestoredMeshRenderer = RestoredEntity->GetMeshRenderer();
+		PF_CHECK(Tests, RestoredMeshRenderer && RestoredMeshRenderer->has_value() && RestoredMeshRenderer->value().MeshAsset == MeshAsset &&
+							!RestoredMeshRenderer->value().MaterialAsset);
+	}
+
 	void TestSceneSerializationRoundTrip(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -699,6 +729,7 @@ namespace
 
 void RunAssetsTests(TestRunner& Tests)
 {
+	TestUnassignedMeshMaterialRoundTrip(Tests);
 	TestSceneSerializationRoundTrip(Tests);
 	TestSceneAssetsByUUID(Tests);
 	RunAssetRegistryTests(Tests);

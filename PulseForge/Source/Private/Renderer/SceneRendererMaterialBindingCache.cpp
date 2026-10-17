@@ -74,7 +74,14 @@ namespace PulseForge
 		auto Emissive = CreateMaterialFallback(BlackPixel, TextureFormat::RGBA8_Srgb, "PulseForge black emissive map fallback");
 		if (!Emissive) return std::unexpected(MakeResourceError("Could not create emissive-map fallback: " + Emissive.error().Message));
 
-		const MaterialConstants FallbackMaterial{ { 1.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f, 0.0f, 0.0f } };
+		const MaterialAssetDesc& DefaultMaterial = m_DefaultMaterialDescription;
+		const MaterialConstants FallbackMaterial{ { DefaultMaterial.BaseColorFactor.r, DefaultMaterial.BaseColorFactor.g,
+													  DefaultMaterial.BaseColorFactor.b, DefaultMaterial.BaseColorFactor.a },
+			{ DefaultMaterial.MetallicFactor, DefaultMaterial.RoughnessFactor, DefaultMaterial.NormalScale,
+				DefaultMaterial.OcclusionStrength },
+			{ DefaultMaterial.EmissiveFactor.r, DefaultMaterial.EmissiveFactor.g, DefaultMaterial.EmissiveFactor.b, 0.0f },
+			{ static_cast<float>(DefaultMaterial.AlphaMode), DefaultMaterial.AlphaCutoff, DefaultMaterial.DoubleSided ? 1.0f : 0.0f,
+				0.0f } };
 		BufferDesc FallbackMaterialDescription;
 		FallbackMaterialDescription.ByteSize = sizeof(FallbackMaterial);
 		FallbackMaterialDescription.Usage = BufferUsage::Constant;
@@ -98,6 +105,30 @@ namespace PulseForge
 		m_FallbackNormal = std::move(*Normal);
 		m_FallbackEmissive = std::move(*Emissive);
 		m_FallbackMaterialConstants = std::move(*FallbackMaterialBuffer);
+		return {};
+	}
+
+	std::expected<void, SceneRendererError> SceneRendererMaterialBindingCache::EnsureDefaultMaterialBindings(
+		const EnvironmentLightingTextures& EnvironmentTextures)
+	{
+		if (auto Initialized = RequireInitialized(); !Initialized) return Initialized;
+		if (m_DefaultMaterialBinding) return {};
+
+		BindingSetDesc Description;
+		Description.Layout = *m_Layout;
+		Description.Textures = { { 0, std::cref(*m_FallbackBaseColor) },
+			{ 1, std::cref(*EnvironmentTextures.DiffuseIrradiance), BindingResourceType::TextureCube },
+			{ 2, std::cref(*EnvironmentTextures.PrefilteredSpecular), BindingResourceType::TextureCube },
+			{ 3, std::cref(*EnvironmentTextures.BrdfIntegrationLut) },
+			{ 4, std::cref(*EnvironmentTextures.Environment), BindingResourceType::TextureCube },
+			{ 5, std::cref(*m_FallbackMetallicRoughness) }, { 6, std::cref(*m_FallbackNormal) }, { 7, std::cref(*m_OcclusionFallback) },
+			{ 8, std::cref(*m_FallbackEmissive) } };
+		Description.Samplers = { { 0, std::cref(*m_MaterialSampler) }, { 1, std::cref(*m_EnvironmentSampler) } };
+		Description.Buffers = { { 0, std::cref(*m_FallbackMaterialConstants) }, { 1, std::cref(**m_ObjectConstants) },
+			{ 2, std::cref(**m_FrameConstants) }, { 3, std::cref(**m_LocalLightingConstants) } };
+		auto Binding = m_Runtime.CreateBindingSet(Description);
+		if (!Binding) return std::unexpected(MakeResourceError("Could not create default material bindings: " + Binding.error().Message));
+		m_DefaultMaterialBinding = std::move(*Binding);
 		return {};
 	}
 
@@ -204,10 +235,8 @@ namespace PulseForge
 	std::expected<const MaterialAssetDesc*, SceneRendererError> SceneRendererMaterialBindingCache::ResolveMaterialDescription(
 		const SceneMeshInstance& Instance)
 	{
-		if (!Instance.MaterialAsset)
-			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::MissingMaterial, Instance.Entity, Instance.MeshAsset,
-				"Visible mesh entity has no material asset assigned" });
 		if (auto Initialized = RequireInitialized(); !Initialized) return std::unexpected(std::move(Initialized.error()));
+		if (!Instance.MaterialAsset) return &m_DefaultMaterialDescription;
 		auto Material = m_Materials->GetOrLoad(*Instance.MaterialAsset);
 		if (!Material)
 			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity, *Instance.MaterialAsset,
@@ -218,10 +247,18 @@ namespace PulseForge
 	std::expected<const BindingSet*, SceneRendererError> SceneRendererMaterialBindingCache::ResolveMaterialBinding(
 		const SceneMeshInstance& Instance, const std::optional<AssetID>& EnvironmentAsset) const
 	{
-		if (!Instance.MaterialAsset)
-			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::MissingMaterial, Instance.Entity, Instance.MeshAsset,
-				"Visible mesh entity has no material asset assigned" });
 		if (auto Initialized = RequireInitialized(); !Initialized) return std::unexpected(std::move(Initialized.error()));
+		if (!Instance.MaterialAsset)
+		{
+			if (EnvironmentAsset)
+			{
+				const auto EnvironmentBinding = m_EnvironmentBindings.find(MakeEnvironmentBindingKey(*EnvironmentAsset, true));
+				if (EnvironmentBinding != m_EnvironmentBindings.end()) return EnvironmentBinding->second.get();
+			}
+			if (m_DefaultMaterialBinding) return m_DefaultMaterialBinding.get();
+			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::ResourceCreationFailed, Instance.Entity, Instance.MeshAsset,
+				"Prepared default material binding set is unavailable" });
+		}
 		const auto Binding = m_MaterialBindings.find(MakeMaterialBindingKey(*Instance.MaterialAsset, EnvironmentAsset));
 		if (Binding == m_MaterialBindings.end())
 			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity, *Instance.MaterialAsset,

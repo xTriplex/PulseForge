@@ -591,7 +591,8 @@ namespace
 		PF_CHECK(Tests, SharedMesh->SetTransform(SharedMeshTransform).has_value());
 		PF_CHECK(Tests, SecondMesh->SetTransform(SecondMeshTransform).has_value());
 		PF_CHECK(Tests, FirstMesh->SetParent(*Parent).has_value());
-		PF_CHECK(Tests, FirstMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID }).has_value());
+		PF_CHECK(Tests, FirstMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID, MaterialAssetID }).has_value());
+		PF_CHECK(Tests, FirstMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID, std::nullopt }).has_value());
 		PF_CHECK(Tests, SharedMesh->SetMeshRenderer(MeshRendererComponent{ FirstMeshAssetID, MaterialAssetID }).has_value());
 		PF_CHECK(Tests, SecondMesh->SetMeshRenderer(MeshRendererComponent{ SecondMeshAssetID }).has_value());
 
