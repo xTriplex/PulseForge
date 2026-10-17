@@ -27,22 +27,19 @@ namespace
 
 			~Model() noexcept override
 			{
-				if (DestructionCount)
-					++*DestructionCount;
-				if (!TeardownManager)
-					return;
+				if (DestructionCount) ++*DestructionCount;
+				if (!TeardownManager) return;
 				if (TeardownSawManagerStateRemoved)
 					*TeardownSawManagerStateRemoved = !TeardownManager->GetSessions().contains(TeardownIdentity);
 				if (TeardownSawHostRemoved)
-					*TeardownSawHostRemoved = std::none_of(
-						TeardownManager->GetHosts().begin(), TeardownManager->GetHosts().end(),
+					*TeardownSawHostRemoved = std::none_of(TeardownManager->GetHosts().begin(), TeardownManager->GetHosts().end(),
 						[this](const EditorDocumentHost& Host) { return Host.ID == TeardownHostID; });
 				if (TeardownOpenRejected)
 				{
 					try
 					{
-						*TeardownOpenRejected = !TeardownManager->Open(
-							TeardownIdentity, {}, "reentrant", EditorDocumentOpenPreference::MainDocumentStrip);
+						*TeardownOpenRejected =
+							!TeardownManager->Open(TeardownIdentity, {}, "reentrant", EditorDocumentOpenPreference::MainDocumentStrip);
 					}
 					catch (...)
 					{
@@ -134,27 +131,22 @@ namespace
 			return false;
 		};
 		Adapter.AssetLocationChanged = [](EditorDocumentSession&, const std::filesystem::path&, std::string_view) { return true; };
-		Adapter.PrepareClose = [&AttemptReentrantMutations, &ReentrantManager, &ReentrantCloseIdentity,
-			&ReentrantTransferIdentity, &ReentrantDestinationHost, &ReentrantCloseStatus,
-			&ReentrantTransferRejected, &ReentrantClearRejected, &ReentrantOpenRejected,
-			&ReentrantPreferenceRejected](const EditorDocumentCloseContext& Context) -> std::expected<void, std::string>
+		Adapter.PrepareClose = [&AttemptReentrantMutations, &ReentrantManager, &ReentrantCloseIdentity, &ReentrantTransferIdentity,
+								   &ReentrantDestinationHost, &ReentrantCloseStatus, &ReentrantTransferRejected, &ReentrantClearRejected,
+								   &ReentrantOpenRejected, &ReentrantPreferenceRejected](
+								   const EditorDocumentCloseContext& Context) -> std::expected<void, std::string>
 		{
 			const auto* State = dynamic_cast<const Model*>(Context.EditorState);
-			if (State && State->ThrowClosePreflight)
-				throw std::runtime_error("close preflight test exception");
+			if (State && State->ThrowClosePreflight) throw std::runtime_error("close preflight test exception");
 			if (AttemptReentrantMutations)
 			{
 				AttemptReentrantMutations = false;
-				ReentrantCloseStatus = ReentrantManager->Close(
-					ReentrantCloseIdentity, EditorDocumentCloseChoice::Cancel, {}, {});
-				ReentrantTransferRejected = !ReentrantManager->Transfer(
-					ReentrantTransferIdentity, ReentrantDestinationHost, 0);
+				ReentrantCloseStatus = ReentrantManager->Close(ReentrantCloseIdentity, EditorDocumentCloseChoice::Cancel, {}, {});
+				ReentrantTransferRejected = !ReentrantManager->Transfer(ReentrantTransferIdentity, ReentrantDestinationHost, 0);
 				ReentrantClearRejected = !ReentrantManager->ClearProject(Context.Identity.Project);
 				ReentrantOpenRejected = !ReentrantManager->Open(
-					Context.Identity, Context.ProjectRelativePath, Context.DisplayName,
-					EditorDocumentOpenPreference::MainDocumentStrip);
-				ReentrantPreferenceRejected = !ReentrantManager->SetOpeningPreference(
-					EditorDocumentOpenPreference::MainDocumentStrip);
+					Context.Identity, Context.ProjectRelativePath, Context.DisplayName, EditorDocumentOpenPreference::MainDocumentStrip);
+				ReentrantPreferenceRejected = !ReentrantManager->SetOpeningPreference(EditorDocumentOpenPreference::MainDocumentStrip);
 			}
 			if (State && State->FailClose) return std::unexpected("close rejected by test fixture");
 			return {};
@@ -329,8 +321,8 @@ namespace
 		StateB->FailClose = false;
 		StateB->ThrowClosePreflight = true;
 		std::function<void()> PendingThrowContinuation = [] {};
-		const auto ThrowingPreflight = ResolveDocumentCloseBatch(
-				Manager, Registry, BatchIdentities, PendingThrowContinuation, EnqueueContinuation);
+		const auto ThrowingPreflight =
+			ResolveDocumentCloseBatch(Manager, Registry, BatchIdentities, PendingThrowContinuation, EnqueueContinuation);
 		PF_CHECK(Tests, !ThrowingPreflight && PendingThrowContinuation && QueuedContinuations.empty());
 		PF_CHECK(Tests, EditorStateDestructions == 0 && Manager.Find(IdentityA) == SessionA && Manager.Find(IdentityB) == SessionB);
 		StateB->ThrowClosePreflight = false;
@@ -345,10 +337,9 @@ namespace
 			{
 				if (Manager.Close(IdentityA, EditorDocumentCloseChoice::Cancel, {}, {}) != EditorDocumentCloseStatus::Closed)
 					return std::unexpected("The fixture could not close the prepared session.");
-				const auto Reopened = Manager.Open(
-					IdentityA, ReplacementPath, ReplacementName, EditorDocumentOpenPreference::MainDocumentStrip);
-				if (!Reopened)
-					return std::unexpected(Reopened.error());
+				const auto Reopened =
+					Manager.Open(IdentityA, ReplacementPath, ReplacementName, EditorDocumentOpenPreference::MainDocumentStrip);
+				if (!Reopened) return std::unexpected(Reopened.error());
 				auto* ReplacementSession = Manager.Find(IdentityA);
 				EditorDocumentEditorContext ReplacementContext = ContextA;
 				ReplacementContext.ProjectRelativePath = ReplacementPath;
@@ -379,8 +370,8 @@ namespace
 			ResolveDocumentCloseBatch(Manager, Registry, BatchIdentities, PendingShutdownContinuation, EnqueueContinuation);
 		PF_CHECK(Tests, RetriedCoordinatedClose.has_value());
 		PF_CHECK(Tests, ReentrantCloseStatus == EditorDocumentCloseStatus::MutationRejectedDuringCloseTransition &&
-							ReentrantTransferRejected && ReentrantClearRejected && ReentrantOpenRejected &&
-							ReentrantPreferenceRejected && !AttemptReentrantMutations);
+							ReentrantTransferRejected && ReentrantClearRejected && ReentrantOpenRejected && ReentrantPreferenceRejected &&
+							!AttemptReentrantMutations);
 		PF_CHECK(Tests, TeardownSawManagerStateRemoved && TeardownSawHostRemoved && TeardownOpenRejected);
 		PF_CHECK(Tests, !PendingShutdownContinuation && QueuedContinuations.size() == 1 && ProjectSwitchContinuationCount == 0 &&
 							ShutdownContinuationCount == 0);

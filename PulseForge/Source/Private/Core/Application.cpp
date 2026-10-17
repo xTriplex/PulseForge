@@ -115,15 +115,13 @@ namespace PulseForge
 			m_MainFrameActive = bCanRender;
 
 			const bool bHasPlatformPresentationTargets = m_Renderer->HasPlatformPresentationTargets();
-			if (bCanRender || bHasPlatformPresentationTargets)
-				m_LayerStack.RenderLayers();
+			if (bCanRender || bHasPlatformPresentationTargets) m_LayerStack.RenderLayers();
 
 			if (bCanRender)
 				m_Renderer->EndFrame();
 			m_MainFrameActive = false;
 
-			if (bCanRender || bHasPlatformPresentationTargets)
-				m_LayerStack.RenderPlatformWindows();
+			if (bCanRender || bHasPlatformPresentationTargets) m_LayerStack.RenderPlatformWindows();
 			else
 				m_Window->WaitEventsTimeout(0.05);
 		}

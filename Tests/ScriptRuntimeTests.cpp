@@ -220,22 +220,21 @@ end
 
 		const UUID LifecycleControllerID{ 0x5500000000000000ull, 1 };
 		const UUID LifecycleVictimID{ 0x5500000000000000ull, 2 };
-		const auto DestroyLaterScript = CreateScriptAsset(
-			"destroy_later.lua",
-			"function OnUpdate()\n"
-			"  local victim = scene.find_entity('" + LifecycleVictimID.ToString() + "')\n"
-			"  if victim then assert(victim:destroy()) end\n"
-			"end\n");
-		const auto LifecycleVictimScript = CreateScriptAsset(
-			"lifecycle_victim.lua",
-			"function OnUpdate()\n"
-			"  local marker, message = scene.create_entity('victim-updated')\n"
-			"  assert(marker, message)\n"
-			"end\n"
-			"function OnDestroy()\n"
-			"  local marker, message = scene.create_entity('victim-destroyed')\n"
-			"  assert(marker, message)\n"
-			"end\n");
+		const auto DestroyLaterScript = CreateScriptAsset("destroy_later.lua", "function OnUpdate()\n"
+																			   "  local victim = scene.find_entity('" +
+																				   LifecycleVictimID.ToString() +
+																				   "')\n"
+																				   "  if victim then assert(victim:destroy()) end\n"
+																				   "end\n");
+		const auto LifecycleVictimScript =
+			CreateScriptAsset("lifecycle_victim.lua", "function OnUpdate()\n"
+													  "  local marker, message = scene.create_entity('victim-updated')\n"
+													  "  assert(marker, message)\n"
+													  "end\n"
+													  "function OnDestroy()\n"
+													  "  local marker, message = scene.create_entity('victim-destroyed')\n"
+													  "  assert(marker, message)\n"
+													  "end\n");
 		PF_CHECK(Tests, DestroyLaterScript && LifecycleVictimScript);
 		if (!DestroyLaterScript || !LifecycleVictimScript) return;
 		Scene CallbackMutationScene;
@@ -266,12 +265,13 @@ end
 
 		const UUID StartupControllerID{ 0x5500000000000000ull, 3 };
 		const UUID StartupVictimID{ 0x5500000000000000ull, 4 };
-		const auto DestroyAtStartupScript = CreateScriptAsset(
-			"destroy_at_startup.lua",
-			"function OnCreate()\n"
-			"  local victim = scene.find_entity('" + StartupVictimID.ToString() + "')\n"
-			"  if victim then assert(victim:destroy()) end\n"
-			"end\n");
+		const auto DestroyAtStartupScript =
+			CreateScriptAsset("destroy_at_startup.lua", "function OnCreate()\n"
+														"  local victim = scene.find_entity('" +
+															StartupVictimID.ToString() +
+															"')\n"
+															"  if victim then assert(victim:destroy()) end\n"
+															"end\n");
 		PF_CHECK(Tests, DestroyAtStartupScript.has_value());
 		if (!DestroyAtStartupScript) return;
 		Scene StartupMutationScene;
@@ -289,25 +289,23 @@ end
 		StartupMutationRuntime.Stop();
 
 		const UUID ReusedScriptEntityID{ 0x5500000000000000ull, 5 };
-		const auto OldIncarnationScript = CreateScriptAsset(
-			"old_incarnation.lua",
-			"function OnDestroy()\n"
-			"  local replacement = scene.find_entity(entity:uuid())\n"
-			"  if replacement then assert(replacement:set_translation(99, 0, 0)) end\n"
-			"  local marker, message = scene.create_entity('old-incarnation-destroyed')\n"
-			"  assert(marker, message)\n"
-			"end\n");
-		const auto ReplacementIncarnationScript = CreateScriptAsset(
-			"replacement_incarnation.lua",
-			"local updates = 0\n"
-			"function OnCreate()\n"
-			"  local x = entity:get_translation()\n"
-			"  assert(x == 10)\n"
-			"end\n"
-			"function OnUpdate()\n"
-			"  updates = updates + 1\n"
-			"  assert(entity:set_translation(updates, 0, 0))\n"
-			"end\n");
+		const auto OldIncarnationScript =
+			CreateScriptAsset("old_incarnation.lua", "function OnDestroy()\n"
+													 "  local replacement = scene.find_entity(entity:uuid())\n"
+													 "  if replacement then assert(replacement:set_translation(99, 0, 0)) end\n"
+													 "  local marker, message = scene.create_entity('old-incarnation-destroyed')\n"
+													 "  assert(marker, message)\n"
+													 "end\n");
+		const auto ReplacementIncarnationScript =
+			CreateScriptAsset("replacement_incarnation.lua", "local updates = 0\n"
+															 "function OnCreate()\n"
+															 "  local x = entity:get_translation()\n"
+															 "  assert(x == 10)\n"
+															 "end\n"
+															 "function OnUpdate()\n"
+															 "  updates = updates + 1\n"
+															 "  assert(entity:set_translation(updates, 0, 0))\n"
+															 "end\n");
 		PF_CHECK(Tests, OldIncarnationScript && ReplacementIncarnationScript);
 		if (!OldIncarnationScript || !ReplacementIncarnationScript) return;
 		Scene ReusedScriptScene;
@@ -336,12 +334,13 @@ end
 
 		const UUID FailedThenReusedID{ 0x5500000000000000ull, 6 };
 		const UUID AttachmentBlockerID{ 0x5500000000000000ull, 7 };
-		const auto RetryOnNewIncarnationScript = CreateScriptAsset(
-			"retry_new_incarnation.lua",
-			"function OnCreate()\n"
-			"  if scene.find_entity('" + AttachmentBlockerID.ToString() + "') then error('blocked attachment') end\n"
-			"end\n"
-			"function OnUpdate() assert(entity:set_translation(7, 0, 0)) end\n");
+		const auto RetryOnNewIncarnationScript =
+			CreateScriptAsset("retry_new_incarnation.lua", "function OnCreate()\n"
+														   "  if scene.find_entity('" +
+															   AttachmentBlockerID.ToString() +
+															   "') then error('blocked attachment') end\n"
+															   "end\n"
+															   "function OnUpdate() assert(entity:set_translation(7, 0, 0)) end\n");
 		PF_CHECK(Tests, RetryOnNewIncarnationScript.has_value());
 		if (!RetryOnNewIncarnationScript) return;
 		Scene FailedAttachmentScene;
@@ -447,10 +446,9 @@ end
 		const auto CoordinatedStoppedTransform = CoordinatedScriptEntity->GetTransform();
 		PF_CHECK(Tests, CoordinatedStoppedTransform && CoordinatedStoppedTransform->Translation.x == -1.0f);
 
-		const auto PhysicsPoseScriptAsset = CreateScriptAsset(
-			"physics_pose.lua",
-			"function OnCreate() assert(entity:set_translation(4, 10, 0)) end\n"
-			"function OnUpdate() assert(entity:set_translation(6, 10, 0)) end\n");
+		const auto PhysicsPoseScriptAsset =
+			CreateScriptAsset("physics_pose.lua", "function OnCreate() assert(entity:set_translation(4, 10, 0)) end\n"
+												  "function OnUpdate() assert(entity:set_translation(6, 10, 0)) end\n");
 		PF_CHECK(Tests, PhysicsPoseScriptAsset.has_value());
 		if (!PhysicsPoseScriptAsset) return;
 		Scene PhysicsPoseScene;
@@ -468,8 +466,8 @@ end
 		const auto PhysicsPoseFrame = PhysicsPoseRuntime.Advance(PhysicsPoseScene, Timestep(0.1));
 		const auto OnUpdatePose = PhysicsPoseEntity->GetTransform();
 		PF_CHECK(Tests, PhysicsPoseFrame && PhysicsPoseFrame->PhysicsSteps == 1);
-		PF_CHECK(Tests, OnUpdatePose && std::abs(OnUpdatePose->Translation.x - 6.0f) < 0.0001f &&
-							OnUpdatePose->Translation.y > 9.8f && OnUpdatePose->Translation.y < 10.0f);
+		PF_CHECK(Tests, OnUpdatePose && std::abs(OnUpdatePose->Translation.x - 6.0f) < 0.0001f && OnUpdatePose->Translation.y > 9.8f &&
+							OnUpdatePose->Translation.y < 10.0f);
 		PhysicsPoseRuntime.Stop();
 
 		constexpr std::string_view ForceScript = R"(

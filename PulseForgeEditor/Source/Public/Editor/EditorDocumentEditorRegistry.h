@@ -46,9 +46,8 @@ namespace PulseForgeEditor
 	public:
 		[[nodiscard]] std::expected<void, std::string> Register(EditorDocumentEditorAdapter Adapter)
 		{
-			if (Adapter.Kind == EditorDocumentKind::Level || !Adapter.IsEligible || !Adapter.LoadSession ||
-				!Adapter.DrawWorkspace || !Adapter.Save || !Adapter.Discard || !Adapter.FocusedCommand ||
-				!Adapter.AssetLocationChanged || !Adapter.PrepareClose)
+			if (Adapter.Kind == EditorDocumentKind::Level || !Adapter.IsEligible || !Adapter.LoadSession || !Adapter.DrawWorkspace ||
+				!Adapter.Save || !Adapter.Discard || !Adapter.FocusedCommand || !Adapter.AssetLocationChanged || !Adapter.PrepareClose)
 				return std::unexpected("A specialized document registration is incomplete");
 			if (m_Adapters.contains(Adapter.Kind))
 				return std::unexpected("A specialized editor is already registered for this document kind");
@@ -142,14 +141,8 @@ namespace PulseForgeEditor
 				return std::unexpected("The document editor session is unavailable");
 			try
 			{
-				const EditorDocumentCloseContext Context{
-					Session.Identity,
-					Session.ProjectRelativePath,
-					Session.DisplayName,
-					Session.Revision,
-					Session.SavedRevision,
-					Session.EditorState.get()
-				};
+				const EditorDocumentCloseContext Context{ Session.Identity, Session.ProjectRelativePath, Session.DisplayName,
+					Session.Revision, Session.SavedRevision, Session.EditorState.get() };
 				return Adapter->second.PrepareClose(Context);
 			}
 			catch (const std::exception& Exception)

@@ -303,8 +303,7 @@ namespace PulseForge
 
 		void InvokeDestroy(ScriptInstance& Instance)
 		{
-			if (Instance.DestroyInvoked)
-				return;
+			if (Instance.DestroyInvoked) return;
 			Instance.DestroyInvoked = true;
 			Instance.Destroying = true;
 			struct DestroyingReset final
@@ -328,8 +327,7 @@ namespace PulseForge
 				if (!Instance)
 				{
 					RecordDiagnostic(std::move(Instance.error()));
-					FailedAttachments.insert_or_assign(
-						EntityValue.GetUUID(), FailedAttachment{ EntityValue, Component.ScriptAsset });
+					FailedAttachments.insert_or_assign(EntityValue.GetUUID(), FailedAttachment{ EntityValue, Component.ScriptAsset });
 					return;
 				}
 				Scripts.insert_or_assign(EntityValue.GetUUID(), std::move(*Instance));
@@ -339,8 +337,7 @@ namespace PulseForge
 			{
 				RecordDiagnostic(MakeDiagnostic(EntityValue.GetUUID(), Component.ScriptAsset, ScriptDiagnosticCode::LuaInitializationFailed,
 					std::string("Could not initialize Lua script instance: ") + Exception.what()));
-				FailedAttachments.insert_or_assign(
-					EntityValue.GetUUID(), FailedAttachment{ EntityValue, Component.ScriptAsset });
+				FailedAttachments.insert_or_assign(EntityValue.GetUUID(), FailedAttachment{ EntityValue, Component.ScriptAsset });
 			}
 		}
 
@@ -390,8 +387,7 @@ namespace PulseForge
 
 			for (const Entity& EntityValue : SceneValue.GetEntities())
 			{
-				if (!EntityValue.IsValid())
-					continue;
+				if (!EntityValue.IsValid()) continue;
 				const auto Component = EntityValue.GetScript();
 				if (!Component || !Component->has_value() || !Component->value().Enabled || Scripts.contains(EntityValue.GetUUID()))
 					continue;
@@ -431,8 +427,7 @@ namespace PulseForge
 			Candidate->Source = &Source;
 			for (const Entity& EntityValue : Source.GetEntities())
 			{
-				if (!EntityValue.IsValid())
-					continue;
+				if (!EntityValue.IsValid()) continue;
 				const auto Component = EntityValue.GetScript();
 				if (!Component)
 				{
@@ -523,8 +518,7 @@ namespace PulseForge
 					}
 					else
 					{
-						Eligible = Component->has_value() && Component->value().Enabled &&
-							Component->value().ScriptAsset == Instance.Asset;
+						Eligible = Component->has_value() && Component->value().Enabled && Component->value().ScriptAsset == Instance.Asset;
 					}
 				}
 

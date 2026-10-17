@@ -310,8 +310,8 @@ namespace PulseForge::ScriptEnvironment
 			bool Found = false;
 			{
 				const auto FoundEntity = Instance->SourceScene->FindEntity(*Identifier);
-				if (FoundEntity && !(Instance->Destroying && *Identifier == Instance->BoundEntity.GetUUID() &&
-									*FoundEntity != Instance->BoundEntity))
+				if (FoundEntity &&
+					!(Instance->Destroying && *Identifier == Instance->BoundEntity.GetUUID() && *FoundEntity != Instance->BoundEntity))
 				{
 					UserData->Value = *FoundEntity;
 					Found = true;
