@@ -1,3 +1,6 @@
+cmake_policy(PUSH)
+cmake_policy(VERSION 3.24)
+
 if(NOT DEFINED PULSEFORGE_SOURCE_LAYOUT_ROOT)
 	get_filename_component(PULSEFORGE_SOURCE_LAYOUT_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 endif()
@@ -49,3 +52,5 @@ if(_pulseforge_layout_violations)
 		"PulseForge first-party source layout violations were found. Headers belong under Source/Public and C/C++ "
 		"implementations belong under Source/Private:\n  ${_formatted_violations}")
 endif()
+
+cmake_policy(POP)
