@@ -196,12 +196,13 @@ namespace PulseForgeEditor
 				   << "  \"binding_unregistrations\": " << Stats.BindingUnregistrations << ",\n"
 				   << "  \"stale_results_discarded\": " << Stats.StaleResultsDiscarded << ",\n"
 				   << "  \"peak_entries\": " << Stats.PeakEntries << ",\n"
-				   << "  \"peak_cpu_bytes\": " << Stats.PeakCpuBytes << ",\n"
+				   << "  \"peak_queued_result_cpu_bytes\": " << Stats.PeakQueuedResultCpuBytes << ",\n"
 				   << "  \"peak_gpu_bytes\": " << Stats.PeakGpuBytes << ",\n"
 				   << "  \"final_entries\": " << Stats.ActiveEntries << ",\n"
 				   << "  \"final_gpu_bytes\": " << Stats.GpuBytes << ",\n"
 				   << "  \"final_pending_requests\": " << Stats.PendingRequests << ",\n"
 				   << "  \"renderer_registered_textures_after_service_shutdown\": " << RegisteredTextures << ",\n"
+				   << "  \"worker_failed\": " << (Stats.WorkerFailed ? "true" : "false") << ",\n"
 				   << "  \"render_failed\": " << (m_Failed ? "true" : "false") << ",\n"
 				   << "  \"completed\": " << (m_Finished && !m_Failed ? "true" : "false") << "\n}\n";
 		}
