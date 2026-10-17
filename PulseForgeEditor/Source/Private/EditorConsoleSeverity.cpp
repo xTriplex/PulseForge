@@ -2,24 +2,23 @@
 
 namespace PulseForgeEditor::Detail
 {
-	EditorConsoleSeverity ConvertConsoleSeverity(spdlog::level::level_enum Level) noexcept
+	EditorConsoleSeverity ConvertConsoleSeverity(PulseForge::LogLevel Level) noexcept
 	{
 		switch (Level)
 		{
-		case spdlog::level::trace:
+		case PulseForge::LogLevel::Trace:
 			return EditorConsoleSeverity::Trace;
-		case spdlog::level::debug:
+		case PulseForge::LogLevel::Debug:
 			return EditorConsoleSeverity::Debug;
-		case spdlog::level::info:
+		case PulseForge::LogLevel::Info:
 			return EditorConsoleSeverity::Info;
-		case spdlog::level::warn:
+		case PulseForge::LogLevel::Warning:
 			return EditorConsoleSeverity::Warning;
-		case spdlog::level::err:
+		case PulseForge::LogLevel::Error:
 			return EditorConsoleSeverity::Error;
-		case spdlog::level::critical:
+		case PulseForge::LogLevel::Critical:
 			return EditorConsoleSeverity::Critical;
-		case spdlog::level::off:
-		case spdlog::level::n_levels:
+		case PulseForge::LogLevel::Unknown:
 		default:
 			return EditorConsoleSeverity::Unknown;
 		}

@@ -5,18 +5,49 @@
 #include <Windows.h>
 
 #include <spdlog/spdlog.h>
-#include <spdlog/sinks/ringbuffer_sink.h>
+#include <spdlog/sinks/base_sink.h>
 #include <spdlog/sinks/msvc_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
+#include <deque>
+#include <mutex>
 #include <vector>
 
 namespace PulseForge
 {
 	namespace
 	{
-		std::shared_ptr<spdlog::logger> CreateLogger(
-			const char* Name, const std::shared_ptr<spdlog::sinks::ringbuffer_sink_mt>& HistorySink)
+		[[nodiscard]] LogLevel ConvertLogLevel(spdlog::level::level_enum Level) noexcept;
+
+		class LogHistorySink final : public spdlog::sinks::base_sink<std::mutex>
+		{
+		public:
+			[[nodiscard]] std::vector<LogEntry> GetRecentEntriesAfter(uint64_t Sequence)
+			{
+				std::lock_guard<std::mutex> Lock(mutex_);
+				std::vector<LogEntry> Entries;
+				for (const LogEntry& Entry : m_Entries)
+					if (Entry.Sequence > Sequence) Entries.push_back(Entry);
+				return Entries;
+			}
+
+		protected:
+			void sink_it_(const spdlog::details::log_msg& Message) override
+			{
+				m_Entries.push_back({ std::string(Message.logger_name.data(), Message.logger_name.size()), ConvertLogLevel(Message.level),
+					std::string(Message.payload.data(), Message.payload.size()), ++m_NextSequence });
+				if (m_Entries.size() > Capacity) m_Entries.pop_front();
+			}
+
+			void flush_() override {}
+
+		private:
+			static constexpr size_t Capacity = 512;
+			std::deque<LogEntry> m_Entries;
+			uint64_t m_NextSequence = 0;
+		};
+
+		std::shared_ptr<spdlog::logger> CreateLogger(const char* Name, const std::shared_ptr<LogHistorySink>& HistorySink)
 		{
 			std::vector<spdlog::sink_ptr> Sinks;
 			const HANDLE StandardOutput = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -55,13 +86,13 @@ namespace PulseForge
 	{
 		std::shared_ptr<spdlog::logger> CoreLogger;
 		std::shared_ptr<spdlog::logger> ClientLogger;
-		std::shared_ptr<spdlog::sinks::ringbuffer_sink_mt> HistorySink;
+		std::shared_ptr<LogHistorySink> HistorySink;
 
 		Impl()
 		{
 			spdlog::set_pattern("%^[%T] %n: %v%$");
 
-			HistorySink = std::make_shared<spdlog::sinks::ringbuffer_sink_mt>(512);
+			HistorySink = std::make_shared<LogHistorySink>();
 			CoreLogger = CreateLogger("PULSEFORGE", HistorySink);
 			CoreLogger->set_level(spdlog::level::trace);
 
@@ -77,19 +108,20 @@ namespace PulseForge
 		s_Impl = std::make_unique<Impl>();
 	}
 
+	bool Log::IsInitialized() noexcept
+	{
+		return s_Impl != nullptr;
+	}
+
 	std::vector<LogEntry> Log::GetRecentEntries()
 	{
-		std::vector<LogEntry> Entries;
-		if (!s_Impl) return Entries;
+		return GetRecentEntriesAfter(0);
+	}
 
-		const std::vector<spdlog::details::log_msg_buffer> Messages = s_Impl->HistorySink->last_raw();
-		Entries.reserve(Messages.size());
-		for (const spdlog::details::log_msg_buffer& Message : Messages)
-		{
-			Entries.push_back({ std::string(Message.logger_name.data(), Message.logger_name.size()), ConvertLogLevel(Message.level),
-				std::string(Message.payload.data(), Message.payload.size()) });
-		}
-		return Entries;
+	std::vector<LogEntry> Log::GetRecentEntriesAfter(uint64_t Sequence)
+	{
+		if (!s_Impl) return {};
+		return s_Impl->HistorySink->GetRecentEntriesAfter(Sequence);
 	}
 
 	// Engine wrappers - These now take pre-formatted strings from the header macros!

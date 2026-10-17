@@ -1,6 +1,7 @@
 #include "EditorConsoleHistory.h"
 
 #include "Core/Log.h"
+#include "EditorConsoleSeverity.h"
 
 #include <algorithm>
 #include <utility>
@@ -23,32 +24,7 @@ namespace PulseForgeEditor
 
 	void EditorConsoleHistory::Append(const PulseForge::LogEntry& Entry)
 	{
-		EditorConsoleSeverity Severity = EditorConsoleSeverity::Unknown;
-		switch (Entry.Level)
-		{
-		case PulseForge::LogLevel::Trace:
-			Severity = EditorConsoleSeverity::Trace;
-			break;
-		case PulseForge::LogLevel::Debug:
-			Severity = EditorConsoleSeverity::Debug;
-			break;
-		case PulseForge::LogLevel::Info:
-			Severity = EditorConsoleSeverity::Info;
-			break;
-		case PulseForge::LogLevel::Warning:
-			Severity = EditorConsoleSeverity::Warning;
-			break;
-		case PulseForge::LogLevel::Error:
-			Severity = EditorConsoleSeverity::Error;
-			break;
-		case PulseForge::LogLevel::Critical:
-			Severity = EditorConsoleSeverity::Critical;
-			break;
-		case PulseForge::LogLevel::Unknown:
-		default:
-			break;
-		}
-		Append(Entry.Logger, Severity, Entry.Message);
+		Append(Entry.Logger, Detail::ConvertConsoleSeverity(Entry.Level), Entry.Message);
 	}
 
 	void EditorConsoleHistory::AppendRecent(const std::vector<PulseForge::LogEntry>& Entries)

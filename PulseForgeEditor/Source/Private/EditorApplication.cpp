@@ -883,7 +883,8 @@ namespace
 		void OnUpdate(PulseForge::Timestep DeltaTime) override
 		{
 			(void)m_DeferredEditorOperations.ExecuteNext();
-			#ifdef PF_EDITOR_RENDERER_OPENGL
+			m_ConsolePanel.CapturePendingLogs();
+#ifdef PF_EDITOR_RENDERER_OPENGL
 			if (m_Context)
 			{
 				ImGui::SetCurrentContext(m_Context);

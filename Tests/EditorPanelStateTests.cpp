@@ -40,18 +40,18 @@ namespace
 
 	void TestEditorConsoleSeverityConversion(TestRunner& Tests)
 	{
+		using PulseForge::LogLevel;
 		using PulseForgeEditor::EditorConsoleSeverity;
 		using PulseForgeEditor::Detail::ConvertConsoleSeverity;
-		using spdlog::level::level_enum;
 
-		PF_CHECK(Tests, ConvertConsoleSeverity(spdlog::level::trace) == EditorConsoleSeverity::Trace);
-		PF_CHECK(Tests, ConvertConsoleSeverity(spdlog::level::debug) == EditorConsoleSeverity::Debug);
-		PF_CHECK(Tests, ConvertConsoleSeverity(spdlog::level::info) == EditorConsoleSeverity::Info);
-		PF_CHECK(Tests, ConvertConsoleSeverity(spdlog::level::warn) == EditorConsoleSeverity::Warning);
-		PF_CHECK(Tests, ConvertConsoleSeverity(spdlog::level::err) == EditorConsoleSeverity::Error);
-		PF_CHECK(Tests, ConvertConsoleSeverity(spdlog::level::critical) == EditorConsoleSeverity::Critical);
-		PF_CHECK(Tests, ConvertConsoleSeverity(spdlog::level::off) == EditorConsoleSeverity::Unknown);
-		PF_CHECK(Tests, ConvertConsoleSeverity(static_cast<level_enum>(127)) == EditorConsoleSeverity::Unknown);
+		PF_CHECK(Tests, ConvertConsoleSeverity(LogLevel::Trace) == EditorConsoleSeverity::Trace);
+		PF_CHECK(Tests, ConvertConsoleSeverity(LogLevel::Debug) == EditorConsoleSeverity::Debug);
+		PF_CHECK(Tests, ConvertConsoleSeverity(LogLevel::Info) == EditorConsoleSeverity::Info);
+		PF_CHECK(Tests, ConvertConsoleSeverity(LogLevel::Warning) == EditorConsoleSeverity::Warning);
+		PF_CHECK(Tests, ConvertConsoleSeverity(LogLevel::Error) == EditorConsoleSeverity::Error);
+		PF_CHECK(Tests, ConvertConsoleSeverity(LogLevel::Critical) == EditorConsoleSeverity::Critical);
+		PF_CHECK(Tests, ConvertConsoleSeverity(LogLevel::Unknown) == EditorConsoleSeverity::Unknown);
+		PF_CHECK(Tests, ConvertConsoleSeverity(static_cast<LogLevel>(127)) == EditorConsoleSeverity::Unknown);
 	}
 
 	void TestEditorContentBrowserState(TestRunner& Tests)

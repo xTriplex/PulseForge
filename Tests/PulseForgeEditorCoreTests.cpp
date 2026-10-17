@@ -6,6 +6,9 @@
 #include "Editor/EditorMaterialDraftStore.h"
 
 #include <algorithm>
+#include <atomic>
+#include <thread>
+#include <unordered_set>
 
 namespace
 {
@@ -47,6 +50,57 @@ namespace
 		PF_CHECK(Tests, Messages[2].Logger == "APP");
 		PF_CHECK(Tests, Messages[2].Severity == PulseForgeEditor::EditorConsoleSeverity::Info);
 		PF_CHECK(Tests, Messages[2].Text == AppMarker);
+		PF_CHECK(Tests, Messages.front().Sequence < Messages.back().Sequence);
+
+		const uint64_t Cursor = Recent.back().Sequence;
+		constexpr std::string_view LiveMarker = "editor console live cursor marker";
+		PF_INFO("{0}", LiveMarker);
+		const std::vector<PulseForge::LogEntry> LiveEntries = PulseForge::Log::GetRecentEntriesAfter(Cursor);
+		PF_CHECK(Tests, LiveEntries.size() == 1);
+		if (LiveEntries.size() == 1)
+		{
+			PF_CHECK(Tests, LiveEntries.front().Message == LiveMarker);
+			PF_CHECK(Tests, LiveEntries.front().Sequence > Cursor);
+		}
+	}
+
+	void TestConcurrentLogHistory(TestRunner& Tests)
+	{
+		const uint64_t Cursor = PulseForge::Log::GetRecentEntries().back().Sequence;
+		constexpr int ThreadCount = 4;
+		constexpr int MessagesPerThread = 32;
+		std::vector<std::thread> Workers;
+		Workers.reserve(ThreadCount);
+		std::atomic<int> RemainingWorkers = ThreadCount;
+		for (int ThreadIndex = 0; ThreadIndex < ThreadCount; ++ThreadIndex)
+			Workers.emplace_back(
+				[ThreadIndex, &RemainingWorkers]
+				{
+					for (int MessageIndex = 0; MessageIndex < MessagesPerThread; ++MessageIndex)
+						PF_CORE_INFO("log cursor regression {0}:{1}", ThreadIndex, MessageIndex);
+					RemainingWorkers.fetch_sub(1, std::memory_order_release);
+				});
+		std::unordered_set<std::string> Messages;
+		uint64_t PreviousSequence = Cursor;
+		auto CaptureNewMessages = [&]
+		{
+			const std::vector<PulseForge::LogEntry> Entries = PulseForge::Log::GetRecentEntriesAfter(PreviousSequence);
+			for (const PulseForge::LogEntry& Entry : Entries)
+			{
+				PF_CHECK(Tests, Entry.Sequence > PreviousSequence);
+				PreviousSequence = Entry.Sequence;
+				if (Entry.Message.starts_with("log cursor regression ")) Messages.insert(Entry.Message);
+			}
+		};
+		while (RemainingWorkers.load(std::memory_order_acquire) != 0)
+		{
+			CaptureNewMessages();
+			std::this_thread::yield();
+		}
+		for (std::thread& Worker : Workers)
+			Worker.join();
+		CaptureNewMessages();
+		PF_CHECK(Tests, Messages.size() == ThreadCount * MessagesPerThread);
 	}
 } // namespace
 
@@ -65,6 +119,7 @@ int main()
 	PF_CHECK(Tests, Console.CopyMessagesIfChanged(Revision, Messages, Revision));
 	PF_CHECK(Tests, Messages.size() == 1 && Messages.front().Text == "engine ready");
 	TestStartupLogReplay(Tests);
+	TestConcurrentLogHistory(Tests);
 
 	PulseForgeEditor::EditorCommandHistory History;
 	PF_CHECK(Tests, History.Begin("Rename", "before"));
