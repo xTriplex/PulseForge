@@ -1,4 +1,5 @@
 #include "TestEditorSupport.h"
+#include "Editor/EditorSceneEditController.h"
 #include "nlohmann/json.hpp"
 #include "Editor/EditorEntityClipboard.h"
 #include "Editor/EditorHierarchyPanelPolicy.h"
@@ -552,6 +553,236 @@ namespace
 		History.Reset(nullptr);
 		PF_CHECK(Tests, !History.IsDirty());
 	}
+	void TestEditorInteractionPolicy(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		const EditorShortcutContext OrdinarySceneFocus{ .SceneAvailable = true };
+		PF_CHECK(Tests, CanRouteEditorShortcut(OrdinarySceneFocus));
+		PF_CHECK(Tests, CanRouteEditorShortcut({ .SceneAvailable = true, .GizmoInteractionActive = false }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .GizmoInteractionActive = true }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .TextInputActive = true }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .ImGuiItemActive = true }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .PopupOpen = true }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .MenuNavigationActive = true }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .WindowNavigationActive = true }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .RuntimeActive = true }));
+		PF_CHECK(Tests, !CanRouteEditorShortcut({ .SceneAvailable = true, .CameraNavigationActive = true }));
+
+		PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ true, true, false }, false) == ViewportGizmoPointerOutcome::Continue);
+		PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ true, false, true }, false) == ViewportGizmoPointerOutcome::Complete);
+		PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ true, false, false }, false) == ViewportGizmoPointerOutcome::Complete);
+		PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ true, true, true }, true) == ViewportGizmoPointerOutcome::Cancel);
+		PF_CHECK(Tests, GetViewportGizmoPointerOutcome({ false, false, true }, false) == ViewportGizmoPointerOutcome::Idle);
+		PF_CHECK(Tests, ShouldFinishSceneEditForInspector(true, 71, 0));
+		PF_CHECK(Tests, !ShouldFinishSceneEditForInspector(true, 71, 71));
+		PF_CHECK(Tests, !ShouldFinishSceneEditForInspector(true, NoInspectorHistoryItem, 0));
+		PF_CHECK(Tests, !ShouldFinishSceneEditForInspector(false, 71, 0));
+	}
+
+	void TestEditorSelection(TestRunner& Tests)
+	{
+		using PulseForge::UUID;
+		using PulseForgeEditor::EditorSelection;
+		const UUID First{ 0, 201 };
+		const UUID Second{ 0, 202 };
+		const UUID Third{ 0, 203 };
+		const UUID Fourth{ 0, 204 };
+		const std::array<UUID, 4> VisibleOrder{ First, Second, Third, Fourth };
+
+		EditorSelection Selection;
+		Selection.SelectSingle(Second);
+		PF_CHECK(Tests, Selection.GetEntities().size() == 1 && Selection.GetPrimary() == Second);
+		Selection.Toggle(Third);
+		PF_CHECK(Tests, Selection.GetEntities().size() == 2 && Selection.GetPrimary() == Third);
+		PF_CHECK(Tests, Selection.SelectRange(VisibleOrder, Fourth));
+		PF_CHECK(Tests, Selection.GetEntities().size() == 3 && Selection.Contains(Second) && Selection.Contains(Third) &&
+							Selection.Contains(Fourth) && Selection.GetPrimary() == Fourth);
+		PF_CHECK(Tests, Selection.SelectRange(VisibleOrder, First, true));
+		PF_CHECK(Tests, Selection.GetEntities().size() == 4 && Selection.GetPrimary() == First);
+		Selection.Remove(First);
+		PF_CHECK(Tests, Selection.GetEntities().size() == 3 && Selection.GetPrimary() == Fourth);
+		Selection.Toggle(Fourth);
+		PF_CHECK(Tests, !Selection.Contains(Fourth) && Selection.GetPrimary() == Third);
+		Selection.Set({ First, First, Third }, First);
+		PF_CHECK(Tests, Selection.GetEntities().size() == 2 && Selection.GetPrimary() == First);
+		Selection.Clear();
+		PF_CHECK(Tests, Selection.GetEntities().empty() && !Selection.GetPrimary() && !Selection.GetAnchor());
+	}
+
+	void TestEditorVisibility(TestRunner& Tests)
+	{
+		using PulseForge::UUID;
+		using PulseForgeEditor::EditorVisibility;
+		const UUID Parent{ 0, 301 };
+		const UUID Child{ 0, 302 };
+		const UUID Sibling{ 0, 303 };
+		const std::unordered_map<UUID, UUID, PulseForge::UUIDHash> Parents{ { Child, Parent } };
+		const auto ParentLookup = [&Parents](const UUID& Identifier) -> std::optional<UUID>
+		{
+			const auto Found = Parents.find(Identifier);
+			return Found == Parents.end() ? std::nullopt : std::optional<UUID>{ Found->second };
+		};
+
+		EditorVisibility Visibility;
+		Visibility.SetVisible(Child, false);
+		Visibility.SetVisible(Parent, false);
+		PF_CHECK(Tests, !Visibility.IsEffectivelyVisible(Child, ParentLookup));
+		Visibility.SetVisible(Parent, true);
+		PF_CHECK(Tests, !Visibility.IsEffectivelyVisible(Child, ParentLookup));
+		Visibility.SetVisible(Child, true);
+		PF_CHECK(Tests, Visibility.IsEffectivelyVisible(Child, ParentLookup));
+
+		Visibility.SetVisible(Sibling, false);
+		const std::array<UUID, 2> Keep{ Parent, Child };
+		const std::array<UUID, 3> All{ Parent, Child, Sibling };
+		PF_CHECK(Tests, Visibility.Isolate(Keep, All));
+		PF_CHECK(Tests, Visibility.IsLocallyVisible(Parent) && Visibility.IsLocallyVisible(Child));
+		PF_CHECK(Tests, !Visibility.IsLocallyVisible(Sibling));
+		PF_CHECK(Tests, Visibility.RestoreIsolation());
+		PF_CHECK(Tests, !Visibility.IsLocallyVisible(Sibling));
+		Visibility.ShowAll();
+		PF_CHECK(Tests, Visibility.IsLocallyVisible(Sibling) && !Visibility.GetIsolationBaseline());
+
+		PF_CHECK(Tests, Visibility.IsEffectivelyVisible(Parent, [Parent, Child](const UUID& Identifier)
+							{ return Identifier == Parent ? std::optional<UUID>{ Child } : std::optional<UUID>{ Parent }; }) == false);
+	}
+
+	void TestEditorHierarchyRowLayout(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		constexpr float FramePaddingX = 7.0f;
+		constexpr float TextStartX = 50.0f;
+		constexpr float TreeTrailingHitWidth = FramePaddingX;
+
+		const auto WideRow = ComputeEditorHierarchyRowLayout(8.0f, 240.0f, TextStartX, 100.0f, 108.0f, FramePaddingX);
+		PF_CHECK(Tests, WideRow.EyeStartX == 210.0f);
+		PF_CHECK(Tests, WideRow.EyeStartX >= 100.0f + EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, WideRow.EyeStartX + EditorHierarchyEyeButtonWidth <= 240.0f);
+		PF_CHECK(Tests, WideRow.MaximumNameWidth > 80.0f);
+		PF_CHECK(Tests, WideRow.SelectionGutterStartX == 108.0f && WideRow.SelectionGutterWidth > 0.0f);
+		PF_CHECK(Tests, WideRow.SelectionGutterStartX >= 100.0f);
+		PF_CHECK(Tests, WideRow.SelectionGutterStartX + WideRow.SelectionGutterWidth <= WideRow.EyeStartX - EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, 8.0f + WideRow.SelectionBackgroundWidth == WideRow.EyeStartX - EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, WideRow.SelectionGutterStartX + WideRow.SelectionGutterWidth == 8.0f + WideRow.SelectionBackgroundWidth);
+		const float LongNameTreeItemRightX = TextStartX + WideRow.MaximumNameWidth + TreeTrailingHitWidth;
+		PF_CHECK(Tests, LongNameTreeItemRightX <= WideRow.EyeStartX - EditorHierarchyHitRegionGap - EditorHierarchyHitRegionSafetyInset);
+
+		const auto NarrowRow = ComputeEditorHierarchyRowLayout(8.0f, 150.0f, 50.0f, 94.0f, 102.0f, FramePaddingX);
+		PF_CHECK(Tests, NarrowRow.EyeStartX >= 94.0f + EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, NarrowRow.EyeStartX + EditorHierarchyEyeButtonWidth <= 150.0f);
+		PF_CHECK(Tests, NarrowRow.MaximumNameWidth >= 0.0f && NarrowRow.SelectionGutterWidth >= 0.0f);
+		PF_CHECK(Tests, NarrowRow.SelectionGutterStartX >= 94.0f);
+		PF_CHECK(
+			Tests, NarrowRow.SelectionGutterStartX + NarrowRow.SelectionGutterWidth <= NarrowRow.EyeStartX - EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, 8.0f + NarrowRow.SelectionBackgroundWidth == NarrowRow.EyeStartX - EditorHierarchyHitRegionGap);
+
+		const auto DeepRow = ComputeEditorHierarchyRowLayout(98.0f, 240.0f, 140.0f, 175.0f, 183.0f, FramePaddingX);
+		PF_CHECK(Tests, DeepRow.EyeStartX == 210.0f);
+		PF_CHECK(Tests, DeepRow.SelectionGutterStartX >= 175.0f);
+		PF_CHECK(Tests, DeepRow.SelectionGutterStartX + DeepRow.SelectionGutterWidth <= DeepRow.EyeStartX - EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, 98.0f + DeepRow.SelectionBackgroundWidth == DeepRow.EyeStartX - EditorHierarchyHitRegionGap);
+
+		const auto ConstrainedDeepRow = ComputeEditorHierarchyRowLayout(170.0f, 260.0f, 215.0f, 230.0f, 238.0f, FramePaddingX);
+		PF_CHECK(Tests, ConstrainedDeepRow.EyeStartX >= 234.0f);
+		PF_CHECK(Tests, ConstrainedDeepRow.EyeStartX + EditorHierarchyEyeButtonWidth <= 260.0f);
+		PF_CHECK(Tests, ConstrainedDeepRow.SelectionGutterWidth == 0.0f);
+		PF_CHECK(Tests, ConstrainedDeepRow.EyeStartX >= 230.0f + EditorHierarchyHitRegionGap);
+		PF_CHECK(Tests, 170.0f + ConstrainedDeepRow.SelectionBackgroundWidth == ConstrainedDeepRow.EyeStartX - EditorHierarchyHitRegionGap);
+	}
+
+	void TestEditorSceneEditController(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+
+		Scene SceneValue;
+		EditorSceneWorkspaceState Workspace;
+		EditorSceneEditController Controller;
+		auto Created = SceneValue.CreateEntity("Controller target");
+		PF_CHECK(Tests, Created.has_value());
+		if (!Created) return;
+		const UUID Identifier = Created->GetUUID();
+		Workspace.Selection().SelectSingle(Identifier);
+		TransformComponent Initial;
+		Initial.Translation = { 1.0f, 2.0f, 3.0f };
+		PF_CHECK(Tests, Created->SetTransform(Initial));
+		Controller.Reset(&SceneValue);
+
+		size_t RestoreCount = 0;
+		const EditorSceneEditController::RestoreCallback Restore = [&](std::string_view State) -> std::expected<void, std::string>
+		{
+			++RestoreCount;
+			return Controller.Restore(State, SceneValue, Workspace);
+		};
+		const auto SetTransform = [&](const TransformComponent& Value) -> std::expected<void, SceneError>
+		{
+			const auto Target = SceneValue.FindEntity(Identifier);
+			if (!Target) return std::unexpected(SceneError{ SceneErrorCode::InvalidEntity, "Edit target no longer exists" });
+			return Target->SetTransform(Value);
+		};
+		const auto ReadTranslation = [&]() -> std::optional<glm::vec3>
+		{
+			const auto Target = SceneValue.FindEntity(Identifier);
+			if (!Target) return std::nullopt;
+			const auto Value = Target->GetTransform();
+			return Value ? std::optional<glm::vec3>{ Value->Translation } : std::nullopt;
+		};
+
+		TransformComponent FirstEdit = Initial;
+		FirstEdit.Translation.x = 4.0f;
+		const auto First = Controller.Run(
+			&SceneValue, Workspace, false, 0, [] { return 0u; }, "Move target", [&] { return SetTransform(FirstEdit); }, Restore);
+		PF_CHECK(Tests, First && !Controller.IsActive() && Controller.CanUndo() && Controller.IsDirty());
+		PF_CHECK(Tests, ReadTranslation() == std::optional<glm::vec3>{ FirstEdit.Translation });
+		PF_CHECK(Tests, Workspace.Selection().GetPrimary() == std::optional<UUID>{ Identifier });
+
+		const auto Undone = Controller.Undo(&SceneValue, Workspace, false, Restore);
+		PF_CHECK(Tests, Undone && *Undone && !Controller.IsDirty());
+		PF_CHECK(Tests, ReadTranslation() == std::optional<glm::vec3>{ Initial.Translation });
+		const auto Redone = Controller.Redo(&SceneValue, Workspace, false, Restore);
+		PF_CHECK(Tests, Redone && *Redone && Controller.IsDirty());
+		PF_CHECK(Tests, ReadTranslation() == std::optional<glm::vec3>{ FirstEdit.Translation });
+		Controller.MarkSaved(&SceneValue);
+		PF_CHECK(Tests, !Controller.IsDirty());
+
+		uint32_t ActiveItem = 41;
+		TransformComponent GroupedEdit = FirstEdit;
+		GroupedEdit.Translation.y = 8.0f;
+		const auto GroupStart = Controller.Run(
+			&SceneValue, Workspace, false, ActiveItem, [&] { return ActiveItem; }, "Adjust target",
+			[&] { return SetTransform(GroupedEdit); }, Restore);
+		PF_CHECK(Tests, GroupStart && Controller.IsActive() && !Controller.CanUndo());
+		ActiveItem = 42;
+		TransformComponent NextEdit = GroupedEdit;
+		NextEdit.Translation.z = 9.0f;
+		const auto GroupBoundary = Controller.Run(
+			&SceneValue, Workspace, false, ActiveItem, [] { return 0u; }, "Adjust target", [&] { return SetTransform(NextEdit); }, Restore);
+		PF_CHECK(Tests, GroupBoundary && !Controller.IsActive() && Controller.CanUndo());
+		PF_CHECK(Tests, ReadTranslation() == std::optional<glm::vec3>{ NextEdit.Translation });
+		const auto UndoSecond = Controller.Undo(&SceneValue, Workspace, false, Restore);
+		PF_CHECK(Tests, UndoSecond && *UndoSecond && ReadTranslation() == std::optional<glm::vec3>{ GroupedEdit.Translation });
+		const auto UndoFirst = Controller.Undo(&SceneValue, Workspace, false, Restore);
+		PF_CHECK(Tests, UndoFirst && *UndoFirst && ReadTranslation() == std::optional<glm::vec3>{ FirstEdit.Translation });
+
+		Controller.Reset(&SceneValue);
+		TransformComponent FailedEdit = FirstEdit;
+		FailedEdit.Translation = { 13.0f, 14.0f, 15.0f };
+		const auto Failed = Controller.Run(
+			&SceneValue, Workspace, false, 0, [] { return 0u; }, "Failing edit",
+			[&]() -> std::expected<void, SceneError>
+			{
+				if (auto Updated = SetTransform(FailedEdit); !Updated) return Updated;
+				return std::unexpected(SceneError{ SceneErrorCode::InvalidEntity, "Injected edit failure" });
+			},
+			Restore);
+		PF_CHECK(Tests, !Failed && !Controller.IsActive() && !Controller.IsDirty() && !Controller.CanUndo());
+		PF_CHECK(Tests, ReadTranslation() == std::optional<glm::vec3>{ FirstEdit.Translation });
+		PF_CHECK(Tests, RestoreCount >= 4);
+		const auto RuntimeEdit = Controller.Run(
+			&SceneValue, Workspace, true, 0, [] { return 0u; }, "Runtime edit", [&] { return SetTransform(Initial); }, Restore);
+		PF_CHECK(Tests, !RuntimeEdit && !Controller.IsActive());
+	}
+
 } // namespace
 
 void RunEditorSceneStateTests(TestRunner& Tests)
@@ -564,4 +795,9 @@ void RunEditorSceneStateTests(TestRunner& Tests)
 	TestEditorHierarchySearchPolicy(Tests);
 	TestEditorSceneWorkspaceState(Tests);
 	TestEditorSceneHistoryState(Tests);
+	TestEditorInteractionPolicy(Tests);
+	TestEditorSelection(Tests);
+	TestEditorVisibility(Tests);
+	TestEditorHierarchyRowLayout(Tests);
+	TestEditorSceneEditController(Tests);
 }
