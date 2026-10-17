@@ -1,4 +1,5 @@
 #include "Assets/AssetMetadata.h"
+#include "Assets/AssetTypes.h"
 
 #include <nlohmann/json.hpp>
 
@@ -229,7 +230,7 @@ namespace PulseForge
 	std::expected<AssetMetadata, AssetMetadataError> AssetMetadataSerializer::CreateForNewAsset(
 		const std::filesystem::path& SourceAssetPath)
 	{
-		if (SourceAssetPath.empty() || SourceAssetPath.filename().empty() || SourceAssetPath.extension() == ".meta")
+		if (SourceAssetPath.empty() || SourceAssetPath.filename().empty() || IsMetadataSidecarPath(SourceAssetPath))
 		{
 			return std::unexpected(MakeMetadataError(
 				AssetMetadataErrorCode::InvalidPath,
@@ -304,8 +305,8 @@ namespace PulseForge
 		const std::filesystem::path& SourceAssetPath,
 		const std::filesystem::path& DuplicateAssetPath)
 	{
-		if (SourceAssetPath.empty() || SourceAssetPath.extension() == ".meta" ||
-			DuplicateAssetPath.empty() || DuplicateAssetPath.filename().empty() || DuplicateAssetPath.extension() == ".meta")
+		if (SourceAssetPath.empty() || IsMetadataSidecarPath(SourceAssetPath) || DuplicateAssetPath.empty() ||
+			DuplicateAssetPath.filename().empty() || IsMetadataSidecarPath(DuplicateAssetPath))
 		{
 			return std::unexpected(MakeMetadataError(
 				AssetMetadataErrorCode::InvalidPath,

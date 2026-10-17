@@ -1,5 +1,7 @@
 #include "TestAssetSupport.h"
 
+#include "Assets/AssetTypes.h"
+
 namespace
 {
 	void TestAssetMetadataAndRegistry(TestRunner& Tests)
@@ -225,6 +227,29 @@ namespace
 		PF_CHECK(Tests, WriteFile(SecondSidecar, *OriginalSecondSidecar));
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
 
+		const std::filesystem::path UppercaseSource = ShaderDirectory / "case-policy.MATERIAL";
+		const std::filesystem::path UppercaseSidecar = UppercaseSource.string() + ".META";
+		const auto UppercaseID = UUID::Generate();
+		PF_CHECK(Tests, UppercaseID.has_value());
+		if (!UppercaseID) return;
+		const std::string UppercaseMetadata =
+			"{\"format\":\"PulseForgeAssetMeta\",\"version\":1,\"uuid\":\"" + UppercaseID->ToString() + "\",\"importSettings\":{}}";
+		PF_CHECK(Tests, WriteFile(UppercaseSource, "case-preserved source"));
+		PF_CHECK(Tests, WriteFile(UppercaseSidecar, UppercaseMetadata));
+		const auto UppercaseBuild = Registry.Rebuild(ProjectRoot);
+		PF_CHECK(Tests, UppercaseBuild.has_value());
+		const auto UppercaseRecord = Registry.Find(*UppercaseID);
+		PF_CHECK(Tests, UppercaseRecord && UppercaseRecord->ProjectRelativePath == UppercaseSource.lexically_relative(ProjectRoot));
+		std::ifstream PreservedUppercaseSidecar(UppercaseSidecar, std::ios::binary);
+		const std::string PreservedUppercaseMetadata(
+			(std::istreambuf_iterator<char>(PreservedUppercaseSidecar)), std::istreambuf_iterator<char>());
+		PF_CHECK(Tests, PreservedUppercaseMetadata == UppercaseMetadata);
+
+		const std::filesystem::path ReservedUppercaseName = ShaderDirectory / "cannot-create.META";
+		const auto ReservedUppercaseMetadata = AssetMetadataSerializer::CreateForNewAsset(ReservedUppercaseName);
+		PF_CHECK(Tests, !ReservedUppercaseMetadata && ReservedUppercaseMetadata.error().Code == AssetMetadataErrorCode::InvalidPath);
+		PF_CHECK(Tests, !std::filesystem::exists(AssetMetadataSerializer::GetSidecarPath(ReservedUppercaseName)));
+
 		std::filesystem::remove(DuplicateSource, FileError);
 		PF_CHECK(Tests, !FileError);
 		const auto OrphanedSidecarBuild = Registry.Rebuild(ProjectRoot);
@@ -241,8 +266,7 @@ namespace
 		PF_CHECK(Tests, NestedSidecarID.has_value());
 		if (!ReservedSuffixMetadata || !NestedSidecarID) return;
 
-		const std::filesystem::path NestedSidecarPath =
-			AssetMetadataSerializer::GetSidecarPath(AssetMetadataSerializer::GetSidecarPath(ReservedSuffixSource));
+		const std::filesystem::path NestedSidecarPath = AssetMetadataSerializer::GetSidecarPath(ReservedSuffixSource).string() + ".META";
 		const std::string NestedSidecar =
 			"{\"format\":\"PulseForgeAssetMeta\",\"version\":1,\"uuid\":\"" + NestedSidecarID->ToString() + "\",\"importSettings\":{}}";
 		PF_CHECK(Tests, WriteFile(NestedSidecarPath, NestedSidecar));
@@ -251,9 +275,34 @@ namespace
 		PF_CHECK(
 			Tests, !ReservedSuffixBuild.has_value() && HasIssue(ReservedSuffixBuild.error(), AssetRegistryIssueCode::UnsupportedEntry));
 	}
+
+	void TestAssetFileTypeClassification(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		struct Case
+		{
+			std::string_view Path;
+			AssetFileType Type;
+		};
+		static constexpr Case Cases[] = { { "Assets/Scenes/Opening.SCENE", AssetFileType::Scene },
+			{ "Assets/Prefabs/Crate.PREFAB", AssetFileType::Prefab }, { "Assets/Materials/Stone.MATERIAL", AssetFileType::Material },
+			{ "Assets/Scripts/Camera.LUA", AssetFileType::Script }, { "Assets/Meshes/Scene.GLTF", AssetFileType::Mesh },
+			{ "Assets/Meshes/Scene.GLB", AssetFileType::Mesh }, { "Assets/Textures/Color.PNG", AssetFileType::Image },
+			{ "Assets/Textures/Color.PPM", AssetFileType::PreviewImage }, { "Assets/Audio/Impact.WAV", AssetFileType::Audio },
+			{ "Assets/Environments/Studio.HDR", AssetFileType::Environment },
+			{ "Assets/Shaders/Lighting.HLSL", AssetFileType::ShaderSource }, { "Projects/Example.PFPROJ", AssetFileType::Project } };
+		for (const Case& TestCase : Cases)
+			PF_CHECK(Tests, HasAssetTypeExtension(std::filesystem::u8path(TestCase.Path), TestCase.Type));
+
+		const std::filesystem::path Sidecar = "Assets/Materials/Stone.META";
+		PF_CHECK(Tests, IsMetadataSidecarPath(Sidecar));
+		PF_CHECK(Tests, IsReservedMetadataComponent(std::filesystem::path(".META")));
+		PF_CHECK(Tests, !HasAssetTypeExtension(Sidecar, AssetFileType::Material));
+	}
 } // namespace
 
 void RunAssetRegistryTests(TestRunner& Tests)
 {
 	TestAssetMetadataAndRegistry(Tests);
+	TestAssetFileTypeClassification(Tests);
 }

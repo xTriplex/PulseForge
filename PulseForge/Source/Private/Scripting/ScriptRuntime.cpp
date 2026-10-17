@@ -3,6 +3,7 @@
 #include "Scripting/ScriptEnvironment.h"
 
 #include "Assets/AssetPathResolver.h"
+#include "Assets/AssetTypes.h"
 #include "Assets/Project.h"
 #include "Core/Log.h"
 #include "Scene/Components/ScriptComponent.h"
@@ -151,7 +152,7 @@ namespace PulseForge
 				return std::unexpected(MakeDiagnostic(EntityIdentifier, ScriptAsset, ScriptDiagnosticCode::AssetNotFound,
 					"Script UUID is not present in the project asset registry"));
 			}
-			if (Record->ProjectRelativePath.extension() != ".lua")
+			if (!HasAssetTypeExtension(Record->ProjectRelativePath, AssetFileType::Script))
 			{
 				return std::unexpected(MakeDiagnostic(
 					EntityIdentifier, ScriptAsset, ScriptDiagnosticCode::WrongAssetType, "Script asset must reference a .lua source file"));

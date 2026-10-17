@@ -1,6 +1,7 @@
 #include "Editor/EditorMaterialDraftController.h"
 
 #include "Assets/MaterialAssetService.h"
+#include "Assets/AssetTypes.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
 
 #include <algorithm>
@@ -18,13 +19,6 @@ namespace PulseForgeEditor
 			return std::string(reinterpret_cast<const char*>(Encoded.data()), Encoded.size());
 		}
 
-		std::string NormalizedExtension(const std::filesystem::path& Path)
-		{
-			std::string Extension = Path.extension().string();
-			std::transform(Extension.begin(), Extension.end(), Extension.begin(),
-				[](unsigned char Character) { return static_cast<char>(std::tolower(Character)); });
-			return Extension;
-		}
 	} // namespace
 
 	std::string EditorMaterialDraftController::MakeKey(const PulseForge::Project& Project, const PulseForge::AssetID& Asset)
@@ -51,7 +45,7 @@ namespace PulseForgeEditor
 		if (const std::string* Error = m_Drafts.FindError(Key)) return std::unexpected(*Error);
 
 		const auto Record = Project.GetAssetRegistry().Find(Asset);
-		if (!Record || NormalizedExtension(Record->ProjectRelativePath) != ".material")
+		if (!Record || !PulseForge::HasAssetTypeExtension(Record->ProjectRelativePath, PulseForge::AssetFileType::Material))
 		{
 			const std::string Error = "The selected material is no longer registered.";
 			m_Drafts.SetError(Key, Error);
@@ -130,7 +124,7 @@ namespace PulseForgeEditor
 		PulseForge::Project& Project, const PulseForge::AssetID& Asset, EditorDocumentManager& Documents)
 	{
 		const auto Record = Project.GetAssetRegistry().Find(Asset);
-		if (!Record || NormalizedExtension(Record->ProjectRelativePath) != ".material")
+		if (!Record || !PulseForge::HasAssetTypeExtension(Record->ProjectRelativePath, PulseForge::AssetFileType::Material))
 			return std::unexpected("The material asset is no longer registered.");
 
 		const std::string Key = MakeKey(Project, Asset);

@@ -1,5 +1,6 @@
 #include "Assets/ImageAssetImporter.h"
 #include "Assets/AssetPathResolver.h"
+#include "Assets/AssetTypes.h"
 
 #include <stb_image.h>
 #include <stb_image_resize2.h>
@@ -36,16 +37,6 @@ namespace PulseForge
 				FingerprintB ^= FingerprintB >> 29;
 			}
 			return { FingerprintA, FingerprintB };
-		}
-
-		bool HasHdrExtension(const std::filesystem::path& Path)
-		{
-			std::string Extension = Path.extension().string();
-			std::ranges::transform(Extension, Extension.begin(), [](unsigned char Character)
-			{
-				return static_cast<char>(std::tolower(Character));
-			});
-			return Extension == ".hdr";
 		}
 
 		ImageAssetImportError MakeError(
@@ -114,7 +105,7 @@ namespace PulseForge
 					{},
 					"Image asset UUID " + Asset.ToString() + " is not present in the project asset registry"));
 			}
-			if (HasHdrExtension(Record->ProjectRelativePath))
+			if (HasAssetTypeExtension(Record->ProjectRelativePath, AssetFileType::Environment))
 			{
 				return std::unexpected(MakeError(
 					ImageAssetImportErrorCode::InvalidImage,
@@ -313,7 +304,7 @@ namespace PulseForge
 					{},
 					"HDR image asset UUID " + Asset.ToString() + " is not present in the project asset registry"));
 			}
-			if (!HasHdrExtension(Record->ProjectRelativePath))
+			if (!HasAssetTypeExtension(Record->ProjectRelativePath, AssetFileType::Environment))
 			{
 				return std::unexpected(MakeError(
 					ImageAssetImportErrorCode::InvalidImage,

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Assets/AssetTypes.h"
+
 #include <algorithm>
 #include <cctype>
 #include <expected>
@@ -80,18 +82,8 @@ namespace PulseForgeEditor
 		if (FinalFilename.extension().empty())
 			FinalFilename += SourcePath.extension();
 
-		const auto Lower = [](std::string Value)
-		{
-			std::transform(Value.begin(), Value.end(), Value.begin(), [](unsigned char Character)
-			{
-				return static_cast<char>(std::tolower(Character));
-			});
-			return Value;
-		};
-		const std::string Extension = Lower(FinalFilename.extension().string());
-		if (Extension == ".meta")
-			return std::unexpected(AssetDestinationNameError::ReservedSidecarExtension);
-		if (Extension != Lower(SourcePath.extension().string()))
+		if (PulseForge::IsMetadataSidecarPath(FinalFilename)) return std::unexpected(AssetDestinationNameError::ReservedSidecarExtension);
+		if (!PulseForge::AssetExtensionsEqual(FinalFilename.extension().string(), SourcePath.extension().string()))
 			return std::unexpected(AssetDestinationNameError::ExtensionMismatch);
 
 		return FinalFilename;

@@ -170,12 +170,12 @@ namespace
 
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
-		const auto Created = MaterialAssetService::Create(Registry, ProjectRoot, "Assets/Materials/validation.material", Description);
+		const auto Created = MaterialAssetService::Create(Registry, ProjectRoot, "Assets/Materials/validation.MATERIAL", Description);
 		PF_CHECK(Tests, Created.has_value());
 		PF_CHECK(Tests, Created && Created->ID != TextureMetadata->ID);
 		if (!Created) return;
 
-		const std::filesystem::path MaterialPath = ProjectRoot / "Assets" / "Materials" / "validation.material";
+		const std::filesystem::path MaterialPath = ProjectRoot / "Assets" / "Materials" / "validation.MATERIAL";
 		const auto Metadata = AssetMetadataSerializer::LoadFromFile(AssetMetadataSerializer::GetSidecarPath(MaterialPath));
 		PF_CHECK(Tests, Metadata && Metadata->ID == Created->ID);
 		PF_CHECK(Tests, Registry.Find(Created->ID).has_value());
@@ -431,7 +431,7 @@ namespace
 		const std::filesystem::path ScenesDirectory = Root / "Assets" / "Scenes";
 		std::filesystem::create_directories(ScenesDirectory, FileError);
 		PF_CHECK(Tests, !FileError);
-		const std::filesystem::path ScenePath = ScenesDirectory / "start.scene";
+		const std::filesystem::path ScenePath = ScenesDirectory / "start.SCENE";
 		{
 			std::ofstream Output(ScenePath, std::ios::binary | std::ios::trunc);
 			Output << "{}";

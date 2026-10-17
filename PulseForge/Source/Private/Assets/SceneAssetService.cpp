@@ -3,6 +3,7 @@
 
 #include "Assets/AssetOperations.h"
 #include "Assets/AssetPathResolver.h"
+#include "Assets/AssetTypes.h"
 #include "Scene/SceneSerializer.h"
 
 #include <span>
@@ -25,7 +26,7 @@ namespace PulseForge
 					"Scene asset UUID " + SceneAsset.ToString() + " is not present in the project asset registry" });
 			}
 
-			if (Record->ProjectRelativePath.extension() != ".scene")
+			if (!HasAssetTypeExtension(Record->ProjectRelativePath, AssetFileType::Scene))
 			{
 				return std::unexpected(SceneAssetError{
 					SceneAssetErrorCode::UnsupportedAssetType,
@@ -51,7 +52,7 @@ namespace PulseForge
 		const std::filesystem::path& ProjectRelativePath,
 		const Scene& Source)
 	{
-		if (ProjectRelativePath.extension() != ".scene")
+		if (!HasAssetTypeExtension(ProjectRelativePath, AssetFileType::Scene))
 		{
 			return std::unexpected(SceneAssetError{
 				SceneAssetErrorCode::UnsupportedAssetType,

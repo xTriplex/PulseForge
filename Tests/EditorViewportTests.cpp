@@ -1,4 +1,6 @@
 #include "TestEditorSupport.h"
+
+#include "Assets/AssetTypes.h"
 #include "Editor/EditorViewportCamera.h"
 #include "Editor/EditorViewportPolicy.h"
 #include "Editor/EditorViewportToolState.h"
@@ -22,8 +24,8 @@ namespace
 		const auto FindGltfAsset = [](const Project& OpenProject) -> std::optional<AssetRecord>
 		{
 			const auto Assets = OpenProject.GetAssetRegistry().GetAssets();
-			const auto Found = std::find_if(
-				Assets.begin(), Assets.end(), [](const AssetRecord& Asset) { return Asset.ProjectRelativePath.extension() == ".gltf"; });
+			const auto Found = std::find_if(Assets.begin(), Assets.end(),
+				[](const AssetRecord& Asset) { return HasAssetTypeExtension(Asset.ProjectRelativePath, AssetFileType::Mesh); });
 			return Found == Assets.end() ? std::nullopt : std::optional<AssetRecord>(*Found);
 		};
 		const auto FirstMesh = FindGltfAsset(*FirstProject);
@@ -40,7 +42,7 @@ namespace
 
 		const auto FirstProjectAssets = FirstProject->GetAssetRegistry().GetAssets();
 		const auto NonMeshAsset = std::find_if(FirstProjectAssets.begin(), FirstProjectAssets.end(),
-			[](const AssetRecord& Asset) { return Asset.ProjectRelativePath.extension() == ".material"; });
+			[](const AssetRecord& Asset) { return HasAssetTypeExtension(Asset.ProjectRelativePath, AssetFileType::Material); });
 		PF_CHECK(Tests, NonMeshAsset != FirstProjectAssets.end());
 		if (NonMeshAsset != FirstProjectAssets.end())
 		{
@@ -111,8 +113,8 @@ namespace
 		PF_CHECK(Tests, FixtureProject.has_value());
 		if (!FixtureProject) return;
 		const auto Assets = FixtureProject->GetAssetRegistry().GetAssets();
-		const auto Mesh = std::find_if(Assets.begin(), Assets.end(), [](const AssetRecord& Asset)
-			{ return Asset.ProjectRelativePath.filename() == "PbrTestCube.gltf"; });
+		const auto Mesh = std::find_if(Assets.begin(), Assets.end(),
+			[](const AssetRecord& Asset) { return Asset.ProjectRelativePath.filename() == "PbrTestCube.gltf"; });
 		PF_CHECK(Tests, Mesh != Assets.end());
 		if (Mesh == Assets.end()) return;
 
@@ -121,8 +123,8 @@ namespace
 		std::filesystem::copy_file(MeshPath, OriginalMeshBackup, Error);
 		PF_CHECK(Tests, !Error);
 		if (Error) return;
-		const std::filesystem::path AlternateMesh = RepositoryRoot / "Samples" / "VisualValidation" / "PointLightShadows" / "Assets" /
-			"Models" / "ShadowDemoCube.gltf";
+		const std::filesystem::path AlternateMesh =
+			RepositoryRoot / "Samples" / "VisualValidation" / "PointLightShadows" / "Assets" / "Models" / "ShadowDemoCube.gltf";
 
 		EditorMeshPickingCache Cache;
 		const auto OriginalGeometry = Cache.Get(*FixtureProject, Mesh->ID);

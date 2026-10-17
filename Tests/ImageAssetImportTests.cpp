@@ -61,7 +61,7 @@ namespace
 		Bitmap.insert(Bitmap.end(), { 0, 0, 255, 0, 255, 0, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0 });
 		PF_CHECK(Tests, Bitmap.size() == 70);
 
-		const std::filesystem::path SourcePath = TextureDirectory / "checker.bmp";
+		const std::filesystem::path SourcePath = TextureDirectory / "checker.BMP";
 		{
 			std::ofstream Output(SourcePath, std::ios::binary | std::ios::trunc);
 			Output.write(reinterpret_cast<const char*>(Bitmap.data()), static_cast<std::streamsize>(Bitmap.size()));
@@ -177,7 +177,7 @@ namespace
 			PF_CHECK(Tests, !InvalidImage && InvalidImage.error().Code == ImageAssetImportErrorCode::InvalidImage);
 		}
 
-		const std::filesystem::path HdrPath = TextureDirectory / "tiny.hdr";
+		const std::filesystem::path HdrPath = TextureDirectory / "tiny.HDR";
 		{
 			constexpr std::string_view HdrHeader = "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 2\n";
 			std::ofstream Output(HdrPath, std::ios::binary | std::ios::trunc);

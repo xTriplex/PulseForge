@@ -621,13 +621,13 @@ namespace
 
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
-		const auto CreatedScene = SceneAssetService::Create(Registry, ProjectRoot, "Assets/Scenes/generated.scene", Source);
+		const auto CreatedScene = SceneAssetService::Create(Registry, ProjectRoot, "Assets/Scenes/generated.SCENE", Source);
 		PF_CHECK(Tests, CreatedScene.has_value());
 		PF_CHECK(Tests, CreatedScene && !CreatedScene->ID.IsNil() && CreatedScene->ID != SceneID &&
-							CreatedScene->ProjectRelativePath == "Assets/Scenes/generated.scene");
+							CreatedScene->ProjectRelativePath == "Assets/Scenes/generated.SCENE");
 		if (CreatedScene)
 		{
-			const auto CreatedMetadata = AssetMetadataSerializer::LoadFromFile(ProjectRoot / "Assets/Scenes/generated.scene.meta");
+			const auto CreatedMetadata = AssetMetadataSerializer::LoadFromFile(ProjectRoot / "Assets/Scenes/generated.SCENE.meta");
 			PF_CHECK(Tests, CreatedMetadata && CreatedMetadata->ID == CreatedScene->ID);
 			PF_CHECK(Tests, Registry.Find(CreatedScene->ID).has_value());
 
@@ -636,7 +636,7 @@ namespace
 			PF_CHECK(Tests, GeneratedScene.GetEntityCount() == Source.GetEntityCount());
 			PF_CHECK(Tests, GeneratedScene.FindEntity(*MeshEntityID).has_value());
 
-			const auto DuplicateCreation = SceneAssetService::Create(Registry, ProjectRoot, "Assets/Scenes/generated.scene", Source);
+			const auto DuplicateCreation = SceneAssetService::Create(Registry, ProjectRoot, "Assets/Scenes/generated.SCENE", Source);
 			PF_CHECK(Tests, !DuplicateCreation && DuplicateCreation.error().Code == SceneAssetErrorCode::AssetOperationFailed);
 			PF_CHECK(Tests, Registry.Find(CreatedScene->ID).has_value());
 		}

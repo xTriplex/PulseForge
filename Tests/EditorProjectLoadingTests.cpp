@@ -1,5 +1,7 @@
 #include "TestEditorSupport.h"
 
+#include "Assets/AssetTypes.h"
+
 namespace
 {
 	void TestEditorCommandLineAndStartupProjectLoading(TestRunner& Tests)
@@ -316,7 +318,7 @@ namespace
 		for (std::filesystem::recursive_directory_iterator Iterator(AssetsRoot, FileError), End; !FileError && Iterator != End;
 			Iterator.increment(FileError))
 		{
-			if (!Iterator->is_regular_file(FileError) || FileError || Iterator->path().extension() == ".meta") continue;
+			if (!Iterator->is_regular_file(FileError) || FileError || IsMetadataSidecarPath(Iterator->path())) continue;
 
 			++ManagedSourceCount;
 			const std::filesystem::path RelativePath = Iterator->path().lexically_relative(ProjectFile.parent_path());
@@ -340,7 +342,7 @@ namespace
 		size_t LoadedDemoSceneCount = 0;
 		for (const AssetRecord& Asset : DemoProject->GetAssetRegistry().GetAssets())
 		{
-			if (Asset.ProjectRelativePath.extension() != ".scene") continue;
+			if (!HasAssetTypeExtension(Asset.ProjectRelativePath, AssetFileType::Scene)) continue;
 
 			Scene LoadedDemoScene;
 			PF_CHECK(Tests, SceneAssetService::Load(Asset.ID, DemoProject->GetRootPath(), DemoProject->GetAssetRegistry(), LoadedDemoScene)
@@ -375,7 +377,7 @@ namespace
 		const std::vector<AssetRecord> WorkflowAssets = EditorWorkflowProject->GetAssetRegistry().GetAssets();
 		size_t WorkflowMaterialCount = 0;
 		for (const AssetRecord& Asset : WorkflowAssets)
-			if (Asset.ProjectRelativePath.extension() == ".material")
+			if (HasAssetTypeExtension(Asset.ProjectRelativePath, AssetFileType::Material))
 			{
 				const auto Material =
 					MaterialAssetService::Load(Asset.ID, EditorWorkflowProject->GetRootPath(), EditorWorkflowProject->GetAssetRegistry());

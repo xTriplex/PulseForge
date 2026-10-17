@@ -23,6 +23,7 @@
 #include "Assets/MaterialAssetService.h"
 #include "Assets/PrefabAssetService.h"
 #include "Assets/Project.h"
+#include "Assets/AssetTypes.h"
 #include "Assets/SceneAssetService.h"
 #include "Scene/Components/CameraComponent.h"
 #include "Scene/Scene.h"
@@ -325,21 +326,9 @@ namespace
 		return { reinterpret_cast<const char*>(UTF8Path.data()), UTF8Path.size() };
 	}
 
-	std::string NormalizedExtension(const std::filesystem::path& Path)
-	{
-		std::string Extension = PathToUtf8(Path.extension());
-		std::transform(Extension.begin(), Extension.end(), Extension.begin(), [](unsigned char Character)
-		{
-			return Character >= 'A' && Character <= 'Z'
-				? static_cast<char>(Character - 'A' + 'a')
-				: static_cast<char>(Character);
-		});
-		return Extension;
-	}
-
 	bool HasReservedMetadataExtension(const std::filesystem::path& Path)
 	{
-		return NormalizedExtension(Path) == ".meta";
+		return PulseForge::IsMetadataSidecarPath(Path);
 	}
 
 	std::string FitEditorContextLabel(std::string_view Label, float AvailableWidth)
@@ -3299,7 +3288,7 @@ namespace
 			if (Workspace->MaterialDetailsAsset)
 			{
 				const auto Asset = m_Project->GetAssetRegistry().Find(*Workspace->MaterialDetailsAsset);
-				if (Asset && NormalizedExtension(Asset->ProjectRelativePath) == ".material")
+				if (Asset && PulseForge::HasAssetTypeExtension(Asset->ProjectRelativePath, PulseForge::AssetFileType::Material))
 				{
 					m_MaterialDetailsAsset = *Workspace->MaterialDetailsAsset;
 					(void)m_Layout.SetPanelVisible(PulseForgeEditor::EditorPanel::MaterialDetails, true);
@@ -3319,7 +3308,7 @@ namespace
 				PulseForgeEditor::GetMaterialDetailsMigrationCandidates(*Workspace))
 			{
 				const auto Asset = m_Project->GetAssetRegistry().Find(Candidate);
-				if (!Asset || NormalizedExtension(Asset->ProjectRelativePath) != ".material")
+				if (!Asset || !PulseForge::HasAssetTypeExtension(Asset->ProjectRelativePath, PulseForge::AssetFileType::Material))
 					continue;
 				if (FocusedActiveMaterial == Candidate || !m_MaterialDetailsAsset)
 					m_MaterialDetailsAsset = Candidate;
@@ -3905,7 +3894,7 @@ namespace
 				return;
 			}
 			const auto Asset = m_Project->GetAssetRegistry().Find(Identifier);
-			const bool DeletedMaterial = Asset && NormalizedExtension(Asset->ProjectRelativePath) == ".material";
+			const bool DeletedMaterial = Asset && PulseForge::HasAssetTypeExtension(Asset->ProjectRelativePath, PulseForge::AssetFileType::Material);
 			std::vector<PulseForgeEditor::EditorDocumentIdentity> DeletedDocuments;
 			for (const auto& [Identity, Session] : m_Documents.GetSessions())
 			{
