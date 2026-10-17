@@ -90,12 +90,6 @@ if(BUILD_TESTING)
 	endif()
 	add_test(NAME PulseForge.Assets COMMAND PulseForgeAssetTests)
 
-	add_custom_target(PulseForgeTests)
-	add_dependencies(PulseForgeTests PulseForgeCoreTests PulseForgeSceneTests PulseForgeAssetTests PulseForgeRendererTests)
-	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
-		add_dependencies(PulseForgeTests PulseForgePublicHeaderChecks)
-	endif()
-
 	add_executable(PulseForgeAssetImportTests
 		Tests/PulseForgeAssetImportTests.cpp
 		Tests/GltfMeshImportTests.cpp
@@ -135,6 +129,18 @@ if(BUILD_TESTING)
 		add_dependencies(PulseForgeAudioRuntimeTests PulseForgePublicHeaderChecks)
 	endif()
 	add_test(NAME PulseForge.AudioRuntime COMMAND PulseForgeAudioRuntimeTests)
+
+	add_executable(PulseForgeScriptingRuntimeTests
+		Tests/PulseForgeScriptingRuntimeTests.cpp
+		Tests/ScriptRuntimeTests.cpp
+	)
+	target_include_directories(PulseForgeScriptingRuntimeTests PRIVATE Tests PulseForge/Vendor/json/include)
+	target_compile_definitions(PulseForgeScriptingRuntimeTests PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeScriptingRuntimeTests PRIVATE PulseForgeRuntime PulseForgeAssetServices)
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeScriptingRuntimeTests PulseForgePublicHeaderChecks)
+	endif()
+	add_test(NAME PulseForge.ScriptingRuntime COMMAND PulseForgeScriptingRuntimeTests)
 
 	add_executable(PulseForgeEditorCoreTests
 		Tests/PulseForgeEditorCoreTests.cpp
@@ -176,7 +182,6 @@ if(BUILD_TESTING)
 			Tests/EditorMaterialProjectTests.cpp
 			Tests/EditorProjectLoadingTests.cpp
 			Tests/EditorAssetReferenceTests.cpp
-			Tests/ScriptRuntimeTests.cpp
 			Tests/ProjectRuntimeTests.cpp
 			Tests/EditorHistoryTests.cpp
 		)
@@ -219,4 +224,35 @@ if(BUILD_TESTING)
 	target_compile_definitions(PulseForgeBufferUpdateTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeBufferUpdateTests PRIVATE PulseForgeRenderer)
 	add_test(NAME PulseForge.BufferUpdates COMMAND PulseForgeBufferUpdateTests)
+
+	set(PULSEFORGE_TEST_EXECUTABLE_TARGETS
+		PulseForgeRendererTests
+		PulseForgeRenderMathTests
+		PulseForgeGpuValidationAnalysisTests
+		PulseForgeCoreTests
+		PulseForgeSceneTests
+		PulseForgeAssetTests
+		PulseForgeAssetImportTests
+		PulseForgeAssetImporterConsumer
+		PulseForgeSceneRendererConsumer
+		PulseForgeAudioRuntimeTests
+		PulseForgeScriptingRuntimeTests
+		PulseForgeEditorCoreTests
+		PulseForgeBufferUpdateTests
+	)
+	if(PULSEFORGE_BUILD_EDITOR)
+		list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS
+			PulseForgeEditorTests
+			PulseForgeEditorWorkspacePresentationTests
+		)
+	endif()
+	if(TARGET PulseForgeGpuValidation)
+		list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS PulseForgeGpuValidation)
+	endif()
+
+	add_custom_target(PulseForgeTests)
+	add_dependencies(PulseForgeTests ${PULSEFORGE_TEST_EXECUTABLE_TARGETS})
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeTests PulseForgePublicHeaderChecks)
+	endif()
 endif()

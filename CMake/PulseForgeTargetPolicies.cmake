@@ -2,6 +2,18 @@ if(BUILD_TESTING)
 	if(NOT TARGET PulseForgeEditorCoreTests)
 		message(FATAL_ERROR "BUILD_TESTING requires the independent PulseForgeEditorCoreTests target")
 	endif()
+	if(NOT TARGET PulseForgeTests)
+		message(FATAL_ERROR "BUILD_TESTING requires the PulseForgeTests aggregate target")
+	endif()
+	get_target_property(PULSEFORGE_TEST_AGGREGATE_DEPENDENCIES PulseForgeTests MANUALLY_ADDED_DEPENDENCIES)
+	foreach(TestTarget IN LISTS PULSEFORGE_TEST_EXECUTABLE_TARGETS)
+		if(NOT TARGET ${TestTarget})
+			message(FATAL_ERROR "PulseForgeTests names an unavailable test executable: ${TestTarget}")
+		endif()
+		if(NOT TestTarget IN_LIST PULSEFORGE_TEST_AGGREGATE_DEPENDENCIES)
+			message(FATAL_ERROR "PulseForgeTests does not depend on registered test executable ${TestTarget}")
+		endif()
+	endforeach()
 	if(PULSEFORGE_BUILD_EDITOR)
 		if(NOT TARGET PulseForgeEditorUI OR NOT TARGET PulseForgeEditorTests)
 			message(FATAL_ERROR "Editor-enabled testing requires PulseForgeEditorUI and PulseForgeEditorTests")
@@ -17,7 +29,7 @@ foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSe
 		PulseForgeApplication PulseForgeSceneRenderer
 		PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI PulseForgeRendererTests PulseForgeRenderMathTests PulseForgeGpuValidationAnalysis PulseForgeGpuValidationAnalysisTests
 		PulseForgeCoreTests PulseForgeSceneTests PulseForgeAssetTests PulseForgeAssetImportTests PulseForgeAssetImporterConsumer PulseForgeAudioRuntimeTests
-		PulseForgeSceneRendererConsumer PulseForgeEditorTests PulseForgeEditorWorkspacePresentationTests PulseForgeEditorCoreTests
+		PulseForgeSceneRendererConsumer PulseForgeScriptingRuntimeTests PulseForgeEditorTests PulseForgeEditorWorkspacePresentationTests PulseForgeEditorCoreTests
 		PulseForgeBufferUpdateTests PulseForgeGpuValidation)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE
