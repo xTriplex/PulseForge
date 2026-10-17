@@ -1877,7 +1877,11 @@ namespace
 					m_DocumentCloseRequest.SetError(CloseError);
 					return false;
 				}
-				(void)m_Documents.ClearProject(m_Project->GetDescription().ID);
+				if (auto Cleared = m_Documents.ClearProject(m_Project->GetDescription().ID); !Cleared)
+				{
+					SetError("Could not clear project document state: " + Cleared.error());
+					return false;
+				}
 				ClearMaterialDraftsForProject();
 			}
 			m_LevelDocumentIdentity.reset();

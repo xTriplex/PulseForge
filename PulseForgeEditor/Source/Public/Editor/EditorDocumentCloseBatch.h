@@ -40,6 +40,8 @@ namespace PulseForgeEditor
 			EditorDocumentCloseBatch Batch;
 			std::unordered_set<EditorDocumentIdentity, EditorDocumentIdentityHash> Unique;
 			Batch.m_Identities.reserve(Identities.size());
+			Batch.m_SessionGenerations.reserve(Identities.size());
+			Batch.m_SessionHostIDs.reserve(Identities.size());
 			Batch.m_HostIDs.reserve(Identities.size());
 			for (const EditorDocumentIdentity& Identity : Identities)
 			{
@@ -50,18 +52,34 @@ namespace PulseForgeEditor
 					return std::unexpected("A document in the close request is missing or cannot be closed.");
 				if (!AllowDirtyDocuments && Session->IsDirty())
 					return std::unexpected("Save or discard the dirty document before closing it.");
+				const std::string HostID = Session->HostID;
+				const uint64_t SessionGeneration = Session->SessionGeneration;
+				const uint64_t Revision = Session->Revision;
+				const uint64_t SavedRevision = Session->SavedRevision;
 				if (Editors.IsRegistered(Identity.Kind))
 				{
 					if (!Session->EditorState)
 						return std::unexpected("The registered document editor session is unavailable.");
-					auto Result = Editors.PrepareClose(*Session);
+					std::expected<void, std::string> Result;
+					{
+						EditorDocumentManager::CloseMutationScope Scope(Documents);
+						if (!Scope.Entered())
+							return std::unexpected("A document close transition is already in progress.");
+						Result = Editors.PrepareClose(*Session);
+					}
 					if (!Result)
 						return std::unexpected(Result.error().empty()
 							? "The document editor is not ready to close." : Result.error());
+					Session = Documents.Find(Identity);
+					if (!Session || Session->HostID != HostID || Session->SessionGeneration != SessionGeneration ||
+						Session->Revision != Revision || Session->SavedRevision != SavedRevision)
+						return std::unexpected("A document changed during close preflight.");
 				}
 				Batch.m_Identities.push_back(Identity);
-				if (std::find(Batch.m_HostIDs.begin(), Batch.m_HostIDs.end(), Session->HostID) == Batch.m_HostIDs.end())
-					Batch.m_HostIDs.push_back(Session->HostID);
+				Batch.m_SessionGenerations.push_back(SessionGeneration);
+				Batch.m_SessionHostIDs.push_back(HostID);
+				if (std::find(Batch.m_HostIDs.begin(), Batch.m_HostIDs.end(), HostID) == Batch.m_HostIDs.end())
+					Batch.m_HostIDs.push_back(HostID);
 			}
 			return Batch;
 		}
@@ -70,26 +88,16 @@ namespace PulseForgeEditor
 			EditorDocumentManager& Documents,
 			const EditorDocumentEditorRegistry& Editors) &&
 		{
-			for (const EditorDocumentIdentity& Identity : m_Identities)
+			for (size_t Index = 0; Index < m_Identities.size(); ++Index)
 			{
+				const EditorDocumentIdentity& Identity = m_Identities[Index];
 				const EditorDocumentSession* Session = Documents.Find(Identity);
-				if (!Session || Session->IsDirty())
+				if (!Session || Session->IsDirty() || Session->HostID != m_SessionHostIDs[Index] ||
+					Session->SessionGeneration != m_SessionGenerations[Index] ||
+					(Editors.IsRegistered(Identity.Kind) != (Session->EditorState != nullptr)))
 					return std::unexpected("A prepared document changed before its close could be committed.");
 			}
-			for (const EditorDocumentIdentity& Identity : m_Identities)
-				if (EditorDocumentSession* Session = Documents.Find(Identity);
-					Session && Editors.IsRegistered(Identity.Kind) && Session->EditorState)
-					Editors.Close(*Session);
-			for (const EditorDocumentIdentity& Identity : m_Identities)
-			{
-				const auto Status = Documents.Close(Identity, EditorDocumentCloseChoice::Discard,
-					[](const auto&, uint64_t) { return true; }, [](const auto&) { return true; });
-				if (Status != EditorDocumentCloseStatus::Closed)
-					return std::unexpected("A prepared document could not be removed from its host.");
-			}
-			for (const std::string& HostID : m_HostIDs)
-				(void)Documents.RemoveEmptyNativeHost(HostID);
-			return {};
+			return Documents.ClosePreparedBatch(m_Identities, m_HostIDs);
 		}
 
 		[[nodiscard]] std::span<const EditorDocumentIdentity> GetIdentities() const noexcept
@@ -99,6 +107,8 @@ namespace PulseForgeEditor
 
 	private:
 		std::vector<EditorDocumentIdentity> m_Identities;
+		std::vector<uint64_t> m_SessionGenerations;
+		std::vector<std::string> m_SessionHostIDs;
 		std::vector<std::string> m_HostIDs;
 	};
 

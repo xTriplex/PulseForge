@@ -234,8 +234,7 @@ namespace
 		Adapter.Discard = [](EditorDocumentSession&) { return true; };
 		Adapter.FocusedCommand = [](EditorDocumentSession&, EditorDocumentCommand) { return true; };
 		Adapter.AssetLocationChanged = [](EditorDocumentSession&, const std::filesystem::path&, std::string_view) { return true; };
-		Adapter.PrepareClose = [](const EditorDocumentSession&) -> std::expected<void, std::string> { return {}; };
-		Adapter.Close = [](EditorDocumentSession&) {};
+		Adapter.PrepareClose = [](const EditorDocumentCloseContext&) -> std::expected<void, std::string> { return {}; };
 		return Adapter;
 	}
 
@@ -336,8 +335,7 @@ void RunEditorWorkspacePresentationTests(TestRunner& Tests)
 			return true;
 		};
 		FixtureAdapter.AssetLocationChanged = [](EditorDocumentSession&, const std::filesystem::path&, std::string_view) { return true; };
-		FixtureAdapter.PrepareClose = [](const EditorDocumentSession&) -> std::expected<void, std::string> { return {}; };
-		FixtureAdapter.Close = [](EditorDocumentSession&) {};
+		FixtureAdapter.PrepareClose = [](const EditorDocumentCloseContext&) -> std::expected<void, std::string> { return {}; };
 		PF_CHECK(Tests, RoutedEditors.Register(std::move(FixtureAdapter)));
 		const auto NativeOpen =
 			RoutedDocuments.Open(Fixture, "Assets/Fixture.fixture", "Fixture.fixture", EditorDocumentOpenPreference::NewNativeWindow);
