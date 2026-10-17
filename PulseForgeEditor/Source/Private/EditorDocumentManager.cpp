@@ -41,7 +41,7 @@ namespace PulseForgeEditor
 	std::expected<std::string, std::string> EditorDocumentManager::CreateNativeHost(
 		EditorDocumentKind PlacementKind)
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return std::unexpected("Document hosts cannot change during document close");
 		const auto HostUUID = PulseForge::UUID::Generate();
 		if (!HostUUID)
@@ -54,7 +54,7 @@ namespace PulseForgeEditor
 		EditorDocumentKind PlacementKind,
 		EditorDocumentHost::WindowBounds Bounds)
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return std::unexpected("Document hosts cannot change during document close");
 		if (HostID.empty() || HostID == MainHostID || PlacementKind == EditorDocumentKind::Level || FindHost(HostID))
 			return std::unexpected("The native document host identity or editor kind is invalid");
@@ -71,7 +71,7 @@ namespace PulseForgeEditor
 		std::string DisplayName,
 		EditorDocumentOpenPreference Preference)
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return std::unexpected("Documents cannot open during document close");
 		if (auto Existing = m_Sessions.find(Identity); Existing != m_Sessions.end())
 		{
@@ -174,7 +174,7 @@ namespace PulseForgeEditor
 		const std::filesystem::path& ProjectRelativePath,
 		std::string DisplayName)
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return false;
 		EditorDocumentSession* Session = Find(Identity);
 		if (!Session || Identity.Kind == EditorDocumentKind::Level)
@@ -186,7 +186,7 @@ namespace PulseForgeEditor
 
 	bool EditorDocumentManager::RemoveEmptyNativeHost(std::string_view HostID)
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return false;
 		const auto Host = std::find_if(m_Hosts.begin(), m_Hosts.end(), [HostID](const EditorDocumentHost& Candidate)
 		{
@@ -217,7 +217,7 @@ namespace PulseForgeEditor
 		const TransferPreparation& Prepare,
 		EditorDocumentTransferCause Cause)
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return std::unexpected("Documents cannot transfer during document close");
 		auto SessionIt = m_Sessions.find(Identity);
 		if (SessionIt == m_Sessions.end())
@@ -310,7 +310,7 @@ namespace PulseForgeEditor
 
 	std::expected<size_t, std::string> EditorDocumentManager::RecoverAllToMain(std::string_view SourceHostID)
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return std::unexpected("Documents cannot transfer during document close");
 		EditorDocumentHost* Source = FindHost(SourceHostID);
 		EditorDocumentHost* Destination = FindHost(MainHostID);
@@ -382,7 +382,7 @@ namespace PulseForgeEditor
 
 	bool EditorDocumentManager::Activate(const EditorDocumentIdentity& Identity) noexcept
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return false;
 		const auto Session = m_Sessions.find(Identity);
 		if (Session == m_Sessions.end())
@@ -397,7 +397,7 @@ namespace PulseForgeEditor
 
 	bool EditorDocumentManager::FocusHost(std::string_view HostID) noexcept
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return false;
 		if (!FindHost(HostID))
 			return false;
@@ -412,7 +412,7 @@ namespace PulseForgeEditor
 		EditorDocumentHost::WindowBounds Bounds,
 		std::optional<std::string> LiveHostID)
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return false;
 		if (Project.IsNil() || Kind == EditorDocumentKind::Level ||
 			(Role != EditorDocumentHostRole::Main && Role != EditorDocumentHostRole::Native))
@@ -458,7 +458,7 @@ namespace PulseForgeEditor
 		std::string_view HostID,
 		EditorDocumentHost::WindowBounds Bounds)
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return false;
 		EditorDocumentHost* Host = FindHost(HostID);
 		if (!Host || Host->Role != EditorDocumentHostRole::Native)
@@ -495,16 +495,16 @@ namespace PulseForgeEditor
 	{
 		if (m_CloseTransitionActive)
 			return false;
-		EditorDocumentSession* Session = Find(Identity);
-		if (!Session || Session->Revision == std::numeric_limits<uint64_t>::max())
+		const auto Session = m_Sessions.find(Identity);
+		if (Session == m_Sessions.end() || Session->second.Revision == std::numeric_limits<uint64_t>::max())
 			return false;
-		++Session->Revision;
+		++Session->second.Revision;
 		return true;
 	}
 
 	bool EditorDocumentManager::MarkSaved(const EditorDocumentIdentity& Identity, uint64_t Revision) noexcept
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return false;
 		EditorDocumentSession* Session = Find(Identity);
 		if (!Session || Revision > Session->Revision)
@@ -516,7 +516,7 @@ namespace PulseForgeEditor
 	std::expected<std::vector<std::string>, std::string> EditorDocumentManager::ClearProject(
 		const PulseForge::UUID& Project)
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return std::unexpected("Project documents cannot be cleared during a document close transition.");
 		size_t ProjectSessionCount = 0;
 		for (const auto& [Identity, Session] : m_Sessions)
@@ -609,13 +609,14 @@ namespace PulseForgeEditor
 		const SaveDocument& Save,
 		const DiscardDocument& Discard)
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return EditorDocumentCloseStatus::MutationRejectedDuringCloseTransition;
 		auto Session = m_Sessions.find(Identity);
 		if (Session == m_Sessions.end())
 			return EditorDocumentCloseStatus::Missing;
 		if (Identity.Kind == EditorDocumentKind::Level)
 			return EditorDocumentCloseStatus::Protected;
+		const uint64_t SessionGeneration = Session->second.SessionGeneration;
 
 		if (Session->second.IsDirty())
 		{
@@ -624,7 +625,37 @@ namespace PulseForgeEditor
 			if (Choice == EditorDocumentCloseChoice::Save)
 			{
 				const uint64_t SaveRevision = Session->second.Revision;
-				if (!Save || !Save(Session->second, SaveRevision))
+				if (!Save)
+					return EditorDocumentCloseStatus::SaveFailed;
+				Session = m_Sessions.end();
+				bool Saved = false;
+				try
+				{
+					CloseCallbackScope CallbackScope(*this);
+					if (!CallbackScope.Entered())
+						return EditorDocumentCloseStatus::MutationRejectedDuringCloseTransition;
+					const auto CallbackSession = m_Sessions.find(Identity);
+					if (CallbackSession == m_Sessions.end())
+						return EditorDocumentCloseStatus::Missing;
+					if (CallbackSession->second.SessionGeneration != SessionGeneration)
+						return EditorDocumentCloseStatus::MutationRejectedDuringCloseTransition;
+					Saved = Save(CallbackSession->second, SaveRevision);
+				}
+				catch (const std::exception&)
+				{
+					return EditorDocumentCloseStatus::SaveFailed;
+				}
+				catch (...)
+				{
+					return EditorDocumentCloseStatus::SaveFailed;
+				}
+
+				Session = m_Sessions.find(Identity);
+				if (Session == m_Sessions.end())
+					return EditorDocumentCloseStatus::Missing;
+				if (Session->second.SessionGeneration != SessionGeneration)
+					return EditorDocumentCloseStatus::MutationRejectedDuringCloseTransition;
+				if (!Saved)
 					return EditorDocumentCloseStatus::SaveFailed;
 				Session->second.SavedRevision = SaveRevision;
 				if (Session->second.IsDirty())
@@ -632,19 +663,52 @@ namespace PulseForgeEditor
 			}
 			else if (Choice == EditorDocumentCloseChoice::Discard)
 			{
-				if (!Discard || !Discard(Session->second))
+				if (!Discard)
 					return EditorDocumentCloseStatus::DiscardFailed;
-				Session->second.Revision = Session->second.SavedRevision;
+				const uint64_t RevisionBeforeDiscard = Session->second.Revision;
+				const uint64_t SavedRevisionBeforeDiscard = Session->second.SavedRevision;
+				Session = m_Sessions.end();
+				bool Discarded = false;
+				try
+				{
+					CloseCallbackScope CallbackScope(*this);
+					if (!CallbackScope.Entered())
+						return EditorDocumentCloseStatus::MutationRejectedDuringCloseTransition;
+					const auto CallbackSession = m_Sessions.find(Identity);
+					if (CallbackSession == m_Sessions.end())
+						return EditorDocumentCloseStatus::Missing;
+					if (CallbackSession->second.SessionGeneration != SessionGeneration)
+						return EditorDocumentCloseStatus::MutationRejectedDuringCloseTransition;
+					Discarded = Discard(CallbackSession->second);
+				}
+				catch (const std::exception&)
+				{
+					return EditorDocumentCloseStatus::DiscardFailed;
+				}
+				catch (...)
+				{
+					return EditorDocumentCloseStatus::DiscardFailed;
+				}
+
+				Session = m_Sessions.find(Identity);
+				if (Session == m_Sessions.end())
+					return EditorDocumentCloseStatus::Missing;
+				if (Session->second.SessionGeneration != SessionGeneration)
+					return EditorDocumentCloseStatus::MutationRejectedDuringCloseTransition;
+				if (!Discarded)
+					return EditorDocumentCloseStatus::DiscardFailed;
+				if (Session->second.Revision != RevisionBeforeDiscard)
+					return EditorDocumentCloseStatus::StillDirty;
+				Session->second.Revision = SavedRevisionBeforeDiscard;
 			}
 		}
 
-		const std::string HostID = Session->second.HostID;
-		std::unique_ptr<EditorDocumentEditorState> RetiredEditorState = std::move(Session->second.EditorState);
-		RemoveSessionFromHost(Identity, HostID);
-		m_Sessions.erase(Session);
 		CloseMutationScope TeardownScope(*this);
 		if (!TeardownScope.Entered())
 			return EditorDocumentCloseStatus::MutationRejectedDuringCloseTransition;
+		std::unique_ptr<EditorDocumentEditorState> RetiredEditorState = std::move(Session->second.EditorState);
+		RemoveSessionFromHost(Identity, Session->second.HostID);
+		m_Sessions.erase(Session);
 		RetiredEditorState.reset();
 		return EditorDocumentCloseStatus::Closed;
 	}
@@ -653,7 +717,7 @@ namespace PulseForgeEditor
 		std::span<const EditorDocumentIdentity> Identities,
 		std::span<const std::string> HostIDs)
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return std::unexpected("Documents cannot close during a document close transition.");
 		for (size_t Index = 0; Index < Identities.size(); ++Index)
 		{
@@ -707,7 +771,7 @@ namespace PulseForgeEditor
 
 	EditorDocumentSession* EditorDocumentManager::Find(const EditorDocumentIdentity& Identity) noexcept
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return nullptr;
 		const auto Session = m_Sessions.find(Identity);
 		return Session == m_Sessions.end() ? nullptr : &Session->second;
@@ -724,7 +788,7 @@ namespace PulseForgeEditor
 
 	EditorDocumentHost* EditorDocumentManager::FindHost(std::string_view HostID) noexcept
 	{
-		if (m_CloseTransitionActive)
+		if (IsCloseOperationActive())
 			return nullptr;
 		const auto Host = std::find_if(m_Hosts.begin(), m_Hosts.end(), [HostID](const EditorDocumentHost& Candidate)
 		{
@@ -742,9 +806,13 @@ namespace PulseForgeEditor
 		const EditorDocumentIdentity& Identity,
 		const std::string& HostID) noexcept
 	{
-		EditorDocumentHost* Host = FindHost(HostID);
-		if (!Host)
+		const auto HostEntry = std::find_if(m_Hosts.begin(), m_Hosts.end(), [&HostID](const EditorDocumentHost& Candidate)
+		{
+			return Candidate.ID == HostID;
+		});
+		if (HostEntry == m_Hosts.end())
 			return;
+		EditorDocumentHost* Host = &*HostEntry;
 		const auto Existing = std::find(Host->Documents.begin(), Host->Documents.end(), Identity);
 		if (Existing == Host->Documents.end())
 			return;
