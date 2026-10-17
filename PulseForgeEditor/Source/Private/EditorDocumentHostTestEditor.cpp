@@ -90,13 +90,12 @@ namespace PulseForgeEditor::Detail
 			return true;
 		};
 		Adapter.AssetLocationChanged = [](auto&, const auto&, std::string_view) { return true; };
-		Adapter.PrepareClose = [](const auto& Session) -> std::expected<void, std::string>
+		Adapter.PrepareClose = [](const EditorDocumentCloseContext& Context) -> std::expected<void, std::string>
 		{
-			const auto* SessionState = dynamic_cast<const State*>(Session.EditorState.get());
+			const auto* SessionState = dynamic_cast<const State*>(Context.EditorState);
 			if (SessionState && SessionState->FailClose) return std::unexpected("The Debug fixture is configured to reject close.");
 			return {};
 		};
-		Adapter.Close = [](auto&) {};
 		return m_Editors.Register(std::move(Adapter));
 	}
 

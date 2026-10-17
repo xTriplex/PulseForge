@@ -14,6 +14,13 @@ void RunEditorDocumentCloseRequestTests(TestRunner& Tests)
 	{
 		int Value = 0;
 		bool FailClose = false;
+		size_t* DestructionCount = nullptr;
+
+		~Model() noexcept override
+		{
+			if (DestructionCount)
+				++*DestructionCount;
+		}
 	};
 
 	const auto Project = UUID::Generate();
@@ -23,16 +30,17 @@ void RunEditorDocumentCloseRequestTests(TestRunner& Tests)
 	if (!Project || !AssetA || !AssetB) return;
 
 	std::unordered_map<UUID, int, UUIDHash> SavedValues;
-	size_t CloseCount = 0;
+	size_t EditorStateDestructions = 0;
 	EditorDocumentEditorRegistry Editors;
 	EditorDocumentEditorAdapter Adapter;
 	Adapter.Kind = EditorDocumentKind::Texture;
 	Adapter.IsEligible = [](const EditorDocumentEditorContext& Context)
 	{ return Context.Identity.Kind == EditorDocumentKind::Texture && Context.ProjectRelativePath.extension() == ".fixture"; };
 	Adapter.LoadSession =
-		[&SavedValues](const EditorDocumentEditorContext& Context) -> std::expected<std::unique_ptr<EditorDocumentEditorState>, std::string>
+		[&SavedValues, &EditorStateDestructions](const EditorDocumentEditorContext& Context) -> std::expected<std::unique_ptr<EditorDocumentEditorState>, std::string>
 	{
 		auto State = std::make_unique<Model>();
+		State->DestructionCount = &EditorStateDestructions;
 		if (const auto Saved = SavedValues.find(Context.Identity.Asset); Saved != SavedValues.end()) State->Value = Saved->second;
 		return std::unique_ptr<EditorDocumentEditorState>(std::move(State));
 	};
@@ -53,13 +61,12 @@ void RunEditorDocumentCloseRequestTests(TestRunner& Tests)
 	};
 	Adapter.FocusedCommand = [](EditorDocumentSession&, EditorDocumentCommand) { return false; };
 	Adapter.AssetLocationChanged = [](EditorDocumentSession&, const std::filesystem::path&, std::string_view) { return true; };
-	Adapter.PrepareClose = [](const EditorDocumentSession& Session) -> std::expected<void, std::string>
+	Adapter.PrepareClose = [](const EditorDocumentCloseContext& Context) -> std::expected<void, std::string>
 	{
-		const auto* State = dynamic_cast<const Model*>(Session.EditorState.get());
+		const auto* State = dynamic_cast<const Model*>(Context.EditorState);
 		if (State && State->FailClose) return std::unexpected("close rejected by fixture");
 		return {};
 	};
-	Adapter.Close = [&CloseCount](EditorDocumentSession&) { ++CloseCount; };
 	PF_CHECK(Tests, Editors.Register(std::move(Adapter)).has_value());
 
 	const EditorDocumentIdentity IdentityA{ *Project, *AssetA, EditorDocumentKind::Texture };
@@ -112,14 +119,14 @@ void RunEditorDocumentCloseRequestTests(TestRunner& Tests)
 	PF_CHECK(Tests, !FailedSavedClose && Request.HasPendingRequest() && !Request.GetError().empty());
 	PF_CHECK(Tests, Documents.Find(IdentityA) == SessionA && Documents.Find(IdentityB) == SessionB);
 	PF_CHECK(Tests, !SessionA->IsDirty() && StateA->Value == 17 && SavedValues[*AssetA] == 17);
-	PF_CHECK(Tests, CloseCount == 0 && Queued.empty() && ContinuationCount == 0);
+	PF_CHECK(Tests, EditorStateDestructions == 0 && Queued.empty() && ContinuationCount == 0);
 	PF_CHECK(Tests, Request.ShouldOfferCloseRetry(true));
 	const std::array<EditorDocumentIdentity, 0> NoDirtyDocuments{};
 	StateB->FailClose = false;
 	const auto RetriedClose =
 		Request.Resolve(Documents, Editors, EditorDocumentCloseChoice::Save, NoDirtyDocuments, ResolveChanges, Enqueue);
 	PF_CHECK(Tests, RetriedClose && RetriedClose->DocumentsClosed && !Request.HasPendingRequest());
-	PF_CHECK(Tests, !Documents.Find(IdentityA) && !Documents.Find(IdentityB) && CloseCount == 2);
+	PF_CHECK(Tests, !Documents.Find(IdentityA) && !Documents.Find(IdentityB) && EditorStateDestructions == 2);
 	PF_CHECK(Tests, Queued.size() == 1 && ContinuationCount == 0);
 	if (!Queued.empty()) Queued.front()();
 	PF_CHECK(Tests, ContinuationCount == 1);

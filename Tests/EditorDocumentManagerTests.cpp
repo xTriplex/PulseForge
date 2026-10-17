@@ -324,12 +324,13 @@ namespace
 		PF_CHECK(Tests, Manager.Close(Level, EditorDocumentCloseChoice::Discard, {}, {}) == EditorDocumentCloseStatus::Protected);
 
 		const auto RemovedProjectHosts = Manager.ClearProject(*OtherProject);
-		PF_CHECK(Tests, RemovedProjectHosts.size() == 2);
+		PF_CHECK(Tests, RemovedProjectHosts && RemovedProjectHosts->size() == 2);
+		if (!RemovedProjectHosts) return;
 		PF_CHECK(Tests,
 			OtherProjectTextureOpen && OtherProjectOpen &&
-				std::find(RemovedProjectHosts.begin(), RemovedProjectHosts.end(), OtherProjectTextureOpen->HostID) !=
-					RemovedProjectHosts.end() &&
-				std::find(RemovedProjectHosts.begin(), RemovedProjectHosts.end(), OtherProjectOpen->HostID) != RemovedProjectHosts.end());
+				std::find(RemovedProjectHosts->begin(), RemovedProjectHosts->end(), OtherProjectTextureOpen->HostID) !=
+					RemovedProjectHosts->end() &&
+				std::find(RemovedProjectHosts->begin(), RemovedProjectHosts->end(), OtherProjectOpen->HostID) != RemovedProjectHosts->end());
 		PF_CHECK(Tests, Manager.GetSessions().size() == 7);
 		PF_CHECK(Tests, !Manager.Find(OtherProjectMaterial));
 		PF_CHECK(Tests, !Manager.Find(OtherProjectTexture));
