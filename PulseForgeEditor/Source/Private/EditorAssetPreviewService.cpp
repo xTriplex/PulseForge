@@ -40,6 +40,7 @@ namespace PulseForgeEditor
 		{
 			std::scoped_lock Lock(m_Mutex);
 			m_Stopping = false;
+			m_WorkerFailed.store(false, std::memory_order_release);
 		}
 		m_Worker = std::jthread([this] { WorkerMain(); });
 	}
@@ -84,14 +85,14 @@ namespace PulseForgeEditor
 				TouchAssetPreviewEntry(Existing->second.Visible, Existing->second.LastUse, m_UseCounter);
 				return;
 			}
-			if (m_Stopping || m_Requests.size() >= m_Limits.MaximumQueuedRequests)
-				return;
+			if (m_Stopping || m_WorkerFailed.load(std::memory_order_acquire) || m_Requests.size() >= m_Limits.MaximumQueuedRequests) return;
 		}
 		if (!EvictToFit(0, Key, 1))
 			return;
 		{
 			std::scoped_lock Lock(m_Mutex);
-			if (m_Stopping || m_Requests.size() >= m_Limits.MaximumQueuedRequests || m_Entries.contains(Key))
+			if (m_Stopping || m_WorkerFailed.load(std::memory_order_acquire) || m_Requests.size() >= m_Limits.MaximumQueuedRequests ||
+				m_Entries.contains(Key))
 				return;
 			++m_Stats.CacheMisses;
 			Entry NewEntry;
@@ -118,14 +119,14 @@ namespace PulseForgeEditor
 				TouchAssetPreviewEntry(Existing->second.Visible, Existing->second.LastUse, m_UseCounter);
 				return;
 			}
-			if (m_Stopping || m_Requests.size() >= m_Limits.MaximumQueuedRequests)
-				return;
+			if (m_Stopping || m_WorkerFailed.load(std::memory_order_acquire) || m_Requests.size() >= m_Limits.MaximumQueuedRequests) return;
 		}
 		if (!EvictToFit(0, Key, 1))
 			return;
 		{
 			std::scoped_lock Lock(m_Mutex);
-			if (m_Stopping || m_Requests.size() >= m_Limits.MaximumQueuedRequests || m_Entries.contains(Key))
+			if (m_Stopping || m_WorkerFailed.load(std::memory_order_acquire) || m_Requests.size() >= m_Limits.MaximumQueuedRequests ||
+				m_Entries.contains(Key))
 				return;
 			++m_Stats.CacheMisses;
 			Entry NewEntry;
@@ -152,14 +153,12 @@ namespace PulseForgeEditor
 				TouchAssetPreviewEntry(Existing->second.Visible, Existing->second.LastUse, m_UseCounter);
 				return;
 			}
-			if (m_Stopping)
-				return;
+			if (m_Stopping || m_WorkerFailed.load(std::memory_order_acquire)) return;
 		}
 		if (!EvictToFit(0, Key, 1))
 			return;
 		std::scoped_lock Lock(m_Mutex);
-		if (m_Entries.contains(Key) || m_Stopping)
-			return;
+		if (m_Entries.contains(Key) || m_Stopping || m_WorkerFailed.load(std::memory_order_acquire)) return;
 		Entry FailedEntry;
 		FailedEntry.Status = State::Failed;
 		TouchAssetPreviewEntry(FailedEntry.Visible, FailedEntry.LastUse, m_UseCounter);
@@ -185,9 +184,10 @@ namespace PulseForgeEditor
 			std::scoped_lock Lock(m_Mutex);
 			Result = m_Stats;
 			Result.PendingRequests = m_Requests.size();
-			Result.CpuBytes = m_QueuedCpuBytes;
+			Result.QueuedResultCpuBytes = m_QueuedCpuBytes;
 		}
 		Result.StaleResultsDiscarded = m_StaleResultsDiscarded.load(std::memory_order_relaxed);
+		Result.WorkerFailed = m_WorkerFailed.load(std::memory_order_acquire);
 		Result.ReadyEntries = 0;
 		Result.FailedEntries = 0;
 		for (const auto& [Key, Entry] : m_Entries)
@@ -208,6 +208,19 @@ namespace PulseForgeEditor
 		std::deque<CpuPreview> Completed;
 		{
 			std::scoped_lock Lock(m_Mutex);
+			if (m_WorkerFailed.load(std::memory_order_acquire))
+			{
+				m_Requests.clear();
+				m_Completed.clear();
+				m_QueuedCpuBytes = 0;
+				for (auto& [Key, Entry] : m_Entries)
+				{
+					(void)Key;
+					if (Entry.Status == State::Queued || Entry.Status == State::Decoding || Entry.Status == State::CpuReady)
+						Entry.Status = State::Failed;
+				}
+				return;
+			}
 			Completed.swap(m_Completed);
 		}
 		size_t Uploaded = 0;
@@ -217,8 +230,9 @@ namespace PulseForgeEditor
 			CpuPreview Preview = std::move(Completed.front());
 			Completed.pop_front();
 			const size_t ByteCount = Preview.Pixels.size();
-			if (Preview.IsValid && (Uploaded >= m_Limits.MaximumUploadsPerUpdate ||
-				(Uploaded != 0 && UploadedBytes + ByteCount > m_Limits.MaximumUploadBytesPerUpdate)))
+			if (Preview.IsValid && m_Limits.MaximumUploadsPerUpdate != 0 && m_Limits.MaximumUploadBytesPerUpdate != 0 &&
+				ByteCount <= m_Limits.MaximumUploadBytesPerUpdate &&
+				(Uploaded >= m_Limits.MaximumUploadsPerUpdate || UploadedBytes > m_Limits.MaximumUploadBytesPerUpdate - ByteCount))
 			{
 				std::scoped_lock Lock(m_Mutex);
 				m_Completed.push_back(std::move(Preview));
@@ -243,6 +257,15 @@ namespace PulseForgeEditor
 			{
 				Found->second.Status = State::Failed;
 				++m_Stats.DecodesFailed;
+				continue;
+			}
+			if (m_Limits.MaximumUploadsPerUpdate == 0 || m_Limits.MaximumUploadBytesPerUpdate == 0 || ByteCount == 0 ||
+				ByteCount > m_Limits.MaximumUploadBytesPerUpdate)
+			{
+				Found->second.Status = State::Failed;
+				++m_Stats.DecodesFailed;
+				std::scoped_lock Lock(m_Mutex);
+				m_QueuedCpuBytes -= (std::min)(m_QueuedCpuBytes, ByteCount);
 				continue;
 			}
 			++m_Stats.DecodesSucceeded;
@@ -382,51 +405,89 @@ namespace PulseForgeEditor
 			m_Entries.size() + RequiredEntrySlots <= m_Limits.MaximumEntries;
 	}
 
-	void EditorAssetPreviewService::WorkerMain()
+	void EditorAssetPreviewService::WorkerMain() noexcept
 	{
-		for (;;)
+		try
 		{
-			Request Work;
+			for (;;)
 			{
-				std::unique_lock Lock(m_Mutex);
-				m_WorkAvailable.wait(Lock, [this] { return m_Stopping || !m_Requests.empty(); });
-				if (m_Stopping)
-					return;
-				Work = std::move(m_Requests.front());
-				m_Requests.pop_front();
-			}
-			auto Preview = Decode(Work);
-			std::unique_lock Lock(m_Mutex);
-			if (m_Stopping)
-				return;
-			if (!IsCurrentAssetPreviewResult(Work.Generation, Work.Generation, m_Generation, m_Stopping))
-			{
-				m_StaleResultsDiscarded.fetch_add(1, std::memory_order_relaxed);
-				continue;
-			}
-			if (!Preview)
-			{
-				CpuPreview Failure;
-				Failure.ProjectID = Work.ProjectID;
-				Failure.AssetID = Work.AssetID;
-				Failure.Generation = Work.Generation;
-				m_Completed.push_back(std::move(Failure));
-			}
-			else
-			{
-				m_WorkAvailable.wait(Lock, [this, &Preview]
+				Request Work;
 				{
-					return m_Stopping || m_QueuedCpuBytes + Preview->Pixels.size() <= m_Limits.MaximumCpuBytes;
-				});
-				if (m_Stopping)
-					return;
+					std::unique_lock Lock(m_Mutex);
+					m_WorkAvailable.wait(Lock, [this] { return m_Stopping || !m_Requests.empty(); });
+					if (m_Stopping || m_WorkerFailed.load(std::memory_order_acquire)) return;
+					Work = std::move(m_Requests.front());
+					m_Requests.pop_front();
+				}
+				std::optional<CpuPreview> Preview;
+				try
+				{
+					Preview = m_DecodeOverrideForTesting ? m_DecodeOverrideForTesting(Work) : Decode(Work);
+				}
+				catch (...)
+				{
+					// A single malformed/unavailable decode must fail its entry without terminating the worker.
+					Preview.reset();
+				}
+
+				std::unique_lock Lock(m_Mutex);
+				if (m_Stopping || m_WorkerFailed.load(std::memory_order_acquire)) return;
 				if (!IsCurrentAssetPreviewResult(Work.Generation, Work.Generation, m_Generation, m_Stopping))
+				{
+					m_StaleResultsDiscarded.fetch_add(1, std::memory_order_relaxed);
 					continue;
-				m_QueuedCpuBytes += Preview->Pixels.size();
-				m_Stats.PeakCpuBytes = (std::max)(m_Stats.PeakCpuBytes, m_QueuedCpuBytes);
+				}
+
+				if (!Preview || !Preview->IsValid || Preview->Pixels.empty() || Preview->Pixels.size() > m_Limits.MaximumCpuBytes)
+				{
+					CpuPreview Failure;
+					Failure.ProjectID = Preview ? std::move(Preview->ProjectID) : std::move(Work.ProjectID);
+					Failure.AssetID = Preview ? std::move(Preview->AssetID) : std::move(Work.AssetID);
+					Failure.Generation = Work.Generation;
+					m_Completed.push_back(std::move(Failure));
+					continue;
+				}
+
+				const size_t ResultBytes = Preview->Pixels.size();
+				if (m_QueuedCpuBytes > m_Limits.MaximumCpuBytes - ResultBytes) ++m_Stats.CpuBudgetWaits;
+				m_WorkAvailable.wait(Lock,
+					[this, &Work, ResultBytes]
+					{
+						return m_Stopping || Work.Generation != m_Generation || m_QueuedCpuBytes <= m_Limits.MaximumCpuBytes - ResultBytes;
+					});
+				if (m_Stopping || m_WorkerFailed.load(std::memory_order_acquire)) return;
+				if (Work.Generation != m_Generation)
+				{
+					m_StaleResultsDiscarded.fetch_add(1, std::memory_order_relaxed);
+					continue;
+				}
+				m_QueuedCpuBytes += ResultBytes;
+				m_Stats.PeakQueuedResultCpuBytes = (std::max)(m_Stats.PeakQueuedResultCpuBytes, m_QueuedCpuBytes);
 				m_Completed.push_back(std::move(*Preview));
 			}
 		}
+		catch (...)
+		{
+			MarkWorkerFailed();
+		}
+	}
+
+	void EditorAssetPreviewService::MarkWorkerFailed() noexcept
+	{
+		m_WorkerFailed.store(true, std::memory_order_release);
+		try
+		{
+			std::scoped_lock Lock(m_Mutex);
+			m_StaleResultsDiscarded.fetch_add(m_Requests.size() + m_Completed.size(), std::memory_order_relaxed);
+			m_Requests.clear();
+			m_Completed.clear();
+			m_QueuedCpuBytes = 0;
+		}
+		catch (...)
+		{
+			// Keep the thread boundary non-throwing even if synchronization itself fails.
+		}
+		m_WorkAvailable.notify_all();
 	}
 
 	std::optional<EditorAssetPreviewService::CpuPreview> EditorAssetPreviewService::Decode(const Request& Work)
