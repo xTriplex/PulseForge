@@ -365,6 +365,14 @@ namespace
 			m_SdrTarget.reset();
 			m_SceneRenderer.reset();
 			m_Project.reset();
+			if (!m_PbrValidationFixtureRoot.empty())
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(m_PbrValidationFixtureRoot, Error);
+				if (Error)
+					PF_WARN("Could not remove the temporary PBR refresh fixture {}: {}", m_PbrValidationFixtureRoot.string(),
+						Error.message());
+			}
 			m_SamplingPipeline.reset();
 			m_ColorPipeline.reset();
 			m_Sampler.reset();
@@ -578,11 +586,25 @@ namespace
 
 		void InitializeSceneResources()
 		{
-			const std::filesystem::path ProjectFile = m_ValidateTransparency   ? std::filesystem::path(PF_TRANSPARENCY_DEMO_PROJECT_FILE)
-													  : m_ValidatePbrMaterials ? std::filesystem::path(PF_PBR_DEMO_PROJECT_FILE)
-													  : m_ValidatePointShadows || m_ValidatePointShadowImages
+			std::filesystem::path ProjectFile = m_ValidateTransparency   ? std::filesystem::path(PF_TRANSPARENCY_DEMO_PROJECT_FILE)
+												  : m_ValidatePbrMaterials ? std::filesystem::path(PF_PBR_DEMO_PROJECT_FILE)
+												  : m_ValidatePointShadows || m_ValidatePointShadowImages
 														  ? std::filesystem::path(PF_POINT_SHADOW_DEMO_PROJECT_FILE)
 														  : std::filesystem::path(PF_GPU_VALIDATION_PROJECT_FILE);
+			if (m_ValidatePbrMaterials)
+			{
+				const std::filesystem::path SourceProjectRoot = ProjectFile.parent_path();
+				m_PbrValidationFixtureRoot = std::filesystem::temp_directory_path() / "PulseForgeGpuValidation" /
+					("PbrAssetRefresh-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+				std::filesystem::create_directories(m_PbrValidationFixtureRoot);
+				std::filesystem::copy_file(ProjectFile, m_PbrValidationFixtureRoot / ProjectFile.filename());
+				std::filesystem::copy(SourceProjectRoot / "Assets", m_PbrValidationFixtureRoot / "Assets",
+					std::filesystem::copy_options::recursive);
+				std::filesystem::copy_file(SourceProjectRoot.parent_path() / "PointLightShadows" / "Assets" / "Models" /
+											   "ShadowDemoCube.gltf",
+					m_PbrValidationFixtureRoot / "PbrAlternativeMesh.gltf");
+				ProjectFile = m_PbrValidationFixtureRoot / ProjectFile.filename();
+			}
 			auto OpenedProject = PulseForge::Project::Open(ProjectFile);
 			if (!OpenedProject)
 				throw std::runtime_error(
@@ -636,6 +658,7 @@ namespace
 		PulseForge::GpuValidation::EditorUiUnormValidation m_EditorUiValidation;
 		std::optional<PulseForge::Project> m_Project;
 		PulseForge::Scene m_Scene;
+		std::filesystem::path m_PbrValidationFixtureRoot;
 		std::filesystem::path m_PointShadowImageDirectory;
 		std::unique_ptr<PulseForge::Window> m_RetirementWindow;
 		std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;

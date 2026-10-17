@@ -888,6 +888,28 @@ namespace
 				m_AssetPreviews.InvalidateAll();
 				m_AssetPreviewAssetsPending = false;
 			}
+			if (m_RendererAssetCachesPending || m_MaterialAssetBindingsPending)
+			{
+				if (m_SceneRuntime)
+				{
+					if (!m_AssetRefreshDeferredForRuntime)
+						SetWarning("Renderer asset changes are deferred until Play mode stops.");
+					m_AssetRefreshDeferredForRuntime = true;
+				}
+				else
+				{
+					if (m_RendererAssetCachesPending)
+					{
+						m_ViewportRenderView.RefreshProjectAssets();
+						m_MeshPickingCache.Clear();
+					}
+					else if (m_MaterialAssetBindingsPending)
+						m_ViewportRenderView.RefreshMaterialAssets();
+					m_RendererAssetCachesPending = false;
+					m_MaterialAssetBindingsPending = false;
+					m_AssetRefreshDeferredForRuntime = false;
+				}
+			}
 			UpdateEditorCamera(DeltaTime);
 			if (m_SceneRuntime && m_RuntimeScene)
 			{
@@ -3539,8 +3561,8 @@ namespace
 					Message += " The asset was committed with UUID " + Imported.error().CommittedAsset->ID.ToString() + ".";
 
 				const auto RegistryRefresh = m_Project->GetAssetRegistry().Rebuild(m_Project->GetRootPath());
-				UpdateAssetList();
-				if (!RegistryRefresh)
+				if (RegistryRefresh) UpdateAssetList(true);
+				else
 				{
 					Message += " Registry recovery also reported:";
 					for (const PulseForge::AssetRegistryIssue& Issue : RegistryRefresh.error().Issues)
@@ -3550,7 +3572,7 @@ namespace
 				return;
 			}
 
-			UpdateAssetList();
+			UpdateAssetList(true);
 			m_ContentBrowser.SelectedAsset() = Imported->ID;
 			SetStatus(
 				"Imported " + PathToUtf8(Imported->ProjectRelativePath) +
@@ -3661,7 +3683,7 @@ namespace
 				return;
 			}
 
-			UpdateAssetList();
+			UpdateAssetList(true);
 			m_ContentBrowser.SelectedAsset() = Moved->ID;
 			SetStatus("Moved " + PathToUtf8(Moved->ProjectRelativePath) + ".");
 		}
@@ -3681,7 +3703,7 @@ namespace
 
 			m_ContentBrowser.RebaseFoldersAfterMove(Source, *Moved);
 
-			UpdateAssetList();
+			UpdateAssetList(true);
 			SetStatus("Moved folder to " + PathToUtf8(*Moved) + ". Asset identities were preserved.");
 		}
 
@@ -3713,7 +3735,7 @@ namespace
 				return;
 			}
 
-			UpdateAssetList();
+			UpdateAssetList(true);
 			m_ContentBrowser.SelectedAsset() = Duplicated->ID;
 			SetStatus(
 				"Duplicated " + PathToUtf8(Duplicated->ProjectRelativePath) +
@@ -3761,7 +3783,7 @@ namespace
 					Message += " Recovery data: " + PathToUtf8(*Created.error().RecoveryPath) + ".";
 				if (Created.error().CommittedAsset)
 				{
-					UpdateAssetList();
+					UpdateAssetList(true);
 					m_ContentBrowser.SelectedAsset() = Created.error().CommittedAsset->ID;
 					SetWarning(
 						"Prefab was created with UUID " + Created.error().CommittedAsset->ID.ToString() +
@@ -3774,7 +3796,7 @@ namespace
 				return;
 			}
 
-			UpdateAssetList();
+			UpdateAssetList(true);
 			m_ContentBrowser.SelectedAsset() = Created->ID;
 			SetStatus(
 				"Created prefab " + PathToUtf8(Created->ProjectRelativePath) +
@@ -3913,7 +3935,7 @@ namespace
 				return;
 			}
 
-			UpdateAssetList();
+			UpdateAssetList(true);
 			if (!CommitPreparedDocumentCloseBatch(std::move(*PreparedClose)))
 				return;
 			if (DeletedMaterial)
@@ -3981,8 +4003,8 @@ namespace
 			if (!m_Project)
 				return;
 			const auto Rebuild = m_Project->GetAssetRegistry().Rebuild(m_Project->GetRootPath());
-			UpdateAssetList();
-			if (!Rebuild)
+			if (Rebuild) UpdateAssetList(true);
+			else
 			{
 				Message += " Registry refresh also reported:";
 				for (const PulseForge::AssetRegistryIssue& Issue : Rebuild.error().Issues)
@@ -4634,7 +4656,7 @@ namespace
 			if (WasDirty)
 			{
 				m_AssetPreviewAssetsPending = true;
-				m_ViewportRenderView.RefreshMaterialAssets();
+				m_MaterialAssetBindingsPending = true;
 			}
 			SetStatus(WasDirty ? "Saved material " + PathToUtf8(SavedPath->filename()) + "." : "Material has no unsaved changes.");
 			return true;
@@ -6499,6 +6521,9 @@ namespace
 			CancelGizmoInteraction();
 			ResetEditorViewportCamera();
 			m_ViewportRenderView.ResetScene();
+			m_RendererAssetCachesPending = false;
+			m_MaterialAssetBindingsPending = false;
+			m_AssetRefreshDeferredForRuntime = false;
 			m_ViewportTools.ResetExposure();
 			m_MeshPickingCache.Clear();
 		}
@@ -6806,26 +6831,44 @@ namespace
 		void RefreshAssets()
 		{
 			if (!m_Project) return;
-
-			const auto Rebuild = m_Project->GetAssetRegistry().Rebuild(m_Project->GetRootPath());
-			if (!Rebuild)
+			if (m_SceneRuntime)
 			{
-				std::string Message = "Asset registry refresh failed:";
-				if (Rebuild.error().Issues.empty()) Message += " unknown registry error";
-				for (const PulseForge::AssetRegistryIssue& Issue : Rebuild.error().Issues)
-					Message += "\n - " + Issue.Message;
-				SetError(std::move(Message));
+				SetWarning("Stop Play mode before refreshing project assets.");
 				return;
 			}
-			UpdateAssetList();
-			SetStatus("Asset registry refreshed.");
+
+			const PulseForge::UUID ProjectID = m_Project->GetDescription().ID;
+			m_DeferredEditorOperations.Enqueue([this, ProjectID]
+				{
+					if (!m_Project || m_Project->GetDescription().ID != ProjectID) return;
+					if (m_SceneRuntime)
+					{
+						SetWarning("Stop Play mode before refreshing project assets.");
+						return;
+					}
+
+					const auto Rebuild = m_Project->GetAssetRegistry().Rebuild(m_Project->GetRootPath());
+					if (!Rebuild)
+					{
+						std::string Message = "Asset registry refresh failed:";
+						if (Rebuild.error().Issues.empty()) Message += " unknown registry error";
+						for (const PulseForge::AssetRegistryIssue& Issue : Rebuild.error().Issues)
+							Message += "\n - " + Issue.Message;
+						SetError(std::move(Message));
+						return;
+					}
+
+					UpdateAssetList(true);
+					SetStatus("Asset registry refreshed.");
+				});
 		}
 
-		void UpdateAssetList()
+		void UpdateAssetList(bool RendererAssetsChanged = false)
 		{
 			m_AssetPreviewProjectPending = true;
 			m_AssetPreviewAssetsPending = true;
-			m_MeshPickingCache.Clear();
+			m_RendererAssetCachesPending = m_RendererAssetCachesPending || RendererAssetsChanged;
+			if (!RendererAssetsChanged) m_MeshPickingCache.Clear();
 			m_ContentBrowser.SetAssets(m_Project ? m_Project->GetAssetRegistry().GetAssets() : std::vector<PulseForge::AssetRecord>{});
 			SynchronizeOpenDocumentAssetLocations();
 		}
@@ -6953,6 +6996,9 @@ namespace
 		PulseForgeEditor::EditorAssetPreviewStressHarness m_AssetPreviewStress;
 		bool m_AssetPreviewProjectPending = false;
 		bool m_AssetPreviewAssetsPending = false;
+		bool m_RendererAssetCachesPending = false;
+		bool m_MaterialAssetBindingsPending = false;
+		bool m_AssetRefreshDeferredForRuntime = false;
 		bool m_GlfwBackendActive = false;
 		bool m_OpenGLBackendActive = false;
 		#ifdef PF_EDITOR_RENDERER_OPENGL

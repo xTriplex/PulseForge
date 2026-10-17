@@ -224,6 +224,13 @@ namespace PulseForgeEditor
 		if (m_SceneRenderer) m_SceneRenderer->RefreshMaterialAssets();
 	}
 
+	void EditorViewportSceneRenderView::RefreshProjectAssets() noexcept
+	{
+		if (!m_SceneRenderer) return;
+		m_SceneRenderer->RefreshProjectAssets();
+		InvalidatePreparedScene();
+	}
+
 	void EditorViewportSceneRenderView::ResetTarget() noexcept
 	{
 		if (m_TextureRegistry && m_TextureID != 0) m_TextureRegistry->UnregisterTexture(m_TextureID);

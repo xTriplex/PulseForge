@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Assets/MaterialAsset.h"
 #include "Renderer/RenderTarget.h"
 #include "Scene/Components/EnvironmentLightComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
@@ -64,6 +65,17 @@ namespace PulseForge::GpuValidation
 			EnvironmentRemoved,
 			EnvironmentFallbackRefreshed,
 			EnvironmentRestored,
+			AssetMaterialRefreshed,
+			AssetMaterialRestored,
+			AssetsUnchangedRefreshed,
+			TextureSourceChanged,
+			TextureSourceRestored,
+			MeshSourceChanged,
+			MeshSourceRestored,
+			EnvironmentSourceChanged,
+			EnvironmentSourceRestored,
+			EnvironmentSourceMissing,
+			EnvironmentSourceRepaired,
 			Complete
 		};
 
@@ -74,6 +86,14 @@ namespace PulseForge::GpuValidation
 		void RenderPbrMaterial();
 		void CapturePbrMaterialImage();
 		bool AdvancePbrMaterialCapture();
+		bool SavePbrTargetMaterialAndRefresh(const PulseForge::MaterialAssetDesc& Description, std::string_view Phase);
+		bool RefreshPbrProjectAssets(std::string_view Phase);
+		bool WriteChangedPbrTexture();
+		bool RestorePbrTexture();
+		bool ReplacePbrMeshWithAlternate();
+		bool RestorePbrMesh();
+		bool WriteChangedPbrEnvironment();
+		bool RestorePbrEnvironment();
 		void RenderTransparency();
 		void CaptureTransparencyImage();
 		void Fail(std::string Message);
@@ -104,6 +124,15 @@ namespace PulseForge::GpuValidation
 		Entity m_PbrEnvironmentEntity;
 		MeshRendererComponent m_PbrFloorComponent;
 		MeshRendererComponent m_PbrTargetComponent;
+		PulseForge::MaterialAssetDesc m_PbrOriginalMaterial;
+		std::filesystem::path m_PbrTargetMaterialPath;
+		std::filesystem::path m_PbrTexturePath;
+		std::filesystem::path m_PbrOriginalTextureBackupPath;
+		std::filesystem::path m_PbrMeshPath;
+		std::filesystem::path m_PbrOriginalMeshBackupPath;
+		std::filesystem::path m_PbrAlternateMeshPath;
+		std::filesystem::path m_PbrEnvironmentPath;
+		std::filesystem::path m_PbrOriginalEnvironmentBackupPath;
 		EnvironmentLightComponent m_PbrEnvironmentComponent;
 		std::vector<std::byte> m_PbrBaselinePixels;
 		std::vector<std::byte> m_PbrEnvironmentFallbackPixels;

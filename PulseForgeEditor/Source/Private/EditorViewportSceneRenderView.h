@@ -45,6 +45,7 @@ namespace PulseForgeEditor
 		void InvalidatePreparedScene() noexcept;
 		void ClearEnvironmentLightingPending() noexcept;
 		void RefreshMaterialAssets() noexcept;
+		void RefreshProjectAssets() noexcept;
 		void ResetTarget() noexcept;
 
 		[[nodiscard]] bool HasTarget() const noexcept { return static_cast<bool>(m_Target); }

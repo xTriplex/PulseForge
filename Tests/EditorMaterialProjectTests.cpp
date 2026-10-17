@@ -347,6 +347,13 @@ namespace
 		PF_CHECK(Tests, Redone.has_value() && *Redone);
 		PF_CHECK(Tests, Drafts.IsDirty(ProjectValue, Material->ID));
 		PF_CHECK(Tests, Documents.Find(Identity)->IsDirty());
+		MaterialAssetDesc ExternalEdit = *Drafts.FindDraft(ProjectValue, Material->ID);
+		ExternalEdit.BaseColorFactor = { 0.1f, 0.2f, 0.9f, 1.0f };
+		PF_CHECK(Tests, MaterialAssetSerializer::SaveToFile(ExternalEdit, Root / Material->ProjectRelativePath).has_value());
+		PF_CHECK(Tests, ProjectValue.GetAssetRegistry().Rebuild(Root).has_value());
+		PF_CHECK(Tests, Drafts.IsDirty(ProjectValue, Material->ID));
+		PF_CHECK(Tests, Documents.Find(Identity)->IsDirty());
+		PF_CHECK(Tests, std::abs(Drafts.FindDraft(ProjectValue, Material->ID)->BaseColorFactor.r - 0.85f) < 1.0e-5f);
 		const auto Saved = Drafts.Save(ProjectValue, Material->ID, Documents);
 		PF_CHECK(Tests, Saved.has_value());
 		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, Material->ID));
