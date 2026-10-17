@@ -1,0 +1,22 @@
+function(pulseforge_attach_shader_deployment Target OutputDirectory)
+	if(NOT TARGET "${Target}")
+		message(FATAL_ERROR "Cannot attach shader deployment to missing target '${Target}'")
+	endif()
+	if(NOT ARGN)
+		message(FATAL_ERROR "Shader deployment for '${Target}' requires at least one shader output")
+	endif()
+
+	string(MAKE_C_IDENTIFIER "${Target}_ShaderDeployment" DeploymentTarget)
+	if(TARGET "${DeploymentTarget}")
+		message(FATAL_ERROR "Shader deployment target '${DeploymentTarget}' already exists")
+	endif()
+	set(ShaderDeploymentCommands COMMAND "${CMAKE_COMMAND}" -E make_directory "${OutputDirectory}")
+	foreach(ShaderOutput IN LISTS ARGN)
+		get_filename_component(ShaderFileName "${ShaderOutput}" NAME)
+		list(APPEND ShaderDeploymentCommands COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+			"${ShaderOutput}" "${OutputDirectory}/${ShaderFileName}")
+	endforeach()
+	add_custom_target("${DeploymentTarget}" ${ShaderDeploymentCommands} DEPENDS ${ARGN} VERBATIM
+		COMMENT "Deploying runtime shaders for ${Target}")
+	add_dependencies("${Target}" "${DeploymentTarget}")
+endfunction()

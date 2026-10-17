@@ -1,3 +1,5 @@
+include("${CMAKE_CURRENT_LIST_DIR}/PulseForgeShaderDeployment.cmake")
+
 if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 	(PULSEFORGE_BUILD_EDITOR AND PULSEFORGE_EDITOR_RENDERER STREQUAL "Vulkan"))
 	# Pin the compiler executable and its archive hash instead of relying on a
@@ -54,19 +56,6 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 			VERBATIM
 			COMMENT "${Shader_COMMENT}"
 		)
-	endfunction()
-
-	function(pulseforge_attach_shader_deployment Target OutputDirectory)
-		if(NOT TARGET "${Target}")
-			message(FATAL_ERROR "Cannot attach shader deployment to missing target '${Target}'")
-		endif()
-		set(ShaderDeploymentCommands COMMAND "${CMAKE_COMMAND}" -E make_directory "${OutputDirectory}")
-		foreach(ShaderOutput IN LISTS ARGN)
-			get_filename_component(ShaderFileName "${ShaderOutput}" NAME)
-			list(APPEND ShaderDeploymentCommands COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-				"${ShaderOutput}" "${OutputDirectory}/${ShaderFileName}")
-		endforeach()
-		add_custom_command(TARGET "${Target}" POST_BUILD ${ShaderDeploymentCommands} VERBATIM)
 	endfunction()
 
 	set(PULSEFORGE_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/Runtime/Shaders")
