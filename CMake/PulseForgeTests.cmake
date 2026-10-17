@@ -169,7 +169,7 @@ if(BUILD_TESTING)
 		Tests/EditorViewportGizmoGeometryTests.cpp
 		Tests/EditorViewportGizmoInteractionTests.cpp
 	)
-	target_include_directories(PulseForgeEditorCoreTests PRIVATE Tests PulseForgeEditor/Source/Private)
+	target_include_directories(PulseForgeEditorCoreTests PRIVATE Tests)
 	target_compile_definitions(PulseForgeEditorCoreTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorCoreTests PRIVATE PulseForgeCore PulseForgeEditorCore)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
@@ -216,7 +216,6 @@ if(BUILD_TESTING)
 		target_include_directories(PulseForgeEditorTests PRIVATE
 			Tests
 			PulseForgeEditor/Source/Public
-			PulseForgeEditor/Source/Private
 			PulseForge/Vendor/json/include
 		)
 		target_compile_definitions(PulseForgeEditorTests PRIVATE PF_PLATFORM_WINDOWS)
@@ -236,7 +235,6 @@ if(BUILD_TESTING)
 		target_include_directories(PulseForgeEditorWorkspacePresentationTests PRIVATE
 			Tests
 			PulseForgeEditor/Source/Public
-			PulseForgeEditor/Source/Private
 			PulseForge/Vendor/json/include
 		)
 		target_compile_definitions(PulseForgeEditorWorkspacePresentationTests PRIVATE PF_PLATFORM_WINDOWS)

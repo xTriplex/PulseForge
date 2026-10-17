@@ -1,5 +1,5 @@
 #include "TestEditorSupport.h"
-#include "EditorViewportCamera.h"
+#include "Editor/EditorViewportCamera.h"
 #include "Editor/EditorViewportPolicy.h"
 #include "Editor/EditorViewportToolState.h"
 

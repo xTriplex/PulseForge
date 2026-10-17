@@ -1,7 +1,7 @@
 #include "TestEditorSupport.h"
 #include "Assets/MaterialAsset.h"
 #include "Editor/EditorAssetPreviewService.h"
-#include "EditorViewportSceneRenderView.h"
+#include "Editor/EditorViewportSceneRenderView.h"
 
 #include <chrono>
 #include <fstream>

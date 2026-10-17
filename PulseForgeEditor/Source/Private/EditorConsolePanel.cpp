@@ -2,7 +2,7 @@
 
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorStyle.h"
-#include "EditorConsoleHistory.h"
+#include "Editor/EditorConsoleHistory.h"
 #include "Core/Log.h"
 
 #include <cfloat>

@@ -1,6 +1,6 @@
 #include "Scripting/ScriptRuntime.h"
-#include "ScriptRuntimeInternal.h"
-#include "ScriptEnvironment.h"
+#include "Scripting/ScriptRuntimeInternal.h"
+#include "Scripting/ScriptEnvironment.h"
 
 #include "Assets/AssetPathResolver.h"
 #include "Assets/Project.h"

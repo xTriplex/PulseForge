@@ -1,6 +1,6 @@
 #pragma once
 
-#include "EditorConsoleHistory.h"
+#include "Editor/EditorConsoleHistory.h"
 #include "Core/Log.h"
 
 namespace PulseForgeEditor::Detail

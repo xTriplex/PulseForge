@@ -31,7 +31,7 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 	)
 	target_include_directories(PulseForgeEditorCore
 		PUBLIC PulseForgeEditor/Source/Public
-		PRIVATE PulseForge/Source/Public PulseForgeEditor/Source/Private PulseForge/Vendor/json/include
+		PRIVATE PulseForge/Source/Public PulseForge/Vendor/json/include
 	)
 	target_compile_definitions(PulseForgeEditorCore PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorCore
@@ -39,5 +39,5 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 		PRIVATE PulseForgeCore PulseForgeAssetImporters PulseForgeSceneSerialization
 	)
 	target_precompile_headers(PulseForgeEditorCore PRIVATE
-		"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Source/Private/EditorCorePCH.h")
+		"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Source/Public/Editor/EditorCorePCH.h")
 endif()

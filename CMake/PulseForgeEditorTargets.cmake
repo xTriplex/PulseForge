@@ -27,7 +27,6 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Public
 	)
 	target_include_directories(PulseForgeEditorUI PRIVATE
-		PulseForgeEditor/Source/Private
 		PulseForge/Vendor/imgui/misc/freetype
 	)
 	target_include_directories(PulseForgeEditorUI SYSTEM PRIVATE
@@ -46,7 +45,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	set_source_files_properties(PulseForge/Vendor/imgui/misc/freetype/imgui_freetype.cpp PROPERTIES
 		SKIP_PRECOMPILE_HEADERS ON)
 	target_precompile_headers(PulseForgeEditorUI PRIVATE
-		"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Source/Private/EditorUIPCH.h")
+		"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Source/Public/Editor/EditorUIPCH.h")
 
 	add_executable(PulseForgeEditor WIN32
 		PulseForgeEditor/Source/Private/EditorMain.cpp
@@ -58,7 +57,6 @@ if(PULSEFORGE_BUILD_EDITOR)
 	endif()
 	target_include_directories(PulseForgeEditor PRIVATE
 		PulseForgeEditor/Source/Public
-		PulseForgeEditor/Source/Private
 		PulseForge/Vendor/json/include
 		PulseForge/Vendor/imgui/misc/freetype
 	)

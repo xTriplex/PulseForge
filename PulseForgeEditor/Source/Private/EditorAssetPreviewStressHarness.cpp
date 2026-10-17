@@ -1,4 +1,4 @@
-#include "EditorAssetPreviewStressHarness.h"
+#include "Editor/EditorAssetPreviewStressHarness.h"
 
 #include "Core/Log.h"
 
