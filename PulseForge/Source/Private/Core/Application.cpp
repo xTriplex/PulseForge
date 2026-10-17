@@ -108,10 +108,7 @@ namespace PulseForge
 			const Timestep DeltaTime(CurrentFrameTime - PreviousFrameTime);
 			PreviousFrameTime = CurrentFrameTime;
 
-			for (const auto& Layer : m_LayerStack)
-			{
-				Layer->OnUpdate(DeltaTime);
-			}
+			m_LayerStack.UpdateLayers(DeltaTime);
 
 			// Resource preparation during updates must happen before the renderer opens its frame command list.
 			const bool bCanRender = m_Renderer->BeginFrame();
@@ -119,20 +116,14 @@ namespace PulseForge
 
 			const bool bHasPlatformPresentationTargets = m_Renderer->HasPlatformPresentationTargets();
 			if (bCanRender || bHasPlatformPresentationTargets)
-			{
-				for (const auto& Layer : m_LayerStack)
-					Layer->OnRender();
-			}
+				m_LayerStack.RenderLayers();
 
 			if (bCanRender)
 				m_Renderer->EndFrame();
 			m_MainFrameActive = false;
 
 			if (bCanRender || bHasPlatformPresentationTargets)
-			{
-				for (const auto& Layer : m_LayerStack)
-					Layer->OnRenderPlatformWindows();
-			}
+				m_LayerStack.RenderPlatformWindows();
 			else
 				m_Window->WaitEventsTimeout(0.05);
 		}
@@ -144,14 +135,7 @@ namespace PulseForge
 
 		EventDispatcher Dispatcher(E);
 
-		for (auto It = m_LayerStack.rbegin(); It != m_LayerStack.rend(); ++It)
-		{
-			(*It)->OnEvent(E);
-			if (E.bHandled)
-			{
-				break;
-			}
-		}
+		m_LayerStack.DispatchEvent(E);
 
 		if (!E.bHandled)
 			Dispatcher.Dispatch<WindowCloseEvent>(std::bind(&Application::OnWindowClose, this, std::placeholders::_1));
