@@ -15,6 +15,7 @@
 #include <fstream>
 #include <limits>
 #include <system_error>
+#include <unordered_set>
 
 namespace PulseForge
 {

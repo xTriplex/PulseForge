@@ -38,4 +38,6 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 		PUBLIC PulseForgeAssetServices PulseForgeScene
 		PRIVATE PulseForgeCore PulseForgeAssetImporters PulseForgeSceneSerialization
 	)
+	target_precompile_headers(PulseForgeEditorCore PRIVATE
+		"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Source/Private/EditorCorePCH.h")
 endif()
