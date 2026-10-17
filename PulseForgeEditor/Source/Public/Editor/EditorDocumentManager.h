@@ -233,8 +233,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] EditorDocumentOpenPreference GetOpeningPreference() const noexcept { return m_OpeningPreference; }
 		bool SetOpeningPreference(EditorDocumentOpenPreference Preference) noexcept
 		{
-			if (IsCloseOperationActive())
-				return false;
+			if (IsCloseOperationActive()) return false;
 			m_OpeningPreference = Preference;
 			return true;
 		}
@@ -244,10 +243,7 @@ namespace PulseForgeEditor
 	private:
 		friend class EditorDocumentCloseBatch;
 
-		[[nodiscard]] bool IsCloseOperationActive() const noexcept
-		{
-			return m_CloseCallbackActive || m_CloseTransitionActive;
-		}
+		[[nodiscard]] bool IsCloseOperationActive() const noexcept { return m_CloseCallbackActive || m_CloseTransitionActive; }
 
 		class CloseCallbackScope final
 		{
@@ -255,14 +251,12 @@ namespace PulseForgeEditor
 			explicit CloseCallbackScope(const EditorDocumentManager& Manager) noexcept
 				: m_Manager(Manager), m_Entered(!Manager.IsCloseOperationActive())
 			{
-				if (m_Entered)
-					m_Manager.m_CloseCallbackActive = true;
+				if (m_Entered) m_Manager.m_CloseCallbackActive = true;
 			}
 
 			~CloseCallbackScope()
 			{
-				if (m_Entered)
-					m_Manager.m_CloseCallbackActive = false;
+				if (m_Entered) m_Manager.m_CloseCallbackActive = false;
 			}
 
 			[[nodiscard]] bool Entered() const noexcept { return m_Entered; }
@@ -278,14 +272,12 @@ namespace PulseForgeEditor
 			explicit CloseMutationScope(const EditorDocumentManager& Manager) noexcept
 				: m_Manager(Manager), m_Entered(!Manager.IsCloseOperationActive())
 			{
-				if (m_Entered)
-					m_Manager.m_CloseTransitionActive = true;
+				if (m_Entered) m_Manager.m_CloseTransitionActive = true;
 			}
 
 			~CloseMutationScope()
 			{
-				if (m_Entered)
-					m_Manager.m_CloseTransitionActive = false;
+				if (m_Entered) m_Manager.m_CloseTransitionActive = false;
 			}
 
 			[[nodiscard]] bool Entered() const noexcept { return m_Entered; }
@@ -296,8 +288,7 @@ namespace PulseForgeEditor
 		};
 
 		[[nodiscard]] std::expected<void, std::string> ClosePreparedBatch(
-			std::span<const EditorDocumentIdentity> Identities,
-			std::span<const std::string> HostIDs);
+			std::span<const EditorDocumentIdentity> Identities, std::span<const std::string> HostIDs);
 		[[nodiscard]] EditorDocumentHost* CreateHost(std::string ID, EditorDocumentHostRole Role,
 			EditorDocumentKind PlacementKind);
 		void RemoveSessionFromHost(const EditorDocumentIdentity& Identity, const std::string& HostID) noexcept;

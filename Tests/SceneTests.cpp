@@ -12,7 +12,7 @@ namespace PulseForge
 			return Runtime.GetFullSceneReconciliationCountForTesting();
 		}
 	};
-}
+} // namespace PulseForge
 
 namespace
 {
@@ -483,8 +483,7 @@ namespace
 		InvalidCapacity.MaxBodies = 0;
 		PhysicsSceneRuntime InvalidCapacityRuntime(InvalidCapacity);
 		const auto InvalidCapacityStart = InvalidCapacityRuntime.Start(Source);
-		PF_CHECK(Tests, !InvalidCapacityStart &&
-			InvalidCapacityStart.error().Code == PhysicsSceneRuntimeErrorCode::InvalidSettings);
+		PF_CHECK(Tests, !InvalidCapacityStart && InvalidCapacityStart.error().Code == PhysicsSceneRuntimeErrorCode::InvalidSettings);
 
 		PhysicsSceneRuntime Runtime(Description);
 		const auto RuntimeStart = Runtime.Start(Source);
@@ -544,8 +543,8 @@ namespace
 			PF_CHECK(Tests, First->ClearParent().has_value());
 			const auto AfterRejectedUpdate = First->GetTransform();
 			PF_CHECK(Tests, BeforeRejectedUpdate && AfterRejectedUpdate &&
-				AfterRejectedUpdate->Translation == BeforeRejectedUpdate->Translation &&
-				AfterRejectedUpdate->Rotation == BeforeRejectedUpdate->Rotation);
+								AfterRejectedUpdate->Translation == BeforeRejectedUpdate->Translation &&
+								AfterRejectedUpdate->Rotation == BeforeRejectedUpdate->Rotation);
 			PF_CHECK(Tests, Runtime.ApplyForce(FirstId, glm::vec3(0.0f)).has_value());
 		}
 		PF_CHECK(Tests, Second->RemoveRigidbody().has_value());
@@ -575,8 +574,7 @@ namespace
 		}
 		const auto RemovedComponentsForce = Runtime.ApplyForce(SecondId, { 1.0f, 0.0f, 0.0f });
 		PF_CHECK(Tests, !RemovedComponentsForce && RemovedComponentsForce.error().Code == PhysicsSceneRuntimeErrorCode::MissingBody);
-		if (Fourth)
-			PF_CHECK(Tests, Source.DestroyEntity(*Fourth).has_value());
+		if (Fourth) PF_CHECK(Tests, Source.DestroyEntity(*Fourth).has_value());
 		const auto ReusedFifth = Source.CreateEntityWithUUID(FifthId, "Body replacing destroyed physics entity");
 		PF_CHECK(Tests, ReusedFifth.has_value());
 		if (ReusedFifth)
@@ -602,7 +600,7 @@ namespace
 		PF_CHECK(Tests, Runtime.Advance(Source, Timestep(FixedStep)).has_value());
 		const auto AfterMotionTransition = First->GetTransform();
 		PF_CHECK(Tests, BeforeMotionTransition && AfterMotionTransition &&
-			std::abs(AfterMotionTransition->Translation.x - BeforeMotionTransition->Translation.x) < 0.001f);
+							std::abs(AfterMotionTransition->Translation.x - BeforeMotionTransition->Translation.x) < 0.001f);
 		PF_CHECK(Tests, Runtime.ApplyForce(FirstId, { 100.0f, 0.0f, 0.0f }).has_value());
 		PF_CHECK(Tests, Runtime.Advance(Source, Timestep(FixedStep)).has_value());
 		const auto MovingOldIncarnation = First->GetTransform();
@@ -726,8 +724,8 @@ namespace
 		{
 			PF_CHECK(Tests, HeavyBody->SetParent(*Parent).has_value());
 			const auto RejectedParentedBody = MassRuntime.Advance(MassScene, Timestep(0.0));
-			PF_CHECK(Tests,
-				!RejectedParentedBody && RejectedParentedBody.error().Code == PhysicsSceneRuntimeErrorCode::UnsupportedHierarchy);
+			PF_CHECK(
+				Tests, !RejectedParentedBody && RejectedParentedBody.error().Code == PhysicsSceneRuntimeErrorCode::UnsupportedHierarchy);
 			PF_CHECK(Tests, HeavyBody->ClearParent().has_value());
 			PF_CHECK(Tests, MassRuntime.Advance(MassScene, Timestep(0.0)).has_value());
 			PF_CHECK(Tests, MassRuntime.ApplyForce(HeavyBody->GetUUID(), { 1.0f, 0.0f, 0.0f }).has_value());
@@ -776,13 +774,11 @@ namespace
 			PF_CHECK(Tests, FrictionRuntime.Advance(FrictionScene, Timestep(FixedStep)).has_value());
 		const auto LowFrictionAfterSlide = LowFrictionBody->GetTransform();
 		const auto UpdatedFrictionAfterSlide = UpdatedFrictionBody->GetTransform();
-		PF_CHECK(Tests,
-			LowFrictionBeforeEdit && UpdatedFrictionBeforeEdit && LowFrictionAfterSlide && UpdatedFrictionAfterSlide);
+		PF_CHECK(Tests, LowFrictionBeforeEdit && UpdatedFrictionBeforeEdit && LowFrictionAfterSlide && UpdatedFrictionAfterSlide);
 		if (LowFrictionBeforeEdit && UpdatedFrictionBeforeEdit && LowFrictionAfterSlide && UpdatedFrictionAfterSlide)
 		{
 			const float LowFrictionTravel = LowFrictionAfterSlide->Translation.x - LowFrictionBeforeEdit->Translation.x;
-			const float UpdatedFrictionTravel =
-				UpdatedFrictionAfterSlide->Translation.x - UpdatedFrictionBeforeEdit->Translation.x;
+			const float UpdatedFrictionTravel = UpdatedFrictionAfterSlide->Translation.x - UpdatedFrictionBeforeEdit->Translation.x;
 			PF_CHECK(Tests, LowFrictionTravel > UpdatedFrictionTravel + 0.5f);
 		}
 		FrictionRuntime.Stop();
@@ -852,8 +848,8 @@ namespace
 		for (int Index = 0; Index < 60; ++Index)
 			PF_CHECK(Tests, StaticEditRuntime.Advance(StaticEditScene, Timestep(FixedStep)).has_value());
 		const auto SettledAfterFloorMove = BodyAboveMovedFloor->GetTransform();
-		PF_CHECK(Tests,
-			SettledAfterFloorMove && SettledAfterFloorMove->Translation.y > 0.9f && SettledAfterFloorMove->Translation.y < 1.1f);
+		PF_CHECK(
+			Tests, SettledAfterFloorMove && SettledAfterFloorMove->Translation.y > 0.9f && SettledAfterFloorMove->Translation.y < 1.1f);
 		StaticEditRuntime.Stop();
 
 		Scene ShapeEditScene;
@@ -894,8 +890,8 @@ namespace
 		for (int Index = 0; Index < 90; ++Index)
 			PF_CHECK(Tests, ShapeEditRuntime.Advance(ShapeEditScene, Timestep(FixedStep)).has_value());
 		const auto SettledAfterShapeEdit = BodyAboveEditedFloor->GetTransform();
-		PF_CHECK(Tests,
-			SettledAfterShapeEdit && SettledAfterShapeEdit->Translation.y > 0.9f && SettledAfterShapeEdit->Translation.y < 1.1f);
+		PF_CHECK(
+			Tests, SettledAfterShapeEdit && SettledAfterShapeEdit->Translation.y > 0.9f && SettledAfterShapeEdit->Translation.y < 1.1f);
 		ShapeEditRuntime.Stop();
 
 		Scene IdentityScene;

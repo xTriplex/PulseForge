@@ -17,7 +17,7 @@ namespace PulseForge
 		private:
 			std::size_t& m_Depth;
 		};
-	}
+	} // namespace
 
 	LayerStack::~LayerStack()
 	{
@@ -26,10 +26,8 @@ namespace PulseForge
 
 	void LayerStack::EnsureMutationAllowed() const
 	{
-		if (m_DispatchDepth != 0)
-			throw std::logic_error("LayerStack mutation is not allowed during layer dispatch");
-		if (m_LifecycleCallbackDepth != 0)
-			throw std::logic_error("LayerStack mutation is not allowed from a layer lifecycle callback");
+		if (m_DispatchDepth != 0) throw std::logic_error("LayerStack mutation is not allowed during layer dispatch");
+		if (m_LifecycleCallbackDepth != 0) throw std::logic_error("LayerStack mutation is not allowed from a layer lifecycle callback");
 	}
 
 	void LayerStack::Clear()
@@ -68,8 +66,7 @@ namespace PulseForge
 		for (auto It = m_Layers.rbegin(); It != m_Layers.rend(); ++It)
 		{
 			(*It)->OnEvent(EventValue);
-			if (EventValue.bHandled)
-				break;
+			if (EventValue.bHandled) break;
 		}
 	}
 

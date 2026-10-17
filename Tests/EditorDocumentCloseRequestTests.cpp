@@ -18,8 +18,7 @@ void RunEditorDocumentCloseRequestTests(TestRunner& Tests)
 
 		~Model() noexcept override
 		{
-			if (DestructionCount)
-				++*DestructionCount;
+			if (DestructionCount) ++*DestructionCount;
 		}
 	};
 
@@ -37,7 +36,8 @@ void RunEditorDocumentCloseRequestTests(TestRunner& Tests)
 	Adapter.IsEligible = [](const EditorDocumentEditorContext& Context)
 	{ return Context.Identity.Kind == EditorDocumentKind::Texture && Context.ProjectRelativePath.extension() == ".fixture"; };
 	Adapter.LoadSession =
-		[&SavedValues, &EditorStateDestructions](const EditorDocumentEditorContext& Context) -> std::expected<std::unique_ptr<EditorDocumentEditorState>, std::string>
+		[&SavedValues, &EditorStateDestructions](
+			const EditorDocumentEditorContext& Context) -> std::expected<std::unique_ptr<EditorDocumentEditorState>, std::string>
 	{
 		auto State = std::make_unique<Model>();
 		State->DestructionCount = &EditorStateDestructions;

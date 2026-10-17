@@ -102,12 +102,7 @@ namespace PulseForge
 			auto Playback = Engine.Play(*Clip, Description);
 			if (!Playback)
 				return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::PlaybackFailed, Playback.error().Message));
-			return Voice{
-				EntityValue,
-				std::move(*Playback),
-				SourceComponent.AudioAsset,
-				SourceComponent.Volume,
-				SourceComponent.Looping,
+			return Voice{ EntityValue, std::move(*Playback), SourceComponent.AudioAsset, SourceComponent.Volume, SourceComponent.Looping,
 				SourceComponent.Spatialized };
 		}
 

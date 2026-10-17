@@ -63,8 +63,7 @@ namespace PulseForgeEditor
 					std::expected<void, std::string> Result;
 					{
 						EditorDocumentManager::CloseMutationScope Scope(Documents);
-						if (!Scope.Entered())
-							return std::unexpected("A document close transition is already in progress.");
+						if (!Scope.Entered()) return std::unexpected("A document close transition is already in progress.");
 						Result = Editors.PrepareClose(*Session);
 					}
 					if (!Result)

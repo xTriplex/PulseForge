@@ -176,18 +176,10 @@ namespace
 		class MutationAttemptingLayer final : public PulseForge::Layer
 		{
 		public:
-			MutationAttemptingLayer(
-				PulseForge::LayerStack& Stack,
-				LayerLifecycle& RejectedLifecycle,
-				std::vector<int>& UpdateOrder,
-				std::vector<int>& EventOrder,
-				int& RejectedMutationCount)
-				: Layer("MutationAttemptingLayer"),
-				  m_Stack(Stack),
-				  m_RejectedLifecycle(RejectedLifecycle),
-				  m_UpdateOrder(UpdateOrder),
-				  m_EventOrder(EventOrder),
-				  m_RejectedMutationCount(RejectedMutationCount)
+			MutationAttemptingLayer(PulseForge::LayerStack& Stack, LayerLifecycle& RejectedLifecycle, std::vector<int>& UpdateOrder,
+				std::vector<int>& EventOrder, int& RejectedMutationCount)
+				: Layer("MutationAttemptingLayer"), m_Stack(Stack), m_RejectedLifecycle(RejectedLifecycle), m_UpdateOrder(UpdateOrder),
+				  m_EventOrder(EventOrder), m_RejectedMutationCount(RejectedMutationCount)
 			{
 			}
 
@@ -244,8 +236,8 @@ namespace
 
 		PulseForge::LayerStack Stack;
 		Stack.PushLayer(std::make_unique<VisitingLayer>(1, UpdateOrder, EventOrder));
-		Stack.PushLayer(std::make_unique<MutationAttemptingLayer>(
-			Stack, RejectedLayerLifecycle, UpdateOrder, EventOrder, RejectedMutationCount));
+		Stack.PushLayer(
+			std::make_unique<MutationAttemptingLayer>(Stack, RejectedLayerLifecycle, UpdateOrder, EventOrder, RejectedMutationCount));
 		Stack.PushOverlay(std::make_unique<VisitingLayer>(3, UpdateOrder, EventOrder));
 		Stack.UpdateLayers(PulseForge::Timestep{});
 		PulseForge::KeyPressedEvent Event(65, 0);
@@ -335,18 +327,10 @@ namespace
 		class ReentrantFailingLayer final : public PulseForge::Layer
 		{
 		public:
-			ReentrantFailingLayer(
-				PulseForge::LayerStack& Stack,
-				LayerLifecycle& NestedLayerLifecycle,
-				int& DetachCount,
-				int& DestroyCount,
+			ReentrantFailingLayer(PulseForge::LayerStack& Stack, LayerLifecycle& NestedLayerLifecycle, int& DetachCount, int& DestroyCount,
 				bool& NestedMutationRejected)
-				: Layer("ReentrantFailingLayer"),
-				  m_Stack(Stack),
-				  m_NestedLayerLifecycle(NestedLayerLifecycle),
-				  m_DetachCount(DetachCount),
-				  m_DestroyCount(DestroyCount),
-				  m_NestedMutationRejected(NestedMutationRejected)
+				: Layer("ReentrantFailingLayer"), m_Stack(Stack), m_NestedLayerLifecycle(NestedLayerLifecycle), m_DetachCount(DetachCount),
+				  m_DestroyCount(DestroyCount), m_NestedMutationRejected(NestedMutationRejected)
 			{
 			}
 

@@ -35,31 +35,27 @@ namespace
 
 		~DirectCloseTestEditorState() noexcept override
 		{
-			if (DestructionCount)
-				++*DestructionCount;
-			if (!Manager)
-				return;
+			if (DestructionCount) ++*DestructionCount;
+			if (!Manager) return;
 
 			const auto& ReadOnlyManager = static_cast<const PulseForgeEditor::EditorDocumentManager&>(*Manager);
 			const auto* Host = ReadOnlyManager.FindHost(HostID);
 			if (ManagerReferencesRemoved)
-				*ManagerReferencesRemoved = !Manager->GetSessions().contains(Identity) &&
+				*ManagerReferencesRemoved =
+					!Manager->GetSessions().contains(Identity) &&
 					(!Host || (std::find(Host->Documents.begin(), Host->Documents.end(), Identity) == Host->Documents.end() &&
-						(!Host->ActiveDocument || *Host->ActiveDocument != Identity)));
+								  (!Host->ActiveDocument || *Host->ActiveDocument != Identity)));
 			try
 			{
 				if (ReentrantOpenRejected)
-					*ReentrantOpenRejected = !Manager->Open(
-						Identity, {}, "reentrant", PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip);
-				if (ReentrantClearRejected)
-					*ReentrantClearRejected = !Manager->ClearProject(Identity.Project);
+					*ReentrantOpenRejected =
+						!Manager->Open(Identity, {}, "reentrant", PulseForgeEditor::EditorDocumentOpenPreference::MainDocumentStrip);
+				if (ReentrantClearRejected) *ReentrantClearRejected = !Manager->ClearProject(Identity.Project);
 			}
 			catch (...)
 			{
-				if (ReentrantOpenRejected)
-					*ReentrantOpenRejected = false;
-				if (ReentrantClearRejected)
-					*ReentrantClearRejected = false;
+				if (ReentrantOpenRejected) *ReentrantOpenRejected = false;
+				if (ReentrantClearRejected) *ReentrantClearRejected = false;
 			}
 		}
 	};
@@ -71,16 +67,14 @@ namespace
 		const auto Project = UUID::Generate();
 		const auto Asset = UUID::Generate();
 		PF_CHECK(Tests, Project && Asset);
-		if (!Project || !Asset)
-			return;
+		if (!Project || !Asset) return;
 
 		const EditorDocumentIdentity Identity{ *Project, *Asset, EditorDocumentKind::Material };
 		EditorDocumentManager Manager;
-		const auto Open = Manager.Open(
-			Identity, "Assets/Materials/Close.material", "Close.material", EditorDocumentOpenPreference::MainDocumentStrip);
+		const auto Open =
+			Manager.Open(Identity, "Assets/Materials/Close.material", "Close.material", EditorDocumentOpenPreference::MainDocumentStrip);
 		PF_CHECK(Tests, Open.has_value());
-		if (!Open)
-			return;
+		if (!Open) return;
 
 		size_t DestructionCount = 0;
 		bool ManagerReferencesRemoved = false;
@@ -104,20 +98,21 @@ namespace
 		const std::vector<EditorDocumentIdentity> OriginalHostDocuments = OriginalHost->Documents;
 		const auto OriginalActiveDocument = OriginalHost->ActiveDocument;
 
-		PF_CHECK(Tests, Manager.Close(Identity, EditorDocumentCloseChoice::Cancel, {}, {}) ==
-			EditorDocumentCloseStatus::Cancelled);
+		PF_CHECK(Tests, Manager.Close(Identity, EditorDocumentCloseChoice::Cancel, {}, {}) == EditorDocumentCloseStatus::Cancelled);
 		bool MarkSavedDuringCloseRejected = false;
 		const auto FailedSave = Manager.Close(Identity, EditorDocumentCloseChoice::Save,
 			[&](const EditorDocumentSession&, uint64_t Revision)
 			{
 				MarkSavedDuringCloseRejected = !Manager.MarkSaved(Identity, Revision);
 				return false;
-			}, {});
+			},
+			{});
 		PF_CHECK(Tests, FailedSave == EditorDocumentCloseStatus::SaveFailed && MarkSavedDuringCloseRejected);
 		PF_CHECK(Tests, Manager.Find(Identity) == OriginalSession && Manager.Find(Identity)->EditorState.get() == OriginalState &&
-			Manager.Find(Identity)->Revision == InitialRevision && Manager.Find(Identity)->SavedRevision == InitialSavedRevision &&
-			Manager.FindHost(Open->HostID)->Documents == OriginalHostDocuments &&
-			Manager.FindHost(Open->HostID)->ActiveDocument == OriginalActiveDocument && DestructionCount == 0);
+							Manager.Find(Identity)->Revision == InitialRevision &&
+							Manager.Find(Identity)->SavedRevision == InitialSavedRevision &&
+							Manager.FindHost(Open->HostID)->Documents == OriginalHostDocuments &&
+							Manager.FindHost(Open->HostID)->ActiveDocument == OriginalActiveDocument && DestructionCount == 0);
 
 		bool StandardSaveExceptionEscaped = false;
 		EditorDocumentCloseStatus StandardSaveExceptionStatus = EditorDocumentCloseStatus::Missing;
@@ -135,8 +130,8 @@ namespace
 		EditorDocumentCloseStatus UnknownSaveExceptionStatus = EditorDocumentCloseStatus::Missing;
 		try
 		{
-			UnknownSaveExceptionStatus = Manager.Close(Identity, EditorDocumentCloseChoice::Save,
-				[](const EditorDocumentSession&, uint64_t) -> bool { throw 17; }, {});
+			UnknownSaveExceptionStatus = Manager.Close(
+				Identity, EditorDocumentCloseChoice::Save, [](const EditorDocumentSession&, uint64_t) -> bool { throw 17; }, {});
 		}
 		catch (...)
 		{
@@ -145,7 +140,7 @@ namespace
 		PF_CHECK(Tests, !UnknownSaveExceptionEscaped && UnknownSaveExceptionStatus == EditorDocumentCloseStatus::SaveFailed);
 
 		PF_CHECK(Tests, Manager.Close(Identity, EditorDocumentCloseChoice::Discard, {},
-			[](const EditorDocumentSession&) { return false; }) == EditorDocumentCloseStatus::DiscardFailed);
+							[](const EditorDocumentSession&) { return false; }) == EditorDocumentCloseStatus::DiscardFailed);
 		bool DiscardExceptionEscaped = false;
 		EditorDocumentCloseStatus DiscardExceptionStatus = EditorDocumentCloseStatus::Missing;
 		try
@@ -159,23 +154,27 @@ namespace
 		}
 		PF_CHECK(Tests, !DiscardExceptionEscaped && DiscardExceptionStatus == EditorDocumentCloseStatus::DiscardFailed);
 		PF_CHECK(Tests, Manager.Find(Identity) == OriginalSession && Manager.Find(Identity)->IsDirty() &&
-			Manager.Find(Identity)->EditorState.get() == OriginalState && Manager.FindHost(Open->HostID)->Documents == OriginalHostDocuments &&
-			Manager.FindHost(Open->HostID)->ActiveDocument == OriginalActiveDocument && DestructionCount == 0);
-		PF_CHECK(Tests, Manager.Close(Identity, EditorDocumentCloseChoice::Cancel, {}, {}) ==
-			EditorDocumentCloseStatus::Cancelled);
+							Manager.Find(Identity)->EditorState.get() == OriginalState &&
+							Manager.FindHost(Open->HostID)->Documents == OriginalHostDocuments &&
+							Manager.FindHost(Open->HostID)->ActiveDocument == OriginalActiveDocument && DestructionCount == 0);
+		PF_CHECK(Tests, Manager.Close(Identity, EditorDocumentCloseChoice::Cancel, {}, {}) == EditorDocumentCloseStatus::Cancelled);
 
 		bool EditDuringSaveAccepted = false;
 		PF_CHECK(Tests, Manager.Close(Identity, EditorDocumentCloseChoice::Save,
-			[&](const EditorDocumentSession&, uint64_t) { EditDuringSaveAccepted = Manager.MarkEdited(Identity); return true; },
-			{}) == EditorDocumentCloseStatus::StillDirty);
+							[&](const EditorDocumentSession&, uint64_t)
+							{
+								EditDuringSaveAccepted = Manager.MarkEdited(Identity);
+								return true;
+							},
+							{}) == EditorDocumentCloseStatus::StillDirty);
 		PF_CHECK(Tests, EditDuringSaveAccepted && Manager.Find(Identity)->Revision == InitialRevision + 1 &&
-			Manager.Find(Identity)->SavedRevision == InitialRevision && Manager.Find(Identity)->EditorState.get() == OriginalState &&
-			DestructionCount == 0);
+							Manager.Find(Identity)->SavedRevision == InitialRevision &&
+							Manager.Find(Identity)->EditorState.get() == OriginalState && DestructionCount == 0);
 
 		PF_CHECK(Tests, Manager.Close(Identity, EditorDocumentCloseChoice::Save,
-			[](const EditorDocumentSession&, uint64_t) { return true; }, {}) == EditorDocumentCloseStatus::Closed);
-		PF_CHECK(Tests, !Manager.Find(Identity) && DestructionCount == 1 && ManagerReferencesRemoved &&
-			ReentrantOpenRejected && ReentrantClearRejected);
+							[](const EditorDocumentSession&, uint64_t) { return true; }, {}) == EditorDocumentCloseStatus::Closed);
+		PF_CHECK(Tests, !Manager.Find(Identity) && DestructionCount == 1 && ManagerReferencesRemoved && ReentrantOpenRejected &&
+							ReentrantClearRejected);
 
 		const auto DiscardAsset = UUID::Generate();
 		PF_CHECK(Tests, DiscardAsset.has_value());
@@ -183,35 +182,31 @@ namespace
 		{
 			const EditorDocumentIdentity DiscardIdentity{ *Project, *DiscardAsset, EditorDocumentKind::Material };
 			EditorDocumentManager DiscardManager;
-			const auto DiscardOpen = DiscardManager.Open(
-				DiscardIdentity, {}, "discard target", EditorDocumentOpenPreference::MainDocumentStrip);
+			const auto DiscardOpen =
+				DiscardManager.Open(DiscardIdentity, {}, "discard target", EditorDocumentOpenPreference::MainDocumentStrip);
 			PF_CHECK(Tests, DiscardOpen && DiscardManager.MarkEdited(DiscardIdentity));
 			if (DiscardOpen)
 			{
 				PF_CHECK(Tests, DiscardManager.Close(DiscardIdentity, EditorDocumentCloseChoice::Discard, {},
-					[](const EditorDocumentSession&) { return true; }) == EditorDocumentCloseStatus::Closed);
-				PF_CHECK(Tests, !DiscardManager.Find(DiscardIdentity) &&
-					DiscardManager.FindHost(DiscardOpen->HostID)->Documents.empty());
+									[](const EditorDocumentSession&) { return true; }) == EditorDocumentCloseStatus::Closed);
+				PF_CHECK(Tests, !DiscardManager.Find(DiscardIdentity) && DiscardManager.FindHost(DiscardOpen->HostID)->Documents.empty());
 			}
 		}
 
 		const auto ReentrantProject = UUID::Generate();
 		PF_CHECK(Tests, ReentrantProject.has_value());
-		if (!ReentrantProject)
-			return;
+		if (!ReentrantProject) return;
 		auto ExerciseReentrantMutation = [&](int Operation)
 		{
 			const auto ReentrantAsset = UUID::Generate();
 			PF_CHECK(Tests, ReentrantAsset.has_value());
-			if (!ReentrantAsset)
-				return;
+			if (!ReentrantAsset) return;
 			const EditorDocumentIdentity ReentrantIdentity{ *ReentrantProject, *ReentrantAsset, EditorDocumentKind::Material };
 			EditorDocumentManager ReentrantManager;
-			const auto ReentrantOpen = ReentrantManager.Open(ReentrantIdentity, {}, "reentrant target",
-				EditorDocumentOpenPreference::NewNativeWindow);
+			const auto ReentrantOpen =
+				ReentrantManager.Open(ReentrantIdentity, {}, "reentrant target", EditorDocumentOpenPreference::NewNativeWindow);
 			PF_CHECK(Tests, ReentrantOpen && ReentrantManager.MarkEdited(ReentrantIdentity));
-			if (!ReentrantOpen)
-				return;
+			if (!ReentrantOpen) return;
 			size_t ReentrantDestructionCount = 0;
 			auto ReentrantState = std::make_unique<DirectCloseTestEditorState>();
 			ReentrantState->DestructionCount = &ReentrantDestructionCount;
@@ -222,40 +217,41 @@ namespace
 			const auto OuterStatus = ReentrantManager.Close(ReentrantIdentity, EditorDocumentCloseChoice::Save,
 				[&](const EditorDocumentSession&, uint64_t)
 				{
-				switch (Operation)
-				{
-				case 0:
-					MutationRejected = ReentrantManager.Close(ReentrantIdentity, EditorDocumentCloseChoice::Discard, {},
-						[](const EditorDocumentSession&) { return true; }) ==
-						EditorDocumentCloseStatus::MutationRejectedDuringCloseTransition;
-					break;
-				case 1:
-					MutationRejected = !ReentrantManager.ClearProject(ReentrantIdentity.Project);
-					break;
-				case 2:
-					MutationRejected = !ReentrantManager.Transfer(ReentrantIdentity, EditorDocumentManager::MainHostID, 0);
-					break;
-				default:
-				{
-					const auto AnotherAsset = UUID::Generate();
-					MutationRejected = AnotherAsset && !ReentrantManager.Open(
-						{ ReentrantIdentity.Project, *AnotherAsset, EditorDocumentKind::Material }, {}, "reentrant open",
-						EditorDocumentOpenPreference::MainDocumentStrip);
-					break;
-				}
-				}
-				return false;
-				}, {});
+					switch (Operation)
+					{
+					case 0:
+						MutationRejected = ReentrantManager.Close(ReentrantIdentity, EditorDocumentCloseChoice::Discard, {},
+											   [](const EditorDocumentSession&)
+											   { return true; }) == EditorDocumentCloseStatus::MutationRejectedDuringCloseTransition;
+						break;
+					case 1:
+						MutationRejected = !ReentrantManager.ClearProject(ReentrantIdentity.Project);
+						break;
+					case 2:
+						MutationRejected = !ReentrantManager.Transfer(ReentrantIdentity, EditorDocumentManager::MainHostID, 0);
+						break;
+					default:
+					{
+						const auto AnotherAsset = UUID::Generate();
+						MutationRejected = AnotherAsset && !ReentrantManager.Open(
+															   { ReentrantIdentity.Project, *AnotherAsset, EditorDocumentKind::Material },
+															   {}, "reentrant open", EditorDocumentOpenPreference::MainDocumentStrip);
+						break;
+					}
+					}
+					return false;
+				},
+				{});
 			PF_CHECK(Tests, OuterStatus == EditorDocumentCloseStatus::SaveFailed && MutationRejected);
 			const auto* HostAfter = ReentrantManager.FindHost(ReentrantOpen->HostID);
 			PF_CHECK(Tests, ReentrantManager.Find(ReentrantIdentity) == TargetBefore && TargetBefore->IsDirty() && HostAfter &&
-				TargetBefore->EditorState.get() == OriginalReentrantState && ReentrantDestructionCount == 0 &&
-				HostAfter->Documents.size() == 1 && HostAfter->Documents.front() == ReentrantIdentity &&
-				HostAfter->ActiveDocument == ReentrantIdentity);
+								TargetBefore->EditorState.get() == OriginalReentrantState && ReentrantDestructionCount == 0 &&
+								HostAfter->Documents.size() == 1 && HostAfter->Documents.front() == ReentrantIdentity &&
+								HostAfter->ActiveDocument == ReentrantIdentity);
 			PF_CHECK(Tests, ReentrantManager.Close(ReentrantIdentity, EditorDocumentCloseChoice::Cancel, {}, {}) ==
-				EditorDocumentCloseStatus::Cancelled);
+								EditorDocumentCloseStatus::Cancelled);
 			PF_CHECK(Tests, ReentrantManager.Close(ReentrantIdentity, EditorDocumentCloseChoice::Save,
-				[](const EditorDocumentSession&, uint64_t) { return true; }, {}) == EditorDocumentCloseStatus::Closed);
+								[](const EditorDocumentSession&, uint64_t) { return true; }, {}) == EditorDocumentCloseStatus::Closed);
 			PF_CHECK(Tests, !ReentrantManager.Find(ReentrantIdentity) && ReentrantDestructionCount == 1);
 		};
 		for (int Operation = 0; Operation < 4; ++Operation)
@@ -547,7 +543,7 @@ namespace
 			[&Tests, &Manager, &MaterialA](const EditorDocumentSession& Session, uint64_t Revision)
 			{
 				PF_CHECK(Tests, Revision == Session.Revision && std::as_const(Manager).Find(MaterialA) == &Session &&
-					Manager.Find(MaterialA) == nullptr);
+									Manager.Find(MaterialA) == nullptr);
 				PF_CHECK(Tests, Manager.MarkEdited(MaterialA));
 				return true;
 			},
@@ -568,11 +564,11 @@ namespace
 		const auto RemovedProjectHosts = Manager.ClearProject(*OtherProject);
 		PF_CHECK(Tests, RemovedProjectHosts && RemovedProjectHosts->size() == 2);
 		if (!RemovedProjectHosts) return;
-		PF_CHECK(Tests,
-			OtherProjectTextureOpen && OtherProjectOpen &&
-				std::find(RemovedProjectHosts->begin(), RemovedProjectHosts->end(), OtherProjectTextureOpen->HostID) !=
-					RemovedProjectHosts->end() &&
-				std::find(RemovedProjectHosts->begin(), RemovedProjectHosts->end(), OtherProjectOpen->HostID) != RemovedProjectHosts->end());
+		PF_CHECK(Tests, OtherProjectTextureOpen && OtherProjectOpen &&
+							std::find(RemovedProjectHosts->begin(), RemovedProjectHosts->end(), OtherProjectTextureOpen->HostID) !=
+								RemovedProjectHosts->end() &&
+							std::find(RemovedProjectHosts->begin(), RemovedProjectHosts->end(), OtherProjectOpen->HostID) !=
+								RemovedProjectHosts->end());
 		PF_CHECK(Tests, Manager.GetSessions().size() == 7);
 		PF_CHECK(Tests, !Manager.Find(OtherProjectMaterial));
 		PF_CHECK(Tests, !Manager.Find(OtherProjectTexture));
