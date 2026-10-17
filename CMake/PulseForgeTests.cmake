@@ -153,6 +153,7 @@ if(BUILD_TESTING)
 	add_executable(PulseForgeEditorCoreTests
 		Tests/PulseForgeEditorCoreTests.cpp
 		Tests/EditorDocumentCloseRequestTests.cpp
+		Tests/EditorDocumentTabInteractionTests.cpp
 		Tests/EditorSceneEntityCommandTests.cpp
 		Tests/EditorSceneViewportInteractionTests.cpp
 		Tests/EditorViewportGizmoGeometryTests.cpp

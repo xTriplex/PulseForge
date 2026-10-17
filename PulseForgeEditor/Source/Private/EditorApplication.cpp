@@ -73,6 +73,7 @@
 #include "Editor/EditorNativeWindowBoundsPolicy.h"
 #include "Editor/EditorDocumentHostPolicy.h"
 #include "Editor/EditorDocumentTabPolicy.h"
+#include "Editor/EditorDocumentTabInteraction.h"
 #include "Editor/EditorDocumentWorkspace.h"
 #include "Editor/EditorDocumentWorkspaceStore.h"
 #include "Editor/EditorDocumentCloseRequest.h"
@@ -391,25 +392,6 @@ namespace
 		using ContentFolderNode = PulseForgeEditor::EditorContentFolderNode;
 		using AssetBrowserPresentation = PulseForgeEditor::EditorContentBrowserAssetPresentation;
 		using ProjectAssetDestinationCreateKind = PulseForgeEditor::ProjectAssetDestinationCreateKind;
-
-		struct PendingDocumentTransfer
-		{
-			PulseForgeEditor::EditorDocumentIdentity Identity;
-			std::string DestinationHostID;
-			size_t DestinationIndex = 0;
-			bool CreateNativeHost = false;
-			std::optional<PulseForgeEditor::EditorDocumentHost::WindowBounds> NativeHostBounds;
-		};
-
-		struct DocumentTabDropTarget
-		{
-			std::string HostID;
-			ImGuiID ViewportID = 0;
-			ImVec2 Minimum{ 0.0f, 0.0f };
-			ImVec2 Maximum{ 0.0f, 0.0f };
-			size_t BeforeIndex = 0;
-			size_t AfterIndex = 0;
-		};
 
 		struct DocumentTabTestPointerTarget
 		{
@@ -1044,7 +1026,7 @@ namespace
 			QueueDocumentTabReorderTestInput();
 			QueueDocumentTabGroupTestInput();
 			ImGui::NewFrame();
-			m_DocumentTabDropTargets.clear();
+			m_DocumentTabInteraction.BeginFrame();
 			for (DocumentTabTestPointerTarget& Target : m_DocumentHostTabReattachInvalidDropTargets)
 				Target.Available = false;
 			m_DocumentHostTabReorderTestFirstTabCenterValid = false;
@@ -5248,117 +5230,56 @@ namespace
 			bool CreateNativeHost = false,
 			std::optional<PulseForgeEditor::EditorDocumentHost::WindowBounds> NativeHostBounds = std::nullopt)
 		{
-			if (m_PendingDocumentTransfer)
-				return;
-			m_PendingDocumentTransfer = PendingDocumentTransfer{
-				Identity, std::move(DestinationHostID), Index, CreateNativeHost, std::move(NativeHostBounds) };
+			(void)m_DocumentTabInteraction.QueueTransfer(PulseForgeEditor::EditorDocumentTransferRequest{
+				Identity, std::move(DestinationHostID), Index, CreateNativeHost, std::move(NativeHostBounds) });
 		}
 
 		void ProcessReleasedDocumentTabDrag()
 		{
 			const ImGuiIO& IO = ImGui::GetIO();
-			const auto CurrentPosition = PulseForgeEditor::IsUsableDocumentTabPointerPosition(
-				IO.MousePos.x, IO.MousePos.y)
-				? std::optional<PulseForgeEditor::DocumentTabPointerPosition>(
-					PulseForgeEditor::DocumentTabPointerPosition{ IO.MousePos.x, IO.MousePos.y })
-				: std::nullopt;
-			if (!IO.MouseReleased[ImGuiMouseButton_Left])
-			{
-				if (m_ActiveDocumentTabDrag && IO.MouseDown[ImGuiMouseButton_Left] && CurrentPosition)
-					m_ActiveDocumentTabDragLastPosition = CurrentPosition;
-				if (!IO.MouseDown[ImGuiMouseButton_Left] && !ImGui::GetDragDropPayload())
-				{
-					m_ActiveDocumentTabDrag.reset();
-					m_ActiveDocumentTabDragStart.reset();
-					m_ActiveDocumentTabDragLastPosition.reset();
-				}
-				return;
-			}
-
-			if (!m_ActiveDocumentTabDrag)
-				return;
-			// The captured identity remains authoritative when a cross-viewport release clears ImGui's payload.
-			const PulseForgeEditor::EditorDocumentIdentity Identity = *m_ActiveDocumentTabDrag;
-			m_ActiveDocumentTabDrag.reset();
-			const auto LastValidPosition = m_ActiveDocumentTabDragLastPosition;
-			const auto ReleasePosition = PulseForgeEditor::ResolveDocumentTabReleasePosition(
-				IO.MousePos.x, IO.MousePos.y, LastValidPosition);
-			const ImVec2 DragStart = m_ActiveDocumentTabDragStart.value_or(
-				ReleasePosition ? ImVec2(ReleasePosition->X, ReleasePosition->Y) : ImVec2(-FLT_MAX, -FLT_MAX));
-			m_ActiveDocumentTabDragStart.reset();
-			m_ActiveDocumentTabDragLastPosition.reset();
-			if (!ReleasePosition || !PulseForgeEditor::IsUsableDocumentTabPointerPosition(DragStart.x, DragStart.y))
-				return;
-			const ImVec2 MousePosition(ReleasePosition->X, ReleasePosition->Y);
-			const auto StartPosition = PulseForgeEditor::DocumentTabPointerPosition{ DragStart.x, DragStart.y };
-			const float DragDistanceSquared = PulseForgeEditor::CalculateDocumentTabDragDistanceSquared(
-				StartPosition, CurrentPosition, LastValidPosition,
-				IO.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left]);
-
-			const bool TransferQueued = m_PendingDocumentTransfer &&
-				m_PendingDocumentTransfer->Identity == Identity;
-			const auto* Session = m_Documents.Find(Identity);
+			const auto ActiveIdentity = m_DocumentTabInteraction.ActiveDragIdentity();
+			const auto* Session = ActiveIdentity ? m_Documents.Find(*ActiveIdentity) : nullptr;
 			const auto* SourceHost = Session ? m_Documents.FindHost(Session->HostID) : nullptr;
-			const auto DropTarget = CurrentPosition
-				? FindDocumentTabDropTarget(MousePosition, IO.MouseHoveredViewport)
-				: std::nullopt;
-			const bool SourceIsMainHost = SourceHost &&
-				SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Main;
-			const bool SourceIsNativeHost = SourceHost &&
-				SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Native;
-			const bool CanCreateNativeHost = PulseForgeEditor::CanDetachDocumentTabToNativeHost(
-				SourceIsMainHost, SourceIsNativeHost, IO.MouseHoveredViewport == 0);
-			const PulseForgeEditor::DocumentTabReleaseAction Action =
-				PulseForgeEditor::ResolveDocumentTabReleaseAction(
-					true,
-					true,
-					TransferQueued,
-					DragDistanceSquared,
-					IO.MouseDragThreshold,
-					CanCreateNativeHost,
-					Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level,
-					DropTarget.has_value());
-			if (Action == PulseForgeEditor::DocumentTabReleaseAction::TransferToStrip && DropTarget)
+			const PulseForgeEditor::EditorDocumentTabDragFrame Frame{ .LeftButtonReleased = IO.MouseReleased[ImGuiMouseButton_Left],
+				.LeftButtonDown = IO.MouseDown[ImGuiMouseButton_Left],
+				.ImGuiPayloadActive = ImGui::GetDragDropPayload() != nullptr,
+				.PointerPosition = { IO.MousePos.x, IO.MousePos.y },
+				.HoveredViewportID = IO.MouseHoveredViewport,
+				.MaximumObservedDistanceSquared = IO.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left],
+				.DragThreshold = IO.MouseDragThreshold,
+				.SourceIsMainHost = SourceHost && SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Main,
+				.SourceIsNativeHost = SourceHost && SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Native };
+			const auto Released = m_DocumentTabInteraction.UpdateDrag(Frame);
+			if (!Released) return;
+
+			// The captured identity stays authoritative when a cross-viewport release clears ImGui's payload.
+			if (Released->Action == PulseForgeEditor::DocumentTabReleaseAction::TransferToStrip && Released->DropLocation)
 			{
-				QueueDocumentTransfer(Identity, DropTarget->first, DropTarget->second);
+				QueueDocumentTransfer(Released->Identity, Released->DropLocation->HostID, Released->DropLocation->Index);
 				return;
 			}
-			if (Action != PulseForgeEditor::DocumentTabReleaseAction::CreateNativeHost || !Session)
-				return;
+			if (Released->Action != PulseForgeEditor::DocumentTabReleaseAction::CreateNativeHost || !Session) return;
 
-			QueueDocumentTransfer(Identity, {}, 0, true, MakeDocumentDropWindowBounds(MousePosition));
+			QueueDocumentTransfer(Released->Identity, {}, 0, true,
+				MakeDocumentDropWindowBounds(ImVec2(Released->ReleasePosition.X, Released->ReleasePosition.Y)));
 		}
 
 		[[nodiscard]] std::optional<std::pair<std::string, size_t>> FindDocumentTabDropTarget(
 			const ImVec2& Position,
 			ImGuiID HoveredViewportID) const
 		{
-			std::optional<std::pair<std::string, size_t>> Result;
-			for (const DocumentTabDropTarget& Target : m_DocumentTabDropTargets)
-			{
-				if (HoveredViewportID != 0 && Target.ViewportID != HoveredViewportID)
-					continue;
-				if (Position.x < Target.Minimum.x || Position.x >= Target.Maximum.x ||
-					Position.y < Target.Minimum.y || Position.y >= Target.Maximum.y)
-					continue;
-
-				if (Result)
-					return std::nullopt;
-				const float Midpoint = (Target.Minimum.x + Target.Maximum.x) * 0.5f;
-				const size_t Index = Target.BeforeIndex != Target.AfterIndex && Position.x >= Midpoint
-					? Target.AfterIndex : Target.BeforeIndex;
-				Result.emplace(Target.HostID, Index);
-			}
-			return Result;
+			const auto Result =
+				m_DocumentTabInteraction.FindDropTarget({ Position.x, Position.y }, static_cast<uint32_t>(HoveredViewportID));
+			if (!Result) return std::nullopt;
+			return std::pair{ Result->HostID, Result->Index };
 		}
 
 		void ProcessPendingDocumentTransfer()
 		{
-			if (!m_PendingDocumentTransfer)
-				return;
+			auto Request = m_DocumentTabInteraction.TakePendingTransfer();
+			if (!Request) return;
 
-			PendingDocumentTransfer Pending = std::move(*m_PendingDocumentTransfer);
-			m_PendingDocumentTransfer.reset();
+			PulseForgeEditor::EditorDocumentTransferRequest Pending = std::move(*Request);
 			const auto* Session = m_Documents.Find(Pending.Identity);
 			if (!Session)
 				return;
@@ -5465,10 +5386,9 @@ namespace
 				const ImVec2 TabMaximum = ImGui::GetItemRectMax();
 				const ImGuiViewport* TabViewport = ImGui::GetWindowViewport();
 				const ImGuiID TabViewportID = TabViewport ? TabViewport->ID : 0;
-				m_DocumentTabDropTargets.push_back(DocumentTabDropTarget{
-					std::string(HostID), TabViewportID, TabMinimum, TabMaximum, Index, Index + 1 });
-				if (m_DocumentHostTabTearOffTest &&
-					Session->Identity == m_DocumentHostTabTearOffTestIdentity)
+				m_DocumentTabInteraction.RegisterDropTarget({ std::string(HostID), static_cast<uint32_t>(TabViewportID),
+					{ TabMinimum.x, TabMinimum.y }, { TabMaximum.x, TabMaximum.y }, Index, Index + 1 });
+				if (m_DocumentHostTabTearOffTest && Session->Identity == m_DocumentHostTabTearOffTestIdentity)
 				{
 					m_DocumentHostTabTearOffTestTabCenter = ImVec2(
 						(TabMinimum.x + TabMaximum.x) * 0.5f,
@@ -5549,11 +5469,9 @@ namespace
 					PulseForgeEditor::ShouldCaptureDocumentTabDrag(
 						TabHovered, CloseHovered, ImGui::GetIO().MouseClicked[ImGuiMouseButton_Left]))
 				{
-					m_ActiveDocumentTabDrag = Session->Identity;
-					m_ActiveDocumentTabDragStart = ImGui::GetIO().MouseClickedPos[ImGuiMouseButton_Left];
-					if (PulseForgeEditor::IsUsableDocumentTabPointerPosition(MousePosition.x, MousePosition.y))
-						m_ActiveDocumentTabDragLastPosition = PulseForgeEditor::DocumentTabPointerPosition{
-							MousePosition.x, MousePosition.y };
+					const ImVec2 DragStart = ImGui::GetIO().MouseClickedPos[ImGuiMouseButton_Left];
+					m_DocumentTabInteraction.BeginDrag(Session->Identity,
+						PulseForgeEditor::DocumentTabPointerPosition{ DragStart.x, DragStart.y }, { MousePosition.x, MousePosition.y });
 				}
 				if (Pressed && CloseHovered)
 					QueueDocumentTabClose(Session->Identity);
@@ -5633,17 +5551,14 @@ namespace
 				if (Session->Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level &&
 					ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
 				{
-					m_ActiveDocumentTabDrag = Session->Identity;
 					// Preserve the original press coordinate as the drag source starts. If
 					// item activation was not observed, using the release position as the
 					// fallback would produce a zero-length drag and suppress tear-off.
 					const ImVec2 PressPosition = ImGui::GetIO().MouseClickedPos[ImGuiMouseButton_Left];
-					if (std::isfinite(PressPosition.x) && std::isfinite(PressPosition.y) &&
-						std::abs(PressPosition.x) < 100000.0f && std::abs(PressPosition.y) < 100000.0f)
-						m_ActiveDocumentTabDragStart = PressPosition;
-					if (PulseForgeEditor::IsUsableDocumentTabPointerPosition(MousePosition.x, MousePosition.y))
-						m_ActiveDocumentTabDragLastPosition = PulseForgeEditor::DocumentTabPointerPosition{
-							MousePosition.x, MousePosition.y };
+					std::optional<PulseForgeEditor::DocumentTabPointerPosition> DragStart;
+					if (PulseForgeEditor::IsUsableDocumentTabPointerPosition(PressPosition.x, PressPosition.y))
+						DragStart = PulseForgeEditor::DocumentTabPointerPosition{ PressPosition.x, PressPosition.y };
+					m_DocumentTabInteraction.BeginDrag(Session->Identity, DragStart, { MousePosition.x, MousePosition.y });
 					const std::string Payload = GetDocumentPayload(Session->Identity);
 					ImGui::SetDragDropPayload("PF_EDITOR_DOCUMENT", Payload.c_str(), Payload.size() + 1);
 					ImGui::TextUnformatted(Label.c_str());
@@ -5668,9 +5583,9 @@ namespace
 				const ImVec2 DropMinimum = ImGui::GetItemRectMin();
 				const ImVec2 DropMaximum = ImGui::GetItemRectMax();
 				const ImGuiViewport* DropViewport = ImGui::GetWindowViewport();
-				m_DocumentTabDropTargets.push_back(DocumentTabDropTarget{
-					std::string(HostID), DropViewport ? DropViewport->ID : 0,
-					DropMinimum, DropMaximum, Documents.size(), Documents.size() });
+				m_DocumentTabInteraction.RegisterDropTarget(
+					{ std::string(HostID), DropViewport ? static_cast<uint32_t>(DropViewport->ID) : 0, { DropMinimum.x, DropMinimum.y },
+						{ DropMaximum.x, DropMaximum.y }, Documents.size(), Documents.size() });
 				if (ImGui::BeginDragDropTarget())
 				{
 					if (const ImGuiPayload* Payload = ImGui::AcceptDragDropPayload("PF_EDITOR_DOCUMENT"))
@@ -7138,11 +7053,7 @@ namespace
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_LevelDocumentIdentity;
 		std::optional<PulseForge::AssetID> m_MaterialDetailsAsset;
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_PendingDocumentTabClose;
-		std::optional<PendingDocumentTransfer> m_PendingDocumentTransfer;
-		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_ActiveDocumentTabDrag;
-		std::optional<ImVec2> m_ActiveDocumentTabDragStart;
-		std::optional<PulseForgeEditor::DocumentTabPointerPosition> m_ActiveDocumentTabDragLastPosition;
-		std::vector<DocumentTabDropTarget> m_DocumentTabDropTargets;
+		PulseForgeEditor::EditorDocumentTabInteraction m_DocumentTabInteraction;
 		std::unordered_set<std::string> m_DocumentHostFocusRequests;
 		std::optional<std::filesystem::path> m_StartupProjectPath;
 		std::optional<std::filesystem::path> m_ProjectOpenRenderTestFile;
