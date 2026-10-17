@@ -57,7 +57,7 @@ function OnDestroy()
   assert(entity:set_translation(-1, 2, 3))
 end
 )";
-		const auto TransformScriptAsset = CreateScriptAsset("transform.lua", TransformScript);
+		const auto TransformScriptAsset = CreateScriptAsset("transform.LUA", TransformScript);
 		PF_CHECK(Tests, TransformScriptAsset.has_value());
 		if (!TransformScriptAsset) return;
 

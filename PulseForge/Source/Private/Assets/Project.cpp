@@ -1,4 +1,5 @@
 #include "Assets/Project.h"
+#include "Assets/AssetTypes.h"
 #include "Core/ScopedProfileTimer.h"
 
 #include <nlohmann/json.hpp>
@@ -31,7 +32,7 @@ namespace PulseForge
 
 		std::expected<void, ProjectError> ValidateProjectPath(const std::filesystem::path& Path)
 		{
-			if (Path.empty() || Path.extension() != ".pfproj")
+			if (Path.empty() || !HasAssetTypeExtension(Path, AssetFileType::Project))
 				return std::unexpected(MakeError(
 					ProjectErrorCode::InvalidPath,
 					Path,
@@ -52,7 +53,7 @@ namespace PulseForge
 					ProjectErrorCode::StartSceneNotFound,
 					ProjectFile,
 					"Project startup scene UUID " + StartScene->ToString() + " is not present in the asset registry"));
-			if (Record->ProjectRelativePath.extension() != ".scene")
+			if (!HasAssetTypeExtension(Record->ProjectRelativePath, AssetFileType::Scene))
 				return std::unexpected(MakeError(
 					ProjectErrorCode::StartSceneWrongType,
 					Record->ProjectRelativePath,

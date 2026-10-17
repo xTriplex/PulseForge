@@ -118,7 +118,7 @@ namespace
 			PF_CHECK(Tests, !Engine.SetListenerDirection({ 0.0f, 0.0f, 0.0f }));
 
 			AssetRegistry& Registry = AudioProject->GetAssetRegistry();
-			auto Imported = AssetOperations::CreateAssetFromBytes(Registry, ProjectRoot, WaveData, "Assets/Audio/test.wav");
+			auto Imported = AssetOperations::CreateAssetFromBytes(Registry, ProjectRoot, WaveData, "Assets/Audio/test.WAV");
 			PF_CHECK(Tests, Imported.has_value());
 			if (!Imported) return;
 
@@ -129,13 +129,13 @@ namespace
 			const auto CachedAgain = Cache.GetOrLoad(Imported->ID);
 			PF_CHECK(Tests, CachedAgain && Cache.GetLoadedCount() == 1);
 
-			const auto Moved = AssetOperations::Move(Registry, ProjectRoot, Imported->ID, "Assets/Audio/renamed.wav");
+			const auto Moved = AssetOperations::Move(Registry, ProjectRoot, Imported->ID, "Assets/Audio/renamed.WAV");
 			PF_CHECK(Tests, Moved && Moved->ID == Imported->ID);
 			Cache.Clear();
 			const auto LoadedAfterMove = Cache.GetOrLoad(Imported->ID);
 			PF_CHECK(Tests, LoadedAfterMove && LoadedAfterMove->IsValid());
 			const auto MovedRecord = Registry.Find(Imported->ID);
-			PF_CHECK(Tests, MovedRecord && MovedRecord->ProjectRelativePath == "Assets/Audio/renamed.wav");
+			PF_CHECK(Tests, MovedRecord && MovedRecord->ProjectRelativePath == "Assets/Audio/renamed.WAV");
 
 			Scene AudioScene;
 			auto EmitterResult = AudioScene.CreateEntity("Audio emitter and listener");

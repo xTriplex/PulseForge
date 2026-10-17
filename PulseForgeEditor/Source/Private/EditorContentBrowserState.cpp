@@ -1,6 +1,8 @@
 #include "Editor/EditorContentBrowserState.h"
 #include "Editor/EditorWorkspaceView.h"
 
+#include "Assets/AssetTypes.h"
+
 #include <algorithm>
 #include <utility>
 
@@ -14,13 +16,6 @@ namespace PulseForgeEditor
 			return { reinterpret_cast<const char*>(UTF8Path.data()), UTF8Path.size() };
 		}
 
-		std::string NormalizedExtension(const std::filesystem::path& Path)
-		{
-			std::string Extension = PathToUtf8(Path.extension());
-			std::transform(Extension.begin(), Extension.end(), Extension.begin(), [](unsigned char Character)
-				{ return Character >= 'A' && Character <= 'Z' ? static_cast<char>(Character - 'A' + 'a') : static_cast<char>(Character); });
-			return Extension;
-		}
 	} // namespace
 
 	void EditorContentBrowserState::SetAssets(std::vector<PulseForge::AssetRecord> Assets)
@@ -37,7 +32,7 @@ namespace PulseForgeEditor
 		for (const PulseForge::AssetRecord& Asset : m_Assets)
 			m_AssetPresentations.push_back(
 				{ Asset.ID.ToString(), PathToUtf8(Asset.ProjectRelativePath.filename()), PathToUtf8(Asset.ProjectRelativePath),
-					NormalizedExtension(Asset.ProjectRelativePath), GetAssetBrowserIcon(Asset.ProjectRelativePath) });
+					PulseForge::GetNormalizedAssetExtension(Asset.ProjectRelativePath), GetAssetBrowserIcon(Asset.ProjectRelativePath) });
 	}
 
 	void EditorContentBrowserState::RebuildFolderTree()

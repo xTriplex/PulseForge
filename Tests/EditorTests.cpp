@@ -172,6 +172,17 @@ namespace
 		const PulseForge::AssetRecord TextureAsset{ PulseForge::AssetID{}, std::filesystem::path("Assets/Textures/Stone_BaseColor.png") };
 		PF_CHECK(Tests, AssetHasExtension(TextureAsset, { ".png", ".jpg" }));
 		PF_CHECK(Tests, !AssetHasExtension(TextureAsset, { ".material" }));
+		const PulseForge::AssetRecord MaterialAsset{ PulseForge::AssetID{}, std::filesystem::path("Assets/Materials/Stone.MATERIAL") };
+		const PulseForge::AssetRecord SceneAsset{ PulseForge::AssetID{}, std::filesystem::path("Assets/Scenes/Opening.SCENE") };
+		PF_CHECK(Tests, AssetHasExtension(MaterialAsset, { ".material" }));
+		PF_CHECK(Tests, AssetHasExtension(SceneAsset, { ".scene" }));
+		PF_CHECK(Tests, AssetHasExtension({ {}, "Assets/Prefabs/Crate.PREFAB" }, { ".prefab" }));
+		PF_CHECK(Tests, AssetHasExtension({ {}, "Assets/Scripts/Camera.LUA" }, { ".lua" }));
+		PF_CHECK(Tests, AssetHasExtension({ {}, "Assets/Meshes/Scene.GLTF" }, { ".gltf", ".glb" }));
+		PF_CHECK(Tests, AssetHasExtension({ {}, "Assets/Meshes/Scene.GLB" }, { ".gltf", ".glb" }));
+		PF_CHECK(Tests, AssetHasExtension({ {}, "Assets/Textures/Color.PNG" }, { ".png", ".jpg", ".bmp" }));
+		PF_CHECK(Tests, AssetHasExtension({ {}, "Assets/Audio/Impact.WAV" }, { ".wav", ".mp3", ".flac", ".ogg" }));
+		PF_CHECK(Tests, AssetHasExtension({ {}, "Assets/Environments/Studio.HDR" }, { ".hdr" }));
 		PF_CHECK(Tests, AssetSelectorMatchesSearch("Assets/Textures/Stone_BaseColor.png", ""));
 		PF_CHECK(Tests, AssetSelectorMatchesSearch("Assets/Textures/Stone_BaseColor.png", "stone"));
 		PF_CHECK(Tests, AssetSelectorMatchesSearch("Assets/Textures/Stone_BaseColor.png", "TEXTURES"));
