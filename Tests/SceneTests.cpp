@@ -365,7 +365,8 @@ namespace
 			const auto RejectedPartialPair = Runtime.Advance(Source, Timestep(0.0));
 			PF_CHECK(Tests, !RejectedPartialPair && RejectedPartialPair.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
 			const auto RemovedPartialBodyForce = Runtime.ApplyForce(RuntimeAddedBody->GetUUID(), { 0.0f, 1.0f, 0.0f });
-			PF_CHECK(Tests, !RemovedPartialBodyForce && RemovedPartialBodyForce.error().Code == PhysicsSceneRuntimeErrorCode::MissingBody);
+			PF_CHECK(Tests,
+				!RemovedPartialBodyForce && RemovedPartialBodyForce.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
 			PF_CHECK(Tests, RuntimeAddedBody->RemoveBoxCollider().has_value());
 			PF_CHECK(Tests, Runtime.Advance(Source, Timestep(0.0)).has_value());
 		}
@@ -436,6 +437,298 @@ namespace
 			PF_CHECK(Tests, !RejectedOverflow && RejectedOverflow.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
 			PF_CHECK(Tests, !OverflowRuntime.IsRunning());
 		}
+	}
+
+	void TestPhysicsLiveReconciliation(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		constexpr double FixedStep = 1.0 / 60.0;
+
+		Scene TeleportScene;
+		const auto TeleportedBody = TeleportScene.CreateEntity("Teleported body");
+		PF_CHECK(Tests, TeleportedBody.has_value());
+		if (!TeleportedBody) return;
+		TransformComponent InitialTransform;
+		InitialTransform.Translation.y = 4.0f;
+		PF_CHECK(Tests, TeleportedBody->SetTransform(InitialTransform).has_value());
+		PF_CHECK(Tests, TeleportedBody->SetRigidbody(RigidbodyComponent{}).has_value());
+		PF_CHECK(Tests, TeleportedBody->SetBoxCollider(BoxColliderComponent{}).has_value());
+
+		PhysicsSceneRuntimeDesc ZeroGravity;
+		ZeroGravity.Gravity = glm::vec3(0.0f);
+		PhysicsSceneRuntime TeleportRuntime(ZeroGravity);
+		PF_CHECK(Tests, TeleportRuntime.Start(TeleportScene).has_value());
+		for (int Index = 0; Index < 10; ++Index)
+		{
+			PF_CHECK(Tests, TeleportRuntime.ApplyForce(TeleportedBody->GetUUID(), { 60.0f, 0.0f, 0.0f }).has_value());
+			PF_CHECK(Tests, TeleportRuntime.Advance(TeleportScene, Timestep(FixedStep)).has_value());
+		}
+		TransformComponent Teleport;
+		Teleport.Translation = { 10.0f, 4.0f, 0.0f };
+		PF_CHECK(Tests, TeleportedBody->SetTransform(Teleport).has_value());
+		PF_CHECK(Tests, TeleportRuntime.Advance(TeleportScene, Timestep(0.0)).has_value());
+		PF_CHECK(Tests, TeleportRuntime.Advance(TeleportScene, Timestep(FixedStep)).has_value());
+		const auto TeleportedTransform = TeleportedBody->GetTransform();
+		PF_CHECK(Tests, TeleportedTransform && TeleportedTransform->Translation.x > 10.1f);
+		TeleportRuntime.Stop();
+
+		Scene MassScene;
+		const auto LightBody = MassScene.CreateEntity("Light body");
+		const auto HeavyBody = MassScene.CreateEntity("Heavy body");
+		PF_CHECK(Tests, LightBody && HeavyBody);
+		if (!LightBody || !HeavyBody) return;
+		TransformComponent HeavyTransform;
+		HeavyTransform.Translation.x = 10.0f;
+		PF_CHECK(Tests, HeavyBody->SetTransform(HeavyTransform).has_value());
+		for (const Entity& Current : { *LightBody, *HeavyBody })
+		{
+			PF_CHECK(Tests, Current.SetRigidbody(RigidbodyComponent{}).has_value());
+			PF_CHECK(Tests, Current.SetBoxCollider(BoxColliderComponent{}).has_value());
+		}
+		PhysicsSceneRuntimeDesc MassDescription;
+		MassDescription.FixedStepSeconds = 0.1;
+		MassDescription.MaxFrameDeltaSeconds = 0.2;
+		MassDescription.Gravity = glm::vec3(0.0f);
+		PhysicsSceneRuntime MassRuntime(MassDescription);
+		PF_CHECK(Tests, MassRuntime.Start(MassScene).has_value());
+		PF_CHECK(Tests, MassRuntime.ApplyForce(LightBody->GetUUID(), { 10.0f, 0.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, MassRuntime.ApplyForce(HeavyBody->GetUUID(), { 10.0f, 0.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, MassRuntime.Advance(MassScene, Timestep(0.1)).has_value());
+		const auto LightBeforeMassEdit = LightBody->GetTransform();
+		const auto HeavyBeforeMassEdit = HeavyBody->GetTransform();
+		PF_CHECK(Tests, LightBeforeMassEdit && HeavyBeforeMassEdit);
+		RigidbodyComponent HeavierConfiguration;
+		HeavierConfiguration.Mass = 10.0f;
+		PF_CHECK(Tests, HeavyBody->SetRigidbody(HeavierConfiguration).has_value());
+		const auto MassReconciliation = MassRuntime.Advance(MassScene, Timestep(0.0));
+		PF_CHECK(Tests, MassReconciliation && *MassReconciliation == 0);
+		PF_CHECK(Tests, MassRuntime.ApplyForce(LightBody->GetUUID(), { 10.0f, 0.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, MassRuntime.ApplyForce(HeavyBody->GetUUID(), { 10.0f, 0.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, MassRuntime.Advance(MassScene, Timestep(0.1)).has_value());
+		const auto LightAfterMassEdit = LightBody->GetTransform();
+		const auto HeavyAfterMassEdit = HeavyBody->GetTransform();
+		PF_CHECK(Tests, LightAfterMassEdit && HeavyAfterMassEdit && LightBeforeMassEdit && HeavyBeforeMassEdit);
+		if (LightAfterMassEdit && HeavyAfterMassEdit && LightBeforeMassEdit && HeavyBeforeMassEdit)
+		{
+			const float LightDisplacement = LightAfterMassEdit->Translation.x - LightBeforeMassEdit->Translation.x;
+			const float HeavyDisplacement = HeavyAfterMassEdit->Translation.x - HeavyBeforeMassEdit->Translation.x;
+			PF_CHECK(Tests, LightDisplacement > HeavyDisplacement + 0.02f);
+		}
+		PF_CHECK(Tests, HeavyBody->SetRigidbody(RigidbodyComponent{ RigidbodyMotionType::Static }).has_value());
+		PF_CHECK(Tests, MassRuntime.Advance(MassScene, Timestep(0.0)).has_value());
+		const auto StaticAfterMotionChange = MassRuntime.ApplyForce(HeavyBody->GetUUID(), { 1.0f, 0.0f, 0.0f });
+		PF_CHECK(Tests, !StaticAfterMotionChange && StaticAfterMotionChange.error().Code == PhysicsSceneRuntimeErrorCode::StaticBody);
+		PF_CHECK(Tests, HeavyBody->SetRigidbody(RigidbodyComponent{}).has_value());
+		PF_CHECK(Tests, MassRuntime.Advance(MassScene, Timestep(0.0)).has_value());
+		PF_CHECK(Tests, MassRuntime.ApplyForce(HeavyBody->GetUUID(), { 1.0f, 0.0f, 0.0f }).has_value());
+
+		const auto Parent = MassScene.CreateEntity("Physics parent");
+		PF_CHECK(Tests, Parent.has_value());
+		if (Parent)
+		{
+			PF_CHECK(Tests, HeavyBody->SetParent(*Parent).has_value());
+			const auto RejectedParentedBody = MassRuntime.Advance(MassScene, Timestep(0.0));
+			PF_CHECK(Tests,
+				!RejectedParentedBody && RejectedParentedBody.error().Code == PhysicsSceneRuntimeErrorCode::UnsupportedHierarchy);
+			PF_CHECK(Tests, HeavyBody->ClearParent().has_value());
+			PF_CHECK(Tests, MassRuntime.Advance(MassScene, Timestep(0.0)).has_value());
+			PF_CHECK(Tests, MassRuntime.ApplyForce(HeavyBody->GetUUID(), { 1.0f, 0.0f, 0.0f }).has_value());
+		}
+		MassRuntime.Stop();
+
+		Scene FrictionScene;
+		const auto FrictionFloor = FrictionScene.CreateEntity("Friction floor");
+		const auto LowFrictionBody = FrictionScene.CreateEntity("Low friction body");
+		const auto UpdatedFrictionBody = FrictionScene.CreateEntity("Updated friction body");
+		PF_CHECK(Tests, FrictionFloor && LowFrictionBody && UpdatedFrictionBody);
+		if (!FrictionFloor || !LowFrictionBody || !UpdatedFrictionBody) return;
+		TransformComponent FrictionFloorTransform;
+		FrictionFloorTransform.Translation.y = -0.5f;
+		PF_CHECK(Tests, FrictionFloor->SetTransform(FrictionFloorTransform).has_value());
+		PF_CHECK(Tests, FrictionFloor->SetRigidbody(RigidbodyComponent{ RigidbodyMotionType::Static, 1.0f, 1.0f }).has_value());
+		PF_CHECK(Tests, FrictionFloor->SetBoxCollider(BoxColliderComponent{ { 100.0f, 0.5f, 2.0f } }).has_value());
+		TransformComponent LowFrictionTransform;
+		LowFrictionTransform.Translation = { -5.0f, 0.5f, 0.0f };
+		PF_CHECK(Tests, LowFrictionBody->SetTransform(LowFrictionTransform).has_value());
+		TransformComponent UpdatedFrictionTransform;
+		UpdatedFrictionTransform.Translation = { 5.0f, 0.5f, 0.0f };
+		PF_CHECK(Tests, UpdatedFrictionBody->SetTransform(UpdatedFrictionTransform).has_value());
+		const RigidbodyComponent NoFriction{ RigidbodyMotionType::Dynamic, 1.0f, 0.0f, 0.0f, false };
+		PF_CHECK(Tests, LowFrictionBody->SetRigidbody(NoFriction).has_value());
+		PF_CHECK(Tests, UpdatedFrictionBody->SetRigidbody(NoFriction).has_value());
+		PF_CHECK(Tests, LowFrictionBody->SetBoxCollider(BoxColliderComponent{}).has_value());
+		PF_CHECK(Tests, UpdatedFrictionBody->SetBoxCollider(BoxColliderComponent{}).has_value());
+		PhysicsSceneRuntime FrictionRuntime;
+		PF_CHECK(Tests, FrictionRuntime.Start(FrictionScene).has_value());
+		PF_CHECK(Tests, FrictionRuntime.Advance(FrictionScene, Timestep(FixedStep * 2.0)).has_value());
+		for (int Index = 0; Index < 10; ++Index)
+		{
+			PF_CHECK(Tests, FrictionRuntime.ApplyForce(LowFrictionBody->GetUUID(), { 20.0f, 0.0f, 0.0f }).has_value());
+			PF_CHECK(Tests, FrictionRuntime.ApplyForce(UpdatedFrictionBody->GetUUID(), { 20.0f, 0.0f, 0.0f }).has_value());
+			PF_CHECK(Tests, FrictionRuntime.Advance(FrictionScene, Timestep(FixedStep)).has_value());
+		}
+		const auto LowFrictionBeforeEdit = LowFrictionBody->GetTransform();
+		const auto UpdatedFrictionBeforeEdit = UpdatedFrictionBody->GetTransform();
+		PF_CHECK(Tests, LowFrictionBeforeEdit && UpdatedFrictionBeforeEdit);
+		RigidbodyComponent HighFriction = NoFriction;
+		HighFriction.Friction = 1.0f;
+		PF_CHECK(Tests, UpdatedFrictionBody->SetRigidbody(HighFriction).has_value());
+		PF_CHECK(Tests, FrictionRuntime.Advance(FrictionScene, Timestep(0.0)).has_value());
+		for (int Index = 0; Index < 60; ++Index)
+			PF_CHECK(Tests, FrictionRuntime.Advance(FrictionScene, Timestep(FixedStep)).has_value());
+		const auto LowFrictionAfterSlide = LowFrictionBody->GetTransform();
+		const auto UpdatedFrictionAfterSlide = UpdatedFrictionBody->GetTransform();
+		PF_CHECK(Tests,
+			LowFrictionBeforeEdit && UpdatedFrictionBeforeEdit && LowFrictionAfterSlide && UpdatedFrictionAfterSlide);
+		if (LowFrictionBeforeEdit && UpdatedFrictionBeforeEdit && LowFrictionAfterSlide && UpdatedFrictionAfterSlide)
+		{
+			const float LowFrictionTravel = LowFrictionAfterSlide->Translation.x - LowFrictionBeforeEdit->Translation.x;
+			const float UpdatedFrictionTravel =
+				UpdatedFrictionAfterSlide->Translation.x - UpdatedFrictionBeforeEdit->Translation.x;
+			PF_CHECK(Tests, LowFrictionTravel > UpdatedFrictionTravel + 0.5f);
+		}
+		FrictionRuntime.Stop();
+
+		Scene RestitutionScene;
+		const auto RestitutionFloor = RestitutionScene.CreateEntity("Restitution floor");
+		const auto BouncingBody = RestitutionScene.CreateEntity("Bouncing body");
+		PF_CHECK(Tests, RestitutionFloor && BouncingBody);
+		if (!RestitutionFloor || !BouncingBody) return;
+		TransformComponent RestitutionFloorTransform;
+		RestitutionFloorTransform.Translation.y = -0.5f;
+		PF_CHECK(Tests, RestitutionFloor->SetTransform(RestitutionFloorTransform).has_value());
+		PF_CHECK(Tests, RestitutionFloor->SetRigidbody(RigidbodyComponent{ RigidbodyMotionType::Static, 1.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, RestitutionFloor->SetBoxCollider(BoxColliderComponent{ { 5.0f, 0.5f, 5.0f } }).has_value());
+		TransformComponent BouncingTransform;
+		BouncingTransform.Translation.y = 2.0f;
+		PF_CHECK(Tests, BouncingBody->SetTransform(BouncingTransform).has_value());
+		PF_CHECK(Tests, BouncingBody->SetRigidbody(RigidbodyComponent{ RigidbodyMotionType::Dynamic, 1.0f, 0.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, BouncingBody->SetBoxCollider(BoxColliderComponent{}).has_value());
+		PhysicsSceneRuntime RestitutionRuntime;
+		PF_CHECK(Tests, RestitutionRuntime.Start(RestitutionScene).has_value());
+		for (int Index = 0; Index < 20; ++Index)
+			PF_CHECK(Tests, RestitutionRuntime.Advance(RestitutionScene, Timestep(FixedStep)).has_value());
+		RigidbodyComponent BouncyConfiguration{ RigidbodyMotionType::Dynamic, 1.0f, 0.0f, 1.0f, false };
+		PF_CHECK(Tests, BouncingBody->SetRigidbody(BouncyConfiguration).has_value());
+		PF_CHECK(Tests, RestitutionRuntime.Advance(RestitutionScene, Timestep(0.0)).has_value());
+		for (int Index = 0; Index < 28; ++Index)
+			PF_CHECK(Tests, RestitutionRuntime.Advance(RestitutionScene, Timestep(FixedStep)).has_value());
+		const auto BouncedTransform = BouncingBody->GetTransform();
+		PF_CHECK(Tests, BouncedTransform && BouncedTransform->Translation.y > 0.6f);
+		RestitutionRuntime.Stop();
+
+		Scene StaticEditScene;
+		const auto Floor = StaticEditScene.CreateEntity("Movable floor");
+		const auto FallingBody = StaticEditScene.CreateEntity("Floor test body");
+		PF_CHECK(Tests, Floor && FallingBody);
+		if (!Floor || !FallingBody) return;
+		TransformComponent InitialFloor;
+		InitialFloor.Translation = { 2.0f, -10.0f, 0.0f };
+		PF_CHECK(Tests, Floor->SetTransform(InitialFloor).has_value());
+		PF_CHECK(Tests, Floor->SetRigidbody(RigidbodyComponent{ RigidbodyMotionType::Static }).has_value());
+		PF_CHECK(Tests, Floor->SetBoxCollider(BoxColliderComponent{ { 0.25f, 0.5f, 2.0f } }).has_value());
+		TransformComponent InitialFallingBody;
+		InitialFallingBody.Translation = { 2.0f, 2.0f, 0.0f };
+		PF_CHECK(Tests, FallingBody->SetTransform(InitialFallingBody).has_value());
+		PF_CHECK(Tests, FallingBody->SetRigidbody(RigidbodyComponent{}).has_value());
+		PF_CHECK(Tests, FallingBody->SetBoxCollider(BoxColliderComponent{}).has_value());
+		PhysicsSceneRuntime StaticEditRuntime;
+		PF_CHECK(Tests, StaticEditRuntime.Start(StaticEditScene).has_value());
+		for (int Index = 0; Index < 60; ++Index)
+			PF_CHECK(Tests, StaticEditRuntime.Advance(StaticEditScene, Timestep(FixedStep)).has_value());
+		const auto FallenBeforeFloorMove = FallingBody->GetTransform();
+		PF_CHECK(Tests, FallenBeforeFloorMove && FallenBeforeFloorMove->Translation.y < -1.0f);
+		TransformComponent MovedFloor = InitialFloor;
+		MovedFloor.Translation.y = 0.0f;
+		PF_CHECK(Tests, Floor->SetTransform(MovedFloor).has_value());
+		TransformComponent ResetAboveMovedFloor;
+		ResetAboveMovedFloor.Translation = { 2.0f, 2.0f, 0.0f };
+		PF_CHECK(Tests, StaticEditScene.DestroyEntity(*FallingBody).has_value());
+		const auto BodyAboveMovedFloor = StaticEditScene.CreateEntity("Body above moved floor");
+		PF_CHECK(Tests, BodyAboveMovedFloor.has_value());
+		if (!BodyAboveMovedFloor) return;
+		PF_CHECK(Tests, BodyAboveMovedFloor->SetTransform(ResetAboveMovedFloor).has_value());
+		PF_CHECK(Tests, BodyAboveMovedFloor->SetRigidbody(RigidbodyComponent{}).has_value());
+		PF_CHECK(Tests, BodyAboveMovedFloor->SetBoxCollider(BoxColliderComponent{}).has_value());
+		PF_CHECK(Tests, StaticEditRuntime.Advance(StaticEditScene, Timestep(0.0)).has_value());
+		for (int Index = 0; Index < 60; ++Index)
+			PF_CHECK(Tests, StaticEditRuntime.Advance(StaticEditScene, Timestep(FixedStep)).has_value());
+		const auto SettledAfterFloorMove = BodyAboveMovedFloor->GetTransform();
+		PF_CHECK(Tests,
+			SettledAfterFloorMove && SettledAfterFloorMove->Translation.y > 0.9f && SettledAfterFloorMove->Translation.y < 1.1f);
+		StaticEditRuntime.Stop();
+
+		Scene ShapeEditScene;
+		const auto ShapeEditFloor = ShapeEditScene.CreateEntity("Shape edited floor");
+		const auto BodyOutsideFloor = ShapeEditScene.CreateEntity("Body outside floor");
+		PF_CHECK(Tests, ShapeEditFloor && BodyOutsideFloor);
+		if (!ShapeEditFloor || !BodyOutsideFloor) return;
+		TransformComponent ShapeEditFloorTransform;
+		ShapeEditFloorTransform.Translation = { 2.0f, 0.0f, 0.0f };
+		PF_CHECK(Tests, ShapeEditFloor->SetTransform(ShapeEditFloorTransform).has_value());
+		PF_CHECK(Tests, ShapeEditFloor->SetRigidbody(RigidbodyComponent{ RigidbodyMotionType::Static }).has_value());
+		PF_CHECK(Tests, ShapeEditFloor->SetBoxCollider(BoxColliderComponent{ { 0.25f, 0.5f, 2.0f } }).has_value());
+		TransformComponent OutsideSmallFloor;
+		OutsideSmallFloor.Translation = { 3.0f, 2.0f, 0.0f };
+		PF_CHECK(Tests, BodyOutsideFloor->SetTransform(OutsideSmallFloor).has_value());
+		PF_CHECK(Tests, BodyOutsideFloor->SetRigidbody(RigidbodyComponent{}).has_value());
+		PF_CHECK(Tests, BodyOutsideFloor->SetBoxCollider(BoxColliderComponent{ { 0.4f, 0.5f, 2.0f } }).has_value());
+		PhysicsSceneRuntime ShapeEditRuntime;
+		PF_CHECK(Tests, ShapeEditRuntime.Start(ShapeEditScene).has_value());
+		for (int Index = 0; Index < 60; ++Index)
+			PF_CHECK(Tests, ShapeEditRuntime.Advance(ShapeEditScene, Timestep(FixedStep)).has_value());
+		const auto FallenOutsideSmallFloor = BodyOutsideFloor->GetTransform();
+		PF_CHECK(Tests, FallenOutsideSmallFloor && FallenOutsideSmallFloor->Translation.y < -1.0f);
+
+		TransformComponent ScaledFloor = ShapeEditFloorTransform;
+		ScaledFloor.Scale.x = 2.0f;
+		PF_CHECK(Tests, ShapeEditFloor->SetTransform(ScaledFloor).has_value());
+		PF_CHECK(Tests, ShapeEditFloor->SetBoxCollider(BoxColliderComponent{ { 0.4f, 0.5f, 2.0f } }).has_value());
+		TransformComponent ResetFallingBody;
+		ResetFallingBody.Translation = { 2.7f, 2.0f, 0.0f };
+		const auto BodyAboveEditedFloor = ShapeEditScene.CreateEntity("Body above edited floor");
+		PF_CHECK(Tests, BodyAboveEditedFloor.has_value());
+		if (!BodyAboveEditedFloor) return;
+		PF_CHECK(Tests, BodyAboveEditedFloor->SetTransform(ResetFallingBody).has_value());
+		PF_CHECK(Tests, BodyAboveEditedFloor->SetRigidbody(RigidbodyComponent{}).has_value());
+		PF_CHECK(Tests, BodyAboveEditedFloor->SetBoxCollider(BoxColliderComponent{ { 0.4f, 0.5f, 2.0f } }).has_value());
+		PF_CHECK(Tests, ShapeEditRuntime.Advance(ShapeEditScene, Timestep(0.0)).has_value());
+		for (int Index = 0; Index < 90; ++Index)
+			PF_CHECK(Tests, ShapeEditRuntime.Advance(ShapeEditScene, Timestep(FixedStep)).has_value());
+		const auto SettledAfterShapeEdit = BodyAboveEditedFloor->GetTransform();
+		PF_CHECK(Tests,
+			SettledAfterShapeEdit && SettledAfterShapeEdit->Translation.y > 0.9f && SettledAfterShapeEdit->Translation.y < 1.1f);
+		ShapeEditRuntime.Stop();
+
+		Scene IdentityScene;
+		const UUID ReusedIdentifier{ 0x5100000000000000ull, 99 };
+		const auto OriginalBody = IdentityScene.CreateEntityWithUUID(ReusedIdentifier, "Original physics incarnation");
+		PF_CHECK(Tests, OriginalBody.has_value());
+		if (!OriginalBody) return;
+		PF_CHECK(Tests, OriginalBody->SetRigidbody(RigidbodyComponent{}).has_value());
+		PF_CHECK(Tests, OriginalBody->SetBoxCollider(BoxColliderComponent{}).has_value());
+		PhysicsSceneRuntime IdentityRuntime(ZeroGravity);
+		PF_CHECK(Tests, IdentityRuntime.Start(IdentityScene).has_value());
+		for (int Index = 0; Index < 10; ++Index)
+		{
+			PF_CHECK(Tests, IdentityRuntime.ApplyForce(ReusedIdentifier, { 60.0f, 0.0f, 0.0f }).has_value());
+			PF_CHECK(Tests, IdentityRuntime.Advance(IdentityScene, Timestep(FixedStep)).has_value());
+		}
+		const auto OriginalMoved = OriginalBody->GetTransform();
+		PF_CHECK(Tests, OriginalMoved && OriginalMoved->Translation.x > 0.5f);
+		PF_CHECK(Tests, IdentityScene.DestroyEntity(*OriginalBody).has_value());
+		const auto ReplacementBody = IdentityScene.CreateEntityWithUUID(ReusedIdentifier, "Replacement physics incarnation");
+		PF_CHECK(Tests, ReplacementBody.has_value());
+		if (!ReplacementBody) return;
+		TransformComponent ReplacementTransform;
+		ReplacementTransform.Translation.x = 10.0f;
+		PF_CHECK(Tests, ReplacementBody->SetTransform(ReplacementTransform).has_value());
+		PF_CHECK(Tests, ReplacementBody->SetRigidbody(RigidbodyComponent{}).has_value());
+		PF_CHECK(Tests, ReplacementBody->SetBoxCollider(BoxColliderComponent{}).has_value());
+		PF_CHECK(Tests, IdentityRuntime.Advance(IdentityScene, Timestep(0.1)).has_value());
+		const auto ReplacementAfterStep = ReplacementBody->GetTransform();
+		PF_CHECK(Tests, ReplacementAfterStep && std::abs(ReplacementAfterStep->Translation.x - 10.0f) < 0.001f);
+		IdentityRuntime.Stop();
 	}
 
 	void TestEntityHandleIdentityAndLifetime(TestRunner& Tests)
@@ -829,6 +1122,7 @@ void RunSceneTests(TestRunner& Tests)
 	TestSceneEntityAndHierarchy(Tests);
 	TestPhysicsComponentsAndPersistence(Tests);
 	TestPhysicsSceneRuntime(Tests);
+	TestPhysicsLiveReconciliation(Tests);
 	TestEntityHandleIdentityAndLifetime(Tests);
 	TestSceneRenderSnapshot(Tests);
 }
