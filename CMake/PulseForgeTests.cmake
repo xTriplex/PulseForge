@@ -113,6 +113,14 @@ if(BUILD_TESTING)
 	target_link_libraries(PulseForgeSceneRendererConsumer PRIVATE PulseForgeSceneRenderer)
 	add_test(NAME PulseForge.SceneRendererConsumer COMMAND PulseForgeSceneRendererConsumer)
 
+	add_executable(PulseForgeEditorCoreConsumer Tests/ModuleConsumers/EditorCoreConsumer.cpp)
+	target_compile_definitions(PulseForgeEditorCoreConsumer PRIVATE PF_PLATFORM_WINDOWS)
+	target_link_libraries(PulseForgeEditorCoreConsumer PRIVATE PulseForgeEditorCore)
+	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+		add_dependencies(PulseForgeEditorCoreConsumer PulseForgePublicHeaderChecks)
+	endif()
+	add_test(NAME PulseForge.EditorCoreConsumer COMMAND PulseForgeEditorCoreConsumer)
+
 	add_executable(PulseForgeAudioRuntimeTests
 		Tests/PulseForgeAudioRuntimeTests.cpp
 		Tests/AudioRuntimeTests.cpp
@@ -235,6 +243,7 @@ if(BUILD_TESTING)
 		PulseForgeAssetImportTests
 		PulseForgeAssetImporterConsumer
 		PulseForgeSceneRendererConsumer
+		PulseForgeEditorCoreConsumer
 		PulseForgeAudioRuntimeTests
 		PulseForgeScriptingRuntimeTests
 		PulseForgeEditorCoreTests

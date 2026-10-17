@@ -25,6 +25,8 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 		PulseForgeEditor/Source/Private/EditorDocumentWorkspaceStore.cpp
 		PulseForgeEditor/Source/Private/EditorMeshPickingCache.cpp
 		PulseForgeEditor/Source/Private/EditorViewportCamera.cpp
+		PulseForgeEditor/Source/Private/ViewportMath.cpp
+		PulseForgeEditor/Source/Private/EditorCommandLine.cpp
 	)
 	target_include_directories(PulseForgeEditorCore
 		PUBLIC PulseForgeEditor/Source/Public
