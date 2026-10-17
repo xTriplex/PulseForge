@@ -1,9 +1,9 @@
-#include "EditorViewportSceneRenderView.h"
+#include "Editor/EditorViewportSceneRenderView.h"
 
 #include "Assets/Project.h"
 #include "Core/Log.h"
 #include "Editor/EditorViewportPolicy.h"
-#include "EditorViewportCamera.h"
+#include "Editor/EditorViewportCamera.h"
 #include "Renderer/SceneRenderer.h"
 #include "Scene/Scene.h"
 

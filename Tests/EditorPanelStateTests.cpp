@@ -1,6 +1,6 @@
 #include "TestEditorSupport.h"
-#include "EditorConsoleHistory.h"
-#include "EditorConsoleSeverity.h"
+#include "Editor/EditorConsoleHistory.h"
+#include "Editor/EditorConsoleSeverity.h"
 #include "Editor/EditorMaterialDraftStore.h"
 #include "Editor/EditorStatusPanel.h"
 

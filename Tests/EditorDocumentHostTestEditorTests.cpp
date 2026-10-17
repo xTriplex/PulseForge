@@ -1,6 +1,6 @@
 #include "TestEditorSupport.h"
 
-#include "EditorDocumentHostTestEditor.h"
+#include "Editor/EditorDocumentHostTestEditor.h"
 
 namespace
 {

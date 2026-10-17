@@ -1,5 +1,5 @@
-#include "ScriptEnvironment.h"
-#include "ScriptRuntimeInternal.h"
+#include "Scripting/ScriptEnvironment.h"
+#include "Scripting/ScriptRuntimeInternal.h"
 
 #include "Assets/PrefabAssetService.h"
 #include "Assets/Project.h"

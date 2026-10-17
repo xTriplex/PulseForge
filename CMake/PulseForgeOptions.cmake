@@ -45,7 +45,7 @@ if(CMAKE_GENERATOR STREQUAL "Visual Studio 17 2022" AND
 	unset(PulseForgeVSGlobal)
 endif()
 
-set(PULSEFORGE_ENGINE_PCH "${CMAKE_CURRENT_SOURCE_DIR}/PulseForge/Source/Private/Core/PulseForgePCH.h")
+set(PULSEFORGE_ENGINE_PCH "${CMAKE_CURRENT_SOURCE_DIR}/PulseForge/Source/Public/Core/PulseForgePCH.h")
 
 if(CMAKE_CONFIGURATION_TYPES)
 	list(APPEND CMAKE_CONFIGURATION_TYPES Dist)
