@@ -27,7 +27,8 @@ namespace PulseForge::VulkanSupport
 		bool PresentationFencesEnabled,
 		bool HasCurrentGeneration,
 		std::size_t DeferredGenerationCount,
-		bool CurrentGenerationOutOfDate = false) noexcept;
+		bool CurrentGenerationOutOfDate = false,
+		bool RecoveryAttemptedAtLimit = false) noexcept;
 
 	[[nodiscard]] bool ShouldRetireDeferredSwapchains(
 		bool PresentationFencesEnabled,

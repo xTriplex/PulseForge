@@ -35,6 +35,12 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 			COMMAND PulseForgeGpuValidation --scene-point-shadow-images
 				"${CMAKE_BINARY_DIR}/Diagnostics/PointShadowDirection")
 		add_test(NAME PulseForge.GPU.ActiveFrameUploads COMMAND PulseForgeGpuValidation --active-frame-resource-upload)
+		add_test(NAME PulseForge.GPU.LegacyMainRetirementCap
+			CONFIGURATIONS Debug
+			COMMAND PulseForgeGpuValidation --legacy-main-retirement-cap)
+		add_test(NAME PulseForge.GPU.LegacyNativeRetirementCap
+			CONFIGURATIONS Debug
+			COMMAND PulseForgeGpuValidation --legacy-native-retirement-cap)
 		set_tests_properties(
 			PulseForge.GPU.RGBA16F
 			PulseForge.GPU.SceneHDR
@@ -48,5 +54,17 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 			PulseForge.GPU.PointShadowImages
 			PulseForge.GPU.ActiveFrameUploads
 			PROPERTIES RUN_SERIAL TRUE TIMEOUT 180 LABELS "gpu;renderer")
+		set_tests_properties(PulseForge.GPU.LegacyMainRetirementCap PROPERTIES
+			RUN_SERIAL TRUE
+			TIMEOUT 60
+			LABELS "gpu;renderer"
+			ENVIRONMENT
+				"PULSEFORGE_VULKAN_FORCE_LEGACY_RETIREMENT=1;PULSEFORGE_VULKAN_TEST_MAIN_OUT_OF_DATE_AFTER_NATIVE_TARGET=1;PULSEFORGE_VULKAN_TEST_MAIN_ACQUIRE_OUT_OF_DATE_AFTER_NATIVE_TARGET_COUNT=5;PULSEFORGE_VULKAN_TEST_MAIN_ACQUIRE_OUT_OF_DATE_AFTER_NATIVE_TARGET_DELAY_FRAMES=2;PULSEFORGE_VULKAN_TEST_MAIN_CREATE_FAILURE_AT_DEFERRED_COUNT=4")
+		set_tests_properties(PulseForge.GPU.LegacyNativeRetirementCap PROPERTIES
+			RUN_SERIAL TRUE
+			TIMEOUT 60
+			LABELS "gpu;renderer"
+			ENVIRONMENT
+				"PULSEFORGE_VULKAN_FORCE_LEGACY_RETIREMENT=1;PULSEFORGE_VULKAN_TEST_NATIVE_ACQUIRE_OUT_OF_DATE_COUNT=5;PULSEFORGE_VULKAN_TEST_NATIVE_CREATE_FAILURE_AT_DEFERRED_COUNT=4")
 	endif()
 endif()
