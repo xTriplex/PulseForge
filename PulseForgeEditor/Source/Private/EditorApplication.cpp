@@ -894,7 +894,7 @@ namespace
 					? static_cast<uint32_t>(PlatformIO.Viewports.Size - 1) : 0;
 				PulseForge::Application::Get().SetExternalPlatformPresentationTargetCount(SecondaryViewportCount);
 			}
-			#endif
+#endif
 			if (m_AssetPreviewProjectPending)
 			{
 				if (!m_AssetPreviewStress.IsEnabled())
@@ -1295,9 +1295,8 @@ namespace
 				}
 				CloseError = m_DocumentCloseRequest.GetError();
 			}
-			m_DocumentCloseRequest.BeginCloseAllDocuments(
-				std::move(Documents), std::string(PulseForgeEditor::EditorDocumentManager::MainHostID),
-				[this] { CompleteEditorApplicationClose(); });
+			m_DocumentCloseRequest.BeginCloseAllDocuments(std::move(Documents),
+				std::string(PulseForgeEditor::EditorDocumentManager::MainHostID), [this] { CompleteEditorApplicationClose(); });
 			if (!CloseError.empty()) m_DocumentCloseRequest.SetError(CloseError);
 			else
 			{
@@ -1499,18 +1498,17 @@ namespace
 				(!RegisteredDocumentFocused &&
 					CommandTarget == PulseForgeEditor::EditorDocumentCommandTarget::Unsupported) ||
 				(MaterialDetailsFocused && !MaterialDocumentFocused);
-			if (!PulseForgeEditor::CanRouteEditorShortcut({
-				.SceneAvailable = RegisteredDocumentFocused || MaterialDocumentFocused ||
-					(!UnsupportedDocumentFocused && m_Scene != nullptr),
-				.RuntimeActive = !RegisteredDocumentFocused && !MaterialDocumentFocused && m_SceneRuntime != nullptr,
-				.CameraNavigationActive = !RegisteredDocumentFocused && !MaterialDocumentFocused && m_EditorCameraNavigationActive,
-				.GizmoInteractionActive = !RegisteredDocumentFocused && !MaterialDocumentFocused && m_ViewportGizmoInteraction.IsActive(),
-				.TextInputActive = IO.WantTextInput,
-				.ImGuiItemActive = ImGui::IsAnyItemActive(),
-				.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup),
-				.MenuNavigationActive = GImGui && GImGui->NavLayer == ImGuiNavLayer_Menu,
-				.WindowNavigationActive = GImGui && GImGui->NavWindowingTarget != nullptr
-			}))
+			if (!PulseForgeEditor::CanRouteEditorShortcut({ .SceneAvailable = RegisteredDocumentFocused || MaterialDocumentFocused ||
+																			  (!UnsupportedDocumentFocused && m_Scene != nullptr),
+					.RuntimeActive = !RegisteredDocumentFocused && !MaterialDocumentFocused && m_SceneRuntime != nullptr,
+					.CameraNavigationActive = !RegisteredDocumentFocused && !MaterialDocumentFocused && m_EditorCameraNavigationActive,
+					.GizmoInteractionActive =
+						!RegisteredDocumentFocused && !MaterialDocumentFocused && m_ViewportGizmoInteraction.IsActive(),
+					.TextInputActive = IO.WantTextInput,
+					.ImGuiItemActive = ImGui::IsAnyItemActive(),
+					.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup),
+					.MenuNavigationActive = GImGui && GImGui->NavLayer == ImGuiNavLayer_Menu,
+					.WindowNavigationActive = GImGui && GImGui->NavWindowingTarget != nullptr }))
 				return;
 
 			if (!IO.KeyCtrl || IO.KeyAlt || IO.KeySuper)
@@ -1649,8 +1647,7 @@ namespace
 		[[nodiscard]] bool CanRouteEditorInputShortcut(bool CommandTargetAvailable) const
 		{
 			const ImGuiIO& IO = ImGui::GetIO();
-			return PulseForgeEditor::CanRouteEditorShortcut({
-				.SceneAvailable = CommandTargetAvailable,
+			return PulseForgeEditor::CanRouteEditorShortcut({ .SceneAvailable = CommandTargetAvailable,
 				.RuntimeActive = m_SceneRuntime != nullptr,
 				.CameraNavigationActive = m_EditorCameraNavigationActive,
 				.GizmoInteractionActive = m_ViewportGizmoInteraction.IsActive(),
@@ -1658,8 +1655,7 @@ namespace
 				.ImGuiItemActive = ImGui::IsAnyItemActive(),
 				.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup),
 				.MenuNavigationActive = GImGui && GImGui->NavLayer == ImGuiNavLayer_Menu,
-				.WindowNavigationActive = GImGui && GImGui->NavWindowingTarget != nullptr
-			});
+				.WindowNavigationActive = GImGui && GImGui->NavWindowingTarget != nullptr });
 		}
 
 		void HandleSceneEditingShortcuts()
@@ -2445,9 +2441,8 @@ namespace
 			{ return m_WorkspacePresentation.WasWorkspaceDrawn(Identity, HostID); };
 			const auto ViewportInteractionReleased = [this]
 			{
-				return !m_EditorCameraNavigationActive && !m_ViewportKeyboardFocused &&
-					!m_ViewportMouseCapture.OwnsMouse() && m_ViewportCameraGesture == ViewportCameraGesture::None &&
-					!m_ViewportGizmoInteraction.IsActive();
+				return !m_EditorCameraNavigationActive && !m_ViewportKeyboardFocused && !m_ViewportMouseCapture.OwnsMouse() &&
+					   m_ViewportCameraGesture == ViewportCameraGesture::None && !m_ViewportGizmoInteraction.IsActive();
 			};
 			const auto MainLayoutRetained = [this]
 			{
@@ -3924,8 +3919,7 @@ namespace
 			if (!PreparedClose)
 			{
 				m_DocumentCloseRequest.BeginCloseDocuments(DeletedDocuments,
-					std::string(PulseForgeEditor::EditorDocumentManager::MainHostID),
-					[this, Identifier] { DeleteAssetAt(Identifier); });
+					std::string(PulseForgeEditor::EditorDocumentManager::MainHostID), [this, Identifier] { DeleteAssetAt(Identifier); });
 				m_DocumentCloseRequest.SetError(PreparedClose.error());
 				SetError(m_DocumentCloseRequest.GetError());
 				return;
@@ -4317,14 +4311,14 @@ namespace
 					State.CanRedo = m_Project && m_MaterialDrafts.CanRedo(*m_Project, *State.FocusedCommandTarget.MaterialAsset);
 				}
 			}
-			State.UndoLabel = RegisteredDocumentFocused ? "Undo Document"
-							  : MaterialDocumentFocused ? "Undo Material Edit"
+			State.UndoLabel = RegisteredDocumentFocused				? "Undo Document"
+							  : MaterialDocumentFocused				? "Undo Material Edit"
 							  : SceneDocumentFocused && UndoCommand ? "Undo " + std::string(UndoCommand->Description)
-															 : "Undo";
-			State.RedoLabel = RegisteredDocumentFocused ? "Redo Document"
-							  : MaterialDocumentFocused ? "Redo Material Edit"
+																	: "Undo";
+			State.RedoLabel = RegisteredDocumentFocused				? "Redo Document"
+							  : MaterialDocumentFocused				? "Redo Material Edit"
 							  : SceneDocumentFocused && RedoCommand ? "Redo " + std::string(RedoCommand->Description)
-															 : "Redo";
+																	: "Redo";
 
 			State.HasSelection = !m_SceneWorkspace.Selection().GetEntities().empty();
 			State.CanPaste = State.CanEditScene && m_Project && m_SceneEntityCommands.CanPaste(m_Project->GetDescription().ID);
@@ -4780,14 +4774,13 @@ namespace
 				m_DeferredEditorOperations.Enqueue(std::move(Action));
 				return;
 			}
-			m_DocumentCloseRequest.BeginResolveChanges(
-				std::string(PulseForgeEditor::EditorDocumentManager::MainHostID), std::move(Action));
+			m_DocumentCloseRequest.BeginResolveChanges(std::string(PulseForgeEditor::EditorDocumentManager::MainHostID), std::move(Action));
 		}
 
 		bool ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice Choice)
 		{
 			auto ResolveDirtyChanges = [this](std::span<const PulseForgeEditor::EditorDocumentIdentity> Documents,
-													  PulseForgeEditor::EditorDocumentCloseChoice Choice) -> std::expected<void, std::string>
+										   PulseForgeEditor::EditorDocumentCloseChoice Choice) -> std::expected<void, std::string>
 			{
 				if (Choice == PulseForgeEditor::EditorDocumentCloseChoice::Save)
 				{
@@ -4850,9 +4843,9 @@ namespace
 				return {};
 			};
 			const std::vector<PulseForgeEditor::EditorDocumentIdentity> CurrentDirtyDocuments = GetDirtyAssetDocuments();
-			auto Resolved = m_DocumentCloseRequest.Resolve(
-				m_Documents, m_DocumentEditors, Choice, CurrentDirtyDocuments, ResolveDirtyChanges,
-				[this](std::function<void()> Continuation) { m_DeferredEditorOperations.Enqueue(std::move(Continuation)); });
+			auto Resolved =
+				m_DocumentCloseRequest.Resolve(m_Documents, m_DocumentEditors, Choice, CurrentDirtyDocuments, ResolveDirtyChanges,
+					[this](std::function<void()> Continuation) { m_DeferredEditorOperations.Enqueue(std::move(Continuation)); });
 			if (!Resolved)
 			{
 				SetError(Resolved.error());
@@ -4869,8 +4862,7 @@ namespace
 			if (HostID != m_DocumentCloseRequest.GetDialogHostID()) return;
 
 			const std::string PopupName = "Unsaved Asset Documents###PFDocumentClose_" + std::string(HostID);
-			if (m_DocumentCloseRequest.ConsumeDialogOpenRequest())
-				ImGui::OpenPopup(PopupName.c_str());
+			if (m_DocumentCloseRequest.ConsumeDialogOpenRequest()) ImGui::OpenPopup(PopupName.c_str());
 			bool PopupOpen = true;
 			const bool PopupVisible = ImGui::BeginPopupModal(PopupName.c_str(), &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize);
 			if (!PopupVisible) return;
@@ -4903,8 +4895,7 @@ namespace
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::EndPopup();
-			if (!PopupOpen)
-				m_DocumentCloseRequest.Cancel();
+			if (!PopupOpen) m_DocumentCloseRequest.Cancel();
 		}
 
 		void DrawUnregisteredAssetDocument(const PulseForgeEditor::EditorDocumentIdentity& Identity)
@@ -6224,8 +6215,7 @@ namespace
 				(m_ViewportCameraGesture != ViewportCameraGesture::None || m_ViewportGizmoInteraction.IsActive()))
 			{
 				m_ViewportCameraGesture = ViewportCameraGesture::None;
-				if (m_ViewportGizmoInteraction.IsActive())
-					CancelGizmoInteraction();
+				if (m_ViewportGizmoInteraction.IsActive()) CancelGizmoInteraction();
 				return;
 			}
 			if (m_ViewportGizmoInteraction.IsActive())
@@ -6236,11 +6226,10 @@ namespace
 					if (const auto Selected = m_Scene->FindEntity(*SelectedEntity()))
 						if (const auto Geometry = BuildViewportGizmoGeometry(*Selected)) DrawViewportGizmo(*Geometry, std::nullopt);
 				}
-				if (PulseForgeEditor::GetViewportGizmoPointerOutcome({
-					m_ViewportGizmoInteraction.IsActive(),
-					IO.MouseDown[ImGuiMouseButton_Left],
-					IO.MouseReleased[ImGuiMouseButton_Left]
-				}, false) == PulseForgeEditor::ViewportGizmoPointerOutcome::Complete)
+				if (PulseForgeEditor::GetViewportGizmoPointerOutcome(
+						{ m_ViewportGizmoInteraction.IsActive(), IO.MouseDown[ImGuiMouseButton_Left],
+							IO.MouseReleased[ImGuiMouseButton_Left] },
+						false) == PulseForgeEditor::ViewportGizmoPointerOutcome::Complete)
 					CompleteGizmoInteraction();
 				return;
 			}
@@ -6403,8 +6392,7 @@ namespace
 
 		bool BeginGizmoDrag(const GizmoHandle& Handle, const ViewportGizmoGeometry& Geometry, const glm::vec2& Mouse)
 		{
-			if (!m_Scene)
-				return false;
+			if (!m_Scene) return false;
 			PulseForgeEditor::EditorViewportGizmoBeginInput Input;
 			Input.Handle = Handle;
 			Input.Geometry = Geometry;
@@ -6456,23 +6444,19 @@ namespace
 
 		void CompleteReleasedGizmoInteractionBeforeShortcuts()
 		{
-			if (!m_ViewportGizmoInteraction.IsActive())
-				return;
+			if (!m_ViewportGizmoInteraction.IsActive()) return;
 
 			const ImGuiIO& IO = ImGui::GetIO();
-			const auto Outcome = PulseForgeEditor::GetViewportGizmoPointerOutcome({
-				m_ViewportGizmoInteraction.IsActive(),
-				IO.MouseDown[ImGuiMouseButton_Left],
-				IO.MouseReleased[ImGuiMouseButton_Left]
-			}, ImGui::IsKeyPressed(ImGuiKey_Escape, false));
+			const auto Outcome = PulseForgeEditor::GetViewportGizmoPointerOutcome(
+				{ m_ViewportGizmoInteraction.IsActive(), IO.MouseDown[ImGuiMouseButton_Left], IO.MouseReleased[ImGuiMouseButton_Left] },
+				ImGui::IsKeyPressed(ImGuiKey_Escape, false));
 			if (Outcome != PulseForgeEditor::ViewportGizmoPointerOutcome::Complete)
 				return;
 
 			// The viewport image normally consumes release later in this frame; finish first so
 			// the history shortcut router and Edit menu observe the committed gesture immediately.
 			UpdateGizmoDrag({ IO.MousePos.x, IO.MousePos.y });
-			if (m_ViewportGizmoInteraction.IsActive())
-				CompleteGizmoInteraction();
+			if (m_ViewportGizmoInteraction.IsActive()) CompleteGizmoInteraction();
 		}
 
 		void CompleteGizmoInteraction()
@@ -6620,8 +6604,8 @@ namespace
 			if (IO.KeyAlt)
 				return false;
 			const bool Focused = Window && glfwGetWindowAttrib(Window, GLFW_FOCUSED) == GLFW_TRUE;
-			if (!m_ViewportMouseCapture.Begin(true, IsCursorOverViewportImage(), Focused,
-				m_ViewportGizmoInteraction.IsActive(), m_SceneRuntime != nullptr))
+			if (!m_ViewportMouseCapture.Begin(
+					true, IsCursorOverViewportImage(), Focused, m_ViewportGizmoInteraction.IsActive(), m_SceneRuntime != nullptr))
 				return false;
 
 			m_PreviousCursorMode = glfwGetInputMode(Window, GLFW_CURSOR);
@@ -6717,9 +6701,8 @@ namespace
 			{
 				EndEditorCameraNavigation();
 				m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
-					m_ViewportKeyboardFocused, m_SceneRuntime
-						? PulseForgeEditor::ViewportKeyboardFocusEvent::PlayModeStarted
-						: PulseForgeEditor::ViewportKeyboardFocusEvent::ViewportUnavailable);
+					m_ViewportKeyboardFocused, m_SceneRuntime ? PulseForgeEditor::ViewportKeyboardFocusEvent::PlayModeStarted
+															  : PulseForgeEditor::ViewportKeyboardFocusEvent::ViewportUnavailable);
 				return;
 			}
 			const PulseForge::Input& Input = PulseForge::Application::Get().GetInput();
@@ -6728,15 +6711,13 @@ namespace
 			{
 				EndEditorCameraNavigation();
 			}
-			if (!m_Context)
-				return;
+			if (!m_Context) return;
 
 			ImGui::SetCurrentContext(m_Context);
 			const ImGuiIO& IO = ImGui::GetIO();
 			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
 			const bool ApplicationFocused = Window && glfwGetWindowAttrib(Window, GLFW_FOCUSED) == GLFW_TRUE;
-			const PulseForgeEditor::ViewportCameraNavigationContext Context{
-				.SceneAvailable = m_Scene != nullptr,
+			const PulseForgeEditor::ViewportCameraNavigationContext Context{ .SceneAvailable = m_Scene != nullptr,
 				.RuntimeActive = m_SceneRuntime != nullptr,
 				.ViewportKeyboardFocused = m_ViewportKeyboardFocused,
 				.RightMouseNavigationActive = m_EditorCameraNavigationActive && RightMouseHeld,
@@ -6744,12 +6725,10 @@ namespace
 				.TextInputActive = IO.WantTextInput,
 				.ActiveImGuiItem = ImGui::IsAnyItemActive(),
 				.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup),
-				.MenuNavigationActive = GImGui->NavLayer == ImGuiNavLayer_Menu ||
-					GImGui->NavWindowingTarget != nullptr,
+				.MenuNavigationActive = GImGui->NavLayer == ImGuiNavLayer_Menu || GImGui->NavWindowingTarget != nullptr,
 				.ModifierHeld = IO.KeyCtrl || IO.KeyAlt || IO.KeySuper,
 				.GizmoInteractionActive = m_ViewportGizmoInteraction.IsActive(),
-				.CameraGestureActive = m_ViewportCameraGesture != ViewportCameraGesture::None
-			};
+				.CameraGestureActive = m_ViewportCameraGesture != ViewportCameraGesture::None };
 			if (PulseForgeEditor::CanNavigateViewportCamera(Context))
 			{
 				const PulseForgeEditor::ViewportCameraMoveKeys Keys{ .Forward = Input.IsKeyPressed(GLFW_KEY_W),
