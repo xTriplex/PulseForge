@@ -29,8 +29,8 @@ void RunEditorDocumentCloseRequestTests(TestRunner& Tests)
 	Adapter.Kind = EditorDocumentKind::Texture;
 	Adapter.IsEligible = [](const EditorDocumentEditorContext& Context)
 	{ return Context.Identity.Kind == EditorDocumentKind::Texture && Context.ProjectRelativePath.extension() == ".fixture"; };
-	Adapter.LoadSession = [&SavedValues](const EditorDocumentEditorContext& Context)
-		-> std::expected<std::unique_ptr<EditorDocumentEditorState>, std::string>
+	Adapter.LoadSession =
+		[&SavedValues](const EditorDocumentEditorContext& Context) -> std::expected<std::unique_ptr<EditorDocumentEditorState>, std::string>
 	{
 		auto State = std::make_unique<Model>();
 		if (const auto Saved = SavedValues.find(Context.Identity.Asset); Saved != SavedValues.end()) State->Value = Saved->second;
@@ -85,15 +85,15 @@ void RunEditorDocumentCloseRequestTests(TestRunner& Tests)
 
 	EditorDocumentCloseRequest Request;
 	size_t ContinuationCount = 0;
-	Request.BeginCloseAllDocuments({ IdentityA, IdentityB }, std::string(EditorDocumentManager::MainHostID),
-		[&ContinuationCount] { ++ContinuationCount; });
+	Request.BeginCloseAllDocuments(
+		{ IdentityA, IdentityB }, std::string(EditorDocumentManager::MainHostID), [&ContinuationCount] { ++ContinuationCount; });
 	PF_CHECK(Tests, Request.HasPendingRequest() && Request.ClosesDocuments());
 	PF_CHECK(Tests, Request.ConsumeDialogOpenRequest() && !Request.ConsumeDialogOpenRequest());
 	const std::array<EditorDocumentIdentity, 1> DirtyBeforeSave = { IdentityA };
 	std::vector<EditorDocumentCloseRequest::Action> Queued;
 	const auto Enqueue = [&Queued](EditorDocumentCloseRequest::Action Action) { Queued.push_back(std::move(Action)); };
 	const auto ResolveChanges = [&Documents, &Editors](std::span<const EditorDocumentIdentity> Identities,
-													EditorDocumentCloseChoice Choice) -> std::expected<void, std::string>
+									EditorDocumentCloseChoice Choice) -> std::expected<void, std::string>
 	{
 		for (const EditorDocumentIdentity& Identity : Identities)
 		{
@@ -107,8 +107,8 @@ void RunEditorDocumentCloseRequestTests(TestRunner& Tests)
 		}
 		return {};
 	};
-	const auto FailedSavedClose = Request.Resolve(Documents, Editors, EditorDocumentCloseChoice::Save,
-		DirtyBeforeSave, ResolveChanges, Enqueue);
+	const auto FailedSavedClose =
+		Request.Resolve(Documents, Editors, EditorDocumentCloseChoice::Save, DirtyBeforeSave, ResolveChanges, Enqueue);
 	PF_CHECK(Tests, !FailedSavedClose && Request.HasPendingRequest() && !Request.GetError().empty());
 	PF_CHECK(Tests, Documents.Find(IdentityA) == SessionA && Documents.Find(IdentityB) == SessionB);
 	PF_CHECK(Tests, !SessionA->IsDirty() && StateA->Value == 17 && SavedValues[*AssetA] == 17);
@@ -116,8 +116,8 @@ void RunEditorDocumentCloseRequestTests(TestRunner& Tests)
 	PF_CHECK(Tests, Request.ShouldOfferCloseRetry(true));
 	const std::array<EditorDocumentIdentity, 0> NoDirtyDocuments{};
 	StateB->FailClose = false;
-	const auto RetriedClose = Request.Resolve(Documents, Editors, EditorDocumentCloseChoice::Save,
-		NoDirtyDocuments, ResolveChanges, Enqueue);
+	const auto RetriedClose =
+		Request.Resolve(Documents, Editors, EditorDocumentCloseChoice::Save, NoDirtyDocuments, ResolveChanges, Enqueue);
 	PF_CHECK(Tests, RetriedClose && RetriedClose->DocumentsClosed && !Request.HasPendingRequest());
 	PF_CHECK(Tests, !Documents.Find(IdentityA) && !Documents.Find(IdentityB) && CloseCount == 2);
 	PF_CHECK(Tests, Queued.size() == 1 && ContinuationCount == 0);
@@ -137,17 +137,18 @@ void RunEditorDocumentCloseRequestTests(TestRunner& Tests)
 	PF_CHECK(Tests, Documents.MarkEdited(IdentityA));
 	StateA->FailClose = true;
 	const EditorDocumentEditorState* const OriginalState = SessionA->EditorState.get();
-	Request.BeginCloseDocuments({ IdentityA }, std::string(EditorDocumentManager::MainHostID),
-		[&ContinuationCount] { ContinuationCount += 100; });
+	Request.BeginCloseDocuments(
+		{ IdentityA }, std::string(EditorDocumentManager::MainHostID), [&ContinuationCount] { ContinuationCount += 100; });
 	const std::array<EditorDocumentIdentity, 1> DirtyBeforeDiscard = { IdentityA };
 	size_t DiscardAttempts = 0;
-	const auto FailingClose = Request.Resolve(Documents, Editors, EditorDocumentCloseChoice::Discard,
-		DirtyBeforeDiscard,
+	const auto FailingClose = Request.Resolve(
+		Documents, Editors, EditorDocumentCloseChoice::Discard, DirtyBeforeDiscard,
 		[&ResolveChanges, &DiscardAttempts](std::span<const EditorDocumentIdentity> Identities, EditorDocumentCloseChoice Choice)
 		{
 			++DiscardAttempts;
 			return ResolveChanges(Identities, Choice);
-		}, Enqueue);
+		},
+		Enqueue);
 	PF_CHECK(Tests, !FailingClose && DiscardAttempts == 0 && Request.HasPendingRequest());
 	PF_CHECK(Tests, Documents.Find(IdentityA) == SessionA && SessionA->EditorState.get() == OriginalState);
 	PF_CHECK(Tests, SessionA->IsDirty() && StateA->Value == 23 && ContinuationCount == 1 && Queued.size() == 1);

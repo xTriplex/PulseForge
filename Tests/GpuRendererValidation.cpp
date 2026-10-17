@@ -53,7 +53,7 @@ namespace
 						? "Main swapchain legacy-retirement recovery validation"
 					: RetirementScenario == LegacyRetirementScenario::NativeRecoveryFailure
 						? "Native swapchain legacy-retirement recovery validation"
-						: ValidateTransparency		? "Transparency rendered-image validation"
+					: ValidateTransparency		? "Transparency rendered-image validation"
 					: ValidatePbrMaterials		? "PBR material rendered-image validation"
 					: ValidatePointShadowImages ? "Point-shadow rendered-image investigation"
 					: ValidatePointShadows		? "SceneRenderer point-shadow GPU validation"
@@ -80,9 +80,8 @@ namespace
 				if (m_LegacyRetirementScenario != LegacyRetirementScenario::None)
 				{
 					auto& App = PulseForge::Application::Get();
-					m_RetirementWindow = PulseForge::Window::Create(PulseForge::WindowProps(
-						"PulseForge legacy retirement fixture", 640, 480, PulseForge::EWindowStyle::Default,
-						PulseForge::EWindowClientAPI::None));
+					m_RetirementWindow = PulseForge::Window::Create(PulseForge::WindowProps("PulseForge legacy retirement fixture", 640,
+						480, PulseForge::EWindowStyle::Default, PulseForge::EWindowClientAPI::None));
 					if (!m_RetirementWindow)
 						throw std::runtime_error("Could not create the secondary window for legacy retirement validation");
 					auto PresentationTarget = App.CreatePlatformPresentationTarget(m_RetirementWindow->GetNativeWindow());
@@ -260,10 +259,8 @@ namespace
 					++m_RetirementMainFrames;
 					if (m_LegacyRetirementScenario == LegacyRetirementScenario::MainRecoveryFailure)
 					{
-						if (m_RetirementValidationFrames < 5)
-							m_SawMainFrameBeforeRecoveryFailure = true;
-						else if (m_RetirementValidationFrames >= 8)
-							m_MainFrameResumedAfterRecoveryFailure = true;
+						if (m_RetirementValidationFrames < 5) m_SawMainFrameBeforeRecoveryFailure = true;
+						else if (m_RetirementValidationFrames >= 8) m_MainFrameResumedAfterRecoveryFailure = true;
 					}
 				}
 				return;
@@ -340,11 +337,9 @@ namespace
 
 		void OnRenderPlatformWindows() override
 		{
-			if (m_RetirementTargetID == 0)
-				return;
+			if (m_RetirementTargetID == 0) return;
 			auto& App = PulseForge::Application::Get();
-			if (!App.BeginPlatformPresentationTarget(m_RetirementTargetID))
-				return;
+			if (!App.BeginPlatformPresentationTarget(m_RetirementTargetID)) return;
 			App.EndPlatformPresentationTarget(m_RetirementTargetID);
 			++m_RetirementNativeSubmissions;
 		}
@@ -380,9 +375,8 @@ namespace
 
 		[[nodiscard]] bool Succeeded() const noexcept
 		{
-			return m_Succeeded && (m_LegacyRetirementScenario != LegacyRetirementScenario::None
-							? m_LegacyRetirementValidationComplete
-							: m_ValidateEditorUiUnorm			? m_EditorUiValidation.IsComplete()
+			return m_Succeeded && (m_LegacyRetirementScenario != LegacyRetirementScenario::None ? m_LegacyRetirementValidationComplete
+									  : m_ValidateEditorUiUnorm									? m_EditorUiValidation.IsComplete()
 									  : m_ValidateTransparency		? (m_ProjectSceneValidation && m_ProjectSceneValidation->Succeeded())
 									  : m_ValidatePbrMaterials		? (m_ProjectSceneValidation && m_ProjectSceneValidation->Succeeded())
 									  : m_ValidatePointShadowImages ? m_PointShadowImageValidation.IsComplete()
@@ -403,8 +397,7 @@ namespace
 
 		void UpdateLegacyRetirementValidation()
 		{
-			if (!m_Succeeded)
-				return;
+			if (!m_Succeeded) return;
 			auto& App = PulseForge::Application::Get();
 			++m_RetirementValidationFrames;
 
@@ -413,13 +406,11 @@ namespace
 				Fail("Timed out while exercising bounded legacy swapchain recovery");
 				return;
 			}
-			if (m_RetirementValidationFrames < 16)
-				return;
+			if (m_RetirementValidationFrames < 16) return;
 
 			if (m_LegacyRetirementScenario == LegacyRetirementScenario::MainRecoveryFailure)
 			{
-				if (!m_SawMainFrameBeforeRecoveryFailure || m_MainFrameResumedAfterRecoveryFailure ||
-					m_RetirementNativeSubmissions < 12)
+				if (!m_SawMainFrameBeforeRecoveryFailure || m_MainFrameResumedAfterRecoveryFailure || m_RetirementNativeSubmissions < 12)
 				{
 					Fail("The failed main recovery was not bounded or the independent native host stopped submitting frames");
 					return;
@@ -433,7 +424,8 @@ namespace
 				return;
 			}
 			else
-				PF_INFO("GPU_VALIDATION_RESULT=PASS; failed native cap recovery remained blocked while the main host ran {} frame callbacks",
+				PF_INFO(
+					"GPU_VALIDATION_RESULT=PASS; failed native cap recovery remained blocked while the main host ran {} frame callbacks",
 					m_RetirementMainFrames);
 
 			if (!ReleaseRetirementFixture())
@@ -450,8 +442,7 @@ namespace
 			if (m_RetirementTargetID != 0)
 			{
 				auto& App = PulseForge::Application::Get();
-				if (!App.DestroyPlatformPresentationTarget(m_RetirementTargetID))
-					return false;
+				if (!App.DestroyPlatformPresentationTarget(m_RetirementTargetID)) return false;
 				m_RetirementTargetID = 0;
 			}
 			m_RetirementWindow.reset();
@@ -717,9 +708,9 @@ int main(int ArgumentCount, char** Arguments)
 		const bool ValidateTransparency = Mode == "--scene-transparency";
 		const bool ValidatePointShadowImages = Mode == "--scene-point-shadow-images";
 		const LegacyRetirementScenario RetirementScenario =
-			Mode == "--legacy-main-retirement-cap" ? LegacyRetirementScenario::MainRecoveryFailure
+			Mode == "--legacy-main-retirement-cap"	   ? LegacyRetirementScenario::MainRecoveryFailure
 			: Mode == "--legacy-native-retirement-cap" ? LegacyRetirementScenario::NativeRecoveryFailure
-																	  : LegacyRetirementScenario::None;
+													   : LegacyRetirementScenario::None;
 		const std::filesystem::path PointShadowImageDirectory =
 			ArgumentCount > 2 ? std::filesystem::path(Arguments[2])
 							  : std::filesystem::current_path() / "Diagnostics" / "PointShadowDirection";

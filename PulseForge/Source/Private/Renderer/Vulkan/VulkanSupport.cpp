@@ -17,12 +17,8 @@ namespace PulseForge::VulkanSupport
 			: SwapchainFrameStartAction::Skip;
 	}
 
-	bool CanCreateSwapchainGeneration(
-		bool PresentationFencesEnabled,
-		bool HasCurrentGeneration,
-		std::size_t DeferredGenerationCount,
-		bool CurrentGenerationOutOfDate,
-		bool RecoveryAttemptedAtLimit) noexcept
+	bool CanCreateSwapchainGeneration(bool PresentationFencesEnabled, bool HasCurrentGeneration, std::size_t DeferredGenerationCount,
+		bool CurrentGenerationOutOfDate, bool RecoveryAttemptedAtLimit) noexcept
 	{
 		if (PresentationFencesEnabled)
 			return true;
@@ -31,8 +27,7 @@ namespace PulseForge::VulkanSupport
 		if (DeferredGenerationCount > MaximumDeferredSwapchainGenerations)
 			return false;
 		const bool CurrentGenerationNeedsRecovery = !HasCurrentGeneration || CurrentGenerationOutOfDate;
-		return CurrentGenerationNeedsRecovery && !RecoveryAttemptedAtLimit &&
-			MaximumOutOfDateRecoveryGenerations > 0;
+		return CurrentGenerationNeedsRecovery && !RecoveryAttemptedAtLimit && MaximumOutOfDateRecoveryGenerations > 0;
 	}
 
 	bool ShouldRetireDeferredSwapchains(

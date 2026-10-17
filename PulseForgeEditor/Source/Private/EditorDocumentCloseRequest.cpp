@@ -6,17 +6,13 @@
 namespace PulseForgeEditor
 {
 	void EditorDocumentCloseRequest::BeginCloseDocuments(
-		std::vector<EditorDocumentIdentity> Documents,
-		std::string DialogHostID,
-		Action Continuation)
+		std::vector<EditorDocumentIdentity> Documents, std::string DialogHostID, Action Continuation)
 	{
 		Begin(Mode::CloseDocuments, std::move(Documents), std::move(DialogHostID), std::move(Continuation));
 	}
 
 	void EditorDocumentCloseRequest::BeginCloseAllDocuments(
-		std::vector<EditorDocumentIdentity> Documents,
-		std::string DialogHostID,
-		Action Continuation)
+		std::vector<EditorDocumentIdentity> Documents, std::string DialogHostID, Action Continuation)
 	{
 		BeginCloseDocuments(std::move(Documents), std::move(DialogHostID), std::move(Continuation));
 		m_IncludeCurrentDirtyDocuments = true;
@@ -28,10 +24,7 @@ namespace PulseForgeEditor
 	}
 
 	void EditorDocumentCloseRequest::Begin(
-		Mode RequestMode,
-		std::vector<EditorDocumentIdentity> Documents,
-		std::string DialogHostID,
-		Action Continuation)
+		Mode RequestMode, std::vector<EditorDocumentIdentity> Documents, std::string DialogHostID, Action Continuation)
 	{
 		Reset();
 		m_Mode = RequestMode;
@@ -102,11 +95,8 @@ namespace PulseForgeEditor
 	}
 
 	std::expected<EditorDocumentCloseRequest::ResolveResult, std::string> EditorDocumentCloseRequest::Resolve(
-		EditorDocumentManager& Documents,
-		const EditorDocumentEditorRegistry& Editors,
-		EditorDocumentCloseChoice Choice,
-		std::span<const EditorDocumentIdentity> CurrentDirtyDocuments,
-		const ResolveChanges& ResolveDirtyChanges,
+		EditorDocumentManager& Documents, const EditorDocumentEditorRegistry& Editors, EditorDocumentCloseChoice Choice,
+		std::span<const EditorDocumentIdentity> CurrentDirtyDocuments, const ResolveChanges& ResolveDirtyChanges,
 		const EnqueueAction& Enqueue)
 	{
 		if (!HasPendingRequest()) return std::unexpected("There is no pending document-close request.");
@@ -122,12 +112,10 @@ namespace PulseForgeEditor
 			for (const EditorDocumentIdentity& Identity : TargetDocuments)
 				if (Documents.Find(Identity)) CloseableDocuments.push_back(Identity);
 
-			const auto ResolveChanges = [this, &TargetDocuments, &ResolveDirtyChanges, Choice]()
-				-> std::expected<void, std::string>
+			const auto ResolveChanges = [this, &TargetDocuments, &ResolveDirtyChanges, Choice]() -> std::expected<void, std::string>
 			{ return ResolveDirtyChanges(TargetDocuments, Choice); };
-			auto Closed = ResolveDocumentCloseBatchWithChanges(
-				Documents, Editors, CloseableDocuments, Choice == EditorDocumentCloseChoice::Discard,
-				ResolveChanges, m_Continuation, Enqueue);
+			auto Closed = ResolveDocumentCloseBatchWithChanges(Documents, Editors, CloseableDocuments,
+				Choice == EditorDocumentCloseChoice::Discard, ResolveChanges, m_Continuation, Enqueue);
 			if (!Closed)
 			{
 				SetError(Closed.error());

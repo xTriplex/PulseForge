@@ -326,8 +326,7 @@ namespace PulseForge
 			if (m_DebugMainAcquireOutOfDateAfterNativeTargetFrames > 0 &&
 				--m_DebugMainAcquireOutOfDateAfterNativeTargetFrames == 0)
 			{
-				m_DebugMainAcquireOutOfDateRemaining = static_cast<uint32_t>(
-				m_DebugMainAcquireOutOfDateAfterNativeTargetCount);
+				m_DebugMainAcquireOutOfDateRemaining = static_cast<uint32_t>(m_DebugMainAcquireOutOfDateAfterNativeTargetCount);
 				PF_CORE_WARN(
 					"Debug Vulkan presentation test will now inject {} main swapchain out-of-date acquisitions",
 					m_DebugMainAcquireOutOfDateRemaining);
@@ -335,12 +334,9 @@ namespace PulseForge
 #endif
 			const bool RecreationRequested = !m_Swapchain || m_SwapchainRecreationNeeded ||
 				FramebufferWidth != m_SwapchainExtent.width || FramebufferHeight != m_SwapchainExtent.height;
-			const bool CanCreateGeneration = VulkanSupport::CanCreateSwapchainGeneration(
-				m_PresentFenceMaintenanceEnabled,
-				m_Swapchain != vk::SwapchainKHR(),
-				m_RetiredSwapchainGenerations.size(),
-				m_SwapchainUnusable,
-				m_LegacyRecoveryAttemptedAtLimit);
+			const bool CanCreateGeneration =
+				VulkanSupport::CanCreateSwapchainGeneration(m_PresentFenceMaintenanceEnabled, m_Swapchain != vk::SwapchainKHR(),
+					m_RetiredSwapchainGenerations.size(), m_SwapchainUnusable, m_LegacyRecoveryAttemptedAtLimit);
 			if (RecreationRequested && !CanCreateGeneration &&
 				(m_SwapchainUnusable || !m_Swapchain))
 			{
@@ -600,8 +596,7 @@ namespace PulseForge
 #if defined(PF_DEBUG)
 			Host->InjectImageAllocationFailure = std::exchange(m_InjectNextPlatformImageAllocationFailure, false);
 			Host->InjectAcquireOutOfDateCount = std::exchange(m_DebugNativeAcquireOutOfDateCount, 0u);
-			Host->InjectSwapchainCreationFailureAtDeferredCount =
-				std::exchange(m_DebugNativeSwapchainCreationFailureAtDeferredCount, 0u);
+			Host->InjectSwapchainCreationFailureAtDeferredCount = std::exchange(m_DebugNativeSwapchainCreationFailureAtDeferredCount, 0u);
 #endif
 			VkSurfaceKHR NativeSurface = VK_NULL_HANDLE;
 			const VkResult SurfaceResult = glfwCreateWindowSurface(
@@ -641,8 +636,7 @@ namespace PulseForge
 				if (m_DebugMainAcquireOutOfDateAfterNativeTarget)
 				{
 					m_DebugMainAcquireOutOfDateAfterNativeTarget = false;
-					m_DebugMainAcquireOutOfDateAfterNativeTargetFrames =
-						m_DebugMainAcquireOutOfDateAfterNativeTargetDelayFrames;
+					m_DebugMainAcquireOutOfDateAfterNativeTargetFrames = m_DebugMainAcquireOutOfDateAfterNativeTargetDelayFrames;
 					PF_CORE_WARN(
 						"Debug Vulkan presentation test will inject out-of-date acquisitions {} main frames after native target creation",
 						m_DebugMainAcquireOutOfDateAfterNativeTargetFrames);
@@ -2368,8 +2362,7 @@ namespace PulseForge
 					return uint32_t{};
 				char* End = nullptr;
 				const unsigned long Parsed = std::strtoul(Value, &End, 10);
-				return End != Value && End && *End == '\0' && Parsed <= Maximum
-					? static_cast<uint32_t>(Parsed) : uint32_t{};
+				return End != Value && End && *End == '\0' && Parsed <= Maximum ? static_cast<uint32_t>(Parsed) : uint32_t{};
 			};
 			m_DebugMainAcquireOutOfDateRemaining = ReadCount("PULSEFORGE_VULKAN_TEST_MAIN_ACQUIRE_OUT_OF_DATE_COUNT");
 			m_DebugNativeAcquireOutOfDateCount = ReadCount("PULSEFORGE_VULKAN_TEST_NATIVE_ACQUIRE_OUT_OF_DATE_COUNT");
@@ -2377,27 +2370,22 @@ namespace PulseForge
 				ReadCount("PULSEFORGE_VULKAN_TEST_MAIN_ACQUIRE_OUT_OF_DATE_AFTER_NATIVE_TARGET_COUNT");
 			m_DebugMainAcquireOutOfDateAfterNativeTargetDelayFrames =
 				ReadCount("PULSEFORGE_VULKAN_TEST_MAIN_ACQUIRE_OUT_OF_DATE_AFTER_NATIVE_TARGET_DELAY_FRAMES", 600ul);
-			if (!m_DebugMainAcquireOutOfDateAfterNativeTargetDelayFrames)
-				m_DebugMainAcquireOutOfDateAfterNativeTargetDelayFrames = 60;
+			if (!m_DebugMainAcquireOutOfDateAfterNativeTargetDelayFrames) m_DebugMainAcquireOutOfDateAfterNativeTargetDelayFrames = 60;
 			if (m_DebugMainAcquireOutOfDateAfterNativeTarget && !m_DebugMainAcquireOutOfDateAfterNativeTargetCount)
 				m_DebugMainAcquireOutOfDateAfterNativeTargetCount = static_cast<uint32_t>(
-					VulkanSupport::MaximumDeferredSwapchainGenerations +
-					VulkanSupport::MaximumOutOfDateRecoveryGenerations + 1);
-			m_DebugMainSwapchainCreationFailureAtDeferredCount =
-				ReadCount("PULSEFORGE_VULKAN_TEST_MAIN_CREATE_FAILURE_AT_DEFERRED_COUNT");
+					VulkanSupport::MaximumDeferredSwapchainGenerations + VulkanSupport::MaximumOutOfDateRecoveryGenerations + 1);
+			m_DebugMainSwapchainCreationFailureAtDeferredCount = ReadCount("PULSEFORGE_VULKAN_TEST_MAIN_CREATE_FAILURE_AT_DEFERRED_COUNT");
 			m_DebugNativeSwapchainCreationFailureAtDeferredCount =
 				ReadCount("PULSEFORGE_VULKAN_TEST_NATIVE_CREATE_FAILURE_AT_DEFERRED_COUNT");
-			if (m_ForceLegacyRetirementForTesting || m_DebugMainAcquireOutOfDateRemaining ||
-				m_DebugMainAcquireOutOfDateAfterNativeTarget ||
+			if (m_ForceLegacyRetirementForTesting || m_DebugMainAcquireOutOfDateRemaining || m_DebugMainAcquireOutOfDateAfterNativeTarget ||
 				m_DebugNativeAcquireOutOfDateCount || m_DebugMainSwapchainCreationFailureAtDeferredCount ||
 				m_DebugNativeSwapchainCreationFailureAtDeferredCount)
 				PF_CORE_WARN(
-					"Debug Vulkan presentation test enabled: legacy retirement forced={}, main acquire injections={}, main-after-native injection count={}, first native host acquire injections={}, main/native create-failure limits={}/{}",
+					"Debug Vulkan presentation test enabled: legacy retirement forced={}, main acquire injections={}, main-after-native "
+					"injection count={}, first native host acquire injections={}, main/native create-failure limits={}/{}",
 					m_ForceLegacyRetirementForTesting, m_DebugMainAcquireOutOfDateRemaining,
-					m_DebugMainAcquireOutOfDateAfterNativeTargetCount,
-					m_DebugNativeAcquireOutOfDateCount,
-					m_DebugMainSwapchainCreationFailureAtDeferredCount,
-					m_DebugNativeSwapchainCreationFailureAtDeferredCount);
+					m_DebugMainAcquireOutOfDateAfterNativeTargetCount, m_DebugNativeAcquireOutOfDateCount,
+					m_DebugMainSwapchainCreationFailureAtDeferredCount, m_DebugNativeSwapchainCreationFailureAtDeferredCount);
 #endif
 		}
 
@@ -2800,9 +2788,8 @@ namespace PulseForge
 		{
 			if (!m_Device)
 				return false;
-			if (!VulkanSupport::CanCreateSwapchainGeneration(
-				m_PresentFenceMaintenanceEnabled, m_Swapchain != vk::SwapchainKHR(),
-				m_RetiredSwapchainGenerations.size(), OutOfDateRecovery, m_LegacyRecoveryAttemptedAtLimit))
+			if (!VulkanSupport::CanCreateSwapchainGeneration(m_PresentFenceMaintenanceEnabled, m_Swapchain != vk::SwapchainKHR(),
+					m_RetiredSwapchainGenerations.size(), OutOfDateRecovery, m_LegacyRecoveryAttemptedAtLimit))
 			{
 				if (!m_DeferredRetirementLimitLogged)
 				{
@@ -2871,12 +2858,11 @@ namespace PulseForge
 			const bool HadPreviousGeneration = m_Swapchain != vk::SwapchainKHR();
 			bool PreviousGenerationRetired = false;
 			const bool RecoveryAtLegacyLimit = !m_PresentFenceMaintenanceEnabled &&
-				m_RetiredSwapchainGenerations.size() == VulkanSupport::MaximumDeferredSwapchainGenerations &&
-				(m_SwapchainUnusable || !HadPreviousGeneration);
+											   m_RetiredSwapchainGenerations.size() == VulkanSupport::MaximumDeferredSwapchainGenerations &&
+											   (m_SwapchainUnusable || !HadPreviousGeneration);
 			try
 			{
-				if (RecoveryAtLegacyLimit)
-					m_LegacyRecoveryAttemptedAtLimit = true;
+				if (RecoveryAtLegacyLimit) m_LegacyRecoveryAttemptedAtLimit = true;
 #if defined(PF_DEBUG)
 				if (RecoveryAtLegacyLimit && m_DebugMainSwapchainCreationFailureAtDeferredCount > 0 &&
 					!m_DebugMainSwapchainCreationFailureConsumed &&
@@ -3180,9 +3166,8 @@ namespace PulseForge
 
 		bool RecreatePlatformSwapchain(PlatformPresentationHost& Host, bool OutOfDateRecovery = false)
 		{
-			if (!VulkanSupport::CanCreateSwapchainGeneration(
-				m_PresentFenceMaintenanceEnabled, Host.Swapchain != vk::SwapchainKHR(),
-				Host.RetiredGenerations.size(), OutOfDateRecovery, Host.LegacyRecoveryAttemptedAtLimit))
+			if (!VulkanSupport::CanCreateSwapchainGeneration(m_PresentFenceMaintenanceEnabled, Host.Swapchain != vk::SwapchainKHR(),
+					Host.RetiredGenerations.size(), OutOfDateRecovery, Host.LegacyRecoveryAttemptedAtLimit))
 			{
 				if ((Host.SwapchainUnusable || !Host.Swapchain) &&
 					(Host.RetiredGenerations.size() > VulkanSupport::MaximumDeferredSwapchainGenerations ||
@@ -3223,10 +3208,9 @@ namespace PulseForge
 					Host.RetiredGenerations.reserve(Host.RetiredGenerations.size() + 1);
 				const auto Capabilities = m_PhysicalDevice.getSurfaceCapabilitiesKHR(Host.Surface);
 				const bool RecoveryAtLegacyLimit = !m_PresentFenceMaintenanceEnabled &&
-					Host.RetiredGenerations.size() == VulkanSupport::MaximumDeferredSwapchainGenerations &&
-					(Host.SwapchainUnusable || !Host.Swapchain);
-				if (RecoveryAtLegacyLimit)
-					Host.LegacyRecoveryAttemptedAtLimit = true;
+												   Host.RetiredGenerations.size() == VulkanSupport::MaximumDeferredSwapchainGenerations &&
+												   (Host.SwapchainUnusable || !Host.Swapchain);
+				if (RecoveryAtLegacyLimit) Host.LegacyRecoveryAttemptedAtLimit = true;
 #if defined(PF_DEBUG)
 				if (RecoveryAtLegacyLimit && Host.InjectSwapchainCreationFailureAtDeferredCount > 0 &&
 					!Host.InjectSwapchainCreationFailureConsumed &&
