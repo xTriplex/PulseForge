@@ -3,6 +3,17 @@
 #include <algorithm>
 #include <array>
 
+namespace PulseForge
+{
+	struct PhysicsSceneRuntimeTestAccess final
+	{
+		static uint64_t GetFullSceneReconciliationCount(const PhysicsSceneRuntime& Runtime)
+		{
+			return Runtime.GetFullSceneReconciliationCountForTesting();
+		}
+	};
+}
+
 namespace
 {
 	void TestUUIDBehavior(TestRunner& Tests)
@@ -437,6 +448,193 @@ namespace
 			PF_CHECK(Tests, !RejectedOverflow && RejectedOverflow.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
 			PF_CHECK(Tests, !OverflowRuntime.IsRunning());
 		}
+	}
+
+	void TestPhysicsTargetedSynchronizationAndCapacity(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		constexpr double FixedStep = 0.1;
+		PhysicsSceneRuntimeDesc Description;
+		Description.FixedStepSeconds = FixedStep;
+		Description.MaxFrameDeltaSeconds = 0.2;
+		Description.MaxSubsteps = 2;
+		Description.Gravity = glm::vec3(0.0f);
+		Description.MaxBodies = 3;
+
+		Scene Source;
+		const UUID FirstId{ 0x7200000000000000ull, 1 };
+		const UUID SecondId{ 0x7200000000000000ull, 2 };
+		const UUID ThirdId{ 0x7200000000000000ull, 3 };
+		const auto First = Source.CreateEntityWithUUID(FirstId, "First force target");
+		const auto Second = Source.CreateEntityWithUUID(SecondId, "Second force target");
+		PF_CHECK(Tests, First && Second);
+		if (!First || !Second) return;
+		TransformComponent SecondTransform;
+		SecondTransform.Translation.x = 10.0f;
+		PF_CHECK(Tests, Second->SetTransform(SecondTransform).has_value());
+
+		for (const Entity& Current : { *First, *Second })
+		{
+			PF_CHECK(Tests, Current.SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.2f, 0.0f, false }).has_value());
+			PF_CHECK(Tests, Current.SetBoxCollider({ { 0.5f, 0.5f, 0.5f } }).has_value());
+		}
+
+		PhysicsSceneRuntimeDesc InvalidCapacity = Description;
+		InvalidCapacity.MaxBodies = 0;
+		PhysicsSceneRuntime InvalidCapacityRuntime(InvalidCapacity);
+		const auto InvalidCapacityStart = InvalidCapacityRuntime.Start(Source);
+		PF_CHECK(Tests, !InvalidCapacityStart &&
+			InvalidCapacityStart.error().Code == PhysicsSceneRuntimeErrorCode::InvalidSettings);
+
+		PhysicsSceneRuntime Runtime(Description);
+		const auto RuntimeStart = Runtime.Start(Source);
+		PF_CHECK(Tests, RuntimeStart.has_value());
+		if (!RuntimeStart) return;
+		PF_CHECK(Tests, PhysicsSceneRuntimeTestAccess::GetFullSceneReconciliationCount(Runtime) == 1);
+		for (int Index = 0; Index < 8; ++Index)
+			PF_CHECK(Tests, Runtime.ApplyForce(FirstId, { 10.0f, 0.0f, 0.0f }).has_value());
+		for (int Index = 0; Index < 4; ++Index)
+			PF_CHECK(Tests, Runtime.ApplyForce(SecondId, { 10.0f, 0.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, PhysicsSceneRuntimeTestAccess::GetFullSceneReconciliationCount(Runtime) == 1);
+
+		TransformComponent ThirdTransform;
+		ThirdTransform.Translation.x = 20.0f;
+		const auto Third = Source.CreateEntityWithUUID(ThirdId, "Runtime-created force target");
+		PF_CHECK(Tests, Third.has_value());
+		if (!Third) return;
+		PF_CHECK(Tests, Third->SetTransform(ThirdTransform).has_value());
+		PF_CHECK(Tests, Third->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.2f, 0.0f, false }).has_value());
+		PF_CHECK(Tests, Third->SetBoxCollider({ { 0.5f, 0.5f, 0.5f } }).has_value());
+		PF_CHECK(Tests, Runtime.ApplyForce(ThirdId, { 10.0f, 0.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, PhysicsSceneRuntimeTestAccess::GetFullSceneReconciliationCount(Runtime) == 1);
+
+		RigidbodyComponent UpdatedRigidbody{ RigidbodyMotionType::Dynamic, 5.0f, 0.7f, 0.2f, false };
+		PF_CHECK(Tests, First->SetRigidbody(UpdatedRigidbody).has_value());
+		PF_CHECK(Tests, First->SetBoxCollider({ { 0.75f, 0.5f, 0.5f } }).has_value());
+		// The targeted update changes mass and shape after eight forces are queued. The next force
+		// must join those forces, and the in-place body update must not require a spare pool slot.
+		PF_CHECK(Tests, Runtime.ApplyForce(FirstId, { 10.0f, 0.0f, 0.0f }).has_value());
+		const auto SettingsStep = Runtime.Advance(Source, Timestep(FixedStep));
+		PF_CHECK(Tests, SettingsStep && *SettingsStep == 1);
+		const auto FirstAfterSettings = First->GetTransform();
+		PF_CHECK(Tests, FirstAfterSettings && FirstAfterSettings->Translation.x > 0.025f);
+		PF_CHECK(Tests, PhysicsSceneRuntimeTestAccess::GetFullSceneReconciliationCount(Runtime) == 2);
+
+		const auto SecondStep = Runtime.Advance(Source, Timestep(FixedStep));
+		PF_CHECK(Tests, SecondStep && *SecondStep == 1);
+		const auto SecondAfterForces = Second->GetTransform();
+		const auto ThirdAfterForce = Third->GetTransform();
+		PF_CHECK(Tests, SecondAfterForces && SecondAfterForces->Translation.x > 0.0f);
+		PF_CHECK(Tests, ThirdAfterForce && ThirdAfterForce->Translation.x > ThirdTransform.Translation.x);
+		PF_CHECK(Tests, PhysicsSceneRuntimeTestAccess::GetFullSceneReconciliationCount(Runtime) == 3);
+
+		// Existing body changes remain legal at capacity; a genuinely additional body does not.
+		PF_CHECK(Tests, First->SetRigidbody({ RigidbodyMotionType::Dynamic, 2.0f, 0.1f, 0.4f, true }).has_value());
+		PF_CHECK(Tests, First->SetBoxCollider({ { 0.6f, 0.6f, 0.6f } }).has_value());
+		const auto FullPoolUpdate = Runtime.Advance(Source, Timestep(0.0));
+		PF_CHECK(Tests, FullPoolUpdate && *FullPoolUpdate == 0);
+		const auto Parent = Source.CreateEntity("Invalid live body parent");
+		PF_CHECK(Tests, Parent.has_value());
+		if (Parent)
+		{
+			const auto BeforeRejectedUpdate = First->GetTransform();
+			PF_CHECK(Tests, First->SetParent(*Parent).has_value());
+			const auto RejectedUpdate = Runtime.ApplyForce(FirstId, { 1.0f, 0.0f, 0.0f });
+			PF_CHECK(Tests, !RejectedUpdate && RejectedUpdate.error().Code == PhysicsSceneRuntimeErrorCode::UnsupportedHierarchy);
+			PF_CHECK(Tests, First->ClearParent().has_value());
+			const auto AfterRejectedUpdate = First->GetTransform();
+			PF_CHECK(Tests, BeforeRejectedUpdate && AfterRejectedUpdate &&
+				AfterRejectedUpdate->Translation == BeforeRejectedUpdate->Translation &&
+				AfterRejectedUpdate->Rotation == BeforeRejectedUpdate->Rotation);
+			PF_CHECK(Tests, Runtime.ApplyForce(FirstId, glm::vec3(0.0f)).has_value());
+		}
+		PF_CHECK(Tests, Second->RemoveRigidbody().has_value());
+		PF_CHECK(Tests, Second->RemoveBoxCollider().has_value());
+		const UUID FourthId{ 0x7200000000000000ull, 4 };
+		const auto Fourth = Source.CreateEntityWithUUID(FourthId, "Body replacing removed physics components");
+		PF_CHECK(Tests, Fourth.has_value());
+		if (Fourth)
+		{
+			TransformComponent FourthTransform;
+			FourthTransform.Translation.x = 30.0f;
+			PF_CHECK(Tests, Fourth->SetTransform(FourthTransform).has_value());
+			PF_CHECK(Tests, Fourth->SetRigidbody({ RigidbodyMotionType::Dynamic }).has_value());
+			PF_CHECK(Tests, Fourth->SetBoxCollider({}).has_value());
+			PF_CHECK(Tests, Runtime.ApplyForce(FourthId, { 1.0f, 0.0f, 0.0f }).has_value());
+		}
+		const UUID FifthId{ 0x7200000000000000ull, 5 };
+		const auto Fifth = Source.CreateEntityWithUUID(FifthId, "Body beyond configured pool");
+		PF_CHECK(Tests, Fifth.has_value());
+		if (Fifth)
+		{
+			PF_CHECK(Tests, Fifth->SetRigidbody({ RigidbodyMotionType::Dynamic }).has_value());
+			PF_CHECK(Tests, Fifth->SetBoxCollider({}).has_value());
+			const auto CapacityExceeded = Runtime.ApplyForce(FifthId, { 1.0f, 0.0f, 0.0f });
+			PF_CHECK(Tests, !CapacityExceeded && CapacityExceeded.error().Code == PhysicsSceneRuntimeErrorCode::BodyCreationFailed);
+			PF_CHECK(Tests, Source.DestroyEntity(*Fifth).has_value());
+		}
+		const auto RemovedComponentsForce = Runtime.ApplyForce(SecondId, { 1.0f, 0.0f, 0.0f });
+		PF_CHECK(Tests, !RemovedComponentsForce && RemovedComponentsForce.error().Code == PhysicsSceneRuntimeErrorCode::MissingBody);
+		if (Fourth)
+			PF_CHECK(Tests, Source.DestroyEntity(*Fourth).has_value());
+		const auto ReusedFifth = Source.CreateEntityWithUUID(FifthId, "Body replacing destroyed physics entity");
+		PF_CHECK(Tests, ReusedFifth.has_value());
+		if (ReusedFifth)
+		{
+			TransformComponent ReusedFifthTransform;
+			ReusedFifthTransform.Translation.x = 40.0f;
+			PF_CHECK(Tests, ReusedFifth->SetTransform(ReusedFifthTransform).has_value());
+			PF_CHECK(Tests, ReusedFifth->SetRigidbody({ RigidbodyMotionType::Dynamic }).has_value());
+			PF_CHECK(Tests, ReusedFifth->SetBoxCollider({}).has_value());
+			PF_CHECK(Tests, Runtime.ApplyForce(FifthId, { 1.0f, 0.0f, 0.0f }).has_value());
+		}
+		PF_CHECK(Tests, Runtime.ApplyForce(FirstId, { 1.0f, 0.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, PhysicsSceneRuntimeTestAccess::GetFullSceneReconciliationCount(Runtime) == 4);
+
+		// Motion transitions use Jolt's in-place transition, which clears force and velocity when
+		// entering static mode. Re-entering dynamic mode begins without stale motion.
+		const auto BeforeMotionTransition = First->GetTransform();
+		PF_CHECK(Tests, First->SetRigidbody({ RigidbodyMotionType::Static }).has_value());
+		const auto StaticForce = Runtime.ApplyForce(FirstId, { 100.0f, 0.0f, 0.0f });
+		PF_CHECK(Tests, !StaticForce && StaticForce.error().Code == PhysicsSceneRuntimeErrorCode::StaticBody);
+		PF_CHECK(Tests, First->SetRigidbody({ RigidbodyMotionType::Dynamic, 2.0f, 0.1f, 0.4f, true }).has_value());
+		PF_CHECK(Tests, Runtime.ApplyForce(FirstId, glm::vec3(0.0f)).has_value());
+		PF_CHECK(Tests, Runtime.Advance(Source, Timestep(FixedStep)).has_value());
+		const auto AfterMotionTransition = First->GetTransform();
+		PF_CHECK(Tests, BeforeMotionTransition && AfterMotionTransition &&
+			std::abs(AfterMotionTransition->Translation.x - BeforeMotionTransition->Translation.x) < 0.001f);
+		PF_CHECK(Tests, Runtime.ApplyForce(FirstId, { 100.0f, 0.0f, 0.0f }).has_value());
+		PF_CHECK(Tests, Runtime.Advance(Source, Timestep(FixedStep)).has_value());
+		const auto MovingOldIncarnation = First->GetTransform();
+		PF_CHECK(Tests, MovingOldIncarnation && MovingOldIncarnation->Translation.x > AfterMotionTransition->Translation.x);
+
+		// Destruction removes stale target state; reusing a UUID binds a new incarnation and resets
+		// old velocity/force while preserving the runtime's configured live-body count.
+		const auto ForceDestroyed = Runtime.ApplyForce(SecondId, { 1.0f, 0.0f, 0.0f });
+		PF_CHECK(Tests, !ForceDestroyed && ForceDestroyed.error().Code == PhysicsSceneRuntimeErrorCode::MissingBody);
+		PF_CHECK(Tests, Source.DestroyEntity(*First).has_value());
+		const auto Replacement = Source.CreateEntityWithUUID(FirstId, "Replacement force target");
+		PF_CHECK(Tests, Replacement.has_value());
+		if (Replacement)
+		{
+			TransformComponent ReplacementTransform;
+			ReplacementTransform.Translation.x = 50.0f;
+			PF_CHECK(Tests, Replacement->SetTransform(ReplacementTransform).has_value());
+			PF_CHECK(Tests, Replacement->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.2f, 0.0f, false }).has_value());
+			PF_CHECK(Tests, Replacement->SetBoxCollider({}).has_value());
+			PF_CHECK(Tests, Runtime.ApplyForce(FirstId, glm::vec3(0.0f)).has_value());
+			PF_CHECK(Tests, Runtime.Advance(Source, Timestep(FixedStep)).has_value());
+			const auto ReplacementAfterStep = Replacement->GetTransform();
+			PF_CHECK(Tests, ReplacementAfterStep && std::abs(ReplacementAfterStep->Translation.x - 50.0f) < 0.001f);
+		}
+
+		PF_CHECK(Tests, Third->RemoveRigidbody().has_value());
+		const auto PartialComponents = Runtime.ApplyForce(ThirdId, { 1.0f, 0.0f, 0.0f });
+		PF_CHECK(Tests, !PartialComponents && PartialComponents.error().Code == PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity);
+		PF_CHECK(Tests, Third->RemoveBoxCollider().has_value());
+		const auto RemovedComponents = Runtime.ApplyForce(ThirdId, { 1.0f, 0.0f, 0.0f });
+		PF_CHECK(Tests, !RemovedComponents && RemovedComponents.error().Code == PhysicsSceneRuntimeErrorCode::MissingBody);
+		Runtime.Stop();
 	}
 
 	void TestPhysicsLiveReconciliation(TestRunner& Tests)
@@ -1122,6 +1320,7 @@ void RunSceneTests(TestRunner& Tests)
 	TestSceneEntityAndHierarchy(Tests);
 	TestPhysicsComponentsAndPersistence(Tests);
 	TestPhysicsSceneRuntime(Tests);
+	TestPhysicsTargetedSynchronizationAndCapacity(Tests);
 	TestPhysicsLiveReconciliation(Tests);
 	TestEntityHandleIdentityAndLifetime(Tests);
 	TestSceneRenderSnapshot(Tests);
