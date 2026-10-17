@@ -11,9 +11,24 @@ if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 			"ordinary builds leave compiler analysis disabled by default.")
 	endif()
 
+	set(PULSEFORGE_QUALITY_TOOLS_DIR "" CACHE PATH
+		"External directory containing the PulseForge quality scripts and rules")
+	if(PULSEFORGE_QUALITY_TOOLS_DIR STREQUAL "")
+		message(FATAL_ERROR
+			"Explicit quality validation requires PULSEFORGE_QUALITY_TOOLS_DIR to point to the external Quality directory "
+			"containing the PulseForge quality scripts and rules.")
+	endif()
+	if(NOT IS_DIRECTORY "${PULSEFORGE_QUALITY_TOOLS_DIR}")
+		message(FATAL_ERROR
+			"PULSEFORGE_QUALITY_TOOLS_DIR='${PULSEFORGE_QUALITY_TOOLS_DIR}' is not an existing directory. "
+			"Set it to the external Quality directory, for example <toolkit-root>/Tools/Quality.")
+	endif()
+	file(REAL_PATH "${PULSEFORGE_QUALITY_TOOLS_DIR}" QualityToolRoot)
+	set(PULSEFORGE_QUALITY_TOOLS_DIR "${QualityToolRoot}" CACHE PATH
+		"External directory containing the PulseForge quality scripts and rules" FORCE)
+
 	set(PULSEFORGE_QUALITY_PYTHON_EXECUTABLE "" CACHE FILEPATH
 		"Optional explicit Python override with pinned PulseForge quality tools installed")
-	set(QualityToolRoot "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Quality")
 	set(QualityRequiredFiles
 		"${QualityToolRoot}/BootstrapQualityTools.py"
 		"${QualityToolRoot}/CheckSourceQuality.py"
@@ -26,7 +41,7 @@ if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		if(NOT EXISTS "${QualityFile}")
 			message(FATAL_ERROR
 				"Explicit quality validation is unavailable because required file '${QualityFile}' is missing. "
-				"Restore Tools/Quality or disable PULSEFORGE_ENABLE_QUALITY_CHECKS.")
+				"Check PULSEFORGE_QUALITY_TOOLS_DIR='${QualityToolRoot}' and restore the missing external toolkit file.")
 		endif()
 	endforeach()
 
@@ -40,7 +55,7 @@ if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		message(FATAL_ERROR
 			"Explicit quality validation requires Python at '${QualityPythonSelected}'. "
 			"Bootstrap the shared pinned environment with: "
-			"python Tools/Quality/BootstrapQualityTools.py --venv Build/QualityTools/.venv "
+			"python \"${QualityToolRoot}/BootstrapQualityTools.py\" --venv \"${CMAKE_CURRENT_SOURCE_DIR}/Build/QualityTools/.venv\" "
 			"or set PULSEFORGE_QUALITY_PYTHON_EXECUTABLE to a compatible interpreter. "
 			"An explicitly supplied invalid override is not replaced automatically.")
 	endif()
@@ -59,7 +74,8 @@ if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 			"Quality Python at '${QualityPythonSelected}' is missing required packages or versions. "
 			"Expected Python >=3.9 with Lizard 1.24.1, pathspec 1.1.1, and Pygments 2.21.0; "
 			"received '${QualityPythonVersion}' (exit ${QualityPythonResult}): ${QualityPythonError}. "
-			"Bootstrap Build/QualityTools/.venv or correct the explicit interpreter override.")
+			"Bootstrap Build/QualityTools/.venv with \"${QualityToolRoot}/BootstrapQualityTools.py\" "
+			"or correct the explicit interpreter override.")
 	endif()
 	message(STATUS "PulseForge quality tools: Python ${QualityPythonVersion} (${QualityPythonSelected})")
 
@@ -100,7 +116,7 @@ if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 	message(STATUS "PulseForge changed-code formatter: ${ClangFormatVersion} (${PULSEFORGE_CLANG_FORMAT_EXECUTABLE})")
 	message(STATUS "MSVC Code Analysis is enabled for importer, mesh-data, editor-core, editor-UI and scene-render owners")
 
-	file(READ "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Quality/SourceQualityRules.json" PULSEFORGE_QUALITY_RULES_JSON)
+	file(READ "${QualityToolRoot}/SourceQualityRules.json" PULSEFORGE_QUALITY_RULES_JSON)
 
 	function(pf_add_public_header_check_target Target PublicRoot)
 		file(GLOB_RECURSE PublicHeaders CONFIGURE_DEPENDS
@@ -200,21 +216,21 @@ if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 	endif()
 	message(STATUS "PulseForge source quality comparison base: ${PULSEFORGE_QUALITY_COMPARISON_BASE}")
 	add_test(NAME PulseForge.SourceQuality
-		COMMAND "${QualityPythonSelected}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Quality/CheckSourceQuality.py"
+		COMMAND "${QualityPythonSelected}" -B "${QualityToolRoot}/CheckSourceQuality.py"
 			--root "${CMAKE_CURRENT_SOURCE_DIR}"
-			--rules "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Quality/SourceQualityRules.json"
+			--rules "${QualityToolRoot}/SourceQualityRules.json"
 			--graph-manifest "${CMAKE_BINARY_DIR}/PulseForgeTargetGraph-$<CONFIG>.txt"
 			--comparison-base "${PULSEFORGE_QUALITY_COMPARISON_BASE}")
 	add_test(NAME PulseForge.SourceQualityRules
 		COMMAND "${QualityPythonSelected}" -B -m unittest discover
 			-s "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Quality" -p test_*.py)
 	add_test(NAME PulseForge.CodeQualityTools
-		COMMAND "${QualityPythonSelected}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tools/Quality/CheckCodeQualityTools.py"
+		COMMAND "${QualityPythonSelected}" -B "${QualityToolRoot}/CheckCodeQualityTools.py"
 			--root "${CMAKE_CURRENT_SOURCE_DIR}"
 			--comparison-base "${PULSEFORGE_QUALITY_COMPARISON_BASE}"
 			--configuration "$<CONFIG>"
 			--clang-format "${PULSEFORGE_CLANG_FORMAT_EXECUTABLE}"
 			--metrics-output "${CMAKE_BINARY_DIR}/QualityReports/FunctionMetrics-$<CONFIG>.json")
 	set_tests_properties(PulseForge.SourceQuality PulseForge.SourceQualityRules PulseForge.CodeQualityTools PROPERTIES
-		ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1;PULSEFORGE_QUALITY_CMAKE_COMMAND=${CMAKE_COMMAND};PULSEFORGE_QUALITY_GENERATOR=${CMAKE_GENERATOR};PULSEFORGE_QUALITY_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM};PULSEFORGE_QUALITY_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM};PULSEFORGE_CLANG_FORMAT_EXECUTABLE=${PULSEFORGE_CLANG_FORMAT_EXECUTABLE}")
+		ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1;PULSEFORGE_QUALITY_TOOLS_DIR=${QualityToolRoot};PULSEFORGE_QUALITY_CMAKE_COMMAND=${CMAKE_COMMAND};PULSEFORGE_QUALITY_GENERATOR=${CMAKE_GENERATOR};PULSEFORGE_QUALITY_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM};PULSEFORGE_QUALITY_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM};PULSEFORGE_CLANG_FORMAT_EXECUTABLE=${PULSEFORGE_CLANG_FORMAT_EXECUTABLE}")
 endif()

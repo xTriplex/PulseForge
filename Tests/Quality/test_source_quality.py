@@ -9,7 +9,11 @@ from pathlib import Path
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
-SCRIPT = REPOSITORY / "Tools" / "Quality" / "CheckSourceQuality.py"
+QUALITY_TOOLS_VALUE = os.environ.get("PULSEFORGE_QUALITY_TOOLS_DIR")
+if not QUALITY_TOOLS_VALUE:
+    raise RuntimeError("CMake must provide PULSEFORGE_QUALITY_TOOLS_DIR for quality tests")
+QUALITY_TOOLS = Path(QUALITY_TOOLS_VALUE).resolve()
+SCRIPT = QUALITY_TOOLS / "CheckSourceQuality.py"
 SPEC = importlib.util.spec_from_file_location("source_quality", SCRIPT)
 source_quality = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = source_quality
@@ -203,7 +207,7 @@ class SourceQualityRulesTests(unittest.TestCase):
             (root / "A.cpp").write_text("int a;\n", encoding="utf-8")
             (root / "B.cpp").write_text("int b;\n", encoding="utf-8")
             (root / "Core.cpp").write_text("int core;\n", encoding="utf-8")
-            exporter = (REPOSITORY / "Tools" / "Quality" / "ExportConfiguredTargetGraph.cmake").as_posix()
+            exporter = (QUALITY_TOOLS / "ExportConfiguredTargetGraph.cmake").as_posix()
             cmake_variable = "$" + "{A_DEPS}"
             cmake_target = "$" + "{Target}"
             cmakelists = "\n".join([

@@ -7,7 +7,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "Tools" / "Quality"))
+QUALITY_TOOLS_VALUE = os.environ.get("PULSEFORGE_QUALITY_TOOLS_DIR")
+if not QUALITY_TOOLS_VALUE:
+	raise RuntimeError("CMake must provide PULSEFORGE_QUALITY_TOOLS_DIR for quality tests")
+QUALITY_TOOLS = Path(QUALITY_TOOLS_VALUE).resolve()
+sys.path.insert(0, str(QUALITY_TOOLS))
 
 import CheckCodeQualityTools as quality_tools
 
