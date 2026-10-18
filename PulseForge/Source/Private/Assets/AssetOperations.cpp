@@ -1443,8 +1443,6 @@ namespace PulseForge
 		const auto Project = OpenProject(ProjectRoot);
 		if (!Project)
 			return std::unexpected(Project.error());
-		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
-			return std::unexpected(RegistryResult.error());
 		if (IsReparsePoint(Project->Root))
 		{
 			return std::unexpected(MakeError(
@@ -1456,6 +1454,8 @@ namespace PulseForge
 			return std::unexpected(SourceResult.error());
 		if (auto DestinationResult = ValidateManagedDirectory(*Project, DestinationParentPath, true); !DestinationResult)
 			return std::unexpected(DestinationResult.error());
+		if (auto RegistryResult = ValidateProjectRegistry(Registry, Project->Root); !RegistryResult)
+			return std::unexpected(RegistryResult.error());
 
 		if (IsCaseInsensitivePathPrefix(SourceFolderPath, DestinationParentPath))
 		{

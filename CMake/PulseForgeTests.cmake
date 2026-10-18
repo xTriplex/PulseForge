@@ -36,7 +36,7 @@ if(BUILD_TESTING)
 		Tests/RendererTests.cpp
 	)
 	target_include_directories(PulseForgeRendererTests PRIVATE Tests)
-	target_link_libraries(PulseForgeRendererTests PRIVATE PulseForgeRenderer PulseForgeScene nvrhi Vulkan-Headers)
+	target_link_libraries(PulseForgeRendererTests PRIVATE PulseForgeRenderer PulseForgeScene nvrhi_vk nvrhi Vulkan-Headers)
 	add_test(NAME PulseForge.Renderer COMMAND PulseForgeRendererTests)
 
 	add_executable(PulseForgeRenderMathTests

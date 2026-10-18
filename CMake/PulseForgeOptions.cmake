@@ -35,15 +35,21 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	endif()
 	set(PULSEFORGE_PLATFORM_WINDOWS FALSE)
 	set(PULSEFORGE_PLATFORM_LINUX TRUE)
-	if(NOT PULSEFORGE_BUILD_CORE_ONLY)
+	if(PULSEFORGE_BUILD_EDITOR)
 		message(FATAL_ERROR
-			"Linux currently supports only the portable Core/CPU target set. Configure with "
-			"-DPULSEFORGE_BUILD_CORE_ONLY=ON; Linux window, editor, renderer, and game targets are not supported yet.")
+			"PulseForgeEditor is not supported on Linux yet. Configure with -DPULSEFORGE_BUILD_EDITOR=OFF; "
+			"the Linux runtime and PulseForgeGame remain available.")
 	endif()
 else()
 	message(FATAL_ERROR
 		"Unsupported PulseForge operating system '${CMAKE_SYSTEM_NAME}'. This revision supports Windows desktop "
-		"builds and Linux Core/CPU-only builds.")
+		"builds and Linux Vulkan runtime/Core builds.")
+endif()
+
+if(PULSEFORGE_PLATFORM_WINDOWS)
+	set(PULSEFORGE_PLATFORM_COMPILE_DEFINITION PF_PLATFORM_WINDOWS)
+else()
+	set(PULSEFORGE_PLATFORM_COMPILE_DEFINITION PF_PLATFORM_LINUX)
 endif()
 
 if(CMAKE_SIZEOF_VOID_P AND NOT CMAKE_SIZEOF_VOID_P EQUAL 8)

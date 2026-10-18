@@ -8,11 +8,11 @@
 #include <exception>
 #include <stdexcept>
 
-#ifdef PF_PLATFORM_WINDOWS
+#if defined(PF_PLATFORM_WINDOWS) || defined(PF_PLATFORM_LINUX)
 
 extern std::unique_ptr<PulseForge::Application> PulseForge::CreateApplication();
 
-int main(int argc, char** argv)
+int main(int, char**)
 {
 	PulseForge::Log::Init();
 	PF_CORE_INFO("Engine Logger Initialized!");
