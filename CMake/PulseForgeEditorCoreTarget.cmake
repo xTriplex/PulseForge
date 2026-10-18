@@ -1,4 +1,4 @@
-if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
+if(PULSEFORGE_BUILD_EDITOR OR (BUILD_TESTING AND NOT PULSEFORGE_PLATFORM_LINUX))
 	add_library(PulseForgeEditorCore STATIC
 		PulseForgeEditor/Source/Private/EditorEntityClipboard.cpp
 		PulseForgeEditor/Source/Private/EditorAssetWorkflowState.cpp

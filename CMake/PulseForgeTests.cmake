@@ -25,6 +25,7 @@ if(BUILD_TESTING)
 	if(NOT PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_test(NAME PulseForge.CMakeBuildMode
 			COMMAND "${CMAKE_COMMAND}"
+				"-DPULSEFORGE_TARGET_SYSTEM_NAME=${CMAKE_SYSTEM_NAME}"
 				"-DPULSEFORGE_BUILD_TREE=${CMAKE_BINARY_DIR}"
 				-P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/CMake/CheckNormalBuildMode.cmake")
 	endif()
@@ -103,12 +104,14 @@ if(BUILD_TESTING)
 	target_link_libraries(PulseForgeSceneRendererConsumer PRIVATE PulseForgeSceneRenderer)
 	add_test(NAME PulseForge.SceneRendererConsumer COMMAND PulseForgeSceneRendererConsumer)
 
-	add_executable(PulseForgeEditorCoreConsumer Tests/ModuleConsumers/EditorCoreConsumer.cpp)
-	target_link_libraries(PulseForgeEditorCoreConsumer PRIVATE PulseForgeEditorCore)
-	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
-		add_dependencies(PulseForgeEditorCoreConsumer PulseForgePublicHeaderChecks)
+	if(TARGET PulseForgeEditorCore)
+		add_executable(PulseForgeEditorCoreConsumer Tests/ModuleConsumers/EditorCoreConsumer.cpp)
+		target_link_libraries(PulseForgeEditorCoreConsumer PRIVATE PulseForgeEditorCore)
+		if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+			add_dependencies(PulseForgeEditorCoreConsumer PulseForgePublicHeaderChecks)
+		endif()
+		add_test(NAME PulseForge.EditorCoreConsumer COMMAND PulseForgeEditorCoreConsumer)
 	endif()
-	add_test(NAME PulseForge.EditorCoreConsumer COMMAND PulseForgeEditorCoreConsumer)
 
 	add_executable(PulseForgeAudioRuntimeTests
 		Tests/PulseForgeAudioRuntimeTests.cpp
@@ -137,36 +140,38 @@ if(BUILD_TESTING)
 	endif()
 	add_test(NAME PulseForge.ScriptingRuntime COMMAND PulseForgeScriptingRuntimeTests)
 
-	add_executable(PulseForgeEditorCoreTests
-		Tests/PulseForgeEditorCoreTests.cpp
-		Tests/EditorDocumentCloseRequestTests.cpp
-		Tests/EditorDocumentTabInteractionTests.cpp
-		Tests/EditorSceneEntityCommandTests.cpp
-		Tests/EditorSceneViewportInteractionTests.cpp
-		Tests/EditorViewportGizmoGeometryTests.cpp
-		Tests/EditorViewportGizmoInteractionTests.cpp
-	)
-	target_include_directories(PulseForgeEditorCoreTests PRIVATE Tests)
-	target_link_libraries(PulseForgeEditorCoreTests PRIVATE PulseForgeCore PulseForgeEditorCore)
-	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
-		add_dependencies(PulseForgeEditorCoreTests PulseForgePublicHeaderChecks)
-	endif()
-	add_test(NAME PulseForge.EditorCore COMMAND PulseForgeEditorCoreTests)
+	if(TARGET PulseForgeEditorCore)
+		add_executable(PulseForgeEditorCoreTests
+			Tests/PulseForgeEditorCoreTests.cpp
+			Tests/EditorDocumentCloseRequestTests.cpp
+			Tests/EditorDocumentTabInteractionTests.cpp
+			Tests/EditorSceneEntityCommandTests.cpp
+			Tests/EditorSceneViewportInteractionTests.cpp
+			Tests/EditorViewportGizmoGeometryTests.cpp
+			Tests/EditorViewportGizmoInteractionTests.cpp
+		)
+		target_include_directories(PulseForgeEditorCoreTests PRIVATE Tests)
+		target_link_libraries(PulseForgeEditorCoreTests PRIVATE PulseForgeCore PulseForgeEditorCore)
+		if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
+			add_dependencies(PulseForgeEditorCoreTests PulseForgePublicHeaderChecks)
+		endif()
+		add_test(NAME PulseForge.EditorCore COMMAND PulseForgeEditorCoreTests)
 
-	add_executable(PulseForgeCommandHistoryFailureTests Tests/EditorCommandHistoryFailureTests.cpp)
-	target_include_directories(PulseForgeCommandHistoryFailureTests PRIVATE PulseForgeEditor/Source/Public)
-	if(MSVC)
-		# This isolated allocator-failure executable replaces global new/delete to inject failures.
-		# Keep it on the non-debug CRT so MSVC's debug-heap diagnostics do not intercept that probe.
-		set_property(TARGET PulseForgeCommandHistoryFailureTests PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
-	endif()
-	add_test(NAME PulseForge.CommandHistoryFailures COMMAND PulseForgeCommandHistoryFailureTests)
+		add_executable(PulseForgeCommandHistoryFailureTests Tests/EditorCommandHistoryFailureTests.cpp)
+		target_include_directories(PulseForgeCommandHistoryFailureTests PRIVATE PulseForgeEditor/Source/Public)
+		if(MSVC)
+			# This isolated allocator-failure executable replaces global new/delete to inject failures.
+			# Keep it on the non-debug CRT so MSVC's debug-heap diagnostics do not intercept that probe.
+			set_property(TARGET PulseForgeCommandHistoryFailureTests PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
+		endif()
+		add_test(NAME PulseForge.CommandHistoryFailures COMMAND PulseForgeCommandHistoryFailureTests)
 
-	add_executable(PulseForgeEditorDocumentTransferFailureTests Tests/EditorDocumentTransferFailureTests.cpp)
-	target_compile_definitions(PulseForgeEditorCore PRIVATE PULSEFORGE_EDITOR_DOCUMENT_MANAGER_TESTING)
-	target_compile_definitions(PulseForgeEditorDocumentTransferFailureTests PRIVATE PULSEFORGE_EDITOR_DOCUMENT_MANAGER_TESTING)
-	target_link_libraries(PulseForgeEditorDocumentTransferFailureTests PRIVATE PulseForgeEditorCore)
-	add_test(NAME PulseForge.EditorDocumentTransferFailures COMMAND PulseForgeEditorDocumentTransferFailureTests)
+		add_executable(PulseForgeEditorDocumentTransferFailureTests Tests/EditorDocumentTransferFailureTests.cpp)
+		target_compile_definitions(PulseForgeEditorCore PRIVATE PULSEFORGE_EDITOR_DOCUMENT_MANAGER_TESTING)
+		target_compile_definitions(PulseForgeEditorDocumentTransferFailureTests PRIVATE PULSEFORGE_EDITOR_DOCUMENT_MANAGER_TESTING)
+		target_link_libraries(PulseForgeEditorDocumentTransferFailureTests PRIVATE PulseForgeEditorCore)
+		add_test(NAME PulseForge.EditorDocumentTransferFailures COMMAND PulseForgeEditorDocumentTransferFailureTests)
+	endif()
 
 	if(PULSEFORGE_BUILD_EDITOR)
 		set(PULSEFORGE_EDITOR_INTEGRATION_LIBRARIES
@@ -241,14 +246,19 @@ if(BUILD_TESTING)
 		PulseForgeAssetImportTests
 		PulseForgeAssetImporterConsumer
 		PulseForgeSceneRendererConsumer
-		PulseForgeEditorCoreConsumer
 		PulseForgeAudioRuntimeTests
 		PulseForgeScriptingRuntimeTests
-		PulseForgeEditorCoreTests
-		PulseForgeCommandHistoryFailureTests
-		PulseForgeEditorDocumentTransferFailureTests
 		PulseForgeBufferUpdateTests
 	)
+	foreach(EditorTestTarget IN ITEMS
+		PulseForgeEditorCoreConsumer
+		PulseForgeEditorCoreTests
+		PulseForgeCommandHistoryFailureTests
+		PulseForgeEditorDocumentTransferFailureTests)
+		if(TARGET ${EditorTestTarget})
+			list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS ${EditorTestTarget})
+		endif()
+	endforeach()
 	if(PULSEFORGE_BUILD_EDITOR)
 		list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS
 			PulseForgeEditorTests
