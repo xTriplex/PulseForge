@@ -101,6 +101,11 @@ namespace PulseForge::VulkanSupport
 		OtherFailure
 	};
 
+	[[nodiscard]] constexpr bool IsSharedDeviceLoss(PresentationQueueResult Result) noexcept
+	{
+		return Result == PresentationQueueResult::DeviceLost;
+	}
+
 	enum class PresentationRequestDisposition : uint8_t
 	{
 		Enqueued,
@@ -227,4 +232,4 @@ namespace PulseForge::VulkanSupport
 		Extent2D Maximum);
 
 	uint32_t ChooseImageCount(uint32_t Minimum, uint32_t Maximum);
-}
+} // namespace PulseForge::VulkanSupport

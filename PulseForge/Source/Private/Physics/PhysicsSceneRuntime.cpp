@@ -626,11 +626,9 @@ namespace PulseForge
 				// Preserve the partial-component error contract before mutating the pool. Then reclaim
 				// every body that no longer has physics components before any UUID-ordered additions.
 				for (const Entity& Current : Entities)
-					if (auto Components = ReadPhysicsComponents(Current); !Components)
-						return std::unexpected(Components.error());
+					if (auto Components = ReadPhysicsComponents(Current); !Components) return std::unexpected(Components.error());
 
-				if (auto Result = PruneBodiesWithoutPhysicsComponents(Source); !Result)
-					return std::unexpected(Result.error());
+				if (auto Result = PruneBodiesWithoutPhysicsComponents(Source); !Result) return std::unexpected(Result.error());
 
 				for (const Entity& Current : Entities)
 				{

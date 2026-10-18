@@ -37,7 +37,7 @@ if(BUILD_TESTING)
 	)
 	target_include_directories(PulseForgeRendererTests PRIVATE Tests)
 	target_compile_definitions(PulseForgeRendererTests PRIVATE PF_PLATFORM_WINDOWS)
-	target_link_libraries(PulseForgeRendererTests PRIVATE PulseForgeRenderer)
+	target_link_libraries(PulseForgeRendererTests PRIVATE PulseForgeRenderer nvrhi Vulkan-Headers)
 	add_test(NAME PulseForge.Renderer COMMAND PulseForgeRendererTests)
 
 	add_executable(PulseForgeRenderMathTests

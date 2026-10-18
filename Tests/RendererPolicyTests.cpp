@@ -1,13 +1,124 @@
 #include "TestSupport.h"
 
+#include "Renderer/Vulkan/VulkanPresentationResources.h"
+#include "Renderer/Vulkan/VulkanRendererShutdown.h"
 #include "Renderer/Vulkan/VulkanSupport.h"
 
+#include <algorithm>
 #include <iterator>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
 {
 	using namespace PulseForge::VulkanSupport;
+	using namespace PulseForge::VulkanDetail;
+
+	constexpr int32_t TestVkErrorDeviceLost = -4;
+
+	struct FakeRendererShutdown final : RendererShutdownOperations
+	{
+		bool ShutdownComplete = false;
+		bool HasLogicalDevice = true;
+		bool DeviceLost = false;
+		int32_t LostResult = 0;
+		bool PresentationFences = true;
+		int NativeHostCount = 0;
+		ShutdownWaitResult NvrhiWait;
+		ShutdownWaitResult DeviceWait;
+		ShutdownWaitResult PresentationWait;
+		ShutdownWaitResult FenceWaitAfterLoss;
+		ShutdownWaitResult LegacyWaitAfterLoss;
+		std::vector<std::string> Calls;
+
+		bool IsShutdownComplete() const noexcept override { return ShutdownComplete; }
+		bool HasDevice() const noexcept override { return HasLogicalDevice; }
+		bool IsDeviceLost() const noexcept override { return DeviceLost; }
+		int32_t DeviceLossResult() const noexcept override { return LostResult; }
+		bool UsesPresentationFences() const noexcept override { return PresentationFences; }
+
+		ShutdownWaitResult WaitForNvrhiIdle() noexcept override
+		{
+			Calls.emplace_back("nvrhi-idle");
+			if (NvrhiWait.Outcome == ShutdownWaitOutcome::DeviceLost)
+			{
+				DeviceLost = true;
+				LostResult = NvrhiWait.VulkanResult;
+			}
+			return NvrhiWait;
+		}
+		ShutdownWaitResult WaitForDeviceIdle() noexcept override
+		{
+			Calls.emplace_back("device-idle");
+			if (DeviceWait.Outcome == ShutdownWaitOutcome::DeviceLost)
+			{
+				DeviceLost = true;
+				LostResult = DeviceWait.VulkanResult;
+			}
+			return DeviceWait;
+		}
+		ShutdownWaitResult WaitForPresentationRetirement() noexcept override
+		{
+			Calls.emplace_back("presentation-main");
+			for (int Index = 0; Index < NativeHostCount; ++Index)
+				Calls.emplace_back("presentation-native");
+			if (PresentationWait.Outcome == ShutdownWaitOutcome::DeviceLost)
+			{
+				DeviceLost = true;
+				LostResult = PresentationWait.VulkanResult;
+			}
+			return PresentationWait;
+		}
+		ShutdownWaitResult WaitForPresentationFencesAfterDeviceLoss() noexcept override
+		{
+			Calls.emplace_back("lost-fence-main");
+			for (int Index = 0; Index < NativeHostCount; ++Index)
+				Calls.emplace_back("lost-fence-native");
+			return FenceWaitAfterLoss;
+		}
+		ShutdownWaitResult BestEffortWaitForLegacyPresentationAfterDeviceLoss() noexcept override
+		{
+			Calls.emplace_back("legacy-best-effort");
+			return LegacyWaitAfterLoss;
+		}
+		bool ReleasePartialInitialization() noexcept override
+		{
+			Calls.emplace_back("release-partial");
+			ShutdownComplete = true;
+			return true;
+		}
+		bool ReleaseDeviceOwnedChildren(ShutdownPresentationReleaseMode Mode) noexcept override
+		{
+			switch (Mode)
+			{
+			case ShutdownPresentationReleaseMode::HealthyDevice:
+				Calls.emplace_back("release-children-healthy");
+				break;
+			case ShutdownPresentationReleaseMode::DeviceLostWithFencesRetired:
+				Calls.emplace_back("release-children-fenced-loss");
+				break;
+			case ShutdownPresentationReleaseMode::LegacyBestEffortAfterDeviceLoss:
+				Calls.emplace_back("release-children-legacy-loss");
+				break;
+			}
+			return true;
+		}
+		bool ReleaseNvrhiDevice() noexcept override
+		{
+			Calls.emplace_back("release-nvrhi");
+			return true;
+		}
+		void DestroyVulkanDevice() noexcept override { Calls.emplace_back("destroy-device"); }
+		bool ReleaseInstanceOwnedChildren() noexcept override
+		{
+			Calls.emplace_back("release-instance");
+			ShutdownComplete = true;
+			return true;
+		}
+	};
 
 	void TestQueueFamilySelection(TestRunner& Tests)
 	{
@@ -214,6 +325,8 @@ namespace
 		const auto LostSurface = ResolvePresentationResult(PresentationQueueResult::SurfaceLost);
 		PF_CHECK(Tests, LostSurface.RequestDisposition == Disposition::Enqueued);
 		PF_CHECK(Tests, LostSurface.RecoveryAction == Action::BlockHost && !LostSurface.CurrentSwapchainUsable);
+		PF_CHECK(Tests, !IsSharedDeviceLoss(PresentationQueueResult::SurfaceLost));
+		PF_CHECK(Tests, IsSharedDeviceLoss(PresentationQueueResult::DeviceLost));
 		const auto Indeterminate = ResolvePresentationResult(PresentationQueueResult::OtherFailure);
 		PF_CHECK(Tests, Indeterminate.RequestDisposition == Disposition::Indeterminate);
 		PF_CHECK(Tests, Indeterminate.RecoveryAction == Action::BlockHost && !Indeterminate.CurrentSwapchainUsable);
@@ -267,6 +380,189 @@ namespace
 		PF_CHECK(Tests, ChooseImageCount(2, 2) == 2);
 		PF_CHECK(Tests, ChooseImageCount(3, 5) == 4);
 	}
+
+	void TestHealthyRendererShutdownOrder(TestRunner& Tests)
+	{
+		FakeRendererShutdown Operations;
+		Operations.NativeHostCount = 1;
+		const ShutdownResult Result = ShutdownRenderer(Operations);
+		const std::vector<std::string> Expected = { "nvrhi-idle", "device-idle", "presentation-main", "presentation-native",
+			"release-children-healthy", "release-nvrhi", "destroy-device", "release-instance" };
+		PF_CHECK(Tests, Result.Disposition == ShutdownDisposition::Complete);
+		PF_CHECK(Tests, Operations.Calls == Expected);
+
+		const size_t CallsAfterFirstShutdown = Operations.Calls.size();
+		const ShutdownResult SecondResult = ShutdownRenderer(Operations);
+		PF_CHECK(Tests, SecondResult.Disposition == ShutdownDisposition::Complete);
+		PF_CHECK(Tests, Operations.Calls.size() == CallsAfterFirstShutdown);
+	}
+
+	void TestDeviceLossShutdown(TestRunner& Tests)
+	{
+		FakeRendererShutdown LostDuringPresent;
+		LostDuringPresent.NativeHostCount = 1;
+		LostDuringPresent.PresentationWait = { ShutdownWaitOutcome::DeviceLost, TestVkErrorDeviceLost };
+		LostDuringPresent.FenceWaitAfterLoss = {};
+		const ShutdownResult PresentResult = ShutdownRenderer(LostDuringPresent);
+		const std::vector<std::string> ExpectedPresentCalls = { "nvrhi-idle", "device-idle", "presentation-main", "presentation-native",
+			"lost-fence-main", "lost-fence-native", "release-children-fenced-loss", "release-nvrhi", "destroy-device", "release-instance" };
+		PF_CHECK(Tests, PresentResult.Disposition == ShutdownDisposition::CompleteAfterDeviceLoss);
+		PF_CHECK(Tests, PresentResult.Stage == ShutdownStage::PresentationRetirement);
+		PF_CHECK(Tests, PresentResult.VulkanResult == TestVkErrorDeviceLost);
+		PF_CHECK(Tests, LostDuringPresent.Calls == ExpectedPresentCalls);
+
+		FakeRendererShutdown LostDuringNvrhiWait;
+		LostDuringNvrhiWait.NvrhiWait = { ShutdownWaitOutcome::DeviceLost, 0 };
+		const ShutdownResult NvrhiResult = ShutdownRenderer(LostDuringNvrhiWait);
+		PF_CHECK(Tests, NvrhiResult.Disposition == ShutdownDisposition::CompleteAfterDeviceLoss);
+		PF_CHECK(Tests, NvrhiResult.Stage == ShutdownStage::NvrhiIdle);
+		PF_CHECK(Tests, std::find(LostDuringNvrhiWait.Calls.begin(), LostDuringNvrhiWait.Calls.end(), "device-idle") ==
+							LostDuringNvrhiWait.Calls.end());
+
+		FakeRendererShutdown LostDuringDeviceWait;
+		LostDuringDeviceWait.DeviceWait = { ShutdownWaitOutcome::DeviceLost, TestVkErrorDeviceLost };
+		const ShutdownResult DeviceResult = ShutdownRenderer(LostDuringDeviceWait);
+		PF_CHECK(Tests, DeviceResult.Disposition == ShutdownDisposition::CompleteAfterDeviceLoss);
+		PF_CHECK(Tests, DeviceResult.Stage == ShutdownStage::DeviceIdle);
+		PF_CHECK(Tests, DeviceResult.VulkanResult == TestVkErrorDeviceLost);
+		PF_CHECK(Tests, std::find(LostDuringDeviceWait.Calls.begin(), LostDuringDeviceWait.Calls.end(), "presentation-main") ==
+							LostDuringDeviceWait.Calls.end());
+
+		FakeRendererShutdown AlreadyLostWithNativeHost;
+		AlreadyLostWithNativeHost.DeviceLost = true;
+		AlreadyLostWithNativeHost.LostResult = TestVkErrorDeviceLost;
+		AlreadyLostWithNativeHost.NativeHostCount = 1;
+		const ShutdownResult ExistingLossResult = ShutdownRenderer(AlreadyLostWithNativeHost);
+		const auto NativeFenceWait =
+			std::find(AlreadyLostWithNativeHost.Calls.begin(), AlreadyLostWithNativeHost.Calls.end(), "lost-fence-native");
+		const auto ChildRelease = std::find_if(AlreadyLostWithNativeHost.Calls.begin(), AlreadyLostWithNativeHost.Calls.end(),
+			[](const std::string& Call) { return Call.starts_with("release-children-"); });
+		PF_CHECK(Tests, ExistingLossResult.Disposition == ShutdownDisposition::CompleteAfterDeviceLoss);
+		PF_CHECK(Tests, ExistingLossResult.Stage == ShutdownStage::DeviceAlreadyLost);
+		PF_CHECK(Tests, NativeFenceWait < ChildRelease);
+	}
+
+	void TestRendererShutdownFailureContracts(TestRunner& Tests)
+	{
+		FakeRendererShutdown FailedWait;
+		FailedWait.DeviceWait = { ShutdownWaitOutcome::Failed, -7 };
+		const ShutdownResult FailedResult = ShutdownRenderer(FailedWait);
+		PF_CHECK(Tests, FailedResult.Disposition == ShutdownDisposition::WaitFailed);
+		PF_CHECK(Tests, FailedResult.Stage == ShutdownStage::DeviceIdle);
+		PF_CHECK(Tests, FailedResult.VulkanResult == -7);
+		PF_CHECK(Tests, std::find(FailedWait.Calls.begin(), FailedWait.Calls.end(), "release-nvrhi") == FailedWait.Calls.end());
+
+		FakeRendererShutdown FailedNvrhiWait;
+		FailedNvrhiWait.NvrhiWait = { ShutdownWaitOutcome::Failed, 0 };
+		const ShutdownResult FailedNvrhiResult = ShutdownRenderer(FailedNvrhiWait);
+		PF_CHECK(Tests, FailedNvrhiResult.Disposition == ShutdownDisposition::WaitFailed);
+		PF_CHECK(Tests, FailedNvrhiResult.Stage == ShutdownStage::NvrhiIdle);
+		PF_CHECK(Tests, !FailedNvrhiWait.DeviceLost);
+		PF_CHECK(
+			Tests, std::find(FailedNvrhiWait.Calls.begin(), FailedNvrhiWait.Calls.end(), "release-nvrhi") == FailedNvrhiWait.Calls.end());
+
+		FakeRendererShutdown UnknownFenceRetirement;
+		UnknownFenceRetirement.DeviceLost = true;
+		UnknownFenceRetirement.LostResult = TestVkErrorDeviceLost;
+		UnknownFenceRetirement.FenceWaitAfterLoss = { ShutdownWaitOutcome::DeviceLost, TestVkErrorDeviceLost };
+		const ShutdownResult UnknownResult = ShutdownRenderer(UnknownFenceRetirement);
+		PF_CHECK(Tests, UnknownResult.Disposition == ShutdownDisposition::PresentationLifetimeUnknown);
+		PF_CHECK(Tests, UnknownResult.Stage == ShutdownStage::PresentationRetirementAfterDeviceLoss);
+		PF_CHECK(Tests, UnknownResult.VulkanResult == TestVkErrorDeviceLost);
+		PF_CHECK(Tests, std::find(UnknownFenceRetirement.Calls.begin(), UnknownFenceRetirement.Calls.end(), "release-nvrhi") ==
+							UnknownFenceRetirement.Calls.end());
+
+		FakeRendererShutdown LegacyLoss;
+		LegacyLoss.DeviceLost = true;
+		LegacyLoss.LostResult = TestVkErrorDeviceLost;
+		LegacyLoss.PresentationFences = false;
+		LegacyLoss.LegacyWaitAfterLoss = { ShutdownWaitOutcome::DeviceLost, TestVkErrorDeviceLost };
+		const ShutdownResult LegacyResult = ShutdownRenderer(LegacyLoss);
+		PF_CHECK(Tests, LegacyResult.Disposition == ShutdownDisposition::CompleteAfterDeviceLoss);
+		PF_CHECK(Tests, std::find(LegacyLoss.Calls.begin(), LegacyLoss.Calls.end(), "legacy-best-effort") != LegacyLoss.Calls.end());
+		PF_CHECK(
+			Tests, std::find(LegacyLoss.Calls.begin(), LegacyLoss.Calls.end(), "release-children-legacy-loss") != LegacyLoss.Calls.end());
+
+		FakeRendererShutdown LegacyWaitFailureAfterLoss;
+		LegacyWaitFailureAfterLoss.DeviceLost = true;
+		LegacyWaitFailureAfterLoss.LostResult = TestVkErrorDeviceLost;
+		LegacyWaitFailureAfterLoss.PresentationFences = false;
+		LegacyWaitFailureAfterLoss.LegacyWaitAfterLoss = { ShutdownWaitOutcome::Failed, -7 };
+		const ShutdownResult LegacyWaitFailureResult = ShutdownRenderer(LegacyWaitFailureAfterLoss);
+		PF_CHECK(Tests, LegacyWaitFailureResult.Disposition == ShutdownDisposition::CompleteAfterDeviceLoss);
+		PF_CHECK(Tests, LegacyWaitFailureResult.VulkanResult == TestVkErrorDeviceLost);
+		PF_CHECK(Tests, std::find(LegacyWaitFailureAfterLoss.Calls.begin(), LegacyWaitFailureAfterLoss.Calls.end(),
+							"release-children-legacy-loss") != LegacyWaitFailureAfterLoss.Calls.end());
+
+		FakeRendererShutdown PartialInitialization;
+		PartialInitialization.HasLogicalDevice = false;
+		const ShutdownResult PartialResult = ShutdownRenderer(PartialInitialization);
+		PF_CHECK(Tests, PartialResult.Disposition == ShutdownDisposition::Complete);
+		const std::vector<std::string> ExpectedPartialCalls = { "release-partial" };
+		PF_CHECK(Tests, PartialInitialization.Calls == ExpectedPartialCalls);
+	}
+
+	void TestDeviceLossStopsRendererWork(TestRunner& Tests)
+	{
+		VulkanDeviceHealth Health;
+		PF_CHECK(Tests, !Health.IsLost());
+		Health.MarkLost(TestVkErrorDeviceLost);
+		PF_CHECK(Tests, Health.IsLost());
+		PF_CHECK(Tests, Health.VulkanResult() == TestVkErrorDeviceLost);
+
+		bool Rejected = false;
+		try
+		{
+			Health.EnsureOperational();
+		}
+		catch (const std::runtime_error& Exception)
+		{
+			Rejected = std::string_view(Exception.what()).find("VkResult -4") != std::string_view::npos;
+		}
+		PF_CHECK(Tests, Rejected);
+	}
+
+	void TestUnpresentedCandidateReleaseGuard(TestRunner& Tests)
+	{
+		VulkanPresentationResources Resources;
+		VulkanDeviceHealth LostDevice;
+		LostDevice.MarkLost(TestVkErrorDeviceLost);
+		Resources.Initialize(vk::Device(), vk::Queue(), nullptr, PresentationRetirementMechanism::KhrMaintenanceFence, &LostDevice);
+		std::vector<VulkanSwapchainImage> UnpresentedImages(1);
+		Resources.ReleaseImages(UnpresentedImages, PresentationResourceReleaseMode::UnpresentedCandidate);
+		PF_CHECK(Tests, UnpresentedImages.empty());
+
+		std::vector<VulkanSwapchainImage> PendingImages(1);
+		PendingImages[0].PresentationState = PresentationRequestState::Pending;
+		bool RejectedPending = false;
+		try
+		{
+			Resources.ReleaseImages(PendingImages, PresentationResourceReleaseMode::UnpresentedCandidate);
+		}
+		catch (const std::runtime_error&)
+		{
+			RejectedPending = true;
+		}
+		PF_CHECK(Tests, RejectedPending);
+		PF_CHECK(Tests, PendingImages.size() == 1);
+		PF_CHECK(Tests, PendingImages.front().PresentationState == PresentationRequestState::Pending);
+
+		std::vector<VulkanRetiredSwapchainGeneration> PendingGenerations(1);
+		PendingGenerations[0].Images.resize(1);
+		PendingGenerations[0].Images[0].PresentationState = PresentationRequestState::DeviceLostIndeterminate;
+		bool RejectedIndeterminate = false;
+		try
+		{
+			Resources.ReleaseGenerations(PendingGenerations, PresentationResourceReleaseMode::UnpresentedCandidate);
+		}
+		catch (const std::runtime_error&)
+		{
+			RejectedIndeterminate = true;
+		}
+		PF_CHECK(Tests, RejectedIndeterminate);
+		PF_CHECK(Tests, PendingGenerations.size() == 1);
+		PF_CHECK(Tests, PendingGenerations.front().Images.size() == 1);
+	}
 } // namespace
 
 void RunRendererPolicyTests(TestRunner& Tests)
@@ -280,4 +576,9 @@ void RunRendererPolicyTests(TestRunner& Tests)
 	TestFormatUsageCapabilities(Tests);
 	TestSurfaceAndPresentationSelection(Tests);
 	TestExtentAndImageCountSelection(Tests);
+	TestHealthyRendererShutdownOrder(Tests);
+	TestDeviceLossShutdown(Tests);
+	TestRendererShutdownFailureContracts(Tests);
+	TestDeviceLossStopsRendererWork(Tests);
+	TestUnpresentedCandidateReleaseGuard(Tests);
 }
