@@ -92,7 +92,7 @@ namespace PulseForge
 		BufferHandle m_ObjectConstantsBuffer;
 		TextureHandle m_FallbackOcclusionTexture;
 		std::array<RenderTargetHandle, 4> m_Targets;
-		std::array<GraphicsPipelineHandle, 2> m_PrepassPipelines;
+		std::array<GraphicsPipelineHandle, 4> m_PrepassPipelines;
 		GraphicsPipelineHandle m_EvaluationPipeline;
 		GraphicsPipelineHandle m_BlurPipeline;
 		AmbientOcclusionSettings m_Settings;

@@ -1,5 +1,6 @@
 #include "TestSupport.h"
 
+#include "Scene/SceneRenderSnapshot.h"
 #include "Renderer/Vulkan/VulkanPresentationResources.h"
 #include "Renderer/Vulkan/VulkanRendererShutdown.h"
 #include "Renderer/Vulkan/VulkanSupport.h"
@@ -11,6 +12,8 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace
 {
@@ -563,6 +566,33 @@ namespace
 		PF_CHECK(Tests, PendingGenerations.size() == 1);
 		PF_CHECK(Tests, PendingGenerations.front().Images.size() == 1);
 	}
+
+	void TestWorldTransformOrientation(TestRunner& Tests)
+	{
+		using PulseForge::ClassifyWorldTransform;
+		using PulseForge::WorldTransformOrientation;
+
+		const glm::mat4 Identity(1.0f);
+		const glm::mat4 PositiveScale = glm::scale(Identity, glm::vec3(2.0f, 0.5f, 3.0f));
+		const glm::mat4 OneReflection = glm::scale(Identity, glm::vec3(-1.0f, 1.0f, 1.0f));
+		const glm::mat4 TwoReflections = glm::scale(Identity, glm::vec3(-1.0f, -1.0f, 1.0f));
+		PF_CHECK(Tests, ClassifyWorldTransform(Identity) == WorldTransformOrientation::Normal);
+		PF_CHECK(Tests, ClassifyWorldTransform(PositiveScale) == WorldTransformOrientation::Normal);
+		PF_CHECK(Tests, ClassifyWorldTransform(OneReflection) == WorldTransformOrientation::Mirrored);
+		PF_CHECK(Tests, ClassifyWorldTransform(TwoReflections) == WorldTransformOrientation::Normal);
+		PF_CHECK(Tests, PulseForge::UsesCounterClockwiseFrontFace(WorldTransformOrientation::Normal));
+		PF_CHECK(Tests, !PulseForge::UsesCounterClockwiseFrontFace(WorldTransformOrientation::Mirrored));
+
+		// Parent/child composition uses the same determinant parity as the resulting world matrix.
+		const glm::mat4 ParentReflection = glm::scale(Identity, glm::vec3(1.0f, -1.0f, 1.0f));
+		const glm::mat4 ChildRotation = glm::rotate(Identity, glm::radians(35.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+		PF_CHECK(Tests, ClassifyWorldTransform(ParentReflection * ChildRotation) == WorldTransformOrientation::Mirrored);
+		PF_CHECK(Tests, ClassifyWorldTransform(ParentReflection * OneReflection) == WorldTransformOrientation::Normal);
+
+		const glm::mat4 Singular = glm::scale(Identity, glm::vec3(1.0f, 0.0f, 1.0f));
+		PF_CHECK(Tests, ClassifyWorldTransform(Singular) == WorldTransformOrientation::Singular);
+		PF_CHECK(Tests, !PulseForge::BuildNormalTransform(Singular).has_value());
+	}
 } // namespace
 
 void RunRendererPolicyTests(TestRunner& Tests)
@@ -581,4 +611,5 @@ void RunRendererPolicyTests(TestRunner& Tests)
 	TestRendererShutdownFailureContracts(Tests);
 	TestDeviceLossStopsRendererWork(Tests);
 	TestUnpresentedCandidateReleaseGuard(Tests);
+	TestWorldTransformOrientation(Tests);
 }

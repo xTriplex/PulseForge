@@ -6,6 +6,7 @@
 #include "Renderer/AssetCache/MeshAssetCache.h"
 #include "Renderer/Mesh.h"
 
+#include <algorithm>
 #include <cmath>
 #include <exception>
 #include <span>
@@ -348,6 +349,8 @@ namespace PulseForge
 		for (size_t Index = 0; Index < m_PrepassPipelines.size(); ++Index)
 		{
 			if (m_PrepassPipelines[Index]) continue;
+			const bool DoubleSided = Index >= 2;
+			const bool Mirrored = (Index % 2) != 0;
 			GraphicsPipelineDesc Description;
 			Description.VertexShader = m_PrepassVertexShader;
 			Description.FragmentShader = m_PrepassFragmentShader;
@@ -368,9 +371,12 @@ namespace PulseForge
 			Description.Depth.WriteEnabled = true;
 			Description.Depth.Compare = DepthCompareOperation::Less;
 			Description.DepthAttachmentEnabled = true;
-			Description.Rasterizer.Cull = Index == 0 ? CullMode::Back : CullMode::None;
+			Description.Rasterizer.Cull = DoubleSided ? CullMode::None : CullMode::Back;
+			Description.Rasterizer.FrontCounterClockwise =
+				UsesCounterClockwiseFrontFace(Mirrored ? WorldTransformOrientation::Mirrored : WorldTransformOrientation::Normal);
 			Description.DebugName =
-				Index == 0 ? "PulseForge SSAO single-sided alpha prepass" : "PulseForge SSAO double-sided alpha prepass";
+				DoubleSided ? "PulseForge SSAO double-sided alpha prepass" : "PulseForge SSAO single-sided alpha prepass";
+			if (Mirrored) Description.DebugName += " (mirrored transform)";
 			auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
 			if (!Pipeline)
 				return std::unexpected(
@@ -389,7 +395,8 @@ namespace PulseForge
 		if (auto Resources = EnsureResources(Width, Height); !Resources) return std::unexpected(std::move(Resources.error()));
 		if (auto Pipelines = EnsurePipelines(Inputs.SceneMaterialLayout, Inputs.SceneVertexLayout); !Pipelines)
 			return std::unexpected(std::move(Pipelines.error()));
-		if (!m_PrepassPipelines[0] || !m_PrepassPipelines[1])
+		if (std::any_of(
+				m_PrepassPipelines.begin(), m_PrepassPipelines.end(), [](const GraphicsPipelineHandle& Pipeline) { return !Pipeline; }))
 			return std::unexpected(
 				MakeAmbientOcclusionResourceError("SSAO normal-depth pipeline is not available for the prepared mesh layout"));
 
@@ -435,7 +442,8 @@ namespace PulseForge
 				return std::unexpected(MakeAmbientOcclusionDrawError("Could not update SSAO object constants: " + Update.error().Message));
 
 			const std::array<const BindingSet*, 2> BindingSets = { *Bindings, m_PrepassBindings.get() };
-			const size_t PipelineIndex = (*Material)->DoubleSided ? 1u : 0u;
+			const size_t PipelineIndex =
+				((*Material)->DoubleSided ? 2u : 0u) + (UsesCounterClockwiseFrontFace(Instance.Orientation) ? 0u : 1u);
 			const GraphicsResult Draw = m_Runtime.DrawIndexed(
 				*m_PrepassPipelines[PipelineIndex], Mesh->get(), { Mesh->get().GetIndexCount(), 1, 0, 0 }, BindingSets);
 			if (!Draw)
