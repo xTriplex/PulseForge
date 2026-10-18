@@ -1,5 +1,5 @@
 add_executable(PulseForgeGame PulseForgeGame/Source/Private/Client/PulseForgeGame.cpp)
-target_include_directories(PulseForgeGame PRIVATE PulseForgeGame/Source/Private)
+target_include_directories(PulseForgeGame PRIVATE PulseForgeGame/Source/Public)
 target_compile_definitions(PulseForgeGame PRIVATE PF_PLATFORM_WINDOWS "PF_SAMPLE_SHADER_DIRECTORY=\"Shaders\"")
 if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "OpenGL")
 	target_compile_definitions(PulseForgeGame PRIVATE PF_SAMPLE_RENDERER_OPENGL)

@@ -1,7 +1,7 @@
 #include "TestEditorSupport.h"
 #include "Editor/EditorDocumentWorkspaceStore.h"
 #include "Editor/EditorWorkspaceFrameState.h"
-#include "EditorDocumentWorkspaceRead.h"
+#include "Editor/EditorDocumentWorkspaceRead.h"
 
 #include <sstream>
 

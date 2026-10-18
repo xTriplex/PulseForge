@@ -1,5 +1,7 @@
 #include "Editor/EditorCommandLine.h"
 
+#include "Assets/AssetTypes.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
@@ -120,10 +122,8 @@ namespace PulseForgeEditor
 				if (ProjectFile.is_relative()) ProjectFile = WorkingDirectory / ProjectFile;
 				std::error_code Error;
 				ProjectFile = std::filesystem::absolute(ProjectFile, Error).lexically_normal();
-				std::string Extension = ProjectFile.extension().string();
-				std::transform(Extension.begin(), Extension.end(), Extension.begin(),
-					[](unsigned char Character) { return static_cast<char>(std::tolower(Character)); });
-				if (Error || Extension != ".pfproj" || !std::filesystem::is_regular_file(ProjectFile, Error) || Error)
+				if (Error || !PulseForge::HasAssetTypeExtension(ProjectFile, PulseForge::AssetFileType::Project) ||
+					!std::filesystem::is_regular_file(ProjectFile, Error) || Error)
 					return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::InvalidProjectPath,
 						"The project-open render test requires an existing .pfproj file." });
 				Options.ProjectOpenRenderTestFile = std::move(ProjectFile);
@@ -158,11 +158,8 @@ namespace PulseForgeEditor
 				return std::unexpected(EditorCommandLineError{
 					EditorCommandLineErrorCode::InvalidProjectPath, "The project path could not be resolved: " + Error.message() });
 
-			const auto Extension = ProjectFile.extension().string();
-			std::string NormalizedExtension = Extension;
-			std::transform(NormalizedExtension.begin(), NormalizedExtension.end(), NormalizedExtension.begin(),
-				[](unsigned char Character) { return static_cast<char>(std::tolower(Character)); });
-			if (NormalizedExtension != ".pfproj" || !std::filesystem::is_regular_file(ProjectFile, Error) || Error)
+			if (!PulseForge::HasAssetTypeExtension(ProjectFile, PulseForge::AssetFileType::Project) ||
+				!std::filesystem::is_regular_file(ProjectFile, Error) || Error)
 			{
 				std::string Message = "The project path is not an existing .pfproj file: ";
 				Message += ProjectFile.string();

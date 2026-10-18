@@ -1,7 +1,79 @@
 #include "TestCoreSupport.h"
+#include "Core/BoundedInput.h"
+
+#include <algorithm>
+#include <functional>
+#include <istream>
+#include <sstream>
+#include <streambuf>
+#include <string>
+#include <utility>
 
 namespace
 {
+	class GrowingInputBuffer final : public std::streambuf
+	{
+	public:
+		GrowingInputBuffer(std::string InitialData, std::string GrowthData)
+			: m_Data(std::move(InitialData)), m_GrowthData(std::move(GrowthData))
+		{
+		}
+
+		[[nodiscard]] size_t GetBytesRead() const noexcept { return m_Position; }
+
+	protected:
+		std::streamsize xsgetn(char* Destination, std::streamsize Count) override
+		{
+			const size_t Requested = static_cast<size_t>(Count);
+			if (!m_GrowthAdded && Requested > m_Data.size() - m_Position)
+			{
+				m_Data += m_GrowthData;
+				m_GrowthAdded = true;
+			}
+
+			const size_t Available = m_Data.size() - m_Position;
+			const size_t BytesToCopy = std::min(Requested, Available);
+			std::copy_n(m_Data.data() + m_Position, BytesToCopy, Destination);
+			m_Position += BytesToCopy;
+			return static_cast<std::streamsize>(BytesToCopy);
+		}
+
+	private:
+		std::string m_Data;
+		std::string m_GrowthData;
+		size_t m_Position = 0;
+		bool m_GrowthAdded = false;
+	};
+
+	class FailingInputBuffer final : public std::streambuf
+	{
+	protected:
+		std::streamsize xsgetn(char*, std::streamsize) override { throw std::ios_base::failure("injected input failure"); }
+	};
+
+	void TestBoundedInputReader(TestRunner& Tests)
+	{
+		using namespace PulseForge::Detail;
+		std::istringstream ExactInput("1234");
+		const auto Exact = ReadBoundedInput(ExactInput, 4);
+		PF_CHECK(Tests, Exact && *Exact == "1234");
+
+		std::istringstream OversizedInput("12345");
+		const auto Oversized = ReadBoundedInput(OversizedInput, 4);
+		PF_CHECK(Tests, !Oversized && Oversized.error().Code == BoundedInputErrorCode::TooLarge);
+
+		GrowingInputBuffer GrowingBuffer("1234", "5");
+		std::istream GrowingInput(&GrowingBuffer);
+		const auto GrewDuringRead = ReadBoundedInput(GrowingInput, 4);
+		PF_CHECK(Tests, !GrewDuringRead && GrewDuringRead.error().Code == BoundedInputErrorCode::TooLarge);
+		PF_CHECK(Tests, GrowingBuffer.GetBytesRead() == 5);
+
+		FailingInputBuffer FailingBuffer;
+		std::istream FailingInput(&FailingBuffer);
+		const auto FailedRead = ReadBoundedInput(FailingInput, 4);
+		PF_CHECK(Tests, !FailedRead && FailedRead.error().Code == BoundedInputErrorCode::ReadFailed);
+	}
+
 	struct LayerLifecycle
 	{
 		int AttachCount = 0;
@@ -90,10 +162,94 @@ namespace
 		Stack.PushLayer(std::make_unique<VisitingLayer>(2, UpdateOrder));
 		Stack.PushOverlay(std::make_unique<VisitingLayer>(3, UpdateOrder));
 		Stack.PushOverlay(std::make_unique<VisitingLayer>(4, UpdateOrder));
-		for (const auto& Layer : Stack)
-			Layer->OnUpdate(PulseForge::Timestep{});
+		Stack.UpdateLayers(PulseForge::Timestep{});
 
 		PF_CHECK(Tests, UpdateOrder == std::vector<int>({ 1, 2, 3, 4 }));
+	}
+
+	void TestLayerStackRejectsMutationDuringDispatch(TestRunner& Tests)
+	{
+		std::vector<int> UpdateOrder;
+		std::vector<int> EventOrder;
+		LayerLifecycle RejectedLayerLifecycle;
+		int RejectedMutationCount = 0;
+		class MutationAttemptingLayer final : public PulseForge::Layer
+		{
+		public:
+			MutationAttemptingLayer(PulseForge::LayerStack& Stack, LayerLifecycle& RejectedLifecycle, std::vector<int>& UpdateOrder,
+				std::vector<int>& EventOrder, int& RejectedMutationCount)
+				: Layer("MutationAttemptingLayer"), m_Stack(Stack), m_RejectedLifecycle(RejectedLifecycle), m_UpdateOrder(UpdateOrder),
+				  m_EventOrder(EventOrder), m_RejectedMutationCount(RejectedMutationCount)
+			{
+			}
+
+			void OnUpdate(PulseForge::Timestep) override
+			{
+				m_UpdateOrder.push_back(2);
+				TryMutation([this]() { m_Stack.PushOverlay(std::make_unique<TrackingLayer>(m_RejectedLifecycle)); });
+				TryMutation([this]() { (void)m_Stack.PopLayer(*this); });
+			}
+
+			void OnEvent(PulseForge::Event&) override
+			{
+				m_EventOrder.push_back(2);
+				TryMutation([this]() { m_Stack.PushLayer(std::make_unique<TrackingLayer>(m_RejectedLifecycle)); });
+				TryMutation([this]() { m_Stack.Clear(); });
+			}
+
+		private:
+			void TryMutation(const std::function<void()>& Attempt)
+			{
+				try
+				{
+					Attempt();
+				}
+				catch (const std::logic_error&)
+				{
+					++m_RejectedMutationCount;
+				}
+			}
+
+			PulseForge::LayerStack& m_Stack;
+			LayerLifecycle& m_RejectedLifecycle;
+			std::vector<int>& m_UpdateOrder;
+			std::vector<int>& m_EventOrder;
+			int& m_RejectedMutationCount;
+		};
+
+		class VisitingLayer final : public PulseForge::Layer
+		{
+		public:
+			VisitingLayer(int Id, std::vector<int>& UpdateOrder, std::vector<int>& EventOrder)
+				: Layer("VisitingLayer"), m_Id(Id), m_UpdateOrder(UpdateOrder), m_EventOrder(EventOrder)
+			{
+			}
+
+			void OnUpdate(PulseForge::Timestep) override { m_UpdateOrder.push_back(m_Id); }
+			void OnEvent(PulseForge::Event&) override { m_EventOrder.push_back(m_Id); }
+
+		private:
+			int m_Id;
+			std::vector<int>& m_UpdateOrder;
+			std::vector<int>& m_EventOrder;
+		};
+
+		PulseForge::LayerStack Stack;
+		Stack.PushLayer(std::make_unique<VisitingLayer>(1, UpdateOrder, EventOrder));
+		Stack.PushLayer(
+			std::make_unique<MutationAttemptingLayer>(Stack, RejectedLayerLifecycle, UpdateOrder, EventOrder, RejectedMutationCount));
+		Stack.PushOverlay(std::make_unique<VisitingLayer>(3, UpdateOrder, EventOrder));
+		Stack.UpdateLayers(PulseForge::Timestep{});
+		PulseForge::KeyPressedEvent Event(65, 0);
+		Stack.DispatchEvent(Event);
+
+		PF_CHECK(Tests, UpdateOrder == std::vector<int>({ 1, 2, 3 }));
+		PF_CHECK(Tests, EventOrder == std::vector<int>({ 3, 2, 1 }));
+		PF_CHECK(Tests, RejectedMutationCount == 4);
+		PF_CHECK(Tests, RejectedLayerLifecycle.AttachCount == 0);
+		PF_CHECK(Tests, RejectedLayerLifecycle.DetachCount == 0);
+		PF_CHECK(Tests, RejectedLayerLifecycle.DestroyCount == 2);
+		PF_CHECK(Tests, Stack.GetLayerCount() == 3);
 	}
 
 	void TestEventDispatchAndHandledState(TestRunner& Tests)
@@ -160,9 +316,66 @@ namespace
 			Threw = true;
 		}
 		PF_CHECK(Tests, Threw);
-		PF_CHECK(Tests, Stack.begin() == Stack.end());
+		PF_CHECK(Tests, Stack.GetLayerCount() == 0);
 		PF_CHECK(Tests, DetachCount == 1);
 		PF_CHECK(Tests, DestroyCount == 1);
+
+		LayerLifecycle NestedLayerLifecycle;
+		int FailedAttachDetachCount = 0;
+		int FailedAttachDestroyCount = 0;
+		bool NestedMutationRejected = false;
+		class ReentrantFailingLayer final : public PulseForge::Layer
+		{
+		public:
+			ReentrantFailingLayer(PulseForge::LayerStack& Stack, LayerLifecycle& NestedLayerLifecycle, int& DetachCount, int& DestroyCount,
+				bool& NestedMutationRejected)
+				: Layer("ReentrantFailingLayer"), m_Stack(Stack), m_NestedLayerLifecycle(NestedLayerLifecycle), m_DetachCount(DetachCount),
+				  m_DestroyCount(DestroyCount), m_NestedMutationRejected(NestedMutationRejected)
+			{
+			}
+
+			~ReentrantFailingLayer() override { ++m_DestroyCount; }
+			void OnAttach() override
+			{
+				try
+				{
+					m_Stack.PushLayer(std::make_unique<TrackingLayer>(m_NestedLayerLifecycle));
+				}
+				catch (const std::logic_error&)
+				{
+					m_NestedMutationRejected = true;
+				}
+				throw std::runtime_error("expected failure after nested attach request");
+			}
+			void OnDetach() override { ++m_DetachCount; }
+
+		private:
+			PulseForge::LayerStack& m_Stack;
+			LayerLifecycle& m_NestedLayerLifecycle;
+			int& m_DetachCount;
+			int& m_DestroyCount;
+			bool& m_NestedMutationRejected;
+		};
+
+		PulseForge::LayerStack ReentrantStack;
+		bool ReentrantAttachThrew = false;
+		try
+		{
+			ReentrantStack.PushLayer(std::make_unique<ReentrantFailingLayer>(
+				ReentrantStack, NestedLayerLifecycle, FailedAttachDetachCount, FailedAttachDestroyCount, NestedMutationRejected));
+		}
+		catch (const std::runtime_error&)
+		{
+			ReentrantAttachThrew = true;
+		}
+		PF_CHECK(Tests, ReentrantAttachThrew);
+		PF_CHECK(Tests, NestedMutationRejected);
+		PF_CHECK(Tests, ReentrantStack.GetLayerCount() == 0);
+		PF_CHECK(Tests, FailedAttachDetachCount == 1);
+		PF_CHECK(Tests, FailedAttachDestroyCount == 1);
+		PF_CHECK(Tests, NestedLayerLifecycle.AttachCount == 0);
+		PF_CHECK(Tests, NestedLayerLifecycle.DetachCount == 0);
+		PF_CHECK(Tests, NestedLayerLifecycle.DestroyCount == 1);
 	}
 
 	void TestLayerPopDetachesAndDestroysWhenDetachThrows(TestRunner& Tests)
@@ -245,7 +458,7 @@ namespace
 		PF_CHECK(Tests, LaterDetachCount == 1);
 		PF_CHECK(Tests, DestroyCount == 1);
 		PF_CHECK(Tests, LaterDestroyCount == 1);
-		PF_CHECK(Tests, Stack.begin() == Stack.end());
+		PF_CHECK(Tests, Stack.GetLayerCount() == 0);
 	}
 
 	void TestInputState(TestRunner& Tests)
@@ -289,9 +502,11 @@ namespace
 
 void RunCoreTests(TestRunner& Tests)
 {
+	TestBoundedInputReader(Tests);
 	TestLayerStackOwnership(Tests);
 	TestLayerStackClearDetachesInReverseOrder(Tests);
 	TestLayerAndOverlayIterationOrder(Tests);
+	TestLayerStackRejectsMutationDuringDispatch(Tests);
 	TestEventDispatchAndHandledState(Tests);
 	TestLayerAttachFailureRollsBackOwnership(Tests);
 	TestLayerPopDetachesAndDestroysWhenDetachThrows(Tests);

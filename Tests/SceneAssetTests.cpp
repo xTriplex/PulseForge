@@ -338,7 +338,7 @@ namespace
 		PF_CHECK(Tests, Child->SetParent(*Root).has_value());
 		PF_CHECK(Tests, Child->SetMeshRenderer(MeshRendererComponent{ *MeshAssetID }).has_value());
 
-		const std::filesystem::path SourcePath = PrefabDirectory / "crate.prefab";
+		const std::filesystem::path SourcePath = PrefabDirectory / "crate.PREFAB";
 		PF_CHECK(Tests, PrefabSerializer::SaveToFile(Source, *Root, SourcePath).has_value());
 		const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(SourcePath);
 		PF_CHECK(Tests, Metadata.has_value());
@@ -361,7 +361,7 @@ namespace
 		PF_CHECK(Tests, ChildRenderer && ChildRenderer->has_value());
 		PF_CHECK(Tests, ChildRenderer && ChildRenderer->has_value() && ChildRenderer->value().MeshAsset == *MeshAssetID);
 
-		const auto MoveResult = AssetOperations::Move(Registry, ProjectRoot, Metadata->ID, "Assets/Prefabs/renamed.prefab");
+		const auto MoveResult = AssetOperations::Move(Registry, ProjectRoot, Metadata->ID, "Assets/Prefabs/renamed.PREFAB");
 		PF_CHECK(Tests, MoveResult && MoveResult->ID == Metadata->ID);
 		PF_CHECK(Tests, PrefabAssetService::Instantiate(Metadata->ID, ProjectRoot, Registry, Destination).has_value());
 
@@ -372,7 +372,7 @@ namespace
 		PF_CHECK(Tests, Root->SetTag(*RootTag).has_value());
 		PF_CHECK(Tests, PrefabAssetService::Save(Metadata->ID, ProjectRoot, Registry, Source, *Root).has_value());
 		const auto PreservedMetadata = AssetMetadataSerializer::LoadFromFile(
-			AssetMetadataSerializer::GetSidecarPath(ProjectRoot / "Assets" / "Prefabs" / "renamed.prefab"));
+			AssetMetadataSerializer::GetSidecarPath(ProjectRoot / "Assets" / "Prefabs" / "renamed.PREFAB"));
 		PF_CHECK(Tests, PreservedMetadata && PreservedMetadata->ID == Metadata->ID);
 		Scene UpdatedInstance;
 		const auto UpdatedRoot = PrefabAssetService::Instantiate(Metadata->ID, ProjectRoot, Registry, UpdatedInstance);
@@ -383,13 +383,13 @@ namespace
 			PF_CHECK(Tests, UpdatedTag && UpdatedTag->Name == "Saved through prefab UUID");
 		}
 
-		const auto CreatedPrefab = PrefabAssetService::Create(Registry, ProjectRoot, "Assets/Prefabs/generated.prefab", Source, *Root);
+		const auto CreatedPrefab = PrefabAssetService::Create(Registry, ProjectRoot, "Assets/Prefabs/generated.PREFAB", Source, *Root);
 		PF_CHECK(Tests, CreatedPrefab.has_value());
 		PF_CHECK(Tests,
-			CreatedPrefab && CreatedPrefab->ID != Metadata->ID && CreatedPrefab->ProjectRelativePath == "Assets/Prefabs/generated.prefab");
+			CreatedPrefab && CreatedPrefab->ID != Metadata->ID && CreatedPrefab->ProjectRelativePath == "Assets/Prefabs/generated.PREFAB");
 		if (CreatedPrefab)
 		{
-			const auto CreatedMetadata = AssetMetadataSerializer::LoadFromFile(ProjectRoot / "Assets/Prefabs/generated.prefab.meta");
+			const auto CreatedMetadata = AssetMetadataSerializer::LoadFromFile(ProjectRoot / "Assets/Prefabs/generated.PREFAB.meta");
 			PF_CHECK(Tests, CreatedMetadata && CreatedMetadata->ID == CreatedPrefab->ID);
 			PF_CHECK(Tests, Registry.Find(CreatedPrefab->ID).has_value());
 
@@ -404,7 +404,7 @@ namespace
 			}
 
 			const auto DuplicateCreation =
-				PrefabAssetService::Create(Registry, ProjectRoot, "Assets/Prefabs/generated.prefab", Source, *Root);
+				PrefabAssetService::Create(Registry, ProjectRoot, "Assets/Prefabs/generated.PREFAB", Source, *Root);
 			PF_CHECK(Tests, !DuplicateCreation && DuplicateCreation.error().Code == PrefabAssetErrorCode::AssetOperationFailed);
 			PF_CHECK(Tests, Registry.Find(CreatedPrefab->ID).has_value());
 		}
@@ -412,7 +412,7 @@ namespace
 			PrefabAssetService::Create(Registry, ProjectRoot, "Assets/Prefabs/generated.json", Source, *Root);
 		PF_CHECK(Tests, !InvalidPrefabCreation && InvalidPrefabCreation.error().Code == PrefabAssetErrorCode::UnsupportedAssetType);
 
-		const auto Duplicate = AssetOperations::Duplicate(Registry, ProjectRoot, Metadata->ID, "Assets/Prefabs/copy.prefab");
+		const auto Duplicate = AssetOperations::Duplicate(Registry, ProjectRoot, Metadata->ID, "Assets/Prefabs/copy.PREFAB");
 		PF_CHECK(Tests, Duplicate.has_value());
 		PF_CHECK(Tests, Duplicate && Duplicate->ID != Metadata->ID);
 		PF_CHECK(Tests, Duplicate && PrefabAssetService::Instantiate(Duplicate->ID, ProjectRoot, Registry, UpdatedInstance).has_value());

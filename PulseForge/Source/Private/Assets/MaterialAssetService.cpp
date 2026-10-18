@@ -2,6 +2,7 @@
 
 #include "Assets/AssetOperations.h"
 #include "Assets/AssetPathResolver.h"
+#include "Assets/AssetTypes.h"
 
 #include <span>
 
@@ -22,7 +23,7 @@ namespace PulseForge
 					MaterialAsset,
 					"Material asset UUID " + MaterialAsset.ToString() + " is not present in the project asset registry" });
 			}
-			if (Record->ProjectRelativePath.extension() != ".material")
+			if (!HasAssetTypeExtension(Record->ProjectRelativePath, AssetFileType::Material))
 			{
 				return std::unexpected(MaterialAssetError{
 					MaterialAssetErrorCode::UnsupportedAssetType,
@@ -48,7 +49,7 @@ namespace PulseForge
 		const std::filesystem::path& ProjectRelativePath,
 		const MaterialAssetDesc& Material)
 	{
-		if (ProjectRelativePath.extension() != ".material")
+		if (!HasAssetTypeExtension(ProjectRelativePath, AssetFileType::Material))
 			return std::unexpected(MaterialAssetError{ MaterialAssetErrorCode::UnsupportedAssetType, {}, "New material assets must use the .material extension" });
 
 		const auto Serialized = MaterialAssetSerializer::Serialize(Material);

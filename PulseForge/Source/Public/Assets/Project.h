@@ -3,6 +3,7 @@
 #include "Assets/AssetRegistry.h"
 #include "Core/Core.h"
 
+#include <cstddef>
 #include <expected>
 #include <filesystem>
 #include <optional>
@@ -30,7 +31,8 @@ namespace PulseForge
 		FileReplaceFailed,
 		RegistryBuildFailed,
 		StartSceneNotFound,
-		StartSceneWrongType
+		StartSceneWrongType,
+		DocumentTooLarge
 	};
 
 	struct ProjectError
@@ -43,6 +45,8 @@ namespace PulseForge
 	class PULSEFORGE_API ProjectSerializer final
 	{
 	public:
+		static constexpr size_t MaximumDocumentBytes = 1024u * 1024u;
+
 		[[nodiscard]] static std::expected<std::string, ProjectError> Serialize(const ProjectDesc& Description);
 		[[nodiscard]] static std::expected<ProjectDesc, ProjectError> Deserialize(std::string_view Data);
 	};

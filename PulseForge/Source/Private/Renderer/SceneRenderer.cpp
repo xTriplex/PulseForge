@@ -139,6 +139,14 @@ namespace PulseForge
 			  EnvironmentLighting(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry())
 		{
 		}
+
+		void Clear() noexcept
+		{
+			Meshes.Clear();
+			Textures.Clear();
+			Materials.Clear();
+			EnvironmentLighting.Clear();
+		}
 	};
 
 	SceneRenderer::SceneRenderer(RenderDevice& Runtime, const Project& SourceProject)
@@ -562,29 +570,8 @@ namespace PulseForge
 		float FarClipPlane,
 		std::span<const UUID> ExcludedEntities)
 	{
-		auto Snapshot = SceneRenderSnapshotBuilder::BuildForView(
-			Source, View, Projection, CameraWorldPosition, NearClipPlane, FarClipPlane);
-		if (!Snapshot)
-			return PrepareSnapshot(std::move(Snapshot));
-		const std::unordered_set<UUID, UUIDHash> Excluded(ExcludedEntities.begin(), ExcludedEntities.end());
-		const auto IsExcluded = [&Excluded](const UUID& Identifier) { return Excluded.contains(Identifier); };
-		std::erase_if(Snapshot->Meshes, [&IsExcluded](const SceneMeshInstance& Instance)
-		{
-			return IsExcluded(Instance.Entity);
-		});
-		std::erase_if(Snapshot->PointLights, [&IsExcluded](const ScenePointLight& Light)
-		{
-			return IsExcluded(Light.Entity);
-		});
-		std::erase_if(Snapshot->SpotLights, [&IsExcluded](const SceneSpotLight& Light)
-		{
-			return IsExcluded(Light.Entity);
-		});
-		if (Snapshot->DirectionalLight && IsExcluded(Snapshot->DirectionalLight->Entity))
-			Snapshot->DirectionalLight.reset();
-		if (Snapshot->EnvironmentLight && IsExcluded(Snapshot->EnvironmentLight->Entity))
-			Snapshot->EnvironmentLight.reset();
-		return PrepareSnapshot(std::move(Snapshot));
+		return PrepareSnapshot(SceneRenderSnapshotBuilder::BuildForViewFiltered(
+			Source, View, Projection, CameraWorldPosition, NearClipPlane, FarClipPlane, ExcludedEntities));
 	}
 
 	std::expected<void, SceneRendererError> SceneRenderer::PrepareSnapshot(
@@ -765,6 +752,18 @@ namespace PulseForge
 	void SceneRenderer::RefreshMaterialAssets() noexcept
 	{
 		m_MaterialBindingCache->RefreshMaterialAssets();
+	}
+
+	void SceneRenderer::RefreshProjectAssets() noexcept
+	{
+		m_TransparentDrawOrder.clear();
+		m_PreparedSnapshot.reset();
+		m_PreparedCascades.reset();
+		m_PreparedEnvironmentTextures = &m_FallbackEnvironmentTextures;
+		m_EnvironmentLightingPending = false;
+		m_PreparedEnvironmentReady = false;
+		m_MaterialBindingCache->RefreshProjectAssets();
+		m_ProjectAssetCaches->Clear();
 	}
 
 	std::expected<HdrSceneRenderResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToHdr(uint32_t Width, uint32_t Height)

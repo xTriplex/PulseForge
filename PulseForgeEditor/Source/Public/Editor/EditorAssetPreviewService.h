@@ -27,6 +27,8 @@ namespace PulseForgeEditor
 {
 	struct AssetPreviewServiceLimits
 	{
+		// Zero queue/entry limits reject new requests. Zero CPU/GPU limits make every non-empty result fail.
+		// Zero upload count or bytes disables preview uploads and marks decoded requests failed.
 		size_t MaximumQueuedRequests = 96;
 		size_t MaximumEntries = 512;
 		size_t MaximumCpuBytes = 8ull * 1024ull * 1024ull;
@@ -47,11 +49,12 @@ namespace PulseForgeEditor
 		size_t PendingRequests = 0;
 		size_t ReadyEntries = 0;
 		size_t FailedEntries = 0;
-		size_t CpuBytes = 0;
+		// Completed pixel payloads awaiting UI-thread upload; excludes the active worker's source/decode memory.
+		size_t QueuedResultCpuBytes = 0;
 		size_t GpuBytes = 0;
 		size_t ActiveEntries = 0;
 		size_t PeakEntries = 0;
-		size_t PeakCpuBytes = 0;
+		size_t PeakQueuedResultCpuBytes = 0;
 		size_t PeakGpuBytes = 0;
 		uint64_t CacheHits = 0;
 		uint64_t CacheMisses = 0;
@@ -62,6 +65,8 @@ namespace PulseForgeEditor
 		uint64_t BindingRegistrations = 0;
 		uint64_t BindingUnregistrations = 0;
 		uint64_t StaleResultsDiscarded = 0;
+		uint64_t CpuBudgetWaits = 0;
+		bool WorkerFailed = false;
 	};
 
 	class EditorAssetPreviewService final
@@ -85,12 +90,14 @@ namespace PulseForgeEditor
 		[[nodiscard]] std::optional<AssetPreviewTexture> FindPreview(
 			std::string_view ProjectID,
 			std::string_view AssetID) const;
+		// Call on the service's owning UI/update thread; worker-owned statistics are snapshotted under m_Mutex.
 		[[nodiscard]] AssetPreviewStats GetStats() const;
 		void PumpUploads();
 		void InvalidateAll() noexcept;
 		void Shutdown() noexcept;
 
 	private:
+		friend struct EditorAssetPreviewServiceTestAccess;
 		enum class State : uint8_t { Queued, Decoding, CpuReady, Ready, Failed };
 		enum class RequestKind : uint8_t { Image, MaterialSwatch };
 		struct Request
@@ -128,8 +135,10 @@ namespace PulseForgeEditor
 			PulseForge::TextureHandle Texture;
 		};
 
-		void WorkerMain();
+		void WorkerMain() noexcept;
+		void MarkWorkerFailed() noexcept;
 		[[nodiscard]] static std::optional<CpuPreview> Decode(const Request& Work);
+		using DecodeOverrideForTesting = std::optional<CpuPreview> (*)(const Request& Work);
 		[[nodiscard]] bool EvictToFit(size_t RequiredBytes, std::string_view ProtectedKey = {}, size_t RequiredEntrySlots = 0);
 		void ClearEntries() noexcept;
 
@@ -146,9 +155,11 @@ namespace PulseForgeEditor
 		uint64_t m_UseCounter = 0;
 		AssetPreviewStats m_Stats;
 		std::atomic_uint64_t m_StaleResultsDiscarded = 0;
+		std::atomic_bool m_WorkerFailed = false;
 		AssetPreviewServiceLimits m_Limits;
 		AssetPreviewBudget m_GpuBudget;
 		size_t m_QueuedCpuBytes = 0;
 		bool m_Stopping = false;
+		DecodeOverrideForTesting m_DecodeOverrideForTesting = nullptr;
 	};
 }

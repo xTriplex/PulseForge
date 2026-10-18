@@ -568,6 +568,52 @@ namespace
 		PF_CHECK(Tests, !MissingFileResult.has_value());
 		PF_CHECK(Tests, !MissingFileResult && MissingFileResult.error().Code == SceneSerializationErrorCode::FileOpenFailed);
 		PF_CHECK(Tests, Source.GetEntityCount() == 2);
+
+		std::string ExactBoundaryScene = *Serialized;
+		ExactBoundaryScene.resize(SceneSerializer::MaximumDocumentBytes, ' ');
+		{
+			std::ofstream Output(ScenePath, std::ios::binary | std::ios::trunc);
+			Output.write(ExactBoundaryScene.data(), static_cast<std::streamsize>(ExactBoundaryScene.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		Scene BoundaryLoadedScene;
+		const auto ExactBoundaryLoad = SceneSerializer::LoadFromFile(ScenePath, BoundaryLoadedScene);
+		PF_CHECK(Tests, ExactBoundaryLoad.has_value());
+		PF_CHECK(Tests, BoundaryLoadedScene.GetEntityCount() == 2);
+
+		const UUID PreservedEntityID = Child.GetUUID();
+		ExactBoundaryScene.push_back(' ');
+		const auto OversizedDeserialize = SceneSerializer::Deserialize(ExactBoundaryScene, BoundaryLoadedScene);
+		PF_CHECK(Tests, !OversizedDeserialize && OversizedDeserialize.error().Code == SceneSerializationErrorCode::DocumentTooLarge);
+		PF_CHECK(Tests, BoundaryLoadedScene.FindEntity(PreservedEntityID).has_value());
+		{
+			std::ofstream Output(ScenePath, std::ios::binary | std::ios::app);
+			Output.put(' ');
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto OversizedLoad = SceneSerializer::LoadFromFile(ScenePath, BoundaryLoadedScene);
+		PF_CHECK(Tests, !OversizedLoad && OversizedLoad.error().Code == SceneSerializationErrorCode::FileReadFailed);
+		PF_CHECK(Tests, OversizedLoad.error().Message.find("64 MiB") != std::string::npos);
+		PF_CHECK(Tests, BoundaryLoadedScene.FindEntity(PreservedEntityID).has_value());
+
+		{
+			std::ofstream Output(ScenePath, std::ios::binary | std::ios::trunc);
+			Output << "{\"format\":\"PulseForgeScene\",\"version\":7,\"entities\":[";
+		}
+		const auto TruncatedLoad = SceneSerializer::LoadFromFile(ScenePath, BoundaryLoadedScene);
+		PF_CHECK(Tests, !TruncatedLoad && TruncatedLoad.error().Code == SceneSerializationErrorCode::InvalidDocument);
+		PF_CHECK(Tests, BoundaryLoadedScene.FindEntity(PreservedEntityID).has_value());
+
+		std::string TooManyEntities = "{\"format\":\"PulseForgeScene\",\"version\":7,\"entities\":[";
+		for (size_t Index = 0; Index < SceneSerializer::MaximumEntityCount; ++Index)
+		{
+			if (Index != 0) TooManyEntities.push_back(',');
+			TooManyEntities += "null";
+		}
+		TooManyEntities += ",null]}";
+		const auto EntityLimitResult = SceneSerializer::Deserialize(TooManyEntities, BoundaryLoadedScene);
+		PF_CHECK(Tests, !EntityLimitResult && EntityLimitResult.error().Code == SceneSerializationErrorCode::DocumentTooLarge);
+		PF_CHECK(Tests, BoundaryLoadedScene.FindEntity(PreservedEntityID).has_value());
 	}
 
 	void TestSceneAssetsByUUID(TestRunner& Tests)
@@ -621,13 +667,13 @@ namespace
 
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
-		const auto CreatedScene = SceneAssetService::Create(Registry, ProjectRoot, "Assets/Scenes/generated.scene", Source);
+		const auto CreatedScene = SceneAssetService::Create(Registry, ProjectRoot, "Assets/Scenes/generated.SCENE", Source);
 		PF_CHECK(Tests, CreatedScene.has_value());
 		PF_CHECK(Tests, CreatedScene && !CreatedScene->ID.IsNil() && CreatedScene->ID != SceneID &&
-							CreatedScene->ProjectRelativePath == "Assets/Scenes/generated.scene");
+							CreatedScene->ProjectRelativePath == "Assets/Scenes/generated.SCENE");
 		if (CreatedScene)
 		{
-			const auto CreatedMetadata = AssetMetadataSerializer::LoadFromFile(ProjectRoot / "Assets/Scenes/generated.scene.meta");
+			const auto CreatedMetadata = AssetMetadataSerializer::LoadFromFile(ProjectRoot / "Assets/Scenes/generated.SCENE.meta");
 			PF_CHECK(Tests, CreatedMetadata && CreatedMetadata->ID == CreatedScene->ID);
 			PF_CHECK(Tests, Registry.Find(CreatedScene->ID).has_value());
 
@@ -636,7 +682,7 @@ namespace
 			PF_CHECK(Tests, GeneratedScene.GetEntityCount() == Source.GetEntityCount());
 			PF_CHECK(Tests, GeneratedScene.FindEntity(*MeshEntityID).has_value());
 
-			const auto DuplicateCreation = SceneAssetService::Create(Registry, ProjectRoot, "Assets/Scenes/generated.scene", Source);
+			const auto DuplicateCreation = SceneAssetService::Create(Registry, ProjectRoot, "Assets/Scenes/generated.SCENE", Source);
 			PF_CHECK(Tests, !DuplicateCreation && DuplicateCreation.error().Code == SceneAssetErrorCode::AssetOperationFailed);
 			PF_CHECK(Tests, Registry.Find(CreatedScene->ID).has_value());
 		}

@@ -278,6 +278,12 @@ namespace PulseForge
 		if (m_Materials) m_Materials->Clear();
 	}
 
+	void SceneRendererMaterialBindingCache::RefreshProjectAssets() noexcept
+	{
+		m_MaterialBindings.clear();
+		m_EnvironmentBindings.clear();
+	}
+
 	std::expected<void, SceneRendererError> SceneRendererMaterialBindingCache::RequireInitialized() const
 	{
 		if (m_Layout) return {};

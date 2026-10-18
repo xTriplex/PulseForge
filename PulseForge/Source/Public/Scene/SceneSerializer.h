@@ -3,6 +3,7 @@
 #include "Core/Core.h"
 #include "Scene/Scene.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -23,7 +24,8 @@ namespace PulseForge
 		FileOpenFailed,
 		FileReadFailed,
 		FileWriteFailed,
-		FileReplaceFailed
+		FileReplaceFailed,
+		DocumentTooLarge
 	};
 
 	struct SceneSerializationError
@@ -35,11 +37,17 @@ namespace PulseForge
 	class PULSEFORGE_API SceneSerializer final
 	{
 	public:
+		// Shared by disk documents and in-memory history snapshots so serialized scenes remain restorable.
+		static constexpr size_t MaximumDocumentBytes = 64u * 1024u * 1024u;
+		static constexpr size_t MaximumEntityCount = 250'000;
+
 		[[nodiscard]] static std::expected<std::string, SceneSerializationError> Serialize(const Scene& Source);
 		[[nodiscard]] static std::expected<void, SceneSerializationError> Deserialize(std::string_view Data, Scene& Destination);
 		// Creates an independent scene copy retaining persistent entity and asset UUIDs.
 		[[nodiscard]] static std::expected<std::unique_ptr<Scene>, SceneSerializationError> Clone(const Scene& Source);
-		[[nodiscard]] static std::expected<void, SceneSerializationError> SaveToFile(const Scene& Source, const std::filesystem::path& Path);
-		[[nodiscard]] static std::expected<void, SceneSerializationError> LoadFromFile(const std::filesystem::path& Path, Scene& Destination);
+		[[nodiscard]] static std::expected<void, SceneSerializationError> SaveToFile(
+			const Scene& Source, const std::filesystem::path& Path);
+		[[nodiscard]] static std::expected<void, SceneSerializationError> LoadFromFile(
+			const std::filesystem::path& Path, Scene& Destination);
 	};
-}
+} // namespace PulseForge

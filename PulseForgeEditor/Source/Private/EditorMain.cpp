@@ -1,6 +1,6 @@
 #include "Core/Log.h"
 #include "Editor/EditorCommandLine.h"
-#include "EditorApplicationFactory.h"
+#include "Editor/EditorApplicationFactory.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX

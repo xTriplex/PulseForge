@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Assets/AssetTypes.h"
+
 #include "Editor/EditorIcons.h"
 
 #include <cstddef>
@@ -108,34 +110,15 @@ namespace PulseForgeEditor
 
 	[[nodiscard]] inline EditorIcon GetAssetBrowserIcon(const std::filesystem::path& AssetPath)
 	{
-		const std::string Extension = AssetPath.extension().string();
-		const auto IsExtension = [&Extension](std::string_view Expected)
-		{
-			if (Extension.size() != Expected.size())
-				return false;
-			for (size_t Index = 0; Index < Extension.size(); ++Index)
-				if (FoldAscii(static_cast<unsigned char>(Extension[Index])) !=
-					FoldAscii(static_cast<unsigned char>(Expected[Index])))
-					return false;
-			return true;
-		};
-
-		if (IsExtension(".scene"))
-			return EditorIcon::Scene;
-		if (IsExtension(".prefab"))
-			return EditorIcon::Prefab;
-		if (IsExtension(".gltf") || IsExtension(".glb"))
-			return EditorIcon::Cube;
-		if (IsExtension(".material"))
-			return EditorIcon::Material;
-		if (IsExtension(".lua") || IsExtension(".hlsl") || IsExtension(".glsl"))
+		if (PulseForge::HasAssetTypeExtension(AssetPath, PulseForge::AssetFileType::Scene)) return EditorIcon::Scene;
+		if (PulseForge::HasAssetTypeExtension(AssetPath, PulseForge::AssetFileType::Prefab)) return EditorIcon::Prefab;
+		if (PulseForge::HasAssetTypeExtension(AssetPath, PulseForge::AssetFileType::Mesh)) return EditorIcon::Cube;
+		if (PulseForge::HasAssetTypeExtension(AssetPath, PulseForge::AssetFileType::Material)) return EditorIcon::Material;
+		if (PulseForge::HasAssetTypeExtension(AssetPath, PulseForge::AssetFileType::Script) ||
+			PulseForge::HasAssetTypeExtension(AssetPath, PulseForge::AssetFileType::ShaderSource))
 			return EditorIcon::Script;
-		if (IsExtension(".png") || IsExtension(".jpg") || IsExtension(".jpeg") || IsExtension(".bmp") ||
-			IsExtension(".tga") || IsExtension(".psd") || IsExtension(".gif") || IsExtension(".pic") ||
-			IsExtension(".ppm") || IsExtension(".pnm") || IsExtension(".pgm") || IsExtension(".pbm"))
-			return EditorIcon::Image;
-		if (IsExtension(".wav") || IsExtension(".mp3") || IsExtension(".flac") || IsExtension(".ogg"))
-			return EditorIcon::AudioSource;
+		if (PulseForge::HasAssetTypeExtension(AssetPath, PulseForge::AssetFileType::Image)) return EditorIcon::Image;
+		if (PulseForge::HasAssetTypeExtension(AssetPath, PulseForge::AssetFileType::Audio)) return EditorIcon::AudioSource;
 		return EditorIcon::File;
 	}
 }

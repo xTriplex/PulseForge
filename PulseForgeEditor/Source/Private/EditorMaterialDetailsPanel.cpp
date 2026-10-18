@@ -1,6 +1,7 @@
 #include "Editor/EditorMaterialDetailsPanel.h"
 
 #include "Assets/Project.h"
+#include "Assets/AssetTypes.h"
 #include "Editor/EditorAssetSelector.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
 #include "Editor/EditorMaterialDraftController.h"
@@ -21,13 +22,6 @@ namespace PulseForgeEditor
 			return std::string(reinterpret_cast<const char*>(Encoded.data()), Encoded.size());
 		}
 
-		std::string NormalizedExtension(const std::filesystem::path& Path)
-		{
-			std::string Extension = Path.extension().string();
-			std::transform(Extension.begin(), Extension.end(), Extension.begin(),
-				[](unsigned char Character) { return static_cast<char>(std::tolower(Character)); });
-			return Extension;
-		}
 	} // namespace
 
 	void EditorMaterialDetailsPanel::DrawContents(const PulseForge::Project* ProjectValue,
@@ -47,7 +41,7 @@ namespace PulseForgeEditor
 		}
 
 		const auto Asset = ProjectValue->GetAssetRegistry().Find(*SelectedAsset);
-		if (!Asset || NormalizedExtension(Asset->ProjectRelativePath) != ".material")
+		if (!Asset || !PulseForge::HasAssetTypeExtension(Asset->ProjectRelativePath, PulseForge::AssetFileType::Material))
 		{
 			SelectedAsset.reset();
 			Style.EmptyState(EditorIcon::Warning, "The material is no longer registered. Refresh the Content Browser and select it again.");

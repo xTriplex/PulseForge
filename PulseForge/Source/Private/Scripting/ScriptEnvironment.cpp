@@ -1,5 +1,5 @@
-#include "ScriptEnvironment.h"
-#include "ScriptRuntimeInternal.h"
+#include "Scripting/ScriptEnvironment.h"
+#include "Scripting/ScriptRuntimeInternal.h"
 
 #include "Assets/PrefabAssetService.h"
 #include "Assets/Project.h"
@@ -310,7 +310,8 @@ namespace PulseForge::ScriptEnvironment
 			bool Found = false;
 			{
 				const auto FoundEntity = Instance->SourceScene->FindEntity(*Identifier);
-				if (FoundEntity)
+				if (FoundEntity &&
+					!(Instance->Destroying && *Identifier == Instance->BoundEntity.GetUUID() && *FoundEntity != Instance->BoundEntity))
 				{
 					UserData->Value = *FoundEntity;
 					Found = true;

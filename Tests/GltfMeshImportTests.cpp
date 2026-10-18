@@ -30,7 +30,7 @@ namespace
 		PF_CHECK(Tests, !FileError);
 		if (FileError) return;
 
-		std::filesystem::path SourcePath = ModelDirectory / "Triangle.gltf";
+		std::filesystem::path SourcePath = ModelDirectory / "Triangle.GLTF";
 		const std::filesystem::path BufferPath = ModelDirectory / "Triangle.bin";
 		const std::string GltfDocument = R"({
 			"asset":{"version":"2.0"},
@@ -430,7 +430,7 @@ namespace
 		while (GlbBytes.size() % 4 != 0)
 			GlbBytes.push_back(std::byte{ 0 });
 
-		const std::filesystem::path GlbPath = ModelDirectory / "Triangle.glb";
+		const std::filesystem::path GlbPath = ModelDirectory / "Triangle.GLB";
 		{
 			std::ofstream Output(GlbPath, std::ios::binary | std::ios::trunc);
 			Output.write(reinterpret_cast<const char*>(GlbBytes.data()), static_cast<std::streamsize>(GlbBytes.size()));

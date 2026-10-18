@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <optional>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace PulseForgeEditor
@@ -20,18 +22,22 @@ namespace PulseForgeEditor
 
 		void Record(const Snapshot& State, size_t MaximumStates = 129)
 		{
+			static_assert(std::is_nothrow_move_constructible_v<Snapshot> && std::is_nothrow_move_assignable_v<Snapshot>,
+				"Snapshot history requires non-throwing moves after capacity is prepared");
 			if (m_States.empty())
 			{
 				Reset(State);
 				return;
 			}
+
+			Snapshot Candidate(State);
+			m_States.reserve(m_Cursor + 2);
 			if (m_Cursor + 1 < m_States.size())
 			{
-				if (m_SavedCursor && *m_SavedCursor > m_Cursor)
-					m_SavedCursor.reset();
 				m_States.resize(m_Cursor + 1);
 			}
-			m_States.push_back(State);
+			m_States.push_back(std::move(Candidate));
+			if (m_SavedCursor && *m_SavedCursor > m_Cursor) m_SavedCursor.reset();
 			m_Cursor = m_States.size() - 1;
 			const size_t StateLimit = (std::max)(MaximumStates, size_t{ 1 });
 			while (m_States.size() > StateLimit)
@@ -40,10 +46,8 @@ namespace PulseForgeEditor
 				--m_Cursor;
 				if (m_SavedCursor)
 				{
-					if (*m_SavedCursor == 0)
-						m_SavedCursor.reset();
-					else
-						--*m_SavedCursor;
+					if (*m_SavedCursor == 0) m_SavedCursor.reset();
+					else --*m_SavedCursor;
 				}
 			}
 		}

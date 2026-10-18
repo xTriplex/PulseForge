@@ -1,9 +1,9 @@
-#include "EditorViewportSceneRenderView.h"
+#include "Editor/EditorViewportSceneRenderView.h"
 
 #include "Assets/Project.h"
 #include "Core/Log.h"
 #include "Editor/EditorViewportPolicy.h"
-#include "EditorViewportCamera.h"
+#include "Editor/EditorViewportCamera.h"
 #include "Renderer/SceneRenderer.h"
 #include "Scene/Scene.h"
 
@@ -222,6 +222,13 @@ namespace PulseForgeEditor
 	void EditorViewportSceneRenderView::RefreshMaterialAssets() noexcept
 	{
 		if (m_SceneRenderer) m_SceneRenderer->RefreshMaterialAssets();
+	}
+
+	void EditorViewportSceneRenderView::RefreshProjectAssets() noexcept
+	{
+		if (!m_SceneRenderer) return;
+		m_SceneRenderer->RefreshProjectAssets();
+		InvalidatePreparedScene();
 	}
 
 	void EditorViewportSceneRenderView::ResetTarget() noexcept

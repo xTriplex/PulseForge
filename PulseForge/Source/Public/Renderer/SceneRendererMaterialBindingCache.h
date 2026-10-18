@@ -40,6 +40,7 @@ namespace PulseForge
 			const SceneMeshInstance& Instance, const std::optional<AssetID>& EnvironmentAsset) const;
 		[[nodiscard]] const BindingSet* FindEnvironmentBindings(const AssetID& EnvironmentAsset, bool IsReady) const;
 		void RefreshMaterialAssets() noexcept;
+		void RefreshProjectAssets() noexcept;
 
 	private:
 		struct MaterialConstants final

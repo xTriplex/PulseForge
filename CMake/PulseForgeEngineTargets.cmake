@@ -1,4 +1,5 @@
 add_library(PulseForgeCore STATIC
+	PulseForge/Source/Private/Core/BoundedInput.cpp
 	PulseForge/Source/Private/Core/Log.cpp
 	PulseForge/Source/Private/Core/Input.cpp
 	PulseForge/Source/Private/Core/Layer.cpp
@@ -148,13 +149,12 @@ add_library(PulseForgeRenderer STATIC
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanResourceObjects.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanPresentationResources.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanRenderer.cpp
+	PulseForge/Source/Private/Renderer/Vulkan/VulkanRendererShutdown.cpp
 	PulseForge/Source/Private/Renderer/Vulkan/VulkanSupport.cpp
 )
 target_include_directories(PulseForgeRenderer
 	PUBLIC PulseForge/Source/Public PulseForge/Vendor/glm
 	PRIVATE
-		PulseForge/Source
-		PulseForge/Source/Private
 		PulseForge/Vendor/Glfw/include
 		PulseForge/Vendor/Glad/include
 		PulseForge/Vendor/stb
@@ -187,7 +187,6 @@ target_precompile_headers(PulseForgeAssetImporters PRIVATE "${PULSEFORGE_ENGINE_
 add_library(PulseForgeApplication STATIC PulseForge/Source/Private/Core/Application.cpp)
 target_include_directories(PulseForgeApplication
 	PUBLIC PulseForge/Source/Public
-	PRIVATE PulseForge/Source PulseForge/Source/Private
 )
 target_compile_definitions(PulseForgeApplication PRIVATE PF_PLATFORM_WINDOWS)
 target_link_libraries(PulseForgeApplication PUBLIC PulseForgeCore PulseForgeRenderer PulseForgeWindow)
@@ -207,10 +206,7 @@ add_library(PulseForgeSceneRenderer STATIC
 )
 target_include_directories(PulseForgeSceneRenderer
 	PUBLIC PulseForge/Source/Public PulseForge/Vendor/glm
-	PRIVATE
-		PulseForge/Source
-		PulseForge/Source/Private
-		PulseForge/Vendor/json/include
+	PRIVATE PulseForge/Vendor/json/include
 )
 target_compile_definitions(PulseForgeSceneRenderer PRIVATE PF_PLATFORM_WINDOWS _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(PulseForgeSceneRenderer
@@ -226,8 +222,6 @@ target_include_directories(PulseForge
 	PUBLIC PulseForge/Source/Public
 		PulseForge/Vendor/glm
 	PRIVATE
-		PulseForge/Source
-		PulseForge/Source/Private
 		PulseForge/Vendor/entt/src
 		PulseForge/Vendor/json/include
 		PulseForge/Vendor/Glfw/include

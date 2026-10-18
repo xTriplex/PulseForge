@@ -1,5 +1,7 @@
 #include "Editor/EditorMainMenuPanel.h"
 
+#include "Assets/AssetTypes.h"
+
 #include "Editor/EditorStyle.h"
 
 #include <imgui.h>
@@ -90,7 +92,7 @@ namespace PulseForgeEditor
 				bool HasScenes = false;
 				for (const PulseForge::AssetRecord& Asset : State.Assets)
 				{
-					if (Asset.ProjectRelativePath.extension() != ".scene") continue;
+					if (!PulseForge::HasAssetTypeExtension(Asset.ProjectRelativePath, PulseForge::AssetFileType::Scene)) continue;
 					HasScenes = true;
 					const bool IsOpen = State.ActiveSceneAsset && *State.ActiveSceneAsset == Asset.ID;
 					const std::string Label = PathToUtf8(Asset.ProjectRelativePath.filename());

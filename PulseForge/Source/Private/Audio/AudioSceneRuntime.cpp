@@ -59,6 +59,7 @@ namespace PulseForge
 	{
 		struct Voice final
 		{
+			Entity BoundEntity;
 			AudioPlayback Playback;
 			AssetID AudioAsset;
 			float Volume = 1.0f;
@@ -101,11 +102,7 @@ namespace PulseForge
 			auto Playback = Engine.Play(*Clip, Description);
 			if (!Playback)
 				return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::PlaybackFailed, Playback.error().Message));
-			return Voice{
-				std::move(*Playback),
-				SourceComponent.AudioAsset,
-				SourceComponent.Volume,
-				SourceComponent.Looping,
+			return Voice{ EntityValue, std::move(*Playback), SourceComponent.AudioAsset, SourceComponent.Volume, SourceComponent.Looping,
 				SourceComponent.Spatialized };
 		}
 
@@ -228,7 +225,7 @@ namespace PulseForge
 		for (auto Iterator = m_Impl->Voices.begin(); Iterator != m_Impl->Voices.end();)
 		{
 			const auto EntityValue = Source.FindEntity(Iterator->first);
-			if (!EntityValue)
+			if (!EntityValue || *EntityValue != Iterator->second.BoundEntity)
 			{
 				Iterator = m_Impl->Voices.erase(Iterator);
 				continue;
@@ -327,6 +324,12 @@ namespace PulseForge
 		const auto Voice = m_Impl->Voices.find(Identifier);
 		if (Voice == m_Impl->Voices.end())
 			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::MissingPlayback, "Entity has no active audio playback"));
+		const auto EntityValue = m_Impl->Source->FindEntity(Identifier);
+		if (!EntityValue || *EntityValue != Voice->second.BoundEntity)
+		{
+			m_Impl->Voices.erase(Voice);
+			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::MissingPlayback, "Entity has no active audio playback"));
+		}
 		if (auto Result = Voice->second.Playback.Pause(); !Result)
 			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::PlaybackFailed, Result.error().Message));
 		return {};
@@ -339,6 +342,12 @@ namespace PulseForge
 		const auto Voice = m_Impl->Voices.find(Identifier);
 		if (Voice == m_Impl->Voices.end())
 			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::MissingPlayback, "Entity has no active audio playback"));
+		const auto EntityValue = m_Impl->Source->FindEntity(Identifier);
+		if (!EntityValue || *EntityValue != Voice->second.BoundEntity)
+		{
+			m_Impl->Voices.erase(Voice);
+			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::MissingPlayback, "Entity has no active audio playback"));
+		}
 		if (auto Result = Voice->second.Playback.Resume(); !Result)
 			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::PlaybackFailed, Result.error().Message));
 		return {};
@@ -351,6 +360,12 @@ namespace PulseForge
 		const auto Voice = m_Impl->Voices.find(Identifier);
 		if (Voice == m_Impl->Voices.end())
 			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::MissingPlayback, "Entity has no active audio playback"));
+		const auto EntityValue = m_Impl->Source->FindEntity(Identifier);
+		if (!EntityValue || *EntityValue != Voice->second.BoundEntity)
+		{
+			m_Impl->Voices.erase(Voice);
+			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::MissingPlayback, "Entity has no active audio playback"));
+		}
 		m_Impl->Voices.erase(Voice);
 		return {};
 	}

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Assets/AssetTypes.h"
+
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -20,10 +22,8 @@ namespace PulseForgeEditor
 	{
 		if (!Activated || !LeftDoubleClick)
 			return AssetBrowserOpenAction::None;
-		if (Extension == ".scene")
-			return AssetBrowserOpenAction::OpenScene;
-		if (Extension == ".material")
-			return AssetBrowserOpenAction::ShowMaterialDetails;
+		if (PulseForge::AssetExtensionsEqual(Extension, ".scene")) return AssetBrowserOpenAction::OpenScene;
+		if (PulseForge::AssetExtensionsEqual(Extension, ".material")) return AssetBrowserOpenAction::ShowMaterialDetails;
 		return AssetBrowserOpenAction::None;
 	}
 

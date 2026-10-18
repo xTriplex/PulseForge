@@ -1,9 +1,31 @@
 #include "TestEditorSupport.h"
-#include "EditorViewportSceneRenderView.h"
+#include "Assets/MaterialAsset.h"
+#include "Editor/EditorAssetPreviewService.h"
+#include "Editor/EditorViewportSceneRenderView.h"
 
+#include <chrono>
+#include <array>
+#include <fstream>
 #include <map>
 #include <memory>
+#include <stdexcept>
+#include <thread>
 #include <vector>
+
+namespace PulseForgeEditor
+{
+	struct EditorAssetPreviewServiceTestAccess
+	{
+		static void ThrowForOneAsset(EditorAssetPreviewService& Service) { Service.m_DecodeOverrideForTesting = &DecodeWithFailure; }
+
+	private:
+		static std::optional<EditorAssetPreviewService::CpuPreview> DecodeWithFailure(const EditorAssetPreviewService::Request& Work)
+		{
+			if (Work.AssetID == "decode-throws") throw std::runtime_error("injected preview decode failure");
+			return EditorAssetPreviewService::Decode(Work);
+		}
+	};
+} // namespace PulseForgeEditor
 
 namespace
 {
@@ -113,9 +135,11 @@ namespace
 			return std::unexpected(PulseForge::BufferUpdateError{ PulseForge::BufferUpdateErrorCode::BackendFailure, "unused" });
 		}
 		[[nodiscard]] PulseForge::TextureCreateResult CreateTexture(
-			const PulseForge::TextureDesc&, std::span<const PulseForge::TextureSubresourceData>) override
+			const PulseForge::TextureDesc& Description, std::span<const PulseForge::TextureSubresourceData>) override
 		{
-			return std::unexpected(PulseForge::TextureError{ PulseForge::TextureErrorCode::BackendFailure, "unused" });
+			++TextureCreations;
+			LastTextureLifetime = std::make_shared<FakeTextureLifetime>();
+			return PulseForge::TextureHandle(std::make_unique<FakeTexture>(Description, LastTextureLifetime));
 		}
 		[[nodiscard]] PulseForge::SamplerCreateResult CreateSampler(const PulseForge::SamplerDesc&) override
 		{
@@ -163,6 +187,7 @@ namespace
 		bool FailNextClearBegin = false;
 		bool FailNextClearEnd = false;
 		size_t RenderTargetCreations = 0;
+		size_t TextureCreations = 0;
 		size_t ClearBegins = 0;
 		size_t ClearEnds = 0;
 		std::shared_ptr<FakeTextureLifetime> LastTextureLifetime;
@@ -209,6 +234,279 @@ namespace
 		uint64_t NextID = 1;
 		std::map<uint64_t, std::weak_ptr<FakeTextureLifetime>> m_Textures;
 	};
+
+	bool WritePpm(const std::filesystem::path& Path, uint32_t Width, uint32_t Height)
+	{
+		std::ofstream Output(Path, std::ios::binary | std::ios::trunc);
+		if (!Output) return false;
+		Output << "P6\n" << Width << ' ' << Height << "\n255\n";
+		for (uint64_t Pixel = 0; Pixel < static_cast<uint64_t>(Width) * Height; ++Pixel)
+		{
+			constexpr std::array<char, 3> Color{ 90, 100, 110 };
+			Output.write(Color.data(), static_cast<std::streamsize>(Color.size()));
+		}
+		return Output.good();
+	}
+
+	std::filesystem::path MakePreviewTestRoot(TestRunner& Tests, std::string_view Name)
+	{
+		std::error_code Error;
+		const auto Identifier = PulseForge::UUID::Generate();
+		PF_CHECK(Tests, Identifier.has_value());
+		if (!Identifier) return {};
+		const std::filesystem::path Root = std::filesystem::temp_directory_path(Error) /
+										   (std::string("PulseForgePreview-") + std::string(Name) + "-" + Identifier->ToString());
+		PF_CHECK(Tests, !Error);
+		if (Error) return {};
+		std::filesystem::create_directories(Root, Error);
+		PF_CHECK(Tests, !Error);
+		return Error ? std::filesystem::path{} : Root;
+	}
+
+	template <typename Predicate>
+	bool WaitForPreviewState(PulseForgeEditor::EditorAssetPreviewService& Previews, Predicate&& IsReady, bool Pump)
+	{
+		const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+		while (std::chrono::steady_clock::now() < Deadline)
+		{
+			if (Pump) Previews.PumpUploads();
+			if (IsReady(Previews.GetStats())) return true;
+			std::this_thread::yield();
+		}
+		return false;
+	}
+
+	void TestPreviewStatisticsWhileWorkerDecodes(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+
+		const auto Identifier = UUID::Generate();
+		PF_CHECK(Tests, Identifier.has_value());
+		if (!Identifier) return;
+		std::error_code FileError;
+		const std::filesystem::path TemporaryRoot =
+			std::filesystem::temp_directory_path(FileError) / ("PulseForgePreviewStatistics-" + Identifier->ToString());
+		PF_CHECK(Tests, !FileError);
+		if (FileError) return;
+		std::filesystem::create_directories(TemporaryRoot, FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError) return;
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} CleanupTemporary{ TemporaryRoot };
+
+		const std::filesystem::path MaterialPath = TemporaryRoot / "preview.material";
+		MaterialAssetDesc Description;
+		const auto Serialized = MaterialAssetSerializer::Serialize(Description);
+		PF_CHECK(Tests, Serialized.has_value());
+		if (!Serialized) return;
+		{
+			std::ofstream Output(MaterialPath, std::ios::binary | std::ios::trunc);
+			Output.write(Serialized->data(), static_cast<std::streamsize>(Serialized->size()));
+			const std::string Padding(256u * 1024u, ' ');
+			Output.write(Padding.data(), static_cast<std::streamsize>(Padding.size()));
+			PF_CHECK(Tests, Output.good());
+			if (!Output.good()) return;
+		}
+
+		FakeRenderDevice Runtime;
+		FakeTextureRegistry Registry;
+		EditorAssetPreviewService Previews;
+		AssetPreviewServiceLimits Limits;
+		Limits.MaximumQueuedRequests = 48;
+		Limits.MaximumCpuBytes = 1024;
+		Previews.Initialize(Runtime, Registry, Limits);
+		const std::string ProjectID = "preview-statistics-project";
+		Previews.SetProject(ProjectID);
+		constexpr size_t RequestCount = 40;
+		for (size_t Index = 0; Index < RequestCount; ++Index)
+			Previews.RequestMaterialSwatch(ProjectID, "asset-" + std::to_string(Index), MaterialPath);
+
+		bool MonotonicPeak = true;
+		size_t PreviousPeak = 0;
+		const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+		while (std::chrono::steady_clock::now() < Deadline)
+		{
+			const AssetPreviewStats Stats = Previews.GetStats();
+			if (Stats.PeakQueuedResultCpuBytes < PreviousPeak) MonotonicPeak = false;
+			PreviousPeak = Stats.PeakQueuedResultCpuBytes;
+			if (Stats.PeakQueuedResultCpuBytes == RequestCount * 4 && Stats.PendingRequests == 0) break;
+			std::this_thread::yield();
+		}
+		const AssetPreviewStats FinalStats = Previews.GetStats();
+		PF_CHECK(Tests, MonotonicPeak);
+		PF_CHECK(Tests, FinalStats.PendingRequests == 0);
+		PF_CHECK(Tests, FinalStats.PeakQueuedResultCpuBytes == RequestCount * 4);
+		Previews.Shutdown();
+	}
+
+	void TestPreviewOversizedResultDoesNotBlockWorker(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		const std::filesystem::path Root = MakePreviewTestRoot(Tests, "Oversized");
+		if (Root.empty()) return;
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} CleanupTemporary{ Root };
+
+		const std::filesystem::path LargeImage = Root / "large.PPM";
+		const std::filesystem::path SmallImage = Root / "small.ppm";
+		PF_CHECK(Tests, WritePpm(LargeImage, 8, 8));
+		PF_CHECK(Tests, WritePpm(SmallImage, 1, 1));
+
+		FakeRenderDevice Runtime;
+		FakeTextureRegistry Registry;
+		EditorAssetPreviewService Previews;
+		AssetPreviewServiceLimits Limits;
+		Limits.MaximumCpuBytes = 4;
+		Limits.MaximumUploadBytesPerUpdate = 4;
+		Previews.Initialize(Runtime, Registry, Limits);
+		Previews.SetProject("oversized-result-project");
+		Previews.RequestImage("oversized-result-project", "large", LargeImage);
+		Previews.RequestImage("oversized-result-project", "small", SmallImage);
+
+		const bool SmallCompleted = WaitForPreviewState(
+			Previews, [&](const AssetPreviewStats&) { return Previews.FindPreview("oversized-result-project", "small").has_value(); },
+			true);
+		PF_CHECK(Tests, SmallCompleted);
+		const AssetPreviewStats Stats = Previews.GetStats();
+		PF_CHECK(Tests, !Stats.WorkerFailed);
+		PF_CHECK(Tests, Stats.FailedEntries == 1 && Stats.ReadyEntries == 1);
+		PF_CHECK(Tests, Stats.DecodesFailed == 1 && Stats.DecodesSucceeded == 1);
+		PF_CHECK(Tests, Stats.PeakQueuedResultCpuBytes <= Limits.MaximumCpuBytes);
+		PF_CHECK(Tests, !Previews.FindPreview("oversized-result-project", "large").has_value());
+		Previews.Shutdown();
+	}
+
+	void TestPreviewBudgetWaitInvalidationAndShutdown(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		const std::filesystem::path Root = MakePreviewTestRoot(Tests, "WaitRelease");
+		if (Root.empty()) return;
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} CleanupTemporary{ Root };
+		const std::filesystem::path SmallImage = Root / "small.ppm";
+		PF_CHECK(Tests, WritePpm(SmallImage, 1, 1));
+
+		FakeRenderDevice Runtime;
+		FakeTextureRegistry Registry;
+		EditorAssetPreviewService Previews;
+		AssetPreviewServiceLimits Limits;
+		Limits.MaximumCpuBytes = 4;
+		Limits.MaximumUploadBytesPerUpdate = 4;
+		Previews.Initialize(Runtime, Registry, Limits);
+		Previews.SetProject("blocked-project");
+		Previews.RequestImage("blocked-project", "queued-result", SmallImage);
+		Previews.RequestImage("blocked-project", "blocked-worker", SmallImage);
+		const bool WorkerBlocked = WaitForPreviewState(
+			Previews, [&](const AssetPreviewStats& Stats)
+			{ return Stats.QueuedResultCpuBytes == 4 && Stats.CpuBudgetWaits > 0 && Stats.PendingRequests == 0; }, false);
+		PF_CHECK(Tests, WorkerBlocked);
+
+		Previews.SetProject("replacement-project");
+		Previews.RequestImage("replacement-project", "current-project", SmallImage);
+		const bool CurrentProjectCompleted = WaitForPreviewState(
+			Previews, [&](const AssetPreviewStats&) { return Previews.FindPreview("replacement-project", "current-project").has_value(); },
+			true);
+		PF_CHECK(Tests, CurrentProjectCompleted);
+		PF_CHECK(Tests, !Previews.FindPreview("blocked-project", "queued-result").has_value());
+		PF_CHECK(Tests, Previews.GetStats().StaleResultsDiscarded > 0);
+		Previews.Shutdown();
+
+		FakeRenderDevice ShutdownRuntime;
+		FakeTextureRegistry ShutdownRegistry;
+		EditorAssetPreviewService ShutdownPreviews;
+		ShutdownPreviews.Initialize(ShutdownRuntime, ShutdownRegistry, Limits);
+		ShutdownPreviews.SetProject("shutdown-project");
+		ShutdownPreviews.RequestImage("shutdown-project", "queued-result", SmallImage);
+		ShutdownPreviews.RequestImage("shutdown-project", "blocked-worker", SmallImage);
+		const bool ShutdownWorkerBlocked = WaitForPreviewState(
+			ShutdownPreviews, [&](const AssetPreviewStats& Stats)
+			{ return Stats.QueuedResultCpuBytes == 4 && Stats.CpuBudgetWaits > 0 && Stats.PendingRequests == 0; }, false);
+		PF_CHECK(Tests, ShutdownWorkerBlocked);
+		const auto ShutdownStart = std::chrono::steady_clock::now();
+		ShutdownPreviews.Shutdown();
+		PF_CHECK(Tests, std::chrono::steady_clock::now() - ShutdownStart < std::chrono::seconds(5));
+	}
+
+	void TestPreviewZeroBudgetsAndDecodeException(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		const std::filesystem::path Root = MakePreviewTestRoot(Tests, "ZeroAndException");
+		if (Root.empty()) return;
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} CleanupTemporary{ Root };
+		const std::filesystem::path SmallImage = Root / "small.PPM";
+		PF_CHECK(Tests, WritePpm(SmallImage, 1, 1));
+
+		const auto RunZeroBudget = [&](AssetPreviewServiceLimits Limits, std::string_view ProjectID)
+		{
+			FakeRenderDevice Runtime;
+			FakeTextureRegistry Registry;
+			EditorAssetPreviewService Previews;
+			Previews.Initialize(Runtime, Registry, Limits);
+			Previews.SetProject(std::string(ProjectID));
+			Previews.RequestImage(ProjectID, "zero-budget", SmallImage);
+			const bool Failed =
+				WaitForPreviewState(Previews, [](const AssetPreviewStats& Stats) { return Stats.FailedEntries == 1; }, true);
+			PF_CHECK(Tests, Failed);
+			PF_CHECK(Tests, !Previews.GetStats().WorkerFailed);
+			PF_CHECK(Tests, !Previews.FindPreview(ProjectID, "zero-budget").has_value());
+			Previews.Shutdown();
+		};
+		AssetPreviewServiceLimits ZeroCpu;
+		ZeroCpu.MaximumCpuBytes = 0;
+		RunZeroBudget(ZeroCpu, "zero-cpu-project");
+		AssetPreviewServiceLimits ZeroUploads;
+		ZeroUploads.MaximumUploadsPerUpdate = 0;
+		RunZeroBudget(ZeroUploads, "zero-count-project");
+		AssetPreviewServiceLimits ZeroUploadBytes;
+		ZeroUploadBytes.MaximumUploadBytesPerUpdate = 0;
+		RunZeroBudget(ZeroUploadBytes, "zero-upload-bytes-project");
+
+		FakeRenderDevice Runtime;
+		FakeTextureRegistry Registry;
+		EditorAssetPreviewService Previews;
+		Previews.Initialize(Runtime, Registry);
+		EditorAssetPreviewServiceTestAccess::ThrowForOneAsset(Previews);
+		Previews.SetProject("decode-exception-project");
+		Previews.RequestImage("decode-exception-project", "decode-throws", SmallImage);
+		Previews.RequestImage("decode-exception-project", "decode-recovers", SmallImage);
+		const bool Recovered = WaitForPreviewState(
+			Previews, [&](const AssetPreviewStats&)
+			{ return Previews.FindPreview("decode-exception-project", "decode-recovers").has_value(); }, true);
+		PF_CHECK(Tests, Recovered);
+		PF_CHECK(Tests, Previews.GetStats().FailedEntries == 1);
+		PF_CHECK(Tests, !Previews.GetStats().WorkerFailed);
+		Previews.Shutdown();
+	}
 
 #ifdef PF_EDITOR_RENDERER_OPENGL
 	void TestOpenGLSceneViewportFallback(TestRunner& Tests)
@@ -315,6 +613,10 @@ namespace
 
 void RunEditorViewportSceneRenderViewTests(TestRunner& Tests)
 {
+	TestPreviewStatisticsWhileWorkerDecodes(Tests);
+	TestPreviewOversizedResultDoesNotBlockWorker(Tests);
+	TestPreviewBudgetWaitInvalidationAndShutdown(Tests);
+	TestPreviewZeroBudgetsAndDecodeException(Tests);
 #ifdef PF_EDITOR_RENDERER_OPENGL
 	TestOpenGLSceneViewportFallback(Tests);
 #else

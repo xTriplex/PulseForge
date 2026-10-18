@@ -1,5 +1,7 @@
 #include "TestEditorSupport.h"
-#include "EditorViewportCamera.h"
+
+#include "Assets/AssetTypes.h"
+#include "Editor/EditorViewportCamera.h"
 #include "Editor/EditorViewportPolicy.h"
 #include "Editor/EditorViewportToolState.h"
 
@@ -22,8 +24,8 @@ namespace
 		const auto FindGltfAsset = [](const Project& OpenProject) -> std::optional<AssetRecord>
 		{
 			const auto Assets = OpenProject.GetAssetRegistry().GetAssets();
-			const auto Found = std::find_if(
-				Assets.begin(), Assets.end(), [](const AssetRecord& Asset) { return Asset.ProjectRelativePath.extension() == ".gltf"; });
+			const auto Found = std::find_if(Assets.begin(), Assets.end(),
+				[](const AssetRecord& Asset) { return HasAssetTypeExtension(Asset.ProjectRelativePath, AssetFileType::Mesh); });
 			return Found == Assets.end() ? std::nullopt : std::optional<AssetRecord>(*Found);
 		};
 		const auto FirstMesh = FindGltfAsset(*FirstProject);
@@ -40,7 +42,7 @@ namespace
 
 		const auto FirstProjectAssets = FirstProject->GetAssetRegistry().GetAssets();
 		const auto NonMeshAsset = std::find_if(FirstProjectAssets.begin(), FirstProjectAssets.end(),
-			[](const AssetRecord& Asset) { return Asset.ProjectRelativePath.extension() == ".material"; });
+			[](const AssetRecord& Asset) { return HasAssetTypeExtension(Asset.ProjectRelativePath, AssetFileType::Material); });
 		PF_CHECK(Tests, NonMeshAsset != FirstProjectAssets.end());
 		if (NonMeshAsset != FirstProjectAssets.end())
 		{
@@ -71,6 +73,99 @@ namespace
 		PF_CHECK(Tests, Cache.GetGeometryCount() == 1 && Cache.GetFailureCount() == 0);
 		Cache.Clear();
 		PF_CHECK(Tests, Cache.GetGeometryCount() == 0 && Cache.GetFailureCount() == 0);
+	}
+
+	void TestEditorMeshPickingCacheTracksProjectRefresh(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		const std::filesystem::path RepositoryRoot = std::filesystem::path(__FILE__).parent_path().parent_path();
+		const std::filesystem::path SourceProjectRoot = RepositoryRoot / "Samples" / "VisualValidation" / "PBRMaterials";
+		const auto FixtureID = UUID::Generate();
+		PF_CHECK(Tests, FixtureID.has_value());
+		if (!FixtureID) return;
+
+		const std::filesystem::path FixtureRoot =
+			std::filesystem::temp_directory_path() / ("PulseForgePickingRefresh-" + FixtureID->ToString());
+		struct FixtureCleanup final
+		{
+			std::filesystem::path Root;
+			~FixtureCleanup()
+			{
+				std::error_code CleanupError;
+				std::filesystem::remove_all(Root, CleanupError);
+			}
+		} Cleanup{ FixtureRoot };
+		std::error_code Error;
+		std::filesystem::create_directories(FixtureRoot, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+
+		const std::filesystem::path FixtureProjectFile = FixtureRoot / "PBRMaterials.pfproj";
+		std::filesystem::copy_file(SourceProjectRoot / FixtureProjectFile.filename(), FixtureProjectFile, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		std::filesystem::copy(SourceProjectRoot / "Assets", FixtureRoot / "Assets", std::filesystem::copy_options::recursive, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+
+		auto FixtureProject = Project::Open(FixtureProjectFile);
+		PF_CHECK(Tests, FixtureProject.has_value());
+		if (!FixtureProject) return;
+		const auto Assets = FixtureProject->GetAssetRegistry().GetAssets();
+		const auto Mesh = std::find_if(Assets.begin(), Assets.end(),
+			[](const AssetRecord& Asset) { return Asset.ProjectRelativePath.filename() == "PbrTestCube.gltf"; });
+		PF_CHECK(Tests, Mesh != Assets.end());
+		if (Mesh == Assets.end()) return;
+
+		const std::filesystem::path MeshPath = FixtureProject->GetRootPath() / Mesh->ProjectRelativePath;
+		const std::filesystem::path OriginalMeshBackup = FixtureRoot / "PbrTestCube.original.gltf";
+		std::filesystem::copy_file(MeshPath, OriginalMeshBackup, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const std::filesystem::path AlternateMesh =
+			RepositoryRoot / "Samples" / "VisualValidation" / "PointLightShadows" / "Assets" / "Models" / "ShadowDemoCube.gltf";
+
+		EditorMeshPickingCache Cache;
+		const auto OriginalGeometry = Cache.Get(*FixtureProject, Mesh->ID);
+		PF_CHECK(Tests, OriginalGeometry && (*OriginalGeometry)->Positions.size() == 24);
+		if (!OriginalGeometry) return;
+		const EditorMeshPickingGeometry OriginalGeometrySnapshot = **OriginalGeometry;
+		const auto SameGeometry = [](const EditorMeshPickingGeometry& First, const EditorMeshPickingGeometry& Second)
+		{
+			if (First.Indices != Second.Indices || First.Positions.size() != Second.Positions.size()) return false;
+			for (size_t Index = 0; Index < First.Positions.size(); ++Index)
+			{
+				const glm::vec3& A = First.Positions[Index];
+				const glm::vec3& B = Second.Positions[Index];
+				if (A.x != B.x || A.y != B.y || A.z != B.z) return false;
+			}
+			return true;
+		};
+
+		std::filesystem::copy_file(AlternateMesh, MeshPath, std::filesystem::copy_options::overwrite_existing, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const auto Rebuilt = FixtureProject->GetAssetRegistry().Rebuild(FixtureProject->GetRootPath());
+		PF_CHECK(Tests, Rebuilt.has_value());
+		if (!Rebuilt) return;
+		const auto CachedOldGeometry = Cache.Get(*FixtureProject, Mesh->ID);
+		PF_CHECK(Tests, CachedOldGeometry && (*CachedOldGeometry)->Positions.size() == 24);
+
+		Cache.Clear();
+		const auto RefreshedGeometry = Cache.Get(*FixtureProject, Mesh->ID);
+		PF_CHECK(Tests, RefreshedGeometry && !SameGeometry(**RefreshedGeometry, OriginalGeometrySnapshot));
+		PF_CHECK(Tests, Cache.GetGeometryCount() == 1 && Cache.GetFailureCount() == 0);
+
+		std::filesystem::copy_file(OriginalMeshBackup, MeshPath, std::filesystem::copy_options::overwrite_existing, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const auto RestoredRegistry = FixtureProject->GetAssetRegistry().Rebuild(FixtureProject->GetRootPath());
+		PF_CHECK(Tests, RestoredRegistry.has_value());
+		if (!RestoredRegistry) return;
+		Cache.Clear();
+		const auto RestoredGeometry = Cache.Get(*FixtureProject, Mesh->ID);
+		PF_CHECK(Tests, RestoredGeometry && SameGeometry(**RestoredGeometry, OriginalGeometrySnapshot));
 	}
 
 	void TestEditorViewportMath(TestRunner& Tests)
@@ -595,6 +690,7 @@ namespace
 void RunEditorViewportTests(TestRunner& Tests)
 {
 	TestEditorMeshPickingCache(Tests);
+	TestEditorMeshPickingCacheTracksProjectRefresh(Tests);
 	TestEditorViewportMath(Tests);
 	TestEditorViewportTargetExtent(Tests);
 	TestEditorViewportInitializationRetry(Tests);

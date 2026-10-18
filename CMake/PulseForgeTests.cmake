@@ -1,6 +1,16 @@
 if(BUILD_TESTING)
 	if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 		(PULSEFORGE_BUILD_EDITOR AND PULSEFORGE_EDITOR_RENDERER STREQUAL "Vulkan"))
+		add_test(NAME PulseForge.RuntimeAssetDeployment
+			COMMAND "${CMAKE_COMMAND}"
+				"-DPULSEFORGE_FIXTURE_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/Tests/CMake/RuntimeAssetDeploymentFixture"
+				"-DPULSEFORGE_TEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/Tests/RuntimeAssetDeployment"
+				"-DPULSEFORGE_TEST_GENERATOR=${CMAKE_GENERATOR}"
+				"-DPULSEFORGE_TEST_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+				"-DPULSEFORGE_TEST_GENERATOR_TOOLSET=${CMAKE_GENERATOR_TOOLSET}"
+				"-DPULSEFORGE_TEST_CONFIGURATION=$<CONFIG>"
+				"-DPULSEFORGE_DEPLOYMENT_MODULE=${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeAssetDeployment.cmake"
+				-P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/CMake/TestRuntimeAssetDeployment.cmake")
 		add_test(NAME PulseForge.ShaderDeployment
 			COMMAND "${CMAKE_COMMAND}"
 				"-DPULSEFORGE_FIXTURE_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/Tests/CMake/ShaderDeploymentFixture"
@@ -27,7 +37,7 @@ if(BUILD_TESTING)
 	)
 	target_include_directories(PulseForgeRendererTests PRIVATE Tests)
 	target_compile_definitions(PulseForgeRendererTests PRIVATE PF_PLATFORM_WINDOWS)
-	target_link_libraries(PulseForgeRendererTests PRIVATE PulseForgeRenderer)
+	target_link_libraries(PulseForgeRendererTests PRIVATE PulseForgeRenderer nvrhi Vulkan-Headers)
 	add_test(NAME PulseForge.Renderer COMMAND PulseForgeRendererTests)
 
 	add_executable(PulseForgeRenderMathTests
@@ -159,13 +169,22 @@ if(BUILD_TESTING)
 		Tests/EditorViewportGizmoGeometryTests.cpp
 		Tests/EditorViewportGizmoInteractionTests.cpp
 	)
-	target_include_directories(PulseForgeEditorCoreTests PRIVATE Tests PulseForgeEditor/Source/Private)
+	target_include_directories(PulseForgeEditorCoreTests PRIVATE Tests)
 	target_compile_definitions(PulseForgeEditorCoreTests PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorCoreTests PRIVATE PulseForgeCore PulseForgeEditorCore)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeEditorCoreTests PulseForgePublicHeaderChecks)
 	endif()
 	add_test(NAME PulseForge.EditorCore COMMAND PulseForgeEditorCoreTests)
+
+	add_executable(PulseForgeCommandHistoryFailureTests Tests/EditorCommandHistoryFailureTests.cpp)
+	target_include_directories(PulseForgeCommandHistoryFailureTests PRIVATE PulseForgeEditor/Source/Public)
+	if(MSVC)
+		# This isolated allocator-failure executable replaces global new/delete to inject failures.
+		# Keep it on the non-debug CRT so MSVC's debug-heap diagnostics do not intercept that probe.
+		set_property(TARGET PulseForgeCommandHistoryFailureTests PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
+	endif()
+	add_test(NAME PulseForge.CommandHistoryFailures COMMAND PulseForgeCommandHistoryFailureTests)
 
 	if(PULSEFORGE_BUILD_EDITOR)
 		set(PULSEFORGE_EDITOR_INTEGRATION_LIBRARIES
@@ -197,7 +216,6 @@ if(BUILD_TESTING)
 		target_include_directories(PulseForgeEditorTests PRIVATE
 			Tests
 			PulseForgeEditor/Source/Public
-			PulseForgeEditor/Source/Private
 			PulseForge/Vendor/json/include
 		)
 		target_compile_definitions(PulseForgeEditorTests PRIVATE PF_PLATFORM_WINDOWS)
@@ -217,7 +235,6 @@ if(BUILD_TESTING)
 		target_include_directories(PulseForgeEditorWorkspacePresentationTests PRIVATE
 			Tests
 			PulseForgeEditor/Source/Public
-			PulseForgeEditor/Source/Private
 			PulseForge/Vendor/json/include
 		)
 		target_compile_definitions(PulseForgeEditorWorkspacePresentationTests PRIVATE PF_PLATFORM_WINDOWS)
@@ -248,6 +265,7 @@ if(BUILD_TESTING)
 		PulseForgeAudioRuntimeTests
 		PulseForgeScriptingRuntimeTests
 		PulseForgeEditorCoreTests
+		PulseForgeCommandHistoryFailureTests
 		PulseForgeBufferUpdateTests
 	)
 	if(PULSEFORGE_BUILD_EDITOR)

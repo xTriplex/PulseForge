@@ -1,4 +1,5 @@
 #include "Assets/GltfMeshImporter.h"
+#include "Assets/AssetTypes.h"
 #include "Assets/AssetPathResolver.h"
 
 #include <nlohmann/json.hpp>
@@ -1136,12 +1137,7 @@ namespace PulseForge
 
 		bool HasExtension(const std::filesystem::path& Path, std::string_view Extension)
 		{
-			std::string Actual = PathToUtf8(Path.extension());
-			std::transform(Actual.begin(), Actual.end(), Actual.begin(), [](unsigned char Character)
-			{
-				return static_cast<char>(std::tolower(Character));
-			});
-			return Actual == Extension;
+			return HasAssetExtension(Path, { Extension });
 		}
 	}
 

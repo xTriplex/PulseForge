@@ -118,7 +118,7 @@ namespace
 			PF_CHECK(Tests, !Engine.SetListenerDirection({ 0.0f, 0.0f, 0.0f }));
 
 			AssetRegistry& Registry = AudioProject->GetAssetRegistry();
-			auto Imported = AssetOperations::CreateAssetFromBytes(Registry, ProjectRoot, WaveData, "Assets/Audio/test.wav");
+			auto Imported = AssetOperations::CreateAssetFromBytes(Registry, ProjectRoot, WaveData, "Assets/Audio/test.WAV");
 			PF_CHECK(Tests, Imported.has_value());
 			if (!Imported) return;
 
@@ -129,13 +129,13 @@ namespace
 			const auto CachedAgain = Cache.GetOrLoad(Imported->ID);
 			PF_CHECK(Tests, CachedAgain && Cache.GetLoadedCount() == 1);
 
-			const auto Moved = AssetOperations::Move(Registry, ProjectRoot, Imported->ID, "Assets/Audio/renamed.wav");
+			const auto Moved = AssetOperations::Move(Registry, ProjectRoot, Imported->ID, "Assets/Audio/renamed.WAV");
 			PF_CHECK(Tests, Moved && Moved->ID == Imported->ID);
 			Cache.Clear();
 			const auto LoadedAfterMove = Cache.GetOrLoad(Imported->ID);
 			PF_CHECK(Tests, LoadedAfterMove && LoadedAfterMove->IsValid());
 			const auto MovedRecord = Registry.Find(Imported->ID);
-			PF_CHECK(Tests, MovedRecord && MovedRecord->ProjectRelativePath == "Assets/Audio/renamed.wav");
+			PF_CHECK(Tests, MovedRecord && MovedRecord->ProjectRelativePath == "Assets/Audio/renamed.WAV");
 
 			Scene AudioScene;
 			auto EmitterResult = AudioScene.CreateEntity("Audio emitter and listener");
@@ -197,6 +197,39 @@ end
 			PF_CHECK(Tests, Runtime.Advance(AudioScene).has_value() && Runtime.GetPlaybackCount() == 0);
 			Runtime.Stop();
 			PF_CHECK(Tests, !Runtime.IsRunning());
+
+			Scene ReusedEmitterScene;
+			const UUID ReusedEmitterID{ 0x5300000000000000ull, 8 };
+			const auto OriginalEmitter = ReusedEmitterScene.CreateEntityWithUUID(ReusedEmitterID, "Original emitter incarnation");
+			PF_CHECK(Tests, OriginalEmitter.has_value());
+			if (!OriginalEmitter) return;
+			AudioSourceComponent ReusedEmitterSource;
+			ReusedEmitterSource.AudioAsset = Imported->ID;
+			ReusedEmitterSource.PlayOnStart = true;
+			ReusedEmitterSource.Spatialized = false;
+			PF_CHECK(Tests, OriginalEmitter->SetAudioSource(ReusedEmitterSource).has_value());
+			AudioSceneRuntime ReusedEmitterRuntime(Engine, Cache);
+			PF_CHECK(Tests, ReusedEmitterRuntime.Start(ReusedEmitterScene).has_value());
+			PF_CHECK(Tests, ReusedEmitterRuntime.GetPlaybackCount() == 1);
+			PF_CHECK(Tests, ReusedEmitterScene.DestroyEntity(*OriginalEmitter).has_value());
+			const auto ReplacementEmitter = ReusedEmitterScene.CreateEntityWithUUID(ReusedEmitterID, "Replacement emitter incarnation");
+			PF_CHECK(Tests, ReplacementEmitter.has_value());
+			if (!ReplacementEmitter) return;
+			PF_CHECK(Tests, ReplacementEmitter->SetAudioSource(ReusedEmitterSource).has_value());
+			PF_CHECK(Tests, ReusedEmitterRuntime.Advance(ReusedEmitterScene).has_value());
+			PF_CHECK(Tests, ReusedEmitterRuntime.GetPlaybackCount() == 0);
+			const auto StalePause = ReusedEmitterRuntime.Pause(ReusedEmitterID);
+			PF_CHECK(Tests, !StalePause && StalePause.error().Code == AudioSceneRuntimeErrorCode::MissingPlayback);
+			PF_CHECK(Tests, ReusedEmitterRuntime.GetPlaybackCount() == 0);
+			const auto StaleResume = ReusedEmitterRuntime.Resume(ReusedEmitterID);
+			PF_CHECK(Tests, !StaleResume && StaleResume.error().Code == AudioSceneRuntimeErrorCode::MissingPlayback);
+			PF_CHECK(Tests, ReusedEmitterRuntime.Play(ReusedEmitterID).has_value());
+			PF_CHECK(Tests, ReusedEmitterRuntime.GetPlaybackCount() == 1);
+			PF_CHECK(Tests, ReusedEmitterRuntime.Pause(ReusedEmitterID).has_value());
+			PF_CHECK(Tests, ReusedEmitterRuntime.Resume(ReusedEmitterID).has_value());
+			PF_CHECK(Tests, ReusedEmitterRuntime.StopPlayback(ReusedEmitterID).has_value());
+			PF_CHECK(Tests, ReusedEmitterRuntime.GetPlaybackCount() == 0);
+			ReusedEmitterRuntime.Stop();
 
 			Scene PartialStartScene;
 			const UUID ValidEmitterId{ 0x5300000000000000ull, 1 };

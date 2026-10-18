@@ -1,4 +1,5 @@
 #include "Assets/AssetOperations.h"
+#include "Assets/AssetTypes.h"
 
 #include "Assets/AssetMetadata.h"
 
@@ -112,7 +113,7 @@ namespace PulseForge
 		bool IsValidProjectAssetPath(const FilesystemPath& Path)
 		{
 			if (Path.empty() || Path.is_absolute() || Path.has_root_name() || Path.has_root_directory() ||
-				Path.lexically_normal() != Path || Path.extension() == ".meta")
+				Path.lexically_normal() != Path || IsMetadataSidecarPath(Path))
 			{
 				return false;
 			}
@@ -143,8 +144,7 @@ namespace PulseForge
 			size_t ComponentCount = 0;
 			for (const FilesystemPath& Component : Path)
 			{
-				if (Component.empty() || Component == "." || Component == ".." || Component == ".meta")
-					return false;
+				if (Component.empty() || Component == "." || Component == ".." || IsReservedMetadataComponent(Component)) return false;
 				if (IsFirstComponent && Component != "Assets")
 					return false;
 				IsFirstComponent = false;
