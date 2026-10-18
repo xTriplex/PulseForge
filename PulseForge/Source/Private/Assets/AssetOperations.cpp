@@ -302,38 +302,33 @@ namespace PulseForge
 				return std::unexpected("could not read glTF dependency list within the importer limit");
 			}
 
-			std::ifstream Input(SourcePath, std::ios::binary);
-			if (!Input) return std::unexpected("could not open glTF dependency source");
-			std::string Text(static_cast<size_t>(FileSize), '\0');
-			if (!Text.empty()) Input.read(Text.data(), static_cast<std::streamsize>(Text.size()));
-			if (!Input || Input.bad()) return std::unexpected("could not read glTF dependency source completely");
+			std::string Text;
 			if (IsGlb)
 			{
-				const auto ReadUInt32 = [&Text](size_t Offset, uint32_t& Value)
+				std::ifstream Input(SourcePath, std::ios::binary);
+				if (!Input) return std::unexpected("could not open glTF dependency source");
+				const auto ReadRange = [&Input](uint64_t Offset, std::span<std::byte> Output)
 				{
-					if (Offset > Text.size() || Text.size() - Offset < sizeof(uint32_t)) return false;
-					Value = static_cast<uint32_t>(static_cast<unsigned char>(Text[Offset])) |
-							(static_cast<uint32_t>(static_cast<unsigned char>(Text[Offset + 1])) << 8) |
-							(static_cast<uint32_t>(static_cast<unsigned char>(Text[Offset + 2])) << 16) |
-							(static_cast<uint32_t>(static_cast<unsigned char>(Text[Offset + 3])) << 24);
-					return true;
+					if (Offset > static_cast<uint64_t>(std::numeric_limits<std::streamoff>::max()) ||
+						Output.size() > static_cast<size_t>(std::numeric_limits<std::streamsize>::max()))
+						return false;
+					Input.clear();
+					Input.seekg(static_cast<std::streamoff>(Offset), std::ios::beg);
+					if (!Input) return false;
+					if (!Output.empty()) Input.read(reinterpret_cast<char*>(Output.data()), static_cast<std::streamsize>(Output.size()));
+					return static_cast<bool>(Input) && !Input.bad();
 				};
-				uint32_t Magic = 0;
-				uint32_t Version = 0;
-				uint32_t DeclaredLength = 0;
-				if (!ReadUInt32(0, Magic) || !ReadUInt32(4, Version) || !ReadUInt32(8, DeclaredLength) || Magic != 0x46546c67 ||
-					Version != 2 || DeclaredLength != Text.size())
-				{
-					return std::unexpected("GLB header is malformed");
-				}
-				uint32_t JsonLength = 0;
-				uint32_t JsonType = 0;
-				if (!ReadUInt32(12, JsonLength) || !ReadUInt32(16, JsonType) || JsonType != 0x4e4f534a || JsonLength % 4 != 0 ||
-					JsonLength > Text.size() - 20 || JsonLength > 64ull * 1024ull * 1024ull)
-				{
-					return std::unexpected("GLB does not contain a valid bounded JSON chunk first");
-				}
-				Text = Text.substr(20, JsonLength);
+				auto Json = Assets::Detail::ReadGlbJsonChunk(FileSize, 64ull * 1024ull * 1024ull, ReadRange);
+				if (!Json) return std::unexpected("could not inspect GLB dependency source: " + Json.error());
+				Text = std::move(*Json);
+			}
+			else
+			{
+				std::ifstream Input(SourcePath, std::ios::binary);
+				if (!Input) return std::unexpected("could not open glTF dependency source");
+				Text.resize(static_cast<size_t>(FileSize));
+				if (!Text.empty()) Input.read(Text.data(), static_cast<std::streamsize>(Text.size()));
+				if (!Input || Input.bad()) return std::unexpected("could not read glTF dependency source completely");
 			}
 
 			using Json = nlohmann::json;
