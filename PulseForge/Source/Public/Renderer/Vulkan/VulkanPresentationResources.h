@@ -4,14 +4,25 @@
 #include <vulkan/vulkan.hpp>
 
 #include "Renderer/RendererBackend.h"
+#include "Renderer/Vulkan/VulkanSupport.h"
 
 #include <nvrhi/nvrhi.h>
 
+#include <cstdint>
 #include <string_view>
 #include <vector>
 
 namespace PulseForge::VulkanDetail
 {
+	enum class PresentationRequestState : uint8_t
+	{
+		NotSubmitted,
+		Pending,
+		Complete,
+		DeviceLostIndeterminate,
+		Indeterminate
+	};
+
 	struct VulkanSwapchainImage
 	{
 		vk::Image NativeImage;
@@ -20,8 +31,7 @@ namespace PulseForge::VulkanDetail
 		nvrhi::FramebufferHandle Framebuffer;
 		vk::Semaphore PresentReady;
 		vk::Fence PresentFence;
-		bool PresentFenceUsed = false;
-		bool PresentPending = false;
+		PresentationRequestState PresentationState = PresentationRequestState::NotSubmitted;
 	};
 
 	struct VulkanRetiredSwapchainGeneration
@@ -36,7 +46,8 @@ namespace PulseForge::VulkanDetail
 	class VulkanPresentationResources final
 	{
 	public:
-		void Initialize(vk::Device Device, vk::Queue PresentQueue, nvrhi::IDevice* NvrhiDevice, bool PresentFenceMaintenanceEnabled);
+		void Initialize(vk::Device Device, vk::Queue PresentQueue, nvrhi::IDevice* NvrhiDevice,
+			VulkanSupport::PresentationRetirementMechanism RetirementMechanism);
 		void Reset() noexcept;
 
 		void WaitForPresentation(VulkanSwapchainImage& Image);
@@ -46,10 +57,14 @@ namespace PulseForge::VulkanDetail
 		void ReleaseGenerations(std::vector<VulkanRetiredSwapchainGeneration>& Generations);
 
 	private:
+		[[nodiscard]] bool UsesPresentationFences() const noexcept;
+		void ValidateImagesForRelease(const std::vector<VulkanSwapchainImage>& Images) const;
+
 		vk::Device m_Device;
 		vk::Queue m_PresentQueue;
 		nvrhi::IDevice* m_NvrhiDevice = nullptr;
-		bool m_PresentFenceMaintenanceEnabled = false;
+		VulkanSupport::PresentationRetirementMechanism m_RetirementMechanism =
+			VulkanSupport::PresentationRetirementMechanism::LegacyBestEffort;
 		bool m_LoggedLegacyPresentRetirement = false;
 	};
 } // namespace PulseForge::VulkanDetail

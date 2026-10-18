@@ -34,7 +34,8 @@ namespace
 	{
 		None,
 		MainRecoveryFailure,
-		NativeRecoveryFailure
+		NativeRecoveryFailure,
+		FenceNativeRecreationAndClose
 	};
 
 	struct ValidationVertex
@@ -51,6 +52,8 @@ namespace
 			bool ValidatePointShadowImages, std::filesystem::path PointShadowImageDirectory, LegacyRetirementScenario RetirementScenario)
 			: Layer(RetirementScenario == LegacyRetirementScenario::MainRecoveryFailure
 						? "Main swapchain legacy-retirement recovery validation"
+					: RetirementScenario == LegacyRetirementScenario::FenceNativeRecreationAndClose
+						? "Fence-backed native presentation recreation and close validation"
 					: RetirementScenario == LegacyRetirementScenario::NativeRecoveryFailure
 						? "Native swapchain legacy-retirement recovery validation"
 					: ValidateTransparency		? "Transparency rendered-image validation"
@@ -136,7 +139,9 @@ namespace
 		{
 			if (m_LegacyRetirementScenario != LegacyRetirementScenario::None)
 			{
-				UpdateLegacyRetirementValidation();
+				if (m_LegacyRetirementScenario == LegacyRetirementScenario::FenceNativeRecreationAndClose)
+					UpdateFenceNativeRecreationAndCloseValidation();
+				else UpdateLegacyRetirementValidation();
 				return;
 			}
 			if (m_ValidateEditorUiUnorm)
@@ -445,6 +450,41 @@ namespace
 			App.RequestClose();
 		}
 
+		void UpdateFenceNativeRecreationAndCloseValidation()
+		{
+			if (!m_Succeeded) return;
+			auto& App = PulseForge::Application::Get();
+			++m_RetirementValidationFrames;
+
+			if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(10))
+			{
+				Fail("Timed out while validating fence-backed main/native swapchain recreation and native-host close");
+				return;
+			}
+
+			if (!m_FenceNativeHostClosed && m_RetirementNativeSubmissions >= 4 && m_RetirementMainFrames >= 6)
+			{
+				m_MainFramesWhenNativeHostClosed = m_RetirementMainFrames;
+				if (!ReleaseRetirementFixture())
+				{
+					Fail("Could not close the fence-backed native presentation host while the main host was active");
+					return;
+				}
+				m_FenceNativeHostClosed = true;
+				PF_INFO("Fence-backed native host closed after {} submissions while the main host had presented {} frames",
+					m_RetirementNativeSubmissions, m_MainFramesWhenNativeHostClosed);
+				return;
+			}
+
+			if (m_FenceNativeHostClosed && m_RetirementMainFrames >= m_MainFramesWhenNativeHostClosed + 3)
+			{
+				PF_INFO(
+					"GPU_VALIDATION_RESULT=PASS; main presentation continued for three frames after the fence-backed native host closed");
+				m_LegacyRetirementValidationComplete = true;
+				App.RequestClose();
+			}
+		}
+
 		bool ReleaseRetirementFixture()
 		{
 			if (m_RetirementTargetID != 0)
@@ -671,11 +711,13 @@ namespace
 		uint32_t m_RetirementValidationFrames = 0;
 		uint32_t m_RetirementNativeSubmissions = 0;
 		uint32_t m_RetirementMainFrames = 0;
+		uint32_t m_MainFramesWhenNativeHostClosed = 0;
 		uint64_t m_RetirementTargetID = 0;
 		bool m_Succeeded = true;
 		bool m_SawMainFrameBeforeRecoveryFailure = false;
 		bool m_MainFrameResumedAfterRecoveryFailure = false;
 		bool m_LegacyRetirementValidationComplete = false;
+		bool m_FenceNativeHostClosed = false;
 		bool m_ValidateSceneHdr = false;
 		bool m_ValidateToneMapping = false;
 		bool m_ValidateEditorUiUnorm = false;
@@ -733,6 +775,7 @@ int main(int ArgumentCount, char** Arguments)
 		const LegacyRetirementScenario RetirementScenario =
 			Mode == "--legacy-main-retirement-cap"	   ? LegacyRetirementScenario::MainRecoveryFailure
 			: Mode == "--legacy-native-retirement-cap" ? LegacyRetirementScenario::NativeRecoveryFailure
+			: Mode == "--presentation-fence-native-lifetime" ? LegacyRetirementScenario::FenceNativeRecreationAndClose
 													   : LegacyRetirementScenario::None;
 		const std::filesystem::path PointShadowImageDirectory =
 			ArgumentCount > 2 ? std::filesystem::path(Arguments[2])
