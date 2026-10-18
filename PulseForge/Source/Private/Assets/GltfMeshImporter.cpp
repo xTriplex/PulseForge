@@ -1,4 +1,5 @@
 #include "Assets/GltfMeshImporter.h"
+#include "Assets/AssetOperations.h"
 #include "Assets/AssetTypes.h"
 #include "Assets/AssetPathResolver.h"
 
@@ -7,6 +8,7 @@
 #include <bit>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <optional>
@@ -25,9 +27,6 @@ namespace PulseForge
 		constexpr uint64_t MaxDecodedBufferBytes = 512ull * 1024ull * 1024ull;
 		constexpr uint64_t MaxVertexCount = 10'000'000;
 		constexpr uint64_t MaxIndexCount = 30'000'000;
-		constexpr uint32_t GlbMagic = 0x46546C67;
-		constexpr uint32_t GlbJsonChunk = 0x4E4F534A;
-		constexpr uint32_t GlbBinaryChunk = 0x004E4942;
 
 		GltfMeshImportError MakeError(
 			GltfMeshImportErrorCode Code,
@@ -137,103 +136,33 @@ namespace PulseForge
 		};
 
 		std::expected<ParsedContainer, GltfMeshImportError> ParseGlb(
-			std::span<const std::byte> FileBytes,
-			const std::filesystem::path& Path)
+			std::span<const std::byte> FileBytes, const std::filesystem::path& Path)
 		{
-			uint32_t Magic = 0;
-			uint32_t Version = 0;
-			uint32_t DeclaredLength = 0;
-			if (FileBytes.size() < 12 || !ReadUInt32LE(FileBytes, 0, Magic) ||
-				!ReadUInt32LE(FileBytes, 4, Version) || !ReadUInt32LE(FileBytes, 8, DeclaredLength) ||
-				Magic != GlbMagic || Version != 2 || DeclaredLength != FileBytes.size())
+			const auto ReadRange = [FileBytes](uint64_t Offset, std::span<std::byte> Output)
 			{
-				return std::unexpected(MakeError(
-					GltfMeshImportErrorCode::InvalidDocument,
-					Path,
-					"GLB header must contain the glTF magic, version 2, and exact file length"));
+				if (Offset > FileBytes.size() || Output.size() > FileBytes.size() - static_cast<size_t>(Offset)) return false;
+				if (!Output.empty()) std::memcpy(Output.data(), FileBytes.data() + static_cast<size_t>(Offset), Output.size());
+				return true;
+			};
+			auto Layout = Assets::Detail::InspectGlbLayout(FileBytes.size(), MaxJsonBytes, ReadRange);
+			if (!Layout)
+			{
+				const GltfMeshImportErrorCode Code = Layout.error() == "GLB JSON chunk exceeds the importer limit"
+														 ? GltfMeshImportErrorCode::ResourceLimitExceeded
+														 : GltfMeshImportErrorCode::InvalidDocument;
+				return std::unexpected(MakeError(Code, Path, Layout.error()));
 			}
 
 			ParsedContainer Container;
-			bool FoundJson = false;
-			size_t Offset = 12;
-			size_t ChunkIndex = 0;
-			while (Offset < FileBytes.size())
-			{
-				uint32_t ChunkLength = 0;
-				uint32_t ChunkType = 0;
-				if (!ReadUInt32LE(FileBytes, Offset, ChunkLength) ||
-					!ReadUInt32LE(FileBytes, Offset + sizeof(uint32_t), ChunkType))
-				{
-					return std::unexpected(MakeError(
-						GltfMeshImportErrorCode::InvalidDocument,
-						Path,
-						"GLB contains a truncated chunk header"));
-				}
-
-				Offset += 8;
-				if (ChunkLength % 4 != 0 || ChunkLength > FileBytes.size() - Offset)
-				{
-					return std::unexpected(MakeError(
-						GltfMeshImportErrorCode::InvalidDocument,
-						Path,
-						"GLB chunk length is misaligned or extends beyond the file"));
-				}
-
-				const auto Chunk = FileBytes.subspan(Offset, ChunkLength);
-				if (!FoundJson)
-				{
-					if (ChunkType != GlbJsonChunk)
-					{
-						return std::unexpected(MakeError(
-							GltfMeshImportErrorCode::InvalidDocument,
-							Path,
-							"The first GLB chunk must contain JSON"));
-					}
-					if (Chunk.size() > MaxJsonBytes)
-					{
-						return std::unexpected(MakeError(
-							GltfMeshImportErrorCode::ResourceLimitExceeded,
-							Path,
-							"GLB JSON chunk exceeds the importer limit"));
-					}
-					Container.JsonText.assign(reinterpret_cast<const char*>(Chunk.data()), Chunk.size());
-					FoundJson = true;
-				}
-				else if (ChunkType == GlbJsonChunk)
-				{
-					return std::unexpected(MakeError(
-						GltfMeshImportErrorCode::InvalidDocument,
-						Path,
-						"GLB contains more than one JSON chunk"));
-				}
-				else if (ChunkType == GlbBinaryChunk)
-				{
-					if (Container.BinaryChunk || ChunkIndex != 1)
-					{
-						return std::unexpected(MakeError(
-							GltfMeshImportErrorCode::InvalidDocument,
-							Path,
-							"GLB binary chunk must appear once, immediately after the JSON chunk"));
-					}
-					Container.BinaryChunk = Chunk;
-				}
-				Offset += ChunkLength;
-				++ChunkIndex;
-			}
-
-			if (!FoundJson)
-			{
-				return std::unexpected(MakeError(
-					GltfMeshImportErrorCode::InvalidDocument,
-					Path,
-					"GLB does not contain a JSON chunk"));
-			}
+			const auto JsonBytes = FileBytes.subspan(static_cast<size_t>(Layout->Json.Offset), Layout->Json.Length);
+			Container.JsonText.assign(reinterpret_cast<const char*>(JsonBytes.data()), JsonBytes.size());
+			if (Layout->Binary)
+				Container.BinaryChunk = FileBytes.subspan(static_cast<size_t>(Layout->Binary->Offset), Layout->Binary->Length);
 
 			while (!Container.JsonText.empty())
 			{
 				const unsigned char Character = static_cast<unsigned char>(Container.JsonText.back());
-				if (Character != '\0' && !std::isspace(Character))
-					break;
+				if (Character != '\0' && !std::isspace(Character)) break;
 				Container.JsonText.pop_back();
 			}
 			return Container;

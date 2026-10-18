@@ -2,8 +2,68 @@
 
 #include "Assets/AssetOperations.h"
 
+#include <cstring>
+
 namespace
 {
+	void TestGlbJsonReadSkipsBinaryPayload(TestRunner& Tests)
+	{
+		using namespace PulseForge::Assets::Detail;
+		constexpr uint32_t BinaryPayloadBytes = 4u * 1024u * 1024u;
+		std::string JsonText = R"({"asset":{"version":"2.0"},"buffers":[]})";
+		while (JsonText.size() % 4 != 0)
+			JsonText.push_back(' ');
+
+		std::vector<std::byte> Container;
+		const auto AppendUInt32 = [&Container](uint32_t Value)
+		{
+			for (size_t Byte = 0; Byte < 4; ++Byte)
+				Container.push_back(static_cast<std::byte>((Value >> (Byte * 8)) & 0xff));
+		};
+		const uint32_t FileSize = static_cast<uint32_t>(12 + 8 + JsonText.size() + 8 + BinaryPayloadBytes);
+		AppendUInt32(GlbMagic);
+		AppendUInt32(2);
+		AppendUInt32(FileSize);
+		AppendUInt32(static_cast<uint32_t>(JsonText.size()));
+		AppendUInt32(GlbJsonChunk);
+		for (const char Character : JsonText)
+			Container.push_back(static_cast<std::byte>(Character));
+		AppendUInt32(BinaryPayloadBytes);
+		AppendUInt32(GlbBinaryChunk);
+		Container.resize(FileSize, std::byte{ 0x5a });
+
+		size_t BytesRead = 0;
+		const auto ReadRange = [&Container, &BytesRead](uint64_t Offset, std::span<std::byte> Output)
+		{
+			if (Offset > Container.size() || Output.size() > Container.size() - static_cast<size_t>(Offset)) return false;
+			if (!Output.empty()) std::memcpy(Output.data(), Container.data() + static_cast<size_t>(Offset), Output.size());
+			BytesRead += Output.size();
+			return true;
+		};
+		auto ReadJson = ReadGlbJsonChunk(FileSize, 64ull * 1024ull * 1024ull, ReadRange);
+		PF_CHECK(Tests, ReadJson.has_value());
+		if (ReadJson) PF_CHECK(Tests, *ReadJson == JsonText);
+		PF_CHECK(Tests, BytesRead == 12 + 8 + 8 + JsonText.size());
+		PF_CHECK(Tests, BytesRead < Container.size());
+
+		std::vector<std::byte> Truncated(16);
+		const auto WriteUInt32 = [&Truncated](size_t Offset, uint32_t Value)
+		{
+			for (size_t Byte = 0; Byte < 4; ++Byte)
+				Truncated[Offset + Byte] = static_cast<std::byte>((Value >> (Byte * 8)) & 0xff);
+		};
+		WriteUInt32(0, GlbMagic);
+		WriteUInt32(4, 2);
+		WriteUInt32(8, static_cast<uint32_t>(Truncated.size()));
+		const auto ReadTruncated = [&Truncated](uint64_t Offset, std::span<std::byte> Output)
+		{
+			if (Offset > Truncated.size() || Output.size() > Truncated.size() - static_cast<size_t>(Offset)) return false;
+			if (!Output.empty()) std::memcpy(Output.data(), Truncated.data() + static_cast<size_t>(Offset), Output.size());
+			return true;
+		};
+		PF_CHECK(Tests, !InspectGlbLayout(Truncated.size(), 64ull * 1024ull * 1024ull, ReadTruncated));
+	}
+
 	void TestGltfMeshImport(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -693,5 +753,6 @@ namespace
 
 void RunGltfMeshImportTests(TestRunner& Tests)
 {
+	TestGlbJsonReadSkipsBinaryPayload(Tests);
 	TestGltfMeshImport(Tests);
 }
