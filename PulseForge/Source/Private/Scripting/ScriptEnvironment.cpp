@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <new>
 #include <optional>
@@ -45,6 +46,13 @@ namespace PulseForge::ScriptEnvironment
 		LuaEntity* GetLuaEntity(lua_State* State)
 		{
 			return static_cast<LuaEntity*>(luaL_testudata(State, 1, EntityMetatableName));
+		}
+
+		bool IsCurrentEntity(const ScriptInstance& Instance, const Entity& Value)
+		{
+			if (!Instance.SourceScene || !Value.IsValid()) return false;
+			const auto Current = Instance.SourceScene->FindEntity(Value.GetUUID());
+			return Current && *Current == Value;
 		}
 
 		int LuaEntityCollect(lua_State* State)
@@ -171,8 +179,27 @@ namespace PulseForge::ScriptEnvironment
 			const glm::vec3 Force{ static_cast<float>(X), static_cast<float>(Y), static_cast<float>(Z) };
 			if (!std::isfinite(Force.x) || !std::isfinite(Force.y) || !std::isfinite(Force.z))
 				return ReturnHostError(State, "force values are outside the supported range");
-			if (auto Result = Instance->Services.Physics->ApplyForce(UserData->Value.GetUUID(), Force); !Result)
-				return ReturnHostError(State, Result.error().Message.c_str());
+			if (!IsCurrentEntity(*Instance, UserData->Value)) return ReturnHostError(State, "entity is no longer valid in its scene");
+
+			std::array<char, 512> Failure{};
+			bool Applied = false;
+			try
+			{
+				{
+					auto Result = Instance->Services.Physics->ApplyForce(UserData->Value.GetUUID(), Force);
+					if (Result) Applied = true;
+					else CopyHostError(Failure, Result.error().Message);
+				}
+			}
+			catch (const std::exception& Exception)
+			{
+				CopyHostError(Failure, Exception.what());
+			}
+			catch (...)
+			{
+				CopyHostError(Failure, "Physics service failed while applying force");
+			}
+			if (!Applied) return ReturnHostError(State, Failure.data());
 			lua_pushboolean(State, true);
 			return 1;
 		}
@@ -186,9 +213,27 @@ namespace PulseForge::ScriptEnvironment
 			ScriptInstance* Instance = GetScriptInstance(State);
 			if (!Instance || !Instance->Services.Audio)
 				return ReturnHostError(State, "audio service is unavailable to this script runtime");
+			if (!IsCurrentEntity(*Instance, UserData->Value)) return ReturnHostError(State, "entity is no longer valid in its scene");
 
-			if (auto Result = (Instance->Services.Audio->*Control)(UserData->Value.GetUUID()); !Result)
-				return ReturnHostError(State, Result.error().Message.c_str());
+			std::array<char, 512> Failure{};
+			bool Succeeded = false;
+			try
+			{
+				{
+					auto Result = (Instance->Services.Audio->*Control)(UserData->Value.GetUUID());
+					if (Result) Succeeded = true;
+					else CopyHostError(Failure, Result.error().Message);
+				}
+			}
+			catch (const std::exception& Exception)
+			{
+				CopyHostError(Failure, Exception.what());
+			}
+			catch (...)
+			{
+				CopyHostError(Failure, "Audio service failed while controlling playback");
+			}
+			if (!Succeeded) return ReturnHostError(State, Failure.data());
 			lua_pushboolean(State, true);
 			return 1;
 		}
