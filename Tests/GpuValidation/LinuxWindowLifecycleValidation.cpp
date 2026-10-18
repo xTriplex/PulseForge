@@ -15,6 +15,7 @@
 namespace
 {
 	using Clock = std::chrono::steady_clock;
+	constexpr auto MinimizedHoldDuration = std::chrono::milliseconds(500);
 	constexpr auto PhaseTimeout = std::chrono::seconds(8);
 
 	enum class WindowLifecyclePhase
@@ -85,11 +86,20 @@ namespace
 				break;
 
 			case WindowLifecyclePhase::WaitingForMinimize:
-				if (!HasExtent ||
-					glfwGetWindowAttrib(static_cast<GLFWwindow*>(App.GetWindow().GetNativeWindow()), GLFW_ICONIFIED) == GLFW_TRUE)
+			{
+				const bool IsIconified =
+					glfwGetWindowAttrib(static_cast<GLFWwindow*>(App.GetWindow().GetNativeWindow()), GLFW_ICONIFIED) == GLFW_TRUE;
+				const bool IsMinimized = !HasExtent || IsIconified;
+				if (IsMinimized && !m_SawMinimize)
 				{
 					m_SawMinimize = true;
+					m_MinimizedAt = Clock::now();
 					PF_CORE_INFO("Linux minimize observed at framebuffer {0}x{1}", Extent.first, Extent.second);
+				}
+				else if (m_SawMinimize && !IsMinimized)
+					Fail("The Linux window left minimized state before the fixture requested restoration");
+				else if (m_SawMinimize && Clock::now() - m_MinimizedAt >= MinimizedHoldDuration)
+				{
 					m_RenderCountBeforeRestore = m_RenderCount;
 					glfwRestoreWindow(static_cast<GLFWwindow*>(App.GetWindow().GetNativeWindow()));
 					SetPhase(WindowLifecyclePhase::WaitingForRestore);
@@ -103,6 +113,7 @@ namespace
 					App.RequestClose();
 				}
 				break;
+			}
 
 			case WindowLifecyclePhase::WaitingForRestore:
 				if (HasExtent && m_RenderCount > m_RenderCountBeforeRestore)
@@ -164,6 +175,7 @@ namespace
 		uint64_t m_RenderCountAtResize = 0;
 		uint64_t m_RenderCountAtMinimize = 0;
 		uint64_t m_RenderCountBeforeRestore = 0;
+		Clock::time_point m_MinimizedAt{};
 		bool m_SawMinimize = false;
 		bool m_WasSkipped = false;
 		std::string m_Failure;
