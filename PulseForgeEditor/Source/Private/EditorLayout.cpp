@@ -1,14 +1,13 @@
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
 #include "Editor/EditorLayoutSettingsPolicy.h"
+#include "Core/PlatformServices.h"
 
 #include <imgui_internal.h>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
-#include <Objbase.h>
-#include <ShlObj.h>
 
 #include <charconv>
 #include <cmath>
@@ -17,6 +16,7 @@
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <utility>
 
 namespace
 {
@@ -38,17 +38,10 @@ namespace
 			return Directory / L"imgui.ini";
 		}
 
-		PWSTR KnownFolder = nullptr;
-		const HRESULT Result = SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_CREATE, nullptr, &KnownFolder);
-		if (FAILED(Result) || !KnownFolder)
-		{
-			if (KnownFolder)
-				CoTaskMemFree(KnownFolder);
-			return std::unexpected("Windows could not resolve the user's Local AppData directory");
-		}
+		auto UserDataDirectory = PulseForge::Platform::GetUserDataDirectory();
+		if (!UserDataDirectory) return std::unexpected(UserDataDirectory.error().Message);
 
-		std::filesystem::path Directory(KnownFolder);
-		CoTaskMemFree(KnownFolder);
+		std::filesystem::path Directory = std::move(*UserDataDirectory);
 		Directory /= L"PulseForge";
 		Directory /= L"Editor";
 

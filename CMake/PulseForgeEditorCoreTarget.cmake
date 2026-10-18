@@ -33,7 +33,6 @@ if(PULSEFORGE_BUILD_EDITOR OR BUILD_TESTING)
 		PUBLIC PulseForgeEditor/Source/Public
 		PRIVATE PulseForge/Source/Public PulseForge/Vendor/json/include
 	)
-	target_compile_definitions(PulseForgeEditorCore PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorCore
 		PUBLIC PulseForgeAssetServices PulseForgeScene
 		PRIVATE PulseForgeCore PulseForgeAssetImporters PulseForgeSceneSerialization
