@@ -1,13 +1,8 @@
 #include "Core/Log.h"
-
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
+#include "Core/Platform/LogSink.h"
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/base_sink.h>
-#include <spdlog/sinks/msvc_sink.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <deque>
 #include <mutex>
@@ -49,12 +44,7 @@ namespace PulseForge
 
 		std::shared_ptr<spdlog::logger> CreateLogger(const char* Name, const std::shared_ptr<LogHistorySink>& HistorySink)
 		{
-			std::vector<spdlog::sink_ptr> Sinks;
-			const HANDLE StandardOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-			if (GetConsoleWindow() || (StandardOutput && StandardOutput != INVALID_HANDLE_VALUE))
-				Sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
-			else Sinks.push_back(std::make_shared<spdlog::sinks::msvc_sink_mt>(false));
-			Sinks.push_back(HistorySink);
+			std::vector<spdlog::sink_ptr> Sinks{ Platform::Detail::CreateLogSink(), HistorySink };
 			auto Logger = std::make_shared<spdlog::logger>(Name, Sinks.begin(), Sinks.end());
 			spdlog::register_logger(Logger);
 			return Logger;
