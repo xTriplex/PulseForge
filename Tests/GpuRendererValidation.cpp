@@ -6,6 +6,7 @@
 #include "GpuValidation/ActiveFrameUploadValidation.h"
 #include "GpuValidation/EditorUiUnormValidation.h"
 #include "GpuValidation/GpuLightingValidation.h"
+#include "GpuValidation/MirroredWindingValidation.h"
 #include "GpuValidation/GpuSceneOutputValidation.h"
 #include "GpuValidation/ValidationShader.h"
 #include "Assets/Project.h"
@@ -49,7 +50,8 @@ namespace
 	public:
 		GpuValidationLayer(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm, bool ValidateLocalLights,
 			bool ValidateSpotlightShadows, bool ValidatePointShadows, bool ValidatePbrMaterials, bool ValidateTransparency,
-			bool ValidatePointShadowImages, std::filesystem::path PointShadowImageDirectory, LegacyRetirementScenario RetirementScenario)
+			bool ValidatePointShadowImages, bool ValidateMirroredWinding, std::filesystem::path PointShadowImageDirectory,
+			LegacyRetirementScenario RetirementScenario)
 			: Layer(RetirementScenario == LegacyRetirementScenario::MainRecoveryFailure
 						? "Main swapchain legacy-retirement recovery validation"
 					: RetirementScenario == LegacyRetirementScenario::FenceNativeRecreationAndClose
@@ -70,8 +72,8 @@ namespace
 			  m_ValidateEditorUiUnorm(ValidateEditorUiUnorm), m_ValidateLocalLights(ValidateLocalLights),
 			  m_ValidateSpotlightShadows(ValidateSpotlightShadows), m_ValidatePointShadows(ValidatePointShadows),
 			  m_ValidatePbrMaterials(ValidatePbrMaterials), m_ValidateTransparency(ValidateTransparency),
-			  m_ValidatePointShadowImages(ValidatePointShadowImages), m_PointShadowImageDirectory(std::move(PointShadowImageDirectory)),
-			  m_LegacyRetirementScenario(RetirementScenario)
+			  m_ValidatePointShadowImages(ValidatePointShadowImages), m_ValidateMirroredWinding(ValidateMirroredWinding),
+			  m_PointShadowImageDirectory(std::move(PointShadowImageDirectory)), m_LegacyRetirementScenario(RetirementScenario)
 		{
 		}
 
@@ -91,6 +93,13 @@ namespace
 					if (!PresentationTarget)
 						throw std::runtime_error("Could not create the secondary presentation target: " + PresentationTarget.error());
 					m_RetirementTargetID = *PresentationTarget;
+					return;
+				}
+				if (m_ValidateMirroredWinding)
+				{
+					m_MirroredWindingValidation = std::make_unique<PulseForge::GpuValidation::MirroredWindingValidation>(
+						PulseForge::Application::Get(), std::filesystem::path(PF_GPU_VALIDATION_SCENE_SHADER_DIRECTORY), m_StartedAt);
+					m_MirroredWindingValidation->Initialize();
 					return;
 				}
 				InitializeResources();
@@ -142,6 +151,21 @@ namespace
 				if (m_LegacyRetirementScenario == LegacyRetirementScenario::FenceNativeRecreationAndClose)
 					UpdateFenceNativeRecreationAndCloseValidation();
 				else UpdateLegacyRetirementValidation();
+				return;
+			}
+			if (m_ValidateMirroredWinding)
+			{
+				const auto Updated = m_MirroredWindingValidation->Update();
+				if (!Updated)
+				{
+					Fail(Updated.error());
+					return;
+				}
+				if (*Updated)
+				{
+					PF_INFO("GPU_VALIDATION_RESULT=PASS; verified single-sided mirrored winding across color, AO and shadow preparation");
+					PulseForge::Application::Get().RequestClose();
+				}
 				return;
 			}
 			if (m_ValidateEditorUiUnorm)
@@ -270,6 +294,11 @@ namespace
 				}
 				return;
 			}
+			if (m_ValidateMirroredWinding)
+			{
+				if (auto Rendered = m_MirroredWindingValidation->Render(); !Rendered) Fail(Rendered.error());
+				return;
+			}
 			if (m_ValidateEditorUiUnorm)
 			{
 				if (const auto Result = m_EditorUiValidation.RenderFrame(PulseForge::Application::Get()); !Result) Fail(Result.error());
@@ -352,6 +381,7 @@ namespace
 		void OnDetach() override
 		{
 			ReleaseRetirementFixture();
+			m_MirroredWindingValidation.reset();
 			const auto ReleasedPointShadowImages = m_PointShadowImageValidation.Release();
 			if (!ReleasedPointShadowImages) Fail(ReleasedPointShadowImages.error());
 			if (m_LightingValidation)
@@ -388,6 +418,7 @@ namespace
 
 		[[nodiscard]] bool Succeeded() const noexcept
 		{
+			if (m_ValidateMirroredWinding) return m_Succeeded && m_MirroredWindingValidation && m_MirroredWindingValidation->IsComplete();
 			return m_Succeeded && (m_LegacyRetirementScenario != LegacyRetirementScenario::None ? m_LegacyRetirementValidationComplete
 									  : m_ValidateEditorUiUnorm									? m_EditorUiValidation.IsComplete()
 									  : m_ValidateTransparency		? (m_ProjectSceneValidation && m_ProjectSceneValidation->Succeeded())
@@ -696,6 +727,7 @@ namespace
 		PulseForge::GraphicsPipelineHandle m_SamplingPipeline;
 		PulseForge::RenderTargetHandle m_SdrTarget;
 		PulseForge::GpuValidation::EditorUiUnormValidation m_EditorUiValidation;
+		std::unique_ptr<PulseForge::GpuValidation::MirroredWindingValidation> m_MirroredWindingValidation;
 		std::optional<PulseForge::Project> m_Project;
 		PulseForge::Scene m_Scene;
 		std::filesystem::path m_PbrValidationFixtureRoot;
@@ -727,6 +759,7 @@ namespace
 		bool m_ValidatePbrMaterials = false;
 		bool m_ValidateTransparency = false;
 		bool m_ValidatePointShadowImages = false;
+		bool m_ValidateMirroredWinding = false;
 		LegacyRetirementScenario m_LegacyRetirementScenario = LegacyRetirementScenario::None;
 	};
 
@@ -735,12 +768,13 @@ namespace
 	public:
 		GpuValidationApplication(bool ValidateSceneHdr, bool ValidateToneMapping, bool ValidateEditorUiUnorm, bool ValidateLocalLights,
 			bool ValidateSpotlightShadows, bool ValidatePointShadows, bool ValidatePbrMaterials, bool ValidateTransparency,
-			bool ValidatePointShadowImages, std::filesystem::path PointShadowImageDirectory, LegacyRetirementScenario RetirementScenario)
+			bool ValidatePointShadowImages, bool ValidateMirroredWinding, std::filesystem::path PointShadowImageDirectory,
+			LegacyRetirementScenario RetirementScenario)
 			: Application(PulseForge::RendererAPI::Vulkan)
 		{
 			auto Layer = std::make_unique<GpuValidationLayer>(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm,
 				ValidateLocalLights, ValidateSpotlightShadows, ValidatePointShadows, ValidatePbrMaterials, ValidateTransparency,
-				ValidatePointShadowImages, std::move(PointShadowImageDirectory), RetirementScenario);
+				ValidatePointShadowImages, ValidateMirroredWinding, std::move(PointShadowImageDirectory), RetirementScenario);
 			m_Layer = Layer.get();
 			PushLayer(std::move(Layer));
 		}
@@ -772,6 +806,7 @@ int main(int ArgumentCount, char** Arguments)
 		const bool ValidatePbrMaterials = Mode == "--scene-pbr-materials";
 		const bool ValidateTransparency = Mode == "--scene-transparency";
 		const bool ValidatePointShadowImages = Mode == "--scene-point-shadow-images";
+		const bool ValidateMirroredWinding = Mode == "--scene-mirrored-winding";
 		const LegacyRetirementScenario RetirementScenario =
 			Mode == "--legacy-main-retirement-cap"	   ? LegacyRetirementScenario::MainRecoveryFailure
 			: Mode == "--legacy-native-retirement-cap" ? LegacyRetirementScenario::NativeRecoveryFailure
@@ -782,7 +817,7 @@ int main(int ArgumentCount, char** Arguments)
 							  : std::filesystem::current_path() / "Diagnostics" / "PointShadowDirection";
 		GpuValidationApplication App(ValidateSceneHdr, ValidateToneMapping, ValidateEditorUiUnorm, ValidateLocalLights,
 			ValidateSpotlightShadows, ValidatePointShadows, ValidatePbrMaterials, ValidateTransparency, ValidatePointShadowImages,
-			PointShadowImageDirectory, RetirementScenario);
+			ValidateMirroredWinding, PointShadowImageDirectory, RetirementScenario);
 		return App.RunValidation();
 	}
 	catch (const std::exception& Exception)

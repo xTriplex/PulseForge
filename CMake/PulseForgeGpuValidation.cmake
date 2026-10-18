@@ -8,6 +8,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 		Tests/GpuValidation/PointShadowImageValidation.cpp
 		Tests/GpuValidation/ActiveFrameUploadValidation.cpp
 		Tests/GpuValidation/EditorUiUnormValidation.cpp
+		Tests/GpuValidation/MirroredWindingValidation.cpp
 		Tests/GpuValidation/ValidationShader.cpp)
 	target_include_directories(PulseForgeGpuValidation PRIVATE Tests)
 	target_compile_definitions(PulseForgeGpuValidation PRIVATE
@@ -29,6 +30,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 		add_test(NAME PulseForge.GPU.LocalLights COMMAND PulseForgeGpuValidation --scene-local-lights)
 		add_test(NAME PulseForge.GPU.SpotlightShadows COMMAND PulseForgeGpuValidation --scene-spot-shadows)
 		add_test(NAME PulseForge.GPU.PointShadows COMMAND PulseForgeGpuValidation --scene-point-shadows)
+		add_test(NAME PulseForge.GPU.MirroredWinding COMMAND PulseForgeGpuValidation --scene-mirrored-winding)
 		add_test(NAME PulseForge.GPU.PBRMaterials COMMAND PulseForgeGpuValidation --scene-pbr-materials)
 		add_test(NAME PulseForge.GPU.Transparency COMMAND PulseForgeGpuValidation --scene-transparency)
 		add_test(NAME PulseForge.GPU.PointShadowImages
@@ -52,6 +54,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 			PulseForge.GPU.LocalLights
 			PulseForge.GPU.SpotlightShadows
 			PulseForge.GPU.PointShadows
+			PulseForge.GPU.MirroredWinding
 			PulseForge.GPU.PBRMaterials
 			PulseForge.GPU.Transparency
 			PulseForge.GPU.PointShadowImages

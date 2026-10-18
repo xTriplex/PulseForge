@@ -1,7 +1,69 @@
 #include "TestEngineSupport.h"
 
+#include "Assets/AssetOperations.h"
+
+#include <cstring>
+
 namespace
 {
+	void TestGlbJsonReadSkipsBinaryPayload(TestRunner& Tests)
+	{
+		using namespace PulseForge::Assets::Detail;
+		constexpr uint32_t BinaryPayloadBytes = 4u * 1024u * 1024u;
+		std::string JsonText = R"({"asset":{"version":"2.0"},"buffers":[]})";
+		while (JsonText.size() % 4 != 0)
+			JsonText.push_back(' ');
+
+		std::vector<std::byte> Container;
+		const auto AppendUInt32 = [&Container](uint32_t Value)
+		{
+			for (size_t Byte = 0; Byte < 4; ++Byte)
+				Container.push_back(static_cast<std::byte>((Value >> (Byte * 8)) & 0xff));
+		};
+		const uint32_t FileSize = static_cast<uint32_t>(12 + 8 + JsonText.size() + 8 + BinaryPayloadBytes);
+		AppendUInt32(GlbMagic);
+		AppendUInt32(2);
+		AppendUInt32(FileSize);
+		AppendUInt32(static_cast<uint32_t>(JsonText.size()));
+		AppendUInt32(GlbJsonChunk);
+		for (const char Character : JsonText)
+			Container.push_back(static_cast<std::byte>(Character));
+		AppendUInt32(BinaryPayloadBytes);
+		AppendUInt32(GlbBinaryChunk);
+		Container.resize(FileSize, std::byte{ 0x5a });
+
+		size_t BytesRead = 0;
+		const auto ReadRange = [&Container, &BytesRead](uint64_t Offset, std::span<std::byte> Output)
+		{
+			if (Offset > Container.size() || Output.size() > Container.size() - static_cast<size_t>(Offset)) return false;
+			if (!Output.empty()) std::memcpy(Output.data(), Container.data() + static_cast<size_t>(Offset), Output.size());
+			BytesRead += Output.size();
+			return true;
+		};
+		auto ReadJson = ReadGlbJsonChunk(FileSize, 64ull * 1024ull * 1024ull, ReadRange);
+		PF_CHECK(Tests, ReadJson.has_value());
+		if (ReadJson) PF_CHECK(Tests, *ReadJson == JsonText);
+		PF_CHECK(Tests, BytesRead == 12 + 8 + 8 + JsonText.size());
+		PF_CHECK(Tests, BytesRead < Container.size());
+
+		std::vector<std::byte> Truncated(16);
+		const auto WriteUInt32 = [&Truncated](size_t Offset, uint32_t Value)
+		{
+			for (size_t Byte = 0; Byte < 4; ++Byte)
+				Truncated[Offset + Byte] = static_cast<std::byte>((Value >> (Byte * 8)) & 0xff);
+		};
+		WriteUInt32(0, GlbMagic);
+		WriteUInt32(4, 2);
+		WriteUInt32(8, static_cast<uint32_t>(Truncated.size()));
+		const auto ReadTruncated = [&Truncated](uint64_t Offset, std::span<std::byte> Output)
+		{
+			if (Offset > Truncated.size() || Output.size() > Truncated.size() - static_cast<size_t>(Offset)) return false;
+			if (!Output.empty()) std::memcpy(Output.data(), Truncated.data() + static_cast<size_t>(Offset), Output.size());
+			return true;
+		};
+		PF_CHECK(Tests, !InspectGlbLayout(Truncated.size(), 64ull * 1024ull * 1024ull, ReadTruncated));
+	}
+
 	void TestGltfMeshImport(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -104,6 +166,85 @@ namespace
 			PF_CHECK(Tests, Vertex.Tangent[3] == 1.0f);
 		}
 		PF_CHECK(Tests, ValidateMeshDescription(Imported->GetMeshDescription()).has_value());
+
+		const std::filesystem::path RelocatedDirectory = ProjectRoot / "Assets" / "Relocated";
+		std::filesystem::create_directories(RelocatedDirectory, FileError);
+		PF_CHECK(Tests, !FileError);
+		const auto CrossDirectoryMove = AssetOperations::Move(Registry, ProjectRoot, SourceMetadata->ID, "Assets/Relocated/Triangle.gltf");
+		PF_CHECK(Tests, !CrossDirectoryMove && CrossDirectoryMove.error().Code == AssetOperationErrorCode::InvalidPath);
+		PF_CHECK(Tests, std::filesystem::is_regular_file(SourcePath) && std::filesystem::is_regular_file(BufferPath));
+		const auto CrossDirectoryDuplicate =
+			AssetOperations::Duplicate(Registry, ProjectRoot, SourceMetadata->ID, "Assets/Relocated/TriangleCopy.gltf");
+		PF_CHECK(Tests, !CrossDirectoryDuplicate && CrossDirectoryDuplicate.error().Code == AssetOperationErrorCode::InvalidPath);
+		PF_CHECK(Tests, !std::filesystem::exists(RelocatedDirectory / "TriangleCopy.gltf"));
+		const auto BufferMove = AssetOperations::Move(Registry, ProjectRoot, BufferMetadata->ID, "Assets/Relocated/Triangle.bin");
+		PF_CHECK(Tests, !BufferMove && BufferMove.error().Code == AssetOperationErrorCode::InvalidPath);
+		PF_CHECK(Tests, std::filesystem::is_regular_file(BufferPath));
+		const auto ImportAfterRejectedMoves = GltfMeshImporter::ImportStaticPrimitive(SourceMetadata->ID, ProjectRoot, Registry);
+		PF_CHECK(Tests, ImportAfterRejectedMoves && ImportAfterRejectedMoves->Indices.size() == 3);
+
+		const std::filesystem::path BundleDirectory = ProjectRoot / "Assets" / "Bundles" / "Ship";
+		std::filesystem::create_directories(BundleDirectory, FileError);
+		PF_CHECK(Tests, !FileError);
+		std::string BundleDocument = GltfDocument;
+		const size_t BundleUri = BundleDocument.find("Triangle.bin");
+		PF_CHECK(Tests, BundleUri != std::string::npos);
+		if (BundleUri == std::string::npos) return;
+		BundleDocument.replace(BundleUri, std::string("Triangle.bin").size(), "Bundle.bin");
+		const std::filesystem::path BundleSource = BundleDirectory / "Bundle.gltf";
+		const std::filesystem::path BundleBuffer = BundleDirectory / "Bundle.bin";
+		{
+			std::ofstream Output(BundleSource, std::ios::binary | std::ios::trunc);
+			Output.write(BundleDocument.data(), static_cast<std::streamsize>(BundleDocument.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		{
+			std::ofstream Output(BundleBuffer, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(BufferBytes.data()), static_cast<std::streamsize>(BufferBytes.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto BundleMetadata = AssetMetadataSerializer::CreateForNewAsset(BundleSource);
+		const auto BundleBufferMetadata = AssetMetadataSerializer::CreateForNewAsset(BundleBuffer);
+		PF_CHECK(Tests, BundleMetadata.has_value() && BundleBufferMetadata.has_value());
+		if (!BundleMetadata || !BundleBufferMetadata) return;
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		const auto BundleBeforeMove = GltfMeshImporter::ImportStaticPrimitive(BundleMetadata->ID, ProjectRoot, Registry);
+		PF_CHECK(Tests, BundleBeforeMove && BundleBeforeMove->Indices.size() == 3);
+		const auto BundleMove = AssetOperations::MoveFolder(Registry, ProjectRoot, "Assets/Bundles/Ship", "Assets/Relocated");
+		PF_CHECK(Tests, BundleMove && *BundleMove == std::filesystem::path("Assets/Relocated/Ship"));
+		const auto BundleAfterMove = GltfMeshImporter::ImportStaticPrimitive(BundleMetadata->ID, ProjectRoot, Registry);
+		PF_CHECK(Tests, BundleAfterMove && BundleAfterMove->Indices.size() == 3);
+		PF_CHECK(Tests, std::filesystem::is_regular_file(RelocatedDirectory / "Ship" / "Bundle.bin"));
+
+		const std::filesystem::path IncomingDirectory = ProjectRoot / "Assets" / "Incoming";
+		std::filesystem::create_directories(IncomingDirectory, FileError);
+		PF_CHECK(Tests, !FileError);
+		const std::filesystem::path IncomingBuffer = IncomingDirectory / "Incoming.bin";
+		{
+			std::ofstream Output(IncomingBuffer, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(BufferBytes.data()), static_cast<std::streamsize>(BufferBytes.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		std::string IncomingDocument = GltfDocument;
+		const size_t IncomingUri = IncomingDocument.find("Triangle.bin");
+		PF_CHECK(Tests, IncomingUri != std::string::npos);
+		if (IncomingUri == std::string::npos) return;
+		IncomingDocument.replace(IncomingUri, std::string("Triangle.bin").size(), "Incoming/Incoming.bin");
+		const std::filesystem::path IncomingSource = ProjectRoot / "Assets" / "IncomingReference.gltf";
+		{
+			std::ofstream Output(IncomingSource, std::ios::binary | std::ios::trunc);
+			Output.write(IncomingDocument.data(), static_cast<std::streamsize>(IncomingDocument.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto IncomingBufferMetadata = AssetMetadataSerializer::CreateForNewAsset(IncomingBuffer);
+		const auto IncomingMetadata = AssetMetadataSerializer::CreateForNewAsset(IncomingSource);
+		PF_CHECK(Tests, IncomingBufferMetadata.has_value() && IncomingMetadata.has_value());
+		if (!IncomingBufferMetadata || !IncomingMetadata) return;
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		PF_CHECK(Tests, GltfMeshImporter::ImportStaticPrimitive(IncomingMetadata->ID, ProjectRoot, Registry).has_value());
+		const auto IncomingFolderMove = AssetOperations::MoveFolder(Registry, ProjectRoot, "Assets/Incoming", "Assets/Relocated");
+		PF_CHECK(Tests, !IncomingFolderMove && IncomingFolderMove.error().Code == AssetOperationErrorCode::InvalidPath);
+		PF_CHECK(Tests, GltfMeshImporter::ImportStaticPrimitive(IncomingMetadata->ID, ProjectRoot, Registry).has_value());
 
 		const std::filesystem::path VertexAlphaPath = ModelDirectory / "VertexColorAlpha.gltf";
 		const std::filesystem::path VertexAlphaBufferPath = ModelDirectory / "VertexColorAlpha.bin";
@@ -400,6 +541,10 @@ namespace
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
 		const auto ImportedEmbedded = GltfMeshImporter::ImportStaticPrimitive(EmbeddedMetadata->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, ImportedEmbedded && ImportedEmbedded->Vertices.size() == 3 && ImportedEmbedded->Indices.size() == 3);
+		const auto EmbeddedGltfMove = AssetOperations::Move(Registry, ProjectRoot, EmbeddedMetadata->ID, "Assets/Relocated/Embedded.gltf");
+		PF_CHECK(Tests, EmbeddedGltfMove.has_value());
+		const auto ImportedMovedEmbedded = GltfMeshImporter::ImportStaticPrimitive(EmbeddedMetadata->ID, ProjectRoot, Registry);
+		PF_CHECK(Tests, ImportedMovedEmbedded && ImportedMovedEmbedded->Vertices.size() == 3 && ImportedMovedEmbedded->Indices.size() == 3);
 
 		std::string GlbDocument = GltfDocument;
 		const size_t ExternalUriPosition = GlbDocument.find("\"uri\":\"Triangle.bin\",");
@@ -443,6 +588,43 @@ namespace
 		const auto ImportedGlb = GltfMeshImporter::ImportStaticPrimitive(GlbMetadata->ID, ProjectRoot, Registry);
 		PF_CHECK(Tests, ImportedGlb.has_value());
 		PF_CHECK(Tests, ImportedGlb && ImportedGlb->Vertices.size() == 3 && ImportedGlb->Indices.size() == 3);
+		const auto EmbeddedGlbMove = AssetOperations::Move(Registry, ProjectRoot, GlbMetadata->ID, "Assets/Relocated/Embedded.glb");
+		PF_CHECK(Tests, EmbeddedGlbMove.has_value());
+		const auto ImportedMovedGlb = GltfMeshImporter::ImportStaticPrimitive(GlbMetadata->ID, ProjectRoot, Registry);
+		PF_CHECK(Tests, ImportedMovedGlb && ImportedMovedGlb->Vertices.size() == 3 && ImportedMovedGlb->Indices.size() == 3);
+
+		std::string ExternalGlbDocument = GltfDocument;
+		while (ExternalGlbDocument.size() % 4 != 0)
+			ExternalGlbDocument.push_back(' ');
+		std::vector<std::byte> ExternalGlbBytes;
+		const auto AppendExternalGlbUInt32 = [&ExternalGlbBytes](uint32_t Value)
+		{
+			for (size_t Byte = 0; Byte < sizeof(Value); ++Byte)
+				ExternalGlbBytes.push_back(static_cast<std::byte>((Value >> (Byte * 8)) & 0xff));
+		};
+		const uint32_t ExternalJsonLength = static_cast<uint32_t>(ExternalGlbDocument.size());
+		AppendExternalGlbUInt32(0x46546C67);
+		AppendExternalGlbUInt32(2);
+		AppendExternalGlbUInt32(12 + 8 + ExternalJsonLength);
+		AppendExternalGlbUInt32(ExternalJsonLength);
+		AppendExternalGlbUInt32(0x4E4F534A);
+		for (const char Character : ExternalGlbDocument)
+			ExternalGlbBytes.push_back(static_cast<std::byte>(static_cast<unsigned char>(Character)));
+		const std::filesystem::path ExternalGlbPath = ModelDirectory / "ExternalBuffer.glb";
+		{
+			std::ofstream Output(ExternalGlbPath, std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(ExternalGlbBytes.data()), static_cast<std::streamsize>(ExternalGlbBytes.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const auto ExternalGlbMetadata = AssetMetadataSerializer::CreateForNewAsset(ExternalGlbPath);
+		PF_CHECK(Tests, ExternalGlbMetadata.has_value());
+		if (!ExternalGlbMetadata) return;
+		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
+		PF_CHECK(Tests, GltfMeshImporter::ImportStaticPrimitive(ExternalGlbMetadata->ID, ProjectRoot, Registry).has_value());
+		const auto ExternalGlbMove =
+			AssetOperations::Move(Registry, ProjectRoot, ExternalGlbMetadata->ID, "Assets/Relocated/ExternalBuffer.glb");
+		PF_CHECK(Tests, !ExternalGlbMove && ExternalGlbMove.error().Code == AssetOperationErrorCode::InvalidPath);
+		PF_CHECK(Tests, GltfMeshImporter::ImportStaticPrimitive(ExternalGlbMetadata->ID, ProjectRoot, Registry).has_value());
 
 		std::vector<std::byte> OverpaddedGlb = GlbBytes;
 		const size_t BinaryChunkHeaderOffset = 20 + JsonLength;
@@ -571,5 +753,6 @@ namespace
 
 void RunGltfMeshImportTests(TestRunner& Tests)
 {
+	TestGlbJsonReadSkipsBinaryPayload(Tests);
 	TestGltfMeshImport(Tests);
 }

@@ -163,6 +163,13 @@ namespace PulseForge
 		return *m_DirectionalTargets[CascadeIndex];
 	}
 
+	const Texture* SceneRenderer::ShadowTargetCache::DirectionalShadowTexture(size_t CascadeIndex) const noexcept
+	{
+		return CascadeIndex < m_DirectionalTargets.size() && m_DirectionalTargets[CascadeIndex]
+				   ? m_DirectionalTargets[CascadeIndex]->GetDepthTexture()
+				   : nullptr;
+	}
+
 	const BindingSet& SceneRenderer::ShadowTargetCache::DirectionalBindings() const noexcept
 	{
 		return *m_DirectionalBindings;
@@ -181,6 +188,12 @@ namespace PulseForge
 	const RenderTarget* SceneRenderer::ShadowTargetCache::SpotlightTarget(size_t Slot) const noexcept
 	{
 		return Slot < m_SpotlightTargets.size() ? m_SpotlightTargets[Slot].get() : nullptr;
+	}
+
+	const Texture* SceneRenderer::ShadowTargetCache::SpotlightShadowTexture(size_t Slot) const noexcept
+	{
+		const RenderTarget* Target = SpotlightTarget(Slot);
+		return Target ? Target->GetDepthTexture() : nullptr;
 	}
 
 	const DepthCubemap* SceneRenderer::ShadowTargetCache::PointLightCubemap(size_t Slot) const noexcept

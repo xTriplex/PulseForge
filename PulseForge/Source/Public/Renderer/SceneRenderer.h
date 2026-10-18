@@ -162,6 +162,9 @@ namespace PulseForge
 		[[nodiscard]] bool HasPreparedEnvironmentLighting() const noexcept { return m_PreparedEnvironmentReady; }
 		// Narrow diagnostic access used by the opt-in GPU validation harness to read actual cubemap face depth.
 		[[nodiscard]] const Texture* GetPointShadowFaceTextureForValidation(size_t Slot, uint32_t Face) const noexcept;
+		[[nodiscard]] const Texture* GetDirectionalShadowTextureForValidation(size_t Cascade) const noexcept;
+		[[nodiscard]] const Texture* GetSpotlightShadowTextureForValidation(size_t Slot) const noexcept;
+		[[nodiscard]] const Texture* GetAmbientOcclusionDepthTextureForValidation() const noexcept;
 
 	private:
 		struct ProjectAssetCaches;

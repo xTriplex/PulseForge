@@ -18,10 +18,12 @@ namespace PulseForge
 			const BindingLayoutHandle& Layout, const Sampler& ShadowSampler);
 
 		[[nodiscard]] const RenderTarget& DirectionalTarget(size_t CascadeIndex) const noexcept;
+		[[nodiscard]] const Texture* DirectionalShadowTexture(size_t CascadeIndex) const noexcept;
 		[[nodiscard]] const BindingSet& DirectionalBindings() const noexcept;
 		[[nodiscard]] const BindingSet& SpotlightBindings() const noexcept;
 		[[nodiscard]] const BindingSet& PointLightBindings() const noexcept;
 		[[nodiscard]] const RenderTarget* SpotlightTarget(size_t Slot) const noexcept;
+		[[nodiscard]] const Texture* SpotlightShadowTexture(size_t Slot) const noexcept;
 		[[nodiscard]] const DepthCubemap* PointLightCubemap(size_t Slot) const noexcept;
 		[[nodiscard]] const Texture* PointShadowFaceTexture(size_t Slot, uint32_t Face) const noexcept;
 		[[nodiscard]] bool HasSpotlightMaps() const noexcept;

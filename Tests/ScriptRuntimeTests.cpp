@@ -2,6 +2,43 @@
 
 namespace
 {
+	std::vector<std::byte> MakeSilentScriptTestWave()
+	{
+		constexpr uint32_t SampleCount = 44100 * 5;
+		constexpr uint32_t DataSize = SampleCount * 2;
+		std::vector<std::byte> Data(44 + DataSize);
+		auto WriteFourCC = [&Data](size_t Offset, std::string_view Value)
+		{
+			for (size_t Index = 0; Index < Value.size(); ++Index)
+				Data[Offset + Index] = static_cast<std::byte>(static_cast<unsigned char>(Value[Index]));
+		};
+		auto Write16 = [&Data](size_t Offset, uint16_t Value)
+		{
+			Data[Offset] = static_cast<std::byte>(Value & 0xff);
+			Data[Offset + 1] = static_cast<std::byte>((Value >> 8) & 0xff);
+		};
+		auto Write32 = [&Data](size_t Offset, uint32_t Value)
+		{
+			for (size_t Byte = 0; Byte < 4; ++Byte)
+				Data[Offset + Byte] = static_cast<std::byte>((Value >> (Byte * 8)) & 0xff);
+		};
+
+		WriteFourCC(0, "RIFF");
+		Write32(4, static_cast<uint32_t>(Data.size() - 8));
+		WriteFourCC(8, "WAVE");
+		WriteFourCC(12, "fmt ");
+		Write32(16, 16);
+		Write16(20, 1);
+		Write16(22, 1);
+		Write32(24, 44100);
+		Write32(28, 88200);
+		Write16(32, 2);
+		Write16(34, 16);
+		WriteFourCC(36, "data");
+		Write32(40, DataSize);
+		return Data;
+	}
+
 	void TestScriptRuntime(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -493,6 +530,96 @@ end
 		PF_CHECK(Tests, ScriptedPhysicsFrame && ScriptedPhysicsFrame->PhysicsSteps == 1);
 		PF_CHECK(Tests, ScriptedBodyTransform && ScriptedBodyTransform->Translation.y > 0.0f);
 		ScriptedPhysicsRuntime.Stop();
+
+		const UUID ReusedServiceEntityID{ 0x5500000000000000ull, 0x51 };
+		const auto StaleServiceScriptAsset = CreateScriptAsset("stale_services.lua", R"(
+function OnDestroy()
+  local applied, forceError = entity:apply_force(0, 100, 0)
+  local played, playError = entity:play_audio()
+  local paused, pauseError = entity:pause_audio()
+  local resumed, resumeError = entity:resume_audio()
+  local stopped, stopError = entity:stop_audio()
+  assert(applied == nil and string.find(forceError, "no longer valid", 1, true) ~= nil)
+  assert(played == nil and string.find(playError, "no longer valid", 1, true) ~= nil)
+  assert(paused == nil and string.find(pauseError, "no longer valid", 1, true) ~= nil)
+  assert(resumed == nil and string.find(resumeError, "no longer valid", 1, true) ~= nil)
+  assert(stopped == nil and string.find(stopError, "no longer valid", 1, true) ~= nil)
+end
+)");
+		const auto FreshServiceScriptAsset = CreateScriptAsset("fresh_services.lua", R"(
+function OnUpdate()
+  assert(entity:apply_force(0, 100, 0))
+  assert(entity:play_audio())
+end
+function OnDestroy()
+  assert(entity:apply_force(0, 1, 0))
+  assert(entity:play_audio())
+end
+)");
+		PF_CHECK(Tests, StaleServiceScriptAsset && FreshServiceScriptAsset);
+		if (!StaleServiceScriptAsset || !FreshServiceScriptAsset) return;
+
+		const std::vector<std::byte> ServiceAudioWave = MakeSilentScriptTestWave();
+		const auto ServiceAudioAsset =
+			AssetOperations::CreateAssetFromBytes(ProjectResult->GetAssetRegistry(), ProjectResult->GetRootPath(),
+				std::as_bytes(std::span(ServiceAudioWave.data(), ServiceAudioWave.size())), "Assets/Scripts/service_test.wav");
+		PF_CHECK(Tests, ServiceAudioAsset.has_value());
+		if (!ServiceAudioAsset) return;
+
+		auto ServiceAudioEngineResult = AudioEngine::Create({ AudioOutputBackend::Null });
+		PF_CHECK(Tests, ServiceAudioEngineResult.has_value());
+		if (!ServiceAudioEngineResult) return;
+		AudioEngine ServiceAudioEngine = std::move(*ServiceAudioEngineResult);
+		AudioAssetCache ServiceAudioCache(ServiceAudioEngine, ProjectResult->GetRootPath(), ProjectResult->GetAssetRegistry());
+		AudioSceneRuntime ServiceAudioRuntime(ServiceAudioEngine, ServiceAudioCache);
+		PhysicsSceneRuntime ServicePhysicsRuntime(RuntimeDescription.Physics);
+		Scene ReusedServiceScene;
+		const auto OriginalServiceEntity = ReusedServiceScene.CreateEntityWithUUID(ReusedServiceEntityID, "Original service entity");
+		PF_CHECK(Tests, OriginalServiceEntity.has_value());
+		if (!OriginalServiceEntity) return;
+		PF_CHECK(Tests, OriginalServiceEntity->SetRigidbody(RigidbodyComponent{}).has_value());
+		PF_CHECK(Tests, OriginalServiceEntity->SetBoxCollider(BoxColliderComponent{}).has_value());
+		PF_CHECK(Tests,
+			OriginalServiceEntity->SetAudioSource(AudioSourceComponent{ ServiceAudioAsset->ID, 1.0f, false, false, true }).has_value());
+		PF_CHECK(Tests, OriginalServiceEntity->SetScript(ScriptComponent{ StaleServiceScriptAsset->ID }).has_value());
+		PF_CHECK(Tests, ServicePhysicsRuntime.Start(ReusedServiceScene).has_value());
+		PF_CHECK(Tests, ServiceAudioRuntime.Start(ReusedServiceScene).has_value());
+		PF_CHECK(Tests, ServiceAudioRuntime.GetPlaybackCount() == 0);
+		ScriptRuntimeServices ReusedServiceBindings{ .Physics = &ServicePhysicsRuntime, .Audio = &ServiceAudioRuntime };
+		ScriptRuntime ReusedServiceScriptRuntime(*ProjectResult, {}, ReusedServiceBindings);
+		PF_CHECK(Tests, ReusedServiceScriptRuntime.Start(ReusedServiceScene).has_value());
+		PF_CHECK(Tests, ReusedServiceScriptRuntime.Advance(ReusedServiceScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReusedServiceScene.DestroyEntity(*OriginalServiceEntity).has_value());
+		const auto ReplacementServiceEntity = ReusedServiceScene.CreateEntityWithUUID(ReusedServiceEntityID, "Replacement service entity");
+		PF_CHECK(Tests, ReplacementServiceEntity.has_value());
+		if (!ReplacementServiceEntity) return;
+		PF_CHECK(Tests, ReplacementServiceEntity->SetRigidbody(RigidbodyComponent{}).has_value());
+		PF_CHECK(Tests, ReplacementServiceEntity->SetBoxCollider(BoxColliderComponent{}).has_value());
+		PF_CHECK(Tests,
+			ReplacementServiceEntity->SetAudioSource(AudioSourceComponent{ ServiceAudioAsset->ID, 1.0f, false, false, false }).has_value());
+		PF_CHECK(Tests, ReusedServiceScriptRuntime.Advance(ReusedServiceScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReusedServiceScriptRuntime.GetDiagnostics().empty());
+		PF_CHECK(Tests, ServiceAudioRuntime.GetPlaybackCount() == 0);
+		const auto NoStaleForceFrame = ServicePhysicsRuntime.Advance(ReusedServiceScene, Timestep(0.1));
+		const auto NoStaleForceTransform = ReplacementServiceEntity->GetTransform();
+		PF_CHECK(Tests, NoStaleForceFrame && *NoStaleForceFrame == 1);
+		PF_CHECK(Tests, NoStaleForceTransform && NoStaleForceTransform->Translation.y < 0.0f);
+		PF_CHECK(Tests, ServiceAudioRuntime.Advance(ReusedServiceScene).has_value());
+		PF_CHECK(Tests, ServiceAudioRuntime.GetPlaybackCount() == 0);
+
+		PF_CHECK(Tests, ReplacementServiceEntity->SetScript(ScriptComponent{ FreshServiceScriptAsset->ID }).has_value());
+		PF_CHECK(Tests, ReusedServiceScriptRuntime.Advance(ReusedServiceScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ReusedServiceScriptRuntime.GetDiagnostics().empty());
+		PF_CHECK(Tests, ServiceAudioRuntime.GetPlaybackCount() == 1);
+		const auto FreshServiceForceFrame = ServicePhysicsRuntime.Advance(ReusedServiceScene, Timestep(0.1));
+		const auto FreshServiceTransform = ReplacementServiceEntity->GetTransform();
+		PF_CHECK(Tests, FreshServiceForceFrame && *FreshServiceForceFrame == 1);
+		PF_CHECK(Tests,
+			FreshServiceTransform && NoStaleForceTransform && FreshServiceTransform->Translation.y > NoStaleForceTransform->Translation.y);
+		ReusedServiceScriptRuntime.Stop();
+		PF_CHECK(Tests, ReusedServiceScriptRuntime.GetDiagnostics().empty());
+		ServiceAudioRuntime.Stop();
+		ServicePhysicsRuntime.Stop();
 
 		constexpr std::string_view UnavailableServicesScript = R"(
 function OnUpdate()

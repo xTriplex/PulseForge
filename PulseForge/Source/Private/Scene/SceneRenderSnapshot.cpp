@@ -25,6 +25,17 @@ namespace PulseForge
 		return Result;
 	}
 
+	WorldTransformOrientation ClassifyWorldTransform(const glm::mat4& WorldTransform) noexcept
+	{
+		for (int Column = 0; Column < 4; ++Column)
+			for (int Row = 0; Row < 4; ++Row)
+				if (!std::isfinite(WorldTransform[Column][Row])) return WorldTransformOrientation::Singular;
+
+		const float Determinant = glm::determinant(glm::mat3(WorldTransform));
+		if (!std::isfinite(Determinant) || std::abs(Determinant) <= 1.0e-8f) return WorldTransformOrientation::Singular;
+		return Determinant < 0.0f ? WorldTransformOrientation::Mirrored : WorldTransformOrientation::Normal;
+	}
+
 	namespace
 	{
 		bool IsFinite(const glm::mat4& Matrix)
@@ -226,8 +237,15 @@ namespace PulseForge
 						Current.GetUUID(),
 						"Mesh entity world transform contains a non-finite matrix value"));
 				}
+				const WorldTransformOrientation Orientation = ClassifyWorldTransform(*WorldTransform);
+				if (Orientation == WorldTransformOrientation::Singular)
+				{
+					return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidMeshTransform, Current.GetUUID(),
+						"Mesh entity world transform is singular and cannot preserve face orientation"));
+				}
 
-				Snapshot.Meshes.push_back({ Current.GetUUID(), Component.MeshAsset, Component.MaterialAsset, *WorldTransform });
+				Snapshot.Meshes.push_back(
+					{ Current.GetUUID(), Component.MeshAsset, Component.MaterialAsset, *WorldTransform, Orientation });
 			}
 			return Snapshot;
 		}

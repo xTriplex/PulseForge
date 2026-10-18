@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <span>
 
 namespace PulseForge
@@ -60,10 +61,12 @@ namespace PulseForge
 			if (auto TargetResult = Resources.Targets.EnsurePointLightCubemaps(Resources.PointLightLayout, Resources.ShadowSampler);
 				!TargetResult)
 				return std::unexpected(std::move(TargetResult.error()));
-			if (auto Pipeline = Resources.Pipelines.EnsurePointShadowPipeline(false); !Pipeline)
-				return std::unexpected(std::move(Pipeline.error()));
-			if (auto Pipeline = Resources.Pipelines.EnsurePointShadowPipeline(true); !Pipeline)
-				return std::unexpected(std::move(Pipeline.error()));
+			for (const bool DoubleSided : { false, true })
+				for (const bool Mirrored : { false, true })
+					if (auto Pipeline = Resources.Pipelines.EnsurePointShadowPipeline(
+							DoubleSided, Mirrored ? WorldTransformOrientation::Mirrored : WorldTransformOrientation::Normal);
+						!Pipeline)
+						return std::unexpected(std::move(Pipeline.error()));
 		}
 
 		return Resources.LocalLighting.Commit();
@@ -87,10 +90,11 @@ namespace PulseForge
 				auto MaterialBinding = Resources.MaterialBindings.ResolveMaterialBinding(Instance, Resources.BindingEnvironmentAsset);
 				if (!MaterialBinding) return std::unexpected(std::move(MaterialBinding.error()));
 				if (auto PipelineResult = Resources.Pipelines.EnsureShadowPipeline(
-						Resources.Snapshot->DirectionalLight->ShadowBias, (*Material)->DoubleSided);
+						Resources.Snapshot->DirectionalLight->ShadowBias, (*Material)->DoubleSided, Instance.Orientation);
 					!PipelineResult)
 					return std::unexpected(std::move(PipelineResult.error()));
-				const GraphicsPipeline* Pipeline = Resources.Pipelines.FindShadowPipeline(RasterBias, (*Material)->DoubleSided);
+				const GraphicsPipeline* Pipeline =
+					Resources.Pipelines.FindShadowPipeline(RasterBias, (*Material)->DoubleSided, Instance.Orientation);
 				if (!Pipeline) return std::unexpected(MakeShadowResourceError("Directional alpha-tested shadow pipeline was not prepared"));
 				auto Mesh = Resources.Meshes.GetOrLoad(Instance.MeshAsset);
 				if (!Mesh) return std::unexpected(MakeShadowDrawError("Shadow pass mesh became unavailable: " + Mesh.error().Message));
@@ -128,9 +132,11 @@ namespace PulseForge
 				if ((*Material)->AlphaMode == MaterialAlphaMode::Blend) continue;
 				auto MaterialBinding = Resources.MaterialBindings.ResolveMaterialBinding(Instance, Resources.BindingEnvironmentAsset);
 				if (!MaterialBinding) return std::unexpected(std::move(MaterialBinding.error()));
-				if (auto PipelineResult = Resources.Pipelines.EnsureShadowPipeline(1.0f, (*Material)->DoubleSided); !PipelineResult)
+				if (auto PipelineResult = Resources.Pipelines.EnsureShadowPipeline(1.0f, (*Material)->DoubleSided, Instance.Orientation);
+					!PipelineResult)
 					return std::unexpected(std::move(PipelineResult.error()));
-				const GraphicsPipeline* Pipeline = Resources.Pipelines.FindShadowPipeline(1, (*Material)->DoubleSided);
+				const GraphicsPipeline* Pipeline =
+					Resources.Pipelines.FindShadowPipeline(1, (*Material)->DoubleSided, Instance.Orientation);
 				if (!Pipeline) return std::unexpected(MakeShadowResourceError("Spotlight alpha-tested shadow pipeline was not prepared"));
 				auto Mesh = Resources.Meshes.GetOrLoad(Instance.MeshAsset);
 				if (!Mesh)
@@ -158,7 +164,10 @@ namespace PulseForge
 	{
 		const auto SelectedLights = Resources.LocalLighting.SelectedLights();
 		if (!Resources.Snapshot || Resources.Snapshot->Meshes.empty() || !Resources.Targets.HasPointLightCubemaps()) return {};
-		if (!Resources.Pipelines.FindPointShadowPipeline(false) && !Resources.Pipelines.FindPointShadowPipeline(true))
+		if (!Resources.Pipelines.FindPointShadowPipeline(false, WorldTransformOrientation::Normal) ||
+			!Resources.Pipelines.FindPointShadowPipeline(false, WorldTransformOrientation::Mirrored) ||
+			!Resources.Pipelines.FindPointShadowPipeline(true, WorldTransformOrientation::Normal) ||
+			!Resources.Pipelines.FindPointShadowPipeline(true, WorldTransformOrientation::Mirrored))
 			return std::unexpected(MakeShadowResourceError("Point-shadow pipeline was not prepared for active shadow owners"));
 
 		for (size_t Slot = 0; Slot < Resources.LocalLighting.PointSlotOwners().size(); ++Slot)
@@ -189,7 +198,8 @@ namespace PulseForge
 					if ((*Material)->AlphaMode == MaterialAlphaMode::Blend) continue;
 					auto MaterialBinding = Resources.MaterialBindings.ResolveMaterialBinding(Instance, Resources.BindingEnvironmentAsset);
 					if (!MaterialBinding) return std::unexpected(std::move(MaterialBinding.error()));
-					const GraphicsPipeline* Pipeline = Resources.Pipelines.FindPointShadowPipeline((*Material)->DoubleSided);
+					const GraphicsPipeline* Pipeline =
+						Resources.Pipelines.FindPointShadowPipeline((*Material)->DoubleSided, Instance.Orientation);
 					if (!Pipeline) return std::unexpected(MakeShadowResourceError("Point-shadow alpha-tested pipeline was not prepared"));
 					auto Mesh = Resources.Meshes.GetOrLoad(Instance.MeshAsset);
 					if (!Mesh)
