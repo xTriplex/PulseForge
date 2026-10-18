@@ -2,6 +2,7 @@
 
 #include "Renderer/Vulkan/VulkanSupport.h"
 
+#include <iterator>
 #include <vector>
 
 namespace
@@ -60,6 +61,164 @@ namespace
 		PF_CHECK(Tests, ShouldRetireDeferredSwapchains(false, true, 2, 2, true));
 	}
 
+	void TestPresentationCapabilitySelection(TestRunner& Tests)
+	{
+		const PresentationInstanceExtensionAvailability KhrInstance{ true, true, true, false };
+		const PresentationInstanceExtensionAvailability ExtInstance{ true, true, false, true };
+		const PresentationInstanceExtensionAvailability BothInstances{ true, true, true, true };
+		const PresentationInstanceExtensionAvailability MissingCapabilities2{ true, false, true, true };
+		const PresentationInstanceExtensionAvailability MissingSurface{ false, true, true, true };
+		const auto KhrEnabled = PlanPresentationInstanceExtensions(KhrInstance);
+		const auto ExtEnabled = PlanPresentationInstanceExtensions(ExtInstance);
+		const auto BothEnabled = PlanPresentationInstanceExtensions(BothInstances);
+		const auto MissingDependencyEnabled = PlanPresentationInstanceExtensions(MissingCapabilities2);
+
+		PF_CHECK(Tests, KhrEnabled.SurfaceCapabilities2 && KhrEnabled.KhrSurfaceMaintenance && !KhrEnabled.ExtSurfaceMaintenance);
+		PF_CHECK(Tests, ExtEnabled.SurfaceCapabilities2 && !ExtEnabled.KhrSurfaceMaintenance && ExtEnabled.ExtSurfaceMaintenance);
+		PF_CHECK(Tests, BothEnabled.KhrSurfaceMaintenance && BothEnabled.ExtSurfaceMaintenance);
+		PF_CHECK(Tests, !MissingDependencyEnabled.SurfaceCapabilities2 && !MissingDependencyEnabled.KhrSurfaceMaintenance &&
+							!MissingDependencyEnabled.ExtSurfaceMaintenance);
+
+		const auto KhrOnly = EvaluatePresentationFenceCapability(KhrInstance, KhrEnabled, { true, true, false }, true);
+		PF_CHECK(Tests, KhrOnly.Mechanism == PresentationRetirementMechanism::KhrMaintenanceFence);
+
+		const auto ExtOnly = EvaluatePresentationFenceCapability(ExtInstance, ExtEnabled, { true, false, true }, true);
+		PF_CHECK(Tests, ExtOnly.Mechanism == PresentationRetirementMechanism::ExtMaintenanceFence);
+
+		const auto PreferKhr = EvaluatePresentationFenceCapability(BothInstances, BothEnabled, { true, true, true }, true);
+		PF_CHECK(Tests, PreferKhr.Mechanism == PresentationRetirementMechanism::KhrMaintenanceFence);
+
+		// Both instance variants are enabled, so an EXT-only physical device remains eligible.
+		const auto ExtDeviceWithBothInstances =
+			EvaluatePresentationFenceCapability(BothInstances, BothEnabled, { true, false, true }, true);
+		PF_CHECK(Tests, ExtDeviceWithBothInstances.Mechanism == PresentationRetirementMechanism::ExtMaintenanceFence);
+
+		const auto KHRDeviceWithBothInstances =
+			EvaluatePresentationFenceCapability(BothInstances, BothEnabled, { true, true, false }, true);
+		PF_CHECK(Tests, KHRDeviceWithBothInstances.Mechanism == PresentationRetirementMechanism::KhrMaintenanceFence);
+
+		const auto MismatchedExtensions = EvaluatePresentationFenceCapability(KhrInstance, KhrEnabled, { true, false, true }, true);
+		PF_CHECK(Tests, !MismatchedExtensions.HasFences());
+		PF_CHECK(Tests, MismatchedExtensions.Reason == PresentationFenceCapabilityReason::MissingMatchingSwapchainMaintenanceExtension);
+
+		const auto MissingFeature = EvaluatePresentationFenceCapability(KhrInstance, KhrEnabled, { true, true, false }, false);
+		PF_CHECK(Tests, !MissingFeature.HasFences());
+		PF_CHECK(Tests, MissingFeature.Reason == PresentationFenceCapabilityReason::FeatureUnsupported);
+
+		const auto MissingCaps2 =
+			EvaluatePresentationFenceCapability(MissingCapabilities2, MissingDependencyEnabled, { true, true, true }, true);
+		PF_CHECK(Tests, MissingCaps2.Reason == PresentationFenceCapabilityReason::MissingSurfaceCapabilities2);
+
+		const auto MissingSurfacePath = EvaluatePresentationFenceCapability(
+			MissingSurface, PlanPresentationInstanceExtensions(MissingSurface), { true, true, true }, true);
+		PF_CHECK(Tests, MissingSurfacePath.Reason == PresentationFenceCapabilityReason::MissingSurfaceExtension);
+
+		const auto MissingBothVariants = EvaluatePresentationFenceCapability(
+			{ true, true, false, false }, PlanPresentationInstanceExtensions({ true, true, false, false }), { true, false, false }, false);
+		PF_CHECK(Tests, MissingBothVariants.Reason == PresentationFenceCapabilityReason::MissingSurfaceMaintenanceExtension);
+
+		const auto NoDeviceExtensions = EvaluatePresentationFenceCapability(BothInstances, BothEnabled, { true, false, false }, false);
+		PF_CHECK(Tests, NoDeviceExtensions.Reason == PresentationFenceCapabilityReason::MissingMatchingSwapchainMaintenanceExtension);
+		PF_CHECK(Tests, !HasCompatiblePresentationFencePath(BothEnabled, { true, false, false }));
+	}
+
+	void TestPresentationPoliciesAndCandidatePreference(TestRunner& Tests)
+	{
+		PF_CHECK(Tests, ParsePresentationPolicy("") == PresentationPolicy::Compatible);
+		PF_CHECK(Tests, ParsePresentationPolicy("auto") == PresentationPolicy::Compatible);
+		PF_CHECK(Tests, ParsePresentationPolicy("compatible") == PresentationPolicy::Compatible);
+		PF_CHECK(Tests, ParsePresentationPolicy("require-fences") == PresentationPolicy::RequireFences);
+		PF_CHECK(Tests, !ParsePresentationPolicy("required").has_value());
+
+		const PresentationFenceCapability Supported{ PresentationRetirementMechanism::ExtMaintenanceFence,
+			PresentationFenceCapabilityReason::Available };
+		const PresentationFenceCapability Unsupported{ PresentationRetirementMechanism::LegacyBestEffort,
+			PresentationFenceCapabilityReason::FeatureUnsupported };
+		const auto AutoFences = ResolvePresentationPolicy(PresentationPolicy::Compatible, Supported, false);
+		PF_CHECK(Tests, AutoFences.Eligible && AutoFences.Mechanism == PresentationRetirementMechanism::ExtMaintenanceFence);
+		const auto StrictFences = ResolvePresentationPolicy(PresentationPolicy::RequireFences, Supported, false);
+		PF_CHECK(Tests, StrictFences.Eligible && StrictFences.Mechanism == PresentationRetirementMechanism::ExtMaintenanceFence);
+
+		const auto CompatibleFallback = ResolvePresentationPolicy(PresentationPolicy::Compatible, Unsupported, false);
+		PF_CHECK(Tests, CompatibleFallback.Eligible);
+		PF_CHECK(Tests, CompatibleFallback.Mechanism == PresentationRetirementMechanism::LegacyBestEffort);
+		PF_CHECK(Tests, CompatibleFallback.Reason == PresentationFenceCapabilityReason::FeatureUnsupported);
+		const auto StrictReject = ResolvePresentationPolicy(PresentationPolicy::RequireFences, Unsupported, false);
+		PF_CHECK(Tests, !StrictReject.Eligible);
+		PF_CHECK(Tests, StrictReject.Reason == PresentationFenceCapabilityReason::FeatureUnsupported);
+
+		const auto ForcedLegacy = ResolvePresentationPolicy(PresentationPolicy::Compatible, Supported, true);
+		PF_CHECK(Tests, ForcedLegacy.Eligible && ForcedLegacy.Mechanism == PresentationRetirementMechanism::LegacyBestEffort);
+		PF_CHECK(Tests, ForcedLegacy.Reason == PresentationFenceCapabilityReason::ForcedLegacyForTesting);
+		const auto StrictForcedConflict = ResolvePresentationPolicy(PresentationPolicy::RequireFences, Supported, true);
+		PF_CHECK(Tests, !StrictForcedConflict.Eligible);
+		PF_CHECK(Tests, StrictForcedConflict.Reason == PresentationFenceCapabilityReason::StrictPolicyConflictsWithForcedLegacy);
+
+		// Fence support outranks device-type score; scoring decides among equivalent paths.
+		PF_CHECK(Tests, IsBetterPresentationCandidate(true, 200, false, 300));
+		PF_CHECK(Tests, !IsBetterPresentationCandidate(false, 300, true, 200));
+		PF_CHECK(Tests, IsBetterPresentationCandidate(true, 300, true, 200));
+		PF_CHECK(Tests, !IsBetterPresentationCandidate(false, 200, false, 300));
+
+		struct Candidate
+		{
+			bool Eligible;
+			bool HasFences;
+			int Score;
+		};
+		const Candidate Devices[] = { { true, false, 300 }, { true, true, 200 }, { false, false, 500 } };
+		std::optional<size_t> CompatibleBest;
+		std::optional<size_t> StrictBest;
+		for (size_t Index = 0; Index < std::size(Devices); ++Index)
+		{
+			const Candidate& Device = Devices[Index];
+			if (Device.Eligible && (!CompatibleBest || IsBetterPresentationCandidate(Device.HasFences, Device.Score,
+														   Devices[*CompatibleBest].HasFences, Devices[*CompatibleBest].Score)))
+				CompatibleBest = Index;
+			if (Device.Eligible && Device.HasFences &&
+				(!StrictBest || IsBetterPresentationCandidate(
+									Device.HasFences, Device.Score, Devices[*StrictBest].HasFences, Devices[*StrictBest].Score)))
+				StrictBest = Index;
+		}
+		PF_CHECK(Tests, CompatibleBest == 1);
+		PF_CHECK(Tests, StrictBest == 1);
+	}
+
+	void TestPresentationRequestDisposition(TestRunner& Tests)
+	{
+		using Disposition = PresentationRequestDisposition;
+		PF_CHECK(Tests, ResolvePresentationRequestDisposition(PresentationQueueResult::Success) == Disposition::Enqueued);
+		PF_CHECK(Tests, ResolvePresentationRequestDisposition(PresentationQueueResult::Suboptimal) == Disposition::Enqueued);
+		PF_CHECK(Tests, ResolvePresentationRequestDisposition(PresentationQueueResult::OutOfDate) == Disposition::Enqueued);
+		PF_CHECK(Tests, ResolvePresentationRequestDisposition(PresentationQueueResult::SurfaceLost) == Disposition::Enqueued);
+		PF_CHECK(Tests, ResolvePresentationRequestDisposition(PresentationQueueResult::FullscreenExclusiveLost) == Disposition::Enqueued);
+		PF_CHECK(Tests, ResolvePresentationRequestDisposition(PresentationQueueResult::PresentTimingQueueFull) == Disposition::Enqueued);
+		PF_CHECK(Tests, ResolvePresentationRequestDisposition(PresentationQueueResult::OutOfHostMemory) == Disposition::NotEnqueued);
+		PF_CHECK(Tests, ResolvePresentationRequestDisposition(PresentationQueueResult::OutOfDeviceMemory) == Disposition::NotEnqueued);
+		PF_CHECK(Tests, ResolvePresentationRequestDisposition(PresentationQueueResult::DeviceLost) == Disposition::Indeterminate);
+		PF_CHECK(Tests, ResolvePresentationRequestDisposition(PresentationQueueResult::OtherFailure) == Disposition::Indeterminate);
+
+		using Action = PresentationRecoveryAction;
+		const auto Success = ResolvePresentationResult(PresentationQueueResult::Success);
+		PF_CHECK(Tests, Success.RequestDisposition == Disposition::Enqueued);
+		PF_CHECK(Tests, Success.RecoveryAction == Action::Continue && Success.CurrentSwapchainUsable);
+		const auto Suboptimal = ResolvePresentationResult(PresentationQueueResult::Suboptimal);
+		PF_CHECK(Tests, Suboptimal.RequestDisposition == Disposition::Enqueued);
+		PF_CHECK(Tests, Suboptimal.RecoveryAction == Action::RecreateSwapchain && Suboptimal.CurrentSwapchainUsable);
+		const auto OutOfDate = ResolvePresentationResult(PresentationQueueResult::OutOfDate);
+		PF_CHECK(Tests, OutOfDate.RequestDisposition == Disposition::Enqueued);
+		PF_CHECK(Tests, OutOfDate.RecoveryAction == Action::RecreateSwapchain && !OutOfDate.CurrentSwapchainUsable);
+		const auto FailedEnqueue = ResolvePresentationResult(PresentationQueueResult::OutOfHostMemory);
+		PF_CHECK(Tests, FailedEnqueue.RequestDisposition == Disposition::NotEnqueued);
+		PF_CHECK(Tests, FailedEnqueue.RecoveryAction == Action::BlockHost && !FailedEnqueue.CurrentSwapchainUsable);
+		const auto LostSurface = ResolvePresentationResult(PresentationQueueResult::SurfaceLost);
+		PF_CHECK(Tests, LostSurface.RequestDisposition == Disposition::Enqueued);
+		PF_CHECK(Tests, LostSurface.RecoveryAction == Action::BlockHost && !LostSurface.CurrentSwapchainUsable);
+		const auto Indeterminate = ResolvePresentationResult(PresentationQueueResult::OtherFailure);
+		PF_CHECK(Tests, Indeterminate.RequestDisposition == Disposition::Indeterminate);
+		PF_CHECK(Tests, Indeterminate.RecoveryAction == Action::BlockHost && !Indeterminate.CurrentSwapchainUsable);
+	}
+
 	void TestFormatUsageCapabilities(TestRunner& Tests)
 	{
 		const FormatFeatureSupport AllFeatures{ true, true, true };
@@ -115,6 +274,9 @@ void RunRendererPolicyTests(TestRunner& Tests)
 	TestQueueFamilySelection(Tests);
 	TestRequiredDeviceFeatures(Tests);
 	TestSwapchainRetirementPolicy(Tests);
+	TestPresentationCapabilitySelection(Tests);
+	TestPresentationPoliciesAndCandidatePreference(Tests);
+	TestPresentationRequestDisposition(Tests);
 	TestFormatUsageCapabilities(Tests);
 	TestSurfaceAndPresentationSelection(Tests);
 	TestExtentAndImageCountSelection(Tests);
