@@ -13,8 +13,17 @@ if(BUILD_TESTING)
 			endif()
 		endforeach()
 	else()
-		if(NOT TARGET PulseForgeEditorCoreTests)
-			message(FATAL_ERROR "BUILD_TESTING requires the independent PulseForgeEditorCoreTests target")
+		if(TARGET PulseForgeEditorCore)
+			foreach(TestTarget PulseForgeEditorCoreConsumer PulseForgeEditorCoreTests
+					PulseForgeCommandHistoryFailureTests PulseForgeEditorDocumentTransferFailureTests)
+				if(NOT TARGET ${TestTarget})
+					message(FATAL_ERROR
+						"PulseForgeEditorCore exists but its registered test executable '${TestTarget}' is missing")
+				endif()
+			endforeach()
+		elseif(NOT PULSEFORGE_PLATFORM_LINUX)
+			message(FATAL_ERROR
+				"Non-Linux BUILD_TESTING requires the independent PulseForgeEditorCore test target")
 		endif()
 		foreach(TestTarget IN LISTS PULSEFORGE_TEST_EXECUTABLE_TARGETS)
 			if(NOT TARGET ${TestTarget})
@@ -31,6 +40,16 @@ if(BUILD_TESTING)
 		elseif(TARGET PulseForgeEditorUI OR TARGET PulseForgeEditorTests OR TARGET PulseForgeImGui)
 			message(FATAL_ERROR "Editor-disabled configuration must not create editor UI or its tests")
 		endif()
+		if(PULSEFORGE_PLATFORM_LINUX)
+			foreach(UnsupportedEditorTarget PulseForgeEditorCore PulseForgeEditorCoreConsumer PulseForgeEditorCoreTests
+					PulseForgeCommandHistoryFailureTests PulseForgeEditorDocumentTransferFailureTests
+					PulseForgeEditorWorkspacePresentationTests PulseForgeEditorTests)
+				if(TARGET ${UnsupportedEditorTarget})
+					message(FATAL_ERROR
+						"Linux runtime testing does not support '${UnsupportedEditorTarget}'; disable editor-only targets")
+				endif()
+			endforeach()
+		endif()
 	endif()
 endif()
 
@@ -41,7 +60,8 @@ foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSe
 		PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI PulseForgeRendererTests PulseForgeRenderMathTests PulseForgeGpuValidationAnalysis PulseForgeGpuValidationAnalysisTests
 		PulseForgeCoreTests PulseForgeCoreConsumer PulseForgeSceneTests PulseForgeAssetTests PulseForgeAssetImportTests PulseForgeAssetImporterConsumer PulseForgeAudioRuntimeTests
 		PulseForgeSceneRendererConsumer PulseForgeEditorCoreConsumer PulseForgeScriptingRuntimeTests PulseForgeEditorTests PulseForgeEditorWorkspacePresentationTests PulseForgeEditorCoreTests
-		PulseForgeBufferUpdateTests PulseForgeCommandHistoryFailureTests PulseForgeEditorDocumentTransferFailureTests PulseForgeGpuValidation)
+		PulseForgeBufferUpdateTests PulseForgeCommandHistoryFailureTests PulseForgeEditorDocumentTransferFailureTests PulseForgeGpuValidation
+		PulseForgeLinuxWindowLifecycleValidation)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE
 			$<$<CXX_COMPILER_ID:MSVC>:/EHsc>
