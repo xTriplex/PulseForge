@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 
+#include "Assets/AssetID.h"
 #include "Assets/Project.h"
 #include "Scene/Entity.h"
 
@@ -52,8 +53,11 @@ namespace PulseForge::GpuValidation
 		std::optional<Entity> m_Light;
 		std::optional<Entity> m_SpotLight;
 		std::optional<Entity> m_PointLight;
+		AssetID m_MeshAssetID;
+		AssetID m_DoubleSidedMaterialAssetID;
 		size_t m_ScenarioIndex = 0;
 		bool m_ScenePrepared = false;
 		bool m_ReadbackPending = false;
+		bool m_ShadowProbe = false;
 	};
 } // namespace PulseForge::GpuValidation

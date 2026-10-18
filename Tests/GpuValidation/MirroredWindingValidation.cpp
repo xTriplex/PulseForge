@@ -20,6 +20,8 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <span>
@@ -130,6 +132,22 @@ namespace PulseForge::GpuValidation
 		{
 			if (!Condition) throw std::runtime_error(std::move(Message));
 		}
+
+		size_t CountWrittenDepthPixels(const TextureReadback& Readback)
+		{
+			if (Readback.Format != TextureFormat::Depth32Float ||
+				Readback.Pixels.size() != static_cast<size_t>(Readback.Width) * Readback.Height * sizeof(float))
+				return 0;
+
+			size_t WrittenPixels = 0;
+			for (size_t Offset = 0; Offset < Readback.Pixels.size(); Offset += sizeof(float))
+			{
+				float Depth = 1.0f;
+				std::memcpy(&Depth, Readback.Pixels.data() + Offset, sizeof(Depth));
+				if (std::isfinite(Depth) && Depth >= 0.0f && Depth < 0.99999f) ++WrittenPixels;
+			}
+			return WrittenPixels;
+		}
 	} // namespace
 
 	MirroredWindingValidation::MirroredWindingValidation(
@@ -157,6 +175,7 @@ namespace PulseForge::GpuValidation
 		WriteFile(MeshPath, MakeTriangleGltf());
 		const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(MeshPath);
 		Require(Metadata.has_value(), Metadata ? "Unexpected metadata creation state" : Metadata.error().Message);
+		m_MeshAssetID = Metadata->ID;
 		const std::filesystem::path DoubleSidedMaterialPath = m_Project->GetRootPath() / "Assets" / "DoubleSided.material";
 		MaterialAssetDesc DoubleSidedMaterial;
 		DoubleSidedMaterial.BaseColorFactor = { 0.05f, 1.0f, 0.05f, 1.0f };
@@ -169,6 +188,7 @@ namespace PulseForge::GpuValidation
 		const auto DoubleSidedMaterialMetadata = AssetMetadataSerializer::CreateForNewAsset(DoubleSidedMaterialPath);
 		Require(DoubleSidedMaterialMetadata.has_value(),
 			DoubleSidedMaterialMetadata ? "Unexpected material metadata creation state" : DoubleSidedMaterialMetadata.error().Message);
+		m_DoubleSidedMaterialAssetID = DoubleSidedMaterialMetadata->ID;
 		const auto Registry = m_Project->GetAssetRegistry().Rebuild(m_Project->GetRootPath());
 		Require(Registry.has_value(), "Could not register mirrored-winding glTF fixture");
 
@@ -266,29 +286,87 @@ namespace PulseForge::GpuValidation
 		if (m_ReadbackPending)
 		{
 			const TransformCase& PreviousCase = TransformCases[m_ScenarioIndex];
-			const Texture* Color = m_OutputTarget->GetColorTexture();
-			if (!Color) return std::unexpected("Mirrored-winding output target has no color attachment");
-			const auto Readback = m_Runtime.ReadTextureForValidation(*Color);
-			if (!Readback) return std::unexpected("Could not read mirrored-winding output: " + Readback.error().Message);
-			if (Readback->Format != TextureFormat::RGBA8_Srgb || Readback->Width != OutputExtent || Readback->Height != OutputExtent ||
-				Readback->Pixels.size() != static_cast<size_t>(OutputExtent) * OutputExtent * 4)
-				return std::unexpected("Mirrored-winding output readback has an unexpected format or extent");
-
-			size_t VisiblePixels = 0;
-			size_t GreenMaterialPixels = 0;
-			for (size_t Pixel = 0; Pixel < static_cast<size_t>(OutputExtent) * OutputExtent; ++Pixel)
+			if (!m_ShadowProbe)
 			{
-				const uint8_t Red = std::to_integer<uint8_t>(Readback->Pixels[Pixel * 4]);
-				const uint8_t Green = std::to_integer<uint8_t>(Readback->Pixels[Pixel * 4 + 1]);
-				const uint8_t Blue = std::to_integer<uint8_t>(Readback->Pixels[Pixel * 4 + 2]);
-				if (std::max({ Red, Green, Blue }) > 12) ++VisiblePixels;
-				if (Green > Red + 20 && Green > Blue + 20) ++GreenMaterialPixels;
-			}
-			if (VisiblePixels < MinimumVisiblePixels * 2 || GreenMaterialPixels < MinimumVisiblePixels)
-				return std::unexpected(std::string(PreviousCase.Name) + " did not visibly render both default and double-sided materials");
+				const Texture* Color = m_OutputTarget->GetColorTexture();
+				if (!Color) return std::unexpected("Mirrored-winding output target has no color attachment");
+				const auto Readback = m_Runtime.ReadTextureForValidation(*Color);
+				if (!Readback) return std::unexpected("Could not read mirrored-winding output: " + Readback.error().Message);
+				if (Readback->Format != TextureFormat::RGBA8_Srgb || Readback->Width != OutputExtent || Readback->Height != OutputExtent ||
+					Readback->Pixels.size() != static_cast<size_t>(OutputExtent) * OutputExtent * 4)
+					return std::unexpected("Mirrored-winding output readback has an unexpected format or extent");
 
-			PF_INFO("MIRRORED_WINDING_CASE={} visible_pixels={} double_sided_pixels={} geometry_draws={}", PreviousCase.Name, VisiblePixels,
-				GreenMaterialPixels, 2);
+				size_t DefaultMaterialPixels = 0;
+				size_t DoubleSidedMaterialPixels = 0;
+				for (size_t Pixel = 0; Pixel < static_cast<size_t>(OutputExtent) * OutputExtent; ++Pixel)
+				{
+					const uint8_t Red = std::to_integer<uint8_t>(Readback->Pixels[Pixel * 4]);
+					const uint8_t Green = std::to_integer<uint8_t>(Readback->Pixels[Pixel * 4 + 1]);
+					const uint8_t Blue = std::to_integer<uint8_t>(Readback->Pixels[Pixel * 4 + 2]);
+					if (std::max({ Red, Green, Blue }) <= 12) continue;
+					if (Green > Red + 20 && Green > Blue + 20) ++DoubleSidedMaterialPixels;
+					else ++DefaultMaterialPixels;
+				}
+				if (DefaultMaterialPixels < MinimumVisiblePixels || DoubleSidedMaterialPixels < MinimumVisiblePixels)
+					return std::unexpected(std::string(PreviousCase.Name) +
+										   " material visibility was below threshold (default=" + std::to_string(DefaultMaterialPixels) +
+										   ", double-sided=" + std::to_string(DoubleSidedMaterialPixels) + ")");
+
+				PF_INFO("MIRRORED_WINDING_CASE={} default_pixels={} double_sided_pixels={} geometry_draws={}", PreviousCase.Name,
+					DefaultMaterialPixels, DoubleSidedMaterialPixels, 2);
+
+				if (const auto Removed = m_DoubleSidedMesh->RemoveMeshRenderer(); !Removed)
+					return std::unexpected("Could not isolate the single-sided caster for shadow validation: " + Removed.error().Message);
+				m_ShadowProbe = true;
+				auto Prepared = m_Renderer->PrepareScene(*m_Scene, m_Camera->GetUUID(), 1.0f);
+				if (!Prepared)
+					return std::unexpected(
+						std::string("Could not prepare ") + PreviousCase.Name + " single-sided shadow probe: " + Prepared.error().Message);
+				m_ScenePrepared = true;
+				m_ReadbackPending = false;
+				return false;
+			}
+
+			const auto ReadDepth = [this](const Texture* TextureToRead, uint32_t ArraySlice,
+									   std::string_view Name) -> std::expected<size_t, std::string>
+			{
+				if (!TextureToRead) return std::unexpected(std::string(Name) + " texture was not created");
+				auto Readback = m_Runtime.ReadTextureForValidation(*TextureToRead, ArraySlice);
+				if (!Readback)
+					return std::unexpected(std::string("Could not read ") + std::string(Name) + " depth: " + Readback.error().Message);
+				return CountWrittenDepthPixels(*Readback);
+			};
+			const Texture* DirectionalDepth = m_Renderer->GetDirectionalShadowTextureForValidation(0);
+			auto DirectionalPixels = ReadDepth(DirectionalDepth, 0, "directional shadow");
+			if (!DirectionalPixels || *DirectionalPixels == 0)
+				return std::unexpected(
+					std::string(PreviousCase.Name) + ": " +
+					(DirectionalPixels ? "directional shadow map contains no rasterized geometry" : DirectionalPixels.error()));
+			auto SpotlightPixels = ReadDepth(m_Renderer->GetSpotlightShadowTextureForValidation(0), 0, "spotlight shadow");
+			if (!SpotlightPixels || *SpotlightPixels == 0)
+				return std::unexpected(
+					std::string(PreviousCase.Name) + ": " +
+					(SpotlightPixels ? "spotlight shadow map contains no rasterized geometry" : SpotlightPixels.error()));
+			auto AoPixels = ReadDepth(m_Renderer->GetAmbientOcclusionDepthTextureForValidation(), 0, "AO prepass");
+			if (!AoPixels || *AoPixels == 0)
+				return std::unexpected(
+					std::string(PreviousCase.Name) + ": " + (AoPixels ? "AO prepass contains no rasterized geometry" : AoPixels.error()));
+
+			size_t PointShadowPixels = 0;
+			for (uint32_t Face = 0; Face < 6 && PointShadowPixels == 0; ++Face)
+			{
+				auto FacePixels = ReadDepth(m_Renderer->GetPointShadowFaceTextureForValidation(0, Face), Face, "point shadow");
+				if (!FacePixels) return std::unexpected(std::string(PreviousCase.Name) + ": " + FacePixels.error());
+				PointShadowPixels = *FacePixels;
+			}
+			if (PointShadowPixels == 0)
+				return std::unexpected(std::string(PreviousCase.Name) + " did not rasterize the single-sided point-shadow caster");
+			PF_INFO("MIRRORED_WINDING_SHADOW_CASE={} directional_pixels={} spotlight_pixels={} point_pixels={} ao_prepass_pixels={}",
+				PreviousCase.Name, *DirectionalPixels, *SpotlightPixels, PointShadowPixels, *AoPixels);
+
+			if (const auto Restored = m_DoubleSidedMesh->SetMeshRenderer({ m_MeshAssetID, m_DoubleSidedMaterialAssetID }); !Restored)
+				return std::unexpected("Could not restore the double-sided validation mesh: " + Restored.error().Message);
+			m_ShadowProbe = false;
 			++m_ScenarioIndex;
 			m_ReadbackPending = false;
 		}
@@ -322,12 +400,24 @@ namespace PulseForge::GpuValidation
 		const TransformCase& Case = TransformCases[m_ScenarioIndex];
 		auto Rendered = m_Renderer->RenderPreparedSceneToOutput(*m_OutputTarget);
 		if (!Rendered) return std::unexpected(std::string("Could not render ") + Case.Name + ": " + Rendered.error().Message);
-		if (Rendered->GeometryDrawCount != 2)
-			return std::unexpected(std::string(Case.Name) + " did not submit both single- and double-sided triangle draws");
-		if (Rendered->SpotlightShadowPassCount != 1 || Rendered->SpotlightShadowCasterDrawCount != 2)
-			return std::unexpected(std::string(Case.Name) + " did not draw both materials into the spotlight shadow map");
-		if (Rendered->PointShadowPassCount != 6 || Rendered->PointShadowCasterDrawCount != 12)
-			return std::unexpected(std::string(Case.Name) + " did not draw both materials into all six point-shadow faces");
+		if (!m_ShadowProbe)
+		{
+			if (Rendered->GeometryDrawCount != 2)
+				return std::unexpected(std::string(Case.Name) + " did not submit both single- and double-sided triangle draws");
+			if (Rendered->SpotlightShadowPassCount != 1 || Rendered->SpotlightShadowCasterDrawCount != 2)
+				return std::unexpected(std::string(Case.Name) + " did not submit both materials to the spotlight shadow pass");
+			if (Rendered->PointShadowPassCount != 6 || Rendered->PointShadowCasterDrawCount != 12)
+				return std::unexpected(std::string(Case.Name) + " did not submit both materials to all point-shadow faces");
+		}
+		else
+		{
+			if (Rendered->GeometryDrawCount != 1)
+				return std::unexpected(std::string(Case.Name) + " single-sided shadow probe rendered an unexpected geometry count");
+			if (Rendered->SpotlightShadowPassCount != 1 || Rendered->SpotlightShadowCasterDrawCount != 1)
+				return std::unexpected(std::string(Case.Name) + " did not submit the single-sided caster to the spotlight pass");
+			if (Rendered->PointShadowPassCount != 6 || Rendered->PointShadowCasterDrawCount != 6)
+				return std::unexpected(std::string(Case.Name) + " did not submit the single-sided caster to all point-shadow faces");
+		}
 
 		m_ScenePrepared = false;
 		m_ReadbackPending = true;
