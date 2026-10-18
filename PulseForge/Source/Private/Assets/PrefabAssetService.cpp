@@ -2,6 +2,7 @@
 
 #include "Assets/AssetOperations.h"
 #include "Assets/AssetPathResolver.h"
+#include "Assets/AssetTypes.h"
 #include "Assets/PrefabSerializer.h"
 
 #include <span>
@@ -24,7 +25,7 @@ namespace PulseForge
 					"Prefab asset UUID " + PrefabAsset.ToString() + " is not present in the project asset registry" });
 			}
 
-			if (Record->ProjectRelativePath.extension() != ".prefab")
+			if (!HasAssetTypeExtension(Record->ProjectRelativePath, AssetFileType::Prefab))
 			{
 				return std::unexpected(PrefabAssetError{
 					PrefabAssetErrorCode::UnsupportedAssetType,
@@ -51,7 +52,7 @@ namespace PulseForge
 		const Scene& Source,
 		const Entity& Root)
 	{
-		if (ProjectRelativePath.extension() != ".prefab")
+		if (!HasAssetTypeExtension(ProjectRelativePath, AssetFileType::Prefab))
 		{
 			return std::unexpected(PrefabAssetError{
 				PrefabAssetErrorCode::UnsupportedAssetType,

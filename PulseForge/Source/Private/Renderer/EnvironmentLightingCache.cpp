@@ -369,18 +369,26 @@ namespace PulseForge
 			m_Worker.join();
 	}
 
+	void EnvironmentLightingCache::Clear() noexcept
+	{
+		{
+			std::lock_guard QueueLock(m_QueueMutex);
+			m_Requests.clear();
+		}
+		m_Entries.clear();
+	}
+
 	std::expected<std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>, EnvironmentLightingCacheError>
 	EnvironmentLightingCache::GetOrLoad(const AssetID& Asset)
 	{
 		auto Found = m_Entries.find(Asset);
 		if (Found == m_Entries.end())
 		{
-			auto NewEntry = std::make_unique<EnvironmentLightingCache::Entry>();
-			EnvironmentLightingCache::Entry* EntryPointer = NewEntry.get();
-			Found = m_Entries.emplace(Asset, std::move(NewEntry)).first;
+			auto NewEntry = std::make_shared<EnvironmentLightingCache::Entry>();
+			Found = m_Entries.emplace(Asset, NewEntry).first;
 			{
 				std::lock_guard QueueLock(m_QueueMutex);
-				m_Requests.push_back(Request{ Asset, m_ProjectRoot, m_Registry, EntryPointer });
+				m_Requests.push_back(Request{ Asset, m_ProjectRoot, m_Registry, std::move(NewEntry) });
 			}
 			m_QueueChanged.notify_one();
 		}

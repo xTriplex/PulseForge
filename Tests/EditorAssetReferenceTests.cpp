@@ -44,11 +44,11 @@ namespace
 		};
 
 		const auto MeshMetadata = CreateManagedAsset("Assets/Meshes/mesh.Gltf", "mesh source");
-		const auto MaterialMetadata = CreateManagedAsset("Assets/Materials/surface.material", "material");
+		const auto MaterialMetadata = CreateManagedAsset("Assets/Materials/surface.MATERIAL", "material");
 		const auto WrongTypeMetadata = CreateManagedAsset("Assets/Misc/not-an-asset.txt", "other data");
-		const auto ScriptMetadata = CreateManagedAsset("Assets/Scripts/controller.lua", "return {}\n");
+		const auto ScriptMetadata = CreateManagedAsset("Assets/Scripts/controller.LUA", "return {}\n");
 		const auto AudioMetadata = CreateManagedAsset("Assets/Audio/sound.WAV", "audio data");
-		const auto HdrMetadata = CreateManagedAsset("Assets/Environments/studio.hdr", "hdr data");
+		const auto HdrMetadata = CreateManagedAsset("Assets/Environments/studio.HDR", "hdr data");
 		PF_CHECK(Tests, MeshMetadata && MaterialMetadata && WrongTypeMetadata && ScriptMetadata && AudioMetadata && HdrMetadata);
 		if (!MeshMetadata || !MaterialMetadata || !WrongTypeMetadata || !ScriptMetadata || !AudioMetadata || !HdrMetadata) return;
 

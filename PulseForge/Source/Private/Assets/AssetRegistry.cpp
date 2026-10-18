@@ -1,4 +1,5 @@
 #include "Assets/AssetRegistry.h"
+#include "Assets/AssetTypes.h"
 #include "Core/ScopedProfileTimer.h"
 
 #include <algorithm>
@@ -111,8 +112,7 @@ namespace PulseForge
 			}
 			else if (std::filesystem::is_regular_file(Status))
 			{
-				if (Entry.path().extension() == ".meta")
-					SidecarFiles.push_back(Entry.path());
+				if (IsMetadataSidecarPath(Entry.path())) SidecarFiles.push_back(Entry.path());
 				else
 					SourceFiles.push_back(Entry.path());
 			}
@@ -179,7 +179,7 @@ namespace PulseForge
 		{
 			std::filesystem::path SourcePath = SidecarPath;
 			SourcePath.replace_extension();
-			if (SourcePath.extension() == ".meta")
+			if (IsMetadataSidecarPath(SourcePath))
 			{
 				const std::filesystem::path RelativePath = SidecarPath.lexically_relative(AbsoluteProjectRoot);
 				Error.Issues.push_back(MakeIssue(

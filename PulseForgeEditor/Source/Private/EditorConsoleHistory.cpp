@@ -1,7 +1,7 @@
-#include "EditorConsoleHistory.h"
+#include "Editor/EditorConsoleHistory.h"
 
 #include "Core/Log.h"
-#include "EditorConsoleSeverity.h"
+#include "Editor/EditorConsoleSeverity.h"
 
 #include <algorithm>
 #include <utility>

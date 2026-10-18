@@ -3,6 +3,7 @@
 #include "Core/Core.h"
 #include "Core/Layer.h"
 
+#include <cstddef>
 #include <vector>
 #include <memory>
 
@@ -13,31 +14,31 @@ namespace PulseForge
 	public:
 		LayerStack() = default;
 		~LayerStack();
+		// Structural changes are synchronous and rejected during dispatch or layer lifecycle callbacks.
 		void Clear();
+		void UpdateLayers(Timestep DeltaTime);
+		void RenderLayers();
+		void RenderPlatformWindows();
+		void DispatchEvent(Event& EventValue);
 
 		Layer& PushLayer(std::unique_ptr<Layer> NewLayer);
 		Layer& PushOverlay(std::unique_ptr<Layer> NewOverlay);
 		// Pop destroys a found layer. Detach-hook failures are reported but do not retain ownership.
 		bool PopLayer(Layer& Layer);
 		bool PopOverlay(Layer& Overlay);
-
-		using Container = std::vector<std::unique_ptr<Layer>>;
-		Container::iterator begin() { return m_Layers.begin(); }
-		Container::iterator end() { return m_Layers.end(); }
-		Container::reverse_iterator rbegin() { return m_Layers.rbegin(); }
-		Container::reverse_iterator rend() { return m_Layers.rend(); }
-
-		Container::const_iterator begin() const { return m_Layers.begin(); }
-		Container::const_iterator end() const { return m_Layers.end(); }
-		Container::const_reverse_iterator rbegin() const { return m_Layers.rbegin(); }
-		Container::const_reverse_iterator rend() const { return m_Layers.rend(); }
-
+		[[nodiscard]] std::size_t GetLayerCount() const noexcept { return m_Layers.size(); }
 
 	private:
+		using Container = std::vector<std::unique_ptr<Layer>>;
+
+		void EnsureMutationAllowed() const;
+		void AttachLayer(Layer& Layer);
 		void DetachLayer(Layer& Layer) noexcept;
 
 	private:
 		Container m_Layers;
 		Container::size_type m_LayerInsertIndex = 0;
+		std::size_t m_DispatchDepth = 0;
+		std::size_t m_LifecycleCallbackDepth = 0;
 	};
 }

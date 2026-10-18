@@ -1,6 +1,6 @@
 #include "TestEditorSupport.h"
 
-#include "EditorDocumentHostTestEditor.h"
+#include "Editor/EditorDocumentHostTestEditor.h"
 
 namespace
 {
@@ -93,7 +93,7 @@ namespace
 							SessionA->DisplayName == "Renamed Fixture A" && SessionA->EditorState.get() == StateA);
 
 		const auto ClearedFirstProject = Documents.ClearProject(*Project);
-		(void)ClearedFirstProject;
+		PF_CHECK(Tests, ClearedFirstProject.has_value());
 		PF_CHECK(Tests, Documents.Find(IdentityA) == nullptr && Documents.Find(IdentityB) == nullptr);
 		ActiveProject = *OtherProject;
 		const EditorDocumentIdentity OtherProjectIdentity{ *OtherProject, *AssetA, EditorDocumentKind::Texture };
@@ -111,7 +111,7 @@ namespace
 		}
 
 		const auto ClearedOtherProject = Documents.ClearProject(*OtherProject);
-		(void)ClearedOtherProject;
+		PF_CHECK(Tests, ClearedOtherProject.has_value());
 		PF_CHECK(Tests, Documents.Find(OtherProjectIdentity) == nullptr);
 		ActiveProject = *Project;
 		const auto RestoredOpen =

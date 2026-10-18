@@ -1,8 +1,8 @@
 #pragma once
 
 #include "Assets/AssetRegistry.h"
+#include "Assets/AssetTypes.h"
 
-#include <algorithm>
 #include <cctype>
 #include <initializer_list>
 #include <string_view>
@@ -11,8 +11,7 @@ namespace PulseForgeEditor
 {
 	[[nodiscard]] inline bool AssetHasExtension(const PulseForge::AssetRecord& Asset, std::initializer_list<std::string_view> Extensions)
 	{
-		const std::string Extension = Asset.ProjectRelativePath.extension().string();
-		return std::any_of(Extensions.begin(), Extensions.end(), [&](std::string_view Candidate) { return Extension == Candidate; });
+		return PulseForge::HasAssetExtension(Asset.ProjectRelativePath, Extensions);
 	}
 
 	[[nodiscard]] inline bool AssetSelectorMatchesSearch(

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <expected>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -140,12 +141,12 @@ namespace PulseForge
 			const Scene& Source,
 			const glm::mat4& ViewProjection,
 			const glm::vec3& CameraWorldPosition);
-		[[nodiscard]] static std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> BuildForView(
-			const Scene& Source,
-			const glm::mat4& View,
-			const glm::mat4& Projection,
-			const glm::vec3& CameraWorldPosition,
-			float NearClipPlane,
+		[[nodiscard]] static std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> BuildForView(const Scene& Source,
+			const glm::mat4& View, const glm::mat4& Projection, const glm::vec3& CameraWorldPosition, float NearClipPlane,
 			float FarClipPlane);
+		// Excluded entities do not contribute render components, but remain in the scene for hierarchy transforms.
+		[[nodiscard]] static std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> BuildForViewFiltered(const Scene& Source,
+			const glm::mat4& View, const glm::mat4& Projection, const glm::vec3& CameraWorldPosition, float NearClipPlane,
+			float FarClipPlane, std::span<const UUID> ExcludedEntities);
 	};
-}
+} // namespace PulseForge

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Assets/AssetTypes.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -204,14 +206,7 @@ namespace PulseForgeEditor
 
 	[[nodiscard]] inline bool IsSupportedImagePreviewExtension(const std::filesystem::path& Path)
 	{
-		std::string Extension = Path.extension().string();
-		std::ranges::transform(Extension, Extension.begin(), [](unsigned char Character)
-		{
-			return static_cast<char>(Character >= 'A' && Character <= 'Z' ? Character + ('a' - 'A') : Character);
-		});
-		constexpr std::array<std::string_view, 12> Extensions = {
-			".png", ".jpg", ".jpeg", ".bmp", ".tga", ".psd", ".gif", ".pic", ".ppm", ".pnm", ".pgm", ".pbm" };
-		return std::ranges::find(Extensions, Extension) != Extensions.end();
+		return PulseForge::HasAssetTypeExtension(Path, PulseForge::AssetFileType::PreviewImage);
 	}
 
 	class AssetPreviewBudget final

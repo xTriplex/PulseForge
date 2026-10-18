@@ -1,5 +1,5 @@
 #include "TestEditorSupport.h"
-#include "EditorAssetPreviewStressHarness.h"
+#include "Editor/EditorAssetPreviewStressHarness.h"
 
 #include <filesystem>
 #include <sstream>

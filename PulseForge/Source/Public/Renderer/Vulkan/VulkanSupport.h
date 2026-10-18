@@ -1,14 +1,138 @@
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 
 namespace PulseForge::VulkanSupport
 {
 	inline constexpr std::size_t MaximumDeferredSwapchainGenerations = 4;
 	inline constexpr std::size_t MaximumOutOfDateRecoveryGenerations = 1;
+
+	enum class PresentationPolicy : uint8_t
+	{
+		Compatible,
+		RequireFences
+	};
+
+	enum class PresentationRetirementMechanism : uint8_t
+	{
+		LegacyBestEffort,
+		KhrMaintenanceFence,
+		ExtMaintenanceFence
+	};
+
+	enum class PresentationFenceCapabilityReason : uint8_t
+	{
+		Available,
+		MissingSurfaceExtension,
+		MissingSurfaceCapabilities2,
+		MissingSurfaceMaintenanceExtension,
+		MissingMatchingSwapchainMaintenanceExtension,
+		FeatureUnsupported,
+		ForcedLegacyForTesting,
+		StrictPolicyConflictsWithForcedLegacy
+	};
+
+	struct PresentationInstanceExtensionAvailability
+	{
+		bool Surface = false;
+		bool SurfaceCapabilities2 = false;
+		bool KhrSurfaceMaintenance = false;
+		bool ExtSurfaceMaintenance = false;
+	};
+
+	struct PresentationInstanceExtensionPlan
+	{
+		bool SurfaceCapabilities2 = false;
+		bool KhrSurfaceMaintenance = false;
+		bool ExtSurfaceMaintenance = false;
+	};
+
+	struct PresentationDeviceExtensionAvailability
+	{
+		bool Swapchain = false;
+		bool KhrSwapchainMaintenance = false;
+		bool ExtSwapchainMaintenance = false;
+	};
+
+	struct PresentationFenceCapability
+	{
+		PresentationRetirementMechanism Mechanism = PresentationRetirementMechanism::LegacyBestEffort;
+		PresentationFenceCapabilityReason Reason = PresentationFenceCapabilityReason::MissingSurfaceExtension;
+
+		[[nodiscard]] bool HasFences() const noexcept { return Mechanism != PresentationRetirementMechanism::LegacyBestEffort; }
+	};
+
+	struct PresentationPolicySelection
+	{
+		bool Eligible = false;
+		PresentationRetirementMechanism Mechanism = PresentationRetirementMechanism::LegacyBestEffort;
+		PresentationFenceCapabilityReason Reason = PresentationFenceCapabilityReason::MissingSurfaceExtension;
+	};
+
+	[[nodiscard]] std::optional<PresentationPolicy> ParsePresentationPolicy(std::string_view Value) noexcept;
+	[[nodiscard]] PresentationInstanceExtensionPlan PlanPresentationInstanceExtensions(
+		const PresentationInstanceExtensionAvailability& Available) noexcept;
+	[[nodiscard]] bool HasCompatiblePresentationFencePath(const PresentationInstanceExtensionPlan& EnabledInstanceExtensions,
+		const PresentationDeviceExtensionAvailability& AvailableDeviceExtensions) noexcept;
+	[[nodiscard]] PresentationFenceCapability EvaluatePresentationFenceCapability(
+		const PresentationInstanceExtensionAvailability& AvailableInstanceExtensions,
+		const PresentationInstanceExtensionPlan& EnabledInstanceExtensions,
+		const PresentationDeviceExtensionAvailability& AvailableDeviceExtensions, bool SwapchainMaintenanceFeatureSupported) noexcept;
+	[[nodiscard]] PresentationPolicySelection ResolvePresentationPolicy(
+		PresentationPolicy Policy, const PresentationFenceCapability& Capability, bool ForceLegacyForTesting) noexcept;
+	[[nodiscard]] bool IsBetterPresentationCandidate(
+		bool CandidateHasFences, int CandidateScore, bool CurrentHasFences, int CurrentScore) noexcept;
+
+	enum class PresentationQueueResult : uint8_t
+	{
+		Success,
+		Suboptimal,
+		OutOfDate,
+		SurfaceLost,
+		FullscreenExclusiveLost,
+		PresentTimingQueueFull,
+		OutOfHostMemory,
+		OutOfDeviceMemory,
+		DeviceLost,
+		OtherFailure
+	};
+
+	[[nodiscard]] constexpr bool IsSharedDeviceLoss(PresentationQueueResult Result) noexcept
+	{
+		return Result == PresentationQueueResult::DeviceLost;
+	}
+
+	enum class PresentationRequestDisposition : uint8_t
+	{
+		Enqueued,
+		NotEnqueued,
+		Indeterminate
+	};
+
+	enum class PresentationRecoveryAction : uint8_t
+	{
+		Continue,
+		RecreateSwapchain,
+		BlockHost
+	};
+
+	struct PresentationResultHandling
+	{
+		PresentationRequestDisposition RequestDisposition = PresentationRequestDisposition::Indeterminate;
+		PresentationRecoveryAction RecoveryAction = PresentationRecoveryAction::BlockHost;
+		bool CurrentSwapchainUsable = false;
+	};
+
+	[[nodiscard]] PresentationRequestDisposition ResolvePresentationRequestDisposition(PresentationQueueResult Result) noexcept;
+	[[nodiscard]] PresentationResultHandling ResolvePresentationResult(PresentationQueueResult Result) noexcept;
+	[[nodiscard]] const char* ToString(PresentationPolicy Policy) noexcept;
+	[[nodiscard]] const char* ToString(PresentationRetirementMechanism Mechanism) noexcept;
+	[[nodiscard]] const char* ToString(PresentationFenceCapabilityReason Reason) noexcept;
+	[[nodiscard]] const char* ToString(PresentationRequestDisposition Disposition) noexcept;
 
 	enum class SwapchainFrameStartAction : uint8_t
 	{
@@ -108,4 +232,4 @@ namespace PulseForge::VulkanSupport
 		Extent2D Maximum);
 
 	uint32_t ChooseImageCount(uint32_t Minimum, uint32_t Maximum);
-}
+} // namespace PulseForge::VulkanSupport

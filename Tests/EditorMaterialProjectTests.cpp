@@ -170,12 +170,12 @@ namespace
 
 		AssetRegistry Registry;
 		PF_CHECK(Tests, Registry.Rebuild(ProjectRoot).has_value());
-		const auto Created = MaterialAssetService::Create(Registry, ProjectRoot, "Assets/Materials/validation.material", Description);
+		const auto Created = MaterialAssetService::Create(Registry, ProjectRoot, "Assets/Materials/validation.MATERIAL", Description);
 		PF_CHECK(Tests, Created.has_value());
 		PF_CHECK(Tests, Created && Created->ID != TextureMetadata->ID);
 		if (!Created) return;
 
-		const std::filesystem::path MaterialPath = ProjectRoot / "Assets" / "Materials" / "validation.material";
+		const std::filesystem::path MaterialPath = ProjectRoot / "Assets" / "Materials" / "validation.MATERIAL";
 		const auto Metadata = AssetMetadataSerializer::LoadFromFile(AssetMetadataSerializer::GetSidecarPath(MaterialPath));
 		PF_CHECK(Tests, Metadata && Metadata->ID == Created->ID);
 		PF_CHECK(Tests, Registry.Find(Created->ID).has_value());
@@ -347,6 +347,13 @@ namespace
 		PF_CHECK(Tests, Redone.has_value() && *Redone);
 		PF_CHECK(Tests, Drafts.IsDirty(ProjectValue, Material->ID));
 		PF_CHECK(Tests, Documents.Find(Identity)->IsDirty());
+		MaterialAssetDesc ExternalEdit = *Drafts.FindDraft(ProjectValue, Material->ID);
+		ExternalEdit.BaseColorFactor = { 0.1f, 0.2f, 0.9f, 1.0f };
+		PF_CHECK(Tests, MaterialAssetSerializer::SaveToFile(ExternalEdit, Root / Material->ProjectRelativePath).has_value());
+		PF_CHECK(Tests, ProjectValue.GetAssetRegistry().Rebuild(Root).has_value());
+		PF_CHECK(Tests, Drafts.IsDirty(ProjectValue, Material->ID));
+		PF_CHECK(Tests, Documents.Find(Identity)->IsDirty());
+		PF_CHECK(Tests, std::abs(Drafts.FindDraft(ProjectValue, Material->ID)->BaseColorFactor.r - 0.85f) < 1.0e-5f);
 		const auto Saved = Drafts.Save(ProjectValue, Material->ID, Documents);
 		PF_CHECK(Tests, Saved.has_value());
 		PF_CHECK(Tests, !Drafts.IsDirty(ProjectValue, Material->ID));
@@ -420,11 +427,30 @@ namespace
 		PF_CHECK(Tests, !Project::Create(ProjectFile, "Duplicate Project"));
 		PF_CHECK(Tests, !ProjectSerializer::Deserialize("{broken"));
 		PF_CHECK(Tests, !ProjectSerializer::Deserialize("{\"format\":\"PulseForgeProject\",\"version\":99}"));
+		const auto SerializedDescription = ProjectSerializer::Serialize(Created->GetDescription());
+		PF_CHECK(Tests, SerializedDescription.has_value());
+		if (SerializedDescription)
+		{
+			std::string ExactBoundaryProject = *SerializedDescription;
+			ExactBoundaryProject.resize(ProjectSerializer::MaximumDocumentBytes, ' ');
+			PF_CHECK(Tests, ProjectSerializer::Deserialize(ExactBoundaryProject).has_value());
+			ExactBoundaryProject.push_back(' ');
+			const auto OversizedProject = ProjectSerializer::Deserialize(ExactBoundaryProject);
+			PF_CHECK(Tests, !OversizedProject && OversizedProject.error().Code == ProjectErrorCode::DocumentTooLarge);
+		}
+
+		const std::filesystem::path OversizedProjectFile = Root / "Oversized.pfproj";
+		std::ofstream(OversizedProjectFile, std::ios::binary | std::ios::trunc).close();
+		std::filesystem::resize_file(OversizedProjectFile, ProjectSerializer::MaximumDocumentBytes + 1, FileError);
+		PF_CHECK(Tests, !FileError);
+		const auto OversizedProjectLoad = Project::Open(OversizedProjectFile);
+		PF_CHECK(Tests, !OversizedProjectLoad && OversizedProjectLoad.error().Code == ProjectErrorCode::FileReadFailed);
+		PF_CHECK(Tests, OversizedProjectLoad.error().Message.find("1 MiB") != std::string::npos);
 
 		const std::filesystem::path ScenesDirectory = Root / "Assets" / "Scenes";
 		std::filesystem::create_directories(ScenesDirectory, FileError);
 		PF_CHECK(Tests, !FileError);
-		const std::filesystem::path ScenePath = ScenesDirectory / "start.scene";
+		const std::filesystem::path ScenePath = ScenesDirectory / "start.SCENE";
 		{
 			std::ofstream Output(ScenePath, std::ios::binary | std::ios::trunc);
 			Output << "{}";

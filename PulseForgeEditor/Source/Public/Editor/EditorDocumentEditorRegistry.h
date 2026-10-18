@@ -3,6 +3,7 @@
 #include "Editor/EditorDocumentManager.h"
 
 #include <expected>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <string>
@@ -36,8 +37,8 @@ namespace PulseForgeEditor
 		std::function<bool(EditorDocumentSession&)> Discard;
 		std::function<bool(EditorDocumentSession&, EditorDocumentCommand)> FocusedCommand;
 		std::function<bool(EditorDocumentSession&, const std::filesystem::path&, std::string_view)> AssetLocationChanged;
-		std::function<std::expected<void, std::string>(const EditorDocumentSession&)> PrepareClose;
-		std::function<void(EditorDocumentSession&)> Close;
+		// This phase may reject closing but must not mutate the manager or editor state, and must not retain the borrowed state.
+		std::function<std::expected<void, std::string>(const EditorDocumentCloseContext&)> PrepareClose;
 	};
 
 	class EditorDocumentEditorRegistry final
@@ -45,9 +46,8 @@ namespace PulseForgeEditor
 	public:
 		[[nodiscard]] std::expected<void, std::string> Register(EditorDocumentEditorAdapter Adapter)
 		{
-			if (Adapter.Kind == EditorDocumentKind::Level || !Adapter.IsEligible || !Adapter.LoadSession ||
-				!Adapter.DrawWorkspace || !Adapter.Save || !Adapter.Discard || !Adapter.FocusedCommand ||
-				!Adapter.AssetLocationChanged || !Adapter.PrepareClose || !Adapter.Close)
+			if (Adapter.Kind == EditorDocumentKind::Level || !Adapter.IsEligible || !Adapter.LoadSession || !Adapter.DrawWorkspace ||
+				!Adapter.Save || !Adapter.Discard || !Adapter.FocusedCommand || !Adapter.AssetLocationChanged || !Adapter.PrepareClose)
 				return std::unexpected("A specialized document registration is incomplete");
 			if (m_Adapters.contains(Adapter.Kind))
 				return std::unexpected("A specialized editor is already registered for this document kind");
@@ -139,14 +139,20 @@ namespace PulseForgeEditor
 			const auto Adapter = m_Adapters.find(Session.Identity.Kind);
 			if (Adapter == m_Adapters.end() || !Session.EditorState)
 				return std::unexpected("The document editor session is unavailable");
-			return Adapter->second.PrepareClose(Session);
-		}
-
-		void Close(EditorDocumentSession& Session) const
-		{
-			const auto Adapter = m_Adapters.find(Session.Identity.Kind);
-			if (Adapter != m_Adapters.end() && Session.EditorState)
-				Adapter->second.Close(Session);
+			try
+			{
+				const EditorDocumentCloseContext Context{ Session.Identity, Session.ProjectRelativePath, Session.DisplayName,
+					Session.Revision, Session.SavedRevision, Session.EditorState.get() };
+				return Adapter->second.PrepareClose(Context);
+			}
+			catch (const std::exception& Exception)
+			{
+				return std::unexpected(std::string("The document editor close preflight threw: ") + Exception.what());
+			}
+			catch (...)
+			{
+				return std::unexpected("The document editor close preflight threw an unknown exception");
+			}
 		}
 
 	private:

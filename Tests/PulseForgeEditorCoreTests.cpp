@@ -1,7 +1,7 @@
 #include "TestSupport.h"
 
 #include "Core/Log.h"
-#include "EditorConsoleHistory.h"
+#include "Editor/EditorConsoleHistory.h"
 #include "Editor/EditorCommandHistory.h"
 #include "Editor/EditorMaterialDraftStore.h"
 

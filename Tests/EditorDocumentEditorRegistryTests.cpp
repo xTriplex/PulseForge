@@ -1,5 +1,7 @@
 #include "TestEditorSupport.h"
 
+#include <stdexcept>
+
 namespace
 {
 	void TestEditorDocumentEditorRegistry(TestRunner& Tests)
@@ -13,7 +15,38 @@ namespace
 			std::vector<int> Redo;
 			bool FailSave = false;
 			bool FailClose = false;
+			bool ThrowClosePreflight = false;
 			bool EditDuringSave = false;
+			size_t* DestructionCount = nullptr;
+			EditorDocumentManager* TeardownManager = nullptr;
+			EditorDocumentIdentity TeardownIdentity;
+			std::string TeardownHostID;
+			bool* TeardownSawManagerStateRemoved = nullptr;
+			bool* TeardownSawHostRemoved = nullptr;
+			bool* TeardownOpenRejected = nullptr;
+
+			~Model() noexcept override
+			{
+				if (DestructionCount) ++*DestructionCount;
+				if (!TeardownManager) return;
+				if (TeardownSawManagerStateRemoved)
+					*TeardownSawManagerStateRemoved = !TeardownManager->GetSessions().contains(TeardownIdentity);
+				if (TeardownSawHostRemoved)
+					*TeardownSawHostRemoved = std::none_of(TeardownManager->GetHosts().begin(), TeardownManager->GetHosts().end(),
+						[this](const EditorDocumentHost& Host) { return Host.ID == TeardownHostID; });
+				if (TeardownOpenRejected)
+				{
+					try
+					{
+						*TeardownOpenRejected =
+							!TeardownManager->Open(TeardownIdentity, {}, "reentrant", EditorDocumentOpenPreference::MainDocumentStrip);
+					}
+					catch (...)
+					{
+						*TeardownOpenRejected = false;
+					}
+				}
+			}
 		};
 
 		const auto Project = UUID::Generate();
@@ -22,6 +55,20 @@ namespace
 		PF_CHECK(Tests, Project && AssetA && AssetB);
 		if (!Project || !AssetA || !AssetB) return;
 
+		size_t EditorStateDestructions = 0;
+		EditorDocumentManager* ReentrantManager = nullptr;
+		EditorDocumentIdentity ReentrantCloseIdentity;
+		EditorDocumentIdentity ReentrantTransferIdentity;
+		std::string ReentrantDestinationHost;
+		bool AttemptReentrantMutations = false;
+		EditorDocumentCloseStatus ReentrantCloseStatus = EditorDocumentCloseStatus::Missing;
+		bool ReentrantTransferRejected = false;
+		bool ReentrantClearRejected = false;
+		bool ReentrantOpenRejected = false;
+		bool ReentrantPreferenceRejected = false;
+		bool TeardownSawManagerStateRemoved = false;
+		bool TeardownSawHostRemoved = false;
+		bool TeardownOpenRejected = false;
 		std::unordered_map<UUID, int, UUIDHash> SavedValues;
 		EditorDocumentEditorRegistry Registry;
 		EditorDocumentEditorAdapter Adapter;
@@ -29,10 +76,11 @@ namespace
 		Adapter.IsEligible = [](const EditorDocumentEditorContext& Context)
 		{ return Context.Identity.Kind == EditorDocumentKind::Texture && Context.ProjectRelativePath.extension() == ".fixture"; };
 		Adapter.LoadSession =
-			[&SavedValues](
+			[&SavedValues, &EditorStateDestructions](
 				const EditorDocumentEditorContext& Context) -> std::expected<std::unique_ptr<EditorDocumentEditorState>, std::string>
 		{
 			auto State = std::make_unique<Model>();
+			State->DestructionCount = &EditorStateDestructions;
 			if (const auto Saved = SavedValues.find(Context.Identity.Asset); Saved != SavedValues.end()) State->Value = Saved->second;
 			return std::unique_ptr<EditorDocumentEditorState>(std::move(State));
 		};
@@ -83,14 +131,26 @@ namespace
 			return false;
 		};
 		Adapter.AssetLocationChanged = [](EditorDocumentSession&, const std::filesystem::path&, std::string_view) { return true; };
-		Adapter.PrepareClose = [](const EditorDocumentSession& Session) -> std::expected<void, std::string>
+		Adapter.PrepareClose = [&AttemptReentrantMutations, &ReentrantManager, &ReentrantCloseIdentity, &ReentrantTransferIdentity,
+								   &ReentrantDestinationHost, &ReentrantCloseStatus, &ReentrantTransferRejected, &ReentrantClearRejected,
+								   &ReentrantOpenRejected, &ReentrantPreferenceRejected](
+								   const EditorDocumentCloseContext& Context) -> std::expected<void, std::string>
 		{
-			const auto* State = dynamic_cast<const Model*>(Session.EditorState.get());
+			const auto* State = dynamic_cast<const Model*>(Context.EditorState);
+			if (State && State->ThrowClosePreflight) throw std::runtime_error("close preflight test exception");
+			if (AttemptReentrantMutations)
+			{
+				AttemptReentrantMutations = false;
+				ReentrantCloseStatus = ReentrantManager->Close(ReentrantCloseIdentity, EditorDocumentCloseChoice::Cancel, {}, {});
+				ReentrantTransferRejected = !ReentrantManager->Transfer(ReentrantTransferIdentity, ReentrantDestinationHost, 0);
+				ReentrantClearRejected = !ReentrantManager->ClearProject(Context.Identity.Project);
+				ReentrantOpenRejected = !ReentrantManager->Open(
+					Context.Identity, Context.ProjectRelativePath, Context.DisplayName, EditorDocumentOpenPreference::MainDocumentStrip);
+				ReentrantPreferenceRejected = !ReentrantManager->SetOpeningPreference(EditorDocumentOpenPreference::MainDocumentStrip);
+			}
 			if (State && State->FailClose) return std::unexpected("close rejected by test fixture");
 			return {};
 		};
-		size_t CloseCount = 0;
-		Adapter.Close = [&CloseCount](EditorDocumentSession&) { ++CloseCount; };
 		PF_CHECK(Tests, !Registry.IsRegistered(EditorDocumentKind::Texture));
 		PF_CHECK(Tests, Registry.Register(Adapter).has_value());
 		PF_CHECK(Tests, Registry.IsRegistered(EditorDocumentKind::Texture));
@@ -106,6 +166,7 @@ namespace
 		ContextA.ProjectRelativePath = "Assets/A.fixture";
 
 		EditorDocumentManager Manager;
+		ReentrantManager = &Manager;
 		const auto OpenA =
 			Manager.Open(IdentityA, ContextA.ProjectRelativePath, ContextA.DisplayName, EditorDocumentOpenPreference::MainDocumentStrip);
 		const auto OpenB =
@@ -171,11 +232,11 @@ namespace
 			[&DiscardContinuations](std::function<void()> Action) { DiscardContinuations.push_back(std::move(Action)); });
 		PF_CHECK(Tests, !RejectedDirtyDiscard && DestructiveDiscardCount == 0 && PendingDiscardContinuation);
 		PF_CHECK(Tests, Manager.Find(IdentityA) == SessionA && StateA->Value == 13 && SessionA->IsDirty());
-		PF_CHECK(Tests, DiscardContinuations.empty() && CloseCount == 0);
+		PF_CHECK(Tests, DiscardContinuations.empty() && EditorStateDestructions == 0);
 		const auto FailedPreparation = Registry.PrepareClose(*SessionA);
-		PF_CHECK(Tests, !FailedPreparation && CloseCount == 0 && Manager.Find(IdentityA) == SessionA && StateA->Value == 13);
+		PF_CHECK(Tests, !FailedPreparation && EditorStateDestructions == 0 && Manager.Find(IdentityA) == SessionA && StateA->Value == 13);
 		StateA->FailClose = false;
-		PF_CHECK(Tests, Registry.PrepareClose(*SessionA).has_value() && CloseCount == 0);
+		PF_CHECK(Tests, Registry.PrepareClose(*SessionA).has_value() && EditorStateDestructions == 0);
 		PF_CHECK(Tests, Manager.Close(
 							IdentityA, EditorDocumentCloseChoice::Cancel, [&Registry](const auto&, uint64_t) { return false; },
 							[&Registry](const auto&) { return false; }) == EditorDocumentCloseStatus::Cancelled);
@@ -232,7 +293,7 @@ namespace
 			SharedHostBeforeClose ? SharedHostBeforeClose->ActiveDocument : std::optional<EditorDocumentIdentity>{};
 		const std::array<EditorDocumentIdentity, 2> BatchIdentities = { IdentityA, IdentityB };
 		auto RejectedBatch = EditorDocumentCloseBatch::Prepare(Manager, Registry, BatchIdentities);
-		PF_CHECK(Tests, !RejectedBatch && CloseCount == 0);
+		PF_CHECK(Tests, !RejectedBatch && EditorStateDestructions == 0);
 		PF_CHECK(Tests, SharedHostBeforeClose && HostOrderBeforeClose.size() == 2 && SessionA->HostID == SessionB->HostID);
 		PF_CHECK(Tests, SavedValues[*AssetA] == 78 && Manager.Find(IdentityA) == SessionA && !SessionA->IsDirty());
 		PF_CHECK(Tests, Manager.Find(IdentityB) == SessionB && StateB->Value == 22);
@@ -248,7 +309,7 @@ namespace
 		const auto FailedProjectSwitchClose =
 			ResolveDocumentCloseBatch(Manager, Registry, BatchIdentities, PendingProjectSwitchContinuation, EnqueueContinuation);
 		PF_CHECK(Tests, !FailedProjectSwitchClose && PendingProjectSwitchContinuation && QueuedContinuations.empty());
-		PF_CHECK(Tests, ProjectSwitchContinuationCount == 0 && ShutdownContinuationCount == 0 && CloseCount == 0 &&
+		PF_CHECK(Tests, ProjectSwitchContinuationCount == 0 && ShutdownContinuationCount == 0 && EditorStateDestructions == 0 &&
 							Manager.Find(IdentityA) == SessionA && Manager.Find(IdentityB) == SessionB);
 		PendingProjectSwitchContinuation = {};
 		PF_CHECK(Tests, Manager.Find(IdentityA) == SessionA && Manager.Find(IdentityB) == SessionB && ProjectSwitchContinuationCount == 0);
@@ -258,12 +319,63 @@ namespace
 		PF_CHECK(Tests, !FailedShutdownClose && PendingShutdownContinuation && QueuedContinuations.empty() &&
 							ShutdownContinuationCount == 0 && Manager.Find(IdentityA) == SessionA && Manager.Find(IdentityB) == SessionB);
 		StateB->FailClose = false;
+		StateB->ThrowClosePreflight = true;
+		std::function<void()> PendingThrowContinuation = [] {};
+		const auto ThrowingPreflight =
+			ResolveDocumentCloseBatch(Manager, Registry, BatchIdentities, PendingThrowContinuation, EnqueueContinuation);
+		PF_CHECK(Tests, !ThrowingPreflight && PendingThrowContinuation && QueuedContinuations.empty());
+		PF_CHECK(Tests, EditorStateDestructions == 0 && Manager.Find(IdentityA) == SessionA && Manager.Find(IdentityB) == SessionB);
+		StateB->ThrowClosePreflight = false;
+		const uint64_t PreparedSessionGeneration = SessionA->SessionGeneration;
+		const std::filesystem::path ReplacementPath = SessionA->ProjectRelativePath;
+		const std::string ReplacementName = SessionA->DisplayName;
+		const std::array<EditorDocumentIdentity, 1> ReplacementIdentity = { IdentityA };
+		std::function<void()> PendingReplacementContinuation = [] {};
+		const auto ReplacedDuringResolution = ResolveDocumentCloseBatchWithChanges(
+			Manager, Registry, ReplacementIdentity, true,
+			[&]() -> std::expected<void, std::string>
+			{
+				if (Manager.Close(IdentityA, EditorDocumentCloseChoice::Cancel, {}, {}) != EditorDocumentCloseStatus::Closed)
+					return std::unexpected("The fixture could not close the prepared session.");
+				const auto Reopened =
+					Manager.Open(IdentityA, ReplacementPath, ReplacementName, EditorDocumentOpenPreference::MainDocumentStrip);
+				if (!Reopened) return std::unexpected(Reopened.error());
+				auto* ReplacementSession = Manager.Find(IdentityA);
+				EditorDocumentEditorContext ReplacementContext = ContextA;
+				ReplacementContext.ProjectRelativePath = ReplacementPath;
+				ReplacementContext.DisplayName = ReplacementName;
+				if (!ReplacementSession || !Registry.Load(*ReplacementSession, ReplacementContext))
+					return std::unexpected("The fixture could not reload the replacement session.");
+				return {};
+			},
+			PendingReplacementContinuation, EnqueueContinuation);
+		PF_CHECK(Tests, !ReplacedDuringResolution && PendingReplacementContinuation && QueuedContinuations.empty());
+		SessionA = Manager.Find(IdentityA);
+		StateA = SessionA ? dynamic_cast<Model*>(SessionA->EditorState.get()) : nullptr;
+		PF_CHECK(Tests, SessionA && StateA && SessionA->SessionGeneration != PreparedSessionGeneration &&
+							Manager.Find(IdentityB) == SessionB && EditorStateDestructions == 1);
+		if (!SessionA || !StateA) return;
+		OriginalStateAddress = SessionA->EditorState.get();
+		StateA->TeardownManager = &Manager;
+		StateA->TeardownIdentity = IdentityA;
+		StateA->TeardownHostID = SessionB->HostID;
+		StateA->TeardownSawManagerStateRemoved = &TeardownSawManagerStateRemoved;
+		StateA->TeardownSawHostRemoved = &TeardownSawHostRemoved;
+		StateA->TeardownOpenRejected = &TeardownOpenRejected;
+		ReentrantCloseIdentity = IdentityB;
+		ReentrantTransferIdentity = IdentityB;
+		ReentrantDestinationHost = std::string(EditorDocumentManager::MainHostID);
+		AttemptReentrantMutations = true;
 		const auto RetriedCoordinatedClose =
 			ResolveDocumentCloseBatch(Manager, Registry, BatchIdentities, PendingShutdownContinuation, EnqueueContinuation);
 		PF_CHECK(Tests, RetriedCoordinatedClose.has_value());
+		PF_CHECK(Tests, ReentrantCloseStatus == EditorDocumentCloseStatus::MutationRejectedDuringCloseTransition &&
+							ReentrantTransferRejected && ReentrantClearRejected && ReentrantOpenRejected && ReentrantPreferenceRejected &&
+							!AttemptReentrantMutations);
+		PF_CHECK(Tests, TeardownSawManagerStateRemoved && TeardownSawHostRemoved && TeardownOpenRejected);
 		PF_CHECK(Tests, !PendingShutdownContinuation && QueuedContinuations.size() == 1 && ProjectSwitchContinuationCount == 0 &&
 							ShutdownContinuationCount == 0);
-		PF_CHECK(Tests, CloseCount == 2 && !Manager.Find(IdentityA) && !Manager.Find(IdentityB));
+		PF_CHECK(Tests, EditorStateDestructions == 3 && !Manager.Find(IdentityA) && !Manager.Find(IdentityB));
 		QueuedContinuations.front()();
 		PF_CHECK(Tests, ShutdownContinuationCount == 1 && ProjectSwitchContinuationCount == 0);
 		PendingShutdownContinuation = [&ShutdownContinuationCount] { ShutdownContinuationCount += 100; };

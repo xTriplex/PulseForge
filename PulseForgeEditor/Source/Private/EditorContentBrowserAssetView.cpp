@@ -1,5 +1,6 @@
 #include "Editor/EditorContentBrowserAssetView.h"
 
+#include "Assets/AssetTypes.h"
 #include "Assets/AssetPathResolver.h"
 #include "Assets/Project.h"
 #include "Editor/EditorAssetPreviewPolicy.h"
@@ -51,14 +52,17 @@ namespace PulseForgeEditor
 			const auto Handler = ActionHandler;
 			DeferredAction = [Handler, Action, Identifier] { Handler(Action, Identifier); };
 		};
-		if (Presentation.Extension == ".material" && Style.MenuItem(EditorIcon::Material, "Show Material Details"))
+		if (PulseForge::HasAssetTypeExtension(Asset.ProjectRelativePath, PulseForge::AssetFileType::Material) &&
+			Style.MenuItem(EditorIcon::Material, "Show Material Details"))
 			Defer(EditorContentBrowserAssetAction::ShowMaterialDetails);
 		if (Style.MenuItem(EditorIcon::Rename, "Move / Rename...")) Defer(EditorContentBrowserAssetAction::Move);
 		if (Style.MenuItem(EditorIcon::Duplicate, "Duplicate...")) Defer(EditorContentBrowserAssetAction::Duplicate);
-		if (Presentation.Extension == ".prefab" && Style.MenuItem(EditorIcon::Cube, "Instantiate in Scene", nullptr, false, SceneAvailable))
+		if (PulseForge::HasAssetTypeExtension(Asset.ProjectRelativePath, PulseForge::AssetFileType::Prefab) &&
+			Style.MenuItem(EditorIcon::Cube, "Instantiate in Scene", nullptr, false, SceneAvailable))
 			Defer(EditorContentBrowserAssetAction::InstantiatePrefab);
 		const bool IsStartupScene = Project && Project->GetDescription().StartScene && *Project->GetDescription().StartScene == Identifier;
-		if (Presentation.Extension == ".scene" && ImGui::MenuItem("Set as Startup Scene", nullptr, IsStartupScene, !IsStartupScene))
+		if (PulseForge::HasAssetTypeExtension(Asset.ProjectRelativePath, PulseForge::AssetFileType::Scene) &&
+			ImGui::MenuItem("Set as Startup Scene", nullptr, IsStartupScene, !IsStartupScene))
 			Defer(EditorContentBrowserAssetAction::SetStartupScene);
 		if (Style.MenuItem(EditorIcon::Delete, "Delete...")) Defer(EditorContentBrowserAssetAction::Delete);
 		ImGui::EndPopup();
@@ -142,7 +146,8 @@ namespace PulseForgeEditor
 					uint32_t PreviewHeight = 0;
 #ifndef PF_EDITOR_RENDERER_OPENGL
 					const bool IsImagePreview = IsSupportedImagePreviewExtension(Asset.ProjectRelativePath);
-					const bool IsMaterialPreview = Presentation.Extension == ".material";
+					const bool IsMaterialPreview =
+						PulseForge::HasAssetTypeExtension(Asset.ProjectRelativePath, PulseForge::AssetFileType::Material);
 					if (Project && (IsImagePreview || IsMaterialPreview))
 					{
 						const std::string ProjectID = Project->GetDescription().ID.ToString();

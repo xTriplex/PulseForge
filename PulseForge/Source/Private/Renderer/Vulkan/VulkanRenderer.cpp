@@ -4,6 +4,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include "Renderer/RendererBackend.h"
 #include "Renderer/Vulkan/VulkanPresentationResources.h"
+#include "Renderer/Vulkan/VulkanRendererShutdown.h"
 #include "Renderer/Vulkan/VulkanResourceObjects.h"
 #include "Renderer/Vulkan/VulkanSupport.h"
 #include "Window/Window.h"
@@ -15,6 +16,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <optional>
 #include <type_traits>
@@ -34,15 +36,6 @@ namespace PulseForge
 			return std::to_string(VK_API_VERSION_MAJOR(Version)) + "." +
 				std::to_string(VK_API_VERSION_MINOR(Version)) + "." +
 				std::to_string(VK_API_VERSION_PATCH(Version));
-		}
-
-		void CheckVkResult(VkResult Result, const char* Operation)
-		{
-			if (Result != VK_SUCCESS)
-			{
-				throw std::runtime_error(std::string(Operation) + " failed with Vulkan result " +
-					vk::to_string(static_cast<vk::Result>(Result)));
-			}
 		}
 
 		bool HasName(const std::vector<vk::ExtensionProperties>& Properties, const char* Name)
@@ -67,6 +60,62 @@ namespace PulseForge
 			{
 				return std::strcmp(Existing, Name) == 0;
 			});
+		}
+
+		void AppendUniqueName(std::vector<const char*>& Names, const char* Name)
+		{
+			if (!HasName(Names, Name)) Names.push_back(Name);
+		}
+
+		VulkanSupport::PresentationQueueResult ClassifyPresentationQueueResult(VkResult Result)
+		{
+			switch (Result)
+			{
+			case VK_SUCCESS:
+				return VulkanSupport::PresentationQueueResult::Success;
+			case VK_SUBOPTIMAL_KHR:
+				return VulkanSupport::PresentationQueueResult::Suboptimal;
+			case VK_ERROR_OUT_OF_DATE_KHR:
+				return VulkanSupport::PresentationQueueResult::OutOfDate;
+			case VK_ERROR_SURFACE_LOST_KHR:
+				return VulkanSupport::PresentationQueueResult::SurfaceLost;
+			case VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT:
+				return VulkanSupport::PresentationQueueResult::FullscreenExclusiveLost;
+			case VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT:
+				return VulkanSupport::PresentationQueueResult::PresentTimingQueueFull;
+			case VK_ERROR_OUT_OF_HOST_MEMORY:
+				return VulkanSupport::PresentationQueueResult::OutOfHostMemory;
+			case VK_ERROR_OUT_OF_DEVICE_MEMORY:
+				return VulkanSupport::PresentationQueueResult::OutOfDeviceMemory;
+			case VK_ERROR_DEVICE_LOST:
+				return VulkanSupport::PresentationQueueResult::DeviceLost;
+			default:
+				return VulkanSupport::PresentationQueueResult::OtherFailure;
+			}
+		}
+
+		VulkanSupport::PresentationResultHandling RecordPresentationResult(VulkanSwapchainImage& Image, VkResult Result)
+		{
+			const VulkanSupport::PresentationResultHandling Handling =
+				VulkanSupport::ResolvePresentationResult(ClassifyPresentationQueueResult(Result));
+			if (VulkanSupport::IsSharedDeviceLoss(ClassifyPresentationQueueResult(Result)))
+			{
+				Image.PresentationState = PresentationRequestState::DeviceLostIndeterminate;
+				return Handling;
+			}
+			switch (Handling.RequestDisposition)
+			{
+			case VulkanSupport::PresentationRequestDisposition::Enqueued:
+				Image.PresentationState = PresentationRequestState::Pending;
+				break;
+			case VulkanSupport::PresentationRequestDisposition::NotEnqueued:
+				Image.PresentationState = PresentationRequestState::NotSubmitted;
+				break;
+			case VulkanSupport::PresentationRequestDisposition::Indeterminate:
+				Image.PresentationState = PresentationRequestState::Indeterminate;
+				break;
+			}
+			return Handling;
 		}
 
 		std::optional<nvrhi::Format> ToNvrhiFormat(vk::Format Format)
@@ -206,9 +255,15 @@ namespace PulseForge
 		class NvrhiMessageCallback final : public nvrhi::IMessageCallback
 		{
 		public:
+			void SetDeviceHealth(VulkanDeviceHealth* DeviceHealth) noexcept { m_DeviceHealth = DeviceHealth; }
+
 			void message(nvrhi::MessageSeverity Severity, const char* Text) override
 			{
 				const char* SafeText = Text ? Text : "NVRHI reported an empty diagnostic";
+				// The pinned NVRHI queue reports a swallowed vk::DeviceLostError through this callback text.
+				if ((Severity == nvrhi::MessageSeverity::Error || Severity == nvrhi::MessageSeverity::Fatal) &&
+					std::strcmp(SafeText, "Device Removed!") == 0 && m_DeviceHealth)
+					m_DeviceHealth->MarkLost();
 				switch (Severity)
 				{
 					case nvrhi::MessageSeverity::Info:
@@ -223,6 +278,9 @@ namespace PulseForge
 						break;
 				}
 			}
+
+		private:
+			VulkanDeviceHealth* m_DeviceHealth = nullptr;
 		};
 
 		struct DeviceCandidate
@@ -233,8 +291,12 @@ namespace PulseForge
 			vk::SurfaceFormatKHR SurfaceFormat;
 			nvrhi::Format NvrhiFormat = nvrhi::Format::UNKNOWN;
 			vk::PresentModeKHR PresentMode = vk::PresentModeKHR::eFifo;
-			std::string SwapchainMaintenanceExtension;
-			bool PresentFenceMaintenance = false;
+			VulkanSupport::PresentationDeviceExtensionAvailability AvailablePresentationDeviceExtensions;
+			bool PresentationFeatureSupported = false;
+			VulkanSupport::PresentationRetirementMechanism PresentationRetirementMechanism =
+				VulkanSupport::PresentationRetirementMechanism::LegacyBestEffort;
+			VulkanSupport::PresentationFenceCapabilityReason PresentationCapabilityReason =
+				VulkanSupport::PresentationFenceCapabilityReason::MissingSurfaceExtension;
 			int Score = 0;
 		};
 
@@ -268,30 +330,49 @@ namespace PulseForge
 			}
 			throw std::runtime_error("Vulkan surface reports no supported composite-alpha mode");
 		}
-	}
+	} // namespace
 
-	class VulkanRenderer final : public RendererBackend
+	class VulkanRenderer final : public RendererBackend, private RendererShutdownOperations
 	{
 	public:
 		explicit VulkanRenderer(Window& Window)
 			: m_Window(Window),
 			  m_NativeWindow(static_cast<GLFWwindow*>(Window.GetNativeWindow()))
 		{
+			m_NvrhiMessageCallback.SetDeviceHealth(&m_DeviceHealth);
 			try
 			{
 				Initialize();
 			}
+			catch (const vk::DeviceLostError& Exception)
+			{
+				MarkDeviceLost(VK_ERROR_DEVICE_LOST);
+				PF_CORE_ERROR("Vulkan renderer initialization failed after device loss: {0}", Exception.what());
+				const ShutdownResult ShutdownStatus = Shutdown();
+				if (!ShutdownStatus.IsComplete()) FailStopUnsafeShutdown(ShutdownStatus);
+				throw;
+			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				PF_CORE_ERROR("Vulkan renderer initialization failed: {0}", Exception.what());
-				Shutdown();
+				const ShutdownResult ShutdownStatus = Shutdown();
+				if (!ShutdownStatus.IsComplete()) FailStopUnsafeShutdown(ShutdownStatus);
+				throw;
+			}
+			catch (...)
+			{
+				PF_CORE_ERROR("Vulkan renderer initialization failed with a non-standard exception");
+				const ShutdownResult ShutdownStatus = Shutdown();
+				if (!ShutdownStatus.IsComplete()) FailStopUnsafeShutdown(ShutdownStatus);
 				throw;
 			}
 		}
 
 		~VulkanRenderer() override
 		{
-			Shutdown();
+			const ShutdownResult ShutdownStatus = Shutdown();
+			if (!ShutdownStatus.IsComplete()) FailStopUnsafeShutdown(ShutdownStatus);
 		}
 
 		OutputColorEncoding GetOutputColorEncoding() const noexcept override
@@ -308,6 +389,7 @@ namespace PulseForge
 
 		bool BeginFrame() override
 		{
+			m_DeviceHealth.EnsureOperational();
 			m_RetirePreviousGenerationsAfterSubmit = false;
 			if (!m_Device)
 				throw std::runtime_error("Vulkan renderer is not initialized");
@@ -335,7 +417,7 @@ namespace PulseForge
 			const bool RecreationRequested = !m_Swapchain || m_SwapchainRecreationNeeded ||
 				FramebufferWidth != m_SwapchainExtent.width || FramebufferHeight != m_SwapchainExtent.height;
 			const bool CanCreateGeneration =
-				VulkanSupport::CanCreateSwapchainGeneration(m_PresentFenceMaintenanceEnabled, m_Swapchain != vk::SwapchainKHR(),
+				VulkanSupport::CanCreateSwapchainGeneration(UsesPresentationFences(), m_Swapchain != vk::SwapchainKHR(),
 					m_RetiredSwapchainGenerations.size(), m_SwapchainUnusable, m_LegacyRecoveryAttemptedAtLimit);
 			if (RecreationRequested && !CanCreateGeneration &&
 				(m_SwapchainUnusable || !m_Swapchain))
@@ -343,8 +425,9 @@ namespace PulseForge
 				m_SwapchainRetirementBlocked = true;
 				if (!m_SwapchainRetirementBlockedLogged)
 				{
-					PF_CORE_ERROR(
-						"Main Vulkan presentation is terminally blocked for this renderer instance: no usable current swapchain can be presented and {} retired generations still await a specification-backed reacquire completion; the document remains open and renderer restart is required",
+					PF_CORE_ERROR("Main Vulkan presentation is terminally blocked for this renderer instance: no usable current swapchain "
+								  "can be presented and {} retired generations still await a specification-backed reacquire completion; "
+								  "the document remains open and renderer restart is required",
 						m_RetiredSwapchainGenerations.size());
 					m_SwapchainRetirementBlockedLogged = true;
 				}
@@ -359,8 +442,8 @@ namespace PulseForge
 				return false;
 			if (RecreationRequested && !CanCreateGeneration && !m_DeferredRetirementLimitLogged)
 			{
-				PF_CORE_ERROR(
-					"Main swapchain recreation is deferred while the current generation renders because {} legacy presentation generations are still awaiting reacquisition",
+				PF_CORE_ERROR("Main swapchain recreation is deferred while the current generation renders because {} legacy presentation "
+							  "generations are still awaiting reacquisition",
 					m_RetiredSwapchainGenerations.size());
 				m_DeferredRetirementLimitLogged = true;
 			}
@@ -409,8 +492,8 @@ namespace PulseForge
 			m_AcquiredImageIndex = ImageIndex;
 			m_AcquiredSuboptimal = AcquireResult == VK_SUBOPTIMAL_KHR;
 			SwapchainImage& Image = m_SwapchainImages[m_AcquiredImageIndex];
-			m_RetirePreviousGenerationsAfterSubmit = !m_PresentFenceMaintenanceEnabled &&
-				m_FirstPresentationPending && m_FirstPresentationImageIndex == m_AcquiredImageIndex;
+			m_RetirePreviousGenerationsAfterSubmit =
+				!UsesPresentationFences() && m_FirstPresentationPending && m_FirstPresentationImageIndex == m_AcquiredImageIndex;
 			m_PresentationResources.WaitForPresentation(Image);
 			const auto* DepthTarget = dynamic_cast<const VulkanTexture*>(Image.DepthTarget.get());
 			if (!DepthTarget)
@@ -447,6 +530,7 @@ namespace PulseForge
 		{
 			if (!m_FrameActive)
 				return;
+			m_DeviceHealth.EnsureOperational();
 			m_Recording = m_MainRecording;
 
 			if (m_ActiveRenderTarget)
@@ -475,16 +559,12 @@ namespace PulseForge
 				nvrhi::ResourceStates::Present);
 			Frame.CommandList->commitBarriers();
 			Frame.CommandList->close();
-			Frame.SubmissionValue = m_ActiveNvrhiDevice->executeCommandList(
-				Frame.CommandList,
-				nvrhi::CommandQueue::Graphics);
+			m_DeviceHealth.EnsureOperational();
+			Frame.SubmissionValue =
+				ExecuteNvrhiCommandList(Frame.CommandList, nvrhi::CommandQueue::Graphics, "submitting the main presentation frame");
 			if (m_RetirePreviousGenerationsAfterSubmit &&
 				VulkanSupport::ShouldRetireDeferredSwapchains(
-					m_PresentFenceMaintenanceEnabled,
-					m_FirstPresentationPending,
-					m_FirstPresentationImageIndex,
-					m_AcquiredImageIndex,
-					true))
+					UsesPresentationFences(), m_FirstPresentationPending, m_FirstPresentationImageIndex, m_AcquiredImageIndex, true))
 			{
 				// Waiting this one graphics submission consumes the acquire semaphore. The
 				// Khronos fallback proof then permits retirement of generations older than
@@ -501,33 +581,27 @@ namespace PulseForge
 			const VkSemaphore PresentSemaphore = static_cast<VkSemaphore>(Image.PresentReady);
 			const VkSwapchainKHR Swapchain = static_cast<VkSwapchainKHR>(m_Swapchain);
 			const VkFence NativePresentFence = static_cast<VkFence>(Image.PresentFence);
-			VkSwapchainPresentFenceInfoKHR PresentFenceInfo{
-				VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR, nullptr, 1,
-				m_PresentFenceMaintenanceEnabled ? &NativePresentFence : nullptr
-			};
-			VkPresentInfoKHR PresentInfo{
-				VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-				m_PresentFenceMaintenanceEnabled ? &PresentFenceInfo : nullptr,
-				1,
-				&PresentSemaphore,
-				1,
-				&Swapchain,
-				&m_AcquiredImageIndex,
-				nullptr
-			};
+			VkSwapchainPresentFenceInfoKHR PresentFenceInfo{ VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR, nullptr, 1,
+				UsesPresentationFences() ? &NativePresentFence : nullptr };
+			VkPresentInfoKHR PresentInfo{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, UsesPresentationFences() ? &PresentFenceInfo : nullptr, 1,
+				&PresentSemaphore, 1, &Swapchain, &m_AcquiredImageIndex, nullptr };
 			const VkResult PresentResult = VULKAN_HPP_DEFAULT_DISPATCHER.vkQueuePresentKHR(
 				static_cast<VkQueue>(m_PresentQueue),
 				&PresentInfo);
-			if (m_PresentFenceMaintenanceEnabled)
-				Image.PresentFenceUsed = true;
-			Image.PresentPending = PresentResult != VK_ERROR_DEVICE_LOST;
-			if (!m_PresentFenceMaintenanceEnabled && !m_FirstPresentationPending && !m_FirstPresentationCompleted &&
+			if (PresentResult == VK_ERROR_DEVICE_LOST) MarkDeviceLost(PresentResult);
+			const VulkanSupport::PresentationResultHandling PresentationHandling = RecordPresentationResult(Image, PresentResult);
+			if (m_DeviceHealth.IsLost())
+			{
+				ClearActiveRecordingState();
+				throw std::runtime_error("Vulkan device was lost while presenting the main swapchain image");
+			}
+			if (!UsesPresentationFences() && !m_FirstPresentationPending && !m_FirstPresentationCompleted &&
 				(PresentResult == VK_SUCCESS || PresentResult == VK_SUBOPTIMAL_KHR))
 			{
 				m_FirstPresentationPending = true;
 				m_FirstPresentationImageIndex = m_AcquiredImageIndex;
 			}
-			m_ActiveNvrhiDevice->runGarbageCollection();
+			RunNvrhiGarbageCollection();
 
 			const bool AcquiredSuboptimal = m_AcquiredSuboptimal;
 			m_FrameActive = false;
@@ -535,7 +609,7 @@ namespace PulseForge
 			m_MainRecording = {};
 			m_AcquiredSuboptimal = false;
 			m_CurrentFrame = (m_CurrentFrame + 1) % m_Frames.size();
-			m_SwapchainUnusable = PresentResult == VK_ERROR_OUT_OF_DATE_KHR;
+			m_SwapchainUnusable = !PresentationHandling.CurrentSwapchainUsable;
 			if (PresentResult == VK_SUCCESS || PresentResult == VK_SUBOPTIMAL_KHR)
 			{
 				m_SwapchainUnusable = false;
@@ -563,10 +637,12 @@ namespace PulseForge
 			}
 #endif
 
-			if (PresentResult != VK_SUCCESS &&
-				PresentResult != VK_SUBOPTIMAL_KHR &&
-				PresentResult != VK_ERROR_OUT_OF_DATE_KHR)
+			if (PresentationHandling.RecoveryAction == VulkanSupport::PresentationRecoveryAction::BlockHost)
 			{
+				PF_CORE_ERROR("Main Vulkan presentation stopped after vkQueuePresentKHR returned {}; request was {} and this "
+							  "swapchain will not be reused. Shutdown must complete the submitted frame before releasing its resources",
+					vk::to_string(static_cast<vk::Result>(PresentResult)),
+					VulkanSupport::ToString(PresentationHandling.RequestDisposition));
 				CheckVkResult(PresentResult, "vkQueuePresentKHR");
 			}
 
@@ -578,7 +654,7 @@ namespace PulseForge
 					m_LoggedFirstDraw);
 			}
 
-			if (AcquiredSuboptimal || PresentResult == VK_ERROR_OUT_OF_DATE_KHR || PresentResult == VK_SUBOPTIMAL_KHR)
+			if (AcquiredSuboptimal || PresentationHandling.RecoveryAction == VulkanSupport::PresentationRecoveryAction::RecreateSwapchain)
 			{
 				m_SwapchainRecreationNeeded = true;
 				return;
@@ -587,6 +663,7 @@ namespace PulseForge
 
 		std::expected<uint64_t, std::string> CreatePlatformPresentationTarget(void* NativeWindow) override
 		{
+			if (m_DeviceHealth.IsLost()) return std::unexpected("The Vulkan device is lost; native presentation hosts cannot be created");
 			auto* Window = static_cast<GLFWwindow*>(NativeWindow);
 			if (!Window)
 				return std::unexpected("The platform viewport does not expose a GLFW window");
@@ -598,20 +675,28 @@ namespace PulseForge
 			Host->InjectAcquireOutOfDateCount = std::exchange(m_DebugNativeAcquireOutOfDateCount, 0u);
 			Host->InjectSwapchainCreationFailureAtDeferredCount = std::exchange(m_DebugNativeSwapchainCreationFailureAtDeferredCount, 0u);
 #endif
-			VkSurfaceKHR NativeSurface = VK_NULL_HANDLE;
-			const VkResult SurfaceResult = glfwCreateWindowSurface(
-				static_cast<VkInstance>(m_Instance), Window, nullptr, &NativeSurface);
-			if (SurfaceResult != VK_SUCCESS)
-				return std::unexpected("Could not create a Vulkan surface for the native editor window: " +
-					vk::to_string(static_cast<vk::Result>(SurfaceResult)));
-			Host->Surface = vk::SurfaceKHR(NativeSurface);
+			const uint64_t TargetID = ++m_NextPlatformTargetID;
+			auto [HostEntry, Inserted] = m_PlatformTargets.emplace(TargetID, std::move(Host));
+			if (!Inserted) return std::unexpected("Could not reserve ownership for a native Vulkan presentation host");
+			PlatformPresentationHost& Candidate = *HostEntry->second;
 
 			try
 			{
-				if (!m_PhysicalDevice.getSurfaceSupportKHR(m_QueueFamilies.PresentIndex, Host->Surface))
+				VkSurfaceKHR NativeSurface = VK_NULL_HANDLE;
+				const VkResult SurfaceResult =
+					glfwCreateWindowSurface(static_cast<VkInstance>(m_Instance), Window, nullptr, &NativeSurface);
+				if (NativeSurface != VK_NULL_HANDLE) Candidate.Surface = vk::SurfaceKHR(NativeSurface);
+				if (SurfaceResult != VK_SUCCESS)
+				{
+					MarkDeviceLost(SurfaceResult);
+					throw std::runtime_error("Could not create a Vulkan surface for the native editor window: " +
+											 vk::to_string(static_cast<vk::Result>(SurfaceResult)));
+				}
+
+				if (!m_PhysicalDevice.getSurfaceSupportKHR(m_QueueFamilies.PresentIndex, Candidate.Surface))
 					throw std::runtime_error("The active Vulkan present queue does not support this window surface");
 
-				const auto SurfaceFormats = m_PhysicalDevice.getSurfaceFormatsKHR(Host->Surface);
+				const auto SurfaceFormats = m_PhysicalDevice.getSurfaceFormatsKHR(Candidate.Surface);
 				auto CompatibleFormat = std::find_if(
 					SurfaceFormats.begin(), SurfaceFormats.end(), [this](const vk::SurfaceFormatKHR& Candidate)
 					{
@@ -620,17 +705,15 @@ namespace PulseForge
 					});
 				if (CompatibleFormat == SurfaceFormats.end())
 					throw std::runtime_error("The native window surface does not support the main editor's swapchain format");
-				Host->SurfaceFormat = *CompatibleFormat;
-				const auto SurfaceCapabilities = m_PhysicalDevice.getSurfaceCapabilitiesKHR(Host->Surface);
-				const auto PresentModes = m_PhysicalDevice.getSurfacePresentModesKHR(Host->Surface);
+				Candidate.SurfaceFormat = *CompatibleFormat;
+				const auto SurfaceCapabilities = m_PhysicalDevice.getSurfaceCapabilitiesKHR(Candidate.Surface);
+				const auto PresentModes = m_PhysicalDevice.getSurfacePresentModesKHR(Candidate.Surface);
 				if (std::find(PresentModes.begin(), PresentModes.end(), vk::PresentModeKHR::eFifo) == PresentModes.end())
 					throw std::runtime_error("The native window surface does not support FIFO presentation");
-				Host->PresentMode = vk::PresentModeKHR::eFifo;
-				if (!CreatePlatformSwapchain(*Host, SurfaceCapabilities))
+				Candidate.PresentMode = vk::PresentModeKHR::eFifo;
+				if (!CreatePlatformSwapchain(Candidate, SurfaceCapabilities))
 					throw std::runtime_error("The native editor window has no nonzero framebuffer extent");
 
-				const uint64_t TargetID = ++m_NextPlatformTargetID;
-				m_PlatformTargets.emplace(TargetID, std::move(Host));
 				PF_CORE_INFO("Created Vulkan presentation target {} for a native editor window", TargetID);
 #if defined(PF_DEBUG)
 				if (m_DebugMainAcquireOutOfDateAfterNativeTarget)
@@ -646,19 +729,47 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
-				ReleasePlatformSwapchainImages(*Host);
-				ReleasePlatformFrames(*Host);
-				if (Host->Swapchain)
-					m_Device.destroySwapchainKHR(Host->Swapchain);
-				if (Host->Surface)
-					m_Instance.destroySurfaceKHR(Host->Surface);
-				return std::unexpected(std::string(
-					"Could not initialize Vulkan presentation for the native editor window: ") + Exception.what());
+				MarkDeviceLostFromException(Exception);
+				std::string Message =
+					std::string("Could not initialize Vulkan presentation for the native editor window: ") + Exception.what();
+				try
+				{
+					ReleaseUnpublishedPlatformHost(Candidate);
+					m_PlatformTargets.erase(HostEntry);
+				}
+				catch (const std::exception& CleanupException)
+				{
+					PF_CORE_ERROR("Could not release the unpublished Vulkan host; renderer retained ownership for shutdown: {}",
+						CleanupException.what());
+					Message += std::string("; cleanup remains owned by the renderer: ") + CleanupException.what();
+				}
+				catch (...)
+				{
+					PF_CORE_ERROR("Could not release the unpublished Vulkan host; renderer retained ownership for shutdown");
+					Message += "; cleanup remains owned by the renderer after a non-standard cleanup exception";
+				}
+				return std::unexpected(std::move(Message));
+			}
+			catch (...)
+			{
+				std::string Message = "Could not initialize Vulkan presentation for the native editor window: non-standard exception";
+				try
+				{
+					ReleaseUnpublishedPlatformHost(Candidate);
+					m_PlatformTargets.erase(HostEntry);
+				}
+				catch (...)
+				{
+					PF_CORE_ERROR("Could not release the unpublished Vulkan host; renderer retained ownership for shutdown");
+					Message += "; cleanup remains owned by the renderer";
+				}
+				return std::unexpected(std::move(Message));
 			}
 		}
 
 		bool BeginPlatformPresentationTarget(uint64_t TargetID) override
 		{
+			m_DeviceHealth.EnsureOperational();
 			const auto Entry = m_PlatformTargets.find(TargetID);
 			if (Entry == m_PlatformTargets.end() || m_FrameActive || m_ActivePlatformTarget || m_ActiveRenderTarget)
 				return false;
@@ -692,8 +803,8 @@ namespace PulseForge
 					--Host.InjectAcquireOutOfDateCount;
 				Host.InjectedAcquireOutOfDatePendingRecovery = true;
 				AcquireResult = VK_ERROR_OUT_OF_DATE_KHR;
-				PF_CORE_INFO(
-					"Debug fixture injected VK_ERROR_OUT_OF_DATE_KHR for native host {}; no image was acquired and no command list was opened",
+				PF_CORE_INFO("Debug fixture injected VK_ERROR_OUT_OF_DATE_KHR for native host {}; no image was acquired and no command "
+							 "list was opened",
 					TargetID);
 			}
 			else
@@ -715,6 +826,8 @@ namespace PulseForge
 			}
 			if (AcquireResult != VK_SUCCESS && AcquireResult != VK_SUBOPTIMAL_KHR)
 			{
+				if (AcquireResult == VK_ERROR_DEVICE_LOST) MarkDeviceLost(AcquireResult);
+				if (m_DeviceHealth.IsLost()) throw std::runtime_error("Vulkan device was lost while acquiring a native presentation image");
 				PF_CORE_ERROR("Native editor window swapchain acquisition failed: {}",
 					vk::to_string(static_cast<vk::Result>(AcquireResult)));
 				Host.RecreateNeeded = true;
@@ -734,8 +847,8 @@ namespace PulseForge
 
 			Host.AcquiredImageIndex = ImageIndex;
 			Host.AcquiredSuboptimal = AcquireResult == VK_SUBOPTIMAL_KHR;
-			Host.RetirePreviousGenerationsAfterSubmit = !m_PresentFenceMaintenanceEnabled &&
-				Host.FirstPresentationPending && Host.FirstPresentationImageIndex == ImageIndex;
+			Host.RetirePreviousGenerationsAfterSubmit =
+				!UsesPresentationFences() && Host.FirstPresentationPending && Host.FirstPresentationImageIndex == ImageIndex;
 			SwapchainImage& Image = Host.Images[ImageIndex];
 			m_PresentationResources.WaitForPresentation(Image);
 			Frame.CommandList->open();
@@ -759,6 +872,7 @@ namespace PulseForge
 		{
 			if (!m_ActivePlatformTarget || m_ActivePlatformTargetID != TargetID || !m_Recording.Frame)
 				return;
+			m_DeviceHealth.EnsureOperational();
 			PlatformPresentationHost& Host = *m_ActivePlatformTarget;
 			FrameContext& Frame = *m_Recording.Frame;
 			SwapchainImage& Image = Host.Images[Host.AcquiredImageIndex];
@@ -769,15 +883,12 @@ namespace PulseForge
 				static_cast<VkSemaphore>(Frame.ImageAvailable), 0);
 			m_VulkanDevice->queueSignalSemaphore(nvrhi::CommandQueue::Graphics,
 				static_cast<VkSemaphore>(Image.PresentReady), 0);
-			Frame.SubmissionValue = m_ActiveNvrhiDevice->executeCommandList(Frame.CommandList,
-				nvrhi::CommandQueue::Graphics);
+			m_DeviceHealth.EnsureOperational();
+			Frame.SubmissionValue =
+				ExecuteNvrhiCommandList(Frame.CommandList, nvrhi::CommandQueue::Graphics, "submitting a native presentation frame");
 			if (Host.RetirePreviousGenerationsAfterSubmit &&
-				VulkanSupport::ShouldRetireDeferredSwapchains(
-					m_PresentFenceMaintenanceEnabled,
-					Host.FirstPresentationPending,
-					Host.FirstPresentationImageIndex,
-					Host.AcquiredImageIndex,
-					true))
+				VulkanSupport::ShouldRetireDeferredSwapchains(UsesPresentationFences(), Host.FirstPresentationPending,
+					Host.FirstPresentationImageIndex, Host.AcquiredImageIndex, true))
 			{
 				WaitForFrame(Frame);
 				const size_t RetiredCount = Host.RetiredGenerations.size();
@@ -790,29 +901,47 @@ namespace PulseForge
 			const VkSemaphore PresentSemaphore = static_cast<VkSemaphore>(Image.PresentReady);
 			const VkSwapchainKHR Swapchain = static_cast<VkSwapchainKHR>(Host.Swapchain);
 			const VkFence NativePresentFence = static_cast<VkFence>(Image.PresentFence);
-			VkSwapchainPresentFenceInfoKHR PresentFenceInfo{
-				VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR, nullptr, 1,
-				m_PresentFenceMaintenanceEnabled ? &NativePresentFence : nullptr
-			};
-			VkPresentInfoKHR PresentInfo{
-				VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-				m_PresentFenceMaintenanceEnabled ? &PresentFenceInfo : nullptr, 1, &PresentSemaphore,
-				1, &Swapchain, &Host.AcquiredImageIndex, nullptr
-			};
+			VkSwapchainPresentFenceInfoKHR PresentFenceInfo{ VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR, nullptr, 1,
+				UsesPresentationFences() ? &NativePresentFence : nullptr };
+			VkPresentInfoKHR PresentInfo{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, UsesPresentationFences() ? &PresentFenceInfo : nullptr, 1,
+				&PresentSemaphore, 1, &Swapchain, &Host.AcquiredImageIndex, nullptr };
 			const VkResult PresentResult = VULKAN_HPP_DEFAULT_DISPATCHER.vkQueuePresentKHR(
 				static_cast<VkQueue>(m_PresentQueue), &PresentInfo);
-			if (m_PresentFenceMaintenanceEnabled)
-				Image.PresentFenceUsed = true;
-			Image.PresentPending = PresentResult != VK_ERROR_DEVICE_LOST;
-			if (!m_PresentFenceMaintenanceEnabled && !Host.FirstPresentationPending && !Host.FirstPresentationCompleted &&
+			if (PresentResult == VK_ERROR_DEVICE_LOST) MarkDeviceLost(PresentResult);
+			const VulkanSupport::PresentationResultHandling PresentationHandling = RecordPresentationResult(Image, PresentResult);
+			if (m_DeviceHealth.IsLost())
+			{
+				ClearActiveRecordingState();
+				throw std::runtime_error("Vulkan device was lost while presenting a native swapchain image");
+			}
+			if (!UsesPresentationFences() && !Host.FirstPresentationPending && !Host.FirstPresentationCompleted &&
 				(PresentResult == VK_SUCCESS || PresentResult == VK_SUBOPTIMAL_KHR))
 			{
 				Host.FirstPresentationPending = true;
 				Host.FirstPresentationImageIndex = Host.AcquiredImageIndex;
 			}
-			Host.RecreateNeeded = Host.AcquiredSuboptimal || PresentResult == VK_SUBOPTIMAL_KHR ||
-				PresentResult == VK_ERROR_OUT_OF_DATE_KHR;
-			Host.SwapchainUnusable = PresentResult == VK_ERROR_OUT_OF_DATE_KHR;
+			Host.RecreateNeeded = Host.AcquiredSuboptimal ||
+								  PresentationHandling.RecoveryAction == VulkanSupport::PresentationRecoveryAction::RecreateSwapchain;
+			Host.SwapchainUnusable = !PresentationHandling.CurrentSwapchainUsable;
+			if (PresentationHandling.RecoveryAction == VulkanSupport::PresentationRecoveryAction::BlockHost)
+			{
+				Host.RetirementBlocked = true;
+				if (PresentationHandling.RequestDisposition == VulkanSupport::PresentationRequestDisposition::NotEnqueued)
+				{
+					PF_CORE_ERROR(
+						"Native Vulkan presentation host {} stopped after vkQueuePresentKHR returned {} without enqueuing "
+						"its semaphore wait. The host is blocked until close so the render-finished semaphore cannot be reused before "
+						"its graphics signal operation completes",
+						TargetID, vk::to_string(static_cast<vk::Result>(PresentResult)));
+				}
+				else
+				{
+					PF_CORE_ERROR("Native Vulkan presentation host {} stopped after vkQueuePresentKHR returned {}; request was {}. "
+								  "The host will not be reused; its resources remain owned until the retirement wait succeeds",
+						TargetID, vk::to_string(static_cast<vk::Result>(PresentResult)),
+						VulkanSupport::ToString(PresentationHandling.RequestDisposition));
+				}
+			}
 			if (PresentResult == VK_SUCCESS || PresentResult == VK_SUBOPTIMAL_KHR)
 			{
 				Host.RetirementBlocked = false;
@@ -847,10 +976,11 @@ namespace PulseForge
 						TargetID, vk::to_string(static_cast<vk::Result>(PresentResult)));
 			}
 #endif
-			if (PresentResult != VK_SUCCESS && !Host.RecreateNeeded)
+			if (PresentationHandling.RecoveryAction != VulkanSupport::PresentationRecoveryAction::BlockHost &&
+				PresentResult != VK_SUCCESS && !Host.RecreateNeeded)
 				PF_CORE_ERROR("Native editor window presentation failed: {}",
 					vk::to_string(static_cast<vk::Result>(PresentResult)));
-			m_ActiveNvrhiDevice->runGarbageCollection();
+			RunNvrhiGarbageCollection();
 			Host.CurrentFrame = (Host.CurrentFrame + 1) % Host.Frames.size();
 			m_ActivePlatformTarget = nullptr;
 			m_ActivePlatformTargetID = 0;
@@ -859,6 +989,13 @@ namespace PulseForge
 
 		bool DestroyPlatformPresentationTarget(uint64_t TargetID) override
 		{
+			if (m_DeviceHealth.IsLost())
+			{
+				PF_CORE_ERROR(
+					"Native Vulkan host {} remains owned by the renderer after shared device loss; shutdown will retire all hosts together",
+					TargetID);
+				return false;
+			}
 			auto Entry = m_PlatformTargets.find(TargetID);
 			if (Entry == m_PlatformTargets.end())
 				return true;
@@ -874,6 +1011,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				PF_CORE_ERROR("Vulkan native-window retirement wait failed: {}", Exception.what());
 				return false;
 			}
@@ -919,6 +1057,7 @@ namespace PulseForge
 			const RenderTarget& Target,
 			const RenderTargetClearValue& ClearValue) override
 		{
+			m_DeviceHealth.EnsureOperational();
 			if (!m_Recording.Frame)
 			{
 				return std::unexpected(GraphicsError{
@@ -999,6 +1138,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = "Vulkan/NVRHI render-target begin failed: " + std::string(Exception.what());
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(GraphicsError{ GraphicsErrorCode::BackendFailure, Message });
@@ -1007,6 +1147,7 @@ namespace PulseForge
 
 		GraphicsResult EndRenderTarget() override
 		{
+			m_DeviceHealth.EnsureOperational();
 			if (!m_Recording.Frame || !m_ActiveRenderTarget)
 			{
 				return std::unexpected(GraphicsError{
@@ -1034,6 +1175,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = "Vulkan/NVRHI render-target end failed: " + std::string(Exception.what());
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(GraphicsError{ GraphicsErrorCode::BackendFailure, Message });
@@ -1044,6 +1186,7 @@ namespace PulseForge
 			const BufferDesc& Description,
 			std::span<const std::byte> InitialData) override
 		{
+			m_DeviceHealth.EnsureOperational();
 			nvrhi::ResourceStates InitialState = nvrhi::ResourceStates::VertexBuffer;
 			nvrhi::BufferDesc NvrhiDescription;
 			NvrhiDescription
@@ -1093,7 +1236,7 @@ namespace PulseForge
 						UploadCommandList->open();
 						UploadCommandList->writeBuffer(NativeBuffer, InitialData.data(), InitialData.size());
 						UploadCommandList->close();
-						m_ActiveNvrhiDevice->executeCommandList(UploadCommandList, nvrhi::CommandQueue::Graphics);
+						ExecuteNvrhiCommandList(UploadCommandList, nvrhi::CommandQueue::Graphics, "uploading a buffer");
 					}
 				}
 
@@ -1102,6 +1245,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = std::string("NVRHI buffer creation/upload failed: ") + Exception.what();
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(BufferCreateError{
@@ -1116,6 +1260,7 @@ namespace PulseForge
 			uint64_t DestinationOffset,
 			std::span<const std::byte> Data) override
 		{
+			m_DeviceHealth.EnsureOperational();
 			if (!m_Recording.Frame)
 			{
 				return std::unexpected(BufferUpdateError{
@@ -1144,6 +1289,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = std::string("NVRHI failed to record a buffer update: ") + Exception.what();
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(BufferUpdateError{
@@ -1155,6 +1301,7 @@ namespace PulseForge
 
 		BindingLayoutCreateResult CreateBindingLayout(const BindingLayoutDesc& Description) override
 		{
+			m_DeviceHealth.EnsureOperational();
 			nvrhi::ShaderType Visibility = nvrhi::ShaderType::Pixel;
 			switch (Description.Visibility)
 			{
@@ -1210,6 +1357,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = "Vulkan/NVRHI binding layout creation failed: " + std::string(Exception.what());
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(BindingError{ BindingErrorCode::BackendFailure, Message });
@@ -1220,6 +1368,7 @@ namespace PulseForge
 			const TextureDesc& Description,
 			std::span<const TextureSubresourceData> InitialData) override
 		{
+			m_DeviceHealth.EnsureOperational();
 			const auto Validation = ValidateTextureUpload(Description, InitialData);
 			if (!Validation)
 				return std::unexpected(Validation.error());
@@ -1362,7 +1511,7 @@ namespace PulseForge
 					UploadCommandList->open();
 					RecordTextureUpload(*UploadCommandList);
 					UploadCommandList->close();
-					m_ActiveNvrhiDevice->executeCommandList(UploadCommandList, nvrhi::CommandQueue::Graphics);
+					ExecuteNvrhiCommandList(UploadCommandList, nvrhi::CommandQueue::Graphics, "uploading a texture");
 				}
 
 				PF_CORE_INFO("Uploaded Vulkan/NVRHI {0}x{1} texture '{2}'",
@@ -1373,6 +1522,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = "Vulkan/NVRHI texture creation/upload failed for '" +
 					Description.DebugName + "': " + Exception.what();
 				PF_CORE_ERROR("{0}", Message);
@@ -1382,6 +1532,7 @@ namespace PulseForge
 
 		TextureReadbackResult ReadTextureForValidation(const Texture& Source, uint32_t ArraySlice) override
 		{
+			m_DeviceHealth.EnsureOperational();
 			if (m_Recording.Frame || m_ActiveRenderTarget)
 			{
 				return std::unexpected(TextureError{
@@ -1413,8 +1564,7 @@ namespace PulseForge
 
 			try
 			{
-				if (!m_ActiveNvrhiDevice->waitForIdle())
-					throw std::runtime_error("NVRHI failed waiting for the rendered source texture");
+				WaitForNvrhiIdleForOperation("waiting for the rendered source texture");
 
 				nvrhi::TextureDesc StagingDescription = NativeSource->GetNativeTexture()->getDesc();
 				StagingDescription
@@ -1451,9 +1601,8 @@ namespace PulseForge
 					nvrhi::ResourceStates::ShaderResource);
 				CopyCommands->commitBarriers();
 				CopyCommands->close();
-				m_ActiveNvrhiDevice->executeCommandList(CopyCommands, nvrhi::CommandQueue::Graphics);
-				if (!m_ActiveNvrhiDevice->waitForIdle())
-					throw std::runtime_error("NVRHI failed waiting for the texture readback copy");
+				ExecuteNvrhiCommandList(CopyCommands, nvrhi::CommandQueue::Graphics, "submitting a texture readback copy");
+				WaitForNvrhiIdleForOperation("waiting for the texture readback copy");
 
 				size_t RowPitch = 0;
 				const nvrhi::TextureSlice Slice;
@@ -1489,6 +1638,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = "Vulkan/NVRHI validation texture readback failed: " + std::string(Exception.what());
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(TextureError{ TextureErrorCode::BackendFailure, Message });
@@ -1497,6 +1647,7 @@ namespace PulseForge
 
 		RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description) override
 		{
+			m_DeviceHealth.EnsureOperational();
 			const auto Validation = ValidateRenderTargetDescription(Description);
 			if (!Validation)
 				return std::unexpected(Validation.error());
@@ -1601,6 +1752,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = "Vulkan/NVRHI render-target creation failed: " + std::string(Exception.what());
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(RenderTargetError{ RenderTargetErrorCode::BackendFailure, Message });
@@ -1609,6 +1761,7 @@ namespace PulseForge
 
 		DepthCubemapCreateResult CreateDepthCubemap(uint32_t Resolution, const std::string& DebugName) override
 		{
+			m_DeviceHealth.EnsureOperational();
 			if (Resolution == 0 || DebugName.empty())
 				return std::unexpected(DepthCubemapError{ DepthCubemapErrorCode::InvalidDescription,
 					"Depth cubemap resolution and debug name must be valid" });
@@ -1657,6 +1810,7 @@ namespace PulseForge
 				}
 				catch (const std::exception& Exception)
 				{
+					MarkDeviceLostFromException(Exception);
 					return std::unexpected(DepthCubemapError{ DepthCubemapErrorCode::BackendFailure,
 						"NVRHI failed to create a depth cubemap face framebuffer: " + std::string(Exception.what()) });
 				}
@@ -1666,6 +1820,7 @@ namespace PulseForge
 
 		SamplerCreateResult CreateSampler(const SamplerDesc& Description) override
 		{
+			m_DeviceHealth.EnsureOperational();
 			const auto ToNativeAddressMode = [](SamplerAddressMode Mode)
 			{
 				return Mode == SamplerAddressMode::Repeat
@@ -1696,6 +1851,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = "Vulkan/NVRHI sampler creation failed: " + std::string(Exception.what());
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(TextureError{ TextureErrorCode::BackendFailure, Message });
@@ -1704,6 +1860,7 @@ namespace PulseForge
 
 		BindingSetCreateResult CreateBindingSet(const BindingSetDesc& Description) override
 		{
+			m_DeviceHealth.EnsureOperational();
 			auto Layout = std::dynamic_pointer_cast<VulkanBindingLayout>(Description.Layout);
 			if (!Layout)
 			{
@@ -1781,6 +1938,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = "Vulkan/NVRHI binding-set creation failed: " + std::string(Exception.what());
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(BindingError{ BindingErrorCode::BackendFailure, Message });
@@ -1791,6 +1949,7 @@ namespace PulseForge
 			const ShaderDesc& Description,
 			std::span<const std::byte> Bytecode) override
 		{
+			m_DeviceHealth.EnsureOperational();
 			std::vector<std::byte> OwnedBytecode(Bytecode.begin(), Bytecode.end());
 			nvrhi::ShaderDesc NativeDescription;
 			NativeDescription
@@ -1823,6 +1982,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = "Vulkan/NVRHI shader creation failed for '" + Description.DebugName + "': " + Exception.what();
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(GraphicsError{ GraphicsErrorCode::BackendFailure, Message });
@@ -1831,6 +1991,7 @@ namespace PulseForge
 
 		GraphicsPipelineCreateResult CreateGraphicsPipeline(const GraphicsPipelineDesc& Description) override
 		{
+			m_DeviceHealth.EnsureOperational();
 			const auto VertexShader = std::dynamic_pointer_cast<VulkanShader>(Description.VertexShader);
 			const auto FragmentShader = std::dynamic_pointer_cast<VulkanShader>(Description.FragmentShader);
 		if (!VertexShader || (Description.FragmentShader && !FragmentShader))
@@ -2012,6 +2173,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = "Vulkan/NVRHI pipeline creation failed for '" + Description.DebugName + "': " + Exception.what();
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(GraphicsError{ GraphicsErrorCode::BackendFailure, Message });
@@ -2056,6 +2218,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = std::string("Vulkan/NVRHI draw recording failed: ") + Exception.what();
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(GraphicsError{ GraphicsErrorCode::BackendFailure, Message });
@@ -2102,6 +2265,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = std::string("Vulkan/NVRHI indexed draw recording failed: ") + Exception.what();
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(GraphicsError{ GraphicsErrorCode::BackendFailure, Message });
@@ -2117,6 +2281,7 @@ namespace PulseForge
 			const std::optional<ScissorRect>& Scissor,
 			bool& OutSkipDraw)
 		{
+			m_DeviceHealth.EnsureOperational();
 			OutSkipDraw = false;
 			if (!m_Recording.Frame)
 			{
@@ -2249,6 +2414,7 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
+				MarkDeviceLostFromException(Exception);
 				const std::string Message = std::string("Vulkan/NVRHI graphics state binding failed: ") + Exception.what();
 				PF_CORE_ERROR("{0}", Message);
 				return std::unexpected(GraphicsError{ GraphicsErrorCode::BackendFailure, Message });
@@ -2333,19 +2499,28 @@ namespace PulseForge
 				throw std::runtime_error("GLFW could not find a usable Vulkan loader and installable driver");
 
 			InitializeVulkanLoader();
-			ConfigureDebugRetirementValidation();
+			ConfigurePresentationPolicyAndDebugValidation();
 			CreateInstance();
 			CreateSurface();
 			SelectPhysicalDevice();
 			CreateLogicalDevice();
 			CreateNvrhiDevice();
-			m_PresentationResources.Initialize(m_Device, m_PresentQueue, m_ActiveNvrhiDevice, m_PresentFenceMaintenanceEnabled);
+			m_PresentationResources.Initialize(
+				m_Device, m_PresentQueue, m_ActiveNvrhiDevice, m_PresentationRetirementMechanism, &m_DeviceHealth);
 			CreateFrameContexts();
 			(void)RecreateSwapchain();
 		}
 
-		void ConfigureDebugRetirementValidation()
+		void ConfigurePresentationPolicyAndDebugValidation()
 		{
+			const char* PolicyValue = std::getenv("PULSEFORGE_VULKAN_PRESENTATION_POLICY");
+			const std::string PolicyText = PolicyValue ? PolicyValue : "";
+			const auto Policy = VulkanSupport::ParsePresentationPolicy(PolicyText);
+			if (!Policy)
+				throw std::runtime_error(
+					"Invalid PULSEFORGE_VULKAN_PRESENTATION_POLICY value '" + PolicyText + "'. Use 'auto' (default) or 'require-fences'.");
+			m_PresentationPolicy = *Policy;
+
 #if defined(PF_DEBUG)
 			const auto IsEnabled = [](const char* Name)
 			{
@@ -2353,6 +2528,9 @@ namespace PulseForge
 				return Value && std::strcmp(Value, "1") == 0;
 			};
 			m_ForceLegacyRetirementForTesting = IsEnabled("PULSEFORGE_VULKAN_FORCE_LEGACY_RETIREMENT");
+			if (m_PresentationPolicy == VulkanSupport::PresentationPolicy::RequireFences && m_ForceLegacyRetirementForTesting)
+				throw std::runtime_error("PULSEFORGE_VULKAN_PRESENTATION_POLICY=require-fences cannot be combined with the Debug-only "
+										 "PULSEFORGE_VULKAN_FORCE_LEGACY_RETIREMENT test override");
 			m_DebugMainAcquireOutOfDateAfterNativeTarget =
 				IsEnabled("PULSEFORGE_VULKAN_TEST_MAIN_OUT_OF_DATE_AFTER_NATIVE_TARGET");
 			const auto ReadCount = [](const char* Name, unsigned long Maximum = 16ul)
@@ -2387,6 +2565,141 @@ namespace PulseForge
 					m_DebugMainAcquireOutOfDateAfterNativeTargetCount, m_DebugNativeAcquireOutOfDateCount,
 					m_DebugMainSwapchainCreationFailureAtDeferredCount, m_DebugNativeSwapchainCreationFailureAtDeferredCount);
 #endif
+			PF_CORE_INFO("Vulkan presentation support policy: {}", VulkanSupport::ToString(m_PresentationPolicy));
+		}
+
+		[[noreturn]] static void FailStopUnsafeShutdown(const ShutdownResult& Result) noexcept
+		{
+			if (Result.Disposition == ShutdownDisposition::PresentationLifetimeUnknown)
+			{
+				PF_CORE_CRITICAL(
+					"Vulkan device loss was confirmed, but a maintenance presentation fence did not signal; the presentation engine's "
+					"resource-reference handoff is unknown (wait result {}). The renderer cannot safely destroy the swapchain children",
+					Result.VulkanResult);
+			}
+			else if (Result.Disposition == ShutdownDisposition::WaitFailed)
+			{
+				PF_CORE_CRITICAL(
+					"Vulkan shutdown could not complete wait stage {} (wait outcome {}, VkResult {}). The device is not confirmed lost and "
+					"the renderer cannot safely destroy resources whose completion remains unknown",
+					static_cast<uint32_t>(Result.Stage), static_cast<uint32_t>(Result.WaitOutcome), Result.VulkanResult);
+			}
+			else
+			{
+				PF_CORE_CRITICAL(
+					"Vulkan shutdown failed while releasing stage {} (disposition {}). Vulkan children may still be owned; terminating "
+					"rather than continuing with partial teardown",
+					static_cast<uint32_t>(Result.Stage), static_cast<uint32_t>(Result.Disposition));
+			}
+			std::terminate();
+		}
+
+		void MarkDeviceLost(VkResult Result) noexcept
+		{
+			if (Result == VK_ERROR_DEVICE_LOST) m_DeviceHealth.MarkLost(Result);
+		}
+
+		void MarkDeviceLostFromException(const std::exception& Exception) noexcept
+		{
+			if (dynamic_cast<const vk::DeviceLostError*>(&Exception)) MarkDeviceLost(VK_ERROR_DEVICE_LOST);
+		}
+
+		void CheckVkResult(VkResult Result, const char* Operation)
+		{
+			MarkDeviceLost(Result);
+			if (Result != VK_SUCCESS)
+				throw std::runtime_error(
+					std::string(Operation) + " failed with Vulkan result " + vk::to_string(static_cast<vk::Result>(Result)));
+		}
+
+		ShutdownWaitResult ClassifyShutdownVkResult(VkResult Result) noexcept
+		{
+			if (Result == VK_SUCCESS) return {};
+			if (Result == VK_ERROR_DEVICE_LOST)
+			{
+				MarkDeviceLost(Result);
+				return { ShutdownWaitOutcome::DeviceLost, Result };
+			}
+			return { ShutdownWaitOutcome::Failed, Result };
+		}
+
+		void RunNvrhiGarbageCollection()
+		{
+			if (!m_ActiveNvrhiDevice || m_DeviceHealth.IsLost()) return;
+			try
+			{
+				m_ActiveNvrhiDevice->runGarbageCollection();
+				if (m_DeviceHealth.IsLost())
+				{
+					ClearActiveRecordingState();
+					throw std::runtime_error("NVRHI reported Vulkan device loss during timeline-semaphore collection");
+				}
+			}
+			catch (const vk::DeviceLostError&)
+			{
+				MarkDeviceLost(VK_ERROR_DEVICE_LOST);
+				ClearActiveRecordingState();
+				throw std::runtime_error("NVRHI timeline-semaphore collection reported Vulkan device loss");
+			}
+		}
+
+		uint64_t ExecuteNvrhiCommandList(nvrhi::ICommandList* CommandList, nvrhi::CommandQueue Queue, const char* Operation)
+		{
+			m_DeviceHealth.EnsureOperational();
+			if (!m_ActiveNvrhiDevice) throw std::runtime_error("The Vulkan renderer has no active NVRHI device");
+
+			uint64_t SubmissionValue = 0;
+			try
+			{
+				SubmissionValue = m_ActiveNvrhiDevice->executeCommandList(CommandList, Queue);
+			}
+			catch (const vk::DeviceLostError&)
+			{
+				MarkDeviceLost(VK_ERROR_DEVICE_LOST);
+				ClearActiveRecordingState();
+				throw std::runtime_error(std::string("NVRHI reported Vulkan device loss while ") + Operation);
+			}
+
+			if (m_DeviceHealth.IsLost())
+			{
+				ClearActiveRecordingState();
+				throw std::runtime_error(std::string("NVRHI reported Vulkan device loss while ") + Operation);
+			}
+			return SubmissionValue;
+		}
+
+		void WaitForNvrhiIdleForOperation(const char* Operation)
+		{
+			m_DeviceHealth.EnsureOperational();
+			if (!m_ActiveNvrhiDevice) throw std::runtime_error("The Vulkan renderer has no active NVRHI device");
+			try
+			{
+				if (!m_ActiveNvrhiDevice->waitForIdle())
+				{
+					MarkDeviceLost(VK_ERROR_DEVICE_LOST);
+					throw std::runtime_error(std::string("NVRHI reported Vulkan device loss while ") + Operation);
+				}
+				m_DeviceHealth.EnsureOperational();
+			}
+			catch (const vk::DeviceLostError&)
+			{
+				MarkDeviceLost(VK_ERROR_DEVICE_LOST);
+				throw std::runtime_error(std::string("NVRHI reported Vulkan device loss while ") + Operation);
+			}
+		}
+
+		void ClearActiveRecordingState() noexcept
+		{
+			m_FrameActive = false;
+			m_Recording = {};
+			m_MainRecording = {};
+			m_ActivePlatformTarget = nullptr;
+			m_ActivePlatformTargetID = 0;
+		}
+
+		[[nodiscard]] bool UsesPresentationFences() const noexcept
+		{
+			return m_PresentationRetirementMechanism != VulkanSupport::PresentationRetirementMechanism::LegacyBestEffort;
 		}
 
 		void InitializeVulkanLoader()
@@ -2416,28 +2729,24 @@ namespace PulseForge
 			{
 				if (!HasName(AvailableExtensions, RequiredExtensions[Index]))
 					throw std::runtime_error(std::string("The Vulkan loader is missing GLFW-required instance extension ") + RequiredExtensions[Index]);
-				if (!HasName(m_EnabledInstanceExtensions, RequiredExtensions[Index]))
-					m_EnabledInstanceExtensions.push_back(RequiredExtensions[Index]);
+				AppendUniqueName(m_EnabledInstanceExtensions, RequiredExtensions[Index]);
 			}
 
 			m_DebugUtilsEnabled = HasName(AvailableExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-			if (m_DebugUtilsEnabled && !HasName(m_EnabledInstanceExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
-				m_EnabledInstanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+			if (m_DebugUtilsEnabled) AppendUniqueName(m_EnabledInstanceExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
-			// Swapchain-maintenance presentation fences depend on the corresponding surface
-			// maintenance instance extension and VK_KHR_get_surface_capabilities2.
-			if (HasName(AvailableExtensions, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME))
-			{
-				if (!HasName(m_EnabledInstanceExtensions, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME))
-					m_EnabledInstanceExtensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
-				if (HasName(AvailableExtensions, VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME))
-					m_SurfaceMaintenanceExtension = VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME;
-				else if (HasName(AvailableExtensions, VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME))
-					m_SurfaceMaintenanceExtension = VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME;
-				if (!m_SurfaceMaintenanceExtension.empty())
-					if (!HasName(m_EnabledInstanceExtensions, m_SurfaceMaintenanceExtension.c_str()))
-						m_EnabledInstanceExtensions.push_back(m_SurfaceMaintenanceExtension.c_str());
-			}
+			m_AvailablePresentationInstanceExtensions = { HasName(AvailableExtensions, VK_KHR_SURFACE_EXTENSION_NAME),
+				HasName(AvailableExtensions, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME),
+				HasName(AvailableExtensions, VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME),
+				HasName(AvailableExtensions, VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME) };
+			m_EnabledPresentationInstanceExtensions =
+				VulkanSupport::PlanPresentationInstanceExtensions(m_AvailablePresentationInstanceExtensions);
+			if (m_EnabledPresentationInstanceExtensions.SurfaceCapabilities2)
+				AppendUniqueName(m_EnabledInstanceExtensions, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+			if (m_EnabledPresentationInstanceExtensions.KhrSurfaceMaintenance)
+				AppendUniqueName(m_EnabledInstanceExtensions, VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
+			if (m_EnabledPresentationInstanceExtensions.ExtSurfaceMaintenance)
+				AppendUniqueName(m_EnabledInstanceExtensions, VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
 #if defined(PF_DEBUG)
 			const auto AvailableLayers = vk::enumerateInstanceLayerProperties();
 			if (HasName(AvailableLayers, "VK_LAYER_KHRONOS_validation"))
@@ -2523,15 +2832,10 @@ namespace PulseForge
 				return std::nullopt;
 
 			const auto Extensions = PhysicalDevice.enumerateDeviceExtensionProperties();
-			if (!HasName(Extensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
-				return std::nullopt;
-			std::string SwapchainMaintenanceExtension;
-			if (m_SurfaceMaintenanceExtension == VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME &&
-				HasName(Extensions, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME))
-				SwapchainMaintenanceExtension = VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME;
-			else if (m_SurfaceMaintenanceExtension == VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME &&
-				HasName(Extensions, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME))
-				SwapchainMaintenanceExtension = VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME;
+			Candidate.AvailablePresentationDeviceExtensions = { HasName(Extensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME),
+				HasName(Extensions, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME),
+				HasName(Extensions, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME) };
+			if (!Candidate.AvailablePresentationDeviceExtensions.Swapchain) return std::nullopt;
 
 			const auto QueueProperties = PhysicalDevice.getQueueFamilyProperties();
 			std::vector<VulkanSupport::QueueFamily> QueueFamilies;
@@ -2571,8 +2875,10 @@ namespace PulseForge
 			vk::PhysicalDeviceVulkan12Features Supported12;
 			vk::PhysicalDeviceVulkan13Features Supported13;
 			vk::PhysicalDeviceSwapchainMaintenance1FeaturesKHR SupportedSwapchainMaintenance;
+			const bool HasCompatibleMaintenancePath = VulkanSupport::HasCompatiblePresentationFencePath(
+				m_EnabledPresentationInstanceExtensions, Candidate.AvailablePresentationDeviceExtensions);
 			Supported12.setPNext(&Supported13);
-			Supported13.setPNext(SwapchainMaintenanceExtension.empty() ? nullptr : &SupportedSwapchainMaintenance);
+			Supported13.setPNext(HasCompatibleMaintenancePath ? &SupportedSwapchainMaintenance : nullptr);
 			vk::PhysicalDeviceFeatures2 SupportedFeatures;
 			SupportedFeatures.setPNext(&Supported12);
 			PhysicalDevice.getFeatures2(&SupportedFeatures);
@@ -2589,11 +2895,20 @@ namespace PulseForge
 			Candidate.SurfaceFormat = SurfaceFormat->first;
 			Candidate.NvrhiFormat = SurfaceFormat->second;
 			Candidate.PresentMode = ToVkPresentMode(*PresentMode);
-			Candidate.PresentFenceMaintenance = !m_ForceLegacyRetirementForTesting &&
-				!SwapchainMaintenanceExtension.empty() &&
-				SupportedSwapchainMaintenance.swapchainMaintenance1 == VK_TRUE;
-			if (Candidate.PresentFenceMaintenance)
-				Candidate.SwapchainMaintenanceExtension = std::move(SwapchainMaintenanceExtension);
+			Candidate.PresentationFeatureSupported =
+				HasCompatibleMaintenancePath && SupportedSwapchainMaintenance.swapchainMaintenance1 == VK_TRUE;
+			const VulkanSupport::PresentationFenceCapability FenceCapability = VulkanSupport::EvaluatePresentationFenceCapability(
+				m_AvailablePresentationInstanceExtensions, m_EnabledPresentationInstanceExtensions,
+				Candidate.AvailablePresentationDeviceExtensions, Candidate.PresentationFeatureSupported);
+			const VulkanSupport::PresentationPolicySelection PresentationSelection =
+				VulkanSupport::ResolvePresentationPolicy(m_PresentationPolicy, FenceCapability, m_ForceLegacyRetirementForTesting);
+			if (!PresentationSelection.Eligible)
+			{
+				if (!m_StrictPresentationRejectionReason) m_StrictPresentationRejectionReason = PresentationSelection.Reason;
+				return std::nullopt;
+			}
+			Candidate.PresentationRetirementMechanism = PresentationSelection.Mechanism;
+			Candidate.PresentationCapabilityReason = PresentationSelection.Reason;
 			Candidate.Score = 0;
 			switch (Candidate.Properties.deviceType)
 			{
@@ -2604,8 +2919,6 @@ namespace PulseForge
 			}
 			if (Candidate.QueueFamilies.GraphicsIndex == Candidate.QueueFamilies.PresentIndex)
 				Candidate.Score += 25;
-			if (Candidate.PresentFenceMaintenance)
-				Candidate.Score += 50;
 
 			return Candidate;
 		}
@@ -2617,15 +2930,27 @@ namespace PulseForge
 				throw std::runtime_error("Vulkan reported no physical devices");
 
 			std::optional<DeviceCandidate> BestCandidate;
+			m_StrictPresentationRejectionReason.reset();
 			for (vk::PhysicalDevice PhysicalDevice : PhysicalDevices)
 			{
 				auto Candidate = EvaluateDevice(PhysicalDevice);
-				if (Candidate && (!BestCandidate || Candidate->Score > BestCandidate->Score))
+				if (Candidate && (!BestCandidate || VulkanSupport::IsBetterPresentationCandidate(
+														Candidate->PresentationRetirementMechanism !=
+															VulkanSupport::PresentationRetirementMechanism::LegacyBestEffort,
+														Candidate->Score,
+														BestCandidate->PresentationRetirementMechanism !=
+															VulkanSupport::PresentationRetirementMechanism::LegacyBestEffort,
+														BestCandidate->Score)))
 					BestCandidate = std::move(Candidate);
 			}
 
 			if (!BestCandidate)
 			{
+				if (m_PresentationPolicy == VulkanSupport::PresentationPolicy::RequireFences && m_StrictPresentationRejectionReason)
+					throw std::runtime_error(
+						std::string("No otherwise suitable Vulkan GPU satisfies PULSEFORGE_VULKAN_PRESENTATION_POLICY=require-fences: ") +
+						VulkanSupport::ToString(*m_StrictPresentationRejectionReason) +
+						". Use PULSEFORGE_VULKAN_PRESENTATION_POLICY=auto to allow the documented legacy compatibility path.");
 				throw std::runtime_error(
 					"No Vulkan 1.3 GPU supports graphics/presentation, VK_KHR_swapchain, "
 					"timeline semaphores, synchronization2, dynamic rendering, D32 depth attachments, "
@@ -2637,8 +2962,23 @@ namespace PulseForge
 			m_SurfaceFormat = BestCandidate->SurfaceFormat;
 			m_NvrhiFormat = BestCandidate->NvrhiFormat;
 			m_PresentMode = BestCandidate->PresentMode;
-			m_SwapchainMaintenanceExtension = BestCandidate->SwapchainMaintenanceExtension;
-			m_PresentFenceMaintenanceEnabled = BestCandidate->PresentFenceMaintenance;
+			m_PresentationRetirementMechanism = BestCandidate->PresentationRetirementMechanism;
+			m_SwapchainMaintenanceFeatureEnabled = BestCandidate->PresentationFeatureSupported && UsesPresentationFences();
+			if (m_SwapchainMaintenanceFeatureEnabled != UsesPresentationFences())
+				throw std::logic_error("Selected Vulkan presentation path does not match the queried swapchainMaintenance1 feature");
+			m_EnabledDeviceExtensions.clear();
+			AppendUniqueName(m_EnabledDeviceExtensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+			switch (m_PresentationRetirementMechanism)
+			{
+			case VulkanSupport::PresentationRetirementMechanism::KhrMaintenanceFence:
+				AppendUniqueName(m_EnabledDeviceExtensions, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
+				break;
+			case VulkanSupport::PresentationRetirementMechanism::ExtMaintenanceFence:
+				AppendUniqueName(m_EnabledDeviceExtensions, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
+				break;
+			case VulkanSupport::PresentationRetirementMechanism::LegacyBestEffort:
+				break;
+			}
 
 			PF_CORE_INFO(
 				"Selected Vulkan GPU: {0} (API {1}, driver {2}, graphics queue {3}, present queue {4})",
@@ -2647,11 +2987,19 @@ namespace PulseForge
 				BestCandidate->Properties.driverVersion,
 				m_QueueFamilies.GraphicsIndex,
 				m_QueueFamilies.PresentIndex);
-			if (m_PresentFenceMaintenanceEnabled)
-				PF_CORE_INFO("Vulkan swapchain presentation fences enabled through {} with {}",
-					m_SwapchainMaintenanceExtension, m_SurfaceMaintenanceExtension);
+			if (UsesPresentationFences())
+			{
+				PF_CORE_INFO("Vulkan presentation retirement: {} (swapchainMaintenance1 feature enabled, policy: {})",
+					VulkanSupport::ToString(m_PresentationRetirementMechanism), VulkanSupport::ToString(m_PresentationPolicy));
+			}
 			else
-				PF_CORE_WARN("Vulkan swapchain maintenance presentation fences are unavailable; using the legacy present-queue retirement fallback");
+			{
+				PF_CORE_WARN(
+					"Vulkan presentation retirement: {} (policy: {}). Reason: {}. Final close/shutdown uses a best-effort "
+					"queue-idle fallback; Vulkan does not provide an explicit presentation-engine release guarantee on this legacy path.",
+					VulkanSupport::ToString(m_PresentationRetirementMechanism), VulkanSupport::ToString(m_PresentationPolicy),
+					VulkanSupport::ToString(BestCandidate->PresentationCapabilityReason));
+			}
 		}
 
 		void CreateLogicalDevice()
@@ -2676,21 +3024,15 @@ namespace PulseForge
 				.setSynchronization2(VK_TRUE)
 				.setDynamicRendering(VK_TRUE)
 				.setShaderDemoteToHelperInvocation(VK_TRUE);
-			if (m_PresentFenceMaintenanceEnabled)
+			if (m_SwapchainMaintenanceFeatureEnabled)
 			{
 				EnabledSwapchainMaintenance.setSwapchainMaintenance1(VK_TRUE);
 				Enabled13.setPNext(&EnabledSwapchainMaintenance);
 			}
 			Enabled12.setPNext(&Enabled13);
 
-			std::vector<const char*> DeviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
-			if (m_PresentFenceMaintenanceEnabled)
-				DeviceExtensions.push_back(m_SwapchainMaintenanceExtension.c_str());
 			vk::DeviceCreateInfo CreateInfo;
-			CreateInfo
-				.setPNext(&Enabled12)
-				.setQueueCreateInfos(QueueCreateInfos)
-				.setPEnabledExtensionNames(DeviceExtensions);
+			CreateInfo.setPNext(&Enabled12).setQueueCreateInfos(QueueCreateInfos).setPEnabledExtensionNames(m_EnabledDeviceExtensions);
 
 			m_Device = m_PhysicalDevice.createDevice(CreateInfo);
 			VULKAN_HPP_DEFAULT_DISPATCHER.init(m_Device);
@@ -2700,9 +3042,6 @@ namespace PulseForge
 
 		void CreateNvrhiDevice()
 		{
-			std::vector<const char*> DeviceExtensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
-			if (m_PresentFenceMaintenanceEnabled)
-				DeviceExtensions.push_back(m_SwapchainMaintenanceExtension.c_str());
 			nvrhi::vulkan::DeviceDesc Description;
 			Description.errorCB = &m_NvrhiMessageCallback;
 			Description.instance = static_cast<VkInstance>(m_Instance);
@@ -2710,8 +3049,8 @@ namespace PulseForge
 			Description.device = static_cast<VkDevice>(m_Device);
 			Description.graphicsQueue = static_cast<VkQueue>(m_GraphicsQueue);
 			Description.graphicsQueueIndex = static_cast<int>(m_QueueFamilies.GraphicsIndex);
-			Description.deviceExtensions = DeviceExtensions.data();
-			Description.numDeviceExtensions = DeviceExtensions.size();
+			Description.deviceExtensions = m_EnabledDeviceExtensions.data();
+			Description.numDeviceExtensions = m_EnabledDeviceExtensions.size();
 			Description.instanceExtensions = m_EnabledInstanceExtensions.data();
 			Description.numInstanceExtensions = m_EnabledInstanceExtensions.size();
 
@@ -2744,18 +3083,22 @@ namespace PulseForge
 
 		void WaitForFrame(const FrameContext& Frame)
 		{
+			m_DeviceHealth.EnsureOperational();
 			if (Frame.SubmissionValue == 0)
 				return;
 
 			const vk::Semaphore CompletionSemaphore(m_VulkanDevice->getQueueSemaphore(nvrhi::CommandQueue::Graphics));
-			const std::array<vk::Semaphore, 1> Semaphores = { CompletionSemaphore };
+			const VkSemaphore NativeCompletionSemaphore = static_cast<VkSemaphore>(CompletionSemaphore);
 			const std::array<uint64_t, 1> Values = { Frame.SubmissionValue };
-			const auto WaitInfo = vk::SemaphoreWaitInfo()
-				.setSemaphores(Semaphores)
-				.setValues(Values);
-			const vk::Result WaitResult = m_Device.waitSemaphores(WaitInfo, std::numeric_limits<uint64_t>::max());
-			if (WaitResult != vk::Result::eSuccess)
-				throw std::runtime_error("Vulkan frame synchronization wait failed: " + vk::to_string(WaitResult));
+			const VkSemaphoreWaitInfo WaitInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, nullptr, 0, 1, &NativeCompletionSemaphore,
+				Values.data() };
+			const VkResult WaitResult = VULKAN_HPP_DEFAULT_DISPATCHER.vkWaitSemaphores(
+				static_cast<VkDevice>(m_Device), &WaitInfo, std::numeric_limits<uint64_t>::max());
+			if (WaitResult != VK_SUCCESS)
+			{
+				MarkDeviceLost(WaitResult);
+				throw std::runtime_error("Vulkan frame synchronization wait failed: " + vk::to_string(static_cast<vk::Result>(WaitResult)));
+			}
 		}
 
 		std::optional<vk::Extent2D> ChooseSwapchainExtent(const vk::SurfaceCapabilitiesKHR& Capabilities) const
@@ -2788,7 +3131,7 @@ namespace PulseForge
 		{
 			if (!m_Device)
 				return false;
-			if (!VulkanSupport::CanCreateSwapchainGeneration(m_PresentFenceMaintenanceEnabled, m_Swapchain != vk::SwapchainKHR(),
+			if (!VulkanSupport::CanCreateSwapchainGeneration(UsesPresentationFences(), m_Swapchain != vk::SwapchainKHR(),
 					m_RetiredSwapchainGenerations.size(), OutOfDateRecovery, m_LegacyRecoveryAttemptedAtLimit))
 			{
 				if (!m_DeferredRetirementLimitLogged)
@@ -2812,7 +3155,7 @@ namespace PulseForge
 
 			for (const FrameContext& Frame : m_Frames)
 				WaitForFrame(Frame);
-			if (m_PresentFenceMaintenanceEnabled) m_PresentationResources.WaitForRetirement(m_SwapchainImages, "main swapchain");
+			if (UsesPresentationFences()) m_PresentationResources.WaitForRetirement(m_SwapchainImages, "main swapchain");
 			else if (m_Swapchain)
 			{
 				try
@@ -2821,6 +3164,7 @@ namespace PulseForge
 				}
 				catch (const std::exception& Exception)
 				{
+					MarkDeviceLostFromException(Exception);
 					PF_CORE_ERROR("Could not reserve bounded legacy swapchain retirement storage: {}", Exception.what());
 					return false;
 				}
@@ -2857,7 +3201,7 @@ namespace PulseForge
 			std::vector<SwapchainImage> NewImages;
 			const bool HadPreviousGeneration = m_Swapchain != vk::SwapchainKHR();
 			bool PreviousGenerationRetired = false;
-			const bool RecoveryAtLegacyLimit = !m_PresentFenceMaintenanceEnabled &&
+			const bool RecoveryAtLegacyLimit = !UsesPresentationFences() &&
 											   m_RetiredSwapchainGenerations.size() == VulkanSupport::MaximumDeferredSwapchainGenerations &&
 											   (m_SwapchainUnusable || !HadPreviousGeneration);
 			try
@@ -2878,7 +3222,7 @@ namespace PulseForge
 					// A successful create with oldSwapchain retires the old generation. With
 					// presentation fences, its completion is known directly. Otherwise retain it
 					// until the first new-chain present is reacquired.
-					if (m_PresentFenceMaintenanceEnabled)
+					if (UsesPresentationFences())
 					{
 						ReleaseSwapchainImages();
 						m_Device.destroySwapchainKHR(m_Swapchain);
@@ -2901,8 +3245,7 @@ namespace PulseForge
 					SwapchainImage& Image = NewImages.back();
 					Image.NativeImage = NativeImages[Index];
 					Image.PresentReady = m_Device.createSemaphore(vk::SemaphoreCreateInfo());
-					if (m_PresentFenceMaintenanceEnabled)
-						Image.PresentFence = m_Device.createFence(vk::FenceCreateInfo());
+					if (UsesPresentationFences()) Image.PresentFence = m_Device.createFence(vk::FenceCreateInfo());
 
 					nvrhi::TextureDesc TextureDescription;
 					TextureDescription
@@ -2945,7 +3288,8 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
-				m_PresentationResources.ReleaseImages(NewImages);
+				MarkDeviceLostFromException(Exception);
+				m_PresentationResources.ReleaseImages(NewImages, PresentationResourceReleaseMode::UnpresentedCandidate);
 				if (NewSwapchain)
 					m_Device.destroySwapchainKHR(NewSwapchain);
 				m_SwapchainRecreationNeeded = true;
@@ -2953,7 +3297,8 @@ namespace PulseForge
 					PF_CORE_ERROR("Could not prepare replacement Vulkan swapchain; the previous generation remains available: {0}",
 						Exception.what());
 				else if (PreviousGenerationRetired)
-					PF_CORE_ERROR("Replacement Vulkan swapchain failed after the previous generation was retired; the main surface will be retried: {0}",
+					PF_CORE_ERROR("Replacement Vulkan swapchain failed after the previous generation was retired; the main surface will be "
+								  "retried: {0}",
 						Exception.what());
 				else
 					PF_CORE_ERROR("Could not create the initial Vulkan swapchain: {0}", Exception.what());
@@ -3041,8 +3386,7 @@ namespace PulseForge
 				SwapchainImage& Image = Host.Images.back();
 				Image.NativeImage = NativeImages[Index];
 				Image.PresentReady = m_Device.createSemaphore(vk::SemaphoreCreateInfo());
-				if (m_PresentFenceMaintenanceEnabled)
-					Image.PresentFence = m_Device.createFence(vk::FenceCreateInfo());
+				if (UsesPresentationFences()) Image.PresentFence = m_Device.createFence(vk::FenceCreateInfo());
 
 				nvrhi::TextureDesc TextureDescription;
 				TextureDescription
@@ -3077,8 +3421,8 @@ namespace PulseForge
 				if (Index == 0 && Host.InjectImageAllocationFailure)
 				{
 					Host.InjectImageAllocationFailure = false;
-					PF_CORE_WARN(
-						"Debug fixture injected a native presentation allocation failure after creating swapchain image {} and its depth target",
+					PF_CORE_WARN("Debug fixture injected a native presentation allocation failure after creating swapchain image {} and "
+								 "its depth target",
 						Index);
 					throw std::runtime_error(
 						"Debug fixture injected allocation failure after native swapchain image and depth-target creation");
@@ -3134,39 +3478,21 @@ namespace PulseForge
 			}
 		}
 
-		bool ForceReleasePlatformPresentationTarget(uint64_t TargetID) noexcept
+		void ReleaseUnpublishedPlatformHost(PlatformPresentationHost& Host)
 		{
-			try
-			{
-				auto Entry = m_PlatformTargets.find(TargetID);
-				if (Entry == m_PlatformTargets.end())
-					return true;
-				if (m_ActivePlatformTargetID == TargetID)
-				{
-					m_ActivePlatformTarget = nullptr;
-					m_ActivePlatformTargetID = 0;
-					m_Recording = m_FrameActive ? m_MainRecording : RecordingContext{};
-				}
-				ReleasePlatformSwapchainImages(*Entry->second);
-				ReleasePlatformRetiredGenerations(*Entry->second);
-				ReleasePlatformFrames(*Entry->second);
-				if (Entry->second->Swapchain)
-					m_Device.destroySwapchainKHR(Entry->second->Swapchain);
-				if (Entry->second->Surface)
-					m_Instance.destroySurfaceKHR(Entry->second->Surface);
-				m_PlatformTargets.erase(Entry);
-				return true;
-			}
-			catch (const std::exception& Exception)
-			{
-				PF_CORE_ERROR("Could not release native Vulkan presentation resources during teardown: {}", Exception.what());
-				return false;
-			}
+			constexpr auto ReleaseMode = PresentationResourceReleaseMode::UnpresentedCandidate;
+			m_PresentationResources.ReleaseImages(Host.Images, ReleaseMode);
+			m_PresentationResources.ReleaseGenerations(Host.RetiredGenerations, ReleaseMode);
+			ReleasePlatformFrames(Host);
+			if (Host.Swapchain) m_Device.destroySwapchainKHR(Host.Swapchain);
+			Host.Swapchain = vk::SwapchainKHR();
+			if (m_Instance && Host.Surface) m_Instance.destroySurfaceKHR(Host.Surface);
+			Host.Surface = vk::SurfaceKHR();
 		}
 
 		bool RecreatePlatformSwapchain(PlatformPresentationHost& Host, bool OutOfDateRecovery = false)
 		{
-			if (!VulkanSupport::CanCreateSwapchainGeneration(m_PresentFenceMaintenanceEnabled, Host.Swapchain != vk::SwapchainKHR(),
+			if (!VulkanSupport::CanCreateSwapchainGeneration(UsesPresentationFences(), Host.Swapchain != vk::SwapchainKHR(),
 					Host.RetiredGenerations.size(), OutOfDateRecovery, Host.LegacyRecoveryAttemptedAtLimit))
 			{
 				if ((Host.SwapchainUnusable || !Host.Swapchain) &&
@@ -3177,16 +3503,17 @@ namespace PulseForge
 					Host.RetirementBlocked = true;
 					if (!Host.RetirementBlockedLogged)
 					{
-						PF_CORE_ERROR(
-							"A native Vulkan presentation host is terminally blocked: its current swapchain is out of date and {} retired generations still await a specification-backed reacquire completion; the document remains open and this host requires recreation after renderer restart",
+						PF_CORE_ERROR("A native Vulkan presentation host is terminally blocked: its current swapchain is out of date and "
+									  "{} retired generations still await a specification-backed reacquire completion; the document "
+									  "remains open and this host requires recreation after renderer restart",
 							Host.RetiredGenerations.size());
 						Host.RetirementBlockedLogged = true;
 					}
 				}
 				if (!Host.DeferredRetirementLimitLogged)
 				{
-					PF_CORE_ERROR(
-						"Native swapchain recreation is deferred because {} legacy presentation generations are still awaiting reacquisition",
+					PF_CORE_ERROR("Native swapchain recreation is deferred because {} legacy presentation generations are still awaiting "
+								  "reacquisition",
 						Host.RetiredGenerations.size());
 					Host.DeferredRetirementLimitLogged = true;
 				}
@@ -3198,16 +3525,16 @@ namespace PulseForge
 			Replacement.Surface = Host.Surface;
 			Replacement.SurfaceFormat = Host.SurfaceFormat;
 			Replacement.PresentMode = Host.PresentMode;
+			bool PreviousGenerationRetired = false;
 			try
 			{
 				for (const FrameContext& Frame : Host.Frames)
 					WaitForFrame(Frame);
-				if (m_PresentFenceMaintenanceEnabled)
-					m_PresentationResources.WaitForRetirement(Host.Images, "resized native-window swapchain");
+				if (UsesPresentationFences()) m_PresentationResources.WaitForRetirement(Host.Images, "resized native-window swapchain");
 				else if (Host.Swapchain)
 					Host.RetiredGenerations.reserve(Host.RetiredGenerations.size() + 1);
 				const auto Capabilities = m_PhysicalDevice.getSurfaceCapabilitiesKHR(Host.Surface);
-				const bool RecoveryAtLegacyLimit = !m_PresentFenceMaintenanceEnabled &&
+				const bool RecoveryAtLegacyLimit = !UsesPresentationFences() &&
 												   Host.RetiredGenerations.size() == VulkanSupport::MaximumDeferredSwapchainGenerations &&
 												   (Host.SwapchainUnusable || !Host.Swapchain);
 				if (RecoveryAtLegacyLimit) Host.LegacyRecoveryAttemptedAtLimit = true;
@@ -3224,7 +3551,9 @@ namespace PulseForge
 #endif
 				if (!CreatePlatformSwapchain(Replacement, Capabilities, false, Host.Swapchain))
 				{
-					ReleasePlatformSwapchainImages(Replacement);
+					m_PresentationResources.ReleaseImages(Replacement.Images, PresentationResourceReleaseMode::UnpresentedCandidate);
+					m_PresentationResources.ReleaseGenerations(
+						Replacement.RetiredGenerations, PresentationResourceReleaseMode::UnpresentedCandidate);
 					if (Replacement.Swapchain)
 						m_Device.destroySwapchainKHR(Replacement.Swapchain);
 					Host.RecreateNeeded = true;
@@ -3232,15 +3561,19 @@ namespace PulseForge
 				}
 				if (Host.Swapchain)
 				{
-					if (m_PresentFenceMaintenanceEnabled)
+					const vk::SwapchainKHR PreviousSwapchain = Host.Swapchain;
+					if (UsesPresentationFences())
 					{
 						ReleasePlatformSwapchainImages(Host);
-						m_Device.destroySwapchainKHR(Host.Swapchain);
+						m_Device.destroySwapchainKHR(PreviousSwapchain);
 					}
-					else
-						Host.RetiredGenerations.push_back({ Host.Swapchain, std::move(Host.Images) });
+					else Host.RetiredGenerations.push_back({ PreviousSwapchain, std::move(Host.Images) });
+					Host.Swapchain = vk::SwapchainKHR();
+					Host.Extent = vk::Extent2D();
+					PreviousGenerationRetired = true;
 				}
 				Host.Swapchain = Replacement.Swapchain;
+				Replacement.Swapchain = vk::SwapchainKHR();
 				Host.Extent = Replacement.Extent;
 				Host.Images = std::move(Replacement.Images);
 				Host.FirstPresentationPending = false;
@@ -3253,19 +3586,29 @@ namespace PulseForge
 			}
 			catch (const std::exception& Exception)
 			{
-				const bool PreviousGenerationRetired = Host.Swapchain && Replacement.Swapchain;
-				ReleasePlatformSwapchainImages(Replacement);
-				if (Replacement.Swapchain)
-					m_Device.destroySwapchainKHR(Replacement.Swapchain);
-				if (PreviousGenerationRetired)
+				MarkDeviceLostFromException(Exception);
+				PreviousGenerationRetired = PreviousGenerationRetired || (Host.Swapchain && Replacement.Swapchain);
+				m_PresentationResources.ReleaseImages(Replacement.Images, PresentationResourceReleaseMode::UnpresentedCandidate);
+				m_PresentationResources.ReleaseGenerations(
+					Replacement.RetiredGenerations, PresentationResourceReleaseMode::UnpresentedCandidate);
+				if (Replacement.Swapchain) m_Device.destroySwapchainKHR(Replacement.Swapchain);
+				if (m_DeviceHealth.IsLost())
 				{
-					if (m_PresentFenceMaintenanceEnabled)
+					// Keep the previously published host and its presentation state for coordinated shutdown.
+					Host.RetirementBlocked = true;
+					Host.RecreateNeeded = false;
+					PF_CORE_ERROR(
+						"Vulkan device loss interrupted native swapchain recreation; the host remains owned for renderer shutdown: {}",
+						Exception.what());
+				}
+				else if (PreviousGenerationRetired)
+				{
+					if (UsesPresentationFences() && Host.Swapchain)
 					{
 						ReleasePlatformSwapchainImages(Host);
 						m_Device.destroySwapchainKHR(Host.Swapchain);
 					}
-					else
-						Host.RetiredGenerations.push_back({ Host.Swapchain, std::move(Host.Images) });
+					else if (Host.Swapchain) Host.RetiredGenerations.push_back({ Host.Swapchain, std::move(Host.Images) });
 					Host.Swapchain = vk::SwapchainKHR();
 					Host.Extent = vk::Extent2D();
 					PF_CORE_ERROR(
@@ -3279,66 +3622,234 @@ namespace PulseForge
 			}
 		}
 
-		void Shutdown() noexcept
+		ShutdownResult Shutdown() noexcept
 		{
-			m_FrameActive = false;
-			m_Recording = {};
-			m_MainRecording = {};
-			bool DeviceIdle = !m_Device;
-			if (m_Device)
+			ClearActiveRecordingState();
+			const ShutdownResult Result = ShutdownRenderer(*this);
+			if (Result.Disposition == ShutdownDisposition::CompleteAfterDeviceLoss)
 			{
-				try
-				{
-					if (m_ActiveNvrhiDevice)
-						if (!m_ActiveNvrhiDevice->waitForIdle())
-							throw std::runtime_error("NVRHI could not confirm graphics queue completion");
-					m_Device.waitIdle();
-					m_PresentationResources.WaitForRetirement(m_SwapchainImages, "main swapchain during shutdown");
-					for (RetiredSwapchainGeneration& Generation : m_RetiredSwapchainGenerations)
-						m_PresentationResources.WaitForRetirement(Generation.Images, "retired main swapchain during shutdown");
-					DeviceIdle = true;
-				}
-				catch (const std::exception& Exception)
-				{
-					PF_CORE_ERROR("Vulkan shutdown wait failed: {0}", Exception.what());
-				}
+				if (UsesPresentationFences())
+					PF_CORE_WARN(
+						"Vulkan device loss was confirmed; every pending presentation request retired by its fence before child cleanup");
+				else
+					PF_CORE_WARN(
+						"Vulkan device loss was confirmed; legacy presentation resources were released using the authorized best-effort "
+						"shutdown path, which does not establish a formal presentation-engine completion guarantee");
 			}
-			while (!m_PlatformTargets.empty())
+			else if (Result.Disposition == ShutdownDisposition::PresentationLifetimeUnknown)
 			{
-				const uint64_t TargetID = m_PlatformTargets.begin()->first;
-				if (DestroyPlatformPresentationTarget(TargetID))
-					continue;
-				if (!DeviceIdle)
-					PF_CORE_ERROR("Retiring a native Vulkan host during device teardown after queue-idle confirmation failed");
-				if (!ForceReleasePlatformPresentationTarget(TargetID))
-					break;
+				PF_CORE_ERROR("Vulkan shutdown retained presentation resources because a presentation fence did not establish the required "
+							  "resource-reference handoff (result {})",
+					Result.VulkanResult);
 			}
-			m_ActiveRenderTarget.reset();
+			else if (Result.Disposition == ShutdownDisposition::WaitFailed)
+			{
+				PF_CORE_ERROR("Vulkan shutdown wait failed at stage {} with outcome {} and VkResult {}",
+					static_cast<uint32_t>(Result.Stage), static_cast<uint32_t>(Result.WaitOutcome), Result.VulkanResult);
+			}
+			else if (Result.Disposition == ShutdownDisposition::CleanupFailed)
+			{
+				PF_CORE_ERROR("Vulkan shutdown cleanup failed at stage {}", static_cast<uint32_t>(Result.Stage));
+			}
+			return Result;
+		}
 
-			if (m_Device)
+		bool IsShutdownComplete() const noexcept override { return m_ShutdownComplete; }
+
+		bool HasDevice() const noexcept override { return static_cast<bool>(m_Device); }
+
+		bool IsDeviceLost() const noexcept override { return m_DeviceHealth.IsLost(); }
+
+		int32_t DeviceLossResult() const noexcept override { return m_DeviceHealth.VulkanResult(); }
+
+		ShutdownWaitResult WaitForNvrhiIdle() noexcept override
+		{
+			if (!m_ActiveNvrhiDevice)
+				return m_DeviceHealth.IsLost() ? ShutdownWaitResult{ ShutdownWaitOutcome::DeviceLost, m_DeviceHealth.VulkanResult() }
+											   : ShutdownWaitResult{};
+			try
 			{
-				ReleaseSwapchainImages();
-				m_PresentationResources.ReleaseGenerations(m_RetiredSwapchainGenerations);
+				if (m_ActiveNvrhiDevice->waitForIdle())
+					return m_DeviceHealth.IsLost() ? ShutdownWaitResult{ ShutdownWaitOutcome::DeviceLost, m_DeviceHealth.VulkanResult() }
+												   : ShutdownWaitResult{};
+				// In this pinned NVRHI revision, false is returned only by its
+				// vk::DeviceLostError handler in Device::waitForIdle().
+				m_DeviceHealth.MarkLost();
+			}
+			catch (...)
+			{
+				return { m_DeviceHealth.IsLost() ? ShutdownWaitOutcome::DeviceLost : ShutdownWaitOutcome::Failed,
+					m_DeviceHealth.VulkanResult() };
+			}
+			return { m_DeviceHealth.IsLost() ? ShutdownWaitOutcome::DeviceLost : ShutdownWaitOutcome::Failed,
+				m_DeviceHealth.VulkanResult() };
+		}
+
+		ShutdownWaitResult WaitForDeviceIdle() noexcept override
+		{
+			if (!m_Device) return {};
+			return ClassifyShutdownVkResult(VULKAN_HPP_DEFAULT_DISPATCHER.vkDeviceWaitIdle(static_cast<VkDevice>(m_Device)));
+		}
+
+		ShutdownWaitResult WaitForPresentationRetirement() noexcept override
+		{
+			try
+			{
+				m_PresentationResources.WaitForRetirement(m_SwapchainImages, "main swapchain during shutdown");
+				for (RetiredSwapchainGeneration& Generation : m_RetiredSwapchainGenerations)
+					m_PresentationResources.WaitForRetirement(Generation.Images, "retired main swapchain during shutdown");
+				for (auto& [TargetID, Host] : m_PlatformTargets)
+				{
+					(void)TargetID;
+					if (!Host) continue;
+					m_PresentationResources.WaitForRetirement(Host->Images, "native-window swapchain during shutdown");
+					for (RetiredSwapchainGeneration& Generation : Host->RetiredGenerations)
+						m_PresentationResources.WaitForRetirement(Generation.Images, "retired native-window swapchain during shutdown");
+				}
+			}
+			catch (...)
+			{
+				return { m_DeviceHealth.IsLost() ? ShutdownWaitOutcome::DeviceLost : ShutdownWaitOutcome::Failed,
+					m_DeviceHealth.VulkanResult() };
+			}
+			if (m_DeviceHealth.IsLost()) return { ShutdownWaitOutcome::DeviceLost, m_DeviceHealth.VulkanResult() };
+			return {};
+		}
+
+		ShutdownWaitResult WaitForPresentationFencesAfterDeviceLoss() noexcept override
+		{
+			if (!UsesPresentationFences() || !m_DeviceHealth.IsLost()) return { ShutdownWaitOutcome::Failed, 0 };
+
+			bool AllRetired = true;
+			int32_t FirstFailure = 0;
+			const auto WaitImages = [this, &AllRetired, &FirstFailure](std::vector<SwapchainImage>& Images)
+			{
+				for (SwapchainImage& Image : Images)
+				{
+					int32_t Result = VK_SUCCESS;
+					if (!m_PresentationResources.WaitForPresentationAfterDeviceLoss(Image, Result))
+					{
+						AllRetired = false;
+						if (FirstFailure == VK_SUCCESS) FirstFailure = Result;
+					}
+				}
+			};
+			WaitImages(m_SwapchainImages);
+			for (RetiredSwapchainGeneration& Generation : m_RetiredSwapchainGenerations)
+				WaitImages(Generation.Images);
+			for (auto& [TargetID, Host] : m_PlatformTargets)
+			{
+				(void)TargetID;
+				if (!Host) continue;
+				WaitImages(Host->Images);
+				for (RetiredSwapchainGeneration& Generation : Host->RetiredGenerations)
+					WaitImages(Generation.Images);
+			}
+			if (AllRetired) return {};
+			const ShutdownWaitOutcome Outcome =
+				FirstFailure == VK_ERROR_DEVICE_LOST ? ShutdownWaitOutcome::DeviceLost : ShutdownWaitOutcome::Failed;
+			return { Outcome, FirstFailure };
+		}
+
+		ShutdownWaitResult BestEffortWaitForLegacyPresentationAfterDeviceLoss() noexcept override
+		{
+			if (UsesPresentationFences() || !m_DeviceHealth.IsLost()) return { ShutdownWaitOutcome::Failed, 0 };
+			PF_CORE_WARN("The Vulkan device is lost without maintenance presentation fences; performing the legacy queue-idle best-effort "
+						 "shutdown. This does not prove presentation-engine resource release");
+			const ShutdownWaitResult Result =
+				ClassifyShutdownVkResult(VULKAN_HPP_DEFAULT_DISPATCHER.vkQueueWaitIdle(static_cast<VkQueue>(m_PresentQueue)));
+			if (Result.Outcome == ShutdownWaitOutcome::Failed)
+				PF_CORE_WARN(
+					"Legacy present-queue idle also failed with VkResult {}; continuing the authorized lost-device best-effort cleanup",
+					Result.VulkanResult);
+			return Result;
+		}
+
+		bool ReleasePartialInitialization() noexcept override
+		{
+			if (m_Device || m_Swapchain || !m_SwapchainImages.empty() || !m_RetiredSwapchainGenerations.empty() ||
+				!m_PlatformTargets.empty())
+				return false;
+			m_PresentationResources.Reset();
+			m_ActiveNvrhiDevice = nullptr;
+			m_ValidationDevice = nullptr;
+			m_VulkanDevice = nullptr;
+			return ReleaseInstanceOwnedChildren();
+		}
+
+		bool ReleaseDeviceOwnedChildren(ShutdownPresentationReleaseMode Mode) noexcept override
+		{
+			if (!m_Device) return false;
+			if ((Mode == ShutdownPresentationReleaseMode::HealthyDevice && m_DeviceHealth.IsLost()) ||
+				(Mode == ShutdownPresentationReleaseMode::DeviceLostWithFencesRetired &&
+					(!m_DeviceHealth.IsLost() || !UsesPresentationFences())) ||
+				(Mode == ShutdownPresentationReleaseMode::LegacyBestEffortAfterDeviceLoss &&
+					(!m_DeviceHealth.IsLost() || UsesPresentationFences())))
+				return false;
+
+			PresentationResourceReleaseMode ResourceMode = PresentationResourceReleaseMode::ShutdownAfterIdle;
+			if (Mode == ShutdownPresentationReleaseMode::DeviceLostWithFencesRetired)
+				ResourceMode = PresentationResourceReleaseMode::DeviceLostWithFencesRetired;
+			else if (Mode == ShutdownPresentationReleaseMode::LegacyBestEffortAfterDeviceLoss)
+				ResourceMode = PresentationResourceReleaseMode::LegacyBestEffortAfterDeviceLoss;
+
+			try
+			{
+				m_ActiveRenderTarget.reset();
+				ClearActiveRecordingState();
+				for (auto& [TargetID, Host] : m_PlatformTargets)
+				{
+					(void)TargetID;
+					if (!Host) continue;
+					m_PresentationResources.ReleaseImages(Host->Images, ResourceMode);
+					m_PresentationResources.ReleaseGenerations(Host->RetiredGenerations, ResourceMode);
+					ReleasePlatformFrames(*Host);
+					if (Host->Swapchain) m_Device.destroySwapchainKHR(Host->Swapchain);
+					Host->Swapchain = vk::SwapchainKHR();
+					if (m_Instance && Host->Surface) m_Instance.destroySurfaceKHR(Host->Surface);
+					Host->Surface = vk::SurfaceKHR();
+				}
+				m_PlatformTargets.clear();
+				m_PresentationResources.ReleaseImages(m_SwapchainImages, ResourceMode);
+				m_PresentationResources.ReleaseGenerations(m_RetiredSwapchainGenerations, ResourceMode);
 				for (FrameContext& Frame : m_Frames)
+				{
 					Frame.CommandList = nullptr;
-				m_ValidationDevice = nullptr;
-				m_ActiveNvrhiDevice = nullptr;
-				m_VulkanDevice = nullptr;
-
-				for (FrameContext& Frame : m_Frames)
-				{
-					if (Frame.ImageAvailable)
-						m_Device.destroySemaphore(Frame.ImageAvailable);
+					Frame.SubmissionValue = 0;
+					if (Frame.ImageAvailable) m_Device.destroySemaphore(Frame.ImageAvailable);
 					Frame.ImageAvailable = vk::Semaphore();
 				}
-
-				if (m_Swapchain)
-					m_Device.destroySwapchainKHR(m_Swapchain);
+				if (m_Swapchain) m_Device.destroySwapchainKHR(m_Swapchain);
 				m_Swapchain = vk::SwapchainKHR();
-				m_Device.destroy();
-				m_Device = vk::Device();
+				m_SwapchainExtent = vk::Extent2D{};
+				m_PresentationResources.Reset();
+				return true;
 			}
-			m_PresentationResources.Reset();
+			catch (...)
+			{
+				return false;
+			}
+		}
+
+		bool ReleaseNvrhiDevice() noexcept override
+		{
+			m_ActiveNvrhiDevice = nullptr;
+			m_ValidationDevice = nullptr;
+			m_VulkanDevice = nullptr;
+			return true;
+		}
+
+		void DestroyVulkanDevice() noexcept override
+		{
+			if (m_Device) m_Device.destroy();
+			m_Device = vk::Device();
+			m_GraphicsQueue = vk::Queue();
+			m_PresentQueue = vk::Queue();
+		}
+
+		bool ReleaseInstanceOwnedChildren() noexcept override
+		{
+			if (m_Device || m_ValidationDevice || m_VulkanDevice || !m_PlatformTargets.empty()) return false;
 
 			if (m_Instance && m_Surface)
 				m_Instance.destroySurfaceKHR(m_Surface);
@@ -3353,15 +3864,16 @@ namespace PulseForge
 			m_Instance = vk::Instance();
 
 			m_PhysicalDevice = vk::PhysicalDevice();
-			m_GraphicsQueue = vk::Queue();
-			m_PresentQueue = vk::Queue();
 			m_VulkanLoader.reset();
+			m_ShutdownComplete = true;
+			return true;
 		}
 
 	private:
 		Window& m_Window;
 		GLFWwindow* m_NativeWindow = nullptr;
 		std::unique_ptr<vk::detail::DynamicLoader> m_VulkanLoader;
+		VulkanDeviceHealth m_DeviceHealth;
 		NvrhiMessageCallback m_NvrhiMessageCallback;
 
 		vk::Instance m_Instance;
@@ -3392,9 +3904,14 @@ namespace PulseForge
 		vk::SurfaceFormatKHR m_SurfaceFormat;
 		nvrhi::Format m_NvrhiFormat = nvrhi::Format::UNKNOWN;
 		vk::PresentModeKHR m_PresentMode = vk::PresentModeKHR::eFifo;
-		std::string m_SwapchainMaintenanceExtension;
-		std::string m_SurfaceMaintenanceExtension;
-		bool m_PresentFenceMaintenanceEnabled = false;
+		VulkanSupport::PresentationInstanceExtensionAvailability m_AvailablePresentationInstanceExtensions;
+		VulkanSupport::PresentationInstanceExtensionPlan m_EnabledPresentationInstanceExtensions;
+		std::optional<VulkanSupport::PresentationFenceCapabilityReason> m_StrictPresentationRejectionReason;
+		VulkanSupport::PresentationPolicy m_PresentationPolicy = VulkanSupport::PresentationPolicy::Compatible;
+		VulkanSupport::PresentationRetirementMechanism m_PresentationRetirementMechanism =
+			VulkanSupport::PresentationRetirementMechanism::LegacyBestEffort;
+		std::vector<const char*> m_EnabledDeviceExtensions;
+		bool m_SwapchainMaintenanceFeatureEnabled = false;
 		bool m_ForceLegacyRetirementForTesting = false;
 		bool m_FirstPresentationPending = false;
 		bool m_FirstPresentationCompleted = false;
@@ -3420,6 +3937,7 @@ namespace PulseForge
 		bool m_LoggedFirstPresentedFrameForSwapchain = false;
 		bool m_LoggedFirstDraw = false;
 		bool m_FrameActive = false;
+		bool m_ShutdownComplete = false;
 #if defined(PF_DEBUG)
 		bool m_InjectNextPlatformImageAllocationFailure = false;
 		uint32_t m_DebugMainAcquireOutOfDateRemaining = 0;
@@ -3438,4 +3956,4 @@ namespace PulseForge
 	{
 		return std::make_unique<VulkanRenderer>(Window);
 	}
-}
+} // namespace PulseForge

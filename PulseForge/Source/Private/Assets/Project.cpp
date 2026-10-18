@@ -1,11 +1,12 @@
 #include "Assets/Project.h"
+#include "Assets/AssetTypes.h"
+#include "Core/BoundedInput.h"
 #include "Core/ScopedProfileTimer.h"
 
 #include <nlohmann/json.hpp>
 
 #include <exception>
 #include <fstream>
-#include <iterator>
 #include <limits>
 #include <system_error>
 
@@ -16,7 +17,6 @@ namespace PulseForge
 		using Json = nlohmann::ordered_json;
 		constexpr std::string_view ProjectFormat = "PulseForgeProject";
 		constexpr int64_t ProjectFormatVersion = 1;
-		constexpr size_t MaximumProjectFileSize = 1024 * 1024;
 
 		ProjectError MakeError(ProjectErrorCode Code, const std::filesystem::path& Path, std::string Message)
 		{
@@ -31,7 +31,7 @@ namespace PulseForge
 
 		std::expected<void, ProjectError> ValidateProjectPath(const std::filesystem::path& Path)
 		{
-			if (Path.empty() || Path.extension() != ".pfproj")
+			if (Path.empty() || !HasAssetTypeExtension(Path, AssetFileType::Project))
 				return std::unexpected(MakeError(
 					ProjectErrorCode::InvalidPath,
 					Path,
@@ -52,7 +52,7 @@ namespace PulseForge
 					ProjectErrorCode::StartSceneNotFound,
 					ProjectFile,
 					"Project startup scene UUID " + StartScene->ToString() + " is not present in the asset registry"));
-			if (Record->ProjectRelativePath.extension() != ".scene")
+			if (!HasAssetTypeExtension(Record->ProjectRelativePath, AssetFileType::Scene))
 				return std::unexpected(MakeError(
 					ProjectErrorCode::StartSceneWrongType,
 					Record->ProjectRelativePath,
@@ -79,10 +79,7 @@ namespace PulseForge
 				{},
 				"Project requires a non-nil UUID and a name between 1 and 256 bytes"));
 		if (Description.StartScene && Description.StartScene->IsNil())
-			return std::unexpected(MakeError(
-				ProjectErrorCode::InvalidDescription,
-				{},
-				"Project startup scene UUID must not be nil"));
+			return std::unexpected(MakeError(ProjectErrorCode::InvalidDescription, {}, "Project startup scene UUID must not be nil"));
 
 		try
 		{
@@ -91,21 +88,25 @@ namespace PulseForge
 			Document["version"] = ProjectFormatVersion;
 			Document["projectId"] = Description.ID.ToString();
 			Document["name"] = Description.Name;
-			if (Description.StartScene)
-				Document["startScene"] = Description.StartScene->ToString();
-			return Document.dump(2) + "\n";
+			if (Description.StartScene) Document["startScene"] = Description.StartScene->ToString();
+			std::string Data = Document.dump(2) + "\n";
+			if (Data.size() > MaximumDocumentBytes)
+				return std::unexpected(
+					MakeError(ProjectErrorCode::DocumentTooLarge, {}, "Serialized project exceeds the 1 MiB document limit"));
+			return Data;
 		}
 		catch (const std::exception& Exception)
 		{
-			return std::unexpected(MakeError(
-				ProjectErrorCode::InvalidDescription,
-				{},
-				std::string("Project serialization failed: ") + Exception.what()));
+			return std::unexpected(
+				MakeError(ProjectErrorCode::InvalidDescription, {}, std::string("Project serialization failed: ") + Exception.what()));
 		}
 	}
 
 	std::expected<ProjectDesc, ProjectError> ProjectSerializer::Deserialize(std::string_view Data)
 	{
+		if (Data.size() > MaximumDocumentBytes)
+			return std::unexpected(MakeError(ProjectErrorCode::DocumentTooLarge, {}, "Project document exceeds the 1 MiB document limit"));
+
 		try
 		{
 			const Json Document = Json::parse(Data.begin(), Data.end());
@@ -225,25 +226,24 @@ namespace PulseForge
 	std::expected<Project, ProjectError> Project::Open(const std::filesystem::path& ProjectFile)
 	{
 		Detail::ScopedProfileTimer Timer("Project::Open total");
-		if (auto Validation = ValidateProjectPath(ProjectFile); !Validation)
-			return std::unexpected(std::move(Validation.error()));
+		if (auto Validation = ValidateProjectPath(ProjectFile); !Validation) return std::unexpected(std::move(Validation.error()));
 
 		std::error_code Error;
 		const std::filesystem::path AbsoluteProjectFile = std::filesystem::absolute(ProjectFile, Error).lexically_normal();
 		if (Error)
-			return std::unexpected(MakeError(ProjectErrorCode::InvalidPath, ProjectFile, "Could not resolve project file path: " + Error.message()));
-		const uintmax_t FileSize = std::filesystem::file_size(AbsoluteProjectFile, Error);
-		if (Error || FileSize > MaximumProjectFileSize)
-			return std::unexpected(MakeError(ProjectErrorCode::FileReadFailed, AbsoluteProjectFile, Error ? Error.message() : "Project file exceeds the 1 MiB size limit"));
-
+			return std::unexpected(
+				MakeError(ProjectErrorCode::InvalidPath, ProjectFile, "Could not resolve project file path: " + Error.message()));
 		std::ifstream Input(AbsoluteProjectFile, std::ios::binary);
 		if (!Input.is_open())
-			return std::unexpected(MakeError(ProjectErrorCode::FileReadFailed, AbsoluteProjectFile, "Could not open project file: " + PathForMessage(AbsoluteProjectFile)));
-		const std::string Data{ std::istreambuf_iterator<char>(Input), std::istreambuf_iterator<char>() };
-		if (Input.bad())
-			return std::unexpected(MakeError(ProjectErrorCode::FileReadFailed, AbsoluteProjectFile, "Could not read the complete project file"));
+			return std::unexpected(MakeError(ProjectErrorCode::FileReadFailed, AbsoluteProjectFile,
+				"Could not open project file: " + PathForMessage(AbsoluteProjectFile)));
+		auto Data = Detail::ReadBoundedInput(Input, ProjectSerializer::MaximumDocumentBytes);
+		if (!Data)
+			return std::unexpected(MakeError(ProjectErrorCode::FileReadFailed, AbsoluteProjectFile,
+				Data.error().Code == Detail::BoundedInputErrorCode::TooLarge ? "Project file exceeds the 1 MiB document limit"
+																			 : "Could not read the complete project file"));
 
-		auto Description = ProjectSerializer::Deserialize(Data);
+		auto Description = ProjectSerializer::Deserialize(*Data);
 		if (!Description)
 		{
 			Description.error().Path = AbsoluteProjectFile;

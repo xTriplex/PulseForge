@@ -20,6 +20,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <span>
 #include <utility>
 
@@ -46,6 +47,12 @@ namespace PulseForge::GpuValidation
 		{
 			size_t Inside = 0;
 			size_t Outside = 0;
+		};
+
+		struct PbrRegionDifferences final
+		{
+			size_t Target = 0;
+			size_t Unaffected = 0;
 		};
 
 		float PixelLuminance(const TextureReadback& Image, size_t PixelIndex)
@@ -104,6 +111,20 @@ namespace PulseForge::GpuValidation
 			}
 			return Difference;
 		}
+
+		std::expected<PbrRegionDifferences, std::string> ComparePbrObjectRegions(
+			const PulseForge::Scene& SceneValue, const PulseForge::UUID& Target, const PulseForge::UUID& Unaffected,
+			std::span<const std::byte> Before, std::span<const std::byte> After, uint32_t Width, uint32_t Height)
+		{
+			const auto TargetRegion = ProjectMaterialValidationRegion(SceneValue, Target, Width, Height);
+			if (!TargetRegion) return std::unexpected(TargetRegion.error());
+			const auto UnaffectedRegion = ProjectMaterialValidationRegion(SceneValue, Unaffected, Width, Height);
+			if (!UnaffectedRegion) return std::unexpected(UnaffectedRegion.error());
+			return PbrRegionDifferences{
+				CompareImages(Before, After, Width, Height, *TargetRegion).Inside,
+				CompareImages(Before, After, Width, Height, *UnaffectedRegion).Inside
+			};
+		}
 	} // namespace
 
 	GpuProjectSceneValidation::GpuProjectSceneValidation(Project& SourceProject, Scene& SourceScene, SceneRenderer& Renderer,
@@ -160,6 +181,15 @@ namespace PulseForge::GpuValidation
 													  static_cast<float>(m_PbrMaterialOutputTarget->GetDescription().Height));
 		if (!Prepared)
 		{
+			if (m_PbrMaterialStage == PbrMaterialCaptureStage::EnvironmentSourceMissing &&
+				Prepared.error().Code == SceneRendererErrorCode::AssetLoadFailed &&
+				Prepared.error().Asset == m_PbrEnvironmentComponent.HdrImage)
+			{
+				PF_INFO("PBR refresh validation reproduced a missing HDR source failure");
+				if (!RestorePbrEnvironment() || !RefreshPbrProjectAssets("environment source repair")) return;
+				m_PbrMaterialStage = PbrMaterialCaptureStage::EnvironmentSourceRepaired;
+				return;
+			}
 			Fail("Could not prepare the PBR project startup scene: " + Prepared.error().Message);
 			return;
 		}
@@ -389,6 +419,33 @@ namespace PulseForge::GpuValidation
 		}
 		if (!m_PbrFloorEntity || !m_PbrTargetEntity || !m_PbrUnaffectedEntity || !m_PbrEnvironmentEntity)
 			throw std::runtime_error("PBR scene is missing an expected floor, material target, unaffected mesh, or environment light");
+		const auto TargetMaterialRecord = m_Project.GetAssetRegistry().Find(*m_PbrTargetComponent.MaterialAsset);
+		if (!TargetMaterialRecord) throw std::runtime_error("PBR target material is not registered in the refresh fixture");
+		m_PbrTargetMaterialPath = m_Project.GetRootPath() / TargetMaterialRecord->ProjectRelativePath;
+		auto OriginalMaterial = PulseForge::MaterialAssetSerializer::LoadFromFile(m_PbrTargetMaterialPath);
+		if (!OriginalMaterial)
+			throw std::runtime_error("Could not load the PBR target material for refresh validation: " + OriginalMaterial.error().Message);
+		m_PbrOriginalMaterial = std::move(*OriginalMaterial);
+		if (m_PbrOriginalMaterial.BaseColorTexture.IsNil())
+			throw std::runtime_error("PBR target material has no base-color texture for refresh validation");
+		const auto TextureRecord = m_Project.GetAssetRegistry().Find(m_PbrOriginalMaterial.BaseColorTexture);
+		if (!TextureRecord) throw std::runtime_error("PBR base-color texture is not registered in the refresh fixture");
+		m_PbrTexturePath = m_Project.GetRootPath() / TextureRecord->ProjectRelativePath;
+		m_PbrOriginalTextureBackupPath = m_Project.GetRootPath() / "PbrTexture.original.ppm";
+		std::filesystem::copy_file(m_PbrTexturePath, m_PbrOriginalTextureBackupPath);
+		const auto MeshRecord = m_Project.GetAssetRegistry().Find(m_PbrTargetComponent.MeshAsset);
+		if (!MeshRecord) throw std::runtime_error("PBR target mesh is not registered in the refresh fixture");
+		m_PbrMeshPath = m_Project.GetRootPath() / MeshRecord->ProjectRelativePath;
+		m_PbrOriginalMeshBackupPath = m_Project.GetRootPath() / "PbrMesh.original.gltf";
+		m_PbrAlternateMeshPath = m_Project.GetRootPath() / "PbrAlternativeMesh.gltf";
+		if (!std::filesystem::exists(m_PbrAlternateMeshPath))
+			throw std::runtime_error("PBR alternate mesh source is missing from the isolated refresh fixture");
+		std::filesystem::copy_file(m_PbrMeshPath, m_PbrOriginalMeshBackupPath);
+		const auto EnvironmentRecord = m_Project.GetAssetRegistry().Find(m_PbrEnvironmentComponent.HdrImage);
+		if (!EnvironmentRecord) throw std::runtime_error("PBR environment is not registered in the refresh fixture");
+		m_PbrEnvironmentPath = m_Project.GetRootPath() / EnvironmentRecord->ProjectRelativePath;
+		m_PbrOriginalEnvironmentBackupPath = m_Project.GetRootPath() / "PbrEnvironment.original.hdr";
+		std::filesystem::copy_file(m_PbrEnvironmentPath, m_PbrOriginalEnvironmentBackupPath);
 		if (!m_PbrFloorEntity.SetMeshRenderer(m_PbrFloorComponent))
 			throw std::runtime_error("Could not clear the PBR floor material for the initial default-material render");
 
@@ -710,31 +767,21 @@ namespace PulseForge::GpuValidation
 		case PbrMaterialCaptureStage::TargetMaterialCleared:
 		case PbrMaterialCaptureStage::TargetMaterialClearedAgain:
 		{
-			const auto Region = ProjectMaterialValidationRegion(m_Scene, m_PbrTargetEntity.GetUUID(), Readback->Width, Readback->Height);
-			if (!Region)
+			const auto Differences = ComparePbrObjectRegions(m_Scene, m_PbrTargetEntity.GetUUID(), m_PbrUnaffectedEntity.GetUUID(),
+				m_PbrBaselinePixels, Readback->Pixels, Readback->Width, Readback->Height);
+			if (!Differences)
 			{
-				Fail(Region.error());
+				Fail(Differences.error());
 				return;
 			}
-			const auto UnaffectedRegion =
-				ProjectMaterialValidationRegion(m_Scene, m_PbrUnaffectedEntity.GetUUID(), Readback->Width, Readback->Height);
-			if (!UnaffectedRegion)
-			{
-				Fail(UnaffectedRegion.error());
-				return;
-			}
-			const PixelDifference TargetDifference =
-				CompareImages(m_PbrBaselinePixels, Readback->Pixels, Readback->Width, Readback->Height, *Region);
-			const PixelDifference UnaffectedDifference =
-				CompareImages(m_PbrBaselinePixels, Readback->Pixels, Readback->Width, Readback->Height, *UnaffectedRegion);
-			if (TargetDifference.Inside < 200 || UnaffectedDifference.Inside != 0)
+			if (Differences->Target < 200 || Differences->Unaffected != 0)
 			{
 				Fail("Clearing a material did not change its own visible mesh while preserving the separate assigned mesh; target pixels=" +
-					 std::to_string(TargetDifference.Inside) + "; unaffected pixels=" + std::to_string(UnaffectedDifference.Inside));
+					 std::to_string(Differences->Target) + "; unaffected pixels=" + std::to_string(Differences->Unaffected));
 				return;
 			}
-			PF_INFO("PBR_UNASSIGNED_MATERIAL_IMAGE_DIFF=target_pixels={0}; assigned_mesh_pixels={1}", TargetDifference.Inside,
-				UnaffectedDifference.Inside);
+			PF_INFO("PBR_UNASSIGNED_MATERIAL_IMAGE_DIFF=target_pixels={0}; assigned_mesh_pixels={1}", Differences->Target,
+				Differences->Unaffected);
 			break;
 		}
 		case PbrMaterialCaptureStage::EnvironmentRemoved:
@@ -756,6 +803,78 @@ namespace PulseForge::GpuValidation
 				return;
 			}
 			break;
+		case PbrMaterialCaptureStage::AssetMaterialRefreshed:
+		{
+			const auto Differences = ComparePbrObjectRegions(m_Scene, m_PbrTargetEntity.GetUUID(), m_PbrUnaffectedEntity.GetUUID(),
+				m_PbrBaselinePixels, Readback->Pixels, Readback->Width, Readback->Height);
+			if (!Differences)
+			{
+				Fail(Differences.error());
+				return;
+			}
+			if (Differences->Target < 200 || Differences->Unaffected != 0)
+			{
+				Fail("Refreshing a same-UUID material source did not update only its mesh; target pixels=" +
+					 std::to_string(Differences->Target) + "; unaffected pixels=" + std::to_string(Differences->Unaffected));
+				return;
+			}
+			PF_INFO("PBR_SAME_UUID_MATERIAL_REFRESH_IMAGE_DIFF=target_pixels={0}; unaffected_pixels={1}",
+				Differences->Target, Differences->Unaffected);
+			break;
+		}
+		case PbrMaterialCaptureStage::AssetMaterialRestored:
+		case PbrMaterialCaptureStage::AssetsUnchangedRefreshed:
+		case PbrMaterialCaptureStage::TextureSourceRestored:
+		case PbrMaterialCaptureStage::MeshSourceRestored:
+			if (Readback->Pixels != m_PbrBaselinePixels)
+			{
+				Fail("Restoring a same-UUID material, texture, or mesh source did not reproduce the baseline image");
+				return;
+			}
+			break;
+		case PbrMaterialCaptureStage::TextureSourceChanged:
+		case PbrMaterialCaptureStage::MeshSourceChanged:
+		{
+			const auto Differences = ComparePbrObjectRegions(m_Scene, m_PbrTargetEntity.GetUUID(), m_PbrUnaffectedEntity.GetUUID(),
+				m_PbrBaselinePixels, Readback->Pixels, Readback->Width, Readback->Height);
+			if (!Differences)
+			{
+				Fail(Differences.error());
+				return;
+			}
+			if (Differences->Target < 200 || Differences->Unaffected < 200)
+			{
+				Fail("Refreshing a shared same-UUID texture or mesh did not update both dependent meshes; target pixels=" +
+					 std::to_string(Differences->Target) + "; dependent pixels=" + std::to_string(Differences->Unaffected));
+				return;
+			}
+			PF_INFO("PBR_SHARED_ASSET_REFRESH_IMAGE_DIFF=target_pixels={0}; dependent_pixels={1}",
+				Differences->Target, Differences->Unaffected);
+			break;
+		}
+		case PbrMaterialCaptureStage::EnvironmentSourceChanged:
+		{
+			const PixelDifference Difference =
+				CompareImages(m_PbrBaselinePixels, Readback->Pixels, Readback->Width, Readback->Height, FullImage);
+			if (Difference.Inside < 1000)
+			{
+				Fail("Refreshing a changed same-UUID HDR source did not change the rendered environment or lighting");
+				return;
+			}
+			PF_INFO("PBR_ENVIRONMENT_REFRESH_IMAGE_DIFF=visible pixels changed={0}", Difference.Inside);
+			break;
+		}
+		case PbrMaterialCaptureStage::EnvironmentSourceRestored:
+		case PbrMaterialCaptureStage::EnvironmentSourceRepaired:
+			if (Readback->Pixels != m_PbrBaselinePixels)
+			{
+				Fail("Refreshing the restored HDR source did not reproduce the original rendered image");
+				return;
+			}
+			break;
+		case PbrMaterialCaptureStage::EnvironmentSourceMissing:
+			Fail("Missing HDR source unexpectedly reached image capture without a preparation failure");
+			return;
 		case PbrMaterialCaptureStage::Complete:
 			Fail("PBR material validation captured an unexpected frame after completion");
 			return;
@@ -817,7 +936,7 @@ namespace PulseForge::GpuValidation
 			m_PbrMaterialStage = PbrMaterialCaptureStage::EnvironmentRemoved;
 			break;
 		case PbrMaterialCaptureStage::EnvironmentRemoved:
-			m_SceneRenderer.RefreshMaterialAssets();
+			m_SceneRenderer.RefreshProjectAssets();
 			m_PbrMaterialStage = PbrMaterialCaptureStage::EnvironmentFallbackRefreshed;
 			break;
 		case PbrMaterialCaptureStage::EnvironmentFallbackRefreshed:
@@ -829,13 +948,204 @@ namespace PulseForge::GpuValidation
 			m_PbrMaterialStage = PbrMaterialCaptureStage::EnvironmentRestored;
 			break;
 		case PbrMaterialCaptureStage::EnvironmentRestored:
+		{
+			PulseForge::MaterialAssetDesc ReplacedMaterial = m_PbrOriginalMaterial;
+			ReplacedMaterial.BaseColorFactor = { 0.05f, 1.0f, 0.05f, 1.0f };
+			if (!SavePbrTargetMaterialAndRefresh(ReplacedMaterial, "replacement")) return false;
+			m_PbrMaterialStage = PbrMaterialCaptureStage::AssetMaterialRefreshed;
+			break;
+		}
+		case PbrMaterialCaptureStage::AssetMaterialRefreshed:
+			if (!SavePbrTargetMaterialAndRefresh(m_PbrOriginalMaterial, "restoration")) return false;
+			m_PbrMaterialStage = PbrMaterialCaptureStage::AssetMaterialRestored;
+			break;
+		case PbrMaterialCaptureStage::AssetMaterialRestored:
+			if (!RefreshPbrProjectAssets("unchanged source refresh")) return false;
+			m_PbrMaterialStage = PbrMaterialCaptureStage::AssetsUnchangedRefreshed;
+			break;
+		case PbrMaterialCaptureStage::AssetsUnchangedRefreshed:
+			if (!WriteChangedPbrTexture() || !RefreshPbrProjectAssets("texture source replacement")) return false;
+			m_PbrMaterialStage = PbrMaterialCaptureStage::TextureSourceChanged;
+			break;
+		case PbrMaterialCaptureStage::TextureSourceChanged:
+			if (!RestorePbrTexture() || !RefreshPbrProjectAssets("texture source restoration")) return false;
+			m_PbrMaterialStage = PbrMaterialCaptureStage::TextureSourceRestored;
+			break;
+		case PbrMaterialCaptureStage::TextureSourceRestored:
+			if (!ReplacePbrMeshWithAlternate() || !RefreshPbrProjectAssets("mesh source replacement")) return false;
+			m_PbrMaterialStage = PbrMaterialCaptureStage::MeshSourceChanged;
+			break;
+		case PbrMaterialCaptureStage::MeshSourceChanged:
+			if (!RestorePbrMesh() || !RefreshPbrProjectAssets("mesh source restoration")) return false;
+			m_PbrMaterialStage = PbrMaterialCaptureStage::MeshSourceRestored;
+			break;
+		case PbrMaterialCaptureStage::MeshSourceRestored:
+			if (!WriteChangedPbrEnvironment() || !RefreshPbrProjectAssets("environment source replacement")) return false;
+			m_PbrMaterialStage = PbrMaterialCaptureStage::EnvironmentSourceChanged;
+			break;
+		case PbrMaterialCaptureStage::EnvironmentSourceChanged:
+			if (!RestorePbrEnvironment() || !RefreshPbrProjectAssets("environment source restoration")) return false;
+			m_PbrMaterialStage = PbrMaterialCaptureStage::EnvironmentSourceRestored;
+			break;
+		case PbrMaterialCaptureStage::EnvironmentSourceRestored:
+		{
+			std::error_code Error;
+			const bool Removed = std::filesystem::remove(m_PbrEnvironmentPath, Error);
+			if (!Removed || Error)
+			{
+				Fail("Could not remove the temporary HDR source for the broken-environment refresh case: " + Error.message());
+				return false;
+			}
+			const auto Rebuild = m_Project.GetAssetRegistry().Rebuild(m_Project.GetRootPath());
+			if (Rebuild || !m_Project.GetAssetRegistry().Find(m_PbrEnvironmentComponent.HdrImage))
+			{
+				Fail("The registry did not preserve its previous HDR record after a missing-source refresh");
+				return false;
+			}
+			m_SceneRenderer.RefreshProjectAssets();
+			m_PbrMaterialStage = PbrMaterialCaptureStage::EnvironmentSourceMissing;
+			break;
+		}
+		case PbrMaterialCaptureStage::EnvironmentSourceRepaired:
 			m_PbrMaterialStage = PbrMaterialCaptureStage::Complete;
-			PF_INFO("PBR default-material transitions passed for initial unassignment, repeated clear/restore, and environment fallback");
+			PF_INFO("PBR renderer refresh passed same-UUID material, texture, mesh, and HDR replacement/restoration plus fallback cases");
 			return true;
+		case PbrMaterialCaptureStage::EnvironmentSourceMissing:
+			Fail("Missing HDR source unexpectedly reached image capture without a preparation failure");
+			return false;
 		case PbrMaterialCaptureStage::Complete:
 			return true;
 		}
 		m_ScenePrepared = false;
+		return true;
+	}
+
+	bool GpuProjectSceneValidation::SavePbrTargetMaterialAndRefresh(
+		const PulseForge::MaterialAssetDesc& Description, std::string_view Phase)
+	{
+		if (auto Saved = PulseForge::MaterialAssetSerializer::SaveToFile(Description, m_PbrTargetMaterialPath); !Saved)
+		{
+			Fail("Could not save the " + std::string(Phase) + " PBR material fixture source: " + Saved.error().Message);
+			return false;
+		}
+		const auto Rebuilt = m_Project.GetAssetRegistry().Rebuild(m_Project.GetRootPath());
+		if (!Rebuilt)
+		{
+			std::string Message = "Could not rebuild the PBR registry after " + std::string(Phase) + " a same-UUID material source";
+			for (const PulseForge::AssetRegistryIssue& Issue : Rebuilt.error().Issues) Message += ": " + Issue.Message;
+			Fail(std::move(Message));
+			return false;
+		}
+		m_SceneRenderer.RefreshProjectAssets();
+		return true;
+	}
+
+	bool GpuProjectSceneValidation::RefreshPbrProjectAssets(std::string_view Phase)
+	{
+		const auto Rebuilt = m_Project.GetAssetRegistry().Rebuild(m_Project.GetRootPath());
+		if (!Rebuilt)
+		{
+			std::string Message = "Could not rebuild the PBR registry after " + std::string(Phase);
+			for (const PulseForge::AssetRegistryIssue& Issue : Rebuilt.error().Issues) Message += ": " + Issue.Message;
+			Fail(std::move(Message));
+			return false;
+		}
+		m_SceneRenderer.RefreshProjectAssets();
+		return true;
+	}
+
+	bool GpuProjectSceneValidation::WriteChangedPbrTexture()
+	{
+		constexpr uint32_t Width = 128;
+		constexpr uint32_t Height = 128;
+		std::ofstream Output(m_PbrTexturePath, std::ios::binary | std::ios::trunc);
+		Output << "P6\n" << Width << ' ' << Height << "\n255\n";
+		std::array<uint8_t, Width * Height * 3> Pixels{};
+		for (size_t Pixel = 0; Pixel < static_cast<size_t>(Width) * Height; ++Pixel)
+		{
+			Pixels[Pixel * 3] = 235;
+			Pixels[Pixel * 3 + 1] = 28;
+			Pixels[Pixel * 3 + 2] = 190;
+		}
+		Output.write(reinterpret_cast<const char*>(Pixels.data()), static_cast<std::streamsize>(Pixels.size()));
+		if (!Output)
+		{
+			Fail("Could not write the changed PBR texture fixture source");
+			return false;
+		}
+		return true;
+	}
+
+	bool GpuProjectSceneValidation::RestorePbrTexture()
+	{
+		std::error_code Error;
+		std::filesystem::copy_file(m_PbrOriginalTextureBackupPath, m_PbrTexturePath,
+			std::filesystem::copy_options::overwrite_existing, Error);
+		if (Error)
+		{
+			Fail("Could not restore the original PBR texture fixture source: " + Error.message());
+			return false;
+		}
+		return true;
+	}
+
+	bool GpuProjectSceneValidation::ReplacePbrMeshWithAlternate()
+	{
+		std::error_code Error;
+		std::filesystem::copy_file(m_PbrAlternateMeshPath, m_PbrMeshPath,
+			std::filesystem::copy_options::overwrite_existing, Error);
+		if (Error)
+		{
+			Fail("Could not replace the PBR mesh source with its alternate fixture: " + Error.message());
+			return false;
+		}
+		return true;
+	}
+
+	bool GpuProjectSceneValidation::RestorePbrMesh()
+	{
+		std::error_code Error;
+		std::filesystem::copy_file(m_PbrOriginalMeshBackupPath, m_PbrMeshPath,
+			std::filesystem::copy_options::overwrite_existing, Error);
+		if (Error)
+		{
+			Fail("Could not restore the original PBR mesh fixture source: " + Error.message());
+			return false;
+		}
+		return true;
+	}
+
+	bool GpuProjectSceneValidation::WriteChangedPbrEnvironment()
+	{
+		constexpr int32_t Width = 32;
+		constexpr int32_t Height = 16;
+		std::vector<float> Pixels(static_cast<size_t>(Width) * Height * 3);
+		for (int32_t Y = 0; Y < Height; ++Y)
+			for (int32_t X = 0; X < Width; ++X)
+			{
+				const size_t Offset = (static_cast<size_t>(Y) * Width + X) * 3;
+				Pixels[Offset] = 0.08f;
+				Pixels[Offset + 1] = 2.0f + static_cast<float>(X) / Width;
+				Pixels[Offset + 2] = 0.12f;
+			}
+		if (!stbi_write_hdr(m_PbrEnvironmentPath.string().c_str(), Width, Height, 3, Pixels.data()))
+		{
+			Fail("Could not write the changed HDR fixture source");
+			return false;
+		}
+		return true;
+	}
+
+	bool GpuProjectSceneValidation::RestorePbrEnvironment()
+	{
+		std::error_code Error;
+		std::filesystem::copy_file(m_PbrOriginalEnvironmentBackupPath, m_PbrEnvironmentPath,
+			std::filesystem::copy_options::overwrite_existing, Error);
+		if (Error)
+		{
+			Fail("Could not restore the original HDR fixture source: " + Error.message());
+			return false;
+		}
 		return true;
 	}
 

@@ -1,4 +1,4 @@
-#include "EditorConsoleSeverity.h"
+#include "Editor/EditorConsoleSeverity.h"
 
 namespace PulseForgeEditor::Detail
 {

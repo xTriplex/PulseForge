@@ -1,6 +1,7 @@
 #include "Scene/SceneRenderSnapshot.h"
 
 #include <cmath>
+#include <unordered_set>
 
 #include <glm/gtc/matrix_inverse.hpp>
 
@@ -71,15 +72,9 @@ namespace PulseForge
 			return glm::normalize(Result);
 		}
 
-		std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> BuildGeometrySnapshot(
-			const Scene& Source,
-			const glm::mat4& View,
-			const glm::mat4& Projection,
-			const glm::mat4& ViewProjection,
-			const glm::vec3& CameraWorldPosition,
-			float NearClipPlane,
-			float FarClipPlane,
-			std::optional<UUID> CameraEntity)
+		std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> BuildGeometrySnapshot(const Scene& Source, const glm::mat4& View,
+			const glm::mat4& Projection, const glm::mat4& ViewProjection, const glm::vec3& CameraWorldPosition, float NearClipPlane,
+			float FarClipPlane, std::optional<UUID> CameraEntity, const std::unordered_set<UUID, UUIDHash>* ExcludedEntities = nullptr)
 		{
 			SceneRenderSnapshot Snapshot;
 			Snapshot.CameraEntity = CameraEntity;
@@ -93,19 +88,21 @@ namespace PulseForge
 
 			for (const Entity& Current : Source.GetEntities())
 			{
+				if (ExcludedEntities && ExcludedEntities->contains(Current.GetUUID())) continue;
+
 				const auto DirectionalLight = Current.GetDirectionalLight();
 				if (!DirectionalLight)
-					return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::SceneOperationFailed,
-						Current.GetUUID(), DirectionalLight.error().Message));
+					return std::unexpected(
+						MakeError(SceneRenderSnapshotErrorCode::SceneOperationFailed, Current.GetUUID(), DirectionalLight.error().Message));
 				if (DirectionalLight->has_value())
 				{
 					if (Snapshot.DirectionalLight)
-						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::MultipleDirectionalLights,
-							Current.GetUUID(), "The direct-light renderer currently supports one directional light per scene"));
+						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::MultipleDirectionalLights, Current.GetUUID(),
+							"The direct-light renderer currently supports one directional light per scene"));
 					const auto World = Current.GetWorldMatrix();
 					if (!World || !IsFinite(*World))
-						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidDirectionalLightTransform,
-							Current.GetUUID(), "Directional-light world transform must be finite"));
+						return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidDirectionalLightTransform, Current.GetUUID(),
+							"Directional-light world transform must be finite"));
 					const glm::vec3 RayDirection = glm::mat3(*World) * glm::vec3(0.0f, 0.0f, -1.0f);
 					const float DirectionLength = glm::length(RayDirection);
 					if (!std::isfinite(DirectionLength) || DirectionLength <= 1.0e-6f)
@@ -374,27 +371,30 @@ namespace PulseForge
 		return Snapshot;
 	}
 
-	std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> SceneRenderSnapshotBuilder::BuildForView(
-		const Scene& Source,
-		const glm::mat4& View,
-		const glm::mat4& Projection,
-		const glm::vec3& CameraWorldPosition,
-		float NearClipPlane,
-		float FarClipPlane)
+	std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> SceneRenderSnapshotBuilder::BuildForView(const Scene& Source,
+		const glm::mat4& View, const glm::mat4& Projection, const glm::vec3& CameraWorldPosition, float NearClipPlane, float FarClipPlane)
 	{
-		if (!IsFinite(View) || !IsFinite(Projection) || !std::isfinite(NearClipPlane) ||
-			!std::isfinite(FarClipPlane) || NearClipPlane <= 0.0f || FarClipPlane <= NearClipPlane ||
-			!std::isfinite(CameraWorldPosition.x) || !std::isfinite(CameraWorldPosition.y) ||
-			!std::isfinite(CameraWorldPosition.z))
+		return BuildForViewFiltered(Source, View, Projection, CameraWorldPosition, NearClipPlane, FarClipPlane, {});
+	}
+
+	std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> SceneRenderSnapshotBuilder::BuildForViewFiltered(const Scene& Source,
+		const glm::mat4& View, const glm::mat4& Projection, const glm::vec3& CameraWorldPosition, float NearClipPlane, float FarClipPlane,
+		std::span<const UUID> ExcludedEntities)
+	{
+		if (!IsFinite(View) || !IsFinite(Projection) || !std::isfinite(NearClipPlane) || !std::isfinite(FarClipPlane) ||
+			NearClipPlane <= 0.0f || FarClipPlane <= NearClipPlane || !std::isfinite(CameraWorldPosition.x) ||
+			!std::isfinite(CameraWorldPosition.y) || !std::isfinite(CameraWorldPosition.z))
 		{
 			return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidViewProjection, {},
 				"Transient render view matrices, position, and clip planes must be finite and valid"));
 		}
 		const glm::mat4 ViewProjection = Projection * View;
 		if (!IsFinite(ViewProjection))
-			return std::unexpected(MakeError(SceneRenderSnapshotErrorCode::InvalidViewProjection, {},
-				"Transient view-projection matrix must be finite"));
-		return BuildGeometrySnapshot(Source, View, Projection, ViewProjection, CameraWorldPosition,
-			NearClipPlane, FarClipPlane, std::nullopt);
+			return std::unexpected(
+				MakeError(SceneRenderSnapshotErrorCode::InvalidViewProjection, {}, "Transient view-projection matrix must be finite"));
+
+		const std::unordered_set<UUID, UUIDHash> Excluded(ExcludedEntities.begin(), ExcludedEntities.end());
+		return BuildGeometrySnapshot(
+			Source, View, Projection, ViewProjection, CameraWorldPosition, NearClipPlane, FarClipPlane, std::nullopt, &Excluded);
 	}
-}
+} // namespace PulseForge
