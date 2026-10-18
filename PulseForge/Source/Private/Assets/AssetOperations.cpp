@@ -3,6 +3,8 @@
 
 #include "Assets/AssetMetadata.h"
 
+#include <nlohmann/json.hpp>
+
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -208,16 +210,261 @@ namespace PulseForge
 			return LeftComponent == Left.end() && RightComponent == Right.end();
 		}
 
-		std::expected<AssetRecord, AssetOperationError> RenameCaseOnlyAsset(
-			AssetRegistry& Registry,
-			const ProjectPaths& Project,
-			const AssetID& Asset,
-			const FilesystemPath& SourcePath,
-			const FilesystemPath& DestinationPath,
-			const FilesystemPath& Source,
-			const FilesystemPath& Destination,
-			const FilesystemPath& SourceSidecar,
-			const FilesystemPath& DestinationSidecar)
+		bool IsPathWithin(const FilesystemPath& Directory, const FilesystemPath& Path)
+		{
+			auto DirectoryComponent = Directory.begin();
+			auto PathComponent = Path.begin();
+			for (; DirectoryComponent != Directory.end(); ++DirectoryComponent, ++PathComponent)
+			{
+				if (PathComponent == Path.end()) return false;
+#if defined(_WIN32)
+				if (CompareStringOrdinal(DirectoryComponent->c_str(), static_cast<int>(DirectoryComponent->native().size()),
+						PathComponent->c_str(), static_cast<int>(PathComponent->native().size()), TRUE) != CSTR_EQUAL)
+				{
+					return false;
+				}
+#else
+				if (*DirectoryComponent != *PathComponent) return false;
+#endif
+			}
+			return true;
+		}
+
+		std::expected<std::optional<FilesystemPath>, std::string> ResolveGltfBufferUri(
+			std::string_view Uri, const FilesystemPath& SourcePath)
+		{
+			if (Uri.starts_with("data:")) return std::optional<FilesystemPath>{};
+
+			std::string Decoded;
+			Decoded.reserve(Uri.size());
+			for (size_t Index = 0; Index < Uri.size(); ++Index)
+			{
+				if (Uri[Index] != '%')
+				{
+					Decoded.push_back(Uri[Index]);
+					continue;
+				}
+				if (Index + 2 >= Uri.size()) return std::unexpected("external buffer URI has an incomplete percent escape");
+
+				const auto HexValue = [](char Character) -> int
+				{
+					if (Character >= '0' && Character <= '9') return Character - '0';
+					if (Character >= 'a' && Character <= 'f') return Character - 'a' + 10;
+					if (Character >= 'A' && Character <= 'F') return Character - 'A' + 10;
+					return -1;
+				};
+				const int High = HexValue(Uri[Index + 1]);
+				const int Low = HexValue(Uri[Index + 2]);
+				if (High < 0 || Low < 0) return std::unexpected("external buffer URI has an invalid percent escape");
+				const char Character = static_cast<char>((High << 4) | Low);
+				if (Character == '\0' || Character == '\\' || Character == ':' || Character == '?' || Character == '#')
+					return std::unexpected("external buffer URI contains a forbidden path character");
+				Decoded.push_back(Character);
+				Index += 2;
+			}
+
+			if (Decoded.empty() || Decoded.front() == '/' || Decoded.find('\0') != std::string::npos ||
+				Decoded.find('\\') != std::string::npos || Decoded.find(':') != std::string::npos ||
+				Decoded.find('?') != std::string::npos || Decoded.find('#') != std::string::npos)
+			{
+				return std::unexpected("external buffer URI must be a relative file path");
+			}
+
+			try
+			{
+				const FilesystemPath RelativePath = std::filesystem::u8path(Decoded);
+				if (RelativePath.is_absolute() || RelativePath.has_root_name() || RelativePath.has_root_directory())
+					return std::unexpected("external buffer URI must be relative");
+				for (const FilesystemPath& Component : RelativePath)
+				{
+					if (Component == "." || Component == "..")
+						return std::unexpected("external buffer URI contains a path component not supported by the glTF importer");
+					const std::u8string Text = Component.generic_u8string();
+					if (!Text.empty() && (Text.back() == u8'.' || Text.back() == u8' '))
+						return std::unexpected("external buffer URI contains a Windows-ambiguous path component");
+				}
+				return std::optional<FilesystemPath>{ (SourcePath.parent_path() / RelativePath).lexically_normal() };
+			}
+			catch (const std::exception& Exception)
+			{
+				return std::unexpected(std::string("external buffer URI is not a valid filesystem path: ") + Exception.what());
+			}
+		}
+
+		std::expected<std::vector<FilesystemPath>, std::string> ReadGltfExternalBufferPaths(const FilesystemPath& SourcePath)
+		{
+			const bool IsGlb = HasAssetExtension(SourcePath, { ".glb" });
+			std::error_code Error;
+			const uintmax_t FileSize = std::filesystem::file_size(SourcePath, Error);
+			if (Error || FileSize > (IsGlb ? 512ull : 64ull) * 1024ull * 1024ull ||
+				FileSize > static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max()))
+			{
+				return std::unexpected("could not read glTF dependency list within the importer limit");
+			}
+
+			std::ifstream Input(SourcePath, std::ios::binary);
+			if (!Input) return std::unexpected("could not open glTF dependency source");
+			std::string Text(static_cast<size_t>(FileSize), '\0');
+			if (!Text.empty()) Input.read(Text.data(), static_cast<std::streamsize>(Text.size()));
+			if (!Input || Input.bad()) return std::unexpected("could not read glTF dependency source completely");
+			if (IsGlb)
+			{
+				const auto ReadUInt32 = [&Text](size_t Offset, uint32_t& Value)
+				{
+					if (Offset > Text.size() || Text.size() - Offset < sizeof(uint32_t)) return false;
+					Value = static_cast<uint32_t>(static_cast<unsigned char>(Text[Offset])) |
+							(static_cast<uint32_t>(static_cast<unsigned char>(Text[Offset + 1])) << 8) |
+							(static_cast<uint32_t>(static_cast<unsigned char>(Text[Offset + 2])) << 16) |
+							(static_cast<uint32_t>(static_cast<unsigned char>(Text[Offset + 3])) << 24);
+					return true;
+				};
+				uint32_t Magic = 0;
+				uint32_t Version = 0;
+				uint32_t DeclaredLength = 0;
+				if (!ReadUInt32(0, Magic) || !ReadUInt32(4, Version) || !ReadUInt32(8, DeclaredLength) || Magic != 0x46546c67 ||
+					Version != 2 || DeclaredLength != Text.size())
+				{
+					return std::unexpected("GLB header is malformed");
+				}
+				uint32_t JsonLength = 0;
+				uint32_t JsonType = 0;
+				if (!ReadUInt32(12, JsonLength) || !ReadUInt32(16, JsonType) || JsonType != 0x4e4f534a || JsonLength % 4 != 0 ||
+					JsonLength > Text.size() - 20 || JsonLength > 64ull * 1024ull * 1024ull)
+				{
+					return std::unexpected("GLB does not contain a valid bounded JSON chunk first");
+				}
+				Text = Text.substr(20, JsonLength);
+			}
+
+			using Json = nlohmann::json;
+			Json Document;
+			try
+			{
+				Document = Json::parse(Text);
+			}
+			catch (const Json::exception& Exception)
+			{
+				return std::unexpected(std::string("could not parse glTF dependency source: ") + Exception.what());
+			}
+
+			std::vector<FilesystemPath> Dependencies;
+			if (!Document.is_object()) return std::unexpected("glTF dependency source root is not an object");
+			const auto Buffers = Document.find("buffers");
+			if (Buffers == Document.end()) return Dependencies;
+			if (!Buffers->is_array()) return std::unexpected("glTF buffers field is not an array");
+
+			for (const Json& Buffer : *Buffers)
+			{
+				if (!Buffer.is_object()) return std::unexpected("glTF buffer entry is not an object");
+				const auto Uri = Buffer.find("uri");
+				if (Uri == Buffer.end()) continue;
+				if (!Uri->is_string()) return std::unexpected("glTF buffer URI is not a string");
+				auto Resolved = [&]() -> std::expected<std::optional<FilesystemPath>, std::string>
+				{
+					try
+					{
+						return ResolveGltfBufferUri(Uri->get<std::string>(), SourcePath);
+					}
+					catch (const Json::exception& Exception)
+					{
+						return std::unexpected(std::string("could not read glTF buffer URI: ") + Exception.what());
+					}
+				}();
+				if (!Resolved) return std::unexpected(Resolved.error());
+				if (*Resolved) Dependencies.push_back(std::move(**Resolved));
+			}
+			return Dependencies;
+		}
+
+		AssetOperationError MakeDependencyMoveError(const FilesystemPath& Path, std::string Message)
+		{
+			return MakeError(AssetOperationErrorCode::InvalidPath, Path,
+				"Asset move was refused to preserve glTF external-buffer dependencies: " + std::move(Message));
+		}
+
+		std::expected<void, AssetOperationError> ValidateGltfDocumentRelocation(const ProjectPaths& Project,
+			const FilesystemPath& SourcePath, const FilesystemPath& DestinationPath, std::string_view Operation)
+		{
+			if (!HasAssetExtension(SourcePath, { ".gltf", ".glb" }) ||
+				AreCaseInsensitivePathComponentsEqual(SourcePath.parent_path(), DestinationPath.parent_path()))
+			{
+				return {};
+			}
+
+			auto Dependencies = ReadGltfExternalBufferPaths(Project.Root / SourcePath);
+			if (!Dependencies)
+			{
+				return std::unexpected(
+					MakeDependencyMoveError(SourcePath, "could not verify the document's dependencies: " + Dependencies.error()));
+			}
+			if (!Dependencies->empty())
+			{
+				return std::unexpected(MakeDependencyMoveError(SourcePath,
+					std::string(Operation) + " would change the base directory of relative external buffers. Keep the document in its "
+											 "current directory or move its containing folder with the buffers."));
+			}
+			return {};
+		}
+
+		std::expected<void, AssetOperationError> ValidateAssetMoveDependencies(const ProjectPaths& Project, const AssetRegistry& Registry,
+			const FilesystemPath& SourcePath, const FilesystemPath& DestinationPath)
+		{
+			if (auto Relocation = ValidateGltfDocumentRelocation(Project, SourcePath, DestinationPath, "Moving"); !Relocation)
+				return Relocation;
+
+			const FilesystemPath AbsoluteSource = (Project.Root / SourcePath).lexically_normal();
+			for (const AssetRecord& Record : Registry.GetAssets())
+			{
+				if (!HasAssetExtension(Record.ProjectRelativePath, { ".gltf", ".glb" })) continue;
+				auto Dependencies = ReadGltfExternalBufferPaths(Project.Root / Record.ProjectRelativePath);
+				if (!Dependencies)
+					continue; // The importer cannot consume malformed documents, so they have no supported dependency contract.
+				for (const FilesystemPath& Dependency : *Dependencies)
+				{
+					if (AreCaseInsensitivePathComponentsEqual(Dependency, AbsoluteSource))
+					{
+						return std::unexpected(MakeDependencyMoveError(
+							SourcePath, "it is referenced by " + Record.ProjectRelativePath.generic_string() +
+											". Move the document and dependency together or update the reference first."));
+					}
+				}
+			}
+			return {};
+		}
+
+		std::expected<void, AssetOperationError> ValidateFolderMoveDependencies(
+			const ProjectPaths& Project, const AssetRegistry& Registry, const FilesystemPath& SourceFolderPath)
+		{
+			for (const AssetRecord& Record : Registry.GetAssets())
+			{
+				if (!HasAssetExtension(Record.ProjectRelativePath, { ".gltf", ".glb" })) continue;
+				const bool DocumentMoves = IsPathWithin(SourceFolderPath, Record.ProjectRelativePath);
+				auto Dependencies = ReadGltfExternalBufferPaths(Project.Root / Record.ProjectRelativePath);
+				if (!Dependencies)
+				{
+					if (!DocumentMoves) continue; // Invalid documents outside the transaction cannot be imported or dependably interpreted.
+					return std::unexpected(MakeDependencyMoveError(SourceFolderPath,
+						"could not inspect " + Record.ProjectRelativePath.generic_string() + ": " + Dependencies.error()));
+				}
+				for (const FilesystemPath& Dependency : *Dependencies)
+				{
+					const FilesystemPath RelativeDependency = Dependency.lexically_relative(Project.Root);
+					const bool DependencyMoves = IsPathWithin(SourceFolderPath, RelativeDependency);
+					if (DocumentMoves != DependencyMoves)
+					{
+						return std::unexpected(MakeDependencyMoveError(
+							SourceFolderPath, "relative buffer dependency between " + Record.ProjectRelativePath.generic_string() +
+												  " and " + Dependency.generic_string() +
+												  " crosses the folder boundary. Move both together or update the reference first."));
+					}
+				}
+			}
+			return {};
+		}
+
+		std::expected<AssetRecord, AssetOperationError> RenameCaseOnlyAsset(AssetRegistry& Registry, const ProjectPaths& Project,
+			const AssetID& Asset, const FilesystemPath& SourcePath, const FilesystemPath& DestinationPath, const FilesystemPath& Source,
+			const FilesystemPath& Destination, const FilesystemPath& SourceSidecar, const FilesystemPath& DestinationSidecar)
 		{
 			const auto TransactionID = UUID::Generate();
 			if (!TransactionID)
@@ -978,28 +1225,30 @@ namespace PulseForge
 			if (EquivalentError || !SameSidecar)
 				return std::unexpected(Destination.error());
 
+			if (auto DependencyResult = ValidateAssetMoveDependencies(*Project, Registry, SourcePath, DestinationPath); !DependencyResult)
+			{
+				return std::unexpected(DependencyResult.error());
+			}
+
 			const auto Metadata = LoadManagedMetadata(*Source, SourcePath);
-			if (!Metadata)
-				return std::unexpected(Metadata.error());
+			if (!Metadata) return std::unexpected(Metadata.error());
 			if (Metadata->ID != SourceAsset)
 			{
-				return std::unexpected(MakeError(
-					AssetOperationErrorCode::InvalidProjectAssets,
-					SourcePath,
+				return std::unexpected(MakeError(AssetOperationErrorCode::InvalidProjectAssets, SourcePath,
 					"Asset sidecar identity changed while preparing the move; expected UUID " + SourceAsset.ToString()));
 			}
-			return RenameCaseOnlyAsset(
-				Registry, *Project, SourceAsset, SourcePath, DestinationPath, *Source,
-				AbsoluteDestination, SourceSidecar, DestinationSidecar);
+			return RenameCaseOnlyAsset(Registry, *Project, SourceAsset, SourcePath, DestinationPath, *Source, AbsoluteDestination,
+				SourceSidecar, DestinationSidecar);
+		}
+		if (auto DependencyResult = ValidateAssetMoveDependencies(*Project, Registry, SourcePath, DestinationPath); !DependencyResult)
+		{
+			return std::unexpected(DependencyResult.error());
 		}
 		const auto Metadata = LoadManagedMetadata(*Source, SourcePath);
-		if (!Metadata)
-			return std::unexpected(Metadata.error());
+		if (!Metadata) return std::unexpected(Metadata.error());
 		if (Metadata->ID != SourceAsset)
 		{
-			return std::unexpected(MakeError(
-				AssetOperationErrorCode::InvalidProjectAssets,
-				SourcePath,
+			return std::unexpected(MakeError(AssetOperationErrorCode::InvalidProjectAssets, SourcePath,
 				"Asset sidecar identity changed while preparing the move; expected UUID " + SourceAsset.ToString()));
 		}
 
@@ -1252,15 +1501,15 @@ namespace PulseForge
 
 		if (auto TreeResult = ValidateNoReparseEntries(AbsoluteSource, SourceFolderPath); !TreeResult)
 			return std::unexpected(TreeResult.error());
+		if (auto DependencyResult = ValidateFolderMoveDependencies(*Project, Registry, SourceFolderPath); !DependencyResult)
+			return std::unexpected(DependencyResult.error());
 
 		// A sibling staging name makes the filesystem rename transactional even for case-only paths
 		// on Windows. The source and destination are both below one non-reparse Assets tree.
 		const auto TransactionID = UUID::Generate();
 		if (!TransactionID)
 		{
-			return std::unexpected(MakeError(
-				AssetOperationErrorCode::FilesystemFailure,
-				SourceFolderPath,
+			return std::unexpected(MakeError(AssetOperationErrorCode::FilesystemFailure, SourceFolderPath,
 				"Could not create a unique temporary name for the folder move"));
 		}
 		const FilesystemPath StagingPath = AbsoluteSource.parent_path() /
@@ -1356,15 +1605,16 @@ namespace PulseForge
 		const FilesystemPath SourcePath = SourceRecord->ProjectRelativePath;
 		if (SourcePath == DestinationPath)
 		{
-			return std::unexpected(MakeError(
-				AssetOperationErrorCode::InvalidPath,
-				SourcePath,
-				"Asset source and destination paths must differ"));
+			return std::unexpected(
+				MakeError(AssetOperationErrorCode::InvalidPath, SourcePath, "Asset source and destination paths must differ"));
+		}
+		if (auto DependencyResult = ValidateGltfDocumentRelocation(*Project, SourcePath, DestinationPath, "Duplicating"); !DependencyResult)
+		{
+			return std::unexpected(DependencyResult.error());
 		}
 
 		const auto Source = ResolveAssetPath(*Project, SourcePath, true);
-		if (!Source)
-			return std::unexpected(Source.error());
+		if (!Source) return std::unexpected(Source.error());
 		const auto Destination = ResolveAssetPath(*Project, DestinationPath, false);
 		if (!Destination)
 			return std::unexpected(Destination.error());
