@@ -508,6 +508,11 @@ namespace PulseForge
 		return m_FallbackOcclusionTexture.get();
 	}
 
+	const Texture* SceneRenderer::AmbientOcclusionPass::GetPrepassDepthTextureForValidation() const noexcept
+	{
+		return m_Targets[0] ? m_Targets[0]->GetDepthTexture() : nullptr;
+	}
+
 	const BindingSet* SceneRenderer::AmbientOcclusionPass::GetSceneBindingSet() const noexcept
 	{
 		if (m_FrameAvailable && m_FinalBindings) return m_FinalBindings.get();

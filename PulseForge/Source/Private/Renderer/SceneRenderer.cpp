@@ -166,6 +166,21 @@ namespace PulseForge
 		return m_ShadowTargetCache->PointShadowFaceTexture(Slot, Face);
 	}
 
+	const Texture* SceneRenderer::GetDirectionalShadowTextureForValidation(size_t Cascade) const noexcept
+	{
+		return m_ShadowTargetCache->DirectionalShadowTexture(Cascade);
+	}
+
+	const Texture* SceneRenderer::GetSpotlightShadowTextureForValidation(size_t Slot) const noexcept
+	{
+		return m_ShadowTargetCache->SpotlightShadowTexture(Slot);
+	}
+
+	const Texture* SceneRenderer::GetAmbientOcclusionDepthTextureForValidation() const noexcept
+	{
+		return m_AmbientOcclusionPass->GetPrepassDepthTextureForValidation();
+	}
+
 	std::expected<std::unique_ptr<SceneRenderer>, SceneRendererError> SceneRenderer::Create(
 		RenderDevice& Runtime, const Project& SourceProject, const std::filesystem::path& CompiledShaderDirectory)
 	{
