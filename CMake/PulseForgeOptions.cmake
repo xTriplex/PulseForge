@@ -1,6 +1,12 @@
 set(PULSEFORGE_SAMPLE_RENDERER "Vulkan" CACHE STRING "Renderer used by PulseForgeGame (Vulkan or OpenGL)")
 set_property(CACHE PULSEFORGE_SAMPLE_RENDERER PROPERTY STRINGS Vulkan OpenGL)
-option(PULSEFORGE_BUILD_EDITOR "Build the experimental PulseForge editor shell" ON)
+option(PULSEFORGE_BUILD_CORE_ONLY "Build only portable Core and CPU consumer tests" OFF)
+if(PULSEFORGE_BUILD_CORE_ONLY)
+	set(PULSEFORGE_EDITOR_DEFAULT OFF)
+else()
+	set(PULSEFORGE_EDITOR_DEFAULT ON)
+endif()
+option(PULSEFORGE_BUILD_EDITOR "Build the experimental PulseForge editor shell" ${PULSEFORGE_EDITOR_DEFAULT})
 option(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS "Build opt-in Vulkan GPU validation smoke tests" OFF)
 option(PULSEFORGE_ENABLE_QUALITY_CHECKS "Enable explicitly requested source, architecture, formatting, and analysis checks" OFF)
 option(PULSEFORGE_ENABLE_MSVC_ANALYSIS "Enable selected MSVC static analysis checks" OFF)
@@ -12,8 +18,40 @@ if(PULSEFORGE_BUILD_EDITOR AND NOT PULSEFORGE_EDITOR_RENDERER STREQUAL "Vulkan" 
 	message(FATAL_ERROR "PULSEFORGE_EDITOR_RENDERER must be Vulkan or OpenGL")
 endif()
 
-if(NOT WIN32)
-	message(FATAL_ERROR "PulseForge currently supports Windows only; desktop platform support is being implemented separately.")
+if(WIN32)
+	if(NOT CMAKE_C_COMPILER_ID STREQUAL "MSVC" OR NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+		message(FATAL_ERROR
+			"Windows builds currently require the MSVC C and C++ toolchains. Selected C=${CMAKE_C_COMPILER_ID}, "
+			"CXX=${CMAKE_CXX_COMPILER_ID}.")
+	endif()
+	set(PULSEFORGE_PLATFORM_WINDOWS TRUE)
+	set(PULSEFORGE_PLATFORM_LINUX FALSE)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+	if(NOT CMAKE_C_COMPILER_ID MATCHES "^(GNU|Clang)$" OR
+		NOT CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
+		message(FATAL_ERROR
+			"Linux Core-only builds require GCC or Clang C and C++ toolchains. Selected C=${CMAKE_C_COMPILER_ID}, "
+			"CXX=${CMAKE_CXX_COMPILER_ID}.")
+	endif()
+	set(PULSEFORGE_PLATFORM_WINDOWS FALSE)
+	set(PULSEFORGE_PLATFORM_LINUX TRUE)
+	if(NOT PULSEFORGE_BUILD_CORE_ONLY)
+		message(FATAL_ERROR
+			"Linux currently supports only the portable Core/CPU target set. Configure with "
+			"-DPULSEFORGE_BUILD_CORE_ONLY=ON; Linux window, editor, renderer, and game targets are not supported yet.")
+	endif()
+else()
+	message(FATAL_ERROR
+		"Unsupported PulseForge operating system '${CMAKE_SYSTEM_NAME}'. This revision supports Windows desktop "
+		"builds and Linux Core/CPU-only builds.")
+endif()
+
+if(CMAKE_SIZEOF_VOID_P AND NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+	message(FATAL_ERROR "PulseForge currently supports 64-bit Windows and Linux targets only.")
+endif()
+
+if(PULSEFORGE_BUILD_CORE_ONLY AND PULSEFORGE_BUILD_EDITOR)
+	message(FATAL_ERROR "PULSEFORGE_BUILD_CORE_ONLY cannot be combined with PULSEFORGE_BUILD_EDITOR=ON.")
 endif()
 
 if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS AND
@@ -25,7 +63,28 @@ endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+if(MSVC)
+	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("#include <expected>
+int main() { std::expected<int, int> value = 1; return *value - 1; }
+" PULSEFORGE_HAS_STD_EXPECTED)
+if(NOT PULSEFORGE_HAS_STD_EXPECTED)
+	message(FATAL_ERROR
+		"The selected C++ compiler/standard library cannot compile std::expected in C++23 mode. "
+		"Use a toolchain with C++23 expected support (for example, a recent MSVC, GCC/libstdc++, or Clang/libc++ release).")
+endif()
+check_cxx_source_compiles("#include <format>
+#include <string>
+int main() { return std::format(\"{}\", 23) == \"23\" ? 0 : 1; }
+" PULSEFORGE_HAS_STD_FORMAT)
+if(NOT PULSEFORGE_HAS_STD_FORMAT)
+	message(FATAL_ERROR
+		"The selected C++ compiler/standard library cannot compile std::format in C++23 mode. "
+		"PulseForge requires a toolchain with C++23 formatting support; this is a standard-library capability, not just a compiler flag.")
+endif()
 
 if(CMAKE_GENERATOR STREQUAL "Visual Studio 17 2022" AND
 	CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" AND

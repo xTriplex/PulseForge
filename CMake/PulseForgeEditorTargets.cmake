@@ -33,11 +33,10 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForge/Vendor/json/include
 		PulseForge/Vendor/spdlog/include
 	)
-	target_compile_definitions(PulseForgeEditorUI PRIVATE PF_PLATFORM_WINDOWS)
 	target_link_libraries(PulseForgeEditorUI
 		PUBLIC PulseForgeRenderer PulseForgeEditorCore
 		PRIVATE PulseForgeCore PulseForgeApplication PulseForgeAssetImporters PulseForgeAssetServices
-			PulseForgeImGui PulseForgeSceneRenderer freetype spdlog::spdlog shell32 ole32
+			PulseForgeImGui PulseForgeSceneRenderer freetype spdlog::spdlog
 	)
 	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
 		target_compile_definitions(PulseForgeEditorUI PRIVATE PF_EDITOR_RENDERER_OPENGL)
@@ -60,7 +59,6 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForge/Vendor/json/include
 		PulseForge/Vendor/imgui/misc/freetype
 	)
-	target_compile_definitions(PulseForgeEditor PRIVATE PF_PLATFORM_WINDOWS)
 	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
 		target_include_directories(PulseForgeEditor PRIVATE PulseForge/Vendor/Glad/include)
 		target_compile_definitions(PulseForgeEditor PRIVATE PF_EDITOR_RENDERER_OPENGL)

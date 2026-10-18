@@ -3,6 +3,7 @@ set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory(PulseForge/Vendor/Glfw)
+find_package(OpenGL REQUIRED)
 
 # Build only Jolt's CPU physics library. PulseForge owns the engine-facing
 # integration; Jolt remains a private implementation dependency.
@@ -91,15 +92,6 @@ add_library(PulseForgeLua STATIC
 target_include_directories(PulseForgeLua PUBLIC "${PULSEFORGE_LUA_SOURCE_DIR}")
 set_target_properties(PulseForgeLua PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
 
-set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
-set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(SPDLOG_BUILD_BENCH OFF CACHE BOOL "" FORCE)
-add_subdirectory(PulseForge/Vendor/spdlog)
-target_compile_options(spdlog PRIVATE
-	$<$<CXX_COMPILER_ID:MSVC>:/EHsc>
-	$<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Dist>>:/O2>
-)
-
 add_library(PulseForgeGlad STATIC PulseForge/Vendor/Glad/src/glad.c)
 target_include_directories(PulseForgeGlad PUBLIC PulseForge/Vendor/Glad/include)
 target_compile_options(PulseForgeGlad PRIVATE
@@ -142,7 +134,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	)
 	target_link_libraries(PulseForgeImGui PUBLIC glfw)
 	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
-		target_link_libraries(PulseForgeImGui PUBLIC opengl32)
+		target_link_libraries(PulseForgeImGui PUBLIC OpenGL::GL)
 	endif()
 	target_compile_options(PulseForgeImGui PRIVATE
 		$<$<CXX_COMPILER_ID:MSVC>:/EHsc>

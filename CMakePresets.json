@@ -1,0 +1,64 @@
+{
+	"version": 5,
+	"cmakeMinimumRequired": {
+		"major": 3,
+		"minor": 24,
+		"patch": 0
+	},
+	"configurePresets": [
+		{
+			"name": "windows-editor",
+			"displayName": "Windows Editor (default configuration)",
+			"generator": "Visual Studio 17 2022",
+			"architecture": "x64",
+			"binaryDir": "${sourceDir}/Build/CMakePresets/windows-editor"
+		},
+		{
+			"name": "windows-core",
+			"displayName": "Windows Core and CPU tests",
+			"inherits": "windows-editor",
+			"binaryDir": "${sourceDir}/Build/CMakePresets/windows-core",
+			"cacheVariables": {
+				"PULSEFORGE_BUILD_CORE_ONLY": "ON",
+				"PULSEFORGE_BUILD_EDITOR": "OFF",
+				"BUILD_TESTING": "ON"
+			}
+		},
+		{
+			"name": "linux-core",
+			"displayName": "Linux Core and CPU tests",
+			"generator": "Unix Makefiles",
+			"binaryDir": "${sourceDir}/Build/CMakePresets/linux-core",
+			"cacheVariables": {
+				"CMAKE_BUILD_TYPE": "Debug",
+				"PULSEFORGE_BUILD_CORE_ONLY": "ON",
+				"PULSEFORGE_BUILD_EDITOR": "OFF",
+				"BUILD_TESTING": "ON"
+			}
+		}
+	],
+	"buildPresets": [
+		{
+			"name": "windows-core-debug",
+			"configurePreset": "windows-core",
+			"configuration": "Debug"
+		},
+		{
+			"name": "linux-core-debug",
+			"configurePreset": "linux-core"
+		}
+	],
+	"testPresets": [
+		{
+			"name": "windows-core-debug",
+			"configurePreset": "windows-core",
+			"configuration": "Debug",
+			"output": { "outputOnFailure": true }
+		},
+		{
+			"name": "linux-core-debug",
+			"configurePreset": "linux-core",
+			"output": { "outputOnFailure": true }
+		}
+	]
+}
