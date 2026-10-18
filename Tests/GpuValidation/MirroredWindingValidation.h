@@ -47,8 +47,10 @@ namespace PulseForge::GpuValidation
 		std::unique_ptr<RenderTarget> m_OutputTarget;
 		std::optional<Entity> m_Parent;
 		std::optional<Entity> m_Mesh;
+		std::optional<Entity> m_DoubleSidedMesh;
 		std::optional<Entity> m_Camera;
 		std::optional<Entity> m_Light;
+		std::optional<Entity> m_SpotLight;
 		std::optional<Entity> m_PointLight;
 		size_t m_ScenarioIndex = 0;
 		bool m_ScenePrepared = false;
