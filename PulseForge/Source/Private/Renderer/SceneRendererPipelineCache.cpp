@@ -41,9 +41,11 @@ namespace PulseForge
 	}
 
 	std::expected<void, SceneRendererError> SceneRendererPipelineCache::EnsureScenePipeline(
-		ColorTargetFormat ColorFormat, bool AlphaBlend, bool DoubleSided)
+		ColorTargetFormat ColorFormat, bool AlphaBlend, bool DoubleSided, WorldTransformOrientation Orientation)
 	{
-		const auto Key = std::tuple{ ColorFormat, AlphaBlend, DoubleSided };
+		if (Orientation == WorldTransformOrientation::Singular)
+			return std::unexpected(MakeResourceError("Cannot create a scene pipeline for a singular mesh transform"));
+		const auto Key = std::tuple{ ColorFormat, AlphaBlend, DoubleSided, Orientation };
 		if (m_ScenePipelines.contains(Key)) return {};
 		if (auto Initialized = RequireInitialized(); !Initialized) return Initialized;
 		if (!m_VertexLayout)
@@ -58,6 +60,7 @@ namespace PulseForge
 		Description.VertexLayout = *m_VertexLayout;
 		Description.ColorFormat = ColorFormat;
 		Description.Rasterizer.Cull = DoubleSided ? CullMode::None : CullMode::Back;
+		Description.Rasterizer.FrontCounterClockwise = UsesCounterClockwiseFrontFace(Orientation);
 		Description.Blend.Enabled = AlphaBlend;
 		Description.Depth.TestEnabled = true;
 		Description.Depth.WriteEnabled = !AlphaBlend;
@@ -65,12 +68,14 @@ namespace PulseForge
 		Description.DebugName = AlphaBlend	  ? "PulseForge transparent scene pipeline"
 								: DoubleSided ? "PulseForge double-sided scene pipeline"
 											  : "PulseForge opaque/masked scene pipeline";
+		if (Orientation == WorldTransformOrientation::Mirrored) Description.DebugName += " (mirrored transform)";
 		auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
 		if (!Pipeline) return std::unexpected(MakeResourceError("Could not create scene graphics pipeline: " + Pipeline.error().Message));
 
 		m_ScenePipelines.emplace(Key, std::move(*Pipeline));
-		PF_CORE_INFO("Created scene pipeline for vertex stride {0}, color format {1}, blend {2}, double-sided {3}", m_VertexLayout->Stride,
-			static_cast<uint32_t>(ColorFormat), AlphaBlend, DoubleSided);
+		PF_CORE_INFO("Created scene pipeline for vertex stride {0}, color format {1}, blend {2}, double-sided {3}, mirrored {4}",
+			m_VertexLayout->Stride, static_cast<uint32_t>(ColorFormat), AlphaBlend, DoubleSided,
+			Orientation == WorldTransformOrientation::Mirrored);
 		return {};
 	}
 
@@ -96,10 +101,13 @@ namespace PulseForge
 		return {};
 	}
 
-	std::expected<void, SceneRendererError> SceneRendererPipelineCache::EnsureShadowPipeline(float DepthBias, bool DoubleSided)
+	std::expected<void, SceneRendererError> SceneRendererPipelineCache::EnsureShadowPipeline(
+		float DepthBias, bool DoubleSided, WorldTransformOrientation Orientation)
 	{
+		if (Orientation == WorldTransformOrientation::Singular)
+			return std::unexpected(MakeResourceError("Cannot create a shadow pipeline for a singular mesh transform"));
 		const int32_t RasterBias = static_cast<int32_t>(std::lround(DepthBias));
-		const auto Key = std::pair{ RasterBias, DoubleSided };
+		const auto Key = std::tuple{ RasterBias, DoubleSided, Orientation };
 		if (m_ShadowPipelines.contains(Key)) return {};
 		if (auto Initialized = RequireInitialized(); !Initialized) return Initialized;
 		if (!m_VertexLayout) return std::unexpected(MakeResourceError("Cannot create a shadow pipeline before a mesh layout is prepared"));
@@ -113,6 +121,7 @@ namespace PulseForge
 		Description.VertexLayout = std::move(*ShadowVertexLayout);
 		Description.ColorFormat = ColorTargetFormat::None;
 		Description.Rasterizer.Cull = DoubleSided ? CullMode::None : CullMode::Back;
+		Description.Rasterizer.FrontCounterClockwise = UsesCounterClockwiseFrontFace(Orientation);
 		Description.Rasterizer.DepthBias = static_cast<float>(RasterBias);
 		Description.Rasterizer.SlopeScaledDepthBias = 1.5f;
 		Description.Depth.TestEnabled = true;
@@ -120,6 +129,7 @@ namespace PulseForge
 		Description.Depth.Compare = DepthCompareOperation::Less;
 		Description.DebugName =
 			DoubleSided ? "PulseForge double-sided alpha-tested shadow depth pipeline" : "PulseForge alpha-tested shadow depth pipeline";
+		if (Orientation == WorldTransformOrientation::Mirrored) Description.DebugName += " (mirrored transform)";
 		auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
 		if (!Pipeline)
 			return std::unexpected(MakeResourceError("Could not create directional shadow pipeline: " + Pipeline.error().Message));
@@ -127,9 +137,13 @@ namespace PulseForge
 		return {};
 	}
 
-	std::expected<void, SceneRendererError> SceneRendererPipelineCache::EnsurePointShadowPipeline(bool DoubleSided)
+	std::expected<void, SceneRendererError> SceneRendererPipelineCache::EnsurePointShadowPipeline(
+		bool DoubleSided, WorldTransformOrientation Orientation)
 	{
-		const size_t Index = DoubleSided ? 1 : 0;
+		if (Orientation == WorldTransformOrientation::Singular)
+			return std::unexpected(MakeResourceError("Cannot create a point-shadow pipeline for a singular mesh transform"));
+		const bool Mirrored = Orientation == WorldTransformOrientation::Mirrored;
+		const size_t Index = (DoubleSided ? 2u : 0u) + (Mirrored ? 1u : 0u);
 		if (m_PointShadowPipelines[Index]) return {};
 		if (auto Initialized = RequireInitialized(); !Initialized) return Initialized;
 		if (!m_VertexLayout)
@@ -144,11 +158,13 @@ namespace PulseForge
 		Description.VertexLayout = std::move(*ShadowVertexLayout);
 		Description.ColorFormat = ColorTargetFormat::None;
 		Description.Rasterizer.Cull = DoubleSided ? CullMode::None : CullMode::Back;
+		Description.Rasterizer.FrontCounterClockwise = UsesCounterClockwiseFrontFace(Orientation);
 		Description.Depth.TestEnabled = true;
 		Description.Depth.WriteEnabled = true;
 		Description.Depth.Compare = DepthCompareOperation::Less;
 		Description.DebugName =
 			DoubleSided ? "PulseForge double-sided alpha-tested point-shadow pipeline" : "PulseForge alpha-tested point-shadow pipeline";
+		if (Mirrored) Description.DebugName += " (mirrored transform)";
 		auto Pipeline = m_Runtime.CreateGraphicsPipeline(Description);
 		if (!Pipeline) return std::unexpected(MakeResourceError("Could not create point-shadow pipeline: " + Pipeline.error().Message));
 		m_PointShadowPipelines[Index] = std::move(*Pipeline);
@@ -156,9 +172,10 @@ namespace PulseForge
 	}
 
 	const GraphicsPipeline* SceneRendererPipelineCache::FindScenePipeline(
-		ColorTargetFormat ColorFormat, bool AlphaBlend, bool DoubleSided) const noexcept
+		ColorTargetFormat ColorFormat, bool AlphaBlend, bool DoubleSided, WorldTransformOrientation Orientation) const noexcept
 	{
-		const auto Found = m_ScenePipelines.find(std::tuple{ ColorFormat, AlphaBlend, DoubleSided });
+		if (Orientation == WorldTransformOrientation::Singular) return nullptr;
+		const auto Found = m_ScenePipelines.find(std::tuple{ ColorFormat, AlphaBlend, DoubleSided, Orientation });
 		return Found != m_ScenePipelines.end() ? Found->second.get() : nullptr;
 	}
 
@@ -168,15 +185,20 @@ namespace PulseForge
 		return Found != m_BackgroundPipelines.end() ? Found->second.get() : nullptr;
 	}
 
-	const GraphicsPipeline* SceneRendererPipelineCache::FindShadowPipeline(int32_t RasterBias, bool DoubleSided) const noexcept
+	const GraphicsPipeline* SceneRendererPipelineCache::FindShadowPipeline(
+		int32_t RasterBias, bool DoubleSided, WorldTransformOrientation Orientation) const noexcept
 	{
-		const auto Found = m_ShadowPipelines.find({ RasterBias, DoubleSided });
+		if (Orientation == WorldTransformOrientation::Singular) return nullptr;
+		const auto Found = m_ShadowPipelines.find({ RasterBias, DoubleSided, Orientation });
 		return Found != m_ShadowPipelines.end() ? Found->second.get() : nullptr;
 	}
 
-	const GraphicsPipeline* SceneRendererPipelineCache::FindPointShadowPipeline(bool DoubleSided) const noexcept
+	const GraphicsPipeline* SceneRendererPipelineCache::FindPointShadowPipeline(
+		bool DoubleSided, WorldTransformOrientation Orientation) const noexcept
 	{
-		return m_PointShadowPipelines[DoubleSided ? 1 : 0].get();
+		if (Orientation == WorldTransformOrientation::Singular) return nullptr;
+		const bool Mirrored = Orientation == WorldTransformOrientation::Mirrored;
+		return m_PointShadowPipelines[(DoubleSided ? 2u : 0u) + (Mirrored ? 1u : 0u)].get();
 	}
 
 	bool SceneRendererPipelineCache::HasSameVertexLayout(const VertexLayoutDesc& Left, const VertexLayoutDesc& Right) noexcept

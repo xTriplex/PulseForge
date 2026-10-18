@@ -2072,15 +2072,18 @@ namespace PulseForge
 				nvrhi::RasterState Rasterizer;
 				switch (Description.Rasterizer.Cull)
 				{
-					case CullMode::None: Rasterizer.setCullNone(); break;
-					case CullMode::Back: Rasterizer.setCullBack(); break;
-					case CullMode::Front: Rasterizer.setCullFront(); break;
+				case CullMode::None:
+					Rasterizer.setCullNone();
+					break;
+				case CullMode::Back:
+					Rasterizer.setCullBack();
+					break;
+				case CullMode::Front:
+					Rasterizer.setCullFront();
+					break;
 				}
-				Rasterizer
-					.setFrontCounterClockwise(true)
-					.setFillMode(Description.Rasterizer.Wireframe
-						? nvrhi::RasterFillMode::Wireframe
-						: nvrhi::RasterFillMode::Solid)
+				Rasterizer.setFrontCounterClockwise(Description.Rasterizer.FrontCounterClockwise)
+					.setFillMode(Description.Rasterizer.Wireframe ? nvrhi::RasterFillMode::Wireframe : nvrhi::RasterFillMode::Solid)
 					.setScissorEnable(Description.Rasterizer.ScissorEnabled)
 					.setDepthBias(static_cast<int32_t>(std::lround(Description.Rasterizer.DepthBias)))
 					.setSlopeScaleDepthBias(Description.Rasterizer.SlopeScaledDepthBias);
@@ -2088,14 +2091,30 @@ namespace PulseForge
 				nvrhi::ComparisonFunc DepthComparison = nvrhi::ComparisonFunc::Less;
 				switch (Description.Depth.Compare)
 				{
-					case DepthCompareOperation::Never: DepthComparison = nvrhi::ComparisonFunc::Never; break;
-					case DepthCompareOperation::Less: DepthComparison = nvrhi::ComparisonFunc::Less; break;
-					case DepthCompareOperation::Equal: DepthComparison = nvrhi::ComparisonFunc::Equal; break;
-					case DepthCompareOperation::LessEqual: DepthComparison = nvrhi::ComparisonFunc::LessOrEqual; break;
-					case DepthCompareOperation::Greater: DepthComparison = nvrhi::ComparisonFunc::Greater; break;
-					case DepthCompareOperation::NotEqual: DepthComparison = nvrhi::ComparisonFunc::NotEqual; break;
-					case DepthCompareOperation::GreaterEqual: DepthComparison = nvrhi::ComparisonFunc::GreaterOrEqual; break;
-					case DepthCompareOperation::Always: DepthComparison = nvrhi::ComparisonFunc::Always; break;
+				case DepthCompareOperation::Never:
+					DepthComparison = nvrhi::ComparisonFunc::Never;
+					break;
+				case DepthCompareOperation::Less:
+					DepthComparison = nvrhi::ComparisonFunc::Less;
+					break;
+				case DepthCompareOperation::Equal:
+					DepthComparison = nvrhi::ComparisonFunc::Equal;
+					break;
+				case DepthCompareOperation::LessEqual:
+					DepthComparison = nvrhi::ComparisonFunc::LessOrEqual;
+					break;
+				case DepthCompareOperation::Greater:
+					DepthComparison = nvrhi::ComparisonFunc::Greater;
+					break;
+				case DepthCompareOperation::NotEqual:
+					DepthComparison = nvrhi::ComparisonFunc::NotEqual;
+					break;
+				case DepthCompareOperation::GreaterEqual:
+					DepthComparison = nvrhi::ComparisonFunc::GreaterOrEqual;
+					break;
+				case DepthCompareOperation::Always:
+					DepthComparison = nvrhi::ComparisonFunc::Always;
+					break;
 				}
 				nvrhi::DepthStencilState DepthState;
 				DepthState

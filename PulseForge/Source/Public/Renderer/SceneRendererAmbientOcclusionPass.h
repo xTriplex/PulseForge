@@ -33,6 +33,7 @@ namespace PulseForge
 		[[nodiscard]] bool SetSettings(const AmbientOcclusionSettings& Settings) noexcept;
 		[[nodiscard]] const AmbientOcclusionSettings& GetSettings() const noexcept { return m_Settings; }
 		[[nodiscard]] const Texture* GetFallbackOcclusionTexture() const noexcept;
+		[[nodiscard]] const Texture* GetPrepassDepthTextureForValidation() const noexcept;
 		[[nodiscard]] const BindingLayoutHandle& GetFinalLayout() const noexcept { return m_FinalLayout; }
 		[[nodiscard]] const BindingSet* GetSceneBindingSet() const noexcept;
 		void InvalidateFrame() noexcept { m_FrameAvailable = false; }
@@ -92,7 +93,7 @@ namespace PulseForge
 		BufferHandle m_ObjectConstantsBuffer;
 		TextureHandle m_FallbackOcclusionTexture;
 		std::array<RenderTargetHandle, 4> m_Targets;
-		std::array<GraphicsPipelineHandle, 2> m_PrepassPipelines;
+		std::array<GraphicsPipelineHandle, 4> m_PrepassPipelines;
 		GraphicsPipelineHandle m_EvaluationPipeline;
 		GraphicsPipelineHandle m_BlurPipeline;
 		AmbientOcclusionSettings m_Settings;

@@ -61,7 +61,8 @@ namespace PulseForgeEditor
 		SaveFailed,
 		StillDirty,
 		DiscardFailed,
-		MutationRejectedDuringCloseTransition
+		MutationRejectedDuringCloseTransition,
+		MutationRejectedDuringTransferPreparation
 	};
 
 	struct EditorDocumentIdentity
@@ -171,6 +172,10 @@ namespace PulseForgeEditor
 	class EditorDocumentManager final
 	{
 	public:
+		// Runs before transfer mutations. The references are borrowed for the call only. Structural, host, focus,
+		// placement, and saved-revision mutations through this manager are rejected during preparation, and any such
+		// attempt rejects the transfer even if ignored by the callback. MarkEdited is allowed and remains in effect.
+		// Callbacks may inspect manager state through a const manager view. Exceptions reject the transfer.
 		using TransferPreparation = std::function<bool(const EditorDocumentSession&, const EditorDocumentHost&)>;
 		using SaveDocument = std::function<bool(const EditorDocumentSession&, uint64_t)>;
 		using DiscardDocument = std::function<bool(const EditorDocumentSession&)>;
@@ -178,6 +183,10 @@ namespace PulseForgeEditor
 		static constexpr std::string_view MainHostID = "main";
 
 		EditorDocumentManager();
+
+#if defined(PULSEFORGE_EDITOR_DOCUMENT_MANAGER_TESTING)
+		void FailNextTransferStagingAllocationForTesting() const noexcept;
+#endif
 
 		[[nodiscard]] std::expected<EditorDocumentOpenResult, std::string> Open(
 			const EditorDocumentIdentity& Identity,
@@ -233,7 +242,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] EditorDocumentOpenPreference GetOpeningPreference() const noexcept { return m_OpeningPreference; }
 		bool SetOpeningPreference(EditorDocumentOpenPreference Preference) noexcept
 		{
-			if (IsCloseOperationActive()) return false;
+			if (RejectMutationDuringTransferPreparation() || IsCloseOperationActive()) return false;
 			m_OpeningPreference = Preference;
 			return true;
 		}
@@ -244,6 +253,12 @@ namespace PulseForgeEditor
 		friend class EditorDocumentCloseBatch;
 
 		[[nodiscard]] bool IsCloseOperationActive() const noexcept { return m_CloseCallbackActive || m_CloseTransitionActive; }
+		[[nodiscard]] bool RejectMutationDuringTransferPreparation() const noexcept
+		{
+			if (!m_TransferPreparationActive) return false;
+			m_TransferPreparationMutationAttempted = true;
+			return true;
+		}
 
 		class CloseCallbackScope final
 		{
@@ -287,6 +302,36 @@ namespace PulseForgeEditor
 			bool m_Entered = false;
 		};
 
+		class TransferPreparationScope final
+		{
+		public:
+			explicit TransferPreparationScope(const EditorDocumentManager& Manager) noexcept
+				: m_Manager(Manager), m_Entered(!Manager.IsCloseOperationActive() && !Manager.m_TransferPreparationActive)
+			{
+				if (m_Entered)
+				{
+					m_Manager.m_TransferPreparationActive = true;
+					m_Manager.m_TransferPreparationMutationAttempted = false;
+				}
+			}
+
+			~TransferPreparationScope()
+			{
+				if (m_Entered)
+				{
+					m_Manager.m_TransferPreparationActive = false;
+					m_Manager.m_TransferPreparationMutationAttempted = false;
+				}
+			}
+
+			[[nodiscard]] bool Entered() const noexcept { return m_Entered; }
+			[[nodiscard]] bool MutationAttempted() const noexcept { return m_Entered && m_Manager.m_TransferPreparationMutationAttempted; }
+
+		private:
+			const EditorDocumentManager& m_Manager;
+			bool m_Entered = false;
+		};
+
 		[[nodiscard]] std::expected<void, std::string> ClosePreparedBatch(
 			std::span<const EditorDocumentIdentity> Identities, std::span<const std::string> HostIDs);
 		[[nodiscard]] EditorDocumentHost* CreateHost(std::string ID, EditorDocumentHostRole Role,
@@ -302,5 +347,7 @@ namespace PulseForgeEditor
 		uint64_t m_NextSessionGeneration = 1;
 		mutable bool m_CloseCallbackActive = false;
 		mutable bool m_CloseTransitionActive = false;
+		mutable bool m_TransferPreparationActive = false;
+		mutable bool m_TransferPreparationMutationAttempted = false;
 	};
 }
