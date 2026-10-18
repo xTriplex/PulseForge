@@ -61,6 +61,7 @@ namespace PulseForge
 	struct RasterState
 	{
 		CullMode Cull = CullMode::None;
+		bool FrontCounterClockwise = true;
 		bool Wireframe = false;
 		bool ScissorEnabled = false;
 		float DepthBias = 0.0f;

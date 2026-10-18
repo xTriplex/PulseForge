@@ -595,6 +595,13 @@ namespace PulseForge
 				Snapshot.error().Message
 			});
 		}
+		for (SceneMeshInstance& Instance : Snapshot->Meshes)
+		{
+			Instance.Orientation = ClassifyWorldTransform(Instance.WorldTransform);
+			if (Instance.Orientation == WorldTransformOrientation::Singular)
+				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::SnapshotBuildFailed, Instance.Entity, Instance.MeshAsset,
+					"Cannot prepare a mesh with a singular or non-finite world transform" });
+		}
 		const std::optional<AssetID> EnvironmentAsset = Snapshot->EnvironmentLight
 			? std::optional<AssetID>{ Snapshot->EnvironmentLight->HdrImage }
 			: std::nullopt;
@@ -1000,38 +1007,31 @@ namespace PulseForge
 			if (!BackgroundDraw)
 				return std::unexpected(MakeDrawError("Could not draw environment background: " + BackgroundDraw.error().Message));
 		}
-		if (m_PreparedSnapshot->Meshes.empty())
-			return size_t{ 0 };
+		if (m_PreparedSnapshot->Meshes.empty()) return size_t{ 0 };
 
-		const auto DrawMaterialInstance = [this, ColorFormat, &SubmittedDraws](
-			const SceneMeshInstance& Instance,
-			const MaterialAssetDesc& Material) -> std::expected<void, SceneRendererError>
+		const auto DrawMaterialInstance = [this, ColorFormat, &SubmittedDraws](const SceneMeshInstance& Instance,
+											  const MaterialAssetDesc& Material) -> std::expected<void, SceneRendererError>
 		{
 			const bool AlphaBlend = Material.AlphaMode == MaterialAlphaMode::Blend;
-			if (auto PipelineResult = m_PipelineCache->EnsureScenePipeline(ColorFormat, AlphaBlend, Material.DoubleSided); !PipelineResult)
+			if (auto PipelineResult =
+					m_PipelineCache->EnsureScenePipeline(ColorFormat, AlphaBlend, Material.DoubleSided, Instance.Orientation);
+				!PipelineResult)
 				return std::unexpected(std::move(PipelineResult.error()));
-			const GraphicsPipeline* Pipeline = m_PipelineCache->FindScenePipeline(ColorFormat, AlphaBlend, Material.DoubleSided);
+			const GraphicsPipeline* Pipeline =
+				m_PipelineCache->FindScenePipeline(ColorFormat, AlphaBlend, Material.DoubleSided, Instance.Orientation);
 			if (!Pipeline) return std::unexpected(MakeResourceError("Prepared material graphics pipeline is unavailable"));
 			auto MaterialBinding = ResolveMaterialBinding(Instance);
-			if (!MaterialBinding)
-				return std::unexpected(std::move(MaterialBinding.error()));
+			if (!MaterialBinding) return std::unexpected(std::move(MaterialBinding.error()));
 			auto Mesh = m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
 			if (!Mesh)
 			{
-				return std::unexpected(SceneRendererError{
-					SceneRendererErrorCode::AssetLoadFailed,
-					Instance.Entity,
-					Instance.MeshAsset,
-					"Prepared mesh resource is unavailable"
-				});
+				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity, Instance.MeshAsset,
+					"Prepared mesh resource is unavailable" });
 			}
 
 			const auto NormalTransform = BuildNormalTransform(Instance.WorldTransform);
 			if (!NormalTransform)
-				return std::unexpected(SceneRendererError{
-					SceneRendererErrorCode::DrawFailed,
-					Instance.Entity,
-					Instance.MeshAsset,
+				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::DrawFailed, Instance.Entity, Instance.MeshAsset,
 					"Cannot render a mesh with a singular/non-finite normal transform" });
 			const ObjectConstants Object{
 				Instance.WorldTransform,

@@ -18,12 +18,28 @@ namespace PulseForge
 	// Returns the inverse-transpose of the model's linear transform, or null for non-finite/singular transforms.
 	[[nodiscard]] PULSEFORGE_API std::optional<glm::mat4> BuildNormalTransform(const glm::mat4& Model) noexcept;
 
+	enum class WorldTransformOrientation : uint8_t
+	{
+		Normal,
+		Mirrored,
+		Singular
+	};
+
+	// Classifies the complete world transform, including inherited reflections.
+	[[nodiscard]] PULSEFORGE_API WorldTransformOrientation ClassifyWorldTransform(const glm::mat4& WorldTransform) noexcept;
+
+	[[nodiscard]] constexpr bool UsesCounterClockwiseFrontFace(WorldTransformOrientation Orientation) noexcept
+	{
+		return Orientation != WorldTransformOrientation::Mirrored;
+	}
+
 	struct SceneMeshInstance
 	{
 		UUID Entity;
 		AssetID MeshAsset;
 		std::optional<AssetID> MaterialAsset;
 		glm::mat4 WorldTransform{ 1.0f };
+		WorldTransformOrientation Orientation = WorldTransformOrientation::Normal;
 	};
 
 	struct SceneDirectionalLight
