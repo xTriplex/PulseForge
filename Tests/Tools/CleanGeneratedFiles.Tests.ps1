@@ -315,6 +315,7 @@ $trackedRelativePath = "$vulkanPath\Debug\Authored.cpp"
 	Assert-True (Test-Path -LiteralPath (Join-Path $root 'Out\QualityGraphProbe\CMakeLists.txt')) 'fixture source remains after generated build output removal'
 	Assert-True (Test-Path -LiteralPath (Join-Path $root 'Build\QualityTools\.venv\pyvenv.cfg')) 'shared quality tools remain outside configuration cleanup targets'
 	Assert-True (Test-Path -LiteralPath (Join-Path $root "$vulkanPath\QualityTools\.venv\pyvenv.cfg")) 'quality tool environment survives'
+	Assert-True (Test-Path -LiteralPath (Join-Path $root 'Build\NoToolsProbeBuild\msbuild-diagnostic.log')) 'unrecognized CMake content is preserved until its exact diagnostic target runs'
 	Assert-True (-not (Test-Path -LiteralPath (Join-Path $root "$vulkanPath\QualityReports\summary.csv"))) 'generated quality reports are removed'
 	Assert-True (Test-Path -LiteralPath (Join-Path $root "$vulkanPath\CMakeUserPresets.json")) 'local CMake presets survive'
 	Assert-ProtectedFixtureData $root
@@ -479,11 +480,12 @@ $trackedRelativePath = "$vulkanPath\Debug\Authored.cpp"
 		Assert-True ($diagnosticsPlan.GeneratedItems.Count -eq 3 -and $diagnosticsPlan.PreservedItems.Count -eq 1) 'diagnostic cleanup plans safe siblings inside a linked subtree'
 		Reset-Prompts @('DELETE DIAGNOSTICS AND EVIDENCE')
 		$result = Invoke-CleanupAction -ActionName Diagnostics
-		Assert-True ($result.Succeeded -eq 10 -and $result.Failed -eq 0) 'diagnostic action cleans exact evidence targets'
+		Assert-True ($result.Succeeded -eq 11 -and $result.Failed -eq 0) 'diagnostic action cleans exact evidence targets'
 		Assert-True (-not (Test-Path -LiteralPath (Join-Path $generatedRoot 'Build\Diagnostics\generated.obj'))) 'safe diagnostic output is removed'
 		Assert-True (-not (Test-Path -LiteralPath (Join-Path $generatedRoot 'Build\Diagnostics\nested\safe-output.bin'))) 'safe output beside a nested link is removed'
 		Assert-True (Test-Path -LiteralPath $diagnosticLink) 'linked external tool path itself is retained'
 		Assert-True (Test-Path -LiteralPath (Join-Path $outside 'must-survive.txt')) 'diagnostic junction target remains untouched'
+		Assert-True (-not (Test-Path -LiteralPath (Join-Path $generatedRoot 'Build\NoToolsProbeBuild\msbuild-diagnostic.log'))) 'the exact probe diagnostic log is removed'
 	}
 	else
 	{
