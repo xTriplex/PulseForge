@@ -4,6 +4,7 @@
 #include <vulkan/vulkan.hpp>
 
 #include "Renderer/RendererBackend.h"
+#include "Renderer/Vulkan/VulkanRendererShutdown.h"
 #include "Renderer/Vulkan/VulkanSupport.h"
 
 #include <nvrhi/nvrhi.h>
@@ -21,6 +22,15 @@ namespace PulseForge::VulkanDetail
 		Complete,
 		DeviceLostIndeterminate,
 		Indeterminate
+	};
+
+	enum class PresentationResourceReleaseMode : uint8_t
+	{
+		Normal,
+		ShutdownAfterIdle,
+		UnpresentedCandidate,
+		DeviceLostWithFencesRetired,
+		LegacyBestEffortAfterDeviceLoss
 	};
 
 	struct VulkanSwapchainImage
@@ -47,22 +57,28 @@ namespace PulseForge::VulkanDetail
 	{
 	public:
 		void Initialize(vk::Device Device, vk::Queue PresentQueue, nvrhi::IDevice* NvrhiDevice,
-			VulkanSupport::PresentationRetirementMechanism RetirementMechanism);
+			VulkanSupport::PresentationRetirementMechanism RetirementMechanism, VulkanDeviceHealth* DeviceHealth);
 		void Reset() noexcept;
 
 		void WaitForPresentation(VulkanSwapchainImage& Image);
+		[[nodiscard]] bool WaitForPresentationAfterDeviceLoss(VulkanSwapchainImage& Image, int32_t& VulkanResult) noexcept;
 		void WaitForRetirement(std::vector<VulkanSwapchainImage>& Images, std::string_view Label);
 		void PrepareFenceForReuse(VulkanSwapchainImage& Image);
-		void ReleaseImages(std::vector<VulkanSwapchainImage>& Images);
-		void ReleaseGenerations(std::vector<VulkanRetiredSwapchainGeneration>& Generations);
+		void ReleaseImages(
+			std::vector<VulkanSwapchainImage>& Images, PresentationResourceReleaseMode Mode = PresentationResourceReleaseMode::Normal);
+		void ReleaseGenerations(std::vector<VulkanRetiredSwapchainGeneration>& Generations,
+			PresentationResourceReleaseMode Mode = PresentationResourceReleaseMode::Normal);
 
 	private:
 		[[nodiscard]] bool UsesPresentationFences() const noexcept;
 		void ValidateImagesForRelease(const std::vector<VulkanSwapchainImage>& Images) const;
+		// Valid only for swapchain candidates not yet published to frame acquisition.
+		void ValidateImagesWereNeverPresented(const std::vector<VulkanSwapchainImage>& Images) const;
 
 		vk::Device m_Device;
 		vk::Queue m_PresentQueue;
 		nvrhi::IDevice* m_NvrhiDevice = nullptr;
+		VulkanDeviceHealth* m_DeviceHealth = nullptr;
 		VulkanSupport::PresentationRetirementMechanism m_RetirementMechanism =
 			VulkanSupport::PresentationRetirementMechanism::LegacyBestEffort;
 		bool m_LoggedLegacyPresentRetirement = false;

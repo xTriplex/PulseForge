@@ -678,8 +678,7 @@ namespace
 			// reclaimed the old body before Advance tries to add the replacement.
 			const auto Step = Runtime.Advance(Source, Timestep(FixedStep));
 			PF_CHECK(Tests, Step.has_value());
-			if (!Step)
-				PF_CHECK(Tests, Step.error().Code == PhysicsSceneRuntimeErrorCode::BodyCreationFailed);
+			if (!Step) PF_CHECK(Tests, Step.error().Code == PhysicsSceneRuntimeErrorCode::BodyCreationFailed);
 			else
 			{
 				PF_CHECK(Tests, *Step == 1);
