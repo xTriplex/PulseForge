@@ -735,6 +735,159 @@ namespace
 		}
 	}
 
+	void TestDocumentTransferTransactions(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		const auto Project = UUID::Generate();
+		const auto AssetA = UUID::Generate();
+		const auto AssetB = UUID::Generate();
+		PF_CHECK(Tests, Project && AssetA && AssetB);
+		if (!Project || !AssetA || !AssetB) return;
+
+		EditorDocumentManager Manager;
+		const EditorDocumentIdentity IdentityA{ *Project, *AssetA, EditorDocumentKind::Material };
+		const EditorDocumentIdentity IdentityB{ *Project, *AssetB, EditorDocumentKind::Material };
+		const auto OpenA = Manager.Open(IdentityA, "Assets/A.material", "A", EditorDocumentOpenPreference::MainDocumentStrip);
+		const auto OpenB = Manager.Open(IdentityB, "Assets/B.material", "B", EditorDocumentOpenPreference::MainDocumentStrip);
+		const auto NativeA = Manager.CreateNativeHost("native-a", EditorDocumentKind::Material);
+		const auto NativeB = Manager.CreateNativeHost("native-b", EditorDocumentKind::Material);
+		PF_CHECK(Tests, OpenA && OpenB && NativeA && NativeB);
+		if (!OpenA || !OpenB || !NativeA || !NativeB) return;
+		PF_CHECK(Tests, Manager.MarkEdited(IdentityA));
+
+		const auto MainBefore = Manager.FindHost(EditorDocumentManager::MainHostID)->Documents;
+		const auto NativeABefore = Manager.FindHost(*NativeA)->Documents;
+		const auto MainActiveBefore = Manager.FindHost(EditorDocumentManager::MainHostID)->ActiveDocument;
+		const std::string FocusBefore = Manager.GetFocusedHost()->ID;
+		const uint64_t RevisionBefore = Manager.Find(IdentityA)->Revision;
+		auto AssertUnchanged = [&]
+		{
+			const auto* Session = Manager.Find(IdentityA);
+			PF_CHECK(Tests, Session && Session->HostID == EditorDocumentManager::MainHostID && Session->Revision == RevisionBefore &&
+								Session->IsDirty());
+			PF_CHECK(Tests, Manager.FindHost(EditorDocumentManager::MainHostID)->Documents == MainBefore &&
+								Manager.FindHost(*NativeA)->Documents == NativeABefore &&
+								Manager.FindHost(EditorDocumentManager::MainHostID)->ActiveDocument == MainActiveBefore &&
+								Manager.GetFocusedHost()->ID == FocusBefore);
+			PF_CHECK(Tests, Manager.GetRememberedPlacements(*Project).empty());
+		};
+
+		bool HostCreationRejected = false;
+		const auto HostMutation = Manager.Transfer(IdentityA, *NativeA, 0,
+			[&](const EditorDocumentSession&, const EditorDocumentHost&)
+			{
+				HostCreationRejected = !Manager.CreateNativeHost("reentrant-host", EditorDocumentKind::Material);
+				return true; // An ignored structural-mutation rejection must still abort the outer transfer.
+			});
+		PF_CHECK(Tests, !HostMutation && HostCreationRejected);
+		AssertUnchanged();
+
+		bool MutableLookupRejected = false;
+		const auto LookupMutation = Manager.Transfer(IdentityA, *NativeA, 0,
+			[&](const EditorDocumentSession&, const EditorDocumentHost&)
+			{
+				MutableLookupRejected = Manager.Find(IdentityA) == nullptr;
+				return true;
+			});
+		PF_CHECK(Tests, !LookupMutation && MutableLookupRejected);
+		AssertUnchanged();
+
+		const auto ThrowingPreparation = Manager.Transfer(
+			IdentityA, *NativeA, 0, [](const EditorDocumentSession&, const EditorDocumentHost&) -> bool { throw std::bad_alloc(); });
+		PF_CHECK(Tests, !ThrowingPreparation);
+		AssertUnchanged();
+
+		const auto RecursiveTransfer = Manager.Transfer(IdentityA, *NativeA, 0,
+			[&](const EditorDocumentSession&, const EditorDocumentHost&) { return !Manager.Transfer(IdentityB, *NativeA, 1); });
+		PF_CHECK(Tests, !RecursiveTransfer);
+		AssertUnchanged();
+
+		const auto ClearAttempt = Manager.Transfer(IdentityA, *NativeA, 0,
+			[&](const EditorDocumentSession&, const EditorDocumentHost&) { return !Manager.ClearProject(*Project); });
+		PF_CHECK(Tests, !ClearAttempt);
+		AssertUnchanged();
+
+		const auto OpenAttempt = Manager.Transfer(IdentityA, *NativeA, 0,
+			[&](const EditorDocumentSession&, const EditorDocumentHost&)
+			{
+				const auto AnotherAsset = UUID::Generate();
+				return AnotherAsset && !Manager.Open({ *Project, *AnotherAsset, EditorDocumentKind::Material }, {}, "reentrant",
+										   EditorDocumentOpenPreference::MainDocumentStrip);
+			});
+		PF_CHECK(Tests, !OpenAttempt);
+		AssertUnchanged();
+
+		const auto CloseAttempt = Manager.Transfer(IdentityA, *NativeA, 0,
+			[&](const EditorDocumentSession&, const EditorDocumentHost&)
+			{
+				return Manager.Close(IdentityA, EditorDocumentCloseChoice::Discard, {}, [](const EditorDocumentSession&)
+						   { return true; }) == EditorDocumentCloseStatus::MutationRejectedDuringTransferPreparation;
+			});
+		PF_CHECK(Tests, !CloseAttempt);
+		AssertUnchanged();
+
+		const auto HostRemovalAttempt = Manager.Transfer(IdentityA, *NativeA, 0,
+			[&](const EditorDocumentSession&, const EditorDocumentHost&) { return !Manager.RemoveEmptyNativeHost(*NativeB); });
+		PF_CHECK(Tests, !HostRemovalAttempt && Manager.FindHost(*NativeB));
+		AssertUnchanged();
+
+		// Presentation preparation may edit content; a rejected transfer preserves the edit and dirty state.
+		const auto EditAndReject = Manager.Transfer(IdentityA, *NativeA, 0,
+			[&](const EditorDocumentSession&, const EditorDocumentHost&) { return Manager.MarkEdited(IdentityA) && false; });
+		PF_CHECK(Tests, !EditAndReject && Manager.Find(IdentityA)->Revision == RevisionBefore + 1 && Manager.Find(IdentityA)->IsDirty());
+
+		// A later retry succeeds, and dirty state and identity survive each host transition.
+		const auto ToNativeA = Manager.Transfer(IdentityA, *NativeA, 0);
+		PF_CHECK(Tests, ToNativeA && Manager.Find(IdentityA)->HostID == *NativeA && Manager.Find(IdentityA)->IsDirty());
+		const auto ToNativeB = Manager.Transfer(IdentityA, *NativeB, 0);
+		PF_CHECK(Tests, ToNativeB && ToNativeB->EmptiedSourceHost == *NativeA && Manager.Find(IdentityA)->HostID == *NativeB &&
+							Manager.Find(IdentityA)->IsDirty());
+		const auto ToMain = Manager.Transfer(IdentityA, EditorDocumentManager::MainHostID, 1);
+		PF_CHECK(Tests, ToMain && ToMain->EmptiedSourceHost == *NativeB &&
+							Manager.Find(IdentityA)->HostID == EditorDocumentManager::MainHostID && Manager.Find(IdentityA)->IsDirty());
+
+		const auto MainOrderBefore = Manager.FindHost(EditorDocumentManager::MainHostID)->Documents;
+		const auto FailedReorder = Manager.Transfer(IdentityA, EditorDocumentManager::MainHostID, 0,
+			[](const EditorDocumentSession&, const EditorDocumentHost&) -> bool { throw std::runtime_error("prepare failed"); });
+		PF_CHECK(Tests, !FailedReorder && Manager.FindHost(EditorDocumentManager::MainHostID)->Documents == MainOrderBefore);
+		const auto Reordered = Manager.Transfer(IdentityA, EditorDocumentManager::MainHostID, 0,
+			[&](const EditorDocumentSession& Session, const EditorDocumentHost& Host)
+			{
+				const auto& ReadOnlyManager = std::as_const(Manager);
+				return ReadOnlyManager.Find(IdentityA) == &Session && ReadOnlyManager.FindHost(Host.ID) == &Host;
+			});
+		PF_CHECK(
+			Tests, Reordered && Reordered->Changed && Manager.FindHost(EditorDocumentManager::MainHostID)->Documents.front() == IdentityA);
+
+		const auto RememberedBeforeRestore = Manager.GetRememberedPlacements(*Project);
+		auto SamePlacements = [](const auto& Left, const auto& Right)
+		{
+			if (Left.size() != Right.size()) return false;
+			for (size_t Index = 0; Index < Left.size(); ++Index)
+			{
+				const auto& [KindA, PlacementA] = Left[Index];
+				const auto& [KindB, PlacementB] = Right[Index];
+				if (KindA != KindB || PlacementA.Role != PlacementB.Role || PlacementA.Bounds.X != PlacementB.Bounds.X ||
+					PlacementA.Bounds.Y != PlacementB.Bounds.Y || PlacementA.Bounds.Width != PlacementB.Bounds.Width ||
+					PlacementA.Bounds.Height != PlacementB.Bounds.Height || PlacementA.Bounds.DpiScale != PlacementB.Bounds.DpiScale ||
+					PlacementA.Bounds.MonitorName != PlacementB.Bounds.MonitorName ||
+					PlacementA.Bounds.Maximized != PlacementB.Bounds.Maximized ||
+					PlacementA.Bounds.HasValue != PlacementB.Bounds.HasValue || PlacementA.LiveHostID != PlacementB.LiveHostID)
+					return false;
+			}
+			return true;
+		};
+		const auto RestoredToNative = Manager.Transfer(IdentityA, *NativeA, 0, {}, EditorDocumentTransferCause::WorkspaceRestore);
+		PF_CHECK(Tests, RestoredToNative && Manager.Find(IdentityA)->HostID == *NativeA && Manager.Find(IdentityA)->IsDirty());
+		PF_CHECK(Tests, SamePlacements(Manager.GetRememberedPlacements(*Project), RememberedBeforeRestore));
+		const auto RestoredToMain =
+			Manager.Transfer(IdentityA, EditorDocumentManager::MainHostID, 0, {}, EditorDocumentTransferCause::WorkspaceRestore);
+		PF_CHECK(Tests,
+			RestoredToMain && Manager.Find(IdentityA)->HostID == EditorDocumentManager::MainHostID && Manager.Find(IdentityA)->IsDirty());
+		PF_CHECK(Tests, SamePlacements(Manager.GetRememberedPlacements(*Project), RememberedBeforeRestore));
+	}
+
 	void TestEditorSnapshotHistory(TestRunner& Tests)
 	{
 		using PulseForgeEditor::EditorSnapshotHistory;
@@ -793,6 +946,7 @@ void RunEditorDocumentManagerTests(TestRunner& Tests)
 {
 	TestDirectDocumentCloseCallbacks(Tests);
 	TestEditorDocumentManager(Tests);
+	TestDocumentTransferTransactions(Tests);
 }
 
 void RunEditorSnapshotHistoryTests(TestRunner& Tests)

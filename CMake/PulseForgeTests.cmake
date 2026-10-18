@@ -37,7 +37,7 @@ if(BUILD_TESTING)
 	)
 	target_include_directories(PulseForgeRendererTests PRIVATE Tests)
 	target_compile_definitions(PulseForgeRendererTests PRIVATE PF_PLATFORM_WINDOWS)
-	target_link_libraries(PulseForgeRendererTests PRIVATE PulseForgeRenderer nvrhi Vulkan-Headers)
+	target_link_libraries(PulseForgeRendererTests PRIVATE PulseForgeRenderer PulseForgeScene nvrhi Vulkan-Headers)
 	add_test(NAME PulseForge.Renderer COMMAND PulseForgeRendererTests)
 
 	add_executable(PulseForgeRenderMathTests
@@ -186,6 +186,12 @@ if(BUILD_TESTING)
 	endif()
 	add_test(NAME PulseForge.CommandHistoryFailures COMMAND PulseForgeCommandHistoryFailureTests)
 
+	add_executable(PulseForgeEditorDocumentTransferFailureTests Tests/EditorDocumentTransferFailureTests.cpp)
+	target_compile_definitions(PulseForgeEditorCore PRIVATE PULSEFORGE_EDITOR_DOCUMENT_MANAGER_TESTING)
+	target_compile_definitions(PulseForgeEditorDocumentTransferFailureTests PRIVATE PULSEFORGE_EDITOR_DOCUMENT_MANAGER_TESTING)
+	target_link_libraries(PulseForgeEditorDocumentTransferFailureTests PRIVATE PulseForgeEditorCore)
+	add_test(NAME PulseForge.EditorDocumentTransferFailures COMMAND PulseForgeEditorDocumentTransferFailureTests)
+
 	if(PULSEFORGE_BUILD_EDITOR)
 		set(PULSEFORGE_EDITOR_INTEGRATION_LIBRARIES
 			PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath
@@ -266,6 +272,7 @@ if(BUILD_TESTING)
 		PulseForgeScriptingRuntimeTests
 		PulseForgeEditorCoreTests
 		PulseForgeCommandHistoryFailureTests
+		PulseForgeEditorDocumentTransferFailureTests
 		PulseForgeBufferUpdateTests
 	)
 	if(PULSEFORGE_BUILD_EDITOR)
