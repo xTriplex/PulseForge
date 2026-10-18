@@ -199,6 +199,12 @@ namespace PulseForge
 			glm::vec3 EffectiveHalfExtents{ 0.0f };
 		};
 
+		struct PhysicsComponents
+		{
+			std::optional<RigidbodyComponent> Rigidbody;
+			std::optional<BoxColliderComponent> Collider;
+		};
+
 		JoltRuntimeLease Runtime;
 		BroadPhaseLayers BroadPhaseLayerInterface;
 		ObjectVsBroadPhaseFilter ObjectVsBroadPhaseLayerFilter;
@@ -225,6 +231,22 @@ namespace PulseForge
 				Description.MaxBodies, 0, 32768, 8192, BroadPhaseLayerInterface, ObjectVsBroadPhaseLayerFilter, ObjectLayerPairFilter);
 			SystemInitialized = true;
 			System.SetGravity(JPH::Vec3(Description.Gravity.x, Description.Gravity.y, Description.Gravity.z));
+		}
+
+		std::expected<PhysicsComponents, PhysicsSceneRuntimeError> ReadPhysicsComponents(const Entity& Current) const
+		{
+			const UUID Identifier = Current.GetUUID();
+			auto Rigidbody = Current.GetRigidbody();
+			auto Collider = Current.GetBoxCollider();
+			if (!Rigidbody || !Collider)
+				return std::unexpected(MakeError(PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
+					"Could not inspect physics components for entity " + Identifier.ToString()));
+
+			if (Rigidbody->has_value() != Collider->has_value())
+				return std::unexpected(MakeError(PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
+					"Physics entities require both a rigidbody and box collider: " + Identifier.ToString()));
+
+			return PhysicsComponents{ std::move(*Rigidbody), std::move(*Collider) };
 		}
 
 		void ClearBodies() noexcept
@@ -386,18 +408,10 @@ namespace PulseForge
 			try
 			{
 				const UUID Identifier = Current.GetUUID();
-				const auto Rigidbody = Current.GetRigidbody();
-				const auto Collider = Current.GetBoxCollider();
-				if (!Rigidbody || !Collider)
-				{
-					return std::unexpected(MakeError(PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
-						"Could not inspect physics components for entity " + Identifier.ToString()));
-				}
-
-				const bool HasRigidbody = Rigidbody->has_value();
-				const bool HasCollider = Collider->has_value();
+				auto Components = ReadPhysicsComponents(Current);
+				if (!Components) return std::unexpected(Components.error());
 				auto ExistingBody = Bodies.find(Identifier);
-				if (!HasRigidbody && !HasCollider)
+				if (!Components->Rigidbody)
 				{
 					if (ExistingBody != Bodies.end())
 					{
@@ -406,26 +420,23 @@ namespace PulseForge
 					}
 					return false;
 				}
-				if (HasRigidbody != HasCollider)
-				{
-					return std::unexpected(MakeError(PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
-						"Physics entities require both a rigidbody and box collider: " + Identifier.ToString()));
-				}
 
-				auto Settings = ValidateBody(Current, Rigidbody->value(), Collider->value());
+				const RigidbodyComponent& CurrentRigidbody = *Components->Rigidbody;
+				const BoxColliderComponent& CurrentCollider = *Components->Collider;
+				auto Settings = ValidateBody(Current, CurrentRigidbody, CurrentCollider);
 				if (!Settings) return std::unexpected(Settings.error());
 
 				if (ExistingBody == Bodies.end())
 				{
-					if (auto Result = AddBody(Current, Rigidbody->value(), Collider->value(), *Settings); !Result)
+					if (auto Result = AddBody(Current, CurrentRigidbody, CurrentCollider, *Settings); !Result)
 						return std::unexpected(Result.error());
 					return true;
 				}
 
 				BodyRecord& Existing = ExistingBody->second;
 				const bool SameIncarnation = Existing.BoundEntity == Current;
-				const RigidbodyComponent& NewRigidbody = Rigidbody->value();
-				const BoxColliderComponent& NewCollider = Collider->value();
+				const RigidbodyComponent& NewRigidbody = CurrentRigidbody;
+				const BoxColliderComponent& NewCollider = CurrentCollider;
 				const bool SameRigidbody =
 					Existing.Rigidbody.MotionType == NewRigidbody.MotionType && Existing.Rigidbody.Mass == NewRigidbody.Mass &&
 					Existing.Rigidbody.Friction == NewRigidbody.Friction && Existing.Rigidbody.Restitution == NewRigidbody.Restitution &&
@@ -569,6 +580,17 @@ namespace PulseForge
 
 		std::expected<void, PhysicsSceneRuntimeError> PruneBodiesWithoutPhysicsComponents(Scene& Source)
 		{
+			// Validate all tracked entities first so a malformed component pair does not leave a
+			// partially reclaimed pool when targeted synchronization is trying to free a slot.
+			for (const auto& Entry : Bodies)
+			{
+				const UUID& Identifier = Entry.first;
+				const auto Current = Source.FindEntity(Identifier);
+				if (!Current) continue;
+				auto Components = ReadPhysicsComponents(*Current);
+				if (!Components) return std::unexpected(Components.error());
+			}
+
 			for (auto Iterator = Bodies.begin(); Iterator != Bodies.end();)
 			{
 				const auto Current = Source.FindEntity(Iterator->first);
@@ -576,19 +598,18 @@ namespace PulseForge
 				{
 					RemoveBody(Iterator->second.ID);
 					Iterator = Bodies.erase(Iterator);
-					continue;
 				}
-				const auto Rigidbody = Current->GetRigidbody();
-				const auto Collider = Current->GetBoxCollider();
-				if (!Rigidbody || !Collider)
-					return std::unexpected(MakeError(PhysicsSceneRuntimeErrorCode::InvalidPhysicsEntity,
-						"Could not inspect physics components while reclaiming a body slot for entity " + Iterator->first.ToString()));
-				if (!Rigidbody->has_value() && !Collider->has_value())
+				else
 				{
-					RemoveBody(Iterator->second.ID);
-					Iterator = Bodies.erase(Iterator);
+					auto Components = ReadPhysicsComponents(*Current);
+					if (!Components) return std::unexpected(Components.error());
+					if (!Components->Rigidbody)
+					{
+						RemoveBody(Iterator->second.ID);
+						Iterator = Bodies.erase(Iterator);
+					}
+					else ++Iterator;
 				}
-				else ++Iterator;
 			}
 			return {};
 		}
@@ -599,9 +620,19 @@ namespace PulseForge
 			{
 				++FullSceneReconciliationCount;
 				Bodies.reserve(Source.GetEntityCount());
+				const std::vector<Entity> Entities = Source.GetEntities();
 				PruneDestroyedBodies(Source);
 
-				for (const Entity& Current : Source.GetEntities())
+				// Preserve the partial-component error contract before mutating the pool. Then reclaim
+				// every body that no longer has physics components before any UUID-ordered additions.
+				for (const Entity& Current : Entities)
+					if (auto Components = ReadPhysicsComponents(Current); !Components)
+						return std::unexpected(Components.error());
+
+				if (auto Result = PruneBodiesWithoutPhysicsComponents(Source); !Result)
+					return std::unexpected(Result.error());
+
+				for (const Entity& Current : Entities)
 				{
 					if (auto Result = ReconcileBody(Current); !Result) return std::unexpected(Result.error());
 				}
