@@ -635,6 +635,100 @@ namespace
 		Runtime.Stop();
 	}
 
+	void TestPhysicsFullSceneCapacityReclamation(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		constexpr double FixedStep = 0.1;
+
+		const auto ExerciseComponentRemoval = [&](UUID RemovedEntityId, UUID ReplacementEntityId)
+		{
+			PhysicsSceneRuntimeDesc Description;
+			Description.FixedStepSeconds = FixedStep;
+			Description.MaxFrameDeltaSeconds = FixedStep;
+			Description.MaxSubsteps = 1;
+			Description.Gravity = glm::vec3(0.0f, -10.0f, 0.0f);
+			Description.MaxBodies = 1;
+
+			Scene Source;
+			const auto RemovedEntity = Source.CreateEntityWithUUID(RemovedEntityId, "Entity losing physics components");
+			PF_CHECK(Tests, RemovedEntity.has_value());
+			if (!RemovedEntity) return;
+			PF_CHECK(Tests, RemovedEntity->SetRigidbody({}).has_value());
+			PF_CHECK(Tests, RemovedEntity->SetBoxCollider({}).has_value());
+
+			PhysicsSceneRuntime Runtime(Description);
+			PF_CHECK(Tests, Runtime.Start(Source).has_value());
+			PF_CHECK(Tests, RemovedEntity->RemoveRigidbody().has_value());
+			PF_CHECK(Tests, RemovedEntity->RemoveBoxCollider().has_value());
+
+			const auto ReplacementEntity = Source.CreateEntityWithUUID(ReplacementEntityId, "Replacement physics entity");
+			PF_CHECK(Tests, ReplacementEntity.has_value());
+			if (!ReplacementEntity)
+			{
+				Runtime.Stop();
+				return;
+			}
+			TransformComponent ReplacementTransform;
+			ReplacementTransform.Translation.y = 10.0f;
+			PF_CHECK(Tests, ReplacementEntity->SetTransform(ReplacementTransform).has_value());
+			PF_CHECK(Tests, ReplacementEntity->SetRigidbody({ RigidbodyMotionType::Dynamic }).has_value());
+			PF_CHECK(Tests, ReplacementEntity->SetBoxCollider({}).has_value());
+
+			// Exercise the public full-scene synchronization path directly. No force call may have
+			// reclaimed the old body before Advance tries to add the replacement.
+			const auto Step = Runtime.Advance(Source, Timestep(FixedStep));
+			PF_CHECK(Tests, Step.has_value());
+			if (!Step)
+				PF_CHECK(Tests, Step.error().Code == PhysicsSceneRuntimeErrorCode::BodyCreationFailed);
+			else
+			{
+				PF_CHECK(Tests, *Step == 1);
+				const auto AfterStep = ReplacementEntity->GetTransform();
+				PF_CHECK(Tests, AfterStep && AfterStep->Translation.y < ReplacementTransform.Translation.y);
+			}
+			Runtime.Stop();
+		};
+
+		// Scene::GetEntities sorts by UUID. The first case puts the new body before the stale
+		// componentless body; the second puts it after. Reconciliation must not depend on that order.
+		ExerciseComponentRemoval(UUID{ 0x7300000000000000ull, 2 }, UUID{ 0x7300000000000000ull, 1 });
+		ExerciseComponentRemoval(UUID{ 0x7300000000000000ull, 1 }, UUID{ 0x7300000000000000ull, 2 });
+
+		// Destroyed entities are also reclaimed before a replacement is synchronized at capacity.
+		PhysicsSceneRuntimeDesc Description;
+		Description.FixedStepSeconds = FixedStep;
+		Description.MaxFrameDeltaSeconds = FixedStep;
+		Description.MaxSubsteps = 1;
+		Description.Gravity = glm::vec3(0.0f, -10.0f, 0.0f);
+		Description.MaxBodies = 1;
+		Scene Source;
+		const UUID DestroyedId{ 0x7400000000000000ull, 1 };
+		const UUID ReplacementId{ 0x7400000000000000ull, 2 };
+		const auto DestroyedEntity = Source.CreateEntityWithUUID(DestroyedId, "Destroyed physics entity");
+		PF_CHECK(Tests, DestroyedEntity.has_value());
+		if (!DestroyedEntity) return;
+		PF_CHECK(Tests, DestroyedEntity->SetRigidbody({}).has_value());
+		PF_CHECK(Tests, DestroyedEntity->SetBoxCollider({}).has_value());
+		PhysicsSceneRuntime Runtime(Description);
+		PF_CHECK(Tests, Runtime.Start(Source).has_value());
+		PF_CHECK(Tests, Source.DestroyEntity(*DestroyedEntity).has_value());
+		const auto ReplacementEntity = Source.CreateEntityWithUUID(ReplacementId, "Body replacing destroyed entity");
+		PF_CHECK(Tests, ReplacementEntity.has_value());
+		if (ReplacementEntity)
+		{
+			TransformComponent ReplacementTransform;
+			ReplacementTransform.Translation.y = 10.0f;
+			PF_CHECK(Tests, ReplacementEntity->SetTransform(ReplacementTransform).has_value());
+			PF_CHECK(Tests, ReplacementEntity->SetRigidbody({ RigidbodyMotionType::Dynamic }).has_value());
+			PF_CHECK(Tests, ReplacementEntity->SetBoxCollider({}).has_value());
+			const auto Step = Runtime.Advance(Source, Timestep(FixedStep));
+			PF_CHECK(Tests, Step && *Step == 1);
+			const auto AfterStep = ReplacementEntity->GetTransform();
+			PF_CHECK(Tests, AfterStep && AfterStep->Translation.y < ReplacementTransform.Translation.y);
+		}
+		Runtime.Stop();
+	}
+
 	void TestPhysicsLiveReconciliation(TestRunner& Tests)
 	{
 		using namespace PulseForge;
@@ -1317,6 +1411,7 @@ void RunSceneTests(TestRunner& Tests)
 	TestPhysicsComponentsAndPersistence(Tests);
 	TestPhysicsSceneRuntime(Tests);
 	TestPhysicsTargetedSynchronizationAndCapacity(Tests);
+	TestPhysicsFullSceneCapacityReclamation(Tests);
 	TestPhysicsLiveReconciliation(Tests);
 	TestEntityHandleIdentityAndLifetime(Tests);
 	TestSceneRenderSnapshot(Tests);
