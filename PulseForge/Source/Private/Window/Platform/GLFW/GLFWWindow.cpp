@@ -1,5 +1,5 @@
 #include "Core/Log.h"
-#include "Window/Platform/Windows/WindowsWindow.h"
+#include "Window/Platform/GLFW/GLFWWindow.h"
 #include "Events/ApplicationEvent.h"
 #include "Events/KeyEvent.h"
 #include "Events/MouseEvent.h"
@@ -16,17 +16,17 @@ namespace PulseForge
 		PF_CORE_ERROR("GLFW Error ({0}): {1}", Error, Description);
 	}
 
-	WindowsWindow::WindowsWindow(const WindowProps& Props)
+	GLFWWindow::GLFWWindow(const WindowProps& Props)
 	{
 		Init(Props);
 	}
 
-	WindowsWindow::~WindowsWindow()
+	GLFWWindow::~GLFWWindow()
 	{
 		Shutdown();
 	}
 
-	void WindowsWindow::Init(const WindowProps& Props)
+	void GLFWWindow::Init(const WindowProps& Props)
 	{
 		WindowData.Title = Props.m_Title;
 		WindowData.Width = Props.m_Width;
@@ -50,11 +50,8 @@ namespace PulseForge
 		{
 			// Apply styles before window creation!
 			glfwDefaultWindowHints();
-			glfwWindowHint(GLFW_CLIENT_API, Props.m_ClientAPI == EWindowClientAPI::OpenGL
-				? GLFW_OPENGL_API
-				: GLFW_NO_API);
-			if (Props.m_ClientAPI == EWindowClientAPI::OpenGL)
-				glfwWindowHint(GLFW_SRGB_CAPABLE, GLFW_FALSE);
+			glfwWindowHint(GLFW_CLIENT_API, Props.m_ClientAPI == EWindowClientAPI::OpenGL ? GLFW_OPENGL_API : GLFW_NO_API);
+			if (Props.m_ClientAPI == EWindowClientAPI::OpenGL) glfwWindowHint(GLFW_SRGB_CAPABLE, GLFW_FALSE);
 
 			if (HasStyle(Props.m_Style, EWindowStyle::Borderless))
 			{
@@ -83,57 +80,62 @@ namespace PulseForge
 			// =========================================
 
 			// 1. Window Resize
-			glfwSetWindowSizeCallback(m_NativeWindow, [](GLFWwindow* CurrentWindow, int Width, int Height)
-			{
-				FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
-				Data.Width = Width;
-				Data.Height = Height;
+			glfwSetWindowSizeCallback(m_NativeWindow,
+				[](GLFWwindow* CurrentWindow, int Width, int Height)
+				{
+					FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
+					Data.Width = Width;
+					Data.Height = Height;
 
-				WindowResizeEvent Event(Width, Height);
-				Data.EventCallback(Event);
-			});
+					WindowResizeEvent Event(Width, Height);
+					Data.EventCallback(Event);
+				});
 
 			// 2. Window Close
-			glfwSetWindowCloseCallback(m_NativeWindow, [](GLFWwindow* CurrentWindow)
-			{
-				FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
+			glfwSetWindowCloseCallback(m_NativeWindow,
+				[](GLFWwindow* CurrentWindow)
+				{
+					FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
 
-				WindowCloseEvent Event;
-				Data.EventCallback(Event);
-			});
+					WindowCloseEvent Event;
+					Data.EventCallback(Event);
+				});
 
 			// 3. Window Focus
-			glfwSetWindowFocusCallback(m_NativeWindow, [](GLFWwindow* CurrentWindow, int Focused)
-			{
-				FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
-				if (Focused)
+			glfwSetWindowFocusCallback(m_NativeWindow,
+				[](GLFWwindow* CurrentWindow, int Focused)
 				{
-					WindowFocusEvent Event;
-					Data.EventCallback(Event);
-				}
+					FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
+					if (Focused)
+					{
+						WindowFocusEvent Event;
+						Data.EventCallback(Event);
+					}
 
-				else
-				{
-					WindowLostFocusEvent Event;
-					Data.EventCallback(Event);
-				}
-			});
+					else
+					{
+						WindowLostFocusEvent Event;
+						Data.EventCallback(Event);
+					}
+				});
 
 			// 4. Window Moved
-			glfwSetWindowPosCallback(m_NativeWindow, [](GLFWwindow* CurrentWindow, int XPos, int YPos)
-			{
-				FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
+			glfwSetWindowPosCallback(m_NativeWindow,
+				[](GLFWwindow* CurrentWindow, int XPos, int YPos)
+				{
+					FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
 
-				WindowMovedEvent Event(XPos, YPos);
-				Data.EventCallback(Event);
-			});
+					WindowMovedEvent Event(XPos, YPos);
+					Data.EventCallback(Event);
+				});
 
 			// 5. Keyboard Events
-			glfwSetKeyCallback(m_NativeWindow, [](GLFWwindow* CurrentWindow, int Key, int Scancode, int Action, int Mods)
-			{
-				FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
-				switch (Action)
+			glfwSetKeyCallback(m_NativeWindow,
+				[](GLFWwindow* CurrentWindow, int Key, int Scancode, int Action, int Mods)
 				{
+					FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
+					switch (Action)
+					{
 					case GLFW_PRESS:
 					{
 						KeyPressedEvent Event(Key, 0);
@@ -152,24 +154,26 @@ namespace PulseForge
 						Data.EventCallback(Event);
 						break;
 					}
-				}
-			});
+					}
+				});
 
-			glfwSetCharCallback(m_NativeWindow, [](GLFWwindow* CurrentWindow, unsigned int KeyCode)
-			{
-				FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
+			glfwSetCharCallback(m_NativeWindow,
+				[](GLFWwindow* CurrentWindow, unsigned int KeyCode)
+				{
+					FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
 
-				KeyTypedEvent Event(KeyCode);
-				Data.EventCallback(Event);
-			});
+					KeyTypedEvent Event(KeyCode);
+					Data.EventCallback(Event);
+				});
 
 			// 6. Mouse Events
-			glfwSetMouseButtonCallback(m_NativeWindow, [](GLFWwindow* CurrentWindow, int Button, int Action, int Mods)
-			{
-				FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
-
-				switch (Action)
+			glfwSetMouseButtonCallback(m_NativeWindow,
+				[](GLFWwindow* CurrentWindow, int Button, int Action, int Mods)
 				{
+					FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
+
+					switch (Action)
+					{
 					case GLFW_PRESS:
 					{
 						MouseButtonPressedEvent Event(Button);
@@ -182,24 +186,26 @@ namespace PulseForge
 						Data.EventCallback(Event);
 						break;
 					}
-				}
-			});
+					}
+				});
 
-			glfwSetScrollCallback(m_NativeWindow, [](GLFWwindow* CurrentWindow, double XOffset, double YOffset)
-			{
-				FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
+			glfwSetScrollCallback(m_NativeWindow,
+				[](GLFWwindow* CurrentWindow, double XOffset, double YOffset)
+				{
+					FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
 
-				MouseScrolledEvent Event((float)XOffset, (float)YOffset);
-				Data.EventCallback(Event);
-			});
+					MouseScrolledEvent Event((float)XOffset, (float)YOffset);
+					Data.EventCallback(Event);
+				});
 
-			glfwSetCursorPosCallback(m_NativeWindow, [](GLFWwindow* CurrentWindow, double XPos, double YPos)
-			{
-				FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
+			glfwSetCursorPosCallback(m_NativeWindow,
+				[](GLFWwindow* CurrentWindow, double XPos, double YPos)
+				{
+					FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
 
-				MouseMovedEvent Event((float)XPos, (float)YPos);
-				Data.EventCallback(Event);
-			});
+					MouseMovedEvent Event((float)XPos, (float)YPos);
+					Data.EventCallback(Event);
+				});
 		}
 		catch (...)
 		{
@@ -208,7 +214,7 @@ namespace PulseForge
 		}
 	}
 
-	void WindowsWindow::Shutdown()
+	void GLFWWindow::Shutdown()
 	{
 		if (m_NativeWindow)
 		{
@@ -219,22 +225,21 @@ namespace PulseForge
 		if (m_GLFWRuntimeAcquired)
 		{
 			m_GLFWRuntimeAcquired = false;
-			if (--s_GLFWWindowCount == 0)
-				glfwTerminate();
+			if (--s_GLFWWindowCount == 0) glfwTerminate();
 		}
 	}
 
-	void WindowsWindow::PollEvents()
+	void GLFWWindow::PollEvents()
 	{
 		glfwPollEvents();
 	}
 
-	void WindowsWindow::WaitEventsTimeout(double TimeoutSeconds)
+	void GLFWWindow::WaitEventsTimeout(double TimeoutSeconds)
 	{
 		glfwWaitEventsTimeout(TimeoutSeconds);
 	}
 
-	std::pair<unsigned int, unsigned int> WindowsWindow::GetFramebufferSize() const
+	std::pair<unsigned int, unsigned int> GLFWWindow::GetFramebufferSize() const
 	{
 		int Width = 0;
 		int Height = 0;
@@ -242,4 +247,4 @@ namespace PulseForge
 		return { static_cast<unsigned int>(Width), static_cast<unsigned int>(Height) };
 	}
 
-}
+} // namespace PulseForge
