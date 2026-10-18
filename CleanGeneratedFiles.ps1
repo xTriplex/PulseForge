@@ -25,6 +25,7 @@ $script:TargetManifest = @(
 	@{ Path = 'Build\CMake\VS2022-x64-OpenGL\Build\Diagnostics'; Category = 'Diagnostics and evidence'; Kind = 'Directory'; AllowedExtensions = $null },
 	@{ Path = 'Out\build-editor-workspace-clcompile.log'; Category = 'Diagnostics and evidence'; Kind = 'File'; AllowedExtensions = $null },
 	@{ Path = 'Out\build-editor-workspace-target.log'; Category = 'Diagnostics and evidence'; Kind = 'File'; AllowedExtensions = $null },
+	@{ Path = 'Build\NoToolsProbeBuild\msbuild-diagnostic.log'; Category = 'Diagnostics and evidence'; Kind = 'File'; AllowedExtensions = $null },
 	@{ Path = 'Out\QualityGraphProbe\A.cpp'; Category = 'Diagnostics and evidence'; Kind = 'File'; AllowedExtensions = $null },
 	@{ Path = 'Out\QualityGraphProbe\B.cpp'; Category = 'Diagnostics and evidence'; Kind = 'File'; AllowedExtensions = $null },
 	@{ Path = 'Out\QualityGraphProbe\Core.cpp'; Category = 'Diagnostics and evidence'; Kind = 'File'; AllowedExtensions = $null },
@@ -1082,7 +1083,7 @@ function Invoke-CleanerMain
 	Write-Host 'Every target is checked for tracked files, reparse points, and registered-worktree overlap before deletion.'
 	Write-Host 'Cleaning Out also removes fetched dependency caches. CMakeUserPresets.json, the root CMakeSettings.json, quality tools, and quality reports are preserved.'
 	Write-Host 'The legacy action is limited to explicitly allowlisted generated paths. Visual Studio cleanup preserves settings and Copilot snapshots.'
-	Write-Host 'Diagnostic cleanup removes only untracked direct children that contain no reparse points; linked source snapshots and linked external tools are preserved.'
+	Write-Host 'Diagnostic cleanup removes only untracked files and directories after inspecting each path; reparse links are preserved and never traversed.'
 	Write-Host ''
 	while ($true)
 	{
