@@ -1,25 +1,36 @@
 if(BUILD_TESTING)
-	if(NOT TARGET PulseForgeEditorCoreTests)
-		message(FATAL_ERROR "BUILD_TESTING requires the independent PulseForgeEditorCoreTests target")
-	endif()
 	if(NOT TARGET PulseForgeTests)
 		message(FATAL_ERROR "BUILD_TESTING requires the PulseForgeTests aggregate target")
 	endif()
 	get_target_property(PULSEFORGE_TEST_AGGREGATE_DEPENDENCIES PulseForgeTests MANUALLY_ADDED_DEPENDENCIES)
-	foreach(TestTarget IN LISTS PULSEFORGE_TEST_EXECUTABLE_TARGETS)
-		if(NOT TARGET ${TestTarget})
-			message(FATAL_ERROR "PulseForgeTests names an unavailable test executable: ${TestTarget}")
+	if(PULSEFORGE_BUILD_CORE_ONLY)
+		foreach(TestTarget PulseForgeCoreTests PulseForgeCoreConsumer)
+			if(NOT TARGET ${TestTarget})
+				message(FATAL_ERROR "Core-only testing requires ${TestTarget}")
+			endif()
+			if(NOT TestTarget IN_LIST PULSEFORGE_TEST_AGGREGATE_DEPENDENCIES)
+				message(FATAL_ERROR "PulseForgeTests does not depend on core test executable ${TestTarget}")
+			endif()
+		endforeach()
+	else()
+		if(NOT TARGET PulseForgeEditorCoreTests)
+			message(FATAL_ERROR "BUILD_TESTING requires the independent PulseForgeEditorCoreTests target")
 		endif()
-		if(NOT TestTarget IN_LIST PULSEFORGE_TEST_AGGREGATE_DEPENDENCIES)
-			message(FATAL_ERROR "PulseForgeTests does not depend on registered test executable ${TestTarget}")
+		foreach(TestTarget IN LISTS PULSEFORGE_TEST_EXECUTABLE_TARGETS)
+			if(NOT TARGET ${TestTarget})
+				message(FATAL_ERROR "PulseForgeTests names an unavailable test executable: ${TestTarget}")
+			endif()
+			if(NOT TestTarget IN_LIST PULSEFORGE_TEST_AGGREGATE_DEPENDENCIES)
+				message(FATAL_ERROR "PulseForgeTests does not depend on registered test executable ${TestTarget}")
+			endif()
+		endforeach()
+		if(PULSEFORGE_BUILD_EDITOR)
+			if(NOT TARGET PulseForgeEditorUI OR NOT TARGET PulseForgeEditorTests)
+				message(FATAL_ERROR "Editor-enabled testing requires PulseForgeEditorUI and PulseForgeEditorTests")
+			endif()
+		elseif(TARGET PulseForgeEditorUI OR TARGET PulseForgeEditorTests OR TARGET PulseForgeImGui)
+			message(FATAL_ERROR "Editor-disabled configuration must not create editor UI or its tests")
 		endif()
-	endforeach()
-	if(PULSEFORGE_BUILD_EDITOR)
-		if(NOT TARGET PulseForgeEditorUI OR NOT TARGET PulseForgeEditorTests)
-			message(FATAL_ERROR "Editor-enabled testing requires PulseForgeEditorUI and PulseForgeEditorTests")
-		endif()
-	elseif(TARGET PulseForgeEditorUI OR TARGET PulseForgeEditorTests OR TARGET PulseForgeImGui)
-		message(FATAL_ERROR "Editor-disabled configuration must not create editor UI or its tests")
 	endif()
 endif()
 
@@ -28,7 +39,7 @@ foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSe
 		PulseForgeScripting PulseForgeRuntime PulseForgeRenderer PulseForgeMeshData
 		PulseForgeApplication PulseForgeSceneRenderer
 		PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI PulseForgeRendererTests PulseForgeRenderMathTests PulseForgeGpuValidationAnalysis PulseForgeGpuValidationAnalysisTests
-		PulseForgeCoreTests PulseForgeSceneTests PulseForgeAssetTests PulseForgeAssetImportTests PulseForgeAssetImporterConsumer PulseForgeAudioRuntimeTests
+		PulseForgeCoreTests PulseForgeCoreConsumer PulseForgeSceneTests PulseForgeAssetTests PulseForgeAssetImportTests PulseForgeAssetImporterConsumer PulseForgeAudioRuntimeTests
 		PulseForgeSceneRendererConsumer PulseForgeEditorCoreConsumer PulseForgeScriptingRuntimeTests PulseForgeEditorTests PulseForgeEditorWorkspacePresentationTests PulseForgeEditorCoreTests
 		PulseForgeBufferUpdateTests PulseForgeCommandHistoryFailureTests PulseForgeEditorDocumentTransferFailureTests PulseForgeGpuValidation)
 	if(TARGET ${Target})
@@ -36,6 +47,8 @@ foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSe
 			$<$<CXX_COMPILER_ID:MSVC>:/EHsc>
 			$<$<CXX_COMPILER_ID:MSVC>:/utf-8>
 			$<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Dist>>:/O2>
+			$<$<AND:$<CONFIG:Dist>,$<COMPILE_LANG_AND_ID:C,GNU,Clang>>:-O3>
+			$<$<AND:$<CONFIG:Dist>,$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>>:-O3>
 		)
 		target_compile_definitions(${Target} PRIVATE
 			$<$<CONFIG:Debug>:PF_DEBUG>

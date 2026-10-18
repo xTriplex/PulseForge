@@ -2,12 +2,9 @@
 #include "Editor/EditorAssetPreviewPolicy.h"
 
 #include "Core/Log.h"
+#include "Core/PlatformServices.h"
 
 #include <imgui_freetype.h>
-
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
 
 #include <cmath>
 #include <cstring>
@@ -21,19 +18,9 @@ namespace
 
 	std::expected<std::filesystem::path, std::string> GetExecutableDirectory()
 	{
-		constexpr DWORD MaximumPathLength = 32768;
-		std::vector<wchar_t> Buffer(512);
-		while (Buffer.size() <= MaximumPathLength)
-		{
-			SetLastError(ERROR_SUCCESS);
-			const DWORD Length = GetModuleFileNameW(nullptr, Buffer.data(), static_cast<DWORD>(Buffer.size()));
-			if (Length == 0)
-				return std::unexpected("Windows could not locate the PulseForgeEditor executable");
-			if (Length < Buffer.size() - 1)
-				return std::filesystem::path(std::wstring_view(Buffer.data(), Length)).parent_path();
-			Buffer.resize(std::min(Buffer.size() * 2, static_cast<size_t>(MaximumPathLength)));
-		}
-		return std::unexpected("The PulseForgeEditor executable path exceeds the Windows path limit");
+		auto ExecutablePath = PulseForge::Platform::GetExecutablePath();
+		if (!ExecutablePath) return std::unexpected(ExecutablePath.error().Message);
+		return ExecutablePath->parent_path();
 	}
 
 	std::string PathToUtf8(const std::filesystem::path& Path)

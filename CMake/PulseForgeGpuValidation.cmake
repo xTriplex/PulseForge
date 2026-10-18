@@ -12,7 +12,6 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 		Tests/GpuValidation/ValidationShader.cpp)
 	target_include_directories(PulseForgeGpuValidation PRIVATE Tests)
 	target_compile_definitions(PulseForgeGpuValidation PRIVATE
-		PF_PLATFORM_WINDOWS
 		PF_GPU_VALIDATION_SHADER_DIRECTORY="${PULSEFORGE_GPU_VALIDATION_SHADER_DIR}"
 		PF_GPU_VALIDATION_PROJECT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/PulseForgeGame.pfproj"
 		PF_PBR_DEMO_PROJECT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/PBRMaterials/PBRMaterials.pfproj"

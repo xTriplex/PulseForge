@@ -1,9 +1,5 @@
 #pragma once
 
-#ifndef _WIN32
-	#error PulseForge is Windows only for now.
-#endif
-
 #define PULSEFORGE_API
 
 #define BIT(x) (1 << x)
@@ -13,12 +9,17 @@
 #endif
 
 #ifdef PF_ENABLE_ASSERTS
+	namespace PulseForge::Platform
+	{
+		void DebugBreak() noexcept;
+	}
+
 	#define PF_CORE_ASSERT(x, ...)\
 	{ \
 		if(!(x)) \
 		{ \
 			PF_CORE_CRITICAL("Assertion failed: {0}", __VA_ARGS__); \
-			__debugbreak(); \
+			::PulseForge::Platform::DebugBreak(); \
 		} \
 	}
 
