@@ -1,6 +1,7 @@
 #include "GpuValidation/MirroredWindingValidation.h"
 
 #include "Assets/AssetMetadata.h"
+#include "Assets/MaterialAsset.h"
 #include "Assets/Project.h"
 #include "Core/Application.h"
 #include "Core/Log.h"
@@ -10,6 +11,7 @@
 #include "Scene/Components/DirectionalLightComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
 #include "Scene/Components/PointLightComponent.h"
+#include "Scene/Components/SpotLightComponent.h"
 #include "Scene/Components/TransformComponent.h"
 #include "Scene/Scene.h"
 
@@ -155,6 +157,18 @@ namespace PulseForge::GpuValidation
 		WriteFile(MeshPath, MakeTriangleGltf());
 		const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(MeshPath);
 		Require(Metadata.has_value(), Metadata ? "Unexpected metadata creation state" : Metadata.error().Message);
+		const std::filesystem::path DoubleSidedMaterialPath = m_Project->GetRootPath() / "Assets" / "DoubleSided.material";
+		MaterialAssetDesc DoubleSidedMaterial;
+		DoubleSidedMaterial.BaseColorFactor = { 0.05f, 1.0f, 0.05f, 1.0f };
+		DoubleSidedMaterial.EmissiveFactor = { 0.0f, 0.15f, 0.0f };
+		DoubleSidedMaterial.DoubleSided = true;
+		const auto SerializedMaterial = MaterialAssetSerializer::Serialize(DoubleSidedMaterial);
+		Require(SerializedMaterial.has_value(),
+			SerializedMaterial ? "Unexpected double-sided material serialization state" : SerializedMaterial.error().Message);
+		WriteFile(DoubleSidedMaterialPath, *SerializedMaterial);
+		const auto DoubleSidedMaterialMetadata = AssetMetadataSerializer::CreateForNewAsset(DoubleSidedMaterialPath);
+		Require(DoubleSidedMaterialMetadata.has_value(),
+			DoubleSidedMaterialMetadata ? "Unexpected material metadata creation state" : DoubleSidedMaterialMetadata.error().Message);
 		const auto Registry = m_Project->GetAssetRegistry().Rebuild(m_Project->GetRootPath());
 		Require(Registry.has_value(), "Could not register mirrored-winding glTF fixture");
 
@@ -176,6 +190,18 @@ namespace PulseForge::GpuValidation
 		LightDescription.CastShadows = true;
 		Require(Light->SetDirectionalLight(LightDescription).has_value(), "Could not configure mirrored-winding directional light");
 		m_Light = *Light;
+		auto SpotLight = m_Scene->CreateEntity("Mirrored-winding spotlight");
+		Require(SpotLight.has_value(), "Could not create mirrored-winding spotlight");
+		SpotLightComponent SpotLightDescription;
+		SpotLightDescription.Intensity = 20.0f;
+		SpotLightDescription.Range = 8.0f;
+		SpotLightDescription.OuterConeAngleDegrees = 35.0f;
+		SpotLightDescription.CastShadows = true;
+		TransformComponent SpotLightTransform;
+		SpotLightTransform.Translation = { 0.0f, 0.0f, 3.0f };
+		Require(SpotLight->SetTransform(SpotLightTransform).has_value(), "Could not position mirrored-winding spotlight");
+		Require(SpotLight->SetSpotLight(SpotLightDescription).has_value(), "Could not configure mirrored-winding spotlight");
+		m_SpotLight = *SpotLight;
 
 		auto PointLight = m_Scene->CreateEntity("Mirrored-winding point shadow light");
 		Require(PointLight.has_value(), "Could not create mirrored-winding point light");
@@ -198,7 +224,22 @@ namespace PulseForge::GpuValidation
 		Require(Record.has_value(), "Mirrored-winding mesh was not present in the rebuilt asset registry");
 		Require(Mesh->SetMeshRenderer({ Metadata->ID, {} }).has_value(), "Could not assign mirrored-winding mesh asset");
 		Require(Mesh->SetParent(*Parent).has_value(), "Could not parent mirrored-winding mesh");
+		TransformComponent MeshTransform;
+		MeshTransform.Translation = { -0.55f, 0.0f, 0.0f };
+		Require(Mesh->SetTransform(MeshTransform).has_value(), "Could not position single-sided mirrored-winding mesh");
 		m_Mesh = *Mesh;
+		auto DoubleSidedMesh = m_Scene->CreateEntity("Mirrored-winding double-sided triangle");
+		Require(DoubleSidedMesh.has_value(), "Could not create mirrored-winding double-sided mesh entity");
+		Require(m_Project->GetAssetRegistry().Find(DoubleSidedMaterialMetadata->ID).has_value(),
+			"Double-sided material was not present in the rebuilt asset registry");
+		Require(DoubleSidedMesh->SetMeshRenderer({ Metadata->ID, DoubleSidedMaterialMetadata->ID }).has_value(),
+			"Could not assign mirrored-winding double-sided material");
+		Require(DoubleSidedMesh->SetParent(*Parent).has_value(), "Could not parent mirrored-winding double-sided mesh");
+		TransformComponent DoubleSidedMeshTransform;
+		DoubleSidedMeshTransform.Translation = { 0.55f, 0.0f, 0.0f };
+		Require(
+			DoubleSidedMesh->SetTransform(DoubleSidedMeshTransform).has_value(), "Could not position mirrored-winding double-sided mesh");
+		m_DoubleSidedMesh = *DoubleSidedMesh;
 
 		auto Renderer = SceneRenderer::Create(m_Runtime, *m_Project, m_ShaderDirectory);
 		Require(Renderer.has_value(), Renderer ? "Unexpected SceneRenderer creation state" : Renderer.error().Message);
@@ -220,7 +261,7 @@ namespace PulseForge::GpuValidation
 	{
 		if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(30))
 			return std::unexpected("Timed out during mirrored-winding GPU validation");
-		if (!m_Scene || !m_Renderer || !m_Parent || !m_Mesh || !m_Camera || !m_OutputTarget)
+		if (!m_Scene || !m_Renderer || !m_Parent || !m_Mesh || !m_DoubleSidedMesh || !m_Camera || !m_OutputTarget)
 			return std::unexpected("Mirrored-winding GPU validation was not initialized");
 		if (m_ReadbackPending)
 		{
@@ -234,18 +275,20 @@ namespace PulseForge::GpuValidation
 				return std::unexpected("Mirrored-winding output readback has an unexpected format or extent");
 
 			size_t VisiblePixels = 0;
+			size_t GreenMaterialPixels = 0;
 			for (size_t Pixel = 0; Pixel < static_cast<size_t>(OutputExtent) * OutputExtent; ++Pixel)
 			{
 				const uint8_t Red = std::to_integer<uint8_t>(Readback->Pixels[Pixel * 4]);
 				const uint8_t Green = std::to_integer<uint8_t>(Readback->Pixels[Pixel * 4 + 1]);
 				const uint8_t Blue = std::to_integer<uint8_t>(Readback->Pixels[Pixel * 4 + 2]);
 				if (std::max({ Red, Green, Blue }) > 12) ++VisiblePixels;
+				if (Green > Red + 20 && Green > Blue + 20) ++GreenMaterialPixels;
 			}
-			if (VisiblePixels < MinimumVisiblePixels)
-				return std::unexpected(
-					std::string(PreviousCase.Name) + " produced too few visible pixels; single-sided geometry may have been culled");
+			if (VisiblePixels < MinimumVisiblePixels * 2 || GreenMaterialPixels < MinimumVisiblePixels)
+				return std::unexpected(std::string(PreviousCase.Name) + " did not visibly render both default and double-sided materials");
 
-			PF_INFO("MIRRORED_WINDING_CASE={} visible_pixels={} geometry_draws={}", PreviousCase.Name, VisiblePixels, 1);
+			PF_INFO("MIRRORED_WINDING_CASE={} visible_pixels={} double_sided_pixels={} geometry_draws={}", PreviousCase.Name, VisiblePixels,
+				GreenMaterialPixels, 2);
 			++m_ScenarioIndex;
 			m_ReadbackPending = false;
 		}
@@ -256,10 +299,16 @@ namespace PulseForge::GpuValidation
 		ParentTransform.Scale = Case.ParentScale;
 		TransformComponent MeshTransform;
 		MeshTransform.Scale = Case.MeshScale;
+		MeshTransform.Translation = { -0.55f, 0.0f, 0.0f };
+		TransformComponent DoubleSidedMeshTransform;
+		DoubleSidedMeshTransform.Scale = Case.MeshScale;
+		DoubleSidedMeshTransform.Translation = { 0.55f, 0.0f, 0.0f };
 		if (auto Result = m_Parent->SetTransform(ParentTransform); !Result)
 			return std::unexpected("Could not update mirrored-winding parent: " + Result.error().Message);
 		if (auto Result = m_Mesh->SetTransform(MeshTransform); !Result)
 			return std::unexpected("Could not update mirrored-winding mesh: " + Result.error().Message);
+		if (auto Result = m_DoubleSidedMesh->SetTransform(DoubleSidedMeshTransform); !Result)
+			return std::unexpected("Could not update mirrored-winding double-sided mesh: " + Result.error().Message);
 
 		const auto Prepared = m_Renderer->PrepareScene(*m_Scene, m_Camera->GetUUID(), 1.0f);
 		if (!Prepared) return std::unexpected(std::string("Could not prepare ") + Case.Name + " scene: " + Prepared.error().Message);
@@ -273,10 +322,12 @@ namespace PulseForge::GpuValidation
 		const TransformCase& Case = TransformCases[m_ScenarioIndex];
 		auto Rendered = m_Renderer->RenderPreparedSceneToOutput(*m_OutputTarget);
 		if (!Rendered) return std::unexpected(std::string("Could not render ") + Case.Name + ": " + Rendered.error().Message);
-		if (Rendered->GeometryDrawCount != 1)
-			return std::unexpected(std::string(Case.Name) + " did not submit the single open-triangle draw");
-		if (Rendered->PointShadowPassCount != 6 || Rendered->PointShadowCasterDrawCount != 6)
-			return std::unexpected(std::string(Case.Name) + " did not draw the open-triangle caster into all six point-shadow faces");
+		if (Rendered->GeometryDrawCount != 2)
+			return std::unexpected(std::string(Case.Name) + " did not submit both single- and double-sided triangle draws");
+		if (Rendered->SpotlightShadowPassCount != 1 || Rendered->SpotlightShadowCasterDrawCount != 2)
+			return std::unexpected(std::string(Case.Name) + " did not draw both materials into the spotlight shadow map");
+		if (Rendered->PointShadowPassCount != 6 || Rendered->PointShadowCasterDrawCount != 12)
+			return std::unexpected(std::string(Case.Name) + " did not draw both materials into all six point-shadow faces");
 
 		m_ScenePrepared = false;
 		m_ReadbackPending = true;
@@ -293,8 +344,10 @@ namespace PulseForge::GpuValidation
 		m_OutputTarget.reset();
 		m_Renderer.reset();
 		m_Mesh.reset();
+		m_DoubleSidedMesh.reset();
 		m_Parent.reset();
 		m_Light.reset();
+		m_SpotLight.reset();
 		m_PointLight.reset();
 		m_Camera.reset();
 		m_Scene.reset();
