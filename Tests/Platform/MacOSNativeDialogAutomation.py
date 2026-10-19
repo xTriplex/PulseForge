@@ -333,6 +333,37 @@ ACCESSIBILITY_CONTROL_HANDLERS = '''on matchesDialog(candidateElement, operation
     end tell
 end matchesDialog
 
+on dialogChildren(container)
+    set childElements to missing value
+    try
+        tell application "System Events" to set childElements to UI elements of container
+        if my uiChildSource is "" then set my uiChildSource to "System Events UI elements"
+        return childElements
+    on error errorMessage number errorNumber
+        if errorNumber is not -1728 then
+            my classifyAccessibilityError(errorNumber, errorMessage)
+            error "NFD_ACCESSIBILITY_CHILD_QUERY_FAILED; source=System Events UI elements; error=" & ¬
+                errorNumber & "; " & errorMessage number errorNumber
+        end if
+    end try
+    try
+        tell application "System Events" to set childElements to value of attribute "AXChildren" of container
+        if childElements is missing value then
+            set my uiChildSource to "AXChildren returned missing after System Events -1728"
+        else if my uiChildSource is "" then
+            set my uiChildSource to "AXChildren fallback after System Events -1728"
+        else if my uiChildSource does not contain "AXChildren fallback" then
+            set my uiChildSource to (my uiChildSource) & "; AXChildren fallback after System Events -1728"
+        end if
+        return childElements
+    on error errorMessage number errorNumber
+        my classifyAccessibilityError(errorNumber, errorMessage)
+        set my uiChildSource to "children unavailable; System Events UI elements=-1728; AXChildren=" & ¬
+            errorNumber & ": " & errorMessage
+        return missing value
+    end try
+end dialogChildren
+
 on countMatchingDialogs(candidateProcess, operation)
     set matchingCount to 0
     tell application "System Events"
@@ -367,13 +398,8 @@ end findDialogTextField
 
 on findDialogElement(container, requestedRole, requestedName, requestedIndex, depth)
     if depth > 8 or my uiScanVisited >= 96 then return missing value
-    set children to missing value
-    try
-        tell application "System Events" to set children to UI elements of container
-    on error errorMessage number errorNumber
-        my classifyAccessibilityError(errorNumber, errorMessage)
-        return missing value
-    end try
+    set children to my dialogChildren(container)
+    if children is missing value then return missing value
     set childCount to count of children
     if requestedRole is "AXTextField" then
         repeat with childIndex from 1 to childCount
@@ -430,25 +456,21 @@ end findDialogChild
 on describeDialogControls(candidateElement, operation)
     set my uiScanVisited to 0
     set my uiScanReport to ""
+    set my uiChildSource to ""
     if operation is "open-select" or operation is "open-cancel" then
         set primaryName to "Open"
     else
         set primaryName to "Save"
     end if
     my appendDialogChildren(candidateElement, 0)
-    return "visited=" & (my uiScanVisited as text) & "; expected=Cancel," & primaryName & "; controls=[" & ¬
-        (my uiScanReport) & "]"
+    return "visited=" & (my uiScanVisited as text) & "; child-source=" & my uiChildSource & ¬
+        "; expected=Cancel," & primaryName & "; controls=[" & (my uiScanReport) & "]"
 end describeDialogControls
 
 on appendDialogChildren(container, depth)
     if depth > 8 or my uiScanVisited >= 32 or (length of (my uiScanReport)) > 2600 then return
-    set children to missing value
-    try
-        tell application "System Events" to set children to UI elements of container
-    on error errorMessage number errorNumber
-        my classifyAccessibilityError(errorNumber, errorMessage)
-        return
-    end try
+    set children to my dialogChildren(container)
+    if children is missing value then return
     set childCount to count of children
     repeat with childIndex from childCount to 1 by -1
         if my uiScanVisited >= 32 or (length of (my uiScanReport)) > 2600 then exit repeat
@@ -551,6 +573,7 @@ end pressDialogButton
 WAITING_PROCESS_SNAPSHOT = '''property uiScanVisited : 0
 property uiFieldMatches : 0
 property uiScanReport : ""
+property uiChildSource : ""
 
 on run argv
     set targetPID to item 1 of argv as integer
@@ -601,6 +624,7 @@ end run
 PANEL_READY_PROBE = '''property uiScanVisited : 0
 property uiFieldMatches : 0
 property uiScanReport : ""
+property uiChildSource : ""
 
 on run argv
     set targetPID to item 1 of argv as integer
@@ -803,7 +827,8 @@ on run argv
                         end try
                         return "NFD_PANEL_READY=pid=" & targetPID & "; panel_pid=" & panelProcessID & ¬
                             "; panel_process=" & processName & "; process=" & processName & "; " & lastState & ¬
-                            "; Cancel actions=" & cancelActions & "; primary actions=" & primaryActions
+                            "; child-source=" & my uiChildSource & "; Cancel actions=" & cancelActions & ¬
+                            "; primary actions=" & primaryActions
                     end if
                 on error errorMessage number errorNumber
                     if errorNumber is -1712 then
@@ -862,7 +887,8 @@ on run argv
                                     end try
                                     return "NFD_PANEL_READY=pid=" & targetPID & "; panel_pid=" & panelProcessID & ¬
                                         "; panel_process=" & processName & "; process=" & processName & "; " & lastState & ¬
-                                        "; Cancel actions=" & cancelActions & "; primary actions=" & primaryActions
+                                        "; child-source=" & my uiChildSource & "; Cancel actions=" & cancelActions & ¬
+                                        "; primary actions=" & primaryActions
                                 end if
                             on error errorMessage number errorNumber
                                 if errorNumber is -1712 then
@@ -906,6 +932,7 @@ end run
 SELECT_SCRIPT = '''property uiScanVisited : 0
 property uiFieldMatches : 0
 property uiScanReport : ""
+property uiChildSource : ""
 
 on run argv
     set targetPID to item 1 of argv as integer
@@ -1038,7 +1065,8 @@ on run argv
             my pressDialogButton(saveButton, "Save")
         end if
     end tell
-    return "NFD_PANEL_INTERACTION=PASS; pid=" & targetPID & "; scenario=" & operation
+    return "NFD_PANEL_INTERACTION=PASS; pid=" & targetPID & "; scenario=" & operation & ¬
+        "; child-source=" & my uiChildSource
 end run
 ''' + ACCESSIBILITY_CONTROL_HANDLERS
 
