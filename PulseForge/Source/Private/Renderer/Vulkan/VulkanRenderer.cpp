@@ -2953,7 +2953,7 @@ namespace PulseForge
 			{
 				vk::PhysicalDeviceProperties2 Properties2;
 				vk::PhysicalDevicePortabilitySubsetPropertiesKHR PortabilityProperties;
-				Properties2.setPNext(&PortabilityProperties);
+				Properties2.pNext = &PortabilityProperties;
 				PhysicalDevice.getProperties2(&Properties2);
 				Candidate.MinVertexInputBindingStrideAlignment = PortabilityProperties.minVertexInputBindingStrideAlignment;
 				if (Candidate.MinVertexInputBindingStrideAlignment == 0)
