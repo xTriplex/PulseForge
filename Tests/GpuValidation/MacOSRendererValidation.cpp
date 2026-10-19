@@ -72,7 +72,7 @@ namespace
 				if (!Loaded) throw std::runtime_error("Could not load the PBR startup scene: " + Loaded.error().Message);
 
 				auto CreatedRenderer = PulseForge::SceneRenderer::Create(
-					App, *m_Project, std::filesystem::path(PF_MACOS_RENDERER_SHADER_DIRECTORY));
+					App, *m_Project, std::filesystem::path(PF_MACOS_RENDERER_SCENE_SHADER_DIRECTORY));
 				if (!CreatedRenderer) throw std::runtime_error("Could not create SceneRenderer: " + CreatedRenderer.error().Message);
 				m_SceneRenderer = std::move(*CreatedRenderer);
 				if (!m_SceneRenderer->SetToneMappingSettings({ 0.0f }))
@@ -88,7 +88,7 @@ namespace
 				m_GlfwBackendInitialized = true;
 				m_ImGuiRenderer = std::make_unique<PulseForgeEditor::EditorImGuiRenderer>();
 				if (auto Initialized = m_ImGuiRenderer->Initialize(
-						App, std::filesystem::path(PF_MACOS_RENDERER_SHADER_DIRECTORY)); !Initialized)
+						App, std::filesystem::path(PF_MACOS_RENDERER_EDITOR_SHADER_DIRECTORY)); !Initialized)
 					throw std::runtime_error("Could not initialize the production editor ImGui renderer: " + Initialized.error());
 			}
 			catch (const std::exception& Exception)

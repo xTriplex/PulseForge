@@ -13,8 +13,8 @@ concurrency:
 
 jobs:
   macos-core:
-    name: macOS 15 · Apple Silicon · PulseForge Vulkan/MoltenVK renderer proof
-    runs-on: macos-15
+    name: macOS 26 · Apple Silicon · PulseForge Vulkan/MoltenVK renderer proof
+    runs-on: macos-26
     timeout-minutes: 90
     steps:
       - name: Check out sources
@@ -39,14 +39,15 @@ jobs:
           INSTALLER="$RUNNER_TEMP/vulkan-sdk-installer/vulkansdk-macOS-${SDK_VERSION}.app/Contents/MacOS/vulkansdk-macOS-${SDK_VERSION}"
           "$INSTALLER" --root "$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}" --accept-licenses --default-answer \
             --confirm-command install copy_only=1
+          DXC_EXECUTABLE="$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS/bin/dxc"
           echo "VULKAN_SDK=$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS" >> "$GITHUB_ENV"
-          echo "PULSEFORGE_DXC_EXECUTABLE=$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS/bin/dxc" >> "$GITHUB_ENV"
+          echo "PULSEFORGE_DXC_EXECUTABLE=$DXC_EXECUTABLE" >> "$GITHUB_ENV"
           echo "DYLD_LIBRARY_PATH=$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS/lib" >> "$GITHUB_ENV"
           echo "VK_DRIVER_FILES=$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS/share/vulkan/icd.d/MoltenVK_icd.json" >> "$GITHUB_ENV"
           echo "VK_LAYER_PATH=$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
           xcodebuild -version | tee "$RUNNER_TEMP/apple-toolchain.log"
           clang --version | tee -a "$RUNNER_TEMP/apple-toolchain.log"
-          "$PULSEFORGE_DXC_EXECUTABLE" --version | tee -a "$RUNNER_TEMP/apple-toolchain.log"
+          "$DXC_EXECUTABLE" --version | tee -a "$RUNNER_TEMP/apple-toolchain.log"
 
       - name: Probe the selected MoltenVK device and capabilities
         run: |
@@ -73,7 +74,7 @@ jobs:
       - name: Build Core checks and the PulseForge renderer proof
         run: |
           set -o pipefail
-          cmake --build Build/CI/macos-renderer --parallel 2 --target \
+          cmake --build Build/CI/macos-renderer --parallel --target \
             PulseForgeCoreTests PulseForgeCoreConsumer PulseForgeMacOSRendererValidation 2>&1 |
             tee "$RUNNER_TEMP/macos-build.log"
 
@@ -174,7 +175,7 @@ jobs:
       - name: Build first-party tests, editor and game
         shell: pwsh
         run: |
-          & cmake --build Build/CI/windows --config Debug --parallel 2 --target PulseForgeTests PulseForgeEditor PulseForgeGame *> "$env:RUNNER_TEMP/build.log"
+          & cmake --build Build/CI/windows --config Debug --parallel --target PulseForgeTests PulseForgeEditor PulseForgeGame *> "$env:RUNNER_TEMP/build.log"
           $result = $LASTEXITCODE
           Get-Content "$env:RUNNER_TEMP/build.log"
           if ($result -ne 0) { exit $result }
@@ -254,7 +255,7 @@ jobs:
       - name: Build first-party tests, editor and game
         run: |
           set -o pipefail
-          cmake --build Build/CI/linux --parallel 2 --target PulseForgeTests PulseForgeEditor PulseForgeGame 2>&1 |
+          cmake --build Build/CI/linux --parallel --target PulseForgeTests PulseForgeEditor PulseForgeGame 2>&1 |
             tee "$RUNNER_TEMP/build.log"
 
       - name: Run registered CPU tests
