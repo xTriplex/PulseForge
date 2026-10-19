@@ -12,6 +12,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  macos-core:
+    name: macOS 15 · Apple Silicon · Core CPU probe
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v5
+
+      - name: Initialize the Core logging dependency
+        run: git submodule update --init PulseForge/Vendor/spdlog
+
+      - name: Configure Core-only C++23 build
+        run: |
+          set -o pipefail
+          cmake -S . -B Build/CI/macos-core -G Ninja \
+            -DBUILD_TESTING=ON \
+            -DPULSEFORGE_BUILD_CORE_ONLY=ON \
+            -DPULSEFORGE_BUILD_EDITOR=OFF 2>&1 | tee "$RUNNER_TEMP/configure.log"
+
+      - name: Build Core tests and consumer
+        run: |
+          set -o pipefail
+          cmake --build Build/CI/macos-core --parallel 3 --target PulseForgeTests 2>&1 |
+            tee "$RUNNER_TEMP/build.log"
+
+      - name: Run Core CPU tests
+        run: |
+          set -o pipefail
+          ctest --test-dir Build/CI/macos-core --output-on-failure --parallel 2 2>&1 |
+            tee "$RUNNER_TEMP/ctest.log"
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-core-cmake-ctest-logs
+          path: |
+            ${{ runner.temp }}/configure.log
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/ctest.log
+            Build/CI/macos-core/CMakeFiles/CMakeConfigureLog.yaml
+            Build/CI/macos-core/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+          retention-days: 5
+
   windows-msvc:
     name: Windows 2022 · MSVC · Debug
     runs-on: windows-2022

@@ -52,6 +52,14 @@ int main(int ArgumentCount, char** Arguments)
 
 	const auto UserDataDirectory = PulseForge::Platform::GetUserDataDirectory();
 	if (!UserDataDirectory || UserDataDirectory->empty()) return 2;
+#if defined(__APPLE__)
+	if (!UserDataDirectory->is_absolute() || UserDataDirectory->filename() != "Application Support" ||
+		UserDataDirectory->parent_path().filename() != "Library")
+	{
+		std::cerr << "Core consumer macOS user-data path must resolve under ~/Library/Application Support\n";
+		return 12;
+	}
+#endif
 
 	std::istringstream Input("core consumer");
 	const auto Read = PulseForge::Detail::ReadBoundedInput(Input, 32);

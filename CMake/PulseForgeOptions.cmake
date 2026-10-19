@@ -26,6 +26,7 @@ if(WIN32)
 	endif()
 	set(PULSEFORGE_PLATFORM_WINDOWS TRUE)
 	set(PULSEFORGE_PLATFORM_LINUX FALSE)
+	set(PULSEFORGE_PLATFORM_MACOS FALSE)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	if(NOT CMAKE_C_COMPILER_ID MATCHES "^(GNU|Clang)$" OR
 		NOT CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
@@ -35,20 +36,38 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	endif()
 	set(PULSEFORGE_PLATFORM_WINDOWS FALSE)
 	set(PULSEFORGE_PLATFORM_LINUX TRUE)
+	set(PULSEFORGE_PLATFORM_MACOS FALSE)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+	if(NOT PULSEFORGE_BUILD_CORE_ONLY)
+		message(FATAL_ERROR
+			"macOS currently supports only the Core portability probe. The full renderer/editor platform route is "
+			"not implemented; see the G04 macOS feasibility decision.")
+	endif()
+	if(NOT CMAKE_C_COMPILER_ID MATCHES "^(AppleClang|Clang)$" OR
+		NOT CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$")
+		message(FATAL_ERROR
+			"macOS Core-only builds require Apple Clang or Clang C and C++ toolchains. Selected C=${CMAKE_C_COMPILER_ID}, "
+			"CXX=${CMAKE_CXX_COMPILER_ID}.")
+	endif()
+	set(PULSEFORGE_PLATFORM_WINDOWS FALSE)
+	set(PULSEFORGE_PLATFORM_LINUX FALSE)
+	set(PULSEFORGE_PLATFORM_MACOS TRUE)
 else()
 	message(FATAL_ERROR
 		"Unsupported PulseForge operating system '${CMAKE_SYSTEM_NAME}'. This revision supports Windows desktop "
-		"builds and Linux desktop/runtime/Core builds.")
+		"builds, Linux desktop/runtime/Core builds, and a macOS Core-only portability probe.")
 endif()
 
 if(PULSEFORGE_PLATFORM_WINDOWS)
 	set(PULSEFORGE_PLATFORM_COMPILE_DEFINITION PF_PLATFORM_WINDOWS)
+elseif(PULSEFORGE_PLATFORM_MACOS)
+	set(PULSEFORGE_PLATFORM_COMPILE_DEFINITION PF_PLATFORM_MACOS)
 else()
 	set(PULSEFORGE_PLATFORM_COMPILE_DEFINITION PF_PLATFORM_LINUX)
 endif()
 
 if(CMAKE_SIZEOF_VOID_P AND NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-	message(FATAL_ERROR "PulseForge currently supports 64-bit Windows and Linux targets only.")
+	message(FATAL_ERROR "PulseForge currently supports 64-bit Windows, Linux, and macOS Core targets only.")
 endif()
 
 if(PULSEFORGE_BUILD_CORE_ONLY AND PULSEFORGE_BUILD_EDITOR)
