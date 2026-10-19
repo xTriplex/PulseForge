@@ -29,6 +29,13 @@ if(PULSEFORGE_BUILD_EDITOR OR (BUILD_TESTING AND NOT PULSEFORGE_PLATFORM_LINUX))
 		PulseForgeEditor/Source/Private/ViewportMath.cpp
 		PulseForgeEditor/Source/Private/EditorCommandLine.cpp
 	)
+	if(WIN32)
+		target_sources(PulseForgeEditorCore PRIVATE
+			PulseForgeEditor/Source/Private/Platform/Windows/EditorPlatformFileSystem.cpp)
+	else()
+		target_sources(PulseForgeEditorCore PRIVATE
+			PulseForgeEditor/Source/Private/Platform/Linux/EditorPlatformFileSystem.cpp)
+	endif()
 	target_include_directories(PulseForgeEditorCore
 		PUBLIC PulseForgeEditor/Source/Public
 		PRIVATE PulseForge/Source/Public PulseForge/Vendor/json/include

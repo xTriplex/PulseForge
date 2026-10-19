@@ -40,7 +40,7 @@ if(BUILD_TESTING)
 		elseif(TARGET PulseForgeEditorUI OR TARGET PulseForgeEditorTests OR TARGET PulseForgeImGui)
 			message(FATAL_ERROR "Editor-disabled configuration must not create editor UI or its tests")
 		endif()
-		if(PULSEFORGE_PLATFORM_LINUX)
+		if(PULSEFORGE_PLATFORM_LINUX AND NOT PULSEFORGE_BUILD_EDITOR)
 			foreach(UnsupportedEditorTarget PulseForgeEditorCore PulseForgeEditorCoreConsumer PulseForgeEditorCoreTests
 					PulseForgeCommandHistoryFailureTests PulseForgeEditorDocumentTransferFailureTests
 					PulseForgeEditorWorkspacePresentationTests PulseForgeEditorTests)

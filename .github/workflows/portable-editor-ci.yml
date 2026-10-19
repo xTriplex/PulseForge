@@ -1,0 +1,140 @@
+name: Portable editor CPU CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-msvc:
+    name: Windows 2022 · MSVC · Debug
+    runs-on: windows-2022
+    steps:
+      - name: Check out pinned sources and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore pinned dependency sources
+        id: dependency-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            Build/CI/Dependencies/pulseforgenvrhi-src
+            Build/CI/Dependencies/pulseforgelua-src
+            Build/CI/Dependencies/vulkan_headers-src
+            Build/CI/Dependencies/_downloads
+          key: ${{ runner.os }}-fetchcontent-v1-${{ hashFiles('CMake/PulseForgeDependencies.cmake', '.gitmodules') }}
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          & cmake -S . -B Build/CI/windows -G "Visual Studio 17 2022" -A x64 `
+            -DBUILD_TESTING=ON `
+            -DPULSEFORGE_BUILD_EDITOR=ON `
+            -DPULSEFORGE_BUILD_GPU_VALIDATION_TESTS=OFF `
+            -DFETCHCONTENT_BASE_DIR="$env:GITHUB_WORKSPACE/Build/CI/Dependencies" `
+            -DFETCHCONTENT_FULLY_DISCONNECTED=${{ steps.dependency-cache.outputs.cache-hit }} *> "$env:RUNNER_TEMP/configure.log"
+          $result = $LASTEXITCODE
+          Get-Content "$env:RUNNER_TEMP/configure.log"
+          if ($result -ne 0) { exit $result }
+
+      - name: Build first-party tests, editor and game
+        shell: pwsh
+        run: |
+          & cmake --build Build/CI/windows --config Debug --parallel 2 --target PulseForgeTests PulseForgeEditor PulseForgeGame *> "$env:RUNNER_TEMP/build.log"
+          $result = $LASTEXITCODE
+          Get-Content "$env:RUNNER_TEMP/build.log"
+          if ($result -ne 0) { exit $result }
+
+      - name: Run registered CPU tests
+        shell: pwsh
+        run: |
+          & ctest --test-dir Build/CI/windows -C Debug --output-on-failure *> "$env:RUNNER_TEMP/ctest.log"
+          $result = $LASTEXITCODE
+          Get-Content "$env:RUNNER_TEMP/ctest.log"
+          if ($result -ne 0) { exit $result }
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-cmake-ctest-logs
+          path: |
+            ${{ runner.temp }}/configure.log
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/ctest.log
+            Build/CI/windows/CMakeFiles/CMakeOutput.log
+            Build/CI/windows/CMakeFiles/CMakeError.log
+            Build/CI/windows/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+          retention-days: 5
+
+  linux-gcc:
+    name: Ubuntu 24.04 · GCC · Ninja · Debug
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out pinned sources and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore pinned dependency sources
+        id: dependency-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            Build/CI/Dependencies/pulseforgenvrhi-src
+            Build/CI/Dependencies/pulseforgelua-src
+            Build/CI/Dependencies/vulkan_headers-src
+            Build/CI/Dependencies/_downloads
+          key: ${{ runner.os }}-fetchcontent-v1-${{ hashFiles('CMake/PulseForgeDependencies.cmake', '.gitmodules') }}
+
+      - name: Install native development prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            cmake ninja-build g++ pkg-config \
+            libgtk-3-dev \
+            libwayland-dev libwayland-bin libwayland-cursor0 wayland-protocols libxkbcommon-dev \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev \
+            libvulkan-dev libgl1-mesa-dev libegl1-mesa-dev
+
+      - name: Configure
+        run: |
+          set -o pipefail
+          cmake -S . -B Build/CI/linux -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_TESTING=ON \
+            -DPULSEFORGE_BUILD_EDITOR=ON \
+            -DPULSEFORGE_BUILD_GPU_VALIDATION_TESTS=OFF \
+            -DFETCHCONTENT_BASE_DIR="$GITHUB_WORKSPACE/Build/CI/Dependencies" \
+            -DFETCHCONTENT_FULLY_DISCONNECTED=${{ steps.dependency-cache.outputs.cache-hit }} 2>&1 | tee "$RUNNER_TEMP/configure.log"
+
+      - name: Build first-party tests, editor and game
+        run: |
+          set -o pipefail
+          cmake --build Build/CI/linux --parallel 2 --target PulseForgeTests PulseForgeEditor PulseForgeGame 2>&1 |
+            tee "$RUNNER_TEMP/build.log"
+
+      - name: Run registered CPU tests
+        run: |
+          set -o pipefail
+          ctest --test-dir Build/CI/linux --output-on-failure 2>&1 | tee "$RUNNER_TEMP/ctest.log"
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-cmake-ctest-logs
+          path: |
+            ${{ runner.temp }}/configure.log
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/ctest.log
+            Build/CI/linux/CMakeFiles/CMakeOutput.log
+            Build/CI/linux/CMakeFiles/CMakeError.log
+            Build/CI/linux/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+          retention-days: 5

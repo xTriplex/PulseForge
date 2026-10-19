@@ -1,9 +1,6 @@
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
-
 #include "Editor/EditorDocumentWorkspaceStore.h"
 #include "Editor/EditorDocumentWorkspaceRead.h"
+#include "Editor/EditorPlatformFileSystem.h"
 
 #include <fstream>
 #include <iterator>
@@ -71,7 +68,7 @@ namespace PulseForgeEditor
 		if (!Workspace)
 		{
 			std::filesystem::path RecoveryPath = m_Path;
-			RecoveryPath += L".recovery";
+			RecoveryPath += ".recovery";
 			std::string RecoveryError;
 			bool OriginalPreserved = false;
 			auto ExistingRecovery = ReadFile(RecoveryPath);
@@ -186,7 +183,7 @@ namespace PulseForgeEditor
 	{
 		if (Path.empty()) return std::unexpected("The document workspace path is unavailable");
 		std::filesystem::path TemporaryPath = Path;
-		TemporaryPath += L".tmp";
+		TemporaryPath += ".tmp";
 		{
 			std::ofstream Output(TemporaryPath, std::ios::binary | std::ios::trunc);
 			if (!Output) return std::unexpected("Could not create a temporary document workspace file");
@@ -200,12 +197,11 @@ namespace PulseForgeEditor
 				return std::unexpected("Could not write the document workspace");
 			}
 		}
-		if (!MoveFileExW(TemporaryPath.c_str(), Path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+		if (auto Replaced = EditorPlatformFileSystem::ReplaceFileAtomically(TemporaryPath, Path); !Replaced)
 		{
-			const DWORD ErrorCode = GetLastError();
 			std::error_code RemoveError;
 			std::filesystem::remove(TemporaryPath, RemoveError);
-			return std::unexpected("Could not atomically replace document workspace (Windows error " + std::to_string(ErrorCode) + ")");
+			return std::unexpected("Could not atomically replace document workspace: " + Replaced.error());
 		}
 		return {};
 	}

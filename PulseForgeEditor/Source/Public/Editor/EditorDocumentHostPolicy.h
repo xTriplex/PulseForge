@@ -102,11 +102,12 @@ namespace PulseForgeEditor
 		return !ApplicationShutdownRequested;
 	}
 
-	template <typename Identity, typename IsDirtyPredicate>
-	[[nodiscard]] std::vector<Identity> FilterDirtyDocumentIdentities(const std::vector<Identity>& Identities, IsDirtyPredicate&& IsDirty)
+	template <typename TIdentity, typename IsDirtyPredicate>
+	[[nodiscard]] std::vector<TIdentity> FilterDirtyDocumentIdentities(
+		const std::vector<TIdentity>& Identities, IsDirtyPredicate&& IsDirty)
 	{
-		std::vector<Identity> DirtyIdentities;
-		for (const Identity& Identity : Identities)
+		std::vector<TIdentity> DirtyIdentities;
+		for (const TIdentity& Identity : Identities)
 			if (IsDirty(Identity)) DirtyIdentities.push_back(Identity);
 		return DirtyIdentities;
 	}
