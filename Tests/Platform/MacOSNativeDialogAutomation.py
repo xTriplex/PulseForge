@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 MAX_LOG_BYTES = 64 * 1024
+MAX_CONSOLE_BYTES = 32 * 1024
 TCC_DENIALS = (
     "not allowed assistive access",
     "not authorized to send apple events",
@@ -27,9 +28,14 @@ TCC_DENIALS = (
 
 class FixtureOutput:
     def __init__(self, process: subprocess.Popen[str], log_path: Path):
-        self.lines: queue.Queue[str | None] = queue.Queue()
+        self.lines: queue.Queue[str | None] = queue.Queue(maxsize=128)
         self.buffer = bytearray()
         self.log_path = log_path
+        self.ready_line: str | None = None
+        self.post_use_line: str | None = None
+        self.result_line: str | None = None
+        self.failure_lines: list[str] = []
+        self.console_bytes = 0
 
         def read_output() -> None:
             assert process.stdout is not None
@@ -37,9 +43,34 @@ class FixtureOutput:
                 encoded = line.encode("utf-8", errors="replace")
                 if len(self.buffer) < MAX_LOG_BYTES:
                     self.buffer.extend(encoded[: MAX_LOG_BYTES - len(self.buffer)])
-                print(line, end="")
-                self.lines.put(line)
-            self.lines.put(None)
+                if self.console_bytes < MAX_CONSOLE_BYTES:
+                    printable = encoded[: MAX_CONSOLE_BYTES - self.console_bytes].decode("utf-8", errors="replace")
+                    print(printable, end="")
+                    self.console_bytes += len(encoded)
+                if line.startswith("NFD_DIALOG_READY="):
+                    self.ready_line = line.rstrip()
+                elif line.startswith("NFD_DIALOG_POST_USE="):
+                    self.post_use_line = line.rstrip()
+                elif line.startswith("NFD_DIALOG_RESULT="):
+                    self.result_line = line.rstrip()
+                elif line.startswith("NFD_FIXTURE=FAIL;") and len(self.failure_lines) < 8:
+                    self.failure_lines.append(line.rstrip())
+                try:
+                    self.lines.put_nowait(line)
+                except queue.Full:
+                    try:
+                        self.lines.get_nowait()
+                    except queue.Empty:
+                        pass
+                    self.lines.put_nowait(line)
+            try:
+                self.lines.put_nowait(None)
+            except queue.Full:
+                try:
+                    self.lines.get_nowait()
+                except queue.Empty:
+                    pass
+                self.lines.put_nowait(None)
             log_path.write_bytes(self.buffer)
 
         self.thread = threading.Thread(target=read_output, daemon=True)
@@ -107,37 +138,156 @@ def apple_script(source: str, *arguments: str, timeout: int = 30) -> tuple[int, 
         return 124, output + "\nAppleScript exceeded its time bound\n"
 
 
-ACCESSIBILITY_PROBE = '''on run argv
+PANEL_READY_PROBE = '''on run argv
+    set targetPID to item 1 of argv as integer
+    set operation to item 2 of argv
     tell application "System Events"
-        tell process (item 1 of argv)
-            get name of every window
+        tell (first process whose unix id is targetPID)
+            set frontmost to true
+            set lastState to ""
+            repeat 100 times
+                repeat with candidateWindow in windows
+                    try
+                        set windowName to name of candidateWindow as text
+                        set windowRole to role of candidateWindow as text
+                        set windowSubrole to subrole of candidateWindow as text
+                        set buttonNames to name of every button of candidateWindow
+                        set buttonActions to "unavailable"
+                        try
+                            set buttonActions to actions of button "Cancel" of candidateWindow as text
+                        end try
+                        set lastState to windowName & " | " & windowRole & " | " & windowSubrole & ¬
+                            " | buttons=" & (buttonNames as text) & " | Cancel actions=" & buttonActions
+                        if buttonNames contains "Cancel" then
+                            if enabled of button "Cancel" of candidateWindow and ¬
+                                ((operation starts with "open" and buttonNames contains "Open") or ¬
+                                (operation starts with "save" and buttonNames contains "Save")) then
+                                return "NFD_PANEL_READY=" & lastState
+                            end if
+                        end if
+                    end try
+                    try
+                        repeat with candidateSheet in sheets of candidateWindow
+                            set sheetName to name of candidateSheet as text
+                            set sheetRole to role of candidateSheet as text
+                            set sheetSubrole to subrole of candidateSheet as text
+                            set buttonNames to name of every button of candidateSheet
+                            set buttonActions to "unavailable"
+                            try
+                                set buttonActions to actions of button "Cancel" of candidateSheet as text
+                            end try
+                            set lastState to sheetName & " | " & sheetRole & " | " & sheetSubrole & ¬
+                                " | buttons=" & (buttonNames as text) & " | Cancel actions=" & buttonActions
+                            if buttonNames contains "Cancel" then
+                                if enabled of button "Cancel" of candidateSheet and ¬
+                                    ((operation starts with "open" and buttonNames contains "Open") or ¬
+                                    (operation starts with "save" and buttonNames contains "Save")) then
+                                    return "NFD_PANEL_READY=" & lastState
+                                end if
+                            end if
+                        end repeat
+                    end try
+                end repeat
+                delay 0.2
+            end repeat
+            error "NFD_PANEL_TIMEOUT; pid=" & targetPID & "; operation=" & operation & "; last role/subrole/buttons=" & lastState
         end tell
     end tell
 end run
 '''
 
 SELECT_SCRIPT = '''on run argv
-    set targetProcessName to item 1 of argv
+    set targetPID to item 1 of argv as integer
     set operation to item 2 of argv
     set directoryPath to item 3 of argv
     set selectedName to item 4 of argv
     tell application "System Events"
-        tell process targetProcessName
+        tell (first process whose unix id is targetPID)
             set frontmost to true
+            set dialogPanel to missing value
+            repeat 100 times
+                repeat with candidateWindow in windows
+                    try
+                        set candidateButtons to name of every button of candidateWindow
+                        if candidateButtons contains "Cancel" and ¬
+                            ((operation starts with "open" and candidateButtons contains "Open") or ¬
+                            (operation starts with "save" and candidateButtons contains "Save")) then
+                            set dialogPanel to candidateWindow
+                            exit repeat
+                        end if
+                    end try
+                    try
+                        repeat with candidateSheet in sheets of candidateWindow
+                            set candidateButtons to name of every button of candidateSheet
+                            if candidateButtons contains "Cancel" and ¬
+                                ((operation starts with "open" and candidateButtons contains "Open") or ¬
+                                (operation starts with "save" and candidateButtons contains "Save")) then
+                                set dialogPanel to candidateSheet
+                                exit repeat
+                            end if
+                        end repeat
+                    end try
+                    if dialogPanel is not missing value then exit repeat
+                end repeat
+                if dialogPanel is not missing value then exit repeat
+                delay 0.1
+            end repeat
+            if dialogPanel is missing value then error "The observable native file panel disappeared before interaction"
             if operation is "open-select" then
                 keystroke "g" using {command down, shift down}
-                delay 0.5
-                keystroke directoryPath
-                key code 36
-                delay 1
+                set goSheet to missing value
+                repeat 100 times
+                    repeat with candidateWindow in windows
+                        try
+                            if (count of sheets of candidateWindow) > 0 then
+                                set possibleSheet to sheet 1 of candidateWindow
+                                if (count of text fields of possibleSheet) > 0 then
+                                    set goSheet to possibleSheet
+                                    exit repeat
+                                end if
+                            end if
+                        end try
+                    end repeat
+                    if goSheet is not missing value then exit repeat
+                    delay 0.1
+                end repeat
+                if goSheet is missing value then error "Go to Folder sheet did not expose a text field after Cmd-Shift-G"
+                set value of text field 1 of goSheet to directoryPath
+                if (value of text field 1 of goSheet as text) is not directoryPath then
+                    error "Go to Folder field did not retain the requested Unicode directory path"
+                end if
+                if not enabled of button "Go" of goSheet then error "Go to Folder confirmation remained disabled"
+                perform action "AXPress" of button "Go" of goSheet
+                repeat 100 times
+                    try
+                        if enabled of button "Open" of dialogPanel then exit repeat
+                    end try
+                    delay 0.1
+                end repeat
                 keystroke selectedName
-                delay 0.5
-                key code 36
+                repeat 100 times
+                    try
+                        if enabled of button "Open" of dialogPanel then exit repeat
+                    end try
+                    delay 0.1
+                end repeat
+                if not enabled of button "Open" of dialogPanel then error "Open remained disabled after selecting the Unicode filename"
+                perform action "AXPress" of button "Open" of dialogPanel
             else if operation is "open-cancel" or operation is "save-cancel" then
-                delay 1
-                key code 53
+                perform action "AXPress" of button "Cancel" of dialogPanel
             else if operation is "save-select" then
-                key code 36
+                set savePanel to dialogPanel
+                if (count of text fields of savePanel) is 0 then error "Save panel did not expose its filename field"
+                set value of text field 1 of savePanel to selectedName
+                if (value of text field 1 of savePanel as text) is not selectedName then
+                    error "Save filename field did not retain the requested Unicode filename"
+                end if
+                repeat 100 times
+                    if enabled of button "Save" of savePanel then exit repeat
+                    delay 0.1
+                end repeat
+                if not enabled of button "Save" of savePanel then error "Save remained disabled after filename entry"
+                perform action "AXPress" of button "Save" of savePanel
             end if
         end tell
     end tell
@@ -165,12 +315,25 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
     )
     output_reader = FixtureOutput(process, log_path)
     while True:
-        try:
-            line = output_reader.lines.get(timeout=remaining_seconds())
-        except queue.Empty:
+        if output_reader.ready_line:
+            if not output_reader.ready_line.startswith(f"NFD_DIALOG_READY={scenario};"):
+                if not stop_fixture(process, output_reader):
+                    return 1, "fixture process group or output reader remained active after a mismatched readiness marker"
+                return 1, f"fixture reported readiness for an unexpected scenario: {output_reader.ready_line}"
+            break
+        if output_reader.failure_lines:
+            if not stop_fixture(process, output_reader):
+                return 1, "fixture process group or output reader remained active after setup failure"
+            return process.returncode or 1, "; ".join(output_reader.failure_lines)
+        remaining = remaining_seconds()
+        if remaining <= 0:
             if not stop_fixture(process, output_reader):
                 return 1, "fixture process group or output reader survived bounded timeout cleanup"
             return 1, f"native dialog fixture did not become ready within its {timeout_seconds}s case bound"
+        try:
+            line = output_reader.lines.get(timeout=min(0.5, remaining))
+        except queue.Empty:
+            continue
         if line is None:
             try:
                 exit_code = process.wait(timeout=remaining_seconds())
@@ -186,20 +349,18 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             if output_reader.thread.is_alive():
                 return 1, "fixture output reader remained active after process exit"
             return exit_code or 1, "fixture exited before opening a native panel"
-        if line.startswith(f"NFD_DIALOG_READY={scenario};"):
-            break
         if line.startswith("NFD_FIXTURE=FAIL;"):
             if not stop_fixture(process, output_reader):
                 return 1, "fixture process group or output reader remained active after setup failure"
             return process.returncode or 1, f"fixture failed before opening a panel: {line.rstrip()}"
 
-    process_name = fixture.stem
+    process_id = str(process.pid)
     remaining = remaining_seconds()
     if remaining <= 0:
         if not stop_fixture(process, output_reader):
             return 1, "fixture process group or output reader survived bounded deadline cleanup"
         return 1, f"native dialog fixture exhausted its {timeout_seconds}s case bound before the Accessibility probe"
-    probe_code, probe_output = apple_script(ACCESSIBILITY_PROBE, process_name, timeout=min(30, remaining))
+    probe_code, probe_output = apple_script(PANEL_READY_PROBE, process_id, scenario, timeout=min(30, remaining))
     if probe_code != 0:
         if not stop_fixture(process, output_reader):
             return 1, "fixture process group or output reader survived cleanup after the Accessibility probe"
@@ -215,7 +376,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
         return 1, f"native dialog fixture exhausted its {timeout_seconds}s case bound before panel automation"
     automation_code, automation_output = apple_script(
         SELECT_SCRIPT,
-        process_name,
+        process_id,
         scenario,
         str(expected_path.parent),
         expected_path.name,
@@ -239,16 +400,16 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
     if output_reader.thread.is_alive():
         return 1, "native dialog fixture output did not close after process exit"
     if exit_code != 0:
-        return exit_code, f"fixture exited with status {exit_code}"
+        detail = "; ".join(output_reader.failure_lines) or f"fixture exited with status {exit_code}"
+        return exit_code, detail
 
-    full_log = output_reader.buffer.decode("utf-8", errors="replace")
-    if "NFD_DIALOG_POST_USE=PASS" not in full_log or f"scenario={scenario}" not in full_log:
+    if not output_reader.post_use_line or f"scenario={scenario}" not in output_reader.post_use_line:
         return 1, "fixture did not prove post-dialog window usability"
     if scenario.endswith("cancel"):
         expected_marker = f"NFD_DIALOG_RESULT=CANCELLED; scenario={scenario}"
     else:
         expected_marker = f"NFD_DIALOG_RESULT=SELECTED; scenario={scenario}; path={expected_path}"
-    if expected_marker not in full_log:
+    if output_reader.result_line != expected_marker:
         return 1, f"fixture did not report the expected result marker: {expected_marker}"
     return 0, f"NFD_DIALOG_SCENARIO=PASS; scenario={scenario}"
 

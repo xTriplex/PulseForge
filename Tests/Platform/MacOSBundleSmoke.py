@@ -10,7 +10,13 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
+
+MAX_LOG_BYTES = 256 * 1024
+MAX_CONSOLE_BYTES = 32 * 1024
+MAX_EVIDENCE_LINES = 256
+MAX_EVIDENCE_LINE_BYTES = 2048
 
 
 def fail(message: str, log_path: Path | None = None) -> int:
@@ -33,32 +39,73 @@ def run_bounded(command: list[str], cwd: Path, environment: dict[str, str], time
         text=True,
         start_new_session=True,
     )
+    captured = bytearray()
+    evidence: list[str] = []
+    validation_errors: list[str] = []
+    console_bytes = 0
+
+    def read_output() -> None:
+        nonlocal console_bytes
+        assert process.stdout is not None
+        for line in process.stdout:
+            encoded = line.encode("utf-8", errors="replace")
+            if len(captured) < MAX_LOG_BYTES:
+                captured.extend(encoded[: MAX_LOG_BYTES - len(captured)])
+            if any(token in line for token in ("PULSEFORGE_", "Profile:", "NVRHI:", "VUID-", "Vulkan error (")):
+                if len(evidence) < MAX_EVIDENCE_LINES:
+                    evidence.append(encoded[:MAX_EVIDENCE_LINE_BYTES].decode("utf-8", errors="replace"))
+            lowered = line.lower()
+            if ("VUID-" in line or "Vulkan error (" in line or
+                    ("NVRHI:" in line and ("[error]" in lowered or "[critical]" in lowered))):
+                if len(validation_errors) < 32:
+                    validation_errors.append(encoded[:MAX_EVIDENCE_LINE_BYTES].decode("utf-8", errors="replace"))
+            if console_bytes < MAX_CONSOLE_BYTES:
+                printable = encoded[: MAX_CONSOLE_BYTES - console_bytes].decode("utf-8", errors="replace")
+                print(printable, end="")
+                console_bytes += len(encoded)
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
     try:
-        output, _ = process.communicate(timeout=timeout)
+        process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
         try:
-            output, _ = process.communicate(timeout=10)
+            process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
                 pass
-            try:
-                output, _ = process.communicate(timeout=5)
-            except subprocess.TimeoutExpired as error:
-                output = error.stdout or ""
-                if isinstance(output, bytes):
-                    output = output.decode("utf-8", errors="replace")
-                log_path.write_text(output, encoding="utf-8")
-                raise TimeoutError("process group survived bounded SIGKILL cleanup")
-        log_path.write_text(output, encoding="utf-8")
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.stdout.close()
+            reader.join(timeout=5)
+            log_path.write_bytes(captured)
+            raise TimeoutError("bundle process survived bounded SIGKILL cleanup")
+        reader.join(timeout=5)
+        log_path.write_bytes(captured)
+        if reader.is_alive():
+            raise TimeoutError("process group or bundle output reader survived bounded timeout cleanup")
         raise TimeoutError(f"process exceeded the {timeout}s bound; process group was terminated")
-    log_path.write_text(output, encoding="utf-8")
-    print(output, end="")
+    reader.join(timeout=5)
+    if reader.is_alive():
+        log_path.write_bytes(captured)
+        raise TimeoutError("bundle output reader remained active after process exit")
+    log_path.write_bytes(captured)
+    output = captured.decode("utf-8", errors="replace")
+    if len(captured) >= MAX_LOG_BYTES:
+        output += "\nMACOS_BUNDLE_SMOKE_LOG=TRUNCATED; required markers and validation diagnostics were streamed separately\n"
+    output += "".join(evidence)
+    output += "".join(validation_errors)
     return process.returncode, output
 
 
@@ -87,6 +134,18 @@ def require_resources(bundle: Path, executable_name: str, paths: tuple[Path, ...
     if not executable.is_file() or not os.access(executable, os.X_OK):
         raise RuntimeError(f"{bundle.name} executable is missing or not executable: {executable}")
     return executable
+
+
+def sdk_assisted_runtime_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    sdk = environment.get("VULKAN_SDK")
+    if not sdk or not Path(sdk).is_dir():
+        raise RuntimeError("relocated developer-bundle smoke requires the configured Vulkan SDK runtime")
+    for name in tuple(environment):
+        if name.startswith("DYLD_") or name.startswith("VK_"):
+            environment.pop(name, None)
+    print("MACOS_BUNDLE_RUNTIME_CONTRACT=SDK_ASSISTED_DEVELOPER_BUNDLE; VULKAN_SDK retained; inherited DYLD/VK overrides removed")
+    return environment
 
 
 def main() -> int:
@@ -142,9 +201,8 @@ def main() -> int:
             editor_project_path = copied_project_root / editor_project.name
             isolated_settings = root / "Isolated Editor Settings Ω"
             isolated_settings.mkdir()
-            editor_environment = os.environ.copy()
+            editor_environment = sdk_assisted_runtime_environment()
             editor_environment["PULSEFORGE_EDITOR_SETTINGS_DIR"] = str(isolated_settings)
-            editor_environment.pop("DYLD_LIBRARY_PATH", None)
             editor_code, editor_output = run_bounded(
                 [str(editor_executable), "--project-open-render-test", str(editor_project_path)],
                 editor_cwd,
@@ -165,9 +223,8 @@ def main() -> int:
             )
             print("MACOS_EDITOR_BUNDLE_SMOKE=PASS; relocated bundle/resources, external project with spaces and Ω, unrelated cwd, render callback, clean shutdown")
 
-            player_environment = os.environ.copy()
+            player_environment = sdk_assisted_runtime_environment()
             player_environment["PULSEFORGE_PLAYER_SMOKE_EXIT_AFTER_RENDER"] = "1"
-            player_environment.pop("DYLD_LIBRARY_PATH", None)
             player_code, player_output = run_bounded(
                 [str(player_executable)],
                 player_cwd,

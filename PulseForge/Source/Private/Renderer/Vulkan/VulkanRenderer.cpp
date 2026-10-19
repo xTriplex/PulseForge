@@ -10,6 +10,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include "Renderer/Vulkan/VulkanRendererShutdown.h"
 #include "Renderer/Vulkan/VulkanResourceObjects.h"
 #include "Renderer/Vulkan/VulkanSupport.h"
+#include "Window/Platform/GLFW/GLFWWindow.h"
 #include "Window/Window.h"
 
 #include <nvrhi/validation.h>
@@ -2757,34 +2758,17 @@ namespace PulseForge
 		void InitializeVulkanLoader()
 		{
 #if defined(__APPLE__)
-			if (const char* VulkanSdk = std::getenv("VULKAN_SDK"); VulkanSdk && VulkanSdk[0] != '\0')
-			{
-				const std::filesystem::path LibraryDirectory = std::filesystem::path(VulkanSdk) / "lib";
-				const std::filesystem::path VersionedLibrary = LibraryDirectory / "libvulkan.1.dylib";
-				const std::filesystem::path UnversionedLibrary = LibraryDirectory / "libvulkan.dylib";
-				std::error_code FileError;
-				if (std::filesystem::is_regular_file(VersionedLibrary, FileError) && !FileError)
-					m_VulkanLoader = std::make_unique<vk::detail::DynamicLoader>(VersionedLibrary.string());
-				else
-				{
-					FileError.clear();
-					if (std::filesystem::is_regular_file(UnversionedLibrary, FileError) && !FileError)
-						m_VulkanLoader = std::make_unique<vk::detail::DynamicLoader>(UnversionedLibrary.string());
-				}
-				if (!m_VulkanLoader)
-					throw std::runtime_error("VULKAN_SDK is set but its lib directory contains no libvulkan.1.dylib or libvulkan.dylib");
-			}
+			const auto GLFWProcAddress = GLFWWindow::GetVulkanLoaderProcAddress();
+			if (!GLFWProcAddress)
+				throw std::runtime_error("GLFW did not retain the Vulkan loader selected before initialization");
+			const auto GetInstanceProcAddress = reinterpret_cast<PFN_vkGetInstanceProcAddr>(GLFWProcAddress);
 #endif
+#if !defined(__APPLE__)
 			if (!m_VulkanLoader) m_VulkanLoader = std::make_unique<vk::detail::DynamicLoader>();
 			const auto GetInstanceProcAddress = m_VulkanLoader->getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
+#endif
 			if (!GetInstanceProcAddress)
 				throw std::runtime_error("The Vulkan loader does not export vkGetInstanceProcAddr");
-
-#if defined(__APPLE__)
-			// Use the loader selected above for GLFW too. In particular, this lets an SDK-installed loader
-			// be found without requiring DYLD_LIBRARY_PATH to be set before process startup.
-			glfwInitVulkanLoader(GetInstanceProcAddress);
-#endif
 
 			VULKAN_HPP_DEFAULT_DISPATCHER.init(GetInstanceProcAddress);
 			const uint32_t LoaderVersion = vk::enumerateInstanceVersion();

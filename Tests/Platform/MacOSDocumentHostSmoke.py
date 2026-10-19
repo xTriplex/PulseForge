@@ -16,11 +16,13 @@ import time
 from pathlib import Path
 
 MAX_LOG_BYTES = 128 * 1024
+MAX_CONSOLE_BYTES = 64 * 1024
 TCC_DENIALS = ("not allowed assistive access", "not authorized to send apple events", "(-1719)", "(-1743)")
 
 WINDOW_QUERY = '''on run argv
+    set targetPID to item 1 of argv as integer
     tell application "System Events"
-        tell process (item 1 of argv)
+        tell (first process whose unix id is targetPID)
             get name of every window
         end tell
     end tell
@@ -28,11 +30,15 @@ end run
 '''
 
 MAIN_WINDOW_CLOSE = '''on run argv
+    set targetPID to item 1 of argv as integer
     tell application "System Events"
-        tell process (item 1 of argv)
+        tell (first process whose unix id is targetPID)
             set editorWindows to every window whose name contains "PulseForge Editor"
             if (count of editorWindows) is 0 then error "No PulseForge Editor top-level window was exposed"
-            click (first button of item 1 of editorWindows)
+            set closeControl to close button of item 1 of editorWindows
+            set availableActions to actions of closeControl
+            if availableActions does not contain "AXPress" then error "The native close control does not expose AXPress; actions=" & (availableActions as text)
+            perform action "AXPress" of closeControl
         end tell
     end tell
 end run
@@ -49,9 +55,12 @@ SUCCESS_MARKERS = (
 
 class BoundedOutput:
     def __init__(self, process: subprocess.Popen[str], log_path: Path):
-        self.lines: queue.Queue[str | None] = queue.Queue()
+        self.lines: queue.Queue[str | None] = queue.Queue(maxsize=128)
         self.buffer = bytearray()
         self.log_path = log_path
+        self.markers: set[str] = set()
+        self.failures: list[str] = []
+        self.console_bytes = 0
 
         def read() -> None:
             assert process.stdout is not None
@@ -59,9 +68,33 @@ class BoundedOutput:
                 encoded = line.encode("utf-8", errors="replace")
                 if len(self.buffer) < MAX_LOG_BYTES:
                     self.buffer.extend(encoded[: MAX_LOG_BYTES - len(self.buffer)])
-                print(line, end="")
-                self.lines.put(line)
-            self.lines.put(None)
+                if self.console_bytes < MAX_CONSOLE_BYTES:
+                    printable = encoded[: MAX_CONSOLE_BYTES - self.console_bytes].decode("utf-8", errors="replace")
+                    print(printable, end="")
+                    self.console_bytes += len(encoded)
+                for marker in SUCCESS_MARKERS:
+                    if marker in line:
+                        self.markers.add(marker)
+                lowered = line.lower()
+                if "document tab" in lowered and (" failed" in lowered or " timed out" in lowered or "[error]" in lowered):
+                    if len(self.failures) < 16:
+                        self.failures.append(line.rstrip())
+                try:
+                    self.lines.put_nowait(line)
+                except queue.Full:
+                    try:
+                        self.lines.get_nowait()
+                    except queue.Empty:
+                        pass
+                    self.lines.put_nowait(line)
+            try:
+                self.lines.put_nowait(None)
+            except queue.Full:
+                try:
+                    self.lines.get_nowait()
+                except queue.Empty:
+                    pass
+                self.lines.put_nowait(None)
             log_path.write_bytes(self.buffer)
 
         self.thread = threading.Thread(target=read, daemon=True)
@@ -91,10 +124,10 @@ def stop_process_group(process: subprocess.Popen[str]) -> bool:
     return process.poll() is not None
 
 
-def run_osascript(script: str, process_name: str, timeout: float) -> tuple[int, str]:
+def run_osascript(script: str, process_id: str, timeout: float) -> tuple[int, str]:
     try:
         result = subprocess.run(
-            ["/usr/bin/osascript", "-", process_name],
+            ["/usr/bin/osascript", "-", process_id],
             input=script,
             text=True,
             stdout=subprocess.PIPE,
@@ -187,11 +220,12 @@ def main() -> int:
                 break
             if line:
                 lowered = line.lower()
-                if "document tab" in lowered and (" failed" in lowered or " timed out" in lowered or "[error]" in lowered):
-                    failures.append(line.rstrip())
-                    break
                 if "development document-host fixture enabled" in lowered:
                     fixture_ready = True
+
+            if capture.failures:
+                failures.extend(capture.failures)
+                break
 
             # Accessibility queries can block while the editor is still creating its
             # first project window. Wait for the fixture's explicit ready log before
@@ -203,7 +237,7 @@ def main() -> int:
             if not observed_native_windows and now >= next_window_query:
                 next_window_query = now + 1.0
                 query_code, query_output = run_osascript(
-                    WINDOW_QUERY, editor.stem, timeout=min(5.0, max(0.1, deadline - now))
+                    WINDOW_QUERY, str(process.pid), timeout=min(5.0, max(0.1, deadline - now))
                 )
                 if query_code != 0:
                     if has_tcc_denial(query_output):
@@ -216,8 +250,7 @@ def main() -> int:
                 if len(window_names) >= 2 and fixture_titles:
                     observed_native_windows = True
 
-            output_text = capture.buffer.decode("utf-8", errors="replace")
-            if all(marker in output_text for marker in SUCCESS_MARKERS) and observed_native_windows:
+            if all(marker in capture.markers for marker in SUCCESS_MARKERS) and observed_native_windows:
                 print(
                     "MACOS_DOCUMENT_HOST_NATIVE_WINDOWS=PASS; accessibility observed native fixture windows: "
                     + repr(fixture_titles)
@@ -244,8 +277,7 @@ def main() -> int:
                 return fail("editor did not report that the document-host fixture reached its UI-ready state", log_path)
             return fail("Accessibility did not observe a separate Host Test Fixture native window", log_path)
 
-        output_text = capture.buffer.decode("utf-8", errors="replace")
-        missing = [marker for marker in SUCCESS_MARKERS if marker not in output_text]
+        missing = [marker for marker in SUCCESS_MARKERS if marker not in capture.markers]
         if missing:
             stop_process_group(process)
             capture.thread.join(timeout=5)
@@ -253,7 +285,7 @@ def main() -> int:
 
         close_code, close_output = run_osascript(
             MAIN_WINDOW_CLOSE,
-            editor.stem,
+            str(process.pid),
             timeout=min(10.0, max(0.1, deadline - time.monotonic())),
         )
         if close_code != 0:
@@ -274,8 +306,7 @@ def main() -> int:
             return fail("editor output reader remained active after process exit", log_path)
         if exit_code != 0:
             return fail(f"editor exited with status {exit_code}", log_path)
-        output_text = capture.buffer.decode("utf-8", errors="replace")
-        if any(marker not in output_text for marker in SUCCESS_MARKERS):
+        if any(marker not in capture.markers for marker in SUCCESS_MARKERS):
             return fail("fixture success evidence was incomplete at shutdown", log_path)
         print(
             "MACOS_DOCUMENT_HOST_SMOKE=PASS; native NSWindow observed; synthetic fixture preserved one session through "

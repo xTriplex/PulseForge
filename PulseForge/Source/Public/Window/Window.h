@@ -33,6 +33,7 @@ namespace PulseForge
 	enum class EWindowClientAPI
 	{
 		OpenGL,
+		Vulkan,
 		None
 	};
 
