@@ -13,12 +13,30 @@ concurrency:
 
 jobs:
   macos-core:
-    name: macOS 15 · Apple Silicon · Core CPU probe
+    name: macOS 15 · Apple Silicon · Metal/MoltenVK and Core probes
     runs-on: macos-15
     timeout-minutes: 45
     steps:
       - name: Check out sources
         uses: actions/checkout@v5
+
+      - name: Probe hosted Metal command execution
+        run: swift Tests/Platform/MacOSMetalCapabilityProbe.swift
+
+      - name: Probe MoltenVK native-window presentation
+        run: |
+          set -o pipefail
+          brew install vulkan-tools 2>&1 | tee "$RUNNER_TEMP/moltenvk-install.log"
+          brew list --versions molten-vk vulkan-loader vulkan-tools
+          VK_DRIVER_FILES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json" \
+            vulkaninfo --summary 2>&1 | tee "$RUNNER_TEMP/vulkaninfo.log"
+          VK_DRIVER_FILES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json" \
+            vulkaninfo --show-formats > "$RUNNER_TEMP/vulkaninfo-full.log" 2>&1
+          grep -Ei 'deviceName|apiVersion|VK_KHR_portability_(enumeration|subset)|VK_KHR_swapchain|VK_KHR_dynamic_rendering|VK_KHR_synchronization2|VK_EXT_metal_surface|timelineSemaphore|dynamicRendering|synchronization2|shaderDemoteToHelperInvocation|D32|depth' \
+            "$RUNNER_TEMP/vulkaninfo-full.log" | tee "$RUNNER_TEMP/moltenvk-capabilities.log" || true
+          VK_DRIVER_FILES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json" \
+            "$(brew --prefix vulkan-tools)/cube/vkcube.app/Contents/MacOS/vkcube" \
+            --wsi metal --c 5 2>&1 | tee "$RUNNER_TEMP/vkcube.log"
 
       - name: Initialize the Core logging dependency
         run: git submodule update --init PulseForge/Vendor/spdlog
@@ -52,6 +70,11 @@ jobs:
             ${{ runner.temp }}/configure.log
             ${{ runner.temp }}/build.log
             ${{ runner.temp }}/ctest.log
+            ${{ runner.temp }}/moltenvk-install.log
+            ${{ runner.temp }}/vulkaninfo.log
+            ${{ runner.temp }}/vulkaninfo-full.log
+            ${{ runner.temp }}/moltenvk-capabilities.log
+            ${{ runner.temp }}/vkcube.log
             Build/CI/macos-core/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/macos-core/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
