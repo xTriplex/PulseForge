@@ -22,8 +22,62 @@ TCC_DENIALS = ("not allowed assistive access", "not authorized to send apple eve
 WINDOW_QUERY = '''on run argv
     set targetPID to item 1 of argv as integer
     tell application "System Events"
-        tell (first process whose unix id is targetPID)
-            get name of every window
+        set targetProcess to first process whose unix id is targetPID
+        tell targetProcess
+            set processName to name as text
+            set windowNames to name of every window
+            set indexedWindowNames to {}
+            repeat with windowIndex from 1 to count of windowNames
+                set end of indexedWindowNames to (windowIndex as text) & tab & (item windowIndex of windowNames as text)
+            end repeat
+            set AppleScript's text item delimiters to linefeed
+            set windowSnapshot to indexedWindowNames as text
+            set AppleScript's text item delimiters to ""
+            return processName & linefeed & windowSnapshot
+        end tell
+    end tell
+end run
+'''
+
+MAIN_WINDOW_SHEET_SNAPSHOT = '''on run argv
+    set targetPID to item 1 of argv as integer
+    set targetIndex to item 2 of argv as integer
+    set expectedWindowName to item 3 of argv as text
+    tell application "System Events"
+        set targetProcess to first process whose unix id is targetPID
+        tell targetProcess
+            set targetWindow to window targetIndex
+            set windowTitle to name of targetWindow
+            if windowTitle is not expectedWindowName then error "Main window changed before sheet snapshot: " & quoted form of windowTitle
+            try
+                set sheetNames to name of every sheet of targetWindow
+                return "MACOS_DOCUMENT_HOST_MAIN_SHEETS=PASS; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; sheets=" & (sheetNames as text)
+            on error errorMessage number errorNumber
+                return "MACOS_DOCUMENT_HOST_MAIN_SHEETS=UNAVAILABLE; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; error=" & errorMessage & " (" & (errorNumber as text) & ")"
+            end try
+        end tell
+    end tell
+end run
+'''
+
+CLOSE_BUTTON_ACTIONS = '''on run argv
+    set targetPID to item 1 of argv as integer
+    set targetIndex to item 2 of argv as integer
+    set expectedWindowName to item 3 of argv as text
+    tell application "System Events"
+        set targetProcess to first process whose unix id is targetPID
+        tell targetProcess
+            set targetWindow to window targetIndex
+            set windowTitle to name of targetWindow
+            if windowTitle is not expectedWindowName then error "Main window changed before close-action query: " & quoted form of windowTitle
+            set windowRole to role of targetWindow
+            set windowSubrole to subrole of targetWindow
+            set closeControl to value of attribute "AXCloseButton" of targetWindow
+            if closeControl is missing value then error "AXCloseButton is missing for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle
+            set closeRole to role of closeControl
+            set closeSubrole to subrole of closeControl
+            set availableActions to actions of closeControl
+            return "MACOS_DOCUMENT_HOST_CLOSE_ACTIONS=PASS; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; window role/subrole=" & windowRole & "/" & windowSubrole & "; close control role/subrole=" & closeRole & "/" & closeSubrole & "; actions=" & (availableActions as text)
         end tell
     end tell
 end run
@@ -31,14 +85,22 @@ end run
 
 MAIN_WINDOW_CLOSE = '''on run argv
     set targetPID to item 1 of argv as integer
+    set targetIndex to item 2 of argv as integer
+    set expectedWindowName to item 3 of argv as text
     tell application "System Events"
-        tell (first process whose unix id is targetPID)
-            set editorWindows to every window whose name contains "PulseForge Editor"
-            if (count of editorWindows) is 0 then error "No PulseForge Editor top-level window was exposed"
-            set closeControl to close button of item 1 of editorWindows
-            set availableActions to actions of closeControl
-            if availableActions does not contain "AXPress" then error "The native close control does not expose AXPress; actions=" & (availableActions as text)
-            perform action "AXPress" of closeControl
+        set targetProcess to first process whose unix id is targetPID
+        tell targetProcess
+            set targetWindow to window targetIndex
+            set windowTitle to name of targetWindow
+            if windowTitle is not expectedWindowName then error "Main-window close target changed to " & quoted form of windowTitle
+            set closeControl to value of attribute "AXCloseButton" of targetWindow
+            if closeControl is missing value then error "AXCloseButton is missing for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle
+            try
+                perform action "AXPress" of closeControl
+            on error errorMessage number errorNumber
+                error "AXPress failed for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle & ": " & errorMessage & " (" & (errorNumber as text) & ")"
+            end try
+            return "MACOS_DOCUMENT_HOST_CLOSE_PRESS=RETURNED; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; target=AXCloseButton; action=AXPress"
         end tell
     end tell
 end run
@@ -124,10 +186,15 @@ def stop_process_group(process: subprocess.Popen[str]) -> bool:
     return process.poll() is not None
 
 
-def run_osascript(script: str, process_id: str, timeout: float) -> tuple[int, str]:
+def run_osascript(
+    script: str,
+    process_id: str,
+    timeout: float,
+    *script_arguments: str,
+) -> tuple[int, str]:
     try:
         result = subprocess.run(
-            ["/usr/bin/osascript", "-", process_id],
+            ["/usr/bin/osascript", "-", process_id, *script_arguments],
             input=script,
             text=True,
             stdout=subprocess.PIPE,
@@ -141,6 +208,32 @@ def run_osascript(script: str, process_id: str, timeout: float) -> tuple[int, st
         if isinstance(output, bytes):
             output = output.decode("utf-8", errors="replace")
         return 124, output + "\nAppleScript operation timed out\n"
+
+
+def close_failure_diagnostics(
+    process_id: str,
+    window_arguments: tuple[str, str],
+    deadline: float,
+) -> list[str]:
+    diagnostics: list[str] = []
+    for label, script, timeout in (
+        ("MAIN_SHEETS", MAIN_WINDOW_SHEET_SNAPSHOT, 3.0),
+        ("CLOSE_ACTIONS", CLOSE_BUTTON_ACTIONS, 3.0),
+    ):
+        code, output = run_osascript(
+            script,
+            process_id,
+            min(timeout, max(0.1, deadline - time.monotonic())),
+            *window_arguments,
+        )
+        if code == 0:
+            result = output.strip()
+        else:
+            state = "TCC_DENIAL" if has_tcc_denial(output) else "TIMED_OUT" if code == 124 else "ERROR"
+            result = f"{label}={state}; exit_code={code}; detail={output.strip()}"
+        diagnostics.append(result)
+        print(f"MACOS_DOCUMENT_HOST_FAILURE_DIAGNOSTIC={result}")
+    return diagnostics
 
 
 def has_tcc_denial(output: str) -> bool:
@@ -207,6 +300,9 @@ def main() -> int:
     fixture_ready = False
     observed_native_windows = False
     next_window_query = 0.0
+    observed_process_name = "<unknown>"
+    observed_windows: list[tuple[int, str]] = []
+    fixture_titles: list[str] = []
     saw_tcc_denial = False
     failures: list[str] = []
 
@@ -245,15 +341,25 @@ def main() -> int:
                         break
                     failures.append(f"Accessibility window query failed: {query_output.strip()}")
                     break
-                window_names = [name.strip() for name in query_output.strip().split(",") if name.strip()]
-                fixture_titles = [name for name in window_names if "Host Test Fixture" in name]
-                if len(window_names) >= 2 and fixture_titles:
+                snapshot_lines = [entry for entry in query_output.splitlines() if entry.strip()]
+                observed_process_name = snapshot_lines[0].strip() if snapshot_lines else "<missing>"
+                observed_windows = []
+                for entry in snapshot_lines[1:]:
+                    index_text, separator, window_title = entry.partition("\t")
+                    if separator and index_text.strip().isdigit():
+                        observed_windows.append((int(index_text.strip()), window_title.strip()))
+                fixture_titles = [title for _, title in observed_windows if "Host Test Fixture" in title]
+                if len(observed_windows) >= 2 and fixture_titles:
                     observed_native_windows = True
 
             if all(marker in capture.markers for marker in SUCCESS_MARKERS) and observed_native_windows:
                 print(
-                    "MACOS_DOCUMENT_HOST_NATIVE_WINDOWS=PASS; accessibility observed native fixture windows: "
-                    + repr(fixture_titles)
+                    "MACOS_DOCUMENT_HOST_NATIVE_WINDOWS=PASS; pid="
+                    + str(process.pid)
+                    + "; process="
+                    + observed_process_name
+                    + "; indexed windows="
+                    + repr(observed_windows)
                 )
                 break
             if process.poll() is not None:
@@ -283,24 +389,94 @@ def main() -> int:
             capture.thread.join(timeout=5)
             return fail("fixture did not produce required round-trip evidence: " + repr(missing), log_path)
 
+        main_windows = [(index, title) for index, title in observed_windows if "PulseForge Editor" in title]
+        if len(main_windows) != 1:
+            stop_process_group(process)
+            capture.thread.join(timeout=5)
+            return fail(
+                "Accessibility did not identify exactly one main editor window by title; "
+                f"pid={process.pid}; process={observed_process_name}; indexed windows={observed_windows!r}",
+                log_path,
+            )
+        main_window_index, main_window_name = main_windows[0]
+        print(
+            f"MACOS_DOCUMENT_HOST_PROCESS=PASS; pid={process.pid}; process={observed_process_name}; "
+            f"main_window_index={main_window_index}; main_window={main_window_name!r}; "
+            f"all_windows={observed_windows!r}"
+        )
+
+        diagnostic_arguments = (str(main_window_index), main_window_name)
+        diagnostic_output: list[str] = []
+        exit_code: int | None = None
         close_code, close_output = run_osascript(
             MAIN_WINDOW_CLOSE,
             str(process.pid),
-            timeout=min(10.0, max(0.1, deadline - time.monotonic())),
+            min(10.0, max(0.1, deadline - time.monotonic())),
+            *diagnostic_arguments,
         )
         if close_code != 0:
-            stop_process_group(process)
-            capture.thread.join(timeout=5)
             if has_tcc_denial(close_output):
-                print("MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; native-window close request NOT RUN; acceptance blocked")
+                stop_process_group(process)
+                capture.thread.join(timeout=5)
+                print(
+                    "MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; native-window close request NOT RUN; "
+                    f"reason=TCC denial; detail={close_output.strip()}; acceptance blocked"
+                )
                 return 77
-            return fail(f"could not request normal main-window close: {close_output.strip()}", log_path)
+            if close_code == 124:
+                try:
+                    exit_code = process.wait(timeout=min(2.0, max(0.1, deadline - time.monotonic())))
+                except subprocess.TimeoutExpired:
+                    exit_code = None
+                if exit_code == 0:
+                    print(
+                        "MACOS_DOCUMENT_HOST_CLOSE_PRESS=TIMED_OUT_AFTER_NORMAL_EXIT; "
+                        f"pid={process.pid}; window={main_window_name!r}; process exited normally after AXPress request; "
+                        f"diagnostics={diagnostic_output!r}; detail={close_output.strip()}"
+                    )
+                else:
+                    diagnostic_output = close_failure_diagnostics(
+                        str(process.pid), diagnostic_arguments, deadline
+                    )
+                    stop_process_group(process)
+                    capture.thread.join(timeout=5)
+                    return fail(
+                        "Accessibility AXPress timed out while the editor remained open; "
+                        + f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
+                        + repr(diagnostic_output)
+                        + "; "
+                        + close_output.strip(),
+                        log_path,
+                    )
+            else:
+                diagnostic_output = close_failure_diagnostics(
+                    str(process.pid), diagnostic_arguments, deadline
+                )
+                stop_process_group(process)
+                capture.thread.join(timeout=5)
+                return fail(
+                    "could not request normal main-window close; "
+                    f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
+                    f"diagnostics={diagnostic_output!r}; detail={close_output.strip()}",
+                    log_path,
+                )
+        else:
+            print(close_output.strip())
         try:
-            exit_code = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            if exit_code is None:
+                exit_code = process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
+            diagnostic_output = close_failure_diagnostics(
+                str(process.pid), diagnostic_arguments, deadline
+            )
             stop_process_group(process)
             capture.thread.join(timeout=5)
-            return fail("editor did not exit after the native main-window close request before timeout", log_path)
+            return fail(
+                "editor did not exit after the native main-window close request before timeout; "
+                f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
+                f"diagnostics={diagnostic_output!r}",
+                log_path,
+            )
         capture.thread.join(timeout=5)
         if capture.thread.is_alive():
             return fail("editor output reader remained active after process exit", log_path)
