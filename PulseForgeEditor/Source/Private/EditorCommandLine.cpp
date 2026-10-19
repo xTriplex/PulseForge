@@ -101,6 +101,26 @@ namespace PulseForgeEditor
 				continue;
 #endif
 			}
+			if (Arguments[Index] == "--document-host-close-ui-test")
+			{
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
+				return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::UnexpectedArgument,
+					"The --document-host-close-ui-test option is available only in Debug builds." });
+#else
+				if (Options.DocumentHostCloseUiTestScenario)
+					return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::DuplicateOption,
+						"The --document-host-close-ui-test option may be specified only once." });
+				if (Index + 1 >= Arguments.size() || Arguments[Index + 1].starts_with("--"))
+					return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::UnexpectedArgument,
+						"The --document-host-close-ui-test option requires one scenario: cancel-save, discard, save-retry, or close-retry." });
+				const std::string_view Scenario = Arguments[++Index];
+				if (Scenario != "cancel-save" && Scenario != "discard" && Scenario != "save-retry" && Scenario != "close-retry")
+					return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::UnexpectedArgument,
+						"The document-host close UI scenario must be cancel-save, discard, save-retry, or close-retry." });
+				Options.DocumentHostCloseUiTestScenario = std::string(Scenario);
+				continue;
+#endif
+			}
 			if (Arguments[Index] == "--asset-preview-stress")
 			{
 				if (Options.AssetPreviewStressManifest)
@@ -153,7 +173,8 @@ namespace PulseForgeEditor
 						"--document-workspace-test-switch, and "
 						"--document-host-test-presentation-failure, --document-host-test-acquire-out-of-date, "
 						"--document-host-test-image-allocation-failure, and the Debug-only "
-						"--editor-runtime-play-stop-test." });
+						"--editor-runtime-play-stop-test, and the Debug-only "
+						"--document-host-close-ui-test <scenario>." });
 
 			if (Options.ProjectFile)
 				return std::unexpected(EditorCommandLineError{
@@ -188,6 +209,17 @@ namespace PulseForgeEditor
 		if (Options.EnableEditorRuntimePlayStopTest && !Options.ProjectFile)
 			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::MissingProjectPath,
 				"The --editor-runtime-play-stop-test option requires --project <path>." });
+		if (Options.DocumentHostCloseUiTestScenario && !Options.ProjectFile)
+			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::MissingProjectPath,
+				"The --document-host-close-ui-test option requires --project <path>." });
+		if (Options.DocumentHostCloseUiTestScenario &&
+			(Options.ProjectOpenRenderTestFile || Options.AssetPreviewStressManifest || Options.EnableEditorRuntimePlayStopTest ||
+				Options.EnableDocumentHostTestFixture || Options.EnableDocumentHostResetLayoutTest || Options.EnableDocumentHostTabTearOffTest ||
+				Options.EnableDocumentHostTabReattachTest || Options.EnableDocumentHostTabReorderTest ||
+				Options.EnableDocumentWorkspaceSwitchTest || Options.EnableDocumentHostPresentationFailureTest ||
+				Options.EnableDocumentHostAcquireOutOfDateTest || Options.EnableDocumentHostImageAllocationFailureTest))
+			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::UnexpectedArgument,
+				"The document-host close UI test must run by itself with --project <path>." });
 		if (Options.EnableEditorRuntimePlayStopTest &&
 			(Options.ProjectOpenRenderTestFile || Options.AssetPreviewStressManifest || Options.EnableDocumentHostTestFixture ||
 				Options.EnableDocumentHostResetLayoutTest || Options.EnableDocumentHostTabTearOffTest ||

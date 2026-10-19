@@ -17,9 +17,10 @@ namespace PulseForgeEditor::Detail
 	};
 
 	EditorDocumentHostTestEditor::EditorDocumentHostTestEditor(EditorDocumentManager& Documents, EditorDocumentEditorRegistry& Editors,
-		EditorStyle& Style, std::function<void(std::string)> ReportError, std::function<PulseForge::UUID()> ActiveProject)
+		EditorStyle& Style, std::function<void(std::string)> ReportError, std::function<PulseForge::UUID()> ActiveProject,
+		std::function<void(std::string_view, int, int, bool)> ReportCloseUiAllowClose)
 		: m_Documents(Documents), m_Editors(Editors), m_Style(Style), m_ReportError(std::move(ReportError)),
-		  m_ActiveProject(std::move(ActiveProject))
+		  m_ActiveProject(std::move(ActiveProject)), m_ReportCloseUiAllowClose(std::move(ReportCloseUiAllowClose))
 	{
 	}
 
@@ -33,6 +34,7 @@ namespace PulseForgeEditor::Detail
 			if (!IsFixtureIdentity(Context.Identity)) return std::unexpected("The identity is not a document-host test fixture");
 			auto SessionState = std::make_unique<State>();
 			if (const auto Saved = m_SavedValues.find(Context.Identity); Saved != m_SavedValues.end()) SessionState->Value = Saved->second;
+			m_LastKnownValues[Context.Identity] = SessionState->Value;
 			return std::unique_ptr<EditorDocumentEditorState>(std::move(SessionState));
 		};
 		Adapter.DrawWorkspace = [this](auto& Session)
@@ -50,8 +52,16 @@ namespace PulseForgeEditor::Detail
 			ImGui::SameLine();
 			if (ImGui::Button("Fail next save")) (void)FailNextSave(Session);
 			ImGui::SameLine();
-			if (ImGui::Button(SessionState->FailClose ? "Allow close" : "Fail close"))
-				(void)SetCloseFailure(Session, !SessionState->FailClose);
+			const bool CloseFailureArmed = SessionState->FailClose;
+			const bool AllowCloseClicked = ImGui::Button(CloseFailureArmed ? "Allow close" : "Fail close");
+			if (AllowCloseClicked) (void)SetCloseFailure(Session, !CloseFailureArmed);
+			if (CloseFailureArmed && m_ReportCloseUiAllowClose)
+			{
+				const ImVec2 Minimum = ImGui::GetItemRectMin();
+				const ImVec2 Maximum = ImGui::GetItemRectMax();
+				m_ReportCloseUiAllowClose(Session.HostID, static_cast<int>((Minimum.x + Maximum.x) * 0.5f),
+					static_cast<int>((Minimum.y + Maximum.y) * 0.5f), AllowCloseClicked);
+			}
 			ImGui::Text("Undo %zu  |  Redo %zu", SessionState->Undo.size(), SessionState->Redo.size());
 			ImGui::TextUnformatted(Session.IsDirty() ? "Unsaved fixture changes" : "Fixture saved");
 		};
@@ -65,6 +75,7 @@ namespace PulseForgeEditor::Detail
 				return false;
 			}
 			m_SavedValues[Session.Identity] = SessionState->Value;
+			m_LastKnownValues[Session.Identity] = SessionState->Value;
 			return true;
 		};
 		Adapter.Discard = [this](auto& Session)
@@ -73,6 +84,7 @@ namespace PulseForgeEditor::Detail
 			if (!SessionState) return false;
 			if (const auto Saved = m_SavedValues.find(Session.Identity); Saved != m_SavedValues.end()) SessionState->Value = Saved->second;
 			else SessionState->Value = 0;
+			m_LastKnownValues[Session.Identity] = SessionState->Value;
 			SessionState->Undo.clear();
 			SessionState->Redo.clear();
 			return true;
@@ -87,6 +99,7 @@ namespace PulseForgeEditor::Detail
 			Destination.push_back(SessionState->Value);
 			SessionState->Value = Source.back();
 			Source.pop_back();
+			m_LastKnownValues[Session.Identity] = SessionState->Value;
 			return true;
 		};
 		Adapter.AssetLocationChanged = [](auto&, const auto&, std::string_view) { return true; };
@@ -119,6 +132,7 @@ namespace PulseForgeEditor::Detail
 		if (!SessionState) return false;
 		SessionState->Value = Value;
 		SessionState->Undo.push_back(0);
+		m_LastKnownValues[Session.Identity] = Value;
 		return m_Documents.MarkEdited(Session.Identity) && m_Editors.Save(Session);
 	}
 
@@ -129,6 +143,7 @@ namespace PulseForgeEditor::Detail
 		SessionState->Undo.push_back(SessionState->Value);
 		SessionState->Redo.clear();
 		SessionState->Value = Value;
+		m_LastKnownValues[Session.Identity] = Value;
 		return true;
 	}
 
@@ -154,6 +169,18 @@ namespace PulseForgeEditor::Detail
 		const auto* SessionState = dynamic_cast<const State*>(Session.EditorState.get());
 		if (!SessionState) return std::nullopt;
 		return ModelSnapshot{ SessionState->Value, SessionState->Undo.size(), SessionState->Redo.size() };
+	}
+
+	std::optional<int> EditorDocumentHostTestEditor::GetCurrentValue(const EditorDocumentIdentity& Identity) const noexcept
+	{
+		if (const auto LastKnown = m_LastKnownValues.find(Identity); LastKnown != m_LastKnownValues.end()) return LastKnown->second;
+		return std::nullopt;
+	}
+
+	std::optional<int> EditorDocumentHostTestEditor::GetSavedValue(const EditorDocumentIdentity& Identity) const noexcept
+	{
+		if (const auto Saved = m_SavedValues.find(Identity); Saved != m_SavedValues.end()) return Saved->second;
+		return std::nullopt;
 	}
 
 	bool EditorDocumentHostTestEditor::MatchesSavedModel(

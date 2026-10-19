@@ -188,6 +188,17 @@ jobs:
             --log-directory "$RUNNER_TEMP" \
             --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-workspace-restore-smoke.log"
 
+      - name: Exercise dirty native document close decisions and recovery
+        id: macos_document_close
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSDocumentCloseSmoke.py \
+            --editor Build/CI/macos-renderer/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor \
+            --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
+            --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-document-close-smoke.log"
+
       - name: Upload compact renderer evidence
         if: always()
         uses: actions/upload-artifact@v6
@@ -213,6 +224,11 @@ jobs:
             ${{ runner.temp }}/macos-workspace-restore-smoke.log
             ${{ runner.temp }}/macos-workspace-restore-first-launch.log
             ${{ runner.temp }}/macos-workspace-restore-second-launch.log
+            ${{ runner.temp }}/macos-document-close-smoke.log
+            ${{ runner.temp }}/macos-document-close-cancel-save.log
+            ${{ runner.temp }}/macos-document-close-discard.log
+            ${{ runner.temp }}/macos-document-close-save-retry.log
+            ${{ runner.temp }}/macos-document-close-close-retry.log
             ${{ runner.temp }}/macos-native-dialog-automation.log
             ${{ runner.temp }}/native-dialog-open-select.log
             ${{ runner.temp }}/native-dialog-open-cancel.log

@@ -120,6 +120,27 @@ namespace
 {
 	using EditorJson = nlohmann::ordered_json;
 
+	[[nodiscard]] std::string EscapeDocumentCloseUiField(std::string_view Value)
+	{
+		constexpr char Hex[] = "0123456789ABCDEF";
+		std::string Escaped;
+		Escaped.reserve(Value.size());
+		for (const char RawCharacter : Value)
+		{
+			const auto Character = static_cast<unsigned char>(RawCharacter);
+			const bool Safe = (Character >= 'a' && Character <= 'z') || (Character >= 'A' && Character <= 'Z') ||
+				(Character >= '0' && Character <= '9') || Character == '-' || Character == '_' || Character == '.' || Character == '~';
+			if (Safe) Escaped.push_back(static_cast<char>(Character));
+			else
+			{
+				Escaped.push_back('%');
+				Escaped.push_back(Hex[Character >> 4]);
+				Escaped.push_back(Hex[Character & 0x0f]);
+			}
+		}
+		return Escaped;
+	}
+
 	PulseForge::OutputColorEncoding GetEditorUiColorEncoding(PulseForge::OutputColorEncoding OutputEncoding) noexcept
 	{
 #ifdef PF_EDITOR_RENDERER_OPENGL
@@ -415,6 +436,21 @@ namespace
 			Failed
 		};
 
+		enum class DocumentCloseUiTestPhase : uint8_t
+		{
+			Disabled,
+			AwaitingInitialClose,
+			AwaitingFirstAction,
+			AwaitingSecondClose,
+			AwaitingSecondAction,
+			AwaitingSaveRetry,
+			AwaitingCloseRetryCancel,
+			AwaitingAllowClose,
+			AwaitingFinalClose,
+			Complete,
+			Failed
+		};
+
 		static constexpr size_t EditorRuntimePlayStopTestMaximumFrames = 600;
 #endif
 
@@ -449,7 +485,8 @@ namespace
 			  m_AssetPreviewStress(std::move(Options.AssetPreviewStressManifest), std::move(Options.AssetPreviewStressBudget)),
 			  m_StartupProjectPath(std::move(Options.ProjectFile)),
 			  m_ProjectOpenRenderTestFile(std::move(Options.ProjectOpenRenderTestFile)),
-			  m_DocumentHostTestFixture(Options.EnableDocumentHostTestFixture),
+			  m_DocumentHostTestFixture(Options.EnableDocumentHostTestFixture || Options.DocumentHostCloseUiTestScenario.has_value()),
+			  m_DocumentHostCloseUiTestScenario(std::move(Options.DocumentHostCloseUiTestScenario)),
 			  m_DocumentHostResetLayoutTest(Options.EnableDocumentHostResetLayoutTest),
 			  m_DocumentHostTabTearOffTest(Options.EnableDocumentHostTabTearOffTest),
 			  m_DocumentHostTabReattachTest(Options.EnableDocumentHostTabReattachTest),
@@ -468,7 +505,9 @@ namespace
 			{
 				m_DocumentHostTestEditor = std::make_unique<PulseForgeEditor::Detail::EditorDocumentHostTestEditor>(
 					m_Documents, m_DocumentEditors, m_EditorStyle, [this](std::string Message) { SetError(std::move(Message)); },
-					[this] { return m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{}; });
+					[this] { return m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{}; },
+					[this](std::string_view HostID, int X, int Y, bool Clicked)
+					{ ReportDocumentCloseUiAllowClose(HostID, X, Y, Clicked); });
 				if (auto Result = m_DocumentHostTestEditor->Register(); !Result)
 					PF_ERROR("Could not register the debug document-host fixture editor: {}", Result.error());
 			}
@@ -1857,12 +1896,299 @@ namespace
 #endif
 		}
 
+#if defined(_DEBUG) || defined(PF_DEBUG)
+		[[nodiscard]] bool IsDocumentCloseUiFixtureIdentity(const PulseForgeEditor::EditorDocumentIdentity& Identity) const noexcept
+		{
+			return m_DocumentCloseUiTestScenario && m_DocumentCloseUiIdentity && Identity == *m_DocumentCloseUiIdentity;
+		}
+
+		[[nodiscard]] bool IsDocumentCloseUiFixtureHost(std::string_view HostID) const noexcept
+		{
+			return m_DocumentCloseUiTestScenario && !m_DocumentCloseUiHostID.empty() && HostID == m_DocumentCloseUiHostID;
+		}
+
+		void FailDocumentCloseUiTest(std::string_view Reason)
+		{
+			if (!m_DocumentCloseUiTestScenario || m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::Failed ||
+				m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::Complete)
+				return;
+			m_DocumentCloseUiTestPhase = DocumentCloseUiTestPhase::Failed;
+			PF_ERROR("PF_DOC_CLOSE_UI|FAIL|scenario={}|reason={}", *m_DocumentCloseUiTestScenario,
+				EscapeDocumentCloseUiField(Reason));
+			SetError("The Debug document-close UI fixture failed: " + std::string(Reason));
+		}
+
+		[[nodiscard]] bool DocumentCloseUiStateMatches(bool Pending, bool Open, bool HostSame, bool Dirty, int Value, int Saved) const
+		{
+			if (!m_DocumentCloseUiIdentity || !m_DocumentHostTestEditor) return false;
+			const auto* Session = m_Documents.Find(*m_DocumentCloseUiIdentity);
+			const auto CurrentValue = m_DocumentHostTestEditor->GetCurrentValue(*m_DocumentCloseUiIdentity);
+			const auto SavedValue = m_DocumentHostTestEditor->GetSavedValue(*m_DocumentCloseUiIdentity);
+			return m_DocumentCloseRequest.HasPendingRequest() == Pending && (Session != nullptr) == Open &&
+				(Session && Session->HostID == m_DocumentCloseUiHostID) == HostSame && (Session && Session->IsDirty()) == Dirty &&
+				CurrentValue == Value && SavedValue == Saved;
+		}
+
+		void ReportDocumentCloseUiPass(int ExpectedSavedValue)
+		{
+			if (!m_DocumentCloseUiTestScenario || !m_DocumentCloseUiIdentity || !m_DocumentHostTestEditor) return;
+			const bool Closed = !m_Documents.Find(*m_DocumentCloseUiIdentity) && !m_Documents.FindHost(m_DocumentCloseUiHostID);
+			const auto Saved = m_DocumentHostTestEditor->GetSavedValue(*m_DocumentCloseUiIdentity);
+			if (!Closed || Saved != ExpectedSavedValue)
+			{
+				FailDocumentCloseUiTest("The terminal document identity, native host, or saved model value was incorrect.");
+				return;
+			}
+			m_DocumentCloseUiTestPhase = DocumentCloseUiTestPhase::Complete;
+			PF_INFO("PF_DOC_CLOSE_UI|PASS|scenario={}|host={}|asset={}|sequence={}|generation={}|open=0|saved={}",
+				*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(),
+				m_DocumentCloseUiActionSequence, m_DocumentCloseUiPromptGeneration, *Saved);
+		}
+
+		void ReportDocumentCloseUiAction(std::string_view Choice, bool Resolved)
+		{
+			if (!m_DocumentCloseUiTestScenario || !m_DocumentCloseUiIdentity || !m_DocumentHostTestEditor ||
+				m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::Failed ||
+				m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::Complete)
+				return;
+
+			const auto* Session = m_Documents.Find(*m_DocumentCloseUiIdentity);
+			const bool Open = Session != nullptr;
+			const bool HostSame = Session && Session->HostID == m_DocumentCloseUiHostID;
+			const bool Dirty = Session && Session->IsDirty();
+			const int Value = m_DocumentHostTestEditor->GetCurrentValue(*m_DocumentCloseUiIdentity).value_or(-1);
+			const int Saved = m_DocumentHostTestEditor->GetSavedValue(*m_DocumentCloseUiIdentity).value_or(-1);
+			const std::string Error = EscapeDocumentCloseUiField(m_DocumentCloseRequest.GetError());
+			const bool Pending = m_DocumentCloseRequest.HasPendingRequest();
+			++m_DocumentCloseUiActionSequence;
+			PF_INFO("PF_DOC_CLOSE_UI|ACTION|scenario={}|host={}|asset={}|sequence={}|generation={}|choice={}|resolved={}|pending={}|open={}|host_same={}|dirty={}|value={}|saved={}|error={}",
+				*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(),
+				m_DocumentCloseUiActionSequence, m_DocumentCloseUiPromptGeneration, Choice, Resolved ? 1 : 0, Pending ? 1 : 0,
+				Open ? 1 : 0, HostSame ? 1 : 0, Dirty ? 1 : 0, Value, Saved, Error);
+
+			const bool InitialDirtyState = Pending && Open && HostSame && Dirty && Value == 20 && Saved == 10;
+			if (*m_DocumentCloseUiTestScenario == "cancel-save")
+			{
+				if (m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingFirstAction && Choice == "cancel" && Resolved &&
+					DocumentCloseUiStateMatches(false, true, true, true, 20, 10))
+				{
+					m_DocumentCloseUiTestPhase = DocumentCloseUiTestPhase::AwaitingSecondClose;
+					++m_DocumentCloseUiPromptGeneration;
+					return;
+				}
+				if (m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingSecondAction && Choice == "save" && Resolved &&
+					DocumentCloseUiStateMatches(false, false, false, false, 20, 20))
+				{
+					ReportDocumentCloseUiPass(20);
+					return;
+				}
+			}
+			else if (*m_DocumentCloseUiTestScenario == "discard")
+			{
+				if (m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingFirstAction && Choice == "discard" && Resolved &&
+					DocumentCloseUiStateMatches(false, false, false, false, 10, 10))
+				{
+					ReportDocumentCloseUiPass(10);
+					return;
+				}
+			}
+			else if (*m_DocumentCloseUiTestScenario == "save-retry")
+			{
+				if (m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingFirstAction && Choice == "save" && !Resolved &&
+					InitialDirtyState && m_DocumentCloseRequest.GetError() == "The document could not be saved; it remains open.")
+				{
+					m_DocumentCloseUiTestPhase = DocumentCloseUiTestPhase::AwaitingSaveRetry;
+					++m_DocumentCloseUiPromptGeneration;
+					return;
+				}
+				if (m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingSaveRetry && Choice == "save" && Resolved &&
+					DocumentCloseUiStateMatches(false, false, false, false, 20, 20))
+				{
+					ReportDocumentCloseUiPass(20);
+					return;
+				}
+			}
+			else if (*m_DocumentCloseUiTestScenario == "close-retry")
+			{
+				if (m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingFirstAction && Choice == "save" && !Resolved &&
+					DocumentCloseUiStateMatches(true, true, true, false, 20, 20) &&
+					m_DocumentCloseRequest.GetError() == "The Debug fixture is configured to reject close.")
+				{
+					m_DocumentCloseUiTestPhase = DocumentCloseUiTestPhase::AwaitingCloseRetryCancel;
+					++m_DocumentCloseUiPromptGeneration;
+					return;
+				}
+				if (m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingCloseRetryCancel && Choice == "cancel" && Resolved &&
+					DocumentCloseUiStateMatches(false, true, true, false, 20, 20))
+				{
+					m_DocumentCloseUiTestPhase = DocumentCloseUiTestPhase::AwaitingAllowClose;
+					++m_DocumentCloseUiPromptGeneration;
+					m_DocumentCloseUiAllowCloseRectReported = false;
+					return;
+				}
+			}
+
+			FailDocumentCloseUiTest("The real close-dialog action produced an unexpected document/session state.");
+		}
+
+		void ReportDocumentCloseUiAllowClose(
+			std::string_view HostID, int X, int Y, bool Clicked)
+		{
+			if (!m_DocumentCloseUiTestScenario || *m_DocumentCloseUiTestScenario != "close-retry" ||
+				m_DocumentCloseUiTestPhase != DocumentCloseUiTestPhase::AwaitingAllowClose || !IsDocumentCloseUiFixtureHost(HostID) ||
+				!m_DocumentCloseUiIdentity || !m_DocumentHostTestEditor)
+				return;
+
+			if (!m_DocumentCloseUiAllowCloseRectReported)
+			{
+				PF_INFO("PF_DOC_CLOSE_UI|FIXTURE|scenario=close-retry|host={}|asset={}|generation={}|allow_close={},{}",
+					m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(), m_DocumentCloseUiPromptGeneration, X, Y);
+				m_DocumentCloseUiAllowCloseRectReported = true;
+			}
+			if (!Clicked) return;
+
+			const auto* Session = m_Documents.Find(*m_DocumentCloseUiIdentity);
+			const int Value = m_DocumentHostTestEditor->GetCurrentValue(*m_DocumentCloseUiIdentity).value_or(-1);
+			const int Saved = m_DocumentHostTestEditor->GetSavedValue(*m_DocumentCloseUiIdentity).value_or(-1);
+			const bool Open = Session != nullptr;
+			const bool HostSame = Session && Session->HostID == m_DocumentCloseUiHostID;
+			const bool Dirty = Session && Session->IsDirty();
+			++m_DocumentCloseUiActionSequence;
+			PF_INFO("PF_DOC_CLOSE_UI|ACTION|scenario=close-retry|host={}|asset={}|sequence={}|generation={}|choice=allow-close|resolved=1|pending={}|open={}|host_same={}|dirty={}|value={}|saved={}|error=",
+				m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(), m_DocumentCloseUiActionSequence,
+				m_DocumentCloseUiPromptGeneration, m_DocumentCloseRequest.HasPendingRequest() ? 1 : 0, Open ? 1 : 0,
+				HostSame ? 1 : 0, Dirty ? 1 : 0, Value, Saved);
+			if (DocumentCloseUiStateMatches(false, true, true, false, 20, 20))
+			{
+				m_DocumentCloseUiTestPhase = DocumentCloseUiTestPhase::AwaitingFinalClose;
+				++m_DocumentCloseUiPromptGeneration;
+			}
+			else FailDocumentCloseUiTest("The Allow close control did not preserve the saved document session.");
+		}
+
+		void EmitDocumentCloseUiPrompt(std::string_view HostID, const ImVec2& Save, const ImVec2& Discard, const ImVec2& Cancel)
+		{
+			if (!m_DocumentCloseUiTestScenario || !m_DocumentCloseUiIdentity || !IsDocumentCloseUiFixtureHost(HostID) ||
+				!IsDocumentCloseUiFixtureIdentity(*m_DocumentCloseUiIdentity) || !m_DocumentCloseRequest.HasPendingRequest() ||
+				m_DocumentCloseUiPromptGeneration == m_DocumentCloseUiLastPromptGeneration)
+				return;
+			m_DocumentCloseUiLastPromptGeneration = m_DocumentCloseUiPromptGeneration;
+			PF_INFO("PF_DOC_CLOSE_UI|PROMPT|scenario={}|host={}|asset={}|generation={}|save={},{}|discard={},{}|cancel={},{}",
+				*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(), m_DocumentCloseUiPromptGeneration,
+				static_cast<int>(Save.x), static_cast<int>(Save.y), static_cast<int>(Discard.x), static_cast<int>(Discard.y),
+				static_cast<int>(Cancel.x), static_cast<int>(Cancel.y));
+		}
+
+		void InitializeDocumentCloseUiFixture()
+		{
+			if (!m_DocumentCloseUiTestScenario || !m_Project || !m_DocumentHostTestEditor)
+			{
+				FailDocumentCloseUiTest("The project or registered document fixture is unavailable.");
+				return;
+			}
+
+			const auto FixtureAssetIDs = PulseForgeEditor::Detail::EditorDocumentHostTestEditor::FixtureAssetIDs();
+			const auto AssetID = PulseForge::UUID::Parse(FixtureAssetIDs.front());
+			if (!AssetID)
+			{
+				FailDocumentCloseUiTest("The Debug document fixture identity is invalid.");
+				return;
+			}
+			m_DocumentCloseUiIdentity = PulseForgeEditor::EditorDocumentIdentity{ m_Project->GetDescription().ID, *AssetID,
+				PulseForgeEditor::EditorDocumentKind::Texture };
+			for (const auto& Host : m_Documents.GetHosts())
+				for (const auto& ExistingIdentity : Host.Documents)
+					if (IsDocumentHostTestFixtureIdentity(ExistingIdentity))
+					{
+						FailDocumentCloseUiTest("The isolated test project already contains a document-host fixture session.");
+						return;
+					}
+			if (m_Documents.Find(*m_DocumentCloseUiIdentity))
+			{
+				FailDocumentCloseUiTest("The isolated test project already restored the fixture identity.");
+				return;
+			}
+
+			const std::string DisplayName = "Host Test Fixture 1";
+			auto Opened = m_Documents.Open(*m_DocumentCloseUiIdentity, {}, DisplayName,
+				PulseForgeEditor::EditorDocumentOpenPreference::NewNativeWindow);
+			if (!Opened || !Opened->Created)
+			{
+				FailDocumentCloseUiTest("Could not create the fixture's fresh native document host.");
+				return;
+			}
+			m_DocumentCloseUiHostID = Opened->HostID;
+			auto* Session = m_Documents.Find(*m_DocumentCloseUiIdentity);
+			const auto Context = MakeDocumentEditorContext(*m_DocumentCloseUiIdentity, {}, DisplayName);
+			if (!Session || Session->HostID != m_DocumentCloseUiHostID || !m_DocumentEditors.Load(*Session, Context) ||
+				!m_DocumentHostTestEditor->InitializeSavedModel(*Session, 10) ||
+				!m_DocumentHostTestEditor->EditValue(*Session, 20))
+			{
+				FailDocumentCloseUiTest("The fixture could not seed saved value 10 and dirty value 20.");
+				return;
+			}
+
+			if (*m_DocumentCloseUiTestScenario == "save-retry" && !m_DocumentHostTestEditor->FailNextSave(*Session))
+			{
+				FailDocumentCloseUiTest("Could not arm the fixture's one-shot save failure.");
+				return;
+			}
+			if (*m_DocumentCloseUiTestScenario == "close-retry" && !m_DocumentHostTestEditor->SetCloseFailure(*Session, true))
+			{
+				FailDocumentCloseUiTest("Could not arm the fixture's close-preparation failure.");
+				return;
+			}
+			m_DocumentHostFixtureSessions.emplace_back(*m_DocumentCloseUiIdentity, m_DocumentCloseUiHostID);
+			if (!m_Documents.Activate(*m_DocumentCloseUiIdentity))
+			{
+				FailDocumentCloseUiTest("The fresh native fixture document could not be activated.");
+				return;
+			}
+
+			size_t FixtureSessionCount = 0;
+			size_t SelectedFixtureSessionCount = 0;
+			size_t FixtureNativeHostCount = 0;
+			for (const auto& Host : m_Documents.GetHosts())
+			{
+				bool ContainsFixture = false;
+				for (const auto& Identity : Host.Documents)
+					if (IsDocumentHostTestFixtureIdentity(Identity))
+					{
+						++FixtureSessionCount;
+						if (IsDocumentCloseUiFixtureIdentity(Identity)) ++SelectedFixtureSessionCount;
+						ContainsFixture = true;
+					}
+				if (ContainsFixture && Host.Role == PulseForgeEditor::EditorDocumentHostRole::Native)
+					++FixtureNativeHostCount;
+			}
+			const auto CurrentValue = m_DocumentHostTestEditor->GetCurrentValue(*m_DocumentCloseUiIdentity);
+			const auto SavedValue = m_DocumentHostTestEditor->GetSavedValue(*m_DocumentCloseUiIdentity);
+			Session = m_Documents.Find(*m_DocumentCloseUiIdentity);
+			if (FixtureSessionCount != 1 || SelectedFixtureSessionCount != 1 || FixtureNativeHostCount != 1 || !Session ||
+				Session->HostID != m_DocumentCloseUiHostID ||
+				!Session->IsDirty() || CurrentValue != 20 || SavedValue != 10)
+			{
+				FailDocumentCloseUiTest("The isolated setup did not contain exactly one fresh dirty native fixture document.");
+				return;
+			}
+
+			m_DocumentCloseUiTestPhase = DocumentCloseUiTestPhase::AwaitingInitialClose;
+			PF_INFO("PF_DOC_CLOSE_UI|READY|scenario={}|host={}|asset={}|saved=10|value=20|dirty=1|fixture_sessions=1|fixture_hosts=1|generation=0",
+				*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString());
+		}
+#endif
+
 		void InitializeDocumentHostTestFixture()
 		{
 #if !defined(_DEBUG) && !defined(PF_DEBUG)
 			return;
 #else
 			if (!m_DocumentHostTestFixture || !m_Project) return;
+			if (m_DocumentCloseUiTestScenario)
+			{
+				InitializeDocumentCloseUiFixture();
+				return;
+			}
 
 			// These synthetic Texture-kind identities exercise registered document dispatch in Debug.
 			const auto FixtureAssetIDs = PulseForgeEditor::Detail::EditorDocumentHostTestEditor::FixtureAssetIDs();
@@ -4435,6 +4761,33 @@ namespace
 		{
 			const auto* Host = m_Documents.FindHost(HostID);
 			if (!Host || Host->Role != PulseForgeEditor::EditorDocumentHostRole::Native) return;
+			const bool IsCloseUiHost =
+#if defined(_DEBUG) || defined(PF_DEBUG)
+				IsDocumentCloseUiFixtureHost(HostID);
+#else
+				false;
+#endif
+			if (IsCloseUiHost && m_DocumentCloseRequest.HasPendingRequest() && m_DocumentCloseRequest.GetDialogHostID() == HostID)
+				return;
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			if (IsCloseUiHost)
+			{
+				if (m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingInitialClose)
+				{
+					++m_DocumentCloseUiPromptGeneration;
+					m_DocumentCloseUiTestPhase = DocumentCloseUiTestPhase::AwaitingFirstAction;
+				}
+				else if (m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingSecondClose)
+				{
+					++m_DocumentCloseUiPromptGeneration;
+					m_DocumentCloseUiTestPhase = DocumentCloseUiTestPhase::AwaitingSecondAction;
+				}
+				else if (m_DocumentCloseUiTestPhase != DocumentCloseUiTestPhase::AwaitingFinalClose)
+				{
+					FailDocumentCloseUiTest("A native close request arrived in an unexpected test phase.");
+				}
+			}
+#endif
 			const auto Documents = Host->Documents;
 			const auto DirtyDocuments = PulseForgeEditor::FilterDirtyDocumentIdentities(Documents,
 				[this](const auto& Identity)
@@ -4444,7 +4797,31 @@ namespace
 				});
 			if (DirtyDocuments.empty())
 			{
-				if (CloseDocumentBatchClean(Documents)) return;
+				if (CloseDocumentBatchClean(Documents))
+				{
+#if defined(_DEBUG) || defined(PF_DEBUG)
+					if (IsCloseUiHost && m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingFinalClose)
+					{
+						const bool IdentityClosed = m_DocumentCloseUiIdentity && !m_Documents.Find(*m_DocumentCloseUiIdentity);
+						const bool HostRemoved = !m_Documents.FindHost(m_DocumentCloseUiHostID);
+						const auto Saved = m_DocumentHostTestEditor && m_DocumentCloseUiIdentity
+							? m_DocumentHostTestEditor->GetSavedValue(*m_DocumentCloseUiIdentity) : std::nullopt;
+						if (IdentityClosed && HostRemoved && Saved == 20)
+						{
+							PF_INFO("PF_DOC_CLOSE_UI|CLOSED|scenario=close-retry|host={}|asset={}|sequence={}|generation={}|open=0|saved=20",
+								m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(), m_DocumentCloseUiActionSequence,
+								m_DocumentCloseUiPromptGeneration);
+							ReportDocumentCloseUiPass(20);
+						}
+						else FailDocumentCloseUiTest("Native clean close returned without removing the test identity and host.");
+					}
+#endif
+					return;
+				}
+#if defined(_DEBUG) || defined(PF_DEBUG)
+				if (IsCloseUiHost && m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingFinalClose)
+					FailDocumentCloseUiTest("The native clean close failed after the fixture allowed close: " + m_DocumentCloseRequest.GetError());
+#endif
 				const std::string CloseError = m_DocumentCloseRequest.GetError();
 				m_DocumentCloseRequest.BeginCloseDocuments(Documents, std::string(HostID));
 				m_DocumentCloseRequest.SetError(CloseError);
@@ -4539,6 +4916,19 @@ namespace
 			return true;
 		}
 
+		bool ResolveDocumentCloseFromUi(
+			std::string_view HostID, PulseForgeEditor::EditorDocumentCloseChoice Choice, std::string_view ChoiceName)
+		{
+			const bool Resolved = ResolveDocumentClose(Choice);
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			if (IsDocumentCloseUiFixtureHost(HostID)) ReportDocumentCloseUiAction(ChoiceName, Resolved);
+#else
+			(void)HostID;
+			(void)ChoiceName;
+#endif
+			return Resolved;
+		}
+
 		void DrawDocumentCloseDialog(std::string_view HostID)
 		{
 			if (HostID != m_DocumentCloseRequest.GetDialogHostID()) return;
@@ -4559,28 +4949,52 @@ namespace
 			ImGui::TextUnformatted(DirtyDocuments.empty() ? "The close request is still pending. Retry it or cancel."
 														  : "Save or discard these drafts before continuing?");
 			if (!m_DocumentCloseRequest.GetError().empty()) ImGui::TextWrapped("%s", m_DocumentCloseRequest.GetError().c_str());
+			bool RetryCloseClicked = false;
+			ImVec2 SaveCenter{};
+			ImVec2 DiscardCenter{};
+			ImVec2 CancelCenter{};
 			if (m_DocumentCloseRequest.ShouldOfferCloseRetry(DirtyDocuments.empty()))
 			{
-				if (ImGui::Button("Retry Close", ImVec2(112.0f, 0.0f)))
-					(void)ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice::Save);
+				RetryCloseClicked = ImGui::Button("Retry Close", ImVec2(112.0f, 0.0f));
 				ImGui::SameLine();
 			}
-			if (ImGui::Button("Save", ImVec2(112.0f, 0.0f))) (void)ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice::Save);
+			const bool SaveClicked = ImGui::Button("Save", ImVec2(112.0f, 0.0f));
+			SaveCenter = ImVec2((ImGui::GetItemRectMin().x + ImGui::GetItemRectMax().x) * 0.5f,
+				(ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f);
 			ImGui::SameLine();
-			if (m_EditorStyle.DangerButton(PulseForgeEditor::EditorIcon::Delete, "Discard"))
-				(void)ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice::Discard);
+			const bool DiscardClicked = m_EditorStyle.DangerButton(PulseForgeEditor::EditorIcon::Delete, "Discard");
+			DiscardCenter = ImVec2((ImGui::GetItemRectMin().x + ImGui::GetItemRectMax().x) * 0.5f,
+				(ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f);
 			ImGui::SameLine();
-			if (ImGui::Button("Cancel", ImVec2(112.0f, 0.0f)))
+			const bool CancelClicked = ImGui::Button("Cancel", ImVec2(112.0f, 0.0f));
+			CancelCenter = ImVec2((ImGui::GetItemRectMin().x + ImGui::GetItemRectMax().x) * 0.5f,
+				(ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f);
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			EmitDocumentCloseUiPrompt(HostID, SaveCenter, DiscardCenter, CancelCenter);
+#endif
+			if (RetryCloseClicked)
+				(void)ResolveDocumentCloseFromUi(HostID, PulseForgeEditor::EditorDocumentCloseChoice::Save, "retry-close");
+			else if (SaveClicked)
+				(void)ResolveDocumentCloseFromUi(HostID, PulseForgeEditor::EditorDocumentCloseChoice::Save, "save");
+			else if (DiscardClicked)
+				(void)ResolveDocumentCloseFromUi(HostID, PulseForgeEditor::EditorDocumentCloseChoice::Discard, "discard");
+			else if (CancelClicked)
 			{
 				m_DocumentCloseRequest.Cancel();
 				CancelEditorApplicationClose();
 				ImGui::CloseCurrentPopup();
+				#if defined(_DEBUG) || defined(PF_DEBUG)
+				if (IsDocumentCloseUiFixtureHost(HostID)) ReportDocumentCloseUiAction("cancel", true);
+				#endif
 			}
 			ImGui::EndPopup();
 			if (!PopupOpen)
 			{
 				m_DocumentCloseRequest.Cancel();
 				CancelEditorApplicationClose();
+				#if defined(_DEBUG) || defined(PF_DEBUG)
+				if (IsDocumentCloseUiFixtureHost(HostID)) ReportDocumentCloseUiAction("cancel", true);
+				#endif
 			}
 		}
 
@@ -6730,6 +7144,16 @@ namespace
 		std::string m_EditorRuntimePlayStopAuthoredSnapshot;
 #endif
 		bool m_DocumentHostTestFixture = false;
+		std::optional<std::string> m_DocumentCloseUiTestScenario;
+#if defined(_DEBUG) || defined(PF_DEBUG)
+		DocumentCloseUiTestPhase m_DocumentCloseUiTestPhase = DocumentCloseUiTestPhase::Disabled;
+		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_DocumentCloseUiIdentity;
+		std::string m_DocumentCloseUiHostID;
+		size_t m_DocumentCloseUiPromptGeneration = 0;
+		size_t m_DocumentCloseUiLastPromptGeneration = 0;
+		size_t m_DocumentCloseUiActionSequence = 0;
+		bool m_DocumentCloseUiAllowCloseRectReported = false;
+#endif
 		bool m_DocumentHostResetLayoutTest = false;
 		bool m_DocumentHostTabTearOffTest = false;
 		bool m_DocumentHostTabTearOffFromNativeHost = false;
