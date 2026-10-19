@@ -2772,8 +2772,7 @@ namespace PulseForge
 						m_VulkanLoader = std::make_unique<vk::detail::DynamicLoader>(UnversionedLibrary.string());
 				}
 				if (!m_VulkanLoader)
-					throw std::runtime_error(
-						"VULKAN_SDK is set but its lib directory contains no libvulkan.1.dylib or libvulkan.dylib");
+					throw std::runtime_error("VULKAN_SDK is set but its lib directory contains no libvulkan.1.dylib or libvulkan.dylib");
 			}
 #endif
 			if (!m_VulkanLoader) m_VulkanLoader = std::make_unique<vk::detail::DynamicLoader>();

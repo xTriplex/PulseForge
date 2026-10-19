@@ -67,9 +67,8 @@ namespace
 					throw std::runtime_error("The macOS native window reported invalid logical dimensions or backing scale");
 				if (m_InitialExtent.first == 0 || m_InitialExtent.second == 0)
 					throw std::runtime_error("The Vulkan presentation surface has a zero initial framebuffer extent");
-				PF_INFO("MACOS_RENDERER_WINDOW_SCALE=PASS; logical={}x{}; framebuffer={}x{}; content_scale={}x{}",
-					LogicalExtent.first, LogicalExtent.second, m_InitialExtent.first, m_InitialExtent.second, ContentScale.first,
-					ContentScale.second);
+				PF_INFO("MACOS_RENDERER_WINDOW_SCALE=PASS; logical={}x{}; framebuffer={}x{}; content_scale={}x{}", LogicalExtent.first,
+					LogicalExtent.second, m_InitialExtent.first, m_InitialExtent.second, ContentScale.first, ContentScale.second);
 
 				auto OpenedProject = PulseForge::Project::Open(std::filesystem::path(PF_MACOS_RENDERER_PROJECT_FILE));
 				if (!OpenedProject) throw std::runtime_error("Could not open the PBR validation project: " + OpenedProject.error().Message);
@@ -214,7 +213,8 @@ namespace
 				}
 				m_ResizedExtent = Extent;
 				CreateOutputTarget(Extent.first, Extent.second);
-				PF_INFO("MACOS_RENDERER_NATIVE_RESIZE=PASS; logical={}x{}; framebuffer={}x{}; content_scale={}x{}; requesting recreated scene targets",
+				PF_INFO("MACOS_RENDERER_NATIVE_RESIZE=PASS; logical={}x{}; framebuffer={}x{}; content_scale={}x{}; requesting recreated "
+						"scene targets",
 					LogicalExtent.first, LogicalExtent.second, Extent.first, Extent.second, ContentScale.first, ContentScale.second);
 				m_Phase = ValidationPhase::ResizedFrame;
 			}

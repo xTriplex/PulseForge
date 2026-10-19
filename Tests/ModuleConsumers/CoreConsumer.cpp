@@ -61,8 +61,7 @@ int main(int ArgumentCount, char** Arguments)
 	std::error_code ResourceDirectoryError;
 	if (!std::filesystem::is_directory(*ResourceDirectory, ResourceDirectoryError) || ResourceDirectoryError)
 	{
-		std::cerr << "Core consumer resource directory does not resolve to a directory: "
-			<< ResourceDirectory->string() << '\n';
+		std::cerr << "Core consumer resource directory does not resolve to a directory: " << ResourceDirectory->string() << '\n';
 		return 14;
 	}
 
