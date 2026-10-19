@@ -57,6 +57,22 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	PF_CHECK(Tests, EditorBodyRelease && EditorBodyRelease->Action == DocumentTabReleaseAction::CreateNativeHost);
 	PF_CHECK(Tests, EditorBodyRelease && !EditorBodyRelease->DropLocation);
 
+	Interaction.BeginFrame();
+	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
+	DragFrame = {};
+	DragFrame.LeftButtonDown = true;
+	DragFrame.PointerPosition = { 20.0f, 20.0f };
+	DragFrame.HoveredViewportID = 10;
+	DragFrame.DragThreshold = 6.0f;
+	DragFrame.SourceIsNativeHost = true;
+	PF_CHECK(Tests, !Interaction.UpdateDrag(DragFrame));
+	DragFrame.LeftButtonDown = false;
+	DragFrame.LeftButtonReleased = true;
+	DragFrame.PointerPosition = { 180.0f, 120.0f };
+	DragFrame.ReleaseOverMainEditorViewport = true;
+	const auto UtilityPanelRelease = Interaction.UpdateDrag(DragFrame);
+	PF_CHECK(Tests, UtilityPanelRelease && UtilityPanelRelease->Action == DocumentTabReleaseAction::None);
+
 	EditorDocumentTransferRequest FirstRequest{ Material, "main", 1, false, std::nullopt };
 	PF_CHECK(Tests, Interaction.QueueTransfer(FirstRequest));
 	PF_CHECK(Tests, !Interaction.QueueTransfer({ Material, "another-host", 0, false, std::nullopt }));

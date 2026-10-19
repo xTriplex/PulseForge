@@ -73,9 +73,10 @@ namespace PulseForgeEditor
 
 	[[nodiscard]] constexpr bool CanCreateNativeHostFromDocumentTabDrag(
 		bool SourceIsMainHost,
-		bool SourceIsNativeHost) noexcept
+		bool SourceIsNativeHost,
+		bool ReleaseOverMainEditorViewport) noexcept
 	{
-		return SourceIsMainHost || SourceIsNativeHost;
+		return (SourceIsMainHost || SourceIsNativeHost) && !ReleaseOverMainEditorViewport;
 	}
 
 	[[nodiscard]] constexpr DocumentTabReleaseAction ResolveDocumentTabReleaseAction(
