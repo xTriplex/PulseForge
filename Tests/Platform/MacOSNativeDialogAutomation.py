@@ -32,6 +32,7 @@ ACCESSIBILITY_TIMEOUTS = (
     "error=-1712",
     "(-1712)",
 )
+OBSERVATION_TOTAL_SECONDS = 35.0
 
 
 class FixtureOutput:
@@ -102,6 +103,27 @@ def is_accessibility_timeout(output: str) -> bool:
     return any(marker in lowered for marker in ACCESSIBILITY_TIMEOUTS)
 
 
+def classify_observation_error(exit_code: int, output: str) -> str:
+    lowered = output.lower()
+    if is_tcc_denial(output):
+        return "tcc-authorization-denial"
+    if "-25211" in lowered:
+        return "accessibility-api-disabled"
+    if is_accessibility_timeout(output) or exit_code == 124:
+        return "timeout"
+    if "-1728" in lowered:
+        return "missing-attribute-or-element"
+    if "-25202" in lowered:
+        return "invalid-or-stale-accessibility-element"
+    if "-25204" in lowered:
+        return "accessibility-cannot-complete"
+    if "-25205" in lowered or "-25213" in lowered:
+        return "unsupported-accessibility-attribute"
+    if exit_code != 0:
+        return "other-accessibility-error"
+    return "snapshot-returned"
+
+
 def terminate_fixture(process: subprocess.Popen[str]) -> bool:
     try:
         os.killpg(process.pid, signal.SIGTERM)
@@ -132,7 +154,12 @@ def stop_fixture(process: subprocess.Popen[str], output_reader: FixtureOutput) -
     return stopped and not output_reader.thread.is_alive()
 
 
-def apple_script(source: str, *arguments: str, timeout: int = 30) -> tuple[int, str]:
+def apple_script(
+    source: str,
+    *arguments: str,
+    timeout: float = 30,
+    cleanup_timeout: float = 5,
+) -> tuple[int, str]:
     try:
         process = subprocess.Popen(
             ["/usr/bin/osascript", "-", *arguments],
@@ -156,14 +183,14 @@ def apple_script(source: str, *arguments: str, timeout: int = 30) -> tuple[int, 
         except ProcessLookupError:
             pass
         try:
-            process.wait(timeout=5)
+            process.wait(timeout=cleanup_timeout)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             try:
-                process.wait(timeout=5)
+                process.wait(timeout=cleanup_timeout)
             except subprocess.TimeoutExpired:
                 return 124, output + "\nAppleScript process group survived SIGKILL cleanup\n"
         try:
@@ -175,6 +202,107 @@ def apple_script(source: str, *arguments: str, timeout: int = 30) -> tuple[int, 
         if process.stdout:
             process.stdout.close()
         return 124, output + "\nAppleScript exceeded its time bound\n"
+
+
+def _process_listing(fixture_pid: int) -> tuple[list[tuple[int, str]], str]:
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-A", "-o", "pid=", "-o", "comm=", "-o", "args="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return [(fixture_pid, "fixture PID supplied by subprocess launcher")], f"NFD_OBSERVATION_PROCESS_LIST_ERROR; {error}"
+    if result.returncode != 0:
+        return (
+            [(fixture_pid, "fixture PID supplied by subprocess launcher")],
+            f"NFD_OBSERVATION_PROCESS_LIST_ERROR; exit_code={result.returncode}; stderr={result.stderr[:400]!r}",
+        )
+
+    records: dict[int, str] = {}
+    for line in result.stdout.splitlines():
+        fields = line.strip().split(None, 2)
+        if len(fields) < 2:
+            continue
+        try:
+            process_id = int(fields[0])
+        except ValueError:
+            continue
+        command = " ".join(fields[1:])
+        records[process_id] = command
+
+    fixture_identity = records.get(fixture_pid, "fixture PID supplied by subprocess launcher")
+    service_pids = [
+        (process_id, command)
+        for process_id, command in records.items()
+        if process_id != fixture_pid and "openandsavepanelservice" in command.lower()
+    ]
+    service_pids.sort(key=lambda entry: entry[0])
+    candidates = [(fixture_pid, fixture_identity), *service_pids]
+    return candidates, f"NFD_OBSERVATION_SERVICE_PIDS={[process_id for process_id, _ in service_pids]}"
+
+
+def capture_waiting_observation(fixture_pid: int, scenario: str, log_path: Path) -> str:
+    started = time.monotonic()
+    deadline = started + OBSERVATION_TOTAL_SECONDS
+    lines = [
+        f"NFD_WAITING_OBSERVATION_BEGIN; scenario={scenario}; fixture_pid={fixture_pid}; "
+        "no input or focus actions issued"
+    ]
+    screenshot_path = log_path.with_name(f"native-dialog-{scenario}-observation.png")
+    try:
+        capture = subprocess.run(
+            ["/usr/sbin/screencapture", "-x", "-t", "png", str(screenshot_path)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if capture.returncode == 0 and screenshot_path.is_file() and screenshot_path.stat().st_size > 0:
+            lines.append(f"NFD_WAITING_SCREENSHOT=CAPTURED; bytes={screenshot_path.stat().st_size}; path={screenshot_path}")
+        else:
+            lines.append(
+                "NFD_WAITING_SCREENSHOT=FAILED; "
+                f"exit_code={capture.returncode}; stdout={capture.stdout[:400]!r}; stderr={capture.stderr[:400]!r}"
+            )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        lines.append(f"NFD_WAITING_SCREENSHOT=FAILED; error={type(error).__name__}: {error}")
+
+    candidates, enumeration_state = _process_listing(fixture_pid)
+    lines.append(enumeration_state)
+    for index, (process_id, identity) in enumerate(candidates):
+        remaining = deadline - time.monotonic()
+        uninspected = len(candidates) - index
+        if remaining <= 0:
+            lines.append(
+                "NFD_OBSERVATION_DEADLINE; "
+                f"uninspected_pids={[pid for pid, _ in candidates[index:]]}"
+            )
+            break
+        per_process_timeout = min(2.5, max(0.05, remaining / max(1, uninspected) - 0.25))
+        lines.append(f"NFD_OBSERVATION_CANDIDATE; pid={process_id}; ps_identity={identity[:280]}")
+        code, output = apple_script(
+            WAITING_PROCESS_SNAPSHOT,
+            str(process_id),
+            scenario,
+            timeout=per_process_timeout,
+            cleanup_timeout=0.1,
+        )
+        category = classify_observation_error(code, output)
+        lines.append(
+            f"NFD_OBSERVATION_AX_EXIT; pid={process_id}; category={category}; "
+            f"exit_code={code}; output={output[:8000]!r}"
+        )
+    lines.append(f"NFD_WAITING_OBSERVATION_END; elapsed_seconds={time.monotonic() - started:.2f}")
+    report = "\n".join(lines)
+    try:
+        log_path.write_text(report + "\n", encoding="utf-8")
+    except OSError as error:
+        report += f"\nNFD_WAITING_OBSERVATION_LOG_WRITE_FAILED; {error}"
+    print(report, flush=True)
+    return report
 
 
 ACCESSIBILITY_CONTROL_HANDLERS = '''on matchesDialog(candidateElement, operation)
@@ -391,6 +519,52 @@ on pressDialogButton(buttonElement, buttonName)
     end tell
 end pressDialogButton
 '''
+
+WAITING_PROCESS_SNAPSHOT = '''on run argv
+    set targetPID to item 1 of argv as integer
+    set operation to item 2 of argv
+    tell application "System Events"
+        try
+            set targetProcess to first application process whose unix id is targetPID
+            set processName to name of targetProcess as text
+            set processBundle to bundle identifier of targetProcess as text
+            set processVisible to visible of targetProcess as text
+            set windowCount to count of windows of targetProcess
+        on error errorMessage number errorNumber
+            return "NFD_OBSERVATION_AX_ERROR; pid=" & targetPID & "; stage=process-or-windows; error=" & ¬
+                errorNumber & "; " & errorMessage
+        end try
+        set snapshot to "NFD_OBSERVATION_PROCESS; pid=" & targetPID & "; name=" & processName & ¬
+            "; bundle=" & processBundle & "; visible=" & processVisible & "; windows=" & windowCount
+        repeat with windowIndex from 1 to windowCount
+            try
+                set candidateWindow to window windowIndex of targetProcess
+                set windowName to name of candidateWindow as text
+                set windowRole to role of candidateWindow as text
+                set windowSubrole to subrole of candidateWindow as text
+                set controlState to my describeDialogControls(candidateWindow, operation)
+                set sheetCount to count of sheets of candidateWindow
+                set snapshot to snapshot & " | WINDOW index=" & windowIndex & "; name=" & windowName & ¬
+                    "; role=" & windowRole & "; subrole=" & windowSubrole & "; " & controlState & "; sheets=" & sheetCount
+                repeat with sheetIndex from 1 to sheetCount
+                    set candidateSheet to sheet sheetIndex of candidateWindow
+                    set sheetName to name of candidateSheet as text
+                    set sheetRole to role of candidateSheet as text
+                    set sheetSubrole to subrole of candidateSheet as text
+                    set controlState to my describeDialogControls(candidateSheet, operation)
+                    set snapshot to snapshot & " | SHEET index=" & sheetIndex & "; name=" & sheetName & ¬
+                        "; role=" & sheetRole & "; subrole=" & sheetSubrole & "; " & controlState
+                end repeat
+            on error errorMessage number errorNumber
+                set snapshot to snapshot & " | WINDOW index=" & windowIndex & "; query-error=" & ¬
+                    errorNumber & "; " & errorMessage
+            end try
+        end repeat
+        return snapshot
+    end tell
+end run
+''' + ACCESSIBILITY_CONTROL_HANDLERS
+
 
 PANEL_READY_PROBE = '''property uiScanVisited : 0
 property uiFieldMatches : 0
@@ -931,6 +1105,8 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
         )
         if probe_code != 0:
             if is_tcc_denial(probe_output):
+                observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+                capture_waiting_observation(process.pid, scenario, observation_log)
                 if not stop_fixture(process, output_reader):
                     return 1, "fixture process group or output reader survived cleanup after the Accessibility authorization denial"
                 print("NFD_UI_AUTOMATION=UNAVAILABLE; reason=macOS TCC denied Accessibility or Apple Events; native dialog cases NOT RUN")
@@ -939,23 +1115,34 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 if "process group survived SIGKILL cleanup" in probe_output:
                     return 1, f"timed-out Accessibility probe process did not terminate; output={probe_output!r}"
                 last_panel_state = f"bounded Accessibility query timed out; exit_code={probe_code}; output={probe_output!r}"
-                time.sleep(min(0.2, max(0.0, probe_deadline - time.monotonic())))
-                continue
-            if not stop_fixture(process, output_reader):
-                return 1, "fixture process group or output reader survived cleanup after an unexpected Accessibility failure"
-            return 1, (
-                "Accessibility snapshot query failed without an identified TCC denial; "
-                f"osascript_exit_code={probe_code}; output={probe_output!r}"
-            )
+                observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+                capture_waiting_observation(process.pid, scenario, observation_log)
+                if not stop_fixture(process, output_reader):
+                    return 1, "fixture process group or output reader survived cleanup after waiting-state observation"
+                return 1, f"native panel readiness probe timed out; read-only waiting-state observation captured; last_state={last_panel_state!r}"
+            if probe_code != 0:
+                observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+                capture_waiting_observation(process.pid, scenario, observation_log)
+                if not stop_fixture(process, output_reader):
+                    return 1, "fixture process group or output reader survived cleanup after an unexpected Accessibility failure"
+                return 1, (
+                    "Accessibility snapshot query failed without an identified TCC denial; "
+                    f"osascript_exit_code={probe_code}; output={probe_output!r}"
+                )
         if is_tcc_denial(probe_output):
+            observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+            capture_waiting_observation(process.pid, scenario, observation_log)
             if not stop_fixture(process, output_reader):
                 return 1, "fixture process group or output reader survived cleanup after an Accessibility authorization denial"
             print("NFD_UI_AUTOMATION=UNAVAILABLE; reason=macOS TCC denied Accessibility or Apple Events; native dialog cases NOT RUN")
             return 77, probe_output
         if is_accessibility_timeout(probe_output):
             last_panel_state = f"bounded Accessibility query timed out; {probe_output.strip()}"
-            time.sleep(min(0.2, max(0.0, probe_deadline - time.monotonic())))
-            continue
+            observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+            capture_waiting_observation(process.pid, scenario, observation_log)
+            if not stop_fixture(process, output_reader):
+                return 1, "fixture process group or output reader survived cleanup after waiting-state observation"
+            return 1, f"native panel readiness reported an Accessibility timeout; read-only observation captured; last_state={last_panel_state!r}"
         if probe_output.startswith(f"NFD_PANEL_READY=pid={process_id};"):
             print(probe_output)
             panel_process_id = next(
@@ -968,11 +1155,18 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 return 1, f"Accessibility readiness did not identify the native panel owner PID: {probe_output!r}"
             break
         if not probe_output.startswith(f"NFD_PANEL_WAIT=pid={process_id};"):
+            observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+            capture_waiting_observation(process.pid, scenario, observation_log)
             if not stop_fixture(process, output_reader):
                 return 1, "fixture process group or output reader survived cleanup after unexpected Accessibility output"
             return 1, f"Accessibility probe returned an unexpected state: {probe_output!r}"
         last_panel_state = probe_output.strip()
-        time.sleep(min(0.2, max(0.0, probe_deadline - time.monotonic())))
+        time.sleep(0.5)
+        observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+        capture_waiting_observation(process.pid, scenario, observation_log)
+        if not stop_fixture(process, output_reader):
+            return 1, "fixture process group or output reader survived cleanup after waiting-state observation"
+        return 1, f"native panel did not meet readiness on the first snapshot; read-only observation captured; last_state={last_panel_state!r}"
 
     remaining = remaining_seconds()
     if remaining <= 0:

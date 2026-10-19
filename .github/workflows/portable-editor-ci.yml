@@ -191,6 +191,14 @@ jobs:
             ${{ runner.temp }}/native-dialog-open-cancel.log
             ${{ runner.temp }}/native-dialog-save-select.log
             ${{ runner.temp }}/native-dialog-save-cancel.log
+            ${{ runner.temp }}/native-dialog-open-select-observation.log
+            ${{ runner.temp }}/native-dialog-open-select-observation.png
+            ${{ runner.temp }}/native-dialog-open-cancel-observation.log
+            ${{ runner.temp }}/native-dialog-open-cancel-observation.png
+            ${{ runner.temp }}/native-dialog-save-select-observation.log
+            ${{ runner.temp }}/native-dialog-save-select-observation.png
+            ${{ runner.temp }}/native-dialog-save-cancel-observation.log
+            ${{ runner.temp }}/native-dialog-save-cancel-observation.png
             Build/CI/macos-renderer/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/macos-renderer/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
