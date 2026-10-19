@@ -2425,7 +2425,8 @@ namespace
 						m_DocumentHostTabTearOffFromNativeHost
 							? ImVec2(
 								  m_DocumentHostTabTearOffTestStart.x + IO.MouseDragThreshold + 24.0f, m_DocumentHostTabTearOffTestStart.y)
-							: ImVec2(MainViewport->Pos.x + MainViewport->Size.x + 24.0f, MainViewport->Pos.y + MainViewport->Size.y * 0.5f);
+							: ImVec2(MainViewport->Pos.x + MainViewport->Size.x * 0.5f,
+								  MainViewport->Pos.y + MainViewport->Size.y * 0.75f);
 					const float DeltaX = m_DocumentHostTabTearOffTestDrop.x - m_DocumentHostTabTearOffTestStart.x;
 					const float DeltaY = m_DocumentHostTabTearOffTestDrop.y - m_DocumentHostTabTearOffTestStart.y;
 					if (DeltaX * DeltaX + DeltaY * DeltaY <= IO.MouseDragThreshold * IO.MouseDragThreshold)
@@ -2446,8 +2447,16 @@ namespace
 				m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::DragQueued;
 				break;
 			case DocumentTabTearOffTestPhase::DragQueued:
-				IO.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
-				IO.AddMouseViewportEvent(0);
+				if (m_DocumentHostTabTearOffFromNativeHost)
+				{
+					IO.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+					IO.AddMouseViewportEvent(0);
+				}
+				else
+				{
+					IO.AddMousePosEvent(m_DocumentHostTabTearOffTestDrop.x, m_DocumentHostTabTearOffTestDrop.y);
+					IO.AddMouseViewportEvent(m_DocumentHostTabTearOffTestTabViewportID);
+				}
 				IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
 				m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::ReleaseQueued;
 				break;
@@ -2506,8 +2515,8 @@ namespace
 					}
 					else
 					{
-						PF_INFO("Document tab tear-off UI fixture passed: the captured tab drag created a native host and kept "
-								"Level Editor in the main host.");
+						PF_INFO("Document tab tear-off UI fixture passed: releasing the captured asset tab in the editor body created a native "
+								"host and kept Level Editor in the main host.");
 					}
 					m_DocumentHostTabTearOffFromNativeHost = false;
 					m_DocumentHostTabTearOffSourceHostID.clear();

@@ -71,12 +71,11 @@ namespace PulseForgeEditor
 		return TabHovered && !CloseButtonHovered && LeftButtonPressed;
 	}
 
-	[[nodiscard]] constexpr bool CanDetachDocumentTabToNativeHost(
+	[[nodiscard]] constexpr bool CanCreateNativeHostFromDocumentTabDrag(
 		bool SourceIsMainHost,
-		bool SourceIsNativeHost,
-		bool PointerOutsideAllEditorWindows) noexcept
+		bool SourceIsNativeHost) noexcept
 	{
-		return (SourceIsMainHost || SourceIsNativeHost) && PointerOutsideAllEditorWindows;
+		return SourceIsMainHost || SourceIsNativeHost;
 	}
 
 	[[nodiscard]] constexpr DocumentTabReleaseAction ResolveDocumentTabReleaseAction(
