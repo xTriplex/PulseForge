@@ -181,7 +181,7 @@ def main() -> int:
                 player_code,
                 (
                     "PULSEFORGE_PLAYER_RUNTIME_SMOKE=PASS; scripting advanced; physics_steps=",
-                    "PULSEFORGE_PLAYER_RELOCATION_SMOKE=PASS; rendered scene geometry and requesting orderly shutdown",
+                    "PULSEFORGE_PLAYER_RELOCATION_SMOKE=PASS; rendered scene geometry after runtime advancement and requesting orderly shutdown",
                     "PULSEFORGE_PLAYER_RELOCATION_SMOKE_SHUTDOWN=PASS",
                 ),
             )
