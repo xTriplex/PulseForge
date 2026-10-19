@@ -405,6 +405,19 @@ namespace
 			Failed
 		};
 
+#if defined(_DEBUG) || defined(PF_DEBUG)
+		enum class EditorRuntimePlayStopTestPhase : uint8_t
+		{
+			Disabled,
+			WaitingForEditViewportRender,
+			WaitingForPlayViewportRender,
+			Complete,
+			Failed
+		};
+
+		static constexpr size_t EditorRuntimePlayStopTestMaximumFrames = 600;
+#endif
+
 		static constexpr size_t DocumentTabTestDropPointsPerPanel = 5;
 		static constexpr size_t DocumentTabRoundTripCycleCount = 3;
 		static constexpr size_t DocumentHostTabReattachTestMaximumFrames = 3600;
@@ -447,6 +460,10 @@ namespace
 			  m_DocumentHostImageAllocationFailureTest(Options.EnableDocumentHostImageAllocationFailureTest)
 		{
 #if defined(_DEBUG) || defined(PF_DEBUG)
+			m_EditorRuntimePlayStopTestEnabled = Options.EnableEditorRuntimePlayStopTest;
+			if (m_EditorRuntimePlayStopTestEnabled)
+				m_EditorRuntimePlayStopTestPhase = EditorRuntimePlayStopTestPhase::WaitingForEditViewportRender;
+
 			if (m_DocumentHostTestFixture)
 			{
 				m_DocumentHostTestEditor = std::make_unique<PulseForgeEditor::Detail::EditorDocumentHostTestEditor>(
@@ -843,6 +860,9 @@ namespace
 					SetError(Message);
 				}
 			}
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			AdvanceEditorRuntimePlayStopTest();
+#endif
 			PrepareViewportScene();
 			m_AssetPreviews.PumpUploads();
 		}
@@ -6057,8 +6077,16 @@ namespace
 			PulseForge::RenderTargetClearValue Clear;
 			const auto Background = PulseForgeEditor::GetEditorColorValue(PulseForgeEditor::EditorColorToken::ViewportBackground);
 			Clear.Color = { Background.Red, Background.Green, Background.Blue, Background.Alpha };
-			if (m_ViewportRenderView.Render(PulseForge::Application::Get(),
-					m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport), m_ViewportTools.GetValues().ExposureEV, Clear) &&
+			const bool ViewportRendered = m_ViewportRenderView.Render(PulseForge::Application::Get(),
+				m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport), m_ViewportTools.GetValues().ExposureEV, Clear);
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			if (m_EditorRuntimePlayStopTestEnabled && ViewportRendered)
+			{
+				if (m_SceneRuntime && m_RuntimeScene) m_EditorRuntimePlayStopPlayViewportRendered = true;
+				else if (m_Project && m_Scene) m_EditorRuntimePlayStopEditViewportRendered = true;
+			}
+#endif
+			if (ViewportRendered &&
 				m_ProjectOpenTimingActive && !m_LoggedFirstViewportRendered)
 			{
 				m_LoggedFirstViewportRendered = true;
@@ -6382,6 +6410,109 @@ namespace
 			m_RuntimeScene.reset();
 		}
 
+#if defined(_DEBUG) || defined(PF_DEBUG)
+		void AdvanceEditorRuntimePlayStopTest()
+		{
+			if (!m_EditorRuntimePlayStopTestEnabled || m_EditorRuntimePlayStopTestPhase == EditorRuntimePlayStopTestPhase::Disabled ||
+				m_EditorRuntimePlayStopTestPhase == EditorRuntimePlayStopTestPhase::Complete ||
+				m_EditorRuntimePlayStopTestPhase == EditorRuntimePlayStopTestPhase::Failed)
+				return;
+
+			if (++m_EditorRuntimePlayStopTestFrames > EditorRuntimePlayStopTestMaximumFrames)
+			{
+				const std::string WaitingFor = m_EditorRuntimePlayStopTestPhase == EditorRuntimePlayStopTestPhase::WaitingForEditViewportRender
+					? "a successful Edit-mode scene viewport render"
+					: "a successful Play-mode scene viewport render";
+				FailEditorRuntimePlayStopTest("Timed out waiting for " + WaitingFor + ".");
+				return;
+			}
+
+			if (m_EditorRuntimePlayStopTestPhase == EditorRuntimePlayStopTestPhase::WaitingForEditViewportRender)
+			{
+				if (!m_EditorRuntimePlayStopEditViewportRendered) return;
+				if (!m_Project || !m_Scene)
+				{
+					FailEditorRuntimePlayStopTest("The Edit-mode viewport rendered without an active project scene.");
+					return;
+				}
+
+				const auto AuthoredSnapshot = PulseForge::SceneSerializer::Serialize(*m_Scene);
+				if (!AuthoredSnapshot)
+				{
+					FailEditorRuntimePlayStopTest("Could not snapshot the authored scene before Play: " + AuthoredSnapshot.error().Message);
+					return;
+				}
+				m_EditorRuntimePlayStopAuthoredScene = m_Scene.get();
+				m_EditorRuntimePlayStopAuthoredEntityCount = m_Scene->GetEntityCount();
+				m_EditorRuntimePlayStopAuthoredSnapshot = std::move(*AuthoredSnapshot);
+
+				try
+				{
+					StartRuntime();
+				}
+				catch (const std::exception& Exception)
+				{
+					FailEditorRuntimePlayStopTest("The Play transition threw: " + std::string(Exception.what()));
+					return;
+				}
+				catch (...)
+				{
+					FailEditorRuntimePlayStopTest("The Play transition threw an unknown exception.");
+					return;
+				}
+
+				if (!m_RuntimeScene || !m_SceneRuntime || !m_SceneRuntime->IsRunning() ||
+					m_RuntimeScene.get() == m_EditorRuntimePlayStopAuthoredScene)
+				{
+					FailEditorRuntimePlayStopTest("Play did not start a running runtime over an isolated scene copy.");
+					return;
+				}
+				m_EditorRuntimePlayStopTestPhase = EditorRuntimePlayStopTestPhase::WaitingForPlayViewportRender;
+				PF_INFO("PULSEFORGE_EDITOR_RUNTIME_PLAY_STOP=PLAY_STARTED; the isolated runtime scene is active.");
+				return;
+			}
+
+			if (!m_SceneRuntime || !m_RuntimeScene || !m_SceneRuntime->IsRunning())
+			{
+				FailEditorRuntimePlayStopTest("The runtime stopped before a Play-mode scene viewport render completed.");
+				return;
+			}
+			if (!m_EditorRuntimePlayStopPlayViewportRendered) return;
+
+			StopRuntime();
+			if (m_SceneRuntime || m_RuntimeScene)
+			{
+				FailEditorRuntimePlayStopTest("Stop did not clear the runtime scene and runtime owner.");
+				return;
+			}
+			if (!m_Scene || m_Scene.get() != m_EditorRuntimePlayStopAuthoredScene ||
+				m_Scene->GetEntityCount() != m_EditorRuntimePlayStopAuthoredEntityCount)
+			{
+				FailEditorRuntimePlayStopTest("Stop did not restore the same authored scene and entity count.");
+				return;
+			}
+			const auto AuthoredSnapshotAfterStop = PulseForge::SceneSerializer::Serialize(*m_Scene);
+			if (!AuthoredSnapshotAfterStop || *AuthoredSnapshotAfterStop != m_EditorRuntimePlayStopAuthoredSnapshot)
+			{
+				FailEditorRuntimePlayStopTest("The authored scene changed during the isolated Play/Stop transition.");
+				return;
+			}
+
+			m_EditorRuntimePlayStopTestPhase = EditorRuntimePlayStopTestPhase::Complete;
+			PF_INFO("PULSEFORGE_EDITOR_RUNTIME_PLAY_STOP=PASS; synthetic EditorApplication Play/Stop transition rendered successfully in "
+					"Edit and Play states; the authored scene was preserved.");
+			RequestEditorApplicationClose();
+		}
+
+		void FailEditorRuntimePlayStopTest(std::string Message)
+		{
+			m_EditorRuntimePlayStopTestPhase = EditorRuntimePlayStopTestPhase::Failed;
+			StopRuntime();
+			PF_ERROR("PULSEFORGE_EDITOR_RUNTIME_PLAY_STOP=FAIL; {}", Message);
+			PulseForge::Application::Get().RequestClose();
+		}
+#endif
+
 		void RefreshAssets()
 		{
 			if (!m_Project) return;
@@ -6588,6 +6719,16 @@ namespace
 		std::optional<std::filesystem::path> m_StartupProjectPath;
 		std::optional<std::filesystem::path> m_ProjectOpenRenderTestFile;
 		bool m_ProjectOpenRenderTestRequested = false;
+#if defined(_DEBUG) || defined(PF_DEBUG)
+		bool m_EditorRuntimePlayStopTestEnabled = false;
+		bool m_EditorRuntimePlayStopEditViewportRendered = false;
+		bool m_EditorRuntimePlayStopPlayViewportRendered = false;
+		EditorRuntimePlayStopTestPhase m_EditorRuntimePlayStopTestPhase = EditorRuntimePlayStopTestPhase::Disabled;
+		const PulseForge::Scene* m_EditorRuntimePlayStopAuthoredScene = nullptr;
+		size_t m_EditorRuntimePlayStopAuthoredEntityCount = 0;
+		size_t m_EditorRuntimePlayStopTestFrames = 0;
+		std::string m_EditorRuntimePlayStopAuthoredSnapshot;
+#endif
 		bool m_DocumentHostTestFixture = false;
 		bool m_DocumentHostResetLayoutTest = false;
 		bool m_DocumentHostTabTearOffTest = false;
