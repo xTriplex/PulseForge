@@ -4877,6 +4877,10 @@ namespace
 		void ProcessReleasedDocumentTabDrag()
 		{
 			const ImGuiIO& IO = ImGui::GetIO();
+			const ImGuiViewport* MainViewport = ImGui::GetMainViewport();
+			const bool ReleaseOverMainEditorViewport = MainViewport && IO.MousePos.x >= MainViewport->Pos.x &&
+				IO.MousePos.y >= MainViewport->Pos.y && IO.MousePos.x < MainViewport->Pos.x + MainViewport->Size.x &&
+				IO.MousePos.y < MainViewport->Pos.y + MainViewport->Size.y;
 			const auto ActiveIdentity = m_DocumentTabInteraction.ActiveDragIdentity();
 			const auto* Session = ActiveIdentity ? m_Documents.Find(*ActiveIdentity) : nullptr;
 			const auto* SourceHost = Session ? m_Documents.FindHost(Session->HostID) : nullptr;
@@ -4888,7 +4892,8 @@ namespace
 				.MaximumObservedDistanceSquared = IO.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left],
 				.DragThreshold = IO.MouseDragThreshold,
 				.SourceIsMainHost = SourceHost && SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Main,
-				.SourceIsNativeHost = SourceHost && SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Native };
+				.SourceIsNativeHost = SourceHost && SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Native,
+				.ReleaseOverMainEditorViewport = ReleaseOverMainEditorViewport };
 			const auto Released = m_DocumentTabInteraction.UpdateDrag(Frame);
 			if (!Released) return;
 

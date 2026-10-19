@@ -47,6 +47,7 @@ namespace PulseForgeEditor
 		float DragThreshold = 0.0f;
 		bool SourceIsMainHost = false;
 		bool SourceIsNativeHost = false;
+		bool ReleaseOverMainEditorViewport = false;
 	};
 
 	struct EditorDocumentTabDragRelease
