@@ -101,9 +101,28 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	DragFrame.DragThreshold = 6.0f;
 	DragFrame.SourceIsMainHost = true;
 	PF_CHECK(Tests, !Interaction.UpdateDrag(DragFrame));
+	DragFrame.PointerPosition = { 1200.0f, 120.0f };
+	DragFrame.ReleaseOverMainEditorViewport = IsDocumentTabReleaseOverMainViewport(10, 10, true, false);
+	PF_CHECK(Tests, DragFrame.ReleaseOverMainEditorViewport);
+	DragFrame.LeftButtonDown = false;
+	DragFrame.LeftButtonReleased = true;
+	const auto MainViewportReportedOutsideRelease = Interaction.UpdateDrag(DragFrame);
+	PF_CHECK(Tests, MainViewportReportedOutsideRelease &&
+						MainViewportReportedOutsideRelease->Action == DocumentTabReleaseAction::None);
+
+	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
+	DragFrame = {};
+	DragFrame.LeftButtonDown = true;
+	DragFrame.PointerPosition = { 20.0f, 20.0f };
+	DragFrame.HoveredViewportID = 10;
+	DragFrame.DragThreshold = 6.0f;
+	DragFrame.SourceIsMainHost = true;
+	PF_CHECK(Tests, !Interaction.UpdateDrag(DragFrame));
 	DragFrame.LeftButtonDown = false;
 	DragFrame.LeftButtonReleased = true;
 	DragFrame.PointerPosition = { 1200.0f, 120.0f };
+	DragFrame.HoveredViewportID = 0;
+	DragFrame.ReleaseOverMainEditorViewport = IsDocumentTabReleaseOverMainViewport(10, 0, true, false);
 	const auto OutsideWindowRelease = Interaction.UpdateDrag(DragFrame);
 	PF_CHECK(Tests, OutsideWindowRelease && OutsideWindowRelease->Action == DocumentTabReleaseAction::CreateNativeHost);
 
