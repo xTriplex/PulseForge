@@ -231,9 +231,13 @@ PANEL_READY_PROBE = '''on run argv
                     end timeout
                     set candidateState to candidateState & "; expected buttons present=" & panelReady
                     if not panelReady then
-                        with timeout of 2 seconds
-                            set controlState to my describeDialogControls(candidateWindow, operation)
-                        end timeout
+                        if windowRole is "AXSheet" or windowSubrole is "AXDialog" then
+                            with timeout of 2 seconds
+                                set controlState to my describeDialogControls(candidateWindow, operation)
+                            end timeout
+                        else
+                            set controlState to "descendant scan skipped for non-dialog window"
+                        end if
                         set candidateState to candidateState & "; " & controlState
                     end if
                     set lastState to lastState & " | " & candidateState
@@ -242,12 +246,14 @@ PANEL_READY_PROBE = '''on run argv
                         set primaryActions to "unavailable"
                         try
                             with timeout of 2 seconds
-                                set cancelActions to actions of button "Cancel" of candidateWindow as text
+                                set cancelButton to my findDialogButton(candidateWindow, "Cancel")
+                                set cancelActions to actions of cancelButton as text
                                 if operation is "open-select" or operation is "open-cancel" then
-                                    set primaryActions to actions of button "Open" of candidateWindow as text
+                                    set primaryButton to my findDialogButton(candidateWindow, "Open")
                                 else
-                                    set primaryActions to actions of button "Save" of candidateWindow as text
+                                    set primaryButton to my findDialogButton(candidateWindow, "Save")
                                 end if
+                                set primaryActions to actions of primaryButton as text
                             end timeout
                         end try
                         return "NFD_PANEL_READY=pid=" & targetPID & "; process=" & processName & "; " & lastState & ¬
@@ -258,6 +264,11 @@ PANEL_READY_PROBE = '''on run argv
                         error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; pid=" & targetPID & "; process=" & processName & ¬
                             "; query=window-" & windowIndex & "; state=" & lastState & ¬
                             "; error=" & errorNumber & "; " & errorMessage
+                    end if
+                    if errorMessage contains "NFD_TCC_DENIAL" then error errorMessage number errorNumber
+                    if errorNumber is -1719 or errorNumber is -1743 then
+                        error "NFD_TCC_DENIAL; pid=" & targetPID & "; process=" & processName & ¬
+                            "; query=window-" & windowIndex & "; error=" & errorNumber & "; " & errorMessage number errorNumber
                     end if
                     set lastState to lastState & " | window " & windowIndex & " query error=" & errorNumber & "; " & errorMessage
                 end try
@@ -293,12 +304,14 @@ PANEL_READY_PROBE = '''on run argv
                                     set primaryActions to "unavailable"
                                     try
                                         with timeout of 2 seconds
-                                            set cancelActions to actions of button "Cancel" of candidateSheet as text
+                                            set cancelButton to my findDialogButton(candidateSheet, "Cancel")
+                                            set cancelActions to actions of cancelButton as text
                                             if operation is "open-select" or operation is "open-cancel" then
-                                                set primaryActions to actions of button "Open" of candidateSheet as text
+                                                set primaryButton to my findDialogButton(candidateSheet, "Open")
                                             else
-                                                set primaryActions to actions of button "Save" of candidateSheet as text
+                                                set primaryButton to my findDialogButton(candidateSheet, "Save")
                                             end if
+                                            set primaryActions to actions of primaryButton as text
                                         end timeout
                                     end try
                                     return "NFD_PANEL_READY=pid=" & targetPID & "; process=" & processName & "; " & lastState & ¬
@@ -311,6 +324,12 @@ PANEL_READY_PROBE = '''on run argv
                                         "; state=" & lastState & "; error=" & errorNumber & "; " & errorMessage ¬
                                         number -1712
                                 end if
+                                if errorMessage contains "NFD_TCC_DENIAL" then error errorMessage number errorNumber
+                                if errorNumber is -1719 or errorNumber is -1743 then
+                                    error "NFD_TCC_DENIAL; pid=" & targetPID & "; process=" & processName & ¬
+                                        "; query=window-" & windowIndex & "/sheet-" & sheetIndex & ¬
+                                        "; error=" & errorNumber & "; " & errorMessage number errorNumber
+                                end if
                                 set lastState to lastState & " | sheet " & sheetIndex & " query error=" & errorNumber & "; " & errorMessage
                             end try
                         end repeat
@@ -320,6 +339,12 @@ PANEL_READY_PROBE = '''on run argv
                             error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; pid=" & targetPID & "; process=" & processName & ¬
                                 "; query=window-" & windowIndex & "/sheets; state=" & lastState & ¬
                                 "; error=" & errorNumber & "; " & errorMessage number -1712
+                        end if
+                        if errorMessage contains "NFD_TCC_DENIAL" then error errorMessage number errorNumber
+                        if errorNumber is -1719 or errorNumber is -1743 then
+                            error "NFD_TCC_DENIAL; pid=" & targetPID & "; process=" & processName & ¬
+                                "; query=window-" & windowIndex & "/sheets; error=" & errorNumber & "; " & errorMessage ¬
+                                number errorNumber
                         end if
                         set lastState to lastState & " | window " & windowIndex & " sheets query error=" & errorNumber & "; " & errorMessage
                     end try
@@ -332,10 +357,9 @@ end run
 
 on matchesDialog(candidateElement, operation)
     tell application "System Events"
-        set cancelEnabled to false
         try
-            set cancelButton to button "Cancel" of candidateElement
-            set cancelEnabled to enabled of cancelButton
+            set candidateRole to role of candidateElement as text
+            set candidateSubrole to subrole of candidateElement as text
         on error errorMessage number errorNumber
             if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
             if errorNumber is -1719 or errorNumber is -1743 then
@@ -343,67 +367,128 @@ on matchesDialog(candidateElement, operation)
             end if
             return false
         end try
+        if candidateRole is not "AXSheet" and candidateSubrole is not "AXDialog" then return false
+        set cancelButton to my findDialogButton(candidateElement, "Cancel")
+        if cancelButton is missing value then return false
+        set cancelEnabled to enabled of cancelButton
         if operation is "open-select" or operation is "open-cancel" then
-            try
-                set primaryButton to button "Open" of candidateElement
-                set primaryEnabled to enabled of primaryButton
-            on error errorMessage number errorNumber
-                if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-                if errorNumber is -1719 or errorNumber is -1743 then
-                    error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-                end if
-                return false
-            end try
+            set primaryButton to my findDialogButton(candidateElement, "Open")
         else
-            try
-                set primaryButton to button "Save" of candidateElement
-                set primaryEnabled to enabled of primaryButton
-            on error errorMessage number errorNumber
-                if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-                if errorNumber is -1719 or errorNumber is -1743 then
-                    error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-                end if
-                return false
-            end try
+            set primaryButton to my findDialogButton(candidateElement, "Save")
         end if
+        if primaryButton is missing value then return false
         return cancelEnabled
     end tell
 end matchesDialog
 
 on describeDialogControls(candidateElement, operation)
     tell application "System Events"
-        set cancelState to "Cancel unavailable"
-        try
-            set cancelButton to button "Cancel" of candidateElement
-            set cancelState to "Cancel enabled=" & ((enabled of cancelButton) as text)
-            try
-                set cancelState to cancelState & "; actions=" & (actions of cancelButton as text)
-            on error errorMessage number errorNumber
-                set cancelState to cancelState & "; actions query error=" & errorNumber & ": " & errorMessage
-            end try
-        on error errorMessage number errorNumber
-            set cancelState to "Cancel query error=" & errorNumber & ": " & errorMessage
-        end try
         if operation is "open-select" or operation is "open-cancel" then
             set primaryName to "Open"
         else
             set primaryName to "Save"
         end if
-        set primaryState to primaryName & " unavailable"
         try
-            set primaryButton to button primaryName of candidateElement
-            set primaryState to primaryName & " enabled=" & ((enabled of primaryButton) as text)
-            try
-                set primaryState to primaryState & "; actions=" & (actions of primaryButton as text)
-            on error errorMessage number errorNumber
-                set primaryState to primaryState & "; actions query error=" & errorNumber & ": " & errorMessage
-            end try
+            set descendants to entire contents of candidateElement
         on error errorMessage number errorNumber
-            set primaryState to primaryName & " query error=" & errorNumber & ": " & errorMessage
+            if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+            if errorNumber is -1719 or errorNumber is -1743 then
+                error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+            end if
+            error "NFD_ACCESSIBILITY_DESCENDANT_QUERY_FAILED; error=" & errorNumber & "; " & errorMessage number errorNumber
         end try
-        return cancelState & "; " & primaryState
+        set descendantCount to count of descendants
+        set state to "descendants=" & descendantCount & "; expected=Cancel," & primaryName & "; controls=["
+        set itemCount to 0
+        set hasMore to false
+        repeat with descendantReference in descendants
+            if itemCount is 40 or (length of state) > 3000 then
+                set hasMore to true
+                exit repeat
+            end if
+            set descendant to contents of descendantReference
+            set roleName to "?"
+            set elementName to "?"
+            set elementDescription to "?"
+            try
+                set roleName to role of descendant as text
+            on error errorMessage number errorNumber
+                if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+                if errorNumber is -1719 or errorNumber is -1743 then
+                    error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+                end if
+            end try
+            try
+                set elementName to name of descendant as text
+            on error errorMessage number errorNumber
+                if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+                if errorNumber is -1719 or errorNumber is -1743 then
+                    error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+                end if
+            end try
+            try
+                set elementDescription to description of descendant as text
+            on error errorMessage number errorNumber
+                if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+                if errorNumber is -1719 or errorNumber is -1743 then
+                    error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+                end if
+            end try
+            set itemState to roleName & ": name='" & elementName & "' description='" & elementDescription & "'"
+            if roleName is "AXButton" then
+                try
+                    set itemState to itemState & " enabled=" & ((enabled of descendant) as text)
+                on error errorMessage number errorNumber
+                    if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+                    if errorNumber is -1719 or errorNumber is -1743 then
+                        error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+                    end if
+                end try
+                try
+                    set itemState to itemState & " actions=" & (actions of descendant as text)
+                on error errorMessage number errorNumber
+                    if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+                    if errorNumber is -1719 or errorNumber is -1743 then
+                        error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+                    end if
+                end try
+            end if
+            if itemCount is not 0 then set state to state & "; "
+            set state to state & itemState
+            set itemCount to itemCount + 1
+        end repeat
+        if hasMore then set state to state & "; truncated"
+        return state & "]"
     end tell
 end describeDialogControls
+
+on findDialogButton(candidateElement, requestedName)
+    tell application "System Events"
+        try
+            set descendants to entire contents of candidateElement
+        on error errorMessage number errorNumber
+            if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+            if errorNumber is -1719 or errorNumber is -1743 then
+                error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+            end if
+            error "NFD_ACCESSIBILITY_DESCENDANT_QUERY_FAILED; error=" & errorNumber & "; " & errorMessage number errorNumber
+        end try
+        repeat with descendantReference in descendants
+            set descendant to contents of descendantReference
+            try
+                if (role of descendant as text) is "AXButton" and (name of descendant as text) is requestedName then
+                    return descendant
+                end if
+            on error errorMessage number errorNumber
+                if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+                if errorNumber is -1719 or errorNumber is -1743 then
+                    error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+                end if
+            end try
+        end repeat
+        return missing value
+    end tell
+end findDialogButton
 '''
 
 SELECT_SCRIPT = '''on run argv
@@ -456,13 +541,15 @@ SELECT_SCRIPT = '''on run argv
         if operation is "open-select" then
             keystroke "g" using {command down, shift down}
             set goSheet to missing value
+            set goSheetParent to missing value
             repeat 100 times
                 repeat with candidateWindow in windows of targetProcess
                     try
                         if (count of sheets of candidateWindow) > 0 then
                             set possibleSheet to sheet 1 of candidateWindow
-                            if (count of text fields of possibleSheet) > 0 then
+                            if my findDialogTextField(possibleSheet, 1) is not missing value then
                                 set goSheet to possibleSheet
+                                set goSheetParent to candidateWindow
                                 exit repeat
                             end if
                         end if
@@ -472,42 +559,58 @@ SELECT_SCRIPT = '''on run argv
                 delay 0.1
             end repeat
             if goSheet is missing value then error "Go to Folder sheet did not expose a text field after Cmd-Shift-G"
-            set value of text field 1 of goSheet to directoryPath
-            if (value of text field 1 of goSheet as text) is not directoryPath then
+            set goTextField to my findDialogTextField(goSheet, 1)
+            set value of goTextField to directoryPath
+            if (value of goTextField as text) is not directoryPath then
                 error "Go to Folder field did not retain the requested Unicode directory path"
             end if
-            if not enabled of button "Go" of goSheet then error "Go to Folder confirmation remained disabled"
-            perform action "AXPress" of button "Go" of goSheet
+            set goButton to my findDialogButton(goSheet, "Go")
+            if goButton is missing value then error "Go to Folder confirmation button was not exposed"
+            if not enabled of goButton then error "Go to Folder confirmation remained disabled"
+            my pressDialogButton(goButton, "Go")
+            set goSheetClosed to false
             repeat 100 times
                 try
-                    if enabled of button "Open" of dialogPanel then exit repeat
+                    if (count of sheets of goSheetParent) is 0 then
+                        set goSheetClosed to true
+                        exit repeat
+                    end if
                 end try
                 delay 0.1
             end repeat
+            if not goSheetClosed then error "Go to Folder sheet remained visible after confirmation"
             keystroke selectedName
             repeat 100 times
                 try
-                    if enabled of button "Open" of dialogPanel then exit repeat
+                    set openButton to my findDialogButton(dialogPanel, "Open")
+                    if openButton is not missing value and enabled of openButton then exit repeat
                 end try
                 delay 0.1
             end repeat
-            if not enabled of button "Open" of dialogPanel then error "Open remained disabled after selecting the Unicode filename"
-            perform action "AXPress" of button "Open" of dialogPanel
+            set openButton to my findDialogButton(dialogPanel, "Open")
+            if openButton is missing value then error "Open button disappeared after selecting the Unicode filename"
+            if not enabled of openButton then error "Open remained disabled after selecting the Unicode filename"
+            my pressDialogButton(openButton, "Open")
         else if operation is "open-cancel" or operation is "save-cancel" then
-            perform action "AXPress" of button "Cancel" of dialogPanel
+            set cancelButton to my findDialogButton(dialogPanel, "Cancel")
+            if cancelButton is missing value then error "Cancel button disappeared before the cancellation action"
+            my pressDialogButton(cancelButton, "Cancel")
         else if operation is "save-select" then
             set savePanel to dialogPanel
-            if (count of text fields of savePanel) is 0 then error "Save panel did not expose its filename field"
-            set value of text field 1 of savePanel to selectedName
-            if (value of text field 1 of savePanel as text) is not selectedName then
+            set saveTextField to my findDialogTextField(savePanel, 1)
+            if saveTextField is missing value then error "Save panel did not expose its filename field"
+            set value of saveTextField to selectedName
+            if (value of saveTextField as text) is not selectedName then
                 error "Save filename field did not retain the requested Unicode filename"
             end if
             repeat 100 times
-                if enabled of button "Save" of savePanel then exit repeat
+                set saveButton to my findDialogButton(savePanel, "Save")
+                if saveButton is not missing value and enabled of saveButton then exit repeat
                 delay 0.1
             end repeat
-            if not enabled of button "Save" of savePanel then error "Save remained disabled after filename entry"
-            perform action "AXPress" of button "Save" of savePanel
+            if saveButton is missing value then error "Save button disappeared before confirmation"
+            if not enabled of saveButton then error "Save remained disabled after filename entry"
+            my pressDialogButton(saveButton, "Save")
         end if
     end tell
     return "NFD_PANEL_INTERACTION=PASS; pid=" & targetPID & "; scenario=" & operation
@@ -515,31 +618,92 @@ end run
 
 on matchesDialog(candidateElement, operation)
     tell application "System Events"
-        set cancelEnabled to false
         try
-            set cancelButton to button "Cancel" of candidateElement
-            set cancelEnabled to enabled of cancelButton
-        on error
+            set candidateRole to role of candidateElement as text
+            set candidateSubrole to subrole of candidateElement as text
+        on error errorMessage number errorNumber
+            if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+            if errorNumber is -1719 or errorNumber is -1743 then
+                error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+            end if
             return false
         end try
+        if candidateRole is not "AXSheet" and candidateSubrole is not "AXDialog" then return false
+        set cancelButton to my findDialogButton(candidateElement, "Cancel")
+        if cancelButton is missing value then return false
+        set cancelEnabled to enabled of cancelButton
         if operation is "open-select" or operation is "open-cancel" then
-            try
-                set primaryButton to button "Open" of candidateElement
-                set primaryEnabled to enabled of primaryButton
-            on error
-                return false
-            end try
+            set primaryButton to my findDialogButton(candidateElement, "Open")
         else
-            try
-                set primaryButton to button "Save" of candidateElement
-                set primaryEnabled to enabled of primaryButton
-            on error
-                return false
-            end try
+            set primaryButton to my findDialogButton(candidateElement, "Save")
         end if
+        if primaryButton is missing value then return false
         return cancelEnabled
     end tell
 end matchesDialog
+
+on findDialogButton(candidateElement, requestedName)
+    tell application "System Events"
+        try
+            set descendants to entire contents of candidateElement
+        on error errorMessage number errorNumber
+            if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+            if errorNumber is -1719 or errorNumber is -1743 then
+                error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+            end if
+            error "NFD_ACCESSIBILITY_DESCENDANT_QUERY_FAILED; error=" & errorNumber & "; " & errorMessage number errorNumber
+        end try
+        repeat with descendantReference in descendants
+            set descendant to contents of descendantReference
+            try
+                if (role of descendant as text) is "AXButton" and (name of descendant as text) is requestedName then
+                    return descendant
+                end if
+            end try
+        end repeat
+        return missing value
+    end tell
+end findDialogButton
+
+on findDialogTextField(candidateElement, requestedIndex)
+    tell application "System Events"
+        set fieldIndex to 0
+        try
+            set descendants to entire contents of candidateElement
+        on error errorMessage number errorNumber
+            if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+            if errorNumber is -1719 or errorNumber is -1743 then
+                error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+            end if
+            error "NFD_ACCESSIBILITY_DESCENDANT_QUERY_FAILED; error=" & errorNumber & "; " & errorMessage number errorNumber
+        end try
+        repeat with descendantReference in descendants
+            set descendant to contents of descendantReference
+            try
+                if (role of descendant as text) is "AXTextField" then
+                    set fieldIndex to fieldIndex + 1
+                    if fieldIndex is requestedIndex then return descendant
+                end if
+            on error errorMessage number errorNumber
+                if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+                if errorNumber is -1719 or errorNumber is -1743 then
+                    error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+                end if
+            end try
+        end repeat
+        return missing value
+    end tell
+end findDialogTextField
+
+on pressDialogButton(buttonElement, buttonName)
+    tell application "System Events"
+        set availableActions to actions of buttonElement as text
+        if availableActions does not contain "AXPress" then
+            error "NFD_ACCESSIBILITY_ACTION_MISSING; button=" & buttonName & "; actions=" & availableActions
+        end if
+        perform action "AXPress" of buttonElement
+    end tell
+end pressDialogButton
 '''
 
 def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, timeout_seconds: int) -> tuple[int, str]:
