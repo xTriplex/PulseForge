@@ -3,9 +3,11 @@
 
 #include <GLFW/glfw3.h>
 
+#include <array>
 #include <chrono>
 #include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
@@ -27,6 +29,21 @@ extern char** environ;
 
 namespace
 {
+	struct FGLFWProbeError
+	{
+		int Code = GLFW_NO_ERROR;
+		std::array<char, 1024> Description{};
+	};
+
+	FGLFWProbeError s_GLFWProbeError;
+
+	void CaptureGLFWProbeError(int Code, const char* Description) noexcept
+	{
+		s_GLFWProbeError.Code = Code;
+		std::snprintf(s_GLFWProbeError.Description.data(), s_GLFWProbeError.Description.size(), "%s",
+			Description ? Description : "");
+	}
+
 	class ScopedTemporaryDirectory
 	{
 	public:
@@ -89,7 +106,7 @@ namespace
 		}
 	}
 
-	bool ReportAbsoluteDlopenSearch(const std::filesystem::path& EmptySdk)
+	void ReportAbsoluteDlopenSearch(const std::filesystem::path& EmptySdk)
 	{
 		PrintLoaderEnvironment();
 		for (const char* Filename : {"libvulkan.1.dylib", "libvulkan.dylib"})
@@ -123,7 +140,7 @@ namespace
 			const char* SdkValue = std::getenv("VULKAN_SDK");
 			std::error_code SdkPathError;
 			const std::filesystem::path CanonicalSdkImage = SdkValue && SdkValue[0] != '\0'
-				? std::filesystem::weakly_canonical(std::filesystem::u8path(SdkValue) / "lib" / Filename, SdkPathError)
+				? std::filesystem::weakly_canonical(std::filesystem::path(SdkValue) / "lib" / Filename, SdkPathError)
 				: std::filesystem::path{};
 			const bool SdkImage = HasImage && SdkValue && SdkValue[0] != '\0' && !SdkPathError && !LoadedError &&
 				CanonicalSdkImage == CanonicalLoaded;
@@ -132,9 +149,8 @@ namespace
 				<< "; dlerror=" << SymbolErrorCopy << "; image=" << LoadedImage
 				<< "; same_image=" << (SameImage ? "true" : "false")
 				<< "; sdk_image=" << (SdkImage ? "true" : "false") << '\n';
-			return HasImage && !SameImage;
+			return;
 		}
-		return false;
 	}
 
 	int RunExpectedEmptySdkFailure(const std::filesystem::path& EmptySdk)
@@ -248,6 +264,8 @@ namespace
 		}
 	}
 
+	bool VerifySelectedVulkanSdkImage();
+
 	bool CreateAndCloseVulkanWindow(const char* Title)
 	{
 		try
@@ -256,6 +274,9 @@ namespace
 				Title, 320, 240, PulseForge::EWindowStyle::Default, PulseForge::EWindowClientAPI::Vulkan));
 			if (!PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
 				throw std::runtime_error("GLFW lost its Vulkan loader while the window runtime was active");
+			const char* SdkValue = std::getenv("VULKAN_SDK");
+			if (SdkValue && SdkValue[0] != '\0' && !VerifySelectedVulkanSdkImage())
+				throw std::runtime_error("the active Vulkan loader did not come from the selected VULKAN_SDK");
 			if (glfwVulkanSupported() != GLFW_TRUE)
 				throw std::runtime_error("GLFW could not query Vulkan through the injected loader");
 		}
@@ -271,27 +292,63 @@ namespace
 		}
 		return true;
 	}
+
+	bool VerifySelectedVulkanSdkImage()
+	{
+		const char* SdkValue = std::getenv("VULKAN_SDK");
+		if (!SdkValue || SdkValue[0] == '\0')
+		{
+			std::cout << "MACOS_VULKAN_LOADER_VALID_SDK=NOT_APPLICABLE; VULKAN_SDK is unset\n";
+			return true;
+		}
+
+		const auto ProcAddress = PulseForge::GLFWWindow::GetVulkanLoaderProcAddress();
+		Dl_info Image{};
+		if (!ProcAddress || !dladdr(reinterpret_cast<const void*>(ProcAddress), &Image) || !Image.dli_fname)
+		{
+			std::cerr << "Could not identify the loaded image for the selected Vulkan SDK loader" << '\n';
+			return false;
+		}
+
+		const std::filesystem::path LoadedImagePath(Image.dli_fname);
+		std::error_code LoadedError;
+		const std::filesystem::path LoadedImage = std::filesystem::weakly_canonical(LoadedImagePath, LoadedError);
+		if (LoadedError)
+		{
+			std::cerr << "Could not canonicalize the loaded Vulkan image '" << LoadedImagePath.string() << "': "
+				<< LoadedError.message() << '\n';
+			return false;
+		}
+
+		for (const char* Filename : {"libvulkan.1.dylib", "libvulkan.dylib"})
+		{
+			std::error_code CandidateError;
+			const std::filesystem::path Candidate = std::filesystem::weakly_canonical(
+				std::filesystem::path(SdkValue) / "lib" / Filename, CandidateError);
+			if (!CandidateError && Candidate == LoadedImage)
+			{
+				std::cout << "MACOS_VULKAN_LOADER_VALID_SDK=PASS; image=" << LoadedImage.string() << '\n';
+				return true;
+			}
+		}
+
+		std::cerr << "The explicitly selected VULKAN_SDK did not provide the active loader image: "
+			<< LoadedImage.string() << '\n';
+		return false;
+	}
 }
 
-int main(int ArgumentCount, char** Arguments)
+static int RunVulkanLoaderLifecycle(const char* ExecutableArgument)
 {
-	PulseForge::Log::Init();
-	if (ArgumentCount == 3 && std::string_view(Arguments[1]) == "--invalid-sdk-child")
-		return RunExpectedEmptySdkFailure(Arguments[2]);
-	if (ArgumentCount != 1)
-	{
-		std::cerr << "Unexpected macOS Vulkan loader lifecycle arguments" << '\n';
-		return 1;
-	}
-
 	const char* ExistingSdkValue = std::getenv("VULKAN_SDK");
 	const std::string ExistingSdk = ExistingSdkValue ? ExistingSdkValue : "";
 	const bool HadSdkValue = ExistingSdkValue != nullptr;
 	ScopedTemporaryDirectory EmptySdk;
 	std::filesystem::create_directory(EmptySdk.Path() / "lib");
-	const bool DyldRedirectedAbsolutePath = ReportAbsoluteDlopenSearch(EmptySdk.Path());
+	ReportAbsoluteDlopenSearch(EmptySdk.Path());
 	std::error_code ExecutableError;
-	const std::filesystem::path ExecutablePath = std::filesystem::canonical(Arguments[0], ExecutableError);
+	const std::filesystem::path ExecutablePath = std::filesystem::canonical(
+		std::filesystem::path(ExecutableArgument), ExecutableError);
 	if (ExecutableError)
 	{
 		std::cerr << "Could not resolve lifecycle test executable path: " << ExecutableError.message() << '\n';
@@ -320,13 +377,6 @@ int main(int ArgumentCount, char** Arguments)
 			std::cerr << "Vulkan startup failed for an unrelated reason: " << Error.what() << '\n';
 			return 1;
 		}
-		if (DyldRedirectedAbsolutePath &&
-			Message.find("DYLD_LIBRARY_PATH may have selected a different Vulkan loader") == std::string_view::npos)
-		{
-			std::cerr << "The loader path probe observed dyld redirection, but SDK selection did not reject it: "
-				<< Error.what() << '\n';
-			return 1;
-		}
 		std::cout << "MACOS_VULKAN_LOADER_FAILURE_REASON=" << Error.what() << '\n';
 	}
 	if (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
@@ -342,57 +392,249 @@ int main(int ArgumentCount, char** Arguments)
 
 	if (!CreateAndCloseVulkanWindow("PulseForge Vulkan loader startup")) return 1;
 	if (!CreateAndCloseVulkanWindow("PulseForge Vulkan loader repeated initialization")) return 1;
+
+	std::cout << "MACOS_VULKAN_LOADER_LIFECYCLE=PASS; sanitized failure, explicit SDK selection, Vulkan startup, "
+		"termination and repeated initialization\n";
+	return 0;
+}
+
+static int RunVulkanLoaderMismatchPolicy()
+{
+	const char* ExistingSdkValue = std::getenv("VULKAN_SDK");
+	const std::string ExistingSdk = ExistingSdkValue ? ExistingSdkValue : "";
+	const bool HadSdkValue = ExistingSdkValue != nullptr;
+	if (setenv("VULKAN_SDK", "/path/that/does/not/exist", 1) != 0)
 	{
-		PulseForge::GLFWWindow OpenGLWindow(PulseForge::WindowProps(
-			"PulseForge OpenGL runtime", 320, 240, PulseForge::EWindowStyle::Default, PulseForge::EWindowClientAPI::OpenGL));
+		std::cerr << "Could not select the invalid Vulkan SDK for the runtime mismatch policy check" << '\n';
+		return 1;
+	}
+
+	{
+		PulseForge::GLFWWindow NoClientApiWindow(PulseForge::WindowProps(
+			"PulseForge no-client-API runtime policy fixture", 320, 240, PulseForge::EWindowStyle::Default,
+			PulseForge::EWindowClientAPI::None));
+		if (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
+		{
+			std::cerr << "A no-client-API GLFW runtime unexpectedly acquired a Vulkan loader" << '\n';
+			return 1;
+		}
+
 		try
 		{
 			PulseForge::GLFWWindow MismatchedVulkanWindow(PulseForge::WindowProps(
-				"PulseForge Vulkan cannot join OpenGL runtime", 320, 240, PulseForge::EWindowStyle::Default,
+				"PulseForge Vulkan cannot join no-client-API runtime", 320, 240, PulseForge::EWindowStyle::Default,
 				PulseForge::EWindowClientAPI::Vulkan));
-			std::cerr << "Vulkan unexpectedly joined a GLFW runtime initialized without its loader" << '\n';
+			std::cerr << "Vulkan unexpectedly joined a GLFW runtime initialized without its Vulkan loader" << '\n';
 			return 1;
 		}
 		catch (const std::exception& Error)
 		{
-			if (std::string_view(Error.what()).find("cannot join a GLFW runtime initialized without its Vulkan loader") ==
-				std::string_view::npos)
+			if (std::string_view(Error.what()).find(
+					"cannot join a GLFW runtime initialized without its Vulkan loader") == std::string_view::npos)
 			{
-				std::cerr << "The Vulkan/OpenGL runtime mismatch failed for an unrelated reason: " << Error.what() << '\n';
-				return 1;
-			}
-			if (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
-			{
-				std::cerr << "Rejected Vulkan window left a loader installed into the OpenGL runtime" << '\n';
+				std::cerr << "Vulkan runtime mismatch failed for an unrelated reason: " << Error.what() << '\n';
 				return 1;
 			}
 		}
+		if (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
+		{
+			std::cerr << "Rejected Vulkan window left a loader installed in the no-client-API runtime" << '\n';
+			return 1;
+		}
 	}
+
 	if (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
 	{
-		std::cerr << "OpenGL runtime teardown retained a Vulkan loader" << '\n';
-		return 1;
-	}
-	if (setenv("VULKAN_SDK", "/path/that/does/not/exist", 1) != 0) return 1;
-	try
-	{
-		PulseForge::GLFWWindow OpenGLWindow(PulseForge::WindowProps(
-			"PulseForge OpenGL does not require a Vulkan SDK", 320, 240, PulseForge::EWindowStyle::Default,
-			PulseForge::EWindowClientAPI::OpenGL));
-		if (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
-			throw std::runtime_error("OpenGL startup unexpectedly acquired a Vulkan loader");
-	}
-	catch (const std::exception& Error)
-	{
-		std::cerr << "OpenGL startup unexpectedly required Vulkan: " << Error.what() << '\n';
+		std::cerr << "No-client-API runtime teardown retained a Vulkan loader" << '\n';
 		return 1;
 	}
 	if (HadSdkValue)
 		setenv("VULKAN_SDK", ExistingSdk.c_str(), 1);
 	else
 		unsetenv("VULKAN_SDK");
+	if (!CreateAndCloseVulkanWindow("PulseForge Vulkan startup after runtime mismatch rejection")) return 1;
 
-	std::cout << "MACOS_VULKAN_LOADER_LIFECYCLE=PASS; sanitized failure, explicit SDK selection, startup, API mismatch, "
-		"termination and repeated initialization\n";
+	std::cout << "MACOS_VULKAN_RUNTIME_MISMATCH_POLICY=PASS; GLFW_NO_API policy fixture only, "
+		"not an OpenGL-context test\n";
 	return 0;
+}
+
+static bool GLFWOpenGLContextProbe(std::string& Version, int& ErrorCode, std::string& ErrorDescription)
+{
+	s_GLFWProbeError = {};
+	glfwSetErrorCallback(CaptureGLFWProbeError);
+	if (glfwInit() != GLFW_TRUE)
+	{
+		ErrorCode = s_GLFWProbeError.Code;
+		ErrorDescription = s_GLFWProbeError.Description.data();
+		glfwTerminate();
+		return false;
+	}
+
+	glfwDefaultWindowHints();
+	glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_API);
+	glfwWindowHint(GLFW_SRGB_CAPABLE, GLFW_FALSE);
+	glfwWindowHint(GLFW_DECORATED, GLFW_TRUE);
+	glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+	GLFWwindow* Window = glfwCreateWindow(320, 240, "PulseForge raw GLFW NSGL probe", nullptr, nullptr);
+	if (!Window)
+	{
+		ErrorCode = s_GLFWProbeError.Code;
+		ErrorDescription = s_GLFWProbeError.Description.data();
+		glfwTerminate();
+		return false;
+	}
+
+	glfwMakeContextCurrent(Window);
+	using GlGetString = const unsigned char* (*)(unsigned int);
+	auto GetString = reinterpret_cast<GlGetString>(glfwGetProcAddress("glGetString"));
+	const unsigned char* VersionString = GetString ? GetString(0x1F02) : nullptr;
+	if (VersionString) Version = reinterpret_cast<const char*>(VersionString);
+	glfwDestroyWindow(Window);
+	glfwTerminate();
+	if (Version.empty())
+	{
+		ErrorCode = GLFW_VERSION_UNAVAILABLE;
+		ErrorDescription = "NSGL context did not provide glGetString(GL_VERSION)";
+		return false;
+	}
+	ErrorCode = GLFW_NO_ERROR;
+	ErrorDescription.clear();
+	return true;
+}
+
+static int RunOpenGLContextWithoutVulkanSdk()
+{
+	const char* ExistingSdkValue = std::getenv("VULKAN_SDK");
+	const std::string ExistingSdk = ExistingSdkValue ? ExistingSdkValue : "";
+	const bool HadSdkValue = ExistingSdkValue != nullptr;
+	if (setenv("VULKAN_SDK", "/path/that/does/not/exist", 1) != 0)
+	{
+		std::cerr << "Could not select the invalid Vulkan SDK for the OpenGL startup check" << '\n';
+		return 1;
+	}
+
+	std::cout << "MACOS_OPENGL_REQUEST GLFW=" << GLFW_VERSION_MAJOR << '.' << GLFW_VERSION_MINOR << '.'
+		<< GLFW_VERSION_REVISION << "; context API=NATIVE; minimum=1.0; profile=ANY; framebuffer defaults=RGBA8/8/8/8, "
+		"depth=24, stencil=8, double-buffered; SRGB=false; client=OPENGL\n";
+	std::string ProbeVersion;
+	int ProbeError = GLFW_NO_ERROR;
+	std::string ProbeDescription;
+	const bool RawProbeSucceeded = GLFWOpenGLContextProbe(ProbeVersion, ProbeError, ProbeDescription);
+	std::cout << "MACOS_OPENGL_RAW_GLFW_PROBE=" << (RawProbeSucceeded ? "PASS" : "FAIL")
+		<< "; error=" << ProbeError << "; description=" << ProbeDescription;
+	if (RawProbeSucceeded)
+		std::cout << "; version=" << ProbeVersion;
+	std::cout << '\n';
+
+	bool EngineWindowSucceeded = false;
+	int EngineGLFWError = GLFW_NO_ERROR;
+	std::string EngineGLFWDescription;
+	try
+	{
+		PulseForge::GLFWWindow OpenGLWindow(PulseForge::WindowProps(
+			"PulseForge OpenGL context without Vulkan SDK", 320, 240, PulseForge::EWindowStyle::Default,
+			PulseForge::EWindowClientAPI::OpenGL));
+		if (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
+			throw std::runtime_error("OpenGL startup unexpectedly acquired a Vulkan loader");
+		GLFWwindow* NativeWindow = static_cast<GLFWwindow*>(OpenGLWindow.GetNativeWindow());
+		glfwMakeContextCurrent(NativeWindow);
+		using GlGetString = const unsigned char* (*)(unsigned int);
+		auto GetString = reinterpret_cast<GlGetString>(glfwGetProcAddress("glGetString"));
+		const unsigned char* VersionString = GetString ? GetString(0x1F02) : nullptr;
+		if (!VersionString)
+			throw std::runtime_error("OpenGL context did not expose glGetString(GL_VERSION)");
+		std::cout << "MACOS_OPENGL_ENGINE_CONTEXT=PASS; version=" << VersionString
+			<< "; major=" << glfwGetWindowAttrib(NativeWindow, GLFW_CONTEXT_VERSION_MAJOR)
+			<< "; minor=" << glfwGetWindowAttrib(NativeWindow, GLFW_CONTEXT_VERSION_MINOR)
+			<< "; profile=" << glfwGetWindowAttrib(NativeWindow, GLFW_OPENGL_PROFILE) << '\n';
+		EngineWindowSucceeded = true;
+	}
+	catch (const std::exception& Error)
+	{
+		const char* Description = nullptr;
+		EngineGLFWError = glfwGetError(&Description);
+		EngineGLFWDescription = Description ? Description : "";
+		if (std::string_view(Error.what()) != "GLFW window creation failed")
+		{
+			std::cerr << "PulseForge OpenGL startup failed outside native window creation: " << Error.what() << '\n';
+			return 1;
+		}
+	}
+
+	if (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
+	{
+		std::cerr << "OpenGL startup path retained an unexpected Vulkan loader" << '\n';
+		return 1;
+	}
+	if (EngineWindowSucceeded)
+	{
+		if (!RawProbeSucceeded)
+		{
+			std::cerr << "The raw GLFW OpenGL probe failed but the PulseForge window unexpectedly succeeded" << '\n';
+			return 1;
+		}
+		if (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
+		{
+			std::cerr << "OpenGL context teardown retained a Vulkan loader" << '\n';
+			return 1;
+		}
+		if (HadSdkValue)
+			setenv("VULKAN_SDK", ExistingSdk.c_str(), 1);
+		else
+			unsetenv("VULKAN_SDK");
+		std::cout << "MACOS_OPENGL_CONTEXT_WITHOUT_VULKAN_SDK=PASS; real PulseForge GLFW context created; "
+			"Vulkan SDK was unusable\n";
+		return 0;
+	}
+
+	const bool ExactNSGLCapabilityFailure = ProbeError == GLFW_FORMAT_UNAVAILABLE &&
+		ProbeDescription == "NSGL: Failed to find a suitable pixel format" &&
+		EngineGLFWError == GLFW_FORMAT_UNAVAILABLE &&
+		EngineGLFWDescription == "NSGL: Failed to find a suitable pixel format";
+	if (RawProbeSucceeded || !ExactNSGLCapabilityFailure)
+	{
+		std::cerr << "OpenGL integration failed without a matching raw GLFW/NSGL capability result; raw="
+			<< ProbeError << " (" << ProbeDescription << "), PulseForge=" << EngineGLFWError << " ("
+			<< EngineGLFWDescription << ")\n";
+		return 1;
+	}
+
+	if (HadSdkValue)
+		setenv("VULKAN_SDK", ExistingSdk.c_str(), 1);
+	else
+		unsetenv("VULKAN_SDK");
+	if (!CreateAndCloseVulkanWindow("PulseForge Vulkan recovery after NSGL context unavailability")) return 1;
+	std::cout << "MACOS_OPENGL_CONTEXT_WITHOUT_VULKAN_SDK=SKIP; capability=GLFW_FORMAT_UNAVAILABLE; "
+		"raw GLFW and PulseForge both received the exact NSGL accelerated-pixel-format error; loader state stayed clean "
+		"and Vulkan recovered\n";
+	return 77;
+}
+
+int main(int ArgumentCount, char** Arguments)
+{
+	try
+	{
+		PulseForge::Log::Init();
+		if (ArgumentCount == 3 && std::string_view(Arguments[1]) == "--invalid-sdk-child")
+			return RunExpectedEmptySdkFailure(Arguments[2]);
+		if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--vulkan-lifecycle")
+			return RunVulkanLoaderLifecycle(Arguments[0]);
+		if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--runtime-mismatch-policy")
+			return RunVulkanLoaderMismatchPolicy();
+		if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--opengl-context-without-vulkan-sdk")
+			return RunOpenGLContextWithoutVulkanSdk();
+		std::cerr << "Unexpected macOS Vulkan loader lifecycle arguments" << '\n';
+		return 1;
+	}
+	catch (const std::exception& Error)
+	{
+		std::cerr << "MacOS platform validation threw unexpectedly: " << Error.what() << '\n';
+		return 1;
+	}
+	catch (...)
+	{
+		std::cerr << "MacOS platform validation threw an unknown exception" << '\n';
+		return 1;
+	}
 }

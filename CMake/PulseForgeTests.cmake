@@ -289,8 +289,18 @@ if(BUILD_TESTING)
 		add_executable(PulseForgeMacOSVulkanLoaderLifecycleValidation
 			Tests/Platform/MacOSVulkanLoaderLifecycleValidation.cpp)
 		target_link_libraries(PulseForgeMacOSVulkanLoaderLifecycleValidation PRIVATE PulseForgeWindow glfw)
-		add_test(NAME PulseForge.MacOSVulkanLoaderLifecycle COMMAND PulseForgeMacOSVulkanLoaderLifecycleValidation)
-		set_tests_properties(PulseForge.MacOSVulkanLoaderLifecycle PROPERTIES RUN_SERIAL TRUE TIMEOUT 60)
+		add_test(NAME PulseForge.MacOSVulkanLoaderLifecycle
+			COMMAND PulseForgeMacOSVulkanLoaderLifecycleValidation --vulkan-lifecycle)
+		add_test(NAME PulseForge.MacOSVulkanLoaderRuntimeMismatch
+			COMMAND PulseForgeMacOSVulkanLoaderLifecycleValidation --runtime-mismatch-policy)
+		add_test(NAME PulseForge.MacOSOpenGLContextWithoutVulkanSdk
+			COMMAND PulseForgeMacOSVulkanLoaderLifecycleValidation --opengl-context-without-vulkan-sdk)
+		set_tests_properties(
+			PulseForge.MacOSVulkanLoaderLifecycle
+			PulseForge.MacOSVulkanLoaderRuntimeMismatch
+			PROPERTIES RUN_SERIAL TRUE TIMEOUT 60)
+		set_tests_properties(PulseForge.MacOSOpenGLContextWithoutVulkanSdk
+			PROPERTIES RUN_SERIAL TRUE TIMEOUT 60 SKIP_RETURN_CODE 77)
 		list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS PulseForgeMacOSVulkanLoaderLifecycleValidation)
 	endif()
 	if(TARGET PulseForgeGpuValidation)
