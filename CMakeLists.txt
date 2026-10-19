@@ -5,7 +5,16 @@ cmake_minimum_required(VERSION 3.24)
 list(APPEND CMAKE_PROJECT_TOP_LEVEL_INCLUDES
 	"${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeConfigurations.cmake")
 
-project(PulseForge LANGUAGES C CXX)
+set(PULSEFORGE_PROJECT_LANGUAGES C CXX)
+if((CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin") AND
+	NOT PULSEFORGE_BUILD_CORE_ONLY AND NOT PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF AND
+	(NOT DEFINED PULSEFORGE_BUILD_EDITOR OR PULSEFORGE_BUILD_EDITOR))
+	# NativeFileDialog adds an Objective-C Cocoa source when the editor is enabled.
+	# Enable Objective-C with the top-level project so its compiler rules remain
+	# available across the dependency's nested project() call.
+	list(APPEND PULSEFORGE_PROJECT_LANGUAGES OBJC)
+endif()
+project(PulseForge LANGUAGES ${PULSEFORGE_PROJECT_LANGUAGES})
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeSourceLayout.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeOptions.cmake")
