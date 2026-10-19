@@ -1631,7 +1631,9 @@ namespace PulseForge
 				Result.Width = Description.Width;
 				Result.Height = Description.Height;
 				Result.Format = Description.Format;
-				const size_t BytesPerPixel = *GetTextureFormatBytesPerPixel(Description.Format);
+				const size_t BytesPerPixel = IsDepth
+					? sizeof(float)
+					: *GetTextureFormatBytesPerPixel(Description.Format);
 				if (Description.Width > (std::numeric_limits<size_t>::max)() / BytesPerPixel)
 					throw std::runtime_error("Validation readback row size overflowed");
 				const size_t PackedRowSize = static_cast<size_t>(Description.Width) * BytesPerPixel;
