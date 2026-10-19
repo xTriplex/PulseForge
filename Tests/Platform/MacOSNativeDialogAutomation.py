@@ -78,6 +78,9 @@ func describe(_ element: AXUIElement, _ depth: Int) {
         "AX_NODE depth=\(depth); role=\(role); subrole=\(subrole); title=\(title); " +
             "description=\(description); enabled=\(enabled); actions=\(actions)"
     )
+    if ["AXOutline", "AXBrowser", "AXTable", "AXList", "AXCollection"].contains(role) {
+        return
+    }
     let (error, value) = readAttribute(element, "AXChildren")
     guard error == .success else {
         print("AX_CHILDREN_ERROR depth=\(depth); error=\(error.rawValue)")
@@ -120,13 +123,14 @@ for pid in pids {
         continue
     }
     print("AX_WINDOWS pid=\(pid); count=\(windows.count)")
-    visited = 0
     for (index, window) in windows.prefix(8).enumerated() {
         let role = textAttribute(window, "AXRole")
         let subrole = textAttribute(window, "AXSubrole")
         let title = textAttribute(window, "AXTitle")
         print("AX_WINDOW pid=\(pid); index=\(index + 1); role=\(role); subrole=\(subrole); title=\(title)")
-        describe(window, 0)
+        if role == "AXSheet" || subrole == "AXDialog" || title == "Open" || title == "Save" {
+            describe(window, 0)
+        }
     }
 }
 """
@@ -490,10 +494,10 @@ ACCESSIBILITY_CONTROL_HANDLERS = '''on matchesDialog(candidateElement, operation
     end tell
 end matchesDialog
 
-on dialogChildren(container)
+on dialogChildren(dialogElement)
     set childElements to missing value
     try
-        tell application "System Events" to set childElements to UI elements of container
+        tell application "System Events" to set childElements to UI elements of dialogElement
         if my uiChildSource is "" then set my uiChildSource to "System Events UI elements"
         return childElements
     on error errorMessage number errorNumber
@@ -504,7 +508,7 @@ on dialogChildren(container)
         end if
     end try
     try
-        tell application "System Events" to set childElements to value of attribute "AXChildren" of container
+        tell application "System Events" to set childElements to value of attribute "AXChildren" of dialogElement
         if childElements is missing value then
             set my uiChildSource to "AXChildren returned missing after System Events -1728"
         else if my uiChildSource is "" then
