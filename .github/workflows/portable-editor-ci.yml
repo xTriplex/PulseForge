@@ -179,6 +179,7 @@ jobs:
 
       - name: Verify native document host workspace restoration across editor restarts
         id: macos_workspace_restore
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
         run: |
           set -o pipefail
           python3 Tests/Platform/MacOSWorkspaceRestoreSmoke.py \
