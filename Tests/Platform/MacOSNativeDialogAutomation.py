@@ -179,7 +179,6 @@ PANEL_READY_PROBE = '''on run argv
                 "; error=" & errorNumber & "; " & errorMessage
         end try
         set lastState to "no windows observed"
-        repeat 100 times
             try
                 with timeout of 2 seconds
                     set windowCount to count of windows of targetProcess
@@ -285,9 +284,7 @@ PANEL_READY_PROBE = '''on run argv
                     end try
                 end if
             end repeat
-            delay 0.2
-        end repeat
-        error "NFD_PANEL_TIMEOUT; pid=" & targetPID & "; process=" & processName & "; operation=" & operation & ¬
+        return "NFD_PANEL_WAIT=pid=" & targetPID & "; process=" & processName & "; operation=" & operation & ¬
             "; last role/subrole/expected-control state=" & lastState
     end tell
 end run
@@ -523,18 +520,39 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
         if not stop_fixture(process, output_reader):
             return 1, "fixture process group or output reader survived bounded deadline cleanup"
         return 1, f"native dialog fixture exhausted its {timeout_seconds}s case bound before the Accessibility probe"
-    probe_code, probe_output = apple_script(PANEL_READY_PROBE, process_id, scenario, timeout=min(30, remaining))
-    if probe_code != 0:
-        if not stop_fixture(process, output_reader):
-            return 1, "fixture process group or output reader survived cleanup after the Accessibility probe"
-        if is_tcc_denial(probe_output):
-            print("NFD_UI_AUTOMATION=UNAVAILABLE; reason=macOS TCC denied Accessibility or Apple Events; native dialog cases NOT RUN")
-            return 77, probe_output
-        return 1, (
-            "Accessibility capability probe failed without an identified TCC denial; "
-            f"osascript_exit_code={probe_code}; output={probe_output!r}"
+    probe_deadline = min(deadline, time.monotonic() + 30)
+    last_panel_state = "no Accessibility snapshot returned"
+    while True:
+        probe_remaining = max(0.0, probe_deadline - time.monotonic())
+        if probe_remaining <= 0:
+            if not stop_fixture(process, output_reader):
+                return 1, "fixture process group or output reader survived cleanup after the panel readiness deadline"
+            return 1, f"native panel did not become Accessibility-ready; last_state={last_panel_state!r}"
+        probe_code, probe_output = apple_script(
+            PANEL_READY_PROBE,
+            process_id,
+            scenario,
+            timeout=min(5, max(1, int(probe_remaining))),
         )
-    print(probe_output)
+        if probe_code != 0:
+            if not stop_fixture(process, output_reader):
+                return 1, "fixture process group or output reader survived cleanup after the Accessibility probe"
+            if is_tcc_denial(probe_output):
+                print("NFD_UI_AUTOMATION=UNAVAILABLE; reason=macOS TCC denied Accessibility or Apple Events; native dialog cases NOT RUN")
+                return 77, probe_output
+            return 1, (
+                "Accessibility snapshot query failed without an identified TCC denial; "
+                f"osascript_exit_code={probe_code}; output={probe_output!r}"
+            )
+        if probe_output.startswith(f"NFD_PANEL_READY=pid={process_id};"):
+            print(probe_output)
+            break
+        if not probe_output.startswith(f"NFD_PANEL_WAIT=pid={process_id};"):
+            if not stop_fixture(process, output_reader):
+                return 1, "fixture process group or output reader survived cleanup after unexpected Accessibility output"
+            return 1, f"Accessibility probe returned an unexpected state: {probe_output!r}"
+        last_panel_state = probe_output.strip()
+        time.sleep(min(0.2, max(0.0, probe_deadline - time.monotonic())))
 
     remaining = remaining_seconds()
     if remaining <= 0:
