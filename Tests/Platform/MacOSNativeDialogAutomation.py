@@ -292,14 +292,27 @@ PANEL_READY_PROBE = '''on run argv
 end run
 
 on matchesDialog(candidateElement, operation)
-    if not (exists button "Cancel" of candidateElement) then return false
-    set cancelEnabled to enabled of button "Cancel" of candidateElement
+    set cancelEnabled to false
+    try
+        set cancelButton to button "Cancel" of candidateElement
+        set cancelEnabled to enabled of cancelButton
+    on error
+        return false
+    end try
     if operation starts with "open" then
-        set primaryButtonExists to exists button "Open" of candidateElement
-        return primaryButtonExists and cancelEnabled
+        try
+            set primaryButton to button "Open" of candidateElement
+        on error
+            return false
+        end try
+    else
+        try
+            set primaryButton to button "Save" of candidateElement
+        on error
+            return false
+        end try
     end if
-    set primaryButtonExists to exists button "Save" of candidateElement
-    return primaryButtonExists and cancelEnabled
+    return cancelEnabled
 end matchesDialog
 '''
 
@@ -412,14 +425,27 @@ SELECT_SCRIPT = '''on run argv
 end run
 
 on matchesDialog(candidateElement, operation)
-    if not (exists button "Cancel" of candidateElement) then return false
-    set cancelEnabled to enabled of button "Cancel" of candidateElement
+    set cancelEnabled to false
+    try
+        set cancelButton to button "Cancel" of candidateElement
+        set cancelEnabled to enabled of cancelButton
+    on error
+        return false
+    end try
     if operation starts with "open" then
-        set primaryButtonExists to exists button "Open" of candidateElement
-        return primaryButtonExists and cancelEnabled
+        try
+            set primaryButton to button "Open" of candidateElement
+        on error
+            return false
+        end try
+    else
+        try
+            set primaryButton to button "Save" of candidateElement
+        on error
+            return false
+        end try
     end if
-    set primaryButtonExists to exists button "Save" of candidateElement
-    return primaryButtonExists and cancelEnabled
+    return cancelEnabled
 end matchesDialog
 '''
 
