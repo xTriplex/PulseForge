@@ -46,6 +46,12 @@ int main()
 		std::cerr << "Could not set the isolated loader-failure test environment" << '\n';
 		return 1;
 	}
+	const char* ConfiguredSdk = std::getenv("VULKAN_SDK");
+	if (!ConfiguredSdk || std::string(ConfiguredSdk) != "/path/that/does/not/exist")
+	{
+		std::cerr << "Could not verify the isolated Vulkan SDK override" << '\n';
+		return 1;
+	}
 	try
 	{
 		PulseForge::GLFWWindow InvalidLoaderWindow(PulseForge::WindowProps(
