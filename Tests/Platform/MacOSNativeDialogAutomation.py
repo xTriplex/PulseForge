@@ -333,6 +333,27 @@ ACCESSIBILITY_CONTROL_HANDLERS = '''on matchesDialog(candidateElement, operation
     end tell
 end matchesDialog
 
+on countMatchingDialogs(candidateProcess, operation)
+    set matchingCount to 0
+    tell application "System Events"
+        set candidateWindowCount to count of windows of candidateProcess
+        repeat with windowIndex from 1 to candidateWindowCount
+            set candidateWindow to window windowIndex of candidateProcess
+            if my matchesDialog(candidateWindow, operation) then
+                set matchingCount to matchingCount + 1
+            end if
+            set sheetCount to count of sheets of candidateWindow
+            repeat with sheetIndex from 1 to sheetCount
+                set candidateSheet to sheet sheetIndex of candidateWindow
+                if my matchesDialog(candidateSheet, operation) then
+                    set matchingCount to matchingCount + 1
+                end if
+            end repeat
+        end repeat
+    end tell
+    return matchingCount
+end countMatchingDialogs
+
 on findDialogButton(candidateElement, requestedName)
     set my uiScanVisited to 0
     return my findDialogElement(candidateElement, "AXButton", requestedName, 0, 0)
@@ -493,9 +514,16 @@ on classifyAccessibilityError(errorNumber, errorMessage)
     if errorNumber is -1719 or errorNumber is -1743 then
         error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
     end if
-    if errorNumber is not -1728 then
-        error "NFD_ACCESSIBILITY_QUERY_FAILED; error=" & errorNumber & "; " & errorMessage number errorNumber
+    if errorNumber is -1728 then
+        set missingState to "AXError=-1728 (missing attribute or element): " & errorMessage
+        if my uiScanReport is "" then
+            set my uiScanReport to missingState
+        else
+            set my uiScanReport to (my uiScanReport) & "; " & missingState
+        end if
+        return
     end if
+    error "NFD_ACCESSIBILITY_QUERY_FAILED; error=" & errorNumber & "; " & errorMessage number errorNumber
 end classifyAccessibilityError
 
 on pressDialogButton(buttonElement, buttonName)
@@ -520,7 +548,11 @@ on pressDialogButton(buttonElement, buttonName)
 end pressDialogButton
 '''
 
-WAITING_PROCESS_SNAPSHOT = '''on run argv
+WAITING_PROCESS_SNAPSHOT = '''property uiScanVisited : 0
+property uiFieldMatches : 0
+property uiScanReport : ""
+
+on run argv
     set targetPID to item 1 of argv as integer
     set operation to item 2 of argv
     tell application "System Events"
@@ -600,110 +632,97 @@ on run argv
             end if
             set discoveryState to "panel-service lookup error=" & errorNumber & "; " & errorMessage
         end try
-        set visibleProcesses to {hostProcess}
-        try
-            with timeout of 2 seconds
-                set visibleProcesses to every application process whose visible is true
-            end timeout
-        on error errorMessage number errorNumber
-            if errorNumber is -1712 then
-                error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; query=visible-process-discovery; " & ¬
-                    "error=" & errorNumber & "; " & errorMessage number -1712
-            end if
-            if errorNumber is -1719 or errorNumber is -1743 then
-                error "NFD_TCC_DENIAL; query=visible-process-discovery; error=" & ¬
-                    errorNumber & "; " & errorMessage number errorNumber
-            end if
-            set discoveryState to discoveryState & "; visible-process lookup error=" & errorNumber & "; " & errorMessage
-        end try
-        set candidateProcesses to visibleProcesses & panelServiceProcesses & {hostProcess}
-        set candidateProcessCount to count of candidateProcesses
-        set fallbackProcess to missing value
-        set fallbackProcessID to 0
-        set fallbackProcessName to ""
-        set fallbackBundleID to ""
-        set discoveredWindows to ""
-        set panelOwnerFound to false
-        repeat with processIndex from 1 to candidateProcessCount
-            set candidateProcess to item processIndex of candidateProcesses
+        set candidateProcesses to {hostProcess}
+        set candidateProcessIDs to {targetPID}
+        repeat with serviceIndex from 1 to panelServiceCount
+            set serviceProcess to item serviceIndex of panelServiceProcesses
             try
                 with timeout of 1 second
-                    set candidateProcessID to unix id of candidateProcess as integer
-                    set candidateProcessName to name of candidateProcess as text
-                    set candidateBundleID to bundle identifier of candidateProcess as text
-                    set candidateWindowCount to count of windows of candidateProcess
+                    set serviceProcessID to unix id of serviceProcess as integer
                 end timeout
-                repeat with windowIndex from 1 to candidateWindowCount
-                    if (length of discoveredWindows) > 1800 then exit repeat
-                    try
-                        with timeout of 1 second
-                            set candidateWindow to window windowIndex of candidateProcess
-                            set candidateWindowName to name of candidateWindow as text
-                            set candidateWindowRole to role of candidateWindow as text
-                            set candidateWindowSubrole to subrole of candidateWindow as text
-                        end timeout
-                        if candidateWindowRole is "AXSheet" or candidateWindowSubrole is "AXDialog" then
-                            set controlsReady to false
-                            with timeout of 1 second
-                                set controlsReady to my matchesDialog(candidateWindow, operation)
-                            end timeout
-                            set windowState to "pid=" & candidateProcessID & "; process=" & candidateProcessName & ¬
-                                "; bundle=" & candidateBundleID & "; window='" & candidateWindowName & ¬
-                                "' | " & candidateWindowRole & " | " & candidateWindowSubrole & ¬
-                                "; expected controls ready=" & controlsReady
-                            if discoveredWindows is not "" then set discoveredWindows to discoveredWindows & " | "
-                            set discoveredWindows to discoveredWindows & windowState
-                            if controlsReady then
-                                set targetProcess to candidateProcess
-                                set panelProcessID to candidateProcessID
-                                set processName to candidateProcessName
-                                set processBundleID to candidateBundleID
-                                set panelOwnerFound to true
-                                exit repeat
-                            end if
-                            if fallbackProcess is missing value then
-                                set fallbackProcess to candidateProcess
-                                set fallbackProcessID to candidateProcessID
-                                set fallbackProcessName to candidateProcessName
-                                set fallbackBundleID to candidateBundleID
-                            end if
-                        end if
-                    on error errorMessage number errorNumber
-                        if errorNumber is -1712 then
-                            error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; query=system-visible-window; pid=" & ¬
-                                candidateProcessID & "; window=" & windowIndex & "; " & errorMessage number -1712
-                        end if
-                        if errorNumber is -1719 or errorNumber is -1743 then
-                            error "NFD_TCC_DENIAL; query=system-visible-window; pid=" & ¬
-                                candidateProcessID & "; window=" & windowIndex & "; " & errorMessage number errorNumber
-                        end if
-                        if (length of discoveredWindows) < 1800 then
-                            set discoveredWindows to discoveredWindows & " | pid=" & candidateProcessID & ¬
-                                "; process=" & candidateProcessName & "; window=" & windowIndex & ¬
-                                " query error=" & errorNumber & "; " & errorMessage
-                        end if
-                    end try
-                end repeat
-                if panelOwnerFound then exit repeat
+                if serviceProcessID is not in candidateProcessIDs then
+                    set end of candidateProcessIDs to serviceProcessID
+                    set end of candidateProcesses to serviceProcess
+                end if
             on error errorMessage number errorNumber
                 if errorNumber is -1712 then
-                    error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; query=system-visible-process; " & ¬
+                    error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; query=panel-service-process-pid; " & ¬
                         "error=" & errorNumber & "; " & errorMessage number -1712
                 end if
                 if errorNumber is -1719 or errorNumber is -1743 then
-                    error "NFD_TCC_DENIAL; query=system-visible-process; error=" & ¬
+                    error "NFD_TCC_DENIAL; query=panel-service-process-pid; error=" & ¬
                         errorNumber & "; " & errorMessage number errorNumber
                 end if
-                if (length of discoveredWindows) < 1800 then
-                    set discoveredWindows to discoveredWindows & " | process query error=" & errorNumber & "; " & errorMessage
-                end if
+                error "NFD_ACCESSIBILITY_QUERY_FAILED; query=panel-service-process-pid; error=" & ¬
+                    errorNumber & "; " & errorMessage number errorNumber
             end try
         end repeat
-        if not panelOwnerFound and fallbackProcess is not missing value then
-            set targetProcess to fallbackProcess
-            set panelProcessID to fallbackProcessID
-            set processName to fallbackProcessName
-            set processBundleID to fallbackBundleID
+        set candidateProcessCount to count of candidateProcesses
+        set processIDsText to candidateProcessIDs as text
+        set candidateSummary to "fixture pid=" & targetPID & "; candidate pids=" & processIDsText
+        set fixtureMatchCount to 0
+        try
+            with timeout of 2 seconds
+                set fixtureMatchCount to my countMatchingDialogs(hostProcess, operation)
+            end timeout
+        on error errorMessage number errorNumber
+            my classifyAccessibilityError(errorNumber, errorMessage)
+            error "NFD_ACCESSIBILITY_QUERY_FAILED; query=fixture-dialog-candidates; pid=" & ¬
+                targetPID & "; error=" & errorNumber & "; " & errorMessage number errorNumber
+        end try
+        if fixtureMatchCount > 1 then
+            return "NFD_PANEL_AMBIGUOUS=pid=" & targetPID & "; fixture matching windows/sheets=" & fixtureMatchCount
+        end if
+        set panelOwnerFound to false
+        if fixtureMatchCount is 1 then
+            set targetProcess to hostProcess
+            set panelProcessID to targetPID
+            set processName to hostName
+            set processBundleID to "host application process"
+            set panelOwnerFound to true
+        else
+            set serviceMatchCount to 0
+            set serviceTargetProcess to missing value
+            set serviceTargetProcessID to 0
+            set serviceTargetName to ""
+            set serviceTargetBundleID to ""
+            if candidateProcessCount > 1 then
+                repeat with processIndex from 2 to candidateProcessCount
+                    set candidateProcess to item processIndex of candidateProcesses
+                    try
+                        with timeout of 2 seconds
+                            set candidateProcessID to unix id of candidateProcess as integer
+                            set candidateProcessName to name of candidateProcess as text
+                            set candidateBundleID to bundle identifier of candidateProcess as text
+                            set candidateMatches to my countMatchingDialogs(candidateProcess, operation)
+                        end timeout
+                    on error errorMessage number errorNumber
+                        my classifyAccessibilityError(errorNumber, errorMessage)
+                        error "NFD_ACCESSIBILITY_QUERY_FAILED; query=panel-service-dialog-candidates; " & ¬
+                            "error=" & errorNumber & "; " & errorMessage number errorNumber
+                    end try
+                    if candidateMatches > 0 then
+                        set serviceMatchCount to serviceMatchCount + candidateMatches
+                        if serviceTargetProcess is missing value then
+                            set serviceTargetProcess to candidateProcess
+                            set serviceTargetProcessID to candidateProcessID
+                            set serviceTargetName to candidateProcessName
+                            set serviceTargetBundleID to candidateBundleID
+                        end if
+                    end if
+                end repeat
+            end if
+            set candidateSummary to candidateSummary & "; service matching windows/sheets=" & serviceMatchCount
+            if serviceMatchCount > 1 then
+                return "NFD_PANEL_AMBIGUOUS=pid=" & targetPID & "; " & candidateSummary
+            end if
+            if serviceMatchCount is 1 then
+                set targetProcess to serviceTargetProcess
+                set panelProcessID to serviceTargetProcessID
+                set processName to serviceTargetName
+                set processBundleID to serviceTargetBundleID
+                set panelOwnerFound to true
+            end if
         end if
         set foregroundState to "unavailable"
         try
@@ -732,7 +751,7 @@ on run argv
             "' (pid=" & panelProcessID & "; bundle=" & processBundleID & "); selected controls=" & ¬
             panelOwnerFound & "; process candidates=" & candidateProcessCount & ¬
             "; panel-service count=" & panelServiceCount & "; discovery=" & discoveryState & ¬
-            "; observed dialog windows=[" & discoveredWindows & "]; no matching dialog controls observed"
+            "; candidate state=" & candidateSummary
             try
                 with timeout of 2 seconds
                     set windowCount to count of windows of targetProcess
@@ -897,6 +916,13 @@ on run argv
         set targetProcess to first application process whose unix id is targetPID
         set frontmost of targetProcess to true
         if not (frontmost of targetProcess) then error "Native panel process did not become frontmost"
+        with timeout of 2 seconds
+            set currentPanelMatches to my countMatchingDialogs(targetProcess, operation)
+        end timeout
+        if currentPanelMatches is not 1 then
+            error "Native panel target changed or became ambiguous before interaction; matching windows/sheets=" & ¬
+                currentPanelMatches
+        end if
         set dialogPanel to missing value
         repeat 100 times
             with timeout of 2 seconds
