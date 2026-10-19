@@ -143,8 +143,8 @@ namespace
 		if (!ProjectID || !MaterialID) return;
 
 		std::error_code Error;
-		const std::filesystem::path Root =
-			std::filesystem::temp_directory_path(Error) / ("PulseForgeWorkspaceStore-" + ProjectID->ToString());
+		const std::filesystem::path Root = std::filesystem::temp_directory_path(Error) /
+										   std::filesystem::u8path("PulseForgeWorkspaceStore café with spaces-" + ProjectID->ToString());
 		PF_CHECK(Tests, !Error);
 		if (Error) return;
 		std::filesystem::create_directories(Root, Error);
@@ -210,7 +210,8 @@ namespace
 		const auto Rejected = Recovery.Load(*ProjectID);
 		PF_CHECK(Tests, Rejected && Rejected->Result == EditorDocumentWorkspaceLoadResult::Status::Rejected);
 		PF_CHECK(Tests, Rejected && !Rejected->Error.empty() && Recovery.HasPendingChanges());
-		const std::filesystem::path RecoveryPath = Path.wstring() + L".recovery";
+		std::filesystem::path RecoveryPath = Path;
+		RecoveryPath += ".recovery";
 		PF_CHECK(Tests, std::filesystem::exists(RecoveryPath));
 		PF_CHECK(Tests, Rejected && Rejected->RecoveryPath == RecoveryPath && Rejected->RecoveryError.empty());
 		{
@@ -251,7 +252,8 @@ namespace
 		PF_CHECK(Tests, RetriedRead && RetriedRead->Result == EditorDocumentWorkspaceLoadResult::Status::Restored);
 
 		const std::filesystem::path UnpreservedPath = Root / "unpreserved.json";
-		const std::filesystem::path UnusableRecoveryPath = UnpreservedPath.wstring() + L".recovery";
+		std::filesystem::path UnusableRecoveryPath = UnpreservedPath;
+		UnusableRecoveryPath += ".recovery";
 		{
 			std::ofstream Corrupt(UnpreservedPath, std::ios::binary | std::ios::trunc);
 			Corrupt << CorruptContents;
@@ -280,7 +282,8 @@ namespace
 		PF_CHECK(Tests, RetryRebuild && *RetryRebuild);
 
 		const std::filesystem::path BlockedPath = Root / "blocked.json";
-		const std::filesystem::path BlockedTemporaryPath = BlockedPath.wstring() + L".tmp";
+		std::filesystem::path BlockedTemporaryPath = BlockedPath;
+		BlockedTemporaryPath += ".tmp";
 		{
 			std::ofstream Previous(BlockedPath, std::ios::binary | std::ios::trunc);
 			Previous << "previous destination";

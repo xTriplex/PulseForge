@@ -35,15 +35,10 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	endif()
 	set(PULSEFORGE_PLATFORM_WINDOWS FALSE)
 	set(PULSEFORGE_PLATFORM_LINUX TRUE)
-	if(PULSEFORGE_BUILD_EDITOR)
-		message(FATAL_ERROR
-			"PulseForgeEditor is not supported on Linux yet. Configure with -DPULSEFORGE_BUILD_EDITOR=OFF; "
-			"the Linux runtime and PulseForgeGame remain available.")
-	endif()
 else()
 	message(FATAL_ERROR
 		"Unsupported PulseForge operating system '${CMAKE_SYSTEM_NAME}'. This revision supports Windows desktop "
-		"builds and Linux Vulkan runtime/Core builds.")
+		"builds and Linux desktop/runtime/Core builds.")
 endif()
 
 if(PULSEFORGE_PLATFORM_WINDOWS)
@@ -111,9 +106,3 @@ if(CMAKE_GENERATOR STREQUAL "Visual Studio 17 2022" AND
 endif()
 
 set(PULSEFORGE_ENGINE_PCH "${CMAKE_CURRENT_SOURCE_DIR}/PulseForge/Source/Public/Core/PulseForgePCH.h")
-
-if(CMAKE_CONFIGURATION_TYPES)
-	list(APPEND CMAKE_CONFIGURATION_TYPES Dist)
-	list(REMOVE_DUPLICATES CMAKE_CONFIGURATION_TYPES)
-	set(CMAKE_CONFIGURATION_TYPES "${CMAKE_CONFIGURATION_TYPES}" CACHE STRING "Available build configurations" FORCE)
-endif()

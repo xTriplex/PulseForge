@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.24)
 
+# Add custom multi-configurations before CMake enables languages and initializes
+# per-configuration compiler and linker flags. Keep any toolchain-provided hooks.
+list(APPEND CMAKE_PROJECT_TOP_LEVEL_INCLUDES
+	"${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeConfigurations.cmake")
+
 project(PulseForge LANGUAGES C CXX)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeSourceLayout.cmake")

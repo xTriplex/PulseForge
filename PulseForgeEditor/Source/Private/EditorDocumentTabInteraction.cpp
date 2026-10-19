@@ -86,8 +86,7 @@ namespace PulseForgeEditor
 			CalculateDocumentTabDragDistanceSquared(DragStart, CurrentPosition, LastValidPosition, Frame.MaximumObservedDistanceSquared);
 		const bool TransferQueued = m_PendingTransfer && m_PendingTransfer->Identity == Identity;
 		const auto DropLocation = CurrentPosition ? FindDropTarget(*CurrentPosition, Frame.HoveredViewportID) : std::nullopt;
-		const bool CanCreateNativeHost =
-			CanDetachDocumentTabToNativeHost(Frame.SourceIsMainHost, Frame.SourceIsNativeHost, Frame.HoveredViewportID == 0);
+		const bool CanCreateNativeHost = CanCreateNativeHostFromDocumentTabDrag(Frame.SourceIsMainHost, Frame.SourceIsNativeHost);
 		const DocumentTabReleaseAction Action = ResolveDocumentTabReleaseAction(true, true, TransferQueued, DragDistanceSquared,
 			Frame.DragThreshold, CanCreateNativeHost, Identity.Kind != EditorDocumentKind::Level, DropLocation.has_value());
 		return EditorDocumentTabDragRelease{ Identity, Action, DropLocation, *ReleasePosition };
