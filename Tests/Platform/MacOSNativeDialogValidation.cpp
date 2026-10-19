@@ -20,8 +20,7 @@ namespace
 
 	bool IsScenario(std::string_view Scenario)
 	{
-		return Scenario == "open-select" || Scenario == "open-cancel" || Scenario == "save-select" ||
-			Scenario == "save-cancel";
+		return Scenario == "open-select" || Scenario == "open-cancel" || Scenario == "save-select" || Scenario == "save-cancel";
 	}
 
 	int Fail(std::string_view Message)
@@ -45,11 +44,10 @@ namespace
 
 int main(int ArgumentCount, char** Arguments)
 {
-	if (ArgumentCount != 5 || std::string_view(Arguments[1]) != "--scenario" ||
-		std::string_view(Arguments[3]) != "--path")
+	if (ArgumentCount != 5 || std::string_view(Arguments[1]) != "--scenario" || std::string_view(Arguments[3]) != "--path")
 	{
 		std::cerr << "Usage: PulseForgeNativeDialogValidation --scenario <open-select|open-cancel|save-select|save-cancel> "
-			"--path <absolute-path>\n";
+					 "--path <absolute-path>\n";
 		return 2;
 	}
 
@@ -82,7 +80,10 @@ int main(int ArgumentCount, char** Arguments)
 	struct WindowCleanup final
 	{
 		GLFWwindow* Window;
-		~WindowCleanup() { if (Window) glfwDestroyWindow(Window); }
+		~WindowCleanup()
+		{
+			if (Window) glfwDestroyWindow(Window);
+		}
 	} WindowLifetime{ Window };
 	glfwShowWindow(Window);
 	glfwFocusWindow(Window);

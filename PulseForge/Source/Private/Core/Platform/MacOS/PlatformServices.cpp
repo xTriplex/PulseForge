@@ -55,18 +55,16 @@ namespace PulseForge::Platform
 
 		const std::filesystem::path ContentsDirectory = ExecutableDirectory.parent_path();
 		const std::filesystem::path BundleDirectory = ContentsDirectory.parent_path();
-		const bool IsAppBundle = ExecutableDirectory.filename() == "MacOS" &&
-			ContentsDirectory.filename() == "Contents" && BundleDirectory.extension() == ".app";
-		const std::filesystem::path ResourceDirectory = IsAppBundle
-			? ContentsDirectory / "Resources"
-			: ExecutableDirectory;
+		const bool IsAppBundle = ExecutableDirectory.filename() == "MacOS" && ContentsDirectory.filename() == "Contents" &&
+								 BundleDirectory.extension() == ".app";
+		const std::filesystem::path ResourceDirectory = IsAppBundle ? ContentsDirectory / "Resources" : ExecutableDirectory;
 
 		std::error_code Error;
 		if (!std::filesystem::is_directory(ResourceDirectory, Error) || Error)
 		{
 			const std::string Reason = Error ? Error.message() : "the path is missing or is not a directory";
-			return std::unexpected(PathError{ "Could not access the application resource directory '" + ResourceDirectory.string() +
-				"': " + Reason });
+			return std::unexpected(
+				PathError{ "Could not access the application resource directory '" + ResourceDirectory.string() + "': " + Reason });
 		}
 
 		return ResourceDirectory;

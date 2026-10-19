@@ -145,9 +145,8 @@ namespace
 			int WorkWidth = 0;
 			int WorkHeight = 0;
 			glfwGetMonitorWorkarea(Monitors[Index], &WorkX, &WorkY, &WorkWidth, &WorkHeight);
-			const double Area = PulseForgeEditor::NativeWindowWorkAreaIntersectionArea(
-				X, Y, Width, Height, { static_cast<float>(WorkX), static_cast<float>(WorkY),
-					static_cast<float>(WorkWidth), static_cast<float>(WorkHeight) });
+			const double Area = PulseForgeEditor::NativeWindowWorkAreaIntersectionArea(X, Y, Width, Height,
+				{ static_cast<float>(WorkX), static_cast<float>(WorkY), static_cast<float>(WorkWidth), static_cast<float>(WorkHeight) });
 			if (Area > BestArea)
 			{
 				BestArea = Area;

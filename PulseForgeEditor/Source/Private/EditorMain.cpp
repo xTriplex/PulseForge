@@ -104,8 +104,7 @@ namespace
 
 			PF_INFO("PulseForge editor application created");
 			Application->Run();
-			if (Options->ProjectOpenRenderTestFile)
-				PF_INFO("PULSEFORGE_EDITOR_PROJECT_RENDER_SMOKE_SHUTDOWN=PASS");
+			if (Options->ProjectOpenRenderTestFile) PF_INFO("PULSEFORGE_EDITOR_PROJECT_RENDER_SMOKE_SHUTDOWN=PASS");
 			return EXIT_SUCCESS;
 		}
 		catch (const std::exception& Exception)

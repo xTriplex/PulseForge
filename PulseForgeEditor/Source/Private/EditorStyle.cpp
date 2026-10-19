@@ -184,10 +184,8 @@ namespace PulseForgeEditor
 		static const std::array<ImWchar, EditorTextGlyphRanges.size()> TextRanges = BuildImGuiTextRanges();
 
 		std::filesystem::path AssetDirectory;
-		if (auto ResourceDirectory = GetResourceDirectory(); ResourceDirectory)
-			AssetDirectory = *ResourceDirectory / "EditorAssets";
-		else
-			PF_WARN("{}; using Dear ImGui's built-in editor font", ResourceDirectory.error());
+		if (auto ResourceDirectory = GetResourceDirectory(); ResourceDirectory) AssetDirectory = *ResourceDirectory / "EditorAssets";
+		else PF_WARN("{}; using Dear ImGui's built-in editor font", ResourceDirectory.error());
 
 		const auto FontPath = [&AssetDirectory](EditorFontRole Role) -> std::filesystem::path
 		{

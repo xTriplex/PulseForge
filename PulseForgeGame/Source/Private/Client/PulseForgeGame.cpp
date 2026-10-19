@@ -148,7 +148,8 @@ public:
 			if (m_PlayerSmokeExitAfterRender && m_PlayerRuntimeSmokeLogged && !m_PlayerSmokeShutdownRequested)
 			{
 				m_PlayerSmokeShutdownRequested = true;
-				PF_INFO("PULSEFORGE_PLAYER_RELOCATION_SMOKE=PASS; rendered scene geometry after runtime advancement and requesting orderly shutdown");
+				PF_INFO("PULSEFORGE_PLAYER_RELOCATION_SMOKE=PASS; rendered scene geometry after runtime advancement and requesting orderly "
+						"shutdown");
 				PulseForge::Application::Get().RequestClose();
 			}
 		}
@@ -156,8 +157,7 @@ public:
 
 	~ExampleLayer() override
 	{
-		if (m_PlayerSmokeShutdownRequested)
-			PF_INFO("PULSEFORGE_PLAYER_RELOCATION_SMOKE_SHUTDOWN=PASS");
+		if (m_PlayerSmokeShutdownRequested) PF_INFO("PULSEFORGE_PLAYER_RELOCATION_SMOKE_SHUTDOWN=PASS");
 	}
 
 	void OnEvent(PulseForge::Event& Event) override
