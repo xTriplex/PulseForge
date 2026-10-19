@@ -22,52 +22,62 @@ TCC_DENIALS = ("not allowed assistive access", "not authorized to send apple eve
 WINDOW_QUERY = '''on run argv
     set targetPID to item 1 of argv as integer
     tell application "System Events"
-        tell (first process whose unix id is targetPID)
-            get name of every window
+        set targetProcess to first process whose unix id is targetPID
+        tell targetProcess
+            set processName to name as text
+            set windowNames to name of every window
+            set indexedWindowNames to {}
+            repeat with windowIndex from 1 to count of windowNames
+                set end of indexedWindowNames to (windowIndex as text) & tab & (item windowIndex of windowNames as text)
+            end repeat
+            set AppleScript's text item delimiters to linefeed
+            set windowSnapshot to indexedWindowNames as text
+            set AppleScript's text item delimiters to ""
+            return processName & linefeed & windowSnapshot
         end tell
     end tell
 end run
 '''
 
-MAIN_WINDOW_CLOSE_PREFLIGHT = '''on run argv
+MAIN_WINDOW_SHEET_SNAPSHOT = '''on run argv
     set targetPID to item 1 of argv as integer
+    set targetIndex to item 2 of argv as integer
+    set expectedWindowName to item 3 of argv as text
     tell application "System Events"
         set targetProcess to first process whose unix id is targetPID
         tell targetProcess
-            set processName to name
-            set exposedWindowNames to name of every window
-            set editorWindows to every window whose name contains "PulseForge Editor"
-            if (count of editorWindows) is not 1 then
-                error "Expected one PulseForge Editor top-level window for PID " & (targetPID as text) & " (" & processName & "), found " & ((count of editorWindows) as text) & "; exposed windows=" & (exposedWindowNames as text)
-            end if
-
-            set targetWindow to item 1 of editorWindows
+            set targetWindow to window targetIndex
             set windowTitle to name of targetWindow
-            set windowRole to role of targetWindow
-            set windowSubrole to subrole of targetWindow
-            set sheetNames to {}
+            if windowTitle is not expectedWindowName then error "Main window changed before sheet snapshot: " & quoted form of windowTitle
             try
                 set sheetNames to name of every sheet of targetWindow
-            end try
-            try
-                set closeControl to value of attribute "AXCloseButton" of targetWindow
+                return "MACOS_DOCUMENT_HOST_MAIN_SHEETS=PASS; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; sheets=" & (sheetNames as text)
             on error errorMessage number errorNumber
-                error "AXCloseButton lookup failed for PID " & (targetPID as text) & " (" & processName & "), window=" & quoted form of windowTitle & ", role=" & windowRole & ", subrole=" & windowSubrole & ", exposed windows=" & (exposedWindowNames as text) & ": " & errorMessage & " (" & (errorNumber as text) & ")"
+                return "MACOS_DOCUMENT_HOST_MAIN_SHEETS=UNAVAILABLE; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; error=" & errorMessage & " (" & (errorNumber as text) & ")"
             end try
-            if closeControl is missing value then
-                error "AXCloseButton was missing for PID " & (targetPID as text) & " (" & processName & "), window=" & quoted form of windowTitle & ", role=" & windowRole & ", subrole=" & windowSubrole & ", exposed windows=" & (exposedWindowNames as text)
-            end if
+        end tell
+    end tell
+end run
+'''
 
+CLOSE_BUTTON_ACTIONS = '''on run argv
+    set targetPID to item 1 of argv as integer
+    set targetIndex to item 2 of argv as integer
+    set expectedWindowName to item 3 of argv as text
+    tell application "System Events"
+        set targetProcess to first process whose unix id is targetPID
+        tell targetProcess
+            set targetWindow to window targetIndex
+            set windowTitle to name of targetWindow
+            if windowTitle is not expectedWindowName then error "Main window changed before close-action query: " & quoted form of windowTitle
+            set windowRole to role of targetWindow
+            set windowSubrole to subrole of targetWindow
+            set closeControl to value of attribute "AXCloseButton" of targetWindow
+            if closeControl is missing value then error "AXCloseButton is missing for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle
             set closeRole to role of closeControl
             set closeSubrole to subrole of closeControl
             set availableActions to actions of closeControl
-            if closeSubrole is not "AXCloseButton" then
-                error "AXCloseButton attribute resolved to an unexpected control for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle & ", control role=" & closeRole & ", subrole=" & closeSubrole & ", actions=" & (availableActions as text)
-            end if
-            if availableActions does not contain "AXPress" then
-                error "AXCloseButton does not expose AXPress for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle & ", control role=" & closeRole & ", subrole=" & closeSubrole & ", actions=" & (availableActions as text)
-            end if
-            return "MACOS_DOCUMENT_HOST_CLOSE_PREFLIGHT=PASS; pid=" & (targetPID as text) & "; process=" & processName & "; windows=" & (exposedWindowNames as text) & "; window=" & quoted form of windowTitle & "; window role=" & windowRole & "; window subrole=" & windowSubrole & "; sheets=" & (sheetNames as text) & "; close control role=" & closeRole & "; close control subrole=" & closeSubrole & "; actions=" & (availableActions as text)
+            return "MACOS_DOCUMENT_HOST_CLOSE_ACTIONS=PASS; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; window role/subrole=" & windowRole & "/" & windowSubrole & "; close control role/subrole=" & closeRole & "/" & closeSubrole & "; actions=" & (availableActions as text)
         end tell
     end tell
 end run
@@ -75,23 +85,27 @@ end run
 
 MAIN_WINDOW_CLOSE = '''on run argv
     set targetPID to item 1 of argv as integer
+    set targetIndex to item 2 of argv as integer
+    set expectedWindowName to item 3 of argv as text
     tell application "System Events"
         set targetProcess to first process whose unix id is targetPID
         tell targetProcess
-            set editorWindows to every window whose name contains "PulseForge Editor"
-            if (count of editorWindows) is not 1 then error "Main-window close target changed after Accessibility preflight"
-            set targetWindow to item 1 of editorWindows
+            set targetWindow to window targetIndex
+            set windowTitle to name of targetWindow
+            if windowTitle is not expectedWindowName then error "Main-window close target changed to " & quoted form of windowTitle
             set closeControl to value of attribute "AXCloseButton" of targetWindow
+            if closeControl is missing value then error "AXCloseButton is missing for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle
+            set windowRole to role of targetWindow
+            set windowSubrole to subrole of targetWindow
+            set closeRole to role of closeControl
             set closeSubrole to subrole of closeControl
-            set availableActions to actions of closeControl
             if closeSubrole is not "AXCloseButton" then error "AXCloseButton resolved to subrole " & closeSubrole
-            if availableActions does not contain "AXPress" then error "AXCloseButton no longer exposes AXPress; actions=" & (availableActions as text)
             try
                 perform action "AXPress" of closeControl
             on error errorMessage number errorNumber
-                error "AXPress failed for PID " & (targetPID as text) & ", close control subrole=" & closeSubrole & ", actions=" & (availableActions as text) & ": " & errorMessage & " (" & (errorNumber as text) & ")"
+                error "AXPress failed for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle & ", window role/subrole=" & windowRole & "/" & windowSubrole & ", close control role/subrole=" & closeRole & "/" & closeSubrole & ": " & errorMessage & " (" & (errorNumber as text) & ")"
             end try
-            return "MACOS_DOCUMENT_HOST_CLOSE_PRESS=RETURNED; pid=" & (targetPID as text) & "; close control subrole=" & closeSubrole & "; actions=" & (availableActions as text)
+            return "MACOS_DOCUMENT_HOST_CLOSE_PRESS=RETURNED; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; window role/subrole=" & windowRole & "/" & windowSubrole & "; close control role/subrole=" & closeRole & "/" & closeSubrole & "; action=AXPress"
         end tell
     end tell
 end run
@@ -177,10 +191,15 @@ def stop_process_group(process: subprocess.Popen[str]) -> bool:
     return process.poll() is not None
 
 
-def run_osascript(script: str, process_id: str, timeout: float) -> tuple[int, str]:
+def run_osascript(
+    script: str,
+    process_id: str,
+    timeout: float,
+    *script_arguments: str,
+) -> tuple[int, str]:
     try:
         result = subprocess.run(
-            ["/usr/bin/osascript", "-", process_id],
+            ["/usr/bin/osascript", "-", process_id, *script_arguments],
             input=script,
             text=True,
             stdout=subprocess.PIPE,
@@ -260,6 +279,9 @@ def main() -> int:
     fixture_ready = False
     observed_native_windows = False
     next_window_query = 0.0
+    observed_process_name = "<unknown>"
+    observed_windows: list[tuple[int, str]] = []
+    fixture_titles: list[str] = []
     saw_tcc_denial = False
     failures: list[str] = []
 
@@ -298,15 +320,25 @@ def main() -> int:
                         break
                     failures.append(f"Accessibility window query failed: {query_output.strip()}")
                     break
-                window_names = [name.strip() for name in query_output.strip().split(",") if name.strip()]
-                fixture_titles = [name for name in window_names if "Host Test Fixture" in name]
-                if len(window_names) >= 2 and fixture_titles:
+                snapshot_lines = [entry for entry in query_output.splitlines() if entry.strip()]
+                observed_process_name = snapshot_lines[0].strip() if snapshot_lines else "<missing>"
+                observed_windows = []
+                for entry in snapshot_lines[1:]:
+                    index_text, separator, window_title = entry.partition("\t")
+                    if separator and index_text.strip().isdigit():
+                        observed_windows.append((int(index_text.strip()), window_title.strip()))
+                fixture_titles = [title for _, title in observed_windows if "Host Test Fixture" in title]
+                if len(observed_windows) >= 2 and fixture_titles:
                     observed_native_windows = True
 
             if all(marker in capture.markers for marker in SUCCESS_MARKERS) and observed_native_windows:
                 print(
-                    "MACOS_DOCUMENT_HOST_NATIVE_WINDOWS=PASS; accessibility observed native fixture windows: "
-                    + repr(fixture_titles)
+                    "MACOS_DOCUMENT_HOST_NATIVE_WINDOWS=PASS; pid="
+                    + str(process.pid)
+                    + "; process="
+                    + observed_process_name
+                    + "; indexed windows="
+                    + repr(observed_windows)
                 )
                 break
             if process.poll() is not None:
@@ -336,25 +368,67 @@ def main() -> int:
             capture.thread.join(timeout=5)
             return fail("fixture did not produce required round-trip evidence: " + repr(missing), log_path)
 
-        exit_code: int | None = None
-        close_preflight_code, close_preflight_output = run_osascript(
-            MAIN_WINDOW_CLOSE_PREFLIGHT,
-            str(process.pid),
-            timeout=min(10.0, max(0.1, deadline - time.monotonic())),
-        )
-        if close_preflight_code != 0:
+        main_windows = [(index, title) for index, title in observed_windows if "PulseForge Editor" in title]
+        if len(main_windows) != 1:
             stop_process_group(process)
             capture.thread.join(timeout=5)
-            if has_tcc_denial(close_preflight_output):
-                print("MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; native-window close preflight NOT RUN; acceptance blocked")
-                return 77
-            return fail(f"could not inspect the native main-window close control: {close_preflight_output.strip()}", log_path)
-        print(close_preflight_output.strip())
+            return fail(
+                "Accessibility did not identify exactly one main editor window by title; "
+                f"pid={process.pid}; process={observed_process_name}; indexed windows={observed_windows!r}",
+                log_path,
+            )
+        main_window_index, main_window_name = main_windows[0]
+        print(
+            f"MACOS_DOCUMENT_HOST_PROCESS=PASS; pid={process.pid}; process={observed_process_name}; "
+            f"main_window_index={main_window_index}; main_window={main_window_name!r}; "
+            f"all_windows={observed_windows!r}"
+        )
 
+        diagnostic_arguments = (str(main_window_index), main_window_name)
+        diagnostics = (
+            ("MAIN_SHEETS", MAIN_WINDOW_SHEET_SNAPSHOT, 3.0),
+            ("CLOSE_ACTIONS", CLOSE_BUTTON_ACTIONS, 4.0),
+        )
+        diagnostic_output: list[str] = []
+        for label, script, diagnostic_timeout in diagnostics:
+            query_code, query_output = run_osascript(
+                script,
+                str(process.pid),
+                min(diagnostic_timeout, max(0.1, deadline - time.monotonic())),
+                *diagnostic_arguments,
+            )
+            if query_code == 0:
+                output = query_output.strip()
+                print(output)
+                diagnostic_output.append(output)
+                if label == "CLOSE_ACTIONS" and "AXPress" not in output:
+                    stop_process_group(process)
+                    capture.thread.join(timeout=5)
+                    return fail("the semantic AXCloseButton does not expose AXPress; " + output, log_path)
+                continue
+            if has_tcc_denial(query_output):
+                stop_process_group(process)
+                capture.thread.join(timeout=5)
+                print(
+                    "MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; "
+                    f"diagnostic_stage={label}; reason=TCC denial; acceptance blocked"
+                )
+                return 77
+            status = "TIMED_OUT" if query_code == 124 else "ERROR"
+            output = query_output.strip()
+            print(
+                f"MACOS_DOCUMENT_HOST_{label}={status}; pid={process.pid}; "
+                f"window_index={main_window_index}; window={main_window_name!r}; "
+                f"exit_code={query_code}; detail={output!r}; continuing to the actual AXPress close request"
+            )
+            diagnostic_output.append(f"{label}={status}: {output}")
+
+        exit_code: int | None = None
         close_code, close_output = run_osascript(
             MAIN_WINDOW_CLOSE,
             str(process.pid),
-            timeout=min(10.0, max(0.1, deadline - time.monotonic())),
+            min(10.0, max(0.1, deadline - time.monotonic())),
+            *diagnostic_arguments,
         )
         if close_code != 0:
             if has_tcc_denial(close_output):
@@ -368,13 +442,18 @@ def main() -> int:
                 except subprocess.TimeoutExpired:
                     exit_code = None
                 if exit_code == 0:
-                    print("MACOS_DOCUMENT_HOST_CLOSE_PRESS=TIMED_OUT_AFTER_NORMAL_EXIT; " + close_preflight_output.strip())
+                    print(
+                        "MACOS_DOCUMENT_HOST_CLOSE_PRESS=TIMED_OUT_AFTER_NORMAL_EXIT; "
+                        f"pid={process.pid}; window={main_window_name!r}; process exited normally after AXPress request; "
+                        f"diagnostics={diagnostic_output!r}; detail={close_output.strip()}"
+                    )
                 else:
                     stop_process_group(process)
                     capture.thread.join(timeout=5)
                     return fail(
                         "Accessibility AXPress timed out while the editor remained open; "
-                        + close_preflight_output.strip()
+                        + f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
+                        + repr(diagnostic_output)
                         + "; "
                         + close_output.strip(),
                         log_path,
@@ -382,7 +461,12 @@ def main() -> int:
             else:
                 stop_process_group(process)
                 capture.thread.join(timeout=5)
-                return fail(f"could not request normal main-window close: {close_output.strip()}", log_path)
+                return fail(
+                    "could not request normal main-window close; "
+                    f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
+                    f"diagnostics={diagnostic_output!r}; detail={close_output.strip()}",
+                    log_path,
+                )
         else:
             print(close_output.strip())
         try:
