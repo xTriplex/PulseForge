@@ -88,6 +88,19 @@ namespace PulseForgeEditor
 				Options.EnableDocumentHostImageAllocationFailureTest = true;
 				continue;
 			}
+			if (Arguments[Index] == "--editor-runtime-play-stop-test")
+			{
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
+				return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::UnexpectedArgument,
+					"The --editor-runtime-play-stop-test option is available only in Debug builds." });
+#else
+				if (Options.EnableEditorRuntimePlayStopTest)
+					return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::DuplicateOption,
+						"The --editor-runtime-play-stop-test option may be specified only once." });
+				Options.EnableEditorRuntimePlayStopTest = true;
+				continue;
+#endif
+			}
 			if (Arguments[Index] == "--asset-preview-stress")
 			{
 				if (Options.AssetPreviewStressManifest)
@@ -139,7 +152,8 @@ namespace PulseForgeEditor
 						"--document-host-test-tab-reattach, --document-host-test-tab-reorder, and "
 						"--document-workspace-test-switch, and "
 						"--document-host-test-presentation-failure, --document-host-test-acquire-out-of-date, "
-						"and --document-host-test-image-allocation-failure." });
+						"--document-host-test-image-allocation-failure, and the Debug-only "
+						"--editor-runtime-play-stop-test." });
 
 			if (Options.ProjectFile)
 				return std::unexpected(EditorCommandLineError{
@@ -171,6 +185,17 @@ namespace PulseForgeEditor
 		if (Options.EnableDocumentHostTestFixture && !Options.ProjectFile)
 			return std::unexpected(EditorCommandLineError{
 				EditorCommandLineErrorCode::MissingProjectPath, "The --document-host-test-fixture option requires --project <path>." });
+		if (Options.EnableEditorRuntimePlayStopTest && !Options.ProjectFile)
+			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::MissingProjectPath,
+				"The --editor-runtime-play-stop-test option requires --project <path>." });
+		if (Options.EnableEditorRuntimePlayStopTest &&
+			(Options.ProjectOpenRenderTestFile || Options.AssetPreviewStressManifest || Options.EnableDocumentHostTestFixture ||
+				Options.EnableDocumentHostResetLayoutTest || Options.EnableDocumentHostTabTearOffTest ||
+				Options.EnableDocumentHostTabReattachTest || Options.EnableDocumentHostTabReorderTest ||
+				Options.EnableDocumentWorkspaceSwitchTest || Options.EnableDocumentHostPresentationFailureTest ||
+				Options.EnableDocumentHostAcquireOutOfDateTest || Options.EnableDocumentHostImageAllocationFailureTest))
+			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::UnexpectedArgument,
+				"The editor runtime Play/Stop fixture must run by itself with --project <path>." });
 		if (Options.EnableDocumentWorkspaceSwitchTest && !Options.EnableDocumentHostTestFixture)
 			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::UnexpectedArgument,
 				"The --document-workspace-test-switch option requires --document-host-test-fixture." });

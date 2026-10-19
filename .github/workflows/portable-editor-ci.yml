@@ -147,6 +147,16 @@ jobs:
             --log-directory "$RUNNER_TEMP" \
             --timeout-seconds 180 2>&1 | tee "$RUNNER_TEMP/macos-bundle-smoke.log"
 
+      - name: Exercise editor Play and Stop through the production runtime transition
+        id: macos_editor_runtime_play_stop
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSEditorRuntimePlayStopSmoke.py \
+            --editor Build/CI/macos-renderer/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor \
+            --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
+            --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-editor-runtime-play-stop-smoke.log"
+
       - name: Verify native document hosts and synthetic tab reattachment
         id: macos_document_hosts
         run: |
@@ -157,8 +167,18 @@ jobs:
             --log-directory "$RUNNER_TEMP" \
             --timeout-seconds 300 2>&1 | tee "$RUNNER_TEMP/macos-document-host-smoke.log"
 
+      - name: Verify native document host workspace restoration across editor restarts
+        id: macos_workspace_restore
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSWorkspaceRestoreSmoke.py \
+            --editor Build/CI/macos-renderer/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor \
+            --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
+            --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-workspace-restore-smoke.log"
+
       - name: Exercise real Cocoa Open and Save dialogs with Accessibility automation
-        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' && steps.macos_cpu_validation.outcome == 'success' && steps.macos_renderer_validation.outcome == 'success' && steps.macos_bundle_smoke.outcome == 'success' }}
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' && steps.macos_cpu_validation.outcome == 'success' && steps.macos_renderer_validation.outcome == 'success' && steps.macos_bundle_smoke.outcome == 'success' && steps.macos_editor_runtime_play_stop.outcome == 'success' && steps.macos_document_hosts.outcome == 'success' && steps.macos_workspace_restore.outcome == 'success' }}
         run: |
           set -o pipefail
           python3 Tests/Platform/MacOSNativeDialogAutomation.py \
@@ -185,7 +205,12 @@ jobs:
             ${{ runner.temp }}/macos-bundle-smoke.log
             ${{ runner.temp }}/macos-editor-bundle-smoke.log
             ${{ runner.temp }}/macos-player-bundle-smoke.log
+            ${{ runner.temp }}/macos-editor-runtime-play-stop.log
+            ${{ runner.temp }}/macos-editor-runtime-play-stop-smoke.log
             ${{ runner.temp }}/macos-document-host-smoke.log
+            ${{ runner.temp }}/macos-workspace-restore-smoke.log
+            ${{ runner.temp }}/macos-workspace-restore-first-launch.log
+            ${{ runner.temp }}/macos-workspace-restore-second-launch.log
             ${{ runner.temp }}/macos-native-dialog-automation.log
             ${{ runner.temp }}/native-dialog-open-select.log
             ${{ runner.temp }}/native-dialog-open-cancel.log

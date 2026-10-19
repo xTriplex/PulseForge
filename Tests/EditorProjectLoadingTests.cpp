@@ -63,6 +63,7 @@ namespace
 		const auto DefaultOptions = ParseEditorCommandLine(NoArguments, Root);
 		PF_CHECK(Tests, DefaultOptions.has_value());
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->ProjectFile.has_value());
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableEditorRuntimePlayStopTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTestFixture);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostResetLayoutTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTabTearOffTest);
@@ -74,6 +75,35 @@ namespace
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->ProjectOpenRenderTestFile);
 
 		const std::string AbsoluteProjectPath = ProjectFile.string();
+#if defined(_DEBUG) || defined(PF_DEBUG)
+		const std::array RuntimePlayStopFixtureArguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--editor-runtime-play-stop-test") };
+		const auto RuntimePlayStopFixtureOptions = ParseEditorCommandLine(RuntimePlayStopFixtureArguments, Root);
+		PF_CHECK(Tests, RuntimePlayStopFixtureOptions.has_value());
+		PF_CHECK(Tests, RuntimePlayStopFixtureOptions && RuntimePlayStopFixtureOptions->ProjectFile == ProjectFile &&
+					RuntimePlayStopFixtureOptions->EnableEditorRuntimePlayStopTest);
+		const std::array RuntimePlayStopFixtureWithoutProject = { std::string_view("--editor-runtime-play-stop-test") };
+		const auto RuntimePlayStopWithoutProjectOptions = ParseEditorCommandLine(RuntimePlayStopFixtureWithoutProject, Root);
+		PF_CHECK(Tests, !RuntimePlayStopWithoutProjectOptions &&
+					RuntimePlayStopWithoutProjectOptions.error().Code == EditorCommandLineErrorCode::MissingProjectPath);
+		const std::array DuplicateRuntimePlayStopFixture = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--editor-runtime-play-stop-test"), std::string_view("--editor-runtime-play-stop-test") };
+		const auto DuplicateRuntimePlayStopOptions = ParseEditorCommandLine(DuplicateRuntimePlayStopFixture, Root);
+		PF_CHECK(Tests, !DuplicateRuntimePlayStopOptions &&
+					DuplicateRuntimePlayStopOptions.error().Code == EditorCommandLineErrorCode::DuplicateOption);
+		const std::array ConflictingRuntimePlayStopFixture = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--editor-runtime-play-stop-test"), std::string_view("--project-open-render-test"),
+			std::string_view(AbsoluteProjectPath) };
+		const auto ConflictingRuntimePlayStopOptions = ParseEditorCommandLine(ConflictingRuntimePlayStopFixture, Root);
+		PF_CHECK(Tests, !ConflictingRuntimePlayStopOptions &&
+					ConflictingRuntimePlayStopOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+#else
+		const std::array RuntimePlayStopFixtureArguments = { std::string_view("--editor-runtime-play-stop-test") };
+		const auto RuntimePlayStopFixtureOptions = ParseEditorCommandLine(RuntimePlayStopFixtureArguments, Root);
+		PF_CHECK(Tests, !RuntimePlayStopFixtureOptions &&
+					RuntimePlayStopFixtureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+#endif
+
 		const std::array ProjectOpenRenderTestArguments = { std::string_view("--project-open-render-test"),
 			std::string_view(AbsoluteProjectPath) };
 		const auto ProjectOpenRenderTestOptions = ParseEditorCommandLine(ProjectOpenRenderTestArguments, Root);
