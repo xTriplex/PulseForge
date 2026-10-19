@@ -99,6 +99,11 @@ target_compile_options(PulseForgeGlad PRIVATE
 )
 
 if(PULSEFORGE_BUILD_EDITOR)
+	if(PULSEFORGE_PLATFORM_MACOS)
+		# NativeFileDialog's macOS adapter is Objective-C and uses Cocoa/AppKit.
+		# Enable the language explicitly; the top-level project keeps its normal C/C++ set.
+		enable_language(OBJC)
+	endif()
 	set(NFD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 	set(NFD_BUILD_SDL2_TESTS OFF CACHE BOOL "" FORCE)
 	set(NFD_BUILD_GLFW3_TESTS OFF CACHE BOOL "" FORCE)

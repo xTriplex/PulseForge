@@ -3,6 +3,16 @@ set_property(CACHE PULSEFORGE_SAMPLE_RENDERER PROPERTY STRINGS Vulkan OpenGL)
 option(PULSEFORGE_BUILD_CORE_ONLY "Build only portable Core and CPU consumer tests" OFF)
 option(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF
 	"Enable the explicit macOS Vulkan renderer proof configuration" OFF)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND NOT PULSEFORGE_BUILD_CORE_ONLY AND
+	NOT PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
+	set(PULSEFORGE_MACOS_DESKTOP_DEFAULT ON)
+else()
+	set(PULSEFORGE_MACOS_DESKTOP_DEFAULT OFF)
+endif()
+option(PULSEFORGE_BUILD_MACOS_DESKTOP
+	"Build the supported macOS Vulkan player/editor desktop targets" ${PULSEFORGE_MACOS_DESKTOP_DEFAULT})
+
 if(PULSEFORGE_BUILD_CORE_ONLY OR PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
 	set(PULSEFORGE_EDITOR_DEFAULT OFF)
 else()
@@ -40,10 +50,21 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	set(PULSEFORGE_PLATFORM_LINUX TRUE)
 	set(PULSEFORGE_PLATFORM_MACOS FALSE)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-	if(NOT PULSEFORGE_BUILD_CORE_ONLY AND NOT PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
+	if(NOT PULSEFORGE_BUILD_CORE_ONLY AND NOT PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF AND
+		NOT PULSEFORGE_BUILD_MACOS_DESKTOP)
 		message(FATAL_ERROR
-			"macOS defaults to the Core portability probe. The renderer proof is opt-in with "
-			"PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF=ON.")
+			"macOS full builds require PULSEFORGE_BUILD_MACOS_DESKTOP=ON. Use "
+			"PULSEFORGE_BUILD_CORE_ONLY=ON for the portable Core target set.")
+	endif()
+	if(PULSEFORGE_BUILD_MACOS_DESKTOP)
+		if(PULSEFORGE_BUILD_CORE_ONLY OR PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
+			message(FATAL_ERROR
+				"PULSEFORGE_BUILD_MACOS_DESKTOP cannot be combined with Core-only or isolated renderer-proof mode.")
+		endif()
+		if(NOT PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
+			(PULSEFORGE_BUILD_EDITOR AND NOT PULSEFORGE_EDITOR_RENDERER STREQUAL "Vulkan"))
+			message(FATAL_ERROR "The supported macOS desktop route requires Vulkan for every enabled application target.")
+		endif()
 	endif()
 	if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
 		if(PULSEFORGE_BUILD_CORE_ONLY)
@@ -71,7 +92,11 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 else()
 	message(FATAL_ERROR
 		"Unsupported PulseForge operating system '${CMAKE_SYSTEM_NAME}'. This revision supports Windows desktop "
-		"builds, Linux desktop/runtime/Core builds, and macOS Core portability or opt-in Vulkan proof builds.")
+		"builds, Linux desktop/runtime/Core builds, and macOS Core, isolated Vulkan proof, or Vulkan desktop builds.")
+endif()
+
+if(PULSEFORGE_BUILD_MACOS_DESKTOP AND NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+	message(FATAL_ERROR "PULSEFORGE_BUILD_MACOS_DESKTOP is only supported when targeting macOS (Darwin).")
 endif()
 
 if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF AND NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")

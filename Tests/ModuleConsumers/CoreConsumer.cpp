@@ -50,6 +50,22 @@ int main(int ArgumentCount, char** Arguments)
 		return 10;
 	}
 
+	const auto ResourceDirectory = PulseForge::Platform::GetResourceDirectory();
+	if (!ResourceDirectory || !ResourceDirectory->is_absolute())
+	{
+		std::cerr << "Core consumer resource directory must resolve to an absolute path";
+		if (!ResourceDirectory) std::cerr << ": " << ResourceDirectory.error().Message;
+		std::cerr << '\n';
+		return 13;
+	}
+	std::error_code ResourceDirectoryError;
+	if (!std::filesystem::is_directory(*ResourceDirectory, ResourceDirectoryError) || ResourceDirectoryError)
+	{
+		std::cerr << "Core consumer resource directory does not resolve to a directory: "
+			<< ResourceDirectory->string() << '\n';
+		return 14;
+	}
+
 	const auto UserDataDirectory = PulseForge::Platform::GetUserDataDirectory();
 	if (!UserDataDirectory || UserDataDirectory->empty()) return 2;
 #if defined(__APPLE__)

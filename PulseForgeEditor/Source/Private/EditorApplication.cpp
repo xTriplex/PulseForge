@@ -140,18 +140,14 @@ namespace
 		double BestArea = 0.0;
 		for (int Index = 0; Monitors && Index < MonitorCount; ++Index)
 		{
-			int MonitorX = 0;
-			int MonitorY = 0;
-			glfwGetMonitorPos(Monitors[Index], &MonitorX, &MonitorY);
-			const GLFWvidmode* Mode = glfwGetVideoMode(Monitors[Index]);
-			if (!Mode) continue;
-			const double IntersectionWidth =
-				(std::max)(0.0, (std::min)(static_cast<double>(X + Width), static_cast<double>(MonitorX + Mode->width)) -
-									(std::max)(static_cast<double>(X), static_cast<double>(MonitorX)));
-			const double IntersectionHeight =
-				(std::max)(0.0, (std::min)(static_cast<double>(Y + Height), static_cast<double>(MonitorY + Mode->height)) -
-									(std::max)(static_cast<double>(Y), static_cast<double>(MonitorY)));
-			const double Area = IntersectionWidth * IntersectionHeight;
+			int WorkX = 0;
+			int WorkY = 0;
+			int WorkWidth = 0;
+			int WorkHeight = 0;
+			glfwGetMonitorWorkarea(Monitors[Index], &WorkX, &WorkY, &WorkWidth, &WorkHeight);
+			const double Area = PulseForgeEditor::NativeWindowWorkAreaIntersectionArea(
+				X, Y, Width, Height, { static_cast<float>(WorkX), static_cast<float>(WorkY),
+					static_cast<float>(WorkWidth), static_cast<float>(WorkHeight) });
 			if (Area > BestArea)
 			{
 				BestArea = Area;
@@ -211,6 +207,7 @@ namespace
 			glfwGetMonitorWorkarea(Monitor, &WorkX, &WorkY, &WorkWidth, &WorkHeight);
 			if (WorkWidth <= 0 || WorkHeight <= 0)
 			{
+#if !defined(__APPLE__)
 				int MonitorX = 0;
 				int MonitorY = 0;
 				glfwGetMonitorPos(Monitor, &MonitorX, &MonitorY);
@@ -222,6 +219,7 @@ namespace
 					WorkWidth = Mode->width;
 					WorkHeight = Mode->height;
 				}
+#endif
 			}
 			float ScaleX = 1.0f;
 			float ScaleY = 1.0f;
@@ -734,14 +732,14 @@ namespace
 #else
 			m_ImGuiRenderer = std::make_unique<PulseForgeEditor::EditorImGuiRenderer>();
 			auto& Runtime = PulseForge::Application::Get();
-			auto ExecutablePath = PulseForge::Platform::GetExecutablePath();
-			if (!ExecutablePath)
+			auto ResourceDirectory = PulseForge::Platform::GetResourceDirectory();
+			if (!ResourceDirectory)
 			{
 				ShutdownImGui();
 				throw std::runtime_error(
-					"Could not resolve the editor executable path for shader loading: " + ExecutablePath.error().Message);
+					"Could not resolve the editor resource directory for shader loading: " + ResourceDirectory.error().Message);
 			}
-			m_EditorShaderDirectory = ExecutablePath->parent_path() / PF_EDITOR_SHADER_DIRECTORY;
+			m_EditorShaderDirectory = *ResourceDirectory / PF_EDITOR_SHADER_DIRECTORY;
 			if (auto Result = m_ImGuiRenderer->Initialize(Runtime, m_EditorShaderDirectory); !Result)
 			{
 				const std::string Message = "Could not initialize the Vulkan editor UI renderer: " + Result.error();
@@ -6021,6 +6019,11 @@ namespace
 				const double Milliseconds =
 					std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_ProjectOpenStartedAt).count();
 				PF_INFO("Profile: Project open to first rendered viewport frame took {:.2f} ms", Milliseconds);
+				if (m_ProjectOpenRenderTestFile)
+				{
+					PF_INFO("PULSEFORGE_EDITOR_PROJECT_RENDER_SMOKE=PASS; requesting orderly shutdown");
+					RequestEditorApplicationClose();
+				}
 			}
 #endif
 		}

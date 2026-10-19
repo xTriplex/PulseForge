@@ -36,6 +36,24 @@ namespace PulseForgeEditor
 		float Height = 0.0f;
 	};
 
+	[[nodiscard]] inline double NativeWindowWorkAreaIntersectionArea(
+		float X, float Y, float Width, float Height, const EditorNativeWindowWorkArea& WorkArea) noexcept
+	{
+		if (!std::isfinite(X) || !std::isfinite(Y) || !std::isfinite(Width) || !std::isfinite(Height) ||
+			!std::isfinite(WorkArea.X) || !std::isfinite(WorkArea.Y) || !std::isfinite(WorkArea.Width) ||
+			!std::isfinite(WorkArea.Height) || Width <= 0.0f || Height <= 0.0f || WorkArea.Width <= 0.0f ||
+			WorkArea.Height <= 0.0f)
+			return 0.0;
+
+		const double IntersectionWidth = (std::max)(0.0,
+			(std::min)(static_cast<double>(X + Width), static_cast<double>(WorkArea.X + WorkArea.Width)) -
+				(std::max)(static_cast<double>(X), static_cast<double>(WorkArea.X)));
+		const double IntersectionHeight = (std::max)(0.0,
+			(std::min)(static_cast<double>(Y + Height), static_cast<double>(WorkArea.Y + WorkArea.Height)) -
+				(std::max)(static_cast<double>(Y), static_cast<double>(WorkArea.Y)));
+		return IntersectionWidth * IntersectionHeight;
+	}
+
 	[[nodiscard]] inline EditorNativeWindowRect ResolveNativeWindowRect(
 		const EditorDocumentHost::WindowBounds& Saved,
 		const EditorNativeWindowWorkArea& WorkArea,

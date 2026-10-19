@@ -12,8 +12,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  macos-core:
-    name: macOS 26 · Apple Silicon · PulseForge Vulkan/MoltenVK renderer proof
+  macos-desktop:
+    name: macOS 26 · Apple Silicon · PulseForge Vulkan/MoltenVK desktop
     runs-on: macos-26
     timeout-minutes: 90
     steps:
@@ -57,33 +57,38 @@ jobs:
           grep -Ei 'deviceName|deviceType|apiVersion|driverVersion|VK_KHR_portability_(enumeration|subset)|VK_KHR_swapchain|VK_KHR_dynamic_rendering|VK_KHR_synchronization2|VK_EXT_metal_surface|swapchainMaintenance1|timelineSemaphore|dynamicRendering|synchronization2|shaderDemoteToHelperInvocation|D32|depth' \
             "$RUNNER_TEMP/vulkaninfo-full.log" | tee "$RUNNER_TEMP/moltenvk-capabilities.log"
 
-      - name: Configure the explicit PulseForge macOS Vulkan renderer proof
+      - name: Configure the supported PulseForge macOS desktop targets
         run: |
           set -o pipefail
           cmake -S . -B Build/CI/macos-renderer -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DBUILD_TESTING=ON \
-            -DPULSEFORGE_ENABLE_MACOS_VULKAN_PROOF=ON \
-            -DPULSEFORGE_BUILD_CORE_ONLY=OFF \
-            -DPULSEFORGE_BUILD_EDITOR=OFF \
+            -DPULSEFORGE_BUILD_MACOS_DESKTOP=ON \
+            -DPULSEFORGE_BUILD_EDITOR=ON \
             -DPULSEFORGE_BUILD_GPU_VALIDATION_TESTS=ON \
             -DPULSEFORGE_DXC_EXECUTABLE="$PULSEFORGE_DXC_EXECUTABLE" \
             -DFETCHCONTENT_BASE_DIR="$GITHUB_WORKSPACE/Build/CI/Dependencies" 2>&1 |
             tee "$RUNNER_TEMP/macos-configure.log"
 
-      - name: Build Core checks and the PulseForge renderer proof
+      - name: Build tests, editor, player and renderer fixture
         run: |
           set -o pipefail
           cmake --build Build/CI/macos-renderer --parallel --target \
-            PulseForgeCoreTests PulseForgeCoreConsumer PulseForgeMacOSRendererValidation 2>&1 |
+            PulseForgeTests PulseForgeEditor PulseForgeGame PulseForgeMacOSRendererValidation \
+            PulseForgeNativeDialogValidation 2>&1 |
             tee "$RUNNER_TEMP/macos-build.log"
 
-      - name: Run Core CPU tests and the required PulseForge renderer proof
+      - name: Run registered macOS CPU and editor tests
+        run: |
+          set -o pipefail
+          ctest --test-dir Build/CI/macos-renderer --output-on-failure --verbose -LE 'gpu|policy' 2>&1 |
+            tee "$RUNNER_TEMP/macos-cpu-ctest.log"
+
+      - name: Run the required PulseForge renderer policy and sensitivity fixtures
         run: |
           set -o pipefail
           ctest --test-dir Build/CI/macos-renderer --output-on-failure --verbose \
-            -R 'PulseForge\.(Core|CoreConsumer|GPU\.MacOSRenderer)' 2>&1 |
-            tee "$RUNNER_TEMP/macos-renderer-ctest.log"
+            -R '^PulseForge\.GPU\.MacOSRenderer' 2>&1 | tee "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'Vulkan validation layer enabled' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'NVRHI validation layer enabled' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'Selected Vulkan GPU:' "$RUNNER_TEMP/macos-renderer-ctest.log"
@@ -91,6 +96,7 @@ jobs:
           grep -q 'MACOS_RENDERER_IMGUI_SUBMISSION=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'MACOS_RENDERER_READBACK=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'MACOS_RENDERER_NATIVE_RESIZE=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
+          grep -q 'MACOS_RENDERER_WINDOW_SCALE=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'MACOS_RENDERER_ORDERLY_SHUTDOWN=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'MACOS_RENDERER_POLICY=auto; RESULT=RENDERED_AND_VALIDATED' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'MACOS_RENDERER_SENSITIVITY=suppress-geometry; EXPECTED_ASSERTION_FAILURE=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
@@ -107,11 +113,38 @@ jobs:
             exit 1
           fi
 
+      - name: Run relocated editor and player bundle smokes from unrelated working directories
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSBundleSmoke.py \
+            --editor-bundle Build/CI/macos-renderer/PulseForgeEditor.app \
+            --editor-project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
+            --player-bundle Build/CI/macos-renderer/PulseForgeGame.app \
+            --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 180 2>&1 | tee "$RUNNER_TEMP/macos-bundle-smoke.log"
+
+      - name: Verify native document hosts and synthetic tab reattachment
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSDocumentHostSmoke.py \
+            --editor Build/CI/macos-renderer/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor \
+            --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
+            --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 300 2>&1 | tee "$RUNNER_TEMP/macos-document-host-smoke.log"
+
+      - name: Exercise real Cocoa Open and Save dialogs with Accessibility automation
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSNativeDialogAutomation.py \
+            --fixture Build/CI/macos-renderer/PulseForgeNativeDialogValidation \
+            --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 180 2>&1 | tee "$RUNNER_TEMP/macos-native-dialog-automation.log"
+
       - name: Upload compact renderer evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: macos-pulseforge-renderer-evidence
+          name: macos-pulseforge-desktop-evidence
           path: |
             ${{ runner.temp }}/vulkan-sdk-download.log
             ${{ runner.temp }}/apple-toolchain.log
@@ -120,7 +153,17 @@ jobs:
             ${{ runner.temp }}/moltenvk-capabilities.log
             ${{ runner.temp }}/macos-configure.log
             ${{ runner.temp }}/macos-build.log
+            ${{ runner.temp }}/macos-cpu-ctest.log
             ${{ runner.temp }}/macos-renderer-ctest.log
+            ${{ runner.temp }}/macos-bundle-smoke.log
+            ${{ runner.temp }}/macos-editor-bundle-smoke.log
+            ${{ runner.temp }}/macos-player-bundle-smoke.log
+            ${{ runner.temp }}/macos-document-host-smoke.log
+            ${{ runner.temp }}/macos-native-dialog-automation.log
+            ${{ runner.temp }}/native-dialog-open-select.log
+            ${{ runner.temp }}/native-dialog-open-cancel.log
+            ${{ runner.temp }}/native-dialog-save-select.log
+            ${{ runner.temp }}/native-dialog-save-cancel.log
             Build/CI/macos-renderer/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/macos-renderer/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
