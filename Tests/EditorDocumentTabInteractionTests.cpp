@@ -84,7 +84,7 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	DragFrame.LeftButtonReleased = false;
 	DragFrame.PointerPosition = { 180.0f, 120.0f };
 	DragFrame.HoveredViewportID = 11;
-	DragFrame.ReleaseOverMainEditorViewport = !IsDocumentTabReleaseOverMainViewport(10, 11, true, true);
+	DragFrame.ReleaseOverMainEditorViewport = IsDocumentTabReleaseOverMainViewport(10, 11, true, true);
 	PF_CHECK(Tests, !Interaction.UpdateDrag(DragFrame));
 	DragFrame.LeftButtonDown = false;
 	DragFrame.LeftButtonReleased = true;

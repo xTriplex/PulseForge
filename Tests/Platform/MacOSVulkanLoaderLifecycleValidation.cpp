@@ -67,24 +67,33 @@ int main()
 
 	if (!CreateAndCloseVulkanWindow("PulseForge Vulkan loader startup")) return 1;
 
-	try
+	if (!CreateAndCloseVulkanWindow("PulseForge Vulkan loader repeated initialization")) return 1;
 	{
-		PulseForge::GLFWWindow InvalidWindow(PulseForge::WindowProps(
-			"PulseForge Vulkan loader failed-window cleanup", 0, 0, PulseForge::EWindowStyle::Default,
-			PulseForge::EWindowClientAPI::Vulkan));
-		std::cerr << "GLFW unexpectedly created a zero-sized validation window" << '\n';
-		return 1;
-	}
-	catch (const std::exception&)
-	{
-		if (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
+		PulseForge::GLFWWindow OpenGLWindow(PulseForge::WindowProps(
+			"PulseForge OpenGL runtime", 320, 240, PulseForge::EWindowStyle::Default,
+			PulseForge::EWindowClientAPI::OpenGL));
+		try
 		{
-			std::cerr << "Failed window construction left the Vulkan loader retained" << '\n';
+			PulseForge::GLFWWindow MismatchedVulkanWindow(PulseForge::WindowProps(
+				"PulseForge Vulkan cannot join OpenGL runtime", 320, 240, PulseForge::EWindowStyle::Default,
+				PulseForge::EWindowClientAPI::Vulkan));
+			std::cerr << "Vulkan unexpectedly joined a GLFW runtime initialized without its loader" << '\n';
 			return 1;
 		}
+		catch (const std::exception&)
+		{
+			if (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
+			{
+				std::cerr << "Rejected Vulkan window left a loader installed into the OpenGL runtime" << '\n';
+				return 1;
+			}
+		}
 	}
-
-	if (!CreateAndCloseVulkanWindow("PulseForge Vulkan loader repeated initialization")) return 1;
+	if (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
+	{
+		std::cerr << "OpenGL runtime teardown retained a Vulkan loader" << '\n';
+		return 1;
+	}
 	if (setenv("VULKAN_SDK", "/path/that/does/not/exist", 1) != 0) return 1;
 	try
 	{
@@ -103,6 +112,6 @@ int main()
 		setenv("VULKAN_SDK", ExistingSdk.c_str(), 1);
 	else
 		unsetenv("VULKAN_SDK");
-	std::cout << "MACOS_VULKAN_LOADER_LIFECYCLE=PASS; startup, failed-window cleanup, termination and reinitialization\n";
+	std::cout << "MACOS_VULKAN_LOADER_LIFECYCLE=PASS; acquisition failure, startup, API mismatch, termination and reinitialization\n";
 	return 0;
 }
