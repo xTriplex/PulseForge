@@ -1358,9 +1358,14 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
     while True:
         probe_remaining = max(0.0, probe_deadline - time.monotonic())
         if probe_remaining <= 0:
+            observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+            capture_waiting_observation(process.pid, scenario, observation_log)
             if not stop_fixture(process, output_reader):
                 return 1, "fixture process group or output reader survived cleanup after the panel readiness deadline"
-            return 1, f"native panel did not become Accessibility-ready; last_state={last_panel_state!r}"
+            return 1, (
+                "native panel did not become Accessibility-ready before the existing readiness deadline; "
+                f"read-only waiting-state observation captured; last_state={last_panel_state!r}"
+            )
         if output_reader.failure_lines:
             if not stop_fixture(process, output_reader):
                 return 1, "fixture process group or output reader survived cleanup after a panel-readiness failure"
@@ -1432,12 +1437,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 return 1, "fixture process group or output reader survived cleanup after unexpected Accessibility output"
             return 1, f"Accessibility probe returned an unexpected state: {probe_output!r}"
         last_panel_state = probe_output.strip()
-        time.sleep(0.5)
-        observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
-        capture_waiting_observation(process.pid, scenario, observation_log)
-        if not stop_fixture(process, output_reader):
-            return 1, "fixture process group or output reader survived cleanup after waiting-state observation"
-        return 1, f"native panel did not meet readiness on the first snapshot; read-only observation captured; last_state={last_panel_state!r}"
+        time.sleep(min(0.2, max(0.0, probe_deadline - time.monotonic())))
 
     remaining = remaining_seconds()
     if remaining <= 0:
