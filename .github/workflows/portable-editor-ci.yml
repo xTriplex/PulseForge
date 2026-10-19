@@ -32,7 +32,7 @@ jobs:
             vulkaninfo --summary 2>&1 | tee "$RUNNER_TEMP/vulkaninfo.log"
           VK_DRIVER_FILES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json" \
             vulkaninfo --show-formats > "$RUNNER_TEMP/vulkaninfo-full.log" 2>&1
-          grep -E 'deviceName|apiVersion|VK_KHR_portability_subset|VK_KHR_swapchain|VK_KHR_dynamic_rendering|VK_KHR_synchronization2|VK_EXT_metal_surface|timelineSemaphore|dynamicRendering|synchronization2|shaderDemoteToHelperInvocation|VK_FORMAT_D32_SFLOAT' \
+          grep -Ei 'deviceName|apiVersion|VK_KHR_portability_(enumeration|subset)|VK_KHR_swapchain|VK_KHR_dynamic_rendering|VK_KHR_synchronization2|VK_EXT_metal_surface|timelineSemaphore|dynamicRendering|synchronization2|shaderDemoteToHelperInvocation|D32|depth' \
             "$RUNNER_TEMP/vulkaninfo-full.log" | tee "$RUNNER_TEMP/moltenvk-capabilities.log" || true
           VK_DRIVER_FILES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json" \
             "$(brew --prefix vulkan-tools)/cube/vkcube.app/Contents/MacOS/vkcube" \
