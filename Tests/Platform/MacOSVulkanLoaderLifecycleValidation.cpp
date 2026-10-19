@@ -1,14 +1,43 @@
+#include "Core/Log.h"
 #include "Window/Platform/GLFW/GLFWWindow.h"
 
 #include <GLFW/glfw3.h>
 
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+
+#include <stdlib.h>
 
 namespace
 {
+	class ScopedTemporaryDirectory
+	{
+	public:
+		ScopedTemporaryDirectory()
+		{
+			std::string Template = (std::filesystem::temp_directory_path() / "PulseForgeVulkanLoader.XXXXXX").string();
+			char* CreatedPath = ::mkdtemp(Template.data());
+			if (!CreatedPath)
+				throw std::runtime_error("Could not create a unique Vulkan loader test directory");
+			m_Path = CreatedPath;
+		}
+
+		~ScopedTemporaryDirectory()
+		{
+			std::error_code Error;
+			std::filesystem::remove_all(m_Path, Error);
+		}
+
+		[[nodiscard]] const std::filesystem::path& Path() const noexcept { return m_Path; }
+
+	private:
+		std::filesystem::path m_Path;
+	};
+
 	bool CreateAndCloseVulkanWindow(const char* Title)
 	{
 		try
@@ -36,12 +65,24 @@ namespace
 
 int main()
 {
+	PulseForge::Log::Init();
 	const char* ExistingSdkValue = std::getenv("VULKAN_SDK");
 	const std::string ExistingSdk = ExistingSdkValue ? ExistingSdkValue : "";
 	const bool HadSdkValue = ExistingSdkValue != nullptr;
-	if (setenv("VULKAN_SDK", "/path/that/does/not/exist", 1) != 0)
+	ScopedTemporaryDirectory EmptySdk;
+	std::filesystem::create_directories(EmptySdk.Path() / "lib");
+	const std::string InvalidSdkPath = EmptySdk.Path().string();
+	if (setenv("VULKAN_SDK", InvalidSdkPath.c_str(), 1) != 0)
 	{
 		std::cerr << "Could not set the isolated loader-failure test environment" << '\n';
+		return 1;
+	}
+	const char* ConfiguredSdk = std::getenv("VULKAN_SDK");
+	if (!ConfiguredSdk || std::string(ConfiguredSdk) != InvalidSdkPath ||
+		std::filesystem::exists(EmptySdk.Path() / "lib/libvulkan.1.dylib") ||
+		std::filesystem::exists(EmptySdk.Path() / "lib/libvulkan.dylib"))
+	{
+		std::cerr << "Could not verify the isolated Vulkan SDK override" << '\n';
 		return 1;
 	}
 	try
@@ -49,7 +90,8 @@ int main()
 		PulseForge::GLFWWindow InvalidLoaderWindow(PulseForge::WindowProps(
 			"PulseForge Vulkan loader acquisition failure", 320, 240, PulseForge::EWindowStyle::Default,
 			PulseForge::EWindowClientAPI::Vulkan));
-		std::cerr << "GLFW unexpectedly accepted a Vulkan SDK path without a loader" << '\n';
+		std::cerr << "GLFW unexpectedly accepted invalid VULKAN_SDK='" << ConfiguredSdk
+			<< "'; loader proc installed=" << (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress() != nullptr) << '\n';
 		return 1;
 	}
 	catch (const std::exception&)
