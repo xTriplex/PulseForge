@@ -82,7 +82,7 @@ namespace PulseForge
 			const Buffer& VertexBuffer,
 			const Buffer& IndexBuffer,
 			const DrawIndexedArguments& Arguments,
-			std::span<const BindingSet* const> BindingSets = {});
+			std::span<const BindingSet* const> BindingSets = {}) override;
 		static Application& Get();
 
 	private:
