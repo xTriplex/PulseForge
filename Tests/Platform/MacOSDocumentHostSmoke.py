@@ -32,7 +32,7 @@ MAIN_WINDOW_CLOSE = '''on run argv
         tell process (item 1 of argv)
             set editorWindows to every window whose name contains "PulseForge Editor"
             if (count of editorWindows) is 0 then error "No PulseForge Editor top-level window was exposed"
-            click close button of item 1 of editorWindows
+            click (first button of item 1 of editorWindows)
         end tell
     end tell
 end run
