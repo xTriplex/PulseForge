@@ -31,6 +31,10 @@ jobs:
           VK_DRIVER_FILES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json" \
             vulkaninfo --summary 2>&1 | tee "$RUNNER_TEMP/vulkaninfo.log"
           VK_DRIVER_FILES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json" \
+            vulkaninfo --show-formats > "$RUNNER_TEMP/vulkaninfo-full.log" 2>&1
+          grep -E 'deviceName|apiVersion|VK_KHR_portability_subset|VK_KHR_swapchain|VK_KHR_dynamic_rendering|VK_KHR_synchronization2|VK_EXT_metal_surface|timelineSemaphore|dynamicRendering|synchronization2|shaderDemoteToHelperInvocation|VK_FORMAT_D32_SFLOAT' \
+            "$RUNNER_TEMP/vulkaninfo-full.log" | tee "$RUNNER_TEMP/moltenvk-capabilities.log" || true
+          VK_DRIVER_FILES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json" \
             "$(brew --prefix vulkan-tools)/cube/vkcube.app/Contents/MacOS/vkcube" \
             --wsi metal --c 5 2>&1 | tee "$RUNNER_TEMP/vkcube.log"
 
@@ -68,6 +72,8 @@ jobs:
             ${{ runner.temp }}/ctest.log
             ${{ runner.temp }}/moltenvk-install.log
             ${{ runner.temp }}/vulkaninfo.log
+            ${{ runner.temp }}/vulkaninfo-full.log
+            ${{ runner.temp }}/moltenvk-capabilities.log
             ${{ runner.temp }}/vkcube.log
             Build/CI/macos-core/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/macos-core/Testing/Temporary/LastTest.log
