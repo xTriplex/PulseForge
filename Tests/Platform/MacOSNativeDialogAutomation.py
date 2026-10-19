@@ -34,6 +34,103 @@ ACCESSIBILITY_TIMEOUTS = (
 )
 OBSERVATION_TOTAL_SECONDS = 35.0
 
+SWIFT_AX_SNAPSHOT = r"""
+import AppKit
+import ApplicationServices
+import Foundation
+
+func readAttribute(_ element: AXUIElement, _ name: String) -> (AXError, CFTypeRef?) {
+    var value: CFTypeRef?
+    let error = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+    return (error, value)
+}
+
+func boundedText(_ value: String) -> String {
+    let flattened = value.replacingOccurrences(of: "\n", with: "\\n")
+        .replacingOccurrences(of: "\r", with: "\\r")
+    return String(flattened.prefix(240))
+}
+
+func textAttribute(_ element: AXUIElement, _ name: String) -> String {
+    let (error, value) = readAttribute(element, name)
+    guard error == .success, let value else { return "AXERR_\(error.rawValue)" }
+    return boundedText(String(describing: value))
+}
+
+func actionNames(_ element: AXUIElement) -> String {
+    var names: CFArray?
+    let error = AXUIElementCopyActionNames(element, &names)
+    guard error == .success, let names else { return "AXERR_\(error.rawValue)" }
+    return boundedText((names as? [String] ?? []).joined(separator: ","))
+}
+
+var visited = 0
+func describe(_ element: AXUIElement, _ depth: Int) {
+    if visited >= 64 || depth > 5 { return }
+    visited += 1
+    let role = textAttribute(element, "AXRole")
+    let subrole = textAttribute(element, "AXSubrole")
+    let title = textAttribute(element, "AXTitle")
+    let description = textAttribute(element, "AXDescription")
+    let enabled = textAttribute(element, "AXEnabled")
+    let actions = actionNames(element)
+    print(
+        "AX_NODE depth=\(depth); role=\(role); subrole=\(subrole); title=\(title); " +
+            "description=\(description); enabled=\(enabled); actions=\(actions)"
+    )
+    let (error, value) = readAttribute(element, "AXChildren")
+    guard error == .success else {
+        print("AX_CHILDREN_ERROR depth=\(depth); error=\(error.rawValue)")
+        return
+    }
+    guard let value else {
+        print("AX_CHILDREN_VALUE depth=\(depth); value=nil")
+        return
+    }
+    guard let children = value as? [AXUIElement] else {
+        print("AX_CHILDREN_VALUE depth=\(depth); cf_type_id=\(CFGetTypeID(value))")
+        return
+    }
+    for child in children {
+        if visited >= 64 { break }
+        describe(child, depth + 1)
+    }
+}
+
+let pidText = ProcessInfo.processInfo.environment["PULSEFORGE_AX_SNAPSHOT_PIDS"] ?? ""
+let pids = pidText.split(separator: ",").compactMap { Int32($0) }
+print("AX_API_TRUSTED=\(AXIsProcessTrusted()); pids=\(pids)")
+for pid in pids {
+    let application = AXUIElementCreateApplication(pid)
+    let running = NSRunningApplication(processIdentifier: pid)
+    let processName = boundedText(running?.localizedName ?? "unknown")
+    let bundleIdentifier = running?.bundleIdentifier ?? "unknown"
+    print("AX_PROCESS pid=\(pid); name=\(processName); bundle=\(bundleIdentifier)")
+    let (error, value) = readAttribute(application, "AXWindows")
+    guard error == .success else {
+        print("AX_WINDOWS_ERROR pid=\(pid); error=\(error.rawValue)")
+        continue
+    }
+    guard let value else {
+        print("AX_WINDOWS_VALUE pid=\(pid); value=nil")
+        continue
+    }
+    guard let windows = value as? [AXUIElement] else {
+        print("AX_WINDOWS_VALUE pid=\(pid); cf_type_id=\(CFGetTypeID(value))")
+        continue
+    }
+    print("AX_WINDOWS pid=\(pid); count=\(windows.count)")
+    visited = 0
+    for (index, window) in windows.prefix(8).enumerated() {
+        let role = textAttribute(window, "AXRole")
+        let subrole = textAttribute(window, "AXSubrole")
+        let title = textAttribute(window, "AXTitle")
+        print("AX_WINDOW pid=\(pid); index=\(index + 1); role=\(role); subrole=\(subrole); title=\(title)")
+        describe(window, 0)
+    }
+}
+"""
+
 
 class FixtureOutput:
     def __init__(self, process: subprocess.Popen[str], log_path: Path):
@@ -294,6 +391,66 @@ def capture_waiting_observation(fixture_pid: int, scenario: str, log_path: Path)
         lines.append(
             f"NFD_OBSERVATION_AX_EXIT; pid={process_id}; category={category}; "
             f"exit_code={code}; output={output[:8000]!r}"
+        )
+    remaining = deadline - time.monotonic()
+    swift_path = shutil.which("swift")
+    if swift_path and remaining > 0.5:
+        environment = os.environ.copy()
+        environment["PULSEFORGE_AX_SNAPSHOT_PIDS"] = ",".join(str(process_id) for process_id, _ in candidates)
+        try:
+            swift_process = subprocess.Popen(
+                [swift_path, "-e", SWIFT_AX_SNAPSHOT],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=environment,
+                start_new_session=True,
+            )
+            try:
+                swift_stdout, swift_stderr = swift_process.communicate(timeout=min(10.0, remaining))
+                swift_exit_code = swift_process.returncode
+                try:
+                    os.killpg(swift_process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                lines.append(
+                    f"NFD_DIRECT_AX_SNAPSHOT; exit_code={swift_exit_code}; "
+                    f"stdout={swift_stdout[:12000]!r}; stderr={swift_stderr[:2000]!r}"
+                )
+            except subprocess.TimeoutExpired as error:
+                partial_stdout = error.stdout or ""
+                partial_stderr = error.stderr or ""
+                if isinstance(partial_stdout, bytes):
+                    partial_stdout = partial_stdout.decode("utf-8", errors="replace")
+                if isinstance(partial_stderr, bytes):
+                    partial_stderr = partial_stderr.decode("utf-8", errors="replace")
+                try:
+                    os.killpg(swift_process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    swift_process.communicate(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(swift_process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        swift_process.communicate(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        lines.append("NFD_DIRECT_AX_SNAPSHOT_CHILD_CLEANUP=FAILED; process group survived SIGKILL")
+                lines.append(
+                    "NFD_DIRECT_AX_SNAPSHOT=TIMEOUT; "
+                    f"stdout={partial_stdout[:12000]!r}; stderr={partial_stderr[:2000]!r}"
+                )
+        except OSError as error:
+            lines.append(f"NFD_DIRECT_AX_SNAPSHOT=FAILED; error={type(error).__name__}: {error}")
+    elif not swift_path:
+        lines.append("NFD_DIRECT_AX_SNAPSHOT=UNAVAILABLE; reason=swift executable was not found")
+    else:
+        lines.append(
+            "NFD_DIRECT_AX_SNAPSHOT=UNAVAILABLE; "
+            "reason=observation deadline had less than 0.5 seconds remaining"
         )
     lines.append(f"NFD_WAITING_OBSERVATION_END; elapsed_seconds={time.monotonic() - started:.2f}")
     report = "\n".join(lines)
