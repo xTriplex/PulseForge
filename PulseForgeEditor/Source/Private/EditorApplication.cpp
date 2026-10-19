@@ -2445,8 +2445,7 @@ namespace
 						m_DocumentHostTabTearOffFromNativeHost
 							? ImVec2(
 								  m_DocumentHostTabTearOffTestStart.x + IO.MouseDragThreshold + 24.0f, m_DocumentHostTabTearOffTestStart.y)
-							: ImVec2(MainViewport->Pos.x + MainViewport->Size.x * 0.5f,
-								  MainViewport->Pos.y + MainViewport->Size.y * 0.75f);
+							: ImVec2(MainViewport->Pos.x + MainViewport->Size.x * 0.5f, MainViewport->Pos.y + MainViewport->Size.y * 0.75f);
 					const float DeltaX = m_DocumentHostTabTearOffTestDrop.x - m_DocumentHostTabTearOffTestStart.x;
 					const float DeltaY = m_DocumentHostTabTearOffTestDrop.y - m_DocumentHostTabTearOffTestStart.y;
 					if (DeltaX * DeltaX + DeltaY * DeltaY <= IO.MouseDragThreshold * IO.MouseDragThreshold)
