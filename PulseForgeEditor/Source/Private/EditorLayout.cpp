@@ -1,17 +1,13 @@
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
 #include "Editor/EditorLayoutSettingsPolicy.h"
+#include "Editor/EditorPlatformFileSystem.h"
 #include "Core/PlatformServices.h"
 
 #include <imgui_internal.h>
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
-
 #include <charconv>
 #include <cmath>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -25,32 +21,38 @@ namespace
 	constexpr uint32_t WorkspaceSettingsFormat = 1;
 	constexpr uintmax_t MaximumWorkspaceFileSize = 16 * 1024 * 1024;
 
-	std::expected<std::filesystem::path, std::string> GetUserWorkspacePath(bool& IsOverridden)
+	std::expected<std::filesystem::path, std::string> GetUserWorkspacePath()
 	{
-		if (const wchar_t* Override = _wgetenv(L"PULSEFORGE_EDITOR_SETTINGS_DIR"); Override && Override[0] != L'\0')
+		auto Override = PulseForgeEditor::EditorPlatformFileSystem::GetSettingsDirectoryOverride();
+		if (!Override)
+			return std::unexpected(std::move(Override.error()));
+		if (*Override)
 		{
-			IsOverridden = true;
-			std::filesystem::path Directory(Override);
+			std::filesystem::path Directory = std::move(**Override);
+			if (!Directory.is_absolute())
+				return std::unexpected("The editor settings directory override must be an absolute path");
 			std::error_code Error;
 			std::filesystem::create_directories(Directory, Error);
 			if (Error)
 				return std::unexpected("Could not create the requested editor workspace directory: " + Error.message());
-			return Directory / L"imgui.ini";
+			return Directory / "imgui.ini";
 		}
 
 		auto UserDataDirectory = PulseForge::Platform::GetUserDataDirectory();
 		if (!UserDataDirectory) return std::unexpected(UserDataDirectory.error().Message);
 
 		std::filesystem::path Directory = std::move(*UserDataDirectory);
-		Directory /= L"PulseForge";
-		Directory /= L"Editor";
+		if (!Directory.is_absolute())
+			return std::unexpected("The platform user data directory must be an absolute path");
+		Directory /= "PulseForge";
+		Directory /= "Editor";
 
 		std::error_code Error;
 		std::filesystem::create_directories(Directory, Error);
 		if (Error)
 			return std::unexpected("Could not create the PulseForge editor settings directory: " + Error.message());
 
-		return Directory / L"imgui.ini";
+		return Directory / "imgui.ini";
 	}
 
 	struct WorkspaceReadError
@@ -132,7 +134,7 @@ namespace
 	std::expected<void, std::string> WriteAtomically(const std::filesystem::path& Path, std::string_view Contents)
 	{
 		std::filesystem::path TemporaryPath = Path;
-		TemporaryPath += L".tmp";
+		TemporaryPath += ".tmp";
 
 		{
 			std::ofstream Output(TemporaryPath, std::ios::binary | std::ios::trunc);
@@ -150,13 +152,11 @@ namespace
 			}
 		}
 
-		if (!MoveFileExW(TemporaryPath.c_str(), Path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+		if (auto Replaced = PulseForgeEditor::EditorPlatformFileSystem::ReplaceFileAtomically(TemporaryPath, Path); !Replaced)
 		{
-			const DWORD ErrorCode = GetLastError();
 			std::error_code RemoveError;
 			std::filesystem::remove(TemporaryPath, RemoveError);
-			return std::unexpected("Could not replace editor workspace settings (Windows error " +
-				std::to_string(ErrorCode) + ")");
+			return std::unexpected("Could not replace editor workspace settings: " + Replaced.error());
 		}
 		return {};
 	}
@@ -174,40 +174,27 @@ namespace PulseForgeEditor
 		ImGuiIO& IO = ImGui::GetIO();
 		IO.IniFilename = nullptr;
 
-		bool IsSettingsPathOverridden = false;
-		auto SettingsPath = GetUserWorkspacePath(IsSettingsPathOverridden);
+		auto SettingsPath = GetUserWorkspacePath();
+		if (!SettingsPath)
+		{
+			m_Initialized = true;
+			return std::unexpected(std::move(SettingsPath.error()));
+		}
 		std::filesystem::path LegacyPath;
 		std::error_code CurrentPathError;
 		const std::filesystem::path CurrentDirectory = std::filesystem::current_path(CurrentPathError);
-		if (!IsSettingsPathOverridden && !CurrentPathError)
-			LegacyPath = CurrentDirectory / L"imgui.ini";
+		if (!CurrentPathError)
+			LegacyPath = CurrentDirectory / "imgui.ini";
 
 		std::filesystem::path SourcePath;
-		if (SettingsPath)
+		m_SettingsPath = *SettingsPath;
+		std::error_code ExistsError;
+		if (std::filesystem::exists(*SettingsPath, ExistsError) && !ExistsError)
+			SourcePath = *SettingsPath;
+		else if (!LegacyPath.empty() && LegacyPath != *SettingsPath && std::filesystem::exists(LegacyPath, ExistsError) && !ExistsError)
 		{
-			m_SettingsPath = *SettingsPath;
-			std::error_code ExistsError;
-			if (std::filesystem::exists(*SettingsPath, ExistsError) && !ExistsError)
-				SourcePath = *SettingsPath;
-			else if (!LegacyPath.empty() && LegacyPath != *SettingsPath && std::filesystem::exists(LegacyPath, ExistsError) && !ExistsError)
-			{
-				SourcePath = LegacyPath;
-				m_MigrateLegacySettings = true;
-			}
-		}
-		else if (!LegacyPath.empty())
-		{
-			m_SettingsPath = LegacyPath;
-			std::error_code ExistsError;
-			if (std::filesystem::exists(LegacyPath, ExistsError) && !ExistsError)
-				SourcePath = LegacyPath;
-		}
-		else
-		{
-			m_Initialized = true;
-			if (IsSettingsPathOverridden)
-				return std::unexpected(SettingsPath.error());
-			return std::unexpected(SettingsPath.error() + "; the current directory is also unavailable");
+			SourcePath = LegacyPath;
+			m_MigrateLegacySettings = true;
 		}
 
 		m_Initialized = true;

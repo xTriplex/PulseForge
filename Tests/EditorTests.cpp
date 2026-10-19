@@ -1,7 +1,65 @@
 #include "TestEditorSupport.h"
 
+#include <cstdlib>
+
 namespace
 {
+	class ScopedSettingsDirectoryOverride final
+	{
+	public:
+		explicit ScopedSettingsDirectoryOverride(const std::filesystem::path& Directory)
+		{
+#ifdef _WIN32
+			if (const wchar_t* Existing = _wgetenv(L"PULSEFORGE_EDITOR_SETTINGS_DIR"))
+				m_PreviousValue = Existing;
+			m_Succeeded = _wputenv_s(L"PULSEFORGE_EDITOR_SETTINGS_DIR", Directory.native().c_str()) == 0;
+#else
+			if (const char* Existing = std::getenv("PULSEFORGE_EDITOR_SETTINGS_DIR"))
+				m_PreviousValue = Existing;
+			m_Succeeded = setenv("PULSEFORGE_EDITOR_SETTINGS_DIR", Directory.native().c_str(), 1) == 0;
+#endif
+		}
+
+		~ScopedSettingsDirectoryOverride()
+		{
+#ifdef _WIN32
+			(void)_wputenv_s(L"PULSEFORGE_EDITOR_SETTINGS_DIR", m_PreviousValue ? m_PreviousValue->c_str() : L"");
+#else
+			if (m_PreviousValue)
+				(void)setenv("PULSEFORGE_EDITOR_SETTINGS_DIR", m_PreviousValue->c_str(), 1);
+			else
+				(void)unsetenv("PULSEFORGE_EDITOR_SETTINGS_DIR");
+#endif
+		}
+
+		[[nodiscard]] bool Succeeded() const noexcept { return m_Succeeded; }
+
+	private:
+#ifdef _WIN32
+		std::optional<std::wstring> m_PreviousValue;
+#else
+		std::optional<std::string> m_PreviousValue;
+#endif
+		bool m_Succeeded = false;
+	};
+
+	class ScopedCurrentDirectory final
+	{
+	public:
+		explicit ScopedCurrentDirectory(const std::filesystem::path& Path) : m_Previous(std::filesystem::current_path())
+		{
+			std::filesystem::current_path(Path);
+		}
+		~ScopedCurrentDirectory()
+		{
+			std::error_code Error;
+			std::filesystem::current_path(m_Previous, Error);
+		}
+
+	private:
+		std::filesystem::path m_Previous;
+	};
+
 	void TestEditorWorkspacePanelState(TestRunner& Tests)
 	{
 		using namespace PulseForgeEditor;
@@ -202,9 +260,10 @@ namespace
 		if (!TestID) return;
 
 		std::error_code Error;
-		const std::filesystem::path SettingsDirectory =
+		const std::filesystem::path TestRoot =
 			std::filesystem::temp_directory_path() / ("PulseForgeEditorLayoutPreference_" + TestID->ToString());
-		const bool DirectoryCreated = std::filesystem::create_directory(SettingsDirectory, Error);
+		const std::filesystem::path SettingsDirectory = TestRoot / std::filesystem::u8path("settings café with spaces");
+		const bool DirectoryCreated = std::filesystem::create_directories(SettingsDirectory, Error);
 		PF_CHECK(Tests, DirectoryCreated && !Error);
 		if (!DirectoryCreated || Error) return;
 		struct ScopedDirectoryCleanup
@@ -215,23 +274,11 @@ namespace
 				std::error_code CleanupError;
 				std::filesystem::remove_all(Path, CleanupError);
 			}
-		} Cleanup{ SettingsDirectory };
+		} Cleanup{ TestRoot };
 
-		const wchar_t* ExistingSettingsDirectory = _wgetenv(L"PULSEFORGE_EDITOR_SETTINGS_DIR");
-		const std::optional<std::wstring> PreviousSettingsDirectory =
-			ExistingSettingsDirectory ? std::optional<std::wstring>(ExistingSettingsDirectory) : std::nullopt;
-		const std::wstring SettingsDirectoryValue = SettingsDirectory.native();
-		const errno_t EnvironmentResult = _wputenv_s(L"PULSEFORGE_EDITOR_SETTINGS_DIR", SettingsDirectoryValue.c_str());
-		PF_CHECK(Tests, EnvironmentResult == 0);
-		if (EnvironmentResult != 0) return;
-		struct ScopedSettingsEnvironment
-		{
-			std::optional<std::wstring> PreviousValue;
-			~ScopedSettingsEnvironment()
-			{
-				(void)_wputenv_s(L"PULSEFORGE_EDITOR_SETTINGS_DIR", PreviousValue ? PreviousValue->c_str() : L"");
-			}
-		} EnvironmentCleanup{ PreviousSettingsDirectory };
+		ScopedSettingsDirectoryOverride EnvironmentCleanup(SettingsDirectory);
+		PF_CHECK(Tests, EnvironmentCleanup.Succeeded());
+		if (!EnvironmentCleanup.Succeeded()) return;
 
 		struct ScopedImGuiContext
 		{
@@ -244,7 +291,7 @@ namespace
 			}
 		};
 
-		const std::filesystem::path SettingsFile = SettingsDirectory / L"imgui.ini";
+		const std::filesystem::path SettingsFile = SettingsDirectory / "imgui.ini";
 		{
 			ScopedImGuiContext Context;
 			PF_CHECK(Tests, Context.Context != nullptr);
@@ -315,6 +362,112 @@ namespace
 				PF_CHECK(Tests, Layout.GetDocumentOpeningPreference() == DefaultDocumentOpeningPreference);
 				PF_CHECK(Tests, Layout.IsPanelVisible(EditorPanel::Hierarchy));
 			}
+		}
+	}
+
+	void TestEditorLayoutSettingsLocationAndLegacyMigration(TestRunner& Tests)
+	{
+		using namespace PulseForgeEditor;
+		const auto TestID = PulseForge::UUID::Generate();
+		PF_CHECK(Tests, TestID.has_value());
+		if (!TestID) return;
+
+		std::error_code Error;
+		const std::filesystem::path Root = std::filesystem::temp_directory_path(Error) /
+			("PulseForgeEditorSettingsLocation_" + TestID->ToString());
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		std::filesystem::create_directories(Root, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup()
+			{
+				std::error_code Error;
+				std::filesystem::remove_all(Path, Error);
+			}
+		} RemoveRoot{ Root };
+
+		const std::filesystem::path WorkingDirectory = Root / "working directory";
+		const std::filesystem::path SettingsDirectory = Root / std::filesystem::u8path("settings café with spaces");
+		std::filesystem::create_directories(WorkingDirectory, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		std::filesystem::create_directories(SettingsDirectory, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+
+		ScopedCurrentDirectory CurrentDirectory(WorkingDirectory);
+		const std::filesystem::path LegacySettingsPath = WorkingDirectory / "imgui.ini";
+		const std::string LegacySettings = "[PulseForgeWorkspace][State]\nStateFormat=1\nDocumentOpeningPreference=2\n";
+		{
+			std::ofstream LegacyOutput(LegacySettingsPath, std::ios::binary | std::ios::trunc);
+			LegacyOutput.write(LegacySettings.data(), static_cast<std::streamsize>(LegacySettings.size()));
+			PF_CHECK(Tests, static_cast<bool>(LegacyOutput));
+		}
+
+		struct ScopedImGuiContext
+		{
+			ImGuiContext* Previous = ImGui::GetCurrentContext();
+			ImGuiContext* Context = ImGui::CreateContext();
+			~ScopedImGuiContext()
+			{
+				if (Context) ImGui::DestroyContext(Context);
+				ImGui::SetCurrentContext(Previous);
+			}
+		};
+
+		{
+			ScopedSettingsDirectoryOverride Environment(SettingsDirectory);
+			PF_CHECK(Tests, Environment.Succeeded());
+			if (!Environment.Succeeded()) return;
+			ScopedImGuiContext Context;
+			PF_CHECK(Tests, Context.Context != nullptr);
+			if (!Context.Context) return;
+
+			EditorLayout Layout;
+			const auto Initialized = Layout.Initialize();
+			PF_CHECK(Tests, Initialized.has_value());
+			if (!Initialized) return;
+			PF_CHECK(Tests, Layout.GetDocumentOpeningPreference() == 2);
+			const std::filesystem::path ProjectWorkspacePath = Layout.GetDocumentWorkspacePath("project-id");
+			PF_CHECK(Tests, ProjectWorkspacePath == SettingsDirectory / "documents-project-id.json");
+			PF_CHECK(Tests, Layout.SaveNow().has_value());
+			PF_CHECK(Tests, std::filesystem::exists(SettingsDirectory / "imgui.ini"));
+		}
+		{
+			std::ifstream LegacyInput(LegacySettingsPath, std::ios::binary);
+			const std::string Preserved{ std::istreambuf_iterator<char>(LegacyInput), std::istreambuf_iterator<char>() };
+			PF_CHECK(Tests, Preserved == LegacySettings);
+		}
+
+		const std::filesystem::path InvalidSettingsDirectory = Root / "not-a-directory";
+		{
+			std::ofstream Blocker(InvalidSettingsDirectory, std::ios::binary | std::ios::trunc);
+			Blocker << "file blocks directory creation";
+			PF_CHECK(Tests, static_cast<bool>(Blocker));
+		}
+		{
+			ScopedSettingsDirectoryOverride Environment(InvalidSettingsDirectory);
+			PF_CHECK(Tests, Environment.Succeeded());
+			if (!Environment.Succeeded()) return;
+			ScopedImGuiContext Context;
+			PF_CHECK(Tests, Context.Context != nullptr);
+			if (!Context.Context) return;
+
+			EditorLayout Layout;
+			const auto Initialized = Layout.Initialize();
+			PF_CHECK(Tests, !Initialized);
+			PF_CHECK(Tests, Layout.GetDocumentWorkspacePath("project-id").empty());
+			PF_CHECK(Tests, Layout.GetDocumentOpeningPreference() == DefaultDocumentOpeningPreference);
+			PF_CHECK(Tests, !Layout.SaveNow());
+		}
+		{
+			std::ifstream LegacyInput(LegacySettingsPath, std::ios::binary);
+			const std::string Preserved{ std::istreambuf_iterator<char>(LegacyInput), std::istreambuf_iterator<char>() };
+			PF_CHECK(Tests, Preserved == LegacySettings);
 		}
 	}
 
@@ -672,6 +825,7 @@ void RunEditorTests(TestRunner& Tests)
 	TestEditorAssetDestinationPolicy(Tests);
 	TestEditorAssetSelectorPolicy(Tests);
 	TestEditorLayoutOpeningPreferencePersistence(Tests);
+	TestEditorLayoutSettingsLocationAndLegacyMigration(Tests);
 	TestEditorWorkspaceViewHelpers(Tests);
 	TestEditorFontAndIconDescriptors(Tests);
 	TestEditorImGuiRendererMath(Tests);
