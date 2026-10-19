@@ -4,6 +4,7 @@
 
 #include "Core/Application.h"
 
+#include <imgui.h>
 
 #include <fstream>
 #include <limits>
