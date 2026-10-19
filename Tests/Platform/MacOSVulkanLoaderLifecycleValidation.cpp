@@ -40,13 +40,16 @@ int main()
 {
 	std::cerr << "loader lifecycle stage: begin" << std::endl;
 	const char* ExistingSdkValue = std::getenv("VULKAN_SDK");
+	std::cerr << "loader lifecycle stage: read SDK environment" << std::endl;
 	const std::string ExistingSdk = ExistingSdkValue ? ExistingSdkValue : "";
+	std::cerr << "loader lifecycle stage: copy SDK environment" << std::endl;
 	const bool HadSdkValue = ExistingSdkValue != nullptr;
 	if (setenv("VULKAN_SDK", "/path/that/does/not/exist", 1) != 0)
 	{
 		std::cerr << "Could not set the isolated loader-failure test environment" << '\n';
 		return 1;
 	}
+	std::cerr << "loader lifecycle stage: set invalid SDK environment" << std::endl;
 	try
 	{
 		PulseForge::GLFWWindow InvalidLoaderWindow(PulseForge::WindowProps(
