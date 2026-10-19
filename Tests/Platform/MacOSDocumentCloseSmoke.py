@@ -1,0 +1,665 @@
+#!/usr/bin/env python3
+"""Exercise document-close decisions through native macOS and OS pointer input."""
+
+from __future__ import annotations
+
+import argparse
+from collections import deque
+import math
+import os
+import queue
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+MAX_LOG_BYTES = 128 * 1024
+MAX_CONSOLE_BYTES = 48 * 1024
+MAX_EVENT_COUNT = 128
+FIXTURE_TITLE = "Host Test Fixture 1"
+MAIN_TITLE_FRAGMENT = "PulseForge Editor"
+SCENARIOS = ("cancel-save", "discard", "save-retry", "close-retry")
+TCC_DENIALS = ("not allowed assistive access", "not authorized to send apple events", "(-1719)", "(-1743)")
+POINT = re.compile(r"^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$")
+
+WINDOW_QUERY = '''on run argv
+    set targetPID to item 1 of argv as integer
+    set expectedTitle to item 2 of argv as text
+    tell application "System Events"
+        set targetProcess to first process whose unix id is targetPID
+        set processName to name of targetProcess as text
+        tell targetProcess
+            set matches to {}
+            repeat with windowIndex from 1 to count of windows
+                set targetWindow to window windowIndex
+                if (name of targetWindow as text) is expectedTitle then
+                    set closeControl to value of attribute "AXCloseButton" of targetWindow
+                    if closeControl is missing value then error "AXCloseButton is missing on " & expectedTitle
+                    set closeActions to actions of closeControl
+                    if not (closeActions contains "AXPress") then error "AXCloseButton does not support AXPress on " & expectedTitle
+                    set end of matches to windowIndex as text
+                end if
+            end repeat
+        end tell
+        set AppleScript's text item delimiters to ","
+        set matchList to matches as text
+        set AppleScript's text item delimiters to ""
+        return processName & linefeed & matchList
+    end tell
+end run
+'''
+
+PRESS_HOST_CLOSE = '''on run argv
+    set targetPID to item 1 of argv as integer
+    set expectedTitle to item 2 of argv as text
+    tell application "System Events"
+        set targetProcess to first process whose unix id is targetPID
+        tell targetProcess
+            set matchingWindow to missing value
+            repeat with targetWindow in windows
+                if (name of targetWindow as text) is expectedTitle then
+                    if matchingWindow is not missing value then error "Native fixture window title is not unique"
+                    set matchingWindow to targetWindow
+                end if
+            end repeat
+            if matchingWindow is missing value then error "Native fixture window disappeared: " & expectedTitle
+            set closeControl to value of attribute "AXCloseButton" of matchingWindow
+            if closeControl is missing value then error "AXCloseButton is missing on " & expectedTitle
+            perform action "AXPress" of closeControl
+            return "MACOS_DOC_CLOSE_AX_PRESS=PASS; pid=" & (targetPID as text) & "; window=" & expectedTitle
+        end tell
+    end tell
+end run
+'''
+
+POINTER_CLICK = '''on run argv
+    set targetPID to item 1 of argv as integer
+    set clickX to item 2 of argv as integer
+    set clickY to item 3 of argv as integer
+    tell application "System Events"
+        set targetProcess to first process whose unix id is targetPID
+        set frontmost of targetProcess to true
+        click at {clickX, clickY}
+        return "MACOS_DOC_CLOSE_POINTER_CLICK=PASS; pid=" & (targetPID as text) & "; x=" & (clickX as text) & "; y=" & (clickY as text)
+    end tell
+end run
+'''
+
+MAIN_WINDOW_CLOSE = '''on run argv
+    set targetPID to item 1 of argv as integer
+    set expectedFragment to item 2 of argv as text
+    tell application "System Events"
+        set targetProcess to first process whose unix id is targetPID
+        tell targetProcess
+            set matches to {}
+            repeat with targetWindow in windows
+                set windowTitle to name of targetWindow as text
+                if windowTitle contains expectedFragment then set end of matches to targetWindow
+            end repeat
+            if (count of matches) is not 1 then error "Expected one main PulseForge Editor window for PID " & (targetPID as text)
+            set closeControl to value of attribute "AXCloseButton" of item 1 of matches
+            if closeControl is missing value then error "Main editor AXCloseButton is missing"
+            perform action "AXPress" of closeControl
+            return "MACOS_DOC_CLOSE_MAIN_AX_PRESS=PASS; pid=" & (targetPID as text)
+        end tell
+    end tell
+end run
+'''
+
+
+class BoundedCapture:
+    def __init__(self, process: subprocess.Popen[str], log_path: Path) -> None:
+        self.process = process
+        self.log_path = log_path
+        self.events: queue.Queue[dict[str, str]] = queue.Queue(maxsize=MAX_EVENT_COUNT)
+        self.pending: deque[dict[str, str]] = deque(maxlen=MAX_EVENT_COUNT)
+        self.buffer = bytearray()
+        self.console_bytes = 0
+        self.log_truncated = False
+        self.console_truncated = False
+        self.reader_error: str | None = None
+        self.thread = threading.Thread(target=self._read, name="PulseForge close-smoke output", daemon=True)
+        self.thread.start()
+
+    def _read(self) -> None:
+        assert self.process.stdout is not None
+        try:
+            for line in self.process.stdout:
+                encoded = line.encode("utf-8", errors="replace")
+                remaining = MAX_LOG_BYTES - len(self.buffer)
+                if remaining > 0:
+                    self.buffer.extend(encoded[:remaining])
+                if len(encoded) > remaining:
+                    self.log_truncated = True
+
+                if self.console_bytes < MAX_CONSOLE_BYTES:
+                    visible = encoded[: MAX_CONSOLE_BYTES - self.console_bytes]
+                    sys.stdout.write(visible.decode("utf-8", errors="replace"))
+                    sys.stdout.flush()
+                    self.console_bytes += len(visible)
+                    if len(visible) < len(encoded):
+                        self.console_truncated = True
+                else:
+                    self.console_truncated = True
+
+                marker = parse_marker(line.rstrip("\r\n"))
+                if marker is not None:
+                    try:
+                        self.events.put_nowait(marker)
+                    except queue.Full as error:
+                        raise RuntimeError("editor emitted more than 128 unconsumed close-fixture markers") from error
+        except Exception as error:
+            self.reader_error = f"{type(error).__name__}: {error}"
+        finally:
+            try:
+                marker = b"\n[output truncated at 128 KiB]\n" if self.log_truncated else b""
+                self.log_path.write_bytes(self.buffer[: MAX_LOG_BYTES - len(marker)] + marker)
+                if self.console_truncated:
+                    print("\n[editor console output truncated at 48 KiB]")
+            except OSError as error:
+                self.reader_error = f"could not write bounded log {self.log_path}: {error}"
+
+
+class MarkerProtocol:
+    def __init__(self, scenario: str, host: str, asset: str, generation: int) -> None:
+        self.scenario = scenario
+        self.host = host
+        self.asset = asset
+        self.generation = generation
+        self.last_sequence = -1
+
+    @classmethod
+    def from_ready(cls, event: dict[str, str], scenario: str) -> MarkerProtocol:
+        if event.get("scenario") != scenario:
+            raise RuntimeError(f"READY scenario mismatch: {event.get('raw')!r}")
+        for key in ("host", "asset"):
+            if not event.get(key):
+                raise RuntimeError(f"READY marker omitted {key}: {event.get('raw')!r}")
+        for key in ("fixture_sessions", "fixture_hosts"):
+            if event.get(key) != "1":
+                raise RuntimeError(f"fixture must own exactly one session and host; {key}={event.get(key)!r}")
+        try:
+            generation = int(event["generation"])
+        except (KeyError, ValueError) as error:
+            raise RuntimeError(f"READY marker has invalid generation: {event.get('raw')!r}") from error
+        if generation != 0:
+            raise RuntimeError(f"fixture must begin at generation 0: {event.get('raw')!r}")
+        return cls(scenario, event["host"], event["asset"], generation)
+
+    def check_identity(self, event: dict[str, str]) -> None:
+        if event.get("scenario") != self.scenario or event.get("host") != self.host or event.get("asset") != self.asset:
+            raise RuntimeError(
+                "fixture identity changed during close interaction; "
+                f"expected scenario/host/asset={self.scenario!r}/{self.host!r}/{self.asset!r}; marker={event.get('raw')!r}"
+            )
+
+    @staticmethod
+    def marker_generation(event: dict[str, str]) -> int:
+        try:
+            return int(event["generation"])
+        except (KeyError, ValueError) as error:
+            raise RuntimeError(f"marker has invalid or missing generation: {event.get('raw')!r}") from error
+
+    def accept_prompt(self, event: dict[str, str]) -> int:
+        self.check_identity(event)
+        generation = self.marker_generation(event)
+        if generation <= self.generation:
+            raise RuntimeError(
+                f"stale prompt coordinates: generation must advance beyond {self.generation}; marker={event.get('raw')!r}"
+            )
+        self.generation = generation
+        return generation
+
+    def accept_action(self, event: dict[str, str], choice: str, expected_generation: int) -> None:
+        self.check_identity(event)
+        if event.get("choice") != choice:
+            raise RuntimeError(f"expected action {choice!r}, got {event.get('raw')!r}")
+        generation = self.marker_generation(event)
+        if generation != expected_generation or generation != self.generation:
+            raise RuntimeError(
+                f"action generation does not match the prompt/control snapshot {expected_generation}: {event.get('raw')!r}"
+            )
+        try:
+            sequence = int(event["sequence"])
+        except (KeyError, ValueError) as error:
+            raise RuntimeError(f"action marker has invalid or missing sequence: {event.get('raw')!r}") from error
+        if sequence <= self.last_sequence:
+            raise RuntimeError(
+                f"action sequence did not advance beyond {self.last_sequence}: {event.get('raw')!r}"
+            )
+        self.last_sequence = sequence
+
+    def accept_fixture(self, event: dict[str, str]) -> int:
+        self.check_identity(event)
+        generation = self.marker_generation(event)
+        if generation <= self.generation:
+            raise RuntimeError(
+                f"fixture control generation must advance beyond {self.generation}; marker={event.get('raw')!r}"
+            )
+        self.generation = generation
+        return generation
+
+    def accept_closed(self, event: dict[str, str]) -> None:
+        self.check_identity(event)
+        generation = self.marker_generation(event)
+        if generation <= self.generation:
+            raise RuntimeError(
+                f"closed marker generation must advance beyond {self.generation}; marker={event.get('raw')!r}"
+            )
+        try:
+            sequence = int(event["sequence"])
+        except (KeyError, ValueError) as error:
+            raise RuntimeError(f"closed marker has invalid or missing sequence: {event.get('raw')!r}") from error
+        if sequence != self.last_sequence:
+            raise RuntimeError(
+                f"closed marker sequence changed without another UI action; expected={self.last_sequence}; "
+                f"marker={event.get('raw')!r}"
+            )
+        self.generation = generation
+
+
+def parse_marker(line: str) -> dict[str, str] | None:
+    marker_start = line.find("PF_DOC_CLOSE_UI|")
+    if marker_start < 0:
+        return None
+    line = line[marker_start:]
+    parts = line.split("|")
+    if len(parts) < 2:
+        return {"kind": "INVALID"}
+    event = {"kind": parts[1]}
+    for field in parts[2:]:
+        key, separator, value = field.partition("=")
+        if not separator or not key or key in event:
+            return {"kind": "INVALID", "raw": line[:1024]}
+        event[key] = value
+    event["raw"] = line[:1024]
+    return event
+
+
+def run_osascript(script: str, *arguments: str, timeout: float) -> tuple[int, str]:
+    try:
+        result = subprocess.run(
+            ["/usr/bin/osascript", "-", *arguments],
+            input=script,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=max(0.1, timeout),
+            check=False,
+        )
+        return result.returncode, result.stdout[-4096:]
+    except subprocess.TimeoutExpired as error:
+        output = error.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        return 124, (output + "\nAppleScript operation timed out\n")[-4096:]
+
+
+def is_tcc_denial(output: str) -> bool:
+    lowered = output.lower()
+    return any(pattern in lowered for pattern in TCC_DENIALS)
+
+
+def stop_process_group(process: subprocess.Popen[str]) -> bool:
+    if process.poll() is not None:
+        return True
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            return False
+    return process.poll() is not None
+
+
+def bounded_timeout(deadline: float, cap: float = 8.0) -> float:
+    return max(0.1, min(cap, deadline - time.monotonic()))
+
+
+def wait_event(capture: BoundedCapture, process: subprocess.Popen[str], kind: str, scenario: str, deadline: float) -> dict[str, str]:
+    while time.monotonic() < deadline:
+        if capture.reader_error:
+            raise RuntimeError(f"editor output capture failed: {capture.reader_error}")
+        if process.poll() is not None:
+            raise RuntimeError(f"editor exited before {kind}; exit_code={process.returncode}")
+        event = None
+        for pending in tuple(capture.pending):
+            if pending.get("kind") == kind and pending.get("scenario") == scenario:
+                capture.pending.remove(pending)
+                event = pending
+                break
+        if event is None:
+            try:
+                event = capture.events.get(timeout=min(0.25, max(0.01, deadline - time.monotonic())))
+            except queue.Empty:
+                continue
+        if event.get("kind") == "FAIL":
+            raise RuntimeError(f"fixture reported failure: {event.get('raw', '<invalid marker>')}")
+        if event.get("scenario") != scenario:
+            raise RuntimeError(f"fixture marker has wrong scenario: {event.get('raw', event)!r}")
+        if event.get("kind") == kind:
+            return event
+        if event.get("kind") == "INVALID":
+            raise RuntimeError(f"malformed fixture marker: {event.get('raw', '<invalid marker>')!r}")
+        if event.get("kind") in {"READY", "PROMPT", "ACTION", "CLOSED", "PASS"}:
+            raise RuntimeError(f"unexpected {event.get('kind')} event while waiting for {kind}: {event.get('raw')!r}")
+        if event.get("kind") == "FIXTURE":
+            capture.pending = deque(
+                (pending for pending in capture.pending if pending.get("kind") != "FIXTURE"), maxlen=MAX_EVENT_COUNT
+            )
+            capture.pending.append(event)
+            continue
+        raise RuntimeError(f"unexpected marker while waiting for {kind}: {event.get('raw')!r}")
+    raise RuntimeError(f"timed out waiting for {kind} marker for {scenario}")
+
+
+def query_fixture_window(process: subprocess.Popen[str], deadline: float) -> None:
+    last_state = "not queried"
+    while time.monotonic() < deadline:
+        code, output = run_osascript(WINDOW_QUERY, str(process.pid), FIXTURE_TITLE, timeout=bounded_timeout(deadline, 4.0))
+        if code != 0:
+            if is_tcc_denial(output):
+                raise RuntimeError(f"TCC_DENIED: Accessibility authorization is required: {output.strip()}")
+            if code == 124:
+                last_state = f"Accessibility query timed out: {output.strip()}"
+                continue
+            raise RuntimeError(f"Accessibility query failed with exit code {code}: {output.strip()}")
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if len(lines) >= 2:
+            indices = [value for value in lines[1].split(",") if value]
+            if "PulseForge" not in lines[0]:
+                raise RuntimeError(f"PID {process.pid} resolves to unexpected process {lines[0]!r}")
+            if len(indices) == 1 and indices[0].isdigit():
+                return
+            last_state = f"expected exactly one {FIXTURE_TITLE!r}, observed indices {indices!r}"
+        else:
+            last_state = f"Accessibility returned incomplete window snapshot: {output.strip()!r}"
+        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+    raise RuntimeError(f"timed out locating unique native fixture window; last state: {last_state}")
+
+
+def press_native_close(process: subprocess.Popen[str], deadline: float) -> None:
+    code, output = run_osascript(PRESS_HOST_CLOSE, str(process.pid), FIXTURE_TITLE, timeout=bounded_timeout(deadline, 8.0))
+    if code != 0:
+        if is_tcc_denial(output):
+            raise RuntimeError(f"TCC_DENIED: Accessibility authorization is required: {output.strip()}")
+        raise RuntimeError(f"could not press semantic AXCloseButton; exit_code={code}; detail={output.strip()}")
+    print(output.strip())
+
+
+def parse_point(value: str, field: str) -> tuple[int, int]:
+    match = POINT.fullmatch(value)
+    if not match:
+        raise RuntimeError(f"fixture gave invalid {field} desktop-logical coordinate: {value!r}")
+    x, y = (float(match.group(1)), float(match.group(2)))
+    if not math.isfinite(x) or not math.isfinite(y):
+        raise RuntimeError(f"fixture gave non-finite {field} coordinate: {value!r}")
+    return int(round(x)), int(round(y))
+
+
+def click_point(process: subprocess.Popen[str], point: tuple[int, int], deadline: float, label: str) -> None:
+    code, output = run_osascript(
+        POINTER_CLICK, str(process.pid), str(point[0]), str(point[1]), timeout=bounded_timeout(deadline, 8.0)
+    )
+    if code != 0:
+        if is_tcc_denial(output):
+            raise RuntimeError(f"TCC_DENIED: Accessibility authorization is required for OS pointer input: {output.strip()}")
+        raise RuntimeError(f"OS pointer click for {label} failed; exit_code={code}; detail={output.strip()}")
+    print(f"MACOS_DOC_CLOSE_CLICK=PASS; control={label}; {output.strip()}")
+
+
+def get_prompt_point(event: dict[str, str], scenario: str, host: str, choice: str) -> tuple[int, int]:
+    if event.get("host") != host:
+        raise RuntimeError(f"prompt host does not match READY: {event.get('raw')!r}")
+    if event.get("scenario") != scenario:
+        raise RuntimeError(f"prompt scenario mismatch: {event.get('raw')!r}")
+    return parse_point(event.get(choice, ""), choice)
+
+
+def expect_action(
+    capture: BoundedCapture,
+    process: subprocess.Popen[str],
+    deadline: float,
+    protocol: MarkerProtocol,
+    choice: str,
+    expected_generation: int,
+    *,
+    resolved: str,
+    pending: str,
+    opened: str,
+    dirty: str,
+    value: str,
+    saved: str,
+    error: str = "",
+) -> dict[str, str]:
+    action = wait_event(capture, process, "ACTION", protocol.scenario, deadline)
+    expected = {
+        "choice": choice,
+        "resolved": resolved,
+        "pending": pending,
+        "open": opened,
+        "host_same": "1" if opened == "1" else "0",
+        "dirty": dirty,
+        "value": value,
+        "saved": saved,
+        "error": error,
+    }
+    for key, value_expected in expected.items():
+        if action.get(key) != value_expected:
+            raise RuntimeError(
+                f"unexpected {choice} state for {protocol.scenario}: field {key} expected {value_expected!r}, "
+                f"got {action.get(key)!r}; marker={action.get('raw')!r}"
+            )
+    protocol.accept_action(action, choice, expected_generation)
+    return action
+
+
+def require_pass(capture: BoundedCapture, process: subprocess.Popen[str], deadline: float, protocol: MarkerProtocol) -> None:
+    event = wait_event(capture, process, "PASS", protocol.scenario, deadline)
+    protocol.check_identity(event)
+    if event.get("scenario") != protocol.scenario:
+        raise RuntimeError(f"unexpected PASS marker: {event.get('raw')!r}")
+
+
+def run_decisions(process: subprocess.Popen[str], capture: BoundedCapture, scenario: str, deadline: float) -> None:
+    ready = wait_event(capture, process, "READY", scenario, deadline)
+    if (ready.get("saved"), ready.get("value"), ready.get("dirty")) != ("10", "20", "1"):
+        raise RuntimeError(f"fixture READY state mismatch: {ready.get('raw')!r}")
+    protocol = MarkerProtocol.from_ready(ready, scenario)
+    host = protocol.host
+    print(f"MACOS_DOC_CLOSE_READY=PASS; scenario={scenario}; host={host}; asset={protocol.asset}")
+    query_fixture_window(process, deadline)
+
+    press_native_close(process, deadline)
+    prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
+    prompt_generation = protocol.accept_prompt(prompt)
+
+    if scenario == "cancel-save":
+        click_point(process, get_prompt_point(prompt, scenario, host, "cancel"), deadline, "Cancel")
+        expect_action(capture, process, deadline, protocol, "cancel", prompt_generation, resolved="1", pending="0", opened="1", dirty="1", value="20", saved="10")
+        press_native_close(process, deadline)
+        prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
+        prompt_generation = protocol.accept_prompt(prompt)
+        click_point(process, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save")
+        expect_action(capture, process, deadline, protocol, "save", prompt_generation, resolved="1", pending="0", opened="0", dirty="0", value="20", saved="20")
+    elif scenario == "discard":
+        click_point(process, get_prompt_point(prompt, scenario, host, "discard"), deadline, "Discard")
+        expect_action(capture, process, deadline, protocol, "discard", prompt_generation, resolved="1", pending="0", opened="0", dirty="0", value="10", saved="10")
+    elif scenario == "save-retry":
+        click_point(process, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (expected failure)")
+        expect_action(
+            capture, process, deadline, protocol, "save", prompt_generation, resolved="0", pending="1", opened="1", dirty="1", value="20", saved="10",
+            error="The%20document%20could%20not%20be%20saved%3B%20it%20remains%20open.",
+        )
+        prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
+        prompt_generation = protocol.accept_prompt(prompt)
+        click_point(process, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (retry)")
+        expect_action(capture, process, deadline, protocol, "save", prompt_generation, resolved="1", pending="0", opened="0", dirty="0", value="20", saved="20")
+    elif scenario == "close-retry":
+        click_point(process, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (expected close preflight failure)")
+        expect_action(
+            capture, process, deadline, protocol, "save", prompt_generation, resolved="0", pending="1", opened="1", dirty="0", value="20", saved="20",
+            error="The%20Debug%20fixture%20is%20configured%20to%20reject%20close.",
+        )
+        prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
+        prompt_generation = protocol.accept_prompt(prompt)
+        click_point(process, get_prompt_point(prompt, scenario, host, "cancel"), deadline, "Cancel pending close")
+        expect_action(capture, process, deadline, protocol, "cancel", prompt_generation, resolved="1", pending="0", opened="1", dirty="0", value="20", saved="20")
+        fixture = wait_event(capture, process, "FIXTURE", scenario, deadline)
+        fixture_generation = protocol.accept_fixture(fixture)
+        click_point(process, parse_point(fixture.get("allow_close", ""), "Allow close"), deadline, "Allow close")
+        expect_action(capture, process, deadline, protocol, "allow-close", fixture_generation, resolved="1", pending="0", opened="1", dirty="0", value="20", saved="20")
+        press_native_close(process, deadline)
+        closed = wait_event(capture, process, "CLOSED", scenario, deadline)
+        protocol.accept_closed(closed)
+        if closed.get("open") != "0" or closed.get("saved") != "20":
+            raise RuntimeError(f"clean close after preflight recovery did not preserve the saved session state: {closed.get('raw')!r}")
+    else:
+        raise RuntimeError(f"unsupported close scenario: {scenario}")
+
+    require_pass(capture, process, deadline, protocol)
+    print(f"MACOS_DOC_CLOSE_DECISION_SCENARIO=PASS; scenario={scenario}")
+
+
+def exit_normally(process: subprocess.Popen[str], deadline: float) -> None:
+    code, output = run_osascript(
+        MAIN_WINDOW_CLOSE, str(process.pid), MAIN_TITLE_FRAGMENT, timeout=bounded_timeout(deadline, 8.0)
+    )
+    if code != 0:
+        if is_tcc_denial(output):
+            raise RuntimeError(f"TCC_DENIED: Accessibility is required for normal application exit: {output.strip()}")
+        raise RuntimeError(f"could not request normal main-window close; exit_code={code}; detail={output.strip()}")
+    print(output.strip())
+    try:
+        exit_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("editor did not exit through the normal main-window close path") from error
+    if exit_code != 0:
+        raise RuntimeError(f"editor exited with status {exit_code} after normal close")
+    print(f"MACOS_DOC_CLOSE_NORMAL_EXIT=PASS; pid={process.pid}; exit_code={exit_code}")
+
+
+def remove_temporary_root(root: Path, parent: Path) -> str | None:
+    try:
+        if root.is_symlink():
+            return f"refusing to remove symlink temporary root: {root}"
+        resolved_root = root.resolve(strict=True)
+        resolved_parent = parent.resolve(strict=True)
+        if resolved_root.parent != resolved_parent or not resolved_root.name.startswith("PulseForge Document Close Ω "):
+            return f"refusing to remove unexpected temporary root: {resolved_root}"
+        shutil.rmtree(resolved_root)
+        return None
+    except OSError as error:
+        return f"could not remove temporary root {root}: {error}"
+
+
+def run_scenario(editor: Path, project: Path, log_directory: Path, scenario: str, timeout_seconds: int) -> None:
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    parent = Path(runner_temp).resolve(strict=True) if runner_temp else Path(tempfile.gettempdir()).resolve(strict=True)
+    root = Path(tempfile.mkdtemp(prefix="PulseForge Document Close Ω ", dir=parent)).resolve(strict=True)
+    work = root / "Unrelated Working Directory Ω"
+    settings = root / "Isolated Editor Settings Ω"
+    log_path = log_directory / f"macos-document-close-{scenario}.log"
+    environment = os.environ.copy()
+    environment["PULSEFORGE_EDITOR_SETTINGS_DIR"] = str(settings)
+    command = [str(editor), "--project", str(project), "--document-host-close-ui-test", scenario]
+    process: subprocess.Popen[str] | None = None
+    capture: BoundedCapture | None = None
+    failure: str | None = None
+    try:
+        work.mkdir()
+        settings.mkdir()
+        print(f"MACOS_DOC_CLOSE_COMMAND={command!r}")
+        print(f"MACOS_DOC_CLOSE_SETTINGS={settings}")
+        process = subprocess.Popen(
+            command,
+            cwd=work,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            start_new_session=True,
+        )
+        capture = BoundedCapture(process, log_path)
+        deadline = time.monotonic() + timeout_seconds
+        run_decisions(process, capture, scenario, deadline)
+        exit_normally(process, deadline)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        failure = str(error)
+    finally:
+        cleanup_failure = None
+        process_stopped = process is None or process.poll() is not None
+        if process is not None and not process_stopped:
+            process_stopped = stop_process_group(process)
+            if not process_stopped:
+                cleanup_failure = f"could not stop fixture process group PID {process.pid}"
+        if capture is not None:
+            capture.thread.join(timeout=5)
+            if capture.thread.is_alive():
+                cleanup_failure = f"editor output reader remained active after bounded process cleanup PID {process.pid}"
+            elif capture.reader_error:
+                cleanup_failure = capture.reader_error
+        if process_stopped:
+            root_failure = remove_temporary_root(root, parent) if root.exists() else None
+        else:
+            root_failure = f"preserved temporary root because fixture process group may still be active: {root}"
+        if cleanup_failure:
+            failure = f"{failure}; {cleanup_failure}" if failure else cleanup_failure
+        if root_failure:
+            failure = f"{failure}; {root_failure}" if failure else root_failure
+    if failure:
+        detail = f"; log={log_path}"
+        if log_path.is_file():
+            detail += "\n" + log_path.read_text(encoding="utf-8", errors="replace")
+        raise RuntimeError(f"{scenario}: {failure}{detail}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--editor", required=True, type=Path)
+    parser.add_argument("--project", required=True, type=Path)
+    parser.add_argument("--log-directory", required=True, type=Path)
+    parser.add_argument("--timeout-seconds", type=int, default=180)
+    args = parser.parse_args()
+    if args.timeout_seconds <= 0:
+        print("macOS document-close smoke failed: timeout must be positive", file=sys.stderr)
+        return 1
+    try:
+        editor = args.editor.resolve(strict=True)
+        project = args.project.resolve(strict=True)
+        if not editor.is_file() or not os.access(editor, os.X_OK):
+            raise RuntimeError(f"editor executable is missing or not executable: {editor}")
+        if not project.is_file() or project.suffix != ".pfproj":
+            raise RuntimeError(f"project fixture is missing or invalid: {project}")
+        args.log_directory.mkdir(parents=True, exist_ok=True)
+        for scenario in SCENARIOS:
+            run_scenario(editor, project, args.log_directory, scenario, args.timeout_seconds)
+            print(f"MACOS_DOC_CLOSE_SCENARIO=PASS; scenario={scenario}")
+    except (OSError, RuntimeError) as error:
+        print(f"macOS document-close smoke failed: {error}", file=sys.stderr)
+        return 1
+    print(
+        "MACOS_DOCUMENT_CLOSE_SMOKE=PASS; native close requests used Accessibility and modal decisions used OS pointer input; "
+        "synthetic input only, not physical pointer acceptance"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
