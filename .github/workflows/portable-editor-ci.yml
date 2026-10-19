@@ -78,11 +78,31 @@ jobs:
             PulseForgeNativeDialogValidation 2>&1 |
             tee "$RUNNER_TEMP/macos-build.log"
 
+      - name: Inspect loader lifecycle executable dependencies before environment isolation
+        run: |
+          set -o pipefail
+          LIFECYCLE_EXECUTABLE="$GITHUB_WORKSPACE/Build/CI/macos-renderer/PulseForgeMacOSVulkanLoaderLifecycleValidation"
+          otool -L "$LIFECYCLE_EXECUTABLE" | tee "$RUNNER_TEMP/macos-loader-lifecycle-otool.log"
+          if grep -E 'libvulkan|MoltenVK' "$RUNNER_TEMP/macos-loader-lifecycle-otool.log"; then
+            echo "The lifecycle test has a startup dependency on the Vulkan SDK; its sanitized child would fail before main." >&2
+            exit 1
+          fi
+          for LOADER in "$VULKAN_SDK/lib/libvulkan.1.dylib" "$VULKAN_SDK/lib/libvulkan.dylib"; do
+            if [ -e "$LOADER" ]; then
+              otool -L "$LOADER" | tee -a "$RUNNER_TEMP/macos-loader-lifecycle-otool.log"
+            fi
+          done
+
       - name: Run registered macOS CPU and editor tests
         run: |
           set -o pipefail
           ctest --test-dir Build/CI/macos-renderer --output-on-failure --verbose -LE 'gpu|policy' 2>&1 |
             tee "$RUNNER_TEMP/macos-cpu-ctest.log"
+          grep -Eq 'MACOS_DYLD_ABSOLUTE_DLOPEN_PROBE .*load=success; symbol=success;.*same_image=false; sdk_image=true' \
+            "$RUNNER_TEMP/macos-cpu-ctest.log"
+          grep -q 'MACOS_VULKAN_LOADER_SANITIZED_ENV=PASS' "$RUNNER_TEMP/macos-cpu-ctest.log"
+          grep -q 'MACOS_VULKAN_LOADER_EMPTY_SDK_FAILURE=PASS' "$RUNNER_TEMP/macos-cpu-ctest.log"
+          grep -q 'DYLD_LIBRARY_PATH may have selected a different Vulkan loader' "$RUNNER_TEMP/macos-cpu-ctest.log"
 
       - name: Run the required PulseForge renderer policy and sensitivity fixtures
         run: |
@@ -153,6 +173,7 @@ jobs:
             ${{ runner.temp }}/moltenvk-capabilities.log
             ${{ runner.temp }}/macos-configure.log
             ${{ runner.temp }}/macos-build.log
+            ${{ runner.temp }}/macos-loader-lifecycle-otool.log
             ${{ runner.temp }}/macos-cpu-ctest.log
             ${{ runner.temp }}/macos-renderer-ctest.log
             ${{ runner.temp }}/macos-bundle-smoke.log

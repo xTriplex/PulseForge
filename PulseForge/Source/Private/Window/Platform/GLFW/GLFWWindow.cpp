@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
+#include <string>
+#include <system_error>
 
 #if defined(__APPLE__)
 	#include <dlfcn.h>
@@ -24,6 +26,23 @@ namespace PulseForge
 	static PFN_vkGetInstanceProcAddr s_VulkanLoaderProcAddress = nullptr;
 	static bool s_GLFWInitUsesVulkanLoader = false;
 
+	struct ScopedMacOSVulkanLibrary
+	{
+		explicit ScopedMacOSVulkanLibrary(void* Library) noexcept : Handle(Library) {}
+		~ScopedMacOSVulkanLibrary() { if (Handle) dlclose(Handle); }
+		ScopedMacOSVulkanLibrary(const ScopedMacOSVulkanLibrary&) = delete;
+		ScopedMacOSVulkanLibrary& operator=(const ScopedMacOSVulkanLibrary&) = delete;
+
+		[[nodiscard]] void* Release() noexcept
+		{
+			void* Library = Handle;
+			Handle = nullptr;
+			return Library;
+		}
+
+		void* Handle = nullptr;
+	};
+
 	static void ResetMacOSVulkanLoader() noexcept
 	{
 		glfwInitVulkanLoader(nullptr);
@@ -36,16 +55,62 @@ namespace PulseForge
 		s_GLFWInitUsesVulkanLoader = false;
 	}
 
-	static bool TryLoadMacOSVulkanLoader(const std::filesystem::path& Path)
+	static bool TryLoadMacOSVulkanLoader(
+		const std::filesystem::path& Path,
+		bool RequireRequestedImage,
+		std::string& Diagnostic)
 	{
-		s_VulkanLoaderLibrary = dlopen(Path.c_str(), RTLD_NOW | RTLD_LOCAL);
-		if (!s_VulkanLoaderLibrary) return false;
-		s_VulkanLoaderProcAddress = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
-			dlsym(s_VulkanLoaderLibrary, "vkGetInstanceProcAddr"));
-		if (s_VulkanLoaderProcAddress) return true;
-		dlclose(s_VulkanLoaderLibrary);
-		s_VulkanLoaderLibrary = nullptr;
-		return false;
+		(void)dlerror();
+		ScopedMacOSVulkanLibrary Library(dlopen(Path.c_str(), RTLD_NOW | RTLD_LOCAL));
+		if (!Library.Handle)
+		{
+			const char* LoaderError = dlerror();
+			Diagnostic = LoaderError ? LoaderError : "dlopen failed without a diagnostic";
+			return false;
+		}
+
+		(void)dlerror();
+		PFN_vkGetInstanceProcAddr ProcAddress = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+			dlsym(Library.Handle, "vkGetInstanceProcAddr"));
+		const char* SymbolError = dlerror();
+		if (!ProcAddress || SymbolError)
+		{
+			Diagnostic = SymbolError ? SymbolError : "the loader did not export vkGetInstanceProcAddr";
+			return false;
+		}
+
+		if (RequireRequestedImage)
+		{
+			Dl_info Image{};
+			if (!dladdr(reinterpret_cast<const void*>(ProcAddress), &Image) || !Image.dli_fname)
+			{
+				Diagnostic = "dladdr could not identify the image containing vkGetInstanceProcAddr";
+				return false;
+			}
+
+			const std::string LoadedImagePath = Image.dli_fname;
+			std::error_code RequestedPathError;
+			std::error_code LoadedPathError;
+			const std::filesystem::path RequestedImage = std::filesystem::weakly_canonical(Path, RequestedPathError);
+			const std::filesystem::path LoadedImage = std::filesystem::weakly_canonical(LoadedImagePath, LoadedPathError);
+			if (RequestedPathError || LoadedPathError)
+			{
+				Diagnostic = "could not canonicalize requested image '" + Path.string() + "' or loaded image '" +
+					LoadedImagePath + "'";
+				return false;
+			}
+			if (RequestedImage != LoadedImage)
+			{
+				Diagnostic = "requested image '" + Path.string() + "' resolved to '" + LoadedImagePath +
+					"' instead; DYLD_LIBRARY_PATH may have selected a different Vulkan loader";
+				return false;
+			}
+		}
+
+		s_VulkanLoaderLibrary = Library.Release();
+		s_VulkanLoaderProcAddress = ProcAddress;
+		Diagnostic.clear();
+		return true;
 	}
 
 	static void InitializeMacOSVulkanLoader()
@@ -53,9 +118,15 @@ namespace PulseForge
 		if (const char* VulkanSdk = std::getenv("VULKAN_SDK"); VulkanSdk && VulkanSdk[0] != '\0')
 		{
 			const std::filesystem::path LibraryDirectory = std::filesystem::u8path(VulkanSdk) / "lib";
-			if (!TryLoadMacOSVulkanLoader(LibraryDirectory / "libvulkan.1.dylib") &&
-				!TryLoadMacOSVulkanLoader(LibraryDirectory / "libvulkan.dylib"))
-				throw std::runtime_error("VULKAN_SDK is set but its lib directory has no usable Vulkan loader");
+			std::string VersionedLoaderDiagnostic;
+			std::string UnversionedLoaderDiagnostic;
+			if (!TryLoadMacOSVulkanLoader(
+					LibraryDirectory / "libvulkan.1.dylib", true, VersionedLoaderDiagnostic) &&
+				!TryLoadMacOSVulkanLoader(
+					LibraryDirectory / "libvulkan.dylib", true, UnversionedLoaderDiagnostic))
+				throw std::runtime_error(
+					"VULKAN_SDK is set but no loader was loaded from that SDK. libvulkan.1.dylib: " +
+					VersionedLoaderDiagnostic + "; libvulkan.dylib: " + UnversionedLoaderDiagnostic);
 		}
 		else
 		{
@@ -67,10 +138,12 @@ namespace PulseForge
 				const std::filesystem::path BundleLoader =
 					std::filesystem::weakly_canonical(std::filesystem::u8path(ExecutablePath.c_str())).parent_path() /
 					"../Frameworks/libvulkan.1.dylib";
-				(void)TryLoadMacOSVulkanLoader(BundleLoader);
+				std::string IgnoredDiagnostic;
+				(void)TryLoadMacOSVulkanLoader(BundleLoader, false, IgnoredDiagnostic);
 			}
-			if (!s_VulkanLoaderProcAddress && !TryLoadMacOSVulkanLoader("libvulkan.1.dylib"))
-				(void)TryLoadMacOSVulkanLoader("libvulkan.dylib");
+			std::string IgnoredDiagnostic;
+			if (!s_VulkanLoaderProcAddress && !TryLoadMacOSVulkanLoader("libvulkan.1.dylib", false, IgnoredDiagnostic))
+				(void)TryLoadMacOSVulkanLoader("libvulkan.dylib", false, IgnoredDiagnostic);
 			if (!s_VulkanLoaderProcAddress)
 				throw std::runtime_error("No Vulkan loader found in the app bundle or the macOS loader search path");
 		}
