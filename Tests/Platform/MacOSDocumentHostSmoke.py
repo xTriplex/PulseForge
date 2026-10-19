@@ -95,17 +95,12 @@ MAIN_WINDOW_CLOSE = '''on run argv
             if windowTitle is not expectedWindowName then error "Main-window close target changed to " & quoted form of windowTitle
             set closeControl to value of attribute "AXCloseButton" of targetWindow
             if closeControl is missing value then error "AXCloseButton is missing for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle
-            set windowRole to role of targetWindow
-            set windowSubrole to subrole of targetWindow
-            set closeRole to role of closeControl
-            set closeSubrole to subrole of closeControl
-            if closeSubrole is not "AXCloseButton" then error "AXCloseButton resolved to subrole " & closeSubrole
             try
                 perform action "AXPress" of closeControl
             on error errorMessage number errorNumber
-                error "AXPress failed for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle & ", window role/subrole=" & windowRole & "/" & windowSubrole & ", close control role/subrole=" & closeRole & "/" & closeSubrole & ": " & errorMessage & " (" & (errorNumber as text) & ")"
+                error "AXPress failed for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle & ": " & errorMessage & " (" & (errorNumber as text) & ")"
             end try
-            return "MACOS_DOCUMENT_HOST_CLOSE_PRESS=RETURNED; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; window role/subrole=" & windowRole & "/" & windowSubrole & "; close control role/subrole=" & closeRole & "/" & closeSubrole & "; action=AXPress"
+            return "MACOS_DOCUMENT_HOST_CLOSE_PRESS=RETURNED; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; target=AXCloseButton; action=AXPress"
         end tell
     end tell
 end run
@@ -213,6 +208,32 @@ def run_osascript(
         if isinstance(output, bytes):
             output = output.decode("utf-8", errors="replace")
         return 124, output + "\nAppleScript operation timed out\n"
+
+
+def close_failure_diagnostics(
+    process_id: str,
+    window_arguments: tuple[str, str],
+    deadline: float,
+) -> list[str]:
+    diagnostics: list[str] = []
+    for label, script, timeout in (
+        ("MAIN_SHEETS", MAIN_WINDOW_SHEET_SNAPSHOT, 3.0),
+        ("CLOSE_ACTIONS", CLOSE_BUTTON_ACTIONS, 3.0),
+    ):
+        code, output = run_osascript(
+            script,
+            process_id,
+            min(timeout, max(0.1, deadline - time.monotonic())),
+            *window_arguments,
+        )
+        if code == 0:
+            result = output.strip()
+        else:
+            state = "TCC_DENIAL" if has_tcc_denial(output) else "TIMED_OUT" if code == 124 else "ERROR"
+            result = f"{label}={state}; exit_code={code}; detail={output.strip()}"
+        diagnostics.append(result)
+        print(f"MACOS_DOCUMENT_HOST_FAILURE_DIAGNOSTIC={result}")
+    return diagnostics
 
 
 def has_tcc_denial(output: str) -> bool:
@@ -385,44 +406,7 @@ def main() -> int:
         )
 
         diagnostic_arguments = (str(main_window_index), main_window_name)
-        diagnostics = (
-            ("MAIN_SHEETS", MAIN_WINDOW_SHEET_SNAPSHOT, 3.0),
-            ("CLOSE_ACTIONS", CLOSE_BUTTON_ACTIONS, 4.0),
-        )
         diagnostic_output: list[str] = []
-        for label, script, diagnostic_timeout in diagnostics:
-            query_code, query_output = run_osascript(
-                script,
-                str(process.pid),
-                min(diagnostic_timeout, max(0.1, deadline - time.monotonic())),
-                *diagnostic_arguments,
-            )
-            if query_code == 0:
-                output = query_output.strip()
-                print(output)
-                diagnostic_output.append(output)
-                if label == "CLOSE_ACTIONS" and "AXPress" not in output:
-                    stop_process_group(process)
-                    capture.thread.join(timeout=5)
-                    return fail("the semantic AXCloseButton does not expose AXPress; " + output, log_path)
-                continue
-            if has_tcc_denial(query_output):
-                stop_process_group(process)
-                capture.thread.join(timeout=5)
-                print(
-                    "MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; "
-                    f"diagnostic_stage={label}; reason=TCC denial; acceptance blocked"
-                )
-                return 77
-            status = "TIMED_OUT" if query_code == 124 else "ERROR"
-            output = query_output.strip()
-            print(
-                f"MACOS_DOCUMENT_HOST_{label}={status}; pid={process.pid}; "
-                f"window_index={main_window_index}; window={main_window_name!r}; "
-                f"exit_code={query_code}; detail={output!r}; continuing to the actual AXPress close request"
-            )
-            diagnostic_output.append(f"{label}={status}: {output}")
-
         exit_code: int | None = None
         close_code, close_output = run_osascript(
             MAIN_WINDOW_CLOSE,
@@ -434,7 +418,10 @@ def main() -> int:
             if has_tcc_denial(close_output):
                 stop_process_group(process)
                 capture.thread.join(timeout=5)
-                print("MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; native-window close request NOT RUN; acceptance blocked")
+                print(
+                    "MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; native-window close request NOT RUN; "
+                    f"reason=TCC denial; detail={close_output.strip()}; acceptance blocked"
+                )
                 return 77
             if close_code == 124:
                 try:
@@ -448,6 +435,9 @@ def main() -> int:
                         f"diagnostics={diagnostic_output!r}; detail={close_output.strip()}"
                     )
                 else:
+                    diagnostic_output = close_failure_diagnostics(
+                        str(process.pid), diagnostic_arguments, deadline
+                    )
                     stop_process_group(process)
                     capture.thread.join(timeout=5)
                     return fail(
@@ -459,6 +449,9 @@ def main() -> int:
                         log_path,
                     )
             else:
+                diagnostic_output = close_failure_diagnostics(
+                    str(process.pid), diagnostic_arguments, deadline
+                )
                 stop_process_group(process)
                 capture.thread.join(timeout=5)
                 return fail(
@@ -473,9 +466,17 @@ def main() -> int:
             if exit_code is None:
                 exit_code = process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
+            diagnostic_output = close_failure_diagnostics(
+                str(process.pid), diagnostic_arguments, deadline
+            )
             stop_process_group(process)
             capture.thread.join(timeout=5)
-            return fail("editor did not exit after the native main-window close request before timeout", log_path)
+            return fail(
+                "editor did not exit after the native main-window close request before timeout; "
+                f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
+                f"diagnostics={diagnostic_output!r}",
+                log_path,
+            )
         capture.thread.join(timeout=5)
         if capture.thread.is_alive():
             return fail("editor output reader remained active after process exit", log_path)
