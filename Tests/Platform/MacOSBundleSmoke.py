@@ -141,10 +141,24 @@ def sdk_assisted_runtime_environment() -> dict[str, str]:
     sdk = environment.get("VULKAN_SDK")
     if not sdk or not Path(sdk).is_dir():
         raise RuntimeError("relocated developer-bundle smoke requires the configured Vulkan SDK runtime")
+    icd_manifest = Path(sdk) / "share" / "vulkan" / "icd.d" / "MoltenVK_icd.json"
+    if not icd_manifest.is_file():
+        raise RuntimeError(f"relocated developer-bundle smoke requires the SDK MoltenVK ICD manifest: {icd_manifest}")
+    layer_directory = Path(sdk) / "share" / "vulkan" / "explicit_layer.d"
+    if not layer_directory.is_dir():
+        raise RuntimeError(
+            "relocated developer-bundle smoke requires the SDK validation layer directory: "
+            f"{layer_directory}"
+        )
     for name in tuple(environment):
         if name.startswith("DYLD_") or name.startswith("VK_"):
             environment.pop(name, None)
-    print("MACOS_BUNDLE_RUNTIME_CONTRACT=SDK_ASSISTED_DEVELOPER_BUNDLE; VULKAN_SDK retained; inherited DYLD/VK overrides removed")
+    environment["VK_DRIVER_FILES"] = str(icd_manifest)
+    environment["VK_LAYER_PATH"] = str(layer_directory)
+    print(
+        "MACOS_BUNDLE_RUNTIME_CONTRACT=SDK_ASSISTED_DEVELOPER_BUNDLE; VULKAN_SDK, its MoltenVK ICD, and validation "
+        "layers selected; inherited DYLD/VK overrides removed"
+    )
     return environment
 
 
