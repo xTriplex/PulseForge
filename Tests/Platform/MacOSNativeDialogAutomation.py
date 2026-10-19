@@ -21,8 +21,16 @@ TCC_DENIALS = (
     "not allowed assistive access",
     "not authorized to send apple events",
     "not permitted to send apple events",
+    "error=-1719",
+    "error=-1743",
+    "nfd_tcc_denial",
     "(-1719)",
     "(-1743)",
+)
+ACCESSIBILITY_TIMEOUTS = (
+    "nfd_accessibility_query_timeout",
+    "error=-1712",
+    "(-1712)",
 )
 
 
@@ -87,6 +95,11 @@ def fail(message: str, log_path: Path | None = None, exit_code: int = 1) -> int:
 def is_tcc_denial(output: str) -> bool:
     lowered = output.lower()
     return any(marker in lowered for marker in TCC_DENIALS)
+
+
+def is_accessibility_timeout(output: str) -> bool:
+    lowered = output.lower()
+    return any(marker in lowered for marker in ACCESSIBILITY_TIMEOUTS)
 
 
 def terminate_fixture(process: subprocess.Popen[str]) -> bool:
@@ -170,15 +183,30 @@ PANEL_READY_PROBE = '''on run argv
     tell application "System Events"
         set targetProcess to first process whose unix id is targetPID
         set processName to name of targetProcess as text
+        set foregroundState to "unavailable"
         try
-            with timeout of 2 seconds
-                set frontmost of targetProcess to true
-            end timeout
+            set foregroundProcess to first process whose frontmost is true
+            set foregroundName to name of foregroundProcess as text
+            set foregroundPID to unix id of foregroundProcess as text
+            set foregroundState to foregroundName & " (pid=" & foregroundPID & ")"
+            if foregroundPID is not (targetPID as text) then
+                try
+                    with timeout of 2 seconds
+                        set foregroundWindow to frontmost window of foregroundProcess
+                        set foregroundWindowName to name of foregroundWindow as text
+                        set foregroundWindowRole to role of foregroundWindow as text
+                        set foregroundWindowSubrole to subrole of foregroundWindow as text
+                    end timeout
+                    set foregroundState to foregroundState & "; frontmost window='" & foregroundWindowName & ¬
+                        "' | " & foregroundWindowRole & " | " & foregroundWindowSubrole
+                on error errorMessage number errorNumber
+                    set foregroundState to foregroundState & "; frontmost window query error=" & errorNumber & ": " & errorMessage
+                end try
+            end if
         on error errorMessage number errorNumber
-            error "NFD_ACCESSIBILITY_PROCESS_FAILED; pid=" & targetPID & "; process=" & processName & ¬
-                "; error=" & errorNumber & "; " & errorMessage
+            set foregroundState to "query error=" & errorNumber & ": " & errorMessage
         end try
-        set lastState to "no windows observed"
+        set lastState to "frontmost process=" & foregroundState & "; no target windows observed"
             try
                 with timeout of 2 seconds
                     set windowCount to count of windows of targetProcess
@@ -196,13 +224,19 @@ PANEL_READY_PROBE = '''on run argv
                         set windowRole to role of candidateWindow as text
                         set windowSubrole to subrole of candidateWindow as text
                     end timeout
-                    set lastState to "window " & windowIndex & " '" & windowName & "' | " & windowRole & ¬
+                    set candidateState to "window " & windowIndex & " '" & windowName & "' | " & windowRole & ¬
                         " | " & windowSubrole & " | checking expected controls"
                     with timeout of 2 seconds
                         set panelReady to my matchesDialog(candidateWindow, operation)
                     end timeout
-                    set lastState to "window " & windowIndex & " '" & windowName & "' | " & windowRole & ¬
-                        " | " & windowSubrole & " | expected buttons present=" & panelReady
+                    set candidateState to candidateState & "; expected buttons present=" & panelReady
+                    if not panelReady then
+                        with timeout of 2 seconds
+                            set controlState to my describeDialogControls(candidateWindow, operation)
+                        end timeout
+                        set candidateState to candidateState & "; " & controlState
+                    end if
+                    set lastState to lastState & " | " & candidateState
                     if panelReady then
                         set cancelActions to "unavailable"
                         set primaryActions to "unavailable"
@@ -225,13 +259,14 @@ PANEL_READY_PROBE = '''on run argv
                             "; query=window-" & windowIndex & "; state=" & lastState & ¬
                             "; error=" & errorNumber & "; " & errorMessage
                     end if
-                    set lastState to "window " & windowIndex & " query error=" & errorNumber & "; " & errorMessage
+                    set lastState to lastState & " | window " & windowIndex & " query error=" & errorNumber & "; " & errorMessage
                 end try
                 if candidateWindow is not missing value then
                     try
                         with timeout of 2 seconds
                             set sheetCount to count of sheets of candidateWindow
                         end timeout
+                        set lastState to lastState & "; window " & windowIndex & " sheets=" & sheetCount
                         repeat with sheetIndex from 1 to sheetCount
                             try
                                 with timeout of 2 seconds
@@ -240,13 +275,19 @@ PANEL_READY_PROBE = '''on run argv
                                     set sheetRole to role of candidateSheet as text
                                     set sheetSubrole to subrole of candidateSheet as text
                                 end timeout
-                                set lastState to "sheet " & sheetIndex & " '" & sheetName & "' | " & sheetRole & ¬
+                                set candidateState to "sheet " & sheetIndex & " '" & sheetName & "' | " & sheetRole & ¬
                                     " | " & sheetSubrole & " | checking expected controls"
                                 with timeout of 2 seconds
                                     set panelReady to my matchesDialog(candidateSheet, operation)
                                 end timeout
-                                set lastState to "sheet " & sheetIndex & " '" & sheetName & "' | " & sheetRole & ¬
-                                    " | " & sheetSubrole & " | expected buttons present=" & panelReady
+                                set candidateState to candidateState & "; expected buttons present=" & panelReady
+                                if not panelReady then
+                                    with timeout of 2 seconds
+                                        set controlState to my describeDialogControls(candidateSheet, operation)
+                                    end timeout
+                                    set candidateState to candidateState & "; " & controlState
+                                end if
+                                set lastState to lastState & " | " & candidateState
                                 if panelReady then
                                     set cancelActions to "unavailable"
                                     set primaryActions to "unavailable"
@@ -270,7 +311,7 @@ PANEL_READY_PROBE = '''on run argv
                                         "; state=" & lastState & "; error=" & errorNumber & "; " & errorMessage ¬
                                         number -1712
                                 end if
-                                set lastState to "sheet " & sheetIndex & " query error=" & errorNumber & "; " & errorMessage
+                                set lastState to lastState & " | sheet " & sheetIndex & " query error=" & errorNumber & "; " & errorMessage
                             end try
                         end repeat
                     on error errorMessage number errorNumber
@@ -280,7 +321,7 @@ PANEL_READY_PROBE = '''on run argv
                                 "; query=window-" & windowIndex & "/sheets; state=" & lastState & ¬
                                 "; error=" & errorNumber & "; " & errorMessage number -1712
                         end if
-                        set lastState to "window " & windowIndex & " sheets query error=" & errorNumber & "; " & errorMessage
+                        set lastState to lastState & " | window " & windowIndex & " sheets query error=" & errorNumber & "; " & errorMessage
                     end try
                 end if
             end repeat
@@ -295,27 +336,74 @@ on matchesDialog(candidateElement, operation)
         try
             set cancelButton to button "Cancel" of candidateElement
             set cancelEnabled to enabled of cancelButton
-        on error
+        on error errorMessage number errorNumber
+            if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+            if errorNumber is -1719 or errorNumber is -1743 then
+                error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+            end if
             return false
         end try
         if operation is "open-select" or operation is "open-cancel" then
             try
                 set primaryButton to button "Open" of candidateElement
                 set primaryEnabled to enabled of primaryButton
-            on error
+            on error errorMessage number errorNumber
+                if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+                if errorNumber is -1719 or errorNumber is -1743 then
+                    error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+                end if
                 return false
             end try
         else
             try
                 set primaryButton to button "Save" of candidateElement
                 set primaryEnabled to enabled of primaryButton
-            on error
+            on error errorMessage number errorNumber
+                if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+                if errorNumber is -1719 or errorNumber is -1743 then
+                    error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+                end if
                 return false
             end try
         end if
         return cancelEnabled
     end tell
 end matchesDialog
+
+on describeDialogControls(candidateElement, operation)
+    tell application "System Events"
+        set cancelState to "Cancel unavailable"
+        try
+            set cancelButton to button "Cancel" of candidateElement
+            set cancelState to "Cancel enabled=" & ((enabled of cancelButton) as text)
+            try
+                set cancelState to cancelState & "; actions=" & (actions of cancelButton as text)
+            on error errorMessage number errorNumber
+                set cancelState to cancelState & "; actions query error=" & errorNumber & ": " & errorMessage
+            end try
+        on error errorMessage number errorNumber
+            set cancelState to "Cancel query error=" & errorNumber & ": " & errorMessage
+        end try
+        if operation is "open-select" or operation is "open-cancel" then
+            set primaryName to "Open"
+        else
+            set primaryName to "Save"
+        end if
+        set primaryState to primaryName & " unavailable"
+        try
+            set primaryButton to button primaryName of candidateElement
+            set primaryState to primaryName & " enabled=" & ((enabled of primaryButton) as text)
+            try
+                set primaryState to primaryState & "; actions=" & (actions of primaryButton as text)
+            on error errorMessage number errorNumber
+                set primaryState to primaryState & "; actions query error=" & errorNumber & ": " & errorMessage
+            end try
+        on error errorMessage number errorNumber
+            set primaryState to primaryName & " query error=" & errorNumber & ": " & errorMessage
+        end try
+        return cancelState & "; " & primaryState
+    end tell
+end describeDialogControls
 '''
 
 SELECT_SCRIPT = '''on run argv
@@ -325,7 +413,6 @@ SELECT_SCRIPT = '''on run argv
     set selectedName to item 4 of argv
     tell application "System Events"
         set targetProcess to first process whose unix id is targetPID
-        set frontmost of targetProcess to true
         set dialogPanel to missing value
         repeat 100 times
             with timeout of 2 seconds
@@ -540,10 +627,21 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             if is_tcc_denial(probe_output):
                 print("NFD_UI_AUTOMATION=UNAVAILABLE; reason=macOS TCC denied Accessibility or Apple Events; native dialog cases NOT RUN")
                 return 77, probe_output
+            if is_accessibility_timeout(probe_output):
+                return 1, f"Accessibility query timed out; osascript_exit_code={probe_code}; output={probe_output!r}"
             return 1, (
                 "Accessibility snapshot query failed without an identified TCC denial; "
                 f"osascript_exit_code={probe_code}; output={probe_output!r}"
             )
+        if is_tcc_denial(probe_output):
+            if not stop_fixture(process, output_reader):
+                return 1, "fixture process group or output reader survived cleanup after an Accessibility authorization denial"
+            print("NFD_UI_AUTOMATION=UNAVAILABLE; reason=macOS TCC denied Accessibility or Apple Events; native dialog cases NOT RUN")
+            return 77, probe_output
+        if is_accessibility_timeout(probe_output):
+            if not stop_fixture(process, output_reader):
+                return 1, "fixture process group or output reader survived cleanup after an Accessibility query timeout"
+            return 1, f"Accessibility query timed out; {probe_output.strip()}"
         if probe_output.startswith(f"NFD_PANEL_READY=pid={process_id};"):
             print(probe_output)
             break
