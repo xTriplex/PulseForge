@@ -292,6 +292,7 @@ namespace PulseForge
 			nvrhi::Format NvrhiFormat = nvrhi::Format::UNKNOWN;
 			vk::PresentModeKHR PresentMode = vk::PresentModeKHR::eFifo;
 			VulkanSupport::PresentationDeviceExtensionAvailability AvailablePresentationDeviceExtensions;
+			bool PortabilitySubsetExtensionAvailable = false;
 			bool PresentationFeatureSupported = false;
 			VulkanSupport::PresentationRetirementMechanism PresentationRetirementMechanism =
 				VulkanSupport::PresentationRetirementMechanism::LegacyBestEffort;
@@ -2752,6 +2753,13 @@ namespace PulseForge
 				AppendUniqueName(m_EnabledInstanceExtensions, RequiredExtensions[Index]);
 			}
 
+			m_PortabilityEnumerationEnabled = HasName(AvailableExtensions, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+			if (m_PortabilityEnumerationEnabled)
+			{
+				AppendUniqueName(m_EnabledInstanceExtensions, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+				PF_CORE_INFO("Vulkan portability enumeration enabled");
+			}
+
 			m_DebugUtilsEnabled = HasName(AvailableExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 			if (m_DebugUtilsEnabled) AppendUniqueName(m_EnabledInstanceExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
@@ -2814,6 +2822,8 @@ namespace PulseForge
 				.setPApplicationInfo(&ApplicationInfo)
 				.setPEnabledExtensionNames(m_EnabledInstanceExtensions)
 				.setPEnabledLayerNames(m_EnabledLayers);
+			if (m_PortabilityEnumerationEnabled)
+				CreateInfo.setFlags(vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR);
 			if (m_DebugUtilsEnabled)
 				CreateInfo.setPNext(&DebugCreateInfo);
 
@@ -2852,6 +2862,8 @@ namespace PulseForge
 				return std::nullopt;
 
 			const auto Extensions = PhysicalDevice.enumerateDeviceExtensionProperties();
+			Candidate.PortabilitySubsetExtensionAvailable =
+				HasName(Extensions, "VK_KHR_portability_subset");
 			Candidate.AvailablePresentationDeviceExtensions = { HasName(Extensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME),
 				HasName(Extensions, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME),
 				HasName(Extensions, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME) };
@@ -2988,6 +3000,11 @@ namespace PulseForge
 				throw std::logic_error("Selected Vulkan presentation path does not match the queried swapchainMaintenance1 feature");
 			m_EnabledDeviceExtensions.clear();
 			AppendUniqueName(m_EnabledDeviceExtensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+			if (BestCandidate->PortabilitySubsetExtensionAvailable)
+			{
+				AppendUniqueName(m_EnabledDeviceExtensions, "VK_KHR_portability_subset");
+				PF_CORE_INFO("Vulkan portability subset enabled for selected physical device");
+			}
 			switch (m_PresentationRetirementMechanism)
 			{
 			case VulkanSupport::PresentationRetirementMechanism::KhrMaintenanceFence:
@@ -3931,6 +3948,7 @@ namespace PulseForge
 		VulkanSupport::PresentationRetirementMechanism m_PresentationRetirementMechanism =
 			VulkanSupport::PresentationRetirementMechanism::LegacyBestEffort;
 		std::vector<const char*> m_EnabledDeviceExtensions;
+		bool m_PortabilityEnumerationEnabled = false;
 		bool m_SwapchainMaintenanceFeatureEnabled = false;
 		bool m_ForceLegacyRetirementForTesting = false;
 		bool m_FirstPresentationPending = false;
