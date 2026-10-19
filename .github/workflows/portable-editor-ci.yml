@@ -20,6 +20,9 @@ jobs:
       - name: Check out sources
         uses: actions/checkout@v5
 
+      - name: Probe hosted Metal command execution
+        run: swift Tests/Platform/MacOSMetalCapabilityProbe.swift
+
       - name: Initialize the Core logging dependency
         run: git submodule update --init PulseForge/Vendor/spdlog
 
