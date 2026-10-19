@@ -2654,11 +2654,17 @@ namespace
 				const auto& Target = m_DocumentHostTabReattachInvalidDropTargets[m_DocumentHostTabReattachInvalidDropIndex];
 				const auto* Session = m_Documents.Find(m_DocumentHostTabReattachTestIdentity);
 				const bool StillInSourceHost = Session && Session->HostID == m_DocumentHostTabReattachTestSourceHostID;
-				const bool NoRegisteredStripTarget = !FindDocumentTabDropTarget(Target.Position, Target.ViewportID);
-				if (!StillInSourceHost || !NoRegisteredStripTarget)
+				const auto MatchedDropTarget = FindDocumentTabDropTarget(Target.Position, Target.ViewportID);
+				if (!StillInSourceHost || MatchedDropTarget)
 				{
 					m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
-					PF_ERROR("Document tab drag over {} changed document membership or matched a registered strip.", Target.Name);
+					m_DocumentHostTabReattachTest = false;
+					if (!StillInSourceHost)
+						PF_ERROR("Document tab drag over {} changed membership: expected host '{}', current host '{}'.", Target.Name,
+							 m_DocumentHostTabReattachTestSourceHostID, Session ? Session->HostID : "<session missing>");
+					else
+						PF_ERROR("Document tab drag over {} matched registered strip host '{}' at index {}.", Target.Name,
+							 MatchedDropTarget->first, MatchedDropTarget->second);
 					break;
 				}
 				PF_INFO("Document tab drag over {} was rejected without changing host membership.", Target.Name);
