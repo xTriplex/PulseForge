@@ -6,12 +6,12 @@ struct GLFWwindow;
 
 namespace PulseForge
 {
-	class WindowsWindow : public Window
+	class GLFWWindow : public Window
 	{
 	public:
-		WindowsWindow(const WindowProps& Props);
+		GLFWWindow(const WindowProps& Props);
 
-		virtual ~WindowsWindow();
+		virtual ~GLFWWindow();
 
 		virtual void PollEvents() override;
 		virtual void WaitEventsTimeout(double TimeoutSeconds) override;
@@ -20,7 +20,10 @@ namespace PulseForge
 		virtual unsigned int GetHeight() const override { return WindowData.Height; }
 		virtual std::pair<unsigned int, unsigned int> GetFramebufferSize() const override;
 
-		virtual void SetEventCallback(const EventCallbackFn& Callback) override { WindowData.EventCallback = Callback; }
+		virtual void SetEventCallback(const EventCallbackFn& Callback) override
+		{
+			WindowData.EventCallback = Callback ? Callback : EventCallbackFn([](Event&) {});
+		}
 
 		virtual void* GetNativeWindow() const override { return m_NativeWindow; }
 
@@ -37,9 +40,9 @@ namespace PulseForge
 			std::string Title;
 			unsigned int Width = 0;
 			unsigned int Height = 0;
-			EventCallbackFn EventCallback;
+			EventCallbackFn EventCallback = [](Event&) {};
 		};
 
 		FWindowData WindowData;
 	};
-}
+} // namespace PulseForge

@@ -18,6 +18,9 @@ file(STRINGS "${CacheFile}" TestingOptionLine REGEX "^BUILD_TESTING:BOOL=")
 if(NOT TestingOptionLine STREQUAL "BUILD_TESTING:BOOL=ON")
 	message(FATAL_ERROR "This check requires BUILD_TESTING=ON")
 endif()
+if(NOT DEFINED PULSEFORGE_TARGET_SYSTEM_NAME OR PULSEFORGE_TARGET_SYSTEM_NAME STREQUAL "")
+	message(FATAL_ERROR "PULSEFORGE_TARGET_SYSTEM_NAME must identify the configured target system")
+endif()
 
 file(STRINGS "${CacheFile}" CTestCommandLine REGEX "^CMAKE_CTEST_COMMAND:INTERNAL=")
 if(NOT CTestCommandLine MATCHES "^CMAKE_CTEST_COMMAND:INTERNAL=(.+)$")
@@ -55,8 +58,16 @@ foreach(QualityTest PulseForge.SourceQuality PulseForge.SourceQualityRules Pulse
 	endif()
 endforeach()
 
-foreach(CppTest PulseForge.Core PulseForge.Scene PulseForge.Assets PulseForge.Renderer PulseForge.AssetImports
-		PulseForge.ScriptingRuntime PulseForge.EditorCore)
+set(RequiredCppTests PulseForge.Core PulseForge.Scene PulseForge.Assets PulseForge.Renderer PulseForge.AssetImports
+	PulseForge.ScriptingRuntime)
+if(PULSEFORGE_TARGET_SYSTEM_NAME STREQUAL "Linux")
+	if(PulseForge.EditorCore IN_LIST RegisteredTests)
+		message(FATAL_ERROR "Unsupported Linux EditorCore test was registered in a runtime-only configuration")
+	endif()
+else()
+	list(APPEND RequiredCppTests PulseForge.EditorCore)
+endif()
+foreach(CppTest IN LISTS RequiredCppTests)
 	if(NOT CppTest IN_LIST RegisteredTests)
 		message(FATAL_ERROR "Quality separation removed ordinary C++ test ${CppTest}")
 	endif()

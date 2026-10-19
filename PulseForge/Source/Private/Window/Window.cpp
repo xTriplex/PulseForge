@@ -1,19 +1,19 @@
 #include "Core/Log.h"
 #include "Window/Window.h"
 
-#ifdef PF_PLATFORM_WINDOWS
-    #include "Window/Platform/Windows/WindowsWindow.h"
+#if defined(PF_PLATFORM_WINDOWS) || defined(PF_PLATFORM_LINUX)
+#include "Window/Platform/GLFW/GLFWWindow.h"
 #endif
 
 namespace PulseForge
 {
-    std::unique_ptr<Window> Window::Create(const WindowProps& Props)
-    {
-        #ifdef PF_PLATFORM_WINDOWS
-            return std::make_unique<WindowsWindow>(Props);
-        #else
-            PF_CORE_ASSERT(false, "Unknown platform!");
-            return {};
-        #endif
-    }
+	std::unique_ptr<Window> Window::Create(const WindowProps& Props)
+	{
+#if defined(PF_PLATFORM_WINDOWS) || defined(PF_PLATFORM_LINUX)
+		return std::make_unique<GLFWWindow>(Props);
+#else
+		PF_CORE_ASSERT(false, "Unknown platform!");
+		return {};
+#endif
+	}
 }

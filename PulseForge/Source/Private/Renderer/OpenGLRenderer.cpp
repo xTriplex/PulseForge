@@ -63,7 +63,7 @@ namespace PulseForge
 
 		OutputColorEncoding GetOutputColorEncoding() const noexcept override
 		{
-			// WindowsWindow requests a non-sRGB OpenGL framebuffer, and this backend never enables
+			// GLFWWindow requests a non-sRGB OpenGL framebuffer, and this backend never enables
 			// GL_FRAMEBUFFER_SRGB. Theme colors therefore reach the active target in display space.
 			return OutputColorEncoding::UnormAttachment;
 		}

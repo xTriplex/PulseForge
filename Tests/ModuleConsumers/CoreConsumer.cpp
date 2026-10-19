@@ -2,13 +2,53 @@
 #include "Core/PlatformServices.h"
 #include "Scene/UUID.h"
 
+#include <filesystem>
+#include <iostream>
 #include <sstream>
 #include <string_view>
 
-int main()
+int main(int ArgumentCount, char** Arguments)
 {
+	bool RequireDistinctWorkingDirectory = false;
+	if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--require-distinct-working-directory")
+		RequireDistinctWorkingDirectory = true;
+	else if (ArgumentCount != 1)
+	{
+		std::cerr << "Core consumer received an unsupported argument\n";
+		return 11;
+	}
+
 	const auto ExecutablePath = PulseForge::Platform::GetExecutablePath();
-	if (!ExecutablePath || ExecutablePath->empty()) return 1;
+	if (!ExecutablePath || ExecutablePath->empty())
+	{
+		std::cerr << "Core consumer could not resolve its executable path\n";
+		return 1;
+	}
+	if (!ExecutablePath->is_absolute() || ExecutablePath->filename().empty())
+	{
+		std::cerr << "Core consumer executable path must be absolute and name a file\n";
+		return 7;
+	}
+
+	std::error_code FileError;
+	if (!std::filesystem::is_regular_file(*ExecutablePath, FileError) || FileError)
+	{
+		std::cerr << "Core consumer executable path does not resolve to a regular file: " << ExecutablePath->string() << '\n';
+		return 8;
+	}
+
+	std::error_code CurrentPathError;
+	const std::filesystem::path CurrentPath = std::filesystem::current_path(CurrentPathError);
+	if (CurrentPathError)
+	{
+		std::cerr << "Core consumer could not query its current working directory: " << CurrentPathError.message() << '\n';
+		return 9;
+	}
+	if (RequireDistinctWorkingDirectory && ExecutablePath->parent_path().lexically_normal() == CurrentPath.lexically_normal())
+	{
+		std::cerr << "Core consumer expected a working directory different from its executable directory\n";
+		return 10;
+	}
 
 	const auto UserDataDirectory = PulseForge::Platform::GetUserDataDirectory();
 	if (!UserDataDirectory || UserDataDirectory->empty()) return 2;

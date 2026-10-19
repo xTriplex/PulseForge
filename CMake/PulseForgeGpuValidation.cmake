@@ -21,6 +21,13 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	target_link_libraries(PulseForgeGpuValidation PRIVATE PulseForge PulseForgeGpuValidationAnalysis)
 	add_dependencies(PulseForgeGpuValidation PulseForgeGpuValidationShaders PulseForgeSceneShaderAssets)
 	set_property(TARGET PulseForgeGpuValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGpuValidation>")
+	if(PULSEFORGE_PLATFORM_LINUX)
+		add_executable(PulseForgeLinuxWindowLifecycleValidation Tests/GpuValidation/LinuxWindowLifecycleValidation.cpp)
+		target_include_directories(PulseForgeLinuxWindowLifecycleValidation PRIVATE PulseForge/Vendor/Glfw/include)
+		target_link_libraries(PulseForgeLinuxWindowLifecycleValidation PRIVATE PulseForge glfw)
+		set_property(TARGET PulseForgeLinuxWindowLifecycleValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY
+			"$<TARGET_FILE_DIR:PulseForgeLinuxWindowLifecycleValidation>")
+	endif()
 	if(BUILD_TESTING)
 		add_test(NAME PulseForge.GPU.RGBA16F COMMAND PulseForgeGpuValidation)
 		add_test(NAME PulseForge.GPU.SceneHDR COMMAND PulseForgeGpuValidation --scene-hdr)
@@ -45,6 +52,14 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 		add_test(NAME PulseForge.GPU.PresentationFenceNativeLifetime
 			CONFIGURATIONS Debug
 			COMMAND PulseForgeGpuValidation --presentation-fence-native-lifetime)
+		if(PULSEFORGE_PLATFORM_LINUX)
+			add_test(NAME PulseForge.GPU.LinuxWindowLifecycle COMMAND PulseForgeLinuxWindowLifecycleValidation)
+			set_tests_properties(PulseForge.GPU.LinuxWindowLifecycle PROPERTIES
+				SKIP_RETURN_CODE 77
+				RUN_SERIAL TRUE
+				TIMEOUT 45
+				LABELS "gpu;renderer;linux-window")
+		endif()
 		set_tests_properties(
 			PulseForge.GPU.RGBA16F
 			PulseForge.GPU.SceneHDR

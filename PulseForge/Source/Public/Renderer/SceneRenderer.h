@@ -66,7 +66,7 @@ namespace PulseForge
 		size_t PointShadowPassCount = 0;
 		size_t PointShadowCasterDrawCount = 0;
 		uint64_t PointShadowResourceGeneration = 0;
-		PointShadowSlotOwners PointShadowSlotOwners{};
+		::PulseForge::PointShadowSlotOwners PointShadowSlotOwners{};
 	};
 
 	struct SceneRenderOutputResult
@@ -79,11 +79,11 @@ namespace PulseForge
 		size_t SpotlightShadowCasterDrawCount = 0;
 		uint64_t SpotlightShadowResourceGeneration = 0;
 		// Diagnostic ownership snapshot for the completed frame, ordered by physical shadow-map slot.
-		SpotlightShadowSlotOwners SpotlightShadowSlotOwners{};
+		::PulseForge::SpotlightShadowSlotOwners SpotlightShadowSlotOwners{};
 		size_t PointShadowPassCount = 0;
 		size_t PointShadowCasterDrawCount = 0;
 		uint64_t PointShadowResourceGeneration = 0;
-		PointShadowSlotOwners PointShadowSlotOwners{};
+		::PulseForge::PointShadowSlotOwners PointShadowSlotOwners{};
 	};
 
 	struct AmbientOcclusionSettings
