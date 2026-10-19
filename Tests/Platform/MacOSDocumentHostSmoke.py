@@ -32,13 +32,43 @@ end run
 MAIN_WINDOW_CLOSE = '''on run argv
     set targetPID to item 1 of argv as integer
     tell application "System Events"
-        tell (first process whose unix id is targetPID)
+        set targetProcess to first process whose unix id is targetPID
+        tell targetProcess
+            set processName to name
+            set exposedWindowNames to name of every window
             set editorWindows to every window whose name contains "PulseForge Editor"
-            if (count of editorWindows) is 0 then error "No PulseForge Editor top-level window was exposed"
-            set closeControl to close button of item 1 of editorWindows
+            if (count of editorWindows) is not 1 then
+                error "Expected one PulseForge Editor top-level window for PID " & (targetPID as text) & " (" & processName & "), found " & ((count of editorWindows) as text) & "; exposed windows=" & (exposedWindowNames as text)
+            end if
+
+            set targetWindow to item 1 of editorWindows
+            set windowTitle to name of targetWindow
+            set windowRole to role of targetWindow
+            set windowSubrole to subrole of targetWindow
+            try
+                set closeControl to value of attribute "AXCloseButton" of targetWindow
+            on error errorMessage number errorNumber
+                error "AXCloseButton lookup failed for PID " & (targetPID as text) & " (" & processName & "), window=" & quoted form of windowTitle & ", role=" & windowRole & ", subrole=" & windowSubrole & ", exposed windows=" & (exposedWindowNames as text) & ": " & errorMessage & " (" & (errorNumber as text) & ")"
+            end try
+            if closeControl is missing value then
+                error "AXCloseButton was missing for PID " & (targetPID as text) & " (" & processName & "), window=" & quoted form of windowTitle & ", role=" & windowRole & ", subrole=" & windowSubrole & ", exposed windows=" & (exposedWindowNames as text)
+            end if
+
+            set closeRole to role of closeControl
+            set closeSubrole to subrole of closeControl
             set availableActions to actions of closeControl
-            if availableActions does not contain "AXPress" then error "The native close control does not expose AXPress; actions=" & (availableActions as text)
-            perform action "AXPress" of closeControl
+            if closeSubrole is not "AXCloseButton" then
+                error "AXCloseButton attribute resolved to an unexpected control for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle & ", control role=" & closeRole & ", subrole=" & closeSubrole & ", actions=" & (availableActions as text)
+            end if
+            if availableActions does not contain "AXPress" then
+                error "AXCloseButton does not expose AXPress for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle & ", control role=" & closeRole & ", subrole=" & closeSubrole & ", actions=" & (availableActions as text)
+            end if
+            try
+                perform action "AXPress" of closeControl
+            on error errorMessage number errorNumber
+                error "AXPress failed for PID " & (targetPID as text) & " (" & processName & "), AXCloseButton of window " & quoted form of windowTitle & ", control role=" & closeRole & ", subrole=" & closeSubrole & ", actions=" & (availableActions as text) & ": " & errorMessage & " (" & (errorNumber as text) & ")"
+            end try
+            return "MACOS_DOCUMENT_HOST_CLOSE_CONTROL=AXPress; pid=" & (targetPID as text) & "; process=" & processName & "; window=" & quoted form of windowTitle & "; window role=" & windowRole & "; window subrole=" & windowSubrole & "; control role=" & closeRole & "; control subrole=" & closeSubrole & "; actions=" & (availableActions as text)
         end tell
     end tell
 end run
@@ -295,6 +325,7 @@ def main() -> int:
                 print("MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; native-window close request NOT RUN; acceptance blocked")
                 return 77
             return fail(f"could not request normal main-window close: {close_output.strip()}", log_path)
+        print(close_output.strip())
         try:
             exit_code = process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
