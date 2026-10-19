@@ -408,6 +408,7 @@ def main() -> int:
         diagnostic_arguments = (str(main_window_index), main_window_name)
         diagnostic_output: list[str] = []
         exit_code: int | None = None
+        time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
         close_code, close_output = run_osascript(
             MAIN_WINDOW_CLOSE,
             str(process.pid),
@@ -425,7 +426,7 @@ def main() -> int:
                 return 77
             if close_code == 124:
                 try:
-                    exit_code = process.wait(timeout=min(2.0, max(0.1, deadline - time.monotonic())))
+                    exit_code = process.wait(timeout=min(10.0, max(0.1, deadline - time.monotonic())))
                 except subprocess.TimeoutExpired:
                     exit_code = None
                 if exit_code == 0:
@@ -441,8 +442,9 @@ def main() -> int:
                     stop_process_group(process)
                     capture.thread.join(timeout=5)
                     return fail(
-                        "Accessibility AXPress timed out while the editor remained open; "
+                        "Accessibility main-window close operation timed out while the editor remained open; "
                         + f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
+                        + f"exit_code={close_code}; "
                         + repr(diagnostic_output)
                         + "; "
                         + close_output.strip(),
@@ -457,6 +459,7 @@ def main() -> int:
                 return fail(
                     "could not request normal main-window close; "
                     f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
+                    f"exit_code={close_code}; "
                     f"diagnostics={diagnostic_output!r}; detail={close_output.strip()}",
                     log_path,
                 )
