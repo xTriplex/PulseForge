@@ -9,8 +9,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <initializer_list>
 #include <span>
+#include <string_view>
 
 namespace PulseForge
 {
@@ -24,6 +26,16 @@ namespace PulseForge
 		SceneRendererError MakeShadowDrawError(std::string Message)
 		{
 			return { SceneRendererErrorCode::DrawFailed, {}, {}, std::move(Message) };
+		}
+
+		bool SuppressShadowCasterDrawsForValidation() noexcept
+		{
+#if defined(PULSEFORGE_GPU_VALIDATION_TESTS)
+			const char* Setting = std::getenv("PULSEFORGE_TEST_SUPPRESS_SHADOW_CASTER_DRAWS");
+			return Setting && std::string_view(Setting) == "1";
+#else
+			return false;
+#endif
 		}
 
 	} // namespace
@@ -105,8 +117,11 @@ namespace PulseForge
 					return std::unexpected(MakeShadowDrawError("Could not update shadow object constants: " + Update.error().Message));
 				const std::array<const BindingSet*, 2> Bindings = { *MaterialBinding, Resources.ShadowObjectBindings.get() };
 				const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
-				const GraphicsResult Draw = Resources.Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
-				if (!Draw) return std::unexpected(MakeShadowDrawError("Could not draw shadow caster: " + Draw.error().Message));
+				if (!SuppressShadowCasterDrawsForValidation())
+				{
+					const GraphicsResult Draw = Resources.Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
+					if (!Draw) return std::unexpected(MakeShadowDrawError("Could not draw shadow caster: " + Draw.error().Message));
+				}
 			}
 			const GraphicsResult End = TargetScope.End();
 			if (!End) return std::unexpected(MakeShadowDrawError("Could not end shadow cascade: " + End.error().Message));
@@ -149,9 +164,13 @@ namespace PulseForge
 						MakeShadowDrawError("Could not update spotlight shadow object constants: " + Update.error().Message));
 				const std::array<const BindingSet*, 2> Bindings = { *MaterialBinding, Resources.ShadowObjectBindings.get() };
 				const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
-				const GraphicsResult Draw = Resources.Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
-				if (!Draw) return std::unexpected(MakeShadowDrawError("Could not draw spotlight shadow caster: " + Draw.error().Message));
-				++Statistics.SpotlightCasterDrawCount;
+				if (!SuppressShadowCasterDrawsForValidation())
+				{
+					const GraphicsResult Draw = Resources.Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
+					if (!Draw)
+						return std::unexpected(MakeShadowDrawError("Could not draw spotlight shadow caster: " + Draw.error().Message));
+					++Statistics.SpotlightCasterDrawCount;
+				}
 			}
 			const GraphicsResult End = TargetScope.End();
 			if (!End) return std::unexpected(MakeShadowDrawError("Could not end spotlight shadow target: " + End.error().Message));
@@ -212,9 +231,13 @@ namespace PulseForge
 						return std::unexpected(MakeShadowDrawError("Could not update point-shadow constants: " + Update.error().Message));
 					const std::array<const BindingSet*, 2> Bindings = { *MaterialBinding, Resources.PointShadowObjectBindings.get() };
 					const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
-					const GraphicsResult Draw = Resources.Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
-					if (!Draw) return std::unexpected(MakeShadowDrawError("Could not draw point-shadow caster: " + Draw.error().Message));
-					++Statistics.PointCasterDrawCount;
+					if (!SuppressShadowCasterDrawsForValidation())
+					{
+						const GraphicsResult Draw = Resources.Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
+						if (!Draw)
+							return std::unexpected(MakeShadowDrawError("Could not draw point-shadow caster: " + Draw.error().Message));
+						++Statistics.PointCasterDrawCount;
+					}
 				}
 				const GraphicsResult End = TargetScope.End();
 				if (!End) return std::unexpected(MakeShadowDrawError("Could not end point-shadow cubemap face: " + End.error().Message));
