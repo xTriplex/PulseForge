@@ -100,9 +100,10 @@ target_compile_options(PulseForgeGlad PRIVATE
 
 if(PULSEFORGE_BUILD_EDITOR)
 	if(PULSEFORGE_PLATFORM_MACOS)
-		# NativeFileDialog's macOS adapter is Objective-C and uses Cocoa/AppKit.
-		# Enable the language explicitly; the top-level project keeps its normal C/C++ set.
-		enable_language(OBJC)
+		# NativeFileDialog calls project() in its own directory. Enable Objective-C
+		# after that call so CMake retains the language rules alongside its .m target.
+		set(CMAKE_PROJECT_nativefiledialog-extended_INCLUDE
+			"${CMAKE_CURRENT_LIST_DIR}/PulseForgeEnableNFDObjectiveC.cmake")
 	endif()
 	set(NFD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 	set(NFD_BUILD_SDL2_TESTS OFF CACHE BOOL "" FORCE)
