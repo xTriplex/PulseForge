@@ -686,11 +686,6 @@ on appendDialogChildren(parentElement, depth)
                 on error errorMessage number errorNumber
                     my classifyAccessibilityError(errorNumber, errorMessage)
                 end try
-                try
-                    set itemState to itemState & " actions=" & (actions of childElement as text)
-                on error errorMessage number errorNumber
-                    my classifyAccessibilityError(errorNumber, errorMessage)
-                end try
             end tell
         end if
         if my uiScanReport is not "" then set my uiScanReport to (my uiScanReport) & "; "
@@ -721,25 +716,28 @@ on classifyAccessibilityError(errorNumber, errorMessage)
     error "NFD_ACCESSIBILITY_QUERY_FAILED; error=" & errorNumber & "; " & errorMessage number errorNumber
 end classifyAccessibilityError
 
-on pressDialogButton(buttonElement, buttonName)
+on performDialogAction(targetElement, requestedAction, targetName)
     tell application "System Events"
-        set availableActions to "unavailable"
         try
-            set availableActions to actions of buttonElement as text
+            perform action requestedAction of targetElement
         on error errorMessage number errorNumber
-            my classifyAccessibilityError(errorNumber, errorMessage)
-            error "NFD_ACCESSIBILITY_ACTION_QUERY_FAILED; button=" & buttonName & "; " & errorMessage number errorNumber
-        end try
-        if availableActions does not contain "AXPress" then
-            error "NFD_ACCESSIBILITY_ACTION_MISSING; button=" & buttonName & "; actions=" & availableActions
-        end if
-        try
-            perform action "AXPress" of buttonElement
-        on error errorMessage number errorNumber
-            my classifyAccessibilityError(errorNumber, errorMessage)
-            error "NFD_ACCESSIBILITY_PRESS_FAILED; button=" & buttonName & "; " & errorMessage number errorNumber
+            if errorNumber is -1712 then
+                error "NFD_ACCESSIBILITY_ACTION_TIMEOUT; action=" & requestedAction & "; target=" & targetName & ¬
+                    "; error=" & errorNumber & "; " & ¬
+                    errorMessage number -1712
+            end if
+            if errorNumber is -1719 or errorNumber is -1743 then
+                error "NFD_TCC_DENIAL; action=" & requestedAction & "; target=" & targetName & "; error=" & ¬
+                    errorNumber & "; " & errorMessage number errorNumber
+            end if
+            error "NFD_ACCESSIBILITY_ACTION_FAILED; action=" & requestedAction & "; target=" & targetName & ¬
+                "; error=" & errorNumber & "; " & errorMessage number errorNumber
         end try
     end tell
+end performDialogAction
+
+on pressDialogButton(buttonElement, buttonName)
+    my performDialogAction(buttonElement, "AXPress", buttonName)
 end pressDialogButton
 '''
 
@@ -984,24 +982,24 @@ on run argv
                     end if
                     set lastState to lastState & " | " & candidateState
                     if panelReady then
-                        set cancelActions to "unavailable"
-                        set primaryActions to "unavailable"
+                        set cancelEnabledState to "unavailable"
+                        set primaryEnabledState to "unavailable"
                         try
                             with timeout of 2 seconds
                                 set cancelButton to my findDialogButton(candidateWindow, "Cancel")
-                                set cancelActions to actions of cancelButton as text
+                                set cancelEnabledState to enabled of cancelButton as text
                                 if operation is "open-select" or operation is "open-cancel" then
                                     set primaryButton to my findDialogButton(candidateWindow, "Open")
                                 else
                                     set primaryButton to my findDialogButton(candidateWindow, "Save")
                                 end if
-                                set primaryActions to actions of primaryButton as text
+                                set primaryEnabledState to enabled of primaryButton as text
                             end timeout
                         end try
                         return "NFD_PANEL_READY=pid=" & targetPID & "; panel_pid=" & panelProcessID & ¬
                             "; panel_process=" & processName & "; process=" & processName & "; " & lastState & ¬
-                            "; child-source=" & my uiChildSource & "; Cancel actions=" & cancelActions & ¬
-                            "; primary actions=" & primaryActions
+                            "; child-source=" & my uiChildSource & "; Cancel enabled=" & cancelEnabledState & ¬
+                            "; primary enabled=" & primaryEnabledState & "; AX actions are invoked and checked at interaction time"
                     end if
                 on error errorMessage number errorNumber
                     if errorNumber is -1712 then
@@ -1044,24 +1042,24 @@ on run argv
                                 end if
                                 set lastState to lastState & " | " & candidateState
                                 if panelReady then
-                                    set cancelActions to "unavailable"
-                                    set primaryActions to "unavailable"
+                                    set cancelEnabledState to "unavailable"
+                                    set primaryEnabledState to "unavailable"
                                     try
                                         with timeout of 2 seconds
                                             set cancelButton to my findDialogButton(candidateSheet, "Cancel")
-                                            set cancelActions to actions of cancelButton as text
+                                            set cancelEnabledState to enabled of cancelButton as text
                                             if operation is "open-select" or operation is "open-cancel" then
                                                 set primaryButton to my findDialogButton(candidateSheet, "Open")
                                             else
                                                 set primaryButton to my findDialogButton(candidateSheet, "Save")
                                             end if
-                                            set primaryActions to actions of primaryButton as text
+                                            set primaryEnabledState to enabled of primaryButton as text
                                         end timeout
                                     end try
                                     return "NFD_PANEL_READY=pid=" & targetPID & "; panel_pid=" & panelProcessID & ¬
                                         "; panel_process=" & processName & "; process=" & processName & "; " & lastState & ¬
-                                        "; child-source=" & my uiChildSource & "; Cancel actions=" & cancelActions & ¬
-                                        "; primary actions=" & primaryActions
+                                        "; child-source=" & my uiChildSource & "; Cancel enabled=" & cancelEnabledState & ¬
+                                        "; primary enabled=" & primaryEnabledState & "; AX actions are invoked and checked at interaction time"
                                 end if
                             on error errorMessage number errorNumber
                                 if errorNumber is -1712 then
@@ -1189,13 +1187,8 @@ on run argv
             if (value of goTextField as text) is not directoryPath then
                 error "Go to Folder field did not retain the requested Unicode directory path"
             end if
-            set goButton to my findDialogButton(goSheet, "Go")
-            if goButton is missing value then
-                set goControlState to my describeDialogControls(goSheet, "open-go")
-                error "Go to Folder confirmation button was not exposed; " & goControlState
-            end if
-            if not enabled of goButton then error "Go to Folder confirmation remained disabled"
-            my pressDialogButton(goButton, "Go")
+            if not enabled of goTextField then error "Go to Folder path field remained disabled"
+            my performDialogAction(goTextField, "AXConfirm", "Go to Folder path")
             set goSheetClosed to false
             repeat 100 times
                 try
