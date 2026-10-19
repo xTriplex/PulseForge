@@ -1224,7 +1224,8 @@ namespace PulseForge
 					AreCaseInsensitivePathComponentsEqual(SourcePath, DestinationPath) &&
 					SourcePath.filename() != DestinationPath.filename()) &&
 					!(SourcePath.parent_path() == DestinationPath.parent_path() &&
-						IsCaseOnlyFilenameAlias(SourcePath.parent_path(), SourcePath.filename(), DestinationPath.filename())))
+						IsCaseOnlyFilenameAlias(
+							Project->Root / SourcePath.parent_path(), SourcePath.filename(), DestinationPath.filename())))
 			{
 				return std::unexpected(Destination.error());
 			}
