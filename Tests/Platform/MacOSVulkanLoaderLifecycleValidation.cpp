@@ -57,7 +57,8 @@ int main()
 		PulseForge::GLFWWindow InvalidLoaderWindow(PulseForge::WindowProps(
 			"PulseForge Vulkan loader acquisition failure", 320, 240, PulseForge::EWindowStyle::Default,
 			PulseForge::EWindowClientAPI::Vulkan));
-		std::cerr << "GLFW unexpectedly accepted a Vulkan SDK path without a loader" << '\n';
+		std::cerr << "GLFW unexpectedly accepted invalid VULKAN_SDK='" << ConfiguredSdk
+			<< "'; loader proc installed=" << (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress() != nullptr) << '\n';
 		return 1;
 	}
 	catch (const std::exception&)
