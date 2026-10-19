@@ -631,7 +631,7 @@ on describeDialogControls(candidateElement, operation)
     if operation is "open-select" or operation is "open-cancel" then
         set primaryName to "Open"
     else if operation is "open-go" then
-        set primaryName to "Go"
+        set primaryName to "AXConfirm on the Go to Folder path field"
     else
         set primaryName to "Save"
     end if
@@ -673,6 +673,20 @@ on appendDialogChildren(parentElement, depth)
         end tell
         set itemState to childRole & "/" & childSubrole
         if childName is not "" then set itemState to itemState & ": name='" & childName & "'"
+        if childRole is "AXTextField" then
+            tell application "System Events"
+                try
+                    set itemState to itemState & " value='" & (value of childElement as text) & "'"
+                on error errorMessage number errorNumber
+                    my classifyAccessibilityError(errorNumber, errorMessage)
+                end try
+                try
+                    set itemState to itemState & " focused=" & (focused of childElement as text)
+                on error errorMessage number errorNumber
+                    my classifyAccessibilityError(errorNumber, errorMessage)
+                end try
+            end tell
+        end if
         if childRole is "AXButton" then
             tell application "System Events"
                 try
@@ -737,6 +751,9 @@ on performDialogAction(targetElement, requestedAction, targetName)
 end performDialogAction
 
 on pressDialogButton(buttonElement, buttonName)
+    if not enabled of buttonElement then
+        error "NFD_ACCESSIBILITY_ACTION_DISABLED; action=AXPress; button=" & buttonName
+    end if
     my performDialogAction(buttonElement, "AXPress", buttonName)
 end pressDialogButton
 '''
@@ -1190,7 +1207,7 @@ on run argv
             if not enabled of goTextField then error "Go to Folder path field remained disabled"
             my performDialogAction(goTextField, "AXConfirm", "Go to Folder path")
             set goSheetClosed to false
-            repeat 100 times
+            repeat 10 times
                 try
                     if (count of sheets of goSheetParent) is 0 then
                         set goSheetClosed to true
@@ -1199,7 +1216,40 @@ on run argv
                 end try
                 delay 0.1
             end repeat
-            if not goSheetClosed then error "Go to Folder sheet remained visible after confirmation"
+            if not goSheetClosed then
+                set sheetCount to count of sheets of goSheetParent
+                if sheetCount is not 1 then
+                    error "Go to Folder target changed after AXConfirm; expected one sheet, found " & ¬
+                        (sheetCount as text)
+                end if
+                set goSheet to sheet 1 of goSheetParent
+                set goTextField to my findDialogTextField(goSheet, 1)
+                if goTextField is missing value then error "Go to Folder path field disappeared before Return"
+                if (value of goTextField as text) is not directoryPath then
+                    error "Go to Folder path changed after AXConfirm and before Return"
+                end if
+                if not enabled of goTextField then error "Go to Folder path field was disabled before Return"
+                set focused of goTextField to true
+                if not focused of goTextField then error "Go to Folder path field did not receive Accessibility focus"
+                set frontmostProcess to first application process whose frontmost is true
+                if (unix id of frontmostProcess) is not targetPID then
+                    error "Go to Folder Return was not sent because the fixture was not frontmost"
+                end if
+                keystroke return
+                repeat 90 times
+                    try
+                        if (count of sheets of goSheetParent) is 0 then
+                            set goSheetClosed to true
+                            exit repeat
+                        end if
+                    end try
+                    delay 0.1
+                end repeat
+            end if
+            if not goSheetClosed then
+                set goControlState to my describeDialogControls(goSheet, "open-go")
+                error "Go to Folder sheet remained visible after AXConfirm and Return; " & goControlState
+            end if
             keystroke selectedName
             repeat 100 times
                 try
