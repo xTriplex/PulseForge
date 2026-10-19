@@ -117,7 +117,7 @@ namespace PulseForge
 	{
 		if (const char* VulkanSdk = std::getenv("VULKAN_SDK"); VulkanSdk && VulkanSdk[0] != '\0')
 		{
-			const std::filesystem::path LibraryDirectory = std::filesystem::u8path(VulkanSdk) / "lib";
+			const std::filesystem::path LibraryDirectory = std::filesystem::path(VulkanSdk) / "lib";
 			std::string VersionedLoaderDiagnostic;
 			std::string UnversionedLoaderDiagnostic;
 			if (!TryLoadMacOSVulkanLoader(
@@ -136,7 +136,7 @@ namespace PulseForge
 			if (PathLength > 0 && _NSGetExecutablePath(ExecutablePath.data(), &PathLength) == 0)
 			{
 				const std::filesystem::path BundleLoader =
-					std::filesystem::weakly_canonical(std::filesystem::u8path(ExecutablePath.c_str())).parent_path() /
+					std::filesystem::weakly_canonical(std::filesystem::path(ExecutablePath.c_str())).parent_path() /
 					"../Frameworks/libvulkan.1.dylib";
 				std::string IgnoredDiagnostic;
 				(void)TryLoadMacOSVulkanLoader(BundleLoader, false, IgnoredDiagnostic);
