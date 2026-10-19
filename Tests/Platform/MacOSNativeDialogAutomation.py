@@ -345,12 +345,22 @@ def _process_listing(fixture_pid: int) -> tuple[list[tuple[int, str]], str]:
     return candidates, f"NFD_OBSERVATION_SERVICE_PIDS={[process_id for process_id, _ in service_pids]}"
 
 
-def capture_waiting_observation(fixture_pid: int, scenario: str, log_path: Path) -> str:
+def capture_waiting_observation(
+    fixture_pid: int,
+    scenario: str,
+    log_path: Path,
+    after_interaction_failure: bool = False,
+) -> str:
     started = time.monotonic()
     deadline = started + OBSERVATION_TOTAL_SECONDS
+    interaction_state = (
+        "post-interaction failure; no further input or focus actions issued during observation"
+        if after_interaction_failure
+        else "no input or focus actions issued before or during observation"
+    )
     lines = [
         f"NFD_WAITING_OBSERVATION_BEGIN; scenario={scenario}; fixture_pid={fixture_pid}; "
-        "no input or focus actions issued"
+        f"state={interaction_state}"
     ]
     screenshot_path = log_path.with_name(f"native-dialog-{scenario}-observation.png")
     try:
@@ -557,9 +567,9 @@ on findDialogTextField(candidateElement, requestedIndex)
     return my findDialogElement(candidateElement, "AXTextField", "", requestedIndex, 0)
 end findDialogTextField
 
-on findDialogElement(container, requestedRole, requestedName, requestedIndex, depth)
+on findDialogElement(parentElement, requestedRole, requestedName, requestedIndex, depth)
     if depth > 8 or my uiScanVisited >= 96 then return missing value
-    set children to my dialogChildren(container)
+    set children to my dialogChildren(parentElement)
     if children is missing value then return missing value
     set childCount to count of children
     if requestedRole is "AXTextField" then
@@ -620,6 +630,8 @@ on describeDialogControls(candidateElement, operation)
     set my uiChildSource to ""
     if operation is "open-select" or operation is "open-cancel" then
         set primaryName to "Open"
+    else if operation is "open-go" then
+        set primaryName to "Go"
     else
         set primaryName to "Save"
     end if
@@ -628,9 +640,9 @@ on describeDialogControls(candidateElement, operation)
         "; expected=Cancel," & primaryName & "; controls=[" & (my uiScanReport) & "]"
 end describeDialogControls
 
-on appendDialogChildren(container, depth)
+on appendDialogChildren(parentElement, depth)
     if depth > 8 or my uiScanVisited >= 32 or (length of (my uiScanReport)) > 2600 then return
-    set children to my dialogChildren(container)
+    set children to my dialogChildren(parentElement)
     if children is missing value then return
     set childCount to count of children
     repeat with childIndex from childCount to 1 by -1
@@ -1178,7 +1190,10 @@ on run argv
                 error "Go to Folder field did not retain the requested Unicode directory path"
             end if
             set goButton to my findDialogButton(goSheet, "Go")
-            if goButton is missing value then error "Go to Folder confirmation button was not exposed"
+            if goButton is missing value then
+                set goControlState to my describeDialogControls(goSheet, "open-go")
+                error "Go to Folder confirmation button was not exposed; " & goControlState
+            end if
             if not enabled of goButton then error "Go to Folder confirmation remained disabled"
             my pressDialogButton(goButton, "Go")
             set goSheetClosed to false
@@ -1397,11 +1412,15 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
         timeout=min(30, remaining),
     )
     if automation_code != 0:
-        if not stop_fixture(process, output_reader):
-            return 1, "fixture process group or output reader survived cleanup after panel automation"
         if is_tcc_denial(automation_output):
+            if not stop_fixture(process, output_reader):
+                return 1, "fixture process group or output reader survived cleanup after the TCC denial"
             print("NFD_UI_AUTOMATION=UNAVAILABLE; reason=macOS TCC denied Accessibility or Apple Events; native dialog cases NOT RUN")
             return 77, automation_output
+        observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+        capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
+        if not stop_fixture(process, output_reader):
+            return 1, "fixture process group or output reader survived cleanup after the panel failure observation"
         return 1, f"native panel automation failed; osascript_exit_code={automation_code}; output={automation_output!r}"
     print(automation_output)
 
