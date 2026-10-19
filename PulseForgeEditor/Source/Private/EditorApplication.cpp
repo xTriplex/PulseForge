@@ -1944,6 +1944,9 @@ namespace
 				static_cast<uint32_t>(Preference), RestoredCount, OpenedCount, FixtureHosts.size());
 			if (m_DocumentHostTabTearOffTest)
 			{
+				m_DocumentHostTabTearOffTestFrameCount = 0;
+				m_DocumentHostTabTearOffTestTabCenterValid = false;
+				m_DocumentHostTabTearOffPointerPrepared = false;
 				if (m_DocumentHostFixtureSessions.empty())
 				{
 					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Failed;
@@ -2461,7 +2464,9 @@ namespace
 				break;
 			case DocumentTabTearOffTestPhase::PressQueued:
 				IO.AddMousePosEvent(m_DocumentHostTabTearOffTestDrop.x, m_DocumentHostTabTearOffTestDrop.y);
-				if (m_DocumentHostTabTearOffFromNativeHost) IO.AddMouseViewportEvent(0);
+				// The fixture releases outside every editor window. A zero viewport models that hit test explicitly;
+				// the production policy trusts GLFW's hovered-window identity when it is available.
+				IO.AddMouseViewportEvent(0);
 				m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::DragQueued;
 				break;
 			case DocumentTabTearOffTestPhase::DragQueued:
@@ -2473,7 +2478,7 @@ namespace
 				else
 				{
 					IO.AddMousePosEvent(m_DocumentHostTabTearOffTestDrop.x, m_DocumentHostTabTearOffTestDrop.y);
-					IO.AddMouseViewportEvent(m_DocumentHostTabTearOffTestTabViewportID);
+					IO.AddMouseViewportEvent(0);
 				}
 				IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
 				m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::ReleaseQueued;
@@ -2546,8 +2551,14 @@ namespace
 						PF_ERROR("Document tab native-group tear-off fixture failed: the tab did not enter a separate native host or the "
 								 "original group changed.");
 					else if (m_DocumentHostTabRoundTripTearOffPending)
-						PF_ERROR("Document tab native-window round-trip fixture failed: the reattached session did not return to a native "
-								 "host or Level Editor left the main host.");
+						PF_ERROR("Document tab native-window round-trip fixture failed: session_present={}, resulting_host='{}', "
+								 "resulting_role={}, expected_previous_host='{}', entered_different_native_host={}, "
+								 "level_retained_in_main={}, main_document_count={}, release_hovered_viewport={}, "
+								 "release_position=({}, {}).",
+							Session != nullptr, Session ? Session->HostID : "<missing>",
+							Host ? static_cast<uint32_t>(Host->Role) : std::numeric_limits<uint32_t>::max(),
+							ExpectedPreviousHostID, EnteredDifferentNativeHost, LevelRetained,
+							MainHost ? MainHost->Documents.size() : 0, IO.MouseHoveredViewport, IO.MousePos.x, IO.MousePos.y);
 					else
 						PF_ERROR("Document tab tear-off UI fixture failed: the released tab did not enter a native host or Level Editor "
 								 "left the main host.");
@@ -2706,6 +2717,8 @@ namespace
 						m_DocumentHostTabReattachInvalidDropIndex, m_DocumentHostTabRoundTripCount + 1, DocumentTabRoundTripCycleCount);
 					m_DocumentHostTabTearOffTestIdentity = m_DocumentHostTabReattachTestIdentity;
 					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::WaitingForTab;
+					m_DocumentHostTabTearOffTestFrameCount = 0;
+					m_DocumentHostTabTearOffTestTabCenterValid = false;
 					m_DocumentHostTabTearOffPointerPrepared = false;
 					m_DocumentHostTabTearOffTest = true;
 					m_DocumentHostTabRoundTripTearOffPending = true;
