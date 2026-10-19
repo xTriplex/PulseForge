@@ -104,11 +104,6 @@ if(PULSEFORGE_BUILD_EDITOR)
 	set(NFD_BUILD_GLFW3_TESTS OFF CACHE BOOL "" FORCE)
 	set(NFD_INSTALL OFF CACHE BOOL "" FORCE)
 	add_subdirectory(PulseForge/Vendor/nativefiledialog)
-	if(PULSEFORGE_PLATFORM_MACOS)
-		# NFD's nested project() drops Objective-C's compile rule from the parent
-		# scope. Re-enable it here at the top-level directory that owns the build.
-		enable_language(OBJC)
-	endif()
 
 	# The current Font Awesome Free desktop font uses CFF outlines in an OTF.
 	# Reuse the repository's pinned FreeType copy for the editor's font atlas;
