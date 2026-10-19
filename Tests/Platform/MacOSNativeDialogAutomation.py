@@ -530,7 +530,10 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
         if is_tcc_denial(probe_output):
             print("NFD_UI_AUTOMATION=UNAVAILABLE; reason=macOS TCC denied Accessibility or Apple Events; native dialog cases NOT RUN")
             return 77, probe_output
-        return 1, f"Accessibility capability probe failed without an identified TCC denial: {probe_output}"
+        return 1, (
+            "Accessibility capability probe failed without an identified TCC denial; "
+            f"osascript_exit_code={probe_code}; output={probe_output!r}"
+        )
     print(probe_output)
 
     remaining = remaining_seconds()
@@ -552,7 +555,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
         if is_tcc_denial(automation_output):
             print("NFD_UI_AUTOMATION=UNAVAILABLE; reason=macOS TCC denied Accessibility or Apple Events; native dialog cases NOT RUN")
             return 77, automation_output
-        return 1, f"native panel automation failed: {automation_output}"
+        return 1, f"native panel automation failed; osascript_exit_code={automation_code}; output={automation_output!r}"
     print(automation_output)
 
     try:

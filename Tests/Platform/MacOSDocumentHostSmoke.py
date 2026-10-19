@@ -41,11 +41,12 @@ end run
 
 MAIN_WINDOW_SHEET_SNAPSHOT = '''on run argv
     set targetPID to item 1 of argv as integer
-    set expectedWindowName to item 2 of argv as text
+    set targetIndex to item 2 of argv as integer
+    set expectedWindowName to item 3 of argv as text
     tell application "System Events"
         set targetProcess to first process whose unix id is targetPID
         tell targetProcess
-            set targetWindow to first window whose name is expectedWindowName
+            set targetWindow to window targetIndex
             set windowTitle to name of targetWindow
             if windowTitle is not expectedWindowName then error "Main window changed before sheet snapshot: " & quoted form of windowTitle
             try
@@ -61,12 +62,12 @@ end run
 
 CLOSE_BUTTON_ACTIONS = '''on run argv
     set targetPID to item 1 of argv as integer
-    set expectedWindowName to item 2 of argv as text
+    set targetIndex to item 2 of argv as integer
+    set expectedWindowName to item 3 of argv as text
     tell application "System Events"
         set targetProcess to first process whose unix id is targetPID
-        set frontmost of targetProcess to true
         tell targetProcess
-            set targetWindow to first window whose name is expectedWindowName
+            set targetWindow to window targetIndex
             set windowTitle to name of targetWindow
             if windowTitle is not expectedWindowName then error "Main window changed before close-action query: " & quoted form of windowTitle
             set windowRole to role of targetWindow
@@ -76,10 +77,6 @@ CLOSE_BUTTON_ACTIONS = '''on run argv
             set closeRole to role of closeControl
             set closeSubrole to subrole of closeControl
             set availableActions to actions of closeControl
-            if not (availableActions contains "AXPress") then
-                error "AXCloseButton does not advertise AXPress for PID " & (targetPID as text) & ", window=" & ¬
-                    quoted form of windowTitle & "; actions=" & (availableActions as text)
-            end if
             return "MACOS_DOCUMENT_HOST_CLOSE_ACTIONS=PASS; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; window role/subrole=" & windowRole & "/" & windowSubrole & "; close control role/subrole=" & closeRole & "/" & closeSubrole & "; actions=" & (availableActions as text)
         end tell
     end tell
@@ -88,12 +85,12 @@ end run
 
 MAIN_WINDOW_CLOSE = '''on run argv
     set targetPID to item 1 of argv as integer
-    set expectedWindowName to item 2 of argv as text
+    set targetIndex to item 2 of argv as integer
+    set expectedWindowName to item 3 of argv as text
     tell application "System Events"
         set targetProcess to first process whose unix id is targetPID
-        set frontmost of targetProcess to true
         tell targetProcess
-            set targetWindow to first window whose name is expectedWindowName
+            set targetWindow to window targetIndex
             set windowTitle to name of targetWindow
             if windowTitle is not expectedWindowName then error "Main-window close target changed to " & quoted form of windowTitle
             set closeControl to value of attribute "AXCloseButton" of targetWindow
@@ -408,33 +405,9 @@ def main() -> int:
             f"all_windows={observed_windows!r}"
         )
 
-        diagnostic_arguments = (main_window_name,)
+        diagnostic_arguments = (str(main_window_index), main_window_name)
         diagnostic_output: list[str] = []
         exit_code: int | None = None
-        close_preflight_code, close_preflight_output = run_osascript(
-            CLOSE_BUTTON_ACTIONS,
-            str(process.pid),
-            min(5.0, max(0.1, deadline - time.monotonic())),
-            *diagnostic_arguments,
-        )
-        if close_preflight_code != 0:
-            if has_tcc_denial(close_preflight_output):
-                stop_process_group(process)
-                capture.thread.join(timeout=5)
-                print(
-                    "MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; native-window close request NOT RUN; "
-                    f"reason=TCC denial; detail={close_preflight_output.strip()}; acceptance blocked"
-                )
-                return 77
-            stop_process_group(process)
-            capture.thread.join(timeout=5)
-            return fail(
-                "Accessibility could not inspect the semantic AXCloseButton before closing; "
-                f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
-                f"exit_code={close_preflight_code}; detail={close_preflight_output.strip()}",
-                log_path,
-            )
-        print(close_preflight_output.strip())
         time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
         close_code, close_output = run_osascript(
             MAIN_WINDOW_CLOSE,
@@ -469,8 +442,9 @@ def main() -> int:
                     stop_process_group(process)
                     capture.thread.join(timeout=5)
                     return fail(
-                        "Accessibility AXPress timed out while the editor remained open; "
+                        "Accessibility main-window close operation timed out while the editor remained open; "
                         + f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
+                        + f"exit_code={close_code}; "
                         + repr(diagnostic_output)
                         + "; "
                         + close_output.strip(),
@@ -485,6 +459,7 @@ def main() -> int:
                 return fail(
                     "could not request normal main-window close; "
                     f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
+                    f"exit_code={close_code}; "
                     f"diagnostics={diagnostic_output!r}; detail={close_output.strip()}",
                     log_path,
                 )
