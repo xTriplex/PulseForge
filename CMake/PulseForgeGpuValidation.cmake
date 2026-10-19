@@ -26,6 +26,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 			Tests/GpuValidation/MacOSRendererValidation.cpp
 			Tests/GpuValidation/MacOSRendererReadbackAnalysis.cpp)
 		target_include_directories(PulseForgeMacOSRendererValidation PRIVATE
+			Tests
 			PulseForgeEditor/Source/Public
 			PulseForge/Vendor/Glfw/include
 			PulseForge/Vendor/imgui
