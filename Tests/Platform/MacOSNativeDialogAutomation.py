@@ -407,18 +407,14 @@ on run argv
         set processName to hostName
         set processBundleID to "host application process"
         set panelServiceCount to 0
+        set panelServiceProcesses to {}
+        set discoveryState to ""
         try
             with timeout of 2 seconds
                 set panelServiceProcesses to every application process whose ¬
                     bundle identifier is "com.apple.appkit.xpc.openAndSavePanelService"
             end timeout
             set panelServiceCount to count of panelServiceProcesses
-            if panelServiceCount > 0 then
-                set targetProcess to item panelServiceCount of panelServiceProcesses
-                set panelProcessID to unix id of targetProcess as integer
-                set processName to name of targetProcess as text
-                set processBundleID to bundle identifier of targetProcess as text
-            end if
         on error errorMessage number errorNumber
             if errorNumber is -1712 then
                 error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; query=open-save-panel-service-process; " & ¬
@@ -428,8 +424,113 @@ on run argv
                 error "NFD_TCC_DENIAL; query=open-save-panel-service-process; error=" & ¬
                     errorNumber & "; " & errorMessage number errorNumber
             end if
-            set processBundleID to "service lookup failed: " & errorNumber & "; " & errorMessage
+            set discoveryState to "panel-service lookup error=" & errorNumber & "; " & errorMessage
         end try
+        set visibleProcesses to {hostProcess}
+        try
+            with timeout of 2 seconds
+                set visibleProcesses to every application process whose visible is true
+            end timeout
+        on error errorMessage number errorNumber
+            if errorNumber is -1712 then
+                error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; query=visible-process-discovery; " & ¬
+                    "error=" & errorNumber & "; " & errorMessage number -1712
+            end if
+            if errorNumber is -1719 or errorNumber is -1743 then
+                error "NFD_TCC_DENIAL; query=visible-process-discovery; error=" & ¬
+                    errorNumber & "; " & errorMessage number errorNumber
+            end if
+            set discoveryState to discoveryState & "; visible-process lookup error=" & errorNumber & "; " & errorMessage
+        end try
+        set candidateProcesses to visibleProcesses & panelServiceProcesses & {hostProcess}
+        set candidateProcessCount to count of candidateProcesses
+        set fallbackProcess to missing value
+        set fallbackProcessID to 0
+        set fallbackProcessName to ""
+        set fallbackBundleID to ""
+        set discoveredWindows to ""
+        set panelOwnerFound to false
+        repeat with processIndex from 1 to candidateProcessCount
+            set candidateProcess to item processIndex of candidateProcesses
+            try
+                with timeout of 1 second
+                    set candidateProcessID to unix id of candidateProcess as integer
+                    set candidateProcessName to name of candidateProcess as text
+                    set candidateBundleID to bundle identifier of candidateProcess as text
+                    set candidateWindowCount to count of windows of candidateProcess
+                end timeout
+                repeat with windowIndex from 1 to candidateWindowCount
+                    if (length of discoveredWindows) > 1800 then exit repeat
+                    try
+                        with timeout of 1 second
+                            set candidateWindow to window windowIndex of candidateProcess
+                            set candidateWindowName to name of candidateWindow as text
+                            set candidateWindowRole to role of candidateWindow as text
+                            set candidateWindowSubrole to subrole of candidateWindow as text
+                        end timeout
+                        if candidateWindowRole is "AXSheet" or candidateWindowSubrole is "AXDialog" then
+                            set controlsReady to false
+                            with timeout of 1 second
+                                set controlsReady to my matchesDialog(candidateWindow, operation)
+                            end timeout
+                            set windowState to "pid=" & candidateProcessID & "; process=" & candidateProcessName & ¬
+                                "; bundle=" & candidateBundleID & "; window='" & candidateWindowName & ¬
+                                "' | " & candidateWindowRole & " | " & candidateWindowSubrole & ¬
+                                "; expected controls ready=" & controlsReady
+                            if discoveredWindows is not "" then set discoveredWindows to discoveredWindows & " | "
+                            set discoveredWindows to discoveredWindows & windowState
+                            if controlsReady then
+                                set targetProcess to candidateProcess
+                                set panelProcessID to candidateProcessID
+                                set processName to candidateProcessName
+                                set processBundleID to candidateBundleID
+                                set panelOwnerFound to true
+                                exit repeat
+                            end if
+                            if fallbackProcess is missing value then
+                                set fallbackProcess to candidateProcess
+                                set fallbackProcessID to candidateProcessID
+                                set fallbackProcessName to candidateProcessName
+                                set fallbackBundleID to candidateBundleID
+                            end if
+                        end if
+                    on error errorMessage number errorNumber
+                        if errorNumber is -1712 then
+                            error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; query=system-visible-window; pid=" & ¬
+                                candidateProcessID & "; window=" & windowIndex & "; " & errorMessage number -1712
+                        end if
+                        if errorNumber is -1719 or errorNumber is -1743 then
+                            error "NFD_TCC_DENIAL; query=system-visible-window; pid=" & ¬
+                                candidateProcessID & "; window=" & windowIndex & "; " & errorMessage number errorNumber
+                        end if
+                        if (length of discoveredWindows) < 1800 then
+                            set discoveredWindows to discoveredWindows & " | pid=" & candidateProcessID & ¬
+                                "; process=" & candidateProcessName & "; window=" & windowIndex & ¬
+                                " query error=" & errorNumber & "; " & errorMessage
+                        end if
+                    end try
+                end repeat
+                if panelOwnerFound then exit repeat
+            on error errorMessage number errorNumber
+                if errorNumber is -1712 then
+                    error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; query=system-visible-process; " & ¬
+                        "error=" & errorNumber & "; " & errorMessage number -1712
+                end if
+                if errorNumber is -1719 or errorNumber is -1743 then
+                    error "NFD_TCC_DENIAL; query=system-visible-process; error=" & ¬
+                        errorNumber & "; " & errorMessage number errorNumber
+                end if
+                if (length of discoveredWindows) < 1800 then
+                    set discoveredWindows to discoveredWindows & " | process query error=" & errorNumber & "; " & errorMessage
+                end if
+            end try
+        end repeat
+        if not panelOwnerFound and fallbackProcess is not missing value then
+            set targetProcess to fallbackProcess
+            set panelProcessID to fallbackProcessID
+            set processName to fallbackProcessName
+            set processBundleID to fallbackBundleID
+        end if
         set foregroundState to "unavailable"
         try
             set foregroundProcess to first process whose frontmost is true
@@ -454,8 +555,10 @@ on run argv
             set foregroundState to "query error=" & errorNumber & ": " & errorMessage
         end try
         set lastState to "frontmost process=" & foregroundState & "; panel owner='" & processName & ¬
-            "' (pid=" & panelProcessID & "; bundle=" & processBundleID & "); service process count=" & ¬
-            panelServiceCount & "; no panel windows observed"
+            "' (pid=" & panelProcessID & "; bundle=" & processBundleID & "); selected controls=" & ¬
+            panelOwnerFound & "; process candidates=" & candidateProcessCount & ¬
+            "; panel-service count=" & panelServiceCount & "; discovery=" & discoveryState & ¬
+            "; observed dialog windows=[" & discoveredWindows & "]; no matching dialog controls observed"
             try
                 with timeout of 2 seconds
                     set windowCount to count of windows of targetProcess
