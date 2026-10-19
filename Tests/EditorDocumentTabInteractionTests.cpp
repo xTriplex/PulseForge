@@ -53,9 +53,10 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	DragFrame.HoveredViewportID = 10;
 	DragFrame.LeftButtonReleased = true;
 	DragFrame.LeftButtonDown = false;
-	const auto EditorBodyRelease = Interaction.UpdateDrag(DragFrame);
-	PF_CHECK(Tests, EditorBodyRelease && EditorBodyRelease->Action == DocumentTabReleaseAction::CreateNativeHost);
-	PF_CHECK(Tests, EditorBodyRelease && !EditorBodyRelease->DropLocation);
+	DragFrame.ReleaseOverMainEditorViewport = true;
+	const auto UtilityPanelRelease = Interaction.UpdateDrag(DragFrame);
+	PF_CHECK(Tests, UtilityPanelRelease && UtilityPanelRelease->Action == DocumentTabReleaseAction::None);
+	PF_CHECK(Tests, UtilityPanelRelease && !UtilityPanelRelease->DropLocation);
 
 	Interaction.BeginFrame();
 	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
@@ -70,8 +71,23 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	DragFrame.LeftButtonReleased = true;
 	DragFrame.PointerPosition = { 180.0f, 120.0f };
 	DragFrame.ReleaseOverMainEditorViewport = true;
-	const auto UtilityPanelRelease = Interaction.UpdateDrag(DragFrame);
-	PF_CHECK(Tests, UtilityPanelRelease && UtilityPanelRelease->Action == DocumentTabReleaseAction::None);
+	const auto NativeHostUtilityRelease = Interaction.UpdateDrag(DragFrame);
+	PF_CHECK(Tests, NativeHostUtilityRelease && NativeHostUtilityRelease->Action == DocumentTabReleaseAction::None);
+
+	Interaction.BeginFrame();
+	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
+	DragFrame = {};
+	DragFrame.LeftButtonDown = true;
+	DragFrame.PointerPosition = { 20.0f, 20.0f };
+	DragFrame.HoveredViewportID = 10;
+	DragFrame.DragThreshold = 6.0f;
+	DragFrame.SourceIsMainHost = true;
+	PF_CHECK(Tests, !Interaction.UpdateDrag(DragFrame));
+	DragFrame.LeftButtonDown = false;
+	DragFrame.LeftButtonReleased = true;
+	DragFrame.PointerPosition = { 1200.0f, 120.0f };
+	const auto OutsideWindowRelease = Interaction.UpdateDrag(DragFrame);
+	PF_CHECK(Tests, OutsideWindowRelease && OutsideWindowRelease->Action == DocumentTabReleaseAction::CreateNativeHost);
 
 	EditorDocumentTransferRequest FirstRequest{ Material, "main", 1, false, std::nullopt };
 	PF_CHECK(Tests, Interaction.QueueTransfer(FirstRequest));

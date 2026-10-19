@@ -2443,7 +2443,8 @@ namespace
 						m_DocumentHostTabTearOffFromNativeHost
 							? ImVec2(
 								  m_DocumentHostTabTearOffTestStart.x + IO.MouseDragThreshold + 24.0f, m_DocumentHostTabTearOffTestStart.y)
-							: ImVec2(MainViewport->Pos.x + MainViewport->Size.x * 0.5f, MainViewport->Pos.y + MainViewport->Size.y * 0.75f);
+							: ImVec2(MainViewport->Pos.x + MainViewport->Size.x + IO.MouseDragThreshold + 24.0f,
+								  m_DocumentHostTabTearOffTestStart.y);
 					const float DeltaX = m_DocumentHostTabTearOffTestDrop.x - m_DocumentHostTabTearOffTestStart.x;
 					const float DeltaY = m_DocumentHostTabTearOffTestDrop.y - m_DocumentHostTabTearOffTestStart.y;
 					if (DeltaX * DeltaX + DeltaY * DeltaY <= IO.MouseDragThreshold * IO.MouseDragThreshold)
@@ -2532,8 +2533,8 @@ namespace
 					}
 					else
 					{
-						PF_INFO("Document tab tear-off UI fixture passed: releasing the captured asset tab in the editor body created a native "
-								"host and kept Level Editor in the main host.");
+						PF_INFO("Document tab tear-off UI fixture passed: releasing the captured asset tab outside the main editor window created a "
+								"native host and kept Level Editor in the main host.");
 					}
 					m_DocumentHostTabTearOffFromNativeHost = false;
 					m_DocumentHostTabTearOffSourceHostID.clear();
