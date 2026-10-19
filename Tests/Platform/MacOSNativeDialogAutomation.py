@@ -192,7 +192,7 @@ PANEL_READY_PROBE = '''on run argv
             if foregroundPID is not (targetPID as text) then
                 try
                     with timeout of 2 seconds
-                        set foregroundWindow to frontmost window of foregroundProcess
+                        set foregroundWindow to window 1 of foregroundProcess
                         set foregroundWindowName to name of foregroundWindow as text
                         set foregroundWindowRole to role of foregroundWindow as text
                         set foregroundWindowSubrole to subrole of foregroundWindow as text
