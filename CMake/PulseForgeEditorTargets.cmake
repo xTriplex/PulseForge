@@ -96,3 +96,18 @@ if(PULSEFORGE_BUILD_EDITOR)
 	)
 	set_property(TARGET PulseForgeEditor PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeEditor>")
 endif()
+
+if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
+	# Compile the production editor ImGui renderer independently of the unfinished
+	# macOS editor shell so the G04 proof exercises its real engine integration.
+	add_library(PulseForgeEditorImGuiProofRenderer STATIC
+		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
+	)
+	target_include_directories(PulseForgeEditorImGuiProofRenderer
+		PUBLIC PulseForgeEditor/Source/Public
+		PRIVATE PulseForge/Vendor/imgui
+	)
+	target_link_libraries(PulseForgeEditorImGuiProofRenderer
+		PUBLIC PulseForge PulseForgeImGui
+	)
+endif()

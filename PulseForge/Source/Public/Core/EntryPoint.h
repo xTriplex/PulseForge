@@ -8,7 +8,7 @@
 #include <exception>
 #include <stdexcept>
 
-#if defined(PF_PLATFORM_WINDOWS) || defined(PF_PLATFORM_LINUX)
+#if defined(PF_PLATFORM_WINDOWS) || defined(PF_PLATFORM_LINUX) || defined(PF_PLATFORM_MACOS)
 
 extern std::unique_ptr<PulseForge::Application> PulseForge::CreateApplication();
 

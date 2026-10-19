@@ -2,6 +2,8 @@ if(PULSEFORGE_PLATFORM_WINDOWS)
 	set(PULSEFORGE_CORE_PLATFORM_SOURCE PulseForge/Source/Private/Core/Platform/Windows/PlatformServices.cpp)
 elseif(PULSEFORGE_PLATFORM_LINUX)
 	set(PULSEFORGE_CORE_PLATFORM_SOURCE PulseForge/Source/Private/Core/Platform/Linux/PlatformServices.cpp)
+elseif(PULSEFORGE_PLATFORM_MACOS)
+	set(PULSEFORGE_CORE_PLATFORM_SOURCE PulseForge/Source/Private/Core/Platform/MacOS/PlatformServices.cpp)
 endif()
 
 add_library(PulseForgeCore STATIC

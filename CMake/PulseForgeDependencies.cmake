@@ -114,7 +114,9 @@ if(PULSEFORGE_BUILD_EDITOR)
 	set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
 	set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
 	add_subdirectory(PulseForge/Vendor/freetype "${CMAKE_BINARY_DIR}/_deps/freetype-build" EXCLUDE_FROM_ALL)
+endif()
 
+if(PULSEFORGE_BUILD_EDITOR OR PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
 	set(PULSEFORGE_IMGUI_SOURCES
 		PulseForge/Vendor/imgui/imgui.cpp
 		PulseForge/Vendor/imgui/imgui_draw.cpp

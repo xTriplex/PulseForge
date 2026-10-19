@@ -1,3 +1,6 @@
+#ifndef VK_ENABLE_BETA_EXTENSIONS
+	#define VK_ENABLE_BETA_EXTENSIONS 1
+#endif
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 #include <vulkan/vulkan.hpp>
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
@@ -292,6 +295,9 @@ namespace PulseForge
 			nvrhi::Format NvrhiFormat = nvrhi::Format::UNKNOWN;
 			vk::PresentModeKHR PresentMode = vk::PresentModeKHR::eFifo;
 			VulkanSupport::PresentationDeviceExtensionAvailability AvailablePresentationDeviceExtensions;
+			bool PortabilitySubsetExtensionAvailable = false;
+			uint32_t MinVertexInputBindingStrideAlignment = 1;
+			bool FillModeNonSolidSupported = false;
 			bool PresentationFeatureSupported = false;
 			VulkanSupport::PresentationRetirementMechanism PresentationRetirementMechanism =
 				VulkanSupport::PresentationRetirementMechanism::LegacyBestEffort;
@@ -1542,14 +1548,18 @@ namespace PulseForge
 			}
 
 			const TextureDesc& Description = Source.GetDescription();
-			const bool IsColor = Description.Format == TextureFormat::RGBA8_UNorm || Description.Format == TextureFormat::RGBA8_Srgb;
+			const bool IsColor = Description.Format == TextureFormat::RGBA8_UNorm || Description.Format == TextureFormat::RGBA8_Srgb ||
+				Description.Format == TextureFormat::RGBA16_Float;
 			const bool IsDepth = Description.Format == TextureFormat::Depth32Float;
+			const nvrhi::ResourceStates RestoreState = HasTextureUsage(Description.Usage, TextureUsage::ShaderResource)
+				? nvrhi::ResourceStates::ShaderResource
+				: IsDepth ? nvrhi::ResourceStates::DepthWrite : nvrhi::ResourceStates::RenderTarget;
 			const uint32_t SliceCount = Description.Dimension == TextureDimension::TextureCube ? 6u : 1u;
 			if (Description.MipLevels != 1 || (!IsColor && !IsDepth) || ArraySlice >= SliceCount)
 			{
 				return std::unexpected(TextureError{
 					TextureErrorCode::UnsupportedFeature,
-					"Validation readback supports one RGBA8 or D32 slice from a single-mip 2D texture or cubemap"
+					"Validation readback supports one RGBA8, RGBA16F, or D32 slice from a single-mip 2D texture or cubemap"
 				});
 			}
 
@@ -1598,7 +1608,7 @@ namespace PulseForge
 				CopyCommands->setTextureState(
 					NativeSource->GetNativeTexture(),
 					SourceSubresources,
-					nvrhi::ResourceStates::ShaderResource);
+					RestoreState);
 				CopyCommands->commitBarriers();
 				CopyCommands->close();
 				ExecuteNvrhiCommandList(CopyCommands, nvrhi::CommandQueue::Graphics, "submitting a texture readback copy");
@@ -1612,7 +1622,7 @@ namespace PulseForge
 					nvrhi::CpuAccessMode::Read,
 					&RowPitch);
 				if (!Mapped)
-					throw std::runtime_error("NVRHI returned no mapped data for the RGBA8 readback");
+					throw std::runtime_error("NVRHI returned no mapped data for the requested validation readback");
 				struct StagingUnmap
 				{
 					nvrhi::IDevice* Device;
@@ -1624,9 +1634,17 @@ namespace PulseForge
 				Result.Width = Description.Width;
 				Result.Height = Description.Height;
 				Result.Format = Description.Format;
-				const size_t PackedRowSize = static_cast<size_t>(Description.Width) * 4;
-				if (RowPitch < PackedRowSize)
-					throw std::runtime_error("NVRHI returned an invalid color/depth readback row pitch");
+				const size_t BytesPerPixel = IsDepth
+					? sizeof(float)
+					: *GetTextureFormatBytesPerPixel(Description.Format);
+				if (Description.Width > (std::numeric_limits<size_t>::max)() / BytesPerPixel)
+					throw std::runtime_error("Validation readback row size overflowed");
+				const size_t PackedRowSize = static_cast<size_t>(Description.Width) * BytesPerPixel;
+				if (RowPitch < PackedRowSize) throw std::runtime_error("NVRHI returned an invalid color/depth readback row pitch");
+				if (Description.Height > (std::numeric_limits<size_t>::max)() / PackedRowSize)
+					throw std::runtime_error("Validation readback image size overflowed");
+				if (Description.Height > 1 && RowPitch > ((std::numeric_limits<size_t>::max)() - PackedRowSize) / (Description.Height - 1))
+					throw std::runtime_error("Validation readback source row offsets overflowed");
 				Result.Pixels.resize(PackedRowSize * Description.Height);
 				const auto* SourceBytes = static_cast<const std::byte*>(Mapped);
 				for (uint32_t Row = 0; Row < Description.Height; ++Row)
@@ -2018,6 +2036,19 @@ namespace PulseForge
 			}
 
 			std::vector<VertexAttributeDesc> OrderedAttributes = Description.VertexLayout.Attributes;
+			if (Description.Rasterizer.Wireframe && !m_FillModeNonSolidEnabled)
+			{
+				const std::string Message = "Vulkan device does not support the fillModeNonSolid feature required by wireframe pipeline '" +
+					Description.DebugName + "'";
+				return std::unexpected(GraphicsError{ GraphicsErrorCode::UnsupportedFeature, Message });
+			}
+			if (Description.VertexLayout.Stride != 0 &&
+				Description.VertexLayout.Stride % m_MinVertexInputBindingStrideAlignment != 0)
+			{
+				const std::string Message = "Vulkan device requires vertex stride alignment of " +
+					std::to_string(m_MinVertexInputBindingStrideAlignment) + " bytes for pipeline '" + Description.DebugName + "'";
+				return std::unexpected(GraphicsError{ GraphicsErrorCode::UnsupportedFeature, Message });
+			}
 			// NVRHI's Vulkan input layout assigns locations by array order; semantic order is the shader-location contract.
 			std::sort(OrderedAttributes.begin(), OrderedAttributes.end(), [](
 				const VertexAttributeDesc& Left,
@@ -2752,6 +2783,13 @@ namespace PulseForge
 				AppendUniqueName(m_EnabledInstanceExtensions, RequiredExtensions[Index]);
 			}
 
+			m_PortabilityEnumerationEnabled = HasName(AvailableExtensions, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+			if (m_PortabilityEnumerationEnabled)
+			{
+				AppendUniqueName(m_EnabledInstanceExtensions, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+				PF_CORE_INFO("Vulkan portability enumeration enabled");
+			}
+
 			m_DebugUtilsEnabled = HasName(AvailableExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 			if (m_DebugUtilsEnabled) AppendUniqueName(m_EnabledInstanceExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
@@ -2814,6 +2852,8 @@ namespace PulseForge
 				.setPApplicationInfo(&ApplicationInfo)
 				.setPEnabledExtensionNames(m_EnabledInstanceExtensions)
 				.setPEnabledLayerNames(m_EnabledLayers);
+			if (m_PortabilityEnumerationEnabled)
+				CreateInfo.setFlags(vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR);
 			if (m_DebugUtilsEnabled)
 				CreateInfo.setPNext(&DebugCreateInfo);
 
@@ -2852,6 +2892,8 @@ namespace PulseForge
 				return std::nullopt;
 
 			const auto Extensions = PhysicalDevice.enumerateDeviceExtensionProperties();
+			Candidate.PortabilitySubsetExtensionAvailable =
+				HasName(Extensions, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
 			Candidate.AvailablePresentationDeviceExtensions = { HasName(Extensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME),
 				HasName(Extensions, VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME),
 				HasName(Extensions, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME) };
@@ -2895,13 +2937,34 @@ namespace PulseForge
 			vk::PhysicalDeviceVulkan12Features Supported12;
 			vk::PhysicalDeviceVulkan13Features Supported13;
 			vk::PhysicalDeviceSwapchainMaintenance1FeaturesKHR SupportedSwapchainMaintenance;
+			vk::PhysicalDevicePortabilitySubsetFeaturesKHR SupportedPortabilitySubset;
 			const bool HasCompatibleMaintenancePath = VulkanSupport::HasCompatiblePresentationFencePath(
 				m_EnabledPresentationInstanceExtensions, Candidate.AvailablePresentationDeviceExtensions);
 			Supported12.setPNext(&Supported13);
-			Supported13.setPNext(HasCompatibleMaintenancePath ? &SupportedSwapchainMaintenance : nullptr);
+			if (Candidate.PortabilitySubsetExtensionAvailable)
+			{
+				Supported13.setPNext(&SupportedPortabilitySubset);
+				if (HasCompatibleMaintenancePath)
+					SupportedPortabilitySubset.setPNext(&SupportedSwapchainMaintenance);
+			}
+			else if (HasCompatibleMaintenancePath)
+			{
+				Supported13.setPNext(&SupportedSwapchainMaintenance);
+			}
 			vk::PhysicalDeviceFeatures2 SupportedFeatures;
 			SupportedFeatures.setPNext(&Supported12);
 			PhysicalDevice.getFeatures2(&SupportedFeatures);
+			Candidate.FillModeNonSolidSupported = SupportedFeatures.features.fillModeNonSolid == VK_TRUE;
+			if (Candidate.PortabilitySubsetExtensionAvailable)
+			{
+				vk::PhysicalDeviceProperties2 Properties2;
+				vk::PhysicalDevicePortabilitySubsetPropertiesKHR PortabilityProperties;
+				Properties2.pNext = &PortabilityProperties;
+				PhysicalDevice.getProperties2(&Properties2);
+				Candidate.MinVertexInputBindingStrideAlignment = PortabilityProperties.minVertexInputBindingStrideAlignment;
+				if (Candidate.MinVertexInputBindingStrideAlignment == 0)
+					return std::nullopt;
+			}
 			const VulkanSupport::RequiredDeviceFeatures RequiredFeatures{
 				Supported12.timelineSemaphore == VK_TRUE,
 				Supported13.synchronization2 == VK_TRUE,
@@ -2981,6 +3044,9 @@ namespace PulseForge
 			m_QueueFamilies = BestCandidate->QueueFamilies;
 			m_SurfaceFormat = BestCandidate->SurfaceFormat;
 			m_NvrhiFormat = BestCandidate->NvrhiFormat;
+			m_MinVertexInputBindingStrideAlignment = BestCandidate->MinVertexInputBindingStrideAlignment;
+			m_FillModeNonSolidEnabled = BestCandidate->FillModeNonSolidSupported;
+			m_PortabilitySubsetEnabled = BestCandidate->PortabilitySubsetExtensionAvailable;
 			m_PresentMode = BestCandidate->PresentMode;
 			m_PresentationRetirementMechanism = BestCandidate->PresentationRetirementMechanism;
 			m_SwapchainMaintenanceFeatureEnabled = BestCandidate->PresentationFeatureSupported && UsesPresentationFences();
@@ -2988,6 +3054,11 @@ namespace PulseForge
 				throw std::logic_error("Selected Vulkan presentation path does not match the queried swapchainMaintenance1 feature");
 			m_EnabledDeviceExtensions.clear();
 			AppendUniqueName(m_EnabledDeviceExtensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+			if (BestCandidate->PortabilitySubsetExtensionAvailable)
+			{
+				AppendUniqueName(m_EnabledDeviceExtensions, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+				PF_CORE_INFO("Vulkan portability subset enabled for selected physical device");
+			}
 			switch (m_PresentationRetirementMechanism)
 			{
 			case VulkanSupport::PresentationRetirementMechanism::KhrMaintenanceFence:
@@ -3036,10 +3107,14 @@ namespace PulseForge
 					.setQueuePriorities(vk::ArrayProxyNoTemporaries<const float>(1, &QueuePriority)));
 			}
 
+			vk::PhysicalDeviceFeatures2 EnabledFeatures;
+			EnabledFeatures.features.setFillModeNonSolid(m_FillModeNonSolidEnabled ? VK_TRUE : VK_FALSE);
 			vk::PhysicalDeviceVulkan12Features Enabled12;
 			Enabled12.setTimelineSemaphore(VK_TRUE);
 			vk::PhysicalDeviceVulkan13Features Enabled13;
+			vk::PhysicalDevicePortabilitySubsetFeaturesKHR EnabledPortabilitySubset;
 			vk::PhysicalDeviceSwapchainMaintenance1FeaturesKHR EnabledSwapchainMaintenance;
+			// No optional portability-subset feature is requested by the renderer's current pipeline contract.
 			Enabled13
 				.setSynchronization2(VK_TRUE)
 				.setDynamicRendering(VK_TRUE)
@@ -3047,12 +3122,18 @@ namespace PulseForge
 			if (m_SwapchainMaintenanceFeatureEnabled)
 			{
 				EnabledSwapchainMaintenance.setSwapchainMaintenance1(VK_TRUE);
-				Enabled13.setPNext(&EnabledSwapchainMaintenance);
+				if (m_PortabilitySubsetEnabled)
+					EnabledPortabilitySubset.setPNext(&EnabledSwapchainMaintenance);
+				else
+					Enabled13.setPNext(&EnabledSwapchainMaintenance);
 			}
+			if (m_PortabilitySubsetEnabled)
+				Enabled13.setPNext(&EnabledPortabilitySubset);
 			Enabled12.setPNext(&Enabled13);
 
 			vk::DeviceCreateInfo CreateInfo;
-			CreateInfo.setPNext(&Enabled12).setQueueCreateInfos(QueueCreateInfos).setPEnabledExtensionNames(m_EnabledDeviceExtensions);
+			EnabledFeatures.setPNext(&Enabled12);
+			CreateInfo.setPNext(&EnabledFeatures).setQueueCreateInfos(QueueCreateInfos).setPEnabledExtensionNames(m_EnabledDeviceExtensions);
 
 			m_Device = m_PhysicalDevice.createDevice(CreateInfo);
 			VULKAN_HPP_DEFAULT_DISPATCHER.init(m_Device);
@@ -3931,6 +4012,10 @@ namespace PulseForge
 		VulkanSupport::PresentationRetirementMechanism m_PresentationRetirementMechanism =
 			VulkanSupport::PresentationRetirementMechanism::LegacyBestEffort;
 		std::vector<const char*> m_EnabledDeviceExtensions;
+		bool m_PortabilityEnumerationEnabled = false;
+		bool m_PortabilitySubsetEnabled = false;
+		bool m_FillModeNonSolidEnabled = false;
+		uint32_t m_MinVertexInputBindingStrideAlignment = 1;
 		bool m_SwapchainMaintenanceFeatureEnabled = false;
 		bool m_ForceLegacyRetirementForTesting = false;
 		bool m_FirstPresentationPending = false;
