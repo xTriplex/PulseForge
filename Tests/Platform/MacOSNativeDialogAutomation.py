@@ -210,7 +210,7 @@ PANEL_READY_PROBE = '''on run argv
                         try
                             with timeout of 2 seconds
                                 set cancelActions to actions of button "Cancel" of candidateWindow as text
-                                if operation starts with "open" then
+                                if operation is "open-select" or operation is "open-cancel" then
                                     set primaryActions to actions of button "Open" of candidateWindow as text
                                 else
                                     set primaryActions to actions of button "Save" of candidateWindow as text
@@ -254,7 +254,7 @@ PANEL_READY_PROBE = '''on run argv
                                     try
                                         with timeout of 2 seconds
                                             set cancelActions to actions of button "Cancel" of candidateSheet as text
-                                            if operation starts with "open" then
+                                            if operation is "open-select" or operation is "open-cancel" then
                                                 set primaryActions to actions of button "Open" of candidateSheet as text
                                             else
                                                 set primaryActions to actions of button "Save" of candidateSheet as text
@@ -268,17 +268,18 @@ PANEL_READY_PROBE = '''on run argv
                                 if errorNumber is -1712 then
                                     error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; pid=" & targetPID & "; process=" & processName & ¬
                                         "; query=window-" & windowIndex & "/sheet-" & sheetIndex & ¬
-                                        "; state=" & lastState & "; error=" & errorNumber & "; " & errorMessage
+                                        "; state=" & lastState & "; error=" & errorNumber & "; " & errorMessage ¬
+                                        number -1712
                                 end if
                                 set lastState to "sheet " & sheetIndex & " query error=" & errorNumber & "; " & errorMessage
                             end try
                         end repeat
                     on error errorMessage number errorNumber
-                        if errorMessage starts with "NFD_ACCESSIBILITY_QUERY_TIMEOUT" then error errorMessage
                         if errorNumber is -1712 then
+                            if errorMessage contains "NFD_ACCESSIBILITY_QUERY_TIMEOUT" then error errorMessage number -1712
                             error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; pid=" & targetPID & "; process=" & processName & ¬
                                 "; query=window-" & windowIndex & "/sheets; state=" & lastState & ¬
-                                "; error=" & errorNumber & "; " & errorMessage
+                                "; error=" & errorNumber & "; " & errorMessage number -1712
                         end if
                         set lastState to "window " & windowIndex & " sheets query error=" & errorNumber & "; " & errorMessage
                     end try
@@ -292,27 +293,31 @@ PANEL_READY_PROBE = '''on run argv
 end run
 
 on matchesDialog(candidateElement, operation)
-    set cancelEnabled to false
-    try
-        set cancelButton to button "Cancel" of candidateElement
-        set cancelEnabled to enabled of cancelButton
-    on error
-        return false
-    end try
-    if operation starts with "open" then
+    tell application "System Events"
+        set cancelEnabled to false
         try
-            set primaryButton to button "Open" of candidateElement
+            set cancelButton to button "Cancel" of candidateElement
+            set cancelEnabled to enabled of cancelButton
         on error
             return false
         end try
-    else
-        try
-            set primaryButton to button "Save" of candidateElement
-        on error
-            return false
-        end try
-    end if
-    return cancelEnabled
+        if operation is "open-select" or operation is "open-cancel" then
+            try
+                set primaryButton to button "Open" of candidateElement
+                set primaryEnabled to enabled of primaryButton
+            on error
+                return false
+            end try
+        else
+            try
+                set primaryButton to button "Save" of candidateElement
+                set primaryEnabled to enabled of primaryButton
+            on error
+                return false
+            end try
+        end if
+        return cancelEnabled
+    end tell
 end matchesDialog
 '''
 
@@ -425,27 +430,31 @@ SELECT_SCRIPT = '''on run argv
 end run
 
 on matchesDialog(candidateElement, operation)
-    set cancelEnabled to false
-    try
-        set cancelButton to button "Cancel" of candidateElement
-        set cancelEnabled to enabled of cancelButton
-    on error
-        return false
-    end try
-    if operation starts with "open" then
+    tell application "System Events"
+        set cancelEnabled to false
         try
-            set primaryButton to button "Open" of candidateElement
+            set cancelButton to button "Cancel" of candidateElement
+            set cancelEnabled to enabled of cancelButton
         on error
             return false
         end try
-    else
-        try
-            set primaryButton to button "Save" of candidateElement
-        on error
-            return false
-        end try
-    end if
-    return cancelEnabled
+        if operation is "open-select" or operation is "open-cancel" then
+            try
+                set primaryButton to button "Open" of candidateElement
+                set primaryEnabled to enabled of primaryButton
+            on error
+                return false
+            end try
+        else
+            try
+                set primaryButton to button "Save" of candidateElement
+                set primaryEnabled to enabled of primaryButton
+            on error
+                return false
+            end try
+        end if
+        return cancelEnabled
+    end tell
 end matchesDialog
 '''
 
