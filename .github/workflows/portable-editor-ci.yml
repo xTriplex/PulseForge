@@ -82,7 +82,7 @@ jobs:
         run: |
           set -o pipefail
           ctest --test-dir Build/CI/macos-renderer --output-on-failure --verbose \
-            -R 'PulseForge\.(Core|CoreConsumer|GPU\.MacOSRenderer)$' 2>&1 |
+            -R 'PulseForge\.(Core|CoreConsumer|GPU\.MacOSRenderer)' 2>&1 |
             tee "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'Vulkan validation layer enabled' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'NVRHI validation layer enabled' "$RUNNER_TEMP/macos-renderer-ctest.log"
@@ -92,28 +92,19 @@ jobs:
           grep -q 'MACOS_RENDERER_READBACK=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'MACOS_RENDERER_NATIVE_RESIZE=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'MACOS_RENDERER_ORDERLY_SHUTDOWN=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
+          grep -q 'MACOS_RENDERER_POLICY=auto; RESULT=RENDERED_AND_VALIDATED' "$RUNNER_TEMP/macos-renderer-ctest.log"
+          grep -q 'MACOS_RENDERER_SENSITIVITY=suppress-geometry; EXPECTED_ASSERTION_FAILURE=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
+          grep -q 'MACOS_RENDERER_SENSITIVITY=suppress-shadow-casters; EXPECTED_ASSERTION_FAILURE=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
+          if ! grep -q 'MACOS_RENDERER_POLICY=require-fences; RESULT=RENDERED_AND_VALIDATED' \
+            "$RUNNER_TEMP/macos-renderer-ctest.log" &&
+            ! grep -q 'MACOS_RENDERER_STRICT_POLICY=CAPABILITY_REJECTED; rendering did not run because the exact required fence capability was unavailable' \
+              "$RUNNER_TEMP/macos-renderer-ctest.log"; then
+            echo "Strict presentation policy neither rendered with fences nor reported the exact unsupported capability." >&2
+            exit 1
+          fi
           if grep -q 'VUID-' "$RUNNER_TEMP/macos-renderer-ctest.log"; then
             echo "Khronos validation reported a Vulkan specification violation." >&2
             exit 1
-          fi
-
-      - name: Verify strict presentation-fence policy behavior
-        run: |
-          set +e
-          PULSEFORGE_VULKAN_PRESENTATION_POLICY=require-fences \
-            Build/CI/macos-renderer/PulseForgeMacOSRendererValidation \
-            > "$RUNNER_TEMP/macos-strict-fences.log" 2>&1
-          result=$?
-          set -e
-          cat "$RUNNER_TEMP/macos-strict-fences.log"
-          if [ "$result" -eq 0 ]; then
-            echo "Strict presentation-fence policy rendered successfully on this device."
-          elif grep -q 'No otherwise suitable Vulkan GPU satisfies PULSEFORGE_VULKAN_PRESENTATION_POLICY=require-fences' \
-            "$RUNNER_TEMP/macos-strict-fences.log"; then
-            echo "Strict policy rejected this device with PulseForge's explicit unsupported-capability diagnostic."
-          else
-            echo "Strict policy failed for a reason other than the expected device capability rejection." >&2
-            exit "$result"
           fi
 
       - name: Upload compact renderer evidence
@@ -130,7 +121,6 @@ jobs:
             ${{ runner.temp }}/macos-configure.log
             ${{ runner.temp }}/macos-build.log
             ${{ runner.temp }}/macos-renderer-ctest.log
-            ${{ runner.temp }}/macos-strict-fences.log
             Build/CI/macos-renderer/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/macos-renderer/Testing/Temporary/LastTest.log
           if-no-files-found: ignore

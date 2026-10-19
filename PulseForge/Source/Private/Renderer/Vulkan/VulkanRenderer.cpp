@@ -1640,10 +1640,11 @@ namespace PulseForge
 				if (Description.Width > (std::numeric_limits<size_t>::max)() / BytesPerPixel)
 					throw std::runtime_error("Validation readback row size overflowed");
 				const size_t PackedRowSize = static_cast<size_t>(Description.Width) * BytesPerPixel;
-				if (RowPitch < PackedRowSize)
-					throw std::runtime_error("NVRHI returned an invalid color/depth readback row pitch");
+				if (RowPitch < PackedRowSize) throw std::runtime_error("NVRHI returned an invalid color/depth readback row pitch");
 				if (Description.Height > (std::numeric_limits<size_t>::max)() / PackedRowSize)
 					throw std::runtime_error("Validation readback image size overflowed");
+				if (Description.Height > 1 && RowPitch > ((std::numeric_limits<size_t>::max)() - PackedRowSize) / (Description.Height - 1))
+					throw std::runtime_error("Validation readback source row offsets overflowed");
 				Result.Pixels.resize(PackedRowSize * Description.Height);
 				const auto* SourceBytes = static_cast<const std::byte*>(Mapped);
 				for (uint32_t Row = 0; Row < Description.Height; ++Row)

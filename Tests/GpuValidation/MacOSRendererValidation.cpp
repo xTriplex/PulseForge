@@ -70,9 +70,32 @@ namespace
 				const auto Loaded = PulseForge::SceneAssetService::Load(
 					*m_Project->GetDescription().StartScene, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), m_Scene);
 				if (!Loaded) throw std::runtime_error("Could not load the PBR startup scene: " + Loaded.error().Message);
+				if (const char* TestMode = std::getenv("PULSEFORGE_MACOS_RENDERER_TEST_MODE"))
+				{
+					if (std::string_view(TestMode) == "suppress-geometry")
+					{
+						size_t RemovedMeshes = 0;
+						for (const PulseForge::Entity& Entity : m_Scene.GetEntities())
+						{
+							auto MeshRenderer = Entity.GetMeshRenderer();
+							if (!MeshRenderer)
+								throw std::runtime_error("Could not inspect a mesh while preparing the geometry-negative fixture");
+							if (!MeshRenderer->has_value()) continue;
+							if (auto Removed = Entity.RemoveMeshRenderer(); !Removed)
+								throw std::runtime_error("Could not suppress fixture geometry: " + Removed.error().Message);
+							++RemovedMeshes;
+						}
+						if (RemovedMeshes == 0) throw std::runtime_error("Geometry-negative fixture found no mesh components to suppress");
+						PF_INFO("MACOS_RENDERER_TEST_FAULT=suppress-geometry; removed_mesh_components={}", RemovedMeshes);
+					}
+					else if (std::string_view(TestMode) == "suppress-shadow-casters")
+						PF_INFO("MACOS_RENDERER_TEST_FAULT=suppress-shadow-casters; render targets and clears remain active");
+					else if (std::string_view(TestMode) != "normal")
+						throw std::runtime_error("Unknown macOS renderer validation test mode");
+				}
 
-				auto CreatedRenderer = PulseForge::SceneRenderer::Create(
-					App, *m_Project, std::filesystem::path(PF_MACOS_RENDERER_SCENE_SHADER_DIRECTORY));
+				auto CreatedRenderer =
+					PulseForge::SceneRenderer::Create(App, *m_Project, std::filesystem::path(PF_MACOS_RENDERER_SCENE_SHADER_DIRECTORY));
 				if (!CreatedRenderer) throw std::runtime_error("Could not create SceneRenderer: " + CreatedRenderer.error().Message);
 				m_SceneRenderer = std::move(*CreatedRenderer);
 				if (!m_SceneRenderer->SetToneMappingSettings({ 0.0f }))
@@ -223,7 +246,7 @@ namespace
 					Hdr->ColorTexture->GetDescription().Format != PulseForge::TextureFormat::RGBA16_Float ||
 					Hdr->DepthTexture->GetDescription().Format != PulseForge::TextureFormat::Depth32Float)
 				{
-					Fail("PBR HDR render did not produce RGBA16F color, D32 depth, geometry, and the environment background");
+					Fail("PBR HDR render did not produce required RGBA16F color, D32 depth, geometry, and environment output");
 					return;
 				}
 				m_CapturedHdrDepth = Hdr->DepthTexture;
@@ -512,6 +535,21 @@ namespace
 	private:
 		MacOSRendererValidationLayer* m_Layer = nullptr;
 	};
+
+	bool HasValidationOrShutdownError()
+	{
+		const auto Entries = PulseForge::Log::GetRecentEntries();
+		return std::any_of(Entries.begin(), Entries.end(), [](const PulseForge::LogEntry& Entry)
+		{
+			const bool HasVulkanId = Entry.Message.find("VUID-") != std::string::npos;
+			const bool IsLoaderDiagnostic = Entry.Message.find("id=Loader Message") != std::string::npos;
+			const bool IsLoggedError = Entry.Level >= PulseForge::LogLevel::Error &&
+				(!IsLoaderDiagnostic &&
+					(Entry.Message.find("Vulkan error (") != std::string::npos || Entry.Message.starts_with("NVRHI:") ||
+						Entry.Message.find("Vulkan shutdown") != std::string::npos));
+			return HasVulkanId || IsLoggedError;
+		});
+	}
 } // namespace
 
 int main()
@@ -524,12 +562,27 @@ int main()
 			MacOSRendererValidationApplication App;
 			Result = App.RunValidation();
 		}
+		if (HasValidationOrShutdownError())
+		{
+			PF_CRITICAL("MACOS_RENDERER_VALIDATION_DIAGNOSTICS=FAIL; Vulkan/NVRHI validation or shutdown error was logged");
+			return EXIT_FAILURE;
+		}
 		if (Result == EXIT_SUCCESS)
 			PF_INFO("MACOS_RENDERER_ORDERLY_SHUTDOWN=PASS; ImGui, scene, targets, Vulkan renderer, and native window destroyed cleanly");
+		PF_INFO("MACOS_RENDERER_PROCESS_SHUTDOWN=PASS; application and fixture scope exited");
 		return Result;
 	}
 	catch (const std::exception& Exception)
 	{
+		constexpr std::string_view StrictCapabilityRejection =
+			"No otherwise suitable Vulkan GPU satisfies PULSEFORGE_VULKAN_PRESENTATION_POLICY=require-fences";
+		const char* Policy = std::getenv("PULSEFORGE_VULKAN_PRESENTATION_POLICY");
+		if (Policy && std::string_view(Policy) == "require-fences" &&
+			std::string_view(Exception.what()).starts_with(StrictCapabilityRejection) && !HasValidationOrShutdownError())
+		{
+			PF_WARN("MACOS_RENDERER_STRICT_POLICY_REJECTED=CAPABILITY; {}", Exception.what());
+			return 77;
+		}
 		PF_CRITICAL("MACOS_RENDERER_VALIDATION=FAIL; startup or renderer unavailable: {}", Exception.what());
 		return EXIT_FAILURE;
 	}

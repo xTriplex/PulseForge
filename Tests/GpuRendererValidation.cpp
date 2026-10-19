@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -270,6 +271,12 @@ namespace
 				return;
 			}
 
+			if (m_ReadbackPending)
+			{
+				m_ReadbackPending = false;
+				if (!ValidateFirstFrameReadback()) return;
+			}
+
 			if (m_CompletedFrames >= 3)
 			{
 				PF_INFO("GPU_VALIDATION_RESULT=PASS; completed three RGBA16F render/sample frames");
@@ -355,6 +362,10 @@ namespace
 				Fail("Could not end the RGBA16F render target: " + EndResult.error().Message);
 				return;
 			}
+			if (m_CompletedFrames == 0)
+			{
+				m_ReadbackPending = true;
+			}
 
 			const std::array<const PulseForge::BindingSet*, 1> BindingSets = { m_SamplingBindingSet.get() };
 			const PulseForge::GraphicsResult SamplingDrawResult =
@@ -432,6 +443,56 @@ namespace
 		}
 
 	private:
+		bool ValidateFirstFrameReadback()
+		{
+			auto& App = PulseForge::Application::Get();
+			const PulseForge::Texture* ColorTexture = m_Target ? m_Target->GetColorTexture() : nullptr;
+			const PulseForge::Texture* DepthTexture = m_Target ? m_Target->GetDepthTexture() : nullptr;
+			if (!ColorTexture || !DepthTexture)
+			{
+				Fail("RGBA16F validation target attachments were unavailable for readback");
+				return false;
+			}
+			const auto ColorReadback = App.ReadTextureForValidation(*ColorTexture);
+			if (!ColorReadback || ColorReadback->Format != PulseForge::TextureFormat::RGBA16_Float || ColorReadback->Width != 32 ||
+				ColorReadback->Height != 32 || ColorReadback->Pixels.size() != 32u * 32u * 8u)
+			{
+				Fail(ColorReadback ? "RGBA16F readback returned an invalid extent, format, or byte count"
+								   : "RGBA16F readback failed: " + ColorReadback.error().Message);
+				return false;
+			}
+			std::array<uint16_t, 4> FirstPixel{};
+			std::memcpy(FirstPixel.data(), ColorReadback->Pixels.data(), sizeof(FirstPixel));
+			if (FirstPixel != std::array<uint16_t, 4>{ 0x4400, 0x3800, 0x3400, 0x3c00 })
+			{
+				Fail("RGBA16F readback did not preserve the known finite shader radiance values");
+				return false;
+			}
+			const auto DepthReadback = App.ReadTextureForValidation(*DepthTexture);
+			if (!DepthReadback || DepthReadback->Format != PulseForge::TextureFormat::Depth32Float || DepthReadback->Width != 32 ||
+				DepthReadback->Height != 32 || DepthReadback->Pixels.size() != 32u * 32u * sizeof(float))
+			{
+				Fail(DepthReadback ? "D32 readback returned an invalid extent, format, or packed byte count"
+								   : "D32 attachment-only readback failed: " + DepthReadback.error().Message);
+				return false;
+			}
+			size_t WrittenDepthPixels = 0;
+			for (size_t Pixel = 0; Pixel < 32u * 32u; ++Pixel)
+			{
+				float Depth = 1.0f;
+				std::memcpy(&Depth, DepthReadback->Pixels.data() + Pixel * sizeof(float), sizeof(Depth));
+				if (std::isfinite(Depth) && Depth >= 0.0f && Depth < 0.99999f) ++WrittenDepthPixels;
+			}
+			if (WrittenDepthPixels < 16)
+			{
+				Fail("D32 attachment-only readback contained too few finite written depth pixels");
+				return false;
+			}
+			PF_INFO("RGBA16F readback preserved known finite HDR values; D32 attachment-only readback found {} written pixels",
+				WrittenDepthPixels);
+			return true;
+		}
+
 		void Fail(const std::string& Message)
 		{
 			m_Succeeded = false;
@@ -740,6 +801,7 @@ namespace
 		std::unique_ptr<PulseForge::GpuValidation::GpuProjectSceneValidation> m_ProjectSceneValidation;
 		std::chrono::steady_clock::time_point m_StartedAt{};
 		uint32_t m_CompletedFrames = 0;
+		bool m_ReadbackPending = false;
 		uint32_t m_RetirementValidationFrames = 0;
 		uint32_t m_RetirementNativeSubmissions = 0;
 		uint32_t m_RetirementMainFrames = 0;

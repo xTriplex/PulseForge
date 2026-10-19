@@ -22,6 +22,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	add_dependencies(PulseForgeGpuValidation PulseForgeGpuValidationShaders PulseForgeSceneShaderAssets)
 	set_property(TARGET PulseForgeGpuValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGpuValidation>")
 	if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
+		target_compile_definitions(PulseForgeSceneRenderer PRIVATE PULSEFORGE_GPU_VALIDATION_TESTS)
 		add_executable(PulseForgeMacOSRendererValidation
 			Tests/GpuValidation/MacOSRendererValidation.cpp
 			Tests/GpuValidation/MacOSRendererReadbackAnalysis.cpp)
@@ -73,11 +74,42 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 			CONFIGURATIONS Debug
 			COMMAND PulseForgeGpuValidation --presentation-fence-native-lifetime)
 		if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
-			add_test(NAME PulseForge.GPU.MacOSRenderer COMMAND PulseForgeMacOSRendererValidation)
-			set_tests_properties(PulseForge.GPU.MacOSRenderer PROPERTIES
-				RUN_SERIAL TRUE
-				TIMEOUT 180
+			foreach(RendererPolicy IN ITEMS auto require-fences)
+				string(REPLACE "-" "_" RendererPolicyTestSuffix "${RendererPolicy}")
+				add_test(NAME "PulseForge.GPU.MacOSRenderer.${RendererPolicyTestSuffix}"
+					COMMAND "${CMAKE_COMMAND}"
+						"-DPULSEFORGE_RENDERER_EXECUTABLE=$<TARGET_FILE:PulseForgeMacOSRendererValidation>"
+						"-DPULSEFORGE_POLICY=${RendererPolicy}"
+						-DPULSEFORGE_TIMEOUT_SECONDS=180
+						-P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/GpuValidation/MacOSRendererPolicyDriver.cmake")
+				set_tests_properties("PulseForge.GPU.MacOSRenderer.${RendererPolicyTestSuffix}" PROPERTIES
+					RUN_SERIAL TRUE
+					TIMEOUT 195
 				LABELS "gpu;renderer;macos;moltenvk")
+			endforeach()
+			foreach(RendererFault IN ITEMS suppress-geometry suppress-shadow-casters)
+				string(REPLACE "-" "_" RendererFaultTestSuffix "${RendererFault}")
+				add_test(NAME "PulseForge.GPU.MacOSRendererSensitivity.${RendererFaultTestSuffix}"
+					COMMAND "${CMAKE_COMMAND}"
+						"-DPULSEFORGE_RENDERER_EXECUTABLE=$<TARGET_FILE:PulseForgeMacOSRendererValidation>"
+						-DPULSEFORGE_POLICY=auto
+						"-DPULSEFORGE_SCENARIO=${RendererFault}"
+						-DPULSEFORGE_TIMEOUT_SECONDS=180
+						-P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/GpuValidation/MacOSRendererPolicyDriver.cmake")
+				set_tests_properties("PulseForge.GPU.MacOSRendererSensitivity.${RendererFaultTestSuffix}" PROPERTIES
+					RUN_SERIAL TRUE
+					TIMEOUT 195
+					LABELS "gpu;renderer;macos;moltenvk;sensitivity")
+			endforeach()
+			add_test(NAME PulseForge.GPU.MacOSRenderer.PolicyDriver
+				COMMAND "${CMAKE_COMMAND}"
+					"-DPULSEFORGE_DRIVER_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/Tests/GpuValidation/MacOSRendererPolicyDriver.cmake"
+					"-DPULSEFORGE_TEST_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}"
+					-P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/GpuValidation/MacOSRendererPolicyDriverSelfTest.cmake")
+			set_tests_properties(PulseForge.GPU.MacOSRenderer.PolicyDriver PROPERTIES
+				RUN_SERIAL TRUE
+				TIMEOUT 30
+				LABELS "renderer;macos;policy")
 		endif()
 		if(PULSEFORGE_PLATFORM_LINUX)
 			add_test(NAME PulseForge.GPU.LinuxWindowLifecycle COMMAND PulseForgeLinuxWindowLifecycleValidation)
