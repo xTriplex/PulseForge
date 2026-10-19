@@ -134,6 +134,7 @@ SELECT_SCRIPT = '''on run argv
                 delay 0.5
                 key code 36
             else if operation is "open-cancel" or operation is "save-cancel" then
+                delay 1
                 key code 53
             else if operation is "save-select" then
                 key code 36
