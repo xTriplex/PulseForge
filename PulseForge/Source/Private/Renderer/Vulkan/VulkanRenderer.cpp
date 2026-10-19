@@ -1551,6 +1551,9 @@ namespace PulseForge
 			const bool IsColor = Description.Format == TextureFormat::RGBA8_UNorm || Description.Format == TextureFormat::RGBA8_Srgb ||
 				Description.Format == TextureFormat::RGBA16_Float;
 			const bool IsDepth = Description.Format == TextureFormat::Depth32Float;
+			const nvrhi::ResourceStates RestoreState = HasTextureUsage(Description.Usage, TextureUsage::ShaderResource)
+				? nvrhi::ResourceStates::ShaderResource
+				: IsDepth ? nvrhi::ResourceStates::DepthWrite : nvrhi::ResourceStates::RenderTarget;
 			const uint32_t SliceCount = Description.Dimension == TextureDimension::TextureCube ? 6u : 1u;
 			if (Description.MipLevels != 1 || (!IsColor && !IsDepth) || ArraySlice >= SliceCount)
 			{
@@ -1605,7 +1608,7 @@ namespace PulseForge
 				CopyCommands->setTextureState(
 					NativeSource->GetNativeTexture(),
 					SourceSubresources,
-					nvrhi::ResourceStates::ShaderResource);
+					RestoreState);
 				CopyCommands->commitBarriers();
 				CopyCommands->close();
 				ExecuteNvrhiCommandList(CopyCommands, nvrhi::CommandQueue::Graphics, "submitting a texture readback copy");

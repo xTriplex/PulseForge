@@ -92,6 +92,10 @@ jobs:
           grep -q 'MACOS_RENDERER_READBACK=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'MACOS_RENDERER_NATIVE_RESIZE=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'MACOS_RENDERER_ORDERLY_SHUTDOWN=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
+          if grep -q 'VUID-' "$RUNNER_TEMP/macos-renderer-ctest.log"; then
+            echo "Khronos validation reported a Vulkan specification violation." >&2
+            exit 1
+          fi
 
       - name: Verify strict presentation-fence policy behavior
         run: |
