@@ -121,20 +121,46 @@ def stop_fixture(process: subprocess.Popen[str], output_reader: FixtureOutput) -
 
 def apple_script(source: str, *arguments: str, timeout: int = 30) -> tuple[int, str]:
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             ["/usr/bin/osascript", "-", *arguments],
-            input=source,
-            text=True,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=timeout,
-            check=False,
+            text=True,
+            start_new_session=True,
         )
-        return result.returncode, result.stdout
+    except OSError as error:
+        return 127, f"Unable to start AppleScript automation: {error}"
+    try:
+        output, _ = process.communicate(input=source, timeout=timeout)
+        return process.returncode, output
     except subprocess.TimeoutExpired as error:
         output = error.stdout or ""
         if isinstance(output, bytes):
             output = output.decode("utf-8", errors="replace")
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                return 124, output + "\nAppleScript process group survived SIGKILL cleanup\n"
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if process.stdin:
+            process.stdin.close()
+        if process.stdout:
+            process.stdout.close()
         return 124, output + "\nAppleScript exceeded its time bound\n"
 
 
@@ -142,58 +168,139 @@ PANEL_READY_PROBE = '''on run argv
     set targetPID to item 1 of argv as integer
     set operation to item 2 of argv
     tell application "System Events"
-        tell (first process whose unix id is targetPID)
-            set frontmost to true
-            set lastState to ""
-            repeat 100 times
-                repeat with candidateWindow in windows
-                    try
+        set targetProcess to first process whose unix id is targetPID
+        set processName to name of targetProcess as text
+        try
+            with timeout of 2 seconds
+                set frontmost of targetProcess to true
+            end timeout
+        on error errorMessage number errorNumber
+            error "NFD_ACCESSIBILITY_PROCESS_FAILED; pid=" & targetPID & "; process=" & processName & ¬
+                "; error=" & errorNumber & "; " & errorMessage
+        end try
+        set lastState to "no windows observed"
+        repeat 100 times
+            try
+                with timeout of 2 seconds
+                    set windowCount to count of windows of targetProcess
+                end timeout
+            on error errorMessage number errorNumber
+                error "NFD_ACCESSIBILITY_QUERY_FAILED; pid=" & targetPID & "; process=" & processName & ¬
+                    "; query=window-count; error=" & errorNumber & "; " & errorMessage
+            end try
+            repeat with windowIndex from 1 to windowCount
+                set candidateWindow to missing value
+                try
+                    with timeout of 2 seconds
+                        set candidateWindow to window windowIndex of targetProcess
                         set windowName to name of candidateWindow as text
                         set windowRole to role of candidateWindow as text
                         set windowSubrole to subrole of candidateWindow as text
-                        set buttonNames to name of every button of candidateWindow
-                        set buttonActions to "unavailable"
+                    end timeout
+                    set lastState to "window " & windowIndex & " '" & windowName & "' | " & windowRole & ¬
+                        " | " & windowSubrole & " | checking expected controls"
+                    with timeout of 2 seconds
+                        set panelReady to my matchesDialog(candidateWindow, operation)
+                    end timeout
+                    set lastState to "window " & windowIndex & " '" & windowName & "' | " & windowRole & ¬
+                        " | " & windowSubrole & " | expected buttons present=" & panelReady
+                    if panelReady then
+                        set cancelActions to "unavailable"
+                        set primaryActions to "unavailable"
                         try
-                            set buttonActions to actions of button "Cancel" of candidateWindow as text
-                        end try
-                        set lastState to windowName & " | " & windowRole & " | " & windowSubrole & ¬
-                            " | buttons=" & (buttonNames as text) & " | Cancel actions=" & buttonActions
-                        if buttonNames contains "Cancel" then
-                            if enabled of button "Cancel" of candidateWindow and ¬
-                                ((operation starts with "open" and buttonNames contains "Open") or ¬
-                                (operation starts with "save" and buttonNames contains "Save")) then
-                                return "NFD_PANEL_READY=" & lastState
-                            end if
-                        end if
-                    end try
-                    try
-                        repeat with candidateSheet in sheets of candidateWindow
-                            set sheetName to name of candidateSheet as text
-                            set sheetRole to role of candidateSheet as text
-                            set sheetSubrole to subrole of candidateSheet as text
-                            set buttonNames to name of every button of candidateSheet
-                            set buttonActions to "unavailable"
-                            try
-                                set buttonActions to actions of button "Cancel" of candidateSheet as text
-                            end try
-                            set lastState to sheetName & " | " & sheetRole & " | " & sheetSubrole & ¬
-                                " | buttons=" & (buttonNames as text) & " | Cancel actions=" & buttonActions
-                            if buttonNames contains "Cancel" then
-                                if enabled of button "Cancel" of candidateSheet and ¬
-                                    ((operation starts with "open" and buttonNames contains "Open") or ¬
-                                    (operation starts with "save" and buttonNames contains "Save")) then
-                                    return "NFD_PANEL_READY=" & lastState
+                            with timeout of 2 seconds
+                                set cancelActions to actions of button "Cancel" of candidateWindow as text
+                                if operation starts with "open" then
+                                    set primaryActions to actions of button "Open" of candidateWindow as text
+                                else
+                                    set primaryActions to actions of button "Save" of candidateWindow as text
                                 end if
-                            end if
+                            end timeout
+                        end try
+                        return "NFD_PANEL_READY=pid=" & targetPID & "; process=" & processName & "; " & lastState & ¬
+                            "; Cancel actions=" & cancelActions & "; primary actions=" & primaryActions
+                    end if
+                on error errorMessage number errorNumber
+                    if errorNumber is -1712 then
+                        error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; pid=" & targetPID & "; process=" & processName & ¬
+                            "; query=window-" & windowIndex & "; state=" & lastState & ¬
+                            "; error=" & errorNumber & "; " & errorMessage
+                    end if
+                    set lastState to "window " & windowIndex & " query error=" & errorNumber & "; " & errorMessage
+                end try
+                if candidateWindow is not missing value then
+                    try
+                        with timeout of 2 seconds
+                            set sheetCount to count of sheets of candidateWindow
+                        end timeout
+                        repeat with sheetIndex from 1 to sheetCount
+                            try
+                                with timeout of 2 seconds
+                                    set candidateSheet to sheet sheetIndex of candidateWindow
+                                    set sheetName to name of candidateSheet as text
+                                    set sheetRole to role of candidateSheet as text
+                                    set sheetSubrole to subrole of candidateSheet as text
+                                end timeout
+                                set lastState to "sheet " & sheetIndex & " '" & sheetName & "' | " & sheetRole & ¬
+                                    " | " & sheetSubrole & " | checking expected controls"
+                                with timeout of 2 seconds
+                                    set panelReady to my matchesDialog(candidateSheet, operation)
+                                end timeout
+                                set lastState to "sheet " & sheetIndex & " '" & sheetName & "' | " & sheetRole & ¬
+                                    " | " & sheetSubrole & " | expected buttons present=" & panelReady
+                                if panelReady then
+                                    set cancelActions to "unavailable"
+                                    set primaryActions to "unavailable"
+                                    try
+                                        with timeout of 2 seconds
+                                            set cancelActions to actions of button "Cancel" of candidateSheet as text
+                                            if operation starts with "open" then
+                                                set primaryActions to actions of button "Open" of candidateSheet as text
+                                            else
+                                                set primaryActions to actions of button "Save" of candidateSheet as text
+                                            end if
+                                        end timeout
+                                    end try
+                                    return "NFD_PANEL_READY=pid=" & targetPID & "; process=" & processName & "; " & lastState & ¬
+                                        "; Cancel actions=" & cancelActions & "; primary actions=" & primaryActions
+                                end if
+                            on error errorMessage number errorNumber
+                                if errorNumber is -1712 then
+                                    error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; pid=" & targetPID & "; process=" & processName & ¬
+                                        "; query=window-" & windowIndex & "/sheet-" & sheetIndex & ¬
+                                        "; state=" & lastState & "; error=" & errorNumber & "; " & errorMessage
+                                end if
+                                set lastState to "sheet " & sheetIndex & " query error=" & errorNumber & "; " & errorMessage
+                            end try
                         end repeat
+                    on error errorMessage number errorNumber
+                        if errorMessage starts with "NFD_ACCESSIBILITY_QUERY_TIMEOUT" then error errorMessage
+                        if errorNumber is -1712 then
+                            error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; pid=" & targetPID & "; process=" & processName & ¬
+                                "; query=window-" & windowIndex & "/sheets; state=" & lastState & ¬
+                                "; error=" & errorNumber & "; " & errorMessage
+                        end if
+                        set lastState to "window " & windowIndex & " sheets query error=" & errorNumber & "; " & errorMessage
                     end try
-                end repeat
-                delay 0.2
+                end if
             end repeat
-            error "NFD_PANEL_TIMEOUT; pid=" & targetPID & "; operation=" & operation & "; last role/subrole/buttons=" & lastState
-        end tell
+            delay 0.2
+        end repeat
+        error "NFD_PANEL_TIMEOUT; pid=" & targetPID & "; process=" & processName & "; operation=" & operation & ¬
+            "; last role/subrole/expected-control state=" & lastState
     end tell
 end run
+
+on matchesDialog(candidateElement, operation)
+    if not (exists button "Cancel" of candidateElement) then return false
+    set cancelEnabled to enabled of button "Cancel" of candidateElement
+    if operation starts with "open" then
+        set primaryButtonExists to exists button "Open" of candidateElement
+        return primaryButtonExists and cancelEnabled
+    end if
+    set primaryButtonExists to exists button "Save" of candidateElement
+    return primaryButtonExists and cancelEnabled
+end matchesDialog
 '''
 
 SELECT_SCRIPT = '''on run argv
@@ -202,98 +309,119 @@ SELECT_SCRIPT = '''on run argv
     set directoryPath to item 3 of argv
     set selectedName to item 4 of argv
     tell application "System Events"
-        tell (first process whose unix id is targetPID)
-            set frontmost to true
-            set dialogPanel to missing value
-            repeat 100 times
-                repeat with candidateWindow in windows
-                    try
-                        set candidateButtons to name of every button of candidateWindow
-                        if candidateButtons contains "Cancel" and ¬
-                            ((operation starts with "open" and candidateButtons contains "Open") or ¬
-                            (operation starts with "save" and candidateButtons contains "Save")) then
+        set targetProcess to first process whose unix id is targetPID
+        set frontmost of targetProcess to true
+        set dialogPanel to missing value
+        repeat 100 times
+            with timeout of 2 seconds
+                set candidateWindowCount to count of windows of targetProcess
+            end timeout
+            repeat with windowIndex from 1 to candidateWindowCount
+                set candidateWindow to missing value
+                try
+                    with timeout of 2 seconds
+                        set candidateWindow to window windowIndex of targetProcess
+                        if my matchesDialog(candidateWindow, operation) then
                             set dialogPanel to candidateWindow
-                            exit repeat
                         end if
-                    end try
+                    end timeout
+                end try
+                if dialogPanel is not missing value then exit repeat
+                if candidateWindow is not missing value then
                     try
-                        repeat with candidateSheet in sheets of candidateWindow
-                            set candidateButtons to name of every button of candidateSheet
-                            if candidateButtons contains "Cancel" and ¬
-                                ((operation starts with "open" and candidateButtons contains "Open") or ¬
-                                (operation starts with "save" and candidateButtons contains "Save")) then
-                                set dialogPanel to candidateSheet
-                                exit repeat
-                            end if
+                        with timeout of 2 seconds
+                            set sheetCount to count of sheets of candidateWindow
+                        end timeout
+                        repeat with sheetIndex from 1 to sheetCount
+                            try
+                                with timeout of 2 seconds
+                                    set candidateSheet to sheet sheetIndex of candidateWindow
+                                    if my matchesDialog(candidateSheet, operation) then
+                                        set dialogPanel to candidateSheet
+                                    end if
+                                end timeout
+                            end try
+                            if dialogPanel is not missing value then exit repeat
                         end repeat
                     end try
-                    if dialogPanel is not missing value then exit repeat
-                end repeat
+                end if
                 if dialogPanel is not missing value then exit repeat
+            end repeat
+            if dialogPanel is not missing value then exit repeat
+            delay 0.1
+        end repeat
+        if dialogPanel is missing value then error "The observable native file panel disappeared before interaction"
+        if operation is "open-select" then
+            keystroke "g" using {command down, shift down}
+            set goSheet to missing value
+            repeat 100 times
+                repeat with candidateWindow in windows of targetProcess
+                    try
+                        if (count of sheets of candidateWindow) > 0 then
+                            set possibleSheet to sheet 1 of candidateWindow
+                            if (count of text fields of possibleSheet) > 0 then
+                                set goSheet to possibleSheet
+                                exit repeat
+                            end if
+                        end if
+                    end try
+                end repeat
+                if goSheet is not missing value then exit repeat
                 delay 0.1
             end repeat
-            if dialogPanel is missing value then error "The observable native file panel disappeared before interaction"
-            if operation is "open-select" then
-                keystroke "g" using {command down, shift down}
-                set goSheet to missing value
-                repeat 100 times
-                    repeat with candidateWindow in windows
-                        try
-                            if (count of sheets of candidateWindow) > 0 then
-                                set possibleSheet to sheet 1 of candidateWindow
-                                if (count of text fields of possibleSheet) > 0 then
-                                    set goSheet to possibleSheet
-                                    exit repeat
-                                end if
-                            end if
-                        end try
-                    end repeat
-                    if goSheet is not missing value then exit repeat
-                    delay 0.1
-                end repeat
-                if goSheet is missing value then error "Go to Folder sheet did not expose a text field after Cmd-Shift-G"
-                set value of text field 1 of goSheet to directoryPath
-                if (value of text field 1 of goSheet as text) is not directoryPath then
-                    error "Go to Folder field did not retain the requested Unicode directory path"
-                end if
-                if not enabled of button "Go" of goSheet then error "Go to Folder confirmation remained disabled"
-                perform action "AXPress" of button "Go" of goSheet
-                repeat 100 times
-                    try
-                        if enabled of button "Open" of dialogPanel then exit repeat
-                    end try
-                    delay 0.1
-                end repeat
-                keystroke selectedName
-                repeat 100 times
-                    try
-                        if enabled of button "Open" of dialogPanel then exit repeat
-                    end try
-                    delay 0.1
-                end repeat
-                if not enabled of button "Open" of dialogPanel then error "Open remained disabled after selecting the Unicode filename"
-                perform action "AXPress" of button "Open" of dialogPanel
-            else if operation is "open-cancel" or operation is "save-cancel" then
-                perform action "AXPress" of button "Cancel" of dialogPanel
-            else if operation is "save-select" then
-                set savePanel to dialogPanel
-                if (count of text fields of savePanel) is 0 then error "Save panel did not expose its filename field"
-                set value of text field 1 of savePanel to selectedName
-                if (value of text field 1 of savePanel as text) is not selectedName then
-                    error "Save filename field did not retain the requested Unicode filename"
-                end if
-                repeat 100 times
-                    if enabled of button "Save" of savePanel then exit repeat
-                    delay 0.1
-                end repeat
-                if not enabled of button "Save" of savePanel then error "Save remained disabled after filename entry"
-                perform action "AXPress" of button "Save" of savePanel
+            if goSheet is missing value then error "Go to Folder sheet did not expose a text field after Cmd-Shift-G"
+            set value of text field 1 of goSheet to directoryPath
+            if (value of text field 1 of goSheet as text) is not directoryPath then
+                error "Go to Folder field did not retain the requested Unicode directory path"
             end if
-        end tell
+            if not enabled of button "Go" of goSheet then error "Go to Folder confirmation remained disabled"
+            perform action "AXPress" of button "Go" of goSheet
+            repeat 100 times
+                try
+                    if enabled of button "Open" of dialogPanel then exit repeat
+                end try
+                delay 0.1
+            end repeat
+            keystroke selectedName
+            repeat 100 times
+                try
+                    if enabled of button "Open" of dialogPanel then exit repeat
+                end try
+                delay 0.1
+            end repeat
+            if not enabled of button "Open" of dialogPanel then error "Open remained disabled after selecting the Unicode filename"
+            perform action "AXPress" of button "Open" of dialogPanel
+        else if operation is "open-cancel" or operation is "save-cancel" then
+            perform action "AXPress" of button "Cancel" of dialogPanel
+        else if operation is "save-select" then
+            set savePanel to dialogPanel
+            if (count of text fields of savePanel) is 0 then error "Save panel did not expose its filename field"
+            set value of text field 1 of savePanel to selectedName
+            if (value of text field 1 of savePanel as text) is not selectedName then
+                error "Save filename field did not retain the requested Unicode filename"
+            end if
+            repeat 100 times
+                if enabled of button "Save" of savePanel then exit repeat
+                delay 0.1
+            end repeat
+            if not enabled of button "Save" of savePanel then error "Save remained disabled after filename entry"
+            perform action "AXPress" of button "Save" of savePanel
+        end if
     end tell
+    return "NFD_PANEL_INTERACTION=PASS; pid=" & targetPID & "; scenario=" & operation
 end run
-'''
 
+on matchesDialog(candidateElement, operation)
+    if not (exists button "Cancel" of candidateElement) then return false
+    set cancelEnabled to enabled of button "Cancel" of candidateElement
+    if operation starts with "open" then
+        set primaryButtonExists to exists button "Open" of candidateElement
+        return primaryButtonExists and cancelEnabled
+    end if
+    set primaryButtonExists to exists button "Save" of candidateElement
+    return primaryButtonExists and cancelEnabled
+end matchesDialog
+'''
 
 def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, timeout_seconds: int) -> tuple[int, str]:
     deadline = time.monotonic() + timeout_seconds
@@ -368,6 +496,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             print("NFD_UI_AUTOMATION=UNAVAILABLE; reason=macOS TCC denied Accessibility or Apple Events; native dialog cases NOT RUN")
             return 77, probe_output
         return 1, f"Accessibility capability probe failed without an identified TCC denial: {probe_output}"
+    print(probe_output)
 
     remaining = remaining_seconds()
     if remaining <= 0:
@@ -389,6 +518,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             print("NFD_UI_AUTOMATION=UNAVAILABLE; reason=macOS TCC denied Accessibility or Apple Events; native dialog cases NOT RUN")
             return 77, automation_output
         return 1, f"native panel automation failed: {automation_output}"
+    print(automation_output)
 
     try:
         exit_code = process.wait(timeout=remaining_seconds())
