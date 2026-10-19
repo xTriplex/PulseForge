@@ -15,13 +15,10 @@ namespace PulseForgeEditor
 	void EditorPlatformServices::ApplyMainWindowAppearance(GLFWwindow* Window) noexcept
 	{
 		const HWND NativeWindow = Window ? glfwGetWin32Window(Window) : nullptr;
-		if (!NativeWindow)
-			return;
+		if (!NativeWindow) return;
 
 		const BOOL UseDarkMode = TRUE;
-		const HRESULT Result = DwmSetWindowAttribute(
-			NativeWindow, DWMWA_USE_IMMERSIVE_DARK_MODE, &UseDarkMode, sizeof(UseDarkMode));
-		if (FAILED(Result))
-			PF_INFO("Dark native caption styling is unavailable; using the system caption style");
+		const HRESULT Result = DwmSetWindowAttribute(NativeWindow, DWMWA_USE_IMMERSIVE_DARK_MODE, &UseDarkMode, sizeof(UseDarkMode));
+		if (FAILED(Result)) PF_INFO("Dark native caption styling is unavailable; using the system caption style");
 	}
 } // namespace PulseForgeEditor

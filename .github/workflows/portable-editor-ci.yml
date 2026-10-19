@@ -13,13 +13,12 @@ jobs:
     runs-on: windows-2022
     steps:
       - name: Check out pinned sources and submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
       - name: Restore pinned dependency sources
-        id: dependency-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             Build/CI/Dependencies/pulseforgenvrhi-src
@@ -27,6 +26,13 @@ jobs:
             Build/CI/Dependencies/vulkan_headers-src
             Build/CI/Dependencies/_downloads
           key: ${{ runner.os }}-fetchcontent-v1-${{ hashFiles('CMake/PulseForgeDependencies.cmake', '.gitmodules') }}
+
+      - name: Validate restored dependency sources
+        shell: pwsh
+        run: |
+          & cmake -DPULSEFORGE_REPOSITORY_ROOT="$env:GITHUB_WORKSPACE" `
+            -DPULSEFORGE_CI_DEPENDENCY_CACHE="$env:GITHUB_WORKSPACE/Build/CI/Dependencies" `
+            -P CMake/PulseForgeCiDependencyCache.cmake
 
       - name: Configure
         shell: pwsh
@@ -36,7 +42,7 @@ jobs:
             -DPULSEFORGE_BUILD_EDITOR=ON `
             -DPULSEFORGE_BUILD_GPU_VALIDATION_TESTS=OFF `
             -DFETCHCONTENT_BASE_DIR="$env:GITHUB_WORKSPACE/Build/CI/Dependencies" `
-            -DFETCHCONTENT_FULLY_DISCONNECTED=${{ steps.dependency-cache.outputs.cache-hit }} *> "$env:RUNNER_TEMP/configure.log"
+            -DFETCHCONTENT_FULLY_DISCONNECTED=OFF *> "$env:RUNNER_TEMP/configure.log"
           $result = $LASTEXITCODE
           Get-Content "$env:RUNNER_TEMP/configure.log"
           if ($result -ne 0) { exit $result }
@@ -59,13 +65,14 @@ jobs:
 
       - name: Upload failure logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: windows-cmake-ctest-logs
           path: |
             ${{ runner.temp }}/configure.log
             ${{ runner.temp }}/build.log
             ${{ runner.temp }}/ctest.log
+            Build/CI/windows/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/windows/CMakeFiles/CMakeOutput.log
             Build/CI/windows/CMakeFiles/CMakeError.log
             Build/CI/windows/Testing/Temporary/LastTest.log
@@ -77,13 +84,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out pinned sources and submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
       - name: Restore pinned dependency sources
-        id: dependency-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             Build/CI/Dependencies/pulseforgenvrhi-src
@@ -91,6 +97,13 @@ jobs:
             Build/CI/Dependencies/vulkan_headers-src
             Build/CI/Dependencies/_downloads
           key: ${{ runner.os }}-fetchcontent-v1-${{ hashFiles('CMake/PulseForgeDependencies.cmake', '.gitmodules') }}
+
+      - name: Validate restored dependency sources
+        run: |
+          cmake \
+            -DPULSEFORGE_REPOSITORY_ROOT="$GITHUB_WORKSPACE" \
+            -DPULSEFORGE_CI_DEPENDENCY_CACHE="$GITHUB_WORKSPACE/Build/CI/Dependencies" \
+            -P CMake/PulseForgeCiDependencyCache.cmake
 
       - name: Install native development prerequisites
         run: |
@@ -111,7 +124,7 @@ jobs:
             -DPULSEFORGE_BUILD_EDITOR=ON \
             -DPULSEFORGE_BUILD_GPU_VALIDATION_TESTS=OFF \
             -DFETCHCONTENT_BASE_DIR="$GITHUB_WORKSPACE/Build/CI/Dependencies" \
-            -DFETCHCONTENT_FULLY_DISCONNECTED=${{ steps.dependency-cache.outputs.cache-hit }} 2>&1 | tee "$RUNNER_TEMP/configure.log"
+            -DFETCHCONTENT_FULLY_DISCONNECTED=OFF 2>&1 | tee "$RUNNER_TEMP/configure.log"
 
       - name: Build first-party tests, editor and game
         run: |
@@ -126,13 +139,14 @@ jobs:
 
       - name: Upload failure logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: linux-cmake-ctest-logs
           path: |
             ${{ runner.temp }}/configure.log
             ${{ runner.temp }}/build.log
             ${{ runner.temp }}/ctest.log
+            Build/CI/linux/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/linux/CMakeFiles/CMakeOutput.log
             Build/CI/linux/CMakeFiles/CMakeError.log
             Build/CI/linux/Testing/Temporary/LastTest.log

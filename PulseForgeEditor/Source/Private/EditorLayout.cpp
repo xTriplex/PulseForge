@@ -24,13 +24,11 @@ namespace
 	std::expected<std::filesystem::path, std::string> GetUserWorkspacePath()
 	{
 		auto Override = PulseForgeEditor::EditorPlatformFileSystem::GetSettingsDirectoryOverride();
-		if (!Override)
-			return std::unexpected(std::move(Override.error()));
+		if (!Override) return std::unexpected(std::move(Override.error()));
 		if (*Override)
 		{
 			std::filesystem::path Directory = std::move(**Override);
-			if (!Directory.is_absolute())
-				return std::unexpected("The editor settings directory override must be an absolute path");
+			if (!Directory.is_absolute()) return std::unexpected("The editor settings directory override must be an absolute path");
 			std::error_code Error;
 			std::filesystem::create_directories(Directory, Error);
 			if (Error)
@@ -42,8 +40,7 @@ namespace
 		if (!UserDataDirectory) return std::unexpected(UserDataDirectory.error().Message);
 
 		std::filesystem::path Directory = std::move(*UserDataDirectory);
-		if (!Directory.is_absolute())
-			return std::unexpected("The platform user data directory must be an absolute path");
+		if (!Directory.is_absolute()) return std::unexpected("The platform user data directory must be an absolute path");
 		Directory /= "PulseForge";
 		Directory /= "Editor";
 
@@ -183,14 +180,12 @@ namespace PulseForgeEditor
 		std::filesystem::path LegacyPath;
 		std::error_code CurrentPathError;
 		const std::filesystem::path CurrentDirectory = std::filesystem::current_path(CurrentPathError);
-		if (!CurrentPathError)
-			LegacyPath = CurrentDirectory / "imgui.ini";
+		if (!CurrentPathError) LegacyPath = CurrentDirectory / "imgui.ini";
 
 		std::filesystem::path SourcePath;
 		m_SettingsPath = *SettingsPath;
 		std::error_code ExistsError;
-		if (std::filesystem::exists(*SettingsPath, ExistsError) && !ExistsError)
-			SourcePath = *SettingsPath;
+		if (std::filesystem::exists(*SettingsPath, ExistsError) && !ExistsError) SourcePath = *SettingsPath;
 		else if (!LegacyPath.empty() && LegacyPath != *SettingsPath && std::filesystem::exists(LegacyPath, ExistsError) && !ExistsError)
 		{
 			SourcePath = LegacyPath;
