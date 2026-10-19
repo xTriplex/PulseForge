@@ -177,7 +177,226 @@ def apple_script(source: str, *arguments: str, timeout: int = 30) -> tuple[int, 
         return 124, output + "\nAppleScript exceeded its time bound\n"
 
 
-PANEL_READY_PROBE = '''on run argv
+ACCESSIBILITY_CONTROL_HANDLERS = '''on matchesDialog(candidateElement, operation)
+    tell application "System Events"
+        try
+            set candidateRole to role of candidateElement as text
+            set candidateSubrole to subrole of candidateElement as text
+        on error errorMessage number errorNumber
+            my classifyAccessibilityError(errorNumber, errorMessage)
+            return false
+        end try
+        if candidateRole is not "AXSheet" and candidateSubrole is not "AXDialog" then return false
+        set cancelButton to my findDialogButton(candidateElement, "Cancel")
+        if cancelButton is missing value then return false
+        set cancelEnabled to false
+        try
+            set cancelEnabled to enabled of cancelButton
+        on error errorMessage number errorNumber
+            my classifyAccessibilityError(errorNumber, errorMessage)
+        end try
+        if operation is "open-select" or operation is "open-cancel" then
+            set primaryButton to my findDialogButton(candidateElement, "Open")
+        else
+            set primaryButton to my findDialogButton(candidateElement, "Save")
+        end if
+        if primaryButton is missing value then return false
+        return cancelEnabled
+    end tell
+end matchesDialog
+
+on findDialogButton(candidateElement, requestedName)
+    set my uiScanVisited to 0
+    return my findDialogElement(candidateElement, "AXButton", requestedName, 0, 0)
+end findDialogButton
+
+on findDialogTextField(candidateElement, requestedIndex)
+    set my uiScanVisited to 0
+    set my uiFieldMatches to 0
+    return my findDialogElement(candidateElement, "AXTextField", "", requestedIndex, 0)
+end findDialogTextField
+
+on findDialogElement(container, requestedRole, requestedName, requestedIndex, depth)
+    if depth > 8 or my uiScanVisited >= 96 then return missing value
+    set children to missing value
+    try
+        tell application "System Events" to set children to UI elements of container
+    on error errorMessage number errorNumber
+        my classifyAccessibilityError(errorNumber, errorMessage)
+        return missing value
+    end try
+    set childCount to count of children
+    if requestedRole is "AXTextField" then
+        repeat with childIndex from 1 to childCount
+            if my uiScanVisited >= 96 then exit repeat
+            set foundElement to my findDialogChild(item childIndex of children, requestedRole, requestedName, requestedIndex, depth)
+            if foundElement is not missing value then return foundElement
+        end repeat
+    else
+        repeat with childIndex from childCount to 1 by -1
+            if my uiScanVisited >= 96 then exit repeat
+            set foundElement to my findDialogChild(item childIndex of children, requestedRole, requestedName, requestedIndex, depth)
+            if foundElement is not missing value then return foundElement
+        end repeat
+    end if
+    return missing value
+end findDialogElement
+
+on findDialogChild(childElement, requestedRole, requestedName, requestedIndex, depth)
+    if my uiScanVisited >= 96 then return missing value
+    set my uiScanVisited to (my uiScanVisited) + 1
+    set childRole to "?"
+    try
+        tell application "System Events" to set childRole to role of childElement as text
+    on error errorMessage number errorNumber
+        my classifyAccessibilityError(errorNumber, errorMessage)
+    end try
+    if childRole is requestedRole and requestedRole is "AXButton" then
+        set childName to ""
+        set childDescription to ""
+        tell application "System Events"
+            try
+                set childName to name of childElement as text
+            on error errorMessage number errorNumber
+                my classifyAccessibilityError(errorNumber, errorMessage)
+            end try
+            try
+                set childDescription to description of childElement as text
+            on error errorMessage number errorNumber
+                my classifyAccessibilityError(errorNumber, errorMessage)
+            end try
+        end tell
+        if childName is requestedName or childDescription is requestedName then return childElement
+    else if childRole is requestedRole and requestedRole is "AXTextField" then
+        set my uiFieldMatches to (my uiFieldMatches) + 1
+        if my uiFieldMatches is requestedIndex then return childElement
+    end if
+    if childRole is "AXGroup" or childRole is "AXToolbar" or childRole is "AXSplitGroup" or ¬
+        childRole is "AXRadioGroup" or childRole is "AXTabGroup" or childRole is "AXSheet" or childRole is "AXWindow" then
+        return my findDialogElement(childElement, requestedRole, requestedName, requestedIndex, depth + 1)
+    end if
+    return missing value
+end findDialogChild
+
+on describeDialogControls(candidateElement, operation)
+    set my uiScanVisited to 0
+    set my uiScanReport to ""
+    if operation is "open-select" or operation is "open-cancel" then
+        set primaryName to "Open"
+    else
+        set primaryName to "Save"
+    end if
+    my appendDialogChildren(candidateElement, 0)
+    return "visited=" & (my uiScanVisited as text) & "; expected=Cancel," & primaryName & "; controls=[" & ¬
+        (my uiScanReport) & "]"
+end describeDialogControls
+
+on appendDialogChildren(container, depth)
+    if depth > 8 or my uiScanVisited >= 32 or (length of (my uiScanReport)) > 2600 then return
+    set children to missing value
+    try
+        tell application "System Events" to set children to UI elements of container
+    on error errorMessage number errorNumber
+        my classifyAccessibilityError(errorNumber, errorMessage)
+        return
+    end try
+    set childCount to count of children
+    repeat with childIndex from childCount to 1 by -1
+        if my uiScanVisited >= 32 or (length of (my uiScanReport)) > 2600 then exit repeat
+        set childElement to item childIndex of children
+        set my uiScanVisited to (my uiScanVisited) + 1
+        set childRole to "?"
+        set childName to ""
+        set childSubrole to "?"
+        tell application "System Events"
+            try
+                set childRole to role of childElement as text
+            on error errorMessage number errorNumber
+                my classifyAccessibilityError(errorNumber, errorMessage)
+            end try
+            try
+                set childSubrole to subrole of childElement as text
+            on error errorMessage number errorNumber
+                my classifyAccessibilityError(errorNumber, errorMessage)
+            end try
+            if childRole is "AXButton" or childRole is "AXTextField" then
+                try
+                    set childName to name of childElement as text
+                on error errorMessage number errorNumber
+                    my classifyAccessibilityError(errorNumber, errorMessage)
+                end try
+            end if
+        end tell
+        set itemState to childRole & "/" & childSubrole
+        if childName is not "" then set itemState to itemState & ": name='" & childName & "'"
+        if childRole is "AXButton" then
+            tell application "System Events"
+                try
+                    set childDescription to description of childElement as text
+                    set itemState to itemState & " description='" & childDescription & "'"
+                on error errorMessage number errorNumber
+                    my classifyAccessibilityError(errorNumber, errorMessage)
+                end try
+                try
+                    set itemState to itemState & " enabled=" & ((enabled of childElement) as text)
+                on error errorMessage number errorNumber
+                    my classifyAccessibilityError(errorNumber, errorMessage)
+                end try
+                try
+                    set itemState to itemState & " actions=" & (actions of childElement as text)
+                on error errorMessage number errorNumber
+                    my classifyAccessibilityError(errorNumber, errorMessage)
+                end try
+            end tell
+        end if
+        if my uiScanReport is not "" then set my uiScanReport to (my uiScanReport) & "; "
+        set my uiScanReport to (my uiScanReport) & (depth as text) & ":" & itemState
+        if childRole is "AXGroup" or childRole is "AXToolbar" or childRole is "AXSplitGroup" or ¬
+            childRole is "AXRadioGroup" or childRole is "AXTabGroup" or childRole is "AXSheet" or childRole is "AXWindow" then
+            my appendDialogChildren(childElement, depth + 1)
+        end if
+    end repeat
+end appendDialogChildren
+
+on classifyAccessibilityError(errorNumber, errorMessage)
+    if errorNumber is -1712 then
+        error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
+    end if
+    if errorNumber is -1719 or errorNumber is -1743 then
+        error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
+    end if
+    if errorNumber is not -1728 then
+        error "NFD_ACCESSIBILITY_QUERY_FAILED; error=" & errorNumber & "; " & errorMessage number errorNumber
+    end if
+end classifyAccessibilityError
+
+on pressDialogButton(buttonElement, buttonName)
+    tell application "System Events"
+        set availableActions to "unavailable"
+        try
+            set availableActions to actions of buttonElement as text
+        on error errorMessage number errorNumber
+            my classifyAccessibilityError(errorNumber, errorMessage)
+            error "NFD_ACCESSIBILITY_ACTION_QUERY_FAILED; button=" & buttonName & "; " & errorMessage number errorNumber
+        end try
+        if availableActions does not contain "AXPress" then
+            error "NFD_ACCESSIBILITY_ACTION_MISSING; button=" & buttonName & "; actions=" & availableActions
+        end if
+        try
+            perform action "AXPress" of buttonElement
+        on error errorMessage number errorNumber
+            my classifyAccessibilityError(errorNumber, errorMessage)
+            error "NFD_ACCESSIBILITY_PRESS_FAILED; button=" & buttonName & "; " & errorMessage number errorNumber
+        end try
+    end tell
+end pressDialogButton
+'''
+
+PANEL_READY_PROBE = '''property uiScanVisited : 0
+property uiFieldMatches : 0
+property uiScanReport : ""
+
+on run argv
     set targetPID to item 1 of argv as integer
     set operation to item 2 of argv
     tell application "System Events"
@@ -354,144 +573,13 @@ PANEL_READY_PROBE = '''on run argv
             "; last role/subrole/expected-control state=" & lastState
     end tell
 end run
+''' + ACCESSIBILITY_CONTROL_HANDLERS
 
-on matchesDialog(candidateElement, operation)
-    tell application "System Events"
-        try
-            set candidateRole to role of candidateElement as text
-            set candidateSubrole to subrole of candidateElement as text
-        on error errorMessage number errorNumber
-            if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-            if errorNumber is -1719 or errorNumber is -1743 then
-                error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-            end if
-            return false
-        end try
-        if candidateRole is not "AXSheet" and candidateSubrole is not "AXDialog" then return false
-        set cancelButton to my findDialogButton(candidateElement, "Cancel")
-        if cancelButton is missing value then return false
-        set cancelEnabled to enabled of cancelButton
-        if operation is "open-select" or operation is "open-cancel" then
-            set primaryButton to my findDialogButton(candidateElement, "Open")
-        else
-            set primaryButton to my findDialogButton(candidateElement, "Save")
-        end if
-        if primaryButton is missing value then return false
-        return cancelEnabled
-    end tell
-end matchesDialog
+SELECT_SCRIPT = '''property uiScanVisited : 0
+property uiFieldMatches : 0
+property uiScanReport : ""
 
-on describeDialogControls(candidateElement, operation)
-    tell application "System Events"
-        if operation is "open-select" or operation is "open-cancel" then
-            set primaryName to "Open"
-        else
-            set primaryName to "Save"
-        end if
-        try
-            set descendants to entire contents of candidateElement
-        on error errorMessage number errorNumber
-            if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-            if errorNumber is -1719 or errorNumber is -1743 then
-                error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-            end if
-            error "NFD_ACCESSIBILITY_DESCENDANT_QUERY_FAILED; error=" & errorNumber & "; " & errorMessage number errorNumber
-        end try
-        set descendantCount to count of descendants
-        set state to "descendants=" & descendantCount & "; expected=Cancel," & primaryName & "; controls=["
-        set itemCount to 0
-        set hasMore to false
-        repeat with descendantReference in descendants
-            if itemCount is 40 or (length of state) > 3000 then
-                set hasMore to true
-                exit repeat
-            end if
-            set descendant to contents of descendantReference
-            set roleName to "?"
-            set elementName to "?"
-            set elementDescription to "?"
-            try
-                set roleName to role of descendant as text
-            on error errorMessage number errorNumber
-                if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-                if errorNumber is -1719 or errorNumber is -1743 then
-                    error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-                end if
-            end try
-            try
-                set elementName to name of descendant as text
-            on error errorMessage number errorNumber
-                if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-                if errorNumber is -1719 or errorNumber is -1743 then
-                    error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-                end if
-            end try
-            try
-                set elementDescription to description of descendant as text
-            on error errorMessage number errorNumber
-                if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-                if errorNumber is -1719 or errorNumber is -1743 then
-                    error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-                end if
-            end try
-            set itemState to roleName & ": name='" & elementName & "' description='" & elementDescription & "'"
-            if roleName is "AXButton" then
-                try
-                    set itemState to itemState & " enabled=" & ((enabled of descendant) as text)
-                on error errorMessage number errorNumber
-                    if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-                    if errorNumber is -1719 or errorNumber is -1743 then
-                        error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-                    end if
-                end try
-                try
-                    set itemState to itemState & " actions=" & (actions of descendant as text)
-                on error errorMessage number errorNumber
-                    if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-                    if errorNumber is -1719 or errorNumber is -1743 then
-                        error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-                    end if
-                end try
-            end if
-            if itemCount is not 0 then set state to state & "; "
-            set state to state & itemState
-            set itemCount to itemCount + 1
-        end repeat
-        if hasMore then set state to state & "; truncated"
-        return state & "]"
-    end tell
-end describeDialogControls
-
-on findDialogButton(candidateElement, requestedName)
-    tell application "System Events"
-        try
-            set descendants to entire contents of candidateElement
-        on error errorMessage number errorNumber
-            if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-            if errorNumber is -1719 or errorNumber is -1743 then
-                error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-            end if
-            error "NFD_ACCESSIBILITY_DESCENDANT_QUERY_FAILED; error=" & errorNumber & "; " & errorMessage number errorNumber
-        end try
-        repeat with descendantReference in descendants
-            set descendant to contents of descendantReference
-            try
-                if (role of descendant as text) is "AXButton" and (name of descendant as text) is requestedName then
-                    return descendant
-                end if
-            on error errorMessage number errorNumber
-                if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-                if errorNumber is -1719 or errorNumber is -1743 then
-                    error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-                end if
-            end try
-        end repeat
-        return missing value
-    end tell
-end findDialogButton
-'''
-
-SELECT_SCRIPT = '''on run argv
+on run argv
     set targetPID to item 1 of argv as integer
     set operation to item 2 of argv
     set directoryPath to item 3 of argv
@@ -615,96 +703,8 @@ SELECT_SCRIPT = '''on run argv
     end tell
     return "NFD_PANEL_INTERACTION=PASS; pid=" & targetPID & "; scenario=" & operation
 end run
+''' + ACCESSIBILITY_CONTROL_HANDLERS
 
-on matchesDialog(candidateElement, operation)
-    tell application "System Events"
-        try
-            set candidateRole to role of candidateElement as text
-            set candidateSubrole to subrole of candidateElement as text
-        on error errorMessage number errorNumber
-            if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-            if errorNumber is -1719 or errorNumber is -1743 then
-                error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-            end if
-            return false
-        end try
-        if candidateRole is not "AXSheet" and candidateSubrole is not "AXDialog" then return false
-        set cancelButton to my findDialogButton(candidateElement, "Cancel")
-        if cancelButton is missing value then return false
-        set cancelEnabled to enabled of cancelButton
-        if operation is "open-select" or operation is "open-cancel" then
-            set primaryButton to my findDialogButton(candidateElement, "Open")
-        else
-            set primaryButton to my findDialogButton(candidateElement, "Save")
-        end if
-        if primaryButton is missing value then return false
-        return cancelEnabled
-    end tell
-end matchesDialog
-
-on findDialogButton(candidateElement, requestedName)
-    tell application "System Events"
-        try
-            set descendants to entire contents of candidateElement
-        on error errorMessage number errorNumber
-            if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-            if errorNumber is -1719 or errorNumber is -1743 then
-                error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-            end if
-            error "NFD_ACCESSIBILITY_DESCENDANT_QUERY_FAILED; error=" & errorNumber & "; " & errorMessage number errorNumber
-        end try
-        repeat with descendantReference in descendants
-            set descendant to contents of descendantReference
-            try
-                if (role of descendant as text) is "AXButton" and (name of descendant as text) is requestedName then
-                    return descendant
-                end if
-            end try
-        end repeat
-        return missing value
-    end tell
-end findDialogButton
-
-on findDialogTextField(candidateElement, requestedIndex)
-    tell application "System Events"
-        set fieldIndex to 0
-        try
-            set descendants to entire contents of candidateElement
-        on error errorMessage number errorNumber
-            if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-            if errorNumber is -1719 or errorNumber is -1743 then
-                error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-            end if
-            error "NFD_ACCESSIBILITY_DESCENDANT_QUERY_FAILED; error=" & errorNumber & "; " & errorMessage number errorNumber
-        end try
-        repeat with descendantReference in descendants
-            set descendant to contents of descendantReference
-            try
-                if (role of descendant as text) is "AXTextField" then
-                    set fieldIndex to fieldIndex + 1
-                    if fieldIndex is requestedIndex then return descendant
-                end if
-            on error errorMessage number errorNumber
-                if errorNumber is -1712 then error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
-                if errorNumber is -1719 or errorNumber is -1743 then
-                    error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
-                end if
-            end try
-        end repeat
-        return missing value
-    end tell
-end findDialogTextField
-
-on pressDialogButton(buttonElement, buttonName)
-    tell application "System Events"
-        set availableActions to actions of buttonElement as text
-        if availableActions does not contain "AXPress" then
-            error "NFD_ACCESSIBILITY_ACTION_MISSING; button=" & buttonName & "; actions=" & availableActions
-        end if
-        perform action "AXPress" of buttonElement
-    end tell
-end pressDialogButton
-'''
 
 def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, timeout_seconds: int) -> tuple[int, str]:
     deadline = time.monotonic() + timeout_seconds
@@ -779,6 +779,13 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             if not stop_fixture(process, output_reader):
                 return 1, "fixture process group or output reader survived cleanup after the panel readiness deadline"
             return 1, f"native panel did not become Accessibility-ready; last_state={last_panel_state!r}"
+        if output_reader.failure_lines:
+            if not stop_fixture(process, output_reader):
+                return 1, "fixture process group or output reader survived cleanup after a panel-readiness failure"
+            return process.returncode or 1, "; ".join(output_reader.failure_lines)
+        if process.poll() is not None:
+            output_reader.thread.join(timeout=5)
+            return process.returncode or 1, "native-dialog fixture exited before its panel became Accessibility-ready"
         probe_code, probe_output = apple_script(
             PANEL_READY_PROBE,
             process_id,
@@ -786,13 +793,19 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             timeout=min(5, max(1, int(probe_remaining))),
         )
         if probe_code != 0:
-            if not stop_fixture(process, output_reader):
-                return 1, "fixture process group or output reader survived cleanup after the Accessibility probe"
             if is_tcc_denial(probe_output):
+                if not stop_fixture(process, output_reader):
+                    return 1, "fixture process group or output reader survived cleanup after the Accessibility authorization denial"
                 print("NFD_UI_AUTOMATION=UNAVAILABLE; reason=macOS TCC denied Accessibility or Apple Events; native dialog cases NOT RUN")
                 return 77, probe_output
-            if is_accessibility_timeout(probe_output):
-                return 1, f"Accessibility query timed out; osascript_exit_code={probe_code}; output={probe_output!r}"
+            if is_accessibility_timeout(probe_output) or probe_code == 124:
+                if "process group survived SIGKILL cleanup" in probe_output:
+                    return 1, f"timed-out Accessibility probe process did not terminate; output={probe_output!r}"
+                last_panel_state = f"bounded Accessibility query timed out; exit_code={probe_code}; output={probe_output!r}"
+                time.sleep(min(0.2, max(0.0, probe_deadline - time.monotonic())))
+                continue
+            if not stop_fixture(process, output_reader):
+                return 1, "fixture process group or output reader survived cleanup after an unexpected Accessibility failure"
             return 1, (
                 "Accessibility snapshot query failed without an identified TCC denial; "
                 f"osascript_exit_code={probe_code}; output={probe_output!r}"
@@ -803,9 +816,9 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             print("NFD_UI_AUTOMATION=UNAVAILABLE; reason=macOS TCC denied Accessibility or Apple Events; native dialog cases NOT RUN")
             return 77, probe_output
         if is_accessibility_timeout(probe_output):
-            if not stop_fixture(process, output_reader):
-                return 1, "fixture process group or output reader survived cleanup after an Accessibility query timeout"
-            return 1, f"Accessibility query timed out; {probe_output.strip()}"
+            last_panel_state = f"bounded Accessibility query timed out; {probe_output.strip()}"
+            time.sleep(min(0.2, max(0.0, probe_deadline - time.monotonic())))
+            continue
         if probe_output.startswith(f"NFD_PANEL_READY=pid={process_id};"):
             print(probe_output)
             break
