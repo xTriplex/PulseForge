@@ -400,8 +400,36 @@ on run argv
     set targetPID to item 1 of argv as integer
     set operation to item 2 of argv
     tell application "System Events"
-        set targetProcess to first process whose unix id is targetPID
-        set processName to name of targetProcess as text
+        set hostProcess to first application process whose unix id is targetPID
+        set hostName to name of hostProcess as text
+        set targetProcess to hostProcess
+        set panelProcessID to targetPID
+        set processName to hostName
+        set processBundleID to "host application process"
+        set panelServiceCount to 0
+        try
+            with timeout of 2 seconds
+                set panelServiceProcesses to every application process whose ¬
+                    bundle identifier is "com.apple.appkit.xpc.openAndSavePanelService"
+            end timeout
+            set panelServiceCount to count of panelServiceProcesses
+            if panelServiceCount > 0 then
+                set targetProcess to item panelServiceCount of panelServiceProcesses
+                set panelProcessID to unix id of targetProcess as integer
+                set processName to name of targetProcess as text
+                set processBundleID to bundle identifier of targetProcess as text
+            end if
+        on error errorMessage number errorNumber
+            if errorNumber is -1712 then
+                error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; query=open-save-panel-service-process; " & ¬
+                    "error=" & errorNumber & "; " & errorMessage number -1712
+            end if
+            if errorNumber is -1719 or errorNumber is -1743 then
+                error "NFD_TCC_DENIAL; query=open-save-panel-service-process; error=" & ¬
+                    errorNumber & "; " & errorMessage number errorNumber
+            end if
+            set processBundleID to "service lookup failed: " & errorNumber & "; " & errorMessage
+        end try
         set foregroundState to "unavailable"
         try
             set foregroundProcess to first process whose frontmost is true
@@ -425,7 +453,9 @@ on run argv
         on error errorMessage number errorNumber
             set foregroundState to "query error=" & errorNumber & ": " & errorMessage
         end try
-        set lastState to "frontmost process=" & foregroundState & "; no target windows observed"
+        set lastState to "frontmost process=" & foregroundState & "; panel owner='" & processName & ¬
+            "' (pid=" & panelProcessID & "; bundle=" & processBundleID & "); service process count=" & ¬
+            panelServiceCount & "; no panel windows observed"
             try
                 with timeout of 2 seconds
                     set windowCount to count of windows of targetProcess
@@ -475,7 +505,8 @@ on run argv
                                 set primaryActions to actions of primaryButton as text
                             end timeout
                         end try
-                        return "NFD_PANEL_READY=pid=" & targetPID & "; process=" & processName & "; " & lastState & ¬
+                        return "NFD_PANEL_READY=pid=" & targetPID & "; panel_pid=" & panelProcessID & ¬
+                            "; panel_process=" & processName & "; process=" & processName & "; " & lastState & ¬
                             "; Cancel actions=" & cancelActions & "; primary actions=" & primaryActions
                     end if
                 on error errorMessage number errorNumber
@@ -533,7 +564,8 @@ on run argv
                                             set primaryActions to actions of primaryButton as text
                                         end timeout
                                     end try
-                                    return "NFD_PANEL_READY=pid=" & targetPID & "; process=" & processName & "; " & lastState & ¬
+                                    return "NFD_PANEL_READY=pid=" & targetPID & "; panel_pid=" & panelProcessID & ¬
+                                        "; panel_process=" & processName & "; process=" & processName & "; " & lastState & ¬
                                         "; Cancel actions=" & cancelActions & "; primary actions=" & primaryActions
                                 end if
                             on error errorMessage number errorNumber
@@ -585,7 +617,9 @@ on run argv
     set directoryPath to item 3 of argv
     set selectedName to item 4 of argv
     tell application "System Events"
-        set targetProcess to first process whose unix id is targetPID
+        set targetProcess to first application process whose unix id is targetPID
+        set frontmost of targetProcess to true
+        if not (frontmost of targetProcess) then error "Native panel process did not become frontmost"
         set dialogPanel to missing value
         repeat 100 times
             with timeout of 2 seconds
@@ -821,6 +855,14 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             continue
         if probe_output.startswith(f"NFD_PANEL_READY=pid={process_id};"):
             print(probe_output)
+            panel_process_id = next(
+                (field.partition("=")[2] for field in probe_output.split("; ") if field.startswith("panel_pid=")),
+                "",
+            )
+            if not panel_process_id.isdecimal() or int(panel_process_id) <= 0:
+                if not stop_fixture(process, output_reader):
+                    return 1, "fixture process group or output reader survived invalid panel-process cleanup"
+                return 1, f"Accessibility readiness did not identify the native panel owner PID: {probe_output!r}"
             break
         if not probe_output.startswith(f"NFD_PANEL_WAIT=pid={process_id};"):
             if not stop_fixture(process, output_reader):
@@ -836,7 +878,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
         return 1, f"native dialog fixture exhausted its {timeout_seconds}s case bound before panel automation"
     automation_code, automation_output = apple_script(
         SELECT_SCRIPT,
-        process_id,
+        panel_process_id,
         scenario,
         str(expected_path.parent),
         expected_path.name,
