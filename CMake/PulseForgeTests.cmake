@@ -285,6 +285,12 @@ if(BUILD_TESTING)
 		target_include_directories(PulseForgeNativeDialogValidation PRIVATE PulseForgeEditor/Source/Public)
 		target_link_libraries(PulseForgeNativeDialogValidation PRIVATE PulseForgeEditorUI glfw)
 		list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS PulseForgeNativeDialogValidation)
+
+		add_executable(PulseForgeMacOSVulkanLoaderLifecycleValidation
+			Tests/Platform/MacOSVulkanLoaderLifecycleValidation.cpp)
+		target_link_libraries(PulseForgeMacOSVulkanLoaderLifecycleValidation PRIVATE PulseForgeWindow glfw)
+		add_test(NAME PulseForge.MacOSVulkanLoaderLifecycle COMMAND PulseForgeMacOSVulkanLoaderLifecycleValidation)
+		list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS PulseForgeMacOSVulkanLoaderLifecycleValidation)
 	endif()
 	if(TARGET PulseForgeGpuValidation)
 		list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS PulseForgeGpuValidation)

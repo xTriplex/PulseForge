@@ -79,6 +79,17 @@ namespace PulseForgeEditor
 		return (SourceIsMainHost || SourceIsNativeHost) && !ReleaseOverMainEditorViewport;
 	}
 
+	[[nodiscard]] constexpr bool IsDocumentTabReleaseOverMainViewport(
+		uint32_t MainViewportID,
+		uint32_t HoveredViewportID,
+		bool HasReliableHoveredViewport,
+		bool PointerInsideMainViewportBounds) noexcept
+	{
+		if (HasReliableHoveredViewport && HoveredViewportID != 0)
+			return HoveredViewportID == MainViewportID;
+		return PointerInsideMainViewportBounds;
+	}
+
 	[[nodiscard]] constexpr DocumentTabReleaseAction ResolveDocumentTabReleaseAction(
 		bool MouseReleased,
 		bool HasActiveTabDrag,

@@ -4,12 +4,81 @@
 #include "Events/KeyEvent.h"
 #include "Events/MouseEvent.h"
 
-#include <GLFW/glfw3.h>
+#include <cstdlib>
+#include <filesystem>
 #include <stdexcept>
+
+#if defined(__APPLE__)
+	#include <dlfcn.h>
+	#include <mach-o/dyld.h>
+	#include <vulkan/vulkan.h>
+#endif
+
+#include <GLFW/glfw3.h>
 
 namespace PulseForge
 {
 	static unsigned int s_GLFWWindowCount = 0;
+	#if defined(__APPLE__)
+	static void* s_VulkanLoaderLibrary = nullptr;
+	static PFN_vkGetInstanceProcAddr s_VulkanLoaderProcAddress = nullptr;
+	static bool s_GLFWInitUsesVulkanLoader = false;
+
+	static void ResetMacOSVulkanLoader() noexcept
+	{
+		glfwInitVulkanLoader(nullptr);
+		s_VulkanLoaderProcAddress = nullptr;
+		if (s_VulkanLoaderLibrary)
+		{
+			dlclose(s_VulkanLoaderLibrary);
+			s_VulkanLoaderLibrary = nullptr;
+		}
+		s_GLFWInitUsesVulkanLoader = false;
+	}
+
+	static bool TryLoadMacOSVulkanLoader(const std::filesystem::path& Path)
+	{
+		s_VulkanLoaderLibrary = dlopen(Path.c_str(), RTLD_NOW | RTLD_LOCAL);
+		if (!s_VulkanLoaderLibrary) return false;
+		s_VulkanLoaderProcAddress = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+			dlsym(s_VulkanLoaderLibrary, "vkGetInstanceProcAddr"));
+		if (s_VulkanLoaderProcAddress) return true;
+		dlclose(s_VulkanLoaderLibrary);
+		s_VulkanLoaderLibrary = nullptr;
+		return false;
+	}
+
+	static void InitializeMacOSVulkanLoader()
+	{
+		if (const char* VulkanSdk = std::getenv("VULKAN_SDK"); VulkanSdk && VulkanSdk[0] != '\0')
+		{
+			const std::filesystem::path LibraryDirectory = std::filesystem::u8path(VulkanSdk) / "lib";
+			if (!TryLoadMacOSVulkanLoader(LibraryDirectory / "libvulkan.1.dylib") &&
+				!TryLoadMacOSVulkanLoader(LibraryDirectory / "libvulkan.dylib"))
+				throw std::runtime_error("VULKAN_SDK is set but its lib directory has no usable Vulkan loader");
+		}
+		else
+		{
+			uint32_t PathLength = 0;
+			(void)_NSGetExecutablePath(nullptr, &PathLength);
+			std::string ExecutablePath(PathLength, '\0');
+			if (PathLength > 0 && _NSGetExecutablePath(ExecutablePath.data(), &PathLength) == 0)
+			{
+				const std::filesystem::path BundleLoader =
+					std::filesystem::weakly_canonical(std::filesystem::u8path(ExecutablePath.c_str())).parent_path() /
+					"../Frameworks/libvulkan.1.dylib";
+				(void)TryLoadMacOSVulkanLoader(BundleLoader);
+			}
+			if (!s_VulkanLoaderProcAddress && !TryLoadMacOSVulkanLoader("libvulkan.1.dylib"))
+				(void)TryLoadMacOSVulkanLoader("libvulkan.dylib");
+			if (!s_VulkanLoaderProcAddress)
+				throw std::runtime_error("No Vulkan loader found in the app bundle or the macOS loader search path");
+		}
+
+		glfwInitVulkanLoader(s_VulkanLoaderProcAddress);
+		s_GLFWInitUsesVulkanLoader = true;
+	}
+	#endif
 
 	static void GLFWErrorCallback(int Error, const char* Description)
 	{
@@ -37,12 +106,25 @@ namespace PulseForge
 		if (s_GLFWWindowCount == 0)
 		{
 			glfwSetErrorCallback(GLFWErrorCallback);
+			#if defined(__APPLE__)
+			if (Props.m_ClientAPI == EWindowClientAPI::Vulkan)
+				InitializeMacOSVulkanLoader();
+			else
+				glfwInitVulkanLoader(nullptr);
+			#endif
 			if (glfwInit() != GLFW_TRUE)
 			{
+				#if defined(__APPLE__)
+				if (s_GLFWInitUsesVulkanLoader || s_VulkanLoaderLibrary) ResetMacOSVulkanLoader();
+				#endif
 				PF_CORE_ERROR("Could not initialize GLFW");
 				throw std::runtime_error("GLFW initialization failed");
 			}
 		}
+		#if defined(__APPLE__)
+		else if (Props.m_ClientAPI == EWindowClientAPI::Vulkan && !s_GLFWInitUsesVulkanLoader)
+			throw std::runtime_error("A Vulkan window cannot join a GLFW runtime initialized without its Vulkan loader");
+		#endif
 
 		++s_GLFWWindowCount;
 		m_GLFWRuntimeAcquired = true;
@@ -225,8 +307,23 @@ namespace PulseForge
 		if (m_GLFWRuntimeAcquired)
 		{
 			m_GLFWRuntimeAcquired = false;
-			if (--s_GLFWWindowCount == 0) glfwTerminate();
+			if (--s_GLFWWindowCount == 0)
+			{
+				glfwTerminate();
+				#if defined(__APPLE__)
+				ResetMacOSVulkanLoader();
+				#endif
+			}
 		}
+	}
+
+	GLFWWindow::VulkanLoaderProcAddress GLFWWindow::GetVulkanLoaderProcAddress() noexcept
+	{
+		#if defined(__APPLE__)
+		return reinterpret_cast<VulkanLoaderProcAddress>(s_VulkanLoaderProcAddress);
+		#else
+		return nullptr;
+		#endif
 	}
 
 	void GLFWWindow::PollEvents()

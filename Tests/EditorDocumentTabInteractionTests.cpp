@@ -24,6 +24,10 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	PF_CHECK(Tests, AfterMidpoint && AfterMidpoint->HostID == "main" && AfterMidpoint->Index == 1);
 	PF_CHECK(Tests, !Interaction.FindDropTarget({ 90.0f, 20.0f }, 11));
 	PF_CHECK(Tests, !Interaction.FindDropTarget({ 110.0f, 20.0f }, 10));
+	PF_CHECK(Tests, !IsDocumentTabReleaseOverMainViewport(10, 11, true, true));
+	PF_CHECK(Tests, IsDocumentTabReleaseOverMainViewport(10, 10, true, false));
+	PF_CHECK(Tests, IsDocumentTabReleaseOverMainViewport(10, 0, true, true));
+	PF_CHECK(Tests, !IsDocumentTabReleaseOverMainViewport(10, 0, false, false));
 
 	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
 	EditorDocumentTabDragFrame DragFrame;
@@ -73,6 +77,20 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	DragFrame.ReleaseOverMainEditorViewport = true;
 	const auto NativeHostUtilityRelease = Interaction.UpdateDrag(DragFrame);
 	PF_CHECK(Tests, NativeHostUtilityRelease && NativeHostUtilityRelease->Action == DocumentTabReleaseAction::None);
+
+	Interaction.BeginFrame();
+	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
+	DragFrame.LeftButtonDown = true;
+	DragFrame.LeftButtonReleased = false;
+	DragFrame.PointerPosition = { 180.0f, 120.0f };
+	DragFrame.HoveredViewportID = 11;
+	DragFrame.ReleaseOverMainEditorViewport = !IsDocumentTabReleaseOverMainViewport(10, 11, true, true);
+	PF_CHECK(Tests, !Interaction.UpdateDrag(DragFrame));
+	DragFrame.LeftButtonDown = false;
+	DragFrame.LeftButtonReleased = true;
+	const auto OverlappingNativeRelease = Interaction.UpdateDrag(DragFrame);
+	PF_CHECK(Tests, OverlappingNativeRelease &&
+		OverlappingNativeRelease->Action == DocumentTabReleaseAction::CreateNativeHost);
 
 	Interaction.BeginFrame();
 	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });

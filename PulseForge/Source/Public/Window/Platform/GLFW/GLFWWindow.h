@@ -9,6 +9,8 @@ namespace PulseForge
 	class GLFWWindow : public Window
 	{
 	public:
+		using VulkanLoaderProcAddress = void (*)();
+
 		GLFWWindow(const WindowProps& Props);
 
 		virtual ~GLFWWindow();
@@ -27,6 +29,7 @@ namespace PulseForge
 		}
 
 		virtual void* GetNativeWindow() const override { return m_NativeWindow; }
+		[[nodiscard]] static VulkanLoaderProcAddress GetVulkanLoaderProcAddress() noexcept;
 
 	private:
 		virtual void Init(const WindowProps& Props);

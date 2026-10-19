@@ -17,7 +17,7 @@ namespace PulseForge
 
 		const EWindowClientAPI WindowClientAPI = API == RendererAPI::OpenGL
 			? EWindowClientAPI::OpenGL
-			: EWindowClientAPI::None;
+			: EWindowClientAPI::Vulkan;
 		m_Window = Window::Create(WindowProps("PulseForge", 1280, 720, EWindowStyle::Default, WindowClientAPI));
 		if (!m_Window)
 			throw std::runtime_error("Window creation failed");

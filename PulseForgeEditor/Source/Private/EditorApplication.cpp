@@ -4879,9 +4879,17 @@ namespace
 		{
 			const ImGuiIO& IO = ImGui::GetIO();
 			const ImGuiViewport* MainViewport = ImGui::GetMainViewport();
-			const bool ReleaseOverMainEditorViewport = MainViewport && IO.MousePos.x >= MainViewport->Pos.x &&
+			const bool PointerInsideMainViewportBounds = MainViewport && IO.MousePos.x >= MainViewport->Pos.x &&
 				IO.MousePos.y >= MainViewport->Pos.y && IO.MousePos.x < MainViewport->Pos.x + MainViewport->Size.x &&
 				IO.MousePos.y < MainViewport->Pos.y + MainViewport->Size.y;
+			const bool HasReliableHoveredViewport =
+				(IO.BackendFlags & ImGuiBackendFlags_HasMouseHoveredViewport) != 0;
+			const bool ReleaseOverMainEditorViewport = MainViewport &&
+				PulseForgeEditor::IsDocumentTabReleaseOverMainViewport(
+					MainViewport->ID,
+					IO.MouseHoveredViewport,
+					HasReliableHoveredViewport,
+					PointerInsideMainViewportBounds);
 			const auto ActiveIdentity = m_DocumentTabInteraction.ActiveDragIdentity();
 			const auto* Session = ActiveIdentity ? m_Documents.Find(*ActiveIdentity) : nullptr;
 			const auto* SourceHost = Session ? m_Documents.FindHost(Session->HostID) : nullptr;
