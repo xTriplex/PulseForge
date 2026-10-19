@@ -1,3 +1,4 @@
+#include "Core/Log.h"
 #include "Window/Platform/GLFW/GLFWWindow.h"
 
 #include <GLFW/glfw3.h>
@@ -11,7 +12,6 @@ namespace
 {
 	bool CreateAndCloseVulkanWindow(const char* Title)
 	{
-		std::cerr << "loader lifecycle window stage: create " << Title << std::endl;
 		try
 		{
 			PulseForge::GLFWWindow Window(PulseForge::WindowProps(
@@ -26,7 +26,6 @@ namespace
 			std::cerr << "Vulkan loader lifecycle window failed: " << Error.what() << '\n';
 			return false;
 		}
-		std::cerr << "loader lifecycle window stage: destroy " << Title << std::endl;
 		if (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
 		{
 			std::cerr << "GLFW retained a Vulkan loader after its last window terminated" << '\n';
@@ -38,18 +37,15 @@ namespace
 
 int main()
 {
-	std::cerr << "loader lifecycle stage: begin" << std::endl;
+	PulseForge::Log::Init();
 	const char* ExistingSdkValue = std::getenv("VULKAN_SDK");
-	std::cerr << "loader lifecycle stage: read SDK environment" << std::endl;
 	const std::string ExistingSdk = ExistingSdkValue ? ExistingSdkValue : "";
-	std::cerr << "loader lifecycle stage: copy SDK environment" << std::endl;
 	const bool HadSdkValue = ExistingSdkValue != nullptr;
 	if (setenv("VULKAN_SDK", "/path/that/does/not/exist", 1) != 0)
 	{
 		std::cerr << "Could not set the isolated loader-failure test environment" << '\n';
 		return 1;
 	}
-	std::cerr << "loader lifecycle stage: set invalid SDK environment" << std::endl;
 	try
 	{
 		PulseForge::GLFWWindow InvalidLoaderWindow(PulseForge::WindowProps(
@@ -66,17 +62,14 @@ int main()
 			return 1;
 		}
 	}
-	std::cerr << "loader lifecycle stage: SDK acquisition failure" << std::endl;
 	if (HadSdkValue)
 		setenv("VULKAN_SDK", ExistingSdk.c_str(), 1);
 	else
 		unsetenv("VULKAN_SDK");
 
 	if (!CreateAndCloseVulkanWindow("PulseForge Vulkan loader startup")) return 1;
-	std::cerr << "loader lifecycle stage: initial Vulkan window teardown" << std::endl;
 
 	if (!CreateAndCloseVulkanWindow("PulseForge Vulkan loader repeated initialization")) return 1;
-	std::cerr << "loader lifecycle stage: repeated Vulkan initialization" << std::endl;
 	{
 		PulseForge::GLFWWindow OpenGLWindow(PulseForge::WindowProps(
 			"PulseForge OpenGL runtime", 320, 240, PulseForge::EWindowStyle::Default,
@@ -98,7 +91,6 @@ int main()
 			}
 		}
 	}
-	std::cerr << "loader lifecycle stage: OpenGL/Vulkan API mismatch rejected" << std::endl;
 	if (PulseForge::GLFWWindow::GetVulkanLoaderProcAddress())
 	{
 		std::cerr << "OpenGL runtime teardown retained a Vulkan loader" << '\n';
