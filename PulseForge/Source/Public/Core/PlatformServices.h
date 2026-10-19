@@ -14,6 +14,7 @@ namespace PulseForge::Platform
 	using PathResult = std::expected<std::filesystem::path, PathError>;
 
 	[[nodiscard]] PathResult GetExecutablePath();
+	[[nodiscard]] PathResult GetResourceDirectory();
 	[[nodiscard]] PathResult GetUserDataDirectory();
 	void DebugBreak() noexcept;
 }

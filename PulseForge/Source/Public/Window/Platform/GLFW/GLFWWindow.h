@@ -19,6 +19,7 @@ namespace PulseForge
 		virtual unsigned int GetWidth() const override { return WindowData.Width; }
 		virtual unsigned int GetHeight() const override { return WindowData.Height; }
 		virtual std::pair<unsigned int, unsigned int> GetFramebufferSize() const override;
+		virtual std::pair<float, float> GetContentScale() const override;
 
 		virtual void SetEventCallback(const EventCallbackFn& Callback) override
 		{

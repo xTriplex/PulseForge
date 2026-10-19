@@ -42,6 +42,36 @@ namespace PulseForge::Platform
 		return std::unexpected(PathError{ "The executable path reported by dyld exceeds 1 MiB" });
 	}
 
+	PathResult GetResourceDirectory()
+	{
+		auto ExecutablePath = GetExecutablePath();
+		if (!ExecutablePath) return std::unexpected(ExecutablePath.error());
+		if (!ExecutablePath->is_absolute() || ExecutablePath->filename().empty())
+			return std::unexpected(PathError{ "The executable path must be absolute and name a file to resolve application resources" });
+
+		const std::filesystem::path ExecutableDirectory = ExecutablePath->parent_path();
+		if (ExecutableDirectory.empty())
+			return std::unexpected(PathError{ "Could not resolve the executable directory for application resources" });
+
+		const std::filesystem::path ContentsDirectory = ExecutableDirectory.parent_path();
+		const std::filesystem::path BundleDirectory = ContentsDirectory.parent_path();
+		const bool IsAppBundle = ExecutableDirectory.filename() == "MacOS" &&
+			ContentsDirectory.filename() == "Contents" && BundleDirectory.extension() == ".app";
+		const std::filesystem::path ResourceDirectory = IsAppBundle
+			? ContentsDirectory / "Resources"
+			: ExecutableDirectory;
+
+		std::error_code Error;
+		if (!std::filesystem::is_directory(ResourceDirectory, Error) || Error)
+		{
+			const std::string Reason = Error ? Error.message() : "the path is missing or is not a directory";
+			return std::unexpected(PathError{ "Could not access the application resource directory '" + ResourceDirectory.string() +
+				"': " + Reason });
+		}
+
+		return ResourceDirectory;
+	}
+
 	PathResult GetUserDataDirectory()
 	{
 		const char* Home = std::getenv("HOME");

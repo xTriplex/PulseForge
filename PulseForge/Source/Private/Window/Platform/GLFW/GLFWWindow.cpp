@@ -247,4 +247,12 @@ namespace PulseForge
 		return { static_cast<unsigned int>(Width), static_cast<unsigned int>(Height) };
 	}
 
+	std::pair<float, float> GLFWWindow::GetContentScale() const
+	{
+		float XScale = 1.0f;
+		float YScale = 1.0f;
+		glfwGetWindowContentScale(m_NativeWindow, &XScale, &YScale);
+		return { XScale, YScale };
+	}
+
 } // namespace PulseForge

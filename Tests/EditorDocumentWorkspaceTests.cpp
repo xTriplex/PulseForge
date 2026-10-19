@@ -378,6 +378,11 @@ namespace
 		Saved.HasValue = true;
 
 		const EditorNativeWindowWorkArea LeftMonitor{ -1920.0f, -40.0f, 1920.0f, 1040.0f };
+		const double LeftMonitorArea = NativeWindowWorkAreaIntersectionArea(
+			1200.0f, 100.0f, 300.0f, 200.0f, { -1440.0f, 0.0f, 1440.0f, 900.0f });
+		const double RightMonitorArea = NativeWindowWorkAreaIntersectionArea(
+			1200.0f, 100.0f, 300.0f, 200.0f, { 0.0f, 0.0f, 1920.0f, 1080.0f });
+		PF_CHECK(Tests, LeftMonitorArea == 0.0 && RightMonitorArea == 60000.0);
 		const EditorNativeWindowRect NegativeCoordinate = ResolveNativeWindowRect(Saved, LeftMonitor, 1.5f);
 		PF_CHECK(Tests, NegativeCoordinate.X == -1900.0f && NegativeCoordinate.Y == -40.0f);
 		PF_CHECK(Tests, NegativeCoordinate.Width == 1200.0f && NegativeCoordinate.Height == 900.0f);

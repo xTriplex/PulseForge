@@ -10,12 +10,14 @@
 #include "Runtime/SceneRuntime.h"
 #include "Scene/Scene.h"
 
+#include <cstdlib>
 #include <expected>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace
 {
@@ -28,12 +30,10 @@ namespace
 
 	std::expected<SampleBundlePaths, std::string> ResolveSampleBundlePaths()
 	{
-		auto ExecutablePath = PulseForge::Platform::GetExecutablePath();
-		if (!ExecutablePath) return std::unexpected("Could not locate the sample executable: " + ExecutablePath.error().Message);
-		if (ExecutablePath->empty() || !ExecutablePath->is_absolute() || ExecutablePath->filename().empty())
-			return std::unexpected("The sample executable path must be absolute and name an executable file");
-
-		const std::filesystem::path BundleRoot = ExecutablePath->parent_path();
+		auto ResourceDirectory = PulseForge::Platform::GetResourceDirectory();
+		if (!ResourceDirectory)
+			return std::unexpected("Could not locate the sample resource directory: " + ResourceDirectory.error().Message);
+		const std::filesystem::path BundleRoot = *ResourceDirectory;
 		if (BundleRoot.empty() || !BundleRoot.is_absolute())
 			return std::unexpected("Could not resolve an absolute sample bundle directory from the executable path");
 
@@ -49,6 +49,10 @@ public:
 	ExampleLayer()
 		: Layer("Example")
 	{
+#if defined(PF_DEBUG)
+		if (const char* Smoke = std::getenv("PULSEFORGE_PLAYER_SMOKE_EXIT_AFTER_RENDER"))
+			m_PlayerSmokeExitAfterRender = std::string_view(Smoke) == "1";
+#endif
 		if (PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan)
 		{
 			auto BundlePaths = ResolveSampleBundlePaths();
@@ -79,7 +83,8 @@ public:
 	{
 		if (m_SceneRuntime)
 		{
-			if (auto RuntimeResult = m_SceneRuntime->Advance(m_Scene, DeltaTime); !RuntimeResult)
+			const auto RuntimeResult = m_SceneRuntime->Advance(m_Scene, DeltaTime);
+			if (!RuntimeResult)
 			{
 				if (!m_LoggedRuntimeFailure)
 				{
@@ -89,6 +94,12 @@ public:
 			}
 			else
 				m_LoggedRuntimeFailure = false;
+			if (RuntimeResult && m_PlayerSmokeExitAfterRender && !m_PlayerRuntimeSmokeLogged)
+			{
+				m_PlayerRuntimeSmokeLogged = true;
+				PF_INFO("PULSEFORGE_PLAYER_RUNTIME_SMOKE=PASS; scripting advanced; physics_steps={}; audio advanced",
+					RuntimeResult->PhysicsSteps);
+			}
 		}
 		if (!m_SceneRenderer)
 			return;
@@ -131,7 +142,19 @@ public:
 		{
 			m_LoggedSceneDraw = true;
 			PF_INFO("Submitted {0} indexed mesh instance(s) from the prepared scene", Rendered->GeometryDrawCount);
+			if (m_PlayerSmokeExitAfterRender)
+			{
+				m_PlayerSmokeShutdownRequested = true;
+				PF_INFO("PULSEFORGE_PLAYER_RELOCATION_SMOKE=PASS; rendered scene geometry and requesting orderly shutdown");
+				PulseForge::Application::Get().RequestClose();
+			}
 		}
+	}
+
+	~ExampleLayer() override
+	{
+		if (m_PlayerSmokeShutdownRequested)
+			PF_INFO("PULSEFORGE_PLAYER_RELOCATION_SMOKE_SHUTDOWN=PASS");
 	}
 
 	void OnEvent(PulseForge::Event& Event) override
@@ -159,6 +182,9 @@ private:
 	bool m_LoggedRenderFailure = false;
 	bool m_LoggedRuntimeFailure = false;
 	bool m_LoggedSceneDraw = false;
+	bool m_PlayerSmokeExitAfterRender = false;
+	bool m_PlayerSmokeShutdownRequested = false;
+	bool m_PlayerRuntimeSmokeLogged = false;
 };
 
 PulseForgeGameApp::PulseForgeGameApp()
