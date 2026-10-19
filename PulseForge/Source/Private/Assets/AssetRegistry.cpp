@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <system_error>
+#include <unordered_map>
 
 namespace PulseForge
 {
@@ -141,10 +142,16 @@ namespace PulseForge
 		};
 		std::sort(SourceFiles.begin(), SourceFiles.end(), SortByPath);
 		std::sort(SidecarFiles.begin(), SidecarFiles.end(), SortByPath);
+		std::unordered_map<std::filesystem::path, std::filesystem::path> SidecarsBySourcePath;
+		SidecarsBySourcePath.reserve(SidecarFiles.size());
+		for (const std::filesystem::path& SidecarPath : SidecarFiles)
+			SidecarsBySourcePath.try_emplace(SidecarPath.parent_path() / SidecarPath.stem(), SidecarPath);
 
 		for (const std::filesystem::path& SourcePath : SourceFiles)
 		{
-			const std::filesystem::path SidecarPath = AssetMetadataSerializer::GetSidecarPath(SourcePath);
+			const auto Sidecar = SidecarsBySourcePath.find(SourcePath);
+			const std::filesystem::path SidecarPath =
+				Sidecar != SidecarsBySourcePath.end() ? Sidecar->second : AssetMetadataSerializer::GetSidecarPath(SourcePath);
 			FileError.clear();
 			const std::filesystem::file_status SidecarStatus = std::filesystem::symlink_status(SidecarPath, FileError);
 			if (FileError == std::errc::no_such_file_or_directory ||

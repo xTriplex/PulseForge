@@ -1,12 +1,12 @@
 add_library(PulseForgeWindow STATIC
 	PulseForge/Source/Private/Window/Window.cpp
-	PulseForge/Source/Private/Window/Platform/Windows/WindowsWindow.cpp
+	PulseForge/Source/Private/Window/Platform/GLFW/GLFWWindow.cpp
 )
 target_include_directories(PulseForgeWindow
 	PUBLIC PulseForge/Source/Public
 	PRIVATE PulseForge/Vendor/Glfw/include
 )
-target_compile_definitions(PulseForgeWindow PRIVATE PF_PLATFORM_WINDOWS GLFW_INCLUDE_NONE)
+target_compile_definitions(PulseForgeWindow PRIVATE ${PULSEFORGE_PLATFORM_COMPILE_DEFINITION} GLFW_INCLUDE_NONE)
 target_link_libraries(PulseForgeWindow PUBLIC PulseForgeCore PRIVATE glfw spdlog::spdlog)
 add_library(PulseForgeScene STATIC
 	PulseForge/Source/Private/Scene/CameraComponent.cpp
@@ -149,7 +149,7 @@ target_compile_definitions(PulseForgeRenderer PRIVATE
 )
 target_link_libraries(PulseForgeRenderer
 	PUBLIC PulseForgeCore PulseForgeMeshData PulseForgeImageData
-	PRIVATE PulseForgeWindow glfw PulseForgeGlad OpenGL::GL nvrhi nvrhi_vk Vulkan-Headers
+	PRIVATE PulseForgeWindow glfw PulseForgeGlad OpenGL::GL nvrhi_vk nvrhi Vulkan-Headers
 )
 target_precompile_headers(PulseForgeRenderer PRIVATE "${PULSEFORGE_ENGINE_PCH}")
 add_library(PulseForgeAssetImporters STATIC
@@ -211,7 +211,7 @@ target_include_directories(PulseForge
 		PulseForge/Vendor/stb
 )
 target_compile_definitions(PulseForge PRIVATE
-	PF_PLATFORM_WINDOWS
+	${PULSEFORGE_PLATFORM_COMPILE_DEFINITION}
 	_CRT_SECURE_NO_WARNINGS
 	GLFW_INCLUDE_NONE
 	MA_NO_WIN32_LEAN_AND_MEAN

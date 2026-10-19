@@ -2,39 +2,73 @@ include("${CMAKE_CURRENT_LIST_DIR}/PulseForgeShaderDeployment.cmake")
 
 if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 	(PULSEFORGE_BUILD_EDITOR AND PULSEFORGE_EDITOR_RENDERER STREQUAL "Vulkan"))
-	# Pin the compiler executable and its archive hash instead of relying on a
-	# developer-installed DXC or whatever happens to be on PATH. DXC is a
-	# build-time tool only; runtime builds consume the generated SPIR-V files.
+	# DXC is a host tool: select its package from the configure host, independently
+	# of the architecture being targeted by this build. An explicit executable
+	# override is available for controlled toolchain setups.
 	set(PULSEFORGE_DXC_VERSION "1.9.2602.24")
-	set(PULSEFORGE_DXC_RELEASE_DATE "2026_05_27")
-	set(PULSEFORGE_DXC_URL
-		"https://github.com/microsoft/DirectXShaderCompiler/releases/download/v${PULSEFORGE_DXC_VERSION}/dxc_${PULSEFORGE_DXC_RELEASE_DATE}.zip")
-	set(PULSEFORGE_DXC_SHA512
-		"cf331112f1753fca68525c85bb4964714d85dbf7cb5e41af4720bbdffefdfddad1878c7a1a74898e2105dff32957a526d188d9ee3f18f0df310ec8548827a374")
-	set(PULSEFORGE_DXC_ROOT "${CMAKE_BINARY_DIR}/_tools/dxc-${PULSEFORGE_DXC_VERSION}")
-	set(PULSEFORGE_DXC "${PULSEFORGE_DXC_ROOT}/bin/x64/dxc.exe")
-	if(NOT EXISTS "${PULSEFORGE_DXC}")
-		set(PULSEFORGE_DXC_DOWNLOAD_DIR "${CMAKE_BINARY_DIR}/_downloads")
-		set(PULSEFORGE_DXC_ARCHIVE "${PULSEFORGE_DXC_DOWNLOAD_DIR}/dxc-${PULSEFORGE_DXC_VERSION}.zip")
-		file(MAKE_DIRECTORY "${PULSEFORGE_DXC_DOWNLOAD_DIR}" "${PULSEFORGE_DXC_ROOT}")
-		message(STATUS "Downloading pinned Microsoft DXC ${PULSEFORGE_DXC_VERSION} for HLSL-to-SPIR-V compilation")
-		file(DOWNLOAD
-			"${PULSEFORGE_DXC_URL}"
-			"${PULSEFORGE_DXC_ARCHIVE}"
-			EXPECTED_HASH "SHA512=${PULSEFORGE_DXC_SHA512}"
-			TLS_VERIFY ON
-			SHOW_PROGRESS
-			STATUS PULSEFORGE_DXC_DOWNLOAD_STATUS
-		)
-		list(GET PULSEFORGE_DXC_DOWNLOAD_STATUS 0 PULSEFORGE_DXC_DOWNLOAD_CODE)
-		if(NOT PULSEFORGE_DXC_DOWNLOAD_CODE EQUAL 0)
-			list(GET PULSEFORGE_DXC_DOWNLOAD_STATUS 1 PULSEFORGE_DXC_DOWNLOAD_MESSAGE)
-			message(FATAL_ERROR "Could not download pinned DXC ${PULSEFORGE_DXC_VERSION}: ${PULSEFORGE_DXC_DOWNLOAD_MESSAGE}")
+	set(PULSEFORGE_DXC_EXECUTABLE "" CACHE FILEPATH "Host DXC executable; empty selects the pinned host archive")
+	if(PULSEFORGE_DXC_EXECUTABLE)
+		if(NOT EXISTS "${PULSEFORGE_DXC_EXECUTABLE}")
+			message(FATAL_ERROR "PULSEFORGE_DXC_EXECUTABLE does not exist: ${PULSEFORGE_DXC_EXECUTABLE}")
 		endif()
-		file(ARCHIVE_EXTRACT INPUT "${PULSEFORGE_DXC_ARCHIVE}" DESTINATION "${PULSEFORGE_DXC_ROOT}")
-	endif()
-	if(NOT EXISTS "${PULSEFORGE_DXC}")
-		message(FATAL_ERROR "Pinned DXC archive did not contain the expected Windows x64 compiler: ${PULSEFORGE_DXC}")
+		set(PULSEFORGE_DXC "${PULSEFORGE_DXC_EXECUTABLE}")
+	else()
+		if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+			string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" PULSEFORGE_DXC_HOST_PROCESSOR)
+			if(NOT PULSEFORGE_DXC_HOST_PROCESSOR MATCHES "^(amd64|x86_64)$")
+				message(FATAL_ERROR
+					"Pinned DXC ${PULSEFORGE_DXC_VERSION} is available for Windows x64 hosts only; "
+					"set PULSEFORGE_DXC_EXECUTABLE to a compatible host compiler.")
+			endif()
+			set(PULSEFORGE_DXC_ARCHIVE_NAME "dxc_2026_05_27.zip")
+			set(PULSEFORGE_DXC_ARCHIVE_SHA512
+				"cf331112f1753fca68525c85bb4964714d85dbf7cb5e41af4720bbdffefdfddad1878c7a1a74898e2105dff32957a526d188d9ee3f18f0df310ec8548827a374")
+			set(PULSEFORGE_DXC_RELATIVE_EXECUTABLE "bin/x64/dxc.exe")
+		elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+			string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" PULSEFORGE_DXC_HOST_PROCESSOR)
+			if(NOT PULSEFORGE_DXC_HOST_PROCESSOR MATCHES "^(amd64|x86_64)$")
+				message(FATAL_ERROR
+					"Pinned DXC ${PULSEFORGE_DXC_VERSION} is available for Linux x86_64 hosts only; "
+					"set PULSEFORGE_DXC_EXECUTABLE to a compatible host compiler.")
+			endif()
+			set(PULSEFORGE_DXC_ARCHIVE_NAME "linux_dxc_2026_05_26.x86_64.tar.gz")
+			set(PULSEFORGE_DXC_ARCHIVE_SHA512
+				"3da18b4b32899c65881276315411092fa1a076e25bbea20606bc247c5fa93c83f948785969e007115dc72afcd433ab76e54c392de6d37c11d93d8614a829e40a")
+			set(PULSEFORGE_DXC_RELATIVE_EXECUTABLE "bin/dxc")
+		else()
+			message(FATAL_ERROR
+				"Pinned DXC ${PULSEFORGE_DXC_VERSION} has no package for host '${CMAKE_HOST_SYSTEM_NAME}'; "
+				"set PULSEFORGE_DXC_EXECUTABLE to a compatible host compiler.")
+		endif()
+		set(PULSEFORGE_DXC_ROOT "${CMAKE_BINARY_DIR}/_tools/dxc-${PULSEFORGE_DXC_VERSION}")
+		set(PULSEFORGE_DXC "${PULSEFORGE_DXC_ROOT}/${PULSEFORGE_DXC_RELATIVE_EXECUTABLE}")
+		if(NOT EXISTS "${PULSEFORGE_DXC}")
+			set(PULSEFORGE_DXC_DOWNLOAD_DIR "${CMAKE_BINARY_DIR}/_downloads")
+			set(PULSEFORGE_DXC_ARCHIVE "${PULSEFORGE_DXC_DOWNLOAD_DIR}/${PULSEFORGE_DXC_ARCHIVE_NAME}")
+			set(PULSEFORGE_DXC_URL
+				"https://github.com/microsoft/DirectXShaderCompiler/releases/download/v${PULSEFORGE_DXC_VERSION}/${PULSEFORGE_DXC_ARCHIVE_NAME}")
+			file(MAKE_DIRECTORY "${PULSEFORGE_DXC_DOWNLOAD_DIR}" "${PULSEFORGE_DXC_ROOT}")
+			message(STATUS
+				"Downloading pinned Microsoft DXC ${PULSEFORGE_DXC_VERSION} for ${CMAKE_HOST_SYSTEM_NAME} "
+				"${CMAKE_HOST_SYSTEM_PROCESSOR} host shader compilation")
+			file(DOWNLOAD
+				"${PULSEFORGE_DXC_URL}"
+				"${PULSEFORGE_DXC_ARCHIVE}"
+				EXPECTED_HASH "SHA512=${PULSEFORGE_DXC_ARCHIVE_SHA512}"
+				TLS_VERIFY ON
+				SHOW_PROGRESS
+				STATUS PULSEFORGE_DXC_DOWNLOAD_STATUS
+			)
+			list(GET PULSEFORGE_DXC_DOWNLOAD_STATUS 0 PULSEFORGE_DXC_DOWNLOAD_CODE)
+			if(NOT PULSEFORGE_DXC_DOWNLOAD_CODE EQUAL 0)
+				list(GET PULSEFORGE_DXC_DOWNLOAD_STATUS 1 PULSEFORGE_DXC_DOWNLOAD_MESSAGE)
+				message(FATAL_ERROR "Could not download pinned DXC ${PULSEFORGE_DXC_VERSION}: ${PULSEFORGE_DXC_DOWNLOAD_MESSAGE}")
+			endif()
+			file(ARCHIVE_EXTRACT INPUT "${PULSEFORGE_DXC_ARCHIVE}" DESTINATION "${PULSEFORGE_DXC_ROOT}")
+		endif()
+		if(NOT EXISTS "${PULSEFORGE_DXC}")
+			message(FATAL_ERROR "Pinned DXC archive did not contain the expected host compiler: ${PULSEFORGE_DXC}")
+		endif()
 	endif()
 
 	function(pulseforge_add_spirv_shader Output Source Profile Entry)

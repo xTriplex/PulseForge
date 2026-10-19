@@ -2742,7 +2742,8 @@ namespace PulseForge
 			uint32_t RequiredExtensionCount = 0;
 			const char** RequiredExtensions = glfwGetRequiredInstanceExtensions(&RequiredExtensionCount);
 			if (!RequiredExtensions || RequiredExtensionCount == 0)
-				throw std::runtime_error("GLFW did not provide the Vulkan surface extensions required for this window");
+				throw std::runtime_error("GLFW did not report the Vulkan surface extensions required by its selected display backend; "
+										 "check that the Vulkan loader/ICD and WSI integration are available for this display session");
 
 			for (uint32_t Index = 0; Index < RequiredExtensionCount; ++Index)
 			{
