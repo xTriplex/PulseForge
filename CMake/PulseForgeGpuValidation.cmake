@@ -21,6 +21,24 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	target_link_libraries(PulseForgeGpuValidation PRIVATE PulseForge PulseForgeGpuValidationAnalysis)
 	add_dependencies(PulseForgeGpuValidation PulseForgeGpuValidationShaders PulseForgeSceneShaderAssets)
 	set_property(TARGET PulseForgeGpuValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGpuValidation>")
+	if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
+		add_executable(PulseForgeMacOSRendererValidation
+			Tests/GpuValidation/MacOSRendererValidation.cpp
+			Tests/GpuValidation/MacOSRendererReadbackAnalysis.cpp)
+		target_include_directories(PulseForgeMacOSRendererValidation PRIVATE
+			PulseForgeEditor/Source/Public
+			PulseForge/Vendor/Glfw/include
+			PulseForge/Vendor/imgui
+		)
+		target_compile_definitions(PulseForgeMacOSRendererValidation PRIVATE
+			PF_MACOS_RENDERER_SHADER_DIRECTORY="${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}"
+			PF_MACOS_RENDERER_PROJECT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/PBRMaterials/PBRMaterials.pfproj")
+		target_link_libraries(PulseForgeMacOSRendererValidation PRIVATE
+			PulseForge PulseForgeSceneRenderer PulseForgeEditorImGuiProofRenderer PulseForgeImGui glfw)
+		add_dependencies(PulseForgeMacOSRendererValidation PulseForgeSceneShaderAssets PulseForgeEditorShaderAssets)
+		set_property(TARGET PulseForgeMacOSRendererValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY
+			"$<TARGET_FILE_DIR:PulseForgeMacOSRendererValidation>")
+	endif()
 	if(PULSEFORGE_PLATFORM_LINUX)
 		add_executable(PulseForgeLinuxWindowLifecycleValidation Tests/GpuValidation/LinuxWindowLifecycleValidation.cpp)
 		target_include_directories(PulseForgeLinuxWindowLifecycleValidation PRIVATE PulseForge/Vendor/Glfw/include)
@@ -52,6 +70,13 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 		add_test(NAME PulseForge.GPU.PresentationFenceNativeLifetime
 			CONFIGURATIONS Debug
 			COMMAND PulseForgeGpuValidation --presentation-fence-native-lifetime)
+		if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
+			add_test(NAME PulseForge.GPU.MacOSRenderer COMMAND PulseForgeMacOSRendererValidation)
+			set_tests_properties(PulseForge.GPU.MacOSRenderer PROPERTIES
+				RUN_SERIAL TRUE
+				TIMEOUT 180
+				LABELS "gpu;renderer;macos;moltenvk")
+		endif()
 		if(PULSEFORGE_PLATFORM_LINUX)
 			add_test(NAME PulseForge.GPU.LinuxWindowLifecycle COMMAND PulseForgeLinuxWindowLifecycleValidation)
 			set_tests_properties(PulseForge.GPU.LinuxWindowLifecycle PROPERTIES

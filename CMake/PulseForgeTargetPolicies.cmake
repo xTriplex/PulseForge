@@ -37,7 +37,8 @@ if(BUILD_TESTING)
 			if(NOT TARGET PulseForgeEditorUI OR NOT TARGET PulseForgeEditorTests)
 				message(FATAL_ERROR "Editor-enabled testing requires PulseForgeEditorUI and PulseForgeEditorTests")
 			endif()
-		elseif(TARGET PulseForgeEditorUI OR TARGET PulseForgeEditorTests OR TARGET PulseForgeImGui)
+		elseif(TARGET PulseForgeEditorUI OR TARGET PulseForgeEditorTests OR
+			(TARGET PulseForgeImGui AND NOT PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF))
 			message(FATAL_ERROR "Editor-disabled configuration must not create editor UI or its tests")
 		endif()
 		if(PULSEFORGE_PLATFORM_LINUX AND NOT PULSEFORGE_BUILD_EDITOR)
@@ -61,7 +62,7 @@ foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSe
 		PulseForgeCoreTests PulseForgeCoreConsumer PulseForgeSceneTests PulseForgeAssetTests PulseForgeAssetImportTests PulseForgeAssetImporterConsumer PulseForgeAudioRuntimeTests
 		PulseForgeSceneRendererConsumer PulseForgeEditorCoreConsumer PulseForgeScriptingRuntimeTests PulseForgeEditorTests PulseForgeEditorWorkspacePresentationTests PulseForgeEditorCoreTests
 		PulseForgeBufferUpdateTests PulseForgeCommandHistoryFailureTests PulseForgeEditorDocumentTransferFailureTests PulseForgeGpuValidation
-		PulseForgeLinuxWindowLifecycleValidation)
+		PulseForgeLinuxWindowLifecycleValidation PulseForgeEditorImGuiProofRenderer PulseForgeMacOSRendererValidation)
 	if(TARGET ${Target})
 		target_compile_options(${Target} PRIVATE
 			$<$<CXX_COMPILER_ID:MSVC>:/EHsc>

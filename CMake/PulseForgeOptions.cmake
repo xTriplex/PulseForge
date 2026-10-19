@@ -1,7 +1,9 @@
 set(PULSEFORGE_SAMPLE_RENDERER "Vulkan" CACHE STRING "Renderer used by PulseForgeGame (Vulkan or OpenGL)")
 set_property(CACHE PULSEFORGE_SAMPLE_RENDERER PROPERTY STRINGS Vulkan OpenGL)
 option(PULSEFORGE_BUILD_CORE_ONLY "Build only portable Core and CPU consumer tests" OFF)
-if(PULSEFORGE_BUILD_CORE_ONLY)
+option(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF
+	"Enable the explicit macOS Vulkan renderer proof configuration" OFF)
+if(PULSEFORGE_BUILD_CORE_ONLY OR PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
 	set(PULSEFORGE_EDITOR_DEFAULT OFF)
 else()
 	set(PULSEFORGE_EDITOR_DEFAULT ON)
@@ -38,15 +40,29 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	set(PULSEFORGE_PLATFORM_LINUX TRUE)
 	set(PULSEFORGE_PLATFORM_MACOS FALSE)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-	if(NOT PULSEFORGE_BUILD_CORE_ONLY)
+	if(NOT PULSEFORGE_BUILD_CORE_ONLY AND NOT PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
 		message(FATAL_ERROR
-			"macOS currently supports only the Core portability probe. The full renderer/editor platform route is "
-			"not implemented; see the G04 macOS feasibility decision.")
+			"macOS defaults to the Core portability probe. The renderer proof is opt-in with "
+			"PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF=ON.")
+	endif()
+	if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
+		if(PULSEFORGE_BUILD_CORE_ONLY)
+			message(FATAL_ERROR "PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF cannot be combined with PULSEFORGE_BUILD_CORE_ONLY.")
+		endif()
+		if(PULSEFORGE_BUILD_EDITOR)
+			message(FATAL_ERROR "The macOS Vulkan proof does not include the editor. Set PULSEFORGE_BUILD_EDITOR=OFF.")
+		endif()
+		if(NOT PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
+			message(FATAL_ERROR "The macOS Vulkan proof requires PULSEFORGE_SAMPLE_RENDERER=Vulkan.")
+		endif()
+		if(NOT PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
+			message(FATAL_ERROR "The macOS Vulkan proof requires PULSEFORGE_BUILD_GPU_VALIDATION_TESTS=ON.")
+		endif()
 	endif()
 	if(NOT CMAKE_C_COMPILER_ID MATCHES "^(AppleClang|Clang)$" OR
 		NOT CMAKE_CXX_COMPILER_ID MATCHES "^(AppleClang|Clang)$")
 		message(FATAL_ERROR
-			"macOS Core-only builds require Apple Clang or Clang C and C++ toolchains. Selected C=${CMAKE_C_COMPILER_ID}, "
+			"macOS builds require Apple Clang or Clang C and C++ toolchains. Selected C=${CMAKE_C_COMPILER_ID}, "
 			"CXX=${CMAKE_CXX_COMPILER_ID}.")
 	endif()
 	set(PULSEFORGE_PLATFORM_WINDOWS FALSE)
@@ -55,7 +71,11 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 else()
 	message(FATAL_ERROR
 		"Unsupported PulseForge operating system '${CMAKE_SYSTEM_NAME}'. This revision supports Windows desktop "
-		"builds, Linux desktop/runtime/Core builds, and a macOS Core-only portability probe.")
+		"builds, Linux desktop/runtime/Core builds, and macOS Core portability or opt-in Vulkan proof builds.")
+endif()
+
+if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF AND NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+	message(FATAL_ERROR "PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF is only valid when configuring for macOS.")
 endif()
 
 if(PULSEFORGE_PLATFORM_WINDOWS)

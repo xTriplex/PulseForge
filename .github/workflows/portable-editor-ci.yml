@@ -13,70 +13,121 @@ concurrency:
 
 jobs:
   macos-core:
-    name: macOS 15 · Apple Silicon · Metal/MoltenVK and Core probes
+    name: macOS 15 · Apple Silicon · PulseForge Vulkan/MoltenVK renderer proof
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Check out sources
         uses: actions/checkout@v5
+        with:
+          submodules: recursive
 
       - name: Probe hosted Metal command execution
         run: swift Tests/Platform/MacOSMetalCapabilityProbe.swift
 
-      - name: Probe MoltenVK native-window presentation
+      - name: Install the official Vulkan SDK in the runner temp directory
         run: |
           set -o pipefail
-          brew install vulkan-tools 2>&1 | tee "$RUNNER_TEMP/moltenvk-install.log"
-          brew list --versions molten-vk vulkan-loader vulkan-tools
-          VK_DRIVER_FILES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json" \
-            vulkaninfo --summary 2>&1 | tee "$RUNNER_TEMP/vulkaninfo.log"
-          VK_DRIVER_FILES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json" \
-            vulkaninfo --show-formats > "$RUNNER_TEMP/vulkaninfo-full.log" 2>&1
-          grep -Ei 'deviceName|apiVersion|VK_KHR_portability_(enumeration|subset)|VK_KHR_swapchain|VK_KHR_dynamic_rendering|VK_KHR_synchronization2|VK_EXT_metal_surface|timelineSemaphore|dynamicRendering|synchronization2|shaderDemoteToHelperInvocation|D32|depth' \
-            "$RUNNER_TEMP/vulkaninfo-full.log" | tee "$RUNNER_TEMP/moltenvk-capabilities.log" || true
-          VK_DRIVER_FILES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json" \
-            "$(brew --prefix vulkan-tools)/cube/vkcube.app/Contents/MacOS/vkcube" \
-            --wsi metal --c 5 2>&1 | tee "$RUNNER_TEMP/vkcube.log"
+          SDK_VERSION=1.4.350.0
+          SDK_ARCHIVE="$RUNNER_TEMP/vulkansdk-macos-${SDK_VERSION}.zip"
+          SDK_URL="https://sdk.lunarg.com/sdk/download/${SDK_VERSION}/mac/vulkansdk-macos-${SDK_VERSION}.zip"
+          curl --fail --location --retry 3 "$SDK_URL" --output "$SDK_ARCHIVE" 2>&1 |
+            tee "$RUNNER_TEMP/vulkan-sdk-download.log"
+          echo "7acc181b8fd9b4781bf51ed086222ec95d22004b85b3d0a6683a7e48ca5a1679  $SDK_ARCHIVE" |
+            shasum --check --status
+          unzip -q "$SDK_ARCHIVE" -d "$RUNNER_TEMP/vulkan-sdk-installer"
+          INSTALLER="$RUNNER_TEMP/vulkan-sdk-installer/vulkansdk-macOS-${SDK_VERSION}.app/Contents/MacOS/vulkansdk-macOS-${SDK_VERSION}"
+          "$INSTALLER" --root "$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}" --accept-licenses --default-answer \
+            --confirm-command install copy_only=1
+          echo "VULKAN_SDK=$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS" >> "$GITHUB_ENV"
+          echo "PULSEFORGE_DXC_EXECUTABLE=$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS/bin/dxc" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS/lib" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS/share/vulkan/icd.d/MoltenVK_icd.json" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+          xcodebuild -version | tee "$RUNNER_TEMP/apple-toolchain.log"
+          clang --version | tee -a "$RUNNER_TEMP/apple-toolchain.log"
+          "$PULSEFORGE_DXC_EXECUTABLE" --version | tee -a "$RUNNER_TEMP/apple-toolchain.log"
 
-      - name: Initialize the Core logging dependency
-        run: git submodule update --init PulseForge/Vendor/spdlog
-
-      - name: Configure Core-only C++23 build
+      - name: Probe the selected MoltenVK device and capabilities
         run: |
           set -o pipefail
-          cmake -S . -B Build/CI/macos-core -G Ninja \
+          "$VULKAN_SDK/bin/vulkaninfo" --summary 2>&1 | tee "$RUNNER_TEMP/vulkaninfo-summary.log"
+          "$VULKAN_SDK/bin/vulkaninfo" --show-formats > "$RUNNER_TEMP/vulkaninfo-full.log" 2>&1
+          grep -Ei 'deviceName|deviceType|apiVersion|driverVersion|VK_KHR_portability_(enumeration|subset)|VK_KHR_swapchain|VK_KHR_dynamic_rendering|VK_KHR_synchronization2|VK_EXT_metal_surface|swapchainMaintenance1|timelineSemaphore|dynamicRendering|synchronization2|shaderDemoteToHelperInvocation|D32|depth' \
+            "$RUNNER_TEMP/vulkaninfo-full.log" | tee "$RUNNER_TEMP/moltenvk-capabilities.log"
+
+      - name: Configure the explicit PulseForge macOS Vulkan renderer proof
+        run: |
+          set -o pipefail
+          cmake -S . -B Build/CI/macos-renderer -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
             -DBUILD_TESTING=ON \
-            -DPULSEFORGE_BUILD_CORE_ONLY=ON \
-            -DPULSEFORGE_BUILD_EDITOR=OFF 2>&1 | tee "$RUNNER_TEMP/configure.log"
+            -DPULSEFORGE_ENABLE_MACOS_VULKAN_PROOF=ON \
+            -DPULSEFORGE_BUILD_CORE_ONLY=OFF \
+            -DPULSEFORGE_BUILD_EDITOR=OFF \
+            -DPULSEFORGE_BUILD_GPU_VALIDATION_TESTS=ON \
+            -DPULSEFORGE_DXC_EXECUTABLE="$PULSEFORGE_DXC_EXECUTABLE" \
+            -DFETCHCONTENT_BASE_DIR="$GITHUB_WORKSPACE/Build/CI/Dependencies" 2>&1 |
+            tee "$RUNNER_TEMP/macos-configure.log"
 
-      - name: Build Core tests and consumer
+      - name: Build Core checks and the PulseForge renderer proof
         run: |
           set -o pipefail
-          cmake --build Build/CI/macos-core --parallel 3 --target PulseForgeTests 2>&1 |
-            tee "$RUNNER_TEMP/build.log"
+          cmake --build Build/CI/macos-renderer --parallel 2 --target \
+            PulseForgeCoreTests PulseForgeCoreConsumer PulseForgeMacOSRendererValidation 2>&1 |
+            tee "$RUNNER_TEMP/macos-build.log"
 
-      - name: Run Core CPU tests
+      - name: Run Core CPU tests and the required PulseForge renderer proof
         run: |
           set -o pipefail
-          ctest --test-dir Build/CI/macos-core --output-on-failure --parallel 2 2>&1 |
-            tee "$RUNNER_TEMP/ctest.log"
+          ctest --test-dir Build/CI/macos-renderer --output-on-failure --verbose \
+            -R 'PulseForge\.(Core|CoreConsumer|GPU\.MacOSRenderer)$' 2>&1 |
+            tee "$RUNNER_TEMP/macos-renderer-ctest.log"
+          grep -q 'Vulkan validation layer enabled' "$RUNNER_TEMP/macos-renderer-ctest.log"
+          grep -q 'NVRHI validation layer enabled' "$RUNNER_TEMP/macos-renderer-ctest.log"
+          grep -q 'Selected Vulkan GPU:' "$RUNNER_TEMP/macos-renderer-ctest.log"
+          grep -q 'Vulkan presentation retirement:' "$RUNNER_TEMP/macos-renderer-ctest.log"
+          grep -q 'MACOS_RENDERER_IMGUI_SUBMISSION=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
+          grep -q 'MACOS_RENDERER_READBACK=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
+          grep -q 'MACOS_RENDERER_NATIVE_RESIZE=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
+          grep -q 'MACOS_RENDERER_ORDERLY_SHUTDOWN=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
 
-      - name: Upload failure logs
-        if: failure()
+      - name: Verify strict presentation-fence policy behavior
+        run: |
+          set +e
+          PULSEFORGE_VULKAN_PRESENTATION_POLICY=require-fences \
+            Build/CI/macos-renderer/PulseForgeMacOSRendererValidation \
+            > "$RUNNER_TEMP/macos-strict-fences.log" 2>&1
+          result=$?
+          set -e
+          cat "$RUNNER_TEMP/macos-strict-fences.log"
+          if [ "$result" -eq 0 ]; then
+            echo "Strict presentation-fence policy rendered successfully on this device."
+          elif grep -q 'No otherwise suitable Vulkan GPU satisfies PULSEFORGE_VULKAN_PRESENTATION_POLICY=require-fences' \
+            "$RUNNER_TEMP/macos-strict-fences.log"; then
+            echo "Strict policy rejected this device with PulseForge's explicit unsupported-capability diagnostic."
+          else
+            echo "Strict policy failed for a reason other than the expected device capability rejection." >&2
+            exit "$result"
+          fi
+
+      - name: Upload compact renderer evidence
+        if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: macos-core-cmake-ctest-logs
+          name: macos-pulseforge-renderer-evidence
           path: |
-            ${{ runner.temp }}/configure.log
-            ${{ runner.temp }}/build.log
-            ${{ runner.temp }}/ctest.log
-            ${{ runner.temp }}/moltenvk-install.log
-            ${{ runner.temp }}/vulkaninfo.log
+            ${{ runner.temp }}/vulkan-sdk-download.log
+            ${{ runner.temp }}/apple-toolchain.log
+            ${{ runner.temp }}/vulkaninfo-summary.log
             ${{ runner.temp }}/vulkaninfo-full.log
             ${{ runner.temp }}/moltenvk-capabilities.log
-            ${{ runner.temp }}/vkcube.log
-            Build/CI/macos-core/CMakeFiles/CMakeConfigureLog.yaml
-            Build/CI/macos-core/Testing/Temporary/LastTest.log
+            ${{ runner.temp }}/macos-configure.log
+            ${{ runner.temp }}/macos-build.log
+            ${{ runner.temp }}/macos-renderer-ctest.log
+            ${{ runner.temp }}/macos-strict-fences.log
+            Build/CI/macos-renderer/CMakeFiles/CMakeConfigureLog.yaml
+            Build/CI/macos-renderer/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
           retention-days: 5
 
