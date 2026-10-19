@@ -98,11 +98,11 @@ jobs:
           set -o pipefail
           ctest --test-dir Build/CI/macos-renderer --output-on-failure --verbose -LE 'gpu|policy' 2>&1 |
             tee "$RUNNER_TEMP/macos-cpu-ctest.log"
-          grep -Eq 'MACOS_DYLD_ABSOLUTE_DLOPEN_PROBE .*load=success; symbol=success;.*same_image=false; sdk_image=true' \
-            "$RUNNER_TEMP/macos-cpu-ctest.log"
           grep -q 'MACOS_VULKAN_LOADER_SANITIZED_ENV=PASS' "$RUNNER_TEMP/macos-cpu-ctest.log"
           grep -q 'MACOS_VULKAN_LOADER_EMPTY_SDK_FAILURE=PASS' "$RUNNER_TEMP/macos-cpu-ctest.log"
-          grep -q 'DYLD_LIBRARY_PATH may have selected a different Vulkan loader' "$RUNNER_TEMP/macos-cpu-ctest.log"
+          grep -q 'MACOS_VULKAN_LOADER_VALID_SDK=PASS' "$RUNNER_TEMP/macos-cpu-ctest.log"
+          grep -q 'MACOS_VULKAN_LOADER_LIFECYCLE=PASS' "$RUNNER_TEMP/macos-cpu-ctest.log"
+          grep -q 'MACOS_VULKAN_RUNTIME_MISMATCH_POLICY=PASS' "$RUNNER_TEMP/macos-cpu-ctest.log"
 
       - name: Run the required PulseForge renderer policy and sensitivity fixtures
         run: |
