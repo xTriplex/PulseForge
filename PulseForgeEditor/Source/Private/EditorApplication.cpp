@@ -2404,6 +2404,8 @@ namespace
 				m_DocumentHostTabTearOffTest = false;
 				if (m_DocumentHostTabRoundTripTearOffPending)
 					PF_ERROR("Document tab native-window round-trip fixture timed out before tearing off the reattached session.");
+				else if (m_DocumentHostTabTearOffPointerPrepared)
+					PF_ERROR("Document tab tear-off UI fixture timed out waiting for the focused source window to become hovered.");
 				else PF_ERROR("Document tab tear-off UI fixture timed out before creating its native host.");
 				m_DocumentHostTabRoundTripTearOffPending = false;
 				return;
@@ -2413,6 +2415,24 @@ namespace
 			case DocumentTabTearOffTestPhase::WaitingForTab:
 				if (m_DocumentHostTabTearOffTestTabCenterValid)
 				{
+					ImGuiViewport* SourceViewport = ImGui::FindViewportByID(m_DocumentHostTabTearOffTestTabViewportID);
+					GLFWwindow* SourceWindow = SourceViewport ? static_cast<GLFWwindow*>(SourceViewport->PlatformHandle) : nullptr;
+					if (!SourceWindow)
+					{
+						m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Failed;
+						m_DocumentHostTabTearOffTest = false;
+						PF_ERROR("Document tab tear-off UI fixture could not find the source platform window.");
+						break;
+					}
+					if (!m_DocumentHostTabTearOffPointerPrepared)
+					{
+						glfwFocusWindow(SourceWindow);
+						glfwSetCursorPos(SourceWindow, m_DocumentHostTabTearOffTestTabCenter.x - SourceViewport->Pos.x,
+							m_DocumentHostTabTearOffTestTabCenter.y - SourceViewport->Pos.y);
+						m_DocumentHostTabTearOffPointerPrepared = true;
+						break;
+					}
+					if (glfwGetWindowAttrib(SourceWindow, GLFW_HOVERED) != GLFW_TRUE) break;
 					m_DocumentHostTabTearOffTestStart = m_DocumentHostTabTearOffTestTabCenter;
 					const ImGuiViewport* MainViewport = ImGui::GetMainViewport();
 					if (!MainViewport || MainViewport->Size.x <= 0.0f || MainViewport->Size.y <= 0.0f)
@@ -2425,8 +2445,7 @@ namespace
 						m_DocumentHostTabTearOffFromNativeHost
 							? ImVec2(
 								  m_DocumentHostTabTearOffTestStart.x + IO.MouseDragThreshold + 24.0f, m_DocumentHostTabTearOffTestStart.y)
-							: ImVec2(MainViewport->Pos.x + MainViewport->Size.x * 0.5f,
-								  MainViewport->Pos.y + MainViewport->Size.y * 0.75f);
+							: ImVec2(MainViewport->Pos.x + MainViewport->Size.x * 0.5f, MainViewport->Pos.y + MainViewport->Size.y * 0.75f);
 					const float DeltaX = m_DocumentHostTabTearOffTestDrop.x - m_DocumentHostTabTearOffTestStart.x;
 					const float DeltaY = m_DocumentHostTabTearOffTestDrop.y - m_DocumentHostTabTearOffTestStart.y;
 					if (DeltaX * DeltaX + DeltaY * DeltaY <= IO.MouseDragThreshold * IO.MouseDragThreshold)
@@ -2669,6 +2688,7 @@ namespace
 						m_DocumentHostTabReattachInvalidDropIndex, m_DocumentHostTabRoundTripCount + 1, DocumentTabRoundTripCycleCount);
 					m_DocumentHostTabTearOffTestIdentity = m_DocumentHostTabReattachTestIdentity;
 					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::WaitingForTab;
+					m_DocumentHostTabTearOffPointerPrepared = false;
 					m_DocumentHostTabTearOffTest = true;
 					m_DocumentHostTabRoundTripTearOffPending = true;
 				}
@@ -2921,6 +2941,7 @@ namespace
 					m_DocumentHostTabTearOffSourceHostID = TargetHost->ID;
 					m_DocumentHostTabTearOffTestFrameCount = 0;
 					m_DocumentHostTabTearOffTestTabCenterValid = false;
+					m_DocumentHostTabTearOffPointerPrepared = false;
 					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::WaitingForTab;
 					m_DocumentHostTabTearOffTest = true;
 					PF_INFO("Document tab native-group tear-off fixture is detaching the same session outside all editor windows.");
@@ -6547,6 +6568,7 @@ namespace
 		ImGuiID m_DocumentHostTabTearOffTestTabViewportID = 0;
 		std::string m_DocumentHostTabTearOffSourceHostID;
 		bool m_DocumentHostTabTearOffTestTabCenterValid = false;
+		bool m_DocumentHostTabTearOffPointerPrepared = false;
 		DocumentTabReattachTestPhase m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Disabled;
 		DocumentTabReorderTestPhase m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::Disabled;
 		DocumentTabGroupTestPhase m_DocumentHostTabGroupTestPhase = DocumentTabGroupTestPhase::Disabled;
