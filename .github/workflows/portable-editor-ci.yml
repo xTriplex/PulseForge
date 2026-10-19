@@ -13,8 +13,8 @@ concurrency:
 
 jobs:
   macos-core:
-    name: macOS 15 · Apple Silicon · PulseForge Vulkan/MoltenVK renderer proof
-    runs-on: macos-15
+    name: macOS 26 · Apple Silicon · PulseForge Vulkan/MoltenVK renderer proof
+    runs-on: macos-26
     timeout-minutes: 90
     steps:
       - name: Check out sources
