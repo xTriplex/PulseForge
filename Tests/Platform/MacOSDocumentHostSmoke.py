@@ -173,6 +173,7 @@ def main() -> int:
     deadline = time.monotonic() + args.timeout_seconds
     fixture_ready = False
     observed_native_windows = False
+    next_window_query = 0.0
     saw_tcc_denial = False
     failures: list[str] = []
 
@@ -186,7 +187,7 @@ def main() -> int:
                 break
             if line:
                 lowered = line.lower()
-                if "document tab" in lowered and (" failed" in lowered or " timed out" in lowered):
+                if "document tab" in lowered and (" failed" in lowered or " timed out" in lowered or "[error]" in lowered):
                     failures.append(line.rstrip())
                     break
                 if "development document-host fixture enabled" in lowered:
@@ -198,17 +199,22 @@ def main() -> int:
             if not fixture_ready:
                 continue
 
-            query_code, query_output = run_osascript(WINDOW_QUERY, editor.stem, timeout=min(5.0, max(0.1, deadline - time.monotonic())))
-            if query_code != 0:
-                if has_tcc_denial(query_output):
-                    saw_tcc_denial = True
+            now = time.monotonic()
+            if not observed_native_windows and now >= next_window_query:
+                next_window_query = now + 1.0
+                query_code, query_output = run_osascript(
+                    WINDOW_QUERY, editor.stem, timeout=min(5.0, max(0.1, deadline - now))
+                )
+                if query_code != 0:
+                    if has_tcc_denial(query_output):
+                        saw_tcc_denial = True
+                        break
+                    failures.append(f"Accessibility window query failed: {query_output.strip()}")
                     break
-                failures.append(f"Accessibility window query failed: {query_output.strip()}")
-                break
-            window_names = [name.strip() for name in query_output.strip().split(",") if name.strip()]
-            fixture_titles = [name for name in window_names if "Host Test Fixture" in name]
-            if len(window_names) >= 2 and fixture_titles:
-                observed_native_windows = True
+                window_names = [name.strip() for name in query_output.strip().split(",") if name.strip()]
+                fixture_titles = [name for name in window_names if "Host Test Fixture" in name]
+                if len(window_names) >= 2 and fixture_titles:
+                    observed_native_windows = True
 
             output_text = capture.buffer.decode("utf-8", errors="replace")
             if all(marker in output_text for marker in SUCCESS_MARKERS) and observed_native_windows:
