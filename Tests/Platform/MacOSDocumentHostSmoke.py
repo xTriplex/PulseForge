@@ -171,6 +171,7 @@ def main() -> int:
     )
     capture = BoundedOutput(process, log_path)
     deadline = time.monotonic() + args.timeout_seconds
+    fixture_ready = False
     observed_native_windows = False
     saw_tcc_denial = False
     failures: list[str] = []
@@ -188,6 +189,14 @@ def main() -> int:
                 if "document tab" in lowered and (" failed" in lowered or " timed out" in lowered):
                     failures.append(line.rstrip())
                     break
+                if "development document-host fixture enabled" in lowered:
+                    fixture_ready = True
+
+            # Accessibility queries can block while the editor is still creating its
+            # first project window. Wait for the fixture's explicit ready log before
+            # asking System Events to inspect native windows.
+            if not fixture_ready:
+                continue
 
             query_code, query_output = run_osascript(WINDOW_QUERY, editor.stem, timeout=min(5.0, max(0.1, deadline - time.monotonic())))
             if query_code != 0:
@@ -225,6 +234,8 @@ def main() -> int:
         if not observed_native_windows:
             stop_process_group(process)
             capture.thread.join(timeout=5)
+            if not fixture_ready:
+                return fail("editor did not report that the document-host fixture reached its UI-ready state", log_path)
             return fail("Accessibility did not observe a separate Host Test Fixture native window", log_path)
 
         output_text = capture.buffer.decode("utf-8", errors="replace")
