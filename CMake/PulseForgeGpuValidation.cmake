@@ -32,7 +32,8 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 			PulseForge/Vendor/imgui
 		)
 		target_compile_definitions(PulseForgeMacOSRendererValidation PRIVATE
-			PF_MACOS_RENDERER_SHADER_DIRECTORY="${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}"
+			PF_MACOS_RENDERER_SCENE_SHADER_DIRECTORY="${PULSEFORGE_SHADER_OUTPUT_DIR}"
+			PF_MACOS_RENDERER_EDITOR_SHADER_DIRECTORY="${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}"
 			PF_MACOS_RENDERER_PROJECT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/PBRMaterials/PBRMaterials.pfproj")
 		target_link_libraries(PulseForgeMacOSRendererValidation PRIVATE
 			PulseForge PulseForgeSceneRenderer PulseForgeEditorImGuiProofRenderer PulseForgeImGui glfw)
