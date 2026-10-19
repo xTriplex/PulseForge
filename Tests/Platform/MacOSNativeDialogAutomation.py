@@ -751,9 +751,6 @@ on performDialogAction(targetElement, requestedAction, targetName)
 end performDialogAction
 
 on pressDialogButton(buttonElement, buttonName)
-    if not enabled of buttonElement then
-        error "NFD_ACCESSIBILITY_ACTION_DISABLED; action=AXPress; button=" & buttonName
-    end if
     my performDialogAction(buttonElement, "AXPress", buttonName)
 end pressDialogButton
 '''
@@ -1265,6 +1262,7 @@ on run argv
         else if operation is "open-cancel" or operation is "save-cancel" then
             set cancelButton to my findDialogButton(dialogPanel, "Cancel")
             if cancelButton is missing value then error "Cancel button disappeared before the cancellation action"
+            if not enabled of cancelButton then error "Cancel was disabled before the cancellation action"
             my pressDialogButton(cancelButton, "Cancel")
         else if operation is "save-select" then
             set savePanel to dialogPanel
