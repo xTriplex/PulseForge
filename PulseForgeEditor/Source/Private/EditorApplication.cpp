@@ -1180,7 +1180,9 @@ namespace
 	private:
 		void RequestEditorApplicationClose()
 		{
-			if (m_ApplicationShutdownRequested) return;
+			if (m_ApplicationShutdownRequested || m_ApplicationClosePending) return;
+			if (!SaveDocumentWorkspaceNow()) return;
+			m_ApplicationClosePending = true;
 			std::vector<PulseForgeEditor::EditorDocumentIdentity> Documents;
 			for (const auto& [Identity, Session] : m_Documents.GetSessions())
 				if (Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level) Documents.push_back(Identity);
@@ -1206,8 +1208,16 @@ namespace
 
 		void CompleteEditorApplicationClose()
 		{
+			m_ApplicationClosePending = false;
 			m_ApplicationShutdownRequested = true;
 			PulseForge::Application::Get().RequestClose();
+		}
+
+		void CancelEditorApplicationClose()
+		{
+			if (!m_ApplicationClosePending) return;
+			m_ApplicationClosePending = false;
+			MarkDocumentWorkspaceDirty();
 		}
 
 		[[nodiscard]] std::expected<void, std::string> RestoreSceneState(std::string_view State)
@@ -1678,7 +1688,7 @@ namespace
 			if (!FinishSceneEdit()) return false;
 			if (m_Project)
 			{
-				SaveDocumentWorkspaceNow();
+				if (!SaveDocumentWorkspaceNow()) return false;
 				std::vector<PulseForgeEditor::EditorDocumentIdentity> ProjectDocuments;
 				for (const auto& [Identity, Session] : m_Documents.GetSessions())
 					if (Identity.Project == m_Project->GetDescription().ID && Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level)
@@ -2944,7 +2954,7 @@ namespace
 
 		void MarkDocumentWorkspaceDirty(bool BoundsOnly = false)
 		{
-			if (!m_Project || !m_DocumentWorkspaceStore.HasPath()) return;
+			if (m_ApplicationClosePending || m_ApplicationShutdownRequested || !m_Project || !m_DocumentWorkspaceStore.HasPath()) return;
 			m_DocumentWorkspaceStore.MarkDirty(BoundsOnly);
 		}
 
@@ -3140,16 +3150,22 @@ namespace
 
 		void SaveDocumentWorkspaceIfNeeded()
 		{
-			if (!m_Project || !m_DocumentWorkspaceStore.HasPath() || !m_DocumentWorkspaceStore.IsSaveDue()) return;
+			if (m_ApplicationClosePending || m_ApplicationShutdownRequested || !m_Project || !m_DocumentWorkspaceStore.HasPath() ||
+				!m_DocumentWorkspaceStore.IsSaveDue())
+				return;
 			if (auto Saved = m_DocumentWorkspaceStore.SaveIfDue(CaptureDocumentWorkspace()); !Saved)
 				PF_WARN("Could not persist editor document workspace: {}", Saved.error());
 		}
 
-		void SaveDocumentWorkspaceNow()
+		bool SaveDocumentWorkspaceNow()
 		{
-			if (!m_Project || !m_DocumentWorkspaceStore.HasPath()) return;
+			if (!m_Project || !m_DocumentWorkspaceStore.HasPath()) return true;
 			if (auto Saved = m_DocumentWorkspaceStore.SaveNow(CaptureDocumentWorkspace()); !Saved)
-				PF_WARN("Could not persist editor document workspace: {}", Saved.error());
+			{
+				SetError("Could not persist the editor document workspace before closing: " + Saved.error());
+				return false;
+			}
+			return true;
 		}
 
 		void ImportAsset()
@@ -4476,10 +4492,15 @@ namespace
 			if (ImGui::Button("Cancel", ImVec2(112.0f, 0.0f)))
 			{
 				m_DocumentCloseRequest.Cancel();
+				CancelEditorApplicationClose();
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::EndPopup();
-			if (!PopupOpen) m_DocumentCloseRequest.Cancel();
+			if (!PopupOpen)
+			{
+				m_DocumentCloseRequest.Cancel();
+				CancelEditorApplicationClose();
+			}
 		}
 
 		void DrawUnregisteredAssetDocument(const PulseForgeEditor::EditorDocumentIdentity& Identity)
@@ -6463,6 +6484,7 @@ namespace
 		PulseForgeEditor::EditorSceneWorkspaceState m_SceneWorkspace;
 		PulseForgeEditor::EditorSceneVisibilityCommands m_SceneVisibilityCommands;
 		bool m_OpenUnsavedDialog = false;
+		bool m_ApplicationClosePending = false;
 		bool m_ApplicationShutdownRequested = false;
 		PulseForgeEditor::EditorDocumentCloseRequest m_DocumentCloseRequest;
 		PulseForgeEditor::EditorAssetWorkflowState m_AssetWorkflow;
