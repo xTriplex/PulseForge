@@ -29,7 +29,7 @@ WINDOW_QUERY = '''on run argv
 end run
 '''
 
-MAIN_WINDOW_CLOSE = '''on run argv
+MAIN_WINDOW_CLOSE_PREFLIGHT = '''on run argv
     set targetPID to item 1 of argv as integer
     tell application "System Events"
         set targetProcess to first process whose unix id is targetPID
@@ -45,6 +45,10 @@ MAIN_WINDOW_CLOSE = '''on run argv
             set windowTitle to name of targetWindow
             set windowRole to role of targetWindow
             set windowSubrole to subrole of targetWindow
+            set sheetNames to {}
+            try
+                set sheetNames to name of every sheet of targetWindow
+            end try
             try
                 set closeControl to value of attribute "AXCloseButton" of targetWindow
             on error errorMessage number errorNumber
@@ -63,12 +67,31 @@ MAIN_WINDOW_CLOSE = '''on run argv
             if availableActions does not contain "AXPress" then
                 error "AXCloseButton does not expose AXPress for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle & ", control role=" & closeRole & ", subrole=" & closeSubrole & ", actions=" & (availableActions as text)
             end if
+            return "MACOS_DOCUMENT_HOST_CLOSE_PREFLIGHT=PASS; pid=" & (targetPID as text) & "; process=" & processName & "; windows=" & (exposedWindowNames as text) & "; window=" & quoted form of windowTitle & "; window role=" & windowRole & "; window subrole=" & windowSubrole & "; sheets=" & (sheetNames as text) & "; close control role=" & closeRole & "; close control subrole=" & closeSubrole & "; actions=" & (availableActions as text)
+        end tell
+    end tell
+end run
+'''
+
+MAIN_WINDOW_CLOSE = '''on run argv
+    set targetPID to item 1 of argv as integer
+    tell application "System Events"
+        set targetProcess to first process whose unix id is targetPID
+        tell targetProcess
+            set editorWindows to every window whose name contains "PulseForge Editor"
+            if (count of editorWindows) is not 1 then error "Main-window close target changed after Accessibility preflight"
+            set targetWindow to item 1 of editorWindows
+            set closeControl to value of attribute "AXCloseButton" of targetWindow
+            set closeSubrole to subrole of closeControl
+            set availableActions to actions of closeControl
+            if closeSubrole is not "AXCloseButton" then error "AXCloseButton resolved to subrole " & closeSubrole
+            if availableActions does not contain "AXPress" then error "AXCloseButton no longer exposes AXPress; actions=" & (availableActions as text)
             try
                 perform action "AXPress" of closeControl
             on error errorMessage number errorNumber
-                error "AXPress failed for PID " & (targetPID as text) & " (" & processName & "), AXCloseButton of window " & quoted form of windowTitle & ", control role=" & closeRole & ", subrole=" & closeSubrole & ", actions=" & (availableActions as text) & ": " & errorMessage & " (" & (errorNumber as text) & ")"
+                error "AXPress failed for PID " & (targetPID as text) & ", close control subrole=" & closeSubrole & ", actions=" & (availableActions as text) & ": " & errorMessage & " (" & (errorNumber as text) & ")"
             end try
-            return "MACOS_DOCUMENT_HOST_CLOSE_CONTROL=AXPress; pid=" & (targetPID as text) & "; process=" & processName & "; window=" & quoted form of windowTitle & "; window role=" & windowRole & "; window subrole=" & windowSubrole & "; control role=" & closeRole & "; control subrole=" & closeSubrole & "; actions=" & (availableActions as text)
+            return "MACOS_DOCUMENT_HOST_CLOSE_PRESS=RETURNED; pid=" & (targetPID as text) & "; close control subrole=" & closeSubrole & "; actions=" & (availableActions as text)
         end tell
     end tell
 end run
@@ -313,21 +336,58 @@ def main() -> int:
             capture.thread.join(timeout=5)
             return fail("fixture did not produce required round-trip evidence: " + repr(missing), log_path)
 
+        exit_code: int | None = None
+        close_preflight_code, close_preflight_output = run_osascript(
+            MAIN_WINDOW_CLOSE_PREFLIGHT,
+            str(process.pid),
+            timeout=min(10.0, max(0.1, deadline - time.monotonic())),
+        )
+        if close_preflight_code != 0:
+            stop_process_group(process)
+            capture.thread.join(timeout=5)
+            if has_tcc_denial(close_preflight_output):
+                print("MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; native-window close preflight NOT RUN; acceptance blocked")
+                return 77
+            return fail(f"could not inspect the native main-window close control: {close_preflight_output.strip()}", log_path)
+        print(close_preflight_output.strip())
+
         close_code, close_output = run_osascript(
             MAIN_WINDOW_CLOSE,
             str(process.pid),
             timeout=min(10.0, max(0.1, deadline - time.monotonic())),
         )
         if close_code != 0:
-            stop_process_group(process)
-            capture.thread.join(timeout=5)
             if has_tcc_denial(close_output):
+                stop_process_group(process)
+                capture.thread.join(timeout=5)
                 print("MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; native-window close request NOT RUN; acceptance blocked")
                 return 77
-            return fail(f"could not request normal main-window close: {close_output.strip()}", log_path)
-        print(close_output.strip())
+            if close_code == 124:
+                try:
+                    exit_code = process.wait(timeout=min(2.0, max(0.1, deadline - time.monotonic())))
+                except subprocess.TimeoutExpired:
+                    exit_code = None
+                if exit_code == 0:
+                    print("MACOS_DOCUMENT_HOST_CLOSE_PRESS=TIMED_OUT_AFTER_NORMAL_EXIT; " + close_preflight_output.strip())
+                else:
+                    stop_process_group(process)
+                    capture.thread.join(timeout=5)
+                    return fail(
+                        "Accessibility AXPress timed out while the editor remained open; "
+                        + close_preflight_output.strip()
+                        + "; "
+                        + close_output.strip(),
+                        log_path,
+                    )
+            else:
+                stop_process_group(process)
+                capture.thread.join(timeout=5)
+                return fail(f"could not request normal main-window close: {close_output.strip()}", log_path)
+        else:
+            print(close_output.strip())
         try:
-            exit_code = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            if exit_code is None:
+                exit_code = process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             stop_process_group(process)
             capture.thread.join(timeout=5)
