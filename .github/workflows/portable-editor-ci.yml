@@ -31,7 +31,8 @@ jobs:
           VK_DRIVER_FILES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json" \
             vulkaninfo --summary 2>&1 | tee "$RUNNER_TEMP/vulkaninfo.log"
           VK_DRIVER_FILES="$(brew --prefix)/etc/vulkan/icd.d/MoltenVK_icd.json" \
-            vkcube --wsi metal --c 5 2>&1 | tee "$RUNNER_TEMP/vkcube.log"
+            "$(brew --prefix vulkan-tools)/cube/vkcube.app/Contents/MacOS/vkcube" \
+            --wsi metal --c 5 2>&1 | tee "$RUNNER_TEMP/vkcube.log"
 
       - name: Initialize the Core logging dependency
         run: git submodule update --init PulseForge/Vendor/spdlog
