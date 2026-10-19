@@ -407,6 +407,7 @@ namespace
 
 		static constexpr size_t DocumentTabTestDropPointsPerPanel = 5;
 		static constexpr size_t DocumentTabRoundTripCycleCount = 3;
+		static constexpr size_t DocumentHostTabReattachTestMaximumFrames = 3600;
 		static constexpr std::array<const char*, 5> DocumentTabTestInvalidDropPanelNames = { "Hierarchy", "Inspector", "Scene Viewport",
 			"Content Browser", "Console" };
 		static constexpr size_t DocumentTabTestConsolePanelIndex = DocumentTabTestInvalidDropPanelNames.size() - 1;
@@ -2572,11 +2573,24 @@ namespace
 			m_DocumentHostTabReattachTest = false;
 #else
 			ImGuiIO& IO = ImGui::GetIO();
-			if (++m_DocumentHostTabReattachTestFrameCount > 600)
+			if (++m_DocumentHostTabReattachTestFrameCount > DocumentHostTabReattachTestMaximumFrames)
 			{
+				const auto TimedOutPhase = m_DocumentHostTabReattachTestPhase;
 				m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
 				m_DocumentHostTabReattachTest = false;
-				PF_ERROR("Document tab reattachment UI fixture timed out before validating all drop targets.");
+				const char* TargetName = "main document strip";
+				bool TargetAvailable = m_DocumentHostTabReattachTestMainDropPositionValid;
+				if (m_DocumentHostTabReattachInvalidDropIndex < m_DocumentHostTabReattachInvalidDropTargets.size())
+				{
+					const auto& Target = m_DocumentHostTabReattachInvalidDropTargets[m_DocumentHostTabReattachInvalidDropIndex];
+					TargetName = Target.Name ? Target.Name : "unidentified utility-panel drop target";
+					TargetAvailable = Target.Available;
+				}
+				PF_ERROR("Document tab reattachment UI fixture timed out: phase {}, drop target {}/{}, '{}' available={}, tab center valid={}, main-strip target valid={}; "
+					 "no remaining target was skipped.",
+					 static_cast<int>(TimedOutPhase), m_DocumentHostTabReattachInvalidDropIndex + 1,
+					 m_DocumentHostTabReattachInvalidDropTargets.size() + 1, TargetName, TargetAvailable,
+					 m_DocumentHostTabReattachTestTabCenterValid, m_DocumentHostTabReattachTestMainDropPositionValid);
 				return;
 			}
 			switch (m_DocumentHostTabReattachTestPhase)
