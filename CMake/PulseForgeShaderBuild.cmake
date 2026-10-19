@@ -6,12 +6,18 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 	# of the architecture being targeted by this build. An explicit executable
 	# override is available for controlled toolchain setups.
 	set(PULSEFORGE_DXC_VERSION "1.9.2602.24")
-	set(PULSEFORGE_DXC_EXECUTABLE "" CACHE FILEPATH "Host DXC executable; empty selects the pinned host archive")
+	set(PULSEFORGE_DXC_EXECUTABLE "" CACHE FILEPATH
+		"Host DXC executable override; on macOS use the compiler supplied by the official LunarG Vulkan SDK")
 	if(PULSEFORGE_DXC_EXECUTABLE)
 		if(NOT EXISTS "${PULSEFORGE_DXC_EXECUTABLE}")
 			message(FATAL_ERROR "PULSEFORGE_DXC_EXECUTABLE does not exist: ${PULSEFORGE_DXC_EXECUTABLE}")
 		endif()
 		set(PULSEFORGE_DXC "${PULSEFORGE_DXC_EXECUTABLE}")
+		if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+			message(STATUS
+				"Using explicit host DXC override '${PULSEFORGE_DXC}'. HLSL sources are compiled locally to SPIR-V; "
+				"the macOS proof expects the DXC provided by the official LunarG macOS Vulkan SDK.")
+		endif()
 	else()
 		if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
 			string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" PULSEFORGE_DXC_HOST_PROCESSOR)
@@ -36,6 +42,12 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 				"3da18b4b32899c65881276315411092fa1a076e25bbea20606bc247c5fa93c83f948785969e007115dc72afcd433ab76e54c392de6d37c11d93d8614a829e40a")
 			set(PULSEFORGE_DXC_RELATIVE_EXECUTABLE "bin/dxc")
 		else()
+			if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+				message(FATAL_ERROR
+					"No pinned Microsoft DXC archive is configured for macOS. Set PULSEFORGE_DXC_EXECUTABLE to the "
+					"host compiler from the official LunarG macOS Vulkan SDK (for example, $VULKAN_SDK/bin/dxc). "
+					"PulseForge compiles checked-in HLSL sources to SPIR-V during this build; it does not use checked-in SPIR-V.")
+			endif()
 			message(FATAL_ERROR
 				"Pinned DXC ${PULSEFORGE_DXC_VERSION} has no package for host '${CMAKE_HOST_SYSTEM_NAME}'; "
 				"set PULSEFORGE_DXC_EXECUTABLE to a compatible host compiler.")
@@ -252,7 +264,8 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 		set_property(TARGET PulseForgeGame PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGame>")
 	endif()
 
-	if(PULSEFORGE_BUILD_EDITOR AND PULSEFORGE_EDITOR_RENDERER STREQUAL "Vulkan")
+	if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF OR
+		(PULSEFORGE_BUILD_EDITOR AND PULSEFORGE_EDITOR_RENDERER STREQUAL "Vulkan"))
 		set(PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/Editor/Shaders")
 		set(PULSEFORGE_EDITOR_IMGUI_VERTEX_SPIRV "${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}/EditorImGui.vs.spv")
 		set(PULSEFORGE_EDITOR_IMGUI_FRAGMENT_SPIRV "${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}/EditorImGui.ps.spv")
@@ -279,8 +292,10 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 			OPTIONS -fvk-b-shift 256 0 -fvk-t-shift 0 0 -fvk-s-shift 128 0)
 		add_custom_target(PulseForgeEditorShaderAssets
 			DEPENDS ${PULSEFORGE_EDITOR_SHADER_OUTPUTS})
-		pulseforge_attach_shader_deployment(PulseForgeEditor "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders"
-			ASSET_TARGETS PulseForgeSceneShaderAssets PulseForgeEditorShaderAssets
-			SHADERS ${PULSEFORGE_SCENE_SHADER_OUTPUTS} ${PULSEFORGE_EDITOR_SHADER_OUTPUTS})
+		if(PULSEFORGE_BUILD_EDITOR)
+			pulseforge_attach_shader_deployment(PulseForgeEditor "$<TARGET_FILE_DIR:PulseForgeEditor>/Shaders"
+				ASSET_TARGETS PulseForgeSceneShaderAssets PulseForgeEditorShaderAssets
+				SHADERS ${PULSEFORGE_SCENE_SHADER_OUTPUTS} ${PULSEFORGE_EDITOR_SHADER_OUTPUTS})
+		endif()
 	endif()
 endif()
