@@ -883,6 +883,9 @@ on run argv
             return "NFD_PANEL_AMBIGUOUS=pid=" & targetPID & "; fixture matching windows/sheets=" & fixtureMatchCount
         end if
         set panelOwnerFound to false
+        set unassociatedServicePanelPID to 0
+        set unassociatedServicePanelName to ""
+        set unassociatedServicePanelBundleID to ""
         if fixtureMatchCount is 1 then
             set targetProcess to hostProcess
             set panelProcessID to targetPID
@@ -926,11 +929,9 @@ on run argv
                 return "NFD_PANEL_AMBIGUOUS=pid=" & targetPID & "; " & candidateSummary
             end if
             if serviceMatchCount is 1 then
-                set targetProcess to serviceTargetProcess
-                set panelProcessID to serviceTargetProcessID
-                set processName to serviceTargetName
-                set processBundleID to serviceTargetBundleID
-                set panelOwnerFound to true
+                set unassociatedServicePanelPID to serviceTargetProcessID
+                set unassociatedServicePanelName to serviceTargetName
+                set unassociatedServicePanelBundleID to serviceTargetBundleID
             end if
         end if
         set foregroundState to "unavailable"
@@ -961,6 +962,11 @@ on run argv
             panelOwnerFound & "; process candidates=" & candidateProcessCount & ¬
             "; panel-service count=" & panelServiceCount & "; discovery=" & discoveryState & ¬
             "; candidate state=" & candidateSummary
+        if unassociatedServicePanelPID is not 0 then
+            return "NFD_PANEL_UNASSOCIATED=fixture_pid=" & targetPID & "; service_panel_pid=" & ¬
+                unassociatedServicePanelPID & "; service_panel_process=" & unassociatedServicePanelName & ¬
+                "; service_panel_bundle=" & unassociatedServicePanelBundleID & "; " & lastState
+        end if
             try
                 with timeout of 2 seconds
                     set windowCount to count of windows of targetProcess
@@ -1358,9 +1364,14 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
     while True:
         probe_remaining = max(0.0, probe_deadline - time.monotonic())
         if probe_remaining <= 0:
+            observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+            capture_waiting_observation(process.pid, scenario, observation_log)
             if not stop_fixture(process, output_reader):
                 return 1, "fixture process group or output reader survived cleanup after the panel readiness deadline"
-            return 1, f"native panel did not become Accessibility-ready; last_state={last_panel_state!r}"
+            return 1, (
+                "native panel did not become Accessibility-ready before the existing readiness deadline; "
+                f"read-only waiting-state observation captured; last_state={last_panel_state!r}"
+            )
         if output_reader.failure_lines:
             if not stop_fixture(process, output_reader):
                 return 1, "fixture process group or output reader survived cleanup after a panel-readiness failure"
@@ -1384,7 +1395,17 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 return 77, probe_output
             if is_accessibility_timeout(probe_output) or probe_code == 124:
                 if "process group survived SIGKILL cleanup" in probe_output:
-                    return 1, f"timed-out Accessibility probe process did not terminate; output={probe_output!r}"
+                    observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+                    capture_waiting_observation(process.pid, scenario, observation_log)
+                    if not stop_fixture(process, output_reader):
+                        return 1, (
+                            "timed-out Accessibility probe and fixture process groups both survived bounded cleanup; "
+                            f"probe_output={probe_output!r}"
+                        )
+                    return 1, (
+                        "timed-out Accessibility probe process did not terminate; fixture was stopped after "
+                        f"read-only observation; output={probe_output!r}"
+                    )
                 last_panel_state = f"bounded Accessibility query timed out; exit_code={probe_code}; output={probe_output!r}"
                 observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
                 capture_waiting_observation(process.pid, scenario, observation_log)
@@ -1424,7 +1445,25 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 if not stop_fixture(process, output_reader):
                     return 1, "fixture process group or output reader survived invalid panel-process cleanup"
                 return 1, f"Accessibility readiness did not identify the native panel owner PID: {probe_output!r}"
+            if panel_process_id != process_id:
+                observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+                capture_waiting_observation(process.pid, scenario, observation_log)
+                if not stop_fixture(process, output_reader):
+                    return 1, "fixture process group or output reader survived cleanup after an unassociated panel was observed"
+                return 1, (
+                    "native panel was exposed by a separate process without a verifiable association to the fixture; "
+                    f"no controls were activated; read-only waiting-state observation captured; state={probe_output!r}"
+                )
             break
+        if probe_output.startswith(f"NFD_PANEL_UNASSOCIATED=fixture_pid={process_id};"):
+            observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+            capture_waiting_observation(process.pid, scenario, observation_log)
+            if not stop_fixture(process, output_reader):
+                return 1, "fixture process group or output reader survived cleanup after an unassociated panel was observed"
+            return 1, (
+                "matching native panel was found outside the fixture process, but its ownership was not established; "
+                f"no controls were activated; read-only waiting-state observation captured; state={probe_output!r}"
+            )
         if not probe_output.startswith(f"NFD_PANEL_WAIT=pid={process_id};"):
             observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
             capture_waiting_observation(process.pid, scenario, observation_log)
@@ -1432,12 +1471,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 return 1, "fixture process group or output reader survived cleanup after unexpected Accessibility output"
             return 1, f"Accessibility probe returned an unexpected state: {probe_output!r}"
         last_panel_state = probe_output.strip()
-        time.sleep(0.5)
-        observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
-        capture_waiting_observation(process.pid, scenario, observation_log)
-        if not stop_fixture(process, output_reader):
-            return 1, "fixture process group or output reader survived cleanup after waiting-state observation"
-        return 1, f"native panel did not meet readiness on the first snapshot; read-only observation captured; last_state={last_panel_state!r}"
+        time.sleep(min(0.2, max(0.0, probe_deadline - time.monotonic())))
 
     remaining = remaining_seconds()
     if remaining <= 0:

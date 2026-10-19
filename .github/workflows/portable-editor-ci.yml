@@ -167,6 +167,16 @@ jobs:
             --log-directory "$RUNNER_TEMP" \
             --timeout-seconds 300 2>&1 | tee "$RUNNER_TEMP/macos-document-host-smoke.log"
 
+      - name: Exercise real Cocoa Open and Save dialogs with Accessibility automation
+        id: macos_native_dialogs
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSNativeDialogAutomation.py \
+            --fixture Build/CI/macos-renderer/PulseForgeNativeDialogValidation \
+            --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 180 2>&1 | tee "$RUNNER_TEMP/macos-native-dialog-automation.log"
+
       - name: Verify native document host workspace restoration across editor restarts
         id: macos_workspace_restore
         run: |
@@ -176,15 +186,6 @@ jobs:
             --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
             --log-directory "$RUNNER_TEMP" \
             --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-workspace-restore-smoke.log"
-
-      - name: Exercise real Cocoa Open and Save dialogs with Accessibility automation
-        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' && steps.macos_cpu_validation.outcome == 'success' && steps.macos_renderer_validation.outcome == 'success' && steps.macos_bundle_smoke.outcome == 'success' && steps.macos_editor_runtime_play_stop.outcome == 'success' && steps.macos_document_hosts.outcome == 'success' && steps.macos_workspace_restore.outcome == 'success' }}
-        run: |
-          set -o pipefail
-          python3 Tests/Platform/MacOSNativeDialogAutomation.py \
-            --fixture Build/CI/macos-renderer/PulseForgeNativeDialogValidation \
-            --log-directory "$RUNNER_TEMP" \
-            --timeout-seconds 180 2>&1 | tee "$RUNNER_TEMP/macos-native-dialog-automation.log"
 
       - name: Upload compact renderer evidence
         if: always()
