@@ -94,7 +94,7 @@ public:
 			}
 			else
 				m_LoggedRuntimeFailure = false;
-			if (RuntimeResult && m_PlayerSmokeExitAfterRender && !m_PlayerRuntimeSmokeLogged)
+			if (RuntimeResult && m_PlayerSmokeExitAfterRender && !m_PlayerRuntimeSmokeLogged && RuntimeResult->PhysicsSteps > 0)
 			{
 				m_PlayerRuntimeSmokeLogged = true;
 				PF_INFO("PULSEFORGE_PLAYER_RUNTIME_SMOKE=PASS; scripting advanced; physics_steps={}; audio advanced",
@@ -138,14 +138,17 @@ public:
 			return;
 		}
 		m_LoggedRenderFailure = false;
-		if (Rendered->GeometryDrawCount > 0 && !m_LoggedSceneDraw)
+		if (Rendered->GeometryDrawCount > 0)
 		{
-			m_LoggedSceneDraw = true;
-			PF_INFO("Submitted {0} indexed mesh instance(s) from the prepared scene", Rendered->GeometryDrawCount);
-			if (m_PlayerSmokeExitAfterRender)
+			if (!m_LoggedSceneDraw)
+			{
+				m_LoggedSceneDraw = true;
+				PF_INFO("Submitted {0} indexed mesh instance(s) from the prepared scene", Rendered->GeometryDrawCount);
+			}
+			if (m_PlayerSmokeExitAfterRender && m_PlayerRuntimeSmokeLogged && !m_PlayerSmokeShutdownRequested)
 			{
 				m_PlayerSmokeShutdownRequested = true;
-				PF_INFO("PULSEFORGE_PLAYER_RELOCATION_SMOKE=PASS; rendered scene geometry and requesting orderly shutdown");
+				PF_INFO("PULSEFORGE_PLAYER_RELOCATION_SMOKE=PASS; rendered scene geometry after runtime advancement and requesting orderly shutdown");
 				PulseForge::Application::Get().RequestClose();
 			}
 		}
