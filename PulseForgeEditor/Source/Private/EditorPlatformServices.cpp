@@ -12,6 +12,8 @@
 #include "Editor/EditorPlatformServices.h"
 
 #include <string>
+#include <memory>
+#include <exception>
 #include <utility>
 
 namespace PulseForgeEditor
@@ -41,35 +43,42 @@ namespace PulseForgeEditor
 		void FocusParent(GLFWwindow* Parent) noexcept
 		{
 			// Request focus restoration after the modal dialog; the window manager may ignore it.
-			if (Parent)
-				glfwFocusWindow(Parent);
+			if (Parent) glfwFocusWindow(Parent);
 		}
 
-		void MakeNativeFilter(const EditorFileDialogFilter* Filter, std::string& Name, std::string& Extensions,
-			nfdu8filteritem_t& NativeFilter)
+		class ParentFocusRestorer final
 		{
-			if (!Filter)
-				return;
+		public:
+			explicit ParentFocusRestorer(GLFWwindow* Parent) noexcept : m_Parent(Parent) {}
+
+			~ParentFocusRestorer() noexcept { FocusParent(m_Parent); }
+
+			ParentFocusRestorer(const ParentFocusRestorer&) = delete;
+			ParentFocusRestorer& operator=(const ParentFocusRestorer&) = delete;
+
+		private:
+			GLFWwindow* m_Parent;
+		};
+
+		void MakeNativeFilter(
+			const EditorFileDialogFilter* Filter, std::string& Name, std::string& Extensions, nfdu8filteritem_t& NativeFilter)
+		{
+			if (!Filter) return;
 			Name.assign(Filter->Name);
 			Extensions.assign(Filter->Extensions);
 			NativeFilter = { Name.c_str(), Extensions.c_str() };
 		}
 
-		nfdwindowhandle_t MakeNativeParent(GLFWwindow* Parent)
+		bool MakeNativeParent(GLFWwindow* Parent, nfdwindowhandle_t& NativeParent)
 		{
-			nfdwindowhandle_t NativeParent{};
-			if (Parent)
-				(void)NFD_GetNativeWindowFromGLFWWindow(Parent, &NativeParent);
-			return NativeParent;
+			return !Parent || NFD_GetNativeWindowFromGLFWWindow(Parent, &NativeParent);
 		}
 	} // namespace
 
 	std::expected<void, std::string> EditorPlatformServices::InitializeNativeFileDialogs()
 	{
-		if (s_NativeFileDialogsInitialized)
-			return {};
-		if (NFD_Init() != NFD_OKAY)
-			return std::unexpected(GetNativeFileDialogError("Could not initialize native file dialogs"));
+		if (s_NativeFileDialogsInitialized) return {};
+		if (NFD_Init() != NFD_OKAY) return std::unexpected(GetNativeFileDialogError("Could not initialize native file dialogs"));
 
 		if (!NFD_SetDisplayPropertiesFromGLFW())
 		{
@@ -84,8 +93,7 @@ namespace PulseForgeEditor
 
 	void EditorPlatformServices::ShutdownNativeFileDialogs() noexcept
 	{
-		if (!s_NativeFileDialogsInitialized)
-			return;
+		if (!s_NativeFileDialogsInitialized) return;
 		NFD_Quit();
 		s_NativeFileDialogsInitialized = false;
 	}
@@ -93,76 +101,83 @@ namespace PulseForgeEditor
 	std::expected<std::optional<std::filesystem::path>, std::string> EditorPlatformServices::ShowOpenFileDialog(
 		GLFWwindow* Parent, const EditorFileDialogFilter* Filter, const std::filesystem::path& DefaultPath)
 	{
-		if (!s_NativeFileDialogsInitialized)
-			return std::unexpected("Native file dialogs have not been initialized");
+		if (!s_NativeFileDialogsInitialized) return std::unexpected("Native file dialogs have not been initialized");
 
-		std::string FilterName;
-		std::string FilterExtensions;
-		nfdu8filteritem_t NativeFilter{};
-		MakeNativeFilter(Filter, FilterName, FilterExtensions, NativeFilter);
-		const std::string Utf8DefaultPath = DefaultPath.empty() ? std::string{} : PathToUtf8(DefaultPath);
-		const nfdwindowhandle_t NativeParent = MakeNativeParent(Parent);
+		ParentFocusRestorer RestoreFocus(Parent);
+		try
+		{
+			std::string FilterName;
+			std::string FilterExtensions;
+			nfdu8filteritem_t NativeFilter{};
+			MakeNativeFilter(Filter, FilterName, FilterExtensions, NativeFilter);
+			const std::string Utf8DefaultPath = DefaultPath.empty() ? std::string{} : PathToUtf8(DefaultPath);
+			nfdwindowhandle_t NativeParent{};
+			if (!MakeNativeParent(Parent, NativeParent))
+				return std::unexpected("Could not attach the file dialog to its parent window on this platform");
 
-		nfdu8char_t* SelectedPath = nullptr;
-		nfdopendialogu8args_t Arguments{};
-		Arguments.filterList = Filter ? &NativeFilter : nullptr;
-		Arguments.filterCount = Filter ? 1 : 0;
-		Arguments.defaultPath = Utf8DefaultPath.empty() ? nullptr : Utf8DefaultPath.c_str();
-		Arguments.parentWindow = NativeParent;
-		const nfdresult_t Result = NFD_OpenDialogU8_With(&SelectedPath, &Arguments);
-		std::optional<std::filesystem::path> Selection;
-		std::string Error;
-		if (Result == NFD_OKAY && SelectedPath)
-			Selection = PathFromUtf8(SelectedPath);
-		else if (Result == NFD_ERROR)
-			Error = GetNativeFileDialogError("Could not open the file dialog");
-		else if (Result != NFD_CANCEL)
-			Error = "The file dialog returned success without a selected path";
-		if (SelectedPath)
-			NFD_FreePathU8(SelectedPath);
-		FocusParent(Parent);
-		if (!Error.empty())
-			return std::unexpected(std::move(Error));
-		return Selection;
+			nfdu8char_t* SelectedPath = nullptr;
+			nfdopendialogu8args_t Arguments{};
+			Arguments.filterList = Filter ? &NativeFilter : nullptr;
+			Arguments.filterCount = Filter ? 1 : 0;
+			Arguments.defaultPath = Utf8DefaultPath.empty() ? nullptr : Utf8DefaultPath.c_str();
+			Arguments.parentWindow = NativeParent;
+			const nfdresult_t Result = NFD_OpenDialogU8_With(&SelectedPath, &Arguments);
+			const std::unique_ptr<nfdu8char_t, decltype(&NFD_FreePathU8)> SelectedPathOwner(SelectedPath, &NFD_FreePathU8);
+			if (Result == NFD_OKAY && SelectedPath) return std::optional<std::filesystem::path>(PathFromUtf8(SelectedPathOwner.get()));
+			if (Result == NFD_ERROR) return std::unexpected(GetNativeFileDialogError("Could not open the file dialog"));
+			if (Result == NFD_CANCEL) return std::optional<std::filesystem::path>{};
+			return std::unexpected("The file dialog returned success without a selected path");
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(std::string("Could not complete the open file dialog: ") + Exception.what());
+		}
+		catch (...)
+		{
+			return std::unexpected("Could not complete the open file dialog because of an unknown exception");
+		}
 	}
 
 	std::expected<std::optional<std::filesystem::path>, std::string> EditorPlatformServices::ShowSaveFileDialog(
-		GLFWwindow* Parent, const EditorFileDialogFilter* Filter, const std::filesystem::path& DefaultPath,
-		std::string_view DefaultName)
+		GLFWwindow* Parent, const EditorFileDialogFilter* Filter, const std::filesystem::path& DefaultPath, std::string_view DefaultName)
 	{
-		if (!s_NativeFileDialogsInitialized)
-			return std::unexpected("Native file dialogs have not been initialized");
+		if (!s_NativeFileDialogsInitialized) return std::unexpected("Native file dialogs have not been initialized");
 
-		std::string FilterName;
-		std::string FilterExtensions;
-		nfdu8filteritem_t NativeFilter{};
-		MakeNativeFilter(Filter, FilterName, FilterExtensions, NativeFilter);
-		const std::string Utf8DefaultPath = DefaultPath.empty() ? std::string{} : PathToUtf8(DefaultPath);
-		const std::string DefaultNameString(DefaultName);
-		const nfdwindowhandle_t NativeParent = MakeNativeParent(Parent);
+		ParentFocusRestorer RestoreFocus(Parent);
+		try
+		{
+			std::string FilterName;
+			std::string FilterExtensions;
+			nfdu8filteritem_t NativeFilter{};
+			MakeNativeFilter(Filter, FilterName, FilterExtensions, NativeFilter);
+			const std::string Utf8DefaultPath = DefaultPath.empty() ? std::string{} : PathToUtf8(DefaultPath);
+			const std::string DefaultNameString(DefaultName);
+			nfdwindowhandle_t NativeParent{};
+			if (!MakeNativeParent(Parent, NativeParent))
+				return std::unexpected("Could not attach the save dialog to its parent window on this platform");
 
-		nfdu8char_t* SelectedPath = nullptr;
-		nfdsavedialogu8args_t Arguments{};
-		Arguments.filterList = Filter ? &NativeFilter : nullptr;
-		Arguments.filterCount = Filter ? 1 : 0;
-		Arguments.defaultPath = Utf8DefaultPath.empty() ? nullptr : Utf8DefaultPath.c_str();
-		Arguments.defaultName = DefaultNameString.empty() ? nullptr : DefaultNameString.c_str();
-		Arguments.parentWindow = NativeParent;
-		const nfdresult_t Result = NFD_SaveDialogU8_With(&SelectedPath, &Arguments);
-		std::optional<std::filesystem::path> Selection;
-		std::string Error;
-		if (Result == NFD_OKAY && SelectedPath)
-			Selection = PathFromUtf8(SelectedPath);
-		else if (Result == NFD_ERROR)
-			Error = GetNativeFileDialogError("Could not open the save dialog");
-		else if (Result != NFD_CANCEL)
-			Error = "The save dialog returned success without a selected path";
-		if (SelectedPath)
-			NFD_FreePathU8(SelectedPath);
-		FocusParent(Parent);
-		if (!Error.empty())
-			return std::unexpected(std::move(Error));
-		return Selection;
+			nfdu8char_t* SelectedPath = nullptr;
+			nfdsavedialogu8args_t Arguments{};
+			Arguments.filterList = Filter ? &NativeFilter : nullptr;
+			Arguments.filterCount = Filter ? 1 : 0;
+			Arguments.defaultPath = Utf8DefaultPath.empty() ? nullptr : Utf8DefaultPath.c_str();
+			Arguments.defaultName = DefaultNameString.empty() ? nullptr : DefaultNameString.c_str();
+			Arguments.parentWindow = NativeParent;
+			const nfdresult_t Result = NFD_SaveDialogU8_With(&SelectedPath, &Arguments);
+			const std::unique_ptr<nfdu8char_t, decltype(&NFD_FreePathU8)> SelectedPathOwner(SelectedPath, &NFD_FreePathU8);
+			if (Result == NFD_OKAY && SelectedPath) return std::optional<std::filesystem::path>(PathFromUtf8(SelectedPathOwner.get()));
+			if (Result == NFD_ERROR) return std::unexpected(GetNativeFileDialogError("Could not open the save dialog"));
+			if (Result == NFD_CANCEL) return std::optional<std::filesystem::path>{};
+			return std::unexpected("The save dialog returned success without a selected path");
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(std::string("Could not complete the save file dialog: ") + Exception.what());
+		}
+		catch (...)
+		{
+			return std::unexpected("Could not complete the save file dialog because of an unknown exception");
+		}
 	}
 
 	bool EditorPlatformServices::CanPositionNativeWindows() noexcept

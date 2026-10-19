@@ -10,12 +10,10 @@ namespace
 		explicit ScopedSettingsDirectoryOverride(const std::filesystem::path& Directory)
 		{
 #ifdef _WIN32
-			if (const wchar_t* Existing = _wgetenv(L"PULSEFORGE_EDITOR_SETTINGS_DIR"))
-				m_PreviousValue = Existing;
+			if (const wchar_t* Existing = _wgetenv(L"PULSEFORGE_EDITOR_SETTINGS_DIR")) m_PreviousValue = Existing;
 			m_Succeeded = _wputenv_s(L"PULSEFORGE_EDITOR_SETTINGS_DIR", Directory.native().c_str()) == 0;
 #else
-			if (const char* Existing = std::getenv("PULSEFORGE_EDITOR_SETTINGS_DIR"))
-				m_PreviousValue = Existing;
+			if (const char* Existing = std::getenv("PULSEFORGE_EDITOR_SETTINGS_DIR")) m_PreviousValue = Existing;
 			m_Succeeded = setenv("PULSEFORGE_EDITOR_SETTINGS_DIR", Directory.native().c_str(), 1) == 0;
 #endif
 		}
@@ -25,10 +23,8 @@ namespace
 #ifdef _WIN32
 			(void)_wputenv_s(L"PULSEFORGE_EDITOR_SETTINGS_DIR", m_PreviousValue ? m_PreviousValue->c_str() : L"");
 #else
-			if (m_PreviousValue)
-				(void)setenv("PULSEFORGE_EDITOR_SETTINGS_DIR", m_PreviousValue->c_str(), 1);
-			else
-				(void)unsetenv("PULSEFORGE_EDITOR_SETTINGS_DIR");
+			if (m_PreviousValue) (void)setenv("PULSEFORGE_EDITOR_SETTINGS_DIR", m_PreviousValue->c_str(), 1);
+			else (void)unsetenv("PULSEFORGE_EDITOR_SETTINGS_DIR");
 #endif
 		}
 
@@ -373,8 +369,8 @@ namespace
 		if (!TestID) return;
 
 		std::error_code Error;
-		const std::filesystem::path Root = std::filesystem::temp_directory_path(Error) /
-			("PulseForgeEditorSettingsLocation_" + TestID->ToString());
+		const std::filesystem::path Root =
+			std::filesystem::temp_directory_path(Error) / ("PulseForgeEditorSettingsLocation_" + TestID->ToString());
 		PF_CHECK(Tests, !Error);
 		if (Error) return;
 		std::filesystem::create_directories(Root, Error);

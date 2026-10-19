@@ -144,7 +144,7 @@ namespace
 
 		std::error_code Error;
 		const std::filesystem::path Root = std::filesystem::temp_directory_path(Error) /
-			std::filesystem::u8path("PulseForgeWorkspaceStore café with spaces-" + ProjectID->ToString());
+										   std::filesystem::u8path("PulseForgeWorkspaceStore café with spaces-" + ProjectID->ToString());
 		PF_CHECK(Tests, !Error);
 		if (Error) return;
 		std::filesystem::create_directories(Root, Error);

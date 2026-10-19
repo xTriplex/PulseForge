@@ -253,8 +253,7 @@ namespace
 		Bounds.Width = 560.0f;
 		Bounds.Height = 760.0f;
 		Bounds.DpiScale = 1.0f;
-		if (!PulseForgeEditor::EditorPlatformServices::CanPositionNativeWindows())
-			return Bounds;
+		if (!PulseForgeEditor::EditorPlatformServices::CanPositionNativeWindows()) return Bounds;
 		Bounds.HasValue = true;
 		if (GLFWmonitor* Monitor = FindMonitorForBounds(Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height))
 		{
@@ -449,7 +448,7 @@ namespace
 			  m_DocumentHostAcquireOutOfDateTest(Options.EnableDocumentHostAcquireOutOfDateTest),
 			  m_DocumentHostImageAllocationFailureTest(Options.EnableDocumentHostImageAllocationFailureTest)
 		{
-#ifdef _DEBUG
+#if defined(_DEBUG) || defined(PF_DEBUG)
 			if (m_DocumentHostTestFixture)
 			{
 				m_DocumentHostTestEditor = std::make_unique<PulseForgeEditor::Detail::EditorDocumentHostTestEditor>(
@@ -739,8 +738,8 @@ namespace
 			if (!ExecutablePath)
 			{
 				ShutdownImGui();
-				throw std::runtime_error("Could not resolve the editor executable path for shader loading: " +
-					ExecutablePath.error().Message);
+				throw std::runtime_error(
+					"Could not resolve the editor executable path for shader loading: " + ExecutablePath.error().Message);
 			}
 			m_EditorShaderDirectory = ExecutablePath->parent_path() / PF_EDITOR_SHADER_DIRECTORY;
 			if (auto Result = m_ImGuiRenderer->Initialize(Runtime, m_EditorShaderDirectory); !Result)
@@ -1636,8 +1635,7 @@ namespace
 				return std::nullopt;
 			}
 
-			auto Result = PulseForgeEditor::EditorPlatformServices::ShowOpenFileDialog(
-				GetDialogParentWindow(), Filter, DefaultPath);
+			auto Result = PulseForgeEditor::EditorPlatformServices::ShowOpenFileDialog(GetDialogParentWindow(), Filter, DefaultPath);
 			if (!Result)
 			{
 				SetError("Could not open the file dialog: " + Result.error());
@@ -1823,7 +1821,7 @@ namespace
 
 		[[nodiscard]] bool IsDocumentHostTestFixtureIdentity(const PulseForgeEditor::EditorDocumentIdentity& Identity) const
 		{
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			(void)Identity;
 			return false;
 #else
@@ -1833,7 +1831,7 @@ namespace
 
 		void InitializeDocumentHostTestFixture()
 		{
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			return;
 #else
 			if (!m_DocumentHostTestFixture || !m_Project) return;
@@ -2094,7 +2092,7 @@ namespace
 
 		void PrepareDocumentWorkspaceSwitchTest()
 		{
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			m_DocumentWorkspaceSwitchTest = false;
 			m_DocumentWorkspaceSwitchTestPhase = DocumentWorkspaceSwitchTestPhase::Failed;
 #else
@@ -2198,7 +2196,7 @@ namespace
 		void AdvanceDocumentWorkspaceSwitchTest()
 		{
 			if (!m_DocumentWorkspaceSwitchTest || m_DocumentWorkspaceSwitchTestPhase == DocumentWorkspaceSwitchTestPhase::Disabled) return;
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			m_DocumentWorkspaceSwitchTest = false;
 #else
 			const auto Fail = [this](std::string_view Message)
@@ -2385,7 +2383,7 @@ namespace
 		void QueueDocumentHostTabTearOffTestInput()
 		{
 			if (!m_DocumentHostTabTearOffTest) return;
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			PF_ERROR("The document tab tear-off UI fixture is available only in Debug builds.");
 			m_DocumentHostTabTearOffTest = false;
 #else
@@ -2534,7 +2532,7 @@ namespace
 		void QueueDocumentHostTabReattachTestInput()
 		{
 			if (!m_DocumentHostTabReattachTest) return;
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			PF_ERROR("The document tab reattachment UI fixture is available only in Debug builds.");
 			m_DocumentHostTabReattachTest = false;
 #else
@@ -2674,7 +2672,7 @@ namespace
 		void QueueDocumentTabReorderTestInput()
 		{
 			if (!m_DocumentHostTabReorderTest) return;
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			PF_ERROR("The document tab reorder UI fixture is available only in Debug builds.");
 			m_DocumentHostTabReorderTest = false;
 #else
@@ -2797,7 +2795,7 @@ namespace
 		void QueueDocumentTabGroupTestInput()
 		{
 			if (!m_DocumentHostTabGroupTest) return;
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			PF_ERROR("The document tab group UI fixture is available only in Debug builds.");
 			m_DocumentHostTabGroupTest = false;
 #else
@@ -4510,11 +4508,11 @@ namespace
 				if (RestoreBounds)
 				{
 					const ResolvedNativeWindowBounds Bounds = ResolveRestoredNativeWindowBounds(SavedBounds);
-					if (CanPositionWindow)
-						ImGui::SetNextWindowPos(Bounds.Position, ImGuiCond_Always);
+					if (CanPositionWindow) ImGui::SetNextWindowPos(Bounds.Position, ImGuiCond_Always);
 					else if (!m_WindowPositionRestoreWarningLogged)
 					{
-						PF_WARN("The current window system controls native document-window placement; restoring size without saved position");
+						PF_WARN(
+							"The current window system controls native document-window placement; restoring size without saved position");
 						m_WindowPositionRestoreWarningLogged = true;
 					}
 					ImGui::SetNextWindowSize(Bounds.Size, ImGuiCond_Always);
@@ -4522,8 +4520,7 @@ namespace
 				else if (ImGuiViewport* MainViewport = ImGui::GetMainViewport())
 				{
 					if (CanPositionWindow)
-						ImGui::SetNextWindowPos(
-							ImVec2(MainViewport->Pos.x + 80.0f, MainViewport->Pos.y + 84.0f), ImGuiCond_FirstUseEver);
+						ImGui::SetNextWindowPos(ImVec2(MainViewport->Pos.x + 80.0f, MainViewport->Pos.y + 84.0f), ImGuiCond_FirstUseEver);
 					ImGui::SetNextWindowSize(ImVec2(560.0f, 760.0f), ImGuiCond_FirstUseEver);
 				}
 				ImGuiWindowClass DocumentWindowClass;
@@ -4561,11 +4558,11 @@ namespace
 						if (CanPositionWindow)
 						{
 							const ImVec2 Position = ImGui::GetWindowPos();
-						Bounds.X = Position.x;
-						Bounds.Y = Position.y;
-						Bounds.MonitorName.clear();
-						if (GLFWmonitor* Monitor = FindMonitorForBounds(Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height))
-							if (const char* MonitorName = glfwGetMonitorName(Monitor)) Bounds.MonitorName = MonitorName;
+							Bounds.X = Position.x;
+							Bounds.Y = Position.y;
+							Bounds.MonitorName.clear();
+							if (GLFWmonitor* Monitor = FindMonitorForBounds(Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height))
+								if (const char* MonitorName = glfwGetMonitorName(Monitor)) Bounds.MonitorName = MonitorName;
 						}
 					}
 					if (m_Documents.SetHostBounds(HostID, std::move(Bounds))) MarkDocumentWorkspaceDirty(true);
@@ -4599,7 +4596,7 @@ namespace
 
 		bool ShouldInjectDocumentPresentationFailure(ImGuiViewport* Viewport)
 		{
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			(void)Viewport;
 			return false;
 #else
@@ -4623,7 +4620,7 @@ namespace
 
 		bool ShouldInjectDocumentImageAllocationFailure(ImGuiViewport* Viewport)
 		{
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			(void)Viewport;
 			return false;
 #else
@@ -4658,7 +4655,7 @@ namespace
 
 		bool ShouldInjectDocumentAcquireOutOfDate(ImGuiViewport* Viewport)
 		{
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			(void)Viewport;
 			return false;
 #else
@@ -5938,8 +5935,7 @@ namespace
 			std::vector<PulseForge::UUID> HiddenEntities;
 			if (!m_SceneRuntime) HiddenEntities = GetEffectivelyHiddenEntities();
 			m_ViewportRenderView.PrepareScene(PulseForge::Application::Get(), m_Project ? &*m_Project : nullptr, m_Scene.get(),
-				m_RuntimeScene.get(), m_SceneRuntime != nullptr, m_EditorCamera, HiddenEntities,
-				m_EditorShaderDirectory);
+				m_RuntimeScene.get(), m_SceneRuntime != nullptr, m_EditorCamera, HiddenEntities, m_EditorShaderDirectory);
 			if (m_ProjectOpenTimingActive && !m_LoggedFirstViewportPrepared && m_ViewportRenderView.IsSceneReady())
 			{
 				m_LoggedFirstViewportPrepared = true;

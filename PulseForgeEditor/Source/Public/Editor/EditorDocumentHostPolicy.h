@@ -103,8 +103,7 @@ namespace PulseForgeEditor
 	}
 
 	template <typename TIdentity, typename IsDirtyPredicate>
-	[[nodiscard]] std::vector<TIdentity> FilterDirtyDocumentIdentities(
-		const std::vector<TIdentity>& Identities, IsDirtyPredicate&& IsDirty)
+	[[nodiscard]] std::vector<TIdentity> FilterDirtyDocumentIdentities(const std::vector<TIdentity>& Identities, IsDirtyPredicate&& IsDirty)
 	{
 		std::vector<TIdentity> DirtyIdentities;
 		for (const TIdentity& Identity : Identities)

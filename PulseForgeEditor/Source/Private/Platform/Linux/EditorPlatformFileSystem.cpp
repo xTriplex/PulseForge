@@ -6,8 +6,7 @@
 
 namespace PulseForgeEditor
 {
-	std::expected<std::optional<std::filesystem::path>, std::string>
-		EditorPlatformFileSystem::GetSettingsDirectoryOverride()
+	std::expected<std::optional<std::filesystem::path>, std::string> EditorPlatformFileSystem::GetSettingsDirectoryOverride()
 	{
 		if (const char* Override = std::getenv("PULSEFORGE_EDITOR_SETTINGS_DIR"); Override && Override[0] != '\0')
 			return std::optional<std::filesystem::path>(std::filesystem::path(Override));
@@ -19,8 +18,7 @@ namespace PulseForgeEditor
 	{
 		std::error_code Error;
 		std::filesystem::rename(TemporaryPath, DestinationPath, Error);
-		if (Error)
-			return std::unexpected("Could not atomically replace the destination file: " + Error.message());
+		if (Error) return std::unexpected("Could not atomically replace the destination file: " + Error.message());
 		return {};
 	}
 } // namespace PulseForgeEditor

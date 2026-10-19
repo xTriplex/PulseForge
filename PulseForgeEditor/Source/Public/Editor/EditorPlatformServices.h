@@ -25,15 +25,10 @@ namespace PulseForgeEditor
 		static void ShutdownNativeFileDialogs() noexcept;
 
 		[[nodiscard]] static std::expected<std::optional<std::filesystem::path>, std::string> ShowOpenFileDialog(
-			GLFWwindow* Parent,
-			const EditorFileDialogFilter* Filter,
-			const std::filesystem::path& DefaultPath);
+			GLFWwindow* Parent, const EditorFileDialogFilter* Filter, const std::filesystem::path& DefaultPath);
 
-		[[nodiscard]] static std::expected<std::optional<std::filesystem::path>, std::string> ShowSaveFileDialog(
-			GLFWwindow* Parent,
-			const EditorFileDialogFilter* Filter,
-			const std::filesystem::path& DefaultPath,
-			std::string_view DefaultName);
+		[[nodiscard]] static std::expected<std::optional<std::filesystem::path>, std::string> ShowSaveFileDialog(GLFWwindow* Parent,
+			const EditorFileDialogFilter* Filter, const std::filesystem::path& DefaultPath, std::string_view DefaultName);
 
 		[[nodiscard]] static bool CanPositionNativeWindows() noexcept;
 		static void ApplyMainWindowAppearance(GLFWwindow* Window) noexcept;
