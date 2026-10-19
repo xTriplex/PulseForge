@@ -21,8 +21,16 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorLayout.cpp
 		PulseForgeEditor/Source/Private/EditorStyle.cpp
 		PulseForgeEditor/Source/Private/EditorWorkspacePresentation.cpp
+		PulseForgeEditor/Source/Private/EditorPlatformServices.cpp
 		PulseForge/Vendor/imgui/misc/freetype/imgui_freetype.cpp
 	)
+	if(WIN32)
+		target_sources(PulseForgeEditorUI PRIVATE
+			PulseForgeEditor/Source/Private/Platform/Windows/EditorPlatformServices.cpp)
+	else()
+		target_sources(PulseForgeEditorUI PRIVATE
+			PulseForgeEditor/Source/Private/Platform/Linux/EditorPlatformServices.cpp)
+	endif()
 	target_include_directories(PulseForgeEditorUI PUBLIC
 		PulseForgeEditor/Source/Public
 	)
@@ -37,6 +45,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PUBLIC PulseForgeRenderer PulseForgeEditorCore
 		PRIVATE PulseForgeCore PulseForgeApplication PulseForgeAssetImporters PulseForgeAssetServices
 			PulseForgeImGui PulseForgeSceneRenderer freetype spdlog::spdlog
+			nfd::nfd
 	)
 	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
 		target_compile_definitions(PulseForgeEditorUI PRIVATE PF_EDITOR_RENDERER_OPENGL)
@@ -46,13 +55,22 @@ if(PULSEFORGE_BUILD_EDITOR)
 	target_precompile_headers(PulseForgeEditorUI PRIVATE
 		"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Source/Public/Editor/EditorUIPCH.h")
 
-	add_executable(PulseForgeEditor WIN32
-		PulseForgeEditor/Source/Private/EditorMain.cpp
-		PulseForgeEditor/Source/Private/EditorApplication.cpp
-	)
-	get_target_property(PULSEFORGE_EDITOR_GUI_SUBSYSTEM PulseForgeEditor WIN32_EXECUTABLE)
-	if(NOT PULSEFORGE_EDITOR_GUI_SUBSYSTEM)
-		message(FATAL_ERROR "PulseForgeEditor must use the Windows GUI subsystem to avoid a separate console window.")
+	if(WIN32)
+		add_executable(PulseForgeEditor WIN32
+			PulseForgeEditor/Source/Private/EditorMain.cpp
+			PulseForgeEditor/Source/Private/EditorApplication.cpp
+		)
+	else()
+		add_executable(PulseForgeEditor
+			PulseForgeEditor/Source/Private/EditorMain.cpp
+			PulseForgeEditor/Source/Private/EditorApplication.cpp
+		)
+	endif()
+	if(WIN32)
+		get_target_property(PULSEFORGE_EDITOR_GUI_SUBSYSTEM PulseForgeEditor WIN32_EXECUTABLE)
+		if(NOT PULSEFORGE_EDITOR_GUI_SUBSYSTEM)
+			message(FATAL_ERROR "PulseForgeEditor must use the Windows GUI subsystem to avoid a separate console window.")
+		endif()
 	endif()
 	target_include_directories(PulseForgeEditor PRIVATE
 		PulseForgeEditor/Source/Public
@@ -66,7 +84,10 @@ if(PULSEFORGE_BUILD_EDITOR)
 		target_compile_definitions(PulseForgeEditor PRIVATE PF_EDITOR_SHADER_DIRECTORY="Shaders")
 	endif()
 	target_link_libraries(PulseForgeEditor PRIVATE
-		PulseForgeEditorCore PulseForgeEditorUI PulseForge PulseForgeImGui nfd::nfd spdlog::spdlog shell32 ole32 dwmapi)
+		PulseForgeEditorCore PulseForgeEditorUI PulseForge PulseForgeImGui spdlog::spdlog)
+	if(WIN32)
+		target_link_libraries(PulseForgeEditor PRIVATE shell32 ole32 dwmapi)
+	endif()
 	pulseforge_attach_asset_deployment(PulseForgeEditor "$<TARGET_FILE_DIR:PulseForgeEditor>/EditorAssets"
 		DIRECTORIES
 			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Fonts" "Fonts"

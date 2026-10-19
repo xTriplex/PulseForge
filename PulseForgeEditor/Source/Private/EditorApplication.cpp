@@ -1,9 +1,3 @@
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
-#include <dwmapi.h>
-
-#define GLFW_EXPOSE_NATIVE_WIN32
 #ifdef PF_EDITOR_RENDERER_OPENGL
 #define GLFW_INCLUDE_NONE
 #include <glad/glad.h>
@@ -12,6 +6,7 @@
 #include "Core/Application.h"
 #include "Core/Layer.h"
 #include "Core/Log.h"
+#include "Core/PlatformServices.h"
 #include "Core/ScopedProfileTimer.h"
 #include "Events/ApplicationEvent.h"
 #include "Events/Event.h"
@@ -63,6 +58,7 @@
 #include "Editor/EditorAssetSelectorPolicy.h"
 #include "Editor/EditorProjectOpening.h"
 #include "Editor/EditorApplicationFactory.h"
+#include "Editor/EditorPlatformServices.h"
 #include "Editor/EditorInteractionPolicy.h"
 #include "Editor/EditorGlfwViewportPolicy.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
@@ -88,9 +84,6 @@
 #include "Editor/ViewportGizmoGeometry.h"
 
 #include <GLFW/glfw3.h>
-#include <GLFW/glfw3native.h>
-#include <nfd.h>
-#include <nfd_glfw3.h>
 #include <imgui.h>
 #include <nlohmann/json.hpp>
 #include <misc/cpp/imgui_stdlib.h>
@@ -139,16 +132,6 @@ namespace
 #endif
 	}
 
-	void RequestDarkNativeCaption(GLFWwindow* Window)
-	{
-		const HWND NativeWindow = Window ? glfwGetWin32Window(Window) : nullptr;
-		if (!NativeWindow) return;
-
-		const BOOL UseDarkMode = TRUE;
-		const HRESULT Result = DwmSetWindowAttribute(NativeWindow, DWMWA_USE_IMMERSIVE_DARK_MODE, &UseDarkMode, sizeof(UseDarkMode));
-		if (FAILED(Result)) PF_INFO("Dark native caption styling is unavailable on this Windows version; using the system caption style");
-	}
-
 	GLFWmonitor* FindMonitorForBounds(float X, float Y, float Width, float Height)
 	{
 		int MonitorCount = 0;
@@ -186,6 +169,14 @@ namespace
 
 	ResolvedNativeWindowBounds ResolveRestoredNativeWindowBounds(const PulseForgeEditor::EditorDocumentHost::WindowBounds& Saved)
 	{
+		if (!PulseForgeEditor::EditorPlatformServices::CanPositionNativeWindows())
+		{
+			const ImGuiViewport* MainViewport = ImGui::GetMainViewport();
+			const float Width = (std::min)(Saved.Width, (std::max)(320.0f, MainViewport->WorkSize.x - 48.0f));
+			const float Height = (std::min)(Saved.Height, (std::max)(240.0f, MainViewport->WorkSize.y - 48.0f));
+			return { ImVec2(0.0f, 0.0f), ImVec2(Width, Height) };
+		}
+
 		GLFWmonitor* Monitor = nullptr;
 		int MonitorCount = 0;
 		GLFWmonitor** Monitors = glfwGetMonitors(&MonitorCount);
@@ -262,6 +253,7 @@ namespace
 		Bounds.Width = 560.0f;
 		Bounds.Height = 760.0f;
 		Bounds.DpiScale = 1.0f;
+		if (!PulseForgeEditor::EditorPlatformServices::CanPositionNativeWindows()) return Bounds;
 		Bounds.HasValue = true;
 		if (GLFWmonitor* Monitor = FindMonitorForBounds(Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height))
 		{
@@ -326,21 +318,6 @@ namespace
 		}
 		return EllipsisWidth <= AvailableWidth ? std::string(Ellipsis) : std::string{};
 	}
-
-	class DialogPath final
-	{
-	public:
-		~DialogPath()
-		{
-			if (m_Path) NFD_FreePathU8(m_Path);
-		}
-
-		[[nodiscard]] nfdu8char_t** GetAddress() noexcept { return &m_Path; }
-		[[nodiscard]] std::filesystem::path GetPath() const { return std::filesystem::u8path(m_Path); }
-
-	private:
-		nfdu8char_t* m_Path = nullptr;
-	};
 
 	class EditorLayer final : public PulseForge::Layer,
 							  public PulseForgeEditor::EditorHierarchyPanelActionSink,
@@ -471,7 +448,7 @@ namespace
 			  m_DocumentHostAcquireOutOfDateTest(Options.EnableDocumentHostAcquireOutOfDateTest),
 			  m_DocumentHostImageAllocationFailureTest(Options.EnableDocumentHostImageAllocationFailureTest)
 		{
-#ifdef _DEBUG
+#if defined(_DEBUG) || defined(PF_DEBUG)
 			if (m_DocumentHostTestFixture)
 			{
 				m_DocumentHostTestEditor = std::make_unique<PulseForgeEditor::Detail::EditorDocumentHostTestEditor>(
@@ -733,7 +710,7 @@ namespace
 				static_cast<PulseForgeEditor::EditorDocumentOpenPreference>(m_Layout.GetDocumentOpeningPreference()));
 
 			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
-			RequestDarkNativeCaption(Window);
+			PulseForgeEditor::EditorPlatformServices::ApplyMainWindowAppearance(Window);
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			if (!ImGui_ImplGlfw_InitForOpenGL(Window, true))
 #else
@@ -757,7 +734,15 @@ namespace
 #else
 			m_ImGuiRenderer = std::make_unique<PulseForgeEditor::EditorImGuiRenderer>();
 			auto& Runtime = PulseForge::Application::Get();
-			if (auto Result = m_ImGuiRenderer->Initialize(Runtime, std::filesystem::path(PF_EDITOR_SHADER_DIRECTORY)); !Result)
+			auto ExecutablePath = PulseForge::Platform::GetExecutablePath();
+			if (!ExecutablePath)
+			{
+				ShutdownImGui();
+				throw std::runtime_error(
+					"Could not resolve the editor executable path for shader loading: " + ExecutablePath.error().Message);
+			}
+			m_EditorShaderDirectory = ExecutablePath->parent_path() / PF_EDITOR_SHADER_DIRECTORY;
+			if (auto Result = m_ImGuiRenderer->Initialize(Runtime, m_EditorShaderDirectory); !Result)
 			{
 				const std::string Message = "Could not initialize the Vulkan editor UI renderer: " + Result.error();
 				ShutdownImGui();
@@ -776,12 +761,12 @@ namespace
 #endif
 			m_ConsolePanel.Attach();
 
-			if (NFD_Init() == NFD_OKAY)
+			if (auto Result = PulseForgeEditor::EditorPlatformServices::InitializeNativeFileDialogs(); Result)
 			{
 				m_FileDialogActive = true;
 				PF_INFO("Native file dialogs initialized");
 			}
-			else SetError(NfdError("Could not initialize the native file dialog"));
+			else SetError("Could not initialize native file dialogs: " + Result.error());
 
 			if (m_StartupProjectPath)
 			{
@@ -1195,7 +1180,9 @@ namespace
 	private:
 		void RequestEditorApplicationClose()
 		{
-			if (m_ApplicationShutdownRequested) return;
+			if (m_ApplicationShutdownRequested || m_ApplicationClosePending) return;
+			if (!SaveDocumentWorkspaceNow()) return;
+			m_ApplicationClosePending = true;
 			std::vector<PulseForgeEditor::EditorDocumentIdentity> Documents;
 			for (const auto& [Identity, Session] : m_Documents.GetSessions())
 				if (Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level) Documents.push_back(Identity);
@@ -1221,8 +1208,16 @@ namespace
 
 		void CompleteEditorApplicationClose()
 		{
+			m_ApplicationClosePending = false;
 			m_ApplicationShutdownRequested = true;
 			PulseForge::Application::Get().RequestClose();
+		}
+
+		void CancelEditorApplicationClose()
+		{
+			if (!m_ApplicationClosePending) return;
+			m_ApplicationClosePending = false;
+			MarkDocumentWorkspaceDirty();
 		}
 
 		[[nodiscard]] std::expected<void, std::string> RestoreSceneState(std::string_view State)
@@ -1636,21 +1631,13 @@ namespace
 			}
 		}
 
-		static std::string NfdError(std::string_view Context)
+		[[nodiscard]] GLFWwindow* GetDialogParentWindow() const
 		{
-			const char* Error = NFD_GetError();
-			return std::string(Context) + ": " + (Error ? Error : "unknown NativeFileDialog error");
+			return static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
 		}
 
-		[[nodiscard]] nfdwindowhandle_t GetDialogParent() const
-		{
-			nfdwindowhandle_t Parent{};
-			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
-			(void)NFD_GetNativeWindowFromGLFWWindow(Window, &Parent);
-			return Parent;
-		}
-
-		std::optional<std::filesystem::path> ShowOpenDialog(const nfdu8filteritem_t* Filter, const std::filesystem::path& DefaultPath = {})
+		std::optional<std::filesystem::path> ShowOpenDialog(
+			const PulseForgeEditor::EditorFileDialogFilter* Filter, const std::filesystem::path& DefaultPath = {})
 		{
 			if (!m_FileDialogActive)
 			{
@@ -1658,26 +1645,17 @@ namespace
 				return std::nullopt;
 			}
 
-			const std::string DefaultPathUTF8 = DefaultPath.empty() ? std::string{} : PathToUtf8(DefaultPath);
-			nfdopendialogu8args_t Arguments{};
-			Arguments.filterList = Filter;
-			Arguments.filterCount = Filter ? 1 : 0;
-			Arguments.defaultPath = DefaultPath.empty() ? nullptr : DefaultPathUTF8.c_str();
-			Arguments.parentWindow = GetDialogParent();
-
-			DialogPath Path;
-			const nfdresult_t Result = NFD_OpenDialogU8_With(Path.GetAddress(), &Arguments);
-			if (Result == NFD_CANCEL) return std::nullopt;
-			if (Result == NFD_ERROR)
+			auto Result = PulseForgeEditor::EditorPlatformServices::ShowOpenFileDialog(GetDialogParentWindow(), Filter, DefaultPath);
+			if (!Result)
 			{
-				SetError(NfdError("Could not open the file dialog"));
+				SetError("Could not open the file dialog: " + Result.error());
 				return std::nullopt;
 			}
-			return Path.GetPath();
+			return std::move(*Result);
 		}
 
 		std::optional<std::filesystem::path> ShowSaveDialog(
-			const nfdu8filteritem_t* Filter, const std::filesystem::path& DefaultPath, const char* DefaultName)
+			const PulseForgeEditor::EditorFileDialogFilter* Filter, const std::filesystem::path& DefaultPath, const char* DefaultName)
 		{
 			if (!m_FileDialogActive)
 			{
@@ -1685,28 +1663,19 @@ namespace
 				return std::nullopt;
 			}
 
-			const std::string DefaultPathUTF8 = DefaultPath.empty() ? std::string{} : PathToUtf8(DefaultPath);
-			nfdsavedialogu8args_t Arguments{};
-			Arguments.filterList = Filter;
-			Arguments.filterCount = Filter ? 1 : 0;
-			Arguments.defaultPath = DefaultPath.empty() ? nullptr : DefaultPathUTF8.c_str();
-			Arguments.defaultName = DefaultName;
-			Arguments.parentWindow = GetDialogParent();
-
-			DialogPath Path;
-			const nfdresult_t Result = NFD_SaveDialogU8_With(Path.GetAddress(), &Arguments);
-			if (Result == NFD_CANCEL) return std::nullopt;
-			if (Result == NFD_ERROR)
+			auto Result = PulseForgeEditor::EditorPlatformServices::ShowSaveFileDialog(
+				GetDialogParentWindow(), Filter, DefaultPath, DefaultName ? std::string_view(DefaultName) : std::string_view{});
+			if (!Result)
 			{
-				SetError(NfdError("Could not open the save dialog"));
+				SetError("Could not open the save dialog: " + Result.error());
 				return std::nullopt;
 			}
-			return Path.GetPath();
+			return std::move(*Result);
 		}
 
 		void CreateProject()
 		{
-			static constexpr nfdu8filteritem_t Filter{ "PulseForge Project", "pfproj" };
+			static constexpr PulseForgeEditor::EditorFileDialogFilter Filter{ "PulseForge Project", "pfproj" };
 			auto ProjectFile = ShowSaveDialog(&Filter, {}, "NewProject.pfproj");
 			if (!ProjectFile) return;
 			if (ProjectFile->extension().empty()) *ProjectFile += ".pfproj";
@@ -1719,7 +1688,7 @@ namespace
 			if (!FinishSceneEdit()) return false;
 			if (m_Project)
 			{
-				SaveDocumentWorkspaceNow();
+				if (!SaveDocumentWorkspaceNow()) return false;
 				std::vector<PulseForgeEditor::EditorDocumentIdentity> ProjectDocuments;
 				for (const auto& [Identity, Session] : m_Documents.GetSessions())
 					if (Identity.Project == m_Project->GetDescription().ID && Identity.Kind != PulseForgeEditor::EditorDocumentKind::Level)
@@ -1809,7 +1778,7 @@ namespace
 
 		void OpenProject()
 		{
-			static constexpr nfdu8filteritem_t Filter{ "PulseForge Project", "pfproj" };
+			static constexpr PulseForgeEditor::EditorFileDialogFilter Filter{ "PulseForge Project", "pfproj" };
 			auto ProjectFile = ShowOpenDialog(&Filter);
 			if (!ProjectFile) return;
 			const std::filesystem::path ChosenPath = *ProjectFile;
@@ -1862,7 +1831,7 @@ namespace
 
 		[[nodiscard]] bool IsDocumentHostTestFixtureIdentity(const PulseForgeEditor::EditorDocumentIdentity& Identity) const
 		{
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			(void)Identity;
 			return false;
 #else
@@ -1872,7 +1841,7 @@ namespace
 
 		void InitializeDocumentHostTestFixture()
 		{
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			return;
 #else
 			if (!m_DocumentHostTestFixture || !m_Project) return;
@@ -2133,7 +2102,7 @@ namespace
 
 		void PrepareDocumentWorkspaceSwitchTest()
 		{
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			m_DocumentWorkspaceSwitchTest = false;
 			m_DocumentWorkspaceSwitchTestPhase = DocumentWorkspaceSwitchTestPhase::Failed;
 #else
@@ -2237,7 +2206,7 @@ namespace
 		void AdvanceDocumentWorkspaceSwitchTest()
 		{
 			if (!m_DocumentWorkspaceSwitchTest || m_DocumentWorkspaceSwitchTestPhase == DocumentWorkspaceSwitchTestPhase::Disabled) return;
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			m_DocumentWorkspaceSwitchTest = false;
 #else
 			const auto Fail = [this](std::string_view Message)
@@ -2424,7 +2393,7 @@ namespace
 		void QueueDocumentHostTabTearOffTestInput()
 		{
 			if (!m_DocumentHostTabTearOffTest) return;
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			PF_ERROR("The document tab tear-off UI fixture is available only in Debug builds.");
 			m_DocumentHostTabTearOffTest = false;
 #else
@@ -2435,6 +2404,8 @@ namespace
 				m_DocumentHostTabTearOffTest = false;
 				if (m_DocumentHostTabRoundTripTearOffPending)
 					PF_ERROR("Document tab native-window round-trip fixture timed out before tearing off the reattached session.");
+				else if (m_DocumentHostTabTearOffPointerPrepared)
+					PF_ERROR("Document tab tear-off UI fixture timed out waiting for the focused source window to become hovered.");
 				else PF_ERROR("Document tab tear-off UI fixture timed out before creating its native host.");
 				m_DocumentHostTabRoundTripTearOffPending = false;
 				return;
@@ -2444,6 +2415,24 @@ namespace
 			case DocumentTabTearOffTestPhase::WaitingForTab:
 				if (m_DocumentHostTabTearOffTestTabCenterValid)
 				{
+					ImGuiViewport* SourceViewport = ImGui::FindViewportByID(m_DocumentHostTabTearOffTestTabViewportID);
+					GLFWwindow* SourceWindow = SourceViewport ? static_cast<GLFWwindow*>(SourceViewport->PlatformHandle) : nullptr;
+					if (!SourceWindow)
+					{
+						m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Failed;
+						m_DocumentHostTabTearOffTest = false;
+						PF_ERROR("Document tab tear-off UI fixture could not find the source platform window.");
+						break;
+					}
+					if (!m_DocumentHostTabTearOffPointerPrepared)
+					{
+						glfwFocusWindow(SourceWindow);
+						glfwSetCursorPos(SourceWindow, m_DocumentHostTabTearOffTestTabCenter.x - SourceViewport->Pos.x,
+							m_DocumentHostTabTearOffTestTabCenter.y - SourceViewport->Pos.y);
+						m_DocumentHostTabTearOffPointerPrepared = true;
+						break;
+					}
+					if (glfwGetWindowAttrib(SourceWindow, GLFW_HOVERED) != GLFW_TRUE) break;
 					m_DocumentHostTabTearOffTestStart = m_DocumentHostTabTearOffTestTabCenter;
 					const ImGuiViewport* MainViewport = ImGui::GetMainViewport();
 					if (!MainViewport || MainViewport->Size.x <= 0.0f || MainViewport->Size.y <= 0.0f)
@@ -2456,7 +2445,7 @@ namespace
 						m_DocumentHostTabTearOffFromNativeHost
 							? ImVec2(
 								  m_DocumentHostTabTearOffTestStart.x + IO.MouseDragThreshold + 24.0f, m_DocumentHostTabTearOffTestStart.y)
-							: ImVec2(MainViewport->Pos.x + MainViewport->Size.x + 24.0f, MainViewport->Pos.y + MainViewport->Size.y * 0.5f);
+							: ImVec2(MainViewport->Pos.x + MainViewport->Size.x * 0.5f, MainViewport->Pos.y + MainViewport->Size.y * 0.75f);
 					const float DeltaX = m_DocumentHostTabTearOffTestDrop.x - m_DocumentHostTabTearOffTestStart.x;
 					const float DeltaY = m_DocumentHostTabTearOffTestDrop.y - m_DocumentHostTabTearOffTestStart.y;
 					if (DeltaX * DeltaX + DeltaY * DeltaY <= IO.MouseDragThreshold * IO.MouseDragThreshold)
@@ -2477,8 +2466,16 @@ namespace
 				m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::DragQueued;
 				break;
 			case DocumentTabTearOffTestPhase::DragQueued:
-				IO.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
-				IO.AddMouseViewportEvent(0);
+				if (m_DocumentHostTabTearOffFromNativeHost)
+				{
+					IO.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+					IO.AddMouseViewportEvent(0);
+				}
+				else
+				{
+					IO.AddMousePosEvent(m_DocumentHostTabTearOffTestDrop.x, m_DocumentHostTabTearOffTestDrop.y);
+					IO.AddMouseViewportEvent(m_DocumentHostTabTearOffTestTabViewportID);
+				}
 				IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
 				m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::ReleaseQueued;
 				break;
@@ -2537,8 +2534,8 @@ namespace
 					}
 					else
 					{
-						PF_INFO("Document tab tear-off UI fixture passed: the captured tab drag created a native host and kept "
-								"Level Editor in the main host.");
+						PF_INFO("Document tab tear-off UI fixture passed: releasing the captured asset tab in the editor body created a native "
+								"host and kept Level Editor in the main host.");
 					}
 					m_DocumentHostTabTearOffFromNativeHost = false;
 					m_DocumentHostTabTearOffSourceHostID.clear();
@@ -2573,7 +2570,7 @@ namespace
 		void QueueDocumentHostTabReattachTestInput()
 		{
 			if (!m_DocumentHostTabReattachTest) return;
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			PF_ERROR("The document tab reattachment UI fixture is available only in Debug builds.");
 			m_DocumentHostTabReattachTest = false;
 #else
@@ -2691,6 +2688,7 @@ namespace
 						m_DocumentHostTabReattachInvalidDropIndex, m_DocumentHostTabRoundTripCount + 1, DocumentTabRoundTripCycleCount);
 					m_DocumentHostTabTearOffTestIdentity = m_DocumentHostTabReattachTestIdentity;
 					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::WaitingForTab;
+					m_DocumentHostTabTearOffPointerPrepared = false;
 					m_DocumentHostTabTearOffTest = true;
 					m_DocumentHostTabRoundTripTearOffPending = true;
 				}
@@ -2713,7 +2711,7 @@ namespace
 		void QueueDocumentTabReorderTestInput()
 		{
 			if (!m_DocumentHostTabReorderTest) return;
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			PF_ERROR("The document tab reorder UI fixture is available only in Debug builds.");
 			m_DocumentHostTabReorderTest = false;
 #else
@@ -2836,7 +2834,7 @@ namespace
 		void QueueDocumentTabGroupTestInput()
 		{
 			if (!m_DocumentHostTabGroupTest) return;
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			PF_ERROR("The document tab group UI fixture is available only in Debug builds.");
 			m_DocumentHostTabGroupTest = false;
 #else
@@ -2943,6 +2941,7 @@ namespace
 					m_DocumentHostTabTearOffSourceHostID = TargetHost->ID;
 					m_DocumentHostTabTearOffTestFrameCount = 0;
 					m_DocumentHostTabTearOffTestTabCenterValid = false;
+					m_DocumentHostTabTearOffPointerPrepared = false;
 					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::WaitingForTab;
 					m_DocumentHostTabTearOffTest = true;
 					PF_INFO("Document tab native-group tear-off fixture is detaching the same session outside all editor windows.");
@@ -2985,7 +2984,7 @@ namespace
 
 		void MarkDocumentWorkspaceDirty(bool BoundsOnly = false)
 		{
-			if (!m_Project || !m_DocumentWorkspaceStore.HasPath()) return;
+			if (m_ApplicationClosePending || m_ApplicationShutdownRequested || !m_Project || !m_DocumentWorkspaceStore.HasPath()) return;
 			m_DocumentWorkspaceStore.MarkDirty(BoundsOnly);
 		}
 
@@ -3181,16 +3180,22 @@ namespace
 
 		void SaveDocumentWorkspaceIfNeeded()
 		{
-			if (!m_Project || !m_DocumentWorkspaceStore.HasPath() || !m_DocumentWorkspaceStore.IsSaveDue()) return;
+			if (m_ApplicationClosePending || m_ApplicationShutdownRequested || !m_Project || !m_DocumentWorkspaceStore.HasPath() ||
+				!m_DocumentWorkspaceStore.IsSaveDue())
+				return;
 			if (auto Saved = m_DocumentWorkspaceStore.SaveIfDue(CaptureDocumentWorkspace()); !Saved)
 				PF_WARN("Could not persist editor document workspace: {}", Saved.error());
 		}
 
-		void SaveDocumentWorkspaceNow()
+		bool SaveDocumentWorkspaceNow()
 		{
-			if (!m_Project || !m_DocumentWorkspaceStore.HasPath()) return;
+			if (!m_Project || !m_DocumentWorkspaceStore.HasPath()) return true;
 			if (auto Saved = m_DocumentWorkspaceStore.SaveNow(CaptureDocumentWorkspace()); !Saved)
-				PF_WARN("Could not persist editor document workspace: {}", Saved.error());
+			{
+				SetError("Could not persist the editor document workspace before closing: " + Saved.error());
+				return false;
+			}
+			return true;
 		}
 
 		void ImportAsset()
@@ -4517,10 +4522,15 @@ namespace
 			if (ImGui::Button("Cancel", ImVec2(112.0f, 0.0f)))
 			{
 				m_DocumentCloseRequest.Cancel();
+				CancelEditorApplicationClose();
 				ImGui::CloseCurrentPopup();
 			}
 			ImGui::EndPopup();
-			if (!PopupOpen) m_DocumentCloseRequest.Cancel();
+			if (!PopupOpen)
+			{
+				m_DocumentCloseRequest.Cancel();
+				CancelEditorApplicationClose();
+			}
 		}
 
 		void DrawUnregisteredAssetDocument(const PulseForgeEditor::EditorDocumentIdentity& Identity)
@@ -4545,15 +4555,23 @@ namespace
 				if (m_DocumentHostFocusRequests.erase(HostID) != 0) ImGui::SetNextWindowFocus();
 				const auto SavedBounds = Host->Bounds;
 				const bool RestoreBounds = SavedBounds.HasValue && m_RestoredHostBoundsPending.contains(HostID);
+				const bool CanPositionWindow = PulseForgeEditor::EditorPlatformServices::CanPositionNativeWindows();
 				if (RestoreBounds)
 				{
 					const ResolvedNativeWindowBounds Bounds = ResolveRestoredNativeWindowBounds(SavedBounds);
-					ImGui::SetNextWindowPos(Bounds.Position, ImGuiCond_Always);
+					if (CanPositionWindow) ImGui::SetNextWindowPos(Bounds.Position, ImGuiCond_Always);
+					else if (!m_WindowPositionRestoreWarningLogged)
+					{
+						PF_WARN(
+							"The current window system controls native document-window placement; restoring size without saved position");
+						m_WindowPositionRestoreWarningLogged = true;
+					}
 					ImGui::SetNextWindowSize(Bounds.Size, ImGuiCond_Always);
 				}
 				else if (ImGuiViewport* MainViewport = ImGui::GetMainViewport())
 				{
-					ImGui::SetNextWindowPos(ImVec2(MainViewport->Pos.x + 80.0f, MainViewport->Pos.y + 84.0f), ImGuiCond_FirstUseEver);
+					if (CanPositionWindow)
+						ImGui::SetNextWindowPos(ImVec2(MainViewport->Pos.x + 80.0f, MainViewport->Pos.y + 84.0f), ImGuiCond_FirstUseEver);
 					ImGui::SetNextWindowSize(ImVec2(560.0f, 760.0f), ImGuiCond_FirstUseEver);
 				}
 				ImGuiWindowClass DocumentWindowClass;
@@ -4578,11 +4596,8 @@ namespace
 				}
 				if (auto* CurrentHost = m_Documents.FindHost(HostID))
 				{
-					const ImVec2 Position = ImGui::GetWindowPos();
 					const ImVec2 Size = ImGui::GetWindowSize();
-					PulseForgeEditor::EditorDocumentHost::WindowBounds Bounds;
-					Bounds.X = Position.x;
-					Bounds.Y = Position.y;
+					PulseForgeEditor::EditorDocumentHost::WindowBounds Bounds = CurrentHost->Bounds;
 					Bounds.Width = Size.x;
 					Bounds.Height = Size.y;
 					Bounds.HasValue = true;
@@ -4591,8 +4606,15 @@ namespace
 					if (GLFWwindow* NativeWindow = WindowViewport ? static_cast<GLFWwindow*>(WindowViewport->PlatformHandle) : nullptr)
 					{
 						Bounds.Maximized = glfwGetWindowAttrib(NativeWindow, GLFW_MAXIMIZED) == GLFW_TRUE;
-						if (GLFWmonitor* Monitor = FindMonitorForBounds(Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height))
-							if (const char* MonitorName = glfwGetMonitorName(Monitor)) Bounds.MonitorName = MonitorName;
+						if (CanPositionWindow)
+						{
+							const ImVec2 Position = ImGui::GetWindowPos();
+							Bounds.X = Position.x;
+							Bounds.Y = Position.y;
+							Bounds.MonitorName.clear();
+							if (GLFWmonitor* Monitor = FindMonitorForBounds(Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height))
+								if (const char* MonitorName = glfwGetMonitorName(Monitor)) Bounds.MonitorName = MonitorName;
+						}
 					}
 					if (m_Documents.SetHostBounds(HostID, std::move(Bounds))) MarkDocumentWorkspaceDirty(true);
 				}
@@ -4625,7 +4647,7 @@ namespace
 
 		bool ShouldInjectDocumentPresentationFailure(ImGuiViewport* Viewport)
 		{
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			(void)Viewport;
 			return false;
 #else
@@ -4649,7 +4671,7 @@ namespace
 
 		bool ShouldInjectDocumentImageAllocationFailure(ImGuiViewport* Viewport)
 		{
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			(void)Viewport;
 			return false;
 #else
@@ -4684,7 +4706,7 @@ namespace
 
 		bool ShouldInjectDocumentAcquireOutOfDate(ImGuiViewport* Viewport)
 		{
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
 			(void)Viewport;
 			return false;
 #else
@@ -5964,8 +5986,7 @@ namespace
 			std::vector<PulseForge::UUID> HiddenEntities;
 			if (!m_SceneRuntime) HiddenEntities = GetEffectivelyHiddenEntities();
 			m_ViewportRenderView.PrepareScene(PulseForge::Application::Get(), m_Project ? &*m_Project : nullptr, m_Scene.get(),
-				m_RuntimeScene.get(), m_SceneRuntime != nullptr, m_EditorCamera, HiddenEntities,
-				std::filesystem::path(PF_EDITOR_SHADER_DIRECTORY));
+				m_RuntimeScene.get(), m_SceneRuntime != nullptr, m_EditorCamera, HiddenEntities, m_EditorShaderDirectory);
 			if (m_ProjectOpenTimingActive && !m_LoggedFirstViewportPrepared && m_ViewportRenderView.IsSceneReady())
 			{
 				m_LoggedFirstViewportPrepared = true;
@@ -6449,7 +6470,7 @@ namespace
 
 		void ShutdownFileDialog() noexcept
 		{
-			if (m_FileDialogActive) NFD_Quit();
+			if (m_FileDialogActive) PulseForgeEditor::EditorPlatformServices::ShutdownNativeFileDialogs();
 			m_FileDialogActive = false;
 		}
 
@@ -6472,6 +6493,7 @@ namespace
 		bool m_AssetRefreshDeferredForRuntime = false;
 		bool m_GlfwBackendActive = false;
 		bool m_OpenGLBackendActive = false;
+		std::filesystem::path m_EditorShaderDirectory;
 #ifdef PF_EDITOR_RENDERER_OPENGL
 		std::filesystem::path m_OpenGLDiagnosticCapturePath;
 		bool m_OpenGLDiagnosticCaptureWritten = false;
@@ -6480,6 +6502,7 @@ namespace
 		uint32_t m_OpenGLDiagnosticFramesSeen = 0;
 #endif
 		bool m_FileDialogActive = false;
+		bool m_WindowPositionRestoreWarningLogged = false;
 		bool m_ViewportImageHovered = false;
 		bool m_ProjectOpenTimingActive = false;
 		bool m_LoggedFirstViewportPrepared = false;
@@ -6491,6 +6514,7 @@ namespace
 		PulseForgeEditor::EditorSceneWorkspaceState m_SceneWorkspace;
 		PulseForgeEditor::EditorSceneVisibilityCommands m_SceneVisibilityCommands;
 		bool m_OpenUnsavedDialog = false;
+		bool m_ApplicationClosePending = false;
 		bool m_ApplicationShutdownRequested = false;
 		PulseForgeEditor::EditorDocumentCloseRequest m_DocumentCloseRequest;
 		PulseForgeEditor::EditorAssetWorkflowState m_AssetWorkflow;
@@ -6544,6 +6568,7 @@ namespace
 		ImGuiID m_DocumentHostTabTearOffTestTabViewportID = 0;
 		std::string m_DocumentHostTabTearOffSourceHostID;
 		bool m_DocumentHostTabTearOffTestTabCenterValid = false;
+		bool m_DocumentHostTabTearOffPointerPrepared = false;
 		DocumentTabReattachTestPhase m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Disabled;
 		DocumentTabReorderTestPhase m_DocumentHostTabReorderTestPhase = DocumentTabReorderTestPhase::Disabled;
 		DocumentTabGroupTestPhase m_DocumentHostTabGroupTestPhase = DocumentTabGroupTestPhase::Disabled;
