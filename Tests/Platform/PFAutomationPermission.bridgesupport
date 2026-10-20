@@ -1,18 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <signatures version="1.0">
-	<function name="PFProbeSystemEventsDescriptor">
-		<retval type="i"/>
-	</function>
-	<function name="PFReadSystemEventsNativeAddress">
-		<retval type="i"/>
-	</function>
-	<function name="PFTypeWildCardEventClass">
-		<retval type="i"/>
-	</function>
-	<function name="PFTypeWildCardEventID">
-		<retval type="i"/>
-	</function>
-	<function name="PFDetermineSystemEventsPermission">
-		<retval type="i"/>
-	</function>
+	<class name="PFAutomationPermissionBridge">
+		<method selector="probeSystemEventsDescriptor">
+			<retval type="i"/>
+		</method>
+		<method selector="readSystemEventsNativeAddress">
+			<retval type="i"/>
+		</method>
+		<method selector="typeWildCardEventClass">
+			<retval type="i"/>
+		</method>
+		<method selector="typeWildCardEventID">
+			<retval type="i"/>
+		</method>
+		<method selector="determineSystemEventsPermission">
+			<retval type="i"/>
+		</method>
+		<method selector="preflightQuartzEventAccess">
+			<retval type="i"/>
+		</method>
+	</class>
 </signatures>

@@ -59,38 +59,61 @@ class DirtyCloseProtocolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.protocol = smoke.MarkerProtocol("cancel-save", "host-a", "asset-a", 0)
 
-    def test_permission_bridge_metadata_matches_the_fixed_c_abi(self) -> None:
+    def test_permission_bridge_class_exposes_only_scalar_no_argument_methods(self) -> None:
         platform_dir = Path(__file__).parent
-        metadata_path = platform_dir / "PFAutomationPermission.bridgesupport"
-        metadata = ET.parse(metadata_path).getroot()
         header = (platform_dir / "MacOSAutomationPermissionBridge.h").read_text(encoding="utf-8")
-        expected = {
-            "PFProbeSystemEventsDescriptor",
-            "PFReadSystemEventsNativeAddress",
-            "PFTypeWildCardEventClass",
-            "PFTypeWildCardEventID",
-            "PFDetermineSystemEventsPermission",
-        }
+        metadata = ET.parse(platform_dir / "PFAutomationPermission.bridgesupport").getroot()
+        expected = (
+            "probeSystemEventsDescriptor",
+            "readSystemEventsNativeAddress",
+            "typeWildCardEventClass",
+            "typeWildCardEventID",
+            "determineSystemEventsPermission",
+            "preflightQuartzEventAccess",
+        )
 
         self.assertEqual("signatures", metadata.tag)
         self.assertEqual("1.0", metadata.attrib.get("version"))
-        functions = metadata.findall("function")
-        self.assertEqual(expected, {function.attrib.get("name") for function in functions})
-        for function in functions:
-            self.assertEqual([], function.findall("arg"), function.attrib.get("name"))
-            self.assertEqual({"type": "i"}, function.find("retval").attrib, function.attrib.get("name"))
-            self.assertIn(f"int32_t {function.attrib['name']}(void);", header)
+        self.assertIn("@interface PFAutomationPermissionBridge : NSObject", header)
+        bridge_classes = [entry for entry in metadata.findall("class") if entry.attrib.get("name") == "PFAutomationPermissionBridge"]
+        self.assertEqual(1, len(bridge_classes))
+        self.assertEqual(len(expected), len(bridge_classes[0].findall("method")))
+        for method in expected:
+            self.assertIn(f"- (int32_t){method};", header)
+            metadata_method = next(item for item in bridge_classes[0].findall("method") if item.attrib.get("selector") == method)
+            self.assertNotEqual("true", metadata_method.attrib.get("class_method"))
+            retval = metadata_method.find("retval")
+            return_types = [retval.attrib[key] for key in ("type", "type64") if key in retval.attrib]
+            self.assertTrue(return_types)
+            self.assertTrue(all(return_type == "i" for return_type in return_types))
+            self.assertEqual([], metadata_method.findall("arg"))
+        self.assertEqual(len(expected), header.count("- (int32_t)"))
 
-    def test_real_probe_script_imports_metadata_framework_and_calls_exported_functions(self) -> None:
-        script = automation._probe_script(Path("/tmp/PFAutomationPermission.framework"))
+    def test_probe_failure_report_preserves_nested_loader_diagnostics(self) -> None:
+        result = {
+            "stage": "custom-framework-binary-load",
+            "message": "NSBundle could not load the private permission framework",
+            "frameworkPath": "/tmp/PFAutomationPermission.framework",
+            "executablePath": "/tmp/PFAutomationPermission.framework/PFAutomationPermission",
+            "hostExecutablePath": "/usr/bin/osascript",
+            "hostTranslated": "0",
+            "nativeError": {
+                "domain": "NSCocoaErrorDomain",
+                "code": "3587",
+                "description": "Bundle is not loadable",
+                "failureReason": "Architecture mismatch",
+                "debugDescription": "have arm64, need arm64e",
+                "underlying": {"domain": "NSPOSIXErrorDomain", "code": "86"},
+            },
+        }
 
-        self.assertIn('ObjC.import(bridgePath);', script)
-        self.assertIn("$.PFProbeSystemEventsDescriptor()", script)
-        self.assertIn("$.PFDetermineSystemEventsPermission()", script)
-        self.assertIn("runningApplicationsWithBundleIdentifier", script)
-        self.assertIn("NSThread.sleepForTimeInterval(0.1)", script)
-        self.assertIn("systemEventsTargetRunning", script)
-        self.assertNotIn("ObjC.bindFunction", script)
+        detail = automation._format_probe_implementation_error(result)
+        parsed = json.loads(detail.split("; diagnostic=", 1)[1])
+
+        self.assertEqual("custom-framework-binary-load", parsed["stage"])
+        self.assertEqual("3587", parsed["nativeError"]["code"])
+        self.assertEqual("have arm64, need arm64e", parsed["nativeError"]["debugDescription"])
+        self.assertEqual("86", parsed["nativeError"]["underlying"]["code"])
 
     def test_permission_probe_launches_system_events_with_a_bounded_noninteractive_request(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -288,7 +311,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertIn("caller=/usr/bin/osascript", detail)
         self.assertIn("AEDeterminePermissionToAutomateTarget", detail)
         self.assertIn("CGPreflightPostEventAccess=false", detail)
-        self.assertIn("PFDetermineSystemEventsPermission", launch.call_args.args[0][-1])
+        self.assertIn("determineSystemEventsPermission", launch.call_args.args[0][-1])
         self.assertEqual("/usr/bin/osascript", launch.call_args.args[0][0])
 
     def test_osascript_probe_classifies_appleevents_denial_separately_from_other_privileges(self) -> None:

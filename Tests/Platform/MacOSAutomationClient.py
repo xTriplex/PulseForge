@@ -14,6 +14,34 @@ def _probe_script(bridge_path: Path) -> str:
     bridge = json.dumps(str(bridge_path))
     return f'''var stage = "ApplicationServices-framework-load";
 var bridgePath = {bridge};
+function safeObjCString(value) {{
+    try {{
+        if (value === null || value === undefined) return null;
+        return String(ObjC.unwrap(value));
+    }} catch (error) {{
+        return "<unavailable: " + String(error) + ">";
+    }}
+}}
+function describeNSError(error, depth) {{
+    try {{
+        if (error === null || error === undefined || error.isNil()) return null;
+        var info = error.userInfo;
+        var result = {{
+            domain: safeObjCString(error.domain),
+            code: safeObjCString(error.code),
+            description: safeObjCString(error.localizedDescription),
+            failureReason: safeObjCString(error.localizedFailureReason),
+            debugDescription: info.isNil() ? null : safeObjCString(info.objectForKey("NSDebugDescription"))
+        }};
+        if (depth < 3 && !info.isNil()) {{
+            var underlying = info.objectForKey("NSUnderlyingError");
+            if (!underlying.isNil()) result.underlying = describeNSError(underlying, depth + 1);
+        }}
+        return result;
+    }} catch (error) {{
+        return {{diagnosticError: String(error)}};
+    }}
+}}
 var descriptorType = -1;
 var descriptorResult = -1;
 var wildcardClass = -1;
@@ -29,10 +57,28 @@ try {{
     stage = "custom-framework-load";
     ObjC.import(bridgePath);
 
-    stage = "custom-framework-symbol-binding";
-    if (typeof $.PFProbeSystemEventsDescriptor !== "function" ||
-        typeof $.PFDetermineSystemEventsPermission !== "function")
-        throw new Error("BridgeSupport metadata did not expose the permission probe functions");
+    stage = "custom-framework-binary-load";
+    var permissionBridgeBundle = $.NSBundle.bundleWithPath(bridgePath);
+    if (permissionBridgeBundle.isNil())
+        throw new Error("NSBundle could not resolve the permission bridge at " + bridgePath);
+    var bundleLoadError = $();
+    if (!permissionBridgeBundle.loadAndReturnError(bundleLoadError)) {{
+        throw {{probeFailure: true, stage: stage,
+            message: "NSBundle could not load the private permission framework",
+            frameworkPath: safeObjCString(permissionBridgeBundle.bundlePath),
+            executablePath: safeObjCString(permissionBridgeBundle.executablePath),
+            hostExecutablePath: safeObjCString($.NSBundle.mainBundle.executablePath),
+            hostTranslated: safeObjCString($.NSProcessInfo.processInfo.isTranslated),
+            nativeError: describeNSError(bundleLoadError, 0)}};
+    }}
+
+    stage = "custom-framework-class-lookup";
+    var permissionBridge = $.PFAutomationPermissionBridge.alloc.init;
+
+    stage = "custom-framework-method-invocation:typeWildCardEventClass";
+    wildcardClass = permissionBridge.typeWildCardEventClass;
+    if (wildcardClass !== 707406378)
+        throw new Error("Objective-C wildcard class method returned " + wildcardClass);
 
     stage = "System-Events-target-readiness";
     var systemEventsApplications = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("com.apple.systemevents");
@@ -42,38 +88,44 @@ try {{
     }}
     systemEventsTargetRunning = ObjC.unwrap(systemEventsApplications.count) > 0;
 
-    stage = "descriptor-construction";
-    descriptorResult = $.PFProbeSystemEventsDescriptor();
+    stage = "custom-framework-method-invocation:probeSystemEventsDescriptor";
+    descriptorResult = permissionBridge.probeSystemEventsDescriptor;
     if (descriptorResult !== 0) throw new Error("descriptor construction returned " + descriptorResult);
 
-    stage = "native-AEAddressDesc-access";
-    descriptorType = $.PFReadSystemEventsNativeAddress();
+    stage = "custom-framework-method-invocation:readSystemEventsNativeAddress";
+    descriptorType = permissionBridge.readSystemEventsNativeAddress;
     if (descriptorType < 0) throw new Error("native address access returned " + descriptorType);
 
-    stage = "wildcard-constant-marshalling";
-    wildcardClass = $.PFTypeWildCardEventClass();
-    wildcardEvent = $.PFTypeWildCardEventID();
+    stage = "custom-framework-method-invocation:typeWildCardEventID";
+    wildcardEvent = permissionBridge.typeWildCardEventID;
     if (wildcardClass !== 707406378 || wildcardClass !== wildcardEvent) throw new Error("invalid wildcard constants");
 
-    stage = "apple-events-permission-api";
-    appleEventsStatus = systemEventsTargetRunning ? $.PFDetermineSystemEventsPermission() : -600;
+    stage = "custom-framework-method-invocation:determineSystemEventsPermission";
+    appleEventsStatus = systemEventsTargetRunning ? permissionBridge.determineSystemEventsPermission : -600;
 
     stage = "accessibility-trust-query";
     axTrusted = Boolean($.AXIsProcessTrusted());
 
-    stage = "CoreGraphics-framework-load";
-    ObjC.import("CoreGraphics");
-    stage = "quartz-post-event-preflight";
-    quartzAllowed = Boolean($.CGPreflightPostEventAccess());
+    stage = "custom-framework-method-invocation:preflightQuartzEventAccess";
+    var quartzStatus = permissionBridge.preflightQuartzEventAccess;
+    if (quartzStatus < 0) throw new Error("Quartz preflight returned " + quartzStatus);
+    quartzAllowed = quartzStatus === 1;
 
     stage = "result-serialization";
     serializedResult = JSON.stringify({{stage: "complete", descriptorType: descriptorType, wildcardClass: wildcardClass,
         wildcardEvent: wildcardEvent, appleEventsStatus: appleEventsStatus,
-        systemEventsTargetRunning: systemEventsTargetRunning, axTrusted: axTrusted, quartzAllowed: quartzAllowed}});
+        systemEventsTargetRunning: systemEventsTargetRunning, axTrusted: axTrusted, quartzAllowed: quartzAllowed,
+        hostExecutablePath: safeObjCString($.NSBundle.mainBundle.executablePath),
+        hostTranslated: safeObjCString($.NSProcessInfo.processInfo.isTranslated)}});
 }} catch (error) {{
-    serializedResult = JSON.stringify({{stage: stage, error: String(error)}});
+    serializedResult = JSON.stringify(error && error.probeFailure ? error : {{stage: stage, error: String(error)}});
 }}
 serializedResult;'''
+
+
+def _format_probe_implementation_error(result: dict[str, object]) -> str:
+    stage = result.get("stage", "unknown")
+    return f"stage={stage}; diagnostic={json.dumps(result, ensure_ascii=False, sort_keys=True)}"
 
 
 def probe_osascript_access(timeout_seconds: float = 7.0, *, prepare_target: bool = True) -> tuple[str, int | None, str]:
@@ -142,7 +194,9 @@ def probe_osascript_access(timeout_seconds: float = 7.0, *, prepare_target: bool
     except json.JSONDecodeError as error:
         return "PROBE_IMPLEMENTATION_ERROR", process.pid, f"invalid probe serialization: {error}; output={output.strip()[-1000:]!r}"
     if not isinstance(result, dict) or result.get("stage") != "complete":
-        return "PROBE_IMPLEMENTATION_ERROR", process.pid, f"stage={result.get('stage') if isinstance(result, dict) else 'unknown'}; {result!r}"
+        if isinstance(result, dict):
+            return "PROBE_IMPLEMENTATION_ERROR", process.pid, _format_probe_implementation_error(result)
+        return "PROBE_IMPLEMENTATION_ERROR", process.pid, f"invalid probe result type: {type(result).__name__}"
     try:
         ae_status = int(result["appleEventsStatus"])
         ax_trusted = result["axTrusted"] is True
