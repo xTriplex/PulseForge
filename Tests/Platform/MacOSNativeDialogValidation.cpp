@@ -2,6 +2,7 @@
 
 #include <GLFW/glfw3.h>
 
+#include <chrono>
 #include <expected>
 #include <filesystem>
 #include <fstream>
@@ -27,6 +28,21 @@ namespace
 	{
 		std::cerr << "NFD_FIXTURE=FAIL; " << Message << '\n';
 		return 1;
+	}
+
+	bool WaitForWindowFocus(GLFWwindow* Window)
+	{
+		using Clock = std::chrono::steady_clock;
+		const Clock::time_point Deadline = Clock::now() + std::chrono::seconds(2);
+		while (Clock::now() < Deadline)
+		{
+			glfwPollEvents();
+			if (glfwWindowShouldClose(Window)) return false;
+			if (glfwGetWindowAttrib(Window, GLFW_FOCUSED) == GLFW_TRUE) return true;
+			glfwWaitEventsTimeout(0.05);
+		}
+		glfwPollEvents();
+		return glfwGetWindowAttrib(Window, GLFW_FOCUSED) == GLFW_TRUE;
 	}
 
 	class GLFWLifetime final
@@ -103,7 +119,9 @@ int main(int ArgumentCount, char** Arguments)
 	glfwPollEvents();
 	if (glfwWindowShouldClose(Window) || glfwGetWindowAttrib(Window, GLFW_VISIBLE) != GLFW_TRUE)
 		return Fail("parent window was not usable after the native dialog returned");
+	if (!WaitForWindowFocus(Window)) return Fail("parent window did not regain focus after the native dialog returned");
 	glfwSetWindowTitle(Window, "PulseForge Native Dialog Validation · returned");
+	std::cout << "NFD_DIALOG_FOCUS=PASS; scenario=" << Scenario << std::endl;
 	std::cout << "NFD_DIALOG_POST_USE=PASS; scenario=" << Scenario << std::endl;
 
 	if (!IsSelection)

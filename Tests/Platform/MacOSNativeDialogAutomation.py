@@ -141,6 +141,7 @@ class FixtureOutput:
         self.log_path = log_path
         self.ready_line: str | None = None
         self.post_use_line: str | None = None
+        self.focus_line: str | None = None
         self.result_line: str | None = None
         self.failure_lines: list[str] = []
         self.console_bytes = 0
@@ -159,6 +160,8 @@ class FixtureOutput:
                     self.ready_line = line.rstrip()
                 elif line.startswith("NFD_DIALOG_POST_USE="):
                     self.post_use_line = line.rstrip()
+                elif line.startswith("NFD_DIALOG_FOCUS="):
+                    self.focus_line = line.rstrip()
                 elif line.startswith("NFD_DIALOG_RESULT="):
                     self.result_line = line.rstrip()
                 elif line.startswith("NFD_FIXTURE=FAIL;") and len(self.failure_lines) < 8:
@@ -1522,6 +1525,9 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
 
     if not output_reader.post_use_line or f"scenario={scenario}" not in output_reader.post_use_line:
         return 1, "fixture did not prove post-dialog window usability"
+    expected_focus_marker = f"NFD_DIALOG_FOCUS=PASS; scenario={scenario}"
+    if output_reader.focus_line != expected_focus_marker:
+        return 1, f"fixture did not prove parent-window focus restoration: {expected_focus_marker}"
     if scenario.endswith("cancel"):
         expected_marker = f"NFD_DIALOG_RESULT=CANCELLED; scenario={scenario}"
     else:
