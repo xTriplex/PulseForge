@@ -29,6 +29,11 @@ try {{
     stage = "custom-framework-load";
     ObjC.import(bridgePath);
 
+    stage = "custom-framework-binary-load";
+    var permissionBridgeBundle = $.NSBundle.bundleWithPath(bridgePath);
+    if (permissionBridgeBundle.isNil() || !permissionBridgeBundle.load)
+        throw new Error("permission bridge framework binary did not load");
+
     stage = "custom-framework-class-lookup";
     var permissionBridge = $.PFAutomationPermissionBridge.alloc.init;
 
