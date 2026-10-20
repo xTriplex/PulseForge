@@ -677,8 +677,14 @@ def click_point(
             f"stdout={stdout[-1000:]!r}; stderr={stderr[-1000:]!r}"
         )
 
+    print(
+        f"MACOS_DOC_CLOSE_POINTER_INPUT=DRIVER_RETURNED; control={label}; "
+        f"driver_output={stdout.strip()!r}; delivery=not-yet-observed; pointer_before={pointer_before.strip()!r}"
+    )
+
     observation_deadline = min(deadline, time.monotonic() + 3.0)
     last_state = "pointer observation not attempted"
+    observed_pointer = False
     while time.monotonic() < observation_deadline:
         code, observation = run_osascript(
             POINTER_OBSERVE,
@@ -688,9 +694,8 @@ def click_point(
         )
         if code == 0 and "target_match=1" in observation:
             print(
-                f"MACOS_DOC_CLOSE_CLICK_DISPATCH=POSTED; control={label}; input=Quartz CGEvent; "
-                f"{stdout.strip()}; pointer_before={pointer_before.strip()}; "
-                f"pointer_after={observation.strip()}; fixture_confirmation=pending"
+                f"MACOS_DOC_CLOSE_POINTER_OBSERVATION=TARGET_MATCH; control={label}; "
+                f"pointer_after={observation.strip()}; fixture_state_confirmation=pending"
             )
             return
         if code != 0:
@@ -704,9 +709,19 @@ def click_point(
                 )
             last_state = f"observation timed out: {observation.strip()}"
         else:
+            observed_pointer = True
             last_state = observation.strip()
         time.sleep(min(0.1, max(0.0, observation_deadline - time.monotonic())))
-    raise RuntimeError(f"Quartz click for {label} did not move the desktop pointer to {point!r}; last state: {last_state}")
+    if observed_pointer:
+        print(
+            f"MACOS_DOC_CLOSE_POINTER_OBSERVATION=TARGET_NOT_CONFIRMED; control={label}; "
+            f"requested={point!r}; last_observed={last_state!r}; fixture_state_confirmation=required"
+        )
+        return
+    print(
+        f"MACOS_DOC_CLOSE_POINTER_OBSERVATION=UNAVAILABLE; control={label}; "
+        f"requested={point!r}; last_observed={last_state!r}; fixture_state_confirmation=required"
+    )
 
 
 def capture_text_focus_timeout(
@@ -746,6 +761,40 @@ def capture_text_focus_timeout(
         state = "TIMED_OUT" if isinstance(error, subprocess.TimeoutExpired) else "FAILED"
         screenshot_state = f"screenshot={state}; error={type(error).__name__}: {error}"
     return f"{cause}; click_point={point!r}; {bounds_state}; {screenshot_state}"
+
+
+def capture_action_timeout_screenshot(
+    log_directory: Path,
+    process: subprocess.Popen[str],
+    scenario: str,
+    choice: str,
+) -> str:
+    screenshot = log_directory / f"macos-document-close-{scenario}-action-timeout.png"
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/screencapture", "-x", "-C", "-t", "png", str(screenshot)],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        if result.returncode == 0 and screenshot.is_file() and screenshot.stat().st_size > 0:
+            screenshot_state = f"CAPTURED; bytes={screenshot.stat().st_size}; path={screenshot}"
+        else:
+            state = "TCC_DENIED" if is_tcc_denial(result.stderr + result.stdout) else "FAILED"
+            screenshot_state = (
+                f"{state}; exit_code={result.returncode}; "
+                f"stdout={result.stdout[-400:]!r}; stderr={result.stderr[-400:]!r}"
+            )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        state = "TIMED_OUT" if isinstance(error, subprocess.TimeoutExpired) else "FAILED"
+        screenshot_state = f"{state}; error={type(error).__name__}: {error}"
+
+    process_state = "running" if process.poll() is None else f"exited={process.returncode}"
+    return (
+        f"scenario={scenario}; choice={choice}; pid={process.pid}; process_state={process_state}; "
+        f"screenshot={screenshot_state}"
+    )
 
 
 def click_document_tab_close(
@@ -863,7 +912,16 @@ def expect_action(
     saved: str,
     error: str = "",
 ) -> dict[str, str]:
-    action = wait_event(capture, process, "ACTION", protocol.scenario, deadline)
+    try:
+        action = wait_event(capture, process, "ACTION", protocol.scenario, deadline)
+    except RuntimeError as error:
+        if str(error).startswith("timed out waiting for ACTION marker"):
+            evidence = capture_action_timeout_screenshot(
+                capture.log_path.parent, process, protocol.scenario, choice
+            )
+            print(f"MACOS_DOC_CLOSE_ACTION_TIMEOUT_OBSERVATION={evidence}")
+            raise RuntimeError(f"{error}; {evidence}") from error
+        raise
     expected = {
         "choice": choice,
         "resolved": resolved,
