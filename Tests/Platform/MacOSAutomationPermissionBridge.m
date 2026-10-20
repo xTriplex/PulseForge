@@ -42,10 +42,10 @@ int32_t PFReadSystemEventsNativeAddress(void)
 		{
 			if (s_SystemEventsDescriptor == nil)
 				return PFPermissionDescriptorUnavailable;
-			AEAddressDesc address = s_SystemEventsDescriptor.aeDesc;
-			if (address.descriptorType == typeNull || address.dataHandle == NULL)
+			const AEAddressDesc* address = s_SystemEventsDescriptor.aeDesc;
+			if (address == NULL || address->descriptorType == typeNull || address->dataHandle == NULL)
 				return PFPermissionAddressUnavailable;
-			return (int32_t)address.descriptorType;
+			return (int32_t)address->descriptorType;
 		}
 		@catch (NSException* exception)
 		{
@@ -73,12 +73,12 @@ int32_t PFDetermineSystemEventsPermission(void)
 			if (s_SystemEventsDescriptor == nil)
 				return PFPermissionDescriptorUnavailable;
 
-			AEAddressDesc address = s_SystemEventsDescriptor.aeDesc;
-			if (address.descriptorType == typeNull || address.dataHandle == NULL)
+			const AEAddressDesc* address = s_SystemEventsDescriptor.aeDesc;
+			if (address == NULL || address->descriptorType == typeNull || address->dataHandle == NULL)
 				return PFPermissionAddressUnavailable;
 
 			if (@available(macOS 10.14, *))
-				return (int32_t)AEDeterminePermissionToAutomateTarget(&address, typeWildCard, typeWildCard, false);
+				return (int32_t)AEDeterminePermissionToAutomateTarget(address, typeWildCard, typeWildCard, false);
 			return PFPermissionApiUnsupported;
 		}
 		@catch (NSException* exception)

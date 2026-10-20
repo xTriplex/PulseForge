@@ -320,89 +320,6 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertIn("did not exit", detail)
 
 
-class WorkspaceRestoreObservationTests(unittest.TestCase):
-    class Process:
-        pid = 876
-        returncode: int | None = None
-
-        def poll(self) -> int | None:
-            return self.returncode
-
-    class Capture:
-        fixture_ready = threading.Event()
-        restored_sessions = 2
-        reader_error: str | None = None
-
-        def __init__(self) -> None:
-            self.fixture_ready.set()
-
-    class Clock:
-        def __init__(self) -> None:
-            self.now = 0.0
-
-        def monotonic(self) -> float:
-            return self.now
-
-        def sleep(self, seconds: float) -> None:
-            self.now += seconds
-
-    VALID_WINDOWS = "PulseForge Editor\n1\tPulseForge Editor\n2\tHost Test Fixture 1\n3\tHost Test Fixture 2\n"
-
-    def run_wait(self, observations: list[tuple[int, str]], deadline_seconds: float = 5.0) -> tuple[list[tuple[int, str]], int]:
-        clock = self.Clock()
-        capture = self.Capture()
-        with patch.object(workspace_restore.time, "monotonic", clock.monotonic), patch.object(
-            workspace_restore.time, "sleep", clock.sleep
-        ), patch.object(workspace_restore, "run_osascript", side_effect=observations) as query:
-            windows = workspace_restore.wait_for_fixture_windows(
-                self.Process(), capture, deadline_seconds, expected_restore_count=2
-            )
-        return windows, query.call_count
-
-    def test_transient_timeout_then_native_snapshot_succeeds_under_one_deadline(self) -> None:
-        windows, attempts = self.run_wait([(124, "AppleScript operation timed out"), (0, self.VALID_WINDOWS)])
-        self.assertEqual(3, len(windows))
-        self.assertEqual(2, attempts)
-
-    def test_persistent_timeout_fails_with_bounded_attempt_diagnostics(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "persistent Accessibility observation timeout.*attempts=3"):
-            self.run_wait([(124, "AppleScript operation timed out")] * 3)
-
-    def test_explicit_authorization_denial_fails_without_retry(self) -> None:
-        with patch.object(workspace_restore, "run_osascript", return_value=(1, "not authorized to send Apple events (-1743)")) as query:
-            with self.assertRaisesRegex(workspace_restore.WindowObservationError, "AX_AUTHORIZATION_DENIED"):
-                workspace_restore.query_windows(self.Process(), time.monotonic() + 2.0)
-        query.assert_called_once()
-
-    def test_editor_exit_and_wrong_process_identity_fail_immediately(self) -> None:
-        process = self.Process()
-        process.returncode = 3
-        with self.assertRaisesRegex(workspace_restore.WindowObservationError, "EDITOR_EXITED"):
-            workspace_restore.query_windows(process, time.monotonic() + 2.0)
-        with patch.object(workspace_restore, "run_osascript", return_value=(0, "Finder\n1\tPulseForge Editor\n")):
-            with self.assertRaisesRegex(workspace_restore.WindowObservationError, "AX_WRONG_PROCESS_IDENTITY"):
-                workspace_restore.query_windows(self.Process(), time.monotonic() + 2.0)
-        with patch.object(workspace_restore, "run_osascript", return_value=(0, "PulseForge\nmalformed window row")):
-            with self.assertRaisesRegex(workspace_restore.WindowObservationError, "AX_MALFORMED_PROTOCOL"):
-                workspace_restore.query_windows(self.Process(), time.monotonic() + 2.0)
-
-    def test_editor_output_reader_failure_fails_before_accepting_windows(self) -> None:
-        capture = self.Capture()
-        capture.reader_error = "synthetic reader failure"
-        with patch.object(workspace_restore, "run_osascript", return_value=(0, self.VALID_WINDOWS)) as query:
-            with self.assertRaisesRegex(RuntimeError, "output capture failed"):
-                workspace_restore.wait_for_fixture_windows(self.Process(), capture, time.monotonic() + 1.0, 2)
-        query.assert_not_called()
-
-    def test_restoration_markers_and_incomplete_window_set_do_not_pass(self) -> None:
-        incomplete = "PulseForge Editor\n1\tPulseForge Editor\n2\tHost Test Fixture 1\n"
-        clock = self.Clock()
-        with patch.object(workspace_restore.time, "monotonic", clock.monotonic), patch.object(
-            workspace_restore.time, "sleep", clock.sleep
-        ), patch.object(workspace_restore, "run_osascript", return_value=(0, incomplete)):
-            with self.assertRaisesRegex(RuntimeError, "overall readiness deadline expired"):
-                workspace_restore.wait_for_fixture_windows(self.Process(), self.Capture(), 1.0, 2)
-
     def test_prompt_response_reconciles_uncertain_dispatch_when_pointer_probe_timed_out(self) -> None:
         capture = FakeCapture(
             [marker("PROMPT", scenario="cancel-save", host="host-a", asset="asset-a", generation="1", sample="1")]
@@ -710,6 +627,92 @@ class WorkspaceRestoreObservationTests(unittest.TestCase):
                     "cancel-save",
                     time.monotonic() + 0.2,
                 )
+
+
+class WorkspaceRestoreObservationTests(unittest.TestCase):
+    class Process:
+        pid = 876
+        returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+    class Capture:
+        restored_sessions = 2
+        reader_error: str | None = None
+
+        def __init__(self) -> None:
+            self.fixture_ready = threading.Event()
+            self.fixture_ready.set()
+
+    class Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.now += seconds
+
+    VALID_WINDOWS = "PulseForge Editor\n1\tPulseForge Editor\n2\tHost Test Fixture 1\n3\tHost Test Fixture 2\n"
+
+    def run_wait(self, observations: list[tuple[int, str]], deadline_seconds: float = 5.0) -> tuple[list[tuple[int, str]], int]:
+        clock = self.Clock()
+        capture = self.Capture()
+        with patch.object(workspace_restore.time, "monotonic", clock.monotonic), patch.object(
+            workspace_restore.time, "sleep", clock.sleep
+        ), patch.object(workspace_restore, "run_osascript", side_effect=observations) as query:
+            windows = workspace_restore.wait_for_fixture_windows(
+                self.Process(), capture, deadline_seconds, expected_restore_count=2
+            )
+        return windows, query.call_count
+
+    def test_transient_timeout_then_native_snapshot_succeeds_under_one_deadline(self) -> None:
+        windows, attempts = self.run_wait([(124, "AppleScript operation timed out"), (0, self.VALID_WINDOWS)])
+        self.assertEqual(3, len(windows))
+        self.assertEqual(2, attempts)
+
+    def test_persistent_timeout_fails_with_bounded_attempt_diagnostics(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "persistent Accessibility observation timeout.*attempts=3"):
+            self.run_wait([(124, "AppleScript operation timed out")] * 3)
+
+    def test_explicit_authorization_denial_fails_without_retry(self) -> None:
+        with patch.object(
+            workspace_restore, "run_osascript", return_value=(1, "not authorized to send Apple events (-1743)")
+        ) as query:
+            with self.assertRaisesRegex(workspace_restore.WindowObservationError, "AX_AUTHORIZATION_DENIED"):
+                workspace_restore.query_windows(self.Process(), time.monotonic() + 2.0)
+        query.assert_called_once()
+
+    def test_editor_exit_and_wrong_process_identity_fail_immediately(self) -> None:
+        process = self.Process()
+        process.returncode = 3
+        with self.assertRaisesRegex(workspace_restore.WindowObservationError, "EDITOR_EXITED"):
+            workspace_restore.query_windows(process, time.monotonic() + 2.0)
+        with patch.object(workspace_restore, "run_osascript", return_value=(0, "Finder\n1\tPulseForge Editor\n")):
+            with self.assertRaisesRegex(workspace_restore.WindowObservationError, "AX_WRONG_PROCESS_IDENTITY"):
+                workspace_restore.query_windows(self.Process(), time.monotonic() + 2.0)
+        with patch.object(workspace_restore, "run_osascript", return_value=(0, "PulseForge\nmalformed window row")):
+            with self.assertRaisesRegex(workspace_restore.WindowObservationError, "AX_MALFORMED_PROTOCOL"):
+                workspace_restore.query_windows(self.Process(), time.monotonic() + 2.0)
+
+    def test_editor_output_reader_failure_fails_before_accepting_windows(self) -> None:
+        capture = self.Capture()
+        capture.reader_error = "synthetic reader failure"
+        with patch.object(workspace_restore, "run_osascript", return_value=(0, self.VALID_WINDOWS)) as query:
+            with self.assertRaisesRegex(RuntimeError, "output capture failed"):
+                workspace_restore.wait_for_fixture_windows(self.Process(), capture, time.monotonic() + 1.0, 2)
+        query.assert_not_called()
+
+    def test_restoration_markers_and_incomplete_window_set_do_not_pass(self) -> None:
+        incomplete = "PulseForge Editor\n1\tPulseForge Editor\n2\tHost Test Fixture 1\n"
+        clock = self.Clock()
+        with patch.object(workspace_restore.time, "monotonic", clock.monotonic), patch.object(
+            workspace_restore.time, "sleep", clock.sleep
+        ), patch.object(workspace_restore, "run_osascript", return_value=(0, incomplete)):
+            with self.assertRaisesRegex(RuntimeError, "overall readiness deadline expired"):
+                workspace_restore.wait_for_fixture_windows(self.Process(), self.Capture(), 1.0, 2)
 
 
 if __name__ == "__main__":
