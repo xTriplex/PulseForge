@@ -176,13 +176,21 @@ func fail(_ message: String, _ status: Int32) -> Never {
     exit(status)
 }
 
-guard CommandLine.arguments.count == 5,
-      let targetPID = Int32(CommandLine.arguments[1]),
-      let actionID = CommandLine.arguments[2],
-      let eventTag = UInt64(actionID.prefix(16), radix: 16),
-      let x = Double(CommandLine.arguments[3]),
-      let y = Double(CommandLine.arguments[4]) else {
+guard CommandLine.arguments.count == 5 else {
     fail("CGEvent input requires PID, click identity and finite desktop coordinates", 2)
+}
+guard let targetPID = Int32(CommandLine.arguments[1]), targetPID > 0 else {
+    fail("CGEvent input PID must be a positive 32-bit integer", 2)
+}
+let actionID = CommandLine.arguments[2]
+guard actionID.range(of: "^[0-9a-fA-F]{32}$", options: .regularExpression) != nil else {
+    fail("CGEvent action identity must be exactly 32 hexadecimal characters", 2)
+}
+guard let eventTag = UInt64(actionID.prefix(16), radix: 16) else {
+    fail("CGEvent action identity does not contain a valid event tag", 2)
+}
+guard let x = Double(CommandLine.arguments[3]), let y = Double(CommandLine.arguments[4]) else {
+    fail("CGEvent coordinates must be numeric", 2)
 }
 guard x.isFinite, y.isFinite else {
     fail("CGEvent input coordinates are not finite", 2)

@@ -3,6 +3,16 @@ name: Portable editor CPU CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      validation_mode:
+        description: Select focused automation-probe validation or the complete acceptance matrix
+        type: choice
+        options:
+          - full
+          - automation-probe-only
+        default: full
+        required: true
 
 permissions:
   contents: read
@@ -23,6 +33,34 @@ jobs:
       - name: Test the automation harness and permission bridge contract
         run: python3 Tests/Platform/MacOSDocumentCloseSmokeTests.py
 
+      - name: Compile the embedded Quartz helper and reject malformed calls
+        run: |
+          set -euo pipefail
+          POINTER_SOURCE="$RUNNER_TEMP/PulseForgePointerInput.swift"
+          POINTER_EXECUTABLE="$RUNNER_TEMP/PulseForgePointerInput"
+          PYTHONPATH=Tests/Platform python3 - "$POINTER_SOURCE" <<'PY'
+          from pathlib import Path
+          import sys
+          from MacOSDocumentCloseSmoke import POINTER_DRIVER_SOURCE
+
+          Path(sys.argv[1]).write_text(POINTER_DRIVER_SOURCE, encoding="utf-8")
+          PY
+          xcrun swiftc -O "$POINTER_SOURCE" -framework CoreGraphics -o "$POINTER_EXECUTABLE" \
+            2>&1 | tee "$RUNNER_TEMP/macos-pointer-driver-build.log"
+          for arguments in '123 invalid 20 20' '123 0123456789abcdef0123456789abcdef not-a-coordinate 20'; do
+            set +e
+            "$POINTER_EXECUTABLE" $arguments > "$RUNNER_TEMP/macos-pointer-driver-invalid.log" 2>&1
+            status=$?
+            set -e
+            if [[ $status -ne 2 ]] || grep -q 'CGEventPost=' "$RUNNER_TEMP/macos-pointer-driver-invalid.log"; then
+              cat "$RUNNER_TEMP/macos-pointer-driver-invalid.log"
+              echo "Malformed Quartz helper input was not rejected before event posting: status=$status" >&2
+              exit 1
+            fi
+            cat "$RUNNER_TEMP/macos-pointer-driver-invalid.log"
+          done
+          echo "PULSEFORGE_QUARTZ_POINTER_HELPER=COMPILED; invalid_inputs=rejected_without_posting"
+
       - name: Build and import the private framework in osascript
         run: |
           set -o pipefail
@@ -38,6 +76,8 @@ jobs:
           path: |
             ${{ runner.temp }}/macos-automation-permission-bridge-build.log
             ${{ runner.temp }}/macos-automation-permission-probe.log
+            ${{ runner.temp }}/macos-pointer-driver-build.log
+            ${{ runner.temp }}/macos-pointer-driver-invalid.log
             ${{ runner.temp }}/PFAutomationPermission.framework/Versions/A/Resources/BridgeSupport/PFAutomationPermission.bridgesupport
           if-no-files-found: ignore
           retention-days: 1
@@ -47,7 +87,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     needs: macos-automation-bridge
-    if: ${{ always() && !cancelled() }}
+    if: ${{ always() && !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && !contains(github.event.head_commit.message || '', '[automation-probe-only]') }}
     steps:
       - name: Check out sources
         id: checkout_sources
@@ -406,6 +446,7 @@ jobs:
 
   windows-msvc:
     name: Windows 2022 · MSVC · Debug
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && !contains(github.event.head_commit.message || '', '[automation-probe-only]') }}
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -497,6 +538,7 @@ jobs:
 
   linux-gcc:
     name: Ubuntu 24.04 · GCC · Ninja · Debug
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && !contains(github.event.head_commit.message || '', '[automation-probe-only]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:

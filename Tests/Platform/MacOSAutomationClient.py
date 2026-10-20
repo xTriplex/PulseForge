@@ -14,6 +14,34 @@ def _probe_script(bridge_path: Path) -> str:
     bridge = json.dumps(str(bridge_path))
     return f'''var stage = "ApplicationServices-framework-load";
 var bridgePath = {bridge};
+function safeObjCString(value) {{
+    try {{
+        if (value === null || value === undefined) return null;
+        return String(ObjC.unwrap(value));
+    }} catch (error) {{
+        return "<unavailable: " + String(error) + ">";
+    }}
+}}
+function describeNSError(error, depth) {{
+    try {{
+        if (error === null || error === undefined || error.isNil()) return null;
+        var info = error.userInfo;
+        var result = {{
+            domain: safeObjCString(error.domain),
+            code: safeObjCString(error.code),
+            description: safeObjCString(error.localizedDescription),
+            failureReason: safeObjCString(error.localizedFailureReason),
+            debugDescription: info.isNil() ? null : safeObjCString(info.objectForKey("NSDebugDescription"))
+        }};
+        if (depth < 3 && !info.isNil()) {{
+            var underlying = info.objectForKey("NSUnderlyingError");
+            if (!underlying.isNil()) result.underlying = describeNSError(underlying, depth + 1);
+        }}
+        return result;
+    }} catch (error) {{
+        return {{diagnosticError: String(error)}};
+    }}
+}}
 var descriptorType = -1;
 var descriptorResult = -1;
 var wildcardClass = -1;
@@ -35,20 +63,13 @@ try {{
         throw new Error("NSBundle could not resolve the permission bridge at " + bridgePath);
     var bundleLoadError = $();
     if (!permissionBridgeBundle.loadAndReturnError(bundleLoadError)) {{
-        var bundleErrorDescription = "no NSError returned";
-        if (!bundleLoadError.isNil()) {{
-            var bundleErrorUserInfo = bundleLoadError.userInfo;
-            var bundleDebugDescription = bundleErrorUserInfo.isNil() ? "" :
-                ObjC.unwrap(bundleErrorUserInfo.objectForKey("NSDebugDescription"));
-            var bundleFailureReason = ObjC.unwrap(bundleLoadError.localizedFailureReason);
-            bundleErrorDescription = "domain=" + ObjC.unwrap(bundleLoadError.domain) +
-                "; code=" + ObjC.unwrap(bundleLoadError.code) +
-                "; description=" + ObjC.unwrap(bundleLoadError.localizedDescription) +
-                "; failureReason=" + bundleFailureReason +
-                "; debugDescription=" + bundleDebugDescription;
-        }}
-        throw new Error("NSBundle failed to load " + ObjC.unwrap(permissionBridgeBundle.executablePath) +
-            ": " + bundleErrorDescription);
+        throw {{probeFailure: true, stage: stage,
+            message: "NSBundle could not load the private permission framework",
+            frameworkPath: safeObjCString(permissionBridgeBundle.bundlePath),
+            executablePath: safeObjCString(permissionBridgeBundle.executablePath),
+            hostExecutablePath: safeObjCString($.NSBundle.mainBundle.executablePath),
+            hostTranslated: safeObjCString($.NSProcessInfo.processInfo.isTranslated),
+            nativeError: describeNSError(bundleLoadError, 0)}};
     }}
 
     stage = "custom-framework-class-lookup";
@@ -93,11 +114,18 @@ try {{
     stage = "result-serialization";
     serializedResult = JSON.stringify({{stage: "complete", descriptorType: descriptorType, wildcardClass: wildcardClass,
         wildcardEvent: wildcardEvent, appleEventsStatus: appleEventsStatus,
-        systemEventsTargetRunning: systemEventsTargetRunning, axTrusted: axTrusted, quartzAllowed: quartzAllowed}});
+        systemEventsTargetRunning: systemEventsTargetRunning, axTrusted: axTrusted, quartzAllowed: quartzAllowed,
+        hostExecutablePath: safeObjCString($.NSBundle.mainBundle.executablePath),
+        hostTranslated: safeObjCString($.NSProcessInfo.processInfo.isTranslated)}});
 }} catch (error) {{
-    serializedResult = JSON.stringify({{stage: stage, error: String(error)}});
+    serializedResult = JSON.stringify(error && error.probeFailure ? error : {{stage: stage, error: String(error)}});
 }}
 serializedResult;'''
+
+
+def _format_probe_implementation_error(result: dict[str, object]) -> str:
+    stage = result.get("stage", "unknown")
+    return f"stage={stage}; diagnostic={json.dumps(result, ensure_ascii=False, sort_keys=True)}"
 
 
 def probe_osascript_access(timeout_seconds: float = 7.0, *, prepare_target: bool = True) -> tuple[str, int | None, str]:
@@ -166,7 +194,9 @@ def probe_osascript_access(timeout_seconds: float = 7.0, *, prepare_target: bool
     except json.JSONDecodeError as error:
         return "PROBE_IMPLEMENTATION_ERROR", process.pid, f"invalid probe serialization: {error}; output={output.strip()[-1000:]!r}"
     if not isinstance(result, dict) or result.get("stage") != "complete":
-        return "PROBE_IMPLEMENTATION_ERROR", process.pid, f"stage={result.get('stage') if isinstance(result, dict) else 'unknown'}; {result!r}"
+        if isinstance(result, dict):
+            return "PROBE_IMPLEMENTATION_ERROR", process.pid, _format_probe_implementation_error(result)
+        return "PROBE_IMPLEMENTATION_ERROR", process.pid, f"invalid probe result type: {type(result).__name__}"
     try:
         ae_status = int(result["appleEventsStatus"])
         ax_trusted = result["axTrusted"] is True

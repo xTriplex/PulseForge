@@ -16,7 +16,7 @@ cat > "$BRIDGE/Versions/A/Resources/Info.plist" <<'EOF'
 </dict></plist>
 EOF
 
-clang -arch arm64 -fobjc-arc -fmodules -dynamiclib \
+clang -arch arm64e -fobjc-arc -fmodules -dynamiclib \
 	-Wl,-install_name,@rpath/PFAutomationPermission.framework/Versions/A/PFAutomationPermission \
 	-framework Foundation -framework ApplicationServices \
 	Tests/Platform/MacOSAutomationPermissionBridge.m \
@@ -41,6 +41,15 @@ echo "Verified the exported Objective-C permission bridge class in the private f
 {
 	echo "Framework root: $BRIDGE"
 	find "$BRIDGE" -maxdepth 5 -print -exec ls -ld {} \;
+	python3 - "$BRIDGE" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+for item in (root, root / "Info.plist", root / "Resources", root / "PFAutomationPermission",
+		root / "Versions" / "Current", root / "Versions" / "A" / "PFAutomationPermission"):
+	print(f"resolved_path[{item}]={item.resolve(strict=True)}")
+PY
 	echo "Framework Info.plist:"
 	plutil -lint "$BRIDGE/Resources/Info.plist"
 	plutil -p "$BRIDGE/Resources/Info.plist"
@@ -48,7 +57,16 @@ echo "Verified the exported Objective-C permission bridge class in the private f
 	file "$BRIDGE/PFAutomationPermission"
 	lipo -archs "$BRIDGE/PFAutomationPermission"
 	/usr/bin/otool -L "$BRIDGE/PFAutomationPermission"
+	/usr/bin/otool -l "$BRIDGE/PFAutomationPermission" | grep -A5 -E 'cmd LC_(LOAD_DYLIB|RPATH|BUILD_VERSION|VERSION_MIN_MACOSX)' || true
+	echo "Actual JXA host executable:"
+	file /usr/bin/osascript
+	lipo -archs /usr/bin/osascript
+	/usr/bin/otool -L /usr/bin/osascript
 	/usr/bin/codesign -dv --verbose=2 "$BRIDGE" 2>&1 || true
+	/usr/bin/codesign -dv --verbose=2 /usr/bin/osascript 2>&1 || true
+	for variable in DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH DYLD_FALLBACK_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_IMAGE_SUFFIX DYLD_ROOT_PATH; do
+		if [[ -v "$variable" ]]; then printf 'loader_env[%s]=%s\n' "$variable" "${!variable}"; else printf 'loader_env[%s]=<unset>\n' "$variable"; fi
+	done
 } 2>&1 | tee -a "$RUNNER_TEMP/macos-automation-permission-bridge-build.log"
 
 test -s "$METADATA"

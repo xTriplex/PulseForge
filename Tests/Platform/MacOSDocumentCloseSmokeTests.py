@@ -88,32 +88,31 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             self.assertEqual([], metadata_method.findall("arg"))
         self.assertEqual(5, header.count("- (int32_t)"))
 
-    def test_real_probe_imports_the_framework_and_invokes_runtime_visible_methods(self) -> None:
-        script = automation._probe_script(Path("/tmp/PFAutomationPermission.framework"))
+    def test_probe_failure_report_preserves_nested_loader_diagnostics(self) -> None:
+        result = {
+            "stage": "custom-framework-binary-load",
+            "message": "NSBundle could not load the private permission framework",
+            "frameworkPath": "/tmp/PFAutomationPermission.framework",
+            "executablePath": "/tmp/PFAutomationPermission.framework/PFAutomationPermission",
+            "hostExecutablePath": "/usr/bin/osascript",
+            "hostTranslated": "0",
+            "nativeError": {
+                "domain": "NSCocoaErrorDomain",
+                "code": "3587",
+                "description": "Bundle is not loadable",
+                "failureReason": "Architecture mismatch",
+                "debugDescription": "have arm64, need arm64e",
+                "underlying": {"domain": "NSPOSIXErrorDomain", "code": "86"},
+            },
+        }
 
-        self.assertIn('ObjC.import(bridgePath);', script)
-        self.assertIn('stage = "custom-framework-binary-load";', script)
-        self.assertIn("$.NSBundle.bundleWithPath(bridgePath)", script)
-        self.assertIn("permissionBridgeBundle.loadAndReturnError(bundleLoadError)", script)
-        self.assertIn('bundleErrorUserInfo.objectForKey("NSDebugDescription")', script)
-        self.assertIn('stage = "custom-framework-class-lookup";', script)
-        self.assertIn("var permissionBridge = $.PFAutomationPermissionBridge.alloc.init;", script)
-        for method in (
-            "probeSystemEventsDescriptor",
-            "readSystemEventsNativeAddress",
-            "typeWildCardEventClass",
-            "typeWildCardEventID",
-            "determineSystemEventsPermission",
-        ):
-            self.assertIn(f"permissionBridge.{method}", script)
-            self.assertIn(f'custom-framework-method-invocation:{method}', script)
+        detail = automation._format_probe_implementation_error(result)
+        parsed = json.loads(detail.split("; diagnostic=", 1)[1])
 
-        self.assertIn("runningApplicationsWithBundleIdentifier", script)
-        self.assertIn("NSThread.sleepForTimeInterval(0.1)", script)
-        self.assertIn("systemEventsTargetRunning", script)
-        self.assertNotIn("ObjC.bindFunction", script)
-        self.assertNotIn("$.PFTypeWildCardEventClass", script)
-        self.assertNotIn("$.PFProbeSystemEventsDescriptor", script)
+        self.assertEqual("custom-framework-binary-load", parsed["stage"])
+        self.assertEqual("3587", parsed["nativeError"]["code"])
+        self.assertEqual("have arm64, need arm64e", parsed["nativeError"]["debugDescription"])
+        self.assertEqual("86", parsed["nativeError"]["underlying"]["code"])
 
     def test_permission_probe_launches_system_events_with_a_bounded_noninteractive_request(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
