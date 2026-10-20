@@ -16,7 +16,7 @@ cat > "$BRIDGE/Versions/A/Resources/Info.plist" <<'EOF'
 </dict></plist>
 EOF
 
-clang -arch x86_64 -arch arm64 -fobjc-arc -fmodules -dynamiclib \
+clang -arch arm64 -fobjc-arc -fmodules -dynamiclib \
 	-Wl,-install_name,@rpath/PFAutomationPermission.framework/Versions/A/PFAutomationPermission \
 	-framework Foundation -framework ApplicationServices \
 	Tests/Platform/MacOSAutomationPermissionBridge.m \
@@ -28,15 +28,8 @@ ln -s Versions/Current/Headers "$BRIDGE/Headers"
 ln -s Versions/Current/Resources "$BRIDGE/Resources"
 ln -s Versions/Current/PFAutomationPermission "$BRIDGE/PFAutomationPermission"
 ln -s Versions/Current/Resources/Info.plist "$BRIDGE/Info.plist"
-
-if command -v gen_bridge_metadata >/dev/null 2>&1; then
-	gen_bridge_metadata -f "$BRIDGE" -o "$METADATA" 2>&1 |
-		tee -a "$RUNNER_TEMP/macos-automation-permission-bridge-build.log"
-	echo "Generated Objective-C class metadata from the built framework and public header."
-else
-	cp Tests/Platform/PFAutomationPermission.bridgesupport "$METADATA"
-	echo "gen_bridge_metadata is unavailable; using the checked-in class method metadata."
-fi
+cp Tests/Platform/PFAutomationPermission.bridgesupport "$METADATA"
+echo "Packaged the checked-in Objective-C class metadata at the framework resource path."
 
 if ! nm -gU "$BRIDGE/Versions/A/PFAutomationPermission" |
 	grep -Fq '_OBJC_CLASS_$_PFAutomationPermissionBridge'; then

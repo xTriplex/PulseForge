@@ -71,9 +71,12 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             "determineSystemEventsPermission",
         )
 
+        self.assertEqual("signatures", metadata.tag)
+        self.assertEqual("1.0", metadata.attrib.get("version"))
         self.assertIn("@interface PFAutomationPermissionBridge : NSObject", header)
         bridge_classes = [entry for entry in metadata.findall("class") if entry.attrib.get("name") == "PFAutomationPermissionBridge"]
         self.assertEqual(1, len(bridge_classes))
+        self.assertEqual(len(expected), len(bridge_classes[0].findall("method")))
         for method in expected:
             self.assertIn(f"+ (int32_t){method};", header)
             metadata_method = next(item for item in bridge_classes[0].findall("method") if item.attrib.get("selector") == method)
