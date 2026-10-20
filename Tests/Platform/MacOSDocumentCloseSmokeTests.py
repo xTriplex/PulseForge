@@ -89,16 +89,21 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertTrue(native_dialog.go_folder_sheet_closed_in_expected_directory(
             "DIRECT_AX_NODE index=1; role=AXPopUpButton; name=Dialog Files With Spaces Ω", "Dialog Files With Spaces Ω"
         ))
-        self.assertFalse(native_dialog.focused_text_field_visible(
-            "DIRECT_AX_NODE index=1; role=AXTextField; name=Search; focused=0"
+        self.assertFalse(native_dialog.go_to_folder_path_field_visible(
+            "DIRECT_AX_NODE index=1; role=AXTextField; name=PathTextField; enabled=true; focused=false"
         ))
-        self.assertTrue(native_dialog.focused_text_field_visible(
-            "DIRECT_AX_WINDOW pid=42; title=Go to Folder\n"
-            "DIRECT_AX_NODE index=1; role=AXTextField; name=Folder path; focused=true"
+        self.assertTrue(native_dialog.go_to_folder_path_field_visible(
+            "DIRECT_AX_WINDOW pid=42; title=Open\n"
+            "DIRECT_AX_NODE index=1; role=AXSheet; name=GoToWindow; enabled=true\n"
+            "DIRECT_AX_NODE index=2; role=AXTextField; name=PathTextField; enabled=true; focused=false"
         ))
-        self.assertFalse(native_dialog.focused_text_field_visible(
-            "DIRECT_AX_NODE index=1; role=AXSheet; name=Go to Folder\n"
-            "DIRECT_AX_NODE index=2; role=AXTextField; name=Search; focused=true"
+        self.assertFalse(native_dialog.go_to_folder_path_field_visible(
+            "DIRECT_AX_NODE index=1; role=AXSheet; name=GoToWindow\n"
+            "DIRECT_AX_NODE index=2; role=AXTextField; name=Search; enabled=true; focused=true"
+        ))
+        self.assertFalse(native_dialog.go_to_folder_path_field_visible(
+            "DIRECT_AX_NODE index=1; role=AXSheet; name=GoToWindow\n"
+            "DIRECT_AX_NODE index=2; role=AXTextField; name=PathTextField; enabled=false; focused=true"
         ))
 
     def test_permission_bridge_class_exposes_only_scalar_no_argument_methods(self) -> None:
@@ -1021,33 +1026,6 @@ class DocumentHostAXWindowCountTests(unittest.TestCase):
                 "DIRECT_AX_RESULT status=window-count; pid=4321; windows=3\n",
                 4321,
             )
-
-
-class NativeDialogGoToFolderObservationTests(unittest.TestCase):
-    def test_enabled_named_path_field_is_ready_without_preexisting_focus(self) -> None:
-        output = (
-            "DIRECT_AX_NODE index=0; parent=none; depth=0; role=AXSheet; subrole=; "
-            "name=GoToWindow; enabled=true; focused=false; actions_error=0; actions=[]\n"
-            "DIRECT_AX_NODE index=1; parent=0; depth=1; role=AXTextField; subrole=; "
-            "name=PathTextField; enabled=true; focused=false; actions_error=0; actions=['AXConfirm']\n"
-        )
-        self.assertTrue(native_dialog.go_to_folder_path_field_visible(output))
-
-    def test_unrelated_or_disabled_text_fields_do_not_satisfy_readiness(self) -> None:
-        unrelated = (
-            "DIRECT_AX_NODE index=0; parent=none; depth=0; role=AXSheet; subrole=; "
-            "name=GoToWindow; enabled=true; focused=false\n"
-            "DIRECT_AX_NODE index=1; parent=0; depth=1; role=AXTextField; subrole=; "
-            "name=SearchField; enabled=true; focused=true\n"
-        )
-        disabled = (
-            "DIRECT_AX_NODE index=0; parent=none; depth=0; role=AXSheet; subrole=; "
-            "name=GoToWindow; enabled=true; focused=false\n"
-            "DIRECT_AX_NODE index=1; parent=0; depth=1; role=AXTextField; subrole=; "
-            "name=PathTextField; enabled=false; focused=true\n"
-        )
-        self.assertFalse(native_dialog.go_to_folder_path_field_visible(unrelated))
-        self.assertFalse(native_dialog.go_to_folder_path_field_visible(disabled))
 
 
 if __name__ == "__main__":
