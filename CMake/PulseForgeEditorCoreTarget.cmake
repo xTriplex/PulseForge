@@ -28,6 +28,7 @@ if(PULSEFORGE_BUILD_EDITOR OR (BUILD_TESTING AND NOT PULSEFORGE_PLATFORM_LINUX))
 		PulseForgeEditor/Source/Private/EditorViewportCamera.cpp
 		PulseForgeEditor/Source/Private/ViewportMath.cpp
 		PulseForgeEditor/Source/Private/EditorCommandLine.cpp
+		$<$<CONFIG:Debug>:PulseForgeEditor/Source/Private/EditorDebugAcceptanceCoordinators.cpp>
 	)
 	if(WIN32)
 		target_sources(PulseForgeEditorCore PRIVATE
