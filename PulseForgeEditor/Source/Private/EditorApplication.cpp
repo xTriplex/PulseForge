@@ -1975,6 +1975,37 @@ namespace
 			if (m_DocumentCloseAcceptance) m_DocumentCloseAcceptance->ReportCloseControl(HostID, Identity, X, Y);
 		}
 
+		void ReportDocumentCloseUiTabInput(std::string_view HostID, const PulseForgeEditor::EditorDocumentIdentity& Identity,
+			bool TabHovered, bool CloseHovered, bool ItemActive, bool MouseClicked, bool Pressed, const ImVec2& Minimum,
+			const ImVec2& Maximum, const ImGuiViewport* Viewport)
+		{
+			if (!m_DocumentCloseAcceptance || !m_DocumentCloseAcceptance->IsFixtureHost(HostID) ||
+				!m_DocumentCloseAcceptance->IsFixtureIdentity(Identity) || !m_DocumentCloseAcceptance->IsAwaitingTabClose())
+				return;
+			const ImGuiIO& IO = ImGui::GetIO();
+			GLFWwindow* NativeWindow = Viewport ? static_cast<GLFWwindow*>(Viewport->PlatformHandle) : nullptr;
+			PulseForgeEditor::Detail::DocumentCloseUiTabInputObservation Observation;
+			Observation.WindowViewport = Viewport ? Viewport->ID : 0;
+			Observation.MouseViewport = IO.MouseHoveredViewport;
+			Observation.MinimumX = static_cast<int>(Minimum.x);
+			Observation.MinimumY = static_cast<int>(Minimum.y);
+			Observation.MaximumX = static_cast<int>(Maximum.x);
+			Observation.MaximumY = static_cast<int>(Maximum.y);
+			Observation.MouseX = static_cast<int>(IO.MousePos.x);
+			Observation.MouseY = static_cast<int>(IO.MousePos.y);
+			Observation.NativeWindowKnown = NativeWindow != nullptr;
+			Observation.NativeWindowFocused = NativeWindow && glfwGetWindowAttrib(NativeWindow, GLFW_FOCUSED) == GLFW_TRUE;
+			Observation.NativeWindowHovered = NativeWindow && glfwGetWindowAttrib(NativeWindow, GLFW_HOVERED) == GLFW_TRUE;
+			Observation.TabHovered = TabHovered;
+			Observation.CloseHovered = CloseHovered;
+			Observation.ItemActive = ItemActive;
+			Observation.MouseDown = IO.MouseDown[ImGuiMouseButton_Left];
+			Observation.MouseClicked = MouseClicked;
+			Observation.MouseReleased = IO.MouseReleased[ImGuiMouseButton_Left];
+			Observation.Pressed = Pressed;
+			m_DocumentCloseAcceptance->ReportTabInput(HostID, Identity, Observation);
+		}
+
 		void EmitDocumentCloseUiPrompt(std::string_view HostID, const ImVec2& Save, const ImVec2& Discard, const ImVec2& Cancel)
 		{
 			if (!m_DocumentCloseAcceptance) return;
@@ -4645,6 +4676,9 @@ namespace
 			const auto* Session = m_Documents.Find(Identity);
 			if (!Session || Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level) return;
 #if defined(_DEBUG) || defined(PF_DEBUG)
+			if (m_DocumentCloseAcceptance)
+				m_DocumentCloseAcceptance->ReportTabCloseRequest(Session->HostID, Identity, m_DocumentCloseRequest.HasPendingRequest(),
+					m_DocumentCloseRequest.GetDialogHostID(), ObserveDocumentCloseUiSession());
 			if (!BeginDocumentCloseUiRequest(Session->HostID)) return;
 #endif
 			if (!Session->IsDirty())
@@ -5435,6 +5469,10 @@ namespace
 					m_DocumentTabInteraction.BeginDrag(Session->Identity,
 						PulseForgeEditor::DocumentTabPointerPosition{ DragStart.x, DragStart.y }, { MousePosition.x, MousePosition.y });
 				}
+#if defined(_DEBUG) || defined(PF_DEBUG)
+				ReportDocumentCloseUiTabInput(HostID, Session->Identity, TabHovered, CloseHovered, ImGui::IsItemActive(),
+					ImGui::IsItemClicked(ImGuiMouseButton_Left), Pressed, TabMinimum, TabMaximum, TabViewport);
+#endif
 				if (Pressed && CloseHovered) QueueDocumentTabClose(Session->Identity);
 				else if (Pressed)
 				{

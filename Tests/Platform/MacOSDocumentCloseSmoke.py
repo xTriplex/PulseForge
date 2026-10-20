@@ -20,12 +20,13 @@ import threading
 import time
 from pathlib import Path
 
+from MacOSAutomationClient import capture_failure_context, probe_osascript_automation
 from MacOSScreenshot import capture_screenshot
 
 MAX_LOG_BYTES = 128 * 1024
 MAX_CONSOLE_BYTES = 48 * 1024
 MAX_EVENT_COUNT = 128
-TELEMETRY_MARKERS = {"TEXT_POINTER", "DECISION_POINTER"}
+TELEMETRY_MARKERS = {"TEXT_POINTER", "DECISION_POINTER", "DIAG_TAB_INPUT", "DIAG_TAB_CLOSE_REQUEST"}
 CONTROL_MARKERS = {"CLOSE_CONTROL", "PROMPT_GEOMETRY", "ALLOW_CLOSE_CONTROL"}
 ACTION_RESPONSE_SECONDS = 15.0
 FIXTURE_TITLE = "Host Test Fixture 1"
@@ -563,14 +564,19 @@ class MarkerProtocol:
 
 
 def parse_marker(line: str) -> dict[str, str] | None:
-    marker_start = line.find("PF_DOC_CLOSE_UI|")
+    diagnostic = False
+    marker_start = line.find("PF_DOC_CLOSE_DIAG|")
+    if marker_start >= 0:
+        diagnostic = True
+    else:
+        marker_start = line.find("PF_DOC_CLOSE_UI|")
     if marker_start < 0:
         return None
     line = line[marker_start:]
     parts = line.split("|")
     if len(parts) < 2:
         return {"kind": "INVALID"}
-    event = {"kind": parts[1]}
+    event = {"kind": f"DIAG_{parts[1]}" if diagnostic else parts[1]}
     for field in parts[2:]:
         key, separator, value = field.partition("=")
         if not separator or not key or key in event:
@@ -867,6 +873,8 @@ def capture_action_diagnostics(
             else:
                     evidence.pointer_observation = f"UNAVAILABLE:ERROR({code}):{output.strip()[-500:]}"
 
+    automation_context = capture_failure_context("dirty-close-action-outcome", process.pid)
+    print(f"MACOS_DOC_CLOSE_AUTOMATION_CONTEXT={automation_context!r}")
     screenshot = capture_screenshot(
         f"macos-document-close-{evidence.label.lower().replace(' ', '-')}-outcome-missing.png"
     )
@@ -1693,6 +1701,19 @@ def main() -> int:
         if not project.is_file() or project.suffix != ".pfproj":
             raise RuntimeError(f"project fixture is missing or invalid: {project}")
         args.log_directory.mkdir(parents=True, exist_ok=True)
+        ax_state, ax_pid, ax_detail = probe_osascript_automation()
+        print(
+            f"MACOS_DOC_CLOSE_OSASCRIPT_AUTOMATION_PREFLIGHT={ax_state}; executable=/usr/bin/osascript; "
+            f"probe_pid={ax_pid}; detail={ax_detail!r}"
+        )
+        if ax_state in {"AX_UNTRUSTED", "APPLE_EVENTS_DENIED", "APPLE_EVENTS_WOULD_PROMPT"}:
+            print(
+                "MACOS_DOC_CLOSE_AUTOMATION=BLOCKED; dirty-close acceptance NOT RUN; client=osascript; "
+                f"reason={ax_state}; no permission prompt was requested"
+            )
+            return 77
+        if ax_state != "TRUSTED":
+            raise RuntimeError(f"could not nonpromptingly check osascript automation access: {ax_state}; {ax_detail}")
         runner_temp = os.environ.get("RUNNER_TEMP")
         temp_parent = Path(runner_temp).resolve(strict=True) if runner_temp else Path(tempfile.gettempdir()).resolve(strict=True)
         driver_root = Path(tempfile.mkdtemp(prefix="PulseForge Document Close Driver Ω ", dir=temp_parent)).resolve(strict=True)

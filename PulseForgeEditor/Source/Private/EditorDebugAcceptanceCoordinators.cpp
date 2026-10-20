@@ -213,6 +213,56 @@ namespace PulseForgeEditor::Detail
 		m_LastCloseControlY = Y;
 	}
 
+	void DocumentCloseAcceptanceCoordinator::ReportTabInput(
+		std::string_view HostID, const EditorDocumentIdentity& Identity, const DocumentCloseUiTabInputObservation& Observation)
+	{
+		if (!m_Scenario || !IsFixtureHost(HostID) || !IsFixtureIdentity(Identity) || !IsAwaitingTabClose()) return;
+		const bool Relevant = Observation.TabHovered || Observation.CloseHovered || Observation.ItemActive || Observation.MouseDown ||
+							  Observation.MouseClicked || Observation.MouseReleased || Observation.Pressed;
+		const bool WasRelevant =
+			m_LastTabInput &&
+			(m_LastTabInput->TabHovered || m_LastTabInput->CloseHovered || m_LastTabInput->ItemActive || m_LastTabInput->MouseDown ||
+				m_LastTabInput->MouseClicked || m_LastTabInput->MouseReleased || m_LastTabInput->Pressed);
+		const bool InputBoundary = Observation.MouseDown || Observation.MouseClicked || Observation.MouseReleased || Observation.Pressed ||
+								   (m_LastTabInput && (m_LastTabInput->MouseDown || m_LastTabInput->MouseClicked ||
+														  m_LastTabInput->MouseReleased || m_LastTabInput->Pressed));
+		const bool Changed =
+			!m_LastTabInput || Observation.WindowViewport != m_LastTabInput->WindowViewport ||
+			Observation.MouseViewport != m_LastTabInput->MouseViewport ||
+			Observation.NativeWindowKnown != m_LastTabInput->NativeWindowKnown ||
+			Observation.NativeWindowFocused != m_LastTabInput->NativeWindowFocused ||
+			Observation.NativeWindowHovered != m_LastTabInput->NativeWindowHovered ||
+			(InputBoundary && (Observation.MouseX != m_LastTabInput->MouseX || Observation.MouseY != m_LastTabInput->MouseY)) ||
+			Observation.TabHovered != m_LastTabInput->TabHovered || Observation.CloseHovered != m_LastTabInput->CloseHovered ||
+			Observation.ItemActive != m_LastTabInput->ItemActive || Observation.MouseDown != m_LastTabInput->MouseDown ||
+			Observation.MouseClicked != m_LastTabInput->MouseClicked || Observation.MouseReleased != m_LastTabInput->MouseReleased ||
+			Observation.Pressed != m_LastTabInput->Pressed || Observation.MinimumX != m_LastTabInput->MinimumX ||
+			Observation.MinimumY != m_LastTabInput->MinimumY || Observation.MaximumX != m_LastTabInput->MaximumX ||
+			Observation.MaximumY != m_LastTabInput->MaximumY;
+		m_LastTabInput = Observation;
+		if (!Relevant && !WasRelevant) return;
+		if (!Changed) return;
+		PF_INFO("PF_DOC_CLOSE_DIAG|TAB_INPUT|scenario={}|host={}|asset={}|generation={}|sample={}|viewport={}|mouse_viewport={}|rect={},{},"
+				"{},{}|mouse={},{}|native_known={}|native_focused={}|native_hovered={}|tab_hovered={}|close_hovered={}|active={}|down={}|"
+				"clicked={}|released={}|pressed={}",
+			*m_Scenario, m_HostID, Identity.Asset.ToString(), m_PromptGeneration, ++m_TabInputSample, Observation.WindowViewport,
+			Observation.MouseViewport, Observation.MinimumX, Observation.MinimumY, Observation.MaximumX, Observation.MaximumY,
+			Observation.MouseX, Observation.MouseY, Observation.NativeWindowKnown ? 1 : 0, Observation.NativeWindowFocused ? 1 : 0,
+			Observation.NativeWindowHovered ? 1 : 0, Observation.TabHovered ? 1 : 0, Observation.CloseHovered ? 1 : 0,
+			Observation.ItemActive ? 1 : 0, Observation.MouseDown ? 1 : 0, Observation.MouseClicked ? 1 : 0,
+			Observation.MouseReleased ? 1 : 0, Observation.Pressed ? 1 : 0);
+	}
+
+	void DocumentCloseAcceptanceCoordinator::ReportTabCloseRequest(std::string_view HostID, const EditorDocumentIdentity& Identity,
+		bool RequestAlreadyPending, std::string_view PendingHostID, const DocumentCloseUiSessionObservation& Session)
+	{
+		if (!m_Scenario || !IsFixtureHost(HostID) || !IsFixtureIdentity(Identity) || !IsAwaitingTabClose()) return;
+		PF_INFO("PF_DOC_CLOSE_DIAG|TAB_CLOSE_REQUEST|scenario={}|host={}|asset={}|generation={}|pending_before={}|pending_host={}|open={}|"
+				"dirty={}|value={}|saved={}",
+			*m_Scenario, m_HostID, Identity.Asset.ToString(), m_PromptGeneration, RequestAlreadyPending ? 1 : 0, PendingHostID,
+			Session.Open ? 1 : 0, Session.Dirty ? 1 : 0, Session.Value, Session.Saved);
+	}
+
 	void DocumentCloseAcceptanceCoordinator::ReportPrompt(
 		std::string_view HostID, bool Pending, const DocumentCloseUiPromptGeometry& Geometry)
 	{
