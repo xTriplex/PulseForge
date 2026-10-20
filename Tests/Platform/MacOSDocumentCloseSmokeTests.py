@@ -85,14 +85,22 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         script = automation._probe_script(Path("/tmp/PFAutomationPermission.framework"))
 
         self.assertIn('ObjC.import(bridgePath);', script)
-        self.assertIn('stage = "custom-framework-symbol-binding";', script)
+        for function in (
+            "PFProbeSystemEventsDescriptor",
+            "PFReadSystemEventsNativeAddress",
+            "PFTypeWildCardEventClass",
+            "PFTypeWildCardEventID",
+            "PFDetermineSystemEventsPermission",
+        ):
+            self.assertIn(f'stage = "custom-framework-symbol-binding:{function}";', script)
+            self.assertIn(f'ObjC.bindFunction("{function}", ["int", []]);', script)
+        self.assertIn('stage = "custom-framework-symbol-invocation";', script)
         self.assertIn("wildcardClass = $.PFTypeWildCardEventClass();", script)
         self.assertIn("$.PFProbeSystemEventsDescriptor()", script)
         self.assertIn("$.PFDetermineSystemEventsPermission()", script)
         self.assertIn("runningApplicationsWithBundleIdentifier", script)
         self.assertIn("NSThread.sleepForTimeInterval(0.1)", script)
         self.assertIn("systemEventsTargetRunning", script)
-        self.assertNotIn("ObjC.bindFunction", script)
         self.assertNotIn("typeof $.PF", script)
 
     def test_permission_probe_launches_system_events_with_a_bounded_noninteractive_request(self) -> None:

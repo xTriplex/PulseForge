@@ -29,7 +29,17 @@ try {{
     stage = "custom-framework-load";
     ObjC.import(bridgePath);
 
-    stage = "custom-framework-symbol-binding";
+    stage = "custom-framework-symbol-binding:PFProbeSystemEventsDescriptor";
+    ObjC.bindFunction("PFProbeSystemEventsDescriptor", ["int", []]);
+    stage = "custom-framework-symbol-binding:PFReadSystemEventsNativeAddress";
+    ObjC.bindFunction("PFReadSystemEventsNativeAddress", ["int", []]);
+    stage = "custom-framework-symbol-binding:PFTypeWildCardEventClass";
+    ObjC.bindFunction("PFTypeWildCardEventClass", ["int", []]);
+    stage = "custom-framework-symbol-binding:PFTypeWildCardEventID";
+    ObjC.bindFunction("PFTypeWildCardEventID", ["int", []]);
+    stage = "custom-framework-symbol-binding:PFDetermineSystemEventsPermission";
+    ObjC.bindFunction("PFDetermineSystemEventsPermission", ["int", []]);
+    stage = "custom-framework-symbol-invocation";
     wildcardClass = $.PFTypeWildCardEventClass();
     if (wildcardClass !== 707406378)
         throw new Error("BridgeSupport wildcard function returned " + wildcardClass);
