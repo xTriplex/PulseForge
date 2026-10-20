@@ -656,6 +656,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             int(panel_process_id),
             operation="set-value",
             window_title=panel_title,
+            control_name="saveAsNameTextField",
             control_value=expected_path.name,
             timeout=min(10.0, remaining),
         )
