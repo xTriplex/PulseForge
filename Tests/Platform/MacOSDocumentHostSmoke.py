@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-from MacOSAutomationClient import capture_failure_context, probe_osascript_automation
+from MacOSAutomationClient import capture_failure_context, probe_osascript_access
 from MacOSScreenshot import capture_screenshot
 
 MAX_LOG_BYTES = 128 * 1024
@@ -528,20 +528,20 @@ def main() -> int:
     if args.timeout_seconds <= 0:
         return fail("timeout must be positive", args.log_directory / "document-host-smoke.log")
 
-    ax_state, ax_pid, ax_detail = probe_osascript_automation()
+    ax_state, ax_pid, ax_detail = probe_osascript_access()
     print(
-        f"MACOS_DOCUMENT_HOST_OSASCRIPT_AUTOMATION_PREFLIGHT={ax_state}; executable=/usr/bin/osascript; "
+        f"MACOS_DOCUMENT_HOST_OSASCRIPT_AX_PREFLIGHT={ax_state}; executable=/usr/bin/osascript; "
         f"probe_pid={ax_pid}; detail={ax_detail!r}"
     )
-    if ax_state in {"AX_UNTRUSTED", "APPLE_EVENTS_DENIED", "APPLE_EVENTS_WOULD_PROMPT"}:
+    if ax_state == "AX_UNTRUSTED":
         print(
             "MACOS_DOCUMENT_HOST_AUTOMATION=BLOCKED; native-window acceptance NOT RUN; "
             f"client=osascript; reason={ax_state}; no permission prompt was requested"
         )
         return 77
-    if ax_state != "TRUSTED":
+    if ax_state != "AX_TRUSTED":
         return fail(
-            f"could not nonpromptingly check osascript automation access: {ax_state}; {ax_detail}",
+            f"could not nonpromptingly check osascript Accessibility trust: {ax_state}; {ax_detail}",
             args.log_directory / "document-host-smoke.log",
         )
 

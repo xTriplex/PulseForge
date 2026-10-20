@@ -109,34 +109,34 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             self.assertEqual(["DIAG_TAB_INPUT", "DIAG_TAB_CLOSE_REQUEST"], [event["kind"] for event in telemetry])
             self.assertIn("close_hovered=1", telemetry[0]["raw"])
 
-    def test_osascript_preflight_distinguishes_permission_that_would_prompt_without_requesting_it(self) -> None:
+    def test_osascript_access_probe_checks_ax_trust_without_attempting_apple_events(self) -> None:
         class Probe:
             pid = 123
             returncode = 0
 
             @staticmethod
             def communicate(timeout: float) -> tuple[str, None]:
-                return "AX=true;AE=-1744\n", None
+                return "AX=true\n", None
 
         with patch.object(automation.subprocess, "Popen", return_value=Probe()) as launch:
-            state, pid, detail = automation.probe_osascript_automation()
+            state, pid, detail = automation.probe_osascript_access()
 
-        self.assertEqual("APPLE_EVENTS_WOULD_PROMPT", state)
+        self.assertEqual("AX_TRUSTED", state)
         self.assertEqual(123, pid)
-        self.assertIn("askUserIfNeeded=false", detail)
-        self.assertIn("askUserIfNeeded = false", launch.call_args.args[0][-1])
+        self.assertIn("Apple Events permission is checked by each bounded System Events operation", detail)
+        self.assertNotIn("AEDeterminePermissionToAutomateTarget", launch.call_args.args[0][-1])
 
-    def test_osascript_preflight_distinguishes_ax_trust_for_its_own_client(self) -> None:
+    def test_osascript_access_probe_distinguishes_ax_trust_for_its_own_client(self) -> None:
         class Probe:
             pid = 124
             returncode = 0
 
             @staticmethod
             def communicate(timeout: float) -> tuple[str, None]:
-                return "AX=false;AE=0\n", None
+                return "AX=false\n", None
 
         with patch.object(automation.subprocess, "Popen", return_value=Probe()):
-            state, pid, detail = automation.probe_osascript_automation()
+            state, pid, detail = automation.probe_osascript_access()
 
         self.assertEqual("AX_UNTRUSTED", state)
         self.assertEqual(124, pid)

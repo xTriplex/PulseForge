@@ -24,6 +24,7 @@ from MacOSDocumentHostSmoke import (  # noqa: E402
     run_osascript,
     stop_process_group,
 )
+from MacOSAutomationClient import capture_failure_context
 from MacOSScreenshot import capture_screenshot
 
 MAX_LOG_BYTES = 128 * 1024
@@ -103,6 +104,14 @@ def query_windows(process: subprocess.Popen[str], deadline: float) -> tuple[str,
     code, output = run_osascript(WINDOW_QUERY, str(process.pid), min(5.0, max(0.1, deadline - time.monotonic())))
     if code != 0:
         category = "Accessibility authorization denied" if has_tcc_denial(output) else "Accessibility query failed"
+        print(
+            "MACOS_WORKSPACE_RESTORE_AX_QUERY=FAILED; stage=process-window-snapshot; "
+            f"editor_pid={process.pid}; exit_code={code}; category={category}; detail={output.strip()!r}"
+        )
+        print(
+            "MACOS_WORKSPACE_RESTORE_AUTOMATION_CONTEXT="
+            + capture_failure_context("workspace process-window snapshot", process.pid)
+        )
         raise RuntimeError(f"{category}; exit_code={code}; detail={output.strip()}")
     lines = [line for line in output.splitlines() if line.strip()]
     if not lines:

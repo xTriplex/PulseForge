@@ -10,18 +10,13 @@ import sys
 from pathlib import Path
 
 
-def probe_osascript_automation(timeout_seconds: float = 3.0) -> tuple[str, int | None, str]:
-    """Nonpromptingly check AX and System Events automation from the osascript client."""
+def probe_osascript_access(timeout_seconds: float = 3.0) -> tuple[str, int | None, str]:
+    """Nonpromptingly check Accessibility trust for the actual osascript executable."""
     command = [
         "/usr/bin/osascript",
         "-l",
         "JavaScript",
-        "-e",
-        "ObjC.import('Cocoa'); ObjC.import('ApplicationServices'); ObjC.import('CoreServices'); "
-        "var target = $.NSAppleEventDescriptor.descriptorWithBundleIdentifier('com.apple.systemevents'); "
-        "var askUserIfNeeded = false; "
-        "var aeStatus = $.AEDeterminePermissionToAutomateTarget(target.aeDesc, $.typeWildCard, $.typeWildCard, askUserIfNeeded); "
-        "'AX=' + $.AXIsProcessTrusted() + ';AE=' + aeStatus",
+        "-e", "ObjC.import('ApplicationServices'); 'AX=' + $.AXIsProcessTrusted()",
     ]
     try:
         process = subprocess.Popen(
@@ -53,21 +48,17 @@ def probe_osascript_automation(timeout_seconds: float = 3.0) -> tuple[str, int |
 
     if process.returncode != 0:
         return "PROBE_FAILED", process.pid, f"exit_code={process.returncode}; output={output.strip()[-500:]!r}"
-    match = re.fullmatch(r"AX=(true|false);AE=(-?\d+)", output.strip(), re.IGNORECASE)
+    match = re.fullmatch(r"AX=(true|false)", output.strip(), re.IGNORECASE)
     if not match:
         return "PROBE_FAILED", process.pid, f"unexpected osascript result={output.strip()[-500:]!r}"
     ax_trusted = match.group(1).lower() == "true"
-    ae_status = int(match.group(2))
-    detail = f"AXIsProcessTrusted={str(ax_trusted).lower()}; AEDeterminePermissionToAutomateTarget(System Events, askUserIfNeeded=false)={ae_status}"
+    detail = (
+        f"AXIsProcessTrusted={str(ax_trusted).lower()}; "
+        "Apple Events permission is checked by each bounded System Events operation, not this AX probe"
+    )
     if not ax_trusted:
         return "AX_UNTRUSTED", process.pid, detail
-    if ae_status == -1743:
-        return "APPLE_EVENTS_DENIED", process.pid, detail
-    if ae_status == -1744:
-        return "APPLE_EVENTS_WOULD_PROMPT", process.pid, detail
-    if ae_status != 0:
-        return "APPLE_EVENTS_PREFLIGHT_FAILED", process.pid, detail
-    return "TRUSTED", process.pid, detail
+    return "AX_TRUSTED", process.pid, detail
 
 
 def capture_failure_context(label: str, target_pid: int | None = None) -> str:
