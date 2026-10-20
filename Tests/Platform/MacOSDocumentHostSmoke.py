@@ -552,7 +552,7 @@ def main() -> int:
 
         print(
             f"MACOS_DOCUMENT_HOST_PROCESS=PASS; pid={process.pid}; process={observed_process_name}; "
-            f"AXWindows_count={observed_window_count}; main_window=AXMainWindow"
+            f"AXWindows_count={observed_window_count}; main_window_title_contains=PulseForge Editor"
         )
         screenshot = capture_screenshot("macos-editor-checkpoint-loaded-scene-and-separate-document-windows.png")
         print(
@@ -570,7 +570,7 @@ def main() -> int:
         )
         print(
             f"MACOS_DOCUMENT_HOST_CLOSE_PRE_ACTION_PREFLIGHT={'PASS' if preflight_code == 0 else 'FAILED'}; "
-            f"pid={process.pid}; window=AXMainWindow; exit_code={preflight_code}; "
+            f"pid={process.pid}; window_title_contains=PulseForge Editor; exit_code={preflight_code}; "
             f"stdout={preflight_output.strip()!r}; stderr={preflight_stderr.strip()!r}; actual_close_request=still-required"
         )
         # Attempt the actual semantic close action directly. The read-only AX
@@ -579,6 +579,7 @@ def main() -> int:
         close_code, close_output, close_stderr = run_direct_ax(
             process.pid,
             operation="close-main-window",
+            window_title="PulseForge Editor",
             timeout=min(12.0, max(0.1, deadline - time.monotonic())),
         )
         close_output += close_stderr
@@ -597,7 +598,7 @@ def main() -> int:
             close_category = classify_accessibility_failure(close_code, close_output)
             print(
                 "MACOS_DOCUMENT_HOST_AX_CLOSE_RESULT="
-                f"{close_category}; pid={process.pid}; window=AXMainWindow; "
+                f"{close_category}; pid={process.pid}; window_title_contains=PulseForge Editor; "
                 f"exit_code={close_code}; detail={close_output.strip()}"
             )
             if "trusted=false" in close_output:
@@ -620,7 +621,7 @@ def main() -> int:
                 if exit_code == 0 and all(marker in capture.markers for marker in SUCCESS_MARKERS):
                     print(
                         "MACOS_DOCUMENT_HOST_CLOSE_PRESS=UNCERTAIN_AX_RESULT_RECONCILED_AFTER_NORMAL_EXIT; "
-                        f"pid={process.pid}; window=AXMainWindow; fixture completed and process exited 0; "
+                        f"pid={process.pid}; window_title_contains=PulseForge Editor; fixture completed and process exited 0; "
                         f"detail={close_output.strip()}"
                     )
                     close_code = 0
@@ -631,7 +632,7 @@ def main() -> int:
                     capture.thread.join(timeout=5)
                     return fail(
                         f"Accessibility main-window close operation {close_category} while the editor remained open; "
-                        + f"pid={process.pid}; process={observed_process_name}; window=AXMainWindow; "
+                        + f"pid={process.pid}; process={observed_process_name}; window_title_contains=PulseForge Editor; "
                         + f"exit_code={close_code}; "
                         + repr(diagnostic_output)
                         + "; "
@@ -647,7 +648,7 @@ def main() -> int:
                 capture.thread.join(timeout=5)
                 return fail(
                     f"could not request normal main-window close ({close_category}); "
-                    f"pid={process.pid}; process={observed_process_name}; window=AXMainWindow; "
+                    f"pid={process.pid}; process={observed_process_name}; window_title_contains=PulseForge Editor; "
                     f"exit_code={close_code}; "
                     f"diagnostics={diagnostic_output!r}; {screenshot_output}; detail={close_output.strip()}",
                     log_path,
@@ -664,7 +665,7 @@ def main() -> int:
             capture.thread.join(timeout=5)
             return fail(
                 "editor did not exit after the native main-window close request before timeout; "
-                f"pid={process.pid}; process={observed_process_name}; window=AXMainWindow; "
+                f"pid={process.pid}; process={observed_process_name}; window_title_contains=PulseForge Editor; "
                 f"diagnostics={diagnostic_output!r}; {screenshot_output}",
                 log_path,
             )

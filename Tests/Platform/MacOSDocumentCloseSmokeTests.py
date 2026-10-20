@@ -75,7 +75,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expected one focused-window result"):
             direct_ax.parse_window_activation("DIRECT_AX_RESULT status=window-focus-timeout; pid=4321\n", 4321, "Host Test Fixture 1")
 
-    def test_open_panel_readiness_requires_exact_enabled_control_and_folder_state(self) -> None:
+    def test_open_panel_requires_exact_enabled_control_and_folder_sheet_state(self) -> None:
         output = (
             "DIRECT_AX_NODE index=12; parent=2; depth=3; role=AXButton; subrole=; name=Open; enabled=true; focused=0\n"
             "DIRECT_AX_NODE index=13; parent=2; depth=3; role=AXButton; subrole=; name=Cancel; enabled=true; focused=0\n"
@@ -83,22 +83,74 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertTrue(native_dialog.ax_node_enabled(output, "AXButton", "Open"))
         self.assertFalse(native_dialog.ax_node_enabled(output, "AXButton", "Save"))
         self.assertFalse(native_dialog.ax_node_enabled(output.replace("enabled=true", "enabled=false", 1), "AXButton", "Open"))
-        self.assertFalse(native_dialog.go_folder_sheet_closed_in_expected_directory(
-            "DIRECT_AX_NODE index=1; role=AXSheet; name=Go to Folder", "Dialog Files With Spaces Ω"
+        open_ready = (
+            "DIRECT_AX_RESULT status=open-button-state; pid=42; window_title=Open; matches=1; enabled=true; "
+            "enabled_error=0; complete=true; truncated=false; visited=18; query_errors=[]"
+        )
+        self.assertTrue(native_dialog.open_button_state_ready(open_ready, 42, "Open"))
+        for disabled_open_state in (
+            open_ready.replace("matches=1", "matches=0"),
+            open_ready.replace("matches=1", "matches=2"),
+            open_ready.replace("enabled=true", "enabled=false"),
+            open_ready.replace("enabled_error=0", "enabled_error=-25204"),
+        ):
+            self.assertFalse(native_dialog.open_button_state_ready(disabled_open_state, 42, "Open"))
+        for incomplete_open_state in (
+            open_ready.replace("complete=true", "complete=false"),
+            open_ready.replace("truncated=false", "truncated=true"),
+            open_ready.replace("query_errors=[]", "query_errors=['children:-25204:2']"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                native_dialog.open_button_state_ready(incomplete_open_state, 42, "Open")
+        with self.assertRaisesRegex(RuntimeError, "target mismatch"):
+            native_dialog.open_button_state_ready(open_ready.replace("pid=42", "pid=43"), 42, "Open")
+        with self.assertRaisesRegex(RuntimeError, "target mismatch"):
+            native_dialog.open_button_state_ready(open_ready.replace("window_title=Open", "window_title=Save"), 42, "Open")
+        with self.assertRaisesRegex(RuntimeError, "expected one targeted"):
+            native_dialog.open_button_state_ready(open_ready + "\n" + open_ready, 42, "Open")
+        with self.assertRaisesRegex(RuntimeError, "malformed Open-button observation"):
+            native_dialog.open_button_state_ready(open_ready.replace("matches=1; enabled=true", "matches=1; enabled"), 42, "Open")
+        dismissed_snapshot = (
+            "DIRECT_AX_RESULT status=go-to-folder-state; pid=42; window_title=Open; visited=8; "
+            "sheet_count=0; complete=true; truncated=false; query_errors=[]\n"
+        )
+        self.assertTrue(native_dialog.go_to_folder_sheet_dismissed(dismissed_snapshot))
+        self.assertFalse(native_dialog.go_to_folder_sheet_dismissed(
+            dismissed_snapshot.replace("sheet_count=0", "sheet_count=1")
         ))
-        self.assertTrue(native_dialog.go_folder_sheet_closed_in_expected_directory(
-            "DIRECT_AX_NODE index=1; role=AXPopUpButton; name=Dialog Files With Spaces Ω", "Dialog Files With Spaces Ω"
+        self.assertFalse(native_dialog.go_to_folder_sheet_dismissed(
+            dismissed_snapshot.replace("complete=true", "complete=false").replace(
+                "query_errors=[]", "query_errors=['children:-25204:2']"
+            )
         ))
-        self.assertFalse(native_dialog.focused_text_field_visible(
-            "DIRECT_AX_NODE index=1; role=AXTextField; name=Search; focused=0"
+        self.assertFalse(native_dialog.go_to_folder_sheet_dismissed(
+            dismissed_snapshot.replace("window_title=Open", "window_title=PulseForge Editor")
         ))
-        self.assertTrue(native_dialog.focused_text_field_visible(
-            "DIRECT_AX_WINDOW pid=42; title=Go to Folder\n"
-            "DIRECT_AX_NODE index=1; role=AXTextField; name=Folder path; focused=true"
+        self.assertFalse(native_dialog.go_to_folder_path_field_visible(
+            "DIRECT_AX_NODE index=1; role=AXTextField; name=PathTextField; enabled=true; focused=false"
         ))
-        self.assertFalse(native_dialog.focused_text_field_visible(
-            "DIRECT_AX_NODE index=1; role=AXSheet; name=Go to Folder\n"
-            "DIRECT_AX_NODE index=2; role=AXTextField; name=Search; focused=true"
+        self.assertTrue(native_dialog.go_to_folder_path_field_visible(
+            "DIRECT_AX_WINDOW pid=42; title=Open\n"
+            "DIRECT_AX_NODE index=1; role=AXSheet; name=GoToWindow; enabled=true\n"
+            "DIRECT_AX_NODE index=2; role=AXTextField; name=PathTextField; enabled=true; focused=false"
+        ))
+        self.assertFalse(native_dialog.go_to_folder_path_field_visible(
+            "DIRECT_AX_NODE index=1; role=AXSheet; name=GoToWindow\n"
+            "DIRECT_AX_NODE index=2; role=AXTextField; name=Search; enabled=true; focused=true"
+        ))
+        self.assertFalse(native_dialog.go_to_folder_path_field_visible(
+            "DIRECT_AX_NODE index=1; role=AXSheet; name=GoToWindow\n"
+            "DIRECT_AX_NODE index=2; role=AXTextField; name=PathTextField; enabled=false; focused=true"
+        ))
+        ready_path = "/tmp/PulseForge NFD Ω/Dialog Files Ω"
+        self.assertTrue(native_dialog.folder_path_field_ready(
+            f"DIRECT_AX_RESULT status=folder-path-ready; value={ready_path}; focused=true; set_error=0", ready_path
+        ))
+        self.assertFalse(native_dialog.folder_path_field_ready(
+            f"DIRECT_AX_RESULT status=folder-path-ready; value={ready_path}; focused=false; set_error=0", ready_path
+        ))
+        self.assertFalse(native_dialog.folder_path_field_ready(
+            f"DIRECT_AX_RESULT status=folder-path-error; value={ready_path}; focused=true; set_error=0", ready_path
         ))
 
     def test_permission_bridge_class_exposes_only_scalar_no_argument_methods(self) -> None:

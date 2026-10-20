@@ -65,7 +65,7 @@ jobs:
           xcrun swiftc -O "$POINTER_SOURCE" -framework AppKit -framework CoreGraphics -o "$POINTER_EXECUTABLE" \
             2>&1 | tee "$RUNNER_TEMP/macos-pointer-driver-build.log"
           for arguments in '123 invalid 20 20' '123 0123456789abcdef0123456789abcdef not-a-coordinate 20' \
-            '--go-to-folder 123 invalid' '--type-text 123 invalid Ω'; do
+            '--go-to-folder 123 invalid' '--press-return 123 invalid' '--type-text 123 invalid Ω'; do
             set +e
             "$POINTER_EXECUTABLE" $arguments > "$RUNNER_TEMP/macos-pointer-driver-invalid.log" 2>&1
             status=$?

@@ -65,22 +65,65 @@ AXUIElementSetMessagingTimeout(app, 1.0)
 if operation == "close-main-window" {
     print("DIRECT_AX_STAGE operation=close-main-window; stage=main-window-query")
     fflush(stdout)
-    var rawWindow: CFTypeRef?
-    let windowError = AXUIElementCopyAttributeValue(app, "AXMainWindow" as CFString, &rawWindow)
-    guard windowError == .success, let rawWindow, CFGetTypeID(rawWindow) == AXUIElementGetTypeID() else {
-        print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=main-window; ax_error=\(windowError.rawValue)")
+    var rawWindows: CFTypeRef?
+    let windowError = AXUIElementCopyAttributeValue(app, "AXWindows" as CFString, &rawWindows)
+    guard windowError == .success, let rawWindows, let windows = rawWindows as? [AXUIElement] else {
+        print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=window-list; ax_error=\(windowError.rawValue)")
         exit(5)
     }
-    let window = rawWindow as! AXUIElement
+    let windowCandidates = windows.filter {
+        string($0, "AXRole") == "AXWindow" &&
+        string($0, "AXSubrole") == "AXStandardWindow" &&
+        (string($0, "AXTitle") ?? "").contains(requestedTitle)
+    }
+    guard !requestedTitle.isEmpty, windowCandidates.count == 1, let window = windowCandidates.first else {
+        let titles = windows.map { string($0, "AXTitle") ?? "<unavailable>" }
+        print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=window-selection; requested_title=\(requestedTitle); matches=\(windowCandidates.count); titles=\(titles)")
+        exit(5)
+    }
     AXUIElementSetMessagingTimeout(window, 1.0)
+    let windowRole = string(window, "AXRole") ?? "<unavailable>"
+    let windowSubrole = string(window, "AXSubrole") ?? "<unavailable>"
+    let windowTitle = string(window, "AXTitle") ?? "<unavailable>"
+    print("DIRECT_AX_CLOSE_WINDOW pid=\(targetPID); role=\(windowRole); subrole=\(windowSubrole); title=\(windowTitle)")
     print("DIRECT_AX_STAGE operation=close-main-window; stage=close-button-query")
     fflush(stdout)
-    guard let rawCloseButton = value(window, "AXCloseButton"),
-          CFGetTypeID(rawCloseButton) == AXUIElementGetTypeID() else {
-        print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=close-button")
+    var rawCloseButton: CFTypeRef?
+    let closeAttributeError = AXUIElementCopyAttributeValue(window, "AXCloseButton" as CFString, &rawCloseButton)
+    var closeButton: AXUIElement?
+    var selectedBy = "AXCloseButton"
+    if closeAttributeError == .success, let rawCloseButton,
+       CFGetTypeID(rawCloseButton) == AXUIElementGetTypeID() {
+        let resolvedCloseButton = rawCloseButton as! AXUIElement
+        closeButton = resolvedCloseButton
+    }
+    if closeButton == nil {
+        var rawChildren: CFTypeRef?
+        let childrenError = AXUIElementCopyAttributeValue(window, "AXChildren" as CFString, &rawChildren)
+        let children = (rawChildren as? [AXUIElement]) ?? []
+        let closeCandidates = children.filter {
+            string($0, "AXRole") == "AXButton" && string($0, "AXSubrole") == "AXCloseButton"
+        }
+        print("DIRECT_AX_CLOSE_FALLBACK close_attribute_error=\(closeAttributeError.rawValue); children_error=\(childrenError.rawValue); child_count=\(children.count); close_candidates=\(closeCandidates.count)")
+        guard closeCandidates.count == 1, let candidate = closeCandidates.first else {
+            let childSummary = children.prefix(24).map { child in
+                let childRole = string(child, "AXRole") ?? "<unavailable>"
+                let childSubrole = string(child, "AXSubrole") ?? "<unavailable>"
+                let childName = titleOrDescription(child)
+                var childActions: CFArray?
+                let childActionError = AXUIElementCopyActionNames(child, &childActions)
+                return "role=\(childRole);subrole=\(childSubrole);name=\(childName);actions_error=\(childActionError.rawValue);actions=\(childActions as? [String] ?? [])"
+            }
+            print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=close-button; requested_title=\(requestedTitle); close_attribute_error=\(closeAttributeError.rawValue); children_error=\(childrenError.rawValue); child_controls=\(childSummary)")
+            exit(6)
+        }
+        closeButton = candidate
+        selectedBy = "unique-AXChildren-AXButton-AXCloseButton"
+    }
+    guard let closeButton else {
+        print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=close-button; reason=missing-or-invalid; close_attribute_error=\(closeAttributeError.rawValue)")
         exit(6)
     }
-    let closeButton = rawCloseButton as! AXUIElement
     print("DIRECT_AX_STAGE operation=close-main-window; stage=close-button-actions")
     fflush(stdout)
     var actions: CFArray?
@@ -90,7 +133,7 @@ if operation == "close-main-window" {
         exit(7)
     }
     AXUIElementSetMessagingTimeout(closeButton, 1.0)
-    print("DIRECT_AX_DISPATCH attempted=true; operation=close-main-window; pid=\(targetPID); window=AXMainWindow")
+    print("DIRECT_AX_DISPATCH attempted=true; operation=close-main-window; pid=\(targetPID); window_title=\(windowTitle); selected_by=\(selectedBy)")
     fflush(stdout)
     let pressError = AXUIElementPerformAction(closeButton, kAXPressAction as CFString)
     print("DIRECT_AX_RESULT status=\(pressError == .success ? "action-returned" : "action-error"); operation=close-main-window; pid=\(targetPID); ax_error=\(pressError.rawValue)")
@@ -144,7 +187,7 @@ if operation == "activate-window" {
         print("DIRECT_AX_RESULT status=window-activation-error; stage=raise-action; pid=\(targetPID); title=\(targetTitle); ax_error=\(actionError.rawValue); actions=\(actions)")
         exit(14)
     }
-    _ = targetProcess?.activate(options: [.activateIgnoringOtherApps])
+    _ = targetProcess?.activate(options: [])
     AXUIElementSetMessagingTimeout(window, 1.0)
     let raiseError = AXUIElementPerformAction(window, "AXRaise" as CFString)
     guard raiseError == .success else {
@@ -171,6 +214,136 @@ if operation == "activate-window" {
     print("DIRECT_AX_RESULT status=window-focus-timeout; pid=\(targetPID); target_title=\(targetTitle); focused_title=\(focusedTitle); ax_raise_error=\(raiseError.rawValue); focus_error=\(focusError); attempts=\(attempts)")
     exit(16)
 }
+if operation == "observe-go-to-folder-state" {
+    guard !requestedTitle.isEmpty, titleMatches.count == 1, let window = titleMatches.first else {
+        print("DIRECT_AX_RESULT status=go-to-folder-state-error; stage=window-selection; requested_title=\(requestedTitle); matches=\(titleMatches.count)")
+        exit(20)
+    }
+    struct PendingElement {
+        let element: AXUIElement
+        let depth: Int
+    }
+    var pending = [PendingElement(element: window, depth: 0)]
+    var next = 0
+    var sheetCount = 0
+    var queryErrors: [String] = []
+    let nodeLimit = 128
+    let depthLimit = 8
+    var visitedRoles: [String] = []
+    while next < pending.count && next < nodeLimit {
+        let item = pending[next]
+        next += 1
+        AXUIElementSetMessagingTimeout(item.element, 0.2)
+        var rawRole: CFTypeRef?
+        let roleError = AXUIElementCopyAttributeValue(item.element, "AXRole" as CFString, &rawRole)
+        guard roleError == .success, let role = rawRole as? String else {
+            queryErrors.append("role:\(roleError.rawValue)")
+            continue
+        }
+        visitedRoles.append("\(role)@\(item.depth)")
+        if role == "AXSheet" {
+            sheetCount += 1
+            var rawTitle: CFTypeRef?
+            let titleError = AXUIElementCopyAttributeValue(item.element, "AXTitle" as CFString, &rawTitle)
+            let title = titleError == .success ? (rawTitle as? String ?? "") : ""
+            print("DIRECT_AX_GO_TO_FOLDER_NODE role=\(role); title=\(title); title_error=\(titleError.rawValue); depth=\(item.depth)")
+        }
+        if ["AXOutline", "AXBrowser", "AXTable", "AXList"].contains(role) { continue }
+        var rawChildren: CFTypeRef?
+        let childrenError = AXUIElementCopyAttributeValue(item.element, "AXChildren" as CFString, &rawChildren)
+        if childrenError == .success {
+            guard let rawChildren, let children = rawChildren as? [AXUIElement] else {
+                queryErrors.append("children-invalid:\(item.depth)")
+                continue
+            }
+            if item.depth >= depthLimit {
+                if !children.isEmpty { queryErrors.append("depth-limit:\(item.depth)") }
+            } else {
+                pending.append(contentsOf: children.map { PendingElement(element: $0, depth: item.depth + 1) })
+            }
+        } else if childrenError != .noValue &&
+            (childrenError != .attributeUnsupported ||
+             ["AXWindow", "AXSheet", "AXGroup", "AXSplitGroup", "AXScrollArea", "AXBrowser", "AXOutline"].contains(role)) {
+            queryErrors.append("children:\(childrenError.rawValue):\(item.depth)")
+        }
+    }
+    let truncated = next < pending.count
+    let complete = queryErrors.isEmpty && !truncated
+    print("DIRECT_AX_RESULT status=go-to-folder-state; pid=\(targetPID); window_title=\(requestedTitle); visited=\(next); sheet_count=\(sheetCount); complete=\(complete); truncated=\(truncated); query_errors=\(queryErrors); roles=\(visitedRoles.prefix(48))")
+    exit(complete ? 0 : 21)
+}
+if operation == "observe-open-button-state" {
+    guard requestedTitle == "Open", titleMatches.count == 1, let window = titleMatches.first,
+          string(window, "AXTitle") == requestedTitle else {
+        print("DIRECT_AX_RESULT status=open-button-state-error; stage=window-selection; requested_title=\(requestedTitle); matches=\(titleMatches.count)")
+        exit(22)
+    }
+    struct PendingControl {
+        let element: AXUIElement
+        let depth: Int
+    }
+    let ignoredSubtreeRoles: Set<String> = [
+        "AXOutline", "AXBrowser", "AXTable", "AXList", "AXRow", "AXCell", "AXStaticText", "AXTextField",
+        "AXButton", "AXImage", "AXPopUpButton", "AXCheckBox", "AXRadioButton", "AXSlider", "AXTextArea"
+    ]
+    var pending = [PendingControl(element: window, depth: 0)]
+    var next = 0
+    var matches: [(Bool?, Int32)] = []
+    var queryErrors: [String] = []
+    let nodeLimit = 128
+    let depthLimit = 8
+    while next < pending.count && next < nodeLimit {
+        let item = pending[next]
+        next += 1
+        AXUIElementSetMessagingTimeout(item.element, 0.25)
+        var rawRole: CFTypeRef?
+        let roleError = AXUIElementCopyAttributeValue(item.element, "AXRole" as CFString, &rawRole)
+        guard roleError == .success, let role = rawRole as? String else {
+            queryErrors.append("role:\(roleError.rawValue)")
+            continue
+        }
+        if role == "AXButton" {
+            var names: [String] = []
+            for attribute in ["AXTitle", "AXDescription", "AXIdentifier"] {
+                var rawValue: CFTypeRef?
+                let labelError = AXUIElementCopyAttributeValue(item.element, attribute as CFString, &rawValue)
+                if labelError == .success, let label = rawValue as? String, !label.isEmpty {
+                    names.append(label)
+                } else if labelError != .noValue && labelError != .attributeUnsupported {
+                    queryErrors.append("label:\(labelError.rawValue)")
+                }
+            }
+            if names.contains("Open") {
+                var rawEnabled: CFTypeRef?
+                let enabledError = AXUIElementCopyAttributeValue(item.element, "AXEnabled" as CFString, &rawEnabled)
+                let enabled = enabledError == .success ? (rawEnabled as? Bool) : nil
+                matches.append((enabled, enabledError.rawValue))
+            }
+        }
+        guard !ignoredSubtreeRoles.contains(role) else { continue }
+        var rawChildren: CFTypeRef?
+        let childrenError = AXUIElementCopyAttributeValue(item.element, "AXChildren" as CFString, &rawChildren)
+        if childrenError == .success {
+            guard let rawChildren, let children = rawChildren as? [AXUIElement] else {
+                queryErrors.append("children-invalid:\(item.depth)")
+                continue
+            }
+            if item.depth >= depthLimit {
+                if !children.isEmpty { queryErrors.append("depth-limit:\(item.depth)") }
+            } else {
+                pending.append(contentsOf: children.map { PendingControl(element: $0, depth: item.depth + 1) })
+            }
+        } else if childrenError != .noValue && childrenError != .attributeUnsupported {
+            queryErrors.append("children:\(childrenError.rawValue):\(item.depth)")
+        }
+    }
+    let truncated = next < pending.count
+    let complete = queryErrors.isEmpty && !truncated
+    let enabled = matches.count == 1 ? (matches[0].0.map { String($0) } ?? "unknown") : "unknown"
+    let enabledError = matches.count == 1 ? matches[0].1 : -1
+    print("DIRECT_AX_RESULT status=open-button-state; pid=\(targetPID); window_title=\(requestedTitle); matches=\(matches.count); enabled=\(enabled); enabled_error=\(enabledError); complete=\(complete); truncated=\(truncated); visited=\(next); query_errors=\(queryErrors)")
+    exit(complete ? 0 : 23)
+}
 struct AXNode {
     let element: AXUIElement
     let parent: Int?
@@ -193,7 +366,7 @@ func collect(_ roots: [AXUIElement], depthLimit: Int = 8, nodeLimit: Int = 256) 
     return found
 }
 let needsDescendants = deepSnapshot || operation == "press-control" || operation == "set-value" ||
-    operation == "set-focused-value-confirm" || operation == "select-element"
+    operation == "set-focused-value-confirm" || operation == "set-folder-path-value" || operation == "select-element"
 let descendants: [AXNode] = {
     guard needsDescendants else { return [] }
     if operation != "select-element" { return collect(matching, depthLimit: operation == "snapshot" ? 4 : 8) }
@@ -257,9 +430,11 @@ if operation == "snapshot" {
     }
     exit(0)
 }
-if operation == "press-control" || operation == "set-value" || operation == "set-focused-value-confirm" || operation == "select-element" {
+if operation == "press-control" || operation == "set-value" || operation == "set-focused-value-confirm" ||
+    operation == "set-folder-path-value" || operation == "select-element" {
     let wantedRole = operation == "press-control" ? "AXButton" :
-        (operation == "set-value" || operation == "set-focused-value-confirm") ? "AXTextField" : "AXRow/AXCell"
+        (operation == "set-value" || operation == "set-focused-value-confirm" || operation == "set-folder-path-value")
+            ? "AXTextField" : "AXRow/AXCell"
     func labelMatches(_ element: AXUIElement) -> Bool {
         labels(element).contains { $0 == controlName || $0.hasSuffix("/" + controlName) }
     }
@@ -270,6 +445,21 @@ if operation == "press-control" || operation == "set-value" || operation == "set
             : role == wantedRole
         let focusedMatch = operation == "set-focused-value-confirm" && (value(node.element, "AXFocused") as? Bool) == true
         let labelMatch = operation == "set-focused-value-confirm" ? focusedMatch : (controlName.isEmpty || labelMatches(node.element))
+        if operation == "set-folder-path-value" {
+            guard roleMatches, labelMatches(node.element) else { return nil }
+            var parent = node.parent
+            var folderSheetFound = false
+            while let parentIndex = parent {
+                let ancestor = descendants[parentIndex].element
+                if string(ancestor, "AXRole") == "AXSheet" &&
+                    labels(ancestor).contains(where: { $0 == "GoToWindow" || $0 == "Go to Folder" }) {
+                    folderSheetFound = true
+                    break
+                }
+                parent = descendants[parentIndex].parent
+            }
+            return folderSheetFound ? (index, node) : nil
+        }
         return roleMatches && labelMatch ? (index, node) : nil
     }
     if operation == "select-element", controls.isEmpty {
@@ -315,11 +505,49 @@ if operation == "press-control" || operation == "set-value" || operation == "set
         print("DIRECT_AX_RESULT status=\(verified ? "value-verified" : "value-error"); operation=set-value; name=\(titleOrDescription(control)); expected=\(controlValue); observed=\(observedValue); ax_error=\(setError.rawValue)")
         exit(verified ? 0 : 9)
     }
-    if operation == "set-focused-value-confirm" {
+    if operation == "set-folder-path-value" {
+        let fieldEnabled = (value(control, "AXEnabled") as? Bool) ?? false
+        guard fieldEnabled else {
+            print("DIRECT_AX_RESULT status=folder-path-error; reason=field-disabled")
+            exit(18)
+        }
         let setError = AXUIElementSetAttributeValue(control, "AXValue" as CFString, controlValue as CFString)
         let observedValue = string(control, "AXValue") ?? "<unavailable>"
         guard setError == .success, observedValue == controlValue else {
-            print("DIRECT_AX_RESULT status=focused-field-error; operation=set-value; name=\(titleOrDescription(control)); expected=\(controlValue); observed=\(observedValue); ax_error=\(setError.rawValue)")
+            print("DIRECT_AX_RESULT status=folder-path-error; expected=\(controlValue); observed=\(observedValue); set_error=\(setError.rawValue)")
+            exit(18)
+        }
+        var focusedSettable = DarwinBoolean(false)
+        let focusedSettableError = AXUIElementIsAttributeSettable(control, "AXFocused" as CFString, &focusedSettable)
+        var focused = (value(control, "AXFocused") as? Bool) == true
+        var focusSetError: Int32 = 0
+        if !focused {
+            guard focusedSettableError == .success, focusedSettable.boolValue else {
+                print("DIRECT_AX_RESULT status=folder-path-error; reason=field-not-focused-and-not-settable; focused_settable_error=\(focusedSettableError.rawValue)")
+                exit(19)
+            }
+            focusSetError = AXUIElementSetAttributeValue(control, "AXFocused" as CFString, kCFBooleanTrue).rawValue
+            focused = (value(control, "AXFocused") as? Bool) == true
+        }
+        guard focused else {
+            print("DIRECT_AX_RESULT status=folder-path-error; reason=focus-not-confirmed; focus_set_error=\(focusSetError)")
+            exit(19)
+        }
+        print("DIRECT_AX_RESULT status=folder-path-ready; value=\(observedValue); focused=true; " +
+              "set_error=\(setError.rawValue); focus_settable_error=\(focusedSettableError.rawValue); " +
+              "focus_set_error=\(focusSetError)")
+        exit(0)
+    }
+    if operation == "set-focused-value-confirm" {
+        let fieldEnabled = (value(control, "AXEnabled") as? Bool) ?? false
+        guard fieldEnabled else {
+            print("DIRECT_AX_RESULT status=focused-field-error; operation=\(operation); name=\(titleOrDescription(control)); reason=field-disabled")
+            exit(18)
+        }
+        let setError = AXUIElementSetAttributeValue(control, "AXValue" as CFString, controlValue as CFString)
+        let observedValue = string(control, "AXValue") ?? "<unavailable>"
+        guard setError == .success, observedValue == controlValue else {
+            print("DIRECT_AX_RESULT status=focused-field-error; operation=\(operation); name=\(titleOrDescription(control)); expected=\(controlValue); observed=\(observedValue); ax_error=\(setError.rawValue)")
             exit(18)
         }
         var fieldActions: CFArray?
@@ -329,10 +557,10 @@ if operation == "press-control" || operation == "set-value" || operation == "set
             print("DIRECT_AX_RESULT status=focused-field-error; operation=confirm; name=\(titleOrDescription(control)); ax_error=\(fieldActionError.rawValue); actions=\(availableActions)")
             exit(19)
         }
-        print("DIRECT_AX_DISPATCH attempted=true; operation=confirm-focused-value; target_pid=\(targetPID); name=\(titleOrDescription(control))")
+        print("DIRECT_AX_DISPATCH attempted=true; operation=confirm-field-value; target_pid=\(targetPID); name=\(titleOrDescription(control)); field_value_verified=true; operation_kind=\(operation)")
         fflush(stdout)
         let confirmError = AXUIElementPerformAction(control, "AXConfirm" as CFString)
-        print("DIRECT_AX_RESULT status=focused-value-confirmed; name=\(titleOrDescription(control)); value=\(observedValue); set_error=\(setError.rawValue); action_error=\(confirmError.rawValue)")
+        print("DIRECT_AX_RESULT status=field-value-confirmed; name=\(titleOrDescription(control)); value=\(observedValue); set_error=\(setError.rawValue); action_error=\(confirmError.rawValue)")
         exit(confirmError == .success ? 0 : 20)
     }
     if operation == "select-element" {

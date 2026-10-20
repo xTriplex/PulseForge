@@ -36,6 +36,30 @@ def ax_node_enabled(output: str, role: str, name: str) -> bool:
     return False
 
 
+def open_button_state_ready(output: str, fixture_pid: int, panel_title: str) -> bool:
+    results = [line for line in output.splitlines() if line.startswith("DIRECT_AX_RESULT status=open-button-state;")]
+    if len(results) != 1:
+        raise RuntimeError(f"expected one targeted Open-button observation, found {len(results)}; output={output[-1600:]!r}")
+    fields: dict[str, str] = {}
+    for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; "):
+        if "=" not in part:
+            raise RuntimeError(f"malformed Open-button observation field: {part!r}")
+        key, value = part.split("=", 1)
+        if key in fields:
+            raise RuntimeError(f"duplicate Open-button observation field: {key!r}")
+        fields[key] = value
+    required_fields = {
+        "status", "pid", "window_title", "matches", "enabled", "enabled_error", "complete", "truncated", "visited", "query_errors"
+    }
+    if not required_fields.issubset(fields) or fields.get("status") != "open-button-state":
+        raise RuntimeError(f"malformed Open-button observation; fields={fields!r}")
+    if fields.get("pid") != str(fixture_pid) or fields.get("window_title") != panel_title:
+        raise RuntimeError(f"Open-button observation target mismatch; fields={fields!r}")
+    if fields.get("complete") != "true" or fields.get("truncated") != "false" or fields.get("query_errors") != "[]":
+        raise RuntimeError(f"Open-button observation incomplete; fields={fields!r}")
+    return fields.get("matches") == "1" and fields.get("enabled") == "true" and fields.get("enabled_error") == "0"
+
+
 def run_keyboard_input(mode: str, target_pid: int, *, text: str = "", timeout: float) -> str:
     runner_temp = os.environ.get("RUNNER_TEMP")
     if not runner_temp:
@@ -98,13 +122,12 @@ def wait_for_open_button(fixture_pid: int, panel_title: str, deadline: float) ->
         remaining = deadline - time.monotonic()
         code, output, error = run_direct_ax(
             fixture_pid,
-            operation="snapshot",
+            operation="observe-open-button-state",
             window_title=panel_title,
-            deep_snapshot=True,
             timeout=min(8.0, max(0.1, remaining)),
         )
         last_output = output + error
-        if code == 0 and ax_node_enabled(last_output, "AXButton", "Open"):
+        if code == 0 and open_button_state_ready(last_output, fixture_pid, panel_title):
             return last_output
         if code not in (0, 124):
             raise RuntimeError(f"Open panel snapshot failed while awaiting selected file; exit_code={code}; {last_output!r}")
@@ -118,15 +141,18 @@ def run_direct_ax_until(
     deadline: float,
     accept: Callable[[str], bool],
     description: str,
+    *,
+    deep_snapshot: bool = True,
+    operation: str = "snapshot",
 ) -> str:
     last_output = ""
     while time.monotonic() < deadline:
         remaining = deadline - time.monotonic()
         code, output, error = run_direct_ax(
             fixture_pid,
-            operation="snapshot",
+            operation=operation,
             window_title=panel_title,
-            deep_snapshot=True,
+            deep_snapshot=deep_snapshot,
             timeout=min(8.0, max(0.1, remaining)),
         )
         last_output = output + error
@@ -138,10 +164,14 @@ def run_direct_ax_until(
     raise RuntimeError(f"Timed out awaiting {description}; last_snapshot={last_output[-4000:]!r}")
 
 
-def focused_text_field_visible(output: str) -> bool:
+def go_to_folder_path_field_visible(output: str) -> bool:
     lines = output.splitlines()
     has_folder_sheet = any(
-        (line.startswith("DIRECT_AX_NODE ") and "role=AXSheet" in line)
+        (
+            line.startswith("DIRECT_AX_NODE ")
+            and "role=AXSheet" in line
+            and ("name=GoToWindow" in line or "name=Go to Folder" in line)
+        )
         or (line.startswith("DIRECT_AX_WINDOW ") and "title=Go to Folder" in line)
         for line in lines
     )
@@ -153,21 +183,44 @@ def focused_text_field_visible(output: str) -> bool:
         fields = dict(part.split("=", 1) for part in line.split("; ") if "=" in part)
         if (
             fields.get("role") == "AXTextField"
-            and fields.get("focused", "").lower() in {"true", "1"}
-            and "search" not in fields.get("name", "").lower()
+            and fields.get("name") == "PathTextField"
+            and fields.get("enabled", "").lower() in {"true", "1"}
         ):
             return True
     return False
 
 
-def go_folder_sheet_closed_in_expected_directory(output: str, directory_name: str) -> bool:
-    if not directory_name or directory_name not in output:
+def go_to_folder_sheet_dismissed(output: str) -> bool:
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=go-to-folder-state;")
+    ]
+    if len(results) != 1:
         return False
-    if any(line.startswith("DIRECT_AX_NODE ") and "role=AXSheet" in line for line in output.splitlines()):
+    fields = dict(part.split("=", 1) for part in results[0].split("; ") if "=" in part)
+    if (
+        fields.get("window_title") != "Open"
+        or fields.get("complete") != "true"
+        or fields.get("truncated") != "false"
+        or fields.get("query_errors") != "[]"
+    ):
         return False
-    if any(line.startswith("DIRECT_AX_WINDOW ") and "title=Go to Folder" in line for line in output.splitlines()):
+    try:
+        sheet_count = int(fields["sheet_count"])
+    except (KeyError, ValueError):
         return False
-    return True
+    return sheet_count == 0
+
+
+def folder_path_field_ready(output: str, expected_path: str) -> bool:
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=folder-path-ready;")
+    ]
+    if len(results) != 1:
+        return False
+    fields = dict(part.split("=", 1) for part in results[0].split("; ") if "=" in part)
+    return fields.get("value") == expected_path and fields.get("focused") == "true"
 
 class FixtureOutput:
     def __init__(self, process: subprocess.Popen[str], log_path: Path):
@@ -511,32 +564,73 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             return 1, "fixture process group or output reader survived bounded deadline cleanup"
         return 1, f"native dialog fixture exhausted its {timeout_seconds}s case bound before panel automation"
     if scenario == "open-select":
+        last_navigation_step = "Open panel activation not attempted"
         try:
-            helper_deadline = min(deadline, time.monotonic() + 25.0)
-            run_keyboard_input("--go-to-folder", int(panel_process_id), timeout=min(5.0, remaining_seconds()))
-            run_direct_ax_until(
-                int(panel_process_id), "", helper_deadline, focused_text_field_visible,
-                "focused Go to Folder path field",
+            activation_code, activation_output, activation_error = run_direct_ax(
+                int(panel_process_id),
+                operation="activate-window",
+                window_title=panel_title,
+                timeout=min(8.0, remaining_seconds()),
             )
+            activation_output += activation_error
+            if activation_code != 0 or "DIRECT_AX_RESULT status=window-focused" not in activation_output:
+                raise RuntimeError(
+                    f"Open panel was not the confirmed focused AX window before Go to Folder; "
+                    f"exit_code={activation_code}; {activation_output!r}"
+                )
+            print(f"NFD_OPEN_PANEL_FOCUS=CONFIRMED; {activation_output.strip()!r}", flush=True)
+
+            # Start the bounded navigation phase after focus has been established.
+            # The prior deadline also covered activation, so a slow AX focus query
+            # could consume the entire Go To Folder observation budget before the
+            # single keyboard action was even posted.
+            helper_deadline = min(deadline, time.monotonic() + 25.0)
+            action_id = run_keyboard_input(
+                "--go-to-folder", int(panel_process_id), timeout=min(5.0, remaining_seconds())
+            )
+            last_navigation_step = f"Go To Folder shortcut posted; action_id={action_id}"
+            print(f"NFD_GO_TO_FOLDER_INPUT=POSTED; action_id={action_id}; target_pid={panel_process_id}", flush=True)
+            run_direct_ax_until(
+                int(panel_process_id), panel_title, helper_deadline, go_to_folder_path_field_visible,
+                "enabled Go to Folder PathTextField",
+            )
+            last_navigation_step = "Go To Folder PathTextField observed in the expected sheet"
+            expected_directory = str(expected_path.parent)
             automation_code, automation_output, automation_error = run_direct_ax(
                 int(panel_process_id),
-                operation="set-focused-value-confirm",
-                window_title="",
-                control_value=str(expected_path.parent),
+                operation="set-folder-path-value",
+                window_title=panel_title,
+                control_name="PathTextField",
+                control_value=expected_directory,
                 timeout=min(10.0, remaining_seconds()),
             )
             automation_output += automation_error
-            if automation_code != 0:
-                raise RuntimeError(
-                    f"Go to Folder path confirmation failed; exit_code={automation_code}; {automation_output!r}"
+            if automation_code != 0 or not folder_path_field_ready(automation_output, expected_directory):
+                last_navigation_step = (
+                    f"Go To Folder value/focus validation failed; exit_code={automation_code}; "
+                    f"output={automation_output.strip()!r}"
                 )
+                raise RuntimeError(
+                    f"Go to Folder path value/focus verification failed; exit_code={automation_code}; {automation_output!r}"
+                )
+            last_navigation_step = f"Go To Folder path value verified and focused; value={expected_directory!r}"
+            print(f"NFD_GO_TO_FOLDER_FIELD=READY; {automation_output.strip()!r}", flush=True)
+            return_action_id = run_keyboard_input(
+                "--press-return", int(panel_process_id), timeout=min(5.0, remaining_seconds())
+            )
+            last_navigation_step = f"Return key posted once; action_id={return_action_id}; field value verified"
+            print(f"NFD_GO_TO_FOLDER_RETURN=POSTED; action_id={return_action_id}; target_pid={panel_process_id}", flush=True)
             run_direct_ax_until(
                 int(panel_process_id),
-                "",
+                panel_title,
                 helper_deadline,
-                lambda output: go_folder_sheet_closed_in_expected_directory(output, expected_path.parent.name),
-                "Go to Folder sheet dismissal and expected directory",
+                go_to_folder_sheet_dismissed,
+                "Go to Folder sheet dismissal",
+                deep_snapshot=False,
+                operation="observe-go-to-folder-state",
             )
+            last_navigation_step = "Go To Folder sheet dismissal observed"
+            print("NFD_GO_TO_FOLDER_SHEET=DISMISSED", flush=True)
             run_keyboard_input(
                 "--type-text", int(panel_process_id), text=expected_path.name, timeout=min(5.0, remaining_seconds())
             )
@@ -548,7 +642,10 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
             if not stop_fixture(process, output_reader):
                 return 1, "fixture process group or output reader survived failed Open panel navigation"
-            return 1, f"Open selection navigation failed before the Open action; {error}"
+            return 1, (
+                f"Open selection navigation failed before the Open action; last_step={last_navigation_step}; "
+                f"{error}"
+            )
         automation_code, pressed, press_error = run_direct_ax(
             int(panel_process_id), operation="press-control", window_title=panel_title,
             control_name="Open", timeout=min(10.0, remaining_seconds())
@@ -559,6 +656,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             int(panel_process_id),
             operation="set-value",
             window_title=panel_title,
+            control_name="saveAsNameTextField",
             control_value=expected_path.name,
             timeout=min(10.0, remaining),
         )
