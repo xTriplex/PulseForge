@@ -236,6 +236,28 @@ def close_failure_diagnostics(
     return diagnostics
 
 
+def capture_close_failure_screenshot(log_directory: Path) -> str:
+    screenshot = log_directory / "macos-document-host-close-failure.png"
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/screencapture", "-x", "-C", "-t", "png", str(screenshot)],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        if result.returncode == 0 and screenshot.is_file() and screenshot.stat().st_size > 0:
+            return f"screenshot=CAPTURED; bytes={screenshot.stat().st_size}; path={screenshot}"
+        state = "TCC_DENIED" if has_tcc_denial(result.stderr + result.stdout) else "FAILED"
+        return (
+            f"screenshot={state}; exit_code={result.returncode}; "
+            f"stdout={result.stdout[-400:]!r}; stderr={result.stderr[-400:]!r}"
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        state = "TIMED_OUT" if isinstance(error, subprocess.TimeoutExpired) else "FAILED"
+        return f"screenshot={state}; error={type(error).__name__}: {error}"
+
+
 def has_tcc_denial(output: str) -> bool:
     lowered = output.lower()
     return any(message in lowered for message in TCC_DENIALS)
@@ -439,6 +461,7 @@ def main() -> int:
                     diagnostic_output = close_failure_diagnostics(
                         str(process.pid), diagnostic_arguments, deadline
                     )
+                    screenshot_output = capture_close_failure_screenshot(args.log_directory)
                     stop_process_group(process)
                     capture.thread.join(timeout=5)
                     return fail(
@@ -447,6 +470,8 @@ def main() -> int:
                         + f"exit_code={close_code}; "
                         + repr(diagnostic_output)
                         + "; "
+                        + screenshot_output
+                        + "; "
                         + close_output.strip(),
                         log_path,
                     )
@@ -454,13 +479,14 @@ def main() -> int:
                 diagnostic_output = close_failure_diagnostics(
                     str(process.pid), diagnostic_arguments, deadline
                 )
+                screenshot_output = capture_close_failure_screenshot(args.log_directory)
                 stop_process_group(process)
                 capture.thread.join(timeout=5)
                 return fail(
                     "could not request normal main-window close; "
                     f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
                     f"exit_code={close_code}; "
-                    f"diagnostics={diagnostic_output!r}; detail={close_output.strip()}",
+                    f"diagnostics={diagnostic_output!r}; {screenshot_output}; detail={close_output.strip()}",
                     log_path,
                 )
         else:
@@ -472,12 +498,13 @@ def main() -> int:
             diagnostic_output = close_failure_diagnostics(
                 str(process.pid), diagnostic_arguments, deadline
             )
+            screenshot_output = capture_close_failure_screenshot(args.log_directory)
             stop_process_group(process)
             capture.thread.join(timeout=5)
             return fail(
                 "editor did not exit after the native main-window close request before timeout; "
                 f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
-                f"diagnostics={diagnostic_output!r}",
+                f"diagnostics={diagnostic_output!r}; {screenshot_output}",
                 log_path,
             )
         capture.thread.join(timeout=5)
