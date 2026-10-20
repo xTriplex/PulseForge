@@ -15,12 +15,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from MacOSDocumentHostSmoke import stop_process_group
+from MacOSScreenshot import capture_screenshot
 
 PASS_MARKER = (
     b"PULSEFORGE_EDITOR_RUNTIME_PLAY_STOP=PASS; synthetic EditorApplication Play/Stop transition rendered successfully in "
     b"Edit and Play states; the authored scene was preserved."
 )
 FAIL_MARKER = b"PULSEFORGE_EDITOR_RUNTIME_PLAY_STOP=FAIL;"
+PLAY_STARTED_MARKER = b"PULSEFORGE_EDITOR_RUNTIME_PLAY_STOP=PLAY_STARTED;"
 MAX_LOG_BYTES = 128 * 1024
 MAX_CONSOLE_BYTES = 64 * 1024
 READ_CHUNK_BYTES = 4096
@@ -35,6 +37,7 @@ class BoundedOutput:
         self.console_bytes = 0
         self.pass_seen = False
         self.fail_seen = False
+        self.play_started = threading.Event()
         self.log_truncated = False
         self.console_truncated = False
         self.reader_error: str | None = None
@@ -54,7 +57,11 @@ class BoundedOutput:
                 searchable = scan_tail + chunk
                 self.pass_seen |= PASS_MARKER in searchable
                 self.fail_seen |= FAIL_MARKER in searchable
-                scan_tail = searchable[-(max(len(PASS_MARKER), len(FAIL_MARKER)) - 1) :]
+                if PLAY_STARTED_MARKER in searchable:
+                    self.play_started.set()
+                scan_tail = searchable[
+                    -(max(len(PASS_MARKER), len(FAIL_MARKER), len(PLAY_STARTED_MARKER)) - 1) :
+                ]
 
                 remaining = MAX_LOG_BYTES - len(self.buffer)
                 if remaining > 0:
@@ -144,6 +151,7 @@ def main() -> int:
     cleanup_error: str | None = None
     result_error: str | None = None
     exit_code: int | None = None
+    deadline = time.monotonic() + args.timeout_seconds
     root_cleanup_error: str | None = None
     try:
         working_directory = root / "Unrelated Working Directory \u03a9"
@@ -168,8 +176,17 @@ def main() -> int:
             start_new_session=True,
         )
         capture = BoundedOutput(process, log_path)
+        while process.poll() is None and time.monotonic() < deadline and not capture.play_started.is_set():
+            capture.play_started.wait(timeout=min(0.1, max(0.01, deadline - time.monotonic())))
+        if capture.play_started.is_set():
+            if process.poll() is None:
+                screenshot = capture_screenshot(
+                    "macos-editor-checkpoint-play-mode-scene-viewport.png",
+                    timeout_seconds=max(0.1, min(2.0, deadline - time.monotonic())),
+                )
+                print(f"MACOS_EDITOR_RUNTIME_PLAY_STOP_SCREENSHOT=checkpoint=play-mode-viewport; {screenshot}")
         try:
-            exit_code = process.wait(timeout=args.timeout_seconds)
+            exit_code = process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             timeout_expired = True
             result_error = f"editor did not complete within {args.timeout_seconds} seconds"
@@ -178,6 +195,11 @@ def main() -> int:
     finally:
         if process is not None:
             try:
+                if process.poll() is None and (timeout_expired or result_error):
+                    screenshot = capture_screenshot(
+                        "macos-editor-runtime-play-stop-checkpoint-unexpected-failure.png"
+                    )
+                    print(f"MACOS_EDITOR_RUNTIME_PLAY_STOP_FAILURE_SCREENSHOT={screenshot}")
                 if not stop_process_group(process):
                     cleanup_error = f"could not stop editor process group PID {process.pid}"
                 if capture is not None:

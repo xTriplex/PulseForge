@@ -15,6 +15,8 @@ import threading
 import time
 from pathlib import Path
 
+from MacOSScreenshot import capture_screenshot
+
 MAX_LOG_BYTES = 64 * 1024
 MAX_CONSOLE_BYTES = 32 * 1024
 TCC_DENIALS = (
@@ -365,24 +367,8 @@ def capture_waiting_observation(
         f"NFD_WAITING_OBSERVATION_BEGIN; scenario={scenario}; fixture_pid={fixture_pid}; "
         f"state={interaction_state}"
     ]
-    screenshot_path = log_path.with_name(f"native-dialog-{scenario}-observation.png")
-    try:
-        capture = subprocess.run(
-            ["/usr/sbin/screencapture", "-x", "-t", "png", str(screenshot_path)],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        if capture.returncode == 0 and screenshot_path.is_file() and screenshot_path.stat().st_size > 0:
-            lines.append(f"NFD_WAITING_SCREENSHOT=CAPTURED; bytes={screenshot_path.stat().st_size}; path={screenshot_path}")
-        else:
-            lines.append(
-                "NFD_WAITING_SCREENSHOT=FAILED; "
-                f"exit_code={capture.returncode}; stdout={capture.stdout[:400]!r}; stderr={capture.stderr[:400]!r}"
-            )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        lines.append(f"NFD_WAITING_SCREENSHOT=FAILED; error={type(error).__name__}: {error}")
+    screenshot_state = capture_screenshot(f"native-dialog-{scenario}-observation.png")
+    lines.append(f"NFD_WAITING_SCREENSHOT={screenshot_state}")
 
     candidates, enumeration_state = _process_listing(fixture_pid)
     lines.append(enumeration_state)
@@ -1457,14 +1443,13 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                     "native panel was exposed by a separate process without a verifiable association to the fixture; "
                     f"no controls were activated; read-only waiting-state observation captured; state={probe_output!r}"
                 )
-            if scenario == "open-select":
-                observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
-                observation_report = capture_waiting_observation(process.pid, scenario, observation_log)
-                screenshot_state = next(
-                    (line for line in observation_report.splitlines() if line.startswith("NFD_WAITING_SCREENSHOT=")),
-                    "NFD_WAITING_SCREENSHOT=NOT_REPORTED",
-                )
-                print(f"NFD_READY_STATE_OBSERVATION=COMPLETE; scenario={scenario}; {screenshot_state}", flush=True)
+            observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+            observation_report = capture_waiting_observation(process.pid, scenario, observation_log)
+            screenshot_state = next(
+                (line for line in observation_report.splitlines() if line.startswith("NFD_WAITING_SCREENSHOT=")),
+                "NFD_WAITING_SCREENSHOT=NOT_REPORTED",
+            )
+            print(f"NFD_READY_STATE_OBSERVATION=COMPLETE; scenario={scenario}; {screenshot_state}", flush=True)
             break
         if probe_output.startswith(f"NFD_PANEL_UNASSOCIATED=fixture_pid={process_id};"):
             observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")

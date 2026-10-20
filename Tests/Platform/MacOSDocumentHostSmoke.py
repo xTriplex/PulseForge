@@ -14,6 +14,8 @@ import threading
 import time
 from pathlib import Path
 
+from MacOSScreenshot import capture_screenshot
+
 MAX_LOG_BYTES = 128 * 1024
 MAX_CONSOLE_BYTES = 64 * 1024
 TCC_DENIALS = ("not allowed assistive access", "not authorized to send apple events", "(-1743)")
@@ -389,26 +391,10 @@ def close_failure_diagnostics(
     return diagnostics
 
 
-def capture_close_failure_screenshot(log_directory: Path) -> str:
-    screenshot = log_directory / "macos-document-host-close-failure.png"
-    try:
-        result = subprocess.run(
-            ["/usr/sbin/screencapture", "-x", "-C", "-t", "png", str(screenshot)],
-            capture_output=True,
-            text=True,
-            timeout=5.0,
-            check=False,
-        )
-        if result.returncode == 0 and screenshot.is_file() and screenshot.stat().st_size > 0:
-            return f"screenshot=CAPTURED; bytes={screenshot.stat().st_size}; path={screenshot}"
-        state = "TCC_DENIED" if has_tcc_denial(result.stderr + result.stdout) else "FAILED"
-        return (
-            f"screenshot={state}; exit_code={result.returncode}; "
-            f"stdout={result.stdout[-400:]!r}; stderr={result.stderr[-400:]!r}"
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        state = "TIMED_OUT" if isinstance(error, subprocess.TimeoutExpired) else "FAILED"
-        return f"screenshot={state}; error={type(error).__name__}: {error}"
+def capture_failure_screenshot(process: subprocess.Popen[str]) -> str:
+    if process.poll() is not None:
+        return f"NOT_CAPTURED_PROCESS_ALREADY_EXITED; exit_code={process.returncode}"
+    return capture_screenshot("macos-document-host-checkpoint-unexpected-failure.png")
 
 
 def has_tcc_denial(output: str) -> bool:
@@ -638,6 +624,10 @@ def main() -> int:
                 break
 
         if saw_tcc_denial:
+            print(
+                "MACOS_DOCUMENT_HOST_FAILURE_SCREENSHOT="
+                + capture_failure_screenshot(process)
+            )
             stopped = stop_process_group(process)
             capture.thread.join(timeout=5)
             if not stopped or capture.thread.is_alive():
@@ -645,10 +635,18 @@ def main() -> int:
             print("MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; native-window verification NOT RUN; acceptance blocked")
             return 77
         if failures:
+            print(
+                "MACOS_DOCUMENT_HOST_FAILURE_SCREENSHOT="
+                + capture_failure_screenshot(process)
+            )
             stop_process_group(process)
             capture.thread.join(timeout=5)
             return fail("fixture reported failure: " + "; ".join(failures), log_path)
         if not observed_native_windows:
+            print(
+                "MACOS_DOCUMENT_HOST_FAILURE_SCREENSHOT="
+                + capture_failure_screenshot(process)
+            )
             stop_process_group(process)
             capture.thread.join(timeout=5)
             if not fixture_ready:
@@ -657,12 +655,20 @@ def main() -> int:
 
         missing = [marker for marker in SUCCESS_MARKERS if marker not in capture.markers]
         if missing:
+            print(
+                "MACOS_DOCUMENT_HOST_FAILURE_SCREENSHOT="
+                + capture_failure_screenshot(process)
+            )
             stop_process_group(process)
             capture.thread.join(timeout=5)
             return fail("fixture did not produce required round-trip evidence: " + repr(missing), log_path)
 
         main_windows = [(index, title) for index, title in observed_windows if "PulseForge Editor" in title]
         if len(main_windows) != 1:
+            print(
+                "MACOS_DOCUMENT_HOST_FAILURE_SCREENSHOT="
+                + capture_failure_screenshot(process)
+            )
             stop_process_group(process)
             capture.thread.join(timeout=5)
             return fail(
@@ -675,6 +681,11 @@ def main() -> int:
             f"MACOS_DOCUMENT_HOST_PROCESS=PASS; pid={process.pid}; process={observed_process_name}; "
             f"main_window_index={main_window_index}; main_window={main_window_name!r}; "
             f"all_windows={observed_windows!r}"
+        )
+        screenshot = capture_screenshot("macos-editor-checkpoint-loaded-scene-and-separate-document-windows.png")
+        print(
+            "MACOS_DOCUMENT_HOST_UI_SCREENSHOT="
+            f"loaded_scene_viewport_and_separate_native_documents; {screenshot}"
         )
 
         diagnostic_arguments = (str(main_window_index), main_window_name)
@@ -715,6 +726,10 @@ def main() -> int:
                 f"exit_code={close_code}; detail={close_output.strip()}"
             )
             if has_tcc_denial(close_output):
+                print(
+                    "MACOS_DOCUMENT_HOST_FAILURE_SCREENSHOT="
+                    + capture_failure_screenshot(process)
+                )
                 stop_process_group(process)
                 capture.thread.join(timeout=5)
                 print(
@@ -737,7 +752,7 @@ def main() -> int:
                     diagnostic_output = close_failure_diagnostics(
                         str(process.pid), diagnostic_arguments, deadline
                     )
-                    screenshot_output = capture_close_failure_screenshot(args.log_directory)
+                    screenshot_output = capture_failure_screenshot(process)
                     stop_process_group(process)
                     capture.thread.join(timeout=5)
                     return fail(
@@ -755,7 +770,7 @@ def main() -> int:
                 diagnostic_output = close_failure_diagnostics(
                     str(process.pid), diagnostic_arguments, deadline
                 )
-                screenshot_output = capture_close_failure_screenshot(args.log_directory)
+                screenshot_output = capture_failure_screenshot(process)
                 stop_process_group(process)
                 capture.thread.join(timeout=5)
                 return fail(
@@ -774,7 +789,7 @@ def main() -> int:
             diagnostic_output = close_failure_diagnostics(
                 str(process.pid), diagnostic_arguments, deadline
             )
-            screenshot_output = capture_close_failure_screenshot(args.log_directory)
+            screenshot_output = capture_failure_screenshot(process)
             stop_process_group(process)
             capture.thread.join(timeout=5)
             return fail(

@@ -227,11 +227,10 @@ jobs:
             ${{ runner.temp }}/macos-editor-runtime-play-stop.log
             ${{ runner.temp }}/macos-editor-runtime-play-stop-smoke.log
             ${{ runner.temp }}/macos-document-host-smoke.log
-            ${{ runner.temp }}/macos-document-host-close-failure.png
             ${{ runner.temp }}/macos-workspace-restore-smoke.log
             ${{ runner.temp }}/macos-workspace-restore-first-launch.log
             ${{ runner.temp }}/macos-workspace-restore-second-launch.log
-            ${{ runner.temp }}/macos-workspace-restore-close-failure.png
+            ${{ runner.temp }}/macos-*-checkpoint-*.png
             ${{ runner.temp }}/macos-document-close-smoke.log
             ${{ runner.temp }}/macos-document-close-cancel-save.log
             ${{ runner.temp }}/macos-document-close-discard.log
@@ -256,7 +255,7 @@ jobs:
             Build/CI/macos-renderer/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/macos-renderer/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
-          retention-days: 5
+          retention-days: 1
 
   windows-msvc:
     name: Windows 2022 · MSVC · Debug

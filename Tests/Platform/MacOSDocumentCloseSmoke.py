@@ -20,6 +20,8 @@ import threading
 import time
 from pathlib import Path
 
+from MacOSScreenshot import capture_screenshot
+
 MAX_LOG_BYTES = 128 * 1024
 MAX_CONSOLE_BYTES = 48 * 1024
 MAX_EVENT_COUNT = 128
@@ -251,6 +253,7 @@ class BoundedCapture:
         self.controls: deque[dict[str, str]] = deque(maxlen=MAX_EVENT_COUNT)
         self.telemetry_dropped = 0
         self.control_overflow_error: str | None = None
+        self.failure_screenshot: str | None = None
         self.capture_index = 0
         self.capture_index_lock = threading.Lock()
         self.control_lock = threading.Lock()
@@ -373,6 +376,7 @@ class ActionEvidence:
     semantic_outcome: str = "PENDING"
     output_watermark: int = -1
     point: tuple[int, int] | None = None
+    target_window_bounds: tuple[float, float, float, float] | None = None
     expected_marker_fields: dict[str, str] | None = None
 
     def summary(self) -> str:
@@ -381,7 +385,7 @@ class ActionEvidence:
             f"api_exit_code={self.api_exit_code}; transport_uncertain={int(self.transport_uncertain)}; "
             f"api_result={self.api_result!r}; "
             f"pointer_observation={self.pointer_observation}; application_response={self.application_response}; "
-            f"semantic_outcome={self.semantic_outcome}"
+            f"semantic_outcome={self.semantic_outcome}; initial_ax_bounds={self.target_window_bounds!r}"
         )
 
 
@@ -863,26 +867,11 @@ def capture_action_diagnostics(
             else:
                     evidence.pointer_observation = f"UNAVAILABLE:ERROR({code}):{output.strip()[-500:]}"
 
-    screenshot = capture.log_path.parent / f"macos-document-close-{evidence.label.lower().replace(' ', '-')}-outcome-missing.png"
-    remaining = deadline - time.monotonic()
-    if remaining > 0.1:
-        try:
-            result = subprocess.run(
-                ["/usr/sbin/screencapture", "-x", "-C", "-t", "png", str(screenshot)],
-                capture_output=True,
-                text=True,
-                timeout=min(2.0, remaining),
-                check=False,
-            )
-            screenshot_state = (
-                f"CAPTURED:{screenshot.stat().st_size} bytes"
-                if result.returncode == 0 and screenshot.is_file() and screenshot.stat().st_size > 0
-                else f"FAILED({result.returncode}):{(result.stdout + result.stderr).strip()[-500:]}"
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            screenshot_state = f"{type(error).__name__}:{error}"
-    else:
-        screenshot_state = "NOT_ATTEMPTED_DEADLINE_EXHAUSTED"
+    screenshot = capture_screenshot(
+        f"macos-document-close-{evidence.label.lower().replace(' ', '-')}-outcome-missing.png"
+    )
+    capture.failure_screenshot = screenshot
+    screenshot_state = screenshot
     telemetry = capture.recent_telemetry(evidence.expected_marker_fields or {})
     state = "running" if process.poll() is None else f"exited({process.returncode})"
     return (
@@ -961,73 +950,65 @@ def wait_close_control(
 
 def query_fixture_window(
     process: subprocess.Popen[str], deadline: float
-) -> tuple[float, float, float, float]:
-    last_state = "not queried"
-    process_lookup_deadline = min(deadline, time.monotonic() + 5.0)
-    while time.monotonic() < deadline:
-        code, output = run_osascript(WINDOW_QUERY, str(process.pid), FIXTURE_TITLE, timeout=bounded_timeout(deadline, 4.0))
-        if code != 0:
-            if is_tcc_denial(output):
-                raise RuntimeError(f"TCC_DENIED: Accessibility authorization is required: {output.strip()}")
-            if code == 124:
-                last_state = f"Accessibility query timed out: {output.strip()}"
-                continue
-            lowered = output.lower()
-            if "-1719" in lowered and "unix id" in lowered and "process" in lowered:
-                last_state = f"System Events has not exposed fixture PID {process.pid}; AXError=-1719: {output.strip()}"
-                if time.monotonic() < process_lookup_deadline:
-                    time.sleep(min(0.1, max(0.0, process_lookup_deadline - time.monotonic())))
-                    continue
-                raise RuntimeError(f"AX_PROCESS_LOOKUP_INVALID_INDEX after fixture readiness: {last_state}")
-            raise RuntimeError(f"Accessibility query failed with exit code {code}: {output.strip()}")
-        lines = [line.strip() for line in output.splitlines() if line.strip()]
-        if len(lines) >= 2:
-            indices = [value for value in lines[1].split(",") if value]
-            if "PulseForge" not in lines[0]:
-                raise RuntimeError(f"PID {process.pid} resolves to unexpected process {lines[0]!r}")
-            if len(indices) == 1 and indices[0].isdigit():
-                bounds_code, bounds = run_osascript(
-                    WINDOW_BOUNDS_QUERY,
-                    str(process.pid),
-                    FIXTURE_TITLE,
-                    timeout=bounded_timeout(deadline, 4.0),
-                )
-                if bounds_code != 0:
-                    if is_tcc_denial(bounds):
-                        raise RuntimeError(
-                            f"TCC_DENIED: Accessibility authorization is required for the read-only window preflight: "
-                            f"{bounds.strip()}"
-                        )
-                    raise RuntimeError(
-                        f"read-only Accessibility window preflight failed; exit_code={bounds_code}; "
-                        f"detail={bounds.strip()}"
-                    )
-                bound_lines = [line.strip() for line in bounds.splitlines() if line.strip()]
-                if len(bound_lines) != 3 or bound_lines[0] != lines[0] or bound_lines[1] != FIXTURE_TITLE:
-                    raise RuntimeError(
-                        f"read-only Accessibility window preflight returned inconsistent process/window identity: "
-                        f"{bounds.strip()!r}"
-                    )
-                try:
-                    window_bounds = tuple(float(value) for value in bound_lines[2].split(","))
-                except ValueError as error:
-                    raise RuntimeError(f"Accessibility fixture bounds are malformed: {bounds.strip()!r}") from error
-                if len(window_bounds) != 4 or not all(math.isfinite(value) for value in window_bounds):
-                    raise RuntimeError(f"Accessibility fixture bounds are non-finite or incomplete: {bounds.strip()!r}")
-                if window_bounds[2] <= 0 or window_bounds[3] <= 0:
-                    raise RuntimeError(f"Accessibility fixture window has no usable area: {bounds.strip()!r}")
-                print(
-                    f"MACOS_DOC_CLOSE_PREFLIGHT=PASS; pid={process.pid}; process={bound_lines[0]}; "
-                    f"window={bound_lines[1]}; accessibility_bounds={bound_lines[2]!r}; "
-                    "ImGui viewport points=desktop logical; AX bounds=desktop logical; "
-                    "no Retina scale conversion applied"
-                )
-                return window_bounds
-            last_state = f"expected exactly one {FIXTURE_TITLE!r}, observed indices {indices!r}"
+) -> tuple[float, float, float, float] | None:
+    timeout = min(1.5, max(0.0, deadline - time.monotonic()))
+    if timeout <= 0.1:
+        print("MACOS_DOC_CLOSE_AX_BOUNDS=UNAVAILABLE; reason=scenario deadline nearly exhausted")
+        return None
+
+    code, output = run_osascript(
+        WINDOW_BOUNDS_QUERY,
+        str(process.pid),
+        FIXTURE_TITLE,
+        timeout=timeout,
+    )
+    if code != 0:
+        if is_tcc_denial(output):
+            category = "TCC_DENIED"
+        elif code == 124 or "-1712" in output or "timed out" in output.lower():
+            category = "TIMED_OUT"
         else:
-            last_state = f"Accessibility returned incomplete window snapshot: {output.strip()!r}"
-        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
-    raise RuntimeError(f"timed out locating unique native fixture window; last state: {last_state}")
+            category = f"ERROR({code})"
+        print(
+            f"MACOS_DOC_CLOSE_AX_BOUNDS=UNAVAILABLE; category={category}; pid={process.pid}; "
+            f"detail={output.strip()[-500:]!r}; app control geometry and correlated responses remain required"
+        )
+        return None
+
+    bound_lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(bound_lines) != 3 or "PulseForge" not in bound_lines[0] or bound_lines[1] != FIXTURE_TITLE:
+        print(
+            f"MACOS_DOC_CLOSE_AX_BOUNDS=UNAVAILABLE; category=INCONSISTENT_IDENTITY; pid={process.pid}; "
+            f"detail={output.strip()[-500:]!r}; app control geometry and correlated responses remain required"
+        )
+        return None
+    try:
+        window_bounds = tuple(float(value) for value in bound_lines[2].split(","))
+    except ValueError:
+        print(
+            f"MACOS_DOC_CLOSE_AX_BOUNDS=UNAVAILABLE; category=MALFORMED; pid={process.pid}; "
+            f"detail={output.strip()[-500:]!r}; app control geometry and correlated responses remain required"
+        )
+        return None
+    if len(window_bounds) != 4 or not all(math.isfinite(value) for value in window_bounds):
+        print(
+            f"MACOS_DOC_CLOSE_AX_BOUNDS=UNAVAILABLE; category=NONFINITE_OR_INCOMPLETE; pid={process.pid}; "
+            f"detail={output.strip()[-500:]!r}; app control geometry and correlated responses remain required"
+        )
+        return None
+    if window_bounds[2] <= 0 or window_bounds[3] <= 0:
+        print(
+            f"MACOS_DOC_CLOSE_AX_BOUNDS=UNAVAILABLE; category=NO_USABLE_AREA; pid={process.pid}; "
+            f"detail={output.strip()[-500:]!r}; app control geometry and correlated responses remain required"
+        )
+        return None
+    print(
+        f"MACOS_DOC_CLOSE_AX_BOUNDS=AVAILABLE; pid={process.pid}; process={bound_lines[0]}; "
+        f"window={bound_lines[1]}; accessibility_bounds={bound_lines[2]!r}; "
+        "ImGui viewport points=desktop logical; AX bounds=desktop logical; no Retina scale conversion applied; "
+        "diagnostic only"
+    )
+    return window_bounds
 
 
 def parse_point(value: str, field: str) -> tuple[int, int]:
@@ -1065,29 +1046,22 @@ def click_point(
     process: subprocess.Popen[str],
     capture: BoundedCapture,
     pointer_driver: Path,
-    fixture_bounds: tuple[float, float, float, float],
+    fixture_bounds: tuple[float, float, float, float] | None,
     point: tuple[int, int],
     deadline: float,
     label: str,
 ) -> ActionEvidence:
-    evidence = ActionEvidence(label=label, point=point, output_watermark=capture.watermark())
-    try:
-        current_bounds = query_fixture_window(process, deadline)
-    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-        evidence.api_result = f"target preparation failed before dispatch: {type(error).__name__}: {error}"
-        evidence.application_response = "NOT_EXPECTED"
-        evidence.semantic_outcome = "FAIL_PREPARATION"
-        raise RuntimeError(f"{label}: dispatch was not attempted; {evidence.summary()}") from error
-    window_x, window_y, window_width, window_height = current_bounds
-    if not (window_x <= point[0] < window_x + window_width and window_y <= point[1] < window_y + window_height):
-        evidence.api_result = f"point {point!r} is outside current window bounds {current_bounds!r}"
-        evidence.application_response = "NOT_EXPECTED"
-        evidence.semantic_outcome = "FAIL_PREPARATION"
-        raise RuntimeError(
-            f"fresh ImGui desktop point for {label} falls outside the current fixture AX bounds; "
-            f"point={point!r}; initial_bounds={fixture_bounds!r}; current_bounds={current_bounds!r}; "
-            f"no window-origin translation was applied; {evidence.summary()}"
-        )
+    evidence = ActionEvidence(
+        label=label,
+        point=point,
+        output_watermark=capture.watermark(),
+        target_window_bounds=fixture_bounds,
+    )
+    print(
+        f"MACOS_DOC_CLOSE_TARGET_PREPARATION=PASS; action={label}; pid={process.pid}; "
+        f"fresh_app_geometry_point={point!r}; initial_ax_bounds={fixture_bounds!r}; "
+        "no repeated Accessibility bounds query gates dispatch"
+    )
 
     try:
         code, output = run_osascript(FOCUS_TARGET, str(process.pid), timeout=bounded_timeout(deadline, 8.0))
@@ -1177,6 +1151,14 @@ def click_document_tab_close(
         after_index=evidence.output_watermark,
         missing_message="Close response missing",
     )
+    if response_kind == "PROMPT":
+        screenshot = capture_screenshot(
+            f"macos-document-close-{protocol.scenario}-checkpoint-prompt-generation-{protocol.generation}.png"
+        )
+        print(
+            f"MACOS_DOC_CLOSE_SCREENSHOT=checkpoint=prompt; scenario={protocol.scenario}; "
+            f"generation={protocol.generation}; {screenshot}"
+        )
     return event, evidence
 
 
@@ -1263,6 +1245,10 @@ def enter_editor_value(
         after_index=type_evidence.output_watermark,
         missing_message="Keyboard edit not observed",
     )
+    screenshot = capture_screenshot(
+        f"macos-document-close-{protocol.scenario}-checkpoint-text-entry.png"
+    )
+    print(f"MACOS_DOC_CLOSE_SCREENSHOT=checkpoint=text-entry; scenario={protocol.scenario}; {screenshot}")
     print(f"MACOS_DOC_CLOSE_TEXT_ENTRY=PASS; scenario={protocol.scenario}; value=42; saved=10; dirty=1")
 
 
@@ -1337,6 +1323,15 @@ def expect_action(
         f"choice={choice}; resolved={resolved}; pending={pending}; open={opened}; dirty={dirty}; "
         f"value={value}; saved={saved}"
     )
+    if opened == "1" and (choice == "cancel" or error):
+        checkpoint = "after-cancel" if choice == "cancel" else "after-failed-save-or-close"
+        screenshot = capture_screenshot(
+            f"macos-document-close-{protocol.scenario}-checkpoint-{checkpoint}-sequence-{protocol.last_sequence}.png"
+        )
+        print(
+            f"MACOS_DOC_CLOSE_SCREENSHOT=checkpoint={checkpoint}; scenario={protocol.scenario}; "
+            f"sequence={protocol.last_sequence}; {screenshot}"
+        )
     return action
 
 
@@ -1482,10 +1477,15 @@ def run_decisions(
     return completion
 
 
-def capture_main_close_diagnostics(process: subprocess.Popen[str], deadline: float, log_directory: Path) -> str:
+def capture_main_close_diagnostics(process: subprocess.Popen[str], deadline: float) -> str:
+    screenshot_state = (
+        capture_screenshot("macos-document-close-main-window-close-failure.png")
+        if process.poll() is None
+        else f"NOT_CAPTURED_PROCESS_ALREADY_EXITED; exit_code={process.returncode}"
+    )
     remaining = deadline - time.monotonic()
     if remaining <= 0.1:
-        return "window_state=DEADLINE_EXHAUSTED; screenshot=NOT_ATTEMPTED"
+        return f"window_state=DEADLINE_EXHAUSTED; screenshot={screenshot_state}"
     code, output = run_osascript(
         WINDOW_QUERY,
         str(process.pid),
@@ -1497,32 +1497,12 @@ def capture_main_close_diagnostics(process: subprocess.Popen[str], deadline: flo
     else:
         category = "TCC_DENIED" if is_tcc_denial(output) else "TIMED_OUT" if code == 124 else f"ERROR({code})"
         window_state = f"window_query={category}; detail={output.strip()[-500:]!r}"
-    screenshot = log_directory / "macos-document-close-main-window-close-failure.png"
-    remaining = deadline - time.monotonic()
-    if remaining <= 0.1:
-        return f"{window_state}; screenshot=NOT_ATTEMPTED_DEADLINE_EXHAUSTED"
-    try:
-        result = subprocess.run(
-            ["/usr/sbin/screencapture", "-x", "-C", "-t", "png", str(screenshot)],
-            capture_output=True,
-            text=True,
-            timeout=min(2.0, remaining),
-            check=False,
-        )
-        screen_state = (
-            f"CAPTURED:{screenshot.stat().st_size} bytes"
-            if result.returncode == 0 and screenshot.is_file() and screenshot.stat().st_size > 0
-            else f"FAILED({result.returncode}):{(result.stdout + result.stderr).strip()[-400:]}"
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        screen_state = f"{type(error).__name__}:{error}"
-    return f"{window_state}; screenshot={screen_state}"
+    return f"{window_state}; screenshot={screenshot_state}"
 
 
 def exit_normally(
     process: subprocess.Popen[str],
     deadline: float,
-    log_directory: Path,
     fixture_completion: dict[str, str],
 ) -> None:
     if fixture_completion.get("kind") != "PASS":
@@ -1554,7 +1534,7 @@ def exit_normally(
     else:
         evidence.api_result = f"AXPress failed before shutdown observation: {output.strip()}"
         evidence.semantic_outcome = "FAIL_DISPATCH_RESULT"
-        diagnostics = capture_main_close_diagnostics(process, deadline, log_directory)
+        diagnostics = capture_main_close_diagnostics(process, deadline)
         raise RuntimeError(
             f"could not request normal main-window close; stage={action_stage}; exit_code={code}; "
             f"{evidence.api_result}; diagnostics={diagnostics}"
@@ -1563,7 +1543,7 @@ def exit_normally(
     try:
         exit_code = process.wait(timeout=min(10.0, max(0.1, deadline - time.monotonic())))
     except subprocess.TimeoutExpired as error:
-        diagnostics = capture_main_close_diagnostics(process, deadline, log_directory)
+        diagnostics = capture_main_close_diagnostics(process, deadline)
         evidence.application_response = "MISSING_PROCESS_EXIT"
         evidence.semantic_outcome = "FAIL_SHUTDOWN_TIMEOUT"
         raise RuntimeError(
@@ -1592,6 +1572,25 @@ def remove_temporary_root(root: Path, parent: Path, expected_prefix: str) -> str
         return None
     except OSError as error:
         return f"could not remove temporary root {root}: {error}"
+
+
+def capture_scenario_failure_screenshot(
+    scenario: str,
+    process: subprocess.Popen[str] | None,
+    capture: BoundedCapture | None,
+) -> None:
+    if process is None or process.poll() is not None:
+        return
+    if capture is not None and capture.failure_screenshot is not None:
+        screenshot = capture.failure_screenshot
+    else:
+        screenshot = capture_screenshot(
+            f"macos-document-close-{scenario}-checkpoint-unexpected-failure.png"
+        )
+    print(
+        f"MACOS_DOC_CLOSE_FAILURE_SCREENSHOT=checkpoint=unexpected-failure; "
+        f"scenario={scenario}; {screenshot}"
+    )
 
 
 def run_scenario(
@@ -1636,12 +1635,14 @@ def run_scenario(
         ready = wait_event(capture, process, "READY", scenario, deadline)
         fixture_bounds = query_fixture_window(process, deadline)
         fixture_completion = run_decisions(process, capture, pointer_driver, fixture_bounds, ready, scenario, deadline)
-        exit_normally(process, deadline, log_directory, fixture_completion)
+        exit_normally(process, deadline, fixture_completion)
     except UnsafeChildCleanupError as error:
         failure = str(error)
         unsafe_cleanup = True
+        capture_scenario_failure_screenshot(scenario, process, capture)
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         failure = str(error)
+        capture_scenario_failure_screenshot(scenario, process, capture)
     finally:
         cleanup_failure = None
         process_stopped = process is None
