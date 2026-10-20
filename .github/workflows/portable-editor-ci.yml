@@ -12,10 +12,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  macos-automation-bridge:
+    name: macOS · JXA permission bridge probe
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v5
+
+      - name: Test the automation harness and BridgeSupport ABI
+        run: python3 Tests/Platform/MacOSDocumentCloseSmokeTests.py
+
+      - name: Build and import the private framework in osascript
+        run: |
+          set -o pipefail
+          source Tests/Platform/BuildMacOSAutomationPermissionBridge.sh
+          python3 Tests/Platform/MacOSAutomationClient.py 2>&1 |
+            tee "$RUNNER_TEMP/macos-automation-permission-probe.log"
+
+      - name: Upload compact bridge diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-automation-bridge-evidence
+          path: |
+            ${{ runner.temp }}/macos-automation-permission-bridge-build.log
+            ${{ runner.temp }}/macos-automation-permission-probe.log
+          if-no-files-found: ignore
+          retention-days: 1
+
   macos-desktop:
     name: macOS 26 · Apple Silicon · PulseForge Vulkan/MoltenVK desktop
     runs-on: macos-26
     timeout-minutes: 90
+    needs: macos-automation-bridge
+    if: ${{ always() && !cancelled() }}
     steps:
       - name: Check out sources
         id: checkout_sources
@@ -34,39 +65,7 @@ jobs:
         if: ${{ always() && !cancelled() && steps.checkout_sources.outcome == 'success' }}
         run: |
           set -o pipefail
-          BRIDGE="$RUNNER_TEMP/PFAutomationPermission.framework"
-          mkdir -p "$BRIDGE/Versions/A/Headers" "$BRIDGE/Versions/A/Modules" "$BRIDGE/Versions/A/Resources"
-          cp Tests/Platform/MacOSAutomationPermissionBridge.h "$BRIDGE/Versions/A/Headers/"
-          cat > "$BRIDGE/Versions/A/Modules/module.modulemap" <<'EOF'
-          framework module PFAutomationPermission {
-            header "MacOSAutomationPermissionBridge.h"
-            export *
-          }
-          EOF
-          cat > "$BRIDGE/Versions/A/Resources/Info.plist" <<'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>CFBundleIdentifier</key><string>com.pulseforge.test.automation-permission</string>
-            <key>CFBundleExecutable</key><string>PFAutomationPermission</string>
-            <key>CFBundlePackageType</key><string>FMWK</string>
-            <key>CFBundleVersion</key><string>1</string>
-          </dict></plist>
-          EOF
-          clang -fobjc-arc -fmodules -dynamiclib \
-            -Wl,-install_name,@rpath/PFAutomationPermission.framework/Versions/A/PFAutomationPermission \
-            -framework Foundation -framework ApplicationServices \
-            Tests/Platform/MacOSAutomationPermissionBridge.m \
-            -o "$BRIDGE/Versions/A/PFAutomationPermission" 2>&1 |
-            tee "$RUNNER_TEMP/macos-automation-permission-bridge-build.log"
-          ln -s A "$BRIDGE/Versions/Current"
-          ln -s Versions/Current/Headers "$BRIDGE/Headers"
-          ln -s Versions/Current/Modules "$BRIDGE/Modules"
-          ln -s Versions/Current/Resources "$BRIDGE/Resources"
-          ln -s Versions/Current/PFAutomationPermission "$BRIDGE/PFAutomationPermission"
-          ln -s Versions/Current/Resources/Info.plist "$BRIDGE/Info.plist"
-          export PULSEFORGE_MACOS_AUTOMATION_BRIDGE="$BRIDGE"
-          echo "PULSEFORGE_MACOS_AUTOMATION_BRIDGE=$BRIDGE" >> "$GITHUB_ENV"
+          source Tests/Platform/BuildMacOSAutomationPermissionBridge.sh
           python3 Tests/Platform/MacOSAutomationClient.py 2>&1 | tee "$RUNNER_TEMP/macos-automation-permission-probe.log"
 
       - name: Probe hosted Metal command execution
@@ -378,6 +377,7 @@ jobs:
             ${{ runner.temp }}/macos-document-close-save-retry.log
             ${{ runner.temp }}/macos-document-close-close-retry.log
             ${{ runner.temp }}/macos-document-close-*-outcome-missing.png
+            ${{ runner.temp }}/macos-document-close-*-stack-sample.txt
             ${{ runner.temp }}/macos-document-close-main-window-close-failure.png
             ${{ runner.temp }}/macos-document-close-harness-tests.log
             ${{ runner.temp }}/macos-configure-release.log

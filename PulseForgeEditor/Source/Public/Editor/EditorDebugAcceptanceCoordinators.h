@@ -54,6 +54,12 @@ namespace PulseForgeEditor::Detail
 		bool Active = false;
 		bool Clicked = false;
 		bool MouseDown = false;
+		bool RawMouseDown = false;
+		bool MouseClickedEvent = false;
+		bool MouseReleasedEvent = false;
+		bool NativeWindowFocused = false;
+		bool NativeWindowHovered = false;
+		int Frame = 0;
 		float MinimumX = 0.0f;
 		float MinimumY = 0.0f;
 		float MaximumX = 0.0f;
@@ -62,6 +68,26 @@ namespace PulseForgeEditor::Detail
 		float MouseY = 0.0f;
 		uint32_t WindowViewport = 0;
 		uint32_t MouseViewport = 0;
+	};
+
+	enum class DocumentCloseUiMouseAction : uint8_t
+	{
+		Release,
+		Press,
+		Repeat
+	};
+
+	struct DocumentCloseUiMouseButtonObservation
+	{
+		uint32_t Viewport = 0;
+		DocumentCloseUiMouseAction Action = DocumentCloseUiMouseAction::Release;
+		int Modifiers = 0;
+		double LocalX = 0.0;
+		double LocalY = 0.0;
+		double SteadyMilliseconds = 0.0;
+		bool MainWindow = false;
+		bool NativeWindowFocused = false;
+		bool NativeWindowHovered = false;
 	};
 
 	struct DocumentCloseUiTabInputObservation
@@ -138,6 +164,7 @@ namespace PulseForgeEditor::Detail
 		[[nodiscard]] bool BeginCloseRequest(std::string_view HostID, bool Pending, std::string_view PendingHostID);
 		void ReportTextField(const DocumentCloseUiTextObservation& Observation);
 		void ReportDecisionPointer(const DocumentCloseUiDecisionPointerObservation& Observation);
+		void ReportGlfwMouseButton(const DocumentCloseUiMouseButtonObservation& Observation);
 		void ReportCloseControl(std::string_view HostID, const EditorDocumentIdentity& Identity, int X, int Y);
 		void ReportTabInput(
 			std::string_view HostID, const EditorDocumentIdentity& Identity, const DocumentCloseUiTabInputObservation& Observation);
@@ -186,6 +213,9 @@ namespace PulseForgeEditor::Detail
 		bool m_DecisionPointerStateReported = false;
 		DocumentCloseUiDecisionPointerObservation m_LastDecisionPointer{};
 		size_t m_DecisionPointerReportCount = 0;
+		int m_LastDecisionHeartbeatFrame = 0;
+		size_t m_DecisionHeartbeatCount = 0;
+		size_t m_GlfwMouseButtonReportCount = 0;
 	};
 
 	enum class EditorRuntimePlayStopAction : uint8_t

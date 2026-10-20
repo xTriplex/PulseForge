@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from MacOSAutomationClient import capture_failure_context, probe_osascript_access
@@ -26,7 +27,10 @@ from MacOSScreenshot import capture_screenshot
 MAX_LOG_BYTES = 128 * 1024
 MAX_CONSOLE_BYTES = 48 * 1024
 MAX_EVENT_COUNT = 128
-TELEMETRY_MARKERS = {"TEXT_POINTER", "DECISION_POINTER", "DIAG_TAB_INPUT", "DIAG_TAB_CLOSE_REQUEST"}
+TELEMETRY_MARKERS = {
+    "TEXT_POINTER", "DECISION_POINTER", "DIAG_TAB_INPUT", "DIAG_TAB_CLOSE_REQUEST",
+    "DIAG_DECISION_HEARTBEAT", "DIAG_GLFW_MOUSE_BUTTON",
+}
 CONTROL_MARKERS = {"CLOSE_CONTROL", "PROMPT_GEOMETRY", "ALLOW_CLOSE_CONTROL"}
 ACTION_RESPONSE_SECONDS = 15.0
 FIXTURE_TITLE = "Host Test Fixture 1"
@@ -172,11 +176,13 @@ func fail(_ message: String, _ status: Int32) -> Never {
     exit(status)
 }
 
-guard CommandLine.arguments.count == 4,
+guard CommandLine.arguments.count == 5,
       let targetPID = Int32(CommandLine.arguments[1]),
-      let x = Double(CommandLine.arguments[2]),
-      let y = Double(CommandLine.arguments[3]) else {
-    fail("CGEvent input requires PID and finite desktop coordinates", 2)
+      let actionID = CommandLine.arguments[2],
+      let eventTag = UInt64(actionID.prefix(16), radix: 16),
+      let x = Double(CommandLine.arguments[3]),
+      let y = Double(CommandLine.arguments[4]) else {
+    fail("CGEvent input requires PID, click identity and finite desktop coordinates", 2)
 }
 guard x.isFinite, y.isFinite else {
     fail("CGEvent input coordinates are not finite", 2)
@@ -186,19 +192,29 @@ guard CGPreflightPostEventAccess() else {
 }
 
 let location = CGPoint(x: x, y: y)
-func post(_ type: CGEventType) {
+let sourcePID = getpid()
+let sourceName = String(cString: getprogname())
+func post(_ type: CGEventType, _ name: String, _ clickState: Int64) {
+    let attemptUptime = ProcessInfo.processInfo.systemUptime
     guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: location, mouseButton: .left) else {
         fail("CGEventCreateMouseEvent failed for event type \(type.rawValue)", 3)
     }
+    event.setIntegerValueField(.mouseEventClickState, value: clickState)
+    event.setIntegerValueField(.eventSourceUserData, value: Int64(truncatingIfNeeded: eventTag))
     event.post(tap: .cghidEventTap)
+    let returnedUptime = ProcessInfo.processInfo.systemUptime
+    print("CGEventPost=EVENT; click_id=\(actionID); event_tag=\(eventTag); event=\(name); attempt_uptime=\(attemptUptime); " +
+          "returned_uptime=\(returnedUptime); source_pid=\(sourcePID); source_name=\(sourceName); target_pid=\(targetPID); " +
+          "point=\(Int(x.rounded())),\(Int(y.rounded())); click_state=\(clickState); post_returned=1; route=global-hid-event-stream")
 }
 
-post(.mouseMoved)
+post(.mouseMoved, "move", 0)
 Thread.sleep(forTimeInterval: 0.05)
-post(.leftMouseDown)
+post(.leftMouseDown, "down", 1)
 Thread.sleep(forTimeInterval: 0.05)
-post(.leftMouseUp)
-print("CGEventPost=POSTED; pid=\(targetPID); point=\(Int(x.rounded())),\(Int(y.rounded())); access=preflight-approved")
+post(.leftMouseUp, "up", 1)
+print("CGEventPost=SEQUENCE_RETURNED; click_id=\(actionID); source_pid=\(sourcePID); source_name=\(sourceName); " +
+      "target_pid=\(targetPID); access=preflight-approved; post_return_is_not_application_acknowledgement")
 '''
 
 TYPE_EDITOR_VALUE = '''on run argv
@@ -368,6 +384,7 @@ class BoundedCapture:
 @dataclass
 class ActionEvidence:
     label: str
+    action_id: str = ""
     dispatch_attempted: bool = False
     api_exit_code: int | None = None
     api_result: str = "not attempted"
@@ -383,6 +400,7 @@ class ActionEvidence:
     def summary(self) -> str:
         return (
             f"label={self.label}; dispatch_attempted={int(self.dispatch_attempted)}; "
+            f"action_id={self.action_id}; "
             f"api_exit_code={self.api_exit_code}; transport_uncertain={int(self.transport_uncertain)}; "
             f"api_result={self.api_result!r}; "
             f"pointer_observation={self.pointer_observation}; application_response={self.application_response}; "
@@ -873,6 +891,9 @@ def capture_action_diagnostics(
             else:
                     evidence.pointer_observation = f"UNAVAILABLE:ERROR({code}):{output.strip()[-500:]}"
 
+    stack_sample = "NOT_REQUESTED"
+    if evidence.application_response == "MISSING" and process.poll() is None:
+        stack_sample = capture_owned_editor_stack_sample(process, capture, evidence, deadline)
     automation_context = capture_failure_context("dirty-close-action-outcome", process.pid)
     print(f"MACOS_DOC_CLOSE_AUTOMATION_CONTEXT={automation_context!r}")
     screenshot = capture_screenshot(
@@ -884,9 +905,40 @@ def capture_action_diagnostics(
     state = "running" if process.poll() is None else f"exited({process.returncode})"
     return (
         f"process={state}; pointer={evidence.pointer_observation}; screenshot={screenshot_state}; "
+        f"stack_sample={stack_sample}; "
         f"recent_telemetry={[marker.get('raw') for marker in telemetry]!r}; "
         f"dropped_telemetry={capture.telemetry_dropped}"
     )
+
+
+def capture_owned_editor_stack_sample(
+    process: subprocess.Popen[str], capture: BoundedCapture, evidence: ActionEvidence, deadline: float
+) -> str:
+    if process.poll() is not None:
+        return f"NOT_CAPTURED_PROCESS_EXITED({process.returncode})"
+    scenario = (evidence.expected_marker_fields or {}).get("scenario", "unknown")
+    action = evidence.action_id[:12] or "unidentified"
+    name = f"macos-document-close-{scenario}-{action}-stack-sample.txt"
+    output_path = capture.log_path.with_name(name)
+    timeout = min(3.0, max(0.1, deadline - time.monotonic()))
+    try:
+        exit_code, stdout, stderr = run_bounded_command(
+            ["/usr/bin/sample", str(process.pid), "1", "-file", str(output_path)], timeout=timeout
+        )
+    except (OSError, UnsafeChildCleanupError) as error:
+        return f"CAPTURE_FAILED:{type(error).__name__}:{error}"
+    if exit_code != 0 or not output_path.is_file():
+        return f"CAPTURE_FAILED:exit_code={exit_code}; stdout={stdout[-500:]!r}; stderr={stderr[-500:]!r}"
+    try:
+        with output_path.open("rb") as stream:
+            sample = stream.read(128 * 1024 + 1)
+        truncated = len(sample) > 128 * 1024 or output_path.stat().st_size > 128 * 1024
+        if truncated:
+            sample = sample[: 128 * 1024] + b"\n[stack sample truncated at 128 KiB]\n"
+            output_path.write_bytes(sample)
+    except OSError as error:
+        return f"CAPTURE_FAILED:could not bound or inspect output: {type(error).__name__}:{error}"
+    return f"CAPTURED:path={output_path}; bytes={len(sample)}; truncated={int(truncated)}"
 
 
 def drain_prompt_geometry(capture: BoundedCapture, protocol: MarkerProtocol) -> None:
@@ -1061,13 +1113,14 @@ def click_point(
 ) -> ActionEvidence:
     evidence = ActionEvidence(
         label=label,
+        action_id=uuid.uuid4().hex,
         point=point,
         output_watermark=capture.watermark(),
         target_window_bounds=fixture_bounds,
     )
     print(
         f"MACOS_DOC_CLOSE_TARGET_PREPARATION=PASS; action={label}; pid={process.pid}; "
-        f"fresh_app_geometry_point={point!r}; initial_ax_bounds={fixture_bounds!r}; "
+        f"action_id={evidence.action_id}; fresh_app_geometry_point={point!r}; initial_ax_bounds={fixture_bounds!r}; "
         "no repeated Accessibility bounds query gates dispatch"
     )
 
@@ -1089,7 +1142,7 @@ def click_point(
     evidence.output_watermark = capture.watermark()
     try:
         exit_code, stdout, stderr = run_bounded_command(
-            [str(pointer_driver), str(process.pid), str(point[0]), str(point[1])],
+            [str(pointer_driver), str(process.pid), evidence.action_id, str(point[0]), str(point[1])],
             timeout=bounded_timeout(deadline, 5.0),
         )
     except UnsafeChildCleanupError as error:
@@ -1114,7 +1167,8 @@ def click_point(
     else:
         evidence.api_result = f"Quartz dispatch failed; stdout={stdout[-1000:]!r}; stderr={stderr[-1000:]!r}"
     print(
-        f"MACOS_DOC_CLOSE_POINTER_INPUT=RESULT; {evidence.summary()}; api_detail={evidence.api_result!r}"
+        f"MACOS_DOC_CLOSE_POINTER_INPUT=RESULT; {evidence.summary()}; api_detail={evidence.api_result!r}; "
+        "posting return is transport evidence only"
     )
     return evidence
 

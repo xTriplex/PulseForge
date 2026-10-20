@@ -736,6 +736,11 @@ namespace
 			}
 			m_GlfwBackendActive = true;
 
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			if (m_DocumentCloseAcceptance && m_DocumentCloseAcceptance->IsEnabled())
+				RefreshDocumentCloseMouseButtonObservers();
+#endif
+
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			if (!ImGui_ImplOpenGL3_Init("#version 410"))
 			{
@@ -1099,6 +1104,10 @@ namespace
 #endif
 				ImGui::UpdatePlatformWindows();
 				ImGuiPlatformIO& PlatformIO = ImGui::GetPlatformIO();
+#if defined(_DEBUG) || defined(PF_DEBUG)
+				if (m_DocumentCloseAcceptance && m_DocumentCloseAcceptance->IsEnabled())
+					RefreshDocumentCloseMouseButtonObservers();
+#endif
 				for (int Index = 1; Index < PlatformIO.Viewports.Size; ++Index)
 				{
 					ImGuiViewport* Viewport = PlatformIO.Viewports[Index];
@@ -1893,6 +1902,68 @@ namespace
 			if (m_DocumentCloseAcceptance) m_DocumentCloseAcceptance->Fail(Reason);
 		}
 
+		void RefreshDocumentCloseMouseButtonObservers()
+		{
+			if (!m_DocumentCloseAcceptance || !m_DocumentCloseAcceptance->IsEnabled()) return;
+			std::unordered_set<GLFWwindow*> LiveWindows;
+			if (auto* MainWindow = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow()))
+			{
+				LiveWindows.insert(MainWindow);
+				if (!m_DocumentCloseMouseButtonCallbacks.contains(MainWindow))
+					m_DocumentCloseMouseButtonCallbacks.emplace(MainWindow,
+						glfwSetMouseButtonCallback(MainWindow, &EditorLayer::ObserveDocumentCloseMouseButton));
+			}
+			const ImGuiPlatformIO& PlatformIO = ImGui::GetPlatformIO();
+			for (int Index = 0; Index < PlatformIO.Viewports.Size; ++Index)
+			{
+				const ImGuiViewport* Viewport = PlatformIO.Viewports[Index];
+				GLFWwindow* Window = Viewport ? static_cast<GLFWwindow*>(Viewport->PlatformHandle) : nullptr;
+				if (!Window) continue;
+				LiveWindows.insert(Window);
+				if (!m_DocumentCloseMouseButtonCallbacks.contains(Window))
+					m_DocumentCloseMouseButtonCallbacks.emplace(Window,
+						glfwSetMouseButtonCallback(Window, &EditorLayer::ObserveDocumentCloseMouseButton));
+			}
+			std::erase_if(m_DocumentCloseMouseButtonCallbacks,
+				[&LiveWindows](const auto& Entry) { return !LiveWindows.contains(Entry.first); });
+		}
+
+		static void ObserveDocumentCloseMouseButton(GLFWwindow* Window, int Button, int Action, int Modifiers)
+		{
+			ImGuiContext* Context = ImGui::GetCurrentContext();
+			if (!Context) return;
+			auto* Layer = static_cast<EditorLayer*>(ImGui::GetIO().UserData);
+			if (!Layer) return;
+			const auto Callback = Layer->m_DocumentCloseMouseButtonCallbacks.find(Window);
+			if (Callback == Layer->m_DocumentCloseMouseButtonCallbacks.end()) return;
+			if (Callback->second) Callback->second(Window, Button, Action, Modifiers);
+			if (Button != GLFW_MOUSE_BUTTON_LEFT) return;
+			if (!Layer->m_DocumentCloseAcceptance || !Layer->m_DocumentCloseAcceptance->IsEnabled()) return;
+
+			PulseForgeEditor::Detail::DocumentCloseUiMouseButtonObservation Observation;
+			Observation.MainWindow = Window == PulseForge::Application::Get().GetWindow().GetNativeWindow();
+			const ImGuiPlatformIO& PlatformIO = ImGui::GetPlatformIO();
+			for (int Index = 0; Index < PlatformIO.Viewports.Size; ++Index)
+			{
+				const ImGuiViewport* Viewport = PlatformIO.Viewports[Index];
+				if (Viewport && Viewport->PlatformHandle == Window)
+				{
+					Observation.Viewport = Viewport->ID;
+					break;
+				}
+			}
+			Observation.Action = Action == GLFW_PRESS ? PulseForgeEditor::Detail::DocumentCloseUiMouseAction::Press :
+				Action == GLFW_REPEAT ? PulseForgeEditor::Detail::DocumentCloseUiMouseAction::Repeat :
+				PulseForgeEditor::Detail::DocumentCloseUiMouseAction::Release;
+			Observation.Modifiers = Modifiers;
+			glfwGetCursorPos(Window, &Observation.LocalX, &Observation.LocalY);
+			Observation.SteadyMilliseconds = std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now().time_since_epoch()).count();
+			Observation.NativeWindowFocused = glfwGetWindowAttrib(Window, GLFW_FOCUSED) == GLFW_TRUE;
+			Observation.NativeWindowHovered = glfwGetWindowAttrib(Window, GLFW_HOVERED) == GLFW_TRUE;
+			Layer->m_DocumentCloseAcceptance->ReportGlfwMouseButton(Observation);
+		}
+
 		void ReportDocumentCloseUiDecisionPointer(std::string_view HostID, std::string_view Choice, bool Hovered, bool Active, bool Clicked,
 			const ImVec2& Minimum, const ImVec2& Maximum)
 		{
@@ -1907,6 +1978,10 @@ namespace
 			Observation.Active = Active;
 			Observation.Clicked = Clicked;
 			Observation.MouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+			Observation.RawMouseDown = IO.MouseDown[ImGuiMouseButton_Left];
+			Observation.MouseClickedEvent = IO.MouseClicked[ImGuiMouseButton_Left];
+			Observation.MouseReleasedEvent = IO.MouseReleased[ImGuiMouseButton_Left];
+			Observation.Frame = ImGui::GetFrameCount();
 			Observation.MinimumX = Minimum.x;
 			Observation.MinimumY = Minimum.y;
 			Observation.MaximumX = Maximum.x;
@@ -1915,6 +1990,12 @@ namespace
 			Observation.MouseY = IO.MousePos.y;
 			Observation.WindowViewport = WindowViewport ? static_cast<uint32_t>(WindowViewport->ID) : 0;
 			Observation.MouseViewport = static_cast<uint32_t>(IO.MouseHoveredViewport);
+			if (WindowViewport && WindowViewport->PlatformHandle)
+			{
+				auto* NativeWindow = static_cast<GLFWwindow*>(WindowViewport->PlatformHandle);
+				Observation.NativeWindowFocused = glfwGetWindowAttrib(NativeWindow, GLFW_FOCUSED) == GLFW_TRUE;
+				Observation.NativeWindowHovered = glfwGetWindowAttrib(NativeWindow, GLFW_HOVERED) == GLFW_TRUE;
+			}
 			m_DocumentCloseAcceptance->ReportDecisionPointer(Observation);
 		}
 
@@ -6927,6 +7008,9 @@ namespace
 			ImGui::SetCurrentContext(m_Context);
 			m_ViewportRenderView.ResetTarget();
 			if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) ImGui::DestroyPlatformWindows();
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			m_DocumentCloseMouseButtonCallbacks.clear();
+#endif
 			if (m_Project)
 			{
 				m_DocumentWorkspaceStore.MarkDirty(false);
@@ -7035,6 +7119,7 @@ namespace
 #if defined(_DEBUG) || defined(PF_DEBUG)
 		std::unique_ptr<PulseForgeEditor::Detail::EditorRuntimePlayStopCoordinator> m_EditorRuntimePlayStopCoordinator;
 		std::unique_ptr<PulseForgeEditor::Detail::DocumentCloseAcceptanceCoordinator> m_DocumentCloseAcceptance;
+		std::unordered_map<GLFWwindow*, GLFWmousebuttonfun> m_DocumentCloseMouseButtonCallbacks;
 #endif
 		bool m_DocumentHostTestFixture = false;
 		bool m_DocumentHostResetLayoutTest = false;

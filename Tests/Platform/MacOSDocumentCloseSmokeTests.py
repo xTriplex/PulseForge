@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -57,6 +58,100 @@ def marker(kind: str, **fields: str) -> dict[str, str]:
 class DirtyCloseProtocolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.protocol = smoke.MarkerProtocol("cancel-save", "host-a", "asset-a", 0)
+
+    def test_permission_bridge_metadata_matches_the_fixed_c_abi(self) -> None:
+        platform_dir = Path(__file__).parent
+        metadata_path = platform_dir / "PFAutomationPermission.bridgesupport"
+        metadata = ET.parse(metadata_path).getroot()
+        header = (platform_dir / "MacOSAutomationPermissionBridge.h").read_text(encoding="utf-8")
+        expected = {
+            "PFProbeSystemEventsDescriptor",
+            "PFReadSystemEventsNativeAddress",
+            "PFTypeWildCardEventClass",
+            "PFTypeWildCardEventID",
+            "PFDetermineSystemEventsPermission",
+        }
+
+        self.assertEqual("signatures", metadata.tag)
+        self.assertEqual("1.0", metadata.attrib.get("version"))
+        functions = metadata.findall("function")
+        self.assertEqual(expected, {function.attrib.get("name") for function in functions})
+        for function in functions:
+            self.assertEqual([], function.findall("arg"), function.attrib.get("name"))
+            self.assertEqual({"type": "i"}, function.find("retval").attrib, function.attrib.get("name"))
+            self.assertIn(f"int32_t {function.attrib['name']}(void);", header)
+
+    def test_real_probe_script_imports_metadata_framework_and_calls_exported_functions(self) -> None:
+        script = automation._probe_script(Path("/tmp/PFAutomationPermission.framework"))
+
+        self.assertIn('ObjC.import(bridgePath);', script)
+        self.assertIn("$.PFProbeSystemEventsDescriptor()", script)
+        self.assertIn("$.PFDetermineSystemEventsPermission()", script)
+        self.assertIn("runningApplicationsWithBundleIdentifier", script)
+        self.assertIn("NSThread.sleepForTimeInterval(0.1)", script)
+        self.assertIn("systemEventsTargetRunning", script)
+        self.assertNotIn("ObjC.bindFunction", script)
+
+    def test_permission_probe_launches_system_events_with_a_bounded_noninteractive_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = Path(temporary) / "PFAutomationPermission.framework"
+            bridge.mkdir()
+            result = {
+                "stage": "complete", "descriptorType": 1, "wildcardClass": 2, "wildcardEvent": 2,
+                "appleEventsStatus": 0, "systemEventsTargetRunning": True, "axTrusted": True, "quartzAllowed": True,
+            }
+
+            class Probe:
+                pid = 129
+                returncode = 0
+
+                @staticmethod
+                def communicate(timeout: float) -> tuple[str, None]:
+                    return json.dumps(result), None
+
+            with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
+                automation.subprocess, "run", return_value=Mock(returncode=0, stderr="")
+            ) as launch_target, patch.object(automation.subprocess, "Popen", return_value=Probe()):
+                state, _, detail = automation.probe_osascript_access()
+
+        self.assertEqual("OSASCRIPT_AX_APPLE_EVENTS_AUTHORIZED", state)
+        self.assertIn("SystemEventsTargetRunning=true", detail)
+        launch_target.assert_called_once_with(
+            ["/usr/bin/open", "-gj", "-b", "com.apple.systemevents"],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
+        )
+
+    def test_system_events_launch_timeout_fails_without_claiming_permission_denial(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = Path(temporary) / "PFAutomationPermission.framework"
+            bridge.mkdir()
+            with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
+                automation.subprocess, "run", side_effect=subprocess.TimeoutExpired(["/usr/bin/open"], 3.0)
+            ), patch.object(automation.subprocess, "Popen") as launch_probe:
+                state, pid, detail = automation.probe_osascript_access()
+
+        self.assertEqual("PROBE_TIMED_OUT", state)
+        self.assertIsNone(pid)
+        self.assertIn("System Events launch request timed out", detail)
+        launch_probe.assert_not_called()
+
+    def test_system_events_launch_failure_is_target_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = Path(temporary) / "PFAutomationPermission.framework"
+            bridge.mkdir()
+            with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
+                automation.subprocess, "run", return_value=Mock(returncode=1, stderr="application unavailable")
+            ) as launch_target, patch.object(automation.subprocess, "Popen") as launch_probe:
+                state, pid, detail = automation.probe_osascript_access()
+
+        self.assertEqual("APPLE_EVENTS_TARGET_UNAVAILABLE", state)
+        self.assertIsNone(pid)
+        self.assertIn("could not be started", detail)
+        launch_target.assert_called_once()
+        launch_probe.assert_not_called()
 
     def test_decision_pointer_telemetry_before_prompt_does_not_hide_response(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -112,6 +207,54 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             self.assertEqual(["DIAG_TAB_INPUT", "DIAG_TAB_CLOSE_REQUEST"], [event["kind"] for event in telemetry])
             self.assertIn("close_hovered=1", telemetry[0]["raw"])
 
+    def test_save_press_or_release_telemetry_without_correlated_action_still_fails(self) -> None:
+        cases = (
+            (
+                "press-without-release",
+                "PF_DOC_CLOSE_DIAG|GLFW_MOUSE_BUTTON|scenario=save-retry|host=host-a|asset=asset-a|generation=1|sequence=1|"
+                "viewport=7|main_window=0|button=left|action=press|modifiers=0|local=55,20|steady_ms=1.0|native_focused=1|native_hovered=1",
+                "PF_DOC_CLOSE_DIAG|DECISION_HEARTBEAT|scenario=save-retry|host=host-a|asset=asset-a|generation=1|choice=save|"
+                "frame=100|phase=awaiting-first-action|hovered=1|active=1|filtered_down=1|raw_down=1|raw_clicked=1|raw_released=0|"
+                "pressed=0|native_focused=1|native_hovered=1|window_viewport=7|mouse_viewport=7",
+            ),
+            (
+                "release-without-action",
+                "PF_DOC_CLOSE_DIAG|GLFW_MOUSE_BUTTON|scenario=save-retry|host=host-a|asset=asset-a|generation=1|sequence=2|"
+                "viewport=7|main_window=0|button=left|action=release|modifiers=0|local=55,20|steady_ms=2.0|native_focused=1|native_hovered=1",
+                "PF_DOC_CLOSE_DIAG|DECISION_HEARTBEAT|scenario=save-retry|host=host-a|asset=asset-a|generation=1|choice=save|"
+                "frame=101|phase=awaiting-first-action|hovered=1|active=0|filtered_down=0|raw_down=0|raw_clicked=0|raw_released=1|"
+                "pressed=0|native_focused=1|native_hovered=1|window_viewport=7|mouse_viewport=7",
+            ),
+        )
+        for name, button_event, heartbeat in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                script = f"print({button_event!r})\nprint({heartbeat!r})\n"
+                child = subprocess.Popen(
+                    [sys.executable, "-c", script], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+                )
+                capture = smoke.BoundedCapture(child, Path(temporary) / f"{name}.log")
+                child.wait(timeout=5)
+                capture.thread.join(timeout=5)
+                telemetry = capture.recent_telemetry({"scenario": "save-retry", "generation": "1"})
+                self.assertEqual(["DIAG_GLFW_MOUSE_BUTTON", "DIAG_DECISION_HEARTBEAT"], [item["kind"] for item in telemetry])
+
+                evidence = smoke.ActionEvidence(label="Save", dispatch_attempted=True, api_exit_code=0)
+                with self.assertRaisesRegex(RuntimeError, "Close response missing"):
+                    smoke.await_application_event(
+                        capture,
+                        FakeProcess(),
+                        "ACTION",
+                        "save-retry",
+                        time.monotonic() + 1.0,
+                        evidence,
+                        lambda _event: None,
+                        after_index=0,
+                        response_seconds=0.03,
+                        missing_message="Close response missing",
+                        diagnose=lambda *_: "release telemetry did not include the semantic ACTION",
+                    )
+                self.assertEqual("MISSING", evidence.application_response)
+
     def test_osascript_probe_checks_its_own_accessibility_appleevents_and_quartz_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             bridge = Path(temporary) / "PFAutomationPermission.framework"
@@ -122,6 +265,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
                 "wildcardClass": 707406378,
                 "wildcardEvent": 707406378,
                 "appleEventsStatus": 0,
+                "systemEventsTargetRunning": True,
                 "axTrusted": True,
                 "quartzAllowed": False,
             }
@@ -137,7 +281,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
                 automation.subprocess, "Popen", return_value=Probe()
             ) as launch:
-                state, pid, detail = automation.probe_osascript_access()
+                state, pid, detail = automation.probe_osascript_access(prepare_target=False)
 
         self.assertEqual("OSASCRIPT_AX_APPLE_EVENTS_AUTHORIZED", state)
         self.assertEqual(123, pid)
@@ -154,6 +298,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             result = {
                 "stage": "complete", "descriptorType": 1, "wildcardClass": 2, "wildcardEvent": 2,
                 "appleEventsStatus": -1743, "axTrusted": True, "quartzAllowed": True,
+                "systemEventsTargetRunning": True,
             }
 
             class Probe:
@@ -167,7 +312,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
                 automation.subprocess, "Popen", return_value=Probe()
             ):
-                state, pid, detail = automation.probe_osascript_access()
+                state, pid, detail = automation.probe_osascript_access(prepare_target=False)
 
         self.assertEqual("APPLE_EVENTS_DENIED", state)
         self.assertEqual(124, pid)
@@ -181,6 +326,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             result = {
                 "stage": "complete", "descriptorType": 1, "wildcardClass": 2, "wildcardEvent": 2,
                 "appleEventsStatus": 0, "axTrusted": False, "quartzAllowed": False,
+                "systemEventsTargetRunning": True,
             }
 
             class Probe:
@@ -194,7 +340,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
                 automation.subprocess, "Popen", return_value=Probe()
             ):
-                state, _, detail = automation.probe_osascript_access()
+                state, _, detail = automation.probe_osascript_access(prepare_target=False)
 
         self.assertEqual("AX_UNTRUSTED", state)
         self.assertIn("CGPreflightPostEventAccess=false", detail)
@@ -213,6 +359,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
                 result = {
                     "stage": "complete", "descriptorType": 1, "wildcardClass": 2, "wildcardEvent": 2,
                     "appleEventsStatus": status, "axTrusted": True, "quartzAllowed": True,
+                    "systemEventsTargetRunning": status != -600,
                 }
 
                 class Probe:
@@ -226,7 +373,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
                 with self.subTest(status=status), patch.dict(
                     os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}
                 ), patch.object(automation.subprocess, "Popen", return_value=Probe()):
-                    state, _, _ = automation.probe_osascript_access()
+                    state, _, _ = automation.probe_osascript_access(prepare_target=False)
                     self.assertEqual(expected, state)
 
     def test_osascript_probe_rejects_malformed_or_failed_bridge_invocation(self) -> None:
@@ -245,7 +392,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
                 automation.subprocess, "Popen", return_value=Probe()
             ):
-                state, _, detail = automation.probe_osascript_access()
+                state, _, detail = automation.probe_osascript_access(prepare_target=False)
             self.assertEqual("PROBE_IMPLEMENTATION_ERROR", state)
             self.assertIn("invalid probe serialization", detail)
 
@@ -253,7 +400,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
                 automation.subprocess, "Popen", return_value=Probe()
             ):
-                state, _, detail = automation.probe_osascript_access()
+                state, _, detail = automation.probe_osascript_access(prepare_target=False)
             self.assertEqual("PROBE_IMPLEMENTATION_ERROR", state)
             self.assertIn("exit_code=1", detail)
 
@@ -264,7 +411,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
                 automation.subprocess, "Popen", return_value=Probe()
             ):
-                state, _, detail = automation.probe_osascript_access()
+                state, _, detail = automation.probe_osascript_access(prepare_target=False)
             self.assertEqual("PROBE_IMPLEMENTATION_ERROR", state)
             self.assertIn("native-AEAddressDesc-access", detail)
             self.assertIn("-2700", detail)
@@ -284,7 +431,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
                 automation.subprocess, "Popen", return_value=Probe()
             ), patch.object(automation.os, "killpg") as kill_group:
-                state, pid, detail = automation.probe_osascript_access()
+                state, pid, detail = automation.probe_osascript_access(prepare_target=False)
 
         self.assertEqual("PROBE_TIMED_OUT", state)
         self.assertEqual(127, pid)
@@ -313,7 +460,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
                 automation.subprocess, "Popen", return_value=Probe()
             ), patch.object(automation.os, "killpg"):
-                state, pid, detail = automation.probe_osascript_access()
+                state, pid, detail = automation.probe_osascript_access(prepare_target=False)
 
         self.assertEqual("PROBE_CLEANUP_FAILED", state)
         self.assertEqual(128, pid)
@@ -370,6 +517,8 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         focus.assert_called_once()
         self.assertEqual(smoke.FOCUS_TARGET, focus.call_args.args[0])
         dispatch.assert_called_once()
+        self.assertEqual(5, len(dispatch.call_args.args[0]))
+        self.assertEqual(evidence.action_id, dispatch.call_args.args[0][2])
 
     def test_malformed_accessibility_bounds_are_diagnostic_only(self) -> None:
         class Process:
