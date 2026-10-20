@@ -80,6 +80,7 @@ namespace PulseForgeEditor::Detail
 	struct DocumentCloseUiMouseButtonObservation
 	{
 		uint32_t Viewport = 0;
+		uintptr_t NativeWindowIdentity = 0;
 		DocumentCloseUiMouseAction Action = DocumentCloseUiMouseAction::Release;
 		int Modifiers = 0;
 		double LocalX = 0.0;

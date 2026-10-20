@@ -278,6 +278,40 @@ class DirtyCloseProtocolTests(unittest.TestCase):
                     )
                 self.assertEqual("MISSING", evidence.application_response)
 
+    def test_cancel_press_and_release_are_retained_with_prompt_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = (
+                "PF_DOC_CLOSE_DIAG|GLFW_MOUSE_BUTTON|scenario=cancel-save|host=host-a|asset=asset-a|generation=3|"
+                "sequence=1|viewport=7|main_window=0|native_window=0x1234|button=left|action=press|modifiers=0|"
+                "local=55,20|steady_ms=1.0|native_focused=1|native_hovered=1\n"
+                "PF_DOC_CLOSE_DIAG|GLFW_MOUSE_BUTTON|scenario=cancel-save|host=host-a|asset=asset-a|generation=3|"
+                "sequence=2|viewport=7|main_window=0|native_window=0x1234|button=left|action=release|modifiers=0|"
+                "local=55,20|steady_ms=2.0|native_focused=1|native_hovered=1\n"
+                "PF_DOC_CLOSE_DIAG|DECISION_HEARTBEAT|scenario=cancel-save|host=host-a|asset=asset-a|generation=3|"
+                "choice=cancel|frame=101|phase=awaiting-first-action|hovered=1|active=0|filtered_down=0|raw_down=0|"
+                "raw_clicked=0|raw_released=1|pressed=0|native_focused=1|native_hovered=1|window_viewport=7|mouse_viewport=7\n"
+            )
+            child = subprocess.Popen(
+                [sys.executable, "-c", f"print({output!r}, end='')"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            capture = smoke.BoundedCapture(child, Path(temporary) / "cancel-pointer-diagnostics.log")
+            child.wait(timeout=5)
+            capture.thread.join(timeout=5)
+            telemetry = capture.recent_telemetry(
+                {"scenario": "cancel-save", "host": "host-a", "asset": "asset-a", "generation": "3"}
+            )
+            self.assertEqual(
+                ["DIAG_GLFW_MOUSE_BUTTON", "DIAG_GLFW_MOUSE_BUTTON", "DIAG_DECISION_HEARTBEAT"],
+                [event["kind"] for event in telemetry],
+            )
+            self.assertEqual("press", telemetry[0]["action"])
+            self.assertEqual("release", telemetry[1]["action"])
+            self.assertEqual("0x1234", telemetry[1]["native_window"])
+            self.assertEqual("1", telemetry[2]["raw_released"])
+
     def test_osascript_probe_checks_its_own_accessibility_appleevents_and_quartz_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             bridge = Path(temporary) / "PFAutomationPermission.framework"
