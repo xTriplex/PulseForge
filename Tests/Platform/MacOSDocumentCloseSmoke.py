@@ -254,9 +254,12 @@ guard CGPreflightPostEventAccess() else {
 let location = CGPoint(x: x, y: y)
 let sourcePID = getpid()
 let sourceName = String(cString: getprogname())
+guard let source = CGEventSource(stateID: .hidSystemState) else {
+    fail("CGEventSource creation failed for native pointer input", 3)
+}
 func post(_ type: CGEventType, _ name: String, _ clickState: Int64) {
     let attemptUptime = ProcessInfo.processInfo.systemUptime
-    guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: location, mouseButton: .left) else {
+    guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: location, mouseButton: .left) else {
         fail("CGEventCreateMouseEvent failed for event type \(type.rawValue)", 3)
     }
     event.setIntegerValueField(.mouseEventClickState, value: clickState)
@@ -265,7 +268,8 @@ func post(_ type: CGEventType, _ name: String, _ clickState: Int64) {
     let returnedUptime = ProcessInfo.processInfo.systemUptime
     print("CGEventPost=EVENT; click_id=\(actionID); event_tag=\(eventTag); event=\(name); attempt_uptime=\(attemptUptime); " +
           "returned_uptime=\(returnedUptime); source_pid=\(sourcePID); source_name=\(sourceName); target_pid=\(targetPID); " +
-          "point=\(Int(x.rounded())),\(Int(y.rounded())); click_state=\(clickState); post_returned=1; route=global-hid-event-stream")
+          "point=\(Int(x.rounded())),\(Int(y.rounded())); click_state=\(clickState); source_state=hid-system; " +
+          "post_returned=1; route=global-hid-event-stream")
 }
 
 post(.mouseMoved, "move", 0)
@@ -289,36 +293,6 @@ TYPE_EDITOR_VALUE = '''on run argv
     end tell
 end run
 '''
-
-MAIN_WINDOW_CLOSE = '''on run argv
-    set targetPID to item 1 of argv as integer
-    set expectedFragment to item 2 of argv as text
-    set stage to "PROCESS_LOOKUP"
-    try
-        tell application "System Events"
-            set targetProcess to first process whose unix id is targetPID
-            tell targetProcess
-                set stage to "WINDOW_LOOKUP"
-                set matches to {}
-                repeat with targetWindow in windows
-                    set windowTitle to name of targetWindow as text
-                    if windowTitle contains expectedFragment then set end of matches to targetWindow
-                end repeat
-                if (count of matches) is not 1 then error "Expected one main PulseForge Editor window for PID " & (targetPID as text)
-                set stage to "CLOSE_BUTTON_LOOKUP"
-                set closeControl to value of attribute "AXCloseButton" of item 1 of matches
-                if closeControl is missing value then error "Main editor AXCloseButton is missing"
-                set stage to "ACTION_DISPATCH"
-                perform action "AXPress" of closeControl
-                return "MACOS_DOC_CLOSE_MAIN_AX_PRESS=PASS; pid=" & (targetPID as text)
-            end tell
-        end tell
-    on error errorMessage number errorNumber
-        error ("MACOS_DOC_CLOSE_AX_FAILURE; stage=" & stage & "; AXError=" & (errorNumber as text) & "; detail=" & errorMessage) number errorNumber
-    end try
-end run
-'''
-
 
 class BoundedCapture:
     def __init__(self, process: subprocess.Popen[str], log_path: Path) -> None:
@@ -1619,17 +1593,19 @@ def capture_main_close_diagnostics(process: subprocess.Popen[str], deadline: flo
     remaining = deadline - time.monotonic()
     if remaining <= 0.1:
         return f"window_state=DEADLINE_EXHAUSTED; screenshot={screenshot_state}"
-    code, output = run_osascript(
-        WINDOW_QUERY,
-        str(process.pid),
-        FIXTURE_TITLE,
+    code, output, error = run_direct_ax(
+        process.pid,
+        operation="snapshot",
+        window_title=MAIN_TITLE_FRAGMENT,
         timeout=min(2.0, remaining),
     )
-    if code == 0:
-        window_state = f"window_query=PASS; snapshot={output.strip()!r}"
+    output = output + error
+    if code == 0 and "DIRECT_AX_RESULT status=snapshot;" in output:
+        client = output.splitlines()[0] if output else "<missing>"
+        window_state = f"direct_ax_snapshot=PASS; client={client!r}; snapshot={output.strip()[-1200:]!r}"
     else:
-        category = "TCC_DENIED" if is_tcc_denial(output) else "TIMED_OUT" if code == 124 else f"ERROR({code})"
-        window_state = f"window_query={category}; detail={output.strip()[-500:]!r}"
+        category = "TIMED_OUT" if code == 124 else f"ERROR({code})"
+        window_state = f"direct_ax_snapshot={category}; detail={output.strip()[-1200:]!r}"
     return f"{window_state}; screenshot={screenshot_state}"
 
 
@@ -1642,35 +1618,51 @@ def exit_normally(
         raise RuntimeError(f"cannot request native window close before fixture completion: {fixture_completion!r}")
     evidence = ActionEvidence(label="native main-window AXCloseButton")
     try:
-        code, output = run_osascript(
-            MAIN_WINDOW_CLOSE, str(process.pid), MAIN_TITLE_FRAGMENT, timeout=bounded_timeout(deadline, 8.0)
+        code, output, error = run_direct_ax(
+            process.pid,
+            operation="close-main-window",
+            window_title=MAIN_TITLE_FRAGMENT,
+            timeout=bounded_timeout(deadline, 8.0),
         )
+        output = output + error
     except UnsafeChildCleanupError as error:
         evidence.dispatch_attempted = True
         evidence.api_exit_code = 124
         evidence.transport_uncertain = True
-        evidence.api_result = f"AXPress timed out; helper cleanup failed: {error}"
+        evidence.api_result = f"Direct AX close helper cleanup failed: {error}"
         raise UnsafeChildCleanupError(f"native main-window close helper cleanup failed; {evidence.summary()}") from error
-    evidence.dispatch_attempted = code != 127
+    dispatch_marker = re.search(
+        rf"DIRECT_AX_DISPATCH attempted=true; operation=close-main-window; pid={process.pid}; window_title=",
+        output,
+    )
+    result_marker = re.search(
+        rf"DIRECT_AX_RESULT status=action-returned; operation=close-main-window; pid={process.pid}; ax_error=0",
+        output,
+    )
+    action_error = re.search(
+        rf"DIRECT_AX_RESULT status=action-error; operation=close-main-window; pid={process.pid}; ax_error=(-?\d+)",
+        output,
+    )
+    evidence.dispatch_attempted = dispatch_marker is not None
     evidence.api_exit_code = code
-    stage_match = re.search(r"stage=([A-Z_]+)", output)
-    action_stage = stage_match.group(1) if stage_match else "ACTION_DISPATCH" if is_transport_timeout(code, output) else "APPLE_SCRIPT"
-    if code == 0:
-        evidence.api_result = output.strip() or "AXPress returned"
-    elif is_tcc_denial(output):
-        evidence.api_result = f"TCC_DENIED: {output.strip()}"
-        evidence.semantic_outcome = "FAIL_DISPATCH_RESULT"
-        raise RuntimeError(f"TCC_DENIED: Accessibility is required for normal application exit: {evidence.api_result}")
-    elif code == 124 or "-1712" in output or "timed out" in output.lower():
+    if "process_group_cleanup=failed" in output:
+        evidence.transport_uncertain = evidence.dispatch_attempted
+        evidence.api_result = f"Direct AX close helper cleanup failed: {output.strip()[-1200:]}"
+        raise UnsafeChildCleanupError(f"native main-window close helper was not reaped; {evidence.summary()}")
+    if result_marker and code == 0:
+        evidence.api_result = "Direct AXPress returned success for the unique main-window close button"
+    elif dispatch_marker and (
+        code == 124 or (action_error is not None and action_error.group(1) == "-25204")
+    ):
         evidence.transport_uncertain = True
-        evidence.api_result = f"AXPress transport timed out; result uncertain: {output.strip()}"
+        evidence.api_result = f"Direct AXPress result is uncertain after dispatch: {output.strip()[-1200:]}"
     else:
-        evidence.api_result = f"AXPress failed before shutdown observation: {output.strip()}"
+        evidence.api_result = f"Direct AX close failed before a confirmed close result: {output.strip()[-1200:]}"
         evidence.semantic_outcome = "FAIL_DISPATCH_RESULT"
         diagnostics = capture_main_close_diagnostics(process, deadline)
         raise RuntimeError(
-            f"could not request normal main-window close; stage={action_stage}; exit_code={code}; "
-            f"{evidence.api_result}; diagnostics={diagnostics}"
+            f"could not request normal main-window close; stage={'ACTION_DISPATCH' if dispatch_marker else 'WINDOW_OR_CONTROL_LOOKUP'}; exit_code={code}; "
+            f"{evidence.summary()}; {evidence.api_result}; diagnostics={diagnostics}"
         )
     print(f"MACOS_DOC_CLOSE_MAIN_WINDOW_CLOSE={evidence.api_result!r}; {evidence.summary()}")
     try:
