@@ -510,7 +510,8 @@ namespace
 					[this](std::string_view HostID, int X, int Y, bool Clicked)
 					{ ReportDocumentCloseUiAllowClose(HostID, X, Y, Clicked); },
 					[this](std::string_view HostID, int X, int Y, bool Active, bool Hovered, bool Changed, int Value)
-					{ ReportDocumentCloseUiTextField(HostID, X, Y, Active, Hovered, Changed, Value); });
+					{ ReportDocumentCloseUiTextField(HostID, X, Y, Active, Hovered, Changed, Value); },
+					m_DocumentCloseUiTestScenario.has_value());
 				if (auto Result = m_DocumentHostTestEditor->Register(); !Result)
 					PF_ERROR("Could not register the debug document-host fixture editor: {}", Result.error());
 			}
