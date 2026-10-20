@@ -441,9 +441,9 @@ namespace
 			  m_ProjectOpenRenderTestFile(std::move(Options.ProjectOpenRenderTestFile)),
 			  m_DocumentHostTestFixture(Options.EnableDocumentHostTestFixture
 #if defined(_DEBUG) || defined(PF_DEBUG)
-				  || Options.DocumentHostCloseUiTestScenario.has_value()
+										|| Options.DocumentHostCloseUiTestScenario.has_value()
 #endif
-			  ),
+					  ),
 			  m_DocumentHostResetLayoutTest(Options.EnableDocumentHostResetLayoutTest),
 			  m_DocumentHostTabTearOffTest(Options.EnableDocumentHostTabTearOffTest),
 			  m_DocumentHostTabReattachTest(Options.EnableDocumentHostTabReattachTest),
@@ -454,8 +454,8 @@ namespace
 			  m_DocumentHostImageAllocationFailureTest(Options.EnableDocumentHostImageAllocationFailureTest)
 		{
 #if defined(_DEBUG) || defined(PF_DEBUG)
-			m_EditorRuntimePlayStopCoordinator = std::make_unique<PulseForgeEditor::Detail::EditorRuntimePlayStopCoordinator>(
-				Options.EnableEditorRuntimePlayStopTest);
+			m_EditorRuntimePlayStopCoordinator =
+				std::make_unique<PulseForgeEditor::Detail::EditorRuntimePlayStopCoordinator>(Options.EnableEditorRuntimePlayStopTest);
 			m_DocumentCloseAcceptance = std::make_unique<PulseForgeEditor::Detail::DocumentCloseAcceptanceCoordinator>(
 				std::move(Options.DocumentHostCloseUiTestScenario), [this](std::string Message) { SetError(std::move(Message)); });
 
@@ -464,8 +464,7 @@ namespace
 				m_DocumentHostTestEditor = std::make_unique<PulseForgeEditor::Detail::EditorDocumentHostTestEditor>(
 					m_Documents, m_DocumentEditors, m_EditorStyle, [this](std::string Message) { SetError(std::move(Message)); },
 					[this] { return m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{}; },
-					[this](std::string_view HostID, int X, int Y, bool Clicked)
-					{ ReportDocumentCloseUiAllowClose(HostID, X, Y, Clicked); },
+					[this](std::string_view HostID, int X, int Y, bool Clicked) { ReportDocumentCloseUiAllowClose(HostID, X, Y, Clicked); },
 					[this](std::string_view HostID, int X, int Y, bool Active, bool Hovered, bool Clicked, bool Changed, int Value)
 					{ ReportDocumentCloseUiTextField(HostID, X, Y, Active, Hovered, Clicked, Changed, Value); },
 					m_DocumentCloseAcceptance->IsEnabled());
@@ -1894,8 +1893,7 @@ namespace
 			if (m_DocumentCloseAcceptance) m_DocumentCloseAcceptance->Fail(Reason);
 		}
 
-		void ReportDocumentCloseUiDecisionPointer(
-			std::string_view HostID, std::string_view Choice, bool Hovered, bool Active, bool Clicked,
+		void ReportDocumentCloseUiDecisionPointer(std::string_view HostID, std::string_view Choice, bool Hovered, bool Active, bool Clicked,
 			const ImVec2& Minimum, const ImVec2& Maximum)
 		{
 			if (!m_DocumentCloseAcceptance) return;
@@ -1977,8 +1975,7 @@ namespace
 			if (m_DocumentCloseAcceptance) m_DocumentCloseAcceptance->ReportCloseControl(HostID, Identity, X, Y);
 		}
 
-		void EmitDocumentCloseUiPrompt(
-			std::string_view HostID, const ImVec2& Save, const ImVec2& Discard, const ImVec2& Cancel)
+		void EmitDocumentCloseUiPrompt(std::string_view HostID, const ImVec2& Save, const ImVec2& Discard, const ImVec2& Cancel)
 		{
 			if (!m_DocumentCloseAcceptance) return;
 			PulseForgeEditor::Detail::DocumentCloseUiPromptGeometry Geometry{
@@ -2020,8 +2017,7 @@ namespace
 			}
 
 			const std::string DisplayName = "Host Test Fixture 1";
-			auto Opened = m_Documents.Open(Identity, {}, DisplayName,
-				PulseForgeEditor::EditorDocumentOpenPreference::NewNativeWindow);
+			auto Opened = m_Documents.Open(Identity, {}, DisplayName, PulseForgeEditor::EditorDocumentOpenPreference::NewNativeWindow);
 			if (!Opened || !Opened->Created)
 			{
 				FailDocumentCloseUiTest("Could not create the fixture's fresh native document host.");
@@ -2068,8 +2064,7 @@ namespace
 						if (IsDocumentCloseUiFixtureIdentity(Identity)) ++SelectedFixtureSessionCount;
 						ContainsFixture = true;
 					}
-				if (ContainsFixture && Host.Role == PulseForgeEditor::EditorDocumentHostRole::Native)
-					++FixtureNativeHostCount;
+				if (ContainsFixture && Host.Role == PulseForgeEditor::EditorDocumentHostRole::Native) ++FixtureNativeHostCount;
 			}
 			const auto Snapshot = ObserveDocumentCloseUiSession();
 			if (!Session || Session->HostID != m_DocumentCloseAcceptance->HostID())

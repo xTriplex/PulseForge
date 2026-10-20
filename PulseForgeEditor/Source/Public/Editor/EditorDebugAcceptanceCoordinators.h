@@ -11,7 +11,10 @@
 #include <string>
 #include <string_view>
 
-namespace PulseForge { class Scene; }
+namespace PulseForge
+{
+	class Scene;
+}
 
 namespace PulseForgeEditor::Detail
 {
@@ -108,21 +111,20 @@ namespace PulseForgeEditor::Detail
 		void SetIdentity(EditorDocumentIdentity Identity);
 		void SetHost(std::string HostID);
 		void Fail(std::string_view Reason);
-		void FixtureReady(const DocumentCloseUiSessionObservation& Session, size_t FixtureSessions, size_t SelectedSessions,
-			size_t NativeHosts);
+		void FixtureReady(
+			const DocumentCloseUiSessionObservation& Session, size_t FixtureSessions, size_t SelectedSessions, size_t NativeHosts);
 		[[nodiscard]] bool BeginCloseRequest(std::string_view HostID, bool Pending, std::string_view PendingHostID);
 		void ReportTextField(const DocumentCloseUiTextObservation& Observation);
 		void ReportDecisionPointer(const DocumentCloseUiDecisionPointerObservation& Observation);
 		void ReportCloseControl(std::string_view HostID, const EditorDocumentIdentity& Identity, int X, int Y);
 		void ReportPrompt(std::string_view HostID, bool Pending, const DocumentCloseUiPromptGeometry& Geometry);
 		void ReportAction(std::string_view Choice, bool Resolved, const DocumentCloseUiSessionObservation& Session);
-		void ReportAllowClose(std::string_view HostID, int X, int Y, bool Clicked,
-			const DocumentCloseUiSessionObservation& Session);
+		void ReportAllowClose(std::string_view HostID, int X, int Y, bool Clicked, const DocumentCloseUiSessionObservation& Session);
 		void ReportCleanClose(bool IdentityClosed, bool HostRemoved, int SavedValue);
 
 	private:
-		[[nodiscard]] bool StateMatches(const DocumentCloseUiSessionObservation& Session, bool Pending, bool Open,
-			bool HostSame, bool Dirty, int Value, int Saved) const noexcept;
+		[[nodiscard]] bool StateMatches(const DocumentCloseUiSessionObservation& Session, bool Pending, bool Open, bool HostSame,
+			bool Dirty, int Value, int Saved) const noexcept;
 		void AdvanceGeneration() noexcept;
 		void Pass(int ExpectedSavedValue);
 
@@ -177,14 +179,20 @@ namespace PulseForgeEditor::Detail
 		[[nodiscard]] std::string_view FailureReason() const noexcept { return m_FailureReason; }
 		[[nodiscard]] bool BeginPlaySnapshot(const PulseForge::Scene* AuthoredScene, size_t EntityCount, std::string Snapshot);
 		[[nodiscard]] bool ObservePlayStarted(bool Running, const PulseForge::Scene* RuntimeScene);
-		[[nodiscard]] bool ObserveStop(const PulseForge::Scene* AuthoredScene, size_t EntityCount,
-			std::optional<std::string> Snapshot);
+		[[nodiscard]] bool ObserveStop(const PulseForge::Scene* AuthoredScene, size_t EntityCount, std::optional<std::string> Snapshot);
 		void Fail(std::string Reason);
 		[[nodiscard]] bool Complete() const noexcept { return m_Phase == Phase::Complete; }
 		[[nodiscard]] bool WaitingForPlayViewportRender() const noexcept { return m_Phase == Phase::WaitingForPlayViewportRender; }
 
 	private:
-		enum class Phase : uint8_t { Disabled, WaitingForEditViewportRender, WaitingForPlayViewportRender, Complete, Failed };
+		enum class Phase : uint8_t
+		{
+			Disabled,
+			WaitingForEditViewportRender,
+			WaitingForPlayViewportRender,
+			Complete,
+			Failed
+		};
 		void SetFailure(std::string Reason);
 
 		Phase m_Phase = Phase::Disabled;
@@ -196,6 +204,6 @@ namespace PulseForgeEditor::Detail
 		std::string m_AuthoredSnapshot;
 		std::string m_FailureReason;
 	};
-}
+} // namespace PulseForgeEditor::Detail
 
 #endif
