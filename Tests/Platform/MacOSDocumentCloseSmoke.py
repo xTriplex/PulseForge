@@ -24,7 +24,7 @@ MAX_EVENT_COUNT = 128
 FIXTURE_TITLE = "Host Test Fixture 1"
 MAIN_TITLE_FRAGMENT = "PulseForge Editor"
 SCENARIOS = ("cancel-save", "discard", "save-retry", "close-retry")
-TCC_DENIALS = ("not allowed assistive access", "not authorized to send apple events", "(-1719)", "(-1743)")
+TCC_DENIALS = ("not allowed assistive access", "not authorized to send apple events", "(-1743)")
 POINT = re.compile(r"^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$")
 
 WINDOW_QUERY = '''on run argv
@@ -535,6 +535,7 @@ def query_fixture_window(
     process: subprocess.Popen[str], deadline: float
 ) -> tuple[float, float, float, float]:
     last_state = "not queried"
+    process_lookup_deadline = min(deadline, time.monotonic() + 5.0)
     while time.monotonic() < deadline:
         code, output = run_osascript(WINDOW_QUERY, str(process.pid), FIXTURE_TITLE, timeout=bounded_timeout(deadline, 4.0))
         if code != 0:
@@ -543,6 +544,13 @@ def query_fixture_window(
             if code == 124:
                 last_state = f"Accessibility query timed out: {output.strip()}"
                 continue
+            lowered = output.lower()
+            if "-1719" in lowered and "unix id" in lowered and "process" in lowered:
+                last_state = f"System Events has not exposed fixture PID {process.pid}; AXError=-1719: {output.strip()}"
+                if time.monotonic() < process_lookup_deadline:
+                    time.sleep(min(0.1, max(0.0, process_lookup_deadline - time.monotonic())))
+                    continue
+                raise RuntimeError(f"AX_PROCESS_LOOKUP_INVALID_INDEX after fixture readiness: {last_state}")
             raise RuntimeError(f"Accessibility query failed with exit code {code}: {output.strip()}")
         lines = [line.strip() for line in output.splitlines() if line.strip()]
         if len(lines) >= 2:
@@ -894,10 +902,10 @@ def run_decisions(
     capture: BoundedCapture,
     pointer_driver: Path,
     fixture_bounds: tuple[float, float, float, float],
+    ready: dict[str, str],
     scenario: str,
     deadline: float,
 ) -> None:
-    ready = wait_event(capture, process, "READY", scenario, deadline)
     if (ready.get("saved"), ready.get("value"), ready.get("dirty")) != ("10", "20", "1"):
         raise RuntimeError(f"fixture READY state mismatch: {ready.get('raw')!r}")
     protocol = MarkerProtocol.from_ready(ready, scenario)
@@ -1025,8 +1033,9 @@ def run_scenario(editor: Path, project: Path, log_directory: Path, scenario: str
         )
         capture = BoundedCapture(process, log_path)
         deadline = time.monotonic() + timeout_seconds
+        ready = wait_event(capture, process, "READY", scenario, deadline)
         fixture_bounds = query_fixture_window(process, deadline)
-        run_decisions(process, capture, pointer_driver, fixture_bounds, scenario, deadline)
+        run_decisions(process, capture, pointer_driver, fixture_bounds, ready, scenario, deadline)
         exit_normally(process, deadline)
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         failure = str(error)

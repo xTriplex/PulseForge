@@ -21,10 +21,8 @@ TCC_DENIALS = (
     "not allowed assistive access",
     "not authorized to send apple events",
     "not permitted to send apple events",
-    "error=-1719",
     "error=-1743",
     "nfd_tcc_denial",
-    "(-1719)",
     "(-1743)",
 )
 ACCESSIBILITY_TIMEOUTS = (
@@ -212,6 +210,8 @@ def classify_observation_error(exit_code: int, output: str) -> str:
         return "accessibility-api-disabled"
     if is_accessibility_timeout(output) or exit_code == 124:
         return "timeout"
+    if "-1719" in lowered or "invalid index" in lowered:
+        return "invalid-index-or-process-lookup"
     if "-1728" in lowered:
         return "missing-attribute-or-element"
     if "-25202" in lowered:
@@ -715,7 +715,7 @@ on classifyAccessibilityError(errorNumber, errorMessage)
     if errorNumber is -1712 then
         error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; " & errorMessage number -1712
     end if
-    if errorNumber is -1719 or errorNumber is -1743 then
+    if errorNumber is -1743 then
         error "NFD_TCC_DENIAL; error=" & errorNumber & "; " & errorMessage number errorNumber
     end if
     if errorNumber is -1728 then
@@ -740,7 +740,7 @@ on performDialogAction(targetElement, requestedAction, targetName)
                     "; error=" & errorNumber & "; " & ¬
                     errorMessage number -1712
             end if
-            if errorNumber is -1719 or errorNumber is -1743 then
+            if errorNumber is -1743 then
                 error "NFD_TCC_DENIAL; action=" & requestedAction & "; target=" & targetName & "; error=" & ¬
                     errorNumber & "; " & errorMessage number errorNumber
             end if
@@ -835,7 +835,7 @@ on run argv
                 error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; query=open-save-panel-service-process; " & ¬
                     "error=" & errorNumber & "; " & errorMessage number -1712
             end if
-            if errorNumber is -1719 or errorNumber is -1743 then
+            if errorNumber is -1743 then
                 error "NFD_TCC_DENIAL; query=open-save-panel-service-process; error=" & ¬
                     errorNumber & "; " & errorMessage number errorNumber
             end if
@@ -858,7 +858,7 @@ on run argv
                     error "NFD_ACCESSIBILITY_QUERY_TIMEOUT; query=panel-service-process-pid; " & ¬
                         "error=" & errorNumber & "; " & errorMessage number -1712
                 end if
-                if errorNumber is -1719 or errorNumber is -1743 then
+                if errorNumber is -1743 then
                     error "NFD_TCC_DENIAL; query=panel-service-process-pid; error=" & ¬
                         errorNumber & "; " & errorMessage number errorNumber
                 end if
@@ -1028,7 +1028,7 @@ on run argv
                             "; error=" & errorNumber & "; " & errorMessage
                     end if
                     if errorMessage contains "NFD_TCC_DENIAL" then error errorMessage number errorNumber
-                    if errorNumber is -1719 or errorNumber is -1743 then
+                    if errorNumber is -1743 then
                         error "NFD_TCC_DENIAL; pid=" & targetPID & "; process=" & processName & ¬
                             "; query=window-" & windowIndex & "; error=" & errorNumber & "; " & errorMessage number errorNumber
                     end if
@@ -1089,7 +1089,7 @@ on run argv
                                         number -1712
                                 end if
                                 if errorMessage contains "NFD_TCC_DENIAL" then error errorMessage number errorNumber
-                                if errorNumber is -1719 or errorNumber is -1743 then
+                                if errorNumber is -1743 then
                                     error "NFD_TCC_DENIAL; pid=" & targetPID & "; process=" & processName & ¬
                                         "; query=window-" & windowIndex & "/sheet-" & sheetIndex & ¬
                                         "; error=" & errorNumber & "; " & errorMessage number errorNumber
@@ -1105,7 +1105,7 @@ on run argv
                                 "; error=" & errorNumber & "; " & errorMessage number -1712
                         end if
                         if errorMessage contains "NFD_TCC_DENIAL" then error errorMessage number errorNumber
-                        if errorNumber is -1719 or errorNumber is -1743 then
+                        if errorNumber is -1743 then
                             error "NFD_TCC_DENIAL; pid=" & targetPID & "; process=" & processName & ¬
                                 "; query=window-" & windowIndex & "/sheets; error=" & errorNumber & "; " & errorMessage ¬
                                 number errorNumber

@@ -17,7 +17,7 @@ from pathlib import Path
 
 MAX_LOG_BYTES = 128 * 1024
 MAX_CONSOLE_BYTES = 64 * 1024
-TCC_DENIALS = ("not allowed assistive access", "not authorized to send apple events", "(-1719)", "(-1743)")
+TCC_DENIALS = ("not allowed assistive access", "not authorized to send apple events", "(-1743)")
 
 WINDOW_QUERY = '''on run argv
     set targetPID to item 1 of argv as integer
@@ -405,6 +405,8 @@ def classify_accessibility_failure(code: int, output: str) -> str:
         return "AX_COMMUNICATION_ERROR"
     if "-25211" in lowered:
         return "AX_API_DISABLED"
+    if "-1719" in lowered:
+        return "AX_INVALID_INDEX"
     if "-1728" in lowered or "can't get" in lowered or "can’t get" in lowered:
         return "AX_ELEMENT_LOOKUP_ERROR"
     return "AX_ACCESSIBILITY_ERROR"
@@ -635,35 +637,9 @@ def main() -> int:
         diagnostic_arguments = (str(main_window_index), main_window_name)
         diagnostic_output: list[str] = []
         exit_code: int | None = None
-        time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
-        preflight_code, preflight_output = run_close_preflight(
-            str(process.pid),
-            diagnostic_arguments,
-            min(3.0, max(0.0, deadline - time.monotonic())),
-        )
-        if preflight_code != 0 or "AXPress=true" not in preflight_output:
-            category = classify_accessibility_failure(preflight_code, preflight_output)
-            screenshot_output = capture_close_failure_screenshot(args.log_directory)
-            print(
-                "MACOS_DOCUMENT_HOST_AX_PREFLIGHT="
-                f"{category}; pid={process.pid}; window={main_window_name!r}; "
-                f"exit_code={preflight_code}; detail={preflight_output.strip()}; {screenshot_output}"
-            )
-            if category == "TCC_DENIED":
-                print(
-                    "MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; native-window close request NOT RUN; "
-                    f"reason=explicit TCC denial; acceptance blocked; {screenshot_output}"
-                )
-                return 77
-            return fail(
-                "read-only semantic AXCloseButton preflight failed; close action was not attempted; "
-                f"category={category}; pid={process.pid}; process={observed_process_name}; "
-                f"window={main_window_name!r}; exit_code={preflight_code}; "
-                f"detail={preflight_output.strip()}; {screenshot_output}",
-                log_path,
-            )
-        print(preflight_output.strip())
-
+        # Attempt the actual semantic close action directly. The read-only AX
+        # inspection is reserved for diagnostics if this action fails, so an
+        # unrelated preflight query cannot prevent the acceptance action itself.
         close_code, close_output = run_osascript(
             MAIN_WINDOW_CLOSE,
             str(process.pid),
