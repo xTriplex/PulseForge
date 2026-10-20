@@ -84,13 +84,13 @@ on currentMouseLocation(targetX, targetY)
         if screenCount > 0 then
             set mainScreen to current application's NSScreen's mainScreen()
             if mainScreen is not missing value then
-                set frameRecord to (mainScreen's frame()) as record
-                set frameOrigin to origin of frameRecord
-                set frameSize to size of frameRecord
-                set frameX to (x of frameOrigin) as real
-                set frameY to (y of frameOrigin) as real
-                set frameWidth to (width of frameSize) as real
-                set frameHeight to (height of frameSize) as real
+                set frameParts to (mainScreen's frame()) as list
+                set frameOrigin to item 1 of frameParts
+                set frameSize to item 2 of frameParts
+                set frameX to (item 1 of frameOrigin) as real
+                set frameY to (item 2 of frameOrigin) as real
+                set frameWidth to (item 1 of frameSize) as real
+                set frameHeight to (item 2 of frameSize) as real
                 set frameText to (frameX as text) & "," & (frameY as text) & "," & ¬
                     (frameWidth as text) & "," & (frameHeight as text)
                 set metadataReady to true
