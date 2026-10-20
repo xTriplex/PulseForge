@@ -208,8 +208,11 @@ jobs:
       - name: Build Release and Dist editor consumers and verify Debug fixture exclusion
         run: |
           set -o pipefail
-          DEBUG_OBJECT="Build/CI/macos-renderer/CMakeFiles/PulseForgeEditorCore.dir/EditorDebugAcceptanceCoordinators.cpp.o"
-          test -f "$DEBUG_OBJECT"
+          DEBUG_OBJECT_DIR="Build/CI/macos-renderer/CMakeFiles/PulseForgeEditorCore.dir"
+          if ! find "$DEBUG_OBJECT_DIR" -name 'EditorDebugAcceptanceCoordinators.cpp.o' -print -quit | grep -q .; then
+            echo "Debug coordinator object was not produced under $DEBUG_OBJECT_DIR" >&2
+            exit 1
+          fi
           for CONFIGURATION in Release Dist; do
             BUILD_DIR="Build/CI/macos-${CONFIGURATION,,}"
             cmake -S . -B "$BUILD_DIR" -G Ninja \
