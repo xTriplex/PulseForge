@@ -254,9 +254,12 @@ guard CGPreflightPostEventAccess() else {
 let location = CGPoint(x: x, y: y)
 let sourcePID = getpid()
 let sourceName = String(cString: getprogname())
+guard let source = CGEventSource(stateID: .hidSystemState) else {
+    fail("CGEventSource creation failed for native pointer input", 3)
+}
 func post(_ type: CGEventType, _ name: String, _ clickState: Int64) {
     let attemptUptime = ProcessInfo.processInfo.systemUptime
-    guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: location, mouseButton: .left) else {
+    guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: location, mouseButton: .left) else {
         fail("CGEventCreateMouseEvent failed for event type \(type.rawValue)", 3)
     }
     event.setIntegerValueField(.mouseEventClickState, value: clickState)
@@ -265,7 +268,8 @@ func post(_ type: CGEventType, _ name: String, _ clickState: Int64) {
     let returnedUptime = ProcessInfo.processInfo.systemUptime
     print("CGEventPost=EVENT; click_id=\(actionID); event_tag=\(eventTag); event=\(name); attempt_uptime=\(attemptUptime); " +
           "returned_uptime=\(returnedUptime); source_pid=\(sourcePID); source_name=\(sourceName); target_pid=\(targetPID); " +
-          "point=\(Int(x.rounded())),\(Int(y.rounded())); click_state=\(clickState); post_returned=1; route=global-hid-event-stream")
+          "point=\(Int(x.rounded())),\(Int(y.rounded())); click_state=\(clickState); source_state=hid-system; " +
+          "post_returned=1; route=global-hid-event-stream")
 }
 
 post(.mouseMoved, "move", 0)
