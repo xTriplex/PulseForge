@@ -227,7 +227,9 @@ if operation == "observe-go-to-folder-state" {
     var next = 0
     var sheetCount = 0
     var queryErrors: [String] = []
-    let nodeLimit = 64
+    let nodeLimit = 128
+    let depthLimit = 8
+    var visitedRoles: [String] = []
     while next < pending.count && next < nodeLimit {
         let item = pending[next]
         next += 1
@@ -238,13 +240,15 @@ if operation == "observe-go-to-folder-state" {
             queryErrors.append("role:\(roleError.rawValue)")
             continue
         }
-        var rawTitle: CFTypeRef?
-        let titleError = AXUIElementCopyAttributeValue(item.element, "AXTitle" as CFString, &rawTitle)
-        let title = titleError == .success ? (rawTitle as? String ?? "") : ""
+        visitedRoles.append("\(role)@\(item.depth)")
         if role == "AXSheet" {
             sheetCount += 1
+            var rawTitle: CFTypeRef?
+            let titleError = AXUIElementCopyAttributeValue(item.element, "AXTitle" as CFString, &rawTitle)
+            let title = titleError == .success ? (rawTitle as? String ?? "") : ""
             print("DIRECT_AX_GO_TO_FOLDER_NODE role=\(role); title=\(title); title_error=\(titleError.rawValue); depth=\(item.depth)")
         }
+        if ["AXOutline", "AXBrowser", "AXTable", "AXList"].contains(role) { continue }
         var rawChildren: CFTypeRef?
         let childrenError = AXUIElementCopyAttributeValue(item.element, "AXChildren" as CFString, &rawChildren)
         if childrenError == .success {
@@ -252,7 +256,7 @@ if operation == "observe-go-to-folder-state" {
                 queryErrors.append("children-invalid:\(item.depth)")
                 continue
             }
-            if item.depth >= 5 {
+            if item.depth >= depthLimit {
                 if !children.isEmpty { queryErrors.append("depth-limit:\(item.depth)") }
             } else {
                 pending.append(contentsOf: children.map { PendingElement(element: $0, depth: item.depth + 1) })
@@ -265,7 +269,7 @@ if operation == "observe-go-to-folder-state" {
     }
     let truncated = next < pending.count
     let complete = queryErrors.isEmpty && !truncated
-    print("DIRECT_AX_RESULT status=go-to-folder-state; pid=\(targetPID); window_title=\(requestedTitle); visited=\(next); sheet_count=\(sheetCount); complete=\(complete); truncated=\(truncated); query_errors=\(queryErrors)")
+    print("DIRECT_AX_RESULT status=go-to-folder-state; pid=\(targetPID); window_title=\(requestedTitle); visited=\(next); sheet_count=\(sheetCount); complete=\(complete); truncated=\(truncated); query_errors=\(queryErrors); roles=\(visitedRoles.prefix(48))")
     exit(complete ? 0 : 21)
 }
 struct AXNode {
