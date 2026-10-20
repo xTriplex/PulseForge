@@ -55,6 +55,11 @@ let targetProcess = NSRunningApplication(processIdentifier: targetPID)
 print("DIRECT_AX_TARGET_PROCESS pid=\(targetPID); name=\(targetProcess?.localizedName ?? "unknown"); bundle=\(targetProcess?.bundleIdentifier ?? "unknown")")
 fflush(stdout)
 
+if operation == "client-preflight" {
+    print("DIRECT_AX_RESULT status=client-preflight; pid=\(getpid()); target_pid=\(targetPID); ax_target_query=not-performed")
+    exit(0)
+}
+
 let app = AXUIElementCreateApplication(targetPID)
 AXUIElementSetMessagingTimeout(app, 1.0)
 if operation == "close-main-window" {

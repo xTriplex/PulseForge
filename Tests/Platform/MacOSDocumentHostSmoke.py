@@ -301,6 +301,24 @@ def fail(message: str, log_path: Path) -> int:
     return 1
 
 
+def preflight_direct_ax_client(timeout: float) -> None:
+    """Warm the exact Swift AX launch path without claiming target authorization."""
+    client_pid = os.getpid()
+    code, output, error = run_direct_ax(client_pid, operation="client-preflight", timeout=timeout)
+    combined = output + error
+    print(
+        f"MACOS_DOCUMENT_HOST_DIRECT_AX_CLIENT_PREFLIGHT=exit_code={code}; target=self; pid={client_pid}; "
+        f"output={combined.strip()!r}"
+    )
+    if (
+        code != 0
+        or "DIRECT_AX_CLIENT " not in combined
+        or "trusted=true" not in combined
+        or "DIRECT_AX_RESULT status=client-preflight;" not in combined
+    ):
+        raise RuntimeError(f"direct AX client startup or self-scoped trust check failed: {combined.strip()!r}")
+
+
 def remove_temporary_root(root: Path, parent: Path) -> str | None:
     try:
         if root.is_symlink():
@@ -332,6 +350,12 @@ def main() -> int:
     if args.timeout_seconds <= 0:
         return fail("timeout must be positive", args.log_directory / "document-host-smoke.log")
 
+    deadline = time.monotonic() + args.timeout_seconds
+    try:
+        preflight_direct_ax_client(min(30.0, max(0.1, deadline - time.monotonic())))
+    except (OSError, RuntimeError, ValueError) as error:
+        return fail(f"direct AX client preflight failed before editor launch: {error}", args.log_directory / "document-host-smoke.log")
+
     args.log_directory.mkdir(parents=True, exist_ok=True)
     runner_temp = os.environ.get("RUNNER_TEMP")
     temp_parent = Path(runner_temp).resolve() if runner_temp else Path(tempfile.gettempdir())
@@ -362,10 +386,12 @@ def main() -> int:
         start_new_session=True,
     )
     capture = BoundedOutput(process, log_path)
-    deadline = time.monotonic() + args.timeout_seconds
     fixture_ready = False
     observed_native_windows = False
     next_window_query = 0.0
+    native_window_query_attempts = 0
+    last_successful_window_snapshot = "<none>"
+    last_window_query_error = "<none>"
     observed_process_name = "<unknown>"
     observed_window_count = 0
     direct_ax_client_untrusted = False
@@ -400,30 +426,66 @@ def main() -> int:
                 and all(marker in capture.markers for marker in SUCCESS_MARKERS)
                 and now >= next_window_query
             ):
-                next_window_query = now + 2.0
+                native_window_query_attempts += 1
+                query_started = time.monotonic()
+                next_window_query = query_started + 2.0
                 query_code, query_output, query_error = run_direct_ax(
                     process.pid, operation="window-count", timeout=min(12.0, max(0.1, deadline - now))
                 )
                 query_output += query_error
-                print(f"MACOS_DOCUMENT_HOST_NATIVE_WINDOW_SNAPSHOT={query_output.strip()!r}")
+                query_elapsed = time.monotonic() - query_started
+                print(
+                    f"MACOS_DOCUMENT_HOST_NATIVE_WINDOW_SNAPSHOT=attempt={native_window_query_attempts}; "
+                    f"elapsed={query_elapsed:.3f}s; exit_code={query_code}; output={query_output.strip()!r}"
+                )
                 if query_code != 0:
                     if "trusted=false" in query_output:
                         direct_ax_client_untrusted = True
                         break
-                    failures.append(f"Native AX window-count query failed; exit_code={query_code}; {query_output.strip()}")
+                    last_window_query_error = (
+                        f"attempt={native_window_query_attempts}; exit_code={query_code}; "
+                        f"elapsed={query_elapsed:.3f}s; detail={query_output.strip()!r}"
+                    )
+                    if query_code == 124 and native_window_query_attempts < 3 and process.poll() is None:
+                        print(
+                            "MACOS_DOCUMENT_HOST_AX_OBSERVATION=TRANSIENT_TIMEOUT; "
+                            f"attempt={native_window_query_attempts}; retry_at_monotonic={next_window_query:.3f}; "
+                            f"last_successful_snapshot={last_successful_window_snapshot!r}"
+                        )
+                    else:
+                        failures.append(
+                            "Native AX window-count query failed after bounded read-only observations; "
+                            f"attempts={native_window_query_attempts}; last_error={last_window_query_error}; "
+                            f"last_successful_snapshot={last_successful_window_snapshot!r}"
+                        )
+                        break
+                else:
+                    last_successful_window_snapshot = query_output.strip()
+                    last_window_query_error = "<none>"
+                    target_line = next(
+                        (entry for entry in query_output.splitlines() if entry.startswith("DIRECT_AX_TARGET_PROCESS ")), ""
+                    )
+                    observed_process_name = (
+                        target_line.split("name=", 1)[1].strip() if "name=" in target_line else f"pid={process.pid}"
+                    )
+                    try:
+                        observed_window_count = parse_ax_window_count(query_output, process.pid)
+                    except ValueError as error:
+                        failures.append(f"Native AX window-count result was invalid: {error}; {query_output.strip()}")
+                        break
+                    # The application fixture has completed all native-host round trips
+                    # before this observation. Three AXWindows independently establish
+                    # the editor plus its two native document hosts.
+                    observed_native_windows = observed_window_count >= 3
+                    if not observed_native_windows and native_window_query_attempts >= 3:
+                        failures.append(
+                            "Native AX returned an incomplete window set after bounded observations; "
+                            f"attempts={native_window_query_attempts}; windows={observed_window_count}; "
+                            f"last_successful_snapshot={last_successful_window_snapshot!r}; "
+                            f"last_error={last_window_query_error}"
+                        )
+                if failures:
                     break
-                target_line = next((entry for entry in query_output.splitlines() if entry.startswith("DIRECT_AX_TARGET_PROCESS ")), "")
-                observed_process_name = target_line.split("name=", 1)[1].strip() if "name=" in target_line else f"pid={process.pid}"
-                try:
-                    observed_window_count = parse_ax_window_count(query_output, process.pid)
-                except ValueError as error:
-                    failures.append(f"Native AX window-count result was invalid: {error}; {query_output.strip()}")
-                    break
-                # The application fixture has completed all native-host round trips
-                # before this observation. Three AXWindows then independently
-                # establish the main editor plus its two native document hosts,
-                # without enumerating titles through a potentially slow CG query.
-                observed_native_windows = observed_window_count >= 3
 
             if all(marker in capture.markers for marker in SUCCESS_MARKERS) and observed_native_windows:
                 print(
@@ -437,6 +499,11 @@ def main() -> int:
                 break
             if process.poll() is not None:
                 break
+            if not observed_native_windows:
+                remaining = deadline - time.monotonic()
+                wait_for = min(0.1, max(0.0, next_window_query - time.monotonic()), max(0.0, remaining))
+                if wait_for > 0:
+                    capture.finished.wait(timeout=wait_for)
 
         if direct_ax_client_untrusted:
             print(
