@@ -319,7 +319,8 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             print(f"NFD_DIRECT_AX_OBSERVATION=PASS; {client_line}; {target_line}; snapshot={probe_output[-9000:]!r}")
             print(
                 f"NFD_PANEL_READY=pid={process_id}; panel_pid={process_id}; client=swift-interpreter; "
-                f"scenario={scenario}; expected_button={expected_button}; button_enabled_not_required=true"
+                f"scenario={scenario}; expected_path={expected_path}; initial_directory={expected_path.parent}; "
+                f"expected_button={expected_button}; button_enabled_not_required=true"
             )
             observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
             observation_report = capture_waiting_observation(process.pid, scenario, observation_log)

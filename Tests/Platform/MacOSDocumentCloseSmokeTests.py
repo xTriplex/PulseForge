@@ -22,6 +22,7 @@ import MacOSBundleSmoke as bundle
 import MacOSAutomationClient as automation
 import MacOSScreenshot as screenshot
 import MacOSWorkspaceRestoreSmoke as workspace_restore
+import MacOSDocumentHostSmoke as document_host
 
 
 class FakeProcess:
@@ -950,6 +951,29 @@ class WorkspaceRestoreObservationTests(unittest.TestCase):
         ), patch.object(workspace_restore, "run_osascript", return_value=(0, incomplete)):
             with self.assertRaisesRegex(RuntimeError, "overall readiness deadline expired"):
                 workspace_restore.wait_for_fixture_windows(self.Process(), self.Capture(), 1.0, 2)
+
+
+class DocumentHostAXWindowCountTests(unittest.TestCase):
+    def test_accepts_only_a_single_count_for_the_expected_editor_process(self) -> None:
+        output = (
+            "DIRECT_AX_TARGET_PROCESS pid=4321; name=PulseForge Editor; bundle=example.editor\n"
+            "DIRECT_AX_RESULT status=window-count; pid=4321; windows=3; elapsed_ms=2.5\n"
+        )
+        self.assertEqual(3, document_host.parse_ax_window_count(output, 4321))
+
+    def test_rejects_wrong_process_malformed_and_duplicate_count_results(self) -> None:
+        with self.assertRaisesRegex(ValueError, "identity/value mismatch"):
+            document_host.parse_ax_window_count(
+                "DIRECT_AX_RESULT status=window-count; pid=4322; windows=3; elapsed_ms=2\n", 4321
+            )
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            document_host.parse_ax_window_count("DIRECT_AX_RESULT status=window-count; pid=x; windows=3\n", 4321)
+        with self.assertRaisesRegex(ValueError, "got 2"):
+            document_host.parse_ax_window_count(
+                "DIRECT_AX_RESULT status=window-count; pid=4321; windows=3\n"
+                "DIRECT_AX_RESULT status=window-count; pid=4321; windows=3\n",
+                4321,
+            )
 
 
 if __name__ == "__main__":

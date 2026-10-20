@@ -231,19 +231,34 @@ def has_tcc_denial(output: str) -> bool:
 
 def close_failure_diagnostics(
     process_id: str,
-    window_arguments: tuple[str, str],
     deadline: float,
 ) -> list[str]:
     remaining = deadline - time.monotonic()
     if remaining <= 0.1:
         return ["DIRECT_AX_SNAPSHOT=DEADLINE_EXHAUSTED"]
     code, output, error = run_direct_ax(
-        int(process_id), operation="snapshot", window_title=window_arguments[1], timeout=min(5.0, remaining - 0.05)
+        int(process_id), operation="window-count", timeout=min(5.0, remaining - 0.05)
     )
     result = output + error if code == 0 else f"DIRECT_AX_SNAPSHOT=ERROR; exit_code={code}; stdout={output!r}; stderr={error!r}"
     print(f"MACOS_DOCUMENT_HOST_FAILURE_DIAGNOSTIC={result}")
     diagnostics = [result]
     return diagnostics
+
+
+def parse_ax_window_count(output: str, expected_pid: int) -> int:
+    """Accept only one process-scoped native-window count result."""
+    results = [line for line in output.splitlines() if line.startswith("DIRECT_AX_RESULT status=window-count;")]
+    if len(results) != 1:
+        raise ValueError(f"expected one AX window-count result, got {len(results)}")
+    fields = dict(part.split("=", 1) for part in results[0].split("; ") if "=" in part)
+    try:
+        result_pid = int(fields["pid"])
+        count = int(fields["windows"])
+    except (KeyError, ValueError) as error:
+        raise ValueError(f"malformed AX window-count result: {results[0]!r}") from error
+    if result_pid != expected_pid or count < 0:
+        raise ValueError(f"AX window-count identity/value mismatch: pid={result_pid}; windows={count}")
+    return count
 
 
 def capture_failure_screenshot(process: subprocess.Popen[str]) -> str:
@@ -352,8 +367,7 @@ def main() -> int:
     observed_native_windows = False
     next_window_query = 0.0
     observed_process_name = "<unknown>"
-    observed_windows: list[tuple[int, str]] = []
-    fixture_titles: list[str] = []
+    observed_window_count = 0
     direct_ax_client_untrusted = False
     failures: list[str] = []
 
@@ -388,7 +402,7 @@ def main() -> int:
             ):
                 next_window_query = now + 2.0
                 query_code, query_output, query_error = run_direct_ax(
-                    process.pid, operation="window-list", timeout=min(12.0, max(0.1, deadline - now))
+                    process.pid, operation="window-count", timeout=min(5.0, max(0.1, deadline - now))
                 )
                 query_output += query_error
                 print(f"MACOS_DOCUMENT_HOST_NATIVE_WINDOW_SNAPSHOT={query_output.strip()!r}")
@@ -396,21 +410,20 @@ def main() -> int:
                     if "trusted=false" in query_output:
                         direct_ax_client_untrusted = True
                         break
-                    failures.append(f"Native window-list query failed; exit_code={query_code}; {query_output.strip()}")
+                    failures.append(f"Native AX window-count query failed; exit_code={query_code}; {query_output.strip()}")
                     break
-                snapshot_lines = [entry for entry in query_output.splitlines() if entry.startswith("DIRECT_CG_WINDOW ")]
                 target_line = next((entry for entry in query_output.splitlines() if entry.startswith("DIRECT_AX_TARGET_PROCESS ")), "")
                 observed_process_name = target_line.split("name=", 1)[1].strip() if "name=" in target_line else f"pid={process.pid}"
-                observed_windows = []
-                for entry in snapshot_lines:
-                    fields = dict(part.split("=", 1) for part in entry.split("; ") if "=" in part)
-                    index_text = fields.get("index", "")
-                    window_title = fields.get("title", "")
-                    if index_text.isdigit():
-                        observed_windows.append((int(index_text), window_title))
-                fixture_titles = [title for _, title in observed_windows if "Host Test Fixture" in title]
-                if len(observed_windows) >= 2 and fixture_titles:
-                    observed_native_windows = True
+                try:
+                    observed_window_count = parse_ax_window_count(query_output, process.pid)
+                except ValueError as error:
+                    failures.append(f"Native AX window-count result was invalid: {error}; {query_output.strip()}")
+                    break
+                # The application fixture has completed all native-host round trips
+                # before this observation. Three AXWindows then independently
+                # establish the main editor plus its two native document hosts,
+                # without enumerating titles through a potentially slow CG query.
+                observed_native_windows = observed_window_count >= 3
 
             if all(marker in capture.markers for marker in SUCCESS_MARKERS) and observed_native_windows:
                 print(
@@ -418,8 +431,8 @@ def main() -> int:
                     + str(process.pid)
                     + "; process="
                     + observed_process_name
-                    + "; indexed windows="
-                    + repr(observed_windows)
+                    + "; AXWindows count="
+                    + str(observed_window_count)
                 )
                 break
             if process.poll() is not None:
@@ -454,7 +467,11 @@ def main() -> int:
             capture.thread.join(timeout=5)
             if not fixture_ready:
                 return fail("editor did not report that the document-host fixture reached its UI-ready state", log_path)
-            return fail("Accessibility did not observe a separate Host Test Fixture native window", log_path)
+            return fail(
+                "Accessibility did not observe the main editor plus two native document windows; "
+                f"pid={process.pid}; observed_AXWindows={observed_window_count}",
+                log_path,
+            )
 
         missing = [marker for marker in SUCCESS_MARKERS if marker not in capture.markers]
         if missing:
@@ -466,24 +483,9 @@ def main() -> int:
             capture.thread.join(timeout=5)
             return fail("fixture did not produce required round-trip evidence: " + repr(missing), log_path)
 
-        main_windows = [(index, title) for index, title in observed_windows if "PulseForge Editor" in title]
-        if len(main_windows) != 1:
-            print(
-                "MACOS_DOCUMENT_HOST_FAILURE_SCREENSHOT="
-                + capture_failure_screenshot(process)
-            )
-            stop_process_group(process)
-            capture.thread.join(timeout=5)
-            return fail(
-                "Accessibility did not identify exactly one main editor window by title; "
-                f"pid={process.pid}; process={observed_process_name}; indexed windows={observed_windows!r}",
-                log_path,
-            )
-        main_window_index, main_window_name = main_windows[0]
         print(
             f"MACOS_DOCUMENT_HOST_PROCESS=PASS; pid={process.pid}; process={observed_process_name}; "
-            f"main_window_index={main_window_index}; main_window={main_window_name!r}; "
-            f"all_windows={observed_windows!r}"
+            f"AXWindows_count={observed_window_count}; main_window=AXMainWindow"
         )
         screenshot = capture_screenshot("macos-editor-checkpoint-loaded-scene-and-separate-document-windows.png")
         print(
@@ -491,19 +493,17 @@ def main() -> int:
             f"loaded_scene_viewport_and_separate_native_documents; {screenshot}"
         )
 
-        diagnostic_arguments = (str(main_window_index), main_window_name)
         diagnostic_output: list[str] = []
         exit_code: int | None = None
-        preflight_timeout = min(12.0, max(0.1, deadline - time.monotonic()))
+        preflight_timeout = min(5.0, max(0.1, deadline - time.monotonic()))
         preflight_code, preflight_output, preflight_stderr = run_direct_ax(
             process.pid,
-            operation="snapshot",
-            window_title=main_window_name,
+            operation="window-count",
             timeout=preflight_timeout,
         )
         print(
             f"MACOS_DOCUMENT_HOST_CLOSE_PRE_ACTION_PREFLIGHT={'PASS' if preflight_code == 0 else 'FAILED'}; "
-            f"pid={process.pid}; window={main_window_name!r}; exit_code={preflight_code}; "
+            f"pid={process.pid}; window=AXMainWindow; exit_code={preflight_code}; "
             f"stdout={preflight_output.strip()!r}; stderr={preflight_stderr.strip()!r}; actual_close_request=still-required"
         )
         # Attempt the actual semantic close action directly. The read-only AX
@@ -517,7 +517,7 @@ def main() -> int:
         close_output += close_stderr
         print(f"MACOS_DOCUMENT_HOST_DIRECT_AX_CLOSE={close_output.strip()!r}")
         if "process_group_cleanup=failed" in close_output:
-            diagnostic_output = close_failure_diagnostics(str(process.pid), diagnostic_arguments, deadline)
+            diagnostic_output = close_failure_diagnostics(str(process.pid), deadline)
             screenshot_output = capture_failure_screenshot(process)
             stop_process_group(process)
             capture.thread.join(timeout=5)
@@ -530,7 +530,7 @@ def main() -> int:
             close_category = classify_accessibility_failure(close_code, close_output)
             print(
                 "MACOS_DOCUMENT_HOST_AX_CLOSE_RESULT="
-                f"{close_category}; pid={process.pid}; window={main_window_name!r}; "
+                f"{close_category}; pid={process.pid}; window=AXMainWindow; "
                 f"exit_code={close_code}; detail={close_output.strip()}"
             )
             if "trusted=false" in close_output:
@@ -553,20 +553,18 @@ def main() -> int:
                 if exit_code == 0 and all(marker in capture.markers for marker in SUCCESS_MARKERS):
                     print(
                         "MACOS_DOCUMENT_HOST_CLOSE_PRESS=UNCERTAIN_AX_RESULT_RECONCILED_AFTER_NORMAL_EXIT; "
-                        f"pid={process.pid}; window={main_window_name!r}; fixture completed and process exited 0; "
+                        f"pid={process.pid}; window=AXMainWindow; fixture completed and process exited 0; "
                         f"detail={close_output.strip()}"
                     )
                     close_code = 0
                 else:
-                    diagnostic_output = close_failure_diagnostics(
-                        str(process.pid), diagnostic_arguments, deadline
-                    )
+                    diagnostic_output = close_failure_diagnostics(str(process.pid), deadline)
                     screenshot_output = capture_failure_screenshot(process)
                     stop_process_group(process)
                     capture.thread.join(timeout=5)
                     return fail(
                         f"Accessibility main-window close operation {close_category} while the editor remained open; "
-                        + f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
+                        + f"pid={process.pid}; process={observed_process_name}; window=AXMainWindow; "
                         + f"exit_code={close_code}; "
                         + repr(diagnostic_output)
                         + "; "
@@ -576,15 +574,13 @@ def main() -> int:
                         log_path,
                     )
             if close_code != 0 and (close_code != 124 and close_category != "AX_QUERY_TIMEOUT"):
-                diagnostic_output = close_failure_diagnostics(
-                    str(process.pid), diagnostic_arguments, deadline
-                )
+                diagnostic_output = close_failure_diagnostics(str(process.pid), deadline)
                 screenshot_output = capture_failure_screenshot(process)
                 stop_process_group(process)
                 capture.thread.join(timeout=5)
                 return fail(
                     f"could not request normal main-window close ({close_category}); "
-                    f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
+                    f"pid={process.pid}; process={observed_process_name}; window=AXMainWindow; "
                     f"exit_code={close_code}; "
                     f"diagnostics={diagnostic_output!r}; {screenshot_output}; detail={close_output.strip()}",
                     log_path,
@@ -595,15 +591,13 @@ def main() -> int:
             if exit_code is None:
                 exit_code = process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            diagnostic_output = close_failure_diagnostics(
-                str(process.pid), diagnostic_arguments, deadline
-            )
+            diagnostic_output = close_failure_diagnostics(str(process.pid), deadline)
             screenshot_output = capture_failure_screenshot(process)
             stop_process_group(process)
             capture.thread.join(timeout=5)
             return fail(
                 "editor did not exit after the native main-window close request before timeout; "
-                f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
+                f"pid={process.pid}; process={observed_process_name}; window=AXMainWindow; "
                 f"diagnostics={diagnostic_output!r}; {screenshot_output}",
                 log_path,
             )

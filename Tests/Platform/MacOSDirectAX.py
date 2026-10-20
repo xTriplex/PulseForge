@@ -11,7 +11,6 @@ import subprocess
 SWIFT_AX_OPERATION = r"""
 import AppKit
 import ApplicationServices
-import CoreGraphics
 import Darwin
 import Foundation
 
@@ -56,23 +55,6 @@ let targetProcess = NSRunningApplication(processIdentifier: targetPID)
 print("DIRECT_AX_TARGET_PROCESS pid=\(targetPID); name=\(targetProcess?.localizedName ?? "unknown"); bundle=\(targetProcess?.bundleIdentifier ?? "unknown")")
 fflush(stdout)
 
-if operation == "window-list" {
-    let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-    let entries = (CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? [])
-        .filter {
-            ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == targetPID &&
-                (($0[kCGWindowLayer as String] as? NSNumber)?.intValue ?? -1) == 0
-        }
-    print("DIRECT_CG_RESULT status=snapshot; pid=\(targetPID); windows=\(entries.count)")
-    for (index, entry) in entries.enumerated() {
-        let number = (entry[kCGWindowNumber as String] as? NSNumber)?.uint32Value ?? 0
-        let title = (entry[kCGWindowName as String] as? String) ?? "<unavailable>"
-        let bounds = entry[kCGWindowBounds as String].map { String(describing: $0) } ?? "<unavailable>"
-        print("DIRECT_CG_WINDOW pid=\(targetPID); index=\(index + 1); window_number=\(number); title=\(title); bounds=\(bounds)")
-    }
-    exit(0)
-}
-
 let app = AXUIElementCreateApplication(targetPID)
 AXUIElementSetMessagingTimeout(app, 1.0)
 if operation == "close-main-window" {
@@ -116,6 +98,10 @@ guard windowsError == .success, let rawWindows, let windows = rawWindows as? [AX
     print("DIRECT_AX_RESULT status=error; stage=copy-windows; pid=\(targetPID); ax_error=\(windowsError.rawValue); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - queryStarted) * 1000)")
     exit(3)
 }
+if operation == "window-count" {
+    print("DIRECT_AX_RESULT status=window-count; pid=\(targetPID); windows=\(windows.count); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - queryStarted) * 1000)")
+    exit(0)
+}
 var titleMatches: [AXUIElement] = []
 var windowReadErrors: [(Int, Int32)] = []
 for (index, window) in windows.enumerated() {
@@ -145,11 +131,11 @@ struct AXNode {
     let parent: Int?
     let depth: Int
 }
-func collect(_ roots: [AXUIElement], depthLimit: Int = 8) -> [AXNode] {
+func collect(_ roots: [AXUIElement], depthLimit: Int = 8, nodeLimit: Int = 256) -> [AXNode] {
     var pending = roots.map { ($0, Optional<Int>.none, 0) }
     var found: [AXNode] = []
     var next = 0
-    while next < pending.count, found.count < 256 {
+    while next < pending.count, found.count < nodeLimit {
         let (element, parent, depth) = pending[next]
         next += 1
         AXUIElementSetMessagingTimeout(element, 1.0)
@@ -162,9 +148,28 @@ func collect(_ roots: [AXUIElement], depthLimit: Int = 8) -> [AXNode] {
     return found
 }
 let needsDescendants = deepSnapshot || operation == "press-control" || operation == "set-value" || operation == "select-element"
-let descendants: [AXNode] = needsDescendants
-    ? collect(matching, depthLimit: operation == "snapshot" ? 4 : 8)
-    : []
+let descendants: [AXNode] = {
+    guard needsDescendants else { return [] }
+    if operation != "select-element" { return collect(matching, depthLimit: operation == "snapshot" ? 4 : 8) }
+
+    // Finder panels can expose dozens of sidebar rows before their file browser
+    // descendants. Search the browser subtree separately so a broad window-tree
+    // node cap cannot hide the target file behind unrelated sidebar content.
+    let windowNodes = collect(matching, depthLimit: 3, nodeLimit: 96)
+    let browsers = windowNodes.enumerated().compactMap { index, node -> (Int, AXUIElement)? in
+        string(node.element, "AXRole") == "AXBrowser" ? (index, node.element) : nil
+    }
+    var allNodes = windowNodes
+    for (browserIndex, browser) in browsers {
+        let browserNodes = collect([browser], depthLimit: 8, nodeLimit: 256)
+        let offset = allNodes.count
+        allNodes.append(contentsOf: browserNodes.enumerated().map { _, node in
+            let parent = node.parent.map { $0 + offset } ?? browserIndex
+            return AXNode(element: node.element, parent: parent, depth: node.depth)
+        })
+    }
+    return allNodes
+}()
 func labels(_ element: AXUIElement) -> [String] {
     var result = ["AXTitle", "AXDescription", "AXIdentifier", "AXValue", "AXFilename", "AXURL", "AXDocument"]
         .compactMap { string(element, $0) }
@@ -236,7 +241,20 @@ if operation == "press-control" || operation == "set-value" || operation == "sel
     guard controls.count == 1, let (_, controlNode) = controls.first else {
         let candidates = descendants.map { string($0.element, "AXRole") ?? "" }
             .filter { $0 == "AXRow" || $0 == "AXCell" }
-        print("DIRECT_AX_RESULT status=control-selection-error; operation=\(operation); role=\(wantedRole); name=\(controlName); matches=\(controls.count); candidate_roles=\(candidates)")
+        let locationNodes = descendants.compactMap { node -> String? in
+            let role = string(node.element, "AXRole") ?? ""
+            guard ["AXPopUpButton", "AXBrowser", "AXTextField", "AXOutline"].contains(role) else { return nil }
+            let nodeLabels = labels(node.element).prefix(4).map { String($0.prefix(160)) }
+            return "depth=\(node.depth); role=\(role); labels=\(nodeLabels)"
+        }.prefix(8)
+        let rowNodes = descendants.compactMap { node -> String? in
+            let role = string(node.element, "AXRole") ?? ""
+            guard ["AXRow", "AXCell", "AXStaticText"].contains(role) else { return nil }
+            let nodeLabels = labels(node.element).prefix(4).map { String($0.prefix(160)) }
+            let parentRole = node.parent.map { string(descendants[$0].element, "AXRole") ?? "" } ?? "<root>"
+            return "depth=\(node.depth); parent_role=\(parentRole); role=\(role); labels=\(nodeLabels)"
+        }.prefix(24)
+        print("DIRECT_AX_RESULT status=control-selection-error; operation=\(operation); role=\(wantedRole); name=\(controlName); matches=\(controls.count); candidate_roles=\(candidates); locations=\(Array(locationNodes)); row_candidates=\(Array(rowNodes))")
         exit(8)
     }
     let control = controlNode.element
