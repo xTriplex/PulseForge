@@ -247,46 +247,46 @@ jobs:
             for FIXTURE_ARGS in "--editor-runtime-play-stop-test" "--document-host-close-ui-test cancel-save"; do
               LOG="$RUNNER_TEMP/macos-fixture-rejection-$CONFIGURATION_LOWER-$(printf '%s' "$FIXTURE_ARGS" | tr ' /-' '_').log"
               python3 - "$EDITOR" "$LOG" "$FIXTURE_ARGS" <<'PY'
-import os
-import shlex
-import signal
-import subprocess
-import sys
+          import os
+          import shlex
+          import signal
+          import subprocess
+          import sys
 
-editor, log_path, arguments = sys.argv[1:]
-process = subprocess.Popen(
-    [editor, *shlex.split(arguments)],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True,
-    start_new_session=True,
-)
-try:
-    output, _ = process.communicate(timeout=15)
-except subprocess.TimeoutExpired:
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        output, _ = process.communicate(timeout=3)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        try:
-            output, _ = process.communicate(timeout=2)
-        except subprocess.TimeoutExpired:
-            print(f"Could not reap timed-out fixture-rejection process: {process.pid}", file=sys.stderr)
-            sys.exit(1)
-    with open(log_path, "w", encoding="utf-8") as log_file:
-        log_file.write(output)
-    print(f"Timed out waiting for Debug-only option rejection: {arguments}", file=sys.stderr)
-    sys.exit(1)
-with open(log_path, "w", encoding="utf-8") as log_file:
-    log_file.write(output)
-if process.returncode == 0:
-    print(f"Release/Dist accepted Debug-only fixture arguments: {arguments}", file=sys.stderr)
-    sys.exit(1)
-PY
+          editor, log_path, arguments = sys.argv[1:]
+          process = subprocess.Popen(
+              [editor, *shlex.split(arguments)],
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              text=True,
+              start_new_session=True,
+          )
+          try:
+              output, _ = process.communicate(timeout=15)
+          except subprocess.TimeoutExpired:
+              try:
+                  os.killpg(process.pid, signal.SIGKILL)
+              except ProcessLookupError:
+                  pass
+              try:
+                  output, _ = process.communicate(timeout=3)
+              except subprocess.TimeoutExpired:
+                  process.kill()
+                  try:
+                      output, _ = process.communicate(timeout=2)
+                  except subprocess.TimeoutExpired:
+                      print(f"Could not reap timed-out fixture-rejection process: {process.pid}", file=sys.stderr)
+                      sys.exit(1)
+              with open(log_path, "w", encoding="utf-8") as log_file:
+                  log_file.write(output)
+              print(f"Timed out waiting for Debug-only option rejection: {arguments}", file=sys.stderr)
+              sys.exit(1)
+          with open(log_path, "w", encoding="utf-8") as log_file:
+              log_file.write(output)
+          if process.returncode == 0:
+              print(f"Release/Dist accepted Debug-only fixture arguments: {arguments}", file=sys.stderr)
+              sys.exit(1)
+          PY
               grep -q 'available only in Debug' "$LOG"
             done
           done
