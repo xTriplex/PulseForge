@@ -388,17 +388,17 @@ def main() -> int:
             ):
                 next_window_query = now + 2.0
                 query_code, query_output, query_error = run_direct_ax(
-                    process.pid, operation="snapshot", timeout=min(12.0, max(0.1, deadline - now))
+                    process.pid, operation="window-list", timeout=min(12.0, max(0.1, deadline - now))
                 )
                 query_output += query_error
-                print(f"MACOS_DOCUMENT_HOST_DIRECT_AX_SNAPSHOT={query_output.strip()!r}")
+                print(f"MACOS_DOCUMENT_HOST_NATIVE_WINDOW_SNAPSHOT={query_output.strip()!r}")
                 if query_code != 0:
                     if "trusted=false" in query_output:
                         direct_ax_client_untrusted = True
                         break
-                    failures.append(f"Direct Swift AX window query failed; exit_code={query_code}; {query_output.strip()}")
+                    failures.append(f"Native window-list query failed; exit_code={query_code}; {query_output.strip()}")
                     break
-                snapshot_lines = [entry for entry in query_output.splitlines() if entry.startswith("DIRECT_AX_WINDOW ")]
+                snapshot_lines = [entry for entry in query_output.splitlines() if entry.startswith("DIRECT_CG_WINDOW ")]
                 target_line = next((entry for entry in query_output.splitlines() if entry.startswith("DIRECT_AX_TARGET_PROCESS ")), "")
                 observed_process_name = target_line.split("name=", 1)[1].strip() if "name=" in target_line else f"pid={process.pid}"
                 observed_windows = []
@@ -511,8 +511,7 @@ def main() -> int:
         # the required close action, even when the query itself is unavailable.
         close_code, close_output, close_stderr = run_direct_ax(
             process.pid,
-            operation="close-window",
-            window_title=main_window_name,
+            operation="close-main-window",
             timeout=min(12.0, max(0.1, deadline - time.monotonic())),
         )
         close_output += close_stderr

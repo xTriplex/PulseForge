@@ -11,6 +11,7 @@ import subprocess
 SWIFT_AX_OPERATION = r"""
 import AppKit
 import ApplicationServices
+import CoreGraphics
 import Darwin
 import Foundation
 
@@ -55,8 +56,59 @@ let targetProcess = NSRunningApplication(processIdentifier: targetPID)
 print("DIRECT_AX_TARGET_PROCESS pid=\(targetPID); name=\(targetProcess?.localizedName ?? "unknown"); bundle=\(targetProcess?.bundleIdentifier ?? "unknown")")
 fflush(stdout)
 
+if operation == "window-list" {
+    let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+    let entries = (CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? [])
+        .filter {
+            ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == targetPID &&
+                (($0[kCGWindowLayer as String] as? NSNumber)?.intValue ?? -1) == 0
+        }
+    print("DIRECT_CG_RESULT status=snapshot; pid=\(targetPID); windows=\(entries.count)")
+    for (index, entry) in entries.enumerated() {
+        let number = (entry[kCGWindowNumber as String] as? NSNumber)?.uint32Value ?? 0
+        let title = (entry[kCGWindowName as String] as? String) ?? "<unavailable>"
+        let bounds = entry[kCGWindowBounds as String].map { String(describing: $0) } ?? "<unavailable>"
+        print("DIRECT_CG_WINDOW pid=\(targetPID); index=\(index + 1); window_number=\(number); title=\(title); bounds=\(bounds)")
+    }
+    exit(0)
+}
+
 let app = AXUIElementCreateApplication(targetPID)
 AXUIElementSetMessagingTimeout(app, 1.0)
+if operation == "close-main-window" {
+    print("DIRECT_AX_STAGE operation=close-main-window; stage=main-window-query")
+    fflush(stdout)
+    var rawWindow: CFTypeRef?
+    let windowError = AXUIElementCopyAttributeValue(app, "AXMainWindow" as CFString, &rawWindow)
+    guard windowError == .success, let rawWindow, CFGetTypeID(rawWindow) == AXUIElementGetTypeID() else {
+        print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=main-window; ax_error=\(windowError.rawValue)")
+        exit(5)
+    }
+    let window = rawWindow as! AXUIElement
+    AXUIElementSetMessagingTimeout(window, 1.0)
+    print("DIRECT_AX_STAGE operation=close-main-window; stage=close-button-query")
+    fflush(stdout)
+    guard let rawCloseButton = value(window, "AXCloseButton"),
+          CFGetTypeID(rawCloseButton) == AXUIElementGetTypeID() else {
+        print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=close-button")
+        exit(6)
+    }
+    let closeButton = rawCloseButton as! AXUIElement
+    print("DIRECT_AX_STAGE operation=close-main-window; stage=close-button-actions")
+    fflush(stdout)
+    var actions: CFArray?
+    let actionsError = AXUIElementCopyActionNames(closeButton, &actions)
+    guard actionsError == .success, (actions as? [String] ?? []).contains("AXPress") else {
+        print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=close-button-actions; ax_error=\(actionsError.rawValue); actions=\(actions as? [String] ?? [])")
+        exit(7)
+    }
+    AXUIElementSetMessagingTimeout(closeButton, 1.0)
+    print("DIRECT_AX_DISPATCH attempted=true; operation=close-main-window; pid=\(targetPID); window=AXMainWindow")
+    fflush(stdout)
+    let pressError = AXUIElementPerformAction(closeButton, kAXPressAction as CFString)
+    print("DIRECT_AX_RESULT status=\(pressError == .success ? "action-returned" : "action-error"); operation=close-main-window; pid=\(targetPID); ax_error=\(pressError.rawValue)")
+    exit(pressError == .success ? 0 : 8)
+}
 let queryStarted = ProcessInfo.processInfo.systemUptime
 var rawWindows: CFTypeRef?
 let windowsError = AXUIElementCopyAttributeValue(app, "AXWindows" as CFString, &rawWindows)
@@ -94,20 +146,25 @@ struct AXNode {
     let depth: Int
 }
 func collect(_ roots: [AXUIElement], depthLimit: Int = 8) -> [AXNode] {
-    var pending = roots.reversed().map { ($0, Optional<Int>.none, 0) }
+    var pending = roots.map { ($0, Optional<Int>.none, 0) }
     var found: [AXNode] = []
-    while let (element, parent, depth) = pending.popLast(), found.count < 256 {
+    var next = 0
+    while next < pending.count, found.count < 256 {
+        let (element, parent, depth) = pending[next]
+        next += 1
         AXUIElementSetMessagingTimeout(element, 1.0)
         let index = found.count
         found.append(AXNode(element: element, parent: parent, depth: depth))
         guard depth < depthLimit, let rawChildren = value(element, "AXChildren"),
               let children = rawChildren as? [AXUIElement] else { continue }
-        pending.append(contentsOf: children.reversed().map { ($0, Optional(index), depth + 1) })
+        pending.append(contentsOf: children.map { ($0, Optional(index), depth + 1) })
     }
     return found
 }
 let needsDescendants = deepSnapshot || operation == "press-control" || operation == "set-value" || operation == "select-element"
-let descendants: [AXNode] = needsDescendants ? collect(matching) : []
+let descendants: [AXNode] = needsDescendants
+    ? collect(matching, depthLimit: operation == "snapshot" ? 4 : 8)
+    : []
 func labels(_ element: AXUIElement) -> [String] {
     var result = ["AXTitle", "AXDescription", "AXIdentifier", "AXValue", "AXFilename", "AXURL", "AXDocument"]
         .compactMap { string(element, $0) }
@@ -122,7 +179,8 @@ func titleOrDescription(_ element: AXUIElement) -> String {
     labels(element).first ?? ""
 }
 if operation == "snapshot" {
-    print("DIRECT_AX_RESULT status=snapshot; pid=\(targetPID); windows=\(matching.count); all_windows=\(windows.count); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - queryStarted) * 1000); window_read_errors=\(windowReadErrors)")
+    let snapshotDepth = deepSnapshot ? 4 : 8
+    print("DIRECT_AX_RESULT status=snapshot; pid=\(targetPID); windows=\(matching.count); all_windows=\(windows.count); depth_limit=\(deepSnapshot ? snapshotDepth : 0); node_limit=256; elapsed_ms=\((ProcessInfo.processInfo.systemUptime - queryStarted) * 1000); window_read_errors=\(windowReadErrors)")
     fflush(stdout)
     for (index, item) in matching.enumerated() {
         AXUIElementSetMessagingTimeout(item, 0.75)

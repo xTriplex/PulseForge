@@ -333,7 +333,7 @@ class BoundedCapture:
                 with self.capture_index_lock:
                     self.capture_index += 1
                     marker["_capture_index"] = str(self.capture_index)
-                if marker.get("kind") in TELEMETRY_MARKERS:
+                if marker.get("kind") in TELEMETRY_MARKERS or marker.get("kind", "").startswith("DIAG_"):
                     with self.telemetry_lock:
                         if len(self.telemetry) == self.telemetry.maxlen:
                             self.telemetry_dropped += 1

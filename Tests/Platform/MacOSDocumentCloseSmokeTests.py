@@ -230,6 +230,37 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             self.assertEqual(["DIAG_TAB_INPUT", "DIAG_TAB_CLOSE_REQUEST"], [event["kind"] for event in telemetry])
             self.assertIn("close_hovered=1", telemetry[0]["raw"])
 
+    def test_cocoa_observer_startup_diagnostic_does_not_block_ready_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            script = (
+                "print('PF_DOC_CLOSE_DIAG|COCOA_LOCAL_MONITOR|scenario=cancel-save|host=host-a|asset=asset-a|"
+                "started=1|pid=123')\n"
+                "print('PF_DOC_CLOSE_UI|READY|scenario=cancel-save|host=host-a|asset=asset-a|generation=0')\n"
+            )
+            process = subprocess.Popen(
+                [sys.executable, "-c", script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            capture = smoke.BoundedCapture(process, Path(temporary) / "cocoa-observer-startup.log")
+            process.wait(timeout=5)
+            capture.thread.join(timeout=5)
+
+            ready = smoke.wait_event(
+                capture,
+                FakeProcess(),
+                "READY",
+                "cancel-save",
+                time.monotonic() + 1.0,
+                after_index=0,
+            )
+            self.assertEqual("READY", ready["kind"])
+            self.assertEqual(
+                ["DIAG_COCOA_LOCAL_MONITOR"],
+                [event["kind"] for event in capture.recent_telemetry({"scenario": "cancel-save"})],
+            )
+
     def test_save_press_or_release_telemetry_without_correlated_action_still_fails(self) -> None:
         cases = (
             (
