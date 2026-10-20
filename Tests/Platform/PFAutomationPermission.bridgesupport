@@ -16,5 +16,8 @@
 		<method selector="determineSystemEventsPermission">
 			<retval type="i"/>
 		</method>
+		<method selector="preflightQuartzEventAccess">
+			<retval type="i"/>
+		</method>
 	</class>
 </signatures>

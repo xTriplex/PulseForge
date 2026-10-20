@@ -69,6 +69,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             "typeWildCardEventClass",
             "typeWildCardEventID",
             "determineSystemEventsPermission",
+            "preflightQuartzEventAccess",
         )
 
         self.assertEqual("signatures", metadata.tag)
@@ -86,7 +87,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             self.assertTrue(return_types)
             self.assertTrue(all(return_type == "i" for return_type in return_types))
             self.assertEqual([], metadata_method.findall("arg"))
-        self.assertEqual(5, header.count("- (int32_t)"))
+        self.assertEqual(len(expected), header.count("- (int32_t)"))
 
     def test_probe_failure_report_preserves_nested_loader_diagnostics(self) -> None:
         result = {

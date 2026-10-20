@@ -106,10 +106,10 @@ try {{
     stage = "accessibility-trust-query";
     axTrusted = Boolean($.AXIsProcessTrusted());
 
-    stage = "CoreGraphics-framework-load";
-    ObjC.import("CoreGraphics");
-    stage = "quartz-post-event-preflight";
-    quartzAllowed = Boolean($.CGPreflightPostEventAccess());
+    stage = "custom-framework-method-invocation:preflightQuartzEventAccess";
+    var quartzStatus = permissionBridge.preflightQuartzEventAccess;
+    if (quartzStatus < 0) throw new Error("Quartz preflight returned " + quartzStatus);
+    quartzAllowed = quartzStatus === 1;
 
     stage = "result-serialization";
     serializedResult = JSON.stringify({{stage: "complete", descriptorType: descriptorType, wildcardClass: wildcardClass,

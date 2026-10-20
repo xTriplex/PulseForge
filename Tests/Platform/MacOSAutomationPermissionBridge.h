@@ -10,5 +10,6 @@
 - (int32_t)typeWildCardEventClass;
 - (int32_t)typeWildCardEventID;
 - (int32_t)determineSystemEventsPermission;
+- (int32_t)preflightQuartzEventAccess;
 
 @end

@@ -91,4 +91,11 @@ static NSAppleEventDescriptor* MakeSystemEventsDescriptor(void)
 	}
 }
 
+- (int32_t)preflightQuartzEventAccess
+{
+	if (@available(macOS 10.15, *))
+		return CGPreflightPostEventAccess() ? 1 : 0;
+	return -32005;
+}
+
 @end

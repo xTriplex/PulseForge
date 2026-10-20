@@ -18,7 +18,7 @@ EOF
 
 clang -arch arm64e -fobjc-arc -fmodules -dynamiclib \
 	-Wl,-install_name,@rpath/PFAutomationPermission.framework/Versions/A/PFAutomationPermission \
-	-framework Foundation -framework ApplicationServices \
+	-framework Foundation -framework ApplicationServices -framework CoreGraphics \
 	Tests/Platform/MacOSAutomationPermissionBridge.m \
 	-o "$BRIDGE/Versions/A/PFAutomationPermission" 2>&1 |
 	tee "$RUNNER_TEMP/macos-automation-permission-bridge-build.log"
