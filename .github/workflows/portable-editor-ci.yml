@@ -214,7 +214,8 @@ jobs:
             exit 1
           fi
           for CONFIGURATION in Release Dist; do
-            BUILD_DIR="Build/CI/macos-${CONFIGURATION,,}"
+            CONFIGURATION_LOWER="$(printf '%s' "$CONFIGURATION" | tr '[:upper:]' '[:lower:]')"
+            BUILD_DIR="Build/CI/macos-$CONFIGURATION_LOWER"
             cmake -S . -B "$BUILD_DIR" -G Ninja \
               -DCMAKE_BUILD_TYPE="$CONFIGURATION" \
               -DBUILD_TESTING=ON \
@@ -224,17 +225,17 @@ jobs:
               -DPULSEFORGE_DXC_EXECUTABLE="$PULSEFORGE_DXC_EXECUTABLE" \
               -DFETCHCONTENT_BASE_DIR="$GITHUB_WORKSPACE/Build/CI/Dependencies" \
               -DFETCHCONTENT_FULLY_DISCONNECTED=OFF 2>&1 |
-              tee "$RUNNER_TEMP/macos-configure-${CONFIGURATION,,}.log"
+              tee "$RUNNER_TEMP/macos-configure-$CONFIGURATION_LOWER.log"
             cmake --build "$BUILD_DIR" --parallel --target \
               PulseForgeEditor PulseForgeGame PulseForgeEditorCoreConsumer PulseForgeEditorTests 2>&1 |
-              tee "$RUNNER_TEMP/macos-build-${CONFIGURATION,,}.log"
+              tee "$RUNNER_TEMP/macos-build-$CONFIGURATION_LOWER.log"
             if find "$BUILD_DIR/CMakeFiles/PulseForgeEditorCore.dir" -name 'EditorDebugAcceptanceCoordinators.cpp.o' -print -quit | grep -q .; then
               echo "Debug-only coordinator was compiled for $CONFIGURATION" >&2
               exit 1
             fi
             EDITOR="$GITHUB_WORKSPACE/$BUILD_DIR/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor"
             for FIXTURE_ARGS in "--editor-runtime-play-stop-test" "--document-host-close-ui-test cancel-save"; do
-              LOG="$RUNNER_TEMP/macos-fixture-rejection-${CONFIGURATION,,}-$(printf '%s' "$FIXTURE_ARGS" | tr ' /-' '_').log"
+              LOG="$RUNNER_TEMP/macos-fixture-rejection-$CONFIGURATION_LOWER-$(printf '%s' "$FIXTURE_ARGS" | tr ' /-' '_').log"
               if "$EDITOR" $FIXTURE_ARGS >"$LOG" 2>&1; then
                 echo "$CONFIGURATION accepted Debug-only fixture arguments: $FIXTURE_ARGS" >&2
                 exit 1
