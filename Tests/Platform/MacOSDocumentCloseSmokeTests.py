@@ -13,7 +13,6 @@ import tempfile
 import threading
 import time
 import unittest
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -59,47 +58,44 @@ class DirtyCloseProtocolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.protocol = smoke.MarkerProtocol("cancel-save", "host-a", "asset-a", 0)
 
-    def test_permission_bridge_metadata_matches_the_fixed_c_abi(self) -> None:
+    def test_permission_bridge_class_exposes_only_scalar_no_argument_methods(self) -> None:
         platform_dir = Path(__file__).parent
-        metadata_path = platform_dir / "PFAutomationPermission.bridgesupport"
-        metadata = ET.parse(metadata_path).getroot()
         header = (platform_dir / "MacOSAutomationPermissionBridge.h").read_text(encoding="utf-8")
-        expected = {
-            "PFProbeSystemEventsDescriptor",
-            "PFReadSystemEventsNativeAddress",
-            "PFTypeWildCardEventClass",
-            "PFTypeWildCardEventID",
-            "PFDetermineSystemEventsPermission",
-        }
+        expected = (
+            "probeSystemEventsDescriptor",
+            "readSystemEventsNativeAddress",
+            "typeWildCardEventClass",
+            "typeWildCardEventID",
+            "determineSystemEventsPermission",
+        )
 
-        self.assertEqual("signatures", metadata.tag)
-        self.assertEqual("1.0", metadata.attrib.get("version"))
-        functions = metadata.findall("function")
-        self.assertEqual(expected, {function.attrib.get("name") for function in functions})
-        for function in functions:
-            self.assertEqual([], function.findall("arg"), function.attrib.get("name"))
-            self.assertEqual({"type": "i"}, function.find("retval").attrib, function.attrib.get("name"))
-            self.assertIn(f"int32_t {function.attrib['name']}(void);", header)
+        self.assertIn("@interface PFAutomationPermissionBridge : NSObject", header)
+        for method in expected:
+            self.assertIn(f"+ (int32_t){method};", header)
+        self.assertEqual(5, header.count("+ (int32_t)"))
 
-    def test_real_probe_script_imports_metadata_framework_and_calls_exported_functions(self) -> None:
+    def test_real_probe_imports_the_framework_and_invokes_runtime_visible_methods(self) -> None:
         script = automation._probe_script(Path("/tmp/PFAutomationPermission.framework"))
 
         self.assertIn('ObjC.import(bridgePath);', script)
-        for function in (
-            "PFProbeSystemEventsDescriptor",
-            "PFReadSystemEventsNativeAddress",
-            "PFTypeWildCardEventClass",
-            "PFTypeWildCardEventID",
-            "PFDetermineSystemEventsPermission",
+        self.assertIn('stage = "custom-framework-class-lookup";', script)
+        self.assertIn("var permissionBridge = $.PFAutomationPermissionBridge;", script)
+        for method in (
+            "probeSystemEventsDescriptor",
+            "readSystemEventsNativeAddress",
+            "typeWildCardEventClass",
+            "typeWildCardEventID",
+            "determineSystemEventsPermission",
         ):
-            self.assertIn(f'stage = "custom-framework-symbol-invocation:{function}";', script)
-        self.assertIn("wildcardClass = $.PFTypeWildCardEventClass();", script)
-        self.assertIn("$.PFProbeSystemEventsDescriptor()", script)
-        self.assertIn("$.PFDetermineSystemEventsPermission()", script)
+            self.assertIn(f"permissionBridge.{method}", script)
+            self.assertIn(f'custom-framework-method-invocation:{method}', script)
+
         self.assertIn("runningApplicationsWithBundleIdentifier", script)
         self.assertIn("NSThread.sleepForTimeInterval(0.1)", script)
         self.assertIn("systemEventsTargetRunning", script)
-        self.assertNotIn("typeof $.PF", script)
+        self.assertNotIn("ObjC.bindFunction", script)
+        self.assertNotIn("$.PFTypeWildCardEventClass", script)
+        self.assertNotIn("$.PFProbeSystemEventsDescriptor", script)
 
     def test_permission_probe_launches_system_events_with_a_bounded_noninteractive_request(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

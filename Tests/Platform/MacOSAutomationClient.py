@@ -29,10 +29,13 @@ try {{
     stage = "custom-framework-load";
     ObjC.import(bridgePath);
 
-    stage = "custom-framework-symbol-invocation:PFTypeWildCardEventClass";
-    wildcardClass = $.PFTypeWildCardEventClass();
+    stage = "custom-framework-class-lookup";
+    var permissionBridge = $.PFAutomationPermissionBridge;
+
+    stage = "custom-framework-method-invocation:typeWildCardEventClass";
+    wildcardClass = permissionBridge.typeWildCardEventClass;
     if (wildcardClass !== 707406378)
-        throw new Error("BridgeSupport wildcard function returned " + wildcardClass);
+        throw new Error("Objective-C wildcard class method returned " + wildcardClass);
 
     stage = "System-Events-target-readiness";
     var systemEventsApplications = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("com.apple.systemevents");
@@ -42,20 +45,20 @@ try {{
     }}
     systemEventsTargetRunning = ObjC.unwrap(systemEventsApplications.count) > 0;
 
-    stage = "custom-framework-symbol-invocation:PFProbeSystemEventsDescriptor";
-    descriptorResult = $.PFProbeSystemEventsDescriptor();
+    stage = "custom-framework-method-invocation:probeSystemEventsDescriptor";
+    descriptorResult = permissionBridge.probeSystemEventsDescriptor;
     if (descriptorResult !== 0) throw new Error("descriptor construction returned " + descriptorResult);
 
-    stage = "custom-framework-symbol-invocation:PFReadSystemEventsNativeAddress";
-    descriptorType = $.PFReadSystemEventsNativeAddress();
+    stage = "custom-framework-method-invocation:readSystemEventsNativeAddress";
+    descriptorType = permissionBridge.readSystemEventsNativeAddress;
     if (descriptorType < 0) throw new Error("native address access returned " + descriptorType);
 
-    stage = "custom-framework-symbol-invocation:PFTypeWildCardEventID";
-    wildcardEvent = $.PFTypeWildCardEventID();
+    stage = "custom-framework-method-invocation:typeWildCardEventID";
+    wildcardEvent = permissionBridge.typeWildCardEventID;
     if (wildcardClass !== 707406378 || wildcardClass !== wildcardEvent) throw new Error("invalid wildcard constants");
 
-    stage = "custom-framework-symbol-invocation:PFDetermineSystemEventsPermission";
-    appleEventsStatus = systemEventsTargetRunning ? $.PFDetermineSystemEventsPermission() : -600;
+    stage = "custom-framework-method-invocation:determineSystemEventsPermission";
+    appleEventsStatus = systemEventsTargetRunning ? permissionBridge.determineSystemEventsPermission : -600;
 
     stage = "accessibility-trust-query";
     axTrusted = Boolean($.AXIsProcessTrusted());

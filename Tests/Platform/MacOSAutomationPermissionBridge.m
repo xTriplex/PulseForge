@@ -1,5 +1,6 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <Foundation/Foundation.h>
+#import "MacOSAutomationPermissionBridge.h"
 
 enum
 {
@@ -9,14 +10,16 @@ enum
 	PFPermissionBridgeFailure = -32004
 };
 
-static NSAppleEventDescriptor* s_SystemEventsDescriptor;
+static NSAppleEventDescriptor* __strong s_SystemEventsDescriptor;
 
 static NSAppleEventDescriptor* MakeSystemEventsDescriptor(void)
 {
 	return [NSAppleEventDescriptor descriptorWithBundleIdentifier:@"com.apple.systemevents"];
 }
 
-int32_t PFProbeSystemEventsDescriptor(void)
+@implementation PFAutomationPermissionBridge
+
++ (int32_t)probeSystemEventsDescriptor
 {
 	@autoreleasepool
 	{
@@ -34,7 +37,7 @@ int32_t PFProbeSystemEventsDescriptor(void)
 	}
 }
 
-int32_t PFReadSystemEventsNativeAddress(void)
++ (int32_t)readSystemEventsNativeAddress
 {
 	@autoreleasepool
 	{
@@ -54,17 +57,17 @@ int32_t PFReadSystemEventsNativeAddress(void)
 	}
 }
 
-int32_t PFTypeWildCardEventClass(void)
++ (int32_t)typeWildCardEventClass
 {
 	return (int32_t)typeWildCard;
 }
 
-int32_t PFTypeWildCardEventID(void)
++ (int32_t)typeWildCardEventID
 {
 	return (int32_t)typeWildCard;
 }
 
-int32_t PFDetermineSystemEventsPermission(void)
++ (int32_t)determineSystemEventsPermission
 {
 	@autoreleasepool
 	{
@@ -87,3 +90,5 @@ int32_t PFDetermineSystemEventsPermission(void)
 		}
 	}
 }
+
+@end

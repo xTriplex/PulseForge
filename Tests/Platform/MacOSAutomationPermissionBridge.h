@@ -1,9 +1,14 @@
 #pragma once
 
 #include <stdint.h>
+#import <Foundation/Foundation.h>
 
-int32_t PFProbeSystemEventsDescriptor(void);
-int32_t PFReadSystemEventsNativeAddress(void);
-int32_t PFTypeWildCardEventClass(void);
-int32_t PFTypeWildCardEventID(void);
-int32_t PFDetermineSystemEventsPermission(void);
+@interface PFAutomationPermissionBridge : NSObject
+
++ (int32_t)probeSystemEventsDescriptor;
++ (int32_t)readSystemEventsNativeAddress;
++ (int32_t)typeWildCardEventClass;
++ (int32_t)typeWildCardEventID;
++ (int32_t)determineSystemEventsPermission;
+
+@end
