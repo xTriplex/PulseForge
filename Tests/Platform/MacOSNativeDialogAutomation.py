@@ -515,8 +515,8 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             return 1, "fixture process group or output reader survived bounded deadline cleanup"
         return 1, f"native dialog fixture exhausted its {timeout_seconds}s case bound before panel automation"
     if scenario == "open-select":
+        last_navigation_step = "Open panel activation not attempted"
         try:
-            helper_deadline = min(deadline, time.monotonic() + 25.0)
             activation_code, activation_output, activation_error = run_direct_ax(
                 int(panel_process_id),
                 operation="activate-window",
@@ -529,12 +529,23 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                     f"Open panel was not the confirmed focused AX window before Go to Folder; "
                     f"exit_code={activation_code}; {activation_output!r}"
                 )
-            print(f"NFD_OPEN_PANEL_FOCUS=CONFIRMED; {activation_output.strip()!r}")
-            run_keyboard_input("--go-to-folder", int(panel_process_id), timeout=min(5.0, remaining_seconds()))
+            print(f"NFD_OPEN_PANEL_FOCUS=CONFIRMED; {activation_output.strip()!r}", flush=True)
+
+            # Start the bounded navigation phase after focus has been established.
+            # The prior deadline also covered activation, so a slow AX focus query
+            # could consume the entire Go To Folder observation budget before the
+            # single keyboard action was even posted.
+            helper_deadline = min(deadline, time.monotonic() + 25.0)
+            action_id = run_keyboard_input(
+                "--go-to-folder", int(panel_process_id), timeout=min(5.0, remaining_seconds())
+            )
+            last_navigation_step = f"Go To Folder shortcut posted; action_id={action_id}"
+            print(f"NFD_GO_TO_FOLDER_INPUT=POSTED; action_id={action_id}; target_pid={panel_process_id}", flush=True)
             run_direct_ax_until(
                 int(panel_process_id), panel_title, helper_deadline, go_to_folder_path_field_visible,
                 "enabled Go to Folder PathTextField",
             )
+            last_navigation_step = "Go To Folder PathTextField observed in the expected sheet"
             automation_code, automation_output, automation_error = run_direct_ax(
                 int(panel_process_id),
                 operation="set-folder-path-confirm",
@@ -544,6 +555,11 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 timeout=min(10.0, remaining_seconds()),
             )
             automation_output += automation_error
+            last_navigation_step = (
+                f"Go To Folder path confirmation returned; exit_code={automation_code}; "
+                f"output={automation_output.strip()!r}"
+            )
+            print(f"NFD_GO_TO_FOLDER_CONFIRM=RETURNED; {last_navigation_step}", flush=True)
             if automation_code != 0:
                 raise RuntimeError(
                     f"Go to Folder path confirmation failed; exit_code={automation_code}; {automation_output!r}"
@@ -555,6 +571,8 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 lambda output: go_folder_sheet_closed_in_expected_directory(output, expected_path.parent.name),
                 "Go to Folder sheet dismissal and expected directory",
             )
+            last_navigation_step = "Go To Folder sheet dismissed and expected directory observed"
+            print(f"NFD_GO_TO_FOLDER_NAVIGATION=PASS; directory={expected_path.parent.name}", flush=True)
             run_keyboard_input(
                 "--type-text", int(panel_process_id), text=expected_path.name, timeout=min(5.0, remaining_seconds())
             )
@@ -566,7 +584,10 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
             if not stop_fixture(process, output_reader):
                 return 1, "fixture process group or output reader survived failed Open panel navigation"
-            return 1, f"Open selection navigation failed before the Open action; {error}"
+            return 1, (
+                f"Open selection navigation failed before the Open action; last_step={last_navigation_step}; "
+                f"{error}"
+            )
         automation_code, pressed, press_error = run_direct_ax(
             int(panel_process_id), operation="press-control", window_title=panel_title,
             control_name="Open", timeout=min(10.0, remaining_seconds())
