@@ -64,6 +64,28 @@ namespace PulseForgeEditor::Detail
 		uint32_t MouseViewport = 0;
 	};
 
+	struct DocumentCloseUiTabInputObservation
+	{
+		uint32_t WindowViewport = 0;
+		uint32_t MouseViewport = 0;
+		int MinimumX = 0;
+		int MinimumY = 0;
+		int MaximumX = 0;
+		int MaximumY = 0;
+		int MouseX = 0;
+		int MouseY = 0;
+		bool NativeWindowKnown = false;
+		bool NativeWindowFocused = false;
+		bool NativeWindowHovered = false;
+		bool TabHovered = false;
+		bool CloseHovered = false;
+		bool ItemActive = false;
+		bool MouseDown = false;
+		bool MouseClicked = false;
+		bool MouseReleased = false;
+		bool Pressed = false;
+	};
+
 	struct DocumentCloseUiPromptGeometry
 	{
 		int SaveX = 0;
@@ -117,6 +139,10 @@ namespace PulseForgeEditor::Detail
 		void ReportTextField(const DocumentCloseUiTextObservation& Observation);
 		void ReportDecisionPointer(const DocumentCloseUiDecisionPointerObservation& Observation);
 		void ReportCloseControl(std::string_view HostID, const EditorDocumentIdentity& Identity, int X, int Y);
+		void ReportTabInput(
+			std::string_view HostID, const EditorDocumentIdentity& Identity, const DocumentCloseUiTabInputObservation& Observation);
+		void ReportTabCloseRequest(std::string_view HostID, const EditorDocumentIdentity& Identity, bool RequestAlreadyPending,
+			std::string_view PendingHostID, const DocumentCloseUiSessionObservation& Session);
 		void ReportPrompt(std::string_view HostID, bool Pending, const DocumentCloseUiPromptGeometry& Geometry);
 		void ReportAction(std::string_view Choice, bool Resolved, const DocumentCloseUiSessionObservation& Session);
 		void ReportAllowClose(std::string_view HostID, int X, int Y, bool Clicked, const DocumentCloseUiSessionObservation& Session);
@@ -147,6 +173,8 @@ namespace PulseForgeEditor::Detail
 		size_t m_CloseControlSample = 0;
 		int m_LastCloseControlX = 0;
 		int m_LastCloseControlY = 0;
+		std::optional<DocumentCloseUiTabInputObservation> m_LastTabInput;
+		size_t m_TabInputSample = 0;
 		bool m_TextControlReported = false;
 		bool m_TextFocusReported = false;
 		bool m_TextPointerStateReported = false;

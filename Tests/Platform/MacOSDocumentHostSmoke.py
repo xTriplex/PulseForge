@@ -14,6 +14,7 @@ import threading
 import time
 from pathlib import Path
 
+from MacOSAutomationClient import capture_failure_context, probe_osascript_automation
 from MacOSScreenshot import capture_screenshot
 
 MAX_LOG_BYTES = 128 * 1024
@@ -394,7 +395,10 @@ def close_failure_diagnostics(
 def capture_failure_screenshot(process: subprocess.Popen[str]) -> str:
     if process.poll() is not None:
         return f"NOT_CAPTURED_PROCESS_ALREADY_EXITED; exit_code={process.returncode}"
-    return capture_screenshot("macos-document-host-checkpoint-unexpected-failure.png")
+    context = capture_failure_context("document-host-AX-close", process.pid)
+    print(f"MACOS_DOCUMENT_HOST_AUTOMATION_CONTEXT={context!r}")
+    screenshot = capture_screenshot("macos-document-host-checkpoint-unexpected-failure.png")
+    return screenshot
 
 
 def has_tcc_denial(output: str) -> bool:
@@ -523,6 +527,23 @@ def main() -> int:
         return fail(f"project fixture is missing or invalid: {project}", args.log_directory / "document-host-smoke.log")
     if args.timeout_seconds <= 0:
         return fail("timeout must be positive", args.log_directory / "document-host-smoke.log")
+
+    ax_state, ax_pid, ax_detail = probe_osascript_automation()
+    print(
+        f"MACOS_DOCUMENT_HOST_OSASCRIPT_AUTOMATION_PREFLIGHT={ax_state}; executable=/usr/bin/osascript; "
+        f"probe_pid={ax_pid}; detail={ax_detail!r}"
+    )
+    if ax_state in {"AX_UNTRUSTED", "APPLE_EVENTS_DENIED", "APPLE_EVENTS_WOULD_PROMPT"}:
+        print(
+            "MACOS_DOCUMENT_HOST_AUTOMATION=BLOCKED; native-window acceptance NOT RUN; "
+            f"client=osascript; reason={ax_state}; no permission prompt was requested"
+        )
+        return 77
+    if ax_state != "TRUSTED":
+        return fail(
+            f"could not nonpromptingly check osascript automation access: {ax_state}; {ax_detail}",
+            args.log_directory / "document-host-smoke.log",
+        )
 
     args.log_directory.mkdir(parents=True, exist_ok=True)
     runner_temp = os.environ.get("RUNNER_TEMP")

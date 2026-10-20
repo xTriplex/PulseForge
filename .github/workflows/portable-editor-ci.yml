@@ -64,6 +64,7 @@ jobs:
             "$RUNNER_TEMP/vulkaninfo-full.log" | tee "$RUNNER_TEMP/moltenvk-capabilities.log"
 
       - name: Configure the supported PulseForge macOS desktop targets
+        id: configure_desktop_targets
         run: |
           set -o pipefail
           cmake -S . -B Build/CI/macos-renderer -G Ninja \
@@ -206,9 +207,14 @@ jobs:
             --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-document-close-smoke.log"
 
       - name: Build Release and Dist editor consumers and verify Debug fixture exclusion
+        if: ${{ always() && !cancelled() && steps.configure_desktop_targets.outcome == 'success' && steps.build_desktop_targets.outcome == 'success' }}
         run: |
           set -o pipefail
           DEBUG_OBJECT_DIR="Build/CI/macos-renderer/CMakeFiles/PulseForgeEditorCore.dir"
+          if [ ! -d "$DEBUG_OBJECT_DIR" ]; then
+            echo "Debug editor-core object directory is missing: $DEBUG_OBJECT_DIR" >&2
+            exit 1
+          fi
           if ! find "$DEBUG_OBJECT_DIR" -name 'EditorDebugAcceptanceCoordinators.cpp.o' -print -quit | grep -q .; then
             echo "Debug coordinator object was not produced under $DEBUG_OBJECT_DIR" >&2
             exit 1
@@ -229,17 +235,58 @@ jobs:
             cmake --build "$BUILD_DIR" --parallel --target \
               PulseForgeEditor PulseForgeGame PulseForgeEditorCoreConsumer PulseForgeEditorTests 2>&1 |
               tee "$RUNNER_TEMP/macos-build-$CONFIGURATION_LOWER.log"
+            EDITOR="$GITHUB_WORKSPACE/$BUILD_DIR/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor"
+            if [ ! -d "$BUILD_DIR/CMakeFiles/PulseForgeEditorCore.dir" ] || [ ! -x "$EDITOR" ]; then
+              echo "Expected $CONFIGURATION editor target outputs are missing: $BUILD_DIR" >&2
+              exit 1
+            fi
             if find "$BUILD_DIR/CMakeFiles/PulseForgeEditorCore.dir" -name 'EditorDebugAcceptanceCoordinators.cpp.o' -print -quit | grep -q .; then
               echo "Debug-only coordinator was compiled for $CONFIGURATION" >&2
               exit 1
             fi
-            EDITOR="$GITHUB_WORKSPACE/$BUILD_DIR/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor"
             for FIXTURE_ARGS in "--editor-runtime-play-stop-test" "--document-host-close-ui-test cancel-save"; do
               LOG="$RUNNER_TEMP/macos-fixture-rejection-$CONFIGURATION_LOWER-$(printf '%s' "$FIXTURE_ARGS" | tr ' /-' '_').log"
-              if "$EDITOR" $FIXTURE_ARGS >"$LOG" 2>&1; then
-                echo "$CONFIGURATION accepted Debug-only fixture arguments: $FIXTURE_ARGS" >&2
-                exit 1
-              fi
+              python3 - "$EDITOR" "$LOG" "$FIXTURE_ARGS" <<'PY'
+import os
+import shlex
+import signal
+import subprocess
+import sys
+
+editor, log_path, arguments = sys.argv[1:]
+process = subprocess.Popen(
+    [editor, *shlex.split(arguments)],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    start_new_session=True,
+)
+try:
+    output, _ = process.communicate(timeout=15)
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        output, _ = process.communicate(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            output, _ = process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            print(f"Could not reap timed-out fixture-rejection process: {process.pid}", file=sys.stderr)
+            sys.exit(1)
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        log_file.write(output)
+    print(f"Timed out waiting for Debug-only option rejection: {arguments}", file=sys.stderr)
+    sys.exit(1)
+with open(log_path, "w", encoding="utf-8") as log_file:
+    log_file.write(output)
+if process.returncode == 0:
+    print(f"Release/Dist accepted Debug-only fixture arguments: {arguments}", file=sys.stderr)
+    sys.exit(1)
+PY
               grep -q 'available only in Debug' "$LOG"
             done
           done
