@@ -19,7 +19,7 @@ namespace PulseForgeEditor::Detail
 	EditorDocumentHostTestEditor::EditorDocumentHostTestEditor(EditorDocumentManager& Documents, EditorDocumentEditorRegistry& Editors,
 		EditorStyle& Style, std::function<void(std::string)> ReportError, std::function<PulseForge::UUID()> ActiveProject,
 		std::function<void(std::string_view, int, int, bool)> ReportCloseUiAllowClose,
-		std::function<void(std::string_view, int, int, bool, bool, int)> ReportCloseUiTextField)
+		std::function<void(std::string_view, int, int, bool, bool, bool, int)> ReportCloseUiTextField)
 		: m_Documents(Documents), m_Editors(Editors), m_Style(Style), m_ReportError(std::move(ReportError)),
 		  m_ActiveProject(std::move(ActiveProject)), m_ReportCloseUiAllowClose(std::move(ReportCloseUiAllowClose)),
 		  m_ReportCloseUiTextField(std::move(ReportCloseUiTextField))
@@ -52,11 +52,12 @@ namespace PulseForgeEditor::Detail
 			const ImVec2 Minimum = ImGui::GetItemRectMin();
 			const ImVec2 Maximum = ImGui::GetItemRectMax();
 			const bool ValueActive = ImGui::IsItemActive();
+			const bool ValueHovered = ImGui::IsItemHovered();
 			if (ValueChanged) (void)EditValue(Session, Candidate);
 			if (m_ReportCloseUiTextField)
 			{
 				m_ReportCloseUiTextField(Session.HostID, static_cast<int>((Minimum.x + Maximum.x) * 0.5f),
-					static_cast<int>((Minimum.y + Maximum.y) * 0.5f), ValueActive, ValueChanged, SessionState->Value);
+					static_cast<int>((Minimum.y + Maximum.y) * 0.5f), ValueActive, ValueHovered, ValueChanged, SessionState->Value);
 			}
 			ImGui::SameLine();
 			ImGui::TextUnformatted("Editable value");

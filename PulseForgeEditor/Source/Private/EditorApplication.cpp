@@ -509,8 +509,8 @@ namespace
 					[this] { return m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{}; },
 					[this](std::string_view HostID, int X, int Y, bool Clicked)
 					{ ReportDocumentCloseUiAllowClose(HostID, X, Y, Clicked); },
-					[this](std::string_view HostID, int X, int Y, bool Active, bool Changed, int Value)
-					{ ReportDocumentCloseUiTextField(HostID, X, Y, Active, Changed, Value); });
+					[this](std::string_view HostID, int X, int Y, bool Active, bool Hovered, bool Changed, int Value)
+					{ ReportDocumentCloseUiTextField(HostID, X, Y, Active, Hovered, Changed, Value); });
 				if (auto Result = m_DocumentHostTestEditor->Register(); !Result)
 					PF_ERROR("Could not register the debug document-host fixture editor: {}", Result.error());
 			}
@@ -1975,7 +1975,8 @@ namespace
 			m_DocumentCloseUiCloseControlReported = true;
 		}
 
-		void ReportDocumentCloseUiTextField(std::string_view HostID, int X, int Y, bool Active, bool Changed, int Value)
+		void ReportDocumentCloseUiTextField(
+			std::string_view HostID, int X, int Y, bool Active, bool Hovered, bool Changed, int Value)
 		{
 			if (!m_DocumentCloseUiTestScenario || m_DocumentCloseUiTestPhase != DocumentCloseUiTestPhase::AwaitingTextEntry ||
 				!IsDocumentCloseUiFixtureHost(HostID) || !m_DocumentCloseUiIdentity || !m_DocumentHostTestEditor)
@@ -1986,6 +1987,14 @@ namespace
 				PF_INFO("PF_DOC_CLOSE_UI|TEXT_CONTROL|scenario={}|host={}|asset={}|generation=0|x={}|y={}|value=20",
 					*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(), X, Y);
 				m_DocumentCloseUiTextControlReported = true;
+			}
+			if (Hovered && !m_DocumentCloseUiTextHoverReported)
+			{
+				const ImVec2 MousePosition = ImGui::GetIO().MousePos;
+				PF_INFO("PF_DOC_CLOSE_UI|TEXT_HOVER|scenario={}|host={}|asset={}|generation=0|hovered=1|active={}|x={}|y={}|mouse_x={:.1f}|mouse_y={:.1f}",
+					*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(),
+					Active ? 1 : 0, X, Y, MousePosition.x, MousePosition.y);
+				m_DocumentCloseUiTextHoverReported = true;
 			}
 			if (Active && !m_DocumentCloseUiTextFocusReported)
 			{
@@ -7244,6 +7253,7 @@ namespace
 		bool m_DocumentCloseUiCloseControlReported = false;
 		bool m_DocumentCloseUiTextControlReported = false;
 		bool m_DocumentCloseUiTextFocusReported = false;
+		bool m_DocumentCloseUiTextHoverReported = false;
 #endif
 		bool m_DocumentHostResetLayoutTest = false;
 		bool m_DocumentHostTabTearOffTest = false;

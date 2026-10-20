@@ -50,6 +50,26 @@ WINDOW_QUERY = '''on run argv
 end run
 '''
 
+WINDOW_BOUNDS_QUERY = '''on run argv
+    set targetPID to item 1 of argv as integer
+    set expectedTitle to item 2 of argv as text
+    tell application "System Events"
+        set targetProcess to first process whose unix id is targetPID
+        set matches to {}
+        repeat with targetWindow in windows of targetProcess
+            if (name of targetWindow as text) is expectedTitle then set end of matches to targetWindow
+        end repeat
+        if (count of matches) is not 1 then error "Expected one fixture window named " & quoted form of expectedTitle
+        set targetWindow to item 1 of matches
+        set windowPosition to position of targetWindow
+        set windowSize to size of targetWindow
+        return (name of targetProcess as text) & linefeed & expectedTitle & linefeed & ¬
+            ((item 1 of windowPosition) as text) & "," & ((item 2 of windowPosition) as text) & ¬
+            "," & ((item 1 of windowSize) as text) & "," & ((item 2 of windowSize) as text)
+    end tell
+end run
+'''
+
 POINTER_CLICK = '''on run argv
     set targetPID to item 1 of argv as integer
     set clickX to item 2 of argv as integer
@@ -353,7 +373,7 @@ def wait_event(capture: BoundedCapture, process: subprocess.Popen[str], kind: st
             raise RuntimeError(f"malformed fixture marker: {event.get('raw', '<invalid marker>')!r}")
         if event.get("kind") in {"READY", "PROMPT", "ACTION", "CLOSED", "PASS"}:
             raise RuntimeError(f"unexpected {event.get('kind')} event while waiting for {kind}: {event.get('raw')!r}")
-        if event.get("kind") in {"FIXTURE", "TEXT_CONTROL", "TEXT_FOCUS", "TEXT_ENTRY", "CLOSE_CONTROL"}:
+        if event.get("kind") in {"FIXTURE", "TEXT_CONTROL", "TEXT_HOVER", "TEXT_FOCUS", "TEXT_ENTRY", "CLOSE_CONTROL"}:
             if event.get("kind") == "FIXTURE":
                 capture.pending = deque(
                     (pending for pending in capture.pending if pending.get("kind") != "FIXTURE"), maxlen=MAX_EVENT_COUNT
@@ -410,6 +430,45 @@ def click_point(process: subprocess.Popen[str], point: tuple[int, int], deadline
     print(f"MACOS_DOC_CLOSE_CLICK=PASS; control={label}; {output.strip()}")
 
 
+def capture_text_focus_timeout(
+    process: subprocess.Popen[str], scenario: str, point: tuple[int, int], log_directory: Path, cause: str
+) -> str:
+    code, bounds = run_osascript(
+        WINDOW_BOUNDS_QUERY, str(process.pid), FIXTURE_TITLE, timeout=5.0
+    )
+    if code != 0:
+        if is_tcc_denial(bounds):
+            bounds_state = f"window_bounds=TCC_DENIED; exit_code={code}; detail={bounds.strip()!r}"
+        elif code == 124:
+            bounds_state = f"window_bounds=TIMED_OUT; exit_code={code}; detail={bounds.strip()!r}"
+        else:
+            bounds_state = f"window_bounds=ERROR; exit_code={code}; detail={bounds.strip()!r}"
+    else:
+        bounds_state = f"window_bounds={bounds.strip()!r}"
+
+    screenshot = log_directory / f"macos-document-close-{scenario}-text-focus-timeout.png"
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/screencapture", "-x", "-C", "-t", "png", str(screenshot)],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        if result.returncode == 0 and screenshot.is_file() and screenshot.stat().st_size > 0:
+            screenshot_state = f"screenshot=CAPTURED; bytes={screenshot.stat().st_size}; path={screenshot}"
+        else:
+            state = "TCC_DENIED" if is_tcc_denial(result.stderr + result.stdout) else "FAILED"
+            screenshot_state = (
+                f"screenshot={state}; exit_code={result.returncode}; "
+                f"stdout={result.stdout[-400:]!r}; stderr={result.stderr[-400:]!r}"
+            )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        state = "TIMED_OUT" if isinstance(error, subprocess.TimeoutExpired) else "FAILED"
+        screenshot_state = f"screenshot={state}; error={type(error).__name__}: {error}"
+    return f"{cause}; click_point={point!r}; {bounds_state}; {screenshot_state}"
+
+
 def click_document_tab_close(
     process: subprocess.Popen[str], capture: BoundedCapture, deadline: float, protocol: MarkerProtocol, label: str
 ) -> None:
@@ -427,7 +486,39 @@ def enter_editor_value(process: subprocess.Popen[str], capture: BoundedCapture, 
     point = parse_point(f"{control.get('x', '')},{control.get('y', '')}", "editable value")
     click_point(process, point, deadline, "Editable value")
 
-    focus = wait_event(capture, process, "TEXT_FOCUS", protocol.scenario, deadline)
+    pointer_deadline = min(deadline, time.monotonic() + 8.0)
+    try:
+        hover = wait_event(capture, process, "TEXT_HOVER", protocol.scenario, pointer_deadline)
+    except RuntimeError as error:
+        raise RuntimeError(
+            capture_text_focus_timeout(
+                process, protocol.scenario, point, capture.log_path.parent,
+                f"ImGui did not report the clicked text control hovered: {error}",
+            )
+        ) from error
+    protocol.check_identity(hover)
+    if hover.get("hovered") != "1" or hover.get("x") != str(point[0]) or hover.get("y") != str(point[1]):
+        raise RuntimeError(
+            capture_text_focus_timeout(
+                process, protocol.scenario, point, capture.log_path.parent,
+                f"ImGui hover evidence did not match the clicked text control: {hover.get('raw')!r}",
+            )
+        )
+    print(
+        f"MACOS_DOC_CLOSE_HOVER=PASS; scenario={protocol.scenario}; "
+        f"mouse=({hover.get('mouse_x')},{hover.get('mouse_y')}); control=({point[0]},{point[1]})"
+    )
+
+    focus_deadline = min(deadline, time.monotonic() + 5.0)
+    try:
+        focus = wait_event(capture, process, "TEXT_FOCUS", protocol.scenario, focus_deadline)
+    except RuntimeError as error:
+        raise RuntimeError(
+            capture_text_focus_timeout(
+                process, protocol.scenario, point, capture.log_path.parent,
+                f"ImGui saw the editable control hovered but did not report focus: {error}",
+            )
+        ) from error
     protocol.check_identity(focus)
     if focus.get("generation") != "0" or focus.get("active") != "1" or focus.get("value") != "20":
         raise RuntimeError(f"editable value did not receive focus before text entry: {focus.get('raw')!r}")
