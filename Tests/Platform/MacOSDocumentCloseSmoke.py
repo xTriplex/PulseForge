@@ -1662,7 +1662,7 @@ def exit_normally(
         diagnostics = capture_main_close_diagnostics(process, deadline)
         raise RuntimeError(
             f"could not request normal main-window close; stage={'ACTION_DISPATCH' if dispatch_marker else 'WINDOW_OR_CONTROL_LOOKUP'}; exit_code={code}; "
-            f"{evidence.api_result}; diagnostics={diagnostics}"
+            f"{evidence.summary()}; {evidence.api_result}; diagnostics={diagnostics}"
         )
     print(f"MACOS_DOC_CLOSE_MAIN_WINDOW_CLOSE={evidence.api_result!r}; {evidence.summary()}")
     try:
