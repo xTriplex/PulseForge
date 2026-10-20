@@ -30,9 +30,9 @@ try {{
     ObjC.import(bridgePath);
 
     stage = "custom-framework-symbol-binding";
-    if (typeof $.PFProbeSystemEventsDescriptor !== "function" ||
-        typeof $.PFDetermineSystemEventsPermission !== "function")
-        throw new Error("BridgeSupport metadata did not expose the permission probe functions");
+    wildcardClass = $.PFTypeWildCardEventClass();
+    if (wildcardClass !== 707406378)
+        throw new Error("BridgeSupport wildcard function returned " + wildcardClass);
 
     stage = "System-Events-target-readiness";
     var systemEventsApplications = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("com.apple.systemevents");
@@ -51,7 +51,6 @@ try {{
     if (descriptorType < 0) throw new Error("native address access returned " + descriptorType);
 
     stage = "wildcard-constant-marshalling";
-    wildcardClass = $.PFTypeWildCardEventClass();
     wildcardEvent = $.PFTypeWildCardEventID();
     if (wildcardClass !== 707406378 || wildcardClass !== wildcardEvent) throw new Error("invalid wildcard constants");
 
