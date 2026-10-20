@@ -4975,6 +4975,15 @@ namespace
 
 			const std::string PopupName = "Unsaved Asset Documents###PFDocumentClose_" + std::string(HostID);
 			if (m_DocumentCloseRequest.ConsumeDialogOpenRequest()) ImGui::OpenPopup(PopupName.c_str());
+			const ImGuiViewport* HostViewport = ImGui::GetWindowViewport();
+			if (HostViewport)
+			{
+				// BeginPopupModal defaults a newly-created popup to the main viewport when its
+				// anchor window was not active last frame. Keep native-host decisions on their
+				// owning viewport so pointer coordinates and modal controls share a window.
+				ImGui::SetNextWindowViewport(HostViewport->ID);
+				ImGui::SetNextWindowPos(HostViewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+			}
 			bool PopupOpen = true;
 			const bool PopupVisible = ImGui::BeginPopupModal(PopupName.c_str(), &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize);
 			if (!PopupVisible) return;
