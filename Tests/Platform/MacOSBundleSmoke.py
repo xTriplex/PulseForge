@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import os
 import shutil
 import signal
@@ -11,12 +12,23 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 MAX_LOG_BYTES = 256 * 1024
 MAX_CONSOLE_BYTES = 32 * 1024
-MAX_EVIDENCE_LINES = 256
-MAX_EVIDENCE_LINE_BYTES = 2048
+MAX_ERROR_SAMPLES = 24
+
+
+@dataclass
+class CapturedRun:
+    returncode: int
+    output: str
+    seen_markers: set[str]
+    validation_error_count: int
+    validation_error_samples: list[str]
+    reader_error: str | None
+    truncated: bool
 
 
 def fail(message: str, log_path: Path | None = None) -> int:
@@ -27,7 +39,52 @@ def fail(message: str, log_path: Path | None = None) -> int:
     return 1
 
 
-def run_bounded(command: list[str], cwd: Path, environment: dict[str, str], timeout: int, log_path: Path) -> tuple[int, str]:
+def stop_process_group(process: subprocess.Popen[str]) -> bool:
+    process_group = process.pid
+    try:
+        os.killpg(process_group, signal.SIGTERM)
+    except ProcessLookupError:
+        return process.poll() is not None
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            return False
+    group_deadline = time.monotonic() + 0.5
+    while time.monotonic() < group_deadline:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return process.poll() is not None
+        time.sleep(0.025)
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except ProcessLookupError:
+        return process.poll() is not None
+    group_deadline = time.monotonic() + 5.0
+    while time.monotonic() < group_deadline:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return process.poll() is not None
+        time.sleep(0.05)
+    return False
+
+
+def run_bounded(
+    command: list[str],
+    cwd: Path,
+    environment: dict[str, str],
+    timeout: int,
+    log_path: Path,
+    required_markers: tuple[str, ...],
+) -> CapturedRun:
     print("MACOS_BUNDLE_SMOKE_COMMAND=" + repr(command))
     print(f"MACOS_BUNDLE_SMOKE_CWD={cwd}")
     process = subprocess.Popen(
@@ -40,87 +97,116 @@ def run_bounded(command: list[str], cwd: Path, environment: dict[str, str], time
         start_new_session=True,
     )
     captured = bytearray()
-    evidence: list[str] = []
-    validation_errors: list[str] = []
+    required = set(required_markers)
+    seen_markers: set[str] = set()
+    validation_error_samples: list[str] = []
+    validation_error_count = 0
     console_bytes = 0
+    console_output_failed = False
+    total_bytes = 0
+    reader_error: str | None = None
+    reader_finished = threading.Event()
 
     def read_output() -> None:
-        nonlocal console_bytes
+        nonlocal console_bytes, total_bytes, validation_error_count, reader_error, console_output_failed
         assert process.stdout is not None
-        for line in process.stdout:
-            encoded = line.encode("utf-8", errors="replace")
-            if len(captured) < MAX_LOG_BYTES:
-                captured.extend(encoded[: MAX_LOG_BYTES - len(captured)])
-            if any(token in line for token in ("PULSEFORGE_", "Profile:", "NVRHI:", "VUID-", "Vulkan error (")):
-                if len(evidence) < MAX_EVIDENCE_LINES:
-                    evidence.append(encoded[:MAX_EVIDENCE_LINE_BYTES].decode("utf-8", errors="replace"))
-            lowered = line.lower()
-            if ("VUID-" in line or "Vulkan error (" in line or
-                    ("NVRHI:" in line and ("[error]" in lowered or "[critical]" in lowered))):
-                if len(validation_errors) < 32:
-                    validation_errors.append(encoded[:MAX_EVIDENCE_LINE_BYTES].decode("utf-8", errors="replace"))
-            if console_bytes < MAX_CONSOLE_BYTES:
-                printable = encoded[: MAX_CONSOLE_BYTES - console_bytes].decode("utf-8", errors="replace")
-                print(printable, end="")
-                console_bytes += len(encoded)
+        try:
+            for line in process.stdout:
+                encoded = line.encode("utf-8", errors="replace")
+                total_bytes += len(encoded)
+                if len(captured) < MAX_LOG_BYTES:
+                    captured.extend(encoded[: MAX_LOG_BYTES - len(captured)])
+                for marker in required:
+                    if marker in line:
+                        seen_markers.add(marker)
+                lowered = line.lower()
+                if (
+                    "VUID-" in line
+                    or "Vulkan error (" in line
+                    or ("NVRHI:" in line and ("[error]" in lowered or "[critical]" in lowered))
+                ):
+                    validation_error_count += 1
+                    if len(validation_error_samples) < MAX_ERROR_SAMPLES:
+                        validation_error_samples.append(encoded[:2048].decode("utf-8", errors="replace"))
+                if console_bytes < MAX_CONSOLE_BYTES and not console_output_failed:
+                    printable_bytes = encoded[: MAX_CONSOLE_BYTES - console_bytes]
+                    try:
+                        print(printable_bytes.decode("utf-8", errors="replace"), end="")
+                        console_bytes += len(printable_bytes)
+                    except (OSError, ValueError) as error:
+                        console_output_failed = True
+                        reader_error = reader_error or (
+                            f"could not forward {command[0]} output to the workflow log: {type(error).__name__}: {error}"
+                        )
+        except Exception as error:
+            reader_error = f"{type(error).__name__}: {error}"
+        finally:
+            reader_finished.set()
 
     reader = threading.Thread(target=read_output, daemon=True)
     reader.start()
+    timed_out = False
     try:
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.stdout.close()
-            reader.join(timeout=5)
+        timed_out = True
+        if not stop_process_group(process):
+            if process.stdout is not None:
+                process.stdout.close()
+            reader.join(timeout=3)
             log_path.write_bytes(captured)
-            raise TimeoutError("bundle process survived bounded SIGKILL cleanup")
-        reader.join(timeout=5)
-        log_path.write_bytes(captured)
-        if reader.is_alive():
-            raise TimeoutError("process group or bundle output reader survived bounded timeout cleanup")
-        raise TimeoutError(f"process exceeded the {timeout}s bound; process group was terminated")
+            raise TimeoutError(f"bundle process group PID {process.pid} survived bounded timeout cleanup")
     reader.join(timeout=5)
     if reader.is_alive():
+        stop_process_group(process)
+        if process.stdout is not None:
+            process.stdout.close()
+        reader.join(timeout=3)
         log_path.write_bytes(captured)
-        raise TimeoutError("bundle output reader remained active after process exit")
-    log_path.write_bytes(captured)
-    output = captured.decode("utf-8", errors="replace")
-    if len(captured) >= MAX_LOG_BYTES:
-        output += "\nMACOS_BUNDLE_SMOKE_LOG=TRUNCATED; required markers and validation diagnostics were streamed separately\n"
-    output += "".join(evidence)
-    output += "".join(validation_errors)
-    return process.returncode, output
-
-
-def verify_output(name: str, output: str, exit_code: int, markers: tuple[str, ...]) -> None:
-    if exit_code != 0:
-        raise RuntimeError(f"{name} exited with status {exit_code}")
-    for marker in markers:
-        if marker not in output:
-            raise RuntimeError(f"{name} output did not contain required evidence marker: {marker}")
-    validation_errors = any(
-        "NVRHI:" in line and ("[error]" in line.lower() or "[critical]" in line.lower())
-        for line in output.splitlines()
+        raise TimeoutError("process group or bundle output reader remained active after bounded cleanup")
+    truncated = total_bytes > len(captured)
+    log = bytes(captured)
+    if truncated:
+        suffix = b"\n[MACOS_BUNDLE_SMOKE_LOG=TRUNCATED; markers and validation errors were streamed separately]\n"
+        log = log[: max(0, MAX_LOG_BYTES - len(suffix))] + suffix
+    log_path.write_bytes(log)
+    output = log.decode("utf-8", errors="replace")
+    if timed_out:
+        raise TimeoutError(f"process exceeded the {timeout}s bound; process group was terminated; log={log_path}")
+    return CapturedRun(
+        returncode=process.returncode,
+        output=output,
+        seen_markers=seen_markers,
+        validation_error_count=validation_error_count,
+        validation_error_samples=validation_error_samples,
+        reader_error=reader_error,
+        truncated=truncated,
     )
-    if "VUID-" in output or "Vulkan error (" in output or validation_errors:
-        raise RuntimeError(f"{name} emitted a Vulkan/NVRHI validation error")
+
+
+def verify_output(name: str, captured: CapturedRun, markers: tuple[str, ...]) -> None:
+    if captured.returncode != 0:
+        raise RuntimeError(f"{name} exited with status {captured.returncode}")
+    if captured.reader_error:
+        raise RuntimeError(f"{name} output reader failed: {captured.reader_error}")
+    missing = [marker for marker in markers if marker not in captured.seen_markers]
+    if missing:
+        raise RuntimeError(f"{name} output did not contain required streamed evidence markers: {missing!r}")
+    if captured.validation_error_count:
+        raise RuntimeError(
+            f"{name} emitted {captured.validation_error_count} Vulkan/NVRHI validation errors; "
+            f"samples={captured.validation_error_samples!r}"
+        )
+
+
+def remove_temporary_root(root: Path, parent: Path) -> None:
+    if root.is_symlink():
+        raise RuntimeError(f"refusing to remove symlink bundle-smoke root: {root}")
+    resolved_root = root.resolve(strict=True)
+    resolved_parent = parent.resolve(strict=True)
+    if resolved_root.parent != resolved_parent or not resolved_root.name.startswith("PulseForge G05 bundle Ω "):
+        raise RuntimeError(f"refusing to remove unexpected bundle-smoke root: {resolved_root}")
+    shutil.rmtree(resolved_root)
 
 
 def require_resources(bundle: Path, executable_name: str, paths: tuple[Path, ...]) -> Path:
@@ -217,48 +303,42 @@ def main() -> int:
             isolated_settings.mkdir()
             editor_environment = sdk_assisted_runtime_environment()
             editor_environment["PULSEFORGE_EDITOR_SETTINGS_DIR"] = str(isolated_settings)
-            editor_code, editor_output = run_bounded(
+            editor_markers = (
+                "Profile: Project open to first renderable viewport preparation took",
+                "Profile: Project open to first rendered viewport frame took",
+                "PULSEFORGE_EDITOR_PROJECT_RENDER_SMOKE=PASS; requesting orderly shutdown",
+                "PULSEFORGE_EDITOR_PROJECT_RENDER_SMOKE_SHUTDOWN=PASS",
+            )
+            editor_output = run_bounded(
                 [str(editor_executable), "--project-open-render-test", str(editor_project_path)],
                 editor_cwd,
                 editor_environment,
                 args.timeout_seconds,
                 args.log_directory / "macos-editor-bundle-smoke.log",
+                editor_markers,
             )
-            verify_output(
-                "editor",
-                editor_output,
-                editor_code,
-                (
-                    "Profile: Project open to first renderable viewport preparation took",
-                    "Profile: Project open to first rendered viewport frame took",
-                    "PULSEFORGE_EDITOR_PROJECT_RENDER_SMOKE=PASS; requesting orderly shutdown",
-                    "PULSEFORGE_EDITOR_PROJECT_RENDER_SMOKE_SHUTDOWN=PASS",
-                ),
-            )
+            verify_output("editor", editor_output, editor_markers)
             print("MACOS_EDITOR_BUNDLE_SMOKE=PASS; relocated bundle/resources, external project with spaces and Ω, unrelated cwd, render callback, clean shutdown")
 
             player_environment = sdk_assisted_runtime_environment()
             player_environment["PULSEFORGE_PLAYER_SMOKE_EXIT_AFTER_RENDER"] = "1"
-            player_code, player_output = run_bounded(
+            player_markers = (
+                "PULSEFORGE_PLAYER_RUNTIME_SMOKE=PASS; scripting advanced; physics_steps=",
+                "PULSEFORGE_PLAYER_RELOCATION_SMOKE=PASS; rendered scene geometry after runtime advancement and requesting orderly shutdown",
+                "PULSEFORGE_PLAYER_RELOCATION_SMOKE_SHUTDOWN=PASS",
+            )
+            player_output = run_bounded(
                 [str(player_executable)],
                 player_cwd,
                 player_environment,
                 args.timeout_seconds,
                 args.log_directory / "macos-player-bundle-smoke.log",
+                player_markers,
             )
-            verify_output(
-                "player",
-                player_output,
-                player_code,
-                (
-                    "PULSEFORGE_PLAYER_RUNTIME_SMOKE=PASS; scripting advanced; physics_steps=",
-                    "PULSEFORGE_PLAYER_RELOCATION_SMOKE=PASS; rendered scene geometry after runtime advancement and requesting orderly shutdown",
-                    "PULSEFORGE_PLAYER_RELOCATION_SMOKE_SHUTDOWN=PASS",
-                ),
-            )
+            verify_output("player", player_output, player_markers)
             print("MACOS_PLAYER_BUNDLE_SMOKE=PASS; relocated bundle/resources, unrelated cwd, scene geometry render callback, clean shutdown")
             print("MACOS_RELOCATED_BUNDLE_SMOKES=PASS; startup/resource lookup/render callbacks/shutdown only; no pixel or native-dialog claim")
-            shutil.rmtree(root)
+            remove_temporary_root(root, temporary_parent)
             return 0
         except (OSError, shutil.Error, subprocess.SubprocessError, TimeoutError, RuntimeError) as error:
             print(f"Bundle evidence retained under: {root}", file=sys.stderr)

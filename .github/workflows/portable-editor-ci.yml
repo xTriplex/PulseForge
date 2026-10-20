@@ -22,6 +22,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Test dirty-close automation protocol and bounded output capture
+        id: dirty_close_harness_tests
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSDocumentCloseSmokeTests.py 2>&1 | tee "$RUNNER_TEMP/macos-document-close-harness-tests.log"
+
       - name: Probe hosted Metal command execution
         run: swift Tests/Platform/MacOSMetalCapabilityProbe.swift
 
@@ -190,7 +196,7 @@ jobs:
 
       - name: Exercise dirty native document close decisions and recovery
         id: macos_document_close
-        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' && steps.dirty_close_harness_tests.outcome == 'success' }}
         run: |
           set -o pipefail
           python3 Tests/Platform/MacOSDocumentCloseSmoke.py \
@@ -231,8 +237,9 @@ jobs:
             ${{ runner.temp }}/macos-document-close-discard.log
             ${{ runner.temp }}/macos-document-close-save-retry.log
             ${{ runner.temp }}/macos-document-close-close-retry.log
-            ${{ runner.temp }}/macos-document-close-*-text-focus-timeout.png
-            ${{ runner.temp }}/macos-document-close-*-action-timeout.png
+            ${{ runner.temp }}/macos-document-close-*-outcome-missing.png
+            ${{ runner.temp }}/macos-document-close-main-window-close-failure.png
+            ${{ runner.temp }}/macos-document-close-harness-tests.log
             ${{ runner.temp }}/macos-native-dialog-automation.log
             ${{ runner.temp }}/native-dialog-open-select.log
             ${{ runner.temp }}/native-dialog-open-cancel.log
