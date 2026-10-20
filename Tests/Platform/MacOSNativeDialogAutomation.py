@@ -36,6 +36,30 @@ def ax_node_enabled(output: str, role: str, name: str) -> bool:
     return False
 
 
+def open_button_state_ready(output: str, fixture_pid: int, panel_title: str) -> bool:
+    results = [line for line in output.splitlines() if line.startswith("DIRECT_AX_RESULT status=open-button-state;")]
+    if len(results) != 1:
+        raise RuntimeError(f"expected one targeted Open-button observation, found {len(results)}; output={output[-1600:]!r}")
+    fields: dict[str, str] = {}
+    for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; "):
+        if "=" not in part:
+            raise RuntimeError(f"malformed Open-button observation field: {part!r}")
+        key, value = part.split("=", 1)
+        if key in fields:
+            raise RuntimeError(f"duplicate Open-button observation field: {key!r}")
+        fields[key] = value
+    required_fields = {
+        "status", "pid", "window_title", "matches", "enabled", "enabled_error", "complete", "truncated", "visited", "query_errors"
+    }
+    if not required_fields.issubset(fields) or fields.get("status") != "open-button-state":
+        raise RuntimeError(f"malformed Open-button observation; fields={fields!r}")
+    if fields.get("pid") != str(fixture_pid) or fields.get("window_title") != panel_title:
+        raise RuntimeError(f"Open-button observation target mismatch; fields={fields!r}")
+    if fields.get("complete") != "true" or fields.get("truncated") != "false" or fields.get("query_errors") != "[]":
+        raise RuntimeError(f"Open-button observation incomplete; fields={fields!r}")
+    return fields.get("matches") == "1" and fields.get("enabled") == "true" and fields.get("enabled_error") == "0"
+
+
 def run_keyboard_input(mode: str, target_pid: int, *, text: str = "", timeout: float) -> str:
     runner_temp = os.environ.get("RUNNER_TEMP")
     if not runner_temp:
@@ -98,13 +122,12 @@ def wait_for_open_button(fixture_pid: int, panel_title: str, deadline: float) ->
         remaining = deadline - time.monotonic()
         code, output, error = run_direct_ax(
             fixture_pid,
-            operation="snapshot",
+            operation="observe-open-button-state",
             window_title=panel_title,
-            deep_snapshot=True,
             timeout=min(8.0, max(0.1, remaining)),
         )
         last_output = output + error
-        if code == 0 and ax_node_enabled(last_output, "AXButton", "Open"):
+        if code == 0 and open_button_state_ready(last_output, fixture_pid, panel_title):
             return last_output
         if code not in (0, 124):
             raise RuntimeError(f"Open panel snapshot failed while awaiting selected file; exit_code={code}; {last_output!r}")

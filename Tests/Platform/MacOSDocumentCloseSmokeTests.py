@@ -83,6 +83,29 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertTrue(native_dialog.ax_node_enabled(output, "AXButton", "Open"))
         self.assertFalse(native_dialog.ax_node_enabled(output, "AXButton", "Save"))
         self.assertFalse(native_dialog.ax_node_enabled(output.replace("enabled=true", "enabled=false", 1), "AXButton", "Open"))
+        open_ready = (
+            "DIRECT_AX_RESULT status=open-button-state; pid=42; window_title=Open; matches=1; enabled=true; "
+            "enabled_error=0; complete=true; truncated=false; visited=18; query_errors=[]"
+        )
+        self.assertTrue(native_dialog.open_button_state_ready(open_ready, 42, "Open"))
+        for invalid_open_state in (
+            open_ready.replace("matches=1", "matches=0"),
+            open_ready.replace("matches=1", "matches=2"),
+            open_ready.replace("enabled=true", "enabled=false"),
+            open_ready.replace("enabled_error=0", "enabled_error=-25204"),
+            open_ready.replace("complete=true", "complete=false"),
+            open_ready.replace("truncated=false", "truncated=true"),
+            open_ready.replace("query_errors=[]", "query_errors=['children:-25204:2']"),
+        ):
+            self.assertFalse(native_dialog.open_button_state_ready(invalid_open_state, 42, "Open"))
+        with self.assertRaisesRegex(RuntimeError, "target mismatch"):
+            native_dialog.open_button_state_ready(open_ready.replace("pid=42", "pid=43"), 42, "Open")
+        with self.assertRaisesRegex(RuntimeError, "target mismatch"):
+            native_dialog.open_button_state_ready(open_ready.replace("window_title=Open", "window_title=Save"), 42, "Open")
+        with self.assertRaisesRegex(RuntimeError, "expected one targeted"):
+            native_dialog.open_button_state_ready(open_ready + "\n" + open_ready, 42, "Open")
+        with self.assertRaisesRegex(RuntimeError, "malformed Open-button observation"):
+            native_dialog.open_button_state_ready(open_ready.replace("matches=1; enabled=true", "matches=1; enabled"), 42, "Open")
         dismissed_snapshot = (
             "DIRECT_AX_RESULT status=go-to-folder-state; pid=42; window_title=Open; visited=8; "
             "sheet_count=0; complete=true; truncated=false; query_errors=[]\n"

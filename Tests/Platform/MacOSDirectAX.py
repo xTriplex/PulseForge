@@ -272,6 +272,78 @@ if operation == "observe-go-to-folder-state" {
     print("DIRECT_AX_RESULT status=go-to-folder-state; pid=\(targetPID); window_title=\(requestedTitle); visited=\(next); sheet_count=\(sheetCount); complete=\(complete); truncated=\(truncated); query_errors=\(queryErrors); roles=\(visitedRoles.prefix(48))")
     exit(complete ? 0 : 21)
 }
+if operation == "observe-open-button-state" {
+    guard requestedTitle == "Open", titleMatches.count == 1, let window = titleMatches.first,
+          string(window, "AXTitle") == requestedTitle else {
+        print("DIRECT_AX_RESULT status=open-button-state-error; stage=window-selection; requested_title=\(requestedTitle); matches=\(titleMatches.count)")
+        exit(22)
+    }
+    struct PendingControl {
+        let element: AXUIElement
+        let depth: Int
+    }
+    let ignoredSubtreeRoles: Set<String> = [
+        "AXOutline", "AXBrowser", "AXTable", "AXList", "AXRow", "AXCell", "AXStaticText", "AXTextField",
+        "AXButton", "AXImage", "AXPopUpButton", "AXCheckBox", "AXRadioButton", "AXSlider", "AXTextArea"
+    ]
+    var pending = [PendingControl(element: window, depth: 0)]
+    var next = 0
+    var matches: [(Bool?, Int32)] = []
+    var queryErrors: [String] = []
+    let nodeLimit = 128
+    let depthLimit = 8
+    while next < pending.count && next < nodeLimit {
+        let item = pending[next]
+        next += 1
+        AXUIElementSetMessagingTimeout(item.element, 0.25)
+        var rawRole: CFTypeRef?
+        let roleError = AXUIElementCopyAttributeValue(item.element, "AXRole" as CFString, &rawRole)
+        guard roleError == .success, let role = rawRole as? String else {
+            queryErrors.append("role:\(roleError.rawValue)")
+            continue
+        }
+        if role == "AXButton" {
+            var names: [String] = []
+            for attribute in ["AXTitle", "AXDescription", "AXIdentifier"] {
+                var rawValue: CFTypeRef?
+                let labelError = AXUIElementCopyAttributeValue(item.element, attribute as CFString, &rawValue)
+                if labelError == .success, let label = rawValue as? String, !label.isEmpty {
+                    names.append(label)
+                } else if labelError != .noValue && labelError != .attributeUnsupported {
+                    queryErrors.append("label:\(labelError.rawValue)")
+                }
+            }
+            if names.contains("Open") {
+                var rawEnabled: CFTypeRef?
+                let enabledError = AXUIElementCopyAttributeValue(item.element, "AXEnabled" as CFString, &rawEnabled)
+                let enabled = enabledError == .success ? (rawEnabled as? Bool) : nil
+                matches.append((enabled, enabledError.rawValue))
+            }
+        }
+        guard !ignoredSubtreeRoles.contains(role) else { continue }
+        var rawChildren: CFTypeRef?
+        let childrenError = AXUIElementCopyAttributeValue(item.element, "AXChildren" as CFString, &rawChildren)
+        if childrenError == .success {
+            guard let rawChildren, let children = rawChildren as? [AXUIElement] else {
+                queryErrors.append("children-invalid:\(item.depth)")
+                continue
+            }
+            if item.depth >= depthLimit {
+                if !children.isEmpty { queryErrors.append("depth-limit:\(item.depth)") }
+            } else {
+                pending.append(contentsOf: children.map { PendingControl(element: $0, depth: item.depth + 1) })
+            }
+        } else if childrenError != .noValue && childrenError != .attributeUnsupported {
+            queryErrors.append("children:\(childrenError.rawValue):\(item.depth)")
+        }
+    }
+    let truncated = next < pending.count
+    let complete = queryErrors.isEmpty && !truncated
+    let enabled = matches.count == 1 ? (matches[0].0.map { String($0) } ?? "unknown") : "unknown"
+    let enabledError = matches.count == 1 ? matches[0].1 : -1
+    print("DIRECT_AX_RESULT status=open-button-state; pid=\(targetPID); window_title=\(requestedTitle); matches=\(matches.count); enabled=\(enabled); enabled_error=\(enabledError); complete=\(complete); truncated=\(truncated); visited=\(next); query_errors=\(queryErrors)")
+    exit(complete ? 0 : 23)
+}
 struct AXNode {
     let element: AXUIElement
     let parent: Int?
