@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise document-close decisions through native macOS and OS pointer input."""
+"""Exercise document-close decisions through macOS Accessibility and synthetic OS input."""
 
 from __future__ import annotations
 
@@ -38,10 +38,6 @@ WINDOW_QUERY = '''on run argv
             repeat with windowIndex from 1 to count of windows
                 set targetWindow to window windowIndex
                 if (name of targetWindow as text) is expectedTitle then
-                    set closeControl to value of attribute "AXCloseButton" of targetWindow
-                    if closeControl is missing value then error "AXCloseButton is missing on " & expectedTitle
-                    set closeActions to actions of closeControl
-                    if not (closeActions contains "AXPress") then error "AXCloseButton does not support AXPress on " & expectedTitle
                     set end of matches to windowIndex as text
                 end if
             end repeat
@@ -50,29 +46,6 @@ WINDOW_QUERY = '''on run argv
         set matchList to matches as text
         set AppleScript's text item delimiters to ""
         return processName & linefeed & matchList
-    end tell
-end run
-'''
-
-PRESS_HOST_CLOSE = '''on run argv
-    set targetPID to item 1 of argv as integer
-    set expectedTitle to item 2 of argv as text
-    tell application "System Events"
-        set targetProcess to first process whose unix id is targetPID
-        tell targetProcess
-            set matchingWindow to missing value
-            repeat with targetWindow in windows
-                if (name of targetWindow as text) is expectedTitle then
-                    if matchingWindow is not missing value then error "Native fixture window title is not unique"
-                    set matchingWindow to targetWindow
-                end if
-            end repeat
-            if matchingWindow is missing value then error "Native fixture window disappeared: " & expectedTitle
-            set closeControl to value of attribute "AXCloseButton" of matchingWindow
-            if closeControl is missing value then error "AXCloseButton is missing on " & expectedTitle
-            perform action "AXPress" of closeControl
-            return "MACOS_DOC_CLOSE_AX_PRESS=PASS; pid=" & (targetPID as text) & "; window=" & expectedTitle
-        end tell
     end tell
 end run
 '''
@@ -86,6 +59,19 @@ POINTER_CLICK = '''on run argv
         set frontmost of targetProcess to true
         click at {clickX, clickY}
         return "MACOS_DOC_CLOSE_POINTER_CLICK=PASS; pid=" & (targetPID as text) & "; x=" & (clickX as text) & "; y=" & (clickY as text)
+    end tell
+end run
+'''
+
+TYPE_EDITOR_VALUE = '''on run argv
+    set targetPID to item 1 of argv as integer
+    tell application "System Events"
+        set targetProcess to first process whose unix id is targetPID
+        set frontmost of targetProcess to true
+        keystroke "a" using {command down}
+        keystroke "42"
+        key code 36
+        return "MACOS_DOC_CLOSE_TEXT_INPUT=PASS; pid=" & (targetPID as text) & "; value=42"
     end tell
 end run
 '''
@@ -244,6 +230,16 @@ class MarkerProtocol:
         self.generation = generation
         return generation
 
+    def accept_control(self, event: dict[str, str]) -> int:
+        self.check_identity(event)
+        generation = self.marker_generation(event)
+        if generation < self.generation:
+            raise RuntimeError(
+                f"stale close-control coordinates: generation must be at least {self.generation}; marker={event.get('raw')!r}"
+            )
+        self.generation = generation
+        return generation
+
     def accept_closed(self, event: dict[str, str]) -> None:
         self.check_identity(event)
         generation = self.marker_generation(event)
@@ -357,10 +353,11 @@ def wait_event(capture: BoundedCapture, process: subprocess.Popen[str], kind: st
             raise RuntimeError(f"malformed fixture marker: {event.get('raw', '<invalid marker>')!r}")
         if event.get("kind") in {"READY", "PROMPT", "ACTION", "CLOSED", "PASS"}:
             raise RuntimeError(f"unexpected {event.get('kind')} event while waiting for {kind}: {event.get('raw')!r}")
-        if event.get("kind") == "FIXTURE":
-            capture.pending = deque(
-                (pending for pending in capture.pending if pending.get("kind") != "FIXTURE"), maxlen=MAX_EVENT_COUNT
-            )
+        if event.get("kind") in {"FIXTURE", "TEXT_CONTROL", "TEXT_FOCUS", "TEXT_ENTRY", "CLOSE_CONTROL"}:
+            if event.get("kind") == "FIXTURE":
+                capture.pending = deque(
+                    (pending for pending in capture.pending if pending.get("kind") != "FIXTURE"), maxlen=MAX_EVENT_COUNT
+                )
             capture.pending.append(event)
             continue
         raise RuntimeError(f"unexpected marker while waiting for {kind}: {event.get('raw')!r}")
@@ -392,15 +389,6 @@ def query_fixture_window(process: subprocess.Popen[str], deadline: float) -> Non
     raise RuntimeError(f"timed out locating unique native fixture window; last state: {last_state}")
 
 
-def press_native_close(process: subprocess.Popen[str], deadline: float) -> None:
-    code, output = run_osascript(PRESS_HOST_CLOSE, str(process.pid), FIXTURE_TITLE, timeout=bounded_timeout(deadline, 8.0))
-    if code != 0:
-        if is_tcc_denial(output):
-            raise RuntimeError(f"TCC_DENIED: Accessibility authorization is required: {output.strip()}")
-        raise RuntimeError(f"could not press semantic AXCloseButton; exit_code={code}; detail={output.strip()}")
-    print(output.strip())
-
-
 def parse_point(value: str, field: str) -> tuple[int, int]:
     match = POINT.fullmatch(value)
     if not match:
@@ -420,6 +408,42 @@ def click_point(process: subprocess.Popen[str], point: tuple[int, int], deadline
             raise RuntimeError(f"TCC_DENIED: Accessibility authorization is required for OS pointer input: {output.strip()}")
         raise RuntimeError(f"OS pointer click for {label} failed; exit_code={code}; detail={output.strip()}")
     print(f"MACOS_DOC_CLOSE_CLICK=PASS; control={label}; {output.strip()}")
+
+
+def click_document_tab_close(
+    process: subprocess.Popen[str], capture: BoundedCapture, deadline: float, protocol: MarkerProtocol, label: str
+) -> None:
+    control = wait_event(capture, process, "CLOSE_CONTROL", protocol.scenario, deadline)
+    protocol.accept_control(control)
+    point = parse_point(f"{control.get('x', '')},{control.get('y', '')}", "document tab close")
+    click_point(process, point, deadline, label)
+
+
+def enter_editor_value(process: subprocess.Popen[str], capture: BoundedCapture, deadline: float, protocol: MarkerProtocol) -> None:
+    control = wait_event(capture, process, "TEXT_CONTROL", protocol.scenario, deadline)
+    protocol.check_identity(control)
+    if control.get("generation") != "0" or control.get("value") != "20":
+        raise RuntimeError(f"editor text control started in an unexpected state: {control.get('raw')!r}")
+    point = parse_point(f"{control.get('x', '')},{control.get('y', '')}", "editable value")
+    click_point(process, point, deadline, "Editable value")
+
+    focus = wait_event(capture, process, "TEXT_FOCUS", protocol.scenario, deadline)
+    protocol.check_identity(focus)
+    if focus.get("generation") != "0" or focus.get("active") != "1" or focus.get("value") != "20":
+        raise RuntimeError(f"editable value did not receive focus before text entry: {focus.get('raw')!r}")
+    code, output = run_osascript(TYPE_EDITOR_VALUE, str(process.pid), timeout=bounded_timeout(deadline, 8.0))
+    if code != 0:
+        if is_tcc_denial(output):
+            raise RuntimeError(f"TCC_DENIED: Accessibility authorization is required for OS keyboard input: {output.strip()}")
+        raise RuntimeError(f"OS keyboard input failed; exit_code={code}; detail={output.strip()}")
+    print(output.strip())
+
+    entered = wait_event(capture, process, "TEXT_ENTRY", protocol.scenario, deadline)
+    protocol.check_identity(entered)
+    expected = {"generation": "0", "value": "42", "saved": "10", "dirty": "1"}
+    if any(entered.get(key) != value for key, value in expected.items()):
+        raise RuntimeError(f"editor did not retain the entered value as a dirty document: {entered.get('raw')!r}")
+    print(f"MACOS_DOC_CLOSE_TEXT_ENTRY=PASS; scenario={protocol.scenario}; value=42; saved=10; dirty=1")
 
 
 def get_prompt_point(event: dict[str, str], scenario: str, host: str, choice: str) -> tuple[int, int]:
@@ -483,50 +507,51 @@ def run_decisions(process: subprocess.Popen[str], capture: BoundedCapture, scena
     host = protocol.host
     print(f"MACOS_DOC_CLOSE_READY=PASS; scenario={scenario}; host={host}; asset={protocol.asset}")
     query_fixture_window(process, deadline)
+    enter_editor_value(process, capture, deadline, protocol)
 
-    press_native_close(process, deadline)
+    click_document_tab_close(process, capture, deadline, protocol, "document tab close")
     prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
     prompt_generation = protocol.accept_prompt(prompt)
 
     if scenario == "cancel-save":
         click_point(process, get_prompt_point(prompt, scenario, host, "cancel"), deadline, "Cancel")
-        expect_action(capture, process, deadline, protocol, "cancel", prompt_generation, resolved="1", pending="0", opened="1", dirty="1", value="20", saved="10")
-        press_native_close(process, deadline)
+        expect_action(capture, process, deadline, protocol, "cancel", prompt_generation, resolved="1", pending="0", opened="1", dirty="1", value="42", saved="10")
+        click_document_tab_close(process, capture, deadline, protocol, "document tab close after cancel")
         prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
         prompt_generation = protocol.accept_prompt(prompt)
         click_point(process, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save")
-        expect_action(capture, process, deadline, protocol, "save", prompt_generation, resolved="1", pending="0", opened="0", dirty="0", value="20", saved="20")
+        expect_action(capture, process, deadline, protocol, "save", prompt_generation, resolved="1", pending="0", opened="0", dirty="0", value="42", saved="42")
     elif scenario == "discard":
         click_point(process, get_prompt_point(prompt, scenario, host, "discard"), deadline, "Discard")
         expect_action(capture, process, deadline, protocol, "discard", prompt_generation, resolved="1", pending="0", opened="0", dirty="0", value="10", saved="10")
     elif scenario == "save-retry":
         click_point(process, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (expected failure)")
         expect_action(
-            capture, process, deadline, protocol, "save", prompt_generation, resolved="0", pending="1", opened="1", dirty="1", value="20", saved="10",
+            capture, process, deadline, protocol, "save", prompt_generation, resolved="0", pending="1", opened="1", dirty="1", value="42", saved="10",
             error="The%20document%20could%20not%20be%20saved%3B%20it%20remains%20open.",
         )
         prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
         prompt_generation = protocol.accept_prompt(prompt)
         click_point(process, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (retry)")
-        expect_action(capture, process, deadline, protocol, "save", prompt_generation, resolved="1", pending="0", opened="0", dirty="0", value="20", saved="20")
+        expect_action(capture, process, deadline, protocol, "save", prompt_generation, resolved="1", pending="0", opened="0", dirty="0", value="42", saved="42")
     elif scenario == "close-retry":
         click_point(process, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (expected close preflight failure)")
         expect_action(
-            capture, process, deadline, protocol, "save", prompt_generation, resolved="0", pending="1", opened="1", dirty="0", value="20", saved="20",
+            capture, process, deadline, protocol, "save", prompt_generation, resolved="0", pending="1", opened="1", dirty="0", value="42", saved="42",
             error="The%20Debug%20fixture%20is%20configured%20to%20reject%20close.",
         )
         prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
         prompt_generation = protocol.accept_prompt(prompt)
         click_point(process, get_prompt_point(prompt, scenario, host, "cancel"), deadline, "Cancel pending close")
-        expect_action(capture, process, deadline, protocol, "cancel", prompt_generation, resolved="1", pending="0", opened="1", dirty="0", value="20", saved="20")
+        expect_action(capture, process, deadline, protocol, "cancel", prompt_generation, resolved="1", pending="0", opened="1", dirty="0", value="42", saved="42")
         fixture = wait_event(capture, process, "FIXTURE", scenario, deadline)
         fixture_generation = protocol.accept_fixture(fixture)
         click_point(process, parse_point(fixture.get("allow_close", ""), "Allow close"), deadline, "Allow close")
-        expect_action(capture, process, deadline, protocol, "allow-close", fixture_generation, resolved="1", pending="0", opened="1", dirty="0", value="20", saved="20")
-        press_native_close(process, deadline)
+        expect_action(capture, process, deadline, protocol, "allow-close", fixture_generation, resolved="1", pending="0", opened="1", dirty="0", value="42", saved="42")
+        click_document_tab_close(process, capture, deadline, protocol, "document tab close after recovery")
         closed = wait_event(capture, process, "CLOSED", scenario, deadline)
         protocol.accept_closed(closed)
-        if closed.get("open") != "0" or closed.get("saved") != "20":
+        if closed.get("open") != "0" or closed.get("saved") != "42":
             raise RuntimeError(f"clean close after preflight recovery did not preserve the saved session state: {closed.get('raw')!r}")
     else:
         raise RuntimeError(f"unsupported close scenario: {scenario}")
@@ -655,8 +680,9 @@ def main() -> int:
         print(f"macOS document-close smoke failed: {error}", file=sys.stderr)
         return 1
     print(
-        "MACOS_DOCUMENT_CLOSE_SMOKE=PASS; native close requests used Accessibility and modal decisions used OS pointer input; "
-        "synthetic input only, not physical pointer acceptance"
+        "MACOS_DOCUMENT_CLOSE_SMOKE=PASS; editor text entry and document-tab close used OS pointer/keyboard input, "
+        "modal decisions used OS pointer input, and application exit used Accessibility; synthetic input only, "
+        "not physical pointer acceptance"
     )
     return 0
 

@@ -18,9 +18,11 @@ namespace PulseForgeEditor::Detail
 
 	EditorDocumentHostTestEditor::EditorDocumentHostTestEditor(EditorDocumentManager& Documents, EditorDocumentEditorRegistry& Editors,
 		EditorStyle& Style, std::function<void(std::string)> ReportError, std::function<PulseForge::UUID()> ActiveProject,
-		std::function<void(std::string_view, int, int, bool)> ReportCloseUiAllowClose)
+		std::function<void(std::string_view, int, int, bool)> ReportCloseUiAllowClose,
+		std::function<void(std::string_view, int, int, bool, bool, int)> ReportCloseUiTextField)
 		: m_Documents(Documents), m_Editors(Editors), m_Style(Style), m_ReportError(std::move(ReportError)),
-		  m_ActiveProject(std::move(ActiveProject)), m_ReportCloseUiAllowClose(std::move(ReportCloseUiAllowClose))
+		  m_ActiveProject(std::move(ActiveProject)), m_ReportCloseUiAllowClose(std::move(ReportCloseUiAllowClose)),
+		  m_ReportCloseUiTextField(std::move(ReportCloseUiTextField))
 	{
 	}
 
@@ -45,7 +47,15 @@ namespace PulseForgeEditor::Detail
 			m_Style.TextMuted("This independent workspace is not part of the Level Editor panels.");
 			ImGui::Text("Asset %s", Session.Identity.Asset.ToString().c_str());
 			int Candidate = SessionState->Value;
-			if (ImGui::InputInt("Editable value", &Candidate)) (void)EditValue(Session, Candidate);
+			const bool ValueChanged = ImGui::InputInt("Editable value", &Candidate);
+			if (ValueChanged) (void)EditValue(Session, Candidate);
+			if (m_ReportCloseUiTextField)
+			{
+				const ImVec2 Minimum = ImGui::GetItemRectMin();
+				const ImVec2 Maximum = ImGui::GetItemRectMax();
+				m_ReportCloseUiTextField(Session.HostID, static_cast<int>((Minimum.x + Maximum.x) * 0.5f),
+					static_cast<int>((Minimum.y + Maximum.y) * 0.5f), ImGui::IsItemActive(), ValueChanged, SessionState->Value);
+			}
 			if (ImGui::Button("Save fixture")) (void)m_Editors.Save(Session);
 			ImGui::SameLine();
 			if (ImGui::Button("Revert fixture")) (void)m_Editors.Discard(Session);
