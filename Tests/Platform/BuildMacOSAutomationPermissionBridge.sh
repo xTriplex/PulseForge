@@ -65,8 +65,9 @@ if root.tag != "signatures" or root.attrib.get("version") != "1.0":
 if actual != expected:
 	raise SystemExit(f"BridgeSupport function set differs from header: expected={sorted(expected)}, actual={sorted(actual)}")
 for function in functions:
-	if function.findall("arg") or function.find("retval") is None or function.find("retval").attrib != {"type": "i"}:
-		raise SystemExit(f"Unexpected ABI for {function.attrib.get('name')}")
+	retval = function.find("retval")
+	if function.findall("arg") or retval is None or retval.attrib.get("type") != "i":
+		raise SystemExit(f"Unexpected ABI for {function.attrib.get('name')}: {ET.tostring(function, encoding='unicode')}")
 print(f"Verified BridgeSupport int32_t(void) ABI for {len(functions)} exported functions.")
 PY
 

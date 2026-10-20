@@ -38,6 +38,7 @@ jobs:
           path: |
             ${{ runner.temp }}/macos-automation-permission-bridge-build.log
             ${{ runner.temp }}/macos-automation-permission-probe.log
+            ${{ runner.temp }}/PFAutomationPermission.framework/Versions/A/Resources/BridgeSupport/PFAutomationPermission.bridgesupport
           if-no-files-found: ignore
           retention-days: 1
 
@@ -351,6 +352,7 @@ jobs:
           path: |
             ${{ runner.temp }}/macos-automation-permission-probe.log
             ${{ runner.temp }}/macos-automation-permission-bridge-build.log
+            ${{ runner.temp }}/PFAutomationPermission.framework/Versions/A/Resources/BridgeSupport/PFAutomationPermission.bridgesupport
             ${{ runner.temp }}/vulkan-sdk-download.log
             ${{ runner.temp }}/apple-toolchain.log
             ${{ runner.temp }}/vulkaninfo-summary.log
