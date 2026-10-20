@@ -94,6 +94,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertIn('ObjC.import(bridgePath);', script)
         self.assertIn('stage = "custom-framework-binary-load";', script)
         self.assertIn("$.NSBundle.bundleWithPath(bridgePath)", script)
+        self.assertIn("permissionBridgeBundle.loadAndReturnError(bundleLoadError)", script)
         self.assertIn('stage = "custom-framework-class-lookup";', script)
         self.assertIn("var permissionBridge = $.PFAutomationPermissionBridge.alloc.init;", script)
         for method in (

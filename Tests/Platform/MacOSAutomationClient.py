@@ -31,8 +31,15 @@ try {{
 
     stage = "custom-framework-binary-load";
     var permissionBridgeBundle = $.NSBundle.bundleWithPath(bridgePath);
-    if (permissionBridgeBundle.isNil() || !permissionBridgeBundle.load)
-        throw new Error("permission bridge framework binary did not load");
+    if (permissionBridgeBundle.isNil())
+        throw new Error("NSBundle could not resolve the permission bridge at " + bridgePath);
+    var bundleLoadError = $();
+    if (!permissionBridgeBundle.loadAndReturnError(bundleLoadError)) {{
+        var bundleErrorDescription = bundleLoadError.isNil() ? "no NSError returned" :
+            ObjC.unwrap(bundleLoadError.localizedDescription);
+        throw new Error("NSBundle failed to load " + ObjC.unwrap(permissionBridgeBundle.executablePath) +
+            ": " + bundleErrorDescription);
+    }}
 
     stage = "custom-framework-class-lookup";
     var permissionBridge = $.PFAutomationPermissionBridge.alloc.init;
