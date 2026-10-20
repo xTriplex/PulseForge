@@ -1911,6 +1911,56 @@ namespace
 			return m_DocumentCloseUiTestScenario && !m_DocumentCloseUiHostID.empty() && HostID == m_DocumentCloseUiHostID;
 		}
 
+		[[nodiscard]] std::string_view GetExpectedDocumentCloseUiChoice() const noexcept
+		{
+			if (m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingFirstAction)
+			{
+				if (*m_DocumentCloseUiTestScenario == "cancel-save") return "cancel";
+				if (*m_DocumentCloseUiTestScenario == "discard") return "discard";
+				return "save";
+			}
+			if (m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingSecondAction ||
+				m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingSaveRetry)
+				return "save";
+			if (m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::AwaitingCloseRetryCancel) return "cancel";
+			return {};
+		}
+
+		void ReportDocumentCloseUiDecisionPointer(
+			std::string_view HostID, std::string_view Choice, bool Hovered, bool Active, bool Clicked,
+			const ImVec2& Minimum, const ImVec2& Maximum)
+		{
+			if (!m_DocumentCloseUiTestScenario || !m_DocumentCloseUiIdentity || !IsDocumentCloseUiFixtureHost(HostID) ||
+				!m_DocumentCloseRequest.HasPendingRequest() ||
+				GetExpectedDocumentCloseUiChoice() != Choice || m_DocumentCloseUiDecisionPointerReportCount >= 4)
+				return;
+
+			const ImGuiIO& IO = ImGui::GetIO();
+			const ImGuiViewport* WindowViewport = ImGui::GetWindowViewport();
+			const bool MouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+			const bool Changed = !m_DocumentCloseUiDecisionPointerStateReported || IO.MousePos.x != m_DocumentCloseUiLastDecisionMousePosition.x ||
+				IO.MousePos.y != m_DocumentCloseUiLastDecisionMousePosition.y || Hovered != m_DocumentCloseUiLastDecisionHovered ||
+				Active != m_DocumentCloseUiLastDecisionActive || MouseDown != m_DocumentCloseUiLastDecisionMouseDown ||
+				Clicked != m_DocumentCloseUiLastDecisionClicked;
+			if (!Changed) return;
+
+			PF_INFO("PF_DOC_CLOSE_UI|DECISION_POINTER|scenario={}|host={}|asset={}|generation={}|choice={}|sample={}|"
+				"rect_min={:.1f},{:.1f}|rect_max={:.1f},{:.1f}|mouse={:.1f},{:.1f}|hovered={}|active={}|mouse_down={}|clicked={}|"
+				"window_viewport={}|mouse_viewport={}",
+				*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(),
+				m_DocumentCloseUiPromptGeneration, Choice, m_DocumentCloseUiDecisionPointerReportCount + 1,
+				Minimum.x, Minimum.y, Maximum.x, Maximum.y, IO.MousePos.x, IO.MousePos.y, Hovered ? 1 : 0, Active ? 1 : 0,
+				MouseDown ? 1 : 0, Clicked ? 1 : 0, WindowViewport ? static_cast<uint32_t>(WindowViewport->ID) : 0,
+				static_cast<uint32_t>(IO.MouseHoveredViewport));
+			m_DocumentCloseUiLastDecisionMousePosition = IO.MousePos;
+			m_DocumentCloseUiLastDecisionHovered = Hovered;
+			m_DocumentCloseUiLastDecisionActive = Active;
+			m_DocumentCloseUiLastDecisionMouseDown = MouseDown;
+			m_DocumentCloseUiLastDecisionClicked = Clicked;
+			m_DocumentCloseUiDecisionPointerStateReported = true;
+			++m_DocumentCloseUiDecisionPointerReportCount;
+		}
+
 		void FailDocumentCloseUiTest(std::string_view Reason)
 		{
 			if (!m_DocumentCloseUiTestScenario || m_DocumentCloseUiTestPhase == DocumentCloseUiTestPhase::Failed ||
@@ -1953,6 +2003,8 @@ namespace
 		{
 			++m_DocumentCloseUiPromptGeneration;
 			m_DocumentCloseUiCloseControlReported = false;
+			m_DocumentCloseUiDecisionPointerStateReported = false;
+			m_DocumentCloseUiDecisionPointerReportCount = 0;
 		}
 
 		[[nodiscard]] bool IsDocumentCloseUiAwaitingTabClose() const noexcept
@@ -5067,15 +5119,25 @@ namespace
 			const bool SaveClicked = ImGui::Button("Save", ImVec2(112.0f, 0.0f));
 			SaveCenter = ImVec2((ImGui::GetItemRectMin().x + ImGui::GetItemRectMax().x) * 0.5f,
 				(ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f);
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			ReportDocumentCloseUiDecisionPointer(HostID, "save", ImGui::IsItemHovered(), ImGui::IsItemActive(), SaveClicked,
+				ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+#endif
 			ImGui::SameLine();
 			const bool DiscardClicked = m_EditorStyle.DangerButton(PulseForgeEditor::EditorIcon::Delete, "Discard");
 			DiscardCenter = ImVec2((ImGui::GetItemRectMin().x + ImGui::GetItemRectMax().x) * 0.5f,
 				(ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f);
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			ReportDocumentCloseUiDecisionPointer(HostID, "discard", ImGui::IsItemHovered(), ImGui::IsItemActive(), DiscardClicked,
+				ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+#endif
 			ImGui::SameLine();
 			const bool CancelClicked = ImGui::Button("Cancel", ImVec2(112.0f, 0.0f));
 			CancelCenter = ImVec2((ImGui::GetItemRectMin().x + ImGui::GetItemRectMax().x) * 0.5f,
 				(ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f);
 #if defined(_DEBUG) || defined(PF_DEBUG)
+			ReportDocumentCloseUiDecisionPointer(HostID, "cancel", ImGui::IsItemHovered(), ImGui::IsItemActive(), CancelClicked,
+				ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
 			EmitDocumentCloseUiPrompt(HostID, SaveCenter, DiscardCenter, CancelCenter);
 #endif
 			if (RetryCloseClicked)
@@ -7271,6 +7333,13 @@ namespace
 		bool m_DocumentCloseUiLastTextHovered = false;
 		bool m_DocumentCloseUiLastTextActive = false;
 		size_t m_DocumentCloseUiTextPointerReportCount = 0;
+		bool m_DocumentCloseUiDecisionPointerStateReported = false;
+		ImVec2 m_DocumentCloseUiLastDecisionMousePosition{};
+		bool m_DocumentCloseUiLastDecisionHovered = false;
+		bool m_DocumentCloseUiLastDecisionActive = false;
+		bool m_DocumentCloseUiLastDecisionMouseDown = false;
+		bool m_DocumentCloseUiLastDecisionClicked = false;
+		size_t m_DocumentCloseUiDecisionPointerReportCount = 0;
 #endif
 		bool m_DocumentHostResetLayoutTest = false;
 		bool m_DocumentHostTabTearOffTest = false;
