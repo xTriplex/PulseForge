@@ -38,6 +38,19 @@ if ! nm -gU "$BRIDGE/Versions/A/PFAutomationPermission" |
 fi
 echo "Verified the exported Objective-C permission bridge class in the private framework."
 
+{
+	echo "Framework root: $BRIDGE"
+	find "$BRIDGE" -maxdepth 5 -print -exec ls -ld {} \;
+	echo "Framework Info.plist:"
+	plutil -lint "$BRIDGE/Resources/Info.plist"
+	plutil -p "$BRIDGE/Resources/Info.plist"
+	echo "Framework executable:"
+	file "$BRIDGE/PFAutomationPermission"
+	lipo -archs "$BRIDGE/PFAutomationPermission"
+	/usr/bin/otool -L "$BRIDGE/PFAutomationPermission"
+	/usr/bin/codesign -dv --verbose=2 "$BRIDGE" 2>&1 || true
+} 2>&1 | tee -a "$RUNNER_TEMP/macos-automation-permission-bridge-build.log"
+
 test -s "$METADATA"
 python3 - "$METADATA" Tests/Platform/MacOSAutomationPermissionBridge.h <<'PY'
 import re

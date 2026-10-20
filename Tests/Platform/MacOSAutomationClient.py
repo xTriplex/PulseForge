@@ -35,8 +35,18 @@ try {{
         throw new Error("NSBundle could not resolve the permission bridge at " + bridgePath);
     var bundleLoadError = $();
     if (!permissionBridgeBundle.loadAndReturnError(bundleLoadError)) {{
-        var bundleErrorDescription = bundleLoadError.isNil() ? "no NSError returned" :
-            ObjC.unwrap(bundleLoadError.localizedDescription);
+        var bundleErrorDescription = "no NSError returned";
+        if (!bundleLoadError.isNil()) {{
+            var bundleErrorUserInfo = bundleLoadError.userInfo;
+            var bundleDebugDescription = bundleErrorUserInfo.isNil() ? "" :
+                ObjC.unwrap(bundleErrorUserInfo.objectForKey("NSDebugDescription"));
+            var bundleFailureReason = ObjC.unwrap(bundleLoadError.localizedFailureReason);
+            bundleErrorDescription = "domain=" + ObjC.unwrap(bundleLoadError.domain) +
+                "; code=" + ObjC.unwrap(bundleLoadError.code) +
+                "; description=" + ObjC.unwrap(bundleLoadError.localizedDescription) +
+                "; failureReason=" + bundleFailureReason +
+                "; debugDescription=" + bundleDebugDescription;
+        }}
         throw new Error("NSBundle failed to load " + ObjC.unwrap(permissionBridgeBundle.executablePath) +
             ": " + bundleErrorDescription);
     }}
