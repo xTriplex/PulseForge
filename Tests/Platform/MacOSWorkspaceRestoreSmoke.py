@@ -24,6 +24,7 @@ from MacOSDocumentHostSmoke import (  # noqa: E402
     run_osascript,
     stop_process_group,
 )
+from MacOSScreenshot import capture_screenshot
 
 MAX_LOG_BYTES = 128 * 1024
 MAX_CONSOLE_BYTES = 64 * 1024
@@ -208,30 +209,8 @@ def verify_workspace(path: Path, project_id: str) -> dict[str, str]:
     return asset_to_host
 
 
-def capture_close_timeout_screenshot(log_directory: Path) -> str:
-    screenshot = log_directory / "macos-workspace-restore-close-failure.png"
-    try:
-        result = subprocess.run(
-            ["/usr/sbin/screencapture", "-x", "-C", "-t", "png", str(screenshot)],
-            capture_output=True,
-            text=True,
-            timeout=5.0,
-            check=False,
-        )
-        if result.returncode == 0 and screenshot.is_file() and screenshot.stat().st_size > 0:
-            return f"screenshot=CAPTURED; bytes={screenshot.stat().st_size}; path={screenshot}"
-        state = "TCC_DENIED" if has_tcc_denial(result.stderr + result.stdout) else "FAILED"
-        return (
-            f"screenshot={state}; exit_code={result.returncode}; "
-            f"stdout={result.stdout[-400:]!r}; stderr={result.stderr[-400:]!r}"
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        state = "TIMED_OUT" if isinstance(error, subprocess.TimeoutExpired) else "FAILED"
-        return f"screenshot={state}; error={type(error).__name__}: {error}"
-
-
 def request_normal_application_exit(
-    process: subprocess.Popen[str], deadline: float, log_directory: Path
+    process: subprocess.Popen[str], deadline: float
 ) -> None:
     code, output = run_osascript(
         QUIT_APPLICATION,
@@ -248,10 +227,9 @@ def request_normal_application_exit(
     try:
         exit_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
     except subprocess.TimeoutExpired as error:
-        screenshot = capture_close_timeout_screenshot(log_directory)
         raise RuntimeError(
             f"editor did not exit after the normal Command+Q application-quit request; "
-            f"pid={process.pid}; {screenshot}"
+            f"pid={process.pid}"
         ) from error
     if exit_code != 0:
         raise RuntimeError(f"editor exited with status {exit_code} after normal application quit")
@@ -287,12 +265,20 @@ def run_launch(
     capture = ProcessCapture(process, log_path)
     deadline = time.monotonic() + timeout_seconds
     stop_failure: str | None = None
+    normal_shutdown = False
     try:
         windows = wait_for_fixture_windows(process, capture, deadline, expected_restore_count)
         if not windows:
             raise RuntimeError("document-host windows disappeared before normal application quit")
-        request_normal_application_exit(process, deadline, log_path.parent)
+        if expected_restore_count:
+            screenshot = capture_screenshot("macos-workspace-restore-checkpoint-restored-after-restart.png")
+            print(f"MACOS_WORKSPACE_RESTORE_SCREENSHOT={screenshot}")
+        request_normal_application_exit(process, deadline)
+        normal_shutdown = True
     finally:
+        if not normal_shutdown and process.poll() is None:
+            screenshot = capture_screenshot("macos-workspace-restore-checkpoint-unexpected-failure.png")
+            print(f"MACOS_WORKSPACE_RESTORE_FAILURE_SCREENSHOT={screenshot}")
         if process.poll() is None:
             if not stop_process_group(process):
                 stop_failure = f"could not stop failed editor process group PID {process.pid}"

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections import deque
+import os
 import queue
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from unittest.mock import patch
 
 import MacOSDocumentCloseSmoke as smoke
 import MacOSBundleSmoke as bundle
+import MacOSScreenshot as screenshot
 
 
 class FakeProcess:
@@ -36,6 +38,9 @@ class FakeCapture:
         self.reader_error: str | None = None
         self.log_path = Path("synthetic-dirty-close.log")
         self.telemetry_dropped = 0
+
+    def watermark(self) -> int:
+        return 4
 
     def recent_telemetry(self, expected: dict[str, str]) -> list[dict[str, str]]:
         return []
@@ -107,6 +112,43 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertEqual("PASS_TRANSPORT_UNCERTAIN_RECONCILED", evidence.semantic_outcome)
         self.assertEqual(1, self.protocol.generation)
         self.assertEqual([], diagnostic_calls, "a confirmed response must not depend on optional pointer diagnostics")
+
+    def test_click_dispatch_does_not_depend_on_repeated_accessibility_bounds_query(self) -> None:
+        class Process:
+            pid = 42
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        capture = FakeCapture()
+        with patch.object(smoke, "run_osascript", return_value=(0, "focus pass")) as focus, patch.object(
+            smoke, "run_bounded_command", return_value=(0, "Quartz event posted", "")
+        ) as dispatch:
+            evidence = smoke.click_point(
+                Process(), capture, Path("pointer-driver"), None, (50, 75), time.monotonic() + 5.0, "Cancel"
+            )
+
+        self.assertTrue(evidence.dispatch_attempted)
+        self.assertEqual(0, evidence.api_exit_code)
+        focus.assert_called_once()
+        self.assertEqual(smoke.FOCUS_TARGET, focus.call_args.args[0])
+        dispatch.assert_called_once()
+
+    def test_malformed_accessibility_bounds_are_diagnostic_only(self) -> None:
+        class Process:
+            pid = 42
+
+        with patch.object(
+            smoke,
+            "run_osascript",
+            return_value=(0, f"PulseForge\n{smoke.FIXTURE_TITLE}\nnot-bounds"),
+        ):
+            with patch("builtins.print") as diagnostic:
+                bounds = smoke.query_fixture_window(Process(), time.monotonic() + 5.0)
+
+        self.assertIsNone(bounds)
+        self.assertIn("category=MALFORMED", diagnostic.call_args.args[0])
 
     def test_missing_response_fails_within_action_bound(self) -> None:
         evidence = smoke.ActionEvidence(label="Cancel", dispatch_attempted=True, api_exit_code=0)
@@ -267,6 +309,38 @@ class DirtyCloseProtocolTests(unittest.TestCase):
                 )
             with self.assertRaisesRegex(RuntimeError, "validation errors"):
                 bundle.verify_output("synthetic bundle child", result, (marker_text,))
+
+
+    def test_capture_uses_runner_temp_and_verifies_nonempty_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            def fake_capture(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                self.assertEqual("/usr/sbin/screencapture", command[0])
+                self.assertEqual("-x", command[1])
+                self.assertEqual("-C", command[2])
+                Path(command[-1]).write_bytes(bytes((137, 80, 78, 71, 13, 10, 26, 10)) + b"image")
+                self.assertEqual(2.0, kwargs["timeout"])
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch.dict(os.environ, {"RUNNER_TEMP": temporary}), patch.object(
+                screenshot.subprocess, "run", side_effect=fake_capture
+            ):
+                result = screenshot.capture_screenshot("macos-test-checkpoint-loaded.png")
+
+            self.assertTrue(result.startswith("CAPTURED; bytes="))
+            self.assertTrue((Path(temporary) / "macos-test-checkpoint-loaded.png").is_file())
+
+    def test_capture_failure_is_reported_without_claiming_an_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            failed = subprocess.CompletedProcess(
+                ["/usr/sbin/screencapture"], 1, "", "screen recording not authorized"
+            )
+            with patch.dict(os.environ, {"RUNNER_TEMP": temporary}), patch.object(
+                screenshot.subprocess, "run", return_value=failed
+            ):
+                result = screenshot.capture_screenshot("macos-test-checkpoint-panel.png")
+
+            self.assertTrue(result.startswith("TCC_DENIED;"))
+            self.assertFalse((Path(temporary) / "macos-test-checkpoint-panel.png").exists())
 
     def test_semantic_queue_overflow_is_sticky_and_reader_keeps_draining(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
