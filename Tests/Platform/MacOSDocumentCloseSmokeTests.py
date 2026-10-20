@@ -78,9 +78,9 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertEqual(1, len(bridge_classes))
         self.assertEqual(len(expected), len(bridge_classes[0].findall("method")))
         for method in expected:
-            self.assertIn(f"+ (int32_t){method};", header)
+            self.assertIn(f"- (int32_t){method};", header)
             metadata_method = next(item for item in bridge_classes[0].findall("method") if item.attrib.get("selector") == method)
-            self.assertEqual("true", metadata_method.attrib.get("class_method"))
+            self.assertNotEqual("true", metadata_method.attrib.get("class_method"))
             retval = metadata_method.find("retval")
             return_types = [retval.attrib[key] for key in ("type", "type64") if key in retval.attrib]
             self.assertTrue(return_types)

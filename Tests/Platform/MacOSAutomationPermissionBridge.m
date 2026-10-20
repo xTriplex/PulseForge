@@ -19,7 +19,7 @@ static NSAppleEventDescriptor* MakeSystemEventsDescriptor(void)
 
 @implementation PFAutomationPermissionBridge
 
-+ (int32_t)probeSystemEventsDescriptor
+- (int32_t)probeSystemEventsDescriptor
 {
 	@autoreleasepool
 	{
@@ -37,7 +37,7 @@ static NSAppleEventDescriptor* MakeSystemEventsDescriptor(void)
 	}
 }
 
-+ (int32_t)readSystemEventsNativeAddress
+- (int32_t)readSystemEventsNativeAddress
 {
 	@autoreleasepool
 	{
@@ -57,17 +57,17 @@ static NSAppleEventDescriptor* MakeSystemEventsDescriptor(void)
 	}
 }
 
-+ (int32_t)typeWildCardEventClass
+- (int32_t)typeWildCardEventClass
 {
 	return (int32_t)typeWildCard;
 }
 
-+ (int32_t)typeWildCardEventID
+- (int32_t)typeWildCardEventID
 {
 	return (int32_t)typeWildCard;
 }
 
-+ (int32_t)determineSystemEventsPermission
+- (int32_t)determineSystemEventsPermission
 {
 	@autoreleasepool
 	{

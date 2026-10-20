@@ -47,12 +47,12 @@ import xml.etree.ElementTree as ET
 root = ET.parse(sys.argv[1]).getroot()
 with open(sys.argv[2], encoding="utf-8") as header_file:
 	header = header_file.read()
-expected = set(re.findall(r"\+\s*\(int32_t\)(\w+)\s*;", header))
+expected = set(re.findall(r"-\s*\(int32_t\)(\w+)\s*;", header))
 classes = [item for item in root.findall("class") if item.attrib.get("name") == "PFAutomationPermissionBridge"]
 if root.tag != "signatures" or root.attrib.get("version") != "1.0" or len(classes) != 1:
 	raise SystemExit("Invalid Objective-C BridgeSupport class metadata")
 methods = classes[0].findall("method")
-actual = {method.attrib.get("selector") for method in methods if method.attrib.get("class_method") == "true"}
+actual = {method.attrib.get("selector") for method in methods if method.attrib.get("class_method") != "true"}
 if actual != expected or len(methods) != len(expected):
 	raise SystemExit(f"BridgeSupport method set differs from header: expected={sorted(expected)}, actual={sorted(actual)}")
 for method in methods:

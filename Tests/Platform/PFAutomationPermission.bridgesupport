@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <signatures version="1.0">
 	<class name="PFAutomationPermissionBridge">
-		<method class_method="true" selector="probeSystemEventsDescriptor">
+		<method selector="probeSystemEventsDescriptor">
 			<retval type="i"/>
 		</method>
-		<method class_method="true" selector="readSystemEventsNativeAddress">
+		<method selector="readSystemEventsNativeAddress">
 			<retval type="i"/>
 		</method>
-		<method class_method="true" selector="typeWildCardEventClass">
+		<method selector="typeWildCardEventClass">
 			<retval type="i"/>
 		</method>
-		<method class_method="true" selector="typeWildCardEventID">
+		<method selector="typeWildCardEventID">
 			<retval type="i"/>
 		</method>
-		<method class_method="true" selector="determineSystemEventsPermission">
+		<method selector="determineSystemEventsPermission">
 			<retval type="i"/>
 		</method>
 	</class>

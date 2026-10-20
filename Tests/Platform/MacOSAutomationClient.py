@@ -30,7 +30,7 @@ try {{
     ObjC.import(bridgePath);
 
     stage = "custom-framework-class-lookup";
-    var permissionBridge = $.PFAutomationPermissionBridge;
+    var permissionBridge = $.PFAutomationPermissionBridge.alloc.init;
 
     stage = "custom-framework-method-invocation:typeWildCardEventClass";
     wildcardClass = permissionBridge.typeWildCardEventClass;
