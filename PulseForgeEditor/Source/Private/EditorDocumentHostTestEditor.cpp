@@ -55,11 +55,13 @@ namespace PulseForgeEditor::Detail
 			const ImVec2 Maximum = ImGui::GetItemRectMax();
 			const bool ValueActive = ImGui::IsItemActive();
 			const bool ValueHovered = ImGui::IsItemHovered();
+			const bool ValueClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
 			if (ValueChanged) (void)EditValue(Session, Candidate);
 			if (m_ReportCloseUiTextField)
 			{
 				m_ReportCloseUiTextField(Session.HostID, static_cast<int>((Minimum.x + Maximum.x) * 0.5f),
-					static_cast<int>((Minimum.y + Maximum.y) * 0.5f), ValueActive, ValueHovered, ValueChanged, SessionState->Value);
+					static_cast<int>((Minimum.y + Maximum.y) * 0.5f), ValueActive, ValueHovered, ValueClicked, ValueChanged,
+					SessionState->Value);
 			}
 			ImGui::SameLine();
 			ImGui::TextUnformatted("Editable value");

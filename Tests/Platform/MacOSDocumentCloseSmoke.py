@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
 import math
 import os
 import queue
@@ -21,6 +23,9 @@ from pathlib import Path
 MAX_LOG_BYTES = 128 * 1024
 MAX_CONSOLE_BYTES = 48 * 1024
 MAX_EVENT_COUNT = 128
+TELEMETRY_MARKERS = {"TEXT_POINTER", "DECISION_POINTER"}
+CONTROL_MARKERS = {"CLOSE_CONTROL", "PROMPT_GEOMETRY", "ALLOW_CLOSE_CONTROL"}
+ACTION_RESPONSE_SECONDS = 15.0
 FIXTURE_TITLE = "Host Test Fixture 1"
 MAIN_TITLE_FRAGMENT = "PulseForge Editor"
 SCENARIOS = ("cancel-save", "discard", "save-retry", "close-retry")
@@ -209,21 +214,29 @@ end run
 MAIN_WINDOW_CLOSE = '''on run argv
     set targetPID to item 1 of argv as integer
     set expectedFragment to item 2 of argv as text
-    tell application "System Events"
-        set targetProcess to first process whose unix id is targetPID
-        tell targetProcess
-            set matches to {}
-            repeat with targetWindow in windows
-                set windowTitle to name of targetWindow as text
-                if windowTitle contains expectedFragment then set end of matches to targetWindow
-            end repeat
-            if (count of matches) is not 1 then error "Expected one main PulseForge Editor window for PID " & (targetPID as text)
-            set closeControl to value of attribute "AXCloseButton" of item 1 of matches
-            if closeControl is missing value then error "Main editor AXCloseButton is missing"
-            perform action "AXPress" of closeControl
-            return "MACOS_DOC_CLOSE_MAIN_AX_PRESS=PASS; pid=" & (targetPID as text)
+    set stage to "PROCESS_LOOKUP"
+    try
+        tell application "System Events"
+            set targetProcess to first process whose unix id is targetPID
+            tell targetProcess
+                set stage to "WINDOW_LOOKUP"
+                set matches to {}
+                repeat with targetWindow in windows
+                    set windowTitle to name of targetWindow as text
+                    if windowTitle contains expectedFragment then set end of matches to targetWindow
+                end repeat
+                if (count of matches) is not 1 then error "Expected one main PulseForge Editor window for PID " & (targetPID as text)
+                set stage to "CLOSE_BUTTON_LOOKUP"
+                set closeControl to value of attribute "AXCloseButton" of item 1 of matches
+                if closeControl is missing value then error "Main editor AXCloseButton is missing"
+                set stage to "ACTION_DISPATCH"
+                perform action "AXPress" of closeControl
+                return "MACOS_DOC_CLOSE_MAIN_AX_PRESS=PASS; pid=" & (targetPID as text)
+            end tell
         end tell
-    end tell
+    on error errorMessage number errorNumber
+        error ("MACOS_DOC_CLOSE_AX_FAILURE; stage=" & stage & "; AXError=" & (errorNumber as text) & "; detail=" & errorMessage) number errorNumber
+    end try
 end run
 '''
 
@@ -233,12 +246,24 @@ class BoundedCapture:
         self.process = process
         self.log_path = log_path
         self.events: queue.Queue[dict[str, str]] = queue.Queue(maxsize=MAX_EVENT_COUNT)
-        self.pending: deque[dict[str, str]] = deque(maxlen=MAX_EVENT_COUNT)
+        self.pending: deque[dict[str, str]] = deque()
+        self.telemetry: deque[dict[str, str]] = deque(maxlen=MAX_EVENT_COUNT)
+        self.controls: deque[dict[str, str]] = deque(maxlen=MAX_EVENT_COUNT)
+        self.telemetry_dropped = 0
+        self.control_overflow_error: str | None = None
+        self.capture_index = 0
+        self.capture_index_lock = threading.Lock()
+        self.control_lock = threading.Lock()
+        self.telemetry_lock = threading.Lock()
+        self.lines_read = 0
         self.buffer = bytearray()
         self.console_bytes = 0
+        self.console_output_failed = False
         self.log_truncated = False
         self.console_truncated = False
         self.reader_error: str | None = None
+        self.queue_overflow_error: str | None = None
+        self.reader_finished = threading.Event()
         self.thread = threading.Thread(target=self._read, name="PulseForge close-smoke output", daemon=True)
         self.thread.start()
 
@@ -246,6 +271,7 @@ class BoundedCapture:
         assert self.process.stdout is not None
         try:
             for line in self.process.stdout:
+                self.lines_read += 1
                 encoded = line.encode("utf-8", errors="replace")
                 remaining = MAX_LOG_BYTES - len(self.buffer)
                 if remaining > 0:
@@ -253,24 +279,54 @@ class BoundedCapture:
                 if len(encoded) > remaining:
                     self.log_truncated = True
 
-                if self.console_bytes < MAX_CONSOLE_BYTES:
+                if self.console_bytes < MAX_CONSOLE_BYTES and not self.console_output_failed:
                     visible = encoded[: MAX_CONSOLE_BYTES - self.console_bytes]
-                    sys.stdout.write(visible.decode("utf-8", errors="replace"))
-                    sys.stdout.flush()
-                    self.console_bytes += len(visible)
+                    try:
+                        sys.stdout.write(visible.decode("utf-8", errors="replace"))
+                        sys.stdout.flush()
+                        self.console_bytes += len(visible)
+                    except (OSError, ValueError) as error:
+                        self.console_output_failed = True
+                        self.reader_error = self.reader_error or (
+                            f"could not forward editor output to the workflow log: {type(error).__name__}: {error}"
+                        )
                     if len(visible) < len(encoded):
                         self.console_truncated = True
                 else:
                     self.console_truncated = True
 
-                marker = parse_marker(line.rstrip("\r\n"))
-                if marker is not None:
-                    try:
-                        self.events.put_nowait(marker)
-                    except queue.Full as error:
-                        raise RuntimeError("editor emitted more than 128 unconsumed close-fixture markers") from error
+                try:
+                    marker = parse_marker(line.rstrip("\r\n"))
+                except Exception as error:
+                    self.reader_error = self.reader_error or f"marker parser failed: {type(error).__name__}: {error}"
+                    continue
+                if marker is None:
+                    continue
+                with self.capture_index_lock:
+                    self.capture_index += 1
+                    marker["_capture_index"] = str(self.capture_index)
+                if marker.get("kind") in TELEMETRY_MARKERS:
+                    with self.telemetry_lock:
+                        if len(self.telemetry) == self.telemetry.maxlen:
+                            self.telemetry_dropped += 1
+                        self.telemetry.append(marker)
+                    continue
+                if marker.get("kind") in CONTROL_MARKERS:
+                    with self.control_lock:
+                        if len(self.controls) == self.controls.maxlen:
+                            self.control_overflow_error = self.control_overflow_error or (
+                                f"editor emitted more than {self.controls.maxlen} unconsumed control-geometry markers"
+                            )
+                        self.controls.append(marker)
+                    continue
+                try:
+                    self.events.put_nowait(marker)
+                except queue.Full:
+                    self.queue_overflow_error = self.queue_overflow_error or (
+                        f"editor emitted more than {self.events.maxsize} unconsumed semantic close-fixture markers"
+                    )
         except Exception as error:
-            self.reader_error = f"{type(error).__name__}: {error}"
+            self.reader_error = self.reader_error or f"{type(error).__name__}: {error}"
         finally:
             try:
                 marker = b"\n[output truncated at 128 KiB]\n" if self.log_truncated else b""
@@ -278,7 +334,59 @@ class BoundedCapture:
                 if self.console_truncated:
                     print("\n[editor console output truncated at 48 KiB]")
             except OSError as error:
-                self.reader_error = f"could not write bounded log {self.log_path}: {error}"
+                self.reader_error = self.reader_error or f"could not write bounded log {self.log_path}: {error}"
+            self.reader_finished.set()
+
+    def watermark(self) -> int:
+        with self.capture_index_lock:
+            return self.capture_index
+
+    def take_controls(self) -> list[dict[str, str]]:
+        with self.control_lock:
+            controls = list(self.controls)
+            self.controls.clear()
+            return controls
+
+    def restore_controls(self, controls: list[dict[str, str]]) -> None:
+        with self.control_lock:
+            for marker in reversed(controls):
+                self.controls.appendleft(marker)
+
+    def recent_telemetry(self, expected: dict[str, str]) -> list[dict[str, str]]:
+        with self.telemetry_lock:
+            return [
+                marker
+                for marker in self.telemetry
+                if all(marker.get(key) == value for key, value in expected.items())
+            ][-8:]
+
+
+@dataclass
+class ActionEvidence:
+    label: str
+    dispatch_attempted: bool = False
+    api_exit_code: int | None = None
+    api_result: str = "not attempted"
+    transport_uncertain: bool = False
+    pointer_observation: str = "NOT_REQUESTED"
+    application_response: str = "PENDING"
+    semantic_outcome: str = "PENDING"
+    output_watermark: int = -1
+    point: tuple[int, int] | None = None
+    expected_marker_fields: dict[str, str] | None = None
+
+    def summary(self) -> str:
+        return (
+            f"label={self.label}; dispatch_attempted={int(self.dispatch_attempted)}; "
+            f"api_exit_code={self.api_exit_code}; transport_uncertain={int(self.transport_uncertain)}; "
+            f"api_result={self.api_result!r}; "
+            f"pointer_observation={self.pointer_observation}; application_response={self.application_response}; "
+            f"semantic_outcome={self.semantic_outcome}"
+        )
+
+
+class UnsafeChildCleanupError(RuntimeError):
+    """A helper process group survived its bounded cleanup and may still own the desktop."""
 
 
 class MarkerProtocol:
@@ -287,7 +395,11 @@ class MarkerProtocol:
         self.host = host
         self.asset = asset
         self.generation = generation
-        self.last_sequence = -1
+        self.last_sequence = 0
+        self.control_samples: dict[str, int] = {}
+        self.prompt_geometry_sample = -1
+        self.prompt_geometry: dict[str, str] = {}
+        self.last_action_capture_index = -1
 
     @classmethod
     def from_ready(cls, event: dict[str, str], scenario: str) -> MarkerProtocol:
@@ -324,12 +436,45 @@ class MarkerProtocol:
     def accept_prompt(self, event: dict[str, str]) -> int:
         self.check_identity(event)
         generation = self.marker_generation(event)
-        if generation <= self.generation:
+        if generation != self.generation + 1:
             raise RuntimeError(
-                f"stale prompt coordinates: generation must advance beyond {self.generation}; marker={event.get('raw')!r}"
+                f"prompt generation must advance exactly once from {self.generation}; marker={event.get('raw')!r}"
+            )
+        sample = self.marker_sample(event)
+        if sample <= self.prompt_geometry_sample:
+            raise RuntimeError(
+                f"prompt geometry sample did not advance beyond {self.prompt_geometry_sample}: {event.get('raw')!r}"
             )
         self.generation = generation
+        self.prompt_geometry_sample = sample
+        self.prompt_geometry = event.copy()
         return generation
+
+    @staticmethod
+    def marker_sample(event: dict[str, str]) -> int:
+        try:
+            return int(event["sample"])
+        except (KeyError, ValueError) as error:
+            raise RuntimeError(f"control marker has invalid or missing sample: {event.get('raw')!r}") from error
+
+    @staticmethod
+    def marker_capture_index(event: dict[str, str]) -> int:
+        try:
+            return int(event["_capture_index"])
+        except (KeyError, ValueError) as error:
+            raise RuntimeError(f"marker has invalid or missing capture index: {event.get('raw')!r}") from error
+
+    def accept_prompt_geometry(self, event: dict[str, str]) -> None:
+        self.check_identity(event)
+        if self.marker_generation(event) != self.generation:
+            raise RuntimeError(f"prompt geometry belongs to a stale generation: {event.get('raw')!r}")
+        sample = self.marker_sample(event)
+        if sample <= self.prompt_geometry_sample:
+            raise RuntimeError(
+                f"prompt geometry sample did not advance beyond {self.prompt_geometry_sample}: {event.get('raw')!r}"
+            )
+        self.prompt_geometry_sample = sample
+        self.prompt_geometry = event.copy()
 
     def accept_action(self, event: dict[str, str], choice: str, expected_generation: int) -> None:
         self.check_identity(event)
@@ -344,18 +489,19 @@ class MarkerProtocol:
             sequence = int(event["sequence"])
         except (KeyError, ValueError) as error:
             raise RuntimeError(f"action marker has invalid or missing sequence: {event.get('raw')!r}") from error
-        if sequence <= self.last_sequence:
+        if sequence != self.last_sequence + 1:
             raise RuntimeError(
-                f"action sequence did not advance beyond {self.last_sequence}: {event.get('raw')!r}"
+                f"action sequence did not advance exactly once from {self.last_sequence}: {event.get('raw')!r}"
             )
         self.last_sequence = sequence
+        self.last_action_capture_index = self.marker_capture_index(event)
 
     def accept_fixture(self, event: dict[str, str]) -> int:
         self.check_identity(event)
         generation = self.marker_generation(event)
-        if generation <= self.generation:
+        if generation != self.generation + 1:
             raise RuntimeError(
-                f"fixture control generation must advance beyond {self.generation}; marker={event.get('raw')!r}"
+                f"fixture control generation must advance exactly once from {self.generation}; marker={event.get('raw')!r}"
             )
         self.generation = generation
         return generation
@@ -363,19 +509,42 @@ class MarkerProtocol:
     def accept_control(self, event: dict[str, str]) -> int:
         self.check_identity(event)
         generation = self.marker_generation(event)
-        if generation < self.generation:
+        if generation < self.generation or generation > self.generation + 1:
             raise RuntimeError(
-                f"stale close-control coordinates: generation must be at least {self.generation}; marker={event.get('raw')!r}"
+                f"close-control generation is stale or skipped a state transition from {self.generation}; "
+                f"marker={event.get('raw')!r}"
             )
+        sample = self.marker_sample(event)
+        kind = event.get("kind", "")
+        previous_sample = self.control_samples.get(kind, -1)
+        if sample <= previous_sample:
+            raise RuntimeError(
+                f"{kind} geometry sample did not advance beyond {previous_sample}: {event.get('raw')!r}"
+            )
+        self.control_samples[kind] = sample
         self.generation = generation
         return generation
+
+    def accept_pass(self, event: dict[str, str]) -> None:
+        self.check_identity(event)
+        if self.marker_generation(event) != self.generation:
+            raise RuntimeError(f"PASS generation does not match the terminal fixture state: {event.get('raw')!r}")
+        try:
+            sequence = int(event["sequence"])
+        except (KeyError, ValueError) as error:
+            raise RuntimeError(f"PASS marker has invalid or missing sequence: {event.get('raw')!r}") from error
+        if sequence != self.last_sequence or event.get("open") != "0":
+            raise RuntimeError(
+                f"PASS is not correlated with the final action/session state; expected sequence={self.last_sequence}; "
+                f"marker={event.get('raw')!r}"
+            )
 
     def accept_closed(self, event: dict[str, str]) -> None:
         self.check_identity(event)
         generation = self.marker_generation(event)
-        if generation <= self.generation:
+        if generation != self.generation:
             raise RuntimeError(
-                f"closed marker generation must advance beyond {self.generation}; marker={event.get('raw')!r}"
+                f"closed marker must match the final close-control generation {self.generation}; marker={event.get('raw')!r}"
             )
         try:
             sequence = int(event["sequence"])
@@ -409,21 +578,33 @@ def parse_marker(line: str) -> dict[str, str] | None:
 
 def run_osascript(script: str, *arguments: str, timeout: float) -> tuple[int, str]:
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             ["/usr/bin/osascript", "-", *arguments],
-            input=script,
-            text=True,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=max(0.1, timeout),
-            check=False,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            start_new_session=True,
         )
-        return result.returncode, result.stdout[-4096:]
+    except OSError as error:
+        return 127, f"could not launch /usr/bin/osascript: {type(error).__name__}: {error}"
+    try:
+        output, _ = process.communicate(input=script, timeout=max(0.1, timeout))
     except subprocess.TimeoutExpired as error:
-        output = error.stdout or ""
-        if isinstance(output, bytes):
-            output = output.decode("utf-8", errors="replace")
-        return 124, (output + "\nAppleScript operation timed out\n")[-4096:]
+        stopped = stop_process_group(process)
+        try:
+            output, _ = process.communicate(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            output = ""
+        detail = (output + "\nAppleScript operation timed out\n")[-4096:]
+        if not stopped:
+            raise UnsafeChildCleanupError(
+                f"AppleScript helper process group PID {process.pid} survived bounded timeout cleanup"
+            ) from error
+        return 124, detail
+    return process.returncode, output[-4096:]
 
 
 def is_tcc_denial(output: str) -> bool:
@@ -432,34 +613,41 @@ def is_tcc_denial(output: str) -> bool:
 
 
 def stop_process_group(process: subprocess.Popen[str]) -> bool:
+    process_group = process.pid
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        os.killpg(process_group, signal.SIGTERM)
     except ProcessLookupError:
-        pass
+        return process.poll() is not None
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(process_group, signal.SIGKILL)
         except ProcessLookupError:
             pass
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             return False
+    group_deadline = time.monotonic() + 0.5
+    while time.monotonic() < group_deadline:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return process.poll() is not None
+        time.sleep(0.025)
     try:
-        os.killpg(process.pid, 0)
+        os.killpg(process_group, signal.SIGKILL)
     except ProcessLookupError:
         return process.poll() is not None
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        return False
-    return process.poll() is not None
+    group_deadline = time.monotonic() + 5.0
+    while time.monotonic() < group_deadline:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return process.poll() is not None
+        time.sleep(0.05)
+    return False
 
 
 def run_bounded_command(command: list[str], timeout: float) -> tuple[int, str, str]:
@@ -481,11 +669,8 @@ def run_bounded_command(command: list[str], timeout: float) -> tuple[int, str, s
         except subprocess.TimeoutExpired:
             stdout, stderr = "", ""
         if not stopped:
-            raise RuntimeError(f"timed-out child process group remains active: PID {process.pid}") from error
-        raise RuntimeError(
-            f"command timed out after {timeout:.1f}s; command={command!r}; "
-            f"stdout={stdout[-1000:]!r}; stderr={stderr[-1000:]!r}"
-        ) from error
+            raise UnsafeChildCleanupError(f"timed-out child process group remains active: PID {process.pid}") from error
+        return 124, stdout[-4096:], (stderr + f"\ncommand timed out after {timeout:.1f}s").strip()[-4096:]
     return process.returncode, stdout[-4096:], stderr[-4096:]
 
 
@@ -493,12 +678,61 @@ def bounded_timeout(deadline: float, cap: float = 8.0) -> float:
     return max(0.1, min(cap, deadline - time.monotonic()))
 
 
-def wait_event(capture: BoundedCapture, process: subprocess.Popen[str], kind: str, scenario: str, deadline: float) -> dict[str, str]:
+def is_transport_timeout(exit_code: int, output: str) -> bool:
+    lowered = output.lower()
+    return exit_code == 124 or "-1712" in lowered or "timed out" in lowered or "timeout" in lowered
+
+
+def reconcile_action_response(evidence: ActionEvidence, response_observed: bool) -> str:
+    if not evidence.dispatch_attempted:
+        evidence.application_response = "NOT_EXPECTED"
+        evidence.semantic_outcome = "FAIL_NOT_DISPATCHED"
+        raise RuntimeError(f"{evidence.label}: action dispatch was not attempted; {evidence.summary()}")
+    if not response_observed:
+        evidence.application_response = "MISSING"
+        evidence.semantic_outcome = "FAIL_RESPONSE_MISSING"
+        raise RuntimeError(f"{evidence.label}: expected application response missing; {evidence.summary()}")
+
+    evidence.application_response = "OBSERVED"
+    if evidence.api_exit_code == 0:
+        evidence.semantic_outcome = "PASS"
+        return evidence.semantic_outcome
+    if evidence.transport_uncertain:
+        evidence.semantic_outcome = "PASS_TRANSPORT_UNCERTAIN_RECONCILED"
+        return evidence.semantic_outcome
+
+    evidence.semantic_outcome = "FAIL_DISPATCH_RESULT"
+    raise RuntimeError(
+        f"{evidence.label}: correlated application response arrived after a failed dispatch API result; "
+        f"{evidence.summary()}"
+    )
+
+
+def verify_successful_exit(exit_code: int | None, fixture_completion: dict[str, str] | None) -> None:
+    if fixture_completion is None or fixture_completion.get("kind") != "PASS":
+        raise RuntimeError("expected validated fixture completion before orderly application shutdown was not observed")
+    if exit_code is None:
+        raise RuntimeError("child process remains open after the bounded shutdown wait")
+    if exit_code != 0:
+        raise RuntimeError(f"child process exited with status {exit_code} despite prior success evidence")
+
+
+def wait_event(
+    capture: BoundedCapture,
+    process: subprocess.Popen[str],
+    kind: str,
+    scenario: str,
+    deadline: float,
+    *,
+    after_index: int | None = None,
+) -> dict[str, str]:
     while time.monotonic() < deadline:
         if capture.reader_error:
             raise RuntimeError(f"editor output capture failed: {capture.reader_error}")
-        if process.poll() is not None:
-            raise RuntimeError(f"editor exited before {kind}; exit_code={process.returncode}")
+        if capture.queue_overflow_error:
+            raise RuntimeError(f"editor semantic-marker queue overflow: {capture.queue_overflow_error}")
+        if capture.control_overflow_error:
+            raise RuntimeError(f"editor control-geometry queue overflow: {capture.control_overflow_error}")
         event = None
         for pending in tuple(capture.pending):
             if pending.get("kind") == kind and pending.get("scenario") == scenario:
@@ -507,28 +741,222 @@ def wait_event(capture: BoundedCapture, process: subprocess.Popen[str], kind: st
                 break
         if event is None:
             try:
-                event = capture.events.get(timeout=min(0.25, max(0.01, deadline - time.monotonic())))
+                event = capture.events.get_nowait()
             except queue.Empty:
-                continue
+                if process.poll() is not None:
+                    raise RuntimeError(f"editor exited before {kind}; exit_code={process.returncode}")
+                try:
+                    event = capture.events.get(timeout=min(0.25, max(0.01, deadline - time.monotonic())))
+                except queue.Empty:
+                    continue
         if event.get("kind") == "FAIL":
             raise RuntimeError(f"fixture reported failure: {event.get('raw', '<invalid marker>')}")
+        if event.get("kind") == "INVALID":
+            raise RuntimeError(f"malformed fixture marker: {event.get('raw', '<invalid marker>')!r}")
         if event.get("scenario") != scenario:
             raise RuntimeError(f"fixture marker has wrong scenario: {event.get('raw', event)!r}")
         if event.get("kind") == kind:
+            capture_index = MarkerProtocol.marker_capture_index(event)
+            if after_index is not None and capture_index <= after_index:
+                raise RuntimeError(
+                    f"stale {kind} event predates the current action; watermark={after_index}; "
+                    f"event_index={capture_index}; marker={event.get('raw')!r}"
+                )
             return event
-        if event.get("kind") == "INVALID":
-            raise RuntimeError(f"malformed fixture marker: {event.get('raw', '<invalid marker>')!r}")
         if event.get("kind") in {"READY", "PROMPT", "ACTION", "CLOSED", "PASS"}:
             raise RuntimeError(f"unexpected {event.get('kind')} event while waiting for {kind}: {event.get('raw')!r}")
-        if event.get("kind") in {"FIXTURE", "TEXT_CONTROL", "TEXT_POINTER", "TEXT_FOCUS", "TEXT_ENTRY", "CLOSE_CONTROL"}:
+        if event.get("kind") in {"FIXTURE", "TEXT_CONTROL", "TEXT_FOCUS", "TEXT_ENTRY", "CLOSE_CONTROL"}:
             if event.get("kind") == "FIXTURE":
-                capture.pending = deque(
-                    (pending for pending in capture.pending if pending.get("kind") != "FIXTURE"), maxlen=MAX_EVENT_COUNT
+                capture.pending = deque(pending for pending in capture.pending if pending.get("kind") != "FIXTURE")
+            if len(capture.pending) >= MAX_EVENT_COUNT:
+                capture.queue_overflow_error = capture.queue_overflow_error or (
+                    f"more than {MAX_EVENT_COUNT} semantic markers were retained while waiting for {kind}"
                 )
+                raise RuntimeError(f"editor semantic-marker queue overflow: {capture.queue_overflow_error}")
             capture.pending.append(event)
             continue
         raise RuntimeError(f"unexpected marker while waiting for {kind}: {event.get('raw')!r}")
     raise RuntimeError(f"timed out waiting for {kind} marker for {scenario}")
+
+
+def await_application_event(
+    capture: BoundedCapture,
+    process: subprocess.Popen[str],
+    kind: str,
+    scenario: str,
+    deadline: float,
+    evidence: ActionEvidence,
+    validate: Callable[[dict[str, str]], object],
+    *,
+    after_index: int,
+    response_seconds: float = ACTION_RESPONSE_SECONDS,
+    missing_message: str | None = None,
+    diagnose: Callable[[BoundedCapture, subprocess.Popen[str], ActionEvidence, float], str] | None = None,
+) -> dict[str, str]:
+    collect_diagnostics = diagnose or capture_action_diagnostics
+    if not evidence.dispatch_attempted:
+        reconcile_action_response(evidence, response_observed=False)
+    if evidence.api_exit_code != 0 and not evidence.transport_uncertain:
+        evidence.application_response = "NOT_WAITED_DISPATCH_FAILED"
+        evidence.semantic_outcome = "FAIL_DISPATCH_RESULT"
+        detail = "; ".join(evidence.api_result.splitlines())[-1000:]
+        diagnostics = collect_diagnostics(capture, process, evidence, deadline)
+        raise RuntimeError(
+            f"{evidence.label}: dispatch API failed; exit_code={evidence.api_exit_code}; {detail}; "
+            f"{evidence.summary()}; diagnostics={diagnostics}"
+        )
+
+    response_deadline = min(deadline, time.monotonic() + response_seconds)
+    try:
+        event = wait_event(capture, process, kind, scenario, response_deadline, after_index=after_index)
+    except RuntimeError as error:
+        message = str(error)
+        missing = message.startswith("timed out waiting for ") or message.startswith("editor exited before ")
+        evidence.application_response = "MISSING" if missing else "INCONSISTENT"
+        evidence.semantic_outcome = "FAIL_RESPONSE_MISSING" if missing else "FAIL_RESPONSE_INCONSISTENT"
+        diagnostics = collect_diagnostics(capture, process, evidence, deadline)
+        label = missing_message if missing and missing_message else (
+            "expected application response missing" if missing else "application response was inconsistent"
+        )
+        raise RuntimeError(f"{kind} response after {evidence.label}: {label}; {evidence.summary()}; diagnostics={diagnostics}; {error}") from error
+
+    try:
+        validate(event)
+        outcome = reconcile_action_response(evidence, response_observed=True)
+    except RuntimeError:
+        evidence.semantic_outcome = "FAIL_RESPONSE_INCONSISTENT"
+        diagnostics = collect_diagnostics(capture, process, evidence, deadline)
+        print(f"MACOS_DOC_CLOSE_ACTION_VALIDATION=FAILED; {evidence.summary()}; diagnostics={diagnostics}")
+        raise
+    print(
+        f"MACOS_DOC_CLOSE_ACTION_OUTCOME=OBSERVED; action={evidence.label}; event={kind}; "
+        f"transport={outcome}; {evidence.summary()}"
+    )
+    return event
+
+
+def capture_action_diagnostics(
+    capture: BoundedCapture,
+    process: subprocess.Popen[str],
+    evidence: ActionEvidence,
+    deadline: float,
+) -> str:
+    if evidence.point is None:
+        evidence.pointer_observation = "NOT_AVAILABLE_NO_TARGET_POINT"
+    else:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.1:
+            evidence.pointer_observation = "NOT_AVAILABLE_DEADLINE_EXHAUSTED"
+        else:
+            code, output = run_osascript(
+                POINTER_OBSERVE,
+                str(evidence.point[0]),
+                str(evidence.point[1]),
+                timeout=min(1.5, remaining),
+            )
+            if code == 0:
+                evidence.pointer_observation = "AVAILABLE"
+            elif is_tcc_denial(output):
+                    evidence.pointer_observation = f"UNAVAILABLE:TCC_DENIED:{output.strip()[-500:]}"
+            elif code == 124:
+                    evidence.pointer_observation = f"UNAVAILABLE:TIMED_OUT:{output.strip()[-500:]}"
+            else:
+                    evidence.pointer_observation = f"UNAVAILABLE:ERROR({code}):{output.strip()[-500:]}"
+
+    screenshot = capture.log_path.parent / f"macos-document-close-{evidence.label.lower().replace(' ', '-')}-outcome-missing.png"
+    remaining = deadline - time.monotonic()
+    if remaining > 0.1:
+        try:
+            result = subprocess.run(
+                ["/usr/sbin/screencapture", "-x", "-C", "-t", "png", str(screenshot)],
+                capture_output=True,
+                text=True,
+                timeout=min(2.0, remaining),
+                check=False,
+            )
+            screenshot_state = (
+                f"CAPTURED:{screenshot.stat().st_size} bytes"
+                if result.returncode == 0 and screenshot.is_file() and screenshot.stat().st_size > 0
+                else f"FAILED({result.returncode}):{(result.stdout + result.stderr).strip()[-500:]}"
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            screenshot_state = f"{type(error).__name__}:{error}"
+    else:
+        screenshot_state = "NOT_ATTEMPTED_DEADLINE_EXHAUSTED"
+    telemetry = capture.recent_telemetry(evidence.expected_marker_fields or {})
+    state = "running" if process.poll() is None else f"exited({process.returncode})"
+    return (
+        f"process={state}; pointer={evidence.pointer_observation}; screenshot={screenshot_state}; "
+        f"recent_telemetry={[marker.get('raw') for marker in telemetry]!r}; "
+        f"dropped_telemetry={capture.telemetry_dropped}"
+    )
+
+
+def drain_prompt_geometry(capture: BoundedCapture, protocol: MarkerProtocol) -> None:
+    preserved: list[dict[str, str]] = []
+    for marker in capture.take_controls():
+        if marker.get("kind") != "PROMPT_GEOMETRY":
+            preserved.append(marker)
+            continue
+        protocol.check_identity(marker)
+        generation = MarkerProtocol.marker_generation(marker)
+        if generation < protocol.generation:
+            print(
+                f"MACOS_DOC_CLOSE_CONTROL_GEOMETRY=STALE_IGNORED; expected_generation={protocol.generation}; "
+                f"marker={marker.get('raw')!r}"
+            )
+            continue
+        protocol.accept_prompt_geometry(marker)
+    capture.restore_controls(preserved)
+
+
+def wait_close_control(
+    capture: BoundedCapture,
+    process: subprocess.Popen[str],
+    protocol: MarkerProtocol,
+    deadline: float,
+    kind: str = "CLOSE_CONTROL",
+) -> dict[str, str]:
+    while time.monotonic() < deadline:
+        if capture.reader_error:
+            raise RuntimeError(f"editor output capture failed: {capture.reader_error}")
+        if capture.queue_overflow_error:
+            raise RuntimeError(f"editor semantic-marker queue overflow: {capture.queue_overflow_error}")
+        if capture.control_overflow_error:
+            raise RuntimeError(f"editor control-geometry queue overflow: {capture.control_overflow_error}")
+        candidate: dict[str, str] | None = None
+        preserved: list[dict[str, str]] = []
+        for marker in capture.take_controls():
+            if marker.get("kind") == "PROMPT_GEOMETRY":
+                protocol.check_identity(marker)
+                generation = MarkerProtocol.marker_generation(marker)
+                if generation == protocol.generation:
+                    protocol.accept_prompt_geometry(marker)
+                elif generation > protocol.generation:
+                    raise RuntimeError(f"future prompt geometry arrived unexpectedly: {marker.get('raw')!r}")
+                else:
+                    print(
+                        f"MACOS_DOC_CLOSE_CONTROL_GEOMETRY=STALE_IGNORED; expected_generation={protocol.generation}; "
+                        f"marker={marker.get('raw')!r}"
+                    )
+                continue
+            if marker.get("kind") != kind:
+                preserved.append(marker)
+                continue
+            protocol.check_identity(marker)
+            protocol.accept_control(marker)
+            candidate = marker
+        capture.restore_controls(preserved)
+        if candidate is not None:
+            print(
+                f"MACOS_DOC_CLOSE_CONTROL=FRESH; kind={kind}; generation={protocol.generation}; "
+                f"sample={candidate.get('sample')}; point=({candidate.get('x')},{candidate.get('y')})"
+            )
+            return candidate
+        if process.poll() is not None:
+            raise RuntimeError(f"editor exited before a fresh CLOSE_CONTROL marker; exit_code={process.returncode}")
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    raise RuntimeError(f"timed out waiting for a fresh {kind} geometry marker")
 
 
 def query_fixture_window(
@@ -622,6 +1050,8 @@ def compile_pointer_driver(temporary_root: Path) -> Path:
             timeout=30,
         )
     except (OSError, RuntimeError) as error:
+        if isinstance(error, UnsafeChildCleanupError):
+            raise
         raise RuntimeError(f"bounded Quartz pointer-driver compilation failed: {error}") from error
     if exit_code != 0 or not executable.is_file():
         raise RuntimeError(
@@ -633,168 +1063,78 @@ def compile_pointer_driver(temporary_root: Path) -> Path:
 
 def click_point(
     process: subprocess.Popen[str],
+    capture: BoundedCapture,
     pointer_driver: Path,
     fixture_bounds: tuple[float, float, float, float],
     point: tuple[int, int],
     deadline: float,
     label: str,
-) -> None:
-    window_x, window_y, window_width, window_height = fixture_bounds
+) -> ActionEvidence:
+    evidence = ActionEvidence(label=label, point=point, output_watermark=capture.watermark())
+    try:
+        current_bounds = query_fixture_window(process, deadline)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        evidence.api_result = f"target preparation failed before dispatch: {type(error).__name__}: {error}"
+        evidence.application_response = "NOT_EXPECTED"
+        evidence.semantic_outcome = "FAIL_PREPARATION"
+        raise RuntimeError(f"{label}: dispatch was not attempted; {evidence.summary()}") from error
+    window_x, window_y, window_width, window_height = current_bounds
     if not (window_x <= point[0] < window_x + window_width and window_y <= point[1] < window_y + window_height):
+        evidence.api_result = f"point {point!r} is outside current window bounds {current_bounds!r}"
+        evidence.application_response = "NOT_EXPECTED"
+        evidence.semantic_outcome = "FAIL_PREPARATION"
         raise RuntimeError(
-            f"ImGui desktop point for {label} falls outside the fixture AX bounds; "
-            f"point={point!r}; bounds={fixture_bounds!r}; no window-origin translation was applied"
+            f"fresh ImGui desktop point for {label} falls outside the current fixture AX bounds; "
+            f"point={point!r}; initial_bounds={fixture_bounds!r}; current_bounds={current_bounds!r}; "
+            f"no window-origin translation was applied; {evidence.summary()}"
         )
 
-    code, output = run_osascript(FOCUS_TARGET, str(process.pid), timeout=bounded_timeout(deadline, 8.0))
+    try:
+        code, output = run_osascript(FOCUS_TARGET, str(process.pid), timeout=bounded_timeout(deadline, 8.0))
+    except OSError as error:
+        evidence.api_result = f"focus helper launch failed before dispatch: {type(error).__name__}: {error}"
+        evidence.application_response = "NOT_EXPECTED"
+        evidence.semantic_outcome = "FAIL_PREPARATION"
+        raise RuntimeError(f"{label}: dispatch was not attempted; {evidence.summary()}") from error
     if code != 0:
-        if is_tcc_denial(output):
-            raise RuntimeError(f"TCC_DENIED: Accessibility authorization is required to focus the fixture: {output.strip()}")
-        raise RuntimeError(f"could not focus the fixture before clicking {label}; exit_code={code}; detail={output.strip()}")
+        evidence.api_exit_code = code
+        evidence.api_result = f"focus failed before dispatch: {output.strip()}"
+        evidence.application_response = "NOT_EXPECTED"
+        evidence.semantic_outcome = "FAIL_PREPARATION"
+        prefix = "TCC_DENIED: " if is_tcc_denial(output) else ""
+        raise RuntimeError(f"{prefix}{label}: dispatch was not attempted; {evidence.summary()}")
 
-    code, pointer_before = run_osascript(
-        POINTER_OBSERVE, str(point[0]), str(point[1]), timeout=bounded_timeout(deadline, 3.0)
-    )
-    if code != 0:
-        if is_tcc_denial(pointer_before):
-            raise RuntimeError(f"TCC_DENIED: Accessibility authorization is required to observe pointer state: {pointer_before.strip()}")
-        raise RuntimeError(
-            f"could not observe pointer before clicking {label}; exit_code={code}; detail={pointer_before.strip()}"
-        )
-
+    evidence.output_watermark = capture.watermark()
     try:
         exit_code, stdout, stderr = run_bounded_command(
             [str(pointer_driver), str(process.pid), str(point[0]), str(point[1])],
             timeout=bounded_timeout(deadline, 5.0),
         )
-    except (OSError, RuntimeError) as error:
-        raise RuntimeError(f"bounded Quartz pointer input for {label} failed: {type(error).__name__}: {error}") from error
-    if exit_code == 77:
-        raise RuntimeError(f"TCC_DENIED: {stderr.strip()}")
-    if exit_code != 0:
-        raise RuntimeError(
-            f"Quartz pointer input for {label} failed; exit_code={exit_code}; "
-            f"stdout={stdout[-1000:]!r}; stderr={stderr[-1000:]!r}"
-        )
-
-    print(
-        f"MACOS_DOC_CLOSE_POINTER_INPUT=DRIVER_RETURNED; control={label}; "
-        f"driver_output={stdout.strip()!r}; delivery=not-yet-observed; pointer_before={pointer_before.strip()!r}"
-    )
-
-    observation_deadline = min(deadline, time.monotonic() + 3.0)
-    last_state = "pointer observation not attempted"
-    observed_pointer = False
-    while time.monotonic() < observation_deadline:
-        code, observation = run_osascript(
-            POINTER_OBSERVE,
-            str(point[0]),
-            str(point[1]),
-            timeout=bounded_timeout(observation_deadline, 1.0),
-        )
-        if code == 0 and "target_match=1" in observation:
-            print(
-                f"MACOS_DOC_CLOSE_POINTER_OBSERVATION=TARGET_MATCH; control={label}; "
-                f"pointer_after={observation.strip()}; fixture_state_confirmation=pending"
-            )
-            return
-        if code != 0:
-            if is_tcc_denial(observation):
-                raise RuntimeError(
-                    f"TCC_DENIED: Accessibility authorization is required to observe pointer delivery: {observation.strip()}"
-                )
-            if code != 124:
-                raise RuntimeError(
-                    f"pointer observation for {label} failed; exit_code={code}; detail={observation.strip()}"
-                )
-            last_state = f"observation timed out: {observation.strip()}"
-        else:
-            observed_pointer = True
-            last_state = observation.strip()
-        time.sleep(min(0.1, max(0.0, observation_deadline - time.monotonic())))
-    if observed_pointer:
-        print(
-            f"MACOS_DOC_CLOSE_POINTER_OBSERVATION=TARGET_NOT_CONFIRMED; control={label}; "
-            f"requested={point!r}; last_observed={last_state!r}; fixture_state_confirmation=required"
-        )
-        return
-    print(
-        f"MACOS_DOC_CLOSE_POINTER_OBSERVATION=UNAVAILABLE; control={label}; "
-        f"requested={point!r}; last_observed={last_state!r}; fixture_state_confirmation=required"
-    )
-
-
-def capture_text_focus_timeout(
-    process: subprocess.Popen[str], scenario: str, point: tuple[int, int], log_directory: Path, cause: str
-) -> str:
-    code, bounds = run_osascript(
-        WINDOW_BOUNDS_QUERY, str(process.pid), FIXTURE_TITLE, timeout=5.0
-    )
-    if code != 0:
-        if is_tcc_denial(bounds):
-            bounds_state = f"window_bounds=TCC_DENIED; exit_code={code}; detail={bounds.strip()!r}"
-        elif code == 124:
-            bounds_state = f"window_bounds=TIMED_OUT; exit_code={code}; detail={bounds.strip()!r}"
-        else:
-            bounds_state = f"window_bounds=ERROR; exit_code={code}; detail={bounds.strip()!r}"
+    except UnsafeChildCleanupError as error:
+        evidence.dispatch_attempted = True
+        evidence.api_exit_code = 124
+        evidence.api_result = f"Quartz dispatch timed out and helper cleanup failed: {error}"
+        raise
+    except OSError as error:
+        evidence.dispatch_attempted = False
+        evidence.api_exit_code = 127
+        evidence.api_result = f"driver launch failed before dispatch: {type(error).__name__}: {error}"
+        return evidence
+    evidence.dispatch_attempted = True
+    evidence.api_exit_code = exit_code
+    if exit_code == 0:
+        evidence.api_result = stdout.strip() or "Quartz driver returned success"
+    elif exit_code == 124:
+        evidence.transport_uncertain = True
+        evidence.api_result = f"Quartz dispatch timed out; delivery uncertain; {stderr.strip()}"
+    elif exit_code == 77:
+        evidence.api_result = f"TCC_DENIED: {stderr.strip()}"
     else:
-        bounds_state = f"window_bounds={bounds.strip()!r}"
-
-    screenshot = log_directory / f"macos-document-close-{scenario}-text-focus-timeout.png"
-    try:
-        result = subprocess.run(
-            ["/usr/sbin/screencapture", "-x", "-C", "-t", "png", str(screenshot)],
-            capture_output=True,
-            text=True,
-            timeout=5.0,
-            check=False,
-        )
-        if result.returncode == 0 and screenshot.is_file() and screenshot.stat().st_size > 0:
-            screenshot_state = f"screenshot=CAPTURED; bytes={screenshot.stat().st_size}; path={screenshot}"
-        else:
-            state = "TCC_DENIED" if is_tcc_denial(result.stderr + result.stdout) else "FAILED"
-            screenshot_state = (
-                f"screenshot={state}; exit_code={result.returncode}; "
-                f"stdout={result.stdout[-400:]!r}; stderr={result.stderr[-400:]!r}"
-            )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        state = "TIMED_OUT" if isinstance(error, subprocess.TimeoutExpired) else "FAILED"
-        screenshot_state = f"screenshot={state}; error={type(error).__name__}: {error}"
-    return f"{cause}; click_point={point!r}; {bounds_state}; {screenshot_state}"
-
-
-def capture_action_timeout_screenshot(
-    log_directory: Path,
-    process: subprocess.Popen[str],
-    scenario: str,
-    choice: str,
-) -> str:
-    screenshot = log_directory / f"macos-document-close-{scenario}-action-timeout.png"
-    try:
-        result = subprocess.run(
-            ["/usr/sbin/screencapture", "-x", "-C", "-t", "png", str(screenshot)],
-            capture_output=True,
-            text=True,
-            timeout=5.0,
-            check=False,
-        )
-        if result.returncode == 0 and screenshot.is_file() and screenshot.stat().st_size > 0:
-            screenshot_state = f"CAPTURED; bytes={screenshot.stat().st_size}; path={screenshot}"
-        else:
-            state = "TCC_DENIED" if is_tcc_denial(result.stderr + result.stdout) else "FAILED"
-            screenshot_state = (
-                f"{state}; exit_code={result.returncode}; "
-                f"stdout={result.stdout[-400:]!r}; stderr={result.stderr[-400:]!r}"
-            )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        state = "TIMED_OUT" if isinstance(error, subprocess.TimeoutExpired) else "FAILED"
-        screenshot_state = f"{state}; error={type(error).__name__}: {error}"
-
-    process_state = "running" if process.poll() is None else f"exited={process.returncode}"
-    return (
-        f"scenario={scenario}; choice={choice}; pid={process.pid}; process_state={process_state}; "
-        f"screenshot={screenshot_state}"
+        evidence.api_result = f"Quartz dispatch failed; stdout={stdout[-1000:]!r}; stderr={stderr[-1000:]!r}"
+    print(
+        f"MACOS_DOC_CLOSE_POINTER_INPUT=RESULT; {evidence.summary()}; api_detail={evidence.api_result!r}"
     )
+    return evidence
 
 
 def click_document_tab_close(
@@ -805,11 +1145,39 @@ def click_document_tab_close(
     deadline: float,
     protocol: MarkerProtocol,
     label: str,
-) -> None:
-    control = wait_event(capture, process, "CLOSE_CONTROL", protocol.scenario, deadline)
-    protocol.accept_control(control)
+    response_kind: str = "PROMPT",
+) -> tuple[dict[str, str], ActionEvidence]:
+    drain_prompt_geometry(capture, protocol)
+    control = wait_close_control(capture, process, protocol, deadline)
     point = parse_point(f"{control.get('x', '')},{control.get('y', '')}", "document tab close")
-    click_point(process, pointer_driver, fixture_bounds, point, deadline, label)
+    evidence = click_point(process, capture, pointer_driver, fixture_bounds, point, deadline, label)
+    evidence.expected_marker_fields = {
+        "scenario": protocol.scenario,
+        "host": protocol.host,
+        "asset": protocol.asset,
+    }
+
+    def validate(event: dict[str, str]) -> None:
+        protocol.check_identity(event)
+        if response_kind == "PROMPT":
+            protocol.accept_prompt(event)
+        elif response_kind == "CLOSED":
+            protocol.accept_closed(event)
+        else:
+            raise RuntimeError(f"unsupported close-tab response kind: {response_kind}")
+
+    event = await_application_event(
+        capture,
+        process,
+        response_kind,
+        protocol.scenario,
+        deadline,
+        evidence,
+        validate,
+        after_index=evidence.output_watermark,
+        missing_message="Close response missing",
+    )
+    return event, evidence
 
 
 def enter_editor_value(
@@ -825,75 +1193,87 @@ def enter_editor_value(
     if control.get("generation") != "0" or control.get("value") != "20":
         raise RuntimeError(f"editor text control started in an unexpected state: {control.get('raw')!r}")
     point = parse_point(f"{control.get('x', '')},{control.get('y', '')}", "editable value")
-    click_point(process, pointer_driver, fixture_bounds, point, deadline, "Editable value")
+    focus_evidence = click_point(process, capture, pointer_driver, fixture_bounds, point, deadline, "Editable value")
+    focus_evidence.expected_marker_fields = {
+        "scenario": protocol.scenario,
+        "host": protocol.host,
+        "asset": protocol.asset,
+        "generation": "0",
+    }
 
-    pointer_deadline = min(deadline, time.monotonic() + 8.0)
-    try:
-        pointer = wait_event(capture, process, "TEXT_POINTER", protocol.scenario, pointer_deadline)
-    except RuntimeError as error:
-        raise RuntimeError(
-            capture_text_focus_timeout(
-                process, protocol.scenario, point, capture.log_path.parent,
-                f"ImGui reported no mouse, hover, or active-state change after the click; "
-                f"initial_pointer=({control.get('mouse_x')},{control.get('mouse_y')}); {error}",
-            )
-        ) from error
-    protocol.check_identity(pointer)
-    try:
-        mouse_x = float(pointer["mouse_x"])
-        mouse_y = float(pointer["mouse_y"])
-    except (KeyError, ValueError) as error:
-        raise RuntimeError(f"ImGui pointer-state marker has invalid coordinates: {pointer.get('raw')!r}") from error
-    if not math.isfinite(mouse_x) or not math.isfinite(mouse_y):
-        raise RuntimeError(f"ImGui pointer-state marker has non-finite coordinates: {pointer.get('raw')!r}")
-    if pointer.get("hovered") != "1" or not math.isclose(mouse_x, point[0], abs_tol=1.5) or not math.isclose(
-        mouse_y, point[1], abs_tol=1.5
-    ):
-        raise RuntimeError(
-            capture_text_focus_timeout(
-                process, protocol.scenario, point, capture.log_path.parent,
-                f"ImGui did not hover the clicked text control at its reported mouse position: {pointer.get('raw')!r}",
-            )
-        )
-    print(
-        f"MACOS_DOC_CLOSE_HOVER=PASS; scenario={protocol.scenario}; "
-        f"mouse=({mouse_x:.1f},{mouse_y:.1f}); control=({point[0]},{point[1]})"
+    def validate_focus(event: dict[str, str]) -> None:
+        protocol.check_identity(event)
+        if event.get("generation") != "0" or event.get("active") != "1" or event.get("clicked") != "1":
+            raise RuntimeError(f"Input did not activate: {event.get('raw')!r}")
+        if event.get("value") != "20":
+            raise RuntimeError(f"Value changed during activation: {event.get('raw')!r}")
+
+    await_application_event(
+        capture,
+        process,
+        "TEXT_FOCUS",
+        protocol.scenario,
+        deadline,
+        focus_evidence,
+        validate_focus,
+        after_index=focus_evidence.output_watermark,
+        missing_message="Input did not activate",
     )
 
-    focus_deadline = min(deadline, time.monotonic() + 5.0)
+    type_evidence = ActionEvidence(
+        label="OS keyboard edit",
+        dispatch_attempted=True,
+        output_watermark=capture.watermark(),
+        point=point,
+        expected_marker_fields={
+            "scenario": protocol.scenario,
+            "host": protocol.host,
+            "asset": protocol.asset,
+            "generation": "0",
+        },
+    )
     try:
-        focus = wait_event(capture, process, "TEXT_FOCUS", protocol.scenario, focus_deadline)
-    except RuntimeError as error:
-        raise RuntimeError(
-            capture_text_focus_timeout(
-                process, protocol.scenario, point, capture.log_path.parent,
-                f"ImGui saw the editable control hovered but did not report focus: {error}",
-            )
-        ) from error
-    protocol.check_identity(focus)
-    if focus.get("generation") != "0" or focus.get("active") != "1" or focus.get("value") != "20":
-        raise RuntimeError(f"editable value did not receive focus before text entry: {focus.get('raw')!r}")
-    code, output = run_osascript(TYPE_EDITOR_VALUE, str(process.pid), timeout=bounded_timeout(deadline, 8.0))
-    if code != 0:
-        if is_tcc_denial(output):
-            raise RuntimeError(f"TCC_DENIED: Accessibility authorization is required for OS keyboard input: {output.strip()}")
-        raise RuntimeError(f"OS keyboard input failed; exit_code={code}; detail={output.strip()}")
-    print(output.strip())
+        code, output = run_osascript(TYPE_EDITOR_VALUE, str(process.pid), timeout=bounded_timeout(deadline, 8.0))
+        type_evidence.dispatch_attempted = code != 127
+        type_evidence.api_exit_code = code
+        type_evidence.transport_uncertain = is_transport_timeout(code, output)
+        type_evidence.api_result = output.strip() if code in (0, 124) else (
+            f"TCC_DENIED: {output.strip()}" if is_tcc_denial(output) else f"AppleScript dispatch failed: {output.strip()}"
+        )
+    except UnsafeChildCleanupError as error:
+        type_evidence.dispatch_attempted = True
+        type_evidence.api_exit_code = 124
+        type_evidence.api_result = f"AppleScript keyboard dispatch timed out; helper cleanup failed: {error}"
+        raise
 
-    entered = wait_event(capture, process, "TEXT_ENTRY", protocol.scenario, deadline)
-    protocol.check_identity(entered)
-    expected = {"generation": "0", "value": "42", "saved": "10", "dirty": "1"}
-    if any(entered.get(key) != value for key, value in expected.items()):
-        raise RuntimeError(f"editor did not retain the entered value as a dirty document: {entered.get('raw')!r}")
+    def validate_text_entry(entered: dict[str, str]) -> None:
+        protocol.check_identity(entered)
+        expected = {"generation": "0", "value": "42", "saved": "10", "dirty": "1"}
+        if any(entered.get(key) != value for key, value in expected.items()):
+            raise RuntimeError(f"editor did not retain the entered value as a dirty document: {entered.get('raw')!r}")
+
+    await_application_event(
+        capture,
+        process,
+        "TEXT_ENTRY",
+        protocol.scenario,
+        deadline,
+        type_evidence,
+        validate_text_entry,
+        after_index=type_evidence.output_watermark,
+        missing_message="Keyboard edit not observed",
+    )
     print(f"MACOS_DOC_CLOSE_TEXT_ENTRY=PASS; scenario={protocol.scenario}; value=42; saved=10; dirty=1")
 
 
-def get_prompt_point(event: dict[str, str], scenario: str, host: str, choice: str) -> tuple[int, int]:
-    if event.get("host") != host:
-        raise RuntimeError(f"prompt host does not match READY: {event.get('raw')!r}")
-    if event.get("scenario") != scenario:
-        raise RuntimeError(f"prompt scenario mismatch: {event.get('raw')!r}")
-    return parse_point(event.get(choice, ""), choice)
+def get_prompt_point(capture: BoundedCapture, protocol: MarkerProtocol, choice: str) -> tuple[int, int]:
+    drain_prompt_geometry(capture, protocol)
+    geometry = protocol.prompt_geometry
+    if geometry.get("host") != protocol.host or geometry.get("scenario") != protocol.scenario:
+        raise RuntimeError(f"prompt control geometry does not match the current document: {geometry.get('raw')!r}")
+    if MarkerProtocol.marker_generation(geometry) != protocol.generation:
+        raise RuntimeError(f"prompt control geometry is stale: {geometry.get('raw')!r}")
+    return parse_point(geometry.get(choice, ""), choice)
 
 
 def expect_action(
@@ -901,6 +1281,7 @@ def expect_action(
     process: subprocess.Popen[str],
     deadline: float,
     protocol: MarkerProtocol,
+    evidence: ActionEvidence,
     choice: str,
     expected_generation: int,
     *,
@@ -912,16 +1293,6 @@ def expect_action(
     saved: str,
     error: str = "",
 ) -> dict[str, str]:
-    try:
-        action = wait_event(capture, process, "ACTION", protocol.scenario, deadline)
-    except RuntimeError as error:
-        if str(error).startswith("timed out waiting for ACTION marker"):
-            evidence = capture_action_timeout_screenshot(
-                capture.log_path.parent, process, protocol.scenario, choice
-            )
-            print(f"MACOS_DOC_CLOSE_ACTION_TIMEOUT_OBSERVATION={evidence}")
-            raise RuntimeError(f"{error}; {evidence}") from error
-        raise
     expected = {
         "choice": choice,
         "resolved": resolved,
@@ -933,13 +1304,34 @@ def expect_action(
         "saved": saved,
         "error": error,
     }
-    for key, value_expected in expected.items():
-        if action.get(key) != value_expected:
-            raise RuntimeError(
-                f"unexpected {choice} state for {protocol.scenario}: field {key} expected {value_expected!r}, "
-                f"got {action.get(key)!r}; marker={action.get('raw')!r}"
-            )
-    protocol.accept_action(action, choice, expected_generation)
+
+    def validate(action: dict[str, str]) -> None:
+        protocol.check_identity(action)
+        for key, value_expected in expected.items():
+            if action.get(key) != value_expected:
+                raise RuntimeError(
+                    f"unexpected {choice} state for {protocol.scenario}: field {key} expected {value_expected!r}, "
+                    f"got {action.get(key)!r}; marker={action.get('raw')!r}"
+                )
+        protocol.accept_action(action, choice, expected_generation)
+
+    evidence.expected_marker_fields = {
+        "scenario": protocol.scenario,
+        "host": protocol.host,
+        "asset": protocol.asset,
+        "generation": str(expected_generation),
+        "choice": choice,
+    }
+    action = await_application_event(
+        capture,
+        process,
+        "ACTION",
+        protocol.scenario,
+        deadline,
+        evidence,
+        validate,
+        after_index=evidence.output_watermark,
+    )
     print(
         f"MACOS_DOC_CLOSE_FIXTURE_ACTION=PASS; scenario={protocol.scenario}; "
         f"choice={choice}; resolved={resolved}; pending={pending}; open={opened}; dirty={dirty}; "
@@ -948,11 +1340,54 @@ def expect_action(
     return action
 
 
-def require_pass(capture: BoundedCapture, process: subprocess.Popen[str], deadline: float, protocol: MarkerProtocol) -> None:
-    event = wait_event(capture, process, "PASS", protocol.scenario, deadline)
-    protocol.check_identity(event)
-    if event.get("scenario") != protocol.scenario:
-        raise RuntimeError(f"unexpected PASS marker: {event.get('raw')!r}")
+def require_pass(capture: BoundedCapture, process: subprocess.Popen[str], deadline: float, protocol: MarkerProtocol) -> dict[str, str]:
+    event = wait_event(
+        capture,
+        process,
+        "PASS",
+        protocol.scenario,
+        deadline,
+        after_index=protocol.last_action_capture_index,
+    )
+    protocol.accept_pass(event)
+    return event
+
+
+def click_decision(
+    process: subprocess.Popen[str],
+    capture: BoundedCapture,
+    pointer_driver: Path,
+    fixture_bounds: tuple[float, float, float, float],
+    deadline: float,
+    protocol: MarkerProtocol,
+    choice: str,
+    *,
+    resolved: str,
+    pending: str,
+    opened: str,
+    dirty: str,
+    value: str,
+    saved: str,
+    error: str = "",
+) -> dict[str, str]:
+    point = get_prompt_point(capture, protocol, choice)
+    evidence = click_point(process, capture, pointer_driver, fixture_bounds, point, deadline, choice.title())
+    return expect_action(
+        capture,
+        process,
+        deadline,
+        protocol,
+        evidence,
+        choice,
+        protocol.generation,
+        resolved=resolved,
+        pending=pending,
+        opened=opened,
+        dirty=dirty,
+        value=value,
+        saved=saved,
+        error=error,
+    )
 
 
 def run_decisions(
@@ -963,95 +1398,195 @@ def run_decisions(
     ready: dict[str, str],
     scenario: str,
     deadline: float,
-) -> None:
+) -> dict[str, str]:
     if (ready.get("saved"), ready.get("value"), ready.get("dirty")) != ("10", "20", "1"):
         raise RuntimeError(f"fixture READY state mismatch: {ready.get('raw')!r}")
     protocol = MarkerProtocol.from_ready(ready, scenario)
-    host = protocol.host
-    print(f"MACOS_DOC_CLOSE_READY=PASS; scenario={scenario}; host={host}; asset={protocol.asset}")
+    print(f"MACOS_DOC_CLOSE_READY=PASS; scenario={scenario}; host={protocol.host}; asset={protocol.asset}")
     enter_editor_value(process, capture, pointer_driver, fixture_bounds, deadline, protocol)
 
-    click_document_tab_close(process, capture, pointer_driver, fixture_bounds, deadline, protocol, "document tab close")
-    prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
-    prompt_generation = protocol.accept_prompt(prompt)
+    prompt, _ = click_document_tab_close(
+        process, capture, pointer_driver, fixture_bounds, deadline, protocol, "document tab close"
+    )
+    prompt_generation = protocol.generation
     print(f"MACOS_DOC_CLOSE_FIXTURE_PROMPT=OBSERVED; scenario={scenario}; generation={prompt_generation}")
 
     if scenario == "cancel-save":
-        click_point(process, pointer_driver, fixture_bounds, get_prompt_point(prompt, scenario, host, "cancel"), deadline, "Cancel")
-        expect_action(capture, process, deadline, protocol, "cancel", prompt_generation, resolved="1", pending="0", opened="1", dirty="1", value="42", saved="10")
-        click_document_tab_close(process, capture, pointer_driver, fixture_bounds, deadline, protocol, "document tab close after cancel")
-        prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
-        prompt_generation = protocol.accept_prompt(prompt)
+        click_decision(
+            process, capture, pointer_driver, fixture_bounds, deadline, protocol, "cancel",
+            resolved="1", pending="0", opened="1", dirty="1", value="42", saved="10",
+        )
+        prompt, _ = click_document_tab_close(
+            process, capture, pointer_driver, fixture_bounds, deadline, protocol, "document tab close after cancel"
+        )
+        prompt_generation = protocol.generation
         print(f"MACOS_DOC_CLOSE_FIXTURE_PROMPT=OBSERVED; scenario={scenario}; generation={prompt_generation}")
-        click_point(process, pointer_driver, fixture_bounds, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save")
-        expect_action(capture, process, deadline, protocol, "save", prompt_generation, resolved="1", pending="0", opened="0", dirty="0", value="42", saved="42")
+        click_decision(
+            process, capture, pointer_driver, fixture_bounds, deadline, protocol, "save",
+            resolved="1", pending="0", opened="0", dirty="0", value="42", saved="42",
+        )
     elif scenario == "discard":
-        click_point(process, pointer_driver, fixture_bounds, get_prompt_point(prompt, scenario, host, "discard"), deadline, "Discard")
-        expect_action(capture, process, deadline, protocol, "discard", prompt_generation, resolved="1", pending="0", opened="0", dirty="0", value="10", saved="10")
+        click_decision(
+            process, capture, pointer_driver, fixture_bounds, deadline, protocol, "discard",
+            resolved="1", pending="0", opened="0", dirty="0", value="10", saved="10",
+        )
     elif scenario == "save-retry":
-        click_point(process, pointer_driver, fixture_bounds, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (expected failure)")
-        expect_action(
-            capture, process, deadline, protocol, "save", prompt_generation, resolved="0", pending="1", opened="1", dirty="1", value="42", saved="10",
+        click_decision(
+            process, capture, pointer_driver, fixture_bounds, deadline, protocol, "save",
+            resolved="0", pending="1", opened="1", dirty="1", value="42", saved="10",
             error="The%20document%20could%20not%20be%20saved%3B%20it%20remains%20open.",
         )
-        prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
-        prompt_generation = protocol.accept_prompt(prompt)
+        prompt = wait_event(capture, process, "PROMPT", scenario, deadline, after_index=protocol.last_action_capture_index)
+        protocol.accept_prompt(prompt)
+        prompt_generation = protocol.generation
         print(f"MACOS_DOC_CLOSE_FIXTURE_PROMPT=OBSERVED; scenario={scenario}; generation={prompt_generation}")
-        click_point(process, pointer_driver, fixture_bounds, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (retry)")
-        expect_action(capture, process, deadline, protocol, "save", prompt_generation, resolved="1", pending="0", opened="0", dirty="0", value="42", saved="42")
+        click_decision(
+            process, capture, pointer_driver, fixture_bounds, deadline, protocol, "save",
+            resolved="1", pending="0", opened="0", dirty="0", value="42", saved="42",
+        )
     elif scenario == "close-retry":
-        click_point(process, pointer_driver, fixture_bounds, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (expected close preflight failure)")
-        expect_action(
-            capture, process, deadline, protocol, "save", prompt_generation, resolved="0", pending="1", opened="1", dirty="0", value="42", saved="42",
+        click_decision(
+            process, capture, pointer_driver, fixture_bounds, deadline, protocol, "save",
+            resolved="0", pending="1", opened="1", dirty="0", value="42", saved="42",
             error="The%20Debug%20fixture%20is%20configured%20to%20reject%20close.",
         )
-        prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
-        prompt_generation = protocol.accept_prompt(prompt)
+        prompt = wait_event(capture, process, "PROMPT", scenario, deadline, after_index=protocol.last_action_capture_index)
+        protocol.accept_prompt(prompt)
+        prompt_generation = protocol.generation
         print(f"MACOS_DOC_CLOSE_FIXTURE_PROMPT=OBSERVED; scenario={scenario}; generation={prompt_generation}")
-        click_point(process, pointer_driver, fixture_bounds, get_prompt_point(prompt, scenario, host, "cancel"), deadline, "Cancel pending close")
-        expect_action(capture, process, deadline, protocol, "cancel", prompt_generation, resolved="1", pending="0", opened="1", dirty="0", value="42", saved="42")
+        click_decision(
+            process, capture, pointer_driver, fixture_bounds, deadline, protocol, "cancel",
+            resolved="1", pending="0", opened="1", dirty="0", value="42", saved="42",
+        )
         fixture = wait_event(capture, process, "FIXTURE", scenario, deadline)
         fixture_generation = protocol.accept_fixture(fixture)
-        click_point(process, pointer_driver, fixture_bounds, parse_point(fixture.get("allow_close", ""), "Allow close"), deadline, "Allow close")
-        expect_action(capture, process, deadline, protocol, "allow-close", fixture_generation, resolved="1", pending="0", opened="1", dirty="0", value="42", saved="42")
-        click_document_tab_close(process, capture, pointer_driver, fixture_bounds, deadline, protocol, "document tab close after recovery")
-        closed = wait_event(capture, process, "CLOSED", scenario, deadline)
-        protocol.accept_closed(closed)
+        allow_control = wait_close_control(capture, process, protocol, deadline, kind="ALLOW_CLOSE_CONTROL")
+        allow_point = parse_point(f"{allow_control.get('x', '')},{allow_control.get('y', '')}", "Allow close")
+        allow_evidence = click_point(process, capture, pointer_driver, fixture_bounds, allow_point, deadline, "Allow close")
+        expect_action(
+            capture, process, deadline, protocol, allow_evidence, "allow-close", fixture_generation,
+            resolved="1", pending="0", opened="1", dirty="0", value="42", saved="42",
+        )
+        closed, _ = click_document_tab_close(
+            process, capture, pointer_driver, fixture_bounds, deadline, protocol,
+            "document tab close after recovery", response_kind="CLOSED",
+        )
         if closed.get("open") != "0" or closed.get("saved") != "42":
             raise RuntimeError(f"clean close after preflight recovery did not preserve the saved session state: {closed.get('raw')!r}")
         print(f"MACOS_DOC_CLOSE_FIXTURE_CLOSED=PASS; scenario={scenario}; saved={closed.get('saved')}")
     else:
         raise RuntimeError(f"unsupported close scenario: {scenario}")
 
-    require_pass(capture, process, deadline, protocol)
+    completion = require_pass(capture, process, deadline, protocol)
     print(f"MACOS_DOC_CLOSE_DECISION_SCENARIO=PASS; scenario={scenario}")
+    return completion
 
 
-def exit_normally(process: subprocess.Popen[str], deadline: float) -> None:
+def capture_main_close_diagnostics(process: subprocess.Popen[str], deadline: float, log_directory: Path) -> str:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0.1:
+        return "window_state=DEADLINE_EXHAUSTED; screenshot=NOT_ATTEMPTED"
     code, output = run_osascript(
-        MAIN_WINDOW_CLOSE, str(process.pid), MAIN_TITLE_FRAGMENT, timeout=bounded_timeout(deadline, 8.0)
+        WINDOW_QUERY,
+        str(process.pid),
+        FIXTURE_TITLE,
+        timeout=min(2.0, remaining),
     )
-    if code != 0:
-        if is_tcc_denial(output):
-            raise RuntimeError(f"TCC_DENIED: Accessibility is required for normal application exit: {output.strip()}")
-        raise RuntimeError(f"could not request normal main-window close; exit_code={code}; detail={output.strip()}")
-    print(output.strip())
+    if code == 0:
+        window_state = f"window_query=PASS; snapshot={output.strip()!r}"
+    else:
+        category = "TCC_DENIED" if is_tcc_denial(output) else "TIMED_OUT" if code == 124 else f"ERROR({code})"
+        window_state = f"window_query={category}; detail={output.strip()[-500:]!r}"
+    screenshot = log_directory / "macos-document-close-main-window-close-failure.png"
+    remaining = deadline - time.monotonic()
+    if remaining <= 0.1:
+        return f"{window_state}; screenshot=NOT_ATTEMPTED_DEADLINE_EXHAUSTED"
     try:
-        exit_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+        result = subprocess.run(
+            ["/usr/sbin/screencapture", "-x", "-C", "-t", "png", str(screenshot)],
+            capture_output=True,
+            text=True,
+            timeout=min(2.0, remaining),
+            check=False,
+        )
+        screen_state = (
+            f"CAPTURED:{screenshot.stat().st_size} bytes"
+            if result.returncode == 0 and screenshot.is_file() and screenshot.stat().st_size > 0
+            else f"FAILED({result.returncode}):{(result.stdout + result.stderr).strip()[-400:]}"
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        screen_state = f"{type(error).__name__}:{error}"
+    return f"{window_state}; screenshot={screen_state}"
+
+
+def exit_normally(
+    process: subprocess.Popen[str],
+    deadline: float,
+    log_directory: Path,
+    fixture_completion: dict[str, str],
+) -> None:
+    if fixture_completion.get("kind") != "PASS":
+        raise RuntimeError(f"cannot request native window close before fixture completion: {fixture_completion!r}")
+    evidence = ActionEvidence(label="native main-window AXCloseButton")
+    try:
+        code, output = run_osascript(
+            MAIN_WINDOW_CLOSE, str(process.pid), MAIN_TITLE_FRAGMENT, timeout=bounded_timeout(deadline, 8.0)
+        )
+    except UnsafeChildCleanupError as error:
+        evidence.dispatch_attempted = True
+        evidence.api_exit_code = 124
+        evidence.transport_uncertain = True
+        evidence.api_result = f"AXPress timed out; helper cleanup failed: {error}"
+        raise UnsafeChildCleanupError(f"native main-window close helper cleanup failed; {evidence.summary()}") from error
+    evidence.dispatch_attempted = code != 127
+    evidence.api_exit_code = code
+    stage_match = re.search(r"stage=([A-Z_]+)", output)
+    action_stage = stage_match.group(1) if stage_match else "ACTION_DISPATCH" if is_transport_timeout(code, output) else "APPLE_SCRIPT"
+    if code == 0:
+        evidence.api_result = output.strip() or "AXPress returned"
+    elif is_tcc_denial(output):
+        evidence.api_result = f"TCC_DENIED: {output.strip()}"
+        evidence.semantic_outcome = "FAIL_DISPATCH_RESULT"
+        raise RuntimeError(f"TCC_DENIED: Accessibility is required for normal application exit: {evidence.api_result}")
+    elif code == 124 or "-1712" in output or "timed out" in output.lower():
+        evidence.transport_uncertain = True
+        evidence.api_result = f"AXPress transport timed out; result uncertain: {output.strip()}"
+    else:
+        evidence.api_result = f"AXPress failed before shutdown observation: {output.strip()}"
+        evidence.semantic_outcome = "FAIL_DISPATCH_RESULT"
+        diagnostics = capture_main_close_diagnostics(process, deadline, log_directory)
+        raise RuntimeError(
+            f"could not request normal main-window close; stage={action_stage}; exit_code={code}; "
+            f"{evidence.api_result}; diagnostics={diagnostics}"
+        )
+    print(f"MACOS_DOC_CLOSE_MAIN_WINDOW_CLOSE={evidence.api_result!r}; {evidence.summary()}")
+    try:
+        exit_code = process.wait(timeout=min(10.0, max(0.1, deadline - time.monotonic())))
     except subprocess.TimeoutExpired as error:
-        raise RuntimeError("editor did not exit through the normal main-window close path") from error
-    if exit_code != 0:
-        raise RuntimeError(f"editor exited with status {exit_code} after normal close")
-    print(f"MACOS_DOC_CLOSE_NORMAL_EXIT=PASS; pid={process.pid}; exit_code={exit_code}")
+        diagnostics = capture_main_close_diagnostics(process, deadline, log_directory)
+        evidence.application_response = "MISSING_PROCESS_EXIT"
+        evidence.semantic_outcome = "FAIL_SHUTDOWN_TIMEOUT"
+        raise RuntimeError(
+            f"native close request did not complete shutdown; stage=SHUTDOWN_COMPLETION; "
+            f"{evidence.summary()}; diagnostics={diagnostics}"
+        ) from error
+    evidence.application_response = "ORDERLY_EXIT_0" if exit_code == 0 else f"EXIT_{exit_code}"
+    try:
+        verify_successful_exit(exit_code, fixture_completion)
+    except RuntimeError as error:
+        evidence.semantic_outcome = "FAIL_SHUTDOWN_RESULT"
+        raise RuntimeError(f"native close process result failed; {evidence.summary()}; {error}") from error
+    evidence.semantic_outcome = "PASS" if code == 0 else "PASS_TRANSPORT_UNCERTAIN_RECONCILED"
+    print(f"MACOS_DOC_CLOSE_NORMAL_EXIT=PASS; pid={process.pid}; exit_code={exit_code}; {evidence.summary()}")
 
 
-def remove_temporary_root(root: Path, parent: Path) -> str | None:
+def remove_temporary_root(root: Path, parent: Path, expected_prefix: str) -> str | None:
     try:
         if root.is_symlink():
             return f"refusing to remove symlink temporary root: {root}"
         resolved_root = root.resolve(strict=True)
         resolved_parent = parent.resolve(strict=True)
-        if resolved_root.parent != resolved_parent or not resolved_root.name.startswith("PulseForge Document Close Ω "):
+        if resolved_root.parent != resolved_parent or not resolved_root.name.startswith(expected_prefix):
             return f"refusing to remove unexpected temporary root: {resolved_root}"
         shutil.rmtree(resolved_root)
         return None
@@ -1059,7 +1594,14 @@ def remove_temporary_root(root: Path, parent: Path) -> str | None:
         return f"could not remove temporary root {root}: {error}"
 
 
-def run_scenario(editor: Path, project: Path, log_directory: Path, scenario: str, timeout_seconds: int) -> None:
+def run_scenario(
+    editor: Path,
+    project: Path,
+    log_directory: Path,
+    pointer_driver: Path,
+    scenario: str,
+    timeout_seconds: int,
+) -> None:
     runner_temp = os.environ.get("RUNNER_TEMP")
     parent = Path(runner_temp).resolve(strict=True) if runner_temp else Path(tempfile.gettempdir()).resolve(strict=True)
     root = Path(tempfile.mkdtemp(prefix="PulseForge Document Close Ω ", dir=parent)).resolve(strict=True)
@@ -1072,10 +1614,11 @@ def run_scenario(editor: Path, project: Path, log_directory: Path, scenario: str
     process: subprocess.Popen[str] | None = None
     capture: BoundedCapture | None = None
     failure: str | None = None
+    unsafe_cleanup = False
     try:
         work.mkdir()
         settings.mkdir()
-        pointer_driver = compile_pointer_driver(root)
+        deadline = time.monotonic() + timeout_seconds
         print(f"MACOS_DOC_CLOSE_COMMAND={command!r}")
         print(f"MACOS_DOC_CLOSE_SETTINGS={settings}")
         process = subprocess.Popen(
@@ -1090,28 +1633,32 @@ def run_scenario(editor: Path, project: Path, log_directory: Path, scenario: str
             start_new_session=True,
         )
         capture = BoundedCapture(process, log_path)
-        deadline = time.monotonic() + timeout_seconds
         ready = wait_event(capture, process, "READY", scenario, deadline)
         fixture_bounds = query_fixture_window(process, deadline)
-        run_decisions(process, capture, pointer_driver, fixture_bounds, ready, scenario, deadline)
-        exit_normally(process, deadline)
+        fixture_completion = run_decisions(process, capture, pointer_driver, fixture_bounds, ready, scenario, deadline)
+        exit_normally(process, deadline, log_directory, fixture_completion)
+    except UnsafeChildCleanupError as error:
+        failure = str(error)
+        unsafe_cleanup = True
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         failure = str(error)
     finally:
         cleanup_failure = None
-        process_stopped = process is None or process.poll() is not None
-        if process is not None and not process_stopped:
+        process_stopped = process is None
+        if process is not None:
             process_stopped = stop_process_group(process)
             if not process_stopped:
                 cleanup_failure = f"could not stop fixture process group PID {process.pid}"
+                unsafe_cleanup = True
         if capture is not None:
             capture.thread.join(timeout=5)
             if capture.thread.is_alive():
                 cleanup_failure = f"editor output reader remained active after bounded process cleanup PID {process.pid}"
+                unsafe_cleanup = True
             elif capture.reader_error:
                 cleanup_failure = capture.reader_error
         if process_stopped:
-            root_failure = remove_temporary_root(root, parent) if root.exists() else None
+            root_failure = remove_temporary_root(root, parent, "PulseForge Document Close Ω ") if root.exists() else None
         else:
             root_failure = f"preserved temporary root because fixture process group may still be active: {root}"
         if cleanup_failure:
@@ -1122,6 +1669,8 @@ def run_scenario(editor: Path, project: Path, log_directory: Path, scenario: str
         detail = f"; log={log_path}"
         if log_path.is_file():
             detail += "\n" + log_path.read_text(encoding="utf-8", errors="replace")
+        if unsafe_cleanup:
+            raise UnsafeChildCleanupError(f"{scenario}: {failure}{detail}")
         raise RuntimeError(f"{scenario}: {failure}{detail}")
 
 
@@ -1143,9 +1692,41 @@ def main() -> int:
         if not project.is_file() or project.suffix != ".pfproj":
             raise RuntimeError(f"project fixture is missing or invalid: {project}")
         args.log_directory.mkdir(parents=True, exist_ok=True)
-        for scenario in SCENARIOS:
-            run_scenario(editor, project, args.log_directory, scenario, args.timeout_seconds)
-            print(f"MACOS_DOC_CLOSE_SCENARIO=PASS; scenario={scenario}")
+        runner_temp = os.environ.get("RUNNER_TEMP")
+        temp_parent = Path(runner_temp).resolve(strict=True) if runner_temp else Path(tempfile.gettempdir()).resolve(strict=True)
+        driver_root = Path(tempfile.mkdtemp(prefix="PulseForge Document Close Driver Ω ", dir=temp_parent)).resolve(strict=True)
+        failures: list[str] = []
+        retain_driver_root = False
+        try:
+            pointer_driver = compile_pointer_driver(driver_root)
+            for scenario in SCENARIOS:
+                try:
+                    run_scenario(editor, project, args.log_directory, pointer_driver, scenario, args.timeout_seconds)
+                    print(f"MACOS_DOC_CLOSE_SCENARIO=PASS; scenario={scenario}")
+                except UnsafeChildCleanupError as error:
+                    failures.append(f"{scenario}: {error}")
+                    retain_driver_root = True
+                    print(
+                        f"MACOS_DOC_CLOSE_SCENARIO=FAIL_UNSAFE_CLEANUP; scenario={scenario}; reason={error}",
+                        file=sys.stderr,
+                    )
+                    break
+                except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                    failures.append(f"{scenario}: {error}")
+                    print(f"MACOS_DOC_CLOSE_SCENARIO=FAIL; scenario={scenario}; reason={error}", file=sys.stderr)
+        except UnsafeChildCleanupError as error:
+            failures.append(f"helper cleanup: {error}")
+            retain_driver_root = True
+        finally:
+            if retain_driver_root:
+                print(f"MACOS_DOC_CLOSE_DRIVER_ROOT=PRESERVED_AFTER_UNSAFE_CLEANUP; path={driver_root}", file=sys.stderr)
+            else:
+                driver_cleanup_error = remove_temporary_root(driver_root, temp_parent, "PulseForge Document Close Driver Ω ")
+                if driver_cleanup_error:
+                    failures.append(driver_cleanup_error)
+        if failures:
+            print("Dirty-close scenario failures:\n" + "\n".join(failures), file=sys.stderr)
+            return 1
     except (OSError, RuntimeError) as error:
         print(f"macOS document-close smoke failed: {error}", file=sys.stderr)
         return 1

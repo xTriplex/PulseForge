@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import queue
 import shutil
 import signal
 import subprocess
@@ -174,73 +173,103 @@ SUCCESS_MARKERS = (
 
 class BoundedOutput:
     def __init__(self, process: subprocess.Popen[str], log_path: Path):
-        self.lines: queue.Queue[str | None] = queue.Queue(maxsize=128)
         self.buffer = bytearray()
         self.log_path = log_path
         self.markers: set[str] = set()
-        self.failures: list[str] = []
+        self.failure_count = 0
+        self.failure_samples: list[str] = []
         self.console_bytes = 0
+        self.console_output_failed = False
+        self.total_bytes = 0
+        self.truncated = False
+        self.reader_error: str | None = None
+        self.fixture_ready = threading.Event()
+        self.finished = threading.Event()
 
         def read() -> None:
             assert process.stdout is not None
-            for line in process.stdout:
-                encoded = line.encode("utf-8", errors="replace")
-                if len(self.buffer) < MAX_LOG_BYTES:
-                    self.buffer.extend(encoded[: MAX_LOG_BYTES - len(self.buffer)])
-                if self.console_bytes < MAX_CONSOLE_BYTES:
-                    printable = encoded[: MAX_CONSOLE_BYTES - self.console_bytes].decode("utf-8", errors="replace")
-                    print(printable, end="")
-                    self.console_bytes += len(encoded)
-                for marker in SUCCESS_MARKERS:
-                    if marker in line:
-                        self.markers.add(marker)
-                lowered = line.lower()
-                if "document tab" in lowered and (" failed" in lowered or " timed out" in lowered or "[error]" in lowered):
-                    if len(self.failures) < 16:
-                        self.failures.append(line.rstrip())
-                try:
-                    self.lines.put_nowait(line)
-                except queue.Full:
-                    try:
-                        self.lines.get_nowait()
-                    except queue.Empty:
-                        pass
-                    self.lines.put_nowait(line)
             try:
-                self.lines.put_nowait(None)
-            except queue.Full:
+                for line in process.stdout:
+                    encoded = line.encode("utf-8", errors="replace")
+                    self.total_bytes += len(encoded)
+                    if len(self.buffer) < MAX_LOG_BYTES:
+                        self.buffer.extend(encoded[: MAX_LOG_BYTES - len(self.buffer)])
+                    else:
+                        self.truncated = True
+                    if self.console_bytes < MAX_CONSOLE_BYTES and not self.console_output_failed:
+                        printable = encoded[: MAX_CONSOLE_BYTES - self.console_bytes]
+                        try:
+                            print(printable.decode("utf-8", errors="replace"), end="")
+                            self.console_bytes += len(printable)
+                        except (OSError, ValueError) as error:
+                            self.console_output_failed = True
+                            self.reader_error = self.reader_error or (
+                                f"could not forward editor output to the workflow log: {type(error).__name__}: {error}"
+                            )
+                    for marker in SUCCESS_MARKERS:
+                        if marker in line:
+                            self.markers.add(marker)
+                    lowered = line.lower()
+                    if "development document-host fixture enabled" in lowered:
+                        self.fixture_ready.set()
+                    if "document tab" in lowered and (" failed" in lowered or " timed out" in lowered or "[error]" in lowered):
+                        self.failure_count += 1
+                        if len(self.failure_samples) < 16:
+                            self.failure_samples.append(line.rstrip()[:2048])
+            except Exception as error:
+                self.reader_error = f"{type(error).__name__}: {error}"
+            finally:
                 try:
-                    self.lines.get_nowait()
-                except queue.Empty:
-                    pass
-                self.lines.put_nowait(None)
-            log_path.write_bytes(self.buffer)
+                    self.truncated = self.total_bytes > len(self.buffer)
+                    output = bytes(self.buffer)
+                    if self.truncated:
+                        suffix = b"\n[document-host output truncated; marker and failure scanning continued]\n"
+                        output = output[: MAX_LOG_BYTES - len(suffix)] + suffix
+                    log_path.write_bytes(output)
+                except OSError as error:
+                    self.reader_error = self.reader_error or f"could not write bounded editor log: {error}"
+                self.finished.set()
 
         self.thread = threading.Thread(target=read, daemon=True)
         self.thread.start()
 
 
 def stop_process_group(process: subprocess.Popen[str]) -> bool:
+    process_group = process.pid
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        os.killpg(process_group, signal.SIGTERM)
     except ProcessLookupError:
-        pass
+        return process.poll() is not None
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(process_group, signal.SIGKILL)
         except ProcessLookupError:
             pass
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             return False
+    group_deadline = time.monotonic() + 0.5
+    while time.monotonic() < group_deadline:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return process.poll() is not None
+        time.sleep(0.025)
     try:
-        os.killpg(process.pid, signal.SIGKILL)
+        os.killpg(process_group, signal.SIGKILL)
     except ProcessLookupError:
-        pass
-    return process.poll() is not None
+        return process.poll() is not None
+    group_deadline = time.monotonic() + 5.0
+    while time.monotonic() < group_deadline:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return process.poll() is not None
+        time.sleep(0.05)
+    return False
 
 
 def run_osascript(
@@ -478,6 +507,20 @@ def fail(message: str, log_path: Path) -> int:
     return 1
 
 
+def remove_temporary_root(root: Path, parent: Path) -> str | None:
+    try:
+        if root.is_symlink():
+            return f"refusing to remove symlink document-host test root: {root}"
+        resolved_root = root.resolve(strict=True)
+        resolved_parent = parent.resolve(strict=True)
+        if resolved_root.parent != resolved_parent or not resolved_root.name.startswith("PulseForge Document Hosts Ω "):
+            return f"refusing to remove unexpected document-host test root: {resolved_root}"
+        shutil.rmtree(resolved_root)
+        return None
+    except OSError as error:
+        return f"could not remove document-host test root {root}: {error}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--editor", required=True, type=Path)
@@ -537,25 +580,25 @@ def main() -> int:
 
     try:
         while time.monotonic() < deadline:
-            try:
-                line = capture.lines.get(timeout=min(1.0, max(0.01, deadline - time.monotonic())))
-            except queue.Empty:
-                line = ""
-            if line is None:
+            fixture_ready = capture.fixture_ready.is_set()
+            if capture.reader_error:
+                failures.append(f"editor output reader failed: {capture.reader_error}")
                 break
-            if line:
-                lowered = line.lower()
-                if "development document-host fixture enabled" in lowered:
-                    fixture_ready = True
-
-            if capture.failures:
-                failures.extend(capture.failures)
+            if capture.failure_count:
+                failures.extend(capture.failure_samples)
+                if not failures:
+                    failures.append(
+                        f"editor emitted {capture.failure_count} document-tab failures; samples={capture.failure_samples!r}"
+                    )
                 break
 
             # Accessibility queries can block while the editor is still creating its
             # first project window. Wait for the fixture's explicit ready log before
             # asking System Events to inspect native windows.
             if not fixture_ready:
+                if process.poll() is not None:
+                    break
+                capture.finished.wait(timeout=min(0.1, max(0.01, deadline - time.monotonic())))
                 continue
 
             now = time.monotonic()
@@ -679,14 +722,14 @@ def main() -> int:
                     f"reason=TCC denial; detail={close_output.strip()}; acceptance blocked"
                 )
                 return 77
-            if close_code == 124:
+            if close_code == 124 or close_category == "AX_QUERY_TIMEOUT":
                 try:
                     exit_code = process.wait(timeout=min(10.0, max(0.1, deadline - time.monotonic())))
                 except subprocess.TimeoutExpired:
                     exit_code = None
                 if exit_code == 0:
                     print(
-                        "MACOS_DOCUMENT_HOST_CLOSE_PRESS=TIMED_OUT_AFTER_NORMAL_EXIT; "
+                        "MACOS_DOCUMENT_HOST_CLOSE_PRESS=UNCERTAIN_ACTION_RECONCILED_AFTER_NORMAL_EXIT; "
                         f"pid={process.pid}; window={main_window_name!r}; process exited normally after AXPress request; "
                         f"diagnostics={diagnostic_output!r}; detail={close_output.strip()}"
                     )
@@ -743,6 +786,8 @@ def main() -> int:
         capture.thread.join(timeout=5)
         if capture.thread.is_alive():
             return fail("editor output reader remained active after process exit", log_path)
+        if capture.reader_error:
+            return fail(f"editor output reader failed: {capture.reader_error}", log_path)
         if exit_code != 0:
             return fail(f"editor exited with status {exit_code}", log_path)
         if any(marker not in capture.markers for marker in SUCCESS_MARKERS):
@@ -753,13 +798,25 @@ def main() -> int:
         )
         return 0
     finally:
-        if process.poll() is None:
-            stop_process_group(process)
+        process_group_stopped = stop_process_group(process)
         capture.thread.join(timeout=5)
+        if capture.thread.is_alive() and process.stdout is not None:
+            try:
+                process.stdout.close()
+            except (OSError, ValueError):
+                pass
+            capture.thread.join(timeout=2)
+        if not process_group_stopped or capture.thread.is_alive():
+            raise RuntimeError(
+                f"document-host child/process group or output reader remains active; "
+                f"pid={process.pid}; temporary root preserved at {root}"
+            )
         if os.environ.get("PULSEFORGE_KEEP_DOCUMENT_HOST_SMOKE_FILES") == "1":
             print(f"MACOS_DOCUMENT_HOST_TEMP_ROOT={root}")
         else:
-            shutil.rmtree(root, ignore_errors=True)
+            cleanup_error = remove_temporary_root(root, temp_parent)
+            if cleanup_error:
+                raise RuntimeError(f"MACOS_DOCUMENT_HOST_CLEANUP=FAILED; {cleanup_error}")
 
 
 if __name__ == "__main__":

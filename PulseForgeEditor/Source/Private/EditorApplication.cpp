@@ -509,8 +509,8 @@ namespace
 					[this] { return m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{}; },
 					[this](std::string_view HostID, int X, int Y, bool Clicked)
 					{ ReportDocumentCloseUiAllowClose(HostID, X, Y, Clicked); },
-					[this](std::string_view HostID, int X, int Y, bool Active, bool Hovered, bool Changed, int Value)
-					{ ReportDocumentCloseUiTextField(HostID, X, Y, Active, Hovered, Changed, Value); },
+					[this](std::string_view HostID, int X, int Y, bool Active, bool Hovered, bool Clicked, bool Changed, int Value)
+					{ ReportDocumentCloseUiTextField(HostID, X, Y, Active, Hovered, Clicked, Changed, Value); },
 					m_DocumentCloseUiTestScenario.has_value());
 				if (auto Result = m_DocumentHostTestEditor->Register(); !Result)
 					PF_ERROR("Could not register the debug document-host fixture editor: {}", Result.error());
@@ -2003,6 +2003,7 @@ namespace
 		{
 			++m_DocumentCloseUiPromptGeneration;
 			m_DocumentCloseUiCloseControlReported = false;
+			m_DocumentCloseUiAllowCloseControlReported = false;
 			m_DocumentCloseUiDecisionPointerStateReported = false;
 			m_DocumentCloseUiDecisionPointerReportCount = 0;
 		}
@@ -2018,18 +2019,22 @@ namespace
 			std::string_view HostID, const PulseForgeEditor::EditorDocumentIdentity& Identity, int X, int Y)
 		{
 			if (!m_DocumentCloseUiTestScenario || !IsDocumentCloseUiFixtureHost(HostID) ||
-				!IsDocumentCloseUiFixtureIdentity(Identity) || !IsDocumentCloseUiAwaitingTabClose() ||
-				m_DocumentCloseUiCloseControlReported)
+				!IsDocumentCloseUiFixtureIdentity(Identity) || !IsDocumentCloseUiAwaitingTabClose())
+				return;
+			if (m_DocumentCloseUiCloseControlReported && X == m_DocumentCloseUiLastCloseControlX &&
+				Y == m_DocumentCloseUiLastCloseControlY)
 				return;
 
-			PF_INFO("PF_DOC_CLOSE_UI|CLOSE_CONTROL|scenario={}|host={}|asset={}|generation={}|x={}|y={}",
+			PF_INFO("PF_DOC_CLOSE_UI|CLOSE_CONTROL|scenario={}|host={}|asset={}|generation={}|sample={}|x={}|y={}",
 				*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, Identity.Asset.ToString(),
-				m_DocumentCloseUiPromptGeneration, X, Y);
+				m_DocumentCloseUiPromptGeneration, ++m_DocumentCloseUiCloseControlSample, X, Y);
 			m_DocumentCloseUiCloseControlReported = true;
+			m_DocumentCloseUiLastCloseControlX = X;
+			m_DocumentCloseUiLastCloseControlY = Y;
 		}
 
 		void ReportDocumentCloseUiTextField(
-			std::string_view HostID, int X, int Y, bool Active, bool Hovered, bool Changed, int Value)
+			std::string_view HostID, int X, int Y, bool Active, bool Hovered, bool Clicked, bool Changed, int Value)
 		{
 			if (!m_DocumentCloseUiTestScenario || m_DocumentCloseUiTestPhase != DocumentCloseUiTestPhase::AwaitingTextEntry ||
 				!IsDocumentCloseUiFixtureHost(HostID) || !m_DocumentCloseUiIdentity || !m_DocumentHostTestEditor)
@@ -2061,9 +2066,9 @@ namespace
 				m_DocumentCloseUiLastTextActive = Active;
 				++m_DocumentCloseUiTextPointerReportCount;
 			}
-			if (Active && !m_DocumentCloseUiTextFocusReported)
+			if (Clicked && Active && !m_DocumentCloseUiTextFocusReported)
 			{
-				PF_INFO("PF_DOC_CLOSE_UI|TEXT_FOCUS|scenario={}|host={}|asset={}|generation=0|active=1|value={}",
+				PF_INFO("PF_DOC_CLOSE_UI|TEXT_FOCUS|scenario={}|host={}|asset={}|generation=0|active=1|clicked=1|value={}",
 					*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(), Value);
 				m_DocumentCloseUiTextFocusReported = true;
 			}
@@ -2226,9 +2231,19 @@ namespace
 
 			if (!m_DocumentCloseUiAllowCloseRectReported)
 			{
-				PF_INFO("PF_DOC_CLOSE_UI|FIXTURE|scenario=close-retry|host={}|asset={}|generation={}|allow_close={},{}",
-					m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(), m_DocumentCloseUiPromptGeneration, X, Y);
+				PF_INFO("PF_DOC_CLOSE_UI|FIXTURE|scenario=close-retry|host={}|asset={}|generation={}",
+					m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(), m_DocumentCloseUiPromptGeneration);
 				m_DocumentCloseUiAllowCloseRectReported = true;
+			}
+			if (!m_DocumentCloseUiAllowCloseControlReported || X != m_DocumentCloseUiLastAllowCloseX ||
+				Y != m_DocumentCloseUiLastAllowCloseY)
+			{
+				PF_INFO("PF_DOC_CLOSE_UI|ALLOW_CLOSE_CONTROL|scenario=close-retry|host={}|asset={}|generation={}|sample={}|x={}|y={}",
+					m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(), m_DocumentCloseUiPromptGeneration,
+					++m_DocumentCloseUiAllowCloseControlSample, X, Y);
+				m_DocumentCloseUiAllowCloseControlReported = true;
+				m_DocumentCloseUiLastAllowCloseX = X;
+				m_DocumentCloseUiLastAllowCloseY = Y;
 			}
 			if (!Clicked) return;
 
@@ -2254,14 +2269,39 @@ namespace
 		void EmitDocumentCloseUiPrompt(std::string_view HostID, const ImVec2& Save, const ImVec2& Discard, const ImVec2& Cancel)
 		{
 			if (!m_DocumentCloseUiTestScenario || !m_DocumentCloseUiIdentity || !IsDocumentCloseUiFixtureHost(HostID) ||
-				!IsDocumentCloseUiFixtureIdentity(*m_DocumentCloseUiIdentity) || !m_DocumentCloseRequest.HasPendingRequest() ||
-				m_DocumentCloseUiPromptGeneration == m_DocumentCloseUiLastPromptGeneration)
+				!IsDocumentCloseUiFixtureIdentity(*m_DocumentCloseUiIdentity) || !m_DocumentCloseRequest.HasPendingRequest())
 				return;
-			m_DocumentCloseUiLastPromptGeneration = m_DocumentCloseUiPromptGeneration;
-			PF_INFO("PF_DOC_CLOSE_UI|PROMPT|scenario={}|host={}|asset={}|generation={}|save={},{}|discard={},{}|cancel={},{}",
-				*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(), m_DocumentCloseUiPromptGeneration,
-				static_cast<int>(Save.x), static_cast<int>(Save.y), static_cast<int>(Discard.x), static_cast<int>(Discard.y),
-				static_cast<int>(Cancel.x), static_cast<int>(Cancel.y));
+			const int SaveX = static_cast<int>(Save.x);
+			const int SaveY = static_cast<int>(Save.y);
+			const int DiscardX = static_cast<int>(Discard.x);
+			const int DiscardY = static_cast<int>(Discard.y);
+			const int CancelX = static_cast<int>(Cancel.x);
+			const int CancelY = static_cast<int>(Cancel.y);
+			const bool FirstReport = m_DocumentCloseUiPromptGenerationReported != m_DocumentCloseUiPromptGeneration;
+			const bool GeometryChanged = FirstReport || SaveX != m_DocumentCloseUiLastPromptSaveX || SaveY != m_DocumentCloseUiLastPromptSaveY ||
+				DiscardX != m_DocumentCloseUiLastPromptDiscardX || DiscardY != m_DocumentCloseUiLastPromptDiscardY ||
+				CancelX != m_DocumentCloseUiLastPromptCancelX || CancelY != m_DocumentCloseUiLastPromptCancelY;
+			if (!GeometryChanged) return;
+			const size_t Sample = ++m_DocumentCloseUiPromptGeometrySample;
+			if (FirstReport)
+			{
+				m_DocumentCloseUiPromptGenerationReported = m_DocumentCloseUiPromptGeneration;
+				PF_INFO("PF_DOC_CLOSE_UI|PROMPT|scenario={}|host={}|asset={}|generation={}|sample={}|save={},{}|discard={},{}|cancel={},{}",
+					*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(),
+					m_DocumentCloseUiPromptGeneration, Sample, SaveX, SaveY, DiscardX, DiscardY, CancelX, CancelY);
+			}
+			else
+			{
+				PF_INFO("PF_DOC_CLOSE_UI|PROMPT_GEOMETRY|scenario={}|host={}|asset={}|generation={}|sample={}|save={},{}|discard={},{}|cancel={},{}",
+					*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(),
+					m_DocumentCloseUiPromptGeneration, Sample, SaveX, SaveY, DiscardX, DiscardY, CancelX, CancelY);
+			}
+			m_DocumentCloseUiLastPromptSaveX = SaveX;
+			m_DocumentCloseUiLastPromptSaveY = SaveY;
+			m_DocumentCloseUiLastPromptDiscardX = DiscardX;
+			m_DocumentCloseUiLastPromptDiscardY = DiscardY;
+			m_DocumentCloseUiLastPromptCancelX = CancelX;
+			m_DocumentCloseUiLastPromptCancelY = CancelY;
 		}
 
 		void InitializeDocumentCloseUiFixture()
@@ -7322,10 +7362,24 @@ namespace
 		std::optional<PulseForgeEditor::EditorDocumentIdentity> m_DocumentCloseUiIdentity;
 		std::string m_DocumentCloseUiHostID;
 		size_t m_DocumentCloseUiPromptGeneration = 0;
-		size_t m_DocumentCloseUiLastPromptGeneration = 0;
+		size_t m_DocumentCloseUiPromptGenerationReported = 0;
+		size_t m_DocumentCloseUiPromptGeometrySample = 0;
+		int m_DocumentCloseUiLastPromptSaveX = 0;
+		int m_DocumentCloseUiLastPromptSaveY = 0;
+		int m_DocumentCloseUiLastPromptDiscardX = 0;
+		int m_DocumentCloseUiLastPromptDiscardY = 0;
+		int m_DocumentCloseUiLastPromptCancelX = 0;
+		int m_DocumentCloseUiLastPromptCancelY = 0;
 		size_t m_DocumentCloseUiActionSequence = 0;
 		bool m_DocumentCloseUiAllowCloseRectReported = false;
+		bool m_DocumentCloseUiAllowCloseControlReported = false;
+		size_t m_DocumentCloseUiAllowCloseControlSample = 0;
+		int m_DocumentCloseUiLastAllowCloseX = 0;
+		int m_DocumentCloseUiLastAllowCloseY = 0;
 		bool m_DocumentCloseUiCloseControlReported = false;
+		size_t m_DocumentCloseUiCloseControlSample = 0;
+		int m_DocumentCloseUiLastCloseControlX = 0;
+		int m_DocumentCloseUiLastCloseControlY = 0;
 		bool m_DocumentCloseUiTextControlReported = false;
 		bool m_DocumentCloseUiTextFocusReported = false;
 		bool m_DocumentCloseUiTextPointerStateReported = false;
