@@ -138,10 +138,14 @@ def run_direct_ax_until(
     raise RuntimeError(f"Timed out awaiting {description}; last_snapshot={last_output[-4000:]!r}")
 
 
-def focused_text_field_visible(output: str) -> bool:
+def go_to_folder_path_field_visible(output: str) -> bool:
     lines = output.splitlines()
     has_folder_sheet = any(
-        (line.startswith("DIRECT_AX_NODE ") and "role=AXSheet" in line)
+        (
+            line.startswith("DIRECT_AX_NODE ")
+            and "role=AXSheet" in line
+            and ("name=GoToWindow" in line or "name=Go to Folder" in line)
+        )
         or (line.startswith("DIRECT_AX_WINDOW ") and "title=Go to Folder" in line)
         for line in lines
     )
@@ -153,8 +157,8 @@ def focused_text_field_visible(output: str) -> bool:
         fields = dict(part.split("=", 1) for part in line.split("; ") if "=" in part)
         if (
             fields.get("role") == "AXTextField"
-            and fields.get("focused", "").lower() in {"true", "1"}
-            and "search" not in fields.get("name", "").lower()
+            and fields.get("name") == "PathTextField"
+            and fields.get("enabled", "").lower() in {"true", "1"}
         ):
             return True
     return False
@@ -515,13 +519,14 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             helper_deadline = min(deadline, time.monotonic() + 25.0)
             run_keyboard_input("--go-to-folder", int(panel_process_id), timeout=min(5.0, remaining_seconds()))
             run_direct_ax_until(
-                int(panel_process_id), "", helper_deadline, focused_text_field_visible,
-                "focused Go to Folder path field",
+                int(panel_process_id), panel_title, helper_deadline, go_to_folder_path_field_visible,
+                "enabled Go to Folder PathTextField",
             )
             automation_code, automation_output, automation_error = run_direct_ax(
                 int(panel_process_id),
-                operation="set-focused-value-confirm",
-                window_title="",
+                operation="set-folder-path-confirm",
+                window_title=panel_title,
+                control_name="PathTextField",
                 control_value=str(expected_path.parent),
                 timeout=min(10.0, remaining_seconds()),
             )
