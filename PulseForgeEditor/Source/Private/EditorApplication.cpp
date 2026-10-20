@@ -68,6 +68,9 @@
 #include "Editor/EditorDocumentHostTestEditor.h"
 #if defined(_DEBUG) || defined(PF_DEBUG)
 #include "Editor/EditorDebugAcceptanceCoordinators.h"
+#if defined(__APPLE__)
+#include "Editor/MacOSDocumentCloseEventObserver.h"
+#endif
 #endif
 #include "Editor/EditorDocumentCloseBatch.h"
 #include "Editor/EditorNativeWindowBoundsPolicy.h"
@@ -474,6 +477,10 @@ namespace
 				std::make_unique<PulseForgeEditor::Detail::EditorRuntimePlayStopCoordinator>(Options.EnableEditorRuntimePlayStopTest);
 			m_DocumentCloseAcceptance = std::make_unique<PulseForgeEditor::Detail::DocumentCloseAcceptanceCoordinator>(
 				std::move(Options.DocumentHostCloseUiTestScenario), [this](std::string Message) { SetError(std::move(Message)); });
+#if defined(__APPLE__)
+			if (m_DocumentCloseAcceptance->IsEnabled())
+				m_MacOSDocumentCloseEventObserver = PulseForgeCreateMacOSDocumentCloseEventObserver();
+#endif
 
 			if (m_DocumentHostTestFixture)
 			{
@@ -487,6 +494,14 @@ namespace
 				if (auto Result = m_DocumentHostTestEditor->Register(); !Result)
 					PF_ERROR("Could not register the debug document-host fixture editor: {}", Result.error());
 			}
+#endif
+		}
+
+		~EditorLayer() override
+		{
+#if (defined(_DEBUG) || defined(PF_DEBUG)) && defined(__APPLE__)
+			PulseForgeDestroyMacOSDocumentCloseEventObserver(m_MacOSDocumentCloseEventObserver);
+			m_MacOSDocumentCloseEventObserver = nullptr;
 #endif
 		}
 
@@ -2122,6 +2137,11 @@ namespace
 				static_cast<int>(Cancel.x), static_cast<int>(Cancel.y) };
 			m_DocumentCloseAcceptance->ReportPrompt(
 				HostID, m_DocumentCloseRequest.HasPendingRequest(), Geometry);
+#if defined(__APPLE__)
+			if (m_MacOSDocumentCloseEventObserver)
+				PulseForgeUpdateMacOSDocumentCloseEventObserver(
+					m_MacOSDocumentCloseEventObserver, m_DocumentCloseAcceptance->PromptGeneration());
+#endif
 		}
 
 		void InitializeDocumentCloseUiFixture()
@@ -2189,6 +2209,17 @@ namespace
 				FailDocumentCloseUiTest("The fresh native fixture document could not be activated.");
 				return;
 			}
+
+#if defined(__APPLE__)
+			if (m_MacOSDocumentCloseEventObserver)
+			{
+				const std::string Scenario(m_DocumentCloseAcceptance->Scenario());
+				const std::string HostID(m_DocumentCloseAcceptance->HostID());
+				const std::string AssetID = Identity.Asset.ToString();
+				PulseForgeStartMacOSDocumentCloseEventObserver(m_MacOSDocumentCloseEventObserver, Scenario.c_str(), HostID.c_str(),
+					AssetID.c_str());
+			}
+#endif
 
 			size_t FixtureSessionCount = 0;
 			size_t SelectedFixtureSessionCount = 0;
@@ -7151,6 +7182,9 @@ namespace
 #if defined(_DEBUG) || defined(PF_DEBUG)
 		std::unique_ptr<PulseForgeEditor::Detail::EditorRuntimePlayStopCoordinator> m_EditorRuntimePlayStopCoordinator;
 		std::unique_ptr<PulseForgeEditor::Detail::DocumentCloseAcceptanceCoordinator> m_DocumentCloseAcceptance;
+#if defined(__APPLE__)
+		void* m_MacOSDocumentCloseEventObserver = nullptr;
+#endif
 		std::unordered_map<GLFWwindow*, GLFWmousebuttonfun> m_DocumentCloseMouseButtonCallbacks;
 #endif
 		bool m_DocumentHostTestFixture = false;

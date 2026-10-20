@@ -53,68 +53,135 @@ let clientName = client?.localizedName ?? "command-line Swift client"
 print("DIRECT_AX_CLIENT pid=\(getpid()); path=\(clientPath); name=\(clientName); trusted=\(AXIsProcessTrusted())")
 let targetProcess = NSRunningApplication(processIdentifier: targetPID)
 print("DIRECT_AX_TARGET_PROCESS pid=\(targetPID); name=\(targetProcess?.localizedName ?? "unknown"); bundle=\(targetProcess?.bundleIdentifier ?? "unknown")")
+fflush(stdout)
 
 let app = AXUIElementCreateApplication(targetPID)
 AXUIElementSetMessagingTimeout(app, 1.0)
+let queryStarted = ProcessInfo.processInfo.systemUptime
 var rawWindows: CFTypeRef?
 let windowsError = AXUIElementCopyAttributeValue(app, "AXWindows" as CFString, &rawWindows)
 guard windowsError == .success, let rawWindows, let windows = rawWindows as? [AXUIElement] else {
-    print("DIRECT_AX_RESULT status=error; stage=windows; pid=\(targetPID); ax_error=\(windowsError.rawValue)")
+    print("DIRECT_AX_RESULT status=error; stage=copy-windows; pid=\(targetPID); ax_error=\(windowsError.rawValue); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - queryStarted) * 1000)")
     exit(3)
 }
-let titleMatches = windows.filter { window in
-    requestedTitle.isEmpty || (string(window, "AXTitle") ?? "").contains(requestedTitle)
+var titleMatches: [AXUIElement] = []
+var windowReadErrors: [(Int, Int32)] = []
+for (index, window) in windows.enumerated() {
+    AXUIElementSetMessagingTimeout(window, 0.75)
+    if requestedTitle.isEmpty {
+        titleMatches.append(window)
+        continue
+    }
+    print("DIRECT_AX_WINDOW_TITLE_QUERY_BEGIN index=\(index); pid=\(targetPID)")
+    fflush(stdout)
+    var rawTitle: CFTypeRef?
+    let titleError = AXUIElementCopyAttributeValue(window, "AXTitle" as CFString, &rawTitle)
+    if titleError == .success, let title = rawTitle as? String {
+        if title.contains(requestedTitle) { titleMatches.append(window) }
+        print("DIRECT_AX_WINDOW_TITLE_QUERY_END index=\(index); ax_error=0; title=\(title)")
+    } else {
+        windowReadErrors.append((index, titleError.rawValue))
+        print("DIRECT_AX_WINDOW_TITLE_QUERY_END index=\(index); ax_error=\(titleError.rawValue); title=<unavailable>")
+    }
+    fflush(stdout)
 }
 let matching = !titleMatches.isEmpty || requestedTitle.isEmpty || operation != "snapshot"
     ? titleMatches
     : windows.filter { string($0, "AXSubrole") == "AXDialog" || string($0, "AXRole") == "AXSheet" }
-func collect(_ roots: [AXUIElement], depthLimit: Int = 6) -> [AXUIElement] {
-    var pending = roots.map { ($0, 0) }
-    var found: [AXUIElement] = []
-    while let (element, depth) = pending.first, found.count < 96 {
-        pending.removeFirst()
+struct AXNode {
+    let element: AXUIElement
+    let parent: Int?
+    let depth: Int
+}
+func collect(_ roots: [AXUIElement], depthLimit: Int = 8) -> [AXNode] {
+    var pending = roots.reversed().map { ($0, Optional<Int>.none, 0) }
+    var found: [AXNode] = []
+    while let (element, parent, depth) = pending.popLast(), found.count < 256 {
         AXUIElementSetMessagingTimeout(element, 1.0)
-        found.append(element)
+        let index = found.count
+        found.append(AXNode(element: element, parent: parent, depth: depth))
         guard depth < depthLimit, let rawChildren = value(element, "AXChildren"),
               let children = rawChildren as? [AXUIElement] else { continue }
-        pending.append(contentsOf: children.map { ($0, depth + 1) })
+        pending.append(contentsOf: children.reversed().map { ($0, Optional(index), depth + 1) })
     }
     return found
 }
 let needsDescendants = deepSnapshot || operation == "press-control" || operation == "set-value" || operation == "select-element"
-let descendants: [AXUIElement] = needsDescendants ? collect(matching) : []
-func titleOrDescription(_ element: AXUIElement) -> String {
-    ["AXTitle", "AXDescription", "AXIdentifier", "AXValue"]
+let descendants: [AXNode] = needsDescendants ? collect(matching) : []
+func labels(_ element: AXUIElement) -> [String] {
+    var result = ["AXTitle", "AXDescription", "AXIdentifier", "AXValue", "AXFilename", "AXURL", "AXDocument"]
         .compactMap { string(element, $0) }
-        .first { !$0.isEmpty } ?? ""
+        .filter { !$0.isEmpty }
+    if let rawURL = value(element, "AXURL"), let url = rawURL as? URL {
+        result.append(url.path)
+        result.append(url.lastPathComponent)
+    }
+    return result
+}
+func titleOrDescription(_ element: AXUIElement) -> String {
+    labels(element).first ?? ""
 }
 if operation == "snapshot" {
-    print("DIRECT_AX_RESULT status=snapshot; pid=\(targetPID); windows=\(matching.count)")
+    print("DIRECT_AX_RESULT status=snapshot; pid=\(targetPID); windows=\(matching.count); all_windows=\(windows.count); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - queryStarted) * 1000); window_read_errors=\(windowReadErrors)")
+    fflush(stdout)
     for (index, item) in matching.enumerated() {
-        print("DIRECT_AX_WINDOW pid=\(targetPID); index=\(index + 1); role=\(string(item, "AXRole") ?? ""); subrole=\(string(item, "AXSubrole") ?? ""); title=\(string(item, "AXTitle") ?? "")")
+        AXUIElementSetMessagingTimeout(item, 0.75)
+        print("DIRECT_AX_WINDOW_SNAPSHOT_BEGIN index=\(index + 1)")
+        fflush(stdout)
+        var rawTitle: CFTypeRef?
+        let titleError = AXUIElementCopyAttributeValue(item, "AXTitle" as CFString, &rawTitle)
+        let windowTitle = titleError == .success ? (rawTitle as? String ?? "") : "<AXError:\(titleError.rawValue)>"
+        print("DIRECT_AX_WINDOW pid=\(targetPID); index=\(index + 1); role=AXWindow; title=\(windowTitle)")
+        fflush(stdout)
     }
     guard deepSnapshot else { exit(0) }
-    for (index, element) in descendants.enumerated() {
+    for (index, node) in descendants.enumerated() {
+        let element = node.element
         let role = string(element, "AXRole") ?? ""
         let subrole = string(element, "AXSubrole") ?? ""
         let name = titleOrDescription(element)
         let enabled = described(element, "AXEnabled")
         var actions: CFArray?
         let actionError = AXUIElementCopyActionNames(element, &actions)
-        print("DIRECT_AX_NODE index=\(index); role=\(role); subrole=\(subrole); name=\(name); enabled=\(enabled); actions_error=\(actionError.rawValue); actions=\(actions as? [String] ?? [])")
+        print("DIRECT_AX_NODE index=\(index); parent=\(node.parent.map(String.init) ?? "none"); depth=\(node.depth); role=\(role); subrole=\(subrole); name=\(name); enabled=\(enabled); actions_error=\(actionError.rawValue); actions=\(actions as? [String] ?? [])")
     }
     exit(0)
 }
 if operation == "press-control" || operation == "set-value" || operation == "select-element" {
-    let wantedRole = operation == "press-control" ? "AXButton" : operation == "set-value" ? "AXTextField" : "AXRow"
-    let controls = descendants.filter { element in
-        (string(element, "AXRole") ?? "") == wantedRole &&
-            (controlName.isEmpty || titleOrDescription(element) == controlName)
+    let wantedRole = operation == "press-control" ? "AXButton" : operation == "set-value" ? "AXTextField" : "AXRow/AXCell"
+    func labelMatches(_ element: AXUIElement) -> Bool {
+        labels(element).contains { $0 == controlName || $0.hasSuffix("/" + controlName) }
     }
-    guard controls.count == 1, let control = controls.first else {
-        print("DIRECT_AX_RESULT status=control-selection-error; operation=\(operation); role=\(wantedRole); name=\(controlName); matches=\(controls.count)")
+    var controls = descendants.enumerated().compactMap { index, node -> (Int, AXNode)? in
+        let role = string(node.element, "AXRole") ?? ""
+        let roleMatches = operation == "select-element"
+            ? (role == "AXRow" || role == "AXCell")
+            : role == wantedRole
+        return roleMatches && (controlName.isEmpty || labelMatches(node.element)) ? (index, node) : nil
+    }
+    if operation == "select-element", controls.isEmpty {
+        for (_, node) in descendants.enumerated() where
+            ["AXStaticText", "AXTextField", "AXCell", "AXRow"].contains(string(node.element, "AXRole") ?? "") &&
+            labelMatches(node.element) {
+            var parent = node.parent
+            while let parentIndex = parent {
+                let ancestor = descendants[parentIndex]
+                let role = string(ancestor.element, "AXRole") ?? ""
+                if role == "AXRow" || role == "AXCell" {
+                    controls.append((parentIndex, ancestor))
+                    break
+                }
+                parent = ancestor.parent
+            }
+        }
+    }
+    guard controls.count == 1, let (_, controlNode) = controls.first else {
+        let candidates = descendants.map { string($0.element, "AXRole") ?? "" }
+            .filter { $0 == "AXRow" || $0 == "AXCell" }
+        print("DIRECT_AX_RESULT status=control-selection-error; operation=\(operation); role=\(wantedRole); name=\(controlName); matches=\(controls.count); candidate_roles=\(candidates)")
         exit(8)
     }
+    let control = controlNode.element
     if operation == "set-value" {
         let setError = AXUIElementSetAttributeValue(control, "AXValue" as CFString, controlValue as CFString)
         let observedValue = string(control, "AXValue") ?? "<unavailable>"
@@ -124,19 +191,11 @@ if operation == "press-control" || operation == "set-value" || operation == "sel
     }
     if operation == "select-element" {
         let role = string(control, "AXRole") ?? ""
-        var actions: CFArray?
-        let actionsError = AXUIElementCopyActionNames(control, &actions)
-        var selectError: AXError
-        if actionsError == .success, (actions as? [String] ?? []).contains("AXPress") {
-            AXUIElementSetMessagingTimeout(control, 1.0)
-            selectError = AXUIElementPerformAction(control, kAXPressAction as CFString)
-        } else {
-            selectError = AXUIElementSetAttributeValue(control, "AXSelected" as CFString, kCFBooleanTrue)
-        }
+        AXUIElementSetMessagingTimeout(control, 1.0)
+        let selectError = AXUIElementSetAttributeValue(control, "AXSelected" as CFString, kCFBooleanTrue)
         let selected = (value(control, "AXSelected") as? Bool) ?? false
-        let verified = selectError == .success &&
-            (selected || (actionsError == .success && (actions as? [String] ?? []).contains("AXPress")))
-        print("DIRECT_AX_RESULT status=\(verified ? "selection-requested" : "selection-error"); operation=select-element; role=\(role); name=\(titleOrDescription(control)); ax_error=\(selectError.rawValue); selected=\(selected)")
+        let verified = selectError == .success && selected
+        print("DIRECT_AX_RESULT status=\(verified ? "selection-verified" : "selection-error"); operation=select-element; role=\(role); name=\(titleOrDescription(control)); ax_error=\(selectError.rawValue); selected=\(selected)")
         exit(verified ? 0 : 12)
     }
     AXUIElementSetMessagingTimeout(control, 1.0)

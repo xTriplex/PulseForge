@@ -75,6 +75,9 @@ if(PULSEFORGE_BUILD_EDITOR)
 		set_target_properties(PulseForgeEditor PROPERTIES
 			MACOSX_BUNDLE TRUE
 			MACOSX_BUNDLE_GUI_IDENTIFIER org.pulseforge.editor)
+		target_sources(PulseForgeEditor PRIVATE
+			$<$<CONFIG:Debug>:PulseForgeEditor/Source/Private/Platform/MacOS/MacOSDocumentCloseEventObserver.m>)
+		target_link_libraries(PulseForgeEditor PRIVATE "-framework AppKit")
 	endif()
 	if(WIN32)
 		get_target_property(PULSEFORGE_EDITOR_GUI_SUBSYSTEM PulseForgeEditor WIN32_EXECUTABLE)
