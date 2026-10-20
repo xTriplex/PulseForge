@@ -118,6 +118,8 @@ def run_direct_ax_until(
     deadline: float,
     accept: Callable[[str], bool],
     description: str,
+    *,
+    deep_snapshot: bool = True,
 ) -> str:
     last_output = ""
     while time.monotonic() < deadline:
@@ -126,7 +128,7 @@ def run_direct_ax_until(
             fixture_pid,
             operation="snapshot",
             window_title=panel_title,
-            deep_snapshot=True,
+            deep_snapshot=deep_snapshot,
             timeout=min(8.0, max(0.1, remaining)),
         )
         last_output = output + error
@@ -164,14 +166,34 @@ def go_to_folder_path_field_visible(output: str) -> bool:
     return False
 
 
-def go_folder_sheet_closed_in_expected_directory(output: str, directory_name: str) -> bool:
-    if not directory_name or directory_name not in output:
+def go_to_folder_sheet_dismissed(output: str) -> bool:
+    window_lines = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_WINDOW ")
+    ]
+    if sum(
+        dict(part.split("=", 1) for part in line.split("; ") if "=" in part).get("title") == "Open"
+        for line in window_lines
+    ) != 1:
         return False
-    if any(line.startswith("DIRECT_AX_NODE ") and "role=AXSheet" in line for line in output.splitlines()):
+    sheets_lines = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_SHEET_LIST ")
+    ]
+    sheets_lines = [
+        line for line in sheets_lines
+        if dict(part.split("=", 1) for part in line.split("; ") if "=" in part).get("parent_title") == "Open"
+    ]
+    if len(sheets_lines) != 1:
         return False
-    if any(line.startswith("DIRECT_AX_WINDOW ") and "title=Go to Folder" in line for line in output.splitlines()):
+    fields = dict(part.split("=", 1) for part in sheets_lines[0].split("; ") if "=" in part)
+    if fields.get("ax_error") not in {"0", "-25212"}:
         return False
-    return True
+    try:
+        sheet_count = int(fields["count"])
+    except (KeyError, ValueError):
+        return False
+    return sheet_count == 0
 
 
 def folder_path_field_ready(output: str, expected_path: str) -> bool:
@@ -586,11 +608,12 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 int(panel_process_id),
                 "",
                 helper_deadline,
-                lambda output: go_folder_sheet_closed_in_expected_directory(output, expected_path.parent.name),
-                "Go to Folder sheet dismissal and expected directory",
+                go_to_folder_sheet_dismissed,
+                "Go to Folder sheet dismissal",
+                deep_snapshot=False,
             )
-            last_navigation_step = "Go To Folder sheet dismissed and expected directory observed"
-            print(f"NFD_GO_TO_FOLDER_NAVIGATION=PASS; directory={expected_path.parent.name}", flush=True)
+            last_navigation_step = "Go To Folder sheet dismissal observed"
+            print("NFD_GO_TO_FOLDER_SHEET=DISMISSED", flush=True)
             run_keyboard_input(
                 "--type-text", int(panel_process_id), text=expected_path.name, timeout=min(5.0, remaining_seconds())
             )

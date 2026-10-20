@@ -284,6 +284,15 @@ if operation == "snapshot" {
         let titleError = AXUIElementCopyAttributeValue(item, "AXTitle" as CFString, &rawTitle)
         let windowTitle = titleError == .success ? (rawTitle as? String ?? "") : "<AXError:\(titleError.rawValue)>"
         print("DIRECT_AX_WINDOW pid=\(targetPID); index=\(index + 1); role=AXWindow; title=\(windowTitle)")
+        var rawSheets: CFTypeRef?
+        let sheetsError = AXUIElementCopyAttributeValue(item, "AXSheets" as CFString, &rawSheets)
+        let sheets = (rawSheets as? [AXUIElement]) ?? []
+        print("DIRECT_AX_SHEET_LIST pid=\(targetPID); parent_title=\(windowTitle); ax_error=\(sheetsError.rawValue); count=\(sheets.count)")
+        for sheet in sheets {
+            let role = string(sheet, "AXRole") ?? "<unavailable>"
+            let title = string(sheet, "AXTitle") ?? "<unavailable>"
+            print("DIRECT_AX_SHEET pid=\(targetPID); parent_title=\(windowTitle); role=\(role); title=\(title)")
+        }
         fflush(stdout)
     }
     guard deepSnapshot else { exit(0) }

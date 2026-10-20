@@ -83,11 +83,22 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertTrue(native_dialog.ax_node_enabled(output, "AXButton", "Open"))
         self.assertFalse(native_dialog.ax_node_enabled(output, "AXButton", "Save"))
         self.assertFalse(native_dialog.ax_node_enabled(output.replace("enabled=true", "enabled=false", 1), "AXButton", "Open"))
-        self.assertFalse(native_dialog.go_folder_sheet_closed_in_expected_directory(
-            "DIRECT_AX_NODE index=1; role=AXSheet; name=Go to Folder", "Dialog Files With Spaces Ω"
+        dismissed_snapshot = (
+            "DIRECT_AX_RESULT status=snapshot; pid=42\n"
+            "DIRECT_AX_WINDOW pid=42; index=1; role=AXWindow; title=Open\n"
+            "DIRECT_AX_SHEET_LIST pid=42; parent_title=Open; ax_error=0; count=0\n"
+        )
+        self.assertTrue(native_dialog.go_to_folder_sheet_dismissed(dismissed_snapshot))
+        self.assertFalse(native_dialog.go_to_folder_sheet_dismissed(
+            dismissed_snapshot.replace("count=0", "count=1") +
+            "DIRECT_AX_SHEET pid=42; parent_title=Open; role=AXSheet; title=GoToWindow\n"
         ))
-        self.assertTrue(native_dialog.go_folder_sheet_closed_in_expected_directory(
-            "DIRECT_AX_NODE index=1; role=AXPopUpButton; name=Dialog Files With Spaces Ω", "Dialog Files With Spaces Ω"
+        self.assertFalse(native_dialog.go_to_folder_sheet_dismissed(
+            dismissed_snapshot.replace("ax_error=0", "ax_error=-25211")
+        ))
+        self.assertFalse(native_dialog.go_to_folder_sheet_dismissed(
+            "DIRECT_AX_WINDOW pid=42; index=1; role=AXWindow; title=PulseForge Editor\n"
+            "DIRECT_AX_SHEET_LIST pid=42; parent_title=PulseForge Editor; ax_error=0; count=0\n"
         ))
         self.assertFalse(native_dialog.go_to_folder_path_field_visible(
             "DIRECT_AX_NODE index=1; role=AXTextField; name=PathTextField; enabled=true; focused=false"
