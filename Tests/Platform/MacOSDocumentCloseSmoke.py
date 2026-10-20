@@ -763,6 +763,40 @@ def capture_text_focus_timeout(
     return f"{cause}; click_point={point!r}; {bounds_state}; {screenshot_state}"
 
 
+def capture_action_timeout_screenshot(
+    log_directory: Path,
+    process: subprocess.Popen[str],
+    scenario: str,
+    choice: str,
+) -> str:
+    screenshot = log_directory / f"macos-document-close-{scenario}-action-timeout.png"
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/screencapture", "-x", "-C", "-t", "png", str(screenshot)],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        if result.returncode == 0 and screenshot.is_file() and screenshot.stat().st_size > 0:
+            screenshot_state = f"CAPTURED; bytes={screenshot.stat().st_size}; path={screenshot}"
+        else:
+            state = "TCC_DENIED" if is_tcc_denial(result.stderr + result.stdout) else "FAILED"
+            screenshot_state = (
+                f"{state}; exit_code={result.returncode}; "
+                f"stdout={result.stdout[-400:]!r}; stderr={result.stderr[-400:]!r}"
+            )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        state = "TIMED_OUT" if isinstance(error, subprocess.TimeoutExpired) else "FAILED"
+        screenshot_state = f"{state}; error={type(error).__name__}: {error}"
+
+    process_state = "running" if process.poll() is None else f"exited={process.returncode}"
+    return (
+        f"scenario={scenario}; choice={choice}; pid={process.pid}; process_state={process_state}; "
+        f"screenshot={screenshot_state}"
+    )
+
+
 def click_document_tab_close(
     process: subprocess.Popen[str],
     capture: BoundedCapture,
@@ -878,7 +912,16 @@ def expect_action(
     saved: str,
     error: str = "",
 ) -> dict[str, str]:
-    action = wait_event(capture, process, "ACTION", protocol.scenario, deadline)
+    try:
+        action = wait_event(capture, process, "ACTION", protocol.scenario, deadline)
+    except RuntimeError as error:
+        if str(error).startswith("timed out waiting for ACTION marker"):
+            evidence = capture_action_timeout_screenshot(
+                capture.log_path.parent, process, protocol.scenario, choice
+            )
+            print(f"MACOS_DOC_CLOSE_ACTION_TIMEOUT_OBSERVATION={evidence}")
+            raise RuntimeError(f"{error}; {evidence}") from error
+        raise
     expected = {
         "choice": choice,
         "resolved": resolved,

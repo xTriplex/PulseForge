@@ -637,9 +637,26 @@ def main() -> int:
         diagnostic_arguments = (str(main_window_index), main_window_name)
         diagnostic_output: list[str] = []
         exit_code: int | None = None
+        preflight_timeout = min(3.0, max(0.1, deadline - time.monotonic()))
+        preflight_code, preflight_output = run_close_preflight(
+            str(process.pid),
+            diagnostic_arguments,
+            preflight_timeout,
+            controller_prefix="AX_CLOSE_PRE_ACTION",
+        )
+        preflight_state = (
+            "PASS"
+            if preflight_code == 0
+            else classify_accessibility_failure(preflight_code, preflight_output)
+        )
+        print(
+            f"MACOS_DOCUMENT_HOST_CLOSE_PRE_ACTION_PREFLIGHT={preflight_state}; "
+            f"pid={process.pid}; window={main_window_name!r}; exit_code={preflight_code}; "
+            f"detail={preflight_output.strip()!r}; actual_close_request=still-required"
+        )
         # Attempt the actual semantic close action directly. The read-only AX
-        # inspection is reserved for diagnostics if this action fails, so an
-        # unrelated preflight query cannot prevent the acceptance action itself.
+        # inspection above is diagnostic only. It cannot prevent or satisfy
+        # the required close action, even when the query itself is unavailable.
         close_code, close_output = run_osascript(
             MAIN_WINDOW_CLOSE,
             str(process.pid),
