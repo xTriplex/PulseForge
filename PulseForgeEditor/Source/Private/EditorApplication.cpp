@@ -497,14 +497,6 @@ namespace
 #endif
 		}
 
-		~EditorLayer() override
-		{
-#if (defined(_DEBUG) || defined(PF_DEBUG)) && defined(__APPLE__)
-			PulseForgeDestroyMacOSDocumentCloseEventObserver(m_MacOSDocumentCloseEventObserver);
-			m_MacOSDocumentCloseEventObserver = nullptr;
-#endif
-		}
-
 		void HandleHierarchyPanelAction(const PulseForgeEditor::EditorHierarchyPanelAction& Action) override
 		{
 			using PulseForgeEditor::EditorHierarchyPanelActionKind;
@@ -722,6 +714,10 @@ namespace
 
 		~EditorLayer() override
 		{
+#if (defined(_DEBUG) || defined(PF_DEBUG)) && defined(__APPLE__)
+			PulseForgeDestroyMacOSDocumentCloseEventObserver(m_MacOSDocumentCloseEventObserver);
+			m_MacOSDocumentCloseEventObserver = nullptr;
+#endif
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
 			StopRuntime();
