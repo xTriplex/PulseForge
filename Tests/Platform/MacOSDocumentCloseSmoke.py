@@ -70,7 +70,17 @@ WINDOW_BOUNDS_QUERY = '''on run argv
 end run
 '''
 
-POINTER_CLICK = '''use framework "AppKit"
+FOCUS_TARGET = '''on run argv
+    set targetPID to item 1 of argv as integer
+    tell application "System Events"
+        set targetProcess to first process whose unix id is targetPID
+        set frontmost of targetProcess to true
+        return "MACOS_DOC_CLOSE_FOCUS=PASS; pid=" & (targetPID as text) & "; process=" & (name of targetProcess as text)
+    end tell
+end run
+'''
+
+POINTER_OBSERVE = '''use framework "AppKit"
 
 on currentMouseLocation(targetX, targetY)
     set screenCountText to "UNAVAILABLE"
@@ -139,21 +149,48 @@ on currentMouseLocation(targetX, targetY)
 end currentMouseLocation
 
 on run argv
-    set targetPID to item 1 of argv as integer
-    set clickX to item 2 of argv as integer
-    set clickY to item 3 of argv as integer
-    tell application "System Events"
-        set targetProcess to first process whose unix id is targetPID
-        set frontmost of targetProcess to true
-    end tell
-    set pointerBefore to my currentMouseLocation(clickX, clickY)
-    tell application "System Events"
-        click at {clickX, clickY}
-    end tell
-    set pointerAfter to my currentMouseLocation(clickX, clickY)
-    return "MACOS_DOC_CLOSE_POINTER_CLICK=PASS; pid=" & (targetPID as text) & "; x=" & (clickX as text) & "; y=" & (clickY as text) & ¬
-        "; pointer_before={" & pointerBefore & "}; pointer_after={" & pointerAfter & "}"
+    set clickX to item 1 of argv as integer
+    set clickY to item 2 of argv as integer
+    return my currentMouseLocation(clickX, clickY)
 end run
+'''
+
+POINTER_DRIVER_SOURCE = r'''import CoreGraphics
+import Darwin
+import Foundation
+
+func fail(_ message: String, _ status: Int32) -> Never {
+    fputs(message + "\n", stderr)
+    exit(status)
+}
+
+guard CommandLine.arguments.count == 4,
+      let targetPID = Int32(CommandLine.arguments[1]),
+      let x = Double(CommandLine.arguments[2]),
+      let y = Double(CommandLine.arguments[3]) else {
+    fail("CGEvent input requires PID and finite desktop coordinates", 2)
+}
+guard x.isFinite, y.isFinite else {
+    fail("CGEvent input coordinates are not finite", 2)
+}
+guard CGPreflightPostEventAccess() else {
+    fail("TCC_DENIED: CGPreflightPostEventAccess rejected synthetic pointer input", 77)
+}
+
+let location = CGPoint(x: x, y: y)
+func post(_ type: CGEventType) {
+    guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: location, mouseButton: .left) else {
+        fail("CGEventCreateMouseEvent failed for event type \(type.rawValue)", 3)
+    }
+    event.post(tap: .cghidEventTap)
+}
+
+post(.mouseMoved)
+Thread.sleep(forTimeInterval: 0.05)
+post(.leftMouseDown)
+Thread.sleep(forTimeInterval: 0.05)
+post(.leftMouseUp)
+print("CGEventPost=POSTED; pid=\(targetPID); point=\(Int(x.rounded())),\(Int(y.rounded())); access=preflight-approved")
 '''
 
 TYPE_EDITOR_VALUE = '''on run argv
@@ -395,8 +432,6 @@ def is_tcc_denial(output: str) -> bool:
 
 
 def stop_process_group(process: subprocess.Popen[str]) -> bool:
-    if process.poll() is not None:
-        return True
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -412,7 +447,46 @@ def stop_process_group(process: subprocess.Popen[str]) -> bool:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             return False
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return process.poll() is not None
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        return False
     return process.poll() is not None
+
+
+def run_bounded_command(command: list[str], timeout: float) -> tuple[int, str, str]:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=max(0.1, timeout))
+    except subprocess.TimeoutExpired as error:
+        stopped = stop_process_group(process)
+        try:
+            stdout, stderr = process.communicate(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        if not stopped:
+            raise RuntimeError(f"timed-out child process group remains active: PID {process.pid}") from error
+        raise RuntimeError(
+            f"command timed out after {timeout:.1f}s; command={command!r}; "
+            f"stdout={stdout[-1000:]!r}; stderr={stderr[-1000:]!r}"
+        ) from error
+    return process.returncode, stdout[-4096:], stderr[-4096:]
 
 
 def bounded_timeout(deadline: float, cap: float = 8.0) -> float:
@@ -457,7 +531,9 @@ def wait_event(capture: BoundedCapture, process: subprocess.Popen[str], kind: st
     raise RuntimeError(f"timed out waiting for {kind} marker for {scenario}")
 
 
-def query_fixture_window(process: subprocess.Popen[str], deadline: float) -> None:
+def query_fixture_window(
+    process: subprocess.Popen[str], deadline: float
+) -> tuple[float, float, float, float]:
     last_state = "not queried"
     while time.monotonic() < deadline:
         code, output = run_osascript(WINDOW_QUERY, str(process.pid), FIXTURE_TITLE, timeout=bounded_timeout(deadline, 4.0))
@@ -496,12 +572,21 @@ def query_fixture_window(process: subprocess.Popen[str], deadline: float) -> Non
                         f"read-only Accessibility window preflight returned inconsistent process/window identity: "
                         f"{bounds.strip()!r}"
                     )
+                try:
+                    window_bounds = tuple(float(value) for value in bound_lines[2].split(","))
+                except ValueError as error:
+                    raise RuntimeError(f"Accessibility fixture bounds are malformed: {bounds.strip()!r}") from error
+                if len(window_bounds) != 4 or not all(math.isfinite(value) for value in window_bounds):
+                    raise RuntimeError(f"Accessibility fixture bounds are non-finite or incomplete: {bounds.strip()!r}")
+                if window_bounds[2] <= 0 or window_bounds[3] <= 0:
+                    raise RuntimeError(f"Accessibility fixture window has no usable area: {bounds.strip()!r}")
                 print(
                     f"MACOS_DOC_CLOSE_PREFLIGHT=PASS; pid={process.pid}; process={bound_lines[0]}; "
                     f"window={bound_lines[1]}; accessibility_bounds={bound_lines[2]!r}; "
-                    "coordinates=raw Accessibility bounds; no Retina scale conversion applied"
+                    "ImGui viewport points=desktop logical; AX bounds=desktop logical; "
+                    "no Retina scale conversion applied"
                 )
-                return
+                return window_bounds
             last_state = f"expected exactly one {FIXTURE_TITLE!r}, observed indices {indices!r}"
         else:
             last_state = f"Accessibility returned incomplete window snapshot: {output.strip()!r}"
@@ -519,15 +604,101 @@ def parse_point(value: str, field: str) -> tuple[int, int]:
     return int(round(x)), int(round(y))
 
 
-def click_point(process: subprocess.Popen[str], point: tuple[int, int], deadline: float, label: str) -> None:
-    code, output = run_osascript(
-        POINTER_CLICK, str(process.pid), str(point[0]), str(point[1]), timeout=bounded_timeout(deadline, 8.0)
-    )
+def compile_pointer_driver(temporary_root: Path) -> Path:
+    source = temporary_root / "PulseForgePointerInput.swift"
+    executable = temporary_root / "PulseForgePointerInput"
+    source.write_text(POINTER_DRIVER_SOURCE, encoding="utf-8")
+    try:
+        exit_code, stdout, stderr = run_bounded_command(
+            ["/usr/bin/xcrun", "swiftc", "-O", str(source), "-framework", "CoreGraphics", "-o", str(executable)],
+            timeout=30,
+        )
+    except (OSError, RuntimeError) as error:
+        raise RuntimeError(f"bounded Quartz pointer-driver compilation failed: {error}") from error
+    if exit_code != 0 or not executable.is_file():
+        raise RuntimeError(
+            f"Quartz pointer-driver compilation failed; exit_code={exit_code}; "
+            f"stdout={stdout[-2000:]!r}; stderr={stderr[-2000:]!r}"
+        )
+    return executable
+
+
+def click_point(
+    process: subprocess.Popen[str],
+    pointer_driver: Path,
+    fixture_bounds: tuple[float, float, float, float],
+    point: tuple[int, int],
+    deadline: float,
+    label: str,
+) -> None:
+    window_x, window_y, window_width, window_height = fixture_bounds
+    if not (window_x <= point[0] < window_x + window_width and window_y <= point[1] < window_y + window_height):
+        raise RuntimeError(
+            f"ImGui desktop point for {label} falls outside the fixture AX bounds; "
+            f"point={point!r}; bounds={fixture_bounds!r}; no window-origin translation was applied"
+        )
+
+    code, output = run_osascript(FOCUS_TARGET, str(process.pid), timeout=bounded_timeout(deadline, 8.0))
     if code != 0:
         if is_tcc_denial(output):
-            raise RuntimeError(f"TCC_DENIED: Accessibility authorization is required for OS pointer input: {output.strip()}")
-        raise RuntimeError(f"OS pointer click for {label} failed; exit_code={code}; detail={output.strip()}")
-    print(f"MACOS_DOC_CLOSE_CLICK=PASS; control={label}; {output.strip()}")
+            raise RuntimeError(f"TCC_DENIED: Accessibility authorization is required to focus the fixture: {output.strip()}")
+        raise RuntimeError(f"could not focus the fixture before clicking {label}; exit_code={code}; detail={output.strip()}")
+
+    code, pointer_before = run_osascript(
+        POINTER_OBSERVE, str(point[0]), str(point[1]), timeout=bounded_timeout(deadline, 3.0)
+    )
+    if code != 0:
+        if is_tcc_denial(pointer_before):
+            raise RuntimeError(f"TCC_DENIED: Accessibility authorization is required to observe pointer state: {pointer_before.strip()}")
+        raise RuntimeError(
+            f"could not observe pointer before clicking {label}; exit_code={code}; detail={pointer_before.strip()}"
+        )
+
+    try:
+        exit_code, stdout, stderr = run_bounded_command(
+            [str(pointer_driver), str(process.pid), str(point[0]), str(point[1])],
+            timeout=bounded_timeout(deadline, 5.0),
+        )
+    except (OSError, RuntimeError) as error:
+        raise RuntimeError(f"bounded Quartz pointer input for {label} failed: {type(error).__name__}: {error}") from error
+    if exit_code == 77:
+        raise RuntimeError(f"TCC_DENIED: {stderr.strip()}")
+    if exit_code != 0:
+        raise RuntimeError(
+            f"Quartz pointer input for {label} failed; exit_code={exit_code}; "
+            f"stdout={stdout[-1000:]!r}; stderr={stderr[-1000:]!r}"
+        )
+
+    observation_deadline = min(deadline, time.monotonic() + 3.0)
+    last_state = "pointer observation not attempted"
+    while time.monotonic() < observation_deadline:
+        code, observation = run_osascript(
+            POINTER_OBSERVE,
+            str(point[0]),
+            str(point[1]),
+            timeout=bounded_timeout(observation_deadline, 1.0),
+        )
+        if code == 0 and "target_match=1" in observation:
+            print(
+                f"MACOS_DOC_CLOSE_CLICK_DISPATCH=POSTED; control={label}; input=Quartz CGEvent; "
+                f"{stdout.strip()}; pointer_before={pointer_before.strip()}; "
+                f"pointer_after={observation.strip()}; fixture_confirmation=pending"
+            )
+            return
+        if code != 0:
+            if is_tcc_denial(observation):
+                raise RuntimeError(
+                    f"TCC_DENIED: Accessibility authorization is required to observe pointer delivery: {observation.strip()}"
+                )
+            if code != 124:
+                raise RuntimeError(
+                    f"pointer observation for {label} failed; exit_code={code}; detail={observation.strip()}"
+                )
+            last_state = f"observation timed out: {observation.strip()}"
+        else:
+            last_state = observation.strip()
+        time.sleep(min(0.1, max(0.0, observation_deadline - time.monotonic())))
+    raise RuntimeError(f"Quartz click for {label} did not move the desktop pointer to {point!r}; last state: {last_state}")
 
 
 def capture_text_focus_timeout(
@@ -570,21 +741,34 @@ def capture_text_focus_timeout(
 
 
 def click_document_tab_close(
-    process: subprocess.Popen[str], capture: BoundedCapture, deadline: float, protocol: MarkerProtocol, label: str
+    process: subprocess.Popen[str],
+    capture: BoundedCapture,
+    pointer_driver: Path,
+    fixture_bounds: tuple[float, float, float, float],
+    deadline: float,
+    protocol: MarkerProtocol,
+    label: str,
 ) -> None:
     control = wait_event(capture, process, "CLOSE_CONTROL", protocol.scenario, deadline)
     protocol.accept_control(control)
     point = parse_point(f"{control.get('x', '')},{control.get('y', '')}", "document tab close")
-    click_point(process, point, deadline, label)
+    click_point(process, pointer_driver, fixture_bounds, point, deadline, label)
 
 
-def enter_editor_value(process: subprocess.Popen[str], capture: BoundedCapture, deadline: float, protocol: MarkerProtocol) -> None:
+def enter_editor_value(
+    process: subprocess.Popen[str],
+    capture: BoundedCapture,
+    pointer_driver: Path,
+    fixture_bounds: tuple[float, float, float, float],
+    deadline: float,
+    protocol: MarkerProtocol,
+) -> None:
     control = wait_event(capture, process, "TEXT_CONTROL", protocol.scenario, deadline)
     protocol.check_identity(control)
     if control.get("generation") != "0" or control.get("value") != "20":
         raise RuntimeError(f"editor text control started in an unexpected state: {control.get('raw')!r}")
     point = parse_point(f"{control.get('x', '')},{control.get('y', '')}", "editable value")
-    click_point(process, point, deadline, "Editable value")
+    click_point(process, pointer_driver, fixture_bounds, point, deadline, "Editable value")
 
     pointer_deadline = min(deadline, time.monotonic() + 8.0)
     try:
@@ -690,6 +874,11 @@ def expect_action(
                 f"got {action.get(key)!r}; marker={action.get('raw')!r}"
             )
     protocol.accept_action(action, choice, expected_generation)
+    print(
+        f"MACOS_DOC_CLOSE_FIXTURE_ACTION=PASS; scenario={protocol.scenario}; "
+        f"choice={choice}; resolved={resolved}; pending={pending}; open={opened}; dirty={dirty}; "
+        f"value={value}; saved={saved}"
+    )
     return action
 
 
@@ -700,60 +889,71 @@ def require_pass(capture: BoundedCapture, process: subprocess.Popen[str], deadli
         raise RuntimeError(f"unexpected PASS marker: {event.get('raw')!r}")
 
 
-def run_decisions(process: subprocess.Popen[str], capture: BoundedCapture, scenario: str, deadline: float) -> None:
+def run_decisions(
+    process: subprocess.Popen[str],
+    capture: BoundedCapture,
+    pointer_driver: Path,
+    fixture_bounds: tuple[float, float, float, float],
+    scenario: str,
+    deadline: float,
+) -> None:
     ready = wait_event(capture, process, "READY", scenario, deadline)
     if (ready.get("saved"), ready.get("value"), ready.get("dirty")) != ("10", "20", "1"):
         raise RuntimeError(f"fixture READY state mismatch: {ready.get('raw')!r}")
     protocol = MarkerProtocol.from_ready(ready, scenario)
     host = protocol.host
     print(f"MACOS_DOC_CLOSE_READY=PASS; scenario={scenario}; host={host}; asset={protocol.asset}")
-    query_fixture_window(process, deadline)
-    enter_editor_value(process, capture, deadline, protocol)
+    enter_editor_value(process, capture, pointer_driver, fixture_bounds, deadline, protocol)
 
-    click_document_tab_close(process, capture, deadline, protocol, "document tab close")
+    click_document_tab_close(process, capture, pointer_driver, fixture_bounds, deadline, protocol, "document tab close")
     prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
     prompt_generation = protocol.accept_prompt(prompt)
+    print(f"MACOS_DOC_CLOSE_FIXTURE_PROMPT=OBSERVED; scenario={scenario}; generation={prompt_generation}")
 
     if scenario == "cancel-save":
-        click_point(process, get_prompt_point(prompt, scenario, host, "cancel"), deadline, "Cancel")
+        click_point(process, pointer_driver, fixture_bounds, get_prompt_point(prompt, scenario, host, "cancel"), deadline, "Cancel")
         expect_action(capture, process, deadline, protocol, "cancel", prompt_generation, resolved="1", pending="0", opened="1", dirty="1", value="42", saved="10")
-        click_document_tab_close(process, capture, deadline, protocol, "document tab close after cancel")
+        click_document_tab_close(process, capture, pointer_driver, fixture_bounds, deadline, protocol, "document tab close after cancel")
         prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
         prompt_generation = protocol.accept_prompt(prompt)
-        click_point(process, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save")
+        print(f"MACOS_DOC_CLOSE_FIXTURE_PROMPT=OBSERVED; scenario={scenario}; generation={prompt_generation}")
+        click_point(process, pointer_driver, fixture_bounds, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save")
         expect_action(capture, process, deadline, protocol, "save", prompt_generation, resolved="1", pending="0", opened="0", dirty="0", value="42", saved="42")
     elif scenario == "discard":
-        click_point(process, get_prompt_point(prompt, scenario, host, "discard"), deadline, "Discard")
+        click_point(process, pointer_driver, fixture_bounds, get_prompt_point(prompt, scenario, host, "discard"), deadline, "Discard")
         expect_action(capture, process, deadline, protocol, "discard", prompt_generation, resolved="1", pending="0", opened="0", dirty="0", value="10", saved="10")
     elif scenario == "save-retry":
-        click_point(process, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (expected failure)")
+        click_point(process, pointer_driver, fixture_bounds, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (expected failure)")
         expect_action(
             capture, process, deadline, protocol, "save", prompt_generation, resolved="0", pending="1", opened="1", dirty="1", value="42", saved="10",
             error="The%20document%20could%20not%20be%20saved%3B%20it%20remains%20open.",
         )
         prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
         prompt_generation = protocol.accept_prompt(prompt)
-        click_point(process, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (retry)")
+        print(f"MACOS_DOC_CLOSE_FIXTURE_PROMPT=OBSERVED; scenario={scenario}; generation={prompt_generation}")
+        click_point(process, pointer_driver, fixture_bounds, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (retry)")
         expect_action(capture, process, deadline, protocol, "save", prompt_generation, resolved="1", pending="0", opened="0", dirty="0", value="42", saved="42")
     elif scenario == "close-retry":
-        click_point(process, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (expected close preflight failure)")
+        click_point(process, pointer_driver, fixture_bounds, get_prompt_point(prompt, scenario, host, "save"), deadline, "Save (expected close preflight failure)")
         expect_action(
             capture, process, deadline, protocol, "save", prompt_generation, resolved="0", pending="1", opened="1", dirty="0", value="42", saved="42",
             error="The%20Debug%20fixture%20is%20configured%20to%20reject%20close.",
         )
         prompt = wait_event(capture, process, "PROMPT", scenario, deadline)
         prompt_generation = protocol.accept_prompt(prompt)
-        click_point(process, get_prompt_point(prompt, scenario, host, "cancel"), deadline, "Cancel pending close")
+        print(f"MACOS_DOC_CLOSE_FIXTURE_PROMPT=OBSERVED; scenario={scenario}; generation={prompt_generation}")
+        click_point(process, pointer_driver, fixture_bounds, get_prompt_point(prompt, scenario, host, "cancel"), deadline, "Cancel pending close")
         expect_action(capture, process, deadline, protocol, "cancel", prompt_generation, resolved="1", pending="0", opened="1", dirty="0", value="42", saved="42")
         fixture = wait_event(capture, process, "FIXTURE", scenario, deadline)
         fixture_generation = protocol.accept_fixture(fixture)
-        click_point(process, parse_point(fixture.get("allow_close", ""), "Allow close"), deadline, "Allow close")
+        click_point(process, pointer_driver, fixture_bounds, parse_point(fixture.get("allow_close", ""), "Allow close"), deadline, "Allow close")
         expect_action(capture, process, deadline, protocol, "allow-close", fixture_generation, resolved="1", pending="0", opened="1", dirty="0", value="42", saved="42")
-        click_document_tab_close(process, capture, deadline, protocol, "document tab close after recovery")
+        click_document_tab_close(process, capture, pointer_driver, fixture_bounds, deadline, protocol, "document tab close after recovery")
         closed = wait_event(capture, process, "CLOSED", scenario, deadline)
         protocol.accept_closed(closed)
         if closed.get("open") != "0" or closed.get("saved") != "42":
             raise RuntimeError(f"clean close after preflight recovery did not preserve the saved session state: {closed.get('raw')!r}")
+        print(f"MACOS_DOC_CLOSE_FIXTURE_CLOSED=PASS; scenario={scenario}; saved={closed.get('saved')}")
     else:
         raise RuntimeError(f"unsupported close scenario: {scenario}")
 
@@ -809,6 +1009,7 @@ def run_scenario(editor: Path, project: Path, log_directory: Path, scenario: str
     try:
         work.mkdir()
         settings.mkdir()
+        pointer_driver = compile_pointer_driver(root)
         print(f"MACOS_DOC_CLOSE_COMMAND={command!r}")
         print(f"MACOS_DOC_CLOSE_SETTINGS={settings}")
         process = subprocess.Popen(
@@ -824,7 +1025,8 @@ def run_scenario(editor: Path, project: Path, log_directory: Path, scenario: str
         )
         capture = BoundedCapture(process, log_path)
         deadline = time.monotonic() + timeout_seconds
-        run_decisions(process, capture, scenario, deadline)
+        fixture_bounds = query_fixture_window(process, deadline)
+        run_decisions(process, capture, pointer_driver, fixture_bounds, scenario, deadline)
         exit_normally(process, deadline)
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         failure = str(error)
