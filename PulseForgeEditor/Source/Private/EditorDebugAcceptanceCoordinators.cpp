@@ -8,6 +8,26 @@ namespace PulseForgeEditor::Detail
 {
 	namespace
 	{
+		[[nodiscard]] const char* DocumentCloseUiPhaseName(DocumentCloseUiPhase Phase) noexcept
+		{
+			switch (Phase)
+			{
+			case DocumentCloseUiPhase::Disabled: return "disabled";
+			case DocumentCloseUiPhase::AwaitingTextEntry: return "awaiting-text-entry";
+			case DocumentCloseUiPhase::AwaitingInitialClose: return "awaiting-initial-close";
+			case DocumentCloseUiPhase::AwaitingFirstAction: return "awaiting-first-action";
+			case DocumentCloseUiPhase::AwaitingSecondClose: return "awaiting-second-close";
+			case DocumentCloseUiPhase::AwaitingSecondAction: return "awaiting-second-action";
+			case DocumentCloseUiPhase::AwaitingSaveRetry: return "awaiting-save-retry";
+			case DocumentCloseUiPhase::AwaitingCloseRetryCancel: return "awaiting-close-retry-cancel";
+			case DocumentCloseUiPhase::AwaitingAllowClose: return "awaiting-allow-close";
+			case DocumentCloseUiPhase::AwaitingFinalClose: return "awaiting-final-close";
+			case DocumentCloseUiPhase::Complete: return "complete";
+			case DocumentCloseUiPhase::Failed: return "failed";
+			}
+			return "unknown";
+		}
+
 		[[nodiscard]] std::string EscapeDocumentCloseUiField(std::string_view Value)
 		{
 			constexpr char Hex[] = "0123456789ABCDEF";
@@ -181,24 +201,70 @@ namespace PulseForgeEditor::Detail
 	void DocumentCloseAcceptanceCoordinator::ReportDecisionPointer(const DocumentCloseUiDecisionPointerObservation& Observation)
 	{
 		if (!m_Scenario || !m_Identity || !IsFixtureHost(Observation.HostID) || !Observation.Pending ||
-			ExpectedChoice() != Observation.Choice || m_DecisionPointerReportCount >= 4)
+			ExpectedChoice() != Observation.Choice)
 			return;
 		const auto& Previous = m_LastDecisionPointer;
 		const bool Changed = !m_DecisionPointerStateReported || Observation.MouseX != Previous.MouseX ||
 							 Observation.MouseY != Previous.MouseY || Observation.Hovered != Previous.Hovered ||
 							 Observation.Active != Previous.Active || Observation.MouseDown != Previous.MouseDown ||
-							 Observation.Clicked != Previous.Clicked;
-		if (!Changed) return;
-		PF_INFO(
-			"PF_DOC_CLOSE_UI|DECISION_POINTER|scenario={}|host={}|asset={}|generation={}|choice={}|sample={}|rect_min={:.1f},{:.1f}|rect_"
-			"max={:.1f},{:.1f}|mouse={:.1f},{:.1f}|hovered={}|active={}|mouse_down={}|clicked={}|window_viewport={}|mouse_viewport={}",
-			*m_Scenario, m_HostID, m_Identity->Asset.ToString(), m_PromptGeneration, Observation.Choice, m_DecisionPointerReportCount + 1,
-			Observation.MinimumX, Observation.MinimumY, Observation.MaximumX, Observation.MaximumY, Observation.MouseX, Observation.MouseY,
-			Observation.Hovered ? 1 : 0, Observation.Active ? 1 : 0, Observation.MouseDown ? 1 : 0, Observation.Clicked ? 1 : 0,
-			Observation.WindowViewport, Observation.MouseViewport);
+							 Observation.Clicked != Previous.Clicked || Observation.RawMouseDown != Previous.RawMouseDown ||
+							 Observation.MouseClickedEvent != Previous.MouseClickedEvent ||
+							 Observation.MouseReleasedEvent != Previous.MouseReleasedEvent ||
+							 Observation.NativeWindowFocused != Previous.NativeWindowFocused ||
+							 Observation.NativeWindowHovered != Previous.NativeWindowHovered;
+		if (Changed && m_DecisionPointerReportCount < 8)
+		{
+			PF_INFO(
+				"PF_DOC_CLOSE_UI|DECISION_POINTER|scenario={}|host={}|asset={}|generation={}|choice={}|sample={}|frame={}|rect_min={:.1f},{:.1f}|rect_"
+				"max={:.1f},{:.1f}|mouse={:.1f},{:.1f}|hovered={}|active={}|filtered_down={}|raw_down={}|raw_clicked={}|raw_released={}|"
+				"pressed={}|native_focused={}|native_hovered={}|window_viewport={}|mouse_viewport={}",
+				*m_Scenario, m_HostID, m_Identity->Asset.ToString(), m_PromptGeneration, Observation.Choice, m_DecisionPointerReportCount + 1,
+				Observation.Frame, Observation.MinimumX, Observation.MinimumY, Observation.MaximumX, Observation.MaximumY,
+				Observation.MouseX, Observation.MouseY, Observation.Hovered ? 1 : 0, Observation.Active ? 1 : 0,
+				Observation.MouseDown ? 1 : 0, Observation.RawMouseDown ? 1 : 0, Observation.MouseClickedEvent ? 1 : 0,
+				Observation.MouseReleasedEvent ? 1 : 0, Observation.Clicked ? 1 : 0, Observation.NativeWindowFocused ? 1 : 0,
+				Observation.NativeWindowHovered ? 1 : 0, Observation.WindowViewport, Observation.MouseViewport);
+			++m_DecisionPointerReportCount;
+		}
+		if (!m_LastDecisionHeartbeatFrame || Observation.Frame - m_LastDecisionHeartbeatFrame >= 60)
+		{
+			if (m_DecisionHeartbeatCount < 8)
+			{
+				PF_INFO("PF_DOC_CLOSE_DIAG|DECISION_HEARTBEAT|scenario={}|host={}|asset={}|generation={}|choice={}|frame={}|phase={}|"
+						"hovered={}|active={}|filtered_down={}|raw_down={}|raw_clicked={}|raw_released={}|pressed={}|native_focused={}|"
+						"native_hovered={}|window_viewport={}|mouse_viewport={}",
+					*m_Scenario, m_HostID, m_Identity->Asset.ToString(), m_PromptGeneration, Observation.Choice, Observation.Frame,
+					DocumentCloseUiPhaseName(m_Phase), Observation.Hovered ? 1 : 0, Observation.Active ? 1 : 0,
+					Observation.MouseDown ? 1 : 0, Observation.RawMouseDown ? 1 : 0, Observation.MouseClickedEvent ? 1 : 0,
+					Observation.MouseReleasedEvent ? 1 : 0, Observation.Clicked ? 1 : 0, Observation.NativeWindowFocused ? 1 : 0,
+					Observation.NativeWindowHovered ? 1 : 0, Observation.WindowViewport, Observation.MouseViewport);
+				++m_DecisionHeartbeatCount;
+			}
+			m_LastDecisionHeartbeatFrame = Observation.Frame;
+		}
 		m_LastDecisionPointer = Observation;
 		m_DecisionPointerStateReported = true;
-		++m_DecisionPointerReportCount;
+	}
+
+	void DocumentCloseAcceptanceCoordinator::ReportGlfwMouseButton(
+		const DocumentCloseUiMouseButtonObservation& Observation)
+	{
+		if (!m_Scenario || !m_Identity || m_Phase == DocumentCloseUiPhase::Failed || m_Phase == DocumentCloseUiPhase::Complete ||
+			m_GlfwMouseButtonReportCount >= 16 || ExpectedChoice() != "save")
+			return;
+		const char* ActionName = "unknown";
+		switch (Observation.Action)
+		{
+		case DocumentCloseUiMouseAction::Release: ActionName = "release"; break;
+		case DocumentCloseUiMouseAction::Press: ActionName = "press"; break;
+		case DocumentCloseUiMouseAction::Repeat: ActionName = "repeat"; break;
+		}
+		PF_INFO("PF_DOC_CLOSE_DIAG|GLFW_MOUSE_BUTTON|scenario={}|host={}|asset={}|generation={}|sequence={}|viewport={}|main_window={}|"
+				"button=left|action={}|modifiers={}|local={},{}|steady_ms={:.3f}|native_focused={}|native_hovered={}",
+			*m_Scenario, m_HostID, m_Identity->Asset.ToString(), m_PromptGeneration, ++m_GlfwMouseButtonReportCount, Observation.Viewport,
+			Observation.MainWindow ? 1 : 0, ActionName, Observation.Modifiers,
+			Observation.LocalX, Observation.LocalY, Observation.SteadyMilliseconds, Observation.NativeWindowFocused ? 1 : 0,
+			Observation.NativeWindowHovered ? 1 : 0);
 	}
 
 	void DocumentCloseAcceptanceCoordinator::ReportCloseControl(
@@ -427,6 +493,9 @@ namespace PulseForgeEditor::Detail
 		m_AllowCloseControlReported = false;
 		m_DecisionPointerStateReported = false;
 		m_DecisionPointerReportCount = 0;
+		m_LastDecisionHeartbeatFrame = 0;
+		m_DecisionHeartbeatCount = 0;
+		m_GlfwMouseButtonReportCount = 0;
 	}
 
 	void DocumentCloseAcceptanceCoordinator::Pass(int ExpectedSavedValue)

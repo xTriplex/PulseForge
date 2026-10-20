@@ -21,31 +21,42 @@ var wildcardEvent = -1;
 var appleEventsStatus = -32000;
 var axTrusted = false;
 var quartzAllowed = false;
+var systemEventsTargetRunning = false;
 var serializedResult = "";
 try {{
+    ObjC.import("AppKit");
     ObjC.import("ApplicationServices");
     stage = "custom-framework-load";
     ObjC.import(bridgePath);
+
+    stage = "custom-framework-symbol-binding";
+    if (typeof $.PFProbeSystemEventsDescriptor !== "function" ||
+        typeof $.PFDetermineSystemEventsPermission !== "function")
+        throw new Error("BridgeSupport metadata did not expose the permission probe functions");
+
+    stage = "System-Events-target-readiness";
+    var systemEventsApplications = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("com.apple.systemevents");
+    for (var attempt = 0; attempt < 20 && ObjC.unwrap(systemEventsApplications.count) === 0; ++attempt) {{
+        $.NSThread.sleepForTimeInterval(0.1);
+        systemEventsApplications = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("com.apple.systemevents");
+    }}
+    systemEventsTargetRunning = ObjC.unwrap(systemEventsApplications.count) > 0;
+
     stage = "descriptor-construction";
-    ObjC.bindFunction("PFProbeSystemEventsDescriptor", ["int", []]);
     descriptorResult = $.PFProbeSystemEventsDescriptor();
     if (descriptorResult !== 0) throw new Error("descriptor construction returned " + descriptorResult);
 
     stage = "native-AEAddressDesc-access";
-    ObjC.bindFunction("PFReadSystemEventsNativeAddress", ["int", []]);
     descriptorType = $.PFReadSystemEventsNativeAddress();
     if (descriptorType < 0) throw new Error("native address access returned " + descriptorType);
 
     stage = "wildcard-constant-marshalling";
-    ObjC.bindFunction("PFTypeWildCardEventClass", ["int", []]);
-    ObjC.bindFunction("PFTypeWildCardEventID", ["int", []]);
     wildcardClass = $.PFTypeWildCardEventClass();
     wildcardEvent = $.PFTypeWildCardEventID();
     if (wildcardClass !== 707406378 || wildcardClass !== wildcardEvent) throw new Error("invalid wildcard constants");
 
     stage = "apple-events-permission-api";
-    ObjC.bindFunction("PFDetermineSystemEventsPermission", ["int", []]);
-    appleEventsStatus = $.PFDetermineSystemEventsPermission();
+    appleEventsStatus = systemEventsTargetRunning ? $.PFDetermineSystemEventsPermission() : -600;
 
     stage = "accessibility-trust-query";
     axTrusted = Boolean($.AXIsProcessTrusted());
@@ -58,14 +69,14 @@ try {{
     stage = "result-serialization";
     serializedResult = JSON.stringify({{stage: "complete", descriptorType: descriptorType, wildcardClass: wildcardClass,
         wildcardEvent: wildcardEvent, appleEventsStatus: appleEventsStatus,
-        axTrusted: axTrusted, quartzAllowed: quartzAllowed}});
+        systemEventsTargetRunning: systemEventsTargetRunning, axTrusted: axTrusted, quartzAllowed: quartzAllowed}});
 }} catch (error) {{
     serializedResult = JSON.stringify({{stage: stage, error: String(error)}});
 }}
 serializedResult;'''
 
 
-def probe_osascript_access(timeout_seconds: float = 4.0) -> tuple[str, int | None, str]:
+def probe_osascript_access(timeout_seconds: float = 7.0, *, prepare_target: bool = True) -> tuple[str, int | None, str]:
     """Nonpromptingly query the actual osascript process for its three distinct privileges."""
     bridge_value = os.environ.get("PULSEFORGE_MACOS_AUTOMATION_BRIDGE")
     if not bridge_value:
@@ -73,6 +84,26 @@ def probe_osascript_access(timeout_seconds: float = 4.0) -> tuple[str, int | Non
     bridge_path = Path(bridge_value)
     if not bridge_path.is_dir():
         return "PROBE_IMPLEMENTATION_ERROR", None, f"permission bridge framework is missing: {bridge_path}"
+    if prepare_target:
+        try:
+            target_launch = subprocess.run(
+                ["/usr/bin/open", "-gj", "-b", "com.apple.systemevents"],
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            return "PROBE_TIMED_OUT", None, f"bounded System Events launch request timed out: {error}"
+        except OSError as error:
+            return "PROBE_IMPLEMENTATION_ERROR", None, (
+                f"could not request System Events startup: {type(error).__name__}: {error}"
+            )
+        if target_launch.returncode != 0:
+            return "APPLE_EVENTS_TARGET_UNAVAILABLE", None, (
+                f"System Events could not be started for the permission query; exit_code={target_launch.returncode}; "
+                f"output={target_launch.stderr.strip()[-500:]!r}"
+            )
     command = ["/usr/bin/osascript", "-l", "JavaScript", "-e", _probe_script(bridge_path)]
     try:
         process = subprocess.Popen(
@@ -116,6 +147,7 @@ def probe_osascript_access(timeout_seconds: float = 4.0) -> tuple[str, int | Non
         ae_status = int(result["appleEventsStatus"])
         ax_trusted = result["axTrusted"] is True
         quartz_allowed = result["quartzAllowed"] is True
+        system_events_target_running = result["systemEventsTargetRunning"] is True
         descriptor_type = int(result["descriptorType"])
         wildcard_class = int(result["wildcardClass"])
         wildcard_event = int(result["wildcardEvent"])
@@ -123,7 +155,8 @@ def probe_osascript_access(timeout_seconds: float = 4.0) -> tuple[str, int | Non
         return "PROBE_IMPLEMENTATION_ERROR", process.pid, f"malformed probe result: {error}; result={result!r}"
 
     detail = (
-        f"caller=/usr/bin/osascript; pid={process.pid}; AXIsProcessTrusted={str(ax_trusted).lower()}; "
+        f"caller=/usr/bin/osascript; pid={process.pid}; SystemEventsTargetRunning={str(system_events_target_running).lower()}; "
+        f"AXIsProcessTrusted={str(ax_trusted).lower()}; "
         f"AEDeterminePermissionToAutomateTarget(target=com.apple.systemevents, askUserIfNeeded=false)={ae_status}; "
         f"CGPreflightPostEventAccess={str(quartz_allowed).lower()}; descriptorType={descriptor_type}; "
         f"typeWildCard(class/event)={wildcard_class}/{wildcard_event}"
@@ -132,7 +165,7 @@ def probe_osascript_access(timeout_seconds: float = 4.0) -> tuple[str, int | Non
         return "APPLE_EVENTS_DENIED", process.pid, detail
     if ae_status == -1744:
         return "APPLE_EVENTS_CONSENT_REQUIRED", process.pid, detail
-    if ae_status == -600:
+    if ae_status == -600 or not system_events_target_running:
         return "APPLE_EVENTS_TARGET_UNAVAILABLE", process.pid, detail
     if ae_status == -32003:
         return "APPLE_EVENTS_UNSUPPORTED", process.pid, detail
