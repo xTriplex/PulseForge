@@ -214,6 +214,7 @@ if(BUILD_TESTING)
 			Tests/EditorAssetReferenceTests.cpp
 			Tests/ProjectRuntimeTests.cpp
 			Tests/EditorHistoryTests.cpp
+			$<$<CONFIG:Debug>:Tests/EditorDebugAcceptanceCoordinatorTests.cpp>
 		)
 		target_include_directories(PulseForgeEditorTests PRIVATE
 			Tests

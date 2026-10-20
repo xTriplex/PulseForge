@@ -205,6 +205,41 @@ jobs:
             --log-directory "$RUNNER_TEMP" \
             --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-document-close-smoke.log"
 
+      - name: Build Release and Dist editor consumers and verify Debug fixture exclusion
+        run: |
+          set -o pipefail
+          DEBUG_OBJECT="Build/CI/macos-renderer/CMakeFiles/PulseForgeEditorCore.dir/EditorDebugAcceptanceCoordinators.cpp.o"
+          test -f "$DEBUG_OBJECT"
+          for CONFIGURATION in Release Dist; do
+            BUILD_DIR="Build/CI/macos-${CONFIGURATION,,}"
+            cmake -S . -B "$BUILD_DIR" -G Ninja \
+              -DCMAKE_BUILD_TYPE="$CONFIGURATION" \
+              -DBUILD_TESTING=ON \
+              -DPULSEFORGE_BUILD_MACOS_DESKTOP=ON \
+              -DPULSEFORGE_BUILD_EDITOR=ON \
+              -DPULSEFORGE_BUILD_GPU_VALIDATION_TESTS=OFF \
+              -DPULSEFORGE_DXC_EXECUTABLE="$PULSEFORGE_DXC_EXECUTABLE" \
+              -DFETCHCONTENT_BASE_DIR="$GITHUB_WORKSPACE/Build/CI/Dependencies" \
+              -DFETCHCONTENT_FULLY_DISCONNECTED=OFF 2>&1 |
+              tee "$RUNNER_TEMP/macos-configure-${CONFIGURATION,,}.log"
+            cmake --build "$BUILD_DIR" --parallel --target \
+              PulseForgeEditor PulseForgeGame PulseForgeEditorCoreConsumer PulseForgeEditorTests 2>&1 |
+              tee "$RUNNER_TEMP/macos-build-${CONFIGURATION,,}.log"
+            if find "$BUILD_DIR/CMakeFiles/PulseForgeEditorCore.dir" -name 'EditorDebugAcceptanceCoordinators.cpp.o' -print -quit | grep -q .; then
+              echo "Debug-only coordinator was compiled for $CONFIGURATION" >&2
+              exit 1
+            fi
+            EDITOR="$GITHUB_WORKSPACE/$BUILD_DIR/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor"
+            for FIXTURE_ARGS in "--editor-runtime-play-stop-test" "--document-host-close-ui-test cancel-save"; do
+              LOG="$RUNNER_TEMP/macos-fixture-rejection-${CONFIGURATION,,}-$(printf '%s' "$FIXTURE_ARGS" | tr ' /-' '_').log"
+              if "$EDITOR" $FIXTURE_ARGS >"$LOG" 2>&1; then
+                echo "$CONFIGURATION accepted Debug-only fixture arguments: $FIXTURE_ARGS" >&2
+                exit 1
+              fi
+              grep -q 'available only in Debug' "$LOG"
+            done
+          done
+
       - name: Upload compact renderer evidence
         if: always()
         uses: actions/upload-artifact@v6
@@ -239,6 +274,10 @@ jobs:
             ${{ runner.temp }}/macos-document-close-*-outcome-missing.png
             ${{ runner.temp }}/macos-document-close-main-window-close-failure.png
             ${{ runner.temp }}/macos-document-close-harness-tests.log
+            ${{ runner.temp }}/macos-configure-release.log
+            ${{ runner.temp }}/macos-build-release.log
+            ${{ runner.temp }}/macos-configure-dist.log
+            ${{ runner.temp }}/macos-build-dist.log
             ${{ runner.temp }}/macos-native-dialog-automation.log
             ${{ runner.temp }}/native-dialog-open-select.log
             ${{ runner.temp }}/native-dialog-open-cancel.log
@@ -313,6 +352,23 @@ jobs:
           Get-Content "$env:RUNNER_TEMP/ctest.log"
           if ($result -ne 0) { exit $result }
 
+      - name: Build Release and Dist editor consumers and verify Debug fixture exclusion
+        shell: pwsh
+        run: |
+          $coreDir = "Build/CI/windows/PulseForgeEditorCore.dir"
+          $debugObject = Join-Path $coreDir "Debug/EditorDebugAcceptanceCoordinators.obj"
+          if (-not (Test-Path $debugObject)) { throw "Debug coordinator object was not produced: $debugObject" }
+          foreach ($configuration in @("Release", "Dist")) {
+            & cmake --build Build/CI/windows --config $configuration --parallel --target `
+              PulseForgeEditor PulseForgeGame PulseForgeEditorCoreConsumer PulseForgeEditorTests `
+              *> "$env:RUNNER_TEMP/build-$($configuration.ToLowerInvariant()).log"
+            $result = $LASTEXITCODE
+            Get-Content "$env:RUNNER_TEMP/build-$($configuration.ToLowerInvariant()).log"
+            if ($result -ne 0) { exit $result }
+            $configurationObject = Join-Path $coreDir "$configuration/EditorDebugAcceptanceCoordinators.obj"
+            if (Test-Path $configurationObject) { throw "Debug-only coordinator was compiled for $configuration" }
+          }
+
       - name: Upload failure logs
         if: failure()
         uses: actions/upload-artifact@v6
@@ -322,6 +378,8 @@ jobs:
             ${{ runner.temp }}/configure.log
             ${{ runner.temp }}/build.log
             ${{ runner.temp }}/ctest.log
+            ${{ runner.temp }}/build-release.log
+            ${{ runner.temp }}/build-dist.log
             Build/CI/windows/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/windows/CMakeFiles/CMakeOutput.log
             Build/CI/windows/CMakeFiles/CMakeError.log
@@ -388,6 +446,37 @@ jobs:
           set -o pipefail
           ctest --test-dir Build/CI/linux --output-on-failure 2>&1 | tee "$RUNNER_TEMP/ctest.log"
 
+      - name: Build Release and Dist editor consumers and verify Debug fixture exclusion
+        run: |
+          set -o pipefail
+          for CONFIGURATION in Release Dist; do
+            BUILD_DIR="Build/CI/linux-${CONFIGURATION,,}"
+            cmake -S . -B "$BUILD_DIR" -G Ninja \
+              -DCMAKE_BUILD_TYPE="$CONFIGURATION" \
+              -DBUILD_TESTING=ON \
+              -DPULSEFORGE_BUILD_EDITOR=ON \
+              -DPULSEFORGE_BUILD_GPU_VALIDATION_TESTS=OFF \
+              -DFETCHCONTENT_BASE_DIR="$GITHUB_WORKSPACE/Build/CI/Dependencies" \
+              -DFETCHCONTENT_FULLY_DISCONNECTED=OFF 2>&1 |
+              tee "$RUNNER_TEMP/configure-${CONFIGURATION,,}.log"
+            cmake --build "$BUILD_DIR" --parallel --target \
+              PulseForgeEditor PulseForgeGame PulseForgeEditorCoreConsumer PulseForgeEditorTests 2>&1 |
+              tee "$RUNNER_TEMP/build-${CONFIGURATION,,}.log"
+            if find "$BUILD_DIR/CMakeFiles/PulseForgeEditorCore.dir" -name 'EditorDebugAcceptanceCoordinators.cpp.o' -print -quit | grep -q .; then
+              echo "Debug-only coordinator was compiled for $CONFIGURATION" >&2
+              exit 1
+            fi
+            EDITOR="$GITHUB_WORKSPACE/$BUILD_DIR/PulseForgeEditor"
+            for FIXTURE_ARGS in "--editor-runtime-play-stop-test" "--document-host-close-ui-test cancel-save"; do
+              LOG="$RUNNER_TEMP/fixture-rejection-${CONFIGURATION,,}-$(printf '%s' "$FIXTURE_ARGS" | tr ' /-' '_').log"
+              if "$EDITOR" $FIXTURE_ARGS >"$LOG" 2>&1; then
+                echo "$CONFIGURATION accepted Debug-only fixture arguments: $FIXTURE_ARGS" >&2
+                exit 1
+              fi
+              grep -q 'available only in Debug' "$LOG"
+            done
+          done
+
       - name: Upload failure logs
         if: failure()
         uses: actions/upload-artifact@v6
@@ -397,6 +486,10 @@ jobs:
             ${{ runner.temp }}/configure.log
             ${{ runner.temp }}/build.log
             ${{ runner.temp }}/ctest.log
+            ${{ runner.temp }}/configure-release.log
+            ${{ runner.temp }}/build-release.log
+            ${{ runner.temp }}/configure-dist.log
+            ${{ runner.temp }}/build-dist.log
             Build/CI/linux/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/linux/CMakeFiles/CMakeOutput.log
             Build/CI/linux/CMakeFiles/CMakeError.log
