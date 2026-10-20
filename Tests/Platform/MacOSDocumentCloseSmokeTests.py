@@ -293,7 +293,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertIn("caller=/usr/bin/osascript", detail)
         self.assertIn("AEDeterminePermissionToAutomateTarget", detail)
         self.assertIn("CGPreflightPostEventAccess=false", detail)
-        self.assertIn("PFDetermineSystemEventsPermission", launch.call_args.args[0][-1])
+        self.assertIn("determineSystemEventsPermission", launch.call_args.args[0][-1])
         self.assertEqual("/usr/bin/osascript", launch.call_args.args[0][0])
 
     def test_osascript_probe_classifies_appleevents_denial_separately_from_other_privileges(self) -> None:
