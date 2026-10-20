@@ -47,15 +47,19 @@ namespace PulseForgeEditor::Detail
 			m_Style.TextMuted("This independent workspace is not part of the Level Editor panels.");
 			ImGui::Text("Asset %s", Session.Identity.Asset.ToString().c_str());
 			int Candidate = SessionState->Value;
-			const bool ValueChanged = ImGui::InputInt("Editable value", &Candidate);
+			ImGui::SetNextItemWidth(120.0f);
+			const bool ValueChanged = ImGui::InputInt("##Editable value", &Candidate);
+			const ImVec2 Minimum = ImGui::GetItemRectMin();
+			const ImVec2 Maximum = ImGui::GetItemRectMax();
+			const bool ValueActive = ImGui::IsItemActive();
 			if (ValueChanged) (void)EditValue(Session, Candidate);
 			if (m_ReportCloseUiTextField)
 			{
-				const ImVec2 Minimum = ImGui::GetItemRectMin();
-				const ImVec2 Maximum = ImGui::GetItemRectMax();
 				m_ReportCloseUiTextField(Session.HostID, static_cast<int>((Minimum.x + Maximum.x) * 0.5f),
-					static_cast<int>((Minimum.y + Maximum.y) * 0.5f), ImGui::IsItemActive(), ValueChanged, SessionState->Value);
+					static_cast<int>((Minimum.y + Maximum.y) * 0.5f), ValueActive, ValueChanged, SessionState->Value);
 			}
+			ImGui::SameLine();
+			ImGui::TextUnformatted("Editable value");
 			if (ImGui::Button("Save fixture")) (void)m_Editors.Save(Session);
 			ImGui::SameLine();
 			if (ImGui::Button("Revert fixture")) (void)m_Editors.Discard(Session);
