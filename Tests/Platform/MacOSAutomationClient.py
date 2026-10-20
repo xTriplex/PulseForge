@@ -29,17 +29,7 @@ try {{
     stage = "custom-framework-load";
     ObjC.import(bridgePath);
 
-    stage = "custom-framework-symbol-binding:PFProbeSystemEventsDescriptor";
-    ObjC.bindFunction("PFProbeSystemEventsDescriptor", ["int", []]);
-    stage = "custom-framework-symbol-binding:PFReadSystemEventsNativeAddress";
-    ObjC.bindFunction("PFReadSystemEventsNativeAddress", ["int", []]);
-    stage = "custom-framework-symbol-binding:PFTypeWildCardEventClass";
-    ObjC.bindFunction("PFTypeWildCardEventClass", ["int", []]);
-    stage = "custom-framework-symbol-binding:PFTypeWildCardEventID";
-    ObjC.bindFunction("PFTypeWildCardEventID", ["int", []]);
-    stage = "custom-framework-symbol-binding:PFDetermineSystemEventsPermission";
-    ObjC.bindFunction("PFDetermineSystemEventsPermission", ["int", []]);
-    stage = "custom-framework-symbol-invocation";
+    stage = "custom-framework-symbol-invocation:PFTypeWildCardEventClass";
     wildcardClass = $.PFTypeWildCardEventClass();
     if (wildcardClass !== 707406378)
         throw new Error("BridgeSupport wildcard function returned " + wildcardClass);
@@ -52,19 +42,19 @@ try {{
     }}
     systemEventsTargetRunning = ObjC.unwrap(systemEventsApplications.count) > 0;
 
-    stage = "descriptor-construction";
+    stage = "custom-framework-symbol-invocation:PFProbeSystemEventsDescriptor";
     descriptorResult = $.PFProbeSystemEventsDescriptor();
     if (descriptorResult !== 0) throw new Error("descriptor construction returned " + descriptorResult);
 
-    stage = "native-AEAddressDesc-access";
+    stage = "custom-framework-symbol-invocation:PFReadSystemEventsNativeAddress";
     descriptorType = $.PFReadSystemEventsNativeAddress();
     if (descriptorType < 0) throw new Error("native address access returned " + descriptorType);
 
-    stage = "wildcard-constant-marshalling";
+    stage = "custom-framework-symbol-invocation:PFTypeWildCardEventID";
     wildcardEvent = $.PFTypeWildCardEventID();
     if (wildcardClass !== 707406378 || wildcardClass !== wildcardEvent) throw new Error("invalid wildcard constants");
 
-    stage = "apple-events-permission-api";
+    stage = "custom-framework-symbol-invocation:PFDetermineSystemEventsPermission";
     appleEventsStatus = systemEventsTargetRunning ? $.PFDetermineSystemEventsPermission() : -600;
 
     stage = "accessibility-trust-query";

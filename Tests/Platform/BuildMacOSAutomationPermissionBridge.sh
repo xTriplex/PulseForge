@@ -4,8 +4,7 @@ set -euo pipefail
 BRIDGE="${RUNNER_TEMP:?RUNNER_TEMP must be set}/PFAutomationPermission.framework"
 mkdir -p "$BRIDGE/Versions/A/Headers" "$BRIDGE/Versions/A/Resources/BridgeSupport"
 cp Tests/Platform/MacOSAutomationPermissionBridge.h "$BRIDGE/Versions/A/Headers/"
-cp Tests/Platform/PFAutomationPermission.bridgesupport \
-	"$BRIDGE/Versions/A/Resources/BridgeSupport/PFAutomationPermission.bridgesupport"
+METADATA="$BRIDGE/Versions/A/Resources/BridgeSupport/PFAutomationPermission.bridgesupport"
 cat > "$BRIDGE/Versions/A/Resources/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -17,18 +16,27 @@ cat > "$BRIDGE/Versions/A/Resources/Info.plist" <<'EOF'
 </dict></plist>
 EOF
 
-if command -v gen_bridge_metadata >/dev/null 2>&1; then
-	echo "gen_bridge_metadata is available; the fixed no-argument int32_t ABI uses checked-in metadata."
-else
-	echo "gen_bridge_metadata is unavailable; the fixed no-argument int32_t ABI uses checked-in metadata."
-fi
-
 clang -fobjc-arc -fmodules -dynamiclib \
 	-Wl,-install_name,@rpath/PFAutomationPermission.framework/Versions/A/PFAutomationPermission \
 	-framework Foundation -framework ApplicationServices \
 	Tests/Platform/MacOSAutomationPermissionBridge.m \
 	-o "$BRIDGE/Versions/A/PFAutomationPermission" 2>&1 |
 	tee "$RUNNER_TEMP/macos-automation-permission-bridge-build.log"
+
+ln -s A "$BRIDGE/Versions/Current"
+ln -s Versions/Current/Headers "$BRIDGE/Headers"
+ln -s Versions/Current/Resources "$BRIDGE/Resources"
+ln -s Versions/Current/PFAutomationPermission "$BRIDGE/PFAutomationPermission"
+ln -s Versions/Current/Resources/Info.plist "$BRIDGE/Info.plist"
+
+if command -v gen_bridge_metadata >/dev/null 2>&1; then
+	gen_bridge_metadata -f "$BRIDGE" -o "$METADATA" 2>&1 |
+		tee -a "$RUNNER_TEMP/macos-automation-permission-bridge-build.log"
+	echo "Generated JXA BridgeSupport metadata from the built framework and public header."
+else
+	cp Tests/Platform/PFAutomationPermission.bridgesupport "$METADATA"
+	echo "gen_bridge_metadata is unavailable; using the checked-in fixed scalar ABI metadata."
+fi
 
 for symbol in PFProbeSystemEventsDescriptor PFReadSystemEventsNativeAddress \
 	PFTypeWildCardEventClass PFTypeWildCardEventID PFDetermineSystemEventsPermission; do
@@ -38,15 +46,27 @@ for symbol in PFProbeSystemEventsDescriptor PFReadSystemEventsNativeAddress \
 	fi
 done
 
-test -s "$BRIDGE/Versions/A/Resources/BridgeSupport/PFAutomationPermission.bridgesupport"
-python3 -c 'import xml.etree.ElementTree as ET,sys; root=ET.parse(sys.argv[1]).getroot(); assert root.tag == "signatures" and root.attrib.get("version") == "1.0"; funcs=root.findall("function"); assert len(funcs) == 5; assert all(f.find("retval") is not None and f.find("retval").attrib == {"type":"i"} and not f.findall("arg") for f in funcs)' \
-	"$BRIDGE/Versions/A/Resources/BridgeSupport/PFAutomationPermission.bridgesupport"
+test -s "$METADATA"
+python3 - "$METADATA" Tests/Platform/MacOSAutomationPermissionBridge.h <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
 
-ln -s A "$BRIDGE/Versions/Current"
-ln -s Versions/Current/Headers "$BRIDGE/Headers"
-ln -s Versions/Current/Resources "$BRIDGE/Resources"
-ln -s Versions/Current/PFAutomationPermission "$BRIDGE/PFAutomationPermission"
-ln -s Versions/Current/Resources/Info.plist "$BRIDGE/Info.plist"
+root = ET.parse(sys.argv[1]).getroot()
+with open(sys.argv[2], encoding="utf-8") as header_file:
+	header = header_file.read()
+expected = set(re.findall(r"int32_t\s+(PF\w+)\s*\(void\)\s*;", header))
+functions = root.findall("function")
+actual = {function.attrib.get("name") for function in functions}
+if root.tag != "signatures" or root.attrib.get("version") != "1.0":
+	raise SystemExit("Invalid BridgeSupport signatures document")
+if actual != expected:
+	raise SystemExit(f"BridgeSupport function set differs from header: expected={sorted(expected)}, actual={sorted(actual)}")
+for function in functions:
+	if function.findall("arg") or function.find("retval") is None or function.find("retval").attrib != {"type": "i"}:
+		raise SystemExit(f"Unexpected ABI for {function.attrib.get('name')}")
+print(f"Verified BridgeSupport int32_t(void) ABI for {len(functions)} exported functions.")
+PY
 
 export PULSEFORGE_MACOS_AUTOMATION_BRIDGE="$BRIDGE"
 if [[ -n "${GITHUB_ENV:-}" ]]; then

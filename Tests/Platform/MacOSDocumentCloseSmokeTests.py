@@ -92,9 +92,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             "PFTypeWildCardEventID",
             "PFDetermineSystemEventsPermission",
         ):
-            self.assertIn(f'stage = "custom-framework-symbol-binding:{function}";', script)
-            self.assertIn(f'ObjC.bindFunction("{function}", ["int", []]);', script)
-        self.assertIn('stage = "custom-framework-symbol-invocation";', script)
+            self.assertIn(f'stage = "custom-framework-symbol-invocation:{function}";', script)
         self.assertIn("wildcardClass = $.PFTypeWildCardEventClass();", script)
         self.assertIn("$.PFProbeSystemEventsDescriptor()", script)
         self.assertIn("$.PFDetermineSystemEventsPermission()", script)
