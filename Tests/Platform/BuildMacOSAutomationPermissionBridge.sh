@@ -66,7 +66,8 @@ if actual != expected:
 	raise SystemExit(f"BridgeSupport function set differs from header: expected={sorted(expected)}, actual={sorted(actual)}")
 for function in functions:
 	retval = function.find("retval")
-	if function.findall("arg") or retval is None or retval.attrib.get("type") != "i":
+	return_types = [] if retval is None else [retval.attrib[key] for key in ("type", "type64") if key in retval.attrib]
+	if function.findall("arg") or not return_types or any(value != "i" for value in return_types):
 		raise SystemExit(f"Unexpected ABI for {function.attrib.get('name')}: {ET.tostring(function, encoding='unicode')}")
 print(f"Verified BridgeSupport int32_t(void) ABI for {len(functions)} exported functions.")
 PY
