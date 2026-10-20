@@ -214,6 +214,60 @@ if operation == "activate-window" {
     print("DIRECT_AX_RESULT status=window-focus-timeout; pid=\(targetPID); target_title=\(targetTitle); focused_title=\(focusedTitle); ax_raise_error=\(raiseError.rawValue); focus_error=\(focusError); attempts=\(attempts)")
     exit(16)
 }
+if operation == "observe-go-to-folder-state" {
+    guard !requestedTitle.isEmpty, titleMatches.count == 1, let window = titleMatches.first else {
+        print("DIRECT_AX_RESULT status=go-to-folder-state-error; stage=window-selection; requested_title=\(requestedTitle); matches=\(titleMatches.count)")
+        exit(20)
+    }
+    struct PendingElement {
+        let element: AXUIElement
+        let depth: Int
+    }
+    var pending = [PendingElement(element: window, depth: 0)]
+    var next = 0
+    var sheetCount = 0
+    var queryErrors: [String] = []
+    let nodeLimit = 64
+    while next < pending.count && next < nodeLimit {
+        let item = pending[next]
+        next += 1
+        AXUIElementSetMessagingTimeout(item.element, 0.2)
+        var rawRole: CFTypeRef?
+        let roleError = AXUIElementCopyAttributeValue(item.element, "AXRole" as CFString, &rawRole)
+        guard roleError == .success, let role = rawRole as? String else {
+            queryErrors.append("role:\(roleError.rawValue)")
+            continue
+        }
+        var rawTitle: CFTypeRef?
+        let titleError = AXUIElementCopyAttributeValue(item.element, "AXTitle" as CFString, &rawTitle)
+        let title = titleError == .success ? (rawTitle as? String ?? "") : ""
+        if role == "AXSheet" {
+            sheetCount += 1
+            print("DIRECT_AX_GO_TO_FOLDER_NODE role=\(role); title=\(title); title_error=\(titleError.rawValue); depth=\(item.depth)")
+        }
+        var rawChildren: CFTypeRef?
+        let childrenError = AXUIElementCopyAttributeValue(item.element, "AXChildren" as CFString, &rawChildren)
+        if childrenError == .success {
+            guard let rawChildren, let children = rawChildren as? [AXUIElement] else {
+                queryErrors.append("children-invalid:\(item.depth)")
+                continue
+            }
+            if item.depth >= 5 {
+                if !children.isEmpty { queryErrors.append("depth-limit:\(item.depth)") }
+            } else {
+                pending.append(contentsOf: children.map { PendingElement(element: $0, depth: item.depth + 1) })
+            }
+        } else if childrenError != .noValue &&
+            (childrenError != .attributeUnsupported ||
+             ["AXWindow", "AXSheet", "AXGroup", "AXSplitGroup", "AXScrollArea", "AXBrowser", "AXOutline"].contains(role)) {
+            queryErrors.append("children:\(childrenError.rawValue):\(item.depth)")
+        }
+    }
+    let truncated = next < pending.count
+    let complete = queryErrors.isEmpty && !truncated
+    print("DIRECT_AX_RESULT status=go-to-folder-state; pid=\(targetPID); window_title=\(requestedTitle); visited=\(next); sheet_count=\(sheetCount); complete=\(complete); truncated=\(truncated); query_errors=\(queryErrors)")
+    exit(complete ? 0 : 21)
+}
 struct AXNode {
     let element: AXUIElement
     let parent: Int?
@@ -284,15 +338,6 @@ if operation == "snapshot" {
         let titleError = AXUIElementCopyAttributeValue(item, "AXTitle" as CFString, &rawTitle)
         let windowTitle = titleError == .success ? (rawTitle as? String ?? "") : "<AXError:\(titleError.rawValue)>"
         print("DIRECT_AX_WINDOW pid=\(targetPID); index=\(index + 1); role=AXWindow; title=\(windowTitle)")
-        var rawSheets: CFTypeRef?
-        let sheetsError = AXUIElementCopyAttributeValue(item, "AXSheets" as CFString, &rawSheets)
-        let sheets = (rawSheets as? [AXUIElement]) ?? []
-        print("DIRECT_AX_SHEET_LIST pid=\(targetPID); parent_title=\(windowTitle); ax_error=\(sheetsError.rawValue); count=\(sheets.count)")
-        for sheet in sheets {
-            let role = string(sheet, "AXRole") ?? "<unavailable>"
-            let title = string(sheet, "AXTitle") ?? "<unavailable>"
-            print("DIRECT_AX_SHEET pid=\(targetPID); parent_title=\(windowTitle); role=\(role); title=\(title)")
-        }
         fflush(stdout)
     }
     guard deepSnapshot else { exit(0) }

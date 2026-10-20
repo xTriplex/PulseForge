@@ -75,7 +75,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expected one focused-window result"):
             direct_ax.parse_window_activation("DIRECT_AX_RESULT status=window-focus-timeout; pid=4321\n", 4321, "Host Test Fixture 1")
 
-    def test_open_panel_readiness_requires_exact_enabled_control_and_folder_state(self) -> None:
+    def test_open_panel_requires_exact_enabled_control_and_folder_sheet_state(self) -> None:
         output = (
             "DIRECT_AX_NODE index=12; parent=2; depth=3; role=AXButton; subrole=; name=Open; enabled=true; focused=0\n"
             "DIRECT_AX_NODE index=13; parent=2; depth=3; role=AXButton; subrole=; name=Cancel; enabled=true; focused=0\n"
@@ -84,21 +84,20 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertFalse(native_dialog.ax_node_enabled(output, "AXButton", "Save"))
         self.assertFalse(native_dialog.ax_node_enabled(output.replace("enabled=true", "enabled=false", 1), "AXButton", "Open"))
         dismissed_snapshot = (
-            "DIRECT_AX_RESULT status=snapshot; pid=42\n"
-            "DIRECT_AX_WINDOW pid=42; index=1; role=AXWindow; title=Open\n"
-            "DIRECT_AX_SHEET_LIST pid=42; parent_title=Open; ax_error=0; count=0\n"
+            "DIRECT_AX_RESULT status=go-to-folder-state; pid=42; window_title=Open; visited=8; "
+            "sheet_count=0; complete=true; truncated=false; query_errors=[]\n"
         )
         self.assertTrue(native_dialog.go_to_folder_sheet_dismissed(dismissed_snapshot))
         self.assertFalse(native_dialog.go_to_folder_sheet_dismissed(
-            dismissed_snapshot.replace("count=0", "count=1") +
-            "DIRECT_AX_SHEET pid=42; parent_title=Open; role=AXSheet; title=GoToWindow\n"
+            dismissed_snapshot.replace("sheet_count=0", "sheet_count=1")
         ))
         self.assertFalse(native_dialog.go_to_folder_sheet_dismissed(
-            dismissed_snapshot.replace("ax_error=0", "ax_error=-25211")
+            dismissed_snapshot.replace("complete=true", "complete=false").replace(
+                "query_errors=[]", "query_errors=['children:-25204:2']"
+            )
         ))
         self.assertFalse(native_dialog.go_to_folder_sheet_dismissed(
-            "DIRECT_AX_WINDOW pid=42; index=1; role=AXWindow; title=PulseForge Editor\n"
-            "DIRECT_AX_SHEET_LIST pid=42; parent_title=PulseForge Editor; ax_error=0; count=0\n"
+            dismissed_snapshot.replace("window_title=Open", "window_title=PulseForge Editor")
         ))
         self.assertFalse(native_dialog.go_to_folder_path_field_visible(
             "DIRECT_AX_NODE index=1; role=AXTextField; name=PathTextField; enabled=true; focused=false"

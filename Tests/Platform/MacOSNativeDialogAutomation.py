@@ -120,13 +120,14 @@ def run_direct_ax_until(
     description: str,
     *,
     deep_snapshot: bool = True,
+    operation: str = "snapshot",
 ) -> str:
     last_output = ""
     while time.monotonic() < deadline:
         remaining = deadline - time.monotonic()
         code, output, error = run_direct_ax(
             fixture_pid,
-            operation="snapshot",
+            operation=operation,
             window_title=panel_title,
             deep_snapshot=deep_snapshot,
             timeout=min(8.0, max(0.1, remaining)),
@@ -167,30 +168,22 @@ def go_to_folder_path_field_visible(output: str) -> bool:
 
 
 def go_to_folder_sheet_dismissed(output: str) -> bool:
-    window_lines = [
+    results = [
         line for line in output.splitlines()
-        if line.startswith("DIRECT_AX_WINDOW ")
+        if line.startswith("DIRECT_AX_RESULT status=go-to-folder-state;")
     ]
-    if sum(
-        dict(part.split("=", 1) for part in line.split("; ") if "=" in part).get("title") == "Open"
-        for line in window_lines
-    ) != 1:
+    if len(results) != 1:
         return False
-    sheets_lines = [
-        line for line in output.splitlines()
-        if line.startswith("DIRECT_AX_SHEET_LIST ")
-    ]
-    sheets_lines = [
-        line for line in sheets_lines
-        if dict(part.split("=", 1) for part in line.split("; ") if "=" in part).get("parent_title") == "Open"
-    ]
-    if len(sheets_lines) != 1:
-        return False
-    fields = dict(part.split("=", 1) for part in sheets_lines[0].split("; ") if "=" in part)
-    if fields.get("ax_error") not in {"0", "-25212"}:
+    fields = dict(part.split("=", 1) for part in results[0].split("; ") if "=" in part)
+    if (
+        fields.get("window_title") != "Open"
+        or fields.get("complete") != "true"
+        or fields.get("truncated") != "false"
+        or fields.get("query_errors") != "[]"
+    ):
         return False
     try:
-        sheet_count = int(fields["count"])
+        sheet_count = int(fields["sheet_count"])
     except (KeyError, ValueError):
         return False
     return sheet_count == 0
@@ -606,11 +599,12 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             print(f"NFD_GO_TO_FOLDER_RETURN=POSTED; action_id={return_action_id}; target_pid={panel_process_id}", flush=True)
             run_direct_ax_until(
                 int(panel_process_id),
-                "",
+                panel_title,
                 helper_deadline,
                 go_to_folder_sheet_dismissed,
                 "Go to Folder sheet dismissal",
                 deep_snapshot=False,
+                operation="observe-go-to-folder-state",
             )
             last_navigation_step = "Go To Folder sheet dismissal observed"
             print("NFD_GO_TO_FOLDER_SHEET=DISMISSED", flush=True)
