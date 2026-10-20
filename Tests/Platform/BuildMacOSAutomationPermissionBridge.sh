@@ -65,7 +65,7 @@ PY
 	/usr/bin/codesign -dv --verbose=2 "$BRIDGE" 2>&1 || true
 	/usr/bin/codesign -dv --verbose=2 /usr/bin/osascript 2>&1 || true
 	for variable in DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH DYLD_FALLBACK_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_IMAGE_SUFFIX DYLD_ROOT_PATH; do
-		if [[ -v "$variable" ]]; then printf 'loader_env[%s]=%s\n' "$variable" "${!variable}"; else printf 'loader_env[%s]=<unset>\n' "$variable"; fi
+		if value=$(printenv "$variable"); then printf 'loader_env[%s]=%s\n' "$variable" "$value"; else printf 'loader_env[%s]=<unset>\n' "$variable"; fi
 	done
 } 2>&1 | tee -a "$RUNNER_TEMP/macos-automation-permission-bridge-build.log"
 
