@@ -1703,17 +1703,23 @@ def main() -> int:
         args.log_directory.mkdir(parents=True, exist_ok=True)
         ax_state, ax_pid, ax_detail = probe_osascript_access()
         print(
-            f"MACOS_DOC_CLOSE_OSASCRIPT_AX_PREFLIGHT={ax_state}; executable=/usr/bin/osascript; "
+            f"MACOS_DOC_CLOSE_OSASCRIPT_PERMISSION_PREFLIGHT={ax_state}; executable=/usr/bin/osascript; "
             f"probe_pid={ax_pid}; detail={ax_detail!r}"
         )
-        if ax_state == "AX_UNTRUSTED":
+        if ax_state in {
+            "AX_UNTRUSTED",
+            "APPLE_EVENTS_DENIED",
+            "APPLE_EVENTS_CONSENT_REQUIRED",
+            "APPLE_EVENTS_TARGET_UNAVAILABLE",
+            "APPLE_EVENTS_UNSUPPORTED",
+        }:
             print(
                 "MACOS_DOC_CLOSE_AUTOMATION=BLOCKED; dirty-close acceptance NOT RUN; client=osascript; "
                 f"reason={ax_state}; no permission prompt was requested"
             )
             return 77
-        if ax_state != "AX_TRUSTED":
-            raise RuntimeError(f"could not nonpromptingly check osascript Accessibility trust: {ax_state}; {ax_detail}")
+        if ax_state != "OSASCRIPT_AX_APPLE_EVENTS_AUTHORIZED":
+            raise RuntimeError(f"could not nonpromptingly verify osascript automation permissions: {ax_state}; {ax_detail}")
         runner_temp = os.environ.get("RUNNER_TEMP")
         temp_parent = Path(runner_temp).resolve(strict=True) if runner_temp else Path(tempfile.gettempdir()).resolve(strict=True)
         driver_root = Path(tempfile.mkdtemp(prefix="PulseForge Document Close Driver Ω ", dir=temp_parent)).resolve(strict=True)

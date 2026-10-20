@@ -18,6 +18,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Check out sources
+        id: checkout_sources
         uses: actions/checkout@v5
         with:
           submodules: recursive
@@ -28,10 +29,53 @@ jobs:
           set -o pipefail
           python3 Tests/Platform/MacOSDocumentCloseSmokeTests.py 2>&1 | tee "$RUNNER_TEMP/macos-document-close-harness-tests.log"
 
+      - name: Build and diagnose the same-process macOS automation permission bridge
+        id: macos_automation_permission_probe
+        if: ${{ always() && !cancelled() && steps.checkout_sources.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          BRIDGE="$RUNNER_TEMP/PFAutomationPermission.framework"
+          mkdir -p "$BRIDGE/Versions/A/Headers" "$BRIDGE/Versions/A/Modules" "$BRIDGE/Versions/A/Resources"
+          cp Tests/Platform/MacOSAutomationPermissionBridge.h "$BRIDGE/Versions/A/Headers/"
+          cat > "$BRIDGE/Versions/A/Modules/module.modulemap" <<'EOF'
+          framework module PFAutomationPermission {
+            header "MacOSAutomationPermissionBridge.h"
+            export *
+          }
+          EOF
+          cat > "$BRIDGE/Versions/A/Resources/Info.plist" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleIdentifier</key><string>com.pulseforge.test.automation-permission</string>
+            <key>CFBundleExecutable</key><string>PFAutomationPermission</string>
+            <key>CFBundlePackageType</key><string>FMWK</string>
+            <key>CFBundleVersion</key><string>1</string>
+          </dict></plist>
+          EOF
+          clang -fobjc-arc -fmodules -dynamiclib \
+            -Wl,-install_name,@rpath/PFAutomationPermission.framework/Versions/A/PFAutomationPermission \
+            -framework Foundation -framework ApplicationServices \
+            Tests/Platform/MacOSAutomationPermissionBridge.m \
+            -o "$BRIDGE/Versions/A/PFAutomationPermission" 2>&1 |
+            tee "$RUNNER_TEMP/macos-automation-permission-bridge-build.log"
+          ln -s A "$BRIDGE/Versions/Current"
+          ln -s Versions/Current/Headers "$BRIDGE/Headers"
+          ln -s Versions/Current/Modules "$BRIDGE/Modules"
+          ln -s Versions/Current/Resources "$BRIDGE/Resources"
+          ln -s Versions/Current/PFAutomationPermission "$BRIDGE/PFAutomationPermission"
+          ln -s Versions/Current/Resources/Info.plist "$BRIDGE/Info.plist"
+          export PULSEFORGE_MACOS_AUTOMATION_BRIDGE="$BRIDGE"
+          echo "PULSEFORGE_MACOS_AUTOMATION_BRIDGE=$BRIDGE" >> "$GITHUB_ENV"
+          python3 Tests/Platform/MacOSAutomationClient.py 2>&1 | tee "$RUNNER_TEMP/macos-automation-permission-probe.log"
+
       - name: Probe hosted Metal command execution
+        if: ${{ always() && !cancelled() && steps.checkout_sources.outcome == 'success' }}
         run: swift Tests/Platform/MacOSMetalCapabilityProbe.swift
 
       - name: Install the official Vulkan SDK in the runner temp directory
+        id: install_vulkan_sdk
+        if: ${{ always() && !cancelled() && steps.checkout_sources.outcome == 'success' }}
         run: |
           set -o pipefail
           SDK_VERSION=1.4.350.0
@@ -56,6 +100,7 @@ jobs:
           "$DXC_EXECUTABLE" --version | tee -a "$RUNNER_TEMP/apple-toolchain.log"
 
       - name: Probe the selected MoltenVK device and capabilities
+        if: ${{ always() && !cancelled() && steps.install_vulkan_sdk.outcome == 'success' }}
         run: |
           set -o pipefail
           "$VULKAN_SDK/bin/vulkaninfo" --summary 2>&1 | tee "$RUNNER_TEMP/vulkaninfo-summary.log"
@@ -65,6 +110,7 @@ jobs:
 
       - name: Configure the supported PulseForge macOS desktop targets
         id: configure_desktop_targets
+        if: ${{ always() && !cancelled() && steps.checkout_sources.outcome == 'success' && steps.install_vulkan_sdk.outcome == 'success' }}
         run: |
           set -o pipefail
           cmake -S . -B Build/CI/macos-renderer -G Ninja \
@@ -79,6 +125,7 @@ jobs:
 
       - name: Build tests, editor, player and renderer fixture
         id: build_desktop_targets
+        if: ${{ always() && !cancelled() && steps.configure_desktop_targets.outcome == 'success' }}
         run: |
           set -o pipefail
           cmake --build Build/CI/macos-renderer --parallel --target \
@@ -87,6 +134,7 @@ jobs:
             tee "$RUNNER_TEMP/macos-build.log"
 
       - name: Inspect loader lifecycle executable dependencies before environment isolation
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
         run: |
           set -o pipefail
           LIFECYCLE_EXECUTABLE="$GITHUB_WORKSPACE/Build/CI/macos-renderer/PulseForgeMacOSVulkanLoaderLifecycleValidation"
@@ -103,6 +151,7 @@ jobs:
 
       - name: Run registered macOS CPU and editor tests
         id: macos_cpu_validation
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
         run: |
           set -o pipefail
           ctest --test-dir Build/CI/macos-renderer --output-on-failure --verbose -LE 'gpu|policy' 2>&1 |
@@ -115,6 +164,7 @@ jobs:
 
       - name: Run the required PulseForge renderer policy and sensitivity fixtures
         id: macos_renderer_validation
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
         run: |
           set -o pipefail
           ctest --test-dir Build/CI/macos-renderer --output-on-failure --verbose \
@@ -145,6 +195,7 @@ jobs:
 
       - name: Run relocated editor and player bundle smokes from unrelated working directories
         id: macos_bundle_smoke
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
         run: |
           set -o pipefail
           python3 Tests/Platform/MacOSBundleSmoke.py \
@@ -156,6 +207,7 @@ jobs:
 
       - name: Exercise editor Play and Stop through the production runtime transition
         id: macos_editor_runtime_play_stop
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
         run: |
           set -o pipefail
           python3 Tests/Platform/MacOSEditorRuntimePlayStopSmoke.py \
@@ -166,6 +218,7 @@ jobs:
 
       - name: Verify native document hosts and synthetic tab reattachment
         id: macos_document_hosts
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
         run: |
           set -o pipefail
           python3 Tests/Platform/MacOSDocumentHostSmoke.py \
@@ -297,6 +350,8 @@ jobs:
         with:
           name: macos-pulseforge-desktop-evidence
           path: |
+            ${{ runner.temp }}/macos-automation-permission-probe.log
+            ${{ runner.temp }}/macos-automation-permission-bridge-build.log
             ${{ runner.temp }}/vulkan-sdk-download.log
             ${{ runner.temp }}/apple-toolchain.log
             ${{ runner.temp }}/vulkaninfo-summary.log
