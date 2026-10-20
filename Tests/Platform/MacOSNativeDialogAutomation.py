@@ -517,6 +517,19 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
     if scenario == "open-select":
         try:
             helper_deadline = min(deadline, time.monotonic() + 25.0)
+            activation_code, activation_output, activation_error = run_direct_ax(
+                int(panel_process_id),
+                operation="activate-window",
+                window_title=panel_title,
+                timeout=min(8.0, remaining_seconds()),
+            )
+            activation_output += activation_error
+            if activation_code != 0 or "DIRECT_AX_RESULT status=window-focused" not in activation_output:
+                raise RuntimeError(
+                    f"Open panel was not the confirmed focused AX window before Go to Folder; "
+                    f"exit_code={activation_code}; {activation_output!r}"
+                )
+            print(f"NFD_OPEN_PANEL_FOCUS=CONFIRMED; {activation_output.strip()!r}")
             run_keyboard_input("--go-to-folder", int(panel_process_id), timeout=min(5.0, remaining_seconds()))
             run_direct_ax_until(
                 int(panel_process_id), panel_title, helper_deadline, go_to_folder_path_field_visible,

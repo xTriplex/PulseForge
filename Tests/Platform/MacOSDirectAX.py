@@ -65,13 +65,22 @@ AXUIElementSetMessagingTimeout(app, 1.0)
 if operation == "close-main-window" {
     print("DIRECT_AX_STAGE operation=close-main-window; stage=main-window-query")
     fflush(stdout)
-    var rawWindow: CFTypeRef?
-    let windowError = AXUIElementCopyAttributeValue(app, "AXMainWindow" as CFString, &rawWindow)
-    guard windowError == .success, let rawWindow, CFGetTypeID(rawWindow) == AXUIElementGetTypeID() else {
-        print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=main-window; ax_error=\(windowError.rawValue)")
+    var rawWindows: CFTypeRef?
+    let windowError = AXUIElementCopyAttributeValue(app, "AXWindows" as CFString, &rawWindows)
+    guard windowError == .success, let rawWindows, let windows = rawWindows as? [AXUIElement] else {
+        print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=window-list; ax_error=\(windowError.rawValue)")
         exit(5)
     }
-    let window = rawWindow as! AXUIElement
+    let windowCandidates = windows.filter {
+        string($0, "AXRole") == "AXWindow" &&
+        string($0, "AXSubrole") == "AXStandardWindow" &&
+        (string($0, "AXTitle") ?? "").contains(requestedTitle)
+    }
+    guard !requestedTitle.isEmpty, windowCandidates.count == 1, let window = windowCandidates.first else {
+        let titles = windows.map { string($0, "AXTitle") ?? "<unavailable>" }
+        print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=window-selection; requested_title=\(requestedTitle); matches=\(windowCandidates.count); titles=\(titles)")
+        exit(5)
+    }
     AXUIElementSetMessagingTimeout(window, 1.0)
     let windowRole = string(window, "AXRole") ?? "<unavailable>"
     let windowSubrole = string(window, "AXSubrole") ?? "<unavailable>"
@@ -85,7 +94,7 @@ if operation == "close-main-window" {
     var selectedBy = "AXCloseButton"
     if closeAttributeError == .success, let rawCloseButton,
        CFGetTypeID(rawCloseButton) == AXUIElementGetTypeID() {
-        closeButton = rawCloseButton as! AXUIElement
+        closeButton = rawCloseButton as? AXUIElement
     }
     if closeButton == nil {
         var rawChildren: CFTypeRef?
@@ -104,7 +113,7 @@ if operation == "close-main-window" {
                 let childActionError = AXUIElementCopyActionNames(child, &childActions)
                 return "role=\(childRole);subrole=\(childSubrole);name=\(childName);actions_error=\(childActionError.rawValue);actions=\(childActions as? [String] ?? [])"
             }
-            print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=close-button; close_attribute_error=\(closeAttributeError.rawValue); children_error=\(childrenError.rawValue); child_controls=\(childSummary)")
+            print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=close-button; requested_title=\(requestedTitle); close_attribute_error=\(closeAttributeError.rawValue); children_error=\(childrenError.rawValue); child_controls=\(childSummary)")
             exit(6)
         }
         closeButton = candidate
@@ -123,7 +132,7 @@ if operation == "close-main-window" {
         exit(7)
     }
     AXUIElementSetMessagingTimeout(closeButton, 1.0)
-    print("DIRECT_AX_DISPATCH attempted=true; operation=close-main-window; pid=\(targetPID); window=AXMainWindow; selected_by=\(selectedBy)")
+    print("DIRECT_AX_DISPATCH attempted=true; operation=close-main-window; pid=\(targetPID); window_title=\(windowTitle); selected_by=\(selectedBy)")
     fflush(stdout)
     let pressError = AXUIElementPerformAction(closeButton, kAXPressAction as CFString)
     print("DIRECT_AX_RESULT status=\(pressError == .success ? "action-returned" : "action-error"); operation=close-main-window; pid=\(targetPID); ax_error=\(pressError.rawValue)")
