@@ -62,6 +62,79 @@ class DirtyCloseProtocolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.protocol = smoke.MarkerProtocol("cancel-save", "host-a", "asset-a", 0)
 
+    def test_native_main_close_requires_the_direct_ax_result_and_orderly_exit(self) -> None:
+        class Process:
+            pid = 4321
+            returncode = None
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+            @staticmethod
+            def wait(timeout: float) -> int:
+                return 0
+
+        output = (
+            "DIRECT_AX_DISPATCH attempted=true; operation=close-main-window; pid=4321; window_title=PulseForge Editor\n"
+            "DIRECT_AX_RESULT status=action-returned; operation=close-main-window; pid=4321; ax_error=0\n"
+        )
+        with patch.object(smoke, "run_direct_ax", return_value=(0, output, "")) as close:
+            smoke.exit_normally(Process(), time.monotonic() + 5.0, {"kind": "PASS", "scenario": "discard"})
+        close.assert_called_once()
+        self.assertEqual(4321, close.call_args.args[0])
+        self.assertEqual("close-main-window", close.call_args.kwargs["operation"])
+        self.assertEqual(smoke.MAIN_TITLE_FRAGMENT, close.call_args.kwargs["window_title"])
+        self.assertGreater(close.call_args.kwargs["timeout"], 0.0)
+        self.assertLessEqual(close.call_args.kwargs["timeout"], 8.0)
+
+    def test_uncertain_native_close_requires_clean_process_exit(self) -> None:
+        class ExitedProcess:
+            pid = 4321
+            returncode = None
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+            @staticmethod
+            def wait(timeout: float) -> int:
+                return 0
+
+        uncertain = (
+            "DIRECT_AX_DISPATCH attempted=true; operation=close-main-window; pid=4321; window_title=PulseForge Editor\n"
+            "DIRECT_AX_RESULT status=action-error; operation=close-main-window; pid=4321; ax_error=-25204\n"
+        )
+        with patch.object(smoke, "run_direct_ax", return_value=(8, uncertain, "")):
+            smoke.exit_normally(ExitedProcess(), time.monotonic() + 5.0, {"kind": "PASS", "scenario": "discard"})
+
+        class StillRunningProcess(ExitedProcess):
+            @staticmethod
+            def wait(timeout: float) -> int:
+                raise subprocess.TimeoutExpired("PulseForgeEditor", timeout)
+
+        with patch.object(smoke, "run_direct_ax", return_value=(124, uncertain, "")), patch.object(
+            smoke, "capture_main_close_diagnostics", return_value="window_query=PASS; snapshot='PulseForgeEditor'"
+        ):
+            with self.assertRaisesRegex(RuntimeError, "SHUTDOWN_COMPLETION.*MISSING_PROCESS_EXIT"):
+                smoke.exit_normally(
+                    StillRunningProcess(), time.monotonic() + 5.0, {"kind": "PASS", "scenario": "discard"}
+                )
+
+    def test_native_close_lookup_failure_does_not_count_as_a_dispatched_action(self) -> None:
+        class Process:
+            pid = 4321
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        with patch.object(
+            smoke, "run_direct_ax", return_value=(5, "DIRECT_AX_RESULT status=error; stage=window-list; ax_error=-25211", "")
+        ), patch.object(smoke, "capture_main_close_diagnostics", return_value="bounded snapshot"):
+            with self.assertRaisesRegex(RuntimeError, "WINDOW_OR_CONTROL_LOOKUP.*dispatch_attempted=0"):
+                smoke.exit_normally(Process(), time.monotonic() + 5.0, {"kind": "PASS", "scenario": "discard"})
+
     def test_native_window_activation_requires_the_expected_focused_window(self) -> None:
         output = (
             "DIRECT_AX_RESULT status=window-focused; pid=4321; target_title=Host Test Fixture 1; "
