@@ -225,6 +225,7 @@ jobs:
             ${{ runner.temp }}/macos-workspace-restore-smoke.log
             ${{ runner.temp }}/macos-workspace-restore-first-launch.log
             ${{ runner.temp }}/macos-workspace-restore-second-launch.log
+            ${{ runner.temp }}/macos-workspace-restore-close-failure.png
             ${{ runner.temp }}/macos-document-close-smoke.log
             ${{ runner.temp }}/macos-document-close-cancel-save.log
             ${{ runner.temp }}/macos-document-close-discard.log

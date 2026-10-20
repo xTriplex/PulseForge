@@ -373,7 +373,7 @@ def wait_event(capture: BoundedCapture, process: subprocess.Popen[str], kind: st
             raise RuntimeError(f"malformed fixture marker: {event.get('raw', '<invalid marker>')!r}")
         if event.get("kind") in {"READY", "PROMPT", "ACTION", "CLOSED", "PASS"}:
             raise RuntimeError(f"unexpected {event.get('kind')} event while waiting for {kind}: {event.get('raw')!r}")
-        if event.get("kind") in {"FIXTURE", "TEXT_CONTROL", "TEXT_HOVER", "TEXT_FOCUS", "TEXT_ENTRY", "CLOSE_CONTROL"}:
+        if event.get("kind") in {"FIXTURE", "TEXT_CONTROL", "TEXT_POINTER", "TEXT_FOCUS", "TEXT_ENTRY", "CLOSE_CONTROL"}:
             if event.get("kind") == "FIXTURE":
                 capture.pending = deque(
                     (pending for pending in capture.pending if pending.get("kind") != "FIXTURE"), maxlen=MAX_EVENT_COUNT
@@ -488,25 +488,35 @@ def enter_editor_value(process: subprocess.Popen[str], capture: BoundedCapture, 
 
     pointer_deadline = min(deadline, time.monotonic() + 8.0)
     try:
-        hover = wait_event(capture, process, "TEXT_HOVER", protocol.scenario, pointer_deadline)
+        pointer = wait_event(capture, process, "TEXT_POINTER", protocol.scenario, pointer_deadline)
     except RuntimeError as error:
         raise RuntimeError(
             capture_text_focus_timeout(
                 process, protocol.scenario, point, capture.log_path.parent,
-                f"ImGui did not report the clicked text control hovered: {error}",
+                f"ImGui reported no mouse, hover, or active-state change after the click; "
+                f"initial_pointer=({control.get('mouse_x')},{control.get('mouse_y')}); {error}",
             )
         ) from error
-    protocol.check_identity(hover)
-    if hover.get("hovered") != "1" or hover.get("x") != str(point[0]) or hover.get("y") != str(point[1]):
+    protocol.check_identity(pointer)
+    try:
+        mouse_x = float(pointer["mouse_x"])
+        mouse_y = float(pointer["mouse_y"])
+    except (KeyError, ValueError) as error:
+        raise RuntimeError(f"ImGui pointer-state marker has invalid coordinates: {pointer.get('raw')!r}") from error
+    if not math.isfinite(mouse_x) or not math.isfinite(mouse_y):
+        raise RuntimeError(f"ImGui pointer-state marker has non-finite coordinates: {pointer.get('raw')!r}")
+    if pointer.get("hovered") != "1" or not math.isclose(mouse_x, point[0], abs_tol=1.5) or not math.isclose(
+        mouse_y, point[1], abs_tol=1.5
+    ):
         raise RuntimeError(
             capture_text_focus_timeout(
                 process, protocol.scenario, point, capture.log_path.parent,
-                f"ImGui hover evidence did not match the clicked text control: {hover.get('raw')!r}",
+                f"ImGui did not hover the clicked text control at its reported mouse position: {pointer.get('raw')!r}",
             )
         )
     print(
         f"MACOS_DOC_CLOSE_HOVER=PASS; scenario={protocol.scenario}; "
-        f"mouse=({hover.get('mouse_x')},{hover.get('mouse_y')}); control=({point[0]},{point[1]})"
+        f"mouse=({mouse_x:.1f},{mouse_y:.1f}); control=({point[0]},{point[1]})"
     )
 
     focus_deadline = min(deadline, time.monotonic() + 5.0)
