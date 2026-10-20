@@ -19,10 +19,10 @@ namespace PulseForgeEditor::Detail
 	EditorDocumentHostTestEditor::EditorDocumentHostTestEditor(EditorDocumentManager& Documents, EditorDocumentEditorRegistry& Editors,
 		EditorStyle& Style, std::function<void(std::string)> ReportError, std::function<PulseForge::UUID()> ActiveProject,
 		std::function<void(std::string_view, int, int, bool)> ReportCloseUiAllowClose,
-		std::function<void(std::string_view, int, int, bool, bool, bool, int)> ReportCloseUiTextField)
+		std::function<void(std::string_view, int, int, bool, bool, bool, int)> ReportCloseUiTextField, bool TextOnlyEditing)
 		: m_Documents(Documents), m_Editors(Editors), m_Style(Style), m_ReportError(std::move(ReportError)),
 		  m_ActiveProject(std::move(ActiveProject)), m_ReportCloseUiAllowClose(std::move(ReportCloseUiAllowClose)),
-		  m_ReportCloseUiTextField(std::move(ReportCloseUiTextField))
+		  m_ReportCloseUiTextField(std::move(ReportCloseUiTextField)), m_TextOnlyEditing(TextOnlyEditing)
 	{
 	}
 
@@ -48,7 +48,9 @@ namespace PulseForgeEditor::Detail
 			ImGui::Text("Asset %s", Session.Identity.Asset.ToString().c_str());
 			int Candidate = SessionState->Value;
 			ImGui::SetNextItemWidth(120.0f);
-			const bool ValueChanged = ImGui::InputInt("##Editable value", &Candidate);
+			const int Step = m_TextOnlyEditing ? 0 : 1;
+			const int FastStep = m_TextOnlyEditing ? 0 : 100;
+			const bool ValueChanged = ImGui::InputInt("##Editable value", &Candidate, Step, FastStep);
 			const ImVec2 Minimum = ImGui::GetItemRectMin();
 			const ImVec2 Maximum = ImGui::GetItemRectMax();
 			const bool ValueActive = ImGui::IsItemActive();
