@@ -62,9 +62,10 @@ jobs:
 
           Path(sys.argv[1]).write_text(POINTER_DRIVER_SOURCE, encoding="utf-8")
           PY
-          xcrun swiftc -O "$POINTER_SOURCE" -framework CoreGraphics -o "$POINTER_EXECUTABLE" \
+          xcrun swiftc -O "$POINTER_SOURCE" -framework AppKit -framework CoreGraphics -o "$POINTER_EXECUTABLE" \
             2>&1 | tee "$RUNNER_TEMP/macos-pointer-driver-build.log"
-          for arguments in '123 invalid 20 20' '123 0123456789abcdef0123456789abcdef not-a-coordinate 20'; do
+          for arguments in '123 invalid 20 20' '123 0123456789abcdef0123456789abcdef not-a-coordinate 20' \
+            '--go-to-folder 123 invalid' '--type-text 123 invalid Ω'; do
             set +e
             "$POINTER_EXECUTABLE" $arguments > "$RUNNER_TEMP/macos-pointer-driver-invalid.log" 2>&1
             status=$?

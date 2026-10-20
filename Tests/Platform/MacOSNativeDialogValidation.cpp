@@ -109,7 +109,9 @@ int main(int ArgumentCount, char** Arguments)
 	if (!Initialized) return Fail("native dialog initialization failed: " + Initialized.error());
 	DialogLifetime DialogCleanup;
 	const std::filesystem::path InitialDirectory = ExpectedPath.parent_path();
-	std::cout << "NFD_DIALOG_READY=" << Scenario << "; expected=" << PathToUtf8(ExpectedPath) << std::endl;
+	std::cout << "NFD_DIALOG_READY=" << Scenario << "; expected=" << PathToUtf8(ExpectedPath)
+			  << "; initial_directory=" << PathToUtf8(InitialDirectory)
+			  << "; expected_filename=" << PathToUtf8(ExpectedPath.filename()) << std::endl;
 	std::expected<std::optional<std::filesystem::path>, std::string> Result =
 		IsOpen ? PulseForgeEditor::EditorPlatformServices::ShowOpenFileDialog(Window, nullptr, InitialDirectory)
 			   : PulseForgeEditor::EditorPlatformServices::ShowSaveFileDialog(

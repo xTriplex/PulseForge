@@ -22,6 +22,7 @@ import uuid
 from pathlib import Path
 
 from MacOSAutomationClient import capture_failure_context, probe_osascript_access
+from MacOSDirectAX import parse_window_activation, run_direct_ax
 from MacOSScreenshot import capture_screenshot
 
 MAX_LOG_BYTES = 128 * 1024
@@ -78,16 +79,6 @@ WINDOW_BOUNDS_QUERY = '''on run argv
         return (name of targetProcess as text) & linefeed & expectedTitle & linefeed & ¬
             ((item 1 of windowPosition) as text) & "," & ((item 2 of windowPosition) as text) & ¬
             "," & ((item 1 of windowSize) as text) & "," & ((item 2 of windowSize) as text)
-    end tell
-end run
-'''
-
-FOCUS_TARGET = '''on run argv
-    set targetPID to item 1 of argv as integer
-    tell application "System Events"
-        set targetProcess to first process whose unix id is targetPID
-        set frontmost of targetProcess to true
-        return "MACOS_DOC_CLOSE_FOCUS=PASS; pid=" & (targetPID as text) & "; process=" & (name of targetProcess as text)
     end tell
 end run
 '''
@@ -167,13 +158,70 @@ on run argv
 end run
 '''
 
-POINTER_DRIVER_SOURCE = r'''import CoreGraphics
+POINTER_DRIVER_SOURCE = r'''import AppKit
+import CoreGraphics
 import Darwin
 import Foundation
 
 func fail(_ message: String, _ status: Int32) -> Never {
     fputs(message + "\n", stderr)
     exit(status)
+}
+
+func postKeyboard(_ keyCode: CGKeyCode, _ isDown: Bool, _ flags: CGEventFlags, _ source: CGEventSource,
+                  _ actionID: String, _ eventTag: UInt64, _ targetPID: Int32, _ text: String? = nil) {
+    guard let event = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: isDown) else {
+        fail("CGEvent keyboard creation failed for keycode \(keyCode)", 3)
+    }
+    event.flags = flags
+    if let text, isDown {
+        let units = Array(text.utf16)
+        units.withUnsafeBufferPointer { buffer in
+            event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: buffer.baseAddress!)
+        }
+    }
+    event.setIntegerValueField(.eventSourceUserData, value: Int64(truncatingIfNeeded: eventTag))
+    event.post(tap: .cghidEventTap)
+    print("CGEventPost=KEY; action_id=\(actionID); target_pid=\(targetPID); keycode=\(keyCode); down=\(isDown ? 1 : 0); " +
+          "unicode_units=\(text?.utf16.count ?? 0); post_returned=1; route=global-hid-event-stream")
+}
+
+if CommandLine.arguments.count >= 2 &&
+   (CommandLine.arguments[1] == "--go-to-folder" || CommandLine.arguments[1] == "--type-text") {
+    let mode = CommandLine.arguments[1]
+    let expectedCount = mode == "--go-to-folder" ? 4 : 5
+    guard CommandLine.arguments.count == expectedCount else {
+        fail("keyboard input requires \(mode), PID, action identity" + (mode == "--type-text" ? " and text" : ""), 2)
+    }
+    guard let targetPID = Int32(CommandLine.arguments[2]), targetPID > 0 else {
+        fail("keyboard target PID must be a positive 32-bit integer", 2)
+    }
+    let actionID = CommandLine.arguments[3]
+    guard actionID.range(of: "^[0-9a-fA-F]{32}$", options: .regularExpression) != nil,
+          let eventTag = UInt64(actionID.prefix(16), radix: 16) else {
+        fail("keyboard action identity must be exactly 32 hexadecimal characters", 2)
+    }
+    guard CGPreflightPostEventAccess() else {
+        fail("TCC_DENIED: CGPreflightPostEventAccess rejected native-dialog keyboard input", 77)
+    }
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID else {
+        fail("keyboard input refused because the expected native-dialog process is not frontmost", 4)
+    }
+    guard let source = CGEventSource(stateID: .hidSystemState) else {
+        fail("CGEventSource creation failed for native-dialog keyboard input", 3)
+    }
+    if mode == "--go-to-folder" {
+        postKeyboard(5, true, [.maskCommand, .maskShift], source, actionID, eventTag, targetPID)
+        postKeyboard(5, false, [.maskCommand, .maskShift], source, actionID, eventTag, targetPID)
+    } else {
+        let text = CommandLine.arguments[4]
+        guard !text.isEmpty else { fail("native-dialog keyboard text must not be empty", 2) }
+        postKeyboard(0, true, [], source, actionID, eventTag, targetPID, text)
+        postKeyboard(0, false, [], source, actionID, eventTag, targetPID)
+    }
+    print("CGEventPost=KEY_SEQUENCE_RETURNED; action_id=\(actionID); source_pid=\(getpid()); target_pid=\(targetPID); " +
+          "access=preflight-approved; post_return_is_not_application_acknowledgement")
+    exit(0)
 }
 
 guard CommandLine.arguments.count == 5 else {
@@ -333,7 +381,7 @@ class BoundedCapture:
                 with self.capture_index_lock:
                     self.capture_index += 1
                     marker["_capture_index"] = str(self.capture_index)
-                if marker.get("kind") in TELEMETRY_MARKERS:
+                if marker.get("kind") in TELEMETRY_MARKERS or marker.get("kind", "").startswith("DIAG_"):
                     with self.telemetry_lock:
                         if len(self.telemetry) == self.telemetry.maxlen:
                             self.telemetry_dropped += 1
@@ -1133,19 +1181,30 @@ def click_point(
     )
 
     try:
-        code, output = run_osascript(FOCUS_TARGET, str(process.pid), timeout=bounded_timeout(deadline, 8.0))
-    except OSError as error:
-        evidence.api_result = f"focus helper launch failed before dispatch: {type(error).__name__}: {error}"
+        code, output, error = run_direct_ax(
+            process.pid,
+            operation="activate-window",
+            window_title=FIXTURE_TITLE,
+            timeout=bounded_timeout(deadline, 10.0),
+        )
+        output += error
+        activated_title = parse_window_activation(output, process.pid, FIXTURE_TITLE) if code == 0 else ""
+    except (OSError, ValueError) as error:
+        evidence.api_exit_code = 1
+        evidence.api_result = f"intended native document window activation failed before dispatch: {error}"
         evidence.application_response = "NOT_EXPECTED"
         evidence.semantic_outcome = "FAIL_PREPARATION"
         raise RuntimeError(f"{label}: dispatch was not attempted; {evidence.summary()}") from error
     if code != 0:
         evidence.api_exit_code = code
-        evidence.api_result = f"focus failed before dispatch: {output.strip()}"
+        evidence.api_result = f"intended native document window activation failed: {output.strip()}"
         evidence.application_response = "NOT_EXPECTED"
         evidence.semantic_outcome = "FAIL_PREPARATION"
-        prefix = "TCC_DENIED: " if is_tcc_denial(output) else ""
-        raise RuntimeError(f"{prefix}{label}: dispatch was not attempted; {evidence.summary()}")
+        raise RuntimeError(f"{label}: dispatch was not attempted; {evidence.summary()}")
+    print(
+        f"MACOS_DOC_CLOSE_NATIVE_WINDOW_READY=PASS; pid={process.pid}; title={activated_title!r}; "
+        f"action_id={evidence.action_id}; focused_window_verified=1"
+    )
 
     evidence.output_watermark = capture.watermark()
     try:

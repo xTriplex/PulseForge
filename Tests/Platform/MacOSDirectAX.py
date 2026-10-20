@@ -57,12 +57,50 @@ fflush(stdout)
 
 let app = AXUIElementCreateApplication(targetPID)
 AXUIElementSetMessagingTimeout(app, 1.0)
+if operation == "close-main-window" {
+    print("DIRECT_AX_STAGE operation=close-main-window; stage=main-window-query")
+    fflush(stdout)
+    var rawWindow: CFTypeRef?
+    let windowError = AXUIElementCopyAttributeValue(app, "AXMainWindow" as CFString, &rawWindow)
+    guard windowError == .success, let rawWindow, CFGetTypeID(rawWindow) == AXUIElementGetTypeID() else {
+        print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=main-window; ax_error=\(windowError.rawValue)")
+        exit(5)
+    }
+    let window = rawWindow as! AXUIElement
+    AXUIElementSetMessagingTimeout(window, 1.0)
+    print("DIRECT_AX_STAGE operation=close-main-window; stage=close-button-query")
+    fflush(stdout)
+    guard let rawCloseButton = value(window, "AXCloseButton"),
+          CFGetTypeID(rawCloseButton) == AXUIElementGetTypeID() else {
+        print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=close-button")
+        exit(6)
+    }
+    let closeButton = rawCloseButton as! AXUIElement
+    print("DIRECT_AX_STAGE operation=close-main-window; stage=close-button-actions")
+    fflush(stdout)
+    var actions: CFArray?
+    let actionsError = AXUIElementCopyActionNames(closeButton, &actions)
+    guard actionsError == .success, (actions as? [String] ?? []).contains("AXPress") else {
+        print("DIRECT_AX_RESULT status=error; operation=close-main-window; stage=close-button-actions; ax_error=\(actionsError.rawValue); actions=\(actions as? [String] ?? [])")
+        exit(7)
+    }
+    AXUIElementSetMessagingTimeout(closeButton, 1.0)
+    print("DIRECT_AX_DISPATCH attempted=true; operation=close-main-window; pid=\(targetPID); window=AXMainWindow")
+    fflush(stdout)
+    let pressError = AXUIElementPerformAction(closeButton, kAXPressAction as CFString)
+    print("DIRECT_AX_RESULT status=\(pressError == .success ? "action-returned" : "action-error"); operation=close-main-window; pid=\(targetPID); ax_error=\(pressError.rawValue)")
+    exit(pressError == .success ? 0 : 8)
+}
 let queryStarted = ProcessInfo.processInfo.systemUptime
 var rawWindows: CFTypeRef?
 let windowsError = AXUIElementCopyAttributeValue(app, "AXWindows" as CFString, &rawWindows)
 guard windowsError == .success, let rawWindows, let windows = rawWindows as? [AXUIElement] else {
     print("DIRECT_AX_RESULT status=error; stage=copy-windows; pid=\(targetPID); ax_error=\(windowsError.rawValue); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - queryStarted) * 1000)")
     exit(3)
+}
+if operation == "window-count" {
+    print("DIRECT_AX_RESULT status=window-count; pid=\(targetPID); windows=\(windows.count); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - queryStarted) * 1000)")
+    exit(0)
 }
 var titleMatches: [AXUIElement] = []
 var windowReadErrors: [(Int, Int32)] = []
@@ -88,26 +126,91 @@ for (index, window) in windows.enumerated() {
 let matching = !titleMatches.isEmpty || requestedTitle.isEmpty || operation != "snapshot"
     ? titleMatches
     : windows.filter { string($0, "AXSubrole") == "AXDialog" || string($0, "AXRole") == "AXSheet" }
+if operation == "activate-window" {
+    guard !requestedTitle.isEmpty, titleMatches.count == 1, let window = titleMatches.first else {
+        print("DIRECT_AX_RESULT status=window-activation-error; stage=window-selection; pid=\(targetPID); requested_title=\(requestedTitle); matches=\(titleMatches.count)")
+        exit(13)
+    }
+    let targetTitle = string(window, "AXTitle") ?? ""
+    var rawActions: CFArray?
+    let actionError = AXUIElementCopyActionNames(window, &rawActions)
+    let actions = rawActions as? [String] ?? []
+    guard actionError == .success, actions.contains("AXRaise") else {
+        print("DIRECT_AX_RESULT status=window-activation-error; stage=raise-action; pid=\(targetPID); title=\(targetTitle); ax_error=\(actionError.rawValue); actions=\(actions)")
+        exit(14)
+    }
+    _ = targetProcess?.activate(options: [.activateIgnoringOtherApps])
+    AXUIElementSetMessagingTimeout(window, 1.0)
+    let raiseError = AXUIElementPerformAction(window, "AXRaise" as CFString)
+    guard raiseError == .success else {
+        print("DIRECT_AX_RESULT status=window-activation-error; stage=raise; pid=\(targetPID); title=\(targetTitle); ax_error=\(raiseError.rawValue)")
+        exit(15)
+    }
+    let focusDeadline = ProcessInfo.processInfo.systemUptime + 2.0
+    var attempts = 0
+    var focusedTitle = "<unavailable>"
+    var focusError: Int32 = 0
+    while ProcessInfo.processInfo.systemUptime < focusDeadline {
+        attempts += 1
+        var rawFocusedWindow: CFTypeRef?
+        focusError = AXUIElementCopyAttributeValue(app, "AXFocusedWindow" as CFString, &rawFocusedWindow).rawValue
+        if focusError == 0, let rawFocusedWindow, CFGetTypeID(rawFocusedWindow) == AXUIElementGetTypeID() {
+            focusedTitle = string(rawFocusedWindow as! AXUIElement, "AXTitle") ?? "<untitled>"
+            if focusedTitle == targetTitle {
+                print("DIRECT_AX_RESULT status=window-focused; pid=\(targetPID); target_title=\(targetTitle); focused_title=\(focusedTitle); ax_raise_error=\(raiseError.rawValue); focus_error=\(focusError); attempts=\(attempts)")
+                exit(0)
+            }
+        }
+        usleep(20000)
+    }
+    print("DIRECT_AX_RESULT status=window-focus-timeout; pid=\(targetPID); target_title=\(targetTitle); focused_title=\(focusedTitle); ax_raise_error=\(raiseError.rawValue); focus_error=\(focusError); attempts=\(attempts)")
+    exit(16)
+}
 struct AXNode {
     let element: AXUIElement
     let parent: Int?
     let depth: Int
 }
-func collect(_ roots: [AXUIElement], depthLimit: Int = 8) -> [AXNode] {
-    var pending = roots.reversed().map { ($0, Optional<Int>.none, 0) }
+func collect(_ roots: [AXUIElement], depthLimit: Int = 8, nodeLimit: Int = 256) -> [AXNode] {
+    var pending = roots.map { ($0, Optional<Int>.none, 0) }
     var found: [AXNode] = []
-    while let (element, parent, depth) = pending.popLast(), found.count < 256 {
+    var next = 0
+    while next < pending.count, found.count < nodeLimit {
+        let (element, parent, depth) = pending[next]
+        next += 1
         AXUIElementSetMessagingTimeout(element, 1.0)
         let index = found.count
         found.append(AXNode(element: element, parent: parent, depth: depth))
         guard depth < depthLimit, let rawChildren = value(element, "AXChildren"),
               let children = rawChildren as? [AXUIElement] else { continue }
-        pending.append(contentsOf: children.reversed().map { ($0, Optional(index), depth + 1) })
+        pending.append(contentsOf: children.map { ($0, Optional(index), depth + 1) })
     }
     return found
 }
-let needsDescendants = deepSnapshot || operation == "press-control" || operation == "set-value" || operation == "select-element"
-let descendants: [AXNode] = needsDescendants ? collect(matching) : []
+let needsDescendants = deepSnapshot || operation == "press-control" || operation == "set-value" ||
+    operation == "set-focused-value-confirm" || operation == "select-element"
+let descendants: [AXNode] = {
+    guard needsDescendants else { return [] }
+    if operation != "select-element" { return collect(matching, depthLimit: operation == "snapshot" ? 4 : 8) }
+
+    // Finder panels can expose dozens of sidebar rows before their file browser
+    // descendants. Search the browser subtree separately so a broad window-tree
+    // node cap cannot hide the target file behind unrelated sidebar content.
+    let windowNodes = collect(matching, depthLimit: 3, nodeLimit: 96)
+    let browsers = windowNodes.enumerated().compactMap { index, node -> (Int, AXUIElement)? in
+        string(node.element, "AXRole") == "AXBrowser" ? (index, node.element) : nil
+    }
+    var allNodes = windowNodes
+    for (browserIndex, browser) in browsers {
+        let browserNodes = collect([browser], depthLimit: 8, nodeLimit: 256)
+        let offset = allNodes.count
+        allNodes.append(contentsOf: browserNodes.enumerated().map { _, node in
+            let parent = node.parent.map { $0 + offset } ?? browserIndex
+            return AXNode(element: node.element, parent: parent, depth: node.depth)
+        })
+    }
+    return allNodes
+}()
 func labels(_ element: AXUIElement) -> [String] {
     var result = ["AXTitle", "AXDescription", "AXIdentifier", "AXValue", "AXFilename", "AXURL", "AXDocument"]
         .compactMap { string(element, $0) }
@@ -122,7 +225,8 @@ func titleOrDescription(_ element: AXUIElement) -> String {
     labels(element).first ?? ""
 }
 if operation == "snapshot" {
-    print("DIRECT_AX_RESULT status=snapshot; pid=\(targetPID); windows=\(matching.count); all_windows=\(windows.count); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - queryStarted) * 1000); window_read_errors=\(windowReadErrors)")
+    let snapshotDepth = deepSnapshot ? 4 : 8
+    print("DIRECT_AX_RESULT status=snapshot; pid=\(targetPID); windows=\(matching.count); all_windows=\(windows.count); depth_limit=\(deepSnapshot ? snapshotDepth : 0); node_limit=256; elapsed_ms=\((ProcessInfo.processInfo.systemUptime - queryStarted) * 1000); window_read_errors=\(windowReadErrors)")
     fflush(stdout)
     for (index, item) in matching.enumerated() {
         AXUIElementSetMessagingTimeout(item, 0.75)
@@ -143,12 +247,14 @@ if operation == "snapshot" {
         let enabled = described(element, "AXEnabled")
         var actions: CFArray?
         let actionError = AXUIElementCopyActionNames(element, &actions)
-        print("DIRECT_AX_NODE index=\(index); parent=\(node.parent.map(String.init) ?? "none"); depth=\(node.depth); role=\(role); subrole=\(subrole); name=\(name); enabled=\(enabled); actions_error=\(actionError.rawValue); actions=\(actions as? [String] ?? [])")
+        let focused = described(element, "AXFocused")
+        print("DIRECT_AX_NODE index=\(index); parent=\(node.parent.map(String.init) ?? "none"); depth=\(node.depth); role=\(role); subrole=\(subrole); name=\(name); enabled=\(enabled); focused=\(focused); actions_error=\(actionError.rawValue); actions=\(actions as? [String] ?? [])")
     }
     exit(0)
 }
-if operation == "press-control" || operation == "set-value" || operation == "select-element" {
-    let wantedRole = operation == "press-control" ? "AXButton" : operation == "set-value" ? "AXTextField" : "AXRow/AXCell"
+if operation == "press-control" || operation == "set-value" || operation == "set-focused-value-confirm" || operation == "select-element" {
+    let wantedRole = operation == "press-control" ? "AXButton" :
+        (operation == "set-value" || operation == "set-focused-value-confirm") ? "AXTextField" : "AXRow/AXCell"
     func labelMatches(_ element: AXUIElement) -> Bool {
         labels(element).contains { $0 == controlName || $0.hasSuffix("/" + controlName) }
     }
@@ -157,7 +263,9 @@ if operation == "press-control" || operation == "set-value" || operation == "sel
         let roleMatches = operation == "select-element"
             ? (role == "AXRow" || role == "AXCell")
             : role == wantedRole
-        return roleMatches && (controlName.isEmpty || labelMatches(node.element)) ? (index, node) : nil
+        let focusedMatch = operation == "set-focused-value-confirm" && (value(node.element, "AXFocused") as? Bool) == true
+        let labelMatch = operation == "set-focused-value-confirm" ? focusedMatch : (controlName.isEmpty || labelMatches(node.element))
+        return roleMatches && labelMatch ? (index, node) : nil
     }
     if operation == "select-element", controls.isEmpty {
         for (_, node) in descendants.enumerated() where
@@ -178,7 +286,20 @@ if operation == "press-control" || operation == "set-value" || operation == "sel
     guard controls.count == 1, let (_, controlNode) = controls.first else {
         let candidates = descendants.map { string($0.element, "AXRole") ?? "" }
             .filter { $0 == "AXRow" || $0 == "AXCell" }
-        print("DIRECT_AX_RESULT status=control-selection-error; operation=\(operation); role=\(wantedRole); name=\(controlName); matches=\(controls.count); candidate_roles=\(candidates)")
+        let locationNodes = descendants.compactMap { node -> String? in
+            let role = string(node.element, "AXRole") ?? ""
+            guard ["AXPopUpButton", "AXBrowser", "AXTextField", "AXOutline"].contains(role) else { return nil }
+            let nodeLabels = labels(node.element).prefix(4).map { String($0.prefix(160)) }
+            return "depth=\(node.depth); role=\(role); labels=\(nodeLabels)"
+        }.prefix(8)
+        let rowNodes = descendants.compactMap { node -> String? in
+            let role = string(node.element, "AXRole") ?? ""
+            guard ["AXRow", "AXCell", "AXStaticText"].contains(role) else { return nil }
+            let nodeLabels = labels(node.element).prefix(4).map { String($0.prefix(160)) }
+            let parentRole = node.parent.map { string(descendants[$0].element, "AXRole") ?? "" } ?? "<root>"
+            return "depth=\(node.depth); parent_role=\(parentRole); role=\(role); labels=\(nodeLabels)"
+        }.prefix(24)
+        print("DIRECT_AX_RESULT status=control-selection-error; operation=\(operation); role=\(wantedRole); name=\(controlName); matches=\(controls.count); candidate_roles=\(candidates); locations=\(Array(locationNodes)); row_candidates=\(Array(rowNodes))")
         exit(8)
     }
     let control = controlNode.element
@@ -188,6 +309,26 @@ if operation == "press-control" || operation == "set-value" || operation == "sel
         let verified = setError == .success && observedValue == controlValue
         print("DIRECT_AX_RESULT status=\(verified ? "value-verified" : "value-error"); operation=set-value; name=\(titleOrDescription(control)); expected=\(controlValue); observed=\(observedValue); ax_error=\(setError.rawValue)")
         exit(verified ? 0 : 9)
+    }
+    if operation == "set-focused-value-confirm" {
+        let setError = AXUIElementSetAttributeValue(control, "AXValue" as CFString, controlValue as CFString)
+        let observedValue = string(control, "AXValue") ?? "<unavailable>"
+        guard setError == .success, observedValue == controlValue else {
+            print("DIRECT_AX_RESULT status=focused-field-error; operation=set-value; name=\(titleOrDescription(control)); expected=\(controlValue); observed=\(observedValue); ax_error=\(setError.rawValue)")
+            exit(18)
+        }
+        var fieldActions: CFArray?
+        let fieldActionError = AXUIElementCopyActionNames(control, &fieldActions)
+        let availableActions = fieldActions as? [String] ?? []
+        guard fieldActionError == .success, availableActions.contains("AXConfirm") else {
+            print("DIRECT_AX_RESULT status=focused-field-error; operation=confirm; name=\(titleOrDescription(control)); ax_error=\(fieldActionError.rawValue); actions=\(availableActions)")
+            exit(19)
+        }
+        print("DIRECT_AX_DISPATCH attempted=true; operation=confirm-focused-value; target_pid=\(targetPID); name=\(titleOrDescription(control))")
+        fflush(stdout)
+        let confirmError = AXUIElementPerformAction(control, "AXConfirm" as CFString)
+        print("DIRECT_AX_RESULT status=focused-value-confirmed; name=\(titleOrDescription(control)); value=\(observedValue); set_error=\(setError.rawValue); action_error=\(confirmError.rawValue)")
+        exit(confirmError == .success ? 0 : 20)
     }
     if operation == "select-element" {
         let role = string(control, "AXRole") ?? ""
@@ -307,3 +448,29 @@ def run_direct_ax(
                     stderr = stderr.decode("utf-8", errors="replace")
                 return 124, stdout, stderr + f"\nDIRECT_AX_RESULT status=timeout; process_group_cleanup=failed; client_pid={process.pid}"
         return 124, stdout, stderr + "\nDIRECT_AX_RESULT status=timeout; process_group_reaped=true"
+
+
+def parse_window_activation(output: str, expected_pid: int, expected_title_fragment: str) -> str:
+    """Require the intended process window to be the one AX reports as focused."""
+    results = [line for line in output.splitlines() if line.startswith("DIRECT_AX_RESULT status=window-focused;")]
+    if len(results) != 1:
+        raise ValueError(f"expected one focused-window result, got {len(results)}")
+    fields = dict(part.split("=", 1) for part in results[0].split("; ") if "=" in part)
+    try:
+        result_pid = int(fields["pid"])
+        target_title = fields["target_title"]
+        focused_title = fields["focused_title"]
+        raise_error = int(fields["ax_raise_error"])
+        focus_error = int(fields["focus_error"])
+    except (KeyError, ValueError) as error:
+        raise ValueError(f"malformed focused-window result: {results[0]!r}") from error
+    if (
+        result_pid != expected_pid
+        or not expected_title_fragment
+        or expected_title_fragment not in target_title
+        or focused_title != target_title
+        or raise_error != 0
+        or focus_error != 0
+    ):
+        raise ValueError(f"focused-window identity or action mismatch: {results[0]!r}")
+    return target_title
