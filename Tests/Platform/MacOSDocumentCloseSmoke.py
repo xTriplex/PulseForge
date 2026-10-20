@@ -20,7 +20,7 @@ import threading
 import time
 from pathlib import Path
 
-from MacOSAutomationClient import capture_failure_context, probe_osascript_automation
+from MacOSAutomationClient import capture_failure_context, probe_osascript_access
 from MacOSScreenshot import capture_screenshot
 
 MAX_LOG_BYTES = 128 * 1024
@@ -1701,19 +1701,25 @@ def main() -> int:
         if not project.is_file() or project.suffix != ".pfproj":
             raise RuntimeError(f"project fixture is missing or invalid: {project}")
         args.log_directory.mkdir(parents=True, exist_ok=True)
-        ax_state, ax_pid, ax_detail = probe_osascript_automation()
+        ax_state, ax_pid, ax_detail = probe_osascript_access()
         print(
-            f"MACOS_DOC_CLOSE_OSASCRIPT_AUTOMATION_PREFLIGHT={ax_state}; executable=/usr/bin/osascript; "
+            f"MACOS_DOC_CLOSE_OSASCRIPT_PERMISSION_PREFLIGHT={ax_state}; executable=/usr/bin/osascript; "
             f"probe_pid={ax_pid}; detail={ax_detail!r}"
         )
-        if ax_state in {"AX_UNTRUSTED", "APPLE_EVENTS_DENIED", "APPLE_EVENTS_WOULD_PROMPT"}:
+        if ax_state in {
+            "AX_UNTRUSTED",
+            "APPLE_EVENTS_DENIED",
+            "APPLE_EVENTS_CONSENT_REQUIRED",
+            "APPLE_EVENTS_TARGET_UNAVAILABLE",
+            "APPLE_EVENTS_UNSUPPORTED",
+        }:
             print(
                 "MACOS_DOC_CLOSE_AUTOMATION=BLOCKED; dirty-close acceptance NOT RUN; client=osascript; "
                 f"reason={ax_state}; no permission prompt was requested"
             )
             return 77
-        if ax_state != "TRUSTED":
-            raise RuntimeError(f"could not nonpromptingly check osascript automation access: {ax_state}; {ax_detail}")
+        if ax_state != "OSASCRIPT_AX_APPLE_EVENTS_AUTHORIZED":
+            raise RuntimeError(f"could not nonpromptingly verify osascript automation permissions: {ax_state}; {ax_detail}")
         runner_temp = os.environ.get("RUNNER_TEMP")
         temp_parent = Path(runner_temp).resolve(strict=True) if runner_temp else Path(tempfile.gettempdir()).resolve(strict=True)
         driver_root = Path(tempfile.mkdtemp(prefix="PulseForge Document Close Driver Ω ", dir=temp_parent)).resolve(strict=True)

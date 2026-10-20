@@ -2,27 +2,78 @@
 
 from __future__ import annotations
 
+import json
 import os
-import re
 import signal
 import subprocess
 import sys
 from pathlib import Path
 
 
-def probe_osascript_automation(timeout_seconds: float = 3.0) -> tuple[str, int | None, str]:
-    """Nonpromptingly check AX and System Events automation from the osascript client."""
-    command = [
-        "/usr/bin/osascript",
-        "-l",
-        "JavaScript",
-        "-e",
-        "ObjC.import('Cocoa'); ObjC.import('ApplicationServices'); ObjC.import('CoreServices'); "
-        "var target = $.NSAppleEventDescriptor.descriptorWithBundleIdentifier('com.apple.systemevents'); "
-        "var askUserIfNeeded = false; "
-        "var aeStatus = $.AEDeterminePermissionToAutomateTarget(target.aeDesc, $.typeWildCard, $.typeWildCard, askUserIfNeeded); "
-        "'AX=' + $.AXIsProcessTrusted() + ';AE=' + aeStatus",
-    ]
+def _probe_script(bridge_path: Path) -> str:
+    bridge = json.dumps(str(bridge_path))
+    return f'''var stage = "ApplicationServices-framework-load";
+var bridgePath = {bridge};
+var descriptorType = -1;
+var descriptorResult = -1;
+var wildcardClass = -1;
+var wildcardEvent = -1;
+var appleEventsStatus = -32000;
+var axTrusted = false;
+var quartzAllowed = false;
+var serializedResult = "";
+try {{
+    ObjC.import("ApplicationServices");
+    stage = "custom-framework-load";
+    ObjC.import(bridgePath);
+    stage = "descriptor-construction";
+    ObjC.bindFunction("PFProbeSystemEventsDescriptor", ["int", []]);
+    descriptorResult = $.PFProbeSystemEventsDescriptor();
+    if (descriptorResult !== 0) throw new Error("descriptor construction returned " + descriptorResult);
+
+    stage = "native-AEAddressDesc-access";
+    ObjC.bindFunction("PFReadSystemEventsNativeAddress", ["int", []]);
+    descriptorType = $.PFReadSystemEventsNativeAddress();
+    if (descriptorType < 0) throw new Error("native address access returned " + descriptorType);
+
+    stage = "wildcard-constant-marshalling";
+    ObjC.bindFunction("PFTypeWildCardEventClass", ["int", []]);
+    ObjC.bindFunction("PFTypeWildCardEventID", ["int", []]);
+    wildcardClass = $.PFTypeWildCardEventClass();
+    wildcardEvent = $.PFTypeWildCardEventID();
+    if (wildcardClass !== 707406378 || wildcardClass !== wildcardEvent) throw new Error("invalid wildcard constants");
+
+    stage = "apple-events-permission-api";
+    ObjC.bindFunction("PFDetermineSystemEventsPermission", ["int", []]);
+    appleEventsStatus = $.PFDetermineSystemEventsPermission();
+
+    stage = "accessibility-trust-query";
+    axTrusted = Boolean($.AXIsProcessTrusted());
+
+    stage = "CoreGraphics-framework-load";
+    ObjC.import("CoreGraphics");
+    stage = "quartz-post-event-preflight";
+    quartzAllowed = Boolean($.CGPreflightPostEventAccess());
+
+    stage = "result-serialization";
+    serializedResult = JSON.stringify({{stage: "complete", descriptorType: descriptorType, wildcardClass: wildcardClass,
+        wildcardEvent: wildcardEvent, appleEventsStatus: appleEventsStatus,
+        axTrusted: axTrusted, quartzAllowed: quartzAllowed}});
+}} catch (error) {{
+    serializedResult = JSON.stringify({{stage: stage, error: String(error)}});
+}}
+serializedResult;'''
+
+
+def probe_osascript_access(timeout_seconds: float = 4.0) -> tuple[str, int | None, str]:
+    """Nonpromptingly query the actual osascript process for its three distinct privileges."""
+    bridge_value = os.environ.get("PULSEFORGE_MACOS_AUTOMATION_BRIDGE")
+    if not bridge_value:
+        return "PROBE_IMPLEMENTATION_ERROR", None, "PULSEFORGE_MACOS_AUTOMATION_BRIDGE is not configured"
+    bridge_path = Path(bridge_value)
+    if not bridge_path.is_dir():
+        return "PROBE_IMPLEMENTATION_ERROR", None, f"permission bridge framework is missing: {bridge_path}"
+    command = ["/usr/bin/osascript", "-l", "JavaScript", "-e", _probe_script(bridge_path)]
     try:
         process = subprocess.Popen(
             command,
@@ -32,7 +83,7 @@ def probe_osascript_automation(timeout_seconds: float = 3.0) -> tuple[str, int |
             start_new_session=True,
         )
     except OSError as error:
-        return "PROBE_FAILED", None, f"{type(error).__name__}: {error}"
+        return "PROBE_IMPLEMENTATION_ERROR", None, f"{type(error).__name__}: {error}"
 
     try:
         output, _ = process.communicate(timeout=timeout_seconds)
@@ -49,25 +100,72 @@ def probe_osascript_automation(timeout_seconds: float = 3.0) -> tuple[str, int |
                 output, _ = process.communicate(timeout=1.0)
             except subprocess.TimeoutExpired:
                 return "PROBE_CLEANUP_FAILED", process.pid, "osascript did not exit after SIGKILL"
-        return "PROBE_TIMED_OUT", process.pid, output.strip()[-500:]
+        return "PROBE_TIMED_OUT", process.pid, (
+            f"osascript exceeded {timeout_seconds}s and was terminated; output={output.strip()[-1000:]!r}"
+        )
 
     if process.returncode != 0:
-        return "PROBE_FAILED", process.pid, f"exit_code={process.returncode}; output={output.strip()[-500:]!r}"
-    match = re.fullmatch(r"AX=(true|false);AE=(-?\d+)", output.strip(), re.IGNORECASE)
-    if not match:
-        return "PROBE_FAILED", process.pid, f"unexpected osascript result={output.strip()[-500:]!r}"
-    ax_trusted = match.group(1).lower() == "true"
-    ae_status = int(match.group(2))
-    detail = f"AXIsProcessTrusted={str(ax_trusted).lower()}; AEDeterminePermissionToAutomateTarget(System Events, askUserIfNeeded=false)={ae_status}"
-    if not ax_trusted:
-        return "AX_UNTRUSTED", process.pid, detail
+        return "PROBE_IMPLEMENTATION_ERROR", process.pid, f"exit_code={process.returncode}; output={output.strip()[-1000:]!r}"
+    try:
+        result = json.loads(output.strip())
+    except json.JSONDecodeError as error:
+        return "PROBE_IMPLEMENTATION_ERROR", process.pid, f"invalid probe serialization: {error}; output={output.strip()[-1000:]!r}"
+    if not isinstance(result, dict) or result.get("stage") != "complete":
+        return "PROBE_IMPLEMENTATION_ERROR", process.pid, f"stage={result.get('stage') if isinstance(result, dict) else 'unknown'}; {result!r}"
+    try:
+        ae_status = int(result["appleEventsStatus"])
+        ax_trusted = result["axTrusted"] is True
+        quartz_allowed = result["quartzAllowed"] is True
+        descriptor_type = int(result["descriptorType"])
+        wildcard_class = int(result["wildcardClass"])
+        wildcard_event = int(result["wildcardEvent"])
+    except (KeyError, TypeError, ValueError) as error:
+        return "PROBE_IMPLEMENTATION_ERROR", process.pid, f"malformed probe result: {error}; result={result!r}"
+
+    detail = (
+        f"caller=/usr/bin/osascript; pid={process.pid}; AXIsProcessTrusted={str(ax_trusted).lower()}; "
+        f"AEDeterminePermissionToAutomateTarget(target=com.apple.systemevents, askUserIfNeeded=false)={ae_status}; "
+        f"CGPreflightPostEventAccess={str(quartz_allowed).lower()}; descriptorType={descriptor_type}; "
+        f"typeWildCard(class/event)={wildcard_class}/{wildcard_event}"
+    )
     if ae_status == -1743:
         return "APPLE_EVENTS_DENIED", process.pid, detail
     if ae_status == -1744:
-        return "APPLE_EVENTS_WOULD_PROMPT", process.pid, detail
+        return "APPLE_EVENTS_CONSENT_REQUIRED", process.pid, detail
+    if ae_status == -600:
+        return "APPLE_EVENTS_TARGET_UNAVAILABLE", process.pid, detail
+    if ae_status == -32003:
+        return "APPLE_EVENTS_UNSUPPORTED", process.pid, detail
+    bridge_failures = {
+        -32001: "descriptor construction failed",
+        -32002: "native AEAddressDesc access failed",
+        -32004: "native permission bridge raised an Objective-C exception",
+    }
+    if ae_status in bridge_failures:
+        return "PROBE_IMPLEMENTATION_ERROR", process.pid, f"{bridge_failures[ae_status]}; {detail}"
     if ae_status != 0:
-        return "APPLE_EVENTS_PREFLIGHT_FAILED", process.pid, detail
-    return "TRUSTED", process.pid, detail
+        return "APPLE_EVENTS_PROBE_ERROR", process.pid, detail
+    if not ax_trusted:
+        return "AX_UNTRUSTED", process.pid, detail
+    # Quartz input is authorized and checked by the process that posts it. This value
+    # describes osascript only and is deliberately not used to certify another client.
+    return "OSASCRIPT_AX_APPLE_EVENTS_AUTHORIZED", process.pid, detail
+
+
+def main() -> int:
+    state, pid, detail = probe_osascript_access()
+    print(f"MACOS_AUTOMATION_PERMISSION_PROBE={state}; caller=/usr/bin/osascript; pid={pid}; detail={detail!r}")
+    if state == "OSASCRIPT_AX_APPLE_EVENTS_AUTHORIZED":
+        return 0
+    if state in {
+        "AX_UNTRUSTED",
+        "APPLE_EVENTS_DENIED",
+        "APPLE_EVENTS_CONSENT_REQUIRED",
+        "APPLE_EVENTS_TARGET_UNAVAILABLE",
+        "APPLE_EVENTS_UNSUPPORTED",
+    }:
+        return 77
+    return 1
 
 
 def capture_failure_context(label: str, target_pid: int | None = None) -> str:
@@ -110,13 +208,7 @@ def capture_failure_context(label: str, target_pid: int | None = None) -> str:
         sections.append(f"process_snapshot=FAILED; {type(error).__name__}: {error}")
 
     tcc_command = [
-        "/usr/bin/log",
-        "show",
-        "--last",
-        "3m",
-        "--style",
-        "compact",
-        "--predicate",
+        "/usr/bin/log", "show", "--last", "3m", "--style", "compact", "--predicate",
         'process == "tccd" AND (eventMessage CONTAINS[c] "osascript" OR '
         'eventMessage CONTAINS[c] "hosted-compute-agent" OR eventMessage CONTAINS[c] "System Events" OR '
         'eventMessage CONTAINS[c] "PulseForge")',
@@ -134,3 +226,7 @@ def capture_failure_context(label: str, target_pid: int | None = None) -> str:
         sections.append(f"tcc_log=UNAVAILABLE; {type(error).__name__}: {error}")
 
     return "\n".join(sections)[:12000]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

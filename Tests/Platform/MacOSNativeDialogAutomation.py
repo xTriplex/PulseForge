@@ -15,6 +15,7 @@ import threading
 import time
 from pathlib import Path
 
+from MacOSAutomationClient import probe_osascript_access
 from MacOSScreenshot import capture_screenshot
 
 MAX_LOG_BYTES = 64 * 1024
@@ -1534,6 +1535,22 @@ def main() -> int:
     if args.timeout_seconds <= 0:
         return fail("timeout must be positive")
     args.log_directory.mkdir(parents=True, exist_ok=True)
+    permission_state, permission_pid, permission_detail = probe_osascript_access()
+    print(
+        f"NFD_OSASCRIPT_AUTOMATION_PREFLIGHT={permission_state}; caller=/usr/bin/osascript; "
+        f"probe_pid={permission_pid}; detail={permission_detail!r}"
+    )
+    if permission_state != "OSASCRIPT_AX_APPLE_EVENTS_AUTHORIZED":
+        print("NFD_NATIVE_DIALOG_ACCEPTANCE=BLOCKED; native Open/Save cases NOT RUN; no permission prompt was requested")
+        if permission_state in {
+            "AX_UNTRUSTED",
+            "APPLE_EVENTS_DENIED",
+            "APPLE_EVENTS_CONSENT_REQUIRED",
+            "APPLE_EVENTS_TARGET_UNAVAILABLE",
+            "APPLE_EVENTS_UNSUPPORTED",
+        }:
+            return 77
+        return fail(f"osascript permission preflight failed: {permission_state}; {permission_detail}")
     runner_temp = os.environ.get("RUNNER_TEMP")
     parent = Path(runner_temp).resolve() if runner_temp else Path(tempfile.gettempdir())
     root = Path(tempfile.mkdtemp(prefix="PulseForge NFD Ω ", dir=parent))

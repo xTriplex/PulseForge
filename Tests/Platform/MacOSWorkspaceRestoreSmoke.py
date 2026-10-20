@@ -24,6 +24,7 @@ from MacOSDocumentHostSmoke import (  # noqa: E402
     run_osascript,
     stop_process_group,
 )
+from MacOSAutomationClient import capture_failure_context, probe_osascript_access
 from MacOSScreenshot import capture_screenshot
 
 MAX_LOG_BYTES = 128 * 1024
@@ -35,6 +36,15 @@ FIXTURE_ASSETS = {
 FIXTURE_WINDOW_TITLES = {"Host Test Fixture 1", "Host Test Fixture 2"}
 FIXTURE_READY = "Development document-host fixture enabled with opening preference"
 RESTORED_COUNT = re.compile(r"(\d+) sessions restored from saved host state")
+MAX_CONSECUTIVE_AX_TIMEOUTS = 3
+AX_QUERY_INTERVAL_SECONDS = 0.5
+
+
+class WindowObservationError(RuntimeError):
+    def __init__(self, category: str, detail: str, transient: bool = False) -> None:
+        super().__init__(f"{category}; {detail}")
+        self.category = category
+        self.transient = transient
 
 
 class ProcessCapture:
@@ -100,19 +110,54 @@ def remove_temporary_root(root: Path, temp_parent: Path) -> str | None:
 
 
 def query_windows(process: subprocess.Popen[str], deadline: float) -> tuple[str, list[tuple[int, str]]]:
-    code, output = run_osascript(WINDOW_QUERY, str(process.pid), min(5.0, max(0.1, deadline - time.monotonic())))
+    if process.poll() is not None:
+        raise WindowObservationError("EDITOR_EXITED", f"pid={process.pid}; exit_code={process.returncode}")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise WindowObservationError("OVERALL_DEADLINE_EXPIRED", f"pid={process.pid}")
+    code, output = run_osascript(
+        WINDOW_QUERY,
+        str(process.pid),
+        min(5.0, remaining),
+        controller_label="workspace native-window snapshot",
+    )
+    if process.poll() is not None:
+        raise WindowObservationError("EDITOR_EXITED", f"pid={process.pid}; exit_code={process.returncode}")
     if code != 0:
-        category = "Accessibility authorization denied" if has_tcc_denial(output) else "Accessibility query failed"
-        raise RuntimeError(f"{category}; exit_code={code}; detail={output.strip()}")
+        if has_tcc_denial(output) or "-1743" in output:
+            category, transient = "AX_AUTHORIZATION_DENIED", False
+        elif code == 124 or "-1712" in output or "timed out" in output.lower():
+            category, transient = "AX_OBSERVATION_TIMEOUT", True
+        elif "cannot get process" in output.lower() or "-600" in output:
+            category, transient = "AX_TARGET_UNAVAILABLE", False
+        else:
+            category, transient = "AX_OBSERVATION_ERROR", False
+        print(
+            f"MACOS_WORKSPACE_RESTORE_AX_QUERY={category}; stage=process-window-snapshot; "
+            f"editor_pid={process.pid}; observer_exit_code={code}; transient={str(transient).lower()}; "
+            f"detail={output.strip()!r}"
+        )
+        if not transient:
+            print(
+                "MACOS_WORKSPACE_RESTORE_AUTOMATION_CONTEXT="
+                + capture_failure_context("workspace process-window snapshot", process.pid)
+            )
+        raise WindowObservationError(category, f"observer_exit_code={code}; detail={output.strip()!r}", transient)
     lines = [line for line in output.splitlines() if line.strip()]
     if not lines:
-        raise RuntimeError(f"Accessibility returned no process identity for PID {process.pid}")
+        raise WindowObservationError("AX_MALFORMED_PROTOCOL", f"no process identity for PID {process.pid}")
     windows: list[tuple[int, str]] = []
     for line in lines[1:]:
         index_text, separator, title = line.partition("\t")
-        if separator and index_text.strip().isdigit():
-            windows.append((int(index_text.strip()), title.strip()))
-    return lines[0].strip(), windows
+        if not separator or not index_text.strip().isdigit():
+            raise WindowObservationError("AX_MALFORMED_PROTOCOL", f"invalid window row for PID {process.pid}: {line!r}")
+        windows.append((int(index_text.strip()), title.strip()))
+    process_name = lines[0].strip()
+    if not process_name or "PulseForge" not in process_name:
+        raise WindowObservationError(
+            "AX_WRONG_PROCESS_IDENTITY", f"requested_pid={process.pid}; returned_process={process_name!r}"
+        )
+    return process_name, windows
 
 
 def wait_for_fixture_windows(
@@ -120,6 +165,11 @@ def wait_for_fixture_windows(
 ) -> list[tuple[int, str]]:
     next_query = 0.0
     last_snapshot: list[tuple[int, str]] = []
+    last_process_name: str | None = None
+    last_error: str | None = None
+    attempts = 0
+    consecutive_timeouts = 0
+    started = time.monotonic()
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"editor exited before fixture windows appeared; exit_code={process.returncode}")
@@ -133,10 +183,34 @@ def wait_for_fixture_windows(
                 )
             now = time.monotonic()
             if now >= next_query:
-                next_query = now + 1.0
-                process_name, last_snapshot = query_windows(process, deadline)
-                if "PulseForge" not in process_name:
-                    raise RuntimeError(f"unexpected Accessibility process identity for PID {process.pid}: {process_name!r}")
+                attempts += 1
+                try:
+                    process_name, snapshot = query_windows(process, deadline)
+                    last_process_name = process_name
+                    last_snapshot = snapshot
+                    last_error = None
+                    consecutive_timeouts = 0
+                    next_query = now + AX_QUERY_INTERVAL_SECONDS
+                except WindowObservationError as error:
+                    last_error = str(error)
+                    if not error.transient:
+                        raise
+                    consecutive_timeouts += 1
+                    print(
+                        f"MACOS_WORKSPACE_RESTORE_AX_RETRY=TRANSIENT_TIMEOUT; pid={process.pid}; "
+                        f"attempt={attempts}; consecutive={consecutive_timeouts}; detail={error}"
+                    )
+                    if consecutive_timeouts >= MAX_CONSECUTIVE_AX_TIMEOUTS:
+                        raise RuntimeError(
+                            f"persistent Accessibility observation timeout; pid={process.pid}; attempts={attempts}; "
+                            f"elapsed={time.monotonic() - started:.2f}s; last_successful_process={last_process_name!r}; "
+                            f"last_successful_windows={last_snapshot!r}; last_error={last_error}"
+                        ) from error
+                    next_query = now + AX_QUERY_INTERVAL_SECONDS
+                if process.poll() is not None:
+                    raise RuntimeError(f"editor exited during native-window observation; pid={process.pid}; exit_code={process.returncode}")
+                if capture.reader_error:
+                    raise RuntimeError(f"editor output capture failed during native-window observation: {capture.reader_error}")
                 titles = [title for _, title in last_snapshot]
                 main_windows = [title for title in titles if "PulseForge Editor" in title]
                 fixture_windows = [title for title in titles if title.startswith("Host Test Fixture ")]
@@ -152,9 +226,11 @@ def wait_for_fixture_windows(
                     return last_snapshot
         time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
     raise RuntimeError(
-        f"timed out waiting for main and both native fixture windows; pid={process.pid}; "
+        f"overall readiness deadline expired waiting for main and both native fixture windows; pid={process.pid}; "
+        f"attempts={attempts}; elapsed={time.monotonic() - started:.2f}s; "
         f"fixture_ready={capture.fixture_ready.is_set()}; restored_sessions={capture.restored_sessions}; "
-        f"last_windows={last_snapshot!r}"
+        f"last_successful_process={last_process_name!r}; last_successful_windows={last_snapshot!r}; "
+        f"last_error={last_error!r}"
     )
 
 
@@ -323,6 +399,25 @@ def main() -> int:
     if not isinstance(project_id, str) or not project_id:
         print("project fixture has no valid projectId", file=sys.stderr)
         return 1
+
+    automation_state, automation_pid, automation_detail = probe_osascript_access()
+    print(
+        f"MACOS_WORKSPACE_RESTORE_OSASCRIPT_PREFLIGHT={automation_state}; "
+        f"caller=/usr/bin/osascript; probe_pid={automation_pid}; detail={automation_detail!r}"
+    )
+    if automation_state != "OSASCRIPT_AX_APPLE_EVENTS_AUTHORIZED":
+        print(
+            "MACOS_WORKSPACE_RESTORE_AUTOMATION=BLOCKED; native-window acceptance NOT RUN; "
+            f"reason={automation_state}; no permission prompt was requested",
+            file=sys.stderr,
+        )
+        return 77 if automation_state in {
+            "AX_UNTRUSTED",
+            "APPLE_EVENTS_DENIED",
+            "APPLE_EVENTS_CONSENT_REQUIRED",
+            "APPLE_EVENTS_TARGET_UNAVAILABLE",
+            "APPLE_EVENTS_UNSUPPORTED",
+        } else 1
 
     args.log_directory.mkdir(parents=True, exist_ok=True)
     runner_temp = os.environ.get("RUNNER_TEMP")

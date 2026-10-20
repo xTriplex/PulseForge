@@ -4,20 +4,23 @@
 from __future__ import annotations
 
 from collections import deque
+import json
 import os
 import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import MacOSDocumentCloseSmoke as smoke
 import MacOSBundleSmoke as bundle
 import MacOSAutomationClient as automation
 import MacOSScreenshot as screenshot
+import MacOSWorkspaceRestoreSmoke as workspace_restore
 
 
 class FakeProcess:
@@ -109,38 +112,213 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             self.assertEqual(["DIAG_TAB_INPUT", "DIAG_TAB_CLOSE_REQUEST"], [event["kind"] for event in telemetry])
             self.assertIn("close_hovered=1", telemetry[0]["raw"])
 
-    def test_osascript_preflight_distinguishes_permission_that_would_prompt_without_requesting_it(self) -> None:
-        class Probe:
-            pid = 123
-            returncode = 0
+    def test_osascript_probe_checks_its_own_accessibility_appleevents_and_quartz_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = Path(temporary) / "PFAutomationPermission.framework"
+            bridge.mkdir()
+            result = {
+                "stage": "complete",
+                "descriptorType": 1936289382,
+                "wildcardClass": 707406378,
+                "wildcardEvent": 707406378,
+                "appleEventsStatus": 0,
+                "axTrusted": True,
+                "quartzAllowed": False,
+            }
 
-            @staticmethod
-            def communicate(timeout: float) -> tuple[str, None]:
-                return "AX=true;AE=-1744\n", None
+            class Probe:
+                pid = 123
+                returncode = 0
 
-        with patch.object(automation.subprocess, "Popen", return_value=Probe()) as launch:
-            state, pid, detail = automation.probe_osascript_automation()
+                @staticmethod
+                def communicate(timeout: float) -> tuple[str, None]:
+                    return json.dumps(result), None
 
-        self.assertEqual("APPLE_EVENTS_WOULD_PROMPT", state)
+            with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
+                automation.subprocess, "Popen", return_value=Probe()
+            ) as launch:
+                state, pid, detail = automation.probe_osascript_access()
+
+        self.assertEqual("OSASCRIPT_AX_APPLE_EVENTS_AUTHORIZED", state)
         self.assertEqual(123, pid)
-        self.assertIn("askUserIfNeeded=false", detail)
-        self.assertIn("askUserIfNeeded = false", launch.call_args.args[0][-1])
+        self.assertIn("caller=/usr/bin/osascript", detail)
+        self.assertIn("AEDeterminePermissionToAutomateTarget", detail)
+        self.assertIn("CGPreflightPostEventAccess=false", detail)
+        self.assertIn("PFDetermineSystemEventsPermission", launch.call_args.args[0][-1])
+        self.assertEqual("/usr/bin/osascript", launch.call_args.args[0][0])
 
-    def test_osascript_preflight_distinguishes_ax_trust_for_its_own_client(self) -> None:
-        class Probe:
-            pid = 124
-            returncode = 0
+    def test_osascript_probe_classifies_appleevents_denial_separately_from_other_privileges(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = Path(temporary) / "PFAutomationPermission.framework"
+            bridge.mkdir()
+            result = {
+                "stage": "complete", "descriptorType": 1, "wildcardClass": 2, "wildcardEvent": 2,
+                "appleEventsStatus": -1743, "axTrusted": True, "quartzAllowed": True,
+            }
 
-            @staticmethod
-            def communicate(timeout: float) -> tuple[str, None]:
-                return "AX=false;AE=0\n", None
+            class Probe:
+                pid = 124
+                returncode = 0
 
-        with patch.object(automation.subprocess, "Popen", return_value=Probe()):
-            state, pid, detail = automation.probe_osascript_automation()
+                @staticmethod
+                def communicate(timeout: float) -> tuple[str, None]:
+                    return json.dumps(result), None
+
+            with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
+                automation.subprocess, "Popen", return_value=Probe()
+            ):
+                state, pid, detail = automation.probe_osascript_access()
+
+        self.assertEqual("APPLE_EVENTS_DENIED", state)
+        self.assertEqual(124, pid)
+        self.assertIn("AXIsProcessTrusted=true", detail)
+        self.assertIn("CGPreflightPostEventAccess=true", detail)
+
+    def test_osascript_probe_reports_accessibility_denial_and_keeps_quartz_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = Path(temporary) / "PFAutomationPermission.framework"
+            bridge.mkdir()
+            result = {
+                "stage": "complete", "descriptorType": 1, "wildcardClass": 2, "wildcardEvent": 2,
+                "appleEventsStatus": 0, "axTrusted": False, "quartzAllowed": False,
+            }
+
+            class Probe:
+                pid = 1241
+                returncode = 0
+
+                @staticmethod
+                def communicate(timeout: float) -> tuple[str, None]:
+                    return json.dumps(result), None
+
+            with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
+                automation.subprocess, "Popen", return_value=Probe()
+            ):
+                state, _, detail = automation.probe_osascript_access()
 
         self.assertEqual("AX_UNTRUSTED", state)
-        self.assertEqual(124, pid)
-        self.assertIn("AXIsProcessTrusted=false", detail)
+        self.assertIn("CGPreflightPostEventAccess=false", detail)
+
+    def test_osascript_preflight_distinguishes_consent_target_and_native_bridge_errors(self) -> None:
+        cases = (
+            (-1744, "APPLE_EVENTS_CONSENT_REQUIRED"),
+            (-600, "APPLE_EVENTS_TARGET_UNAVAILABLE"),
+            (-32003, "APPLE_EVENTS_UNSUPPORTED"),
+            (-32001, "PROBE_IMPLEMENTATION_ERROR"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = Path(temporary) / "PFAutomationPermission.framework"
+            bridge.mkdir()
+            for status, expected in cases:
+                result = {
+                    "stage": "complete", "descriptorType": 1, "wildcardClass": 2, "wildcardEvent": 2,
+                    "appleEventsStatus": status, "axTrusted": True, "quartzAllowed": True,
+                }
+
+                class Probe:
+                    pid = 125
+                    returncode = 0
+
+                    @staticmethod
+                    def communicate(timeout: float) -> tuple[str, None]:
+                        return json.dumps(result), None
+
+                with self.subTest(status=status), patch.dict(
+                    os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}
+                ), patch.object(automation.subprocess, "Popen", return_value=Probe()):
+                    state, _, _ = automation.probe_osascript_access()
+                    self.assertEqual(expected, state)
+
+    def test_osascript_probe_rejects_malformed_or_failed_bridge_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = Path(temporary) / "PFAutomationPermission.framework"
+            bridge.mkdir()
+
+            class Probe:
+                pid = 126
+                returncode = 0
+
+                @staticmethod
+                def communicate(timeout: float) -> tuple[str, None]:
+                    return "execution error: Ref has incompatible type (-2700)", None
+
+            with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
+                automation.subprocess, "Popen", return_value=Probe()
+            ):
+                state, _, detail = automation.probe_osascript_access()
+            self.assertEqual("PROBE_IMPLEMENTATION_ERROR", state)
+            self.assertIn("invalid probe serialization", detail)
+
+            Probe.returncode = 1
+            with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
+                automation.subprocess, "Popen", return_value=Probe()
+            ):
+                state, _, detail = automation.probe_osascript_access()
+            self.assertEqual("PROBE_IMPLEMENTATION_ERROR", state)
+            self.assertIn("exit_code=1", detail)
+
+            Probe.returncode = 0
+            Probe.communicate = staticmethod(lambda timeout: (json.dumps({
+                "stage": "native-AEAddressDesc-access", "error": "Ref has incompatible type (-2700)"
+            }), None))
+            with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
+                automation.subprocess, "Popen", return_value=Probe()
+            ):
+                state, _, detail = automation.probe_osascript_access()
+            self.assertEqual("PROBE_IMPLEMENTATION_ERROR", state)
+            self.assertIn("native-AEAddressDesc-access", detail)
+            self.assertIn("-2700", detail)
+
+    def test_osascript_probe_timeout_is_reported_and_owned_child_is_reaped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = Path(temporary) / "PFAutomationPermission.framework"
+            bridge.mkdir()
+
+            class Probe:
+                pid = 127
+                returncode = -9
+                communicate = Mock(side_effect=[
+                    subprocess.TimeoutExpired(["/usr/bin/osascript"], 4), ("", None)
+                ])
+
+            with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
+                automation.subprocess, "Popen", return_value=Probe()
+            ), patch.object(automation.os, "killpg") as kill_group:
+                state, pid, detail = automation.probe_osascript_access()
+
+        self.assertEqual("PROBE_TIMED_OUT", state)
+        self.assertEqual(127, pid)
+        kill_group.assert_called_once_with(127, automation.signal.SIGKILL)
+        self.assertEqual(2, Probe.communicate.call_count)
+        self.assertIn("osascript", detail)
+
+    def test_osascript_probe_reports_cleanup_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            bridge = Path(temporary) / "PFAutomationPermission.framework"
+            bridge.mkdir()
+
+            class Probe:
+                pid = 128
+                returncode = None
+                communicate = Mock(side_effect=[
+                    subprocess.TimeoutExpired(["/usr/bin/osascript"], 4),
+                    subprocess.TimeoutExpired(["/usr/bin/osascript"], 2),
+                    subprocess.TimeoutExpired(["/usr/bin/osascript"], 1),
+                ])
+
+                @staticmethod
+                def kill() -> None:
+                    pass
+
+            with patch.dict(os.environ, {"PULSEFORGE_MACOS_AUTOMATION_BRIDGE": str(bridge)}), patch.object(
+                automation.subprocess, "Popen", return_value=Probe()
+            ), patch.object(automation.os, "killpg"):
+                state, pid, detail = automation.probe_osascript_access()
+
+        self.assertEqual("PROBE_CLEANUP_FAILED", state)
+        self.assertEqual(128, pid)
+        self.assertIn("did not exit", detail)
+
 
     def test_prompt_response_reconciles_uncertain_dispatch_when_pointer_probe_timed_out(self) -> None:
         capture = FakeCapture(
@@ -449,6 +627,92 @@ class DirtyCloseProtocolTests(unittest.TestCase):
                     "cancel-save",
                     time.monotonic() + 0.2,
                 )
+
+
+class WorkspaceRestoreObservationTests(unittest.TestCase):
+    class Process:
+        pid = 876
+        returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+    class Capture:
+        restored_sessions = 2
+        reader_error: str | None = None
+
+        def __init__(self) -> None:
+            self.fixture_ready = threading.Event()
+            self.fixture_ready.set()
+
+    class Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.now += seconds
+
+    VALID_WINDOWS = "PulseForge Editor\n1\tPulseForge Editor\n2\tHost Test Fixture 1\n3\tHost Test Fixture 2\n"
+
+    def run_wait(self, observations: list[tuple[int, str]], deadline_seconds: float = 5.0) -> tuple[list[tuple[int, str]], int]:
+        clock = self.Clock()
+        capture = self.Capture()
+        with patch.object(workspace_restore.time, "monotonic", clock.monotonic), patch.object(
+            workspace_restore.time, "sleep", clock.sleep
+        ), patch.object(workspace_restore, "run_osascript", side_effect=observations) as query:
+            windows = workspace_restore.wait_for_fixture_windows(
+                self.Process(), capture, deadline_seconds, expected_restore_count=2
+            )
+        return windows, query.call_count
+
+    def test_transient_timeout_then_native_snapshot_succeeds_under_one_deadline(self) -> None:
+        windows, attempts = self.run_wait([(124, "AppleScript operation timed out"), (0, self.VALID_WINDOWS)])
+        self.assertEqual(3, len(windows))
+        self.assertEqual(2, attempts)
+
+    def test_persistent_timeout_fails_with_bounded_attempt_diagnostics(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "persistent Accessibility observation timeout.*attempts=3"):
+            self.run_wait([(124, "AppleScript operation timed out")] * 3)
+
+    def test_explicit_authorization_denial_fails_without_retry(self) -> None:
+        with patch.object(
+            workspace_restore, "run_osascript", return_value=(1, "not authorized to send Apple events (-1743)")
+        ) as query:
+            with self.assertRaisesRegex(workspace_restore.WindowObservationError, "AX_AUTHORIZATION_DENIED"):
+                workspace_restore.query_windows(self.Process(), time.monotonic() + 2.0)
+        query.assert_called_once()
+
+    def test_editor_exit_and_wrong_process_identity_fail_immediately(self) -> None:
+        process = self.Process()
+        process.returncode = 3
+        with self.assertRaisesRegex(workspace_restore.WindowObservationError, "EDITOR_EXITED"):
+            workspace_restore.query_windows(process, time.monotonic() + 2.0)
+        with patch.object(workspace_restore, "run_osascript", return_value=(0, "Finder\n1\tPulseForge Editor\n")):
+            with self.assertRaisesRegex(workspace_restore.WindowObservationError, "AX_WRONG_PROCESS_IDENTITY"):
+                workspace_restore.query_windows(self.Process(), time.monotonic() + 2.0)
+        with patch.object(workspace_restore, "run_osascript", return_value=(0, "PulseForge\nmalformed window row")):
+            with self.assertRaisesRegex(workspace_restore.WindowObservationError, "AX_MALFORMED_PROTOCOL"):
+                workspace_restore.query_windows(self.Process(), time.monotonic() + 2.0)
+
+    def test_editor_output_reader_failure_fails_before_accepting_windows(self) -> None:
+        capture = self.Capture()
+        capture.reader_error = "synthetic reader failure"
+        with patch.object(workspace_restore, "run_osascript", return_value=(0, self.VALID_WINDOWS)) as query:
+            with self.assertRaisesRegex(RuntimeError, "output capture failed"):
+                workspace_restore.wait_for_fixture_windows(self.Process(), capture, time.monotonic() + 1.0, 2)
+        query.assert_not_called()
+
+    def test_restoration_markers_and_incomplete_window_set_do_not_pass(self) -> None:
+        incomplete = "PulseForge Editor\n1\tPulseForge Editor\n2\tHost Test Fixture 1\n"
+        clock = self.Clock()
+        with patch.object(workspace_restore.time, "monotonic", clock.monotonic), patch.object(
+            workspace_restore.time, "sleep", clock.sleep
+        ), patch.object(workspace_restore, "run_osascript", return_value=(0, incomplete)):
+            with self.assertRaisesRegex(RuntimeError, "overall readiness deadline expired"):
+                workspace_restore.wait_for_fixture_windows(self.Process(), self.Capture(), 1.0, 2)
 
 
 if __name__ == "__main__":
