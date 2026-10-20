@@ -154,6 +154,7 @@ namespace PulseForgeEditor::Detail
 		[[nodiscard]] bool IsFixtureIdentity(const EditorDocumentIdentity& Identity) const noexcept;
 		[[nodiscard]] bool IsFixtureHost(std::string_view HostID) const noexcept;
 		[[nodiscard]] bool IsAwaitingFinalClose() const noexcept { return m_Phase == DocumentCloseUiPhase::AwaitingFinalClose; }
+		[[nodiscard]] size_t PromptGeneration() const noexcept { return m_PromptGeneration; }
 		[[nodiscard]] bool IsAwaitingTabClose() const noexcept;
 		[[nodiscard]] std::string_view ExpectedChoice() const noexcept;
 

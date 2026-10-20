@@ -327,6 +327,8 @@ jobs:
             --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
             --log-directory "$RUNNER_TEMP/macos-document-close-focused-repeat" \
             --timeout-seconds 240 \
+            --scenario cancel-save \
+            --scenario discard \
             --scenario save-retry \
             --scenario close-retry 2>&1 | tee "$RUNNER_TEMP/macos-document-close-focused-repeat.log"
 
@@ -341,6 +343,11 @@ jobs:
           fi
           if ! find "$DEBUG_OBJECT_DIR" -name 'EditorDebugAcceptanceCoordinators.cpp.o' -print -quit | grep -q .; then
             echo "Debug coordinator object was not produced under $DEBUG_OBJECT_DIR" >&2
+            exit 1
+          fi
+          DEBUG_EDITOR_OBJECT_DIR="Build/CI/macos-renderer/CMakeFiles/PulseForgeEditor.dir"
+          if ! find "$DEBUG_EDITOR_OBJECT_DIR" -name 'MacOSDocumentCloseEventObserver.m.o' -print -quit | grep -q .; then
+            echo "Debug Cocoa event observer object was not produced under $DEBUG_EDITOR_OBJECT_DIR" >&2
             exit 1
           fi
           for CONFIGURATION in Release Dist; do
@@ -366,6 +373,10 @@ jobs:
             fi
             if find "$BUILD_DIR/CMakeFiles/PulseForgeEditorCore.dir" -name 'EditorDebugAcceptanceCoordinators.cpp.o' -print -quit | grep -q .; then
               echo "Debug-only coordinator was compiled for $CONFIGURATION" >&2
+              exit 1
+            fi
+            if find "$BUILD_DIR/CMakeFiles/PulseForgeEditor.dir" -name 'MacOSDocumentCloseEventObserver.m.o' -print -quit | grep -q .; then
+              echo "Debug-only Cocoa event observer was compiled for $CONFIGURATION" >&2
               exit 1
             fi
             for FIXTURE_ARGS in "--editor-runtime-play-stop-test" "--document-host-close-ui-test cancel-save"; do
