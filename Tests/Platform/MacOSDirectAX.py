@@ -94,7 +94,8 @@ if operation == "close-main-window" {
     var selectedBy = "AXCloseButton"
     if closeAttributeError == .success, let rawCloseButton,
        CFGetTypeID(rawCloseButton) == AXUIElementGetTypeID() {
-        closeButton = rawCloseButton as? AXUIElement
+        let resolvedCloseButton = rawCloseButton as! AXUIElement
+        closeButton = resolvedCloseButton
     }
     if closeButton == nil {
         var rawChildren: CFTypeRef?
@@ -186,7 +187,7 @@ if operation == "activate-window" {
         print("DIRECT_AX_RESULT status=window-activation-error; stage=raise-action; pid=\(targetPID); title=\(targetTitle); ax_error=\(actionError.rawValue); actions=\(actions)")
         exit(14)
     }
-    _ = targetProcess?.activate(options: [.activateIgnoringOtherApps])
+    _ = targetProcess?.activate(options: [])
     AXUIElementSetMessagingTimeout(window, 1.0)
     let raiseError = AXUIElementPerformAction(window, "AXRaise" as CFString)
     guard raiseError == .success else {
