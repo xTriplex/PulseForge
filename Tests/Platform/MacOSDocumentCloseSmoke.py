@@ -70,16 +70,89 @@ WINDOW_BOUNDS_QUERY = '''on run argv
 end run
 '''
 
-POINTER_CLICK = '''on run argv
+POINTER_CLICK = '''use framework "AppKit"
+
+on currentMouseLocation(targetX, targetY)
+    set screenCountText to "UNAVAILABLE"
+    set frameText to "UNAVAILABLE"
+    set metadataReady to false
+    set metadataError to ""
+    try
+        set screensList to (current application's NSScreen's screens()) as list
+        set screenCount to count of screensList
+        set screenCountText to screenCount as text
+        if screenCount > 0 then
+            set mainScreen to current application's NSScreen's mainScreen()
+            if mainScreen is not missing value then
+                set frameRecord to (mainScreen's frame()) as record
+                set frameOrigin to origin of frameRecord
+                set frameSize to size of frameRecord
+                set frameX to (x of frameOrigin) as real
+                set frameY to (y of frameOrigin) as real
+                set frameWidth to (width of frameSize) as real
+                set frameHeight to (height of frameSize) as real
+                set frameText to (frameX as text) & "," & (frameY as text) & "," & ¬
+                    (frameWidth as text) & "," & (frameHeight as text)
+                set metadataReady to true
+            else
+                set metadataError to "NSScreen.mainScreen returned no screen"
+            end if
+        else
+            set metadataError to "NSScreen exposed no screens"
+        end if
+    on error errorMessage number errorNumber
+        set metadataError to (errorNumber as text) & ":" & errorMessage
+    end try
+    try
+        set locationRecord to (current application's NSEvent's mouseLocation()) as record
+        set locationX to (x of locationRecord) as real
+        set locationY to (y of locationRecord) as real
+    on error errorMessage number errorNumber
+        return "screen_count=" & screenCountText & "; main_frame=" & frameText & ¬
+            "; raw_appkit=UNAVAILABLE; system_events_top_left_logical=UNAVAILABLE; " & ¬
+            "target_match=UNAVAILABLE; mouse_error=" & ¬
+            (errorNumber as text) & ":" & errorMessage
+    end try
+    set rawText to (locationX as text) & "," & (locationY as text)
+    if metadataReady is false then
+        return "screen_count=" & screenCountText & "; main_frame=" & frameText & "; raw_appkit=" & rawText & ¬
+            "; system_events_top_left_logical=UNAVAILABLE; target_match=UNAVAILABLE; metadata_error=" & metadataError
+    end if
+    if screenCount is not 1 then
+        return "screen_count=" & (screenCount as text) & "; main_frame=" & frameText & "; raw_appkit=" & rawText & ¬
+            "; system_events_top_left_logical=UNAVAILABLE; target_match=UNAVAILABLE; reason=multiple screens"
+    end if
+
+    -- AppKit screen coordinates have a lower-left origin; System Events uses top-left screen coordinates.
+    -- Only convert when one screen is exposed, so no multi-display origin or backing-scale guess is needed.
+    set systemX to locationX - frameX
+    set systemY to frameY + frameHeight - locationY
+    set deltaX to systemX - targetX
+    set deltaY to systemY - targetY
+    if deltaX < 0 then set deltaX to -deltaX
+    if deltaY < 0 then set deltaY to -deltaY
+    set targetMatch to "0"
+    if deltaX is less than or equal to 2.0 and deltaY is less than or equal to 2.0 then set targetMatch to "1"
+    return "screen_count=" & (screenCount as text) & "; main_frame=" & frameText & "; raw_appkit=" & rawText & ¬
+        "; system_events_top_left_logical=" & (systemX as text) & "," & (systemY as text) & ¬
+        "; target_match=" & targetMatch & "; tolerance=2.0"
+end currentMouseLocation
+
+on run argv
     set targetPID to item 1 of argv as integer
     set clickX to item 2 of argv as integer
     set clickY to item 3 of argv as integer
     tell application "System Events"
         set targetProcess to first process whose unix id is targetPID
         set frontmost of targetProcess to true
-        click at {clickX, clickY}
-        return "MACOS_DOC_CLOSE_POINTER_CLICK=PASS; pid=" & (targetPID as text) & "; x=" & (clickX as text) & "; y=" & (clickY as text)
     end tell
+    set pointerBefore to my currentMouseLocation(clickX, clickY)
+    tell application "System Events"
+        click at {clickX, clickY}
+    end tell
+    set pointerAfter to my currentMouseLocation(clickX, clickY)
+    return "MACOS_DOC_CLOSE_POINTER_CLICK=PASS; pid=" & (targetPID as text) & "; x=" & (clickX as text) & "; y=" & (clickY as text) & ¬
+        "; pointer_before={" & pointerBefore & "}; pointer_after={" & pointerAfter & "}"
 end run
 '''
 
@@ -401,6 +474,33 @@ def query_fixture_window(process: subprocess.Popen[str], deadline: float) -> Non
             if "PulseForge" not in lines[0]:
                 raise RuntimeError(f"PID {process.pid} resolves to unexpected process {lines[0]!r}")
             if len(indices) == 1 and indices[0].isdigit():
+                bounds_code, bounds = run_osascript(
+                    WINDOW_BOUNDS_QUERY,
+                    str(process.pid),
+                    FIXTURE_TITLE,
+                    timeout=bounded_timeout(deadline, 4.0),
+                )
+                if bounds_code != 0:
+                    if is_tcc_denial(bounds):
+                        raise RuntimeError(
+                            f"TCC_DENIED: Accessibility authorization is required for the read-only window preflight: "
+                            f"{bounds.strip()}"
+                        )
+                    raise RuntimeError(
+                        f"read-only Accessibility window preflight failed; exit_code={bounds_code}; "
+                        f"detail={bounds.strip()}"
+                    )
+                bound_lines = [line.strip() for line in bounds.splitlines() if line.strip()]
+                if len(bound_lines) != 3 or bound_lines[0] != lines[0] or bound_lines[1] != FIXTURE_TITLE:
+                    raise RuntimeError(
+                        f"read-only Accessibility window preflight returned inconsistent process/window identity: "
+                        f"{bounds.strip()!r}"
+                    )
+                print(
+                    f"MACOS_DOC_CLOSE_PREFLIGHT=PASS; pid={process.pid}; process={bound_lines[0]}; "
+                    f"window={bound_lines[1]}; accessibility_bounds={bound_lines[2]!r}; "
+                    "coordinates=raw Accessibility bounds; no Retina scale conversion applied"
+                )
                 return
             last_state = f"expected exactly one {FIXTURE_TITLE!r}, observed indices {indices!r}"
         else:

@@ -77,7 +77,10 @@ CLOSE_BUTTON_ACTIONS = '''on run argv
             set closeRole to role of closeControl
             set closeSubrole to subrole of closeControl
             set availableActions to actions of closeControl
-            return "MACOS_DOCUMENT_HOST_CLOSE_ACTIONS=PASS; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; window role/subrole=" & windowRole & "/" & windowSubrole & "; close control role/subrole=" & closeRole & "/" & closeSubrole & "; actions=" & (availableActions as text)
+            set supportsAXPress to availableActions contains "AXPress"
+            set supportsAXPressText to "false"
+            if supportsAXPress then set supportsAXPressText to "true"
+            return "MACOS_DOCUMENT_HOST_CLOSE_ACTIONS=PASS; pid=" & (targetPID as text) & "; process=" & (name of targetProcess as text) & "; window=" & quoted form of windowTitle & "; window role/subrole=" & windowRole & "/" & windowSubrole & "; close control role/subrole=" & closeRole & "/" & closeSubrole & "; AXPress=" & supportsAXPressText & "; actions=" & (availableActions as text)
         end tell
     end tell
 end run
@@ -202,15 +205,67 @@ def run_osascript(
     process_id: str,
     timeout: float,
     *script_arguments: str,
+    controller_label: str | None = None,
 ) -> tuple[int, str]:
+    command = ["/usr/bin/osascript", "-", process_id, *script_arguments]
+    bounded_timeout = max(0.1, timeout)
+    if controller_label is not None:
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+            )
+        except OSError as error:
+            return 127, f"could not launch /usr/bin/osascript: {type(error).__name__}: {error}"
+        print(
+            "MACOS_DOCUMENT_HOST_AX_CLIENT="
+            f"operation={controller_label}; executable=/usr/bin/osascript; pid={process.pid}; "
+            f"parent_pid={os.getpid()}; parent_executable={Path(sys.executable).resolve()}; target_pid={process_id}"
+        )
+        try:
+            output, _ = process.communicate(input=script, timeout=bounded_timeout)
+            return process.returncode, output
+        except subprocess.TimeoutExpired as error:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            cleanup_failure: str | None = None
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    cleanup_failure = f"timed-out osascript client PID {process.pid} did not terminate after SIGKILL"
+            for stream in (process.stdin, process.stdout):
+                if stream is not None and not stream.closed:
+                    try:
+                        stream.close()
+                    except OSError as close_error:
+                        cleanup_failure = cleanup_failure or (
+                            f"could not close timed-out osascript client pipe: {type(close_error).__name__}: {close_error}"
+                        )
+            if cleanup_failure:
+                raise RuntimeError(cleanup_failure) from error
+            output = error.stdout or ""
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            return 124, output + "\nAppleScript operation timed out\n"
+
     try:
         result = subprocess.run(
-            ["/usr/bin/osascript", "-", process_id, *script_arguments],
+            command,
             input=script,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            timeout=max(0.1, timeout),
+            timeout=bounded_timeout,
             check=False,
         )
         return result.returncode, result.stdout
@@ -240,7 +295,7 @@ def close_failure_diagnostics(
         if code == 0:
             result = output.strip()
         else:
-            state = "TCC_DENIAL" if has_tcc_denial(output) else "TIMED_OUT" if code == 124 else "ERROR"
+            state = classify_accessibility_failure(code, output)
             result = f"{label}={state}; exit_code={code}; detail={output.strip()}"
         diagnostics.append(result)
         print(f"MACOS_DOCUMENT_HOST_FAILURE_DIAGNOSTIC={result}")
@@ -272,6 +327,19 @@ def capture_close_failure_screenshot(log_directory: Path) -> str:
 def has_tcc_denial(output: str) -> bool:
     lowered = output.lower()
     return any(message in lowered for message in TCC_DENIALS)
+
+
+def classify_accessibility_failure(code: int, output: str) -> str:
+    lowered = output.lower()
+    if has_tcc_denial(output):
+        return "TCC_DENIED"
+    if code == 124 or "-1712" in lowered or "timed out" in lowered:
+        return "AX_QUERY_TIMEOUT"
+    if "-25202" in lowered or "invalid ui element" in lowered or "stale ax element" in lowered:
+        return "STALE_AX_ELEMENT"
+    if "-1728" in lowered or "can't get" in lowered or "can’t get" in lowered:
+        return "AX_ELEMENT_LOOKUP_ERROR"
+    return "AX_ACCESSIBILITY_ERROR"
 
 
 def fail(message: str, log_path: Path) -> int:
@@ -442,13 +510,50 @@ def main() -> int:
         diagnostic_output: list[str] = []
         exit_code: int | None = None
         time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+        preflight_code, preflight_output = run_osascript(
+            CLOSE_BUTTON_ACTIONS,
+            str(process.pid),
+            min(3.0, max(0.1, deadline - time.monotonic())),
+            *diagnostic_arguments,
+            controller_label="AX_CLOSE_PREFLIGHT",
+        )
+        if preflight_code != 0 or "AXPress=true" not in preflight_output:
+            category = classify_accessibility_failure(preflight_code, preflight_output)
+            screenshot_output = capture_close_failure_screenshot(args.log_directory)
+            print(
+                "MACOS_DOCUMENT_HOST_AX_PREFLIGHT="
+                f"{category}; pid={process.pid}; window={main_window_name!r}; "
+                f"exit_code={preflight_code}; detail={preflight_output.strip()}; {screenshot_output}"
+            )
+            if category == "TCC_DENIED":
+                print(
+                    "MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; native-window close request NOT RUN; "
+                    f"reason=explicit TCC denial; acceptance blocked; {screenshot_output}"
+                )
+                return 77
+            return fail(
+                "read-only semantic AXCloseButton preflight failed; close action was not attempted; "
+                f"category={category}; pid={process.pid}; process={observed_process_name}; "
+                f"window={main_window_name!r}; exit_code={preflight_code}; "
+                f"detail={preflight_output.strip()}; {screenshot_output}",
+                log_path,
+            )
+        print(preflight_output.strip())
+
         close_code, close_output = run_osascript(
             MAIN_WINDOW_CLOSE,
             str(process.pid),
             min(10.0, max(0.1, deadline - time.monotonic())),
             *diagnostic_arguments,
+            controller_label="AX_CLOSE_PRESS",
         )
         if close_code != 0:
+            close_category = classify_accessibility_failure(close_code, close_output)
+            print(
+                "MACOS_DOCUMENT_HOST_AX_CLOSE_RESULT="
+                f"{close_category}; pid={process.pid}; window={main_window_name!r}; "
+                f"exit_code={close_code}; detail={close_output.strip()}"
+            )
             if has_tcc_denial(close_output):
                 stop_process_group(process)
                 capture.thread.join(timeout=5)
@@ -476,7 +581,7 @@ def main() -> int:
                     stop_process_group(process)
                     capture.thread.join(timeout=5)
                     return fail(
-                        "Accessibility main-window close operation timed out while the editor remained open; "
+                        f"Accessibility main-window close operation {close_category} while the editor remained open; "
                         + f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
                         + f"exit_code={close_code}; "
                         + repr(diagnostic_output)
@@ -494,7 +599,7 @@ def main() -> int:
                 stop_process_group(process)
                 capture.thread.join(timeout=5)
                 return fail(
-                    "could not request normal main-window close; "
+                    f"could not request normal main-window close ({close_category}); "
                     f"pid={process.pid}; process={observed_process_name}; window={main_window_name!r}; "
                     f"exit_code={close_code}; "
                     f"diagnostics={diagnostic_output!r}; {screenshot_output}; detail={close_output.strip()}",
