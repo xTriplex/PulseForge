@@ -16,12 +16,14 @@ cat > "$BRIDGE/Versions/A/Resources/Info.plist" <<'EOF'
 </dict></plist>
 EOF
 
-clang -fobjc-arc -fmodules -dynamiclib \
+clang -arch x86_64 -arch arm64 -fobjc-arc -fmodules -dynamiclib \
 	-Wl,-install_name,@rpath/PFAutomationPermission.framework/Versions/A/PFAutomationPermission \
 	-framework Foundation -framework ApplicationServices \
 	Tests/Platform/MacOSAutomationPermissionBridge.m \
 	-o "$BRIDGE/Versions/A/PFAutomationPermission" 2>&1 |
 	tee "$RUNNER_TEMP/macos-automation-permission-bridge-build.log"
+lipo -archs "$BRIDGE/Versions/A/PFAutomationPermission" |
+	tee -a "$RUNNER_TEMP/macos-automation-permission-bridge-build.log"
 
 ln -s A "$BRIDGE/Versions/Current"
 ln -s Versions/Current/Headers "$BRIDGE/Headers"
