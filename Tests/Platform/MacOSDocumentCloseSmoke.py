@@ -187,9 +187,10 @@ func postKeyboard(_ keyCode: CGKeyCode, _ isDown: Bool, _ flags: CGEventFlags, _
 }
 
 if CommandLine.arguments.count >= 2 &&
-   (CommandLine.arguments[1] == "--go-to-folder" || CommandLine.arguments[1] == "--type-text") {
+   (CommandLine.arguments[1] == "--go-to-folder" || CommandLine.arguments[1] == "--press-return" ||
+    CommandLine.arguments[1] == "--type-text") {
     let mode = CommandLine.arguments[1]
-    let expectedCount = mode == "--go-to-folder" ? 4 : 5
+    let expectedCount = mode == "--type-text" ? 5 : 4
     guard CommandLine.arguments.count == expectedCount else {
         fail("keyboard input requires \(mode), PID, action identity" + (mode == "--type-text" ? " and text" : ""), 2)
     }
@@ -213,6 +214,9 @@ if CommandLine.arguments.count >= 2 &&
     if mode == "--go-to-folder" {
         postKeyboard(5, true, [.maskCommand, .maskShift], source, actionID, eventTag, targetPID)
         postKeyboard(5, false, [.maskCommand, .maskShift], source, actionID, eventTag, targetPID)
+    } else if mode == "--press-return" {
+        postKeyboard(36, true, [], source, actionID, eventTag, targetPID)
+        postKeyboard(36, false, [], source, actionID, eventTag, targetPID)
     } else {
         let text = CommandLine.arguments[4]
         guard !text.isEmpty else { fail("native-dialog keyboard text must not be empty", 2) }

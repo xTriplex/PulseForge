@@ -173,6 +173,17 @@ def go_folder_sheet_closed_in_expected_directory(output: str, directory_name: st
         return False
     return True
 
+
+def folder_path_field_ready(output: str, expected_path: str) -> bool:
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=folder-path-ready;")
+    ]
+    if len(results) != 1:
+        return False
+    fields = dict(part.split("=", 1) for part in results[0].split("; ") if "=" in part)
+    return fields.get("value") == expected_path and fields.get("focused") == "true"
+
 class FixtureOutput:
     def __init__(self, process: subprocess.Popen[str], log_path: Path):
         self.lines: queue.Queue[str | None] = queue.Queue(maxsize=128)
@@ -546,24 +557,31 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 "enabled Go to Folder PathTextField",
             )
             last_navigation_step = "Go To Folder PathTextField observed in the expected sheet"
+            expected_directory = str(expected_path.parent)
             automation_code, automation_output, automation_error = run_direct_ax(
                 int(panel_process_id),
-                operation="set-folder-path-confirm",
+                operation="set-folder-path-value",
                 window_title=panel_title,
                 control_name="PathTextField",
-                control_value=str(expected_path.parent),
+                control_value=expected_directory,
                 timeout=min(10.0, remaining_seconds()),
             )
             automation_output += automation_error
-            last_navigation_step = (
-                f"Go To Folder path confirmation returned; exit_code={automation_code}; "
-                f"output={automation_output.strip()!r}"
-            )
-            print(f"NFD_GO_TO_FOLDER_CONFIRM=RETURNED; {last_navigation_step}", flush=True)
-            if automation_code != 0:
-                raise RuntimeError(
-                    f"Go to Folder path confirmation failed; exit_code={automation_code}; {automation_output!r}"
+            if automation_code != 0 or not folder_path_field_ready(automation_output, expected_directory):
+                last_navigation_step = (
+                    f"Go To Folder value/focus validation failed; exit_code={automation_code}; "
+                    f"output={automation_output.strip()!r}"
                 )
+                raise RuntimeError(
+                    f"Go to Folder path value/focus verification failed; exit_code={automation_code}; {automation_output!r}"
+                )
+            last_navigation_step = f"Go To Folder path value verified and focused; value={expected_directory!r}"
+            print(f"NFD_GO_TO_FOLDER_FIELD=READY; {automation_output.strip()!r}", flush=True)
+            return_action_id = run_keyboard_input(
+                "--press-return", int(panel_process_id), timeout=min(5.0, remaining_seconds())
+            )
+            last_navigation_step = f"Return key posted once; action_id={return_action_id}; field value verified"
+            print(f"NFD_GO_TO_FOLDER_RETURN=POSTED; action_id={return_action_id}; target_pid={panel_process_id}", flush=True)
             run_direct_ax_until(
                 int(panel_process_id),
                 "",

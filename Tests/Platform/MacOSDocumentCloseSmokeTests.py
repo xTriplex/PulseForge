@@ -105,6 +105,16 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             "DIRECT_AX_NODE index=1; role=AXSheet; name=GoToWindow\n"
             "DIRECT_AX_NODE index=2; role=AXTextField; name=PathTextField; enabled=false; focused=true"
         ))
+        ready_path = "/tmp/PulseForge NFD Ω/Dialog Files Ω"
+        self.assertTrue(native_dialog.folder_path_field_ready(
+            f"DIRECT_AX_RESULT status=folder-path-ready; value={ready_path}; focused=true; set_error=0", ready_path
+        ))
+        self.assertFalse(native_dialog.folder_path_field_ready(
+            f"DIRECT_AX_RESULT status=folder-path-ready; value={ready_path}; focused=false; set_error=0", ready_path
+        ))
+        self.assertFalse(native_dialog.folder_path_field_ready(
+            f"DIRECT_AX_RESULT status=folder-path-error; value={ready_path}; focused=true; set_error=0", ready_path
+        ))
 
     def test_permission_bridge_class_exposes_only_scalar_no_argument_methods(self) -> None:
         platform_dir = Path(__file__).parent
