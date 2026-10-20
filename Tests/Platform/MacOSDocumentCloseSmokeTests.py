@@ -86,14 +86,14 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             self.assertTrue(return_types)
             self.assertTrue(all(return_type == "i" for return_type in return_types))
             self.assertEqual([], metadata_method.findall("arg"))
-        self.assertEqual(5, header.count("+ (int32_t)"))
+        self.assertEqual(5, header.count("- (int32_t)"))
 
     def test_real_probe_imports_the_framework_and_invokes_runtime_visible_methods(self) -> None:
         script = automation._probe_script(Path("/tmp/PFAutomationPermission.framework"))
 
         self.assertIn('ObjC.import(bridgePath);', script)
         self.assertIn('stage = "custom-framework-class-lookup";', script)
-        self.assertIn("var permissionBridge = $.PFAutomationPermissionBridge;", script)
+        self.assertIn("var permissionBridge = $.PFAutomationPermissionBridge.alloc.init;", script)
         for method in (
             "probeSystemEventsDescriptor",
             "readSystemEventsNativeAddress",
