@@ -19,7 +19,7 @@ namespace PulseForgeEditor::Detail
 	EditorDocumentHostTestEditor::EditorDocumentHostTestEditor(EditorDocumentManager& Documents, EditorDocumentEditorRegistry& Editors,
 		EditorStyle& Style, std::function<void(std::string)> ReportError, std::function<PulseForge::UUID()> ActiveProject,
 		std::function<void(std::string_view, int, int, bool)> ReportCloseUiAllowClose,
-		std::function<void(std::string_view, int, int, bool, bool, bool, int)> ReportCloseUiTextField, bool TextOnlyEditing)
+		std::function<void(std::string_view, int, int, bool, bool, bool, bool, int)> ReportCloseUiTextField, bool TextOnlyEditing)
 		: m_Documents(Documents), m_Editors(Editors), m_Style(Style), m_ReportError(std::move(ReportError)),
 		  m_ActiveProject(std::move(ActiveProject)), m_ReportCloseUiAllowClose(std::move(ReportCloseUiAllowClose)),
 		  m_ReportCloseUiTextField(std::move(ReportCloseUiTextField)), m_TextOnlyEditing(TextOnlyEditing)
