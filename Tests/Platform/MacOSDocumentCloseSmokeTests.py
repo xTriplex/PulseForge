@@ -20,6 +20,8 @@ from unittest.mock import Mock, patch
 import MacOSDocumentCloseSmoke as smoke
 import MacOSBundleSmoke as bundle
 import MacOSAutomationClient as automation
+import MacOSDirectAX as direct_ax
+import MacOSNativeDialogAutomation as native_dialog
 import MacOSScreenshot as screenshot
 import MacOSWorkspaceRestoreSmoke as workspace_restore
 import MacOSDocumentHostSmoke as document_host
@@ -59,6 +61,45 @@ def marker(kind: str, **fields: str) -> dict[str, str]:
 class DirtyCloseProtocolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.protocol = smoke.MarkerProtocol("cancel-save", "host-a", "asset-a", 0)
+
+    def test_native_window_activation_requires_the_expected_focused_window(self) -> None:
+        output = (
+            "DIRECT_AX_RESULT status=window-focused; pid=4321; target_title=Host Test Fixture 1; "
+            "focused_title=Host Test Fixture 1; ax_raise_error=0; focus_error=0; attempts=2\n"
+        )
+        self.assertEqual(
+            "Host Test Fixture 1", direct_ax.parse_window_activation(output, 4321, "Host Test Fixture 1")
+        )
+        with self.assertRaisesRegex(ValueError, "identity or action mismatch"):
+            direct_ax.parse_window_activation(output.replace("focused_title=Host Test Fixture 1", "focused_title=PulseForge Editor"), 4321, "Host Test Fixture 1")
+        with self.assertRaisesRegex(ValueError, "expected one focused-window result"):
+            direct_ax.parse_window_activation("DIRECT_AX_RESULT status=window-focus-timeout; pid=4321\n", 4321, "Host Test Fixture 1")
+
+    def test_open_panel_readiness_requires_exact_enabled_control_and_folder_state(self) -> None:
+        output = (
+            "DIRECT_AX_NODE index=12; parent=2; depth=3; role=AXButton; subrole=; name=Open; enabled=true; focused=0\n"
+            "DIRECT_AX_NODE index=13; parent=2; depth=3; role=AXButton; subrole=; name=Cancel; enabled=true; focused=0\n"
+        )
+        self.assertTrue(native_dialog.ax_node_enabled(output, "AXButton", "Open"))
+        self.assertFalse(native_dialog.ax_node_enabled(output, "AXButton", "Save"))
+        self.assertFalse(native_dialog.ax_node_enabled(output.replace("enabled=true", "enabled=false", 1), "AXButton", "Open"))
+        self.assertFalse(native_dialog.go_folder_sheet_closed_in_expected_directory(
+            "DIRECT_AX_NODE index=1; role=AXSheet; name=Go to Folder", "Dialog Files With Spaces Ω"
+        ))
+        self.assertTrue(native_dialog.go_folder_sheet_closed_in_expected_directory(
+            "DIRECT_AX_NODE index=1; role=AXPopUpButton; name=Dialog Files With Spaces Ω", "Dialog Files With Spaces Ω"
+        ))
+        self.assertFalse(native_dialog.focused_text_field_visible(
+            "DIRECT_AX_NODE index=1; role=AXTextField; name=Search; focused=0"
+        ))
+        self.assertTrue(native_dialog.focused_text_field_visible(
+            "DIRECT_AX_WINDOW pid=42; title=Go to Folder\n"
+            "DIRECT_AX_NODE index=1; role=AXTextField; name=Folder path; focused=true"
+        ))
+        self.assertFalse(native_dialog.focused_text_field_visible(
+            "DIRECT_AX_NODE index=1; role=AXSheet; name=Go to Folder\n"
+            "DIRECT_AX_NODE index=2; role=AXTextField; name=Search; focused=true"
+        ))
 
     def test_permission_bridge_class_exposes_only_scalar_no_argument_methods(self) -> None:
         platform_dir = Path(__file__).parent
@@ -594,7 +635,11 @@ class DirtyCloseProtocolTests(unittest.TestCase):
                 return None
 
         capture = FakeCapture()
-        with patch.object(smoke, "run_osascript", return_value=(0, "focus pass")) as focus, patch.object(
+        activation_output = (
+            "DIRECT_AX_RESULT status=window-focused; pid=42; target_title=Host Test Fixture 1; "
+            "focused_title=Host Test Fixture 1; ax_raise_error=0; focus_error=0; attempts=1\n"
+        )
+        with patch.object(smoke, "run_direct_ax", return_value=(0, activation_output, "")) as activate, patch.object(
             smoke, "run_bounded_command", return_value=(0, "Quartz event posted", "")
         ) as dispatch:
             evidence = smoke.click_point(
@@ -603,8 +648,10 @@ class DirtyCloseProtocolTests(unittest.TestCase):
 
         self.assertTrue(evidence.dispatch_attempted)
         self.assertEqual(0, evidence.api_exit_code)
-        focus.assert_called_once()
-        self.assertEqual(smoke.FOCUS_TARGET, focus.call_args.args[0])
+        activate.assert_called_once()
+        self.assertEqual(42, activate.call_args.args[0])
+        self.assertEqual("activate-window", activate.call_args.kwargs["operation"])
+        self.assertEqual(smoke.FIXTURE_TITLE, activate.call_args.kwargs["window_title"])
         dispatch.assert_called_once()
         self.assertEqual(5, len(dispatch.call_args.args[0]))
         self.assertEqual(evidence.action_id, dispatch.call_args.args[0][2])

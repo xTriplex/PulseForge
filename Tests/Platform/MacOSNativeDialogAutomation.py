@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import os
 import queue
 import signal
@@ -13,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from MacOSDirectAX import run_direct_ax
@@ -22,6 +24,150 @@ MAX_LOG_BYTES = 64 * 1024
 MAX_CONSOLE_BYTES = 32 * 1024
 OBSERVATION_TOTAL_SECONDS = 35.0
 ACTION_RESPONSE_SECONDS = 15.0
+
+
+def ax_node_enabled(output: str, role: str, name: str) -> bool:
+    for line in output.splitlines():
+        if not line.startswith("DIRECT_AX_NODE "):
+            continue
+        fields = dict(part.split("=", 1) for part in line.split("; ") if "=" in part)
+        if fields.get("role") == role and fields.get("name") == name:
+            return fields.get("enabled") == "true"
+    return False
+
+
+def run_keyboard_input(mode: str, target_pid: int, *, text: str = "", timeout: float) -> str:
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    if not runner_temp:
+        raise RuntimeError("RUNNER_TEMP is unavailable for the compiled Quartz keyboard helper")
+    executable = Path(runner_temp) / "PulseForgePointerInput"
+    if not executable.is_file():
+        raise RuntimeError(f"compiled Quartz helper is missing: {executable}")
+    action_id = uuid.uuid4().hex
+    arguments = [str(executable), mode, str(target_pid), action_id]
+    if mode == "--type-text":
+        arguments.append(text)
+    process = subprocess.Popen(
+        arguments,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=max(0.1, timeout))
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=0.25)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                stdout, stderr = process.communicate(timeout=1.0)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError(
+                    f"Quartz keyboard helper survived SIGKILL; action_id={action_id}; pid={process.pid}"
+                ) from error
+        raise RuntimeError(
+            f"Quartz keyboard helper timed out; action_id={action_id}; pid={target_pid}; "
+            f"stdout={stdout[-1200:]!r}; stderr={stderr[-1200:]!r}"
+        )
+    if process.returncode != 0:
+        category = "TCC_DENIED" if process.returncode == 77 else "DISPATCH_FAILED"
+        raise RuntimeError(
+            f"{category}; Quartz keyboard helper exit_code={process.returncode}; action_id={action_id}; "
+            f"stdout={stdout[-1200:]!r}; stderr={stderr[-1200:]!r}"
+        )
+    if "CGEventPost=KEY_SEQUENCE_RETURNED" not in stdout:
+        raise RuntimeError(f"Quartz keyboard helper returned no sequence result; action_id={action_id}; output={stdout!r}")
+    print(f"NFD_KEYBOARD_INPUT=TRANSPORT_RETURNED; mode={mode}; action_id={action_id}; target_pid={target_pid}; output={stdout.strip()!r}")
+    return action_id
+
+
+def wait_for_open_button(fixture_pid: int, panel_title: str, deadline: float) -> str:
+    last_output = ""
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        code, output, error = run_direct_ax(
+            fixture_pid,
+            operation="snapshot",
+            window_title=panel_title,
+            deep_snapshot=True,
+            timeout=min(8.0, max(0.1, remaining)),
+        )
+        last_output = output + error
+        if code == 0 and ax_node_enabled(last_output, "AXButton", "Open"):
+            return last_output
+        if code not in (0, 124):
+            raise RuntimeError(f"Open panel snapshot failed while awaiting selected file; exit_code={code}; {last_output!r}")
+        time.sleep(min(0.15, max(0.0, deadline - time.monotonic())))
+    raise RuntimeError(f"Open did not become enabled after filename selection; last_snapshot={last_output[-4000:]!r}")
+
+
+def run_direct_ax_until(
+    fixture_pid: int,
+    panel_title: str,
+    deadline: float,
+    accept: Callable[[str], bool],
+    description: str,
+) -> str:
+    last_output = ""
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        code, output, error = run_direct_ax(
+            fixture_pid,
+            operation="snapshot",
+            window_title=panel_title,
+            deep_snapshot=True,
+            timeout=min(8.0, max(0.1, remaining)),
+        )
+        last_output = output + error
+        if code == 0 and accept(last_output):
+            return last_output
+        if code not in (0, 124):
+            raise RuntimeError(f"Accessibility observation failed while awaiting {description}; exit_code={code}; {last_output!r}")
+        time.sleep(min(0.15, max(0.0, deadline - time.monotonic())))
+    raise RuntimeError(f"Timed out awaiting {description}; last_snapshot={last_output[-4000:]!r}")
+
+
+def focused_text_field_visible(output: str) -> bool:
+    lines = output.splitlines()
+    has_folder_sheet = any(
+        (line.startswith("DIRECT_AX_NODE ") and "role=AXSheet" in line)
+        or (line.startswith("DIRECT_AX_WINDOW ") and "title=Go to Folder" in line)
+        for line in lines
+    )
+    if not has_folder_sheet:
+        return False
+    for line in lines:
+        if not line.startswith("DIRECT_AX_NODE "):
+            continue
+        fields = dict(part.split("=", 1) for part in line.split("; ") if "=" in part)
+        if (
+            fields.get("role") == "AXTextField"
+            and fields.get("focused", "").lower() in {"true", "1"}
+            and "search" not in fields.get("name", "").lower()
+        ):
+            return True
+    return False
+
+
+def go_folder_sheet_closed_in_expected_directory(output: str, directory_name: str) -> bool:
+    if not directory_name or directory_name not in output:
+        return False
+    if any(line.startswith("DIRECT_AX_NODE ") and "role=AXSheet" in line for line in output.splitlines()):
+        return False
+    if any(line.startswith("DIRECT_AX_WINDOW ") and "title=Go to Folder" in line for line in output.splitlines()):
+        return False
+    return True
 
 class FixtureOutput:
     def __init__(self, process: subprocess.Popen[str], log_path: Path):
@@ -365,20 +511,49 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             return 1, "fixture process group or output reader survived bounded deadline cleanup"
         return 1, f"native dialog fixture exhausted its {timeout_seconds}s case bound before panel automation"
     if scenario == "open-select":
-        automation_code, automation_output, automation_error = run_direct_ax(
-            int(panel_process_id),
-            operation="select-element",
-            window_title=panel_title,
-            control_name=expected_path.name,
-            timeout=min(10.0, remaining),
-        )
-        automation_output += automation_error
-        if automation_code == 0:
-            automation_code, pressed, press_error = run_direct_ax(
-                int(panel_process_id), operation="press-control", window_title=panel_title,
-                control_name="Open", timeout=min(10.0, remaining)
+        try:
+            helper_deadline = min(deadline, time.monotonic() + 25.0)
+            run_keyboard_input("--go-to-folder", int(panel_process_id), timeout=min(5.0, remaining_seconds()))
+            run_direct_ax_until(
+                int(panel_process_id), "", helper_deadline, focused_text_field_visible,
+                "focused Go to Folder path field",
             )
-            automation_output += pressed + press_error
+            automation_code, automation_output, automation_error = run_direct_ax(
+                int(panel_process_id),
+                operation="set-focused-value-confirm",
+                window_title="",
+                control_value=str(expected_path.parent),
+                timeout=min(10.0, remaining_seconds()),
+            )
+            automation_output += automation_error
+            if automation_code != 0:
+                raise RuntimeError(
+                    f"Go to Folder path confirmation failed; exit_code={automation_code}; {automation_output!r}"
+                )
+            run_direct_ax_until(
+                int(panel_process_id),
+                "",
+                helper_deadline,
+                lambda output: go_folder_sheet_closed_in_expected_directory(output, expected_path.parent.name),
+                "Go to Folder sheet dismissal and expected directory",
+            )
+            run_keyboard_input(
+                "--type-text", int(panel_process_id), text=expected_path.name, timeout=min(5.0, remaining_seconds())
+            )
+            automation_output = wait_for_open_button(
+                int(panel_process_id), panel_title, min(deadline, time.monotonic() + 15.0)
+            )
+        except (OSError, RuntimeError) as error:
+            observation_log = log_path.with_name(f"native-dialog-{scenario}-navigation-failure.log")
+            capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
+            if not stop_fixture(process, output_reader):
+                return 1, "fixture process group or output reader survived failed Open panel navigation"
+            return 1, f"Open selection navigation failed before the Open action; {error}"
+        automation_code, pressed, press_error = run_direct_ax(
+            int(panel_process_id), operation="press-control", window_title=panel_title,
+            control_name="Open", timeout=min(10.0, remaining_seconds())
+        )
+        automation_output += pressed + press_error
     elif scenario == "save-select":
         automation_code, automation_output, automation_error = run_direct_ax(
             int(panel_process_id),

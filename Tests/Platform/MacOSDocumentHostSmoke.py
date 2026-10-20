@@ -237,7 +237,7 @@ def close_failure_diagnostics(
     if remaining <= 0.1:
         return ["DIRECT_AX_SNAPSHOT=DEADLINE_EXHAUSTED"]
     code, output, error = run_direct_ax(
-        int(process_id), operation="window-count", timeout=min(5.0, remaining - 0.05)
+        int(process_id), operation="window-count", timeout=min(12.0, remaining - 0.05)
     )
     result = output + error if code == 0 else f"DIRECT_AX_SNAPSHOT=ERROR; exit_code={code}; stdout={output!r}; stderr={error!r}"
     print(f"MACOS_DOCUMENT_HOST_FAILURE_DIAGNOSTIC={result}")
@@ -402,7 +402,7 @@ def main() -> int:
             ):
                 next_window_query = now + 2.0
                 query_code, query_output, query_error = run_direct_ax(
-                    process.pid, operation="window-count", timeout=min(5.0, max(0.1, deadline - now))
+                    process.pid, operation="window-count", timeout=min(12.0, max(0.1, deadline - now))
                 )
                 query_output += query_error
                 print(f"MACOS_DOCUMENT_HOST_NATIVE_WINDOW_SNAPSHOT={query_output.strip()!r}")
@@ -495,7 +495,7 @@ def main() -> int:
 
         diagnostic_output: list[str] = []
         exit_code: int | None = None
-        preflight_timeout = min(5.0, max(0.1, deadline - time.monotonic()))
+        preflight_timeout = min(12.0, max(0.1, deadline - time.monotonic()))
         preflight_code, preflight_output, preflight_stderr = run_direct_ax(
             process.pid,
             operation="window-count",
