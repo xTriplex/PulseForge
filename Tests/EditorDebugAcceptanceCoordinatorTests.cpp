@@ -22,8 +22,8 @@ namespace
 	void TestCoordinatorRejectsWrongIdentityAndInvalidTransition(TestRunner& Tests)
 	{
 		std::string ApplicationError;
-		DocumentCloseAcceptanceCoordinator Coordinator("cancel-save", [&ApplicationError](std::string Message)
-			{ ApplicationError = std::move(Message); });
+		DocumentCloseAcceptanceCoordinator Coordinator(
+			"cancel-save", [&ApplicationError](std::string Message) { ApplicationError = std::move(Message); });
 		EditorDocumentIdentity Identity;
 		Coordinator.SetIdentity(Identity);
 		Coordinator.SetHost("fixture-host");
@@ -67,8 +67,8 @@ namespace
 		SavedButOpen.Error = "The Debug fixture is configured to reject close.";
 		Coordinator.ReportAction("save", false, SavedButOpen);
 		PF_CHECK(Tests, Coordinator.Phase() == DocumentCloseUiPhase::AwaitingCloseRetryCancel);
-		PF_CHECK(Tests, SavedButOpen.Pending && SavedButOpen.Open && SavedButOpen.HostSame &&
-			!SavedButOpen.Dirty && SavedButOpen.Value == 42 && SavedButOpen.Saved == 42);
+		PF_CHECK(Tests, SavedButOpen.Pending && SavedButOpen.Open && SavedButOpen.HostSame && !SavedButOpen.Dirty &&
+							SavedButOpen.Value == 42 && SavedButOpen.Saved == 42);
 		PF_CHECK(Tests, Coordinator.ExpectedChoice() == "cancel");
 
 		SavedButOpen.Pending = false;
@@ -107,8 +107,8 @@ namespace
 		Coordinator.ReportAction("save", false, FailedSave);
 		PF_CHECK(Tests, Coordinator.Phase() == DocumentCloseUiPhase::AwaitingSaveRetry);
 		PF_CHECK(Tests, Coordinator.ExpectedChoice() == "save");
-		PF_CHECK(Tests, FailedSave.Pending && FailedSave.Open && FailedSave.HostSame && FailedSave.HostExists &&
-			FailedSave.Dirty && FailedSave.Value == 42 && FailedSave.Saved == 10);
+		PF_CHECK(Tests, FailedSave.Pending && FailedSave.Open && FailedSave.HostSame && FailedSave.HostExists && FailedSave.Dirty &&
+							FailedSave.Value == 42 && FailedSave.Saved == 10);
 
 		DocumentCloseUiSessionObservation SavedAndClosed;
 		SavedAndClosed.Value = 42;
@@ -116,7 +116,7 @@ namespace
 		Coordinator.ReportAction("save", true, SavedAndClosed);
 		PF_CHECK(Tests, Coordinator.Complete());
 	}
-}
+} // namespace
 
 void RunEditorDebugAcceptanceCoordinatorTests(TestRunner& Tests)
 {

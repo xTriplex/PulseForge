@@ -17,7 +17,8 @@ namespace PulseForgeEditor::Detail
 			{
 				const auto Character = static_cast<unsigned char>(RawCharacter);
 				const bool Safe = (Character >= 'a' && Character <= 'z') || (Character >= 'A' && Character <= 'Z') ||
-					(Character >= '0' && Character <= '9') || Character == '-' || Character == '_' || Character == '.' || Character == '~';
+								  (Character >= '0' && Character <= '9') || Character == '-' || Character == '_' || Character == '.' ||
+								  Character == '~';
 				if (Safe) Escaped.push_back(static_cast<char>(Character));
 				else
 				{
@@ -28,7 +29,7 @@ namespace PulseForgeEditor::Detail
 			}
 			return Escaped;
 		}
-	}
+	} // namespace
 
 	DocumentCloseAcceptanceCoordinator::DocumentCloseAcceptanceCoordinator(
 		std::optional<std::string> Scenario, std::function<void(std::string)> ReportApplicationError)
@@ -55,7 +56,7 @@ namespace PulseForgeEditor::Detail
 	bool DocumentCloseAcceptanceCoordinator::IsAwaitingTabClose() const noexcept
 	{
 		return m_Phase == DocumentCloseUiPhase::AwaitingInitialClose || m_Phase == DocumentCloseUiPhase::AwaitingSecondClose ||
-			m_Phase == DocumentCloseUiPhase::AwaitingFinalClose;
+			   m_Phase == DocumentCloseUiPhase::AwaitingFinalClose;
 	}
 
 	std::string_view DocumentCloseAcceptanceCoordinator::ExpectedChoice() const noexcept
@@ -67,8 +68,7 @@ namespace PulseForgeEditor::Detail
 			if (*m_Scenario == "discard") return "discard";
 			return "save";
 		}
-		if (m_Phase == DocumentCloseUiPhase::AwaitingSecondAction || m_Phase == DocumentCloseUiPhase::AwaitingSaveRetry)
-			return "save";
+		if (m_Phase == DocumentCloseUiPhase::AwaitingSecondAction || m_Phase == DocumentCloseUiPhase::AwaitingSaveRetry) return "save";
 		if (m_Phase == DocumentCloseUiPhase::AwaitingCloseRetryCancel) return "cancel";
 		return {};
 	}
@@ -91,18 +91,19 @@ namespace PulseForgeEditor::Detail
 		if (m_ReportApplicationError) m_ReportApplicationError("The Debug document-close UI fixture failed: " + std::string(Reason));
 	}
 
-	void DocumentCloseAcceptanceCoordinator::FixtureReady(const DocumentCloseUiSessionObservation& Session,
-		size_t FixtureSessions, size_t SelectedSessions, size_t NativeHosts)
+	void DocumentCloseAcceptanceCoordinator::FixtureReady(
+		const DocumentCloseUiSessionObservation& Session, size_t FixtureSessions, size_t SelectedSessions, size_t NativeHosts)
 	{
 		if (!m_Scenario || !m_Identity || m_HostID.empty()) return;
-		if (FixtureSessions != 1 || SelectedSessions != 1 || NativeHosts != 1 || !Session.Open || !Session.HostSame ||
-			!Session.Dirty || Session.Value != 20 || Session.Saved != 10)
+		if (FixtureSessions != 1 || SelectedSessions != 1 || NativeHosts != 1 || !Session.Open || !Session.HostSame || !Session.Dirty ||
+			Session.Value != 20 || Session.Saved != 10)
 		{
 			Fail("The isolated setup did not contain exactly one fresh dirty native fixture document.");
 			return;
 		}
 		m_Phase = DocumentCloseUiPhase::AwaitingTextEntry;
-		PF_INFO("PF_DOC_CLOSE_UI|READY|scenario={}|host={}|asset={}|saved=10|value=20|dirty=1|fixture_sessions=1|fixture_hosts=1|generation=0",
+		PF_INFO(
+			"PF_DOC_CLOSE_UI|READY|scenario={}|host={}|asset={}|saved=10|value=20|dirty=1|fixture_sessions=1|fixture_hosts=1|generation=0",
 			*m_Scenario, m_HostID, m_Identity->Asset.ToString());
 	}
 
@@ -130,11 +131,11 @@ namespace PulseForgeEditor::Detail
 
 	void DocumentCloseAcceptanceCoordinator::ReportTextField(const DocumentCloseUiTextObservation& Observation)
 	{
-		if (!m_Scenario || m_Phase != DocumentCloseUiPhase::AwaitingTextEntry || !IsFixtureHost(Observation.HostID) || !m_Identity)
-			return;
+		if (!m_Scenario || m_Phase != DocumentCloseUiPhase::AwaitingTextEntry || !IsFixtureHost(Observation.HostID) || !m_Identity) return;
 		if (!m_TextControlReported)
 		{
-			PF_INFO("PF_DOC_CLOSE_UI|TEXT_CONTROL|scenario={}|host={}|asset={}|generation=0|x={}|y={}|value=20|active={}|hovered={}|mouse_x={:.1f}|mouse_y={:.1f}",
+			PF_INFO("PF_DOC_CLOSE_UI|TEXT_CONTROL|scenario={}|host={}|asset={}|generation=0|x={}|y={}|value=20|active={}|hovered={}|mouse_"
+					"x={:.1f}|mouse_y={:.1f}",
 				*m_Scenario, m_HostID, m_Identity->Asset.ToString(), Observation.X, Observation.Y, Observation.Active ? 1 : 0,
 				Observation.Hovered ? 1 : 0, Observation.MouseX, Observation.MouseY);
 			m_LastTextMouseX = Observation.MouseX;
@@ -145,10 +146,11 @@ namespace PulseForgeEditor::Detail
 			m_TextControlReported = true;
 		}
 		const bool PointerChanged = Observation.MouseX != m_LastTextMouseX || Observation.MouseY != m_LastTextMouseY ||
-			Observation.Hovered != m_LastTextHovered || Observation.Active != m_LastTextActive;
+									Observation.Hovered != m_LastTextHovered || Observation.Active != m_LastTextActive;
 		if (m_TextPointerStateReported && PointerChanged && m_TextPointerReportCount < 8)
 		{
-			PF_INFO("PF_DOC_CLOSE_UI|TEXT_POINTER|scenario={}|host={}|asset={}|generation=0|x={}|y={}|hovered={}|active={}|mouse_x={:.1f}|mouse_y={:.1f}",
+			PF_INFO("PF_DOC_CLOSE_UI|TEXT_POINTER|scenario={}|host={}|asset={}|generation=0|x={}|y={}|hovered={}|active={}|mouse_x={:.1f}|"
+					"mouse_y={:.1f}",
 				*m_Scenario, m_HostID, m_Identity->Asset.ToString(), Observation.X, Observation.Y, Observation.Hovered ? 1 : 0,
 				Observation.Active ? 1 : 0, Observation.MouseX, Observation.MouseY);
 			m_LastTextMouseX = Observation.MouseX;
@@ -159,39 +161,40 @@ namespace PulseForgeEditor::Detail
 		}
 		if (Observation.Clicked && Observation.Active && !m_TextFocusReported)
 		{
-			PF_INFO("PF_DOC_CLOSE_UI|TEXT_FOCUS|scenario={}|host={}|asset={}|generation=0|active=1|clicked=1|value={}",
-				*m_Scenario, m_HostID, m_Identity->Asset.ToString(), Observation.Value);
+			PF_INFO("PF_DOC_CLOSE_UI|TEXT_FOCUS|scenario={}|host={}|asset={}|generation=0|active=1|clicked=1|value={}", *m_Scenario,
+				m_HostID, m_Identity->Asset.ToString(), Observation.Value);
 			m_TextFocusReported = true;
 		}
 		if (!Observation.Changed || Observation.Value != 42) return;
-		if (!Observation.Session.Open || !Observation.Session.HostSame || !Observation.Session.Dirty ||
-			Observation.Session.Value != 42 || Observation.Session.Saved != 10 || !m_TextFocusReported)
+		if (!Observation.Session.Open || !Observation.Session.HostSame || !Observation.Session.Dirty || Observation.Session.Value != 42 ||
+			Observation.Session.Saved != 10 || !m_TextFocusReported)
 		{
 			Fail("OS text entry did not leave the focused document dirty with its original saved value.");
 			return;
 		}
 		m_Phase = DocumentCloseUiPhase::AwaitingInitialClose;
 		m_CloseControlReported = false;
-		PF_INFO("PF_DOC_CLOSE_UI|TEXT_ENTRY|scenario={}|host={}|asset={}|generation=0|value=42|saved=10|dirty=1",
-			*m_Scenario, m_HostID, m_Identity->Asset.ToString());
+		PF_INFO("PF_DOC_CLOSE_UI|TEXT_ENTRY|scenario={}|host={}|asset={}|generation=0|value=42|saved=10|dirty=1", *m_Scenario, m_HostID,
+			m_Identity->Asset.ToString());
 	}
 
 	void DocumentCloseAcceptanceCoordinator::ReportDecisionPointer(const DocumentCloseUiDecisionPointerObservation& Observation)
 	{
 		if (!m_Scenario || !m_Identity || !IsFixtureHost(Observation.HostID) || !Observation.Pending ||
-			ExpectedChoice() != Observation.Choice ||
-			m_DecisionPointerReportCount >= 4)
+			ExpectedChoice() != Observation.Choice || m_DecisionPointerReportCount >= 4)
 			return;
 		const auto& Previous = m_LastDecisionPointer;
 		const bool Changed = !m_DecisionPointerStateReported || Observation.MouseX != Previous.MouseX ||
-			Observation.MouseY != Previous.MouseY || Observation.Hovered != Previous.Hovered || Observation.Active != Previous.Active ||
-			Observation.MouseDown != Previous.MouseDown || Observation.Clicked != Previous.Clicked;
+							 Observation.MouseY != Previous.MouseY || Observation.Hovered != Previous.Hovered ||
+							 Observation.Active != Previous.Active || Observation.MouseDown != Previous.MouseDown ||
+							 Observation.Clicked != Previous.Clicked;
 		if (!Changed) return;
-		PF_INFO("PF_DOC_CLOSE_UI|DECISION_POINTER|scenario={}|host={}|asset={}|generation={}|choice={}|sample={}|rect_min={:.1f},{:.1f}|rect_max={:.1f},{:.1f}|mouse={:.1f},{:.1f}|hovered={}|active={}|mouse_down={}|clicked={}|window_viewport={}|mouse_viewport={}",
-			*m_Scenario, m_HostID, m_Identity->Asset.ToString(), m_PromptGeneration, Observation.Choice,
-			m_DecisionPointerReportCount + 1, Observation.MinimumX, Observation.MinimumY, Observation.MaximumX,
-			Observation.MaximumY, Observation.MouseX, Observation.MouseY, Observation.Hovered ? 1 : 0,
-			Observation.Active ? 1 : 0, Observation.MouseDown ? 1 : 0, Observation.Clicked ? 1 : 0,
+		PF_INFO(
+			"PF_DOC_CLOSE_UI|DECISION_POINTER|scenario={}|host={}|asset={}|generation={}|choice={}|sample={}|rect_min={:.1f},{:.1f}|rect_"
+			"max={:.1f},{:.1f}|mouse={:.1f},{:.1f}|hovered={}|active={}|mouse_down={}|clicked={}|window_viewport={}|mouse_viewport={}",
+			*m_Scenario, m_HostID, m_Identity->Asset.ToString(), m_PromptGeneration, Observation.Choice, m_DecisionPointerReportCount + 1,
+			Observation.MinimumX, Observation.MinimumY, Observation.MaximumX, Observation.MaximumY, Observation.MouseX, Observation.MouseY,
+			Observation.Hovered ? 1 : 0, Observation.Active ? 1 : 0, Observation.MouseDown ? 1 : 0, Observation.Clicked ? 1 : 0,
 			Observation.WindowViewport, Observation.MouseViewport);
 		m_LastDecisionPointer = Observation;
 		m_DecisionPointerStateReported = true;
@@ -203,8 +206,8 @@ namespace PulseForgeEditor::Detail
 	{
 		if (!m_Scenario || !IsFixtureHost(HostID) || !IsFixtureIdentity(Identity) || !IsAwaitingTabClose()) return;
 		if (m_CloseControlReported && X == m_LastCloseControlX && Y == m_LastCloseControlY) return;
-		PF_INFO("PF_DOC_CLOSE_UI|CLOSE_CONTROL|scenario={}|host={}|asset={}|generation={}|sample={}|x={}|y={}",
-			*m_Scenario, m_HostID, Identity.Asset.ToString(), m_PromptGeneration, ++m_CloseControlSample, X, Y);
+		PF_INFO("PF_DOC_CLOSE_UI|CLOSE_CONTROL|scenario={}|host={}|asset={}|generation={}|sample={}|x={}|y={}", *m_Scenario, m_HostID,
+			Identity.Asset.ToString(), m_PromptGeneration, ++m_CloseControlSample, X, Y);
 		m_CloseControlReported = true;
 		m_LastCloseControlX = X;
 		m_LastCloseControlY = Y;
@@ -216,8 +219,8 @@ namespace PulseForgeEditor::Detail
 		if (!m_Scenario || !m_Identity || !IsFixtureHost(HostID) || !Pending) return;
 		const bool First = m_PromptGenerationReported != m_PromptGeneration;
 		const bool Changed = First || Geometry.SaveX != m_LastPromptGeometry.SaveX || Geometry.SaveY != m_LastPromptGeometry.SaveY ||
-			Geometry.DiscardX != m_LastPromptGeometry.DiscardX || Geometry.DiscardY != m_LastPromptGeometry.DiscardY ||
-			Geometry.CancelX != m_LastPromptGeometry.CancelX || Geometry.CancelY != m_LastPromptGeometry.CancelY;
+							 Geometry.DiscardX != m_LastPromptGeometry.DiscardX || Geometry.DiscardY != m_LastPromptGeometry.DiscardY ||
+							 Geometry.CancelX != m_LastPromptGeometry.CancelX || Geometry.CancelY != m_LastPromptGeometry.CancelY;
 		if (!Changed) return;
 		const size_t Sample = ++m_PromptGeometrySample;
 		if (First)
@@ -229,7 +232,8 @@ namespace PulseForgeEditor::Detail
 		}
 		else
 		{
-			PF_INFO("PF_DOC_CLOSE_UI|PROMPT_GEOMETRY|scenario={}|host={}|asset={}|generation={}|sample={}|save={},{}|discard={},{}|cancel={},{}",
+			PF_INFO("PF_DOC_CLOSE_UI|PROMPT_GEOMETRY|scenario={}|host={}|asset={}|generation={}|sample={}|save={},{}|discard={},{}|cancel={"
+					"},{}",
 				*m_Scenario, m_HostID, m_Identity->Asset.ToString(), m_PromptGeneration, Sample, Geometry.SaveX, Geometry.SaveY,
 				Geometry.DiscardX, Geometry.DiscardY, Geometry.CancelX, Geometry.CancelY);
 		}
@@ -242,12 +246,13 @@ namespace PulseForgeEditor::Detail
 		if (!m_Scenario || !m_Identity || m_Phase == DocumentCloseUiPhase::Failed || m_Phase == DocumentCloseUiPhase::Complete) return;
 		const std::string Error = EscapeDocumentCloseUiField(Session.Error);
 		++m_ActionSequence;
-		PF_INFO("PF_DOC_CLOSE_UI|ACTION|scenario={}|host={}|asset={}|sequence={}|generation={}|choice={}|resolved={}|pending={}|open={}|host_same={}|dirty={}|value={}|saved={}|error={}",
-			*m_Scenario, m_HostID, m_Identity->Asset.ToString(), m_ActionSequence, m_PromptGeneration, Choice,
-			Resolved ? 1 : 0, Session.Pending ? 1 : 0, Session.Open ? 1 : 0, Session.HostSame ? 1 : 0,
-			Session.Dirty ? 1 : 0, Session.Value, Session.Saved, Error);
-		const bool InitialDirtyState = Session.Pending && Session.Open && Session.HostSame && Session.Dirty &&
-			Session.Value == 42 && Session.Saved == 10;
+		PF_INFO("PF_DOC_CLOSE_UI|ACTION|scenario={}|host={}|asset={}|sequence={}|generation={}|choice={}|resolved={}|pending={}|open={}|"
+				"host_same={}|dirty={}|value={}|saved={}|error={}",
+			*m_Scenario, m_HostID, m_Identity->Asset.ToString(), m_ActionSequence, m_PromptGeneration, Choice, Resolved ? 1 : 0,
+			Session.Pending ? 1 : 0, Session.Open ? 1 : 0, Session.HostSame ? 1 : 0, Session.Dirty ? 1 : 0, Session.Value, Session.Saved,
+			Error);
+		const bool InitialDirtyState =
+			Session.Pending && Session.Open && Session.HostSame && Session.Dirty && Session.Value == 42 && Session.Saved == 10;
 		if (*m_Scenario == "cancel-save")
 		{
 			if (m_Phase == DocumentCloseUiPhase::AwaitingFirstAction && Choice == "cancel" && Resolved &&
@@ -311,31 +316,32 @@ namespace PulseForgeEditor::Detail
 		Fail("The real close-dialog action produced an unexpected document/session state.");
 	}
 
-	void DocumentCloseAcceptanceCoordinator::ReportAllowClose(std::string_view HostID, int X, int Y, bool Clicked,
-		const DocumentCloseUiSessionObservation& Session)
+	void DocumentCloseAcceptanceCoordinator::ReportAllowClose(
+		std::string_view HostID, int X, int Y, bool Clicked, const DocumentCloseUiSessionObservation& Session)
 	{
-		if (!m_Scenario || *m_Scenario != "close-retry" || m_Phase != DocumentCloseUiPhase::AwaitingAllowClose ||
-			!IsFixtureHost(HostID) || !m_Identity)
+		if (!m_Scenario || *m_Scenario != "close-retry" || m_Phase != DocumentCloseUiPhase::AwaitingAllowClose || !IsFixtureHost(HostID) ||
+			!m_Identity)
 			return;
 		if (!m_AllowCloseRectReported)
 		{
-			PF_INFO("PF_DOC_CLOSE_UI|FIXTURE|scenario=close-retry|host={}|asset={}|generation={}",
-				m_HostID, m_Identity->Asset.ToString(), m_PromptGeneration);
+			PF_INFO("PF_DOC_CLOSE_UI|FIXTURE|scenario=close-retry|host={}|asset={}|generation={}", m_HostID, m_Identity->Asset.ToString(),
+				m_PromptGeneration);
 			m_AllowCloseRectReported = true;
 		}
 		if (!m_AllowCloseControlReported || X != m_LastAllowCloseX || Y != m_LastAllowCloseY)
 		{
-			PF_INFO("PF_DOC_CLOSE_UI|ALLOW_CLOSE_CONTROL|scenario=close-retry|host={}|asset={}|generation={}|sample={}|x={}|y={}",
-				m_HostID, m_Identity->Asset.ToString(), m_PromptGeneration, ++m_AllowCloseControlSample, X, Y);
+			PF_INFO("PF_DOC_CLOSE_UI|ALLOW_CLOSE_CONTROL|scenario=close-retry|host={}|asset={}|generation={}|sample={}|x={}|y={}", m_HostID,
+				m_Identity->Asset.ToString(), m_PromptGeneration, ++m_AllowCloseControlSample, X, Y);
 			m_AllowCloseControlReported = true;
 			m_LastAllowCloseX = X;
 			m_LastAllowCloseY = Y;
 		}
 		if (!Clicked) return;
 		++m_ActionSequence;
-		PF_INFO("PF_DOC_CLOSE_UI|ACTION|scenario=close-retry|host={}|asset={}|sequence={}|generation={}|choice=allow-close|resolved=1|pending={}|open={}|host_same={}|dirty={}|value={}|saved={}|error=",
-			m_HostID, m_Identity->Asset.ToString(), m_ActionSequence, m_PromptGeneration, Session.Pending ? 1 : 0,
-			Session.Open ? 1 : 0, Session.HostSame ? 1 : 0, Session.Dirty ? 1 : 0, Session.Value, Session.Saved);
+		PF_INFO("PF_DOC_CLOSE_UI|ACTION|scenario=close-retry|host={}|asset={}|sequence={}|generation={}|choice=allow-close|resolved=1|"
+				"pending={}|open={}|host_same={}|dirty={}|value={}|saved={}|error=",
+			m_HostID, m_Identity->Asset.ToString(), m_ActionSequence, m_PromptGeneration, Session.Pending ? 1 : 0, Session.Open ? 1 : 0,
+			Session.HostSame ? 1 : 0, Session.Dirty ? 1 : 0, Session.Value, Session.Saved);
 		if (StateMatches(Session, false, true, true, false, 42, 42))
 		{
 			m_Phase = DocumentCloseUiPhase::AwaitingFinalClose;
@@ -346,23 +352,22 @@ namespace PulseForgeEditor::Detail
 
 	void DocumentCloseAcceptanceCoordinator::ReportCleanClose(bool IdentityClosed, bool HostRemoved, int SavedValue)
 	{
-		if (!m_Scenario || *m_Scenario != "close-retry" || m_Phase != DocumentCloseUiPhase::AwaitingFinalClose || !m_Identity)
-			return;
+		if (!m_Scenario || *m_Scenario != "close-retry" || m_Phase != DocumentCloseUiPhase::AwaitingFinalClose || !m_Identity) return;
 		if (!IdentityClosed || !HostRemoved || SavedValue != 42)
 		{
 			Fail("Clean tab close did not remove the document and native host after recovery.");
 			return;
 		}
-		PF_INFO("PF_DOC_CLOSE_UI|CLOSED|scenario=close-retry|host={}|asset={}|sequence={}|generation={}|open=0|saved=42",
-			m_HostID, m_Identity->Asset.ToString(), m_ActionSequence, m_PromptGeneration);
+		PF_INFO("PF_DOC_CLOSE_UI|CLOSED|scenario=close-retry|host={}|asset={}|sequence={}|generation={}|open=0|saved=42", m_HostID,
+			m_Identity->Asset.ToString(), m_ActionSequence, m_PromptGeneration);
 		Pass(42);
 	}
 
-	bool DocumentCloseAcceptanceCoordinator::StateMatches(const DocumentCloseUiSessionObservation& Session, bool Pending,
-		bool Open, bool HostSame, bool Dirty, int Value, int Saved) const noexcept
+	bool DocumentCloseAcceptanceCoordinator::StateMatches(const DocumentCloseUiSessionObservation& Session, bool Pending, bool Open,
+		bool HostSame, bool Dirty, int Value, int Saved) const noexcept
 	{
-		return Session.Pending == Pending && Session.Open == Open && Session.HostSame == HostSame &&
-			Session.HostExists == HostSame && Session.Dirty == Dirty && Session.Value == Value && Session.Saved == Saved;
+		return Session.Pending == Pending && Session.Open == Open && Session.HostSame == HostSame && Session.HostExists == HostSame &&
+			   Session.Dirty == Dirty && Session.Value == Value && Session.Saved == Saved;
 	}
 
 	void DocumentCloseAcceptanceCoordinator::AdvanceGeneration() noexcept
@@ -378,8 +383,8 @@ namespace PulseForgeEditor::Detail
 	{
 		if (!m_Scenario || !m_Identity) return;
 		m_Phase = DocumentCloseUiPhase::Complete;
-		PF_INFO("PF_DOC_CLOSE_UI|PASS|scenario={}|host={}|asset={}|sequence={}|generation={}|open=0|saved={}",
-			*m_Scenario, m_HostID, m_Identity->Asset.ToString(), m_ActionSequence, m_PromptGeneration, ExpectedSavedValue);
+		PF_INFO("PF_DOC_CLOSE_UI|PASS|scenario={}|host={}|asset={}|sequence={}|generation={}|open=0|saved={}", *m_Scenario, m_HostID,
+			m_Identity->Asset.ToString(), m_ActionSequence, m_PromptGeneration, ExpectedSavedValue);
 	}
 
 	EditorRuntimePlayStopCoordinator::EditorRuntimePlayStopCoordinator(bool Enabled) noexcept
@@ -399,8 +404,8 @@ namespace PulseForgeEditor::Detail
 		if (++m_Frames > 600)
 		{
 			SetFailure(m_Phase == Phase::WaitingForEditViewportRender
-				? "Timed out waiting for a successful Edit-mode scene viewport render."
-				: "Timed out waiting for a successful Play-mode scene viewport render.");
+						   ? "Timed out waiting for a successful Edit-mode scene viewport render."
+						   : "Timed out waiting for a successful Play-mode scene viewport render.");
 			return EditorRuntimePlayStopAction::Wait;
 		}
 		if (m_Phase == Phase::WaitingForPlayViewportRender && !RuntimeRunning)
@@ -440,8 +445,8 @@ namespace PulseForgeEditor::Detail
 		return true;
 	}
 
-	bool EditorRuntimePlayStopCoordinator::ObserveStop(const PulseForge::Scene* AuthoredScene, size_t EntityCount,
-		std::optional<std::string> Snapshot)
+	bool EditorRuntimePlayStopCoordinator::ObserveStop(
+		const PulseForge::Scene* AuthoredScene, size_t EntityCount, std::optional<std::string> Snapshot)
 	{
 		if (m_Phase != Phase::WaitingForPlayViewportRender) return false;
 		if (!AuthoredScene || AuthoredScene != m_AuthoredSceneIdentity || EntityCount != m_AuthoredEntityCount)
@@ -471,6 +476,6 @@ namespace PulseForgeEditor::Detail
 		m_Phase = Phase::Failed;
 		m_FailureReason = std::move(Reason);
 	}
-}
+} // namespace PulseForgeEditor::Detail
 
 #endif
