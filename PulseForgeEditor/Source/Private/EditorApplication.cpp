@@ -486,7 +486,7 @@ namespace
 			  m_StartupProjectPath(std::move(Options.ProjectFile)),
 			  m_ProjectOpenRenderTestFile(std::move(Options.ProjectOpenRenderTestFile)),
 			  m_DocumentHostTestFixture(Options.EnableDocumentHostTestFixture || Options.DocumentHostCloseUiTestScenario.has_value()),
-			  m_DocumentHostCloseUiTestScenario(std::move(Options.DocumentHostCloseUiTestScenario)),
+			  m_DocumentCloseUiTestScenario(std::move(Options.DocumentHostCloseUiTestScenario)),
 			  m_DocumentHostResetLayoutTest(Options.EnableDocumentHostResetLayoutTest),
 			  m_DocumentHostTabTearOffTest(Options.EnableDocumentHostTabTearOffTest),
 			  m_DocumentHostTabReattachTest(Options.EnableDocumentHostTabReattachTest),
