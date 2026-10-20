@@ -1984,17 +1984,29 @@ namespace
 
 			if (!m_DocumentCloseUiTextControlReported)
 			{
-				PF_INFO("PF_DOC_CLOSE_UI|TEXT_CONTROL|scenario={}|host={}|asset={}|generation=0|x={}|y={}|value=20",
-					*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(), X, Y);
+				const ImVec2 MousePosition = ImGui::GetIO().MousePos;
+				PF_INFO("PF_DOC_CLOSE_UI|TEXT_CONTROL|scenario={}|host={}|asset={}|generation=0|x={}|y={}|value=20|active={}|hovered={}|mouse_x={:.1f}|mouse_y={:.1f}",
+					*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(), X, Y,
+					Active ? 1 : 0, Hovered ? 1 : 0, MousePosition.x, MousePosition.y);
+				m_DocumentCloseUiLastTextMousePosition = MousePosition;
+				m_DocumentCloseUiLastTextHovered = Hovered;
+				m_DocumentCloseUiLastTextActive = Active;
+				m_DocumentCloseUiTextPointerStateReported = true;
 				m_DocumentCloseUiTextControlReported = true;
 			}
-			if (Hovered && !m_DocumentCloseUiTextHoverReported)
+			const ImVec2 MousePosition = ImGui::GetIO().MousePos;
+			const bool PointerStateChanged = MousePosition.x != m_DocumentCloseUiLastTextMousePosition.x ||
+				MousePosition.y != m_DocumentCloseUiLastTextMousePosition.y || Hovered != m_DocumentCloseUiLastTextHovered ||
+				Active != m_DocumentCloseUiLastTextActive;
+			if (m_DocumentCloseUiTextPointerStateReported && PointerStateChanged && m_DocumentCloseUiTextPointerReportCount < 8)
 			{
-				const ImVec2 MousePosition = ImGui::GetIO().MousePos;
-				PF_INFO("PF_DOC_CLOSE_UI|TEXT_HOVER|scenario={}|host={}|asset={}|generation=0|hovered=1|active={}|x={}|y={}|mouse_x={:.1f}|mouse_y={:.1f}",
+				PF_INFO("PF_DOC_CLOSE_UI|TEXT_POINTER|scenario={}|host={}|asset={}|generation=0|x={}|y={}|hovered={}|active={}|mouse_x={:.1f}|mouse_y={:.1f}",
 					*m_DocumentCloseUiTestScenario, m_DocumentCloseUiHostID, m_DocumentCloseUiIdentity->Asset.ToString(),
-					Active ? 1 : 0, X, Y, MousePosition.x, MousePosition.y);
-				m_DocumentCloseUiTextHoverReported = true;
+					X, Y, Hovered ? 1 : 0, Active ? 1 : 0, MousePosition.x, MousePosition.y);
+				m_DocumentCloseUiLastTextMousePosition = MousePosition;
+				m_DocumentCloseUiLastTextHovered = Hovered;
+				m_DocumentCloseUiLastTextActive = Active;
+				++m_DocumentCloseUiTextPointerReportCount;
 			}
 			if (Active && !m_DocumentCloseUiTextFocusReported)
 			{
@@ -7253,7 +7265,11 @@ namespace
 		bool m_DocumentCloseUiCloseControlReported = false;
 		bool m_DocumentCloseUiTextControlReported = false;
 		bool m_DocumentCloseUiTextFocusReported = false;
-		bool m_DocumentCloseUiTextHoverReported = false;
+		bool m_DocumentCloseUiTextPointerStateReported = false;
+		ImVec2 m_DocumentCloseUiLastTextMousePosition{};
+		bool m_DocumentCloseUiLastTextHovered = false;
+		bool m_DocumentCloseUiLastTextActive = false;
+		size_t m_DocumentCloseUiTextPointerReportCount = 0;
 #endif
 		bool m_DocumentHostResetLayoutTest = false;
 		bool m_DocumentHostTabTearOffTest = false;

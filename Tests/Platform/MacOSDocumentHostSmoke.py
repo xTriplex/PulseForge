@@ -106,6 +106,17 @@ MAIN_WINDOW_CLOSE = '''on run argv
 end run
 '''
 
+QUIT_APPLICATION = '''on run argv
+    set targetPID to item 1 of argv as integer
+    tell application "System Events"
+        set targetProcess to first process whose unix id is targetPID
+        set frontmost of targetProcess to true
+        keystroke "q" using {command down}
+        return "MACOS_APPLICATION_QUIT_KEY=PASS; pid=" & (targetPID as text)
+    end tell
+end run
+'''
+
 SUCCESS_MARKERS = (
     "Document tab reattachment UI fixture passed:",
     "Document tab native-window round-trip 3/3 passed: the same session was dragged into the main strip and back into a native host",

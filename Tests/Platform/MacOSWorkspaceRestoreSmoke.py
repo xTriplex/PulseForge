@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from MacOSDocumentHostSmoke import (  # noqa: E402
-    MAIN_WINDOW_CLOSE,
+    QUIT_APPLICATION,
     WINDOW_QUERY,
     has_tcc_denial,
     run_osascript,
@@ -208,31 +208,53 @@ def verify_workspace(path: Path, project_id: str) -> dict[str, str]:
     return asset_to_host
 
 
-def close_normally(process: subprocess.Popen[str], windows: list[tuple[int, str]], deadline: float) -> None:
-    main_windows = [(index, title) for index, title in windows if "PulseForge Editor" in title]
-    if len(main_windows) != 1:
-        raise RuntimeError(f"could not identify exactly one main editor window for normal close: {windows!r}")
-    main_index, main_title = main_windows[0]
+def capture_close_timeout_screenshot(log_directory: Path) -> str:
+    screenshot = log_directory / "macos-workspace-restore-close-failure.png"
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/screencapture", "-x", "-C", "-t", "png", str(screenshot)],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        if result.returncode == 0 and screenshot.is_file() and screenshot.stat().st_size > 0:
+            return f"screenshot=CAPTURED; bytes={screenshot.stat().st_size}; path={screenshot}"
+        state = "TCC_DENIED" if has_tcc_denial(result.stderr + result.stdout) else "FAILED"
+        return (
+            f"screenshot={state}; exit_code={result.returncode}; "
+            f"stdout={result.stdout[-400:]!r}; stderr={result.stderr[-400:]!r}"
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        state = "TIMED_OUT" if isinstance(error, subprocess.TimeoutExpired) else "FAILED"
+        return f"screenshot={state}; error={type(error).__name__}: {error}"
+
+
+def request_normal_application_exit(
+    process: subprocess.Popen[str], deadline: float, log_directory: Path
+) -> None:
     code, output = run_osascript(
-        MAIN_WINDOW_CLOSE,
+        QUIT_APPLICATION,
         str(process.pid),
         min(10.0, max(0.1, deadline - time.monotonic())),
-        str(main_index),
-        main_title,
     )
     if code != 0 and code != 124:
-        category = "Accessibility authorization denied" if has_tcc_denial(output) else "normal close request failed"
+        category = "Accessibility authorization denied" if has_tcc_denial(output) else "normal application-quit request failed"
         raise RuntimeError(f"{category}; pid={process.pid}; exit_code={code}; detail={output.strip()}")
     if code == 124:
-        print(f"MACOS_WORKSPACE_RESTORE_CLOSE_ACTION=TIMED_OUT_WAITING_FOR_EXIT; pid={process.pid}; detail={output.strip()}")
+        print(f"MACOS_WORKSPACE_RESTORE_QUIT_ACTION=TIMED_OUT_WAITING_FOR_EXIT; pid={process.pid}; detail={output.strip()}")
     else:
         print(output.strip())
     try:
         exit_code = process.wait(timeout=max(0.1, deadline - time.monotonic()))
     except subprocess.TimeoutExpired as error:
-        raise RuntimeError(f"editor did not exit after normal main-window close; pid={process.pid}") from error
+        screenshot = capture_close_timeout_screenshot(log_directory)
+        raise RuntimeError(
+            f"editor did not exit after the normal Command+Q application-quit request; "
+            f"pid={process.pid}; {screenshot}"
+        ) from error
     if exit_code != 0:
-        raise RuntimeError(f"editor exited with status {exit_code} after normal main-window close")
+        raise RuntimeError(f"editor exited with status {exit_code} after normal application quit")
     print(f"MACOS_WORKSPACE_RESTORE_NORMAL_SHUTDOWN=PASS; pid={process.pid}; exit_code={exit_code}")
 
 
@@ -267,7 +289,9 @@ def run_launch(
     stop_failure: str | None = None
     try:
         windows = wait_for_fixture_windows(process, capture, deadline, expected_restore_count)
-        close_normally(process, windows, deadline)
+        if not windows:
+            raise RuntimeError("document-host windows disappeared before normal application quit")
+        request_normal_application_exit(process, deadline, log_path.parent)
     finally:
         if process.poll() is None:
             if not stop_process_group(process):
