@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -61,6 +62,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
     def test_permission_bridge_class_exposes_only_scalar_no_argument_methods(self) -> None:
         platform_dir = Path(__file__).parent
         header = (platform_dir / "MacOSAutomationPermissionBridge.h").read_text(encoding="utf-8")
+        metadata = ET.parse(platform_dir / "PFAutomationPermission.bridgesupport").getroot()
         expected = (
             "probeSystemEventsDescriptor",
             "readSystemEventsNativeAddress",
@@ -70,8 +72,17 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         )
 
         self.assertIn("@interface PFAutomationPermissionBridge : NSObject", header)
+        bridge_classes = [entry for entry in metadata.findall("class") if entry.attrib.get("name") == "PFAutomationPermissionBridge"]
+        self.assertEqual(1, len(bridge_classes))
         for method in expected:
             self.assertIn(f"+ (int32_t){method};", header)
+            metadata_method = next(item for item in bridge_classes[0].findall("method") if item.attrib.get("selector") == method)
+            self.assertEqual("true", metadata_method.attrib.get("class_method"))
+            retval = metadata_method.find("retval")
+            return_types = [retval.attrib[key] for key in ("type", "type64") if key in retval.attrib]
+            self.assertTrue(return_types)
+            self.assertTrue(all(return_type == "i" for return_type in return_types))
+            self.assertEqual([], metadata_method.findall("arg"))
         self.assertEqual(5, header.count("+ (int32_t)"))
 
     def test_real_probe_imports_the_framework_and_invokes_runtime_visible_methods(self) -> None:
