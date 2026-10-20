@@ -33,6 +33,23 @@ jobs:
       - name: Test the automation harness and permission bridge contract
         run: python3 Tests/Platform/MacOSDocumentCloseSmokeTests.py
 
+      - name: Compile the direct Accessibility client before the engine build
+        run: |
+          set -euo pipefail
+          AX_SOURCE="$RUNNER_TEMP/PulseForgeDirectAX.swift"
+          AX_OBJECT="$RUNNER_TEMP/PulseForgeDirectAX.o"
+          PYTHONPATH=Tests/Platform python3 - "$AX_SOURCE" <<'PY'
+          from pathlib import Path
+          import sys
+          from MacOSDirectAX import SWIFT_AX_OPERATION
+
+          Path(sys.argv[1]).write_text(SWIFT_AX_OPERATION, encoding="utf-8")
+          PY
+          xcrun swiftc -emit-object -sdk "$(xcrun --show-sdk-path)" "$AX_SOURCE" -o "$AX_OBJECT" \
+            2>&1 | tee "$RUNNER_TEMP/macos-direct-ax-client-build.log"
+          test -s "$AX_OBJECT"
+          echo "PULSEFORGE_DIRECT_AX_CLIENT=COMPILED; runtime trust and operations are checked in the desktop job"
+
       - name: Compile the embedded Quartz helper and reject malformed calls
         run: |
           set -euo pipefail
@@ -78,6 +95,7 @@ jobs:
             ${{ runner.temp }}/macos-automation-permission-probe.log
             ${{ runner.temp }}/macos-pointer-driver-build.log
             ${{ runner.temp }}/macos-pointer-driver-invalid.log
+            ${{ runner.temp }}/macos-direct-ax-client-build.log
             ${{ runner.temp }}/PFAutomationPermission.framework/Versions/A/Resources/BridgeSupport/PFAutomationPermission.bridgesupport
           if-no-files-found: ignore
           retention-days: 1

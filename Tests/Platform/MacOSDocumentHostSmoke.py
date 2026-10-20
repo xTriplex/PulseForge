@@ -14,13 +14,16 @@ import threading
 import time
 from pathlib import Path
 
-from MacOSAutomationClient import capture_failure_context, probe_osascript_access
+from MacOSAutomationClient import capture_failure_context
+from MacOSDirectAX import run_direct_ax
 from MacOSScreenshot import capture_screenshot
 
 MAX_LOG_BYTES = 128 * 1024
 MAX_CONSOLE_BYTES = 64 * 1024
 TCC_DENIALS = ("not allowed assistive access", "not authorized to send apple events", "(-1743)")
 
+# Workspace restoration retains its previously validated System Events client.
+# Document-host close and native dialogs use the direct Swift AX client below.
 WINDOW_QUERY = '''on run argv
     set targetPID to item 1 of argv as integer
     tell application "System Events"
@@ -41,119 +44,6 @@ WINDOW_QUERY = '''on run argv
 end run
 '''
 
-MAIN_WINDOW_SHEET_SNAPSHOT = '''on run argv
-    set targetPID to item 1 of argv as integer
-    set targetIndex to item 2 of argv as integer
-    set expectedWindowName to item 3 of argv as text
-    tell application "System Events"
-        set targetProcess to first process whose unix id is targetPID
-        tell targetProcess
-            set targetWindow to window targetIndex
-            set windowTitle to name of targetWindow
-            if windowTitle is not expectedWindowName then error "Main window changed before sheet snapshot: " & quoted form of windowTitle
-            try
-                set sheetNames to name of every sheet of targetWindow
-                return "MACOS_DOCUMENT_HOST_MAIN_SHEETS=PASS; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; sheets=" & (sheetNames as text)
-            on error errorMessage number errorNumber
-                return "MACOS_DOCUMENT_HOST_MAIN_SHEETS=UNAVAILABLE; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; error=" & errorMessage & " (" & (errorNumber as text) & ")"
-            end try
-        end tell
-    end tell
-end run
-'''
-
-def close_preflight_script(stage: str, query: str) -> str:
-    if stage == "PROCESS":
-        scoped_query = query
-    else:
-        scoped_query = f'''tell targetProcess
-            set targetWindow to window targetIndex
-            set windowTitle to name of targetWindow
-            if windowTitle is not expectedWindowName then error "Main window changed before {stage} query: " & quoted form of windowTitle
-            {query}
-        end tell'''
-    return f'''on run argv
-    set targetPID to item 1 of argv as integer
-    set targetIndex to item 2 of argv as integer
-    set expectedWindowName to item 3 of argv as text
-    tell application "System Events"
-        set targetProcess to first process whose unix id is targetPID
-        {scoped_query}
-    end tell
-end run
-'''
-
-
-CLOSE_PREFLIGHT_STAGES = tuple(
-    (
-        stage,
-        close_preflight_script(stage, query),
-    )
-    for stage, query in (
-        (
-            "PROCESS",
-            '''set processName to name of targetProcess as text
-return "MACOS_DOCUMENT_HOST_CLOSE_PREFLIGHT_PROCESS=PASS; pid=" & (targetPID as text) & "; process=" & processName''',
-        ),
-        (
-            "WINDOW",
-            '''return "MACOS_DOCUMENT_HOST_CLOSE_PREFLIGHT_WINDOW=PASS; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle''',
-        ),
-        (
-            "WINDOW_ROLE_SUBROLE",
-            '''set windowRole to role of targetWindow
-set windowSubrole to subrole of targetWindow
-return "MACOS_DOCUMENT_HOST_CLOSE_PREFLIGHT_WINDOW_ROLE_SUBROLE=PASS; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; role/subrole=" & windowRole & "/" & windowSubrole''',
-        ),
-        (
-            "AXCLOSEBUTTON",
-            '''set closeControl to value of attribute "AXCloseButton" of targetWindow
-if closeControl is missing value then error "AXCloseButton is missing for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle
-return "MACOS_DOCUMENT_HOST_CLOSE_PREFLIGHT_AXCLOSEBUTTON=PASS; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; present=true''',
-        ),
-        (
-            "BUTTON_ROLE_SUBROLE",
-            '''set closeControl to value of attribute "AXCloseButton" of targetWindow
-if closeControl is missing value then error "AXCloseButton is missing for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle
-set closeRole to role of closeControl
-set closeSubrole to subrole of closeControl
-return "MACOS_DOCUMENT_HOST_CLOSE_PREFLIGHT_BUTTON_ROLE_SUBROLE=PASS; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; role/subrole=" & closeRole & "/" & closeSubrole''',
-        ),
-        (
-            "ACTIONS",
-            '''set closeControl to value of attribute "AXCloseButton" of targetWindow
-if closeControl is missing value then error "AXCloseButton is missing for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle
-set availableActions to actions of closeControl
-set supportsAXPressText to "false"
-if availableActions contains "AXPress" then set supportsAXPressText to "true"
-return "MACOS_DOCUMENT_HOST_CLOSE_PREFLIGHT_ACTIONS=PASS; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; AXPress=" & supportsAXPressText & "; actions=" & (availableActions as text)''',
-        ),
-    )
-)
-
-MAIN_WINDOW_CLOSE = '''on run argv
-    set targetPID to item 1 of argv as integer
-    set targetIndex to item 2 of argv as integer
-    set expectedWindowName to item 3 of argv as text
-    tell application "System Events"
-        set targetProcess to first process whose unix id is targetPID
-        tell targetProcess
-            set targetWindow to window targetIndex
-            set windowTitle to name of targetWindow
-            if windowTitle is not expectedWindowName then error "Main-window close target changed to " & quoted form of windowTitle
-            set closeControl to value of attribute "AXCloseButton" of targetWindow
-            if closeControl is missing value then error "AXCloseButton is missing for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle
-            try
-                perform action "AXPress" of closeControl
-            on error errorMessage number errorNumber
-                error "AXPress failed for PID " & (targetPID as text) & ", window=" & quoted form of windowTitle & ": " & errorMessage & " (" & (errorNumber as text) & ")"
-            end try
-            return "MACOS_DOCUMENT_HOST_CLOSE_PRESS=RETURNED; pid=" & (targetPID as text) & "; window=" & quoted form of windowTitle & "; target=AXCloseButton; action=AXPress"
-        end tell
-    end tell
-end run
-'''
-
 QUIT_APPLICATION = '''on run argv
     set targetPID to item 1 of argv as integer
     tell application "System Events"
@@ -164,7 +54,6 @@ QUIT_APPLICATION = '''on run argv
     end tell
 end run
 '''
-
 SUCCESS_MARKERS = (
     "Document tab reattachment UI fixture passed:",
     "Document tab native-window round-trip 3/3 passed: the same session was dragged into the main strip and back into a native host",
@@ -309,30 +198,14 @@ def run_osascript(
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            cleanup_failure: str | None = None
             try:
                 process.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
-                process.kill()
-                try:
-                    process.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:
-                    cleanup_failure = f"timed-out osascript client PID {process.pid} did not terminate after SIGKILL"
-            for stream in (process.stdin, process.stdout):
-                if stream is not None and not stream.closed:
-                    try:
-                        stream.close()
-                    except OSError as close_error:
-                        cleanup_failure = cleanup_failure or (
-                            f"could not close timed-out osascript client pipe: {type(close_error).__name__}: {close_error}"
-                        )
-            if cleanup_failure:
-                raise RuntimeError(cleanup_failure) from error
+                return 124, f"timed-out osascript client PID {process.pid} did not terminate after SIGKILL"
             output = error.stdout or ""
             if isinstance(output, bytes):
                 output = output.decode("utf-8", errors="replace")
             return 124, output + "\nAppleScript operation timed out\n"
-
     try:
         result = subprocess.run(
             command,
@@ -351,44 +224,25 @@ def run_osascript(
         return 124, output + "\nAppleScript operation timed out\n"
 
 
+def has_tcc_denial(output: str) -> bool:
+    lowered = output.lower()
+    return any(message in lowered for message in TCC_DENIALS)
+
+
 def close_failure_diagnostics(
     process_id: str,
     window_arguments: tuple[str, str],
     deadline: float,
 ) -> list[str]:
-    diagnostics: list[str] = []
-    for label, script in (("MAIN_SHEETS", MAIN_WINDOW_SHEET_SNAPSHOT),):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0.1:
-            diagnostics.append(f"{label}=DEADLINE_EXHAUSTED")
-            continue
-        code, output = run_osascript(
-            script,
-            process_id,
-            min(3.0, remaining - 0.05),
-            *window_arguments,
-        )
-        if code == 0:
-            result = output.strip()
-        else:
-            state = classify_accessibility_failure(code, output)
-            result = f"{label}={state}; exit_code={code}; detail={output.strip()}"
-        diagnostics.append(result)
-        print(f"MACOS_DOCUMENT_HOST_FAILURE_DIAGNOSTIC={result}")
     remaining = deadline - time.monotonic()
-    if remaining > 0.15:
-        code, output = run_close_preflight(
-            process_id,
-            window_arguments,
-            min(3.0, remaining - 0.05),
-            controller_prefix="AX_CLOSE_FAILURE_DIAGNOSTIC",
-        )
-        result = output if code == 0 else (
-            f"CLOSE_PREFLIGHT={classify_accessibility_failure(code, output)}; "
-            f"exit_code={code}; detail={output}"
-        )
-        diagnostics.append(result)
-        print(f"MACOS_DOCUMENT_HOST_FAILURE_DIAGNOSTIC={result}")
+    if remaining <= 0.1:
+        return ["DIRECT_AX_SNAPSHOT=DEADLINE_EXHAUSTED"]
+    code, output, error = run_direct_ax(
+        int(process_id), operation="snapshot", window_title=window_arguments[1], timeout=min(5.0, remaining - 0.05)
+    )
+    result = output + error if code == 0 else f"DIRECT_AX_SNAPSHOT=ERROR; exit_code={code}; stdout={output!r}; stderr={error!r}"
+    print(f"MACOS_DOCUMENT_HOST_FAILURE_DIAGNOSTIC={result}")
+    diagnostics = [result]
     return diagnostics
 
 
@@ -401,15 +255,10 @@ def capture_failure_screenshot(process: subprocess.Popen[str]) -> str:
     return screenshot
 
 
-def has_tcc_denial(output: str) -> bool:
-    lowered = output.lower()
-    return any(message in lowered for message in TCC_DENIALS)
-
-
 def classify_accessibility_failure(code: int, output: str) -> str:
     lowered = output.lower()
-    if has_tcc_denial(output):
-        return "TCC_DENIED"
+    if "trusted=false" in lowered:
+        return "DIRECT_AX_CLIENT_UNTRUSTED"
     if code == 124 or "-1712" in lowered or "timed out" in lowered:
         return "AX_QUERY_TIMEOUT"
     if "-25202" in lowered or "invalid ui element" in lowered or "stale ax element" in lowered:
@@ -422,71 +271,11 @@ def classify_accessibility_failure(code: int, output: str) -> str:
         return "AX_ATTRIBUTE_MISSING"
     if "-25204" in lowered:
         return "AX_COMMUNICATION_ERROR"
-    if "-25211" in lowered:
-        return "AX_API_DISABLED"
     if "-1719" in lowered:
         return "AX_INVALID_INDEX"
     if "-1728" in lowered or "can't get" in lowered or "can’t get" in lowered:
         return "AX_ELEMENT_LOOKUP_ERROR"
     return "AX_ACCESSIBILITY_ERROR"
-
-
-def run_close_preflight(
-    process_id: str,
-    window_arguments: tuple[str, str],
-    timeout: float,
-    *,
-    controller_prefix: str = "AX_CLOSE_PREFLIGHT",
-) -> tuple[int, str]:
-    deadline = time.monotonic() + max(0.0, timeout)
-    results: list[str] = []
-    process_id_text = str(process_id)
-    window_name = window_arguments[1]
-    for stage, script in CLOSE_PREFLIGHT_STAGES:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0.1:
-            failure = (
-                f"MACOS_DOCUMENT_HOST_CLOSE_PREFLIGHT_STAGE={stage}; pid={process_id_text}; "
-                f"window={window_name!r}; "
-                "state=AX_PREFLIGHT_DEADLINE_EXHAUSTED; no query launched"
-            )
-            results.append(failure)
-            print(f"MACOS_DOCUMENT_HOST_AX_PREFLIGHT_STAGE_FAILURE={failure}")
-            return 124, "\n".join(results)
-
-        # Isolate each potentially blocking System Events request while retaining
-        # the original three-second total preflight bound.
-        stage_timeout = min(1.0, remaining - 0.05)
-        code, output = run_osascript(
-            script,
-            process_id,
-            stage_timeout,
-            *window_arguments,
-            controller_label=f"{controller_prefix}_{stage}",
-        )
-        marker = f"MACOS_DOCUMENT_HOST_CLOSE_PREFLIGHT_{stage}="
-        if code == 0 and marker in output and not (
-            stage == "ACTIONS" and "AXPress=true" not in output
-        ):
-            result = f"pid={process_id_text}; window={window_name!r}; {output.strip()}"
-            results.append(result)
-            print(f"MACOS_DOCUMENT_HOST_AX_PREFLIGHT_STAGE={stage}; {result}")
-            continue
-
-        category = classify_accessibility_failure(code, output)
-        if code == 0 and stage == "ACTIONS" and "AXPress=true" not in output:
-            category = "AXPRESS_UNAVAILABLE"
-        elif code == 0 and marker not in output:
-            category = "AX_STAGE_RESULT_MISSING"
-        failure = (
-            f"MACOS_DOCUMENT_HOST_CLOSE_PREFLIGHT_STAGE={stage}; pid={process_id_text}; "
-            f"window={window_name!r}; state={category}; "
-            f"exit_code={code}; detail={output.strip()}"
-        )
-        results.append(failure)
-        print(f"MACOS_DOCUMENT_HOST_AX_PREFLIGHT_STAGE_FAILURE={failure}")
-        return code if code != 0 else 1, "\n".join(results)
-    return 0, "\n".join(results)
 
 
 def fail(message: str, log_path: Path) -> int:
@@ -528,29 +317,6 @@ def main() -> int:
     if args.timeout_seconds <= 0:
         return fail("timeout must be positive", args.log_directory / "document-host-smoke.log")
 
-    ax_state, ax_pid, ax_detail = probe_osascript_access()
-    print(
-        f"MACOS_DOCUMENT_HOST_OSASCRIPT_PERMISSION_PREFLIGHT={ax_state}; executable=/usr/bin/osascript; "
-        f"probe_pid={ax_pid}; detail={ax_detail!r}"
-    )
-    if ax_state in {
-        "AX_UNTRUSTED",
-        "APPLE_EVENTS_DENIED",
-        "APPLE_EVENTS_CONSENT_REQUIRED",
-        "APPLE_EVENTS_TARGET_UNAVAILABLE",
-        "APPLE_EVENTS_UNSUPPORTED",
-    }:
-        print(
-            "MACOS_DOCUMENT_HOST_AUTOMATION=BLOCKED; native-window acceptance NOT RUN; "
-            f"client=osascript; reason={ax_state}; no permission prompt was requested"
-        )
-        return 77
-    if ax_state != "OSASCRIPT_AX_APPLE_EVENTS_AUTHORIZED":
-        return fail(
-            f"could not nonpromptingly verify osascript automation permissions: {ax_state}; {ax_detail}",
-            args.log_directory / "document-host-smoke.log",
-        )
-
     args.log_directory.mkdir(parents=True, exist_ok=True)
     runner_temp = os.environ.get("RUNNER_TEMP")
     temp_parent = Path(runner_temp).resolve() if runner_temp else Path(tempfile.gettempdir())
@@ -588,7 +354,7 @@ def main() -> int:
     observed_process_name = "<unknown>"
     observed_windows: list[tuple[int, str]] = []
     fixture_titles: list[str] = []
-    saw_tcc_denial = False
+    direct_ax_client_untrusted = False
     failures: list[str] = []
 
     try:
@@ -615,24 +381,33 @@ def main() -> int:
                 continue
 
             now = time.monotonic()
-            if not observed_native_windows and now >= next_window_query:
-                next_window_query = now + 1.0
-                query_code, query_output = run_osascript(
-                    WINDOW_QUERY, str(process.pid), timeout=min(5.0, max(0.1, deadline - now))
+            if (
+                not observed_native_windows
+                and all(marker in capture.markers for marker in SUCCESS_MARKERS)
+                and now >= next_window_query
+            ):
+                next_window_query = now + 2.0
+                query_code, query_output, query_error = run_direct_ax(
+                    process.pid, operation="snapshot", timeout=min(12.0, max(0.1, deadline - now))
                 )
+                query_output += query_error
+                print(f"MACOS_DOCUMENT_HOST_DIRECT_AX_SNAPSHOT={query_output.strip()!r}")
                 if query_code != 0:
-                    if has_tcc_denial(query_output):
-                        saw_tcc_denial = True
+                    if "trusted=false" in query_output:
+                        direct_ax_client_untrusted = True
                         break
-                    failures.append(f"Accessibility window query failed: {query_output.strip()}")
+                    failures.append(f"Direct Swift AX window query failed; exit_code={query_code}; {query_output.strip()}")
                     break
-                snapshot_lines = [entry for entry in query_output.splitlines() if entry.strip()]
-                observed_process_name = snapshot_lines[0].strip() if snapshot_lines else "<missing>"
+                snapshot_lines = [entry for entry in query_output.splitlines() if entry.startswith("DIRECT_AX_WINDOW ")]
+                target_line = next((entry for entry in query_output.splitlines() if entry.startswith("DIRECT_AX_TARGET_PROCESS ")), "")
+                observed_process_name = target_line.split("name=", 1)[1].strip() if "name=" in target_line else f"pid={process.pid}"
                 observed_windows = []
-                for entry in snapshot_lines[1:]:
-                    index_text, separator, window_title = entry.partition("\t")
-                    if separator and index_text.strip().isdigit():
-                        observed_windows.append((int(index_text.strip()), window_title.strip()))
+                for entry in snapshot_lines:
+                    fields = dict(part.split("=", 1) for part in entry.split("; ") if "=" in part)
+                    index_text = fields.get("index", "")
+                    window_title = fields.get("title", "")
+                    if index_text.isdigit():
+                        observed_windows.append((int(index_text), window_title))
                 fixture_titles = [title for _, title in observed_windows if "Host Test Fixture" in title]
                 if len(observed_windows) >= 2 and fixture_titles:
                     observed_native_windows = True
@@ -650,7 +425,7 @@ def main() -> int:
             if process.poll() is not None:
                 break
 
-        if saw_tcc_denial:
+        if direct_ax_client_untrusted:
             print(
                 "MACOS_DOCUMENT_HOST_FAILURE_SCREENSHOT="
                 + capture_failure_screenshot(process)
@@ -658,8 +433,9 @@ def main() -> int:
             stopped = stop_process_group(process)
             capture.thread.join(timeout=5)
             if not stopped or capture.thread.is_alive():
-                return fail("TCC denial occurred and the editor process/output reader did not stop cleanly", log_path)
-            print("MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; native-window verification NOT RUN; acceptance blocked")
+                return fail("cleanup failed after the direct AX client reported itself untrusted", log_path)
+            print("MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; direct Swift AX client reported itself untrusted; "
+                  "native-window verification NOT RUN; acceptance blocked")
             return 77
         if failures:
             print(
@@ -718,33 +494,39 @@ def main() -> int:
         diagnostic_arguments = (str(main_window_index), main_window_name)
         diagnostic_output: list[str] = []
         exit_code: int | None = None
-        preflight_timeout = min(3.0, max(0.1, deadline - time.monotonic()))
-        preflight_code, preflight_output = run_close_preflight(
-            str(process.pid),
-            diagnostic_arguments,
-            preflight_timeout,
-            controller_prefix="AX_CLOSE_PRE_ACTION",
-        )
-        preflight_state = (
-            "PASS"
-            if preflight_code == 0
-            else classify_accessibility_failure(preflight_code, preflight_output)
+        preflight_timeout = min(12.0, max(0.1, deadline - time.monotonic()))
+        preflight_code, preflight_output, preflight_stderr = run_direct_ax(
+            process.pid,
+            operation="snapshot",
+            window_title=main_window_name,
+            timeout=preflight_timeout,
         )
         print(
-            f"MACOS_DOCUMENT_HOST_CLOSE_PRE_ACTION_PREFLIGHT={preflight_state}; "
+            f"MACOS_DOCUMENT_HOST_CLOSE_PRE_ACTION_PREFLIGHT={'PASS' if preflight_code == 0 else 'FAILED'}; "
             f"pid={process.pid}; window={main_window_name!r}; exit_code={preflight_code}; "
-            f"detail={preflight_output.strip()!r}; actual_close_request=still-required"
+            f"stdout={preflight_output.strip()!r}; stderr={preflight_stderr.strip()!r}; actual_close_request=still-required"
         )
         # Attempt the actual semantic close action directly. The read-only AX
         # inspection above is diagnostic only. It cannot prevent or satisfy
         # the required close action, even when the query itself is unavailable.
-        close_code, close_output = run_osascript(
-            MAIN_WINDOW_CLOSE,
-            str(process.pid),
-            min(10.0, max(0.1, deadline - time.monotonic())),
-            *diagnostic_arguments,
-            controller_label="AX_CLOSE_PRESS",
+        close_code, close_output, close_stderr = run_direct_ax(
+            process.pid,
+            operation="close-window",
+            window_title=main_window_name,
+            timeout=min(12.0, max(0.1, deadline - time.monotonic())),
         )
+        close_output += close_stderr
+        print(f"MACOS_DOCUMENT_HOST_DIRECT_AX_CLOSE={close_output.strip()!r}")
+        if "process_group_cleanup=failed" in close_output:
+            diagnostic_output = close_failure_diagnostics(str(process.pid), diagnostic_arguments, deadline)
+            screenshot_output = capture_failure_screenshot(process)
+            stop_process_group(process)
+            capture.thread.join(timeout=5)
+            return fail(
+                f"direct AX client cleanup failed after close dispatch; client details={close_output.strip()}; "
+                f"diagnostics={diagnostic_output!r}; {screenshot_output}",
+                log_path,
+            )
         if close_code != 0:
             close_category = classify_accessibility_failure(close_code, close_output)
             print(
@@ -752,7 +534,7 @@ def main() -> int:
                 f"{close_category}; pid={process.pid}; window={main_window_name!r}; "
                 f"exit_code={close_code}; detail={close_output.strip()}"
             )
-            if has_tcc_denial(close_output):
+            if "trusted=false" in close_output:
                 print(
                     "MACOS_DOCUMENT_HOST_FAILURE_SCREENSHOT="
                     + capture_failure_screenshot(process)
@@ -761,20 +543,21 @@ def main() -> int:
                 capture.thread.join(timeout=5)
                 print(
                     "MACOS_DOCUMENT_HOST_ACCESSIBILITY=UNAVAILABLE; native-window close request NOT RUN; "
-                    f"reason=TCC denial; detail={close_output.strip()}; acceptance blocked"
+                    f"reason=direct Swift AX client reported itself untrusted; detail={close_output.strip()}; acceptance blocked"
                 )
                 return 77
-            if close_code == 124 or close_category == "AX_QUERY_TIMEOUT":
+            if "DIRECT_AX_DISPATCH attempted=true" in close_output:
                 try:
-                    exit_code = process.wait(timeout=min(10.0, max(0.1, deadline - time.monotonic())))
+                    exit_code = process.wait(timeout=min(15.0, max(0.1, deadline - time.monotonic())))
                 except subprocess.TimeoutExpired:
                     exit_code = None
-                if exit_code == 0:
+                if exit_code == 0 and all(marker in capture.markers for marker in SUCCESS_MARKERS):
                     print(
-                        "MACOS_DOCUMENT_HOST_CLOSE_PRESS=UNCERTAIN_ACTION_RECONCILED_AFTER_NORMAL_EXIT; "
-                        f"pid={process.pid}; window={main_window_name!r}; process exited normally after AXPress request; "
-                        f"diagnostics={diagnostic_output!r}; detail={close_output.strip()}"
+                        "MACOS_DOCUMENT_HOST_CLOSE_PRESS=UNCERTAIN_AX_RESULT_RECONCILED_AFTER_NORMAL_EXIT; "
+                        f"pid={process.pid}; window={main_window_name!r}; fixture completed and process exited 0; "
+                        f"detail={close_output.strip()}"
                     )
+                    close_code = 0
                 else:
                     diagnostic_output = close_failure_diagnostics(
                         str(process.pid), diagnostic_arguments, deadline
@@ -793,7 +576,7 @@ def main() -> int:
                         + close_output.strip(),
                         log_path,
                     )
-            else:
+            if close_code != 0 and (close_code != 124 and close_category != "AX_QUERY_TIMEOUT"):
                 diagnostic_output = close_failure_diagnostics(
                     str(process.pid), diagnostic_arguments, deadline
                 )

@@ -250,7 +250,7 @@ namespace PulseForgeEditor::Detail
 		const DocumentCloseUiMouseButtonObservation& Observation)
 	{
 		if (!m_Scenario || !m_Identity || m_Phase == DocumentCloseUiPhase::Failed || m_Phase == DocumentCloseUiPhase::Complete ||
-			m_GlfwMouseButtonReportCount >= 16 || ExpectedChoice() != "save")
+			m_GlfwMouseButtonReportCount >= 16)
 			return;
 		const char* ActionName = "unknown";
 		switch (Observation.Action)
@@ -260,9 +260,9 @@ namespace PulseForgeEditor::Detail
 		case DocumentCloseUiMouseAction::Repeat: ActionName = "repeat"; break;
 		}
 		PF_INFO("PF_DOC_CLOSE_DIAG|GLFW_MOUSE_BUTTON|scenario={}|host={}|asset={}|generation={}|sequence={}|viewport={}|main_window={}|"
-				"button=left|action={}|modifiers={}|local={},{}|steady_ms={:.3f}|native_focused={}|native_hovered={}",
+				"native_window=0x{:x}|button=left|action={}|modifiers={}|local={},{}|steady_ms={:.3f}|native_focused={}|native_hovered={}",
 			*m_Scenario, m_HostID, m_Identity->Asset.ToString(), m_PromptGeneration, ++m_GlfwMouseButtonReportCount, Observation.Viewport,
-			Observation.MainWindow ? 1 : 0, ActionName, Observation.Modifiers,
+			Observation.MainWindow ? 1 : 0, Observation.NativeWindowIdentity, ActionName, Observation.Modifiers,
 			Observation.LocalX, Observation.LocalY, Observation.SteadyMilliseconds, Observation.NativeWindowFocused ? 1 : 0,
 			Observation.NativeWindowHovered ? 1 : 0);
 	}

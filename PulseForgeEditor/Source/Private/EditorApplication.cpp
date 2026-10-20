@@ -123,6 +123,22 @@ namespace
 {
 	using EditorJson = nlohmann::ordered_json;
 
+#if defined(_DEBUG) || defined(PF_DEBUG)
+	class EditorLayer;
+
+	struct DocumentCloseMouseButtonCallbackRoute
+	{
+		EditorLayer* Owner = nullptr;
+		GLFWmousebuttonfun Previous = nullptr;
+	};
+
+	std::unordered_map<GLFWwindow*, DocumentCloseMouseButtonCallbackRoute>& GetDocumentCloseMouseButtonCallbackRoutes()
+	{
+		static std::unordered_map<GLFWwindow*, DocumentCloseMouseButtonCallbackRoute> Routes;
+		return Routes;
+	}
+#endif
+
 	PulseForge::OutputColorEncoding GetEditorUiColorEncoding(PulseForge::OutputColorEncoding OutputEncoding) noexcept
 	{
 #ifdef PF_EDITOR_RENDERER_OPENGL
@@ -1906,12 +1922,16 @@ namespace
 		{
 			if (!m_DocumentCloseAcceptance || !m_DocumentCloseAcceptance->IsEnabled()) return;
 			std::unordered_set<GLFWwindow*> LiveWindows;
+			auto& Routes = GetDocumentCloseMouseButtonCallbackRoutes();
 			if (auto* MainWindow = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow()))
 			{
 				LiveWindows.insert(MainWindow);
 				if (!m_DocumentCloseMouseButtonCallbacks.contains(MainWindow))
-					m_DocumentCloseMouseButtonCallbacks.emplace(MainWindow,
-						glfwSetMouseButtonCallback(MainWindow, &EditorLayer::ObserveDocumentCloseMouseButton));
+				{
+					const auto Previous = glfwSetMouseButtonCallback(MainWindow, &EditorLayer::ObserveDocumentCloseMouseButton);
+					m_DocumentCloseMouseButtonCallbacks.emplace(MainWindow, Previous);
+					Routes[MainWindow] = { this, Previous };
+				}
 			}
 			const ImGuiPlatformIO& PlatformIO = ImGui::GetPlatformIO();
 			for (int Index = 0; Index < PlatformIO.Viewports.Size; ++Index)
@@ -1921,22 +1941,28 @@ namespace
 				if (!Window) continue;
 				LiveWindows.insert(Window);
 				if (!m_DocumentCloseMouseButtonCallbacks.contains(Window))
-					m_DocumentCloseMouseButtonCallbacks.emplace(Window,
-						glfwSetMouseButtonCallback(Window, &EditorLayer::ObserveDocumentCloseMouseButton));
+				{
+					const auto Previous = glfwSetMouseButtonCallback(Window, &EditorLayer::ObserveDocumentCloseMouseButton);
+					m_DocumentCloseMouseButtonCallbacks.emplace(Window, Previous);
+					Routes[Window] = { this, Previous };
+				}
 			}
-			std::erase_if(m_DocumentCloseMouseButtonCallbacks,
-				[&LiveWindows](const auto& Entry) { return !LiveWindows.contains(Entry.first); });
+			std::erase_if(m_DocumentCloseMouseButtonCallbacks, [&LiveWindows, &Routes](const auto& Entry) {
+				if (LiveWindows.contains(Entry.first)) return false;
+				Routes.erase(Entry.first);
+				return true;
+			});
 		}
 
 		static void ObserveDocumentCloseMouseButton(GLFWwindow* Window, int Button, int Action, int Modifiers)
 		{
-			ImGuiContext* Context = ImGui::GetCurrentContext();
-			if (!Context) return;
-			auto* Layer = static_cast<EditorLayer*>(ImGui::GetIO().UserData);
-			if (!Layer) return;
-			const auto Callback = Layer->m_DocumentCloseMouseButtonCallbacks.find(Window);
-			if (Callback == Layer->m_DocumentCloseMouseButtonCallbacks.end()) return;
-			if (Callback->second) Callback->second(Window, Button, Action, Modifiers);
+			auto& Routes = GetDocumentCloseMouseButtonCallbackRoutes();
+			const auto Route = Routes.find(Window);
+			if (Route == Routes.end()) return;
+			EditorLayer* Layer = Route->second.Owner;
+			const GLFWmousebuttonfun Previous = Route->second.Previous;
+			if (Previous) Previous(Window, Button, Action, Modifiers);
+			if (!Layer || ImGui::GetCurrentContext() != Layer->m_Context) return;
 			if (Button != GLFW_MOUSE_BUTTON_LEFT) return;
 			if (!Layer->m_DocumentCloseAcceptance || !Layer->m_DocumentCloseAcceptance->IsEnabled()) return;
 
@@ -1955,6 +1981,7 @@ namespace
 			Observation.Action = Action == GLFW_PRESS ? PulseForgeEditor::Detail::DocumentCloseUiMouseAction::Press :
 				Action == GLFW_REPEAT ? PulseForgeEditor::Detail::DocumentCloseUiMouseAction::Repeat :
 				PulseForgeEditor::Detail::DocumentCloseUiMouseAction::Release;
+			Observation.NativeWindowIdentity = reinterpret_cast<uintptr_t>(Window);
 			Observation.Modifiers = Modifiers;
 			glfwGetCursorPos(Window, &Observation.LocalX, &Observation.LocalY);
 			Observation.SteadyMilliseconds = std::chrono::duration<double, std::milli>(
@@ -7008,9 +7035,6 @@ namespace
 			ImGui::SetCurrentContext(m_Context);
 			m_ViewportRenderView.ResetTarget();
 			if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) ImGui::DestroyPlatformWindows();
-#if defined(_DEBUG) || defined(PF_DEBUG)
-			m_DocumentCloseMouseButtonCallbacks.clear();
-#endif
 			if (m_Project)
 			{
 				m_DocumentWorkspaceStore.MarkDirty(false);
@@ -7037,6 +7061,14 @@ namespace
 			if (m_OpenGLBackendActive) ImGui_ImplOpenGL3_Shutdown();
 #endif
 			if (m_GlfwBackendActive) ImGui_ImplGlfw_Shutdown();
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			{
+				auto& Routes = GetDocumentCloseMouseButtonCallbackRoutes();
+				for (const auto& [Window, Callback] : m_DocumentCloseMouseButtonCallbacks)
+					Routes.erase(Window);
+				m_DocumentCloseMouseButtonCallbacks.clear();
+			}
+#endif
 			ImGui::GetIO().UserData = m_PreviousImGuiUserData;
 			m_EditorStyle.Reset();
 			ImGui::DestroyContext(m_Context);
