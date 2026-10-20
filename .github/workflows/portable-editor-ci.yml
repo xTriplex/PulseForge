@@ -299,6 +299,19 @@ jobs:
             --log-directory "$RUNNER_TEMP" \
             --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-document-close-smoke.log"
 
+      - name: Repeat intermittent dirty-close retry cases serially
+        if: ${{ always() && !cancelled() && steps.macos_document_close.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/macos-document-close-focused-repeat"
+          python3 Tests/Platform/MacOSDocumentCloseSmoke.py \
+            --editor Build/CI/macos-renderer/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor \
+            --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
+            --log-directory "$RUNNER_TEMP/macos-document-close-focused-repeat" \
+            --timeout-seconds 240 \
+            --scenario save-retry \
+            --scenario close-retry 2>&1 | tee "$RUNNER_TEMP/macos-document-close-focused-repeat.log"
+
       - name: Build Release and Dist editor consumers and verify Debug fixture exclusion
         if: ${{ always() && !cancelled() && steps.configure_desktop_targets.outcome == 'success' && steps.build_desktop_targets.outcome == 'success' }}
         run: |
@@ -414,6 +427,8 @@ jobs:
             ${{ runner.temp }}/macos-workspace-restore-second-launch.log
             ${{ runner.temp }}/macos-*-checkpoint-*.png
             ${{ runner.temp }}/macos-document-close-smoke.log
+            ${{ runner.temp }}/macos-document-close-focused-repeat.log
+            ${{ runner.temp }}/macos-document-close-focused-repeat/*.log
             ${{ runner.temp }}/macos-document-close-cancel-save.log
             ${{ runner.temp }}/macos-document-close-discard.log
             ${{ runner.temp }}/macos-document-close-save-retry.log

@@ -1751,6 +1751,7 @@ def main() -> int:
     parser.add_argument("--project", required=True, type=Path)
     parser.add_argument("--log-directory", required=True, type=Path)
     parser.add_argument("--timeout-seconds", type=int, default=180)
+    parser.add_argument("--scenario", action="append", choices=SCENARIOS)
     args = parser.parse_args()
     if args.timeout_seconds <= 0:
         print("macOS document-close smoke failed: timeout must be positive", file=sys.stderr)
@@ -1789,7 +1790,8 @@ def main() -> int:
         retain_driver_root = False
         try:
             pointer_driver = compile_pointer_driver(driver_root)
-            for scenario in SCENARIOS:
+            scenarios = args.scenario or SCENARIOS
+            for scenario in scenarios:
                 try:
                     run_scenario(editor, project, args.log_directory, pointer_driver, scenario, args.timeout_seconds)
                     print(f"MACOS_DOC_CLOSE_SCENARIO=PASS; scenario={scenario}")
