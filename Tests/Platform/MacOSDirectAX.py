@@ -658,9 +658,20 @@ if operation == "press-control" || operation == "set-value" || operation == "set
               "browser_selected_children_settable=\(browserSelectedSettable)")
         fflush(stdout)
         if !selectionSettable, role == "AXTextField", availableActions.contains("AXOpen") {
+            var frameText = "unavailable"
+            if let rawFrame = value(control, "AXFrame"), CFGetTypeID(rawFrame) == AXValueGetTypeID() {
+                let frameValue = rawFrame as! AXValue
+                var frame = CGRect.zero
+                if AXValueGetType(frameValue) == .cgRect && AXValueGetValue(frameValue, .cgRect, &frame),
+                   frame.origin.x.isFinite, frame.origin.y.isFinite,
+                   frame.size.width.isFinite, frame.size.height.isFinite,
+                   frame.size.width > 0, frame.size.height > 0 {
+                    frameText = "\(frame.origin.x),\(frame.origin.y),\(frame.size.width),\(frame.size.height)"
+                }
+            }
             AXUIElementSetMessagingTimeout(control, 1.0)
             print("DIRECT_AX_DISPATCH attempted=true; operation=open-file; target_pid=\(targetPID); " +
-                  "role=\(role); name=\(titleOrDescription(control)); advertised_action=AXOpen")
+                  "role=\(role); name=\(titleOrDescription(control)); advertised_action=AXOpen; frame=\(frameText)")
             fflush(stdout)
             let openError = AXUIElementPerformAction(control, "AXOpen" as CFString)
             print("DIRECT_AX_RESULT status=open-file-action-returned; operation=open-file; " +

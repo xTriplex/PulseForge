@@ -489,6 +489,51 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertEqual(action_returned, result)
         select.assert_called_once()
 
+    def test_unsupported_axopen_uses_only_the_exact_validated_axframe(self) -> None:
+        result = (
+            "DIRECT_AX_DISPATCH attempted=true; operation=open-file; target_pid=42; "
+            "role=AXTextField; name=Selected Ω.pfproj; advertised_action=AXOpen; frame=100.5,200,80,24\n"
+            "DIRECT_AX_RESULT status=open-file-action-returned; operation=open-file; "
+            "role=AXTextField; name=Selected Ω.pfproj; ax_error=-25205"
+        )
+        self.assertEqual(
+            (100.5, 200.0, 80.0, 24.0),
+            native_dialog.unsupported_open_action_frame(result, "Selected Ω.pfproj"),
+        )
+        self.assertIsNone(native_dialog.unsupported_open_action_frame(
+            result.replace("ax_error=-25205", "ax_error=0"), "Selected Ω.pfproj"
+        ))
+        self.assertIsNone(native_dialog.unsupported_open_action_frame(result, "Other.pfproj"))
+        self.assertIsNone(native_dialog.unsupported_open_action_frame(
+            result.replace("frame=100.5,200,80,24", "frame=nan,200,80,24"), "Selected Ω.pfproj"
+        ))
+        self.assertIsNone(native_dialog.unsupported_open_action_frame(
+            result.replace("frame=100.5,200,80,24", "frame=100.5,200,0,24"), "Selected Ω.pfproj"
+        ))
+
+    def test_open_file_field_click_posts_once_at_axframe_center(self) -> None:
+        class CompletedPointer:
+            returncode = 0
+
+            @staticmethod
+            def communicate(timeout: float) -> tuple[str, str]:
+                return "SCENE_VIEWPORT_CG_EVENT=SEQUENCE_RETURNED; operation=click-left;", ""
+
+        frame = (100.0, 200.0, 80.0, 24.0)
+        with tempfile.TemporaryDirectory() as runner_temp:
+            pointer = Path(runner_temp) / "PulseForgeSceneViewportPointer"
+            pointer.touch()
+            with patch.dict(native_dialog.os.environ, {"RUNNER_TEMP": runner_temp}), patch.object(
+                native_dialog.subprocess, "Popen", return_value=CompletedPointer()
+            ) as launch:
+                output = native_dialog.run_open_file_pointer_click(42, "Selected Ω.pfproj", frame, 3.0)
+        self.assertIn("operation=click-left", output)
+        arguments = launch.call_args.args[0]
+        self.assertEqual([str(pointer), "click-left", "42"], arguments[:3])
+        self.assertEqual("140.000", arguments[4])
+        self.assertEqual("212.000", arguments[5])
+        launch.assert_called_once()
+
     def test_open_selection_waits_only_while_the_exact_file_row_is_absent(self) -> None:
         no_row = (
             "DIRECT_AX_RESULT status=control-selection-error; operation=select-element; role=AXRow/AXCell; "

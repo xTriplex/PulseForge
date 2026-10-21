@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+import math
 import os
 import queue
 import signal
@@ -127,6 +128,89 @@ def open_file_action_dispatched(output: str, expected_name: str) -> bool:
         fields.get("role") == "AXTextField"
         and fields.get("name") == expected_name
     )
+
+
+def unsupported_open_action_frame(output: str, expected_name: str) -> tuple[float, float, float, float] | None:
+    dispatches = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_DISPATCH attempted=true; operation=open-file;")
+    ]
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=open-file-action-returned; operation=open-file;")
+    ]
+    if len(dispatches) != 1 or len(results) != 1:
+        return None
+    dispatch_fields = dict(
+        part.split("=", 1) for part in dispatches[0].removeprefix("DIRECT_AX_DISPATCH ").split("; ") if "=" in part
+    )
+    result_fields = dict(
+        part.split("=", 1) for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ") if "=" in part
+    )
+    if (
+        dispatch_fields.get("name") != expected_name
+        or dispatch_fields.get("advertised_action") != "AXOpen"
+        or result_fields.get("name") != expected_name
+        or result_fields.get("ax_error") != "-25205"
+    ):
+        return None
+    try:
+        frame = tuple(float(value) for value in dispatch_fields["frame"].split(","))
+    except (KeyError, ValueError):
+        return None
+    if len(frame) != 4 or not all(math.isfinite(value) for value in frame):
+        return None
+    if frame[2] <= 0 or frame[3] <= 0:
+        return None
+    return frame  # AXFrame and Quartz use global top-left points; do not apply backing scale.
+
+
+def run_open_file_pointer_click(target_pid: int, expected_name: str, frame: tuple[float, float, float, float], timeout: float) -> str:
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    if not runner_temp:
+        raise RuntimeError("RUNNER_TEMP is unavailable for the compiled Quartz pointer helper")
+    executable = Path(runner_temp) / "PulseForgeSceneViewportPointer"
+    if not executable.is_file():
+        raise RuntimeError(f"compiled Quartz pointer helper is missing: {executable}")
+    x = frame[0] + frame[2] / 2.0
+    y = frame[1] + frame[3] / 2.0
+    action_id = uuid.uuid4().hex
+    process = subprocess.Popen(
+        [str(executable), "click-left", str(target_pid), action_id, f"{x:.3f}", f"{y:.3f}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=max(0.1, timeout))
+    except subprocess.TimeoutExpired as error:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=0.25)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate(timeout=1.0)
+        raise RuntimeError(f"Open file-field pointer click timed out; action_id={action_id}; {stdout!r}; {stderr!r}") from error
+    if process.returncode != 0 or "operation=click-left;" not in stdout:
+        raise RuntimeError(
+            f"Open file-field pointer click failed; exit_code={process.returncode}; action_id={action_id}; "
+            f"stdout={stdout[-1200:]!r}; stderr={stderr[-1200:]!r}"
+        )
+    print(
+        f"NFD_OPEN_FILE_FIELD_CLICK=TRANSPORT_RETURNED; action_id={action_id}; target_pid={target_pid}; "
+        f"target_name={expected_name!r}; quartz_point={x:.3f},{y:.3f}; output={stdout.strip()!r}",
+        flush=True,
+    )
+    return stdout
 
 
 def run_keyboard_input(mode: str, target_pid: int, *, text: str = "", timeout: float) -> str:
@@ -727,9 +811,32 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             automation_code = selection_code
             last_open_step = "exact Open-panel filename selection operation returned"
             automation_output = selection_output
-            if not open_file_action_dispatched(selection_output, expected_path.name):
+            open_action_sent = open_file_action_dispatched(selection_output, expected_path.name)
+            open_button_confirmed = False
+            if open_action_sent:
+                frame = unsupported_open_action_frame(selection_output, expected_path.name)
+                if frame is not None:
+                    click_output = run_open_file_pointer_click(
+                        int(panel_process_id), expected_path.name, frame, min(5.0, remaining_seconds())
+                    )
+                    automation_output += click_output
+                    panel_state = wait_for_open_button(int(panel_process_id), panel_title, helper_deadline)
+                    automation_output += panel_state
+                    open_button_confirmed = open_button_state_ready(panel_state, int(panel_process_id), panel_title)
+                    if not open_button_confirmed:
+                        if open_panel_dismissed(panel_state, panel_title):
+                            last_open_step = "file-field click dismissed Open panel; awaiting exact semantic fixture result"
+                        else:
+                            raise RuntimeError(
+                                "AXOpen was unsupported and one exact file-field click did not enable Open; "
+                                f"postcondition={panel_state[-2400:]!r}"
+                            )
+                else:
+                    last_open_step = "AXOpen dispatched; waiting for semantic fixture result without replay"
+            else:
                 panel_state = wait_for_open_button(int(panel_process_id), panel_title, helper_deadline)
                 automation_output += panel_state
+                open_button_confirmed = open_button_state_ready(panel_state, int(panel_process_id), panel_title)
         except (OSError, RuntimeError) as error:
             observation_log = log_path.with_name(f"native-dialog-{scenario}-selection-failure.log")
             capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
@@ -739,7 +846,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 f"Open selection failed before the Open action; last_step={last_open_step}; "
                 f"{error}"
             )
-        if not open_file_action_dispatched(automation_output, expected_path.name):
+        if open_button_confirmed:
             automation_code, pressed, press_error = run_direct_ax(
                 int(panel_process_id), operation="press-control", window_title=panel_title,
                 control_name="Open", timeout=min(10.0, remaining_seconds())
