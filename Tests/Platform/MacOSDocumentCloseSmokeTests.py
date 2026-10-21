@@ -150,7 +150,9 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
         self.assertEqual(display["id"], 1)
         self.assertEqual(minimum, (57.0, 288.0))
         self.assertEqual(maximum, (127.0, 417.0))
-        self.assertEqual(point, (92.0, 352.5))
+        self.assertEqual(point, (65.0, 409.0))
+        self.assertGreater(point[1], 372.0, "focus point must remain below the Scene Viewport orientation gizmo")
+        self.assertLess(point[0], 71.0, "focus point must remain left of the Scene Viewport orientation gizmo")
 
     def test_focus_reacquisition_target_stays_on_the_visible_display(self) -> None:
         display, minimum, maximum, point = scene_viewport_smoke.visible_camera_target(
@@ -412,9 +414,16 @@ class DirtyCloseProtocolTests(unittest.TestCase):
     def test_open_file_selection_requires_one_confirmed_ax_selection(self) -> None:
         selected = (
             "DIRECT_AX_RESULT status=selection-verified; operation=select-element; "
-            "role=AXRow; name=Example Ω.scene; ax_error=0; selected=true"
+            "role=AXTextField; name=Example Ω.scene; ax_error=0; selected=true"
         )
         expected_path = Path("/tmp/Dialog Files Ω/Example Ω.scene")
+        self.assertTrue(native_dialog.open_file_selection_ready(selected, expected_path.name))
+        self.assertFalse(native_dialog.open_file_selection_ready(
+            selected.replace("name=Example Ω.scene", "name=Other Ω.scene"), expected_path.name
+        ))
+        self.assertFalse(native_dialog.open_file_selection_ready(
+            selected.replace("selected=true", "selected=false"), expected_path.name
+        ))
         with patch.object(native_dialog, "run_direct_ax", return_value=(0, selected, "")) as select:
             result = native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
         self.assertIn("status=selection-verified", result)

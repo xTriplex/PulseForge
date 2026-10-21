@@ -60,6 +60,27 @@ def open_button_state_ready(output: str, fixture_pid: int, panel_title: str) -> 
     return fields.get("matches") == "1" and fields.get("enabled") == "true" and fields.get("enabled_error") == "0"
 
 
+def open_file_selection_ready(output: str, expected_name: str) -> bool:
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=selection-verified; operation=select-element;")
+    ]
+    if len(results) != 1:
+        return False
+    fields = dict(
+        part.split("=", 1)
+        for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ")
+        if "=" in part
+    )
+    return (
+        fields.get("operation") == "select-element"
+        and fields.get("role") in {"AXRow", "AXCell", "AXTextField"}
+        and fields.get("name") == expected_name
+        and fields.get("ax_error") == "0"
+        and fields.get("selected") == "true"
+    )
+
+
 def run_keyboard_input(mode: str, target_pid: int, *, text: str = "", timeout: float) -> str:
     runner_temp = os.environ.get("RUNNER_TEMP")
     if not runner_temp:
@@ -160,9 +181,13 @@ def select_open_file(fixture_pid: int, panel_title: str, expected_path: Path, ti
             flush=True,
         )
         if code == 0 and "DIRECT_AX_RESULT status=selection-verified; operation=select-element;" in result:
+            if not open_file_selection_ready(result, expected_path.name):
+                raise RuntimeError(
+                    f"Open-file selection result did not identify the exact selected file; output={result[-2400:]!r}"
+                )
             break
 
-        # The helper exits before AXUIElementSetAttributeValue unless it finds one exact file row.
+        # The helper exits before changing AXSelected unless it finds one exact file element.
         # A zero-match result is therefore a read-only indication that the browser has not exposed
         # the destination yet. Any ambiguous or timed-out action stops without a second selection.
         no_matching_row = False

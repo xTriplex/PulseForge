@@ -454,14 +454,14 @@ if operation == "press-control" || operation == "set-value" || operation == "set
     operation == "set-folder-path-value" || operation == "select-element" {
     let wantedRole = operation == "press-control" ? "AXButton" :
         (operation == "set-value" || operation == "set-focused-value-confirm" || operation == "set-folder-path-value")
-            ? "AXTextField" : "AXRow/AXCell"
+            ? "AXTextField" : "AXRow/AXCell/AXTextField"
     func labelMatches(_ element: AXUIElement) -> Bool {
         labels(element).contains { $0 == controlName || $0.hasSuffix("/" + controlName) }
     }
     var controls = descendants.enumerated().compactMap { index, node -> (Int, AXNode)? in
         let role = string(node.element, "AXRole") ?? ""
         let roleMatches = operation == "select-element"
-            ? (role == "AXRow" || role == "AXCell")
+            ? (role == "AXRow" || role == "AXCell" || role == "AXTextField")
             : role == wantedRole
         let focusedMatch = operation == "set-focused-value-confirm" && (value(node.element, "AXFocused") as? Bool) == true
         let labelMatch = operation == "set-focused-value-confirm" ? focusedMatch : (controlName.isEmpty || labelMatches(node.element))
@@ -483,24 +483,29 @@ if operation == "press-control" || operation == "set-value" || operation == "set
         return roleMatches && labelMatch ? (index, node) : nil
     }
     if operation == "select-element", controls.isEmpty {
-        for (_, node) in descendants.enumerated() where
+        for (index, node) in descendants.enumerated() where
             ["AXStaticText", "AXTextField", "AXCell", "AXRow"].contains(string(node.element, "AXRole") ?? "") &&
             labelMatches(node.element) {
             var parent = node.parent
+            var foundSelectableAncestor = false
             while let parentIndex = parent {
                 let ancestor = descendants[parentIndex]
                 let role = string(ancestor.element, "AXRole") ?? ""
                 if role == "AXRow" || role == "AXCell" {
                     controls.append((parentIndex, ancestor))
+                    foundSelectableAncestor = true
                     break
                 }
                 parent = ancestor.parent
+            }
+            if !foundSelectableAncestor, string(node.element, "AXRole") == "AXTextField" {
+                controls.append((index, node))
             }
         }
     }
     guard controls.count == 1, let (_, controlNode) = controls.first else {
         let candidates = descendants.map { string($0.element, "AXRole") ?? "" }
-            .filter { $0 == "AXRow" || $0 == "AXCell" }
+            .filter { $0 == "AXRow" || $0 == "AXCell" || $0 == "AXTextField" }
         let locationNodes = descendants.compactMap { node -> String? in
             let role = string(node.element, "AXRole") ?? ""
             guard ["AXPopUpButton", "AXBrowser", "AXTextField", "AXOutline"].contains(role) else { return nil }
@@ -509,7 +514,7 @@ if operation == "press-control" || operation == "set-value" || operation == "set
         }.prefix(8)
         let rowNodes = descendants.compactMap { node -> String? in
             let role = string(node.element, "AXRole") ?? ""
-            guard ["AXRow", "AXCell", "AXStaticText"].contains(role) else { return nil }
+            guard ["AXRow", "AXCell", "AXStaticText", "AXTextField"].contains(role) else { return nil }
             let nodeLabels = labels(node.element).prefix(4).map { String($0.prefix(160)) }
             let parentRole = node.parent.map { string(descendants[$0].element, "AXRole") ?? "" } ?? "<root>"
             return "depth=\(node.depth); parent_role=\(parentRole); role=\(role); labels=\(nodeLabels)"
