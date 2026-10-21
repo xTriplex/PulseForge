@@ -7,6 +7,7 @@
 #include <expected>
 #include <limits>
 #include <string>
+#include <imgui.h>
 
 namespace PulseForgeEditor
 {
@@ -45,6 +46,11 @@ namespace PulseForgeEditor
 		uint32_t Width = 0;
 		uint32_t Height = 0;
 	};
+
+	[[nodiscard]] inline ImVec2 GetEditorViewportFramebufferScale(const ImGuiViewport* OwnerViewport) noexcept
+	{
+		return OwnerViewport ? OwnerViewport->FramebufferScale : ImVec2(1.0f, 1.0f);
+	}
 
 	struct EditorViewportSceneMode
 	{

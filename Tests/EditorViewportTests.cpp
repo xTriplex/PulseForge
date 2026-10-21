@@ -521,6 +521,25 @@ namespace
 		const auto AtHighDpi = CalculateEditorViewportTargetExtent(130.0, 65.0, 1.5, 1.5);
 		PF_CHECK(Tests, AtHighDpi && AtHighDpi->Width == 224 && AtHighDpi->Height == 128);
 
+		ImGuiViewport MainViewport;
+		MainViewport.ID = 1;
+		MainViewport.FramebufferScale = ImVec2(1.0f, 1.0f);
+		ImGuiViewport DetachedViewport;
+		DetachedViewport.ID = 2;
+		DetachedViewport.FramebufferScale = ImVec2(2.0f, 2.0f);
+		const ImVec2 MainOwnerScale = GetEditorViewportFramebufferScale(&MainViewport);
+		const ImVec2 DetachedOwnerScale = GetEditorViewportFramebufferScale(&DetachedViewport);
+		const auto MainOwnerExtent = CalculateEditorViewportTargetExtent(130.0, 65.0, MainOwnerScale.x, MainOwnerScale.y);
+		const auto DetachedOwnerExtent =
+			CalculateEditorViewportTargetExtent(130.0, 65.0, DetachedOwnerScale.x, DetachedOwnerScale.y);
+		PF_CHECK(Tests, MainOwnerExtent && MainOwnerExtent->Width == 160 && MainOwnerExtent->Height == 96);
+		PF_CHECK(Tests, DetachedOwnerExtent && DetachedOwnerExtent->Width == 288 && DetachedOwnerExtent->Height == 160);
+		DetachedViewport.FramebufferScale = ImVec2(0.75f, 1.25f);
+		const ImVec2 FractionalOwnerScale = GetEditorViewportFramebufferScale(&DetachedViewport);
+		const auto FractionalOwnerExtent =
+			CalculateEditorViewportTargetExtent(130.0, 65.0, FractionalOwnerScale.x, FractionalOwnerScale.y);
+		PF_CHECK(Tests, FractionalOwnerExtent && FractionalOwnerExtent->Width == 128 && FractionalOwnerExtent->Height == 96);
+
 		const auto InvalidScaleFallsBackToOne = CalculateEditorViewportTargetExtent(130.0, 65.0, 0.0, -1.0);
 		PF_CHECK(Tests, InvalidScaleFallsBackToOne && InvalidScaleFallsBackToOne->Width == 160 && InvalidScaleFallsBackToOne->Height == 96);
 		PF_CHECK(Tests, !CalculateEditorViewportTargetExtent(0.0, 65.0, 1.0, 1.0));
