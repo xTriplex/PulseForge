@@ -653,11 +653,6 @@ namespace PulseForgeEditor::Detail
 			   << Observation.TearOffPoint[1] << "; owner_native_rect=" << Observation.OwnerNativePosition[0] << ','
 			   << Observation.OwnerNativePosition[1] << ',' << Observation.OwnerNativeSize[0] << ','
 			   << Observation.OwnerNativeSize[1];
-		Stream << "; camera_position=" << Observation.CameraPosition[0] << ',' << Observation.CameraPosition[1] << ','
-			   << Observation.CameraPosition[2] << "; camera_speed=" << Observation.CameraMoveSpeed
-			   << "; viewport_keyboard_focused=" << Observation.ViewportKeyboardFocused
-			   << "; cursor_mode=" << Observation.CursorMode << "; raw_motion_supported=" << Observation.RawMotionSupported
-			   << "; raw_motion_enabled=" << Observation.RawMotionEnabled;
 		return Stream.str();
 	}
 

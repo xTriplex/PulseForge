@@ -420,6 +420,28 @@ class DirtyCloseProtocolTests(unittest.TestCase):
                 native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
         select.assert_called_once()
 
+    def test_open_selection_waits_only_while_the_exact_file_row_is_absent(self) -> None:
+        no_row = (
+            "DIRECT_AX_RESULT status=control-selection-error; operation=select-element; role=AXRow/AXCell; "
+            "name=Example Ω.scene; matches=0; candidate_roles=[]"
+        )
+        selected = (
+            "DIRECT_AX_RESULT status=selection-verified; operation=select-element; "
+            "role=AXRow; name=Example Ω.scene; ax_error=0; selected=true"
+        )
+        expected_path = Path("/tmp/Dialog Files Ω/Example Ω.scene")
+        with patch.object(native_dialog, "run_direct_ax", side_effect=[(8, no_row, ""), (0, selected, "")]) as select, patch.object(
+            native_dialog.time, "sleep"
+        ):
+            native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        self.assertEqual(2, select.call_count)
+
+        ambiguous = no_row.replace("matches=0", "matches=2")
+        with patch.object(native_dialog, "run_direct_ax", return_value=(8, ambiguous, "")) as select:
+            with self.assertRaisesRegex(RuntimeError, "selection was not confirmed"):
+                native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        select.assert_called_once()
+
     def test_permission_bridge_class_exposes_only_scalar_no_argument_methods(self) -> None:
         platform_dir = Path(__file__).parent
         header = (platform_dir / "MacOSAutomationPermissionBridge.h").read_text(encoding="utf-8")
