@@ -204,7 +204,8 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
 
     def test_reattachment_targets_a_visible_main_utility_dock_node(self) -> None:
         fields = {
-            "utility_drop_target": "inspector_dock_node",
+            "utility_drop_target": "main_utility_panel_dock_node",
+            "utility_drop_panel": "Inspector",
             "utility_drop_rect": "690,180,850,610",
         }
         displays = [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0,
@@ -217,7 +218,8 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
             scene_viewport_smoke.visible_utility_drop_target({"utility_drop_rect": "1,1,100,100"}, displays)
         with self.assertRaisesRegex(ValueError, "no usable visible region"):
             scene_viewport_smoke.visible_utility_drop_target(
-                {"utility_drop_target": "inspector_dock_node", "utility_drop_rect": "1100,20,1200,200"}, displays
+                {"utility_drop_target": "main_utility_panel_dock_node", "utility_drop_panel": "Hierarchy",
+                 "utility_drop_rect": "1100,20,1200,200"}, displays
             )
 
     def test_drag_target_rejects_empty_or_fully_offscreen_geometry(self) -> None:

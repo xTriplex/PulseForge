@@ -191,7 +191,8 @@ def visible_utility_drop_target(
     fields: dict[str, str], displays: list[dict[str, float | int | str]],
 ) -> tuple[dict[str, float | int | str], tuple[float, float, float, float], tuple[float, float]]:
     target_name = fields.get("utility_drop_target")
-    if target_name != "inspector_dock_node":
+    target_panel = fields.get("utility_drop_panel", "")
+    if target_name != "main_utility_panel_dock_node" or target_panel in ("", "Scene Viewport"):
         raise ValueError(f"main-window utility dock target is unavailable or unexpected: {target_name!r}")
     return visible_drag_target(coordinate(fields, "utility_drop_rect", 4), displays, minimum_extent=40.0)
 
@@ -718,6 +719,7 @@ def main() -> int:
         drop_display, visible_drop_rect, drop_point = visible_utility_drop_target(reattach_state, drag_displays)
         reattach_end_x, reattach_end_y = drop_point
         print(f"MACOS_SCENE_VIEWPORT_REATTACH_UTILITY_TARGET=target={reattach_state['utility_drop_target']}; "
+              f"panel={reattach_state['utility_drop_panel']}; "
               f"display_id={drop_display['id']}; coordinate_space={drop_display['coordinate_space']!r}; "
               f"target_rect={coordinate(reattach_state, 'utility_drop_rect', 4)}; visible={visible_drop_rect}; "
               f"point={drop_point}")

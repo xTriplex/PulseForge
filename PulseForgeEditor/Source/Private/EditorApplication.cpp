@@ -6284,18 +6284,33 @@ namespace
 					SceneWindow->WindowClass, PulseForgeEditor::EditorDockingDomain::UtilityPanel);
 				Observation.UtilityDockNodeID = SceneWindow->DockId;
 			}
-			ImGuiWindow* InspectorWindow = ImGui::FindWindowByName("Inspector");
-			if (InspectorWindow && InspectorWindow->Viewport == MainViewport && InspectorWindow->DockNode && InspectorWindow->Active &&
-				PulseForgeEditor::IsEditorWindowClassInDomain(InspectorWindow->WindowClass,
-					PulseForgeEditor::EditorDockingDomain::UtilityPanel))
+			for (ImGuiWindow* Candidate : GImGui->Windows)
 			{
-				const ImGuiDockNode* InspectorDockNode = InspectorWindow->DockNode;
-				const ImVec2 DockMinimum = InspectorDockNode->Pos;
-				const ImVec2 DockMaximum(DockMinimum.x + InspectorDockNode->Size.x, DockMinimum.y + InspectorDockNode->Size.y);
+				if (!Candidate || Candidate == SceneWindow || Candidate->RootWindow != Candidate || !Candidate->Active ||
+					Candidate->Viewport != MainViewport || !Candidate->DockNode ||
+					!PulseForgeEditor::IsEditorWindowClassInDomain(Candidate->WindowClass,
+						PulseForgeEditor::EditorDockingDomain::UtilityPanel))
+					continue;
+				bool IsTargetUtilityPanel = false;
+				for (const PulseForgeEditor::EditorPanelDescriptor& Descriptor : PulseForgeEditor::EditorPanelDescriptors)
+				{
+					if (Descriptor.IsUtilityPanel && Descriptor.Panel != PulseForgeEditor::EditorPanel::SceneViewport &&
+						std::string_view(Candidate->Name) == Descriptor.WindowName)
+					{
+						IsTargetUtilityPanel = true;
+						break;
+					}
+				}
+				if (!IsTargetUtilityPanel || !Candidate->DockNode->IsLeafNode()) continue;
+				const ImGuiDockNode* UtilityDockNode = Candidate->DockNode;
+				const ImVec2 DockMinimum = UtilityDockNode->Pos;
+				const ImVec2 DockMaximum(DockMinimum.x + UtilityDockNode->Size.x, DockMinimum.y + UtilityDockNode->Size.y);
 				if (DockMaximum.x - DockMinimum.x >= 40.0f && DockMaximum.y - DockMinimum.y >= 40.0f)
 				{
 					Observation.UtilityDropTargetReady = true;
 					Observation.UtilityDropTargetRect = { DockMinimum.x, DockMinimum.y, DockMaximum.x, DockMaximum.y };
+					Observation.UtilityDropTargetPanel = Candidate->Name;
+					break;
 				}
 			}
 			if (auto Marker = m_SceneViewportNativeSmoke->Observe(Observation)) PF_INFO("{}", *Marker);
