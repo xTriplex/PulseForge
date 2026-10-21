@@ -590,12 +590,22 @@ if operation == "press-control" || operation == "set-value" || operation == "set
     }
     if operation == "select-element" {
         let role = string(control, "AXRole") ?? ""
-        var rawAttributeNames: CFArray?
-        let attributeNamesError = AXUIElementCopyAttributeNames(control, &rawAttributeNames)
         var rawActions: CFArray?
         let actionsError = AXUIElementCopyActionNames(control, &rawActions)
+        let availableActions = rawActions as? [String] ?? []
         var selectedSettable = DarwinBoolean(false)
         let selectedSettableError = AXUIElementIsAttributeSettable(control, "AXSelected" as CFString, &selectedSettable)
+        if role == "AXTextField", selectedSettableError == .success, !selectedSettable.boolValue,
+            availableActions.contains("AXOpen") {
+            AXUIElementSetMessagingTimeout(control, 1.0)
+            print("DIRECT_AX_DISPATCH attempted=true; operation=open-file-row; target_pid=\(targetPID); role=\(role); name=\(titleOrDescription(control)); advertised_action=AXOpen")
+            fflush(stdout)
+            let openError = AXUIElementPerformAction(control, "AXOpen" as CFString)
+            print("DIRECT_AX_RESULT status=open-action-returned; operation=open-file-row; role=\(role); name=\(titleOrDescription(control)); ax_error=\(openError.rawValue)")
+            exit(openError == .success ? 0 : 13)
+        }
+        var rawAttributeNames: CFArray?
+        let attributeNamesError = AXUIElementCopyAttributeNames(control, &rawAttributeNames)
         var parentSummary: [String] = []
         var parentIndex = controlNode.parent
         while let index = parentIndex, parentSummary.count < 6 {

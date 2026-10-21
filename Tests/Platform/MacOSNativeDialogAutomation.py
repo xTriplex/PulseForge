@@ -81,6 +81,36 @@ def open_file_selection_ready(output: str, expected_name: str) -> bool:
     )
 
 
+def open_file_action_returned(output: str, expected_name: str) -> bool:
+    dispatches = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_DISPATCH attempted=true; operation=open-file-row;")
+    ]
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=open-action-returned; operation=open-file-row;")
+    ]
+    if len(dispatches) != 1 or len(results) != 1:
+        return False
+    dispatch_fields = dict(
+        part.split("=", 1)
+        for part in dispatches[0].removeprefix("DIRECT_AX_DISPATCH ").split("; ")
+        if "=" in part
+    )
+    fields = dict(
+        part.split("=", 1)
+        for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ")
+        if "=" in part
+    )
+    return (
+        dispatch_fields.get("name") == expected_name
+        and dispatch_fields.get("advertised_action") == "AXOpen"
+        and fields.get("role") == "AXTextField"
+        and fields.get("name") == expected_name
+        and fields.get("ax_error") == "0"
+    )
+
+
 def run_keyboard_input(mode: str, target_pid: int, *, text: str = "", timeout: float) -> str:
     runner_temp = os.environ.get("RUNNER_TEMP")
     if not runner_temp:
@@ -188,10 +218,16 @@ def select_open_file(fixture_pid: int, panel_title: str, expected_path: Path, ti
                     f"Open-file selection result did not identify the exact selected file; output={result[-2400:]!r}"
                 )
             break
+        if code == 0 and open_file_action_returned(result, expected_path.name):
+            print(
+                f"NFD_OPEN_FILE_ROW_ACTION=RETURNED; attempts={attempts}; pid={fixture_pid}; "
+                f"panel={panel_title!r}; file={expected_path.name!r}; {result.strip()!r}",
+                flush=True,
+            )
+            return result
 
-        # The helper exits before changing AXSelected unless it finds one exact file element.
-        # A zero-match result is therefore a read-only indication that the browser has not exposed
-        # the destination yet. Any ambiguous or timed-out action stops without a second selection.
+        # Only a zero-match result indicates that the browser has not exposed the destination yet.
+        # Any ambiguous or timed-out action stops without retrying a potentially dispatched action.
         no_matching_row = False
         if code == 8:
             matches = [
@@ -716,11 +752,14 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             )
             last_navigation_step = "Go To Folder sheet dismissal observed"
             print("NFD_GO_TO_FOLDER_SHEET=DISMISSED", flush=True)
-            select_open_file(
+            selection_output = select_open_file(
                 int(panel_process_id), panel_title, expected_path,
                 timeout=max(0.1, helper_deadline - time.monotonic())
             )
-            automation_output = wait_for_open_button(int(panel_process_id), panel_title, helper_deadline)
+            if open_file_action_returned(selection_output, expected_path.name):
+                automation_output = selection_output
+            else:
+                automation_output = wait_for_open_button(int(panel_process_id), panel_title, helper_deadline)
         except (OSError, RuntimeError) as error:
             observation_log = log_path.with_name(f"native-dialog-{scenario}-navigation-failure.log")
             capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
@@ -730,11 +769,12 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 f"Open selection navigation failed before the Open action; last_step={last_navigation_step}; "
                 f"{error}"
             )
-        automation_code, pressed, press_error = run_direct_ax(
-            int(panel_process_id), operation="press-control", window_title=panel_title,
-            control_name="Open", timeout=min(10.0, remaining_seconds())
-        )
-        automation_output += pressed + press_error
+        if not open_file_action_returned(automation_output, expected_path.name):
+            automation_code, pressed, press_error = run_direct_ax(
+                int(panel_process_id), operation="press-control", window_title=panel_title,
+                control_name="Open", timeout=min(10.0, remaining_seconds())
+            )
+            automation_output += pressed + press_error
     elif scenario == "save-select":
         automation_code, automation_output, automation_error = run_direct_ax(
             int(panel_process_id),

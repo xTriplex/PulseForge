@@ -452,6 +452,31 @@ class DirtyCloseProtocolTests(unittest.TestCase):
                 native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
         select.assert_called_once()
 
+    def test_open_file_action_is_used_only_when_ax_reports_it_and_name_matches(self) -> None:
+        expected_name = "Selected Ω.pfproj"
+        action_returned = (
+            "DIRECT_AX_DISPATCH attempted=true; operation=open-file-row; target_pid=42; "
+            "role=AXTextField; name=Selected Ω.pfproj; advertised_action=AXOpen\n"
+            "DIRECT_AX_RESULT status=open-action-returned; operation=open-file-row; "
+            "role=AXTextField; name=Selected Ω.pfproj; ax_error=0"
+        )
+        self.assertTrue(native_dialog.open_file_action_returned(action_returned, expected_name))
+        self.assertFalse(native_dialog.open_file_action_returned(
+            action_returned.replace("name=Selected Ω.pfproj; ax_error", "name=Other.pfproj; ax_error"), expected_name
+        ))
+        self.assertFalse(native_dialog.open_file_action_returned(
+            action_returned.replace("ax_error=0", "ax_error=-25205"), expected_name
+        ))
+        self.assertFalse(native_dialog.open_file_action_returned(
+            action_returned.replace("operation=open-file-row", "operation=select-element"), expected_name
+        ))
+
+        expected_path = Path("/tmp/Dialog Files Ω/Selected Ω.pfproj")
+        with patch.object(native_dialog, "run_direct_ax", return_value=(0, action_returned, "")) as select:
+            result = native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        self.assertEqual(action_returned, result)
+        select.assert_called_once()
+
     def test_open_selection_waits_only_while_the_exact_file_row_is_absent(self) -> None:
         no_row = (
             "DIRECT_AX_RESULT status=control-selection-error; operation=select-element; role=AXRow/AXCell; "
