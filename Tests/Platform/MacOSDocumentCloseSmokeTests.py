@@ -90,6 +90,17 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
                 "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT; stable_seconds=1.5", 4
             )
 
+    def test_camera_input_uses_only_the_visible_intersection_of_a_detached_image(self) -> None:
+        minimum, maximum = scene_viewport_smoke.visible_camera_region((832.2, 425.0), (1274.8, 602.0), (1024, 768))
+        self.assertAlmostEqual(minimum[0], 856.2)
+        self.assertAlmostEqual(minimum[1], 449.0)
+        self.assertAlmostEqual(maximum[0], 1000.0)
+        self.assertAlmostEqual(maximum[1], 578.0)
+        self.assertLessEqual(maximum[0], 1024.0)
+        self.assertLessEqual(maximum[1], 768.0)
+        with self.assertRaisesRegex(ValueError, "no usable visible image area"):
+            scene_viewport_smoke.visible_camera_region((1100.0, 425.0), (1274.8, 602.0), (1024, 768))
+
 
 class DirtyCloseProtocolTests(unittest.TestCase):
     def setUp(self) -> None:

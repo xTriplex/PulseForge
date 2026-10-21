@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -61,9 +62,38 @@ def is_fresh_geometry_sample(line: str | None, previous_sample: int) -> bool:
     return sample > previous_sample
 
 
-def screenshot(filename: str, checkpoint: str) -> None:
+def screenshot(filename: str, checkpoint: str) -> tuple[int, int] | None:
     result = capture_screenshot(filename)
     print(f"MACOS_SCENE_VIEWPORT_SCREENSHOT={checkpoint}; {result}")
+    if not result.startswith("CAPTURED;") or "path=" not in result:
+        return None
+    screenshot_path = Path(result.rsplit("path=", 1)[1])
+    try:
+        with screenshot_path.open("rb") as image:
+            header = image.read(24)
+    except OSError:
+        return None
+    if len(header) != 24 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+        return None
+    return struct.unpack(">II", header[16:24])
+
+
+def visible_camera_region(
+    image_minimum: tuple[float, float],
+    image_maximum: tuple[float, float],
+    display_size: tuple[int, int],
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    width, height = display_size
+    visible_minimum = (max(0.0, image_minimum[0]), max(0.0, image_minimum[1]))
+    visible_maximum = (min(float(width), image_maximum[0]), min(float(height), image_maximum[1]))
+    minimum = (visible_minimum[0] + 24.0, visible_minimum[1] + 24.0)
+    maximum = (visible_maximum[0] - 24.0, visible_maximum[1] - 24.0)
+    if maximum[0] - minimum[0] < 80.0 or maximum[1] - minimum[1] < 80.0:
+        raise ValueError(
+            f"detached viewport has no usable visible image area; image={image_minimum}..{image_maximum}; "
+            f"display=0,0,{width},{height}; inset_region={minimum}..{maximum}"
+        )
+    return minimum, maximum
 
 
 def remove_root(root: Path, parent: Path) -> str | None:
@@ -216,7 +246,9 @@ def main() -> int:
         detached = marker_fields(detached_line, DETACHED)
         if detached.get("owner_viewport") == initial.get("owner_viewport") or detached.get("owner_window") == initial.get("owner_window"):
             raise RuntimeError("detached Scene Viewport did not acquire a distinct native owner")
-        screenshot("macos-scene-viewport-checkpoint-detached.png", "detached-native-window")
+        display_size = screenshot("macos-scene-viewport-checkpoint-detached.png", "detached-native-window")
+        if display_size is None:
+            raise RuntimeError("could not determine the hosted display bounds from the detached-window screenshot")
 
         ax_code, ax_output, ax_error = run_direct_ax(
             process.pid, operation="activate-window", window_title="Scene Viewport", timeout=min(10.0, deadline - time.monotonic())
@@ -256,10 +288,15 @@ def main() -> int:
         if not (native_x <= image_min_x < image_max_x <= native_x + native_width and
                 native_y <= image_min_y < image_max_y <= native_y + native_height):
             raise RuntimeError("fresh Scene Viewport image geometry is outside its focused native owner")
-        image_center_x = (image_min_x + image_max_x) * 0.5
-        image_center_y = (image_min_y + image_max_y) * 0.5
-        if image_max_x - image_min_x < 80 or image_max_y - image_min_y < 80:
-            raise RuntimeError("detached Scene Viewport image is too small for a bounded camera gesture")
+        visible_minimum, visible_maximum = visible_camera_region(
+            (image_min_x, image_min_y), (image_max_x, image_max_y), display_size
+        )
+        image_center_x = (visible_minimum[0] + visible_maximum[0]) * 0.5
+        image_center_y = (visible_minimum[1] + visible_maximum[1]) * 0.5
+        print(f"MACOS_SCENE_VIEWPORT_VISIBLE_INPUT_REGION=display={display_size}; "
+              f"image={image_min_x:.1f},{image_min_y:.1f}..{image_max_x:.1f},{image_max_y:.1f}; "
+              f"usable={visible_minimum[0]:.1f},{visible_minimum[1]:.1f}.."
+              f"{visible_maximum[0]:.1f},{visible_maximum[1]:.1f}")
 
         press_id = uuid.uuid4().hex
         code, stdout, stderr = run_bounded_command(
@@ -273,8 +310,8 @@ def main() -> int:
             raise RuntimeError("the intended right-button press was not posted")
         wait_for(CAPTURED, "camera capture started on the detached native owner")
 
-        end_camera_x = min(image_max_x - 30.0, image_center_x + 90.0)
-        end_camera_y = min(image_max_y - 30.0, image_center_y + 55.0)
+        end_camera_x = min(visible_maximum[0] - 8.0, image_center_x + 70.0)
+        end_camera_y = min(visible_maximum[1] - 8.0, image_center_y + 45.0)
         if (end_camera_x, end_camera_y) == (image_center_x, image_center_y):
             raise RuntimeError("detached viewport geometry did not provide a camera movement path")
         move_id = uuid.uuid4().hex
