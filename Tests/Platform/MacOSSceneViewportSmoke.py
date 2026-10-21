@@ -365,7 +365,12 @@ def main() -> int:
                 if failure:
                     raise RuntimeError(f"editor fixture failed: {failure}")
                 if OBSERVATION_EXPIRED in capture.markers:
-                    raise TimeoutError(f"editor fixture observation channel expired: {capture.marker_lines.get(OBSERVATION_EXPIRED)}")
+                    latest_state = capture.marker_lines.get(STATE, "<no state observation>")
+                    raise TimeoutError(
+                        f"editor fixture observation channel expired while waiting for {label}; "
+                        f"after_sequence={after_sequence}; latest_state={latest_state}; "
+                        f"expiration={capture.marker_lines.get(OBSERVATION_EXPIRED)}"
+                    )
                 if process.poll() is not None:
                     raise RuntimeError(f"editor exited with status {process.returncode} before {label}")
                 capture.finished.wait(timeout=min(0.1, max(0.0, deadline - time.monotonic())))

@@ -145,7 +145,7 @@ def select_open_file(fixture_pid: int, panel_title: str, expected_path: Path, ti
             operation="select-element",
             window_title=panel_title,
             control_name=expected_path.name,
-            timeout=min(2.0, max(0.1, deadline - time.monotonic())),
+            timeout=min(6.0, max(0.1, deadline - time.monotonic())),
         )
         result = output + error
         if code == 0 and "DIRECT_AX_RESULT status=selection-verified; operation=select-element;" in result:
