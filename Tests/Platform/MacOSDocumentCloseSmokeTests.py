@@ -132,6 +132,21 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
                 [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}],
             )
 
+    def test_focus_reacquisition_target_stays_on_the_visible_display(self) -> None:
+        display, minimum, maximum, point = scene_viewport_smoke.visible_camera_target(
+            (832.2, 425.0),
+            (1274.8, 602.0),
+            [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}],
+        )
+        self.assertEqual(display["id"], 1)
+        self.assertGreaterEqual(point[0], minimum[0])
+        self.assertLessEqual(point[0], maximum[0])
+        self.assertGreaterEqual(point[1], minimum[1])
+        self.assertLessEqual(point[1], maximum[1])
+        self.assertLessEqual(point[0], 1024.0)
+        self.assertLessEqual(point[1], 768.0)
+        self.assertNotEqual(point, ((832.2 + 1274.8) * 0.5, (425.0 + 602.0) * 0.5))
+
     def test_native_geometry_keeps_two_x_backing_scale_in_input_coordinates(self) -> None:
         display, minimum, maximum = scene_viewport_smoke.visible_camera_region(
             (100.0, 120.0), (500.0, 420.0),

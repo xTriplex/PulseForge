@@ -122,6 +122,16 @@ def visible_camera_region(
     return display, minimum, maximum
 
 
+def visible_camera_target(
+    image_minimum: tuple[float, float],
+    image_maximum: tuple[float, float],
+    displays: list[dict[str, float | int | str]],
+) -> tuple[dict[str, float | int | str], tuple[float, float], tuple[float, float], tuple[float, float]]:
+    display, minimum, maximum = visible_camera_region(image_minimum, image_maximum, displays)
+    center = ((minimum[0] + maximum[0]) * 0.5, (minimum[1] + maximum[1]) * 0.5)
+    return display, minimum, maximum, center
+
+
 def read_native_displays(driver: Path, timeout: float) -> list[dict[str, float | int | str]]:
     code, stdout, stderr = run_bounded_command([str(driver), "display-geometry"], timeout=timeout)
     prefix = "SCENE_VIEWPORT_DISPLAY_GEOMETRY="
@@ -359,11 +369,10 @@ def main() -> int:
         if not (native_x <= image_min_x < image_max_x <= native_x + native_width and
                 native_y <= image_min_y < image_max_y <= native_y + native_height):
             raise RuntimeError("fresh Scene Viewport image geometry is outside its focused native owner")
-        selected_display, visible_minimum, visible_maximum = visible_camera_region(
+        selected_display, visible_minimum, visible_maximum, image_center = visible_camera_target(
             (image_min_x, image_min_y), (image_max_x, image_max_y), displays
         )
-        image_center_x = (visible_minimum[0] + visible_maximum[0]) * 0.5
-        image_center_y = (visible_minimum[1] + visible_maximum[1]) * 0.5
+        image_center_x, image_center_y = image_center
         print(f"MACOS_SCENE_VIEWPORT_VISIBLE_INPUT_REGION=display_id={selected_display['id']}; "
               f"coordinate_space={selected_display['coordinate_space']!r}; origin={selected_display['origin']!r}; "
               f"backing_scale={selected_display['backing_scale']}; scale_applied={selected_display['scale_applied']}; "
@@ -532,10 +541,23 @@ def main() -> int:
         activation_sample = int(activation_state["sample"])
         image_min = coordinate(activation_state, "image_min", 2)
         image_max = coordinate(activation_state, "image_max", 2)
-        reacquire_x = (image_min[0] + image_max[0]) * 0.5
-        reacquire_y = (image_min[1] + image_max[1]) * 0.5
         if image_max[0] <= image_min[0] or image_max[1] <= image_min[1]:
             raise RuntimeError("detached Scene Viewport had no usable image region after AX activation")
+        reacquire_displays = read_native_displays(
+            driver, timeout=min(5.0, max(0.1, deadline - time.monotonic()))
+        )
+        reacquire_display, reacquire_minimum, reacquire_maximum, reacquire_point = visible_camera_target(
+            image_min, image_max, reacquire_displays
+        )
+        reacquire_x, reacquire_y = reacquire_point
+        print(f"MACOS_SCENE_VIEWPORT_REACQUIRE_VISIBLE_REGION=display_id={reacquire_display['id']}; "
+              f"coordinate_space={reacquire_display['coordinate_space']!r}; "
+              f"bounds={reacquire_display['x']},{reacquire_display['y']},"
+              f"{reacquire_display['width']},{reacquire_display['height']}; "
+              f"image={image_min[0]:.1f},{image_min[1]:.1f}..{image_max[0]:.1f},{image_max[1]:.1f}; "
+              f"usable={reacquire_minimum[0]:.1f},{reacquire_minimum[1]:.1f}.."
+              f"{reacquire_maximum[0]:.1f},{reacquire_maximum[1]:.1f}; "
+              f"point={reacquire_x:.1f},{reacquire_y:.1f}")
         click_id = uuid.uuid4().hex
         code, stdout, stderr = run_bounded_command(
             [str(driver), "click-left", str(process.pid), click_id, str(reacquire_x), str(reacquire_y)],
