@@ -60,6 +60,9 @@ def marker(kind: str, **fields: str) -> dict[str, str]:
 
 
 class SceneViewportSmokeProtocolTests(unittest.TestCase):
+    def test_capture_reader_retains_the_reattached_camera_input_marker(self) -> None:
+        self.assertIn(scene_viewport_smoke.REATTACHED_INPUT, scene_viewport_smoke.EVIDENCE_MARKERS)
+
     def test_focus_loss_activation_targets_and_verifies_the_main_editor_window(self) -> None:
         output = (
             "DIRECT_AX_RESULT status=window-focused; pid=4321; target_title=EditorWorkflowOverview.scene - PulseForge Editor; "
@@ -436,6 +439,15 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertAlmostEqual(select.call_args.kwargs["timeout"], 4.0, places=3)
 
         with patch.object(native_dialog, "run_direct_ax", return_value=(124, "DIRECT_AX_RESULT status=timeout", "")) as select:
+            with self.assertRaisesRegex(RuntimeError, "selection was not confirmed"):
+                native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        select.assert_called_once()
+
+        unchanged_selection = (
+            "DIRECT_AX_RESULT status=selection-error; operation=select-element; "
+            "role=AXTextField; name=Example Ω.scene; ax_error=0; selected=false"
+        )
+        with patch.object(native_dialog, "run_direct_ax", return_value=(12, unchanged_selection, "")) as select:
             with self.assertRaisesRegex(RuntimeError, "selection was not confirmed"):
                 native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
         select.assert_called_once()

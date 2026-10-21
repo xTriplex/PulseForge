@@ -171,11 +171,13 @@ def select_open_file(fixture_pid: int, panel_title: str, expected_path: Path, ti
         )
         result = output + error
         stage_lines = [line for line in result.splitlines() if line.startswith("DIRECT_AX_SELECT_STAGE ")]
+        target_line = next((line for line in result.splitlines() if line.startswith("DIRECT_AX_SELECT_TARGET ")), "none")
         print(
             f"NFD_OPEN_FILE_SELECT_QUERY=attempt={attempts}; exit_code={code}; "
             f"elapsed_seconds={time.monotonic() - query_started:.3f}; "
             f"client_started={any(line.startswith('DIRECT_AX_CLIENT ') for line in result.splitlines())}; "
             f"last_stage={stage_lines[-1] if stage_lines else 'none'}; "
+            f"target_info={target_line}; "
             f"dispatch_attempted={'DIRECT_AX_DISPATCH attempted=true' in result}; "
             f"result={next((line for line in result.splitlines() if line.startswith('DIRECT_AX_RESULT ')), 'none')}",
             flush=True,

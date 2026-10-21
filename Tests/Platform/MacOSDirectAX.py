@@ -590,6 +590,45 @@ if operation == "press-control" || operation == "set-value" || operation == "set
     }
     if operation == "select-element" {
         let role = string(control, "AXRole") ?? ""
+        var rawAttributeNames: CFArray?
+        let attributeNamesError = AXUIElementCopyAttributeNames(control, &rawAttributeNames)
+        var rawActions: CFArray?
+        let actionsError = AXUIElementCopyActionNames(control, &rawActions)
+        var selectedSettable = DarwinBoolean(false)
+        let selectedSettableError = AXUIElementIsAttributeSettable(control, "AXSelected" as CFString, &selectedSettable)
+        var parentSummary: [String] = []
+        var parentIndex = controlNode.parent
+        while let index = parentIndex, parentSummary.count < 6 {
+            let parent = descendants[index]
+            let parentRole = string(parent.element, "AXRole") ?? "<unavailable>"
+            let parentName = titleOrDescription(parent.element)
+            parentSummary.append("\(parentRole):\(parentName)")
+            parentIndex = parent.parent
+        }
+        let browser = descendants.first { string($0.element, "AXRole") == "AXBrowser" }?.element
+        let browserSelectedSettable: String
+        var browserSelectedChildren: String = "<unavailable>"
+        if let browser {
+            var settable = DarwinBoolean(false)
+            let settableError = AXUIElementIsAttributeSettable(browser, "AXSelectedChildren" as CFString, &settable)
+            var rawSelectedChildren: CFTypeRef?
+            let selectedChildrenError = AXUIElementCopyAttributeValue(browser, "AXSelectedChildren" as CFString, &rawSelectedChildren)
+            if selectedChildrenError == .success {
+                browserSelectedChildren = String(describing: rawSelectedChildren)
+            } else {
+                browserSelectedChildren = "AXError:\(selectedChildrenError.rawValue)"
+            }
+            browserSelectedSettable = "\(settableError.rawValue):\(settable.boolValue)"
+        } else {
+            browserSelectedSettable = "unavailable"
+        }
+        print("DIRECT_AX_SELECT_TARGET role=\(role); name=\(titleOrDescription(control)); " +
+              "attributes_error=\(attributeNamesError.rawValue); attributes=\(rawAttributeNames as? [String] ?? []); " +
+              "actions_error=\(actionsError.rawValue); actions=\(rawActions as? [String] ?? []); " +
+              "selected=\(described(control, "AXSelected")); selected_settable=\(selectedSettableError.rawValue):\(selectedSettable.boolValue); " +
+              "parents=\(parentSummary); browser_selected_children=\(browserSelectedChildren); " +
+              "browser_selected_children_settable=\(browserSelectedSettable)")
+        fflush(stdout)
         AXUIElementSetMessagingTimeout(control, 1.0)
         let selectError = AXUIElementSetAttributeValue(control, "AXSelected" as CFString, kCFBooleanTrue)
         let selected = (value(control, "AXSelected") as? Bool) ?? false
