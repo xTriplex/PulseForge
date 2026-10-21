@@ -87,7 +87,7 @@ namespace
 				{
 					auto& App = PulseForge::Application::Get();
 					m_RetirementWindow = PulseForge::Window::Create(PulseForge::WindowProps("PulseForge legacy retirement fixture", 640,
-						480, PulseForge::EWindowStyle::Default, PulseForge::EWindowClientAPI::None));
+						480, PulseForge::EWindowStyle::Default, PulseForge::EWindowClientAPI::Vulkan));
 					if (!m_RetirementWindow)
 						throw std::runtime_error("Could not create the secondary window for legacy retirement validation");
 					auto PresentationTarget = App.CreatePlatformPresentationTarget(m_RetirementWindow->GetNativeWindow());

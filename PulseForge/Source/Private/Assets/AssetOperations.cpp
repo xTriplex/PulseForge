@@ -210,6 +210,22 @@ namespace PulseForge
 			return LeftComponent == Left.end() && RightComponent == Right.end();
 		}
 
+		bool IsCaseOnlyFilenameAlias(const FilesystemPath& Parent, const FilesystemPath& SourceName, const FilesystemPath& DestinationName)
+		{
+			if (SourceName == DestinationName) return false;
+
+			bool HasSourceSpelling = false;
+			bool HasDestinationSpelling = false;
+			std::error_code Error;
+			for (std::filesystem::directory_iterator Iterator(Parent, Error), End; !Error && Iterator != End; Iterator.increment(Error))
+			{
+				const FilesystemPath Name = Iterator->path().filename();
+				HasSourceSpelling = HasSourceSpelling || Name == SourceName;
+				HasDestinationSpelling = HasDestinationSpelling || Name == DestinationName;
+			}
+			return !Error && HasSourceSpelling && !HasDestinationSpelling;
+		}
+
 		bool IsPathWithin(const FilesystemPath& Directory, const FilesystemPath& Path)
 		{
 			auto DirectoryComponent = Directory.begin();
@@ -1204,9 +1220,12 @@ namespace PulseForge
 		if (!Destination)
 		{
 			if (Destination.error().Code != AssetOperationErrorCode::DestinationExists ||
-				!AreCaseInsensitivePathComponentsEqual(SourcePath.parent_path(), DestinationPath.parent_path()) ||
-				!AreCaseInsensitivePathComponentsEqual(SourcePath, DestinationPath) ||
-				SourcePath.filename() == DestinationPath.filename())
+				!(AreCaseInsensitivePathComponentsEqual(SourcePath.parent_path(), DestinationPath.parent_path()) &&
+					AreCaseInsensitivePathComponentsEqual(SourcePath, DestinationPath) &&
+					SourcePath.filename() != DestinationPath.filename()) &&
+					!(SourcePath.parent_path() == DestinationPath.parent_path() &&
+						IsCaseOnlyFilenameAlias(
+							Project->Root / SourcePath.parent_path(), SourcePath.filename(), DestinationPath.filename())))
 			{
 				return std::unexpected(Destination.error());
 			}

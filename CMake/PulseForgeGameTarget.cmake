@@ -1,4 +1,9 @@
 add_executable(PulseForgeGame PulseForgeGame/Source/Private/Client/PulseForgeGame.cpp)
+if(PULSEFORGE_PLATFORM_MACOS)
+	set_target_properties(PulseForgeGame PROPERTIES
+		MACOSX_BUNDLE TRUE
+		MACOSX_BUNDLE_GUI_IDENTIFIER org.pulseforge.player)
+endif()
 target_include_directories(PulseForgeGame PRIVATE PulseForgeGame/Source/Public)
 target_compile_definitions(PulseForgeGame PRIVATE ${PULSEFORGE_PLATFORM_COMPILE_DEFINITION} "PF_SAMPLE_SHADER_DIRECTORY=\"Shaders\"")
 if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "OpenGL")

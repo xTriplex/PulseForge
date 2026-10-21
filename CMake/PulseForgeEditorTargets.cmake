@@ -27,9 +27,14 @@ if(PULSEFORGE_BUILD_EDITOR)
 	if(WIN32)
 		target_sources(PulseForgeEditorUI PRIVATE
 			PulseForgeEditor/Source/Private/Platform/Windows/EditorPlatformServices.cpp)
-	else()
+	elseif(PULSEFORGE_PLATFORM_LINUX)
 		target_sources(PulseForgeEditorUI PRIVATE
 			PulseForgeEditor/Source/Private/Platform/Linux/EditorPlatformServices.cpp)
+	elseif(PULSEFORGE_PLATFORM_MACOS)
+		target_sources(PulseForgeEditorUI PRIVATE
+			PulseForgeEditor/Source/Private/Platform/MacOS/EditorPlatformServices.cpp)
+	else()
+		message(FATAL_ERROR "No EditorPlatformServices implementation is available for this target platform.")
 	endif()
 	target_include_directories(PulseForgeEditorUI PUBLIC
 		PulseForgeEditor/Source/Public
@@ -66,6 +71,14 @@ if(PULSEFORGE_BUILD_EDITOR)
 			PulseForgeEditor/Source/Private/EditorApplication.cpp
 		)
 	endif()
+	if(PULSEFORGE_PLATFORM_MACOS)
+		set_target_properties(PulseForgeEditor PROPERTIES
+			MACOSX_BUNDLE TRUE
+			MACOSX_BUNDLE_GUI_IDENTIFIER org.pulseforge.editor)
+		target_sources(PulseForgeEditor PRIVATE
+			$<$<CONFIG:Debug>:PulseForgeEditor/Source/Private/Platform/MacOS/MacOSDocumentCloseEventObserver.m>)
+		target_link_libraries(PulseForgeEditor PRIVATE "-framework AppKit")
+	endif()
 	if(WIN32)
 		get_target_property(PULSEFORGE_EDITOR_GUI_SUBSYSTEM PulseForgeEditor WIN32_EXECUTABLE)
 		if(NOT PULSEFORGE_EDITOR_GUI_SUBSYSTEM)
@@ -88,7 +101,8 @@ if(PULSEFORGE_BUILD_EDITOR)
 	if(WIN32)
 		target_link_libraries(PulseForgeEditor PRIVATE shell32 ole32 dwmapi)
 	endif()
-	pulseforge_attach_asset_deployment(PulseForgeEditor "$<TARGET_FILE_DIR:PulseForgeEditor>/EditorAssets"
+	pulseforge_runtime_resource_directory(PulseForgeEditor PULSEFORGE_EDITOR_RESOURCE_DIRECTORY)
+	pulseforge_attach_asset_deployment(PulseForgeEditor "${PULSEFORGE_EDITOR_RESOURCE_DIRECTORY}/EditorAssets"
 		DIRECTORIES
 			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Fonts" "Fonts"
 			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Icons" "Icons"

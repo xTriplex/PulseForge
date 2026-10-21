@@ -16,11 +16,11 @@ namespace
 {
 	constexpr size_t LabelBufferSize = 512;
 
-	std::expected<std::filesystem::path, std::string> GetExecutableDirectory()
+	std::expected<std::filesystem::path, std::string> GetResourceDirectory()
 	{
-		auto ExecutablePath = PulseForge::Platform::GetExecutablePath();
-		if (!ExecutablePath) return std::unexpected(ExecutablePath.error().Message);
-		return ExecutablePath->parent_path();
+		auto ResourceDirectory = PulseForge::Platform::GetResourceDirectory();
+		if (!ResourceDirectory) return std::unexpected(ResourceDirectory.error().Message);
+		return *ResourceDirectory;
 	}
 
 	std::string PathToUtf8(const std::filesystem::path& Path)
@@ -184,10 +184,8 @@ namespace PulseForgeEditor
 		static const std::array<ImWchar, EditorTextGlyphRanges.size()> TextRanges = BuildImGuiTextRanges();
 
 		std::filesystem::path AssetDirectory;
-		if (auto ExecutableDirectory = GetExecutableDirectory(); ExecutableDirectory)
-			AssetDirectory = *ExecutableDirectory / "EditorAssets";
-		else
-			PF_WARN("{}; using Dear ImGui's built-in editor font", ExecutableDirectory.error());
+		if (auto ResourceDirectory = GetResourceDirectory(); ResourceDirectory) AssetDirectory = *ResourceDirectory / "EditorAssets";
+		else PF_WARN("{}; using Dear ImGui's built-in editor font", ResourceDirectory.error());
 
 		const auto FontPath = [&AssetDirectory](EditorFontRole Role) -> std::filesystem::path
 		{

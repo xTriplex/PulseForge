@@ -9,6 +9,8 @@ namespace PulseForge
 	class GLFWWindow : public Window
 	{
 	public:
+		using VulkanLoaderProcAddress = void (*)();
+
 		GLFWWindow(const WindowProps& Props);
 
 		virtual ~GLFWWindow();
@@ -19,6 +21,7 @@ namespace PulseForge
 		virtual unsigned int GetWidth() const override { return WindowData.Width; }
 		virtual unsigned int GetHeight() const override { return WindowData.Height; }
 		virtual std::pair<unsigned int, unsigned int> GetFramebufferSize() const override;
+		virtual std::pair<float, float> GetContentScale() const override;
 
 		virtual void SetEventCallback(const EventCallbackFn& Callback) override
 		{
@@ -26,6 +29,7 @@ namespace PulseForge
 		}
 
 		virtual void* GetNativeWindow() const override { return m_NativeWindow; }
+		[[nodiscard]] static VulkanLoaderProcAddress GetVulkanLoaderProcAddress() noexcept;
 
 	private:
 		virtual void Init(const WindowProps& Props);

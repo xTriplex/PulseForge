@@ -58,9 +58,17 @@ namespace
 				auto& App = PulseForge::Application::Get();
 				m_NativeWindow = static_cast<GLFWwindow*>(App.GetWindow().GetNativeWindow());
 				if (!m_NativeWindow) throw std::runtime_error("The application did not expose a GLFW native window");
+				const auto LogicalExtent = std::pair{ App.GetWindow().GetWidth(), App.GetWindow().GetHeight() };
+				const auto ContentScale = App.GetWindow().GetContentScale();
+				m_InitialLogicalExtent = LogicalExtent;
 				m_InitialExtent = App.GetWindow().GetFramebufferSize();
+				if (LogicalExtent.first == 0 || LogicalExtent.second == 0 || !std::isfinite(ContentScale.first) ||
+					!std::isfinite(ContentScale.second) || ContentScale.first <= 0.0f || ContentScale.second <= 0.0f)
+					throw std::runtime_error("The macOS native window reported invalid logical dimensions or backing scale");
 				if (m_InitialExtent.first == 0 || m_InitialExtent.second == 0)
 					throw std::runtime_error("The Vulkan presentation surface has a zero initial framebuffer extent");
+				PF_INFO("MACOS_RENDERER_WINDOW_SCALE=PASS; logical={}x{}; framebuffer={}x{}; content_scale={}x{}", LogicalExtent.first,
+					LogicalExtent.second, m_InitialExtent.first, m_InitialExtent.second, ContentScale.first, ContentScale.second);
 
 				auto OpenedProject = PulseForge::Project::Open(std::filesystem::path(PF_MACOS_RENDERER_PROJECT_FILE));
 				if (!OpenedProject) throw std::runtime_error("Could not open the PBR validation project: " + OpenedProject.error().Message);
@@ -193,10 +201,21 @@ namespace
 			{
 				const auto Extent = App.GetWindow().GetFramebufferSize();
 				if (Extent.first == 0 || Extent.second == 0) return;
-				if (Extent == m_InitialExtent) return;
+				const auto LogicalExtent = std::pair{ App.GetWindow().GetWidth(), App.GetWindow().GetHeight() };
+				if (LogicalExtent.first == 0 || LogicalExtent.second == 0) return;
+				if (Extent == m_InitialExtent || LogicalExtent == m_InitialLogicalExtent) return;
+				const auto ContentScale = App.GetWindow().GetContentScale();
+				if (!std::isfinite(ContentScale.first) || !std::isfinite(ContentScale.second) || ContentScale.first <= 0.0f ||
+					ContentScale.second <= 0.0f)
+				{
+					Fail("The macOS native window reported an invalid backing scale after resize");
+					return;
+				}
 				m_ResizedExtent = Extent;
 				CreateOutputTarget(Extent.first, Extent.second);
-				PF_INFO("MACOS_RENDERER_NATIVE_RESIZE=PASS; framebuffer={}x{}; requesting recreated scene targets", Extent.first, Extent.second);
+				PF_INFO("MACOS_RENDERER_NATIVE_RESIZE=PASS; logical={}x{}; framebuffer={}x{}; content_scale={}x{}; requesting recreated "
+						"scene targets",
+					LogicalExtent.first, LogicalExtent.second, Extent.first, Extent.second, ContentScale.first, ContentScale.second);
 				m_Phase = ValidationPhase::ResizedFrame;
 			}
 
@@ -492,6 +511,7 @@ namespace
 		PulseForge::TextureReadback m_CapturedColor;
 		PulseForge::TextureReadback m_ResizedColorReadback;
 		std::pair<unsigned int, unsigned int> m_InitialExtent{};
+		std::pair<unsigned int, unsigned int> m_InitialLogicalExtent{};
 		std::pair<unsigned int, unsigned int> m_ResizedExtent{};
 		std::pair<uint32_t, uint32_t> m_CapturedHdrExtent{};
 		Clock::time_point m_StartedAt = Clock::now();

@@ -58,6 +58,18 @@ namespace PulseForge::Platform
 		return std::unexpected(PathError{ "The current executable path exceeds the Windows path limit" });
 	}
 
+	PathResult GetResourceDirectory()
+	{
+		auto ExecutablePath = GetExecutablePath();
+		if (!ExecutablePath) return std::unexpected(ExecutablePath.error());
+
+		const std::filesystem::path ResourceDirectory = ExecutablePath->parent_path();
+		std::error_code Error;
+		if (ResourceDirectory.empty() || !std::filesystem::is_directory(ResourceDirectory, Error) || Error)
+			return std::unexpected(PathError{ "Could not resolve the executable's resource directory" });
+		return ResourceDirectory;
+	}
+
 	PathResult GetUserDataDirectory()
 	{
 		PWSTR RawPath = nullptr;

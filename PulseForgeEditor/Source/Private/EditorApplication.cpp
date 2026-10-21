@@ -66,6 +66,12 @@
 #include "Editor/EditorDocumentManager.h"
 #include "Editor/EditorDocumentEditorRegistry.h"
 #include "Editor/EditorDocumentHostTestEditor.h"
+#if defined(_DEBUG) || defined(PF_DEBUG)
+#include "Editor/EditorDebugAcceptanceCoordinators.h"
+#if defined(__APPLE__)
+#include "Editor/MacOSDocumentCloseEventObserver.h"
+#endif
+#endif
 #include "Editor/EditorDocumentCloseBatch.h"
 #include "Editor/EditorNativeWindowBoundsPolicy.h"
 #include "Editor/EditorDocumentHostPolicy.h"
@@ -120,6 +126,22 @@ namespace
 {
 	using EditorJson = nlohmann::ordered_json;
 
+#if defined(_DEBUG) || defined(PF_DEBUG)
+	class EditorLayer;
+
+	struct DocumentCloseMouseButtonCallbackRoute
+	{
+		EditorLayer* Owner = nullptr;
+		GLFWmousebuttonfun Previous = nullptr;
+	};
+
+	std::unordered_map<GLFWwindow*, DocumentCloseMouseButtonCallbackRoute>& GetDocumentCloseMouseButtonCallbackRoutes()
+	{
+		static std::unordered_map<GLFWwindow*, DocumentCloseMouseButtonCallbackRoute> Routes;
+		return Routes;
+	}
+#endif
+
 	PulseForge::OutputColorEncoding GetEditorUiColorEncoding(PulseForge::OutputColorEncoding OutputEncoding) noexcept
 	{
 #ifdef PF_EDITOR_RENDERER_OPENGL
@@ -140,18 +162,13 @@ namespace
 		double BestArea = 0.0;
 		for (int Index = 0; Monitors && Index < MonitorCount; ++Index)
 		{
-			int MonitorX = 0;
-			int MonitorY = 0;
-			glfwGetMonitorPos(Monitors[Index], &MonitorX, &MonitorY);
-			const GLFWvidmode* Mode = glfwGetVideoMode(Monitors[Index]);
-			if (!Mode) continue;
-			const double IntersectionWidth =
-				(std::max)(0.0, (std::min)(static_cast<double>(X + Width), static_cast<double>(MonitorX + Mode->width)) -
-									(std::max)(static_cast<double>(X), static_cast<double>(MonitorX)));
-			const double IntersectionHeight =
-				(std::max)(0.0, (std::min)(static_cast<double>(Y + Height), static_cast<double>(MonitorY + Mode->height)) -
-									(std::max)(static_cast<double>(Y), static_cast<double>(MonitorY)));
-			const double Area = IntersectionWidth * IntersectionHeight;
+			int WorkX = 0;
+			int WorkY = 0;
+			int WorkWidth = 0;
+			int WorkHeight = 0;
+			glfwGetMonitorWorkarea(Monitors[Index], &WorkX, &WorkY, &WorkWidth, &WorkHeight);
+			const double Area = PulseForgeEditor::NativeWindowWorkAreaIntersectionArea(X, Y, Width, Height,
+				{ static_cast<float>(WorkX), static_cast<float>(WorkY), static_cast<float>(WorkWidth), static_cast<float>(WorkHeight) });
 			if (Area > BestArea)
 			{
 				BestArea = Area;
@@ -211,6 +228,7 @@ namespace
 			glfwGetMonitorWorkarea(Monitor, &WorkX, &WorkY, &WorkWidth, &WorkHeight);
 			if (WorkWidth <= 0 || WorkHeight <= 0)
 			{
+#if !defined(__APPLE__)
 				int MonitorX = 0;
 				int MonitorY = 0;
 				glfwGetMonitorPos(Monitor, &MonitorX, &MonitorY);
@@ -222,6 +240,7 @@ namespace
 					WorkWidth = Mode->width;
 					WorkHeight = Mode->height;
 				}
+#endif
 			}
 			float ScaleX = 1.0f;
 			float ScaleY = 1.0f;
@@ -410,6 +429,7 @@ namespace
 
 		static constexpr size_t DocumentTabTestDropPointsPerPanel = 5;
 		static constexpr size_t DocumentTabRoundTripCycleCount = 3;
+		static constexpr size_t DocumentHostTabReattachTestMaximumFrames = 3600;
 		static constexpr std::array<const char*, 5> DocumentTabTestInvalidDropPanelNames = { "Hierarchy", "Inspector", "Scene Viewport",
 			"Content Browser", "Console" };
 		static constexpr size_t DocumentTabTestConsolePanelIndex = DocumentTabTestInvalidDropPanelNames.size() - 1;
@@ -438,7 +458,11 @@ namespace
 			  m_AssetPreviewStress(std::move(Options.AssetPreviewStressManifest), std::move(Options.AssetPreviewStressBudget)),
 			  m_StartupProjectPath(std::move(Options.ProjectFile)),
 			  m_ProjectOpenRenderTestFile(std::move(Options.ProjectOpenRenderTestFile)),
-			  m_DocumentHostTestFixture(Options.EnableDocumentHostTestFixture),
+			  m_DocumentHostTestFixture(Options.EnableDocumentHostTestFixture
+#if defined(_DEBUG) || defined(PF_DEBUG)
+										|| Options.DocumentHostCloseUiTestScenario.has_value()
+#endif
+					  ),
 			  m_DocumentHostResetLayoutTest(Options.EnableDocumentHostResetLayoutTest),
 			  m_DocumentHostTabTearOffTest(Options.EnableDocumentHostTabTearOffTest),
 			  m_DocumentHostTabReattachTest(Options.EnableDocumentHostTabReattachTest),
@@ -449,11 +473,24 @@ namespace
 			  m_DocumentHostImageAllocationFailureTest(Options.EnableDocumentHostImageAllocationFailureTest)
 		{
 #if defined(_DEBUG) || defined(PF_DEBUG)
+			m_EditorRuntimePlayStopCoordinator =
+				std::make_unique<PulseForgeEditor::Detail::EditorRuntimePlayStopCoordinator>(Options.EnableEditorRuntimePlayStopTest);
+			m_DocumentCloseAcceptance = std::make_unique<PulseForgeEditor::Detail::DocumentCloseAcceptanceCoordinator>(
+				std::move(Options.DocumentHostCloseUiTestScenario), [this](std::string Message) { SetError(std::move(Message)); });
+#if defined(__APPLE__)
+			if (m_DocumentCloseAcceptance->IsEnabled())
+				m_MacOSDocumentCloseEventObserver = PulseForgeCreateMacOSDocumentCloseEventObserver();
+#endif
+
 			if (m_DocumentHostTestFixture)
 			{
 				m_DocumentHostTestEditor = std::make_unique<PulseForgeEditor::Detail::EditorDocumentHostTestEditor>(
 					m_Documents, m_DocumentEditors, m_EditorStyle, [this](std::string Message) { SetError(std::move(Message)); },
-					[this] { return m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{}; });
+					[this] { return m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{}; },
+					[this](std::string_view HostID, int X, int Y, bool Clicked) { ReportDocumentCloseUiAllowClose(HostID, X, Y, Clicked); },
+					[this](std::string_view HostID, int X, int Y, bool Active, bool Hovered, bool Clicked, bool Changed, int Value)
+					{ ReportDocumentCloseUiTextField(HostID, X, Y, Active, Hovered, Clicked, Changed, Value); },
+					m_DocumentCloseAcceptance->IsEnabled());
 				if (auto Result = m_DocumentHostTestEditor->Register(); !Result)
 					PF_ERROR("Could not register the debug document-host fixture editor: {}", Result.error());
 			}
@@ -677,6 +714,10 @@ namespace
 
 		~EditorLayer() override
 		{
+#if (defined(_DEBUG) || defined(PF_DEBUG)) && defined(__APPLE__)
+			PulseForgeDestroyMacOSDocumentCloseEventObserver(m_MacOSDocumentCloseEventObserver);
+			m_MacOSDocumentCloseEventObserver = nullptr;
+#endif
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
 			StopRuntime();
@@ -722,6 +763,11 @@ namespace
 			}
 			m_GlfwBackendActive = true;
 
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			if (m_DocumentCloseAcceptance && m_DocumentCloseAcceptance->IsEnabled())
+				RefreshDocumentCloseMouseButtonObservers();
+#endif
+
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			if (!ImGui_ImplOpenGL3_Init("#version 410"))
 			{
@@ -734,14 +780,14 @@ namespace
 #else
 			m_ImGuiRenderer = std::make_unique<PulseForgeEditor::EditorImGuiRenderer>();
 			auto& Runtime = PulseForge::Application::Get();
-			auto ExecutablePath = PulseForge::Platform::GetExecutablePath();
-			if (!ExecutablePath)
+			auto ResourceDirectory = PulseForge::Platform::GetResourceDirectory();
+			if (!ResourceDirectory)
 			{
 				ShutdownImGui();
 				throw std::runtime_error(
-					"Could not resolve the editor executable path for shader loading: " + ExecutablePath.error().Message);
+					"Could not resolve the editor resource directory for shader loading: " + ResourceDirectory.error().Message);
 			}
-			m_EditorShaderDirectory = ExecutablePath->parent_path() / PF_EDITOR_SHADER_DIRECTORY;
+			m_EditorShaderDirectory = *ResourceDirectory / PF_EDITOR_SHADER_DIRECTORY;
 			if (auto Result = m_ImGuiRenderer->Initialize(Runtime, m_EditorShaderDirectory); !Result)
 			{
 				const std::string Message = "Could not initialize the Vulkan editor UI renderer: " + Result.error();
@@ -845,6 +891,9 @@ namespace
 					SetError(Message);
 				}
 			}
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			AdvanceEditorRuntimePlayStopTest();
+#endif
 			PrepareViewportScene();
 			m_AssetPreviews.PumpUploads();
 		}
@@ -1082,6 +1131,10 @@ namespace
 #endif
 				ImGui::UpdatePlatformWindows();
 				ImGuiPlatformIO& PlatformIO = ImGui::GetPlatformIO();
+#if defined(_DEBUG) || defined(PF_DEBUG)
+				if (m_DocumentCloseAcceptance && m_DocumentCloseAcceptance->IsEnabled())
+					RefreshDocumentCloseMouseButtonObservers();
+#endif
 				for (int Index = 1; Index < PlatformIO.Viewports.Size; ++Index)
 				{
 					ImGuiViewport* Viewport = PlatformIO.Viewports[Index];
@@ -1839,12 +1892,367 @@ namespace
 #endif
 		}
 
+#if defined(_DEBUG) || defined(PF_DEBUG)
+		[[nodiscard]] PulseForgeEditor::Detail::DocumentCloseUiSessionObservation ObserveDocumentCloseUiSession() const
+		{
+			PulseForgeEditor::Detail::DocumentCloseUiSessionObservation Observation;
+			Observation.Pending = m_DocumentCloseRequest.HasPendingRequest();
+			Observation.Error = m_DocumentCloseRequest.GetError();
+			if (!m_DocumentCloseAcceptance || !m_DocumentCloseAcceptance->Identity()) return Observation;
+			const auto& Identity = *m_DocumentCloseAcceptance->Identity();
+			const auto* Session = m_Documents.Find(Identity);
+			Observation.Open = Session != nullptr;
+			Observation.HostSame = Session && Session->HostID == m_DocumentCloseAcceptance->HostID();
+			Observation.Dirty = Session && Session->IsDirty();
+			Observation.HostExists = !m_DocumentCloseAcceptance->HostID().empty() &&
+				m_Documents.FindHost(m_DocumentCloseAcceptance->HostID()) != nullptr;
+			if (m_DocumentHostTestEditor)
+			{
+				Observation.Value = m_DocumentHostTestEditor->GetCurrentValue(Identity).value_or(-1);
+				Observation.Saved = m_DocumentHostTestEditor->GetSavedValue(Identity).value_or(-1);
+			}
+			return Observation;
+		}
+
+		[[nodiscard]] bool IsDocumentCloseUiFixtureIdentity(const PulseForgeEditor::EditorDocumentIdentity& Identity) const noexcept
+		{
+			return m_DocumentCloseAcceptance && m_DocumentCloseAcceptance->IsFixtureIdentity(Identity);
+		}
+
+		[[nodiscard]] bool IsDocumentCloseUiFixtureHost(std::string_view HostID) const noexcept
+		{
+			return m_DocumentCloseAcceptance && m_DocumentCloseAcceptance->IsFixtureHost(HostID);
+		}
+
+		void FailDocumentCloseUiTest(std::string_view Reason)
+		{
+			if (m_DocumentCloseAcceptance) m_DocumentCloseAcceptance->Fail(Reason);
+		}
+
+		void RefreshDocumentCloseMouseButtonObservers()
+		{
+			if (!m_DocumentCloseAcceptance || !m_DocumentCloseAcceptance->IsEnabled()) return;
+			std::unordered_set<GLFWwindow*> LiveWindows;
+			auto& Routes = GetDocumentCloseMouseButtonCallbackRoutes();
+			if (auto* MainWindow = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow()))
+			{
+				LiveWindows.insert(MainWindow);
+				if (!m_DocumentCloseMouseButtonCallbacks.contains(MainWindow))
+				{
+					const auto Previous = glfwSetMouseButtonCallback(MainWindow, &EditorLayer::ObserveDocumentCloseMouseButton);
+					m_DocumentCloseMouseButtonCallbacks.emplace(MainWindow, Previous);
+					Routes[MainWindow] = { this, Previous };
+				}
+			}
+			const ImGuiPlatformIO& PlatformIO = ImGui::GetPlatformIO();
+			for (int Index = 0; Index < PlatformIO.Viewports.Size; ++Index)
+			{
+				const ImGuiViewport* Viewport = PlatformIO.Viewports[Index];
+				GLFWwindow* Window = Viewport ? static_cast<GLFWwindow*>(Viewport->PlatformHandle) : nullptr;
+				if (!Window) continue;
+				LiveWindows.insert(Window);
+				if (!m_DocumentCloseMouseButtonCallbacks.contains(Window))
+				{
+					const auto Previous = glfwSetMouseButtonCallback(Window, &EditorLayer::ObserveDocumentCloseMouseButton);
+					m_DocumentCloseMouseButtonCallbacks.emplace(Window, Previous);
+					Routes[Window] = { this, Previous };
+				}
+			}
+			std::erase_if(m_DocumentCloseMouseButtonCallbacks, [&LiveWindows, &Routes](const auto& Entry) {
+				if (LiveWindows.contains(Entry.first)) return false;
+				Routes.erase(Entry.first);
+				return true;
+			});
+		}
+
+		static void ObserveDocumentCloseMouseButton(GLFWwindow* Window, int Button, int Action, int Modifiers)
+		{
+			auto& Routes = GetDocumentCloseMouseButtonCallbackRoutes();
+			const auto Route = Routes.find(Window);
+			if (Route == Routes.end()) return;
+			EditorLayer* Layer = Route->second.Owner;
+			const GLFWmousebuttonfun Previous = Route->second.Previous;
+			if (Previous) Previous(Window, Button, Action, Modifiers);
+			if (!Layer || ImGui::GetCurrentContext() != Layer->m_Context) return;
+			if (Button != GLFW_MOUSE_BUTTON_LEFT) return;
+			if (!Layer->m_DocumentCloseAcceptance || !Layer->m_DocumentCloseAcceptance->IsEnabled()) return;
+
+			PulseForgeEditor::Detail::DocumentCloseUiMouseButtonObservation Observation;
+			Observation.MainWindow = Window == PulseForge::Application::Get().GetWindow().GetNativeWindow();
+			const ImGuiPlatformIO& PlatformIO = ImGui::GetPlatformIO();
+			for (int Index = 0; Index < PlatformIO.Viewports.Size; ++Index)
+			{
+				const ImGuiViewport* Viewport = PlatformIO.Viewports[Index];
+				if (Viewport && Viewport->PlatformHandle == Window)
+				{
+					Observation.Viewport = Viewport->ID;
+					break;
+				}
+			}
+			Observation.Action = Action == GLFW_PRESS ? PulseForgeEditor::Detail::DocumentCloseUiMouseAction::Press :
+				Action == GLFW_REPEAT ? PulseForgeEditor::Detail::DocumentCloseUiMouseAction::Repeat :
+				PulseForgeEditor::Detail::DocumentCloseUiMouseAction::Release;
+			Observation.NativeWindowIdentity = reinterpret_cast<uintptr_t>(Window);
+			Observation.Modifiers = Modifiers;
+			glfwGetCursorPos(Window, &Observation.LocalX, &Observation.LocalY);
+			Observation.SteadyMilliseconds = std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now().time_since_epoch()).count();
+			Observation.NativeWindowFocused = glfwGetWindowAttrib(Window, GLFW_FOCUSED) == GLFW_TRUE;
+			Observation.NativeWindowHovered = glfwGetWindowAttrib(Window, GLFW_HOVERED) == GLFW_TRUE;
+			Layer->m_DocumentCloseAcceptance->ReportGlfwMouseButton(Observation);
+		}
+
+		void ReportDocumentCloseUiDecisionPointer(std::string_view HostID, std::string_view Choice, bool Hovered, bool Active, bool Clicked,
+			const ImVec2& Minimum, const ImVec2& Maximum)
+		{
+			if (!m_DocumentCloseAcceptance) return;
+			const ImGuiIO& IO = ImGui::GetIO();
+			const ImGuiViewport* WindowViewport = ImGui::GetWindowViewport();
+			PulseForgeEditor::Detail::DocumentCloseUiDecisionPointerObservation Observation;
+			Observation.HostID = HostID;
+			Observation.Choice = Choice;
+			Observation.Pending = m_DocumentCloseRequest.HasPendingRequest();
+			Observation.Hovered = Hovered;
+			Observation.Active = Active;
+			Observation.Clicked = Clicked;
+			Observation.MouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+			Observation.RawMouseDown = IO.MouseDown[ImGuiMouseButton_Left];
+			Observation.MouseClickedEvent = IO.MouseClicked[ImGuiMouseButton_Left];
+			Observation.MouseReleasedEvent = IO.MouseReleased[ImGuiMouseButton_Left];
+			Observation.Frame = ImGui::GetFrameCount();
+			Observation.MinimumX = Minimum.x;
+			Observation.MinimumY = Minimum.y;
+			Observation.MaximumX = Maximum.x;
+			Observation.MaximumY = Maximum.y;
+			Observation.MouseX = IO.MousePos.x;
+			Observation.MouseY = IO.MousePos.y;
+			Observation.WindowViewport = WindowViewport ? static_cast<uint32_t>(WindowViewport->ID) : 0;
+			Observation.MouseViewport = static_cast<uint32_t>(IO.MouseHoveredViewport);
+			if (WindowViewport && WindowViewport->PlatformHandle)
+			{
+				auto* NativeWindow = static_cast<GLFWwindow*>(WindowViewport->PlatformHandle);
+				Observation.NativeWindowFocused = glfwGetWindowAttrib(NativeWindow, GLFW_FOCUSED) == GLFW_TRUE;
+				Observation.NativeWindowHovered = glfwGetWindowAttrib(NativeWindow, GLFW_HOVERED) == GLFW_TRUE;
+			}
+			m_DocumentCloseAcceptance->ReportDecisionPointer(Observation);
+		}
+
+		void ReportDocumentCloseUiTextField(
+			std::string_view HostID, int X, int Y, bool Active, bool Hovered, bool Clicked, bool Changed, int Value)
+		{
+			if (!m_DocumentCloseAcceptance) return;
+			const ImVec2 MousePosition = ImGui::GetIO().MousePos;
+			PulseForgeEditor::Detail::DocumentCloseUiTextObservation Observation;
+			Observation.HostID = HostID;
+			Observation.X = X;
+			Observation.Y = Y;
+			Observation.Active = Active;
+			Observation.Hovered = Hovered;
+			Observation.Clicked = Clicked;
+			Observation.Changed = Changed;
+			Observation.Value = Value;
+			Observation.MouseX = MousePosition.x;
+			Observation.MouseY = MousePosition.y;
+			Observation.Session = ObserveDocumentCloseUiSession();
+			m_DocumentCloseAcceptance->ReportTextField(Observation);
+		}
+
+		[[nodiscard]] bool BeginDocumentCloseUiRequest(std::string_view HostID)
+		{
+			if (!m_DocumentCloseAcceptance) return true;
+			return m_DocumentCloseAcceptance->BeginCloseRequest(
+				HostID, m_DocumentCloseRequest.HasPendingRequest(), m_DocumentCloseRequest.GetDialogHostID());
+		}
+
+		void ReportDocumentCloseUiCleanClose()
+		{
+			if (!m_DocumentCloseAcceptance || !m_DocumentCloseAcceptance->Identity()) return;
+			const auto& Identity = *m_DocumentCloseAcceptance->Identity();
+			const bool IdentityClosed = m_Documents.Find(Identity) == nullptr;
+			const bool HostRemoved = m_DocumentCloseAcceptance->HostID().empty() ||
+				m_Documents.FindHost(m_DocumentCloseAcceptance->HostID()) == nullptr;
+			const int Saved = m_DocumentHostTestEditor
+				? m_DocumentHostTestEditor->GetSavedValue(Identity).value_or(-1)
+				: -1;
+			m_DocumentCloseAcceptance->ReportCleanClose(IdentityClosed, HostRemoved, Saved);
+		}
+
+		void ReportDocumentCloseUiAction(std::string_view Choice, bool Resolved)
+		{
+			if (m_DocumentCloseAcceptance) m_DocumentCloseAcceptance->ReportAction(Choice, Resolved, ObserveDocumentCloseUiSession());
+		}
+
+		void ReportDocumentCloseUiAllowClose(std::string_view HostID, int X, int Y, bool Clicked)
+		{
+			if (m_DocumentCloseAcceptance)
+				m_DocumentCloseAcceptance->ReportAllowClose(HostID, X, Y, Clicked, ObserveDocumentCloseUiSession());
+		}
+
+		void ReportDocumentCloseUiCloseControl(
+			std::string_view HostID, const PulseForgeEditor::EditorDocumentIdentity& Identity, int X, int Y)
+		{
+			if (m_DocumentCloseAcceptance) m_DocumentCloseAcceptance->ReportCloseControl(HostID, Identity, X, Y);
+		}
+
+		void ReportDocumentCloseUiTabInput(std::string_view HostID, const PulseForgeEditor::EditorDocumentIdentity& Identity,
+			bool TabHovered, bool CloseHovered, bool ItemActive, bool MouseClicked, bool Pressed, const ImVec2& Minimum,
+			const ImVec2& Maximum, const ImGuiViewport* Viewport)
+		{
+			if (!m_DocumentCloseAcceptance || !m_DocumentCloseAcceptance->IsFixtureHost(HostID) ||
+				!m_DocumentCloseAcceptance->IsFixtureIdentity(Identity) || !m_DocumentCloseAcceptance->IsAwaitingTabClose())
+				return;
+			const ImGuiIO& IO = ImGui::GetIO();
+			GLFWwindow* NativeWindow = Viewport ? static_cast<GLFWwindow*>(Viewport->PlatformHandle) : nullptr;
+			PulseForgeEditor::Detail::DocumentCloseUiTabInputObservation Observation;
+			Observation.WindowViewport = Viewport ? Viewport->ID : 0;
+			Observation.MouseViewport = IO.MouseHoveredViewport;
+			Observation.MinimumX = static_cast<int>(Minimum.x);
+			Observation.MinimumY = static_cast<int>(Minimum.y);
+			Observation.MaximumX = static_cast<int>(Maximum.x);
+			Observation.MaximumY = static_cast<int>(Maximum.y);
+			Observation.MouseX = static_cast<int>(IO.MousePos.x);
+			Observation.MouseY = static_cast<int>(IO.MousePos.y);
+			Observation.NativeWindowKnown = NativeWindow != nullptr;
+			Observation.NativeWindowFocused = NativeWindow && glfwGetWindowAttrib(NativeWindow, GLFW_FOCUSED) == GLFW_TRUE;
+			Observation.NativeWindowHovered = NativeWindow && glfwGetWindowAttrib(NativeWindow, GLFW_HOVERED) == GLFW_TRUE;
+			Observation.TabHovered = TabHovered;
+			Observation.CloseHovered = CloseHovered;
+			Observation.ItemActive = ItemActive;
+			Observation.MouseDown = IO.MouseDown[ImGuiMouseButton_Left];
+			Observation.MouseClicked = MouseClicked;
+			Observation.MouseReleased = IO.MouseReleased[ImGuiMouseButton_Left];
+			Observation.Pressed = Pressed;
+			m_DocumentCloseAcceptance->ReportTabInput(HostID, Identity, Observation);
+		}
+
+		void EmitDocumentCloseUiPrompt(std::string_view HostID, const ImVec2& Save, const ImVec2& Discard, const ImVec2& Cancel)
+		{
+			if (!m_DocumentCloseAcceptance) return;
+			PulseForgeEditor::Detail::DocumentCloseUiPromptGeometry Geometry{
+				static_cast<int>(Save.x), static_cast<int>(Save.y), static_cast<int>(Discard.x), static_cast<int>(Discard.y),
+				static_cast<int>(Cancel.x), static_cast<int>(Cancel.y) };
+			m_DocumentCloseAcceptance->ReportPrompt(
+				HostID, m_DocumentCloseRequest.HasPendingRequest(), Geometry);
+#if defined(__APPLE__)
+			if (m_MacOSDocumentCloseEventObserver)
+				PulseForgeUpdateMacOSDocumentCloseEventObserver(
+					m_MacOSDocumentCloseEventObserver, m_DocumentCloseAcceptance->PromptGeneration());
+#endif
+		}
+
+		void InitializeDocumentCloseUiFixture()
+		{
+			if (!m_DocumentCloseAcceptance || !m_DocumentCloseAcceptance->IsEnabled() || !m_Project || !m_DocumentHostTestEditor)
+			{
+				FailDocumentCloseUiTest("The project or registered document fixture is unavailable.");
+				return;
+			}
+
+			const auto FixtureAssetIDs = PulseForgeEditor::Detail::EditorDocumentHostTestEditor::FixtureAssetIDs();
+			const auto AssetID = PulseForge::UUID::Parse(FixtureAssetIDs.front());
+			if (!AssetID)
+			{
+				FailDocumentCloseUiTest("The Debug document fixture identity is invalid.");
+				return;
+			}
+			const PulseForgeEditor::EditorDocumentIdentity Identity{ m_Project->GetDescription().ID, *AssetID,
+				PulseForgeEditor::EditorDocumentKind::Texture };
+			m_DocumentCloseAcceptance->SetIdentity(Identity);
+			for (const auto& Host : m_Documents.GetHosts())
+				for (const auto& ExistingIdentity : Host.Documents)
+					if (IsDocumentHostTestFixtureIdentity(ExistingIdentity))
+					{
+						FailDocumentCloseUiTest("The isolated test project already contains a document-host fixture session.");
+						return;
+					}
+			if (m_Documents.Find(Identity))
+			{
+				FailDocumentCloseUiTest("The isolated test project already restored the fixture identity.");
+				return;
+			}
+
+			const std::string DisplayName = "Host Test Fixture 1";
+			auto Opened = m_Documents.Open(Identity, {}, DisplayName, PulseForgeEditor::EditorDocumentOpenPreference::NewNativeWindow);
+			if (!Opened || !Opened->Created)
+			{
+				FailDocumentCloseUiTest("Could not create the fixture's fresh native document host.");
+				return;
+			}
+			m_DocumentCloseAcceptance->SetHost(Opened->HostID);
+			auto* Session = m_Documents.Find(Identity);
+			const auto Context = MakeDocumentEditorContext(Identity, {}, DisplayName);
+			if (!Session || Session->HostID != m_DocumentCloseAcceptance->HostID() || !m_DocumentEditors.Load(*Session, Context) ||
+				!m_DocumentHostTestEditor->InitializeSavedModel(*Session, 10) ||
+				!m_DocumentHostTestEditor->EditValue(*Session, 20))
+			{
+				FailDocumentCloseUiTest("The fixture could not seed saved value 10 and dirty value 20.");
+				return;
+			}
+
+			if (m_DocumentCloseAcceptance->Scenario() == "save-retry" && !m_DocumentHostTestEditor->FailNextSave(*Session))
+			{
+				FailDocumentCloseUiTest("Could not arm the fixture's one-shot save failure.");
+				return;
+			}
+			if (m_DocumentCloseAcceptance->Scenario() == "close-retry" && !m_DocumentHostTestEditor->SetCloseFailure(*Session, true))
+			{
+				FailDocumentCloseUiTest("Could not arm the fixture's close-preparation failure.");
+				return;
+			}
+			m_DocumentHostFixtureSessions.emplace_back(Identity, std::string(m_DocumentCloseAcceptance->HostID()));
+			if (!m_Documents.Activate(Identity))
+			{
+				FailDocumentCloseUiTest("The fresh native fixture document could not be activated.");
+				return;
+			}
+
+#if defined(__APPLE__)
+			if (m_MacOSDocumentCloseEventObserver)
+			{
+				const std::string Scenario(m_DocumentCloseAcceptance->Scenario());
+				const std::string HostID(m_DocumentCloseAcceptance->HostID());
+				const std::string AssetID = Identity.Asset.ToString();
+				PulseForgeStartMacOSDocumentCloseEventObserver(m_MacOSDocumentCloseEventObserver, Scenario.c_str(), HostID.c_str(),
+					AssetID.c_str());
+			}
+#endif
+
+			size_t FixtureSessionCount = 0;
+			size_t SelectedFixtureSessionCount = 0;
+			size_t FixtureNativeHostCount = 0;
+			for (const auto& Host : m_Documents.GetHosts())
+			{
+				bool ContainsFixture = false;
+				for (const auto& Identity : Host.Documents)
+					if (IsDocumentHostTestFixtureIdentity(Identity))
+					{
+						++FixtureSessionCount;
+						if (IsDocumentCloseUiFixtureIdentity(Identity)) ++SelectedFixtureSessionCount;
+						ContainsFixture = true;
+					}
+				if (ContainsFixture && Host.Role == PulseForgeEditor::EditorDocumentHostRole::Native) ++FixtureNativeHostCount;
+			}
+			const auto Snapshot = ObserveDocumentCloseUiSession();
+			if (!Session || Session->HostID != m_DocumentCloseAcceptance->HostID())
+			{
+				FailDocumentCloseUiTest("The isolated setup did not contain exactly one fresh dirty native fixture document.");
+				return;
+			}
+			m_DocumentCloseAcceptance->FixtureReady(Snapshot, FixtureSessionCount, SelectedFixtureSessionCount, FixtureNativeHostCount);
+		}
+#endif
+
 		void InitializeDocumentHostTestFixture()
 		{
 #if !defined(_DEBUG) && !defined(PF_DEBUG)
 			return;
 #else
 			if (!m_DocumentHostTestFixture || !m_Project) return;
+			if (m_DocumentCloseAcceptance && m_DocumentCloseAcceptance->IsEnabled())
+			{
+				InitializeDocumentCloseUiFixture();
+				return;
+			}
 
 			// These synthetic Texture-kind identities exercise registered document dispatch in Debug.
 			const auto FixtureAssetIDs = PulseForgeEditor::Detail::EditorDocumentHostTestEditor::FixtureAssetIDs();
@@ -1946,6 +2354,9 @@ namespace
 				static_cast<uint32_t>(Preference), RestoredCount, OpenedCount, FixtureHosts.size());
 			if (m_DocumentHostTabTearOffTest)
 			{
+				m_DocumentHostTabTearOffTestFrameCount = 0;
+				m_DocumentHostTabTearOffTestTabCenterValid = false;
+				m_DocumentHostTabTearOffPointerPrepared = false;
 				if (m_DocumentHostFixtureSessions.empty())
 				{
 					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::Failed;
@@ -2445,7 +2856,8 @@ namespace
 						m_DocumentHostTabTearOffFromNativeHost
 							? ImVec2(
 								  m_DocumentHostTabTearOffTestStart.x + IO.MouseDragThreshold + 24.0f, m_DocumentHostTabTearOffTestStart.y)
-							: ImVec2(MainViewport->Pos.x + MainViewport->Size.x * 0.5f, MainViewport->Pos.y + MainViewport->Size.y * 0.75f);
+							: ImVec2(MainViewport->Pos.x + MainViewport->Size.x + IO.MouseDragThreshold + 24.0f,
+								  m_DocumentHostTabTearOffTestStart.y);
 					const float DeltaX = m_DocumentHostTabTearOffTestDrop.x - m_DocumentHostTabTearOffTestStart.x;
 					const float DeltaY = m_DocumentHostTabTearOffTestDrop.y - m_DocumentHostTabTearOffTestStart.y;
 					if (DeltaX * DeltaX + DeltaY * DeltaY <= IO.MouseDragThreshold * IO.MouseDragThreshold)
@@ -2462,7 +2874,9 @@ namespace
 				break;
 			case DocumentTabTearOffTestPhase::PressQueued:
 				IO.AddMousePosEvent(m_DocumentHostTabTearOffTestDrop.x, m_DocumentHostTabTearOffTestDrop.y);
-				if (m_DocumentHostTabTearOffFromNativeHost) IO.AddMouseViewportEvent(0);
+				// The fixture releases outside every editor window. A zero viewport models that hit test explicitly;
+				// the production policy trusts GLFW's hovered-window identity when it is available.
+				IO.AddMouseViewportEvent(0);
 				m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::DragQueued;
 				break;
 			case DocumentTabTearOffTestPhase::DragQueued:
@@ -2474,7 +2888,7 @@ namespace
 				else
 				{
 					IO.AddMousePosEvent(m_DocumentHostTabTearOffTestDrop.x, m_DocumentHostTabTearOffTestDrop.y);
-					IO.AddMouseViewportEvent(m_DocumentHostTabTearOffTestTabViewportID);
+					IO.AddMouseViewportEvent(0);
 				}
 				IO.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
 				m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::ReleaseQueued;
@@ -2534,8 +2948,8 @@ namespace
 					}
 					else
 					{
-						PF_INFO("Document tab tear-off UI fixture passed: releasing the captured asset tab in the editor body created a native "
-								"host and kept Level Editor in the main host.");
+						PF_INFO("Document tab tear-off UI fixture passed: releasing the captured asset tab outside the main editor window created a "
+								"native host and kept Level Editor in the main host.");
 					}
 					m_DocumentHostTabTearOffFromNativeHost = false;
 					m_DocumentHostTabTearOffSourceHostID.clear();
@@ -2547,8 +2961,14 @@ namespace
 						PF_ERROR("Document tab native-group tear-off fixture failed: the tab did not enter a separate native host or the "
 								 "original group changed.");
 					else if (m_DocumentHostTabRoundTripTearOffPending)
-						PF_ERROR("Document tab native-window round-trip fixture failed: the reattached session did not return to a native "
-								 "host or Level Editor left the main host.");
+						PF_ERROR("Document tab native-window round-trip fixture failed: session_present={}, resulting_host='{}', "
+								 "resulting_role={}, expected_previous_host='{}', entered_different_native_host={}, "
+								 "level_retained_in_main={}, main_document_count={}, release_hovered_viewport={}, "
+								 "release_position=({}, {}).",
+							Session != nullptr, Session ? Session->HostID : "<missing>",
+							Host ? static_cast<uint32_t>(Host->Role) : std::numeric_limits<uint32_t>::max(),
+							ExpectedPreviousHostID, EnteredDifferentNativeHost, LevelRetained,
+							MainHost ? MainHost->Documents.size() : 0, IO.MouseHoveredViewport, IO.MousePos.x, IO.MousePos.y);
 					else
 						PF_ERROR("Document tab tear-off UI fixture failed: the released tab did not enter a native host or Level Editor "
 								 "left the main host.");
@@ -2575,11 +2995,24 @@ namespace
 			m_DocumentHostTabReattachTest = false;
 #else
 			ImGuiIO& IO = ImGui::GetIO();
-			if (++m_DocumentHostTabReattachTestFrameCount > 600)
+			if (++m_DocumentHostTabReattachTestFrameCount > DocumentHostTabReattachTestMaximumFrames)
 			{
+				const auto TimedOutPhase = m_DocumentHostTabReattachTestPhase;
 				m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
 				m_DocumentHostTabReattachTest = false;
-				PF_ERROR("Document tab reattachment UI fixture timed out before validating all drop targets.");
+				const char* TargetName = "main document strip";
+				bool TargetAvailable = m_DocumentHostTabReattachTestMainDropPositionValid;
+				if (m_DocumentHostTabReattachInvalidDropIndex < m_DocumentHostTabReattachInvalidDropTargets.size())
+				{
+					const auto& Target = m_DocumentHostTabReattachInvalidDropTargets[m_DocumentHostTabReattachInvalidDropIndex];
+					TargetName = Target.Name ? Target.Name : "unidentified utility-panel drop target";
+					TargetAvailable = Target.Available;
+				}
+				PF_ERROR("Document tab reattachment UI fixture timed out: phase {}, drop target {}/{}, '{}' available={}, tab center valid={}, main-strip target valid={}; "
+					 "no remaining target was skipped.",
+					 static_cast<int>(TimedOutPhase), m_DocumentHostTabReattachInvalidDropIndex + 1,
+					 m_DocumentHostTabReattachInvalidDropTargets.size() + 1, TargetName, TargetAvailable,
+					 m_DocumentHostTabReattachTestTabCenterValid, m_DocumentHostTabReattachTestMainDropPositionValid);
 				return;
 			}
 			switch (m_DocumentHostTabReattachTestPhase)
@@ -2643,11 +3076,17 @@ namespace
 				const auto& Target = m_DocumentHostTabReattachInvalidDropTargets[m_DocumentHostTabReattachInvalidDropIndex];
 				const auto* Session = m_Documents.Find(m_DocumentHostTabReattachTestIdentity);
 				const bool StillInSourceHost = Session && Session->HostID == m_DocumentHostTabReattachTestSourceHostID;
-				const bool NoRegisteredStripTarget = !FindDocumentTabDropTarget(Target.Position, Target.ViewportID);
-				if (!StillInSourceHost || !NoRegisteredStripTarget)
+				const auto MatchedDropTarget = FindDocumentTabDropTarget(Target.Position, Target.ViewportID);
+				if (!StillInSourceHost || MatchedDropTarget)
 				{
 					m_DocumentHostTabReattachTestPhase = DocumentTabReattachTestPhase::Failed;
-					PF_ERROR("Document tab drag over {} changed document membership or matched a registered strip.", Target.Name);
+					m_DocumentHostTabReattachTest = false;
+					if (!StillInSourceHost)
+						PF_ERROR("Document tab drag over {} changed membership: expected host '{}', current host '{}'.", Target.Name,
+							 m_DocumentHostTabReattachTestSourceHostID, Session ? Session->HostID : "<session missing>");
+					else
+						PF_ERROR("Document tab drag over {} matched registered strip host '{}' at index {}.", Target.Name,
+							 MatchedDropTarget->first, MatchedDropTarget->second);
 					break;
 				}
 				PF_INFO("Document tab drag over {} was rejected without changing host membership.", Target.Name);
@@ -2688,6 +3127,8 @@ namespace
 						m_DocumentHostTabReattachInvalidDropIndex, m_DocumentHostTabRoundTripCount + 1, DocumentTabRoundTripCycleCount);
 					m_DocumentHostTabTearOffTestIdentity = m_DocumentHostTabReattachTestIdentity;
 					m_DocumentHostTabTearOffTestPhase = DocumentTabTearOffTestPhase::WaitingForTab;
+					m_DocumentHostTabTearOffTestFrameCount = 0;
+					m_DocumentHostTabTearOffTestTabCenterValid = false;
 					m_DocumentHostTabTearOffPointerPrepared = false;
 					m_DocumentHostTabTearOffTest = true;
 					m_DocumentHostTabRoundTripTearOffPending = true;
@@ -4369,9 +4810,21 @@ namespace
 		{
 			const auto* Session = m_Documents.Find(Identity);
 			if (!Session || Identity.Kind == PulseForgeEditor::EditorDocumentKind::Level) return;
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			if (m_DocumentCloseAcceptance)
+				m_DocumentCloseAcceptance->ReportTabCloseRequest(Session->HostID, Identity, m_DocumentCloseRequest.HasPendingRequest(),
+					m_DocumentCloseRequest.GetDialogHostID(), ObserveDocumentCloseUiSession());
+			if (!BeginDocumentCloseUiRequest(Session->HostID)) return;
+#endif
 			if (!Session->IsDirty())
 			{
-				if (CloseDocumentBatchClean({ Identity })) return;
+				if (CloseDocumentBatchClean({ Identity }))
+				{
+#if defined(_DEBUG) || defined(PF_DEBUG)
+					ReportDocumentCloseUiCleanClose();
+#endif
+					return;
+				}
 				const std::string CloseError = m_DocumentCloseRequest.GetError();
 				m_DocumentCloseRequest.BeginCloseDocuments({ Identity }, Session->HostID);
 				m_DocumentCloseRequest.SetError(CloseError);
@@ -4384,6 +4837,10 @@ namespace
 		{
 			const auto* Host = m_Documents.FindHost(HostID);
 			if (!Host || Host->Role != PulseForgeEditor::EditorDocumentHostRole::Native) return;
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			const bool IsCloseUiHost = IsDocumentCloseUiFixtureHost(HostID);
+			if (!BeginDocumentCloseUiRequest(HostID)) return;
+#endif
 			const auto Documents = Host->Documents;
 			const auto DirtyDocuments = PulseForgeEditor::FilterDirtyDocumentIdentities(Documents,
 				[this](const auto& Identity)
@@ -4393,7 +4850,18 @@ namespace
 				});
 			if (DirtyDocuments.empty())
 			{
-				if (CloseDocumentBatchClean(Documents)) return;
+				if (CloseDocumentBatchClean(Documents))
+				{
+#if defined(_DEBUG) || defined(PF_DEBUG)
+					ReportDocumentCloseUiCleanClose();
+#endif
+					return;
+				}
+#if defined(_DEBUG) || defined(PF_DEBUG)
+				if (IsCloseUiHost && m_DocumentCloseAcceptance && m_DocumentCloseAcceptance->IsAwaitingFinalClose())
+					FailDocumentCloseUiTest("The clean document-tab close failed after the fixture allowed close: " +
+						m_DocumentCloseRequest.GetError());
+#endif
 				const std::string CloseError = m_DocumentCloseRequest.GetError();
 				m_DocumentCloseRequest.BeginCloseDocuments(Documents, std::string(HostID));
 				m_DocumentCloseRequest.SetError(CloseError);
@@ -4488,12 +4956,34 @@ namespace
 			return true;
 		}
 
+		bool ResolveDocumentCloseFromUi(
+			std::string_view HostID, PulseForgeEditor::EditorDocumentCloseChoice Choice, std::string_view ChoiceName)
+		{
+			const bool Resolved = ResolveDocumentClose(Choice);
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			if (IsDocumentCloseUiFixtureHost(HostID)) ReportDocumentCloseUiAction(ChoiceName, Resolved);
+#else
+			(void)HostID;
+			(void)ChoiceName;
+#endif
+			return Resolved;
+		}
+
 		void DrawDocumentCloseDialog(std::string_view HostID)
 		{
 			if (HostID != m_DocumentCloseRequest.GetDialogHostID()) return;
 
 			const std::string PopupName = "Unsaved Asset Documents###PFDocumentClose_" + std::string(HostID);
 			if (m_DocumentCloseRequest.ConsumeDialogOpenRequest()) ImGui::OpenPopup(PopupName.c_str());
+			const ImGuiViewport* HostViewport = ImGui::GetWindowViewport();
+			if (HostViewport)
+			{
+				// BeginPopupModal defaults a newly-created popup to the main viewport when its
+				// anchor window was not active last frame. Keep native-host decisions on their
+				// owning viewport so pointer coordinates and modal controls share a window.
+				ImGui::SetNextWindowViewport(HostViewport->ID);
+				ImGui::SetNextWindowPos(HostViewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+			}
 			bool PopupOpen = true;
 			const bool PopupVisible = ImGui::BeginPopupModal(PopupName.c_str(), &PopupOpen, ImGuiWindowFlags_AlwaysAutoResize);
 			if (!PopupVisible) return;
@@ -4508,28 +4998,62 @@ namespace
 			ImGui::TextUnformatted(DirtyDocuments.empty() ? "The close request is still pending. Retry it or cancel."
 														  : "Save or discard these drafts before continuing?");
 			if (!m_DocumentCloseRequest.GetError().empty()) ImGui::TextWrapped("%s", m_DocumentCloseRequest.GetError().c_str());
+			bool RetryCloseClicked = false;
+			ImVec2 SaveCenter{};
+			ImVec2 DiscardCenter{};
+			ImVec2 CancelCenter{};
 			if (m_DocumentCloseRequest.ShouldOfferCloseRetry(DirtyDocuments.empty()))
 			{
-				if (ImGui::Button("Retry Close", ImVec2(112.0f, 0.0f)))
-					(void)ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice::Save);
+				RetryCloseClicked = ImGui::Button("Retry Close", ImVec2(112.0f, 0.0f));
 				ImGui::SameLine();
 			}
-			if (ImGui::Button("Save", ImVec2(112.0f, 0.0f))) (void)ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice::Save);
+			const bool SaveClicked = ImGui::Button("Save", ImVec2(112.0f, 0.0f));
+			SaveCenter = ImVec2((ImGui::GetItemRectMin().x + ImGui::GetItemRectMax().x) * 0.5f,
+				(ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f);
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			ReportDocumentCloseUiDecisionPointer(HostID, "save", ImGui::IsItemHovered(), ImGui::IsItemActive(), SaveClicked,
+				ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+#endif
 			ImGui::SameLine();
-			if (m_EditorStyle.DangerButton(PulseForgeEditor::EditorIcon::Delete, "Discard"))
-				(void)ResolveDocumentClose(PulseForgeEditor::EditorDocumentCloseChoice::Discard);
+			const bool DiscardClicked = m_EditorStyle.DangerButton(PulseForgeEditor::EditorIcon::Delete, "Discard");
+			DiscardCenter = ImVec2((ImGui::GetItemRectMin().x + ImGui::GetItemRectMax().x) * 0.5f,
+				(ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f);
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			ReportDocumentCloseUiDecisionPointer(HostID, "discard", ImGui::IsItemHovered(), ImGui::IsItemActive(), DiscardClicked,
+				ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+#endif
 			ImGui::SameLine();
-			if (ImGui::Button("Cancel", ImVec2(112.0f, 0.0f)))
+			const bool CancelClicked = ImGui::Button("Cancel", ImVec2(112.0f, 0.0f));
+			CancelCenter = ImVec2((ImGui::GetItemRectMin().x + ImGui::GetItemRectMax().x) * 0.5f,
+				(ImGui::GetItemRectMin().y + ImGui::GetItemRectMax().y) * 0.5f);
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			ReportDocumentCloseUiDecisionPointer(HostID, "cancel", ImGui::IsItemHovered(), ImGui::IsItemActive(), CancelClicked,
+				ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+			EmitDocumentCloseUiPrompt(HostID, SaveCenter, DiscardCenter, CancelCenter);
+#endif
+			if (RetryCloseClicked)
+				(void)ResolveDocumentCloseFromUi(HostID, PulseForgeEditor::EditorDocumentCloseChoice::Save, "retry-close");
+			else if (SaveClicked)
+				(void)ResolveDocumentCloseFromUi(HostID, PulseForgeEditor::EditorDocumentCloseChoice::Save, "save");
+			else if (DiscardClicked)
+				(void)ResolveDocumentCloseFromUi(HostID, PulseForgeEditor::EditorDocumentCloseChoice::Discard, "discard");
+			else if (CancelClicked)
 			{
 				m_DocumentCloseRequest.Cancel();
 				CancelEditorApplicationClose();
 				ImGui::CloseCurrentPopup();
+				#if defined(_DEBUG) || defined(PF_DEBUG)
+				if (IsDocumentCloseUiFixtureHost(HostID)) ReportDocumentCloseUiAction("cancel", true);
+				#endif
 			}
 			ImGui::EndPopup();
 			if (!PopupOpen)
 			{
 				m_DocumentCloseRequest.Cancel();
 				CancelEditorApplicationClose();
+				#if defined(_DEBUG) || defined(PF_DEBUG)
+				if (IsDocumentCloseUiFixtureHost(HostID)) ReportDocumentCloseUiAction("cancel", true);
+				#endif
 			}
 		}
 
@@ -4860,6 +5384,18 @@ namespace
 		void ProcessReleasedDocumentTabDrag()
 		{
 			const ImGuiIO& IO = ImGui::GetIO();
+			const ImGuiViewport* MainViewport = ImGui::GetMainViewport();
+			const bool PointerInsideMainViewportBounds = MainViewport && IO.MousePos.x >= MainViewport->Pos.x &&
+				IO.MousePos.y >= MainViewport->Pos.y && IO.MousePos.x < MainViewport->Pos.x + MainViewport->Size.x &&
+				IO.MousePos.y < MainViewport->Pos.y + MainViewport->Size.y;
+			const bool HasReliableHoveredViewport =
+				(IO.BackendFlags & ImGuiBackendFlags_HasMouseHoveredViewport) != 0;
+			const bool ReleaseOverMainEditorViewport = MainViewport &&
+				PulseForgeEditor::IsDocumentTabReleaseOverMainViewport(
+					MainViewport->ID,
+					IO.MouseHoveredViewport,
+					HasReliableHoveredViewport,
+					PointerInsideMainViewportBounds);
 			const auto ActiveIdentity = m_DocumentTabInteraction.ActiveDragIdentity();
 			const auto* Session = ActiveIdentity ? m_Documents.Find(*ActiveIdentity) : nullptr;
 			const auto* SourceHost = Session ? m_Documents.FindHost(Session->HostID) : nullptr;
@@ -4871,7 +5407,8 @@ namespace
 				.MaximumObservedDistanceSquared = IO.MouseDragMaxDistanceSqr[ImGuiMouseButton_Left],
 				.DragThreshold = IO.MouseDragThreshold,
 				.SourceIsMainHost = SourceHost && SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Main,
-				.SourceIsNativeHost = SourceHost && SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Native };
+				.SourceIsNativeHost = SourceHost && SourceHost->Role == PulseForgeEditor::EditorDocumentHostRole::Native,
+				.ReleaseOverMainEditorViewport = ReleaseOverMainEditorViewport };
 			const auto Released = m_DocumentTabInteraction.UpdateDrag(Frame);
 			if (!Released) return;
 
@@ -5076,6 +5613,10 @@ namespace
 					m_DocumentTabInteraction.BeginDrag(Session->Identity,
 						PulseForgeEditor::DocumentTabPointerPosition{ DragStart.x, DragStart.y }, { MousePosition.x, MousePosition.y });
 				}
+#if defined(_DEBUG) || defined(PF_DEBUG)
+				ReportDocumentCloseUiTabInput(HostID, Session->Identity, TabHovered, CloseHovered, ImGui::IsItemActive(),
+					ImGui::IsItemClicked(ImGuiMouseButton_Left), Pressed, TabMinimum, TabMaximum, TabViewport);
+#endif
 				if (Pressed && CloseHovered) QueueDocumentTabClose(Session->Identity);
 				else if (Pressed)
 				{
@@ -5090,6 +5631,10 @@ namespace
 				if (HasCloseButton)
 				{
 					const ImVec2 CloseCenter(CloseRegionMinimumX + CloseRegionWidth * 0.5f, TabMinimum.y + TabHeight * 0.5f);
+#if defined(_DEBUG) || defined(PF_DEBUG)
+					ReportDocumentCloseUiCloseControl(HostID, Session->Identity, static_cast<int>(CloseCenter.x),
+						static_cast<int>(CloseCenter.y));
+#endif
 					constexpr float CloseHalfExtent = 8.5f;
 					const ImU32 CloseColor = ImGui::GetColorU32(CloseHovered ? ImGuiCol_Text : ImGuiCol_TextDisabled);
 					DrawList->AddLine(ImVec2(CloseCenter.x - CloseHalfExtent, CloseCenter.y - CloseHalfExtent),
@@ -6013,14 +6558,24 @@ namespace
 			PulseForge::RenderTargetClearValue Clear;
 			const auto Background = PulseForgeEditor::GetEditorColorValue(PulseForgeEditor::EditorColorToken::ViewportBackground);
 			Clear.Color = { Background.Red, Background.Green, Background.Blue, Background.Alpha };
-			if (m_ViewportRenderView.Render(PulseForge::Application::Get(),
-					m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport), m_ViewportTools.GetValues().ExposureEV, Clear) &&
+			const bool ViewportRendered = m_ViewportRenderView.Render(PulseForge::Application::Get(),
+				m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport), m_ViewportTools.GetValues().ExposureEV, Clear);
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			if (m_EditorRuntimePlayStopCoordinator && m_EditorRuntimePlayStopCoordinator->IsEnabled() && ViewportRendered)
+				m_EditorRuntimePlayStopCoordinator->ObserveViewportRender(m_SceneRuntime && m_RuntimeScene);
+#endif
+			if (ViewportRendered &&
 				m_ProjectOpenTimingActive && !m_LoggedFirstViewportRendered)
 			{
 				m_LoggedFirstViewportRendered = true;
 				const double Milliseconds =
 					std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_ProjectOpenStartedAt).count();
 				PF_INFO("Profile: Project open to first rendered viewport frame took {:.2f} ms", Milliseconds);
+				if (m_ProjectOpenRenderTestFile)
+				{
+					PF_INFO("PULSEFORGE_EDITOR_PROJECT_RENDER_SMOKE=PASS; requesting orderly shutdown");
+					RequestEditorApplicationClose();
+				}
 			}
 #endif
 		}
@@ -6333,6 +6888,88 @@ namespace
 			m_RuntimeScene.reset();
 		}
 
+#if defined(_DEBUG) || defined(PF_DEBUG)
+		void AdvanceEditorRuntimePlayStopTest()
+		{
+			if (!m_EditorRuntimePlayStopCoordinator || !m_EditorRuntimePlayStopCoordinator->IsEnabled()) return;
+			const bool RuntimeRunning = m_SceneRuntime && m_RuntimeScene && m_SceneRuntime->IsRunning();
+			const auto Action = m_EditorRuntimePlayStopCoordinator->Advance(RuntimeRunning);
+			if (!m_EditorRuntimePlayStopCoordinator->FailureReason().empty())
+			{
+				FailEditorRuntimePlayStopTest(std::string(m_EditorRuntimePlayStopCoordinator->FailureReason()));
+				return;
+			}
+
+			if (Action == PulseForgeEditor::Detail::EditorRuntimePlayStopAction::BeginPlay)
+			{
+				if (!m_Project || !m_Scene)
+				{
+					FailEditorRuntimePlayStopTest("The Edit-mode viewport rendered without an active project scene.");
+					return;
+				}
+				const auto AuthoredSnapshot = PulseForge::SceneSerializer::Serialize(*m_Scene);
+				if (!AuthoredSnapshot)
+				{
+					FailEditorRuntimePlayStopTest("Could not snapshot the authored scene before Play: " + AuthoredSnapshot.error().Message);
+					return;
+				}
+				if (!m_EditorRuntimePlayStopCoordinator->BeginPlaySnapshot(
+						m_Scene.get(), m_Scene->GetEntityCount(), std::move(*AuthoredSnapshot)))
+				{
+					FailEditorRuntimePlayStopTest(std::string(m_EditorRuntimePlayStopCoordinator->FailureReason()));
+					return;
+				}
+				try
+				{
+					StartRuntime();
+				}
+				catch (const std::exception& Exception)
+				{
+					FailEditorRuntimePlayStopTest("The Play transition threw: " + std::string(Exception.what()));
+					return;
+				}
+				catch (...)
+				{
+					FailEditorRuntimePlayStopTest("The Play transition threw an unknown exception.");
+					return;
+				}
+				const bool Started = m_SceneRuntime && m_RuntimeScene && m_SceneRuntime->IsRunning();
+				if (!m_EditorRuntimePlayStopCoordinator->ObservePlayStarted(Started, m_RuntimeScene.get()))
+					FailEditorRuntimePlayStopTest(std::string(m_EditorRuntimePlayStopCoordinator->FailureReason()));
+				return;
+			}
+
+			if (Action == PulseForgeEditor::Detail::EditorRuntimePlayStopAction::StopRuntime)
+			{
+				StopRuntime();
+				if (m_SceneRuntime || m_RuntimeScene)
+				{
+					FailEditorRuntimePlayStopTest("Stop did not clear the runtime scene and runtime owner.");
+					return;
+				}
+				std::optional<std::string> Snapshot;
+				if (m_Scene)
+					if (auto Serialized = PulseForge::SceneSerializer::Serialize(*m_Scene); Serialized)
+						Snapshot = std::move(*Serialized);
+				const bool Complete = m_EditorRuntimePlayStopCoordinator->ObserveStop(
+					m_Scene.get(), m_Scene ? m_Scene->GetEntityCount() : 0, std::move(Snapshot));
+				if (!Complete)
+				{
+					FailEditorRuntimePlayStopTest(std::string(m_EditorRuntimePlayStopCoordinator->FailureReason()));
+					return;
+				}
+				RequestEditorApplicationClose();
+			}
+		}
+
+		void FailEditorRuntimePlayStopTest(std::string Message)
+		{
+			if (m_EditorRuntimePlayStopCoordinator) m_EditorRuntimePlayStopCoordinator->Fail(Message);
+			StopRuntime();
+			PF_ERROR("PULSEFORGE_EDITOR_RUNTIME_PLAY_STOP=FAIL; {}", Message);
+			PulseForge::Application::Get().RequestClose();
+		}
+#endif
 		void RefreshAssets()
 		{
 			if (!m_Project) return;
@@ -6460,6 +7097,14 @@ namespace
 			if (m_OpenGLBackendActive) ImGui_ImplOpenGL3_Shutdown();
 #endif
 			if (m_GlfwBackendActive) ImGui_ImplGlfw_Shutdown();
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			{
+				auto& Routes = GetDocumentCloseMouseButtonCallbackRoutes();
+				for (const auto& [Window, Callback] : m_DocumentCloseMouseButtonCallbacks)
+					Routes.erase(Window);
+				m_DocumentCloseMouseButtonCallbacks.clear();
+			}
+#endif
 			ImGui::GetIO().UserData = m_PreviousImGuiUserData;
 			m_EditorStyle.Reset();
 			ImGui::DestroyContext(m_Context);
@@ -6539,6 +7184,14 @@ namespace
 		std::optional<std::filesystem::path> m_StartupProjectPath;
 		std::optional<std::filesystem::path> m_ProjectOpenRenderTestFile;
 		bool m_ProjectOpenRenderTestRequested = false;
+#if defined(_DEBUG) || defined(PF_DEBUG)
+		std::unique_ptr<PulseForgeEditor::Detail::EditorRuntimePlayStopCoordinator> m_EditorRuntimePlayStopCoordinator;
+		std::unique_ptr<PulseForgeEditor::Detail::DocumentCloseAcceptanceCoordinator> m_DocumentCloseAcceptance;
+#if defined(__APPLE__)
+		void* m_MacOSDocumentCloseEventObserver = nullptr;
+#endif
+		std::unordered_map<GLFWwindow*, GLFWmousebuttonfun> m_DocumentCloseMouseButtonCallbacks;
+#endif
 		bool m_DocumentHostTestFixture = false;
 		bool m_DocumentHostResetLayoutTest = false;
 		bool m_DocumentHostTabTearOffTest = false;

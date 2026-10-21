@@ -25,7 +25,10 @@ namespace PulseForgeEditor::Detail
 		};
 
 		EditorDocumentHostTestEditor(EditorDocumentManager& Documents, EditorDocumentEditorRegistry& Editors, EditorStyle& Style,
-			std::function<void(std::string)> ReportError, std::function<PulseForge::UUID()> ActiveProject);
+			std::function<void(std::string)> ReportError, std::function<PulseForge::UUID()> ActiveProject,
+			std::function<void(std::string_view, int, int, bool)> ReportCloseUiAllowClose = {},
+			std::function<void(std::string_view, int, int, bool, bool, bool, bool, int)> ReportCloseUiTextField = {},
+			bool TextOnlyEditing = false);
 
 		[[nodiscard]] std::expected<void, std::string> Register();
 		[[nodiscard]] bool IsFixtureIdentity(const EditorDocumentIdentity& Identity) const;
@@ -39,6 +42,8 @@ namespace PulseForgeEditor::Detail
 		[[nodiscard]] bool FailNextSave(EditorDocumentSession& Session) noexcept;
 		[[nodiscard]] bool SetCloseFailure(EditorDocumentSession& Session, bool ShouldFail) noexcept;
 		[[nodiscard]] std::optional<ModelSnapshot> InspectModel(const EditorDocumentSession& Session) const noexcept;
+		[[nodiscard]] std::optional<int> GetCurrentValue(const EditorDocumentIdentity& Identity) const noexcept;
+		[[nodiscard]] std::optional<int> GetSavedValue(const EditorDocumentIdentity& Identity) const noexcept;
 		[[nodiscard]] bool MatchesSavedModel(
 			const EditorDocumentSession& Session, const EditorDocumentEditorState* ExpectedState, int ExpectedValue) const noexcept;
 
@@ -50,6 +55,10 @@ namespace PulseForgeEditor::Detail
 		EditorStyle& m_Style;
 		std::function<void(std::string)> m_ReportError;
 		std::function<PulseForge::UUID()> m_ActiveProject;
+		std::function<void(std::string_view, int, int, bool)> m_ReportCloseUiAllowClose;
+		std::function<void(std::string_view, int, int, bool, bool, bool, bool, int)> m_ReportCloseUiTextField;
+		bool m_TextOnlyEditing = false;
 		std::unordered_map<EditorDocumentIdentity, int, EditorDocumentIdentityHash> m_SavedValues;
+		std::unordered_map<EditorDocumentIdentity, int, EditorDocumentIdentityHash> m_LastKnownValues;
 	};
 } // namespace PulseForgeEditor::Detail

@@ -214,6 +214,7 @@ if(BUILD_TESTING)
 			Tests/EditorAssetReferenceTests.cpp
 			Tests/ProjectRuntimeTests.cpp
 			Tests/EditorHistoryTests.cpp
+			$<$<CONFIG:Debug>:Tests/EditorDebugAcceptanceCoordinatorTests.cpp>
 		)
 		target_include_directories(PulseForgeEditorTests PRIVATE
 			Tests
@@ -279,6 +280,29 @@ if(BUILD_TESTING)
 			PulseForgeEditorTests
 			PulseForgeEditorWorkspacePresentationTests
 		)
+	endif()
+	if(PULSEFORGE_BUILD_EDITOR AND PULSEFORGE_PLATFORM_MACOS)
+		add_executable(PulseForgeNativeDialogValidation Tests/Platform/MacOSNativeDialogValidation.cpp)
+		target_include_directories(PulseForgeNativeDialogValidation PRIVATE PulseForgeEditor/Source/Public)
+		target_link_libraries(PulseForgeNativeDialogValidation PRIVATE PulseForgeEditorUI glfw)
+		list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS PulseForgeNativeDialogValidation)
+
+		add_executable(PulseForgeMacOSVulkanLoaderLifecycleValidation
+			Tests/Platform/MacOSVulkanLoaderLifecycleValidation.cpp)
+		target_link_libraries(PulseForgeMacOSVulkanLoaderLifecycleValidation PRIVATE PulseForgeWindow glfw)
+		add_test(NAME PulseForge.MacOSVulkanLoaderLifecycle
+			COMMAND PulseForgeMacOSVulkanLoaderLifecycleValidation --vulkan-lifecycle)
+		add_test(NAME PulseForge.MacOSVulkanLoaderRuntimeMismatch
+			COMMAND PulseForgeMacOSVulkanLoaderLifecycleValidation --runtime-mismatch-policy)
+		add_test(NAME PulseForge.MacOSOpenGLContextWithoutVulkanSdk
+			COMMAND PulseForgeMacOSVulkanLoaderLifecycleValidation --opengl-context-without-vulkan-sdk)
+		set_tests_properties(
+			PulseForge.MacOSVulkanLoaderLifecycle
+			PulseForge.MacOSVulkanLoaderRuntimeMismatch
+			PROPERTIES RUN_SERIAL TRUE TIMEOUT 60)
+		set_tests_properties(PulseForge.MacOSOpenGLContextWithoutVulkanSdk
+			PROPERTIES RUN_SERIAL TRUE TIMEOUT 60 SKIP_RETURN_CODE 77)
+		list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS PulseForgeMacOSVulkanLoaderLifecycleValidation)
 	endif()
 	if(TARGET PulseForgeGpuValidation)
 		list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS PulseForgeGpuValidation)

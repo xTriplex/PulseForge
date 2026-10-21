@@ -33,6 +33,7 @@ namespace PulseForge
 	enum class EWindowClientAPI
 	{
 		OpenGL,
+		Vulkan,
 		None
 	};
 
@@ -68,6 +69,7 @@ namespace PulseForge
 		virtual unsigned int GetWidth() const = 0;
 		virtual unsigned int GetHeight() const = 0;
 		virtual std::pair<unsigned int, unsigned int> GetFramebufferSize() const = 0;
+		virtual std::pair<float, float> GetContentScale() const = 0;
 
 		virtual void SetEventCallback(const EventCallbackFn& Callback) = 0;
 
