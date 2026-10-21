@@ -597,15 +597,6 @@ if operation == "press-control" || operation == "set-value" || operation == "set
         let availableActions = rawActions as? [String] ?? []
         var selectedSettable = DarwinBoolean(false)
         let selectedSettableError = AXUIElementIsAttributeSettable(control, "AXSelected" as CFString, &selectedSettable)
-        if role == "AXTextField", selectedSettableError == .success, !selectedSettable.boolValue,
-            availableActions.contains("AXConfirm") {
-            AXUIElementSetMessagingTimeout(control, 1.0)
-            print("DIRECT_AX_DISPATCH attempted=true; operation=confirm-open-file; target_pid=\(targetPID); role=\(role); name=\(titleOrDescription(control)); advertised_action=AXConfirm")
-            fflush(stdout)
-            let confirmError = AXUIElementPerformAction(control, "AXConfirm" as CFString)
-            print("DIRECT_AX_RESULT status=confirm-action-returned; operation=confirm-open-file; role=\(role); name=\(titleOrDescription(control)); ax_error=\(confirmError.rawValue)")
-            exit(confirmError == .success ? 0 : 13)
-        }
         var rawAttributeNames: CFArray?
         let attributeNamesError = AXUIElementCopyAttributeNames(control, &rawAttributeNames)
         var parentSummary: [String] = []
@@ -634,18 +625,49 @@ if operation == "press-control" || operation == "set-value" || operation == "set
         } else {
             browserSelectedSettable = "unavailable"
         }
+        var selectionTarget = control
+        var selectionRole = role
+        var selectionSettable = selectedSettable.boolValue
+        var selectionSettableError = selectedSettableError
+        if role == "AXTextField", !selectionSettable {
+            var parent = controlNode.parent
+            while let parentIndex = parent {
+                let ancestor = descendants[parentIndex].element
+                let ancestorRole = string(ancestor, "AXRole") ?? ""
+                if ancestorRole == "AXRow" || ancestorRole == "AXCell" {
+                    var ancestorSettable = DarwinBoolean(false)
+                    selectionSettableError = AXUIElementIsAttributeSettable(
+                        ancestor, "AXSelected" as CFString, &ancestorSettable
+                    )
+                    if selectionSettableError == .success, ancestorSettable.boolValue {
+                        selectionTarget = ancestor
+                        selectionRole = ancestorRole
+                        selectionSettable = true
+                        break
+                    }
+                }
+                parent = descendants[parentIndex].parent
+            }
+        }
         print("DIRECT_AX_SELECT_TARGET role=\(role); name=\(titleOrDescription(control)); " +
               "attributes_error=\(attributeNamesError.rawValue); attributes=\(rawAttributeNames as? [String] ?? []); " +
               "actions_error=\(actionsError.rawValue); actions=\(rawActions as? [String] ?? []); " +
               "selected=\(described(control, "AXSelected")); selected_settable=\(selectedSettableError.rawValue):\(selectedSettable.boolValue); " +
+              "selection_target_role=\(selectionRole); selection_target_settable=\(selectionSettableError.rawValue):\(selectionSettable); " +
               "parents=\(parentSummary); browser_selected_children=\(browserSelectedChildren); " +
               "browser_selected_children_settable=\(browserSelectedSettable)")
         fflush(stdout)
-        AXUIElementSetMessagingTimeout(control, 1.0)
-        let selectError = AXUIElementSetAttributeValue(control, "AXSelected" as CFString, kCFBooleanTrue)
-        let selected = (value(control, "AXSelected") as? Bool) ?? false
+        guard selectionSettable else {
+            print("DIRECT_AX_RESULT status=selection-error; operation=select-element; name=\(titleOrDescription(control)); " +
+                  "reason=no-settable-row-or-cell-ancestor; selected_settable_error=\(selectionSettableError.rawValue)")
+            exit(12)
+        }
+        AXUIElementSetMessagingTimeout(selectionTarget, 1.0)
+        let selectError = AXUIElementSetAttributeValue(selectionTarget, "AXSelected" as CFString, kCFBooleanTrue)
+        let selected = (value(selectionTarget, "AXSelected") as? Bool) ?? false
         let verified = selectError == .success && selected
-        print("DIRECT_AX_RESULT status=\(verified ? "selection-verified" : "selection-error"); operation=select-element; role=\(role); name=\(titleOrDescription(control)); ax_error=\(selectError.rawValue); selected=\(selected)")
+        print("DIRECT_AX_RESULT status=\(verified ? "selection-verified" : "selection-error"); operation=select-element; " +
+              "role=\(selectionRole); name=\(titleOrDescription(control)); ax_error=\(selectError.rawValue); selected=\(selected)")
         exit(verified ? 0 : 12)
     }
     AXUIElementSetMessagingTimeout(control, 1.0)

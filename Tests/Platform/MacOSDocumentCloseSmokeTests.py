@@ -436,6 +436,8 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertFalse(native_dialog.open_file_selection_ready(
             selected.replace("selected=true", "selected=false"), expected_path.name
         ))
+        row_selected = selected.replace("role=AXTextField", "role=AXRow")
+        self.assertTrue(native_dialog.open_file_selection_ready(row_selected, expected_path.name))
         with patch.object(native_dialog, "run_direct_ax", return_value=(0, selected, "")) as select:
             result = native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
         self.assertIn("status=selection-verified", result)
