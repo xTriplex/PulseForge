@@ -22,13 +22,14 @@ MAIN_TITLE_FRAGMENT = "PulseForge Editor"
 READY = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY;"
 DETACHED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=DETACHED;"
 CAPTURED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=CAPTURED;"
-PASSED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=PASS;"
+CAMERA_DRAG_PASSED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=CAMERA_DRAG_PASS;"
 REATTACHED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=REATTACHED;"
 REATTACHED_INPUT = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=REATTACHED_CAMERA_INPUT;"
 CAMERA_READY = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT;"
 STATE = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=STATE;"
+OBSERVATION_EXPIRED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=OBSERVATION_EXPIRED;"
 FAILURE_MARKERS = ("MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=FAILED;",)
-EVIDENCE_MARKERS = (READY, DETACHED, CAMERA_READY, CAPTURED, PASSED, REATTACHED, STATE, *FAILURE_MARKERS)
+EVIDENCE_MARKERS = (READY, DETACHED, CAMERA_READY, CAPTURED, CAMERA_DRAG_PASSED, REATTACHED, STATE, OBSERVATION_EXPIRED, *FAILURE_MARKERS)
 
 
 def marker_fields(line: str, marker: str) -> dict[str, str]:
@@ -51,6 +52,26 @@ def coordinate(fields: dict[str, str], name: str, count: int) -> tuple[float, ..
     if not all(value == value and abs(value) != float("inf") for value in values):
         raise ValueError(f"non-finite {name} coordinates: {raw!r}")
     return values
+
+
+def has_usable_viewport_geometry(fields: dict[str, str]) -> bool:
+    try:
+        image_minimum = coordinate(fields, "image_min", 2)
+        image_maximum = coordinate(fields, "image_max", 2)
+        owner = coordinate(fields, "owner_native_rect", 4)
+    except ValueError:
+        return False
+    left, top, width, height = owner
+    return (
+        image_maximum[0] > image_minimum[0]
+        and image_maximum[1] > image_minimum[1]
+        and width > 0.0
+        and height > 0.0
+        and image_minimum[0] >= left
+        and image_minimum[1] >= top
+        and image_maximum[0] <= left + width
+        and image_maximum[1] <= top + height
+    )
 
 
 def activate_main_editor_window(pid: int, deadline: float) -> str:
@@ -133,6 +154,39 @@ def visible_camera_target(
     return display, minimum, maximum, center
 
 
+def visible_drag_target(
+    target_rect: tuple[float, float, float, float],
+    displays: list[dict[str, float | int | str]],
+    minimum_extent: float = 20.0,
+) -> tuple[dict[str, float | int | str], tuple[float, float, float, float], tuple[float, float]]:
+    if len(target_rect) != 4 or not all(value == value and abs(value) != float("inf") for value in target_rect):
+        raise ValueError(f"malformed native-window drag target: {target_rect!r}")
+    left, top, right, bottom = target_rect
+    if right <= left or bottom <= top:
+        raise ValueError(f"native-window drag target is empty: {target_rect!r}")
+    candidates: list[tuple[float, dict[str, float | int | str], tuple[float, float, float, float]]] = []
+    for display in displays:
+        try:
+            display_left, display_top = float(display["x"]), float(display["y"])
+            display_right = display_left + float(display["width"])
+            display_bottom = display_top + float(display["height"])
+            scale = float(display["backing_scale"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"malformed native display geometry: {display!r}") from error
+        if not all(value == value and abs(value) != float("inf") for value in
+                   (display_left, display_top, display_right, display_bottom, scale)) or scale <= 0:
+            raise ValueError(f"invalid native display geometry: {display!r}")
+        visible = (max(left, display_left), max(top, display_top), min(right, display_right), min(bottom, display_bottom))
+        width, height = visible[2] - visible[0], visible[3] - visible[1]
+        if width >= minimum_extent and height >= 10.0:
+            candidates.append((width * height, display, visible))
+    if not candidates:
+        raise ValueError(f"native title/tab drag target has no usable visible region; target={target_rect!r}; displays={displays!r}")
+    _, display, visible = max(candidates, key=lambda candidate: candidate[0])
+    point = ((visible[0] + visible[2]) * 0.5, (visible[1] + visible[3]) * 0.5)
+    return display, visible, point
+
+
 def read_native_displays(driver: Path, timeout: float) -> list[dict[str, float | int | str]]:
     code, stdout, stderr = run_bounded_command([str(driver), "display-geometry"], timeout=timeout)
     prefix = "SCENE_VIEWPORT_DISPLAY_GEOMETRY="
@@ -167,7 +221,7 @@ def main() -> int:
     parser.add_argument("--editor", required=True, type=Path)
     parser.add_argument("--project", required=True, type=Path)
     parser.add_argument("--log-directory", required=True, type=Path)
-    parser.add_argument("--timeout-seconds", type=int, default=180)
+    parser.add_argument("--timeout-seconds", type=int, default=330)
     args = parser.parse_args()
 
     try:
@@ -261,12 +315,28 @@ def main() -> int:
                 failure = next((capture.marker_lines[item] for item in FAILURE_MARKERS if item in capture.markers), None)
                 if failure:
                     raise RuntimeError(f"editor fixture failed: {failure}")
+                if OBSERVATION_EXPIRED in capture.markers:
+                    raise TimeoutError(f"editor fixture observation channel expired: {capture.marker_lines.get(OBSERVATION_EXPIRED)}")
                 if process.poll() is not None:
                     raise RuntimeError(f"editor exited with status {process.returncode} before {label}")
                 capture.finished.wait(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
             raise TimeoutError(f"timed out waiting for {label}; process_status={process.poll()}")
 
-        def wait_for_state(after_sample: int, label: str, predicate) -> str:
+        def latest_state_sequence() -> int:
+            assert capture is not None
+            line = capture.marker_lines.get(STATE)
+            if line is None:
+                return 0
+            fields = marker_fields(line, STATE)
+            try:
+                sequence = int(fields["sequence"])
+            except (KeyError, ValueError) as error:
+                raise ValueError(f"native camera state marker has no valid observation sequence: {line!r}") from error
+            if sequence <= 0:
+                raise ValueError(f"native camera state observation sequence must be positive: {line!r}")
+            return sequence
+
+        def wait_for_state(after_sequence: int, label: str, predicate, not_before: float = 0.0) -> str:
             assert process is not None and capture is not None
             while time.monotonic() < deadline:
                 if capture.reader_error:
@@ -275,19 +345,21 @@ def main() -> int:
                 if line:
                     fields = marker_fields(line, STATE)
                     try:
-                        sample = int(fields["sample"])
+                        sequence = int(fields["sequence"])
                     except (KeyError, ValueError) as error:
-                        raise ValueError(f"native camera state marker is malformed: {line!r}") from error
-                    if sample > after_sample and predicate(fields):
+                        raise ValueError(f"native camera state sequence is malformed: {line!r}") from error
+                    if sequence > after_sequence and time.monotonic() >= not_before and predicate(fields):
                         print(f"MACOS_SCENE_VIEWPORT_OBSERVED={label}; {line}")
                         return line
                 failure = next((capture.marker_lines[item] for item in FAILURE_MARKERS if item in capture.markers), None)
                 if failure:
                     raise RuntimeError(f"editor fixture failed: {failure}")
+                if OBSERVATION_EXPIRED in capture.markers:
+                    raise TimeoutError(f"editor fixture observation channel expired: {capture.marker_lines.get(OBSERVATION_EXPIRED)}")
                 if process.poll() is not None:
                     raise RuntimeError(f"editor exited with status {process.returncode} before {label}")
                 capture.finished.wait(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
-            raise TimeoutError(f"timed out waiting for {label}; after_sample={after_sample}; process_status={process.poll()}")
+            raise TimeoutError(f"timed out waiting for {label}; after_sequence={after_sequence}; process_status={process.poll()}")
 
         ready_line = wait_for(READY, "main Scene Viewport and image ready")
         if not screenshot("macos-scene-viewport-checkpoint-main.png", "main-owner-scene-loaded"):
@@ -395,10 +467,13 @@ def main() -> int:
         wait_for(CAPTURED, "camera capture started on the detached native owner")
 
         capture_state_line = wait_for_state(
-            0, "detached owner capture state", lambda fields: fields.get("focused") == "1" and fields.get("capture") == "1"
+            latest_state_sequence(), "detached owner capture state",
+            lambda fields: fields.get("focused") == "1" and fields.get("capture") == "1" and
+            fields.get("owner_viewport") == detached.get("owner_viewport") and
+            fields.get("owner_window") == detached.get("owner_window"),
         )
         capture_state = marker_fields(capture_state_line, STATE)
-        capture_state_sample = int(capture_state["sample"])
+        capture_state_sample = int(capture_state["sequence"])
         speed_before_wheel = float(capture_state["camera_speed"])
         wheel_id = uuid.uuid4().hex
         code, stdout, stderr = run_bounded_command(
@@ -409,13 +484,16 @@ def main() -> int:
               f"output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
         if code != 0:
             raise RuntimeError("the single detached-owner wheel event was not posted")
+        wheel_completed_at = time.monotonic()
+        wheel_baseline = latest_state_sequence()
         wheel_state_line = wait_for_state(
-            capture_state_sample, "detached-owner fly speed changed from owner wheel input",
+            wheel_baseline, "detached-owner fly speed changed from owner wheel input",
             lambda fields: fields.get("focused") == "1" and fields.get("capture") == "1" and
             float(fields.get("camera_speed", "nan")) > speed_before_wheel,
+            not_before=wheel_completed_at,
         )
         wheel_state = marker_fields(wheel_state_line, STATE)
-        wheel_state_sample = int(wheel_state["sample"])
+        wheel_state_sample = int(wheel_state["sequence"])
 
         end_camera_x = min(visible_maximum[0] - 8.0, image_center_x + 70.0)
         end_camera_y = min(visible_maximum[1] - 8.0, image_center_y + 45.0)
@@ -432,7 +510,7 @@ def main() -> int:
               f"output={stdout[-2500:]!r}; error={stderr[-1000:]!r}")
         if code != 0:
             raise RuntimeError("the bounded right-button drag continuation and release sequence failed")
-        passed_line = wait_for(PASSED, "camera orientation changed and capture released")
+        passed_line = wait_for(CAMERA_DRAG_PASSED, "camera orientation changed and capture released")
         print(f"MACOS_SCENE_VIEWPORT_ACCEPTANCE={passed_line}")
         if not screenshot("macos-scene-viewport-checkpoint-camera-input.png", "camera-changed-after-detached-input"):
             raise RuntimeError("could not capture the changed-camera screenshot evidence")
@@ -442,7 +520,7 @@ def main() -> int:
             lambda fields: fields.get("focused") == "1" and fields.get("capture") == "0",
         )
         released_state = marker_fields(released_state_line, STATE)
-        released_sample = int(released_state["sample"])
+        released_sample = int(released_state["sequence"])
         position_before_key = coordinate(released_state, "camera_position", 3)
         key_id = uuid.uuid4().hex
         code, stdout, stderr = run_bounded_command(
@@ -453,20 +531,23 @@ def main() -> int:
               f"exit_code={code}; output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
         if code != 0:
             raise RuntimeError("the bounded detached-owner keyboard input was not posted")
+        detached_key_completed_at = time.monotonic()
+        detached_key_baseline = latest_state_sequence()
         moved_state_line = wait_for_state(
-            released_sample, "camera translated from detached-owner keyboard input",
+            detached_key_baseline, "camera translated from detached-owner keyboard input",
             lambda fields: fields.get("focused") == "1" and fields.get("keyboard_focused") == "1" and
             sum((a - b) ** 2 for a, b in zip(coordinate(fields, "camera_position", 3), position_before_key)) > 1.0e-6,
+            not_before=detached_key_completed_at,
         )
         moved_state = marker_fields(moved_state_line, STATE)
-        moved_sample = int(moved_state["sample"])
+        moved_sample = int(moved_state["sequence"])
 
         pre_loss_state_line = wait_for_state(
             moved_sample, "detached owner ready before focus-loss capture",
             lambda fields: fields.get("focused") == "1" and fields.get("capture") == "0",
         )
         pre_loss_state = marker_fields(pre_loss_state_line, STATE)
-        pre_loss_sample = int(pre_loss_state["sample"])
+        pre_loss_sample = int(pre_loss_state["sequence"])
         normal_cursor_mode = pre_loss_state["cursor_mode"]
         raw_motion_before = pre_loss_state["raw_motion_enabled"]
         loss_press_id = uuid.uuid4().hex
@@ -484,16 +565,17 @@ def main() -> int:
             lambda fields: fields.get("focused") == "1" and fields.get("capture") == "1",
         )
         captured_state = marker_fields(captured_state_line, STATE)
-        captured_sample = int(captured_state["sample"])
+        captured_sample = int(captured_state["sequence"])
 
         activate_main_editor_window(process.pid, deadline)
+        focus_loss_baseline = latest_state_sequence()
         focus_loss_line = wait_for_state(
-            captured_sample, "capture cancelled and cursor settings restored after owner focus loss",
+            focus_loss_baseline, "capture cancelled and cursor settings restored after owner focus loss",
             lambda fields: fields.get("focused") == "0" and fields.get("capture") == "0" and
             fields.get("cursor_mode") == normal_cursor_mode and fields.get("raw_motion_enabled") == raw_motion_before,
         )
         focus_loss_state = marker_fields(focus_loss_line, STATE)
-        focus_loss_sample = int(focus_loss_state["sample"])
+        focus_loss_sample = int(focus_loss_state["sequence"])
         focus_loss_position = coordinate(focus_loss_state, "camera_position", 3)
 
         release_id = uuid.uuid4().hex
@@ -516,13 +598,16 @@ def main() -> int:
               f"exit_code={code}; output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
         if code != 0:
             raise RuntimeError("keyboard input directed to the main editor window was not posted")
+        nonowner_action_completed_at = time.monotonic()
+        nonowner_baseline = latest_state_sequence()
         other_window_state_line = wait_for_state(
-            focus_loss_sample, "main-window keyboard input left detached camera unchanged",
+            nonowner_baseline, "main-window keyboard input left detached camera unchanged over a fresh interval",
             lambda fields: fields.get("focused") == "0" and
             sum((a - b) ** 2 for a, b in zip(coordinate(fields, "camera_position", 3), focus_loss_position)) <= 1.0e-8,
+            not_before=nonowner_action_completed_at + 0.8,
         )
         other_window_state = marker_fields(other_window_state_line, STATE)
-        other_window_sample = int(other_window_state["sample"])
+        other_window_sample = int(other_window_state["sequence"])
 
         activation_code, activation_output, activation_error = run_direct_ax(
             process.pid, operation="activate-window", window_title="Scene Viewport",
@@ -532,14 +617,19 @@ def main() -> int:
         if activation_code != 0:
             raise RuntimeError(f"detached Scene Viewport focus reacquisition failed: {activation_output.strip()!r}")
         focused_title = parse_window_activation(activation_output, process.pid, "Scene Viewport")
+        activation_completed_at = time.monotonic()
+        activation_baseline = latest_state_sequence()
         activation_state_line = wait_for_state(
-            other_window_sample, "detached Scene Viewport geometry after AX activation",
+            activation_baseline, "fresh detached Scene Viewport focus and geometry after AX activation",
             lambda fields: fields.get("owner_viewport") == detached.get("owner_viewport") and
-            fields.get("capture") == "0" and
-            all(key in fields for key in ("image_min", "image_max")),
+            fields.get("owner_window") == detached.get("owner_window") and
+            fields.get("focused") == "1" and fields.get("capture") == "0" and
+            fields.get("scene_image_ready") == "1" and has_usable_viewport_geometry(fields) and
+            "owner_cursor" in fields,
+            not_before=activation_completed_at,
         )
         activation_state = marker_fields(activation_state_line, STATE)
-        activation_sample = int(activation_state["sample"])
+        activation_sample = int(activation_state["sequence"])
         image_min = coordinate(activation_state, "image_min", 2)
         image_max = coordinate(activation_state, "image_max", 2)
         if image_max[0] <= image_min[0] or image_max[1] <= image_min[1]:
@@ -569,12 +659,17 @@ def main() -> int:
               f"exit_code={code}; output={stdout[-1200:]!r}; error={stderr[-800:]!r}")
         if code != 0:
             raise RuntimeError("the deliberate viewport click used to reacquire keyboard focus was not posted")
+        focus_click_completed_at = time.monotonic()
+        focus_click_baseline = latest_state_sequence()
         keyboard_focus_line = wait_for_state(
-            activation_sample, "viewport keyboard focus reacquired on detached owner after one click",
-            lambda fields: fields.get("focused") == "1" and fields.get("keyboard_focused") == "1",
+            focus_click_baseline, "viewport keyboard focus reacquired on detached owner after one click",
+            lambda fields: fields.get("owner_viewport") == detached.get("owner_viewport") and
+            fields.get("focused") == "1" and fields.get("keyboard_focused") == "1" and
+            fields.get("image_hovered") == "1" and fields.get("hovered_viewport") == detached.get("owner_viewport"),
+            not_before=focus_click_completed_at,
         )
         keyboard_focus_state = marker_fields(keyboard_focus_line, STATE)
-        keyboard_focus_sample = int(keyboard_focus_state["sample"])
+        keyboard_focus_sample = int(keyboard_focus_state["sequence"])
         keyboard_reacquire_position = coordinate(keyboard_focus_state, "camera_position", 3)
         reacquire_key_id = uuid.uuid4().hex
         code, stdout, stderr = run_bounded_command(
@@ -585,23 +680,32 @@ def main() -> int:
               f"exit_code={code}; output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
         if code != 0:
             raise RuntimeError("keyboard input after detached-owner focus reacquisition was not posted")
+        reacquire_key_completed_at = time.monotonic()
+        reacquire_key_baseline = latest_state_sequence()
         reactivated_state_line = wait_for_state(
-            keyboard_focus_sample, "camera navigation resumed after detached-owner focus reacquisition",
+            reacquire_key_baseline, "camera navigation resumed after detached-owner focus reacquisition",
             lambda fields: fields.get("focused") == "1" and fields.get("keyboard_focused") == "1" and
             sum((a - b) ** 2 for a, b in zip(coordinate(fields, "camera_position", 3), keyboard_reacquire_position)) > 1.0e-6,
+            not_before=reacquire_key_completed_at,
         )
         reactivated_state = marker_fields(reactivated_state_line, STATE)
-        reactivated_sample = int(reactivated_state["sample"])
+        reactivated_sample = int(reactivated_state["sequence"])
 
         reattach_state_line = wait_for_state(
             reactivated_sample, "detached viewport geometry before reattachment",
-            lambda fields: fields.get("focused") == "1" and fields.get("capture") == "0",
+            lambda fields: fields.get("focused") == "1" and fields.get("capture") == "0" and
+            fields.get("drag_target_kind") in ("dock_tab", "floating_title_bar"),
         )
         reattach_state = marker_fields(reattach_state_line, STATE)
-        reattach_start_x, reattach_start_y = coordinate(reattach_state, "title_center", 2)
-        tab_min_x, tab_min_y, tab_max_x, tab_max_y = coordinate(reattach_state, "dock_tab_rect", 4)
-        if not (tab_min_x <= reattach_start_x <= tab_max_x and tab_min_y <= reattach_start_y <= tab_max_y):
-            raise RuntimeError("fresh detached Scene Viewport title center is outside its observed dock tab")
+        target_rect = coordinate(reattach_state, "drag_target_rect", 4)
+        drag_displays = read_native_displays(
+            driver, timeout=min(5.0, max(0.1, deadline - time.monotonic()))
+        )
+        drag_display, visible_drag_rect, drag_point = visible_drag_target(target_rect, drag_displays)
+        reattach_start_x, reattach_start_y = drag_point
+        print(f"MACOS_SCENE_VIEWPORT_REATTACH_DRAG_TARGET=kind={reattach_state['drag_target_kind']}; "
+              f"display_id={drag_display['id']}; coordinate_space={drag_display['coordinate_space']!r}; "
+              f"target={target_rect}; visible={visible_drag_rect}; point={drag_point}")
         main_x, main_y, main_width, main_height = coordinate(reattach_state, "main_rect", 4)
         reattach_end_x = main_x + main_width * 0.5
         reattach_end_y = main_y + main_height * 0.55
@@ -618,23 +722,34 @@ def main() -> int:
         right_press_attempted = False
         reattached_line = wait_for(REATTACHED, "Scene Viewport reattached to its original main utility window")
         reattached = marker_fields(reattached_line, REATTACHED)
-        if reattached.get("main_viewport") != initial.get("main_viewport") or reattached.get("scene_image_ready") != "1":
+        if (reattached.get("main_viewport") != initial.get("main_viewport") or
+                reattached.get("scene_image_ready") != "1" or reattached.get("utility_domain") != "1" or
+                int(reattached.get("utility_dock_node", "0")) == 0 or
+                reattached.get("owner_window") != initial.get("owner_window") or
+                reattached.get("owner_native_window") != reattached.get("owner_window") or
+                reattached.get("capture") != "0"):
             raise RuntimeError(f"reattached Scene Viewport did not return to the original main owner: {reattached_line}")
         before_reattach_position = coordinate(reattach_state, "camera_position", 3)
         after_reattach_position = coordinate(reattached, "camera_position", 3)
         if sum((a - b) ** 2 for a, b in zip(before_reattach_position, after_reattach_position)) > 1.0e-6:
             raise RuntimeError("Scene Viewport camera position changed while reattaching")
+        before_reattach_forward = coordinate(reattach_state, "camera_forward", 3)
+        after_reattach_forward = coordinate(reattached, "camera_forward", 3)
+        if sum((a - b) ** 2 for a, b in zip(before_reattach_forward, after_reattach_forward)) > 1.0e-6:
+            raise RuntimeError("Scene Viewport camera orientation changed while reattaching")
         if not screenshot("macos-scene-viewport-checkpoint-reattached.png", "reattached-utility-panel"):
             raise RuntimeError("could not capture the reattached utility-panel screenshot evidence")
 
+        reattached_state_baseline = latest_state_sequence()
         reattached_state_line = wait_for_state(
-            0, "main utility owner ready after Scene Viewport reattachment",
+            reattached_state_baseline, "main utility owner ready after Scene Viewport reattachment",
             lambda fields: fields.get("owner_viewport") == initial.get("main_viewport") and
             fields.get("focused") == "1" and fields.get("capture") == "0" and
+            fields.get("utility_domain") == "1" and int(fields.get("utility_dock_node", "0")) != 0 and
             all(key in fields for key in ("image_min", "image_max")),
         )
         reattached_state = marker_fields(reattached_state_line, STATE)
-        reattached_state_sample = int(reattached_state["sample"])
+        reattached_state_sample = int(reattached_state["sequence"])
         reattached_image_min = coordinate(reattached_state, "image_min", 2)
         reattached_image_max = coordinate(reattached_state, "image_max", 2)
         reattached_displays = read_native_displays(
@@ -663,13 +778,17 @@ def main() -> int:
               f"output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
         if code != 0:
             raise RuntimeError("the single reattached viewport focus click was not posted")
+        reattached_click_completed_at = time.monotonic()
+        reattached_click_baseline = latest_state_sequence()
         reattached_focus_line = wait_for_state(
-            reattached_state_sample, "reattached viewport keyboard focus after one image click",
+            reattached_click_baseline, "reattached viewport keyboard focus after one image click",
             lambda fields: fields.get("owner_viewport") == initial.get("main_viewport") and
-            fields.get("focused") == "1" and fields.get("keyboard_focused") == "1",
+            fields.get("focused") == "1" and fields.get("keyboard_focused") == "1" and
+            fields.get("image_hovered") == "1" and fields.get("hovered_viewport") == initial.get("main_viewport"),
+            not_before=reattached_click_completed_at,
         )
         reattached_focus = marker_fields(reattached_focus_line, STATE)
-        reattached_focus_sample = int(reattached_focus["sample"])
+        reattached_focus_sample = int(reattached_focus["sequence"])
         reattached_camera_position = coordinate(reattached_focus, "camera_position", 3)
         reattached_key_id = uuid.uuid4().hex
         code, stdout, stderr = run_bounded_command(
@@ -680,6 +799,8 @@ def main() -> int:
               f"exit_code={code}; output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
         if code != 0:
             raise RuntimeError("the bounded reattached-owner keyboard input was not posted")
+        reattached_key_completed_at = time.monotonic()
+        reattached_key_baseline = latest_state_sequence()
         reattached_input_line = wait_for(REATTACHED_INPUT, "production camera translation through the reattached main owner")
         reattached_input = marker_fields(reattached_input_line, REATTACHED_INPUT)
         if reattached_input.get("owner_viewport") != initial.get("main_viewport") or reattached_input.get("keyboard_focused") != "1":
@@ -763,7 +884,8 @@ def main() -> int:
         if log_path.is_file():
             print(log_path.read_text(encoding="utf-8", errors="replace"), file=sys.stderr)
         return 1
-    print("MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=PASS; Scene Viewport detached into a secondary native window, actual right-drag changed the production camera, and the main window closed normally")
+    print("MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=PASS; detached input, focus recovery, pointer-driven utility reattachment, "
+          "preserved camera state, resumed navigation, and orderly exit all completed")
     return 0
 
 

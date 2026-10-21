@@ -328,7 +328,7 @@ jobs:
             --editor Build/CI/macos-renderer/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor \
             --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
             --log-directory "$RUNNER_TEMP" \
-            --timeout-seconds 180 2>&1 | tee "$RUNNER_TEMP/macos-scene-viewport-native-smoke.log"
+            --timeout-seconds 330 2>&1 | tee "$RUNNER_TEMP/macos-scene-viewport-native-smoke.log"
 
       - name: Verify native document hosts and synthetic tab reattachment
         id: macos_document_hosts

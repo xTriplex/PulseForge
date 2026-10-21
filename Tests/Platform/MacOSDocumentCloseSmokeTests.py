@@ -101,6 +101,15 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 scene_viewport_smoke.coordinate({"point": raw}, "point", 2)
 
+    def test_post_activation_viewport_geometry_must_belong_to_its_native_owner(self) -> None:
+        usable = {
+            "image_min": "110,120", "image_max": "500,400", "owner_native_rect": "100,80,600,400"
+        }
+        outside = {**usable, "image_max": "710,400"}
+        self.assertTrue(scene_viewport_smoke.has_usable_viewport_geometry(usable))
+        self.assertFalse(scene_viewport_smoke.has_usable_viewport_geometry(outside))
+        self.assertFalse(scene_viewport_smoke.has_usable_viewport_geometry({"image_min": "0,0"}))
+
     def test_camera_geometry_requires_a_sample_emitted_after_window_activation(self) -> None:
         prior = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT; sample=4; stable_seconds=1.5"
         fresh = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT; sample=5; stable_seconds=0.8"
@@ -174,6 +183,31 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
         self.assertEqual(display["id"], 2)
         self.assertEqual(minimum, (424.0, 24.0))
         self.assertEqual(maximum, (826.0, 276.0))
+
+    def test_floating_title_bar_drag_target_uses_global_event_coordinates(self) -> None:
+        display, visible, point = scene_viewport_smoke.visible_drag_target(
+            (-1600.0, 40.0, -1240.0, 68.0),
+            [{"id": 3, "x": -1920, "y": 0, "width": 1920, "height": 1080, "backing_scale": 2.0}],
+        )
+        self.assertEqual(display["id"], 3)
+        self.assertEqual(visible, (-1600.0, 40.0, -1240.0, 68.0))
+        self.assertEqual(point, (-1420.0, 54.0))
+
+    def test_dock_tab_drag_target_uses_only_visible_noncontrol_region(self) -> None:
+        display, visible, point = scene_viewport_smoke.visible_drag_target(
+            (300.0, 90.0, 430.0, 116.0),
+            [{"id": 1, "x": 0, "y": 0, "width": 400, "height": 300, "backing_scale": 1.0}],
+        )
+        self.assertEqual(display["id"], 1)
+        self.assertEqual(visible, (300.0, 90.0, 400.0, 116.0))
+        self.assertEqual(point, (350.0, 103.0))
+
+    def test_drag_target_rejects_empty_or_fully_offscreen_geometry(self) -> None:
+        displays = [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}]
+        with self.assertRaisesRegex(ValueError, "empty"):
+            scene_viewport_smoke.visible_drag_target((20.0, 20.0, 20.0, 30.0), displays)
+        with self.assertRaisesRegex(ValueError, "no usable visible region"):
+            scene_viewport_smoke.visible_drag_target((1100.0, 20.0, 1200.0, 50.0), displays)
 
 
 class DirtyCloseProtocolTests(unittest.TestCase):

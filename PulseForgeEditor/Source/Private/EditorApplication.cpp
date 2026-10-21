@@ -6175,11 +6175,18 @@ namespace
 			ImGuiViewport* OwnerViewport = ImGui::GetWindowViewport();
 			ImGuiViewport* MainViewport = ImGui::GetMainViewport();
 			GLFWwindow* OwnerWindow = OwnerViewport ? static_cast<GLFWwindow*>(OwnerViewport->PlatformHandle) : nullptr;
-			if (!OwnerViewport || !MainViewport || !OwnerWindow) return;
+			if (!OwnerViewport || !MainViewport) return;
+			if (!OwnerWindow)
+			{
+				PulseForgeEditor::Detail::SceneViewportNativeSmokeObservation MissingOwnerObservation;
+				MissingOwnerObservation.MainViewportID = MainViewport->ID;
+				MissingOwnerObservation.OwnerViewportID = OwnerViewport->ID;
+				MissingOwnerObservation.ImGuiFrameNumber = ImGui::GetFrameCount();
+				MissingOwnerObservation.ImGuiTime = ImGui::GetTime();
+				if (auto Marker = m_SceneViewportNativeSmoke->ObserveState(MissingOwnerObservation)) PF_INFO("{}", *Marker);
+				return;
+			}
 
-			const ImVec2 WindowPosition = ImGui::GetWindowPos();
-			const ImVec2 WindowSize = ImGui::GetWindowSize();
-			const float TitleHeight = ImGui::GetFrameHeight();
 			const float TearOffX = MainViewport->Pos.x + MainViewport->Size.x + 40.0f;
 			const auto Forward = m_EditorCamera.GetForward();
 			PulseForgeEditor::Detail::SceneViewportNativeSmokeObservation Observation;
@@ -6221,7 +6228,6 @@ namespace
 			double OwnerCursorY = 0.0;
 			glfwGetCursorPos(OwnerWindow, &OwnerCursorX, &OwnerCursorY);
 			Observation.OwnerCursorPosition = { static_cast<float>(OwnerCursorX), static_cast<float>(OwnerCursorY) };
-			Observation.TitleCenter = { WindowPosition.x + WindowSize.x * 0.5f, WindowPosition.y + TitleHeight * 0.5f };
 			ImGuiWindow* SceneWindow = ImGui::GetCurrentWindow();
 			ImGuiTabBar* TabBar = SceneWindow && SceneWindow->DockNode ? SceneWindow->DockNode->TabBar : nullptr;
 			if (SceneWindow && TabBar)
@@ -6238,14 +6244,46 @@ namespace
 					if (TabMaximumX - TabMinimumX < 12.0f || TabMaximumY <= TabMinimumY) break;
 					Observation.DockTabReady = true;
 					Observation.DockTabRect = { TabMinimumX, TabMinimumY, TabMaximumX, TabMaximumY };
-					Observation.TitleCenter = { (TabMinimumX + TabMaximumX) * 0.5f, (TabMinimumY + TabMaximumY) * 0.5f };
+					float DragMaximumX = TabMaximumX - ImGui::GetStyle().FramePadding.x;
+					if (SceneWindow->HasCloseButton && !(Tab.Flags & ImGuiTabItemFlags_NoCloseButton))
+						DragMaximumX -= ImGui::GetFontSize() + ImGui::GetStyle().ItemInnerSpacing.x;
+					Observation.DragTargetRect = { TabMinimumX + ImGui::GetStyle().FramePadding.x,
+						TabMinimumY + 2.0f, DragMaximumX, TabMaximumY - 2.0f };
+					Observation.DragTargetKind = PulseForgeEditor::Detail::SceneViewportDragTargetKind::DockTab;
 					break;
 				}
+			}
+			if (SceneWindow && Observation.DragTargetKind == PulseForgeEditor::Detail::SceneViewportDragTargetKind::Unavailable)
+			{
+				const ImRect TitleBar = SceneWindow->TitleBarRect();
+				const ImGuiStyle& Style = ImGui::GetStyle();
+				float DragMinimumX = TitleBar.Min.x + Style.FramePadding.x;
+				float DragMaximumX = TitleBar.Max.x - Style.FramePadding.x;
+				if (!(SceneWindow->Flags & ImGuiWindowFlags_NoCollapse) && Style.WindowMenuButtonPosition == ImGuiDir_Left)
+					DragMinimumX += ImGui::GetFontSize() + Style.ItemInnerSpacing.x;
+				if (!(SceneWindow->Flags & ImGuiWindowFlags_NoCollapse) && Style.WindowMenuButtonPosition == ImGuiDir_Right)
+					DragMaximumX -= ImGui::GetFontSize() + Style.ItemInnerSpacing.x;
+				if (SceneWindow->HasCloseButton)
+					DragMaximumX -= ImGui::GetFontSize() + Style.ItemInnerSpacing.x;
+				Observation.DragTargetRect = { DragMinimumX, TitleBar.Min.y + 2.0f, DragMaximumX, TitleBar.Max.y - 2.0f };
+				Observation.DragTargetKind = PulseForgeEditor::Detail::SceneViewportDragTargetKind::FloatingTitleBar;
+			}
+			if (Observation.DragTargetRect[2] > Observation.DragTargetRect[0] &&
+				Observation.DragTargetRect[3] > Observation.DragTargetRect[1])
+			{
+				Observation.TitleCenter = { (Observation.DragTargetRect[0] + Observation.DragTargetRect[2]) * 0.5f,
+					(Observation.DragTargetRect[1] + Observation.DragTargetRect[3]) * 0.5f };
 			}
 			Observation.ImageMinimum = { m_ViewportImageRect.Minimum.x, m_ViewportImageRect.Minimum.y };
 			Observation.ImageMaximum = { m_ViewportImageRect.Maximum.x, m_ViewportImageRect.Maximum.y };
 			Observation.MainWindowRect = { MainViewport->Pos.x, MainViewport->Pos.y, MainViewport->Size.x, MainViewport->Size.y };
 			Observation.TearOffPoint = { TearOffX, MainViewport->Pos.y + MainViewport->Size.y * 0.5f };
+			if (SceneWindow)
+			{
+				Observation.UtilityDockingDomainValid = PulseForgeEditor::IsEditorWindowClassInDomain(
+					SceneWindow->WindowClass, PulseForgeEditor::EditorDockingDomain::UtilityPanel);
+				Observation.UtilityDockNodeID = SceneWindow->DockId;
+			}
 			if (auto Marker = m_SceneViewportNativeSmoke->Observe(Observation)) PF_INFO("{}", *Marker);
 			if (auto Marker = m_SceneViewportNativeSmoke->ObserveInput(Observation)) PF_INFO("{}", *Marker);
 			if (auto Marker = m_SceneViewportNativeSmoke->ObserveState(Observation)) PF_INFO("{}", *Marker);

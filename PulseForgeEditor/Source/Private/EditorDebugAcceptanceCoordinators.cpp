@@ -634,7 +634,13 @@ namespace PulseForgeEditor::Detail
 		std::ostringstream Stream;
 		Stream << std::fixed << std::setprecision(1) << "title_center=" << Observation.TitleCenter[0] << ','
 			   << Observation.TitleCenter[1] << "; dock_tab_rect=" << Observation.DockTabRect[0] << ',' << Observation.DockTabRect[1]
-			   << ',' << Observation.DockTabRect[2] << ',' << Observation.DockTabRect[3] << "; image_min="
+			   << ',' << Observation.DockTabRect[2] << ',' << Observation.DockTabRect[3] << "; drag_target_rect="
+			   << Observation.DragTargetRect[0] << ',' << Observation.DragTargetRect[1] << ','
+			   << Observation.DragTargetRect[2] << ',' << Observation.DragTargetRect[3] << "; drag_target_kind="
+			   << (Observation.DragTargetKind == SceneViewportDragTargetKind::DockTab ? "dock_tab" :
+				   Observation.DragTargetKind == SceneViewportDragTargetKind::FloatingTitleBar ? "floating_title_bar" : "unavailable")
+			   << "; utility_domain=" << Observation.UtilityDockingDomainValid << "; utility_dock_node="
+			   << Observation.UtilityDockNodeID << "; image_min="
 			   << Observation.ImageMinimum[0] << ',' << Observation.ImageMinimum[1]
 			   << "; image_max=" << Observation.ImageMaximum[0] << ',' << Observation.ImageMaximum[1] << "; main_rect="
 			   << Observation.MainWindowRect[0] << ',' << Observation.MainWindowRect[1] << ',' << Observation.MainWindowRect[2] << ','
@@ -658,18 +664,62 @@ namespace PulseForgeEditor::Detail
 		const uint32_t ExpectedViewportID = ReattachedInput ? m_MainViewportID : m_DetachedViewportID;
 		const uintptr_t ExpectedWindow = ReattachedInput ? m_MainWindow : m_DetachedWindow;
 		if (m_Phase < Phase::AwaitingCameraCapture || m_Phase == Phase::Complete ||
-			Observation.OwnerViewportID != ExpectedViewportID || Observation.OwnerWindow != ExpectedWindow ||
-			m_StateSamples >= 80 || !std::isfinite(Observation.ImGuiTime))
+			m_Phase == Phase::ObservationExpired || !std::isfinite(Observation.ImGuiTime))
 			return std::nullopt;
-		if (m_LastStateSampleTime >= 0.0 && Observation.ImGuiTime - m_LastStateSampleTime < 0.2) return std::nullopt;
-		m_LastStateSampleTime = Observation.ImGuiTime;
-		++m_StateSamples;
+
+		constexpr double ObservationDeadlineSeconds = 270.0;
+		constexpr double StateHeartbeatSeconds = 0.75;
+		constexpr double CameraMotionObservationIntervalSeconds = 0.1;
+		if (m_SmokeStartedTime < 0.0) m_SmokeStartedTime = Observation.ImGuiTime;
+		const double ElapsedSeconds = Observation.ImGuiTime - m_SmokeStartedTime;
+		if (ElapsedSeconds >= ObservationDeadlineSeconds)
+		{
+			m_Phase = Phase::ObservationExpired;
+			std::ostringstream Stream;
+			Stream << std::fixed << std::setprecision(1)
+				   << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=OBSERVATION_EXPIRED; elapsed_seconds=" << ElapsedSeconds
+				   << "; last_sequence=" << m_StateSequence << "; owner_viewport=" << Observation.OwnerViewportID
+				   << "; owner_window=0x" << std::hex << Observation.OwnerWindow << std::dec;
+			return Stream.str();
+		}
+		if (Observation.OwnerViewportID != ExpectedViewportID || Observation.OwnerWindow != ExpectedWindow)
+			return std::nullopt;
+
+		const bool IdentityChanged = !m_HasStateSnapshot || Observation.OwnerViewportID != m_LastStateViewportID ||
+			Observation.OwnerWindow != m_LastStateWindow;
+		const bool FocusChanged = !m_HasStateSnapshot || Observation.OwnerFocused != m_LastOwnerFocused ||
+			Observation.CameraCaptureActive != m_LastCameraCaptureActive ||
+			Observation.ViewportKeyboardFocused != m_LastViewportKeyboardFocused ||
+			Observation.ImageHovered != m_LastImageHovered || Observation.SceneImageReady != m_LastSceneImageReady;
+		const bool CameraMoved = !m_HasStateSnapshot ||
+			Distance(m_LastObservedCameraPosition, Observation.CameraPosition) > 0.005f;
+		const bool MotionCanBeReported = m_LastStateObservationTime < 0.0 ||
+			Observation.ImGuiTime - m_LastStateObservationTime >= CameraMotionObservationIntervalSeconds;
+		const bool HeartbeatDue = m_LastStateObservationTime < 0.0 ||
+			Observation.ImGuiTime - m_LastStateObservationTime >= StateHeartbeatSeconds;
+		if (m_HasStateSnapshot && !IdentityChanged && !FocusChanged && !(CameraMoved && MotionCanBeReported) && !HeartbeatDue)
+			return std::nullopt;
+
+		m_HasStateSnapshot = true;
+		m_LastStateViewportID = Observation.OwnerViewportID;
+		m_LastStateWindow = Observation.OwnerWindow;
+		m_LastOwnerFocused = Observation.OwnerFocused;
+		m_LastCameraCaptureActive = Observation.CameraCaptureActive;
+		m_LastViewportKeyboardFocused = Observation.ViewportKeyboardFocused;
+		m_LastImageHovered = Observation.ImageHovered;
+		m_LastSceneImageReady = Observation.SceneImageReady;
+		m_LastObservedCameraPosition = Observation.CameraPosition;
+		m_LastStateObservationTime = Observation.ImGuiTime;
+		++m_StateSequence;
 		std::ostringstream Stream;
-		Stream << std::fixed << std::setprecision(4) << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=STATE; sample=" << m_StateSamples
-			   << "; frame=" << Observation.ImGuiFrameNumber << "; owner_viewport=" << Observation.OwnerViewportID
+		Stream << std::fixed << std::setprecision(4) << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=STATE; sequence=" << m_StateSequence
+			   << "; elapsed_seconds=" << ElapsedSeconds << "; frame=" << Observation.ImGuiFrameNumber
+			   << "; owner_viewport=" << Observation.OwnerViewportID
 			   << "; owner_window=0x" << std::hex << Observation.OwnerWindow << std::dec
 			   << "; focused=" << Observation.OwnerFocused << "; capture=" << Observation.CameraCaptureActive
-			   << "; keyboard_focused=" << Observation.ViewportKeyboardFocused << "; cursor_mode=" << Observation.CursorMode
+			   << "; keyboard_focused=" << Observation.ViewportKeyboardFocused
+			   << "; image_hovered=" << Observation.ImageHovered << "; scene_image_ready=" << Observation.SceneImageReady
+			   << "; hovered_viewport=" << Observation.ImGuiHoveredViewportID << "; cursor_mode=" << Observation.CursorMode
 			   << "; raw_motion_supported=" << Observation.RawMotionSupported << "; raw_motion_enabled=" << Observation.RawMotionEnabled
 			   << "; camera_position=" << Observation.CameraPosition[0] << ',' << Observation.CameraPosition[1] << ','
 			   << Observation.CameraPosition[2] << "; camera_forward=" << Observation.CameraForward[0] << ','
@@ -680,7 +730,16 @@ namespace PulseForgeEditor::Detail
 			   << "; main_rect=" << Observation.MainWindowRect[0] << ',' << Observation.MainWindowRect[1] << ','
 			   << Observation.MainWindowRect[2] << ',' << Observation.MainWindowRect[3]
 			   << "; image_min=" << Observation.ImageMinimum[0] << ',' << Observation.ImageMinimum[1]
-			   << "; image_max=" << Observation.ImageMaximum[0] << ',' << Observation.ImageMaximum[1];
+			   << "; image_max=" << Observation.ImageMaximum[0] << ',' << Observation.ImageMaximum[1]
+			   << "; owner_native_rect=" << Observation.OwnerNativePosition[0] << ',' << Observation.OwnerNativePosition[1] << ','
+			   << Observation.OwnerNativeSize[0] << ',' << Observation.OwnerNativeSize[1]
+			   << "; owner_cursor=" << Observation.OwnerCursorPosition[0] << ',' << Observation.OwnerCursorPosition[1]
+			   << "; drag_target_rect=" << Observation.DragTargetRect[0] << ',' << Observation.DragTargetRect[1] << ','
+			   << Observation.DragTargetRect[2] << ',' << Observation.DragTargetRect[3]
+			   << "; drag_target_kind=" << (Observation.DragTargetKind == SceneViewportDragTargetKind::DockTab ? "dock_tab" :
+				   Observation.DragTargetKind == SceneViewportDragTargetKind::FloatingTitleBar ? "floating_title_bar" : "unavailable")
+			   << "; utility_domain=" << Observation.UtilityDockingDomainValid
+			   << "; utility_dock_node=" << Observation.UtilityDockNodeID;
 		return Stream.str();
 	}
 
@@ -756,13 +815,16 @@ namespace PulseForgeEditor::Detail
 	std::optional<std::string> SceneViewportNativeSmokeCoordinator::Observe(
 		const SceneViewportNativeSmokeObservation& Observation)
 	{
-		if (!IsEnabled() || m_Phase == Phase::Complete || !Observation.SceneImageReady || Observation.MainViewportID == 0 ||
+		if (!IsEnabled() || m_Phase == Phase::Complete || m_Phase == Phase::ObservationExpired ||
+			!Observation.SceneImageReady || Observation.MainViewportID == 0 ||
 			Observation.OwnerViewportID == 0 || Observation.OwnerWindow == 0 || !IsFinite(Observation.CameraForward))
 			return std::nullopt;
 
 		if (m_Phase == Phase::AwaitingMainScene)
 		{
 			if (Observation.OwnerViewportID != Observation.MainViewportID || !Observation.DockTabReady) return std::nullopt;
+			if (!std::isfinite(Observation.ImGuiTime)) return std::nullopt;
+			m_SmokeStartedTime = Observation.ImGuiTime;
 			m_MainViewportID = Observation.MainViewportID;
 			m_MainWindow = Observation.OwnerWindow;
 			m_Phase = Phase::AwaitingNativeDetach;
@@ -789,15 +851,20 @@ namespace PulseForgeEditor::Detail
 
 		if (m_Phase == Phase::AwaitingReattachment)
 		{
-			if (Observation.OwnerViewportID != m_MainViewportID || Observation.OwnerWindow != m_MainWindow) return std::nullopt;
+			if (Observation.OwnerViewportID != m_MainViewportID || Observation.OwnerWindow != m_MainWindow ||
+				!Observation.UtilityDockingDomainValid || Observation.UtilityDockNodeID == 0 ||
+				Observation.DragTargetKind != SceneViewportDragTargetKind::DockTab)
+				return std::nullopt;
 			m_Phase = Phase::AwaitingReattachedCameraInput;
 			m_ReattachedCameraPosition = Observation.CameraPosition;
-			m_StateSamples = 0;
-			m_LastStateSampleTime = -1.0;
 			std::ostringstream Stream;
 			Stream << std::fixed << std::setprecision(4) << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=REATTACHED; main_viewport="
 				   << m_MainViewportID << "; owner_window=0x" << std::hex << m_MainWindow << std::dec
-				   << "; scene_image_ready=" << Observation.SceneImageReady << "; camera_position="
+				   << "; owner_native_window=0x" << std::hex << Observation.OwnerWindow << std::dec
+				   << "; scene_image_ready=" << Observation.SceneImageReady
+				   << "; capture=" << Observation.CameraCaptureActive
+				   << "; utility_domain=" << Observation.UtilityDockingDomainValid
+				   << "; utility_dock_node=" << Observation.UtilityDockNodeID << "; camera_position="
 				   << Observation.CameraPosition[0] << ',' << Observation.CameraPosition[1] << ',' << Observation.CameraPosition[2]
 				   << "; camera_forward=" << Observation.CameraForward[0] << ',' << Observation.CameraForward[1] << ','
 				   << Observation.CameraForward[2] << "; " << FormatGeometry(Observation);
@@ -835,7 +902,7 @@ namespace PulseForgeEditor::Detail
 		{
 			m_Phase = Phase::AwaitingReattachment;
 			std::ostringstream Stream;
-			Stream << std::fixed << std::setprecision(4) << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=PASS; main_viewport=" << m_MainViewportID
+			Stream << std::fixed << std::setprecision(4) << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=CAMERA_DRAG_PASS; main_viewport=" << m_MainViewportID
 				   << "; detached_viewport=" << m_DetachedViewportID << "; owner_window=0x" << std::hex << m_DetachedWindow << std::dec
 				   << "; right-button capture began and ended on the detached owner; camera_forward_before="
 				   << m_InitialCameraForward[0] << ',' << m_InitialCameraForward[1] << ',' << m_InitialCameraForward[2]

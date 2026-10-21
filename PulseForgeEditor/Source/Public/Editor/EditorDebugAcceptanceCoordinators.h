@@ -266,6 +266,13 @@ namespace PulseForgeEditor::Detail
 		std::string m_FailureReason;
 	};
 
+	enum class SceneViewportDragTargetKind : uint8_t
+	{
+		Unavailable,
+		DockTab,
+		FloatingTitleBar
+	};
+
 	struct SceneViewportNativeSmokeObservation
 	{
 		uint32_t MainViewportID = 0;
@@ -293,6 +300,10 @@ namespace PulseForgeEditor::Detail
 		std::array<float, 2> ImGuiMousePosition{};
 		std::array<float, 2> TitleCenter{};
 		std::array<float, 4> DockTabRect{};
+		std::array<float, 4> DragTargetRect{};
+		SceneViewportDragTargetKind DragTargetKind = SceneViewportDragTargetKind::Unavailable;
+		bool UtilityDockingDomainValid = false;
+		uint32_t UtilityDockNodeID = 0;
 		std::array<float, 2> ImageMinimum{};
 		std::array<float, 2> ImageMaximum{};
 		std::array<float, 4> MainWindowRect{};
@@ -322,7 +333,8 @@ namespace PulseForgeEditor::Detail
 			AwaitingCameraRelease,
 			AwaitingReattachment,
 			AwaitingReattachedCameraInput,
-			Complete
+			Complete,
+			ObservationExpired
 		};
 
 		[[nodiscard]] static bool IsFinite(const std::array<float, 3>& Vector) noexcept;
@@ -336,15 +348,25 @@ namespace PulseForgeEditor::Detail
 		uintptr_t m_DetachedWindow = 0;
 		std::array<float, 3> m_InitialCameraForward{};
 		std::array<float, 3> m_ReattachedCameraPosition{};
+		std::array<float, 3> m_LastObservedCameraPosition{};
 		bool m_CaptureWasObserved = false;
 		bool m_NormalReleaseObserved = false;
 		bool m_LastRightButtonDown = false;
+		bool m_HasStateSnapshot = false;
+		bool m_LastOwnerFocused = false;
+		bool m_LastCameraCaptureActive = false;
+		bool m_LastViewportKeyboardFocused = false;
+		bool m_LastImageHovered = false;
+		bool m_LastSceneImageReady = false;
 		uint32_t m_InputSamples = 0;
 		uint32_t m_CameraGeometryReadySamples = 0;
-		uint32_t m_StateSamples = 0;
+		uint64_t m_StateSequence = 0;
 		double m_GeometryStableSince = -1.0;
 		double m_LastGeometryReadyTime = -1.0;
-		double m_LastStateSampleTime = -1.0;
+		double m_SmokeStartedTime = -1.0;
+		double m_LastStateObservationTime = -1.0;
+		uint32_t m_LastStateViewportID = 0;
+		uintptr_t m_LastStateWindow = 0;
 		std::array<float, 8> m_LastCameraGeometry{};
 	};
 } // namespace PulseForgeEditor::Detail
