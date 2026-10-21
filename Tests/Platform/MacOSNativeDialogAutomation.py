@@ -60,6 +60,21 @@ def open_button_state_ready(output: str, fixture_pid: int, panel_title: str) -> 
     return fields.get("matches") == "1" and fields.get("enabled") == "true" and fields.get("enabled_error") == "0"
 
 
+def open_panel_dismissed(output: str, panel_title: str) -> bool:
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=open-button-state-error; stage=window-selection;")
+    ]
+    if len(results) != 1:
+        return False
+    fields = dict(
+        part.split("=", 1)
+        for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ")
+        if "=" in part
+    )
+    return fields.get("requested_title") == panel_title and fields.get("matches") == "0"
+
+
 def open_file_selection_ready(output: str, expected_name: str) -> bool:
     results = [
         line for line in output.splitlines()
@@ -79,6 +94,210 @@ def open_file_selection_ready(output: str, expected_name: str) -> bool:
         and fields.get("ax_error") == "0"
         and fields.get("selected") == "true"
     )
+
+
+def open_file_action_dispatched(output: str, expected_name: str) -> bool:
+    dispatches = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_DISPATCH attempted=true; operation=open-file;")
+    ]
+    if len(dispatches) != 1:
+        return False
+    dispatch_fields = dict(
+        part.split("=", 1)
+        for part in dispatches[0].removeprefix("DIRECT_AX_DISPATCH ").split("; ")
+        if "=" in part
+    )
+    if dispatch_fields.get("name") != expected_name or dispatch_fields.get("advertised_action") != "AXOpen":
+        return False
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=open-file-action-returned; operation=open-file;")
+    ]
+    if len(results) > 1:
+        return False
+    if not results:
+        return True
+    fields = dict(
+        part.split("=", 1)
+        for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ")
+        if "=" in part
+    )
+    return (
+        fields.get("role") == "AXTextField"
+        and fields.get("name") == expected_name
+    )
+
+
+def open_file_action_error(output: str, expected_name: str) -> int | None:
+    dispatches = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_DISPATCH attempted=true; operation=open-file;")
+    ]
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=open-file-action-returned; operation=open-file;")
+    ]
+    if len(dispatches) != 1 or len(results) != 1:
+        return None
+    dispatch_fields = dict(
+        part.split("=", 1) for part in dispatches[0].removeprefix("DIRECT_AX_DISPATCH ").split("; ") if "=" in part
+    )
+    result_fields = dict(
+        part.split("=", 1) for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ") if "=" in part
+    )
+    if dispatch_fields.get("name") != expected_name or dispatch_fields.get("advertised_action") != "AXOpen":
+        return None
+    try:
+        ax_error = int(result_fields["ax_error"])
+    except (KeyError, ValueError):
+        return None
+    if result_fields.get("role") != "AXTextField" or result_fields.get("name") != expected_name:
+        return None
+    return ax_error
+
+
+def open_file_confirm_action_dispatched(output: str, expected_name: str) -> bool:
+    dispatches = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_DISPATCH attempted=true; operation=confirm-element;")
+    ]
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=confirm-element-action-returned; operation=confirm-element;")
+    ]
+    if len(dispatches) != 1 or len(results) != 1:
+        return False
+    dispatch_fields = dict(
+        part.split("=", 1) for part in dispatches[0].removeprefix("DIRECT_AX_DISPATCH ").split("; ") if "=" in part
+    )
+    result_fields = dict(
+        part.split("=", 1) for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ") if "=" in part
+    )
+    return (
+        dispatch_fields.get("role") == "AXTextField"
+        and dispatch_fields.get("name") == expected_name
+        and dispatch_fields.get("advertised_action") == "AXConfirm"
+        and result_fields.get("role") == "AXTextField"
+        and result_fields.get("name") == expected_name
+        and _is_integer(result_fields.get("ax_error", ""))
+    )
+
+
+def open_file_element_observed(output: str, expected_name: str) -> bool:
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=target-element-observed; operation=observe-element;")
+    ]
+    if len(results) != 1:
+        return False
+    fields = dict(part.split("=", 1) for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ") if "=" in part)
+    return (
+        fields.get("role") == "AXTextField"
+        and fields.get("name") == expected_name
+        and fields.get("advertised_action") == "AXConfirm"
+    )
+
+
+def _is_integer(value: str) -> bool:
+    try:
+        int(value)
+        return True
+    except ValueError:
+        return False
+
+
+def wait_for_open_file_element(fixture_pid: int, panel_title: str, file_name: str, deadline: float) -> str:
+    last_output = ""
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        code, output, error = run_direct_ax(
+            fixture_pid,
+            operation="observe-element",
+            window_title=panel_title,
+            control_name=file_name,
+            timeout=min(6.0, max(0.1, remaining)),
+        )
+        last_output = output + error
+        if code == 0 and open_file_element_observed(last_output, file_name):
+            result_line = next(
+                line for line in last_output.splitlines()
+                if line.startswith("DIRECT_AX_RESULT status=target-element-observed;")
+            )
+            print(
+                f"NFD_OPEN_FILE_TARGET=READY; pid={fixture_pid}; panel={panel_title!r}; "
+                f"file={file_name!r}; {result_line}",
+                flush=True,
+            )
+            return last_output
+        result_lines = [
+            line for line in last_output.splitlines()
+            if line.startswith("DIRECT_AX_RESULT status=control-selection-error; operation=observe-element;")
+        ]
+        result_fields = {}
+        if len(result_lines) == 1:
+            result_fields = dict(
+                part.split("=", 1)
+                for part in result_lines[0].removeprefix("DIRECT_AX_RESULT ").split("; ")
+                if "=" in part
+            )
+        missing_exact_file = (
+            code == 8
+            and result_fields.get("matches") == "0"
+        )
+        if code not in (0, 124) and not missing_exact_file:
+            raise RuntimeError(
+                f"Exact Open-panel file observation failed; exit_code={code}; output={last_output[-2400:]!r}"
+            )
+        time.sleep(min(0.15, max(0.0, deadline - time.monotonic())))
+    raise RuntimeError(
+        f"Timed out waiting for the exact Open-panel file in the visible directory column; "
+        f"file={file_name!r}; last_snapshot={last_output[-2400:]!r}"
+    )
+
+
+def navigate_open_panel_to_folder(fixture_pid: int, panel_title: str, folder: Path, deadline: float) -> str:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("Open panel folder-navigation deadline expired before dispatch")
+    shortcut = run_keyboard_input("--go-to-folder", fixture_pid, timeout=min(5.0, remaining))
+    print(
+        f"NFD_GO_TO_FOLDER_SHORTCUT=TRANSPORT_RETURNED; action_id={shortcut}; target_pid={fixture_pid}",
+        flush=True,
+    )
+    sheet = run_direct_ax_until(
+        fixture_pid,
+        panel_title,
+        deadline,
+        go_to_folder_path_field_visible,
+        "the Open panel Go to Folder path field",
+        operation="snapshot",
+    )
+    if "\n" in str(folder) or "\r" in str(folder):
+        raise RuntimeError("Go to Folder path contains a line break and cannot be represented safely")
+    set_code, set_output, set_error = run_direct_ax(
+        fixture_pid,
+        operation="set-folder-path-value",
+        window_title=panel_title,
+        control_name="PathTextField",
+        control_value=str(folder),
+        timeout=min(8.0, max(0.1, deadline - time.monotonic())),
+    )
+    set_output += set_error
+    if set_code != 0 or not folder_path_field_ready(set_output, str(folder)):
+        raise RuntimeError(f"Go to Folder path was not set and focused; exit_code={set_code}; output={set_output!r}")
+    print(f"NFD_GO_TO_FOLDER_PATH=CONFIRMED; target_pid={fixture_pid}; path={str(folder)!r}; {set_output.strip()!r}")
+    return_action = run_keyboard_input("--press-return", fixture_pid, timeout=min(5.0, max(0.1, deadline - time.monotonic())))
+    print(f"NFD_GO_TO_FOLDER_CONFIRM=TRANSPORT_RETURNED; action_id={return_action}; target_pid={fixture_pid}")
+    dismissed = run_direct_ax_until(
+        fixture_pid,
+        panel_title,
+        deadline,
+        go_to_folder_sheet_dismissed,
+        "the Go to Folder sheet to dismiss after the exact path was confirmed",
+        operation="observe-go-to-folder-state",
+    )
+    return sheet + set_output + dismissed
 
 
 def run_keyboard_input(mode: str, target_pid: int, *, text: str = "", timeout: float) -> str:
@@ -139,6 +358,7 @@ def run_keyboard_input(mode: str, target_pid: int, *, text: str = "", timeout: f
 
 def wait_for_open_button(fixture_pid: int, panel_title: str, deadline: float) -> str:
     last_output = ""
+    last_complete_snapshot = ""
     while time.monotonic() < deadline:
         remaining = deadline - time.monotonic()
         code, output, error = run_direct_ax(
@@ -148,15 +368,23 @@ def wait_for_open_button(fixture_pid: int, panel_title: str, deadline: float) ->
             timeout=min(8.0, max(0.1, remaining)),
         )
         last_output = output + error
+        if code == 0:
+            last_complete_snapshot = last_output
         if code == 0 and open_button_state_ready(last_output, fixture_pid, panel_title):
+            return last_output
+        if code == 22 and open_panel_dismissed(last_output, panel_title):
             return last_output
         if code not in (0, 124):
             raise RuntimeError(f"Open panel snapshot failed while awaiting selected file; exit_code={code}; {last_output!r}")
         time.sleep(min(0.15, max(0.0, deadline - time.monotonic())))
-    raise RuntimeError(f"Open did not become enabled after filename selection; last_snapshot={last_output[-4000:]!r}")
+    raise RuntimeError(
+        "Open did not become enabled after filename selection; "
+        f"last_complete_snapshot={last_complete_snapshot[-3000:]!r}; "
+        f"last_query={last_output[-800:]!r}"
+    )
 
 
-def select_open_file(fixture_pid: int, panel_title: str, expected_path: Path, timeout: float) -> str:
+def select_open_file(fixture_pid: int, panel_title: str, expected_path: Path, timeout: float) -> tuple[int, str]:
     deadline = time.monotonic() + max(0.1, timeout)
     attempts = 0
     while time.monotonic() < deadline:
@@ -182,16 +410,22 @@ def select_open_file(fixture_pid: int, panel_title: str, expected_path: Path, ti
             f"result={next((line for line in result.splitlines() if line.startswith('DIRECT_AX_RESULT ')), 'none')}",
             flush=True,
         )
+        if open_file_action_dispatched(result, expected_path.name):
+            return code, result
         if code == 0 and "DIRECT_AX_RESULT status=selection-verified; operation=select-element;" in result:
             if not open_file_selection_ready(result, expected_path.name):
                 raise RuntimeError(
                     f"Open-file selection result did not identify the exact selected file; output={result[-2400:]!r}"
                 )
-            break
+            print(
+                f"NFD_OPEN_FILE_SELECTION=CONFIRMED; attempts={attempts}; pid={fixture_pid}; "
+                f"panel={panel_title!r}; file={expected_path.name!r}; {result.strip()!r}",
+                flush=True,
+            )
+            return code, result
 
-        # The helper exits before changing AXSelected unless it finds one exact file element.
-        # A zero-match result is therefore a read-only indication that the browser has not exposed
-        # the destination yet. Any ambiguous or timed-out action stops without a second selection.
+        # Only a zero-match result indicates that the browser has not exposed the destination yet.
+        # Any ambiguous or timed-out action stops without retrying a potentially dispatched action.
         no_matching_row = False
         if code == 8:
             matches = [
@@ -212,12 +446,7 @@ def select_open_file(fixture_pid: int, panel_title: str, expected_path: Path, ti
             f"Expected Open-file row did not become accessible before its deadline; "
             f"attempts={attempts}; output={result[-2400:]!r}"
         )
-    print(
-        f"NFD_OPEN_FILE_SELECTION=CONFIRMED; attempts={attempts}; pid={fixture_pid}; panel={panel_title!r}; "
-        f"file={expected_path.name!r}; {result.strip()!r}",
-        flush=True,
-    )
-    return result
+    raise RuntimeError("Open-file selection loop ended without a terminal result")
 
 
 def run_direct_ax_until(
@@ -649,7 +878,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             return 1, "fixture process group or output reader survived bounded deadline cleanup"
         return 1, f"native dialog fixture exhausted its {timeout_seconds}s case bound before panel automation"
     if scenario == "open-select":
-        last_navigation_step = "Open panel activation not attempted"
+        last_open_step = "Open panel activation not attempted"
         try:
             activation_code, activation_output, activation_error = run_direct_ax(
                 int(panel_process_id),
@@ -660,81 +889,136 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             activation_output += activation_error
             if activation_code != 0 or "DIRECT_AX_RESULT status=window-focused" not in activation_output:
                 raise RuntimeError(
-                    f"Open panel was not the confirmed focused AX window before Go to Folder; "
+                    f"Open panel was not the confirmed focused AX window before exact file selection; "
                     f"exit_code={activation_code}; {activation_output!r}"
                 )
             print(f"NFD_OPEN_PANEL_FOCUS=CONFIRMED; {activation_output.strip()!r}", flush=True)
 
-            # Start the bounded navigation phase after focus has been established.
-            # The prior deadline also covered activation, so a slow AX focus query
-            # could consume the entire Go To Folder observation budget before the
-            # single keyboard action was even posted.
             helper_deadline = min(deadline, time.monotonic() + 25.0)
-            action_id = run_keyboard_input(
-                "--go-to-folder", int(panel_process_id), timeout=min(5.0, remaining_seconds())
-            )
-            last_navigation_step = f"Go To Folder shortcut posted; action_id={action_id}"
-            print(f"NFD_GO_TO_FOLDER_INPUT=POSTED; action_id={action_id}; target_pid={panel_process_id}", flush=True)
-            run_direct_ax_until(
-                int(panel_process_id), panel_title, helper_deadline, go_to_folder_path_field_visible,
-                "enabled Go to Folder PathTextField",
-            )
-            last_navigation_step = "Go To Folder PathTextField observed in the expected sheet"
-            expected_directory = str(expected_path.parent)
-            automation_code, automation_output, automation_error = run_direct_ax(
-                int(panel_process_id),
-                operation="set-folder-path-value",
-                window_title=panel_title,
-                control_name="PathTextField",
-                control_value=expected_directory,
-                timeout=min(10.0, remaining_seconds()),
-            )
-            automation_output += automation_error
-            if automation_code != 0 or not folder_path_field_ready(automation_output, expected_directory):
-                last_navigation_step = (
-                    f"Go To Folder value/focus validation failed; exit_code={automation_code}; "
-                    f"output={automation_output.strip()!r}"
-                )
-                raise RuntimeError(
-                    f"Go to Folder path value/focus verification failed; exit_code={automation_code}; {automation_output!r}"
-                )
-            last_navigation_step = f"Go To Folder path value verified and focused; value={expected_directory!r}"
-            print(f"NFD_GO_TO_FOLDER_FIELD=READY; {automation_output.strip()!r}", flush=True)
-            return_action_id = run_keyboard_input(
-                "--press-return", int(panel_process_id), timeout=min(5.0, remaining_seconds())
-            )
-            last_navigation_step = f"Return key posted once; action_id={return_action_id}; field value verified"
-            print(f"NFD_GO_TO_FOLDER_RETURN=POSTED; action_id={return_action_id}; target_pid={panel_process_id}", flush=True)
-            run_direct_ax_until(
-                int(panel_process_id),
-                panel_title,
-                helper_deadline,
-                go_to_folder_sheet_dismissed,
-                "Go to Folder sheet dismissal",
-                deep_snapshot=False,
-                operation="observe-go-to-folder-state",
-            )
-            last_navigation_step = "Go To Folder sheet dismissal observed"
-            print("NFD_GO_TO_FOLDER_SHEET=DISMISSED", flush=True)
-            select_open_file(
+            selection_code, selection_output = select_open_file(
                 int(panel_process_id), panel_title, expected_path,
                 timeout=max(0.1, helper_deadline - time.monotonic())
             )
-            automation_output = wait_for_open_button(int(panel_process_id), panel_title, helper_deadline)
+            automation_code = selection_code
+            last_open_step = "exact Open-panel filename selection operation returned"
+            automation_output = selection_output
+            open_action_sent = open_file_action_dispatched(selection_output, expected_path.name)
+            open_button_confirmed = False
+            if open_action_sent:
+                ax_error = open_file_action_error(selection_output, expected_path.name)
+                if ax_error == -25205:
+                    state_code, panel_state, state_error = run_direct_ax(
+                        int(panel_process_id),
+                        operation="observe-open-button-state",
+                        window_title=panel_title,
+                        timeout=min(8.0, max(0.1, helper_deadline - time.monotonic())),
+                    )
+                    panel_state += state_error
+                    if state_code == 22 and open_panel_dismissed(panel_state, panel_title):
+                        last_open_step = "unsupported AXOpen was followed by panel dismissal; reconciling semantic result without replay"
+                    elif state_code == 0 and not open_button_state_ready(panel_state, int(panel_process_id), panel_title):
+                        automation_output += panel_state
+                        navigation = navigate_open_panel_to_folder(
+                            int(panel_process_id), panel_title, expected_path.parent, helper_deadline
+                        )
+                        automation_output += navigation
+                        file_ready = wait_for_open_file_element(
+                            int(panel_process_id), panel_title, expected_path.name, helper_deadline
+                        )
+                        automation_output += file_ready
+                        confirm_code, confirm_output, confirm_error = run_direct_ax(
+                            int(panel_process_id),
+                            operation="confirm-element",
+                            window_title=panel_title,
+                            control_name=expected_path.name,
+                            timeout=min(8.0, max(0.1, helper_deadline - time.monotonic())),
+                        )
+                        confirm_output += confirm_error
+                        automation_output += confirm_output
+                        automation_code = confirm_code
+                        if not open_file_confirm_action_dispatched(confirm_output, expected_path.name):
+                            raise RuntimeError(
+                                "The exact file did not expose one completed AXConfirm action after Go to Folder; "
+                                f"exit_code={confirm_code}; output={confirm_output[-2400:]!r}"
+                            )
+                        confirm_result = next(
+                            line for line in confirm_output.splitlines()
+                            if line.startswith("DIRECT_AX_RESULT status=confirm-element-action-returned;")
+                        )
+                        print(
+                            f"NFD_OPEN_FILE_CONFIRM=RETURNED; exit_code={confirm_code}; "
+                            f"file={expected_path.name!r}; {confirm_result}",
+                            flush=True,
+                        )
+                        try:
+                            panel_state = wait_for_open_button(
+                                int(panel_process_id), panel_title, helper_deadline
+                            )
+                        except RuntimeError as postcondition_error:
+                            post_code, post_output, post_error = run_direct_ax(
+                                int(panel_process_id),
+                                operation="observe-element",
+                                window_title=panel_title,
+                                control_name=expected_path.name,
+                                timeout=min(2.0, max(0.1, remaining_seconds())),
+                            )
+                            post_output += post_error
+                            post_result = next(
+                                (
+                                    line for line in post_output.splitlines()
+                                    if line.startswith("DIRECT_AX_RESULT ")
+                                ),
+                                "DIRECT_AX_RESULT status=missing",
+                            )
+                            print(
+                                f"NFD_OPEN_FILE_POST_CONFIRM=OBSERVED; exit_code={post_code}; "
+                                f"file={expected_path.name!r}; {post_result}",
+                                flush=True,
+                            )
+                            raise RuntimeError(
+                                f"{postcondition_error}; post_confirm_file_state={post_result}"
+                            ) from postcondition_error
+                        automation_output += panel_state
+                        if open_panel_dismissed(panel_state, panel_title):
+                            last_open_step = "AXConfirm returned; Open panel dismissed and semantic result will be reconciled without replay"
+                        else:
+                            open_button_confirmed = open_button_state_ready(
+                                panel_state, int(panel_process_id), panel_title
+                            )
+                            if not open_button_confirmed:
+                                raise RuntimeError(
+                                    "AXConfirm was dispatched once, but neither Open readiness nor panel dismissal was observed; "
+                                    f"action_exit_code={confirm_code}; postcondition={panel_state[-2400:]!r}"
+                                )
+                    elif state_code == 0 and open_button_state_ready(panel_state, int(panel_process_id), panel_title):
+                        automation_output += panel_state
+                        open_button_confirmed = True
+                    else:
+                        raise RuntimeError(
+                            "Could not establish the Open-panel postcondition after unsupported AXOpen; "
+                            f"exit_code={state_code}; output={panel_state[-2400:]!r}"
+                        )
+                else:
+                    last_open_step = "AXOpen dispatched; waiting for semantic fixture result without replay"
+            else:
+                panel_state = wait_for_open_button(int(panel_process_id), panel_title, helper_deadline)
+                automation_output += panel_state
+                open_button_confirmed = open_button_state_ready(panel_state, int(panel_process_id), panel_title)
         except (OSError, RuntimeError) as error:
-            observation_log = log_path.with_name(f"native-dialog-{scenario}-navigation-failure.log")
+            observation_log = log_path.with_name(f"native-dialog-{scenario}-selection-failure.log")
             capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
             if not stop_fixture(process, output_reader):
-                return 1, "fixture process group or output reader survived failed Open panel navigation"
+                return 1, "fixture process group or output reader survived failed Open selection"
             return 1, (
-                f"Open selection navigation failed before the Open action; last_step={last_navigation_step}; "
+                f"Open selection failed before the Open action; last_step={last_open_step}; "
                 f"{error}"
             )
-        automation_code, pressed, press_error = run_direct_ax(
-            int(panel_process_id), operation="press-control", window_title=panel_title,
-            control_name="Open", timeout=min(10.0, remaining_seconds())
-        )
-        automation_output += pressed + press_error
+        if open_button_confirmed:
+            automation_code, pressed, press_error = run_direct_ax(
+                int(panel_process_id), operation="press-control", window_title=panel_title,
+                control_name="Open", timeout=min(10.0, remaining_seconds())
+            )
+            automation_output += pressed + press_error
     elif scenario == "save-select":
         automation_code, automation_output, automation_error = run_direct_ax(
             int(panel_process_id),
@@ -758,6 +1042,39 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             control_name="Cancel", timeout=min(10.0, remaining)
         )
         automation_output += automation_error
+    expected_marker = (
+        f"NFD_DIALOG_RESULT=CANCELLED; scenario={scenario}"
+        if scenario.endswith("cancel")
+        else f"NFD_DIALOG_RESULT=SELECTED; scenario={scenario}; path={expected_path}"
+    )
+    if "DIRECT_AX_DISPATCH attempted=true" in automation_output:
+        response_deadline = min(deadline, time.monotonic() + ACTION_RESPONSE_SECONDS)
+        while (
+            output_reader.result_line != expected_marker
+            and output_reader.result_line is None
+            and process.poll() is None
+            and time.monotonic() < response_deadline
+        ):
+            try:
+                output_reader.lines.get(timeout=min(0.1, max(0.01, response_deadline - time.monotonic())))
+            except queue.Empty:
+                pass
+        if output_reader.result_line != expected_marker:
+            observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+            capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
+            if not stop_fixture(process, output_reader):
+                return 1, "fixture process group or output reader survived cleanup after AX action response timeout"
+            return 1, (
+                f"direct AX action was submitted but the expected fixture result was absent; "
+                f"expected={expected_marker!r}; observed={output_reader.result_line!r}; "
+                f"swift_exit_code={automation_code}; output={automation_output!r}"
+            )
+        print(
+            f"NFD_DIRECT_AX_ACTION=TRANSPORT_RECONCILED; scenario={scenario}; "
+            f"expected_result={expected_marker!r}; no action was replayed",
+            flush=True,
+        )
+
     if automation_code != 0:
         if "process_group_cleanup=failed" in automation_output:
             if not stop_fixture(process, output_reader):
@@ -768,38 +1085,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 return 1, "fixture process group or output reader survived cleanup after direct AX trust denial"
             print("NFD_UI_AUTOMATION=UNAVAILABLE; client=Swift interpreter; reason=AXIsProcessTrusted=false; native dialog case NOT RUN")
             return 77, automation_output
-        expected_marker = (
-            f"NFD_DIALOG_RESULT=CANCELLED; scenario={scenario}"
-            if scenario.endswith("cancel")
-            else f"NFD_DIALOG_RESULT=SELECTED; scenario={scenario}; path={expected_path}"
-        )
-        if "DIRECT_AX_DISPATCH attempted=true" in automation_output:
-            response_deadline = min(deadline, time.monotonic() + ACTION_RESPONSE_SECONDS)
-            while (
-                output_reader.result_line != expected_marker
-                and output_reader.result_line is None
-                and process.poll() is None
-                and time.monotonic() < response_deadline
-            ):
-                try:
-                    output_reader.lines.get(timeout=min(0.1, max(0.01, response_deadline - time.monotonic())))
-                except queue.Empty:
-                    pass
-            if output_reader.result_line == expected_marker:
-                print(
-                    f"NFD_DIRECT_AX_ACTION=UNCERTAIN_TRANSPORT_RECONCILED; scenario={scenario}; "
-                    f"expected_result={expected_marker!r}; no action was replayed"
-                )
-            else:
-                observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
-                capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
-                if not stop_fixture(process, output_reader):
-                    return 1, "fixture process group or output reader survived cleanup after uncertain AX action"
-                return 1, (
-                    f"direct AX action result was uncertain and the expected fixture result was absent; "
-                    f"expected={expected_marker!r}; observed={output_reader.result_line!r}; output={automation_output!r}"
-                )
-        else:
+        if "DIRECT_AX_DISPATCH attempted=true" not in automation_output:
             observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
             capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
             if not stop_fixture(process, output_reader):
