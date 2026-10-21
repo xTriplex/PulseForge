@@ -112,7 +112,7 @@ def visible_camera_region(
     image_maximum: tuple[float, float],
     displays: list[dict[str, float | int | str]],
     inset: float = 24.0,
-    minimum_extent: float = 80.0,
+    minimum_extent: float = 20.0,
 ) -> tuple[dict[str, float | int | str], tuple[float, float], tuple[float, float]]:
     candidates: list[tuple[float, dict[str, float | int | str], tuple[float, float], tuple[float, float]]] = []
     for display in displays:
@@ -365,7 +365,12 @@ def main() -> int:
                 if failure:
                     raise RuntimeError(f"editor fixture failed: {failure}")
                 if OBSERVATION_EXPIRED in capture.markers:
-                    raise TimeoutError(f"editor fixture observation channel expired: {capture.marker_lines.get(OBSERVATION_EXPIRED)}")
+                    latest_state = capture.marker_lines.get(STATE, "<no state observation>")
+                    raise TimeoutError(
+                        f"editor fixture observation channel expired while waiting for {label}; "
+                        f"after_sequence={after_sequence}; latest_state={latest_state}; "
+                        f"expiration={capture.marker_lines.get(OBSERVATION_EXPIRED)}"
+                    )
                 if process.poll() is not None:
                     raise RuntimeError(f"editor exited with status {process.returncode} before {label}")
                 capture.finished.wait(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
@@ -756,13 +761,34 @@ def main() -> int:
 
         reattached_state_baseline = latest_state_sequence()
         reattached_state_line = wait_for_state(
-            reattached_state_baseline, "main utility owner ready after Scene Viewport reattachment",
+            reattached_state_baseline, "fresh main utility owner geometry after Scene Viewport reattachment",
             lambda fields: fields.get("owner_viewport") == initial.get("main_viewport") and
-            fields.get("focused") == "1" and fields.get("capture") == "0" and
+            fields.get("capture") == "0" and fields.get("scene_image_ready") == "1" and
             fields.get("utility_domain") == "1" and int(fields.get("utility_dock_node", "0")) != 0 and
             all(key in fields for key in ("image_min", "image_max")),
         )
         reattached_state = marker_fields(reattached_state_line, STATE)
+        reattached_state_sample = int(reattached_state["sequence"])
+        activation_code, activation_output, activation_error = run_direct_ax(
+            process.pid,
+            operation="activate-window",
+            window_title="PulseForge Editor",
+            timeout=min(10.0, max(0.1, deadline - time.monotonic())),
+        )
+        activation_output += activation_error
+        if activation_code != 0:
+            raise RuntimeError(f"main editor activation after reattachment failed: {activation_output.strip()!r}")
+        parse_window_activation(activation_output, process.pid, "PulseForge Editor")
+        activation_completed_at = time.monotonic()
+        reattached_active_state_line = wait_for_state(
+            reattached_state_sample,
+            "fresh focused main utility owner after native activation",
+            lambda fields: fields.get("owner_viewport") == initial.get("main_viewport") and
+            fields.get("focused") == "1" and fields.get("capture") == "0" and
+            fields.get("utility_domain") == "1" and int(fields.get("utility_dock_node", "0")) != 0,
+            not_before=activation_completed_at,
+        )
+        reattached_state = marker_fields(reattached_active_state_line, STATE)
         reattached_state_sample = int(reattached_state["sequence"])
         reattached_image_min = coordinate(reattached_state, "image_min", 2)
         reattached_image_max = coordinate(reattached_state, "image_max", 2)

@@ -371,21 +371,36 @@ let descendants: [AXNode] = {
     guard needsDescendants else { return [] }
     if operation != "select-element" { return collect(matching, depthLimit: operation == "snapshot" ? 4 : 8) }
 
+    let selectionStarted = ProcessInfo.processInfo.systemUptime
+    print("DIRECT_AX_SELECT_STAGE stage=window-tree-begin; node_limit=96; depth_limit=3")
+    fflush(stdout)
     // Finder panels expose column-view contents through AXColumns/AXVisibleColumns,
-    // not only through the browser's AXChildren. Search those columns separately
-    // so sidebar entries cannot hide the requested file from the bounded tree walk.
+    // not only through the browser's AXChildren. The rightmost column is the
+    // selected directory, so search it directly instead of walking every folder column.
     let windowNodes = collect(matching, depthLimit: 3, nodeLimit: 96)
+    print("DIRECT_AX_SELECT_STAGE stage=window-tree-end; nodes=\(windowNodes.count); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - selectionStarted) * 1000)")
+    fflush(stdout)
     let browsers = windowNodes.enumerated().compactMap { index, node -> (Int, AXUIElement)? in
         string(node.element, "AXRole") == "AXBrowser" ? (index, node.element) : nil
     }
+    print("DIRECT_AX_SELECT_STAGE stage=browsers-found; count=\(browsers.count)")
+    fflush(stdout)
     var allNodes = windowNodes
     for (browserIndex, browser) in browsers {
+        AXUIElementSetMessagingTimeout(browser, 0.5)
+        print("DIRECT_AX_SELECT_STAGE stage=browser-columns-begin; index=\(browserIndex)")
+        fflush(stdout)
         let visibleColumns = value(browser, "AXVisibleColumns") as? [AXUIElement]
+        print("DIRECT_AX_SELECT_STAGE stage=visible-columns-read; index=\(browserIndex); count=\(visibleColumns?.count ?? -1); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - selectionStarted) * 1000)")
+        fflush(stdout)
         let columns = visibleColumns.flatMap { $0.isEmpty ? nil : $0 } ??
             (value(browser, "AXColumns") as? [AXUIElement] ?? [])
-        let browserNodes = columns.isEmpty
-            ? collect([browser], depthLimit: 8, nodeLimit: 256)
-            : collect(columns, depthLimit: 8, nodeLimit: 256)
+        print("DIRECT_AX_SELECT_STAGE stage=columns-selected; index=\(browserIndex); count=\(columns.count); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - selectionStarted) * 1000)")
+        fflush(stdout)
+        let selectedDirectoryRoots = columns.isEmpty ? [browser] : [columns[columns.count - 1]]
+        let browserNodes = collect(selectedDirectoryRoots, depthLimit: 8, nodeLimit: 96)
+        print("DIRECT_AX_SELECT_STAGE stage=column-tree-end; index=\(browserIndex); nodes=\(browserNodes.count); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - selectionStarted) * 1000)")
+        fflush(stdout)
         let offset = allNodes.count
         allNodes.append(contentsOf: browserNodes.enumerated().map { _, node in
             let parent = node.parent.map { $0 + offset } ?? browserIndex

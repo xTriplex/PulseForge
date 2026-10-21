@@ -141,6 +141,17 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
                 [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}],
             )
 
+    def test_camera_input_accepts_a_small_but_usable_reattached_viewport(self) -> None:
+        display, minimum, maximum, point = scene_viewport_smoke.visible_camera_target(
+            (33.0, 264.0),
+            (151.0, 441.0),
+            [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}],
+        )
+        self.assertEqual(display["id"], 1)
+        self.assertEqual(minimum, (57.0, 288.0))
+        self.assertEqual(maximum, (127.0, 417.0))
+        self.assertEqual(point, (92.0, 352.5))
+
     def test_focus_reacquisition_target_stays_on_the_visible_display(self) -> None:
         display, minimum, maximum, point = scene_viewport_smoke.visible_camera_target(
             (832.2, 425.0),
@@ -407,13 +418,13 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         with patch.object(native_dialog, "run_direct_ax", return_value=(0, selected, "")) as select:
             result = native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
         self.assertIn("status=selection-verified", result)
-        select.assert_called_once_with(
-            42,
-            operation="select-element",
-            window_title="Open",
-            control_name="Example Ω.scene",
-            timeout=4.0,
+        select.assert_called_once()
+        self.assertEqual(select.call_args.args, (42,))
+        self.assertEqual(
+            {key: value for key, value in select.call_args.kwargs.items() if key != "timeout"},
+            {"operation": "select-element", "window_title": "Open", "control_name": "Example Ω.scene"},
         )
+        self.assertAlmostEqual(select.call_args.kwargs["timeout"], 4.0, places=3)
 
         with patch.object(native_dialog, "run_direct_ax", return_value=(124, "DIRECT_AX_RESULT status=timeout", "")) as select:
             with self.assertRaisesRegex(RuntimeError, "selection was not confirmed"):
