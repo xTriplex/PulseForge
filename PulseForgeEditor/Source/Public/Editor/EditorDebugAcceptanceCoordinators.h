@@ -279,7 +279,13 @@ namespace PulseForgeEditor::Detail
 		bool RightButtonDown = false;
 		bool RightButtonClicked = false;
 		bool RightButtonReleased = false;
+		bool ViewportKeyboardFocused = false;
 		std::array<float, 3> CameraForward{};
+		std::array<float, 3> CameraPosition{};
+		float CameraMoveSpeed = 0.0f;
+		int CursorMode = 0;
+		bool RawMotionSupported = false;
+		bool RawMotionEnabled = false;
 		std::array<float, 2> FramebufferScale{ 1.0f, 1.0f };
 		std::array<float, 2> OwnerNativePosition{};
 		std::array<float, 2> OwnerNativeSize{};
@@ -304,6 +310,7 @@ namespace PulseForgeEditor::Detail
 		[[nodiscard]] bool Complete() const noexcept;
 		[[nodiscard]] std::optional<std::string> Observe(const SceneViewportNativeSmokeObservation& Observation);
 		[[nodiscard]] std::optional<std::string> ObserveInput(const SceneViewportNativeSmokeObservation& Observation);
+		[[nodiscard]] std::optional<std::string> ObserveState(const SceneViewportNativeSmokeObservation& Observation);
 
 	private:
 		enum class Phase : uint8_t
@@ -313,6 +320,7 @@ namespace PulseForgeEditor::Detail
 			AwaitingNativeDetach,
 			AwaitingCameraCapture,
 			AwaitingCameraRelease,
+			AwaitingReattachment,
 			Complete
 		};
 
@@ -322,15 +330,19 @@ namespace PulseForgeEditor::Detail
 
 		Phase m_Phase = Phase::Disabled;
 		uint32_t m_MainViewportID = 0;
+		uintptr_t m_MainWindow = 0;
 		uint32_t m_DetachedViewportID = 0;
 		uintptr_t m_DetachedWindow = 0;
 		std::array<float, 3> m_InitialCameraForward{};
 		bool m_CaptureWasObserved = false;
+		bool m_NormalReleaseObserved = false;
 		bool m_LastRightButtonDown = false;
 		uint32_t m_InputSamples = 0;
 		uint32_t m_CameraGeometryReadySamples = 0;
+		uint32_t m_StateSamples = 0;
 		double m_GeometryStableSince = -1.0;
 		double m_LastGeometryReadyTime = -1.0;
+		double m_LastStateSampleTime = -1.0;
 		std::array<float, 8> m_LastCameraGeometry{};
 	};
 } // namespace PulseForgeEditor::Detail

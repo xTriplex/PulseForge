@@ -294,11 +294,372 @@ namespace
 		ImGui::UpdatePlatformWindows();
 	}
 
+	void DrawUtilityWindowsWithProductionPolicy(
+		bool EnforcePolicy = true, bool* SawUnclassifiedAttachedRoot = nullptr,
+		bool* RejectedUnclassifiedAttachedRoot = nullptr)
+	{
+		const ImGuiWindowClass UtilityClass =
+			PulseForgeEditor::MakeEditorDockingClass(PulseForgeEditor::EditorDockingDomain::UtilityPanel);
+		for (const char* Name : { "Scene Viewport", "Inspector" })
+		{
+			ImGui::SetNextWindowClass(&UtilityClass);
+			ImGui::SetNextWindowSize(ImVec2(420.0f, 300.0f), ImGuiCond_Always);
+			ImGui::Begin(Name);
+			if (SawUnclassifiedAttachedRoot)
+			{
+				const ImGuiWindow* Window = ImGui::GetCurrentWindowRead();
+				const ImGuiDockNode* Root = Window && Window->DockNode ? ImGui::DockNodeGetRootNode(Window->DockNode) : nullptr;
+				*SawUnclassifiedAttachedRoot |= Root && Root->WindowClass.ClassId == 0;
+			}
+			if (EnforcePolicy)
+			{
+				const bool Allowed = PulseForgeEditor::EnforceCurrentEditorWindowDockingDomain(
+					PulseForgeEditor::EditorDockingDomain::UtilityPanel);
+				if (RejectedUnclassifiedAttachedRoot && SawUnclassifiedAttachedRoot && *SawUnclassifiedAttachedRoot && !Allowed)
+					*RejectedUnclassifiedAttachedRoot = true;
+			}
+			ImGui::TextUnformatted(Name);
+			ImGui::End();
+		}
+	}
+
+	void DrawPolicyWindow(std::string_view Name, PulseForgeEditor::EditorDockingDomain Domain, bool EnforcePolicy)
+	{
+		const ImGuiWindowClass WindowClass = PulseForgeEditor::MakeEditorDockingClass(Domain);
+		const std::string OwnedName(Name);
+		ImGui::SetNextWindowClass(&WindowClass);
+		ImGui::SetNextWindowSize(ImVec2(420.0f, 300.0f), ImGuiCond_Always);
+		ImGui::Begin(OwnedName.c_str());
+		if (EnforcePolicy) (void)PulseForgeEditor::EnforceCurrentEditorWindowDockingDomain(Domain);
+		ImGui::End();
+	}
+
+	std::string SaveFloatingUtilityGroup(FakeViewportBackend& Backend)
+	{
+		ScopedWorkspaceImGuiContext Context(Backend);
+		ImGui::NewFrame();
+		ImGui::Render();
+		ImGui::UpdatePlatformWindows();
+		constexpr ImGuiID DockID = 0x764F0101;
+		ImGui::DockBuilderAddNode(DockID, ImGuiDockNodeFlags_None);
+		ImGui::DockBuilderSetNodePos(DockID, ImVec2(120.0f, 100.0f));
+		ImGui::DockBuilderSetNodeSize(DockID, ImVec2(720.0f, 480.0f));
+		ImGui::DockBuilderDockWindow("Scene Viewport", DockID);
+		ImGui::DockBuilderDockWindow("Inspector", DockID);
+		ImGui::DockBuilderFinish(DockID);
+		for (int Frame = 0; Frame < 4; ++Frame)
+		{
+			ImGui::NewFrame();
+			DrawUtilityWindowsWithProductionPolicy(false);
+			ImGui::Render();
+			ImGui::UpdatePlatformWindows();
+		}
+		const ImGuiWindow* Scene = ImGui::FindWindowByName("Scene Viewport");
+		const ImGuiWindow* Inspector = ImGui::FindWindowByName("Inspector");
+		if (!Scene || !Inspector || Scene->DockId != DockID || Inspector->DockId != DockID) return {};
+
+		size_t SettingsSize = 0;
+		const char* Settings = ImGui::SaveIniSettingsToMemory(&SettingsSize);
+		return Settings ? std::string(Settings, SettingsSize) : std::string{};
+	}
+
+	void TestFloatingUtilityGroupSurvivesFreshContextRestore(TestRunner& Tests)
+	{
+		FakeViewportBackend InitialBackend;
+		const std::string SavedSettings = SaveFloatingUtilityGroup(InitialBackend);
+		PF_CHECK(Tests, !SavedSettings.empty());
+		if (SavedSettings.empty()) return;
+
+		FakeViewportBackend RestoredBackend;
+		ScopedWorkspaceImGuiContext Context(RestoredBackend, SavedSettings);
+		constexpr ImGuiID DockID = 0x764F0101;
+		bool SawUnclassifiedAttachedRoot = false;
+		bool RejectedUnclassifiedAttachedRoot = false;
+		for (int Frame = 0; Frame < 4; ++Frame)
+		{
+			ImGui::NewFrame();
+			DrawUtilityWindowsWithProductionPolicy(true, &SawUnclassifiedAttachedRoot, &RejectedUnclassifiedAttachedRoot);
+			ImGui::Render();
+			ImGui::UpdatePlatformWindows();
+			const ImGuiWindow* Scene = ImGui::FindWindowByName("Scene Viewport");
+			const ImGuiWindow* Inspector = ImGui::FindWindowByName("Inspector");
+			PF_CHECK(Tests, Scene && Inspector);
+			PF_CHECK(Tests, Scene && Inspector && Scene->DockId == DockID && Inspector->DockId == DockID);
+		}
+		PF_CHECK(Tests, SawUnclassifiedAttachedRoot);
+		PF_CHECK(Tests, !RejectedUnclassifiedAttachedRoot);
+		const ImGuiWindow* Scene = ImGui::FindWindowByName("Scene Viewport");
+		const ImGuiDockNode* Root = Scene && Scene->DockNode ? ImGui::DockNodeGetRootNode(Scene->DockNode) : nullptr;
+		PF_CHECK(Tests, Root && PulseForgeEditor::IsEditorWindowClassInDomain(
+			Root->WindowClass, PulseForgeEditor::EditorDockingDomain::UtilityPanel));
+		const ImGuiWindow* RestoredScene = ImGui::FindWindowByName("Scene Viewport");
+		const ImGuiWindow* RestoredInspector = ImGui::FindWindowByName("Inspector");
+		PF_CHECK(Tests, RestoredScene && RestoredInspector && RestoredScene->DockId == RestoredInspector->DockId);
+	}
+
+	void TestLegacyFloatingUtilityGroupWithoutClassMetadata(TestRunner& Tests)
+	{
+		FakeViewportBackend InitialBackend;
+		std::string SavedSettings = SaveFloatingUtilityGroup(InitialBackend);
+		PF_CHECK(Tests, !SavedSettings.empty());
+		if (SavedSettings.empty()) return;
+
+		std::string LegacySettings;
+		LegacySettings.reserve(SavedSettings.size());
+		size_t LineStart = 0;
+		while (LineStart < SavedSettings.size())
+		{
+			const size_t LineEnd = SavedSettings.find('\n', LineStart);
+			const size_t Length = (LineEnd == std::string::npos ? SavedSettings.size() : LineEnd) - LineStart;
+			std::string_view Line(SavedSettings.data() + LineStart, Length);
+			const size_t ClassID = Line.find(" ClassId=");
+			if (ClassID != std::string_view::npos)
+				Line = Line.substr(0, ClassID);
+			LegacySettings.append(Line);
+			LegacySettings.push_back('\n');
+			LineStart = LineEnd == std::string::npos ? SavedSettings.size() : LineEnd + 1;
+		}
+
+		FakeViewportBackend RestoredBackend;
+		ScopedWorkspaceImGuiContext Context(RestoredBackend, LegacySettings);
+		constexpr ImGuiID DockID = 0x764F0101;
+		for (int Frame = 0; Frame < 4; ++Frame)
+		{
+			ImGui::NewFrame();
+			DrawUtilityWindowsWithProductionPolicy();
+			ImGui::Render();
+			ImGui::UpdatePlatformWindows();
+		}
+		const ImGuiWindow* Scene = ImGui::FindWindowByName("Scene Viewport");
+		const ImGuiWindow* Inspector = ImGui::FindWindowByName("Inspector");
+		PF_CHECK(Tests, Scene && Inspector && Scene->DockId == DockID && Inspector->DockId == DockID);
+	}
+
+	void TestMixedDomainDockBuilderLayoutIsSeparated(TestRunner& Tests)
+	{
+		constexpr ImGuiID DockID = 0x764F0102;
+		constexpr const char* UtilityName = "Scene Viewport";
+		constexpr const char* DocumentName = "Document Workspace###PFDocumentWorkspace_mixed";
+		FakeViewportBackend InitialBackend;
+		std::string SavedSettings;
+		{
+			ScopedWorkspaceImGuiContext Context(InitialBackend);
+			ImGui::NewFrame();
+			ImGui::Render();
+			ImGui::UpdatePlatformWindows();
+			ImGui::DockBuilderAddNode(DockID, ImGuiDockNodeFlags_None);
+			ImGui::DockBuilderSetNodePos(DockID, ImVec2(150.0f, 120.0f));
+			ImGui::DockBuilderSetNodeSize(DockID, ImVec2(700.0f, 460.0f));
+			ImGui::DockBuilderDockWindow(UtilityName, DockID);
+			ImGui::DockBuilderDockWindow(DocumentName, DockID);
+			ImGui::DockBuilderFinish(DockID);
+			for (int Frame = 0; Frame < 4; ++Frame)
+			{
+				ImGui::NewFrame();
+				DrawPolicyWindow(UtilityName, PulseForgeEditor::EditorDockingDomain::UtilityPanel, false);
+				DrawPolicyWindow(DocumentName, PulseForgeEditor::EditorDockingDomain::AssetDocument, false);
+				ImGui::Render();
+				ImGui::UpdatePlatformWindows();
+			}
+			const ImGuiWindow* Utility = ImGui::FindWindowByName(UtilityName);
+			const ImGuiWindow* Document = ImGui::FindWindowByName(DocumentName);
+			PF_CHECK(Tests, Utility && Document && Utility->DockId == DockID && Document->DockId == DockID);
+			size_t SettingsSize = 0;
+			const char* Settings = ImGui::SaveIniSettingsToMemory(&SettingsSize);
+			if (Settings) SavedSettings.assign(Settings, SettingsSize);
+		}
+		PF_CHECK(Tests, !SavedSettings.empty());
+		if (SavedSettings.empty()) return;
+
+		FakeViewportBackend RestoredBackend;
+		ScopedWorkspaceImGuiContext Context(RestoredBackend, SavedSettings);
+		bool RejectedDocument = false;
+		for (int Frame = 0; Frame < 5; ++Frame)
+		{
+			ImGui::NewFrame();
+			const ImGuiWindowClass UtilityClass =
+				PulseForgeEditor::MakeEditorDockingClass(PulseForgeEditor::EditorDockingDomain::UtilityPanel);
+			ImGui::SetNextWindowClass(&UtilityClass);
+			ImGui::Begin(UtilityName);
+			(void)PulseForgeEditor::EnforceCurrentEditorWindowDockingDomain(
+				PulseForgeEditor::EditorDockingDomain::UtilityPanel);
+			ImGui::End();
+
+			const ImGuiWindowClass DocumentClass =
+				PulseForgeEditor::MakeEditorDockingClass(PulseForgeEditor::EditorDockingDomain::AssetDocument);
+			ImGui::SetNextWindowClass(&DocumentClass);
+			ImGui::Begin(DocumentName);
+			RejectedDocument |= !PulseForgeEditor::EnforceCurrentEditorWindowDockingDomain(
+				PulseForgeEditor::EditorDockingDomain::AssetDocument);
+			ImGui::End();
+			ImGui::Render();
+			ImGui::UpdatePlatformWindows();
+		}
+		const ImGuiWindow* Utility = ImGui::FindWindowByName(UtilityName);
+		const ImGuiWindow* Document = ImGui::FindWindowByName(DocumentName);
+		// The utility window is submitted first, before ImGui has materialized the
+		// second restored member. The document submission observes the mixed root
+		// and is rejected in this ordering.
+		PF_CHECK(Tests, RejectedDocument);
+		PF_CHECK(Tests, Utility && Document && Utility->DockId != Document->DockId);
+		if (Utility && Utility->DockNode)
+		{
+			const ImGuiDockNode* Root = ImGui::DockNodeGetRootNode(Utility->DockNode);
+			PF_CHECK(Tests, Root && PulseForgeEditor::IsEditorWindowClassInDomain(
+				Root->WindowClass, PulseForgeEditor::EditorDockingDomain::UtilityPanel));
+		}
+		if (Document && Document->DockNode)
+		{
+			const ImGuiDockNode* Root = ImGui::DockNodeGetRootNode(Document->DockNode);
+			PF_CHECK(Tests, Root && PulseForgeEditor::IsEditorWindowClassInDomain(
+				Root->WindowClass, PulseForgeEditor::EditorDockingDomain::AssetDocument));
+		}
+	}
+
+	void TestMainUtilityDockspaceRestoresPanelGroup(TestRunner& Tests)
+	{
+		constexpr ImGuiID DockID = 0x764F0103;
+		const auto DrawMainUtilityFrame = []
+		{
+			const ImGuiWindowClass UtilityClass =
+				PulseForgeEditor::MakeEditorDockingClass(PulseForgeEditor::EditorDockingDomain::UtilityPanel);
+			ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+			ImGui::SetNextWindowSize(ImVec2(1280.0f, 720.0f), ImGuiCond_Always);
+			if (ImGui::Begin("##PolicyMainUtilityDockspace", nullptr,
+					ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking))
+				ImGui::DockSpace(DockID, ImGui::GetContentRegionAvail(), ImGuiDockNodeFlags_None, &UtilityClass);
+			ImGui::End();
+			DrawUtilityWindowsWithProductionPolicy();
+		};
+
+		FakeViewportBackend InitialBackend;
+		std::string SavedSettings;
+		{
+			ScopedWorkspaceImGuiContext Context(InitialBackend);
+			ImGui::NewFrame();
+			DrawMainUtilityFrame();
+			ImGui::Render();
+			ImGui::UpdatePlatformWindows();
+			ImGui::DockBuilderDockWindow("Scene Viewport", DockID);
+			ImGui::DockBuilderDockWindow("Inspector", DockID);
+			ImGui::DockBuilderFinish(DockID);
+			for (int Frame = 0; Frame < 3; ++Frame)
+			{
+				ImGui::NewFrame();
+				DrawMainUtilityFrame();
+				ImGui::Render();
+				ImGui::UpdatePlatformWindows();
+			}
+			size_t SettingsSize = 0;
+			const char* Settings = ImGui::SaveIniSettingsToMemory(&SettingsSize);
+			if (Settings) SavedSettings.assign(Settings, SettingsSize);
+		}
+		PF_CHECK(Tests, !SavedSettings.empty());
+		if (SavedSettings.empty()) return;
+
+		FakeViewportBackend RestoredBackend;
+		ScopedWorkspaceImGuiContext Context(RestoredBackend, SavedSettings);
+		for (int Frame = 0; Frame < 4; ++Frame)
+		{
+			ImGui::NewFrame();
+			DrawMainUtilityFrame();
+			ImGui::Render();
+			ImGui::UpdatePlatformWindows();
+		}
+		const ImGuiWindow* Scene = ImGui::FindWindowByName("Scene Viewport");
+		const ImGuiWindow* Inspector = ImGui::FindWindowByName("Inspector");
+		const ImGuiDockNode* Root = ImGui::DockBuilderGetNode(DockID);
+		PF_CHECK(Tests, Scene && Inspector && Scene->DockId == DockID && Inspector->DockId == DockID);
+		PF_CHECK(Tests, Root && PulseForgeEditor::IsEditorWindowClassInDomain(
+			Root->WindowClass, PulseForgeEditor::EditorDockingDomain::UtilityPanel));
+
+		constexpr const char* DocumentName = "Document Workspace###PFDocumentWorkspace_intrusion";
+		ImGui::DockBuilderDockWindow(DocumentName, DockID);
+		ImGui::DockBuilderFinish(DockID);
+		bool RejectedDocument = false;
+		for (int Frame = 0; Frame < 4; ++Frame)
+		{
+			ImGui::NewFrame();
+			DrawMainUtilityFrame();
+			const ImGuiWindowClass DocumentClass =
+				PulseForgeEditor::MakeEditorDockingClass(PulseForgeEditor::EditorDockingDomain::AssetDocument);
+			ImGui::SetNextWindowClass(&DocumentClass);
+			ImGui::Begin(DocumentName);
+			RejectedDocument |= !PulseForgeEditor::EnforceCurrentEditorWindowDockingDomain(
+				PulseForgeEditor::EditorDockingDomain::AssetDocument);
+			ImGui::End();
+			ImGui::Render();
+			ImGui::UpdatePlatformWindows();
+		}
+		const ImGuiWindow* UtilityAfterIntrusion = ImGui::FindWindowByName("Scene Viewport");
+		const ImGuiWindow* DocumentIntruder = ImGui::FindWindowByName(DocumentName);
+		PF_CHECK(Tests, RejectedDocument);
+		PF_CHECK(Tests, UtilityAfterIntrusion && DocumentIntruder && UtilityAfterIntrusion->DockId == DockID &&
+			DocumentIntruder->DockId != DockID);
+	}
+
+	void TestUtilityWindowRejectedFromDocumentDockspace(TestRunner& Tests)
+	{
+		constexpr ImGuiID DockID = 0x764F0104;
+		constexpr const char* DocumentName = "Document Workspace###PFDocumentWorkspace_owner";
+		constexpr const char* UtilityName = "Scene Viewport";
+		const auto DrawDocumentDockspace = [=]
+		{
+			const ImGuiWindowClass DocumentClass =
+				PulseForgeEditor::MakeEditorDockingClass(PulseForgeEditor::EditorDockingDomain::AssetDocument);
+			ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+			ImGui::SetNextWindowSize(ImVec2(1280.0f, 720.0f), ImGuiCond_Always);
+			if (ImGui::Begin("##PolicyDocumentDockspace", nullptr,
+					ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking))
+				ImGui::DockSpace(DockID, ImGui::GetContentRegionAvail(), ImGuiDockNodeFlags_None, &DocumentClass);
+			ImGui::End();
+		};
+		FakeViewportBackend Backend;
+		ScopedWorkspaceImGuiContext Context(Backend);
+		ImGui::NewFrame();
+		DrawDocumentDockspace();
+		DrawPolicyWindow(DocumentName, PulseForgeEditor::EditorDockingDomain::AssetDocument, true);
+		ImGui::Render();
+		ImGui::UpdatePlatformWindows();
+		ImGui::DockBuilderDockWindow(DocumentName, DockID);
+		ImGui::DockBuilderFinish(DockID);
+		ImGui::DockBuilderDockWindow(UtilityName, DockID);
+		ImGui::DockBuilderFinish(DockID);
+
+		bool RejectedUtility = false;
+		for (int Frame = 0; Frame < 4; ++Frame)
+		{
+			ImGui::NewFrame();
+			DrawDocumentDockspace();
+			DrawPolicyWindow(DocumentName, PulseForgeEditor::EditorDockingDomain::AssetDocument, true);
+			const ImGuiWindowClass UtilityClass =
+				PulseForgeEditor::MakeEditorDockingClass(PulseForgeEditor::EditorDockingDomain::UtilityPanel);
+			ImGui::SetNextWindowClass(&UtilityClass);
+			ImGui::SetNextWindowSize(ImVec2(420.0f, 300.0f), ImGuiCond_Always);
+			ImGui::Begin(UtilityName);
+			RejectedUtility |= !PulseForgeEditor::EnforceCurrentEditorWindowDockingDomain(
+				PulseForgeEditor::EditorDockingDomain::UtilityPanel);
+			ImGui::End();
+			ImGui::Render();
+			ImGui::UpdatePlatformWindows();
+		}
+		const ImGuiWindow* Document = ImGui::FindWindowByName(DocumentName);
+		const ImGuiWindow* Utility = ImGui::FindWindowByName(UtilityName);
+		PF_CHECK(Tests, RejectedUtility);
+		PF_CHECK(Tests, Document && Document->DockId == DockID);
+		PF_CHECK(Tests, Utility && Utility->DockId != DockID);
+	}
+
 } // namespace
 
 void RunEditorWorkspacePresentationTests(TestRunner& Tests)
 {
 	using namespace PulseForgeEditor;
+	TestFloatingUtilityGroupSurvivesFreshContextRestore(Tests);
+	TestLegacyFloatingUtilityGroupWithoutClassMetadata(Tests);
+	TestMixedDomainDockBuilderLayoutIsSeparated(Tests);
+	TestMainUtilityDockspaceRestoresPanelGroup(Tests);
+	TestUtilityWindowRejectedFromDocumentDockspace(Tests);
 	const ImGuiWindowClass UtilityClass = MakeEditorDockingClass(EditorDockingDomain::UtilityPanel);
 	const ImGuiWindowClass DocumentClass = MakeEditorDockingClass(EditorDockingDomain::AssetDocument);
 	PF_CHECK(Tests, UtilityClass.ClassId != 0 && DocumentClass.ClassId != 0 && UtilityClass.ClassId != DocumentClass.ClassId);
@@ -492,7 +853,8 @@ void RunEditorWorkspacePresentationTests(TestRunner& Tests)
 		PF_CHECK(Tests, ImGui::FindWindowByName("##PFInactiveDocumentWorkspaceKeepAlive") == nullptr);
 		PF_CHECK(Tests, ImGui::DockBuilderGetNode(GetWorkspaceDockspaceID(First)) != nullptr);
 		PF_CHECK(Tests, ImGui::DockBuilderGetNode(GetWorkspaceDockspaceID(Second)) != nullptr);
-		const ImGuiDockNode* FirstRoot = ImGui::DockNodeGetRootNode(ImGui::DockBuilderGetNode(GetWorkspaceDockspaceID(First)));
+		ImGuiDockNode* FirstNode = ImGui::DockBuilderGetNode(GetWorkspaceDockspaceID(First));
+		const ImGuiDockNode* FirstRoot = FirstNode ? ImGui::DockNodeGetRootNode(FirstNode) : nullptr;
 		PF_CHECK(Tests, FirstRoot && FirstRoot->WindowClass.ClassId == DocumentClass.ClassId);
 		const std::string FirstWorkspaceName = "Document Workspace###PFDocumentWorkspace_" + First.Project.ToString() + "_" +
 			First.Asset.ToString() + "_" + std::to_string(static_cast<uint32_t>(First.Kind));

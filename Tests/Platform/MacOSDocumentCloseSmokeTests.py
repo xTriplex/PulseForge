@@ -91,15 +91,52 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
             )
 
     def test_camera_input_uses_only_the_visible_intersection_of_a_detached_image(self) -> None:
-        minimum, maximum = scene_viewport_smoke.visible_camera_region((832.2, 425.0), (1274.8, 602.0), (1024, 768))
+        display, minimum, maximum = scene_viewport_smoke.visible_camera_region(
+            (832.2, 425.0),
+            (1274.8, 602.0),
+            [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}],
+        )
+        self.assertEqual(display["id"], 1)
         self.assertAlmostEqual(minimum[0], 856.2)
         self.assertAlmostEqual(minimum[1], 449.0)
         self.assertAlmostEqual(maximum[0], 1000.0)
         self.assertAlmostEqual(maximum[1], 578.0)
         self.assertLessEqual(maximum[0], 1024.0)
         self.assertLessEqual(maximum[1], 768.0)
-        with self.assertRaisesRegex(ValueError, "no usable visible image area"):
-            scene_viewport_smoke.visible_camera_region((1100.0, 425.0), (1274.8, 602.0), (1024, 768))
+        with self.assertRaisesRegex(ValueError, "no usable visible region"):
+            scene_viewport_smoke.visible_camera_region(
+                (1100.0, 425.0),
+                (1274.8, 602.0),
+                [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}],
+            )
+
+    def test_native_geometry_keeps_two_x_backing_scale_in_input_coordinates(self) -> None:
+        display, minimum, maximum = scene_viewport_smoke.visible_camera_region(
+            (100.0, 120.0), (500.0, 420.0),
+            [{"id": 7, "x": 0, "y": 0, "width": 720, "height": 450, "backing_scale": 2.0}],
+        )
+        self.assertEqual(display["backing_scale"], 2.0)
+        self.assertEqual(minimum, (124.0, 144.0))
+        self.assertEqual(maximum, (476.0, 396.0))
+
+    def test_native_geometry_uses_negative_secondary_display_origin(self) -> None:
+        display, minimum, maximum = scene_viewport_smoke.visible_camera_region(
+            (-1800.0, 80.0), (-1200.0, 500.0),
+            [{"id": 2, "x": -1920, "y": 0, "width": 1920, "height": 1080, "backing_scale": 1.0}],
+        )
+        self.assertEqual(display["id"], 2)
+        self.assertEqual(minimum, (-1776.0, 104.0))
+        self.assertEqual(maximum, (-1224.0, 476.0))
+
+    def test_native_geometry_selects_most_visible_display_for_partial_image(self) -> None:
+        displays = [
+            {"id": 1, "x": 0, "y": 0, "width": 400, "height": 300, "backing_scale": 1.0},
+            {"id": 2, "x": 400, "y": -100, "width": 600, "height": 500, "backing_scale": 2.0},
+        ]
+        display, minimum, maximum = scene_viewport_smoke.visible_camera_region((350.0, 0.0), (850.0, 300.0), displays)
+        self.assertEqual(display["id"], 2)
+        self.assertEqual(minimum, (424.0, 24.0))
+        self.assertEqual(maximum, (826.0, 276.0))
 
 
 class DirtyCloseProtocolTests(unittest.TestCase):
