@@ -633,7 +633,9 @@ namespace PulseForgeEditor::Detail
 	{
 		std::ostringstream Stream;
 		Stream << std::fixed << std::setprecision(1) << "title_center=" << Observation.TitleCenter[0] << ','
-			   << Observation.TitleCenter[1] << "; image_min=" << Observation.ImageMinimum[0] << ',' << Observation.ImageMinimum[1]
+			   << Observation.TitleCenter[1] << "; dock_tab_rect=" << Observation.DockTabRect[0] << ',' << Observation.DockTabRect[1]
+			   << ',' << Observation.DockTabRect[2] << ',' << Observation.DockTabRect[3] << "; image_min="
+			   << Observation.ImageMinimum[0] << ',' << Observation.ImageMinimum[1]
 			   << "; image_max=" << Observation.ImageMaximum[0] << ',' << Observation.ImageMaximum[1] << "; main_rect="
 			   << Observation.MainWindowRect[0] << ',' << Observation.MainWindowRect[1] << ',' << Observation.MainWindowRect[2] << ','
 			   << Observation.MainWindowRect[3] << "; owner_framebuffer_scale=" << Observation.FramebufferScale[0] << ','
@@ -651,7 +653,7 @@ namespace PulseForgeEditor::Detail
 
 		if (m_Phase == Phase::AwaitingMainScene)
 		{
-			if (Observation.OwnerViewportID != Observation.MainViewportID) return std::nullopt;
+			if (Observation.OwnerViewportID != Observation.MainViewportID || !Observation.DockTabReady) return std::nullopt;
 			m_MainViewportID = Observation.MainViewportID;
 			m_Phase = Phase::AwaitingNativeDetach;
 			std::ostringstream Stream;
