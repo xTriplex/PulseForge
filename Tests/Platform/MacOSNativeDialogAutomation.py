@@ -111,40 +111,6 @@ def open_file_confirmation_returned(output: str, expected_name: str) -> bool:
     )
 
 
-def folder_path_confirmation_returned(output: str, expected_directory: str, target_pid: int) -> bool:
-    dispatches = [
-        line for line in output.splitlines()
-        if line.startswith("DIRECT_AX_DISPATCH attempted=true; operation=confirm-folder-path;")
-    ]
-    results = [
-        line for line in output.splitlines()
-        if line.startswith("DIRECT_AX_RESULT status=folder-path-confirm-returned;")
-    ]
-    if len(dispatches) != 1 or len(results) != 1:
-        return False
-    dispatch_fields = dict(
-        part.split("=", 1)
-        for part in dispatches[0].removeprefix("DIRECT_AX_DISPATCH ").split("; ")
-        if "=" in part
-    )
-    fields = dict(
-        part.split("=", 1)
-        for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ")
-        if "=" in part
-    )
-    return (
-        dispatch_fields.get("target_pid") == str(target_pid)
-        and dispatch_fields.get("name") == "PathTextField"
-        and dispatch_fields.get("value_verified") == "true"
-        and dispatch_fields.get("focused") == "true"
-        and dispatch_fields.get("advertised_action") == "AXConfirm"
-        and fields.get("value") == expected_directory
-        and fields.get("operation") == "confirm-folder-path"
-        and fields.get("name") == "PathTextField"
-        and fields.get("ax_error") == "0"
-    )
-
-
 def run_keyboard_input(mode: str, target_pid: int, *, text: str = "", timeout: float) -> str:
     runner_temp = os.environ.get("RUNNER_TEMP")
     if not runner_temp:
@@ -719,7 +685,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             return 1, "fixture process group or output reader survived bounded deadline cleanup"
         return 1, f"native dialog fixture exhausted its {timeout_seconds}s case bound before panel automation"
     if scenario == "open-select":
-        last_navigation_step = "Open panel activation not attempted"
+        last_open_step = "Open panel activation not attempted"
         try:
             activation_code, activation_output, activation_error = run_direct_ax(
                 int(panel_process_id),
@@ -735,89 +701,26 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 )
             print(f"NFD_OPEN_PANEL_FOCUS=CONFIRMED; {activation_output.strip()!r}", flush=True)
 
-            # Start the bounded navigation phase after focus has been established.
-            # The prior deadline also covered activation, so a slow AX focus query
-            # could consume the entire Go To Folder observation budget before the
-            # single keyboard action was even posted.
+            # The fixture supplies this directory as NSSavePanel's defaultPath.
+            # The pinned Cocoa adapter applies it with setDirectoryURL, so select
+            # the exact file from the native panel's initial directory directly.
             helper_deadline = min(deadline, time.monotonic() + 25.0)
-            action_id = run_keyboard_input(
-                "--go-to-folder", int(panel_process_id), timeout=min(5.0, remaining_seconds())
-            )
-            last_navigation_step = f"Go To Folder shortcut posted; action_id={action_id}"
-            print(f"NFD_GO_TO_FOLDER_INPUT=POSTED; action_id={action_id}; target_pid={panel_process_id}", flush=True)
-            run_direct_ax_until(
-                int(panel_process_id), panel_title, helper_deadline, go_to_folder_path_field_visible,
-                "enabled Go to Folder PathTextField",
-            )
-            last_navigation_step = "Go To Folder PathTextField observed in the expected sheet"
-            expected_directory = str(expected_path.parent)
-            automation_code, automation_output, automation_error = run_direct_ax(
-                int(panel_process_id),
-                operation="set-folder-path-value",
-                window_title=panel_title,
-                control_name="PathTextField",
-                control_value=expected_directory,
-                timeout=min(10.0, remaining_seconds()),
-            )
-            automation_output += automation_error
-            if automation_code != 0 or not folder_path_field_ready(automation_output, expected_directory):
-                last_navigation_step = (
-                    f"Go To Folder value/focus validation failed; exit_code={automation_code}; "
-                    f"output={automation_output.strip()!r}"
-                )
-                raise RuntimeError(
-                    f"Go to Folder path value/focus verification failed; exit_code={automation_code}; {automation_output!r}"
-                )
-            last_navigation_step = f"Go To Folder path value verified and focused; value={expected_directory!r}"
-            print(f"NFD_GO_TO_FOLDER_FIELD=READY; {automation_output.strip()!r}", flush=True)
-            automation_code, confirmation_output, confirmation_error = run_direct_ax(
-                int(panel_process_id),
-                operation="confirm-folder-path",
-                window_title=panel_title,
-                control_name="PathTextField",
-                control_value=expected_directory,
-                timeout=min(5.0, remaining_seconds()),
-            )
-            confirmation_output += confirmation_error
-            if automation_code != 0 or not folder_path_confirmation_returned(
-                confirmation_output, expected_directory, int(panel_process_id)
-            ):
-                last_navigation_step = (
-                    f"Go To Folder AXConfirm failed; exit_code={automation_code}; "
-                    f"output={confirmation_output.strip()!r}"
-                )
-                raise RuntimeError(
-                    f"Go to Folder confirmation was not accepted by the focused path field; "
-                    f"exit_code={automation_code}; {confirmation_output!r}"
-                )
-            last_navigation_step = "Go To Folder AXConfirm returned for the verified focused path field"
-            print(f"NFD_GO_TO_FOLDER_CONFIRM=RETURNED; {confirmation_output.strip()!r}", flush=True)
-            run_direct_ax_until(
-                int(panel_process_id),
-                panel_title,
-                helper_deadline,
-                go_to_folder_sheet_dismissed,
-                "Go to Folder sheet dismissal",
-                deep_snapshot=False,
-                operation="observe-go-to-folder-state",
-            )
-            last_navigation_step = "Go To Folder sheet dismissal observed"
-            print("NFD_GO_TO_FOLDER_SHEET=DISMISSED", flush=True)
             selection_output = select_open_file(
                 int(panel_process_id), panel_title, expected_path,
                 timeout=max(0.1, helper_deadline - time.monotonic())
             )
+            last_open_step = "exact Open-panel filename selection operation returned"
             if open_file_confirmation_returned(selection_output, expected_path.name):
                 automation_output = selection_output
             else:
                 automation_output = wait_for_open_button(int(panel_process_id), panel_title, helper_deadline)
         except (OSError, RuntimeError) as error:
-            observation_log = log_path.with_name(f"native-dialog-{scenario}-navigation-failure.log")
+            observation_log = log_path.with_name(f"native-dialog-{scenario}-selection-failure.log")
             capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
             if not stop_fixture(process, output_reader):
-                return 1, "fixture process group or output reader survived failed Open panel navigation"
+                return 1, "fixture process group or output reader survived failed Open selection"
             return 1, (
-                f"Open selection navigation failed before the Open action; last_step={last_navigation_step}; "
+                f"Open selection failed before the Open action; last_step={last_open_step}; "
                 f"{error}"
             )
         if not open_file_confirmation_returned(automation_output, expected_path.name):
