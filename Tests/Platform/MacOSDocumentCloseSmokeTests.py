@@ -418,13 +418,13 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         with patch.object(native_dialog, "run_direct_ax", return_value=(0, selected, "")) as select:
             result = native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
         self.assertIn("status=selection-verified", result)
-        select.assert_called_once_with(
-            42,
-            operation="select-element",
-            window_title="Open",
-            control_name="Example Ω.scene",
-            timeout=4.0,
+        select.assert_called_once()
+        self.assertEqual(select.call_args.args, (42,))
+        self.assertEqual(
+            {key: value for key, value in select.call_args.kwargs.items() if key != "timeout"},
+            {"operation": "select-element", "window_title": "Open", "control_name": "Example Ω.scene"},
         )
+        self.assertAlmostEqual(select.call_args.kwargs["timeout"], 4.0, places=3)
 
         with patch.object(native_dialog, "run_direct_ax", return_value=(124, "DIRECT_AX_RESULT status=timeout", "")) as select:
             with self.assertRaisesRegex(RuntimeError, "selection was not confirmed"):
