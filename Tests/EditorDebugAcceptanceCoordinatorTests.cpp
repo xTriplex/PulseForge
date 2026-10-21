@@ -116,6 +116,45 @@ namespace
 		Coordinator.ReportAction("save", true, SavedAndClosed);
 		PF_CHECK(Tests, Coordinator.Complete());
 	}
+
+	void TestDetachedSceneViewportSmokeRequiresNativeOwnerAndCameraMotion(TestRunner& Tests)
+	{
+		SceneViewportNativeSmokeCoordinator Coordinator(true);
+		SceneViewportNativeSmokeObservation Observation;
+		Observation.MainViewportID = 1;
+		Observation.OwnerViewportID = 1;
+		Observation.OwnerWindow = 0x1000;
+		Observation.SceneImageReady = true;
+		Observation.CameraForward = { 0.0f, 0.0f, -1.0f };
+		Observation.TitleCenter = { 150.0f, 50.0f };
+		Observation.ImageMinimum = { 100.0f, 100.0f };
+		Observation.ImageMaximum = { 700.0f, 500.0f };
+		Observation.MainWindowRect = { 20.0f, 30.0f, 820.0f, 620.0f };
+		Observation.TearOffPoint = { 860.0f, 340.0f };
+
+		const auto Ready = Coordinator.Observe(Observation);
+		PF_CHECK(Tests, Ready && Ready->find("=READY;") != std::string::npos);
+		PF_CHECK(Tests, !Coordinator.Complete());
+
+		Observation.OwnerViewportID = 2;
+		Observation.OwnerWindow = 0x2000;
+		const auto Detached = Coordinator.Observe(Observation);
+		PF_CHECK(Tests, Detached && Detached->find("=DETACHED;") != std::string::npos);
+		PF_CHECK(Tests, !Coordinator.Complete());
+
+		Observation.CameraCaptureActive = true;
+		const auto Captured = Coordinator.Observe(Observation);
+		PF_CHECK(Tests, Captured && Captured->find("=CAPTURED;") != std::string::npos);
+		PF_CHECK(Tests, !Coordinator.Complete());
+
+		Observation.CameraCaptureActive = false;
+		PF_CHECK(Tests, !Coordinator.Observe(Observation));
+		Observation.CameraForward = { 0.1f, 0.0f, -0.995f };
+		const auto Passed = Coordinator.Observe(Observation);
+		PF_CHECK(Tests, Passed && Passed->find("=PASS;") != std::string::npos);
+		PF_CHECK(Tests, Coordinator.Complete());
+		PF_CHECK(Tests, !Coordinator.Observe(Observation));
+	}
 } // namespace
 
 void RunEditorDebugAcceptanceCoordinatorTests(TestRunner& Tests)
@@ -123,4 +162,5 @@ void RunEditorDebugAcceptanceCoordinatorTests(TestRunner& Tests)
 	TestCoordinatorRejectsWrongIdentityAndInvalidTransition(Tests);
 	TestSaveRetryKeepsDirtySessionUntilRetrySucceeds(Tests);
 	TestSaveFailureAndClosePreparationRetryStates(Tests);
+	TestDetachedSceneViewportSmokeRequiresNativeOwnerAndCameraMotion(Tests);
 }

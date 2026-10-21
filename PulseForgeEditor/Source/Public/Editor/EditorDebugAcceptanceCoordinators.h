@@ -4,6 +4,7 @@
 
 #include "Editor/EditorDocumentManager.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -263,6 +264,53 @@ namespace PulseForgeEditor::Detail
 		size_t m_Frames = 0;
 		std::string m_AuthoredSnapshot;
 		std::string m_FailureReason;
+	};
+
+	struct SceneViewportNativeSmokeObservation
+	{
+		uint32_t MainViewportID = 0;
+		uint32_t OwnerViewportID = 0;
+		uintptr_t OwnerWindow = 0;
+		bool SceneImageReady = false;
+		bool CameraCaptureActive = false;
+		std::array<float, 3> CameraForward{};
+		std::array<float, 2> FramebufferScale{ 1.0f, 1.0f };
+		std::array<float, 2> TitleCenter{};
+		std::array<float, 2> ImageMinimum{};
+		std::array<float, 2> ImageMaximum{};
+		std::array<float, 4> MainWindowRect{};
+		std::array<float, 2> TearOffPoint{};
+	};
+
+	class SceneViewportNativeSmokeCoordinator final
+	{
+	public:
+		explicit SceneViewportNativeSmokeCoordinator(bool Enabled) noexcept;
+		[[nodiscard]] bool IsEnabled() const noexcept;
+		[[nodiscard]] bool Complete() const noexcept;
+		[[nodiscard]] std::optional<std::string> Observe(const SceneViewportNativeSmokeObservation& Observation);
+
+	private:
+		enum class Phase : uint8_t
+		{
+			Disabled,
+			AwaitingMainScene,
+			AwaitingNativeDetach,
+			AwaitingCameraCapture,
+			AwaitingCameraRelease,
+			Complete
+		};
+
+		[[nodiscard]] static bool IsFinite(const std::array<float, 3>& Vector) noexcept;
+		[[nodiscard]] static float Distance(const std::array<float, 3>& Left, const std::array<float, 3>& Right) noexcept;
+		[[nodiscard]] std::string FormatGeometry(const SceneViewportNativeSmokeObservation& Observation) const;
+
+		Phase m_Phase = Phase::Disabled;
+		uint32_t m_MainViewportID = 0;
+		uint32_t m_DetachedViewportID = 0;
+		uintptr_t m_DetachedWindow = 0;
+		std::array<float, 3> m_InitialCameraForward{};
+		bool m_CaptureWasObserved = false;
 	};
 } // namespace PulseForgeEditor::Detail
 

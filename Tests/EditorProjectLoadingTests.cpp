@@ -64,6 +64,7 @@ namespace
 		PF_CHECK(Tests, DefaultOptions.has_value());
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->ProjectFile.has_value());
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableEditorRuntimePlayStopTest);
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableSceneViewportNativeSmoke);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->DocumentHostCloseUiTestScenario);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTestFixture);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostResetLayoutTest);
@@ -87,6 +88,20 @@ namespace
 		const auto RuntimePlayStopWithoutProjectOptions = ParseEditorCommandLine(RuntimePlayStopFixtureWithoutProject, Root);
 		PF_CHECK(Tests, !RuntimePlayStopWithoutProjectOptions &&
 					RuntimePlayStopWithoutProjectOptions.error().Code == EditorCommandLineErrorCode::MissingProjectPath);
+		const std::array SceneViewportSmokeArguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--scene-viewport-native-smoke") };
+		const auto SceneViewportSmokeOptions = ParseEditorCommandLine(SceneViewportSmokeArguments, Root);
+		PF_CHECK(Tests, SceneViewportSmokeOptions && SceneViewportSmokeOptions->EnableSceneViewportNativeSmoke &&
+					SceneViewportSmokeOptions->ProjectFile == ProjectFile);
+		const std::array SceneViewportSmokeWithoutProject = { std::string_view("--scene-viewport-native-smoke") };
+		const auto SceneViewportSmokeWithoutProjectOptions = ParseEditorCommandLine(SceneViewportSmokeWithoutProject, Root);
+		PF_CHECK(Tests, !SceneViewportSmokeWithoutProjectOptions &&
+					SceneViewportSmokeWithoutProjectOptions.error().Code == EditorCommandLineErrorCode::MissingProjectPath);
+		const std::array DuplicateSceneViewportSmoke = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--scene-viewport-native-smoke"), std::string_view("--scene-viewport-native-smoke") };
+		const auto DuplicateSceneViewportSmokeOptions = ParseEditorCommandLine(DuplicateSceneViewportSmoke, Root);
+		PF_CHECK(Tests, !DuplicateSceneViewportSmokeOptions &&
+					DuplicateSceneViewportSmokeOptions.error().Code == EditorCommandLineErrorCode::DuplicateOption);
 		const std::array DuplicateRuntimePlayStopFixture = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
 			std::string_view("--editor-runtime-play-stop-test"), std::string_view("--editor-runtime-play-stop-test") };
 		const auto DuplicateRuntimePlayStopOptions = ParseEditorCommandLine(DuplicateRuntimePlayStopFixture, Root);
@@ -128,6 +143,10 @@ namespace
 		const auto InvalidCloseUiOptions = ParseEditorCommandLine(InvalidCloseUiScenario, Root);
 		PF_CHECK(Tests, !InvalidCloseUiOptions && InvalidCloseUiOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
 #else
+		const std::array SceneViewportSmokeArguments = { std::string_view("--scene-viewport-native-smoke") };
+		const auto SceneViewportSmokeOptions = ParseEditorCommandLine(SceneViewportSmokeArguments, Root);
+		PF_CHECK(Tests, !SceneViewportSmokeOptions &&
+					SceneViewportSmokeOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
 		const std::array RuntimePlayStopFixtureArguments = { std::string_view("--editor-runtime-play-stop-test") };
 		const auto RuntimePlayStopFixtureOptions = ParseEditorCommandLine(RuntimePlayStopFixtureArguments, Root);
 		PF_CHECK(Tests, !RuntimePlayStopFixtureOptions &&
