@@ -439,7 +439,8 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         row_selected = selected.replace("role=AXTextField", "role=AXRow")
         self.assertTrue(native_dialog.open_file_selection_ready(row_selected, expected_path.name))
         with patch.object(native_dialog, "run_direct_ax", return_value=(0, selected, "")) as select:
-            result = native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+            code, result = native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        self.assertEqual(0, code)
         self.assertIn("status=selection-verified", result)
         select.assert_called_once()
         self.assertEqual(select.call_args.args, (42,))
@@ -463,28 +464,28 @@ class DirtyCloseProtocolTests(unittest.TestCase):
                 native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
         select.assert_called_once()
 
-    def test_open_file_confirmation_is_used_only_when_ax_reports_it_and_name_matches(self) -> None:
+    def test_open_file_axopen_dispatch_is_identity_checked_and_never_replayed(self) -> None:
         expected_name = "Selected Ω.pfproj"
         action_returned = (
-            "DIRECT_AX_DISPATCH attempted=true; operation=confirm-open-file; target_pid=42; "
-            "role=AXTextField; name=Selected Ω.pfproj; advertised_action=AXConfirm\n"
-            "DIRECT_AX_RESULT status=confirm-action-returned; operation=confirm-open-file; "
+            "DIRECT_AX_DISPATCH attempted=true; operation=open-file; target_pid=42; "
+            "role=AXTextField; name=Selected Ω.pfproj; advertised_action=AXOpen\n"
+            "DIRECT_AX_RESULT status=open-file-action-returned; operation=open-file; "
             "role=AXTextField; name=Selected Ω.pfproj; ax_error=0"
         )
-        self.assertTrue(native_dialog.open_file_confirmation_returned(action_returned, expected_name))
-        self.assertFalse(native_dialog.open_file_confirmation_returned(
+        self.assertTrue(native_dialog.open_file_action_dispatched(action_returned, expected_name))
+        self.assertFalse(native_dialog.open_file_action_dispatched(
             action_returned.replace("name=Selected Ω.pfproj; ax_error", "name=Other.pfproj; ax_error"), expected_name
         ))
-        self.assertFalse(native_dialog.open_file_confirmation_returned(
-            action_returned.replace("ax_error=0", "ax_error=-25205"), expected_name
+        self.assertFalse(native_dialog.open_file_action_dispatched(
+            action_returned.replace("advertised_action=AXOpen", "advertised_action=AXConfirm"), expected_name
         ))
-        self.assertFalse(native_dialog.open_file_confirmation_returned(
-            action_returned.replace("advertised_action=AXConfirm", "advertised_action=AXOpen"), expected_name
-        ))
+        ambiguous_dispatch = action_returned.splitlines()[0]
+        self.assertTrue(native_dialog.open_file_action_dispatched(ambiguous_dispatch, expected_name))
 
         expected_path = Path("/tmp/Dialog Files Ω/Selected Ω.pfproj")
-        with patch.object(native_dialog, "run_direct_ax", return_value=(0, action_returned, "")) as select:
-            result = native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        with patch.object(native_dialog, "run_direct_ax", return_value=(13, action_returned, "")) as select:
+            code, result = native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        self.assertEqual(13, code)
         self.assertEqual(action_returned, result)
         select.assert_called_once()
 

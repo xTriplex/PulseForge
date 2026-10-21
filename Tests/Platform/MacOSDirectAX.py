@@ -657,6 +657,16 @@ if operation == "press-control" || operation == "set-value" || operation == "set
               "parents=\(parentSummary); browser_selected_children=\(browserSelectedChildren); " +
               "browser_selected_children_settable=\(browserSelectedSettable)")
         fflush(stdout)
+        if !selectionSettable, role == "AXTextField", availableActions.contains("AXOpen") {
+            AXUIElementSetMessagingTimeout(control, 1.0)
+            print("DIRECT_AX_DISPATCH attempted=true; operation=open-file; target_pid=\(targetPID); " +
+                  "role=\(role); name=\(titleOrDescription(control)); advertised_action=AXOpen")
+            fflush(stdout)
+            let openError = AXUIElementPerformAction(control, "AXOpen" as CFString)
+            print("DIRECT_AX_RESULT status=open-file-action-returned; operation=open-file; " +
+                  "role=\(role); name=\(titleOrDescription(control)); ax_error=\(openError.rawValue)")
+            exit(openError == .success ? 0 : 13)
+        }
         guard selectionSettable else {
             print("DIRECT_AX_RESULT status=selection-error; operation=select-element; name=\(titleOrDescription(control)); " +
                   "reason=no-settable-row-or-cell-ancestor; selected_settable_error=\(selectionSettableError.rawValue)")
