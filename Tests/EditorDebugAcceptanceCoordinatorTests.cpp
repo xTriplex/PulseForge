@@ -141,17 +141,36 @@ namespace
 
 		Observation.OwnerViewportID = 2;
 		Observation.OwnerWindow = 0x2000;
+		Observation.OwnerNativePosition = { 300.0f, 100.0f };
+		Observation.OwnerNativeSize = { 820.0f, 620.0f };
+		Observation.ImageMinimum = { 400.0f, 200.0f };
+		Observation.ImageMaximum = { 700.0f, 500.0f };
+		Observation.OwnerFocused = true;
 		const auto Detached = Coordinator.Observe(Observation);
 		PF_CHECK(Tests, Detached && Detached->find("=DETACHED;") != std::string::npos);
 		PF_CHECK(Tests, !Coordinator.Complete());
 		PF_CHECK(Tests, !Coordinator.ObserveInput(Observation));
 		Observation.OwnerNativePosition = { 700.0f, 100.0f };
 		Observation.OwnerNativeSize = { 500.0f, 400.0f };
+		Observation.ImageMinimum = { 720.0f, 150.0f };
+		Observation.ImageMaximum = { 980.0f, 400.0f };
+		Observation.ImGuiTime = 0.1;
+		PF_CHECK(Tests, !Coordinator.ObserveInput(Observation));
+		Observation.ImGuiTime = 0.2;
+		PF_CHECK(Tests, !Coordinator.ObserveInput(Observation));
+		Observation.ImGuiTime = 0.4;
+		const auto CameraReady = Coordinator.ObserveInput(Observation);
+		PF_CHECK(Tests, CameraReady && CameraReady->find("=READY_FOR_CAMERA_INPUT;") != std::string::npos);
+		PF_CHECK(Tests, CameraReady && CameraReady->find("sample=1") != std::string::npos);
+		Observation.ImGuiTime = 1.2;
+		const auto CameraReadyAgain = Coordinator.ObserveInput(Observation);
+		PF_CHECK(Tests, CameraReadyAgain && CameraReadyAgain->find("sample=2") != std::string::npos);
+		Observation.ImageMinimum = { 720.0f, 150.0f };
 		Observation.ImGuiMousePosition = { 730.0f, 220.0f };
-		Observation.OwnerFocused = true;
 		Observation.RightButtonDown = true;
 		Observation.RightButtonClicked = true;
 		Observation.ImageHovered = true;
+		Observation.ImGuiTime = 1.3;
 		const auto Input = Coordinator.ObserveInput(Observation);
 		PF_CHECK(Tests, Input && Input->find("event=clicked") != std::string::npos &&
 			Input->find("native_rect=700.0,100.0,500.0,400.0") != std::string::npos);

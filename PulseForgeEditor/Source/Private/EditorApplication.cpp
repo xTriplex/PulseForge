@@ -6195,6 +6195,7 @@ namespace
 			Observation.ImGuiMousePosition = { SmokeIO.MousePos.x, SmokeIO.MousePos.y };
 			Observation.ImGuiHoveredViewportID = SmokeIO.MouseHoveredViewport;
 			Observation.ImGuiFrameNumber = ImGui::GetFrameCount();
+			Observation.ImGuiTime = ImGui::GetTime();
 			double OwnerCursorX = 0.0;
 			double OwnerCursorY = 0.0;
 			glfwGetCursorPos(OwnerWindow, &OwnerCursorX, &OwnerCursorY);
