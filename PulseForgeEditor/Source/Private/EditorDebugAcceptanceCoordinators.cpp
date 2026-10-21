@@ -654,8 +654,12 @@ namespace PulseForgeEditor::Detail
 	std::optional<std::string> SceneViewportNativeSmokeCoordinator::ObserveState(
 		const SceneViewportNativeSmokeObservation& Observation)
 	{
-		if (m_Phase < Phase::AwaitingCameraCapture || Observation.OwnerViewportID != m_DetachedViewportID ||
-			Observation.OwnerWindow != m_DetachedWindow || m_StateSamples >= 80 || !std::isfinite(Observation.ImGuiTime))
+		const bool ReattachedInput = m_Phase == Phase::AwaitingReattachedCameraInput;
+		const uint32_t ExpectedViewportID = ReattachedInput ? m_MainViewportID : m_DetachedViewportID;
+		const uintptr_t ExpectedWindow = ReattachedInput ? m_MainWindow : m_DetachedWindow;
+		if (m_Phase < Phase::AwaitingCameraCapture || m_Phase == Phase::Complete ||
+			Observation.OwnerViewportID != ExpectedViewportID || Observation.OwnerWindow != ExpectedWindow ||
+			m_StateSamples >= 80 || !std::isfinite(Observation.ImGuiTime))
 			return std::nullopt;
 		if (m_LastStateSampleTime >= 0.0 && Observation.ImGuiTime - m_LastStateSampleTime < 0.2) return std::nullopt;
 		m_LastStateSampleTime = Observation.ImGuiTime;
@@ -786,14 +790,33 @@ namespace PulseForgeEditor::Detail
 		if (m_Phase == Phase::AwaitingReattachment)
 		{
 			if (Observation.OwnerViewportID != m_MainViewportID || Observation.OwnerWindow != m_MainWindow) return std::nullopt;
-			m_Phase = Phase::Complete;
+			m_Phase = Phase::AwaitingReattachedCameraInput;
+			m_ReattachedCameraPosition = Observation.CameraPosition;
+			m_StateSamples = 0;
+			m_LastStateSampleTime = -1.0;
 			std::ostringstream Stream;
 			Stream << std::fixed << std::setprecision(4) << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=REATTACHED; main_viewport="
 				   << m_MainViewportID << "; owner_window=0x" << std::hex << m_MainWindow << std::dec
 				   << "; scene_image_ready=" << Observation.SceneImageReady << "; camera_position="
 				   << Observation.CameraPosition[0] << ',' << Observation.CameraPosition[1] << ',' << Observation.CameraPosition[2]
 				   << "; camera_forward=" << Observation.CameraForward[0] << ',' << Observation.CameraForward[1] << ','
-				   << Observation.CameraForward[2];
+				   << Observation.CameraForward[2] << "; " << FormatGeometry(Observation);
+			return Stream.str();
+		}
+
+		if (m_Phase == Phase::AwaitingReattachedCameraInput)
+		{
+			if (Observation.OwnerViewportID != m_MainViewportID || Observation.OwnerWindow != m_MainWindow ||
+				!Observation.OwnerFocused || !Observation.ViewportKeyboardFocused ||
+				Distance(m_ReattachedCameraPosition, Observation.CameraPosition) <= 0.001f)
+				return std::nullopt;
+			m_Phase = Phase::Complete;
+			std::ostringstream Stream;
+			Stream << std::fixed << std::setprecision(4)
+				   << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=REATTACHED_CAMERA_INPUT; owner_viewport=" << m_MainViewportID
+				   << "; owner_window=0x" << std::hex << m_MainWindow << std::dec
+				   << "; keyboard_focused=" << Observation.ViewportKeyboardFocused << "; camera_position="
+				   << Observation.CameraPosition[0] << ',' << Observation.CameraPosition[1] << ',' << Observation.CameraPosition[2];
 			return Stream.str();
 		}
 

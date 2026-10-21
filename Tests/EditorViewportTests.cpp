@@ -195,7 +195,10 @@ namespace
 		PF_CHECK(Tests, ResolveViewportKeyboardFocus(false, ViewportKeyboardFocusEvent::RenderedImageClicked));
 		PF_CHECK(Tests, ResolveViewportKeyboardFocus(true, ViewportKeyboardFocusEvent::NoChange));
 		PF_CHECK(Tests, !ResolveViewportKeyboardFocus(true, ViewportKeyboardFocusEvent::OtherEditorPanelClicked));
-		PF_CHECK(Tests, !ResolveViewportKeyboardFocus(true, ViewportKeyboardFocusEvent::ApplicationFocusLost));
+		const bool FocusAfterApplicationLoss =
+			ResolveViewportKeyboardFocus(true, ViewportKeyboardFocusEvent::ApplicationFocusLost);
+		PF_CHECK(Tests, !FocusAfterApplicationLoss);
+		PF_CHECK(Tests, ResolveViewportKeyboardFocus(FocusAfterApplicationLoss, ViewportKeyboardFocusEvent::RenderedImageClicked));
 		PF_CHECK(Tests, !ResolveViewportKeyboardFocus(true, ViewportKeyboardFocusEvent::ViewportUnavailable));
 		PF_CHECK(Tests, !ResolveViewportKeyboardFocus(true, ViewportKeyboardFocusEvent::PlayModeStarted));
 		PF_CHECK(Tests,

@@ -6098,11 +6098,12 @@ namespace
 								m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
 									m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::ApplicationFocusLost);
 							}
-							else if (m_ViewportImageHovered && ImGui::GetIO().MouseClicked[ImGuiMouseButton_Right])
+							else if (m_ViewportImageHovered && AnyMouseClicked)
 							{
 								m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
 									m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::RenderedImageClicked);
-								(void)BeginEditorCameraNavigation(OwnerViewport, ImGui::GetIO().MouseDown[ImGuiMouseButton_Right]);
+								if (ImGui::GetIO().MouseClicked[ImGuiMouseButton_Right])
+									(void)BeginEditorCameraNavigation(OwnerViewport, ImGui::GetIO().MouseDown[ImGuiMouseButton_Right]);
 							}
 							if (OwnerViewport && OwnerViewport->PlatformRequestClose &&
 								m_ViewportMouseCapture.OwnsViewport(OwnerViewport->ID, OwnerWindow))
@@ -7222,6 +7223,7 @@ namespace
 			if (!m_Context) return;
 
 			ImGui::SetCurrentContext(m_Context);
+			EndEditorCameraNavigation(false);
 			m_ViewportRenderView.ResetTarget();
 			if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) ImGui::DestroyPlatformWindows();
 			m_ViewportScrollInput.Shutdown();

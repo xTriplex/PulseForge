@@ -211,6 +211,12 @@ namespace
 		Observation.OwnerWindow = 0x1000;
 		const auto Reattached = Coordinator.Observe(Observation);
 		PF_CHECK(Tests, Reattached && Reattached->find("=REATTACHED;") != std::string::npos);
+		PF_CHECK(Tests, !Coordinator.Complete());
+		Observation.OwnerFocused = true;
+		Observation.ViewportKeyboardFocused = true;
+		Observation.CameraPosition = { 1.0f, 2.0f, 3.2f };
+		const auto ReattachedInput = Coordinator.Observe(Observation);
+		PF_CHECK(Tests, ReattachedInput && ReattachedInput->find("=REATTACHED_CAMERA_INPUT;") != std::string::npos);
 		PF_CHECK(Tests, Coordinator.Complete());
 	}
 } // namespace

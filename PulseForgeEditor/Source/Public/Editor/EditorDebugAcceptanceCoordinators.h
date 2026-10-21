@@ -321,6 +321,7 @@ namespace PulseForgeEditor::Detail
 			AwaitingCameraCapture,
 			AwaitingCameraRelease,
 			AwaitingReattachment,
+			AwaitingReattachedCameraInput,
 			Complete
 		};
 
@@ -334,6 +335,7 @@ namespace PulseForgeEditor::Detail
 		uint32_t m_DetachedViewportID = 0;
 		uintptr_t m_DetachedWindow = 0;
 		std::array<float, 3> m_InitialCameraForward{};
+		std::array<float, 3> m_ReattachedCameraPosition{};
 		bool m_CaptureWasObserved = false;
 		bool m_NormalReleaseObserved = false;
 		bool m_LastRightButtonDown = false;

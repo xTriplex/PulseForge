@@ -24,6 +24,7 @@ DETACHED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=DETACHED;"
 CAPTURED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=CAPTURED;"
 PASSED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=PASS;"
 REATTACHED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=REATTACHED;"
+REATTACHED_INPUT = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=REATTACHED_CAMERA_INPUT;"
 CAMERA_READY = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT;"
 STATE = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=STATE;"
 FAILURE_MARKERS = ("MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=FAILED;",)
@@ -625,6 +626,69 @@ def main() -> int:
             raise RuntimeError("Scene Viewport camera position changed while reattaching")
         if not screenshot("macos-scene-viewport-checkpoint-reattached.png", "reattached-utility-panel"):
             raise RuntimeError("could not capture the reattached utility-panel screenshot evidence")
+
+        reattached_state_line = wait_for_state(
+            0, "main utility owner ready after Scene Viewport reattachment",
+            lambda fields: fields.get("owner_viewport") == initial.get("main_viewport") and
+            fields.get("focused") == "1" and fields.get("capture") == "0" and
+            all(key in fields for key in ("image_min", "image_max")),
+        )
+        reattached_state = marker_fields(reattached_state_line, STATE)
+        reattached_state_sample = int(reattached_state["sample"])
+        reattached_image_min = coordinate(reattached_state, "image_min", 2)
+        reattached_image_max = coordinate(reattached_state, "image_max", 2)
+        reattached_displays = read_native_displays(
+            driver, timeout=min(5.0, max(0.1, deadline - time.monotonic()))
+        )
+        reattached_display, reattached_minimum, reattached_maximum, reattached_point = visible_camera_target(
+            reattached_image_min, reattached_image_max, reattached_displays
+        )
+        reattached_x, reattached_y = reattached_point
+        print(f"MACOS_SCENE_VIEWPORT_REATTACHED_VISIBLE_REGION=display_id={reattached_display['id']}; "
+              f"coordinate_space={reattached_display['coordinate_space']!r}; "
+              f"bounds={reattached_display['x']},{reattached_display['y']},"
+              f"{reattached_display['width']},{reattached_display['height']}; "
+              f"image={reattached_image_min[0]:.1f},{reattached_image_min[1]:.1f}.."
+              f"{reattached_image_max[0]:.1f},{reattached_image_max[1]:.1f}; "
+              f"usable={reattached_minimum[0]:.1f},{reattached_minimum[1]:.1f}.."
+              f"{reattached_maximum[0]:.1f},{reattached_maximum[1]:.1f}; point={reattached_x:.1f},{reattached_y:.1f}")
+        reattached_click_id = uuid.uuid4().hex
+        code, stdout, stderr = run_bounded_command(
+            [str(driver), "click-left", str(process.pid), reattached_click_id,
+             str(reattached_x), str(reattached_y)],
+            timeout=min(8.0, max(0.1, deadline - time.monotonic())),
+        )
+        print(f"MACOS_SCENE_VIEWPORT_REATTACHED_FOCUS_CLICK=action_id={reattached_click_id}; "
+              f"point={reattached_x:.1f},{reattached_y:.1f}; exit_code={code}; "
+              f"output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
+        if code != 0:
+            raise RuntimeError("the single reattached viewport focus click was not posted")
+        reattached_focus_line = wait_for_state(
+            reattached_state_sample, "reattached viewport keyboard focus after one image click",
+            lambda fields: fields.get("owner_viewport") == initial.get("main_viewport") and
+            fields.get("focused") == "1" and fields.get("keyboard_focused") == "1",
+        )
+        reattached_focus = marker_fields(reattached_focus_line, STATE)
+        reattached_focus_sample = int(reattached_focus["sample"])
+        reattached_camera_position = coordinate(reattached_focus, "camera_position", 3)
+        reattached_key_id = uuid.uuid4().hex
+        code, stdout, stderr = run_bounded_command(
+            [str(driver), "key-hold", str(process.pid), reattached_key_id, "13", "0.5"],
+            timeout=min(8.0, max(0.1, deadline - time.monotonic())),
+        )
+        print(f"MACOS_SCENE_VIEWPORT_REATTACHED_KEYBOARD=action_id={reattached_key_id}; keycode=13; "
+              f"exit_code={code}; output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
+        if code != 0:
+            raise RuntimeError("the bounded reattached-owner keyboard input was not posted")
+        reattached_input_line = wait_for(REATTACHED_INPUT, "production camera translation through the reattached main owner")
+        reattached_input = marker_fields(reattached_input_line, REATTACHED_INPUT)
+        if reattached_input.get("owner_viewport") != initial.get("main_viewport") or reattached_input.get("keyboard_focused") != "1":
+            raise RuntimeError(f"reattached camera input was not handled by the expected main viewport: {reattached_input_line}")
+        final_camera_position = coordinate(reattached_input, "camera_position", 3)
+        if sum((a - b) ** 2 for a, b in zip(reattached_camera_position, final_camera_position)) <= 1.0e-6:
+            raise RuntimeError("reattached main-owner keyboard input did not move the production camera")
+        print(f"MACOS_SCENE_VIEWPORT_REATTACHED_CAMERA_INPUT=PASS; owner_viewport={reattached_input['owner_viewport']}; "
+              f"camera_position={reattached_input['camera_position']}")
 
         close_code, close_stdout, close_stderr = run_direct_ax(
             process.pid,
