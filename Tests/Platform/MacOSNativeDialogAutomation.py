@@ -135,6 +135,27 @@ def wait_for_open_button(fixture_pid: int, panel_title: str, deadline: float) ->
     raise RuntimeError(f"Open did not become enabled after filename selection; last_snapshot={last_output[-4000:]!r}")
 
 
+def select_open_file(fixture_pid: int, panel_title: str, expected_path: Path, timeout: float) -> str:
+    code, output, error = run_direct_ax(
+        fixture_pid,
+        operation="select-element",
+        window_title=panel_title,
+        control_name=expected_path.name,
+        timeout=max(0.1, timeout),
+    )
+    result = output + error
+    if code != 0 or "DIRECT_AX_RESULT status=selection-verified; operation=select-element;" not in result:
+        raise RuntimeError(
+            f"Expected Open-file row selection was not confirmed; exit_code={code}; output={result[-2400:]!r}"
+        )
+    print(
+        f"NFD_OPEN_FILE_SELECTION=CONFIRMED; pid={fixture_pid}; panel={panel_title!r}; "
+        f"file={expected_path.name!r}; {result.strip()!r}",
+        flush=True,
+    )
+    return result
+
+
 def run_direct_ax_until(
     fixture_pid: int,
     panel_title: str,
@@ -631,8 +652,8 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             )
             last_navigation_step = "Go To Folder sheet dismissal observed"
             print("NFD_GO_TO_FOLDER_SHEET=DISMISSED", flush=True)
-            run_keyboard_input(
-                "--type-text", int(panel_process_id), text=expected_path.name, timeout=min(5.0, remaining_seconds())
+            select_open_file(
+                int(panel_process_id), panel_title, expected_path, timeout=min(10.0, remaining_seconds())
             )
             automation_output = wait_for_open_button(
                 int(panel_process_id), panel_title, min(deadline, time.monotonic() + 15.0)

@@ -6286,7 +6286,9 @@ namespace
 			}
 			for (ImGuiWindow* Candidate : GImGui->Windows)
 			{
-				if (!Candidate || Candidate == SceneWindow || Candidate->RootWindow != Candidate || !Candidate->Active ||
+				// This observation runs while Scene Viewport is submitted before its sibling utility panels.
+				// ImGui clears Active at NewFrame, so those visible panels are not Active again yet here.
+				if (!Candidate || Candidate == SceneWindow || Candidate->RootWindow != Candidate ||
 					Candidate->Viewport != MainViewport || !Candidate->DockNode ||
 					!PulseForgeEditor::IsEditorWindowClassInDomain(Candidate->WindowClass,
 						PulseForgeEditor::EditorDockingDomain::UtilityPanel))
@@ -6295,6 +6297,7 @@ namespace
 				for (const PulseForgeEditor::EditorPanelDescriptor& Descriptor : PulseForgeEditor::EditorPanelDescriptors)
 				{
 					if (Descriptor.IsUtilityPanel && Descriptor.Panel != PulseForgeEditor::EditorPanel::SceneViewport &&
+						m_Layout.IsPanelVisible(Descriptor.Panel) &&
 						std::string_view(Candidate->Name) == Descriptor.WindowName)
 					{
 						IsTargetUtilityPanel = true;
