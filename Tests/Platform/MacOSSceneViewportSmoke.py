@@ -18,6 +18,7 @@ from MacOSDocumentCloseSmoke import run_bounded_command
 from MacOSDocumentHostSmoke import BoundedOutput, preflight_direct_ax_client, stop_process_group
 from MacOSScreenshot import capture_screenshot
 
+MAIN_TITLE_FRAGMENT = "PulseForge Editor"
 READY = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY;"
 DETACHED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=DETACHED;"
 CAPTURED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=CAPTURED;"
@@ -49,6 +50,20 @@ def coordinate(fields: dict[str, str], name: str, count: int) -> tuple[float, ..
     if not all(value == value and abs(value) != float("inf") for value in values):
         raise ValueError(f"non-finite {name} coordinates: {raw!r}")
     return values
+
+
+def activate_main_editor_window(pid: int, deadline: float) -> str:
+    code, output, error = run_direct_ax(
+        pid,
+        operation="activate-window",
+        window_title=MAIN_TITLE_FRAGMENT,
+        timeout=min(10.0, max(0.1, deadline - time.monotonic())),
+    )
+    output += error
+    if code != 0:
+        raise RuntimeError(f"main editor activation failed during focus-loss test: {output.strip()!r}")
+    parse_window_activation(output, pid, MAIN_TITLE_FRAGMENT)
+    return output
 
 
 def is_fresh_geometry_sample(line: str | None, previous_sample: int) -> bool:
@@ -461,14 +476,7 @@ def main() -> int:
         captured_state = marker_fields(captured_state_line, STATE)
         captured_sample = int(captured_state["sample"])
 
-        activation_code, activation_output, activation_error = run_direct_ax(
-            process.pid, operation="activate-window", window_title=MAIN_TITLE_FRAGMENT,
-            timeout=min(10.0, max(0.1, deadline - time.monotonic())),
-        )
-        activation_output += activation_error
-        if activation_code != 0:
-            raise RuntimeError(f"main editor activation failed during focus-loss test: {activation_output.strip()!r}")
-        parse_window_activation(activation_output, process.pid, MAIN_TITLE_FRAGMENT)
+        activate_main_editor_window(process.pid, deadline)
         focus_loss_line = wait_for_state(
             captured_sample, "capture cancelled and cursor settings restored after owner focus loss",
             lambda fields: fields.get("focused") == "0" and fields.get("capture") == "0" and
