@@ -200,7 +200,7 @@ namespace
 		const auto NormalRelease = Coordinator.ObserveInput(Observation);
 		PF_CHECK(Tests, NormalRelease && NormalRelease->find("event=released") != std::string::npos);
 		const auto Passed = Coordinator.Observe(Observation);
-		PF_CHECK(Tests, Passed && Passed->find("=PASS;") != std::string::npos);
+		PF_CHECK(Tests, Passed && Passed->find("=CAMERA_DRAG_PASS;") != std::string::npos);
 		PF_CHECK(Tests, !Coordinator.Complete());
 		PF_CHECK(Tests, !Coordinator.Observe(Observation));
 		Observation.OwnerViewportID = Observation.MainViewportID;
@@ -209,6 +209,9 @@ namespace
 		Observation.OwnerWindow = 0x1001;
 		PF_CHECK(Tests, !Coordinator.Observe(Observation));
 		Observation.OwnerWindow = 0x1000;
+		Observation.UtilityDockingDomainValid = true;
+		Observation.UtilityDockNodeID = 42;
+		Observation.DragTargetKind = SceneViewportDragTargetKind::DockTab;
 		const auto Reattached = Coordinator.Observe(Observation);
 		PF_CHECK(Tests, Reattached && Reattached->find("=REATTACHED;") != std::string::npos);
 		PF_CHECK(Tests, !Coordinator.Complete());
@@ -218,6 +221,108 @@ namespace
 		const auto ReattachedInput = Coordinator.Observe(Observation);
 		PF_CHECK(Tests, ReattachedInput && ReattachedInput->find("=REATTACHED_CAMERA_INPUT;") != std::string::npos);
 		PF_CHECK(Tests, Coordinator.Complete());
+		Observation.ImGuiTime = 300.0;
+		PF_CHECK(Tests, !Coordinator.ObserveState(Observation));
+	}
+
+	void TestSceneViewportObservationsRemainLivePastLegacyLimit(TestRunner& Tests)
+	{
+		SceneViewportNativeSmokeCoordinator Coordinator(true);
+		SceneViewportNativeSmokeObservation Observation;
+		Observation.MainViewportID = 1;
+		Observation.OwnerViewportID = 1;
+		Observation.OwnerWindow = 0x1000;
+		Observation.SceneImageReady = true;
+		Observation.DockTabReady = true;
+		Observation.ImGuiTime = 0.0;
+		(void)Coordinator.Observe(Observation);
+
+		Observation.OwnerViewportID = 2;
+		Observation.OwnerWindow = 0x2000;
+		Observation.OwnerFocused = true;
+		Observation.ImGuiTime = 0.1;
+		PF_CHECK(Tests, Coordinator.Observe(Observation).has_value());
+		const auto InitialState = Coordinator.ObserveState(Observation);
+		PF_CHECK(Tests, InitialState && InitialState->find("sequence=1") != std::string::npos);
+
+		std::string LastState;
+		for (int Index = 1; Index <= 105; ++Index)
+		{
+			Observation.ImGuiTime = 0.1 + static_cast<double>(Index) * 0.2;
+			if (auto State = Coordinator.ObserveState(Observation)) LastState = *State;
+		}
+		PF_CHECK(Tests, !LastState.empty());
+
+		const auto Sequence = [](const std::string& State)
+		{
+			const size_t Start = State.find("sequence=");
+			if (Start == std::string::npos) return uint64_t{ 0 };
+			return static_cast<uint64_t>(std::stoull(State.substr(Start + 9)));
+		};
+		const uint64_t LastSequence = Sequence(LastState);
+		PF_CHECK(Tests, LastSequence > 1);
+
+		Observation.OwnerFocused = false;
+		Observation.ViewportKeyboardFocused = false;
+		Observation.ImGuiTime += 0.01;
+		const auto FocusChanged = Coordinator.ObserveState(Observation);
+		PF_CHECK(Tests, FocusChanged && FocusChanged->find("focused=0") != std::string::npos &&
+			FocusChanged->find("keyboard_focused=0") != std::string::npos && Sequence(*FocusChanged) > LastSequence);
+
+		Observation.OwnerFocused = true;
+		Observation.CameraCaptureActive = true;
+		Observation.ImGuiTime += 0.01;
+		PF_CHECK(Tests, Coordinator.Observe(Observation).has_value());
+		Observation.RightButtonDown = true;
+		Observation.RightButtonClicked = true;
+		(void)Coordinator.ObserveInput(Observation);
+		Observation.RightButtonDown = false;
+		Observation.RightButtonClicked = false;
+		Observation.RightButtonReleased = true;
+		Observation.CameraCaptureActive = false;
+		Observation.CameraForward = { 0.1f, 0.0f, -0.995f };
+		Observation.ImGuiTime += 0.1;
+		(void)Coordinator.ObserveInput(Observation);
+		const auto Released = Coordinator.Observe(Observation);
+		PF_CHECK(Tests, Released && Released->find("=CAMERA_DRAG_PASS;") != std::string::npos);
+		Observation.OwnerViewportID = Observation.MainViewportID;
+		Observation.OwnerWindow = 0x1000;
+		Observation.ImGuiTime += 0.1;
+		PF_CHECK(Tests, !Coordinator.Observe(Observation));
+		Observation.UtilityDockingDomainValid = true;
+		Observation.DragTargetKind = SceneViewportDragTargetKind::FloatingTitleBar;
+		PF_CHECK(Tests, !Coordinator.Observe(Observation));
+		Observation.UtilityDockNodeID = 42;
+		Observation.DragTargetKind = SceneViewportDragTargetKind::DockTab;
+		Observation.ImGuiTime += 0.1;
+		const auto Reattached = Coordinator.Observe(Observation);
+		PF_CHECK(Tests, Reattached && Reattached->find("=REATTACHED;") != std::string::npos);
+		const auto ReattachedState = Coordinator.ObserveState(Observation);
+		PF_CHECK(Tests, ReattachedState && Sequence(*ReattachedState) > LastSequence);
+		PF_CHECK(Tests, !Coordinator.Complete());
+		Observation.ViewportKeyboardFocused = true;
+		Observation.CameraPosition = { 0.0f, 0.0f, 0.1f };
+		Observation.ImGuiTime += 0.01;
+		PF_CHECK(Tests, Coordinator.Observe(Observation).has_value());
+		PF_CHECK(Tests, Coordinator.Complete());
+
+		SceneViewportNativeSmokeCoordinator ExpiringCoordinator(true);
+		SceneViewportNativeSmokeObservation Expiring = Observation;
+		Expiring.OwnerViewportID = 1;
+		Expiring.OwnerWindow = 0x3000;
+		Expiring.MainViewportID = 1;
+		Expiring.ImGuiTime = 0.0;
+		(void)ExpiringCoordinator.Observe(Expiring);
+		Expiring.OwnerViewportID = 2;
+		Expiring.OwnerWindow = 0x4000;
+		Expiring.ImGuiTime = 0.1;
+		(void)ExpiringCoordinator.Observe(Expiring);
+		Expiring.ImGuiTime = 270.0;
+		Expiring.OwnerWindow = 0;
+		const auto Expired = ExpiringCoordinator.ObserveState(Expiring);
+		PF_CHECK(Tests, Expired && Expired->find("=OBSERVATION_EXPIRED;") != std::string::npos);
+		PF_CHECK(Tests, !ExpiringCoordinator.ObserveState(Expiring));
+		PF_CHECK(Tests, !ExpiringCoordinator.Complete());
 	}
 } // namespace
 
@@ -227,4 +332,5 @@ void RunEditorDebugAcceptanceCoordinatorTests(TestRunner& Tests)
 	TestSaveRetryKeepsDirtySessionUntilRetrySucceeds(Tests);
 	TestSaveFailureAndClosePreparationRetryStates(Tests);
 	TestDetachedSceneViewportSmokeRequiresNativeOwnerAndCameraMotion(Tests);
+	TestSceneViewportObservationsRemainLivePastLegacyLimit(Tests);
 }
