@@ -6284,6 +6284,20 @@ namespace
 					SceneWindow->WindowClass, PulseForgeEditor::EditorDockingDomain::UtilityPanel);
 				Observation.UtilityDockNodeID = SceneWindow->DockId;
 			}
+			ImGuiWindow* InspectorWindow = ImGui::FindWindowByName("Inspector");
+			if (InspectorWindow && InspectorWindow->Viewport == MainViewport && InspectorWindow->DockNode && InspectorWindow->Active &&
+				PulseForgeEditor::IsEditorWindowClassInDomain(InspectorWindow->WindowClass,
+					PulseForgeEditor::EditorDockingDomain::UtilityPanel))
+			{
+				const ImGuiDockNode* InspectorDockNode = InspectorWindow->DockNode;
+				const ImVec2 DockMinimum = InspectorDockNode->Pos;
+				const ImVec2 DockMaximum(DockMinimum.x + InspectorDockNode->Size.x, DockMinimum.y + InspectorDockNode->Size.y);
+				if (DockMaximum.x - DockMinimum.x >= 40.0f && DockMaximum.y - DockMinimum.y >= 40.0f)
+				{
+					Observation.UtilityDropTargetReady = true;
+					Observation.UtilityDropTargetRect = { DockMinimum.x, DockMinimum.y, DockMaximum.x, DockMaximum.y };
+				}
+			}
 			if (auto Marker = m_SceneViewportNativeSmoke->Observe(Observation)) PF_INFO("{}", *Marker);
 			if (auto Marker = m_SceneViewportNativeSmoke->ObserveInput(Observation)) PF_INFO("{}", *Marker);
 			if (auto Marker = m_SceneViewportNativeSmoke->ObserveState(Observation)) PF_INFO("{}", *Marker);

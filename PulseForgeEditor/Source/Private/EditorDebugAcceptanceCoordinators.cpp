@@ -639,6 +639,9 @@ namespace PulseForgeEditor::Detail
 			   << Observation.DragTargetRect[2] << ',' << Observation.DragTargetRect[3] << "; drag_target_kind="
 			   << (Observation.DragTargetKind == SceneViewportDragTargetKind::DockTab ? "dock_tab" :
 				   Observation.DragTargetKind == SceneViewportDragTargetKind::FloatingTitleBar ? "floating_title_bar" : "unavailable")
+			   << "; utility_drop_target=" << (Observation.UtilityDropTargetReady ? "inspector_dock_node" : "unavailable")
+			   << "; utility_drop_rect=" << Observation.UtilityDropTargetRect[0] << ',' << Observation.UtilityDropTargetRect[1]
+			   << ',' << Observation.UtilityDropTargetRect[2] << ',' << Observation.UtilityDropTargetRect[3]
 			   << "; utility_domain=" << Observation.UtilityDockingDomainValid << "; utility_dock_node="
 			   << Observation.UtilityDockNodeID << "; image_min="
 			   << Observation.ImageMinimum[0] << ',' << Observation.ImageMinimum[1]
@@ -738,6 +741,9 @@ namespace PulseForgeEditor::Detail
 			   << Observation.DragTargetRect[2] << ',' << Observation.DragTargetRect[3]
 			   << "; drag_target_kind=" << (Observation.DragTargetKind == SceneViewportDragTargetKind::DockTab ? "dock_tab" :
 				   Observation.DragTargetKind == SceneViewportDragTargetKind::FloatingTitleBar ? "floating_title_bar" : "unavailable")
+			   << "; utility_drop_target=" << (Observation.UtilityDropTargetReady ? "inspector_dock_node" : "unavailable")
+			   << "; utility_drop_rect=" << Observation.UtilityDropTargetRect[0] << ',' << Observation.UtilityDropTargetRect[1]
+			   << ',' << Observation.UtilityDropTargetRect[2] << ',' << Observation.UtilityDropTargetRect[3]
 			   << "; utility_domain=" << Observation.UtilityDockingDomainValid
 			   << "; utility_dock_node=" << Observation.UtilityDockNodeID;
 		return Stream.str();
