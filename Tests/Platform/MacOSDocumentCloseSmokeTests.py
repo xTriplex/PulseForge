@@ -412,7 +412,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             operation="select-element",
             window_title="Open",
             control_name="Example Ω.scene",
-            timeout=4.0,
+            timeout=2.0,
         )
 
         with patch.object(native_dialog, "run_direct_ax", return_value=(124, "DIRECT_AX_RESULT status=timeout", "")) as select:

@@ -756,13 +756,34 @@ def main() -> int:
 
         reattached_state_baseline = latest_state_sequence()
         reattached_state_line = wait_for_state(
-            reattached_state_baseline, "main utility owner ready after Scene Viewport reattachment",
+            reattached_state_baseline, "fresh main utility owner geometry after Scene Viewport reattachment",
             lambda fields: fields.get("owner_viewport") == initial.get("main_viewport") and
-            fields.get("focused") == "1" and fields.get("capture") == "0" and
+            fields.get("capture") == "0" and fields.get("scene_image_ready") == "1" and
             fields.get("utility_domain") == "1" and int(fields.get("utility_dock_node", "0")) != 0 and
             all(key in fields for key in ("image_min", "image_max")),
         )
         reattached_state = marker_fields(reattached_state_line, STATE)
+        reattached_state_sample = int(reattached_state["sequence"])
+        activation_code, activation_output, activation_error = run_direct_ax(
+            process.pid,
+            operation="activate-window",
+            window_title="PulseForge Editor",
+            timeout=min(10.0, max(0.1, deadline - time.monotonic())),
+        )
+        activation_output += activation_error
+        if activation_code != 0:
+            raise RuntimeError(f"main editor activation after reattachment failed: {activation_output.strip()!r}")
+        parse_window_activation(activation_output, process.pid, "PulseForge Editor")
+        activation_completed_at = time.monotonic()
+        reattached_active_state_line = wait_for_state(
+            reattached_state_sample,
+            "fresh focused main utility owner after native activation",
+            lambda fields: fields.get("owner_viewport") == initial.get("main_viewport") and
+            fields.get("focused") == "1" and fields.get("capture") == "0" and
+            fields.get("utility_domain") == "1" and int(fields.get("utility_dock_node", "0")) != 0,
+            not_before=activation_completed_at,
+        )
+        reattached_state = marker_fields(reattached_active_state_line, STATE)
         reattached_state_sample = int(reattached_state["sequence"])
         reattached_image_min = coordinate(reattached_state, "image_min", 2)
         reattached_image_max = coordinate(reattached_state, "image_max", 2)
