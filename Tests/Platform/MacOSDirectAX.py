@@ -371,16 +371,21 @@ let descendants: [AXNode] = {
     guard needsDescendants else { return [] }
     if operation != "select-element" { return collect(matching, depthLimit: operation == "snapshot" ? 4 : 8) }
 
-    // Finder panels can expose dozens of sidebar rows before their file browser
-    // descendants. Search the browser subtree separately so a broad window-tree
-    // node cap cannot hide the target file behind unrelated sidebar content.
+    // Finder panels expose column-view contents through AXColumns/AXVisibleColumns,
+    // not only through the browser's AXChildren. Search those columns separately
+    // so sidebar entries cannot hide the requested file from the bounded tree walk.
     let windowNodes = collect(matching, depthLimit: 3, nodeLimit: 96)
     let browsers = windowNodes.enumerated().compactMap { index, node -> (Int, AXUIElement)? in
         string(node.element, "AXRole") == "AXBrowser" ? (index, node.element) : nil
     }
     var allNodes = windowNodes
     for (browserIndex, browser) in browsers {
-        let browserNodes = collect([browser], depthLimit: 8, nodeLimit: 256)
+        let visibleColumns = value(browser, "AXVisibleColumns") as? [AXUIElement]
+        let columns = visibleColumns.flatMap { $0.isEmpty ? nil : $0 } ??
+            (value(browser, "AXColumns") as? [AXUIElement] ?? [])
+        let browserNodes = columns.isEmpty
+            ? collect([browser], depthLimit: 8, nodeLimit: 256)
+            : collect(columns, depthLimit: 8, nodeLimit: 256)
         let offset = allNodes.count
         allNodes.append(contentsOf: browserNodes.enumerated().map { _, node in
             let parent = node.parent.map { $0 + offset } ?? browserIndex

@@ -136,20 +136,46 @@ def wait_for_open_button(fixture_pid: int, panel_title: str, deadline: float) ->
 
 
 def select_open_file(fixture_pid: int, panel_title: str, expected_path: Path, timeout: float) -> str:
-    code, output, error = run_direct_ax(
-        fixture_pid,
-        operation="select-element",
-        window_title=panel_title,
-        control_name=expected_path.name,
-        timeout=max(0.1, timeout),
-    )
-    result = output + error
-    if code != 0 or "DIRECT_AX_RESULT status=selection-verified; operation=select-element;" not in result:
+    deadline = time.monotonic() + max(0.1, timeout)
+    attempts = 0
+    while time.monotonic() < deadline:
+        attempts += 1
+        code, output, error = run_direct_ax(
+            fixture_pid,
+            operation="select-element",
+            window_title=panel_title,
+            control_name=expected_path.name,
+            timeout=min(2.0, max(0.1, deadline - time.monotonic())),
+        )
+        result = output + error
+        if code == 0 and "DIRECT_AX_RESULT status=selection-verified; operation=select-element;" in result:
+            break
+
+        # The helper exits before AXUIElementSetAttributeValue unless it finds one exact file row.
+        # A zero-match result is therefore a read-only indication that the browser has not exposed
+        # the destination yet. Any ambiguous or timed-out action stops without a second selection.
+        no_matching_row = False
+        if code == 8:
+            matches = [
+                line for line in result.splitlines()
+                if line.startswith("DIRECT_AX_RESULT status=control-selection-error; operation=select-element;")
+            ]
+            if len(matches) == 1:
+                fields = dict(part.split("=", 1) for part in matches[0].split("; ") if "=" in part)
+                no_matching_row = fields.get("matches") == "0"
+        if no_matching_row:
+            time.sleep(min(0.15, max(0.0, deadline - time.monotonic())))
+            continue
         raise RuntimeError(
             f"Expected Open-file row selection was not confirmed; exit_code={code}; output={result[-2400:]!r}"
         )
+    else:
+        raise RuntimeError(
+            f"Expected Open-file row did not become accessible before its deadline; "
+            f"attempts={attempts}; output={result[-2400:]!r}"
+        )
     print(
-        f"NFD_OPEN_FILE_SELECTION=CONFIRMED; pid={fixture_pid}; panel={panel_title!r}; "
+        f"NFD_OPEN_FILE_SELECTION=CONFIRMED; attempts={attempts}; pid={fixture_pid}; panel={panel_title!r}; "
         f"file={expected_path.name!r}; {result.strip()!r}",
         flush=True,
     )

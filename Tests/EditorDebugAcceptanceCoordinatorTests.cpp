@@ -220,6 +220,9 @@ namespace
 		Observation.DragTargetKind = SceneViewportDragTargetKind::DockTab;
 		const auto Reattached = Coordinator.Observe(Observation);
 		PF_CHECK(Tests, Reattached && Reattached->find("=REATTACHED;") != std::string::npos);
+		PF_CHECK(Tests, Reattached && Reattached->find("camera_position=1.0000,2.0000,3.0000") != std::string::npos);
+		PF_CHECK(Tests, Reattached && Reattached->find("camera_position=", Reattached->find("camera_position=") + 1) ==
+			std::string::npos);
 		PF_CHECK(Tests, !Coordinator.Complete());
 		Observation.OwnerFocused = true;
 		Observation.ViewportKeyboardFocused = true;
