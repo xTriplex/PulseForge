@@ -301,6 +301,8 @@ namespace PulseForgeEditor::Detail
 		std::array<float, 2> TitleCenter{};
 		std::array<float, 4> DockTabRect{};
 		std::array<float, 4> DragTargetRect{};
+		std::array<float, 4> UtilityDropTargetRect{};
+		bool UtilityDropTargetReady = false;
 		SceneViewportDragTargetKind DragTargetKind = SceneViewportDragTargetKind::Unavailable;
 		bool UtilityDockingDomainValid = false;
 		uint32_t UtilityDockNodeID = 0;

@@ -202,6 +202,24 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
         self.assertEqual(visible, (300.0, 90.0, 400.0, 116.0))
         self.assertEqual(point, (350.0, 103.0))
 
+    def test_reattachment_targets_a_visible_main_utility_dock_node(self) -> None:
+        fields = {
+            "utility_drop_target": "inspector_dock_node",
+            "utility_drop_rect": "690,180,850,610",
+        }
+        displays = [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0,
+                     "coordinate_space": "Quartz global display coordinates"}]
+        display, visible, point = scene_viewport_smoke.visible_utility_drop_target(fields, displays)
+        self.assertEqual(display["id"], 1)
+        self.assertEqual(visible, (690.0, 180.0, 850.0, 610.0))
+        self.assertEqual(point, (770.0, 395.0))
+        with self.assertRaisesRegex(ValueError, "unavailable or unexpected"):
+            scene_viewport_smoke.visible_utility_drop_target({"utility_drop_rect": "1,1,100,100"}, displays)
+        with self.assertRaisesRegex(ValueError, "no usable visible region"):
+            scene_viewport_smoke.visible_utility_drop_target(
+                {"utility_drop_target": "inspector_dock_node", "utility_drop_rect": "1100,20,1200,200"}, displays
+            )
+
     def test_drag_target_rejects_empty_or_fully_offscreen_geometry(self) -> None:
         displays = [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}]
         with self.assertRaisesRegex(ValueError, "empty"):

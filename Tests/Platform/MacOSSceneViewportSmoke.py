@@ -187,6 +187,15 @@ def visible_drag_target(
     return display, visible, point
 
 
+def visible_utility_drop_target(
+    fields: dict[str, str], displays: list[dict[str, float | int | str]],
+) -> tuple[dict[str, float | int | str], tuple[float, float, float, float], tuple[float, float]]:
+    target_name = fields.get("utility_drop_target")
+    if target_name != "inspector_dock_node":
+        raise ValueError(f"main-window utility dock target is unavailable or unexpected: {target_name!r}")
+    return visible_drag_target(coordinate(fields, "utility_drop_rect", 4), displays, minimum_extent=40.0)
+
+
 def read_native_displays(driver: Path, timeout: float) -> list[dict[str, float | int | str]]:
     code, stdout, stderr = run_bounded_command([str(driver), "display-geometry"], timeout=timeout)
     prefix = "SCENE_VIEWPORT_DISPLAY_GEOMETRY="
@@ -706,9 +715,12 @@ def main() -> int:
         print(f"MACOS_SCENE_VIEWPORT_REATTACH_DRAG_TARGET=kind={reattach_state['drag_target_kind']}; "
               f"display_id={drag_display['id']}; coordinate_space={drag_display['coordinate_space']!r}; "
               f"target={target_rect}; visible={visible_drag_rect}; point={drag_point}")
-        main_x, main_y, main_width, main_height = coordinate(reattach_state, "main_rect", 4)
-        reattach_end_x = main_x + main_width * 0.5
-        reattach_end_y = main_y + main_height * 0.55
+        drop_display, visible_drop_rect, drop_point = visible_utility_drop_target(reattach_state, drag_displays)
+        reattach_end_x, reattach_end_y = drop_point
+        print(f"MACOS_SCENE_VIEWPORT_REATTACH_UTILITY_TARGET=target={reattach_state['utility_drop_target']}; "
+              f"display_id={drop_display['id']}; coordinate_space={drop_display['coordinate_space']!r}; "
+              f"target_rect={coordinate(reattach_state, 'utility_drop_rect', 4)}; visible={visible_drop_rect}; "
+              f"point={drop_point}")
         reattach_id = uuid.uuid4().hex
         code, stdout, stderr = run_bounded_command(
             [str(driver), "drag-left", str(process.pid), reattach_id, str(reattach_start_x), str(reattach_start_y),
