@@ -519,8 +519,8 @@ class DirtyCloseProtocolTests(unittest.TestCase):
 
             def communicate(self, timeout: float) -> tuple[str, str]:
                 return (
-                    f"CGEventPost=SEQUENCE_RETURNED; click_id={self.arguments[3]}; "
-                    f"target_pid={self.arguments[2]};",
+                    f"CGEventPost=SEQUENCE_RETURNED; click_id={self.arguments[2]}; "
+                    f"target_pid={self.arguments[1]};",
                     "",
                 )
 
