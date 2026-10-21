@@ -6179,6 +6179,26 @@ namespace
 			Observation.CameraForward = { Forward.x, Forward.y, Forward.z };
 			Observation.FramebufferScale = { OwnerViewport->FramebufferScale.x, OwnerViewport->FramebufferScale.y };
 			Observation.TitleCenter = { WindowPosition.x + WindowSize.x * 0.5f, WindowPosition.y + TitleHeight * 0.5f };
+			ImGuiWindow* SceneWindow = ImGui::GetCurrentWindow();
+			ImGuiTabBar* TabBar = SceneWindow && SceneWindow->DockNode ? SceneWindow->DockNode->TabBar : nullptr;
+			if (SceneWindow && TabBar)
+			{
+				for (const ImGuiTabItem& Tab : TabBar->Tabs)
+				{
+					if (Tab.Window != SceneWindow || Tab.ID != TabBar->VisibleTabId) continue;
+					const float TabMinimumX = std::max(
+						TabBar->ScrollingRectMinX, TabBar->BarRect.Min.x + Tab.Offset - TabBar->ScrollingAnim);
+					const float TabMaximumX = std::min(
+						TabBar->ScrollingRectMaxX, TabBar->BarRect.Min.x + Tab.Offset - TabBar->ScrollingAnim + Tab.Width);
+					const float TabMinimumY = TabBar->BarRect.Min.y;
+					const float TabMaximumY = TabBar->BarRect.Max.y;
+					if (TabMaximumX - TabMinimumX < 12.0f || TabMaximumY <= TabMinimumY) break;
+					Observation.DockTabReady = true;
+					Observation.DockTabRect = { TabMinimumX, TabMinimumY, TabMaximumX, TabMaximumY };
+					Observation.TitleCenter = { (TabMinimumX + TabMaximumX) * 0.5f, (TabMinimumY + TabMaximumY) * 0.5f };
+					break;
+				}
+			}
 			Observation.ImageMinimum = { m_ViewportImageRect.Minimum.x, m_ViewportImageRect.Minimum.y };
 			Observation.ImageMaximum = { m_ViewportImageRect.Maximum.x, m_ViewportImageRect.Maximum.y };
 			Observation.MainWindowRect = { MainViewport->Pos.x, MainViewport->Pos.y, MainViewport->Size.x, MainViewport->Size.y };

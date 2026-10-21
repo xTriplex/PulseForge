@@ -273,9 +273,11 @@ namespace PulseForgeEditor::Detail
 		uintptr_t OwnerWindow = 0;
 		bool SceneImageReady = false;
 		bool CameraCaptureActive = false;
+		bool DockTabReady = false;
 		std::array<float, 3> CameraForward{};
 		std::array<float, 2> FramebufferScale{ 1.0f, 1.0f };
 		std::array<float, 2> TitleCenter{};
+		std::array<float, 4> DockTabRect{};
 		std::array<float, 2> ImageMinimum{};
 		std::array<float, 2> ImageMaximum{};
 		std::array<float, 4> MainWindowRect{};

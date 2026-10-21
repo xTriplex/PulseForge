@@ -127,6 +127,9 @@ namespace
 		Observation.SceneImageReady = true;
 		Observation.CameraForward = { 0.0f, 0.0f, -1.0f };
 		Observation.TitleCenter = { 150.0f, 50.0f };
+		PF_CHECK(Tests, !Coordinator.Observe(Observation));
+		Observation.DockTabReady = true;
+		Observation.DockTabRect = { 100.0f, 30.0f, 200.0f, 70.0f };
 		Observation.ImageMinimum = { 100.0f, 100.0f };
 		Observation.ImageMaximum = { 700.0f, 500.0f };
 		Observation.MainWindowRect = { 20.0f, 30.0f, 820.0f, 620.0f };

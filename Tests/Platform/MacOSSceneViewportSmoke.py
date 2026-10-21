@@ -175,7 +175,15 @@ def main() -> int:
         initial = marker_fields(ready_line, READY)
         start_x, start_y = coordinate(initial, "title_center", 2)
         end_x, end_y = coordinate(initial, "tear_off_point", 2)
+        tab_min_x, tab_min_y, tab_max_x, tab_max_y = coordinate(initial, "dock_tab_rect", 4)
+        image_min_x, image_min_y = coordinate(initial, "image_min", 2)
         main_x, main_y, main_width, main_height = coordinate(initial, "main_rect", 4)
+        if tab_max_x - tab_min_x < 30 or tab_max_y - tab_min_y < 8:
+            raise RuntimeError("Scene Viewport did not report a usable dock-tab rectangle")
+        if not (tab_min_x <= start_x <= tab_max_x and tab_min_y <= start_y <= tab_max_y):
+            raise RuntimeError("Scene Viewport drag origin is outside its observed dock tab")
+        if tab_max_y > image_min_y:
+            raise RuntimeError("Scene Viewport dock-tab rectangle overlaps the rendered image origin")
         if not (main_x <= start_x <= main_x + main_width and main_y <= start_y <= main_y + main_height):
             raise RuntimeError("Scene Viewport tab drag origin is outside the main editor viewport")
         if main_x <= end_x <= main_x + main_width and main_y <= end_y <= main_y + main_height:
