@@ -79,6 +79,17 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 scene_viewport_smoke.coordinate({"point": raw}, "point", 2)
 
+    def test_camera_geometry_requires_a_sample_emitted_after_window_activation(self) -> None:
+        prior = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT; sample=4; stable_seconds=1.5"
+        fresh = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT; sample=5; stable_seconds=0.8"
+        self.assertFalse(scene_viewport_smoke.is_fresh_geometry_sample(prior, 4))
+        self.assertTrue(scene_viewport_smoke.is_fresh_geometry_sample(fresh, 4))
+        self.assertFalse(scene_viewport_smoke.is_fresh_geometry_sample(None, 4))
+        with self.assertRaisesRegex(ValueError, "valid sample sequence"):
+            scene_viewport_smoke.is_fresh_geometry_sample(
+                "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT; stable_seconds=1.5", 4
+            )
+
 
 class DirtyCloseProtocolTests(unittest.TestCase):
     def setUp(self) -> None:

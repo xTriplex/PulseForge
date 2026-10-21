@@ -293,6 +293,7 @@ namespace PulseForgeEditor::Detail
 		std::array<float, 2> TearOffPoint{};
 		uint32_t ImGuiHoveredViewportID = 0;
 		int ImGuiFrameNumber = 0;
+		double ImGuiTime = 0.0;
 	};
 
 	class SceneViewportNativeSmokeCoordinator final
@@ -327,6 +328,10 @@ namespace PulseForgeEditor::Detail
 		bool m_CaptureWasObserved = false;
 		bool m_LastRightButtonDown = false;
 		uint32_t m_InputSamples = 0;
+		uint32_t m_CameraGeometryReadySamples = 0;
+		double m_GeometryStableSince = -1.0;
+		double m_LastGeometryReadyTime = -1.0;
+		std::array<float, 8> m_LastCameraGeometry{};
 	};
 } // namespace PulseForgeEditor::Detail
 

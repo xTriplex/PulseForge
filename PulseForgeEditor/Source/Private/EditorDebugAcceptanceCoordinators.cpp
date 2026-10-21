@@ -652,10 +652,46 @@ namespace PulseForgeEditor::Detail
 		if (m_Phase < Phase::AwaitingCameraCapture || m_Phase > Phase::AwaitingCameraRelease ||
 			Observation.OwnerViewportID != m_DetachedViewportID || Observation.OwnerWindow != m_DetachedWindow)
 			return std::nullopt;
-
 		const bool PressTransition = Observation.RightButtonDown && !m_LastRightButtonDown;
 		const bool ReleaseTransition = !Observation.RightButtonDown && m_LastRightButtonDown;
 		m_LastRightButtonDown = Observation.RightButtonDown;
+
+		const std::array<float, 8> Geometry = {
+			Observation.OwnerNativePosition[0], Observation.OwnerNativePosition[1], Observation.OwnerNativeSize[0],
+			Observation.OwnerNativeSize[1], Observation.ImageMinimum[0], Observation.ImageMinimum[1],
+			Observation.ImageMaximum[0], Observation.ImageMaximum[1]
+		};
+		const bool GeometryFinite = std::all_of(Geometry.begin(), Geometry.end(), [](float Value) { return std::isfinite(Value); });
+		const bool ImageInsideOwner = GeometryFinite && Observation.OwnerNativeSize[0] > 0.0f &&
+			Observation.OwnerNativeSize[1] > 0.0f && Observation.ImageMinimum[0] >= Observation.OwnerNativePosition[0] &&
+			Observation.ImageMinimum[1] >= Observation.OwnerNativePosition[1] &&
+			Observation.ImageMaximum[0] <= Observation.OwnerNativePosition[0] + Observation.OwnerNativeSize[0] &&
+			Observation.ImageMaximum[1] <= Observation.OwnerNativePosition[1] + Observation.OwnerNativeSize[1];
+		const bool SameGeometry = std::equal(Geometry.begin(), Geometry.end(), m_LastCameraGeometry.begin(),
+			[](float Left, float Right) { return std::abs(Left - Right) <= 0.5f; });
+		const bool StableGeometry = Observation.OwnerFocused && Observation.SceneImageReady && ImageInsideOwner &&
+			std::isfinite(Observation.ImGuiTime);
+		if (!StableGeometry)
+			m_GeometryStableSince = -1.0;
+		else if (!SameGeometry || m_GeometryStableSince < 0.0)
+			m_GeometryStableSince = Observation.ImGuiTime;
+		m_LastCameraGeometry = Geometry;
+		const double StableSeconds = m_GeometryStableSince < 0.0 ? 0.0 : Observation.ImGuiTime - m_GeometryStableSince;
+		if (!PressTransition && !ReleaseTransition && !Observation.RightButtonClicked && !Observation.RightButtonReleased &&
+			StableGeometry && StableSeconds >= 0.3 && m_CameraGeometryReadySamples < 12 &&
+			Observation.ImGuiTime - m_LastGeometryReadyTime >= 0.75)
+		{
+			m_LastGeometryReadyTime = Observation.ImGuiTime;
+			++m_CameraGeometryReadySamples;
+			std::ostringstream Stream;
+			Stream << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT; sample=" << m_CameraGeometryReadySamples
+				   << "; stable_seconds=" << std::fixed << std::setprecision(2) << StableSeconds
+				   << "; frame=" << Observation.ImGuiFrameNumber << "; owner_viewport=" << Observation.OwnerViewportID
+				   << "; focused=" << Observation.OwnerFocused << "; "
+				   << FormatGeometry(Observation);
+			return Stream.str();
+		}
+
 		if ((!PressTransition && !ReleaseTransition && !Observation.RightButtonClicked && !Observation.RightButtonReleased) ||
 			m_InputSamples >= 8)
 			return std::nullopt;

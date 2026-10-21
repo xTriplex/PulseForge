@@ -21,8 +21,9 @@ READY = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY;"
 DETACHED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=DETACHED;"
 CAPTURED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=CAPTURED;"
 PASSED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=PASS;"
+CAMERA_READY = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT;"
 FAILURE_MARKERS = ("MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=FAILED;",)
-EVIDENCE_MARKERS = (READY, DETACHED, CAPTURED, PASSED, *FAILURE_MARKERS)
+EVIDENCE_MARKERS = (READY, DETACHED, CAMERA_READY, CAPTURED, PASSED, *FAILURE_MARKERS)
 
 
 def marker_fields(line: str, marker: str) -> dict[str, str]:
@@ -45,6 +46,19 @@ def coordinate(fields: dict[str, str], name: str, count: int) -> tuple[float, ..
     if not all(value == value and abs(value) != float("inf") for value in values):
         raise ValueError(f"non-finite {name} coordinates: {raw!r}")
     return values
+
+
+def is_fresh_geometry_sample(line: str | None, previous_sample: int) -> bool:
+    if line is None:
+        return False
+    fields = marker_fields(line, CAMERA_READY)
+    try:
+        sample = int(fields["sample"])
+    except (KeyError, ValueError) as error:
+        raise ValueError("camera geometry marker has no valid sample sequence") from error
+    if sample <= 0:
+        raise ValueError("camera geometry sample sequence must be positive")
+    return sample > previous_sample
 
 
 def screenshot(filename: str, checkpoint: str) -> None:
@@ -211,8 +225,37 @@ def main() -> int:
         if ax_code != 0:
             raise RuntimeError(f"could not focus the observed Scene Viewport native window: {ax_output.strip()!r}")
         focused_title = parse_window_activation(ax_output, process.pid, "Scene Viewport")
-        image_min_x, image_min_y = coordinate(detached, "image_min", 2)
-        image_max_x, image_max_y = coordinate(detached, "image_max", 2)
+
+        latest_camera_geometry = capture.marker_lines.get(CAMERA_READY)
+        geometry_sequence = int(marker_fields(latest_camera_geometry, CAMERA_READY)["sample"]) if latest_camera_geometry else 0
+        while time.monotonic() < deadline:
+            if capture.reader_error:
+                raise RuntimeError(f"editor output reader failed while waiting for fresh viewport geometry: {capture.reader_error}")
+            latest_camera_geometry = capture.marker_lines.get(CAMERA_READY)
+            if latest_camera_geometry:
+                if is_fresh_geometry_sample(latest_camera_geometry, geometry_sequence):
+                    break
+            failure = next((capture.marker_lines[item] for item in FAILURE_MARKERS if item in capture.markers), None)
+            if failure:
+                raise RuntimeError(f"editor fixture failed: {failure}")
+            if process.poll() is not None:
+                raise RuntimeError(f"editor exited with status {process.returncode} before fresh viewport geometry")
+            capture.finished.wait(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
+        else:
+            raise TimeoutError(
+                f"timed out waiting for a fresh stable viewport geometry sample after activation; "
+                f"last_sequence={geometry_sequence}; process_status={process.poll()}"
+            )
+        assert latest_camera_geometry is not None
+        camera_ready_line = latest_camera_geometry
+        print(f"MACOS_SCENE_VIEWPORT_OBSERVED=post-activation stable geometry; {camera_ready_line}")
+        camera_ready = marker_fields(camera_ready_line, CAMERA_READY)
+        image_min_x, image_min_y = coordinate(camera_ready, "image_min", 2)
+        image_max_x, image_max_y = coordinate(camera_ready, "image_max", 2)
+        native_x, native_y, native_width, native_height = coordinate(camera_ready, "owner_native_rect", 4)
+        if not (native_x <= image_min_x < image_max_x <= native_x + native_width and
+                native_y <= image_min_y < image_max_y <= native_y + native_height):
+            raise RuntimeError("fresh Scene Viewport image geometry is outside its focused native owner")
         image_center_x = (image_min_x + image_max_x) * 0.5
         image_center_y = (image_min_y + image_max_y) * 0.5
         if image_max_x - image_min_x < 80 or image_max_y - image_min_y < 80:
