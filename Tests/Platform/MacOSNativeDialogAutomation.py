@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-import math
 import os
 import queue
 import signal
@@ -130,7 +129,7 @@ def open_file_action_dispatched(output: str, expected_name: str) -> bool:
     )
 
 
-def unsupported_open_action_frame(output: str, expected_name: str) -> tuple[float, float, float, float] | None:
+def open_file_action_error(output: str, expected_name: str) -> int | None:
     dispatches = [
         line for line in output.splitlines()
         if line.startswith("DIRECT_AX_DISPATCH attempted=true; operation=open-file;")
@@ -147,74 +146,59 @@ def unsupported_open_action_frame(output: str, expected_name: str) -> tuple[floa
     result_fields = dict(
         part.split("=", 1) for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ") if "=" in part
     )
-    if (
-        dispatch_fields.get("name") != expected_name
-        or dispatch_fields.get("advertised_action") != "AXOpen"
-        or result_fields.get("name") != expected_name
-        or result_fields.get("ax_error") != "-25205"
-    ):
+    if dispatch_fields.get("name") != expected_name or dispatch_fields.get("advertised_action") != "AXOpen":
         return None
     try:
-        frame = tuple(float(value) for value in dispatch_fields["frame"].split(","))
+        ax_error = int(result_fields["ax_error"])
     except (KeyError, ValueError):
         return None
-    if len(frame) != 4 or not all(math.isfinite(value) for value in frame):
+    if result_fields.get("role") != "AXTextField" or result_fields.get("name") != expected_name:
         return None
-    if frame[2] <= 0 or frame[3] <= 0:
-        return None
-    return frame  # AXFrame and Quartz use global top-left points; do not apply backing scale.
+    return ax_error
 
 
-def run_open_file_pointer_click(target_pid: int, expected_name: str, frame: tuple[float, float, float, float], timeout: float) -> str:
-    runner_temp = os.environ.get("RUNNER_TEMP")
-    if not runner_temp:
-        raise RuntimeError("RUNNER_TEMP is unavailable for the compiled Quartz pointer helper")
-    executable = Path(runner_temp) / "PulseForgePointerInput"
-    if not executable.is_file():
-        raise RuntimeError(f"desktop-job Quartz pointer helper is missing: {executable}")
-    x = frame[0] + frame[2] / 2.0
-    y = frame[1] + frame[3] / 2.0
-    action_id = uuid.uuid4().hex
-    process = subprocess.Popen(
-        [str(executable), str(target_pid), action_id, f"{x:.3f}", f"{y:.3f}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        start_new_session=True,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=max(0.1, timeout))
-    except subprocess.TimeoutExpired as error:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            stdout, stderr = process.communicate(timeout=0.25)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            stdout, stderr = process.communicate(timeout=1.0)
-        raise RuntimeError(f"Open file-field pointer click timed out; action_id={action_id}; {stdout!r}; {stderr!r}") from error
-    if (
-        process.returncode != 0
-        or f"CGEventPost=SEQUENCE_RETURNED; click_id={action_id};" not in stdout
-        or f"target_pid={target_pid};" not in stdout
-    ):
-        raise RuntimeError(
-            f"Open file-field pointer click failed; exit_code={process.returncode}; action_id={action_id}; "
-            f"stdout={stdout[-1200:]!r}; stderr={stderr[-1200:]!r}"
-        )
+def navigate_open_panel_to_folder(fixture_pid: int, panel_title: str, folder: Path, deadline: float) -> str:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("Open panel folder-navigation deadline expired before dispatch")
+    shortcut = run_keyboard_input("--go-to-folder", fixture_pid, timeout=min(5.0, remaining))
     print(
-        f"NFD_OPEN_FILE_FIELD_CLICK=TRANSPORT_RETURNED; action_id={action_id}; target_pid={target_pid}; "
-        f"target_name={expected_name!r}; quartz_point={x:.3f},{y:.3f}; output={stdout.strip()!r}",
+        f"NFD_GO_TO_FOLDER_SHORTCUT=TRANSPORT_RETURNED; action_id={shortcut}; target_pid={fixture_pid}",
         flush=True,
     )
-    return stdout
+    sheet = run_direct_ax_until(
+        fixture_pid,
+        panel_title,
+        deadline,
+        go_to_folder_path_field_visible,
+        "the Open panel Go to Folder path field",
+        operation="snapshot",
+    )
+    if "\n" in str(folder) or "\r" in str(folder):
+        raise RuntimeError("Go to Folder path contains a line break and cannot be represented safely")
+    set_code, set_output, set_error = run_direct_ax(
+        fixture_pid,
+        operation="set-folder-path-value",
+        window_title=panel_title,
+        control_name="PathTextField",
+        control_value=str(folder),
+        timeout=min(8.0, max(0.1, deadline - time.monotonic())),
+    )
+    set_output += set_error
+    if set_code != 0 or not folder_path_field_ready(set_output, str(folder)):
+        raise RuntimeError(f"Go to Folder path was not set and focused; exit_code={set_code}; output={set_output!r}")
+    print(f"NFD_GO_TO_FOLDER_PATH=CONFIRMED; target_pid={fixture_pid}; path={str(folder)!r}; {set_output.strip()!r}")
+    return_action = run_keyboard_input("--press-return", fixture_pid, timeout=min(5.0, max(0.1, deadline - time.monotonic())))
+    print(f"NFD_GO_TO_FOLDER_CONFIRM=TRANSPORT_RETURNED; action_id={return_action}; target_pid={fixture_pid}")
+    dismissed = run_direct_ax_until(
+        fixture_pid,
+        panel_title,
+        deadline,
+        go_to_folder_sheet_dismissed,
+        "the Go to Folder sheet to dismiss after the exact path was confirmed",
+        operation="observe-go-to-folder-state",
+    )
+    return sheet + set_output + dismissed
 
 
 def run_keyboard_input(mode: str, target_pid: int, *, text: str = "", timeout: float) -> str:
@@ -804,9 +788,6 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 )
             print(f"NFD_OPEN_PANEL_FOCUS=CONFIRMED; {activation_output.strip()!r}", flush=True)
 
-            # The fixture supplies this directory as NSSavePanel's defaultPath.
-            # The pinned Cocoa adapter applies it with setDirectoryURL, so select
-            # the exact file from the native panel's initial directory directly.
             helper_deadline = min(deadline, time.monotonic() + 25.0)
             selection_code, selection_output = select_open_file(
                 int(panel_process_id), panel_title, expected_path,
@@ -818,23 +799,54 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             open_action_sent = open_file_action_dispatched(selection_output, expected_path.name)
             open_button_confirmed = False
             if open_action_sent:
-                frame = unsupported_open_action_frame(selection_output, expected_path.name)
-                if frame is not None:
-                    click_output = run_open_file_pointer_click(
-                        int(panel_process_id), expected_path.name, frame, min(5.0, remaining_seconds())
+                ax_error = open_file_action_error(selection_output, expected_path.name)
+                if ax_error == -25205:
+                    state_code, panel_state, state_error = run_direct_ax(
+                        int(panel_process_id),
+                        operation="observe-open-button-state",
+                        window_title=panel_title,
+                        timeout=min(8.0, max(0.1, helper_deadline - time.monotonic())),
                     )
-                    automation_output += click_output
-                    panel_state = wait_for_open_button(int(panel_process_id), panel_title, helper_deadline)
-                    automation_output += panel_state
-                    open_button_confirmed = open_button_state_ready(panel_state, int(panel_process_id), panel_title)
-                    if not open_button_confirmed:
-                        if open_panel_dismissed(panel_state, panel_title):
-                            last_open_step = "file-field click dismissed Open panel; awaiting exact semantic fixture result"
-                        else:
+                    panel_state += state_error
+                    if state_code == 22 and open_panel_dismissed(panel_state, panel_title):
+                        last_open_step = "unsupported AXOpen was followed by panel dismissal; reconciling semantic result without replay"
+                    elif state_code == 0 and not open_button_state_ready(panel_state, int(panel_process_id), panel_title):
+                        automation_output += panel_state
+                        navigation = navigate_open_panel_to_folder(
+                            int(panel_process_id), panel_title, expected_path.parent, helper_deadline
+                        )
+                        automation_output += navigation
+                        selection_code, selection_output = select_open_file(
+                            int(panel_process_id), panel_title, expected_path,
+                            timeout=max(0.1, helper_deadline - time.monotonic())
+                        )
+                        automation_code = selection_code
+                        automation_output += selection_output
+                        if open_file_action_dispatched(selection_output, expected_path.name):
                             raise RuntimeError(
-                                "AXOpen was unsupported and one exact file-field click did not enable Open; "
-                                f"postcondition={panel_state[-2400:]!r}"
+                                "The exact file was still exposed only through unsupported AXOpen after Go to Folder; "
+                                "no second action was attempted."
                             )
+                        if selection_code != 0 or not open_file_selection_ready(selection_output, expected_path.name):
+                            raise RuntimeError(
+                                f"Open-file row was not selected after Go to Folder; exit_code={selection_code}; "
+                                f"output={selection_output[-2400:]!r}"
+                            )
+                        panel_state = wait_for_open_button(
+                            int(panel_process_id), panel_title, helper_deadline
+                        )
+                        automation_output += panel_state
+                        open_button_confirmed = open_button_state_ready(
+                            panel_state, int(panel_process_id), panel_title
+                        )
+                    elif state_code == 0 and open_button_state_ready(panel_state, int(panel_process_id), panel_title):
+                        automation_output += panel_state
+                        open_button_confirmed = True
+                    else:
+                        raise RuntimeError(
+                            "Could not establish the Open-panel postcondition after unsupported AXOpen; "
+                            f"exit_code={state_code}; output={panel_state[-2400:]!r}"
+                        )
                 else:
                     last_open_step = "AXOpen dispatched; waiting for semantic fixture result without replay"
             else:

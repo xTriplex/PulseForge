@@ -15,7 +15,7 @@ import time
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import MacOSDocumentCloseSmoke as smoke
 import MacOSBundleSmoke as bundle
@@ -489,55 +489,69 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertEqual(action_returned, result)
         select.assert_called_once()
 
-    def test_unsupported_axopen_uses_only_the_exact_validated_axframe(self) -> None:
+    def test_open_file_axopen_error_is_classified_only_for_the_exact_control(self) -> None:
         result = (
             "DIRECT_AX_DISPATCH attempted=true; operation=open-file; target_pid=42; "
-            "role=AXTextField; name=Selected Ω.pfproj; advertised_action=AXOpen; frame=100.5,200,80,24\n"
+            "role=AXTextField; name=Selected Ω.pfproj; advertised_action=AXOpen\n"
             "DIRECT_AX_RESULT status=open-file-action-returned; operation=open-file; "
             "role=AXTextField; name=Selected Ω.pfproj; ax_error=-25205"
         )
-        self.assertEqual(
-            (100.5, 200.0, 80.0, 24.0),
-            native_dialog.unsupported_open_action_frame(result, "Selected Ω.pfproj"),
-        )
-        self.assertIsNone(native_dialog.unsupported_open_action_frame(
+        self.assertEqual(-25205, native_dialog.open_file_action_error(result, "Selected Ω.pfproj"))
+        self.assertIsNone(native_dialog.open_file_action_error(
             result.replace("ax_error=-25205", "ax_error=0"), "Selected Ω.pfproj"
         ))
-        self.assertIsNone(native_dialog.unsupported_open_action_frame(result, "Other.pfproj"))
-        self.assertIsNone(native_dialog.unsupported_open_action_frame(
-            result.replace("frame=100.5,200,80,24", "frame=nan,200,80,24"), "Selected Ω.pfproj"
+        self.assertIsNone(native_dialog.open_file_action_error(result, "Other.pfproj"))
+        self.assertIsNone(native_dialog.open_file_action_error(
+            result.replace("role=AXTextField; name=Selected Ω.pfproj; ax_error", "role=AXRow; name=Selected Ω.pfproj; ax_error"),
+            "Selected Ω.pfproj",
         ))
-        self.assertIsNone(native_dialog.unsupported_open_action_frame(
-            result.replace("frame=100.5,200,80,24", "frame=100.5,200,0,24"), "Selected Ω.pfproj"
-        ))
+        self.assertIsNone(native_dialog.open_file_action_error(result + "\n" + result, "Selected Ω.pfproj"))
 
-    def test_open_file_field_click_posts_once_at_axframe_center(self) -> None:
-        class CompletedPointer:
-            def __init__(self, arguments: list[str]):
-                self.arguments = arguments
-            returncode = 0
+    def test_go_to_folder_navigation_requires_exact_focused_path_and_dismissal(self) -> None:
+        folder = Path("/Users/runner/_temp/Dialog Files Ω")
+        visible = (
+            "DIRECT_AX_NODE index=4; role=AXSheet; name=GoToWindow\n"
+            "DIRECT_AX_NODE index=7; role=AXTextField; name=PathTextField; enabled=true"
+        )
+        focused = f"DIRECT_AX_RESULT status=folder-path-ready; value={folder}; focused=true"
+        dismissed = (
+            "DIRECT_AX_RESULT status=go-to-folder-state; window_title=Open; complete=true; "
+            "truncated=false; query_errors=[]; sheet_count=0"
+        )
+        with (
+            patch.object(native_dialog, "run_keyboard_input", side_effect=["go-action", "return-action"]) as keyboard,
+            patch.object(native_dialog, "run_direct_ax_until", side_effect=[visible, dismissed]) as observe,
+            patch.object(native_dialog, "run_direct_ax", return_value=(0, focused, "")) as set_path,
+        ):
+            output = native_dialog.navigate_open_panel_to_folder(42, "Open", folder, native_dialog.time.monotonic() + 20)
+        self.assertIn("Go to Folder", output)
+        self.assertEqual(["--go-to-folder", "--press-return"], [call.args[0] for call in keyboard.call_args_list])
+        set_path.assert_called_once_with(
+            42,
+            operation="set-folder-path-value",
+            window_title="Open",
+            control_name="PathTextField",
+            control_value=str(folder),
+            timeout=ANY,
+        )
+        self.assertEqual(2, observe.call_count)
+        self.assertEqual("snapshot", observe.call_args_list[0].kwargs["operation"])
+        self.assertEqual("observe-go-to-folder-state", observe.call_args_list[1].kwargs["operation"])
 
-            def communicate(self, timeout: float) -> tuple[str, str]:
-                return (
-                    f"CGEventPost=SEQUENCE_RETURNED; click_id={self.arguments[2]}; "
-                    f"target_pid={self.arguments[1]};",
-                    "",
-                )
-
-        frame = (100.0, 200.0, 80.0, 24.0)
-        with tempfile.TemporaryDirectory() as runner_temp:
-            pointer = Path(runner_temp) / "PulseForgePointerInput"
-            pointer.touch()
-            with patch.dict(native_dialog.os.environ, {"RUNNER_TEMP": runner_temp}), patch.object(
-                native_dialog.subprocess, "Popen", side_effect=lambda arguments, **kwargs: CompletedPointer(arguments)
-            ) as launch:
-                output = native_dialog.run_open_file_pointer_click(42, "Selected Ω.pfproj", frame, 3.0)
-        self.assertIn("CGEventPost=SEQUENCE_RETURNED", output)
-        arguments = launch.call_args.args[0]
-        self.assertEqual([str(pointer), "42"], arguments[:2])
-        self.assertEqual("140.000", arguments[3])
-        self.assertEqual("212.000", arguments[4])
-        launch.assert_called_once()
+    def test_go_to_folder_does_not_confirm_when_path_is_not_focused(self) -> None:
+        folder = Path("/Users/runner/Dialog Files Ω")
+        visible = (
+            "DIRECT_AX_NODE index=4; role=AXSheet; name=GoToWindow\n"
+            "DIRECT_AX_NODE index=7; role=AXTextField; name=PathTextField; enabled=true"
+        )
+        with (
+            patch.object(native_dialog, "run_keyboard_input", return_value="go-action") as keyboard,
+            patch.object(native_dialog, "run_direct_ax_until", return_value=visible),
+            patch.object(native_dialog, "run_direct_ax", return_value=(9, "DIRECT_AX_RESULT status=folder-path-ready; focused=false", "")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "not set and focused"):
+                native_dialog.navigate_open_panel_to_folder(42, "Open", folder, native_dialog.time.monotonic() + 20)
+        keyboard.assert_called_once_with("--go-to-folder", 42, timeout=ANY)
 
     def test_open_selection_waits_only_while_the_exact_file_row_is_absent(self) -> None:
         no_row = (
