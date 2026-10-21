@@ -640,7 +640,39 @@ namespace PulseForgeEditor::Detail
 			   << Observation.MainWindowRect[0] << ',' << Observation.MainWindowRect[1] << ',' << Observation.MainWindowRect[2] << ','
 			   << Observation.MainWindowRect[3] << "; owner_framebuffer_scale=" << Observation.FramebufferScale[0] << ','
 			   << Observation.FramebufferScale[1] << "; tear_off_point=" << Observation.TearOffPoint[0] << ','
-			   << Observation.TearOffPoint[1];
+			   << Observation.TearOffPoint[1] << "; owner_native_rect=" << Observation.OwnerNativePosition[0] << ','
+			   << Observation.OwnerNativePosition[1] << ',' << Observation.OwnerNativeSize[0] << ','
+			   << Observation.OwnerNativeSize[1];
+		return Stream.str();
+	}
+
+	std::optional<std::string> SceneViewportNativeSmokeCoordinator::ObserveInput(
+		const SceneViewportNativeSmokeObservation& Observation)
+	{
+		if (m_Phase < Phase::AwaitingCameraCapture || m_Phase > Phase::AwaitingCameraRelease ||
+			Observation.OwnerViewportID != m_DetachedViewportID || Observation.OwnerWindow != m_DetachedWindow)
+			return std::nullopt;
+
+		const bool PressTransition = Observation.RightButtonDown && !m_LastRightButtonDown;
+		const bool ReleaseTransition = !Observation.RightButtonDown && m_LastRightButtonDown;
+		m_LastRightButtonDown = Observation.RightButtonDown;
+		if ((!PressTransition && !ReleaseTransition && !Observation.RightButtonClicked && !Observation.RightButtonReleased) ||
+			m_InputSamples >= 8)
+			return std::nullopt;
+
+		++m_InputSamples;
+		std::ostringstream Stream;
+		Stream << std::fixed << std::setprecision(1) << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=INPUT; sample=" << m_InputSamples
+			   << "; event=" << (Observation.RightButtonClicked ? "clicked" : Observation.RightButtonReleased || ReleaseTransition ? "released" : "down")
+			   << "; frame=" << Observation.ImGuiFrameNumber << "; owner_viewport=" << Observation.OwnerViewportID
+			   << "; focused=" << Observation.OwnerFocused
+			   << "; mouse=" << Observation.ImGuiMousePosition[0] << ',' << Observation.ImGuiMousePosition[1]
+			   << "; hovered_viewport=" << Observation.ImGuiHoveredViewportID << "; image_hovered=" << Observation.ImageHovered
+			   << "; raw_down=" << Observation.RightButtonDown << "; clicked=" << Observation.RightButtonClicked
+			   << "; released=" << Observation.RightButtonReleased << "; capture=" << Observation.CameraCaptureActive
+			   << "; native_rect=" << Observation.OwnerNativePosition[0] << ',' << Observation.OwnerNativePosition[1] << ','
+			   << Observation.OwnerNativeSize[0] << ',' << Observation.OwnerNativeSize[1]
+			   << "; cursor=" << Observation.OwnerCursorPosition[0] << ',' << Observation.OwnerCursorPosition[1];
 		return Stream.str();
 	}
 

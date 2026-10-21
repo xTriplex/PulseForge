@@ -274,14 +274,25 @@ namespace PulseForgeEditor::Detail
 		bool SceneImageReady = false;
 		bool CameraCaptureActive = false;
 		bool DockTabReady = false;
+		bool ImageHovered = false;
+		bool OwnerFocused = false;
+		bool RightButtonDown = false;
+		bool RightButtonClicked = false;
+		bool RightButtonReleased = false;
 		std::array<float, 3> CameraForward{};
 		std::array<float, 2> FramebufferScale{ 1.0f, 1.0f };
+		std::array<float, 2> OwnerNativePosition{};
+		std::array<float, 2> OwnerNativeSize{};
+		std::array<float, 2> OwnerCursorPosition{};
+		std::array<float, 2> ImGuiMousePosition{};
 		std::array<float, 2> TitleCenter{};
 		std::array<float, 4> DockTabRect{};
 		std::array<float, 2> ImageMinimum{};
 		std::array<float, 2> ImageMaximum{};
 		std::array<float, 4> MainWindowRect{};
 		std::array<float, 2> TearOffPoint{};
+		uint32_t ImGuiHoveredViewportID = 0;
+		int ImGuiFrameNumber = 0;
 	};
 
 	class SceneViewportNativeSmokeCoordinator final
@@ -291,6 +302,7 @@ namespace PulseForgeEditor::Detail
 		[[nodiscard]] bool IsEnabled() const noexcept;
 		[[nodiscard]] bool Complete() const noexcept;
 		[[nodiscard]] std::optional<std::string> Observe(const SceneViewportNativeSmokeObservation& Observation);
+		[[nodiscard]] std::optional<std::string> ObserveInput(const SceneViewportNativeSmokeObservation& Observation);
 
 	private:
 		enum class Phase : uint8_t
@@ -313,6 +325,8 @@ namespace PulseForgeEditor::Detail
 		uintptr_t m_DetachedWindow = 0;
 		std::array<float, 3> m_InitialCameraForward{};
 		bool m_CaptureWasObserved = false;
+		bool m_LastRightButtonDown = false;
+		uint32_t m_InputSamples = 0;
 	};
 } // namespace PulseForgeEditor::Detail
 
