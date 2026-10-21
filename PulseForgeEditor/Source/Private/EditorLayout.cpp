@@ -1,4 +1,5 @@
 #include "Editor/EditorLayout.h"
+#include "Editor/EditorDockingPolicy.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
 #include "Editor/EditorLayoutSettingsPolicy.h"
 #include "Editor/EditorPlatformFileSystem.h"
@@ -242,8 +243,9 @@ namespace PulseForgeEditor
 			m_LayoutInitialized = true;
 		}
 
+		const ImGuiWindowClass UtilityClass = MakeEditorDockingClass(EditorDockingDomain::UtilityPanel);
 		ImGui::DockSpaceOverViewport(DockspaceID, Viewport,
-			KeepAliveOnly ? ImGuiDockNodeFlags_KeepAliveOnly : ImGuiDockNodeFlags_None);
+			KeepAliveOnly ? ImGuiDockNodeFlags_KeepAliveOnly : ImGuiDockNodeFlags_None, &UtilityClass);
 		return ResetApplied;
 	}
 
@@ -336,10 +338,11 @@ namespace PulseForgeEditor
 	{
 		if (!m_Initialized || !m_LayoutInitialized || !ImGui::GetCurrentContext() || Panel == ReferencePanel)
 			return false;
-
 		const size_t PanelIndex = static_cast<size_t>(Panel);
 		const size_t ReferenceIndex = static_cast<size_t>(ReferencePanel);
 		if (PanelIndex >= EditorPanelDescriptors.size() || ReferenceIndex >= EditorPanelDescriptors.size())
+			return false;
+		if (!EditorPanelDescriptors[PanelIndex].IsUtilityPanel || !EditorPanelDescriptors[ReferenceIndex].IsUtilityPanel)
 			return false;
 
 		const std::string PanelName(EditorPanelDescriptors[PanelIndex].WindowName);
@@ -352,9 +355,10 @@ namespace PulseForgeEditor
 			? ImGui::DockBuilderGetNode(ReferenceSettings->DockId)
 			: nullptr;
 		if (!ReferenceSettings || !ReferenceNode || !ShouldApplyFirstOpenPanelDocking(HasPanelWindowSettings, true)) return false;
+		const ImGuiDockNode* RootNode = ImGui::DockNodeGetRootNode(ReferenceNode);
+		if (!RootNode || !IsEditorWindowClassInDomain(RootNode->WindowClass, EditorDockingDomain::UtilityPanel)) return false;
 
 		ImGui::DockBuilderDockWindow(PanelName.c_str(), ReferenceSettings->DockId);
-		const ImGuiDockNode* RootNode = ImGui::DockNodeGetRootNode(ReferenceNode);
 		ImGui::DockBuilderFinish(RootNode->ID);
 		MarkSettingsDirty();
 		return true;
@@ -368,6 +372,8 @@ namespace PulseForgeEditor
 		const size_t ReferenceIndex = static_cast<size_t>(ReferencePanel);
 		if (PanelIndex >= EditorPanelDescriptors.size() || ReferenceIndex >= EditorPanelDescriptors.size())
 			return false;
+		if (!EditorPanelDescriptors[PanelIndex].IsUtilityPanel || !EditorPanelDescriptors[ReferenceIndex].IsUtilityPanel)
+			return false;
 		const std::string PanelName(EditorPanelDescriptors[PanelIndex].WindowName);
 		const std::string ReferenceName(EditorPanelDescriptors[ReferenceIndex].WindowName);
 		const ImGuiWindowSettings* ReferenceSettings =
@@ -375,9 +381,10 @@ namespace PulseForgeEditor
 		if (!ReferenceSettings || ReferenceSettings->DockId == 0 ||
 			!ImGui::DockBuilderGetNode(ReferenceSettings->DockId))
 			return false;
+		const ImGuiDockNode* RootNode = ImGui::DockNodeGetRootNode(ImGui::DockBuilderGetNode(ReferenceSettings->DockId));
+		if (!RootNode || !IsEditorWindowClassInDomain(RootNode->WindowClass, EditorDockingDomain::UtilityPanel)) return false;
 		ImGui::DockBuilderDockWindow(PanelName.c_str(), ReferenceSettings->DockId);
-		ImGui::DockBuilderFinish(ImGui::DockNodeGetRootNode(
-			ImGui::DockBuilderGetNode(ReferenceSettings->DockId))->ID);
+		ImGui::DockBuilderFinish(RootNode->ID);
 		MarkSettingsDirty();
 		return true;
 	}

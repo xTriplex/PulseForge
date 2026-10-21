@@ -1,6 +1,7 @@
 #include "TestEditorSupport.h"
 
 #include "Editor/EditorMainMenuPanel.h"
+#include "Editor/EditorDockingPolicy.h"
 #include "Editor/EditorWorkspacePresentation.h"
 
 #include <imgui_internal.h>
@@ -298,6 +299,18 @@ namespace
 void RunEditorWorkspacePresentationTests(TestRunner& Tests)
 {
 	using namespace PulseForgeEditor;
+	const ImGuiWindowClass UtilityClass = MakeEditorDockingClass(EditorDockingDomain::UtilityPanel);
+	const ImGuiWindowClass DocumentClass = MakeEditorDockingClass(EditorDockingDomain::AssetDocument);
+	PF_CHECK(Tests, UtilityClass.ClassId != 0 && DocumentClass.ClassId != 0 && UtilityClass.ClassId != DocumentClass.ClassId);
+	PF_CHECK(Tests, !UtilityClass.DockingAllowUnclassed && !DocumentClass.DockingAllowUnclassed);
+	PF_CHECK(Tests, IsEditorWindowClassInDomain(UtilityClass, EditorDockingDomain::UtilityPanel));
+	PF_CHECK(Tests, !IsEditorWindowClassInDomain(DocumentClass, EditorDockingDomain::UtilityPanel));
+	PF_CHECK(Tests, IsEditorWindowClassInDomain(DocumentClass, EditorDockingDomain::AssetDocument));
+	PF_CHECK(Tests, !IsEditorWindowClassInDomain(UtilityClass, EditorDockingDomain::AssetDocument));
+	PF_CHECK(Tests, IsEditorDockingDomainCompatible(EditorDockingDomain::UtilityPanel, EditorDockingDomain::UtilityPanel));
+	PF_CHECK(Tests, IsEditorDockingDomainCompatible(EditorDockingDomain::AssetDocument, EditorDockingDomain::AssetDocument));
+	PF_CHECK(Tests, !IsEditorDockingDomainCompatible(EditorDockingDomain::UtilityPanel, EditorDockingDomain::AssetDocument));
+	PF_CHECK(Tests, !IsEditorDockingDomainCompatible(EditorDockingDomain::AssetDocument, EditorDockingDomain::UtilityPanel));
 	{
 		const PulseForge::UUID Project{ 0x1100220033004400ull, 0x5500660077008800ull };
 		const PulseForge::UUID OtherProject{ 0x9900aa00bb00cc00ull, 0xdd00ee00ff001100ull };
@@ -479,6 +492,12 @@ void RunEditorWorkspacePresentationTests(TestRunner& Tests)
 		PF_CHECK(Tests, ImGui::FindWindowByName("##PFInactiveDocumentWorkspaceKeepAlive") == nullptr);
 		PF_CHECK(Tests, ImGui::DockBuilderGetNode(GetWorkspaceDockspaceID(First)) != nullptr);
 		PF_CHECK(Tests, ImGui::DockBuilderGetNode(GetWorkspaceDockspaceID(Second)) != nullptr);
+		const ImGuiDockNode* FirstRoot = ImGui::DockNodeGetRootNode(ImGui::DockBuilderGetNode(GetWorkspaceDockspaceID(First)));
+		PF_CHECK(Tests, FirstRoot && FirstRoot->WindowClass.ClassId == DocumentClass.ClassId);
+		const std::string FirstWorkspaceName = "Document Workspace###PFDocumentWorkspace_" + First.Project.ToString() + "_" +
+			First.Asset.ToString() + "_" + std::to_string(static_cast<uint32_t>(First.Kind));
+		const ImGuiWindow* FirstWorkspaceWindow = ImGui::FindWindowByName(FirstWorkspaceName.c_str());
+		PF_CHECK(Tests, FirstWorkspaceWindow && FirstWorkspaceWindow->WindowClass.ClassId == DocumentClass.ClassId);
 
 		size_t SettingsSize = 0;
 		const char* SettingsData = ImGui::SaveIniSettingsToMemory(&SettingsSize);
