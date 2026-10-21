@@ -513,25 +513,30 @@ class DirtyCloseProtocolTests(unittest.TestCase):
 
     def test_open_file_field_click_posts_once_at_axframe_center(self) -> None:
         class CompletedPointer:
+            def __init__(self, arguments: list[str]):
+                self.arguments = arguments
             returncode = 0
 
-            @staticmethod
-            def communicate(timeout: float) -> tuple[str, str]:
-                return "SCENE_VIEWPORT_CG_EVENT=SEQUENCE_RETURNED; operation=click-left;", ""
+            def communicate(self, timeout: float) -> tuple[str, str]:
+                return (
+                    f"CGEventPost=SEQUENCE_RETURNED; click_id={self.arguments[3]}; "
+                    f"target_pid={self.arguments[2]};",
+                    "",
+                )
 
         frame = (100.0, 200.0, 80.0, 24.0)
         with tempfile.TemporaryDirectory() as runner_temp:
-            pointer = Path(runner_temp) / "PulseForgeSceneViewportPointer"
+            pointer = Path(runner_temp) / "PulseForgePointerInput"
             pointer.touch()
             with patch.dict(native_dialog.os.environ, {"RUNNER_TEMP": runner_temp}), patch.object(
-                native_dialog.subprocess, "Popen", return_value=CompletedPointer()
+                native_dialog.subprocess, "Popen", side_effect=lambda arguments, **kwargs: CompletedPointer(arguments)
             ) as launch:
                 output = native_dialog.run_open_file_pointer_click(42, "Selected Ω.pfproj", frame, 3.0)
-        self.assertIn("operation=click-left", output)
+        self.assertIn("CGEventPost=SEQUENCE_RETURNED", output)
         arguments = launch.call_args.args[0]
-        self.assertEqual([str(pointer), "click-left", "42"], arguments[:3])
-        self.assertEqual("140.000", arguments[4])
-        self.assertEqual("212.000", arguments[5])
+        self.assertEqual([str(pointer), "42"], arguments[:2])
+        self.assertEqual("140.000", arguments[3])
+        self.assertEqual("212.000", arguments[4])
         launch.assert_called_once()
 
     def test_open_selection_waits_only_while_the_exact_file_row_is_absent(self) -> None:

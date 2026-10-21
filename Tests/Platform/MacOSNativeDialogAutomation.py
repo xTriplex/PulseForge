@@ -169,14 +169,14 @@ def run_open_file_pointer_click(target_pid: int, expected_name: str, frame: tupl
     runner_temp = os.environ.get("RUNNER_TEMP")
     if not runner_temp:
         raise RuntimeError("RUNNER_TEMP is unavailable for the compiled Quartz pointer helper")
-    executable = Path(runner_temp) / "PulseForgeSceneViewportPointer"
+    executable = Path(runner_temp) / "PulseForgePointerInput"
     if not executable.is_file():
-        raise RuntimeError(f"compiled Quartz pointer helper is missing: {executable}")
+        raise RuntimeError(f"desktop-job Quartz pointer helper is missing: {executable}")
     x = frame[0] + frame[2] / 2.0
     y = frame[1] + frame[3] / 2.0
     action_id = uuid.uuid4().hex
     process = subprocess.Popen(
-        [str(executable), "click-left", str(target_pid), action_id, f"{x:.3f}", f"{y:.3f}"],
+        [str(executable), str(target_pid), action_id, f"{x:.3f}", f"{y:.3f}"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -200,7 +200,11 @@ def run_open_file_pointer_click(target_pid: int, expected_name: str, frame: tupl
                 pass
             stdout, stderr = process.communicate(timeout=1.0)
         raise RuntimeError(f"Open file-field pointer click timed out; action_id={action_id}; {stdout!r}; {stderr!r}") from error
-    if process.returncode != 0 or "operation=click-left;" not in stdout:
+    if (
+        process.returncode != 0
+        or f"CGEventPost=SEQUENCE_RETURNED; click_id={action_id};" not in stdout
+        or f"target_pid={target_pid};" not in stdout
+    ):
         raise RuntimeError(
             f"Open file-field pointer click failed; exit_code={process.returncode}; action_id={action_id}; "
             f"stdout={stdout[-1200:]!r}; stderr={stderr[-1200:]!r}"
