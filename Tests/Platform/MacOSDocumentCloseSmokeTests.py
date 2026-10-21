@@ -349,6 +349,15 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             "enabled_error=0; complete=true; truncated=false; visited=18; query_errors=[]"
         )
         self.assertTrue(native_dialog.open_button_state_ready(open_ready, 42, "Open"))
+        dismissed = (
+            "DIRECT_AX_RESULT status=open-button-state-error; stage=window-selection; "
+            "requested_title=Open; matches=0"
+        )
+        self.assertTrue(native_dialog.open_panel_dismissed(dismissed, "Open"))
+        self.assertFalse(native_dialog.open_panel_dismissed(dismissed, "Save"))
+        self.assertFalse(native_dialog.open_panel_dismissed(
+            dismissed.replace("matches=0", "matches=1"), "Open"
+        ))
         for disabled_open_state in (
             open_ready.replace("matches=1", "matches=0"),
             open_ready.replace("matches=1", "matches=2"),

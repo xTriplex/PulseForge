@@ -60,6 +60,21 @@ def open_button_state_ready(output: str, fixture_pid: int, panel_title: str) -> 
     return fields.get("matches") == "1" and fields.get("enabled") == "true" and fields.get("enabled_error") == "0"
 
 
+def open_panel_dismissed(output: str, panel_title: str) -> bool:
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=open-button-state-error; stage=window-selection;")
+    ]
+    if len(results) != 1:
+        return False
+    fields = dict(
+        part.split("=", 1)
+        for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ")
+        if "=" in part
+    )
+    return fields.get("requested_title") == panel_title and fields.get("matches") == "0"
+
+
 def open_file_selection_ready(output: str, expected_name: str) -> bool:
     results = [
         line for line in output.splitlines()
@@ -179,6 +194,8 @@ def wait_for_open_button(fixture_pid: int, panel_title: str, deadline: float) ->
         )
         last_output = output + error
         if code == 0 and open_button_state_ready(last_output, fixture_pid, panel_title):
+            return last_output
+        if code == 22 and open_panel_dismissed(last_output, panel_title):
             return last_output
         if code not in (0, 124):
             raise RuntimeError(f"Open panel snapshot failed while awaiting selected file; exit_code={code}; {last_output!r}")
@@ -711,10 +728,9 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             )
             automation_code = 0
             last_open_step = "exact Open-panel filename selection operation returned"
-            if open_file_confirmation_returned(selection_output, expected_path.name):
-                automation_output = selection_output
-            else:
-                automation_output = wait_for_open_button(int(panel_process_id), panel_title, helper_deadline)
+            automation_output = selection_output
+            panel_state = wait_for_open_button(int(panel_process_id), panel_title, helper_deadline)
+            automation_output += panel_state
         except (OSError, RuntimeError) as error:
             observation_log = log_path.with_name(f"native-dialog-{scenario}-selection-failure.log")
             capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
@@ -724,7 +740,11 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 f"Open selection failed before the Open action; last_step={last_open_step}; "
                 f"{error}"
             )
-        if not open_file_confirmation_returned(automation_output, expected_path.name):
+        panel_dismissed_after_confirmation = (
+            open_file_confirmation_returned(automation_output, expected_path.name)
+            and open_panel_dismissed(automation_output, panel_title)
+        )
+        if not panel_dismissed_after_confirmation:
             automation_code, pressed, press_error = run_direct_ax(
                 int(panel_process_id), operation="press-control", window_title=panel_title,
                 control_name="Open", timeout=min(10.0, remaining_seconds())
@@ -753,6 +773,39 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             control_name="Cancel", timeout=min(10.0, remaining)
         )
         automation_output += automation_error
+    expected_marker = (
+        f"NFD_DIALOG_RESULT=CANCELLED; scenario={scenario}"
+        if scenario.endswith("cancel")
+        else f"NFD_DIALOG_RESULT=SELECTED; scenario={scenario}; path={expected_path}"
+    )
+    if "DIRECT_AX_DISPATCH attempted=true" in automation_output:
+        response_deadline = min(deadline, time.monotonic() + ACTION_RESPONSE_SECONDS)
+        while (
+            output_reader.result_line != expected_marker
+            and output_reader.result_line is None
+            and process.poll() is None
+            and time.monotonic() < response_deadline
+        ):
+            try:
+                output_reader.lines.get(timeout=min(0.1, max(0.01, response_deadline - time.monotonic())))
+            except queue.Empty:
+                pass
+        if output_reader.result_line != expected_marker:
+            observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
+            capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
+            if not stop_fixture(process, output_reader):
+                return 1, "fixture process group or output reader survived cleanup after AX action response timeout"
+            return 1, (
+                f"direct AX action was submitted but the expected fixture result was absent; "
+                f"expected={expected_marker!r}; observed={output_reader.result_line!r}; "
+                f"swift_exit_code={automation_code}; output={automation_output!r}"
+            )
+        print(
+            f"NFD_DIRECT_AX_ACTION=TRANSPORT_RECONCILED; scenario={scenario}; "
+            f"expected_result={expected_marker!r}; no action was replayed",
+            flush=True,
+        )
+
     if automation_code != 0:
         if "process_group_cleanup=failed" in automation_output:
             if not stop_fixture(process, output_reader):
@@ -763,38 +816,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 return 1, "fixture process group or output reader survived cleanup after direct AX trust denial"
             print("NFD_UI_AUTOMATION=UNAVAILABLE; client=Swift interpreter; reason=AXIsProcessTrusted=false; native dialog case NOT RUN")
             return 77, automation_output
-        expected_marker = (
-            f"NFD_DIALOG_RESULT=CANCELLED; scenario={scenario}"
-            if scenario.endswith("cancel")
-            else f"NFD_DIALOG_RESULT=SELECTED; scenario={scenario}; path={expected_path}"
-        )
-        if "DIRECT_AX_DISPATCH attempted=true" in automation_output:
-            response_deadline = min(deadline, time.monotonic() + ACTION_RESPONSE_SECONDS)
-            while (
-                output_reader.result_line != expected_marker
-                and output_reader.result_line is None
-                and process.poll() is None
-                and time.monotonic() < response_deadline
-            ):
-                try:
-                    output_reader.lines.get(timeout=min(0.1, max(0.01, response_deadline - time.monotonic())))
-                except queue.Empty:
-                    pass
-            if output_reader.result_line == expected_marker:
-                print(
-                    f"NFD_DIRECT_AX_ACTION=UNCERTAIN_TRANSPORT_RECONCILED; scenario={scenario}; "
-                    f"expected_result={expected_marker!r}; no action was replayed"
-                )
-            else:
-                observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
-                capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
-                if not stop_fixture(process, output_reader):
-                    return 1, "fixture process group or output reader survived cleanup after uncertain AX action"
-                return 1, (
-                    f"direct AX action result was uncertain and the expected fixture result was absent; "
-                    f"expected={expected_marker!r}; observed={output_reader.result_line!r}; output={automation_output!r}"
-                )
-        else:
+        if "DIRECT_AX_DISPATCH attempted=true" not in automation_output:
             observation_log = log_path.with_name(f"native-dialog-{scenario}-observation.log")
             capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)
             if not stop_fixture(process, output_reader):
