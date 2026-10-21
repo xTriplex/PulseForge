@@ -522,23 +522,32 @@ def main() -> int:
         if activation_code != 0:
             raise RuntimeError(f"detached Scene Viewport focus reacquisition failed: {activation_output.strip()!r}")
         focused_title = parse_window_activation(activation_output, process.pid, "Scene Viewport")
-        focused_again_line = wait_for_state(
-            other_window_sample, "detached Scene Viewport native owner regained focus",
-            lambda fields: fields.get("focused") == "1" and fields.get("capture") == "0",
+        activation_state_line = wait_for_state(
+            other_window_sample, "detached Scene Viewport geometry after AX activation",
+            lambda fields: fields.get("owner_viewport") == detached.get("owner_viewport") and
+            fields.get("capture") == "0" and
+            all(key in fields for key in ("image_min", "image_max")),
         )
-        focused_again = marker_fields(focused_again_line, STATE)
-        focused_again_sample = int(focused_again["sample"])
+        activation_state = marker_fields(activation_state_line, STATE)
+        activation_sample = int(activation_state["sample"])
+        image_min = coordinate(activation_state, "image_min", 2)
+        image_max = coordinate(activation_state, "image_max", 2)
+        reacquire_x = (image_min[0] + image_max[0]) * 0.5
+        reacquire_y = (image_min[1] + image_max[1]) * 0.5
+        if image_max[0] <= image_min[0] or image_max[1] <= image_min[1]:
+            raise RuntimeError("detached Scene Viewport had no usable image region after AX activation")
         click_id = uuid.uuid4().hex
         code, stdout, stderr = run_bounded_command(
-            [str(driver), "click-left", str(process.pid), click_id, str(image_center_x), str(image_center_y)],
+            [str(driver), "click-left", str(process.pid), click_id, str(reacquire_x), str(reacquire_y)],
             timeout=min(8.0, max(0.1, deadline - time.monotonic())),
         )
         print(f"MACOS_SCENE_VIEWPORT_REACQUIRE_CLICK=action_id={click_id}; window={focused_title!r}; "
+              f"geometry_sample={activation_sample}; point={reacquire_x:.1f},{reacquire_y:.1f}; "
               f"exit_code={code}; output={stdout[-1200:]!r}; error={stderr[-800:]!r}")
         if code != 0:
             raise RuntimeError("the deliberate viewport click used to reacquire keyboard focus was not posted")
         keyboard_focus_line = wait_for_state(
-            focused_again_sample, "viewport keyboard focus reacquired on detached owner",
+            activation_sample, "viewport keyboard focus reacquired on detached owner after one click",
             lambda fields: fields.get("focused") == "1" and fields.get("keyboard_focused") == "1",
         )
         keyboard_focus_state = marker_fields(keyboard_focus_line, STATE)
