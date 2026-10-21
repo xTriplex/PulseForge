@@ -477,6 +477,32 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertEqual(action_returned, result)
         select.assert_called_once()
 
+    def test_go_to_folder_confirmation_requires_the_exact_focused_field_and_client_target(self) -> None:
+        expected_directory = "/tmp/Dialog Files Ω"
+        returned = (
+            "DIRECT_AX_DISPATCH attempted=true; operation=confirm-folder-path; target_pid=42; "
+            "name=PathTextField; value_verified=true; focused=true; advertised_action=AXConfirm\n"
+            f"DIRECT_AX_RESULT status=folder-path-confirm-returned; operation=confirm-folder-path; "
+            f"name=PathTextField; value={expected_directory}; ax_error=0"
+        )
+        self.assertTrue(native_dialog.folder_path_confirmation_returned(returned, expected_directory, 42))
+        self.assertFalse(native_dialog.folder_path_confirmation_returned(returned, expected_directory, 43))
+        self.assertFalse(native_dialog.folder_path_confirmation_returned(
+            returned.replace("value_verified=true", "value_verified=false"), expected_directory, 42
+        ))
+        self.assertFalse(native_dialog.folder_path_confirmation_returned(
+            returned.replace("focused=true", "focused=false"), expected_directory, 42
+        ))
+        self.assertFalse(native_dialog.folder_path_confirmation_returned(
+            returned.replace("advertised_action=AXConfirm", "advertised_action=AXPress"), expected_directory, 42
+        ))
+        self.assertFalse(native_dialog.folder_path_confirmation_returned(
+            returned.replace("ax_error=0", "ax_error=-25205"), expected_directory, 42
+        ))
+
+        wrong_value = returned.replace(expected_directory, "/tmp/Other")
+        self.assertFalse(native_dialog.folder_path_confirmation_returned(wrong_value, expected_directory, 42))
+
     def test_open_selection_waits_only_while_the_exact_file_row_is_absent(self) -> None:
         no_row = (
             "DIRECT_AX_RESULT status=control-selection-error; operation=select-element; role=AXRow/AXCell; "

@@ -366,7 +366,8 @@ func collect(_ roots: [AXUIElement], depthLimit: Int = 8, nodeLimit: Int = 256) 
     return found
 }
 let needsDescendants = deepSnapshot || operation == "press-control" || operation == "set-value" ||
-    operation == "set-focused-value-confirm" || operation == "set-folder-path-value" || operation == "select-element"
+    operation == "set-focused-value-confirm" || operation == "set-folder-path-value" ||
+    operation == "confirm-folder-path" || operation == "select-element"
 let descendants: [AXNode] = {
     guard needsDescendants else { return [] }
     if operation != "select-element" { return collect(matching, depthLimit: operation == "snapshot" ? 4 : 8) }
@@ -451,9 +452,10 @@ if operation == "snapshot" {
     exit(0)
 }
 if operation == "press-control" || operation == "set-value" || operation == "set-focused-value-confirm" ||
-    operation == "set-folder-path-value" || operation == "select-element" {
+    operation == "set-folder-path-value" || operation == "confirm-folder-path" || operation == "select-element" {
     let wantedRole = operation == "press-control" ? "AXButton" :
-        (operation == "set-value" || operation == "set-focused-value-confirm" || operation == "set-folder-path-value")
+        (operation == "set-value" || operation == "set-focused-value-confirm" ||
+            operation == "set-folder-path-value" || operation == "confirm-folder-path")
             ? "AXTextField" : "AXRow/AXCell/AXTextField"
     func labelMatches(_ element: AXUIElement) -> Bool {
         labels(element).contains { $0 == controlName || $0.hasSuffix("/" + controlName) }
@@ -465,7 +467,7 @@ if operation == "press-control" || operation == "set-value" || operation == "set
             : role == wantedRole
         let focusedMatch = operation == "set-focused-value-confirm" && (value(node.element, "AXFocused") as? Bool) == true
         let labelMatch = operation == "set-focused-value-confirm" ? focusedMatch : (controlName.isEmpty || labelMatches(node.element))
-        if operation == "set-folder-path-value" {
+        if operation == "set-folder-path-value" || operation == "confirm-folder-path" {
             guard roleMatches, labelMatches(node.element) else { return nil }
             var parent = node.parent
             var folderSheetFound = false
@@ -562,6 +564,25 @@ if operation == "press-control" || operation == "set-value" || operation == "set
               "set_error=\(setError.rawValue); focus_settable_error=\(focusedSettableError.rawValue); " +
               "focus_set_error=\(focusSetError)")
         exit(0)
+    }
+    if operation == "confirm-folder-path" {
+        let observedValue = string(control, "AXValue") ?? "<unavailable>"
+        let focused = (value(control, "AXFocused") as? Bool) == true
+        let fieldEnabled = (value(control, "AXEnabled") as? Bool) ?? false
+        var fieldActions: CFArray?
+        let fieldActionError = AXUIElementCopyActionNames(control, &fieldActions)
+        let availableActions = fieldActions as? [String] ?? []
+        guard fieldEnabled, focused, observedValue == controlValue,
+              fieldActionError == .success, availableActions.contains("AXConfirm") else {
+            print("DIRECT_AX_RESULT status=folder-path-confirm-error; value=\(observedValue); expected=\(controlValue); enabled=\(fieldEnabled); focused=\(focused); action_error=\(fieldActionError.rawValue); actions=\(availableActions)")
+            exit(23)
+        }
+        AXUIElementSetMessagingTimeout(control, 1.0)
+        print("DIRECT_AX_DISPATCH attempted=true; operation=confirm-folder-path; target_pid=\(targetPID); name=\(titleOrDescription(control)); value_verified=true; focused=true; advertised_action=AXConfirm")
+        fflush(stdout)
+        let confirmError = AXUIElementPerformAction(control, "AXConfirm" as CFString)
+        print("DIRECT_AX_RESULT status=folder-path-confirm-returned; operation=confirm-folder-path; name=\(titleOrDescription(control)); value=\(observedValue); ax_error=\(confirmError.rawValue)")
+        exit(confirmError == .success ? 0 : 24)
     }
     if operation == "set-focused-value-confirm" {
         let fieldEnabled = (value(control, "AXEnabled") as? Bool) ?? false

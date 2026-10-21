@@ -111,6 +111,40 @@ def open_file_confirmation_returned(output: str, expected_name: str) -> bool:
     )
 
 
+def folder_path_confirmation_returned(output: str, expected_directory: str, target_pid: int) -> bool:
+    dispatches = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_DISPATCH attempted=true; operation=confirm-folder-path;")
+    ]
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=folder-path-confirm-returned;")
+    ]
+    if len(dispatches) != 1 or len(results) != 1:
+        return False
+    dispatch_fields = dict(
+        part.split("=", 1)
+        for part in dispatches[0].removeprefix("DIRECT_AX_DISPATCH ").split("; ")
+        if "=" in part
+    )
+    fields = dict(
+        part.split("=", 1)
+        for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ")
+        if "=" in part
+    )
+    return (
+        dispatch_fields.get("target_pid") == str(target_pid)
+        and dispatch_fields.get("name") == "PathTextField"
+        and dispatch_fields.get("value_verified") == "true"
+        and dispatch_fields.get("focused") == "true"
+        and dispatch_fields.get("advertised_action") == "AXConfirm"
+        and fields.get("value") == expected_directory
+        and fields.get("operation") == "confirm-folder-path"
+        and fields.get("name") == "PathTextField"
+        and fields.get("ax_error") == "0"
+    )
+
+
 def run_keyboard_input(mode: str, target_pid: int, *, text: str = "", timeout: float) -> str:
     runner_temp = os.environ.get("RUNNER_TEMP")
     if not runner_temp:
@@ -736,11 +770,28 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 )
             last_navigation_step = f"Go To Folder path value verified and focused; value={expected_directory!r}"
             print(f"NFD_GO_TO_FOLDER_FIELD=READY; {automation_output.strip()!r}", flush=True)
-            return_action_id = run_keyboard_input(
-                "--press-return", int(panel_process_id), timeout=min(5.0, remaining_seconds())
+            automation_code, confirmation_output, confirmation_error = run_direct_ax(
+                int(panel_process_id),
+                operation="confirm-folder-path",
+                window_title=panel_title,
+                control_name="PathTextField",
+                control_value=expected_directory,
+                timeout=min(5.0, remaining_seconds()),
             )
-            last_navigation_step = f"Return key posted once; action_id={return_action_id}; field value verified"
-            print(f"NFD_GO_TO_FOLDER_RETURN=POSTED; action_id={return_action_id}; target_pid={panel_process_id}", flush=True)
+            confirmation_output += confirmation_error
+            if automation_code != 0 or not folder_path_confirmation_returned(
+                confirmation_output, expected_directory, int(panel_process_id)
+            ):
+                last_navigation_step = (
+                    f"Go To Folder AXConfirm failed; exit_code={automation_code}; "
+                    f"output={confirmation_output.strip()!r}"
+                )
+                raise RuntimeError(
+                    f"Go to Folder confirmation was not accepted by the focused path field; "
+                    f"exit_code={automation_code}; {confirmation_output!r}"
+                )
+            last_navigation_step = "Go To Folder AXConfirm returned for the verified focused path field"
+            print(f"NFD_GO_TO_FOLDER_CONFIRM=RETURNED; {confirmation_output.strip()!r}", flush=True)
             run_direct_ax_until(
                 int(panel_process_id),
                 panel_title,
