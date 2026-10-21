@@ -101,6 +101,19 @@ namespace PulseForgeEditor
 				continue;
 #endif
 			}
+			if (Arguments[Index] == "--scene-viewport-native-smoke")
+			{
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
+				return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::UnexpectedArgument,
+					"The --scene-viewport-native-smoke option is available only in Debug builds." });
+#else
+				if (Options.EnableSceneViewportNativeSmoke)
+					return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::DuplicateOption,
+						"The --scene-viewport-native-smoke option may be specified only once." });
+				Options.EnableSceneViewportNativeSmoke = true;
+				continue;
+#endif
+			}
 			if (Arguments[Index] == "--document-host-close-ui-test")
 			{
 #if !defined(_DEBUG) && !defined(PF_DEBUG)
@@ -173,7 +186,7 @@ namespace PulseForgeEditor
 						"--document-workspace-test-switch, and "
 						"--document-host-test-presentation-failure, --document-host-test-acquire-out-of-date, "
 						"--document-host-test-image-allocation-failure, and the Debug-only "
-						"--editor-runtime-play-stop-test, and the Debug-only "
+						"--editor-runtime-play-stop-test, --scene-viewport-native-smoke, and the Debug-only "
 						"--document-host-close-ui-test <scenario>." });
 
 			if (Options.ProjectFile)
@@ -209,6 +222,9 @@ namespace PulseForgeEditor
 		if (Options.EnableEditorRuntimePlayStopTest && !Options.ProjectFile)
 			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::MissingProjectPath,
 				"The --editor-runtime-play-stop-test option requires --project <path>." });
+		if (Options.EnableSceneViewportNativeSmoke && !Options.ProjectFile)
+			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::MissingProjectPath,
+				"The --scene-viewport-native-smoke option requires --project <path>." });
 		if (Options.DocumentHostCloseUiTestScenario && !Options.ProjectFile)
 			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::MissingProjectPath,
 				"The --document-host-close-ui-test option requires --project <path>." });
@@ -220,6 +236,15 @@ namespace PulseForgeEditor
 				Options.EnableDocumentHostAcquireOutOfDateTest || Options.EnableDocumentHostImageAllocationFailureTest))
 			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::UnexpectedArgument,
 				"The document-host close UI test must run by itself with --project <path>." });
+		if (Options.EnableSceneViewportNativeSmoke &&
+			(Options.ProjectOpenRenderTestFile || Options.AssetPreviewStressManifest || Options.EnableEditorRuntimePlayStopTest ||
+				Options.DocumentHostCloseUiTestScenario || Options.EnableDocumentHostTestFixture || Options.EnableDocumentHostResetLayoutTest ||
+				Options.EnableDocumentHostTabTearOffTest || Options.EnableDocumentHostTabReattachTest ||
+				Options.EnableDocumentHostTabReorderTest || Options.EnableDocumentWorkspaceSwitchTest ||
+				Options.EnableDocumentHostPresentationFailureTest || Options.EnableDocumentHostAcquireOutOfDateTest ||
+				Options.EnableDocumentHostImageAllocationFailureTest))
+			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::UnexpectedArgument,
+				"The Scene Viewport native-window smoke must run by itself with --project <path>." });
 		if (Options.EnableEditorRuntimePlayStopTest &&
 			(Options.ProjectOpenRenderTestFile || Options.AssetPreviewStressManifest || Options.EnableDocumentHostTestFixture ||
 				Options.EnableDocumentHostResetLayoutTest || Options.EnableDocumentHostTabTearOffTest ||

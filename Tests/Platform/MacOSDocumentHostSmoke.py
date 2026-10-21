@@ -64,10 +64,12 @@ SUCCESS_MARKERS = (
 
 
 class BoundedOutput:
-    def __init__(self, process: subprocess.Popen[str], log_path: Path):
+    def __init__(self, process: subprocess.Popen[str], log_path: Path, success_markers=SUCCESS_MARKERS):
         self.buffer = bytearray()
         self.log_path = log_path
         self.markers: set[str] = set()
+        self.marker_lines: dict[str, str] = {}
+        self.success_markers = tuple(success_markers)
         self.failure_count = 0
         self.failure_samples: list[str] = []
         self.console_bytes = 0
@@ -98,9 +100,10 @@ class BoundedOutput:
                             self.reader_error = self.reader_error or (
                                 f"could not forward editor output to the workflow log: {type(error).__name__}: {error}"
                             )
-                    for marker in SUCCESS_MARKERS:
+                    for marker in self.success_markers:
                         if marker in line:
                             self.markers.add(marker)
+                            self.marker_lines[marker] = line.rstrip()[:2048]
                     lowered = line.lower()
                     if "development document-host fixture enabled" in lowered:
                         self.fixture_ready.set()

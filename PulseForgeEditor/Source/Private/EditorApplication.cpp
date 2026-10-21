@@ -476,6 +476,8 @@ namespace
 #if defined(_DEBUG) || defined(PF_DEBUG)
 			m_EditorRuntimePlayStopCoordinator =
 				std::make_unique<PulseForgeEditor::Detail::EditorRuntimePlayStopCoordinator>(Options.EnableEditorRuntimePlayStopTest);
+			m_SceneViewportNativeSmoke =
+				std::make_unique<PulseForgeEditor::Detail::SceneViewportNativeSmokeCoordinator>(Options.EnableSceneViewportNativeSmoke);
 			m_DocumentCloseAcceptance = std::make_unique<PulseForgeEditor::Detail::DocumentCloseAcceptanceCoordinator>(
 				std::move(Options.DocumentHostCloseUiTestScenario), [this](std::string Message) { SetError(std::move(Message)); });
 #if defined(__APPLE__)
@@ -752,6 +754,23 @@ namespace
 				static_cast<PulseForgeEditor::EditorDocumentOpenPreference>(m_Layout.GetDocumentOpeningPreference()));
 
 			auto* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			if (m_SceneViewportNativeSmoke && m_SceneViewportNativeSmoke->IsEnabled())
+			{
+				if (GLFWmonitor* Monitor = glfwGetPrimaryMonitor())
+				{
+					int WorkX = 0, WorkY = 0, WorkWidth = 0, WorkHeight = 0;
+					glfwGetMonitorWorkarea(Monitor, &WorkX, &WorkY, &WorkWidth, &WorkHeight);
+					if (WorkWidth > 0 && WorkHeight > 0)
+					{
+						const int Width = std::min(840, std::max(640, WorkWidth - 160));
+						const int Height = std::min(620, std::max(480, WorkHeight - 80));
+						glfwSetWindowPos(Window, WorkX + 20, WorkY + 20);
+						glfwSetWindowSize(Window, Width, Height);
+					}
+				}
+			}
+#endif
 			PulseForgeEditor::EditorPlatformServices::ApplyMainWindowAppearance(Window);
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			if (!ImGui_ImplGlfw_InitForOpenGL(Window, true))
@@ -6132,7 +6151,40 @@ namespace
 				}
 			}
 			else ResetViewportPanelInteraction();
+			ReportSceneViewportNativeSmoke();
 			ImGui::End();
+		}
+
+		void ReportSceneViewportNativeSmoke()
+		{
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			if (!m_SceneViewportNativeSmoke || !m_SceneViewportNativeSmoke->IsEnabled()) return;
+			ImGuiViewport* OwnerViewport = ImGui::GetWindowViewport();
+			ImGuiViewport* MainViewport = ImGui::GetMainViewport();
+			GLFWwindow* OwnerWindow = OwnerViewport ? static_cast<GLFWwindow*>(OwnerViewport->PlatformHandle) : nullptr;
+			if (!OwnerViewport || !MainViewport || !OwnerWindow) return;
+
+			const ImVec2 WindowPosition = ImGui::GetWindowPos();
+			const ImVec2 WindowSize = ImGui::GetWindowSize();
+			const float TitleHeight = ImGui::GetFrameHeight();
+			const float TearOffX = MainViewport->Pos.x + MainViewport->Size.x + 40.0f;
+			const auto Forward = m_EditorCamera.GetForward();
+			PulseForgeEditor::Detail::SceneViewportNativeSmokeObservation Observation;
+			Observation.MainViewportID = MainViewport->ID;
+			Observation.OwnerViewportID = OwnerViewport->ID;
+			Observation.OwnerWindow = reinterpret_cast<uintptr_t>(OwnerWindow);
+			Observation.SceneImageReady = m_Scene && m_ViewportRenderView.HasTarget() &&
+				m_ViewportImageRect.Maximum.x > m_ViewportImageRect.Minimum.x && m_ViewportImageRect.Maximum.y > m_ViewportImageRect.Minimum.y;
+			Observation.CameraCaptureActive = m_ViewportMouseCapture.OwnsViewport(OwnerViewport->ID, OwnerWindow);
+			Observation.CameraForward = { Forward.x, Forward.y, Forward.z };
+			Observation.FramebufferScale = { OwnerViewport->FramebufferScale.x, OwnerViewport->FramebufferScale.y };
+			Observation.TitleCenter = { WindowPosition.x + WindowSize.x * 0.5f, WindowPosition.y + TitleHeight * 0.5f };
+			Observation.ImageMinimum = { m_ViewportImageRect.Minimum.x, m_ViewportImageRect.Minimum.y };
+			Observation.ImageMaximum = { m_ViewportImageRect.Maximum.x, m_ViewportImageRect.Maximum.y };
+			Observation.MainWindowRect = { MainViewport->Pos.x, MainViewport->Pos.y, MainViewport->Size.x, MainViewport->Size.y };
+			Observation.TearOffPoint = { TearOffX, MainViewport->Pos.y + MainViewport->Size.y * 0.5f };
+			if (auto Marker = m_SceneViewportNativeSmoke->Observe(Observation)) PF_INFO("{}", *Marker);
+#endif
 		}
 
 #ifndef PF_EDITOR_RENDERER_OPENGL
@@ -7225,6 +7277,7 @@ namespace
 		bool m_ProjectOpenRenderTestRequested = false;
 #if defined(_DEBUG) || defined(PF_DEBUG)
 		std::unique_ptr<PulseForgeEditor::Detail::EditorRuntimePlayStopCoordinator> m_EditorRuntimePlayStopCoordinator;
+		std::unique_ptr<PulseForgeEditor::Detail::SceneViewportNativeSmokeCoordinator> m_SceneViewportNativeSmoke;
 		std::unique_ptr<PulseForgeEditor::Detail::DocumentCloseAcceptanceCoordinator> m_DocumentCloseAcceptance;
 #if defined(__APPLE__)
 		void* m_MacOSDocumentCloseEventObserver = nullptr;

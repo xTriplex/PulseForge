@@ -79,6 +79,29 @@ jobs:
           done
           echo "PULSEFORGE_QUARTZ_POINTER_HELPER=COMPILED; invalid_inputs=rejected_without_posting"
 
+      - name: Compile Scene Viewport pointer helper before desktop builds
+        run: |
+          set -euo pipefail
+          POINTER_EXECUTABLE="$RUNNER_TEMP/PulseForgeSceneViewportPointer"
+          xcrun swiftc -O Tests/Platform/MacOSSceneViewportPointer.swift \
+            -framework AppKit -framework CoreGraphics -o "$POINTER_EXECUTABLE" \
+            2>&1 | tee "$RUNNER_TEMP/macos-scene-viewport-pointer-build.log"
+          for arguments in \
+            'drag-left 123 not-a-uuid 10 10 20 20' \
+            'drag-left 123 0123456789abcdef0123456789abcdef nan 10 20 20'; do
+            set +e
+            "$POINTER_EXECUTABLE" $arguments > "$RUNNER_TEMP/macos-scene-viewport-pointer-invalid.log" 2>&1
+            status=$?
+            set -e
+            if [[ $status -ne 2 ]] || grep -q 'SCENE_VIEWPORT_CG_EVENT' "$RUNNER_TEMP/macos-scene-viewport-pointer-invalid.log"; then
+              cat "$RUNNER_TEMP/macos-scene-viewport-pointer-invalid.log"
+              echo "Malformed Scene Viewport pointer input was not rejected before posting: status=$status" >&2
+              exit 1
+            fi
+            cat "$RUNNER_TEMP/macos-scene-viewport-pointer-invalid.log"
+          done
+          echo "PULSEFORGE_SCENE_VIEWPORT_POINTER_HELPER=COMPILED; invalid_inputs=rejected_without_posting"
+
       - name: Build and import the private framework in osascript
         run: |
           set -o pipefail
@@ -97,6 +120,8 @@ jobs:
             ${{ runner.temp }}/macos-pointer-driver-build.log
             ${{ runner.temp }}/macos-pointer-driver-invalid.log
             ${{ runner.temp }}/macos-direct-ax-client-build.log
+            ${{ runner.temp }}/macos-scene-viewport-pointer-build.log
+            ${{ runner.temp }}/macos-scene-viewport-pointer-invalid.log
             ${{ runner.temp }}/PFAutomationPermission.framework/Versions/A/Resources/BridgeSupport/PFAutomationPermission.bridgesupport
           if-no-files-found: ignore
           retention-days: 1
@@ -294,6 +319,17 @@ jobs:
             --log-directory "$RUNNER_TEMP" \
             --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-editor-runtime-play-stop-smoke.log"
 
+      - name: Detach Scene Viewport and verify native-owner camera input
+        id: macos_scene_viewport_native_smoke
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSSceneViewportSmoke.py \
+            --editor Build/CI/macos-renderer/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor \
+            --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
+            --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 180 2>&1 | tee "$RUNNER_TEMP/macos-scene-viewport-native-smoke.log"
+
       - name: Verify native document hosts and synthetic tab reattachment
         id: macos_document_hosts
         if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
@@ -399,7 +435,7 @@ jobs:
               echo "Debug-only Cocoa event observer was compiled for $CONFIGURATION" >&2
               exit 1
             fi
-            for FIXTURE_ARGS in "--editor-runtime-play-stop-test" "--document-host-close-ui-test cancel-save"; do
+            for FIXTURE_ARGS in "--editor-runtime-play-stop-test" "--scene-viewport-native-smoke" "--document-host-close-ui-test cancel-save"; do
               LOG="$RUNNER_TEMP/macos-fixture-rejection-$CONFIGURATION_LOWER-$(printf '%s' "$FIXTURE_ARGS" | tr ' /-' '_').log"
               python3 - "$EDITOR" "$LOG" "$FIXTURE_ARGS" <<'PY'
           import os
@@ -471,6 +507,7 @@ jobs:
             ${{ runner.temp }}/macos-player-bundle-smoke.log
             ${{ runner.temp }}/macos-editor-runtime-play-stop.log
             ${{ runner.temp }}/macos-editor-runtime-play-stop-smoke.log
+            ${{ runner.temp }}/macos-scene-viewport-native-smoke.log
             ${{ runner.temp }}/macos-document-host-smoke.log
             ${{ runner.temp }}/macos-workspace-restore-smoke.log
             ${{ runner.temp }}/macos-workspace-restore-first-launch.log
@@ -682,7 +719,7 @@ jobs:
               exit 1
             fi
             EDITOR="$GITHUB_WORKSPACE/$BUILD_DIR/PulseForgeEditor"
-            for FIXTURE_ARGS in "--editor-runtime-play-stop-test" "--document-host-close-ui-test cancel-save"; do
+            for FIXTURE_ARGS in "--editor-runtime-play-stop-test" "--scene-viewport-native-smoke" "--document-host-close-ui-test cancel-save"; do
               LOG="$RUNNER_TEMP/fixture-rejection-${CONFIGURATION,,}-$(printf '%s' "$FIXTURE_ARGS" | tr ' /-' '_').log"
               if "$EDITOR" $FIXTURE_ARGS >"$LOG" 2>&1; then
                 echo "$CONFIGURATION accepted Debug-only fixture arguments: $FIXTURE_ARGS" >&2

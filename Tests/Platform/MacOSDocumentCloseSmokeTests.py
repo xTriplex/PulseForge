@@ -25,6 +25,7 @@ import MacOSNativeDialogAutomation as native_dialog
 import MacOSScreenshot as screenshot
 import MacOSWorkspaceRestoreSmoke as workspace_restore
 import MacOSDocumentHostSmoke as document_host
+import MacOSSceneViewportSmoke as scene_viewport_smoke
 
 
 class FakeProcess:
@@ -56,6 +57,27 @@ class FakeCapture:
 
 def marker(kind: str, **fields: str) -> dict[str, str]:
     return {"kind": kind, "_capture_index": "1", "raw": f"PF_DOC_CLOSE_UI|{kind}", **fields}
+
+
+class SceneViewportSmokeProtocolTests(unittest.TestCase):
+    def test_marker_fields_preserve_keys_and_native_owner_identity(self) -> None:
+        line = (
+            "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=DETACHED; main_viewport=1; owner_viewport=2; "
+            "owner_window=0x2000; image_min=20.0,30.0; image_max=620.0,430.0"
+        )
+        fields = scene_viewport_smoke.marker_fields(line, scene_viewport_smoke.DETACHED)
+        self.assertEqual(fields["main_viewport"], "1")
+        self.assertEqual(fields["owner_viewport"], "2")
+        self.assertEqual(fields["owner_window"], "0x2000")
+        self.assertEqual(scene_viewport_smoke.coordinate(fields, "image_min", 2), (20.0, 30.0))
+        self.assertNotEqual(fields["owner_viewport"], fields["main_viewport"])
+
+    def test_marker_parser_rejects_wrong_event_and_malformed_geometry(self) -> None:
+        with self.assertRaises(ValueError):
+            scene_viewport_smoke.marker_fields("MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY;", scene_viewport_smoke.DETACHED)
+        for raw in ("1,2,3", "nan,2", "1,inf"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                scene_viewport_smoke.coordinate({"point": raw}, "point", 2)
 
 
 class DirtyCloseProtocolTests(unittest.TestCase):
