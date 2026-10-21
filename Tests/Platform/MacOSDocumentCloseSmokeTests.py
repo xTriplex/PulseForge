@@ -398,6 +398,28 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             f"DIRECT_AX_RESULT status=folder-path-error; value={ready_path}; focused=true; set_error=0", ready_path
         ))
 
+    def test_open_file_selection_requires_one_confirmed_ax_selection(self) -> None:
+        selected = (
+            "DIRECT_AX_RESULT status=selection-verified; operation=select-element; "
+            "role=AXRow; name=Example Ω.scene; ax_error=0; selected=true"
+        )
+        expected_path = Path("/tmp/Dialog Files Ω/Example Ω.scene")
+        with patch.object(native_dialog, "run_direct_ax", return_value=(0, selected, "")) as select:
+            result = native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        self.assertIn("status=selection-verified", result)
+        select.assert_called_once_with(
+            42,
+            operation="select-element",
+            window_title="Open",
+            control_name="Example Ω.scene",
+            timeout=4.0,
+        )
+
+        with patch.object(native_dialog, "run_direct_ax", return_value=(124, "DIRECT_AX_RESULT status=timeout", "")) as select:
+            with self.assertRaisesRegex(RuntimeError, "selection was not confirmed"):
+                native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        select.assert_called_once()
+
     def test_permission_bridge_class_exposes_only_scalar_no_argument_methods(self) -> None:
         platform_dir = Path(__file__).parent
         header = (platform_dir / "MacOSAutomationPermissionBridge.h").read_text(encoding="utf-8")
