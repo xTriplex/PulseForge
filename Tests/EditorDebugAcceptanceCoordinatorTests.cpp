@@ -144,6 +144,17 @@ namespace
 		const auto Detached = Coordinator.Observe(Observation);
 		PF_CHECK(Tests, Detached && Detached->find("=DETACHED;") != std::string::npos);
 		PF_CHECK(Tests, !Coordinator.Complete());
+		PF_CHECK(Tests, !Coordinator.ObserveInput(Observation));
+		Observation.OwnerNativePosition = { 700.0f, 100.0f };
+		Observation.OwnerNativeSize = { 500.0f, 400.0f };
+		Observation.ImGuiMousePosition = { 730.0f, 220.0f };
+		Observation.OwnerFocused = true;
+		Observation.RightButtonDown = true;
+		Observation.RightButtonClicked = true;
+		Observation.ImageHovered = true;
+		const auto Input = Coordinator.ObserveInput(Observation);
+		PF_CHECK(Tests, Input && Input->find("event=clicked") != std::string::npos &&
+			Input->find("native_rect=700.0,100.0,500.0,400.0") != std::string::npos);
 
 		Observation.CameraCaptureActive = true;
 		const auto Captured = Coordinator.Observe(Observation);

@@ -6173,11 +6173,32 @@ namespace
 			Observation.MainViewportID = MainViewport->ID;
 			Observation.OwnerViewportID = OwnerViewport->ID;
 			Observation.OwnerWindow = reinterpret_cast<uintptr_t>(OwnerWindow);
+			Observation.OwnerFocused = glfwGetWindowAttrib(OwnerWindow, GLFW_FOCUSED) == GLFW_TRUE;
+			int OwnerWindowX = 0;
+			int OwnerWindowY = 0;
+			int OwnerWindowWidth = 0;
+			int OwnerWindowHeight = 0;
+			glfwGetWindowPos(OwnerWindow, &OwnerWindowX, &OwnerWindowY);
+			glfwGetWindowSize(OwnerWindow, &OwnerWindowWidth, &OwnerWindowHeight);
+			Observation.OwnerNativePosition = { static_cast<float>(OwnerWindowX), static_cast<float>(OwnerWindowY) };
+			Observation.OwnerNativeSize = { static_cast<float>(OwnerWindowWidth), static_cast<float>(OwnerWindowHeight) };
 			Observation.SceneImageReady = m_Scene && m_ViewportRenderView.HasTarget() &&
 				m_ViewportImageRect.Maximum.x > m_ViewportImageRect.Minimum.x && m_ViewportImageRect.Maximum.y > m_ViewportImageRect.Minimum.y;
+			Observation.ImageHovered = m_ViewportImageHovered;
 			Observation.CameraCaptureActive = m_ViewportMouseCapture.OwnsViewport(OwnerViewport->ID, OwnerWindow);
 			Observation.CameraForward = { Forward.x, Forward.y, Forward.z };
 			Observation.FramebufferScale = { OwnerViewport->FramebufferScale.x, OwnerViewport->FramebufferScale.y };
+			ImGuiIO& SmokeIO = ImGui::GetIO();
+			Observation.RightButtonDown = SmokeIO.MouseDown[ImGuiMouseButton_Right];
+			Observation.RightButtonClicked = SmokeIO.MouseClicked[ImGuiMouseButton_Right];
+			Observation.RightButtonReleased = SmokeIO.MouseReleased[ImGuiMouseButton_Right];
+			Observation.ImGuiMousePosition = { SmokeIO.MousePos.x, SmokeIO.MousePos.y };
+			Observation.ImGuiHoveredViewportID = SmokeIO.MouseHoveredViewport;
+			Observation.ImGuiFrameNumber = ImGui::GetFrameCount();
+			double OwnerCursorX = 0.0;
+			double OwnerCursorY = 0.0;
+			glfwGetCursorPos(OwnerWindow, &OwnerCursorX, &OwnerCursorY);
+			Observation.OwnerCursorPosition = { static_cast<float>(OwnerCursorX), static_cast<float>(OwnerCursorY) };
 			Observation.TitleCenter = { WindowPosition.x + WindowSize.x * 0.5f, WindowPosition.y + TitleHeight * 0.5f };
 			ImGuiWindow* SceneWindow = ImGui::GetCurrentWindow();
 			ImGuiTabBar* TabBar = SceneWindow && SceneWindow->DockNode ? SceneWindow->DockNode->TabBar : nullptr;
@@ -6204,6 +6225,7 @@ namespace
 			Observation.MainWindowRect = { MainViewport->Pos.x, MainViewport->Pos.y, MainViewport->Size.x, MainViewport->Size.y };
 			Observation.TearOffPoint = { TearOffX, MainViewport->Pos.y + MainViewport->Size.y * 0.5f };
 			if (auto Marker = m_SceneViewportNativeSmoke->Observe(Observation)) PF_INFO("{}", *Marker);
+			if (auto Marker = m_SceneViewportNativeSmoke->ObserveInput(Observation)) PF_INFO("{}", *Marker);
 #endif
 		}
 
