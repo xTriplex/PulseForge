@@ -375,8 +375,8 @@ let descendants: [AXNode] = {
     print("DIRECT_AX_SELECT_STAGE stage=window-tree-begin; node_limit=96; depth_limit=3")
     fflush(stdout)
     // Finder panels expose column-view contents through AXColumns/AXVisibleColumns,
-    // not only through the browser's AXChildren. Search those columns separately
-    // so sidebar entries cannot hide the requested file from the bounded tree walk.
+    // not only through the browser's AXChildren. The rightmost column is the
+    // selected directory, so search it directly instead of walking every folder column.
     let windowNodes = collect(matching, depthLimit: 3, nodeLimit: 96)
     print("DIRECT_AX_SELECT_STAGE stage=window-tree-end; nodes=\(windowNodes.count); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - selectionStarted) * 1000)")
     fflush(stdout)
@@ -397,9 +397,8 @@ let descendants: [AXNode] = {
             (value(browser, "AXColumns") as? [AXUIElement] ?? [])
         print("DIRECT_AX_SELECT_STAGE stage=columns-selected; index=\(browserIndex); count=\(columns.count); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - selectionStarted) * 1000)")
         fflush(stdout)
-        let browserNodes = columns.isEmpty
-            ? collect([browser], depthLimit: 8, nodeLimit: 256)
-            : collect(columns, depthLimit: 8, nodeLimit: 256)
+        let selectedDirectoryRoots = columns.isEmpty ? [browser] : [columns[columns.count - 1]]
+        let browserNodes = collect(selectedDirectoryRoots, depthLimit: 8, nodeLimit: 96)
         print("DIRECT_AX_SELECT_STAGE stage=column-tree-end; index=\(browserIndex); nodes=\(browserNodes.count); elapsed_ms=\((ProcessInfo.processInfo.systemUptime - selectionStarted) * 1000)")
         fflush(stdout)
         let offset = allNodes.count

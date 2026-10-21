@@ -141,6 +141,17 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
                 [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}],
             )
 
+    def test_camera_input_accepts_a_small_but_usable_reattached_viewport(self) -> None:
+        display, minimum, maximum, point = scene_viewport_smoke.visible_camera_target(
+            (33.0, 264.0),
+            (151.0, 441.0),
+            [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}],
+        )
+        self.assertEqual(display["id"], 1)
+        self.assertEqual(minimum, (57.0, 288.0))
+        self.assertEqual(maximum, (127.0, 417.0))
+        self.assertEqual(point, (92.0, 352.5))
+
     def test_focus_reacquisition_target_stays_on_the_visible_display(self) -> None:
         display, minimum, maximum, point = scene_viewport_smoke.visible_camera_target(
             (832.2, 425.0),

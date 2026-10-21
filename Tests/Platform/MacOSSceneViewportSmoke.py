@@ -112,7 +112,7 @@ def visible_camera_region(
     image_maximum: tuple[float, float],
     displays: list[dict[str, float | int | str]],
     inset: float = 24.0,
-    minimum_extent: float = 80.0,
+    minimum_extent: float = 20.0,
 ) -> tuple[dict[str, float | int | str], tuple[float, float], tuple[float, float]]:
     candidates: list[tuple[float, dict[str, float | int | str], tuple[float, float], tuple[float, float]]] = []
     for display in displays:
