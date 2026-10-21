@@ -146,9 +146,14 @@ namespace
 		Observation.ImageMinimum = { 400.0f, 200.0f };
 		Observation.ImageMaximum = { 700.0f, 500.0f };
 		Observation.OwnerFocused = true;
+		Observation.CameraPosition = { 1.0f, 2.0f, 3.0f };
+		Observation.CameraMoveSpeed = 6.0f;
 		const auto Detached = Coordinator.Observe(Observation);
 		PF_CHECK(Tests, Detached && Detached->find("=DETACHED;") != std::string::npos);
 		PF_CHECK(Tests, !Coordinator.Complete());
+		const auto DetachedState = Coordinator.ObserveState(Observation);
+		PF_CHECK(Tests, DetachedState && DetachedState->find("camera_position=1.0000,2.0000,3.0000") != std::string::npos &&
+			DetachedState->find("camera_speed=6.0000") != std::string::npos);
 		PF_CHECK(Tests, !Coordinator.ObserveInput(Observation));
 		Observation.OwnerNativePosition = { 700.0f, 100.0f };
 		Observation.OwnerNativeSize = { 500.0f, 400.0f };
@@ -181,12 +186,32 @@ namespace
 		PF_CHECK(Tests, !Coordinator.Complete());
 
 		Observation.CameraCaptureActive = false;
+		Observation.OwnerFocused = false;
 		PF_CHECK(Tests, !Coordinator.Observe(Observation));
 		Observation.CameraForward = { 0.1f, 0.0f, -0.995f };
+		PF_CHECK(Tests, !Coordinator.Observe(Observation));
+		Observation.ImGuiTime = 0.5;
+		const auto FocusLossState = Coordinator.ObserveState(Observation);
+		PF_CHECK(Tests, FocusLossState && FocusLossState->find("focused=0; capture=0") != std::string::npos);
+		Observation.OwnerFocused = true;
+		Observation.RightButtonDown = false;
+		Observation.RightButtonClicked = false;
+		Observation.RightButtonReleased = true;
+		const auto NormalRelease = Coordinator.ObserveInput(Observation);
+		PF_CHECK(Tests, NormalRelease && NormalRelease->find("event=released") != std::string::npos);
 		const auto Passed = Coordinator.Observe(Observation);
 		PF_CHECK(Tests, Passed && Passed->find("=PASS;") != std::string::npos);
-		PF_CHECK(Tests, Coordinator.Complete());
+		PF_CHECK(Tests, !Coordinator.Complete());
 		PF_CHECK(Tests, !Coordinator.Observe(Observation));
+		Observation.OwnerViewportID = Observation.MainViewportID;
+		Observation.OwnerWindow = 0x2000;
+		PF_CHECK(Tests, !Coordinator.Observe(Observation));
+		Observation.OwnerWindow = 0x1001;
+		PF_CHECK(Tests, !Coordinator.Observe(Observation));
+		Observation.OwnerWindow = 0x1000;
+		const auto Reattached = Coordinator.Observe(Observation);
+		PF_CHECK(Tests, Reattached && Reattached->find("=REATTACHED;") != std::string::npos);
+		PF_CHECK(Tests, Coordinator.Complete());
 	}
 } // namespace
 

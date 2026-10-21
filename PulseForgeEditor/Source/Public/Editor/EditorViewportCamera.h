@@ -27,6 +27,7 @@ namespace PulseForgeEditor
 		[[nodiscard]] std::expected<glm::mat4, std::string> GetProjection(float AspectRatio) const;
 		[[nodiscard]] glm::vec3 GetPosition() const noexcept;
 		[[nodiscard]] glm::vec3 GetForward() const noexcept;
+		[[nodiscard]] float GetMoveSpeed() const noexcept { return m_MoveSpeed; }
 
 	private:
 		glm::vec3 m_Position{ 0.0f, 0.0f, 3.1f };

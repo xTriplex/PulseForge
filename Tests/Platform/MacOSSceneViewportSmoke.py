@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
-import struct
 import subprocess
 import sys
 import tempfile
@@ -22,9 +22,11 @@ READY = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY;"
 DETACHED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=DETACHED;"
 CAPTURED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=CAPTURED;"
 PASSED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=PASS;"
+REATTACHED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=REATTACHED;"
 CAMERA_READY = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT;"
+STATE = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=STATE;"
 FAILURE_MARKERS = ("MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=FAILED;",)
-EVIDENCE_MARKERS = (READY, DETACHED, CAMERA_READY, CAPTURED, PASSED, *FAILURE_MARKERS)
+EVIDENCE_MARKERS = (READY, DETACHED, CAMERA_READY, CAPTURED, PASSED, REATTACHED, STATE, *FAILURE_MARKERS)
 
 
 def marker_fields(line: str, marker: str) -> dict[str, str]:
@@ -62,38 +64,62 @@ def is_fresh_geometry_sample(line: str | None, previous_sample: int) -> bool:
     return sample > previous_sample
 
 
-def screenshot(filename: str, checkpoint: str) -> tuple[int, int] | None:
+def screenshot(filename: str, checkpoint: str) -> bool:
     result = capture_screenshot(filename)
     print(f"MACOS_SCENE_VIEWPORT_SCREENSHOT={checkpoint}; {result}")
-    if not result.startswith("CAPTURED;") or "path=" not in result:
-        return None
-    screenshot_path = Path(result.rsplit("path=", 1)[1])
-    try:
-        with screenshot_path.open("rb") as image:
-            header = image.read(24)
-    except OSError:
-        return None
-    if len(header) != 24 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
-        return None
-    return struct.unpack(">II", header[16:24])
+    return result.startswith("CAPTURED;") and "path=" in result
 
 
 def visible_camera_region(
     image_minimum: tuple[float, float],
     image_maximum: tuple[float, float],
-    display_size: tuple[int, int],
-) -> tuple[tuple[float, float], tuple[float, float]]:
-    width, height = display_size
-    visible_minimum = (max(0.0, image_minimum[0]), max(0.0, image_minimum[1]))
-    visible_maximum = (min(float(width), image_maximum[0]), min(float(height), image_maximum[1]))
-    minimum = (visible_minimum[0] + 24.0, visible_minimum[1] + 24.0)
-    maximum = (visible_maximum[0] - 24.0, visible_maximum[1] - 24.0)
-    if maximum[0] - minimum[0] < 80.0 or maximum[1] - minimum[1] < 80.0:
+    displays: list[dict[str, float | int | str]],
+    inset: float = 24.0,
+    minimum_extent: float = 80.0,
+) -> tuple[dict[str, float | int | str], tuple[float, float], tuple[float, float]]:
+    candidates: list[tuple[float, dict[str, float | int | str], tuple[float, float], tuple[float, float]]] = []
+    for display in displays:
+        try:
+            x, y = float(display["x"]), float(display["y"])
+            width, height = float(display["width"]), float(display["height"])
+            scale = float(display["backing_scale"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"malformed native display geometry: {display!r}") from error
+        if not all(value == value and abs(value) != float("inf") for value in (x, y, width, height, scale)):
+            raise ValueError(f"non-finite native display geometry: {display!r}")
+        if width <= 0.0 or height <= 0.0 or scale <= 0.0:
+            continue
+        # CGDisplayBounds and CGEvent locations are both in Quartz global display
+        # coordinates. The backing scale is evidence only; do not rescale points.
+        intersection_minimum = (max(image_minimum[0], x), max(image_minimum[1], y))
+        intersection_maximum = (min(image_maximum[0], x + width), min(image_maximum[1], y + height))
+        minimum = (intersection_minimum[0] + inset, intersection_minimum[1] + inset)
+        maximum = (intersection_maximum[0] - inset, intersection_maximum[1] - inset)
+        extent_x, extent_y = maximum[0] - minimum[0], maximum[1] - minimum[1]
+        if extent_x >= minimum_extent and extent_y >= minimum_extent:
+            candidates.append((extent_x * extent_y, display, minimum, maximum))
+    if not candidates:
         raise ValueError(
-            f"detached viewport has no usable visible image area; image={image_minimum}..{image_maximum}; "
-            f"display=0,0,{width},{height}; inset_region={minimum}..{maximum}"
+            f"detached viewport has no usable visible region in native Quartz display geometry; "
+            f"image={image_minimum}..{image_maximum}; displays={displays!r}"
         )
-    return minimum, maximum
+    _, display, minimum, maximum = max(candidates, key=lambda candidate: candidate[0])
+    return display, minimum, maximum
+
+
+def read_native_displays(driver: Path, timeout: float) -> list[dict[str, float | int | str]]:
+    code, stdout, stderr = run_bounded_command([str(driver), "display-geometry"], timeout=timeout)
+    prefix = "SCENE_VIEWPORT_DISPLAY_GEOMETRY="
+    line = next((line for line in stdout.splitlines() if line.startswith(prefix)), None)
+    if code != 0 or line is None:
+        raise RuntimeError(f"native display geometry query failed; exit_code={code}; stdout={stdout!r}; stderr={stderr!r}")
+    try:
+        result = json.loads(line[len(prefix):])
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"native display geometry protocol was malformed: {line!r}") from error
+    if not isinstance(result, list) or not result:
+        raise RuntimeError(f"native display geometry returned no active displays: {result!r}")
+    return result
 
 
 def remove_root(root: Path, parent: Path) -> str | None:
@@ -146,6 +172,7 @@ def main() -> int:
     process: subprocess.Popen[str] | None = None
     capture: BoundedOutput | None = None
     failures: list[str] = []
+    normal_shutdown_completed = False
 
     try:
         preflight_direct_ax_client(min(30.0, max(0.1, deadline - time.monotonic())))
@@ -158,9 +185,15 @@ def main() -> int:
         if code != 0 or not driver.is_file():
             raise RuntimeError("the bounded native pointer helper did not compile")
 
+        display_query_timeout = min(5.0, max(0.1, deadline - time.monotonic()))
+        displays = read_native_displays(driver, display_query_timeout)
+        print(f"MACOS_SCENE_VIEWPORT_NATIVE_DISPLAYS={displays!r}")
+
         invalid_inputs = (
             ("action-id", ["drag-left", "123", "not-a-uuid", "10", "10", "20", "20"]),
             ("coordinates", ["drag-left", "123", uuid.uuid4().hex, "nan", "10", "20", "20"]),
+            ("scroll-delta", ["scroll", "123", uuid.uuid4().hex, "10", "10", "0"]),
+            ("key-hold-duration", ["key-hold", "123", uuid.uuid4().hex, "13", "3.0"]),
         )
         for label, helper_arguments in invalid_inputs:
             code, stdout, stderr = run_bounded_command([str(driver), *helper_arguments], timeout=5)
@@ -207,8 +240,32 @@ def main() -> int:
                 capture.finished.wait(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
             raise TimeoutError(f"timed out waiting for {label}; process_status={process.poll()}")
 
+        def wait_for_state(after_sample: int, label: str, predicate) -> str:
+            assert process is not None and capture is not None
+            while time.monotonic() < deadline:
+                if capture.reader_error:
+                    raise RuntimeError(f"editor output reader failed while waiting for {label}: {capture.reader_error}")
+                line = capture.marker_lines.get(STATE)
+                if line:
+                    fields = marker_fields(line, STATE)
+                    try:
+                        sample = int(fields["sample"])
+                    except (KeyError, ValueError) as error:
+                        raise ValueError(f"native camera state marker is malformed: {line!r}") from error
+                    if sample > after_sample and predicate(fields):
+                        print(f"MACOS_SCENE_VIEWPORT_OBSERVED={label}; {line}")
+                        return line
+                failure = next((capture.marker_lines[item] for item in FAILURE_MARKERS if item in capture.markers), None)
+                if failure:
+                    raise RuntimeError(f"editor fixture failed: {failure}")
+                if process.poll() is not None:
+                    raise RuntimeError(f"editor exited with status {process.returncode} before {label}")
+                capture.finished.wait(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
+            raise TimeoutError(f"timed out waiting for {label}; after_sample={after_sample}; process_status={process.poll()}")
+
         ready_line = wait_for(READY, "main Scene Viewport and image ready")
-        screenshot("macos-scene-viewport-checkpoint-main.png", "main-owner-scene-loaded")
+        if not screenshot("macos-scene-viewport-checkpoint-main.png", "main-owner-scene-loaded"):
+            raise RuntimeError("could not capture the main-owner screenshot evidence")
         activation_code, activation_output, activation_error = run_direct_ax(
             process.pid, operation="activate-window", window_title="PulseForge Editor", timeout=min(10.0, deadline - time.monotonic())
         )
@@ -246,9 +303,8 @@ def main() -> int:
         detached = marker_fields(detached_line, DETACHED)
         if detached.get("owner_viewport") == initial.get("owner_viewport") or detached.get("owner_window") == initial.get("owner_window"):
             raise RuntimeError("detached Scene Viewport did not acquire a distinct native owner")
-        display_size = screenshot("macos-scene-viewport-checkpoint-detached.png", "detached-native-window")
-        if display_size is None:
-            raise RuntimeError("could not determine the hosted display bounds from the detached-window screenshot")
+        if not screenshot("macos-scene-viewport-checkpoint-detached.png", "detached-native-window"):
+            raise RuntimeError("could not capture the detached-window screenshot evidence")
 
         ax_code, ax_output, ax_error = run_direct_ax(
             process.pid, operation="activate-window", window_title="Scene Viewport", timeout=min(10.0, deadline - time.monotonic())
@@ -288,12 +344,15 @@ def main() -> int:
         if not (native_x <= image_min_x < image_max_x <= native_x + native_width and
                 native_y <= image_min_y < image_max_y <= native_y + native_height):
             raise RuntimeError("fresh Scene Viewport image geometry is outside its focused native owner")
-        visible_minimum, visible_maximum = visible_camera_region(
-            (image_min_x, image_min_y), (image_max_x, image_max_y), display_size
+        selected_display, visible_minimum, visible_maximum = visible_camera_region(
+            (image_min_x, image_min_y), (image_max_x, image_max_y), displays
         )
         image_center_x = (visible_minimum[0] + visible_maximum[0]) * 0.5
         image_center_y = (visible_minimum[1] + visible_maximum[1]) * 0.5
-        print(f"MACOS_SCENE_VIEWPORT_VISIBLE_INPUT_REGION=display={display_size}; "
+        print(f"MACOS_SCENE_VIEWPORT_VISIBLE_INPUT_REGION=display_id={selected_display['id']}; "
+              f"coordinate_space={selected_display['coordinate_space']!r}; origin={selected_display['origin']!r}; "
+              f"backing_scale={selected_display['backing_scale']}; scale_applied={selected_display['scale_applied']}; "
+              f"bounds={selected_display['x']},{selected_display['y']},{selected_display['width']},{selected_display['height']}; "
               f"image={image_min_x:.1f},{image_min_y:.1f}..{image_max_x:.1f},{image_max_y:.1f}; "
               f"usable={visible_minimum[0]:.1f},{visible_minimum[1]:.1f}.."
               f"{visible_maximum[0]:.1f},{visible_maximum[1]:.1f}")
@@ -309,6 +368,29 @@ def main() -> int:
         if code != 0:
             raise RuntimeError("the intended right-button press was not posted")
         wait_for(CAPTURED, "camera capture started on the detached native owner")
+
+        capture_state_line = wait_for_state(
+            0, "detached owner capture state", lambda fields: fields.get("focused") == "1" and fields.get("capture") == "1"
+        )
+        capture_state = marker_fields(capture_state_line, STATE)
+        capture_state_sample = int(capture_state["sample"])
+        speed_before_wheel = float(capture_state["camera_speed"])
+        wheel_id = uuid.uuid4().hex
+        code, stdout, stderr = run_bounded_command(
+            [str(driver), "scroll", str(process.pid), wheel_id, str(image_center_x), str(image_center_y), "1"],
+            timeout=min(8.0, max(0.1, deadline - time.monotonic())),
+        )
+        print(f"MACOS_SCENE_VIEWPORT_OWNER_WHEEL=action_id={wheel_id}; exit_code={code}; "
+              f"output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
+        if code != 0:
+            raise RuntimeError("the single detached-owner wheel event was not posted")
+        wheel_state_line = wait_for_state(
+            capture_state_sample, "detached-owner fly speed changed from owner wheel input",
+            lambda fields: fields.get("focused") == "1" and fields.get("capture") == "1" and
+            float(fields.get("camera_speed", "nan")) > speed_before_wheel,
+        )
+        wheel_state = marker_fields(wheel_state_line, STATE)
+        wheel_state_sample = int(wheel_state["sample"])
 
         end_camera_x = min(visible_maximum[0] - 8.0, image_center_x + 70.0)
         end_camera_y = min(visible_maximum[1] - 8.0, image_center_y + 45.0)
@@ -327,7 +409,213 @@ def main() -> int:
             raise RuntimeError("the bounded right-button drag continuation and release sequence failed")
         passed_line = wait_for(PASSED, "camera orientation changed and capture released")
         print(f"MACOS_SCENE_VIEWPORT_ACCEPTANCE={passed_line}")
-        screenshot("macos-scene-viewport-checkpoint-camera-input.png", "camera-changed-after-detached-input")
+        if not screenshot("macos-scene-viewport-checkpoint-camera-input.png", "camera-changed-after-detached-input"):
+            raise RuntimeError("could not capture the changed-camera screenshot evidence")
+
+        released_state_line = wait_for_state(
+            wheel_state_sample, "normal right-button release restored detached navigation state",
+            lambda fields: fields.get("focused") == "1" and fields.get("capture") == "0",
+        )
+        released_state = marker_fields(released_state_line, STATE)
+        released_sample = int(released_state["sample"])
+        position_before_key = coordinate(released_state, "camera_position", 3)
+        key_id = uuid.uuid4().hex
+        code, stdout, stderr = run_bounded_command(
+            [str(driver), "key-hold", str(process.pid), key_id, "13", "0.5"],
+            timeout=min(8.0, max(0.1, deadline - time.monotonic())),
+        )
+        print(f"MACOS_SCENE_VIEWPORT_DETACHED_KEYBOARD=action_id={key_id}; keycode=13; "
+              f"exit_code={code}; output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
+        if code != 0:
+            raise RuntimeError("the bounded detached-owner keyboard input was not posted")
+        moved_state_line = wait_for_state(
+            released_sample, "camera translated from detached-owner keyboard input",
+            lambda fields: fields.get("focused") == "1" and fields.get("keyboard_focused") == "1" and
+            sum((a - b) ** 2 for a, b in zip(coordinate(fields, "camera_position", 3), position_before_key)) > 1.0e-6,
+        )
+        moved_state = marker_fields(moved_state_line, STATE)
+        moved_sample = int(moved_state["sample"])
+
+        pre_loss_state_line = wait_for_state(
+            moved_sample, "detached owner ready before focus-loss capture",
+            lambda fields: fields.get("focused") == "1" and fields.get("capture") == "0",
+        )
+        pre_loss_state = marker_fields(pre_loss_state_line, STATE)
+        pre_loss_sample = int(pre_loss_state["sample"])
+        normal_cursor_mode = pre_loss_state["cursor_mode"]
+        raw_motion_before = pre_loss_state["raw_motion_enabled"]
+        loss_press_id = uuid.uuid4().hex
+        code, stdout, stderr = run_bounded_command(
+            [str(driver), "press-right", str(process.pid), loss_press_id, str(image_center_x), str(image_center_y)],
+            timeout=min(8.0, max(0.1, deadline - time.monotonic())),
+        )
+        right_press_attempted = code in (0, 124)
+        print(f"MACOS_SCENE_VIEWPORT_FOCUS_LOSS_PRESS=action_id={loss_press_id}; exit_code={code}; "
+              f"output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
+        if code != 0:
+            raise RuntimeError("the deliberate focus-loss capture press was not posted")
+        captured_state_line = wait_for_state(
+            pre_loss_sample, "detached owner entered capture before focus loss",
+            lambda fields: fields.get("focused") == "1" and fields.get("capture") == "1",
+        )
+        captured_state = marker_fields(captured_state_line, STATE)
+        captured_sample = int(captured_state["sample"])
+
+        activation_code, activation_output, activation_error = run_direct_ax(
+            process.pid, operation="activate-window", window_title=MAIN_TITLE_FRAGMENT,
+            timeout=min(10.0, max(0.1, deadline - time.monotonic())),
+        )
+        activation_output += activation_error
+        if activation_code != 0:
+            raise RuntimeError(f"main editor activation failed during focus-loss test: {activation_output.strip()!r}")
+        parse_window_activation(activation_output, process.pid, MAIN_TITLE_FRAGMENT)
+        focus_loss_line = wait_for_state(
+            captured_sample, "capture cancelled and cursor settings restored after owner focus loss",
+            lambda fields: fields.get("focused") == "0" and fields.get("capture") == "0" and
+            fields.get("cursor_mode") == normal_cursor_mode and fields.get("raw_motion_enabled") == raw_motion_before,
+        )
+        focus_loss_state = marker_fields(focus_loss_line, STATE)
+        focus_loss_sample = int(focus_loss_state["sample"])
+        focus_loss_position = coordinate(focus_loss_state, "camera_position", 3)
+
+        release_id = uuid.uuid4().hex
+        code, stdout, stderr = run_bounded_command(
+            [str(driver), "release-right", str(process.pid), release_id, str(image_center_x), str(image_center_y)],
+            timeout=min(5.0, max(0.1, deadline - time.monotonic())),
+        )
+        print(f"MACOS_SCENE_VIEWPORT_FOCUS_LOSS_RELEASE_CLEANUP=action_id={release_id}; exit_code={code}; "
+              f"output={stdout[-500:]!r}; error={stderr[-500:]!r}")
+        if code != 0:
+            raise RuntimeError("the matching release for the focus-loss capture could not be posted")
+        right_press_attempted = False
+
+        other_window_key_id = uuid.uuid4().hex
+        code, stdout, stderr = run_bounded_command(
+            [str(driver), "key-hold", str(process.pid), other_window_key_id, "13", "0.5"],
+            timeout=min(8.0, max(0.1, deadline - time.monotonic())),
+        )
+        print(f"MACOS_SCENE_VIEWPORT_NONOWNER_KEYBOARD=action_id={other_window_key_id}; "
+              f"exit_code={code}; output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
+        if code != 0:
+            raise RuntimeError("keyboard input directed to the main editor window was not posted")
+        other_window_state_line = wait_for_state(
+            focus_loss_sample, "main-window keyboard input left detached camera unchanged",
+            lambda fields: fields.get("focused") == "0" and
+            sum((a - b) ** 2 for a, b in zip(coordinate(fields, "camera_position", 3), focus_loss_position)) <= 1.0e-8,
+        )
+        other_window_state = marker_fields(other_window_state_line, STATE)
+        other_window_sample = int(other_window_state["sample"])
+
+        activation_code, activation_output, activation_error = run_direct_ax(
+            process.pid, operation="activate-window", window_title="Scene Viewport",
+            timeout=min(10.0, max(0.1, deadline - time.monotonic())),
+        )
+        activation_output += activation_error
+        if activation_code != 0:
+            raise RuntimeError(f"detached Scene Viewport focus reacquisition failed: {activation_output.strip()!r}")
+        focused_title = parse_window_activation(activation_output, process.pid, "Scene Viewport")
+        focused_again_line = wait_for_state(
+            other_window_sample, "detached Scene Viewport native owner regained focus",
+            lambda fields: fields.get("focused") == "1" and fields.get("capture") == "0",
+        )
+        focused_again = marker_fields(focused_again_line, STATE)
+        focused_again_sample = int(focused_again["sample"])
+        click_id = uuid.uuid4().hex
+        code, stdout, stderr = run_bounded_command(
+            [str(driver), "click-left", str(process.pid), click_id, str(image_center_x), str(image_center_y)],
+            timeout=min(8.0, max(0.1, deadline - time.monotonic())),
+        )
+        print(f"MACOS_SCENE_VIEWPORT_REACQUIRE_CLICK=action_id={click_id}; window={focused_title!r}; "
+              f"exit_code={code}; output={stdout[-1200:]!r}; error={stderr[-800:]!r}")
+        if code != 0:
+            raise RuntimeError("the deliberate viewport click used to reacquire keyboard focus was not posted")
+        keyboard_focus_line = wait_for_state(
+            focused_again_sample, "viewport keyboard focus reacquired on detached owner",
+            lambda fields: fields.get("focused") == "1" and fields.get("keyboard_focused") == "1",
+        )
+        keyboard_focus_state = marker_fields(keyboard_focus_line, STATE)
+        keyboard_focus_sample = int(keyboard_focus_state["sample"])
+        keyboard_reacquire_position = coordinate(keyboard_focus_state, "camera_position", 3)
+        reacquire_key_id = uuid.uuid4().hex
+        code, stdout, stderr = run_bounded_command(
+            [str(driver), "key-hold", str(process.pid), reacquire_key_id, "13", "0.5"],
+            timeout=min(8.0, max(0.1, deadline - time.monotonic())),
+        )
+        print(f"MACOS_SCENE_VIEWPORT_REACQUIRE_KEYBOARD=action_id={reacquire_key_id}; "
+              f"exit_code={code}; output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
+        if code != 0:
+            raise RuntimeError("keyboard input after detached-owner focus reacquisition was not posted")
+        reactivated_state_line = wait_for_state(
+            keyboard_focus_sample, "camera navigation resumed after detached-owner focus reacquisition",
+            lambda fields: fields.get("focused") == "1" and fields.get("keyboard_focused") == "1" and
+            sum((a - b) ** 2 for a, b in zip(coordinate(fields, "camera_position", 3), keyboard_reacquire_position)) > 1.0e-6,
+        )
+        reactivated_state = marker_fields(reactivated_state_line, STATE)
+        reactivated_sample = int(reactivated_state["sample"])
+
+        reattach_state_line = wait_for_state(
+            reactivated_sample, "detached viewport geometry before reattachment",
+            lambda fields: fields.get("focused") == "1" and fields.get("capture") == "0",
+        )
+        reattach_state = marker_fields(reattach_state_line, STATE)
+        reattach_start_x, reattach_start_y = coordinate(reattach_state, "title_center", 2)
+        tab_min_x, tab_min_y, tab_max_x, tab_max_y = coordinate(reattach_state, "dock_tab_rect", 4)
+        if not (tab_min_x <= reattach_start_x <= tab_max_x and tab_min_y <= reattach_start_y <= tab_max_y):
+            raise RuntimeError("fresh detached Scene Viewport title center is outside its observed dock tab")
+        main_x, main_y, main_width, main_height = coordinate(reattach_state, "main_rect", 4)
+        reattach_end_x = main_x + main_width * 0.5
+        reattach_end_y = main_y + main_height * 0.55
+        reattach_id = uuid.uuid4().hex
+        code, stdout, stderr = run_bounded_command(
+            [str(driver), "drag-left", str(process.pid), reattach_id, str(reattach_start_x), str(reattach_start_y),
+             str(reattach_end_x), str(reattach_end_y)],
+            timeout=min(15.0, max(0.1, deadline - time.monotonic())),
+        )
+        print(f"MACOS_SCENE_VIEWPORT_REATTACH_INPUT=action_id={reattach_id}; destination={reattach_end_x:.1f},{reattach_end_y:.1f}; "
+              f"exit_code={code}; output={stdout[-2500:]!r}; error={stderr[-1000:]!r}")
+        if code != 0:
+            raise RuntimeError("the single Scene Viewport reattachment gesture did not complete")
+        right_press_attempted = False
+        reattached_line = wait_for(REATTACHED, "Scene Viewport reattached to its original main utility window")
+        reattached = marker_fields(reattached_line, REATTACHED)
+        if reattached.get("main_viewport") != initial.get("main_viewport") or reattached.get("scene_image_ready") != "1":
+            raise RuntimeError(f"reattached Scene Viewport did not return to the original main owner: {reattached_line}")
+        before_reattach_position = coordinate(reattach_state, "camera_position", 3)
+        after_reattach_position = coordinate(reattached, "camera_position", 3)
+        if sum((a - b) ** 2 for a, b in zip(before_reattach_position, after_reattach_position)) > 1.0e-6:
+            raise RuntimeError("Scene Viewport camera position changed while reattaching")
+        if not screenshot("macos-scene-viewport-checkpoint-reattached.png", "reattached-utility-panel"):
+            raise RuntimeError("could not capture the reattached utility-panel screenshot evidence")
+
+        close_code, close_stdout, close_stderr = run_direct_ax(
+            process.pid,
+            operation="close-main-window",
+            window_title="PulseForge Editor",
+            timeout=min(12.0, max(0.1, deadline - time.monotonic())),
+        )
+        close_output = close_stdout + close_stderr
+        dispatched = "DIRECT_AX_DISPATCH attempted=true; operation=close-main-window" in close_output
+        print(f"MACOS_SCENE_VIEWPORT_SHUTDOWN_DISPATCH=attempted={dispatched}; client_exit={close_code}; "
+              f"output={close_output[-1800:]!r}")
+        if not dispatched:
+            raise RuntimeError("native main-window close was not confirmed as dispatched; no retry will be attempted")
+        try:
+            exit_code = process.wait(timeout=max(0.0, min(15.0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired as error:
+            raise TimeoutError("editor did not exit after the dispatched native main-window close") from error
+        print(f"MACOS_SCENE_VIEWPORT_SHUTDOWN_COMPLETION=process_exit={exit_code}; expected_exit=0; "
+              f"ax_client_exit={close_code}; action_result_is_reconciled_without_replay={close_code != 0}")
+        if exit_code != 0:
+            raise RuntimeError(f"editor exited with unexpected status after native main-window close: {exit_code}")
+        if close_code != 0:
+            print("MACOS_SCENE_VIEWPORT_SHUTDOWN_RECONCILIATION=dispatched AX result was ambiguous; normal exit 0 confirms completion")
+        assert capture is not None
+        capture.thread.join(timeout=5)
+        if capture.thread.is_alive():
+            raise RuntimeError("editor output reader remained active after normal application exit")
+        if capture.reader_error:
+            raise RuntimeError(f"editor output reader failed during normal shutdown: {capture.reader_error}")
+        normal_shutdown_completed = True
 
     except (OSError, RuntimeError, TimeoutError, ValueError, subprocess.SubprocessError) as error:
         failures.append(f"{type(error).__name__}: {error}")
@@ -358,6 +646,8 @@ def main() -> int:
                 capture.thread.join(timeout=5)
             if not stopped or (capture and capture.thread.is_alive()):
                 failures.append("owned editor process group or output reader did not stop cleanly")
+            if normal_shutdown_completed:
+                failures.append("editor remained alive after normal-shutdown acceptance and required forced cleanup")
         if process_stopped and (capture is None or not capture.thread.is_alive()):
             cleanup = remove_root(root, temp_parent)
             if cleanup:
@@ -370,7 +660,7 @@ def main() -> int:
         if log_path.is_file():
             print(log_path.read_text(encoding="utf-8", errors="replace"), file=sys.stderr)
         return 1
-    print("MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=PASS; Scene Viewport detached into a secondary native window and actual right-drag changed the production camera")
+    print("MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=PASS; Scene Viewport detached into a secondary native window, actual right-drag changed the production camera, and the main window closed normally")
     return 0
 
 

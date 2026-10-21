@@ -2,6 +2,7 @@
 
 #include "Assets/AssetTypes.h"
 #include "Editor/EditorViewportCamera.h"
+#include "Editor/EditorViewportScrollInput.h"
 #include "Editor/EditorViewportPolicy.h"
 #include "Editor/EditorViewportToolState.h"
 
@@ -628,6 +629,30 @@ namespace
 		PF_CHECK(Tests, !Capture.UpdateCursorPosition(47.0f, 44.0f));
 	}
 
+	void TestViewportScrollEventsRemainBoundToTheirNativeOwner(TestRunner& Tests)
+	{
+		using PulseForgeEditor::Detail::ViewportScrollEventAccumulator;
+		ViewportScrollEventAccumulator Scroll;
+		constexpr uint64_t SceneOwnerA = 101;
+		constexpr uint64_t OtherWindowB = 202;
+
+		Scroll.Record(OtherWindowB, 4.0f);
+		Scroll.Record(SceneOwnerA, 1.0f);
+		Scroll.Record(SceneOwnerA, 2.0f);
+		PF_CHECK(Tests, std::abs(Scroll.Consume(SceneOwnerA) - 3.0f) < 1.0e-6f);
+		PF_CHECK(Tests, Scroll.Consume(OtherWindowB) == 0.0f);
+
+		Scroll.Record(OtherWindowB, -2.0f);
+		PF_CHECK(Tests, Scroll.Consume(SceneOwnerA) == 0.0f);
+		PF_CHECK(Tests, Scroll.Consume(OtherWindowB) == 0.0f);
+
+		Scroll.Record(SceneOwnerA, 1.5f);
+		Scroll.Forget(SceneOwnerA);
+		PF_CHECK(Tests, Scroll.Consume(SceneOwnerA) == 0.0f);
+		Scroll.Record(SceneOwnerA + 1, -1.0f);
+		PF_CHECK(Tests, std::abs(Scroll.Consume(SceneOwnerA + 1) + 1.0f) < 1.0e-6f);
+	}
+
 	void TestEditorViewportCameraController(TestRunner& Tests)
 	{
 		PulseForgeEditor::EditorViewportCamera Camera;
@@ -714,6 +739,7 @@ void RunEditorViewportTests(TestRunner& Tests)
 	TestEditorViewportTargetExtent(Tests);
 	TestEditorViewportInitializationRetry(Tests);
 	TestViewportMouseCaptureState(Tests);
+	TestViewportScrollEventsRemainBoundToTheirNativeOwner(Tests);
 	TestEditorViewportCameraController(Tests);
 	TestEditorViewportToolState(Tests);
 }

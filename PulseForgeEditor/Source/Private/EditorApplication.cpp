@@ -87,6 +87,7 @@
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
 #include "Editor/EditorViewportMouseCapture.h"
+#include "Editor/EditorViewportScrollInput.h"
 #include "Editor/ViewportMath.h"
 #include "Editor/ViewportGizmoGeometry.h"
 
@@ -782,6 +783,11 @@ namespace
 				throw std::runtime_error("Could not initialize the editor GLFW ImGui backend");
 			}
 			m_GlfwBackendActive = true;
+			if (!m_ViewportScrollInput.Install(m_Context, Window))
+			{
+				ShutdownImGui();
+				throw std::runtime_error("Could not install Scene Viewport scroll-source routing");
+			}
 
 #if defined(_DEBUG) || defined(PF_DEBUG)
 			if (m_DocumentCloseAcceptance && m_DocumentCloseAcceptance->IsEnabled())
@@ -6017,6 +6023,7 @@ namespace
 			m_ViewportImageHovered = false;
 			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport))
 			{
+				m_ViewportScrollInput.DiscardPending();
 				ResetViewportPanelInteraction();
 				return;
 			}
@@ -6026,6 +6033,7 @@ namespace
 				ImGuiViewport* OwnerViewport = ImGui::GetWindowViewport();
 				GLFWwindow* OwnerWindow = OwnerViewport ? static_cast<GLFWwindow*>(OwnerViewport->PlatformHandle) : nullptr;
 				UpdateSceneViewportOwner(OwnerViewport, OwnerWindow);
+				const float OwnerScrollDelta = m_ViewportScrollInput.Consume(OwnerViewport ? OwnerViewport->ID : 0, OwnerWindow);
 				if (!m_Project) m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::FolderOpen, "Open a project to render a scene.");
 				else if (!m_Scene) m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Scene, "Open a scene to render it here.");
 				else
@@ -6114,7 +6122,7 @@ namespace
 								ImGui::SetCursorScreenPos(ImVec2(CursorAfterImage.x, ImageMaximum.y));
 								ImGui::Dummy(ImVec2(0.0f, 0.0f));
 							}
-							HandleViewportImage(ImageClicked && !OverHelp && !OverOrientationWidget);
+							HandleViewportImage(ImageClicked && !OverHelp && !OverOrientationWidget, OwnerScrollDelta);
 							if (m_ViewportMouseCapture.OwnsViewport(OwnerViewport ? OwnerViewport->ID : 0, OwnerWindow) &&
 								(ImGui::GetIO().MouseReleased[ImGuiMouseButton_Right] || !ImGui::GetIO().MouseDown[ImGuiMouseButton_Right]))
 								EndEditorCameraNavigation();
@@ -6150,7 +6158,11 @@ namespace
 #endif
 				}
 			}
-			else ResetViewportPanelInteraction();
+			else
+			{
+				m_ViewportScrollInput.DiscardPending();
+				ResetViewportPanelInteraction();
+			}
 			ReportSceneViewportNativeSmoke();
 			ImGui::End();
 		}
@@ -6187,6 +6199,14 @@ namespace
 			Observation.ImageHovered = m_ViewportImageHovered;
 			Observation.CameraCaptureActive = m_ViewportMouseCapture.OwnsViewport(OwnerViewport->ID, OwnerWindow);
 			Observation.CameraForward = { Forward.x, Forward.y, Forward.z };
+			const auto CameraPosition = m_EditorCamera.GetPosition();
+			Observation.CameraPosition = { CameraPosition.x, CameraPosition.y, CameraPosition.z };
+			Observation.CameraMoveSpeed = m_EditorCamera.GetMoveSpeed();
+			Observation.ViewportKeyboardFocused = m_ViewportKeyboardFocused;
+			Observation.CursorMode = glfwGetInputMode(OwnerWindow, GLFW_CURSOR);
+			Observation.RawMotionSupported = glfwRawMouseMotionSupported() == GLFW_TRUE;
+			Observation.RawMotionEnabled = Observation.RawMotionSupported &&
+				glfwGetInputMode(OwnerWindow, GLFW_RAW_MOUSE_MOTION) == GLFW_TRUE;
 			Observation.FramebufferScale = { OwnerViewport->FramebufferScale.x, OwnerViewport->FramebufferScale.y };
 			ImGuiIO& SmokeIO = ImGui::GetIO();
 			Observation.RightButtonDown = SmokeIO.MouseDown[ImGuiMouseButton_Right];
@@ -6227,6 +6247,7 @@ namespace
 			Observation.TearOffPoint = { TearOffX, MainViewport->Pos.y + MainViewport->Size.y * 0.5f };
 			if (auto Marker = m_SceneViewportNativeSmoke->Observe(Observation)) PF_INFO("{}", *Marker);
 			if (auto Marker = m_SceneViewportNativeSmoke->ObserveInput(Observation)) PF_INFO("{}", *Marker);
+			if (auto Marker = m_SceneViewportNativeSmoke->ObserveState(Observation)) PF_INFO("{}", *Marker);
 #endif
 		}
 
@@ -6291,7 +6312,7 @@ namespace
 #endif
 		}
 
-		void HandleViewportImage(bool ImageClicked)
+		void HandleViewportImage(bool ImageClicked, float OwnerScrollDelta)
 		{
 			if (m_SceneRuntime || !m_Scene)
 			{
@@ -6310,11 +6331,11 @@ namespace
 					.RightMouseHeld = IO.MouseDown[ImGuiMouseButton_Right],
 					.RuntimeActive = m_SceneRuntime != nullptr,
 					.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) });
-			if (WheelAction == PulseForgeEditor::ViewportWheelAction::AdjustFlySpeed && IO.MouseWheel != 0.0f)
-				m_EditorCamera.AdjustMoveSpeed(IO.MouseWheel);
-			if (WheelAction == PulseForgeEditor::ViewportWheelAction::Zoom && IO.MouseWheel != 0.0f &&
+			if (WheelAction == PulseForgeEditor::ViewportWheelAction::AdjustFlySpeed && OwnerScrollDelta != 0.0f)
+				m_EditorCamera.AdjustMoveSpeed(OwnerScrollDelta);
+			if (WheelAction == PulseForgeEditor::ViewportWheelAction::Zoom && OwnerScrollDelta != 0.0f &&
 				!IO.MouseDown[ImGuiMouseButton_Left] && !IO.MouseDown[ImGuiMouseButton_Middle] && !ImGui::IsAnyItemActive())
-				m_EditorCamera.Dolly(PulseForgeEditor::GetViewportWheelDollyDelta(IO.MouseWheel));
+				m_EditorCamera.Dolly(PulseForgeEditor::GetViewportWheelDollyDelta(OwnerScrollDelta));
 			if (!m_ShowEditorOverlays) return;
 
 			if (SelectedEntity() && !m_Scene->FindEntity(*SelectedEntity()))
@@ -7203,6 +7224,7 @@ namespace
 			ImGui::SetCurrentContext(m_Context);
 			m_ViewportRenderView.ResetTarget();
 			if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) ImGui::DestroyPlatformWindows();
+			m_ViewportScrollInput.Shutdown();
 			if (m_Project)
 			{
 				m_DocumentWorkspaceStore.MarkDirty(false);
@@ -7289,6 +7311,7 @@ namespace
 		bool m_LoggedEnvironmentReady = false;
 		bool m_ViewportKeyboardFocused = false;
 		PulseForgeEditor::Detail::EditorViewportMouseCapture m_ViewportMouseCapture;
+		PulseForgeEditor::Detail::EditorViewportScrollInput m_ViewportScrollInput;
 		PulseForgeEditor::EditorSceneEditController m_SceneEditController;
 		PulseForgeEditor::EditorSceneWorkspaceState m_SceneWorkspace;
 		PulseForgeEditor::EditorSceneVisibilityCommands m_SceneVisibilityCommands;

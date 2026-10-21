@@ -643,6 +643,40 @@ namespace PulseForgeEditor::Detail
 			   << Observation.TearOffPoint[1] << "; owner_native_rect=" << Observation.OwnerNativePosition[0] << ','
 			   << Observation.OwnerNativePosition[1] << ',' << Observation.OwnerNativeSize[0] << ','
 			   << Observation.OwnerNativeSize[1];
+		Stream << "; camera_position=" << Observation.CameraPosition[0] << ',' << Observation.CameraPosition[1] << ','
+			   << Observation.CameraPosition[2] << "; camera_speed=" << Observation.CameraMoveSpeed
+			   << "; viewport_keyboard_focused=" << Observation.ViewportKeyboardFocused
+			   << "; cursor_mode=" << Observation.CursorMode << "; raw_motion_supported=" << Observation.RawMotionSupported
+			   << "; raw_motion_enabled=" << Observation.RawMotionEnabled;
+		return Stream.str();
+	}
+
+	std::optional<std::string> SceneViewportNativeSmokeCoordinator::ObserveState(
+		const SceneViewportNativeSmokeObservation& Observation)
+	{
+		if (m_Phase < Phase::AwaitingCameraCapture || Observation.OwnerViewportID != m_DetachedViewportID ||
+			Observation.OwnerWindow != m_DetachedWindow || m_StateSamples >= 80 || !std::isfinite(Observation.ImGuiTime))
+			return std::nullopt;
+		if (m_LastStateSampleTime >= 0.0 && Observation.ImGuiTime - m_LastStateSampleTime < 0.2) return std::nullopt;
+		m_LastStateSampleTime = Observation.ImGuiTime;
+		++m_StateSamples;
+		std::ostringstream Stream;
+		Stream << std::fixed << std::setprecision(4) << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=STATE; sample=" << m_StateSamples
+			   << "; frame=" << Observation.ImGuiFrameNumber << "; owner_viewport=" << Observation.OwnerViewportID
+			   << "; owner_window=0x" << std::hex << Observation.OwnerWindow << std::dec
+			   << "; focused=" << Observation.OwnerFocused << "; capture=" << Observation.CameraCaptureActive
+			   << "; keyboard_focused=" << Observation.ViewportKeyboardFocused << "; cursor_mode=" << Observation.CursorMode
+			   << "; raw_motion_supported=" << Observation.RawMotionSupported << "; raw_motion_enabled=" << Observation.RawMotionEnabled
+			   << "; camera_position=" << Observation.CameraPosition[0] << ',' << Observation.CameraPosition[1] << ','
+			   << Observation.CameraPosition[2] << "; camera_forward=" << Observation.CameraForward[0] << ','
+			   << Observation.CameraForward[1] << ',' << Observation.CameraForward[2] << "; camera_speed=" << Observation.CameraMoveSpeed;
+		Stream << "; title_center=" << Observation.TitleCenter[0] << ',' << Observation.TitleCenter[1]
+			   << "; dock_tab_rect=" << Observation.DockTabRect[0] << ',' << Observation.DockTabRect[1] << ','
+			   << Observation.DockTabRect[2] << ',' << Observation.DockTabRect[3]
+			   << "; main_rect=" << Observation.MainWindowRect[0] << ',' << Observation.MainWindowRect[1] << ','
+			   << Observation.MainWindowRect[2] << ',' << Observation.MainWindowRect[3]
+			   << "; image_min=" << Observation.ImageMinimum[0] << ',' << Observation.ImageMinimum[1]
+			   << "; image_max=" << Observation.ImageMaximum[0] << ',' << Observation.ImageMaximum[1];
 		return Stream.str();
 	}
 
@@ -655,6 +689,8 @@ namespace PulseForgeEditor::Detail
 		const bool PressTransition = Observation.RightButtonDown && !m_LastRightButtonDown;
 		const bool ReleaseTransition = !Observation.RightButtonDown && m_LastRightButtonDown;
 		m_LastRightButtonDown = Observation.RightButtonDown;
+		if (m_CaptureWasObserved && Observation.OwnerFocused && !Observation.RightButtonDown && Observation.RightButtonReleased)
+			m_NormalReleaseObserved = true;
 
 		const std::array<float, 8> Geometry = {
 			Observation.OwnerNativePosition[0], Observation.OwnerNativePosition[1], Observation.OwnerNativeSize[0],
@@ -706,6 +742,7 @@ namespace PulseForgeEditor::Detail
 			   << "; hovered_viewport=" << Observation.ImGuiHoveredViewportID << "; image_hovered=" << Observation.ImageHovered
 			   << "; raw_down=" << Observation.RightButtonDown << "; clicked=" << Observation.RightButtonClicked
 			   << "; released=" << Observation.RightButtonReleased << "; capture=" << Observation.CameraCaptureActive
+		   << "; normal_release=" << m_NormalReleaseObserved
 			   << "; native_rect=" << Observation.OwnerNativePosition[0] << ',' << Observation.OwnerNativePosition[1] << ','
 			   << Observation.OwnerNativeSize[0] << ',' << Observation.OwnerNativeSize[1]
 			   << "; cursor=" << Observation.OwnerCursorPosition[0] << ',' << Observation.OwnerCursorPosition[1];
@@ -723,6 +760,7 @@ namespace PulseForgeEditor::Detail
 		{
 			if (Observation.OwnerViewportID != Observation.MainViewportID || !Observation.DockTabReady) return std::nullopt;
 			m_MainViewportID = Observation.MainViewportID;
+			m_MainWindow = Observation.OwnerWindow;
 			m_Phase = Phase::AwaitingNativeDetach;
 			std::ostringstream Stream;
 			Stream << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY; main_viewport=" << m_MainViewportID << "; owner_viewport="
@@ -745,6 +783,20 @@ namespace PulseForgeEditor::Detail
 			return Stream.str();
 		}
 
+		if (m_Phase == Phase::AwaitingReattachment)
+		{
+			if (Observation.OwnerViewportID != m_MainViewportID || Observation.OwnerWindow != m_MainWindow) return std::nullopt;
+			m_Phase = Phase::Complete;
+			std::ostringstream Stream;
+			Stream << std::fixed << std::setprecision(4) << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=REATTACHED; main_viewport="
+				   << m_MainViewportID << "; owner_window=0x" << std::hex << m_MainWindow << std::dec
+				   << "; scene_image_ready=" << Observation.SceneImageReady << "; camera_position="
+				   << Observation.CameraPosition[0] << ',' << Observation.CameraPosition[1] << ',' << Observation.CameraPosition[2]
+				   << "; camera_forward=" << Observation.CameraForward[0] << ',' << Observation.CameraForward[1] << ','
+				   << Observation.CameraForward[2];
+			return Stream.str();
+		}
+
 		if (Observation.OwnerViewportID != m_DetachedViewportID || Observation.OwnerWindow != m_DetachedWindow) return std::nullopt;
 
 		if (m_Phase == Phase::AwaitingCameraCapture && Observation.CameraCaptureActive)
@@ -754,10 +806,11 @@ namespace PulseForgeEditor::Detail
 			return "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=CAPTURED; detached owner accepted right-button camera capture";
 		}
 
-		if (m_Phase == Phase::AwaitingCameraRelease && m_CaptureWasObserved && !Observation.CameraCaptureActive &&
+		if (m_Phase == Phase::AwaitingCameraRelease && m_CaptureWasObserved && m_NormalReleaseObserved &&
+			Observation.OwnerFocused && !Observation.CameraCaptureActive &&
 			Distance(m_InitialCameraForward, Observation.CameraForward) > 0.02f)
 		{
-			m_Phase = Phase::Complete;
+			m_Phase = Phase::AwaitingReattachment;
 			std::ostringstream Stream;
 			Stream << std::fixed << std::setprecision(4) << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=PASS; main_viewport=" << m_MainViewportID
 				   << "; detached_viewport=" << m_DetachedViewportID << "; owner_window=0x" << std::hex << m_DetachedWindow << std::dec
