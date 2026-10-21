@@ -60,6 +60,28 @@ def marker(kind: str, **fields: str) -> dict[str, str]:
 
 
 class SceneViewportSmokeProtocolTests(unittest.TestCase):
+    def test_focus_loss_activation_targets_and_verifies_the_main_editor_window(self) -> None:
+        output = (
+            "DIRECT_AX_RESULT status=window-focused; pid=4321; target_title=EditorWorkflowOverview.scene - PulseForge Editor; "
+            "focused_title=EditorWorkflowOverview.scene - PulseForge Editor; ax_raise_error=0; focus_error=0; attempts=1\n"
+        )
+        with patch.object(scene_viewport_smoke, "run_direct_ax", return_value=(0, output, "")) as activate:
+            result = scene_viewport_smoke.activate_main_editor_window(4321, time.monotonic() + 5.0)
+        activate.assert_called_once()
+        self.assertEqual((4321,), activate.call_args.args)
+        self.assertEqual("activate-window", activate.call_args.kwargs["operation"])
+        self.assertEqual("PulseForge Editor", activate.call_args.kwargs["window_title"])
+        self.assertGreater(activate.call_args.kwargs["timeout"], 0.0)
+        self.assertLessEqual(activate.call_args.kwargs["timeout"], 10.0)
+        self.assertIn("status=window-focused", result)
+
+    def test_focus_loss_activation_failure_is_not_treated_as_success(self) -> None:
+        with patch.object(
+            scene_viewport_smoke, "run_direct_ax", return_value=(13, "window selection failed", "")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "main editor activation failed"):
+                scene_viewport_smoke.activate_main_editor_window(4321, time.monotonic() + 5.0)
+
     def test_marker_fields_preserve_keys_and_native_owner_identity(self) -> None:
         line = (
             "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=DETACHED; main_viewport=1; owner_viewport=2; "
@@ -109,6 +131,21 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
                 (1274.8, 602.0),
                 [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}],
             )
+
+    def test_focus_reacquisition_target_stays_on_the_visible_display(self) -> None:
+        display, minimum, maximum, point = scene_viewport_smoke.visible_camera_target(
+            (832.2, 425.0),
+            (1274.8, 602.0),
+            [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}],
+        )
+        self.assertEqual(display["id"], 1)
+        self.assertGreaterEqual(point[0], minimum[0])
+        self.assertLessEqual(point[0], maximum[0])
+        self.assertGreaterEqual(point[1], minimum[1])
+        self.assertLessEqual(point[1], maximum[1])
+        self.assertLessEqual(point[0], 1024.0)
+        self.assertLessEqual(point[1], 768.0)
+        self.assertNotEqual(point, ((832.2 + 1274.8) * 0.5, (425.0 + 602.0) * 0.5))
 
     def test_native_geometry_keeps_two_x_backing_scale_in_input_coordinates(self) -> None:
         display, minimum, maximum = scene_viewport_smoke.visible_camera_region(
