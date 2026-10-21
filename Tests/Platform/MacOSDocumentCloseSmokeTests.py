@@ -497,7 +497,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             "role=AXTextField; name=Selected Ω.pfproj; ax_error=-25205"
         )
         self.assertEqual(-25205, native_dialog.open_file_action_error(result, "Selected Ω.pfproj"))
-        self.assertIsNone(native_dialog.open_file_action_error(
+        self.assertEqual(0, native_dialog.open_file_action_error(
             result.replace("ax_error=-25205", "ax_error=0"), "Selected Ω.pfproj"
         ))
         self.assertIsNone(native_dialog.open_file_action_error(result, "Other.pfproj"))
@@ -524,7 +524,7 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             patch.object(native_dialog, "run_direct_ax", return_value=(0, focused, "")) as set_path,
         ):
             output = native_dialog.navigate_open_panel_to_folder(42, "Open", folder, native_dialog.time.monotonic() + 20)
-        self.assertIn("Go to Folder", output)
+        self.assertIn("PathTextField", output)
         self.assertEqual(["--go-to-folder", "--press-return"], [call.args[0] for call in keyboard.call_args_list])
         set_path.assert_called_once_with(
             42,
