@@ -454,14 +454,14 @@ if operation == "press-control" || operation == "set-value" || operation == "set
     operation == "set-folder-path-value" || operation == "select-element" {
     let wantedRole = operation == "press-control" ? "AXButton" :
         (operation == "set-value" || operation == "set-focused-value-confirm" || operation == "set-folder-path-value")
-            ? "AXTextField" : "AXRow/AXCell"
+            ? "AXTextField" : "AXRow/AXCell/AXTextField"
     func labelMatches(_ element: AXUIElement) -> Bool {
         labels(element).contains { $0 == controlName || $0.hasSuffix("/" + controlName) }
     }
     var controls = descendants.enumerated().compactMap { index, node -> (Int, AXNode)? in
         let role = string(node.element, "AXRole") ?? ""
         let roleMatches = operation == "select-element"
-            ? (role == "AXRow" || role == "AXCell")
+            ? (role == "AXRow" || role == "AXCell" || role == "AXTextField")
             : role == wantedRole
         let focusedMatch = operation == "set-focused-value-confirm" && (value(node.element, "AXFocused") as? Bool) == true
         let labelMatch = operation == "set-focused-value-confirm" ? focusedMatch : (controlName.isEmpty || labelMatches(node.element))
@@ -483,24 +483,29 @@ if operation == "press-control" || operation == "set-value" || operation == "set
         return roleMatches && labelMatch ? (index, node) : nil
     }
     if operation == "select-element", controls.isEmpty {
-        for (_, node) in descendants.enumerated() where
+        for (index, node) in descendants.enumerated() where
             ["AXStaticText", "AXTextField", "AXCell", "AXRow"].contains(string(node.element, "AXRole") ?? "") &&
             labelMatches(node.element) {
             var parent = node.parent
+            var foundSelectableAncestor = false
             while let parentIndex = parent {
                 let ancestor = descendants[parentIndex]
                 let role = string(ancestor.element, "AXRole") ?? ""
                 if role == "AXRow" || role == "AXCell" {
                     controls.append((parentIndex, ancestor))
+                    foundSelectableAncestor = true
                     break
                 }
                 parent = ancestor.parent
+            }
+            if !foundSelectableAncestor, string(node.element, "AXRole") == "AXTextField" {
+                controls.append((index, node))
             }
         }
     }
     guard controls.count == 1, let (_, controlNode) = controls.first else {
         let candidates = descendants.map { string($0.element, "AXRole") ?? "" }
-            .filter { $0 == "AXRow" || $0 == "AXCell" }
+            .filter { $0 == "AXRow" || $0 == "AXCell" || $0 == "AXTextField" }
         let locationNodes = descendants.compactMap { node -> String? in
             let role = string(node.element, "AXRole") ?? ""
             guard ["AXPopUpButton", "AXBrowser", "AXTextField", "AXOutline"].contains(role) else { return nil }
@@ -509,7 +514,7 @@ if operation == "press-control" || operation == "set-value" || operation == "set
         }.prefix(8)
         let rowNodes = descendants.compactMap { node -> String? in
             let role = string(node.element, "AXRole") ?? ""
-            guard ["AXRow", "AXCell", "AXStaticText"].contains(role) else { return nil }
+            guard ["AXRow", "AXCell", "AXStaticText", "AXTextField"].contains(role) else { return nil }
             let nodeLabels = labels(node.element).prefix(4).map { String($0.prefix(160)) }
             let parentRole = node.parent.map { string(descendants[$0].element, "AXRole") ?? "" } ?? "<root>"
             return "depth=\(node.depth); parent_role=\(parentRole); role=\(role); labels=\(nodeLabels)"
@@ -585,6 +590,45 @@ if operation == "press-control" || operation == "set-value" || operation == "set
     }
     if operation == "select-element" {
         let role = string(control, "AXRole") ?? ""
+        var rawAttributeNames: CFArray?
+        let attributeNamesError = AXUIElementCopyAttributeNames(control, &rawAttributeNames)
+        var rawActions: CFArray?
+        let actionsError = AXUIElementCopyActionNames(control, &rawActions)
+        var selectedSettable = DarwinBoolean(false)
+        let selectedSettableError = AXUIElementIsAttributeSettable(control, "AXSelected" as CFString, &selectedSettable)
+        var parentSummary: [String] = []
+        var parentIndex = controlNode.parent
+        while let index = parentIndex, parentSummary.count < 6 {
+            let parent = descendants[index]
+            let parentRole = string(parent.element, "AXRole") ?? "<unavailable>"
+            let parentName = titleOrDescription(parent.element)
+            parentSummary.append("\(parentRole):\(parentName)")
+            parentIndex = parent.parent
+        }
+        let browser = descendants.first { string($0.element, "AXRole") == "AXBrowser" }?.element
+        let browserSelectedSettable: String
+        var browserSelectedChildren: String = "<unavailable>"
+        if let browser {
+            var settable = DarwinBoolean(false)
+            let settableError = AXUIElementIsAttributeSettable(browser, "AXSelectedChildren" as CFString, &settable)
+            var rawSelectedChildren: CFTypeRef?
+            let selectedChildrenError = AXUIElementCopyAttributeValue(browser, "AXSelectedChildren" as CFString, &rawSelectedChildren)
+            if selectedChildrenError == .success {
+                browserSelectedChildren = String(describing: rawSelectedChildren)
+            } else {
+                browserSelectedChildren = "AXError:\(selectedChildrenError.rawValue)"
+            }
+            browserSelectedSettable = "\(settableError.rawValue):\(settable.boolValue)"
+        } else {
+            browserSelectedSettable = "unavailable"
+        }
+        print("DIRECT_AX_SELECT_TARGET role=\(role); name=\(titleOrDescription(control)); " +
+              "attributes_error=\(attributeNamesError.rawValue); attributes=\(rawAttributeNames as? [String] ?? []); " +
+              "actions_error=\(actionsError.rawValue); actions=\(rawActions as? [String] ?? []); " +
+              "selected=\(described(control, "AXSelected")); selected_settable=\(selectedSettableError.rawValue):\(selectedSettable.boolValue); " +
+              "parents=\(parentSummary); browser_selected_children=\(browserSelectedChildren); " +
+              "browser_selected_children_settable=\(browserSelectedSettable)")
+        fflush(stdout)
         AXUIElementSetMessagingTimeout(control, 1.0)
         let selectError = AXUIElementSetAttributeValue(control, "AXSelected" as CFString, kCFBooleanTrue)
         let selected = (value(control, "AXSelected") as? Bool) ?? false

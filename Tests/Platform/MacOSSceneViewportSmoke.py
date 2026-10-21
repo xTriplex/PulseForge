@@ -29,7 +29,18 @@ CAMERA_READY = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT;"
 STATE = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=STATE;"
 OBSERVATION_EXPIRED = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=OBSERVATION_EXPIRED;"
 FAILURE_MARKERS = ("MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=FAILED;",)
-EVIDENCE_MARKERS = (READY, DETACHED, CAMERA_READY, CAPTURED, CAMERA_DRAG_PASSED, REATTACHED, STATE, OBSERVATION_EXPIRED, *FAILURE_MARKERS)
+EVIDENCE_MARKERS = (
+    READY,
+    DETACHED,
+    CAMERA_READY,
+    CAPTURED,
+    CAMERA_DRAG_PASSED,
+    REATTACHED,
+    REATTACHED_INPUT,
+    STATE,
+    OBSERVATION_EXPIRED,
+    *FAILURE_MARKERS,
+)
 
 
 def marker_fields(line: str, marker: str) -> dict[str, str]:
@@ -150,8 +161,12 @@ def visible_camera_target(
     displays: list[dict[str, float | int | str]],
 ) -> tuple[dict[str, float | int | str], tuple[float, float], tuple[float, float], tuple[float, float]]:
     display, minimum, maximum = visible_camera_region(image_minimum, image_maximum, displays)
-    center = ((minimum[0] + maximum[0]) * 0.5, (minimum[1] + maximum[1]) * 0.5)
-    return display, minimum, maximum, center
+    # The orientation gizmo and information control occupy the image's upper-right
+    # overlay. Focus the image through a lower-left interior point instead.
+    inset_x = min(8.0, (maximum[0] - minimum[0]) * 0.25)
+    inset_y = min(8.0, (maximum[1] - minimum[1]) * 0.25)
+    target = (minimum[0] + inset_x, maximum[1] - inset_y)
+    return display, minimum, maximum, target
 
 
 def visible_drag_target(
