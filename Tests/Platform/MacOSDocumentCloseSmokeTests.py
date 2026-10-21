@@ -507,6 +507,23 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         ))
         self.assertIsNone(native_dialog.open_file_action_error(result + "\n" + result, "Selected Ω.pfproj"))
 
+    def test_open_file_confirm_action_requires_one_exact_axconfirm_result(self) -> None:
+        result = (
+            "DIRECT_AX_DISPATCH attempted=true; operation=confirm-element; target_pid=42; "
+            "role=AXTextField; name=Selected Ω.pfproj; advertised_action=AXConfirm\n"
+            "DIRECT_AX_RESULT status=confirm-element-action-returned; operation=confirm-element; "
+            "role=AXTextField; name=Selected Ω.pfproj; ax_error=0"
+        )
+        self.assertTrue(native_dialog.open_file_confirm_action_dispatched(result, "Selected Ω.pfproj"))
+        self.assertFalse(native_dialog.open_file_confirm_action_dispatched(result, "Other.pfproj"))
+        self.assertFalse(native_dialog.open_file_confirm_action_dispatched(
+            result.replace("advertised_action=AXConfirm", "advertised_action=AXOpen"), "Selected Ω.pfproj"
+        ))
+        self.assertFalse(native_dialog.open_file_confirm_action_dispatched(
+            result.replace("ax_error=0", "ax_error=not-an-integer"), "Selected Ω.pfproj"
+        ))
+        self.assertFalse(native_dialog.open_file_confirm_action_dispatched(result + "\n" + result, "Selected Ω.pfproj"))
+
     def test_go_to_folder_navigation_requires_exact_focused_path_and_dismissal(self) -> None:
         folder = Path("/Users/runner/_temp/Dialog Files Ω")
         visible = (

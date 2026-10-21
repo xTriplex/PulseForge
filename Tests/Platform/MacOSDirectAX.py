@@ -451,7 +451,7 @@ if operation == "snapshot" {
     exit(0)
 }
 if operation == "press-control" || operation == "set-value" || operation == "set-focused-value-confirm" ||
-    operation == "set-folder-path-value" || operation == "select-element" {
+    operation == "set-folder-path-value" || operation == "select-element" || operation == "confirm-element" {
     let wantedRole = operation == "press-control" ? "AXButton" :
         (operation == "set-value" || operation == "set-focused-value-confirm" ||
             operation == "set-folder-path-value")
@@ -463,7 +463,7 @@ if operation == "press-control" || operation == "set-value" || operation == "set
         let role = string(node.element, "AXRole") ?? ""
         let roleMatches = operation == "select-element"
             ? (role == "AXRow" || role == "AXCell" || role == "AXTextField")
-            : role == wantedRole
+            : operation == "confirm-element" ? role == "AXTextField" : role == wantedRole
         guard roleMatches else { return nil }
         let focusedMatch = operation == "set-focused-value-confirm" && (value(node.element, "AXFocused") as? Bool) == true
         let labelMatch = operation == "set-focused-value-confirm" ? focusedMatch : (controlName.isEmpty || labelMatches(node.element))
@@ -525,6 +525,25 @@ if operation == "press-control" || operation == "set-value" || operation == "set
         exit(8)
     }
     let control = controlNode.element
+    if operation == "confirm-element" {
+        var confirmActions: CFArray?
+        let confirmActionsError = AXUIElementCopyActionNames(control, &confirmActions)
+        let availableConfirmActions = confirmActions as? [String] ?? []
+        guard (string(control, "AXRole") ?? "") == "AXTextField",
+              confirmActionsError == .success, availableConfirmActions.contains("AXConfirm") else {
+            print("DIRECT_AX_RESULT status=confirm-element-error; reason=exact-text-field-does-not-advertise-AXConfirm; " +
+                  "name=\(titleOrDescription(control)); actions_error=\(confirmActionsError.rawValue); actions=\(availableConfirmActions)")
+            exit(12)
+        }
+        AXUIElementSetMessagingTimeout(control, 1.0)
+        print("DIRECT_AX_DISPATCH attempted=true; operation=confirm-element; target_pid=\(targetPID); " +
+              "role=AXTextField; name=\(titleOrDescription(control)); advertised_action=AXConfirm")
+        fflush(stdout)
+        let confirmError = AXUIElementPerformAction(control, "AXConfirm" as CFString)
+        print("DIRECT_AX_RESULT status=confirm-element-action-returned; operation=confirm-element; " +
+              "role=AXTextField; name=\(titleOrDescription(control)); ax_error=\(confirmError.rawValue)")
+        exit(confirmError == .success ? 0 : 13)
+    }
     if operation == "set-value" {
         let setError = AXUIElementSetAttributeValue(control, "AXValue" as CFString, controlValue as CFString)
         let observedValue = string(control, "AXValue") ?? "<unavailable>"

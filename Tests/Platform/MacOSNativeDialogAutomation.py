@@ -157,6 +157,41 @@ def open_file_action_error(output: str, expected_name: str) -> int | None:
     return ax_error
 
 
+def open_file_confirm_action_dispatched(output: str, expected_name: str) -> bool:
+    dispatches = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_DISPATCH attempted=true; operation=confirm-element;")
+    ]
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=confirm-element-action-returned; operation=confirm-element;")
+    ]
+    if len(dispatches) != 1 or len(results) != 1:
+        return False
+    dispatch_fields = dict(
+        part.split("=", 1) for part in dispatches[0].removeprefix("DIRECT_AX_DISPATCH ").split("; ") if "=" in part
+    )
+    result_fields = dict(
+        part.split("=", 1) for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ") if "=" in part
+    )
+    return (
+        dispatch_fields.get("role") == "AXTextField"
+        and dispatch_fields.get("name") == expected_name
+        and dispatch_fields.get("advertised_action") == "AXConfirm"
+        and result_fields.get("role") == "AXTextField"
+        and result_fields.get("name") == expected_name
+        and _is_integer(result_fields.get("ax_error", ""))
+    )
+
+
+def _is_integer(value: str) -> bool:
+    try:
+        int(value)
+        return True
+    except ValueError:
+        return False
+
+
 def navigate_open_panel_to_folder(fixture_pid: int, panel_title: str, folder: Path, deadline: float) -> str:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -816,29 +851,36 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                             int(panel_process_id), panel_title, expected_path.parent, helper_deadline
                         )
                         automation_output += navigation
-                        selection_code, selection_output = select_open_file(
-                            int(panel_process_id), panel_title, expected_path,
-                            timeout=max(0.1, helper_deadline - time.monotonic())
+                        confirm_code, confirm_output, confirm_error = run_direct_ax(
+                            int(panel_process_id),
+                            operation="confirm-element",
+                            window_title=panel_title,
+                            control_name=expected_path.name,
+                            timeout=min(8.0, max(0.1, helper_deadline - time.monotonic())),
                         )
-                        automation_code = selection_code
-                        automation_output += selection_output
-                        if open_file_action_dispatched(selection_output, expected_path.name):
+                        confirm_output += confirm_error
+                        automation_output += confirm_output
+                        automation_code = confirm_code
+                        if not open_file_confirm_action_dispatched(confirm_output, expected_path.name):
                             raise RuntimeError(
-                                "The exact file was still exposed only through unsupported AXOpen after Go to Folder; "
-                                "no second action was attempted."
-                            )
-                        if selection_code != 0 or not open_file_selection_ready(selection_output, expected_path.name):
-                            raise RuntimeError(
-                                f"Open-file row was not selected after Go to Folder; exit_code={selection_code}; "
-                                f"output={selection_output[-2400:]!r}"
+                                "The exact file did not expose one completed AXConfirm action after Go to Folder; "
+                                f"exit_code={confirm_code}; output={confirm_output[-2400:]!r}"
                             )
                         panel_state = wait_for_open_button(
                             int(panel_process_id), panel_title, helper_deadline
                         )
                         automation_output += panel_state
-                        open_button_confirmed = open_button_state_ready(
-                            panel_state, int(panel_process_id), panel_title
-                        )
+                        if open_panel_dismissed(panel_state, panel_title):
+                            last_open_step = "AXConfirm returned; Open panel dismissed and semantic result will be reconciled without replay"
+                        else:
+                            open_button_confirmed = open_button_state_ready(
+                                panel_state, int(panel_process_id), panel_title
+                            )
+                            if not open_button_confirmed:
+                                raise RuntimeError(
+                                    "AXConfirm was dispatched once, but neither Open readiness nor panel dismissal was observed; "
+                                    f"action_exit_code={confirm_code}; postcondition={panel_state[-2400:]!r}"
+                                )
                     elif state_code == 0 and open_button_state_ready(panel_state, int(panel_process_id), panel_title):
                         automation_output += panel_state
                         open_button_confirmed = True
