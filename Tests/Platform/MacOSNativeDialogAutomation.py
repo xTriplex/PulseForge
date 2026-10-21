@@ -140,6 +140,7 @@ def select_open_file(fixture_pid: int, panel_title: str, expected_path: Path, ti
     attempts = 0
     while time.monotonic() < deadline:
         attempts += 1
+        query_started = time.monotonic()
         code, output, error = run_direct_ax(
             fixture_pid,
             operation="select-element",
@@ -148,6 +149,16 @@ def select_open_file(fixture_pid: int, panel_title: str, expected_path: Path, ti
             timeout=min(6.0, max(0.1, deadline - time.monotonic())),
         )
         result = output + error
+        stage_lines = [line for line in result.splitlines() if line.startswith("DIRECT_AX_SELECT_STAGE ")]
+        print(
+            f"NFD_OPEN_FILE_SELECT_QUERY=attempt={attempts}; exit_code={code}; "
+            f"elapsed_seconds={time.monotonic() - query_started:.3f}; "
+            f"client_started={any(line.startswith('DIRECT_AX_CLIENT ') for line in result.splitlines())}; "
+            f"last_stage={stage_lines[-1] if stage_lines else 'none'}; "
+            f"dispatch_attempted={'DIRECT_AX_DISPATCH attempted=true' in result}; "
+            f"result={next((line for line in result.splitlines() if line.startswith('DIRECT_AX_RESULT ')), 'none')}",
+            flush=True,
+        )
         if code == 0 and "DIRECT_AX_RESULT status=selection-verified; operation=select-element;" in result:
             break
 
@@ -679,11 +690,10 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             last_navigation_step = "Go To Folder sheet dismissal observed"
             print("NFD_GO_TO_FOLDER_SHEET=DISMISSED", flush=True)
             select_open_file(
-                int(panel_process_id), panel_title, expected_path, timeout=min(10.0, remaining_seconds())
+                int(panel_process_id), panel_title, expected_path,
+                timeout=max(0.1, helper_deadline - time.monotonic())
             )
-            automation_output = wait_for_open_button(
-                int(panel_process_id), panel_title, min(deadline, time.monotonic() + 15.0)
-            )
+            automation_output = wait_for_open_button(int(panel_process_id), panel_title, helper_deadline)
         except (OSError, RuntimeError) as error:
             observation_log = log_path.with_name(f"native-dialog-{scenario}-navigation-failure.log")
             capture_waiting_observation(process.pid, scenario, observation_log, after_interaction_failure=True)

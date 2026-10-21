@@ -249,10 +249,12 @@ namespace
 		Observation.OwnerViewportID = 2;
 		Observation.OwnerWindow = 0x2000;
 		Observation.OwnerFocused = true;
+		Observation.ImGuiMousePosition = { 101.0f, 202.0f };
 		Observation.ImGuiTime = 0.1;
 		PF_CHECK(Tests, Coordinator.Observe(Observation).has_value());
 		const auto InitialState = Coordinator.ObserveState(Observation);
-		PF_CHECK(Tests, InitialState && InitialState->find("sequence=1") != std::string::npos);
+		PF_CHECK(Tests, InitialState && InitialState->find("sequence=1") != std::string::npos &&
+			InitialState->find("imgui_mouse=101.0000,202.0000") != std::string::npos);
 
 		std::string LastState;
 		for (int Index = 1; Index <= 105; ++Index)

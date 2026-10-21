@@ -718,6 +718,7 @@ namespace PulseForgeEditor::Detail
 			   << "; focused=" << Observation.OwnerFocused << "; capture=" << Observation.CameraCaptureActive
 			   << "; keyboard_focused=" << Observation.ViewportKeyboardFocused
 			   << "; image_hovered=" << Observation.ImageHovered << "; scene_image_ready=" << Observation.SceneImageReady
+			   << "; imgui_mouse=" << Observation.ImGuiMousePosition[0] << ',' << Observation.ImGuiMousePosition[1]
 			   << "; hovered_viewport=" << Observation.ImGuiHoveredViewportID << "; cursor_mode=" << Observation.CursorMode
 			   << "; raw_motion_supported=" << Observation.RawMotionSupported << "; raw_motion_enabled=" << Observation.RawMotionEnabled
 			   << "; camera_position=" << Observation.CameraPosition[0] << ',' << Observation.CameraPosition[1] << ','
