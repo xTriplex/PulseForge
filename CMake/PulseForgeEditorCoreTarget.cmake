@@ -28,13 +28,19 @@ if(PULSEFORGE_BUILD_EDITOR OR (BUILD_TESTING AND NOT PULSEFORGE_PLATFORM_LINUX))
 		PulseForgeEditor/Source/Private/EditorViewportCamera.cpp
 		PulseForgeEditor/Source/Private/ViewportMath.cpp
 		PulseForgeEditor/Source/Private/EditorCommandLine.cpp
+		$<$<CONFIG:Debug>:PulseForgeEditor/Source/Private/EditorDebugAcceptanceCoordinators.cpp>
 	)
 	if(WIN32)
 		target_sources(PulseForgeEditorCore PRIVATE
 			PulseForgeEditor/Source/Private/Platform/Windows/EditorPlatformFileSystem.cpp)
-	else()
+	elseif(PULSEFORGE_PLATFORM_LINUX)
 		target_sources(PulseForgeEditorCore PRIVATE
 			PulseForgeEditor/Source/Private/Platform/Linux/EditorPlatformFileSystem.cpp)
+	elseif(PULSEFORGE_PLATFORM_MACOS)
+		target_sources(PulseForgeEditorCore PRIVATE
+			PulseForgeEditor/Source/Private/Platform/MacOS/EditorPlatformFileSystem.cpp)
+	else()
+		message(FATAL_ERROR "No EditorPlatformFileSystem implementation is available for this target platform.")
 	endif()
 	target_include_directories(PulseForgeEditorCore
 		PUBLIC PulseForgeEditor/Source/Public

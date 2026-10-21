@@ -21,7 +21,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 	target_link_libraries(PulseForgeGpuValidation PRIVATE PulseForge PulseForgeGpuValidationAnalysis)
 	add_dependencies(PulseForgeGpuValidation PulseForgeGpuValidationShaders PulseForgeSceneShaderAssets)
 	set_property(TARGET PulseForgeGpuValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGpuValidation>")
-	if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
+	if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF OR PULSEFORGE_BUILD_MACOS_DESKTOP)
 		target_compile_definitions(PulseForgeSceneRenderer PRIVATE PULSEFORGE_GPU_VALIDATION_TESTS)
 		add_executable(PulseForgeMacOSRendererValidation
 			Tests/GpuValidation/MacOSRendererValidation.cpp
@@ -36,8 +36,13 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 			PF_MACOS_RENDERER_SCENE_SHADER_DIRECTORY="${PULSEFORGE_SHADER_OUTPUT_DIR}"
 			PF_MACOS_RENDERER_EDITOR_SHADER_DIRECTORY="${PULSEFORGE_EDITOR_SHADER_OUTPUT_DIR}"
 			PF_MACOS_RENDERER_PROJECT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/PBRMaterials/PBRMaterials.pfproj")
-		target_link_libraries(PulseForgeMacOSRendererValidation PRIVATE
-			PulseForge PulseForgeSceneRenderer PulseForgeEditorImGuiProofRenderer PulseForgeImGui glfw)
+		if(PULSEFORGE_BUILD_EDITOR)
+			target_link_libraries(PulseForgeMacOSRendererValidation PRIVATE
+				PulseForge PulseForgeSceneRenderer PulseForgeEditorUI PulseForgeImGui glfw)
+		else()
+			target_link_libraries(PulseForgeMacOSRendererValidation PRIVATE
+				PulseForge PulseForgeSceneRenderer PulseForgeEditorImGuiProofRenderer PulseForgeImGui glfw)
+		endif()
 		add_dependencies(PulseForgeMacOSRendererValidation PulseForgeSceneShaderAssets PulseForgeEditorShaderAssets)
 		set_property(TARGET PulseForgeMacOSRendererValidation PROPERTY VS_DEBUGGER_WORKING_DIRECTORY
 			"$<TARGET_FILE_DIR:PulseForgeMacOSRendererValidation>")
@@ -73,7 +78,7 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 		add_test(NAME PulseForge.GPU.PresentationFenceNativeLifetime
 			CONFIGURATIONS Debug
 			COMMAND PulseForgeGpuValidation --presentation-fence-native-lifetime)
-		if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
+		if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF OR PULSEFORGE_BUILD_MACOS_DESKTOP)
 			foreach(RendererPolicy IN ITEMS auto require-fences)
 				string(REPLACE "-" "_" RendererPolicyTestSuffix "${RendererPolicy}")
 				add_test(NAME "PulseForge.GPU.MacOSRenderer.${RendererPolicyTestSuffix}"

@@ -9,6 +9,11 @@ project(PulseForge LANGUAGES C CXX)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeSourceLayout.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeOptions.cmake")
+if(PULSEFORGE_PLATFORM_MACOS AND PULSEFORGE_BUILD_EDITOR)
+	# NativeFileDialog's Cocoa source needs Objective-C's compiler rules during
+	# generation. Keep this language initialization in the top-level directory.
+	enable_language(OBJC)
+endif()
 include(CTest)
 if(BUILD_TESTING)
 	add_test(NAME PulseForge.SourceLayout

@@ -8,6 +8,9 @@ target_include_directories(PulseForgeWindow
 )
 target_compile_definitions(PulseForgeWindow PRIVATE ${PULSEFORGE_PLATFORM_COMPILE_DEFINITION} GLFW_INCLUDE_NONE)
 target_link_libraries(PulseForgeWindow PUBLIC PulseForgeCore PRIVATE glfw spdlog::spdlog)
+if(PULSEFORGE_PLATFORM_MACOS)
+	target_link_libraries(PulseForgeWindow PRIVATE Vulkan-Headers)
+endif()
 add_library(PulseForgeScene STATIC
 	PulseForge/Source/Private/Scene/CameraComponent.cpp
 	PulseForge/Source/Private/Scene/Components/AudioSourceComponent.cpp

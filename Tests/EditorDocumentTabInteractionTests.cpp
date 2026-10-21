@@ -24,6 +24,10 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	PF_CHECK(Tests, AfterMidpoint && AfterMidpoint->HostID == "main" && AfterMidpoint->Index == 1);
 	PF_CHECK(Tests, !Interaction.FindDropTarget({ 90.0f, 20.0f }, 11));
 	PF_CHECK(Tests, !Interaction.FindDropTarget({ 110.0f, 20.0f }, 10));
+	PF_CHECK(Tests, !IsDocumentTabReleaseOverMainViewport(10, 11, true, true));
+	PF_CHECK(Tests, IsDocumentTabReleaseOverMainViewport(10, 10, true, false));
+	PF_CHECK(Tests, IsDocumentTabReleaseOverMainViewport(10, 0, true, true));
+	PF_CHECK(Tests, !IsDocumentTabReleaseOverMainViewport(10, 0, false, false));
 
 	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
 	EditorDocumentTabDragFrame DragFrame;
@@ -53,9 +57,74 @@ void RunEditorDocumentTabInteractionTests(TestRunner& Tests)
 	DragFrame.HoveredViewportID = 10;
 	DragFrame.LeftButtonReleased = true;
 	DragFrame.LeftButtonDown = false;
-	const auto EditorBodyRelease = Interaction.UpdateDrag(DragFrame);
-	PF_CHECK(Tests, EditorBodyRelease && EditorBodyRelease->Action == DocumentTabReleaseAction::CreateNativeHost);
-	PF_CHECK(Tests, EditorBodyRelease && !EditorBodyRelease->DropLocation);
+	DragFrame.ReleaseOverMainEditorViewport = true;
+	const auto UtilityPanelRelease = Interaction.UpdateDrag(DragFrame);
+	PF_CHECK(Tests, UtilityPanelRelease && UtilityPanelRelease->Action == DocumentTabReleaseAction::None);
+	PF_CHECK(Tests, UtilityPanelRelease && !UtilityPanelRelease->DropLocation);
+
+	Interaction.BeginFrame();
+	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
+	DragFrame = {};
+	DragFrame.LeftButtonDown = true;
+	DragFrame.PointerPosition = { 20.0f, 20.0f };
+	DragFrame.HoveredViewportID = 10;
+	DragFrame.DragThreshold = 6.0f;
+	DragFrame.SourceIsNativeHost = true;
+	PF_CHECK(Tests, !Interaction.UpdateDrag(DragFrame));
+	DragFrame.LeftButtonDown = false;
+	DragFrame.LeftButtonReleased = true;
+	DragFrame.PointerPosition = { 180.0f, 120.0f };
+	DragFrame.ReleaseOverMainEditorViewport = true;
+	const auto NativeHostUtilityRelease = Interaction.UpdateDrag(DragFrame);
+	PF_CHECK(Tests, NativeHostUtilityRelease && NativeHostUtilityRelease->Action == DocumentTabReleaseAction::None);
+
+	Interaction.BeginFrame();
+	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
+	DragFrame.LeftButtonDown = true;
+	DragFrame.LeftButtonReleased = false;
+	DragFrame.PointerPosition = { 180.0f, 120.0f };
+	DragFrame.HoveredViewportID = 11;
+	DragFrame.ReleaseOverMainEditorViewport = IsDocumentTabReleaseOverMainViewport(10, 11, true, true);
+	PF_CHECK(Tests, !Interaction.UpdateDrag(DragFrame));
+	DragFrame.LeftButtonDown = false;
+	DragFrame.LeftButtonReleased = true;
+	const auto OverlappingNativeRelease = Interaction.UpdateDrag(DragFrame);
+	PF_CHECK(Tests, OverlappingNativeRelease &&
+		OverlappingNativeRelease->Action == DocumentTabReleaseAction::CreateNativeHost);
+
+	Interaction.BeginFrame();
+	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
+	DragFrame = {};
+	DragFrame.LeftButtonDown = true;
+	DragFrame.PointerPosition = { 20.0f, 20.0f };
+	DragFrame.HoveredViewportID = 10;
+	DragFrame.DragThreshold = 6.0f;
+	DragFrame.SourceIsMainHost = true;
+	PF_CHECK(Tests, !Interaction.UpdateDrag(DragFrame));
+	DragFrame.PointerPosition = { 1200.0f, 120.0f };
+	DragFrame.ReleaseOverMainEditorViewport = IsDocumentTabReleaseOverMainViewport(10, 10, true, false);
+	PF_CHECK(Tests, DragFrame.ReleaseOverMainEditorViewport);
+	DragFrame.LeftButtonDown = false;
+	DragFrame.LeftButtonReleased = true;
+	const auto MainViewportReportedOutsideRelease = Interaction.UpdateDrag(DragFrame);
+	PF_CHECK(Tests, MainViewportReportedOutsideRelease &&
+						MainViewportReportedOutsideRelease->Action == DocumentTabReleaseAction::None);
+
+	Interaction.BeginDrag(Material, DocumentTabPointerPosition{ 20.0f, 20.0f }, { 20.0f, 20.0f });
+	DragFrame = {};
+	DragFrame.LeftButtonDown = true;
+	DragFrame.PointerPosition = { 20.0f, 20.0f };
+	DragFrame.HoveredViewportID = 10;
+	DragFrame.DragThreshold = 6.0f;
+	DragFrame.SourceIsMainHost = true;
+	PF_CHECK(Tests, !Interaction.UpdateDrag(DragFrame));
+	DragFrame.LeftButtonDown = false;
+	DragFrame.LeftButtonReleased = true;
+	DragFrame.PointerPosition = { 1200.0f, 120.0f };
+	DragFrame.HoveredViewportID = 0;
+	DragFrame.ReleaseOverMainEditorViewport = IsDocumentTabReleaseOverMainViewport(10, 0, true, false);
+	const auto OutsideWindowRelease = Interaction.UpdateDrag(DragFrame);
+	PF_CHECK(Tests, OutsideWindowRelease && OutsideWindowRelease->Action == DocumentTabReleaseAction::CreateNativeHost);
 
 	EditorDocumentTransferRequest FirstRequest{ Material, "main", 1, false, std::nullopt };
 	PF_CHECK(Tests, Interaction.QueueTransfer(FirstRequest));

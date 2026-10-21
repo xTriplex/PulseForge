@@ -3,6 +3,16 @@ name: Portable editor CPU CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      validation_mode:
+        description: Select focused automation-probe validation or the complete acceptance matrix
+        type: choice
+        options:
+          - full
+          - automation-probe-only
+        default: full
+        required: true
 
 permissions:
   contents: read
@@ -12,20 +22,138 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  macos-core:
-    name: macOS 26 · Apple Silicon · PulseForge Vulkan/MoltenVK renderer proof
+  macos-automation-bridge:
+    name: macOS · JXA permission bridge probe
     runs-on: macos-26
-    timeout-minutes: 90
+    timeout-minutes: 10
     steps:
       - name: Check out sources
+        uses: actions/checkout@v5
+
+      - name: Test the automation harness and permission bridge contract
+        run: python3 Tests/Platform/MacOSDocumentCloseSmokeTests.py
+
+      - name: Compile the direct Accessibility client before the engine build
+        run: |
+          set -euo pipefail
+          AX_SOURCE="$RUNNER_TEMP/PulseForgeDirectAX.swift"
+          AX_OBJECT="$RUNNER_TEMP/PulseForgeDirectAX.o"
+          PYTHONPATH=Tests/Platform python3 - "$AX_SOURCE" <<'PY'
+          from pathlib import Path
+          import sys
+          from MacOSDirectAX import SWIFT_AX_OPERATION
+
+          Path(sys.argv[1]).write_text(SWIFT_AX_OPERATION, encoding="utf-8")
+          PY
+          xcrun swiftc -emit-object -sdk "$(xcrun --show-sdk-path)" "$AX_SOURCE" -o "$AX_OBJECT" \
+            2>&1 | tee "$RUNNER_TEMP/macos-direct-ax-client-build.log"
+          test -s "$AX_OBJECT"
+          echo "PULSEFORGE_DIRECT_AX_CLIENT=COMPILED; runtime trust and operations are checked in the desktop job"
+
+      - name: Compile the embedded Quartz helper and reject malformed calls
+        run: |
+          set -euo pipefail
+          POINTER_SOURCE="$RUNNER_TEMP/PulseForgePointerInput.swift"
+          POINTER_EXECUTABLE="$RUNNER_TEMP/PulseForgePointerInput"
+          PYTHONPATH=Tests/Platform python3 - "$POINTER_SOURCE" <<'PY'
+          from pathlib import Path
+          import sys
+          from MacOSDocumentCloseSmoke import POINTER_DRIVER_SOURCE
+
+          Path(sys.argv[1]).write_text(POINTER_DRIVER_SOURCE, encoding="utf-8")
+          PY
+          xcrun swiftc -O "$POINTER_SOURCE" -framework AppKit -framework CoreGraphics -o "$POINTER_EXECUTABLE" \
+            2>&1 | tee "$RUNNER_TEMP/macos-pointer-driver-build.log"
+          for arguments in '123 invalid 20 20' '123 0123456789abcdef0123456789abcdef not-a-coordinate 20' \
+            '--go-to-folder 123 invalid' '--press-return 123 invalid' '--type-text 123 invalid Ω'; do
+            set +e
+            "$POINTER_EXECUTABLE" $arguments > "$RUNNER_TEMP/macos-pointer-driver-invalid.log" 2>&1
+            status=$?
+            set -e
+            if [[ $status -ne 2 ]] || grep -q 'CGEventPost=' "$RUNNER_TEMP/macos-pointer-driver-invalid.log"; then
+              cat "$RUNNER_TEMP/macos-pointer-driver-invalid.log"
+              echo "Malformed Quartz helper input was not rejected before event posting: status=$status" >&2
+              exit 1
+            fi
+            cat "$RUNNER_TEMP/macos-pointer-driver-invalid.log"
+          done
+          echo "PULSEFORGE_QUARTZ_POINTER_HELPER=COMPILED; invalid_inputs=rejected_without_posting"
+
+      - name: Build and import the private framework in osascript
+        run: |
+          set -o pipefail
+          source Tests/Platform/BuildMacOSAutomationPermissionBridge.sh
+          python3 Tests/Platform/MacOSAutomationClient.py 2>&1 |
+            tee "$RUNNER_TEMP/macos-automation-permission-probe.log"
+
+      - name: Upload compact bridge diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-automation-bridge-evidence
+          path: |
+            ${{ runner.temp }}/macos-automation-permission-bridge-build.log
+            ${{ runner.temp }}/macos-automation-permission-probe.log
+            ${{ runner.temp }}/macos-pointer-driver-build.log
+            ${{ runner.temp }}/macos-pointer-driver-invalid.log
+            ${{ runner.temp }}/macos-direct-ax-client-build.log
+            ${{ runner.temp }}/PFAutomationPermission.framework/Versions/A/Resources/BridgeSupport/PFAutomationPermission.bridgesupport
+          if-no-files-found: ignore
+          retention-days: 1
+
+  macos-desktop:
+    name: macOS 26 · Apple Silicon · PulseForge Vulkan/MoltenVK desktop
+    runs-on: macos-26
+    timeout-minutes: 90
+    needs: macos-automation-bridge
+    if: ${{ always() && !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && !contains(github.event.head_commit.message || '', '[automation-probe-only]') }}
+    steps:
+      - name: Check out sources
+        id: checkout_sources
         uses: actions/checkout@v5
         with:
           submodules: recursive
 
+      - name: Build the Quartz input client in the desktop job
+        id: desktop_pointer_client
+        if: ${{ always() && !cancelled() && steps.checkout_sources.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          POINTER_SOURCE="$RUNNER_TEMP/PulseForgePointerInput.swift"
+          POINTER_EXECUTABLE="$RUNNER_TEMP/PulseForgePointerInput"
+          PYTHONPATH=Tests/Platform python3 - "$POINTER_SOURCE" <<'PY'
+          from pathlib import Path
+          import sys
+          from MacOSDocumentCloseSmoke import POINTER_DRIVER_SOURCE
+
+          Path(sys.argv[1]).write_text(POINTER_DRIVER_SOURCE, encoding="utf-8")
+          PY
+          xcrun swiftc -O "$POINTER_SOURCE" -framework AppKit -framework CoreGraphics -o "$POINTER_EXECUTABLE" \
+            2>&1 | tee "$RUNNER_TEMP/macos-desktop-pointer-driver-build.log"
+          test -x "$POINTER_EXECUTABLE"
+          echo "PULSEFORGE_DESKTOP_QUARTZ_HELPER=COMPILED; path=$POINTER_EXECUTABLE"
+
+      - name: Test dirty-close automation protocol and bounded output capture
+        id: dirty_close_harness_tests
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSDocumentCloseSmokeTests.py 2>&1 | tee "$RUNNER_TEMP/macos-document-close-harness-tests.log"
+
+      - name: Build and diagnose the same-process macOS automation permission bridge
+        id: macos_automation_permission_probe
+        if: ${{ always() && !cancelled() && steps.checkout_sources.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          source Tests/Platform/BuildMacOSAutomationPermissionBridge.sh
+          python3 Tests/Platform/MacOSAutomationClient.py 2>&1 | tee "$RUNNER_TEMP/macos-automation-permission-probe.log"
+
       - name: Probe hosted Metal command execution
+        if: ${{ always() && !cancelled() && steps.checkout_sources.outcome == 'success' }}
         run: swift Tests/Platform/MacOSMetalCapabilityProbe.swift
 
       - name: Install the official Vulkan SDK in the runner temp directory
+        id: install_vulkan_sdk
+        if: ${{ always() && !cancelled() && steps.checkout_sources.outcome == 'success' }}
         run: |
           set -o pipefail
           SDK_VERSION=1.4.350.0
@@ -50,6 +178,7 @@ jobs:
           "$DXC_EXECUTABLE" --version | tee -a "$RUNNER_TEMP/apple-toolchain.log"
 
       - name: Probe the selected MoltenVK device and capabilities
+        if: ${{ always() && !cancelled() && steps.install_vulkan_sdk.outcome == 'success' }}
         run: |
           set -o pipefail
           "$VULKAN_SDK/bin/vulkaninfo" --summary 2>&1 | tee "$RUNNER_TEMP/vulkaninfo-summary.log"
@@ -57,33 +186,67 @@ jobs:
           grep -Ei 'deviceName|deviceType|apiVersion|driverVersion|VK_KHR_portability_(enumeration|subset)|VK_KHR_swapchain|VK_KHR_dynamic_rendering|VK_KHR_synchronization2|VK_EXT_metal_surface|swapchainMaintenance1|timelineSemaphore|dynamicRendering|synchronization2|shaderDemoteToHelperInvocation|D32|depth' \
             "$RUNNER_TEMP/vulkaninfo-full.log" | tee "$RUNNER_TEMP/moltenvk-capabilities.log"
 
-      - name: Configure the explicit PulseForge macOS Vulkan renderer proof
+      - name: Configure the supported PulseForge macOS desktop targets
+        id: configure_desktop_targets
+        if: ${{ always() && !cancelled() && steps.checkout_sources.outcome == 'success' && steps.install_vulkan_sdk.outcome == 'success' }}
         run: |
           set -o pipefail
           cmake -S . -B Build/CI/macos-renderer -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DBUILD_TESTING=ON \
-            -DPULSEFORGE_ENABLE_MACOS_VULKAN_PROOF=ON \
-            -DPULSEFORGE_BUILD_CORE_ONLY=OFF \
-            -DPULSEFORGE_BUILD_EDITOR=OFF \
+            -DPULSEFORGE_BUILD_MACOS_DESKTOP=ON \
+            -DPULSEFORGE_BUILD_EDITOR=ON \
             -DPULSEFORGE_BUILD_GPU_VALIDATION_TESTS=ON \
             -DPULSEFORGE_DXC_EXECUTABLE="$PULSEFORGE_DXC_EXECUTABLE" \
             -DFETCHCONTENT_BASE_DIR="$GITHUB_WORKSPACE/Build/CI/Dependencies" 2>&1 |
             tee "$RUNNER_TEMP/macos-configure.log"
 
-      - name: Build Core checks and the PulseForge renderer proof
+      - name: Build tests, editor, player and renderer fixture
+        id: build_desktop_targets
+        if: ${{ always() && !cancelled() && steps.configure_desktop_targets.outcome == 'success' }}
         run: |
           set -o pipefail
           cmake --build Build/CI/macos-renderer --parallel --target \
-            PulseForgeCoreTests PulseForgeCoreConsumer PulseForgeMacOSRendererValidation 2>&1 |
+            PulseForgeTests PulseForgeEditor PulseForgeGame PulseForgeMacOSRendererValidation \
+            PulseForgeNativeDialogValidation 2>&1 |
             tee "$RUNNER_TEMP/macos-build.log"
 
-      - name: Run Core CPU tests and the required PulseForge renderer proof
+      - name: Inspect loader lifecycle executable dependencies before environment isolation
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          LIFECYCLE_EXECUTABLE="$GITHUB_WORKSPACE/Build/CI/macos-renderer/PulseForgeMacOSVulkanLoaderLifecycleValidation"
+          otool -L "$LIFECYCLE_EXECUTABLE" | tee "$RUNNER_TEMP/macos-loader-lifecycle-otool.log"
+          if grep -E 'libvulkan|MoltenVK' "$RUNNER_TEMP/macos-loader-lifecycle-otool.log"; then
+            echo "The lifecycle test has a startup dependency on the Vulkan SDK; its sanitized child would fail before main." >&2
+            exit 1
+          fi
+          for LOADER in "$VULKAN_SDK/lib/libvulkan.1.dylib" "$VULKAN_SDK/lib/libvulkan.dylib"; do
+            if [ -e "$LOADER" ]; then
+              otool -L "$LOADER" | tee -a "$RUNNER_TEMP/macos-loader-lifecycle-otool.log"
+            fi
+          done
+
+      - name: Run registered macOS CPU and editor tests
+        id: macos_cpu_validation
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          ctest --test-dir Build/CI/macos-renderer --output-on-failure --verbose -LE 'gpu|policy' 2>&1 |
+            tee "$RUNNER_TEMP/macos-cpu-ctest.log"
+          grep -q 'MACOS_VULKAN_LOADER_SANITIZED_ENV=PASS' "$RUNNER_TEMP/macos-cpu-ctest.log"
+          grep -q 'MACOS_VULKAN_LOADER_EMPTY_SDK_FAILURE=PASS' "$RUNNER_TEMP/macos-cpu-ctest.log"
+          grep -q 'MACOS_VULKAN_LOADER_VALID_SDK=PASS' "$RUNNER_TEMP/macos-cpu-ctest.log"
+          grep -q 'MACOS_VULKAN_LOADER_LIFECYCLE=PASS' "$RUNNER_TEMP/macos-cpu-ctest.log"
+          grep -q 'MACOS_VULKAN_RUNTIME_MISMATCH_POLICY=PASS' "$RUNNER_TEMP/macos-cpu-ctest.log"
+
+      - name: Run the required PulseForge renderer policy and sensitivity fixtures
+        id: macos_renderer_validation
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
         run: |
           set -o pipefail
           ctest --test-dir Build/CI/macos-renderer --output-on-failure --verbose \
-            -R 'PulseForge\.(Core|CoreConsumer|GPU\.MacOSRenderer)' 2>&1 |
-            tee "$RUNNER_TEMP/macos-renderer-ctest.log"
+            -R '^PulseForge\.GPU\.MacOSRenderer' 2>&1 | tee "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'Vulkan validation layer enabled' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'NVRHI validation layer enabled' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'Selected Vulkan GPU:' "$RUNNER_TEMP/macos-renderer-ctest.log"
@@ -91,6 +254,7 @@ jobs:
           grep -q 'MACOS_RENDERER_IMGUI_SUBMISSION=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'MACOS_RENDERER_READBACK=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'MACOS_RENDERER_NATIVE_RESIZE=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
+          grep -q 'MACOS_RENDERER_WINDOW_SCALE=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'MACOS_RENDERER_ORDERLY_SHUTDOWN=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'MACOS_RENDERER_POLICY=auto; RESULT=RENDERED_AND_VALIDATED' "$RUNNER_TEMP/macos-renderer-ctest.log"
           grep -q 'MACOS_RENDERER_SENSITIVITY=suppress-geometry; EXPECTED_ASSERTION_FAILURE=PASS' "$RUNNER_TEMP/macos-renderer-ctest.log"
@@ -107,12 +271,191 @@ jobs:
             exit 1
           fi
 
+      - name: Run relocated editor and player bundle smokes from unrelated working directories
+        id: macos_bundle_smoke
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSBundleSmoke.py \
+            --editor-bundle Build/CI/macos-renderer/PulseForgeEditor.app \
+            --editor-project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
+            --player-bundle Build/CI/macos-renderer/PulseForgeGame.app \
+            --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 180 2>&1 | tee "$RUNNER_TEMP/macos-bundle-smoke.log"
+
+      - name: Exercise editor Play and Stop through the production runtime transition
+        id: macos_editor_runtime_play_stop
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSEditorRuntimePlayStopSmoke.py \
+            --editor Build/CI/macos-renderer/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor \
+            --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
+            --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-editor-runtime-play-stop-smoke.log"
+
+      - name: Verify native document hosts and synthetic tab reattachment
+        id: macos_document_hosts
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSDocumentHostSmoke.py \
+            --editor Build/CI/macos-renderer/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor \
+            --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
+            --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 300 2>&1 | tee "$RUNNER_TEMP/macos-document-host-smoke.log"
+
+      - name: Exercise real Cocoa Open and Save dialogs with Accessibility automation
+        id: macos_native_dialogs
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSNativeDialogAutomation.py \
+            --fixture Build/CI/macos-renderer/PulseForgeNativeDialogValidation \
+            --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 180 2>&1 | tee "$RUNNER_TEMP/macos-native-dialog-automation.log"
+
+      - name: Verify native document host workspace restoration across editor restarts
+        id: macos_workspace_restore
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSWorkspaceRestoreSmoke.py \
+            --editor Build/CI/macos-renderer/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor \
+            --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
+            --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-workspace-restore-smoke.log"
+
+      - name: Exercise dirty native document close decisions and recovery
+        id: macos_document_close
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' && steps.dirty_close_harness_tests.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSDocumentCloseSmoke.py \
+            --editor Build/CI/macos-renderer/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor \
+            --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
+            --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-document-close-smoke.log"
+
+      - name: Repeat intermittent dirty-close retry cases serially
+        if: ${{ always() && !cancelled() && steps.macos_document_close.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/macos-document-close-focused-repeat"
+          python3 Tests/Platform/MacOSDocumentCloseSmoke.py \
+            --editor Build/CI/macos-renderer/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor \
+            --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
+            --log-directory "$RUNNER_TEMP/macos-document-close-focused-repeat" \
+            --timeout-seconds 240 \
+            --scenario cancel-save \
+            --scenario discard \
+            --scenario save-retry \
+            --scenario close-retry 2>&1 | tee "$RUNNER_TEMP/macos-document-close-focused-repeat.log"
+
+      - name: Build Release and Dist editor consumers and verify Debug fixture exclusion
+        if: ${{ always() && !cancelled() && steps.configure_desktop_targets.outcome == 'success' && steps.build_desktop_targets.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          DEBUG_OBJECT_DIR="Build/CI/macos-renderer/CMakeFiles/PulseForgeEditorCore.dir"
+          if [ ! -d "$DEBUG_OBJECT_DIR" ]; then
+            echo "Debug editor-core object directory is missing: $DEBUG_OBJECT_DIR" >&2
+            exit 1
+          fi
+          if ! find "$DEBUG_OBJECT_DIR" -name 'EditorDebugAcceptanceCoordinators.cpp.o' -print -quit | grep -q .; then
+            echo "Debug coordinator object was not produced under $DEBUG_OBJECT_DIR" >&2
+            exit 1
+          fi
+          DEBUG_EDITOR_OBJECT_DIR="Build/CI/macos-renderer/CMakeFiles/PulseForgeEditor.dir"
+          if ! find "$DEBUG_EDITOR_OBJECT_DIR" -name 'MacOSDocumentCloseEventObserver.m.o' -print -quit | grep -q .; then
+            echo "Debug Cocoa event observer object was not produced under $DEBUG_EDITOR_OBJECT_DIR" >&2
+            exit 1
+          fi
+          for CONFIGURATION in Release Dist; do
+            CONFIGURATION_LOWER="$(printf '%s' "$CONFIGURATION" | tr '[:upper:]' '[:lower:]')"
+            BUILD_DIR="Build/CI/macos-$CONFIGURATION_LOWER"
+            cmake -S . -B "$BUILD_DIR" -G Ninja \
+              -DCMAKE_BUILD_TYPE="$CONFIGURATION" \
+              -DBUILD_TESTING=ON \
+              -DPULSEFORGE_BUILD_MACOS_DESKTOP=ON \
+              -DPULSEFORGE_BUILD_EDITOR=ON \
+              -DPULSEFORGE_BUILD_GPU_VALIDATION_TESTS=OFF \
+              -DPULSEFORGE_DXC_EXECUTABLE="$PULSEFORGE_DXC_EXECUTABLE" \
+              -DFETCHCONTENT_BASE_DIR="$GITHUB_WORKSPACE/Build/CI/Dependencies" \
+              -DFETCHCONTENT_FULLY_DISCONNECTED=OFF 2>&1 |
+              tee "$RUNNER_TEMP/macos-configure-$CONFIGURATION_LOWER.log"
+            cmake --build "$BUILD_DIR" --parallel --target \
+              PulseForgeEditor PulseForgeGame PulseForgeEditorCoreConsumer PulseForgeEditorTests 2>&1 |
+              tee "$RUNNER_TEMP/macos-build-$CONFIGURATION_LOWER.log"
+            EDITOR="$GITHUB_WORKSPACE/$BUILD_DIR/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor"
+            if [ ! -d "$BUILD_DIR/CMakeFiles/PulseForgeEditorCore.dir" ] || [ ! -x "$EDITOR" ]; then
+              echo "Expected $CONFIGURATION editor target outputs are missing: $BUILD_DIR" >&2
+              exit 1
+            fi
+            if find "$BUILD_DIR/CMakeFiles/PulseForgeEditorCore.dir" -name 'EditorDebugAcceptanceCoordinators.cpp.o' -print -quit | grep -q .; then
+              echo "Debug-only coordinator was compiled for $CONFIGURATION" >&2
+              exit 1
+            fi
+            if find "$BUILD_DIR/CMakeFiles/PulseForgeEditor.dir" -name 'MacOSDocumentCloseEventObserver.m.o' -print -quit | grep -q .; then
+              echo "Debug-only Cocoa event observer was compiled for $CONFIGURATION" >&2
+              exit 1
+            fi
+            for FIXTURE_ARGS in "--editor-runtime-play-stop-test" "--document-host-close-ui-test cancel-save"; do
+              LOG="$RUNNER_TEMP/macos-fixture-rejection-$CONFIGURATION_LOWER-$(printf '%s' "$FIXTURE_ARGS" | tr ' /-' '_').log"
+              python3 - "$EDITOR" "$LOG" "$FIXTURE_ARGS" <<'PY'
+          import os
+          import shlex
+          import signal
+          import subprocess
+          import sys
+
+          editor, log_path, arguments = sys.argv[1:]
+          process = subprocess.Popen(
+              [editor, *shlex.split(arguments)],
+              stdout=subprocess.PIPE,
+              stderr=subprocess.STDOUT,
+              text=True,
+              start_new_session=True,
+          )
+          try:
+              output, _ = process.communicate(timeout=15)
+          except subprocess.TimeoutExpired:
+              try:
+                  os.killpg(process.pid, signal.SIGKILL)
+              except ProcessLookupError:
+                  pass
+              try:
+                  output, _ = process.communicate(timeout=3)
+              except subprocess.TimeoutExpired:
+                  process.kill()
+                  try:
+                      output, _ = process.communicate(timeout=2)
+                  except subprocess.TimeoutExpired:
+                      print(f"Could not reap timed-out fixture-rejection process: {process.pid}", file=sys.stderr)
+                      sys.exit(1)
+              with open(log_path, "w", encoding="utf-8") as log_file:
+                  log_file.write(output)
+              print(f"Timed out waiting for Debug-only option rejection: {arguments}", file=sys.stderr)
+              sys.exit(1)
+          with open(log_path, "w", encoding="utf-8") as log_file:
+              log_file.write(output)
+          if process.returncode == 0:
+              print(f"Release/Dist accepted Debug-only fixture arguments: {arguments}", file=sys.stderr)
+              sys.exit(1)
+          PY
+              grep -q 'available only in Debug' "$LOG"
+            done
+          done
+
       - name: Upload compact renderer evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: macos-pulseforge-renderer-evidence
+          name: macos-pulseforge-desktop-evidence
           path: |
+            ${{ runner.temp }}/macos-automation-permission-probe.log
+            ${{ runner.temp }}/macos-automation-permission-bridge-build.log
+            ${{ runner.temp }}/macos-desktop-pointer-driver-build.log
+            ${{ runner.temp }}/PFAutomationPermission.framework/Versions/A/Resources/BridgeSupport/PFAutomationPermission.bridgesupport
             ${{ runner.temp }}/vulkan-sdk-download.log
             ${{ runner.temp }}/apple-toolchain.log
             ${{ runner.temp }}/vulkaninfo-summary.log
@@ -120,14 +463,55 @@ jobs:
             ${{ runner.temp }}/moltenvk-capabilities.log
             ${{ runner.temp }}/macos-configure.log
             ${{ runner.temp }}/macos-build.log
+            ${{ runner.temp }}/macos-loader-lifecycle-otool.log
+            ${{ runner.temp }}/macos-cpu-ctest.log
             ${{ runner.temp }}/macos-renderer-ctest.log
+            ${{ runner.temp }}/macos-bundle-smoke.log
+            ${{ runner.temp }}/macos-editor-bundle-smoke.log
+            ${{ runner.temp }}/macos-player-bundle-smoke.log
+            ${{ runner.temp }}/macos-editor-runtime-play-stop.log
+            ${{ runner.temp }}/macos-editor-runtime-play-stop-smoke.log
+            ${{ runner.temp }}/macos-document-host-smoke.log
+            ${{ runner.temp }}/macos-workspace-restore-smoke.log
+            ${{ runner.temp }}/macos-workspace-restore-first-launch.log
+            ${{ runner.temp }}/macos-workspace-restore-second-launch.log
+            ${{ runner.temp }}/macos-*-checkpoint-*.png
+            ${{ runner.temp }}/macos-document-close-smoke.log
+            ${{ runner.temp }}/macos-document-close-focused-repeat.log
+            ${{ runner.temp }}/macos-document-close-focused-repeat/*.log
+            ${{ runner.temp }}/macos-document-close-cancel-save.log
+            ${{ runner.temp }}/macos-document-close-discard.log
+            ${{ runner.temp }}/macos-document-close-save-retry.log
+            ${{ runner.temp }}/macos-document-close-close-retry.log
+            ${{ runner.temp }}/macos-document-close-*-outcome-missing.png
+            ${{ runner.temp }}/macos-document-close-*-stack-sample.txt
+            ${{ runner.temp }}/macos-document-close-main-window-close-failure.png
+            ${{ runner.temp }}/macos-document-close-harness-tests.log
+            ${{ runner.temp }}/macos-configure-release.log
+            ${{ runner.temp }}/macos-build-release.log
+            ${{ runner.temp }}/macos-configure-dist.log
+            ${{ runner.temp }}/macos-build-dist.log
+            ${{ runner.temp }}/macos-native-dialog-automation.log
+            ${{ runner.temp }}/native-dialog-open-select.log
+            ${{ runner.temp }}/native-dialog-open-cancel.log
+            ${{ runner.temp }}/native-dialog-save-select.log
+            ${{ runner.temp }}/native-dialog-save-cancel.log
+            ${{ runner.temp }}/native-dialog-open-select-observation.log
+            ${{ runner.temp }}/native-dialog-open-select-observation.png
+            ${{ runner.temp }}/native-dialog-open-cancel-observation.log
+            ${{ runner.temp }}/native-dialog-open-cancel-observation.png
+            ${{ runner.temp }}/native-dialog-save-select-observation.log
+            ${{ runner.temp }}/native-dialog-save-select-observation.png
+            ${{ runner.temp }}/native-dialog-save-cancel-observation.log
+            ${{ runner.temp }}/native-dialog-save-cancel-observation.png
             Build/CI/macos-renderer/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/macos-renderer/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
-          retention-days: 5
+          retention-days: 1
 
   windows-msvc:
     name: Windows 2022 · MSVC · Debug
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && !contains(github.event.head_commit.message || '', '[automation-probe-only]') }}
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -182,6 +566,23 @@ jobs:
           Get-Content "$env:RUNNER_TEMP/ctest.log"
           if ($result -ne 0) { exit $result }
 
+      - name: Build Release and Dist editor consumers and verify Debug fixture exclusion
+        shell: pwsh
+        run: |
+          $coreDir = "Build/CI/windows/PulseForgeEditorCore.dir"
+          $debugObject = Join-Path $coreDir "Debug/EditorDebugAcceptanceCoordinators.obj"
+          if (-not (Test-Path $debugObject)) { throw "Debug coordinator object was not produced: $debugObject" }
+          foreach ($configuration in @("Release", "Dist")) {
+            & cmake --build Build/CI/windows --config $configuration --parallel --target `
+              PulseForgeEditor PulseForgeGame PulseForgeEditorCoreConsumer PulseForgeEditorTests `
+              *> "$env:RUNNER_TEMP/build-$($configuration.ToLowerInvariant()).log"
+            $result = $LASTEXITCODE
+            Get-Content "$env:RUNNER_TEMP/build-$($configuration.ToLowerInvariant()).log"
+            if ($result -ne 0) { exit $result }
+            $configurationObject = Join-Path $coreDir "$configuration/EditorDebugAcceptanceCoordinators.obj"
+            if (Test-Path $configurationObject) { throw "Debug-only coordinator was compiled for $configuration" }
+          }
+
       - name: Upload failure logs
         if: failure()
         uses: actions/upload-artifact@v6
@@ -191,6 +592,8 @@ jobs:
             ${{ runner.temp }}/configure.log
             ${{ runner.temp }}/build.log
             ${{ runner.temp }}/ctest.log
+            ${{ runner.temp }}/build-release.log
+            ${{ runner.temp }}/build-dist.log
             Build/CI/windows/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/windows/CMakeFiles/CMakeOutput.log
             Build/CI/windows/CMakeFiles/CMakeError.log
@@ -200,6 +603,7 @@ jobs:
 
   linux-gcc:
     name: Ubuntu 24.04 · GCC · Ninja · Debug
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && !contains(github.event.head_commit.message || '', '[automation-probe-only]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -257,6 +661,37 @@ jobs:
           set -o pipefail
           ctest --test-dir Build/CI/linux --output-on-failure 2>&1 | tee "$RUNNER_TEMP/ctest.log"
 
+      - name: Build Release and Dist editor consumers and verify Debug fixture exclusion
+        run: |
+          set -o pipefail
+          for CONFIGURATION in Release Dist; do
+            BUILD_DIR="Build/CI/linux-${CONFIGURATION,,}"
+            cmake -S . -B "$BUILD_DIR" -G Ninja \
+              -DCMAKE_BUILD_TYPE="$CONFIGURATION" \
+              -DBUILD_TESTING=ON \
+              -DPULSEFORGE_BUILD_EDITOR=ON \
+              -DPULSEFORGE_BUILD_GPU_VALIDATION_TESTS=OFF \
+              -DFETCHCONTENT_BASE_DIR="$GITHUB_WORKSPACE/Build/CI/Dependencies" \
+              -DFETCHCONTENT_FULLY_DISCONNECTED=OFF 2>&1 |
+              tee "$RUNNER_TEMP/configure-${CONFIGURATION,,}.log"
+            cmake --build "$BUILD_DIR" --parallel --target \
+              PulseForgeEditor PulseForgeGame PulseForgeEditorCoreConsumer PulseForgeEditorTests 2>&1 |
+              tee "$RUNNER_TEMP/build-${CONFIGURATION,,}.log"
+            if find "$BUILD_DIR/CMakeFiles/PulseForgeEditorCore.dir" -name 'EditorDebugAcceptanceCoordinators.cpp.o' -print -quit | grep -q .; then
+              echo "Debug-only coordinator was compiled for $CONFIGURATION" >&2
+              exit 1
+            fi
+            EDITOR="$GITHUB_WORKSPACE/$BUILD_DIR/PulseForgeEditor"
+            for FIXTURE_ARGS in "--editor-runtime-play-stop-test" "--document-host-close-ui-test cancel-save"; do
+              LOG="$RUNNER_TEMP/fixture-rejection-${CONFIGURATION,,}-$(printf '%s' "$FIXTURE_ARGS" | tr ' /-' '_').log"
+              if "$EDITOR" $FIXTURE_ARGS >"$LOG" 2>&1; then
+                echo "$CONFIGURATION accepted Debug-only fixture arguments: $FIXTURE_ARGS" >&2
+                exit 1
+              fi
+              grep -q 'available only in Debug' "$LOG"
+            done
+          done
+
       - name: Upload failure logs
         if: failure()
         uses: actions/upload-artifact@v6
@@ -266,6 +701,10 @@ jobs:
             ${{ runner.temp }}/configure.log
             ${{ runner.temp }}/build.log
             ${{ runner.temp }}/ctest.log
+            ${{ runner.temp }}/configure-release.log
+            ${{ runner.temp }}/build-release.log
+            ${{ runner.temp }}/configure-dist.log
+            ${{ runner.temp }}/build-dist.log
             Build/CI/linux/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/linux/CMakeFiles/CMakeOutput.log
             Build/CI/linux/CMakeFiles/CMakeError.log

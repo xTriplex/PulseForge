@@ -63,6 +63,8 @@ namespace
 		const auto DefaultOptions = ParseEditorCommandLine(NoArguments, Root);
 		PF_CHECK(Tests, DefaultOptions.has_value());
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->ProjectFile.has_value());
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableEditorRuntimePlayStopTest);
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->DocumentHostCloseUiTestScenario);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTestFixture);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostResetLayoutTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostTabTearOffTest);
@@ -74,6 +76,68 @@ namespace
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->ProjectOpenRenderTestFile);
 
 		const std::string AbsoluteProjectPath = ProjectFile.string();
+#if defined(_DEBUG) || defined(PF_DEBUG)
+		const std::array RuntimePlayStopFixtureArguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--editor-runtime-play-stop-test") };
+		const auto RuntimePlayStopFixtureOptions = ParseEditorCommandLine(RuntimePlayStopFixtureArguments, Root);
+		PF_CHECK(Tests, RuntimePlayStopFixtureOptions.has_value());
+		PF_CHECK(Tests, RuntimePlayStopFixtureOptions && RuntimePlayStopFixtureOptions->ProjectFile == ProjectFile &&
+					RuntimePlayStopFixtureOptions->EnableEditorRuntimePlayStopTest);
+		const std::array RuntimePlayStopFixtureWithoutProject = { std::string_view("--editor-runtime-play-stop-test") };
+		const auto RuntimePlayStopWithoutProjectOptions = ParseEditorCommandLine(RuntimePlayStopFixtureWithoutProject, Root);
+		PF_CHECK(Tests, !RuntimePlayStopWithoutProjectOptions &&
+					RuntimePlayStopWithoutProjectOptions.error().Code == EditorCommandLineErrorCode::MissingProjectPath);
+		const std::array DuplicateRuntimePlayStopFixture = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--editor-runtime-play-stop-test"), std::string_view("--editor-runtime-play-stop-test") };
+		const auto DuplicateRuntimePlayStopOptions = ParseEditorCommandLine(DuplicateRuntimePlayStopFixture, Root);
+		PF_CHECK(Tests, !DuplicateRuntimePlayStopOptions &&
+					DuplicateRuntimePlayStopOptions.error().Code == EditorCommandLineErrorCode::DuplicateOption);
+		const std::array ConflictingRuntimePlayStopFixture = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--editor-runtime-play-stop-test"), std::string_view("--project-open-render-test"),
+			std::string_view(AbsoluteProjectPath) };
+		const auto ConflictingRuntimePlayStopOptions = ParseEditorCommandLine(ConflictingRuntimePlayStopFixture, Root);
+		PF_CHECK(Tests, !ConflictingRuntimePlayStopOptions &&
+					ConflictingRuntimePlayStopOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+
+		const std::array<std::string_view, 4> CloseUiScenarios = { "cancel-save", "discard", "save-retry", "close-retry" };
+		for (const std::string_view Scenario : CloseUiScenarios)
+		{
+			const std::array Arguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+				std::string_view("--document-host-close-ui-test"), Scenario };
+			const auto Options = ParseEditorCommandLine(Arguments, Root);
+			PF_CHECK(Tests, Options.has_value());
+			PF_CHECK(Tests, Options && Options->ProjectFile == ProjectFile && Options->DocumentHostCloseUiTestScenario &&
+							*Options->DocumentHostCloseUiTestScenario == Scenario);
+		}
+		const std::array MissingCloseUiScenario = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-close-ui-test") };
+		const auto MissingCloseUiScenarioOptions = ParseEditorCommandLine(MissingCloseUiScenario, Root);
+		PF_CHECK(Tests, !MissingCloseUiScenarioOptions &&
+					MissingCloseUiScenarioOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+		const std::array CloseUiWithoutProject = { std::string_view("--document-host-close-ui-test"), std::string_view("cancel-save") };
+		const auto CloseUiWithoutProjectOptions = ParseEditorCommandLine(CloseUiWithoutProject, Root);
+		PF_CHECK(Tests, !CloseUiWithoutProjectOptions &&
+					CloseUiWithoutProjectOptions.error().Code == EditorCommandLineErrorCode::MissingProjectPath);
+		const std::array DuplicateCloseUiOption = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-close-ui-test"), std::string_view("cancel-save"),
+			std::string_view("--document-host-close-ui-test"), std::string_view("discard") };
+		const auto DuplicateCloseUiOptions = ParseEditorCommandLine(DuplicateCloseUiOption, Root);
+		PF_CHECK(Tests, !DuplicateCloseUiOptions && DuplicateCloseUiOptions.error().Code == EditorCommandLineErrorCode::DuplicateOption);
+		const std::array InvalidCloseUiScenario = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--document-host-close-ui-test"), std::string_view("retry") };
+		const auto InvalidCloseUiOptions = ParseEditorCommandLine(InvalidCloseUiScenario, Root);
+		PF_CHECK(Tests, !InvalidCloseUiOptions && InvalidCloseUiOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+#else
+		const std::array RuntimePlayStopFixtureArguments = { std::string_view("--editor-runtime-play-stop-test") };
+		const auto RuntimePlayStopFixtureOptions = ParseEditorCommandLine(RuntimePlayStopFixtureArguments, Root);
+		PF_CHECK(Tests, !RuntimePlayStopFixtureOptions &&
+					RuntimePlayStopFixtureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+		const std::array CloseUiFixtureArguments = { std::string_view("--document-host-close-ui-test"),
+			std::string_view("cancel-save") };
+		const auto CloseUiFixtureOptions = ParseEditorCommandLine(CloseUiFixtureArguments, Root);
+		PF_CHECK(Tests, !CloseUiFixtureOptions && CloseUiFixtureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+#endif
+
 		const std::array ProjectOpenRenderTestArguments = { std::string_view("--project-open-render-test"),
 			std::string_view(AbsoluteProjectPath) };
 		const auto ProjectOpenRenderTestOptions = ParseEditorCommandLine(ProjectOpenRenderTestArguments, Root);

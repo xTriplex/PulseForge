@@ -10,6 +10,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include "Renderer/Vulkan/VulkanRendererShutdown.h"
 #include "Renderer/Vulkan/VulkanResourceObjects.h"
 #include "Renderer/Vulkan/VulkanSupport.h"
+#include "Window/Platform/GLFW/GLFWWindow.h"
 #include "Window/Window.h"
 
 #include <nvrhi/validation.h>
@@ -20,6 +21,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <limits>
 #include <optional>
 #include <type_traits>
@@ -218,10 +220,10 @@ namespace PulseForge
 				return static_cast<uint64_t>(Handle);
 		}
 
-		VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
-			VkDebugUtilsMessageSeverityFlagBitsEXT Severity,
-			VkDebugUtilsMessageTypeFlagsEXT MessageType,
-			const VkDebugUtilsMessengerCallbackDataEXT* CallbackData,
+		VKAPI_ATTR vk::Bool32 VKAPI_CALL VulkanDebugCallback(
+			vk::DebugUtilsMessageSeverityFlagBitsEXT Severity,
+			vk::DebugUtilsMessageTypeFlagsEXT MessageType,
+			const vk::DebugUtilsMessengerCallbackDataEXT* CallbackData,
 			void*)
 		{
 			const char* Message = CallbackData && CallbackData->pMessage
@@ -234,16 +236,16 @@ namespace PulseForge
 			const uint32_t MessageTypeValue = static_cast<uint32_t>(MessageType);
 			switch (Severity)
 			{
-				case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
+				case vk::DebugUtilsMessageSeverityFlagBitsEXT::eError:
 					PF_CORE_ERROR("Vulkan error (type={0:#x}, id={1}): {2}", MessageTypeValue, MessageId, Message);
 					break;
-				case VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT:
+				case vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning:
 					PF_CORE_WARN("Vulkan warning (type={0:#x}, id={1}): {2}", MessageTypeValue, MessageId, Message);
 					break;
-				case VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT:
+				case vk::DebugUtilsMessageSeverityFlagBitsEXT::eInfo:
 					PF_CORE_INFO("Vulkan info (type={0:#x}, id={1}): {2}", MessageTypeValue, MessageId, Message);
 					break;
-				case VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT:
+				case vk::DebugUtilsMessageSeverityFlagBitsEXT::eVerbose:
 					PF_CORE_TRACE("Vulkan verbose (type={0:#x}, id={1}): {2}", MessageTypeValue, MessageId, Message);
 					break;
 				default:
@@ -2545,10 +2547,11 @@ namespace PulseForge
 		{
 			if (!m_NativeWindow)
 				throw std::runtime_error("Vulkan renderer requires a valid GLFW window");
+
+			InitializeVulkanLoader();
 			if (glfwVulkanSupported() != GLFW_TRUE)
 				throw std::runtime_error("GLFW could not find a usable Vulkan loader and installable driver");
 
-			InitializeVulkanLoader();
 			ConfigurePresentationPolicyAndDebugValidation();
 			CreateInstance();
 			CreateSurface();
@@ -2747,15 +2750,23 @@ namespace PulseForge
 			m_ActivePlatformTargetID = 0;
 		}
 
-		[[nodiscard]] bool UsesPresentationFences() const noexcept
+		[[nodiscard]] bool UsesPresentationFences() const noexcept override
 		{
 			return m_PresentationRetirementMechanism != VulkanSupport::PresentationRetirementMechanism::LegacyBestEffort;
 		}
 
 		void InitializeVulkanLoader()
 		{
-			m_VulkanLoader = std::make_unique<vk::detail::DynamicLoader>();
+#if defined(__APPLE__)
+			const auto GLFWProcAddress = GLFWWindow::GetVulkanLoaderProcAddress();
+			if (!GLFWProcAddress)
+				throw std::runtime_error("GLFW did not retain the Vulkan loader selected before initialization");
+			const auto GetInstanceProcAddress = reinterpret_cast<PFN_vkGetInstanceProcAddr>(GLFWProcAddress);
+#endif
+#if !defined(__APPLE__)
+			if (!m_VulkanLoader) m_VulkanLoader = std::make_unique<vk::detail::DynamicLoader>();
 			const auto GetInstanceProcAddress = m_VulkanLoader->getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
+#endif
 			if (!GetInstanceProcAddress)
 				throw std::runtime_error("The Vulkan loader does not export vkGetInstanceProcAddr");
 
