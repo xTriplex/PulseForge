@@ -696,7 +696,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
             activation_output += activation_error
             if activation_code != 0 or "DIRECT_AX_RESULT status=window-focused" not in activation_output:
                 raise RuntimeError(
-                    f"Open panel was not the confirmed focused AX window before Go to Folder; "
+                    f"Open panel was not the confirmed focused AX window before exact file selection; "
                     f"exit_code={activation_code}; {activation_output!r}"
                 )
             print(f"NFD_OPEN_PANEL_FOCUS=CONFIRMED; {activation_output.strip()!r}", flush=True)
@@ -709,6 +709,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 int(panel_process_id), panel_title, expected_path,
                 timeout=max(0.1, helper_deadline - time.monotonic())
             )
+            automation_code = 0
             last_open_step = "exact Open-panel filename selection operation returned"
             if open_file_confirmation_returned(selection_output, expected_path.name):
                 automation_output = selection_output
