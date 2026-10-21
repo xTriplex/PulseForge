@@ -150,13 +150,15 @@ namespace
 		Observation.CameraMoveSpeed = 6.0f;
 		Observation.UtilityDropTargetReady = true;
 		Observation.UtilityDropTargetRect = { 600.0f, 100.0f, 800.0f, 600.0f };
+		Observation.UtilityDropTargetPanel = "Inspector";
 		const auto Detached = Coordinator.Observe(Observation);
 		PF_CHECK(Tests, Detached && Detached->find("=DETACHED;") != std::string::npos);
 		PF_CHECK(Tests, !Coordinator.Complete());
 		const auto DetachedState = Coordinator.ObserveState(Observation);
 		PF_CHECK(Tests, DetachedState && DetachedState->find("camera_position=1.0000,2.0000,3.0000") != std::string::npos &&
 			DetachedState->find("camera_speed=6.0000") != std::string::npos &&
-			DetachedState->find("utility_drop_target=inspector_dock_node") != std::string::npos &&
+			DetachedState->find("utility_drop_target=main_utility_panel_dock_node") != std::string::npos &&
+			DetachedState->find("utility_drop_panel=Inspector") != std::string::npos &&
 			DetachedState->find("utility_drop_rect=600.0000,100.0000,800.0000,600.0000") != std::string::npos);
 		PF_CHECK(Tests, !Coordinator.ObserveInput(Observation));
 		Observation.OwnerNativePosition = { 700.0f, 100.0f };
