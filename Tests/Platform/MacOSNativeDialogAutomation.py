@@ -81,14 +81,14 @@ def open_file_selection_ready(output: str, expected_name: str) -> bool:
     )
 
 
-def open_file_action_returned(output: str, expected_name: str) -> bool:
+def open_file_confirmation_returned(output: str, expected_name: str) -> bool:
     dispatches = [
         line for line in output.splitlines()
-        if line.startswith("DIRECT_AX_DISPATCH attempted=true; operation=open-file-row;")
+        if line.startswith("DIRECT_AX_DISPATCH attempted=true; operation=confirm-open-file;")
     ]
     results = [
         line for line in output.splitlines()
-        if line.startswith("DIRECT_AX_RESULT status=open-action-returned; operation=open-file-row;")
+        if line.startswith("DIRECT_AX_RESULT status=confirm-action-returned; operation=confirm-open-file;")
     ]
     if len(dispatches) != 1 or len(results) != 1:
         return False
@@ -104,7 +104,7 @@ def open_file_action_returned(output: str, expected_name: str) -> bool:
     )
     return (
         dispatch_fields.get("name") == expected_name
-        and dispatch_fields.get("advertised_action") == "AXOpen"
+        and dispatch_fields.get("advertised_action") == "AXConfirm"
         and fields.get("role") == "AXTextField"
         and fields.get("name") == expected_name
         and fields.get("ax_error") == "0"
@@ -218,9 +218,9 @@ def select_open_file(fixture_pid: int, panel_title: str, expected_path: Path, ti
                     f"Open-file selection result did not identify the exact selected file; output={result[-2400:]!r}"
                 )
             break
-        if code == 0 and open_file_action_returned(result, expected_path.name):
+        if code == 0 and open_file_confirmation_returned(result, expected_path.name):
             print(
-                f"NFD_OPEN_FILE_ROW_ACTION=RETURNED; attempts={attempts}; pid={fixture_pid}; "
+                f"NFD_OPEN_FILE_CONFIRMATION=RETURNED; attempts={attempts}; pid={fixture_pid}; "
                 f"panel={panel_title!r}; file={expected_path.name!r}; {result.strip()!r}",
                 flush=True,
             )
@@ -756,7 +756,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 int(panel_process_id), panel_title, expected_path,
                 timeout=max(0.1, helper_deadline - time.monotonic())
             )
-            if open_file_action_returned(selection_output, expected_path.name):
+            if open_file_confirmation_returned(selection_output, expected_path.name):
                 automation_output = selection_output
             else:
                 automation_output = wait_for_open_button(int(panel_process_id), panel_title, helper_deadline)
@@ -769,7 +769,7 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                 f"Open selection navigation failed before the Open action; last_step={last_navigation_step}; "
                 f"{error}"
             )
-        if not open_file_action_returned(automation_output, expected_path.name):
+        if not open_file_confirmation_returned(automation_output, expected_path.name):
             automation_code, pressed, press_error = run_direct_ax(
                 int(panel_process_id), operation="press-control", window_title=panel_title,
                 control_name="Open", timeout=min(10.0, remaining_seconds())

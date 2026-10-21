@@ -596,13 +596,13 @@ if operation == "press-control" || operation == "set-value" || operation == "set
         var selectedSettable = DarwinBoolean(false)
         let selectedSettableError = AXUIElementIsAttributeSettable(control, "AXSelected" as CFString, &selectedSettable)
         if role == "AXTextField", selectedSettableError == .success, !selectedSettable.boolValue,
-            availableActions.contains("AXOpen") {
+            availableActions.contains("AXConfirm") {
             AXUIElementSetMessagingTimeout(control, 1.0)
-            print("DIRECT_AX_DISPATCH attempted=true; operation=open-file-row; target_pid=\(targetPID); role=\(role); name=\(titleOrDescription(control)); advertised_action=AXOpen")
+            print("DIRECT_AX_DISPATCH attempted=true; operation=confirm-open-file; target_pid=\(targetPID); role=\(role); name=\(titleOrDescription(control)); advertised_action=AXConfirm")
             fflush(stdout)
-            let openError = AXUIElementPerformAction(control, "AXOpen" as CFString)
-            print("DIRECT_AX_RESULT status=open-action-returned; operation=open-file-row; role=\(role); name=\(titleOrDescription(control)); ax_error=\(openError.rawValue)")
-            exit(openError == .success ? 0 : 13)
+            let confirmError = AXUIElementPerformAction(control, "AXConfirm" as CFString)
+            print("DIRECT_AX_RESULT status=confirm-action-returned; operation=confirm-open-file; role=\(role); name=\(titleOrDescription(control)); ax_error=\(confirmError.rawValue)")
+            exit(confirmError == .success ? 0 : 13)
         }
         var rawAttributeNames: CFArray?
         let attributeNamesError = AXUIElementCopyAttributeNames(control, &rawAttributeNames)
