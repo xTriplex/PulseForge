@@ -464,6 +464,7 @@ if operation == "press-control" || operation == "set-value" || operation == "set
         let roleMatches = operation == "select-element"
             ? (role == "AXRow" || role == "AXCell" || role == "AXTextField")
             : role == wantedRole
+        guard roleMatches else { return nil }
         let focusedMatch = operation == "set-focused-value-confirm" && (value(node.element, "AXFocused") as? Bool) == true
         let labelMatch = operation == "set-focused-value-confirm" ? focusedMatch : (controlName.isEmpty || labelMatches(node.element))
         if operation == "set-folder-path-value" {
@@ -481,7 +482,7 @@ if operation == "press-control" || operation == "set-value" || operation == "set
             }
             return folderSheetFound ? (index, node) : nil
         }
-        return roleMatches && labelMatch ? (index, node) : nil
+        return labelMatch ? (index, node) : nil
     }
     if operation == "select-element", controls.isEmpty {
         for (index, node) in descendants.enumerated() where
