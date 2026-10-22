@@ -120,7 +120,7 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
         status, _ = scene_viewport_smoke.evaluate_unchanged_camera_interval(
             [], 0, 10, (1.0, 2.0, 3.0), "2", "0x2000", 30.0, 31.6, 1.5, 38.0
         )
-        self.assertEqual(status, "insufficient")
+        self.assertEqual(status, "pending")
         observations = [(11, 30.2, self.state(11))]
         status, _ = scene_viewport_smoke.evaluate_unchanged_camera_interval(
             observations, 0, 10, (1.0, 2.0, 3.0), "2", "0x2000", 30.0, 30.8, 1.5, 38.0
