@@ -13,21 +13,8 @@ import time
 import tempfile
 from pathlib import Path
 
-from MacOSDirectAX import parse_window_activation, run_direct_ax
-
 PANEL_READY = "PULSEFORGE_DIAGNOSTICS_PERFORMANCE_PANEL=READY;"
 SMOKE_PASS = "PULSEFORGE_DIAGNOSTICS_SMOKE=PASS;"
-MAIN_WINDOW_TITLE = "PulseForge Editor"
-
-
-def activate_editor_window(pid: int) -> str:
-    code, output, error = run_direct_ax(
-        pid, operation="activate-window", window_title=MAIN_WINDOW_TITLE, timeout=10.0
-    )
-    output += error
-    if code != 0:
-        raise RuntimeError(f"could not reactivate the diagnostics editor after the screenshot: {output.strip()!r}")
-    return parse_window_activation(output, pid, MAIN_WINDOW_TITLE)
 
 
 def validate_panel_ready(output: str) -> dict[str, str]:
@@ -167,8 +154,6 @@ def main() -> int:
                         raise RuntimeError(f"Performance panel screenshot failed: {result.stderr.strip()}")
                     screenshot_taken = True
                     print("MACOS_DIAGNOSTICS_PANEL_SCREENSHOT=CAPTURED")
-                    focused_title = activate_editor_window(process.pid)
-                    print(f"MACOS_DIAGNOSTICS_EDITOR_REACTIVATION=PASS; pid={process.pid}; focused_title={focused_title!r}")
                 time.sleep(0.1)
             if process.poll() is None:
                 raise TimeoutError("diagnostics editor did not exit before the bounded deadline")
