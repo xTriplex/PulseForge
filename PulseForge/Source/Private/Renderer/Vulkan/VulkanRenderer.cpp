@@ -505,6 +505,32 @@ namespace PulseForge
 			return m_GpuFrameTimingInvalidResultCount;
 		}
 
+		void CollectCompletedGpuFrameTimings() noexcept override
+		{
+			if (!m_ActiveNvrhiDevice || m_DeviceHealth.IsLost() || m_GpuFrameTimingFailureReported) return;
+			for (FrameContext& Frame : m_Frames)
+				if (Frame.GpuTimingPending && !Frame.GpuTimingRecording)
+					RetireGpuFrameTiming(Frame);
+		}
+
+		GpuFrameTimingCollectionState GetGpuFrameTimingCollectionState(uint64_t SessionId) const noexcept override
+		{
+			GpuFrameTimingCollectionState State;
+			State.Failed = m_GpuFrameTimingFailureReported || m_DeviceHealth.IsLost();
+			for (const FrameContext& Frame : m_Frames)
+			{
+				if (Frame.GpuTimingSessionId != SessionId) continue;
+				if (Frame.GpuTimingRecording) ++State.RecordingCount;
+				if (Frame.GpuTimingPending) ++State.PendingCount;
+			}
+			for (size_t Index = 0; Index < m_CompletedGpuTimingCount; ++Index)
+			{
+				const size_t Slot = (m_CompletedGpuTimingFirst + Index) % m_CompletedGpuTimings.size();
+				if (m_CompletedGpuTimings[Slot].SessionId == SessionId) ++State.CompletedCount;
+			}
+			return State;
+		}
+
 		bool BeginFrame() override
 		{
 			m_DeviceHealth.EnsureOperational();

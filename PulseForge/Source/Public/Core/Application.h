@@ -42,6 +42,8 @@ namespace PulseForge
 		[[nodiscard]] bool StartDiagnosticsCapture() noexcept;
 		void StopDiagnosticsCapture() noexcept;
 		[[nodiscard]] DiagnosticSnapshot GetDiagnosticsSnapshot() const;
+		[[nodiscard]] DiagnosticCaptureStatus GetDiagnosticsCaptureStatus() const noexcept;
+		[[nodiscard]] bool IsDiagnosticsCaptureEnabled() const noexcept;
 		[[nodiscard]] bool IsGpuFrameTimingSupported() const noexcept;
 		[[nodiscard]] bool HasGpuFrameTimingFailed() const noexcept;
 		[[nodiscard]] bool IsGpuFrameTimingEnabled() const noexcept;
@@ -70,6 +72,8 @@ namespace PulseForge
 		[[nodiscard]] size_t ReadCompletedGpuFrameTimings(std::span<GpuFrameTiming> Destination) noexcept override;
 		[[nodiscard]] uint64_t GetCompletedGpuFrameTimingEvictedCount() const noexcept override;
 		[[nodiscard]] uint64_t GetGpuFrameTimingInvalidResultCount() const noexcept override;
+		void CollectCompletedGpuFrameTimings() noexcept override;
+		[[nodiscard]] GpuFrameTimingCollectionState GetGpuFrameTimingCollectionState(uint64_t SessionId) const noexcept override;
 		// Renderer resources should be released before this Application is destroyed.
 		BufferCreateResult CreateBuffer(const BufferDesc& Description, std::span<const std::byte> InitialData = {}) override;
 		// Records an aligned constant-buffer or dynamic geometry-buffer update on the active renderer frame.

@@ -25,6 +25,14 @@ namespace PulseForge
 		uint64_t DurationNanoseconds = 0;
 	};
 
+	struct GpuFrameTimingCollectionState
+	{
+		size_t RecordingCount = 0;
+		size_t PendingCount = 0;
+		size_t CompletedCount = 0;
+		bool Failed = false;
+	};
+
 	// Rendering systems use this validated resource and draw capability without depending on Application's
 	// window, input, event loop, or layer ownership. The caller controls the active frame and device lifetime.
 	class PULSEFORGE_API RenderDevice
@@ -56,6 +64,12 @@ namespace PulseForge
 		}
 		[[nodiscard]] virtual uint64_t GetCompletedGpuFrameTimingEvictedCount() const noexcept { return 0; }
 		[[nodiscard]] virtual uint64_t GetGpuFrameTimingInvalidResultCount() const noexcept { return 0; }
+		virtual void CollectCompletedGpuFrameTimings() noexcept {}
+		[[nodiscard]] virtual GpuFrameTimingCollectionState GetGpuFrameTimingCollectionState(uint64_t SessionId) const noexcept
+		{
+			(void)SessionId;
+			return {};
+		}
 		[[nodiscard]] virtual RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description) = 0;
 		[[nodiscard]] virtual DepthCubemapCreateResult CreateDepthCubemap(uint32_t Resolution, const std::string& DebugName) = 0;
 		[[nodiscard]] virtual GraphicsResult BeginRenderTarget(

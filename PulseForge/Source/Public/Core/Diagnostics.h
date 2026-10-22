@@ -55,6 +55,18 @@ namespace PulseForge
 		bool CaptureEnabled = false;
 	};
 
+	struct DiagnosticCaptureStatus
+	{
+		uint64_t CaptureStartTimestampNanoseconds = 0;
+		uint64_t CaptureEndTimestampNanoseconds = 0;
+		uint64_t SessionId = 0;
+		size_t EventCount = 0;
+		size_t EventCapacity = 0;
+		uint64_t EvictedCount = 0;
+		uint64_t DroppedCount = 0;
+		bool CaptureEnabled = false;
+	};
+
 	class PULSEFORGE_API DiagnosticRecorder final
 	{
 	public:
@@ -70,6 +82,7 @@ namespace PulseForge
 		// A stopped capture retires its session. Scopes still active at Stop are discarded and counted,
 		// never clipped into the capture; later scope completion cannot enter a new session.
 		[[nodiscard]] bool IsCaptureEnabled() const noexcept;
+		[[nodiscard]] DiagnosticCaptureStatus GetCaptureStatus() const noexcept;
 		[[nodiscard]] bool BeginDurationSession(uint64_t& SessionId, uint64_t& StartTimestampNanoseconds) const noexcept;
 
 		[[nodiscard]] bool RecordEvent(

@@ -129,6 +129,21 @@ namespace PulseForge
 		return m_CaptureEnabled.load(std::memory_order_acquire);
 	}
 
+	DiagnosticCaptureStatus DiagnosticRecorder::GetCaptureStatus() const noexcept
+	{
+		std::lock_guard Lock(m_Mutex);
+		return {
+			.CaptureStartTimestampNanoseconds = m_CaptureStartTimestampNanoseconds,
+			.CaptureEndTimestampNanoseconds = m_CaptureEndTimestampNanoseconds,
+			.SessionId = m_SessionId,
+			.EventCount = m_EventCount,
+			.EventCapacity = m_Capacity,
+			.EvictedCount = m_EvictedCount,
+			.DroppedCount = m_DroppedCount.load(std::memory_order_relaxed),
+			.CaptureEnabled = m_CaptureEnabled.load(std::memory_order_acquire)
+		};
+	}
+
 	bool DiagnosticRecorder::BeginDurationSession(uint64_t& SessionId, uint64_t& StartTimestampNanoseconds) const noexcept
 	{
 		try
