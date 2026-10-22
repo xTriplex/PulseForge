@@ -112,6 +112,71 @@ def is_fresh_geometry_sample(line: str | None, previous_sample: int) -> bool:
     return sample > previous_sample
 
 
+def find_fresh_state(
+    observations: list[tuple[int, float, str]],
+    dropped_through: int,
+    after_sequence: int,
+    predicate,
+) -> str | None:
+    """Find a qualifying app-produced state newer than the caller's sequence watermark."""
+    if dropped_through > after_sequence:
+        raise RuntimeError(
+            f"state observation history overflowed past sequence {after_sequence}; "
+            f"oldest retained sequence={observations[0][0] if observations else 'none'}"
+        )
+    for sequence, _received_at, line in reversed(observations):
+        if sequence > after_sequence and predicate(marker_fields(line, STATE)):
+            return line
+    return None
+
+
+def evaluate_unchanged_camera_interval(
+    observations: list[tuple[int, float, str]],
+    dropped_through: int,
+    after_sequence: int,
+    camera_position: tuple[float, float, float],
+    owner_viewport: str,
+    owner_window: str,
+    action_completed_at: float,
+    now: float,
+    interval_seconds: float,
+    observation_deadline: float,
+    expired: bool = False,
+) -> tuple[str, str]:
+    """Evaluate fresh app state; receipt times only establish coverage of the aftermath interval."""
+    if expired:
+        return "expired", "application observation channel reported expiration"
+    if dropped_through > after_sequence:
+        return "insufficient", f"history overflowed through sequence {dropped_through}"
+    end_time = action_completed_at + interval_seconds
+    fresh: list[tuple[float, dict[str, str]]] = []
+    for sequence, received_at, line in observations:
+        if sequence <= after_sequence:
+            continue
+        fields = marker_fields(line, STATE)
+        if fields.get("owner_viewport") != owner_viewport or fields.get("owner_window") != owner_window:
+            return "invalid-owner", line
+        try:
+            position = coordinate(fields, "camera_position", 3)
+        except ValueError as error:
+            return "insufficient", str(error)
+        if sum((actual - expected) ** 2 for actual, expected in zip(position, camera_position)) > 1.0e-8:
+            return "movement", line
+        if fields.get("focused") != "0":
+            return "invalid-focus", line
+        fresh.append((received_at, fields))
+    if now < end_time:
+        return "pending", f"observed={len(fresh)}; interval_end={end_time:.3f}"
+    if len(fresh) < 2 or max(received_at for received_at, _fields in fresh) < end_time:
+        if now < observation_deadline:
+            return "pending", f"observed={len(fresh)}; awaiting coverage through={end_time:.3f}"
+        return "insufficient", f"observed={len(fresh)}; latest_receipt=" + (
+            f"{max((received_at for received_at, _fields in fresh), default=0.0):.3f}; "
+            f"required_through={end_time:.3f}"
+        )
+    return "pass", f"observed={len(fresh)}; latest_receipt={max(t for t, _ in fresh):.3f}"
+
+
 def screenshot(filename: str, checkpoint: str) -> bool:
     result = capture_screenshot(filename)
     print(f"MACOS_SCENE_VIEWPORT_SCREENSHOT={checkpoint}; {result}")
@@ -361,21 +426,18 @@ def main() -> int:
                 raise ValueError(f"native camera state observation sequence must be positive: {line!r}")
             return sequence
 
-        def wait_for_state(after_sequence: int, label: str, predicate, not_before: float = 0.0) -> str:
+        def wait_for_state(after_sequence: int, label: str, predicate) -> str:
             assert process is not None and capture is not None
             while time.monotonic() < deadline:
                 if capture.reader_error:
                     raise RuntimeError(f"editor output reader failed while waiting for {label}: {capture.reader_error}")
-                line = capture.marker_lines.get(STATE)
+                with capture.state_observations_lock:
+                    observations = list(capture.state_observations)
+                    dropped_through = capture.state_observations_dropped_through
+                line = find_fresh_state(observations, dropped_through, after_sequence, predicate)
                 if line:
-                    fields = marker_fields(line, STATE)
-                    try:
-                        sequence = int(fields["sequence"])
-                    except (KeyError, ValueError) as error:
-                        raise ValueError(f"native camera state sequence is malformed: {line!r}") from error
-                    if sequence > after_sequence and time.monotonic() >= not_before and predicate(fields):
-                        print(f"MACOS_SCENE_VIEWPORT_OBSERVED={label}; {line}")
-                        return line
+                    print(f"MACOS_SCENE_VIEWPORT_OBSERVED={label}; {line}")
+                    return line
                 failure = next((capture.marker_lines[item] for item in FAILURE_MARKERS if item in capture.markers), None)
                 if failure:
                     raise RuntimeError(f"editor fixture failed: {failure}")
@@ -514,13 +576,11 @@ def main() -> int:
               f"output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
         if code != 0:
             raise RuntimeError("the single detached-owner wheel event was not posted")
-        wheel_completed_at = time.monotonic()
         wheel_baseline = latest_state_sequence()
         wheel_state_line = wait_for_state(
             wheel_baseline, "detached-owner fly speed changed from owner wheel input",
             lambda fields: fields.get("focused") == "1" and fields.get("capture") == "1" and
             float(fields.get("camera_speed", "nan")) > speed_before_wheel,
-            not_before=wheel_completed_at,
         )
         wheel_state = marker_fields(wheel_state_line, STATE)
         wheel_state_sample = int(wheel_state["sequence"])
@@ -561,13 +621,11 @@ def main() -> int:
               f"exit_code={code}; output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
         if code != 0:
             raise RuntimeError("the bounded detached-owner keyboard input was not posted")
-        detached_key_completed_at = time.monotonic()
         detached_key_baseline = latest_state_sequence()
         moved_state_line = wait_for_state(
             detached_key_baseline, "camera translated from detached-owner keyboard input",
             lambda fields: fields.get("focused") == "1" and fields.get("keyboard_focused") == "1" and
             sum((a - b) ** 2 for a, b in zip(coordinate(fields, "camera_position", 3), position_before_key)) > 1.0e-6,
-            not_before=detached_key_completed_at,
         )
         moved_state = marker_fields(moved_state_line, STATE)
         moved_sample = int(moved_state["sequence"])
@@ -620,6 +678,7 @@ def main() -> int:
         right_press_attempted = False
 
         other_window_key_id = uuid.uuid4().hex
+        nonowner_baseline = latest_state_sequence()
         code, stdout, stderr = run_bounded_command(
             [str(driver), "key-hold", str(process.pid), other_window_key_id, "13", "0.5"],
             timeout=min(8.0, max(0.1, deadline - time.monotonic())),
@@ -629,16 +688,39 @@ def main() -> int:
         if code != 0:
             raise RuntimeError("keyboard input directed to the main editor window was not posted")
         nonowner_action_completed_at = time.monotonic()
-        nonowner_baseline = latest_state_sequence()
-        other_window_state_line = wait_for_state(
-            nonowner_baseline, "main-window keyboard input left detached camera unchanged over a fresh interval",
-            lambda fields: fields.get("focused") == "0" and
-            sum((a - b) ** 2 for a, b in zip(coordinate(fields, "camera_position", 3), focus_loss_position)) <= 1.0e-8,
-            not_before=nonowner_action_completed_at + 0.8,
-        )
-        other_window_state = marker_fields(other_window_state_line, STATE)
-        other_window_sample = int(other_window_state["sequence"])
-
+        nonowner_observation_deadline = min(deadline, nonowner_action_completed_at + 8.0)
+        while time.monotonic() < nonowner_observation_deadline:
+            if capture.reader_error:
+                raise RuntimeError(f"editor output reader failed during non-owner input observation: {capture.reader_error}")
+            if OBSERVATION_EXPIRED in capture.markers:
+                raise TimeoutError(
+                    "editor observation channel expired during the non-owner keyboard interval: "
+                    f"{capture.marker_lines.get(OBSERVATION_EXPIRED)}"
+                )
+            if process.poll() is not None:
+                raise RuntimeError(f"editor exited during non-owner keyboard interval with status {process.returncode}")
+            with capture.state_observations_lock:
+                nonowner_observations = list(capture.state_observations)
+                nonowner_dropped_through = capture.state_observations_dropped_through
+            interval_status, interval_evidence = evaluate_unchanged_camera_interval(
+                nonowner_observations, nonowner_dropped_through, nonowner_baseline, focus_loss_position,
+                detached.get("owner_viewport", ""), detached.get("owner_window", ""),
+                nonowner_action_completed_at, time.monotonic(), 1.5, nonowner_observation_deadline,
+            )
+            if interval_status == "movement":
+                raise RuntimeError(f"main-window keyboard input moved the detached camera: {interval_evidence}")
+            if interval_status not in ("pending", "pass"):
+                raise RuntimeError(f"non-owner camera observation was insufficient: {interval_status}; {interval_evidence}")
+            if interval_status == "pass":
+                print(f"MACOS_SCENE_VIEWPORT_NONOWNER_CAMERA_INTERVAL=PASS; {interval_evidence}; "
+                      f"host_receipt_clock=monotonic; sequence_watermark={nonowner_baseline}")
+                break
+            capture.finished.wait(timeout=0.05)
+        else:
+            raise TimeoutError(
+                f"no sufficient fresh detached-camera observations across the non-owner input interval; "
+                f"status={interval_status}; {interval_evidence}"
+            )
         activation_code, activation_output, activation_error = run_direct_ax(
             process.pid, operation="activate-window", window_title="Scene Viewport",
             timeout=min(10.0, max(0.1, deadline - time.monotonic())),
@@ -647,7 +729,6 @@ def main() -> int:
         if activation_code != 0:
             raise RuntimeError(f"detached Scene Viewport focus reacquisition failed: {activation_output.strip()!r}")
         focused_title = parse_window_activation(activation_output, process.pid, "Scene Viewport")
-        activation_completed_at = time.monotonic()
         activation_baseline = latest_state_sequence()
         activation_state_line = wait_for_state(
             activation_baseline, "fresh detached Scene Viewport focus and geometry after AX activation",
@@ -656,7 +737,6 @@ def main() -> int:
             fields.get("focused") == "1" and fields.get("capture") == "0" and
             fields.get("scene_image_ready") == "1" and has_usable_viewport_geometry(fields) and
             "owner_cursor" in fields,
-            not_before=activation_completed_at,
         )
         activation_state = marker_fields(activation_state_line, STATE)
         activation_sample = int(activation_state["sequence"])
@@ -689,14 +769,12 @@ def main() -> int:
               f"exit_code={code}; output={stdout[-1200:]!r}; error={stderr[-800:]!r}")
         if code != 0:
             raise RuntimeError("the deliberate viewport click used to reacquire keyboard focus was not posted")
-        focus_click_completed_at = time.monotonic()
         focus_click_baseline = latest_state_sequence()
         keyboard_focus_line = wait_for_state(
             focus_click_baseline, "viewport keyboard focus reacquired on detached owner after one click",
             lambda fields: fields.get("owner_viewport") == detached.get("owner_viewport") and
             fields.get("focused") == "1" and fields.get("keyboard_focused") == "1" and
             fields.get("image_hovered") == "1" and fields.get("hovered_viewport") == detached.get("owner_viewport"),
-            not_before=focus_click_completed_at,
         )
         keyboard_focus_state = marker_fields(keyboard_focus_line, STATE)
         keyboard_focus_sample = int(keyboard_focus_state["sequence"])
@@ -710,13 +788,11 @@ def main() -> int:
               f"exit_code={code}; output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
         if code != 0:
             raise RuntimeError("keyboard input after detached-owner focus reacquisition was not posted")
-        reacquire_key_completed_at = time.monotonic()
         reacquire_key_baseline = latest_state_sequence()
         reactivated_state_line = wait_for_state(
             reacquire_key_baseline, "camera navigation resumed after detached-owner focus reacquisition",
             lambda fields: fields.get("focused") == "1" and fields.get("keyboard_focused") == "1" and
             sum((a - b) ** 2 for a, b in zip(coordinate(fields, "camera_position", 3), keyboard_reacquire_position)) > 1.0e-6,
-            not_before=reacquire_key_completed_at,
         )
         reactivated_state = marker_fields(reactivated_state_line, STATE)
         reactivated_sample = int(reactivated_state["sequence"])
@@ -794,14 +870,13 @@ def main() -> int:
         if activation_code != 0:
             raise RuntimeError(f"main editor activation after reattachment failed: {activation_output.strip()!r}")
         parse_window_activation(activation_output, process.pid, "PulseForge Editor")
-        activation_completed_at = time.monotonic()
+        reattached_activation_baseline = latest_state_sequence()
         reattached_active_state_line = wait_for_state(
-            reattached_state_sample,
+            reattached_activation_baseline,
             "fresh focused main utility owner after native activation",
             lambda fields: fields.get("owner_viewport") == initial.get("main_viewport") and
             fields.get("focused") == "1" and fields.get("capture") == "0" and
             fields.get("utility_domain") == "1" and int(fields.get("utility_dock_node", "0")) != 0,
-            not_before=activation_completed_at,
         )
         reattached_state = marker_fields(reattached_active_state_line, STATE)
         reattached_state_sample = int(reattached_state["sequence"])
@@ -833,14 +908,12 @@ def main() -> int:
               f"output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
         if code != 0:
             raise RuntimeError("the single reattached viewport focus click was not posted")
-        reattached_click_completed_at = time.monotonic()
         reattached_click_baseline = latest_state_sequence()
         reattached_focus_line = wait_for_state(
             reattached_click_baseline, "reattached viewport keyboard focus after one image click",
             lambda fields: fields.get("owner_viewport") == initial.get("main_viewport") and
             fields.get("focused") == "1" and fields.get("keyboard_focused") == "1" and
             fields.get("image_hovered") == "1" and fields.get("hovered_viewport") == initial.get("main_viewport"),
-            not_before=reattached_click_completed_at,
         )
         reattached_focus = marker_fields(reattached_focus_line, STATE)
         reattached_focus_sample = int(reattached_focus["sequence"])

@@ -60,6 +60,82 @@ def marker(kind: str, **fields: str) -> dict[str, str]:
 
 
 class SceneViewportSmokeProtocolTests(unittest.TestCase):
+    @staticmethod
+    def state(sequence: int, position: str = "1,2,3", owner: str = "0x2000") -> str:
+        return (
+            f"{scene_viewport_smoke.STATE} sequence={sequence}; owner_viewport=2; owner_window={owner}; "
+            f"focused=0; camera_position={position}"
+        )
+
+    def test_retained_matching_observation_does_not_become_fresh_when_time_passes(self) -> None:
+        retained = [(4, 10.0, self.state(4))]
+        self.assertIsNone(scene_viewport_smoke.find_fresh_state(
+            retained, 0, 4, lambda fields: fields.get("focused") == "0"
+        ))
+        # Advancing a fake polling clock cannot change sequence eligibility.
+        fake_now = 10_000.0
+        self.assertGreater(fake_now, retained[0][1])
+        self.assertIsNone(scene_viewport_smoke.find_fresh_state(
+            retained, 0, 4, lambda fields: fields.get("focused") == "0"
+        ))
+
+    def test_genuinely_fresh_matching_state_requires_a_later_sequence(self) -> None:
+        observations = [(5, 20.0, self.state(5))]
+        self.assertEqual(
+            observations[0][2], scene_viewport_smoke.find_fresh_state(
+                observations, 0, 4, lambda fields: fields.get("focused") == "0"
+            ),
+        )
+
+    def test_state_history_loss_is_insufficient_freshness_evidence(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "history overflowed"):
+            scene_viewport_smoke.find_fresh_state(
+                [(12, 30.0, self.state(12))], 11, 4, lambda fields: True
+            )
+
+    def test_nonowner_interval_fails_if_camera_moves_during_the_interval(self) -> None:
+        observations = [
+            (11, 30.2, self.state(11)),
+            (12, 31.0, self.state(12, "1,2,3.1")),
+        ]
+        status, evidence = scene_viewport_smoke.evaluate_unchanged_camera_interval(
+            observations, 0, 10, (1.0, 2.0, 3.0), "2", "0x2000", 30.0, 32.0, 1.5, 38.0
+        )
+        self.assertEqual(status, "movement")
+        self.assertIn("sequence=12", evidence)
+
+    def test_nonowner_interval_passes_only_with_fresh_unchanged_observations_through_aftermath(self) -> None:
+        observations = [
+            (10, 29.9, self.state(10)),
+            (11, 30.3, self.state(11)),
+            (12, 31.6, self.state(12)),
+        ]
+        status, evidence = scene_viewport_smoke.evaluate_unchanged_camera_interval(
+            observations, 0, 10, (1.0, 2.0, 3.0), "2", "0x2000", 30.0, 31.6, 1.5, 38.0
+        )
+        self.assertEqual(status, "pass")
+        self.assertIn("observed=2", evidence)
+
+    def test_nonowner_interval_reports_missing_evidence_timeout_and_expiration(self) -> None:
+        status, _ = scene_viewport_smoke.evaluate_unchanged_camera_interval(
+            [], 0, 10, (1.0, 2.0, 3.0), "2", "0x2000", 30.0, 31.6, 1.5, 38.0
+        )
+        self.assertEqual(status, "pending")
+        observations = [(11, 30.2, self.state(11))]
+        status, _ = scene_viewport_smoke.evaluate_unchanged_camera_interval(
+            observations, 0, 10, (1.0, 2.0, 3.0), "2", "0x2000", 30.0, 30.8, 1.5, 38.0
+        )
+        self.assertEqual(status, "pending")
+        status, _ = scene_viewport_smoke.evaluate_unchanged_camera_interval(
+            observations, 0, 10, (1.0, 2.0, 3.0), "2", "0x2000", 30.0, 38.0, 1.5, 38.0
+        )
+        self.assertEqual(status, "insufficient")
+        status, _ = scene_viewport_smoke.evaluate_unchanged_camera_interval(
+            observations, 0, 10, (1.0, 2.0, 3.0), "2", "0x2000", 30.0, 31.6, 1.5,
+            38.0, expired=True,
+        )
+        self.assertEqual(status, "expired")
+
     def test_capture_reader_retains_the_reattached_camera_input_marker(self) -> None:
         self.assertIn(scene_viewport_smoke.REATTACHED_INPUT, scene_viewport_smoke.EVIDENCE_MARKERS)
 
