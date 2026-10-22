@@ -24,6 +24,7 @@ namespace PulseForge
 		m_Renderer = RendererBackend::Create(API, *m_Window);
 		if (!m_Renderer)
 			throw std::runtime_error("Renderer backend creation failed");
+		m_Diagnostics = std::make_unique<DiagnosticRecorder>();
 
 		s_Instance = this;
 		try
@@ -50,14 +51,39 @@ namespace PulseForge
 		return m_Renderer->GetOutputColorEncoding();
 	}
 
-	bool Application::SetGpuFrameTimingEnabled(bool Enabled) noexcept
+	bool Application::SetGpuFrameTimingEnabled(bool Enabled, uint64_t SessionId) noexcept
 	{
-		return m_Renderer->SetGpuFrameTimingEnabled(Enabled);
+		return m_Renderer->SetGpuFrameTimingEnabled(Enabled, SessionId);
 	}
 
 	size_t Application::ReadCompletedGpuFrameTimings(std::span<GpuFrameTiming> Destination) noexcept
 	{
 		return m_Renderer->ReadCompletedGpuFrameTimings(Destination);
+	}
+
+	uint64_t Application::GetCompletedGpuFrameTimingEvictedCount() const noexcept
+	{
+		return m_Renderer->GetCompletedGpuFrameTimingEvictedCount();
+	}
+
+	bool Application::IsGpuFrameTimingSupported() const noexcept
+	{
+		return m_Renderer->IsGpuFrameTimingSupported();
+	}
+
+	bool Application::IsGpuFrameTimingEnabled() const noexcept
+	{
+		return m_Renderer->IsGpuFrameTimingEnabled();
+	}
+
+	std::string_view Application::GetGpuFrameTimingUnavailableReason() const noexcept
+	{
+		return m_Renderer->GetGpuFrameTimingUnavailableReason();
+	}
+
+	std::string_view Application::GetRendererHardwareName() const noexcept
+	{
+		return m_Renderer->GetRendererHardwareName();
 	}
 
 	std::pair<unsigned int, unsigned int> Application::GetOutputFramebufferSize() const noexcept
@@ -99,11 +125,10 @@ namespace PulseForge
 	{
 		try
 		{
-			if (!m_Diagnostics)
-				m_Diagnostics = std::make_unique<DiagnosticRecorder>();
-			m_Diagnostics->Clear();
-			m_Diagnostics->SetCaptureEnabled(true);
-			m_GpuFrameTimingSupported = m_Renderer->SetGpuFrameTimingEnabled(true);
+			if (!m_Diagnostics->SetCaptureEnabled(true))
+				return false;
+			const DiagnosticSnapshot Snapshot = m_Diagnostics->CaptureSnapshot();
+			(void)m_Renderer->SetGpuFrameTimingEnabled(true, Snapshot.SessionId);
 			return true;
 		}
 		catch (...)

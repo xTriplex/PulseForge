@@ -33,6 +33,8 @@ namespace PulseForgeEditor
 				return "Logical allocation";
 			case EditorResourceMetricQuality::ProcessReported:
 				return "OS-reported process";
+			case EditorResourceMetricQuality::Unavailable:
+				return "Unavailable";
 			default:
 				return "Unknown";
 			}
@@ -57,6 +59,13 @@ namespace PulseForgeEditor
 					static_cast<unsigned long long>(Snapshot.EvictedCount),
 					static_cast<unsigned long long>(Snapshot.DroppedCount));
 			}
+			if (Snapshot.MalformedUtf8Count != 0 || Snapshot.TruncatedStringCount != 0 ||
+				Snapshot.RetiredDurationScopesDiscarded != 0)
+				ImGui::TextColored(Style.GetColor(EditorColorToken::TextMuted),
+					"Diagnostic data issues: %llu malformed UTF-8 replacements, %llu truncated strings, %llu retired scopes discarded",
+					static_cast<unsigned long long>(Snapshot.MalformedUtf8Count),
+					static_cast<unsigned long long>(Snapshot.TruncatedStringCount),
+					static_cast<unsigned long long>(Snapshot.RetiredDurationScopesDiscarded));
 
 			if (!ImGui::BeginTable("DiagnosticEvents", 6,
 				ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_RowBg |
@@ -76,8 +85,10 @@ namespace PulseForgeEditor
 				const PulseForge::DiagnosticEvent& Event = Snapshot.Events[Index];
 				ImGui::TableNextRow();
 				ImGui::TableSetColumnIndex(0);
-				const uint64_t RelativeNanoseconds = Event.TimestampNanoseconds >= Snapshot.CaptureStartTimestampNanoseconds
-					? Event.TimestampNanoseconds - Snapshot.CaptureStartTimestampNanoseconds
+				const uint64_t EventTimestamp = Event.Kind == PulseForge::DiagnosticEventKind::Duration &&
+					Event.StartTimestampNanoseconds != 0 ? Event.StartTimestampNanoseconds : Event.TimestampNanoseconds;
+				const uint64_t RelativeNanoseconds = EventTimestamp >= Snapshot.CaptureStartTimestampNanoseconds
+					? EventTimestamp - Snapshot.CaptureStartTimestampNanoseconds
 					: 0;
 				ImGui::Text("%.3f ms", static_cast<double>(RelativeNanoseconds) / 1'000'000.0);
 				ImGui::TableSetColumnIndex(1);
@@ -132,9 +143,14 @@ namespace PulseForgeEditor
 				ImGui::TableSetColumnIndex(1);
 				ImGui::TextUnformatted(Metric.Owner.c_str());
 				ImGui::TableSetColumnIndex(2);
-				ImGui::Text("%llu %s", static_cast<unsigned long long>(Metric.Value), ResourceKindUnit(Metric.Kind));
+				if (Metric.Quality == EditorResourceMetricQuality::Unavailable)
+					ImGui::TextUnformatted(Metric.AvailabilityReason.empty() ? "Unavailable" : Metric.AvailabilityReason.c_str());
+				else
+					ImGui::Text("%llu %s", static_cast<unsigned long long>(Metric.Value), ResourceKindUnit(Metric.Kind));
 				ImGui::TableSetColumnIndex(3);
 				ImGui::TextUnformatted(ResourceQualityName(Metric.Quality));
+				if (!Metric.QualityReason.empty() && ImGui::IsItemHovered())
+					ImGui::SetTooltip("%s", Metric.QualityReason.c_str());
 				ImGui::TableSetColumnIndex(4);
 				ImGui::TextUnformatted(Metric.Scope.c_str());
 			}
@@ -143,9 +159,19 @@ namespace PulseForgeEditor
 
 		void DrawGpuTimings(const EditorPerformanceSnapshot& Snapshot, EditorStyle& Style)
 		{
-			if (!Snapshot.GpuTimingAvailable)
+			if (Snapshot.GpuTimingDroppedCount != 0 || Snapshot.GpuTimingStaleSessionDiscardCount != 0)
+				ImGui::TextColored(Style.GetColor(EditorColorToken::TextMuted),
+					"GPU sample loss: %llu overwritten, %llu stale-session samples discarded",
+					static_cast<unsigned long long>(Snapshot.GpuTimingDroppedCount),
+					static_cast<unsigned long long>(Snapshot.GpuTimingStaleSessionDiscardCount));
+			ImGui::Text("GPU timing: %s | capture enabled: %s",
+				Snapshot.GpuTimingSupported ? "supported" : "unsupported",
+				Snapshot.GpuTimingEnabled ? "yes" : "no");
+			if (!Snapshot.GpuTimingSupported || !Snapshot.GpuTimingEnabled)
 			{
-				Style.TextMuted("GPU frame timing is unavailable on this renderer.");
+				Style.TextMuted(Snapshot.GpuTimingUnavailableReason.empty()
+					? "GPU frame timing is unavailable on this renderer."
+					: Snapshot.GpuTimingUnavailableReason.c_str());
 				return;
 			}
 			Style.TextMuted("Vulkan main-frame duration; results arrive after frame completion and are not synchronized to the CPU clock.");
@@ -190,14 +216,9 @@ namespace PulseForgeEditor
 		}
 	} // namespace
 
-	EditorPerformanceAction EditorPerformancePanel::Draw(const EditorPerformanceSnapshot& Snapshot, EditorStyle& Style) const
+	EditorPerformanceAction EditorPerformancePanel::DrawContents(const EditorPerformanceSnapshot& Snapshot, EditorStyle& Style) const
 	{
 		EditorPerformanceAction Action;
-		if (!ImGui::Begin("Performance"))
-		{
-			ImGui::End();
-			return Action;
-		}
 
 		const PulseForge::DiagnosticSnapshot& Diagnostics = Snapshot.Diagnostics;
 		if (Diagnostics.CaptureEnabled)
@@ -215,11 +236,12 @@ namespace PulseForgeEditor
 		ImGui::SameLine();
 		if (ImGui::Button("Export capture")) Action.Kind = EditorPerformanceActionKind::ExportCapture;
 
-		if (Diagnostics.CaptureStartTimestampNanoseconds != 0 && Diagnostics.SnapshotTimestampNanoseconds >=
-			Diagnostics.CaptureStartTimestampNanoseconds)
+		const uint64_t CaptureEndTimestamp = Diagnostics.CaptureEndTimestampNanoseconds != 0
+			? Diagnostics.CaptureEndTimestampNanoseconds : Diagnostics.SnapshotTimestampNanoseconds;
+		if (Diagnostics.CaptureStartTimestampNanoseconds != 0 && CaptureEndTimestamp >= Diagnostics.CaptureStartTimestampNanoseconds)
 		{
 			const double DurationMilliseconds = static_cast<double>(
-				Diagnostics.SnapshotTimestampNanoseconds - Diagnostics.CaptureStartTimestampNanoseconds) / 1'000'000.0;
+			CaptureEndTimestamp - Diagnostics.CaptureStartTimestampNanoseconds) / 1'000'000.0;
 			ImGui::Text("Capture window: %.2f ms", DurationMilliseconds);
 		}
 		else
@@ -232,7 +254,6 @@ namespace PulseForgeEditor
 		if (ImGui::CollapsingHeader("CPU and resource events", ImGuiTreeNodeFlags_DefaultOpen))
 			DrawDiagnosticEvents(Diagnostics, Style);
 
-		ImGui::End();
 		return Action;
 	}
 } // namespace PulseForgeEditor

@@ -3,6 +3,7 @@
 #include "Core/ScopedProfileTimer.h"
 
 #include <algorithm>
+#include <limits>
 #include <system_error>
 #include <unordered_map>
 
@@ -181,6 +182,7 @@ namespace PulseForge
 		}
 
 		std::unordered_map<AssetID, AssetRecord, UUIDHash> RebuiltAssets;
+		AssetSourceByteAccounting SourceByteAccounting;
 		RebuiltAssets.reserve(SidecarFiles.size());
 		for (const std::filesystem::path& SidecarPath : SidecarFiles)
 		{
@@ -220,6 +222,12 @@ namespace PulseForge
 			}
 
 			const std::filesystem::path RelativePath = SourcePath.lexically_relative(AbsoluteProjectRoot);
+			FileError.clear();
+			const uintmax_t SourceBytes = std::filesystem::file_size(SourcePath, FileError);
+			if (FileError || SourceBytes > std::numeric_limits<uint64_t>::max() - SourceByteAccounting.KnownBytes)
+				++SourceByteAccounting.UnavailableAssetCount;
+			else
+				SourceByteAccounting.KnownBytes += static_cast<uint64_t>(SourceBytes);
 			const auto [Existing, Inserted] = RebuiltAssets.try_emplace(
 				Metadata->ID,
 				AssetRecord{ Metadata->ID, RelativePath });
@@ -238,6 +246,7 @@ namespace PulseForge
 			return std::unexpected(std::move(Error));
 
 		m_Assets.swap(RebuiltAssets);
+		m_SourceByteAccounting = SourceByteAccounting;
 		return {};
 	}
 

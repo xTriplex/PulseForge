@@ -20,9 +20,10 @@ namespace PulseForgeEditor
 		}
 	} // namespace
 
-	std::expected<PreparedEditorProject, EditorProjectPreparationError> PrepareEditorProjectOpen(const std::filesystem::path& ProjectFile)
+	std::expected<PreparedEditorProject, EditorProjectPreparationError> PrepareEditorProjectOpen(
+		const std::filesystem::path& ProjectFile, PulseForge::DiagnosticRecorder* Diagnostics)
 	{
-		auto OpenedProject = PulseForge::Project::Open(ProjectFile);
+		auto OpenedProject = PulseForge::Project::Open(ProjectFile, Diagnostics);
 		if (!OpenedProject)
 			return std::unexpected(EditorProjectPreparationError{ "Project could not be opened: " + OpenedProject.error().Message });
 
@@ -34,7 +35,8 @@ namespace PulseForgeEditor
 				*StartupScene,
 				Result.Project.GetRootPath(),
 				Result.Project.GetAssetRegistry(),
-				*Result.StartupScene);
+				*Result.StartupScene,
+				Diagnostics);
 			if (Loaded)
 				Result.StartupSceneAsset = *StartupScene;
 			else

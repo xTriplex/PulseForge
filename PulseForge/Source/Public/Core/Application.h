@@ -42,11 +42,15 @@ namespace PulseForge
 		[[nodiscard]] bool StartDiagnosticsCapture() noexcept;
 		void StopDiagnosticsCapture() noexcept;
 		[[nodiscard]] DiagnosticSnapshot GetDiagnosticsSnapshot() const;
-		[[nodiscard]] bool IsGpuFrameTimingSupported() const noexcept { return m_GpuFrameTimingSupported; }
+		[[nodiscard]] bool IsGpuFrameTimingSupported() const noexcept;
+		[[nodiscard]] bool IsGpuFrameTimingEnabled() const noexcept;
+		[[nodiscard]] std::string_view GetGpuFrameTimingUnavailableReason() const noexcept;
+		[[nodiscard]] std::string_view GetRendererHardwareName() const noexcept override;
 		[[nodiscard]] DiagnosticRecorder* GetDiagnosticsRecorder() noexcept
 		{
-			return m_Diagnostics && m_Diagnostics->IsCaptureEnabled() ? m_Diagnostics.get() : nullptr;
+			return m_Diagnostics.get();
 		}
+		[[nodiscard]] DiagnosticRecorder* GetDiagnosticRecorder() noexcept override { return m_Diagnostics.get(); }
 #if defined(PF_DEBUG)
 		[[nodiscard]] bool InjectNextPlatformAcquireOutOfDateForTesting(uint64_t TargetID) noexcept;
 		[[nodiscard]] bool InjectNextPlatformImageAllocationFailureForTesting() noexcept;
@@ -61,8 +65,9 @@ namespace PulseForge
 		RendererAPI GetRendererAPI() const { return m_RendererAPI; }
 		[[nodiscard]] std::pair<unsigned int, unsigned int> GetOutputFramebufferSize() const noexcept override;
 		[[nodiscard]] OutputColorEncoding GetOutputColorEncoding() const noexcept override;
-		[[nodiscard]] bool SetGpuFrameTimingEnabled(bool Enabled) noexcept override;
+		[[nodiscard]] bool SetGpuFrameTimingEnabled(bool Enabled, uint64_t SessionId = 0) noexcept override;
 		[[nodiscard]] size_t ReadCompletedGpuFrameTimings(std::span<GpuFrameTiming> Destination) noexcept override;
+		[[nodiscard]] uint64_t GetCompletedGpuFrameTimingEvictedCount() const noexcept override;
 		// Renderer resources should be released before this Application is destroyed.
 		BufferCreateResult CreateBuffer(const BufferDesc& Description, std::span<const std::byte> InitialData = {}) override;
 		// Records an aligned constant-buffer or dynamic geometry-buffer update on the active renderer frame.
@@ -107,7 +112,6 @@ namespace PulseForge
 		LayerStack m_LayerStack;
 		Input m_Input;
 		std::unique_ptr<DiagnosticRecorder> m_Diagnostics;
-		bool m_GpuFrameTimingSupported = false;
 		RendererAPI m_RendererAPI;
 		static Application* s_Instance;
 	};

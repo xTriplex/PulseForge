@@ -26,7 +26,7 @@ namespace PulseForgeEditor
 	};
 
 	[[nodiscard]] std::expected<PreparedEditorProject, EditorProjectPreparationError> PrepareEditorProjectOpen(
-		const std::filesystem::path& ProjectFile);
+		const std::filesystem::path& ProjectFile, PulseForge::DiagnosticRecorder* Diagnostics = nullptr);
 	[[nodiscard]] std::expected<PreparedEditorProject, EditorProjectPreparationError> PrepareEditorProjectCreation(
 		const std::filesystem::path& ProjectFile);
 	[[nodiscard]] std::optional<std::string> CommitPreparedProjectSettings(PreparedEditorProject& Prepared);

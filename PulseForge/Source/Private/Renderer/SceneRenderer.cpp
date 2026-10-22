@@ -133,10 +133,10 @@ namespace PulseForge
 		EnvironmentLightingCache EnvironmentLighting;
 
 		ProjectAssetCaches(RenderDevice& Runtime, const Project& SourceProject)
-			: Meshes(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry()),
-			  Textures(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry()),
+			: Meshes(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry(), Runtime.GetDiagnosticRecorder()),
+			  Textures(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry(), Runtime.GetDiagnosticRecorder()),
 			  Materials(SourceProject.GetRootPath(), SourceProject.GetAssetRegistry()),
-			  EnvironmentLighting(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry())
+			  EnvironmentLighting(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry(), Runtime.GetDiagnosticRecorder())
 		{
 		}
 

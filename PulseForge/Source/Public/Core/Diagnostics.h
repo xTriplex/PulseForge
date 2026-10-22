@@ -23,8 +23,12 @@ namespace PulseForge
 
 	struct DiagnosticEvent
 	{
+		uint64_t SessionId = 0;
 		uint64_t Sequence = 0;
+		// Duration events use the same process-local steady_clock epoch for start and completion;
+		// counters and resource events use TimestampNanoseconds as their event time.
 		uint64_t TimestampNanoseconds = 0;
+		uint64_t StartTimestampNanoseconds = 0;
 		uint64_t ThreadToken = 0;
 		DiagnosticEventKind Kind = DiagnosticEventKind::Counter;
 		std::string Name;
@@ -39,10 +43,15 @@ namespace PulseForge
 		std::vector<DiagnosticEvent> Events;
 		// These timestamps share the steady_clock epoch and are process-local, not wall-clock times.
 		uint64_t CaptureStartTimestampNanoseconds = 0;
+		uint64_t CaptureEndTimestampNanoseconds = 0;
 		uint64_t SnapshotTimestampNanoseconds = 0;
+		uint64_t SessionId = 0;
 		size_t EventCapacity = 0;
 		uint64_t EvictedCount = 0;
 		uint64_t DroppedCount = 0;
+		uint64_t MalformedUtf8Count = 0;
+		uint64_t TruncatedStringCount = 0;
+		uint64_t RetiredDurationScopesDiscarded = 0;
 		bool CaptureEnabled = false;
 	};
 
@@ -57,8 +66,11 @@ namespace PulseForge
 
 		explicit DiagnosticRecorder(size_t Capacity = DefaultCapacity);
 
-		void SetCaptureEnabled(bool Enabled) noexcept;
+		bool SetCaptureEnabled(bool Enabled) noexcept;
+		// A stopped capture retires its session. Scopes still active at Stop are discarded and counted,
+		// never clipped into the capture; later scope completion cannot enter a new session.
 		[[nodiscard]] bool IsCaptureEnabled() const noexcept;
+		[[nodiscard]] bool BeginDurationSession(uint64_t& SessionId, uint64_t& StartTimestampNanoseconds) const noexcept;
 
 		[[nodiscard]] bool RecordEvent(
 			DiagnosticEventKind Kind,
@@ -67,6 +79,21 @@ namespace PulseForge
 			std::string_view Unit = {},
 			uint64_t Value = 0,
 			uint64_t DurationNanoseconds = 0) noexcept;
+		[[nodiscard]] bool RecordDurationForSession(
+			uint64_t SessionId,
+			uint64_t StartTimestampNanoseconds,
+			std::string_view Name,
+			std::string_view Owner,
+			uint64_t MalformedUtf8Count = 0,
+			uint64_t TruncatedStringCount = 0) noexcept;
+		[[nodiscard]] bool RecordDurationForSession(
+			uint64_t SessionId,
+			uint64_t StartTimestampNanoseconds,
+			uint64_t EndTimestampNanoseconds,
+			std::string_view Name,
+			std::string_view Owner,
+			uint64_t MalformedUtf8Count = 0,
+			uint64_t TruncatedStringCount = 0) noexcept;
 
 		[[nodiscard]] DiagnosticSnapshot CaptureSnapshot() const;
 		void Clear() noexcept;
@@ -76,6 +103,8 @@ namespace PulseForge
 		{
 			uint64_t Sequence = 0;
 			uint64_t TimestampNanoseconds = 0;
+			uint64_t StartTimestampNanoseconds = 0;
+			uint64_t SessionId = 0;
 			uint64_t ThreadToken = 0;
 			DiagnosticEventKind Kind = DiagnosticEventKind::Counter;
 			std::array<char, MaximumNameBytes> Name{};
@@ -92,12 +121,17 @@ namespace PulseForge
 		std::unique_ptr<StoredEvent[]> m_Events;
 		mutable std::mutex m_Mutex;
 		std::atomic<bool> m_CaptureEnabled = false;
-		std::atomic<uint64_t> m_CaptureStartTimestampNanoseconds = 0;
+		uint64_t m_CaptureStartTimestampNanoseconds = 0;
 		size_t m_FirstEvent = 0;
 		size_t m_EventCount = 0;
 		uint64_t m_NextSequence = 0;
+		uint64_t m_SessionId = 0;
 		uint64_t m_EvictedCount = 0;
 		std::atomic<uint64_t> m_DroppedCount = 0;
+		uint64_t m_MalformedUtf8Count = 0;
+		uint64_t m_TruncatedStringCount = 0;
+		uint64_t m_RetiredDurationScopesDiscarded = 0;
+		uint64_t m_CaptureEndTimestampNanoseconds = 0;
 	};
 
 	class ScopedDiagnosticTimer final
@@ -119,6 +153,9 @@ namespace PulseForge
 		uint8_t m_NameLength = 0;
 		uint8_t m_OwnerLength = 0;
 		uint64_t m_StartTimestampNanoseconds = 0;
+		uint64_t m_SessionId = 0;
+		uint64_t m_MalformedUtf8Count = 0;
+		uint64_t m_TruncatedStringCount = 0;
 		bool m_Started = false;
 	};
 }
