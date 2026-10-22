@@ -4748,12 +4748,14 @@ namespace
 			PulseForge::Application& App = PulseForge::Application::Get();
 			if (!m_PerformanceCaptureService.IsActive())
 			{
-				if (!App.IsDiagnosticsCaptureEnabled()) return;
-				m_PerformanceGpuTimingRequested = App.IsGpuFrameTimingEnabled();
-				if (!BeginPerformanceCaptureFromCurrentSession())
+				if (App.IsDiagnosticsCaptureEnabled())
 				{
-					App.StopDiagnosticsCapture();
-					m_PerformanceGpuTimingRequested = false;
+					m_PerformanceGpuTimingRequested = App.IsGpuFrameTimingEnabled();
+					if (!BeginPerformanceCaptureFromCurrentSession())
+					{
+						App.StopDiagnosticsCapture();
+						m_PerformanceGpuTimingRequested = false;
+					}
 				}
 			}
 
