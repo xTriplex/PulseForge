@@ -117,6 +117,7 @@ namespace PulseForge
 		Snapshot.CaptureEnabled = m_CaptureEnabled.load(std::memory_order_relaxed);
 		Snapshot.CaptureStartTimestampNanoseconds = m_CaptureStartTimestampNanoseconds.load(std::memory_order_relaxed);
 		Snapshot.SnapshotTimestampNanoseconds = GetMonotonicTimestampNanoseconds();
+		Snapshot.EventCapacity = m_Capacity;
 		Snapshot.EvictedCount = m_EvictedCount;
 		Snapshot.DroppedCount = m_DroppedCount.load(std::memory_order_relaxed);
 		Snapshot.Events.reserve(m_EventCount);

@@ -75,6 +75,7 @@ namespace
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostAcquireOutOfDateTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->EnableDocumentHostImageAllocationFailureTest);
 		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->ProjectOpenRenderTestFile);
+		PF_CHECK(Tests, DefaultOptions && !DefaultOptions->DiagnosticsCaptureSmokeOutput);
 
 		const std::string AbsoluteProjectPath = ProjectFile.string();
 #if defined(_DEBUG) || defined(PF_DEBUG)
@@ -84,6 +85,29 @@ namespace
 		PF_CHECK(Tests, RuntimePlayStopFixtureOptions.has_value());
 		PF_CHECK(Tests, RuntimePlayStopFixtureOptions && RuntimePlayStopFixtureOptions->ProjectFile == ProjectFile &&
 					RuntimePlayStopFixtureOptions->EnableEditorRuntimePlayStopTest);
+		const std::string DiagnosticsTracePath = (Root / "diagnostics-smoke.json").string();
+		const std::array DiagnosticsSmokeArguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--diagnostics-capture-smoke"), std::string_view(DiagnosticsTracePath) };
+		const auto DiagnosticsSmokeOptions = ParseEditorCommandLine(DiagnosticsSmokeArguments, Root);
+		PF_CHECK(Tests, DiagnosticsSmokeOptions && DiagnosticsSmokeOptions->ProjectFile == ProjectFile &&
+			DiagnosticsSmokeOptions->DiagnosticsCaptureSmokeOutput == std::filesystem::path(DiagnosticsTracePath) &&
+			DiagnosticsSmokeOptions->EnableEditorRuntimePlayStopTest);
+		const std::array DiagnosticsSmokeWithoutProject = { std::string_view("--diagnostics-capture-smoke"),
+			std::string_view(DiagnosticsTracePath) };
+		const auto DiagnosticsSmokeWithoutProjectOptions = ParseEditorCommandLine(DiagnosticsSmokeWithoutProject, Root);
+		PF_CHECK(Tests, !DiagnosticsSmokeWithoutProjectOptions &&
+			DiagnosticsSmokeWithoutProjectOptions.error().Code == EditorCommandLineErrorCode::MissingProjectPath);
+		const std::array DiagnosticsSmokeMissingOutput = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--diagnostics-capture-smoke") };
+		const auto DiagnosticsSmokeMissingOutputOptions = ParseEditorCommandLine(DiagnosticsSmokeMissingOutput, Root);
+		PF_CHECK(Tests, !DiagnosticsSmokeMissingOutputOptions &&
+			DiagnosticsSmokeMissingOutputOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+		const std::array DuplicateRuntimeSmokeArguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath),
+			std::string_view("--editor-runtime-play-stop-test"), std::string_view("--diagnostics-capture-smoke"),
+			std::string_view(DiagnosticsTracePath) };
+		const auto DuplicateRuntimeSmokeOptions = ParseEditorCommandLine(DuplicateRuntimeSmokeArguments, Root);
+		PF_CHECK(Tests, !DuplicateRuntimeSmokeOptions &&
+			DuplicateRuntimeSmokeOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
 		const std::array RuntimePlayStopFixtureWithoutProject = { std::string_view("--editor-runtime-play-stop-test") };
 		const auto RuntimePlayStopWithoutProjectOptions = ParseEditorCommandLine(RuntimePlayStopFixtureWithoutProject, Root);
 		PF_CHECK(Tests, !RuntimePlayStopWithoutProjectOptions &&
@@ -151,6 +175,10 @@ namespace
 		const auto RuntimePlayStopFixtureOptions = ParseEditorCommandLine(RuntimePlayStopFixtureArguments, Root);
 		PF_CHECK(Tests, !RuntimePlayStopFixtureOptions &&
 					RuntimePlayStopFixtureOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
+		const std::array DiagnosticsSmokeArguments = { std::string_view("--diagnostics-capture-smoke"), std::string_view("trace.json") };
+		const auto DiagnosticsSmokeOptions = ParseEditorCommandLine(DiagnosticsSmokeArguments, Root);
+		PF_CHECK(Tests, !DiagnosticsSmokeOptions &&
+					DiagnosticsSmokeOptions.error().Code == EditorCommandLineErrorCode::UnexpectedArgument);
 		const std::array CloseUiFixtureArguments = { std::string_view("--document-host-close-ui-test"),
 			std::string_view("cancel-save") };
 		const auto CloseUiFixtureOptions = ParseEditorCommandLine(CloseUiFixtureArguments, Root);

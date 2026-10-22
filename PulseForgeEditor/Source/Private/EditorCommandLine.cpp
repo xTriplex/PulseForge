@@ -101,6 +101,33 @@ namespace PulseForgeEditor
 				continue;
 #endif
 			}
+			if (Arguments[Index] == "--diagnostics-capture-smoke")
+			{
+#if !defined(_DEBUG) && !defined(PF_DEBUG)
+				return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::UnexpectedArgument,
+					"The --diagnostics-capture-smoke option is available only in Debug builds." });
+#else
+				if (Options.EnableEditorRuntimePlayStopTest)
+					return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::UnexpectedArgument,
+						"The diagnostics capture smoke already includes the runtime Play/Stop fixture." });
+				if (Options.DiagnosticsCaptureSmokeOutput)
+					return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::DuplicateOption,
+						"The --diagnostics-capture-smoke option may be specified only once." });
+				if (Index + 1 >= Arguments.size() || Arguments[Index + 1].starts_with("--"))
+					return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::UnexpectedArgument,
+						"The --diagnostics-capture-smoke option requires a trace output path." });
+				std::filesystem::path Output = std::filesystem::u8path(Arguments[++Index]);
+				if (Output.is_relative()) Output = WorkingDirectory / Output;
+				std::error_code Error;
+				Output = std::filesystem::absolute(Output, Error).lexically_normal();
+				if (Error || Output.extension() != ".json" || !std::filesystem::is_directory(Output.parent_path(), Error) || Error)
+					return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::InvalidProjectPath,
+						"The diagnostics smoke output must be a .json path in an existing directory." });
+				Options.DiagnosticsCaptureSmokeOutput = std::move(Output);
+				Options.EnableEditorRuntimePlayStopTest = true;
+				continue;
+#endif
+			}
 			if (Arguments[Index] == "--scene-viewport-native-smoke")
 			{
 #if !defined(_DEBUG) && !defined(PF_DEBUG)
@@ -186,7 +213,8 @@ namespace PulseForgeEditor
 						"--document-workspace-test-switch, and "
 						"--document-host-test-presentation-failure, --document-host-test-acquire-out-of-date, "
 						"--document-host-test-image-allocation-failure, and the Debug-only "
-						"--editor-runtime-play-stop-test, --scene-viewport-native-smoke, and the Debug-only "
+						"--editor-runtime-play-stop-test, --diagnostics-capture-smoke <trace.json>, "
+						"--scene-viewport-native-smoke, and the Debug-only "
 						"--document-host-close-ui-test <scenario>." });
 
 			if (Options.ProjectFile)
@@ -222,6 +250,18 @@ namespace PulseForgeEditor
 		if (Options.EnableEditorRuntimePlayStopTest && !Options.ProjectFile)
 			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::MissingProjectPath,
 				"The --editor-runtime-play-stop-test option requires --project <path>." });
+		if (Options.DiagnosticsCaptureSmokeOutput && !Options.ProjectFile)
+			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::MissingProjectPath,
+				"The --diagnostics-capture-smoke option requires --project <path>." });
+		if (Options.DiagnosticsCaptureSmokeOutput &&
+			(Options.ProjectOpenRenderTestFile || Options.AssetPreviewStressManifest || Options.EnableSceneViewportNativeSmoke ||
+			 Options.DocumentHostCloseUiTestScenario || Options.EnableDocumentHostTestFixture || Options.EnableDocumentHostResetLayoutTest ||
+			 Options.EnableDocumentHostTabTearOffTest || Options.EnableDocumentHostTabReattachTest ||
+			 Options.EnableDocumentHostTabReorderTest || Options.EnableDocumentWorkspaceSwitchTest ||
+			 Options.EnableDocumentHostPresentationFailureTest || Options.EnableDocumentHostAcquireOutOfDateTest ||
+			 Options.EnableDocumentHostImageAllocationFailureTest))
+			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::UnexpectedArgument,
+				"The diagnostics capture smoke must run by itself with --project <path>." });
 		if (Options.EnableSceneViewportNativeSmoke && !Options.ProjectFile)
 			return std::unexpected(EditorCommandLineError{ EditorCommandLineErrorCode::MissingProjectPath,
 				"The --scene-viewport-native-smoke option requires --project <path>." });

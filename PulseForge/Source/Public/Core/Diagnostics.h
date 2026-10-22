@@ -40,6 +40,7 @@ namespace PulseForge
 		// These timestamps share the steady_clock epoch and are process-local, not wall-clock times.
 		uint64_t CaptureStartTimestampNanoseconds = 0;
 		uint64_t SnapshotTimestampNanoseconds = 0;
+		size_t EventCapacity = 0;
 		uint64_t EvictedCount = 0;
 		uint64_t DroppedCount = 0;
 		bool CaptureEnabled = false;

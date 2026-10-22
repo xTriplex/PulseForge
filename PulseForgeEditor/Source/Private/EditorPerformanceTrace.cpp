@@ -20,6 +20,7 @@ namespace PulseForgeEditor
 			{ "capture_start_monotonic_ns", Snapshot.Diagnostics.CaptureStartTimestampNanoseconds },
 			{ "snapshot_monotonic_ns", Snapshot.Diagnostics.SnapshotTimestampNanoseconds },
 			{ "capture_enabled_at_export", Snapshot.Diagnostics.CaptureEnabled },
+			{ "event_capacity", Snapshot.Diagnostics.EventCapacity },
 			{ "ring_evicted_events", Snapshot.Diagnostics.EvictedCount },
 			{ "record_dropped_events", Snapshot.Diagnostics.DroppedCount },
 			{ "gpu_timing_available", Snapshot.GpuTimingAvailable },

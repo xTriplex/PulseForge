@@ -30,6 +30,7 @@ namespace PulseForgeEditor
 		std::optional<std::filesystem::path> ProjectFile;
 		std::optional<std::filesystem::path> ProjectOpenRenderTestFile;
 		std::optional<std::filesystem::path> AssetPreviewStressManifest;
+		std::optional<std::filesystem::path> DiagnosticsCaptureSmokeOutput;
 		std::optional<std::string> DocumentHostCloseUiTestScenario;
 		std::string AssetPreviewStressBudget;
 		bool EnableEditorRuntimePlayStopTest = false;

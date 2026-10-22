@@ -461,6 +461,7 @@ namespace
 			  m_AssetPreviewStress(std::move(Options.AssetPreviewStressManifest), std::move(Options.AssetPreviewStressBudget)),
 			  m_StartupProjectPath(std::move(Options.ProjectFile)),
 			  m_ProjectOpenRenderTestFile(std::move(Options.ProjectOpenRenderTestFile)),
+			  m_DiagnosticsCaptureSmokeOutput(std::move(Options.DiagnosticsCaptureSmokeOutput)),
 			  m_DocumentHostTestFixture(Options.EnableDocumentHostTestFixture
 #if defined(_DEBUG) || defined(PF_DEBUG)
 										|| Options.DocumentHostCloseUiTestScenario.has_value()
@@ -476,6 +477,7 @@ namespace
 			  m_DocumentHostImageAllocationFailureTest(Options.EnableDocumentHostImageAllocationFailureTest)
 		{
 #if defined(_DEBUG) || defined(PF_DEBUG)
+			if (m_DiagnosticsCaptureSmokeOutput) m_DiagnosticsSmokeStartedAt = std::chrono::steady_clock::now();
 			m_EditorRuntimePlayStopCoordinator =
 				std::make_unique<PulseForgeEditor::Detail::EditorRuntimePlayStopCoordinator>(Options.EnableEditorRuntimePlayStopTest);
 			m_SceneViewportNativeSmoke =
@@ -1837,7 +1839,11 @@ namespace
 		std::expected<void, std::string> OpenProjectAt(const std::filesystem::path& ProjectFile)
 		{
 			PulseForge::ScopedDiagnosticTimer DiagnosticTimer(
-				PulseForge::Application::Get().GetDiagnosticsRecorder(), "Editor project open and startup scene", "Editor");
+				PulseForge::Application::Get().GetDiagnosticsRecorder(),
+				m_DiagnosticsCaptureSmokeOutput
+					? (m_DiagnosticsWarmOpenRequested ? "Warm project open and startup scene" : "Cold project open and startup scene")
+					: "Editor project open and startup scene",
+				"Editor");
 			m_ProjectOpenStartedAt = std::chrono::steady_clock::now();
 			m_ProjectOpenTimingActive = true;
 			m_LoggedFirstViewportPrepared = false;
@@ -4522,8 +4528,14 @@ namespace
 			static constexpr PulseForgeEditor::EditorFileDialogFilter Filter{ "JSON Capture", "json" };
 			const auto OutputPath = ShowSaveDialog(&Filter, {}, "PulseForgeCapture.json");
 			if (!OutputPath) return;
-
 			const auto Snapshot = BuildPerformanceSnapshot();
+			if (!WritePerformanceCapture(*OutputPath, Snapshot)) SetError("Could not write the diagnostics capture.");
+			else SetStatus("Diagnostics capture exported.");
+		}
+
+		bool WritePerformanceCapture(
+			const std::filesystem::path& OutputPath, const PulseForgeEditor::EditorPerformanceSnapshot& Snapshot)
+		{
 			PulseForgeEditor::EditorPerformanceTraceMetadata TraceMetadata;
 #if defined(_WIN32)
 			TraceMetadata.Platform = "Windows";
@@ -4544,16 +4556,11 @@ namespace
 			TraceMetadata.Configuration = "Unknown";
 #endif
 			TraceMetadata.Renderer = PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan ? "Vulkan" : "OpenGL";
-			std::ofstream Output(*OutputPath, std::ios::binary | std::ios::trunc);
-			if (!Output)
-			{
-				SetError("Could not open the selected diagnostics capture path for writing.");
-				return;
-			}
+			std::ofstream Output(OutputPath, std::ios::binary | std::ios::trunc);
+			if (!Output) return false;
 			Output << PulseForgeEditor::SerializeEditorPerformanceTrace(Snapshot, TraceMetadata);
 			Output.flush();
-			if (!Output) SetError("Could not finish writing the diagnostics capture.");
-			else SetStatus("Diagnostics capture exported.");
+			return static_cast<bool>(Output);
 		}
 
 		void DrawPerformancePanel()
@@ -6896,6 +6903,7 @@ namespace
 			Clear.Color = { Background.Red, Background.Green, Background.Blue, Background.Alpha };
 			const bool ViewportRendered = m_ViewportRenderView.Render(PulseForge::Application::Get(),
 				m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport), m_ViewportTools.GetValues().ExposureEV, Clear);
+			if (ViewportRendered) ++m_SceneViewportRenderedFrames;
 #if defined(_DEBUG) || defined(PF_DEBUG)
 			if (m_EditorRuntimePlayStopCoordinator && m_EditorRuntimePlayStopCoordinator->IsEnabled() && ViewportRendered)
 				m_EditorRuntimePlayStopCoordinator->ObserveViewportRender(m_SceneRuntime && m_RuntimeScene);
@@ -7257,6 +7265,8 @@ namespace
 		void AdvanceEditorRuntimePlayStopTest()
 		{
 			if (!m_EditorRuntimePlayStopCoordinator || !m_EditorRuntimePlayStopCoordinator->IsEnabled()) return;
+			if (AdvanceDiagnosticsCaptureSmokeCompletion()) return;
+			if (m_DiagnosticsCaptureSmokeOutput && !PrepareDiagnosticsCaptureSmokeWorkload()) return;
 			const bool RuntimeRunning = m_SceneRuntime && m_RuntimeScene && m_SceneRuntime->IsRunning();
 			const auto Action = m_EditorRuntimePlayStopCoordinator->Advance(RuntimeRunning);
 			if (!m_EditorRuntimePlayStopCoordinator->FailureReason().empty())
@@ -7323,8 +7333,103 @@ namespace
 					FailEditorRuntimePlayStopTest(std::string(m_EditorRuntimePlayStopCoordinator->FailureReason()));
 					return;
 				}
-				RequestEditorApplicationClose();
+				if (!m_DiagnosticsCaptureSmokeOutput) RequestEditorApplicationClose();
 			}
+		}
+
+		bool PrepareDiagnosticsCaptureSmokeWorkload()
+		{
+			if (m_DiagnosticsSmokeStartedAt != std::chrono::steady_clock::time_point{} &&
+				std::chrono::steady_clock::now() - m_DiagnosticsSmokeStartedAt > std::chrono::seconds(180))
+			{
+				FailEditorRuntimePlayStopTest("The diagnostics capture smoke exceeded its 180-second safety deadline.");
+				return false;
+			}
+			if (!m_DiagnosticsWarmOpenRequested)
+			{
+				if (!m_LoggedFirstViewportRendered || !m_StartupProjectPath) return false;
+				m_DiagnosticsWarmOpenRequested = true;
+				if (auto Result = OpenProjectAt(*m_StartupProjectPath); !Result)
+					FailEditorRuntimePlayStopTest("Warm project open failed: " + Result.error());
+				else PF_INFO("PULSEFORGE_DIAGNOSTICS_SMOKE=WARM_PROJECT_OPEN_REQUESTED");
+				return false;
+			}
+			if (!m_LoggedFirstViewportRendered) return false;
+			if (m_DiagnosticsResizeObserved) return true;
+			GLFWwindow* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
+			if (!Window)
+			{
+				FailEditorRuntimePlayStopTest("The diagnostics smoke could not resolve the editor's native window for resize.");
+				return false;
+			}
+			if (!m_DiagnosticsResizeRequested)
+			{
+				glfwGetWindowSize(Window, &m_DiagnosticsInitialWindowWidth, &m_DiagnosticsInitialWindowHeight);
+				if (m_DiagnosticsInitialWindowWidth <= 0 || m_DiagnosticsInitialWindowHeight <= 0)
+				{
+					FailEditorRuntimePlayStopTest("The diagnostics smoke observed an invalid initial window size.");
+					return false;
+				}
+				m_DiagnosticsTargetWindowWidth = m_DiagnosticsInitialWindowWidth < 1400
+					? std::min(m_DiagnosticsInitialWindowWidth + 64, 1400) : std::max(m_DiagnosticsInitialWindowWidth - 64, 800);
+				m_DiagnosticsTargetWindowHeight = m_DiagnosticsInitialWindowHeight < 850
+					? std::min(m_DiagnosticsInitialWindowHeight + 48, 850) : std::max(m_DiagnosticsInitialWindowHeight - 48, 600);
+				m_DiagnosticsResizeRenderBaseline = m_SceneViewportRenderedFrames;
+				glfwSetWindowSize(Window, m_DiagnosticsTargetWindowWidth, m_DiagnosticsTargetWindowHeight);
+				m_DiagnosticsResizeRequested = true;
+				PF_INFO("PULSEFORGE_DIAGNOSTICS_SMOKE=RESIZE_REQUESTED; from={}x{}; to={}x{}",
+					m_DiagnosticsInitialWindowWidth, m_DiagnosticsInitialWindowHeight,
+					m_DiagnosticsTargetWindowWidth, m_DiagnosticsTargetWindowHeight);
+				return false;
+			}
+			int Width = 0;
+			int Height = 0;
+			glfwGetWindowSize(Window, &Width, &Height);
+			if (Width != m_DiagnosticsTargetWindowWidth || Height != m_DiagnosticsTargetWindowHeight ||
+				m_SceneViewportRenderedFrames <= m_DiagnosticsResizeRenderBaseline)
+				return false;
+			m_DiagnosticsResizeObserved = true;
+			PF_INFO("PULSEFORGE_DIAGNOSTICS_SMOKE=RESIZE_OBSERVED; size={}x{}; rendered_frames={}",
+				Width, Height, m_SceneViewportRenderedFrames - m_DiagnosticsResizeRenderBaseline);
+			return true;
+		}
+
+		bool AdvanceDiagnosticsCaptureSmokeCompletion()
+		{
+			if (!m_DiagnosticsCaptureSmokeOutput || !m_EditorRuntimePlayStopCoordinator ||
+				!m_EditorRuntimePlayStopCoordinator->Complete()) return false;
+			if (!m_DiagnosticsIdleStartedAt)
+			{
+				m_DiagnosticsIdleStartedAt = std::chrono::steady_clock::now();
+				PF_INFO("PULSEFORGE_DIAGNOSTICS_SMOKE=IDLE_SAMPLE_STARTED; duration_seconds=2");
+				return true;
+			}
+			if (std::chrono::steady_clock::now() - *m_DiagnosticsIdleStartedAt < std::chrono::seconds(2)) return true;
+			PulseForge::Application& Application = PulseForge::Application::Get();
+			Application.StopDiagnosticsCapture();
+			const auto Snapshot = BuildPerformanceSnapshot();
+			const bool ColdProjectOpenCaptured = std::any_of(Snapshot.Diagnostics.Events.begin(), Snapshot.Diagnostics.Events.end(),
+				[](const PulseForge::DiagnosticEvent& Event) { return Event.Name == "Cold project open and startup scene"; });
+			const bool WarmProjectOpenCaptured = std::any_of(Snapshot.Diagnostics.Events.begin(), Snapshot.Diagnostics.Events.end(),
+				[](const PulseForge::DiagnosticEvent& Event) { return Event.Name == "Warm project open and startup scene"; });
+			if (Snapshot.Diagnostics.Events.empty() || !ColdProjectOpenCaptured || !WarmProjectOpenCaptured || !m_DiagnosticsResizeObserved)
+			{
+				FailEditorRuntimePlayStopTest("The diagnostics smoke capture lacks project-open, resize, or diagnostic event evidence.");
+				return true;
+			}
+			if (!WritePerformanceCapture(*m_DiagnosticsCaptureSmokeOutput, Snapshot))
+			{
+				FailEditorRuntimePlayStopTest("The diagnostics smoke could not write its trace output.");
+				return true;
+			}
+			PF_INFO("PULSEFORGE_DIAGNOSTICS_SMOKE=PASS; events={}; event_capacity={}; gpu_timing_supported={}; gpu_samples={}; "
+				"resources={}; evicted={}; dropped={}; trace={}; orderly_shutdown_requested=1",
+				Snapshot.Diagnostics.Events.size(), Snapshot.Diagnostics.EventCapacity, Snapshot.GpuTimingAvailable ? 1 : 0,
+				Snapshot.CompletedGpuTimings.size(),
+				Snapshot.Resources.size(), Snapshot.Diagnostics.EvictedCount, Snapshot.Diagnostics.DroppedCount,
+				m_DiagnosticsCaptureSmokeOutput->string());
+			RequestEditorApplicationClose();
+			return true;
 		}
 
 		void FailEditorRuntimePlayStopTest(std::string Message)
@@ -7556,6 +7661,20 @@ namespace
 		std::unordered_set<std::string> m_DocumentHostFocusRequests;
 		std::optional<std::filesystem::path> m_StartupProjectPath;
 		std::optional<std::filesystem::path> m_ProjectOpenRenderTestFile;
+		std::optional<std::filesystem::path> m_DiagnosticsCaptureSmokeOutput;
+		bool m_DiagnosticsWarmOpenRequested = false;
+		bool m_DiagnosticsResizeRequested = false;
+		bool m_DiagnosticsResizeObserved = false;
+		int m_DiagnosticsInitialWindowWidth = 0;
+		int m_DiagnosticsInitialWindowHeight = 0;
+		int m_DiagnosticsTargetWindowWidth = 0;
+		int m_DiagnosticsTargetWindowHeight = 0;
+		uint64_t m_DiagnosticsResizeRenderBaseline = 0;
+		uint64_t m_SceneViewportRenderedFrames = 0;
+		std::optional<std::chrono::steady_clock::time_point> m_DiagnosticsIdleStartedAt;
+#if defined(_DEBUG) || defined(PF_DEBUG)
+		std::chrono::steady_clock::time_point m_DiagnosticsSmokeStartedAt{};
+#endif
 		bool m_ProjectOpenRenderTestRequested = false;
 #if defined(_DEBUG) || defined(PF_DEBUG)
 		std::unique_ptr<PulseForgeEditor::Detail::EditorRuntimePlayStopCoordinator> m_EditorRuntimePlayStopCoordinator;
@@ -7682,6 +7801,8 @@ namespace
 			: Application(PulseForge::RendererAPI::Vulkan)
 #endif
 		{
+			if (Options.DiagnosticsCaptureSmokeOutput && !StartDiagnosticsCapture())
+				throw std::runtime_error("The diagnostics smoke could not allocate its bounded capture buffer.");
 			PushLayer(std::make_unique<EditorLayer>(std::move(Options)));
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			PF_INFO("PulseForge editor started with the OpenGL ImGui backend");
