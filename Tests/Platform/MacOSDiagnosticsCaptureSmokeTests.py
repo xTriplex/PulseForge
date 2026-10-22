@@ -100,6 +100,14 @@ class DiagnosticsCaptureSmokeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid owner or geometry"):
             smoke.validate_panel_ready(marker)
 
+    def test_performance_panel_title_bar_only_geometry_is_rejected(self) -> None:
+        marker = (
+            "PULSEFORGE_DIAGNOSTICS_PERFORMANCE_PANEL=READY; utility_window=1; capture_controls=1; "
+            "owner_viewport=3158883903; rect=60,123,32,44; resources=19; events=9"
+        )
+        with self.assertRaisesRegex(ValueError, "usable utility window"):
+            smoke.validate_panel_ready(marker)
+
 
 if __name__ == "__main__":
     unittest.main()
