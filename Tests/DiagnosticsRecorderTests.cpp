@@ -3,6 +3,9 @@
 #include "Core/Diagnostics.h"
 
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -21,6 +24,7 @@ namespace
 		const DiagnosticSnapshot Snapshot = Recorder.CaptureSnapshot();
 		PF_CHECK(Tests, !Snapshot.CaptureEnabled);
 		PF_CHECK(Tests, Snapshot.Events.empty());
+		PF_CHECK(Tests, Snapshot.EventCapacity == 4);
 		PF_CHECK(Tests, Snapshot.EvictedCount == 0);
 		PF_CHECK(Tests, Snapshot.DroppedCount == 0);
 	}
@@ -172,10 +176,34 @@ namespace
 
 void RunDiagnosticsRecorderTests(TestRunner& Tests)
 {
+	using namespace PulseForge;
 	TestDisabledRecording(Tests);
 	TestCapacityAndClear(Tests);
 	TestBoundedStrings(Tests);
 	TestConcurrentRecordingAndSnapshots(Tests);
 	TestScopedTimerCapture(Tests);
 	TestInvalidCapacities(Tests);
+	if (std::getenv("PULSEFORGE_DIAGNOSTICS_BENCHMARK"))
+	{
+		using Clock = std::chrono::steady_clock;
+		constexpr size_t Iterations = 200'000;
+		DiagnosticRecorder Recorder;
+		auto Begin = Clock::now();
+		for (size_t Index = 0; Index < Iterations; ++Index)
+		{
+			ScopedDiagnosticTimer Timer(Recorder, "benchmark", "test");
+		}
+		const auto DisabledElapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - Begin).count();
+		Recorder.SetCaptureEnabled(true);
+		Begin = Clock::now();
+		for (size_t Index = 0; Index < Iterations; ++Index)
+		{
+			ScopedDiagnosticTimer Timer(Recorder, "benchmark", "test");
+		}
+		const auto EnabledElapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - Begin).count();
+		std::cout << "PULSEFORGE_DIAGNOSTICS_BENCHMARK; iterations=" << Iterations
+			<< "; disabled_ns_per_scope=" << (DisabledElapsed / static_cast<int64_t>(Iterations))
+			<< "; enabled_ns_per_scope=" << (EnabledElapsed / static_cast<int64_t>(Iterations))
+			<< "; ring_capacity=" << Recorder.CaptureSnapshot().EventCapacity << '\n';
+	}
 }

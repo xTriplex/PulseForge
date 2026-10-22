@@ -10,6 +10,7 @@ void RunEditorPerformanceTraceTests(TestRunner& Tests)
 	EditorPerformanceSnapshot Snapshot;
 	Snapshot.Diagnostics.CaptureStartTimestampNanoseconds = 1'000'000;
 	Snapshot.Diagnostics.SnapshotTimestampNanoseconds = 8'000'000;
+	Snapshot.Diagnostics.EventCapacity = 8192;
 	Snapshot.Diagnostics.EvictedCount = 3;
 	Snapshot.Diagnostics.DroppedCount = 2;
 	Snapshot.Diagnostics.Events.push_back({
@@ -44,6 +45,7 @@ void RunEditorPerformanceTraceTests(TestRunner& Tests)
 	PF_CHECK(Tests, Trace["metadata"]["configuration"] == "Debug");
 	PF_CHECK(Tests, Trace["metadata"]["renderer"] == "Vulkan");
 	PF_CHECK(Tests, Trace["metadata"]["capture_start_monotonic_ns"] == 1'000'000);
+	PF_CHECK(Tests, Trace["metadata"]["event_capacity"] == 8192);
 	PF_CHECK(Tests, Trace["metadata"]["ring_evicted_events"] == 3);
 	PF_CHECK(Tests, Trace["metadata"]["record_dropped_events"] == 2);
 	PF_CHECK(Tests, Trace["metadata"]["resources"][0]["quality"] == "logical-allocation-estimate");
