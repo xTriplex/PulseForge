@@ -131,7 +131,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     needs: macos-automation-bridge
-    if: ${{ always() && !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && !contains(github.event.head_commit.message || '', '[automation-probe-only]') }}
+    if: ${{ always() && !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && (github.event_name != 'push' || !contains(github.event.head_commit.message || '', '[automation-probe-only]')) }}
     steps:
       - name: Check out sources
         id: checkout_sources
@@ -548,7 +548,7 @@ jobs:
 
   windows-msvc:
     name: Windows 2022 · MSVC · Debug
-    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && !contains(github.event.head_commit.message || '', '[automation-probe-only]') }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && (github.event_name != 'push' || !contains(github.event.head_commit.message || '', '[automation-probe-only]')) }}
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -640,7 +640,7 @@ jobs:
 
   linux-gcc:
     name: Ubuntu 24.04 · GCC · Ninja · Debug
-    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && !contains(github.event.head_commit.message || '', '[automation-probe-only]') }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && (github.event_name != 'push' || !contains(github.event.head_commit.message || '', '[automation-probe-only]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
