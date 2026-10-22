@@ -15,7 +15,7 @@ import time
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import MacOSDocumentCloseSmoke as smoke
 import MacOSBundleSmoke as bundle
@@ -25,6 +25,7 @@ import MacOSNativeDialogAutomation as native_dialog
 import MacOSScreenshot as screenshot
 import MacOSWorkspaceRestoreSmoke as workspace_restore
 import MacOSDocumentHostSmoke as document_host
+import MacOSSceneViewportSmoke as scene_viewport_smoke
 
 
 class FakeProcess:
@@ -56,6 +57,269 @@ class FakeCapture:
 
 def marker(kind: str, **fields: str) -> dict[str, str]:
     return {"kind": kind, "_capture_index": "1", "raw": f"PF_DOC_CLOSE_UI|{kind}", **fields}
+
+
+class SceneViewportSmokeProtocolTests(unittest.TestCase):
+    @staticmethod
+    def state(sequence: int, position: str = "1,2,3", owner: str = "0x2000") -> str:
+        return (
+            f"{scene_viewport_smoke.STATE} sequence={sequence}; owner_viewport=2; owner_window={owner}; "
+            f"focused=0; camera_position={position}"
+        )
+
+    def test_retained_matching_observation_does_not_become_fresh_when_time_passes(self) -> None:
+        retained = [(4, 10.0, self.state(4))]
+        self.assertIsNone(scene_viewport_smoke.find_fresh_state(
+            retained, 0, 4, lambda fields: fields.get("focused") == "0"
+        ))
+        # Advancing a fake polling clock cannot change sequence eligibility.
+        fake_now = 10_000.0
+        self.assertGreater(fake_now, retained[0][1])
+        self.assertIsNone(scene_viewport_smoke.find_fresh_state(
+            retained, 0, 4, lambda fields: fields.get("focused") == "0"
+        ))
+
+    def test_genuinely_fresh_matching_state_requires_a_later_sequence(self) -> None:
+        observations = [(5, 20.0, self.state(5))]
+        self.assertEqual(
+            observations[0][2], scene_viewport_smoke.find_fresh_state(
+                observations, 0, 4, lambda fields: fields.get("focused") == "0"
+            ),
+        )
+
+    def test_state_history_loss_is_insufficient_freshness_evidence(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "history overflowed"):
+            scene_viewport_smoke.find_fresh_state(
+                [(12, 30.0, self.state(12))], 11, 4, lambda fields: True
+            )
+
+    def test_nonowner_interval_fails_if_camera_moves_during_the_interval(self) -> None:
+        observations = [
+            (11, 30.2, self.state(11)),
+            (12, 31.0, self.state(12, "1,2,3.1")),
+        ]
+        status, evidence = scene_viewport_smoke.evaluate_unchanged_camera_interval(
+            observations, 0, 10, (1.0, 2.0, 3.0), "2", "0x2000", 30.0, 32.0, 1.5, 38.0
+        )
+        self.assertEqual(status, "movement")
+        self.assertIn("sequence=12", evidence)
+
+    def test_nonowner_interval_passes_only_with_fresh_unchanged_observations_through_aftermath(self) -> None:
+        observations = [
+            (10, 29.9, self.state(10)),
+            (11, 30.3, self.state(11)),
+            (12, 31.6, self.state(12)),
+        ]
+        status, evidence = scene_viewport_smoke.evaluate_unchanged_camera_interval(
+            observations, 0, 10, (1.0, 2.0, 3.0), "2", "0x2000", 30.0, 31.6, 1.5, 38.0
+        )
+        self.assertEqual(status, "pass")
+        self.assertIn("observed=2", evidence)
+
+    def test_nonowner_interval_reports_missing_evidence_timeout_and_expiration(self) -> None:
+        status, _ = scene_viewport_smoke.evaluate_unchanged_camera_interval(
+            [], 0, 10, (1.0, 2.0, 3.0), "2", "0x2000", 30.0, 31.6, 1.5, 38.0
+        )
+        self.assertEqual(status, "pending")
+        observations = [(11, 30.2, self.state(11))]
+        status, _ = scene_viewport_smoke.evaluate_unchanged_camera_interval(
+            observations, 0, 10, (1.0, 2.0, 3.0), "2", "0x2000", 30.0, 30.8, 1.5, 38.0
+        )
+        self.assertEqual(status, "pending")
+        status, _ = scene_viewport_smoke.evaluate_unchanged_camera_interval(
+            observations, 0, 10, (1.0, 2.0, 3.0), "2", "0x2000", 30.0, 38.0, 1.5, 38.0
+        )
+        self.assertEqual(status, "insufficient")
+        status, _ = scene_viewport_smoke.evaluate_unchanged_camera_interval(
+            observations, 0, 10, (1.0, 2.0, 3.0), "2", "0x2000", 30.0, 31.6, 1.5,
+            38.0, expired=True,
+        )
+        self.assertEqual(status, "expired")
+
+    def test_capture_reader_retains_the_reattached_camera_input_marker(self) -> None:
+        self.assertIn(scene_viewport_smoke.REATTACHED_INPUT, scene_viewport_smoke.EVIDENCE_MARKERS)
+
+    def test_focus_loss_activation_targets_and_verifies_the_main_editor_window(self) -> None:
+        output = (
+            "DIRECT_AX_RESULT status=window-focused; pid=4321; target_title=EditorWorkflowOverview.scene - PulseForge Editor; "
+            "focused_title=EditorWorkflowOverview.scene - PulseForge Editor; ax_raise_error=0; focus_error=0; attempts=1\n"
+        )
+        with patch.object(scene_viewport_smoke, "run_direct_ax", return_value=(0, output, "")) as activate:
+            result = scene_viewport_smoke.activate_main_editor_window(4321, time.monotonic() + 5.0)
+        activate.assert_called_once()
+        self.assertEqual((4321,), activate.call_args.args)
+        self.assertEqual("activate-window", activate.call_args.kwargs["operation"])
+        self.assertEqual("PulseForge Editor", activate.call_args.kwargs["window_title"])
+        self.assertGreater(activate.call_args.kwargs["timeout"], 0.0)
+        self.assertLessEqual(activate.call_args.kwargs["timeout"], 10.0)
+        self.assertIn("status=window-focused", result)
+
+    def test_focus_loss_activation_failure_is_not_treated_as_success(self) -> None:
+        with patch.object(
+            scene_viewport_smoke, "run_direct_ax", return_value=(13, "window selection failed", "")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "main editor activation failed"):
+                scene_viewport_smoke.activate_main_editor_window(4321, time.monotonic() + 5.0)
+
+    def test_marker_fields_preserve_keys_and_native_owner_identity(self) -> None:
+        line = (
+            "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=DETACHED; main_viewport=1; owner_viewport=2; "
+            "owner_window=0x2000; image_min=20.0,30.0; image_max=620.0,430.0"
+        )
+        fields = scene_viewport_smoke.marker_fields(line, scene_viewport_smoke.DETACHED)
+        self.assertEqual(fields["main_viewport"], "1")
+        self.assertEqual(fields["owner_viewport"], "2")
+        self.assertEqual(fields["owner_window"], "0x2000")
+        self.assertEqual(scene_viewport_smoke.coordinate(fields, "image_min", 2), (20.0, 30.0))
+        self.assertNotEqual(fields["owner_viewport"], fields["main_viewport"])
+
+    def test_marker_parser_rejects_wrong_event_and_malformed_geometry(self) -> None:
+        with self.assertRaises(ValueError):
+            scene_viewport_smoke.marker_fields("MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY;", scene_viewport_smoke.DETACHED)
+        for raw in ("1,2,3", "nan,2", "1,inf"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                scene_viewport_smoke.coordinate({"point": raw}, "point", 2)
+
+    def test_post_activation_viewport_geometry_must_belong_to_its_native_owner(self) -> None:
+        usable = {
+            "image_min": "110,120", "image_max": "500,400", "owner_native_rect": "100,80,600,400"
+        }
+        outside = {**usable, "image_max": "710,400"}
+        self.assertTrue(scene_viewport_smoke.has_usable_viewport_geometry(usable))
+        self.assertFalse(scene_viewport_smoke.has_usable_viewport_geometry(outside))
+        self.assertFalse(scene_viewport_smoke.has_usable_viewport_geometry({"image_min": "0,0"}))
+
+    def test_camera_geometry_requires_a_sample_emitted_after_window_activation(self) -> None:
+        prior = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT; sample=4; stable_seconds=1.5"
+        fresh = "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT; sample=5; stable_seconds=0.8"
+        self.assertFalse(scene_viewport_smoke.is_fresh_geometry_sample(prior, 4))
+        self.assertTrue(scene_viewport_smoke.is_fresh_geometry_sample(fresh, 4))
+        self.assertFalse(scene_viewport_smoke.is_fresh_geometry_sample(None, 4))
+        with self.assertRaisesRegex(ValueError, "valid sample sequence"):
+            scene_viewport_smoke.is_fresh_geometry_sample(
+                "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT; stable_seconds=1.5", 4
+            )
+
+    def test_camera_input_uses_only_the_visible_intersection_of_a_detached_image(self) -> None:
+        display, minimum, maximum = scene_viewport_smoke.visible_camera_region(
+            (832.2, 425.0),
+            (1274.8, 602.0),
+            [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}],
+        )
+        self.assertEqual(display["id"], 1)
+        self.assertAlmostEqual(minimum[0], 856.2)
+        self.assertAlmostEqual(minimum[1], 449.0)
+        self.assertAlmostEqual(maximum[0], 1000.0)
+        self.assertAlmostEqual(maximum[1], 578.0)
+        self.assertLessEqual(maximum[0], 1024.0)
+        self.assertLessEqual(maximum[1], 768.0)
+        with self.assertRaisesRegex(ValueError, "no usable visible region"):
+            scene_viewport_smoke.visible_camera_region(
+                (1100.0, 425.0),
+                (1274.8, 602.0),
+                [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}],
+            )
+
+    def test_camera_input_accepts_a_small_but_usable_reattached_viewport(self) -> None:
+        display, minimum, maximum, point = scene_viewport_smoke.visible_camera_target(
+            (33.0, 264.0),
+            (151.0, 441.0),
+            [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}],
+        )
+        self.assertEqual(display["id"], 1)
+        self.assertEqual(minimum, (57.0, 288.0))
+        self.assertEqual(maximum, (127.0, 417.0))
+        self.assertEqual(point, (65.0, 409.0))
+        self.assertGreater(point[1], 372.0, "focus point must remain below the Scene Viewport orientation gizmo")
+        self.assertLess(point[0], 71.0, "focus point must remain left of the Scene Viewport orientation gizmo")
+
+    def test_focus_reacquisition_target_stays_on_the_visible_display(self) -> None:
+        display, minimum, maximum, point = scene_viewport_smoke.visible_camera_target(
+            (832.2, 425.0),
+            (1274.8, 602.0),
+            [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}],
+        )
+        self.assertEqual(display["id"], 1)
+        self.assertGreaterEqual(point[0], minimum[0])
+        self.assertLessEqual(point[0], maximum[0])
+        self.assertGreaterEqual(point[1], minimum[1])
+        self.assertLessEqual(point[1], maximum[1])
+        self.assertLessEqual(point[0], 1024.0)
+        self.assertLessEqual(point[1], 768.0)
+        self.assertNotEqual(point, ((832.2 + 1274.8) * 0.5, (425.0 + 602.0) * 0.5))
+
+    def test_native_geometry_keeps_two_x_backing_scale_in_input_coordinates(self) -> None:
+        display, minimum, maximum = scene_viewport_smoke.visible_camera_region(
+            (100.0, 120.0), (500.0, 420.0),
+            [{"id": 7, "x": 0, "y": 0, "width": 720, "height": 450, "backing_scale": 2.0}],
+        )
+        self.assertEqual(display["backing_scale"], 2.0)
+        self.assertEqual(minimum, (124.0, 144.0))
+        self.assertEqual(maximum, (476.0, 396.0))
+
+    def test_native_geometry_uses_negative_secondary_display_origin(self) -> None:
+        display, minimum, maximum = scene_viewport_smoke.visible_camera_region(
+            (-1800.0, 80.0), (-1200.0, 500.0),
+            [{"id": 2, "x": -1920, "y": 0, "width": 1920, "height": 1080, "backing_scale": 1.0}],
+        )
+        self.assertEqual(display["id"], 2)
+        self.assertEqual(minimum, (-1776.0, 104.0))
+        self.assertEqual(maximum, (-1224.0, 476.0))
+
+    def test_native_geometry_selects_most_visible_display_for_partial_image(self) -> None:
+        displays = [
+            {"id": 1, "x": 0, "y": 0, "width": 400, "height": 300, "backing_scale": 1.0},
+            {"id": 2, "x": 400, "y": -100, "width": 600, "height": 500, "backing_scale": 2.0},
+        ]
+        display, minimum, maximum = scene_viewport_smoke.visible_camera_region((350.0, 0.0), (850.0, 300.0), displays)
+        self.assertEqual(display["id"], 2)
+        self.assertEqual(minimum, (424.0, 24.0))
+        self.assertEqual(maximum, (826.0, 276.0))
+
+    def test_floating_title_bar_drag_target_uses_global_event_coordinates(self) -> None:
+        display, visible, point = scene_viewport_smoke.visible_drag_target(
+            (-1600.0, 40.0, -1240.0, 68.0),
+            [{"id": 3, "x": -1920, "y": 0, "width": 1920, "height": 1080, "backing_scale": 2.0}],
+        )
+        self.assertEqual(display["id"], 3)
+        self.assertEqual(visible, (-1600.0, 40.0, -1240.0, 68.0))
+        self.assertEqual(point, (-1420.0, 54.0))
+
+    def test_dock_tab_drag_target_uses_only_visible_noncontrol_region(self) -> None:
+        display, visible, point = scene_viewport_smoke.visible_drag_target(
+            (300.0, 90.0, 430.0, 116.0),
+            [{"id": 1, "x": 0, "y": 0, "width": 400, "height": 300, "backing_scale": 1.0}],
+        )
+        self.assertEqual(display["id"], 1)
+        self.assertEqual(visible, (300.0, 90.0, 400.0, 116.0))
+        self.assertEqual(point, (350.0, 103.0))
+
+    def test_reattachment_targets_a_visible_main_utility_dock_node(self) -> None:
+        fields = {
+            "utility_drop_target": "main_utility_panel_dock_node",
+            "utility_drop_panel": "Inspector",
+            "utility_drop_rect": "690,180,850,610",
+        }
+        displays = [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0,
+                     "coordinate_space": "Quartz global display coordinates"}]
+        display, visible, point = scene_viewport_smoke.visible_utility_drop_target(fields, displays)
+        self.assertEqual(display["id"], 1)
+        self.assertEqual(visible, (690.0, 180.0, 850.0, 610.0))
+        self.assertEqual(point, (770.0, 395.0))
+        with self.assertRaisesRegex(ValueError, "unavailable or unexpected"):
+            scene_viewport_smoke.visible_utility_drop_target({"utility_drop_rect": "1,1,100,100"}, displays)
+        with self.assertRaisesRegex(ValueError, "no usable visible region"):
+            scene_viewport_smoke.visible_utility_drop_target(
+                {"utility_drop_target": "main_utility_panel_dock_node", "utility_drop_panel": "Hierarchy",
+                 "utility_drop_rect": "1100,20,1200,200"}, displays
+            )
+
+    def test_drag_target_rejects_empty_or_fully_offscreen_geometry(self) -> None:
+        displays = [{"id": 1, "x": 0, "y": 0, "width": 1024, "height": 768, "backing_scale": 1.0}]
+        with self.assertRaisesRegex(ValueError, "empty"):
+            scene_viewport_smoke.visible_drag_target((20.0, 20.0, 20.0, 30.0), displays)
+        with self.assertRaisesRegex(ValueError, "no usable visible region"):
+            scene_viewport_smoke.visible_drag_target((1100.0, 20.0, 1200.0, 50.0), displays)
 
 
 class DirtyCloseProtocolTests(unittest.TestCase):
@@ -161,6 +425,15 @@ class DirtyCloseProtocolTests(unittest.TestCase):
             "enabled_error=0; complete=true; truncated=false; visited=18; query_errors=[]"
         )
         self.assertTrue(native_dialog.open_button_state_ready(open_ready, 42, "Open"))
+        dismissed = (
+            "DIRECT_AX_RESULT status=open-button-state-error; stage=window-selection; "
+            "requested_title=Open; matches=0"
+        )
+        self.assertTrue(native_dialog.open_panel_dismissed(dismissed, "Open"))
+        self.assertFalse(native_dialog.open_panel_dismissed(dismissed, "Save"))
+        self.assertFalse(native_dialog.open_panel_dismissed(
+            dismissed.replace("matches=0", "matches=1"), "Open"
+        ))
         for disabled_open_state in (
             open_ready.replace("matches=1", "matches=0"),
             open_ready.replace("matches=1", "matches=2"),
@@ -225,6 +498,238 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         self.assertFalse(native_dialog.folder_path_field_ready(
             f"DIRECT_AX_RESULT status=folder-path-error; value={ready_path}; focused=true; set_error=0", ready_path
         ))
+
+    def test_open_file_selection_requires_one_confirmed_ax_selection(self) -> None:
+        selected = (
+            "DIRECT_AX_RESULT status=selection-verified; operation=select-element; "
+            "role=AXTextField; name=Example Ω.scene; ax_error=0; selected=true"
+        )
+        expected_path = Path("/tmp/Dialog Files Ω/Example Ω.scene")
+        self.assertTrue(native_dialog.open_file_selection_ready(selected, expected_path.name))
+        self.assertFalse(native_dialog.open_file_selection_ready(
+            selected.replace("name=Example Ω.scene", "name=Other Ω.scene"), expected_path.name
+        ))
+        self.assertFalse(native_dialog.open_file_selection_ready(
+            selected.replace("selected=true", "selected=false"), expected_path.name
+        ))
+        row_selected = selected.replace("role=AXTextField", "role=AXRow")
+        self.assertTrue(native_dialog.open_file_selection_ready(row_selected, expected_path.name))
+        list_selected = (
+            "DIRECT_AX_RESULT status=selection-verified; operation=select-element; "
+            "role=AXTextField; name=Example Ω.scene; ax_error=-25205; selected=true; "
+            "selection_method=list-selected-children; owner_role=AXList; selected_children_error=0"
+        )
+        self.assertTrue(native_dialog.open_file_selection_ready(list_selected, expected_path.name))
+        self.assertFalse(native_dialog.open_file_selection_ready(
+            list_selected.replace("selected_children_error=0", "selected_children_error=-25205"),
+            expected_path.name,
+        ))
+        self.assertFalse(native_dialog.open_file_selection_ready(
+            list_selected.replace("selected=true", "selected=false"), expected_path.name
+        ))
+        self.assertFalse(native_dialog.open_file_selection_ready(
+            list_selected.replace("ax_error=-25205", "ax_error=unknown"), expected_path.name
+        ))
+        with patch.object(native_dialog, "run_direct_ax", return_value=(0, list_selected, "")) as select:
+            code, result = native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        self.assertEqual(0, code)
+        self.assertIn("selection_method=list-selected-children", result)
+        select.assert_called_once()
+        with patch.object(native_dialog, "run_direct_ax", return_value=(0, selected, "")) as select:
+            code, result = native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        self.assertEqual(0, code)
+        self.assertIn("status=selection-verified", result)
+        select.assert_called_once()
+        self.assertEqual(select.call_args.args, (42,))
+        self.assertEqual(
+            {key: value for key, value in select.call_args.kwargs.items() if key != "timeout"},
+            {"operation": "select-element", "window_title": "Open", "control_name": "Example Ω.scene"},
+        )
+        self.assertAlmostEqual(select.call_args.kwargs["timeout"], 4.0, places=3)
+
+        with patch.object(native_dialog, "run_direct_ax", return_value=(124, "DIRECT_AX_RESULT status=timeout", "")) as select:
+            with self.assertRaisesRegex(RuntimeError, "selection was not confirmed"):
+                native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        select.assert_called_once()
+
+        unchanged_selection = (
+            "DIRECT_AX_RESULT status=selection-error; operation=select-element; "
+            "role=AXTextField; name=Example Ω.scene; ax_error=0; selected=false"
+        )
+        with patch.object(native_dialog, "run_direct_ax", return_value=(12, unchanged_selection, "")) as select:
+            with self.assertRaisesRegex(RuntimeError, "selection was not confirmed"):
+                native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        select.assert_called_once()
+
+    def test_open_file_axopen_dispatch_is_identity_checked_and_never_replayed(self) -> None:
+        expected_name = "Selected Ω.pfproj"
+        action_returned = (
+            "DIRECT_AX_DISPATCH attempted=true; operation=open-file; target_pid=42; "
+            "role=AXTextField; name=Selected Ω.pfproj; advertised_action=AXOpen\n"
+            "DIRECT_AX_RESULT status=open-file-action-returned; operation=open-file; "
+            "role=AXTextField; name=Selected Ω.pfproj; ax_error=0"
+        )
+        self.assertTrue(native_dialog.open_file_action_dispatched(action_returned, expected_name))
+        self.assertFalse(native_dialog.open_file_action_dispatched(
+            action_returned.replace("name=Selected Ω.pfproj; ax_error", "name=Other.pfproj; ax_error"), expected_name
+        ))
+        self.assertFalse(native_dialog.open_file_action_dispatched(
+            action_returned.replace("advertised_action=AXOpen", "advertised_action=AXConfirm"), expected_name
+        ))
+        ambiguous_dispatch = action_returned.splitlines()[0]
+        self.assertTrue(native_dialog.open_file_action_dispatched(ambiguous_dispatch, expected_name))
+
+        expected_path = Path("/tmp/Dialog Files Ω/Selected Ω.pfproj")
+        with patch.object(native_dialog, "run_direct_ax", return_value=(13, action_returned, "")) as select:
+            code, result = native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        self.assertEqual(13, code)
+        self.assertEqual(action_returned, result)
+        select.assert_called_once()
+
+    def test_open_file_axopen_error_is_classified_only_for_the_exact_control(self) -> None:
+        result = (
+            "DIRECT_AX_DISPATCH attempted=true; operation=open-file; target_pid=42; "
+            "role=AXTextField; name=Selected Ω.pfproj; advertised_action=AXOpen\n"
+            "DIRECT_AX_RESULT status=open-file-action-returned; operation=open-file; "
+            "role=AXTextField; name=Selected Ω.pfproj; ax_error=-25205"
+        )
+        self.assertEqual(-25205, native_dialog.open_file_action_error(result, "Selected Ω.pfproj"))
+        self.assertEqual(0, native_dialog.open_file_action_error(
+            result.replace("ax_error=-25205", "ax_error=0"), "Selected Ω.pfproj"
+        ))
+        self.assertIsNone(native_dialog.open_file_action_error(result, "Other.pfproj"))
+        self.assertIsNone(native_dialog.open_file_action_error(
+            result.replace("role=AXTextField; name=Selected Ω.pfproj; ax_error", "role=AXRow; name=Selected Ω.pfproj; ax_error"),
+            "Selected Ω.pfproj",
+        ))
+        self.assertIsNone(native_dialog.open_file_action_error(result + "\n" + result, "Selected Ω.pfproj"))
+
+    def test_open_file_confirm_action_requires_one_exact_axconfirm_result(self) -> None:
+        result = (
+            "DIRECT_AX_DISPATCH attempted=true; operation=confirm-element; target_pid=42; "
+            "role=AXTextField; name=Selected Ω.pfproj; advertised_action=AXConfirm\n"
+            "DIRECT_AX_RESULT status=confirm-element-action-returned; operation=confirm-element; "
+            "role=AXTextField; name=Selected Ω.pfproj; ax_error=0"
+        )
+        self.assertTrue(native_dialog.open_file_confirm_action_dispatched(result, "Selected Ω.pfproj"))
+        self.assertFalse(native_dialog.open_file_confirm_action_dispatched(result, "Other.pfproj"))
+        self.assertFalse(native_dialog.open_file_confirm_action_dispatched(
+            result.replace("advertised_action=AXConfirm", "advertised_action=AXOpen"), "Selected Ω.pfproj"
+        ))
+        self.assertFalse(native_dialog.open_file_confirm_action_dispatched(
+            result.replace("ax_error=0", "ax_error=not-an-integer"), "Selected Ω.pfproj"
+        ))
+        self.assertFalse(native_dialog.open_file_confirm_action_dispatched(result + "\n" + result, "Selected Ω.pfproj"))
+
+    def test_open_file_readiness_is_observed_in_the_visible_directory_column(self) -> None:
+        missing = (
+            "DIRECT_AX_RESULT status=control-selection-error; operation=observe-element; "
+            "role=AXRow/AXCell/AXTextField; name=Selected Ω.pfproj; matches=0"
+        )
+        ready = (
+            "DIRECT_AX_RESULT status=target-element-observed; operation=observe-element; "
+            "target_pid=42; role=AXTextField; name=Selected Ω.pfproj; advertised_action=AXConfirm"
+        )
+        self.assertTrue(native_dialog.open_file_element_observed(ready, "Selected Ω.pfproj"))
+        self.assertFalse(native_dialog.open_file_element_observed(ready, "Other.pfproj"))
+        self.assertFalse(native_dialog.open_file_element_observed(ready + "\n" + ready, "Selected Ω.pfproj"))
+        with patch.object(native_dialog, "run_direct_ax", side_effect=[(8, missing, ""), (0, ready, "")]) as observe, patch.object(
+            native_dialog.time, "sleep"
+        ):
+            output = native_dialog.wait_for_open_file_element(
+                42, "Open", "Selected Ω.pfproj", time.monotonic() + 4.0
+            )
+        self.assertIn("target-element-observed", output)
+        self.assertEqual(2, observe.call_count)
+        self.assertEqual("observe-element", observe.call_args.kwargs["operation"])
+
+        ambiguous = missing.replace("matches=0", "matches=2")
+        with patch.object(native_dialog, "run_direct_ax", return_value=(8, ambiguous, "")) as observe:
+            with self.assertRaisesRegex(RuntimeError, "Exact Open-panel file observation failed"):
+                native_dialog.wait_for_open_file_element(42, "Open", "Selected Ω.pfproj", time.monotonic() + 4.0)
+        observe.assert_called_once()
+
+    def test_go_to_folder_navigation_requires_exact_focused_path_and_dismissal(self) -> None:
+        folder = Path("/Users/runner/_temp/Dialog Files Ω")
+        visible = (
+            "DIRECT_AX_NODE index=4; role=AXSheet; name=GoToWindow\n"
+            "DIRECT_AX_NODE index=7; role=AXTextField; name=PathTextField; enabled=true"
+        )
+        focused = f"DIRECT_AX_RESULT status=folder-path-ready; value={folder}; focused=true"
+        dismissed = (
+            "DIRECT_AX_RESULT status=go-to-folder-state; window_title=Open; complete=true; "
+            "truncated=false; query_errors=[]; sheet_count=0"
+        )
+        with (
+            patch.object(native_dialog, "run_keyboard_input", side_effect=["go-action", "return-action"]) as keyboard,
+            patch.object(native_dialog, "run_direct_ax_until", side_effect=[visible, dismissed]) as observe,
+            patch.object(native_dialog, "run_direct_ax", return_value=(0, focused, "")) as set_path,
+        ):
+            output = native_dialog.navigate_open_panel_to_folder(42, "Open", folder, native_dialog.time.monotonic() + 20)
+        self.assertIn("PathTextField", output)
+        self.assertEqual(["--go-to-folder", "--press-return"], [call.args[0] for call in keyboard.call_args_list])
+        set_path.assert_called_once_with(
+            42,
+            operation="set-folder-path-value",
+            window_title="Open",
+            control_name="PathTextField",
+            control_value=str(folder),
+            timeout=ANY,
+        )
+        self.assertEqual(2, observe.call_count)
+        self.assertEqual("snapshot", observe.call_args_list[0].kwargs["operation"])
+        self.assertEqual("observe-go-to-folder-state", observe.call_args_list[1].kwargs["operation"])
+
+    def test_go_to_folder_does_not_confirm_when_path_is_not_focused(self) -> None:
+        folder = Path("/Users/runner/Dialog Files Ω")
+        visible = (
+            "DIRECT_AX_NODE index=4; role=AXSheet; name=GoToWindow\n"
+            "DIRECT_AX_NODE index=7; role=AXTextField; name=PathTextField; enabled=true"
+        )
+        with (
+            patch.object(native_dialog, "run_keyboard_input", return_value="go-action") as keyboard,
+            patch.object(native_dialog, "run_direct_ax_until", return_value=visible),
+            patch.object(native_dialog, "run_direct_ax", return_value=(9, "DIRECT_AX_RESULT status=folder-path-ready; focused=false", "")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "not set and focused"):
+                native_dialog.navigate_open_panel_to_folder(42, "Open", folder, native_dialog.time.monotonic() + 20)
+        keyboard.assert_called_once_with("--go-to-folder", 42, timeout=ANY)
+
+    def test_open_selection_waits_only_while_the_exact_file_row_is_absent(self) -> None:
+        no_row = (
+            "DIRECT_AX_RESULT status=control-selection-error; operation=select-element; role=AXRow/AXCell; "
+            "name=Example Ω.scene; matches=0; candidate_roles=[]"
+        )
+        selected = (
+            "DIRECT_AX_RESULT status=selection-verified; operation=select-element; "
+            "role=AXRow; name=Example Ω.scene; ax_error=0; selected=true"
+        )
+        expected_path = Path("/tmp/Dialog Files Ω/Example Ω.scene")
+        with patch.object(native_dialog, "run_direct_ax", side_effect=[(8, no_row, ""), (0, selected, "")]) as select, patch.object(
+            native_dialog.time, "sleep"
+        ):
+            native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        self.assertEqual(2, select.call_count)
+
+        ambiguous = no_row.replace("matches=0", "matches=2")
+        with patch.object(native_dialog, "run_direct_ax", return_value=(8, ambiguous, "")) as select:
+            with self.assertRaisesRegex(RuntimeError, "selection was not confirmed"):
+                native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
+        select.assert_called_once()
+
+    def test_open_button_timeout_preserves_the_last_complete_post_action_state(self) -> None:
+        disabled = (
+            "DIRECT_AX_RESULT status=open-button-state; pid=42; window_title=Open; matches=1; enabled=false; "
+            "enabled_error=0; complete=true; truncated=false; visited=18; query_errors=[]"
+        )
+        timed_out = "DIRECT_AX_RESULT status=timeout; process_group_reaped=true"
+        with (
+            patch.object(native_dialog, "run_direct_ax", side_effect=[(0, disabled, ""), (124, timed_out, "")]),
+            patch.object(native_dialog.time, "monotonic", side_effect=[0, 0, 0, 0, 0, 0, 10]),
+            patch.object(native_dialog.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "last_complete_snapshot=.*enabled=false.*last_query=.*status=timeout"):
+                native_dialog.wait_for_open_button(42, "Open", 10)
 
     def test_permission_bridge_class_exposes_only_scalar_no_argument_methods(self) -> None:
         platform_dir = Path(__file__).parent

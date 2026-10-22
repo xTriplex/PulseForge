@@ -14,11 +14,13 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorMaterialDetailsPanel.cpp
 		PulseForgeEditor/Source/Private/EditorStatusPanel.cpp
 		PulseForgeEditor/Source/Private/EditorViewportMouseCapture.cpp
+		PulseForgeEditor/Source/Private/EditorViewportScrollInput.cpp
 		PulseForgeEditor/Source/Private/EditorViewportSceneRenderView.cpp
 		PulseForgeEditor/Source/Private/EditorViewportToolbar.cpp
 		PulseForgeEditor/Source/Private/EditorImGuiRenderer.cpp
 		PulseForgeEditor/Source/Private/EditorMainMenuPanel.cpp
 		PulseForgeEditor/Source/Private/EditorLayout.cpp
+		PulseForgeEditor/Source/Private/EditorDockingPolicy.cpp
 		PulseForgeEditor/Source/Private/EditorStyle.cpp
 		PulseForgeEditor/Source/Private/EditorWorkspacePresentation.cpp
 		PulseForgeEditor/Source/Private/EditorPlatformServices.cpp
