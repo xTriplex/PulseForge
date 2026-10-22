@@ -509,7 +509,7 @@ if operation == "press-control" || operation == "set-value" || operation == "set
             }
         }
     }
-    guard controls.count == 1, let (_, controlNode) = controls.first else {
+    guard controls.count == 1, let (controlIndex, controlNode) = controls.first else {
         let candidates = descendants.map { string($0.element, "AXRole") ?? "" }
             .filter { $0 == "AXRow" || $0 == "AXCell" || $0 == "AXTextField" }
         let locationNodes = descendants.compactMap { node -> String? in
@@ -719,6 +719,28 @@ if operation == "press-control" || operation == "set-value" || operation == "set
                 parent = descendants[parentIndex].parent
             }
         }
+        var listSelectionOwner: AXUIElement?
+        var listSelectionChild: AXUIElement?
+        if !selectionSettable, role == "AXTextField" {
+            var childIndex = controlIndex
+            var parentIndex = controlNode.parent
+            while let index = parentIndex {
+                let ancestor = descendants[index].element
+                if string(ancestor, "AXRole") == "AXList" {
+                    var settable = DarwinBoolean(false)
+                    let settableError = AXUIElementIsAttributeSettable(
+                        ancestor, "AXSelectedChildren" as CFString, &settable
+                    )
+                    if settableError == .success, settable.boolValue {
+                        listSelectionOwner = ancestor
+                        listSelectionChild = descendants[childIndex].element
+                        break
+                    }
+                }
+                childIndex = index
+                parentIndex = descendants[index].parent
+            }
+        }
         print("DIRECT_AX_SELECT_TARGET role=\(role); name=\(titleOrDescription(control)); " +
               "attributes_error=\(attributeNamesError.rawValue); attributes=\(rawAttributeNames as? [String] ?? []); " +
               "actions_error=\(actionsError.rawValue); actions=\(rawActions as? [String] ?? []); " +
@@ -727,6 +749,27 @@ if operation == "press-control" || operation == "set-value" || operation == "set
               "parents=\(parentSummary); browser_selected_children=\(browserSelectedChildren); " +
               "browser_selected_children_settable=\(browserSelectedSettable)")
         fflush(stdout)
+        if let listSelectionOwner, let listSelectionChild {
+            AXUIElementSetMessagingTimeout(listSelectionOwner, 1.0)
+            let selectionError = AXUIElementSetAttributeValue(
+                listSelectionOwner,
+                "AXSelectedChildren" as CFString,
+                [listSelectionChild] as CFArray
+            )
+            var rawSelectedChildren: CFTypeRef?
+            let selectedChildrenError = AXUIElementCopyAttributeValue(
+                listSelectionOwner, "AXSelectedChildren" as CFString, &rawSelectedChildren
+            )
+            let selectedChildren = rawSelectedChildren as? [AXUIElement] ?? []
+            let selected = selectedChildren.contains { CFEqual($0, listSelectionChild) }
+            let verified = selectedChildrenError == .success && selected
+            print("DIRECT_AX_RESULT status=\(verified ? "selection-verified" : "selection-error"); " +
+                  "operation=select-element; role=\(role); name=\(titleOrDescription(control)); " +
+                  "ax_error=\(selectionError.rawValue); selected=\(selected); " +
+                  "selection_method=list-selected-children; owner_role=AXList; " +
+                  "selected_children_error=\(selectedChildrenError.rawValue)")
+            exit(verified ? 0 : 12)
+        }
         if !selectionSettable, role == "AXTextField", availableActions.contains("AXOpen") {
             AXUIElementSetMessagingTimeout(control, 1.0)
             print("DIRECT_AX_DISPATCH attempted=true; operation=open-file; target_pid=\(targetPID); " +
