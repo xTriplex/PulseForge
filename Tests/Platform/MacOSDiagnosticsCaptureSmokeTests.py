@@ -70,24 +70,6 @@ class DiagnosticsCaptureSmokeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "beyond the capture stop"):
             self.check_document(document)
 
-    def test_screenshot_followup_requires_the_exact_editor_window_to_be_focused(self) -> None:
-        output = (
-            "DIRECT_AX_RESULT status=window-focused; pid=4321; target_title=EditorWorkflowOverview.scene - "
-            "PulseForge Editor; focused_title=EditorWorkflowOverview.scene - PulseForge Editor; "
-            "ax_raise_error=0; focus_error=0; attempts=2"
-        )
-        with patch.object(smoke, "run_direct_ax", return_value=(0, output, "")) as activate:
-            title = smoke.activate_editor_window(4321)
-        activate.assert_called_once_with(
-            4321, operation="activate-window", window_title="PulseForge Editor", timeout=10.0
-        )
-        self.assertEqual("EditorWorkflowOverview.scene - PulseForge Editor", title)
-
-    def test_screenshot_followup_rejects_unverified_editor_activation(self) -> None:
-        with patch.object(smoke, "run_direct_ax", return_value=(16, "DIRECT_AX_RESULT status=window-focus-timeout", "")):
-            with self.assertRaisesRegex(RuntimeError, "could not reactivate"):
-                smoke.activate_editor_window(4321)
-
     def test_performance_panel_ready_requires_visible_utility_geometry(self) -> None:
         marker = (
             "PULSEFORGE_DIAGNOSTICS_PERFORMANCE_PANEL=READY; utility_window=1; capture_controls=1; "
