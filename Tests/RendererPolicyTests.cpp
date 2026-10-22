@@ -30,6 +30,8 @@ namespace
 		int32_t LostResult = 0;
 		bool PresentationFences = true;
 		int NativeHostCount = 0;
+		bool GpuTimerQueryPending = false;
+		bool GpuTimerQueryReleasedAfterRetirement = false;
 		ShutdownWaitResult NvrhiWait;
 		ShutdownWaitResult DeviceWait;
 		ShutdownWaitResult PresentationWait;
@@ -46,6 +48,7 @@ namespace
 		ShutdownWaitResult WaitForNvrhiIdle() noexcept override
 		{
 			Calls.emplace_back("nvrhi-idle");
+			if (NvrhiWait.Outcome == ShutdownWaitOutcome::Complete) GpuTimerQueryPending = false;
 			if (NvrhiWait.Outcome == ShutdownWaitOutcome::DeviceLost)
 			{
 				DeviceLost = true;
@@ -107,6 +110,7 @@ namespace
 				Calls.emplace_back("release-children-legacy-loss");
 				break;
 			}
+			GpuTimerQueryReleasedAfterRetirement = !GpuTimerQueryPending;
 			return true;
 		}
 		bool ReleaseNvrhiDevice() noexcept override
@@ -393,6 +397,16 @@ namespace
 			"release-children-healthy", "release-nvrhi", "destroy-device", "release-instance" };
 		PF_CHECK(Tests, Result.Disposition == ShutdownDisposition::Complete);
 		PF_CHECK(Tests, Operations.Calls == Expected);
+
+		FakeRendererShutdown PendingGpuQuery;
+		PendingGpuQuery.GpuTimerQueryPending = true;
+		const ShutdownResult PendingQueryResult = ShutdownRenderer(PendingGpuQuery);
+		const std::vector<std::string> ExpectedPendingQueryCalls = { "nvrhi-idle", "device-idle", "presentation-main",
+			"release-children-healthy", "release-nvrhi", "destroy-device", "release-instance" };
+		PF_CHECK(Tests, PendingQueryResult.Disposition == ShutdownDisposition::Complete);
+		PF_CHECK(Tests, !PendingGpuQuery.GpuTimerQueryPending);
+		PF_CHECK(Tests, PendingGpuQuery.GpuTimerQueryReleasedAfterRetirement);
+		PF_CHECK(Tests, PendingGpuQuery.Calls == ExpectedPendingQueryCalls);
 
 		const size_t CallsAfterFirstShutdown = Operations.Calls.size();
 		const ShutdownResult SecondResult = ShutdownRenderer(Operations);
