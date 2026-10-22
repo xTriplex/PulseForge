@@ -45,8 +45,12 @@ def validate_trace(path: Path) -> dict[str, object]:
     events = document["traceEvents"]
     start = int(metadata["capture_start_monotonic_ns"])
     stop = int(metadata["capture_stop_monotonic_ns"])
+    snapshot_time = int(metadata["snapshot_monotonic_ns"])
+    active_export = bool(metadata.get("capture_enabled_at_export"))
     session = int(metadata["capture_id"])
-    if session <= 0 or stop < start or not events:
+    effective_end = snapshot_time if active_export and stop == 0 else stop
+    if (session <= 0 or effective_end < start or (not active_export and stop == 0)
+            or (active_export and stop != 0) or not events):
         raise ValueError("trace has no valid, bounded capture interval or events")
     if metadata["engine_build_identifier"] in ("", "unavailable"):
         raise ValueError("trace does not identify its engine build")
@@ -73,7 +77,7 @@ def validate_trace(path: Path) -> dict[str, object]:
             completed_ns = int(args["completion_timestamp_ns"])
             if not math.isfinite(duration_us) or duration_us < 0:
                 raise ValueError("trace duration is not finite and nonnegative")
-            if completed_ns > stop or (timestamp_us + duration_us) * 1000 > stop - start + 1:
+            if completed_ns > effective_end or (timestamp_us + duration_us) * 1000 > effective_end - start + 1:
                 raise ValueError("completed CPU slice extends beyond the capture stop boundary")
 
     required = {
@@ -99,16 +103,81 @@ def validate_trace(path: Path) -> dict[str, object]:
     if not any(item.get("quality") == "unavailable" and item.get("unavailable_reason")
                for item in resources):
         raise ValueError("trace does not explain an unavailable accounting category")
-    if metadata["gpu_timing_supported"] and metadata["gpu_timing_enabled"]:
-        if not metadata.get("gpu_timings"):
-            raise ValueError("GPU timing was supported and enabled but produced no completed sample")
+    segments = metadata.get("resource_segments")
+    segment_count = int(metadata.get("resource_segments_exported", -1))
+    segment_count_in_snapshot = int(metadata.get("resource_segments_in_snapshot", -1))
+    if not isinstance(segments, list) or segment_count != len(segments) or segment_count_in_snapshot < segment_count:
+        raise ValueError("resource segment export accounting is missing or inconsistent")
+    if not segments:
+        raise ValueError("trace has no capture-associated resource observations")
+    for segment in segments:
+        timestamp = int(segment.get("timestamp_monotonic_ns", -1))
+        fingerprint = segment.get("content_fingerprint", "")
+        unavailable_reason = segment.get("content_fingerprint_unavailable_reason", "")
+        if timestamp < start or timestamp > effective_end:
+            raise ValueError("resource observation falls outside the capture interval")
+        if not segment.get("workload"):
+            raise ValueError("resource observation lacks its workload identity")
+        if not fingerprint and not unavailable_reason:
+            raise ValueError("resource observation lacks content identity or an unavailable reason")
+        if not isinstance(segment.get("resources"), list):
+            raise ValueError("resource observation has no resource list")
+    gpu_samples = metadata.get("gpu_timings", [])
+    positive_count = int(metadata.get("gpu_timing_positive_duration_count", -1))
+    zero_count = int(metadata.get("gpu_timing_zero_duration_count", -1))
+    if positive_count < 0 or zero_count < 0:
+        raise ValueError("GPU timing duration accounting is missing")
+    actual_positive = 0
+    actual_zero = 0
+    for sample in gpu_samples:
+        duration = int(sample.get("duration_ns", -1))
+        quality = sample.get("quality")
+        if duration < 0 or quality != ("zero-duration" if duration == 0 else "positive-duration"):
+            raise ValueError("GPU sample quality does not match its duration")
+        if duration == 0:
+            actual_zero += 1
+        else:
+            actual_positive += 1
+        if "session_id" not in sample or int(sample["session_id"]) != session:
+            raise ValueError("GPU sample belongs to a different capture session")
+    if positive_count < actual_positive or zero_count < actual_zero:
+        raise ValueError("GPU duration accounting is smaller than the retained samples")
+    status = metadata.get("gpu_timing_result_status")
+    available = bool(metadata.get("gpu_timing_available"))
+    if status not in ("pending", "informative", "zero-duration-only", "no-samples", "failed"):
+        raise ValueError("GPU timing result status is missing or unknown")
+    if status == "pending":
+        raise ValueError("a final trace cannot retain pending GPU timing results")
+    if available != (positive_count > 0):
+        raise ValueError("GPU timing availability contradicts its retained positive-duration evidence")
+    if (status == "informative") != (positive_count > 0):
+        raise ValueError("informative GPU timing requires positive-duration evidence and a matching status")
+    if status == "zero-duration-only":
+        reason = str(metadata.get("gpu_timing_unavailable_reason", "")).lower()
+        if positive_count != 0 or zero_count == 0 or "zero-duration" not in reason:
+            raise ValueError("zero-only GPU timing requires samples and an explicit limitation reason")
+    if status == "failed" and (not metadata.get("gpu_timing_failure_reported") or
+                                not metadata.get("gpu_timing_unavailable_reason")):
+        raise ValueError("failed GPU timing requires an explicit failure and reason")
+    if status == "no-samples" and (positive_count != 0 or zero_count != 0 or gpu_samples):
+        raise ValueError("no-samples GPU status contradicts sample accounting")
+    if metadata.get("gpu_timing_failure_reported") and status != "failed":
+        raise ValueError("GPU timing failure accounting contradicts the result status")
+    if metadata["gpu_timing_supported"] and metadata.get("gpu_timing_requested", metadata["gpu_timing_enabled"]):
+        if status not in ("informative", "zero-duration-only"):
+            raise ValueError("supported requested GPU timing did not produce a usable or backend-limited measurement")
     return {
         "capture_id": session,
         "events": len(events),
         "resources": len(resources),
         "gpu_timing_supported": metadata["gpu_timing_supported"],
         "gpu_timing_enabled": metadata["gpu_timing_enabled"],
-        "gpu_samples": len(metadata.get("gpu_timings", [])),
+        "gpu_samples": len(gpu_samples),
+        "gpu_timing_status": status,
+        "gpu_timing_positive": positive_count,
+        "gpu_timing_zero": zero_count,
+        "gpu_history_evicted": int(metadata.get("gpu_timing_capture_history_eviction_count", 0)),
+        "gpu_renderer_overwrites": int(metadata.get("gpu_timing_renderer_overwrite_count", 0)),
         "workload": metadata["workload"],
     }
 

@@ -55,6 +55,7 @@ namespace PulseForge
 			return 0;
 		}
 		[[nodiscard]] virtual uint64_t GetCompletedGpuFrameTimingEvictedCount() const noexcept { return 0; }
+		[[nodiscard]] virtual uint64_t GetGpuFrameTimingInvalidResultCount() const noexcept { return 0; }
 		[[nodiscard]] virtual RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description) = 0;
 		[[nodiscard]] virtual DepthCubemapCreateResult CreateDepthCubemap(uint32_t Resolution, const std::string& DebugName) = 0;
 		[[nodiscard]] virtual GraphicsResult BeginRenderTarget(

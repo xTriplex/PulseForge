@@ -25,7 +25,17 @@ def valid_trace() -> dict[str, object]:
             "engine_build_identifier": "test-build", "platform": "macOS", "configuration": "Debug",
             "workload": "fixture", "content_fingerprint": "fixture-hash",
             "content_fingerprint_unavailable_reason": "", "gpu_timing_supported": False,
-            "gpu_timing_enabled": False, "gpu_timings": [],
+            "gpu_timing_requested": False,
+            "gpu_timing_enabled": False, "gpu_timing_available": False,
+            "gpu_timing_failure_reported": False,
+            "gpu_timing_result_status": "no-samples", "gpu_timing_unavailable_reason": "not available",
+            "gpu_timing_positive_duration_count": 0, "gpu_timing_zero_duration_count": 0,
+            "snapshot_monotonic_ns": 5000, "capture_enabled_at_export": False,
+            "gpu_timings": [],
+            "resource_segments_in_snapshot": 1, "resource_segments_exported": 1,
+            "resource_segments": [{"timestamp_monotonic_ns": 1000, "workload": "fixture",
+                                    "content_fingerprint": "fixture-hash",
+                                    "content_fingerprint_unavailable_reason": "", "resources": []}],
             "resources": [
                 {"label": "Registered project assets", "quality": "exact-payload"},
                 {"label": "Derived data bytes", "quality": "unavailable", "unavailable_reason": "not present"},
@@ -68,6 +78,137 @@ class DiagnosticsCaptureSmokeTests(unittest.TestCase):
         document = valid_trace()
         document["traceEvents"][0]["args"]["completion_timestamp_ns"] = 9000
         with self.assertRaisesRegex(ValueError, "beyond the capture stop"):
+            self.check_document(document)
+
+    def test_isolated_zero_sample_with_positive_evidence_is_accepted(self) -> None:
+        document = valid_trace()
+        metadata = document["metadata"]
+        metadata.update({
+            "gpu_timing_supported": True, "gpu_timing_enabled": True,
+            "gpu_timing_requested": True,
+            "gpu_timing_available": True, "gpu_timing_result_status": "informative",
+            "gpu_timing_positive_duration_count": 1, "gpu_timing_zero_duration_count": 1,
+            "gpu_timings": [
+                {"session_id": 5, "duration_ns": 1200, "quality": "positive-duration"},
+                {"session_id": 5, "duration_ns": 0, "quality": "zero-duration"},
+            ],
+        })
+        self.check_document(document)
+
+    def test_truthful_zero_duration_only_result_is_accepted(self) -> None:
+        document = valid_trace()
+        metadata = document["metadata"]
+        metadata.update({
+            "gpu_timing_supported": True, "gpu_timing_enabled": True,
+            "gpu_timing_requested": True,
+            "gpu_timing_available": False, "gpu_timing_result_status": "zero-duration-only",
+            "gpu_timing_unavailable_reason": (
+                "GPU queries returned zero-duration samples; they do not establish useful frame-duration evidence."
+            ),
+            "gpu_timing_positive_duration_count": 0, "gpu_timing_zero_duration_count": 2,
+            "gpu_timings": [
+                {"session_id": 5, "duration_ns": 0, "quality": "zero-duration"},
+                {"session_id": 5, "duration_ns": 0, "quality": "zero-duration"},
+            ],
+        })
+        self.check_document(document)
+
+    def test_zero_duration_sequence_cannot_claim_informative_availability(self) -> None:
+        document = valid_trace()
+        metadata = document["metadata"]
+        metadata.update({
+            "gpu_timing_supported": True, "gpu_timing_enabled": True,
+            "gpu_timing_requested": True,
+            "gpu_timing_available": True, "gpu_timing_result_status": "informative",
+            "gpu_timing_positive_duration_count": 0, "gpu_timing_zero_duration_count": 2,
+            "gpu_timings": [
+                {"session_id": 5, "duration_ns": 0, "quality": "zero-duration"},
+                {"session_id": 5, "duration_ns": 0, "quality": "zero-duration"},
+            ],
+        })
+        with self.assertRaisesRegex(ValueError, "informative GPU timing"):
+            self.check_document(document)
+
+    def test_gpu_sample_quality_must_match_duration(self) -> None:
+        document = valid_trace()
+        metadata = document["metadata"]
+        metadata.update({
+            "gpu_timing_supported": True, "gpu_timing_enabled": True,
+            "gpu_timing_requested": True,
+            "gpu_timing_available": True, "gpu_timing_result_status": "informative",
+            "gpu_timing_positive_duration_count": 1, "gpu_timing_zero_duration_count": 0,
+            "gpu_timings": [{"session_id": 5, "duration_ns": 0, "quality": "positive-duration"}],
+        })
+        with self.assertRaisesRegex(ValueError, "quality"):
+            self.check_document(document)
+
+    def test_timing_collection_failure_requires_explicit_failure_reason(self) -> None:
+        document = valid_trace()
+        metadata = document["metadata"]
+        metadata.update({
+            "gpu_timing_supported": True, "gpu_timing_requested": True,
+            "gpu_timing_enabled": True, "gpu_timing_available": False,
+            "gpu_timing_result_status": "failed", "gpu_timings": [],
+        })
+        with self.assertRaisesRegex(ValueError, "explicit failure and reason"):
+            self.check_document(document)
+
+    def test_supported_gpu_failure_does_not_satisfy_smoke_acceptance(self) -> None:
+        document = valid_trace()
+        metadata = document["metadata"]
+        metadata.update({
+            "gpu_timing_supported": True, "gpu_timing_requested": True,
+            "gpu_timing_enabled": True, "gpu_timing_available": False,
+            "gpu_timing_failure_reported": True, "gpu_timing_result_status": "failed",
+            "gpu_timing_unavailable_reason": "Injected query retrieval failure",
+        })
+        with self.assertRaisesRegex(ValueError, "did not produce a usable or backend-limited"):
+            self.check_document(document)
+
+    def test_gpu_sample_must_name_its_capture_session(self) -> None:
+        document = valid_trace()
+        metadata = document["metadata"]
+        metadata.update({
+            "gpu_timing_supported": True, "gpu_timing_requested": True,
+            "gpu_timing_enabled": True, "gpu_timing_available": True,
+            "gpu_timing_result_status": "informative", "gpu_timing_positive_duration_count": 1,
+            "gpu_timings": [{"duration_ns": 10, "quality": "positive-duration"}],
+        })
+        with self.assertRaisesRegex(ValueError, "different capture session"):
+            self.check_document(document)
+
+    def test_unknown_gpu_status_is_rejected(self) -> None:
+        document = valid_trace()
+        document["metadata"]["gpu_timing_result_status"] = "maybe"
+        with self.assertRaisesRegex(ValueError, "missing or unknown"):
+            self.check_document(document)
+
+    def test_resource_segment_must_be_inside_capture_and_have_identity(self) -> None:
+        document = valid_trace()
+        document["metadata"]["resource_segments"][0]["timestamp_monotonic_ns"] = 9000
+        with self.assertRaisesRegex(ValueError, "outside the capture interval"):
+            self.check_document(document)
+        document = valid_trace()
+        document["metadata"]["resource_segments"][0]["content_fingerprint"] = ""
+        with self.assertRaisesRegex(ValueError, "lacks content identity"):
+            self.check_document(document)
+
+    def test_active_export_uses_snapshot_boundary_without_claiming_stop(self) -> None:
+        document = valid_trace()
+        metadata = document["metadata"]
+        metadata["capture_stop_monotonic_ns"] = 0
+        metadata["capture_enabled_at_export"] = True
+        metadata["snapshot_monotonic_ns"] = 5000
+        self.check_document(document)
+        metadata["snapshot_monotonic_ns"] = 1100
+        with self.assertRaisesRegex(ValueError, "capture stop boundary"):
+            self.check_document(document)
+
+    def test_active_export_cannot_claim_a_stop_timestamp(self) -> None:
+        document = valid_trace()
+        metadata = document["metadata"]
+        metadata["capture_enabled_at_export"] = True
+        with self.assertRaisesRegex(ValueError, "valid, bounded capture interval"):
             self.check_document(document)
 
     def test_performance_panel_ready_requires_visible_utility_geometry(self) -> None:

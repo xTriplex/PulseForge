@@ -44,6 +44,7 @@
 #include "Editor/EditorDockingPolicy.h"
 #include "Editor/EditorMainMenuPanel.h"
 #include "Editor/EditorPerformancePanel.h"
+#include "Editor/EditorPerformanceCaptureService.h"
 #include "Editor/EditorViewportCamera.h"
 #include "Editor/EditorViewportSceneRenderView.h"
 #include "Editor/EditorViewportToolbar.h"
@@ -4509,35 +4510,107 @@ namespace
 			if (Result.FocusMainDocumentHost) FocusDocumentHostIfChanged(PulseForgeEditor::EditorDocumentManager::MainHostID);
 		}
 
+		PulseForgeEditor::EditorPerformanceCaptureMetadata BuildPerformanceCaptureMetadata()
+		{
+			PulseForgeEditor::EditorPerformanceCaptureMetadata Metadata;
+#if defined(_WIN32)
+			Metadata.Platform = "Windows";
+#elif defined(__APPLE__)
+			Metadata.Platform = "macOS";
+#elif defined(__linux__)
+			Metadata.Platform = "Linux";
+#else
+			Metadata.Platform = "Unknown";
+#endif
+#if defined(PF_DEBUG)
+			Metadata.Configuration = "Debug";
+#elif defined(PF_DIST)
+			Metadata.Configuration = "Dist";
+#elif defined(PF_RELEASE)
+			Metadata.Configuration = "Release";
+#else
+			Metadata.Configuration = "Unknown";
+#endif
+			PulseForge::Application& App = PulseForge::Application::Get();
+			Metadata.Renderer = App.GetRendererAPI() == PulseForge::RendererAPI::Vulkan ? "Vulkan" : "OpenGL";
+			Metadata.Workload = m_Project ? m_Project->GetFilePath().stem().string() : "No project";
+			Metadata.Hardware = std::string(App.GetRendererHardwareName());
+#if defined(PF_BUILD_IDENTIFIER)
+			Metadata.BuildIdentifier = PF_BUILD_IDENTIFIER;
+#else
+			Metadata.BuildIdentifier = "source-archive";
+#endif
+			Metadata.ContentFingerprintScope = "selected project file and selected authored scene file; referenced assets and unsaved edits are excluded";
+			if (m_Project)
+			{
+				std::optional<std::filesystem::path> ScenePath;
+				if (m_SceneAsset)
+					if (const auto Record = m_Project->GetAssetRegistry().Find(*m_SceneAsset))
+						ScenePath = m_Project->GetRootPath() / Record->ProjectRelativePath;
+				const std::filesystem::path ProjectPath = m_Project->GetFilePath();
+				std::error_code ProjectTimeError, ProjectSizeError, SceneTimeError, SceneSizeError;
+				const auto ProjectWriteTime = std::filesystem::last_write_time(ProjectPath, ProjectTimeError);
+				const uintmax_t ProjectSize = std::filesystem::file_size(ProjectPath, ProjectSizeError);
+				const auto SceneWriteTime = ScenePath ? std::filesystem::last_write_time(*ScenePath, SceneTimeError) :
+					std::filesystem::file_time_type{};
+				const uintmax_t SceneSize = ScenePath ? std::filesystem::file_size(*ScenePath, SceneSizeError) : 0;
+				const bool FingerprintInputsChanged = ProjectPath != m_CachedFingerprintProjectPath ||
+					ScenePath.value_or(std::filesystem::path{}) != m_CachedFingerprintScenePath ||
+					ProjectTimeError || ProjectSizeError || SceneTimeError || SceneSizeError ||
+					ProjectWriteTime != m_CachedProjectWriteTime || ProjectSize != m_CachedProjectSize ||
+					SceneWriteTime != m_CachedSceneWriteTime || SceneSize != m_CachedSceneSize;
+				if (FingerprintInputsChanged)
+				{
+					m_CachedFingerprintProjectPath = ProjectPath;
+					m_CachedFingerprintScenePath = ScenePath.value_or(std::filesystem::path{});
+					m_CachedProjectWriteTime = ProjectWriteTime;
+					m_CachedProjectSize = ProjectSize;
+					m_CachedSceneWriteTime = SceneWriteTime;
+					m_CachedSceneSize = SceneSize;
+					if (auto Fingerprint = BuildContentFingerprint(
+							ProjectPath, ScenePath, m_CachedFingerprintUnavailableReason))
+						m_CachedContentFingerprint = std::move(*Fingerprint);
+					else
+						m_CachedContentFingerprint.clear();
+				}
+				Metadata.ContentFingerprint = m_CachedContentFingerprint;
+				Metadata.ContentFingerprintUnavailableReason = m_CachedFingerprintUnavailableReason;
+			}
+			else
+				Metadata.ContentFingerprintUnavailableReason = "No project is open.";
+			return Metadata;
+		}
+
+		bool StartPerformanceCapture()
+		{
+			PulseForge::Application& App = PulseForge::Application::Get();
+			if (!App.StartDiagnosticsCapture()) return false;
+			m_PerformanceGpuTimingRequested = true;
+			(void)BuildPerformanceSnapshot();
+			if (!m_PerformanceCaptureService.IsActive())
+			{
+				App.StopDiagnosticsCapture();
+				SetError("The diagnostics capture service could not attach to the active recorder session.");
+				m_PerformanceGpuTimingRequested = false;
+				return false;
+			}
+			return true;
+		}
+
 		PulseForgeEditor::EditorPerformanceSnapshot BuildPerformanceSnapshot()
 		{
 			PulseForgeEditor::EditorPerformanceSnapshot Snapshot;
 			PulseForge::Application& App = PulseForge::Application::Get();
 			Snapshot.Diagnostics = App.GetDiagnosticsSnapshot();
-			if (m_CompletedGpuTimingSessionId != Snapshot.Diagnostics.SessionId)
-			{
-				m_CompletedGpuTimings.clear();
-				m_StaleGpuTimingDiscardCount = 0;
-				m_CompletedGpuTimingSessionId = Snapshot.Diagnostics.SessionId;
-				m_GpuTimingWasEnabledForSession = App.IsGpuFrameTimingEnabled();
-				m_GpuTimingEvictionBaseline = App.GetCompletedGpuFrameTimingEvictedCount();
-			}
-			if (Snapshot.Diagnostics.CaptureEnabled && App.IsGpuFrameTimingEnabled())
-				m_GpuTimingWasEnabledForSession = true;
 			Snapshot.GpuTimingSupported = App.IsGpuFrameTimingSupported();
-			Snapshot.GpuTimingEnabled = m_GpuTimingWasEnabledForSession;
-			Snapshot.GpuTimingAvailable = PulseForgeEditor::EditorPerformanceCaptureService::IsGpuTimingAvailable(
-				Snapshot.GpuTimingSupported, Snapshot.GpuTimingEnabled, Snapshot.Diagnostics.CaptureEnabled,
-				App.IsGpuFrameTimingEnabled(), !App.GetGpuFrameTimingUnavailableReason().empty());
-			Snapshot.GpuTimingUnavailableReason = Snapshot.GpuTimingAvailable ? std::string{}
-				: (!App.GetGpuFrameTimingUnavailableReason().empty()
-					? std::string(App.GetGpuFrameTimingUnavailableReason())
-					: (Snapshot.GpuTimingSupported ? "GPU timing was not enabled for this capture."
-						: "GPU frame timing is unsupported by the active renderer."));
-			const uint64_t GpuEvictedCount = App.GetCompletedGpuFrameTimingEvictedCount();
-			Snapshot.GpuTimingDroppedCount = GpuEvictedCount >= m_GpuTimingEvictionBaseline
-				? GpuEvictedCount - m_GpuTimingEvictionBaseline : 0;
-			Snapshot.GpuTimingStaleSessionDiscardCount = m_StaleGpuTimingDiscardCount;
+			Snapshot.GpuTimingRequested = m_PerformanceGpuTimingRequested;
+			Snapshot.GpuTimingEnabled = App.IsGpuFrameTimingEnabled();
+			Snapshot.GpuTimingFailureReported = Snapshot.GpuTimingRequested && App.HasGpuFrameTimingFailed();
+			Snapshot.GpuTimingUnavailableReason = std::string(App.GetGpuFrameTimingUnavailableReason());
+			if (!Snapshot.GpuTimingSupported && Snapshot.GpuTimingUnavailableReason.empty())
+				Snapshot.GpuTimingUnavailableReason = "The active renderer does not support GPU timestamp queries.";
+			Snapshot.GpuTimingRendererOverwriteCount = App.GetCompletedGpuFrameTimingEvictedCount();
+			Snapshot.GpuTimingInvalidResultCount = App.GetGpuFrameTimingInvalidResultCount();
 			std::array<PulseForge::GpuFrameTiming, 64> NewTimings{};
 			const size_t NewTimingCount = App.ReadCompletedGpuFrameTimings(NewTimings);
 			const uint64_t CollectedAt = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -4545,21 +4618,12 @@ namespace
 			for (size_t Index = 0; Index < NewTimingCount; ++Index)
 			{
 				const PulseForge::GpuFrameTiming& Timing = NewTimings[Index];
-				if (Timing.SessionId != Snapshot.Diagnostics.SessionId)
-				{
-					++m_StaleGpuTimingDiscardCount;
-					++Snapshot.GpuTimingStaleSessionDiscardCount;
-					continue;
-				}
-				m_CompletedGpuTimings.push_back({ "Main presentation frame", "VulkanRenderer",
+				Snapshot.CompletedGpuTimings.push_back({ Timing.SessionId, "Main presentation frame", "VulkanRenderer",
 					"NVRHI Vulkan timer query; delayed completed sample", Timing.FrameSequence, CollectedAt,
-					Timing.DurationNanoseconds });
+					Timing.DurationNanoseconds, Timing.DurationNanoseconds == 0
+						? PulseForgeEditor::EditorGpuTimingSampleQuality::ZeroDuration
+						: PulseForgeEditor::EditorGpuTimingSampleQuality::PositiveDuration });
 			}
-			if (m_CompletedGpuTimings.size() > PulseForgeEditor::EditorPerformancePanel::MaximumVisibleGpuTimings)
-				m_CompletedGpuTimings.erase(m_CompletedGpuTimings.begin(),
-					m_CompletedGpuTimings.begin() + static_cast<std::ptrdiff_t>(
-						m_CompletedGpuTimings.size() - PulseForgeEditor::EditorPerformancePanel::MaximumVisibleGpuTimings));
-			Snapshot.CompletedGpuTimings = m_CompletedGpuTimings;
 			const auto AddMetric = [&Snapshot](std::string Label, std::string Owner, std::string Scope, uint64_t Value,
 				PulseForgeEditor::EditorResourceMetricKind Kind, PulseForgeEditor::EditorResourceMetricQuality Quality)
 			{
@@ -4622,6 +4686,19 @@ namespace
 				AddMetric("Registered renderer texture bindings", "EditorImGuiRenderer", "Bindings registered with editor UI renderer",
 					m_ImGuiRenderer->GetRegisteredTextureCount(), PulseForgeEditor::EditorResourceMetricKind::Count,
 					PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			if (Snapshot.Diagnostics.CaptureEnabled &&
+				(!m_PerformanceCaptureService.IsActive() ||
+				 m_PerformanceCaptureService.GetSessionId() != Snapshot.Diagnostics.SessionId))
+			{
+				m_PerformanceGpuTimingRequested = true;
+				Snapshot.GpuTimingRequested = true;
+				Snapshot.GpuTimingFailureReported = App.HasGpuFrameTimingFailed();
+				if (auto Result = m_PerformanceCaptureService.Begin(Snapshot, BuildPerformanceCaptureMetadata()); !Result)
+					SetError(Result.error().Message);
+			}
+			else if (m_PerformanceCaptureService.HasCapture())
+				(void)m_PerformanceCaptureService.Observe(Snapshot, BuildPerformanceCaptureMetadata());
+			m_PerformanceCaptureService.ApplyGpuHistory(Snapshot);
 			return Snapshot;
 		}
 
@@ -4630,54 +4707,20 @@ namespace
 			static constexpr PulseForgeEditor::EditorFileDialogFilter Filter{ "JSON Capture", "json" };
 			const auto OutputPath = ShowSaveDialog(&Filter, {}, "PulseForgeCapture.json");
 			if (!OutputPath) return;
-			const auto Snapshot = BuildPerformanceSnapshot();
-			if (auto Result = WritePerformanceCapture(*OutputPath, Snapshot); !Result) SetError(Result.error());
+			(void)BuildPerformanceSnapshot();
+			const auto Capture = m_PerformanceCaptureService.GetExportSnapshot();
+			if (!Capture)
+			{
+				SetError("Start a diagnostics capture before exporting.");
+				return;
+			}
+			if (auto Result = WritePerformanceCapture(*OutputPath, *Capture); !Result) SetError(Result.error());
 			else SetStatus("Diagnostics capture exported.");
 		}
 
 		std::expected<void, std::string> WritePerformanceCapture(
-			const std::filesystem::path& OutputPath, const PulseForgeEditor::EditorPerformanceSnapshot& Snapshot)
+			const std::filesystem::path& OutputPath, const PulseForgeEditor::EditorPerformanceCapture& Capture)
 		{
-			PulseForgeEditor::EditorPerformanceCaptureMetadata TraceMetadata;
-#if defined(_WIN32)
-			TraceMetadata.Platform = "Windows";
-#elif defined(__APPLE__)
-			TraceMetadata.Platform = "macOS";
-#elif defined(__linux__)
-			TraceMetadata.Platform = "Linux";
-#else
-			TraceMetadata.Platform = "Unknown";
-#endif
-#if defined(PF_DEBUG)
-			TraceMetadata.Configuration = "Debug";
-#elif defined(PF_DIST)
-			TraceMetadata.Configuration = "Dist";
-#elif defined(PF_RELEASE)
-			TraceMetadata.Configuration = "Release";
-#else
-			TraceMetadata.Configuration = "Unknown";
-#endif
-			TraceMetadata.Renderer = PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan ? "Vulkan" : "OpenGL";
-			TraceMetadata.Workload = m_Project ? m_Project->GetFilePath().stem().string() : "No project";
-			TraceMetadata.Hardware = std::string(PulseForge::Application::Get().GetRendererHardwareName());
-#if defined(PF_BUILD_IDENTIFIER)
-			TraceMetadata.BuildIdentifier = PF_BUILD_IDENTIFIER;
-#else
-			TraceMetadata.BuildIdentifier = "source-archive";
-#endif
-			if (m_Project)
-			{
-				std::optional<std::filesystem::path> ScenePath;
-				if (m_SceneAsset)
-					if (const auto Record = m_Project->GetAssetRegistry().Find(*m_SceneAsset))
-						ScenePath = m_Project->GetRootPath() / Record->ProjectRelativePath;
-				if (auto Fingerprint = BuildContentFingerprint(
-						m_Project->GetFilePath(), ScenePath, TraceMetadata.ContentFingerprintUnavailableReason))
-					TraceMetadata.ContentFingerprint = std::move(*Fingerprint);
-			}
-			else
-				TraceMetadata.ContentFingerprintUnavailableReason = "No project is open.";
-			const auto Capture = PulseForgeEditor::EditorPerformanceCaptureService::Capture(Snapshot, std::move(TraceMetadata));
 			auto Result = PulseForgeEditor::EditorPerformanceCaptureService::ExportAtomically(OutputPath, Capture);
 			if (!Result) return std::unexpected(Result.error().Message);
 			return {};
@@ -4688,6 +4731,7 @@ namespace
 			bool* IsOpen = m_Layout.GetPanelVisibility(PulseForgeEditor::EditorPanel::Performance);
 			if (!IsOpen) return;
 			if (m_DiagnosticsCaptureSmokeOutput) *IsOpen = true;
+			const auto Snapshot = BuildPerformanceSnapshot();
 			if (!*IsOpen) return;
 #if defined(_DEBUG) || defined(PF_DEBUG)
 			if (m_DiagnosticsCaptureSmokeOutput) ImGui::SetNextWindowCollapsed(false, ImGuiCond_Always);
@@ -4695,7 +4739,6 @@ namespace
 			const ImGuiWindowClass UtilityClass = PulseForgeEditor::MakeEditorDockingClass(
 				PulseForgeEditor::EditorDockingDomain::UtilityPanel);
 			ImGui::SetNextWindowClass(&UtilityClass);
-			const auto Snapshot = BuildPerformanceSnapshot();
 			const bool WasOpen = *IsOpen;
 			const bool ContentsVisible = ImGui::Begin("Performance###Performance", IsOpen);
 			const ImGuiViewport* Owner = ImGui::GetWindowViewport();
@@ -4734,13 +4777,19 @@ namespace
 			switch (Action.Kind)
 			{
 			case PulseForgeEditor::EditorPerformanceActionKind::StartCapture:
-				if (!PulseForge::Application::Get().StartDiagnosticsCapture())
-					SetError("Diagnostics capture could not allocate its bounded event buffer.");
+				if (!StartPerformanceCapture())
+					SetError("Diagnostics capture could not start; inspect the reported capture error.");
 				else SetStatus("Diagnostics capture started.");
 				break;
 			case PulseForgeEditor::EditorPerformanceActionKind::StopCapture:
 				PulseForge::Application::Get().StopDiagnosticsCapture();
-				SetStatus("Diagnostics capture stopped.");
+				{
+					const auto FinalSnapshot = BuildPerformanceSnapshot();
+					if (auto Result = m_PerformanceCaptureService.Stop(FinalSnapshot, BuildPerformanceCaptureMetadata()); !Result)
+						SetError(Result.error().Message);
+					else SetStatus("Diagnostics capture stopped.");
+					m_PerformanceGpuTimingRequested = false;
+				}
 				break;
 			case PulseForgeEditor::EditorPerformanceActionKind::ExportCapture:
 				ExportPerformanceCapture();
@@ -7590,9 +7639,13 @@ namespace
 			}
 			if (std::chrono::steady_clock::now() - *m_DiagnosticsIdleStartedAt < std::chrono::seconds(2)) return true;
 			PulseForge::Application& Application = PulseForge::Application::Get();
-			const bool GpuTimingWasEnabled = Application.IsGpuFrameTimingEnabled();
 			Application.StopDiagnosticsCapture();
 			const auto Snapshot = BuildPerformanceSnapshot();
+			if (auto Result = m_PerformanceCaptureService.Stop(Snapshot, BuildPerformanceCaptureMetadata()); !Result)
+			{
+				FailEditorRuntimePlayStopTest("The diagnostics smoke could not freeze the completed capture.");
+				return true;
+			}
 			const bool ColdProjectOpenCaptured = std::any_of(Snapshot.Diagnostics.Events.begin(), Snapshot.Diagnostics.Events.end(),
 				[](const PulseForge::DiagnosticEvent& Event) { return Event.Name == "Cold project open and startup scene"; });
 			const bool WarmProjectOpenCaptured = std::any_of(Snapshot.Diagnostics.Events.begin(), Snapshot.Diagnostics.Events.end(),
@@ -7620,8 +7673,10 @@ namespace
 						(Event.Kind != PulseForge::DiagnosticEventKind::Duration ||
 							Event.DurationNanoseconds == Event.TimestampNanoseconds - Start);
 				});
-			const bool GpuSamplesCaptured = !Application.IsGpuFrameTimingSupported() || !GpuTimingWasEnabled ||
-				!Snapshot.CompletedGpuTimings.empty();
+			const bool GpuSamplesCaptured = !Snapshot.GpuTimingSupported || !Snapshot.GpuTimingRequested ||
+				(!Snapshot.CompletedGpuTimings.empty() &&
+					(Snapshot.GpuTimingResultStatus == PulseForgeEditor::EditorGpuTimingResultStatus::Informative ||
+					 Snapshot.GpuTimingResultStatus == PulseForgeEditor::EditorGpuTimingResultStatus::ZeroDurationOnly));
 			if (Snapshot.Diagnostics.Events.empty() || !ColdProjectOpenCaptured || !WarmProjectOpenCaptured ||
 				!ProjectPhasesCaptured || !ViewportReadinessCaptured || !RuntimePhasesCaptured || !ValidIntervals ||
 				!GpuSamplesCaptured || Snapshot.Resources.empty() || !m_DiagnosticsResizeObserved)
@@ -7630,15 +7685,31 @@ namespace
 					"The diagnostics smoke capture lacks valid project/runtime/readiness timing, resource, resize, or supported GPU evidence.");
 				return true;
 			}
-			if (!WritePerformanceCapture(*m_DiagnosticsCaptureSmokeOutput, Snapshot))
+			const auto Capture = m_PerformanceCaptureService.GetExportSnapshot();
+			if (!Capture || !WritePerformanceCapture(*m_DiagnosticsCaptureSmokeOutput, *Capture))
 			{
 				FailEditorRuntimePlayStopTest("The diagnostics smoke could not write its trace output.");
 				return true;
 			}
-			PF_INFO("PULSEFORGE_DIAGNOSTICS_SMOKE=PASS; events={}; event_capacity={}; gpu_timing_supported={}; gpu_samples={}; "
+			const char* GpuTimingStatus = "no-samples";
+			switch (Snapshot.GpuTimingResultStatus)
+			{
+			case PulseForgeEditor::EditorGpuTimingResultStatus::Pending: GpuTimingStatus = "pending"; break;
+			case PulseForgeEditor::EditorGpuTimingResultStatus::Informative: GpuTimingStatus = "informative"; break;
+			case PulseForgeEditor::EditorGpuTimingResultStatus::ZeroDurationOnly: GpuTimingStatus = "zero-duration-only"; break;
+			case PulseForgeEditor::EditorGpuTimingResultStatus::Failed: GpuTimingStatus = "failed"; break;
+			case PulseForgeEditor::EditorGpuTimingResultStatus::NoSamples: break;
+			}
+			PF_INFO("PULSEFORGE_DIAGNOSTICS_SMOKE=PASS; events={}; event_capacity={}; gpu_timing_supported={}; gpu_timing_enabled={}; "
+				"gpu_timing_requested={}; gpu_timing_status={}; gpu_samples={}; gpu_positive={}; gpu_zero={}; gpu_history_evicted={}; "
+				"gpu_renderer_overwrites={}; gpu_invalid={}; "
 				"resources={}; evicted={}; dropped={}; trace={}; orderly_shutdown_requested=1",
-				Snapshot.Diagnostics.Events.size(), Snapshot.Diagnostics.EventCapacity, Snapshot.GpuTimingAvailable ? 1 : 0,
+				Snapshot.Diagnostics.Events.size(), Snapshot.Diagnostics.EventCapacity, Snapshot.GpuTimingSupported ? 1 : 0,
+				Snapshot.GpuTimingEnabled ? 1 : 0, Snapshot.GpuTimingRequested ? 1 : 0, GpuTimingStatus,
 				Snapshot.CompletedGpuTimings.size(),
+				Snapshot.GpuTimingPositiveDurationCount, Snapshot.GpuTimingZeroDurationCount,
+				Snapshot.GpuTimingCaptureHistoryEvictionCount, Snapshot.GpuTimingRendererOverwriteCount,
+				Snapshot.GpuTimingInvalidResultCount,
 				Snapshot.Resources.size(), Snapshot.Diagnostics.EvictedCount, Snapshot.Diagnostics.DroppedCount,
 				m_DiagnosticsCaptureSmokeOutput->string());
 			RequestEditorApplicationClose();
@@ -7815,7 +7886,16 @@ namespace
 		PulseForgeEditor::EditorStyle m_EditorStyle;
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
 		PulseForgeEditor::EditorAssetPreviewService m_AssetPreviews;
-		std::vector<PulseForgeEditor::EditorGpuTimingSample> m_CompletedGpuTimings;
+		PulseForgeEditor::EditorPerformanceCaptureService m_PerformanceCaptureService;
+		bool m_PerformanceGpuTimingRequested = false;
+		std::filesystem::path m_CachedFingerprintProjectPath;
+		std::filesystem::path m_CachedFingerprintScenePath;
+		std::filesystem::file_time_type m_CachedProjectWriteTime{};
+		std::filesystem::file_time_type m_CachedSceneWriteTime{};
+		uintmax_t m_CachedProjectSize = 0;
+		uintmax_t m_CachedSceneSize = 0;
+		std::string m_CachedContentFingerprint;
+		std::string m_CachedFingerprintUnavailableReason;
 		PulseForgeEditor::EditorAssetPreviewStressHarness m_AssetPreviewStress;
 		bool m_AssetPreviewProjectPending = false;
 		bool m_AssetPreviewAssetsPending = false;
@@ -7884,10 +7964,6 @@ namespace
 		int m_DiagnosticsTargetWindowWidth = 0;
 		int m_DiagnosticsTargetWindowHeight = 0;
 		uint64_t m_DiagnosticsResizeRenderBaseline = 0;
-		uint64_t m_CompletedGpuTimingSessionId = 0;
-		bool m_GpuTimingWasEnabledForSession = false;
-		uint64_t m_GpuTimingEvictionBaseline = 0;
-		uint64_t m_StaleGpuTimingDiscardCount = 0;
 		uint64_t m_SceneViewportRenderedFrames = 0;
 		std::optional<std::chrono::steady_clock::time_point> m_DiagnosticsIdleStartedAt;
 #if defined(_DEBUG) || defined(PF_DEBUG)
