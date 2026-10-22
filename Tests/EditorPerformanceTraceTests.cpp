@@ -11,6 +11,12 @@
 void RunEditorPerformanceTraceTests(TestRunner& Tests)
 {
 	using namespace PulseForgeEditor;
+	PF_CHECK(Tests, EditorPerformanceCaptureService::IsGpuTimingAvailable(true, true, true, true, false));
+	PF_CHECK(Tests, EditorPerformanceCaptureService::IsGpuTimingAvailable(true, true, false, false, false));
+	PF_CHECK(Tests, !EditorPerformanceCaptureService::IsGpuTimingAvailable(true, true, true, false, false));
+	PF_CHECK(Tests, !EditorPerformanceCaptureService::IsGpuTimingAvailable(true, true, false, false, true));
+	PF_CHECK(Tests, !EditorPerformanceCaptureService::IsGpuTimingAvailable(true, false, false, false, false));
+	PF_CHECK(Tests, !EditorPerformanceCaptureService::IsGpuTimingAvailable(false, true, true, true, false));
 	EditorPerformanceSnapshot Snapshot;
 	PulseForge::DiagnosticRecorder Recorder(8);
 	Recorder.SetCaptureEnabled(true);

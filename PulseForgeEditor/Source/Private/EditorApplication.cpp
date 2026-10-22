@@ -4526,7 +4526,9 @@ namespace
 				m_GpuTimingWasEnabledForSession = true;
 			Snapshot.GpuTimingSupported = App.IsGpuFrameTimingSupported();
 			Snapshot.GpuTimingEnabled = m_GpuTimingWasEnabledForSession;
-			Snapshot.GpuTimingAvailable = Snapshot.GpuTimingSupported && Snapshot.GpuTimingEnabled;
+			Snapshot.GpuTimingAvailable = PulseForgeEditor::EditorPerformanceCaptureService::IsGpuTimingAvailable(
+				Snapshot.GpuTimingSupported, Snapshot.GpuTimingEnabled, Snapshot.Diagnostics.CaptureEnabled,
+				App.IsGpuFrameTimingEnabled(), !App.GetGpuFrameTimingUnavailableReason().empty());
 			Snapshot.GpuTimingUnavailableReason = Snapshot.GpuTimingAvailable ? std::string{}
 				: (!App.GetGpuFrameTimingUnavailableReason().empty()
 					? std::string(App.GetGpuFrameTimingUnavailableReason())

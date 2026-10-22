@@ -103,6 +103,9 @@ namespace PulseForgeEditor
 	class EditorPerformanceCaptureService final
 	{
 	public:
+		[[nodiscard]] static bool IsGpuTimingAvailable(
+			bool Supported, bool EnabledForCapture, bool CaptureActive, bool BackendEnabled, bool FailureReported) noexcept;
+
 		[[nodiscard]] static EditorPerformanceCapture Capture(
 			const EditorPerformanceSnapshot& Snapshot, EditorPerformanceCaptureMetadata Metadata);
 
