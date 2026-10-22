@@ -540,7 +540,9 @@ if operation == "press-control" || operation == "set-value" || operation == "set
             exit(24)
         }
         print("DIRECT_AX_RESULT status=target-element-observed; operation=observe-element; " +
-              "target_pid=\(targetPID); role=AXTextField; name=\(titleOrDescription(control)); advertised_action=AXConfirm")
+              "target_pid=\(targetPID); role=AXTextField; name=\(titleOrDescription(control)); " +
+              "selected=\(described(control, "AXSelected")); focused=\(described(control, "AXFocused")); " +
+              "advertised_action=AXConfirm")
         exit(0)
     }
     if operation == "confirm-element" {

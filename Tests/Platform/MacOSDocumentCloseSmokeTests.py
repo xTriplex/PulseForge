@@ -620,6 +620,20 @@ class DirtyCloseProtocolTests(unittest.TestCase):
                 native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
         select.assert_called_once()
 
+    def test_open_button_timeout_preserves_the_last_complete_post_action_state(self) -> None:
+        disabled = (
+            "DIRECT_AX_RESULT status=open-button-state; pid=42; window_title=Open; matches=1; enabled=false; "
+            "enabled_error=0; complete=true; truncated=false; visited=18; query_errors=[]"
+        )
+        timed_out = "DIRECT_AX_RESULT status=timeout; process_group_reaped=true"
+        with (
+            patch.object(native_dialog, "run_direct_ax", side_effect=[(0, disabled, ""), (124, timed_out, "")]),
+            patch.object(native_dialog.time, "monotonic", side_effect=[0, 0, 0, 0, 0, 0, 10]),
+            patch.object(native_dialog.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "last_complete_snapshot=.*enabled=false.*last_query=.*status=timeout"):
+                native_dialog.wait_for_open_button(42, "Open", 10)
+
     def test_permission_bridge_class_exposes_only_scalar_no_argument_methods(self) -> None:
         platform_dir = Path(__file__).parent
         header = (platform_dir / "MacOSAutomationPermissionBridge.h").read_text(encoding="utf-8")
