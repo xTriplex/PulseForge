@@ -119,7 +119,7 @@ class DiagnosticsCaptureSmokeTests(unittest.TestCase):
         metadata.update({
             "gpu_timing_supported": True, "gpu_timing_enabled": True,
             "gpu_timing_requested": True,
-            "gpu_timing_available": True, "gpu_timing_result_status": "informative",
+            "gpu_timing_available": False, "gpu_timing_result_status": "informative",
             "gpu_timing_positive_duration_count": 0, "gpu_timing_zero_duration_count": 2,
             "gpu_timings": [
                 {"session_id": 5, "duration_ns": 0, "quality": "zero-duration"},
