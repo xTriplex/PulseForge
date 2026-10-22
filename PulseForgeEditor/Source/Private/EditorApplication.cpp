@@ -4689,22 +4689,36 @@ namespace
 			if (!IsOpen) return;
 			if (m_DiagnosticsCaptureSmokeOutput) *IsOpen = true;
 			if (!*IsOpen) return;
+#if defined(_DEBUG) || defined(PF_DEBUG)
+			if (m_DiagnosticsCaptureSmokeOutput) ImGui::SetNextWindowCollapsed(false, ImGuiCond_Always);
+#endif
 			const ImGuiWindowClass UtilityClass = PulseForgeEditor::MakeEditorDockingClass(
 				PulseForgeEditor::EditorDockingDomain::UtilityPanel);
 			ImGui::SetNextWindowClass(&UtilityClass);
 			const auto Snapshot = BuildPerformanceSnapshot();
 			const bool WasOpen = *IsOpen;
 			const bool ContentsVisible = ImGui::Begin("Performance###Performance", IsOpen);
+			const ImGuiViewport* Owner = ImGui::GetWindowViewport();
+			const ImVec2 Position = ImGui::GetWindowPos();
+			const ImVec2 Size = ImGui::GetWindowSize();
 			const bool DockingDomainValid = PulseForgeEditor::EnforceCurrentEditorWindowDockingDomain(
 				PulseForgeEditor::EditorDockingDomain::UtilityPanel);
 			const PulseForgeEditor::EditorPerformanceAction Action = ContentsVisible && DockingDomainValid
 				? m_PerformancePanel.DrawContents(Snapshot, m_EditorStyle) : PulseForgeEditor::EditorPerformanceAction{};
 			ImGui::End();
-			if (m_DiagnosticsCaptureSmokeOutput && !m_DiagnosticsPerformancePanelLogged)
+			if (m_DiagnosticsCaptureSmokeOutput && !ContentsVisible && !m_DiagnosticsPerformancePanelActivationRequested)
+			{
+				m_DiagnosticsPerformancePanelActivationRequested = true;
+				if (!m_Layout.ActivatePanel(PulseForgeEditor::EditorPanel::Performance))
+					FailEditorRuntimePlayStopTest("The diagnostics fixture could not select the Performance utility panel.");
+				else PF_INFO("PULSEFORGE_DIAGNOSTICS_PERFORMANCE_PANEL=ACTIVATION_REQUESTED; panel=Performance");
+			}
+			if (m_DiagnosticsCaptureSmokeOutput && ContentsVisible && DockingDomainValid && !m_DiagnosticsPerformancePanelLogged)
 			{
 				m_DiagnosticsPerformancePanelLogged = true;
-				PF_INFO("PULSEFORGE_DIAGNOSTICS_PERFORMANCE_PANEL=READY; utility_window=1; capture_controls=1; resources={}; events={}",
-					Snapshot.Resources.size(), Snapshot.Diagnostics.Events.size());
+				PF_INFO("PULSEFORGE_DIAGNOSTICS_PERFORMANCE_PANEL=READY; utility_window=1; capture_controls=1; "
+					"owner_viewport={}; rect={},{},{},{}; resources={}; events={}", Owner ? Owner->ID : 0,
+					Position.x, Position.y, Size.x, Size.y, Snapshot.Resources.size(), Snapshot.Diagnostics.Events.size());
 			}
 			if (WasOpen != *IsOpen)
 			{
@@ -7844,6 +7858,7 @@ namespace
 		bool m_DiagnosticsResizeRequested = false;
 		bool m_DiagnosticsResizeObserved = false;
 		bool m_DiagnosticsPerformancePanelLogged = false;
+		bool m_DiagnosticsPerformancePanelActivationRequested = false;
 		int m_DiagnosticsInitialWindowWidth = 0;
 		int m_DiagnosticsInitialWindowHeight = 0;
 		int m_DiagnosticsTargetWindowWidth = 0;

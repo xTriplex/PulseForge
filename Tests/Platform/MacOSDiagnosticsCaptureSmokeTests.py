@@ -6,7 +6,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import MacOSDiagnosticsCaptureSmoke as smoke
 from MacOSDiagnosticsCaptureSmoke import validate_trace
 
 
@@ -67,6 +69,36 @@ class DiagnosticsCaptureSmokeTests(unittest.TestCase):
         document["traceEvents"][0]["args"]["completion_timestamp_ns"] = 9000
         with self.assertRaisesRegex(ValueError, "beyond the capture stop"):
             self.check_document(document)
+
+    def test_screenshot_followup_requires_the_exact_editor_window_to_be_focused(self) -> None:
+        output = (
+            "DIRECT_AX_RESULT status=window-focused; pid=4321; target_title=EditorWorkflowOverview.scene - "
+            "PulseForge Editor; focused_title=EditorWorkflowOverview.scene - PulseForge Editor; "
+            "ax_raise_error=0; focus_error=0; attempts=2"
+        )
+        with patch.object(smoke, "run_direct_ax", return_value=(0, output, "")) as activate:
+            title = smoke.activate_editor_window(4321)
+        activate.assert_called_once_with(
+            4321, operation="activate-window", window_title="PulseForge Editor", timeout=10.0
+        )
+        self.assertEqual("EditorWorkflowOverview.scene - PulseForge Editor", title)
+
+    def test_screenshot_followup_rejects_unverified_editor_activation(self) -> None:
+        with patch.object(smoke, "run_direct_ax", return_value=(16, "DIRECT_AX_RESULT status=window-focus-timeout", "")):
+            with self.assertRaisesRegex(RuntimeError, "could not reactivate"):
+                smoke.activate_editor_window(4321)
+
+    def test_performance_panel_ready_requires_visible_utility_geometry(self) -> None:
+        marker = (
+            "PULSEFORGE_DIAGNOSTICS_PERFORMANCE_PANEL=READY; utility_window=1; capture_controls=1; "
+            "owner_viewport=3158883903; rect=10,20,420,300; resources=19; events=9"
+        )
+        self.assertEqual("3158883903", smoke.validate_panel_ready(marker)["owner_viewport"])
+
+    def test_performance_panel_marker_without_geometry_is_rejected(self) -> None:
+        marker = "PULSEFORGE_DIAGNOSTICS_PERFORMANCE_PANEL=READY; utility_window=1; capture_controls=1"
+        with self.assertRaisesRegex(ValueError, "invalid owner or geometry"):
+            smoke.validate_panel_ready(marker)
 
 
 if __name__ == "__main__":
