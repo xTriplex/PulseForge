@@ -68,7 +68,9 @@ public:
 			m_SceneRuntime = std::make_unique<PulseForge::SceneRuntime>(
 				*m_Project,
 				PulseForge::SceneRuntimeDesc{},
-				PulseForge::SceneRuntimeServices{ .InputState = &PulseForge::Application::Get().GetInput() });
+				PulseForge::SceneRuntimeServices{
+					.InputState = &PulseForge::Application::Get().GetInput(),
+					.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder() });
 			if (auto StartResult = m_SceneRuntime->Start(m_Scene); !StartResult)
 				throw std::runtime_error("Could not start sample scene runtime: " + StartResult.error().Message);
 			auto CreatedSceneRenderer =

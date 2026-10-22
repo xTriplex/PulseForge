@@ -43,6 +43,7 @@
 #include "Editor/EditorLayout.h"
 #include "Editor/EditorDockingPolicy.h"
 #include "Editor/EditorMainMenuPanel.h"
+#include "Editor/EditorPerformancePanel.h"
 #include "Editor/EditorViewportCamera.h"
 #include "Editor/EditorViewportSceneRenderView.h"
 #include "Editor/EditorViewportToolbar.h"
@@ -1835,6 +1836,8 @@ namespace
 
 		std::expected<void, std::string> OpenProjectAt(const std::filesystem::path& ProjectFile)
 		{
+			PulseForge::Detail::ScopedDiagnosticTimer DiagnosticTimer(
+				PulseForge::Application::Get().GetDiagnosticsRecorder(), "Editor project open and startup scene", "Editor");
 			m_ProjectOpenStartedAt = std::chrono::steady_clock::now();
 			m_ProjectOpenTimingActive = true;
 			m_LoggedFirstViewportPrepared = false;
@@ -3667,6 +3670,8 @@ namespace
 
 		void ImportAssetAt(const std::filesystem::path& SourceFile, const std::filesystem::path& DestinationFile)
 		{
+			PulseForge::Detail::ScopedDiagnosticTimer DiagnosticTimer(
+				PulseForge::Application::Get().GetDiagnosticsRecorder(), "Editor asset import", "Editor");
 			if (!m_Project)
 			{
 				SetError("Create or open a project before importing assets.");
@@ -4355,6 +4360,7 @@ namespace
 		{
 			PulseForgeEditor::EditorMainMenuState State;
 			State.ProjectOpen = m_Project.has_value();
+			State.PerformancePanelVisible = m_ShowPerformancePanel;
 			State.Assets = m_ContentBrowser.Assets();
 			State.ActiveSceneAsset = m_SceneAsset;
 			State.OpeningPreference = m_Documents.GetOpeningPreference();
@@ -4439,8 +4445,139 @@ namespace
 		{
 			const auto State = BuildMainMenuState();
 			const auto Result = m_MainMenuPanel.Draw(State, m_EditorStyle);
+			if (Result.TogglePerformancePanel) m_ShowPerformancePanel = !m_ShowPerformancePanel;
 			if (Result.Action) ExecuteMainMenuAction(*Result.Action);
 			if (Result.FocusMainDocumentHost) FocusDocumentHostIfChanged(PulseForgeEditor::EditorDocumentManager::MainHostID);
+		}
+
+		PulseForgeEditor::EditorPerformanceSnapshot BuildPerformanceSnapshot()
+		{
+			PulseForgeEditor::EditorPerformanceSnapshot Snapshot;
+			PulseForge::Application& App = PulseForge::Application::Get();
+			Snapshot.Diagnostics = App.GetDiagnosticsSnapshot();
+			Snapshot.GpuTimingAvailable = App.IsGpuFrameTimingSupported();
+			std::array<PulseForge::GpuFrameTiming, 64> NewTimings{};
+			const size_t NewTimingCount = App.ReadCompletedGpuFrameTimings(NewTimings);
+			const uint64_t CollectedAt = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+			for (size_t Index = 0; Index < NewTimingCount; ++Index)
+			{
+				const PulseForge::GpuFrameTiming& Timing = NewTimings[Index];
+				m_CompletedGpuTimings.push_back({ "Main presentation frame", "VulkanRenderer",
+					"NVRHI Vulkan timer query; delayed completed sample", Timing.FrameSequence, CollectedAt, Timing.DurationNanoseconds });
+			}
+			if (m_CompletedGpuTimings.size() > PulseForgeEditor::EditorPerformancePanel::MaximumVisibleGpuTimings)
+				m_CompletedGpuTimings.erase(m_CompletedGpuTimings.begin(),
+					m_CompletedGpuTimings.begin() + static_cast<std::ptrdiff_t>(
+						m_CompletedGpuTimings.size() - PulseForgeEditor::EditorPerformancePanel::MaximumVisibleGpuTimings));
+			Snapshot.CompletedGpuTimings = m_CompletedGpuTimings;
+			const auto AddMetric = [&Snapshot](std::string Label, std::string Owner, std::string Scope, uint64_t Value,
+				PulseForgeEditor::EditorResourceMetricKind Kind, PulseForgeEditor::EditorResourceMetricQuality Quality)
+			{
+				Snapshot.Resources.push_back({ std::move(Label), std::move(Owner), std::move(Scope), Value, Kind, Quality });
+			};
+			if (m_Project)
+				AddMetric("Registered project assets", "AssetRegistry", "Current project's registered asset records",
+					m_Project->GetAssetRegistry().GetAssetCount(), PulseForgeEditor::EditorResourceMetricKind::Count,
+					PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			if (m_Scene)
+				AddMetric("Authored scene entities", "Scene", "Currently open authored scene", m_Scene->GetEntityCount(),
+					PulseForgeEditor::EditorResourceMetricKind::Count, PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			const PulseForgeEditor::AssetPreviewStats PreviewStats = m_AssetPreviews.GetStats();
+			AddMetric("Queued decoded preview bytes", "AssetPreviewService", "Completed pixel payloads awaiting UI upload",
+				PreviewStats.QueuedResultCpuBytes, PulseForgeEditor::EditorResourceMetricKind::Bytes,
+				PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			AddMetric("Preview texture logical bytes", "AssetPreviewService", "Service-accounted preview texture footprint",
+				PreviewStats.GpuBytes, PulseForgeEditor::EditorResourceMetricKind::Bytes,
+				PulseForgeEditor::EditorResourceMetricQuality::LogicalAllocation);
+			AddMetric("Preview cache entries", "AssetPreviewService", "Ready preview cache entries", PreviewStats.ReadyEntries,
+				PulseForgeEditor::EditorResourceMetricKind::Count, PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			AddMetric("Pending preview requests", "AssetPreviewService", "Requests waiting for worker or UI upload", PreviewStats.PendingRequests,
+				PulseForgeEditor::EditorResourceMetricKind::Count, PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			AddMetric("Failed preview entries", "AssetPreviewService", "Current failed cache entries", PreviewStats.FailedEntries,
+				PulseForgeEditor::EditorResourceMetricKind::Count, PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			AddMetric("Preview cache hits", "AssetPreviewService", "Cumulative hits for current project cache", PreviewStats.CacheHits,
+				PulseForgeEditor::EditorResourceMetricKind::Count, PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			AddMetric("Preview cache misses", "AssetPreviewService", "Cumulative misses for current project cache", PreviewStats.CacheMisses,
+				PulseForgeEditor::EditorResourceMetricKind::Count, PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			AddMetric("Preview decodes succeeded", "AssetPreviewService", "Cumulative successful decodes for current project cache",
+				PreviewStats.DecodesSucceeded, PulseForgeEditor::EditorResourceMetricKind::Count,
+				PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			AddMetric("Preview decodes failed", "AssetPreviewService", "Cumulative failed decodes for current project cache",
+				PreviewStats.DecodesFailed, PulseForgeEditor::EditorResourceMetricKind::Count,
+				PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			AddMetric("Preview uploads", "AssetPreviewService", "Cumulative UI-thread texture uploads", PreviewStats.Uploads,
+				PulseForgeEditor::EditorResourceMetricKind::Count, PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			AddMetric("Preview evictions", "AssetPreviewService", "Cumulative cache evictions", PreviewStats.Evictions,
+				PulseForgeEditor::EditorResourceMetricKind::Count, PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			if (m_ImGuiRenderer)
+				AddMetric("Registered renderer texture bindings", "EditorImGuiRenderer", "Bindings registered with editor UI renderer",
+					m_ImGuiRenderer->GetRegisteredTextureCount(), PulseForgeEditor::EditorResourceMetricKind::Count,
+					PulseForgeEditor::EditorResourceMetricQuality::ExactPayload);
+			return Snapshot;
+		}
+
+		void ExportPerformanceCapture()
+		{
+			static constexpr PulseForgeEditor::EditorFileDialogFilter Filter{ "JSON Capture", "json" };
+			const auto OutputPath = ShowSaveDialog(&Filter, {}, "PulseForgeCapture.json");
+			if (!OutputPath) return;
+
+			const auto Snapshot = BuildPerformanceSnapshot();
+			PulseForgeEditor::EditorPerformanceTraceMetadata TraceMetadata;
+#if defined(_WIN32)
+			TraceMetadata.Platform = "Windows";
+#elif defined(__APPLE__)
+			TraceMetadata.Platform = "macOS";
+#elif defined(__linux__)
+			TraceMetadata.Platform = "Linux";
+#else
+			TraceMetadata.Platform = "Unknown";
+#endif
+#if defined(PF_DEBUG)
+			TraceMetadata.Configuration = "Debug";
+#elif defined(PF_DIST)
+			TraceMetadata.Configuration = "Dist";
+#elif defined(PF_RELEASE)
+			TraceMetadata.Configuration = "Release";
+#else
+			TraceMetadata.Configuration = "Unknown";
+#endif
+			TraceMetadata.Renderer = PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan ? "Vulkan" : "OpenGL";
+			std::ofstream Output(*OutputPath, std::ios::binary | std::ios::trunc);
+			if (!Output)
+			{
+				SetError("Could not open the selected diagnostics capture path for writing.");
+				return;
+			}
+			Output << PulseForgeEditor::SerializeEditorPerformanceTrace(Snapshot, TraceMetadata);
+			Output.flush();
+			if (!Output) SetError("Could not finish writing the diagnostics capture.");
+			else SetStatus("Diagnostics capture exported.");
+		}
+
+		void DrawPerformancePanel()
+		{
+			if (!m_ShowPerformancePanel) return;
+			const auto Snapshot = BuildPerformanceSnapshot();
+			const PulseForgeEditor::EditorPerformanceAction Action = m_PerformancePanel.Draw(Snapshot, m_EditorStyle);
+			switch (Action.Kind)
+			{
+			case PulseForgeEditor::EditorPerformanceActionKind::StartCapture:
+				if (!PulseForge::Application::Get().StartDiagnosticsCapture())
+					SetError("Diagnostics capture could not allocate its bounded event buffer.");
+				else SetStatus("Diagnostics capture started.");
+				break;
+			case PulseForgeEditor::EditorPerformanceActionKind::StopCapture:
+				PulseForge::Application::Get().StopDiagnosticsCapture();
+				SetStatus("Diagnostics capture stopped.");
+				break;
+			case PulseForgeEditor::EditorPerformanceActionKind::ExportCapture:
+				ExportPerformanceCapture();
+				break;
+			case PulseForgeEditor::EditorPerformanceActionKind::None:
+				break;
+			}
 		}
 
 		void ExecuteMainMenuAction(const PulseForgeEditor::EditorMainMenuAction& Action)
@@ -5842,6 +5979,7 @@ namespace
 				DrawDeleteAssetDialog();
 				DrawAssetDestinationDialog();
 				DrawConsolePanel();
+				DrawPerformancePanel();
 			}
 			DrawNativeDocumentHosts();
 			m_WorkspacePresentation.KeepInactiveWorkspacesAlive(m_Documents, m_DocumentEditors);
@@ -7072,6 +7210,8 @@ namespace
 
 		void StartRuntime()
 		{
+			PulseForge::Detail::ScopedDiagnosticTimer DiagnosticTimer(
+				PulseForge::Application::Get().GetDiagnosticsRecorder(), "Editor Play transition", "Editor");
 			if (!m_Project || !m_Scene)
 			{
 				SetError("Open a project and scene before starting the runtime.");
@@ -7091,6 +7231,7 @@ namespace
 
 			PulseForge::SceneRuntimeServices Services;
 			Services.InputState = &PulseForge::Application::Get().GetInput();
+			Services.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder();
 			auto CandidateRuntime = std::make_unique<PulseForge::SceneRuntime>(*m_Project, PulseForge::SceneRuntimeDesc{}, Services);
 			if (auto Result = CandidateRuntime->Start(**CandidateScene); !Result)
 			{
@@ -7356,6 +7497,7 @@ namespace
 		PulseForgeEditor::EditorStyle m_EditorStyle;
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
 		PulseForgeEditor::EditorAssetPreviewService m_AssetPreviews;
+		std::vector<PulseForgeEditor::EditorGpuTimingSample> m_CompletedGpuTimings;
 		PulseForgeEditor::EditorAssetPreviewStressHarness m_AssetPreviewStress;
 		bool m_AssetPreviewProjectPending = false;
 		bool m_AssetPreviewAssetsPending = false;
@@ -7393,6 +7535,8 @@ namespace
 		PulseForgeEditor::EditorDocumentCloseRequest m_DocumentCloseRequest;
 		PulseForgeEditor::EditorAssetWorkflowState m_AssetWorkflow;
 		PulseForgeEditor::EditorConsolePanel m_ConsolePanel;
+		PulseForgeEditor::EditorPerformancePanel m_PerformancePanel;
+		bool m_ShowPerformancePanel = false;
 		PulseForgeEditor::EditorStatusPanel m_StatusPanel;
 		PulseForgeEditor::EditorHierarchyPanel m_HierarchyPanel;
 		PulseForgeEditor::EditorMainMenuPanel m_MainMenuPanel;

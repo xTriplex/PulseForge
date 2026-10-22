@@ -3,6 +3,7 @@
 #include "Assets/AudioAssetCache.h"
 #include "Assets/Project.h"
 #include "Audio/AudioSceneRuntime.h"
+#include "Core/Diagnostics.h"
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Scene/Scene.h"
 #include "Scripting/ScriptRuntime.h"
@@ -136,24 +137,34 @@ namespace PulseForge
 				SceneRuntimeSubsystem::None,
 				"Scene runtime frame delta must be finite and non-negative"));
 
-		if (auto Result = m_Impl->Scripting->Advance(Source, FrameDelta); !Result)
-			return std::unexpected(MakeError(
-				SceneRuntimeErrorCode::UpdateFailed,
-				SceneRuntimeSubsystem::Scripting,
-				"Could not update scene scripts: " + Result.error().Message));
+		{
+			Detail::ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "ScriptRuntime::Advance", "ScriptRuntime");
+			if (auto Result = m_Impl->Scripting->Advance(Source, FrameDelta); !Result)
+				return std::unexpected(MakeError(
+					SceneRuntimeErrorCode::UpdateFailed,
+					SceneRuntimeSubsystem::Scripting,
+					"Could not update scene scripts: " + Result.error().Message));
+		}
 
-		auto PhysicsResult = m_Impl->Physics->Advance(Source, FrameDelta);
+		auto PhysicsResult = [&]
+		{
+			Detail::ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "PhysicsSceneRuntime::Advance", "PhysicsSceneRuntime");
+			return m_Impl->Physics->Advance(Source, FrameDelta);
+		}();
 		if (!PhysicsResult)
 			return std::unexpected(MakeError(
 				SceneRuntimeErrorCode::UpdateFailed,
 				SceneRuntimeSubsystem::Physics,
 				"Could not advance scene physics: " + PhysicsResult.error().Message));
 
-		if (auto Result = m_Impl->Audio->Advance(Source); !Result)
-			return std::unexpected(MakeError(
-				SceneRuntimeErrorCode::UpdateFailed,
-				SceneRuntimeSubsystem::Audio,
-				"Could not update scene audio: " + Result.error().Message));
+		{
+			Detail::ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "AudioSceneRuntime::Advance", "AudioSceneRuntime");
+			if (auto Result = m_Impl->Audio->Advance(Source); !Result)
+				return std::unexpected(MakeError(
+					SceneRuntimeErrorCode::UpdateFailed,
+					SceneRuntimeSubsystem::Audio,
+					"Could not update scene audio: " + Result.error().Message));
+		}
 
 		return SceneRuntimeFrameResult{ *PhysicsResult };
 	}
