@@ -7517,10 +7517,11 @@ namespace
 				int Height = 0;
 				if (Window) glfwGetWindowSize(Window, &Width, &Height);
 				PF_ERROR("PULSEFORGE_DIAGNOSTICS_SMOKE=DEADLINE; resize_requested={}; resize_observed={}; "
-					"main_frame_active={}; native_focused={}; native_size={}x{}; viewport_visible={}; viewport_target={}; "
+					"native_focused={}; native_size={}x{}; requested_size={}x{}; viewport_visible={}; viewport_target={}; "
 					"scene_ready={}; rendered_frames_after_resize={}", m_DiagnosticsResizeRequested, m_DiagnosticsResizeObserved,
-					PulseForge::Application::Get().IsMainFrameActive(), Window && glfwGetWindowAttrib(Window, GLFW_FOCUSED) == GLFW_TRUE,
-					Width, Height, m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport),
+					Window && glfwGetWindowAttrib(Window, GLFW_FOCUSED) == GLFW_TRUE, Width, Height,
+					m_DiagnosticsTargetWindowWidth, m_DiagnosticsTargetWindowHeight,
+					m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport),
 					m_ViewportRenderView.HasTarget(), m_ViewportRenderView.IsSceneReady(),
 					m_SceneViewportRenderedFrames - m_DiagnosticsResizeRenderBaseline);
 				FailEditorRuntimePlayStopTest("The diagnostics capture smoke exceeded its 180-second safety deadline.");
@@ -7566,12 +7567,14 @@ namespace
 			int Width = 0;
 			int Height = 0;
 			glfwGetWindowSize(Window, &Width, &Height);
-			if (Width != m_DiagnosticsTargetWindowWidth || Height != m_DiagnosticsTargetWindowHeight ||
-				m_SceneViewportRenderedFrames <= m_DiagnosticsResizeRenderBaseline)
+			if (!PulseForgeEditor::Detail::IsViewportResizeObserved(m_DiagnosticsInitialWindowWidth,
+				m_DiagnosticsInitialWindowHeight, Width, Height, m_DiagnosticsResizeRenderBaseline,
+				m_SceneViewportRenderedFrames))
 				return false;
 			m_DiagnosticsResizeObserved = true;
-			PF_INFO("PULSEFORGE_DIAGNOSTICS_SMOKE=RESIZE_OBSERVED; size={}x{}; rendered_frames={}",
-				Width, Height, m_SceneViewportRenderedFrames - m_DiagnosticsResizeRenderBaseline);
+			PF_INFO("PULSEFORGE_DIAGNOSTICS_SMOKE=RESIZE_OBSERVED; initial={}x{}; requested={}x{}; actual={}x{}; rendered_frames={}",
+				m_DiagnosticsInitialWindowWidth, m_DiagnosticsInitialWindowHeight, m_DiagnosticsTargetWindowWidth,
+				m_DiagnosticsTargetWindowHeight, Width, Height, m_SceneViewportRenderedFrames - m_DiagnosticsResizeRenderBaseline);
 			return true;
 		}
 
