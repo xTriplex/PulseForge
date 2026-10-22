@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 from MacOSAutomationClient import capture_failure_context
@@ -69,6 +70,10 @@ class BoundedOutput:
         self.log_path = log_path
         self.markers: set[str] = set()
         self.marker_lines: dict[str, str] = {}
+        self.state_observations: deque[tuple[int, float, str]] = deque(maxlen=512)
+        self.state_observations_dropped_through = 0
+        self.state_observations_lock = threading.Lock()
+        self.last_state_observation_sequence = 0
         self.success_markers = tuple(success_markers)
         self.failure_count = 0
         self.failure_samples: list[str] = []
@@ -104,6 +109,28 @@ class BoundedOutput:
                         if marker in line:
                             self.markers.add(marker)
                             self.marker_lines[marker] = line.rstrip()[:2048]
+                            if marker.endswith("=STATE;"):
+                                observation = line.rstrip()[:2048]
+                                try:
+                                    sequence_text = observation.split("sequence=", 1)[1].split(";", 1)[0]
+                                    sequence = int(sequence_text)
+                                except (IndexError, ValueError):
+                                    sequence = 0
+                                with self.state_observations_lock:
+                                    if sequence <= self.last_state_observation_sequence:
+                                        self.reader_error = self.reader_error or (
+                                            "native camera state sequence was malformed or non-monotonic: "
+                                            f"previous={self.last_state_observation_sequence}; current={sequence}"
+                                        )
+                                    self.last_state_observation_sequence = max(
+                                        self.last_state_observation_sequence, sequence
+                                    )
+                                    if len(self.state_observations) == self.state_observations.maxlen:
+                                        self.state_observations_dropped_through = max(
+                                            self.state_observations_dropped_through,
+                                            self.state_observations[0][0],
+                                        )
+                                    self.state_observations.append((sequence, time.monotonic(), observation))
                     lowered = line.lower()
                     if "development document-host fixture enabled" in lowered:
                         self.fixture_ready.set()

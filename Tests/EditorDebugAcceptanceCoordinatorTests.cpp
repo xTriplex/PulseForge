@@ -259,7 +259,7 @@ namespace
 		std::string LastState;
 		for (int Index = 1; Index <= 105; ++Index)
 		{
-			Observation.ImGuiTime = 0.1 + static_cast<double>(Index) * 0.2;
+			Observation.ImGuiTime = 0.1 + static_cast<double>(Index);
 			if (auto State = Coordinator.ObserveState(Observation)) LastState = *State;
 		}
 		PF_CHECK(Tests, !LastState.empty());
@@ -271,7 +271,8 @@ namespace
 			return static_cast<uint64_t>(std::stoull(State.substr(Start + 9)));
 		};
 		const uint64_t LastSequence = Sequence(LastState);
-		PF_CHECK(Tests, LastSequence > 1);
+		PF_CHECK(Tests, LastSequence > 80);
+		std::cout << "Scene viewport state observation regression reached sequence=" << LastSequence << ".\n";
 
 		Observation.OwnerFocused = false;
 		Observation.ViewportKeyboardFocused = false;
@@ -279,11 +280,16 @@ namespace
 		const auto FocusChanged = Coordinator.ObserveState(Observation);
 		PF_CHECK(Tests, FocusChanged && FocusChanged->find("focused=0") != std::string::npos &&
 			FocusChanged->find("keyboard_focused=0") != std::string::npos && Sequence(*FocusChanged) > LastSequence);
+		const uint64_t FocusSequence = FocusChanged ? Sequence(*FocusChanged) : 0;
 
 		Observation.OwnerFocused = true;
 		Observation.CameraCaptureActive = true;
 		Observation.ImGuiTime += 0.01;
 		PF_CHECK(Tests, Coordinator.Observe(Observation).has_value());
+		const auto CapturedState = Coordinator.ObserveState(Observation);
+		PF_CHECK(Tests, CapturedState && CapturedState->find("capture=1") != std::string::npos &&
+			Sequence(*CapturedState) > FocusSequence);
+		const uint64_t CapturedSequence = CapturedState ? Sequence(*CapturedState) : 0;
 		Observation.RightButtonDown = true;
 		Observation.RightButtonClicked = true;
 		(void)Coordinator.ObserveInput(Observation);
@@ -309,7 +315,7 @@ namespace
 		const auto Reattached = Coordinator.Observe(Observation);
 		PF_CHECK(Tests, Reattached && Reattached->find("=REATTACHED;") != std::string::npos);
 		const auto ReattachedState = Coordinator.ObserveState(Observation);
-		PF_CHECK(Tests, ReattachedState && Sequence(*ReattachedState) > LastSequence);
+		PF_CHECK(Tests, ReattachedState && Sequence(*ReattachedState) > CapturedSequence);
 		PF_CHECK(Tests, !Coordinator.Complete());
 		Observation.ViewportKeyboardFocused = true;
 		Observation.CameraPosition = { 0.0f, 0.0f, 0.1f };
