@@ -164,6 +164,7 @@ jobs:
         run: |
           set -o pipefail
           python3 Tests/Platform/MacOSDocumentCloseSmokeTests.py 2>&1 | tee "$RUNNER_TEMP/macos-document-close-harness-tests.log"
+          python3 Tests/Platform/MacOSDiagnosticsCaptureSmokeTests.py 2>&1 | tee "$RUNNER_TEMP/macos-diagnostics-capture-harness-tests.log"
 
       - name: Build and diagnose the same-process macOS automation permission bridge
         id: macos_automation_permission_probe
@@ -331,6 +332,19 @@ jobs:
             --log-directory "$RUNNER_TEMP" \
             --timeout-seconds 330 2>&1 | tee "$RUNNER_TEMP/macos-scene-viewport-native-smoke.log"
 
+      - name: Run diagnostics capture workload and inspect the Performance utility panel
+        id: macos_diagnostics_capture
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/MacOSDiagnosticsCaptureSmoke.py \
+            --editor Build/CI/macos-renderer/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor \
+            --project Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj \
+            --trace "$RUNNER_TEMP/macos-diagnostics-capture.json" \
+            --log "$RUNNER_TEMP/macos-diagnostics-capture-smoke.log" \
+            --screenshot "$RUNNER_TEMP/macos-diagnostics-performance-panel.png" \
+            --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-diagnostics-capture-driver.log"
+
       - name: Verify native document hosts and synthetic tab reattachment
         id: macos_document_hosts
         if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
@@ -436,7 +450,7 @@ jobs:
               echo "Debug-only Cocoa event observer was compiled for $CONFIGURATION" >&2
               exit 1
             fi
-            for FIXTURE_ARGS in "--editor-runtime-play-stop-test" "--scene-viewport-native-smoke" "--document-host-close-ui-test cancel-save"; do
+            for FIXTURE_ARGS in "--editor-runtime-play-stop-test" "--diagnostics-capture-smoke" "--scene-viewport-native-smoke" "--document-host-close-ui-test cancel-save"; do
               LOG="$RUNNER_TEMP/macos-fixture-rejection-$CONFIGURATION_LOWER-$(printf '%s' "$FIXTURE_ARGS" | tr ' /-' '_').log"
               python3 - "$EDITOR" "$LOG" "$FIXTURE_ARGS" <<'PY'
           import os
@@ -509,6 +523,10 @@ jobs:
             ${{ runner.temp }}/macos-editor-runtime-play-stop.log
             ${{ runner.temp }}/macos-editor-runtime-play-stop-smoke.log
             ${{ runner.temp }}/macos-scene-viewport-native-smoke.log
+            ${{ runner.temp }}/macos-diagnostics-capture-driver.log
+            ${{ runner.temp }}/macos-diagnostics-capture-smoke.log
+            ${{ runner.temp }}/macos-diagnostics-capture.json
+            ${{ runner.temp }}/macos-diagnostics-performance-panel.png
             ${{ runner.temp }}/macos-document-host-smoke.log
             ${{ runner.temp }}/macos-workspace-restore-smoke.log
             ${{ runner.temp }}/macos-workspace-restore-first-launch.log
@@ -525,6 +543,7 @@ jobs:
             ${{ runner.temp }}/macos-document-close-*-stack-sample.txt
             ${{ runner.temp }}/macos-document-close-main-window-close-failure.png
             ${{ runner.temp }}/macos-document-close-harness-tests.log
+            ${{ runner.temp }}/macos-diagnostics-capture-harness-tests.log
             ${{ runner.temp }}/macos-configure-release.log
             ${{ runner.temp }}/macos-build-release.log
             ${{ runner.temp }}/macos-configure-dist.log

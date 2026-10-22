@@ -1,5 +1,5 @@
 #include "Assets/SceneAssetService.h"
-#include "Core/ScopedProfileTimer.h"
+#include "Core/Diagnostics.h"
 
 #include "Assets/AssetOperations.h"
 #include "Assets/AssetPathResolver.h"
@@ -96,14 +96,23 @@ namespace PulseForge
 		const AssetID& SceneAsset,
 		const std::filesystem::path& ProjectRoot,
 		const AssetRegistry& Registry,
-		Scene& Destination)
+		Scene& Destination,
+		DiagnosticRecorder* Diagnostics)
 	{
-		Detail::ScopedProfileTimer Timer("SceneAssetService::Load / deserialize");
-		auto Path = ResolveScenePath(SceneAsset, ProjectRoot, Registry);
+		auto Path = [&]()
+		{
+			ScopedDiagnosticTimer Timer(Diagnostics, "Scene asset path resolution", "SceneAssetService");
+			return ResolveScenePath(SceneAsset, ProjectRoot, Registry);
+		}();
 		if (!Path)
 			return std::unexpected(std::move(Path.error()));
 
-		if (auto LoadResult = SceneSerializer::LoadFromFile(*Path, Destination); !LoadResult)
+		std::expected<void, SceneSerializationError> LoadResult;
+		{
+			ScopedDiagnosticTimer Timer(Diagnostics, "Scene asset file load and deserialize", "SceneAssetService");
+			LoadResult = SceneSerializer::LoadFromFile(*Path, Destination);
+		}
+		if (!LoadResult)
 		{
 			return std::unexpected(SceneAssetError{
 				SceneAssetErrorCode::SerializationFailed,

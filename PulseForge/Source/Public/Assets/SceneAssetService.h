@@ -12,6 +12,8 @@
 
 namespace PulseForge
 {
+	class DiagnosticRecorder;
+
 	enum class SceneAssetErrorCode : uint8_t
 	{
 		AssetNotFound,
@@ -47,7 +49,8 @@ namespace PulseForge
 			const AssetID& SceneAsset,
 			const std::filesystem::path& ProjectRoot,
 			const AssetRegistry& Registry,
-			Scene& Destination);
+			Scene& Destination,
+			DiagnosticRecorder* Diagnostics = nullptr);
 
 		// Saves to the existing managed scene path without changing its sidecar UUID.
 		[[nodiscard]] static std::expected<void, SceneAssetError> Save(

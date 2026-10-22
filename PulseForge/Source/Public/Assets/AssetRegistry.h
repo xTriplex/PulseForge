@@ -44,6 +44,12 @@ namespace PulseForge
 		std::filesystem::path ProjectRelativePath;
 	};
 
+	struct AssetSourceByteAccounting
+	{
+		uint64_t KnownBytes = 0;
+		size_t UnavailableAssetCount = 0;
+	};
+
 	class PULSEFORGE_API AssetRegistry final
 	{
 	public:
@@ -53,8 +59,10 @@ namespace PulseForge
 		// Returns a copy ordered by project-relative path for deterministic browser and tooling views.
 		[[nodiscard]] std::vector<AssetRecord> GetAssets() const;
 		[[nodiscard]] size_t GetAssetCount() const noexcept { return m_Assets.size(); }
+		[[nodiscard]] AssetSourceByteAccounting GetSourceByteAccounting() const noexcept { return m_SourceByteAccounting; }
 
 	private:
 		std::unordered_map<AssetID, AssetRecord, UUIDHash> m_Assets;
+		AssetSourceByteAccounting m_SourceByteAccounting;
 	};
 }

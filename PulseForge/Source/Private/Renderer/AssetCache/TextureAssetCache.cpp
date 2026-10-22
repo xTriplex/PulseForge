@@ -1,6 +1,7 @@
 #include "Renderer/AssetCache/TextureAssetCache.h"
 
 #include "Assets/ImageAssetImporter.h"
+#include "Core/Diagnostics.h"
 
 #include <exception>
 #include <cmath>
@@ -78,12 +79,19 @@ namespace PulseForge
 		}
 	} // namespace
 
-	TextureAssetCache::TextureAssetCache(RenderDevice& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry)
-		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_Registry(Registry)
+	TextureAssetCache::TextureAssetCache(
+		RenderDevice& Runtime,
+		std::filesystem::path ProjectRoot,
+		const AssetRegistry& Registry,
+		DiagnosticRecorder* Diagnostics)
+		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_Registry(Registry), m_Diagnostics(Diagnostics)
 	{
 	}
 
-	TextureAssetCache::~TextureAssetCache() = default;
+	TextureAssetCache::~TextureAssetCache()
+	{
+		Clear();
+	}
 
 	std::expected<std::reference_wrapper<const Texture>, TextureAssetError> TextureAssetCache::GetOrLoad(
 		const AssetID& Asset, TextureFormat Format)
@@ -102,9 +110,18 @@ namespace PulseForge
 		}
 
 		const CacheKey Key{ Asset, Format };
-		if (const auto Existing = m_Textures.find(Key); Existing != m_Textures.end()) return std::cref(*Existing->second);
+		if (const auto Existing = m_Textures.find(Key); Existing != m_Textures.end())
+		{
+			++m_CacheHits;
+			return std::cref(*Existing->second);
+		}
+		++m_CacheMisses;
 
-		auto ImportedImage = ImageAssetImporter::ImportRGBA8(Asset, m_ProjectRoot, m_Registry);
+		auto ImportedImage = [&]()
+		{
+			ScopedDiagnosticTimer Timer(m_Diagnostics, "Texture asset import", "TextureAssetCache");
+			return ImageAssetImporter::ImportRGBA8(Asset, m_ProjectRoot, m_Registry);
+		}();
 		if (!ImportedImage)
 		{
 			return std::unexpected(TextureAssetError{ TextureAssetErrorCode::ImportFailed, Asset, ImportedImage.error().Message });
@@ -114,8 +131,12 @@ namespace PulseForge
 		Description.Width = ImportedImage->Width;
 		Description.Height = ImportedImage->Height;
 		Description.Format = Format;
-		auto MipLevels =
-			BuildMipChain(ImportedImage->Width, ImportedImage->Height, ImportedImage->RGBA8Pixels, Format == TextureFormat::RGBA8_Srgb);
+		auto MipLevels = [&]()
+		{
+			ScopedDiagnosticTimer Timer(m_Diagnostics, "Texture mip generation", "TextureAssetCache");
+			return BuildMipChain(
+				ImportedImage->Width, ImportedImage->Height, ImportedImage->RGBA8Pixels, Format == TextureFormat::RGBA8_Srgb);
+		}();
 		Description.MipLevels = static_cast<uint32_t>(MipLevels.size());
 		Description.DebugName = "Image asset " + Asset.ToString();
 		std::vector<TextureSubresourceData> InitialData;
@@ -125,7 +146,11 @@ namespace PulseForge
 			const OwnedMipLevel& Level = MipLevels[MipLevel];
 			InitialData.push_back({ MipLevel, 0, std::as_bytes(std::span(Level.Pixels)), 0 });
 		}
-		auto CreatedTexture = m_Runtime.CreateTexture(Description, InitialData);
+		auto CreatedTexture = [&]()
+		{
+			ScopedDiagnosticTimer Timer(m_Diagnostics, "Texture GPU resource creation", "TextureAssetCache");
+			return m_Runtime.CreateTexture(Description, InitialData);
+		}();
 		if (!CreatedTexture)
 		{
 			return std::unexpected(
@@ -140,6 +165,8 @@ namespace PulseForge
 				return std::unexpected(TextureAssetError{ TextureAssetErrorCode::CacheFailure, Asset,
 					"Texture asset UUID and format were already present during cache insertion" });
 			}
+			if (m_Diagnostics)
+				(void)m_Diagnostics->RecordEvent(DiagnosticEventKind::Resource, "Texture cache resource created", "TextureAssetCache", "objects", 1);
 			return std::cref(*Inserted->second);
 		}
 		catch (const std::exception& Exception)
@@ -151,7 +178,16 @@ namespace PulseForge
 
 	void TextureAssetCache::Clear() noexcept
 	{
+		const uint64_t RetiredCount = m_Textures.size();
 		m_Textures.clear();
+		if (m_Diagnostics && RetiredCount > 0)
+			(void)m_Diagnostics->RecordEvent(DiagnosticEventKind::Resource, "Texture cache resources retired", "TextureAssetCache", "objects", RetiredCount);
+		if (m_Diagnostics && m_CacheHits > 0)
+			(void)m_Diagnostics->RecordEvent(DiagnosticEventKind::Counter, "Texture cache hits", "TextureAssetCache", "lookups", m_CacheHits);
+		if (m_Diagnostics && m_CacheMisses > 0)
+			(void)m_Diagnostics->RecordEvent(DiagnosticEventKind::Counter, "Texture cache misses", "TextureAssetCache", "lookups", m_CacheMisses);
+		m_CacheHits = 0;
+		m_CacheMisses = 0;
 	}
 
 	size_t TextureAssetCache::GetLoadedCount() const noexcept

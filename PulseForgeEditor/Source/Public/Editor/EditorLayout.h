@@ -21,6 +21,7 @@ namespace PulseForgeEditor
 		Console,
 		Scene,
 		MaterialDetails,
+		Performance,
 		Count
 	};
 
@@ -40,6 +41,7 @@ namespace PulseForgeEditor
 			case EditorPanel::SceneViewport: return EditorDefaultDockRegion::Center;
 			case EditorPanel::Inspector:
 			case EditorPanel::MaterialDetails: return EditorDefaultDockRegion::Right;
+			case EditorPanel::Performance: return EditorDefaultDockRegion::Right;
 			case EditorPanel::ContentBrowser:
 			case EditorPanel::Console:
 			case EditorPanel::Scene: return EditorDefaultDockRegion::Bottom;
@@ -65,7 +67,8 @@ namespace PulseForgeEditor
 		{ EditorPanel::Console, "Console", "Console", true, true },
 		{ EditorPanel::Scene, "Scene", "Scene", true, false },
 		// Keep the settings key and ImGui window name stable for existing workspaces.
-		{ EditorPanel::MaterialDetails, "MaterialEditor", "Material Editor", true, false }
+		{ EditorPanel::MaterialDetails, "MaterialEditor", "Material Editor", true, false },
+		{ EditorPanel::Performance, "Performance", "Performance", true, false }
 	}};
 
 	class EditorPanelVisibility final

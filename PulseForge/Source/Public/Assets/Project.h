@@ -12,6 +12,8 @@
 
 namespace PulseForge
 {
+	class DiagnosticRecorder;
+
 	struct ProjectDesc
 	{
 		UUID ID;
@@ -58,7 +60,9 @@ namespace PulseForge
 		[[nodiscard]] static std::expected<Project, ProjectError> Create(
 			const std::filesystem::path& ProjectFile,
 			std::string Name);
-		[[nodiscard]] static std::expected<Project, ProjectError> Open(const std::filesystem::path& ProjectFile);
+		[[nodiscard]] static std::expected<Project, ProjectError> Open(
+			const std::filesystem::path& ProjectFile,
+			DiagnosticRecorder* Diagnostics = nullptr);
 
 		Project(const Project&) = delete;
 		Project& operator=(const Project&) = delete;

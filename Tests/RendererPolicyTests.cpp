@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -388,6 +389,18 @@ namespace
 		PF_CHECK(Tests, ChooseImageCount(3, 5) == 4);
 	}
 
+	void TestGpuTimestampCapabilityPolicy(TestRunner& Tests)
+	{
+		PF_CHECK(Tests, EvaluateGpuTimestampCapability(0, 1.0f) == GpuTimestampCapabilityReason::QueueDoesNotSupportTimestamps);
+		PF_CHECK(Tests, EvaluateGpuTimestampCapability(36, 1.0f) == GpuTimestampCapabilityReason::Supported);
+		PF_CHECK(Tests, EvaluateGpuTimestampCapability(36, 0.0f) == GpuTimestampCapabilityReason::InvalidTimestampPeriod);
+		PF_CHECK(Tests, EvaluateGpuTimestampCapability(36, -1.0f) == GpuTimestampCapabilityReason::InvalidTimestampPeriod);
+		PF_CHECK(Tests, EvaluateGpuTimestampCapability(36, std::numeric_limits<float>::infinity()) ==
+			GpuTimestampCapabilityReason::InvalidTimestampPeriod);
+		PF_CHECK(Tests, EvaluateGpuTimestampCapability(36, std::numeric_limits<float>::quiet_NaN()) ==
+			GpuTimestampCapabilityReason::InvalidTimestampPeriod);
+	}
+
 	void TestHealthyRendererShutdownOrder(TestRunner& Tests)
 	{
 		FakeRendererShutdown Operations;
@@ -478,6 +491,24 @@ namespace
 		PF_CHECK(
 			Tests, std::find(FailedNvrhiWait.Calls.begin(), FailedNvrhiWait.Calls.end(), "release-nvrhi") == FailedNvrhiWait.Calls.end());
 
+		FakeRendererShutdown PendingQueryWaitFailure;
+		// This fake verifies shutdown ordering policy only; it does not model or exercise an NVRHI timer query object.
+		PendingQueryWaitFailure.GpuTimerQueryPending = true;
+		PendingQueryWaitFailure.NvrhiWait = { ShutdownWaitOutcome::Failed, -11 };
+		const ShutdownResult PendingQueryWaitFailureResult = ShutdownRenderer(PendingQueryWaitFailure);
+		PF_CHECK(Tests, PendingQueryWaitFailureResult.Disposition == ShutdownDisposition::WaitFailed);
+		PF_CHECK(Tests, PendingQueryWaitFailureResult.Stage == ShutdownStage::NvrhiIdle);
+		PF_CHECK(Tests, PendingQueryWaitFailure.GpuTimerQueryPending);
+		PF_CHECK(Tests, !PendingQueryWaitFailure.GpuTimerQueryReleasedAfterRetirement);
+		PF_CHECK(Tests, std::find(PendingQueryWaitFailure.Calls.begin(), PendingQueryWaitFailure.Calls.end(),
+			"release-children-healthy") == PendingQueryWaitFailure.Calls.end());
+
+		PendingQueryWaitFailure.NvrhiWait = {};
+		const ShutdownResult PendingQueryRetryResult = ShutdownRenderer(PendingQueryWaitFailure);
+		PF_CHECK(Tests, PendingQueryRetryResult.Disposition == ShutdownDisposition::Complete);
+		PF_CHECK(Tests, !PendingQueryWaitFailure.GpuTimerQueryPending);
+		PF_CHECK(Tests, PendingQueryWaitFailure.GpuTimerQueryReleasedAfterRetirement);
+
 		FakeRendererShutdown UnknownFenceRetirement;
 		UnknownFenceRetirement.DeviceLost = true;
 		UnknownFenceRetirement.LostResult = TestVkErrorDeviceLost;
@@ -488,6 +519,18 @@ namespace
 		PF_CHECK(Tests, UnknownResult.VulkanResult == TestVkErrorDeviceLost);
 		PF_CHECK(Tests, std::find(UnknownFenceRetirement.Calls.begin(), UnknownFenceRetirement.Calls.end(), "release-nvrhi") ==
 							UnknownFenceRetirement.Calls.end());
+
+		FakeRendererShutdown PendingQueryUnknownFence;
+		PendingQueryUnknownFence.DeviceLost = true;
+		PendingQueryUnknownFence.LostResult = TestVkErrorDeviceLost;
+		PendingQueryUnknownFence.GpuTimerQueryPending = true;
+		PendingQueryUnknownFence.FenceWaitAfterLoss = { ShutdownWaitOutcome::Failed, -9 };
+		const ShutdownResult PendingQueryUnknownFenceResult = ShutdownRenderer(PendingQueryUnknownFence);
+		PF_CHECK(Tests, PendingQueryUnknownFenceResult.Disposition == ShutdownDisposition::PresentationLifetimeUnknown);
+		PF_CHECK(Tests, PendingQueryUnknownFence.GpuTimerQueryPending);
+		PF_CHECK(Tests, !PendingQueryUnknownFence.GpuTimerQueryReleasedAfterRetirement);
+		PF_CHECK(Tests, std::find_if(PendingQueryUnknownFence.Calls.begin(), PendingQueryUnknownFence.Calls.end(),
+			[](const std::string& Call) { return Call.starts_with("release-children-"); }) == PendingQueryUnknownFence.Calls.end());
 
 		FakeRendererShutdown LegacyLoss;
 		LegacyLoss.DeviceLost = true;
@@ -620,6 +663,7 @@ void RunRendererPolicyTests(TestRunner& Tests)
 	TestFormatUsageCapabilities(Tests);
 	TestSurfaceAndPresentationSelection(Tests);
 	TestExtentAndImageCountSelection(Tests);
+	TestGpuTimestampCapabilityPolicy(Tests);
 	TestHealthyRendererShutdownOrder(Tests);
 	TestDeviceLossShutdown(Tests);
 	TestRendererShutdownFailureContracts(Tests);

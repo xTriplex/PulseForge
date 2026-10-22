@@ -196,6 +196,17 @@ namespace PulseForge::VulkanSupport
 
 	std::optional<QueueFamilySelection> ChooseQueueFamilies(std::span<const QueueFamily> Families);
 
+	enum class GpuTimestampCapabilityReason : uint8_t
+	{
+		Supported,
+		QueueDoesNotSupportTimestamps,
+		InvalidTimestampPeriod
+	};
+
+	[[nodiscard]] GpuTimestampCapabilityReason EvaluateGpuTimestampCapability(
+		uint32_t TimestampValidBits, float TimestampPeriodNanoseconds) noexcept;
+	[[nodiscard]] const char* ToString(GpuTimestampCapabilityReason Reason) noexcept;
+
 	struct SurfaceFormat
 	{
 		uint32_t Format = 0;
