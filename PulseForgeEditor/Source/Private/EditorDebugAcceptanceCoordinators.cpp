@@ -510,6 +510,13 @@ namespace PulseForgeEditor::Detail
 			m_Identity->Asset.ToString(), m_ActionSequence, m_PromptGeneration, ExpectedSavedValue);
 	}
 
+	bool IsViewportResizeObserved(
+		int InitialWidth, int InitialHeight, int ActualWidth, int ActualHeight, uint64_t FramesBefore, uint64_t FramesAfter) noexcept
+	{
+		return InitialWidth > 0 && InitialHeight > 0 && ActualWidth > 0 && ActualHeight > 0 &&
+			(ActualWidth != InitialWidth || ActualHeight != InitialHeight) && FramesAfter > FramesBefore;
+	}
+
 	EditorRuntimePlayStopCoordinator::EditorRuntimePlayStopCoordinator(bool Enabled) noexcept
 		: m_Phase(Enabled ? Phase::WaitingForEditViewportRender : Phase::Disabled)
 	{
