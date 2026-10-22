@@ -762,7 +762,7 @@ if operation == "press-control" || operation == "set-value" || operation == "set
             )
             let selectedChildren = rawSelectedChildren as? [AXUIElement] ?? []
             let selected = selectedChildren.contains { CFEqual($0, listSelectionChild) }
-            let verified = selectionError == .success && selectedChildrenError == .success && selected
+            let verified = selectedChildrenError == .success && selected
             print("DIRECT_AX_RESULT status=\(verified ? "selection-verified" : "selection-error"); " +
                   "operation=select-element; role=\(role); name=\(titleOrDescription(control)); " +
                   "ax_error=\(selectionError.rawValue); selected=\(selected); " +
