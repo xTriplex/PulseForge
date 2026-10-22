@@ -87,12 +87,21 @@ def open_file_selection_ready(output: str, expected_name: str) -> bool:
         for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ")
         if "=" in part
     )
+    valid_list_selection = (
+        "selection_method" not in fields
+        or (
+            fields.get("selection_method") == "list-selected-children"
+            and fields.get("owner_role") == "AXList"
+            and fields.get("selected_children_error") == "0"
+        )
+    )
     return (
         fields.get("operation") == "select-element"
         and fields.get("role") in {"AXRow", "AXCell", "AXTextField"}
         and fields.get("name") == expected_name
         and fields.get("ax_error") == "0"
         and fields.get("selected") == "true"
+        and valid_list_selection
     )
 
 

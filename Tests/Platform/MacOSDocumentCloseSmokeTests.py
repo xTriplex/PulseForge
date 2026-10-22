@@ -438,6 +438,16 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         ))
         row_selected = selected.replace("role=AXTextField", "role=AXRow")
         self.assertTrue(native_dialog.open_file_selection_ready(row_selected, expected_path.name))
+        list_selected = (
+            "DIRECT_AX_RESULT status=selection-verified; operation=select-element; "
+            "role=AXTextField; name=Example Ω.scene; ax_error=0; selected=true; "
+            "selection_method=list-selected-children; owner_role=AXList; selected_children_error=0"
+        )
+        self.assertTrue(native_dialog.open_file_selection_ready(list_selected, expected_path.name))
+        self.assertFalse(native_dialog.open_file_selection_ready(
+            list_selected.replace("selected_children_error=0", "selected_children_error=-25205"),
+            expected_path.name,
+        ))
         with patch.object(native_dialog, "run_direct_ax", return_value=(0, selected, "")) as select:
             code, result = native_dialog.select_open_file(42, "Open", expected_path, timeout=4.0)
         self.assertEqual(0, code)
