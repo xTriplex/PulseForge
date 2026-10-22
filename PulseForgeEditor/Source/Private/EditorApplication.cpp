@@ -1836,7 +1836,7 @@ namespace
 
 		std::expected<void, std::string> OpenProjectAt(const std::filesystem::path& ProjectFile)
 		{
-			PulseForge::Detail::ScopedDiagnosticTimer DiagnosticTimer(
+			PulseForge::ScopedDiagnosticTimer DiagnosticTimer(
 				PulseForge::Application::Get().GetDiagnosticsRecorder(), "Editor project open and startup scene", "Editor");
 			m_ProjectOpenStartedAt = std::chrono::steady_clock::now();
 			m_ProjectOpenTimingActive = true;
@@ -3670,7 +3670,7 @@ namespace
 
 		void ImportAssetAt(const std::filesystem::path& SourceFile, const std::filesystem::path& DestinationFile)
 		{
-			PulseForge::Detail::ScopedDiagnosticTimer DiagnosticTimer(
+			PulseForge::ScopedDiagnosticTimer DiagnosticTimer(
 				PulseForge::Application::Get().GetDiagnosticsRecorder(), "Editor asset import", "Editor");
 			if (!m_Project)
 			{
@@ -7210,7 +7210,7 @@ namespace
 
 		void StartRuntime()
 		{
-			PulseForge::Detail::ScopedDiagnosticTimer DiagnosticTimer(
+			PulseForge::ScopedDiagnosticTimer DiagnosticTimer(
 				PulseForge::Application::Get().GetDiagnosticsRecorder(), "Editor Play transition", "Editor");
 			if (!m_Project || !m_Scene)
 			{

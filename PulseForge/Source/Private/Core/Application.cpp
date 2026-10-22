@@ -149,7 +149,7 @@ namespace PulseForge
 
 			if (DiagnosticRecorder* Recorder = GetDiagnosticsRecorder())
 			{
-				Detail::ScopedDiagnosticTimer Timer(*Recorder, "Application layer update", "Application");
+				ScopedDiagnosticTimer Timer(*Recorder, "Application layer update", "Application");
 				m_LayerStack.UpdateLayers(DeltaTime);
 			}
 			else
@@ -164,7 +164,7 @@ namespace PulseForge
 			{
 				if (DiagnosticRecorder* Recorder = GetDiagnosticsRecorder())
 				{
-					Detail::ScopedDiagnosticTimer Timer(*Recorder, "Application layer render", "Application");
+					ScopedDiagnosticTimer Timer(*Recorder, "Application layer render", "Application");
 					m_LayerStack.RenderLayers();
 				}
 				else
@@ -179,7 +179,7 @@ namespace PulseForge
 			{
 				if (DiagnosticRecorder* Recorder = GetDiagnosticsRecorder())
 				{
-					Detail::ScopedDiagnosticTimer Timer(*Recorder, "Application platform-window render", "Application");
+					ScopedDiagnosticTimer Timer(*Recorder, "Application platform-window render", "Application");
 					m_LayerStack.RenderPlatformWindows();
 				}
 				else

@@ -138,7 +138,7 @@ namespace PulseForge
 				"Scene runtime frame delta must be finite and non-negative"));
 
 		{
-			Detail::ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "ScriptRuntime::Advance", "ScriptRuntime");
+			ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "ScriptRuntime::Advance", "ScriptRuntime");
 			if (auto Result = m_Impl->Scripting->Advance(Source, FrameDelta); !Result)
 				return std::unexpected(MakeError(
 					SceneRuntimeErrorCode::UpdateFailed,
@@ -148,7 +148,7 @@ namespace PulseForge
 
 		auto PhysicsResult = [&]
 		{
-			Detail::ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "PhysicsSceneRuntime::Advance", "PhysicsSceneRuntime");
+			ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "PhysicsSceneRuntime::Advance", "PhysicsSceneRuntime");
 			return m_Impl->Physics->Advance(Source, FrameDelta);
 		}();
 		if (!PhysicsResult)
@@ -158,7 +158,7 @@ namespace PulseForge
 				"Could not advance scene physics: " + PhysicsResult.error().Message));
 
 		{
-			Detail::ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "AudioSceneRuntime::Advance", "AudioSceneRuntime");
+			ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "AudioSceneRuntime::Advance", "AudioSceneRuntime");
 			if (auto Result = m_Impl->Audio->Advance(Source); !Result)
 				return std::unexpected(MakeError(
 					SceneRuntimeErrorCode::UpdateFailed,
