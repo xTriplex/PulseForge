@@ -6,11 +6,12 @@ on:
   workflow_dispatch:
     inputs:
       validation_mode:
-        description: Select focused automation-probe validation or the complete acceptance matrix
+        description: Select focused automation-probe, macOS desktop, or complete acceptance validation
         type: choice
         options:
           - full
           - automation-probe-only
+          - macos-desktop-only
         default: full
         required: true
 
@@ -548,7 +549,7 @@ jobs:
 
   windows-msvc:
     name: Windows 2022 · MSVC · Debug
-    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && (github.event_name != 'push' || !contains(github.event.head_commit.message || '', '[automation-probe-only]')) }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]'))) }}
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -640,7 +641,7 @@ jobs:
 
   linux-gcc:
     name: Ubuntu 24.04 · GCC · Ninja · Debug
-    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && (github.event_name != 'push' || !contains(github.event.head_commit.message || '', '[automation-probe-only]')) }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
