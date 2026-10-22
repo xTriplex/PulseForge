@@ -5,11 +5,13 @@
 #include "Renderer/Graphics.h"
 #include "Renderer/RenderTarget.h"
 #include "Renderer/DepthCubemap.h"
+#include "Renderer/RenderDevice.h"
 
 #include <memory>
 #include <expected>
 #include <string>
 #include <cstdint>
+#include <span>
 #include "Renderer/RendererAPI.h"
 
 namespace PulseForge
@@ -22,6 +24,12 @@ namespace PulseForge
 		virtual ~RendererBackend() = default;
 
 		[[nodiscard]] virtual OutputColorEncoding GetOutputColorEncoding() const noexcept = 0;
+		[[nodiscard]] virtual bool SetGpuFrameTimingEnabled(bool Enabled) noexcept { (void)Enabled; return false; }
+		[[nodiscard]] virtual size_t ReadCompletedGpuFrameTimings(std::span<GpuFrameTiming> Destination) noexcept
+		{
+			(void)Destination;
+			return 0;
+		}
 		virtual bool BeginFrame() = 0;
 		virtual void EndFrame() = 0;
 		[[nodiscard]] virtual std::expected<uint64_t, std::string> CreatePlatformPresentationTarget(void* NativeWindow)

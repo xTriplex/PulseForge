@@ -13,6 +13,7 @@
 namespace PulseForge
 {
 	class Input;
+	class DiagnosticRecorder;
 	class Project;
 	class Scene;
 
@@ -27,6 +28,7 @@ namespace PulseForge
 	struct SceneRuntimeServices
 	{
 		Input* InputState = nullptr;
+		DiagnosticRecorder* Diagnostics = nullptr;
 	};
 
 	enum class SceneRuntimeErrorCode : uint8_t

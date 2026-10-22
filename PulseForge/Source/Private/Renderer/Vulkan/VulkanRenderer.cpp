@@ -18,7 +18,9 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include <GLFW/glfw3.h>
 
+#include <algorithm>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -395,6 +397,51 @@ namespace PulseForge
 			}
 		}
 
+		bool SetGpuFrameTimingEnabled(bool Enabled) noexcept override
+		{
+			if (!Enabled)
+			{
+				m_GpuFrameTimingEnabled = false;
+				return true;
+			}
+			if (!m_ActiveNvrhiDevice || m_DeviceHealth.IsLost()) return false;
+			try
+			{
+				for (FrameContext& Frame : m_Frames)
+				{
+					if (Frame.GpuTimerQuery) continue;
+					Frame.GpuTimerQuery = m_ActiveNvrhiDevice->createTimerQuery();
+					if (!Frame.GpuTimerQuery)
+					{
+						for (FrameContext& Created : m_Frames)
+							if (!Created.GpuTimingPending) Created.GpuTimerQuery = nullptr;
+						return false;
+					}
+				}
+				m_GpuFrameTimingEnabled = true;
+				return true;
+			}
+			catch (...)
+			{
+				m_GpuFrameTimingEnabled = false;
+				for (FrameContext& Frame : m_Frames)
+					if (!Frame.GpuTimingPending) Frame.GpuTimerQuery = nullptr;
+				return false;
+			}
+		}
+
+		size_t ReadCompletedGpuFrameTimings(std::span<GpuFrameTiming> Destination) noexcept override
+		{
+			const size_t Count = (std::min)(Destination.size(), m_CompletedGpuTimingCount);
+			for (size_t Index = 0; Index < Count; ++Index)
+			{
+				Destination[Index] = m_CompletedGpuTimings[m_CompletedGpuTimingFirst];
+				m_CompletedGpuTimingFirst = (m_CompletedGpuTimingFirst + 1) % m_CompletedGpuTimings.size();
+				--m_CompletedGpuTimingCount;
+			}
+			return Count;
+		}
+
 		bool BeginFrame() override
 		{
 			m_DeviceHealth.EnsureOperational();
@@ -463,6 +510,7 @@ namespace PulseForge
 
 			FrameContext& Frame = m_Frames[m_CurrentFrame];
 			WaitForFrame(Frame);
+			RetireGpuFrameTiming(Frame);
 
 			uint32_t ImageIndex = 0;
 			VkResult AcquireResult = VK_SUCCESS;
@@ -531,6 +579,12 @@ namespace PulseForge
 			};
 			m_MainRecording = m_Recording;
 			m_FrameActive = true;
+			Frame.GpuFrameSequence = ++m_GpuFrameSequence;
+			if (m_GpuFrameTimingEnabled && Frame.GpuTimerQuery && !Frame.GpuTimingPending)
+			{
+				Frame.CommandList->beginTimerQuery(Frame.GpuTimerQuery);
+				Frame.GpuTimingRecording = true;
+			}
 			return true;
 		}
 
@@ -566,6 +620,12 @@ namespace PulseForge
 				nvrhi::TextureSubresourceSet(),
 				nvrhi::ResourceStates::Present);
 			Frame.CommandList->commitBarriers();
+			if (Frame.GpuTimingRecording && Frame.GpuTimerQuery && !Frame.GpuTimingPending)
+			{
+				Frame.CommandList->endTimerQuery(Frame.GpuTimerQuery);
+				Frame.GpuTimingPending = true;
+				Frame.GpuTimingRecording = false;
+			}
 			Frame.CommandList->close();
 			m_DeviceHealth.EnsureOperational();
 			Frame.SubmissionValue =
@@ -2477,7 +2537,11 @@ namespace PulseForge
 		{
 			vk::Semaphore ImageAvailable;
 			nvrhi::CommandListHandle CommandList;
+			nvrhi::TimerQueryHandle GpuTimerQuery;
 			uint64_t SubmissionValue = 0;
+			uint64_t GpuFrameSequence = 0;
+			bool GpuTimingPending = false;
+			bool GpuTimingRecording = false;
 		};
 
 		struct ActiveRenderTarget
@@ -3213,6 +3277,38 @@ namespace PulseForge
 			}
 		}
 
+		void RetireGpuFrameTiming(FrameContext& Frame) noexcept
+		{
+			if (!Frame.GpuTimingPending || !Frame.GpuTimerQuery || !m_ActiveNvrhiDevice) return;
+			try
+			{
+				if (!m_ActiveNvrhiDevice->pollTimerQuery(Frame.GpuTimerQuery)) return;
+				const float Seconds = m_ActiveNvrhiDevice->getTimerQueryTime(Frame.GpuTimerQuery);
+				m_ActiveNvrhiDevice->resetTimerQuery(Frame.GpuTimerQuery);
+				Frame.GpuTimingPending = false;
+				if (!std::isfinite(Seconds) || Seconds < 0.0f) return;
+
+				const GpuFrameTiming Timing{
+					Frame.GpuFrameSequence,
+					static_cast<uint64_t>(static_cast<double>(Seconds) * 1'000'000'000.0)
+				};
+				if (m_CompletedGpuTimingCount == m_CompletedGpuTimings.size())
+				{
+					m_CompletedGpuTimingFirst = (m_CompletedGpuTimingFirst + 1) % m_CompletedGpuTimings.size();
+					--m_CompletedGpuTimingCount;
+				}
+				const size_t Slot = (m_CompletedGpuTimingFirst + m_CompletedGpuTimingCount) % m_CompletedGpuTimings.size();
+				m_CompletedGpuTimings[Slot] = Timing;
+				++m_CompletedGpuTimingCount;
+			}
+			catch (...)
+			{
+				Frame.GpuTimingPending = false;
+				m_GpuFrameTimingEnabled = false;
+				Frame.GpuTimerQuery = nullptr;
+			}
+		}
+
 		std::optional<vk::Extent2D> ChooseSwapchainExtent(const vk::SurfaceCapabilitiesKHR& Capabilities) const
 		{
 			const auto [Width, Height] = m_Window.GetFramebufferSize();
@@ -3926,6 +4022,9 @@ namespace PulseForge
 				m_PresentationResources.ReleaseGenerations(m_RetiredSwapchainGenerations, ResourceMode);
 				for (FrameContext& Frame : m_Frames)
 				{
+					Frame.GpuTimerQuery = nullptr;
+					Frame.GpuTimingPending = false;
+					Frame.GpuTimingRecording = false;
 					Frame.CommandList = nullptr;
 					Frame.SubmissionValue = 0;
 					if (Frame.ImageAvailable) m_Device.destroySemaphore(Frame.ImageAvailable);
@@ -4004,6 +4103,11 @@ namespace PulseForge
 		std::vector<const char*> m_EnabledInstanceExtensions;
 		std::vector<const char*> m_EnabledLayers;
 		std::array<FrameContext, FramesInFlight> m_Frames;
+		std::array<GpuFrameTiming, 64> m_CompletedGpuTimings{};
+		size_t m_CompletedGpuTimingFirst = 0;
+		size_t m_CompletedGpuTimingCount = 0;
+		uint64_t m_GpuFrameSequence = 0;
+		bool m_GpuFrameTimingEnabled = false;
 		RecordingContext m_Recording;
 		RecordingContext m_MainRecording;
 		std::unordered_map<uint64_t, std::unique_ptr<PlatformPresentationHost>> m_PlatformTargets;

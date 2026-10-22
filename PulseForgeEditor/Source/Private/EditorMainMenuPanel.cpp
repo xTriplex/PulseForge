@@ -111,6 +111,8 @@ namespace PulseForgeEditor
 
 		if (ImGui::BeginMenu("Window"))
 		{
+			if (ImGui::MenuItem("Performance", nullptr, State.PerformancePanelVisible)) Result.TogglePerformancePanel = true;
+			ImGui::Separator();
 			for (const EditorPanelDescriptor& Descriptor : EditorPanelDescriptors)
 			{
 				const bool Visible = State.PanelVisibility[static_cast<size_t>(Descriptor.Panel)];

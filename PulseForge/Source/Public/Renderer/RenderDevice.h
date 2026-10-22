@@ -8,6 +8,7 @@
 #include "Renderer/RendererAPI.h"
 
 #include <cstdint>
+#include <cstddef>
 #include <expected>
 #include <span>
 #include <string>
@@ -15,6 +16,12 @@
 
 namespace PulseForge
 {
+	struct GpuFrameTiming
+	{
+		uint64_t FrameSequence = 0;
+		uint64_t DurationNanoseconds = 0;
+	};
+
 	// Rendering systems use this validated resource and draw capability without depending on Application's
 	// window, input, event loop, or layer ownership. The caller controls the active frame and device lifetime.
 	class PULSEFORGE_API RenderDevice
@@ -24,6 +31,12 @@ namespace PulseForge
 
 		[[nodiscard]] virtual std::pair<unsigned int, unsigned int> GetOutputFramebufferSize() const noexcept = 0;
 		[[nodiscard]] virtual OutputColorEncoding GetOutputColorEncoding() const noexcept = 0;
+		[[nodiscard]] virtual bool SetGpuFrameTimingEnabled(bool Enabled) noexcept { (void)Enabled; return false; }
+		[[nodiscard]] virtual size_t ReadCompletedGpuFrameTimings(std::span<GpuFrameTiming> Destination) noexcept
+		{
+			(void)Destination;
+			return 0;
+		}
 		[[nodiscard]] virtual RenderTargetCreateResult CreateRenderTarget(const RenderTargetDesc& Description) = 0;
 		[[nodiscard]] virtual DepthCubemapCreateResult CreateDepthCubemap(uint32_t Resolution, const std::string& DebugName) = 0;
 		[[nodiscard]] virtual GraphicsResult BeginRenderTarget(
