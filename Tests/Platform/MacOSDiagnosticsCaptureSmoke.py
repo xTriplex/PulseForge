@@ -10,10 +10,46 @@ import signal
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
+
+from MacOSDirectAX import parse_window_activation, run_direct_ax
 
 PANEL_READY = "PULSEFORGE_DIAGNOSTICS_PERFORMANCE_PANEL=READY;"
 SMOKE_PASS = "PULSEFORGE_DIAGNOSTICS_SMOKE=PASS;"
+MAIN_WINDOW_TITLE = "PulseForge Editor"
+
+
+def activate_editor_window(pid: int) -> str:
+    code, output, error = run_direct_ax(
+        pid, operation="activate-window", window_title=MAIN_WINDOW_TITLE, timeout=10.0
+    )
+    output += error
+    if code != 0:
+        raise RuntimeError(f"could not reactivate the diagnostics editor after the screenshot: {output.strip()!r}")
+    return parse_window_activation(output, pid, MAIN_WINDOW_TITLE)
+
+
+def validate_panel_ready(output: str) -> dict[str, str]:
+    lines = [line for line in output.splitlines() if PANEL_READY in line]
+    if len(lines) != 1:
+        raise ValueError(f"expected one visible Performance panel observation, got {len(lines)}")
+    fields = {
+        key.strip(): value.strip()
+        for item in lines[0].split(PANEL_READY, 1)[1].split("; ")
+        if "=" in item
+        for key, value in [item.split("=", 1)]
+    }
+    try:
+        owner_viewport = int(fields["owner_viewport"])
+        rectangle = tuple(float(value) for value in fields["rect"].split(","))
+    except (KeyError, ValueError) as error:
+        raise ValueError("visible Performance panel observation has invalid owner or geometry") from error
+    if (fields.get("utility_window") != "1" or fields.get("capture_controls") != "1" or owner_viewport <= 0
+            or len(rectangle) != 4 or not all(math.isfinite(value) for value in rectangle)
+            or rectangle[2] <= 1.0 or rectangle[3] <= 1.0):
+        raise ValueError("Performance panel was not visible in a usable utility window")
+    return fields
 
 
 def validate_trace(path: Path) -> dict[str, object]:
@@ -109,8 +145,15 @@ def main() -> int:
 
     command = [str(args.editor), "--project", str(args.project), "--diagnostics-capture-smoke", str(args.trace)]
     started = time.monotonic()
-    with args.log.open("w", encoding="utf-8", buffering=1) as log_file:
-        process = subprocess.Popen(command, stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
+    with tempfile.TemporaryDirectory(prefix="pulseforge-diagnostics-settings-") as settings_directory:
+        settings_path = Path(settings_directory) / "imgui.ini"
+        settings_path.write_text("", encoding="utf-8")
+        environment = os.environ.copy()
+        environment["PULSEFORGE_EDITOR_SETTINGS_DIR"] = settings_directory
+        with args.log.open("w", encoding="utf-8", buffering=1) as log_file:
+            process = subprocess.Popen(
+                command, stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True, env=environment
+            )
         screenshot_taken = False
         try:
             while process.poll() is None and time.monotonic() - started < args.timeout_seconds:
@@ -124,6 +167,8 @@ def main() -> int:
                         raise RuntimeError(f"Performance panel screenshot failed: {result.stderr.strip()}")
                     screenshot_taken = True
                     print("MACOS_DIAGNOSTICS_PANEL_SCREENSHOT=CAPTURED")
+                    focused_title = activate_editor_window(process.pid)
+                    print(f"MACOS_DIAGNOSTICS_EDITOR_REACTIVATION=PASS; pid={process.pid}; focused_title={focused_title!r}")
                 time.sleep(0.1)
             if process.poll() is None:
                 raise TimeoutError("diagnostics editor did not exit before the bounded deadline")
@@ -132,8 +177,9 @@ def main() -> int:
                 raise RuntimeError(f"editor normal shutdown returned {process.returncode}")
             if SMOKE_PASS not in output:
                 raise RuntimeError("editor exited normally without the complete diagnostics PASS marker")
-            if PANEL_READY not in output or not screenshot_taken:
+            if not screenshot_taken:
                 raise RuntimeError("Performance panel did not reach its ready state and produce a screenshot")
+            validate_panel_ready(output)
             report = validate_trace(args.trace)
             print("MACOS_DIAGNOSTICS_APPLICATION_COMPLETION=exit_code=0; orderly_shutdown=1")
             print(f"MACOS_DIAGNOSTICS_TRACE=VALID; {json.dumps(report, sort_keys=True)}")
