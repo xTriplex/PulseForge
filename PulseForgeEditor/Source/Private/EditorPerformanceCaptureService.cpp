@@ -31,6 +31,12 @@ namespace PulseForgeEditor
 		}
 	} // namespace
 
+	bool EditorPerformanceCaptureService::IsGpuTimingAvailable(
+		bool Supported, bool EnabledForCapture, bool CaptureActive, bool BackendEnabled, bool FailureReported) noexcept
+	{
+		return Supported && EnabledForCapture && !FailureReported && (!CaptureActive || BackendEnabled);
+	}
+
 	EditorPerformanceCapture EditorPerformanceCaptureService::Capture(
 		const EditorPerformanceSnapshot& Snapshot, EditorPerformanceCaptureMetadata Metadata)
 	{
