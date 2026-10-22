@@ -524,6 +524,34 @@ class DirtyCloseProtocolTests(unittest.TestCase):
         ))
         self.assertFalse(native_dialog.open_file_confirm_action_dispatched(result + "\n" + result, "Selected Ω.pfproj"))
 
+    def test_open_file_readiness_is_observed_in_the_visible_directory_column(self) -> None:
+        missing = (
+            "DIRECT_AX_RESULT status=control-selection-error; operation=observe-element; "
+            "role=AXRow/AXCell/AXTextField; name=Selected Ω.pfproj; matches=0"
+        )
+        ready = (
+            "DIRECT_AX_RESULT status=target-element-observed; operation=observe-element; "
+            "target_pid=42; role=AXTextField; name=Selected Ω.pfproj; advertised_action=AXConfirm"
+        )
+        self.assertTrue(native_dialog.open_file_element_observed(ready, "Selected Ω.pfproj"))
+        self.assertFalse(native_dialog.open_file_element_observed(ready, "Other.pfproj"))
+        self.assertFalse(native_dialog.open_file_element_observed(ready + "\n" + ready, "Selected Ω.pfproj"))
+        with patch.object(native_dialog, "run_direct_ax", side_effect=[(8, missing, ""), (0, ready, "")]) as observe, patch.object(
+            native_dialog.time, "sleep"
+        ):
+            output = native_dialog.wait_for_open_file_element(
+                42, "Open", "Selected Ω.pfproj", time.monotonic() + 4.0
+            )
+        self.assertIn("target-element-observed", output)
+        self.assertEqual(2, observe.call_count)
+        self.assertEqual("observe-element", observe.call_args.kwargs["operation"])
+
+        ambiguous = missing.replace("matches=0", "matches=2")
+        with patch.object(native_dialog, "run_direct_ax", return_value=(8, ambiguous, "")) as observe:
+            with self.assertRaisesRegex(RuntimeError, "Exact Open-panel file observation failed"):
+                native_dialog.wait_for_open_file_element(42, "Open", "Selected Ω.pfproj", time.monotonic() + 4.0)
+        observe.assert_called_once()
+
     def test_go_to_folder_navigation_requires_exact_focused_path_and_dismissal(self) -> None:
         folder = Path("/Users/runner/_temp/Dialog Files Ω")
         visible = (

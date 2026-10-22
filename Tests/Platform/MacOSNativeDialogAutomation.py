@@ -184,12 +184,57 @@ def open_file_confirm_action_dispatched(output: str, expected_name: str) -> bool
     )
 
 
+def open_file_element_observed(output: str, expected_name: str) -> bool:
+    results = [
+        line for line in output.splitlines()
+        if line.startswith("DIRECT_AX_RESULT status=target-element-observed; operation=observe-element;")
+    ]
+    if len(results) != 1:
+        return False
+    fields = dict(part.split("=", 1) for part in results[0].removeprefix("DIRECT_AX_RESULT ").split("; ") if "=" in part)
+    return (
+        fields.get("role") == "AXTextField"
+        and fields.get("name") == expected_name
+        and fields.get("advertised_action") == "AXConfirm"
+    )
+
+
 def _is_integer(value: str) -> bool:
     try:
         int(value)
         return True
     except ValueError:
         return False
+
+
+def wait_for_open_file_element(fixture_pid: int, panel_title: str, file_name: str, deadline: float) -> str:
+    last_output = ""
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        code, output, error = run_direct_ax(
+            fixture_pid,
+            operation="observe-element",
+            window_title=panel_title,
+            control_name=file_name,
+            timeout=min(6.0, max(0.1, remaining)),
+        )
+        last_output = output + error
+        if code == 0 and open_file_element_observed(last_output, file_name):
+            return last_output
+        missing_exact_file = (
+            code == 8
+            and f"DIRECT_AX_RESULT status=control-selection-error; operation=observe-element;" in last_output
+            and "matches=0;" in last_output
+        )
+        if code not in (0, 124) and not missing_exact_file:
+            raise RuntimeError(
+                f"Exact Open-panel file observation failed; exit_code={code}; output={last_output[-2400:]!r}"
+            )
+        time.sleep(min(0.15, max(0.0, deadline - time.monotonic())))
+    raise RuntimeError(
+        f"Timed out waiting for the exact Open-panel file in the visible directory column; "
+        f"file={file_name!r}; last_snapshot={last_output[-2400:]!r}"
+    )
 
 
 def navigate_open_panel_to_folder(fixture_pid: int, panel_title: str, folder: Path, deadline: float) -> str:
@@ -851,6 +896,10 @@ def run_case(fixture: Path, scenario: str, expected_path: Path, log_path: Path, 
                             int(panel_process_id), panel_title, expected_path.parent, helper_deadline
                         )
                         automation_output += navigation
+                        file_ready = wait_for_open_file_element(
+                            int(panel_process_id), panel_title, expected_path.name, helper_deadline
+                        )
+                        automation_output += file_ready
                         confirm_code, confirm_output, confirm_error = run_direct_ax(
                             int(panel_process_id),
                             operation="confirm-element",

@@ -367,10 +367,11 @@ func collect(_ roots: [AXUIElement], depthLimit: Int = 8, nodeLimit: Int = 256) 
 }
 let needsDescendants = deepSnapshot || operation == "press-control" || operation == "set-value" ||
     operation == "set-focused-value-confirm" || operation == "set-folder-path-value" ||
-    operation == "select-element" || operation == "confirm-element"
+    operation == "select-element" || operation == "observe-element" || operation == "confirm-element"
 let descendants: [AXNode] = {
     guard needsDescendants else { return [] }
-    let usesVisibleBrowserColumn = operation == "select-element" || operation == "confirm-element"
+    let usesVisibleBrowserColumn = operation == "select-element" || operation == "observe-element" ||
+        operation == "confirm-element"
     if !usesVisibleBrowserColumn { return collect(matching, depthLimit: operation == "snapshot" ? 4 : 8) }
 
     let selectionStarted = ProcessInfo.processInfo.systemUptime
@@ -453,7 +454,8 @@ if operation == "snapshot" {
     exit(0)
 }
 if operation == "press-control" || operation == "set-value" || operation == "set-focused-value-confirm" ||
-    operation == "set-folder-path-value" || operation == "select-element" || operation == "confirm-element" {
+    operation == "set-folder-path-value" || operation == "select-element" || operation == "observe-element" ||
+    operation == "confirm-element" {
     let wantedRole = operation == "press-control" ? "AXButton" :
         (operation == "set-value" || operation == "set-focused-value-confirm" ||
             operation == "set-folder-path-value")
@@ -463,7 +465,7 @@ if operation == "press-control" || operation == "set-value" || operation == "set
     }
     var controls = descendants.enumerated().compactMap { index, node -> (Int, AXNode)? in
         let role = string(node.element, "AXRole") ?? ""
-        let roleMatches = operation == "select-element"
+        let roleMatches = operation == "select-element" || operation == "observe-element"
             ? (role == "AXRow" || role == "AXCell" || role == "AXTextField")
             : operation == "confirm-element" ? role == "AXTextField" : role == wantedRole
         guard roleMatches else { return nil }
@@ -527,6 +529,20 @@ if operation == "press-control" || operation == "set-value" || operation == "set
         exit(8)
     }
     let control = controlNode.element
+    if operation == "observe-element" {
+        let role = string(control, "AXRole") ?? ""
+        var rawActions: CFArray?
+        let actionsError = AXUIElementCopyActionNames(control, &rawActions)
+        let actions = rawActions as? [String] ?? []
+        guard role == "AXTextField", actionsError == .success, actions.contains("AXConfirm") else {
+            print("DIRECT_AX_RESULT status=target-element-error; operation=observe-element; " +
+                  "name=\(titleOrDescription(control)); role=\(role); actions_error=\(actionsError.rawValue); actions=\(actions)")
+            exit(24)
+        }
+        print("DIRECT_AX_RESULT status=target-element-observed; operation=observe-element; " +
+              "target_pid=\(targetPID); role=AXTextField; name=\(titleOrDescription(control)); advertised_action=AXConfirm")
+        exit(0)
+    }
     if operation == "confirm-element" {
         var confirmActions: CFArray?
         let confirmActionsError = AXUIElementCopyActionNames(control, &confirmActions)
