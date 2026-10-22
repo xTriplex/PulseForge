@@ -539,10 +539,41 @@ if operation == "press-control" || operation == "set-value" || operation == "set
                   "name=\(titleOrDescription(control)); role=\(role); actions_error=\(actionsError.rawValue); actions=\(actions)")
             exit(24)
         }
+        var selectedSettable = DarwinBoolean(false)
+        let selectedSettableError = AXUIElementIsAttributeSettable(control, "AXSelected" as CFString, &selectedSettable)
+        var focusedSettable = DarwinBoolean(false)
+        let focusedSettableError = AXUIElementIsAttributeSettable(control, "AXFocused" as CFString, &focusedSettable)
+        var selectionOwners: [String] = []
+        var parentIndex = controlNode.parent
+        while let index = parentIndex, selectionOwners.count < 6 {
+            let parentNode = descendants[index]
+            let parent = parentNode.element
+            let parentRole = string(parent, "AXRole") ?? ""
+            if parentRole == "AXList" || parentRole == "AXBrowser" {
+                var selectedChildrenSettable = DarwinBoolean(false)
+                let selectedChildrenSettableError = AXUIElementIsAttributeSettable(
+                    parent, "AXSelectedChildren" as CFString, &selectedChildrenSettable
+                )
+                var selectedChildren: CFTypeRef?
+                let selectedChildrenError = AXUIElementCopyAttributeValue(
+                    parent, "AXSelectedChildren" as CFString, &selectedChildren
+                )
+                let selectedChildrenValue = selectedChildrenError == .success
+                    ? String(describing: selectedChildren)
+                    : "AXError:\(selectedChildrenError.rawValue)"
+                selectionOwners.append(
+                    "role=\(parentRole); selected_children=\(selectedChildrenValue); " +
+                    "selected_children_settable=\(selectedChildrenSettableError.rawValue):\(selectedChildrenSettable.boolValue)"
+                )
+            }
+            parentIndex = parentNode.parent
+        }
         print("DIRECT_AX_RESULT status=target-element-observed; operation=observe-element; " +
               "target_pid=\(targetPID); role=AXTextField; name=\(titleOrDescription(control)); " +
               "selected=\(described(control, "AXSelected")); focused=\(described(control, "AXFocused")); " +
-              "advertised_action=AXConfirm")
+              "selected_settable=\(selectedSettableError.rawValue):\(selectedSettable.boolValue); " +
+              "focused_settable=\(focusedSettableError.rawValue):\(focusedSettable.boolValue); " +
+              "selection_owners=\(selectionOwners); advertised_action=AXConfirm")
         exit(0)
     }
     if operation == "confirm-element" {
