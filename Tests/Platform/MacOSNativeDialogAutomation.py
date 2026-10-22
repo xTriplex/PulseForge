@@ -221,10 +221,20 @@ def wait_for_open_file_element(fixture_pid: int, panel_title: str, file_name: st
         last_output = output + error
         if code == 0 and open_file_element_observed(last_output, file_name):
             return last_output
+        result_lines = [
+            line for line in last_output.splitlines()
+            if line.startswith("DIRECT_AX_RESULT status=control-selection-error; operation=observe-element;")
+        ]
+        result_fields = {}
+        if len(result_lines) == 1:
+            result_fields = dict(
+                part.split("=", 1)
+                for part in result_lines[0].removeprefix("DIRECT_AX_RESULT ").split("; ")
+                if "=" in part
+            )
         missing_exact_file = (
             code == 8
-            and f"DIRECT_AX_RESULT status=control-selection-error; operation=observe-element;" in last_output
-            and "matches=0;" in last_output
+            and result_fields.get("matches") == "0"
         )
         if code not in (0, 124) and not missing_exact_file:
             raise RuntimeError(
