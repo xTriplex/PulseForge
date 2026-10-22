@@ -1,4 +1,5 @@
 #include "Editor/EditorWorkspacePresentation.h"
+#include "Editor/EditorDockingPolicy.h"
 
 #include <imgui_internal.h>
 
@@ -33,7 +34,8 @@ namespace PulseForgeEditor
 			ImGui::DockBuilderDockWindow(WindowName.c_str(), DockspaceID);
 			ImGui::DockBuilderFinish(DockspaceID);
 		}
-		ImGui::DockSpace(DockspaceID, Size);
+		const ImGuiWindowClass DocumentClass = MakeEditorDockingClass(EditorDockingDomain::AssetDocument);
+		ImGui::DockSpace(DockspaceID, Size, ImGuiDockNodeFlags_None, &DocumentClass);
 		m_FrameState.MarkDockspaceDrawn(Session.Identity);
 	}
 
@@ -41,8 +43,13 @@ namespace PulseForgeEditor
 		EditorDocumentSession& Session, const EditorDocumentEditorRegistry& Editors, FallbackDrawer DrawFallback, void* FallbackContext)
 	{
 		const std::string WindowName = GetWindowName(Session.Identity);
-		if (ImGui::Begin(WindowName.c_str(), nullptr, ImGuiWindowFlags_NoCollapse))
+		const ImGuiWindowClass DocumentClass = MakeEditorDockingClass(EditorDockingDomain::AssetDocument);
+		ImGui::SetNextWindowClass(&DocumentClass);
+		const bool ContentsVisible = ImGui::Begin(WindowName.c_str(), nullptr, ImGuiWindowFlags_NoCollapse);
+		const bool DockingDomainValid = EnforceCurrentEditorWindowDockingDomain(EditorDockingDomain::AssetDocument);
+		if (ContentsVisible && DockingDomainValid)
 		{
+			(void)EnforceCurrentEditorWindowDockingDomain(EditorDockingDomain::AssetDocument);
 			if (Editors.DrawWorkspace(Session)) m_FrameState.MarkWorkspaceDrawn(Session.Identity, Session.HostID);
 			else if (DrawFallback) DrawFallback(FallbackContext, Session.Identity);
 		}
@@ -80,7 +87,8 @@ namespace PulseForgeEditor
 		{
 			(void)Session;
 			if (!Editors.IsRegistered(Identity.Kind) || m_FrameState.WasDockspaceDrawn(Identity)) continue;
-			ImGui::DockSpace(GetDockspaceID(Identity), ImVec2(1.0f, 1.0f), ImGuiDockNodeFlags_KeepAliveOnly);
+			const ImGuiWindowClass DocumentClass = MakeEditorDockingClass(EditorDockingDomain::AssetDocument);
+			ImGui::DockSpace(GetDockspaceID(Identity), ImVec2(1.0f, 1.0f), ImGuiDockNodeFlags_KeepAliveOnly, &DocumentClass);
 		}
 		ImGui::End();
 	}

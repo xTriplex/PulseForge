@@ -4,6 +4,10 @@
 
 #include "Core/Log.h"
 
+#include <cmath>
+#include <iomanip>
+#include <sstream>
+
 namespace PulseForgeEditor::Detail
 {
 	namespace
@@ -594,6 +598,324 @@ namespace PulseForgeEditor::Detail
 		if (m_Phase == Phase::Failed || m_Phase == Phase::Complete || m_Phase == Phase::Disabled) return;
 		m_Phase = Phase::Failed;
 		m_FailureReason = std::move(Reason);
+	}
+
+	SceneViewportNativeSmokeCoordinator::SceneViewportNativeSmokeCoordinator(bool Enabled) noexcept
+		: m_Phase(Enabled ? Phase::AwaitingMainScene : Phase::Disabled)
+	{
+	}
+
+	bool SceneViewportNativeSmokeCoordinator::IsEnabled() const noexcept
+	{
+		return m_Phase != Phase::Disabled;
+	}
+
+	bool SceneViewportNativeSmokeCoordinator::Complete() const noexcept
+	{
+		return m_Phase == Phase::Complete;
+	}
+
+	bool SceneViewportNativeSmokeCoordinator::IsFinite(const std::array<float, 3>& Vector) noexcept
+	{
+		return std::isfinite(Vector[0]) && std::isfinite(Vector[1]) && std::isfinite(Vector[2]);
+	}
+
+	float SceneViewportNativeSmokeCoordinator::Distance(
+		const std::array<float, 3>& Left, const std::array<float, 3>& Right) noexcept
+	{
+		const float X = Left[0] - Right[0];
+		const float Y = Left[1] - Right[1];
+		const float Z = Left[2] - Right[2];
+		return std::sqrt(X * X + Y * Y + Z * Z);
+	}
+
+	std::string SceneViewportNativeSmokeCoordinator::FormatGeometry(const SceneViewportNativeSmokeObservation& Observation) const
+	{
+		std::ostringstream Stream;
+		Stream << std::fixed << std::setprecision(1) << "title_center=" << Observation.TitleCenter[0] << ','
+			   << Observation.TitleCenter[1] << "; dock_tab_rect=" << Observation.DockTabRect[0] << ',' << Observation.DockTabRect[1]
+			   << ',' << Observation.DockTabRect[2] << ',' << Observation.DockTabRect[3] << "; drag_target_rect="
+			   << Observation.DragTargetRect[0] << ',' << Observation.DragTargetRect[1] << ','
+			   << Observation.DragTargetRect[2] << ',' << Observation.DragTargetRect[3] << "; drag_target_kind="
+			   << (Observation.DragTargetKind == SceneViewportDragTargetKind::DockTab ? "dock_tab" :
+				   Observation.DragTargetKind == SceneViewportDragTargetKind::FloatingTitleBar ? "floating_title_bar" : "unavailable")
+			   << "; utility_drop_target=" << (Observation.UtilityDropTargetReady ? "main_utility_panel_dock_node" : "unavailable")
+			   << "; utility_drop_rect=" << Observation.UtilityDropTargetRect[0] << ',' << Observation.UtilityDropTargetRect[1]
+			   << ',' << Observation.UtilityDropTargetRect[2] << ',' << Observation.UtilityDropTargetRect[3]
+			   << "; utility_drop_panel=" << Observation.UtilityDropTargetPanel
+			   << "; utility_domain=" << Observation.UtilityDockingDomainValid << "; utility_dock_node="
+			   << Observation.UtilityDockNodeID << "; image_min="
+			   << Observation.ImageMinimum[0] << ',' << Observation.ImageMinimum[1]
+			   << "; image_max=" << Observation.ImageMaximum[0] << ',' << Observation.ImageMaximum[1] << "; main_rect="
+			   << Observation.MainWindowRect[0] << ',' << Observation.MainWindowRect[1] << ',' << Observation.MainWindowRect[2] << ','
+			   << Observation.MainWindowRect[3] << "; owner_framebuffer_scale=" << Observation.FramebufferScale[0] << ','
+			   << Observation.FramebufferScale[1] << "; tear_off_point=" << Observation.TearOffPoint[0] << ','
+			   << Observation.TearOffPoint[1] << "; owner_native_rect=" << Observation.OwnerNativePosition[0] << ','
+			   << Observation.OwnerNativePosition[1] << ',' << Observation.OwnerNativeSize[0] << ','
+			   << Observation.OwnerNativeSize[1];
+		return Stream.str();
+	}
+
+	std::optional<std::string> SceneViewportNativeSmokeCoordinator::ObserveState(
+		const SceneViewportNativeSmokeObservation& Observation)
+	{
+		const bool ReattachedInput = m_Phase == Phase::AwaitingReattachedCameraInput;
+		const uint32_t ExpectedViewportID = ReattachedInput ? m_MainViewportID : m_DetachedViewportID;
+		const uintptr_t ExpectedWindow = ReattachedInput ? m_MainWindow : m_DetachedWindow;
+		if (m_Phase < Phase::AwaitingCameraCapture || m_Phase == Phase::Complete ||
+			m_Phase == Phase::ObservationExpired || !std::isfinite(Observation.ImGuiTime))
+			return std::nullopt;
+
+		constexpr double ObservationDeadlineSeconds = 270.0;
+		constexpr double StateHeartbeatSeconds = 0.75;
+		constexpr double CameraMotionObservationIntervalSeconds = 0.1;
+		if (m_SmokeStartedTime < 0.0) m_SmokeStartedTime = Observation.ImGuiTime;
+		const double ElapsedSeconds = Observation.ImGuiTime - m_SmokeStartedTime;
+		if (ElapsedSeconds >= ObservationDeadlineSeconds)
+		{
+			m_Phase = Phase::ObservationExpired;
+			std::ostringstream Stream;
+			Stream << std::fixed << std::setprecision(1)
+				   << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=OBSERVATION_EXPIRED; elapsed_seconds=" << ElapsedSeconds
+				   << "; last_sequence=" << m_StateSequence << "; owner_viewport=" << Observation.OwnerViewportID
+				   << "; owner_window=0x" << std::hex << Observation.OwnerWindow << std::dec;
+			return Stream.str();
+		}
+		if (Observation.OwnerViewportID != ExpectedViewportID || Observation.OwnerWindow != ExpectedWindow)
+			return std::nullopt;
+
+		const bool IdentityChanged = !m_HasStateSnapshot || Observation.OwnerViewportID != m_LastStateViewportID ||
+			Observation.OwnerWindow != m_LastStateWindow;
+		const bool FocusChanged = !m_HasStateSnapshot || Observation.OwnerFocused != m_LastOwnerFocused ||
+			Observation.CameraCaptureActive != m_LastCameraCaptureActive ||
+			Observation.ViewportKeyboardFocused != m_LastViewportKeyboardFocused ||
+			Observation.ImageHovered != m_LastImageHovered || Observation.SceneImageReady != m_LastSceneImageReady;
+		const bool CameraMoved = !m_HasStateSnapshot ||
+			Distance(m_LastObservedCameraPosition, Observation.CameraPosition) > 0.005f;
+		const bool MotionCanBeReported = m_LastStateObservationTime < 0.0 ||
+			Observation.ImGuiTime - m_LastStateObservationTime >= CameraMotionObservationIntervalSeconds;
+		const bool HeartbeatDue = m_LastStateObservationTime < 0.0 ||
+			Observation.ImGuiTime - m_LastStateObservationTime >= StateHeartbeatSeconds;
+		if (m_HasStateSnapshot && !IdentityChanged && !FocusChanged && !(CameraMoved && MotionCanBeReported) && !HeartbeatDue)
+			return std::nullopt;
+
+		m_HasStateSnapshot = true;
+		m_LastStateViewportID = Observation.OwnerViewportID;
+		m_LastStateWindow = Observation.OwnerWindow;
+		m_LastOwnerFocused = Observation.OwnerFocused;
+		m_LastCameraCaptureActive = Observation.CameraCaptureActive;
+		m_LastViewportKeyboardFocused = Observation.ViewportKeyboardFocused;
+		m_LastImageHovered = Observation.ImageHovered;
+		m_LastSceneImageReady = Observation.SceneImageReady;
+		m_LastObservedCameraPosition = Observation.CameraPosition;
+		m_LastStateObservationTime = Observation.ImGuiTime;
+		++m_StateSequence;
+		std::ostringstream Stream;
+		Stream << std::fixed << std::setprecision(4) << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=STATE; sequence=" << m_StateSequence
+			   << "; elapsed_seconds=" << ElapsedSeconds << "; frame=" << Observation.ImGuiFrameNumber
+			   << "; owner_viewport=" << Observation.OwnerViewportID
+			   << "; owner_window=0x" << std::hex << Observation.OwnerWindow << std::dec
+			   << "; focused=" << Observation.OwnerFocused << "; capture=" << Observation.CameraCaptureActive
+			   << "; keyboard_focused=" << Observation.ViewportKeyboardFocused
+			   << "; image_hovered=" << Observation.ImageHovered << "; scene_image_ready=" << Observation.SceneImageReady
+			   << "; imgui_mouse=" << Observation.ImGuiMousePosition[0] << ',' << Observation.ImGuiMousePosition[1]
+			   << "; hovered_viewport=" << Observation.ImGuiHoveredViewportID << "; cursor_mode=" << Observation.CursorMode
+			   << "; raw_motion_supported=" << Observation.RawMotionSupported << "; raw_motion_enabled=" << Observation.RawMotionEnabled
+			   << "; camera_position=" << Observation.CameraPosition[0] << ',' << Observation.CameraPosition[1] << ','
+			   << Observation.CameraPosition[2] << "; camera_forward=" << Observation.CameraForward[0] << ','
+			   << Observation.CameraForward[1] << ',' << Observation.CameraForward[2] << "; camera_speed=" << Observation.CameraMoveSpeed;
+		Stream << "; title_center=" << Observation.TitleCenter[0] << ',' << Observation.TitleCenter[1]
+			   << "; dock_tab_rect=" << Observation.DockTabRect[0] << ',' << Observation.DockTabRect[1] << ','
+			   << Observation.DockTabRect[2] << ',' << Observation.DockTabRect[3]
+			   << "; main_rect=" << Observation.MainWindowRect[0] << ',' << Observation.MainWindowRect[1] << ','
+			   << Observation.MainWindowRect[2] << ',' << Observation.MainWindowRect[3]
+			   << "; image_min=" << Observation.ImageMinimum[0] << ',' << Observation.ImageMinimum[1]
+			   << "; image_max=" << Observation.ImageMaximum[0] << ',' << Observation.ImageMaximum[1]
+			   << "; owner_native_rect=" << Observation.OwnerNativePosition[0] << ',' << Observation.OwnerNativePosition[1] << ','
+			   << Observation.OwnerNativeSize[0] << ',' << Observation.OwnerNativeSize[1]
+			   << "; owner_cursor=" << Observation.OwnerCursorPosition[0] << ',' << Observation.OwnerCursorPosition[1]
+			   << "; drag_target_rect=" << Observation.DragTargetRect[0] << ',' << Observation.DragTargetRect[1] << ','
+			   << Observation.DragTargetRect[2] << ',' << Observation.DragTargetRect[3]
+			   << "; drag_target_kind=" << (Observation.DragTargetKind == SceneViewportDragTargetKind::DockTab ? "dock_tab" :
+				   Observation.DragTargetKind == SceneViewportDragTargetKind::FloatingTitleBar ? "floating_title_bar" : "unavailable")
+			   << "; utility_drop_target=" << (Observation.UtilityDropTargetReady ? "main_utility_panel_dock_node" : "unavailable")
+			   << "; utility_drop_rect=" << Observation.UtilityDropTargetRect[0] << ',' << Observation.UtilityDropTargetRect[1]
+			   << ',' << Observation.UtilityDropTargetRect[2] << ',' << Observation.UtilityDropTargetRect[3]
+			   << "; utility_drop_panel=" << Observation.UtilityDropTargetPanel
+			   << "; utility_domain=" << Observation.UtilityDockingDomainValid
+			   << "; utility_dock_node=" << Observation.UtilityDockNodeID;
+		return Stream.str();
+	}
+
+	std::optional<std::string> SceneViewportNativeSmokeCoordinator::ObserveInput(
+		const SceneViewportNativeSmokeObservation& Observation)
+	{
+		if (m_Phase < Phase::AwaitingCameraCapture || m_Phase > Phase::AwaitingCameraRelease ||
+			Observation.OwnerViewportID != m_DetachedViewportID || Observation.OwnerWindow != m_DetachedWindow)
+			return std::nullopt;
+		const bool PressTransition = Observation.RightButtonDown && !m_LastRightButtonDown;
+		const bool ReleaseTransition = !Observation.RightButtonDown && m_LastRightButtonDown;
+		m_LastRightButtonDown = Observation.RightButtonDown;
+		if (m_CaptureWasObserved && Observation.OwnerFocused && !Observation.RightButtonDown && Observation.RightButtonReleased)
+			m_NormalReleaseObserved = true;
+
+		const std::array<float, 8> Geometry = {
+			Observation.OwnerNativePosition[0], Observation.OwnerNativePosition[1], Observation.OwnerNativeSize[0],
+			Observation.OwnerNativeSize[1], Observation.ImageMinimum[0], Observation.ImageMinimum[1],
+			Observation.ImageMaximum[0], Observation.ImageMaximum[1]
+		};
+		const bool GeometryFinite = std::all_of(Geometry.begin(), Geometry.end(), [](float Value) { return std::isfinite(Value); });
+		const bool ImageInsideOwner = GeometryFinite && Observation.OwnerNativeSize[0] > 0.0f &&
+			Observation.OwnerNativeSize[1] > 0.0f && Observation.ImageMinimum[0] >= Observation.OwnerNativePosition[0] &&
+			Observation.ImageMinimum[1] >= Observation.OwnerNativePosition[1] &&
+			Observation.ImageMaximum[0] <= Observation.OwnerNativePosition[0] + Observation.OwnerNativeSize[0] &&
+			Observation.ImageMaximum[1] <= Observation.OwnerNativePosition[1] + Observation.OwnerNativeSize[1];
+		const bool SameGeometry = std::equal(Geometry.begin(), Geometry.end(), m_LastCameraGeometry.begin(),
+			[](float Left, float Right) { return std::abs(Left - Right) <= 0.5f; });
+		const bool StableGeometry = Observation.OwnerFocused && Observation.SceneImageReady && ImageInsideOwner &&
+			std::isfinite(Observation.ImGuiTime);
+		if (!StableGeometry)
+			m_GeometryStableSince = -1.0;
+		else if (!SameGeometry || m_GeometryStableSince < 0.0)
+			m_GeometryStableSince = Observation.ImGuiTime;
+		m_LastCameraGeometry = Geometry;
+		const double StableSeconds = m_GeometryStableSince < 0.0 ? 0.0 : Observation.ImGuiTime - m_GeometryStableSince;
+		if (!PressTransition && !ReleaseTransition && !Observation.RightButtonClicked && !Observation.RightButtonReleased &&
+			StableGeometry && StableSeconds >= 0.3 && m_CameraGeometryReadySamples < 12 &&
+			Observation.ImGuiTime - m_LastGeometryReadyTime >= 0.75)
+		{
+			m_LastGeometryReadyTime = Observation.ImGuiTime;
+			++m_CameraGeometryReadySamples;
+			std::ostringstream Stream;
+			Stream << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT; sample=" << m_CameraGeometryReadySamples
+				   << "; stable_seconds=" << std::fixed << std::setprecision(2) << StableSeconds
+				   << "; frame=" << Observation.ImGuiFrameNumber << "; owner_viewport=" << Observation.OwnerViewportID
+				   << "; focused=" << Observation.OwnerFocused << "; "
+				   << FormatGeometry(Observation);
+			return Stream.str();
+		}
+
+		if ((!PressTransition && !ReleaseTransition && !Observation.RightButtonClicked && !Observation.RightButtonReleased) ||
+			m_InputSamples >= 8)
+			return std::nullopt;
+
+		++m_InputSamples;
+		std::ostringstream Stream;
+		Stream << std::fixed << std::setprecision(1) << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=INPUT; sample=" << m_InputSamples
+			   << "; event=" << (Observation.RightButtonClicked ? "clicked" : Observation.RightButtonReleased || ReleaseTransition ? "released" : "down")
+			   << "; frame=" << Observation.ImGuiFrameNumber << "; owner_viewport=" << Observation.OwnerViewportID
+			   << "; focused=" << Observation.OwnerFocused
+			   << "; mouse=" << Observation.ImGuiMousePosition[0] << ',' << Observation.ImGuiMousePosition[1]
+			   << "; hovered_viewport=" << Observation.ImGuiHoveredViewportID << "; image_hovered=" << Observation.ImageHovered
+			   << "; raw_down=" << Observation.RightButtonDown << "; clicked=" << Observation.RightButtonClicked
+			   << "; released=" << Observation.RightButtonReleased << "; capture=" << Observation.CameraCaptureActive
+		   << "; normal_release=" << m_NormalReleaseObserved
+			   << "; native_rect=" << Observation.OwnerNativePosition[0] << ',' << Observation.OwnerNativePosition[1] << ','
+			   << Observation.OwnerNativeSize[0] << ',' << Observation.OwnerNativeSize[1]
+			   << "; cursor=" << Observation.OwnerCursorPosition[0] << ',' << Observation.OwnerCursorPosition[1];
+		return Stream.str();
+	}
+
+	std::optional<std::string> SceneViewportNativeSmokeCoordinator::Observe(
+		const SceneViewportNativeSmokeObservation& Observation)
+	{
+		if (!IsEnabled() || m_Phase == Phase::Complete || m_Phase == Phase::ObservationExpired ||
+			!Observation.SceneImageReady || Observation.MainViewportID == 0 ||
+			Observation.OwnerViewportID == 0 || Observation.OwnerWindow == 0 || !IsFinite(Observation.CameraForward))
+			return std::nullopt;
+
+		if (m_Phase == Phase::AwaitingMainScene)
+		{
+			if (Observation.OwnerViewportID != Observation.MainViewportID || !Observation.DockTabReady) return std::nullopt;
+			if (!std::isfinite(Observation.ImGuiTime)) return std::nullopt;
+			m_SmokeStartedTime = Observation.ImGuiTime;
+			m_MainViewportID = Observation.MainViewportID;
+			m_MainWindow = Observation.OwnerWindow;
+			m_Phase = Phase::AwaitingNativeDetach;
+			std::ostringstream Stream;
+			Stream << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY; main_viewport=" << m_MainViewportID << "; owner_viewport="
+				   << Observation.OwnerViewportID << "; owner_window=0x" << std::hex << Observation.OwnerWindow << std::dec << "; "
+				   << FormatGeometry(Observation);
+			return Stream.str();
+		}
+
+		if (m_Phase == Phase::AwaitingNativeDetach)
+		{
+			if (Observation.MainViewportID != m_MainViewportID || Observation.OwnerViewportID == m_MainViewportID) return std::nullopt;
+			m_DetachedViewportID = Observation.OwnerViewportID;
+			m_DetachedWindow = Observation.OwnerWindow;
+			m_InitialCameraForward = Observation.CameraForward;
+			m_Phase = Phase::AwaitingCameraCapture;
+			std::ostringstream Stream;
+			Stream << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=DETACHED; main_viewport=" << m_MainViewportID << "; owner_viewport="
+				   << m_DetachedViewportID << "; owner_window=0x" << std::hex << m_DetachedWindow << std::dec << "; "
+				   << FormatGeometry(Observation);
+			return Stream.str();
+		}
+
+		if (m_Phase == Phase::AwaitingReattachment)
+		{
+			if (Observation.OwnerViewportID != m_MainViewportID || Observation.OwnerWindow != m_MainWindow ||
+				!Observation.UtilityDockingDomainValid || Observation.UtilityDockNodeID == 0 ||
+				Observation.DragTargetKind != SceneViewportDragTargetKind::DockTab)
+				return std::nullopt;
+			m_Phase = Phase::AwaitingReattachedCameraInput;
+			m_ReattachedCameraPosition = Observation.CameraPosition;
+			std::ostringstream Stream;
+			Stream << std::fixed << std::setprecision(4) << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=REATTACHED; main_viewport="
+				   << m_MainViewportID << "; owner_window=0x" << std::hex << m_MainWindow << std::dec
+				   << "; owner_native_window=0x" << std::hex << Observation.OwnerWindow << std::dec
+				   << "; scene_image_ready=" << Observation.SceneImageReady
+				   << "; capture=" << Observation.CameraCaptureActive
+				   << "; utility_domain=" << Observation.UtilityDockingDomainValid
+				   << "; utility_dock_node=" << Observation.UtilityDockNodeID << "; camera_position="
+				   << Observation.CameraPosition[0] << ',' << Observation.CameraPosition[1] << ',' << Observation.CameraPosition[2]
+				   << "; camera_forward=" << Observation.CameraForward[0] << ',' << Observation.CameraForward[1] << ','
+				   << Observation.CameraForward[2] << "; " << FormatGeometry(Observation);
+			return Stream.str();
+		}
+
+		if (m_Phase == Phase::AwaitingReattachedCameraInput)
+		{
+			if (Observation.OwnerViewportID != m_MainViewportID || Observation.OwnerWindow != m_MainWindow ||
+				!Observation.OwnerFocused || !Observation.ViewportKeyboardFocused ||
+				Distance(m_ReattachedCameraPosition, Observation.CameraPosition) <= 0.001f)
+				return std::nullopt;
+			m_Phase = Phase::Complete;
+			std::ostringstream Stream;
+			Stream << std::fixed << std::setprecision(4)
+				   << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=REATTACHED_CAMERA_INPUT; owner_viewport=" << m_MainViewportID
+				   << "; owner_window=0x" << std::hex << m_MainWindow << std::dec
+				   << "; keyboard_focused=" << Observation.ViewportKeyboardFocused << "; camera_position="
+				   << Observation.CameraPosition[0] << ',' << Observation.CameraPosition[1] << ',' << Observation.CameraPosition[2];
+			return Stream.str();
+		}
+
+		if (Observation.OwnerViewportID != m_DetachedViewportID || Observation.OwnerWindow != m_DetachedWindow) return std::nullopt;
+
+		if (m_Phase == Phase::AwaitingCameraCapture && Observation.CameraCaptureActive)
+		{
+			m_CaptureWasObserved = true;
+			m_Phase = Phase::AwaitingCameraRelease;
+			return "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=CAPTURED; detached owner accepted right-button camera capture";
+		}
+
+		if (m_Phase == Phase::AwaitingCameraRelease && m_CaptureWasObserved && m_NormalReleaseObserved &&
+			Observation.OwnerFocused && !Observation.CameraCaptureActive &&
+			Distance(m_InitialCameraForward, Observation.CameraForward) > 0.02f)
+		{
+			m_Phase = Phase::AwaitingReattachment;
+			std::ostringstream Stream;
+			Stream << std::fixed << std::setprecision(4) << "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=CAMERA_DRAG_PASS; main_viewport=" << m_MainViewportID
+				   << "; detached_viewport=" << m_DetachedViewportID << "; owner_window=0x" << std::hex << m_DetachedWindow << std::dec
+				   << "; right-button capture began and ended on the detached owner; camera_forward_before="
+				   << m_InitialCameraForward[0] << ',' << m_InitialCameraForward[1] << ',' << m_InitialCameraForward[2]
+				   << "; camera_forward_after=" << Observation.CameraForward[0] << ',' << Observation.CameraForward[1] << ','
+				   << Observation.CameraForward[2];
+			return Stream.str();
+		}
+
+		return std::nullopt;
 	}
 } // namespace PulseForgeEditor::Detail
 

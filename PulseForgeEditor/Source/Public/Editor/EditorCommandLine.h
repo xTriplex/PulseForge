@@ -33,6 +33,7 @@ namespace PulseForgeEditor
 		std::optional<std::string> DocumentHostCloseUiTestScenario;
 		std::string AssetPreviewStressBudget;
 		bool EnableEditorRuntimePlayStopTest = false;
+		bool EnableSceneViewportNativeSmoke = false;
 		bool EnableDocumentHostTestFixture = false;
 		bool EnableDocumentHostResetLayoutTest = false;
 		bool EnableDocumentHostTabTearOffTest = false;

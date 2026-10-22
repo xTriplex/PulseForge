@@ -2,6 +2,7 @@
 
 #include "Assets/AssetTypes.h"
 #include "Editor/EditorViewportCamera.h"
+#include "Editor/EditorViewportScrollInput.h"
 #include "Editor/EditorViewportPolicy.h"
 #include "Editor/EditorViewportToolState.h"
 
@@ -194,7 +195,10 @@ namespace
 		PF_CHECK(Tests, ResolveViewportKeyboardFocus(false, ViewportKeyboardFocusEvent::RenderedImageClicked));
 		PF_CHECK(Tests, ResolveViewportKeyboardFocus(true, ViewportKeyboardFocusEvent::NoChange));
 		PF_CHECK(Tests, !ResolveViewportKeyboardFocus(true, ViewportKeyboardFocusEvent::OtherEditorPanelClicked));
-		PF_CHECK(Tests, !ResolveViewportKeyboardFocus(true, ViewportKeyboardFocusEvent::ApplicationFocusLost));
+		const bool FocusAfterApplicationLoss =
+			ResolveViewportKeyboardFocus(true, ViewportKeyboardFocusEvent::ApplicationFocusLost);
+		PF_CHECK(Tests, !FocusAfterApplicationLoss);
+		PF_CHECK(Tests, ResolveViewportKeyboardFocus(FocusAfterApplicationLoss, ViewportKeyboardFocusEvent::RenderedImageClicked));
 		PF_CHECK(Tests, !ResolveViewportKeyboardFocus(true, ViewportKeyboardFocusEvent::ViewportUnavailable));
 		PF_CHECK(Tests, !ResolveViewportKeyboardFocus(true, ViewportKeyboardFocusEvent::PlayModeStarted));
 		PF_CHECK(Tests,
@@ -521,6 +525,25 @@ namespace
 		const auto AtHighDpi = CalculateEditorViewportTargetExtent(130.0, 65.0, 1.5, 1.5);
 		PF_CHECK(Tests, AtHighDpi && AtHighDpi->Width == 224 && AtHighDpi->Height == 128);
 
+		ImGuiViewport MainViewport;
+		MainViewport.ID = 1;
+		MainViewport.FramebufferScale = ImVec2(1.0f, 1.0f);
+		ImGuiViewport DetachedViewport;
+		DetachedViewport.ID = 2;
+		DetachedViewport.FramebufferScale = ImVec2(2.0f, 2.0f);
+		const ImVec2 MainOwnerScale = GetEditorViewportFramebufferScale(&MainViewport);
+		const ImVec2 DetachedOwnerScale = GetEditorViewportFramebufferScale(&DetachedViewport);
+		const auto MainOwnerExtent = CalculateEditorViewportTargetExtent(130.0, 65.0, MainOwnerScale.x, MainOwnerScale.y);
+		const auto DetachedOwnerExtent =
+			CalculateEditorViewportTargetExtent(130.0, 65.0, DetachedOwnerScale.x, DetachedOwnerScale.y);
+		PF_CHECK(Tests, MainOwnerExtent && MainOwnerExtent->Width == 160 && MainOwnerExtent->Height == 96);
+		PF_CHECK(Tests, DetachedOwnerExtent && DetachedOwnerExtent->Width == 288 && DetachedOwnerExtent->Height == 160);
+		DetachedViewport.FramebufferScale = ImVec2(0.75f, 1.25f);
+		const ImVec2 FractionalOwnerScale = GetEditorViewportFramebufferScale(&DetachedViewport);
+		const auto FractionalOwnerExtent =
+			CalculateEditorViewportTargetExtent(130.0, 65.0, FractionalOwnerScale.x, FractionalOwnerScale.y);
+		PF_CHECK(Tests, FractionalOwnerExtent && FractionalOwnerExtent->Width == 128 && FractionalOwnerExtent->Height == 96);
+
 		const auto InvalidScaleFallsBackToOne = CalculateEditorViewportTargetExtent(130.0, 65.0, 0.0, -1.0);
 		PF_CHECK(Tests, InvalidScaleFallsBackToOne && InvalidScaleFallsBackToOne->Width == 160 && InvalidScaleFallsBackToOne->Height == 96);
 		PF_CHECK(Tests, !CalculateEditorViewportTargetExtent(0.0, 65.0, 1.0, 1.0));
@@ -609,6 +632,30 @@ namespace
 		PF_CHECK(Tests, !Capture.UpdateCursorPosition(47.0f, 44.0f));
 	}
 
+	void TestViewportScrollEventsRemainBoundToTheirNativeOwner(TestRunner& Tests)
+	{
+		using PulseForgeEditor::Detail::ViewportScrollEventAccumulator;
+		ViewportScrollEventAccumulator Scroll;
+		constexpr uint64_t SceneOwnerA = 101;
+		constexpr uint64_t OtherWindowB = 202;
+
+		Scroll.Record(OtherWindowB, 4.0f);
+		Scroll.Record(SceneOwnerA, 1.0f);
+		Scroll.Record(SceneOwnerA, 2.0f);
+		PF_CHECK(Tests, std::abs(Scroll.Consume(SceneOwnerA) - 3.0f) < 1.0e-6f);
+		PF_CHECK(Tests, Scroll.Consume(OtherWindowB) == 0.0f);
+
+		Scroll.Record(OtherWindowB, -2.0f);
+		PF_CHECK(Tests, Scroll.Consume(SceneOwnerA) == 0.0f);
+		PF_CHECK(Tests, Scroll.Consume(OtherWindowB) == 0.0f);
+
+		Scroll.Record(SceneOwnerA, 1.5f);
+		Scroll.Forget(SceneOwnerA);
+		PF_CHECK(Tests, Scroll.Consume(SceneOwnerA) == 0.0f);
+		Scroll.Record(SceneOwnerA + 1, -1.0f);
+		PF_CHECK(Tests, std::abs(Scroll.Consume(SceneOwnerA + 1) + 1.0f) < 1.0e-6f);
+	}
+
 	void TestEditorViewportCameraController(TestRunner& Tests)
 	{
 		PulseForgeEditor::EditorViewportCamera Camera;
@@ -695,6 +742,7 @@ void RunEditorViewportTests(TestRunner& Tests)
 	TestEditorViewportTargetExtent(Tests);
 	TestEditorViewportInitializationRetry(Tests);
 	TestViewportMouseCaptureState(Tests);
+	TestViewportScrollEventsRemainBoundToTheirNativeOwner(Tests);
 	TestEditorViewportCameraController(Tests);
 	TestEditorViewportToolState(Tests);
 }
