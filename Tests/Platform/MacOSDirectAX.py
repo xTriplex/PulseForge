@@ -366,10 +366,12 @@ func collect(_ roots: [AXUIElement], depthLimit: Int = 8, nodeLimit: Int = 256) 
     return found
 }
 let needsDescendants = deepSnapshot || operation == "press-control" || operation == "set-value" ||
-    operation == "set-focused-value-confirm" || operation == "set-folder-path-value" || operation == "select-element"
+    operation == "set-focused-value-confirm" || operation == "set-folder-path-value" ||
+    operation == "select-element" || operation == "confirm-element"
 let descendants: [AXNode] = {
     guard needsDescendants else { return [] }
-    if operation != "select-element" { return collect(matching, depthLimit: operation == "snapshot" ? 4 : 8) }
+    let usesVisibleBrowserColumn = operation == "select-element" || operation == "confirm-element"
+    if !usesVisibleBrowserColumn { return collect(matching, depthLimit: operation == "snapshot" ? 4 : 8) }
 
     let selectionStarted = ProcessInfo.processInfo.systemUptime
     print("DIRECT_AX_SELECT_STAGE stage=window-tree-begin; node_limit=96; depth_limit=3")
