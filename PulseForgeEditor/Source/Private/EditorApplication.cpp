@@ -4709,9 +4709,14 @@ namespace
 			if (m_DiagnosticsCaptureSmokeOutput && !ContentsVisible && !m_DiagnosticsPerformancePanelActivationRequested)
 			{
 				m_DiagnosticsPerformancePanelActivationRequested = true;
-				if (!m_Layout.ActivatePanel(PulseForgeEditor::EditorPanel::Performance))
+				const bool Activated = m_Layout.ActivatePanel(PulseForgeEditor::EditorPanel::Performance);
+#if defined(_DEBUG) || defined(PF_DEBUG)
+				if (!Activated)
 					FailEditorRuntimePlayStopTest("The diagnostics fixture could not select the Performance utility panel.");
 				else PF_INFO("PULSEFORGE_DIAGNOSTICS_PERFORMANCE_PANEL=ACTIVATION_REQUESTED; panel=Performance");
+#else
+				(void)Activated;
+#endif
 			}
 			if (m_DiagnosticsCaptureSmokeOutput && ContentsVisible && DockingDomainValid && !m_DiagnosticsPerformancePanelLogged)
 			{
