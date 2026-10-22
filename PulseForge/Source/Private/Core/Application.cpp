@@ -66,9 +66,19 @@ namespace PulseForge
 		return m_Renderer->GetCompletedGpuFrameTimingEvictedCount();
 	}
 
+	uint64_t Application::GetGpuFrameTimingInvalidResultCount() const noexcept
+	{
+		return m_Renderer->GetGpuFrameTimingInvalidResultCount();
+	}
+
 	bool Application::IsGpuFrameTimingSupported() const noexcept
 	{
 		return m_Renderer->IsGpuFrameTimingSupported();
+	}
+
+	bool Application::HasGpuFrameTimingFailed() const noexcept
+	{
+		return m_Renderer->HasGpuFrameTimingFailed();
 	}
 
 	bool Application::IsGpuFrameTimingEnabled() const noexcept

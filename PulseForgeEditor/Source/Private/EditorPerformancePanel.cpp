@@ -159,14 +159,31 @@ namespace PulseForgeEditor
 
 		void DrawGpuTimings(const EditorPerformanceSnapshot& Snapshot, EditorStyle& Style)
 		{
-			if (Snapshot.GpuTimingDroppedCount != 0 || Snapshot.GpuTimingStaleSessionDiscardCount != 0)
+			if (Snapshot.GpuTimingRendererOverwriteCount != 0 || Snapshot.GpuTimingCaptureHistoryEvictionCount != 0 ||
+				Snapshot.GpuTimingStaleSessionDiscardCount != 0 || Snapshot.GpuTimingInvalidResultCount != 0)
 				ImGui::TextColored(Style.GetColor(EditorColorToken::TextMuted),
-					"GPU sample loss: %llu overwritten, %llu stale-session samples discarded",
-					static_cast<unsigned long long>(Snapshot.GpuTimingDroppedCount),
-					static_cast<unsigned long long>(Snapshot.GpuTimingStaleSessionDiscardCount));
-			ImGui::Text("GPU timing: %s | capture enabled: %s",
+					"GPU samples: %llu renderer overwrites, %llu capture-history evictions, %llu stale discarded, %llu invalid",
+					static_cast<unsigned long long>(Snapshot.GpuTimingRendererOverwriteCount),
+					static_cast<unsigned long long>(Snapshot.GpuTimingCaptureHistoryEvictionCount),
+					static_cast<unsigned long long>(Snapshot.GpuTimingStaleSessionDiscardCount),
+					static_cast<unsigned long long>(Snapshot.GpuTimingInvalidResultCount));
+			ImGui::Text("GPU timing: %s | requested: %s | collection enabled: %s",
 				Snapshot.GpuTimingSupported ? "supported" : "unsupported",
+				Snapshot.GpuTimingRequested ? "yes" : "no",
 				Snapshot.GpuTimingEnabled ? "yes" : "no");
+			const char* ResultStatus = "no samples";
+			switch (Snapshot.GpuTimingResultStatus)
+			{
+			case EditorGpuTimingResultStatus::Pending: ResultStatus = "pending"; break;
+			case EditorGpuTimingResultStatus::Informative: ResultStatus = "informative"; break;
+			case EditorGpuTimingResultStatus::ZeroDurationOnly: ResultStatus = "zero-duration only"; break;
+			case EditorGpuTimingResultStatus::Failed: ResultStatus = "failed"; break;
+			case EditorGpuTimingResultStatus::NoSamples: break;
+			}
+			ImGui::Text("Measurement status: %s | positive: %llu | zero: %llu | retained: %zu / %zu",
+				ResultStatus, static_cast<unsigned long long>(Snapshot.GpuTimingPositiveDurationCount),
+				static_cast<unsigned long long>(Snapshot.GpuTimingZeroDurationCount), Snapshot.CompletedGpuTimings.size(),
+				EditorPerformanceCaptureService::MaximumGpuTimingSamples);
 			if (!Snapshot.GpuTimingSupported || !Snapshot.GpuTimingEnabled)
 			{
 				Style.TextMuted(Snapshot.GpuTimingUnavailableReason.empty()
@@ -174,7 +191,7 @@ namespace PulseForgeEditor
 					: Snapshot.GpuTimingUnavailableReason.c_str());
 				return;
 			}
-			Style.TextMuted("Vulkan main-frame duration; results arrive after frame completion and are not synchronized to the CPU clock.");
+			Style.TextMuted("Vulkan main-frame query results arrive after frame completion and are not synchronized to the CPU clock.");
 			const size_t FirstVisible = Snapshot.CompletedGpuTimings.size() > EditorPerformancePanel::MaximumVisibleGpuTimings
 				? Snapshot.CompletedGpuTimings.size() - EditorPerformancePanel::MaximumVisibleGpuTimings
 				: 0;
@@ -208,7 +225,10 @@ namespace PulseForgeEditor
 				ImGui::TableSetColumnIndex(2);
 				ImGui::TextUnformatted(Sample.Owner.c_str());
 				ImGui::TableSetColumnIndex(3);
-				ImGui::Text("%.3f ms", static_cast<double>(Sample.DurationNanoseconds) / 1'000'000.0);
+				if (Sample.Quality == EditorGpuTimingSampleQuality::ZeroDuration)
+					ImGui::TextUnformatted("0 ns (uninformative)");
+				else
+					ImGui::Text("%.3f ms", static_cast<double>(Sample.DurationNanoseconds) / 1'000'000.0);
 				ImGui::TableSetColumnIndex(4);
 				ImGui::TextUnformatted(Sample.Source.c_str());
 			}

@@ -411,11 +411,13 @@ namespace PulseForge
 			if (TimestampCapability != VulkanSupport::GpuTimestampCapabilityReason::Supported)
 			{
 				m_GpuFrameTimingEnabled = false;
+				m_GpuFrameTimingFailureReported = false;
 				m_GpuFrameTimingUnavailableReason = VulkanSupport::ToString(TimestampCapability);
 				return false;
 			}
 			if (!m_ActiveNvrhiDevice || m_DeviceHealth.IsLost())
 			{
+				m_GpuFrameTimingFailureReported = true;
 				m_GpuFrameTimingUnavailableReason = "The Vulkan device is unavailable for timer queries.";
 				return false;
 			}
@@ -427,6 +429,7 @@ namespace PulseForge
 					Frame.GpuTimerQuery = m_ActiveNvrhiDevice->createTimerQuery();
 					if (!Frame.GpuTimerQuery)
 					{
+						m_GpuFrameTimingFailureReported = true;
 						m_GpuFrameTimingUnavailableReason = "NVRHI could not allocate a Vulkan timer query.";
 						for (FrameContext& Created : m_Frames)
 							if (!Created.GpuTimingPending) Created.GpuTimerQuery = nullptr;
@@ -434,6 +437,7 @@ namespace PulseForge
 					}
 				}
 				m_GpuFrameTimingEnabled = true;
+				m_GpuFrameTimingFailureReported = false;
 				m_GpuFrameTimingSessionId = SessionId;
 				m_GpuFrameTimingUnavailableReason.clear();
 				return true;
@@ -441,6 +445,7 @@ namespace PulseForge
 			catch (...)
 			{
 				m_GpuFrameTimingEnabled = false;
+				m_GpuFrameTimingFailureReported = true;
 				m_GpuFrameTimingUnavailableReason = "NVRHI threw while allocating Vulkan timer queries.";
 				for (FrameContext& Frame : m_Frames)
 					if (!Frame.GpuTimingPending) Frame.GpuTimerQuery = nullptr;
@@ -473,6 +478,11 @@ namespace PulseForge
 				VulkanSupport::GpuTimestampCapabilityReason::Supported && m_ActiveNvrhiDevice && !m_DeviceHealth.IsLost();
 		}
 
+		bool HasGpuFrameTimingFailed() const noexcept override
+		{
+			return m_GpuFrameTimingFailureReported || m_DeviceHealth.IsLost();
+		}
+
 		size_t ReadCompletedGpuFrameTimings(std::span<GpuFrameTiming> Destination) noexcept override
 		{
 			const size_t Count = (std::min)(Destination.size(), m_CompletedGpuTimingCount);
@@ -483,6 +493,16 @@ namespace PulseForge
 				--m_CompletedGpuTimingCount;
 			}
 			return Count;
+		}
+
+		uint64_t GetCompletedGpuFrameTimingEvictedCount() const noexcept override
+		{
+			return m_CompletedGpuTimingEvictedCount;
+		}
+
+		uint64_t GetGpuFrameTimingInvalidResultCount() const noexcept override
+		{
+			return m_GpuFrameTimingInvalidResultCount;
 		}
 
 		bool BeginFrame() override
@@ -3336,12 +3356,21 @@ namespace PulseForge
 				const float Seconds = m_ActiveNvrhiDevice->getTimerQueryTime(Frame.GpuTimerQuery);
 				m_ActiveNvrhiDevice->resetTimerQuery(Frame.GpuTimerQuery);
 				Frame.GpuTimingPending = false;
-				if (!std::isfinite(Seconds) || Seconds < 0.0f) return;
+				const double DurationNanoseconds = static_cast<double>(Seconds) * 1'000'000'000.0;
+				if (!std::isfinite(DurationNanoseconds) || DurationNanoseconds < 0.0 ||
+					DurationNanoseconds >= static_cast<double>(std::numeric_limits<uint64_t>::max()))
+				{
+					++m_GpuFrameTimingInvalidResultCount;
+					m_GpuFrameTimingEnabled = false;
+					m_GpuFrameTimingFailureReported = true;
+					m_GpuFrameTimingUnavailableReason = "Vulkan timer query returned a non-finite or out-of-range duration.";
+					return;
+				}
 
 				const GpuFrameTiming Timing{
 					Frame.GpuTimingSessionId,
 					Frame.GpuFrameSequence,
-					static_cast<uint64_t>(static_cast<double>(Seconds) * 1'000'000'000.0)
+					static_cast<uint64_t>(DurationNanoseconds)
 				};
 				if (m_CompletedGpuTimingCount == m_CompletedGpuTimings.size())
 				{
@@ -3358,6 +3387,7 @@ namespace PulseForge
 				// Keep the query attached to its frame context. A poll/result failure does not
 				// establish that GPU use has retired; shutdown owns its eventual safe release.
 				m_GpuFrameTimingEnabled = false;
+				m_GpuFrameTimingFailureReported = true;
 				m_GpuFrameTimingUnavailableReason = "Vulkan timer query polling or result retrieval failed.";
 			}
 		}
@@ -4160,6 +4190,7 @@ namespace PulseForge
 		size_t m_CompletedGpuTimingFirst = 0;
 		size_t m_CompletedGpuTimingCount = 0;
 		uint64_t m_CompletedGpuTimingEvictedCount = 0;
+		uint64_t m_GpuFrameTimingInvalidResultCount = 0;
 		uint64_t m_GpuFrameSequence = 0;
 		uint64_t m_GpuFrameTimingSessionId = 0;
 		uint32_t m_GpuTimestampValidBits = 0;
@@ -4167,6 +4198,7 @@ namespace PulseForge
 		std::string m_GpuFrameTimingUnavailableReason = "Vulkan timestamp capability has not been queried.";
 		std::string m_GpuDeviceName = "Vulkan device name unavailable";
 		bool m_GpuFrameTimingEnabled = false;
+		bool m_GpuFrameTimingFailureReported = false;
 		RecordingContext m_Recording;
 		RecordingContext m_MainRecording;
 		std::unordered_map<uint64_t, std::unique_ptr<PlatformPresentationHost>> m_PlatformTargets;
