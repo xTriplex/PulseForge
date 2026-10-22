@@ -4718,7 +4718,8 @@ namespace
 				(void)Activated;
 #endif
 			}
-			if (m_DiagnosticsCaptureSmokeOutput && ContentsVisible && DockingDomainValid && !m_DiagnosticsPerformancePanelLogged)
+			if (m_DiagnosticsCaptureSmokeOutput && ContentsVisible && DockingDomainValid && Size.x >= 320.0f && Size.y >= 240.0f &&
+				!m_DiagnosticsPerformancePanelLogged)
 			{
 				m_DiagnosticsPerformancePanelLogged = true;
 				PF_INFO("PULSEFORGE_DIAGNOSTICS_PERFORMANCE_PANEL=READY; utility_window=1; capture_controls=1; "
@@ -7511,6 +7512,17 @@ namespace
 			if (m_DiagnosticsSmokeStartedAt != std::chrono::steady_clock::time_point{} &&
 				std::chrono::steady_clock::now() - m_DiagnosticsSmokeStartedAt > std::chrono::seconds(180))
 			{
+				GLFWwindow* Window = static_cast<GLFWwindow*>(PulseForge::Application::Get().GetWindow().GetNativeWindow());
+				int Width = 0;
+				int Height = 0;
+				if (Window) glfwGetWindowSize(Window, &Width, &Height);
+				PF_ERROR("PULSEFORGE_DIAGNOSTICS_SMOKE=DEADLINE; resize_requested={}; resize_observed={}; "
+					"main_frame_active={}; native_focused={}; native_size={}x{}; viewport_visible={}; viewport_target={}; "
+					"scene_ready={}; rendered_frames_after_resize={}", m_DiagnosticsResizeRequested, m_DiagnosticsResizeObserved,
+					PulseForge::Application::Get().IsMainFrameActive(), Window && glfwGetWindowAttrib(Window, GLFW_FOCUSED) == GLFW_TRUE,
+					Width, Height, m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport),
+					m_ViewportRenderView.HasTarget(), m_ViewportRenderView.IsSceneReady(),
+					m_SceneViewportRenderedFrames - m_DiagnosticsResizeRenderBaseline);
 				FailEditorRuntimePlayStopTest("The diagnostics capture smoke exceeded its 180-second safety deadline.");
 				return false;
 			}

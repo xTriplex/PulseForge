@@ -47,7 +47,7 @@ def validate_panel_ready(output: str) -> dict[str, str]:
         raise ValueError("visible Performance panel observation has invalid owner or geometry") from error
     if (fields.get("utility_window") != "1" or fields.get("capture_controls") != "1" or owner_viewport <= 0
             or len(rectangle) != 4 or not all(math.isfinite(value) for value in rectangle)
-            or rectangle[2] <= 1.0 or rectangle[3] <= 1.0):
+            or rectangle[2] < 320.0 or rectangle[3] < 240.0):
         raise ValueError("Performance panel was not visible in a usable utility window")
     return fields
 
