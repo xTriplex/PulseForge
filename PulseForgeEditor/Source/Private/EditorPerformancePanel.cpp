@@ -159,14 +159,14 @@ namespace PulseForgeEditor
 
 		void DrawGpuTimings(const EditorPerformanceSnapshot& Snapshot, EditorStyle& Style)
 		{
-			if (Snapshot.GpuTimingRendererOverwriteCount != 0 || Snapshot.GpuTimingCaptureHistoryEvictionCount != 0 ||
-				Snapshot.GpuTimingStaleSessionDiscardCount != 0 || Snapshot.GpuTimingInvalidResultCount != 0)
+			if (Snapshot.Timing.RendererQueueOverwriteCount != 0 || Snapshot.Timing.CaptureHistoryEvictionCount != 0 ||
+				Snapshot.Timing.StaleSessionDiscardCount != 0 || Snapshot.Timing.InvalidResultCount != 0)
 				ImGui::TextColored(Style.GetColor(EditorColorToken::TextMuted),
 					"GPU samples: %llu renderer overwrites, %llu capture-history evictions, %llu stale discarded, %llu invalid",
-					static_cast<unsigned long long>(Snapshot.GpuTimingRendererOverwriteCount),
-					static_cast<unsigned long long>(Snapshot.GpuTimingCaptureHistoryEvictionCount),
-					static_cast<unsigned long long>(Snapshot.GpuTimingStaleSessionDiscardCount),
-					static_cast<unsigned long long>(Snapshot.GpuTimingInvalidResultCount));
+					static_cast<unsigned long long>(Snapshot.Timing.RendererQueueOverwriteCount),
+					static_cast<unsigned long long>(Snapshot.Timing.CaptureHistoryEvictionCount),
+					static_cast<unsigned long long>(Snapshot.Timing.StaleSessionDiscardCount),
+					static_cast<unsigned long long>(Snapshot.Timing.InvalidResultCount));
 			ImGui::Text("GPU timing: %s | requested: %s | collection enabled: %s",
 				Snapshot.GpuTimingSupported ? "supported" : "unsupported",
 				Snapshot.GpuTimingRequested ? "yes" : "no",
@@ -181,8 +181,8 @@ namespace PulseForgeEditor
 			case EditorGpuTimingResultStatus::NoSamples: break;
 			}
 			ImGui::Text("Measurement status: %s | positive: %llu | zero: %llu | retained: %zu / %zu",
-				ResultStatus, static_cast<unsigned long long>(Snapshot.GpuTimingPositiveDurationCount),
-				static_cast<unsigned long long>(Snapshot.GpuTimingZeroDurationCount), Snapshot.CompletedGpuTimings.size(),
+				ResultStatus, static_cast<unsigned long long>(Snapshot.Timing.PositiveDurationCount),
+				static_cast<unsigned long long>(Snapshot.Timing.ZeroDurationCount), Snapshot.CompletedGpuTimings.size(),
 				EditorPerformanceCaptureService::MaximumGpuTimingSamples);
 			if (!Snapshot.GpuTimingSupported || !Snapshot.GpuTimingEnabled)
 			{

@@ -76,115 +76,133 @@ namespace PulseForgeEditor
 	} // namespace
 
 	std::expected<void, EditorPerformanceCaptureError> EditorPerformanceCaptureService::Begin(
-		const EditorPerformanceSnapshot& InitialSnapshot, EditorPerformanceCaptureMetadata Metadata)
+		const PulseForge::DiagnosticSnapshot& InitialDiagnostics,
+		const RendererTimingObservation& InitialRendererObservation,
+		const std::vector<EditorResourceMetric>& InitialResources,
+		EditorPerformanceCaptureMetadata Metadata)
 	{
 		if (m_ActiveCapture)
 			return std::unexpected(MakeCaptureError(EditorPerformanceCaptureErrorCode::AlreadyActive,
 				"A performance capture is already active"));
-		if (InitialSnapshot.Diagnostics.SessionId == 0 || InitialSnapshot.Diagnostics.CaptureStartTimestampNanoseconds == 0)
+		if (InitialDiagnostics.SessionId == 0 || InitialDiagnostics.CaptureStartTimestampNanoseconds == 0 ||
+			InitialRendererObservation.CaptureSessionId != InitialDiagnostics.SessionId)
 			return std::unexpected(MakeCaptureError(EditorPerformanceCaptureErrorCode::StaleSession,
 				"The initial diagnostics snapshot has no active capture identity"));
 
 		m_CompletedCapture.reset();
-		m_GpuHistory.clear();
-		m_LastRendererOverwriteCount = InitialSnapshot.GpuTimingRendererOverwriteCount;
-		m_LastInvalidResultCount = InitialSnapshot.GpuTimingInvalidResultCount;
-		m_LastGpuFrameSequence = 0;
-		m_HasLastGpuFrameSequence = false;
+		m_LastLifetimeCounters = InitialRendererObservation.LifetimeCounters;
+		m_CollectionOutstanding = InitialRendererObservation.CollectionOutstanding;
 
 		m_ActiveCapture.emplace();
 		m_ActiveCapture->Metadata = Metadata;
-		m_ActiveCapture->Snapshot = InitialSnapshot;
+		m_ActiveCapture->Snapshot.Diagnostics = InitialDiagnostics;
+		m_ActiveCapture->Snapshot.GpuTimingSupported = InitialRendererObservation.Supported;
+		m_ActiveCapture->Snapshot.GpuTimingRequested = InitialRendererObservation.Requested;
+		m_ActiveCapture->Snapshot.GpuTimingEnabled = InitialRendererObservation.Enabled;
+		m_ActiveCapture->Snapshot.GpuTimingFailureReported = InitialRendererObservation.FailureReported;
+		m_ActiveCapture->Snapshot.GpuTimingUnavailableReason = InitialRendererObservation.UnavailableReason;
+		m_ActiveCapture->Snapshot.Resources = InitialResources;
 		m_ActiveCapture->Snapshot.DiagnosticSnapshotTruncationCount = 0;
 		KeepLatestEvents(m_ActiveCapture->Snapshot.Diagnostics, m_ActiveCapture->Snapshot.DiagnosticSnapshotTruncationCount);
 		KeepLatestMetrics(m_ActiveCapture->Snapshot.Resources, MaximumMetricsPerResourceSegment);
 		m_ActiveCapture->Snapshot.CompletedGpuTimings.clear();
-		m_ActiveCapture->Snapshot.GpuTimingRendererOverwriteCount = 0;
-		m_ActiveCapture->Snapshot.GpuTimingCaptureHistoryEvictionCount = 0;
-		m_ActiveCapture->Snapshot.GpuTimingStaleSessionDiscardCount = 0;
-		m_ActiveCapture->Snapshot.GpuTimingInvalidResultCount = 0;
-		m_ActiveCapture->Snapshot.GpuTimingPositiveDurationCount = 0;
-		m_ActiveCapture->Snapshot.GpuTimingZeroDurationCount = 0;
-		m_ActiveCapture->Snapshot.GpuTimingExportTruncationCount = 0;
+		m_ActiveCapture->Snapshot.Timing = {};
 		m_ActiveCapture->Snapshot.ResourceSegmentHistoryEvictionCount = 0;
 		m_ActiveCapture->Snapshot.ResourceSegmentMetricTruncationCount = 0;
-		AppendGpuSamples(*m_ActiveCapture, InitialSnapshot);
-		AppendResourceSegment(InitialSnapshot, Metadata);
-		UpdateGpuStatus(m_ActiveCapture->Snapshot, false);
+		ApplyLifetimeCounterDeltas(*m_ActiveCapture, InitialRendererObservation);
+		AppendGpuSamples(*m_ActiveCapture, InitialRendererObservation);
+		AppendResourceSegment(*m_ActiveCapture, InitialDiagnostics.SnapshotTimestampNanoseconds, InitialResources, Metadata);
+		UpdateGpuStatus(m_ActiveCapture->Snapshot);
 		return {};
 	}
 
 	std::expected<void, EditorPerformanceCaptureError> EditorPerformanceCaptureService::Observe(
-		const EditorPerformanceSnapshot& Snapshot, const EditorPerformanceCaptureMetadata& Metadata)
+		const RendererTimingObservation& RendererObservation,
+		uint64_t ObservationTimestampNanoseconds,
+		const std::vector<EditorResourceMetric>* Resources,
+		const EditorPerformanceCaptureMetadata* Metadata)
 	{
 		EditorPerformanceCapture* Target = m_ActiveCapture ? &*m_ActiveCapture : m_CompletedCapture ? &*m_CompletedCapture : nullptr;
 		if (!Target)
 			return std::unexpected(MakeCaptureError(EditorPerformanceCaptureErrorCode::NotActive,
 				"No performance capture is active"));
-		AppendGpuSamples(*Target, Snapshot);
-		if (Snapshot.Diagnostics.SessionId != Target->Snapshot.Diagnostics.SessionId)
+		if (RendererObservation.CaptureSessionId != Target->Snapshot.Diagnostics.SessionId)
 		{
-			UpdateGpuStatus(Target->Snapshot, !m_ActiveCapture);
 			return std::unexpected(MakeCaptureError(EditorPerformanceCaptureErrorCode::StaleSession,
-				"The diagnostics snapshot belongs to a different capture session"));
+				"The renderer observation belongs to a different capture session"));
 		}
-
-		const uint64_t CurrentOverwriteCount = Snapshot.GpuTimingRendererOverwriteCount;
-		Target->Snapshot.GpuTimingRendererOverwriteCount += CurrentOverwriteCount >= m_LastRendererOverwriteCount
-			? CurrentOverwriteCount - m_LastRendererOverwriteCount : CurrentOverwriteCount;
-		m_LastRendererOverwriteCount = CurrentOverwriteCount;
-		const uint64_t CurrentInvalidCount = Snapshot.GpuTimingInvalidResultCount;
-		Target->Snapshot.GpuTimingInvalidResultCount += CurrentInvalidCount >= m_LastInvalidResultCount
-			? CurrentInvalidCount - m_LastInvalidResultCount : CurrentInvalidCount;
-		m_LastInvalidResultCount = CurrentInvalidCount;
+		ApplyLifetimeCounterDeltas(*Target, RendererObservation);
+		AppendGpuSamples(*Target, RendererObservation);
+		m_CollectionOutstanding = RendererObservation.CollectionOutstanding;
+		Target->Snapshot.GpuTimingSupported = RendererObservation.Supported;
+		Target->Snapshot.GpuTimingFailureReported = Target->Snapshot.GpuTimingFailureReported || RendererObservation.FailureReported;
+		Target->Snapshot.GpuTimingUnavailableReason = RendererObservation.UnavailableReason;
+		Target->Snapshot.GpuTimingRequested = Target->Snapshot.GpuTimingRequested || RendererObservation.Requested;
+		Target->Snapshot.GpuTimingEnabled = Target->Snapshot.GpuTimingEnabled || RendererObservation.Enabled;
 		if (!m_ActiveCapture)
 		{
-			if (Snapshot.GpuTimingFailureReported)
-			{
-				Target->Snapshot.GpuTimingFailureReported = true;
-				Target->Snapshot.GpuTimingUnavailableReason = Snapshot.GpuTimingUnavailableReason;
-			}
-			UpdateGpuStatus(Target->Snapshot, true);
+			UpdateGpuStatus(Target->Snapshot);
 			return {};
 		}
 
-		AppendResourceSegment(Snapshot, Metadata);
-		Target->Snapshot.Diagnostics = Snapshot.Diagnostics;
-		KeepLatestEvents(Target->Snapshot.Diagnostics, Target->Snapshot.DiagnosticSnapshotTruncationCount);
-		Target->Snapshot.Resources = Snapshot.Resources;
-		KeepLatestMetrics(Target->Snapshot.Resources, MaximumMetricsPerResourceSegment);
-		Target->Snapshot.GpuTimingSupported = Snapshot.GpuTimingSupported;
-		Target->Snapshot.GpuTimingFailureReported = Snapshot.GpuTimingFailureReported;
-		Target->Snapshot.GpuTimingUnavailableReason = Snapshot.GpuTimingUnavailableReason;
-		Target->Snapshot.GpuTimingRequested = Snapshot.GpuTimingRequested;
-		Target->Snapshot.GpuTimingEnabled = Target->Snapshot.GpuTimingEnabled || Snapshot.GpuTimingEnabled;
-		UpdateGpuStatus(Target->Snapshot, false);
+		if (Resources && Metadata)
+		{
+			Target->Snapshot.Resources = *Resources;
+			KeepLatestMetrics(Target->Snapshot.Resources, MaximumMetricsPerResourceSegment);
+			AppendResourceSegment(*Target, ObservationTimestampNanoseconds, *Resources, *Metadata);
+		}
+		UpdateGpuStatus(Target->Snapshot);
 		return {};
 	}
 
 	std::expected<void, EditorPerformanceCaptureError> EditorPerformanceCaptureService::Stop(
-		const EditorPerformanceSnapshot& FinalSnapshot, EditorPerformanceCaptureMetadata FinalMetadata)
+		const PulseForge::DiagnosticSnapshot& FinalDiagnostics,
+		const RendererTimingObservation& FinalRendererObservation,
+		const std::vector<EditorResourceMetric>& FinalResources,
+		EditorPerformanceCaptureMetadata FinalMetadata)
 	{
 		if (!m_ActiveCapture)
-			return std::unexpected(MakeCaptureError(EditorPerformanceCaptureErrorCode::NotActive,
-				"No performance capture is active"));
-		EditorPerformanceSnapshot BoundedFinalSnapshot = FinalSnapshot;
-		const uint64_t CaptureEnd = BoundedFinalSnapshot.Diagnostics.CaptureEndTimestampNanoseconds;
-		if (CaptureEnd != 0 && BoundedFinalSnapshot.Diagnostics.SnapshotTimestampNanoseconds > CaptureEnd)
-			BoundedFinalSnapshot.Diagnostics.SnapshotTimestampNanoseconds = CaptureEnd;
-		if (auto Observed = Observe(BoundedFinalSnapshot, FinalMetadata); !Observed) return Observed;
-		UpdateGpuStatus(m_ActiveCapture->Snapshot, true);
+			return m_CompletedCapture ? std::expected<void, EditorPerformanceCaptureError>{} :
+				std::expected<void, EditorPerformanceCaptureError>{std::unexpected(MakeCaptureError(
+					EditorPerformanceCaptureErrorCode::NotActive, "No performance capture is active"))};
+		if (FinalDiagnostics.SessionId != m_ActiveCapture->Snapshot.Diagnostics.SessionId ||
+			FinalRendererObservation.CaptureSessionId != FinalDiagnostics.SessionId)
+			return std::unexpected(MakeCaptureError(EditorPerformanceCaptureErrorCode::StaleSession,
+				"The final diagnostics and renderer observations do not match the active capture"));
+		m_ActiveCapture->Snapshot.Diagnostics = FinalDiagnostics;
+		const uint64_t CaptureEnd = FinalDiagnostics.CaptureEndTimestampNanoseconds;
+		if (CaptureEnd != 0 && m_ActiveCapture->Snapshot.Diagnostics.SnapshotTimestampNanoseconds > CaptureEnd)
+			m_ActiveCapture->Snapshot.Diagnostics.SnapshotTimestampNanoseconds = CaptureEnd;
+		KeepLatestEvents(m_ActiveCapture->Snapshot.Diagnostics, m_ActiveCapture->Snapshot.DiagnosticSnapshotTruncationCount);
+		ApplyLifetimeCounterDeltas(*m_ActiveCapture, FinalRendererObservation);
+		AppendGpuSamples(*m_ActiveCapture, FinalRendererObservation);
+		m_CollectionOutstanding = FinalRendererObservation.CollectionOutstanding;
+		m_ActiveCapture->Snapshot.GpuTimingSupported = FinalRendererObservation.Supported;
+		m_ActiveCapture->Snapshot.GpuTimingFailureReported = m_ActiveCapture->Snapshot.GpuTimingFailureReported ||
+			FinalRendererObservation.FailureReported;
+		if (!FinalRendererObservation.UnavailableReason.empty())
+			m_ActiveCapture->Snapshot.GpuTimingUnavailableReason = FinalRendererObservation.UnavailableReason;
+		if (CaptureEnd != 0)
+		{
+			m_ActiveCapture->Snapshot.Resources = FinalResources;
+			KeepLatestMetrics(m_ActiveCapture->Snapshot.Resources, MaximumMetricsPerResourceSegment);
+			AppendResourceSegment(*m_ActiveCapture, CaptureEnd, FinalResources, FinalMetadata);
+		}
+		UpdateGpuStatus(m_ActiveCapture->Snapshot);
 		m_ActiveCapture->Snapshot.Diagnostics.CaptureEnabled = false;
 		m_CompletedCapture = std::move(m_ActiveCapture);
 		m_ActiveCapture.reset();
 		return {};
 	}
 
-	std::optional<EditorPerformanceCapture> EditorPerformanceCaptureService::GetExportSnapshot() const
+	std::optional<EditorPerformanceCapture> EditorPerformanceCaptureService::GetExportSnapshot(
+		const PulseForge::DiagnosticSnapshot* ActiveDiagnostics) const
 	{
 		if (m_ActiveCapture)
 		{
 			EditorPerformanceCapture Snapshot = *m_ActiveCapture;
+			if (ActiveDiagnostics && ActiveDiagnostics->SessionId == Snapshot.Snapshot.Diagnostics.SessionId)
+				Snapshot.Snapshot.Diagnostics = *ActiveDiagnostics;
 			// An active point-in-time export is bounded by SnapshotTimestampNanoseconds,
 			// but it must not claim the capture itself has stopped.
 			Snapshot.Snapshot.Diagnostics.CaptureEndTimestampNanoseconds = 0;
@@ -193,11 +211,24 @@ namespace PulseForgeEditor
 		return m_CompletedCapture;
 	}
 
-	std::optional<EditorPerformanceSnapshot> EditorPerformanceCaptureService::GetCurrentSnapshot() const
+	const EditorPerformanceSnapshot* EditorPerformanceCaptureService::GetPresentationSnapshot(
+		const PulseForge::DiagnosticSnapshot* ActiveDiagnostics)
 	{
-		if (m_ActiveCapture) return m_ActiveCapture->Snapshot;
-		if (m_CompletedCapture) return m_CompletedCapture->Snapshot;
-		return std::nullopt;
+		EditorPerformanceCapture* Capture = m_ActiveCapture ? &*m_ActiveCapture :
+			m_CompletedCapture ? &*m_CompletedCapture : nullptr;
+		if (!Capture) return nullptr;
+		if (m_ActiveCapture && ActiveDiagnostics && ActiveDiagnostics->SessionId == Capture->Snapshot.Diagnostics.SessionId)
+		{
+			Capture->Snapshot.Diagnostics = *ActiveDiagnostics;
+			KeepLatestEvents(Capture->Snapshot.Diagnostics, Capture->Snapshot.DiagnosticSnapshotTruncationCount);
+			++m_FullSnapshotMaterializationCount;
+		}
+		return &Capture->Snapshot;
+	}
+
+	bool EditorPerformanceCaptureService::IsCollectionSettled() const noexcept
+	{
+		return !m_CollectionOutstanding;
 	}
 
 	uint64_t EditorPerformanceCaptureService::GetSessionId() const noexcept
@@ -206,100 +237,113 @@ namespace PulseForgeEditor
 		return m_CompletedCapture ? m_CompletedCapture->Snapshot.Diagnostics.SessionId : 0;
 	}
 
-	void EditorPerformanceCaptureService::ApplyGpuHistory(EditorPerformanceSnapshot& Snapshot) const
-	{
-		const EditorPerformanceSnapshot* CaptureSnapshot = m_ActiveCapture ? &m_ActiveCapture->Snapshot :
-			m_CompletedCapture ? &m_CompletedCapture->Snapshot : nullptr;
-		if (!CaptureSnapshot || Snapshot.Diagnostics.SessionId != CaptureSnapshot->Diagnostics.SessionId) return;
-		Snapshot.GpuTimingRequested = CaptureSnapshot->GpuTimingRequested;
-		Snapshot.GpuTimingEnabled = CaptureSnapshot->GpuTimingEnabled;
-		Snapshot.GpuTimingAvailable = CaptureSnapshot->GpuTimingAvailable;
-		Snapshot.GpuTimingResultStatus = CaptureSnapshot->GpuTimingResultStatus;
-		Snapshot.GpuTimingRendererOverwriteCount = CaptureSnapshot->GpuTimingRendererOverwriteCount;
-		Snapshot.GpuTimingCaptureHistoryEvictionCount = CaptureSnapshot->GpuTimingCaptureHistoryEvictionCount;
-		Snapshot.GpuTimingStaleSessionDiscardCount = CaptureSnapshot->GpuTimingStaleSessionDiscardCount;
-		Snapshot.GpuTimingInvalidResultCount = CaptureSnapshot->GpuTimingInvalidResultCount;
-		Snapshot.GpuTimingPositiveDurationCount = CaptureSnapshot->GpuTimingPositiveDurationCount;
-		Snapshot.GpuTimingZeroDurationCount = CaptureSnapshot->GpuTimingZeroDurationCount;
-		Snapshot.GpuTimingExportTruncationCount = CaptureSnapshot->GpuTimingExportTruncationCount;
-		Snapshot.CompletedGpuTimings = CaptureSnapshot->CompletedGpuTimings;
-		if (!CaptureSnapshot->GpuTimingUnavailableReason.empty())
-			Snapshot.GpuTimingUnavailableReason = CaptureSnapshot->GpuTimingUnavailableReason;
-	}
-
 	void EditorPerformanceCaptureService::AppendGpuSamples(
-		EditorPerformanceCapture& Target, const EditorPerformanceSnapshot& Snapshot)
+		EditorPerformanceCapture& Target, const RendererTimingObservation& Observation)
 	{
 		const uint64_t SessionId = Target.Snapshot.Diagnostics.SessionId;
-		for (const EditorGpuTimingSample& Incoming : Snapshot.CompletedGpuTimings)
+		auto& GpuHistory = Target.Snapshot.CompletedGpuTimings;
+		bool AddedSample = false;
+		for (const EditorGpuTimingSample& Incoming : Observation.NewlyCompletedSamples)
 		{
 			if (Incoming.SessionId != SessionId)
 			{
-				++Target.Snapshot.GpuTimingStaleSessionDiscardCount;
+				++Target.Snapshot.Timing.StaleSessionDiscardCount;
 				continue;
 			}
-			if (m_HasLastGpuFrameSequence && Incoming.FrameSequence <= m_LastGpuFrameSequence) continue;
-			m_LastGpuFrameSequence = Incoming.FrameSequence;
-			m_HasLastGpuFrameSequence = true;
+			if (std::any_of(GpuHistory.begin(), GpuHistory.end(), [&Incoming](const EditorGpuTimingSample& Retained)
+				{ return Retained.FrameSequence == Incoming.FrameSequence; }))
+				continue;
 			EditorGpuTimingSample Sample = Incoming;
 			Sample.Quality = Sample.DurationNanoseconds == 0
 				? EditorGpuTimingSampleQuality::ZeroDuration : EditorGpuTimingSampleQuality::PositiveDuration;
 			if (Sample.Quality == EditorGpuTimingSampleQuality::ZeroDuration)
-				++Target.Snapshot.GpuTimingZeroDurationCount;
+				++Target.Snapshot.Timing.ZeroDurationCount;
 			else
-				++Target.Snapshot.GpuTimingPositiveDurationCount;
-			if (m_GpuHistory.size() == MaximumGpuTimingSamples)
+				++Target.Snapshot.Timing.PositiveDurationCount;
+			if (GpuHistory.size() == MaximumGpuTimingSamples)
 			{
-				m_GpuHistory.erase(m_GpuHistory.begin());
-				++Target.Snapshot.GpuTimingCaptureHistoryEvictionCount;
+				GpuHistory.erase(GpuHistory.begin());
+				++Target.Snapshot.Timing.CaptureHistoryEvictionCount;
 			}
-			m_GpuHistory.push_back(std::move(Sample));
+			GpuHistory.push_back(std::move(Sample));
+			AddedSample = true;
 		}
-		Target.Snapshot.CompletedGpuTimings = m_GpuHistory;
+		if (AddedSample)
+			std::sort(GpuHistory.begin(), GpuHistory.end(), [](const EditorGpuTimingSample& Left, const EditorGpuTimingSample& Right)
+				{ return Left.FrameSequence < Right.FrameSequence; });
 	}
 
 	void EditorPerformanceCaptureService::AppendResourceSegment(
-		const EditorPerformanceSnapshot& Snapshot, const EditorPerformanceCaptureMetadata& Metadata)
+		EditorPerformanceCapture& Target,
+		uint64_t TimestampNanoseconds,
+		const std::vector<EditorResourceMetric>& Resources,
+		const EditorPerformanceCaptureMetadata& Metadata)
 	{
 		EditorPerformanceResourceSegment Segment;
-		Segment.TimestampNanoseconds = Snapshot.Diagnostics.SnapshotTimestampNanoseconds;
+		Segment.TimestampNanoseconds = TimestampNanoseconds;
 		Segment.Workload = Metadata.Workload;
 		Segment.ContentFingerprint = Metadata.ContentFingerprint;
 		Segment.ContentFingerprintScope = Metadata.ContentFingerprintScope;
 		Segment.ContentFingerprintUnavailableReason = Metadata.ContentFingerprintUnavailableReason;
-		const size_t MetricCount = (std::min)(Snapshot.Resources.size(), MaximumMetricsPerResourceSegment);
-		Segment.Resources.assign(Snapshot.Resources.begin(), Snapshot.Resources.begin() + static_cast<std::ptrdiff_t>(MetricCount));
-		m_ActiveCapture->Snapshot.ResourceSegmentMetricTruncationCount += Snapshot.Resources.size() - MetricCount;
+		const size_t MetricCount = (std::min)(Resources.size(), MaximumMetricsPerResourceSegment);
+		Segment.Resources.assign(Resources.begin(), Resources.begin() + static_cast<std::ptrdiff_t>(MetricCount));
+		Target.Snapshot.ResourceSegmentMetricTruncationCount += Resources.size() - MetricCount;
 
-		if (!m_ActiveCapture->ResourceSegments.empty())
+		if (!Target.ResourceSegments.empty())
 		{
-			const EditorPerformanceResourceSegment& Previous = m_ActiveCapture->ResourceSegments.back();
+			const EditorPerformanceResourceSegment& Previous = Target.ResourceSegments.back();
 			if (Previous.Workload == Segment.Workload && Previous.ContentFingerprint == Segment.ContentFingerprint &&
 				Previous.ContentFingerprintScope == Segment.ContentFingerprintScope &&
 				Previous.ContentFingerprintUnavailableReason == Segment.ContentFingerprintUnavailableReason &&
 				MetricsEqual(Previous.Resources, Segment.Resources))
 				return;
 		}
-		if (m_ActiveCapture->ResourceSegments.size() == MaximumResourceSegments)
+		if (Target.ResourceSegments.size() == MaximumResourceSegments)
 		{
-			m_ActiveCapture->ResourceSegments.erase(m_ActiveCapture->ResourceSegments.begin());
-			++m_ActiveCapture->Snapshot.ResourceSegmentHistoryEvictionCount;
+			Target.ResourceSegments.erase(Target.ResourceSegments.begin());
+			++Target.Snapshot.ResourceSegmentHistoryEvictionCount;
 		}
-		m_ActiveCapture->ResourceSegments.push_back(std::move(Segment));
+		Target.ResourceSegments.push_back(std::move(Segment));
 	}
 
-	void EditorPerformanceCaptureService::UpdateGpuStatus(EditorPerformanceSnapshot& Snapshot, bool Completed) const
+	void EditorPerformanceCaptureService::ApplyLifetimeCounterDeltas(
+		EditorPerformanceCapture& Target, const RendererTimingObservation& Observation)
+	{
+		const RendererTimingLifetimeCounters& Current = Observation.LifetimeCounters;
+		if (Current.RendererGeneration != m_LastLifetimeCounters.RendererGeneration)
+		{
+			++Target.Snapshot.Timing.RendererGenerationChangeCount;
+			m_LastLifetimeCounters = Current;
+			return;
+		}
+		if (Current.QueueOverwriteCount < m_LastLifetimeCounters.QueueOverwriteCount)
+			++Target.Snapshot.Timing.CounterRegressionCount;
+		else
+		{
+			Target.Snapshot.Timing.RendererQueueOverwriteCount += Current.QueueOverwriteCount - m_LastLifetimeCounters.QueueOverwriteCount;
+			m_LastLifetimeCounters.QueueOverwriteCount = Current.QueueOverwriteCount;
+		}
+		if (Current.InvalidResultCount < m_LastLifetimeCounters.InvalidResultCount)
+			++Target.Snapshot.Timing.CounterRegressionCount;
+		else
+		{
+			Target.Snapshot.Timing.InvalidResultCount += Current.InvalidResultCount - m_LastLifetimeCounters.InvalidResultCount;
+			m_LastLifetimeCounters.InvalidResultCount = Current.InvalidResultCount;
+		}
+	}
+
+	void EditorPerformanceCaptureService::UpdateGpuStatus(EditorPerformanceSnapshot& Snapshot) const
 	{
 		Snapshot.GpuTimingAvailable = false;
-		Snapshot.GpuTimingAvailable = Snapshot.GpuTimingPositiveDurationCount != 0;
-		const bool HasZeroDurationSample = Snapshot.GpuTimingZeroDurationCount != 0;
+		Snapshot.GpuTimingAvailable = Snapshot.Timing.PositiveDurationCount != 0;
+		const bool HasZeroDurationSample = Snapshot.Timing.ZeroDurationCount != 0;
 		if (Snapshot.GpuTimingFailureReported)
 			Snapshot.GpuTimingResultStatus = EditorGpuTimingResultStatus::Failed;
 		else if (Snapshot.GpuTimingAvailable)
 			Snapshot.GpuTimingResultStatus = EditorGpuTimingResultStatus::Informative;
 		else if (HasZeroDurationSample)
 			Snapshot.GpuTimingResultStatus = EditorGpuTimingResultStatus::ZeroDurationOnly;
-		else if (!Completed && Snapshot.GpuTimingEnabled)
+		else if (m_CollectionOutstanding && Snapshot.GpuTimingEnabled)
 			Snapshot.GpuTimingResultStatus = EditorGpuTimingResultStatus::Pending;
 		else
 			Snapshot.GpuTimingResultStatus = EditorGpuTimingResultStatus::NoSamples;
@@ -368,13 +412,15 @@ namespace PulseForgeEditor
 				{ "gpu_timing_failure_reported", Snapshot.GpuTimingFailureReported },
 				{ "gpu_timing_result_status", GpuResultStatusName(Snapshot.GpuTimingResultStatus) },
 				{ "gpu_timing_unavailable_reason", Snapshot.GpuTimingUnavailableReason },
-				{ "gpu_timing_renderer_overwrite_count", Snapshot.GpuTimingRendererOverwriteCount },
-				{ "gpu_timing_capture_history_eviction_count", Snapshot.GpuTimingCaptureHistoryEvictionCount },
-				{ "gpu_timing_stale_session_discard_count", Snapshot.GpuTimingStaleSessionDiscardCount },
-				{ "gpu_timing_invalid_result_count", Snapshot.GpuTimingInvalidResultCount },
-				{ "gpu_timing_positive_duration_count", Snapshot.GpuTimingPositiveDurationCount },
-				{ "gpu_timing_zero_duration_count", Snapshot.GpuTimingZeroDurationCount },
-				{ "gpu_timing_export_truncation_count", Snapshot.GpuTimingExportTruncationCount },
+				{ "gpu_timing_renderer_overwrite_count", Snapshot.Timing.RendererQueueOverwriteCount },
+				{ "gpu_timing_capture_history_eviction_count", Snapshot.Timing.CaptureHistoryEvictionCount },
+				{ "gpu_timing_stale_session_discard_count", Snapshot.Timing.StaleSessionDiscardCount },
+				{ "gpu_timing_invalid_result_count", Snapshot.Timing.InvalidResultCount },
+				{ "gpu_timing_counter_regression_count", Snapshot.Timing.CounterRegressionCount },
+				{ "gpu_timing_renderer_generation_change_count", Snapshot.Timing.RendererGenerationChangeCount },
+				{ "gpu_timing_positive_duration_count", Snapshot.Timing.PositiveDurationCount },
+				{ "gpu_timing_zero_duration_count", Snapshot.Timing.ZeroDurationCount },
+				{ "gpu_timing_export_truncation_count", Snapshot.Timing.ExportTruncationCount },
 				{ "resource_segment_history_eviction_count", Snapshot.ResourceSegmentHistoryEvictionCount },
 				{ "resource_segment_metric_truncation_count", Snapshot.ResourceSegmentMetricTruncationCount }
 			};
@@ -408,7 +454,7 @@ namespace PulseForgeEditor
 			Metadata["gpu_timing_samples_in_snapshot"] = Snapshot.CompletedGpuTimings.size();
 			Metadata["gpu_timing_samples_exported"] = GpuSampleCount;
 			const size_t ExportTruncation = Snapshot.CompletedGpuTimings.size() - GpuSampleCount;
-			Metadata["gpu_timing_export_truncation_count"] = Snapshot.GpuTimingExportTruncationCount + ExportTruncation;
+			Metadata["gpu_timing_export_truncation_count"] = Snapshot.Timing.ExportTruncationCount + ExportTruncation;
 			for (size_t Index = 0; Index < GpuSampleCount; ++Index)
 			{
 				const EditorGpuTimingSample& Sample = Snapshot.CompletedGpuTimings[Index];

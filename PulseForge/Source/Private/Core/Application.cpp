@@ -71,6 +71,16 @@ namespace PulseForge
 		return m_Renderer->GetGpuFrameTimingInvalidResultCount();
 	}
 
+	void Application::CollectCompletedGpuFrameTimings() noexcept
+	{
+		m_Renderer->CollectCompletedGpuFrameTimings();
+	}
+
+	GpuFrameTimingCollectionState Application::GetGpuFrameTimingCollectionState(uint64_t SessionId) const noexcept
+	{
+		return m_Renderer->GetGpuFrameTimingCollectionState(SessionId);
+	}
+
 	bool Application::IsGpuFrameTimingSupported() const noexcept
 	{
 		return m_Renderer->IsGpuFrameTimingSupported();
@@ -157,6 +167,16 @@ namespace PulseForge
 	DiagnosticSnapshot Application::GetDiagnosticsSnapshot() const
 	{
 		return m_Diagnostics ? m_Diagnostics->CaptureSnapshot() : DiagnosticSnapshot{};
+	}
+
+	DiagnosticCaptureStatus Application::GetDiagnosticsCaptureStatus() const noexcept
+	{
+		return m_Diagnostics ? m_Diagnostics->GetCaptureStatus() : DiagnosticCaptureStatus{};
+	}
+
+	bool Application::IsDiagnosticsCaptureEnabled() const noexcept
+	{
+		return m_Diagnostics && m_Diagnostics->IsCaptureEnabled();
 	}
 
 #if defined(PF_DEBUG)

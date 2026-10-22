@@ -46,6 +46,12 @@ namespace PulseForge
 		}
 		[[nodiscard]] virtual uint64_t GetCompletedGpuFrameTimingEvictedCount() const noexcept { return 0; }
 		[[nodiscard]] virtual uint64_t GetGpuFrameTimingInvalidResultCount() const noexcept { return 0; }
+		virtual void CollectCompletedGpuFrameTimings() noexcept {}
+		[[nodiscard]] virtual GpuFrameTimingCollectionState GetGpuFrameTimingCollectionState(uint64_t SessionId) const noexcept
+		{
+			(void)SessionId;
+			return {};
+		}
 		virtual bool BeginFrame() = 0;
 		virtual void EndFrame() = 0;
 		[[nodiscard]] virtual std::expected<uint64_t, std::string> CreatePlatformPresentationTarget(void* NativeWindow)

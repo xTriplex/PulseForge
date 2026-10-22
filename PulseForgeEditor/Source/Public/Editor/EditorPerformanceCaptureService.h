@@ -57,6 +57,41 @@ namespace PulseForgeEditor
 		EditorGpuTimingSampleQuality Quality = EditorGpuTimingSampleQuality::PositiveDuration;
 	};
 
+	// Raw renderer data. Counters are monotonic for one RendererGeneration; samples are newly drained only.
+	struct RendererTimingLifetimeCounters
+	{
+		uint64_t RendererGeneration = 1;
+		uint64_t QueueOverwriteCount = 0;
+		uint64_t InvalidResultCount = 0;
+	};
+
+	struct RendererTimingObservation
+	{
+		uint64_t CaptureSessionId = 0;
+		RendererTimingLifetimeCounters LifetimeCounters;
+		std::vector<EditorGpuTimingSample> NewlyCompletedSamples;
+		bool Supported = false;
+		bool Requested = false;
+		bool Enabled = false;
+		bool FailureReported = false;
+		bool CollectionOutstanding = false;
+		std::string UnavailableReason;
+	};
+
+	// All counters in this type are capture-relative and are never accepted as renderer input.
+	struct CaptureTimingStatistics
+	{
+		uint64_t RendererQueueOverwriteCount = 0;
+		uint64_t CaptureHistoryEvictionCount = 0;
+		uint64_t StaleSessionDiscardCount = 0;
+		uint64_t InvalidResultCount = 0;
+		uint64_t CounterRegressionCount = 0;
+		uint64_t RendererGenerationChangeCount = 0;
+		uint64_t PositiveDurationCount = 0;
+		uint64_t ZeroDurationCount = 0;
+		uint64_t ExportTruncationCount = 0;
+	};
+
 	enum class EditorGpuTimingResultStatus : uint8_t
 	{
 		Pending,
@@ -75,16 +110,8 @@ namespace PulseForgeEditor
 		bool GpuTimingEnabled = false;
 		std::string GpuTimingUnavailableReason;
 		bool GpuTimingFailureReported = false;
-		// Input is renderer-cumulative; service output is the delta observed in this capture.
-		uint64_t GpuTimingRendererOverwriteCount = 0;
-		// Input is renderer-cumulative; service output is the delta observed in this capture.
-		uint64_t GpuTimingInvalidResultCount = 0;
+		CaptureTimingStatistics Timing;
 		EditorGpuTimingResultStatus GpuTimingResultStatus = EditorGpuTimingResultStatus::NoSamples;
-		uint64_t GpuTimingCaptureHistoryEvictionCount = 0;
-		uint64_t GpuTimingStaleSessionDiscardCount = 0;
-		uint64_t GpuTimingPositiveDurationCount = 0;
-		uint64_t GpuTimingZeroDurationCount = 0;
-		uint64_t GpuTimingExportTruncationCount = 0;
 		uint64_t DiagnosticSnapshotTruncationCount = 0;
 		uint64_t ResourceSegmentHistoryEvictionCount = 0;
 		uint64_t ResourceSegmentMetricTruncationCount = 0;
@@ -164,19 +191,32 @@ namespace PulseForgeEditor
 		static constexpr size_t MaximumMetricsPerResourceSegment = 32;
 
 		[[nodiscard]] std::expected<void, EditorPerformanceCaptureError> Begin(
-			const EditorPerformanceSnapshot& InitialSnapshot, EditorPerformanceCaptureMetadata Metadata);
-		// CompletedGpuTimings contains only samples newly drained since the prior service call.
-		// After Stop, same-session observations append delayed GPU results only; frozen session data stays unchanged.
+			const PulseForge::DiagnosticSnapshot& InitialDiagnostics,
+			const RendererTimingObservation& InitialRendererObservation,
+			const std::vector<EditorResourceMetric>& InitialResources,
+			EditorPerformanceCaptureMetadata Metadata);
+		// Renderer observations always carry lifetime counters and only newly drained samples.
+		// After Stop, updates append delayed GPU results and raw counter deltas only.
 		[[nodiscard]] std::expected<void, EditorPerformanceCaptureError> Observe(
-			const EditorPerformanceSnapshot& Snapshot, const EditorPerformanceCaptureMetadata& Metadata);
+			const RendererTimingObservation& RendererObservation,
+			uint64_t ObservationTimestampNanoseconds,
+			const std::vector<EditorResourceMetric>* Resources = nullptr,
+			const EditorPerformanceCaptureMetadata* Metadata = nullptr);
 		[[nodiscard]] std::expected<void, EditorPerformanceCaptureError> Stop(
-			const EditorPerformanceSnapshot& FinalSnapshot, EditorPerformanceCaptureMetadata FinalMetadata);
-		[[nodiscard]] std::optional<EditorPerformanceCapture> GetExportSnapshot() const;
-		[[nodiscard]] std::optional<EditorPerformanceSnapshot> GetCurrentSnapshot() const;
+			const PulseForge::DiagnosticSnapshot& FinalDiagnostics,
+			const RendererTimingObservation& FinalRendererObservation,
+			const std::vector<EditorResourceMetric>& FinalResources,
+			EditorPerformanceCaptureMetadata FinalMetadata);
+		[[nodiscard]] std::optional<EditorPerformanceCapture> GetExportSnapshot(
+			const PulseForge::DiagnosticSnapshot* ActiveDiagnostics = nullptr) const;
+		[[nodiscard]] const EditorPerformanceSnapshot* GetPresentationSnapshot(
+			const PulseForge::DiagnosticSnapshot* ActiveDiagnostics = nullptr);
+		[[nodiscard]] bool IsCollectionSettled() const noexcept;
+		[[nodiscard]] bool NeedsLifecycleUpdate() const noexcept { return IsActive() || !IsCollectionSettled(); }
 		[[nodiscard]] bool IsActive() const noexcept { return m_ActiveCapture.has_value(); }
 		[[nodiscard]] bool HasCapture() const noexcept { return m_ActiveCapture.has_value() || m_CompletedCapture.has_value(); }
 		[[nodiscard]] uint64_t GetSessionId() const noexcept;
-		void ApplyGpuHistory(EditorPerformanceSnapshot& Snapshot) const;
+		[[nodiscard]] uint64_t GetFullSnapshotMaterializationCount() const noexcept { return m_FullSnapshotMaterializationCount; }
 
 		[[nodiscard]] static std::expected<std::string, EditorPerformanceExportError> Serialize(
 			const EditorPerformanceCapture& Capture);
@@ -185,16 +225,19 @@ namespace PulseForgeEditor
 			const std::filesystem::path& Destination, const EditorPerformanceCapture& Capture);
 
 	private:
-		void AppendGpuSamples(EditorPerformanceCapture& Target, const EditorPerformanceSnapshot& Snapshot);
-		void AppendResourceSegment(const EditorPerformanceSnapshot& Snapshot, const EditorPerformanceCaptureMetadata& Metadata);
-		void UpdateGpuStatus(EditorPerformanceSnapshot& Snapshot, bool Completed) const;
+		void AppendGpuSamples(EditorPerformanceCapture& Target, const RendererTimingObservation& Observation);
+		void AppendResourceSegment(
+			EditorPerformanceCapture& Target,
+			uint64_t TimestampNanoseconds,
+			const std::vector<EditorResourceMetric>& Resources,
+			const EditorPerformanceCaptureMetadata& Metadata);
+		void ApplyLifetimeCounterDeltas(EditorPerformanceCapture& Target, const RendererTimingObservation& Observation);
+		void UpdateGpuStatus(EditorPerformanceSnapshot& Snapshot) const;
 
 		std::optional<EditorPerformanceCapture> m_ActiveCapture;
 		std::optional<EditorPerformanceCapture> m_CompletedCapture;
-		std::vector<EditorGpuTimingSample> m_GpuHistory;
-		uint64_t m_LastRendererOverwriteCount = 0;
-		uint64_t m_LastInvalidResultCount = 0;
-		uint64_t m_LastGpuFrameSequence = 0;
-		bool m_HasLastGpuFrameSequence = false;
+		RendererTimingLifetimeCounters m_LastLifetimeCounters;
+		bool m_CollectionOutstanding = false;
+		uint64_t m_FullSnapshotMaterializationCount = 0;
 	};
 } // namespace PulseForgeEditor
