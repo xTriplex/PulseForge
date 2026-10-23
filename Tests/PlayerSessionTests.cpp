@@ -7,6 +7,7 @@
 #include "Runtime/PlayerSession.h"
 #include "Scene/Components/ScriptComponent.h"
 #include "Scene/Scene.h"
+#include "Scripting/ScriptRuntime.h"
 
 #include <array>
 #include <filesystem>
@@ -19,6 +20,44 @@
 
 namespace
 {
+	struct ScriptObservationBuffer
+	{
+		std::array<PulseForge::ScriptRuntimeObservation, 64> Events{};
+		size_t Count = 0;
+		bool Overflowed = false;
+	};
+
+	void StoreScriptObservation(void* Context, const PulseForge::ScriptRuntimeObservation& Observation) noexcept
+	{
+		auto& Buffer = *static_cast<ScriptObservationBuffer*>(Context);
+		if (Buffer.Count == Buffer.Events.size())
+		{
+			Buffer.Overflowed = true;
+			return;
+		}
+		Buffer.Events[Buffer.Count++] = Observation;
+	}
+
+	size_t CountScriptObservations(
+		const ScriptObservationBuffer& Buffer,
+		PulseForge::ScriptRuntimeObservationKind Kind,
+		const PulseForge::AssetID& ScriptAsset,
+		PulseForge::UUID Entity,
+		std::optional<PulseForge::ScriptRuntimeCallback> Callback = std::nullopt)
+	{
+		size_t Result = 0;
+		for (size_t Index = 0; Index < Buffer.Count; ++Index)
+		{
+			const auto& Event = Buffer.Events[Index];
+			if (Event.Kind == Kind && Event.ScriptAsset == ScriptAsset && Event.Entity == Entity &&
+				(!Callback || Event.Callback == *Callback))
+			{
+				++Result;
+			}
+		}
+		return Result;
+	}
+
 	std::string ReadFile(const std::filesystem::path& Path)
 	{
 		std::ifstream Input(Path, std::ios::binary);
@@ -53,19 +92,39 @@ namespace
 		std::optional<Project> CreatedProject(std::move(*CreatedProjectResult));
 		std::filesystem::create_directories(Root / "Assets" / "Scripts", Error);
 		PF_CHECK(Tests, !Error);
-		const std::string TimeScaleScript = "function OnUpdate(dt) assert(entity:set_translation(dt, 0, 0)) end\n";
+		const std::string TimeScaleScript = "function OnUpdate(dt) assert(entity:set_translation(dt, 0, 0)) end\n"
+			"function OnDestroy()\n"
+			"  local marker, message = scene.create_entity('original session teardown marker')\n"
+			"  assert(marker, message)\n"
+			"end\n";
 		const auto ScriptAsset = AssetOperations::CreateAssetFromBytes(CreatedProject->GetAssetRegistry(), CreatedProject->GetRootPath(),
 			std::as_bytes(std::span(TimeScaleScript.data(), TimeScaleScript.size())), "Assets/Scripts/time_scale.lua");
 		PF_CHECK(Tests, ScriptAsset.has_value());
 		if (!ScriptAsset) return;
-		const std::string TeardownScript = "function OnDestroy()\n"
-			"  local marker, message = scene.create_entity('candidate teardown marker')\n"
+		const std::string TeardownScript = "function OnCreate()\n"
+			"  local marker, message = scene.create_entity('rejected candidate initialization marker')\n"
+			"  assert(marker, message)\n"
+			"end\n"
+			"function OnDestroy()\n"
+			"  local marker, message = scene.create_entity('rejected candidate teardown marker')\n"
 			"  assert(marker, message)\n"
 			"end\n";
 		const auto TeardownScriptAsset = AssetOperations::CreateAssetFromBytes(CreatedProject->GetAssetRegistry(), CreatedProject->GetRootPath(),
 			std::as_bytes(std::span(TeardownScript.data(), TeardownScript.size())), "Assets/Scripts/teardown.lua");
 		PF_CHECK(Tests, TeardownScriptAsset.has_value());
 		if (!TeardownScriptAsset) return;
+		const std::string RetryScript = "function OnCreate()\n"
+			"  local marker, message = scene.create_entity('retry candidate initialization marker')\n"
+			"  assert(marker, message)\n"
+			"end\n"
+			"function OnDestroy()\n"
+			"  local marker, message = scene.create_entity('retry candidate teardown marker')\n"
+			"  assert(marker, message)\n"
+			"end\n";
+		const auto RetryScriptAsset = AssetOperations::CreateAssetFromBytes(CreatedProject->GetAssetRegistry(), CreatedProject->GetRootPath(),
+			std::as_bytes(std::span(RetryScript.data(), RetryScript.size())), "Assets/Scripts/retry_teardown.lua");
+		PF_CHECK(Tests, RetryScriptAsset.has_value());
+		if (!RetryScriptAsset) return;
 
 		Scene StartupScene;
 		auto StartupEntity = StartupScene.CreateEntity("Startup Entity");
@@ -87,17 +146,31 @@ namespace
 			CreatedProject->GetAssetRegistry(), CreatedProject->GetRootPath(), "Assets/Second.scene", SecondScene);
 		PF_CHECK(Tests, SecondAsset.has_value());
 		if (!SecondAsset) return;
+		Scene RetryScene;
+		auto RetryEntity = RetryScene.CreateEntity("Retry Entity");
+		PF_CHECK(Tests, RetryEntity.has_value());
+		if (!RetryEntity) return;
+		PF_CHECK(Tests, RetryEntity->SetScript(ScriptComponent{ RetryScriptAsset->ID }).has_value());
+		auto RetryAsset = SceneAssetService::Create(
+			CreatedProject->GetAssetRegistry(), CreatedProject->GetRootPath(), "Assets/Retry.scene", RetryScene);
+		PF_CHECK(Tests, RetryAsset.has_value());
+		if (!RetryAsset) return;
+		const auto StartupBytes = ReadFile(Root / "Assets/Startup.scene");
+		const auto SecondBytes = ReadFile(Root / "Assets/Second.scene");
+		const auto RetryBytes = ReadFile(Root / "Assets/Retry.scene");
 		CreatedProject.reset();
 
 		SceneRuntimeDesc RuntimeDescription;
 		RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
 		int PauseAttempts = 0;
+		ScriptObservationBuffer ScriptObservations;
 		SceneRuntimeServices RuntimeServices;
 		RuntimeServices.AudioPauseGuard = [&PauseAttempts](bool Paused) -> std::optional<std::string>
 		{
 			if (Paused && ++PauseAttempts == 2) return "deterministic candidate activation failure";
 			return std::nullopt;
 		};
+		RuntimeServices.ScriptObserver = { .Context = &ScriptObservations, .Observe = StoreScriptObservation };
 		PlayerSession Session(ProjectFile, RuntimeDescription, RuntimeServices);
 		PF_CHECK(Tests, !Session.IsRunning());
 		const auto TransitionBeforeStart = Session.RequestSceneTransition(SecondAsset->ID);
@@ -135,23 +208,54 @@ namespace
 		PF_CHECK(Tests, Session.IsPaused());
 		const auto FailedCandidateAdvance = Session.Advance(Timestep(0.1));
 		PF_CHECK(Tests, !FailedCandidateAdvance && FailedCandidateAdvance.error().Code == PlayerSessionErrorCode::RuntimeOperationFailed);
+		PF_CHECK(Tests, !FailedCandidateAdvance &&
+			FailedCandidateAdvance.error().Message.find("deterministic candidate activation failure") != std::string::npos);
+		const auto RejectedEntity = SecondEntity->GetUUID();
+		const auto RejectedAttached = CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::ScriptAttached,
+			TeardownScriptAsset->ID, RejectedEntity);
+		const auto RejectedCreateEntered = CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackEntered,
+			TeardownScriptAsset->ID, RejectedEntity, ScriptRuntimeCallback::OnCreate);
+		const auto RejectedCreateCompleted = CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackCompleted,
+			TeardownScriptAsset->ID, RejectedEntity, ScriptRuntimeCallback::OnCreate);
+		const auto RejectedDestroyEntered = CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackEntered,
+			TeardownScriptAsset->ID, RejectedEntity, ScriptRuntimeCallback::OnDestroy);
+		const auto RejectedDestroyCompleted = CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackCompleted,
+			TeardownScriptAsset->ID, RejectedEntity, ScriptRuntimeCallback::OnDestroy);
+		const auto RejectedDiagnostics = CountScriptObservations(
+			ScriptObservations, ScriptRuntimeObservationKind::Diagnostic, TeardownScriptAsset->ID, RejectedEntity);
+		PF_CHECK(Tests, RejectedAttached == 1);
+		PF_CHECK(Tests, RejectedCreateEntered == 1);
+		PF_CHECK(Tests, RejectedCreateCompleted == 1);
+		PF_CHECK(Tests, RejectedDestroyEntered == 1);
+		PF_CHECK(Tests, RejectedDestroyCompleted == 1);
+		PF_CHECK(Tests, RejectedDiagnostics == 0);
 		PF_CHECK(Tests, Session.GetActiveScene() == OriginalScene);
 		PF_CHECK(Tests, Session.GetActiveSceneAsset() == StartupAsset->ID);
 		PF_CHECK(Tests, Session.IsPaused());
 		PF_CHECK(Tests, Session.Resume().has_value());
 		PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
 		PF_CHECK(Tests, Session.Pause().has_value());
-		PF_CHECK(Tests, Session.RequestSceneTransition(SecondAsset->ID).has_value());
+		PF_CHECK(Tests, Session.RequestSceneTransition(RetryAsset->ID).has_value());
 		const auto PausedAdvance = Session.Advance(Timestep(0.1));
 		PF_CHECK(Tests, PausedAdvance && PausedAdvance->PhysicsSteps == 0);
-		PF_CHECK(Tests, Session.GetActiveSceneAsset() == SecondAsset->ID);
+		PF_CHECK(Tests, Session.GetActiveSceneAsset() == RetryAsset->ID);
 		PF_CHECK(Tests, Session.GetActiveScene() != OriginalScene);
-		PF_CHECK(Tests, Session.GetActiveScene() && Session.GetActiveScene()->GetEntityCount() == 1);
+		PF_CHECK(Tests, Session.GetActiveScene() && Session.GetActiveScene()->GetEntityCount() == 2);
+		const auto RetryEntityID = RetryEntity->GetUUID();
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::ScriptAttached,
+			RetryScriptAsset->ID, RetryEntityID) == 1);
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackCompleted,
+			RetryScriptAsset->ID, RetryEntityID, ScriptRuntimeCallback::OnCreate) == 1);
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackEntered,
+			ScriptAsset->ID, StartupEntity->GetUUID(), ScriptRuntimeCallback::OnDestroy) == 1);
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackCompleted,
+			ScriptAsset->ID, StartupEntity->GetUUID(), ScriptRuntimeCallback::OnDestroy) == 1);
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::Diagnostic,
+			ScriptAsset->ID, StartupEntity->GetUUID()) == 0);
 		PF_CHECK(Tests, Session.Resume().has_value());
 		PF_CHECK(Tests, !Session.IsPaused());
 		PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
 
-		const std::string StartupBytes = ReadFile(Root / "Assets/Startup.scene");
 		PF_CHECK(Tests, !StartupBytes.empty());
 		PF_CHECK(Tests, Session.GetActiveScene()->CreateEntity("Runtime Only Mutation").has_value());
 		Session.Stop();
@@ -159,6 +263,25 @@ namespace
 		PF_CHECK(Tests, !Session.GetActiveScene());
 		PF_CHECK(Tests, !Session.GetActiveSceneAsset());
 		PF_CHECK(Tests, ReadFile(Root / "Assets/Startup.scene") == StartupBytes);
+		PF_CHECK(Tests, ReadFile(Root / "Assets/Second.scene") == SecondBytes);
+		PF_CHECK(Tests, ReadFile(Root / "Assets/Retry.scene") == RetryBytes);
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackEntered,
+			RetryScriptAsset->ID, RetryEntityID, ScriptRuntimeCallback::OnDestroy) == 1);
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackCompleted,
+			RetryScriptAsset->ID, RetryEntityID, ScriptRuntimeCallback::OnDestroy) == 1);
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::Diagnostic,
+			RetryScriptAsset->ID, RetryEntityID) == 0);
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackEntered,
+			TeardownScriptAsset->ID, RejectedEntity, ScriptRuntimeCallback::OnDestroy) == 1);
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackCompleted,
+			TeardownScriptAsset->ID, RejectedEntity, ScriptRuntimeCallback::OnDestroy) == 1);
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::Diagnostic,
+			TeardownScriptAsset->ID, RejectedEntity) == 0);
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackEntered,
+			ScriptAsset->ID, StartupEntity->GetUUID(), ScriptRuntimeCallback::OnDestroy) == 1);
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackCompleted,
+			ScriptAsset->ID, StartupEntity->GetUUID(), ScriptRuntimeCallback::OnDestroy) == 1);
+		PF_CHECK(Tests, !ScriptObservations.Overflowed);
 		const auto AdvanceAfterStop = Session.Advance(Timestep(0.01));
 		PF_CHECK(Tests, !AdvanceAfterStop && AdvanceAfterStop.error().Code == PlayerSessionErrorCode::NotStarted);
 
