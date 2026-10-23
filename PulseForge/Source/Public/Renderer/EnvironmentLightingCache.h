@@ -22,6 +22,8 @@
 
 namespace PulseForge
 {
+	class DiagnosticRecorder;
+
 	struct EnvironmentLightingCacheError
 	{
 		AssetID Asset;
@@ -29,10 +31,15 @@ namespace PulseForge
 	};
 
 	// CPU decoding/preprocessing is asynchronous; GPU upload and texture ownership stay on the renderer thread.
+	// The optional diagnostics recorder must outlive this cache and is only used from synchronous renderer-thread calls.
 	class EnvironmentLightingCache final
 	{
 	public:
-		EnvironmentLightingCache(RenderDevice& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry);
+		EnvironmentLightingCache(
+			RenderDevice& Runtime,
+			std::filesystem::path ProjectRoot,
+			const AssetRegistry& Registry,
+			DiagnosticRecorder* Diagnostics = nullptr);
 		~EnvironmentLightingCache();
 		EnvironmentLightingCache(const EnvironmentLightingCache&) = delete;
 		EnvironmentLightingCache& operator=(const EnvironmentLightingCache&) = delete;
@@ -58,6 +65,13 @@ namespace PulseForge
 			std::optional<EnvironmentLightingData> CpuData;
 			std::optional<EnvironmentLightingTextures> GpuTextures;
 			std::string Error;
+			uint64_t DiagnosticSessionId = 0;
+		uint64_t ImportStartTimestampNanoseconds = 0;
+		uint64_t ImportEndTimestampNanoseconds = 0;
+		uint64_t DerivedCacheReadStartTimestampNanoseconds = 0;
+		uint64_t DerivedCacheReadEndTimestampNanoseconds = 0;
+		uint64_t PreprocessStartTimestampNanoseconds = 0;
+		uint64_t PreprocessEndTimestampNanoseconds = 0;
 		};
 		struct Request
 		{
@@ -74,6 +88,9 @@ namespace PulseForge
 		RenderDevice& m_Runtime;
 		std::filesystem::path m_ProjectRoot;
 		const AssetRegistry& m_Registry;
+		DiagnosticRecorder* m_Diagnostics = nullptr;
+		uint64_t m_CacheHits = 0;
+		uint64_t m_CacheMisses = 0;
 		std::unordered_map<AssetID, std::shared_ptr<Entry>, UUIDHash> m_Entries;
 		std::deque<Request> m_Requests;
 		std::mutex m_QueueMutex;

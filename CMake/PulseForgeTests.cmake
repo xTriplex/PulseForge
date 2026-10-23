@@ -233,6 +233,7 @@ if(BUILD_TESTING)
 		add_executable(PulseForgeEditorWorkspacePresentationTests
 			Tests/EditorWorkspacePresentationTestMain.cpp
 			Tests/EditorWorkspacePresentationTests.cpp
+			Tests/EditorPerformanceTraceTests.cpp
 		)
 		target_include_directories(PulseForgeEditorWorkspacePresentationTests PRIVATE
 			Tests

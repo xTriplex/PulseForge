@@ -7,26 +7,36 @@
 	},
 	"configurePresets": [
 		{
-			"name": "windows-editor",
-			"displayName": "Windows Editor (default configuration)",
+			"name": "Windows-Editor",
+			"displayName": "Windows Editor",
 			"generator": "Visual Studio 17 2022",
 			"architecture": "x64",
-			"binaryDir": "${sourceDir}/Build/CMakePresets/windows-editor"
+			"binaryDir": "${sourceDir}/Build/CMakePresets/windows-editor",
+			"vendor": {
+				"microsoft.com/VisualStudioSettings/CMake/1.0": {
+					"hostOS": [ "Windows" ]
+				}
+			}
 		},
 		{
-			"name": "windows-core",
-			"displayName": "Windows Core and CPU tests",
-			"inherits": "windows-editor",
+			"name": "Windows-Core",
+			"displayName": "Windows Core and CPU Tests",
+			"inherits": "Windows-Editor",
 			"binaryDir": "${sourceDir}/Build/CMakePresets/windows-core",
 			"cacheVariables": {
 				"PULSEFORGE_BUILD_CORE_ONLY": "ON",
 				"PULSEFORGE_BUILD_EDITOR": "OFF",
 				"BUILD_TESTING": "ON"
+			},
+			"vendor": {
+				"microsoft.com/VisualStudioSettings/CMake/1.0": {
+					"hostOS": [ "Windows" ]
+				}
 			}
 		},
 		{
-			"name": "linux-core",
-			"displayName": "Linux Core and CPU tests",
+			"name": "Linux-Core",
+			"displayName": "Linux Core and CPU Tests",
 			"generator": "Unix Makefiles",
 			"binaryDir": "${sourceDir}/Build/CMakePresets/linux-core",
 			"cacheVariables": {
@@ -34,30 +44,78 @@
 				"PULSEFORGE_BUILD_CORE_ONLY": "ON",
 				"PULSEFORGE_BUILD_EDITOR": "OFF",
 				"BUILD_TESTING": "ON"
+			},
+			"vendor": {
+				"microsoft.com/VisualStudioSettings/CMake/1.0": {
+					"hostOS": [ "Linux" ]
+				}
 			}
 		}
 	],
 	"buildPresets": [
 		{
-			"name": "windows-core-debug",
-			"configurePreset": "windows-core",
+			"name": "Windows-Editor-Debug",
+			"displayName": "Windows Editor Debug",
+			"configurePreset": "Windows-Editor",
 			"configuration": "Debug"
 		},
 		{
-			"name": "linux-core-debug",
-			"configurePreset": "linux-core"
+			"name": "Windows-Editor-Release",
+			"displayName": "Windows Editor Release",
+			"configurePreset": "Windows-Editor",
+			"configuration": "Release"
+		},
+		{
+			"name": "Windows-Editor-Dist",
+			"displayName": "Windows Editor Dist",
+			"configurePreset": "Windows-Editor",
+			"configuration": "Dist"
+		},
+		{
+			"name": "Windows-Core-Debug",
+			"displayName": "Windows Core Debug",
+			"configurePreset": "Windows-Core",
+			"configuration": "Debug"
+		},
+		{
+			"name": "Linux-Core-Debug",
+			"displayName": "Linux Core Debug",
+			"configurePreset": "Linux-Core"
 		}
 	],
 	"testPresets": [
 		{
-			"name": "windows-core-debug",
-			"configurePreset": "windows-core",
+			"name": "Windows-Editor-Debug",
+			"displayName": "Windows Editor Debug",
+			"configurePreset": "Windows-Editor",
 			"configuration": "Debug",
 			"output": { "outputOnFailure": true }
 		},
 		{
-			"name": "linux-core-debug",
-			"configurePreset": "linux-core",
+			"name": "Windows-Editor-Release",
+			"displayName": "Windows Editor Release",
+			"configurePreset": "Windows-Editor",
+			"configuration": "Release",
+			"output": { "outputOnFailure": true }
+		},
+		{
+			"name": "Windows-Editor-Dist",
+			"displayName": "Windows Editor Dist",
+			"configurePreset": "Windows-Editor",
+			"configuration": "Dist",
+			"output": { "outputOnFailure": true }
+		},
+		{
+			"name": "Windows-Core-Debug",
+			"displayName": "Windows Core Debug",
+			"configurePreset": "Windows-Core",
+			"configuration": "Debug",
+			"output": { "outputOnFailure": true }
+		},
+		{
+			"name": "Linux-Core-Debug",
+			"displayName": "Linux Core Debug",
+			"configurePreset": "Linux-Core",
 			"output": { "outputOnFailure": true }
 		}
 	]

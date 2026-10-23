@@ -5,11 +5,14 @@
 #include "Renderer/Graphics.h"
 #include "Renderer/RenderTarget.h"
 #include "Renderer/DepthCubemap.h"
+#include "Renderer/RenderDevice.h"
 
 #include <memory>
 #include <expected>
 #include <string>
+#include <string_view>
 #include <cstdint>
+#include <span>
 #include "Renderer/RendererAPI.h"
 
 namespace PulseForge
@@ -22,6 +25,33 @@ namespace PulseForge
 		virtual ~RendererBackend() = default;
 
 		[[nodiscard]] virtual OutputColorEncoding GetOutputColorEncoding() const noexcept = 0;
+		[[nodiscard]] virtual std::string_view GetRendererHardwareName() const noexcept { return "not reported"; }
+		[[nodiscard]] virtual bool SetGpuFrameTimingEnabled(bool Enabled, uint64_t SessionId = 0) noexcept
+		{
+			(void)Enabled;
+			(void)SessionId;
+			return false;
+		}
+		[[nodiscard]] virtual std::string_view GetGpuFrameTimingUnavailableReason() const noexcept
+		{
+			return "GPU frame timing is unavailable on this renderer.";
+		}
+		[[nodiscard]] virtual bool IsGpuFrameTimingEnabled() const noexcept { return false; }
+		[[nodiscard]] virtual bool IsGpuFrameTimingSupported() const noexcept { return false; }
+		[[nodiscard]] virtual bool HasGpuFrameTimingFailed() const noexcept { return false; }
+		[[nodiscard]] virtual size_t ReadCompletedGpuFrameTimings(std::span<GpuFrameTiming> Destination) noexcept
+		{
+			(void)Destination;
+			return 0;
+		}
+		[[nodiscard]] virtual uint64_t GetCompletedGpuFrameTimingEvictedCount() const noexcept { return 0; }
+		[[nodiscard]] virtual uint64_t GetGpuFrameTimingInvalidResultCount() const noexcept { return 0; }
+		virtual void CollectCompletedGpuFrameTimings() noexcept {}
+		[[nodiscard]] virtual GpuFrameTimingCollectionState GetGpuFrameTimingCollectionState(uint64_t SessionId) const noexcept
+		{
+			(void)SessionId;
+			return {};
+		}
 		virtual bool BeginFrame() = 0;
 		virtual void EndFrame() = 0;
 		[[nodiscard]] virtual std::expected<uint64_t, std::string> CreatePlatformPresentationTarget(void* NativeWindow)

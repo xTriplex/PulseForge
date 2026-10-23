@@ -69,6 +69,7 @@ namespace PulseForgeEditor
 		EditorCommandContext FocusedCommandTarget;
 		EditorCommandContext LevelDocumentTarget;
 		std::array<bool, static_cast<size_t>(EditorPanel::Count)> PanelVisibility{};
+	bool PerformancePanelVisible = false;
 		EditorDocumentOpenPreference OpeningPreference = EditorDocumentOpenPreference::NewNativeWindow;
 		std::string UndoLabel = "Undo";
 		std::string RedoLabel = "Redo";
@@ -95,6 +96,7 @@ namespace PulseForgeEditor
 	{
 		std::optional<EditorMainMenuAction> Action;
 		bool FocusMainDocumentHost = false;
+	bool TogglePerformancePanel = false;
 	};
 
 	class EditorMainMenuPanel final

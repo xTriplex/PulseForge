@@ -228,6 +228,9 @@ namespace PulseForgeEditor::Detail
 		StopRuntime
 	};
 
+	[[nodiscard]] bool IsViewportResizeObserved(
+		int InitialWidth, int InitialHeight, int ActualWidth, int ActualHeight, uint64_t FramesBefore, uint64_t FramesAfter) noexcept;
+
 	class EditorRuntimePlayStopCoordinator final
 	{
 	public:

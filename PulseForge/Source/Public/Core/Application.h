@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Core.h"
+#include "Core/Diagnostics.h"
 #include "Window/Window.h"
 #include "Core/LayerStack.h"
 #include "Events/ApplicationEvent.h"
@@ -38,6 +39,21 @@ namespace PulseForge
 		[[nodiscard]] bool DestroyPlatformPresentationTarget(uint64_t TargetID);
 		[[nodiscard]] bool HasPlatformPresentationTargets() const noexcept;
 		void SetExternalPlatformPresentationTargetCount(uint32_t Count) noexcept;
+		[[nodiscard]] bool StartDiagnosticsCapture() noexcept;
+		void StopDiagnosticsCapture() noexcept;
+		[[nodiscard]] DiagnosticSnapshot GetDiagnosticsSnapshot() const;
+		[[nodiscard]] DiagnosticCaptureStatus GetDiagnosticsCaptureStatus() const noexcept;
+		[[nodiscard]] bool IsDiagnosticsCaptureEnabled() const noexcept;
+		[[nodiscard]] bool IsGpuFrameTimingSupported() const noexcept;
+		[[nodiscard]] bool HasGpuFrameTimingFailed() const noexcept;
+		[[nodiscard]] bool IsGpuFrameTimingEnabled() const noexcept;
+		[[nodiscard]] std::string_view GetGpuFrameTimingUnavailableReason() const noexcept;
+		[[nodiscard]] std::string_view GetRendererHardwareName() const noexcept override;
+		[[nodiscard]] DiagnosticRecorder* GetDiagnosticsRecorder() noexcept
+		{
+			return m_Diagnostics.get();
+		}
+		[[nodiscard]] DiagnosticRecorder* GetDiagnosticRecorder() noexcept override { return m_Diagnostics.get(); }
 #if defined(PF_DEBUG)
 		[[nodiscard]] bool InjectNextPlatformAcquireOutOfDateForTesting(uint64_t TargetID) noexcept;
 		[[nodiscard]] bool InjectNextPlatformImageAllocationFailureForTesting() noexcept;
@@ -52,6 +68,12 @@ namespace PulseForge
 		RendererAPI GetRendererAPI() const { return m_RendererAPI; }
 		[[nodiscard]] std::pair<unsigned int, unsigned int> GetOutputFramebufferSize() const noexcept override;
 		[[nodiscard]] OutputColorEncoding GetOutputColorEncoding() const noexcept override;
+		[[nodiscard]] bool SetGpuFrameTimingEnabled(bool Enabled, uint64_t SessionId = 0) noexcept override;
+		[[nodiscard]] size_t ReadCompletedGpuFrameTimings(std::span<GpuFrameTiming> Destination) noexcept override;
+		[[nodiscard]] uint64_t GetCompletedGpuFrameTimingEvictedCount() const noexcept override;
+		[[nodiscard]] uint64_t GetGpuFrameTimingInvalidResultCount() const noexcept override;
+		void CollectCompletedGpuFrameTimings() noexcept override;
+		[[nodiscard]] GpuFrameTimingCollectionState GetGpuFrameTimingCollectionState(uint64_t SessionId) const noexcept override;
 		// Renderer resources should be released before this Application is destroyed.
 		BufferCreateResult CreateBuffer(const BufferDesc& Description, std::span<const std::byte> InitialData = {}) override;
 		// Records an aligned constant-buffer or dynamic geometry-buffer update on the active renderer frame.
@@ -95,6 +117,7 @@ namespace PulseForge
 		bool m_MainFrameActive = false;
 		LayerStack m_LayerStack;
 		Input m_Input;
+		std::unique_ptr<DiagnosticRecorder> m_Diagnostics;
 		RendererAPI m_RendererAPI;
 		static Application* s_Instance;
 	};

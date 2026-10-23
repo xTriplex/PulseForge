@@ -15,3 +15,5 @@
 #include <chrono>
 #include <memory>
 #include <vector>
+
+void RunDiagnosticsRecorderTests(TestRunner& Tests);
