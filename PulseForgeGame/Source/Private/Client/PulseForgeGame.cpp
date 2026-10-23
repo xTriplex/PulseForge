@@ -5,119 +5,150 @@
 #include "Core/EntryPoint.h"
 #include "Core/Log.h"
 #include "Core/PlatformServices.h"
-#include "Events/Event.h"
 #include "Renderer/SceneRenderer.h"
-#include "Runtime/SceneRuntime.h"
+#include "Runtime/PlayerSession.h"
 #include "Scene/Scene.h"
 
 #include <cstdlib>
-#include <expected>
 #include <filesystem>
 #include <memory>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace
 {
-	struct SampleBundlePaths
+	std::string PathToUtf8(const std::filesystem::path& Path)
 	{
-		std::filesystem::path ProjectRoot;
-		std::filesystem::path ProjectFile;
-		std::filesystem::path CompiledShaderDirectory;
-	};
+		const std::u8string Encoded = Path.u8string();
+		return { reinterpret_cast<const char*>(Encoded.data()), Encoded.size() };
+	}
 
-	std::expected<SampleBundlePaths, std::string> ResolveSampleBundlePaths()
+	std::filesystem::path ResolveCompiledShaderDirectory()
 	{
 		auto ResourceDirectory = PulseForge::Platform::GetResourceDirectory();
 		if (!ResourceDirectory)
-			return std::unexpected("Could not locate the sample resource directory: " + ResourceDirectory.error().Message);
-		const std::filesystem::path BundleRoot = *ResourceDirectory;
-		if (BundleRoot.empty() || !BundleRoot.is_absolute())
-			return std::unexpected("Could not resolve an absolute sample bundle directory from the executable path");
+			throw std::runtime_error("Could not locate the player resource directory: " + ResourceDirectory.error().Message);
+		if (ResourceDirectory->empty() || !ResourceDirectory->is_absolute())
+			throw std::runtime_error("Could not resolve an absolute player resource directory from the executable path");
+		return *ResourceDirectory / PF_SAMPLE_SHADER_DIRECTORY;
+	}
 
-		return SampleBundlePaths{ .ProjectRoot = BundleRoot,
-			.ProjectFile = BundleRoot / "PulseForgeGame.pfproj",
-			.CompiledShaderDirectory = BundleRoot / PF_SAMPLE_SHADER_DIRECTORY };
+	void ValidateLaunchProject(const PulseForgeGame::PlayerLaunchConfiguration& Configuration)
+	{
+		auto ProjectResult = PulseForge::Project::Open(Configuration.ProjectFile);
+		if (!ProjectResult) throw std::runtime_error("Could not open player project: " + ProjectResult.error().Message);
+
+		const auto StartupScene = Configuration.StartupScene ? Configuration.StartupScene : ProjectResult->GetDescription().StartScene;
+		if (!StartupScene) throw std::runtime_error("The player project has no startup scene; specify --start-scene <uuid>.");
+
+		PulseForge::Scene Scene;
+		if (auto Loaded =
+				PulseForge::SceneAssetService::Load(*StartupScene, ProjectResult->GetRootPath(), ProjectResult->GetAssetRegistry(), Scene);
+			!Loaded)
+			throw std::runtime_error("Could not load player startup scene: " + Loaded.error().Message);
+	}
+
+	PulseForge::RendererAPI ResolveRendererAPI(const PulseForgeGame::PlayerLaunchConfiguration& Configuration)
+	{
+		if (Configuration.Renderer) return *Configuration.Renderer;
+#if defined(PF_SAMPLE_RENDERER_OPENGL)
+		return PulseForge::RendererAPI::OpenGL;
+#else
+		return PulseForge::RendererAPI::Vulkan;
+#endif
+	}
+
+	PulseForgeGame::PlayerLaunchConfiguration ParseArguments(int ArgumentCount, char** Arguments)
+	{
+		std::vector<std::string> DefaultArguments;
+		std::vector<std::string_view> ParsedArguments;
+		if (ArgumentCount <= 1)
+		{
+			auto ResourceDirectory = PulseForge::Platform::GetResourceDirectory();
+			if (!ResourceDirectory)
+				throw std::runtime_error(
+					"No --project was provided and the bundled sample path is unavailable: " + ResourceDirectory.error().Message);
+			DefaultArguments = { "--project", PathToUtf8(*ResourceDirectory / "PulseForgeGame.pfproj") };
+			for (const std::string& Argument : DefaultArguments)
+				ParsedArguments.push_back(Argument);
+		}
+		else
+		{
+			ParsedArguments.reserve(static_cast<size_t>(ArgumentCount - 1));
+			for (int Index = 1; Index < ArgumentCount; ++Index)
+				ParsedArguments.emplace_back(Arguments[Index]);
+		}
+
+		std::error_code Error;
+		const std::filesystem::path WorkingDirectory = std::filesystem::current_path(Error);
+		if (Error) throw std::runtime_error("Could not resolve the player invocation directory: " + Error.message());
+		auto Configuration = PulseForgeGame::ParsePlayerLaunchConfiguration(ParsedArguments, WorkingDirectory);
+		if (!Configuration) throw std::runtime_error(Configuration.error().Message);
+		ValidateLaunchProject(*Configuration);
+		return std::move(*Configuration);
 	}
 } // namespace
 
-class ExampleLayer : public PulseForge::Layer
+class ExampleLayer final : public PulseForge::Layer
 {
 public:
-	ExampleLayer()
-		: Layer("Example")
+	explicit ExampleLayer(PulseForgeGame::PlayerLaunchConfiguration Configuration)
+		: Layer("Player"), m_Configuration(std::move(Configuration))
 	{
 #if defined(PF_DEBUG)
 		if (const char* Smoke = std::getenv("PULSEFORGE_PLAYER_SMOKE_EXIT_AFTER_RENDER"))
 			m_PlayerSmokeExitAfterRender = std::string_view(Smoke) == "1";
 #endif
+		PulseForge::SceneRuntimeServices Services{ .InputState = &PulseForge::Application::Get().GetInput(),
+			.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder() };
+		m_Session = std::make_unique<PulseForge::PlayerSession>(m_Configuration.ProjectFile, PulseForge::SceneRuntimeDesc{}, Services);
+		if (auto Started = m_Session->Start(m_Configuration.StartupScene); !Started)
+			throw std::runtime_error("Could not start player session: " + Started.error().Message);
+
 		if (PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan)
 		{
-			auto BundlePaths = ResolveSampleBundlePaths();
-			if (!BundlePaths) throw std::runtime_error(BundlePaths.error());
-
-			auto OpenedProject = PulseForge::Project::Open(BundlePaths->ProjectFile);
-			if (!OpenedProject)
-				throw std::runtime_error("Could not open sample project: " + OpenedProject.error().Message);
-			m_Project.emplace(std::move(*OpenedProject));
-			if (!m_Project->GetDescription().StartScene)
-				throw std::runtime_error("Sample project does not specify a startup scene asset");
-			LoadValidationScene(BundlePaths->ProjectRoot, m_Project->GetAssetRegistry(), *m_Project->GetDescription().StartScene);
-			m_SceneRuntime = std::make_unique<PulseForge::SceneRuntime>(
-				*m_Project,
-				PulseForge::SceneRuntimeDesc{},
-				PulseForge::SceneRuntimeServices{
-					.InputState = &PulseForge::Application::Get().GetInput(),
-					.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder() });
-			if (auto StartResult = m_SceneRuntime->Start(m_Scene); !StartResult)
-				throw std::runtime_error("Could not start sample scene runtime: " + StartResult.error().Message);
-			auto CreatedSceneRenderer =
-				PulseForge::SceneRenderer::Create(PulseForge::Application::Get(), *m_Project, BundlePaths->CompiledShaderDirectory);
-			if (!CreatedSceneRenderer)
-				throw std::runtime_error(CreatedSceneRenderer.error().Message);
-			m_SceneRenderer = std::move(CreatedSceneRenderer.value());
+			auto CreatedRenderer = PulseForge::SceneRenderer::Create(
+				PulseForge::Application::Get(), *m_Session->GetProject(), ResolveCompiledShaderDirectory());
+			if (!CreatedRenderer) throw std::runtime_error(CreatedRenderer.error().Message);
+			m_SceneRenderer = std::move(*CreatedRenderer);
 		}
 	}
 
 	void OnUpdate(PulseForge::Timestep DeltaTime) override
 	{
-		if (m_SceneRuntime)
+		if (m_Session)
 		{
-			const auto RuntimeResult = m_SceneRuntime->Advance(m_Scene, DeltaTime);
-			if (!RuntimeResult)
+			const auto Advanced = m_Session->Advance(DeltaTime);
+			if (!Advanced)
 			{
 				if (!m_LoggedRuntimeFailure)
 				{
-					PF_ERROR("Could not advance the sample scene runtime: {0}", RuntimeResult.error().Message);
+					PF_ERROR("Could not advance player session: {0}", Advanced.error().Message);
 					m_LoggedRuntimeFailure = true;
 				}
 			}
 			else
 				m_LoggedRuntimeFailure = false;
-			if (RuntimeResult && m_PlayerSmokeExitAfterRender && !m_PlayerRuntimeSmokeLogged && RuntimeResult->PhysicsSteps > 0)
+			if (Advanced && m_PlayerSmokeExitAfterRender && !m_PlayerRuntimeSmokeLogged && Advanced->PhysicsSteps > 0)
 			{
 				m_PlayerRuntimeSmokeLogged = true;
-				PF_INFO("PULSEFORGE_PLAYER_RUNTIME_SMOKE=PASS; scripting advanced; physics_steps={}; audio advanced",
-					RuntimeResult->PhysicsSteps);
+				PF_INFO(
+					"PULSEFORGE_PLAYER_RUNTIME_SMOKE=PASS; scripting advanced; physics_steps={}; audio advanced", Advanced->PhysicsSteps);
 			}
 		}
-		if (!m_SceneRenderer)
-			return;
+		if (!m_SceneRenderer || !m_Session || !m_Session->GetActiveScene()) return;
 
 		const auto [FramebufferWidth, FramebufferHeight] = PulseForge::Application::Get().GetWindow().GetFramebufferSize();
-		if (FramebufferWidth == 0 || FramebufferHeight == 0)
-			return;
-
+		if (FramebufferWidth == 0 || FramebufferHeight == 0) return;
 		const auto Prepared = m_SceneRenderer->PrepareScene(
-			m_Scene,
-			static_cast<float>(FramebufferWidth) / static_cast<float>(FramebufferHeight));
+			*m_Session->GetActiveScene(), static_cast<float>(FramebufferWidth) / static_cast<float>(FramebufferHeight));
 		if (!Prepared)
 		{
 			if (!m_LoggedPrepareFailure)
 			{
-				PF_ERROR("Could not prepare the sample scene renderer: {0}", Prepared.error().Message);
+				PF_ERROR("Could not prepare the player scene renderer: {0}", Prepared.error().Message);
 				m_LoggedPrepareFailure = true;
 			}
 			return;
@@ -127,14 +158,13 @@ public:
 
 	void OnRender() override
 	{
-		if (!m_SceneRenderer)
-			return;
+		if (!m_SceneRenderer) return;
 		const auto Rendered = m_SceneRenderer->RenderPreparedSceneToOutput();
 		if (!Rendered)
 		{
 			if (!m_LoggedRenderFailure)
 			{
-				PF_ERROR("Could not render the prepared sample scene: {0}", Rendered.error().Message);
+				PF_ERROR("Could not render the prepared player scene: {0}", Rendered.error().Message);
 				m_LoggedRenderFailure = true;
 			}
 			return;
@@ -145,7 +175,7 @@ public:
 			if (!m_LoggedSceneDraw)
 			{
 				m_LoggedSceneDraw = true;
-				PF_INFO("Submitted {0} indexed mesh instance(s) from the prepared scene", Rendered->GeometryDrawCount);
+				PF_INFO("Submitted {0} indexed mesh instance(s) from the player scene", Rendered->GeometryDrawCount);
 			}
 			if (m_PlayerSmokeExitAfterRender && m_PlayerRuntimeSmokeLogged && !m_PlayerSmokeShutdownRequested)
 			{
@@ -162,27 +192,10 @@ public:
 		if (m_PlayerSmokeShutdownRequested) PF_INFO("PULSEFORGE_PLAYER_RELOCATION_SMOKE_SHUTDOWN=PASS");
 	}
 
-	void OnEvent(PulseForge::Event& Event) override
-	{
-		PF_TRACE("{0}", Event.ToString());
-	}
-
 private:
-	void LoadValidationScene(
-		const std::filesystem::path& ProjectRoot,
-		const PulseForge::AssetRegistry& Registry,
-		const PulseForge::AssetID& SceneAsset)
-	{
-		if (auto LoadResult = PulseForge::SceneAssetService::Load(SceneAsset, ProjectRoot, Registry, m_Scene);
-			!LoadResult)
-			throw std::runtime_error("Could not load validation scene: " + LoadResult.error().Message);
-
-	}
-
-	PulseForge::Scene m_Scene;
-	std::optional<PulseForge::Project> m_Project;
+	PulseForgeGame::PlayerLaunchConfiguration m_Configuration;
+	std::unique_ptr<PulseForge::PlayerSession> m_Session;
 	std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
-	std::unique_ptr<PulseForge::SceneRuntime> m_SceneRuntime;
 	bool m_LoggedPrepareFailure = false;
 	bool m_LoggedRenderFailure = false;
 	bool m_LoggedRuntimeFailure = false;
@@ -192,20 +205,16 @@ private:
 	bool m_PlayerRuntimeSmokeLogged = false;
 };
 
-PulseForgeGameApp::PulseForgeGameApp()
-#if defined(PF_SAMPLE_RENDERER_OPENGL)
-	: Application(PulseForge::RendererAPI::OpenGL)
-#else
-	: Application()
-#endif
-
+PulseForgeGameApp::PulseForgeGameApp(PulseForgeGame::PlayerLaunchConfiguration Configuration)
+	: Application(ResolveRendererAPI(Configuration),
+		  PulseForge::WindowProps("PulseForge Player", Configuration.WindowWidth.value_or(1280), Configuration.WindowHeight.value_or(720)))
 {
-	PF_INFO("Hello, PulseForge!");
-
-	PushLayer(std::make_unique<ExampleLayer>());
+	if (Configuration.DiagnosticsEnabled && !StartDiagnosticsCapture())
+		throw std::runtime_error("Could not start the requested bounded diagnostics capture.");
+	PushLayer(std::make_unique<ExampleLayer>(std::move(Configuration)));
 }
 
-std::unique_ptr<PulseForge::Application> PulseForge::CreateApplication()
+std::unique_ptr<PulseForge::Application> PulseForge::CreateApplication(int ArgumentCount, char** Arguments)
 {
-	return std::make_unique<PulseForgeGameApp>();
+	return std::make_unique<PulseForgeGameApp>(ParseArguments(ArgumentCount, Arguments));
 }

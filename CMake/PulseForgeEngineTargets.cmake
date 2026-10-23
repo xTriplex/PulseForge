@@ -116,7 +116,10 @@ target_link_libraries(PulseForgeScripting
 	PUBLIC PulseForgeAssetCatalog
 	PRIVATE PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeCore PulseForgeLua spdlog::spdlog
 )
-add_library(PulseForgeRuntime STATIC PulseForge/Source/Private/Runtime/SceneRuntime.cpp)
+add_library(PulseForgeRuntime STATIC
+	PulseForge/Source/Private/Runtime/SceneRuntime.cpp
+	PulseForge/Source/Private/Runtime/PlayerSession.cpp
+)
 target_include_directories(PulseForgeRuntime PUBLIC PulseForge/Source/Public)
 target_link_libraries(PulseForgeRuntime
 	PUBLIC PulseForgeAudio PulseForgePhysics PulseForgeScripting
