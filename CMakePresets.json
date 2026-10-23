@@ -8,10 +8,15 @@
 	"configurePresets": [
 		{
 			"name": "windows-editor",
-			"displayName": "Windows Editor (default configuration)",
+			"displayName": "Windows Editor",
 			"generator": "Visual Studio 17 2022",
 			"architecture": "x64",
-			"binaryDir": "${sourceDir}/Build/CMakePresets/windows-editor"
+			"binaryDir": "${sourceDir}/Build/CMakePresets/windows-editor",
+			"vendor": {
+				"microsoft.com/VisualStudioSettings/CMake/1.0": {
+					"hostOS": [ "Windows" ]
+				}
+			}
 		},
 		{
 			"name": "windows-core",
@@ -22,6 +27,11 @@
 				"PULSEFORGE_BUILD_CORE_ONLY": "ON",
 				"PULSEFORGE_BUILD_EDITOR": "OFF",
 				"BUILD_TESTING": "ON"
+			},
+			"vendor": {
+				"microsoft.com/VisualStudioSettings/CMake/1.0": {
+					"hostOS": [ "Windows" ]
+				}
 			}
 		},
 		{
@@ -34,10 +44,30 @@
 				"PULSEFORGE_BUILD_CORE_ONLY": "ON",
 				"PULSEFORGE_BUILD_EDITOR": "OFF",
 				"BUILD_TESTING": "ON"
+			},
+			"vendor": {
+				"microsoft.com/VisualStudioSettings/CMake/1.0": {
+					"hostOS": [ "Linux" ]
+				}
 			}
 		}
 	],
 	"buildPresets": [
+		{
+			"name": "windows-editor-debug",
+			"configurePreset": "windows-editor",
+			"configuration": "Debug"
+		},
+		{
+			"name": "windows-editor-release",
+			"configurePreset": "windows-editor",
+			"configuration": "Release"
+		},
+		{
+			"name": "windows-editor-dist",
+			"configurePreset": "windows-editor",
+			"configuration": "Dist"
+		},
 		{
 			"name": "windows-core-debug",
 			"configurePreset": "windows-core",
@@ -49,6 +79,24 @@
 		}
 	],
 	"testPresets": [
+		{
+			"name": "windows-editor-debug",
+			"configurePreset": "windows-editor",
+			"configuration": "Debug",
+			"output": { "outputOnFailure": true }
+		},
+		{
+			"name": "windows-editor-release",
+			"configurePreset": "windows-editor",
+			"configuration": "Release",
+			"output": { "outputOnFailure": true }
+		},
+		{
+			"name": "windows-editor-dist",
+			"configurePreset": "windows-editor",
+			"configuration": "Dist",
+			"output": { "outputOnFailure": true }
+		},
 		{
 			"name": "windows-core-debug",
 			"configurePreset": "windows-core",

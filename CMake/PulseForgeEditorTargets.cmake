@@ -125,7 +125,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Icons" "Icons"
 			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/ThirdParty" "ThirdParty"
 	)
-	set_property(TARGET PulseForgeEditor PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeEditor>")
+	pulseforge_apply_visual_studio_debugger_working_directory(PulseForgeEditor)
 endif()
 
 if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
