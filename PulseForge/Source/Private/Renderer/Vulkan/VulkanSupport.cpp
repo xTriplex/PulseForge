@@ -1,6 +1,7 @@
 #include "Renderer/Vulkan/VulkanSupport.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace PulseForge::VulkanSupport
@@ -248,6 +249,28 @@ namespace PulseForge::VulkanSupport
 			return std::nullopt;
 
 		return QueueFamilySelection{ *GraphicsIndex, *PresentIndex };
+	}
+
+	GpuTimestampCapabilityReason EvaluateGpuTimestampCapability(
+		uint32_t TimestampValidBits, float TimestampPeriodNanoseconds) noexcept
+	{
+		if (TimestampValidBits == 0) return GpuTimestampCapabilityReason::QueueDoesNotSupportTimestamps;
+		if (!std::isfinite(TimestampPeriodNanoseconds) || TimestampPeriodNanoseconds <= 0.0f)
+			return GpuTimestampCapabilityReason::InvalidTimestampPeriod;
+		return GpuTimestampCapabilityReason::Supported;
+	}
+
+	const char* ToString(GpuTimestampCapabilityReason Reason) noexcept
+	{
+		switch (Reason)
+		{
+			case GpuTimestampCapabilityReason::Supported: return "supported";
+			case GpuTimestampCapabilityReason::QueueDoesNotSupportTimestamps:
+				return "selected Vulkan graphics queue does not support timestamp queries";
+			case GpuTimestampCapabilityReason::InvalidTimestampPeriod:
+				return "selected Vulkan device reports an invalid timestampPeriod";
+		}
+		return "unknown Vulkan timestamp capability";
 	}
 
 	std::optional<SurfaceFormat> ChooseSurfaceFormat(

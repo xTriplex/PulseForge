@@ -80,7 +80,7 @@ namespace
 		PF_CHECK(Tests, GetDefaultDockRegion(EditorPanel::MaterialDetails) == EditorDefaultDockRegion::Right);
 		PF_CHECK(Tests, EditorPanelDescriptors.size() == static_cast<size_t>(EditorPanel::Count));
 		constexpr std::array<std::string_view, static_cast<size_t>(EditorPanel::Count)> StablePanelNames = { "Scene Viewport", "Hierarchy",
-			"Inspector", "Content Browser", "Console", "Scene", "Material Editor" };
+			"Inspector", "Content Browser", "Console", "Scene", "Material Editor", "Performance" };
 
 		EditorPanelVisibility Panels;
 		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::SceneViewport));
@@ -90,6 +90,7 @@ namespace
 		PF_CHECK(Tests, Panels.IsVisible(EditorPanel::Console));
 		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Scene));
 		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::MaterialDetails));
+		PF_CHECK(Tests, !Panels.IsVisible(EditorPanel::Performance));
 
 		for (size_t Index = 0; Index < EditorPanelDescriptors.size(); ++Index)
 		{
@@ -99,6 +100,8 @@ namespace
 			PF_CHECK(Tests, !Descriptor.WindowName.empty());
 			if (Descriptor.Panel == EditorPanel::MaterialDetails)
 				PF_CHECK(Tests, Descriptor.IsUtilityPanel && !Descriptor.DefaultVisible && Descriptor.SettingsKey == "MaterialEditor");
+			if (Descriptor.Panel == EditorPanel::Performance)
+				PF_CHECK(Tests, Descriptor.IsUtilityPanel && !Descriptor.DefaultVisible && Descriptor.SettingsKey == "Performance");
 			for (size_t OtherIndex = Index + 1; OtherIndex < EditorPanelDescriptors.size(); ++OtherIndex)
 			{
 				PF_CHECK(Tests, Descriptor.SettingsKey != EditorPanelDescriptors[OtherIndex].SettingsKey);

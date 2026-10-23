@@ -14,6 +14,8 @@
 
 namespace PulseForge
 {
+	class DiagnosticRecorder;
+
 	enum class TextureAssetErrorCode : uint8_t
 	{
 		AssetNotFound,
@@ -30,12 +32,16 @@ namespace PulseForge
 		std::string Message;
 	};
 
-	// Per-project runtime GPU cache. The rendering device and project registry must outlive this cache.
+	// Per-project runtime GPU cache. The rendering device, project registry and optional diagnostics recorder must outlive this cache.
 	// Returned texture references remain valid until Clear() or cache destruction. The cache is not thread-safe.
 	class TextureAssetCache final
 	{
 	public:
-		TextureAssetCache(RenderDevice& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry);
+		TextureAssetCache(
+			RenderDevice& Runtime,
+			std::filesystem::path ProjectRoot,
+			const AssetRegistry& Registry,
+			DiagnosticRecorder* Diagnostics = nullptr);
 		~TextureAssetCache();
 		TextureAssetCache(const TextureAssetCache&) = delete;
 		TextureAssetCache& operator=(const TextureAssetCache&) = delete;
@@ -64,6 +70,9 @@ namespace PulseForge
 		RenderDevice& m_Runtime;
 		std::filesystem::path m_ProjectRoot;
 		const AssetRegistry& m_Registry;
+		DiagnosticRecorder* m_Diagnostics = nullptr;
+		uint64_t m_CacheHits = 0;
+		uint64_t m_CacheMisses = 0;
 		std::unordered_map<CacheKey, TextureHandle, CacheKeyHash> m_Textures;
 	};
 } // namespace PulseForge

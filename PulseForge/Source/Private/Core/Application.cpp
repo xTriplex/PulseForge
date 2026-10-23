@@ -24,6 +24,7 @@ namespace PulseForge
 		m_Renderer = RendererBackend::Create(API, *m_Window);
 		if (!m_Renderer)
 			throw std::runtime_error("Renderer backend creation failed");
+		m_Diagnostics = std::make_unique<DiagnosticRecorder>();
 
 		s_Instance = this;
 		try
@@ -48,6 +49,61 @@ namespace PulseForge
 	OutputColorEncoding Application::GetOutputColorEncoding() const noexcept
 	{
 		return m_Renderer->GetOutputColorEncoding();
+	}
+
+	bool Application::SetGpuFrameTimingEnabled(bool Enabled, uint64_t SessionId) noexcept
+	{
+		return m_Renderer->SetGpuFrameTimingEnabled(Enabled, SessionId);
+	}
+
+	size_t Application::ReadCompletedGpuFrameTimings(std::span<GpuFrameTiming> Destination) noexcept
+	{
+		return m_Renderer->ReadCompletedGpuFrameTimings(Destination);
+	}
+
+	uint64_t Application::GetCompletedGpuFrameTimingEvictedCount() const noexcept
+	{
+		return m_Renderer->GetCompletedGpuFrameTimingEvictedCount();
+	}
+
+	uint64_t Application::GetGpuFrameTimingInvalidResultCount() const noexcept
+	{
+		return m_Renderer->GetGpuFrameTimingInvalidResultCount();
+	}
+
+	void Application::CollectCompletedGpuFrameTimings() noexcept
+	{
+		m_Renderer->CollectCompletedGpuFrameTimings();
+	}
+
+	GpuFrameTimingCollectionState Application::GetGpuFrameTimingCollectionState(uint64_t SessionId) const noexcept
+	{
+		return m_Renderer->GetGpuFrameTimingCollectionState(SessionId);
+	}
+
+	bool Application::IsGpuFrameTimingSupported() const noexcept
+	{
+		return m_Renderer->IsGpuFrameTimingSupported();
+	}
+
+	bool Application::HasGpuFrameTimingFailed() const noexcept
+	{
+		return m_Renderer->HasGpuFrameTimingFailed();
+	}
+
+	bool Application::IsGpuFrameTimingEnabled() const noexcept
+	{
+		return m_Renderer->IsGpuFrameTimingEnabled();
+	}
+
+	std::string_view Application::GetGpuFrameTimingUnavailableReason() const noexcept
+	{
+		return m_Renderer->GetGpuFrameTimingUnavailableReason();
+	}
+
+	std::string_view Application::GetRendererHardwareName() const noexcept
+	{
+		return m_Renderer->GetRendererHardwareName();
 	}
 
 	std::pair<unsigned int, unsigned int> Application::GetOutputFramebufferSize() const noexcept
@@ -85,6 +141,44 @@ namespace PulseForge
 		m_Renderer->SetExternalPlatformPresentationTargetCount(Count);
 	}
 
+	bool Application::StartDiagnosticsCapture() noexcept
+	{
+		try
+		{
+			if (!m_Diagnostics->SetCaptureEnabled(true))
+				return false;
+			const DiagnosticSnapshot Snapshot = m_Diagnostics->CaptureSnapshot();
+			(void)m_Renderer->SetGpuFrameTimingEnabled(true, Snapshot.SessionId);
+			return true;
+		}
+		catch (...)
+		{
+			return false;
+		}
+	}
+
+	void Application::StopDiagnosticsCapture() noexcept
+	{
+		if (m_Diagnostics)
+			m_Diagnostics->SetCaptureEnabled(false);
+		(void)m_Renderer->SetGpuFrameTimingEnabled(false);
+	}
+
+	DiagnosticSnapshot Application::GetDiagnosticsSnapshot() const
+	{
+		return m_Diagnostics ? m_Diagnostics->CaptureSnapshot() : DiagnosticSnapshot{};
+	}
+
+	DiagnosticCaptureStatus Application::GetDiagnosticsCaptureStatus() const noexcept
+	{
+		return m_Diagnostics ? m_Diagnostics->GetCaptureStatus() : DiagnosticCaptureStatus{};
+	}
+
+	bool Application::IsDiagnosticsCaptureEnabled() const noexcept
+	{
+		return m_Diagnostics && m_Diagnostics->IsCaptureEnabled();
+	}
+
 #if defined(PF_DEBUG)
 	bool Application::InjectNextPlatformAcquireOutOfDateForTesting(uint64_t TargetID) noexcept
 	{
@@ -108,20 +202,44 @@ namespace PulseForge
 			const Timestep DeltaTime(CurrentFrameTime - PreviousFrameTime);
 			PreviousFrameTime = CurrentFrameTime;
 
-			m_LayerStack.UpdateLayers(DeltaTime);
+			if (DiagnosticRecorder* Recorder = GetDiagnosticsRecorder())
+			{
+				ScopedDiagnosticTimer Timer(*Recorder, "Application layer update", "Application");
+				m_LayerStack.UpdateLayers(DeltaTime);
+			}
+			else
+				m_LayerStack.UpdateLayers(DeltaTime);
 
 			// Resource preparation during updates must happen before the renderer opens its frame command list.
 			const bool bCanRender = m_Renderer->BeginFrame();
 			m_MainFrameActive = bCanRender;
 
 			const bool bHasPlatformPresentationTargets = m_Renderer->HasPlatformPresentationTargets();
-			if (bCanRender || bHasPlatformPresentationTargets) m_LayerStack.RenderLayers();
+			if (bCanRender || bHasPlatformPresentationTargets)
+			{
+				if (DiagnosticRecorder* Recorder = GetDiagnosticsRecorder())
+				{
+					ScopedDiagnosticTimer Timer(*Recorder, "Application layer render", "Application");
+					m_LayerStack.RenderLayers();
+				}
+				else
+					m_LayerStack.RenderLayers();
+			}
 
 			if (bCanRender)
 				m_Renderer->EndFrame();
 			m_MainFrameActive = false;
 
-			if (bCanRender || bHasPlatformPresentationTargets) m_LayerStack.RenderPlatformWindows();
+			if (bCanRender || bHasPlatformPresentationTargets)
+			{
+				if (DiagnosticRecorder* Recorder = GetDiagnosticsRecorder())
+				{
+					ScopedDiagnosticTimer Timer(*Recorder, "Application platform-window render", "Application");
+					m_LayerStack.RenderPlatformWindows();
+				}
+				else
+					m_LayerStack.RenderPlatformWindows();
+			}
 			else
 				m_Window->WaitEventsTimeout(0.05);
 		}

@@ -38,6 +38,14 @@ namespace
 		PF_CHECK(Tests, ApplicationError.find("unexpected test phase") != std::string::npos);
 	}
 
+	void TestViewportResizeObservationAcceptsPlatformConstrainedSize(TestRunner& Tests)
+	{
+		PF_CHECK(Tests, IsViewportResizeObserved(1024, 642, 1088, 645, 12, 13));
+		PF_CHECK(Tests, !IsViewportResizeObserved(1024, 642, 1024, 642, 12, 13));
+		PF_CHECK(Tests, !IsViewportResizeObserved(1024, 642, 1088, 645, 12, 12));
+		PF_CHECK(Tests, !IsViewportResizeObserved(1024, 642, 0, 645, 12, 13));
+	}
+
 	void TestSaveFailureAndClosePreparationRetryStates(TestRunner& Tests)
 	{
 		DocumentCloseAcceptanceCoordinator Coordinator("close-retry", [](std::string) {});
@@ -346,6 +354,7 @@ namespace
 void RunEditorDebugAcceptanceCoordinatorTests(TestRunner& Tests)
 {
 	TestCoordinatorRejectsWrongIdentityAndInvalidTransition(Tests);
+	TestViewportResizeObservationAcceptsPlatformConstrainedSize(Tests);
 	TestSaveRetryKeepsDirtySessionUntilRetrySucceeds(Tests);
 	TestSaveFailureAndClosePreparationRetryStates(Tests);
 	TestDetachedSceneViewportSmokeRequiresNativeOwnerAndCameraMotion(Tests);

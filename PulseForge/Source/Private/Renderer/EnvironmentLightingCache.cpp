@@ -2,8 +2,10 @@
 
 #include "Assets/AssetPathResolver.h"
 #include "Assets/ImageAssetImporter.h"
+#include "Core/Diagnostics.h"
 #include "Core/ScopedProfileTimer.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -20,6 +22,12 @@ namespace PulseForge
 		constexpr uint32_t EnvironmentAlgorithmVersion = 1;
 		constexpr uint32_t BrdfCacheVersion = 1;
 		constexpr uint64_t MaximumCacheBytes = 64ull * 1024ull * 1024ull;
+
+		[[nodiscard]] uint64_t GetMonotonicTimestampNanoseconds() noexcept
+		{
+			return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+		}
 
 #pragma pack(push, 1)
 		struct EnvironmentCacheHeader
@@ -355,8 +363,12 @@ namespace PulseForge
 	}
 
 	EnvironmentLightingCache::EnvironmentLightingCache(
-		RenderDevice& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry)
+		RenderDevice& Runtime,
+		std::filesystem::path ProjectRoot,
+		const AssetRegistry& Registry,
+		DiagnosticRecorder* Diagnostics)
 		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_Registry(Registry),
+		  m_Diagnostics(Diagnostics),
 		  m_Worker([this](std::stop_token StopToken) { WorkerMain(StopToken); })
 	{
 	}
@@ -367,15 +379,34 @@ namespace PulseForge
 		m_QueueChanged.notify_all();
 		if (m_Worker.joinable())
 			m_Worker.join();
+		Clear();
 	}
 
 	void EnvironmentLightingCache::Clear() noexcept
 	{
+		uint64_t RetiredCount = 0;
+		for (const auto& [Asset, State] : m_Entries)
+		{
+			(void)Asset;
+			std::lock_guard EntryLock(State->Mutex);
+			if (State->GpuTextures) ++RetiredCount;
+		}
 		{
 			std::lock_guard QueueLock(m_QueueMutex);
 			m_Requests.clear();
 		}
 		m_Entries.clear();
+		if (m_Diagnostics && RetiredCount > 0)
+			(void)m_Diagnostics->RecordEvent(
+				DiagnosticEventKind::Resource, "Environment cache resources retired", "EnvironmentLightingCache", "objects", RetiredCount);
+		if (m_Diagnostics && m_CacheHits > 0)
+			(void)m_Diagnostics->RecordEvent(
+				DiagnosticEventKind::Counter, "Environment cache hits", "EnvironmentLightingCache", "lookups", m_CacheHits);
+		if (m_Diagnostics && m_CacheMisses > 0)
+			(void)m_Diagnostics->RecordEvent(
+				DiagnosticEventKind::Counter, "Environment cache misses", "EnvironmentLightingCache", "lookups", m_CacheMisses);
+		m_CacheHits = 0;
+		m_CacheMisses = 0;
 	}
 
 	std::expected<std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>, EnvironmentLightingCacheError>
@@ -384,7 +415,14 @@ namespace PulseForge
 		auto Found = m_Entries.find(Asset);
 		if (Found == m_Entries.end())
 		{
+			++m_CacheMisses;
 			auto NewEntry = std::make_shared<EnvironmentLightingCache::Entry>();
+			if (m_Diagnostics)
+			{
+				uint64_t SessionStartTimestampNanoseconds = 0;
+				(void)m_Diagnostics->BeginDurationSession(
+					NewEntry->DiagnosticSessionId, SessionStartTimestampNanoseconds);
+			}
 			Found = m_Entries.emplace(Asset, NewEntry).first;
 			{
 				std::lock_guard QueueLock(m_QueueMutex);
@@ -392,9 +430,20 @@ namespace PulseForge
 			}
 			m_QueueChanged.notify_one();
 		}
+		else
+		{
+			++m_CacheHits;
+		}
 
 		Entry& State = *Found->second;
 		std::optional<EnvironmentLightingData> CpuData;
+		uint64_t DiagnosticSessionId = 0;
+		uint64_t ImportStartTimestampNanoseconds = 0;
+		uint64_t ImportEndTimestampNanoseconds = 0;
+		uint64_t DerivedCacheReadStartTimestampNanoseconds = 0;
+		uint64_t DerivedCacheReadEndTimestampNanoseconds = 0;
+		uint64_t PreprocessStartTimestampNanoseconds = 0;
+		uint64_t PreprocessEndTimestampNanoseconds = 0;
 		{
 			std::lock_guard EntryLock(State.Mutex);
 			switch (State.State)
@@ -410,11 +459,30 @@ namespace PulseForge
 				case EntryState::CpuReady:
 					State.State = EntryState::Uploading;
 					CpuData = std::move(State.CpuData);
+					DiagnosticSessionId = State.DiagnosticSessionId;
+					ImportStartTimestampNanoseconds = State.ImportStartTimestampNanoseconds;
+					ImportEndTimestampNanoseconds = State.ImportEndTimestampNanoseconds;
+					DerivedCacheReadStartTimestampNanoseconds = State.DerivedCacheReadStartTimestampNanoseconds;
+					DerivedCacheReadEndTimestampNanoseconds = State.DerivedCacheReadEndTimestampNanoseconds;
+					PreprocessStartTimestampNanoseconds = State.PreprocessStartTimestampNanoseconds;
+					PreprocessEndTimestampNanoseconds = State.PreprocessEndTimestampNanoseconds;
 					break;
 			}
 		}
 
-		Detail::ScopedProfileTimer UploadTimer("Environment GPU texture creation/upload");
+		if (m_Diagnostics)
+		{
+			if (ImportEndTimestampNanoseconds > ImportStartTimestampNanoseconds)
+				(void)m_Diagnostics->RecordDurationForSession(DiagnosticSessionId, ImportStartTimestampNanoseconds,
+					ImportEndTimestampNanoseconds, "Environment source import", "EnvironmentLightingCache");
+			if (DerivedCacheReadEndTimestampNanoseconds > DerivedCacheReadStartTimestampNanoseconds)
+				(void)m_Diagnostics->RecordDurationForSession(DiagnosticSessionId, DerivedCacheReadStartTimestampNanoseconds,
+					DerivedCacheReadEndTimestampNanoseconds, "Environment derived cache read", "EnvironmentLightingCache");
+			if (PreprocessEndTimestampNanoseconds > PreprocessStartTimestampNanoseconds)
+				(void)m_Diagnostics->RecordDurationForSession(DiagnosticSessionId, PreprocessStartTimestampNanoseconds,
+					PreprocessEndTimestampNanoseconds, "Environment CPU preprocessing", "EnvironmentLightingCache");
+		}
+		ScopedDiagnosticTimer UploadTimer(m_Diagnostics, "Environment GPU upload", "EnvironmentLightingCache");
 		auto Uploaded = UploadProcessedData(Asset, std::move(*CpuData));
 		if (!Uploaded)
 		{
@@ -428,6 +496,8 @@ namespace PulseForge
 			State.GpuTextures.emplace(std::move(*Uploaded));
 			State.State = EntryState::Ready;
 		}
+		if (m_Diagnostics)
+			(void)m_Diagnostics->RecordEvent(DiagnosticEventKind::Resource, "Environment cache resource created", "EnvironmentLightingCache", "objects", 1);
 		return std::cref(*State.GpuTextures);
 	}
 
@@ -452,6 +522,7 @@ namespace PulseForge
 			try
 			{
 				const EnvironmentProcessingDesc Processing = GetProcessingDescription();
+				const uint64_t ImportStartTimestampNanoseconds = GetMonotonicTimestampNanoseconds();
 				std::expected<ImportedFloatImage, ImageAssetImportError> Imported = std::unexpected(
 					ImageAssetImportError{ ImageAssetImportErrorCode::InvalidImage, {}, "HDR import has not started" });
 				{
@@ -460,16 +531,19 @@ namespace PulseForge
 				}
 				if (!Imported)
 					throw std::runtime_error("HDR image import failed: " + Imported.error().Message);
+				const uint64_t ImportEndTimestampNanoseconds = GetMonotonicTimestampNanoseconds();
 				if (StopToken.stop_requested())
 					return;
 
 				const std::filesystem::path EnvironmentPath = GetEnvironmentCachePath(
 					Work.ProjectRoot, Work.Asset, Imported->SourceFingerprint, Processing);
 				std::optional<EnvironmentLightingData> Data;
+				const uint64_t DerivedCacheReadStartTimestampNanoseconds = GetMonotonicTimestampNanoseconds();
 				{
 					Detail::ScopedProfileTimer Timer("Environment derived-data cache read");
 					Data = ReadEnvironmentCache(EnvironmentPath, Work.Asset, Imported->SourceFingerprint, Processing);
 				}
+				const uint64_t DerivedCacheReadEndTimestampNanoseconds = GetMonotonicTimestampNanoseconds();
 				const bool EnvironmentCacheHit = Data.has_value();
 				if (!Data)
 				{
@@ -502,6 +576,7 @@ namespace PulseForge
 
 				if (!Data)
 				{
+					const uint64_t PreprocessStartTimestampNanoseconds = GetMonotonicTimestampNanoseconds();
 					Detail::ScopedProfileTimer Timer("HDR CPU environment preprocessing");
 					auto Processed = ProcessEnvironmentImage(*Imported, Processing, StopToken, &*BrdfLut);
 					if (!Processed)
@@ -511,7 +586,25 @@ namespace PulseForge
 						throw std::runtime_error("Environment preprocessing failed: " + Processed.error().Message);
 					}
 					Data = std::move(*Processed);
+					const uint64_t PreprocessEndTimestampNanoseconds = GetMonotonicTimestampNanoseconds();
+					{
+						std::lock_guard EntryLock(Work.Destination->Mutex);
+						Work.Destination->ImportStartTimestampNanoseconds = ImportStartTimestampNanoseconds;
+						Work.Destination->ImportEndTimestampNanoseconds = ImportEndTimestampNanoseconds;
+						Work.Destination->DerivedCacheReadStartTimestampNanoseconds = DerivedCacheReadStartTimestampNanoseconds;
+						Work.Destination->DerivedCacheReadEndTimestampNanoseconds = DerivedCacheReadEndTimestampNanoseconds;
+						Work.Destination->PreprocessStartTimestampNanoseconds = PreprocessStartTimestampNanoseconds;
+						Work.Destination->PreprocessEndTimestampNanoseconds = PreprocessEndTimestampNanoseconds;
+					}
 					WriteEnvironmentCache(EnvironmentPath, Work.Asset, Imported->SourceFingerprint, Processing, *Data);
+				}
+				else
+				{
+					std::lock_guard EntryLock(Work.Destination->Mutex);
+					Work.Destination->ImportStartTimestampNanoseconds = ImportStartTimestampNanoseconds;
+					Work.Destination->ImportEndTimestampNanoseconds = ImportEndTimestampNanoseconds;
+					Work.Destination->DerivedCacheReadStartTimestampNanoseconds = DerivedCacheReadStartTimestampNanoseconds;
+					Work.Destination->DerivedCacheReadEndTimestampNanoseconds = DerivedCacheReadEndTimestampNanoseconds;
 				}
 				Data->BrdfIntegrationLut = std::move(*BrdfLut);
 				PF_INFO("Environment derived data {} for {}", EnvironmentCacheHit ? "loaded from cache" : "generated",

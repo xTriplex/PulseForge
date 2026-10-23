@@ -1,4 +1,5 @@
 #include "TestEngineSupport.h"
+#include "Core/Diagnostics.h"
 
 namespace
 {
@@ -460,20 +461,64 @@ end
 		RuntimeDescription.Physics.FixedStepSeconds = 0.1;
 		RuntimeDescription.Physics.MaxSubsteps = 2;
 		RuntimeDescription.Physics.MaxFrameDeltaSeconds = 0.25;
-		SceneRuntime CoordinatedRuntime(*ProjectResult, RuntimeDescription);
+		DiagnosticRecorder RuntimeDiagnostics(32);
+		SceneRuntimeServices RuntimeServices{ .Diagnostics = &RuntimeDiagnostics };
+		SceneRuntime CoordinatedRuntime(*ProjectResult, RuntimeDescription, RuntimeServices);
 		const auto BeforeRuntimeStart = CoordinatedRuntime.Advance(CoordinatedScene, Timestep(0.1));
 		PF_CHECK(Tests, !BeforeRuntimeStart && BeforeRuntimeStart.error().Code == SceneRuntimeErrorCode::NotRunning);
 		PF_CHECK(Tests, CoordinatedRuntime.Start(CoordinatedScene).has_value());
 		PF_CHECK(Tests, CoordinatedRuntime.IsRunning());
+		PF_CHECK(Tests, RuntimeDiagnostics.CaptureSnapshot().Events.empty());
+		SceneRuntime* const RunningRuntimeIdentity = &CoordinatedRuntime;
+		RuntimeDiagnostics.SetCaptureEnabled(true);
 		const auto DuplicateRuntimeStart = CoordinatedRuntime.Start(CoordinatedScene);
 		PF_CHECK(Tests, !DuplicateRuntimeStart && DuplicateRuntimeStart.error().Code == SceneRuntimeErrorCode::AlreadyRunning);
 		const auto CoordinatedNegativeDelta = CoordinatedRuntime.Advance(CoordinatedScene, Timestep(-0.1));
 		PF_CHECK(Tests, !CoordinatedNegativeDelta && CoordinatedNegativeDelta.error().Code == SceneRuntimeErrorCode::InvalidDeltaTime);
 		const auto CoordinatedUpdate = CoordinatedRuntime.Advance(CoordinatedScene, Timestep(0.25));
 		PF_CHECK(Tests, CoordinatedUpdate && CoordinatedUpdate->PhysicsSteps == 2);
+		const auto RuntimeDiagnosticsSnapshot = RuntimeDiagnostics.CaptureSnapshot();
+		PF_CHECK(Tests, RuntimeDiagnosticsSnapshot.Events.size() == 3);
+		const uint64_t FirstCaptureSessionId = RuntimeDiagnosticsSnapshot.SessionId;
+		bool SawScriptAdvance = false;
+		bool SawPhysicsAdvance = false;
+		bool SawAudioAdvance = false;
+		for (const DiagnosticEvent& Event : RuntimeDiagnosticsSnapshot.Events)
+		{
+			SawScriptAdvance |= Event.Owner == "ScriptRuntime" && Event.Name == "ScriptRuntime::Advance";
+			SawPhysicsAdvance |= Event.Owner == "PhysicsSceneRuntime" && Event.Name == "PhysicsSceneRuntime::Advance";
+			SawAudioAdvance |= Event.Owner == "AudioSceneRuntime" && Event.Name == "AudioSceneRuntime::Advance";
+		}
+		PF_CHECK(Tests, SawScriptAdvance && SawPhysicsAdvance && SawAudioAdvance);
+		RuntimeDiagnostics.SetCaptureEnabled(false);
+		const DiagnosticSnapshot FirstStoppedCapture = RuntimeDiagnostics.CaptureSnapshot();
+		PF_CHECK(Tests, FirstStoppedCapture.CaptureEndTimestampNanoseconds != 0);
+		PF_CHECK(Tests, CoordinatedRuntime.Advance(CoordinatedScene, Timestep(0.1)).has_value());
+		PF_CHECK(Tests, RuntimeDiagnostics.CaptureSnapshot().Events.size() == RuntimeDiagnosticsSnapshot.Events.size());
+		const auto GameplayAtCaptureRestart = CoordinatedScriptEntity->GetTransform();
+		const auto PhysicsAtCaptureRestart = CoordinatedPhysicsEntity->GetTransform();
+		PF_CHECK(Tests, GameplayAtCaptureRestart && std::abs(GameplayAtCaptureRestart->Translation.x - 0.35f) < 0.0001f);
+		PF_CHECK(Tests, PhysicsAtCaptureRestart.has_value());
+		RuntimeDiagnostics.SetCaptureEnabled(true);
+		const DiagnosticSnapshot SecondCaptureStarted = RuntimeDiagnostics.CaptureSnapshot();
+		PF_CHECK(Tests, SecondCaptureStarted.SessionId > FirstCaptureSessionId);
+		PF_CHECK(Tests, SecondCaptureStarted.Events.empty());
+		PF_CHECK(Tests, SecondCaptureStarted.CaptureEndTimestampNanoseconds == 0);
+		PF_CHECK(Tests, CoordinatedRuntime.IsRunning() && &CoordinatedRuntime == RunningRuntimeIdentity);
+		PF_CHECK(Tests, CoordinatedRuntime.Advance(CoordinatedScene, Timestep(0.1)).has_value());
+		const DiagnosticSnapshot SecondCaptureEvents = RuntimeDiagnostics.CaptureSnapshot();
+		PF_CHECK(Tests, SecondCaptureEvents.Events.size() == 3);
+		for (const DiagnosticEvent& Event : SecondCaptureEvents.Events)
+			PF_CHECK(Tests, Event.SessionId == SecondCaptureStarted.SessionId);
+		const auto GameplayAfterCaptureRestart = CoordinatedScriptEntity->GetTransform();
+		const auto PhysicsAfterCaptureRestart = CoordinatedPhysicsEntity->GetTransform();
+		PF_CHECK(Tests, GameplayAfterCaptureRestart && std::abs(GameplayAfterCaptureRestart->Translation.x - 0.45f) < 0.0001f);
+		PF_CHECK(Tests, PhysicsAtCaptureRestart && PhysicsAfterCaptureRestart &&
+			PhysicsAfterCaptureRestart->Translation.y < PhysicsAtCaptureRestart->Translation.y);
+		PF_CHECK(Tests, CoordinatedRuntime.IsRunning() && &CoordinatedRuntime == RunningRuntimeIdentity);
 		const auto CoordinatedTransform = CoordinatedScriptEntity->GetTransform();
 		const auto PhysicsTransform = CoordinatedPhysicsEntity->GetTransform();
-		PF_CHECK(Tests, CoordinatedTransform && std::abs(CoordinatedTransform->Translation.x - 0.25f) < 0.0001f);
+		PF_CHECK(Tests, CoordinatedTransform && std::abs(CoordinatedTransform->Translation.x - 0.45f) < 0.0001f);
 		PF_CHECK(Tests, PhysicsTransform && PhysicsTransform->Translation.y < 0.0f);
 		Scene OtherRuntimeScene;
 		const auto WrongRuntimeScene = CoordinatedRuntime.Advance(OtherRuntimeScene, Timestep(0.1));

@@ -300,7 +300,7 @@ namespace
 	{
 		const ImGuiWindowClass UtilityClass =
 			PulseForgeEditor::MakeEditorDockingClass(PulseForgeEditor::EditorDockingDomain::UtilityPanel);
-		for (const char* Name : { "Scene Viewport", "Inspector" })
+		for (const char* Name : { "Scene Viewport", "Inspector", "Performance###Performance" })
 		{
 			ImGui::SetNextWindowClass(&UtilityClass);
 			ImGui::SetNextWindowSize(ImVec2(420.0f, 300.0f), ImGuiCond_Always);
@@ -346,6 +346,7 @@ namespace
 		ImGui::DockBuilderSetNodeSize(DockID, ImVec2(720.0f, 480.0f));
 		ImGui::DockBuilderDockWindow("Scene Viewport", DockID);
 		ImGui::DockBuilderDockWindow("Inspector", DockID);
+		ImGui::DockBuilderDockWindow("Performance###Performance", DockID);
 		ImGui::DockBuilderFinish(DockID);
 		for (int Frame = 0; Frame < 4; ++Frame)
 		{
@@ -356,7 +357,9 @@ namespace
 		}
 		const ImGuiWindow* Scene = ImGui::FindWindowByName("Scene Viewport");
 		const ImGuiWindow* Inspector = ImGui::FindWindowByName("Inspector");
-		if (!Scene || !Inspector || Scene->DockId != DockID || Inspector->DockId != DockID) return {};
+		const ImGuiWindow* Performance = ImGui::FindWindowByName("Performance###Performance");
+		if (!Scene || !Inspector || !Performance || Scene->DockId != DockID || Inspector->DockId != DockID ||
+			Performance->DockId != DockID) return {};
 
 		size_t SettingsSize = 0;
 		const char* Settings = ImGui::SaveIniSettingsToMemory(&SettingsSize);
@@ -383,8 +386,10 @@ namespace
 			ImGui::UpdatePlatformWindows();
 			const ImGuiWindow* Scene = ImGui::FindWindowByName("Scene Viewport");
 			const ImGuiWindow* Inspector = ImGui::FindWindowByName("Inspector");
-			PF_CHECK(Tests, Scene && Inspector);
-			PF_CHECK(Tests, Scene && Inspector && Scene->DockId == DockID && Inspector->DockId == DockID);
+			const ImGuiWindow* Performance = ImGui::FindWindowByName("Performance###Performance");
+			PF_CHECK(Tests, Scene && Inspector && Performance);
+			PF_CHECK(Tests, Scene && Inspector && Performance && Scene->DockId == DockID && Inspector->DockId == DockID &&
+				Performance->DockId == DockID);
 		}
 		PF_CHECK(Tests, SawUnclassifiedAttachedRoot);
 		PF_CHECK(Tests, !RejectedUnclassifiedAttachedRoot);
@@ -394,7 +399,9 @@ namespace
 			Root->WindowClass, PulseForgeEditor::EditorDockingDomain::UtilityPanel));
 		const ImGuiWindow* RestoredScene = ImGui::FindWindowByName("Scene Viewport");
 		const ImGuiWindow* RestoredInspector = ImGui::FindWindowByName("Inspector");
-		PF_CHECK(Tests, RestoredScene && RestoredInspector && RestoredScene->DockId == RestoredInspector->DockId);
+		const ImGuiWindow* RestoredPerformance = ImGui::FindWindowByName("Performance###Performance");
+		PF_CHECK(Tests, RestoredScene && RestoredInspector && RestoredPerformance &&
+			RestoredScene->DockId == RestoredInspector->DockId && RestoredScene->DockId == RestoredPerformance->DockId);
 	}
 
 	void TestLegacyFloatingUtilityGroupWithoutClassMetadata(TestRunner& Tests)
@@ -433,6 +440,9 @@ namespace
 		const ImGuiWindow* Scene = ImGui::FindWindowByName("Scene Viewport");
 		const ImGuiWindow* Inspector = ImGui::FindWindowByName("Inspector");
 		PF_CHECK(Tests, Scene && Inspector && Scene->DockId == DockID && Inspector->DockId == DockID);
+		const ImGuiDockNode* Root = Scene && Scene->DockNode ? ImGui::DockNodeGetRootNode(Scene->DockNode) : nullptr;
+		PF_CHECK(Tests, Root && PulseForgeEditor::IsEditorWindowClassInDomain(
+			Root->WindowClass, PulseForgeEditor::EditorDockingDomain::UtilityPanel));
 	}
 
 	void TestMixedDomainDockBuilderLayoutIsSeparated(TestRunner& Tests)

@@ -1,4 +1,16 @@
 if(PULSEFORGE_BUILD_EDITOR)
+	set(PULSEFORGE_BUILD_IDENTIFIER "source-archive" CACHE STRING "Build identifier written to diagnostics captures")
+	if(PULSEFORGE_BUILD_IDENTIFIER STREQUAL "source-archive")
+		find_package(Git QUIET)
+		if(GIT_FOUND)
+			execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short=12 HEAD
+				WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" OUTPUT_VARIABLE PULSEFORGE_DETECTED_BUILD_ID
+				OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+			if(PULSEFORGE_DETECTED_BUILD_ID)
+				set(PULSEFORGE_BUILD_IDENTIFIER "${PULSEFORGE_DETECTED_BUILD_ID}")
+			endif()
+		endif()
+	endif()
 	add_library(PulseForgeEditorUI STATIC
 		PulseForgeEditor/Source/Private/EditorAssetDestinationDialog.cpp
 		PulseForgeEditor/Source/Private/EditorAssetPreviewService.cpp
@@ -6,6 +18,8 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorAssetSelector.cpp
 		PulseForgeEditor/Source/Private/EditorConsolePanel.cpp
 		PulseForgeEditor/Source/Private/EditorDocumentHostTestEditor.cpp
+		PulseForgeEditor/Source/Private/EditorPerformancePanel.cpp
+		PulseForgeEditor/Source/Private/EditorPerformanceCaptureService.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserAssetView.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserNavigation.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserPanel.cpp
@@ -73,6 +87,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 			PulseForgeEditor/Source/Private/EditorApplication.cpp
 		)
 	endif()
+	target_compile_definitions(PulseForgeEditor PRIVATE PF_BUILD_IDENTIFIER="${PULSEFORGE_BUILD_IDENTIFIER}")
 	if(PULSEFORGE_PLATFORM_MACOS)
 		set_target_properties(PulseForgeEditor PROPERTIES
 			MACOSX_BUNDLE TRUE
@@ -110,7 +125,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Icons" "Icons"
 			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/ThirdParty" "ThirdParty"
 	)
-	set_property(TARGET PulseForgeEditor PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeEditor>")
+	pulseforge_apply_visual_studio_debugger_working_directory(PulseForgeEditor)
 endif()
 
 if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)

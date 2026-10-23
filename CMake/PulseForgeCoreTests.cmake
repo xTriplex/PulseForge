@@ -2,6 +2,7 @@ if(BUILD_TESTING)
 	add_executable(PulseForgeCoreTests
 		Tests/PulseForgeTests.cpp
 		Tests/CoreTests.cpp
+		Tests/DiagnosticsRecorderTests.cpp
 	)
 	target_include_directories(PulseForgeCoreTests PRIVATE Tests)
 	target_link_libraries(PulseForgeCoreTests PRIVATE PulseForgeCore)

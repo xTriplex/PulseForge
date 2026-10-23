@@ -1,7 +1,7 @@
 #include "Assets/Project.h"
 #include "Assets/AssetTypes.h"
 #include "Core/BoundedInput.h"
-#include "Core/ScopedProfileTimer.h"
+#include "Core/Diagnostics.h"
 
 #include <nlohmann/json.hpp>
 
@@ -223,9 +223,11 @@ namespace PulseForge
 		return Result;
 	}
 
-	std::expected<Project, ProjectError> Project::Open(const std::filesystem::path& ProjectFile)
+	std::expected<Project, ProjectError> Project::Open(
+		const std::filesystem::path& ProjectFile,
+		DiagnosticRecorder* Diagnostics)
 	{
-		Detail::ScopedProfileTimer Timer("Project::Open total");
+		ScopedDiagnosticTimer TotalTimer(Diagnostics, "Project::Open", "Project");
 		if (auto Validation = ValidateProjectPath(ProjectFile); !Validation) return std::unexpected(std::move(Validation.error()));
 
 		std::error_code Error;
@@ -233,17 +235,25 @@ namespace PulseForge
 		if (Error)
 			return std::unexpected(
 				MakeError(ProjectErrorCode::InvalidPath, ProjectFile, "Could not resolve project file path: " + Error.message()));
-		std::ifstream Input(AbsoluteProjectFile, std::ios::binary);
-		if (!Input.is_open())
-			return std::unexpected(MakeError(ProjectErrorCode::FileReadFailed, AbsoluteProjectFile,
-				"Could not open project file: " + PathForMessage(AbsoluteProjectFile)));
-		auto Data = Detail::ReadBoundedInput(Input, ProjectSerializer::MaximumDocumentBytes);
+		std::expected<std::string, Detail::BoundedInputError> Data = std::unexpected(Detail::BoundedInputError{});
+		{
+			ScopedDiagnosticTimer ReadTimer(Diagnostics, "Project metadata read", "Project");
+			std::ifstream Input(AbsoluteProjectFile, std::ios::binary);
+			if (!Input.is_open())
+				return std::unexpected(MakeError(ProjectErrorCode::FileReadFailed, AbsoluteProjectFile,
+					"Could not open project file: " + PathForMessage(AbsoluteProjectFile)));
+			Data = Detail::ReadBoundedInput(Input, ProjectSerializer::MaximumDocumentBytes);
+		}
 		if (!Data)
 			return std::unexpected(MakeError(ProjectErrorCode::FileReadFailed, AbsoluteProjectFile,
 				Data.error().Code == Detail::BoundedInputErrorCode::TooLarge ? "Project file exceeds the 1 MiB document limit"
 																			 : "Could not read the complete project file"));
 
-		auto Description = ProjectSerializer::Deserialize(*Data);
+		std::expected<ProjectDesc, ProjectError> Description = std::unexpected(ProjectError{});
+		{
+			ScopedDiagnosticTimer DeserializeTimer(Diagnostics, "Project metadata deserialize", "Project");
+			Description = ProjectSerializer::Deserialize(*Data);
+		}
 		if (!Description)
 		{
 			Description.error().Path = AbsoluteProjectFile;
@@ -251,16 +261,24 @@ namespace PulseForge
 		}
 
 		AssetRegistry Registry;
-		if (auto Rebuild = Registry.Rebuild(AbsoluteProjectFile.parent_path()); !Rebuild)
+		std::expected<void, AssetRegistryError> Rebuild;
+		{
+			ScopedDiagnosticTimer RegistryTimer(Diagnostics, "Project asset registry rebuild", "Project");
+			Rebuild = Registry.Rebuild(AbsoluteProjectFile.parent_path());
+		}
+		if (!Rebuild)
 		{
 			const std::string Message = Rebuild.error().Issues.empty()
 				? "Could not rebuild project asset registry"
 				: Rebuild.error().Issues.front().Message;
 			return std::unexpected(MakeError(ProjectErrorCode::RegistryBuildFailed, AbsoluteProjectFile.parent_path(), Message));
 		}
-		if (auto StartSceneValidation = ValidateStartScene(Description->StartScene, Registry, AbsoluteProjectFile);
-			!StartSceneValidation)
-			return std::unexpected(std::move(StartSceneValidation.error()));
+		{
+			ScopedDiagnosticTimer ValidationTimer(Diagnostics, "Project startup scene validation", "Project");
+			if (auto StartSceneValidation = ValidateStartScene(Description->StartScene, Registry, AbsoluteProjectFile);
+				!StartSceneValidation)
+				return std::unexpected(std::move(StartSceneValidation.error()));
+		}
 
 		return Project(AbsoluteProjectFile, std::move(*Description), std::move(Registry));
 	}
