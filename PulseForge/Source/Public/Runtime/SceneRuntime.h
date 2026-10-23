@@ -33,6 +33,7 @@ namespace PulseForge
 		DiagnosticRecorder* Diagnostics = nullptr;
 		// Optional host policy check; an error rejects a pause change before audio state is modified.
 		std::function<std::optional<std::string>(bool)> AudioPauseGuard;
+		ScriptRuntimeObserver ScriptObserver;
 	};
 
 	enum class SceneRuntimeErrorCode : uint8_t

@@ -88,7 +88,8 @@ namespace PulseForge
 			const ScriptRuntimeServices Services{
 				.Physics = Candidate->Physics.get(),
 				.Audio = Candidate->Audio.get(),
-				.InputState = m_Services.InputState };
+				.InputState = m_Services.InputState,
+				.Observer = m_Services.ScriptObserver };
 			Candidate->Scripting = std::make_unique<ScriptRuntime>(m_Project, m_Description.Scripting, Services);
 			if (auto Result = Candidate->Scripting->Start(Source); !Result)
 				return std::unexpected(MakeError(
