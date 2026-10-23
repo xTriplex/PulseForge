@@ -6,5 +6,5 @@
 class PulseForgeGameApp final : public PulseForge::Application
 {
 public:
-	explicit PulseForgeGameApp(PulseForgeGame::PlayerLaunchConfiguration Configuration);
+	explicit PulseForgeGameApp(PulseForgeGame::PlayerLaunchConfiguration Configuration, bool EditorControlEnabled = false);
 };

@@ -106,16 +106,20 @@ namespace PulseForge
 
 		if (m_PendingScene)
 		{
+			// Move the candidate scene into a local owner declared before its runtime. On every
+			// return and exception path, the runtime is destroyed first and can still use the scene
+			// from script teardown callbacks.
+			auto CandidateScene = std::move(m_PendingScene->Value);
+			const AssetID CandidateAsset = m_PendingScene->Asset;
+			m_PendingScene.reset();
 			auto CandidateRuntime = std::make_unique<SceneRuntime>(*m_Project, m_RuntimeDescription, m_RuntimeServices);
-			if (auto Started = CandidateRuntime->Start(*m_PendingScene->Value); !Started)
+			if (auto Started = CandidateRuntime->Start(*CandidateScene); !Started)
 			{
-				m_PendingScene.reset();
 				return std::unexpected(MakeError(
 					PlayerSessionErrorCode::RuntimeStartFailed, "Could not start requested player scene: " + Started.error().Message));
 			}
 			if (auto Paused = CandidateRuntime->SetPaused(m_Paused); !Paused)
 			{
-				m_PendingScene.reset();
 				return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeOperationFailed,
 					"Could not apply player pause state to requested scene: " + Paused.error().Message));
 			}
@@ -123,9 +127,8 @@ namespace PulseForge
 			// Keep the old scene alive until its runtime has released every non-owning scene reference.
 			auto RetiredScene = std::move(m_Scene);
 			auto RetiredRuntime = std::move(m_Runtime);
-			m_Scene = std::move(m_PendingScene->Value);
-			m_SceneAsset = m_PendingScene->Asset;
-			m_PendingScene.reset();
+			m_Scene = std::move(CandidateScene);
+			m_SceneAsset = CandidateAsset;
 			m_Runtime = std::move(CandidateRuntime);
 			RetiredRuntime.reset();
 			RetiredScene.reset();

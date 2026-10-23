@@ -7,7 +7,9 @@
 #include "Scripting/ScriptRuntime.h"
 
 #include <expected>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace PulseForge
@@ -29,6 +31,8 @@ namespace PulseForge
 	{
 		Input* InputState = nullptr;
 		DiagnosticRecorder* Diagnostics = nullptr;
+		// Optional host policy check; an error rejects a pause change before audio state is modified.
+		std::function<std::optional<std::string>(bool)> AudioPauseGuard;
 	};
 
 	enum class SceneRuntimeErrorCode : uint8_t

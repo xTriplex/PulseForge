@@ -9,6 +9,7 @@
 #include "Scripting/ScriptRuntime.h"
 
 #include <optional>
+#include <exception>
 
 namespace PulseForge
 {
@@ -123,6 +124,25 @@ namespace PulseForge
 			return std::unexpected(
 				MakeError(SceneRuntimeErrorCode::NotRunning, SceneRuntimeSubsystem::None, "Scene runtime is not started"));
 		if (m_Impl->Paused == Paused) return {};
+		if (m_Services.AudioPauseGuard)
+		{
+			try
+			{
+				if (const auto Rejection = m_Services.AudioPauseGuard(Paused))
+					return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
+						"Audio pause change was rejected by the host: " + *Rejection));
+			}
+			catch (const std::exception& Exception)
+			{
+				return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
+					std::string("Audio pause guard failed: ") + Exception.what()));
+			}
+			catch (...)
+			{
+				return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
+					"Audio pause guard failed with an unknown exception"));
+			}
+		}
 		if (auto Result = m_Impl->Audio->SetPaused(Paused); !Result)
 			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
 				"Could not change scene audio pause state: " + Result.error().Message));

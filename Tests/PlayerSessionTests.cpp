@@ -58,6 +58,14 @@ namespace
 			std::as_bytes(std::span(TimeScaleScript.data(), TimeScaleScript.size())), "Assets/Scripts/time_scale.lua");
 		PF_CHECK(Tests, ScriptAsset.has_value());
 		if (!ScriptAsset) return;
+		const std::string TeardownScript = "function OnDestroy()\n"
+			"  local marker, message = scene.create_entity('candidate teardown marker')\n"
+			"  assert(marker, message)\n"
+			"end\n";
+		const auto TeardownScriptAsset = AssetOperations::CreateAssetFromBytes(CreatedProject->GetAssetRegistry(), CreatedProject->GetRootPath(),
+			std::as_bytes(std::span(TeardownScript.data(), TeardownScript.size())), "Assets/Scripts/teardown.lua");
+		PF_CHECK(Tests, TeardownScriptAsset.has_value());
+		if (!TeardownScriptAsset) return;
 
 		Scene StartupScene;
 		auto StartupEntity = StartupScene.CreateEntity("Startup Entity");
@@ -71,7 +79,10 @@ namespace
 		PF_CHECK(Tests, CreatedProject->SetStartScene(StartupAsset->ID).has_value());
 
 		Scene SecondScene;
-		PF_CHECK(Tests, SecondScene.CreateEntity("Second Entity").has_value());
+		auto SecondEntity = SecondScene.CreateEntity("Second Entity");
+		PF_CHECK(Tests, SecondEntity.has_value());
+		if (!SecondEntity) return;
+		PF_CHECK(Tests, SecondEntity->SetScript(ScriptComponent{ TeardownScriptAsset->ID }).has_value());
 		auto SecondAsset = SceneAssetService::Create(
 			CreatedProject->GetAssetRegistry(), CreatedProject->GetRootPath(), "Assets/Second.scene", SecondScene);
 		PF_CHECK(Tests, SecondAsset.has_value());
@@ -80,7 +91,14 @@ namespace
 
 		SceneRuntimeDesc RuntimeDescription;
 		RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
-		PlayerSession Session(ProjectFile, RuntimeDescription);
+		int PauseAttempts = 0;
+		SceneRuntimeServices RuntimeServices;
+		RuntimeServices.AudioPauseGuard = [&PauseAttempts](bool Paused) -> std::optional<std::string>
+		{
+			if (Paused && ++PauseAttempts == 2) return "deterministic candidate activation failure";
+			return std::nullopt;
+		};
+		PlayerSession Session(ProjectFile, RuntimeDescription, RuntimeServices);
 		PF_CHECK(Tests, !Session.IsRunning());
 		const auto TransitionBeforeStart = Session.RequestSceneTransition(SecondAsset->ID);
 		PF_CHECK(Tests, !TransitionBeforeStart && TransitionBeforeStart.error().Code == PlayerSessionErrorCode::NotStarted);
@@ -115,6 +133,15 @@ namespace
 		PF_CHECK(Tests, Session.GetActiveScene() == OriginalScene);
 		PF_CHECK(Tests, Session.Pause().has_value());
 		PF_CHECK(Tests, Session.IsPaused());
+		const auto FailedCandidateAdvance = Session.Advance(Timestep(0.1));
+		PF_CHECK(Tests, !FailedCandidateAdvance && FailedCandidateAdvance.error().Code == PlayerSessionErrorCode::RuntimeOperationFailed);
+		PF_CHECK(Tests, Session.GetActiveScene() == OriginalScene);
+		PF_CHECK(Tests, Session.GetActiveSceneAsset() == StartupAsset->ID);
+		PF_CHECK(Tests, Session.IsPaused());
+		PF_CHECK(Tests, Session.Resume().has_value());
+		PF_CHECK(Tests, Session.Advance(Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, Session.Pause().has_value());
+		PF_CHECK(Tests, Session.RequestSceneTransition(SecondAsset->ID).has_value());
 		const auto PausedAdvance = Session.Advance(Timestep(0.1));
 		PF_CHECK(Tests, PausedAdvance && PausedAdvance->PhysicsSteps == 0);
 		PF_CHECK(Tests, Session.GetActiveSceneAsset() == SecondAsset->ID);

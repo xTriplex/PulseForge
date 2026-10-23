@@ -144,15 +144,36 @@ namespace
 			Entity Emitter = *EmitterResult;
 			PF_CHECK(Tests, Emitter.SetAudioSource(AudioSourceComponent{ Imported->ID, 0.5f, true, true, true }).has_value());
 			PF_CHECK(Tests, Emitter.SetAudioListener(AudioListenerComponent{}).has_value());
+			auto SecondEmitterResult = AudioScene.CreateEntity("Second audio emitter");
+			PF_CHECK(Tests, SecondEmitterResult.has_value());
+			if (!SecondEmitterResult) return;
+			Entity SecondEmitter = *SecondEmitterResult;
+			PF_CHECK(Tests, SecondEmitter.SetAudioSource(AudioSourceComponent{ Imported->ID, 0.5f, true, true, false }).has_value());
 
 			AudioSceneRuntime Runtime(Engine, Cache);
 			PF_CHECK(Tests, Runtime.Start(AudioScene).has_value());
-			PF_CHECK(Tests, Runtime.IsRunning() && Runtime.GetPlaybackCount() == 1);
+			PF_CHECK(Tests, Runtime.IsRunning() && Runtime.GetPlaybackCount() == 2);
+			auto CheckPlaybackState = [&Tests, &Runtime](UUID Identifier, bool Expected)
+			{
+				const auto Playing = Runtime.IsPlaybackPlaying(Identifier);
+				PF_CHECK(Tests, Playing.has_value());
+				if (Playing) PF_CHECK(Tests, *Playing == Expected);
+			};
+			CheckPlaybackState(Emitter.GetUUID(), true);
+			CheckPlaybackState(SecondEmitter.GetUUID(), true);
 			PF_CHECK(Tests, Runtime.Advance(AudioScene).has_value());
 			Scene OtherAudioScene;
 			PF_CHECK(Tests, !Runtime.Advance(OtherAudioScene));
 			PF_CHECK(Tests, Runtime.Pause(Emitter.GetUUID()).has_value());
+			CheckPlaybackState(Emitter.GetUUID(), false);
+			PF_CHECK(Tests, Runtime.SetPaused(true).has_value());
+			CheckPlaybackState(Emitter.GetUUID(), false);
+			CheckPlaybackState(SecondEmitter.GetUUID(), false);
+			PF_CHECK(Tests, Runtime.SetPaused(false).has_value());
+			CheckPlaybackState(Emitter.GetUUID(), false);
+			CheckPlaybackState(SecondEmitter.GetUUID(), true);
 			PF_CHECK(Tests, Runtime.Resume(Emitter.GetUUID()).has_value());
+			CheckPlaybackState(Emitter.GetUUID(), true);
 
 			AudioSourceComponent UpdatedSource{ Imported->ID, 0.25f, false, true, false };
 			PF_CHECK(Tests, Emitter.SetAudioSource(UpdatedSource).has_value());
@@ -161,10 +182,10 @@ namespace
 			PF_CHECK(Tests, Emitter.SetTransform(MovedEmitter).has_value());
 			PF_CHECK(Tests, Runtime.Advance(AudioScene).has_value());
 			PF_CHECK(Tests, Runtime.StopPlayback(Emitter.GetUUID()).has_value());
-			PF_CHECK(Tests, Runtime.GetPlaybackCount() == 0);
-			PF_CHECK(Tests, Runtime.Advance(AudioScene).has_value() && Runtime.GetPlaybackCount() == 0);
-			PF_CHECK(Tests, Runtime.Play(Emitter.GetUUID()).has_value());
 			PF_CHECK(Tests, Runtime.GetPlaybackCount() == 1);
+			PF_CHECK(Tests, Runtime.Advance(AudioScene).has_value() && Runtime.GetPlaybackCount() == 1);
+			PF_CHECK(Tests, Runtime.Play(Emitter.GetUUID()).has_value());
+			PF_CHECK(Tests, Runtime.GetPlaybackCount() == 2);
 
 			std::filesystem::create_directories(ProjectRoot / "Assets" / "Scripts", FileError);
 			PF_CHECK(Tests, !FileError);
@@ -189,14 +210,15 @@ end
 			PF_CHECK(Tests, AudioControlRuntime.Start(AudioScene).has_value());
 			PF_CHECK(Tests, AudioControlRuntime.Advance(AudioScene, Timestep(1.0 / 60.0)).has_value());
 			PF_CHECK(Tests, AudioControlRuntime.GetDiagnostics().empty());
-			PF_CHECK(Tests, Runtime.GetPlaybackCount() == 1);
+			PF_CHECK(Tests, Runtime.GetPlaybackCount() == 2);
 			AudioControlRuntime.Stop();
 			PF_CHECK(Tests, Emitter.RemoveScript().has_value());
 
 			PF_CHECK(Tests, Emitter.RemoveAudioSource().has_value());
-			PF_CHECK(Tests, Runtime.Advance(AudioScene).has_value() && Runtime.GetPlaybackCount() == 0);
+			PF_CHECK(Tests, Runtime.Advance(AudioScene).has_value() && Runtime.GetPlaybackCount() == 1);
 			Runtime.Stop();
 			PF_CHECK(Tests, !Runtime.IsRunning());
+			PF_CHECK(Tests, Runtime.GetPlaybackCount() == 0);
 
 			Scene ReusedEmitterScene;
 			const UUID ReusedEmitterID{ 0x5300000000000000ull, 8 };
