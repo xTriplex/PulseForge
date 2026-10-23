@@ -20,6 +20,11 @@ if(BUILD_TESTING)
 		COMMAND "${CMAKE_COMMAND}"
 			"-DPULSEFORGE_SOURCE_LAYOUT_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
 			-P "${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeSourceLayout.cmake")
+	add_test(NAME PulseForge.CMake.Presets
+		COMMAND "${CMAKE_COMMAND}"
+			"-DPULSEFORGE_SOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+			"-DPULSEFORGE_CMAKE_COMMAND=${CMAKE_COMMAND}"
+			-P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/CMake/TestPresets.cmake")
 endif()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeCoreDependencies.cmake")
@@ -36,6 +41,7 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeEngineTargets.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeGameTarget.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeEditorCoreTarget.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeAssetDeployment.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeVisualStudioLaunch.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeEditorTargets.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeShaderBuild.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeGpuValidationAnalysis.cmake")
@@ -45,3 +51,12 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeGpuValidation.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeTests.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeTargetPolicies.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeQualityGraph.cmake")
+
+if(BUILD_TESTING AND CMAKE_GENERATOR MATCHES "^Visual Studio")
+	add_test(NAME PulseForge.CMake.VisualStudioLaunchPaths
+		COMMAND "${CMAKE_COMMAND}"
+			"-DPULSEFORGE_BINARY_DIR=${CMAKE_BINARY_DIR}"
+			"-DPULSEFORGE_MSBUILD_EXECUTABLE=${CMAKE_MAKE_PROGRAM}"
+			"-DPULSEFORGE_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+			-P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/CMake/TestVisualStudioLaunchPaths.cmake")
+endif()

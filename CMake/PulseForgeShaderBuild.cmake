@@ -278,7 +278,7 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 			FILES
 				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/PulseForgeGame.pfproj" "PulseForgeGame.pfproj"
 		)
-		set_property(TARGET PulseForgeGame PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:PulseForgeGame>")
+		pulseforge_apply_visual_studio_debugger_working_directory(PulseForgeGame)
 	endif()
 
 	if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF OR
