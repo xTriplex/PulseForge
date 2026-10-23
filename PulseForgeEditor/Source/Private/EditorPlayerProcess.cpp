@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <system_error>
+#include <string_view>
 #include <utility>
 
 namespace PulseForgeEditor
@@ -44,11 +45,22 @@ namespace PulseForgeEditor
 	EditorPlayerProcessUpdate EditorPlayerProcess::Poll(size_t MaximumOutputBytes)
 	{
 		if (!m_Impl) return { .Error = "The player process implementation is unavailable" };
-		return m_Impl->Poll((std::min)(MaximumOutputBytes, size_t{ 1024 * 1024 }));
+		EditorPlayerProcessUpdate Update = m_Impl->Poll((std::min)(MaximumOutputBytes, size_t{ 1024 * 1024 }));
+		constexpr std::string_view Acknowledgement = "PULSEFORGE_EDITOR_CONTROL_ACCEPTED";
+		m_ControlAcknowledgementTail.append(Update.OutputChunk);
+		if (m_ControlAcknowledgementTail.find(Acknowledgement) != std::string::npos)
+			m_CooperativeControlAcknowledged = true;
+		if (m_ControlAcknowledgementTail.size() >= Acknowledgement.size())
+			m_ControlAcknowledgementTail.erase(0, m_ControlAcknowledgementTail.size() - Acknowledgement.size() + 1);
+		Update.CooperativeStopObserved = m_StopRequested && m_CooperativeControlAcknowledged && Update.ExitCode == 0 &&
+			!Update.ForcedTermination;
+		return Update;
 	}
 
 	void EditorPlayerProcess::RequestStop() noexcept
 	{
-		if (m_Impl) m_Impl->RequestStop();
+		if (!m_Impl || m_StopRequested) return;
+		m_StopRequested = true;
+		m_Impl->RequestStop();
 	}
 } // namespace PulseForgeEditor

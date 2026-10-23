@@ -122,6 +122,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <chrono>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -778,7 +780,7 @@ namespace
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
 			StopRuntime();
-			StopPlayerProcess();
+			ShutdownPlayerProcess();
 			m_ConsolePanel.Detach();
 			ShutdownImGui();
 			ShutdownFileDialog();
@@ -907,7 +909,7 @@ namespace
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
 			StopRuntime();
-			StopPlayerProcess();
+			ShutdownPlayerProcess();
 			m_ConsolePanel.Detach();
 			ResetViewportSceneRenderer();
 			ResetViewportTarget();
@@ -7644,6 +7646,7 @@ namespace
 			Specification.Executable = std::move(PlayerExecutable);
 			Specification.WorkingDirectory = m_Project->GetRootPath();
 			Specification.Arguments = { "--project", PathToUtf8(m_Project->GetFilePath()) };
+			Specification.Arguments.push_back("--editor-control-stdin");
 			if (m_SceneAsset)
 			{
 				Specification.Arguments.push_back("--start-scene");
@@ -7669,6 +7672,31 @@ namespace
 			m_PlayerProcess->RequestStop();
 		}
 
+		void ShutdownPlayerProcess() noexcept
+		{
+			if (!m_PlayerProcess) return;
+			StopPlayerProcess();
+			const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+			while (m_PlayerProcess && std::chrono::steady_clock::now() < Deadline)
+			{
+				const auto Update = m_PlayerProcess->Poll();
+				if (!Update.OutputChunk.empty()) PF_INFO("Player output during editor shutdown:\n{}", Update.OutputChunk);
+				if (Update.Error) PF_WARN("Player shutdown monitoring: {}", *Update.Error);
+				if (!Update.Running && Update.OutputComplete)
+				{
+					if (Update.ForcedTermination)
+						PF_WARN("Player required forced termination during editor shutdown (exit code {}).", Update.ExitCode.value_or(-1));
+					else if (Update.ExitCode)
+						PF_INFO("Player exited during editor shutdown (exit code {}).", *Update.ExitCode);
+					m_PlayerProcess.reset();
+					return;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			}
+			PF_WARN("Player did not complete shutdown within six seconds; process ownership is being closed with forced cleanup.");
+			m_PlayerProcess.reset();
+		}
+
 		void PollPlayerProcess()
 		{
 			if (!m_PlayerProcess) return;
@@ -7685,16 +7713,22 @@ namespace
 				SetError("Player process monitoring failed: " + *Update.Error);
 				m_PlayerProcess->RequestStop();
 			}
-			if (Update.Running || (Update.ExitCode && Update.OutputTruncated)) return;
+			if (Update.Running || !Update.OutputComplete) return;
 			if (!Update.ExitCode)
 			{
 				SetError("Player process ended without a reported exit status.");
 				m_PlayerProcess.reset();
 				return;
 			}
-			if (m_PlayerStopRequested) SetStatus("Player process stopped.");
-			else if (*Update.ExitCode == 0) SetStatus("Player exited successfully.");
-			else SetError("Player exited with code " + std::to_string(*Update.ExitCode) + ".");
+			if (Update.ForcedTermination)
+				SetError("Player was force-terminated after it did not complete cooperative shutdown.");
+			else if (Update.OutputTruncated)
+				SetError("Player exited after output draining was abandoned; some final output was discarded.");
+			else if (!m_PlayerMonitorErrorReported && m_PlayerStopRequested && Update.CooperativeStopObserved)
+				SetStatus("Player shut down cooperatively.");
+			else if (!m_PlayerMonitorErrorReported && m_PlayerStopRequested) SetStatus("Player exited after the stop request.");
+			else if (!m_PlayerMonitorErrorReported && *Update.ExitCode == 0) SetStatus("Player exited successfully.");
+			else if (!m_PlayerMonitorErrorReported) SetError("Player exited with code " + std::to_string(*Update.ExitCode) + ".");
 			m_PlayerProcess.reset();
 			m_PlayerStopRequested = false;
 			m_PlayerMonitorErrorReported = false;

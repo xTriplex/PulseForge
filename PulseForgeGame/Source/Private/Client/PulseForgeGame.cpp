@@ -16,9 +16,63 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#if defined(PF_PLATFORM_WINDOWS)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <Windows.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace
 {
+	class EditorShutdownChannel final
+	{
+	public:
+		explicit EditorShutdownChannel(bool Enabled) noexcept : m_Enabled(Enabled)
+		{
+#if !defined(PF_PLATFORM_WINDOWS)
+			if (m_Enabled)
+			{
+				const int Flags = ::fcntl(STDIN_FILENO, F_GETFL);
+				if (Flags >= 0) (void)::fcntl(STDIN_FILENO, F_SETFL, Flags | O_NONBLOCK);
+			}
+#endif
+		}
+
+		bool ConsumeRequest() noexcept
+		{
+			if (!m_Enabled || m_Consumed) return false;
+#if defined(PF_PLATFORM_WINDOWS)
+			HANDLE Input = GetStdHandle(STD_INPUT_HANDLE);
+			if (!Input || Input == INVALID_HANDLE_VALUE) return false;
+			DWORD Available = 0;
+			if (!PeekNamedPipe(Input, nullptr, 0, nullptr, &Available, nullptr))
+			{
+				if (GetLastError() == ERROR_BROKEN_PIPE) m_Consumed = true;
+				return m_Consumed;
+			}
+			if (Available == 0) return false;
+			char Request = 0;
+			DWORD Read = 0;
+			if (!ReadFile(Input, &Request, 1, &Read, nullptr) || Read == 0 || Request == 'S') m_Consumed = true;
+			return m_Consumed;
+#else
+			char Request = 0;
+			const ssize_t Read = ::read(STDIN_FILENO, &Request, 1);
+			if (Read == 1 || Read == 0) m_Consumed = true;
+			else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) m_Consumed = true;
+			return m_Consumed;
+#endif
+		}
+
+	private:
+		bool m_Enabled = false;
+		bool m_Consumed = false;
+	};
+
 	std::string PathToUtf8(const std::filesystem::path& Path)
 	{
 		const std::u8string Encoded = Path.u8string();
@@ -60,10 +114,17 @@ namespace
 #endif
 	}
 
-	PulseForgeGame::PlayerLaunchConfiguration ParseArguments(int ArgumentCount, char** Arguments)
+	struct ParsedPlayerLaunch final
+	{
+		PulseForgeGame::PlayerLaunchConfiguration Configuration;
+		bool EditorControlEnabled = false;
+	};
+
+	ParsedPlayerLaunch ParseArguments(int ArgumentCount, char** Arguments)
 	{
 		std::vector<std::string> DefaultArguments;
 		std::vector<std::string_view> ParsedArguments;
+		bool EditorControlEnabled = false;
 		if (ArgumentCount <= 1)
 		{
 			auto ResourceDirectory = PulseForge::Platform::GetResourceDirectory();
@@ -78,7 +139,14 @@ namespace
 		{
 			ParsedArguments.reserve(static_cast<size_t>(ArgumentCount - 1));
 			for (int Index = 1; Index < ArgumentCount; ++Index)
+			{
+				if (std::string_view(Arguments[Index]) == "--editor-control-stdin")
+				{
+					EditorControlEnabled = true;
+					continue;
+				}
 				ParsedArguments.emplace_back(Arguments[Index]);
+			}
 		}
 
 		std::error_code Error;
@@ -87,15 +155,15 @@ namespace
 		auto Configuration = PulseForgeGame::ParsePlayerLaunchConfiguration(ParsedArguments, WorkingDirectory);
 		if (!Configuration) throw std::runtime_error(Configuration.error().Message);
 		ValidateLaunchProject(*Configuration);
-		return std::move(*Configuration);
+		return { std::move(*Configuration), EditorControlEnabled };
 	}
 } // namespace
 
 class ExampleLayer final : public PulseForge::Layer
 {
 public:
-	explicit ExampleLayer(PulseForgeGame::PlayerLaunchConfiguration Configuration)
-		: Layer("Player"), m_Configuration(std::move(Configuration))
+	explicit ExampleLayer(PulseForgeGame::PlayerLaunchConfiguration Configuration, bool EditorControlEnabled)
+		: Layer("Player"), m_Configuration(std::move(Configuration)), m_EditorShutdownChannel(EditorControlEnabled)
 	{
 #if defined(PF_DEBUG)
 		if (const char* Smoke = std::getenv("PULSEFORGE_PLAYER_SMOKE_EXIT_AFTER_RENDER"))
@@ -118,6 +186,13 @@ public:
 
 	void OnUpdate(PulseForge::Timestep DeltaTime) override
 	{
+		if (m_EditorShutdownChannel.ConsumeRequest())
+		{
+			m_EditorShutdownRequested = true;
+			PF_INFO("PULSEFORGE_EDITOR_CONTROL_ACCEPTED");
+			PulseForge::Application::Get().RequestClose();
+			return;
+		}
 		if (m_Session)
 		{
 			const auto Advanced = m_Session->Advance(DeltaTime);
@@ -189,7 +264,10 @@ public:
 
 	~ExampleLayer() override
 	{
+		m_SceneRenderer.reset();
+		m_Session.reset();
 		if (m_PlayerSmokeShutdownRequested) PF_INFO("PULSEFORGE_PLAYER_RELOCATION_SMOKE_SHUTDOWN=PASS");
+		if (m_EditorShutdownRequested) PF_INFO("PULSEFORGE_PLAYER_ORDERLY_STOP=PASS");
 	}
 
 private:
@@ -203,18 +281,21 @@ private:
 	bool m_PlayerSmokeExitAfterRender = false;
 	bool m_PlayerSmokeShutdownRequested = false;
 	bool m_PlayerRuntimeSmokeLogged = false;
+	EditorShutdownChannel m_EditorShutdownChannel;
+	bool m_EditorShutdownRequested = false;
 };
 
-PulseForgeGameApp::PulseForgeGameApp(PulseForgeGame::PlayerLaunchConfiguration Configuration)
+PulseForgeGameApp::PulseForgeGameApp(PulseForgeGame::PlayerLaunchConfiguration Configuration, bool EditorControlEnabled)
 	: Application(ResolveRendererAPI(Configuration),
 		  PulseForge::WindowProps("PulseForge Player", Configuration.WindowWidth.value_or(1280), Configuration.WindowHeight.value_or(720)))
 {
 	if (Configuration.DiagnosticsEnabled && !StartDiagnosticsCapture())
 		throw std::runtime_error("Could not start the requested bounded diagnostics capture.");
-	PushLayer(std::make_unique<ExampleLayer>(std::move(Configuration)));
+	PushLayer(std::make_unique<ExampleLayer>(std::move(Configuration), EditorControlEnabled));
 }
 
 std::unique_ptr<PulseForge::Application> PulseForge::CreateApplication(int ArgumentCount, char** Arguments)
 {
-	return std::make_unique<PulseForgeGameApp>(ParseArguments(ArgumentCount, Arguments));
+	auto Parsed = ParseArguments(ArgumentCount, Arguments);
+	return std::make_unique<PulseForgeGameApp>(std::move(Parsed.Configuration), Parsed.EditorControlEnabled);
 }

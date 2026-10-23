@@ -221,6 +221,19 @@ namespace PulseForge
 		return m_Impl ? m_Impl->Voices.size() : 0;
 	}
 
+	std::expected<bool, AudioSceneRuntimeError> AudioSceneRuntime::IsPlaybackPlaying(UUID Identifier) const
+	{
+		if (!m_Impl)
+			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::NotRunning, "Audio scene runtime is not started"));
+		const auto Voice = m_Impl->Voices.find(Identifier);
+		if (Voice == m_Impl->Voices.end())
+			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::MissingPlayback, "Entity has no active audio playback"));
+		const auto EntityValue = m_Impl->Source->FindEntity(Identifier);
+		if (!EntityValue || *EntityValue != Voice->second.BoundEntity)
+			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::MissingPlayback, "Entity has no active audio playback"));
+		return Voice->second.Playback.IsPlaying();
+	}
+
 	std::expected<void, AudioSceneRuntimeError> AudioSceneRuntime::SetPaused(bool Paused)
 	{
 		if (!m_Impl) return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::NotRunning, "Audio scene runtime is not started"));

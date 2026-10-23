@@ -12,7 +12,9 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/socket.h>
 #include <new>
+#include <chrono>
 
 extern char** environ;
 
@@ -21,23 +23,16 @@ namespace PulseForgeEditor::Detail
 	class PosixEditorPlayerProcess final : public EditorPlayerProcessImpl
 	{
 	public:
-		PosixEditorPlayerProcess(pid_t ProcessID, int OutputDescriptor) noexcept
-			: m_ProcessID(ProcessID), m_OutputDescriptor(OutputDescriptor)
+		PosixEditorPlayerProcess(pid_t ProcessID, int OutputDescriptor, int ControlDescriptor) noexcept
+			: m_ProcessID(ProcessID), m_OutputDescriptor(OutputDescriptor), m_ControlDescriptor(ControlDescriptor)
 		{
 		}
 
 		~PosixEditorPlayerProcess() override
 		{
-			RequestStop();
-			if (!m_Reaped && m_ProcessID > 0)
-			{
-				(void)::kill(m_ProcessID, SIGKILL);
-				int Status = 0;
-				while (::waitpid(m_ProcessID, &Status, 0) < 0 && errno == EINTR)
-				{
-				}
-			}
+			ForceStopForDestruction();
 			CloseOutputDescriptor();
+			CloseControlDescriptor();
 		}
 
 		EditorPlayerProcessUpdate Poll(size_t MaximumOutputBytes) override
@@ -45,6 +40,12 @@ namespace PulseForgeEditor::Detail
 			EditorPlayerProcessUpdate Update;
 			ReadOutput(MaximumOutputBytes, Update);
 			ObserveExit(Update);
+			AdvanceStopDeadline(Update);
+			AdvanceOutputDeadline(Update);
+			Update.OutputComplete = m_OutputComplete;
+			Update.OutputTruncated = Update.OutputTruncated || m_OutputTruncated;
+			Update.ForcedTermination = m_ForcedTermination;
+			Update.CooperativeStopObserved = m_StopRequested && m_Reaped && !m_ForcedTermination;
 			return Update;
 		}
 
@@ -53,13 +54,24 @@ namespace PulseForgeEditor::Detail
 			if (m_Reaped || m_StopRequested || m_ProcessID <= 0) return;
 			int WaitError = 0;
 			if (ObserveExitStatus(WaitError)) return;
-			if (::kill(m_ProcessID, SIGTERM) == 0 || errno == ESRCH) m_StopRequested = true;
+			m_StopRequested = true;
+			m_StopDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+			if (m_ControlDescriptor >= 0)
+			{
+				const char Request = 'S';
+#if defined(MSG_NOSIGNAL)
+				const ssize_t Written = ::send(m_ControlDescriptor, &Request, 1, MSG_NOSIGNAL);
+#else
+				const ssize_t Written = ::send(m_ControlDescriptor, &Request, 1, 0);
+#endif
+				if (Written == 1) CloseControlDescriptor();
+			}
 		}
 
 	private:
 		void ReadOutput(size_t MaximumOutputBytes, EditorPlayerProcessUpdate& Update)
 		{
-			if (m_OutputDescriptor < 0) return;
+			if (m_OutputDescriptor < 0 || m_OutputComplete) return;
 
 			if (MaximumOutputBytes > 0)
 			{
@@ -70,16 +82,24 @@ namespace PulseForgeEditor::Detail
 					if (Read > 0)
 					{
 						Update.OutputChunk.assign(Buffer.data(), static_cast<size_t>(Read));
+						if (static_cast<size_t>(Read) == MaximumOutputBytes) Update.OutputTruncated = true;
 						break;
 					}
 					if (Read == 0)
 					{
+						m_OutputComplete = true;
 						CloseOutputDescriptor();
 						break;
 					}
 					if (errno == EINTR) continue;
 					if (errno != EAGAIN && errno != EWOULDBLOCK)
+					{
+						Update.OutputReadFailed = true;
 						Update.Error = "Could not read player output: " + std::string(std::strerror(errno));
+						m_OutputComplete = true;
+						m_OutputTruncated = true;
+						CloseOutputDescriptor();
+					}
 					break;
 				}
 			}
@@ -89,8 +109,18 @@ namespace PulseForgeEditor::Detail
 				pollfd Descriptor{ .fd = m_OutputDescriptor, .events = POLLIN };
 				const int Result = ::poll(&Descriptor, 1, 0);
 				if (Result > 0 && (Descriptor.revents & POLLIN) != 0) Update.OutputTruncated = true;
+				else if (Result > 0 && (Descriptor.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0)
+				{
+					// A final zero-byte read below observes EOF; do not infer completion from process exit.
+				}
 				else if (Result < 0 && errno != EINTR)
+				{
+					Update.OutputReadFailed = true;
 					Update.Error = "Could not inspect player output: " + std::string(std::strerror(errno));
+					m_OutputComplete = true;
+					m_OutputTruncated = true;
+					CloseOutputDescriptor();
+				}
 			}
 		}
 
@@ -115,6 +145,48 @@ namespace PulseForgeEditor::Detail
 			Update.Running = false;
 			if (m_HasExitCode) Update.ExitCode = m_ExitCode;
 			if (WaitError != 0) Update.Error = "Could not inspect player process state: " + std::string(std::strerror(WaitError));
+		}
+
+		void AdvanceStopDeadline(EditorPlayerProcessUpdate& Update)
+		{
+			if (!m_StopRequested || m_Reaped || m_ForcedTermination || std::chrono::steady_clock::now() < m_StopDeadline) return;
+			if (::kill(m_ProcessID, SIGKILL) == 0 || errno == ESRCH)
+				m_ForcedTermination = true;
+			else
+			{
+				Update.Error = "Could not force-stop the unresponsive player: " + std::string(std::strerror(errno));
+				Update.OutputReadFailed = true;
+			}
+		}
+
+		void AdvanceOutputDeadline(EditorPlayerProcessUpdate& Update)
+		{
+			if (!m_Reaped || m_OutputComplete) return;
+			if (m_ExitObservedAt == std::chrono::steady_clock::time_point{}) m_ExitObservedAt = std::chrono::steady_clock::now();
+			if (std::chrono::steady_clock::now() - m_ExitObservedAt < std::chrono::seconds(2)) return;
+			m_OutputTruncated = true;
+			m_OutputComplete = true;
+			CloseOutputDescriptor();
+			Update.Error = "Player output drain was abandoned after the bounded post-exit deadline";
+		}
+
+		void ForceStopForDestruction() noexcept
+		{
+			if (m_Reaped || m_ProcessID <= 0) return;
+			(void)::kill(m_ProcessID, SIGKILL);
+			const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+			while (std::chrono::steady_clock::now() < Deadline)
+			{
+				int Status = 0;
+				const pid_t Result = ::waitpid(m_ProcessID, &Status, WNOHANG);
+				if (Result == m_ProcessID || (Result < 0 && errno == ECHILD))
+				{
+					m_Reaped = true;
+					return;
+				}
+				if (Result < 0 && errno != EINTR) return;
+				(void)::poll(nullptr, 0, 10);
+			}
 		}
 
 		bool ObserveExitStatus(int& ErrorCode) noexcept
@@ -154,12 +226,25 @@ namespace PulseForgeEditor::Detail
 			m_OutputDescriptor = -1;
 		}
 
+		void CloseControlDescriptor() noexcept
+		{
+			if (m_ControlDescriptor < 0) return;
+			(void)::close(m_ControlDescriptor);
+			m_ControlDescriptor = -1;
+		}
+
 		pid_t m_ProcessID = -1;
 		int m_OutputDescriptor = -1;
+		int m_ControlDescriptor = -1;
 		int64_t m_ExitCode = 0;
 		bool m_Reaped = false;
 		bool m_HasExitCode = false;
 		bool m_StopRequested = false;
+		bool m_ForcedTermination = false;
+		bool m_OutputComplete = false;
+		bool m_OutputTruncated = false;
+		std::chrono::steady_clock::time_point m_StopDeadline{};
+		std::chrono::steady_clock::time_point m_ExitObservedAt{};
 		int m_WaitErrorCode = 0;
 	};
 
@@ -169,6 +254,14 @@ namespace PulseForgeEditor::Detail
 		int PipeDescriptors[2] = { -1, -1 };
 		if (::pipe(PipeDescriptors) != 0)
 			return std::unexpected("Could not create player output pipe: " + std::string(std::strerror(errno)));
+		int ControlDescriptors[2] = { -1, -1 };
+		if (::socketpair(AF_UNIX, SOCK_STREAM, 0, ControlDescriptors) != 0)
+		{
+			const std::string Error = "Could not create player control pipe: " + std::string(std::strerror(errno));
+			(void)::close(PipeDescriptors[0]);
+			(void)::close(PipeDescriptors[1]);
+			return std::unexpected(Error);
+		}
 
 		const auto Close = [](int& Descriptor)
 		{
@@ -185,12 +278,30 @@ namespace PulseForgeEditor::Detail
 				const std::string Error = "Could not isolate player output descriptors: " + std::string(std::strerror(errno));
 				Close(PipeDescriptors[0]);
 				Close(PipeDescriptors[1]);
+				Close(ControlDescriptors[0]);
+				Close(ControlDescriptors[1]);
 				return std::unexpected(Error);
 			}
 			Close(Descriptor);
 			Descriptor = Replacement;
 		}
-		for (const int Descriptor : PipeDescriptors)
+		for (int& Descriptor : ControlDescriptors)
+		{
+			if (Descriptor > STDERR_FILENO) continue;
+			const int Replacement = ::fcntl(Descriptor, F_DUPFD, STDERR_FILENO + 1);
+			if (Replacement < 0)
+			{
+				const std::string Error = "Could not isolate player control descriptors: " + std::string(std::strerror(errno));
+				Close(PipeDescriptors[0]);
+				Close(PipeDescriptors[1]);
+				Close(ControlDescriptors[0]);
+				Close(ControlDescriptors[1]);
+				return std::unexpected(Error);
+			}
+			Close(Descriptor);
+			Descriptor = Replacement;
+		}
+		for (const int Descriptor : { PipeDescriptors[0], PipeDescriptors[1], ControlDescriptors[0], ControlDescriptors[1] })
 		{
 			const int Flags = ::fcntl(Descriptor, F_GETFD);
 			if (Flags < 0 || ::fcntl(Descriptor, F_SETFD, Flags | FD_CLOEXEC) < 0)
@@ -198,15 +309,31 @@ namespace PulseForgeEditor::Detail
 				const std::string Error = "Could not mark player output pipe close-on-exec: " + std::string(std::strerror(errno));
 				Close(PipeDescriptors[0]);
 				Close(PipeDescriptors[1]);
+				Close(ControlDescriptors[0]);
+				Close(ControlDescriptors[1]);
 				return std::unexpected(Error);
 			}
 		}
+#if defined(SO_NOSIGPIPE) && !defined(MSG_NOSIGNAL)
+		const int SuppressSigPipe = 1;
+		if (::setsockopt(ControlDescriptors[1], SOL_SOCKET, SO_NOSIGPIPE, &SuppressSigPipe, sizeof(SuppressSigPipe)) != 0)
+		{
+			const std::string Error = "Could not protect the player control channel from a broken pipe: " + std::string(std::strerror(errno));
+			Close(PipeDescriptors[0]);
+			Close(PipeDescriptors[1]);
+			Close(ControlDescriptors[0]);
+			Close(ControlDescriptors[1]);
+			return std::unexpected(Error);
+		}
+#endif
 		const int ReadFlags = ::fcntl(PipeDescriptors[0], F_GETFL);
 		if (ReadFlags < 0 || ::fcntl(PipeDescriptors[0], F_SETFL, ReadFlags | O_NONBLOCK) < 0)
 		{
 			const std::string Error = "Could not configure nonblocking player output: " + std::string(std::strerror(errno));
 			Close(PipeDescriptors[0]);
 			Close(PipeDescriptors[1]);
+			Close(ControlDescriptors[0]);
+			Close(ControlDescriptors[1]);
 			return std::unexpected(Error);
 		}
 
@@ -216,6 +343,8 @@ namespace PulseForgeEditor::Detail
 		{
 			Close(PipeDescriptors[0]);
 			Close(PipeDescriptors[1]);
+			Close(ControlDescriptors[0]);
+			Close(ControlDescriptors[1]);
 			return std::unexpected("Could not initialize player process file actions: " + std::string(std::strerror(ErrorCode)));
 		}
 		const auto AddAction = [&ErrorCode](int Result)
@@ -224,15 +353,19 @@ namespace PulseForgeEditor::Detail
 		};
 		AddAction(::posix_spawn_file_actions_adddup2(&Actions, PipeDescriptors[1], STDOUT_FILENO));
 		AddAction(::posix_spawn_file_actions_adddup2(&Actions, PipeDescriptors[1], STDERR_FILENO));
-		AddAction(::posix_spawn_file_actions_addopen(&Actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0));
+		AddAction(::posix_spawn_file_actions_adddup2(&Actions, ControlDescriptors[0], STDIN_FILENO));
 		AddAction(::posix_spawn_file_actions_addclose(&Actions, PipeDescriptors[0]));
 		AddAction(::posix_spawn_file_actions_addclose(&Actions, PipeDescriptors[1]));
+		AddAction(::posix_spawn_file_actions_addclose(&Actions, ControlDescriptors[0]));
+		AddAction(::posix_spawn_file_actions_addclose(&Actions, ControlDescriptors[1]));
 		if (ErrorCode == 0) AddAction(::posix_spawn_file_actions_addchdir_np(&Actions, Spec.WorkingDirectory.c_str()));
 		if (ErrorCode != 0)
 		{
 			(void)::posix_spawn_file_actions_destroy(&Actions);
 			Close(PipeDescriptors[0]);
 			Close(PipeDescriptors[1]);
+			Close(ControlDescriptors[0]);
+			Close(ControlDescriptors[1]);
 			return std::unexpected("Could not configure player process file actions: " + std::string(std::strerror(ErrorCode)));
 		}
 
@@ -250,13 +383,15 @@ namespace PulseForgeEditor::Detail
 		ErrorCode = ::posix_spawn(&ProcessID, Spec.Executable.c_str(), &Actions, nullptr, Arguments.data(), environ);
 		(void)::posix_spawn_file_actions_destroy(&Actions);
 		Close(PipeDescriptors[1]);
+		Close(ControlDescriptors[0]);
 		if (ErrorCode != 0)
 		{
 			Close(PipeDescriptors[0]);
+			Close(ControlDescriptors[1]);
 			return std::unexpected("Could not launch player process: " + std::string(std::strerror(ErrorCode)));
 		}
 
-		auto* RawImplementation = new (std::nothrow) PosixEditorPlayerProcess(ProcessID, PipeDescriptors[0]);
+		auto* RawImplementation = new (std::nothrow) PosixEditorPlayerProcess(ProcessID, PipeDescriptors[0], ControlDescriptors[1]);
 		if (!RawImplementation)
 		{
 			(void)::kill(ProcessID, SIGKILL);
@@ -265,6 +400,7 @@ namespace PulseForgeEditor::Detail
 			{
 			}
 			Close(PipeDescriptors[0]);
+			Close(ControlDescriptors[1]);
 			return std::unexpected("Could not allocate player process state");
 		}
 		return std::unique_ptr<EditorPlayerProcessImpl>(RawImplementation);
