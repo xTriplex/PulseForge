@@ -444,7 +444,7 @@ namespace
 		PF_CHECK(Tests, IncompleteBegan && IncompleteEnded && IncompleteAssociated);
 		FakeTimerQuery StaleAvailableQuery{ .Available = true };
 		const auto IncompleteDecision = TryRetireGpuFrameTiming(
-			IncompleteTiming, 41, [&](uint64_t) { RetireFakeQuery(IncompleteTiming, StaleAvailableQuery); });
+			IncompleteTiming, 41, [&]() { RetireFakeQuery(IncompleteTiming, StaleAvailableQuery); });
 		PF_CHECK(Tests, IncompleteDecision == GpuFrameTimingRetirementDecision::SubmissionIncomplete);
 		PF_CHECK(Tests, StaleAvailableQuery.PollCount == 0);
 		PF_CHECK(Tests, StaleAvailableQuery.ResultReadCount == 0);
@@ -464,22 +464,39 @@ namespace
 		PF_CHECK(Tests, EqualBegan && EqualEnded && EqualAssociated);
 		FakeTimerQuery EqualAvailableQuery{ .Available = true };
 		const auto EqualDecision = TryRetireGpuFrameTiming(
-			EqualTiming, 42, [&](uint64_t) { RetireFakeQuery(EqualTiming, EqualAvailableQuery); });
+			EqualTiming, 42, [&]() { RetireFakeQuery(EqualTiming, EqualAvailableQuery); });
 		PF_CHECK(Tests, EqualDecision == GpuFrameTimingRetirementDecision::SubmissionComplete);
 		PF_CHECK(Tests, EqualAvailableQuery.PollCount == 1 && EqualAvailableQuery.ResultReadCount == 1);
 		PF_CHECK(Tests, EqualAvailableQuery.ResetCount == 1 && EqualAvailableQuery.PublishCount == 1);
 		PF_CHECK(Tests, EqualAvailableQuery.PublishedSessionId == 8 && EqualAvailableQuery.PublishedFrameSequence == 22);
 		PF_CHECK(Tests, !EqualTiming.Pending && !EqualTiming.SubmissionValue);
 		const auto RepeatedEqualDecision = TryRetireGpuFrameTiming(
-			EqualTiming, 42, [&](uint64_t) { RetireFakeQuery(EqualTiming, EqualAvailableQuery); });
+			EqualTiming, 42, [&]() { RetireFakeQuery(EqualTiming, EqualAvailableQuery); });
 		PF_CHECK(Tests, RepeatedEqualDecision == GpuFrameTimingRetirementDecision::NotPending);
 		PF_CHECK(Tests, EqualAvailableQuery.PollCount == 1 && EqualAvailableQuery.PublishCount == 1);
+
+		auto [DelayedTiming, DelayedBegan, DelayedEnded, DelayedAssociated] = BeginPendingTiming(16, 30, 57);
+		PF_CHECK(Tests, DelayedBegan && DelayedEnded && DelayedAssociated);
+		FakeTimerQuery DelayedAvailableQuery;
+		const auto DelayedFirstPoll = TryRetireGpuFrameTiming(
+			DelayedTiming, 57, [&]() { RetireFakeQuery(DelayedTiming, DelayedAvailableQuery); });
+		PF_CHECK(Tests, DelayedFirstPoll == GpuFrameTimingRetirementDecision::SubmissionComplete);
+		PF_CHECK(Tests, DelayedAvailableQuery.PollCount == 1 && DelayedAvailableQuery.ResultReadCount == 0);
+		PF_CHECK(Tests, DelayedAvailableQuery.ResetCount == 0 && DelayedAvailableQuery.PublishCount == 0);
+		PF_CHECK(Tests, DelayedTiming.Pending && DelayedTiming.SubmissionValue == 57);
+		DelayedAvailableQuery.Available = true;
+		const auto DelayedSecondPoll = TryRetireGpuFrameTiming(
+			DelayedTiming, 57, [&]() { RetireFakeQuery(DelayedTiming, DelayedAvailableQuery); });
+		PF_CHECK(Tests, DelayedSecondPoll == GpuFrameTimingRetirementDecision::SubmissionComplete);
+		PF_CHECK(Tests, DelayedAvailableQuery.PollCount == 2 && DelayedAvailableQuery.ResultReadCount == 1);
+		PF_CHECK(Tests, DelayedAvailableQuery.ResetCount == 1 && DelayedAvailableQuery.PublishCount == 1);
+		PF_CHECK(Tests, !DelayedTiming.Pending && !DelayedTiming.SubmissionValue);
 
 		auto [BeyondTiming, BeyondBegan, BeyondEnded, BeyondAssociated] = BeginPendingTiming(9, 23, 42);
 		PF_CHECK(Tests, BeyondBegan && BeyondEnded && BeyondAssociated);
 		FakeTimerQuery BeyondAvailableQuery{ .Available = true };
 		const auto BeyondDecision = TryRetireGpuFrameTiming(
-			BeyondTiming, 100, [&](uint64_t) { RetireFakeQuery(BeyondTiming, BeyondAvailableQuery); });
+			BeyondTiming, 100, [&]() { RetireFakeQuery(BeyondTiming, BeyondAvailableQuery); });
 		PF_CHECK(Tests, BeyondDecision == GpuFrameTimingRetirementDecision::SubmissionComplete);
 		PF_CHECK(Tests, BeyondAvailableQuery.PollCount == 1 && BeyondAvailableQuery.PublishCount == 1);
 
@@ -489,7 +506,7 @@ namespace
 		PF_CHECK(Tests, !AssociateGpuFrameTimingSubmission(UnassignedTiming, 0));
 		FakeTimerQuery UnassignedAvailableQuery{ .Available = true };
 		const auto UnassignedDecision = TryRetireGpuFrameTiming(
-			UnassignedTiming, 100, [&](uint64_t) { RetireFakeQuery(UnassignedTiming, UnassignedAvailableQuery); });
+			UnassignedTiming, 100, [&]() { RetireFakeQuery(UnassignedTiming, UnassignedAvailableQuery); });
 		PF_CHECK(Tests, UnassignedDecision == GpuFrameTimingRetirementDecision::SubmissionUnassigned);
 		PF_CHECK(Tests, UnassignedAvailableQuery.PollCount == 0 && UnassignedTiming.Pending);
 
@@ -497,7 +514,7 @@ namespace
 		PF_CHECK(Tests, BeginGpuFrameTiming(RecordingTiming, 11, 25));
 		FakeTimerQuery RecordingAvailableQuery{ .Available = true };
 		const auto RecordingDecision = TryRetireGpuFrameTiming(
-			RecordingTiming, 100, [&](uint64_t) { RetireFakeQuery(RecordingTiming, RecordingAvailableQuery); });
+			RecordingTiming, 100, [&]() { RetireFakeQuery(RecordingTiming, RecordingAvailableQuery); });
 		PF_CHECK(Tests, RecordingDecision == GpuFrameTimingRetirementDecision::Recording);
 		PF_CHECK(Tests, RecordingAvailableQuery.PollCount == 0 && RecordingTiming.Recording);
 
@@ -507,7 +524,7 @@ namespace
 		PF_CHECK(Tests, !BeginGpuFrameTiming(OldSessionTiming, 13, 27));
 		FakeTimerQuery OldSessionAvailableQuery{ .Available = true };
 		const auto OldSessionDecision = TryRetireGpuFrameTiming(
-			OldSessionTiming, 55, [&](uint64_t) { RetireFakeQuery(OldSessionTiming, OldSessionAvailableQuery); });
+			OldSessionTiming, 55, [&]() { RetireFakeQuery(OldSessionTiming, OldSessionAvailableQuery); });
 		PF_CHECK(Tests, OldSessionDecision == GpuFrameTimingRetirementDecision::SubmissionComplete);
 		PF_CHECK(Tests, OldSessionAvailableQuery.PublishedSessionId == 12);
 		PF_CHECK(Tests, OldSessionAvailableQuery.PublishedFrameSequence == 26);
@@ -522,7 +539,7 @@ namespace
 		FailGpuFrameTiming(FailedSubmissionTiming);
 		FakeTimerQuery FailedSubmissionQuery{ .Available = true };
 		const auto FailedSubmissionDecision = TryRetireGpuFrameTiming(
-			FailedSubmissionTiming, 100, [&](uint64_t) { RetireFakeQuery(FailedSubmissionTiming, FailedSubmissionQuery); });
+			FailedSubmissionTiming, 100, [&]() { RetireFakeQuery(FailedSubmissionTiming, FailedSubmissionQuery); });
 		PF_CHECK(Tests, FailedSubmissionDecision == GpuFrameTimingRetirementDecision::Failed);
 		PF_CHECK(Tests, FailedSubmissionQuery.PollCount == 0 && FailedSubmissionTiming.Pending);
 
@@ -530,13 +547,13 @@ namespace
 		PF_CHECK(Tests, UnavailableBegan && UnavailableEnded && UnavailableAssociated);
 		FakeTimerQuery UnavailableQuery{ .Available = true };
 		const auto UnavailableDecision = TryRetireGpuFrameTiming(
-			UnavailableTiming, std::nullopt, [&](uint64_t) { RetireFakeQuery(UnavailableTiming, UnavailableQuery); });
+			UnavailableTiming, std::nullopt, [&]() { RetireFakeQuery(UnavailableTiming, UnavailableQuery); });
 		PF_CHECK(Tests, UnavailableDecision == GpuFrameTimingRetirementDecision::CompletionUnavailable);
 		PF_CHECK(Tests, UnavailableQuery.PollCount == 0 && UnavailableTiming.Pending);
 		PF_CHECK(Tests, UnavailableTiming.SubmissionValue == 56);
 		FailGpuFrameTiming(UnavailableTiming);
 		const auto FailedCompletionDecision = TryRetireGpuFrameTiming(
-			UnavailableTiming, 56, [&](uint64_t) { RetireFakeQuery(UnavailableTiming, UnavailableQuery); });
+			UnavailableTiming, 56, [&]() { RetireFakeQuery(UnavailableTiming, UnavailableQuery); });
 		PF_CHECK(Tests, FailedCompletionDecision == GpuFrameTimingRetirementDecision::Failed);
 		PF_CHECK(Tests, UnavailableQuery.PollCount == 0 && UnavailableTiming.Pending);
 	}

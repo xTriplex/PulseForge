@@ -81,7 +81,7 @@ namespace PulseForge::VulkanSupport
 		if (*CompletedSubmissionValue < *Timing.SubmissionValue)
 			return GpuFrameTimingRetirementDecision::SubmissionIncomplete;
 
-		std::invoke(std::forward<RetirementAction>(RetireQuery), *CompletedSubmissionValue);
+		std::invoke(std::forward<RetirementAction>(RetireQuery));
 		return GpuFrameTimingRetirementDecision::SubmissionComplete;
 	}
 } // namespace PulseForge::VulkanSupport
