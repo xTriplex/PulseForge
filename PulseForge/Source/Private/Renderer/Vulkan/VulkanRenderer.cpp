@@ -3434,7 +3434,7 @@ namespace PulseForge
 			(void)VulkanSupport::TryRetireGpuFrameTiming(
 				Frame.GpuTiming,
 				CompletedSubmissionValue,
-				[this, &Frame](uint64_t CompletedValue) { RetireGpuFrameTimingQuery(Frame, CompletedValue); });
+				[this, &Frame]() { RetireGpuFrameTimingQuery(Frame); });
 		}
 
 		std::optional<uint64_t> ReadCompletedGraphicsSubmissionValue() noexcept
@@ -3482,21 +3482,13 @@ namespace PulseForge
 			if (!WasAlreadyReported) PF_CORE_ERROR("Vulkan GPU frame timing failed: {0}", Reason);
 		}
 
-		void RetireGpuFrameTimingQuery(FrameContext& Frame, uint64_t CompletedSubmissionValue) noexcept
+		void RetireGpuFrameTimingQuery(FrameContext& Frame) noexcept
 		{
 			if (!Frame.GpuTiming.Pending || !Frame.GpuTimerQuery || !m_ActiveNvrhiDevice) return;
 			try
 			{
-				if (!m_ActiveNvrhiDevice->pollTimerQuery(Frame.GpuTimerQuery))
-				{
-					if (Frame.GpuTiming.SubmissionValue &&
-						CompletedSubmissionValue >= *Frame.GpuTiming.SubmissionValue)
-					{
-						MarkGpuFrameTimingFailure(
-							"NVRHI reported a timer query unavailable after its graphics submission completed.");
-					}
-					return;
-				}
+				// The associated submission can complete before NVRHI reports the timestamp result ready.
+				if (!m_ActiveNvrhiDevice->pollTimerQuery(Frame.GpuTimerQuery)) return;
 				const uint64_t SessionId = Frame.GpuTiming.SessionId;
 				const uint64_t FrameSequence = Frame.GpuTiming.FrameSequence;
 				const float Seconds = m_ActiveNvrhiDevice->getTimerQueryTime(Frame.GpuTimerQuery);
