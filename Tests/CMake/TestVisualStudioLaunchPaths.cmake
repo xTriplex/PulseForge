@@ -1,4 +1,8 @@
-foreach(PULSEFORGE_TARGET IN ITEMS PulseForgeEditor PulseForgeGame)
+if(NOT PULSEFORGE_TARGETS)
+	message(FATAL_ERROR "The launch-path test must receive at least one existing executable target.")
+endif()
+
+foreach(PULSEFORGE_TARGET IN LISTS PULSEFORGE_TARGETS)
 	set(PULSEFORGE_PROJECT "${PULSEFORGE_BINARY_DIR}/${PULSEFORGE_TARGET}.vcxproj")
 	if(NOT EXISTS "${PULSEFORGE_PROJECT}")
 		message(FATAL_ERROR "Generated Visual Studio project is missing: ${PULSEFORGE_PROJECT}")
@@ -44,4 +48,4 @@ foreach(PULSEFORGE_TARGET IN ITEMS PulseForgeEditor PulseForgeGame)
 	endforeach()
 endforeach()
 
-message(STATUS "Generated Visual Studio Editor and Game launch paths match Debug, Release and Dist output directories.")
+message(STATUS "Generated Visual Studio launch paths match Debug, Release and Dist output directories for: ${PULSEFORGE_TARGETS}.")
