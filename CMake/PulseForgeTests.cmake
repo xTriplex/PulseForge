@@ -155,6 +155,39 @@ if(BUILD_TESTING)
 	endif()
 	add_test(NAME PulseForge.ScriptingRuntime COMMAND PulseForgeScriptingRuntimeTests)
 
+	add_executable(PulseForgePlayerLaunchConfigurationTests
+		Tests/PlayerLaunchConfigurationTestMain.cpp
+		Tests/PlayerLaunchConfigurationTests.cpp
+		PulseForgeGame/Source/Private/Client/PlayerLaunchConfiguration.cpp
+	)
+	target_include_directories(PulseForgePlayerLaunchConfigurationTests PRIVATE Tests PulseForgeGame/Source/Public)
+	target_link_libraries(PulseForgePlayerLaunchConfigurationTests PRIVATE PulseForgeAssetCatalog)
+	add_test(NAME PulseForge.PlayerLaunchConfiguration COMMAND PulseForgePlayerLaunchConfigurationTests)
+
+	if(PULSEFORGE_BUILD_EDITOR)
+		add_executable(PulseForgeEditorPlayerProcessTests
+			Tests/EditorPlayerProcessTestMain.cpp
+			PulseForgeEditor/Source/Private/EditorPlayerProcess.cpp
+		)
+		if(WIN32)
+			target_sources(PulseForgeEditorPlayerProcessTests PRIVATE
+				PulseForgeEditor/Source/Private/Platform/Windows/EditorPlayerProcess.cpp)
+			target_link_libraries(PulseForgeEditorPlayerProcessTests PRIVATE kernel32)
+		elseif(PULSEFORGE_PLATFORM_LINUX)
+			target_sources(PulseForgeEditorPlayerProcessTests PRIVATE
+				PulseForgeEditor/Source/Private/Platform/Linux/EditorPlayerProcess.cpp)
+		elseif(PULSEFORGE_PLATFORM_MACOS)
+			target_sources(PulseForgeEditorPlayerProcessTests PRIVATE
+				PulseForgeEditor/Source/Private/Platform/MacOS/EditorPlayerProcess.cpp)
+		endif()
+		target_include_directories(PulseForgeEditorPlayerProcessTests PRIVATE
+			Tests
+			PulseForgeEditor/Source/Public)
+		add_test(NAME PulseForge.EditorPlayerProcess COMMAND PulseForgeEditorPlayerProcessTests)
+	endif()
+
+	target_sources(PulseForgeScriptingRuntimeTests PRIVATE Tests/PlayerSessionTests.cpp)
+
 	if(TARGET PulseForgeEditorCore)
 		add_executable(PulseForgeEditorCoreTests
 			Tests/PulseForgeEditorCoreTests.cpp
@@ -265,8 +298,12 @@ if(BUILD_TESTING)
 		PulseForgeSceneRendererConsumer
 		PulseForgeAudioRuntimeTests
 		PulseForgeScriptingRuntimeTests
+		PulseForgePlayerLaunchConfigurationTests
 		PulseForgeBufferUpdateTests
 	)
+	if(TARGET PulseForgeEditorPlayerProcessTests)
+		list(APPEND PULSEFORGE_TEST_EXECUTABLE_TARGETS PulseForgeEditorPlayerProcessTests)
+	endif()
 	foreach(EditorTestTarget IN ITEMS
 		PulseForgeEditorCoreConsumer
 		PulseForgeEditorCoreTests

@@ -38,17 +38,21 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorStyle.cpp
 		PulseForgeEditor/Source/Private/EditorWorkspacePresentation.cpp
 		PulseForgeEditor/Source/Private/EditorPlatformServices.cpp
+		PulseForgeEditor/Source/Private/EditorPlayerProcess.cpp
 		PulseForge/Vendor/imgui/misc/freetype/imgui_freetype.cpp
 	)
 	if(WIN32)
 		target_sources(PulseForgeEditorUI PRIVATE
-			PulseForgeEditor/Source/Private/Platform/Windows/EditorPlatformServices.cpp)
+			PulseForgeEditor/Source/Private/Platform/Windows/EditorPlatformServices.cpp
+			PulseForgeEditor/Source/Private/Platform/Windows/EditorPlayerProcess.cpp)
 	elseif(PULSEFORGE_PLATFORM_LINUX)
 		target_sources(PulseForgeEditorUI PRIVATE
-			PulseForgeEditor/Source/Private/Platform/Linux/EditorPlatformServices.cpp)
+			PulseForgeEditor/Source/Private/Platform/Linux/EditorPlatformServices.cpp
+			PulseForgeEditor/Source/Private/Platform/Linux/EditorPlayerProcess.cpp)
 	elseif(PULSEFORGE_PLATFORM_MACOS)
 		target_sources(PulseForgeEditorUI PRIVATE
-			PulseForgeEditor/Source/Private/Platform/MacOS/EditorPlatformServices.cpp)
+			PulseForgeEditor/Source/Private/Platform/MacOS/EditorPlatformServices.cpp
+			PulseForgeEditor/Source/Private/Platform/MacOS/EditorPlayerProcess.cpp)
 	else()
 		message(FATAL_ERROR "No EditorPlatformServices implementation is available for this target platform.")
 	endif()

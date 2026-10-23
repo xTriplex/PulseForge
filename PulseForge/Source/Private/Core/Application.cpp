@@ -9,8 +9,7 @@ namespace PulseForge
 {
 	Application* Application::s_Instance = nullptr;
 
-	Application::Application(RendererAPI API)
-		: m_RendererAPI(API)
+	Application::Application(RendererAPI API, WindowProps WindowProperties) : m_RendererAPI(API)
 	{
 		if (s_Instance)
 			throw std::logic_error("Only one PulseForge Application may exist at a time");
@@ -18,7 +17,8 @@ namespace PulseForge
 		const EWindowClientAPI WindowClientAPI = API == RendererAPI::OpenGL
 			? EWindowClientAPI::OpenGL
 			: EWindowClientAPI::Vulkan;
-		m_Window = Window::Create(WindowProps("PulseForge", 1280, 720, EWindowStyle::Default, WindowClientAPI));
+		WindowProperties.m_ClientAPI = WindowClientAPI;
+		m_Window = Window::Create(WindowProperties);
 		if (!m_Window)
 			throw std::runtime_error("Window creation failed");
 		m_Renderer = RendererBackend::Create(API, *m_Window);
