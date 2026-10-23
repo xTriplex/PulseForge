@@ -1,6 +1,7 @@
 #include "TestSupport.h"
 
 #include "Scene/SceneRenderSnapshot.h"
+#include "Renderer/Vulkan/VulkanGpuFrameTimingPolicy.h"
 #include "Renderer/Vulkan/VulkanPresentationResources.h"
 #include "Renderer/Vulkan/VulkanRendererShutdown.h"
 #include "Renderer/Vulkan/VulkanSupport.h"
@@ -8,9 +9,11 @@
 #include <algorithm>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -401,6 +404,143 @@ namespace
 			GpuTimestampCapabilityReason::InvalidTimestampPeriod);
 	}
 
+	void TestGpuFrameTimingSubmissionRetirement(TestRunner& Tests)
+	{
+		struct FakeTimerQuery
+		{
+			bool Available = false;
+			uint32_t PollCount = 0;
+			uint32_t ResultReadCount = 0;
+			uint32_t ResetCount = 0;
+			uint32_t PublishCount = 0;
+			uint64_t PublishedSessionId = 0;
+			uint64_t PublishedFrameSequence = 0;
+		};
+
+		const auto BeginPendingTiming = [](uint64_t SessionId, uint64_t FrameSequence, uint64_t SubmissionValue)
+		{
+			GpuFrameTimingState Timing;
+			const bool Began = BeginGpuFrameTiming(Timing, SessionId, FrameSequence);
+			const bool Ended = EndGpuFrameTimingRecording(Timing);
+			const bool Associated = AssociateGpuFrameTimingSubmission(Timing, SubmissionValue);
+			return std::tuple{ Timing, Began, Ended, Associated };
+		};
+
+		const auto RetireFakeQuery = [](GpuFrameTimingState& Timing, FakeTimerQuery& Query)
+		{
+			++Query.PollCount;
+			if (!Query.Available) return;
+			++Query.ResultReadCount;
+			Query.PublishedSessionId = Timing.SessionId;
+			Query.PublishedFrameSequence = Timing.FrameSequence;
+			++Query.ResetCount;
+			++Query.PublishCount;
+			ResetGpuFrameTiming(Timing);
+		};
+
+		// A previous-use availability result is deliberately true. Production must not poll it until
+		// the submission containing the current query reset has completed.
+		auto [IncompleteTiming, IncompleteBegan, IncompleteEnded, IncompleteAssociated] = BeginPendingTiming(7, 21, 42);
+		PF_CHECK(Tests, IncompleteBegan && IncompleteEnded && IncompleteAssociated);
+		FakeTimerQuery StaleAvailableQuery{ .Available = true };
+		const auto IncompleteDecision = TryRetireGpuFrameTiming(
+			IncompleteTiming, 41, [&](uint64_t) { RetireFakeQuery(IncompleteTiming, StaleAvailableQuery); });
+		PF_CHECK(Tests, IncompleteDecision == GpuFrameTimingRetirementDecision::SubmissionIncomplete);
+		PF_CHECK(Tests, StaleAvailableQuery.PollCount == 0);
+		PF_CHECK(Tests, StaleAvailableQuery.ResultReadCount == 0);
+		PF_CHECK(Tests, StaleAvailableQuery.ResetCount == 0);
+		PF_CHECK(Tests, StaleAvailableQuery.PublishCount == 0);
+		PF_CHECK(Tests, IncompleteTiming.Pending && IncompleteTiming.SubmissionValue == 42);
+		PF_CHECK(Tests, IncompleteTiming.SessionId == 7 && IncompleteTiming.FrameSequence == 21);
+
+		// A later untimed frame reuses the context synchronization value but cannot replace query identity.
+		const uint64_t LaterUntimedFrameSubmissionValue = 87;
+		PF_CHECK(Tests, IncompleteTiming.SubmissionValue == 42);
+		PF_CHECK(Tests, !AssociateGpuFrameTimingSubmission(IncompleteTiming, LaterUntimedFrameSubmissionValue));
+		PF_CHECK(Tests, IncompleteTiming.SubmissionValue == 42);
+		PF_CHECK(Tests, IncompleteTiming.FrameSequence == 21 && IncompleteTiming.SessionId == 7);
+
+		auto [EqualTiming, EqualBegan, EqualEnded, EqualAssociated] = BeginPendingTiming(8, 22, 42);
+		PF_CHECK(Tests, EqualBegan && EqualEnded && EqualAssociated);
+		FakeTimerQuery EqualAvailableQuery{ .Available = true };
+		const auto EqualDecision = TryRetireGpuFrameTiming(
+			EqualTiming, 42, [&](uint64_t) { RetireFakeQuery(EqualTiming, EqualAvailableQuery); });
+		PF_CHECK(Tests, EqualDecision == GpuFrameTimingRetirementDecision::SubmissionComplete);
+		PF_CHECK(Tests, EqualAvailableQuery.PollCount == 1 && EqualAvailableQuery.ResultReadCount == 1);
+		PF_CHECK(Tests, EqualAvailableQuery.ResetCount == 1 && EqualAvailableQuery.PublishCount == 1);
+		PF_CHECK(Tests, EqualAvailableQuery.PublishedSessionId == 8 && EqualAvailableQuery.PublishedFrameSequence == 22);
+		PF_CHECK(Tests, !EqualTiming.Pending && !EqualTiming.SubmissionValue);
+		const auto RepeatedEqualDecision = TryRetireGpuFrameTiming(
+			EqualTiming, 42, [&](uint64_t) { RetireFakeQuery(EqualTiming, EqualAvailableQuery); });
+		PF_CHECK(Tests, RepeatedEqualDecision == GpuFrameTimingRetirementDecision::NotPending);
+		PF_CHECK(Tests, EqualAvailableQuery.PollCount == 1 && EqualAvailableQuery.PublishCount == 1);
+
+		auto [BeyondTiming, BeyondBegan, BeyondEnded, BeyondAssociated] = BeginPendingTiming(9, 23, 42);
+		PF_CHECK(Tests, BeyondBegan && BeyondEnded && BeyondAssociated);
+		FakeTimerQuery BeyondAvailableQuery{ .Available = true };
+		const auto BeyondDecision = TryRetireGpuFrameTiming(
+			BeyondTiming, 100, [&](uint64_t) { RetireFakeQuery(BeyondTiming, BeyondAvailableQuery); });
+		PF_CHECK(Tests, BeyondDecision == GpuFrameTimingRetirementDecision::SubmissionComplete);
+		PF_CHECK(Tests, BeyondAvailableQuery.PollCount == 1 && BeyondAvailableQuery.PublishCount == 1);
+
+		GpuFrameTimingState UnassignedTiming;
+		PF_CHECK(Tests, BeginGpuFrameTiming(UnassignedTiming, 10, 24));
+		PF_CHECK(Tests, EndGpuFrameTimingRecording(UnassignedTiming));
+		PF_CHECK(Tests, !AssociateGpuFrameTimingSubmission(UnassignedTiming, 0));
+		FakeTimerQuery UnassignedAvailableQuery{ .Available = true };
+		const auto UnassignedDecision = TryRetireGpuFrameTiming(
+			UnassignedTiming, 100, [&](uint64_t) { RetireFakeQuery(UnassignedTiming, UnassignedAvailableQuery); });
+		PF_CHECK(Tests, UnassignedDecision == GpuFrameTimingRetirementDecision::SubmissionUnassigned);
+		PF_CHECK(Tests, UnassignedAvailableQuery.PollCount == 0 && UnassignedTiming.Pending);
+
+		GpuFrameTimingState RecordingTiming;
+		PF_CHECK(Tests, BeginGpuFrameTiming(RecordingTiming, 11, 25));
+		FakeTimerQuery RecordingAvailableQuery{ .Available = true };
+		const auto RecordingDecision = TryRetireGpuFrameTiming(
+			RecordingTiming, 100, [&](uint64_t) { RetireFakeQuery(RecordingTiming, RecordingAvailableQuery); });
+		PF_CHECK(Tests, RecordingDecision == GpuFrameTimingRetirementDecision::Recording);
+		PF_CHECK(Tests, RecordingAvailableQuery.PollCount == 0 && RecordingTiming.Recording);
+
+		// A restarted capture does not relabel a query that was recorded by the prior capture.
+		auto [OldSessionTiming, OldSessionBegan, OldSessionEnded, OldSessionAssociated] = BeginPendingTiming(12, 26, 55);
+		PF_CHECK(Tests, OldSessionBegan && OldSessionEnded && OldSessionAssociated);
+		PF_CHECK(Tests, !BeginGpuFrameTiming(OldSessionTiming, 13, 27));
+		FakeTimerQuery OldSessionAvailableQuery{ .Available = true };
+		const auto OldSessionDecision = TryRetireGpuFrameTiming(
+			OldSessionTiming, 55, [&](uint64_t) { RetireFakeQuery(OldSessionTiming, OldSessionAvailableQuery); });
+		PF_CHECK(Tests, OldSessionDecision == GpuFrameTimingRetirementDecision::SubmissionComplete);
+		PF_CHECK(Tests, OldSessionAvailableQuery.PublishedSessionId == 12);
+		PF_CHECK(Tests, OldSessionAvailableQuery.PublishedFrameSequence == 26);
+		PF_CHECK(Tests, BeginGpuFrameTiming(OldSessionTiming, 13, 27));
+		PF_CHECK(Tests, OldSessionTiming.SessionId == 13 && OldSessionTiming.FrameSequence == 27);
+		PF_CHECK(Tests, OldSessionTiming.Recording && !OldSessionTiming.SubmissionValue);
+
+		GpuFrameTimingState FailedSubmissionTiming;
+		PF_CHECK(Tests, BeginGpuFrameTiming(FailedSubmissionTiming, 14, 28));
+		PF_CHECK(Tests, EndGpuFrameTimingRecording(FailedSubmissionTiming));
+		PF_CHECK(Tests, !AssociateGpuFrameTimingSubmission(FailedSubmissionTiming, 0));
+		FailGpuFrameTiming(FailedSubmissionTiming);
+		FakeTimerQuery FailedSubmissionQuery{ .Available = true };
+		const auto FailedSubmissionDecision = TryRetireGpuFrameTiming(
+			FailedSubmissionTiming, 100, [&](uint64_t) { RetireFakeQuery(FailedSubmissionTiming, FailedSubmissionQuery); });
+		PF_CHECK(Tests, FailedSubmissionDecision == GpuFrameTimingRetirementDecision::Failed);
+		PF_CHECK(Tests, FailedSubmissionQuery.PollCount == 0 && FailedSubmissionTiming.Pending);
+
+		auto [UnavailableTiming, UnavailableBegan, UnavailableEnded, UnavailableAssociated] = BeginPendingTiming(15, 29, 56);
+		PF_CHECK(Tests, UnavailableBegan && UnavailableEnded && UnavailableAssociated);
+		FakeTimerQuery UnavailableQuery{ .Available = true };
+		const auto UnavailableDecision = TryRetireGpuFrameTiming(
+			UnavailableTiming, std::nullopt, [&](uint64_t) { RetireFakeQuery(UnavailableTiming, UnavailableQuery); });
+		PF_CHECK(Tests, UnavailableDecision == GpuFrameTimingRetirementDecision::CompletionUnavailable);
+		PF_CHECK(Tests, UnavailableQuery.PollCount == 0 && UnavailableTiming.Pending);
+		PF_CHECK(Tests, UnavailableTiming.SubmissionValue == 56);
+		FailGpuFrameTiming(UnavailableTiming);
+		const auto FailedCompletionDecision = TryRetireGpuFrameTiming(
+			UnavailableTiming, 56, [&](uint64_t) { RetireFakeQuery(UnavailableTiming, UnavailableQuery); });
+		PF_CHECK(Tests, FailedCompletionDecision == GpuFrameTimingRetirementDecision::Failed);
+		PF_CHECK(Tests, UnavailableQuery.PollCount == 0 && UnavailableTiming.Pending);
+	}
+
 	void TestHealthyRendererShutdownOrder(TestRunner& Tests)
 	{
 		FakeRendererShutdown Operations;
@@ -664,6 +804,7 @@ void RunRendererPolicyTests(TestRunner& Tests)
 	TestSurfaceAndPresentationSelection(Tests);
 	TestExtentAndImageCountSelection(Tests);
 	TestGpuTimestampCapabilityPolicy(Tests);
+	TestGpuFrameTimingSubmissionRetirement(Tests);
 	TestHealthyRendererShutdownOrder(Tests);
 	TestDeviceLossShutdown(Tests);
 	TestRendererShutdownFailureContracts(Tests);
