@@ -24,6 +24,14 @@ namespace
 		return { reinterpret_cast<const char*>(Encoded.data()), Encoded.size() };
 	}
 
+	std::filesystem::path PathFromUtf8(std::string_view Value)
+	{
+		std::u8string Encoded;
+		Encoded.reserve(Value.size());
+		for (const char Byte : Value) Encoded.push_back(static_cast<char8_t>(static_cast<unsigned char>(Byte)));
+		return std::filesystem::path(Encoded);
+	}
+
 	std::string NormalizeNewlines(std::string Value)
 	{
 		for (size_t Position = 0; (Position = Value.find("\r\n", Position)) != std::string::npos;)
@@ -145,7 +153,24 @@ namespace
 		const std::string Output = NormalizeNewlines(Result.Output);
 		PF_CHECK(Tests, Output.find("PLAYER-STDOUT-OK\n") != std::string::npos);
 		PF_CHECK(Tests, Output.find("PLAYER-STDERR-OK\n") != std::string::npos);
-		PF_CHECK(Tests, Output.find("PLAYER-CWD:" + PathToUtf8(WorkingDirectory->Root) + "\n") != std::string::npos);
+		const std::string WorkingDirectoryPrefix = "PLAYER-CWD:";
+		const size_t WorkingDirectoryStart = Output.find(WorkingDirectoryPrefix);
+		PF_CHECK(Tests, WorkingDirectoryStart != std::string::npos);
+		if (WorkingDirectoryStart != std::string::npos)
+		{
+			const size_t WorkingDirectoryEnd = Output.find('\n', WorkingDirectoryStart);
+			PF_CHECK(Tests, WorkingDirectoryEnd != std::string::npos);
+			if (WorkingDirectoryEnd != std::string::npos)
+			{
+				const std::string_view ReportedUtf8(Output.data() + WorkingDirectoryStart + WorkingDirectoryPrefix.size(),
+					WorkingDirectoryEnd - WorkingDirectoryStart - WorkingDirectoryPrefix.size());
+				std::error_code Error;
+				const bool IsSameDirectory = std::filesystem::equivalent(
+					WorkingDirectory->Root, PathFromUtf8(ReportedUtf8), Error);
+				PF_CHECK(Tests, !Error);
+				PF_CHECK(Tests, IsSameDirectory);
+			}
+		}
 	}
 
 	void TestMissingExecutableFailsImmediately(TestRunner& Tests, const std::filesystem::path& WorkingDirectory)
