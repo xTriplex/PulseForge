@@ -7381,9 +7381,8 @@ namespace
 			if (m_SceneRuntime || !m_Scene)
 			{
 				EndEditorCameraNavigation();
-				m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
-					m_ViewportKeyboardFocused, m_SceneRuntime ? PulseForgeEditor::ViewportKeyboardFocusEvent::PlayModeStarted
-															  : PulseForgeEditor::ViewportKeyboardFocusEvent::ViewportUnavailable);
+				m_ViewportKeyboardFocused = PulseForgeEditor::MaintainViewportKeyboardFocusDuringUpdate(
+					m_ViewportKeyboardFocused, m_Scene != nullptr, m_SceneRuntime != nullptr);
 				return;
 			}
 			if (!m_Context) return;
@@ -7667,8 +7666,6 @@ namespace
 		void PublishEditorGameplayInput()
 		{
 			auto& Application = PulseForge::Application::Get();
-			PulseForge::InputRoutingState Routing;
-			const PulseForge::InputWindowID MainWindow = Application.GetInputWindowID();
 			ImGuiViewport* SceneViewportOwner = ResolveSceneViewportOwner();
 			GLFWwindow* SceneViewportWindow = SceneViewportOwner
 				? static_cast<GLFWwindow*>(SceneViewportOwner->PlatformHandle) : nullptr;
@@ -7676,7 +7673,7 @@ namespace
 				? m_ViewportScrollInput.GetInputWindowID(SceneViewportOwner->ID, SceneViewportWindow) : 0;
 			const bool SceneViewportFocused = SceneViewportWindow && SceneViewportInputWindow != 0 &&
 				glfwGetWindowAttrib(SceneViewportWindow, GLFW_FOCUSED) == GLFW_TRUE;
-			if (SceneViewportFocused) Routing.FocusedWindow = SceneViewportInputWindow;
+			bool ImGuiOwnerFocused = true;
 
 			bool TextOrModalInput = m_InputMappingPanel.NeedsTextEntryRoute();
 			if (m_Context)
@@ -7687,7 +7684,7 @@ namespace
 					ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
 				if (GImGui && GImGui->NavWindow && SceneViewportOwner &&
 					GImGui->NavWindow->ViewportId != SceneViewportOwner->ID)
-					Routing.FocusedWindow = 0;
+					ImGuiOwnerFocused = false;
 				const bool MouseDownOutsideSceneViewport =
 					(IO.MouseDown[ImGuiMouseButton_Left] || IO.MouseDown[ImGuiMouseButton_Right] || IO.MouseDown[ImGuiMouseButton_Middle]) &&
 					!IsCursorOverViewportImage();
@@ -7697,26 +7694,16 @@ namespace
 				m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
 					m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::OtherEditorPanelClicked);
 
-			if (Routing.FocusedWindow != 0)
-			{
-				const auto AddContext = [&Routing](PulseForge::InputContext Context,
-					PulseForge::InputDeviceMask Consumes, bool Active)
-				{
-					if (Routing.ContextCount >= Routing.Contexts.size()) return;
-					Routing.Contexts[Routing.ContextCount++] = { .Context = Context,
-						.Consumes = Consumes, .OwnerWindow = Routing.FocusedWindow, .Active = Active };
-				};
-				const auto KeyboardAndMouse = PulseForge::InputDeviceMask::Keyboard | PulseForge::InputDeviceMask::Mouse;
-				const bool ViewportNavigation = m_ViewportMouseCapture.OwnsMouse() && SceneViewportOwner != nullptr;
-				const bool ShortcutsRouted = !TextOrModalInput && !ViewportNavigation;
-				AddContext(PulseForge::InputContext::Gameplay, PulseForge::InputDeviceMask::None,
-					m_SceneRuntime && SceneViewportOwner && m_ViewportKeyboardFocused && !TextOrModalInput && !ViewportNavigation);
-				AddContext(PulseForge::InputContext::EditorShortcuts, PulseForge::InputDeviceMask::None, ShortcutsRouted);
-				AddContext(PulseForge::InputContext::ViewportNavigation, KeyboardAndMouse, ViewportNavigation);
-				AddContext(PulseForge::InputContext::TextEntry, PulseForge::InputDeviceMask::All, TextOrModalInput);
-				m_EditorShortcutsRouted = ShortcutsRouted;
-			}
-			else m_EditorShortcutsRouted = false;
+			const bool ViewportNavigation = m_ViewportMouseCapture.OwnsMouse() && SceneViewportOwner != nullptr;
+			const auto Routing = PulseForgeEditor::BuildEditorGameplayInputRouting({ .ViewportWindow = SceneViewportInputWindow,
+				.ViewportAvailable = SceneViewportOwner && m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport),
+				.NativeOwnerFocused = SceneViewportFocused,
+				.ImGuiOwnerFocused = ImGuiOwnerFocused,
+				.RuntimeActive = m_SceneRuntime != nullptr,
+				.ViewportKeyboardFocused = m_ViewportKeyboardFocused,
+				.TextOrModalInput = TextOrModalInput,
+				.ViewportNavigation = ViewportNavigation });
+			m_EditorShortcutsRouted = Routing.FocusedWindow != 0 && !TextOrModalInput && !ViewportNavigation;
 			Application.GetGameplayInput().PublishFrame(Routing);
 			m_InputMappingPanel.MarkInputPublished();
 		}

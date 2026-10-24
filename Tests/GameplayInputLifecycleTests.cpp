@@ -167,6 +167,95 @@ namespace
 			DelayedInput.FindAction("Jump")->Pressed);
 	}
 
+	void TestSlowGamepadAxisPublication(TestRunner& Tests)
+	{
+		GamepadStateAdapter Adapter;
+		GameplayInputService Input;
+		GameplayActionMap Map;
+		GameplayActionDefinition Move{ .Id = "Move", .Type = ActionValueType::Axis1D };
+		Move.Bindings.push_back(AnalogBinding("Move.leftX", Axis(GamepadAxis::LeftX), 0.15f));
+		GameplayActionDefinition Trigger{ .Id = "Trigger", .Type = ActionValueType::Axis1D };
+		Trigger.Bindings.push_back(AnalogBinding("Trigger.left", Axis(GamepadAxis::LeftTrigger), 0.05f));
+		Map.Actions = { Move, Trigger };
+		PF_CHECK(Tests, Input.SetActionMap(std::move(Map)).has_value());
+
+		GamepadStateSample Sample = NeutralPad();
+		PF_CHECK(Tests, Queue(Input, Adapter.Update(0, true, true, &Sample)));
+		Input.PublishFrame(Routing());
+
+		const auto PublishSample = [&Tests, &Adapter, &Input, &Sample](float LeftX, float LeftTriggerRaw)
+		{
+			Sample.Axes[static_cast<size_t>(GamepadAxis::LeftX)] = LeftX;
+			Sample.Axes[static_cast<size_t>(GamepadAxis::LeftTrigger)] = LeftTriggerRaw;
+			const GamepadStateEvents Events = Adapter.Update(0, true, true, &Sample);
+			PF_CHECK(Tests, Queue(Input, Events));
+			Input.PublishFrame(Routing());
+			return Events.Count;
+		};
+
+		size_t PublishedAxisEvents = 0;
+		for (int Step = 1; Step <= 4000; ++Step)
+		{
+			const float AxisValue = static_cast<float>(Step) * 0.00005f;
+			PublishedAxisEvents += PublishSample(AxisValue, -1.0f);
+		}
+		PF_CHECK(Tests, PublishedAxisEvents == 4000);
+		PF_CHECK(Tests,
+			Input.FindAction("Move") && Input.FindAction("Move")->Held && std::abs(Input.FindAction("Move")->X - 0.0588235f) < 0.0002f);
+
+		const GamepadStateEvents Unchanged = Adapter.Update(0, true, true, &Sample);
+		PF_CHECK(Tests, Unchanged.Count == 0);
+
+		PublishedAxisEvents = 0;
+		for (int Step = 1; Step <= 8000; ++Step)
+		{
+			const float AxisValue = 0.2f - static_cast<float>(Step) * 0.00005f;
+			PublishedAxisEvents += PublishSample(AxisValue, -1.0f);
+		}
+		PF_CHECK(Tests, PublishedAxisEvents == 8000);
+		PF_CHECK(Tests, Input.FindAction("Move") && Input.FindAction("Move")->Held && Input.FindAction("Move")->X < -0.058f);
+
+		PublishedAxisEvents = 0;
+		for (int Step = 7999; Step >= 0; --Step)
+		{
+			const float AxisValue = static_cast<float>(Step) * 0.00005f;
+			PublishedAxisEvents += PublishSample(AxisValue, -1.0f);
+		}
+		PF_CHECK(Tests, PublishedAxisEvents == 8000);
+		PF_CHECK(Tests, Input.FindAction("Move") && !Input.FindAction("Move")->Held && Input.FindAction("Move")->X == 0.0f);
+
+		PublishedAxisEvents = 0;
+		for (int Step = 1; Step <= 4000; ++Step)
+		{
+			const float RawTrigger = -1.0f + static_cast<float>(Step) * 0.00005f;
+			PublishedAxisEvents += PublishSample(0.0f, RawTrigger);
+		}
+		PF_CHECK(Tests, PublishedAxisEvents == 4000);
+		PF_CHECK(Tests, Input.FindAction("Trigger") && Input.FindAction("Trigger")->Held &&
+							std::abs(Input.FindAction("Trigger")->X - 0.0526316f) < 0.0002f);
+
+		GamepadStateAdapter RearmAdapter;
+		GameplayInputService RearmInput;
+		GameplayActionMap RearmMap;
+		GameplayActionDefinition RearmMove{ .Id = "Move", .Type = ActionValueType::Axis1D };
+		RearmMove.Bindings.push_back(AnalogBinding("Move.leftX", Axis(GamepadAxis::LeftX), 0.15f));
+		RearmMap.Actions.push_back(RearmMove);
+		PF_CHECK(Tests, RearmInput.SetActionMap(std::move(RearmMap)).has_value());
+		GamepadStateSample Displaced = NeutralPad();
+		Displaced.Axes[static_cast<size_t>(GamepadAxis::LeftX)] = 0.07502f;
+		PF_CHECK(Tests, Queue(RearmInput, RearmAdapter.Update(1, true, true, &Displaced)));
+		RearmInput.PublishFrame(Routing());
+		Displaced.Axes[static_cast<size_t>(GamepadAxis::LeftX)] = 0.07498f;
+		const GamepadStateEvents NeutralCrossing = RearmAdapter.Update(1, true, true, &Displaced);
+		PF_CHECK(Tests, NeutralCrossing.Count == 1);
+		PF_CHECK(Tests, Queue(RearmInput, NeutralCrossing));
+		RearmInput.PublishFrame(Routing());
+		Displaced.Axes[static_cast<size_t>(GamepadAxis::LeftX)] = 0.8f;
+		PF_CHECK(Tests, Queue(RearmInput, RearmAdapter.Update(1, true, true, &Displaced)));
+		RearmInput.PublishFrame(Routing());
+		PF_CHECK(Tests, RearmInput.FindAction("Move") && RearmInput.FindAction("Move")->Held);
+	}
+
 	void TestAnalogRearmUsesBindingDeadZones(TestRunner& Tests)
 	{
 		GameplayInputService Input;
@@ -401,6 +490,7 @@ void RunGameplayInputLifecycleTests(TestRunner& Tests)
 {
 	TestGamepadSampleNormalization(Tests);
 	TestInitialGamepadSampleAndReconnect(Tests);
+	TestSlowGamepadAxisPublication(Tests);
 	TestAnalogRearmUsesBindingDeadZones(Tests);
 	TestTransientMouseControlsAcrossMapChanges(Tests);
 }
