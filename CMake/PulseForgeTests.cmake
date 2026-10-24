@@ -75,6 +75,7 @@ if(BUILD_TESTING)
 	add_executable(PulseForgeSceneTests
 		Tests/PulseForgeSceneTests.cpp
 		Tests/SceneTests.cpp
+		Tests/PropertyMetadataTests.cpp
 	)
 	target_include_directories(PulseForgeSceneTests PRIVATE Tests)
 	target_link_libraries(PulseForgeSceneTests PRIVATE
@@ -83,6 +84,11 @@ if(BUILD_TESTING)
 		add_dependencies(PulseForgeSceneTests PulseForgePublicHeaderChecks)
 	endif()
 	add_test(NAME PulseForge.Scene COMMAND PulseForgeSceneTests)
+
+	add_executable(PulseForgePropertyMetadataConsumer Tests/ModuleConsumers/PropertyMetadataConsumer.cpp)
+	target_link_libraries(PulseForgePropertyMetadataConsumer PRIVATE PulseForgeScene)
+	set_property(TARGET PulseForgePropertyMetadataConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+	add_test(NAME PulseForge.PropertyMetadataConsumer COMMAND PulseForgePropertyMetadataConsumer)
 
 	add_executable(PulseForgeAssetTests
 		Tests/PulseForgeAssetTests.cpp
@@ -299,6 +305,7 @@ if(BUILD_TESTING)
 		PulseForgeCoreTests
 		PulseForgeCoreConsumer
 		PulseForgeSceneTests
+		PulseForgePropertyMetadataConsumer
 		PulseForgeAssetTests
 		PulseForgeAssetImportTests
 		PulseForgeAssetImporterConsumer

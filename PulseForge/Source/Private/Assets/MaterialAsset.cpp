@@ -1,12 +1,13 @@
 #include "Assets/MaterialAsset.h"
+#include "Core/BoundedInput.h"
 
 #include <nlohmann/json.hpp>
 
 #include <cmath>
 #include <exception>
 #include <fstream>
-#include <iterator>
 #include <limits>
+#include <optional>
 #include <system_error>
 
 namespace PulseForge
@@ -17,6 +18,24 @@ namespace PulseForge
 		constexpr int64_t MaterialFormatVersion = 4;
 		constexpr size_t MaximumMaterialFileSize = 1024 * 1024;
 		constexpr std::string_view MaterialFormatName = "PulseForgeMaterial";
+
+		std::optional<std::string> FindUnknownField(const Json& Object, int64_t Version)
+		{
+			for (const auto& [Key, Value] : Object.items())
+			{
+				(void)Value;
+				const bool CommonField = Key == "format" || Key == "version" || Key == "baseColorTexture" || Key == "baseColorFactor";
+				const bool VersionTwoField = Key == "metallicFactor" || Key == "roughnessFactor";
+				const bool VersionThreeField = Key == "metallicRoughnessTexture" || Key == "normalTexture" || Key == "occlusionTexture" ||
+											   Key == "emissiveTexture" || Key == "normalScale" || Key == "occlusionStrength" ||
+											   Key == "emissiveFactor";
+				const bool VersionFourField = Key == "alphaMode" || Key == "alphaCutoff" || Key == "doubleSided";
+				if (!CommonField && !(Version >= 2 && VersionTwoField) && !(Version >= 3 && VersionThreeField) &&
+					!(Version >= 4 && VersionFourField))
+					return Key;
+			}
+			return std::nullopt;
+		}
 
 		MaterialAssetError MakeError(MaterialAssetErrorCode Code, std::string Message)
 		{
@@ -133,6 +152,8 @@ namespace PulseForge
 
 	std::expected<MaterialAssetDesc, MaterialAssetError> MaterialAssetSerializer::Deserialize(std::string_view Data)
 	{
+		if (Data.size() > MaximumMaterialFileSize)
+			return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument, "Material document exceeds the 1 MiB size limit"));
 		try
 		{
 			const Json Document = Json::parse(Data.begin(), Data.end());
@@ -146,10 +167,20 @@ namespace PulseForge
 				return std::unexpected(MakeError(MaterialAssetErrorCode::UnsupportedFormat, "Document is not a PulseForge material"));
 
 			const auto Version = Document.find("version");
-			if (Version == Document.end() || !Version->is_number_integer() ||
-				(Version->get<int64_t>() < 1 || Version->get<int64_t>() > MaterialFormatVersion))
+			if (Version == Document.end() || (!Version->is_number_integer() && !Version->is_number_unsigned()))
+				return std::unexpected(
+					MakeError(MaterialAssetErrorCode::InvalidDocument, "Material document requires an integer format version"));
+			const bool SupportedVersion =
+				Version->is_number_unsigned()
+					? Version->get<uint64_t>() >= 1 && Version->get<uint64_t>() <= static_cast<uint64_t>(MaterialFormatVersion)
+					: Version->get<int64_t>() >= 1 && Version->get<int64_t>() <= MaterialFormatVersion;
+			if (!SupportedVersion)
 				return std::unexpected(MakeError(MaterialAssetErrorCode::UnsupportedVersion, "Material document version is not supported"));
-			const int64_t DocumentVersion = Version->get<int64_t>();
+			const int64_t DocumentVersion =
+				Version->is_number_unsigned() ? static_cast<int64_t>(Version->get<uint64_t>()) : Version->get<int64_t>();
+			if (const auto Unknown = FindUnknownField(Document, DocumentVersion))
+				return std::unexpected(MakeError(MaterialAssetErrorCode::InvalidDocument,
+					"Material version " + std::to_string(DocumentVersion) + " contains unsupported field '" + *Unknown + "'"));
 
 			const auto Texture = Document.find("baseColorTexture");
 			const auto Factor = Document.find("baseColorFactor");
@@ -369,10 +400,14 @@ namespace PulseForge
 			std::ifstream Input(Path, std::ios::binary);
 			if (!Input.is_open())
 				return std::unexpected(MakeError(MaterialAssetErrorCode::FileReadFailed, "Could not open material file: " + PathForMessage(Path)));
-			std::string Data{ std::istreambuf_iterator<char>(Input), std::istreambuf_iterator<char>() };
-			if (Input.bad())
-				return std::unexpected(MakeError(MaterialAssetErrorCode::FileReadFailed, "Could not read the complete material file"));
-			return Deserialize(Data);
+			const auto Data = Detail::ReadBoundedInput(Input, MaximumMaterialFileSize);
+			if (!Data)
+				return std::unexpected(
+					MakeError(Data.error().Code == Detail::BoundedInputErrorCode::TooLarge ? MaterialAssetErrorCode::InvalidDocument
+																						   : MaterialAssetErrorCode::FileReadFailed,
+						Data.error().Code == Detail::BoundedInputErrorCode::TooLarge ? "Material file exceeds the 1 MiB size limit"
+																					 : "Could not read the complete material file"));
+			return Deserialize(*Data);
 		}
 		catch (const std::exception& Exception)
 		{

@@ -128,6 +128,31 @@ namespace PulseForge::ScriptEnvironment
 			return 3;
 		}
 
+		int LuaEntityGetFloatProperty(lua_State* State)
+		{
+			LuaEntity* UserData = GetLuaEntity(State);
+			if (!UserData) return ReturnHostError(State, "entity method requires an Entity value as self");
+			if (lua_type(State, 2) != LUA_TSTRING) return ReturnHostError(State, "get_float_property requires a stable property ID string");
+
+			size_t IdentifierLength = 0;
+			const char* IdentifierText = lua_tolstring(State, 2, &IdentifierLength);
+			const std::string_view Identifier(IdentifierText, IdentifierLength);
+			if (!IsValidScriptPropertyIdentifier(Identifier))
+				return ReturnHostError(State, "get_float_property received an invalid stable property ID");
+
+			const auto Script = UserData->Value.GetScript();
+			if (!Script) return ReturnHostError(State, "entity is no longer valid in its scene");
+			if (!Script->has_value()) return ReturnHostError(State, "entity has no script component");
+			const auto Property = Script->value().FindFloatProperty(Identifier);
+			if (!Property)
+			{
+				lua_pushnil(State);
+				return 1;
+			}
+			lua_pushnumber(State, *Property);
+			return 1;
+		}
+
 		int LuaEntitySetTranslation(lua_State* State)
 		{
 			LuaEntity* UserData = GetLuaEntity(State);
@@ -588,6 +613,8 @@ namespace PulseForge::ScriptEnvironment
 		lua_setfield(State, -2, "get_translation");
 		lua_pushcfunction(State, LuaEntitySetTranslation);
 		lua_setfield(State, -2, "set_translation");
+		lua_pushcfunction(State, LuaEntityGetFloatProperty);
+		lua_setfield(State, -2, "get_float_property");
 		lua_pushcfunction(State, LuaEntityApplyForce);
 		lua_setfield(State, -2, "apply_force");
 		lua_pushcfunction(State, LuaEntityPlayAudio);
