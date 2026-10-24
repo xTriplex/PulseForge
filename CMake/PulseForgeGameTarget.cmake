@@ -1,4 +1,7 @@
-add_executable(PulseForgeGame PulseForgeGame/Source/Private/Client/PulseForgeGame.cpp)
+add_executable(PulseForgeGame
+	PulseForgeGame/Source/Private/Client/PulseForgeGame.cpp
+	PulseForgeGame/Source/Private/Client/PlayerLaunchConfiguration.cpp
+)
 if(PULSEFORGE_PLATFORM_MACOS)
 	set_target_properties(PulseForgeGame PROPERTIES
 		MACOSX_BUNDLE TRUE

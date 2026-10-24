@@ -48,6 +48,8 @@ namespace PulseForge
 		void Stop() noexcept;
 		[[nodiscard]] bool IsRunning() const noexcept;
 		[[nodiscard]] size_t GetPlaybackCount() const noexcept;
+		[[nodiscard]] std::expected<bool, AudioSceneRuntimeError> IsPlaybackPlaying(UUID Entity) const;
+		[[nodiscard]] std::expected<void, AudioSceneRuntimeError> SetPaused(bool Paused);
 		[[nodiscard]] std::expected<void, AudioSceneRuntimeError> Advance(Scene& Source);
 		[[nodiscard]] std::expected<void, AudioSceneRuntimeError> Play(UUID Entity);
 		[[nodiscard]] std::expected<void, AudioSceneRuntimeError> Pause(UUID Entity);

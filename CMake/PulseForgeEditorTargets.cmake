@@ -38,17 +38,21 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorStyle.cpp
 		PulseForgeEditor/Source/Private/EditorWorkspacePresentation.cpp
 		PulseForgeEditor/Source/Private/EditorPlatformServices.cpp
+		PulseForgeEditor/Source/Private/EditorPlayerProcess.cpp
 		PulseForge/Vendor/imgui/misc/freetype/imgui_freetype.cpp
 	)
 	if(WIN32)
 		target_sources(PulseForgeEditorUI PRIVATE
-			PulseForgeEditor/Source/Private/Platform/Windows/EditorPlatformServices.cpp)
+			PulseForgeEditor/Source/Private/Platform/Windows/EditorPlatformServices.cpp
+			PulseForgeEditor/Source/Private/Platform/Windows/EditorPlayerProcess.cpp)
 	elseif(PULSEFORGE_PLATFORM_LINUX)
 		target_sources(PulseForgeEditorUI PRIVATE
-			PulseForgeEditor/Source/Private/Platform/Linux/EditorPlatformServices.cpp)
+			PulseForgeEditor/Source/Private/Platform/Linux/EditorPlatformServices.cpp
+			PulseForgeEditor/Source/Private/Platform/Linux/EditorPlayerProcess.cpp)
 	elseif(PULSEFORGE_PLATFORM_MACOS)
 		target_sources(PulseForgeEditorUI PRIVATE
-			PulseForgeEditor/Source/Private/Platform/MacOS/EditorPlatformServices.cpp)
+			PulseForgeEditor/Source/Private/Platform/MacOS/EditorPlatformServices.cpp
+			PulseForgeEditor/Source/Private/Platform/MacOS/EditorPlayerProcess.cpp)
 	else()
 		message(FATAL_ERROR "No EditorPlatformServices implementation is available for this target platform.")
 	endif()
@@ -80,14 +84,22 @@ if(PULSEFORGE_BUILD_EDITOR)
 		add_executable(PulseForgeEditor WIN32
 			PulseForgeEditor/Source/Private/EditorMain.cpp
 			PulseForgeEditor/Source/Private/EditorApplication.cpp
+			PulseForgeEditor/Source/Private/EditorPlayerExecutablePath.cpp
 		)
 	else()
 		add_executable(PulseForgeEditor
 			PulseForgeEditor/Source/Private/EditorMain.cpp
 			PulseForgeEditor/Source/Private/EditorApplication.cpp
+			PulseForgeEditor/Source/Private/EditorPlayerExecutablePath.cpp
 		)
 	endif()
-	target_compile_definitions(PulseForgeEditor PRIVATE PF_BUILD_IDENTIFIER="${PULSEFORGE_BUILD_IDENTIFIER}")
+	target_compile_definitions(PulseForgeEditor PRIVATE
+		${PULSEFORGE_PLATFORM_COMPILE_DEFINITION}
+		PF_BUILD_IDENTIFIER="${PULSEFORGE_BUILD_IDENTIFIER}")
+	get_target_property(PULSEFORGE_EDITOR_COMPILE_DEFINITIONS PulseForgeEditor COMPILE_DEFINITIONS)
+	if(NOT "${PULSEFORGE_PLATFORM_COMPILE_DEFINITION}" IN_LIST PULSEFORGE_EDITOR_COMPILE_DEFINITIONS)
+		message(FATAL_ERROR "PulseForgeEditor must compile with ${PULSEFORGE_PLATFORM_COMPILE_DEFINITION}.")
+	endif()
 	if(PULSEFORGE_PLATFORM_MACOS)
 		set_target_properties(PulseForgeEditor PROPERTIES
 			MACOSX_BUNDLE TRUE

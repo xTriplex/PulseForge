@@ -1,45 +1,54 @@
-set(PULSEFORGE_PRESETS_FILE "${PULSEFORGE_SOURCE_ROOT}/CMakePresets.json")
+if(NOT DEFINED PULSEFORGE_PRESETS_FILE)
+	set(PULSEFORGE_PRESETS_FILE "${PULSEFORGE_SOURCE_ROOT}/CMakePresets.json")
+endif()
+if(NOT DEFINED PULSEFORGE_PRESET_WORKING_DIRECTORY)
+	set(PULSEFORGE_PRESET_WORKING_DIRECTORY "${PULSEFORGE_SOURCE_ROOT}")
+endif()
 file(READ "${PULSEFORGE_PRESETS_FILE}" PULSEFORGE_PRESETS_JSON)
 string(JSON PULSEFORGE_PRESETS_VERSION GET "${PULSEFORGE_PRESETS_JSON}" version)
 if(NOT PULSEFORGE_PRESETS_VERSION EQUAL 5)
 	message(FATAL_ERROR "PulseForge presets must retain schema version 5.")
 endif()
+string(JSON PULSEFORGE_PRESETS_MINIMUM_MAJOR GET "${PULSEFORGE_PRESETS_JSON}" cmakeMinimumRequired major)
+string(JSON PULSEFORGE_PRESETS_MINIMUM_MINOR GET "${PULSEFORGE_PRESETS_JSON}" cmakeMinimumRequired minor)
+string(JSON PULSEFORGE_PRESETS_MINIMUM_PATCH GET "${PULSEFORGE_PRESETS_JSON}" cmakeMinimumRequired patch)
+if(NOT PULSEFORGE_PRESETS_MINIMUM_MAJOR EQUAL 3 OR
+	NOT PULSEFORGE_PRESETS_MINIMUM_MINOR EQUAL 24 OR
+	NOT PULSEFORGE_PRESETS_MINIMUM_PATCH EQUAL 0)
+	message(FATAL_ERROR "PulseForge presets must preserve the declared CMake 3.24.0 minimum.")
+endif()
 
 function(pulseforge_find_preset_index OutputVariable PresetArray PresetName)
 	string(JSON PULSEFORGE_PRESET_COUNT LENGTH "${PULSEFORGE_PRESETS_JSON}" "${PresetArray}")
 	math(EXPR PULSEFORGE_PRESET_LAST_INDEX "${PULSEFORGE_PRESET_COUNT} - 1")
+	set(PULSEFORGE_MATCH_COUNT 0)
 	foreach(PULSEFORGE_INDEX RANGE 0 ${PULSEFORGE_PRESET_LAST_INDEX})
 		string(JSON PULSEFORGE_PRESET_NAME GET "${PULSEFORGE_PRESETS_JSON}"
 			"${PresetArray}" ${PULSEFORGE_INDEX} name)
 		if(PULSEFORGE_PRESET_NAME STREQUAL PresetName)
-			set(${OutputVariable} "${PULSEFORGE_INDEX}" PARENT_SCOPE)
-			return()
+			math(EXPR PULSEFORGE_MATCH_COUNT "${PULSEFORGE_MATCH_COUNT} + 1")
+			set(PULSEFORGE_MATCH_INDEX "${PULSEFORGE_INDEX}")
 		endif()
 	endforeach()
-	set(${OutputVariable} -1 PARENT_SCOPE)
-endfunction()
-
-function(pulseforge_require_preset_names PresetArray)
-	string(JSON PULSEFORGE_PRESET_COUNT LENGTH "${PULSEFORGE_PRESETS_JSON}" "${PresetArray}")
-	math(EXPR PULSEFORGE_EXPECTED_PRESET_COUNT "${ARGC} - 1")
-	if(NOT PULSEFORGE_PRESET_COUNT EQUAL PULSEFORGE_EXPECTED_PRESET_COUNT)
-		message(FATAL_ERROR "${PresetArray} has an unexpected number of named presets.")
+	if(PULSEFORGE_MATCH_COUNT GREATER 1)
+		message(FATAL_ERROR "${PresetArray} contains duplicate identifier '${PresetName}'.")
 	endif()
-	foreach(PULSEFORGE_EXPECTED_NAME IN LISTS ARGN)
-		pulseforge_find_preset_index(PULSEFORGE_PRESET_INDEX "${PresetArray}" "${PULSEFORGE_EXPECTED_NAME}")
-		if(PULSEFORGE_PRESET_INDEX LESS 0)
-			message(FATAL_ERROR "Missing ${PresetArray} identifier '${PULSEFORGE_EXPECTED_NAME}'.")
-		endif()
-	endforeach()
+	if(PULSEFORGE_MATCH_COUNT EQUAL 1)
+		set(${OutputVariable} "${PULSEFORGE_MATCH_INDEX}" PARENT_SCOPE)
+	else()
+		set(${OutputVariable} -1 PARENT_SCOPE)
+	endif()
 endfunction()
 
-pulseforge_require_preset_names(configurePresets Windows-Editor Windows-Core Linux-Core)
-pulseforge_require_preset_names(buildPresets
-	Windows-Editor-Debug Windows-Editor-Release Windows-Editor-Dist Windows-Core-Debug Linux-Core-Debug)
-pulseforge_require_preset_names(testPresets
-	Windows-Editor-Debug Windows-Editor-Release Windows-Editor-Dist Windows-Core-Debug Linux-Core-Debug)
+function(pulseforge_require_preset PresetArray PresetName OutputVariable)
+	pulseforge_find_preset_index(PULSEFORGE_PRESET_INDEX "${PresetArray}" "${PresetName}")
+	if(PULSEFORGE_PRESET_INDEX LESS 0)
+		message(FATAL_ERROR "Missing ${PresetArray} identifier '${PresetName}'.")
+	endif()
+	set(${OutputVariable} "${PULSEFORGE_PRESET_INDEX}" PARENT_SCOPE)
+endfunction()
 
-pulseforge_find_preset_index(PULSEFORGE_WINDOWS_EDITOR_INDEX configurePresets Windows-Editor)
+pulseforge_require_preset(configurePresets Windows-Editor PULSEFORGE_WINDOWS_EDITOR_INDEX)
 string(JSON PULSEFORGE_WINDOWS_EDITOR_GENERATOR GET "${PULSEFORGE_PRESETS_JSON}"
 	configurePresets ${PULSEFORGE_WINDOWS_EDITOR_INDEX} generator)
 string(JSON PULSEFORGE_WINDOWS_EDITOR_BINARY_DIR GET "${PULSEFORGE_PRESETS_JSON}"
@@ -52,8 +61,8 @@ string(JSON PULSEFORGE_WINDOWS_EDITOR_HOST_OS GET "${PULSEFORGE_PRESETS_JSON}"
 if(NOT PULSEFORGE_WINDOWS_EDITOR_GENERATOR STREQUAL "Visual Studio 17 2022")
 	message(FATAL_ERROR "Windows-Editor must use the existing Visual Studio multi-config generator.")
 endif()
-if(NOT PULSEFORGE_WINDOWS_EDITOR_BINARY_DIR STREQUAL "\${sourceDir}/Build/CMakePresets/windows-editor")
-	message(FATAL_ERROR "Windows-Editor must preserve its existing shared build directory.")
+if(NOT PULSEFORGE_WINDOWS_EDITOR_BINARY_DIR STREQUAL "\${sourceDir}/Build/CMakePresets/WindowsEditor")
+	message(FATAL_ERROR "Windows-Editor must use the canonical shared build directory.")
 endif()
 if(NOT PULSEFORGE_WINDOWS_EDITOR_DISPLAY_NAME STREQUAL "Windows Editor")
 	message(FATAL_ERROR "Windows-Editor must have a coherent capitalized display name.")
@@ -68,7 +77,7 @@ if(PULSEFORGE_WINDOWS_EDITOR_BUILD_TYPE_ERROR STREQUAL "NOTFOUND")
 	message(FATAL_ERROR "The multi-configuration Windows-Editor preset must not set CMAKE_BUILD_TYPE.")
 endif()
 
-pulseforge_find_preset_index(PULSEFORGE_WINDOWS_CORE_INDEX configurePresets Windows-Core)
+pulseforge_require_preset(configurePresets Windows-Core PULSEFORGE_WINDOWS_CORE_INDEX)
 string(JSON PULSEFORGE_WINDOWS_CORE_PARENT GET "${PULSEFORGE_PRESETS_JSON}"
 	configurePresets ${PULSEFORGE_WINDOWS_CORE_INDEX} inherits)
 string(JSON PULSEFORGE_WINDOWS_CORE_BINARY_DIR GET "${PULSEFORGE_PRESETS_JSON}"
@@ -77,9 +86,21 @@ string(JSON PULSEFORGE_WINDOWS_CORE_HOST_OS GET "${PULSEFORGE_PRESETS_JSON}"
 	configurePresets ${PULSEFORGE_WINDOWS_CORE_INDEX} vendor
 	"microsoft.com/VisualStudioSettings/CMake/1.0" hostOS 0)
 if(NOT PULSEFORGE_WINDOWS_CORE_PARENT STREQUAL "Windows-Editor" OR
-	NOT PULSEFORGE_WINDOWS_CORE_BINARY_DIR STREQUAL "\${sourceDir}/Build/CMakePresets/windows-core" OR
+	NOT PULSEFORGE_WINDOWS_CORE_BINARY_DIR STREQUAL "\${sourceDir}/Build/CMakePresets/WindowsCore" OR
 	NOT PULSEFORGE_WINDOWS_CORE_HOST_OS STREQUAL "Windows")
 	message(FATAL_ERROR "Windows-Core must preserve its parent, build directory and host filter.")
+endif()
+foreach(PULSEFORGE_OPTION IN ITEMS PULSEFORGE_BUILD_CORE_ONLY BUILD_TESTING)
+	string(JSON PULSEFORGE_OPTION_VALUE GET "${PULSEFORGE_PRESETS_JSON}"
+		configurePresets ${PULSEFORGE_WINDOWS_CORE_INDEX} cacheVariables "${PULSEFORGE_OPTION}")
+	if(NOT PULSEFORGE_OPTION_VALUE STREQUAL "ON")
+		message(FATAL_ERROR "Windows-Core must set ${PULSEFORGE_OPTION}=ON.")
+	endif()
+endforeach()
+string(JSON PULSEFORGE_WINDOWS_CORE_EDITOR_VALUE GET "${PULSEFORGE_PRESETS_JSON}"
+	configurePresets ${PULSEFORGE_WINDOWS_CORE_INDEX} cacheVariables PULSEFORGE_BUILD_EDITOR)
+if(NOT PULSEFORGE_WINDOWS_CORE_EDITOR_VALUE STREQUAL "OFF")
+	message(FATAL_ERROR "Windows-Core must set PULSEFORGE_BUILD_EDITOR=OFF.")
 endif()
 string(JSON PULSEFORGE_WINDOWS_CORE_DISPLAY_NAME GET "${PULSEFORGE_PRESETS_JSON}"
 	configurePresets ${PULSEFORGE_WINDOWS_CORE_INDEX} displayName)
@@ -87,7 +108,7 @@ if(NOT PULSEFORGE_WINDOWS_CORE_DISPLAY_NAME STREQUAL "Windows Core and CPU Tests
 	message(FATAL_ERROR "Windows-Core must have a coherent capitalized display name.")
 endif()
 
-pulseforge_find_preset_index(PULSEFORGE_LINUX_CORE_INDEX configurePresets Linux-Core)
+pulseforge_require_preset(configurePresets Linux-Core PULSEFORGE_LINUX_CORE_INDEX)
 string(JSON PULSEFORGE_LINUX_CORE_GENERATOR GET "${PULSEFORGE_PRESETS_JSON}"
 	configurePresets ${PULSEFORGE_LINUX_CORE_INDEX} generator)
 string(JSON PULSEFORGE_LINUX_CORE_BINARY_DIR GET "${PULSEFORGE_PRESETS_JSON}"
@@ -98,10 +119,22 @@ string(JSON PULSEFORGE_LINUX_CORE_HOST_OS GET "${PULSEFORGE_PRESETS_JSON}"
 string(JSON PULSEFORGE_LINUX_CORE_BUILD_TYPE GET "${PULSEFORGE_PRESETS_JSON}"
 	configurePresets ${PULSEFORGE_LINUX_CORE_INDEX} cacheVariables CMAKE_BUILD_TYPE)
 if(NOT PULSEFORGE_LINUX_CORE_GENERATOR STREQUAL "Unix Makefiles" OR
-	NOT PULSEFORGE_LINUX_CORE_BINARY_DIR STREQUAL "\${sourceDir}/Build/CMakePresets/linux-core" OR
+	NOT PULSEFORGE_LINUX_CORE_BINARY_DIR STREQUAL "\${sourceDir}/Build/CMakePresets/LinuxCore" OR
 	NOT PULSEFORGE_LINUX_CORE_HOST_OS STREQUAL "Linux" OR
 	NOT PULSEFORGE_LINUX_CORE_BUILD_TYPE STREQUAL "Debug")
 	message(FATAL_ERROR "Linux-Core must preserve its Linux configure behavior and binary directory.")
+endif()
+foreach(PULSEFORGE_OPTION IN ITEMS PULSEFORGE_BUILD_CORE_ONLY BUILD_TESTING)
+	string(JSON PULSEFORGE_OPTION_VALUE GET "${PULSEFORGE_PRESETS_JSON}"
+		configurePresets ${PULSEFORGE_LINUX_CORE_INDEX} cacheVariables "${PULSEFORGE_OPTION}")
+	if(NOT PULSEFORGE_OPTION_VALUE STREQUAL "ON")
+		message(FATAL_ERROR "Linux-Core must set ${PULSEFORGE_OPTION}=ON.")
+	endif()
+endforeach()
+string(JSON PULSEFORGE_LINUX_CORE_EDITOR_VALUE GET "${PULSEFORGE_PRESETS_JSON}"
+	configurePresets ${PULSEFORGE_LINUX_CORE_INDEX} cacheVariables PULSEFORGE_BUILD_EDITOR)
+if(NOT PULSEFORGE_LINUX_CORE_EDITOR_VALUE STREQUAL "OFF")
+	message(FATAL_ERROR "Linux-Core must set PULSEFORGE_BUILD_EDITOR=OFF.")
 endif()
 string(JSON PULSEFORGE_LINUX_CORE_DISPLAY_NAME GET "${PULSEFORGE_PRESETS_JSON}"
 	configurePresets ${PULSEFORGE_LINUX_CORE_INDEX} displayName)
@@ -111,7 +144,7 @@ endif()
 
 foreach(PULSEFORGE_CONFIGURATION IN ITEMS Debug Release Dist)
 	set(PULSEFORGE_PRESET_NAME "Windows-Editor-${PULSEFORGE_CONFIGURATION}")
-	pulseforge_find_preset_index(PULSEFORGE_BUILD_PRESET_INDEX buildPresets "${PULSEFORGE_PRESET_NAME}")
+	pulseforge_require_preset(buildPresets "${PULSEFORGE_PRESET_NAME}" PULSEFORGE_BUILD_PRESET_INDEX)
 	string(JSON PULSEFORGE_BUILD_PRESET_CONFIGURE GET "${PULSEFORGE_PRESETS_JSON}"
 		buildPresets ${PULSEFORGE_BUILD_PRESET_INDEX} configurePreset)
 	string(JSON PULSEFORGE_BUILD_PRESET_CONFIGURATION GET "${PULSEFORGE_PRESETS_JSON}"
@@ -133,7 +166,7 @@ foreach(PULSEFORGE_CONFIGURATION IN ITEMS Debug Release Dist)
 		message(FATAL_ERROR "${PULSEFORGE_PRESET_NAME} must build the normal target set.")
 	endif()
 
-	pulseforge_find_preset_index(PULSEFORGE_TEST_PRESET_INDEX testPresets "${PULSEFORGE_PRESET_NAME}")
+	pulseforge_require_preset(testPresets "${PULSEFORGE_PRESET_NAME}" PULSEFORGE_TEST_PRESET_INDEX)
 	string(JSON PULSEFORGE_TEST_PRESET_CONFIGURE GET "${PULSEFORGE_PRESETS_JSON}"
 		testPresets ${PULSEFORGE_TEST_PRESET_INDEX} configurePreset)
 	string(JSON PULSEFORGE_TEST_PRESET_CONFIGURATION GET "${PULSEFORGE_PRESETS_JSON}"
@@ -155,7 +188,7 @@ foreach(PULSEFORGE_PRESET_NAME IN ITEMS Windows-Core-Debug Linux-Core-Debug)
 		set(PULSEFORGE_CONFIGURE_PRESET_NAME Linux-Core)
 		set(PULSEFORGE_CONFIGURATION Debug)
 	endif()
-	pulseforge_find_preset_index(PULSEFORGE_BUILD_PRESET_INDEX buildPresets "${PULSEFORGE_PRESET_NAME}")
+	pulseforge_require_preset(buildPresets "${PULSEFORGE_PRESET_NAME}" PULSEFORGE_BUILD_PRESET_INDEX)
 	string(JSON PULSEFORGE_BUILD_PRESET_CONFIGURE GET "${PULSEFORGE_PRESETS_JSON}"
 		buildPresets ${PULSEFORGE_BUILD_PRESET_INDEX} configurePreset)
 	if(NOT PULSEFORGE_BUILD_PRESET_CONFIGURE STREQUAL PULSEFORGE_CONFIGURE_PRESET_NAME)
@@ -169,7 +202,7 @@ foreach(PULSEFORGE_PRESET_NAME IN ITEMS Windows-Core-Debug Linux-Core-Debug)
 		endif()
 	endif()
 
-	pulseforge_find_preset_index(PULSEFORGE_TEST_PRESET_INDEX testPresets "${PULSEFORGE_PRESET_NAME}")
+	pulseforge_require_preset(testPresets "${PULSEFORGE_PRESET_NAME}" PULSEFORGE_TEST_PRESET_INDEX)
 	string(JSON PULSEFORGE_TEST_PRESET_CONFIGURE GET "${PULSEFORGE_PRESETS_JSON}"
 		testPresets ${PULSEFORGE_TEST_PRESET_INDEX} configurePreset)
 	if(NOT PULSEFORGE_TEST_PRESET_CONFIGURE STREQUAL PULSEFORGE_CONFIGURE_PRESET_NAME)
@@ -186,7 +219,7 @@ endforeach()
 
 execute_process(
 	COMMAND "${PULSEFORGE_CMAKE_COMMAND}" --list-presets=all
-	WORKING_DIRECTORY "${PULSEFORGE_SOURCE_ROOT}"
+	WORKING_DIRECTORY "${PULSEFORGE_PRESET_WORKING_DIRECTORY}"
 	RESULT_VARIABLE PULSEFORGE_LIST_PRESETS_RESULT
 	OUTPUT_VARIABLE PULSEFORGE_LIST_PRESETS_OUTPUT
 	ERROR_VARIABLE PULSEFORGE_LIST_PRESETS_ERROR)
@@ -200,12 +233,4 @@ foreach(PULSEFORGE_REQUIRED_PRESET IN ITEMS
 		message(FATAL_ERROR "cmake --list-presets=all omitted ${PULSEFORGE_REQUIRED_PRESET}.")
 	endif()
 endforeach()
-foreach(PULSEFORGE_FORBIDDEN_PRESET IN ITEMS
-	windows-editor windows-core linux-core windows-editor-debug windows-editor-release windows-editor-dist
-	windows-core-debug linux-core-debug)
-	if(PULSEFORGE_LIST_PRESETS_OUTPUT MATCHES "${PULSEFORGE_FORBIDDEN_PRESET}")
-		message(FATAL_ERROR "cmake --list-presets=all exposed obsolete identifier ${PULSEFORGE_FORBIDDEN_PRESET}.")
-	endif()
-endforeach()
-
 message(STATUS "Windows Editor Debug, Release and Dist presets share ${PULSEFORGE_WINDOWS_EDITOR_BINARY_DIR}.")

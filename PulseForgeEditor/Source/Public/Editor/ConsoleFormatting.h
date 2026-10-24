@@ -16,7 +16,7 @@ namespace PulseForgeEditor
 	inline void AppendConsoleEntry(std::string& Output, ConsoleEntryView Entry)
 	{
 		Output.push_back('[');
-		Output.append(Entry.Severity.empty() ? std::string_view("unknown") : Entry.Severity);
+		Output.append(Entry.Severity.empty() ? std::string_view("UNKNOWN") : Entry.Severity);
 		Output.push_back(']');
 		if (!Entry.Logger.empty())
 		{

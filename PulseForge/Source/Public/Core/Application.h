@@ -27,7 +27,7 @@ namespace PulseForge
 	class PULSEFORGE_API Application : public RenderDevice
 	{
 	public:
-		explicit Application(RendererAPI API = RendererAPI::Vulkan);
+		explicit Application(RendererAPI API = RendererAPI::Vulkan, WindowProps WindowProperties = WindowProps());
 		virtual ~Application();
 
 		void Run();

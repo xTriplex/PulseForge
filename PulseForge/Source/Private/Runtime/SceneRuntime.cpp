@@ -9,6 +9,7 @@
 #include "Scripting/ScriptRuntime.h"
 
 #include <optional>
+#include <exception>
 
 namespace PulseForge
 {
@@ -32,6 +33,7 @@ namespace PulseForge
 		std::unique_ptr<PhysicsSceneRuntime> Physics;
 		std::unique_ptr<ScriptRuntime> Scripting;
 		Scene* Source = nullptr;
+		bool Paused = false;
 	};
 
 	SceneRuntime::SceneRuntime(
@@ -86,7 +88,8 @@ namespace PulseForge
 			const ScriptRuntimeServices Services{
 				.Physics = Candidate->Physics.get(),
 				.Audio = Candidate->Audio.get(),
-				.InputState = m_Services.InputState };
+				.InputState = m_Services.InputState,
+				.Observer = m_Services.ScriptObserver };
 			Candidate->Scripting = std::make_unique<ScriptRuntime>(m_Project, m_Description.Scripting, Services);
 			if (auto Result = Candidate->Scripting->Start(Source); !Result)
 				return std::unexpected(MakeError(
@@ -116,6 +119,43 @@ namespace PulseForge
 		return m_Impl != nullptr;
 	}
 
+	std::expected<void, SceneRuntimeError> SceneRuntime::SetPaused(bool Paused)
+	{
+		if (!m_Impl)
+			return std::unexpected(
+				MakeError(SceneRuntimeErrorCode::NotRunning, SceneRuntimeSubsystem::None, "Scene runtime is not started"));
+		if (m_Impl->Paused == Paused) return {};
+		if (m_Services.AudioPauseGuard)
+		{
+			try
+			{
+				if (const auto Rejection = m_Services.AudioPauseGuard(Paused))
+					return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
+						"Audio pause change was rejected by the host: " + *Rejection));
+			}
+			catch (const std::exception& Exception)
+			{
+				return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
+					std::string("Audio pause guard failed: ") + Exception.what()));
+			}
+			catch (...)
+			{
+				return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
+					"Audio pause guard failed with an unknown exception"));
+			}
+		}
+		if (auto Result = m_Impl->Audio->SetPaused(Paused); !Result)
+			return std::unexpected(MakeError(SceneRuntimeErrorCode::UpdateFailed, SceneRuntimeSubsystem::Audio,
+				"Could not change scene audio pause state: " + Result.error().Message));
+		m_Impl->Paused = Paused;
+		return {};
+	}
+
+	bool SceneRuntime::IsPaused() const noexcept
+	{
+		return m_Impl && m_Impl->Paused;
+	}
+
 	std::expected<SceneRuntimeFrameResult, SceneRuntimeError> SceneRuntime::Advance(
 		Scene& Source,
 		Timestep FrameDelta)
@@ -136,6 +176,7 @@ namespace PulseForge
 				SceneRuntimeErrorCode::InvalidDeltaTime,
 				SceneRuntimeSubsystem::None,
 				"Scene runtime frame delta must be finite and non-negative"));
+		if (m_Impl->Paused) return SceneRuntimeFrameResult{};
 
 		{
 			ScopedDiagnosticTimer Timer(m_Services.Diagnostics, "ScriptRuntime::Advance", "ScriptRuntime");

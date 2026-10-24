@@ -134,12 +134,12 @@ function New-Fixture
 		}
 		elseif ($entry.Kind -eq 'CMakeSettingsOutputTree')
 		{
-			$buildTree = Join-Path $target 'build\x64-Debug'
+			$buildTree = Join-Path $target 'Build\x64-Debug'
 			$cache = "CMAKE_HOME_DIRECTORY:INTERNAL=$path`r`nCMAKE_GENERATOR:INTERNAL=Ninja`r`n"
 			Set-FixtureFile $buildTree 'CMakeCache.txt' $cache
 			Set-FixtureFile $buildTree 'build.ninja' 'generated build graph'
 			Set-FixtureFile $buildTree '_deps\pulseforgenvrhi-src\source.cpp' 'fetched pinned dependency source'
-			Set-FixtureFile $target 'install\x64-Debug\bin\PulseForgeGame.exe' 'generated install output'
+			Set-FixtureFile $target 'Install\x64-Debug\bin\PulseForgeGame.exe' 'generated install output'
 		}
 		elseif ($entry.Kind -eq 'CMakeSettingsBuildDirectory')
 		{
@@ -208,7 +208,7 @@ try
 	Assert-True ((Resolve-MenuSelection '7') -eq 'Preview' -and (Resolve-MenuSelection '8') -eq 'Sizes' -and (Resolve-MenuSelection '9') -eq 'Diagnostics' -and (Resolve-MenuSelection '10') -eq 'Cancel' -and $null -eq (Resolve-MenuSelection '11')) 'preview, size, diagnostics, cancel, and invalid selections map correctly'
 	$processMetadata = @(
 		[pscustomobject]@{ Name = 'cmd.exe'; ProcessId = 101; CommandLine = 'cmd.exe /c start "" PulseForgeEditor.exe' },
-		[pscustomobject]@{ Name = 'powershell.exe'; ProcessId = 102; CommandLine = ('powershell.exe -Command cd ' + $root + '\Out\build\x64-Debug') },
+		[pscustomobject]@{ Name = 'powershell.exe'; ProcessId = 102; CommandLine = ('powershell.exe -Command cd ' + $root + '\Out\Build\x64-Debug') },
 		[pscustomobject]@{ Name = 'cmd.exe'; ProcessId = 103; CommandLine = 'cmd.exe /k' }
 	)
 	$launcherMatches = @(Find-PulseForgeLauncherProcesses -ProcessMetadata $processMetadata)
@@ -219,9 +219,9 @@ try
 	Assert-Throws { Get-TargetFullPath -RelativePath 'PulseForge\Vendor\JoltPhysics\Build' } 'Jolt upstream build path is not allowlisted'
 	Assert-Throws { Get-TargetFullPath -RelativePath 'Build' } 'the whole Build tree is not allowlisted'
 	Assert-True ((Get-TargetFullPath -RelativePath 'Out') -eq (Join-Path $root 'Out')) 'the exact Out target is allowlisted'
-	Assert-True ((Get-TargetFullPath -RelativePath 'Out\build') -eq (Join-Path $root 'Out\build')) 'the validated CMakeSettings build subtree is allowlisted'
-	Assert-True ((Get-TargetFullPath -RelativePath 'Out\QualityGraphProbe\build') -eq (Join-Path $root 'Out\QualityGraphProbe\build')) 'the exact quality-graph fixture output is allowlisted'
-	Assert-Throws { Get-TargetFullPath -RelativePath 'Out\build\x64-Debug' } 'individual configuration subpaths are not independently allowlisted'
+	Assert-True ((Get-TargetFullPath -RelativePath 'Out\Build') -eq (Join-Path $root 'Out\Build')) 'the validated CMakeSettings build subtree is allowlisted'
+	Assert-True ((Get-TargetFullPath -RelativePath 'Out\QualityGraphProbe\Build') -eq (Join-Path $root 'Out\QualityGraphProbe\Build')) 'the exact quality-graph fixture output is allowlisted'
+	Assert-Throws { Get-TargetFullPath -RelativePath 'Out\Build\x64-Debug' } 'individual configuration subpaths are not independently allowlisted'
 
 	$vulkanPath = 'Build\CMake\VS2022-x64'
 	$size = Get-TargetInspection -RelativePath $vulkanPath
@@ -235,11 +235,11 @@ try
 	$preview = Show-CleanupPreview -ActionName Comprehensive
 	Assert-True ($preview.TotalBytes -gt 0 -and (Get-Item -LiteralPath $cachePath).Length -eq $cacheBytes) 'preview measures without changing files'
 	Assert-Throws { Get-TargetInspection -RelativePath 'Out' } 'Out with an unrelated probe sibling is preserved as a whole'
-	$outBuildPlan = Get-TargetInspection -RelativePath 'Out\build'
+	$outBuildPlan = Get-TargetInspection -RelativePath 'Out\Build'
 	Assert-True ($outBuildPlan.Bytes -gt 0 -and $outBuildPlan.GeneratedItems.Count -eq 1) 'partial Out cleanup validates every repository-owned Ninja configuration'
-	$qualityBuildPlan = Get-TargetInspection -RelativePath 'Out\QualityGraphProbe\build'
+	$qualityBuildPlan = Get-TargetInspection -RelativePath 'Out\QualityGraphProbe\Build'
 	Assert-True ($qualityBuildPlan.Bytes -gt 0) 'quality-graph output is checked against its exact fixture source directory'
-	Assert-True (Test-Path -LiteralPath (Join-Path $root 'Out\build\x64-Debug\_deps\pulseforgenvrhi-src\source.cpp')) 'preview leaves fetched dependency sources intact'
+	Assert-True (Test-Path -LiteralPath (Join-Path $root 'Out\Build\x64-Debug\_deps\pulseforgenvrhi-src\source.cpp')) 'preview leaves fetched dependency sources intact'
 	Assert-ProtectedFixtureData $root
 
 	$validOutRoot = Join-Path ([IO.Path]::GetTempPath()) ('PulseForgeCleanerValidOut-' + [Guid]::NewGuid().ToString('N'))
@@ -247,14 +247,14 @@ try
 	$fixtureRoots.Add($validOutRoot)
 	Set-FixtureFile $validOutRoot 'CMakeLists.txt' '# valid Out fixture marker'
 	Initialize-FixtureGit $validOutRoot
-	Set-FixtureFile $validOutRoot 'Out\build\x64-Debug\CMakeCache.txt' "CMAKE_HOME_DIRECTORY:INTERNAL=$validOutRoot`r`nCMAKE_GENERATOR:INTERNAL=Ninja`r`n"
-	Set-FixtureFile $validOutRoot 'Out\build\x64-Debug\build.ninja' 'generated build graph'
-	Set-FixtureFile $validOutRoot 'Out\build\x64-Debug\_deps\pulseforgenvrhi-src\source.cpp' 'pinned source'
-	Set-FixtureFile $validOutRoot 'Out\install\x64-Debug\bin\PulseForgeGame.exe' 'install output'
+	Set-FixtureFile $validOutRoot 'Out\Build\x64-Debug\CMakeCache.txt' "CMAKE_HOME_DIRECTORY:INTERNAL=$validOutRoot`r`nCMAKE_GENERATOR:INTERNAL=Ninja`r`n"
+	Set-FixtureFile $validOutRoot 'Out\Build\x64-Debug\build.ninja' 'generated build graph'
+	Set-FixtureFile $validOutRoot 'Out\Build\x64-Debug\_deps\pulseforgenvrhi-src\source.cpp' 'pinned source'
+	Set-FixtureFile $validOutRoot 'Out\Install\x64-Debug\bin\PulseForgeGame.exe' 'install output'
 	Set-FixtureCleanerRoot $validOutRoot
 	$outPlan = Get-TargetInspection -RelativePath 'Out'
 	Assert-True ($outPlan.Bytes -gt 0 -and $outPlan.GeneratedItems.Count -eq 2) 'conventional Out layout validates build and install trees'
-	Assert-True (Test-Path -LiteralPath (Join-Path $validOutRoot 'Out\build\x64-Debug\_deps\pulseforgenvrhi-src\source.cpp')) 'Out preview retains fetched dependency source checkouts'
+	Assert-True (Test-Path -LiteralPath (Join-Path $validOutRoot 'Out\Build\x64-Debug\_deps\pulseforgenvrhi-src\source.cpp')) 'Out preview retains fetched dependency source checkouts'
 
 	$unexpectedOutRoot = New-Fixture
 	$fixtureRoots.Add($unexpectedOutRoot)
@@ -266,17 +266,17 @@ try
 	$wrongGeneratorRoot = New-Fixture
 	$fixtureRoots.Add($wrongGeneratorRoot)
 	Set-FixtureCleanerRoot $wrongGeneratorRoot
-	Set-Content -LiteralPath (Join-Path $wrongGeneratorRoot 'Out\build\x64-Debug\CMakeCache.txt') -Value ("CMAKE_HOME_DIRECTORY:INTERNAL=$wrongGeneratorRoot`r`nCMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022`r`n")
+	Set-Content -LiteralPath (Join-Path $wrongGeneratorRoot 'Out\Build\x64-Debug\CMakeCache.txt') -Value ("CMAKE_HOME_DIRECTORY:INTERNAL=$wrongGeneratorRoot`r`nCMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022`r`n")
 	Assert-Throws { Get-TargetInspection -RelativePath 'Out' } 'Out using an unexpected generator is preserved'
-	Assert-True (Test-Path -LiteralPath (Join-Path $wrongGeneratorRoot 'Out\build\x64-Debug\CMakeCache.txt')) 'unsupported Out cache remains untouched'
-	Assert-Throws { Get-TargetInspection -RelativePath 'Out\build' } 'partial Out cleanup also rejects an unsupported generator'
+	Assert-True (Test-Path -LiteralPath (Join-Path $wrongGeneratorRoot 'Out\Build\x64-Debug\CMakeCache.txt')) 'unsupported Out cache remains untouched'
+	Assert-Throws { Get-TargetInspection -RelativePath 'Out\Build' } 'partial Out cleanup also rejects an unsupported generator'
 
 	$wrongFixtureSourceRoot = New-Fixture
 	$fixtureRoots.Add($wrongFixtureSourceRoot)
 	Set-FixtureCleanerRoot $wrongFixtureSourceRoot
-$wrongFixtureCache = Join-Path $wrongFixtureSourceRoot 'Out\QualityGraphProbe\build\CMakeCache.txt'
+$wrongFixtureCache = Join-Path $wrongFixtureSourceRoot 'Out\QualityGraphProbe\Build\CMakeCache.txt'
 	Set-Content -LiteralPath $wrongFixtureCache -Value "CMAKE_HOME_DIRECTORY:INTERNAL=$wrongFixtureSourceRoot`r`nCMAKE_GENERATOR:INTERNAL=Ninja`r`n"
-	Assert-Throws { Get-TargetInspection -RelativePath 'Out\QualityGraphProbe\build' } 'quality fixture build from another source root is preserved'
+	Assert-Throws { Get-TargetInspection -RelativePath 'Out\QualityGraphProbe\Build' } 'quality fixture build from another source root is preserved'
 	Assert-True (Test-Path -LiteralPath $wrongFixtureCache) 'mismatched quality fixture cache remains untouched'
 
 	$trackedRoot = New-Fixture
@@ -311,7 +311,7 @@ $trackedRelativePath = "$vulkanPath\Debug\Authored.cpp"
 	$result = Invoke-CleanupAction -ActionName Build
 	Assert-True ($result.Succeeded -eq 5 -and $result.Failed -eq 1 -and (Test-Path (Join-Path $root $vulkanPath))) "build action cleans safe CMake targets while rejecting the unexpected Out root (succeeded=$($result.Succeeded), failed=$($result.Failed), skipped=$($result.Skipped))"
 	Assert-True (-not (Test-Path -LiteralPath $cachePath)) 'CMake cache is removed last'
-	Assert-True (-not (Test-Path -LiteralPath (Join-Path $root 'Out\build'))) 'validated CMakeSettings configurations are removed independently of Out user files'
+	Assert-True (-not (Test-Path -LiteralPath (Join-Path $root 'Out\Build'))) 'validated CMakeSettings configurations are removed independently of Out user files'
 	Assert-True (Test-Path -LiteralPath (Join-Path $root 'Out\QualityGraphProbe\CMakeLists.txt')) 'fixture source remains after generated build output removal'
 	Assert-True (Test-Path -LiteralPath (Join-Path $root 'Build\QualityTools\.venv\pyvenv.cfg')) 'shared quality tools remain outside configuration cleanup targets'
 	Assert-True (Test-Path -LiteralPath (Join-Path $root "$vulkanPath\QualityTools\.venv\pyvenv.cfg")) 'quality tool environment survives'
@@ -449,7 +449,7 @@ $trackedRelativePath = "$vulkanPath\Debug\Authored.cpp"
 	{
 		$script:JunctionSkipReasons.Add(('nested junction test: ' + $nestedLinkResult.Reason))
 	}
-	$outJunction = Join-Path $nestedRoot 'Out\build\x64-Debug\_deps\external-cache'
+	$outJunction = Join-Path $nestedRoot 'Out\Build\x64-Debug\_deps\external-cache'
 	$outLinkResult = Try-NewFixtureJunction -Path $outJunction -Target $outside
 	if ($outLinkResult.Created)
 	{

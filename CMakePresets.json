@@ -11,7 +11,7 @@
 			"displayName": "Windows Editor",
 			"generator": "Visual Studio 17 2022",
 			"architecture": "x64",
-			"binaryDir": "${sourceDir}/Build/CMakePresets/windows-editor",
+			"binaryDir": "${sourceDir}/Build/CMakePresets/WindowsEditor",
 			"vendor": {
 				"microsoft.com/VisualStudioSettings/CMake/1.0": {
 					"hostOS": [ "Windows" ]
@@ -22,7 +22,7 @@
 			"name": "Windows-Core",
 			"displayName": "Windows Core and CPU Tests",
 			"inherits": "Windows-Editor",
-			"binaryDir": "${sourceDir}/Build/CMakePresets/windows-core",
+			"binaryDir": "${sourceDir}/Build/CMakePresets/WindowsCore",
 			"cacheVariables": {
 				"PULSEFORGE_BUILD_CORE_ONLY": "ON",
 				"PULSEFORGE_BUILD_EDITOR": "OFF",
@@ -38,7 +38,7 @@
 			"name": "Linux-Core",
 			"displayName": "Linux Core and CPU Tests",
 			"generator": "Unix Makefiles",
-			"binaryDir": "${sourceDir}/Build/CMakePresets/linux-core",
+			"binaryDir": "${sourceDir}/Build/CMakePresets/LinuxCore",
 			"cacheVariables": {
 				"CMAKE_BUILD_TYPE": "Debug",
 				"PULSEFORGE_BUILD_CORE_ONLY": "ON",
