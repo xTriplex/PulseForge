@@ -126,6 +126,8 @@ namespace
 
 		ImGui::End();
 		ImGui::Render();
+		const ImDrawData* DrawData = ImGui::GetDrawData();
+		PF_CHECK(Tests, DrawData && DrawData->Valid);
 		PF_CHECK(Tests, Context.ColorStack.Size == 0);
 		PF_CHECK(Tests, Context.StyleVarStack.Size == 0);
 		PF_CHECK(Tests, Actions.Errors.empty());
@@ -159,4 +161,8 @@ void RunEditorInspectorRegressionTests(TestRunner& Tests)
 	DrawInspectorFrame(Tests, Panel, Workspace, Style, AssetSelector, Scene, Actions, NoAssets, 3);
 	SetScriptFloatProperties(Entity, { { "health", 100.0f }, { "weight", 2.5f } });
 	DrawInspectorFrame(Tests, Panel, Workspace, Style, AssetSelector, Scene, Actions, NoAssets, 2);
+	SetScriptFloatProperties(Entity, { { "weight", 2.5f } });
+	DrawInspectorFrame(Tests, Panel, Workspace, Style, AssetSelector, Scene, Actions, NoAssets, 1);
+	SetScriptFloatProperties(Entity, {});
+	DrawInspectorFrame(Tests, Panel, Workspace, Style, AssetSelector, Scene, Actions, NoAssets, 0);
 }

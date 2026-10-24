@@ -24,7 +24,8 @@ namespace PulseForge
 			PropertyDescriptor{ DirectionalLightId, "castShadows", "Cast shadows", true, "" },
 			PropertyDescriptor{
 				DirectionalLightId, "shadowDistance", "Shadow distance", 100.0f, "world units", true, true, 0.0f, 100000.0f },
-			PropertyDescriptor{ DirectionalLightId, "shadowBias", "Shadow bias", 1.0f, "normalized depth", true, true, 0.0f, 16.0f },
+			PropertyDescriptor{
+				DirectionalLightId, "shadowBias", "Shadow bias", 1.0f, "rasterizer depth-bias factor", true, true, 0.0f, 16.0f },
 			PropertyDescriptor{
 				DirectionalLightId, "shadowNormalBias", "Shadow normal bias", 0.025f, "world units", true, true, 0.0f, 1.0f },
 			PropertyDescriptor{
