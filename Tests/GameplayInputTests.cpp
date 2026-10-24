@@ -386,6 +386,7 @@ namespace
 		Map.Actions.push_back(DigitalAction("GameplayJump", Keyboard(InputKey::Space), InputContext::Gameplay));
 		Map.Actions.push_back(DigitalAction("EditorCommand", Keyboard(InputKey::Space), InputContext::EditorShortcuts));
 		Map.Actions.push_back(DigitalAction("GameplayClick", MouseButtonControl(MouseControl::Left), InputContext::Gameplay));
+		Map.Actions.push_back(DigitalAction("GameplayPad", GamepadButtonControl(GamepadButton::A), InputContext::Gameplay));
 		PF_CHECK(Tests, Service.SetActionMap(std::move(Map)).has_value());
 
 		InputRoutingState Routing = GameplayRouting();
@@ -396,14 +397,19 @@ namespace
 			.Active = true
 		};
 		Routing.ContextCount = 2;
+		PF_CHECK(Tests, Service.QueueEvent({ .Kind = InputEventKind::DeviceConnected, .DeviceInstance = 37 }));
+		Service.PublishFrame(Routing);
 		PF_CHECK(Tests, Service.QueueEvent(ButtonEvent(InputEventKind::Pressed, Keyboard(InputKey::Space))));
 		PF_CHECK(Tests, Service.QueueEvent(ButtonEvent(InputEventKind::Pressed, MouseButtonControl(MouseControl::Left))));
+		PF_CHECK(Tests, Service.QueueEvent(ButtonEvent(InputEventKind::Pressed,
+			GamepadButtonControl(GamepadButton::A), 0, 37)));
 		Service.PublishFrame(Routing);
 		const auto* GameplayAction = Service.FindAction("GameplayJump");
 		const auto* ShortcutAction = Service.FindAction("EditorCommand");
 		PF_CHECK(Tests, GameplayAction && !GameplayAction->Held);
 		PF_CHECK(Tests, ShortcutAction && ShortcutAction->Held && ShortcutAction->Pressed);
 		PF_CHECK(Tests, Service.FindAction("GameplayClick") && Service.FindAction("GameplayClick")->Held);
+		PF_CHECK(Tests, Service.FindAction("GameplayPad") && Service.FindAction("GameplayPad")->Held);
 
 		Service.Reset();
 		Routing = GameplayRouting();
@@ -422,19 +428,26 @@ namespace
 		Routing = GameplayRouting();
 		Routing.Contexts[1] = {
 			.Context = InputContext::TextEntry,
-			.Consumes = InputDeviceMask::Keyboard,
+			.Consumes = InputDeviceMask::All,
 			.OwnerWindow = TestWindow,
 			.Active = true
 		};
 		Routing.ContextCount = 2;
+		PF_CHECK(Tests, Service.QueueEvent({ .Kind = InputEventKind::DeviceConnected, .DeviceInstance = 38 }));
+		Service.PublishFrame(Routing);
 		PF_CHECK(Tests, Service.QueueEvent(ButtonEvent(InputEventKind::Released, Keyboard(InputKey::Space))));
 		PF_CHECK(Tests, Service.QueueEvent(ButtonEvent(InputEventKind::Released, MouseButtonControl(MouseControl::Left))));
+		PF_CHECK(Tests, Service.QueueEvent(ButtonEvent(InputEventKind::Pressed,
+			GamepadButtonControl(GamepadButton::A), 0, 38)));
 		Service.PublishFrame(Routing);
 		PF_CHECK(Tests, Service.QueueEvent(ButtonEvent(InputEventKind::Pressed, Keyboard(InputKey::Space))));
 		PF_CHECK(Tests, Service.QueueEvent(ButtonEvent(InputEventKind::Pressed, MouseButtonControl(MouseControl::Left))));
+		PF_CHECK(Tests, Service.QueueEvent(ButtonEvent(InputEventKind::Pressed,
+			GamepadButtonControl(GamepadButton::A), 0, 38)));
 		Service.PublishFrame(Routing);
 		PF_CHECK(Tests, Service.FindAction("GameplayJump") && !Service.FindAction("GameplayJump")->Held);
-		PF_CHECK(Tests, Service.FindAction("GameplayClick") && Service.FindAction("GameplayClick")->Held);
+		PF_CHECK(Tests, Service.FindAction("GameplayClick") && !Service.FindAction("GameplayClick")->Held);
+		PF_CHECK(Tests, Service.FindAction("GameplayPad") && !Service.FindAction("GameplayPad")->Held);
 	}
 
 	void TestDetachedViewportOwnerLifecycle(TestRunner& Tests)

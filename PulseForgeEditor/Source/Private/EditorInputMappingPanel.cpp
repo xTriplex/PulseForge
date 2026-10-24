@@ -9,7 +9,9 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <cmath>
 #include <string_view>
+#include <utility>
 
 namespace PulseForgeEditor::Detail
 {
@@ -41,20 +43,17 @@ namespace PulseForgeEditor::Detail
 		m_FocusedLastFrame = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 		if (m_Capturing)
 		{
-			ImGui::Text("Press a keyboard key or mouse button for %s / %s. Escape cancels.",
+			ImGui::Text("Press a keyboard, mouse, or gamepad control for %s / %s. Escape cancels.",
 				m_CaptureActionId.c_str(), m_CaptureBindingId.c_str());
 			if (ImGui::Button("Cancel capture"))
 			{
-				m_Capturing = false;
-				m_CaptureActionId.clear();
-				m_CaptureBindingId.clear();
-				m_Status = "Binding capture canceled.";
+				FinishCapture("Binding capture canceled.");
 			}
 		}
 		else if (!CanPersist)
 			ImGui::TextWrapped("Bindings are read-only: %s", PersistenceWarning.c_str());
 		else
-			ImGui::TextUnformatted("Choose Rebind, then press a keyboard key or mouse button. Escape cancels.");
+			ImGui::TextUnformatted("Choose Rebind, then press a keyboard, mouse, or gamepad control. Escape cancels.");
 
 		if (!m_Status.empty()) ImGui::TextWrapped("%s", m_Status.c_str());
 		ImGui::Separator();
@@ -82,31 +81,38 @@ namespace PulseForgeEditor::Detail
 				ImGui::SameLine();
 				ImGui::Text("Primary: %s", ControlName(Binding.Primary).c_str());
 				ImGui::SameLine();
-				const bool CanCaptureBinding = CanPersist && !m_Capturing &&
-					(Binding.Kind == PulseForge::ActionBindingKind::Button || Binding.Kind == PulseForge::ActionBindingKind::Axis);
+				const bool CanCaptureBinding = CanPersist && !m_Capturing;
 				ImGui::BeginDisabled(!CanCaptureBinding);
 				if (ImGui::SmallButton("Rebind primary"))
 				{
-					m_CaptureActionId = Action.Id;
-					m_CaptureBindingId = Binding.Id;
-					m_CaptureSecondary = false;
-					m_Capturing = true;
-					m_Status.clear();
+					BeginCapture(Action.Id, Binding.Id);
 				}
 				ImGui::EndDisabled();
-				if (Binding.Kind == PulseForge::ActionBindingKind::Axis)
+				if (Binding.Kind == PulseForge::ActionBindingKind::Axis || Binding.Kind == PulseForge::ActionBindingKind::Stick)
 				{
 					ImGui::Text("Secondary: %s", ControlName(Binding.Secondary).c_str());
 					ImGui::SameLine();
 					ImGui::BeginDisabled(!CanCaptureBinding);
 					if (ImGui::SmallButton("Rebind secondary"))
 					{
-						m_CaptureActionId = Action.Id;
-						m_CaptureBindingId = Binding.Id;
-						m_CaptureSecondary = true;
-						m_Capturing = true;
-						m_Status.clear();
+						BeginCapture(Action.Id, Binding.Id, true);
 					}
+					ImGui::EndDisabled();
+				}
+				for (uint8_t Modifier = 0; Modifier < Binding.ModifierCount && Modifier < Binding.Modifiers.size(); ++Modifier)
+				{
+					ImGui::SameLine();
+					ImGui::BeginDisabled(!CanCaptureBinding);
+					if (ImGui::SmallButton(("Rebind modifier " + std::to_string(Modifier + 1)).c_str()))
+						BeginCapture(Action.Id, Binding.Id, false, Modifier);
+					ImGui::EndDisabled();
+				}
+				if (Binding.ModifierCount < Binding.Modifiers.size())
+				{
+					ImGui::SameLine();
+					ImGui::BeginDisabled(!CanCaptureBinding);
+					if (ImGui::SmallButton("Add modifier"))
+						BeginCapture(Action.Id, Binding.Id, false, Binding.ModifierCount);
 					ImGui::EndDisabled();
 				}
 				for (uint8_t Modifier = 0; Modifier < Binding.ModifierCount && Modifier < Binding.Modifiers.size(); ++Modifier)
@@ -132,13 +138,7 @@ namespace PulseForgeEditor::Detail
 
 		if (Event.GetEventType() == PulseForge::EEventType::WindowLostFocus)
 		{
-			m_Capturing = false;
-			m_CapturedInputAwaitingPublish = true;
-			m_CapturedInputPublished = true;
-			m_CaptureActionId.clear();
-			m_CaptureBindingId.clear();
-			m_CaptureSecondary = false;
-			m_Status = "Binding capture canceled because the owning window lost focus.";
+			FinishCapture("Binding capture canceled because the owning window lost focus.");
 			Event.bHandled = true;
 			return;
 		}
@@ -156,13 +156,7 @@ namespace PulseForgeEditor::Detail
 			const auto& Key = static_cast<const PulseForge::KeyPressedEvent&>(Event);
 			if (Key.GetRepeatCount() == 0 && Key.GetKeyCode() == static_cast<int>(PulseForge::InputKey::Escape))
 			{
-				m_Capturing = false;
-				m_CapturedInputAwaitingPublish = true;
-				m_CapturedInputPublished = true;
-				m_CaptureActionId.clear();
-				m_CaptureBindingId.clear();
-				m_CaptureSecondary = false;
-				m_Status = "Binding capture canceled.";
+				FinishCapture("Binding capture canceled.");
 				return;
 			}
 			if (Key.GetRepeatCount() == 0 && Key.GetKeyCode() > 0)
@@ -181,36 +175,134 @@ namespace PulseForgeEditor::Detail
 			}
 		}
 
-		if (!HasCapturedControl) return;
+		if (HasCapturedControl) ApplyCapturedControl(Captured, Input, ProjectRoot, ProjectId, UserDataRoot, CanPersist);
+	}
+
+	void EditorInputMappingPanel::HandleInputEvent(
+		const PulseForge::InputEvent& Event,
+		PulseForge::GameplayInputService& Input,
+		const std::filesystem::path& ProjectRoot,
+		const PulseForge::UUID& ProjectId,
+		const std::filesystem::path& UserDataRoot,
+		bool CanPersist)
+	{
+		if (!m_Capturing) return;
+		if (Event.Kind == PulseForge::InputEventKind::FocusLost ||
+			Event.Kind == PulseForge::InputEventKind::WindowDestroyed ||
+			Event.Kind == PulseForge::InputEventKind::CaptureCancelled)
+		{
+			FinishCapture("Binding capture canceled because input ownership changed.");
+			return;
+		}
+		if (Event.Kind == PulseForge::InputEventKind::DeviceDisconnected)
+		{
+			FinishCapture("Binding capture canceled because the controller disconnected.");
+			return;
+		}
+		if (Event.Control.Device != PulseForge::InputDevice::GamepadButton &&
+			Event.Control.Device != PulseForge::InputDevice::GamepadAxis) return;
+
+		bool HasCapturedControl = Event.Control.Device == PulseForge::InputDevice::GamepadButton &&
+			Event.Kind == PulseForge::InputEventKind::Pressed;
+		if (Event.Control.Device == PulseForge::InputDevice::GamepadAxis && Event.Kind == PulseForge::InputEventKind::Value)
+		{
+			const float Threshold = Event.Control.Code >= static_cast<uint16_t>(PulseForge::GamepadAxis::LeftTrigger)
+				? 0.75f : 0.5f;
+			HasCapturedControl = std::abs(Event.X) >= Threshold;
+		}
+		if (HasCapturedControl)
+			ApplyCapturedControl(Event.Control, Input, ProjectRoot, ProjectId, UserDataRoot, CanPersist);
+	}
+
+	void EditorInputMappingPanel::BeginCapture(
+		std::string ActionId,
+		std::string BindingId,
+		bool Secondary,
+		int ModifierIndex)
+	{
+		m_CaptureActionId = std::move(ActionId);
+		m_CaptureBindingId = std::move(BindingId);
+		m_CaptureSecondary = Secondary;
+		m_CaptureModifierIndex = ModifierIndex;
+		m_Capturing = true;
+		m_CapturedInputAwaitingPublish = false;
+		m_CapturedInputPublished = false;
+		m_Status.clear();
+	}
+
+	void EditorInputMappingPanel::FinishCapture(std::string Status)
+	{
 		m_Capturing = false;
 		m_CapturedInputAwaitingPublish = true;
 		m_CapturedInputPublished = true;
+		m_CaptureActionId.clear();
+		m_CaptureBindingId.clear();
+		m_CaptureSecondary = false;
+		m_CaptureModifierIndex = -1;
+		m_Status = std::move(Status);
+	}
+
+	void EditorInputMappingPanel::ApplyCapturedControl(
+		PulseForge::InputControl Captured,
+		PulseForge::GameplayInputService& Input,
+		const std::filesystem::path& ProjectRoot,
+		const PulseForge::UUID& ProjectId,
+		const std::filesystem::path& UserDataRoot,
+		bool CanPersist)
+	{
+		const bool Secondary = m_CaptureSecondary;
+		const int ModifierIndex = m_CaptureModifierIndex;
+		const std::string ActionId = m_CaptureActionId;
+		const std::string BindingId = m_CaptureBindingId;
+		FinishCapture({});
 		if (!CanPersist)
 		{
 			m_Status = "Could not save the binding because user data storage is unavailable.";
 			return;
 		}
-
 		const auto Action = std::find_if(Input.GetActionMap().Actions.begin(), Input.GetActionMap().Actions.end(),
-			[this](const PulseForge::GameplayActionDefinition& Candidate) { return Candidate.Id == m_CaptureActionId; });
+			[&](const PulseForge::GameplayActionDefinition& Candidate) { return Candidate.Id == ActionId; });
 		if (Action == Input.GetActionMap().Actions.end())
 		{
 			m_Status = "The selected action no longer exists.";
 			return;
 		}
 		const auto Binding = std::find_if(Action->Bindings.begin(), Action->Bindings.end(),
-			[this](const PulseForge::ActionBinding& Candidate) { return Candidate.Id == m_CaptureBindingId; });
+			[&](const PulseForge::ActionBinding& Candidate) { return Candidate.Id == BindingId; });
 		if (Binding == Action->Bindings.end())
 		{
 			m_Status = "The selected binding no longer exists.";
 			return;
 		}
 
-		PulseForge::ActionBinding Replacement = *Binding;
-		if (m_CaptureSecondary) Replacement.Secondary = Captured;
+		PulseForge::GameplayActionMap CandidateMap = Input.GetActionMap();
+		auto CandidateAction = std::find_if(CandidateMap.Actions.begin(), CandidateMap.Actions.end(),
+			[&](const PulseForge::GameplayActionDefinition& Candidate) { return Candidate.Id == ActionId; });
+		auto CandidateBinding = std::find_if(CandidateAction->Bindings.begin(), CandidateAction->Bindings.end(),
+			[&](const PulseForge::ActionBinding& Candidate) { return Candidate.Id == BindingId; });
+		PulseForge::ActionBinding Replacement = *CandidateBinding;
+		if (ModifierIndex >= 0)
+		{
+			if (static_cast<size_t>(ModifierIndex) > Replacement.ModifierCount ||
+				static_cast<size_t>(ModifierIndex) >= Replacement.Modifiers.size())
+			{
+				m_Status = "The selected modifier slot is no longer available.";
+				return;
+			}
+			if (static_cast<size_t>(ModifierIndex) == Replacement.ModifierCount)
+				++Replacement.ModifierCount;
+			Replacement.Modifiers[ModifierIndex] = Captured;
+		}
+		else if (Secondary) Replacement.Secondary = Captured;
 		else Replacement.Primary = Captured;
+		*CandidateBinding = Replacement;
+		if (auto Valid = PulseForge::ValidateGameplayActionMap(CandidateMap); !Valid)
+		{
+			m_Status = "That control cannot be used for this binding: " + Valid.error().Message;
+			return;
+		}
 		auto Saved = PulseForge::SaveGameplayInputBindingOverride(
-			UserDataRoot, ProjectId, m_CaptureActionId, m_CaptureBindingId, Replacement);
+			UserDataRoot, ProjectId, ActionId, BindingId, Replacement);
 		if (!Saved)
 		{
 			m_Status = "Could not save binding override: " + Saved.error().Message;
@@ -231,9 +323,7 @@ namespace PulseForgeEditor::Detail
 		if (auto Applied = Input.SetActionMap(std::move(Reloaded->ActionMap)); !Applied)
 			m_Status = "Saved the override, but the active map rejected it: " + Applied.error().Message;
 		else
-			m_Status = std::string(m_CaptureSecondary ? "Secondary" : "Primary") + " binding updated to " + ControlName(Captured) + ".";
-		m_CaptureActionId.clear();
-		m_CaptureBindingId.clear();
-		m_CaptureSecondary = false;
+			m_Status = std::string(ModifierIndex >= 0 ? "Modifier" : (Secondary ? "Secondary" : "Primary")) +
+				" binding updated to " + ControlName(Captured) + ".";
 	}
 }

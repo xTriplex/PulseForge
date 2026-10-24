@@ -20,6 +20,7 @@ namespace PulseForge
 		void RenderLayers();
 		void RenderPlatformWindows();
 		void DispatchEvent(Event& EventValue);
+		void DispatchInputEvent(const InputEvent& EventValue) noexcept;
 
 		Layer& PushLayer(std::unique_ptr<Layer> NewLayer);
 		Layer& PushOverlay(std::unique_ptr<Layer> NewOverlay);
