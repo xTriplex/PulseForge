@@ -333,6 +333,7 @@ namespace PulseForge
 	void Application::QueueGameplayInputEvent(const InputEvent& Event) noexcept
 	{
 		(void)m_GameplayInput.QueueEvent(Event);
+		m_LayerStack.DispatchInputEvent(Event);
 		if (m_GameplayInput.DidOverflowEvents() && !m_GameplayInputOverflowLogged)
 		{
 			m_GameplayInputOverflowLogged = true;

@@ -1,4 +1,6 @@
 #include "TestEditorSupport.h"
+#include "Editor/Detail/EditorInputMappingPanel.h"
+#include "Input/GameplayInputStore.h"
 
 #include <cstdlib>
 
@@ -135,6 +137,107 @@ namespace
 		PF_CHECK(Tests, DraftKey == MakeMaterialDraftKey("C:/Project", "material-uuid"));
 		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("D:/Project", "material-uuid"));
 		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("C:/Project", "other-material-uuid"));
+	}
+
+	void TestGamepadAndModifierBindingCapture(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		auto ProjectId = UUID::Generate();
+		PF_CHECK(Tests, ProjectId.has_value());
+		if (!ProjectId) return;
+
+		std::error_code Error;
+		const auto TemporaryDirectory = std::filesystem::temp_directory_path(Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const auto Root = TemporaryDirectory /
+			std::filesystem::u8path("PulseForge Editor Input Remap Ω " + ProjectId->ToString());
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup() { std::error_code Ignore; std::filesystem::remove_all(Path, Ignore); }
+		} CleanupRoot{ Root };
+		const auto ProjectRoot = Root / "Project";
+		const auto UserDataRoot = Root / "User Data";
+		std::filesystem::create_directories(ProjectRoot, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+
+		GameplayActionMap Defaults;
+		GameplayActionDefinition Throttle;
+		Throttle.Id = "Throttle";
+		Throttle.Type = ActionValueType::Axis1D;
+		ActionBinding Binding;
+		Binding.Id = "primary";
+		Binding.Kind = ActionBindingKind::Axis;
+		Binding.Primary = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::H) };
+		Throttle.Bindings.push_back(Binding);
+		Defaults.Actions.push_back(Throttle);
+		GameplayActionDefinition Jump;
+		Jump.Id = "Jump";
+		Jump.Type = ActionValueType::Digital;
+		ActionBinding JumpBinding;
+		JumpBinding.Id = "primary";
+		JumpBinding.Kind = ActionBindingKind::Button;
+		JumpBinding.Primary = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::Space) };
+		Jump.Bindings.push_back(JumpBinding);
+		Defaults.Actions.push_back(Jump);
+		auto Json = SerializeGameplayActionMap(Defaults);
+		PF_CHECK(Tests, Json.has_value());
+		if (!Json) return;
+		{
+			std::ofstream Stream(ProjectRoot / "InputActions.json", std::ios::binary | std::ios::trunc);
+			Stream.write(Json->data(), static_cast<std::streamsize>(Json->size()));
+			PF_CHECK(Tests, Stream.good());
+		}
+
+		auto Loaded = LoadGameplayInputMap(ProjectRoot, *ProjectId, UserDataRoot);
+		PF_CHECK(Tests, Loaded.has_value());
+		if (!Loaded) return;
+		GameplayInputService Input;
+		PF_CHECK(Tests, Input.SetActionMap(std::move(Loaded->ActionMap)).has_value());
+		PulseForgeEditor::Detail::EditorInputMappingPanel Panel;
+		Panel.BeginCapture("Throttle", "primary");
+		PF_CHECK(Tests, Panel.IsCapturing());
+		Panel.HandleInputEvent({ .Kind = InputEventKind::Value,
+			.Control = { InputDevice::GamepadAxis, static_cast<uint16_t>(GamepadAxis::RightX) },
+			.DeviceInstance = 71, .X = 0.35f }, Input, ProjectRoot, *ProjectId, UserDataRoot, true);
+		PF_CHECK(Tests, Panel.IsCapturing());
+		PF_CHECK(Tests, Input.GetActionMap().Actions[0].Bindings[0].Primary == Binding.Primary);
+		Panel.HandleInputEvent({ .Kind = InputEventKind::Value,
+			.Control = { InputDevice::GamepadAxis, static_cast<uint16_t>(GamepadAxis::RightX) },
+			.DeviceInstance = 71, .X = -0.65f }, Input, ProjectRoot, *ProjectId, UserDataRoot, true);
+		PF_CHECK(Tests, !Panel.IsCapturing());
+		const InputControl ReboundAxis{ InputDevice::GamepadAxis, static_cast<uint16_t>(GamepadAxis::RightX) };
+		PF_CHECK(Tests, Input.GetActionMap().Actions[0].Bindings[0].Primary == ReboundAxis);
+
+		Panel.BeginCapture("Throttle", "primary", false, 0);
+		Panel.HandleInputEvent({ .Kind = InputEventKind::Pressed,
+			.Control = { InputDevice::GamepadButton, static_cast<uint16_t>(GamepadButton::A) },
+			.DeviceInstance = 71 }, Input, ProjectRoot, *ProjectId, UserDataRoot, true);
+		PF_CHECK(Tests, !Panel.IsCapturing());
+		const ActionBinding& Rebound = Input.GetActionMap().Actions[0].Bindings[0];
+		PF_CHECK(Tests, Rebound.ModifierCount == 1);
+		PF_CHECK(Tests, Rebound.Modifiers[0] ==
+			(InputControl{ InputDevice::GamepadButton, static_cast<uint16_t>(GamepadButton::A) }));
+		auto Persisted = LoadGameplayInputMap(ProjectRoot, *ProjectId, UserDataRoot);
+		PF_CHECK(Tests, Persisted.has_value());
+		if (Persisted)
+		{
+			PF_CHECK(Tests, Persisted->ActionMap.Actions[0].Bindings[0].Primary == ReboundAxis);
+			PF_CHECK(Tests, Persisted->ActionMap.Actions[0].Bindings[0].ModifierCount == 1);
+		}
+
+		Panel.BeginCapture("Jump", "primary");
+		Panel.HandleInputEvent({ .Kind = InputEventKind::Value,
+			.Control = { InputDevice::GamepadAxis, static_cast<uint16_t>(GamepadAxis::LeftX) },
+			.DeviceInstance = 71, .X = 0.8f }, Input, ProjectRoot, *ProjectId, UserDataRoot, true);
+		PF_CHECK(Tests, !Panel.IsCapturing());
+		PF_CHECK(Tests, Input.GetActionMap().Actions[1].Bindings[0].Primary == JumpBinding.Primary);
+		Persisted = LoadGameplayInputMap(ProjectRoot, *ProjectId, UserDataRoot);
+		PF_CHECK(Tests, Persisted.has_value());
+		if (Persisted)
+			PF_CHECK(Tests, Persisted->ActionMap.Actions[1].Bindings[0].Primary == JumpBinding.Primary);
 	}
 
 	void TestEditorDeferredOperationQueue(TestRunner& Tests)
@@ -820,6 +923,7 @@ namespace
 void RunEditorTests(TestRunner& Tests)
 {
 	TestEditorWorkspacePanelState(Tests);
+	TestGamepadAndModifierBindingCapture(Tests);
 	TestEditorDeferredOperationQueue(Tests);
 	TestEditorAssetDestinationPolicy(Tests);
 	TestEditorAssetSelectorPolicy(Tests);

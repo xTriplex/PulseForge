@@ -1296,6 +1296,14 @@ namespace
 			Event.bHandled |= Event.IsInCategory(PulseForge::EventCategoryKeyboard) && IO.WantCaptureKeyboard;
 		}
 
+		void OnInputEvent(const PulseForge::InputEvent& Event) override
+		{
+			if (!m_Project) return;
+			PulseForge::Application& Application = PulseForge::Application::Get();
+			m_InputMappingPanel.HandleInputEvent(Event, Application.GetGameplayInput(), m_Project->GetRootPath(),
+				m_Project->GetDescription().ID, m_InputUserDataRoot, m_InputPersistenceAvailable);
+		}
+
 	private:
 		void RequestEditorApplicationClose()
 		{
@@ -7705,7 +7713,7 @@ namespace
 					m_SceneRuntime && SceneViewportOwner && m_ViewportKeyboardFocused && !TextOrModalInput && !ViewportNavigation);
 				AddContext(PulseForge::InputContext::EditorShortcuts, PulseForge::InputDeviceMask::None, ShortcutsRouted);
 				AddContext(PulseForge::InputContext::ViewportNavigation, KeyboardAndMouse, ViewportNavigation);
-				AddContext(PulseForge::InputContext::TextEntry, KeyboardAndMouse, TextOrModalInput);
+				AddContext(PulseForge::InputContext::TextEntry, PulseForge::InputDeviceMask::All, TextOrModalInput);
 				m_EditorShortcutsRouted = ShortcutsRouted;
 			}
 			else m_EditorShortcutsRouted = false;

@@ -70,6 +70,28 @@ namespace PulseForge
 		}
 	}
 
+	void LayerStack::DispatchInputEvent(const InputEvent& EventValue) noexcept
+	{
+		CallbackDepthScope DispatchScope(m_DispatchDepth);
+		for (auto It = m_Layers.rbegin(); It != m_Layers.rend(); ++It)
+		{
+			try
+			{
+				(*It)->OnInputEvent(EventValue);
+			}
+			catch (const std::exception& Exception)
+			{
+				std::fprintf(stderr, "PulseForge: layer '%s' threw while observing input: %s\n",
+					(*It)->GetName().c_str(), Exception.what());
+			}
+			catch (...)
+			{
+				std::fprintf(stderr, "PulseForge: layer '%s' threw an unknown exception while observing input\n",
+					(*It)->GetName().c_str());
+			}
+		}
+	}
+
 	void LayerStack::AttachLayer(Layer& LayerValue)
 	{
 		CallbackDepthScope LifecycleScope(m_LifecycleCallbackDepth);
