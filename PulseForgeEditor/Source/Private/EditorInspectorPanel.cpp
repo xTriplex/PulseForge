@@ -9,6 +9,7 @@
 
 #include <misc/cpp/imgui_stdlib.h>
 
+#include <algorithm>
 #include <expected>
 #include <functional>
 #include <initializer_list>
@@ -21,6 +22,14 @@ namespace PulseForgeEditor
 		{
 			const std::u8string Encoded = Path.u8string();
 			return std::string(reinterpret_cast<const char*>(Encoded.data()), Encoded.size());
+		}
+
+		PulseForge::SceneError ToSceneError(const PulseForge::PropertyAccessError& Error)
+		{
+			const PulseForge::SceneErrorCode Code = Error.Code == PulseForge::PropertyAccessErrorCode::MissingComponent
+														? PulseForge::SceneErrorCode::MissingComponent
+														: PulseForge::SceneErrorCode::StorageFailure;
+			return { Code, Error.Message };
 		}
 	} // namespace
 
@@ -735,6 +744,17 @@ namespace PulseForgeEditor
 
 		if (Inspector.Style.BeginPropertyTable("MeshRendererProperties"))
 		{
+			if (Inspector.Style.BeginPropertyRow("Mesh Asset"))
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::MeshRenderer, PulseForge::PropertyIds::MeshAsset,
+					[&Inspector, this](PulseForge::PropertyValue& Value)
+					{
+						auto* Mesh = std::get_if<PulseForge::AssetID>(&Value);
+						if (!Mesh) return false;
+						std::optional<PulseForge::AssetID> Selected{ *Mesh };
+						if (!DrawAssetSelector(Inspector, "##MeshAsset", Selected, { ".gltf", ".glb" }, false) || !Selected) return false;
+						*Mesh = *Selected;
+						return true;
+					});
 			if (Inspector.Style.BeginPropertyRow("Material"))
 				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::MeshRenderer, PulseForge::PropertyIds::MaterialAsset,
 					[&Inspector, this](PulseForge::PropertyValue& Value)
@@ -896,7 +916,6 @@ namespace PulseForgeEditor
 		const auto Result = Entity.GetScript();
 		if (!Result || !Result->has_value()) return;
 
-		PulseForge::ScriptComponent Component = **Result;
 		const bool IsExpanded = Inspector.Style.SectionHeader(PulseForgeEditor::EditorIcon::Script, "Script");
 		ImGui::SameLine();
 		ImGui::SetCursorPosX((std::max)(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 31.0f));
@@ -930,57 +949,62 @@ namespace PulseForgeEditor
 					});
 			Inspector.Style.EndPropertyTable();
 		}
-		DrawScriptFloatProperties(Inspector, Entity, Component);
+		DrawScriptFloatProperties(Inspector, Entity);
 		Inspector.Style.EndComponentBody();
 	}
 
-	void EditorInspectorPanel::DrawScriptFloatProperties(
-		Context& Inspector, const PulseForge::Entity& Entity, PulseForge::ScriptComponent& Component)
+	void EditorInspectorPanel::DrawScriptFloatProperties(Context& Inspector, const PulseForge::Entity& Entity)
 	{
-		const auto UpdateScript = [this, &Inspector, Entity](
-									  std::string Description, std::function<void(PulseForge::ScriptComponent&)> Update)
-		{
-			RecordComponentOperation(
-				Inspector,
-				[Entity, Update = std::move(Update)]() -> std::expected<void, PulseForge::SceneError>
-				{
-					auto Current = Entity.GetScript();
-					if (!Current) return std::unexpected(Current.error());
-					if (!Current->has_value())
-						return std::unexpected(PulseForge::SceneError{
-							PulseForge::SceneErrorCode::MissingComponent, "Entity does not have a Script component" });
-					PulseForge::ScriptComponent Updated = Current->value();
-					Update(Updated);
-					return Entity.SetScript(Updated);
-				},
-				Description);
-		};
+		const auto UpdateScript = [this, &Inspector](
+									  std::string Description, std::function<std::expected<void, PulseForge::SceneError>()> Update)
+		{ RecordComponentOperation(Inspector, std::move(Update), Description); };
 
 		ImGui::TextDisabled("Script Properties");
-		ImGui::Separator();
-		for (const auto& [Identifier, Value] : Component.FloatProperties)
+		const auto Properties = PulseForge::GetDynamicPropertyDescriptors(Entity, PulseForge::PropertyComponentIds::ScriptFloat);
+		if (!Properties)
 		{
-			ImGui::PushID(Identifier.c_str());
-			if (Inspector.Style.BeginPropertyRow(Identifier.c_str()))
+			Inspector.Actions.ReportInspectorError("Could not inspect script properties: " + Properties.error().Message);
+			return;
+		}
+		if (!Properties->empty() && Inspector.Style.BeginPropertyTable("ScriptFloatProperties"))
+		{
+			for (const PulseForge::DynamicPropertyDescriptor& Property : *Properties)
 			{
-				float UpdatedValue = Value;
-				ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 31.0f);
-				if (ImGui::DragFloat("##ScriptFloatProperty", &UpdatedValue, 0.05f, -PulseForge::MaximumScriptFloatPropertyMagnitude,
-						PulseForge::MaximumScriptFloatPropertyMagnitude, "%.3f"))
-					UpdateScript("Edit script property " + Identifier, [Identifier, UpdatedValue](PulseForge::ScriptComponent& Updated)
-						{ Updated.FloatProperties[Identifier] = UpdatedValue; });
-				ImGui::SameLine();
-				if (ImGui::SmallButton("X"))
-					UpdateScript("Remove script property " + Identifier,
-						[Identifier](PulseForge::ScriptComponent& Updated) { Updated.FloatProperties.erase(Identifier); });
+				if (!Property.Editable) continue;
+				ImGui::PushID(Property.Id.c_str());
+				if (Inspector.Style.BeginPropertyRow(Property.Label))
+				{
+					const float AvailableWidth = (std::max)(ImGui::GetContentRegionAvail().x, 1.0f);
+					const float RemoveWidth = (std::min)(31.0f, AvailableWidth * 0.35f);
+					ImGui::SetNextItemWidth((std::max)(AvailableWidth - RemoveWidth - ImGui::GetStyle().ItemInnerSpacing.x, 1.0f));
+					DrawProperty(Inspector, Entity, Property.ComponentId, Property.Id,
+						[](PulseForge::PropertyValue& Value)
+						{
+							auto* Number = std::get_if<float>(&Value);
+							return Number && ImGui::DragFloat("##ScriptFloatProperty", Number, 0.05f,
+												 -PulseForge::MaximumScriptFloatPropertyMagnitude,
+												 PulseForge::MaximumScriptFloatPropertyMagnitude, "%.3f");
+						});
+					ImGui::SameLine();
+					if (ImGui::SmallButton("X"))
+						UpdateScript("Remove script property " + Property.Id,
+							[Entity, Identifier = Property.Id]() -> std::expected<void, PulseForge::SceneError>
+							{
+								const auto Removed = PulseForge::RemoveScriptFloatProperty(Entity, Identifier);
+								if (!Removed) return std::unexpected(ToSceneError(Removed.error()));
+								return {};
+							});
+				}
+				ImGui::PopID();
 			}
-			ImGui::PopID();
+			Inspector.Style.EndPropertyTable();
 		}
 
-		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+		const float AddRowWidth = (std::max)(ImGui::GetContentRegionAvail().x, 1.0f);
+		ImGui::SetNextItemWidth((std::max)(AddRowWidth * 0.45f, 1.0f));
 		ImGui::InputText("##NewScriptPropertyIdentifier", &m_NewScriptPropertyIdentifier);
 		ImGui::SameLine();
-		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5f - 46.0f);
+		ImGui::SetNextItemWidth((std::max)(AddRowWidth * 0.30f, 1.0f));
 		ImGui::DragFloat("##NewScriptPropertyValue", &m_NewScriptPropertyValue, 0.05f, -PulseForge::MaximumScriptFloatPropertyMagnitude,
 			PulseForge::MaximumScriptFloatPropertyMagnitude, "%.3f");
 		ImGui::SameLine();
@@ -988,12 +1012,18 @@ namespace PulseForgeEditor
 		{
 			if (!PulseForge::IsValidScriptPropertyIdentifier(m_NewScriptPropertyIdentifier))
 				Inspector.Actions.ReportInspectorError("Script property IDs must use the supported ASCII identifier format.");
-			else if (Component.FloatProperties.contains(m_NewScriptPropertyIdentifier))
+			else if (std::any_of(Properties->begin(), Properties->end(), [this](const PulseForge::DynamicPropertyDescriptor& Property)
+						 { return Property.Id == m_NewScriptPropertyIdentifier; }))
 				Inspector.Actions.ReportInspectorError("A script property with that ID already exists.");
 			else
 				UpdateScript("Add script property " + m_NewScriptPropertyIdentifier,
-					[m_NewScriptPropertyIdentifier = m_NewScriptPropertyIdentifier, Value = m_NewScriptPropertyValue](
-						PulseForge::ScriptComponent& Updated) { Updated.FloatProperties.emplace(m_NewScriptPropertyIdentifier, Value); });
+					[Entity, Identifier = m_NewScriptPropertyIdentifier,
+						Value = m_NewScriptPropertyValue]() -> std::expected<void, PulseForge::SceneError>
+					{
+						const auto Added = PulseForge::AddScriptFloatProperty(Entity, Identifier, Value);
+						if (!Added) return std::unexpected(ToSceneError(Added.error()));
+						return {};
+					});
 		}
 	}
 

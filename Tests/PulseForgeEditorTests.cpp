@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 
 void RunEditorDocumentHostTestEditorTests(TestRunner& Tests);
+void RunEditorInspectorRegressionTests(TestRunner& Tests);
 #if defined(_DEBUG) || defined(PF_DEBUG)
 void RunEditorDebugAcceptanceCoordinatorTests(TestRunner& Tests);
 #endif
@@ -28,6 +29,7 @@ int main()
 	RunEditorSnapshotHistoryTests(Tests);
 	RunEditorDocumentWorkspaceTests(Tests);
 	RunEditorAssetImportOperationTests(Tests);
+	RunEditorInspectorRegressionTests(Tests);
 	RunProjectRuntimeTests(Tests);
 	return Tests.Finish();
 }

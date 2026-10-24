@@ -8,6 +8,7 @@
 #include "Input/GameplayInput.h"
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Scene/Scene.h"
+#include "Scripting/Detail/ScriptFloatPropertyRead.h"
 
 #include <algorithm>
 #include <array>
@@ -140,16 +141,15 @@ namespace PulseForge::ScriptEnvironment
 			if (!IsValidScriptPropertyIdentifier(Identifier))
 				return ReturnHostError(State, "get_float_property received an invalid stable property ID");
 
-			const auto Script = UserData->Value.GetScript();
-			if (!Script) return ReturnHostError(State, "entity is no longer valid in its scene");
-			if (!Script->has_value()) return ReturnHostError(State, "entity has no script component");
-			const auto Property = Script->value().FindFloatProperty(Identifier);
-			if (!Property)
+			const auto Result = CaptureScriptFloatPropertyRead(
+				[&UserData, Identifier] { return ReadProperty(UserData->Value, PropertyComponentIds::ScriptFloat, Identifier); });
+			if (Result.State == ScriptFloatPropertyReadState::Failed) return ReturnHostError(State, Result.Failure.data());
+			if (Result.State == ScriptFloatPropertyReadState::Missing)
 			{
 				lua_pushnil(State);
 				return 1;
 			}
-			lua_pushnumber(State, *Property);
+			lua_pushnumber(State, Result.Value);
 			return 1;
 		}
 

@@ -50,6 +50,7 @@ namespace PulseForge
 			PropertyDescriptor{ SpotLightId, "shadowSoftness", "Shadow softness", 1.5f, "shadow-map texels", true, true, 0.0f, 4.0f },
 			PropertyDescriptor{ MeshRendererId, "materialAsset", "Material", std::optional<AssetID>{}, "", true, true, {}, {},
 				PropertyReferenceKind::MaterialAsset },
+			PropertyDescriptor{ MeshRendererId, "meshAsset", "Mesh", AssetID{}, "", true, true, {}, {}, PropertyReferenceKind::MeshAsset },
 			PropertyDescriptor{ ScriptId, "enabled", "Enabled", true, "" },
 			PropertyDescriptor{ ScriptId, "asset", "Script", AssetID{}, "", true, true, {}, {}, PropertyReferenceKind::ScriptAsset } };
 
@@ -72,6 +73,11 @@ namespace PulseForge
 					return MakeError(PropertyAccessErrorCode::UnknownProperty,
 						"Unknown property '" + std::string(PropertyId) + "' on component '" + std::string(ComponentId) + "'");
 			return MakeError(PropertyAccessErrorCode::UnknownComponent, "Unknown property component '" + std::string(ComponentId) + "'");
+		}
+
+		PropertyAccessError ScriptErrorToPropertyError(const ScriptComponentError& Error)
+		{
+			return MakeError(PropertyAccessErrorCode::InvalidValue, Error.Message);
 		}
 
 		template <typename T>
@@ -98,6 +104,22 @@ namespace PulseForge
 		return Descriptors;
 	}
 
+	std::expected<std::vector<DynamicPropertyDescriptor>, PropertyAccessError> GetDynamicPropertyDescriptors(
+		const Entity& Target, std::string_view ComponentId)
+	{
+		if (ComponentId != PropertyComponentIds::ScriptFloat) return std::unexpected(UnknownPropertyError(ComponentId, {}));
+		auto Script = RequireComponent(Target.GetScript(), PropertyComponentIds::Script);
+		if (!Script) return std::unexpected(Script.error());
+		std::vector<DynamicPropertyDescriptor> Results;
+		Results.reserve(Script->FloatProperties.size());
+		for (const auto& [Identifier, Value] : Script->FloatProperties)
+		{
+			(void)Value;
+			Results.push_back({ std::string(PropertyComponentIds::ScriptFloat), Identifier, Identifier, PropertyValueType::Float, true });
+		}
+		return Results;
+	}
+
 	const PropertyDescriptor* FindPropertyDescriptor(std::string_view ComponentId, std::string_view PropertyId) noexcept
 	{
 		for (const PropertyDescriptor& Descriptor : Descriptors)
@@ -108,6 +130,17 @@ namespace PulseForge
 	std::expected<PropertyValue, PropertyAccessError> ReadProperty(
 		const Entity& Target, std::string_view ComponentId, std::string_view PropertyId)
 	{
+		if (ComponentId == PropertyComponentIds::ScriptFloat)
+		{
+			if (!IsValidScriptPropertyIdentifier(PropertyId)) return std::unexpected(UnknownPropertyError(ComponentId, PropertyId));
+			auto Script = RequireComponent(Target.GetScript(), PropertyComponentIds::Script);
+			if (!Script) return std::unexpected(Script.error());
+			const auto Value = Script->FindFloatProperty(PropertyId);
+			if (!Value)
+				return std::unexpected(MakeError(
+					PropertyAccessErrorCode::UnknownProperty, "Script float property '" + std::string(PropertyId) + "' does not exist"));
+			return PropertyValue{ *Value };
+		}
 		if (!FindPropertyDescriptor(ComponentId, PropertyId)) return std::unexpected(UnknownPropertyError(ComponentId, PropertyId));
 
 		if (ComponentId == TransformId)
@@ -160,7 +193,7 @@ namespace PulseForge
 		{
 			const auto Mesh = RequireComponent(Target.GetMeshRenderer(), ComponentId);
 			if (!Mesh) return std::unexpected(Mesh.error());
-			return PropertyValue{ Mesh->MaterialAsset };
+			return PropertyId == PropertyIds::MeshAsset ? PropertyValue{ Mesh->MeshAsset } : PropertyValue{ Mesh->MaterialAsset };
 		}
 		const auto Script = RequireComponent(Target.GetScript(), ComponentId);
 		if (!Script) return std::unexpected(Script.error());
@@ -171,6 +204,21 @@ namespace PulseForge
 		const Entity& Target, std::string_view ComponentId, std::string_view PropertyId, const PropertyValue& Value)
 	{
 		const PropertyDescriptor* Descriptor = FindPropertyDescriptor(ComponentId, PropertyId);
+		if (ComponentId == PropertyComponentIds::ScriptFloat)
+		{
+			if (!IsValidScriptPropertyIdentifier(PropertyId)) return std::unexpected(UnknownPropertyError(ComponentId, PropertyId));
+			auto Typed = RequireValue<float>(Value, PropertyId);
+			if (!Typed) return std::unexpected(Typed.error());
+			auto Current = RequireComponent(Target.GetScript(), PropertyComponentIds::Script);
+			if (!Current) return std::unexpected(Current.error());
+			if (!Current->FloatProperties.contains(PropertyId))
+				return std::unexpected(MakeError(
+					PropertyAccessErrorCode::UnknownProperty, "Script float property '" + std::string(PropertyId) + "' does not exist"));
+			if (auto Updated = Current->SetFloatProperty(PropertyId, *Typed); !Updated)
+				return std::unexpected(ScriptErrorToPropertyError(Updated.error()));
+			const auto Result = Target.SetScript(*Current);
+			return Result ? std::expected<void, PropertyAccessError>{} : std::unexpected(SceneErrorToPropertyError(Result.error()));
+		}
 		if (!Descriptor) return std::unexpected(UnknownPropertyError(ComponentId, PropertyId));
 		if (!Descriptor->Editable)
 			return std::unexpected(MakeError(PropertyAccessErrorCode::ReadOnlyProperty,
@@ -208,9 +256,18 @@ namespace PulseForge
 		{
 			auto Current = RequireComponent(Target.GetMeshRenderer(), ComponentId);
 			if (!Current) return std::unexpected(Current.error());
-			auto Typed = RequireValue<std::optional<AssetID>>(Value, PropertyId);
-			if (!Typed) return std::unexpected(Typed.error());
-			Current->MaterialAsset = *Typed;
+			if (PropertyId == PropertyIds::MeshAsset)
+			{
+				auto Typed = RequireValue<AssetID>(Value, PropertyId);
+				if (!Typed) return std::unexpected(Typed.error());
+				Current->MeshAsset = *Typed;
+			}
+			else
+			{
+				auto Typed = RequireValue<std::optional<AssetID>>(Value, PropertyId);
+				if (!Typed) return std::unexpected(Typed.error());
+				Current->MaterialAsset = *Typed;
+			}
 			const auto Result = Target.SetMeshRenderer(*Current);
 			return Result ? std::expected<void, PropertyAccessError>{} : Reject(Result.error());
 		}
@@ -296,5 +353,31 @@ namespace PulseForge
 		if (PropertyId == "shadowBias") return Apply(Current->ShadowBias);
 		if (PropertyId == "shadowNormalBias") return Apply(Current->ShadowNormalBias);
 		return Apply(Current->ShadowSoftness);
+	}
+
+	std::expected<void, PropertyAccessError> AddScriptFloatProperty(const Entity& Target, std::string_view AuthoredId, float Value)
+	{
+		if (!IsValidScriptPropertyIdentifier(AuthoredId))
+			return std::unexpected(MakeError(PropertyAccessErrorCode::InvalidValue, "Invalid authored script float property ID"));
+		auto Current = RequireComponent(Target.GetScript(), PropertyComponentIds::Script);
+		if (!Current) return std::unexpected(Current.error());
+		if (Current->FloatProperties.contains(AuthoredId))
+			return std::unexpected(MakeError(PropertyAccessErrorCode::InvalidValue, "Script float property already exists"));
+		if (auto Updated = Current->SetFloatProperty(AuthoredId, Value); !Updated)
+			return std::unexpected(ScriptErrorToPropertyError(Updated.error()));
+		const auto Result = Target.SetScript(*Current);
+		return Result ? std::expected<void, PropertyAccessError>{} : std::unexpected(SceneErrorToPropertyError(Result.error()));
+	}
+
+	std::expected<void, PropertyAccessError> RemoveScriptFloatProperty(const Entity& Target, std::string_view AuthoredId)
+	{
+		if (!IsValidScriptPropertyIdentifier(AuthoredId))
+			return std::unexpected(MakeError(PropertyAccessErrorCode::InvalidValue, "Invalid authored script float property ID"));
+		auto Current = RequireComponent(Target.GetScript(), PropertyComponentIds::Script);
+		if (!Current) return std::unexpected(Current.error());
+		if (auto Updated = Current->RemoveFloatProperty(AuthoredId); !Updated)
+			return std::unexpected(ScriptErrorToPropertyError(Updated.error()));
+		const auto Result = Target.SetScript(*Current);
+		return Result ? std::expected<void, PropertyAccessError>{} : std::unexpected(SceneErrorToPropertyError(Result.error()));
 	}
 } // namespace PulseForge

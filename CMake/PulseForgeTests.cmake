@@ -76,6 +76,7 @@ if(BUILD_TESTING)
 		Tests/PulseForgeSceneTests.cpp
 		Tests/SceneTests.cpp
 		Tests/PropertyMetadataTests.cpp
+		Tests/ScriptPropertyMetadataTests.cpp
 	)
 	target_include_directories(PulseForgeSceneTests PRIVATE Tests)
 	target_link_libraries(PulseForgeSceneTests PRIVATE
@@ -255,6 +256,7 @@ if(BUILD_TESTING)
 			Tests/EditorDocumentEditorRegistryTests.cpp
 			Tests/EditorDocumentWorkspaceTests.cpp
 			Tests/EditorAssetImportOperationTests.cpp
+			Tests/EditorInspectorRegressionTests.cpp
 			Tests/EditorMaterialProjectTests.cpp
 			Tests/EditorProjectLoadingTests.cpp
 			Tests/EditorAssetReferenceTests.cpp

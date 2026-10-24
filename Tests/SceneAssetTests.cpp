@@ -1,5 +1,7 @@
 #include "TestAssetSupport.h"
 
+#include "Scene/PropertyMetadata.h"
+
 namespace
 {
 	void TestSceneSerializerClone(TestRunner& Tests)
@@ -86,9 +88,19 @@ namespace
 		const AssetID MaterialAssetID{ 0x7400000000000000ull, 7 };
 		const AssetID AudioAssetID{ 0x7500000000000000ull, 7 };
 		const AssetID ScriptAssetID{ 0x7600000000000000ull, 7 };
+		const AssetID SelectedMeshAssetID{ 0x7350000000000000ull, 7 };
 		PF_CHECK(Tests, Child->SetMeshRenderer(MeshRendererComponent{ MeshAssetID, MaterialAssetID }).has_value());
+		PF_CHECK(
+			Tests, WriteProperty(*Child, PropertyComponentIds::MeshRenderer, PropertyIds::MeshAsset, PropertyValue{ SelectedMeshAssetID })
+					   .has_value());
+		const auto SelectedMaterial = ReadProperty(*Child, PropertyComponentIds::MeshRenderer, PropertyIds::MaterialAsset);
+		PF_CHECK(
+			Tests, SelectedMaterial && std::get<std::optional<AssetID>>(*SelectedMaterial) == std::optional<AssetID>{ MaterialAssetID });
 		PF_CHECK(Tests, Child->SetAudioSource(AudioSourceComponent{ AudioAssetID, 0.6f, true, false, true }).has_value());
-		PF_CHECK(Tests, Child->SetScript(ScriptComponent{ ScriptAssetID, false }).has_value());
+		ScriptComponent ChildScript{ ScriptAssetID, false };
+		ChildScript.FloatProperties.emplace("health", 10.0f);
+		PF_CHECK(Tests, Child->SetScript(ChildScript).has_value());
+		PF_CHECK(Tests, WriteProperty(*Child, PropertyComponentIds::ScriptFloat, "health", PropertyValue{ 72.5f }).has_value());
 		PF_CHECK(Tests, Root->SetAudioListener(AudioListenerComponent{ true }).has_value());
 
 		const auto PrefabData = PrefabSerializer::Serialize(Source, *Root);
@@ -97,7 +109,7 @@ namespace
 		PF_CHECK(Tests, PrefabData->find("\"format\": \"PulseForgePrefab\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"version\": 3") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"root\": \"" + Root->GetUUID().ToString() + "\"") != std::string::npos);
-		PF_CHECK(Tests, PrefabData->find("\"meshAsset\": \"" + MeshAssetID.ToString() + "\"") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"meshAsset\": \"" + SelectedMeshAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"materialAsset\": \"" + MaterialAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"asset\": \"" + AudioAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"asset\": \"" + ScriptAssetID.ToString() + "\"") != std::string::npos);
@@ -194,12 +206,14 @@ namespace
 		const auto FirstChildScript = FirstChild.GetScript();
 		const auto FirstGrandchildren = FirstChild.GetChildren();
 		PF_CHECK(Tests, FirstChildTag && FirstChildTag->Name == "Prefab child");
-		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MeshAsset == MeshAssetID);
+		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MeshAsset == SelectedMeshAssetID);
 		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MaterialAsset == MaterialAssetID);
 		PF_CHECK(Tests, FirstChildAudioSource && FirstChildAudioSource->has_value() &&
 							FirstChildAudioSource->value().AudioAsset == AudioAssetID && !FirstChildAudioSource->value().PlayOnStart);
 		PF_CHECK(Tests, FirstChildScript && FirstChildScript->has_value() && FirstChildScript->value().ScriptAsset == ScriptAssetID &&
 							!FirstChildScript->value().Enabled);
+		const auto ReopenedScriptFloat = ReadProperty(FirstChild, PropertyComponentIds::ScriptFloat, "health");
+		PF_CHECK(Tests, ReopenedScriptFloat && std::get<float>(*ReopenedScriptFloat) == 72.5f);
 		PF_CHECK(Tests, FirstGrandchildren && FirstGrandchildren->size() == 1);
 		if (FirstGrandchildren && FirstGrandchildren->size() == 1)
 		{

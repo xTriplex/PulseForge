@@ -2,6 +2,7 @@
 
 #include "Assets/AssetID.h"
 #include "Core/Core.h"
+#include "Scene/Components/ScriptComponent.h"
 
 #include <expected>
 #include <optional>
@@ -11,6 +12,7 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include <glm/vec3.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -40,6 +42,7 @@ namespace PulseForge
 		inline constexpr std::string_view SpotLight = "spotLight";
 		inline constexpr std::string_view MeshRenderer = "meshRenderer";
 		inline constexpr std::string_view Script = "script";
+		inline constexpr std::string_view ScriptFloat = "script.float";
 	} // namespace PropertyComponentIds
 
 	namespace PropertyIds
@@ -58,6 +61,7 @@ namespace PulseForge
 		inline constexpr std::string_view InnerConeAngleDegrees = "innerConeAngleDegrees";
 		inline constexpr std::string_view OuterConeAngleDegrees = "outerConeAngleDegrees";
 		inline constexpr std::string_view MaterialAsset = "materialAsset";
+		inline constexpr std::string_view MeshAsset = "meshAsset";
 		inline constexpr std::string_view Enabled = "enabled";
 		inline constexpr std::string_view Asset = "asset";
 	} // namespace PropertyIds
@@ -68,6 +72,19 @@ namespace PulseForge
 		MeshAsset,
 		MaterialAsset,
 		ScriptAsset
+	};
+
+	// Dynamic descriptors own their identity strings because authored IDs belong to the entity's script component.
+	struct DynamicPropertyDescriptor
+	{
+		std::string ComponentId;
+		std::string Id;
+		std::string Label;
+		PropertyValueType Type = PropertyValueType::Float;
+		bool Editable = true;
+		std::optional<float> DefaultValue;
+		float HardMinimum = -MaximumScriptFloatPropertyMagnitude;
+		float HardMaximum = MaximumScriptFloatPropertyMagnitude;
 	};
 
 	struct PropertyDescriptor
@@ -129,10 +146,16 @@ namespace PulseForge
 	};
 
 	[[nodiscard]] PULSEFORGE_API std::span<const PropertyDescriptor> GetPropertyDescriptors() noexcept;
+	[[nodiscard]] PULSEFORGE_API std::expected<std::vector<DynamicPropertyDescriptor>, PropertyAccessError> GetDynamicPropertyDescriptors(
+		const Entity& Target, std::string_view ComponentId);
 	[[nodiscard]] PULSEFORGE_API const PropertyDescriptor* FindPropertyDescriptor(
 		std::string_view ComponentId, std::string_view PropertyId) noexcept;
 	[[nodiscard]] PULSEFORGE_API std::expected<PropertyValue, PropertyAccessError> ReadProperty(
 		const Entity& Target, std::string_view ComponentId, std::string_view PropertyId);
 	[[nodiscard]] PULSEFORGE_API std::expected<void, PropertyAccessError> WriteProperty(
 		const Entity& Target, std::string_view ComponentId, std::string_view PropertyId, const PropertyValue& Value);
+	[[nodiscard]] PULSEFORGE_API std::expected<void, PropertyAccessError> AddScriptFloatProperty(
+		const Entity& Target, std::string_view AuthoredId, float Value);
+	[[nodiscard]] PULSEFORGE_API std::expected<void, PropertyAccessError> RemoveScriptFloatProperty(
+		const Entity& Target, std::string_view AuthoredId);
 } // namespace PulseForge

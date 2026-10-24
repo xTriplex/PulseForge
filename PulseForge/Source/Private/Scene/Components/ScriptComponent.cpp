@@ -25,12 +25,31 @@ namespace PulseForge
 		return Property->second;
 	}
 
+	std::expected<void, ScriptComponentError> ScriptComponent::SetFloatProperty(std::string_view Identifier, float Value)
+	{
+		ScriptComponent Candidate = *this;
+		Candidate.FloatProperties.insert_or_assign(std::string(Identifier), Value);
+		if (auto Validation = Candidate.Validate(); !Validation) return std::unexpected(Validation.error());
+		*this = std::move(Candidate);
+		return {};
+	}
+
+	std::expected<void, ScriptComponentError> ScriptComponent::RemoveFloatProperty(std::string_view Identifier)
+	{
+		ScriptComponent Candidate = *this;
+		if (Candidate.FloatProperties.erase(std::string(Identifier)) == 0)
+			return std::unexpected(
+				ScriptComponentError{ ScriptComponentErrorCode::InvalidPropertyBag, "Script float property does not exist" });
+		if (auto Validation = Candidate.Validate(); !Validation) return std::unexpected(Validation.error());
+		*this = std::move(Candidate);
+		return {};
+	}
+
 	std::expected<void, ScriptComponentError> ScriptComponent::Validate() const
 	{
 		if (ScriptAsset.IsNil())
-			return std::unexpected(ScriptComponentError{
-				ScriptComponentErrorCode::InvalidAsset,
-				"Script component requires a non-nil script asset UUID" });
+			return std::unexpected(
+				ScriptComponentError{ ScriptComponentErrorCode::InvalidAsset, "Script component requires a non-nil script asset UUID" });
 		if (FloatProperties.size() > MaximumScriptFloatPropertyCount)
 			return std::unexpected(ScriptComponentError{
 				ScriptComponentErrorCode::InvalidPropertyBag, "Script component exceeds the 64 authored float property limit" });
@@ -45,4 +64,4 @@ namespace PulseForge
 		}
 		return {};
 	}
-}
+} // namespace PulseForge

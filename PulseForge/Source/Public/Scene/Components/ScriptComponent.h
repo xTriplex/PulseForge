@@ -40,5 +40,7 @@ namespace PulseForge
 
 		[[nodiscard]] PULSEFORGE_API std::expected<void, ScriptComponentError> Validate() const;
 		[[nodiscard]] std::optional<float> FindFloatProperty(std::string_view Identifier) const noexcept;
+		[[nodiscard]] PULSEFORGE_API std::expected<void, ScriptComponentError> SetFloatProperty(std::string_view Identifier, float Value);
+		[[nodiscard]] PULSEFORGE_API std::expected<void, ScriptComponentError> RemoveFloatProperty(std::string_view Identifier);
 	};
-}
+} // namespace PulseForge

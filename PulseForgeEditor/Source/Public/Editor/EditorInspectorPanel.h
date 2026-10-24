@@ -61,7 +61,7 @@ namespace PulseForgeEditor
 		void DrawAudioSourceComponent(Context& Inspector, const PulseForge::Entity& Entity);
 		void DrawAudioListenerComponent(Context& Inspector, const PulseForge::Entity& Entity);
 		void DrawScriptComponent(Context& Inspector, const PulseForge::Entity& Entity);
-		void DrawScriptFloatProperties(Context& Inspector, const PulseForge::Entity& Entity, PulseForge::ScriptComponent& Component);
+		void DrawScriptFloatProperties(Context& Inspector, const PulseForge::Entity& Entity);
 
 		bool m_FocusEntityNameNextFrame = false;
 		std::string m_NewScriptPropertyIdentifier;
