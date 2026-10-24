@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Window/Window.h"
+#include "Input/GamepadStateAdapter.h"
 
 #include <array>
 
@@ -47,11 +48,9 @@ namespace PulseForge
 	private:
 		GLFWwindow* m_NativeWindow = nullptr;
 		bool m_GLFWRuntimeAcquired = false;
-		std::array<uint64_t, 16> m_GamepadGenerations{};
-		std::array<bool, 16> m_GamepadConnected{};
-		std::array<bool, 16> m_GamepadMapped{};
-		std::array<std::array<float, 6>, 16> m_GamepadAxes{};
-		std::array<std::array<bool, 15>, 16> m_GamepadButtons{};
+		GamepadStateAdapter m_GamepadStateAdapter;
+		std::array<bool, GamepadStateAdapter::MaximumSlots> m_GamepadPresent{};
+		std::array<bool, GamepadStateAdapter::MaximumSlots> m_GamepadMapped{};
 		void PollGamepads() noexcept;
 		static void SecondaryWindowFocusCallback(GLFWwindow* Window, int Focused);
 		static void SecondaryWindowKeyCallback(GLFWwindow* Window, int Key, int Scancode, int Action, int Mods);
