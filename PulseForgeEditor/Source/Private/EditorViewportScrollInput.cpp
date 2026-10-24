@@ -1,4 +1,6 @@
 #include "Editor/EditorViewportScrollInput.h"
+#include "Core/Application.h"
+#include "Window/Platform/GLFW/GLFWWindow.h"
 
 #ifndef GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_NONE
@@ -16,6 +18,8 @@ namespace PulseForgeEditor::Detail
 		{
 			uint32_t ViewportID = 0;
 			uint64_t Registration = 0;
+			uint64_t InputWindow = 0;
+			bool RegisteredSecondary = false;
 			GLFWscrollfun BackendCallback = nullptr;
 		};
 
@@ -38,16 +42,21 @@ namespace PulseForgeEditor::Detail
 		{
 			if (!Viewport || !Window) return;
 			const uint64_t Registration = NextRegistration++;
+			auto& MainWindow = static_cast<PulseForge::GLFWWindow&>(PulseForge::Application::Get().GetWindow());
+			const bool IsSecondary = Window != MainWindow.GetNativeWindow();
+			const uint64_t InputWindow = IsSecondary ? MainWindow.RegisterInputWindow(Window) : MainWindow.GetInputWindowID();
+			if (InputWindow == 0) return;
 			const GLFWscrollfun BackendCallback = glfwSetScrollCallback(Window, &Scroll);
 			try
 			{
-				Routes.insert_or_assign(Window, WindowRoute{ Viewport->ID, Registration, BackendCallback });
+				Routes.insert_or_assign(Window, WindowRoute{ Viewport->ID, Registration, InputWindow, IsSecondary, BackendCallback });
 				WindowOwners.insert_or_assign(Window, this);
 			}
 			catch (...)
 			{
 				Routes.erase(Window);
-				glfwSetScrollCallback(Window, BackendCallback);
+				if (IsSecondary) MainWindow.UnregisterInputWindow(Window);
+			else glfwSetScrollCallback(Window, BackendCallback);
 				throw;
 			}
 		}
@@ -57,6 +66,8 @@ namespace PulseForgeEditor::Detail
 			const auto Route = Routes.find(Window);
 			if (Route == Routes.end()) return;
 			PendingScroll.Forget(Route->second.Registration);
+			if (Route->second.RegisteredSecondary)
+				static_cast<PulseForge::GLFWWindow&>(PulseForge::Application::Get().GetWindow()).UnregisterInputWindow(Window);
 			Routes.erase(Route);
 			WindowOwners.erase(Window);
 		}
@@ -179,6 +190,13 @@ namespace PulseForgeEditor::Detail
 			return 0.0f;
 		}
 		return m_State->PendingScroll.Consume(Route->second.Registration);
+	}
+
+	uint64_t EditorViewportScrollInput::GetInputWindowID(uint32_t ViewportID, GLFWwindow* Window) const noexcept
+	{
+		if (!m_State || !m_State->Installed) return 0;
+		const auto Route = m_State->Routes.find(Window);
+		return Route != m_State->Routes.end() && Route->second.ViewportID == ViewportID ? Route->second.InputWindow : 0;
 	}
 
 	void EditorViewportScrollInput::DiscardPending() noexcept

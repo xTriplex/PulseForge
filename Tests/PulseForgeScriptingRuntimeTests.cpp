@@ -2,6 +2,8 @@
 
 void RunScriptRuntimeTests(TestRunner& Tests);
 void RunPlayerSessionTests(TestRunner& Tests);
+void RunGameplayInputTests(TestRunner& Tests);
+void RunGameplayInputStoreTests(TestRunner& Tests);
 
 int main()
 {
@@ -9,5 +11,7 @@ int main()
 	TestRunner Tests;
 	RunScriptRuntimeTests(Tests);
 	RunPlayerSessionTests(Tests);
+	RunGameplayInputTests(Tests);
+	RunGameplayInputStoreTests(Tests);
 	return Tests.Finish();
 }

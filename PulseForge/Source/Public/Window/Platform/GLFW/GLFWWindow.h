@@ -2,6 +2,8 @@
 
 #include "Window/Window.h"
 
+#include <array>
+
 struct GLFWwindow;
 
 namespace PulseForge
@@ -27,6 +29,13 @@ namespace PulseForge
 		{
 			WindowData.EventCallback = Callback ? Callback : EventCallbackFn([](Event&) {});
 		}
+		virtual void SetInputEventCallback(const InputCallbackFn& Callback) override
+		{
+			WindowData.InputCallback = Callback ? Callback : InputCallbackFn([](const InputEvent&) {});
+		}
+		[[nodiscard]] virtual InputWindowID GetInputWindowID() const noexcept override { return WindowData.ID; }
+		[[nodiscard]] InputWindowID RegisterInputWindow(void* NativeWindow);
+		void UnregisterInputWindow(void* NativeWindow) noexcept;
 
 		virtual void* GetNativeWindow() const override { return m_NativeWindow; }
 		[[nodiscard]] static VulkanLoaderProcAddress GetVulkanLoaderProcAddress() noexcept;
@@ -38,13 +47,27 @@ namespace PulseForge
 	private:
 		GLFWwindow* m_NativeWindow = nullptr;
 		bool m_GLFWRuntimeAcquired = false;
+		std::array<uint64_t, 16> m_GamepadGenerations{};
+		std::array<bool, 16> m_GamepadConnected{};
+		std::array<bool, 16> m_GamepadMapped{};
+		std::array<std::array<float, 6>, 16> m_GamepadAxes{};
+		std::array<std::array<bool, 15>, 16> m_GamepadButtons{};
+		void PollGamepads() noexcept;
+		static void SecondaryWindowFocusCallback(GLFWwindow* Window, int Focused);
+		static void SecondaryWindowKeyCallback(GLFWwindow* Window, int Key, int Scancode, int Action, int Mods);
+		static void SecondaryWindowCharCallback(GLFWwindow* Window, unsigned int Character);
+		static void SecondaryWindowMouseButtonCallback(GLFWwindow* Window, int Button, int Action, int Mods);
+		static void SecondaryWindowScrollCallback(GLFWwindow* Window, double XOffset, double YOffset);
+		static void SecondaryWindowCursorPosCallback(GLFWwindow* Window, double X, double Y);
 
 		struct FWindowData
 		{
 			std::string Title;
+			InputWindowID ID = 0;
 			unsigned int Width = 0;
 			unsigned int Height = 0;
 			EventCallbackFn EventCallback = [](Event&) {};
+			InputCallbackFn InputCallback = [](const InputEvent&) {};
 		};
 
 		FWindowData WindowData;

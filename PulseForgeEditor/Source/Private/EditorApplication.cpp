@@ -7,6 +7,7 @@
 #include "Core/Layer.h"
 #include "Core/Log.h"
 #include "Core/PlatformServices.h"
+#include "Input/GameplayInputStore.h"
 #include "Core/ScopedProfileTimer.h"
 #include "Events/ApplicationEvent.h"
 #include "Events/Event.h"
@@ -91,6 +92,7 @@
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorWorkspaceView.h"
 #include "Editor/EditorViewportMouseCapture.h"
+#include "Editor/Detail/EditorInputMappingPanel.h"
 #include "Editor/EditorViewportScrollInput.h"
 #include "Editor/ViewportMath.h"
 #include "Editor/ViewportGizmoGeometry.h"
@@ -967,6 +969,7 @@ namespace
 					m_AssetRefreshDeferredForRuntime = false;
 				}
 			}
+			PublishEditorGameplayInput();
 			UpdateEditorCamera(DeltaTime);
 			if (m_SceneRuntime && m_RuntimeScene)
 			{
@@ -1116,10 +1119,13 @@ namespace
 			m_AssetPreviews.BeginRequestFrame();
 			if (m_AssetPreviewStress.IsEnabled()) m_AssetPreviewStress.Draw(m_AssetPreviews);
 			m_EditorStyle.ApplyTheme(GetEditorUiColorEncoding(PulseForge::Application::Get().GetOutputColorEncoding()));
-			CompleteReleasedGizmoInteractionBeforeShortcuts();
-			HandleViewportToolShortcuts();
-			HandleEditorHistoryShortcuts();
-			HandleSceneEditingShortcuts();
+			if (m_EditorShortcutsRouted && !m_InputMappingPanel.SuppressShortcutsThisFrame())
+			{
+				CompleteReleasedGizmoInteractionBeforeShortcuts();
+				HandleViewportToolShortcuts();
+				HandleEditorHistoryShortcuts();
+				HandleSceneEditingShortcuts();
+			}
 
 			DrawMainMenu();
 			if (m_ProjectOpenRenderTestFile && !m_ProjectOpenRenderTestRequested)
@@ -1203,6 +1209,7 @@ namespace
 			}
 #endif
 			SaveDocumentWorkspaceIfNeeded();
+			m_InputMappingPanel.FinishUiFrame();
 		}
 
 		void OnRenderPlatformWindows() override
@@ -1264,6 +1271,10 @@ namespace
 				Event.bHandled = true;
 				return;
 			}
+			auto& Application = PulseForge::Application::Get();
+			if (m_Project && Event.GetInputWindowID() != 0 && Event.GetInputWindowID() == Application.GetInputWindowID())
+				m_InputMappingPanel.HandleEvent(Event, Application.GetGameplayInput(), m_Project->GetRootPath(),
+					m_Project->GetDescription().ID, m_InputUserDataRoot, m_InputPersistenceAvailable);
 
 			if (Event.GetEventType() == PulseForge::EEventType::WindowLostFocus)
 			{
@@ -1845,6 +1856,7 @@ namespace
 			StopRuntime();
 			ResetViewportSceneRenderer();
 			m_Project.emplace(std::move(Prepared.Project));
+			ConfigureGameplayInputForProject();
 			RegisterLevelDocument();
 			ResetContentBrowserNavigation();
 			if (ClearSceneWhenMissing && !StartupScene) ClearScene();
@@ -4417,6 +4429,7 @@ namespace
 			if (!ClearCurrentProjectDocumentState([this] { CloseProjectNow(); })) return;
 			ClearScene();
 			ResetViewportSceneRenderer();
+			ClearGameplayInputProject();
 			m_Project.reset();
 			m_ContentBrowser.ClearProject();
 			SetStatus("Project closed.");
@@ -5082,6 +5095,8 @@ namespace
 				ImGui::TableNextRow(ImGuiTableRowFlags_None, 50.0f);
 
 				ImGui::TableSetColumnIndex(0);
+				if (m_Project && ImGui::SmallButton("Input Map")) m_InputMappingOpen = !m_InputMappingOpen;
+				if (m_Project) ImGui::SameLine();
 				if (m_Project)
 				{
 					const std::string& ProjectName = m_Project->GetDescription().Name;
@@ -6326,7 +6341,23 @@ namespace
 				DrawPerformancePanel();
 			}
 			DrawNativeDocumentHosts();
+			DrawInputMappingPanel();
 			m_WorkspacePresentation.KeepInactiveWorkspacesAlive(m_Documents, m_DocumentEditors);
+		}
+
+		void DrawInputMappingPanel()
+		{
+			if (!m_InputMappingOpen || !m_Project)
+			{
+				m_InputMappingPanel.MarkWindowUnfocused();
+				return;
+			}
+
+			if (ImGui::Begin("Input Mapping", &m_InputMappingOpen))
+				m_InputMappingPanel.DrawContents(PulseForge::Application::Get().GetGameplayInput().GetActionMap(),
+					m_InputPersistenceAvailable, m_InputPersistenceWarning);
+			else m_InputMappingPanel.MarkWindowUnfocused();
+			ImGui::End();
 		}
 
 		void CaptureDocumentTabTestInvalidDropTarget(PulseForgeEditor::EditorPanel Panel)
@@ -7560,6 +7591,128 @@ namespace
 		}
 		void SetStatus(std::string Message) { m_StatusPanel.SetStatus(std::move(Message)); }
 
+		void ConfigureGameplayInputForProject()
+		{
+			auto& Application = PulseForge::Application::Get();
+			auto& GameplayInput = Application.GetGameplayInput();
+			GameplayInput.Reset();
+			m_InputMappingPanel.CancelCapture();
+			m_InputUserDataRoot.clear();
+			m_InputPersistenceAvailable = false;
+			m_InputPersistenceWarning.clear();
+			if (!m_Project)
+			{
+				(void)GameplayInput.SetActionMap({});
+				return;
+			}
+
+			auto UserDataRoot = PulseForge::Platform::GetUserDataDirectory();
+			std::expected<PulseForge::GameplayActionMap, PulseForge::GameplayInputError> ActionMap =
+				std::unexpected(PulseForge::GameplayInputError{ "User data directory is unavailable" });
+			if (UserDataRoot)
+			{
+				m_InputUserDataRoot = *UserDataRoot;
+				m_InputPersistenceAvailable = true;
+				auto Loaded = PulseForge::LoadGameplayInputMap(
+					m_Project->GetRootPath(), m_Project->GetDescription().ID, m_InputUserDataRoot);
+				if (Loaded)
+				{
+					ActionMap = std::move(Loaded->ActionMap);
+					for (const std::string& Warning : Loaded->Warnings)
+						PF_WARN("Editor input map: {}", Warning);
+				}
+				else ActionMap = std::unexpected(Loaded.error());
+			}
+			else
+			{
+				m_InputPersistenceWarning = UserDataRoot.error().Message;
+				PF_WARN("Editor input overrides are unavailable: {}; using project-authored defaults",
+					m_InputPersistenceWarning);
+				ActionMap = PulseForge::LoadProjectGameplayActionMap(m_Project->GetRootPath());
+			}
+
+			if (!ActionMap)
+			{
+				m_InputPersistenceWarning = "Could not load project input actions: " + ActionMap.error().Message;
+				PF_ERROR("{}", m_InputPersistenceWarning);
+				(void)GameplayInput.SetActionMap({});
+				return;
+			}
+			if (auto Applied = GameplayInput.SetActionMap(std::move(*ActionMap)); !Applied)
+			{
+				m_InputPersistenceWarning = "Could not apply project input actions: " + Applied.error().Message;
+				PF_ERROR("{}", m_InputPersistenceWarning);
+			}
+		}
+
+		void ClearGameplayInputProject() noexcept
+		{
+			auto& GameplayInput = PulseForge::Application::Get().GetGameplayInput();
+			GameplayInput.Reset();
+			(void)GameplayInput.SetActionMap({});
+			m_InputMappingPanel.CancelCapture();
+			m_InputUserDataRoot.clear();
+			m_InputPersistenceAvailable = false;
+			m_InputPersistenceWarning.clear();
+		}
+
+		void PublishEditorGameplayInput()
+		{
+			auto& Application = PulseForge::Application::Get();
+			PulseForge::InputRoutingState Routing;
+			const PulseForge::InputWindowID MainWindow = Application.GetInputWindowID();
+			ImGuiViewport* SceneViewportOwner = ResolveSceneViewportOwner();
+			GLFWwindow* SceneViewportWindow = SceneViewportOwner
+				? static_cast<GLFWwindow*>(SceneViewportOwner->PlatformHandle) : nullptr;
+			const uint64_t SceneViewportInputWindow = SceneViewportOwner && SceneViewportWindow
+				? m_ViewportScrollInput.GetInputWindowID(SceneViewportOwner->ID, SceneViewportWindow) : 0;
+			const bool SceneViewportFocused = SceneViewportWindow && SceneViewportInputWindow != 0 &&
+				glfwGetWindowAttrib(SceneViewportWindow, GLFW_FOCUSED) == GLFW_TRUE;
+			if (SceneViewportFocused) Routing.FocusedWindow = SceneViewportInputWindow;
+
+			bool TextOrModalInput = m_InputMappingPanel.NeedsTextEntryRoute();
+			if (m_Context)
+			{
+				ImGui::SetCurrentContext(m_Context);
+				const ImGuiIO& IO = ImGui::GetIO();
+				TextOrModalInput = TextOrModalInput || IO.WantTextInput || ImGui::IsAnyItemActive() ||
+					ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
+				if (GImGui && GImGui->NavWindow && SceneViewportOwner &&
+					GImGui->NavWindow->ViewportId != SceneViewportOwner->ID)
+					Routing.FocusedWindow = 0;
+				const bool MouseDownOutsideSceneViewport =
+					(IO.MouseDown[ImGuiMouseButton_Left] || IO.MouseDown[ImGuiMouseButton_Right] || IO.MouseDown[ImGuiMouseButton_Middle]) &&
+					!IsCursorOverViewportImage();
+				TextOrModalInput = TextOrModalInput || MouseDownOutsideSceneViewport;
+			}
+			if (m_InputMappingPanel.NeedsTextEntryRoute())
+				m_ViewportKeyboardFocused = PulseForgeEditor::ResolveViewportKeyboardFocus(
+					m_ViewportKeyboardFocused, PulseForgeEditor::ViewportKeyboardFocusEvent::OtherEditorPanelClicked);
+
+			if (Routing.FocusedWindow != 0)
+			{
+				const auto AddContext = [&Routing](PulseForge::InputContext Context,
+					PulseForge::InputDeviceMask Consumes, bool Active)
+				{
+					if (Routing.ContextCount >= Routing.Contexts.size()) return;
+					Routing.Contexts[Routing.ContextCount++] = { .Context = Context,
+						.Consumes = Consumes, .OwnerWindow = Routing.FocusedWindow, .Active = Active };
+				};
+				const auto KeyboardAndMouse = PulseForge::InputDeviceMask::Keyboard | PulseForge::InputDeviceMask::Mouse;
+				const bool ViewportNavigation = m_ViewportMouseCapture.OwnsMouse() && SceneViewportOwner != nullptr;
+				const bool ShortcutsRouted = !TextOrModalInput && !ViewportNavigation;
+				AddContext(PulseForge::InputContext::Gameplay, PulseForge::InputDeviceMask::None,
+					m_SceneRuntime && SceneViewportOwner && m_ViewportKeyboardFocused && !TextOrModalInput && !ViewportNavigation);
+				AddContext(PulseForge::InputContext::EditorShortcuts, PulseForge::InputDeviceMask::None, ShortcutsRouted);
+				AddContext(PulseForge::InputContext::ViewportNavigation, KeyboardAndMouse, ViewportNavigation);
+				AddContext(PulseForge::InputContext::TextEntry, KeyboardAndMouse, TextOrModalInput);
+				m_EditorShortcutsRouted = ShortcutsRouted;
+			}
+			else m_EditorShortcutsRouted = false;
+			Application.GetGameplayInput().PublishFrame(Routing);
+			m_InputMappingPanel.MarkInputPublished();
+		}
+
 		void StartRuntime()
 		{
 			PulseForge::ScopedDiagnosticTimer DiagnosticTimer(
@@ -7583,6 +7736,7 @@ namespace
 
 			PulseForge::SceneRuntimeServices Services;
 			Services.InputState = &PulseForge::Application::Get().GetInput();
+			Services.GameplayInput = &PulseForge::Application::Get().GetGameplayInput();
 			Services.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder();
 			auto CandidateRuntime = std::make_unique<PulseForge::SceneRuntime>(*m_Project, PulseForge::SceneRuntimeDesc{}, Services);
 			if (auto Result = CandidateRuntime->Start(**CandidateScene); !Result)
@@ -8177,6 +8331,12 @@ namespace
 		bool m_LoggedFirstViewportRendered = false;
 		bool m_LoggedEnvironmentReady = false;
 		bool m_ViewportKeyboardFocused = false;
+		bool m_EditorShortcutsRouted = false;
+		bool m_InputMappingOpen = false;
+		bool m_InputPersistenceAvailable = false;
+		std::filesystem::path m_InputUserDataRoot;
+		std::string m_InputPersistenceWarning;
+		PulseForgeEditor::Detail::EditorInputMappingPanel m_InputMappingPanel;
 		PulseForgeEditor::Detail::EditorViewportMouseCapture m_ViewportMouseCapture;
 		PulseForgeEditor::Detail::EditorViewportScrollInput m_ViewportScrollInput;
 		PulseForgeEditor::EditorSceneEditController m_SceneEditController;

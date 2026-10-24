@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -73,6 +74,15 @@ namespace PulseForge::Platform
 		if (!HomeDirectory.is_absolute())
 			return std::unexpected(PathError{ "HOME must be an absolute path to resolve the user's data directory" });
 		return HomeDirectory / ".local" / "share";
+	}
+
+	std::expected<void, PathError> ReplaceFileAtomically(
+		const std::filesystem::path& TemporaryPath,
+		const std::filesystem::path& DestinationPath)
+	{
+		if (rename(TemporaryPath.c_str(), DestinationPath.c_str()) != 0)
+			return std::unexpected(PathError{ "Could not replace the settings file: " + std::string(std::strerror(errno)) });
+		return {};
 	}
 
 	void DebugBreak() noexcept

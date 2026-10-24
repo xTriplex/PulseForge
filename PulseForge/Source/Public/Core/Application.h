@@ -6,6 +6,7 @@
 #include "Core/LayerStack.h"
 #include "Events/ApplicationEvent.h"
 #include "Core/Input.h"
+#include "Input/GameplayInput.h"
 #include "Renderer/RendererAPI.h"
 #include "Renderer/Buffer.h"
 #include "Renderer/Binding.h"
@@ -65,6 +66,9 @@ namespace PulseForge
 
 		inline Window& GetWindow() { return *m_Window; }
 		Input& GetInput() { return m_Input; }
+		GameplayInputService& GetGameplayInput() noexcept { return m_GameplayInput; }
+		[[nodiscard]] InputWindowID GetInputWindowID() const noexcept { return m_Window->GetInputWindowID(); }
+		[[nodiscard]] bool IsMainWindowFocused() const noexcept { return m_MainWindowFocused; }
 		RendererAPI GetRendererAPI() const { return m_RendererAPI; }
 		[[nodiscard]] std::pair<unsigned int, unsigned int> GetOutputFramebufferSize() const noexcept override;
 		[[nodiscard]] OutputColorEncoding GetOutputColorEncoding() const noexcept override;
@@ -109,6 +113,7 @@ namespace PulseForge
 
 	private:
 		bool OnWindowClose(WindowCloseEvent& E);
+		void QueueGameplayInputEvent(const InputEvent& Event) noexcept;
 
 	private:
 		std::unique_ptr<Window> m_Window;
@@ -117,6 +122,9 @@ namespace PulseForge
 		bool m_MainFrameActive = false;
 		LayerStack m_LayerStack;
 		Input m_Input;
+		GameplayInputService m_GameplayInput;
+		bool m_GameplayInputOverflowLogged = false;
+		bool m_MainWindowFocused = true;
 		std::unique_ptr<DiagnosticRecorder> m_Diagnostics;
 		RendererAPI m_RendererAPI;
 		static Application* s_Instance;

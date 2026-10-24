@@ -1,0 +1,28 @@
+{
+  "format": "PulseForgeScene",
+  "version": 7,
+  "entities": [
+    {
+      "uuid": "a9822000-0000-4000-8000-000000000002",
+      "tag": { "name": "Action controlled cube" },
+      "transform": { "translation": [0.0, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [0.8, 0.8, 0.8] },
+      "meshRenderer": { "meshAsset": "a9833000-0000-4000-8000-000000000001", "materialAsset": "a9844000-0000-4000-8000-000000000001" },
+      "script": { "asset": "a9855000-0000-4000-8000-000000000001", "enabled": true },
+      "parent": null
+    },
+    {
+      "uuid": "a9822000-0000-4000-8000-000000000003",
+      "tag": { "name": "Acceptance camera" },
+      "transform": { "translation": [0.0, 1.2, 6.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "camera": { "verticalFovRadians": 0.78539816, "nearClipPlane": 0.1, "farClipPlane": 100.0, "primary": true },
+      "parent": null
+    },
+    {
+      "uuid": "a9822000-0000-4000-8000-000000000004",
+      "tag": { "name": "Acceptance light" },
+      "transform": { "translation": [1.0, 3.0, 2.0], "rotation": [0.92387953, -0.38268343, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "directionalLight": { "color": [1.0, 1.0, 1.0], "intensity": 2.0, "castShadows": false, "shadowDistance": 35.0, "shadowBias": 1.0, "shadowNormalBias": 0.025, "shadowSoftness": 1.0 },
+      "parent": null
+    }
+  ]
+}

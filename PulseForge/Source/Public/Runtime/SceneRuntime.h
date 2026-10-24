@@ -3,6 +3,7 @@
 #include "Audio/AudioEngine.h"
 #include "Core/Core.h"
 #include "Core/Timestep.h"
+#include "Input/GameplayInput.h"
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Scripting/ScriptRuntime.h"
 
@@ -30,6 +31,7 @@ namespace PulseForge
 	struct SceneRuntimeServices
 	{
 		Input* InputState = nullptr;
+		GameplayInputService* GameplayInput = nullptr;
 		DiagnosticRecorder* Diagnostics = nullptr;
 		// Optional host policy check; an error rejects a pause change before audio state is modified.
 		std::function<std::optional<std::string>(bool)> AudioPauseGuard;
