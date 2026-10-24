@@ -101,7 +101,7 @@ namespace PulseForge
 		}
 		for (size_t Axis = 0; Axis < Normalized.Axes.size(); ++Axis)
 		{
-			if (std::abs(Normalized.Axes[Axis] - Device.LastSample.Axes[Axis]) < 0.0001f) continue;
+			if (Normalized.Axes[Axis] == Device.LastSample.Axes[Axis]) continue;
 			AppendAxisEvent(Events, Slot, Device.Generation, Axis, Normalized.Axes[Axis]);
 		}
 		Device.LastSample = Normalized;
