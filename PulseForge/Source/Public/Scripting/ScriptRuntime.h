@@ -28,14 +28,6 @@ namespace PulseForge
 		int MaxInstructionsPerCallback = 100000;
 	};
 
-	// Non-owning gameplay services. When provided, they must remain alive until ScriptRuntime stops.
-	struct ScriptRuntimeServices
-	{
-		PhysicsSceneRuntime* Physics = nullptr;
-		AudioSceneRuntime* Audio = nullptr;
-		Input* InputState = nullptr;
-	};
-
 	enum class ScriptDiagnosticCode : uint8_t
 	{
 		InvalidComponent,
@@ -55,6 +47,47 @@ namespace PulseForge
 		AssetID ScriptAsset;
 		ScriptDiagnosticCode Code;
 		std::string Message;
+	};
+
+	enum class ScriptRuntimeCallback : uint8_t
+	{
+		OnCreate,
+		OnUpdate,
+		OnDestroy
+	};
+
+	enum class ScriptRuntimeObservationKind : uint8_t
+	{
+		ScriptAttached,
+		CallbackEntered,
+		CallbackCompleted,
+		Diagnostic
+	};
+
+	struct ScriptRuntimeObservation
+	{
+		ScriptRuntimeObservationKind Kind;
+		UUID Entity;
+		AssetID ScriptAsset;
+		ScriptRuntimeCallback Callback = ScriptRuntimeCallback::OnCreate;
+		ScriptDiagnosticCode Diagnostic = ScriptDiagnosticCode::InvalidComponent;
+	};
+
+	// Optional non-owning observation hook. The context must outlive the runtime; notifications
+	// are value-only and the callback must not throw because it may run during shutdown.
+	struct ScriptRuntimeObserver
+	{
+		void* Context = nullptr;
+		void (*Observe)(void* Context, const ScriptRuntimeObservation& Observation) noexcept = nullptr;
+	};
+
+	// Non-owning gameplay services. When provided, they must remain alive until ScriptRuntime stops.
+	struct ScriptRuntimeServices
+	{
+		PhysicsSceneRuntime* Physics = nullptr;
+		AudioSceneRuntime* Audio = nullptr;
+		Input* InputState = nullptr;
+		ScriptRuntimeObserver Observer;
 	};
 
 	enum class ScriptRuntimeErrorCode : uint8_t

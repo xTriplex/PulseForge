@@ -62,6 +62,8 @@
 #include "Editor/EditorProjectOpening.h"
 #include "Editor/EditorApplicationFactory.h"
 #include "Editor/EditorPlatformServices.h"
+#include "Editor/EditorPlayerProcess.h"
+#include "Editor/EditorPlayerExecutablePath.h"
 #include "Editor/EditorInteractionPolicy.h"
 #include "Editor/EditorGlfwViewportPolicy.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
@@ -121,6 +123,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <chrono>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -777,6 +781,7 @@ namespace
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
 			StopRuntime();
+			ShutdownPlayerProcess();
 			m_ConsolePanel.Detach();
 			ShutdownImGui();
 			ShutdownFileDialog();
@@ -905,6 +910,7 @@ namespace
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
 			StopRuntime();
+			ShutdownPlayerProcess();
 			m_ConsolePanel.Detach();
 			ResetViewportSceneRenderer();
 			ResetViewportTarget();
@@ -918,6 +924,7 @@ namespace
 		{
 			AdvancePerformanceCaptureLifecycle();
 			(void)m_DeferredEditorOperations.ExecuteNext();
+			PollPlayerProcess();
 			m_ConsolePanel.CapturePendingLogs();
 #ifdef PF_EDITOR_RENDERER_OPENGL
 			if (m_Context)
@@ -5069,7 +5076,7 @@ namespace
 			if (ImGui::BeginTable("GlobalToolbarLayout", 3, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings))
 			{
 				ImGui::TableSetupColumn("Tools", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-				const float RuntimeColumnWidth = ContentWidth < 720.0f ? 136.0f : 188.0f;
+				const float RuntimeColumnWidth = ContentWidth < 720.0f ? 260.0f : 280.0f;
 				ImGui::TableSetupColumn("Runtime", ImGuiTableColumnFlags_WidthFixed, RuntimeColumnWidth);
 				ImGui::TableSetupColumn("Save", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 				ImGui::TableNextRow(ImGuiTableRowFlags_None, 50.0f);
@@ -5105,9 +5112,9 @@ namespace
 					ImGui::SameLine(0.0f, 10.0f);
 				}
 				ImGui::TableSetColumnIndex(1);
-				const float RuntimeWidth = m_SceneRuntime ? 116.0f : 112.0f;
+				const float RuntimeWidth = 260.0f;
 				ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (std::max)(0.0f, (ImGui::GetContentRegionAvail().x - RuntimeWidth) * 0.5f));
-				ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(24.0f, 8.0f));
+				ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 8.0f));
 				if (!m_SceneRuntime)
 				{
 					ImGui::BeginDisabled(!m_Project || !m_Scene);
@@ -5118,6 +5125,18 @@ namespace
 				{
 					StopRuntime();
 					SetStatus("Runtime stopped. The authored scene was not modified by simulation.");
+				}
+				ImGui::SameLine();
+				if (!m_PlayerProcess)
+				{
+					ImGui::BeginDisabled(!m_Project);
+					if (m_EditorStyle.AccentButton(PulseForgeEditor::EditorIcon::Play, "Run Player")) LaunchPlayerProcess();
+					ImGui::EndDisabled();
+				}
+				else if (m_EditorStyle.DangerButton(PulseForgeEditor::EditorIcon::Stop, "Stop Player"))
+				{
+					StopPlayerProcess();
+					SetStatus("Stopping the owned player process.");
 				}
 				ImGui::PopStyleVar();
 
@@ -7586,6 +7605,133 @@ namespace
 			m_RuntimeScene.reset();
 		}
 
+		void LaunchPlayerProcess()
+		{
+			if (!m_Project)
+			{
+				SetError("Open a project before launching the player.");
+				return;
+			}
+			if (m_PlayerProcess)
+			{
+				SetWarning("A player process is already owned by this editor.");
+				return;
+			}
+
+			auto EditorExecutable = PulseForge::Platform::GetExecutablePath();
+			if (!EditorExecutable)
+			{
+				SetError("Could not resolve the editor executable path: " + EditorExecutable.error().Message);
+				return;
+			}
+			auto PlayerExecutable = PulseForgeEditor::ResolveEditorPlayerExecutablePath(
+				*EditorExecutable, PulseForgeEditor::GetEditorPlayerPlatform());
+			if (!PlayerExecutable)
+			{
+				SetError("Could not resolve the PulseForgeGame path: " + PlayerExecutable.error());
+				return;
+			}
+			std::error_code PathError;
+			if (!std::filesystem::is_regular_file(*PlayerExecutable, PathError) || PathError)
+			{
+				SetError("Could not find the matching PulseForgeGame at " + PathToUtf8(*PlayerExecutable) +
+						 ". Build the PulseForgeGame target in the same configuration as this editor.");
+				return;
+			}
+
+			PulseForgeEditor::EditorPlayerLaunchSpec Specification;
+			Specification.Executable = std::move(*PlayerExecutable);
+			Specification.WorkingDirectory = m_Project->GetRootPath();
+			Specification.Arguments = { "--project", PathToUtf8(m_Project->GetFilePath()) };
+			Specification.Arguments.push_back("--editor-control-stdin");
+			if (m_SceneAsset)
+			{
+				Specification.Arguments.push_back("--start-scene");
+				Specification.Arguments.push_back(m_SceneAsset->ToString());
+			}
+
+			auto Started = PulseForgeEditor::EditorPlayerProcess::Launch(Specification);
+			if (!Started)
+			{
+				SetError("Could not launch PulseForgeGame: " + Started.error());
+				return;
+			}
+			m_PlayerProcess = std::move(*Started);
+			m_PlayerStopRequested = false;
+			m_PlayerMonitorErrorReported = false;
+			SetStatus("Player launched in a separate process.");
+		}
+
+		void StopPlayerProcess() noexcept
+		{
+			if (!m_PlayerProcess) return;
+			m_PlayerStopRequested = true;
+			m_PlayerProcess->RequestStop();
+		}
+
+		void ShutdownPlayerProcess() noexcept
+		{
+			if (!m_PlayerProcess) return;
+			StopPlayerProcess();
+			const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+			while (m_PlayerProcess && std::chrono::steady_clock::now() < Deadline)
+			{
+				const auto Update = m_PlayerProcess->Poll();
+				if (!Update.OutputChunk.empty()) PF_INFO("Player output during editor shutdown:\n{}", Update.OutputChunk);
+				if (Update.Error) PF_WARN("Player shutdown monitoring: {}", *Update.Error);
+				if (!Update.Running && Update.OutputComplete)
+				{
+					if (Update.ForcedTermination)
+						PF_WARN("Player required forced termination during editor shutdown (exit code {}).", Update.ExitCode.value_or(-1));
+					else if (Update.ExitCode)
+						PF_INFO("Player exited during editor shutdown (exit code {}).", *Update.ExitCode);
+					m_PlayerProcess.reset();
+					return;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			}
+			PF_WARN("Player did not complete shutdown within six seconds; process ownership is being closed with forced cleanup.");
+			m_PlayerProcess.reset();
+		}
+
+		void PollPlayerProcess()
+		{
+			if (!m_PlayerProcess) return;
+			const auto Update = m_PlayerProcess->Poll();
+			if (!Update.OutputChunk.empty()) PF_INFO("Player output:\n{}", Update.OutputChunk);
+			if (Update.OutputTruncated && !m_PlayerOutputTruncationReported)
+			{
+				m_PlayerOutputTruncationReported = true;
+				PF_WARN("Player output is still being drained in bounded chunks.");
+			}
+			if (Update.Error && !m_PlayerMonitorErrorReported)
+			{
+				m_PlayerMonitorErrorReported = true;
+				SetError("Player process monitoring failed: " + *Update.Error);
+				m_PlayerProcess->RequestStop();
+			}
+			if (Update.Running || !Update.OutputComplete) return;
+			if (!Update.ExitCode)
+			{
+				SetError("Player process ended without a reported exit status.");
+				m_PlayerProcess.reset();
+				return;
+			}
+			if (Update.ForcedTermination)
+				SetError("Player was force-terminated after it did not complete cooperative shutdown.");
+			else if (Update.OutputTruncated)
+				SetError("Player exited after output draining was abandoned; some final output was discarded.");
+			else if (!m_PlayerMonitorErrorReported && m_PlayerStopRequested && Update.CooperativeStopObserved)
+				SetStatus("Player shut down cooperatively.");
+			else if (!m_PlayerMonitorErrorReported && m_PlayerStopRequested) SetStatus("Player exited after the stop request.");
+			else if (!m_PlayerMonitorErrorReported && *Update.ExitCode == 0) SetStatus("Player exited successfully.");
+			else if (!m_PlayerMonitorErrorReported) SetError("Player exited with code " + std::to_string(*Update.ExitCode) + ".");
+			m_PlayerProcess.reset();
+			m_PlayerStopRequested = false;
+			m_PlayerMonitorErrorReported = false;
+			m_PlayerOutputTruncationReported = false;
+		}
+
 #if defined(_DEBUG) || defined(PF_DEBUG)
 		void AdvanceEditorRuntimePlayStopTest()
 		{
@@ -8171,6 +8317,10 @@ namespace
 		bool m_DocumentHostTabGroupSourceCenterValid = false;
 		bool m_DocumentHostTabGroupTargetCenterValid = false;
 		std::optional<PulseForge::Project> m_Project;
+		std::unique_ptr<PulseForgeEditor::EditorPlayerProcess> m_PlayerProcess;
+		bool m_PlayerStopRequested = false;
+		bool m_PlayerMonitorErrorReported = false;
+		bool m_PlayerOutputTruncationReported = false;
 		PulseForgeEditor::EditorViewportSceneRenderView m_ViewportRenderView;
 		PulseForgeEditor::EditorSceneViewportInteraction m_ViewportInteraction;
 		std::unique_ptr<PulseForge::Scene> m_Scene;

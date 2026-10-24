@@ -51,6 +51,11 @@ namespace PulseForge
 			return { EntityIdentifier, ScriptAsset, Code, std::move(Message) };
 		}
 
+		void Observe(const ScriptRuntimeObserver& Observer, const ScriptRuntimeObservation& Observation) noexcept
+		{
+			if (Observer.Observe) Observer.Observe(Observer.Context, Observation);
+		}
+
 		void* BoundedLuaAllocator(void* UserData, void* Pointer, size_t OldSize, size_t NewSize)
 		{
 			auto& Memory = *static_cast<LuaMemory*>(UserData);
@@ -104,7 +109,7 @@ namespace PulseForge
 			return Result;
 		}
 
-		std::expected<void, std::string> RunCallback(
+		std::expected<bool, std::string> RunCallback(
 			ScriptInstance& Instance, size_t CallbackIndex, std::optional<double> DeltaSeconds = std::nullopt)
 		{
 			lua_State* State = Instance.State;
@@ -119,7 +124,7 @@ namespace PulseForge
 			if (lua_isnil(State, -1))
 			{
 				lua_pop(State, 1);
-				return {};
+				return false;
 			}
 			if (!lua_isfunction(State, -1))
 			{
@@ -137,10 +142,17 @@ namespace PulseForge
 				lua_pushnumber(State, *DeltaSeconds);
 				ArgumentCount = 1;
 			}
+			const auto Callback = static_cast<ScriptRuntimeCallback>(CallbackIndex);
+			Observe(Instance.Services.Observer,
+				{ .Kind = ScriptRuntimeObservationKind::CallbackEntered,
+					.Entity = Instance.BoundEntity.GetUUID(), .ScriptAsset = Instance.Asset, .Callback = Callback });
 			const int Status = lua_pcall(State, ArgumentCount, 0, 0);
 			lua_sethook(State, nullptr, 0, 0);
 			if (Status != LUA_OK) return std::unexpected(LuaErrorMessage(State));
-			return {};
+			Observe(Instance.Services.Observer,
+				{ .Kind = ScriptRuntimeObservationKind::CallbackCompleted,
+					.Entity = Instance.BoundEntity.GetUUID(), .ScriptAsset = Instance.Asset, .Callback = Callback });
+			return true;
 		}
 
 		std::expected<std::string, ScriptDiagnostic> ReadScriptSource(
@@ -226,6 +238,9 @@ namespace PulseForge
 		{
 			PF_ERROR("Script on entity {0} (asset {1}) failed: {2}", Diagnostic.Entity.ToString(), Diagnostic.ScriptAsset.ToString(),
 				Diagnostic.Message);
+			Observe(Services.Observer,
+				{ .Kind = ScriptRuntimeObservationKind::Diagnostic,
+					.Entity = Diagnostic.Entity, .ScriptAsset = Diagnostic.ScriptAsset, .Diagnostic = Diagnostic.Code });
 			Diagnostics.push_back(std::move(Diagnostic));
 		}
 
@@ -331,6 +346,8 @@ namespace PulseForge
 					return;
 				}
 				Scripts.insert_or_assign(EntityValue.GetUUID(), std::move(*Instance));
+				Observe(Services.Observer,
+					{ .Kind = ScriptRuntimeObservationKind::ScriptAttached, .Entity = EntityValue.GetUUID(), .ScriptAsset = Component.ScriptAsset });
 				FailedAttachments.erase(EntityValue.GetUUID());
 			}
 			catch (const std::exception& Exception)

@@ -5,8 +5,8 @@
 			"generator": "Ninja",
 			"configurationType": "Debug",
 			"inheritEnvironments": [ "msvc_x64_x64" ],
-			"buildRoot": "${projectDir}\\Out\\build\\${name}",
-			"installRoot": "${projectDir}\\Out\\install\\${name}",
+			"buildRoot": "${projectDir}\\Out\\Build\\${name}",
+			"installRoot": "${projectDir}\\Out\\Install\\${name}",
 			"cmakeCommandArgs": "",
 			"buildCommandArgs": "-j 4",
 			"ctestCommandArgs": ""
@@ -16,8 +16,8 @@
 			"generator": "Ninja",
 			"configurationType": "Release",
 			"inheritEnvironments": [ "msvc_x64_x64" ],
-			"buildRoot": "${projectDir}\\Out\\build\\${name}",
-			"installRoot": "${projectDir}\\Out\\install\\${name}",
+			"buildRoot": "${projectDir}\\Out\\Build\\${name}",
+			"installRoot": "${projectDir}\\Out\\Install\\${name}",
 			"cmakeCommandArgs": "",
 			"buildCommandArgs": "-j 4",
 			"ctestCommandArgs": ""
@@ -27,8 +27,8 @@
 			"generator": "Ninja",
 			"configurationType": "Dist",
 			"inheritEnvironments": [ "msvc_x64_x64" ],
-			"buildRoot": "${projectDir}\\Out\\build\\${name}",
-			"installRoot": "${projectDir}\\Out\\install\\${name}",
+			"buildRoot": "${projectDir}\\Out\\Build\\${name}",
+			"installRoot": "${projectDir}\\Out\\Install\\${name}",
 			"cmakeCommandArgs": "",
 			"buildCommandArgs": "-j 4",
 			"ctestCommandArgs": ""

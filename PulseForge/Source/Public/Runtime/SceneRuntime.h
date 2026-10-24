@@ -7,7 +7,9 @@
 #include "Scripting/ScriptRuntime.h"
 
 #include <expected>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace PulseForge
@@ -29,6 +31,9 @@ namespace PulseForge
 	{
 		Input* InputState = nullptr;
 		DiagnosticRecorder* Diagnostics = nullptr;
+		// Optional host policy check; an error rejects a pause change before audio state is modified.
+		std::function<std::optional<std::string>(bool)> AudioPauseGuard;
+		ScriptRuntimeObserver ScriptObserver;
 	};
 
 	enum class SceneRuntimeErrorCode : uint8_t
@@ -77,6 +82,8 @@ namespace PulseForge
 		[[nodiscard]] std::expected<void, SceneRuntimeError> Start(Scene& Source);
 		void Stop() noexcept;
 		[[nodiscard]] bool IsRunning() const noexcept;
+		[[nodiscard]] std::expected<void, SceneRuntimeError> SetPaused(bool Paused);
+		[[nodiscard]] bool IsPaused() const noexcept;
 		// Updates scripts, advances fixed-step physics, then synchronizes spatial audio before rendering.
 		[[nodiscard]] std::expected<SceneRuntimeFrameResult, SceneRuntimeError> Advance(
 			Scene& Source,

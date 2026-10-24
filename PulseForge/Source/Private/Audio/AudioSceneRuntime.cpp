@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <unordered_map>
+#include <vector>
 #include <utility>
 
 namespace PulseForge
@@ -65,10 +66,12 @@ namespace PulseForge
 			float Volume = 1.0f;
 			bool Looping = false;
 			bool Spatialized = false;
+			bool EntityPaused = false;
 		};
 
 		Scene* Source = nullptr;
 		std::unordered_map<UUID, Voice, UUIDHash> Voices;
+		bool Paused = false;
 
 		std::expected<Voice, AudioSceneRuntimeError> CreateVoice(
 			AudioEngine& Engine,
@@ -102,8 +105,14 @@ namespace PulseForge
 			auto Playback = Engine.Play(*Clip, Description);
 			if (!Playback)
 				return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::PlaybackFailed, Playback.error().Message));
-			return Voice{ EntityValue, std::move(*Playback), SourceComponent.AudioAsset, SourceComponent.Volume, SourceComponent.Looping,
+			Voice Result{ EntityValue, std::move(*Playback), SourceComponent.AudioAsset, SourceComponent.Volume, SourceComponent.Looping,
 				SourceComponent.Spatialized };
+			if (Paused)
+			{
+				if (auto PauseResult = Result.Playback.Pause(); !PauseResult)
+					return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::PlaybackFailed, PauseResult.error().Message));
+			}
+			return Result;
 		}
 
 		std::expected<std::optional<ListenerPose>, AudioSceneRuntimeError> FindPrimaryListener(const Scene& SceneValue)
@@ -210,6 +219,54 @@ namespace PulseForge
 	size_t AudioSceneRuntime::GetPlaybackCount() const noexcept
 	{
 		return m_Impl ? m_Impl->Voices.size() : 0;
+	}
+
+	std::expected<bool, AudioSceneRuntimeError> AudioSceneRuntime::IsPlaybackPlaying(UUID Identifier) const
+	{
+		if (!m_Impl)
+			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::NotRunning, "Audio scene runtime is not started"));
+		const auto Voice = m_Impl->Voices.find(Identifier);
+		if (Voice == m_Impl->Voices.end())
+			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::MissingPlayback, "Entity has no active audio playback"));
+		const auto EntityValue = m_Impl->Source->FindEntity(Identifier);
+		if (!EntityValue || *EntityValue != Voice->second.BoundEntity)
+			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::MissingPlayback, "Entity has no active audio playback"));
+		return Voice->second.Playback.IsPlaying();
+	}
+
+	std::expected<void, AudioSceneRuntimeError> AudioSceneRuntime::SetPaused(bool Paused)
+	{
+		if (!m_Impl) return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::NotRunning, "Audio scene runtime is not started"));
+		if (m_Impl->Paused == Paused) return {};
+
+		std::vector<AudioPlayback*> ChangedVoices;
+		for (auto& [Identifier, Voice] : m_Impl->Voices)
+		{
+			(void)Identifier;
+			if (Paused)
+			{
+				if (Voice.EntityPaused) continue;
+				if (auto Result = Voice.Playback.Pause(); !Result)
+				{
+					for (AudioPlayback* Changed : ChangedVoices)
+						(void)Changed->Resume();
+					return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::PlaybackFailed, Result.error().Message));
+				}
+				ChangedVoices.push_back(&Voice.Playback);
+			}
+			else if (!Voice.EntityPaused)
+			{
+				if (auto Result = Voice.Playback.Resume(); !Result)
+				{
+					for (AudioPlayback* Changed : ChangedVoices)
+						(void)Changed->Pause();
+					return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::PlaybackFailed, Result.error().Message));
+				}
+				ChangedVoices.push_back(&Voice.Playback);
+			}
+		}
+		m_Impl->Paused = Paused;
+		return {};
 	}
 
 	std::expected<void, AudioSceneRuntimeError> AudioSceneRuntime::Advance(Scene& Source)
@@ -332,6 +389,7 @@ namespace PulseForge
 		}
 		if (auto Result = Voice->second.Playback.Pause(); !Result)
 			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::PlaybackFailed, Result.error().Message));
+		Voice->second.EntityPaused = true;
 		return {};
 	}
 
@@ -348,8 +406,10 @@ namespace PulseForge
 			m_Impl->Voices.erase(Voice);
 			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::MissingPlayback, "Entity has no active audio playback"));
 		}
-		if (auto Result = Voice->second.Playback.Resume(); !Result)
-			return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::PlaybackFailed, Result.error().Message));
+		if (!m_Impl->Paused)
+			if (auto Result = Voice->second.Playback.Resume(); !Result)
+				return std::unexpected(MakeError(AudioSceneRuntimeErrorCode::PlaybackFailed, Result.error().Message));
+		Voice->second.EntityPaused = false;
 		return {};
 	}
 
