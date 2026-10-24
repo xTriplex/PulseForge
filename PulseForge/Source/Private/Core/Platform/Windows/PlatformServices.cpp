@@ -82,6 +82,16 @@ namespace PulseForge::Platform
 		return std::filesystem::path(Path.get());
 	}
 
+	std::expected<void, PathError> ReplaceFileAtomically(
+		const std::filesystem::path& TemporaryPath,
+		const std::filesystem::path& DestinationPath)
+	{
+		if (!MoveFileExW(TemporaryPath.c_str(), DestinationPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+			return std::unexpected(PathError{ "Windows could not replace the settings file (error " +
+				std::to_string(GetLastError()) + ")" });
+		return {};
+	}
+
 	void DebugBreak() noexcept
 	{
 		::DebugBreak();

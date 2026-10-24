@@ -15,6 +15,7 @@
 namespace PulseForge
 {
 	class AudioSceneRuntime;
+	class GameplayInputService;
 	class Input;
 	class PhysicsSceneRuntime;
 	class Project;
@@ -86,6 +87,7 @@ namespace PulseForge
 	{
 		PhysicsSceneRuntime* Physics = nullptr;
 		AudioSceneRuntime* Audio = nullptr;
+		const GameplayInputService* GameplayInput = nullptr;
 		Input* InputState = nullptr;
 		ScriptRuntimeObserver Observer;
 	};

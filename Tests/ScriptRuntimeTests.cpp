@@ -1,5 +1,6 @@
 #include "TestEngineSupport.h"
 #include "Core/Diagnostics.h"
+#include "Input/GameplayInput.h"
 
 namespace
 {
@@ -749,6 +750,114 @@ end
 		PF_CHECK(Tests, InputUpdatedTransform && std::abs(InputUpdatedTransform->Translation.x - 14.5f) < 0.0001f &&
 							std::abs(InputUpdatedTransform->Translation.y - 7.25f) < 0.0001f);
 		InputRuntime.Stop();
+
+		const auto ActionInputScriptAsset = CreateScriptAsset("action_input.lua", R"(
+local updates = 0
+function OnUpdate()
+  updates = updates + 1
+  if updates == 1 then
+    assert(input.was_action_pressed("Jump"))
+    assert(input.is_action_held("Jump"))
+    local x, y = input.get_vector("Move")
+    assert(x == 1 and y == 0)
+    assert(input.get_axis("Throttle") == 1)
+    local axis, axisMessage = input.get_axis("Jump")
+    assert(axis == nil and axisMessage ~= nil)
+    local unknown, unknownMessage = input.is_action_held("Missing")
+    assert(unknown == nil and unknownMessage ~= nil)
+  else
+    assert(not input.is_action_held("Jump"))
+    assert(input.was_action_released("Jump"))
+  end
+end
+)" );
+		PF_CHECK(Tests, ActionInputScriptAsset.has_value());
+		if (!ActionInputScriptAsset) return;
+		const auto ActionInputObserverAsset = CreateScriptAsset("action_input_observer.lua", R"(
+local updates = 0
+function OnUpdate()
+  updates = updates + 1
+  if updates == 1 then
+    assert(input.was_action_pressed("Jump"))
+    assert(input.is_action_held("Jump"))
+  else
+    assert(input.was_action_released("Jump"))
+    assert(not input.is_action_held("Jump"))
+  end
+end
+)" );
+		PF_CHECK(Tests, ActionInputObserverAsset.has_value());
+		if (!ActionInputObserverAsset) return;
+
+		GameplayInputService GameplayInput;
+		GameplayActionMap ActionMap;
+		GameplayActionDefinition JumpAction;
+		JumpAction.Id = "Jump";
+		JumpAction.Type = ActionValueType::Digital;
+		ActionBinding JumpBinding;
+		JumpBinding.Id = "Jump.primary";
+		JumpBinding.Primary = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::Space) };
+		JumpAction.Bindings.push_back(JumpBinding);
+		ActionMap.Actions.push_back(JumpAction);
+		GameplayActionDefinition MoveAction;
+		MoveAction.Id = "Move";
+		MoveAction.Type = ActionValueType::Axis2D;
+		ActionBinding MoveRight;
+		MoveRight.Id = "Move.right";
+		MoveRight.Primary = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::D) };
+		MoveRight.ScaleX = 1.0f;
+		ActionBinding MoveUp;
+		MoveUp.Id = "Move.up";
+		MoveUp.Primary = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::W) };
+		MoveUp.ScaleY = 1.0f;
+		MoveAction.Bindings = { MoveRight, MoveUp };
+		ActionMap.Actions.push_back(MoveAction);
+		GameplayActionDefinition ThrottleAction;
+		ThrottleAction.Id = "Throttle";
+		ThrottleAction.Type = ActionValueType::Axis1D;
+		ActionBinding ThrottleBinding;
+		ThrottleBinding.Id = "Throttle.key";
+		ThrottleBinding.Kind = ActionBindingKind::Axis;
+		ThrottleBinding.Primary = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::E) };
+		ThrottleAction.Bindings.push_back(ThrottleBinding);
+		ActionMap.Actions.push_back(ThrottleAction);
+		PF_CHECK(Tests, GameplayInput.SetActionMap(std::move(ActionMap)).has_value());
+		InputRoutingState ActionRouting;
+		ActionRouting.FocusedWindow = 17;
+		ActionRouting.Contexts[0] = { .Context = InputContext::Gameplay,
+			.Consumes = InputDeviceMask::None, .OwnerWindow = 17, .Active = true };
+		ActionRouting.ContextCount = 1;
+		PF_CHECK(Tests, GameplayInput.QueueEvent({ .Kind = InputEventKind::Pressed,
+			.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::Space) }, .Window = 17 }));
+		PF_CHECK(Tests, GameplayInput.QueueEvent({ .Kind = InputEventKind::Pressed,
+			.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::D) }, .Window = 17 }));
+		PF_CHECK(Tests, GameplayInput.QueueEvent({ .Kind = InputEventKind::Pressed,
+			.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::E) }, .Window = 17 }));
+		GameplayInput.PublishFrame(ActionRouting);
+		PF_CHECK(Tests, GameplayInput.FindAction("Jump") && GameplayInput.FindAction("Jump")->Held &&
+			GameplayInput.FindAction("Jump")->Pressed);
+		PF_CHECK(Tests, GameplayInput.FindAction("Move") && GameplayInput.FindAction("Move")->X == 1.0f);
+		PF_CHECK(Tests, GameplayInput.FindAction("Throttle") && GameplayInput.FindAction("Throttle")->X == 1.0f);
+
+		Scene ActionInputScene;
+		const auto ActionInputEntity = ActionInputScene.CreateEntity("Action input consumer");
+		const auto ActionInputObserver = ActionInputScene.CreateEntity("Shared snapshot observer");
+		PF_CHECK(Tests, ActionInputEntity && ActionInputObserver);
+		if (!ActionInputEntity || !ActionInputObserver) return;
+		PF_CHECK(Tests, ActionInputEntity->SetScript(ScriptComponent{ ActionInputScriptAsset->ID }).has_value());
+		PF_CHECK(Tests, ActionInputObserver->SetScript(ScriptComponent{ ActionInputObserverAsset->ID }).has_value());
+		ScriptRuntimeServices ActionInputServices;
+		ActionInputServices.GameplayInput = &GameplayInput;
+		ScriptRuntime ActionInputRuntime(*ProjectResult, {}, ActionInputServices);
+		PF_CHECK(Tests, ActionInputRuntime.Start(ActionInputScene).has_value());
+		PF_CHECK(Tests, ActionInputRuntime.Advance(ActionInputScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ActionInputRuntime.GetDiagnostics().empty());
+		PF_CHECK(Tests, GameplayInput.QueueEvent({ .Kind = InputEventKind::Released,
+			.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::Space) }, .Window = 17 }));
+		GameplayInput.PublishFrame(ActionRouting);
+		PF_CHECK(Tests, ActionInputRuntime.Advance(ActionInputScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, ActionInputRuntime.GetDiagnostics().empty());
+		ActionInputRuntime.Stop();
 
 		KeyPressedEvent CoordinatorWPressed(87, 0);
 		MouseButtonPressedEvent CoordinatorLeftPressed(0);

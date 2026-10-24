@@ -1,0 +1,7 @@
+{
+  "format": "PulseForgeProject",
+  "version": 1,
+  "projectId": "a9811000-0000-4000-8000-000000000001",
+  "name": "Gameplay Input Acceptance",
+  "startScene": "a9822000-0000-4000-8000-000000000001"
+}

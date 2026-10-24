@@ -1,5 +1,8 @@
 #include "TestEditorSupport.h"
+#include "Editor/Detail/EditorInputMappingPanel.h"
+#include "Input/GameplayInputStore.h"
 
+#include <cmath>
 #include <cstdlib>
 
 namespace
@@ -135,6 +138,329 @@ namespace
 		PF_CHECK(Tests, DraftKey == MakeMaterialDraftKey("C:/Project", "material-uuid"));
 		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("D:/Project", "material-uuid"));
 		PF_CHECK(Tests, DraftKey != MakeMaterialDraftKey("C:/Project", "other-material-uuid"));
+	}
+
+	void TestGamepadAndModifierBindingCapture(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		auto ProjectId = UUID::Generate();
+		PF_CHECK(Tests, ProjectId.has_value());
+		if (!ProjectId) return;
+
+		std::error_code Error;
+		const auto TemporaryDirectory = std::filesystem::temp_directory_path(Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const auto Root = TemporaryDirectory /
+			std::filesystem::u8path("PulseForge Editor Input Remap Ω " + ProjectId->ToString());
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup() { std::error_code Ignore; std::filesystem::remove_all(Path, Ignore); }
+		} CleanupRoot{ Root };
+		const auto ProjectRoot = Root / "Project";
+		const auto UserDataRoot = Root / "User Data";
+		std::filesystem::create_directories(ProjectRoot, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+
+		GameplayActionMap Defaults;
+		GameplayActionDefinition Throttle;
+		Throttle.Id = "Throttle";
+		Throttle.Type = ActionValueType::Axis1D;
+		ActionBinding Binding;
+		Binding.Id = "primary";
+		Binding.Kind = ActionBindingKind::Axis;
+		Binding.Primary = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::H) };
+		Throttle.Bindings.push_back(Binding);
+		Defaults.Actions.push_back(Throttle);
+		GameplayActionDefinition Jump;
+		Jump.Id = "Jump";
+		Jump.Type = ActionValueType::Digital;
+		ActionBinding JumpBinding;
+		JumpBinding.Id = "primary";
+		JumpBinding.Kind = ActionBindingKind::Button;
+		JumpBinding.Primary = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::Space) };
+		Jump.Bindings.push_back(JumpBinding);
+		Defaults.Actions.push_back(Jump);
+		auto Json = SerializeGameplayActionMap(Defaults);
+		PF_CHECK(Tests, Json.has_value());
+		if (!Json) return;
+		{
+			std::ofstream Stream(ProjectRoot / "InputActions.json", std::ios::binary | std::ios::trunc);
+			Stream.write(Json->data(), static_cast<std::streamsize>(Json->size()));
+			PF_CHECK(Tests, Stream.good());
+		}
+
+		auto Loaded = LoadGameplayInputMap(ProjectRoot, *ProjectId, UserDataRoot);
+		PF_CHECK(Tests, Loaded.has_value());
+		if (!Loaded) return;
+		GameplayInputService Input;
+		PF_CHECK(Tests, Input.SetActionMap(std::move(Loaded->ActionMap)).has_value());
+		PulseForgeEditor::Detail::EditorInputMappingPanel Panel;
+		Panel.BeginCapture("Throttle", "primary");
+		PF_CHECK(Tests, Panel.IsCapturing());
+		Panel.HandleInputEvent({ .Kind = InputEventKind::Value,
+			.Control = { InputDevice::GamepadAxis, static_cast<uint16_t>(GamepadAxis::RightX) },
+			.DeviceInstance = 71, .X = 0.35f }, Input, ProjectRoot, *ProjectId, UserDataRoot, true);
+		PF_CHECK(Tests, Panel.IsCapturing());
+		PF_CHECK(Tests, Input.GetActionMap().Actions[0].Bindings[0].Primary == Binding.Primary);
+		Panel.HandleInputEvent({ .Kind = InputEventKind::Value,
+			.Control = { InputDevice::GamepadAxis, static_cast<uint16_t>(GamepadAxis::RightX) },
+			.DeviceInstance = 71, .X = -0.65f }, Input, ProjectRoot, *ProjectId, UserDataRoot, true);
+		PF_CHECK(Tests, !Panel.IsCapturing());
+		const InputControl ReboundAxis{ InputDevice::GamepadAxis, static_cast<uint16_t>(GamepadAxis::RightX) };
+		PF_CHECK(Tests, Input.GetActionMap().Actions[0].Bindings[0].Primary == ReboundAxis);
+
+		Panel.BeginCapture("Throttle", "primary", false, 0);
+		Panel.HandleInputEvent({ .Kind = InputEventKind::Pressed,
+			.Control = { InputDevice::GamepadButton, static_cast<uint16_t>(GamepadButton::A) },
+			.DeviceInstance = 71 }, Input, ProjectRoot, *ProjectId, UserDataRoot, true);
+		PF_CHECK(Tests, !Panel.IsCapturing());
+		const ActionBinding& Rebound = Input.GetActionMap().Actions[0].Bindings[0];
+		PF_CHECK(Tests, Rebound.ModifierCount == 1);
+		PF_CHECK(Tests, Rebound.Modifiers[0] ==
+			(InputControl{ InputDevice::GamepadButton, static_cast<uint16_t>(GamepadButton::A) }));
+		auto Persisted = LoadGameplayInputMap(ProjectRoot, *ProjectId, UserDataRoot);
+		PF_CHECK(Tests, Persisted.has_value());
+		if (Persisted)
+		{
+			PF_CHECK(Tests, Persisted->ActionMap.Actions[0].Bindings[0].Primary == ReboundAxis);
+			PF_CHECK(Tests, Persisted->ActionMap.Actions[0].Bindings[0].ModifierCount == 1);
+		}
+
+		Panel.BeginCapture("Jump", "primary");
+		Panel.HandleInputEvent({ .Kind = InputEventKind::Value,
+			.Control = { InputDevice::GamepadAxis, static_cast<uint16_t>(GamepadAxis::LeftX) },
+			.DeviceInstance = 71, .X = 0.8f }, Input, ProjectRoot, *ProjectId, UserDataRoot, true);
+		PF_CHECK(Tests, !Panel.IsCapturing());
+		PF_CHECK(Tests, Input.GetActionMap().Actions[1].Bindings[0].Primary == JumpBinding.Primary);
+		Persisted = LoadGameplayInputMap(ProjectRoot, *ProjectId, UserDataRoot);
+		PF_CHECK(Tests, Persisted.has_value());
+		if (Persisted)
+			PF_CHECK(Tests, Persisted->ActionMap.Actions[1].Bindings[0].Primary == JumpBinding.Primary);
+	}
+
+	void TestEditorPlayGameplayFocusLifecycle(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		const auto ProjectId = UUID::Generate();
+		PF_CHECK(Tests, ProjectId.has_value());
+		if (!ProjectId) return;
+
+		std::error_code Error;
+		const auto Root = std::filesystem::temp_directory_path(Error) / ("PulseForge Editor Play Input " + ProjectId->ToString());
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup()
+			{
+				std::error_code Ignore;
+				std::filesystem::remove_all(Path, Ignore);
+			}
+		} CleanupRoot{ Root };
+
+		auto ProjectResult = Project::Create(Root / "EditorPlayInput.pfproj", "Editor Play Input");
+		PF_CHECK(Tests, ProjectResult.has_value());
+		if (!ProjectResult) return;
+		std::filesystem::create_directories(Root / "Assets/Scripts", Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+
+		constexpr std::string_view Script = R"(
+local moved = 0
+function OnUpdate(deltaTime)
+  local moveX, moveY = input.get_vector("Move")
+  local jump = input.is_action_held("Jump")
+  assert(moveX ~= nil and moveY ~= nil and jump ~= nil)
+  moved = moved + moveY * deltaTime * 2.0
+  local updated, message = entity:set_translation(moved, jump and 0.8 or 0.0, 0.0)
+  assert(updated, message)
+end
+)";
+		const auto ScriptBytes = std::as_bytes(std::span(Script.data(), Script.size()));
+		const auto ScriptAsset = AssetOperations::CreateAssetFromBytes(
+			ProjectResult->GetAssetRegistry(), ProjectResult->GetRootPath(), ScriptBytes, "Assets/Scripts/editor_play_input.lua");
+		PF_CHECK(Tests, ScriptAsset.has_value());
+		if (!ScriptAsset) return;
+
+		GameplayInputService Input;
+		GameplayActionMap Map;
+		GameplayActionDefinition Move{ .Id = "Move", .Type = ActionValueType::Axis2D };
+		ActionBinding Forward;
+		Forward.Id = "Move.forward";
+		Forward.Primary = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::W) };
+		Forward.ScaleX = 0.0f;
+		Forward.ScaleY = 1.0f;
+		Move.Bindings.push_back(Forward);
+		GameplayActionDefinition Jump{ .Id = "Jump", .Type = ActionValueType::Digital };
+		ActionBinding Space;
+		Space.Id = "Jump.space";
+		Space.Primary = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::Space) };
+		Jump.Bindings.push_back(Space);
+		Map.Actions = { Move, Jump };
+		PF_CHECK(Tests, Input.SetActionMap(std::move(Map)).has_value());
+
+		Scene RuntimeScene;
+		const auto Entity = RuntimeScene.CreateEntity("Editor Play input target");
+		PF_CHECK(Tests, Entity && Entity->SetScript(ScriptComponent{ ScriptAsset->ID }).has_value());
+		if (!Entity) return;
+		SceneRuntimeServices Services;
+		Services.GameplayInput = &Input;
+		SceneRuntime Runtime(*ProjectResult, {}, Services);
+		PF_CHECK(Tests, Runtime.Start(RuntimeScene).has_value());
+		if (!Runtime.IsRunning()) return;
+
+		bool ViewportFocused = ResolveViewportKeyboardFocus(false, ViewportKeyboardFocusEvent::PlayModeStarted);
+		PF_CHECK(Tests, !ViewportFocused);
+		for (int Update = 0; Update < 4; ++Update)
+		{
+			ViewportFocused = MaintainViewportKeyboardFocusDuringUpdate(ViewportFocused, true, true);
+			PF_CHECK(Tests, !ViewportFocused);
+		}
+		ViewportFocused = ResolveViewportKeyboardFocus(ViewportFocused, ViewportKeyboardFocusEvent::RenderedImageClicked);
+		PF_CHECK(Tests, ViewportFocused);
+
+		constexpr InputWindowID MainViewportWindow = 17;
+		const auto MakeRouting = [&ViewportFocused](InputWindowID Window, bool NativeFocused = true, bool ImGuiFocused = true,
+									 bool TextOrModal = false, bool ViewportNavigation = false)
+		{
+			return BuildEditorGameplayInputRouting({ .ViewportWindow = Window,
+				.ViewportAvailable = true,
+				.NativeOwnerFocused = NativeFocused,
+				.ImGuiOwnerFocused = ImGuiFocused,
+				.RuntimeActive = true,
+				.ViewportKeyboardFocused = ViewportFocused,
+				.TextOrModalInput = TextOrModal,
+				.ViewportNavigation = ViewportNavigation });
+		};
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
+							.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::W) },
+							.Window = MainViewportWindow }));
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
+							.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::Space) },
+							.Window = MainViewportWindow }));
+		glm::vec3 EditorCameraPosition{ 3.0f, 4.0f, 5.0f };
+		const glm::vec3 OriginalEditorCameraPosition = EditorCameraPosition;
+		for (int Update = 0; Update < 4; ++Update)
+		{
+			ViewportFocused = MaintainViewportKeyboardFocusDuringUpdate(ViewportFocused, true, true);
+			const InputRoutingState Routing = MakeRouting(MainViewportWindow);
+			PF_CHECK(Tests, Routing.FocusedWindow == MainViewportWindow && Routing.ContextCount == 4 &&
+								Routing.Contexts[0].Context == InputContext::Gameplay && Routing.Contexts[0].Active);
+			Input.PublishFrame(Routing);
+			PF_CHECK(Tests, Input.FindAction("Move") && Input.FindAction("Move")->Held);
+			PF_CHECK(Tests, Input.FindAction("Move") && Input.FindAction("Move")->X == 0.0f && Input.FindAction("Move")->Y == 1.0f);
+			PF_CHECK(Tests, Input.FindAction("Jump") && Input.FindAction("Jump")->Held);
+			const ViewportCameraNavigationContext CameraContext{
+				.SceneAvailable = true, .RuntimeActive = true, .ViewportKeyboardFocused = ViewportFocused, .ApplicationFocused = true
+			};
+			if (CanNavigateViewportCamera(CameraContext)) EditorCameraPosition.x += 1.0f;
+			PF_CHECK(Tests, Runtime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		}
+		const auto MovedTransform = Entity->GetTransform();
+		PF_CHECK(Tests, MovedTransform && MovedTransform->Translation.x > 0.13f && MovedTransform->Translation.x < 0.14f);
+		PF_CHECK(Tests, MovedTransform && MovedTransform->Translation.y == 0.8f);
+		PF_CHECK(Tests, EditorCameraPosition == OriginalEditorCameraPosition);
+
+		const auto BeforeTextEntry = Entity->GetTransform();
+		const InputRoutingState NavigationRouting = MakeRouting(MainViewportWindow, true, true, false, true);
+		PF_CHECK(Tests, !NavigationRouting.Contexts[0].Active && NavigationRouting.Contexts[2].Active);
+		Input.PublishFrame(NavigationRouting);
+		PF_CHECK(Tests, Runtime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, !Input.FindAction("Move")->Held);
+		const auto DuringViewportNavigation = Entity->GetTransform();
+		PF_CHECK(Tests,
+			BeforeTextEntry && DuringViewportNavigation && BeforeTextEntry->Translation.x == DuringViewportNavigation->Translation.x);
+
+		Input.PublishFrame(MakeRouting(MainViewportWindow, true, true, true));
+		PF_CHECK(Tests, Runtime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, Input.FindAction("Move") && !Input.FindAction("Move")->Held);
+		const auto DuringTextEntry = Entity->GetTransform();
+		PF_CHECK(Tests, BeforeTextEntry && DuringTextEntry && BeforeTextEntry->Translation.x == DuringTextEntry->Translation.x &&
+							DuringTextEntry->Translation.y == 0.0f);
+
+		Input.PublishFrame(MakeRouting(MainViewportWindow));
+		PF_CHECK(Tests, Runtime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, !Input.FindAction("Move")->Held);
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Released,
+							.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::W) },
+							.Window = MainViewportWindow }));
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Released,
+							.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::Space) },
+							.Window = MainViewportWindow }));
+		Input.PublishFrame(MakeRouting(MainViewportWindow));
+		PF_CHECK(Tests, Runtime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
+							.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::W) },
+							.Window = MainViewportWindow }));
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
+							.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::Space) },
+							.Window = MainViewportWindow }));
+		Input.PublishFrame(MakeRouting(MainViewportWindow));
+		PF_CHECK(Tests, Runtime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		const auto AfterRearm = Entity->GetTransform();
+		PF_CHECK(Tests, AfterRearm && BeforeTextEntry && AfterRearm->Translation.x > BeforeTextEntry->Translation.x &&
+							AfterRearm->Translation.y == 0.8f);
+
+		ViewportFocused = ResolveViewportKeyboardFocus(ViewportFocused, ViewportKeyboardFocusEvent::OtherEditorPanelClicked);
+		PF_CHECK(Tests, !ViewportFocused);
+		Input.PublishFrame(MakeRouting(MainViewportWindow));
+		PF_CHECK(Tests, Runtime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, !Input.FindAction("Move")->Held);
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
+							.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::W) },
+							.Window = MainViewportWindow }));
+		ViewportFocused = ResolveViewportKeyboardFocus(ViewportFocused, ViewportKeyboardFocusEvent::RenderedImageClicked);
+		Input.PublishFrame(MakeRouting(MainViewportWindow));
+		PF_CHECK(Tests, Runtime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, !Input.FindAction("Move")->Held);
+
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Released,
+							.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::W) },
+							.Window = MainViewportWindow }));
+		Input.PublishFrame(MakeRouting(MainViewportWindow, false));
+		PF_CHECK(Tests, Runtime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
+							.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::W) },
+							.Window = MainViewportWindow }));
+		Input.PublishFrame(MakeRouting(MainViewportWindow, true, false));
+		PF_CHECK(Tests, Runtime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, !Input.FindAction("Move")->Held);
+
+		Runtime.Stop();
+		ViewportFocused = ResolveViewportKeyboardFocus(ViewportFocused, ViewportKeyboardFocusEvent::PlayModeStarted);
+		PF_CHECK(Tests, !ViewportFocused);
+		Input.PublishFrame(BuildEditorGameplayInputRouting({ .ViewportWindow = MainViewportWindow,
+			.ViewportAvailable = true,
+			.NativeOwnerFocused = true,
+			.ImGuiOwnerFocused = true,
+			.RuntimeActive = false,
+			.ViewportKeyboardFocused = ViewportFocused }));
+		PF_CHECK(Tests, !Input.FindAction("Move")->Held);
+
+		SceneRuntime RestartedRuntime(*ProjectResult, {}, Services);
+		PF_CHECK(Tests, RestartedRuntime.Start(RuntimeScene).has_value());
+		Input.PublishFrame(MakeRouting(MainViewportWindow));
+		PF_CHECK(Tests, RestartedRuntime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, !Input.FindAction("Move")->Held);
+		ViewportFocused = ResolveViewportKeyboardFocus(ViewportFocused, ViewportKeyboardFocusEvent::RenderedImageClicked);
+		Input.PublishFrame(MakeRouting(MainViewportWindow));
+		PF_CHECK(Tests, RestartedRuntime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, !Input.FindAction("Move")->Held);
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Released,
+			.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::W) }, .Window = MainViewportWindow }));
+		Input.PublishFrame(MakeRouting(MainViewportWindow));
+		PF_CHECK(Tests, RestartedRuntime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, Input.QueueEvent({ .Kind = InputEventKind::Pressed,
+			.Control = { InputDevice::Keyboard, static_cast<uint16_t>(InputKey::W) }, .Window = MainViewportWindow }));
+		Input.PublishFrame(MakeRouting(MainViewportWindow));
+		PF_CHECK(Tests, RestartedRuntime.Advance(RuntimeScene, Timestep(1.0 / 60.0)).has_value());
+		PF_CHECK(Tests, Input.FindAction("Move") && Input.FindAction("Move")->Held);
+		RestartedRuntime.Stop();
 	}
 
 	void TestEditorDeferredOperationQueue(TestRunner& Tests)
@@ -820,6 +1146,8 @@ namespace
 void RunEditorTests(TestRunner& Tests)
 {
 	TestEditorWorkspacePanelState(Tests);
+	TestGamepadAndModifierBindingCapture(Tests);
+	TestEditorPlayGameplayFocusLifecycle(Tests);
 	TestEditorDeferredOperationQueue(Tests);
 	TestEditorAssetDestinationPolicy(Tests);
 	TestEditorAssetSelectorPolicy(Tests);

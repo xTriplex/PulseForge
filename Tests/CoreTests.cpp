@@ -1,4 +1,5 @@
 #include "TestCoreSupport.h"
+#include "Input/GameplayInput.h"
 #include "Core/BoundedInput.h"
 
 #include <algorithm>
@@ -116,6 +117,39 @@ namespace
 		}
 		PF_CHECK(Tests, RegularLifecycle.DetachCount == 1);
 		PF_CHECK(Tests, OverlayLifecycle.DetachCount == 1);
+	}
+
+	void TestLayerStackRawInputDispatch(TestRunner& Tests)
+	{
+		int Observed = 0;
+		PulseForge::InputEvent LastInput;
+		class InputObservingLayer final : public PulseForge::Layer
+		{
+		public:
+			InputObservingLayer(int& Count, PulseForge::InputEvent& Last) : Layer("InputObservingLayer"), m_Count(Count), m_Last(Last) {}
+			void OnInputEvent(const PulseForge::InputEvent& Event) override
+			{
+				++m_Count;
+				m_Last = Event;
+			}
+
+		private:
+			int& m_Count;
+			PulseForge::InputEvent& m_Last;
+		};
+
+		PulseForge::LayerStack Stack;
+		Stack.PushLayer(std::make_unique<InputObservingLayer>(Observed, LastInput));
+		const PulseForge::InputEvent GamepadPress{
+			.Kind = PulseForge::InputEventKind::Pressed,
+			.Control = { PulseForge::InputDevice::GamepadButton,
+				static_cast<uint16_t>(PulseForge::GamepadButton::A) },
+			.DeviceInstance = 29
+		};
+		Stack.DispatchInputEvent(GamepadPress);
+		PF_CHECK(Tests, Observed == 1);
+		PF_CHECK(Tests, LastInput.Kind == GamepadPress.Kind && LastInput.Control == GamepadPress.Control);
+		PF_CHECK(Tests, LastInput.DeviceInstance == GamepadPress.DeviceInstance);
 	}
 
 	void TestLayerStackClearDetachesInReverseOrder(TestRunner& Tests)
@@ -504,6 +538,7 @@ void RunCoreTests(TestRunner& Tests)
 {
 	TestBoundedInputReader(Tests);
 	TestLayerStackOwnership(Tests);
+	TestLayerStackRawInputDispatch(Tests);
 	TestLayerStackClearDetachesInReverseOrder(Tests);
 	TestLayerAndOverlayIterationOrder(Tests);
 	TestLayerStackRejectsMutationDuringDispatch(Tests);

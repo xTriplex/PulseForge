@@ -8,6 +8,8 @@
 
 namespace PulseForge
 {
+	struct InputEvent;
+
 	class PULSEFORGE_API Layer
 	{
 	public:
@@ -22,6 +24,7 @@ namespace PulseForge
 		// Runs after the main frame is submitted so layers can render native platform windows safely.
 		virtual void OnRenderPlatformWindows() {}
 		virtual void OnEvent(Event& Event) {}
+		virtual void OnInputEvent(const InputEvent& Event) { (void)Event; }
 
 		inline const std::string& GetName() const { return m_DebugName; }
 
