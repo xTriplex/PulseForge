@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Assets/AssetRegistry.h"
+#include "Scene/PropertyMetadata.h"
 #include "Scene/Scene.h"
 
 #include <expected>
@@ -39,6 +40,8 @@ namespace PulseForgeEditor
 		struct Context;
 
 		template <typename Action> void RecordComponentOperation(Context& Inspector, Action&& Operation, std::string_view Description);
+		void DrawProperty(Context& Inspector, const PulseForge::Entity& Entity, std::string_view ComponentId, std::string_view PropertyId,
+			const std::function<bool(PulseForge::PropertyValue&)>& DrawWidget);
 		void SetCameraComponent(Context& Inspector, const PulseForge::Entity& Target, const PulseForge::CameraComponent& Camera);
 		void SetAudioListenerComponent(
 			Context& Inspector, const PulseForge::Entity& Target, const PulseForge::AudioListenerComponent& Listener);
@@ -58,7 +61,10 @@ namespace PulseForgeEditor
 		void DrawAudioSourceComponent(Context& Inspector, const PulseForge::Entity& Entity);
 		void DrawAudioListenerComponent(Context& Inspector, const PulseForge::Entity& Entity);
 		void DrawScriptComponent(Context& Inspector, const PulseForge::Entity& Entity);
+		void DrawScriptFloatProperties(Context& Inspector, const PulseForge::Entity& Entity, PulseForge::ScriptComponent& Component);
 
 		bool m_FocusEntityNameNextFrame = false;
+		std::string m_NewScriptPropertyIdentifier;
+		float m_NewScriptPropertyValue = 0.0f;
 	};
 } // namespace PulseForgeEditor

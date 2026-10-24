@@ -30,6 +30,7 @@ add_library(PulseForgeScene STATIC
 	PulseForge/Source/Private/Scene/Components/RigidbodyComponent.cpp
 	PulseForge/Source/Private/Scene/Components/ScriptComponent.cpp
 	PulseForge/Source/Private/Scene/Components/SpotLightComponent.cpp
+	PulseForge/Source/Private/Scene/PropertyMetadata.cpp
 	PulseForge/Source/Private/Scene/Scene.cpp
 	PulseForge/Source/Private/Scene/SceneRenderSnapshot.cpp
 	PulseForge/Source/Private/Scene/TransformComponent.cpp

@@ -11,10 +11,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <exception>
 #include <fstream>
+#include <initializer_list>
 #include <limits>
 #include <optional>
 #include <span>
@@ -27,13 +29,32 @@ namespace PulseForge
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
-		constexpr int64_t SceneFormatVersion = 7;
+		constexpr int64_t SceneFormatVersion = 8;
 		constexpr int64_t MinimumSupportedSceneFormatVersion = 1;
 		constexpr std::string_view SceneFormatName = "PulseForgeScene";
 
 		SceneSerializationError MakeError(SceneSerializationErrorCode Code, std::string Message)
 		{
 			return { Code, std::move(Message) };
+		}
+
+		std::optional<std::string> FindUnknownField(const Json& Object, std::initializer_list<std::string_view> AllowedFields)
+		{
+			for (const auto& [Key, Value] : Object.items())
+			{
+				(void)Value;
+				if (std::find(AllowedFields.begin(), AllowedFields.end(), Key) == AllowedFields.end()) return Key;
+			}
+			return std::nullopt;
+		}
+
+		std::expected<void, SceneSerializationError> ValidateKnownFields(const Json& Object,
+			std::initializer_list<std::string_view> AllowedFields, std::string_view ObjectName,
+			SceneSerializationErrorCode ErrorCode = SceneSerializationErrorCode::InvalidDocument)
+		{
+			if (const auto Unknown = FindUnknownField(Object, AllowedFields))
+				return std::unexpected(MakeError(ErrorCode, std::string(ObjectName) + " contains unsupported field '" + *Unknown + "'"));
+			return {};
 		}
 
 		bool ReadFiniteFloats(const Json& Value, std::span<float> Output)
@@ -227,10 +248,18 @@ namespace PulseForge
 					Record["audioListener"] = Json::object({ { "primary", AudioListener->value().IsPrimary } });
 				if (Script->has_value())
 				{
-					Record["script"] = Json::object({
-						{ "asset", Script->value().ScriptAsset.ToString() },
-						{ "enabled", Script->value().Enabled }
-					});
+					if (auto Validation = Script->value().Validate(); !Validation)
+						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error().Message));
+					Json SerializedScript =
+						Json::object({ { "asset", Script->value().ScriptAsset.ToString() }, { "enabled", Script->value().Enabled } });
+					if (!Script->value().FloatProperties.empty())
+					{
+						Json Properties = Json::object();
+						for (const auto& [Identifier, Value] : Script->value().FloatProperties)
+							Properties[Identifier] = Value;
+						SerializedScript["properties"] = std::move(Properties);
+					}
+					Record["script"] = std::move(SerializedScript);
 				}
 				Record["parent"] = Parent->has_value() ? Json((**Parent).GetUUID().ToString()) : Json(nullptr);
 				Document["entities"].push_back(std::move(Record));
@@ -280,6 +309,10 @@ namespace PulseForge
 			if (!SupportedVersion)
 				return std::unexpected(
 					MakeError(SceneSerializationErrorCode::UnsupportedVersion, "Scene document version is not supported"));
+			const int64_t DocumentVersion =
+				Version->is_number_unsigned() ? static_cast<int64_t>(Version->get<uint64_t>()) : Version->get<int64_t>();
+			if (auto Fields = ValidateKnownFields(Document, { "format", "version", "entities" }, "Scene document"); !Fields)
+				return std::unexpected(Fields.error());
 
 			const auto SerializedEntities = Document.find("entities");
 			if (SerializedEntities == Document.end() || !SerializedEntities->is_array())
@@ -303,6 +336,12 @@ namespace PulseForge
 			{
 				if (!SerializedEntity.is_object())
 					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Each scene entity must be an object"));
+				if (auto Fields = ValidateKnownFields(SerializedEntity,
+						{ "uuid", "tag", "transform", "camera", "directionalLight", "environmentLight", "pointLight", "spotLight",
+							"meshRenderer", "rigidbody", "boxCollider", "audioSource", "audioListener", "script", "parent" },
+						"Scene entity");
+					!Fields)
+					return std::unexpected(Fields.error());
 
 				const auto UUIDValue = SerializedEntity.find("uuid");
 				const auto Tag = SerializedEntity.find("tag");
@@ -327,8 +366,11 @@ namespace PulseForge
 					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Scene document contains a duplicate entity UUID"));
 
 				const auto Name = Tag->find("name");
+				if (auto Fields = ValidateKnownFields(*Tag, { "name" }, "Entity tag"); !Fields) return std::unexpected(Fields.error());
 				if (Name == Tag->end() || !Name->is_string())
 					return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity tag requires a string name"));
+				if (auto Fields = ValidateKnownFields(*Transform, { "translation", "rotation", "scale" }, "Entity transform"); !Fields)
+					return std::unexpected(Fields.error());
 
 				const auto Translation = Transform->find("translation");
 				const auto Rotation = Transform->find("rotation");
@@ -369,6 +411,11 @@ namespace PulseForge
 				{
 					if (!SerializedCamera->is_object())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity camera must be an object"));
+					if (auto Fields =
+							ValidateKnownFields(*SerializedCamera, { "verticalFovRadians", "nearClipPlane", "farClipPlane", "primary" },
+								"Camera component", SceneSerializationErrorCode::InvalidEntityData);
+						!Fields)
+						return std::unexpected(Fields.error());
 
 					const auto VerticalFov = SerializedCamera->find("verticalFovRadians");
 					const auto NearClip = SerializedCamera->find("nearClipPlane");
@@ -400,6 +447,11 @@ namespace PulseForge
 					if (!SerializedDirectionalLight->is_object())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
 							"Entity directionalLight must be an object"));
+					if (auto Fields = ValidateKnownFields(*SerializedDirectionalLight,
+							{ "color", "intensity", "castShadows", "shadowDistance", "shadowBias", "shadowNormalBias", "shadowSoftness" },
+							"Directional light component", SceneSerializationErrorCode::InvalidEntityData);
+						!Fields)
+						return std::unexpected(Fields.error());
 					const auto Color = SerializedDirectionalLight->find("color");
 					const auto Intensity = SerializedDirectionalLight->find("intensity");
 					std::array<float, 3> ColorValues{};
@@ -442,6 +494,10 @@ namespace PulseForge
 					if (!SerializedEnvironmentLight->is_object())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
 							"Entity environmentLight must be an object"));
+					if (auto Fields = ValidateKnownFields(*SerializedEnvironmentLight, { "hdrImage", "intensity" },
+							"Environment light component", SceneSerializationErrorCode::InvalidEntityData);
+						!Fields)
+						return std::unexpected(Fields.error());
 					const auto HdrImage = SerializedEnvironmentLight->find("hdrImage");
 					const auto Intensity = SerializedEnvironmentLight->find("intensity");
 					if (HdrImage == SerializedEnvironmentLight->end() || !HdrImage->is_string() ||
@@ -463,6 +519,11 @@ namespace PulseForge
 				{
 					if (!SerializedPointLight->is_object())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity pointLight must be an object"));
+					if (auto Fields = ValidateKnownFields(*SerializedPointLight,
+							{ "color", "intensity", "range", "castShadows", "shadowBias", "shadowNormalBias", "shadowSoftness" },
+							"Point light component", SceneSerializationErrorCode::InvalidEntityData);
+						!Fields)
+						return std::unexpected(Fields.error());
 					const auto Color = SerializedPointLight->find("color");
 					const auto Intensity = SerializedPointLight->find("intensity");
 					const auto Range = SerializedPointLight->find("range");
@@ -507,6 +568,12 @@ namespace PulseForge
 				{
 					if (!SerializedSpotLight->is_object())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity spotLight must be an object"));
+					if (auto Fields = ValidateKnownFields(*SerializedSpotLight,
+							{ "color", "intensity", "range", "innerConeAngleDegrees", "outerConeAngleDegrees", "castShadows", "shadowBias",
+								"shadowNormalBias", "shadowSoftness" },
+							"Spot light component", SceneSerializationErrorCode::InvalidEntityData);
+						!Fields)
+						return std::unexpected(Fields.error());
 					const auto Color = SerializedSpotLight->find("color");
 					const auto Intensity = SerializedSpotLight->find("intensity");
 					const auto Range = SerializedSpotLight->find("range");
@@ -547,6 +614,10 @@ namespace PulseForge
 						return std::unexpected(MakeError(
 							SceneSerializationErrorCode::InvalidEntityData,
 							"Entity meshRenderer must be an object"));
+					if (auto Fields = ValidateKnownFields(*SerializedMeshRenderer, { "meshAsset", "materialAsset" },
+							"Mesh renderer component", SceneSerializationErrorCode::InvalidEntityData);
+						!Fields)
+						return std::unexpected(Fields.error());
 
 					const auto MeshAsset = SerializedMeshRenderer->find("meshAsset");
 					if (MeshAsset == SerializedMeshRenderer->end() || !MeshAsset->is_string())
@@ -585,6 +656,11 @@ namespace PulseForge
 				{
 					if (!SerializedRigidbody->is_object())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity rigidbody must be an object"));
+					if (auto Fields =
+							ValidateKnownFields(*SerializedRigidbody, { "motionType", "mass", "friction", "restitution", "allowSleeping" },
+								"Rigidbody component", SceneSerializationErrorCode::InvalidEntityData);
+						!Fields)
+						return std::unexpected(Fields.error());
 
 					const auto MotionType = SerializedRigidbody->find("motionType");
 					const auto Mass = SerializedRigidbody->find("mass");
@@ -621,6 +697,10 @@ namespace PulseForge
 				{
 					if (!SerializedBoxCollider->is_object())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity boxCollider must be an object"));
+					if (auto Fields = ValidateKnownFields(*SerializedBoxCollider, { "halfExtents" }, "Box collider component",
+							SceneSerializationErrorCode::InvalidEntityData);
+						!Fields)
+						return std::unexpected(Fields.error());
 					const auto HalfExtents = SerializedBoxCollider->find("halfExtents");
 					std::array<float, 3> HalfExtentValues{};
 					if (HalfExtents == SerializedBoxCollider->end() || !ReadFiniteFloats(*HalfExtents, HalfExtentValues))
@@ -638,6 +718,11 @@ namespace PulseForge
 				{
 					if (!SerializedAudioSource->is_object())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity audioSource must be an object"));
+					if (auto Fields =
+							ValidateKnownFields(*SerializedAudioSource, { "asset", "volume", "looping", "playOnStart", "spatialized" },
+								"Audio source component", SceneSerializationErrorCode::InvalidEntityData);
+						!Fields)
+						return std::unexpected(Fields.error());
 					const auto Asset = SerializedAudioSource->find("asset");
 					const auto Volume = SerializedAudioSource->find("volume");
 					const auto Looping = SerializedAudioSource->find("looping");
@@ -676,6 +761,10 @@ namespace PulseForge
 				{
 					if (!SerializedAudioListener->is_object())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity audioListener must be an object"));
+					if (auto Fields = ValidateKnownFields(*SerializedAudioListener, { "primary" }, "Audio listener component",
+							SceneSerializationErrorCode::InvalidEntityData);
+						!Fields)
+						return std::unexpected(Fields.error());
 					const auto Primary = SerializedAudioListener->find("primary");
 					if (Primary == SerializedAudioListener->end() || !Primary->is_boolean())
 						return std::unexpected(MakeError(
@@ -690,6 +779,12 @@ namespace PulseForge
 				{
 					if (!SerializedScript->is_object())
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, "Entity script must be an object"));
+					if (auto Fields = DocumentVersion >= 8 ? ValidateKnownFields(*SerializedScript, { "asset", "enabled", "properties" },
+																 "Script component", SceneSerializationErrorCode::InvalidEntityData)
+														   : ValidateKnownFields(*SerializedScript, { "asset", "enabled" },
+																 "Legacy script component", SceneSerializationErrorCode::InvalidEntityData);
+						!Fields)
+						return std::unexpected(Fields.error());
 					const auto Asset = SerializedScript->find("asset");
 					const auto Enabled = SerializedScript->find("enabled");
 					if (Asset == SerializedScript->end() || !Asset->is_string() ||
@@ -705,6 +800,31 @@ namespace PulseForge
 							SceneSerializationErrorCode::InvalidEntityData,
 							ParsedAsset ? "Script asset UUID must not be nil" : ParsedAsset.error().Message));
 					ScriptData = ScriptComponent{ *ParsedAsset, Enabled->get<bool>() };
+					if (DocumentVersion >= 8)
+					{
+						const auto Properties = SerializedScript->find("properties");
+						if (Properties != SerializedScript->end())
+						{
+							if (!Properties->is_object() || Properties->size() > MaximumScriptFloatPropertyCount)
+								return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+									"Script properties must be an object containing at most 64 entries"));
+							for (const auto& [Identifier, Value] : Properties->items())
+							{
+								if (!IsValidScriptPropertyIdentifier(Identifier) || !Value.is_number())
+									return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+										"Script properties require stable IDs and finite numeric values"));
+								const double NumericValue = Value.get<double>();
+								if (!std::isfinite(NumericValue) || std::abs(NumericValue) > MaximumScriptFloatPropertyMagnitude)
+									return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+										"Script property values must be finite with magnitude at most 1000000000"));
+								const float PropertyValue = static_cast<float>(NumericValue);
+								if (!std::isfinite(PropertyValue) || std::abs(PropertyValue) > MaximumScriptFloatPropertyMagnitude)
+									return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData,
+										"Script property values must be representable as finite single-precision numbers"));
+								ScriptData->FloatProperties.emplace(Identifier, PropertyValue);
+							}
+						}
+					}
 					if (auto Validation = ScriptData->Validate(); !Validation)
 						return std::unexpected(MakeError(SceneSerializationErrorCode::InvalidEntityData, Validation.error().Message));
 				}

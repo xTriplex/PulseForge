@@ -100,6 +100,30 @@ end
 		PF_CHECK(Tests, TransformScriptAsset.has_value());
 		if (!TransformScriptAsset) return;
 
+		const auto AuthoredPropertyScriptAsset =
+			CreateScriptAsset("authored_property.lua", "function OnUpdate()\n"
+													   "  local speed = entity:get_float_property('move.speed')\n"
+													   "  assert(speed == 4.5)\n"
+													   "  assert(entity:get_float_property('unknown') == nil)\n"
+													   "  assert(entity:set_translation(speed, 0, 0))\n"
+													   "end\n");
+		PF_CHECK(Tests, AuthoredPropertyScriptAsset.has_value());
+		if (!AuthoredPropertyScriptAsset) return;
+		Scene AuthoredPropertyScene;
+		const auto AuthoredPropertyEntity = AuthoredPropertyScene.CreateEntity("Authored script property");
+		PF_CHECK(Tests, AuthoredPropertyEntity.has_value());
+		if (!AuthoredPropertyEntity) return;
+		ScriptComponent AuthoredPropertyComponent{ AuthoredPropertyScriptAsset->ID };
+		AuthoredPropertyComponent.FloatProperties.emplace("move.speed", 4.5f);
+		PF_CHECK(Tests, AuthoredPropertyEntity->SetScript(AuthoredPropertyComponent).has_value());
+		ScriptRuntime AuthoredPropertyRuntime(*ProjectResult);
+		PF_CHECK(Tests, AuthoredPropertyRuntime.Start(AuthoredPropertyScene).has_value());
+		PF_CHECK(Tests, AuthoredPropertyRuntime.Advance(AuthoredPropertyScene, Timestep(1.0 / 60.0)).has_value());
+		const auto AuthoredPropertyTransform = AuthoredPropertyEntity->GetTransform();
+		PF_CHECK(Tests, AuthoredPropertyTransform && AuthoredPropertyTransform->Translation.x == 4.5f);
+		PF_CHECK(Tests, AuthoredPropertyRuntime.GetDiagnostics().empty());
+		AuthoredPropertyRuntime.Stop();
+
 		const auto RelativeMotionScriptAsset = CreateScriptAsset("relative_motion.lua",
 			"local elapsed = 0\n"
 			"local initialX, initialY, initialZ = 0, 0, 0\n"

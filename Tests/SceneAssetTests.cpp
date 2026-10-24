@@ -135,26 +135,18 @@ namespace
 			PF_CHECK(Tests, InstanceListener && InstanceListener->has_value() && !InstanceListener->value().IsPrimary);
 		}
 
-		std::string LegacyPrefabV1 = *PrefabData;
-		const size_t CameraPrimaryPosition = LegacyPrefabV1.find("\"primary\": false");
-		PF_CHECK(Tests, CameraPrimaryPosition != std::string::npos);
-		if (CameraPrimaryPosition != std::string::npos)
+		auto LegacyPrefabDocument = nlohmann::json::parse(*PrefabData);
+		LegacyPrefabDocument["version"] = 1;
+		auto& LegacyScene = LegacyPrefabDocument["scene"];
+		LegacyScene["version"] = 3;
+		for (auto& EntityRecord : LegacyScene["entities"])
 		{
-			LegacyPrefabV1.replace(CameraPrimaryPosition, std::string("\"primary\": false").size(), "\"primary\": true");
-			const size_t PrimaryCommaPosition = LegacyPrefabV1.rfind(',', CameraPrimaryPosition);
-			const size_t PrimaryLineEnd = LegacyPrefabV1.find('\n', CameraPrimaryPosition);
-			PF_CHECK(Tests, PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos);
-			if (PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos)
-				LegacyPrefabV1.erase(PrimaryCommaPosition, PrimaryLineEnd - PrimaryCommaPosition);
+			for (const std::string_view Field : { "directionalLight", "environmentLight", "pointLight", "spotLight", "rigidbody",
+					 "boxCollider", "audioSource", "audioListener", "script" })
+				EntityRecord.erase(std::string(Field));
+			if (EntityRecord.contains("camera")) EntityRecord["camera"].erase("primary");
 		}
-		const size_t EmbeddedSceneVersionPosition = LegacyPrefabV1.find("\"version\": 7", LegacyPrefabV1.find("\"scene\""));
-		PF_CHECK(Tests, EmbeddedSceneVersionPosition != std::string::npos);
-		if (EmbeddedSceneVersionPosition != std::string::npos)
-			LegacyPrefabV1.replace(EmbeddedSceneVersionPosition, std::string("\"version\": 7").size(), "\"version\": 3");
-		const size_t OuterPrefabVersionPosition = LegacyPrefabV1.find("\"version\": 3");
-		PF_CHECK(Tests, OuterPrefabVersionPosition != std::string::npos);
-		if (OuterPrefabVersionPosition != std::string::npos)
-			LegacyPrefabV1.replace(OuterPrefabVersionPosition, std::string("\"version\": 3").size(), "\"version\": 1");
+		const std::string LegacyPrefabV1 = LegacyPrefabDocument.dump(2) + "\n";
 		Scene LegacyPrefabDestination;
 		const auto LegacyPrefabInstance = PrefabSerializer::Instantiate(LegacyPrefabV1, LegacyPrefabDestination);
 		PF_CHECK(Tests, LegacyPrefabInstance.has_value());

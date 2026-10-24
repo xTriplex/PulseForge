@@ -92,24 +92,36 @@ namespace PulseForgeEditor
 					Style.BeginComponentBody("TransformComponentBody");
 					if (Style.BeginPropertyTable("TransformProperties"))
 					{
-						float Translation[3]{ Transform->Translation.x, Transform->Translation.y, Transform->Translation.z };
-						const glm::vec3 RotationDegrees = glm::degrees(glm::eulerAngles(Transform->Rotation));
-						float Rotation[3]{ RotationDegrees.x, RotationDegrees.y, RotationDegrees.z };
-						float Scale[3]{ Transform->Scale.x, Transform->Scale.y, Transform->Scale.z };
-						const bool TranslationChanged = Style.Vector3PropertyRow("Position", Translation, 0.05f, "%.3f");
-						const bool RotationChanged = Style.Vector3PropertyRow("Rotation", Rotation, 0.5f, "%.1f");
-						const bool ScaleChanged = Style.Vector3PropertyRow("Scale", Scale, 0.05f, "%.3f");
+						if (Style.BeginPropertyRow("Position"))
+							DrawProperty(Inspector, *Entity, PulseForge::PropertyComponentIds::Transform,
+								PulseForge::PropertyIds::Translation,
+								[](PulseForge::PropertyValue& Value)
+								{
+									auto* Translation = std::get_if<glm::vec3>(&Value);
+									return Translation &&
+										   ImGui::DragFloat3("##TransformPosition", &Translation->x, 0.05f, 0.0f, 0.0f, "%.3f");
+								});
+						if (Style.BeginPropertyRow("Rotation"))
+							DrawProperty(Inspector, *Entity, PulseForge::PropertyComponentIds::Transform, PulseForge::PropertyIds::Rotation,
+								[](PulseForge::PropertyValue& Value)
+								{
+									auto* Rotation = std::get_if<glm::quat>(&Value);
+									if (!Rotation) return false;
+									const glm::vec3 Degrees = glm::degrees(glm::eulerAngles(*Rotation));
+									float RotationDegrees[3]{ Degrees.x, Degrees.y, Degrees.z };
+									if (!ImGui::DragFloat3("##TransformRotation", RotationDegrees, 0.5f, 0.0f, 0.0f, "%.1f")) return false;
+									*Rotation =
+										glm::quat(glm::radians(glm::vec3(RotationDegrees[0], RotationDegrees[1], RotationDegrees[2])));
+									return true;
+								});
+						if (Style.BeginPropertyRow("Scale"))
+							DrawProperty(Inspector, *Entity, PulseForge::PropertyComponentIds::Transform, PulseForge::PropertyIds::Scale,
+								[](PulseForge::PropertyValue& Value)
+								{
+									auto* Scale = std::get_if<glm::vec3>(&Value);
+									return Scale && ImGui::DragFloat3("##TransformScale", &Scale->x, 0.05f, 0.0f, 0.0f, "%.3f");
+								});
 						Style.EndPropertyTable();
-						if (TranslationChanged || RotationChanged || ScaleChanged)
-						{
-							PulseForge::TransformComponent UpdatedTransform = *Transform;
-							UpdatedTransform.Translation = { Translation[0], Translation[1], Translation[2] };
-							UpdatedTransform.Rotation = glm::quat(glm::radians(glm::vec3(Rotation[0], Rotation[1], Rotation[2])));
-							UpdatedTransform.Scale = { Scale[0], Scale[1], Scale[2] };
-							const auto Updated = Actions.RunInspectorSceneEdit(
-								"Edit Transform", [Entity = *Entity, UpdatedTransform] { return Entity.SetTransform(UpdatedTransform); });
-							if (!Updated) Actions.ReportInspectorError("Entity transform update failed: " + Updated.error());
-						}
 					}
 					Style.EndComponentBody();
 				}
@@ -134,6 +146,30 @@ namespace PulseForgeEditor
 			Inspector.Actions.ReportInspectorError(std::string(Context) + ": " + Result.error());
 			return;
 		}
+	}
+
+	void EditorInspectorPanel::DrawProperty(Context& Inspector, const PulseForge::Entity& Entity, std::string_view ComponentId,
+		std::string_view PropertyId, const std::function<bool(PulseForge::PropertyValue&)>& DrawWidget)
+	{
+		auto Value = PulseForge::ReadProperty(Entity, ComponentId, PropertyId);
+		if (!Value)
+		{
+			Inspector.Actions.ReportInspectorError(
+				"Could not read Inspector property '" + std::string(PropertyId) + "': " + Value.error().Message);
+			return;
+		}
+		if (!DrawWidget(*Value)) return;
+
+		const auto Updated = Inspector.Actions.RunInspectorSceneEdit("Edit " + std::string(PropertyId),
+			[Entity, ComponentId = std::string(ComponentId), PropertyId = std::string(PropertyId),
+				Value = std::move(*Value)]() -> std::expected<void, PulseForge::SceneError>
+			{
+				const auto Result = PulseForge::WriteProperty(Entity, ComponentId, PropertyId, Value);
+				if (!Result)
+					return std::unexpected(PulseForge::SceneError{ PulseForge::SceneErrorCode::StorageFailure, Result.error().Message });
+				return {};
+			});
+		if (!Updated) Inspector.Actions.ReportInspectorError("Inspector property update failed: " + Updated.error());
 	}
 
 	void EditorInspectorPanel::SetCameraComponent(
@@ -405,34 +441,67 @@ namespace PulseForgeEditor
 		}
 		if (!Expanded) return;
 		Inspector.Style.BeginComponentBody("DirectionalLightComponentBody");
-		bool Changed = false;
 		if (Inspector.Style.BeginPropertyTable("DirectionalLightProperties"))
 		{
 			if (Inspector.Style.BeginPropertyRow("Linear Color"))
-				Changed |= ImGui::DragFloat3("##DirectionalLightLinearColor", &Component.Color.x, 0.01f, 0.0f, 100000.0f, "%.3f");
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::DirectionalLight, PulseForge::PropertyIds::Color,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* Color = std::get_if<glm::vec3>(&Value);
+						return Color && ImGui::DragFloat3("##DirectionalLightLinearColor", &Color->x, 0.01f, 0.0f, 100000.0f, "%.3f");
+					});
 			if (Inspector.Style.BeginPropertyRow("Intensity"))
-				Changed |= ImGui::DragFloat("##DirectionalLightIntensity", &Component.Intensity, 0.05f, 0.0f, 100000.0f, "%.3f");
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::DirectionalLight, PulseForge::PropertyIds::Intensity,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* Intensity = std::get_if<float>(&Value);
+						return Intensity && ImGui::DragFloat("##DirectionalLightIntensity", Intensity, 0.05f, 0.0f, 100000.0f, "%.3f");
+					});
 			if (Inspector.Style.BeginPropertyRow("Cast Shadows"))
-				Changed |= ImGui::Checkbox("##DirectionalLightCastShadows", &Component.CastShadows);
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::DirectionalLight, PulseForge::PropertyIds::CastShadows,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* CastShadows = std::get_if<bool>(&Value);
+						return CastShadows && ImGui::Checkbox("##DirectionalLightCastShadows", CastShadows);
+					});
 			if (Component.CastShadows)
 			{
 				if (Inspector.Style.BeginPropertyRow("Shadow Distance"))
-					Changed |=
-						ImGui::DragFloat("##DirectionalLightShadowDistance", &Component.ShadowDistance, 0.25f, 0.1f, 5000.0f, "%.1f m");
+					DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::DirectionalLight,
+						PulseForge::PropertyIds::ShadowDistance,
+						[](PulseForge::PropertyValue& Value)
+						{
+							auto* Distance = std::get_if<float>(&Value);
+							return Distance &&
+								   ImGui::DragFloat("##DirectionalLightShadowDistance", Distance, 0.25f, 0.1f, 5000.0f, "%.1f m");
+						});
 				if (Inspector.Style.BeginPropertyRow("Shadow Bias"))
-					Changed |= ImGui::DragFloat("##DirectionalLightShadowBias", &Component.ShadowBias, 0.25f, 0.0f, 16.0f, "%.0f units");
+					DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::DirectionalLight, PulseForge::PropertyIds::ShadowBias,
+						[](PulseForge::PropertyValue& Value)
+						{
+							auto* Bias = std::get_if<float>(&Value);
+							return Bias && ImGui::DragFloat("##DirectionalLightShadowBias", Bias, 0.25f, 0.0f, 16.0f, "%.0f units");
+						});
 				if (Inspector.Style.BeginPropertyRow("Normal Bias"))
-					Changed |=
-						ImGui::DragFloat("##DirectionalLightShadowNormalBias", &Component.ShadowNormalBias, 0.0025f, 0.0f, 0.25f, "%.4f");
+					DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::DirectionalLight,
+						PulseForge::PropertyIds::ShadowNormalBias,
+						[](PulseForge::PropertyValue& Value)
+						{
+							auto* Bias = std::get_if<float>(&Value);
+							return Bias && ImGui::DragFloat("##DirectionalLightShadowNormalBias", Bias, 0.0025f, 0.0f, 0.25f, "%.4f");
+						});
 				if (Inspector.Style.BeginPropertyRow("Softness"))
-					Changed |=
-						ImGui::DragFloat("##DirectionalLightShadowSoftness", &Component.ShadowSoftness, 0.05f, 0.0f, 8.0f, "%.2f texels");
+					DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::DirectionalLight,
+						PulseForge::PropertyIds::ShadowSoftness,
+						[](PulseForge::PropertyValue& Value)
+						{
+							auto* Softness = std::get_if<float>(&Value);
+							return Softness &&
+								   ImGui::DragFloat("##DirectionalLightShadowSoftness", Softness, 0.05f, 0.0f, 8.0f, "%.2f texels");
+						});
 			}
 			Inspector.Style.EndPropertyTable();
 		}
-		if (Changed)
-			RecordComponentOperation(
-				Inspector, [Entity, Component] { return Entity.SetDirectionalLight(Component); }, "Directional light update failed");
 		Inspector.Style.EndComponentBody();
 	}
 
@@ -452,34 +521,65 @@ namespace PulseForgeEditor
 		}
 		if (!Expanded) return;
 		Inspector.Style.BeginComponentBody("PointLightComponentBody");
-		bool Changed = false;
 		if (Inspector.Style.BeginPropertyTable("PointLightProperties"))
 		{
 			if (Inspector.Style.BeginPropertyRow("Linear Color"))
-				Changed |= ImGui::DragFloat3("##PointLightColor", &Component.Color.x, 0.01f, 0.0f, 1000.0f, "%.3f");
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::PointLight, PulseForge::PropertyIds::Color,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* Color = std::get_if<glm::vec3>(&Value);
+						return Color && ImGui::DragFloat3("##PointLightColor", &Color->x, 0.01f, 0.0f, 1000.0f, "%.3f");
+					});
 			if (Inspector.Style.BeginPropertyRow("Intensity (unitless)"))
-				Changed |= ImGui::DragFloat("##PointLightIntensity", &Component.Intensity, 0.1f, 0.0f, 1000000.0f, "%.2f");
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::PointLight, PulseForge::PropertyIds::Intensity,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* Intensity = std::get_if<float>(&Value);
+						return Intensity && ImGui::DragFloat("##PointLightIntensity", Intensity, 0.1f, 0.0f, 1000000.0f, "%.2f");
+					});
 			if (Inspector.Style.BeginPropertyRow("Range"))
-				Changed |= ImGui::DragFloat("##PointLightRange", &Component.Range, 0.05f, 0.01f, 10000.0f, "%.2f units");
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::PointLight, PulseForge::PropertyIds::Range,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* Range = std::get_if<float>(&Value);
+						return Range && ImGui::DragFloat("##PointLightRange", Range, 0.05f, 0.01f, 10000.0f, "%.2f units");
+					});
 			if (Inspector.Style.BeginPropertyRow("Cast Shadows"))
-				Changed |= ImGui::Checkbox("##PointLightCastShadows", &Component.CastShadows);
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::PointLight, PulseForge::PropertyIds::CastShadows,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* CastShadows = std::get_if<bool>(&Value);
+						return CastShadows && ImGui::Checkbox("##PointLightCastShadows", CastShadows);
+					});
 			if (Component.CastShadows)
 			{
 				if (Inspector.Style.BeginPropertyRow("Shadow Bias (normalized)"))
-					Changed |= ImGui::DragFloat(
-						"##PointLightShadowBias", &Component.ShadowBias, 0.0001f, 0.0f, PulseForge::MaxPointLightShadowBias, "%.4f");
+					DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::PointLight, PulseForge::PropertyIds::ShadowBias,
+						[](PulseForge::PropertyValue& Value)
+						{
+							auto* Bias = std::get_if<float>(&Value);
+							return Bias && ImGui::DragFloat(
+											   "##PointLightShadowBias", Bias, 0.0001f, 0.0f, PulseForge::MaxPointLightShadowBias, "%.4f");
+						});
 				if (Inspector.Style.BeginPropertyRow("Shadow Normal Bias"))
-					Changed |= ImGui::DragFloat("##PointLightShadowNormalBias", &Component.ShadowNormalBias, 0.001f, 0.0f,
-						PulseForge::MaxPointLightShadowNormalBias, "%.3f units");
+					DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::PointLight, PulseForge::PropertyIds::ShadowNormalBias,
+						[](PulseForge::PropertyValue& Value)
+						{
+							auto* Bias = std::get_if<float>(&Value);
+							return Bias && ImGui::DragFloat("##PointLightShadowNormalBias", Bias, 0.001f, 0.0f,
+											   PulseForge::MaxPointLightShadowNormalBias, "%.3f units");
+						});
 				if (Inspector.Style.BeginPropertyRow("Shadow Softness (texels)"))
-					Changed |= ImGui::DragFloat("##PointLightShadowSoftness", &Component.ShadowSoftness, 0.05f, 0.0f,
-						PulseForge::MaxPointLightShadowSoftness, "%.2f");
+					DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::PointLight, PulseForge::PropertyIds::ShadowSoftness,
+						[](PulseForge::PropertyValue& Value)
+						{
+							auto* Softness = std::get_if<float>(&Value);
+							return Softness && ImGui::DragFloat("##PointLightShadowSoftness", Softness, 0.05f, 0.0f,
+												   PulseForge::MaxPointLightShadowSoftness, "%.2f");
+						});
 			}
 			Inspector.Style.EndPropertyTable();
 		}
-		if (Changed)
-			RecordComponentOperation(
-				Inspector, [Entity, Component] { return Entity.SetPointLight(Component); }, "Point light update failed");
 		Inspector.Style.EndComponentBody();
 	}
 
@@ -499,35 +599,77 @@ namespace PulseForgeEditor
 		}
 		if (!Expanded) return;
 		Inspector.Style.BeginComponentBody("SpotLightComponentBody");
-		bool Changed = false;
 		if (Inspector.Style.BeginPropertyTable("SpotLightProperties"))
 		{
 			if (Inspector.Style.BeginPropertyRow("Linear Color"))
-				Changed |= ImGui::DragFloat3("##SpotLightColor", &Component.Color.x, 0.01f, 0.0f, 1000.0f, "%.3f");
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::SpotLight, PulseForge::PropertyIds::Color,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* Color = std::get_if<glm::vec3>(&Value);
+						return Color && ImGui::DragFloat3("##SpotLightColor", &Color->x, 0.01f, 0.0f, 1000.0f, "%.3f");
+					});
 			if (Inspector.Style.BeginPropertyRow("Intensity (unitless)"))
-				Changed |= ImGui::DragFloat("##SpotLightIntensity", &Component.Intensity, 0.1f, 0.0f, 1000000.0f, "%.2f");
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::SpotLight, PulseForge::PropertyIds::Intensity,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* Intensity = std::get_if<float>(&Value);
+						return Intensity && ImGui::DragFloat("##SpotLightIntensity", Intensity, 0.1f, 0.0f, 1000000.0f, "%.2f");
+					});
 			if (Inspector.Style.BeginPropertyRow("Range"))
-				Changed |= ImGui::DragFloat("##SpotLightRange", &Component.Range, 0.05f, 0.01f, 10000.0f, "%.2f units");
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::SpotLight, PulseForge::PropertyIds::Range,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* Range = std::get_if<float>(&Value);
+						return Range && ImGui::DragFloat("##SpotLightRange", Range, 0.05f, 0.01f, 10000.0f, "%.2f units");
+					});
 			if (Inspector.Style.BeginPropertyRow("Inner cone half-angle"))
-				Changed |= ImGui::DragFloat(
-					"##SpotLightInner", &Component.InnerConeAngleDegrees, 0.25f, 0.5f, Component.OuterConeAngleDegrees - 0.1f, "%.1f deg");
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::SpotLight, PulseForge::PropertyIds::InnerConeAngleDegrees,
+					[&Component](PulseForge::PropertyValue& Value)
+					{
+						auto* Angle = std::get_if<float>(&Value);
+						return Angle &&
+							   ImGui::DragFloat("##SpotLightInner", Angle, 0.25f, 0.5f, Component.OuterConeAngleDegrees - 0.1f, "%.1f deg");
+					});
 			if (Inspector.Style.BeginPropertyRow("Outer cone half-angle"))
-				Changed |= ImGui::DragFloat(
-					"##SpotLightOuter", &Component.OuterConeAngleDegrees, 0.25f, Component.InnerConeAngleDegrees + 0.1f, 89.5f, "%.1f deg");
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::SpotLight, PulseForge::PropertyIds::OuterConeAngleDegrees,
+					[&Component](PulseForge::PropertyValue& Value)
+					{
+						auto* Angle = std::get_if<float>(&Value);
+						return Angle && ImGui::DragFloat(
+											"##SpotLightOuter", Angle, 0.25f, Component.InnerConeAngleDegrees + 0.1f, 89.5f, "%.1f deg");
+					});
 			if (Inspector.Style.BeginPropertyRow("Cast Shadows"))
-				Changed |= ImGui::Checkbox("##SpotLightCastShadows", &Component.CastShadows);
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::SpotLight, PulseForge::PropertyIds::CastShadows,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* CastShadows = std::get_if<bool>(&Value);
+						return CastShadows && ImGui::Checkbox("##SpotLightCastShadows", CastShadows);
+					});
 			if (Inspector.Style.BeginPropertyRow("Shadow Bias"))
-				Changed |= ImGui::DragFloat("##SpotLightShadowBias", &Component.ShadowBias, 0.0001f, 0.0f, 0.02f, "%.4f");
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::SpotLight, PulseForge::PropertyIds::ShadowBias,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* Bias = std::get_if<float>(&Value);
+						return Bias && ImGui::DragFloat("##SpotLightShadowBias", Bias, 0.0001f, 0.0f, 0.02f, "%.4f");
+					});
 			if (Inspector.Style.BeginPropertyRow("Shadow Normal Bias"))
-				Changed |= ImGui::DragFloat("##SpotLightShadowNormalBias", &Component.ShadowNormalBias, 0.0025f, 0.0f, 1.0f, "%.3f units");
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::SpotLight, PulseForge::PropertyIds::ShadowNormalBias,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* Bias = std::get_if<float>(&Value);
+						return Bias && ImGui::DragFloat("##SpotLightShadowNormalBias", Bias, 0.0025f, 0.0f, 1.0f, "%.3f units");
+					});
 			if (Inspector.Style.BeginPropertyRow("Shadow Softness"))
-				Changed |= ImGui::DragFloat("##SpotLightShadowSoftness", &Component.ShadowSoftness, 0.1f, 0.0f, 4.0f, "%.1f texels");
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::SpotLight, PulseForge::PropertyIds::ShadowSoftness,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* Softness = std::get_if<float>(&Value);
+						return Softness && ImGui::DragFloat("##SpotLightShadowSoftness", Softness, 0.1f, 0.0f, 4.0f, "%.1f texels");
+					});
 			if (Component.CastShadows && Component.OuterConeAngleDegrees > 80.0f)
 				ImGui::TextDisabled("Shadows support outer half-angles up to 80 degrees; illumination is unchanged.");
 			Inspector.Style.EndPropertyTable();
 		}
-		if (Changed)
-			RecordComponentOperation(Inspector, [Entity, Component] { return Entity.SetSpotLight(Component); }, "Spot light update failed");
 		Inspector.Style.EndComponentBody();
 	}
 
@@ -579,7 +721,6 @@ namespace PulseForgeEditor
 		const auto Result = Entity.GetMeshRenderer();
 		if (!Result || !Result->has_value()) return;
 
-		PulseForge::MeshRendererComponent Component = **Result;
 		const bool IsExpanded = Inspector.Style.SectionHeader(PulseForgeEditor::EditorIcon::Cube, "Mesh Renderer");
 		ImGui::SameLine();
 		ImGui::SetCursorPosX((std::max)(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - 31.0f));
@@ -592,23 +733,16 @@ namespace PulseForgeEditor
 		if (!IsExpanded) return;
 		Inspector.Style.BeginComponentBody("MeshRendererComponentBody");
 
-		std::optional<PulseForge::AssetID> Mesh = Component.MeshAsset;
-		std::optional<PulseForge::AssetID> Material = Component.MaterialAsset;
-		bool Changed = false;
 		if (Inspector.Style.BeginPropertyTable("MeshRendererProperties"))
 		{
-			if (Inspector.Style.BeginPropertyRow("Mesh Asset"))
-				Changed = DrawAssetSelector(Inspector, "##MeshAsset", Mesh, { ".gltf", ".glb" }, false);
 			if (Inspector.Style.BeginPropertyRow("Material"))
-				Changed |= DrawAssetSelector(Inspector, "##MaterialAsset", Material, { ".material" }, true);
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::MeshRenderer, PulseForge::PropertyIds::MaterialAsset,
+					[&Inspector, this](PulseForge::PropertyValue& Value)
+					{
+						auto* Material = std::get_if<std::optional<PulseForge::AssetID>>(&Value);
+						return Material && DrawAssetSelector(Inspector, "##MaterialAsset", *Material, { ".material" }, true);
+					});
 			Inspector.Style.EndPropertyTable();
-		}
-		if (Changed && Mesh)
-		{
-			Component.MeshAsset = *Mesh;
-			Component.MaterialAsset = Material;
-			RecordComponentOperation(
-				Inspector, [Entity, Component] { return Entity.SetMeshRenderer(Component); }, "Mesh renderer update failed");
 		}
 		Inspector.Style.EndComponentBody();
 	}
@@ -774,22 +908,93 @@ namespace PulseForgeEditor
 		if (!IsExpanded) return;
 		Inspector.Style.BeginComponentBody("ScriptComponentBody");
 
-		std::optional<PulseForge::AssetID> Script = Component.ScriptAsset;
-		bool Changed = false;
 		if (Inspector.Style.BeginPropertyTable("ScriptProperties"))
 		{
 			if (Inspector.Style.BeginPropertyRow("Lua Script"))
-				Changed = DrawAssetSelector(Inspector, "##ScriptAsset", Script, { ".lua" }, false);
-			if (Inspector.Style.BeginPropertyRow("Enabled")) Changed |= ImGui::Checkbox("##ScriptEnabled", &Component.Enabled);
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::Script, PulseForge::PropertyIds::Asset,
+					[&Inspector, this](PulseForge::PropertyValue& Value)
+					{
+						auto* ScriptAsset = std::get_if<PulseForge::AssetID>(&Value);
+						if (!ScriptAsset) return false;
+						std::optional<PulseForge::AssetID> Script{ *ScriptAsset };
+						if (!DrawAssetSelector(Inspector, "##ScriptAsset", Script, { ".lua" }, false) || !Script) return false;
+						*ScriptAsset = *Script;
+						return true;
+					});
+			if (Inspector.Style.BeginPropertyRow("Enabled"))
+				DrawProperty(Inspector, Entity, PulseForge::PropertyComponentIds::Script, PulseForge::PropertyIds::Enabled,
+					[](PulseForge::PropertyValue& Value)
+					{
+						auto* Enabled = std::get_if<bool>(&Value);
+						return Enabled && ImGui::Checkbox("##ScriptEnabled", Enabled);
+					});
 			Inspector.Style.EndPropertyTable();
 		}
-		if (Changed && Script)
-		{
-			Component.ScriptAsset = *Script;
-			RecordComponentOperation(
-				Inspector, [Entity, Component] { return Entity.SetScript(Component); }, "Script component update failed");
-		}
+		DrawScriptFloatProperties(Inspector, Entity, Component);
 		Inspector.Style.EndComponentBody();
+	}
+
+	void EditorInspectorPanel::DrawScriptFloatProperties(
+		Context& Inspector, const PulseForge::Entity& Entity, PulseForge::ScriptComponent& Component)
+	{
+		const auto UpdateScript = [this, &Inspector, Entity](
+									  std::string Description, std::function<void(PulseForge::ScriptComponent&)> Update)
+		{
+			RecordComponentOperation(
+				Inspector,
+				[Entity, Update = std::move(Update)]() -> std::expected<void, PulseForge::SceneError>
+				{
+					auto Current = Entity.GetScript();
+					if (!Current) return std::unexpected(Current.error());
+					if (!Current->has_value())
+						return std::unexpected(PulseForge::SceneError{
+							PulseForge::SceneErrorCode::MissingComponent, "Entity does not have a Script component" });
+					PulseForge::ScriptComponent Updated = Current->value();
+					Update(Updated);
+					return Entity.SetScript(Updated);
+				},
+				Description);
+		};
+
+		ImGui::TextDisabled("Script Properties");
+		ImGui::Separator();
+		for (const auto& [Identifier, Value] : Component.FloatProperties)
+		{
+			ImGui::PushID(Identifier.c_str());
+			if (Inspector.Style.BeginPropertyRow(Identifier.c_str()))
+			{
+				float UpdatedValue = Value;
+				ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 31.0f);
+				if (ImGui::DragFloat("##ScriptFloatProperty", &UpdatedValue, 0.05f, -PulseForge::MaximumScriptFloatPropertyMagnitude,
+						PulseForge::MaximumScriptFloatPropertyMagnitude, "%.3f"))
+					UpdateScript("Edit script property " + Identifier, [Identifier, UpdatedValue](PulseForge::ScriptComponent& Updated)
+						{ Updated.FloatProperties[Identifier] = UpdatedValue; });
+				ImGui::SameLine();
+				if (ImGui::SmallButton("X"))
+					UpdateScript("Remove script property " + Identifier,
+						[Identifier](PulseForge::ScriptComponent& Updated) { Updated.FloatProperties.erase(Identifier); });
+			}
+			ImGui::PopID();
+		}
+
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+		ImGui::InputText("##NewScriptPropertyIdentifier", &m_NewScriptPropertyIdentifier);
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5f - 46.0f);
+		ImGui::DragFloat("##NewScriptPropertyValue", &m_NewScriptPropertyValue, 0.05f, -PulseForge::MaximumScriptFloatPropertyMagnitude,
+			PulseForge::MaximumScriptFloatPropertyMagnitude, "%.3f");
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Add"))
+		{
+			if (!PulseForge::IsValidScriptPropertyIdentifier(m_NewScriptPropertyIdentifier))
+				Inspector.Actions.ReportInspectorError("Script property IDs must use the supported ASCII identifier format.");
+			else if (Component.FloatProperties.contains(m_NewScriptPropertyIdentifier))
+				Inspector.Actions.ReportInspectorError("A script property with that ID already exists.");
+			else
+				UpdateScript("Add script property " + m_NewScriptPropertyIdentifier,
+					[m_NewScriptPropertyIdentifier = m_NewScriptPropertyIdentifier, Value = m_NewScriptPropertyValue](
+						PulseForge::ScriptComponent& Updated) { Updated.FloatProperties.emplace(m_NewScriptPropertyIdentifier, Value); });
+		}
 	}
 
 } // namespace PulseForgeEditor
