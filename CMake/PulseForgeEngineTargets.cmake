@@ -1,5 +1,6 @@
 add_library(PulseForgeInput STATIC
 	PulseForge/Source/Private/Input/GameplayInput.cpp
+	PulseForge/Source/Private/Input/GamepadStateAdapter.cpp
 	PulseForge/Source/Private/Input/GameplayInputStore.cpp
 )
 target_include_directories(PulseForgeInput

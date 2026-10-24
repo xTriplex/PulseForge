@@ -147,6 +147,7 @@ if(BUILD_TESTING)
 	add_executable(PulseForgeScriptingRuntimeTests
 		Tests/PulseForgeScriptingRuntimeTests.cpp
 		Tests/GameplayInputTests.cpp
+		Tests/GameplayInputLifecycleTests.cpp
 		Tests/GameplayInputStoreTests.cpp
 		Tests/ScriptRuntimeTests.cpp
 	)

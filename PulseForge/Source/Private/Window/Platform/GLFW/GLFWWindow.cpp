@@ -186,11 +186,6 @@ namespace PulseForge
 		return Result;
 	}
 
-	static uint64_t MakeGamepadInstance(uint32_t Slot, uint64_t Generation) noexcept
-	{
-		return (Generation << 8) | (static_cast<uint64_t>(Slot) + 1);
-	}
-
 	GLFWWindow::GLFWWindow(const WindowProps& Props)
 	{
 		Init(Props);
@@ -579,12 +574,12 @@ namespace PulseForge
 	{
 		if (m_NativeWindow)
 		{
-			for (uint32_t Slot = 0; Slot < m_GamepadConnected.size(); ++Slot)
+			for (uint32_t Slot = 0; Slot < m_GamepadPresent.size(); ++Slot)
 			{
-				if (!m_GamepadConnected[Slot]) continue;
-				WindowData.InputCallback({ .Kind = InputEventKind::DeviceDisconnected,
-					.DeviceInstance = MakeGamepadInstance(Slot, m_GamepadGenerations[Slot]) });
-				m_GamepadConnected[Slot] = false;
+				const GamepadStateEvents Events = m_GamepadStateAdapter.Update(Slot, false, false, nullptr);
+				for (const InputEvent& Event : Events.View()) WindowData.InputCallback(Event);
+				m_GamepadPresent[Slot] = false;
+				m_GamepadMapped[Slot] = false;
 			}
 			WindowData.InputCallback({ .Kind = InputEventKind::WindowDestroyed, .Window = WindowData.ID });
 		}
@@ -624,66 +619,35 @@ namespace PulseForge
 
 	void GLFWWindow::PollGamepads() noexcept
 	{
-		for (uint32_t Slot = 0; Slot < m_GamepadConnected.size(); ++Slot)
+		for (uint32_t Slot = 0; Slot < m_GamepadPresent.size(); ++Slot)
 		{
 			const int Joystick = GLFW_JOYSTICK_1 + static_cast<int>(Slot);
 			const bool Present = glfwJoystickPresent(Joystick) == GLFW_TRUE;
 			const bool Mapped = Present && glfwJoystickIsGamepad(Joystick) == GLFW_TRUE;
-			if (!Present)
+			if (Present && !Mapped && (!m_GamepadPresent[Slot] || m_GamepadMapped[Slot]))
 			{
-				if (m_GamepadConnected[Slot])
-					WindowData.InputCallback({ .Kind = InputEventKind::DeviceDisconnected,
-						.DeviceInstance = MakeGamepadInstance(Slot, m_GamepadGenerations[Slot]) });
-				m_GamepadConnected[Slot] = false;
-				m_GamepadMapped[Slot] = false;
-				m_GamepadAxes[Slot].fill(0.0f);
-				m_GamepadButtons[Slot].fill(false);
-				continue;
+				const char* Name = glfwGetJoystickName(Joystick);
+				PF_CORE_WARN("Gamepad '{0}' is unavailable because GLFW has no supported mapping",
+					Name ? Name : "Unknown controller");
 			}
+			m_GamepadPresent[Slot] = Present;
+			m_GamepadMapped[Slot] = Mapped;
 
-			if (!m_GamepadConnected[Slot] || m_GamepadMapped[Slot] != Mapped)
+			GamepadStateSample Sample;
+			const GamepadStateSample* SamplePointer = nullptr;
+			if (Present && Mapped)
 			{
-				if (m_GamepadConnected[Slot])
-					WindowData.InputCallback({ .Kind = InputEventKind::DeviceDisconnected,
-						.DeviceInstance = MakeGamepadInstance(Slot, m_GamepadGenerations[Slot]) });
-				++m_GamepadGenerations[Slot];
-				m_GamepadConnected[Slot] = true;
-				m_GamepadMapped[Slot] = Mapped;
-				m_GamepadAxes[Slot].fill(0.0f);
-				m_GamepadButtons[Slot].fill(false);
-				if (Mapped)
-					WindowData.InputCallback({ .Kind = InputEventKind::DeviceConnected,
-						.DeviceInstance = MakeGamepadInstance(Slot, m_GamepadGenerations[Slot]) });
-				else
+				GLFWgamepadstate State{};
+				if (glfwGetGamepadState(Joystick, &State) == GLFW_TRUE)
 				{
-					const char* Name = glfwGetJoystickName(Joystick);
-					PF_CORE_WARN("Gamepad '{0}' is unavailable because GLFW has no supported mapping",
-						Name ? Name : "Unknown controller");
+					for (size_t Button = 0; Button < Sample.Buttons.size(); ++Button)
+						Sample.Buttons[Button] = State.buttons[Button] == GLFW_PRESS;
+					for (size_t Axis = 0; Axis < Sample.Axes.size(); ++Axis) Sample.Axes[Axis] = State.axes[Axis];
+					SamplePointer = &Sample;
 				}
 			}
-			if (!Mapped) continue;
-
-			GLFWgamepadstate State{};
-			if (glfwGetGamepadState(Joystick, &State) != GLFW_TRUE) continue;
-			const uint64_t DeviceInstance = MakeGamepadInstance(Slot, m_GamepadGenerations[Slot]);
-			for (uint16_t Button = 0; Button < m_GamepadButtons[Slot].size(); ++Button)
-			{
-				const bool Down = State.buttons[Button] == GLFW_PRESS;
-				if (Down == m_GamepadButtons[Slot][Button]) continue;
-				m_GamepadButtons[Slot][Button] = Down;
-				WindowData.InputCallback({ .Kind = Down ? InputEventKind::Pressed : InputEventKind::Released,
-					.Control = { InputDevice::GamepadButton, Button }, .DeviceInstance = DeviceInstance });
-			}
-			for (uint16_t Axis = 0; Axis < m_GamepadAxes[Slot].size(); ++Axis)
-			{
-				float Value = std::clamp(State.axes[Axis], -1.0f, 1.0f);
-				if (!std::isfinite(Value)) Value = 0.0f;
-				if (Axis >= static_cast<uint16_t>(GamepadAxis::LeftTrigger)) Value = (Value + 1.0f) * 0.5f;
-				if (std::abs(Value - m_GamepadAxes[Slot][Axis]) < 0.0001f) continue;
-				m_GamepadAxes[Slot][Axis] = Value;
-				WindowData.InputCallback({ .Kind = InputEventKind::Value,
-					.Control = { InputDevice::GamepadAxis, Axis }, .DeviceInstance = DeviceInstance, .X = Value });
-			}
+			const GamepadStateEvents Events = m_GamepadStateAdapter.Update(Slot, Present, Mapped, SamplePointer);
+			for (const InputEvent& Event : Events.View()) WindowData.InputCallback(Event);
 		}
 	}
 

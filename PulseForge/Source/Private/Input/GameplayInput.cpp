@@ -22,6 +22,8 @@ namespace PulseForge
 		constexpr size_t MaximumBindingsTotal = 4096;
 		constexpr float MaximumBindingScale = 100.0f;
 		constexpr float ActionActivationEpsilon = 0.0001f;
+		// Rearm analog controls only in the inner half of each binding's dead zone.
+		constexpr float AnalogNeutralRearmFraction = 0.5f;
 
 		struct NamedControl
 		{
@@ -210,6 +212,11 @@ namespace PulseForge
 		{
 			return Control.Device == InputDevice::GamepadAxis || Control.Device == InputDevice::MouseMotion ||
 				Control.Device == InputDevice::MouseWheel;
+		}
+
+		[[nodiscard]] bool IsTransientControl(InputControl Control) noexcept
+		{
+			return Control.Device == InputDevice::MouseMotion || Control.Device == InputDevice::MouseWheel;
 		}
 
 		[[nodiscard]] bool IsContextValid(InputContext Context) noexcept
@@ -834,6 +841,63 @@ namespace PulseForge
 			return { SumX, SumY };
 		}
 
+		[[nodiscard]] bool IsNeutralForRearm(
+			const GameplayActionMap& Map,
+			const PhysicalKey& Key,
+			const std::unordered_map<PhysicalKey, float, PhysicalKeyHash>& Controls) noexcept
+		{
+			const auto Value = Controls.find(Key);
+			if (Value == Controls.end()) return false;
+			bool HasBinding = false;
+			for (const GameplayActionDefinition& Action : Map.Actions)
+				for (const ActionBinding& Binding : Action.Bindings)
+				{
+					if (Binding.Kind == ActionBindingKind::Stick &&
+						(Binding.Primary == Key.Control || Binding.Secondary == Key.Control))
+					{
+						HasBinding = true;
+						const PhysicalKey Primary{ Binding.Primary, Key.Window, Key.DeviceInstance };
+						const PhysicalKey Secondary{ Binding.Secondary, Key.Window, Key.DeviceInstance };
+						const auto X = Controls.find(Primary);
+						const auto Y = Controls.find(Secondary);
+						if (X == Controls.end() || Y == Controls.end()) return false;
+						const float Magnitude = std::sqrt(X->second * X->second + Y->second * Y->second);
+						if (Magnitude > Binding.DeadZone * AnalogNeutralRearmFraction) return false;
+					}
+					else if (Binding.Kind == ActionBindingKind::Axis && Binding.Primary == Key.Control)
+					{
+						HasBinding = true;
+						if (std::abs(Value->second) > Binding.DeadZone * AnalogNeutralRearmFraction) return false;
+					}
+				}
+			return HasBinding ? true : std::abs(Value->second) <= ActionActivationEpsilon;
+		}
+
+		void RearmNeutralAnalogControls(
+			const GameplayActionMap& Map,
+			const std::unordered_map<PhysicalKey, float, PhysicalKeyHash>& Controls,
+			std::unordered_set<PhysicalKey, PhysicalKeyHash>& Quarantined)
+		{
+			for (auto It = Quarantined.begin(); It != Quarantined.end();)
+			{
+				if (It->Control.Device == InputDevice::GamepadAxis && IsNeutralForRearm(Map, *It, Controls))
+					It = Quarantined.erase(It);
+				else ++It;
+			}
+		}
+
+		void DiscardTransientControls(
+			std::unordered_map<PhysicalKey, float, PhysicalKeyHash>& Controls,
+			std::unordered_set<PhysicalKey, PhysicalKeyHash>& Quarantined)
+		{
+			for (auto It = Controls.begin(); It != Controls.end();)
+				if (IsTransientControl(It->first.Control)) It = Controls.erase(It);
+				else ++It;
+			for (auto It = Quarantined.begin(); It != Quarantined.end();)
+				if (IsTransientControl(It->Control)) It = Quarantined.erase(It);
+				else ++It;
+		}
+
 		[[nodiscard]] ActionState EvaluateAction(
 			const GameplayActionDefinition& Action,
 			const InputRoutingState& Routing,
@@ -971,6 +1035,7 @@ namespace PulseForge
 		{
 			for (const auto& [Key, Value] : Controls)
 			{
+				if (IsTransientControl(Key.Control)) continue;
 				if (std::abs(Value) <= ActionActivationEpsilon) continue;
 				bool EligibilityChanged = false;
 				for (uint8_t ContextValue = 0; ContextValue <= static_cast<uint8_t>(InputContext::RuntimeUI); ++ContextValue)
@@ -1068,8 +1133,12 @@ namespace PulseForge
 					Quarantined.insert(Key);
 				if (Quarantined.contains(Key))
 				{
-					Controls.erase(Key);
-					if (std::abs(Value) <= ActionActivationEpsilon) Quarantined.erase(Key);
+					if (Event.Control.Device == InputDevice::GamepadAxis) Controls[Key] = Value;
+					else
+					{
+						Controls.erase(Key);
+						if (std::abs(Value) <= ActionActivationEpsilon) Quarantined.erase(Key);
+					}
 					break;
 				}
 				Controls[Key] = Value;
@@ -1167,7 +1236,8 @@ namespace PulseForge
 			NewPending.reserve(Map.Actions.size());
 			auto NewQuarantined = m_Impl->Quarantined;
 			for (const auto& [Key, Value] : m_Impl->Controls)
-				if (std::abs(Value) > ActionActivationEpsilon) NewQuarantined.insert(Key);
+				if (!IsTransientControl(Key.Control) && std::abs(Value) > ActionActivationEpsilon)
+					NewQuarantined.insert(Key);
 
 			for (const GameplayActionDefinition& Action : Map.Actions)
 			{
@@ -1178,6 +1248,8 @@ namespace PulseForge
 				NewPending.push_back({ Action.Id, ActionValue{ .Type = Action.Type } });
 			}
 
+			DiscardTransientControls(m_Impl->Controls, NewQuarantined);
+			m_Impl->PointerPositions.clear();
 			m_Map = std::move(Map);
 			m_Impl->Quarantined.swap(NewQuarantined);
 			m_Impl->Actions.swap(NewActions);
@@ -1240,8 +1312,9 @@ namespace PulseForge
 			{
 				m_EventOverflowPending = false;
 				for (const auto& [Key, Value] : m_Impl->Controls)
-					if (std::abs(Value) > ActionActivationEpsilon) m_Impl->Quarantined.insert(Key);
-				m_Impl->Controls.clear();
+					if (!IsTransientControl(Key.Control) && std::abs(Value) > ActionActivationEpsilon)
+						m_Impl->Quarantined.insert(Key);
+				DiscardTransientControls(m_Impl->Controls, m_Impl->Quarantined);
 				m_Impl->PointerPositions.clear();
 				m_Events.clear();
 				m_Impl->NewlyConnectedDevices.clear();
@@ -1276,6 +1349,7 @@ namespace PulseForge
 				m_Impl->HasPreviousRouting = true;
 				m_Impl->MapChangedPending = false;
 				m_Impl->ResetPending = false;
+				RearmNeutralAnalogControls(m_Map, m_Impl->Controls, m_Impl->Quarantined);
 				return;
 			}
 			// Motion and wheel values are frame-local. Button and gamepad states persist until release.
@@ -1318,6 +1392,7 @@ namespace PulseForge
 				RecordEventActionTransitions(*m_Impl, m_Map, Routing, IsCancellation);
 			}
 			m_Events.clear();
+			RearmNeutralAnalogControls(m_Map, m_Impl->Controls, m_Impl->Quarantined);
 
 			const auto Current = EvaluateAll(m_Map, Routing, m_Impl->Controls, m_Impl->Quarantined);
 			RecordTransitions(m_Impl->Actions, Current, false);
@@ -1369,8 +1444,9 @@ namespace PulseForge
 		try
 		{
 			for (const auto& [Key, Value] : m_Impl->Controls)
-				if (std::abs(Value) > ActionActivationEpsilon) m_Impl->Quarantined.insert(Key);
-			m_Impl->Controls.clear();
+				if (!IsTransientControl(Key.Control) && std::abs(Value) > ActionActivationEpsilon)
+					m_Impl->Quarantined.insert(Key);
+			DiscardTransientControls(m_Impl->Controls, m_Impl->Quarantined);
 			m_Impl->NewlyConnectedDevices.clear();
 			m_Impl->PointerPositions.clear();
 			m_Impl->HasPreviousRouting = false;
