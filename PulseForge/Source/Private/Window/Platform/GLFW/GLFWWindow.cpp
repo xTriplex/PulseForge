@@ -5,10 +5,13 @@
 #include "Events/MouseEvent.h"
 
 #include <cstdlib>
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 
 #if defined(__APPLE__)
 	#include <dlfcn.h>
@@ -21,6 +24,19 @@
 namespace PulseForge
 {
 	static unsigned int s_GLFWWindowCount = 0;
+	static InputWindowID s_NextInputWindowID = 1;
+	struct SecondaryInputCallbacks
+	{
+		GLFWWindow* Owner = nullptr;
+		InputWindowID ID = 0;
+		GLFWwindowfocusfun Focus = nullptr;
+		GLFWkeyfun Key = nullptr;
+		GLFWcharfun Character = nullptr;
+		GLFWmousebuttonfun MouseButton = nullptr;
+		GLFWscrollfun Scroll = nullptr;
+		GLFWcursorposfun CursorPosition = nullptr;
+	};
+	static std::unordered_map<GLFWwindow*, SecondaryInputCallbacks> s_SecondaryInputCallbacks;
 	#if defined(__APPLE__)
 	static void* s_VulkanLoaderLibrary = nullptr;
 	static PFN_vkGetInstanceProcAddr s_VulkanLoaderProcAddress = nullptr;
@@ -158,6 +174,23 @@ namespace PulseForge
 		PF_CORE_ERROR("GLFW Error ({0}): {1}", Error, Description);
 	}
 
+	static uint16_t ConvertModifiers(int Modifiers) noexcept
+	{
+		uint16_t Result = 0;
+		if (Modifiers & GLFW_MOD_SHIFT) Result |= static_cast<uint16_t>(InputModifier::Shift);
+		if (Modifiers & GLFW_MOD_CONTROL) Result |= static_cast<uint16_t>(InputModifier::Control);
+		if (Modifiers & GLFW_MOD_ALT) Result |= static_cast<uint16_t>(InputModifier::Alt);
+		if (Modifiers & GLFW_MOD_SUPER) Result |= static_cast<uint16_t>(InputModifier::Super);
+		if (Modifiers & GLFW_MOD_CAPS_LOCK) Result |= static_cast<uint16_t>(InputModifier::CapsLock);
+		if (Modifiers & GLFW_MOD_NUM_LOCK) Result |= static_cast<uint16_t>(InputModifier::NumLock);
+		return Result;
+	}
+
+	static uint64_t MakeGamepadInstance(uint32_t Slot, uint64_t Generation) noexcept
+	{
+		return (Generation << 8) | (static_cast<uint64_t>(Slot) + 1);
+	}
+
 	GLFWWindow::GLFWWindow(const WindowProps& Props)
 	{
 		Init(Props);
@@ -168,9 +201,172 @@ namespace PulseForge
 		Shutdown();
 	}
 
+	InputWindowID GLFWWindow::RegisterInputWindow(void* NativeWindow)
+	{
+		GLFWwindow* Window = static_cast<GLFWwindow*>(NativeWindow);
+		if (!Window || Window == m_NativeWindow || s_SecondaryInputCallbacks.contains(Window)) return 0;
+
+		SecondaryInputCallbacks Callbacks;
+		Callbacks.Owner = this;
+		Callbacks.ID = s_NextInputWindowID++;
+		try
+		{
+			s_SecondaryInputCallbacks.emplace(Window, Callbacks);
+			auto& Registered = s_SecondaryInputCallbacks.at(Window);
+			Registered.Focus = glfwSetWindowFocusCallback(Window, &GLFWWindow::SecondaryWindowFocusCallback);
+			Registered.Key = glfwSetKeyCallback(Window, &GLFWWindow::SecondaryWindowKeyCallback);
+			Registered.Character = glfwSetCharCallback(Window, &GLFWWindow::SecondaryWindowCharCallback);
+			Registered.MouseButton = glfwSetMouseButtonCallback(Window, &GLFWWindow::SecondaryWindowMouseButtonCallback);
+			Registered.Scroll = glfwSetScrollCallback(Window, &GLFWWindow::SecondaryWindowScrollCallback);
+			Registered.CursorPosition = glfwSetCursorPosCallback(Window, &GLFWWindow::SecondaryWindowCursorPosCallback);
+			Callbacks = Registered;
+		}
+		catch (...)
+		{
+			const auto Registered = s_SecondaryInputCallbacks.find(Window);
+			if (Registered != s_SecondaryInputCallbacks.end())
+			{
+				glfwSetWindowFocusCallback(Window, Registered->second.Focus);
+				glfwSetKeyCallback(Window, Registered->second.Key);
+				glfwSetCharCallback(Window, Registered->second.Character);
+				glfwSetMouseButtonCallback(Window, Registered->second.MouseButton);
+				glfwSetScrollCallback(Window, Registered->second.Scroll);
+				glfwSetCursorPosCallback(Window, Registered->second.CursorPosition);
+				s_SecondaryInputCallbacks.erase(Registered);
+			}
+			throw;
+		}
+		return Callbacks.ID;
+	}
+
+	void GLFWWindow::UnregisterInputWindow(void* NativeWindow) noexcept
+	{
+		GLFWwindow* Window = static_cast<GLFWwindow*>(NativeWindow);
+		const auto Registered = s_SecondaryInputCallbacks.find(Window);
+		if (Registered == s_SecondaryInputCallbacks.end() || Registered->second.Owner != this) return;
+		const SecondaryInputCallbacks Callbacks = Registered->second;
+		if (Window)
+		{
+			glfwSetWindowFocusCallback(Window, Callbacks.Focus);
+			glfwSetKeyCallback(Window, Callbacks.Key);
+			glfwSetCharCallback(Window, Callbacks.Character);
+			glfwSetMouseButtonCallback(Window, Callbacks.MouseButton);
+			glfwSetScrollCallback(Window, Callbacks.Scroll);
+			glfwSetCursorPosCallback(Window, Callbacks.CursorPosition);
+		}
+		s_SecondaryInputCallbacks.erase(Registered);
+		WindowData.InputCallback({ .Kind = InputEventKind::WindowDestroyed, .Window = Callbacks.ID });
+	}
+
+	void GLFWWindow::SecondaryWindowFocusCallback(GLFWwindow* Window, int Focused)
+	{
+		const auto Found = s_SecondaryInputCallbacks.find(Window);
+		if (Found == s_SecondaryInputCallbacks.end()) return;
+		const SecondaryInputCallbacks Callbacks = Found->second;
+		if (Callbacks.Focus) Callbacks.Focus(Window, Focused);
+		if (Focused)
+		{
+			WindowFocusEvent Event;
+			Event.SetInputWindowID(Callbacks.ID);
+			Callbacks.Owner->WindowData.EventCallback(Event);
+		}
+		else
+		{
+			WindowLostFocusEvent Event;
+			Event.SetInputWindowID(Callbacks.ID);
+			Callbacks.Owner->WindowData.EventCallback(Event);
+		}
+	}
+
+	void GLFWWindow::SecondaryWindowKeyCallback(GLFWwindow* Window, int Key, int Scancode, int Action, int Mods)
+	{
+		const auto Found = s_SecondaryInputCallbacks.find(Window);
+		if (Found == s_SecondaryInputCallbacks.end()) return;
+		const SecondaryInputCallbacks Callbacks = Found->second;
+		if (Callbacks.Key) Callbacks.Key(Window, Key, Scancode, Action, Mods);
+		switch (Action)
+		{
+		case GLFW_PRESS:
+		{
+			KeyPressedEvent Event(Key, 0, ConvertModifiers(Mods));
+			Event.SetInputWindowID(Callbacks.ID);
+			Callbacks.Owner->WindowData.EventCallback(Event);
+			break;
+		}
+		case GLFW_RELEASE:
+		{
+			KeyReleasedEvent Event(Key, ConvertModifiers(Mods));
+			Event.SetInputWindowID(Callbacks.ID);
+			Callbacks.Owner->WindowData.EventCallback(Event);
+			break;
+		}
+		case GLFW_REPEAT:
+		{
+			KeyPressedEvent Event(Key, 1, ConvertModifiers(Mods));
+			Event.SetInputWindowID(Callbacks.ID);
+			Callbacks.Owner->WindowData.EventCallback(Event);
+			break;
+		}
+		}
+	}
+
+	void GLFWWindow::SecondaryWindowCharCallback(GLFWwindow* Window, unsigned int Character)
+	{
+		const auto Found = s_SecondaryInputCallbacks.find(Window);
+		if (Found == s_SecondaryInputCallbacks.end()) return;
+		const SecondaryInputCallbacks Callbacks = Found->second;
+		if (Callbacks.Character) Callbacks.Character(Window, Character);
+		KeyTypedEvent Event(static_cast<int>(Character));
+		Event.SetInputWindowID(Callbacks.ID);
+		Callbacks.Owner->WindowData.EventCallback(Event);
+	}
+
+	void GLFWWindow::SecondaryWindowMouseButtonCallback(GLFWwindow* Window, int Button, int Action, int Mods)
+	{
+		const auto Found = s_SecondaryInputCallbacks.find(Window);
+		if (Found == s_SecondaryInputCallbacks.end()) return;
+		const SecondaryInputCallbacks Callbacks = Found->second;
+		if (Callbacks.MouseButton) Callbacks.MouseButton(Window, Button, Action, Mods);
+		if (Action == GLFW_PRESS)
+		{
+			MouseButtonPressedEvent Event(Button, ConvertModifiers(Mods));
+			Event.SetInputWindowID(Callbacks.ID);
+			Callbacks.Owner->WindowData.EventCallback(Event);
+		}
+		else if (Action == GLFW_RELEASE)
+		{
+			MouseButtonReleasedEvent Event(Button, ConvertModifiers(Mods));
+			Event.SetInputWindowID(Callbacks.ID);
+			Callbacks.Owner->WindowData.EventCallback(Event);
+		}
+	}
+
+	void GLFWWindow::SecondaryWindowScrollCallback(GLFWwindow* Window, double XOffset, double YOffset)
+	{
+		const auto Found = s_SecondaryInputCallbacks.find(Window);
+		if (Found == s_SecondaryInputCallbacks.end()) return;
+		const SecondaryInputCallbacks Callbacks = Found->second;
+		if (Callbacks.Scroll) Callbacks.Scroll(Window, XOffset, YOffset);
+		MouseScrolledEvent Event(static_cast<float>(XOffset), static_cast<float>(YOffset));
+		Event.SetInputWindowID(Callbacks.ID);
+		Callbacks.Owner->WindowData.EventCallback(Event);
+	}
+
+	void GLFWWindow::SecondaryWindowCursorPosCallback(GLFWwindow* Window, double X, double Y)
+	{
+		const auto Found = s_SecondaryInputCallbacks.find(Window);
+		if (Found == s_SecondaryInputCallbacks.end()) return;
+		const SecondaryInputCallbacks Callbacks = Found->second;
+		if (Callbacks.CursorPosition) Callbacks.CursorPosition(Window, X, Y);
+		MouseMovedEvent Event(static_cast<float>(X), static_cast<float>(Y));
+		Event.SetInputWindowID(Callbacks.ID);
+		Callbacks.Owner->WindowData.EventCallback(Event);
+	}
+
 	void GLFWWindow::Init(const WindowProps& Props)
 	{
 		WindowData.Title = Props.m_Title;
+		WindowData.ID = s_NextInputWindowID++;
 		WindowData.Width = Props.m_Width;
 		WindowData.Height = Props.m_Height;
 
@@ -264,12 +460,14 @@ namespace PulseForge
 					if (Focused)
 					{
 						WindowFocusEvent Event;
+						Event.SetInputWindowID(Data.ID);
 						Data.EventCallback(Event);
 					}
 
 					else
 					{
 						WindowLostFocusEvent Event;
+						Event.SetInputWindowID(Data.ID);
 						Data.EventCallback(Event);
 					}
 				});
@@ -293,19 +491,22 @@ namespace PulseForge
 					{
 					case GLFW_PRESS:
 					{
-						KeyPressedEvent Event(Key, 0);
+						KeyPressedEvent Event(Key, 0, ConvertModifiers(Mods));
+						Event.SetInputWindowID(Data.ID);
 						Data.EventCallback(Event);
 						break;
 					}
 					case GLFW_RELEASE:
 					{
-						KeyReleasedEvent Event(Key);
+						KeyReleasedEvent Event(Key, ConvertModifiers(Mods));
+						Event.SetInputWindowID(Data.ID);
 						Data.EventCallback(Event);
 						break;
 					}
 					case GLFW_REPEAT:
 					{
-						KeyPressedEvent Event(Key, 1);
+						KeyPressedEvent Event(Key, 1, ConvertModifiers(Mods));
+						Event.SetInputWindowID(Data.ID);
 						Data.EventCallback(Event);
 						break;
 					}
@@ -317,7 +518,8 @@ namespace PulseForge
 				{
 					FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
 
-					KeyTypedEvent Event(KeyCode);
+					KeyTypedEvent Event(static_cast<int>(KeyCode));
+					Event.SetInputWindowID(Data.ID);
 					Data.EventCallback(Event);
 				});
 
@@ -331,13 +533,15 @@ namespace PulseForge
 					{
 					case GLFW_PRESS:
 					{
-						MouseButtonPressedEvent Event(Button);
+						MouseButtonPressedEvent Event(Button, ConvertModifiers(Mods));
+						Event.SetInputWindowID(Data.ID);
 						Data.EventCallback(Event);
 						break;
 					}
 					case GLFW_RELEASE:
 					{
-						MouseButtonReleasedEvent Event(Button);
+						MouseButtonReleasedEvent Event(Button, ConvertModifiers(Mods));
+						Event.SetInputWindowID(Data.ID);
 						Data.EventCallback(Event);
 						break;
 					}
@@ -350,6 +554,7 @@ namespace PulseForge
 					FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
 
 					MouseScrolledEvent Event((float)XOffset, (float)YOffset);
+					Event.SetInputWindowID(Data.ID);
 					Data.EventCallback(Event);
 				});
 
@@ -359,6 +564,7 @@ namespace PulseForge
 					FWindowData& Data = *(FWindowData*)glfwGetWindowUserPointer(CurrentWindow);
 
 					MouseMovedEvent Event((float)XPos, (float)YPos);
+					Event.SetInputWindowID(Data.ID);
 					Data.EventCallback(Event);
 				});
 		}
@@ -371,6 +577,17 @@ namespace PulseForge
 
 	void GLFWWindow::Shutdown()
 	{
+		if (m_NativeWindow)
+		{
+			for (uint32_t Slot = 0; Slot < m_GamepadConnected.size(); ++Slot)
+			{
+				if (!m_GamepadConnected[Slot]) continue;
+				WindowData.InputCallback({ .Kind = InputEventKind::DeviceDisconnected,
+					.DeviceInstance = MakeGamepadInstance(Slot, m_GamepadGenerations[Slot]) });
+				m_GamepadConnected[Slot] = false;
+			}
+			WindowData.InputCallback({ .Kind = InputEventKind::WindowDestroyed, .Window = WindowData.ID });
+		}
 		if (m_NativeWindow)
 		{
 			glfwDestroyWindow(m_NativeWindow);
@@ -402,6 +619,72 @@ namespace PulseForge
 	void GLFWWindow::PollEvents()
 	{
 		glfwPollEvents();
+		PollGamepads();
+	}
+
+	void GLFWWindow::PollGamepads() noexcept
+	{
+		for (uint32_t Slot = 0; Slot < m_GamepadConnected.size(); ++Slot)
+		{
+			const int Joystick = GLFW_JOYSTICK_1 + static_cast<int>(Slot);
+			const bool Present = glfwJoystickPresent(Joystick) == GLFW_TRUE;
+			const bool Mapped = Present && glfwJoystickIsGamepad(Joystick) == GLFW_TRUE;
+			if (!Present)
+			{
+				if (m_GamepadConnected[Slot])
+					WindowData.InputCallback({ .Kind = InputEventKind::DeviceDisconnected,
+						.DeviceInstance = MakeGamepadInstance(Slot, m_GamepadGenerations[Slot]) });
+				m_GamepadConnected[Slot] = false;
+				m_GamepadMapped[Slot] = false;
+				m_GamepadAxes[Slot].fill(0.0f);
+				m_GamepadButtons[Slot].fill(false);
+				continue;
+			}
+
+			if (!m_GamepadConnected[Slot] || m_GamepadMapped[Slot] != Mapped)
+			{
+				if (m_GamepadConnected[Slot])
+					WindowData.InputCallback({ .Kind = InputEventKind::DeviceDisconnected,
+						.DeviceInstance = MakeGamepadInstance(Slot, m_GamepadGenerations[Slot]) });
+				++m_GamepadGenerations[Slot];
+				m_GamepadConnected[Slot] = true;
+				m_GamepadMapped[Slot] = Mapped;
+				m_GamepadAxes[Slot].fill(0.0f);
+				m_GamepadButtons[Slot].fill(false);
+				if (Mapped)
+					WindowData.InputCallback({ .Kind = InputEventKind::DeviceConnected,
+						.DeviceInstance = MakeGamepadInstance(Slot, m_GamepadGenerations[Slot]) });
+				else
+				{
+					const char* Name = glfwGetJoystickName(Joystick);
+					PF_CORE_WARN("Gamepad '{0}' is unavailable because GLFW has no supported mapping",
+						Name ? Name : "Unknown controller");
+				}
+			}
+			if (!Mapped) continue;
+
+			GLFWgamepadstate State{};
+			if (glfwGetGamepadState(Joystick, &State) != GLFW_TRUE) continue;
+			const uint64_t DeviceInstance = MakeGamepadInstance(Slot, m_GamepadGenerations[Slot]);
+			for (uint16_t Button = 0; Button < m_GamepadButtons[Slot].size(); ++Button)
+			{
+				const bool Down = State.buttons[Button] == GLFW_PRESS;
+				if (Down == m_GamepadButtons[Slot][Button]) continue;
+				m_GamepadButtons[Slot][Button] = Down;
+				WindowData.InputCallback({ .Kind = Down ? InputEventKind::Pressed : InputEventKind::Released,
+					.Control = { InputDevice::GamepadButton, Button }, .DeviceInstance = DeviceInstance });
+			}
+			for (uint16_t Axis = 0; Axis < m_GamepadAxes[Slot].size(); ++Axis)
+			{
+				float Value = std::clamp(State.axes[Axis], -1.0f, 1.0f);
+				if (!std::isfinite(Value)) Value = 0.0f;
+				if (Axis >= static_cast<uint16_t>(GamepadAxis::LeftTrigger)) Value = (Value + 1.0f) * 0.5f;
+				if (std::abs(Value - m_GamepadAxes[Slot][Axis]) < 0.0001f) continue;
+				m_GamepadAxes[Slot][Axis] = Value;
+				WindowData.InputCallback({ .Kind = InputEventKind::Value,
+					.Control = { InputDevice::GamepadAxis, Axis }, .DeviceInstance = DeviceInstance, .X = Value });
+			}
+		}
 	}
 
 	void GLFWWindow::WaitEventsTimeout(double TimeoutSeconds)

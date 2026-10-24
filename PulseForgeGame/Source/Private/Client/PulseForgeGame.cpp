@@ -5,6 +5,7 @@
 #include "Core/EntryPoint.h"
 #include "Core/Log.h"
 #include "Core/PlatformServices.h"
+#include "Input/GameplayInputStore.h"
 #include "Renderer/SceneRenderer.h"
 #include "Runtime/PlayerSession.h"
 #include "Scene/Scene.h"
@@ -170,7 +171,29 @@ public:
 			m_PlayerSmokeExitAfterRender = std::string_view(Smoke) == "1";
 #endif
 		PulseForge::SceneRuntimeServices Services{ .InputState = &PulseForge::Application::Get().GetInput(),
+			.GameplayInput = &PulseForge::Application::Get().GetGameplayInput(),
 			.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder() };
+		auto& Application = PulseForge::Application::Get();
+		auto ActionProject = PulseForge::Project::Open(m_Configuration.ProjectFile);
+		if (!ActionProject) throw std::runtime_error("Could not load player input project settings: " + ActionProject.error().Message);
+		auto UserDataRoot = PulseForge::Platform::GetUserDataDirectory();
+		if (UserDataRoot)
+		{
+			auto Loaded = PulseForge::LoadGameplayInputMap(
+				ActionProject->GetRootPath(), ActionProject->GetDescription().ID, *UserDataRoot);
+			if (!Loaded) throw std::runtime_error("Could not load player input map: " + Loaded.error().Message);
+			for (const std::string& Warning : Loaded->Warnings) PF_WARN("Player input map: {}", Warning);
+			if (auto Applied = Application.GetGameplayInput().SetActionMap(std::move(Loaded->ActionMap)); !Applied)
+				throw std::runtime_error("Could not apply player input map: " + Applied.error().Message);
+		}
+		else
+		{
+			PF_WARN("Player input overrides are unavailable: {}; using project-authored defaults", UserDataRoot.error().Message);
+			auto Defaults = PulseForge::LoadProjectGameplayActionMap(ActionProject->GetRootPath());
+			if (!Defaults) throw std::runtime_error("Could not load player input defaults: " + Defaults.error().Message);
+			if (auto Applied = Application.GetGameplayInput().SetActionMap(std::move(*Defaults)); !Applied)
+				throw std::runtime_error("Could not apply player input defaults: " + Applied.error().Message);
+		}
 		m_Session = std::make_unique<PulseForge::PlayerSession>(m_Configuration.ProjectFile, PulseForge::SceneRuntimeDesc{}, Services);
 		if (auto Started = m_Session->Start(m_Configuration.StartupScene); !Started)
 			throw std::runtime_error("Could not start player session: " + Started.error().Message);
@@ -186,6 +209,16 @@ public:
 
 	void OnUpdate(PulseForge::Timestep DeltaTime) override
 	{
+		auto& Application = PulseForge::Application::Get();
+		PulseForge::InputRoutingState Routing;
+		Routing.FocusedWindow = Application.IsMainWindowFocused() ? Application.GetInputWindowID() : 0;
+		if (m_Session && Routing.FocusedWindow != 0)
+		{
+			Routing.Contexts[Routing.ContextCount++] = { .Context = PulseForge::InputContext::Gameplay,
+				.Consumes = PulseForge::InputDeviceMask::None, .OwnerWindow = Routing.FocusedWindow, .Active = true };
+		}
+		Application.GetGameplayInput().PublishFrame(Routing);
+
 		if (m_EditorShutdownChannel.ConsumeRequest())
 		{
 			m_EditorShutdownRequested = true;

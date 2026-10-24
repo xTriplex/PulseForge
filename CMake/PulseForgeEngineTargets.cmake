@@ -1,3 +1,13 @@
+add_library(PulseForgeInput STATIC
+	PulseForge/Source/Private/Input/GameplayInput.cpp
+	PulseForge/Source/Private/Input/GameplayInputStore.cpp
+)
+target_include_directories(PulseForgeInput
+	PUBLIC PulseForge/Source/Public
+	PRIVATE PulseForge/Vendor/json/include
+)
+target_link_libraries(PulseForgeInput PUBLIC PulseForgeCore)
+
 add_library(PulseForgeWindow STATIC
 	PulseForge/Source/Private/Window/Window.cpp
 	PulseForge/Source/Private/Window/Platform/GLFW/GLFWWindow.cpp
@@ -7,7 +17,7 @@ target_include_directories(PulseForgeWindow
 	PRIVATE PulseForge/Vendor/Glfw/include
 )
 target_compile_definitions(PulseForgeWindow PRIVATE ${PULSEFORGE_PLATFORM_COMPILE_DEFINITION} GLFW_INCLUDE_NONE)
-target_link_libraries(PulseForgeWindow PUBLIC PulseForgeCore PRIVATE glfw spdlog::spdlog)
+target_link_libraries(PulseForgeWindow PUBLIC PulseForgeCore PulseForgeInput PRIVATE glfw spdlog::spdlog)
 if(PULSEFORGE_PLATFORM_MACOS)
 	target_link_libraries(PulseForgeWindow PRIVATE Vulkan-Headers)
 endif()
@@ -114,7 +124,7 @@ target_include_directories(PulseForgeScripting
 target_compile_definitions(PulseForgeScripting PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_link_libraries(PulseForgeScripting
 	PUBLIC PulseForgeAssetCatalog
-	PRIVATE PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeCore PulseForgeLua spdlog::spdlog
+	PRIVATE PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeInput PulseForgeCore PulseForgeLua spdlog::spdlog
 )
 add_library(PulseForgeRuntime STATIC
 	PulseForge/Source/Private/Runtime/SceneRuntime.cpp
@@ -123,7 +133,7 @@ add_library(PulseForgeRuntime STATIC
 target_include_directories(PulseForgeRuntime PUBLIC PulseForge/Source/Public)
 target_link_libraries(PulseForgeRuntime
 	PUBLIC PulseForgeAudio PulseForgePhysics PulseForgeScripting
-	PRIVATE PulseForgeAssetServices PulseForgeAudioAssets PulseForgeAudioScene PulseForgeScene
+	PRIVATE PulseForgeAssetServices PulseForgeAudioAssets PulseForgeAudioScene PulseForgeScene PulseForgeInput
 )
 add_library(PulseForgeRenderer STATIC
 	PulseForge/Source/Private/Renderer/OpenGLRenderer.cpp
@@ -177,7 +187,7 @@ add_library(PulseForgeApplication STATIC PulseForge/Source/Private/Core/Applicat
 target_include_directories(PulseForgeApplication
 	PUBLIC PulseForge/Source/Public
 )
-target_link_libraries(PulseForgeApplication PUBLIC PulseForgeCore PulseForgeRenderer PulseForgeWindow)
+target_link_libraries(PulseForgeApplication PUBLIC PulseForgeCore PulseForgeInput PulseForgeRenderer PulseForgeWindow)
 add_library(PulseForgeSceneRenderer STATIC
 	PulseForge/Source/Private/Renderer/AssetCache/MeshAssetCache.cpp
 	PulseForge/Source/Private/Renderer/AssetCache/TextureAssetCache.cpp

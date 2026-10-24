@@ -146,10 +146,14 @@ if(BUILD_TESTING)
 
 	add_executable(PulseForgeScriptingRuntimeTests
 		Tests/PulseForgeScriptingRuntimeTests.cpp
+		Tests/GameplayInputTests.cpp
+		Tests/GameplayInputStoreTests.cpp
 		Tests/ScriptRuntimeTests.cpp
 	)
 	target_include_directories(PulseForgeScriptingRuntimeTests PRIVATE Tests PulseForge/Vendor/json/include)
-	target_link_libraries(PulseForgeScriptingRuntimeTests PRIVATE PulseForgeRuntime PulseForgeAssetServices)
+	target_compile_definitions(PulseForgeScriptingRuntimeTests PRIVATE
+		PULSEFORGE_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+	target_link_libraries(PulseForgeScriptingRuntimeTests PRIVATE PulseForgeRuntime PulseForgeAssetServices PulseForgeInput)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeScriptingRuntimeTests PulseForgePublicHeaderChecks)
 	endif()

@@ -1,5 +1,9 @@
 #include "Core/Application.h"
 #include "Renderer/RendererBackend.h"
+#include "Events/KeyEvent.h"
+#include "Events/MouseEvent.h"
+#include "Input/GameplayInput.h"
+#include "Core/Log.h"
 
 #include <chrono>
 #include <functional>
@@ -30,6 +34,10 @@ namespace PulseForge
 		try
 		{
 			m_Window->SetEventCallback(std::bind(&Application::OnEvent, this, std::placeholders::_1));
+			m_Window->SetInputEventCallback([this](const InputEvent& Event)
+			{
+				QueueGameplayInputEvent(Event);
+			});
 		}
 		catch (...)
 		{
@@ -248,6 +256,71 @@ namespace PulseForge
 	void Application::OnEvent(Event& E)
 	{
 		m_Input.OnEvent(E);
+		const InputWindowID WindowID = E.GetInputWindowID();
+		switch (E.GetEventType())
+		{
+			case EEventType::KeyPressed:
+			{
+				const auto& Key = static_cast<const KeyPressedEvent&>(E);
+				if (Key.GetRepeatCount() == 0 && Key.GetKeyCode() > 0)
+					QueueGameplayInputEvent({ .Kind = InputEventKind::Pressed,
+						.Control = { InputDevice::Keyboard, static_cast<uint16_t>(Key.GetKeyCode()) },
+						.Window = WindowID, .Modifiers = Key.GetModifiers() });
+				break;
+			}
+			case EEventType::KeyReleased:
+			{
+				const auto& Key = static_cast<const KeyReleasedEvent&>(E);
+				if (Key.GetKeyCode() > 0)
+					QueueGameplayInputEvent({ .Kind = InputEventKind::Released,
+						.Control = { InputDevice::Keyboard, static_cast<uint16_t>(Key.GetKeyCode()) },
+						.Window = WindowID, .Modifiers = Key.GetModifiers() });
+				break;
+			}
+			case EEventType::MouseButtonPressed:
+			{
+				const auto& Button = static_cast<const MouseButtonPressedEvent&>(E);
+				if (Button.GetMouseButton() >= 0)
+					QueueGameplayInputEvent({ .Kind = InputEventKind::Pressed,
+						.Control = { InputDevice::MouseButton, static_cast<uint16_t>(Button.GetMouseButton()) },
+						.Window = WindowID, .Modifiers = Button.GetModifiers() });
+				break;
+			}
+			case EEventType::MouseButtonReleased:
+			{
+				const auto& Button = static_cast<const MouseButtonReleasedEvent&>(E);
+				if (Button.GetMouseButton() >= 0)
+					QueueGameplayInputEvent({ .Kind = InputEventKind::Released,
+						.Control = { InputDevice::MouseButton, static_cast<uint16_t>(Button.GetMouseButton()) },
+						.Window = WindowID, .Modifiers = Button.GetModifiers() });
+				break;
+			}
+			case EEventType::MouseMoved:
+			{
+				const auto& Pointer = static_cast<const MouseMovedEvent&>(E);
+				QueueGameplayInputEvent({ .Kind = InputEventKind::PointerMoved,
+					.Control = { InputDevice::MouseMotion, 0 }, .Window = WindowID,
+					.X = Pointer.GetX(), .Y = Pointer.GetY() });
+				break;
+			}
+			case EEventType::MouseScrolled:
+			{
+				const auto& Scroll = static_cast<const MouseScrolledEvent&>(E);
+				QueueGameplayInputEvent({ .Kind = InputEventKind::Scrolled,
+					.Control = { InputDevice::MouseWheel, 0 }, .Window = WindowID,
+					.X = Scroll.GetXOffset(), .Y = Scroll.GetYOffset() });
+				break;
+			}
+			case EEventType::WindowLostFocus:
+				if (WindowID == m_Window->GetInputWindowID()) m_MainWindowFocused = false;
+				QueueGameplayInputEvent({ .Kind = InputEventKind::FocusLost, .Window = WindowID });
+				break;
+			case EEventType::WindowFocus:
+				if (WindowID == m_Window->GetInputWindowID()) m_MainWindowFocused = true;
+				break;
+			default:
+				break;
+		}
 
 		EventDispatcher Dispatcher(E);
 
@@ -255,6 +328,16 @@ namespace PulseForge
 
 		if (!E.bHandled)
 			Dispatcher.Dispatch<WindowCloseEvent>(std::bind(&Application::OnWindowClose, this, std::placeholders::_1));
+	}
+
+	void Application::QueueGameplayInputEvent(const InputEvent& Event) noexcept
+	{
+		(void)m_GameplayInput.QueueEvent(Event);
+		if (m_GameplayInput.DidOverflowEvents() && !m_GameplayInputOverflowLogged)
+		{
+			m_GameplayInputOverflowLogged = true;
+			PF_CORE_ERROR("Gameplay input event queue overflowed; held actions were safely canceled");
+		}
 	}
 
 	Layer& Application::PushLayer(std::unique_ptr<Layer> Layer)

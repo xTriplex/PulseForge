@@ -16,5 +16,8 @@ namespace PulseForge::Platform
 	[[nodiscard]] PathResult GetExecutablePath();
 	[[nodiscard]] PathResult GetResourceDirectory();
 	[[nodiscard]] PathResult GetUserDataDirectory();
+	[[nodiscard]] std::expected<void, PathError> ReplaceFileAtomically(
+		const std::filesystem::path& TemporaryPath,
+		const std::filesystem::path& DestinationPath);
 	void DebugBreak() noexcept;
 }

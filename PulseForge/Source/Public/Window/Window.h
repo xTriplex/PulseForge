@@ -2,6 +2,7 @@
 
 #include "Core/Core.h"
 #include "Events/Event.h"
+#include "Input/GameplayInput.h"
 #include <memory>
 #include <functional>
 #include <string>
@@ -60,6 +61,7 @@ namespace PulseForge
 	{
 	public:
 		using EventCallbackFn = std::function<void(Event&)>;
+		using InputCallbackFn = std::function<void(const InputEvent&)>;
 
 		virtual ~Window() = default;
 
@@ -72,6 +74,8 @@ namespace PulseForge
 		virtual std::pair<float, float> GetContentScale() const = 0;
 
 		virtual void SetEventCallback(const EventCallbackFn& Callback) = 0;
+		virtual void SetInputEventCallback(const InputCallbackFn& Callback) = 0;
+		[[nodiscard]] virtual InputWindowID GetInputWindowID() const noexcept = 0;
 
 		virtual void* GetNativeWindow() const = 0;
 
