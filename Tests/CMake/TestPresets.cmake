@@ -5,6 +5,26 @@ if(NOT PULSEFORGE_PRESETS_VERSION EQUAL 5)
 	message(FATAL_ERROR "PulseForge presets must retain schema version 5.")
 endif()
 
+file(READ "${PULSEFORGE_SOURCE_ROOT}/CMakeSettings.json" PULSEFORGE_CMAKE_SETTINGS_JSON)
+string(JSON PULSEFORGE_CMAKE_SETTINGS_COUNT LENGTH "${PULSEFORGE_CMAKE_SETTINGS_JSON}" configurations)
+if(NOT PULSEFORGE_CMAKE_SETTINGS_COUNT EQUAL 3)
+	message(FATAL_ERROR "CMakeSettings.json must retain its three user configurations.")
+endif()
+math(EXPR PULSEFORGE_CMAKE_SETTINGS_LAST_INDEX "${PULSEFORGE_CMAKE_SETTINGS_COUNT} - 1")
+foreach(PULSEFORGE_INDEX RANGE 0 ${PULSEFORGE_CMAKE_SETTINGS_LAST_INDEX})
+	string(JSON PULSEFORGE_SETTINGS_NAME GET "${PULSEFORGE_CMAKE_SETTINGS_JSON}" configurations ${PULSEFORGE_INDEX} name)
+	string(JSON PULSEFORGE_SETTINGS_BUILD_ROOT GET "${PULSEFORGE_CMAKE_SETTINGS_JSON}"
+		configurations ${PULSEFORGE_INDEX} buildRoot)
+	string(JSON PULSEFORGE_SETTINGS_INSTALL_ROOT GET "${PULSEFORGE_CMAKE_SETTINGS_JSON}"
+		configurations ${PULSEFORGE_INDEX} installRoot)
+	string(REPLACE "\\" "/" PULSEFORGE_SETTINGS_BUILD_ROOT_NORMALIZED "${PULSEFORGE_SETTINGS_BUILD_ROOT}")
+	string(REPLACE "\\" "/" PULSEFORGE_SETTINGS_INSTALL_ROOT_NORMALIZED "${PULSEFORGE_SETTINGS_INSTALL_ROOT}")
+	if(NOT PULSEFORGE_SETTINGS_BUILD_ROOT_NORMALIZED STREQUAL "\${projectDir}/Out/Build/\${name}" OR
+		NOT PULSEFORGE_SETTINGS_INSTALL_ROOT_NORMALIZED STREQUAL "\${projectDir}/Out/Install/\${name}")
+		message(FATAL_ERROR "CMakeSettings configuration '${PULSEFORGE_SETTINGS_NAME}' must use Out/Build and Out/Install.")
+	endif()
+endforeach()
+
 function(pulseforge_find_preset_index OutputVariable PresetArray PresetName)
 	string(JSON PULSEFORGE_PRESET_COUNT LENGTH "${PULSEFORGE_PRESETS_JSON}" "${PresetArray}")
 	math(EXPR PULSEFORGE_PRESET_LAST_INDEX "${PULSEFORGE_PRESET_COUNT} - 1")
@@ -52,8 +72,8 @@ string(JSON PULSEFORGE_WINDOWS_EDITOR_HOST_OS GET "${PULSEFORGE_PRESETS_JSON}"
 if(NOT PULSEFORGE_WINDOWS_EDITOR_GENERATOR STREQUAL "Visual Studio 17 2022")
 	message(FATAL_ERROR "Windows-Editor must use the existing Visual Studio multi-config generator.")
 endif()
-if(NOT PULSEFORGE_WINDOWS_EDITOR_BINARY_DIR STREQUAL "\${sourceDir}/Build/CMakePresets/windows-editor")
-	message(FATAL_ERROR "Windows-Editor must preserve its existing shared build directory.")
+if(NOT PULSEFORGE_WINDOWS_EDITOR_BINARY_DIR STREQUAL "\${sourceDir}/Build/CMakePresets/WindowsEditor")
+	message(FATAL_ERROR "Windows-Editor must use the canonical shared build directory.")
 endif()
 if(NOT PULSEFORGE_WINDOWS_EDITOR_DISPLAY_NAME STREQUAL "Windows Editor")
 	message(FATAL_ERROR "Windows-Editor must have a coherent capitalized display name.")
@@ -77,7 +97,7 @@ string(JSON PULSEFORGE_WINDOWS_CORE_HOST_OS GET "${PULSEFORGE_PRESETS_JSON}"
 	configurePresets ${PULSEFORGE_WINDOWS_CORE_INDEX} vendor
 	"microsoft.com/VisualStudioSettings/CMake/1.0" hostOS 0)
 if(NOT PULSEFORGE_WINDOWS_CORE_PARENT STREQUAL "Windows-Editor" OR
-	NOT PULSEFORGE_WINDOWS_CORE_BINARY_DIR STREQUAL "\${sourceDir}/Build/CMakePresets/windows-core" OR
+	NOT PULSEFORGE_WINDOWS_CORE_BINARY_DIR STREQUAL "\${sourceDir}/Build/CMakePresets/WindowsCore" OR
 	NOT PULSEFORGE_WINDOWS_CORE_HOST_OS STREQUAL "Windows")
 	message(FATAL_ERROR "Windows-Core must preserve its parent, build directory and host filter.")
 endif()
@@ -98,7 +118,7 @@ string(JSON PULSEFORGE_LINUX_CORE_HOST_OS GET "${PULSEFORGE_PRESETS_JSON}"
 string(JSON PULSEFORGE_LINUX_CORE_BUILD_TYPE GET "${PULSEFORGE_PRESETS_JSON}"
 	configurePresets ${PULSEFORGE_LINUX_CORE_INDEX} cacheVariables CMAKE_BUILD_TYPE)
 if(NOT PULSEFORGE_LINUX_CORE_GENERATOR STREQUAL "Unix Makefiles" OR
-	NOT PULSEFORGE_LINUX_CORE_BINARY_DIR STREQUAL "\${sourceDir}/Build/CMakePresets/linux-core" OR
+	NOT PULSEFORGE_LINUX_CORE_BINARY_DIR STREQUAL "\${sourceDir}/Build/CMakePresets/LinuxCore" OR
 	NOT PULSEFORGE_LINUX_CORE_HOST_OS STREQUAL "Linux" OR
 	NOT PULSEFORGE_LINUX_CORE_BUILD_TYPE STREQUAL "Debug")
 	message(FATAL_ERROR "Linux-Core must preserve its Linux configure behavior and binary directory.")

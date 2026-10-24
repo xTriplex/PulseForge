@@ -168,7 +168,9 @@ if(BUILD_TESTING)
 		add_executable(PulseForgeEditorPlayerProcessTests
 			Tests/EditorPlayerProcessTestMain.cpp
 			PulseForgeEditor/Source/Private/EditorPlayerProcess.cpp
+			PulseForgeEditor/Source/Private/EditorPlayerExecutablePath.cpp
 		)
+		target_compile_definitions(PulseForgeEditorPlayerProcessTests PRIVATE ${PULSEFORGE_PLATFORM_COMPILE_DEFINITION})
 		if(WIN32)
 			target_sources(PulseForgeEditorPlayerProcessTests PRIVATE
 				PulseForgeEditor/Source/Private/Platform/Windows/EditorPlayerProcess.cpp)

@@ -63,6 +63,7 @@
 #include "Editor/EditorApplicationFactory.h"
 #include "Editor/EditorPlatformServices.h"
 #include "Editor/EditorPlayerProcess.h"
+#include "Editor/EditorPlayerExecutablePath.h"
 #include "Editor/EditorInteractionPolicy.h"
 #include "Editor/EditorGlfwViewportPolicy.h"
 #include "Editor/EditorMaterialEditorPolicy.h"
@@ -7623,27 +7624,23 @@ namespace
 				SetError("Could not resolve the editor executable path: " + EditorExecutable.error().Message);
 				return;
 			}
-			std::filesystem::path PlayerExecutable;
-#if defined(PF_PLATFORM_MACOS)
-			const std::filesystem::path OutputRoot = EditorExecutable->parent_path().parent_path().parent_path().parent_path();
-			PlayerExecutable = OutputRoot / "PulseForgeGame.app" / "Contents" / "MacOS" / "PulseForgeGame";
-#else
-			PlayerExecutable = EditorExecutable->parent_path() /
-#if defined(PF_PLATFORM_WINDOWS)
-							   "PulseForgeGame.exe";
-#else
-							   "PulseForgeGame";
-#endif
-#endif
-			std::error_code PathError;
-			if (!std::filesystem::is_regular_file(PlayerExecutable, PathError) || PathError)
+			auto PlayerExecutable = PulseForgeEditor::ResolveEditorPlayerExecutablePath(
+				*EditorExecutable, PulseForgeEditor::GetEditorPlayerPlatform());
+			if (!PlayerExecutable)
 			{
-				SetError("Could not find the PulseForgeGame executable beside this editor build: " + PathToUtf8(PlayerExecutable));
+				SetError("Could not resolve the PulseForgeGame path: " + PlayerExecutable.error());
+				return;
+			}
+			std::error_code PathError;
+			if (!std::filesystem::is_regular_file(*PlayerExecutable, PathError) || PathError)
+			{
+				SetError("Could not find the matching PulseForgeGame at " + PathToUtf8(*PlayerExecutable) +
+						 ". Build the PulseForgeGame target in the same configuration as this editor.");
 				return;
 			}
 
 			PulseForgeEditor::EditorPlayerLaunchSpec Specification;
-			Specification.Executable = std::move(PlayerExecutable);
+			Specification.Executable = std::move(*PlayerExecutable);
 			Specification.WorkingDirectory = m_Project->GetRootPath();
 			Specification.Arguments = { "--project", PathToUtf8(m_Project->GetFilePath()) };
 			Specification.Arguments.push_back("--editor-control-stdin");

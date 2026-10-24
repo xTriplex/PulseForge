@@ -43,6 +43,7 @@ namespace
 		using PulseForge::LogLevel;
 		using PulseForgeEditor::EditorConsoleSeverity;
 		using PulseForgeEditor::Detail::ConvertConsoleSeverity;
+		using PulseForgeEditor::Detail::ConsoleSeverityLabel;
 
 		PF_CHECK(Tests, ConvertConsoleSeverity(LogLevel::Trace) == EditorConsoleSeverity::Trace);
 		PF_CHECK(Tests, ConvertConsoleSeverity(LogLevel::Debug) == EditorConsoleSeverity::Debug);
@@ -52,6 +53,14 @@ namespace
 		PF_CHECK(Tests, ConvertConsoleSeverity(LogLevel::Critical) == EditorConsoleSeverity::Critical);
 		PF_CHECK(Tests, ConvertConsoleSeverity(LogLevel::Unknown) == EditorConsoleSeverity::Unknown);
 		PF_CHECK(Tests, ConvertConsoleSeverity(static_cast<LogLevel>(127)) == EditorConsoleSeverity::Unknown);
+		PF_CHECK(Tests, std::string_view(ConsoleSeverityLabel(EditorConsoleSeverity::Trace)) == "TRACE");
+		PF_CHECK(Tests, std::string_view(ConsoleSeverityLabel(EditorConsoleSeverity::Debug)) == "DEBUG");
+		PF_CHECK(Tests, std::string_view(ConsoleSeverityLabel(EditorConsoleSeverity::Info)) == "INFO");
+		PF_CHECK(Tests, std::string_view(ConsoleSeverityLabel(EditorConsoleSeverity::Warning)) == "WARNING");
+		PF_CHECK(Tests, std::string_view(ConsoleSeverityLabel(EditorConsoleSeverity::Error)) == "ERROR");
+		PF_CHECK(Tests, std::string_view(ConsoleSeverityLabel(EditorConsoleSeverity::Critical)) == "CRITICAL");
+		PF_CHECK(Tests, std::string_view(ConsoleSeverityLabel(EditorConsoleSeverity::Unknown)) == "UNKNOWN");
+		PF_CHECK(Tests, std::string_view(ConsoleSeverityLabel(static_cast<EditorConsoleSeverity>(127))) == "UNKNOWN");
 	}
 
 	void TestEditorContentBrowserState(TestRunner& Tests)
@@ -247,41 +256,41 @@ namespace
 		using PulseForgeEditor::FormatConsoleEntry;
 		using PulseForgeEditor::FormatConsoleHistory;
 
-		PF_CHECK(Tests, FormatConsoleEntry({ "info", "PULSEFORGE", "Renderer ready" }) == "[info] [PULSEFORGE] Renderer ready");
-		PF_CHECK(Tests, FormatConsoleEntry({ "warning", "APP", "Slow asset" }) == "[warning] [APP] Slow asset");
-		PF_CHECK(Tests, FormatConsoleEntry({ "error", "PULSEFORGE", "Failed" }) == "[error] [PULSEFORGE] Failed");
-		PF_CHECK(Tests, FormatConsoleEntry({ "critical", "APP", "Fatal" }) == "[critical] [APP] Fatal");
-		PF_CHECK(Tests, FormatConsoleEntry({ "trace", "APP", "Trace" }) == "[trace] [APP] Trace");
-		PF_CHECK(Tests, FormatConsoleEntry({ "debug", "APP", "Debug" }) == "[debug] [APP] Debug");
-		PF_CHECK(Tests, FormatConsoleEntry({ {}, "APP", "Unknown severity" }) == "[unknown] [APP] Unknown severity");
-		PF_CHECK(Tests, FormatConsoleEntry({ "info", {}, "No logger" }) == "[info] No logger");
-		PF_CHECK(Tests, FormatConsoleEntry({ "info", "APP", {} }) == "[info] [APP]");
-		PF_CHECK(Tests, FormatConsoleEntry({ "info", {}, {} }) == "[info]");
-		PF_CHECK(Tests, FormatConsoleEntry({ "info", "APP", "UTF-8: \xE2\x98\x83 and punctuation !?[]" }) ==
-							"[info] [APP] UTF-8: \xE2\x98\x83 and punctuation !?[]");
-		PF_CHECK(Tests, FormatConsoleEntry({ "debug", "APP", "tabs\tremain" }) == "[debug] [APP] tabs\tremain");
+		PF_CHECK(Tests, FormatConsoleEntry({ "INFO", "PULSEFORGE", "Renderer ready" }) == "[INFO] [PULSEFORGE] Renderer ready");
+		PF_CHECK(Tests, FormatConsoleEntry({ "WARNING", "APP", "Slow asset" }) == "[WARNING] [APP] Slow asset");
+		PF_CHECK(Tests, FormatConsoleEntry({ "ERROR", "PULSEFORGE", "Failed" }) == "[ERROR] [PULSEFORGE] Failed");
+		PF_CHECK(Tests, FormatConsoleEntry({ "CRITICAL", "APP", "Fatal" }) == "[CRITICAL] [APP] Fatal");
+		PF_CHECK(Tests, FormatConsoleEntry({ "TRACE", "APP", "Trace" }) == "[TRACE] [APP] Trace");
+		PF_CHECK(Tests, FormatConsoleEntry({ "DEBUG", "APP", "Debug" }) == "[DEBUG] [APP] Debug");
+		PF_CHECK(Tests, FormatConsoleEntry({ {}, "APP", "Unknown severity" }) == "[UNKNOWN] [APP] Unknown severity");
+		PF_CHECK(Tests, FormatConsoleEntry({ "INFO", {}, "No logger" }) == "[INFO] No logger");
+		PF_CHECK(Tests, FormatConsoleEntry({ "INFO", "APP", {} }) == "[INFO] [APP]");
+		PF_CHECK(Tests, FormatConsoleEntry({ "INFO", {}, {} }) == "[INFO]");
+		PF_CHECK(Tests, FormatConsoleEntry({ "INFO", "APP", "UTF-8: \xE2\x98\x83 and punctuation !?[]" }) ==
+							"[INFO] [APP] UTF-8: \xE2\x98\x83 and punctuation !?[]");
+		PF_CHECK(Tests, FormatConsoleEntry({ "DEBUG", "APP", "tabs\tremain" }) == "[DEBUG] [APP] tabs\tremain");
 
 		const std::string TruncatedPayload = std::string(8192, 'x') + " [truncated]";
-		PF_CHECK(Tests, FormatConsoleEntry({ "warning", "APP", TruncatedPayload }) == "[warning] [APP] " + TruncatedPayload);
+		PF_CHECK(Tests, FormatConsoleEntry({ "WARNING", "APP", TruncatedPayload }) == "[WARNING] [APP] " + TruncatedPayload);
 
 		PF_CHECK(Tests, FormatConsoleHistory({}).empty());
-		const std::array Single = { ConsoleEntryView{ "info", "PULSEFORGE", "Only entry" } };
-		PF_CHECK(Tests, FormatConsoleHistory(Single) == "[info] [PULSEFORGE] Only entry");
-		const std::array Ordered = { ConsoleEntryView{ "info", "PULSEFORGE", "First" }, ConsoleEntryView{ "warning", "APP", "Second" },
-			ConsoleEntryView{ "error", "PULSEFORGE", "Third" } };
+		const std::array Single = { ConsoleEntryView{ "INFO", "PULSEFORGE", "Only entry" } };
+		PF_CHECK(Tests, FormatConsoleHistory(Single) == "[INFO] [PULSEFORGE] Only entry");
+		const std::array Ordered = { ConsoleEntryView{ "INFO", "PULSEFORGE", "First" }, ConsoleEntryView{ "WARNING", "APP", "Second" },
+			ConsoleEntryView{ "ERROR", "PULSEFORGE", "Third" } };
 		const std::string FormattedHistory = FormatConsoleHistory(Ordered);
-		PF_CHECK(Tests, FormattedHistory == "[info] [PULSEFORGE] First\n[warning] [APP] Second\n[error] [PULSEFORGE] Third");
+		PF_CHECK(Tests, FormattedHistory == "[INFO] [PULSEFORGE] First\n[WARNING] [APP] Second\n[ERROR] [PULSEFORGE] Third");
 		PF_CHECK(Tests, !FormattedHistory.empty() && FormattedHistory.back() != '\n');
 		PF_CHECK(Tests, std::count(FormattedHistory.begin(), FormattedHistory.end(), '\n') == 2);
 
 		std::vector<ConsoleEntryView> CapacityBoundary;
 		CapacityBoundary.reserve(2000);
 		for (size_t Index = 0; Index < 2000; ++Index)
-			CapacityBoundary.push_back({ "info", "APP", "retained" });
+			CapacityBoundary.push_back({ "INFO", "APP", "retained" });
 		const std::string CapacityHistory = FormatConsoleHistory(CapacityBoundary);
 		PF_CHECK(Tests, std::count(CapacityHistory.begin(), CapacityHistory.end(), '\n') == 1999);
-		PF_CHECK(Tests, CapacityHistory.starts_with("[info] [APP] retained\n"));
-		PF_CHECK(Tests, CapacityHistory.ends_with("[info] [APP] retained"));
+		PF_CHECK(Tests, CapacityHistory.starts_with("[INFO] [APP] retained\n"));
+		PF_CHECK(Tests, CapacityHistory.ends_with("[INFO] [APP] retained"));
 	}
 
 } // namespace

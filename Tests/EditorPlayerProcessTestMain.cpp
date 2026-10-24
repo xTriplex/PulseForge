@@ -1,4 +1,5 @@
 #include "Editor/EditorPlayerProcess.h"
+#include "Editor/EditorPlayerExecutablePath.h"
 #include "TestSupport.h"
 
 #include <chrono>
@@ -54,6 +55,41 @@ namespace
 		std::cout << "PLAYER-STDOUT-OK\nPLAYER-CWD:" << PathToUtf8(WorkingDirectory) << '\n' << std::flush;
 		std::cerr << "PLAYER-STDERR-OK\n" << std::flush;
 		std::cout << "PLAYER-FINAL-NO-NEWLINE" << std::flush;
+	}
+
+	void TestEditorPlayerExecutablePath(TestRunner& Tests)
+	{
+		const std::filesystem::path OutputDirectory = std::filesystem::temp_directory_path() / "PulseForge Player Ω";
+		const std::filesystem::path EditorExecutable = OutputDirectory / "PulseForgeEditor.exe";
+		auto WindowsPath = PulseForgeEditor::ResolveEditorPlayerExecutablePath(
+			EditorExecutable, PulseForgeEditor::EditorPlayerPlatform::Windows);
+		PF_CHECK(Tests, WindowsPath && *WindowsPath == EditorExecutable.parent_path() / "PulseForgeGame.exe");
+
+		auto LinuxPath = PulseForgeEditor::ResolveEditorPlayerExecutablePath(
+			EditorExecutable, PulseForgeEditor::EditorPlayerPlatform::Linux);
+		PF_CHECK(Tests, LinuxPath && *LinuxPath == EditorExecutable.parent_path() / "PulseForgeGame");
+
+		const std::filesystem::path MacEditorExecutable = OutputDirectory / "PulseForgeEditor.app" / "Contents" / "MacOS" /
+			"PulseForgeEditor";
+		auto MacPath = PulseForgeEditor::ResolveEditorPlayerExecutablePath(
+			MacEditorExecutable, PulseForgeEditor::EditorPlayerPlatform::MacOS);
+		PF_CHECK(Tests, MacPath && *MacPath == OutputDirectory / "PulseForgeGame.app" / "Contents" / "MacOS" / "PulseForgeGame");
+
+		PF_CHECK(Tests, !PulseForgeEditor::ResolveEditorPlayerExecutablePath({}, PulseForgeEditor::EditorPlayerPlatform::Windows));
+		PF_CHECK(Tests, !PulseForgeEditor::ResolveEditorPlayerExecutablePath(
+			"PulseForgeEditor.exe", PulseForgeEditor::EditorPlayerPlatform::Windows));
+		PF_CHECK(Tests, !PulseForgeEditor::ResolveEditorPlayerExecutablePath(
+			EditorExecutable, static_cast<PulseForgeEditor::EditorPlayerPlatform>(255)));
+
+#if defined(PF_PLATFORM_WINDOWS)
+		PF_CHECK(Tests, PulseForgeEditor::GetEditorPlayerPlatform() == PulseForgeEditor::EditorPlayerPlatform::Windows);
+#elif defined(PF_PLATFORM_LINUX)
+		PF_CHECK(Tests, PulseForgeEditor::GetEditorPlayerPlatform() == PulseForgeEditor::EditorPlayerPlatform::Linux);
+#elif defined(PF_PLATFORM_MACOS)
+		PF_CHECK(Tests, PulseForgeEditor::GetEditorPlayerPlatform() == PulseForgeEditor::EditorPlayerPlatform::MacOS);
+#else
+#error "Editor player path tests require the configured platform definition."
+#endif
 	}
 
 	int RunOutputChild(std::string_view Argument)
@@ -523,6 +559,7 @@ namespace
 	int RunHarness(const std::filesystem::path& Executable)
 	{
 		TestRunner Tests;
+		TestEditorPlayerExecutablePath(Tests);
 		auto WorkingDirectory = CreateTemporaryWorkingDirectory();
 		PF_CHECK(Tests, WorkingDirectory.has_value());
 		if (WorkingDirectory)

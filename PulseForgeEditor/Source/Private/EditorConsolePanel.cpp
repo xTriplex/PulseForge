@@ -3,6 +3,7 @@
 #include "Editor/ConsoleFormatting.h"
 #include "Editor/EditorStyle.h"
 #include "Editor/EditorConsoleHistory.h"
+#include "Editor/EditorConsoleSeverity.h"
 #include "Core/Log.h"
 
 #include <cfloat>
@@ -12,29 +13,6 @@ namespace PulseForgeEditor
 {
 	namespace
 	{
-		const char* SeverityName(EditorConsoleSeverity Severity)
-		{
-			switch (Severity)
-			{
-			case EditorConsoleSeverity::Unknown:
-				return "unknown";
-			case EditorConsoleSeverity::Trace:
-				return "trace";
-			case EditorConsoleSeverity::Debug:
-				return "debug";
-			case EditorConsoleSeverity::Info:
-				return "info";
-			case EditorConsoleSeverity::Warning:
-				return "warning";
-			case EditorConsoleSeverity::Error:
-				return "error";
-			case EditorConsoleSeverity::Critical:
-				return "critical";
-			default:
-				return "unknown";
-			}
-		}
-
 		ImVec4 SeverityColor(const EditorStyle& Style, EditorConsoleSeverity Severity)
 		{
 			switch (Severity)
@@ -89,13 +67,13 @@ namespace PulseForgeEditor
 			std::vector<ConsoleEntryView> Entries;
 			Entries.reserve(Messages.size());
 			for (const EditorConsoleMessage& Message : Messages)
-				Entries.push_back({ SeverityName(Message.Severity), Message.Logger, Message.Text });
+				Entries.push_back({ Detail::ConsoleSeverityLabel(Message.Severity), Message.Logger, Message.Text });
 			return FormatConsoleHistory(Entries);
 		}
 
 		[[nodiscard]] std::string FormatMessage(const EditorConsoleMessage& Message) const
 		{
-			return FormatConsoleEntry({ SeverityName(Message.Severity), Message.Logger, Message.Text });
+			return FormatConsoleEntry({ Detail::ConsoleSeverityLabel(Message.Severity), Message.Logger, Message.Text });
 		}
 	};
 
@@ -213,7 +191,7 @@ namespace PulseForgeEditor
 							const ImVec2 RowStart = ImGui::GetCursorScreenPos();
 							const float RowHeight = ImGui::GetTextLineHeightWithSpacing();
 							char SeverityLabel[16]{};
-							std::snprintf(SeverityLabel, sizeof(SeverityLabel), "[%s]", SeverityName(Message.Severity));
+							std::snprintf(SeverityLabel, sizeof(SeverityLabel), "[%s]", Detail::ConsoleSeverityLabel(Message.Severity));
 							ImGui::Selectable("##ConsoleMessageRow", false,
 								ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap, ImVec2(0.0f, RowHeight));
 							if (ImGui::BeginPopupContextItem("ConsoleEntryContextMenu"))
