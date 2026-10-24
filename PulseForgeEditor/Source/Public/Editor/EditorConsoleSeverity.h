@@ -6,4 +6,5 @@
 namespace PulseForgeEditor::Detail
 {
 	[[nodiscard]] EditorConsoleSeverity ConvertConsoleSeverity(PulseForge::LogLevel Level) noexcept;
+	[[nodiscard]] const char* ConsoleSeverityLabel(EditorConsoleSeverity Severity) noexcept;
 }

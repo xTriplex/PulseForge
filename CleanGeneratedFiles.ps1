@@ -17,8 +17,8 @@ $script:TargetManifest = @(
 	@{ Path = 'Build\CMake\VS2022-x64-OpenGL'; Category = 'CMake build outputs'; Kind = 'CMakeBuildDirectory'; AllowedExtensions = $null },
 	@{ Path = 'Build\NoToolsProbeBuild'; Category = 'CMake build outputs'; Kind = 'CMakeBuildDirectory'; ExpectedSourceDirectory = 'Build\NoToolsProbeSource'; PreserveReparsePointNames = @('_tools'); AllowedExtensions = $null },
 	@{ Path = 'Out'; Category = 'CMake build outputs'; Kind = 'CMakeSettingsOutputTree'; AllowedExtensions = $null },
-	@{ Path = 'Out\build'; Category = 'CMake build outputs'; Kind = 'CMakeSettingsBuildDirectory'; AllowedExtensions = $null },
-	@{ Path = 'Out\QualityGraphProbe\build'; Category = 'CMake build outputs'; Kind = 'CMakeFixtureBuildDirectory'; ExpectedSourceDirectory = 'Out\QualityGraphProbe'; AllowedExtensions = $null },
+	@{ Path = 'Out\Build'; Category = 'CMake build outputs'; Kind = 'CMakeSettingsBuildDirectory'; AllowedExtensions = $null },
+	@{ Path = 'Out\QualityGraphProbe\Build'; Category = 'CMake build outputs'; Kind = 'CMakeFixtureBuildDirectory'; ExpectedSourceDirectory = 'Out\QualityGraphProbe'; AllowedExtensions = $null },
 	@{ Path = 'Build\Diagnostics'; Category = 'Diagnostics and evidence'; Kind = 'GeneratedTree'; AllowedExtensions = $null },
 	@{ Path = 'Build\IntegrationEvidence'; Category = 'Diagnostics and evidence'; Kind = 'GeneratedTree'; AllowedExtensions = $null },
 	@{ Path = 'Build\CMake\VS2022-x64\Build\Diagnostics'; Category = 'Diagnostics and evidence'; Kind = 'Directory'; AllowedExtensions = $null },
@@ -248,15 +248,15 @@ function Get-CMakeSettingsOutputTreePlan
 	$bytes = Get-TreeInspection -Path $Path -Entry $entry
 	$rootChildren = @([IO.Directory]::EnumerateFileSystemEntries($Path))
 	$rootNames = @($rootChildren | ForEach-Object { [IO.Path]::GetFileName($_) })
-	if ($rootNames -notcontains 'build' -or @($rootNames | Where-Object { $_ -notin @('build', 'install') }).Count -gt 0)
+	if ($rootNames -notcontains 'Build' -or @($rootNames | Where-Object { $_ -notin @('Build', 'Install') }).Count -gt 0)
 	{
-		throw "The Out tree must contain only CMakeSettings 'build' and optional 'install' directories. The target was preserved."
+		throw "The Out tree must contain only CMakeSettings 'Build' and optional 'Install' directories. The target was preserved."
 	}
 
-	$buildRoot = Join-Path $Path 'build'
+	$buildRoot = Join-Path $Path 'Build'
 	if (-not (Test-Path -LiteralPath $buildRoot -PathType Container))
 	{
-		throw "The Out tree has no CMakeSettings build directory. The target was preserved."
+		throw "The Out tree has no CMakeSettings Build directory. The target was preserved."
 	}
 	$buildDirectories = @([IO.Directory]::EnumerateFileSystemEntries($buildRoot))
 	if ($buildDirectories.Count -eq 0)
@@ -276,7 +276,7 @@ function Get-CMakeSettingsOutputTreePlan
 		$null = $configurationNames.Add([IO.Path]::GetFileName($buildDirectory))
 	}
 
-	$installRoot = Join-Path $Path 'install'
+	$installRoot = Join-Path $Path 'Install'
 	if (Test-Path -LiteralPath $installRoot)
 	{
 		foreach ($installDirectory in [IO.Directory]::EnumerateFileSystemEntries($installRoot))

@@ -23,4 +23,26 @@ namespace PulseForgeEditor::Detail
 			return EditorConsoleSeverity::Unknown;
 		}
 	}
+
+	const char* ConsoleSeverityLabel(EditorConsoleSeverity Severity) noexcept
+	{
+		switch (Severity)
+		{
+		case EditorConsoleSeverity::Trace:
+			return "TRACE";
+		case EditorConsoleSeverity::Debug:
+			return "DEBUG";
+		case EditorConsoleSeverity::Info:
+			return "INFO";
+		case EditorConsoleSeverity::Warning:
+			return "WARNING";
+		case EditorConsoleSeverity::Error:
+			return "ERROR";
+		case EditorConsoleSeverity::Critical:
+			return "CRITICAL";
+		case EditorConsoleSeverity::Unknown:
+		default:
+			return "UNKNOWN";
+		}
+	}
 } // namespace PulseForgeEditor::Detail

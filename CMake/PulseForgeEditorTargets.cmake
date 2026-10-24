@@ -84,14 +84,22 @@ if(PULSEFORGE_BUILD_EDITOR)
 		add_executable(PulseForgeEditor WIN32
 			PulseForgeEditor/Source/Private/EditorMain.cpp
 			PulseForgeEditor/Source/Private/EditorApplication.cpp
+			PulseForgeEditor/Source/Private/EditorPlayerExecutablePath.cpp
 		)
 	else()
 		add_executable(PulseForgeEditor
 			PulseForgeEditor/Source/Private/EditorMain.cpp
 			PulseForgeEditor/Source/Private/EditorApplication.cpp
+			PulseForgeEditor/Source/Private/EditorPlayerExecutablePath.cpp
 		)
 	endif()
-	target_compile_definitions(PulseForgeEditor PRIVATE PF_BUILD_IDENTIFIER="${PULSEFORGE_BUILD_IDENTIFIER}")
+	target_compile_definitions(PulseForgeEditor PRIVATE
+		${PULSEFORGE_PLATFORM_COMPILE_DEFINITION}
+		PF_BUILD_IDENTIFIER="${PULSEFORGE_BUILD_IDENTIFIER}")
+	get_target_property(PULSEFORGE_EDITOR_COMPILE_DEFINITIONS PulseForgeEditor COMPILE_DEFINITIONS)
+	if(NOT "${PULSEFORGE_PLATFORM_COMPILE_DEFINITION}" IN_LIST PULSEFORGE_EDITOR_COMPILE_DEFINITIONS)
+		message(FATAL_ERROR "PulseForgeEditor must compile with ${PULSEFORGE_PLATFORM_COMPILE_DEFINITION}.")
+	endif()
 	if(PULSEFORGE_PLATFORM_MACOS)
 		set_target_properties(PulseForgeEditor PROPERTIES
 			MACOSX_BUNDLE TRUE
