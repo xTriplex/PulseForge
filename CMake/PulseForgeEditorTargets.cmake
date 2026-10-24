@@ -24,6 +24,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorContentBrowserNavigation.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserPanel.cpp
 		PulseForgeEditor/Source/Private/EditorHierarchyPanel.cpp
+		PulseForgeEditor/Source/Private/EditorInputMappingPanel.cpp
 		PulseForgeEditor/Source/Private/EditorInspectorPanel.cpp
 		PulseForgeEditor/Source/Private/EditorMaterialDetailsPanel.cpp
 		PulseForgeEditor/Source/Private/EditorStatusPanel.cpp
@@ -68,7 +69,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	)
 	target_link_libraries(PulseForgeEditorUI
 		PUBLIC PulseForgeRenderer PulseForgeEditorCore
-		PRIVATE PulseForgeCore PulseForgeApplication PulseForgeAssetImporters PulseForgeAssetServices
+		PRIVATE PulseForgeCore PulseForgeInput PulseForgeApplication PulseForgeAssetImporters PulseForgeAssetServices
 			PulseForgeImGui PulseForgeSceneRenderer freetype spdlog::spdlog
 			nfd::nfd
 	)
@@ -126,7 +127,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		target_compile_definitions(PulseForgeEditor PRIVATE PF_EDITOR_SHADER_DIRECTORY="Shaders")
 	endif()
 	target_link_libraries(PulseForgeEditor PRIVATE
-		PulseForgeEditorCore PulseForgeEditorUI PulseForge PulseForgeImGui spdlog::spdlog)
+		PulseForgeEditorCore PulseForgeEditorUI PulseForge PulseForgeInput PulseForgeImGui spdlog::spdlog)
 	if(WIN32)
 		target_link_libraries(PulseForgeEditor PRIVATE shell32 ole32 dwmapi)
 	endif()

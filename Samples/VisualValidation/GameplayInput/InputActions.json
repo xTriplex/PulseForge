@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "actions": [
+    {
+      "id": "Move",
+      "type": "Axis2D",
+      "context": "Gameplay",
+      "bindings": [
+        { "id": "move.forward", "kind": "Button", "primary": "Key.W", "scaleX": 0.0, "scaleY": 1.0, "deadZone": 0.15, "modifiers": [] },
+        { "id": "move.backward", "kind": "Button", "primary": "Key.S", "scaleX": 0.0, "scaleY": -1.0, "deadZone": 0.15, "modifiers": [] },
+        { "id": "move.left", "kind": "Button", "primary": "Key.A", "scaleX": -1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] },
+        { "id": "move.right", "kind": "Button", "primary": "Key.D", "scaleX": 1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] },
+        { "id": "move.stick", "kind": "Stick", "primary": "GamepadAxis.LeftX", "secondary": "GamepadAxis.LeftY", "scaleX": 1.0, "scaleY": 1.0, "deadZone": 0.2, "modifiers": [] }
+      ]
+    },
+    {
+      "id": "Jump",
+      "type": "Digital",
+      "context": "Gameplay",
+      "bindings": [
+        { "id": "jump.space", "kind": "Button", "primary": "Key.Space", "scaleX": 1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] },
+        { "id": "jump.gamepad", "kind": "Button", "primary": "GamepadButton.A", "scaleX": 1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] }
+      ]
+    },
+    {
+      "id": "Interact",
+      "type": "Digital",
+      "context": "Gameplay",
+      "bindings": [
+        { "id": "interact.mouse", "kind": "Button", "primary": "Mouse.Left", "scaleX": 1.0, "scaleY": 0.0, "deadZone": 0.15, "modifiers": [] }
+      ]
+    }
+  ]
+}

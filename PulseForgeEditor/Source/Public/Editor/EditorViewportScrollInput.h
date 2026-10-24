@@ -31,6 +31,7 @@ namespace PulseForgeEditor::Detail
 
 		[[nodiscard]] bool Install(ImGuiContext* Context, GLFWwindow* MainWindow);
 		[[nodiscard]] float Consume(uint32_t ViewportID, GLFWwindow* Window) noexcept;
+		[[nodiscard]] uint64_t GetInputWindowID(uint32_t ViewportID, GLFWwindow* Window) const noexcept;
 		void DiscardPending() noexcept;
 		void Shutdown() noexcept;
 

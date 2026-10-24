@@ -5,6 +5,7 @@
 #include "Assets/Project.h"
 #include "Audio/AudioSceneRuntime.h"
 #include "Core/Input.h"
+#include "Input/GameplayInput.h"
 #include "Physics/PhysicsSceneRuntime.h"
 #include "Scene/Scene.h"
 
@@ -284,6 +285,88 @@ namespace PulseForge::ScriptEnvironment
 			return 2;
 		}
 
+		bool ReadActionIdentifier(lua_State* State, std::string_view& Identifier)
+		{
+			if (lua_type(State, 1) != LUA_TSTRING) return false;
+			size_t Length = 0;
+			const char* Data = lua_tolstring(State, 1, &Length);
+			if (!Data || Length == 0) return false;
+			Identifier = std::string_view(Data, Length);
+			return true;
+		}
+
+		const ActionValue* FindLuaAction(lua_State* State)
+		{
+			ScriptInstance* Instance = GetScriptInstance(State);
+			if (!Instance || !Instance->Services.GameplayInput)
+			{
+				ReturnHostError(State, "gameplay input service is unavailable to this script runtime");
+				return nullptr;
+			}
+
+			std::string_view Identifier;
+			if (!ReadActionIdentifier(State, Identifier))
+			{
+				ReturnHostError(State, "gameplay action queries require a non-empty string action id");
+				return nullptr;
+			}
+
+			const ActionValue* Value = Instance->Services.GameplayInput->FindAction(Identifier);
+			if (!Value) ReturnHostError(State, "unknown gameplay action id");
+			return Value;
+		}
+
+		int LuaInputIsActionHeld(lua_State* State)
+		{
+			const ActionValue* Value = FindLuaAction(State);
+			if (!Value) return 2;
+			if (Value->Type != ActionValueType::Digital)
+				return ReturnHostError(State, "input.is_action_held requires a digital action");
+			lua_pushboolean(State, Value->Held);
+			return 1;
+		}
+
+		int LuaInputWasActionPressed(lua_State* State)
+		{
+			const ActionValue* Value = FindLuaAction(State);
+			if (!Value) return 2;
+			if (Value->Type != ActionValueType::Digital)
+				return ReturnHostError(State, "input.was_action_pressed requires a digital action");
+			lua_pushboolean(State, Value->Pressed);
+			return 1;
+		}
+
+		int LuaInputWasActionReleased(lua_State* State)
+		{
+			const ActionValue* Value = FindLuaAction(State);
+			if (!Value) return 2;
+			if (Value->Type != ActionValueType::Digital)
+				return ReturnHostError(State, "input.was_action_released requires a digital action");
+			lua_pushboolean(State, Value->Released);
+			return 1;
+		}
+
+		int LuaInputGetAxis(lua_State* State)
+		{
+			const ActionValue* Value = FindLuaAction(State);
+			if (!Value) return 2;
+			if (Value->Type != ActionValueType::Axis1D)
+				return ReturnHostError(State, "input.get_axis requires a one-dimensional axis action");
+			lua_pushnumber(State, Value->X);
+			return 1;
+		}
+
+		int LuaInputGetVector(lua_State* State)
+		{
+			const ActionValue* Value = FindLuaAction(State);
+			if (!Value) return 2;
+			if (Value->Type != ActionValueType::Axis2D)
+				return ReturnHostError(State, "input.get_vector requires a two-dimensional axis action");
+			lua_pushnumber(State, Value->X);
+			lua_pushnumber(State, Value->Y);
+			return 2;
+		}
+
 		int LuaEntityPlayAudio(lua_State* State)
 		{
 			return InvokeAudioControl(State, &AudioSceneRuntime::Play);
@@ -534,6 +617,16 @@ namespace PulseForge::ScriptEnvironment
 		lua_setfield(State, -2, "is_mouse_button_pressed");
 		lua_pushcfunction(State, LuaInputGetMousePosition);
 		lua_setfield(State, -2, "get_mouse_position");
+		lua_pushcfunction(State, LuaInputIsActionHeld);
+		lua_setfield(State, -2, "is_action_held");
+		lua_pushcfunction(State, LuaInputWasActionPressed);
+		lua_setfield(State, -2, "was_action_pressed");
+		lua_pushcfunction(State, LuaInputWasActionReleased);
+		lua_setfield(State, -2, "was_action_released");
+		lua_pushcfunction(State, LuaInputGetAxis);
+		lua_setfield(State, -2, "get_axis");
+		lua_pushcfunction(State, LuaInputGetVector);
+		lua_setfield(State, -2, "get_vector");
 		lua_setglobal(State, "input");
 
 		lua_newuserdatauv(State, sizeof(LuaEntity), 0);

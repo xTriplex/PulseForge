@@ -14,25 +14,27 @@ namespace PulseForge
         EVENT_CLASS_CATEGORY(EventCategoryKeyboard | EventCategoryInput)
 
     protected:
-        KeyEvent(int KeyCode)
-            : m_KeyCode(KeyCode)
+        KeyEvent(int KeyCode, uint16_t Modifiers)
+            : m_KeyCode(KeyCode), m_Modifiers(Modifiers)
         {
 
         }
 
         int m_KeyCode;
+        uint16_t m_Modifiers;
     };
 
     class PULSEFORGE_API KeyPressedEvent : public KeyEvent
     {
     public:
-        KeyPressedEvent(int KeyCode, int RepeatCount)
-            : KeyEvent(KeyCode), m_RepeatCount(RepeatCount)
+        KeyPressedEvent(int KeyCode, int RepeatCount, uint16_t Modifiers = 0)
+            : KeyEvent(KeyCode, Modifiers), m_RepeatCount(RepeatCount)
         {
 
         }
 
         inline int GetRepeatCount() const { return m_RepeatCount; }
+        inline uint16_t GetModifiers() const { return m_Modifiers; }
 
         std::string ToString() const override
         {
@@ -48,11 +50,13 @@ namespace PulseForge
     class PULSEFORGE_API KeyReleasedEvent : public KeyEvent
     {
     public:
-        KeyReleasedEvent(int KeyCode)
-            : KeyEvent(KeyCode)
+        KeyReleasedEvent(int KeyCode, uint16_t Modifiers = 0)
+            : KeyEvent(KeyCode, Modifiers)
         {
 
         }
+
+        inline uint16_t GetModifiers() const { return m_Modifiers; }
 
         std::string ToString() const override
         {
@@ -65,11 +69,13 @@ namespace PulseForge
     class PULSEFORGE_API KeyTypedEvent : public KeyEvent
     {
     public:
-        KeyTypedEvent(int KeyCode)
-            : KeyEvent(KeyCode)
+        KeyTypedEvent(int KeyCode, uint16_t Modifiers = 0)
+            : KeyEvent(KeyCode, Modifiers)
         {
 
         }
+
+        inline uint16_t GetModifiers() const { return m_Modifiers; }
 
         std::string ToString() const override
         {

@@ -7,6 +7,7 @@
 
 #include <string>
 #include <functional>
+#include <cstdint>
 
 namespace PulseForge
 {
@@ -41,6 +42,8 @@ namespace PulseForge
 	{
 	public:
 		bool bHandled = false;
+		void SetInputWindowID(uint64_t ID) noexcept { m_InputWindowID = ID; }
+		[[nodiscard]] uint64_t GetInputWindowID() const noexcept { return m_InputWindowID; }
 
 		virtual EEventType GetEventType() const = 0;
 		virtual const char* GetName() const = 0;
@@ -51,6 +54,9 @@ namespace PulseForge
 		{
 			return GetCategoryFlags() & Category;
 		}
+
+	private:
+		uint64_t m_InputWindowID = 0;
 	};
 
 	class EventDispatcher

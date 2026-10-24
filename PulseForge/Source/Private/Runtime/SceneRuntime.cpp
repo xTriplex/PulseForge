@@ -88,6 +88,7 @@ namespace PulseForge
 			const ScriptRuntimeServices Services{
 				.Physics = Candidate->Physics.get(),
 				.Audio = Candidate->Audio.get(),
+				.GameplayInput = m_Services.GameplayInput,
 				.InputState = m_Services.InputState,
 				.Observer = m_Services.ScriptObserver };
 			Candidate->Scripting = std::make_unique<ScriptRuntime>(m_Project, m_Description.Scripting, Services);

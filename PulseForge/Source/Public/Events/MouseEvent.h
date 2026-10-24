@@ -60,24 +60,26 @@ namespace PulseForge
     {
     public:
         inline int GetMouseButton() const { return m_Button; }
+        inline uint16_t GetModifiers() const { return m_Modifiers; }
         
         EVENT_CLASS_CATEGORY(EventCategoryMouse | EventCategoryInput | EventCategoryMouseButton )
 
     protected:
-        MouseButtonEvent(int Button)
-            : m_Button(Button)
+        MouseButtonEvent(int Button, uint16_t Modifiers)
+            : m_Button(Button), m_Modifiers(Modifiers)
         {
 
         }
 
         int m_Button;
+        uint16_t m_Modifiers;
     };
 
     class PULSEFORGE_API MouseButtonPressedEvent : public MouseButtonEvent
     {
     public:
-        MouseButtonPressedEvent(int Button)
-            : MouseButtonEvent(Button)
+        MouseButtonPressedEvent(int Button, uint16_t Modifiers = 0)
+            : MouseButtonEvent(Button, Modifiers)
         {
 
         }
@@ -93,8 +95,8 @@ namespace PulseForge
     class PULSEFORGE_API MouseButtonReleasedEvent : public MouseButtonEvent
     {
     public:
-        MouseButtonReleasedEvent(int Button)
-            : MouseButtonEvent(Button)
+        MouseButtonReleasedEvent(int Button, uint16_t Modifiers = 0)
+            : MouseButtonEvent(Button, Modifiers)
         {
 
         }
