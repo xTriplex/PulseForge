@@ -165,6 +165,10 @@ namespace PulseForge
 		[[nodiscard]] bool IsEnvironmentLightingPending() const noexcept { return m_EnvironmentLightingPending; }
 		[[nodiscard]] bool IsAssetPreparationPending() const noexcept { return m_AssetPreparationPending; }
 		[[nodiscard]] AssetPreparationServiceStats GetAssetPreparationStats() const noexcept;
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+		[[nodiscard]] std::expected<AssetPreparationService::Subscription, AssetPreparationError>
+			EnqueuePreparationForValidation(AssetPreparationService::Processor Processor);
+#endif
 		[[nodiscard]] bool HasPreparedEnvironmentLighting() const noexcept { return m_PreparedEnvironmentReady; }
 		// Narrow diagnostic access used by the opt-in GPU validation harness to read actual cubemap face depth.
 		[[nodiscard]] const Texture* GetPointShadowFaceTextureForValidation(size_t Slot, uint32_t Face) const noexcept;
@@ -272,6 +276,9 @@ namespace PulseForge
 		bool m_AssetPreparationPending = false;
 		bool m_PreparedEnvironmentReady = false;
 		bool m_LoggedFirstSnapshotPreparation = false;
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+		uint64_t m_ValidationPreparationRequest = 0;
+#endif
 		std::unique_ptr<SceneRendererMaterialBindingCache> m_MaterialBindingCache;
 		std::unique_ptr<ShadowPass> m_ShadowPass;
 	};

@@ -19,13 +19,50 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <fstream>
+#include <mutex>
 #include <span>
+#include <stdexcept>
+#include <stop_token>
 #include <utility>
 
 namespace PulseForge::GpuValidation
 {
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+	struct G11PreparationGate final
+	{
+		bool Wait(std::stop_token Stop)
+		{
+			std::unique_lock Lock(Mutex);
+			Entered = true;
+			Changed.notify_all();
+			return Changed.wait(Lock, Stop, [this] { return Released; });
+		}
+
+		[[nodiscard]] bool HasEntered()
+		{
+			std::lock_guard Lock(Mutex);
+			return Entered;
+		}
+
+		void Release()
+		{
+			{
+				std::lock_guard Lock(Mutex);
+				Released = true;
+			}
+			Changed.notify_all();
+		}
+
+		std::mutex Mutex;
+		std::condition_variable_any Changed;
+		bool Entered = false;
+		bool Released = false;
+	};
+#endif
+
 	namespace PointShadowAnalysis = PulseForge::GpuValidation::PointShadowImageAnalysis;
 
 	namespace
@@ -148,6 +185,10 @@ namespace PulseForge::GpuValidation
 
 	void GpuProjectSceneValidation::Render()
 	{
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+		if (m_G11GateEntered && !m_G11GateReleased)
+			++m_G11HeldRenderFrames;
+#endif
 		if (m_Mode == ProjectSceneValidationMode::PbrMaterials) RenderPbrMaterial();
 		else RenderTransparency();
 	}
@@ -155,6 +196,33 @@ namespace PulseForge::GpuValidation
 	void GpuProjectSceneValidation::UpdatePbrMaterial()
 	{
 		if (!m_Succeeded || m_PbrMaterialStage == PbrMaterialCaptureStage::Complete) return;
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+		if (m_G11PreparationGates.front() && !m_G11GateEntered)
+		{
+			const bool AllWorkersEntered = std::all_of(m_G11PreparationGates.begin(), m_G11PreparationGates.end(),
+				[](const auto& Gate) { return Gate && Gate->HasEntered(); });
+			if (!AllWorkersEntered)
+			{
+				if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(10))
+					Fail("G11 responsiveness gate worker did not start within the bounded acceptance interval");
+				return;
+			}
+			m_G11GateEntered = true;
+			PF_INFO("G11_RESPONSIVENESS_GATE_ENTERED; actual=PBR scene asset requests will queue behind a held CPU worker");
+		}
+		if (m_G11GateReleased)
+		{
+			for (auto& Subscription : m_G11PreparationGateSubscriptions)
+			{
+				if (!Subscription)
+					continue;
+				const AssetPreparationSnapshot GateResult = Subscription->Poll();
+				if (GateResult.Status == AssetPreparationStatus::CpuReady || GateResult.Status == AssetPreparationStatus::Failed ||
+					GateResult.Status == AssetPreparationStatus::Cancelled)
+					Subscription.reset();
+			}
+		}
+#endif
 		if (m_PbrMaterialCapturePending)
 		{
 			CapturePbrMaterialImage();
@@ -162,7 +230,14 @@ namespace PulseForge::GpuValidation
 			if (!m_Succeeded) return;
 			if (!AdvancePbrMaterialCapture() || m_PbrMaterialStage == PbrMaterialCaptureStage::Complete) return;
 		}
-		if (std::chrono::steady_clock::now() - m_StartedAt > std::chrono::seconds(60))
+		constexpr std::chrono::seconds PbrPreparationDeadline{
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+			120
+#else
+			60
+#endif
+		};
+		if (std::chrono::steady_clock::now() - m_StartedAt > PbrPreparationDeadline)
 		{
 			Fail("Timed out preparing or capturing the PBR default-material transition scenario");
 			return;
@@ -200,7 +275,55 @@ namespace PulseForge::GpuValidation
 			Fail("Scene renderer preparation changed serialized scene state or created a material asset");
 			return;
 		}
-		if (m_SceneRenderer.IsAssetPreparationPending()) return;
+		if (m_SceneRenderer.IsAssetPreparationPending())
+		{
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+			if (m_G11GateEntered && !m_G11GateReleased)
+			{
+				const AssetPreparationServiceStats Stats = m_SceneRenderer.GetAssetPreparationStats();
+				if (Stats.ActiveJobs != m_G11PreparationGates.size() || Stats.QueuedJobs == 0)
+				{
+					for (const auto& Gate : m_G11PreparationGates)
+						if (Gate) Gate->Release();
+					Fail("G11 held-gate acceptance did not block real project asset jobs in a bounded worker state");
+					return;
+				}
+				++m_G11HeldUpdateFrames;
+				if (!m_G11RefreshDuringGate && m_G11HeldUpdateFrames == 12)
+				{
+					m_SceneRenderer.RefreshProjectAssets();
+					m_ScenePrepared = false;
+					m_G11RefreshDuringGate = true;
+					const AssetPreparationServiceStats RefreshedStats = m_SceneRenderer.GetAssetPreparationStats();
+					if (RefreshedStats.QueuedJobs != 0)
+					{
+						for (const auto& Gate : m_G11PreparationGates)
+							if (Gate) Gate->Release();
+						Fail("G11 project refresh retained queued work from the superseded asset generation");
+						return;
+					}
+					PF_INFO("G11_RESPONSIVENESS_GATE_REFRESH; stale queued project-generation requests cancelled while the app loop advanced");
+				}
+				if (m_G11HeldUpdateFrames >= 24)
+				{
+					if (m_G11HeldRenderFrames < 23 || !m_G11RefreshDuringGate)
+					{
+						for (const auto& Gate : m_G11PreparationGates)
+							if (Gate) Gate->Release();
+						Fail("G11 held-gate acceptance did not advance render frames or refresh the project generation");
+						return;
+					}
+					m_G11GateReleased = true;
+					for (const auto& Gate : m_G11PreparationGates)
+						if (Gate) Gate->Release();
+					PF_INFO("G11_RESPONSIVENESS_RESULT=PASS; held_worker_frames={0}; render_frames={1}; queued_jobs_high_water={2}; "
+							"project_refresh_during_gate=true; actual_scene_publication_required=true",
+						m_G11HeldUpdateFrames, m_G11HeldRenderFrames, Stats.HighWaterQueuedJobs);
+				}
+			}
+#endif
+			return;
+		}
 		m_ScenePrepared = true;
 	}
 
@@ -310,6 +433,14 @@ namespace PulseForge::GpuValidation
 
 	void GpuProjectSceneValidation::Reset() noexcept
 	{
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+		for (const auto& Gate : m_G11PreparationGates)
+			if (Gate) Gate->Release();
+		for (auto& Subscription : m_G11PreparationGateSubscriptions)
+			Subscription.reset();
+		for (auto& Gate : m_G11PreparationGates)
+			Gate.reset();
+#endif
 		m_PbrMaterialOutputTarget.reset();
 		m_PbrFloorEntity = {};
 		m_PbrTargetEntity = {};
@@ -379,6 +510,25 @@ namespace PulseForge::GpuValidation
 		m_PbrMaterialOutputTarget = std::move(*Target);
 		m_PbrMaterialImagePath = m_OutputRoot / "PBRMaterials" / "overview.png";
 		std::filesystem::create_directories(m_PbrMaterialImagePath.parent_path());
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+		for (size_t Index = 0; Index < m_G11PreparationGates.size(); ++Index)
+		{
+			m_G11PreparationGates[Index] = std::make_shared<G11PreparationGate>();
+			const auto Gate = m_G11PreparationGates[Index];
+			auto GateRequest = m_SceneRenderer.EnqueuePreparationForValidation(
+				[Gate](std::stop_token Stop)
+					-> std::expected<AssetPreparationService::CpuPayload, AssetPreparationError>
+				{
+					if (!Gate->Wait(Stop))
+						return std::unexpected(AssetPreparationError{ AssetPreparationErrorCode::ProcessingFailed,
+							"Validation preparation gate stopped before release" });
+					return AssetPreparationService::CpuPayload(MakeAssetPreparationValue(uint8_t{ 1 }, 0));
+				});
+			if (!GateRequest)
+				throw std::runtime_error("Could not enqueue the G11 responsiveness gate: " + GateRequest.error().Message);
+			m_G11PreparationGateSubscriptions[Index].emplace(std::move(*GateRequest));
+		}
+#endif
 
 		for (const PulseForge::Entity& Entity : m_Scene.GetEntities())
 		{

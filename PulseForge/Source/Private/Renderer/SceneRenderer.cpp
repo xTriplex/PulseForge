@@ -209,6 +209,18 @@ namespace PulseForge
 		return m_ProjectAssetCaches->Preparation.GetStats();
 	}
 
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+	std::expected<AssetPreparationService::Subscription, AssetPreparationError>
+	SceneRenderer::EnqueuePreparationForValidation(AssetPreparationService::Processor Processor)
+	{
+		if (!Processor)
+			return std::unexpected(AssetPreparationError{ AssetPreparationErrorCode::InvalidRequest, "Validation processor is empty" });
+		const std::string RecipeKey = "gpu-validation-gate/" + std::to_string(++m_ValidationPreparationRequest);
+		return m_ProjectAssetCaches->Preparation.Request(
+			{ m_ProjectAssetCaches->SessionKey, RecipeKey }, AssetPreparationPriority::Interactive, 1, std::move(Processor));
+	}
+#endif
+
 	const Texture* SceneRenderer::GetPointShadowFaceTextureForValidation(size_t Slot, uint32_t Face) const noexcept
 	{
 		return m_ShadowTargetCache->PointShadowFaceTexture(Slot, Face);
