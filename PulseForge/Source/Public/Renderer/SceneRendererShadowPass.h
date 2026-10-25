@@ -2,6 +2,9 @@
 
 #include "Renderer/SceneRenderer.h"
 
+#include <utility>
+#include <vector>
+
 namespace PulseForge
 {
 	class MeshAssetCache;
@@ -22,12 +25,12 @@ namespace PulseForge
 			RenderDevice& Runtime;
 			const SceneRenderSnapshot* Snapshot;
 			const DirectionalShadowCascadeSet* Cascades;
-			const std::optional<AssetID>& BindingEnvironmentAsset;
 			LocalLightingState& LocalLighting;
 			ShadowTargetCache& Targets;
 			SceneRendererPipelineCache& Pipelines;
 			SceneRendererMaterialBindingCache& MaterialBindings;
-			MeshAssetCache& Meshes;
+			const std::vector<std::pair<AssetID, const Mesh*>>& PreparedMeshes;
+			const std::vector<std::pair<UUID, const BindingSet*>>& PreparedMaterialBindings;
 			const BindingLayoutHandle& SpotlightLayout;
 			const BindingLayoutHandle& PointLightLayout;
 			const Sampler& ShadowSampler;

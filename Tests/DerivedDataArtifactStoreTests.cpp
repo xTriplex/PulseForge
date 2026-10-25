@@ -114,6 +114,25 @@ void RunDerivedDataArtifactStoreTests(TestRunner& Tests)
 	const auto Warm = Store.Read(MeshKey);
 	PF_CHECK(Tests, Warm.Status == DerivedDataArtifactReadStatus::Hit);
 	PF_CHECK(Tests, Warm.Payload == Payload);
+	PF_CHECK(Tests, !Warm.EntryChecksum.Algorithm.empty());
+	const std::vector<std::byte> RepairedPayload = Bytes("repaired decoded mesh payload");
+	const auto Repaired = Store.ReplaceRejectedProduct(MeshKey, Warm.EntryChecksum, RepairedPayload);
+	PF_CHECK(Tests, Repaired.Status == DerivedDataArtifactWriteStatus::Written);
+	PF_CHECK(Tests, Store.Read(MeshKey).Payload == RepairedPayload);
+	PF_CHECK(Tests, Store.ReplaceRejectedProduct(MeshKey, Warm.EntryChecksum, Payload).Status ==
+		DerivedDataArtifactWriteStatus::Rejected);
+	PF_CHECK(Tests, Store.Read(MeshKey).Payload == RepairedPayload);
+	const auto RepairedRead = Store.Read(MeshKey);
+	const std::vector<std::byte> NewerPayload = Bytes("newer valid concurrent product");
+		PF_CHECK(Tests, std::filesystem::remove(DerivedDataArtifactStoreTestAccess::GetPath(Root.Path, MeshKey)));
+		PF_CHECK(Tests, Store.Write(MeshKey, NewerPayload).Status == DerivedDataArtifactWriteStatus::Written);
+	PF_CHECK(Tests, Store.ReplaceRejectedProduct(MeshKey, RepairedRead.EntryChecksum, RepairedPayload).Status ==
+		DerivedDataArtifactWriteStatus::Rejected);
+	PF_CHECK(Tests, Store.Read(MeshKey).Payload == NewerPayload);
+	std::error_code RestoreError;
+	std::filesystem::remove(DerivedDataArtifactStoreTestAccess::GetPath(Root.Path, MeshKey), RestoreError);
+	PF_CHECK(Tests, !RestoreError);
+	PF_CHECK(Tests, Store.Write(MeshKey, Payload).Status == DerivedDataArtifactWriteStatus::Written);
 	DerivedDataArtifactStore NewSession({ Root.Path, true, 1024 * 1024, 1024, 8 });
 	const auto Reopened = NewSession.Read(MeshKey);
 	PF_CHECK(Tests, Reopened.Status == DerivedDataArtifactReadStatus::Hit);
@@ -186,6 +205,10 @@ void RunDerivedDataArtifactStoreTests(TestRunner& Tests)
 	PF_CHECK(Tests, Retained.Payload == Payload);
 
 	TemporaryArtifactRoot EvictionRoot;
+	const std::filesystem::path Sentinel = EvictionRoot.Path / "keep-this.pfartifact";
+	const std::vector<std::byte> SentinelContents = Bytes("not owned by the artifact store");
+	std::filesystem::create_directories(EvictionRoot.Path);
+	PF_CHECK(Tests, WriteBytes(Sentinel, SentinelContents));
 	DerivedDataArtifactStore Bounded({ EvictionRoot.Path, true, 1024 * 1024, 1024, 1 });
 	const DerivedDataArtifactKey First = MakeKey("static-mesh", 1, "first");
 	const DerivedDataArtifactKey Second = MakeKey("static-mesh", 1, "second");
@@ -193,6 +216,20 @@ void RunDerivedDataArtifactStoreTests(TestRunner& Tests)
 	PF_CHECK(Tests, Bounded.Write(Second, Payload).Status == DerivedDataArtifactWriteStatus::Written);
 	PF_CHECK(Tests, Bounded.Read(First).Status == DerivedDataArtifactReadStatus::Miss);
 	PF_CHECK(Tests, Bounded.Read(Second).Status == DerivedDataArtifactReadStatus::Hit);
+	PF_CHECK(Tests, ReadBytes(Sentinel) == SentinelContents);
+
+	TemporaryArtifactRoot LinkRoot;
+	const std::filesystem::path ActualParent = LinkRoot.Path / "actual";
+	const std::filesystem::path LinkedParent = LinkRoot.Path / "linked";
+	std::filesystem::create_directories(ActualParent);
+	std::error_code LinkError;
+	std::filesystem::create_directory_symlink(ActualParent, LinkedParent, LinkError);
+	if (!LinkError)
+	{
+		DerivedDataArtifactStore Linked({ LinkedParent / "DerivedData", true, 1024 * 1024, 1024, 8 });
+		PF_CHECK(Tests, Linked.Write(MakeKey("linked-root"), Payload).Status == DerivedDataArtifactWriteStatus::Unavailable);
+		PF_CHECK(Tests, !std::filesystem::exists(ActualParent / "DerivedData"));
+	}
 
 	DerivedDataArtifactStore Disabled({ Root.Path / "disabled", false });
 	PF_CHECK(Tests, Disabled.Read(MeshKey).Status == DerivedDataArtifactReadStatus::Unavailable);

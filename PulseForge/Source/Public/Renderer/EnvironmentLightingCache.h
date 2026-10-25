@@ -56,7 +56,7 @@ namespace PulseForge
 		PrepareEnvironmentCpuProduct(
 			AssetID Asset,
 			std::filesystem::path ProjectRoot,
-			AssetRegistry Registry,
+			const AssetRegistry& Registry,
 			DerivedDataArtifactStore* ArtifactStore,
 			EnvironmentProcessingDesc Processing,
 			std::stop_token StopToken = {});
@@ -118,14 +118,29 @@ namespace PulseForge
 			std::string SessionKey,
 			DiagnosticRecorder* Diagnostics = nullptr,
 			EnvironmentProcessingDesc Processing = {});
+		EnvironmentLightingCache(
+			RenderDevice& Runtime,
+			std::filesystem::path ProjectRoot,
+			std::shared_ptr<const AssetRegistry> Registry,
+			AssetPreparationService& Preparation,
+			AssetUploadBudget* UploadBudget,
+			DerivedDataArtifactStore& ArtifactStore,
+			std::string SessionKey,
+			DiagnosticRecorder* Diagnostics = nullptr,
+			EnvironmentProcessingDesc Processing = {});
 		~EnvironmentLightingCache();
 		EnvironmentLightingCache(const EnvironmentLightingCache&) = delete;
 		EnvironmentLightingCache& operator=(const EnvironmentLightingCache&) = delete;
 		[[nodiscard]] std::expected<std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>, EnvironmentLightingCacheError>
 		GetOrLoad(const AssetID& Asset);
+		// Advance admitted CPU products and renderer uploads independently of binding-cache lookup results.
+		[[nodiscard]] bool AdvancePending();
+		[[nodiscard]] uint64_t GetResourceRevision(const AssetID& Asset) const noexcept;
+		[[nodiscard]] bool HasPendingWork() const noexcept;
 		// Call on a known project/source-session change. Pending subscriptions are cancelled; current GPU data remains usable
 		// until a replacement has completed preparation and upload on the renderer owner.
 		void SetSessionKey(std::string SessionKey);
+		void SetRegistrySnapshot(std::shared_ptr<const AssetRegistry> Registry) noexcept;
 		[[nodiscard]] size_t GetLoadedCount() const noexcept { return m_Entries.size(); }
 		void Clear() noexcept;
 
@@ -138,7 +153,9 @@ namespace PulseForge
 			std::string SessionKey;
 			std::string PublishedSessionKey;
 			bool UploadFailed = false;
+			bool AdmissionDeferred = false;
 			uint64_t DiagnosticSessionId = 0;
+			uint64_t ResourceRevision = 0;
 		};
 
 		[[nodiscard]] std::expected<EnvironmentLightingTextures, EnvironmentLightingCacheError> UploadProcessedData(
@@ -146,7 +163,8 @@ namespace PulseForge
 
 		RenderDevice& m_Runtime;
 		std::filesystem::path m_ProjectRoot;
-		const AssetRegistry& m_Registry;
+		std::shared_ptr<const AssetRegistry> m_RegistryOwner;
+		const AssetRegistry* m_Registry = nullptr;
 		DiagnosticRecorder* m_Diagnostics = nullptr;
 		std::unique_ptr<AssetPreparationService> m_OwnedPreparationService;
 		AssetPreparationService* m_Preparation = nullptr;

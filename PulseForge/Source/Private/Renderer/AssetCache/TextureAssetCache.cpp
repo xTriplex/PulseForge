@@ -7,16 +7,12 @@
 #include "Assets/Detail/AssetCpuProducts.h"
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
-#include <fstream>
-#include <cmath>
 #include <limits>
 #include <span>
 #include <string>
-#include <system_error>
 #include <vector>
 
 namespace PulseForge
@@ -34,22 +30,6 @@ namespace PulseForge
 
 		// Peak includes bounded source bytes, decoder output, retained mip levels, and an encoded cache-write buffer.
 		constexpr size_t EstimatedTextureWorkingBytes = 480ull * 1024ull * 1024ull;
-		constexpr uint32_t TextureArtifactSchemaVersion = 1;
-		constexpr uint64_t MaximumImageSourceBytes = 128ull * 1024ull * 1024ull;
-		constexpr uint64_t MaximumImagePixels = 32ull * 1024ull * 1024ull;
-		constexpr size_t MaximumTextureArtifactBytes = 256ull * 1024ull * 1024ull;
-
-		uint32_t GetFullMipCount(uint32_t Width, uint32_t Height)
-		{
-			uint32_t Count = 1;
-			while (Width > 1 || Height > 1)
-			{
-				Width = (std::max)(1u, Width / 2);
-				Height = (std::max)(1u, Height / 2);
-				++Count;
-			}
-			return Count;
-		}
 
 		template <typename Product>
 		size_t GetPreparedTextureRetainedBytes(const Product& Data) noexcept
@@ -64,198 +44,6 @@ namespace PulseForge
 			return Total;
 		}
 
-		void AppendU32(std::vector<std::byte>& Output, uint32_t Value)
-		{
-			for (unsigned Shift = 0; Shift < 32; Shift += 8)
-				Output.push_back(static_cast<std::byte>((Value >> Shift) & 0xffu));
-		}
-
-		bool ReadU32(std::span<const std::byte> Input, size_t& Offset, uint32_t& Value)
-		{
-			if (Offset > Input.size() || Input.size() - Offset < 4) return false;
-			Value = 0;
-			for (unsigned Index = 0; Index < 4; ++Index)
-				Value |= static_cast<uint32_t>(std::to_integer<uint8_t>(Input[Offset++])) << (Index * 8);
-			return true;
-		}
-
-		std::expected<std::vector<std::byte>, std::string> ReadImageSource(const std::filesystem::path& Path)
-		{
-			std::error_code SizeError;
-			const uintmax_t Size = std::filesystem::file_size(Path, SizeError);
-			if (SizeError || Size == 0 || Size > MaximumImageSourceBytes || Size > std::numeric_limits<size_t>::max() ||
-				Size > static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max()))
-				return std::unexpected("Image source is inaccessible, empty or exceeds the bounded source limit");
-			std::vector<std::byte> Bytes(static_cast<size_t>(Size));
-			std::ifstream Input(Path, std::ios::binary);
-			if (!Input.is_open()) return std::unexpected("Image source could not be opened for recipe identity");
-			Input.read(reinterpret_cast<char*>(Bytes.data()), static_cast<std::streamsize>(Bytes.size()));
-			if (!Input || Input.bad()) return std::unexpected("Image source could not be read completely for recipe identity");
-			return Bytes;
-		}
-
-		std::array<uint64_t, 2> ComputeImporterImageFingerprint(std::span<const std::byte> Bytes)
-		{
-			uint64_t A = 14695981039346656037ull;
-			uint64_t B = 7809847782465536322ull;
-			for (const std::byte Byte : Bytes)
-			{
-				const uint8_t Value = std::to_integer<uint8_t>(Byte);
-				A = (A ^ Value) * 1099511628211ull;
-				B = (B ^ (Value + 0x9du)) * 14029467366897019727ull;
-				B ^= B >> 29;
-			}
-			return { A, B };
-		}
-
-		DerivedDataArtifactKey MakeTextureArtifactKey(
-			const AssetContentFingerprint& Source,
-			TextureFormat Format)
-		{
-			AssetFingerprintBuilder Builder("PulseForge.TextureMipProduct.v1");
-			Builder.UpdateText("sourceAlgorithm", Source.Algorithm);
-			Builder.UpdateText("sourceDigest", Source.DigestHex);
-			Builder.UpdateText("decoder", "PulseForge.ImageRGBA8Importer.v1");
-			Builder.UpdateText("mipAlgorithm", "box-filter-srgb-linear-v1");
-			Builder.UpdateText("format", std::to_string(static_cast<uint8_t>(Format)));
-			return { "image-rgba8-mips", Builder.Finish(), TextureArtifactSchemaVersion };
-		}
-
-		std::expected<std::vector<std::byte>, std::string> EncodeTextureArtifact(const PreparedTextureData& Data)
-		{
-			if (Data.Width == 0 || Data.Height == 0 || Data.Width > 32768 || Data.Height > 32768 ||
-				(static_cast<uint64_t>(Data.Width) * Data.Height) > MaximumImagePixels ||
-				(Data.Format != TextureFormat::RGBA8_UNorm && Data.Format != TextureFormat::RGBA8_Srgb) ||
-				Data.MipLevels.size() != GetFullMipCount(Data.Width, Data.Height))
-				return std::unexpected("Texture product exceeds the artifact codec bounds");
-			const size_t RetainedBytes = GetPreparedTextureRetainedBytes(Data);
-			if (RetainedBytes > MaximumTextureArtifactBytes - 256)
-				return std::unexpected("Texture product exceeds the artifact codec size bound");
-			std::vector<std::byte> Output;
-			Output.reserve(24 + RetainedBytes + Data.MipLevels.size() * 12);
-			Output.insert(Output.end(), { std::byte{'P'}, std::byte{'F'}, std::byte{'T'}, std::byte{'X'} });
-			AppendU32(Output, TextureArtifactSchemaVersion);
-			AppendU32(Output, static_cast<uint32_t>(Data.Format));
-			AppendU32(Output, Data.Width);
-			AppendU32(Output, Data.Height);
-			AppendU32(Output, static_cast<uint32_t>(Data.MipLevels.size()));
-			uint32_t ExpectedWidth = Data.Width, ExpectedHeight = Data.Height;
-			for (const OwnedMipLevel& Level : Data.MipLevels)
-			{
-				const uint64_t ExpectedBytes = static_cast<uint64_t>(ExpectedWidth) * ExpectedHeight * 4;
-				if (Level.Width != ExpectedWidth || Level.Height != ExpectedHeight || Level.Pixels.size() != ExpectedBytes)
-					return std::unexpected("Texture product has an inconsistent mip layout");
-				AppendU32(Output, Level.Width);
-				AppendU32(Output, Level.Height);
-				AppendU32(Output, static_cast<uint32_t>(Level.Pixels.size()));
-				for (uint8_t Value : Level.Pixels) Output.push_back(static_cast<std::byte>(Value));
-				ExpectedWidth = (std::max)(1u, ExpectedWidth / 2);
-				ExpectedHeight = (std::max)(1u, ExpectedHeight / 2);
-			}
-			if (ExpectedWidth != 1 || ExpectedHeight != 1 || Output.size() > MaximumTextureArtifactBytes)
-				return std::unexpected("Texture product has incomplete mips or exceeds the artifact size bound");
-			return Output;
-		}
-
-		std::expected<PreparedTextureData, std::string> DecodeTextureArtifact(
-			std::span<const std::byte> Input, TextureFormat ExpectedFormat)
-		{
-			if (Input.size() < 24 || Input.size() > MaximumTextureArtifactBytes || Input[0] != std::byte{'P'} ||
-				Input[1] != std::byte{'F'} || Input[2] != std::byte{'T'} || Input[3] != std::byte{'X'})
-				return std::unexpected("Texture artifact has an invalid magic or size");
-			size_t Offset = 4;
-			uint32_t Version = 0, Format = 0, MipCount = 0;
-			PreparedTextureData Data;
-			if (!ReadU32(Input, Offset, Version) || Version != TextureArtifactSchemaVersion ||
-				!ReadU32(Input, Offset, Format) || Format != static_cast<uint32_t>(ExpectedFormat) ||
-				!ReadU32(Input, Offset, Data.Width) || !ReadU32(Input, Offset, Data.Height) ||
-				!ReadU32(Input, Offset, MipCount) || Data.Width == 0 || Data.Height == 0 ||
-				Data.Width > 32768 || Data.Height > 32768 || static_cast<uint64_t>(Data.Width) * Data.Height > MaximumImagePixels ||
-				MipCount != GetFullMipCount(Data.Width, Data.Height))
-				return std::unexpected("Texture artifact has invalid schema, format or dimensions");
-			Data.Format = ExpectedFormat;
-			uint32_t ExpectedWidth = Data.Width, ExpectedHeight = Data.Height;
-			Data.MipLevels.reserve(MipCount);
-			for (uint32_t Index = 0; Index < MipCount; ++Index)
-			{
-				uint32_t Width = 0, Height = 0, ByteCount = 0;
-				const uint64_t ExpectedBytes = static_cast<uint64_t>(ExpectedWidth) * ExpectedHeight * 4;
-				if (!ReadU32(Input, Offset, Width) || !ReadU32(Input, Offset, Height) || !ReadU32(Input, Offset, ByteCount) ||
-					Width != ExpectedWidth || Height != ExpectedHeight || ByteCount != ExpectedBytes ||
-					Offset > Input.size() || Input.size() - Offset < ByteCount)
-					return std::unexpected("Texture artifact contains an invalid mip layout or truncated payload");
-				OwnedMipLevel Level{ Width, Height, {} };
-				Level.Pixels.resize(ByteCount);
-				for (uint8_t& Value : Level.Pixels) Value = std::to_integer<uint8_t>(Input[Offset++]);
-				Data.MipLevels.push_back(std::move(Level));
-				ExpectedWidth = (std::max)(1u, ExpectedWidth / 2);
-				ExpectedHeight = (std::max)(1u, ExpectedHeight / 2);
-			}
-			if (ExpectedWidth != 1 || ExpectedHeight != 1 || Offset != Input.size())
-				return std::unexpected("Texture artifact has trailing data or an incomplete mip chain");
-			return Data;
-		}
-
-		float SrgbToLinear(uint8_t Value)
-		{
-			const float Encoded = static_cast<float>(Value) / 255.0f;
-			return Encoded <= 0.04045f ? Encoded / 12.92f : std::pow((Encoded + 0.055f) / 1.055f, 2.4f);
-		}
-
-		uint8_t LinearToSrgbByte(float Value)
-		{
-			Value = std::clamp(Value, 0.0f, 1.0f);
-			const float Encoded = Value <= 0.0031308f ? Value * 12.92f : 1.055f * std::pow(Value, 1.0f / 2.4f) - 0.055f;
-			return static_cast<uint8_t>(std::lround(Encoded * 255.0f));
-		}
-
-		std::vector<OwnedMipLevel> BuildMipChain(uint32_t Width, uint32_t Height, std::span<const uint8_t> SourcePixels, bool IsSrgb)
-		{
-			std::vector<OwnedMipLevel> Levels;
-			Levels.push_back({ Width, Height, { SourcePixels.begin(), SourcePixels.end() } });
-			while (Width > 1 || Height > 1)
-			{
-				const OwnedMipLevel& Previous = Levels.back();
-				const uint32_t NextWidth = (std::max)(1u, Width / 2);
-				const uint32_t NextHeight = (std::max)(1u, Height / 2);
-				OwnedMipLevel Next;
-				Next.Width = NextWidth;
-				Next.Height = NextHeight;
-				Next.Pixels.resize(static_cast<size_t>(NextWidth) * NextHeight * 4);
-				for (uint32_t Y = 0; Y < NextHeight; ++Y)
-				{
-					const uint32_t StartY = static_cast<uint32_t>((static_cast<uint64_t>(Y) * Height) / NextHeight);
-					const uint32_t EndY = static_cast<uint32_t>((static_cast<uint64_t>(Y + 1) * Height) / NextHeight);
-					for (uint32_t X = 0; X < NextWidth; ++X)
-					{
-						const uint32_t StartX = static_cast<uint32_t>((static_cast<uint64_t>(X) * Width) / NextWidth);
-						const uint32_t EndX = static_cast<uint32_t>((static_cast<uint64_t>(X + 1) * Width) / NextWidth);
-						std::array<float, 4> Sum{};
-						uint32_t SampleCount = 0;
-						for (uint32_t SourceY = StartY; SourceY < EndY; ++SourceY)
-							for (uint32_t SourceX = StartX; SourceX < EndX; ++SourceX)
-							{
-								const size_t Source = (static_cast<size_t>(SourceY) * Width + SourceX) * 4;
-								for (size_t Channel = 0; Channel < 4; ++Channel)
-									Sum[Channel] += IsSrgb && Channel < 3 ? SrgbToLinear(Previous.Pixels[Source + Channel])
-																		  : static_cast<float>(Previous.Pixels[Source + Channel]) / 255.0f;
-								++SampleCount;
-							}
-						const size_t Destination = (static_cast<size_t>(Y) * NextWidth + X) * 4;
-						for (size_t Channel = 0; Channel < 4; ++Channel)
-						{
-							const float Average = Sum[Channel] / static_cast<float>(SampleCount);
-							Next.Pixels[Destination + Channel] =
-								IsSrgb && Channel < 3 ? LinearToSrgbByte(Average) : static_cast<uint8_t>(std::lround(Average * 255.0f));
-						}
-					}
-				}
-				Levels.push_back(std::move(Next));
-				Width = NextWidth;
-				Height = NextHeight;
-			}
-			return Levels;
-		}
 	} // namespace
 
 	TextureAssetCache::TextureAssetCache(
@@ -263,7 +51,8 @@ namespace PulseForge
 		std::filesystem::path ProjectRoot,
 		const AssetRegistry& Registry,
 		DiagnosticRecorder* Diagnostics)
-		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_Registry(Registry), m_Diagnostics(Diagnostics)
+		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)),
+		  m_RegistryOwner(std::make_shared<const AssetRegistry>(Registry)), m_Registry(m_RegistryOwner.get()), m_Diagnostics(Diagnostics)
 	{
 	}
 
@@ -276,9 +65,25 @@ namespace PulseForge
 		DerivedDataArtifactStore& ArtifactStore,
 		std::string SessionKey,
 		DiagnosticRecorder* Diagnostics)
-		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_Registry(Registry),
+		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)),
+		  m_RegistryOwner(std::make_shared<const AssetRegistry>(Registry)), m_Registry(m_RegistryOwner.get()),
 		  m_Preparation(&Preparation), m_UploadBudget(UploadBudget), m_ArtifactStore(&ArtifactStore),
 		  m_SessionKey(std::move(SessionKey)), m_Diagnostics(Diagnostics)
+	{
+	}
+
+	TextureAssetCache::TextureAssetCache(
+		RenderDevice& Runtime,
+		std::filesystem::path ProjectRoot,
+		std::shared_ptr<const AssetRegistry> Registry,
+		AssetPreparationService& Preparation,
+		AssetUploadBudget* UploadBudget,
+		DerivedDataArtifactStore& ArtifactStore,
+		std::string SessionKey,
+		DiagnosticRecorder* Diagnostics)
+		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_RegistryOwner(std::move(Registry)),
+		  m_Registry(m_RegistryOwner.get()), m_Preparation(&Preparation), m_UploadBudget(UploadBudget),
+		  m_ArtifactStore(&ArtifactStore), m_SessionKey(std::move(SessionKey)), m_Diagnostics(Diagnostics)
 	{
 	}
 
@@ -298,14 +103,23 @@ namespace PulseForge
 			Entry.Pending.reset();
 			Entry.SessionKey.clear();
 			Entry.FailureMessage.clear();
-			Entry.UploadFailed = false;
+			Entry.TerminalFailure = false;
+			Entry.TerminalFailureCode = TextureAssetErrorCode::TextureCreationFailed;
 		}
+	}
+
+	void TextureAssetCache::SetRegistrySnapshot(std::shared_ptr<const AssetRegistry> Registry) noexcept
+	{
+		if (!Registry)
+			return;
+		m_RegistryOwner = std::move(Registry);
+		m_Registry = m_RegistryOwner.get();
 	}
 
 	std::expected<std::reference_wrapper<const Texture>, TextureAssetError> TextureAssetCache::GetOrLoad(
 		const AssetID& Asset, TextureFormat Format)
 	{
-		if (Asset.IsNil() || !m_Registry.Find(Asset))
+		if (Asset.IsNil() || !m_Registry->Find(Asset))
 		{
 			return std::unexpected(TextureAssetError{ TextureAssetErrorCode::AssetNotFound, Asset,
 				Asset.IsNil() ? "Cannot load a texture with a nil asset UUID"
@@ -333,7 +147,7 @@ namespace PulseForge
 			auto ImportedImage = [&]()
 			{
 				ScopedDiagnosticTimer Timer(m_Diagnostics, "Texture asset import", "TextureAssetCache");
-				return ImageAssetImporter::ImportRGBA8(Asset, m_ProjectRoot, m_Registry);
+				return ImageAssetImporter::ImportRGBA8(Asset, m_ProjectRoot, *m_Registry);
 			}();
 			if (!ImportedImage)
 				return std::unexpected(TextureAssetError{ TextureAssetErrorCode::ImportFailed, Asset, ImportedImage.error().Message });
@@ -343,8 +157,9 @@ namespace PulseForge
 			Prepared.Format = Format;
 			{
 				ScopedDiagnosticTimer Timer(m_Diagnostics, "Texture mip generation", "TextureAssetCache");
-				Prepared.MipLevels = BuildMipChain(ImportedImage->Width, ImportedImage->Height, ImportedImage->RGBA8Pixels,
-					Format == TextureFormat::RGBA8_Srgb);
+			Prepared.MipLevels = Detail::BuildTextureMipChain(ImportedImage->Width, ImportedImage->Height,
+				ImportedImage->RGBA8Pixels, Format == TextureFormat::RGBA8_Srgb
+					? Detail::ImageColorSpace::Srgb : Detail::ImageColorSpace::Linear);
 			}
 			TextureDesc Description;
 			Description.Width = Prepared.Width;
@@ -364,6 +179,7 @@ namespace PulseForge
 				return std::unexpected(TextureAssetError{ TextureAssetErrorCode::TextureCreationFailed, Asset,
 					CreatedTexture.error().Message });
 			State.Current = std::move(*CreatedTexture);
+			++State.ResourceRevision;
 			if (m_Diagnostics)
 				(void)m_Diagnostics->RecordEvent(DiagnosticEventKind::Resource, "Texture cache resource created", "TextureAssetCache", "objects", 1);
 			return std::cref(*State.Current);
@@ -387,19 +203,21 @@ namespace PulseForge
 				uint64_t Start = 0;
 				(void)m_Diagnostics->BeginDurationSession(State.DiagnosticSessionId, Start);
 			}
-			State.UploadFailed = false;
-			AssetRegistry RegistrySnapshot = m_Registry;
+			State.TerminalFailure = false;
+			State.AdmissionDeferred = false;
+			State.TerminalFailureCode = TextureAssetErrorCode::TextureCreationFailed;
+			auto RegistrySnapshot = m_RegistryOwner;
 			const std::filesystem::path ProjectRoot = m_ProjectRoot;
 			DerivedDataArtifactStore* ArtifactStore = m_ArtifactStore;
 			auto Requested = m_Preparation->Request(
 				{ m_SessionKey, "texture-request/" + Asset.ToString() + "/" + std::to_string(static_cast<uint8_t>(Format)) },
 				AssetPreparationPriority::Interactive,
 				EstimatedTextureWorkingBytes,
-				[Asset, Format, ProjectRoot, RegistrySnapshot = std::move(RegistrySnapshot), ArtifactStore](std::stop_token StopToken) mutable
+				[Asset, Format, ProjectRoot, RegistrySnapshot, ArtifactStore](std::stop_token StopToken)
 					-> std::expected<AssetPreparationService::CpuPayload, AssetPreparationError>
 				{
 					auto Prepared = Detail::PrepareTextureCpuProduct(
-						Asset, ProjectRoot, RegistrySnapshot,
+						Asset, ProjectRoot, *RegistrySnapshot,
 						Format == TextureFormat::RGBA8_Srgb ? Detail::ImageColorSpace::Srgb : Detail::ImageColorSpace::Linear,
 						ArtifactStore, StopToken);
 					if (!Prepared)
@@ -410,13 +228,21 @@ namespace PulseForge
 			if (!Requested)
 			{
 				if (State.Current)
+				{
+					State.AdmissionDeferred = Requested.error().Code == AssetPreparationErrorCode::WorkingSetLimit ||
+						Requested.error().Code == AssetPreparationErrorCode::QueueFull;
 					return std::cref(*State.Current);
+				}
 				if (Requested.error().Code == AssetPreparationErrorCode::WorkingSetLimit ||
 					Requested.error().Code == AssetPreparationErrorCode::QueueFull)
+				{
+					State.AdmissionDeferred = true;
 					return std::unexpected(TextureAssetError{ TextureAssetErrorCode::Pending, Asset, Requested.error().Message });
+				}
 				return std::unexpected(TextureAssetError{ TextureAssetErrorCode::CacheFailure, Asset, Requested.error().Message });
 			}
 			State.Pending.emplace(std::move(*Requested));
+			State.AdmissionDeferred = false;
 			State.SessionKey = m_SessionKey;
 			++m_CacheMisses;
 		}
@@ -425,8 +251,8 @@ namespace PulseForge
 		{
 			if (State.Current)
 				return std::cref(*State.Current);
-			if (State.UploadFailed)
-				return std::unexpected(TextureAssetError{ TextureAssetErrorCode::TextureCreationFailed, Asset, State.FailureMessage });
+			if (State.TerminalFailure)
+				return std::unexpected(TextureAssetError{ State.TerminalFailureCode, Asset, State.FailureMessage });
 			return std::unexpected(TextureAssetError{ TextureAssetErrorCode::Pending, Asset, "Texture preparation is pending" });
 		}
 
@@ -440,19 +266,21 @@ namespace PulseForge
 				return std::unexpected(TextureAssetError{ TextureAssetErrorCode::Pending, Asset, "Texture preparation is pending" });
 			case AssetPreparationStatus::CpuReady:
 			{
-				if (State.UploadFailed)
+				if (State.TerminalFailure)
 				{
 					if (State.Current)
 						return std::cref(*State.Current);
-					return std::unexpected(TextureAssetError{ TextureAssetErrorCode::TextureCreationFailed, Asset,
+					return std::unexpected(TextureAssetError{ State.TerminalFailureCode, Asset,
 						State.FailureMessage });
 				}
 				const auto* TextureProduct = Prepared.CpuPayload
 					? dynamic_cast<const AssetPreparationValue<Detail::AssetCpuProductResult<Detail::PreparedTextureCpuProduct>>*>(Prepared.CpuPayload.get()) : nullptr;
 				if (!TextureProduct)
 				{
-					State.UploadFailed = true;
+					State.TerminalFailure = true;
+					State.TerminalFailureCode = TextureAssetErrorCode::CacheFailure;
 					State.FailureMessage = "Prepared texture result has an unexpected CPU product type";
+					State.Pending.reset();
 					if (State.Current)
 						return std::cref(*State.Current);
 					return std::unexpected(TextureAssetError{ TextureAssetErrorCode::CacheFailure, Asset, State.FailureMessage });
@@ -478,7 +306,8 @@ namespace PulseForge
 				const size_t UploadBytes = Prepared.CpuPayload->GetRetainedBytes();
 				if (m_UploadBudget && (UploadBytes == 0 || UploadBytes > AssetUploadBudget::MaximumIndivisibleProductBytes))
 				{
-					State.UploadFailed = true;
+					State.TerminalFailure = true;
+					State.TerminalFailureCode = TextureAssetErrorCode::TextureCreationFailed;
 					State.FailureMessage = "Prepared texture exceeds the bounded indivisible GPU upload size";
 					State.Pending.reset();
 					if (State.Current) return std::cref(*State.Current);
@@ -511,16 +340,20 @@ namespace PulseForge
 				}();
 				if (!CreatedTexture)
 				{
-					State.UploadFailed = true;
+					State.TerminalFailure = true;
+					State.TerminalFailureCode = TextureAssetErrorCode::TextureCreationFailed;
 					State.FailureMessage = CreatedTexture.error().Message;
+					State.Pending.reset();
 					if (State.Current)
 						return std::cref(*State.Current);
 					return std::unexpected(TextureAssetError{ TextureAssetErrorCode::TextureCreationFailed, Asset,
 						State.FailureMessage });
 				}
 				State.Current = std::move(*CreatedTexture);
+				++State.ResourceRevision;
 				State.Pending.reset();
-				State.UploadFailed = false;
+				State.TerminalFailure = false;
+				State.TerminalFailureCode = TextureAssetErrorCode::TextureCreationFailed;
 				State.FailureMessage.clear();
 				if (m_Diagnostics)
 					(void)m_Diagnostics->RecordEvent(DiagnosticEventKind::Resource, "Texture cache resource created", "TextureAssetCache", "objects", 1);
@@ -528,18 +361,61 @@ namespace PulseForge
 			}
 			case AssetPreparationStatus::Failed:
 				State.FailureMessage = Prepared.Error ? Prepared.Error->Message : "Texture CPU preparation failed";
+				State.TerminalFailure = true;
+				State.TerminalFailureCode = TextureAssetErrorCode::ImportFailed;
+				State.Pending.reset();
 				if (State.Current)
 					return std::cref(*State.Current);
 				return std::unexpected(TextureAssetError{ TextureAssetErrorCode::ImportFailed, Asset, State.FailureMessage });
 			case AssetPreparationStatus::Cancelled:
 				State.Pending.reset();
 				State.SessionKey.clear();
+				State.TerminalFailure = false;
 				if (State.Current)
 					return std::cref(*State.Current);
 				return std::unexpected(TextureAssetError{ TextureAssetErrorCode::Pending, Asset, "Texture preparation was cancelled" });
 		}
 		return std::unexpected(TextureAssetError{ TextureAssetErrorCode::CacheFailure, Asset,
 			"Unrecognized texture preparation state" });
+	}
+
+	bool TextureAssetCache::AdvancePending()
+	{
+		std::vector<CacheKey> Keys;
+		Keys.reserve(m_Textures.size());
+		for (const auto& [Key, State] : m_Textures)
+		{
+			(void)State;
+			Keys.push_back(Key);
+		}
+
+		bool PublishedReplacement = false;
+		for (const CacheKey& Key : Keys)
+		{
+			const auto Found = m_Textures.find(Key);
+			if (Found == m_Textures.end())
+				continue;
+			const uint64_t PreviousRevision = Found->second.ResourceRevision;
+			(void)GetOrLoad(Key.Asset, Key.Format);
+			const auto Updated = m_Textures.find(Key);
+			PublishedReplacement |= Updated != m_Textures.end() && Updated->second.ResourceRevision != PreviousRevision;
+		}
+		return PublishedReplacement;
+	}
+
+	uint64_t TextureAssetCache::GetResourceRevision(const AssetID& Asset, TextureFormat Format) const noexcept
+	{
+		const auto Found = m_Textures.find(CacheKey{ Asset, Format });
+		return Found == m_Textures.end() ? 0 : Found->second.ResourceRevision;
+	}
+
+	bool TextureAssetCache::HasPendingWork() const noexcept
+	{
+		return std::ranges::any_of(m_Textures, [this](const auto& Pair)
+		{
+			const auto& State = Pair.second;
+			return State.Pending.has_value() || State.AdmissionDeferred;
+		});
 	}
 
 	void TextureAssetCache::Clear() noexcept

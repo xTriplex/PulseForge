@@ -6,6 +6,7 @@
 #include <array>
 #include <exception>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <system_error>
 
@@ -171,10 +172,60 @@ namespace PulseForge
 #endif
 		}
 
+		std::expected<bool, std::string> HasSafeCacheAncestors(const std::filesystem::path& Root)
+		{
+			std::error_code Error;
+			const std::filesystem::path AbsoluteRoot = std::filesystem::absolute(Root, Error).lexically_normal();
+			if (Error)
+				return std::unexpected("Could not resolve artifact cache root: " + Error.message());
+
+			std::filesystem::path Current = AbsoluteRoot.root_path();
+			for (auto Component = std::next(AbsoluteRoot.begin()); Component != AbsoluteRoot.end(); ++Component)
+			{
+				Current /= *Component;
+				auto Next = Component;
+				++Next;
+				const bool IsLastComponent = Next == AbsoluteRoot.end();
+				const auto Status = std::filesystem::symlink_status(Current, Error);
+				if (Error == std::errc::no_such_file_or_directory ||
+					(!Error && Status.type() == std::filesystem::file_type::not_found))
+				{
+					Error.clear();
+					return true;
+				}
+				if (Error)
+					return std::unexpected("Could not inspect artifact cache path ancestor: " + Error.message());
+				if (IsReparseOrSymlink(Current, Error))
+					return std::unexpected("Artifact cache path contains a symbolic link or reparse point ancestor");
+				if (Error)
+					return std::unexpected("Could not inspect artifact cache path ancestor: " + Error.message());
+				if (!IsLastComponent && !std::filesystem::is_directory(Status))
+					return std::unexpected("Artifact cache path ancestor is not a directory");
+			}
+			return false;
+		}
+
+		bool IsOwnedArtifactName(const std::filesystem::path& Path)
+		{
+			if (Path.extension() != ".pfartifact")
+				return false;
+			const std::string Stem = Path.stem().string();
+			// AssetFingerprintBuilder currently emits XXH3-128 as 32 lower-case hexadecimal characters.
+			return Stem.size() == 32 && std::ranges::all_of(Stem, [](unsigned char Character)
+			{
+				return (Character >= '0' && Character <= '9') || (Character >= 'a' && Character <= 'f');
+			});
+		}
+
 		std::expected<std::vector<CacheFile>, std::string> EnumerateOwnedFiles(
 			const std::filesystem::path& Root)
 		{
 			std::vector<CacheFile> Files;
+			auto SafeAncestors = HasSafeCacheAncestors(Root);
+			if (!SafeAncestors)
+				return std::unexpected(SafeAncestors.error());
+			if (*SafeAncestors)
+				return Files;
 			std::error_code Error;
 			const auto RootStatus = std::filesystem::symlink_status(Root, Error);
 			if (Error == std::errc::no_such_file_or_directory ||
@@ -196,7 +247,7 @@ namespace PulseForge
 				if (++EntriesVisited > 131072)
 					return std::unexpected("Artifact cache root exceeds the bounded directory-entry scan limit");
 				const std::filesystem::path Path = Entry.path();
-				if (Path.extension() != ".pfartifact")
+				if (!IsOwnedArtifactName(Path))
 					continue;
 				const auto Status = Entry.symlink_status(Error);
 				if (Error)
@@ -308,6 +359,11 @@ namespace PulseForge
 			return { DerivedDataArtifactReadStatus::Incompatible, {}, "Artifact key has an invalid product token, digest or schema version" };
 
 		const std::filesystem::path Path = GetArtifactPath(m_Options.Root, Key);
+		auto SafeAncestors = HasSafeCacheAncestors(m_Options.Root);
+		if (!SafeAncestors)
+			return { DerivedDataArtifactReadStatus::Unavailable, {}, SafeAncestors.error() };
+		if (*SafeAncestors)
+			return { DerivedDataArtifactReadStatus::Miss, {}, {} };
 		std::error_code Error;
 		const auto RootStatus = std::filesystem::symlink_status(m_Options.Root, Error);
 		if (Error == std::errc::no_such_file_or_directory ||
@@ -408,6 +464,7 @@ namespace PulseForge
 			return { DerivedDataArtifactReadStatus::Corrupt, {}, "Artifact payload checksum does not match" };
 
 		Result.Status = DerivedDataArtifactReadStatus::Hit;
+		Result.EntryChecksum = StoredChecksum;
 		std::filesystem::last_write_time(Path, std::filesystem::file_time_type::clock::now(), Error);
 		return Result;
 	}
@@ -437,10 +494,41 @@ namespace PulseForge
 		}
 	}
 
+	DerivedDataArtifactWriteResult DerivedDataArtifactStore::ReplaceRejectedProduct(
+		const DerivedDataArtifactKey& Key,
+		const AssetContentFingerprint& ObservedEntryChecksum,
+		std::span<const std::byte> ReplacementPayload)
+	{
+		if (!IsHexDigest(ObservedEntryChecksum.DigestHex) || !IsToken(ObservedEntryChecksum.Algorithm, MaximumAlgorithmBytes))
+			return { DerivedDataArtifactWriteStatus::Rejected, "Observed artifact checksum is invalid" };
+		try
+		{
+			return WriteWithReplacement(Key, ReplacementPayload,
+				[](const std::filesystem::path& Temporary, const std::filesystem::path& Destination)
+				{
+					auto Replaced = Platform::ReplaceFileAtomically(Temporary, Destination);
+					if (!Replaced)
+						return std::expected<void, std::string>(std::unexpected(Replaced.error().Message));
+					return std::expected<void, std::string>{};
+				}, &ObservedEntryChecksum);
+		}
+		catch (const std::exception& Exception)
+		{
+			return { DerivedDataArtifactWriteStatus::Unavailable,
+				std::string("Rejected product replacement failed safely: ") + Exception.what() };
+		}
+		catch (...)
+		{
+			return { DerivedDataArtifactWriteStatus::Unavailable,
+				"Rejected product replacement failed with an unknown host error" };
+		}
+	}
+
 	DerivedDataArtifactWriteResult DerivedDataArtifactStore::WriteWithReplacement(
 		const DerivedDataArtifactKey& Key,
 		std::span<const std::byte> Payload,
-		const ReplaceFunction& Replace)
+		const ReplaceFunction& Replace,
+		const AssetContentFingerprint* ExpectedExistingChecksum)
 	{
 		std::lock_guard Lock(m_Mutex);
 		if (!m_Options.Enabled || m_Options.Root.empty())
@@ -458,9 +546,16 @@ namespace PulseForge
 			return { DerivedDataArtifactWriteStatus::Rejected, "Artifact cannot fit within configured cache bounds" };
 
 		std::error_code Error;
+		auto SafeAncestors = HasSafeCacheAncestors(m_Options.Root);
+		if (!SafeAncestors)
+			return { DerivedDataArtifactWriteStatus::Unavailable, SafeAncestors.error() };
 		std::filesystem::create_directories(m_Options.Root, Error);
 		if (Error)
 			return { DerivedDataArtifactWriteStatus::Unavailable, "Could not create artifact cache root: " + Error.message() };
+		SafeAncestors = HasSafeCacheAncestors(m_Options.Root);
+		if (!SafeAncestors || *SafeAncestors)
+			return { DerivedDataArtifactWriteStatus::Unavailable,
+				SafeAncestors ? "Artifact cache path contains a symbolic link or reparse point ancestor" : SafeAncestors.error() };
 		if (IsReparseOrSymlink(m_Options.Root, Error))
 			return { DerivedDataArtifactWriteStatus::Unavailable, "Artifact cache root must not be a symbolic link or reparse point" };
 		const auto DestinationStatus = std::filesystem::symlink_status(Destination, Error);
@@ -471,8 +566,19 @@ namespace PulseForge
 			return { DerivedDataArtifactWriteStatus::Unavailable, "Could not inspect artifact destination: " + Error.message() };
 
 		DerivedDataArtifactReadResult Existing = ReadUnlocked(Key);
+		if (ExpectedExistingChecksum)
+		{
+			if (Existing.Status != DerivedDataArtifactReadStatus::Hit || Existing.EntryChecksum != *ExpectedExistingChecksum)
+				return { DerivedDataArtifactWriteStatus::Rejected,
+					"Rejected product artifact changed since it was read; refusing to replace a newer or different entry" };
+		}
 		if (Existing.Status == DerivedDataArtifactReadStatus::Hit)
+		{
+			if (ExpectedExistingChecksum)
+				Existing.Status = DerivedDataArtifactReadStatus::Corrupt;
+			else
 			return { DerivedDataArtifactWriteStatus::ExistingValid, "A valid equivalent artifact already exists" };
+		}
 
 		auto Capacity = EnsureCapacity(m_Options.Root, Destination, EnvelopeSize, m_Options.MaxTotalBytes, m_Options.MaxEntries);
 		if (!Capacity)

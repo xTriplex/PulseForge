@@ -27,6 +27,13 @@ namespace PulseForge
 			return { SceneRendererErrorCode::DrawFailed, {}, {}, std::move(Message) };
 		}
 
+		const Mesh* FindPreparedMesh(const std::vector<std::pair<AssetID, const Mesh*>>& PreparedMeshes, const AssetID& Asset)
+		{
+			const auto Found = std::find_if(PreparedMeshes.begin(), PreparedMeshes.end(),
+				[&Asset](const auto& Entry) { return Entry.first == Asset; });
+			return Found == PreparedMeshes.end() ? nullptr : Found->second;
+		}
+
 		bool IsFiniteMatrix(const glm::mat4& Matrix)
 		{
 			for (int Column = 0; Column < 4; ++Column)
@@ -428,9 +435,9 @@ namespace PulseForge
 			if ((*Material)->AlphaMode == MaterialAlphaMode::Blend) continue;
 			auto Bindings = Inputs.ResolveBindings(Instance);
 			if (!Bindings) return std::unexpected(std::move(Bindings.error()));
-			auto Mesh = Inputs.Meshes.GetOrLoad(Instance.MeshAsset);
-			if (!Mesh)
-				return std::unexpected(MakeAmbientOcclusionDrawError("SSAO prepass mesh became unavailable: " + Mesh.error().Message));
+			const Mesh* MeshResource = FindPreparedMesh(Inputs.PreparedMeshes, Instance.MeshAsset);
+			if (!MeshResource)
+				return std::unexpected(MakeAmbientOcclusionDrawError("Prepared SSAO prepass mesh is unavailable"));
 
 			const glm::mat4 ViewModel = Inputs.Snapshot.View * Instance.WorldTransform;
 			const glm::mat4 ViewNormalTransform = glm::transpose(glm::inverse(ViewModel));
@@ -445,7 +452,7 @@ namespace PulseForge
 			const size_t PipelineIndex =
 				((*Material)->DoubleSided ? 2u : 0u) + (UsesCounterClockwiseFrontFace(Instance.Orientation) ? 0u : 1u);
 			const GraphicsResult Draw = m_Runtime.DrawIndexed(
-				*m_PrepassPipelines[PipelineIndex], Mesh->get(), { Mesh->get().GetIndexCount(), 1, 0, 0 }, BindingSets);
+				*m_PrepassPipelines[PipelineIndex], *MeshResource, { MeshResource->GetIndexCount(), 1, 0, 0 }, BindingSets);
 			if (!Draw)
 				return std::unexpected(MakeAmbientOcclusionDrawError("Could not draw SSAO normal-depth prepass: " + Draw.error().Message));
 		}

@@ -1,6 +1,6 @@
 #include "Renderer/SceneRendererShadowPass.h"
 
-#include "Renderer/AssetCache/MeshAssetCache.h"
+#include "Renderer/Mesh.h"
 #include "Renderer/SceneRendererLocalLightingState.h"
 #include "Renderer/SceneRendererMaterialBindingCache.h"
 #include "Renderer/SceneRendererPipelineCache.h"
@@ -26,6 +26,21 @@ namespace PulseForge
 		SceneRendererError MakeShadowDrawError(std::string Message)
 		{
 			return { SceneRendererErrorCode::DrawFailed, {}, {}, std::move(Message) };
+		}
+
+		const Mesh* FindPreparedMesh(const std::vector<std::pair<AssetID, const Mesh*>>& PreparedMeshes, const AssetID& Asset)
+		{
+			const auto Found = std::find_if(PreparedMeshes.begin(), PreparedMeshes.end(),
+				[&Asset](const auto& Entry) { return Entry.first == Asset; });
+			return Found == PreparedMeshes.end() ? nullptr : Found->second;
+		}
+
+		const BindingSet* FindPinnedMaterialBinding(
+			const std::vector<std::pair<UUID, const BindingSet*>>& Bindings, UUID Entity)
+		{
+			const auto Found = std::find_if(Bindings.begin(), Bindings.end(),
+				[Entity](const auto& Entry) { return Entry.first == Entity; });
+			return Found == Bindings.end() ? nullptr : Found->second;
 		}
 
 		bool SuppressShadowCasterDrawsForValidation() noexcept
@@ -99,8 +114,9 @@ namespace PulseForge
 				auto Material = Resources.MaterialBindings.ResolveMaterialDescription(Instance);
 				if (!Material) return std::unexpected(std::move(Material.error()));
 				if ((*Material)->AlphaMode == MaterialAlphaMode::Blend) continue;
-				auto MaterialBinding = Resources.MaterialBindings.ResolveMaterialBinding(Instance, Resources.BindingEnvironmentAsset);
-				if (!MaterialBinding) return std::unexpected(std::move(MaterialBinding.error()));
+				const BindingSet* MaterialBinding =
+					FindPinnedMaterialBinding(Resources.PreparedMaterialBindings, Instance.Entity);
+				if (!MaterialBinding) return std::unexpected(MakeShadowDrawError("Prepared directional shadow material binding is unavailable"));
 				if (auto PipelineResult = Resources.Pipelines.EnsureShadowPipeline(
 						Resources.Snapshot->DirectionalLight->ShadowBias, (*Material)->DoubleSided, Instance.Orientation);
 					!PipelineResult)
@@ -108,18 +124,18 @@ namespace PulseForge
 				const GraphicsPipeline* Pipeline =
 					Resources.Pipelines.FindShadowPipeline(RasterBias, (*Material)->DoubleSided, Instance.Orientation);
 				if (!Pipeline) return std::unexpected(MakeShadowResourceError("Directional alpha-tested shadow pipeline was not prepared"));
-				auto Mesh = Resources.Meshes.GetOrLoad(Instance.MeshAsset);
-				if (!Mesh) return std::unexpected(MakeShadowDrawError("Shadow pass mesh became unavailable: " + Mesh.error().Message));
+				const Mesh* MeshResource = FindPreparedMesh(Resources.PreparedMeshes, Instance.MeshAsset);
+				if (!MeshResource) return std::unexpected(MakeShadowDrawError("Prepared shadow-pass mesh is unavailable"));
 				const glm::mat4 ShadowTransform = Resources.Cascades->Cascades[CascadeIndex].ViewProjection * Instance.WorldTransform;
 				const auto Update =
 					Resources.Runtime.WriteBuffer(*Resources.ShadowObjectConstants, 0, std::as_bytes(std::span(&ShadowTransform, 1)));
 				if (!Update)
 					return std::unexpected(MakeShadowDrawError("Could not update shadow object constants: " + Update.error().Message));
-				const std::array<const BindingSet*, 2> Bindings = { *MaterialBinding, Resources.ShadowObjectBindings.get() };
-				const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
+				const std::array<const BindingSet*, 2> Bindings = { MaterialBinding, Resources.ShadowObjectBindings.get() };
+				const DrawIndexedArguments Arguments{ MeshResource->GetIndexCount(), 1, 0, 0 };
 				if (!SuppressShadowCasterDrawsForValidation())
 				{
-					const GraphicsResult Draw = Resources.Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
+					const GraphicsResult Draw = Resources.Runtime.DrawIndexed(*Pipeline, *MeshResource, Arguments, Bindings);
 					if (!Draw) return std::unexpected(MakeShadowDrawError("Could not draw shadow caster: " + Draw.error().Message));
 				}
 			}
@@ -145,28 +161,28 @@ namespace PulseForge
 				auto Material = Resources.MaterialBindings.ResolveMaterialDescription(Instance);
 				if (!Material) return std::unexpected(std::move(Material.error()));
 				if ((*Material)->AlphaMode == MaterialAlphaMode::Blend) continue;
-				auto MaterialBinding = Resources.MaterialBindings.ResolveMaterialBinding(Instance, Resources.BindingEnvironmentAsset);
-				if (!MaterialBinding) return std::unexpected(std::move(MaterialBinding.error()));
+				const BindingSet* MaterialBinding =
+					FindPinnedMaterialBinding(Resources.PreparedMaterialBindings, Instance.Entity);
+				if (!MaterialBinding) return std::unexpected(MakeShadowDrawError("Prepared spotlight material binding is unavailable"));
 				if (auto PipelineResult = Resources.Pipelines.EnsureShadowPipeline(1.0f, (*Material)->DoubleSided, Instance.Orientation);
 					!PipelineResult)
 					return std::unexpected(std::move(PipelineResult.error()));
 				const GraphicsPipeline* Pipeline =
 					Resources.Pipelines.FindShadowPipeline(1, (*Material)->DoubleSided, Instance.Orientation);
 				if (!Pipeline) return std::unexpected(MakeShadowResourceError("Spotlight alpha-tested shadow pipeline was not prepared"));
-				auto Mesh = Resources.Meshes.GetOrLoad(Instance.MeshAsset);
-				if (!Mesh)
-					return std::unexpected(MakeShadowDrawError("Spotlight shadow caster mesh became unavailable: " + Mesh.error().Message));
+				const Mesh* MeshResource = FindPreparedMesh(Resources.PreparedMeshes, Instance.MeshAsset);
+				if (!MeshResource) return std::unexpected(MakeShadowDrawError("Prepared spotlight shadow mesh is unavailable"));
 				const glm::mat4 ShadowTransform = Resources.LocalLighting.SpotlightMatrices()[Slot] * Instance.WorldTransform;
 				const auto Update =
 					Resources.Runtime.WriteBuffer(*Resources.ShadowObjectConstants, 0, std::as_bytes(std::span(&ShadowTransform, 1)));
 				if (!Update)
 					return std::unexpected(
 						MakeShadowDrawError("Could not update spotlight shadow object constants: " + Update.error().Message));
-				const std::array<const BindingSet*, 2> Bindings = { *MaterialBinding, Resources.ShadowObjectBindings.get() };
-				const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
+				const std::array<const BindingSet*, 2> Bindings = { MaterialBinding, Resources.ShadowObjectBindings.get() };
+				const DrawIndexedArguments Arguments{ MeshResource->GetIndexCount(), 1, 0, 0 };
 				if (!SuppressShadowCasterDrawsForValidation())
 				{
-					const GraphicsResult Draw = Resources.Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
+					const GraphicsResult Draw = Resources.Runtime.DrawIndexed(*Pipeline, *MeshResource, Arguments, Bindings);
 					if (!Draw)
 						return std::unexpected(MakeShadowDrawError("Could not draw spotlight shadow caster: " + Draw.error().Message));
 					++Statistics.SpotlightCasterDrawCount;
@@ -215,25 +231,25 @@ namespace PulseForge
 					auto Material = Resources.MaterialBindings.ResolveMaterialDescription(Instance);
 					if (!Material) return std::unexpected(std::move(Material.error()));
 					if ((*Material)->AlphaMode == MaterialAlphaMode::Blend) continue;
-					auto MaterialBinding = Resources.MaterialBindings.ResolveMaterialBinding(Instance, Resources.BindingEnvironmentAsset);
-					if (!MaterialBinding) return std::unexpected(std::move(MaterialBinding.error()));
+					const BindingSet* MaterialBinding =
+						FindPinnedMaterialBinding(Resources.PreparedMaterialBindings, Instance.Entity);
+					if (!MaterialBinding) return std::unexpected(MakeShadowDrawError("Prepared point-shadow material binding is unavailable"));
 					const GraphicsPipeline* Pipeline =
 						Resources.Pipelines.FindPointShadowPipeline((*Material)->DoubleSided, Instance.Orientation);
 					if (!Pipeline) return std::unexpected(MakeShadowResourceError("Point-shadow alpha-tested pipeline was not prepared"));
-					auto Mesh = Resources.Meshes.GetOrLoad(Instance.MeshAsset);
-					if (!Mesh)
-						return std::unexpected(MakeShadowDrawError("Point-shadow caster mesh became unavailable: " + Mesh.error().Message));
+					const Mesh* MeshResource = FindPreparedMesh(Resources.PreparedMeshes, Instance.MeshAsset);
+					if (!MeshResource) return std::unexpected(MakeShadowDrawError("Prepared point-shadow mesh is unavailable"));
 					const PointShadowObjectConstants Object{ Resources.LocalLighting.PointMatrices()[Slot][Face],
 						glm::vec4(Selected->Point->WorldPosition, Selected->Point->Range), Instance.WorldTransform };
 					const auto Update =
 						Resources.Runtime.WriteBuffer(*Resources.PointShadowObjectConstants, 0, std::as_bytes(std::span(&Object, 1)));
 					if (!Update)
 						return std::unexpected(MakeShadowDrawError("Could not update point-shadow constants: " + Update.error().Message));
-					const std::array<const BindingSet*, 2> Bindings = { *MaterialBinding, Resources.PointShadowObjectBindings.get() };
-					const DrawIndexedArguments Arguments{ Mesh->get().GetIndexCount(), 1, 0, 0 };
+					const std::array<const BindingSet*, 2> Bindings = { MaterialBinding, Resources.PointShadowObjectBindings.get() };
+					const DrawIndexedArguments Arguments{ MeshResource->GetIndexCount(), 1, 0, 0 };
 					if (!SuppressShadowCasterDrawsForValidation())
 					{
-						const GraphicsResult Draw = Resources.Runtime.DrawIndexed(*Pipeline, Mesh->get(), Arguments, Bindings);
+						const GraphicsResult Draw = Resources.Runtime.DrawIndexed(*Pipeline, *MeshResource, Arguments, Bindings);
 						if (!Draw)
 							return std::unexpected(MakeShadowDrawError("Could not draw point-shadow caster: " + Draw.error().Message));
 						++Statistics.PointCasterDrawCount;

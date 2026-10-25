@@ -11,6 +11,7 @@
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -57,6 +58,15 @@ namespace PulseForge
 			DerivedDataArtifactStore& ArtifactStore,
 			std::string SessionKey,
 			DiagnosticRecorder* Diagnostics = nullptr);
+		TextureAssetCache(
+			RenderDevice& Runtime,
+			std::filesystem::path ProjectRoot,
+			std::shared_ptr<const AssetRegistry> Registry,
+			AssetPreparationService& Preparation,
+			AssetUploadBudget* UploadBudget,
+			DerivedDataArtifactStore& ArtifactStore,
+			std::string SessionKey,
+			DiagnosticRecorder* Diagnostics = nullptr);
 		~TextureAssetCache();
 		TextureAssetCache(const TextureAssetCache&) = delete;
 		TextureAssetCache& operator=(const TextureAssetCache&) = delete;
@@ -65,9 +75,14 @@ namespace PulseForge
 
 		[[nodiscard]] std::expected<std::reference_wrapper<const Texture>, TextureAssetError> GetOrLoad(
 			const AssetID& Asset, TextureFormat Format = TextureFormat::RGBA8_Srgb);
+		// Advance every admitted texture request on the render owner, even when an existing material binding is still usable.
+		[[nodiscard]] bool AdvancePending();
+		[[nodiscard]] uint64_t GetResourceRevision(const AssetID& Asset, TextureFormat Format) const noexcept;
+		[[nodiscard]] bool HasPendingWork() const noexcept;
 		// Change this on project close/reopen or a known source/settings refresh. Current GPU handles remain usable
 		// while requests for the new session are prepared; work from the previous session is cancelled.
 		void SetSessionKey(std::string SessionKey);
+		void SetRegistrySnapshot(std::shared_ptr<const AssetRegistry> Registry) noexcept;
 		void Clear() noexcept;
 		[[nodiscard]] size_t GetLoadedCount() const noexcept;
 
@@ -90,14 +105,18 @@ namespace PulseForge
 			std::optional<AssetPreparationService::Subscription> Pending;
 			std::string SessionKey;
 			std::string FailureMessage;
+			TextureAssetErrorCode TerminalFailureCode = TextureAssetErrorCode::TextureCreationFailed;
 			uint64_t DiagnosticSessionId = 0;
 			bool DiagnosticTimingsRecorded = false;
-			bool UploadFailed = false;
+			bool TerminalFailure = false;
+			bool AdmissionDeferred = false;
+			uint64_t ResourceRevision = 0;
 		};
 
 		RenderDevice& m_Runtime;
 		std::filesystem::path m_ProjectRoot;
-		const AssetRegistry& m_Registry;
+		std::shared_ptr<const AssetRegistry> m_RegistryOwner;
+		const AssetRegistry* m_Registry = nullptr;
 		AssetPreparationService* m_Preparation = nullptr;
 		AssetUploadBudget* m_UploadBudget = nullptr;
 		DerivedDataArtifactStore* m_ArtifactStore = nullptr;

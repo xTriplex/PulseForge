@@ -48,6 +48,8 @@ namespace PulseForge
 		DerivedDataArtifactReadStatus Status = DerivedDataArtifactReadStatus::Miss;
 		std::vector<std::byte> Payload;
 		std::string Message;
+		// Checksum from the validated envelope, used to conditionally replace a product-codec rejection.
+		AssetContentFingerprint EntryChecksum;
 	};
 
 	enum class DerivedDataArtifactWriteStatus : uint8_t
@@ -80,6 +82,12 @@ namespace PulseForge
 		[[nodiscard]] DerivedDataArtifactWriteResult Write(
 			const DerivedDataArtifactKey& Key,
 			std::span<const std::byte> Payload);
+		// Replaces an envelope only if it is still the exact validated entry observed by Read().
+		// This coordinates requests using this store instance; cross-process writers are not coordinated.
+		[[nodiscard]] DerivedDataArtifactWriteResult ReplaceRejectedProduct(
+			const DerivedDataArtifactKey& Key,
+			const AssetContentFingerprint& ObservedEntryChecksum,
+			std::span<const std::byte> ReplacementPayload);
 
 		[[nodiscard]] const DerivedDataArtifactStoreOptions& GetOptions() const noexcept { return m_Options; }
 
@@ -92,7 +100,8 @@ namespace PulseForge
 		[[nodiscard]] DerivedDataArtifactWriteResult WriteWithReplacement(
 			const DerivedDataArtifactKey& Key,
 			std::span<const std::byte> Payload,
-			const ReplaceFunction& Replace);
+			const ReplaceFunction& Replace,
+			const AssetContentFingerprint* ExpectedExistingChecksum = nullptr);
 
 		DerivedDataArtifactStoreOptions m_Options;
 		mutable std::mutex m_Mutex;

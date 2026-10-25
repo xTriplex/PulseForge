@@ -1,23 +1,16 @@
 #include "Renderer/AssetCache/MeshAssetCache.h"
 
-#include "Assets/AssetDependencyExtractor.h"
-#include "Assets/AssetImportProvenance.h"
 #include "Assets/DerivedDataArtifactStore.h"
 #include "Assets/GltfMeshImporter.h"
 #include "Core/Diagnostics.h"
 #include "Assets/Detail/AssetCpuProducts.h"
 
 #include <algorithm>
-#include <bit>
-#include <cmath>
 #include <cstddef>
 #include <exception>
 #include <limits>
-#include <optional>
-#include <span>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 namespace PulseForge
 {
@@ -26,10 +19,6 @@ namespace PulseForge
 		// GltfMeshImporter permits up to 10M vertices/30M indices; this reservation is a bounded admission estimate,
 		// not a precise peak allocator measurement. Products beyond service completion limits fail explicitly.
 		constexpr size_t EstimatedMeshWorkingBytes = 512ull * 1024ull * 1024ull;
-		constexpr uint32_t MeshArtifactSchemaVersion = 1;
-		constexpr uint32_t MaximumMeshArtifactVertices = 4'000'000;
-		constexpr uint32_t MaximumMeshArtifactIndices = 12'000'000;
-		constexpr size_t MaximumMeshArtifactBytes = 256ull * 1024ull * 1024ull;
 
 		size_t GetImportedMeshRetainedBytes(const ImportedGltfMesh& Mesh) noexcept
 		{
@@ -46,145 +35,6 @@ namespace PulseForge
 			return "gltf-static-mesh-v1/" + Asset.ToString() + "/mesh-0/primitive-0/" + std::string(CanonicalSettings);
 		}
 
-		void AppendU32(std::vector<std::byte>& Output, uint32_t Value)
-		{
-			for (unsigned Shift = 0; Shift < 32; Shift += 8)
-				Output.push_back(static_cast<std::byte>((Value >> Shift) & 0xffu));
-		}
-
-		bool ReadU32(std::span<const std::byte> Input, size_t& Offset, uint32_t& Value)
-		{
-			if (Offset > Input.size() || Input.size() - Offset < 4)
-				return false;
-			Value = 0;
-			for (unsigned Index = 0; Index < 4; ++Index)
-				Value |= static_cast<uint32_t>(std::to_integer<uint8_t>(Input[Offset++])) << (Index * 8);
-			return true;
-		}
-
-		void AppendFloat(std::vector<std::byte>& Output, float Value)
-		{
-			AppendU32(Output, std::bit_cast<uint32_t>(Value));
-		}
-
-		bool ReadFloat(std::span<const std::byte> Input, size_t& Offset, float& Value)
-		{
-			uint32_t Bits = 0;
-			if (!ReadU32(Input, Offset, Bits))
-				return false;
-			Value = std::bit_cast<float>(Bits);
-			return std::isfinite(Value);
-		}
-
-		std::expected<std::vector<std::byte>, std::string> EncodeMeshArtifact(const ImportedGltfMesh& Mesh)
-		{
-			if (Mesh.Name.size() > 4096 || Mesh.Vertices.size() > MaximumMeshArtifactVertices ||
-				Mesh.Indices.size() > MaximumMeshArtifactIndices)
-				return std::unexpected("Mesh product exceeds the artifact codec bounds");
-			constexpr size_t FloatCountPerVertex = 16;
-			if (Mesh.Vertices.size() > (MaximumMeshArtifactBytes - 16) / (FloatCountPerVertex * sizeof(uint32_t)))
-				return std::unexpected("Mesh vertex payload exceeds the artifact codec size bound");
-			std::vector<std::byte> Output;
-			Output.reserve(16 + Mesh.Name.size() + Mesh.Vertices.size() * FloatCountPerVertex * sizeof(uint32_t) +
-				Mesh.Indices.size() * sizeof(uint32_t));
-			Output.insert(Output.end(), { std::byte{'P'}, std::byte{'F'}, std::byte{'M'}, std::byte{'S'} });
-			AppendU32(Output, MeshArtifactSchemaVersion);
-			AppendU32(Output, static_cast<uint32_t>(Mesh.Name.size()));
-			for (const unsigned char Character : Mesh.Name)
-				Output.push_back(static_cast<std::byte>(Character));
-			AppendU32(Output, static_cast<uint32_t>(Mesh.Vertices.size()));
-			AppendU32(Output, static_cast<uint32_t>(Mesh.Indices.size()));
-			for (const GltfMeshVertex& Vertex : Mesh.Vertices)
-			{
-				for (float Value : Vertex.Position) AppendFloat(Output, Value);
-				for (float Value : Vertex.Color) AppendFloat(Output, Value);
-				for (float Value : Vertex.TexCoord) AppendFloat(Output, Value);
-				for (float Value : Vertex.Normal) AppendFloat(Output, Value);
-				for (float Value : Vertex.Tangent) AppendFloat(Output, Value);
-			}
-			for (const uint32_t Index : Mesh.Indices)
-				AppendU32(Output, Index);
-			if (Output.size() > MaximumMeshArtifactBytes)
-				return std::unexpected("Encoded mesh product exceeds the artifact size bound");
-			return Output;
-		}
-
-		std::expected<ImportedGltfMesh, std::string> DecodeMeshArtifact(std::span<const std::byte> Input)
-		{
-			if (Input.size() < 16 || Input.size() > MaximumMeshArtifactBytes ||
-				Input[0] != std::byte{'P'} || Input[1] != std::byte{'F'} || Input[2] != std::byte{'M'} || Input[3] != std::byte{'S'})
-				return std::unexpected("Mesh artifact has an invalid magic or size");
-			size_t Offset = 4;
-			uint32_t Version = 0, NameLength = 0;
-			if (!ReadU32(Input, Offset, Version) || Version != MeshArtifactSchemaVersion ||
-				!ReadU32(Input, Offset, NameLength) || NameLength > 4096 || NameLength > Input.size() - Offset)
-				return std::unexpected("Mesh artifact has an unsupported schema or invalid name length");
-			ImportedGltfMesh Mesh;
-			Mesh.Name.assign(reinterpret_cast<const char*>(Input.data() + Offset), NameLength);
-			Offset += NameLength;
-			uint32_t VertexCount = 0, IndexCount = 0;
-			if (!ReadU32(Input, Offset, VertexCount) || !ReadU32(Input, Offset, IndexCount) ||
-				VertexCount == 0 || VertexCount > MaximumMeshArtifactVertices || IndexCount == 0 ||
-				IndexCount > MaximumMeshArtifactIndices || IndexCount % 3 != 0)
-				return std::unexpected("Mesh artifact has invalid geometry counts");
-			const uint64_t Required = static_cast<uint64_t>(VertexCount) * 16ull * 4ull + static_cast<uint64_t>(IndexCount) * 4ull;
-			if (Required != Input.size() - Offset)
-				return std::unexpected("Mesh artifact payload length does not match its geometry counts");
-			Mesh.Vertices.resize(VertexCount);
-			for (GltfMeshVertex& Vertex : Mesh.Vertices)
-			{
-				for (float& Value : Vertex.Position) if (!ReadFloat(Input, Offset, Value)) return std::unexpected("Mesh artifact has a non-finite position");
-				for (float& Value : Vertex.Color) if (!ReadFloat(Input, Offset, Value)) return std::unexpected("Mesh artifact has a non-finite color");
-				for (float& Value : Vertex.TexCoord) if (!ReadFloat(Input, Offset, Value)) return std::unexpected("Mesh artifact has a non-finite texture coordinate");
-				for (float& Value : Vertex.Normal) if (!ReadFloat(Input, Offset, Value)) return std::unexpected("Mesh artifact has a non-finite normal");
-				for (float& Value : Vertex.Tangent) if (!ReadFloat(Input, Offset, Value)) return std::unexpected("Mesh artifact has a non-finite tangent");
-			}
-			Mesh.Indices.resize(IndexCount);
-			for (uint32_t& Index : Mesh.Indices)
-				if (!ReadU32(Input, Offset, Index) || Index >= VertexCount)
-					return std::unexpected("Mesh artifact contains an out-of-range index");
-			return Mesh;
-		}
-
-		std::optional<DerivedDataArtifactKey> MakeMeshArtifactKey(
-			const AssetImportRecipe& Recipe,
-			const AssetID& Asset,
-			std::string_view EffectiveSettings)
-		{
-			if (Recipe.SourceAsset != Asset || Recipe.SubresourceKey != "mesh/0/primitive/0" ||
-				Recipe.ImporterID != "PulseForge.StaticGltfMeshImporter" || Recipe.ImporterVersion != "1" ||
-				Recipe.OutputSchemaVersion != 1 || Recipe.TargetID != "cpu-generic-v1" ||
-				Recipe.EffectiveSettings != EffectiveSettings)
-				return std::nullopt;
-			auto Calculated = ComputeAssetImportInputFingerprint(Recipe);
-			if (!Calculated || *Calculated != Recipe.InputFingerprint)
-				return std::nullopt;
-			return DerivedDataArtifactKey{ "gltf-static-mesh", *Calculated, MeshArtifactSchemaVersion };
-		}
-
-		AssetImportRecipe MakeRecipe(const AssetImportObservation& Observation)
-		{
-			AssetImportRecipe Recipe;
-			Recipe.SourceAsset = Observation.Asset;
-			Recipe.SubresourceKey = Observation.SubresourceKey;
-			Recipe.ImporterID = Observation.ImporterID;
-			Recipe.ImporterVersion = Observation.ImporterVersion;
-			Recipe.OutputSchemaVersion = Observation.OutputSchemaVersion;
-			Recipe.EffectiveSettings = Observation.EffectiveSettings;
-			Recipe.TargetID = Observation.TargetID;
-			Recipe.Inputs = Observation.Inputs;
-			Recipe.InputFingerprint = Observation.InputFingerprint;
-			return Recipe;
-		}
-
-		bool SameRecipe(const AssetImportRecipe& First, const AssetImportRecipe& Second)
-		{
-			return First.SourceAsset == Second.SourceAsset && First.SubresourceKey == Second.SubresourceKey &&
-				First.ImporterID == Second.ImporterID && First.ImporterVersion == Second.ImporterVersion &&
-				First.OutputSchemaVersion == Second.OutputSchemaVersion && First.EffectiveSettings == Second.EffectiveSettings &&
-				First.TargetID == Second.TargetID && First.Inputs == Second.Inputs &&
-				First.InputFingerprint == Second.InputFingerprint;
-		}
 	}
 
 	MeshAssetCache::MeshAssetCache(
@@ -192,7 +42,8 @@ namespace PulseForge
 		std::filesystem::path ProjectRoot,
 		const AssetRegistry& Registry,
 		DiagnosticRecorder* Diagnostics)
-		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_Registry(Registry), m_Diagnostics(Diagnostics)
+		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)),
+		  m_RegistryOwner(std::make_shared<const AssetRegistry>(Registry)), m_Registry(m_RegistryOwner.get()), m_Diagnostics(Diagnostics)
 	{
 	}
 
@@ -205,9 +56,25 @@ namespace PulseForge
 		DerivedDataArtifactStore& ArtifactStore,
 		std::string SessionKey,
 		DiagnosticRecorder* Diagnostics)
-		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_Registry(Registry),
+		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)),
+		  m_RegistryOwner(std::make_shared<const AssetRegistry>(Registry)), m_Registry(m_RegistryOwner.get()),
 		  m_Preparation(&Preparation), m_UploadBudget(UploadBudget), m_ArtifactStore(&ArtifactStore),
 		  m_SessionKey(std::move(SessionKey)), m_Diagnostics(Diagnostics)
+	{
+	}
+
+	MeshAssetCache::MeshAssetCache(
+		RenderDevice& Runtime,
+		std::filesystem::path ProjectRoot,
+		std::shared_ptr<const AssetRegistry> Registry,
+		AssetPreparationService& Preparation,
+		AssetUploadBudget* UploadBudget,
+		DerivedDataArtifactStore& ArtifactStore,
+		std::string SessionKey,
+		DiagnosticRecorder* Diagnostics)
+		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_RegistryOwner(std::move(Registry)),
+		  m_Registry(m_RegistryOwner.get()), m_Preparation(&Preparation), m_UploadBudget(UploadBudget),
+		  m_ArtifactStore(&ArtifactStore), m_SessionKey(std::move(SessionKey)), m_Diagnostics(Diagnostics)
 	{
 	}
 
@@ -227,8 +94,17 @@ namespace PulseForge
 			Entry.Pending.reset();
 			Entry.SessionKey.clear();
 			Entry.FailureMessage.clear();
-			Entry.UploadFailed = false;
+			Entry.TerminalFailure = false;
+			Entry.TerminalFailureCode = MeshAssetErrorCode::MeshCreationFailed;
 		}
+	}
+
+	void MeshAssetCache::SetRegistrySnapshot(std::shared_ptr<const AssetRegistry> Registry) noexcept
+	{
+		if (!Registry)
+			return;
+		m_RegistryOwner = std::move(Registry);
+		m_Registry = m_RegistryOwner.get();
 	}
 
 	std::expected<std::reference_wrapper<const Mesh>, MeshAssetError> MeshAssetCache::GetOrLoad(const AssetID& Asset)
@@ -236,7 +112,7 @@ namespace PulseForge
 		if (Asset.IsNil())
 			return std::unexpected(MeshAssetError{ MeshAssetErrorCode::AssetNotFound, Asset,
 				"Cannot load a mesh with a nil asset UUID" });
-		const auto Record = m_Registry.Find(Asset);
+		const auto Record = m_Registry->Find(Asset);
 		if (!Record)
 			return std::unexpected(MeshAssetError{ MeshAssetErrorCode::AssetNotFound, Asset,
 				"Mesh asset UUID " + Asset.ToString() + " is not present in the project asset registry" });
@@ -255,7 +131,7 @@ namespace PulseForge
 			auto ImportedMesh = [&]()
 			{
 				ScopedDiagnosticTimer Timer(m_Diagnostics, "Mesh asset import", "MeshAssetCache");
-				return GltfMeshImporter::ImportStaticPrimitive(Asset, m_ProjectRoot, m_Registry);
+				return GltfMeshImporter::ImportStaticPrimitive(Asset, m_ProjectRoot, *m_Registry);
 			}();
 			if (!ImportedMesh)
 				return std::unexpected(MeshAssetError{ MeshAssetErrorCode::ImportFailed, Asset, ImportedMesh.error().Message });
@@ -294,51 +170,41 @@ namespace PulseForge
 			State.FailureMessage.clear();
 			State.DiagnosticSessionId = 0;
 			State.DiagnosticTimingsRecorded = false;
+			State.TerminalFailureCode = MeshAssetErrorCode::MeshCreationFailed;
 			if (m_Diagnostics)
 			{
 				uint64_t Start = 0;
 				(void)m_Diagnostics->BeginDurationSession(State.DiagnosticSessionId, Start);
 			}
-			State.UploadFailed = false;
-			const std::filesystem::path SourcePath = m_ProjectRoot / Record->ProjectRelativePath;
-			const auto Metadata = AssetMetadataSerializer::LoadFromFile(AssetMetadataSerializer::GetSidecarPath(SourcePath));
-			if (!Metadata || Metadata->ID != Asset)
-			{
-				const std::string Message = Metadata
-					? "Mesh sidecar identity no longer matches the asset registry"
-					: Metadata.error().Message;
-				if (State.Current)
-					return std::cref(*State.Current);
-				return std::unexpected(MeshAssetError{ MeshAssetErrorCode::ImportFailed, Asset, Message });
-			}
-			auto Settings = GltfMeshImportSettings::Parse(Metadata->ImportSettingsJson);
-			if (!Settings)
-			{
-				if (State.Current)
-					return std::cref(*State.Current);
-				return std::unexpected(MeshAssetError{ MeshAssetErrorCode::ImportFailed, Asset, Settings.error() });
-			}
-			auto CanonicalSettings = Settings->Canonicalize();
-			if (!CanonicalSettings)
-			{
-				if (State.Current)
-					return std::cref(*State.Current);
-				return std::unexpected(MeshAssetError{ MeshAssetErrorCode::ImportFailed, Asset, CanonicalSettings.error() });
-			}
-
-			AssetRegistry RegistrySnapshot = m_Registry;
+			State.TerminalFailure = false;
+			State.AdmissionDeferred = false;
 			const std::filesystem::path ProjectRoot = m_ProjectRoot;
 			DerivedDataArtifactStore* ArtifactStore = m_ArtifactStore;
-			const std::string EffectiveSettings = *CanonicalSettings;
+			const auto RegistrySnapshot = m_RegistryOwner;
 			const std::string Session = m_SessionKey;
-			const std::string Recipe = MakeMeshRecipeKey(Asset, EffectiveSettings);
+			const std::string Recipe = MakeMeshRecipeKey(Asset, "authored-settings");
 			auto Requested = m_Preparation->Request(
 				{ Session, Recipe }, AssetPreparationPriority::Interactive, EstimatedMeshWorkingBytes,
-				[Asset, ProjectRoot, RegistrySnapshot = std::move(RegistrySnapshot), EffectiveSettings, ArtifactStore](std::stop_token StopToken) mutable
+				[Asset, ProjectRoot, RegistrySnapshot, ArtifactStore](std::stop_token StopToken)
 					-> std::expected<AssetPreparationService::CpuPayload, AssetPreparationError>
 				{
+					const auto Record = RegistrySnapshot->Find(Asset);
+					if (!Record)
+						return std::unexpected(AssetPreparationError{ AssetPreparationErrorCode::ProcessingFailed,
+							"Mesh asset was removed from the retained project registry" });
+					const auto Metadata = AssetMetadataSerializer::LoadFromFile(
+						AssetMetadataSerializer::GetSidecarPath(ProjectRoot / Record->ProjectRelativePath));
+					if (!Metadata || Metadata->ID != Asset)
+						return std::unexpected(AssetPreparationError{ AssetPreparationErrorCode::ProcessingFailed,
+							Metadata ? "Mesh sidecar identity no longer matches the asset registry" : Metadata.error().Message });
+					auto Settings = GltfMeshImportSettings::Parse(Metadata->ImportSettingsJson);
+					if (!Settings)
+						return std::unexpected(AssetPreparationError{ AssetPreparationErrorCode::ProcessingFailed, Settings.error() });
+					auto EffectiveSettings = Settings->Canonicalize();
+					if (!EffectiveSettings)
+						return std::unexpected(AssetPreparationError{ AssetPreparationErrorCode::ProcessingFailed, EffectiveSettings.error() });
 					auto Prepared = Detail::PrepareMeshCpuProduct(
-						Asset, ProjectRoot, RegistrySnapshot, EffectiveSettings, ArtifactStore, StopToken);
+						Asset, ProjectRoot, *RegistrySnapshot, *EffectiveSettings, ArtifactStore, StopToken);
 					if (!Prepared)
 						return std::unexpected(AssetPreparationError{ AssetPreparationErrorCode::ProcessingFailed, Prepared.error() });
 					const size_t RetainedBytes = GetImportedMeshRetainedBytes(Prepared->Product);
@@ -347,13 +213,21 @@ namespace PulseForge
 			if (!Requested)
 			{
 				if (State.Current)
+				{
+					State.AdmissionDeferred = Requested.error().Code == AssetPreparationErrorCode::WorkingSetLimit ||
+						Requested.error().Code == AssetPreparationErrorCode::QueueFull;
 					return std::cref(*State.Current);
+				}
 				if (Requested.error().Code == AssetPreparationErrorCode::WorkingSetLimit ||
 					Requested.error().Code == AssetPreparationErrorCode::QueueFull)
+				{
+					State.AdmissionDeferred = true;
 					return std::unexpected(MeshAssetError{ MeshAssetErrorCode::Pending, Asset, Requested.error().Message });
+				}
 				return std::unexpected(MeshAssetError{ MeshAssetErrorCode::CacheFailure, Asset, Requested.error().Message });
 			}
 			State.Pending.emplace(std::move(*Requested));
+			State.AdmissionDeferred = false;
 			State.SessionKey = m_SessionKey;
 			++m_CacheMisses;
 		}
@@ -362,8 +236,8 @@ namespace PulseForge
 		{
 			if (State.Current)
 				return std::cref(*State.Current);
-			if (State.UploadFailed)
-				return std::unexpected(MeshAssetError{ MeshAssetErrorCode::MeshCreationFailed, Asset, State.FailureMessage });
+			if (State.TerminalFailure)
+				return std::unexpected(MeshAssetError{ State.TerminalFailureCode, Asset, State.FailureMessage });
 			return std::unexpected(MeshAssetError{ MeshAssetErrorCode::Pending, Asset, "Mesh preparation is pending" });
 		}
 
@@ -377,7 +251,7 @@ namespace PulseForge
 				return std::unexpected(MeshAssetError{ MeshAssetErrorCode::Pending, Asset, "Mesh preparation is pending" });
 			case AssetPreparationStatus::CpuReady:
 			{
-				if (State.UploadFailed)
+				if (State.TerminalFailure)
 				{
 					if (State.Current)
 						return std::cref(*State.Current);
@@ -387,8 +261,10 @@ namespace PulseForge
 					? dynamic_cast<const AssetPreparationValue<Detail::AssetCpuProductResult<ImportedGltfMesh>>*>(Prepared.CpuPayload.get()) : nullptr;
 				if (!MeshProduct)
 				{
-					State.UploadFailed = true;
+					State.TerminalFailure = true;
+					State.TerminalFailureCode = MeshAssetErrorCode::CacheFailure;
 					State.FailureMessage = "Prepared mesh result has an unexpected CPU product type";
+					State.Pending.reset();
 					if (State.Current)
 						return std::cref(*State.Current);
 					return std::unexpected(MeshAssetError{ MeshAssetErrorCode::CacheFailure, Asset, State.FailureMessage });
@@ -413,7 +289,8 @@ namespace PulseForge
 				const size_t UploadBytes = Prepared.CpuPayload->GetRetainedBytes();
 				if (m_UploadBudget && (UploadBytes == 0 || UploadBytes > AssetUploadBudget::MaximumIndivisibleProductBytes))
 				{
-					State.UploadFailed = true;
+					State.TerminalFailure = true;
+					State.TerminalFailureCode = MeshAssetErrorCode::MeshCreationFailed;
 					State.FailureMessage = "Prepared mesh exceeds the bounded indivisible GPU upload size";
 					State.Pending.reset();
 					if (State.Current) return std::cref(*State.Current);
@@ -433,15 +310,18 @@ namespace PulseForge
 				}();
 				if (!CreatedMesh)
 				{
-					State.UploadFailed = true;
+					State.TerminalFailure = true;
+					State.TerminalFailureCode = MeshAssetErrorCode::MeshCreationFailed;
 					State.FailureMessage = CreatedMesh.error().Message;
+					State.Pending.reset();
 					if (State.Current)
 						return std::cref(*State.Current);
 					return std::unexpected(MeshAssetError{ MeshAssetErrorCode::MeshCreationFailed, Asset, State.FailureMessage });
 				}
 				State.Current = std::move(*CreatedMesh);
 				State.Pending.reset();
-				State.UploadFailed = false;
+				State.TerminalFailure = false;
+				State.TerminalFailureCode = MeshAssetErrorCode::MeshCreationFailed;
 				State.FailureMessage.clear();
 				if (m_Diagnostics)
 					(void)m_Diagnostics->RecordEvent(DiagnosticEventKind::Resource, "Mesh cache resource created", "MeshAssetCache", "objects", 1);
@@ -449,6 +329,9 @@ namespace PulseForge
 			}
 			case AssetPreparationStatus::Failed:
 				State.FailureMessage = Prepared.Error ? Prepared.Error->Message : "Mesh CPU preparation failed";
+				State.TerminalFailure = true;
+				State.TerminalFailureCode = MeshAssetErrorCode::ImportFailed;
+				State.Pending.reset();
 				if (State.Current)
 					return std::cref(*State.Current);
 				return std::unexpected(MeshAssetError{ MeshAssetErrorCode::ImportFailed, Asset, State.FailureMessage });
@@ -485,5 +368,14 @@ namespace PulseForge
 			Count += Entry.Current ? 1 : 0;
 		}
 		return Count;
+	}
+
+	bool MeshAssetCache::HasPendingWork() const noexcept
+	{
+		return std::ranges::any_of(m_Meshes, [this](const auto& Pair)
+		{
+			const auto& State = Pair.second;
+			return State.Pending.has_value() || State.AdmissionDeferred;
+		});
 	}
 } // namespace PulseForge

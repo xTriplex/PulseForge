@@ -23,6 +23,7 @@
 #include <span>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace PulseForge
 {
@@ -31,6 +32,7 @@ namespace PulseForge
 	class Scene;
 	class SceneRendererPipelineCache;
 	class SceneRendererMaterialBindingCache;
+	class Mesh;
 
 	enum class SceneRendererErrorCode : uint8_t
 	{
@@ -190,6 +192,7 @@ namespace PulseForge
 			uint32_t Height);
 		[[nodiscard]] std::expected<const MaterialAssetDesc*, SceneRendererError> ResolveMaterialDescription(
 			const SceneMeshInstance& Instance);
+		[[nodiscard]] const BindingSet* FindPreparedMaterialBinding(UUID Entity) const noexcept;
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareSnapshot(
 			std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot);
 
@@ -257,9 +260,13 @@ namespace PulseForge
 		TextureHandle m_FallbackPointShadowTexture;
 		EnvironmentLightingTextures m_FallbackEnvironmentTextures;
 		std::optional<SceneRenderSnapshot> m_PreparedSnapshot;
+		std::vector<std::pair<AssetID, const Mesh*>> m_PreparedMeshResources;
+		std::vector<std::pair<UUID, const BindingSet*>> m_PreparedMaterialBindings;
 		std::vector<const SceneMeshInstance*> m_TransparentDrawOrder;
 		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
 		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;
+		const BindingSet* m_PreparedEnvironmentBinding = nullptr;
+		uint64_t m_PreparedEnvironmentRevision = 0;
 		std::unique_ptr<AmbientOcclusionPass> m_AmbientOcclusionPass;
 		bool m_EnvironmentLightingPending = false;
 		bool m_AssetPreparationPending = false;

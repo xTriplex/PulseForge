@@ -11,6 +11,7 @@
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -56,6 +57,15 @@ namespace PulseForge
 			DerivedDataArtifactStore& ArtifactStore,
 			std::string SessionKey,
 			DiagnosticRecorder* Diagnostics = nullptr);
+		MeshAssetCache(
+			RenderDevice& Runtime,
+			std::filesystem::path ProjectRoot,
+			std::shared_ptr<const AssetRegistry> Registry,
+			AssetPreparationService& Preparation,
+			AssetUploadBudget* UploadBudget,
+			DerivedDataArtifactStore& ArtifactStore,
+			std::string SessionKey,
+			DiagnosticRecorder* Diagnostics = nullptr);
 		~MeshAssetCache();
 		MeshAssetCache(const MeshAssetCache&) = delete;
 		MeshAssetCache& operator=(const MeshAssetCache&) = delete;
@@ -66,6 +76,8 @@ namespace PulseForge
 		// Change this on project close/reopen or a known source/settings refresh. Current GPU handles remain usable
 		// while requests for the new session are prepared; work from the previous session is cancelled.
 		void SetSessionKey(std::string SessionKey);
+		void SetRegistrySnapshot(std::shared_ptr<const AssetRegistry> Registry) noexcept;
+		[[nodiscard]] bool HasPendingWork() const noexcept;
 		void Clear() noexcept;
 		[[nodiscard]] size_t GetLoadedCount() const noexcept;
 
@@ -78,12 +90,15 @@ namespace PulseForge
 			std::string FailureMessage;
 			uint64_t DiagnosticSessionId = 0;
 			bool DiagnosticTimingsRecorded = false;
-			bool UploadFailed = false;
+			bool TerminalFailure = false;
+			bool AdmissionDeferred = false;
+			MeshAssetErrorCode TerminalFailureCode = MeshAssetErrorCode::MeshCreationFailed;
 		};
 
 		RenderDevice& m_Runtime;
 		std::filesystem::path m_ProjectRoot;
-		const AssetRegistry& m_Registry;
+		std::shared_ptr<const AssetRegistry> m_RegistryOwner;
+		const AssetRegistry* m_Registry = nullptr;
 		AssetPreparationService* m_Preparation = nullptr;
 		AssetUploadBudget* m_UploadBudget = nullptr;
 		DerivedDataArtifactStore* m_ArtifactStore = nullptr;

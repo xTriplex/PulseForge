@@ -1,6 +1,7 @@
 #include "TestAssetSupport.h"
 
 #include "Assets/DerivedDataArtifactStore.h"
+#include "Assets/AssetDependencyExtractor.h"
 #include "Assets/GltfMeshImporter.h"
 #include "Assets/ImageAssetImporter.h"
 #include "Assets/Detail/AssetCpuProducts.h"
@@ -12,6 +13,19 @@
 namespace
 {
 	using namespace PulseForge;
+
+	std::vector<std::byte> AsBytes(std::string_view Text)
+	{
+		const auto Bytes = std::as_bytes(std::span(Text.data(), Text.size()));
+		return { Bytes.begin(), Bytes.end() };
+	}
+
+	AssetImportRecipe MakeRecipe(const AssetImportObservation& Observation)
+	{
+		return { Observation.Asset, Observation.SubresourceKey, Observation.ImporterID, Observation.ImporterVersion,
+			Observation.OutputSchemaVersion, Observation.EffectiveSettings, Observation.TargetID,
+			Observation.Inputs, Observation.InputFingerprint };
+	}
 
 	struct TemporaryProject final
 	{
@@ -101,6 +115,97 @@ namespace
 			std::cout << "G11 mesh CPU cold: lookup=" << Cold->ObservationAndLookupMicroseconds << "us process="
 				<< Cold->ProcessingMicroseconds << "us write=" << Cold->CacheWriteMicroseconds << "us; warm: lookup="
 				<< Warm->ObservationAndLookupMicroseconds << "us process=" << Warm->ProcessingMicroseconds << "us\n";
+
+		auto Extraction = AssetDependencyExtractor::ExtractAsset(Project.Root, SourceMetadata->ID, Registry);
+		PF_CHECK(Tests, Extraction.has_value());
+		if (Extraction)
+		{
+			const auto Observation = std::find_if(Extraction->ImportObservations.begin(), Extraction->ImportObservations.end(),
+				[](const AssetImportObservation& Item) { return Item.SubresourceKey == "mesh/0/primitive/0"; });
+			PF_CHECK(Tests, Observation != Extraction->ImportObservations.end());
+			if (Observation != Extraction->ImportObservations.end())
+			{
+				auto Key = Detail::MakeMeshArtifactKey(MakeRecipe(*Observation), SourceMetadata->ID, *Settings);
+				PF_CHECK(Tests, Key.has_value());
+				if (Key)
+				{
+					const auto SemanticRoot = Project.Root / "Out" / "SemanticMeshCache";
+					DerivedDataArtifactStore SemanticStore({ SemanticRoot, true, 1024 * 1024, 512 * 1024, 16 });
+					PF_CHECK(Tests, SemanticStore.Write(*Key, AsBytes("checksummed but invalid mesh payload")).Status ==
+						DerivedDataArtifactWriteStatus::Written);
+					uint32_t SemanticImportCount = 0;
+					auto Processor = [&SemanticImportCount](const AssetID& ID, const auto& Root, const AssetRegistry& Assets)
+						-> std::expected<GltfMeshImportProduct, std::string>
+					{
+						++SemanticImportCount;
+						auto Imported = GltfMeshImporter::ProcessStaticPrimitive(ID, Root, Assets);
+						if (!Imported) return std::unexpected(Imported.error().Message);
+						return std::move(*Imported);
+					};
+					auto Repaired = Detail::PrepareMeshCpuProduct(SourceMetadata->ID, Project.Root, Registry, *Settings,
+						&SemanticStore, {}, Processor);
+					PF_CHECK(Tests, Repaired.has_value() && SemanticImportCount == 1);
+					DerivedDataArtifactStore ReopenedStore({ SemanticRoot, true, 1024 * 1024, 512 * 1024, 16 });
+					auto Reopened = Detail::PrepareMeshCpuProduct(SourceMetadata->ID, Project.Root, Registry, *Settings,
+						&ReopenedStore, {}, Processor);
+					PF_CHECK(Tests, Reopened.has_value() && Reopened->CacheOutcome == Detail::AssetCpuProductCacheOutcome::ArtifactHit);
+					PF_CHECK(Tests, SemanticImportCount == 1);
+				}
+			}
+		}
+
+		const auto SourceTimestamp = std::filesystem::last_write_time(BufferPath);
+		const auto WriteBuffer = [&BufferPath, &Buffer, &Tests](float FirstPositionX)
+		{
+			std::vector<std::byte> Changed = Buffer;
+			const uint32_t Bits = std::bit_cast<uint32_t>(FirstPositionX);
+			for (unsigned Byte = 0; Byte < 4; ++Byte)
+				Changed[Byte] = static_cast<std::byte>((Bits >> (Byte * 8)) & 0xffu);
+			std::ofstream Out(BufferPath, std::ios::binary | std::ios::trunc);
+			Out.write(reinterpret_cast<const char*>(Changed.data()), static_cast<std::streamsize>(Changed.size()));
+			PF_CHECK(Tests, static_cast<bool>(Out));
+			return Changed;
+		};
+		const auto RestoreTimestamp = [&BufferPath, SourceTimestamp, &Tests]()
+		{
+			std::error_code Error;
+			std::filesystem::last_write_time(BufferPath, SourceTimestamp, Error);
+			PF_CHECK(Tests, !Error);
+		};
+		const auto RunStaleProcessing = [&](DerivedDataArtifactStore* Store, float InitialX, float ChangedX)
+		{
+			const auto BeforeProcessing = WriteBuffer(InitialX);
+			RestoreTimestamp();
+			bool ProcessorRan = false;
+			Detail::MeshProcessor MutatingImporter = [&ProcessorRan, &WriteBuffer, &RestoreTimestamp, ChangedX] (
+				const AssetID& ID, const auto& Root, const AssetRegistry& Assets)
+				-> std::expected<GltfMeshImportProduct, std::string>
+			{
+				ProcessorRan = true;
+				auto Imported = GltfMeshImporter::ProcessStaticPrimitive(ID, Root, Assets);
+				if (!Imported) return std::unexpected(Imported.error().Message);
+				(void)WriteBuffer(ChangedX);
+				RestoreTimestamp();
+				return std::move(*Imported);
+			};
+			auto Stale = Detail::PrepareMeshCpuProduct(SourceMetadata->ID, Project.Root, Registry, *Settings,
+				Store, {}, std::move(MutatingImporter));
+			PF_CHECK(Tests, ProcessorRan);
+			PF_CHECK(Tests, !Stale && Stale.error().find("changed during preparation") != std::string::npos);
+			std::ofstream Restore(BufferPath, std::ios::binary | std::ios::trunc);
+			Restore.write(reinterpret_cast<const char*>(BeforeProcessing.data()), static_cast<std::streamsize>(BeforeProcessing.size()));
+			PF_CHECK(Tests, static_cast<bool>(Restore));
+			Restore.close();
+			RestoreTimestamp();
+		};
+
+		// A same-size buffer edit with its timestamp restored must invalidate a result even
+		// when the disposable artifact store is unavailable.
+		RunStaleProcessing(nullptr, 0.25f, 0.5f);
+		// The same stale-result rejection applies when persistence is enabled; cache write
+		// failure is optional, but freshness validation is not.
+		DerivedDataArtifactStore StaleStore({ Project.Root / "Out" / "StaleMeshCache", true, 1024 * 1024, 512 * 1024, 16 });
+		RunStaleProcessing(&StaleStore, 0.75f, 1.0f);
 	}
 
 	void TestTextureColdWarmArtifactBypassesDecoder(TestRunner& Tests)
@@ -161,6 +266,30 @@ namespace
 			std::cout << "G11 image CPU cold: lookup=" << Cold->ObservationAndLookupMicroseconds << "us decode+mips="
 				<< Cold->ProcessingMicroseconds << "us write=" << Cold->CacheWriteMicroseconds << "us; warm: lookup="
 				<< Warm->ObservationAndLookupMicroseconds << "us process=" << Warm->ProcessingMicroseconds << "us\n";
+
+		const auto SourceFingerprint = ComputeAssetContentFingerprint(std::as_bytes(std::span(Bitmap)));
+		const auto TextureKey = Detail::MakeTextureArtifactKey(SourceFingerprint, Detail::ImageColorSpace::Srgb);
+		const auto SemanticRoot = Project.Root / "Out" / "SemanticImageCache";
+		DerivedDataArtifactStore SemanticStore({ SemanticRoot, true, 8 * 1024 * 1024, 4 * 1024 * 1024, 16 });
+		PF_CHECK(Tests, SemanticStore.Write(TextureKey, AsBytes("checksummed but invalid texture payload")).Status ==
+			DerivedDataArtifactWriteStatus::Written);
+		uint32_t SemanticDecodeCount = 0;
+		auto Processor = [&SemanticDecodeCount](const AssetID& ID, const auto& Root, const AssetRegistry& Assets)
+			-> std::expected<ImportedImage, std::string>
+		{
+			++SemanticDecodeCount;
+			auto Image = ImageAssetImporter::ImportRGBA8(ID, Root, Assets);
+			if (!Image) return std::unexpected(Image.error().Message);
+			return std::move(*Image);
+		};
+		auto Repaired = Detail::PrepareTextureCpuProduct(Metadata->ID, Project.Root, Registry, Detail::ImageColorSpace::Srgb,
+			&SemanticStore, {}, Processor);
+		PF_CHECK(Tests, Repaired.has_value() && SemanticDecodeCount == 1);
+		DerivedDataArtifactStore ReopenedStore({ SemanticRoot, true, 8 * 1024 * 1024, 4 * 1024 * 1024, 16 });
+		auto Reopened = Detail::PrepareTextureCpuProduct(Metadata->ID, Project.Root, Registry, Detail::ImageColorSpace::Srgb,
+			&ReopenedStore, {}, Processor);
+		PF_CHECK(Tests, Reopened.has_value() && Reopened->CacheOutcome == Detail::AssetCpuProductCacheOutcome::ArtifactHit);
+		PF_CHECK(Tests, SemanticDecodeCount == 1);
 	}
 }
 

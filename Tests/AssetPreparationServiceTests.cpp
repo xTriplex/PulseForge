@@ -153,6 +153,36 @@ namespace
 		Service.Shutdown();
 	}
 
+	void TestStopCallbackCanQueryStatsDuringCancellation(TestRunner& Tests)
+	{
+		AssetPreparationService Service({ .MaximumWorkers = 1 });
+		ProcessorGate Gate;
+		std::atomic_bool CallbackEntered = false;
+		std::atomic_bool CallbackReturned = false;
+		auto Request = Service.Request(Identity("cancel-callback-stats"), AssetPreparationPriority::Normal, 1,
+			[&](std::stop_token Token)
+			{
+				std::stop_callback Callback(Token, [&]
+				{
+					CallbackEntered = true;
+					(void)Service.GetStats();
+					CallbackReturned = true;
+				});
+				Gate.EnterAndWait();
+				return std::expected<CpuPayload, AssetPreparationError>(Payload(1));
+			});
+		PF_CHECK(Tests, Request.has_value());
+		if (!Request) return;
+		PF_CHECK(Tests, Gate.WaitUntilEntered());
+
+		Request->Cancel();
+		PF_CHECK(Tests, CallbackEntered.load());
+		PF_CHECK(Tests, CallbackReturned.load());
+		PF_CHECK(Tests, Request->Poll().Status == AssetPreparationStatus::Cancelled);
+		Gate.Release();
+		Service.Shutdown();
+	}
+
 	void TestCallerCanAdvanceWhilePreparationIsBlocked(TestRunner& Tests)
 	{
 		AssetPreparationService Service({ .MaximumWorkers = 1 });
@@ -387,15 +417,46 @@ namespace
 			[](std::stop_token) { return std::expected<CpuPayload, AssetPreparationError>(Payload(1)); });
 		PF_CHECK(Tests, !Rejected && Rejected.error().Code == AssetPreparationErrorCode::ServiceStopping);
 	}
+
+	void TestStopCallbackCanQueryStatsDuringShutdown(TestRunner& Tests)
+	{
+		AssetPreparationService Service({ .MaximumWorkers = 1 });
+		ProcessorGate Gate;
+		std::atomic_bool CallbackEntered = false;
+		std::atomic_bool CallbackReturned = false;
+		auto Active = Service.Request(Identity("shutdown-callback-stats"), AssetPreparationPriority::Normal, 1,
+			[&](std::stop_token Token)
+			{
+				std::stop_callback Callback(Token, [&]
+				{
+					CallbackEntered = true;
+					(void)Service.GetStats();
+					CallbackReturned = true;
+					Gate.Release();
+				});
+				Gate.EnterAndWait();
+				return std::expected<CpuPayload, AssetPreparationError>(Payload(1));
+			});
+		PF_CHECK(Tests, Active.has_value());
+		if (!Active) return;
+		PF_CHECK(Tests, Gate.WaitUntilEntered());
+
+		Service.Shutdown();
+		PF_CHECK(Tests, CallbackEntered.load());
+		PF_CHECK(Tests, CallbackReturned.load());
+		PF_CHECK(Tests, Active->Poll().Status == AssetPreparationStatus::Cancelled);
+	}
 } // namespace
 
 void RunAssetPreparationServiceTests(TestRunner& Tests)
 {
 	TestEquivalentSubscribersAndIndependentCancellation(Tests);
 	TestFinalCancellationSuppressesLateResult(Tests);
+	TestStopCallbackCanQueryStatsDuringCancellation(Tests);
 	TestCallerCanAdvanceWhilePreparationIsBlocked(Tests);
 	TestQueuedPriorityPromotionDoesNotDuplicateWork(Tests);
 	TestExplicitFailureRetryAndExceptionRecovery(Tests);
 	TestAdmissionAndCompletedPayloadBounds(Tests);
 	TestShutdownJoinsAndSuppressesLatePublication(Tests);
+	TestStopCallbackCanQueryStatsDuringShutdown(Tests);
 }

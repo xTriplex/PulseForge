@@ -873,8 +873,13 @@ namespace PulseForge::GpuValidation
 			}
 			break;
 		case PbrMaterialCaptureStage::EnvironmentSourceMissing:
-			Fail("Missing HDR source unexpectedly reached image capture without a preparation failure");
-			return;
+			if (Readback->Pixels != m_PbrBaselinePixels)
+			{
+				Fail("Missing HDR replacement did not retain the last usable environment image");
+				return;
+			}
+			PF_INFO("PBR_MISSING_HDR_RETAINED_IMAGE=unchanged");
+			break;
 		case PbrMaterialCaptureStage::Complete:
 			Fail("PBR material validation captured an unexpected frame after completion");
 			return;
@@ -1011,8 +1016,9 @@ namespace PulseForge::GpuValidation
 			PF_INFO("PBR renderer refresh passed same-UUID material, texture, mesh, and HDR replacement/restoration plus fallback cases");
 			return true;
 		case PbrMaterialCaptureStage::EnvironmentSourceMissing:
-			Fail("Missing HDR source unexpectedly reached image capture without a preparation failure");
-			return false;
+			if (!RestorePbrEnvironment() || !RefreshPbrProjectAssets("environment source repair")) return false;
+			m_PbrMaterialStage = PbrMaterialCaptureStage::EnvironmentSourceRepaired;
+			break;
 		case PbrMaterialCaptureStage::Complete:
 			return true;
 		}

@@ -668,7 +668,8 @@ namespace PulseForge
 	EnvironmentLightingCache::EnvironmentLightingCache(
 		RenderDevice& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry,
 		DiagnosticRecorder* Diagnostics, DerivedDataArtifactStoreOptions ArtifactStoreOptions)
-		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_Registry(Registry), m_Diagnostics(Diagnostics),
+		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)),
+		  m_RegistryOwner(std::make_shared<const AssetRegistry>(Registry)), m_Registry(m_RegistryOwner.get()), m_Diagnostics(Diagnostics),
 		  m_OwnedPreparationService(std::make_unique<AssetPreparationService>(MakeCompatibilityPreparationLimits())),
 		  m_Preparation(m_OwnedPreparationService.get()),
 		  m_OwnedArtifactStore(std::make_unique<DerivedDataArtifactStore>(
@@ -681,7 +682,8 @@ namespace PulseForge
 	EnvironmentLightingCache::EnvironmentLightingCache(
 		RenderDevice& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry,
 		DerivedDataArtifactStore& ArtifactStore, DiagnosticRecorder* Diagnostics)
-		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_Registry(Registry), m_Diagnostics(Diagnostics),
+		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)),
+		  m_RegistryOwner(std::make_shared<const AssetRegistry>(Registry)), m_Registry(m_RegistryOwner.get()), m_Diagnostics(Diagnostics),
 		  m_OwnedPreparationService(std::make_unique<AssetPreparationService>(MakeCompatibilityPreparationLimits())),
 		  m_Preparation(m_OwnedPreparationService.get()), m_ArtifactStore(&ArtifactStore),
 		  m_SessionKey(MakeCompatibilityPreparationSession(m_ProjectRoot)), m_Processing(GetProcessingDescription())
@@ -692,9 +694,21 @@ namespace PulseForge
 		RenderDevice& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry,
 		AssetPreparationService& Preparation, AssetUploadBudget* UploadBudget, DerivedDataArtifactStore& ArtifactStore,
 		std::string SessionKey, DiagnosticRecorder* Diagnostics, EnvironmentProcessingDesc Processing)
-		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_Registry(Registry), m_Diagnostics(Diagnostics),
+		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)),
+		  m_RegistryOwner(std::make_shared<const AssetRegistry>(Registry)), m_Registry(m_RegistryOwner.get()), m_Diagnostics(Diagnostics),
 		  m_Preparation(&Preparation), m_UploadBudget(UploadBudget), m_ArtifactStore(&ArtifactStore),
 		  m_SessionKey(std::move(SessionKey)), m_Processing(Processing)
+	{
+	}
+
+	EnvironmentLightingCache::EnvironmentLightingCache(
+		RenderDevice& Runtime, std::filesystem::path ProjectRoot, std::shared_ptr<const AssetRegistry> Registry,
+		AssetPreparationService& Preparation, AssetUploadBudget* UploadBudget, DerivedDataArtifactStore& ArtifactStore,
+		std::string SessionKey, DiagnosticRecorder* Diagnostics, EnvironmentProcessingDesc Processing)
+		: m_Runtime(Runtime), m_ProjectRoot(std::move(ProjectRoot)), m_RegistryOwner(std::move(Registry)),
+		  m_Registry(m_RegistryOwner.get()), m_Diagnostics(Diagnostics), m_Preparation(&Preparation),
+		  m_UploadBudget(UploadBudget), m_ArtifactStore(&ArtifactStore), m_SessionKey(std::move(SessionKey)),
+		  m_Processing(Processing)
 	{
 	}
 
@@ -737,9 +751,18 @@ namespace PulseForge
 			State->Pending.reset();
 			State->Error.clear();
 			State->UploadFailed = false;
+			State->AdmissionDeferred = false;
 			State->SessionKey.clear();
 			State->DiagnosticSessionId = 0;
 		}
+	}
+
+	void EnvironmentLightingCache::SetRegistrySnapshot(std::shared_ptr<const AssetRegistry> Registry) noexcept
+	{
+		if (!Registry)
+			return;
+		m_RegistryOwner = std::move(Registry);
+		m_Registry = m_RegistryOwner.get();
 	}
 
 	std::expected<std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>, EnvironmentLightingCacheError>
@@ -767,6 +790,7 @@ namespace PulseForge
 			State.Pending.reset();
 			State.Error.clear();
 			State.UploadFailed = false;
+			State.AdmissionDeferred = false;
 			State.SessionKey = m_SessionKey;
 			State.DiagnosticSessionId = 0;
 			if (m_Diagnostics)
@@ -779,7 +803,7 @@ namespace PulseForge
 			return std::cref(*State.GpuTextures);
 		if (!State.Pending && !State.UploadFailed)
 		{
-			AssetRegistry RegistrySnapshot = m_Registry;
+			auto RegistrySnapshot = m_RegistryOwner;
 			const std::filesystem::path Root = m_ProjectRoot;
 			DerivedDataArtifactStore* Store = m_ArtifactStore;
 			const EnvironmentProcessingDesc Processing = m_Processing;
@@ -790,11 +814,11 @@ namespace PulseForge
 				std::to_string(Processing.BrdfSamples);
 			auto Requested = m_Preparation->Request({ m_SessionKey, Recipe }, AssetPreparationPriority::Interactive,
 				256ull * 1024ull * 1024ull,
-				[Asset, Root, RegistrySnapshot = std::move(RegistrySnapshot), Store, Processing](std::stop_token Token) mutable
+				[Asset, Root, RegistrySnapshot, Store, Processing](std::stop_token Token)
 					-> std::expected<AssetPreparationService::CpuPayload, AssetPreparationError>
 				{
 					auto Product = Detail::PrepareEnvironmentCpuProduct(
-						Asset, Root, std::move(RegistrySnapshot), Store, Processing, Token);
+						Asset, Root, *RegistrySnapshot, Store, Processing, Token);
 					if (!Product)
 						return std::unexpected(std::move(Product.error()));
 					const size_t Retained = GetPreparedEnvironmentRetainedBytes(Product->Data);
@@ -806,11 +830,13 @@ namespace PulseForge
 				if (Requested.error().Code == AssetPreparationErrorCode::WorkingSetLimit ||
 					Requested.error().Code == AssetPreparationErrorCode::QueueFull)
 				{
+					State.AdmissionDeferred = true;
 					State.Error.clear();
 					if (State.GpuTextures)
 						return std::cref(*State.GpuTextures);
 					return std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>{};
 				}
+				State.AdmissionDeferred = false;
 				State.Error = Requested.error().Message;
 				State.UploadFailed = true;
 				State.SessionKey.clear();
@@ -818,6 +844,7 @@ namespace PulseForge
 				return std::unexpected(MakeError(Asset, State.Error));
 			}
 			State.Pending.emplace(std::move(*Requested));
+			State.AdmissionDeferred = false;
 			++m_CacheMisses;
 		}
 		if (!State.Pending)
@@ -841,6 +868,7 @@ namespace PulseForge
 				{
 					State.Error = "Environment preparation returned an unexpected CPU product type";
 					State.UploadFailed = true;
+					State.Pending.reset();
 					if (State.GpuTextures) return std::cref(*State.GpuTextures);
 					return std::unexpected(MakeError(Asset, State.Error));
 				}
@@ -871,10 +899,12 @@ namespace PulseForge
 				{
 					State.Error = Uploaded.error().Message;
 					State.UploadFailed = true;
+					State.Pending.reset();
 					if (State.GpuTextures) return std::cref(*State.GpuTextures);
 					return std::unexpected(std::move(Uploaded.error()));
 				}
 				State.GpuTextures.emplace(std::move(*Uploaded));
+				++State.ResourceRevision;
 				State.PublishedSessionKey = m_SessionKey;
 				State.Pending.reset();
 				State.UploadFailed = false;
@@ -887,6 +917,7 @@ namespace PulseForge
 			case AssetPreparationStatus::Failed:
 				State.Error = Prepared.Error ? Prepared.Error->Message : "Environment CPU preparation failed";
 				State.UploadFailed = true;
+				State.Pending.reset();
 				if (State.GpuTextures) return std::cref(*State.GpuTextures);
 				return std::unexpected(MakeError(Asset, State.Error));
 			case AssetPreparationStatus::Cancelled:
@@ -899,8 +930,47 @@ namespace PulseForge
 		return std::unexpected(MakeError(Asset, "Environment cache reached an invalid preparation state"));
 	}
 
+	bool EnvironmentLightingCache::AdvancePending()
+	{
+		std::vector<AssetID> Assets;
+		Assets.reserve(m_Entries.size());
+		for (const auto& [Asset, State] : m_Entries)
+		{
+			(void)State;
+			Assets.push_back(Asset);
+		}
+
+		bool PublishedReplacement = false;
+		for (const AssetID& Asset : Assets)
+		{
+			const auto Found = m_Entries.find(Asset);
+			if (Found == m_Entries.end())
+				continue;
+			const uint64_t PreviousRevision = Found->second->ResourceRevision;
+			(void)GetOrLoad(Asset);
+			const auto Updated = m_Entries.find(Asset);
+			PublishedReplacement |= Updated != m_Entries.end() && Updated->second->ResourceRevision != PreviousRevision;
+		}
+		return PublishedReplacement;
+	}
+
+	uint64_t EnvironmentLightingCache::GetResourceRevision(const AssetID& Asset) const noexcept
+	{
+		const auto Found = m_Entries.find(Asset);
+		return Found == m_Entries.end() ? 0 : Found->second->ResourceRevision;
+	}
+
+	bool EnvironmentLightingCache::HasPendingWork() const noexcept
+	{
+		return std::ranges::any_of(m_Entries, [this](const auto& Pair)
+		{
+			const auto& State = *Pair.second;
+			return State.Pending.has_value() || State.AdmissionDeferred;
+		});
+	}
+
 	std::expected<Detail::EnvironmentCpuPreparationResult, AssetPreparationError> Detail::PrepareEnvironmentCpuProduct(
-		AssetID Asset, std::filesystem::path ProjectRoot, AssetRegistry Registry,
+		AssetID Asset, std::filesystem::path ProjectRoot, const AssetRegistry& Registry,
 		DerivedDataArtifactStore* ArtifactStore, EnvironmentProcessingDesc Processing, std::stop_token StopToken)
 	{
 		auto Fail = [](std::string Message)
@@ -918,6 +988,7 @@ namespace PulseForge
 			const DerivedDataArtifactKey Key =
 				Detail::EnvironmentLightingArtifactCodec::MakeEnvironmentKey(Asset, Source->Content, Processing);
 			std::optional<EnvironmentLightingData> Data;
+			std::optional<AssetContentFingerprint> RejectedEnvironmentEntry;
 			bool CacheHit = false;
 			bool BrdfCacheHit = false;
 			if (ArtifactStore)
@@ -927,7 +998,11 @@ namespace PulseForge
 				{
 					auto Decoded = Detail::EnvironmentLightingArtifactCodec::DecodeEnvironment(Artifact.Payload, Processing);
 					if (Decoded) { Data = std::move(*Decoded); CacheHit = true; }
-					else PF_WARN("Environment artifact payload was invalid for {}: {}", Asset.ToString(), Decoded.error());
+					else
+					{
+						RejectedEnvironmentEntry = Artifact.EntryChecksum;
+						PF_WARN("Environment artifact payload was invalid for {}: {}", Asset.ToString(), Decoded.error());
+					}
 				}
 				else if (Artifact.Status == DerivedDataArtifactReadStatus::Corrupt ||
 					Artifact.Status == DerivedDataArtifactReadStatus::Incompatible)
@@ -938,6 +1013,7 @@ namespace PulseForge
 
 			const DerivedDataArtifactKey BrdfKey = Detail::EnvironmentLightingArtifactCodec::MakeBrdfLutKey(Processing);
 			std::optional<ImportedFloatImage> Brdf;
+			std::optional<AssetContentFingerprint> RejectedBrdfEntry;
 			if (ArtifactStore)
 			{
 				const auto Artifact = ArtifactStore->Read(BrdfKey);
@@ -946,7 +1022,11 @@ namespace PulseForge
 					auto Decoded = Detail::EnvironmentLightingArtifactCodec::DecodeBrdfLut(
 						Artifact.Payload, Processing.BrdfLutSize, Processing.BrdfSamples);
 					if (Decoded) { Brdf = std::move(*Decoded); BrdfCacheHit = true; }
-					else PF_WARN("Shared BRDF artifact payload was invalid: {}", Decoded.error());
+					else
+					{
+						RejectedBrdfEntry = Artifact.EntryChecksum;
+						PF_WARN("Shared BRDF artifact payload was invalid: {}", Decoded.error());
+					}
 				}
 				else if (Artifact.Status == DerivedDataArtifactReadStatus::Corrupt ||
 					Artifact.Status == DerivedDataArtifactReadStatus::Incompatible)
@@ -960,7 +1040,9 @@ namespace PulseForge
 				if (Brdf && ArtifactStore)
 					if (auto Encoded = Detail::EnvironmentLightingArtifactCodec::EncodeBrdfLut(*Brdf, Processing.BrdfSamples))
 					{
-						const auto Stored = ArtifactStore->Write(BrdfKey, *Encoded);
+						const auto Stored = RejectedBrdfEntry
+							? ArtifactStore->ReplaceRejectedProduct(BrdfKey, *RejectedBrdfEntry, *Encoded)
+							: ArtifactStore->Write(BrdfKey, *Encoded);
 						if ((Stored.Status == DerivedDataArtifactWriteStatus::Unavailable ||
 							Stored.Status == DerivedDataArtifactWriteStatus::Rejected) && ArtifactStore->GetOptions().Enabled)
 							PF_WARN("Could not migrate the read-only BRDF cache: {}", Stored.Message);
@@ -975,7 +1057,9 @@ namespace PulseForge
 				if (ArtifactStore)
 					if (auto Encoded = Detail::EnvironmentLightingArtifactCodec::EncodeBrdfLut(*Brdf, Processing.BrdfSamples))
 					{
-						const auto Stored = ArtifactStore->Write(BrdfKey, *Encoded);
+						const auto Stored = RejectedBrdfEntry
+							? ArtifactStore->ReplaceRejectedProduct(BrdfKey, *RejectedBrdfEntry, *Encoded)
+							: ArtifactStore->Write(BrdfKey, *Encoded);
 						if ((Stored.Status == DerivedDataArtifactWriteStatus::Unavailable ||
 							Stored.Status == DerivedDataArtifactWriteStatus::Rejected) && ArtifactStore->GetOptions().Enabled)
 							PF_WARN("Could not persist shared BRDF artifact: {}", Stored.Message);
@@ -1018,7 +1102,9 @@ namespace PulseForge
 				return Fail("Environment source changed during preparation; stale product discarded");
 			if (ToStore && ArtifactStore)
 			{
-				const auto Stored = ArtifactStore->Write(Key, *ToStore);
+				const auto Stored = RejectedEnvironmentEntry
+					? ArtifactStore->ReplaceRejectedProduct(Key, *RejectedEnvironmentEntry, *ToStore)
+					: ArtifactStore->Write(Key, *ToStore);
 				if ((Stored.Status == DerivedDataArtifactWriteStatus::Unavailable ||
 					Stored.Status == DerivedDataArtifactWriteStatus::Rejected) && ArtifactStore->GetOptions().Enabled)
 					PF_WARN("Could not persist environment artifact for {}: {}", Asset.ToString(), Stored.Message);

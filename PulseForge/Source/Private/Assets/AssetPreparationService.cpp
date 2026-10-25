@@ -338,48 +338,64 @@ namespace PulseForge::Detail
 	{
 		if (!State || !Subscriber)
 			return;
+		std::shared_ptr<AssetPreparationJob> RetiredJob;
+		std::shared_ptr<const AssetPreparationPayload> RetiredSubscriberPayload;
+		std::shared_ptr<const AssetPreparationError> RetiredSubscriberError;
+		std::shared_ptr<const AssetPreparationPayload> RetiredJobPayload;
+		std::shared_ptr<const AssetPreparationError> RetiredJobError;
+		bool RequestStop = false;
 		try
 		{
-			std::lock_guard Lock(State->Mutex);
-			if (Subscriber->Status == AssetPreparationStatus::Cancelled)
-				return;
-			Subscriber->Status = AssetPreparationStatus::Cancelled;
-			Subscriber->Payload.reset();
-			Subscriber->Error.reset();
-			if (State->SubscriberCount > 0)
-				--State->SubscriberCount;
-
-			for (auto& [Identity, Job] : State->Jobs)
 			{
-				(void)Identity;
-				const auto Found = Job->Subscribers.find(Subscriber->ID);
-				if (Found == Job->Subscribers.end())
-					continue;
-				Job->Subscribers.erase(Found);
-				if (!Job->Subscribers.empty())
-					break;
+				std::lock_guard Lock(State->Mutex);
+				if (Subscriber->Status == AssetPreparationStatus::Cancelled)
+					return;
+				Subscriber->Status = AssetPreparationStatus::Cancelled;
+				RetiredSubscriberPayload = std::move(Subscriber->Payload);
+				RetiredSubscriberError = std::move(Subscriber->Error);
+				if (State->SubscriberCount > 0)
+					--State->SubscriberCount;
 
-				if (Job->Status == AssetPreparationStatus::Queued)
+				for (auto& [Identity, Job] : State->Jobs)
 				{
-					EraseQueuedJob(*State, Job);
-					State->ReservedWorkingBytes -= (std::min)(State->ReservedWorkingBytes, Job->EstimatedPeakWorkingBytes);
-					Job->Status = AssetPreparationStatus::Cancelled;
+					(void)Identity;
+					const auto Found = Job->Subscribers.find(Subscriber->ID);
+					if (Found == Job->Subscribers.end())
+						continue;
+					RetiredJob = Job;
+					Job->Subscribers.erase(Found);
+					if (!Job->Subscribers.empty())
+						break;
+
+					if (Job->Status == AssetPreparationStatus::Queued)
+					{
+						EraseQueuedJob(*State, Job);
+						State->ReservedWorkingBytes -= (std::min)(State->ReservedWorkingBytes,
+							Job->EstimatedPeakWorkingBytes);
+						Job->Status = AssetPreparationStatus::Cancelled;
+					}
+					else if (Job->IsActive)
+					{
+						RequestStop = true;
+					}
+					if (Job->CompletedBytesCounted && Job->Payload)
+					{
+						State->CompletedPayloadBytes -= (std::min)(State->CompletedPayloadBytes,
+							Job->Payload->GetRetainedBytes());
+						Job->CompletedBytesCounted = false;
+					}
+					RetiredJobPayload = std::move(Job->Payload);
+					RetiredJobError = std::move(Job->Error);
+					EraseJobMapEntry(*State, Job);
+					break;
 				}
-				else if (Job->IsActive)
-				{
-					Job->StopSource.request_stop();
-				}
-				if (Job->CompletedBytesCounted && Job->Payload)
-				{
-					State->CompletedPayloadBytes -= (std::min)(State->CompletedPayloadBytes,
-						Job->Payload->GetRetainedBytes());
-					Job->CompletedBytesCounted = false;
-					Job->Payload.reset();
-				}
-				State->Jobs.erase(Job->Identity);
-				break;
+				State->Changed.notify_all();
 			}
-			State->Changed.notify_all();
+
+			// Stop callbacks are user supplied and may call back into the service. Keep the job alive,
+			// but never invoke them while holding the state mutex.
+			if (RequestStop && RetiredJob)
+				RetiredJob->StopSource.request_stop();
 		}
 		catch (...)
 		{
@@ -560,6 +576,9 @@ namespace PulseForge
 	{
 		if (!m_State)
 			return;
+		std::unordered_map<AssetPreparationRequestIdentity, std::shared_ptr<Detail::AssetPreparationJob>,
+			Detail::AssetPreparationIdentityHash> RetiredJobs;
+		std::vector<std::shared_ptr<Detail::AssetPreparationJob>> RetiredQueue;
 		{
 			std::lock_guard Lock(m_State->Mutex);
 			if (m_State->Accepting)
@@ -568,24 +587,30 @@ namespace PulseForge
 				for (auto& [Identity, Job] : m_State->Jobs)
 				{
 					(void)Identity;
-					Job->StopSource.request_stop();
 					Job->Status = AssetPreparationStatus::Cancelled;
+					if (Job->CompletedBytesCounted)
+						Job->CompletedBytesCounted = false;
 					for (auto& [ID, Subscriber] : Job->Subscribers)
 					{
 						(void)ID;
 						Subscriber->Status = AssetPreparationStatus::Cancelled;
-						Subscriber->Payload.reset();
-						Subscriber->Error.reset();
 					}
 				}
 				for (const auto& Job : m_State->Queue)
 					m_State->ReservedWorkingBytes -= (std::min)(m_State->ReservedWorkingBytes,
 						Job->EstimatedPeakWorkingBytes);
-				m_State->Queue.clear();
-				m_State->Jobs.clear();
+				RetiredJobs.swap(m_State->Jobs);
+				RetiredQueue.swap(m_State->Queue);
 				m_State->SubscriberCount = 0;
 				m_State->CompletedPayloadBytes = 0;
 			}
+		}
+		// Stop callbacks are user code and may query this service. Job and processor-closure
+		// destruction is also deferred until after the mutex is released.
+		for (const auto& [Identity, Job] : RetiredJobs)
+		{
+			(void)Identity;
+			Job->StopSource.request_stop();
 		}
 		m_State->Changed.notify_all();
 		for (std::jthread& Worker : m_Workers)
@@ -595,5 +620,21 @@ namespace PulseForge
 			if (Worker.joinable())
 				Worker.join();
 		m_Workers.clear();
+		if (!RetiredJobs.empty())
+		{
+			std::lock_guard Lock(m_State->Mutex);
+			for (const auto& [Identity, Job] : RetiredJobs)
+			{
+				(void)Identity;
+				for (const auto& [ID, Subscriber] : Job->Subscribers)
+				{
+					(void)ID;
+					// RetiredJobs still owns the job's matching result, so these resets cannot destroy
+					// a payload/error object while the service mutex is held.
+					Subscriber->Payload.reset();
+					Subscriber->Error.reset();
+				}
+			}
+		}
 	}
 } // namespace PulseForge

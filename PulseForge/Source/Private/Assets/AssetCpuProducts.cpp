@@ -318,6 +318,23 @@ namespace PulseForge::Detail
 		}
 	}
 
+	std::optional<DerivedDataArtifactKey> MakeMeshArtifactKey(
+		const AssetImportRecipe& Recipe, const AssetID& Asset, std::string_view EffectiveSettings)
+	{
+		return MeshKey(Recipe, Asset, EffectiveSettings);
+	}
+
+	DerivedDataArtifactKey MakeTextureArtifactKey(const AssetContentFingerprint& Source, ImageColorSpace ColorSpace)
+	{
+		return TextureKey(Source, ColorSpace);
+	}
+
+	std::vector<PreparedMipLevel> BuildTextureMipChain(
+		uint32_t Width, uint32_t Height, std::span<const uint8_t> SourcePixels, ImageColorSpace ColorSpace)
+	{
+		return MakeMips(Width, Height, SourcePixels, ColorSpace == ImageColorSpace::Srgb);
+	}
+
 	std::expected<AssetCpuProductResult<ImportedGltfMesh>, std::string> PrepareMeshCpuProduct(
 		const AssetID& Asset, const std::filesystem::path& Root, const AssetRegistry& Registry, std::string_view Settings,
 		DerivedDataArtifactStore* Store, std::stop_token Stop, MeshProcessor Processor)
@@ -326,34 +343,43 @@ namespace PulseForge::Detail
 		if (Stop.stop_requested()) return std::unexpected("Mesh preparation cancelled before inspection");
 		std::optional<AssetImportRecipe> Observed;
 		std::optional<DerivedDataArtifactKey> Key;
+		std::optional<AssetContentFingerprint> RejectedProductChecksum;
 		std::vector<AssetDependencyInputReceipt> ReadSet;
+		// Observe inputs for every processing run, including when the disposable cache is
+		// unavailable. Cache persistence is optional; publishing a product prepared from
+		// inputs that changed during processing is not.
+		auto Inspection = AssetDependencyExtractor::ExtractAsset(Root, Asset, Registry);
+		if (!Inspection)
+			return std::unexpected("Mesh source could not be inspected for a stable processing read set: " + Inspection.error().Message);
+		auto O = std::find_if(Inspection->ImportObservations.begin(), Inspection->ImportObservations.end(),
+			[](const auto& X) { return X.SubresourceKey == "mesh/0/primitive/0"; });
+		auto S = std::find_if(Inspection->Subresources.begin(), Inspection->Subresources.end(),
+			[](const auto& X) { return X.Identity.SubresourceKey == "mesh/0/primitive/0"; });
+		if (O == Inspection->ImportObservations.end() || S == Inspection->Subresources.end() ||
+			(S->Classification != AssetSubresourceClassification::SupportedCandidate &&
+			 S->Classification != AssetSubresourceClassification::Imported) || O->EffectiveSettings != Settings)
+			return std::unexpected("Mesh source does not contain the requested supported output and settings");
+		Observed = MakeRecipe(*O);
+		Key = MakeMeshArtifactKey(*Observed, Asset, Settings);
+		ReadSet = std::move(Inspection->ReadSet);
 		if (Store)
 		{
-			auto Inspection = AssetDependencyExtractor::ExtractAsset(Root, Asset, Registry);
-			if (Inspection)
+			if (Key)
 			{
-				auto O = std::find_if(Inspection->ImportObservations.begin(), Inspection->ImportObservations.end(),
-					[](const auto& X) { return X.SubresourceKey == "mesh/0/primitive/0"; });
-				auto S = std::find_if(Inspection->Subresources.begin(), Inspection->Subresources.end(),
-					[](const auto& X) { return X.Identity.SubresourceKey == "mesh/0/primitive/0"; });
-				if (O != Inspection->ImportObservations.end() && S != Inspection->Subresources.end() &&
-					(S->Classification == AssetSubresourceClassification::SupportedCandidate || S->Classification == AssetSubresourceClassification::Imported) &&
-					O->EffectiveSettings == Settings)
+				auto Cached = Store->Read(*Key);
+				if (Cached.Status == DerivedDataArtifactReadStatus::Hit)
 				{
-					Observed = MakeRecipe(*O); Key = MeshKey(*Observed, Asset, Settings); ReadSet = std::move(Inspection->ReadSet);
-					if (Key)
+					auto Product = DecodeMesh(Cached.Payload);
+					if (Product && AssetDependencyExtractor::ValidateInputReceipts(Root, ReadSet))
 					{
-						auto Cached = Store->Read(*Key);
-						if (Cached.Status == DerivedDataArtifactReadStatus::Hit)
-							if (auto Product = DecodeMesh(Cached.Payload); Product && AssetDependencyExtractor::ValidateInputReceipts(Root, ReadSet))
-							{
-								const auto LookupEnd = std::chrono::steady_clock::now();
-								AssetCpuProductResult<ImportedGltfMesh> Result{ std::move(*Product), AssetCpuProductCacheOutcome::ArtifactHit,
-									static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(LookupEnd - LookupStart).count()), 0, 0 };
-								Result.ObservationAndLookup = MakeTiming(LookupStart, LookupEnd);
-								return Result;
-							}
+						const auto LookupEnd = std::chrono::steady_clock::now();
+						AssetCpuProductResult<ImportedGltfMesh> Result{ std::move(*Product), AssetCpuProductCacheOutcome::ArtifactHit,
+							static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(LookupEnd - LookupStart).count()), 0, 0 };
+						Result.ObservationAndLookup = MakeTiming(LookupStart, LookupEnd);
+						return Result;
 					}
+					if (!Product)
+						RejectedProductChecksum = Cached.EntryChecksum;
 				}
 			}
 		}
@@ -375,17 +401,22 @@ namespace PulseForge::Detail
 		if (!Product) return std::unexpected(Product.error());
 		if (Product->Recipe.EffectiveSettings != Settings) return std::unexpected("Mesh import settings changed during preparation");
 		if (Stop.stop_requested()) return std::unexpected("Mesh preparation cancelled after import");
+		if (!Observed || !SameRecipe(Product->Recipe, *Observed))
+			return std::unexpected("Mesh inputs or processing recipe changed during preparation");
+		if (!AssetDependencyExtractor::ValidateInputReceipts(Root, ReadSet))
+			return std::unexpected("Mesh inputs changed during preparation; the CPU product was rejected as stale");
 		AssetCpuProductCacheOutcome Outcome = AssetCpuProductCacheOutcome::ProcessedStoreUnavailable;
 		uint64_t WriteMicroseconds = 0;
 		auto WriteStart = std::chrono::steady_clock::time_point{};
 		auto WriteEnd = WriteStart;
-		if (Store && Observed && Key && SameRecipe(Product->Recipe, *Observed) &&
-			AssetDependencyExtractor::ValidateInputReceipts(Root, ReadSet))
+		if (Store && Key)
 		{
 			WriteStart = std::chrono::steady_clock::now();
 			if (auto Bytes = EncodeMesh(Product->Mesh); Bytes)
 			{
-				const auto Write = Store->Write(*Key, *Bytes);
+				const auto Write = RejectedProductChecksum
+					? Store->ReplaceRejectedProduct(*Key, *RejectedProductChecksum, *Bytes)
+					: Store->Write(*Key, *Bytes);
 				if (Write.Status == DerivedDataArtifactWriteStatus::Written || Write.Status == DerivedDataArtifactWriteStatus::ExistingValid)
 					Outcome = AssetCpuProductCacheOutcome::ProcessedAndStored;
 			}
@@ -415,13 +446,16 @@ namespace PulseForge::Detail
 		if (!Source) return std::unexpected(Source.error());
 		const AssetContentFingerprint Fingerprint = ComputeAssetContentFingerprint(*Source);
 		const auto RawFingerprint = ImporterFingerprint(*Source);
-		const DerivedDataArtifactKey Key = TextureKey(Fingerprint, ColorSpace);
+		const DerivedDataArtifactKey Key = MakeTextureArtifactKey(Fingerprint, ColorSpace);
+		std::optional<AssetContentFingerprint> RejectedProductChecksum;
 		std::vector<std::byte>().swap(*Source);
 		if (Store)
 		{
 			auto Cached = Store->Read(Key);
 			if (Cached.Status == DerivedDataArtifactReadStatus::Hit)
-				if (auto Product = DecodeTexture(Cached.Payload, ColorSpace))
+			{
+				auto Product = DecodeTexture(Cached.Payload, ColorSpace);
+				if (Product)
 				{
 					auto Current = ReadImage(*Resolved);
 					if (!Current || ComputeAssetContentFingerprint(*Current) != Fingerprint) return std::unexpected("Image source changed during cache lookup");
@@ -431,6 +465,8 @@ namespace PulseForge::Detail
 					Result.ObservationAndLookup = MakeTiming(LookupStart, LookupEnd);
 					return Result;
 				}
+				RejectedProductChecksum = Cached.EntryChecksum;
+			}
 		}
 		if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled before decode");
 		if (!Processor)
@@ -464,7 +500,9 @@ namespace PulseForge::Detail
 			WriteStart = std::chrono::steady_clock::now();
 			if (auto Bytes = EncodeTexture(Product); Bytes)
 			{
-				const auto Write = Store->Write(Key, *Bytes);
+				const auto Write = RejectedProductChecksum
+					? Store->ReplaceRejectedProduct(Key, *RejectedProductChecksum, *Bytes)
+					: Store->Write(Key, *Bytes);
 				if (Write.Status == DerivedDataArtifactWriteStatus::Written || Write.Status == DerivedDataArtifactWriteStatus::ExistingValid)
 					Outcome = AssetCpuProductCacheOutcome::ProcessedAndStored;
 			}

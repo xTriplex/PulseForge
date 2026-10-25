@@ -348,4 +348,28 @@ void RunEnvironmentLightingCacheTests(TestRunner& Tests)
 					<< "us process=0us\n";
 		}
 	}
+
+	// A checksummed envelope can still contain an invalid environment product. The production
+	// decoder must rebuild it, conditionally repair that exact entry, and let a fresh store hit it.
+	const AssetContentFingerprint HdrFingerprint = ComputeAssetContentFingerprint(HdrBytes);
+	const DerivedDataArtifactKey EnvironmentKey = Detail::EnvironmentLightingArtifactCodec::MakeEnvironmentKey(
+		HdrMetadata->ID, HdrFingerprint, CpuProcessing);
+	const DerivedDataArtifactStoreOptions SemanticOptions{ Root.Path / "SemanticEnvironmentArtifacts", true,
+		16 * 1024 * 1024, 8 * 1024 * 1024, 16 };
+	{
+		DerivedDataArtifactStore SemanticStore(SemanticOptions);
+		PF_CHECK(Tests, SemanticStore.Write(EnvironmentKey, Bytes("checksummed invalid environment product")).Status ==
+			DerivedDataArtifactWriteStatus::Written);
+		AssetPreparationService RepairService(MakeTestPreparationLimits());
+		const auto Repaired = RunCpuPreparation(RepairService, "semantic-repair", HdrMetadata->ID, ProjectRoot,
+			HdrRegistry, SemanticStore, CpuProcessing);
+		PF_CHECK(Tests, Repaired.has_value() && !Repaired->EnvironmentArtifactHit && Repaired->RanEnvironmentPreprocessing);
+	}
+	{
+		DerivedDataArtifactStore ReopenedStore(SemanticOptions);
+		AssetPreparationService ReopenService(MakeTestPreparationLimits());
+		const auto Reopened = RunCpuPreparation(ReopenService, "semantic-reopen", HdrMetadata->ID, ProjectRoot,
+			HdrRegistry, ReopenedStore, CpuProcessing);
+		PF_CHECK(Tests, Reopened.has_value() && Reopened->EnvironmentArtifactHit && !Reopened->RanEnvironmentPreprocessing);
+	}
 }
