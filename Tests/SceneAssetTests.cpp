@@ -1,5 +1,7 @@
 #include "TestAssetSupport.h"
 
+#include "Scene/PropertyMetadata.h"
+
 namespace
 {
 	void TestSceneSerializerClone(TestRunner& Tests)
@@ -86,9 +88,19 @@ namespace
 		const AssetID MaterialAssetID{ 0x7400000000000000ull, 7 };
 		const AssetID AudioAssetID{ 0x7500000000000000ull, 7 };
 		const AssetID ScriptAssetID{ 0x7600000000000000ull, 7 };
+		const AssetID SelectedMeshAssetID{ 0x7350000000000000ull, 7 };
 		PF_CHECK(Tests, Child->SetMeshRenderer(MeshRendererComponent{ MeshAssetID, MaterialAssetID }).has_value());
+		PF_CHECK(
+			Tests, WriteProperty(*Child, PropertyComponentIds::MeshRenderer, PropertyIds::MeshAsset, PropertyValue{ SelectedMeshAssetID })
+					   .has_value());
+		const auto SelectedMaterial = ReadProperty(*Child, PropertyComponentIds::MeshRenderer, PropertyIds::MaterialAsset);
+		PF_CHECK(
+			Tests, SelectedMaterial && std::get<std::optional<AssetID>>(*SelectedMaterial) == std::optional<AssetID>{ MaterialAssetID });
 		PF_CHECK(Tests, Child->SetAudioSource(AudioSourceComponent{ AudioAssetID, 0.6f, true, false, true }).has_value());
-		PF_CHECK(Tests, Child->SetScript(ScriptComponent{ ScriptAssetID, false }).has_value());
+		ScriptComponent ChildScript{ ScriptAssetID, false };
+		ChildScript.FloatProperties.emplace("health", 10.0f);
+		PF_CHECK(Tests, Child->SetScript(ChildScript).has_value());
+		PF_CHECK(Tests, WriteProperty(*Child, PropertyComponentIds::ScriptFloat, "health", PropertyValue{ 72.5f }).has_value());
 		PF_CHECK(Tests, Root->SetAudioListener(AudioListenerComponent{ true }).has_value());
 
 		const auto PrefabData = PrefabSerializer::Serialize(Source, *Root);
@@ -97,7 +109,7 @@ namespace
 		PF_CHECK(Tests, PrefabData->find("\"format\": \"PulseForgePrefab\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"version\": 3") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"root\": \"" + Root->GetUUID().ToString() + "\"") != std::string::npos);
-		PF_CHECK(Tests, PrefabData->find("\"meshAsset\": \"" + MeshAssetID.ToString() + "\"") != std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"meshAsset\": \"" + SelectedMeshAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"materialAsset\": \"" + MaterialAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"asset\": \"" + AudioAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"asset\": \"" + ScriptAssetID.ToString() + "\"") != std::string::npos);
@@ -135,26 +147,18 @@ namespace
 			PF_CHECK(Tests, InstanceListener && InstanceListener->has_value() && !InstanceListener->value().IsPrimary);
 		}
 
-		std::string LegacyPrefabV1 = *PrefabData;
-		const size_t CameraPrimaryPosition = LegacyPrefabV1.find("\"primary\": false");
-		PF_CHECK(Tests, CameraPrimaryPosition != std::string::npos);
-		if (CameraPrimaryPosition != std::string::npos)
+		auto LegacyPrefabDocument = nlohmann::json::parse(*PrefabData);
+		LegacyPrefabDocument["version"] = 1;
+		auto& LegacyScene = LegacyPrefabDocument["scene"];
+		LegacyScene["version"] = 3;
+		for (auto& EntityRecord : LegacyScene["entities"])
 		{
-			LegacyPrefabV1.replace(CameraPrimaryPosition, std::string("\"primary\": false").size(), "\"primary\": true");
-			const size_t PrimaryCommaPosition = LegacyPrefabV1.rfind(',', CameraPrimaryPosition);
-			const size_t PrimaryLineEnd = LegacyPrefabV1.find('\n', CameraPrimaryPosition);
-			PF_CHECK(Tests, PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos);
-			if (PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos)
-				LegacyPrefabV1.erase(PrimaryCommaPosition, PrimaryLineEnd - PrimaryCommaPosition);
+			for (const std::string_view Field : { "directionalLight", "environmentLight", "pointLight", "spotLight", "rigidbody",
+					 "boxCollider", "audioSource", "audioListener", "script" })
+				EntityRecord.erase(std::string(Field));
+			if (EntityRecord.contains("camera")) EntityRecord["camera"].erase("primary");
 		}
-		const size_t EmbeddedSceneVersionPosition = LegacyPrefabV1.find("\"version\": 7", LegacyPrefabV1.find("\"scene\""));
-		PF_CHECK(Tests, EmbeddedSceneVersionPosition != std::string::npos);
-		if (EmbeddedSceneVersionPosition != std::string::npos)
-			LegacyPrefabV1.replace(EmbeddedSceneVersionPosition, std::string("\"version\": 7").size(), "\"version\": 3");
-		const size_t OuterPrefabVersionPosition = LegacyPrefabV1.find("\"version\": 3");
-		PF_CHECK(Tests, OuterPrefabVersionPosition != std::string::npos);
-		if (OuterPrefabVersionPosition != std::string::npos)
-			LegacyPrefabV1.replace(OuterPrefabVersionPosition, std::string("\"version\": 3").size(), "\"version\": 1");
+		const std::string LegacyPrefabV1 = LegacyPrefabDocument.dump(2) + "\n";
 		Scene LegacyPrefabDestination;
 		const auto LegacyPrefabInstance = PrefabSerializer::Instantiate(LegacyPrefabV1, LegacyPrefabDestination);
 		PF_CHECK(Tests, LegacyPrefabInstance.has_value());
@@ -202,12 +206,14 @@ namespace
 		const auto FirstChildScript = FirstChild.GetScript();
 		const auto FirstGrandchildren = FirstChild.GetChildren();
 		PF_CHECK(Tests, FirstChildTag && FirstChildTag->Name == "Prefab child");
-		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MeshAsset == MeshAssetID);
+		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MeshAsset == SelectedMeshAssetID);
 		PF_CHECK(Tests, FirstChildMesh && FirstChildMesh->has_value() && FirstChildMesh->value().MaterialAsset == MaterialAssetID);
 		PF_CHECK(Tests, FirstChildAudioSource && FirstChildAudioSource->has_value() &&
 							FirstChildAudioSource->value().AudioAsset == AudioAssetID && !FirstChildAudioSource->value().PlayOnStart);
 		PF_CHECK(Tests, FirstChildScript && FirstChildScript->has_value() && FirstChildScript->value().ScriptAsset == ScriptAssetID &&
 							!FirstChildScript->value().Enabled);
+		const auto ReopenedScriptFloat = ReadProperty(FirstChild, PropertyComponentIds::ScriptFloat, "health");
+		PF_CHECK(Tests, ReopenedScriptFloat && std::get<float>(*ReopenedScriptFloat) == 72.5f);
 		PF_CHECK(Tests, FirstGrandchildren && FirstGrandchildren->size() == 1);
 		if (FirstGrandchildren && FirstGrandchildren->size() == 1)
 		{

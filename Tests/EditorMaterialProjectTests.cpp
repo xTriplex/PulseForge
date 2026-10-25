@@ -28,6 +28,8 @@ namespace
 											 TextureAsset->ToString() + "\",\"baseColorFactor\":[1,1,1,1]}";
 		const auto Version1Material = MaterialAssetSerializer::Deserialize(Version1Document);
 		PF_CHECK(Tests, Version1Material && Version1Material->MetallicFactor == 0.0f && Version1Material->RoughnessFactor == 1.0f);
+		PF_CHECK(Tests, Version1Material && Version1Material->BaseColorTexture == *TextureAsset &&
+							Version1Material->NormalTexture.IsNil() && Version1Material->AlphaMode == MaterialAlphaMode::Opaque);
 		const std::string Version2Document = "{\"format\":\"PulseForgeMaterial\",\"version\":2,\"baseColorTexture\":\"" +
 											 TextureAsset->ToString() +
 											 "\",\"baseColorFactor\":[1,1,1,1],\"metallicFactor\":0.4,\"roughnessFactor\":0.6}";
@@ -39,6 +41,22 @@ namespace
 		const auto Version3Material = MaterialAssetSerializer::Deserialize(Version3Document);
 		PF_CHECK(Tests, Version3Material && Version3Material->AlphaMode == MaterialAlphaMode::Opaque &&
 							Version3Material->AlphaCutoff == 0.5f && !Version3Material->DoubleSided);
+		PF_CHECK(Tests, Version3Material && Version3Material->MetallicFactor == 0.4f && Version3Material->RoughnessFactor == 0.6f &&
+							Version3Material->NormalScale == 1.0f && Version3Material->OcclusionStrength == 1.0f);
+		const auto CheckLegacyMaterialUpgrade = [&](const MaterialAssetDesc& LegacyMaterial)
+		{
+			const auto Upgraded = MaterialAssetSerializer::Serialize(LegacyMaterial);
+			PF_CHECK(Tests, Upgraded && Upgraded->find("\"version\": 4") != std::string::npos);
+			if (!Upgraded) return;
+			const auto RoundTripped = MaterialAssetSerializer::Deserialize(*Upgraded);
+			PF_CHECK(Tests, RoundTripped && RoundTripped->BaseColorTexture == LegacyMaterial.BaseColorTexture &&
+								glm::all(glm::equal(RoundTripped->BaseColorFactor, LegacyMaterial.BaseColorFactor)) &&
+								RoundTripped->MetallicFactor == LegacyMaterial.MetallicFactor &&
+								RoundTripped->RoughnessFactor == LegacyMaterial.RoughnessFactor);
+		};
+		if (Version1Material) CheckLegacyMaterialUpgrade(*Version1Material);
+		if (Version2Material) CheckLegacyMaterialUpgrade(*Version2Material);
+		if (Version3Material) CheckLegacyMaterialUpgrade(*Version3Material);
 		MaterialAssetDesc TexturedDescription = Description;
 		TexturedDescription.BaseColorTexture = {};
 		TexturedDescription.MetallicRoughnessTexture = *TextureAsset;
@@ -130,6 +148,26 @@ namespace
 		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize("{invalid"));
 		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize("{\"format\":\"OtherMaterial\",\"version\":1}"));
 		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize("{\"format\":\"PulseForgeMaterial\",\"version\":99}"));
+		for (const std::string_view UnsupportedVersion : { "0", "-1", "5" })
+		{
+			const std::string UnsupportedDocument =
+				"{\"format\":\"PulseForgeMaterial\",\"version\":" + std::string(UnsupportedVersion) + ",\"baseColorFactor\":[1,1,1,1]}";
+			const auto Result = MaterialAssetSerializer::Deserialize(UnsupportedDocument);
+			PF_CHECK(Tests, !Result && Result.error().Code == MaterialAssetErrorCode::UnsupportedVersion);
+		}
+		for (const std::string_view InvalidVersion : { "1.5", "\"1\"", "null" })
+		{
+			const std::string InvalidDocument =
+				"{\"format\":\"PulseForgeMaterial\",\"version\":" + std::string(InvalidVersion) + ",\"baseColorFactor\":[1,1,1,1]}";
+			const auto Result = MaterialAssetSerializer::Deserialize(InvalidDocument);
+			PF_CHECK(Tests, !Result && Result.error().Code == MaterialAssetErrorCode::InvalidDocument);
+		}
+		const auto MissingMaterialVersion =
+			MaterialAssetSerializer::Deserialize("{\"format\":\"PulseForgeMaterial\",\"baseColorFactor\":[1,1,1,1]}");
+		PF_CHECK(Tests, !MissingMaterialVersion && MissingMaterialVersion.error().Code == MaterialAssetErrorCode::InvalidDocument);
+		const std::string MaterialWithUnknownField = "{\"format\":\"PulseForgeMaterial\",\"version\":4,"
+													 "\"baseColorFactor\":[1,1,1,1],\"futureMaterialData\":{\"keep\":true}}";
+		PF_CHECK(Tests, !MaterialAssetSerializer::Deserialize(MaterialWithUnknownField));
 
 		std::error_code FileError;
 		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
@@ -426,11 +464,30 @@ namespace
 		PF_CHECK(Tests, std::filesystem::is_directory(Root / "Assets"));
 		PF_CHECK(Tests, !Project::Create(ProjectFile, "Duplicate Project"));
 		PF_CHECK(Tests, !ProjectSerializer::Deserialize("{broken"));
-		PF_CHECK(Tests, !ProjectSerializer::Deserialize("{\"format\":\"PulseForgeProject\",\"version\":99}"));
+		for (const std::string_view UnsupportedVersion : { "0", "2", "99" })
+		{
+			const std::string UnsupportedProject = "{\"format\":\"PulseForgeProject\",\"version\":" + std::string(UnsupportedVersion) + "}";
+			const auto Result = ProjectSerializer::Deserialize(UnsupportedProject);
+			PF_CHECK(Tests, !Result && Result.error().Code == ProjectErrorCode::UnsupportedVersion);
+		}
+		for (const std::string_view InvalidVersion : { "1.5", "\"1\"", "null" })
+		{
+			const std::string InvalidProject = "{\"format\":\"PulseForgeProject\",\"version\":" + std::string(InvalidVersion) + "}";
+			const auto Result = ProjectSerializer::Deserialize(InvalidProject);
+			PF_CHECK(Tests, !Result && Result.error().Code == ProjectErrorCode::InvalidDocument);
+		}
+		const auto MissingProjectVersion = ProjectSerializer::Deserialize("{\"format\":\"PulseForgeProject\"}");
+		PF_CHECK(Tests, !MissingProjectVersion && MissingProjectVersion.error().Code == ProjectErrorCode::InvalidDocument);
 		const auto SerializedDescription = ProjectSerializer::Serialize(Created->GetDescription());
 		PF_CHECK(Tests, SerializedDescription.has_value());
 		if (SerializedDescription)
 		{
+			const auto ProjectV1 = ProjectSerializer::Deserialize(*SerializedDescription);
+			PF_CHECK(Tests, ProjectV1 && ProjectV1->ID == Created->GetDescription().ID &&
+								ProjectV1->Name == Created->GetDescription().Name && !ProjectV1->StartScene);
+			auto ProjectWithUnknownField = nlohmann::json::parse(*SerializedDescription);
+			ProjectWithUnknownField["futureProjectData"] = nlohmann::json::object({ { "keep", true } });
+			PF_CHECK(Tests, !ProjectSerializer::Deserialize(ProjectWithUnknownField.dump()));
 			std::string ExactBoundaryProject = *SerializedDescription;
 			ExactBoundaryProject.resize(ProjectSerializer::MaximumDocumentBytes, ' ');
 			PF_CHECK(Tests, ProjectSerializer::Deserialize(ExactBoundaryProject).has_value());

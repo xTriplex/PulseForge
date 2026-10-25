@@ -257,7 +257,7 @@ namespace
 		const auto Serialized = SceneSerializer::Serialize(Source);
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized) return;
-		PF_CHECK(Tests, Serialized->find("\"version\": 7") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 8") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"motionType\": \"dynamic\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"halfExtents\": [\n          0.75,") != std::string::npos);
 

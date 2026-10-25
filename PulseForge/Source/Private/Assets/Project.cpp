@@ -5,9 +5,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <exception>
 #include <fstream>
+#include <initializer_list>
 #include <limits>
+#include <optional>
 #include <system_error>
 
 namespace PulseForge
@@ -17,6 +20,16 @@ namespace PulseForge
 		using Json = nlohmann::ordered_json;
 		constexpr std::string_view ProjectFormat = "PulseForgeProject";
 		constexpr int64_t ProjectFormatVersion = 1;
+
+		std::optional<std::string> FindUnknownField(const Json& Object, std::initializer_list<std::string_view> AllowedFields)
+		{
+			for (const auto& [Key, Value] : Object.items())
+			{
+				(void)Value;
+				if (std::find(AllowedFields.begin(), AllowedFields.end(), Key) == AllowedFields.end()) return Key;
+			}
+			return std::nullopt;
+		}
 
 		ProjectError MakeError(ProjectErrorCode Code, const std::filesystem::path& Path, std::string Message)
 		{
@@ -118,10 +131,18 @@ namespace PulseForge
 				return std::unexpected(MakeError(ProjectErrorCode::InvalidDocument, {}, "Project document is missing its format identifier"));
 			if (Format->get<std::string>() != ProjectFormat)
 				return std::unexpected(MakeError(ProjectErrorCode::UnsupportedFormat, {}, "Document is not a PulseForge project"));
-
 			const auto Version = Document.find("version");
-			if (Version == Document.end() || !Version->is_number_integer() || Version->get<int64_t>() != ProjectFormatVersion)
+			if (Version == Document.end() || (!Version->is_number_integer() && !Version->is_number_unsigned()))
+				return std::unexpected(
+					MakeError(ProjectErrorCode::InvalidDocument, {}, "Project document requires an integer format version"));
+			const bool SupportedVersion = Version->is_number_unsigned()
+											  ? Version->get<uint64_t>() == static_cast<uint64_t>(ProjectFormatVersion)
+											  : Version->get<int64_t>() == ProjectFormatVersion;
+			if (!SupportedVersion)
 				return std::unexpected(MakeError(ProjectErrorCode::UnsupportedVersion, {}, "Project document version is not supported"));
+			if (const auto Unknown = FindUnknownField(Document, { "format", "version", "projectId", "name", "startScene" }))
+				return std::unexpected(
+					MakeError(ProjectErrorCode::InvalidDocument, {}, "Project document contains unsupported field '" + *Unknown + "'"));
 
 			const auto ProjectIDValue = Document.find("projectId");
 			const auto NameValue = Document.find("name");

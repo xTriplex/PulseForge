@@ -5,6 +5,7 @@
 #include "Editor/EditorHierarchyPanelPolicy.h"
 #include "Editor/EditorSceneEntityCommands.h"
 #include "Editor/EditorSceneTransitionQueue.h"
+#include "Scene/PropertyMetadata.h"
 #include "Editor/EditorSceneVisibilityCommands.h"
 
 namespace
@@ -838,6 +839,176 @@ namespace
 		PF_CHECK(Tests, Controller.IsDirty() && Controller.CanUndo());
 	}
 
+	void TestInspectorMetadataPropertyTransactions(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		using namespace PulseForgeEditor;
+		Scene SceneValue;
+		EditorSceneWorkspaceState Workspace;
+		EditorSceneEditController Controller;
+		const AssetID MeshAsset{ 0x8500000000000000ull, 85 };
+		const AssetID UpdatedMeshAsset{ 0x8550000000000000ull, 85 };
+		const AssetID OriginalMaterial{ 0x8600000000000000ull, 86 };
+		const AssetID UpdatedMaterial{ 0x8700000000000000ull, 87 };
+		auto Created = SceneValue.CreateEntity("Metadata inspector target");
+		PF_CHECK(Tests, Created.has_value());
+		if (!Created) return;
+		const UUID EntityID = Created->GetUUID();
+		PF_CHECK(Tests, Created->SetPointLight(PointLightComponent{}).has_value());
+		PF_CHECK(Tests, Created->SetMeshRenderer(MeshRendererComponent{ MeshAsset, OriginalMaterial }).has_value());
+		ScriptComponent InitialScript{ AssetID{ 0x8800000000000000ull, 88 } };
+		InitialScript.FloatProperties.emplace("Health", 10.0f);
+		PF_CHECK(Tests, Created->SetScript(InitialScript).has_value());
+		Controller.Reset(&SceneValue);
+		Controller.MarkSaved(&SceneValue);
+
+		const EditorSceneEditController::RestoreCallback Restore = [&](std::string_view State)
+		{ return Controller.Restore(State, SceneValue, Workspace); };
+		const auto Write = [&](std::string_view ComponentId, std::string_view PropertyId, const PropertyValue& Value,
+							   std::string Description) -> std::expected<void, std::string>
+		{
+			return Controller.Run(
+				&SceneValue, Workspace, false, 0, [] { return 0u; }, std::move(Description),
+				[&]() -> std::expected<void, SceneError>
+				{
+					const auto Target = SceneValue.FindEntity(EntityID);
+					if (!Target) return std::unexpected(SceneError{ SceneErrorCode::InvalidEntity, "Metadata target no longer exists" });
+					const auto Result = WriteProperty(*Target, ComponentId, PropertyId, Value);
+					if (!Result) return std::unexpected(SceneError{ SceneErrorCode::StorageFailure, Result.error().Message });
+					return {};
+				},
+				Restore);
+		};
+		const auto Read = [&](std::string_view ComponentId, std::string_view PropertyId) -> std::optional<PropertyValue>
+		{
+			const auto Target = SceneValue.FindEntity(EntityID);
+			if (!Target) return std::nullopt;
+			auto Result = ReadProperty(*Target, ComponentId, PropertyId);
+			return Result ? std::optional<PropertyValue>{ std::move(*Result) } : std::nullopt;
+		};
+
+		const glm::vec3 Translation{ 3.0f, 5.0f, 7.0f };
+		const auto TransformWrite = Write(PropertyComponentIds::Transform, PropertyIds::Translation, Translation, "Edit translation");
+		const auto LightWrite = Write(PropertyComponentIds::PointLight, PropertyIds::Intensity, 37.0f, "Edit point intensity");
+		const auto MaterialWrite = Write(
+			PropertyComponentIds::MeshRenderer, PropertyIds::MaterialAsset, std::optional<AssetID>{ UpdatedMaterial }, "Assign material");
+		const auto MeshWrite = Write(PropertyComponentIds::MeshRenderer, PropertyIds::MeshAsset, UpdatedMeshAsset, "Assign mesh");
+		const auto ScriptWrite = Write(PropertyComponentIds::Script, PropertyIds::Enabled, false, "Disable script");
+		const auto ScriptFloatWrite = Write(PropertyComponentIds::ScriptFloat, "Health", 72.5f, "Edit script property");
+		PF_CHECK(Tests, TransformWrite && LightWrite && MaterialWrite && MeshWrite && ScriptWrite && ScriptFloatWrite);
+		auto UpdatedTranslation = Read(PropertyComponentIds::Transform, PropertyIds::Translation);
+		const auto UpdatedTranslationValue = UpdatedTranslation ? std::get_if<glm::vec3>(&*UpdatedTranslation) : nullptr;
+		PF_CHECK(Tests, UpdatedTranslationValue && glm::length(*UpdatedTranslationValue - Translation) < 1.0e-6f);
+		auto UpdatedIntensity = Read(PropertyComponentIds::PointLight, PropertyIds::Intensity);
+		PF_CHECK(Tests, UpdatedIntensity && std::get_if<float>(&*UpdatedIntensity) && *std::get_if<float>(&*UpdatedIntensity) == 37.0f);
+		auto UpdatedMaterialValue = Read(PropertyComponentIds::MeshRenderer, PropertyIds::MaterialAsset);
+		PF_CHECK(Tests, UpdatedMaterialValue && std::get_if<std::optional<AssetID>>(&*UpdatedMaterialValue) &&
+							*std::get_if<std::optional<AssetID>>(&*UpdatedMaterialValue) == std::optional<AssetID>{ UpdatedMaterial });
+		auto UpdatedMeshValue = Read(PropertyComponentIds::MeshRenderer, PropertyIds::MeshAsset);
+		PF_CHECK(Tests,
+			UpdatedMeshValue && std::get_if<AssetID>(&*UpdatedMeshValue) && *std::get_if<AssetID>(&*UpdatedMeshValue) == UpdatedMeshAsset);
+		auto UpdatedScriptEnabled = Read(PropertyComponentIds::Script, PropertyIds::Enabled);
+		PF_CHECK(Tests, UpdatedScriptEnabled && std::get_if<bool>(&*UpdatedScriptEnabled) && !*std::get_if<bool>(&*UpdatedScriptEnabled));
+		auto UpdatedScriptFloat = Read(PropertyComponentIds::ScriptFloat, "Health");
+		PF_CHECK(
+			Tests, UpdatedScriptFloat && std::get_if<float>(&*UpdatedScriptFloat) && *std::get_if<float>(&*UpdatedScriptFloat) == 72.5f);
+		PF_CHECK(Tests, Controller.IsDirty() && Controller.CanUndo());
+
+		for (size_t Index = 0; Index < 6; ++Index)
+		{
+			const auto Undone = Controller.Undo(&SceneValue, Workspace, false, Restore);
+			PF_CHECK(Tests, Undone && *Undone);
+		}
+		PF_CHECK(Tests, !Controller.IsDirty());
+		auto UndoneTranslation = Read(PropertyComponentIds::Transform, PropertyIds::Translation);
+		const auto UndoneTranslationValue = UndoneTranslation ? std::get_if<glm::vec3>(&*UndoneTranslation) : nullptr;
+		PF_CHECK(Tests, UndoneTranslationValue && glm::length(*UndoneTranslationValue - glm::vec3(0.0f)) < 1.0e-6f);
+		auto UndoneIntensity = Read(PropertyComponentIds::PointLight, PropertyIds::Intensity);
+		PF_CHECK(Tests, UndoneIntensity && std::get_if<float>(&*UndoneIntensity) &&
+							*std::get_if<float>(&*UndoneIntensity) == PointLightComponent{}.Intensity);
+		auto UndoneMaterial = Read(PropertyComponentIds::MeshRenderer, PropertyIds::MaterialAsset);
+		PF_CHECK(Tests, UndoneMaterial && std::get_if<std::optional<AssetID>>(&*UndoneMaterial) &&
+							*std::get_if<std::optional<AssetID>>(&*UndoneMaterial) == std::optional<AssetID>{ OriginalMaterial });
+		auto UndoneMesh = Read(PropertyComponentIds::MeshRenderer, PropertyIds::MeshAsset);
+		PF_CHECK(Tests, UndoneMesh && std::get_if<AssetID>(&*UndoneMesh) && *std::get_if<AssetID>(&*UndoneMesh) == MeshAsset);
+		auto UndoneScriptEnabled = Read(PropertyComponentIds::Script, PropertyIds::Enabled);
+		PF_CHECK(Tests, UndoneScriptEnabled && std::get_if<bool>(&*UndoneScriptEnabled) && *std::get_if<bool>(&*UndoneScriptEnabled));
+		auto UndoneScriptFloat = Read(PropertyComponentIds::ScriptFloat, "Health");
+		PF_CHECK(Tests, UndoneScriptFloat && std::get_if<float>(&*UndoneScriptFloat) && *std::get_if<float>(&*UndoneScriptFloat) == 10.0f);
+
+		for (size_t Index = 0; Index < 6; ++Index)
+		{
+			const auto Redone = Controller.Redo(&SceneValue, Workspace, false, Restore);
+			PF_CHECK(Tests, Redone && *Redone);
+		}
+		PF_CHECK(Tests, Controller.IsDirty());
+		Controller.MarkSaved(&SceneValue);
+
+		const auto ReadScriptProperty = [&]() -> std::optional<float>
+		{
+			const auto Target = SceneValue.FindEntity(EntityID);
+			if (!Target) return std::nullopt;
+			auto Value = ReadProperty(*Target, PropertyComponentIds::ScriptFloat, "Health");
+			if (!Value) return std::nullopt;
+			const float* ScriptFloat = std::get_if<float>(&*Value);
+			return ScriptFloat ? std::optional<float>{ *ScriptFloat } : std::nullopt;
+		};
+		PF_CHECK(Tests, ReadScriptProperty() == std::optional<float>{ 72.5f });
+		PF_CHECK(Tests, !Controller.IsDirty());
+		const auto RejectedMeshAssignment = Controller.Run(
+			&SceneValue, Workspace, false, 0, [] { return 0u; }, "Reject empty mesh reference",
+			[&]() -> std::expected<void, SceneError>
+			{
+				const auto Target = SceneValue.FindEntity(EntityID);
+				if (!Target) return std::unexpected(SceneError{ SceneErrorCode::InvalidEntity, "Mesh target no longer exists" });
+				auto Updated =
+					WriteProperty(*Target, PropertyComponentIds::MeshRenderer, PropertyIds::MeshAsset, PropertyValue{ AssetID{} });
+				if (!Updated) return std::unexpected(SceneError{ SceneErrorCode::StorageFailure, Updated.error().Message });
+				return {};
+			},
+			Restore);
+		const auto PreservedMesh = Read(PropertyComponentIds::MeshRenderer, PropertyIds::MeshAsset);
+		PF_CHECK(Tests, !RejectedMeshAssignment && PreservedMesh && std::get<AssetID>(*PreservedMesh) == UpdatedMeshAsset);
+		PF_CHECK(Tests, !Controller.IsDirty() && Controller.CanUndo() && !Controller.IsActive());
+
+		const auto RejectedScriptProperty = Controller.Run(
+			&SceneValue, Workspace, false, 0, [] { return 0u; }, "Reject invalid script property",
+			[&]() -> std::expected<void, SceneError>
+			{
+				const auto Target = SceneValue.FindEntity(EntityID);
+				if (!Target) return std::unexpected(SceneError{ SceneErrorCode::InvalidEntity, "Script target no longer exists" });
+				auto Current = Target->GetScript();
+				if (!Current) return std::unexpected(Current.error());
+				if (!Current->has_value())
+					return std::unexpected(SceneError{ SceneErrorCode::MissingComponent, "Script component is missing" });
+				auto Updated = WriteProperty(
+					*Target, PropertyComponentIds::ScriptFloat, "Health", PropertyValue{ std::numeric_limits<float>::infinity() });
+				if (!Updated) return std::unexpected(SceneError{ SceneErrorCode::InvalidScriptComponent, Updated.error().Message });
+				return {};
+			},
+			Restore);
+		PF_CHECK(Tests, !RejectedScriptProperty && ReadScriptProperty() == std::optional<float>{ 72.5f });
+		PF_CHECK(Tests, !Controller.IsDirty() && Controller.CanUndo() && !Controller.IsActive());
+
+		const auto ScriptTarget = SceneValue.FindEntity(EntityID);
+		PF_CHECK(Tests, ScriptTarget.has_value());
+		if (!ScriptTarget) return;
+		auto Script = ScriptTarget->GetScript();
+		PF_CHECK(Tests, Script && Script->has_value());
+		if (!Script || !Script->has_value()) return;
+		ScriptComponent AuthoredScript = **Script;
+		PF_CHECK(Tests, IsValidScriptPropertyIdentifier("Health.current-value"));
+		PF_CHECK(Tests, !IsValidScriptPropertyIdentifier("9Health"));
+		AuthoredScript.FloatProperties["Health.current-value"] = 72.5f;
+		PF_CHECK(Tests, ScriptTarget->SetScript(AuthoredScript).has_value());
+		const auto StoredScript = ScriptTarget->GetScript();
+		PF_CHECK(Tests, StoredScript && StoredScript->has_value() &&
+							StoredScript->value().FindFloatProperty("Health.current-value") == std::optional<float>{ 72.5f });
+		AuthoredScript.FloatProperties["9Health"] = 1.0f;
+		const auto InvalidScript = ScriptTarget->SetScript(AuthoredScript);
+		PF_CHECK(Tests, !InvalidScript && InvalidScript.error().Code == SceneErrorCode::InvalidScriptComponent);
+	}
+
 } // namespace
 
 void RunEditorSceneStateTests(TestRunner& Tests)
@@ -856,4 +1027,5 @@ void RunEditorSceneStateTests(TestRunner& Tests)
 	TestEditorHierarchyRowLayout(Tests);
 	TestEditorSceneEditController(Tests);
 	TestMeshMaterialAssignmentUndoRedo(Tests);
+	TestInspectorMetadataPropertyTransactions(Tests);
 }

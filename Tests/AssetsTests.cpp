@@ -118,7 +118,9 @@ namespace
 		PF_CHECK(Tests, !Child.SetMeshRenderer(MeshRendererComponent{ MeshAssetIdentifier, AssetID{} }).has_value());
 		const AudioSourceComponent SourceAudio{ AudioAssetIdentifier, 0.35f, true, false, true };
 		PF_CHECK(Tests, Child.SetAudioSource(SourceAudio).has_value());
-		PF_CHECK(Tests, Child.SetScript(ScriptComponent{ ScriptAssetIdentifier, false }).has_value());
+		ScriptComponent SourceScript{ ScriptAssetIdentifier, false };
+		SourceScript.FloatProperties = { { "health.current", 42.5f }, { "_enabled", 0.0f }, { "version-2", -3.25f } };
+		PF_CHECK(Tests, Child.SetScript(SourceScript).has_value());
 		const auto InvalidScriptSet = Child.SetScript(ScriptComponent{});
 		PF_CHECK(Tests, !InvalidScriptSet && InvalidScriptSet.error().Code == SceneErrorCode::InvalidScriptComponent);
 		PF_CHECK(Tests, Root.SetAudioListener(AudioListenerComponent{ true }).has_value());
@@ -133,7 +135,8 @@ namespace
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized) return;
 		PF_CHECK(Tests, Serialized->find("\"format\": \"PulseForgeScene\"") != std::string::npos);
-		PF_CHECK(Tests, Serialized->find("\"version\": 7") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 8") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"properties\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"primary\": true") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"directionalLight\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"castShadows\": false") != std::string::npos);
@@ -253,6 +256,9 @@ namespace
 		PF_CHECK(Tests, LoadedAudioListener && LoadedAudioListener->has_value() && LoadedAudioListener->value().IsPrimary);
 		PF_CHECK(Tests, LoadedScript && LoadedScript->has_value() && LoadedScript->value().ScriptAsset == ScriptAssetIdentifier &&
 							!LoadedScript->value().Enabled);
+		PF_CHECK(Tests, LoadedScript && LoadedScript->has_value() && LoadedScript->value().FloatProperties == SourceScript.FloatProperties);
+		PF_CHECK(Tests, LoadedScript && LoadedScript->has_value() && LoadedScript->value().FindFloatProperty("health.current") == 42.5f &&
+							LoadedScript->value().FindFloatProperty("missing").has_value() == false);
 		PF_CHECK(Tests, LoadedParent && LoadedParent->has_value() && **LoadedParent == *LoadedRoot);
 		auto LegacySpotDocument = nlohmann::json::parse(*Serialized);
 		for (auto& EntityRecord : LegacySpotDocument["entities"])
@@ -298,14 +304,112 @@ namespace
 
 		const auto DestinationRootBeforeFailure = Destination.FindEntity(RootId);
 		std::string UnsupportedVersion = *Serialized;
-		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 7");
+		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 8");
 		PF_CHECK(Tests, VersionPosition != std::string::npos);
 		if (VersionPosition != std::string::npos)
-			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 7").size(), "\"version\": 99");
+			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 8").size(), "\"version\": 99");
 		const auto UnsupportedVersionResult = SceneSerializer::Deserialize(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedVersionResult.has_value());
 		PF_CHECK(
 			Tests, !UnsupportedVersionResult && UnsupportedVersionResult.error().Code == SceneSerializationErrorCode::UnsupportedVersion);
+		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+		for (const std::string_view UnsupportedSceneVersion : { "0", "-1", "9", "1.5", "\"8\"" })
+		{
+			std::string UnsupportedDocument = *Serialized;
+			const size_t VersionValue = UnsupportedDocument.find("8", UnsupportedDocument.find("\"version\": "));
+			PF_CHECK(Tests, VersionValue != std::string::npos);
+			if (VersionValue == std::string::npos) continue;
+			UnsupportedDocument.replace(VersionValue, 1, UnsupportedSceneVersion);
+			const auto UnsupportedLoad = SceneSerializer::Deserialize(UnsupportedDocument, Destination);
+			PF_CHECK(Tests, !UnsupportedLoad);
+			PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+		}
+		const auto AddUnknownSceneField = [&](std::string_view Location)
+		{
+			auto UnknownDocument = nlohmann::json::parse(*Serialized);
+			if (Location == "root") UnknownDocument["futureSceneData"] = nlohmann::json::object({ { "keep", true } });
+			else if (Location == "entity") UnknownDocument["entities"][0]["futureEntityData"] = true;
+			else UnknownDocument["entities"][0]["tag"]["futureTagData"] = true;
+			return UnknownDocument.dump();
+		};
+		for (const std::string_view UnknownLocation : { "root", "entity", "component" })
+		{
+			const std::string UnknownDocument = AddUnknownSceneField(UnknownLocation);
+			const auto UnknownFieldResult = SceneSerializer::Deserialize(UnknownDocument, Destination);
+			PF_CHECK(Tests, !UnknownFieldResult);
+			PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+		}
+		const auto MakeScriptPropertyDocument = [&](int PropertyCase)
+		{
+			auto PropertyDocument = nlohmann::json::parse(*Serialized);
+			for (auto& EntityRecord : PropertyDocument["entities"])
+			{
+				if (EntityRecord.value("uuid", std::string{}) != ChildId.ToString()) continue;
+				auto& Script = EntityRecord["script"];
+				switch (PropertyCase)
+				{
+				case 0:
+					Script["properties"] = nlohmann::json::array();
+					break;
+				case 1:
+					Script["properties"] = nlohmann::json::object({ { "bad id", 1.0 } });
+					break;
+				case 2:
+					Script["properties"] = nlohmann::json::object({ { "value", "not numeric" } });
+					break;
+				case 3:
+					Script["properties"] = nlohmann::json::object({ { "value", 1.0e100 } });
+					break;
+				case 4:
+				{
+					auto TooManyProperties = nlohmann::json::object();
+					for (size_t Index = 0; Index <= MaximumScriptFloatPropertyCount; ++Index)
+						TooManyProperties["property_" + std::to_string(Index)] = static_cast<double>(Index);
+					Script["properties"] = std::move(TooManyProperties);
+					break;
+				}
+				case 5:
+					Script["properties"] = nullptr;
+					break;
+				default:
+					break;
+				}
+			}
+			return PropertyDocument.dump();
+		};
+		for (int PropertyCase = 0; PropertyCase < 6; ++PropertyCase)
+		{
+			const auto InvalidProperties = MakeScriptPropertyDocument(PropertyCase);
+			const auto InvalidPropertiesResult = SceneSerializer::Deserialize(InvalidProperties, Destination);
+			PF_CHECK(Tests, !InvalidPropertiesResult);
+			PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
+		}
+		auto MaximumCountProperties = nlohmann::json::parse(*Serialized);
+		for (auto& EntityRecord : MaximumCountProperties["entities"])
+			if (EntityRecord.value("uuid", std::string{}) == ChildId.ToString())
+			{
+				EntityRecord["script"]["properties"] = nlohmann::json::object();
+				for (size_t Index = 0; Index < MaximumScriptFloatPropertyCount; ++Index)
+					EntityRecord["script"]["properties"]["property_" + std::to_string(Index)] = static_cast<double>(Index);
+			}
+		Scene MaximumCountDestination;
+		const auto MaximumCountResult = SceneSerializer::Deserialize(MaximumCountProperties.dump(), MaximumCountDestination);
+		PF_CHECK(Tests, MaximumCountResult.has_value());
+		const auto MaximumCountEntity = MaximumCountDestination.FindEntity(ChildId);
+		PF_CHECK(Tests, MaximumCountEntity.has_value());
+		if (MaximumCountEntity)
+		{
+			const auto MaximumCountScript = MaximumCountEntity->GetScript();
+			PF_CHECK(Tests, MaximumCountScript && MaximumCountScript->has_value() &&
+								MaximumCountScript->value().FloatProperties.size() == MaximumScriptFloatPropertyCount);
+		}
+		std::string LegacyScriptProperties = *Serialized;
+		const size_t ScriptPropertiesPosition = LegacyScriptProperties.find("\"version\": 8");
+		PF_CHECK(Tests, ScriptPropertiesPosition != std::string::npos);
+		if (ScriptPropertiesPosition != std::string::npos)
+			LegacyScriptProperties.replace(ScriptPropertiesPosition, std::string("\"version\": 8").size(), "\"version\": 7");
+		const auto LegacyScriptPropertiesResult = SceneSerializer::Deserialize(LegacyScriptProperties, Destination);
+		PF_CHECK(Tests, !LegacyScriptPropertiesResult);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
 
 		std::string InvalidAudioVolume = *Serialized;
@@ -336,10 +440,18 @@ namespace
 			if (PrimaryCommaPosition != std::string::npos && PrimaryLineEnd != std::string::npos)
 				LegacyVersionThree.erase(PrimaryCommaPosition, PrimaryLineEnd - PrimaryCommaPosition);
 		}
-		const size_t LegacyVersionThreePosition = LegacyVersionThree.find("\"version\": 7");
+		auto LegacyVersionThreeDocument = nlohmann::json::parse(LegacyVersionThree);
+		for (auto& EntityRecord : LegacyVersionThreeDocument["entities"])
+		{
+			for (const std::string_view Field : { "directionalLight", "environmentLight", "pointLight", "spotLight", "rigidbody",
+					 "boxCollider", "audioSource", "audioListener", "script" })
+				EntityRecord.erase(std::string(Field));
+		}
+		LegacyVersionThree = LegacyVersionThreeDocument.dump(2) + "\n";
+		const size_t LegacyVersionThreePosition = LegacyVersionThree.find("\"version\": 8");
 		PF_CHECK(Tests, LegacyVersionThreePosition != std::string::npos);
 		if (LegacyVersionThreePosition != std::string::npos)
-			LegacyVersionThree.replace(LegacyVersionThreePosition, std::string("\"version\": 7").size(), "\"version\": 3");
+			LegacyVersionThree.replace(LegacyVersionThreePosition, std::string("\"version\": 8").size(), "\"version\": 3");
 		Scene LegacyVersionThreeDestination;
 		const auto LegacyVersionThreeLoad = SceneSerializer::Deserialize(LegacyVersionThree, LegacyVersionThreeDestination);
 		PF_CHECK(Tests, LegacyVersionThreeLoad.has_value());
@@ -359,10 +471,11 @@ namespace
 		if (LegacySerializedVersionTwo)
 		{
 			std::string LegacyVersionOne = *LegacySerializedVersionTwo;
-			const size_t LegacyVersionPosition = LegacyVersionOne.find("\"version\": 7");
+			auto LegacyVersionOneDocument = nlohmann::json::parse(LegacyVersionOne);
+			LegacyVersionOneDocument["version"] = 1;
+			LegacyVersionOne = LegacyVersionOneDocument.dump(2) + "\n";
+			const size_t LegacyVersionPosition = LegacyVersionOne.find("\"version\": 1");
 			PF_CHECK(Tests, LegacyVersionPosition != std::string::npos);
-			if (LegacyVersionPosition != std::string::npos)
-				LegacyVersionOne.replace(LegacyVersionPosition, std::string("\"version\": 7").size(), "\"version\": 1");
 			Scene LegacyDestination;
 			const auto LegacyLoad = SceneSerializer::Deserialize(LegacyVersionOne, LegacyDestination);
 			PF_CHECK(Tests, LegacyLoad.has_value());
@@ -376,22 +489,11 @@ namespace
 			}
 		}
 
-		std::string LegacyVersionTwo = LegacyVersionThree;
-		const std::string MaterialField = "\"materialAsset\": \"" + MaterialAssetIdentifier.ToString() + "\"";
-		const size_t MaterialFieldPosition = LegacyVersionTwo.find(MaterialField);
-		PF_CHECK(Tests, MaterialFieldPosition != std::string::npos);
-		if (MaterialFieldPosition != std::string::npos)
-		{
-			const size_t CommaPosition = LegacyVersionTwo.rfind(',', MaterialFieldPosition);
-			const size_t LineEnd = LegacyVersionTwo.find('\n', MaterialFieldPosition);
-			PF_CHECK(Tests, CommaPosition != std::string::npos && LineEnd != std::string::npos);
-			if (CommaPosition != std::string::npos && LineEnd != std::string::npos)
-				LegacyVersionTwo.erase(CommaPosition, LineEnd - CommaPosition);
-		}
-		const size_t VersionTwoPosition = LegacyVersionTwo.find("\"version\": 3");
-		PF_CHECK(Tests, VersionTwoPosition != std::string::npos);
-		if (VersionTwoPosition != std::string::npos)
-			LegacyVersionTwo.replace(VersionTwoPosition, std::string("\"version\": 3").size(), "\"version\": 2");
+		auto LegacyVersionTwoDocument = nlohmann::json::parse(LegacyVersionThree);
+		for (auto& EntityRecord : LegacyVersionTwoDocument["entities"])
+			if (EntityRecord.contains("meshRenderer")) EntityRecord["meshRenderer"].erase("materialAsset");
+		LegacyVersionTwoDocument["version"] = 2;
+		const std::string LegacyVersionTwo = LegacyVersionTwoDocument.dump(2) + "\n";
 		Scene LegacyVersionTwoDestination;
 		const auto LegacyVersionTwoLoad = SceneSerializer::Deserialize(LegacyVersionTwo, LegacyVersionTwoDestination);
 		PF_CHECK(Tests, LegacyVersionTwoLoad.has_value());
@@ -538,10 +640,17 @@ namespace
 		const auto SaveResult = SceneSerializer::SaveToFile(Source, ScenePath);
 		PF_CHECK(Tests, SaveResult.has_value());
 		if (!SaveResult) return;
+		const auto ReadFileBytes = [](const std::filesystem::path& Path)
+		{
+			std::ifstream Input(Path, std::ios::binary);
+			return std::string{ std::istreambuf_iterator<char>(Input), std::istreambuf_iterator<char>() };
+		};
+		const std::string SavedSourceBytes = ReadFileBytes(ScenePath);
 
 		Scene FileLoadedScene;
 		const auto LoadResult = SceneSerializer::LoadFromFile(ScenePath, FileLoadedScene);
 		PF_CHECK(Tests, LoadResult.has_value());
+		PF_CHECK(Tests, ReadFileBytes(ScenePath) == SavedSourceBytes);
 		PF_CHECK(Tests, FileLoadedScene.GetEntityCount() == 2);
 		const auto FileLoadedChild = FileLoadedScene.FindEntity(ChildId);
 		PF_CHECK(Tests, FileLoadedChild.has_value());
@@ -603,6 +712,17 @@ namespace
 		const auto TruncatedLoad = SceneSerializer::LoadFromFile(ScenePath, BoundaryLoadedScene);
 		PF_CHECK(Tests, !TruncatedLoad && TruncatedLoad.error().Code == SceneSerializationErrorCode::InvalidDocument);
 		PF_CHECK(Tests, BoundaryLoadedScene.FindEntity(PreservedEntityID).has_value());
+		const std::string UnknownSceneBytes = AddUnknownSceneField("root");
+		{
+			std::ofstream Output(ScenePath, std::ios::binary | std::ios::trunc);
+			Output.write(UnknownSceneBytes.data(), static_cast<std::streamsize>(UnknownSceneBytes.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const std::string SourceBytesBeforeLoad = ReadFileBytes(ScenePath);
+		const auto UnknownSceneFileLoad = SceneSerializer::LoadFromFile(ScenePath, BoundaryLoadedScene);
+		PF_CHECK(Tests, !UnknownSceneFileLoad);
+		PF_CHECK(Tests, BoundaryLoadedScene.FindEntity(PreservedEntityID).has_value());
+		PF_CHECK(Tests, ReadFileBytes(ScenePath) == SourceBytesBeforeLoad);
 
 		std::string TooManyEntities = "{\"format\":\"PulseForgeScene\",\"version\":7,\"entities\":[";
 		for (size_t Index = 0; Index < SceneSerializer::MaximumEntityCount; ++Index)

@@ -1,6 +1,10 @@
 #include "TestEngineSupport.h"
 #include "Core/Diagnostics.h"
 #include "Input/GameplayInput.h"
+#include "Scripting/Detail/ScriptFloatPropertyRead.h"
+
+#include <stdexcept>
+#include <string_view>
 
 namespace
 {
@@ -100,6 +104,50 @@ end
 		PF_CHECK(Tests, TransformScriptAsset.has_value());
 		if (!TransformScriptAsset) return;
 
+		const auto AuthoredPropertyScriptAsset =
+			CreateScriptAsset("authored_property.lua", "function OnUpdate()\n"
+													   "  local speed = entity:get_float_property('move.speed')\n"
+													   "  assert(speed == 4.5)\n"
+													   "  assert(entity:get_float_property('unknown') == nil)\n"
+													   "  assert(entity:get_float_property('zero') == 0)\n"
+													   "  assert(entity:get_float_property('negative') == -2.5)\n"
+													   "  local invalid, invalidMessage = entity:get_float_property('bad id')\n"
+													   "  assert(invalid == nil and type(invalidMessage) == 'string')\n"
+													   "  local wrongType, typeMessage = entity:get_float_property(17)\n"
+													   "  assert(wrongType == nil and type(typeMessage) == 'string')\n"
+													   "  assert(entity:set_translation(speed, 0, 0))\n"
+													   "end\n");
+		PF_CHECK(Tests, AuthoredPropertyScriptAsset.has_value());
+		if (!AuthoredPropertyScriptAsset) return;
+		Scene AuthoredPropertyScene;
+		const auto AuthoredPropertyEntity = AuthoredPropertyScene.CreateEntity("Authored script property");
+		PF_CHECK(Tests, AuthoredPropertyEntity.has_value());
+		if (!AuthoredPropertyEntity) return;
+		ScriptComponent AuthoredPropertyComponent{ AuthoredPropertyScriptAsset->ID };
+		AuthoredPropertyComponent.FloatProperties.emplace("move.speed", 4.5f);
+		AuthoredPropertyComponent.FloatProperties.emplace("zero", 0.0f);
+		AuthoredPropertyComponent.FloatProperties.emplace("negative", -2.5f);
+		PF_CHECK(Tests, AuthoredPropertyEntity->SetScript(AuthoredPropertyComponent).has_value());
+		ScriptRuntime AuthoredPropertyRuntime(*ProjectResult);
+		PF_CHECK(Tests, AuthoredPropertyRuntime.Start(AuthoredPropertyScene).has_value());
+		PF_CHECK(Tests, AuthoredPropertyRuntime.Advance(AuthoredPropertyScene, Timestep(1.0 / 60.0)).has_value());
+		const auto AuthoredPropertyTransform = AuthoredPropertyEntity->GetTransform();
+		PF_CHECK(Tests, AuthoredPropertyTransform && AuthoredPropertyTransform->Translation.x == 4.5f);
+		PF_CHECK(Tests, AuthoredPropertyRuntime.GetDiagnostics().empty());
+		AuthoredPropertyRuntime.Stop();
+
+		const auto ThrownPropertyRead = ScriptRuntimeDetail::CaptureScriptFloatPropertyRead(
+			[]() -> std::expected<PropertyValue, PropertyAccessError> { throw std::runtime_error("deterministic host lookup failure"); });
+		PF_CHECK(Tests, ThrownPropertyRead.State == ScriptRuntimeDetail::ScriptFloatPropertyReadState::Failed);
+		PF_CHECK(Tests, std::string_view(ThrownPropertyRead.Failure.data()) == "deterministic host lookup failure");
+		const auto UnknownPropertyRead = ScriptRuntimeDetail::CaptureScriptFloatPropertyRead(
+			[]()
+			{
+				return std::expected<PropertyValue, PropertyAccessError>{ std::unexpected(
+					PropertyAccessError{ PropertyAccessErrorCode::UnknownProperty, "unknown authored float" }) };
+			});
+		PF_CHECK(Tests, UnknownPropertyRead.State == ScriptRuntimeDetail::ScriptFloatPropertyReadState::Missing);
+
 		const auto RelativeMotionScriptAsset = CreateScriptAsset("relative_motion.lua",
 			"local elapsed = 0\n"
 			"local initialX, initialY, initialZ = 0, 0, 0\n"
@@ -175,6 +223,8 @@ end
 												"  assert(CreatedEntity, nameMessage)\n"
 												"  local found = scene.find_entity(CreatedEntity:uuid())\n"
 												"  assert(found ~= nil and found:uuid() == CreatedEntity:uuid())\n"
+												"  local absent, absentMessage = CreatedEntity:get_float_property('missing')\n"
+												"  assert(absent == nil and type(absentMessage) == 'string')\n"
 												"  local invalidPrefab, prefabMessage = scene.spawn_prefab('not-a-uuid')\n"
 												"  assert(invalidPrefab == nil and prefabMessage ~= nil)\n"
 												"  local wrongType = scene.spawn_prefab('" +
@@ -193,6 +243,8 @@ end
 												"    assert(scene.find_entity(CreatedEntity:uuid()) == nil)\n"
 												"    local x, staleMessage = CreatedEntity:get_translation()\n"
 												"    assert(x == nil and staleMessage ~= nil)\n"
+												"    local value, propertyMessage = CreatedEntity:get_float_property('missing')\n"
+												"    assert(value == nil and type(propertyMessage) == 'string')\n"
 												"    local transient, message = scene.create_entity('Transient Lua entity')\n"
 												"    assert(transient, message)\n"
 												"    assert(transient:destroy())\n"
@@ -330,6 +382,8 @@ end
 		const UUID ReusedScriptEntityID{ 0x5500000000000000ull, 5 };
 		const auto OldIncarnationScript =
 			CreateScriptAsset("old_incarnation.lua", "function OnDestroy()\n"
+													 "  local oldValue, propertyMessage = entity:get_float_property('speed')\n"
+													 "  assert(oldValue == nil and propertyMessage ~= nil)\n"
 													 "  local replacement = scene.find_entity(entity:uuid())\n"
 													 "  if replacement then assert(replacement:set_translation(99, 0, 0)) end\n"
 													 "  local marker, message = scene.create_entity('old-incarnation-destroyed')\n"
