@@ -92,6 +92,11 @@ namespace PulseForge
 		return HasAssetExtension(Path, { ".meta" });
 	}
 
+	[[nodiscard]] inline bool IsImportProvenanceSidecarPath(const std::filesystem::path& Path)
+	{
+		return HasAssetExtension(Path, { ".importresult" });
+	}
+
 	[[nodiscard]] inline bool IsReservedMetadataComponent(const std::filesystem::path& Component)
 	{
 		return AssetExtensionsEqual(Component.string(), ".meta");

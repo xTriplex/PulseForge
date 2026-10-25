@@ -36,6 +36,7 @@ namespace PulseForgeEditor
 	public:
 		void DrawContents(EditorContentBrowserState& State, const PulseForge::Project& Project, bool SceneAvailable,
 			EditorAssetPreviewService& Previews, EditorStyle& Style, EditorContentBrowserPanelActions& Actions);
+		void MarkDependencyAnalysisOutdated();
 		void FocusSearch() noexcept { m_FocusSearchNextFrame = true; }
 
 	private:

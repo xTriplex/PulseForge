@@ -19,7 +19,9 @@ namespace PulseForgeEditor
 		PulseForge::AssetDependencyCatalog Catalog;
 		PulseForge::AssetDependencyCatalog::SnapshotPtr Snapshot;
 		PulseForge::UUID ProjectID;
+		std::filesystem::path ProjectRoot;
 		std::string LastError;
+		bool IsOutdated = false;
 	};
 
 	namespace
@@ -96,6 +98,11 @@ namespace PulseForgeEditor
 			return EllipsisWidth <= AvailableWidth ? std::string(Ellipsis) : std::string{};
 		}
 	} // namespace
+
+	void EditorContentBrowserPanel::MarkDependencyAnalysisOutdated()
+	{
+		if (m_DependencyState && m_DependencyState->Snapshot) m_DependencyState->IsOutdated = true;
+	}
 
 	void EditorContentBrowserPanel::DrawContents(EditorContentBrowserState& State, const PulseForge::Project& Project, bool SceneAvailable,
 		EditorAssetPreviewService& Previews, EditorStyle& Style, EditorContentBrowserPanelActions& Actions)
@@ -271,33 +278,47 @@ namespace PulseForgeEditor
 		if (IsProtectedScene) Style.TextMuted("Open and startup scenes cannot be deleted.");
 
 		if (!m_DependencyState) m_DependencyState = std::make_shared<EditorContentBrowserDependencyState>();
-		if (m_DependencyState->ProjectID != Project.GetDescription().ID)
+		std::error_code RootError;
+		std::filesystem::path CurrentProjectRoot = std::filesystem::weakly_canonical(Project.GetRootPath(), RootError);
+		if (RootError) CurrentProjectRoot = Project.GetRootPath().lexically_normal();
+		if (m_DependencyState->ProjectID != Project.GetDescription().ID || m_DependencyState->ProjectRoot != CurrentProjectRoot)
 		{
 			m_DependencyState->ProjectID = Project.GetDescription().ID;
+			m_DependencyState->ProjectRoot = CurrentProjectRoot;
 			(void)m_DependencyState->Catalog.BeginRequest(m_DependencyState->ProjectID);
 			m_DependencyState->Snapshot.reset();
 			m_DependencyState->LastError.clear();
+			m_DependencyState->IsOutdated = false;
 		}
 
 		if (ImGui::CollapsingHeader("Dependency Analysis", ImGuiTreeNodeFlags_DefaultOpen))
 		{
+			ImGui::TextDisabled("Synchronous analysis of current disk inputs; external edits are observed when analysis runs.");
 			if (ImGui::SmallButton("Analyze Project Dependencies"))
 			{
 				const PulseForge::AssetDependencyCatalogTicket Ticket =
 					m_DependencyState->Catalog.BeginRequest(Project.GetDescription().ID);
 				const auto Candidate =
 					PulseForge::AssetDependencyCatalogBuilder::Build(Project.GetRootPath(), Project.GetDescription().ID, Ticket.Generation);
-				if (!Candidate) m_DependencyState->LastError = Candidate.error().Message;
+				if (!Candidate)
+				{
+					m_DependencyState->LastError = Candidate.error().Message;
+					m_DependencyState->IsOutdated = m_DependencyState->Snapshot != nullptr;
+				}
 				else if (!m_DependencyState->Catalog.Publish(Ticket, *Candidate))
-					m_DependencyState->LastError = "The analysis became stale before publication.";
+				{
+					m_DependencyState->LastError = "Inputs or project request changed before publication.";
+					m_DependencyState->IsOutdated = m_DependencyState->Snapshot != nullptr;
+				}
 				else
 				{
 					m_DependencyState->Snapshot = m_DependencyState->Catalog.GetSnapshot();
 					m_DependencyState->LastError.clear();
+					m_DependencyState->IsOutdated = false;
 				}
 			}
 			if (!m_DependencyState->LastError.empty())
-				ImGui::TextWrapped("Latest analysis failed: %s", m_DependencyState->LastError.c_str());
+				ImGui::TextWrapped("Latest analysis failed; retained results are historical: %s", m_DependencyState->LastError.c_str());
 			const auto& Snapshot = m_DependencyState->Snapshot;
 			if (!Snapshot)
 			{
@@ -305,11 +326,17 @@ namespace PulseForgeEditor
 			}
 			else
 			{
-				ImGui::Text("Catalog generation %llu; %zu diagnostic(s)", static_cast<unsigned long long>(Snapshot->GetGeneration()),
+				ImGui::Text("%s catalog generation %llu; %zu diagnostic(s)", m_DependencyState->IsOutdated ? "Historical" : "Current",
+					static_cast<unsigned long long>(Snapshot->GetGeneration()),
 					Snapshot->GetIssues().size());
 				const auto Record = Snapshot->GetRegistry().Find(Asset.ID);
+				if (!Record)
+				{
+					Style.TextMuted("Selected asset is absent from this analysis generation; its dependencies are unknown here.");
+					return;
+				}
 				const PulseForge::AssetDependencyNode SelectedNode{ Asset.ID,
-					Record ? PathToUtf8(Record->ProjectRelativePath) : std::string{}, {} };
+					PathToUtf8(Record->ProjectRelativePath), {} };
 				DrawDependencyEdges(*Snapshot, "Direct dependencies", Snapshot->GetDirectDependencies(SelectedNode), true);
 				DrawDependencyEdges(*Snapshot, "Referencers", Snapshot->GetDirectReferencers(SelectedNode), false);
 				for (const PulseForge::AssetDependencyIssue& Issue : Snapshot->GetIssues())
@@ -322,9 +349,24 @@ namespace PulseForgeEditor
 				{
 					if (Observation.Asset != Asset.ID) continue;
 					HasImportObservation = true;
-					ImGui::Text("Import inputs: %s (%s)", Observation.ImporterID.c_str(),
-						Observation.ResultState == PulseForge::AssetImportResultState::Unavailable ? "unavailable"
-																								   : "no successful result recorded");
+					const char* ResultStatus = "no successful result recorded";
+					switch (Observation.ResultState)
+					{
+					case PulseForge::AssetImportResultState::NoSuccessfulResultRecorded:
+						break;
+					case PulseForge::AssetImportResultState::SuccessfulInputsMatch:
+						ResultStatus = "last successful inputs match";
+						break;
+					case PulseForge::AssetImportResultState::SuccessfulInputsDiffer:
+						ResultStatus = "last successful inputs differ";
+						break;
+					case PulseForge::AssetImportResultState::Unavailable:
+						ResultStatus = "success receipt unavailable";
+						break;
+					}
+					ImGui::Text("Import inputs: %s%s%s%s — %s; reusable artifact: not tracked", Observation.ImporterID.c_str(),
+						Observation.SubresourceKey.empty() ? "" : " [", Observation.SubresourceKey.c_str(),
+						Observation.SubresourceKey.empty() ? "" : "]", ResultStatus);
 					ImGui::TextWrapped("Input fingerprint: %s:%s", Observation.InputFingerprint.Algorithm.c_str(),
 						Observation.InputFingerprint.DigestHex.c_str());
 				}

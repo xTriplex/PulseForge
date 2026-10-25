@@ -115,7 +115,11 @@ namespace PulseForge
 			}
 			else if (std::filesystem::is_regular_file(Status))
 			{
-				if (IsMetadataSidecarPath(Entry.path())) SidecarFiles.push_back(Entry.path());
+				if (IsImportProvenanceSidecarPath(Entry.path()))
+				{
+					// Import receipts are generated provenance, not managed source assets or UUID sidecars.
+				}
+				else if (IsMetadataSidecarPath(Entry.path())) SidecarFiles.push_back(Entry.path());
 				else
 					SourceFiles.push_back(Entry.path());
 			}

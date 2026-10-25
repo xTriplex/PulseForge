@@ -7,6 +7,7 @@
 #include <expected>
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 namespace PulseForge
 {
@@ -36,6 +37,8 @@ namespace PulseForge
 	{
 		AssetID ID;
 		uint32_t Version = 1;
+		// Owned JSON text for the complete importSettings object. Legacy empty objects remain represented as "{}".
+		std::string ImportSettingsJson = "{}";
 	};
 
 	class PULSEFORGE_API AssetMetadataSerializer final
@@ -44,7 +47,14 @@ namespace PulseForge
 		static constexpr uint32_t CurrentVersion = 1;
 
 		[[nodiscard]] static std::filesystem::path GetSidecarPath(const std::filesystem::path& SourceAssetPath);
+		[[nodiscard]] static std::expected<AssetMetadata, AssetMetadataError> Deserialize(
+			std::string_view Data,
+			const std::filesystem::path& SidecarPath = {});
 		[[nodiscard]] static std::expected<AssetMetadata, AssetMetadataError> LoadFromFile(const std::filesystem::path& SidecarPath);
+		[[nodiscard]] static std::expected<void, AssetMetadataError> SaveImportSettings(
+			const std::filesystem::path& SidecarPath,
+			const AssetMetadata& ExpectedMetadata,
+			std::string_view ImportSettingsJson);
 		// Use only when importing or duplicating a genuinely new asset. Existing assets are never repaired automatically.
 		[[nodiscard]] static std::expected<AssetMetadata, AssetMetadataError> CreateForNewAsset(
 			const std::filesystem::path& SourceAssetPath);

@@ -1,24 +1,25 @@
 #include "Assets/AssetDependencyExtractor.h"
 
+#include "Assets/AssetImportProvenance.h"
+#include "Assets/AssetMetadata.h"
 #include "Assets/AssetReferenceValidator.h"
 #include "Assets/AssetPathResolver.h"
 #include "Assets/AssetTypes.h"
+#include "Assets/Detail/GltfPrimitiveInspector.h"
 #include "Assets/Detail/GltfSourceDocument.h"
+#include "Assets/GltfMeshImporter.h"
 #include "Assets/MaterialAsset.h"
 #include "Assets/PrefabSerializer.h"
 #include "Scene/SceneSerializer.h"
 
 #include <nlohmann/json.hpp>
-#define XXH_INLINE_ALL
-#include <tracy_xxhash.h>
-
-static_assert(XXH_VERSION_NUMBER == 802, "Asset input fingerprints require the pinned xxHash 0.8.2 implementation");
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
@@ -39,6 +40,8 @@ namespace PulseForge
 		constexpr uint64_t MaximumGltfContainerBytes = 512ull * 1024ull * 1024ull;
 		constexpr uint64_t MaximumGltfBufferBytes = 512ull * 1024ull * 1024ull;
 		constexpr uint64_t MaximumPrefabBytes = 64ull * 1024ull * 1024ull;
+		constexpr uint64_t MaximumMetadataBytes = 1024ull * 1024ull;
+		constexpr uint64_t MaximumProvenanceBytes = 1024ull * 1024ull;
 		constexpr size_t MaximumGltfCollectionEntries = 1'000'000;
 		constexpr size_t MaximumCycleNodes = 1'000'000;
 		constexpr size_t MaximumCycleEdges = 4'000'000;
@@ -51,10 +54,103 @@ namespace PulseForge
 			return { Path, std::move(Message) };
 		}
 
+		bool IsSafeReadSetKey(const std::filesystem::path& Relative)
+		{
+			if (Relative.empty() || Relative.is_absolute() || Relative.has_root_name() || Relative.has_root_directory() ||
+				Relative.lexically_normal() != Relative)
+				return false;
+			auto Component = Relative.begin();
+			if (Component == Relative.end() || *Component != "Assets") return false;
+			for (; Component != Relative.end(); ++Component)
+			{
+				const std::u8string Text = Component->generic_u8string();
+				if (*Component == "." || *Component == ".." ||
+					(!Text.empty() && (Text.back() == u8'.' || Text.back() == u8' ')))
+					return false;
+			}
+			return std::next(Relative.begin()) != Relative.end();
+		}
+
 		std::string PathToUtf8(const std::filesystem::path& Path)
 		{
 			const std::u8string Value = Path.generic_u8string();
 			return { reinterpret_cast<const char*>(Value.data()), Value.size() };
+		}
+
+		AssetContentFingerprint FingerprintBytes(std::span<const std::byte> Bytes)
+		{
+			return ComputeAssetContentFingerprint(Bytes);
+		}
+
+		std::string ProjectRelativeKey(const std::filesystem::path& ProjectRoot, const std::filesystem::path& Path)
+		{
+			const auto Relative = Path.lexically_relative(ProjectRoot).lexically_normal();
+			return PathToUtf8(Relative);
+		}
+
+		void AddReadReceipt(AssetDependencyExtraction& Output, const std::filesystem::path& ProjectRoot,
+			const std::filesystem::path& Path, std::span<const std::byte> Bytes)
+		{
+			Output.ReadSet.push_back({ ProjectRelativeKey(ProjectRoot, Path), true, static_cast<uint64_t>(Bytes.size()), FingerprintBytes(Bytes) });
+		}
+
+		void AddReadReceipt(AssetDependencyExtraction& Output, std::string RelativePath, uint64_t ByteLength,
+			AssetContentFingerprint Content)
+		{
+			Output.ReadSet.push_back({ std::move(RelativePath), true, ByteLength, std::move(Content) });
+		}
+
+		std::expected<std::vector<std::byte>, std::string> ReadBoundedBytes(
+			const std::filesystem::path& Path, uint64_t MaximumBytes);
+
+		std::expected<AssetMetadata, AssetDependencyCatalogError> ReadAssetMetadata(
+			AssetDependencyExtraction& Output, const std::filesystem::path& ProjectRoot, const std::filesystem::path& SourcePath,
+			const AssetRecord& Record)
+		{
+			const std::filesystem::path Sidecar = AssetMetadataSerializer::GetSidecarPath(SourcePath);
+			auto Bytes = ReadBoundedBytes(Sidecar, MaximumMetadataBytes);
+			if (!Bytes) return std::unexpected(MakeError(Sidecar, "Asset metadata could not be read for dependency analysis: " + Bytes.error()));
+			const std::string Data(Bytes->empty() ? std::string{} :
+				std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size()));
+			auto Metadata = AssetMetadataSerializer::Deserialize(Data, Sidecar);
+			if (!Metadata) return std::unexpected(MakeError(Sidecar, "Asset metadata is invalid: " + Metadata.error().Message));
+			if (Metadata->ID != Record.ID)
+				return std::unexpected(MakeError(Sidecar,
+					"Asset metadata UUID changed during dependency analysis; registry identity no longer matches its sidecar"));
+			AddReadReceipt(Output, ProjectRoot, Sidecar, *Bytes);
+			return *Metadata;
+		}
+
+		std::expected<AssetContentFingerprint, std::string> FingerprintFile(
+			const std::filesystem::path& Path, uint64_t ExpectedLength, uint64_t MaximumBytes)
+		{
+			std::error_code Error;
+			const auto Status = std::filesystem::symlink_status(Path, Error);
+			if (Error || std::filesystem::is_symlink(Status) || !std::filesystem::is_regular_file(Status))
+				return std::unexpected("input is not a regular, non-symlink file");
+			Error.clear();
+			const uintmax_t Size = std::filesystem::file_size(Path, Error);
+			if (Error || Size != ExpectedLength || Size > MaximumBytes ||
+				Size > static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max()))
+				return std::unexpected("input length changed or exceeds its bounded read limit");
+			std::ifstream Input(Path, std::ios::binary);
+			if (!Input.is_open()) return std::unexpected("input could not be opened for fingerprinting");
+			AssetFingerprintBuilder Builder("PulseForge.AssetInputBytes.v1");
+			Builder.UpdateText("byteLength", std::to_string(ExpectedLength));
+			std::array<std::byte, 64 * 1024> Buffer{};
+			uint64_t Remaining = ExpectedLength;
+			while (Remaining != 0)
+			{
+				const size_t Count = static_cast<size_t>(std::min<uint64_t>(Remaining, Buffer.size()));
+				Input.read(reinterpret_cast<char*>(Buffer.data()), static_cast<std::streamsize>(Count));
+				if (!Input || Input.bad()) return std::unexpected("input could not be read completely for fingerprinting");
+				Builder.UpdateBytes("chunk", std::span<const std::byte>(Buffer.data(), Count));
+				Remaining -= Count;
+			}
+			Error.clear();
+			const uintmax_t FinalSize = std::filesystem::file_size(Path, Error);
+			if (Error || FinalSize != Size) return std::unexpected("input length changed while fingerprinting");
+			return Builder.Finish();
 		}
 
 		std::expected<std::vector<std::byte>, std::string> ReadBoundedBytes(const std::filesystem::path& Path, uint64_t MaximumBytes)
@@ -76,14 +172,6 @@ namespace PulseForge
 			if (!Bytes.empty()) Input.read(reinterpret_cast<char*>(Bytes.data()), static_cast<std::streamsize>(Bytes.size()));
 			if (!Input || Input.bad()) return std::unexpected("source file could not be read completely");
 			return Bytes;
-		}
-
-		std::expected<std::string, std::string> ReadBoundedText(const std::filesystem::path& Path, uint64_t MaximumBytes)
-		{
-			auto Bytes = ReadBoundedBytes(Path, MaximumBytes);
-			if (!Bytes) return std::unexpected(Bytes.error());
-			if (Bytes->empty()) return std::string{};
-			return std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size());
 		}
 
 		std::optional<std::string> FindString(const Json& Object, std::string_view Key)
@@ -207,31 +295,41 @@ namespace PulseForge
 		}
 
 		std::expected<void, AssetDependencyCatalogError> ExtractSceneFile(AssetDependencyExtraction& Output,
-			const std::filesystem::path& SourcePath, const AssetRecord& Owner, const AssetRegistry& Registry)
+			const std::filesystem::path& ProjectRoot, const std::filesystem::path& SourcePath, const AssetRecord& Owner,
+			const AssetRegistry& Registry)
 		{
+			auto Bytes = ReadBoundedBytes(SourcePath, 64ull * 1024ull * 1024ull);
+			if (!Bytes) return std::unexpected(MakeError(SourcePath, "Scene dependency analysis failed: " + Bytes.error()));
+			AddReadReceipt(Output, ProjectRoot, SourcePath, *Bytes);
+			const std::string Data(Bytes->empty() ? std::string{} :
+				std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size()));
 			Scene Source;
-			auto Loaded = SceneSerializer::LoadFromFile(SourcePath, Source);
+			auto Loaded = SceneSerializer::Deserialize(Data, Source);
 			if (!Loaded) return std::unexpected(MakeError(SourcePath, "Scene dependency analysis failed: " + Loaded.error().Message));
 			return ExtractSceneReferences(Output, Owner, Registry, Source);
 		}
 
 		std::expected<void, AssetDependencyCatalogError> ExtractPrefabFile(AssetDependencyExtraction& Output,
-			const std::filesystem::path& SourcePath, const AssetRecord& Owner, const AssetRegistry& Registry)
+			const std::filesystem::path& ProjectRoot, const std::filesystem::path& SourcePath, const AssetRecord& Owner,
+			const AssetRegistry& Registry)
 		{
-			auto Data = ReadBoundedText(SourcePath, MaximumPrefabBytes);
-			if (!Data) return std::unexpected(MakeError(SourcePath, "Prefab dependency analysis failed: " + Data.error()));
+			auto Bytes = ReadBoundedBytes(SourcePath, MaximumPrefabBytes);
+			if (!Bytes) return std::unexpected(MakeError(SourcePath, "Prefab dependency analysis failed: " + Bytes.error()));
+			AddReadReceipt(Output, ProjectRoot, SourcePath, *Bytes);
+			const std::string Data(Bytes->empty() ? std::string{} :
+				std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size()));
 
 			// Use the production prefab path to validate its wrapper/root/subtree policy, then deserialize its nested
 			// scene separately so edge owners retain the authored entity UUIDs rather than the instance UUIDs.
 			Scene ValidationScene;
-			auto ValidatedRoot = PrefabSerializer::Instantiate(*Data, ValidationScene);
+			auto ValidatedRoot = PrefabSerializer::Instantiate(Data, ValidationScene);
 			if (!ValidatedRoot)
 				return std::unexpected(MakeError(SourcePath, "Prefab dependency analysis failed: " + ValidatedRoot.error().Message));
 
 			Json Document;
 			try
 			{
-				Document = Json::parse(Data->begin(), Data->end());
+				Document = Json::parse(Data.begin(), Data.end());
 			}
 			catch (const Json::exception& Exception)
 			{
@@ -257,6 +355,7 @@ namespace PulseForge
 			std::string ProjectRelativeKey;
 			uint64_t ByteLength = 0;
 			AssetDependencyStatus Status = AssetDependencyStatus::Resolved;
+			AssetContentFingerprint Content;
 		};
 
 		std::expected<uint64_t, std::string> ReadByteLength(const Json& Buffer)
@@ -297,7 +396,7 @@ namespace PulseForge
 			std::string JsonText;
 			uint64_t FileSize = 0;
 			std::optional<Assets::Detail::GlbChunkRange> BinaryRange;
-			XXH128_hash_t SourceDigest{};
+			AssetContentFingerprint Content;
 		};
 
 		bool ReadLittleEndian32(std::span<const std::byte> Data, size_t Offset, uint32_t& Value)
@@ -309,43 +408,25 @@ namespace PulseForge
 			return true;
 		}
 
-		std::expected<GltfSourceRead, std::string> ReadGltfSource(const std::filesystem::path& SourcePath, bool IsGlb)
+		std::expected<GltfSourceRead, std::string> ReadGltfSource(
+			AssetDependencyExtraction& Output, const std::filesystem::path& ProjectRoot,
+			const std::filesystem::path& SourcePath, bool IsGlb)
 		{
 			std::error_code Error;
 			const uintmax_t Size = std::filesystem::file_size(SourcePath, Error);
 			if (Error || Size > (IsGlb ? MaximumGltfContainerBytes : MaximumGltfJsonBytes))
 				return std::unexpected("glTF source exceeds the supported bounded read limit");
-			std::error_code TimeError;
-			const auto InitialWriteTime = std::filesystem::last_write_time(SourcePath, TimeError);
-			if (TimeError) return std::unexpected("glTF source modification state could not be inspected");
 
 			GltfSourceRead Result;
 			Result.FileSize = static_cast<uint64_t>(Size);
-			XXH3_state_t* State = XXH3_createState();
-			if (State == nullptr) return std::unexpected("Could not allocate a glTF fingerprint state");
-			struct StateOwner
-			{
-				XXH3_state_t* Value;
-				~StateOwner() { (void)XXH3_freeState(Value); }
-			} StateCleanup{ State };
-			if (XXH3_128bits_reset(State) != XXH_OK) return std::unexpected("Could not initialize a glTF fingerprint state");
 
 			if (!IsGlb)
 			{
 				auto Bytes = ReadBoundedBytes(SourcePath, MaximumGltfJsonBytes);
 				if (!Bytes) return std::unexpected(Bytes.error());
-				if (!Bytes->empty())
-				{
-					(void)XXH3_128bits_update(State, Bytes->data(), Bytes->size());
-					Result.JsonText.assign(reinterpret_cast<const char*>(Bytes->data()), Bytes->size());
-				}
-				Error.clear();
-				const uintmax_t FinalSize = std::filesystem::file_size(SourcePath, Error);
-				TimeError.clear();
-				const auto FinalWriteTime = std::filesystem::last_write_time(SourcePath, TimeError);
-				if (Error || TimeError || FinalSize != Size || FinalWriteTime != InitialWriteTime)
-					return std::unexpected("glTF source changed while its parsed and fingerprinted bytes were being read");
-				Result.SourceDigest = XXH3_128bits_digest(State);
+				if (!Bytes->empty()) Result.JsonText.assign(reinterpret_cast<const char*>(Bytes->data()), Bytes->size());
+				Result.Content = FingerprintBytes(*Bytes);
+				AddReadReceipt(Output, ProjectRoot, SourcePath, *Bytes);
 				return Result;
 			}
 
@@ -371,6 +452,8 @@ namespace PulseForge
 			if (!Input) return std::unexpected("GLB source could not be rewound for a coherent parse and fingerprint read");
 
 			std::array<std::byte, 64 * 1024> Buffer{};
+			AssetFingerprintBuilder Fingerprint("PulseForge.AssetInputBytes.v1");
+			Fingerprint.UpdateText("byteLength", std::to_string(Size));
 			std::array<std::byte, 12> Header{};
 			std::array<std::byte, 8> JsonChunkHeader{};
 			std::array<std::byte, 8> BinaryChunkHeader{};
@@ -382,7 +465,7 @@ namespace PulseForge
 				Input.read(reinterpret_cast<char*>(Buffer.data()), static_cast<std::streamsize>(Count));
 				if (!Input || Input.bad()) return std::unexpected("GLB source could not be read completely for parsing and fingerprinting");
 				const std::span<const std::byte> Chunk(Buffer.data(), Count);
-				(void)XXH3_128bits_update(State, Chunk.data(), Chunk.size());
+				Fingerprint.UpdateBytes("chunk", Chunk);
 
 				const auto Capture = [Offset, Chunk, Count](uint64_t RangeOffset, std::span<std::byte> Destination)
 				{
@@ -423,127 +506,12 @@ namespace PulseForge
 					BinaryLength != Layout->Binary->Length || BinaryType != Assets::Detail::GlbBinaryChunk)
 					return std::unexpected("GLB BIN layout changed while source bytes were being fingerprinted");
 			}
-			Error.clear();
-			const uintmax_t FinalSize = std::filesystem::file_size(SourcePath, Error);
-			TimeError.clear();
-			const auto FinalWriteTime = std::filesystem::last_write_time(SourcePath, TimeError);
-			if (Error || TimeError || FinalSize != Size || FinalWriteTime != InitialWriteTime)
-				return std::unexpected("GLB source changed while its parsed and fingerprinted bytes were being read");
-
 			while (!Result.JsonText.empty() &&
 				   (Result.JsonText.back() == '\0' || std::isspace(static_cast<unsigned char>(Result.JsonText.back()))))
 				Result.JsonText.pop_back();
-			Result.SourceDigest = XXH3_128bits_digest(State);
+			Result.Content = Fingerprint.Finish();
+			AddReadReceipt(Output, ProjectRelativeKey(ProjectRoot, SourcePath), Result.FileSize, Result.Content);
 			return Result;
-		}
-
-		struct XxHashState
-		{
-			XXH3_state_t* Value = XXH3_createState();
-			~XxHashState()
-			{
-				if (Value) XXH3_freeState(Value);
-			}
-		};
-
-		void HashBytes(XXH3_state_t* State, std::span<const std::byte> Bytes)
-		{
-			if (!Bytes.empty()) (void)XXH3_128bits_update(State, Bytes.data(), Bytes.size());
-		}
-
-		void HashString(XXH3_state_t* State, std::string_view Value)
-		{
-			const uint64_t Length = Value.size();
-			std::array<std::byte, sizeof(Length)> EncodedLength{};
-			for (size_t Index = 0; Index < EncodedLength.size(); ++Index)
-				EncodedLength[Index] = static_cast<std::byte>((Length >> (Index * 8)) & 0xff);
-			HashBytes(State, EncodedLength);
-			HashBytes(State, std::as_bytes(std::span(Value.data(), Value.size())));
-		}
-
-		std::expected<void, std::string> HashFileRange(XXH3_state_t* State, const std::filesystem::path& Path, uint64_t ByteLength)
-		{
-			std::error_code Error;
-			const auto Status = std::filesystem::symlink_status(Path, Error);
-			if (Error || std::filesystem::is_symlink(Status) || !std::filesystem::is_regular_file(Status))
-				return std::unexpected("input is not a regular, non-symlink file");
-			Error.clear();
-			const uintmax_t Size = std::filesystem::file_size(Path, Error);
-			if (Error || Size < ByteLength) return std::unexpected("input is missing or shorter than the declared glTF buffer byteLength");
-
-			const auto InitialWriteTime = std::filesystem::last_write_time(Path, Error);
-			if (Error) return std::unexpected("input modification state could not be inspected");
-
-			std::ifstream Input(Path, std::ios::binary);
-			if (!Input.is_open()) return std::unexpected("input could not be opened while fingerprinting");
-			std::array<std::byte, 64 * 1024> Buffer{};
-			uint64_t Remaining = ByteLength;
-			while (Remaining != 0)
-			{
-				const size_t Count = static_cast<size_t>(std::min<uint64_t>(Remaining, Buffer.size()));
-				Input.read(reinterpret_cast<char*>(Buffer.data()), static_cast<std::streamsize>(Count));
-				if (!Input || Input.bad()) return std::unexpected("input could not be read completely while fingerprinting");
-				HashBytes(State, std::span<const std::byte>(Buffer.data(), Count));
-				Remaining -= Count;
-			}
-			Error.clear();
-			const uintmax_t FinalSize = std::filesystem::file_size(Path, Error);
-			std::error_code TimeError;
-			const auto FinalWriteTime = std::filesystem::last_write_time(Path, TimeError);
-			if (Error || TimeError || FinalSize != Size || FinalWriteTime != InitialWriteTime)
-				return std::unexpected("input changed while its consumed bytes were fingerprinted");
-			return {};
-		}
-
-		std::string DigestHex(XXH128_hash_t Digest)
-		{
-			std::array<char, 32> Digits{};
-			constexpr char Hex[] = "0123456789abcdef";
-			for (size_t Index = 0; Index < 16; ++Index)
-			{
-				const size_t Shift = (15 - Index) * 4;
-				Digits[Index] = Hex[(Digest.high64 >> Shift) & 0xf];
-				Digits[16 + Index] = Hex[(Digest.low64 >> Shift) & 0xf];
-			}
-			return { Digits.begin(), Digits.end() };
-		}
-
-		std::expected<void, std::string> VerifySourceDigest(
-			const std::filesystem::path& Path, uint64_t ExpectedSize, XXH128_hash_t ExpectedDigest)
-		{
-			std::error_code Error;
-			const auto Status = std::filesystem::symlink_status(Path, Error);
-			if (Error || std::filesystem::is_symlink(Status) || !std::filesystem::is_regular_file(Status))
-				return std::unexpected("source ceased to be a regular, non-symlink file during analysis");
-			Error.clear();
-			const uintmax_t Size = std::filesystem::file_size(Path, Error);
-			if (Error || Size != ExpectedSize) return std::unexpected("source size changed during dependency analysis");
-
-			XXH3_state_t* State = XXH3_createState();
-			if (State == nullptr) return std::unexpected("could not allocate a source verification state");
-			struct StateOwner
-			{
-				XXH3_state_t* Value;
-				~StateOwner() { (void)XXH3_freeState(Value); }
-			} Cleanup{ State };
-			if (XXH3_128bits_reset(State) != XXH_OK) return std::unexpected("could not initialize a source verification state");
-
-			std::ifstream Input(Path, std::ios::binary);
-			if (!Input.is_open()) return std::unexpected("source could not be reopened for mutation verification");
-			std::array<std::byte, 64 * 1024> Buffer{};
-			uint64_t Remaining = ExpectedSize;
-			while (Remaining != 0)
-			{
-				const size_t Count = static_cast<size_t>(std::min<uint64_t>(Remaining, Buffer.size()));
-				Input.read(reinterpret_cast<char*>(Buffer.data()), static_cast<std::streamsize>(Count));
-				if (!Input || Input.bad()) return std::unexpected("source could not be reread completely for mutation verification");
-				(void)XXH3_128bits_update(State, Buffer.data(), Count);
-				Remaining -= Count;
-			}
-			const XXH128_hash_t ActualDigest = XXH3_128bits_digest(State);
-			if (ActualDigest.high64 != ExpectedDigest.high64 || ActualDigest.low64 != ExpectedDigest.low64)
-				return std::unexpected("source content changed during dependency analysis");
-			return {};
 		}
 
 		AssetDependencyNode RootNode(const AssetRecord& Record)
@@ -562,10 +530,11 @@ namespace PulseForge
 		}
 
 		std::expected<void, AssetDependencyCatalogError> AnalyzeGltf(AssetDependencyExtraction& Output,
-			const std::filesystem::path& ProjectRoot, const std::filesystem::path& SourcePath, const AssetRecord& Owner)
+			const std::filesystem::path& ProjectRoot, const std::filesystem::path& SourcePath, const AssetRecord& Owner,
+			const AssetMetadata& Metadata)
 		{
 			const bool IsGlb = HasAssetExtension(SourcePath, { ".glb" });
-			auto SourceRead = ReadGltfSource(SourcePath, IsGlb);
+			auto SourceRead = ReadGltfSource(Output, ProjectRoot, SourcePath, IsGlb);
 			if (!SourceRead) return std::unexpected(MakeError(SourcePath, "glTF dependency analysis failed: " + SourceRead.error()));
 
 			Json Document;
@@ -581,9 +550,13 @@ namespace PulseForge
 			if (!Document.is_object() || AssetObject == Document.end() || !AssetObject->is_object() ||
 				FindString(*AssetObject, "version") != std::optional<std::string>{ "2.0" })
 				return std::unexpected(MakeError(SourcePath, "glTF dependency source must have an asset.version of 2.0"));
+			auto Settings = GltfMeshImportSettings::Parse(Metadata.ImportSettingsJson);
+			if (!Settings) return std::unexpected(MakeError(SourcePath, "glTF import settings are invalid: " + Settings.error()));
+			auto CanonicalSettings = Settings->Canonicalize();
+			if (!CanonicalSettings)
+				return std::unexpected(MakeError(SourcePath, "glTF import settings could not be canonicalized: " + CanonicalSettings.error()));
 
 			std::vector<BufferInput> ExternalBuffers;
-			bool AnyUnavailable = false;
 			const AssetDependencyNode Referrer = RootNode(Owner);
 			if (const auto Required = Document.find("extensionsRequired"); Required != Document.end())
 			{
@@ -597,7 +570,6 @@ namespace PulseForge
 					const AssetDependencyNode Target = RootNode(Owner);
 					AppendIssue(Output, Referrer, Target, AssetDependencyStatus::Unsupported, "extensionsRequired/" + std::to_string(Index),
 						"Current static mesh importer does not support required glTF extension '" + Extension + "'");
-					AnyUnavailable = true;
 				}
 			}
 			const auto Buffers = Document.find("buffers");
@@ -635,7 +607,6 @@ namespace PulseForge
 								AssetDependencyStatus::Unsupported, Location, OriginalUri });
 							AppendIssue(Output, Referrer, Target, AssetDependencyStatus::Unsupported, Location,
 								"Embedded glTF buffer URI uses an unsupported data URI encoding");
-							AnyUnavailable = true;
 						}
 						continue;
 					}
@@ -645,11 +616,12 @@ namespace PulseForge
 					if (!Relative || !*Relative)
 					{
 						const AssetDependencyNode Target = SourceFileNode({});
-						const AssetDependencyStatus Status = AssetDependencyStatus::Invalid;
+						const AssetDependencyStatus Status = Assets::Detail::HasUriScheme(OriginalUri)
+							? AssetDependencyStatus::Unsupported : AssetDependencyStatus::Invalid;
 						Output.Edges.push_back({ Referrer, Target, AssetDependencyEdgeKind::ImportInput, Status, Location, OriginalUri });
 						AppendIssue(Output, Referrer, Target, Status, Location,
-							Relative ? "External glTF buffer URI unexpectedly resolved as embedded" : Relative.error());
-						AnyUnavailable = true;
+							Assets::Detail::HasUriScheme(OriginalUri) ? "External glTF buffer URI uses an unsupported scheme"
+								: Relative ? "External glTF buffer URI unexpectedly resolved as embedded" : Relative.error());
 						continue;
 					}
 
@@ -670,7 +642,6 @@ namespace PulseForge
 						AppendIssue(Output, Referrer, Target, Input.Status, Location,
 							Exists ? "External glTF buffer is not a safe managed source file: " + ManagedPath.error().Message
 								   : "External glTF buffer is missing: " + Input.ProjectRelativeKey);
-						AnyUnavailable = true;
 						ExternalBuffers.push_back(std::move(Input));
 						continue;
 					}
@@ -685,7 +656,6 @@ namespace PulseForge
 							{ Referrer, Target, AssetDependencyEdgeKind::ImportInput, Input.Status, Location, OriginalUri });
 						AppendIssue(Output, Referrer, Target, Input.Status, Location,
 							"External glTF buffer is shorter than its declared byteLength or its size cannot be read");
-						AnyUnavailable = true;
 						ExternalBuffers.push_back(std::move(Input));
 						continue;
 					}
@@ -745,13 +715,15 @@ namespace PulseForge
 								Status = Exists ? AssetDependencyStatus::Invalid : AssetDependencyStatus::Missing;
 							}
 						}
-						else if (!Relative) Status = AssetDependencyStatus::Invalid;
+						else if (!Relative) Status = Assets::Detail::HasUriScheme(OriginalUri)
+							? AssetDependencyStatus::Unsupported : AssetDependencyStatus::Invalid;
 					}
 					const std::string Location = "images/" + std::to_string(Index) + ".uri";
 					Output.Edges.push_back({ Referrer, Target, AssetDependencyEdgeKind::ImportInput, Status, Location, OriginalUri });
 					AppendIssue(Output, Referrer, Target, Status, Location,
 						Status == AssetDependencyStatus::Invalid ? "glTF image URI is invalid for a contained project-relative source"
-																 : "glTF image URI is not consumed by the current static mesh importer");
+							: Status == AssetDependencyStatus::Unsupported ? "glTF image URI is not consumed by the current static mesh importer"
+							: "glTF image URI is not consumed by the current static mesh importer");
 				}
 			}
 
@@ -760,6 +732,7 @@ namespace PulseForge
 				return std::unexpected(MakeError(SourcePath, "glTF static mesh source requires a bounded, non-empty meshes array"));
 			if (Meshes != Document.end())
 			{
+				const size_t FirstSubresource = Output.Subresources.size();
 				size_t TotalPrimitives = 0;
 				for (size_t MeshIndex = 0; MeshIndex < Meshes->size(); ++MeshIndex)
 				{
@@ -773,53 +746,45 @@ namespace PulseForge
 					const std::string MeshName = FindString(Mesh, "name").value_or("mesh " + std::to_string(MeshIndex));
 					for (size_t PrimitiveIndex = 0; PrimitiveIndex < Primitives->size(); ++PrimitiveIndex)
 					{
-						const Json& Primitive = (*Primitives)[PrimitiveIndex];
-						if (!Primitive.is_object()) return std::unexpected(MakeError(SourcePath, "glTF primitive entry must be an object"));
 						const std::string Key = MeshPrimitiveKey(MeshIndex, PrimitiveIndex);
-						// Index locators are stable for unchanged source structure. A reorder/insertion has no guaranteed matching
-						// identity in glTF and must be treated as a changed/ambiguous source, never name-matched silently.
-						const Json* Extensions = nullptr;
-						if (const auto Value = Primitive.find("extensions"); Value != Primitive.end() && Value->is_object())
-							Extensions = &*Value;
-						const bool Draco = Extensions != nullptr && Extensions->find("KHR_draco_mesh_compression") != Extensions->end();
-						const auto Targets = Primitive.find("targets");
-						if (Targets != Primitive.end() && !Targets->is_array())
-							return std::unexpected(MakeError(SourcePath, "glTF primitive targets must be an array"));
-						const bool HasMorphTargets = Targets != Primitive.end() && !Targets->empty();
-						uint64_t Mode = 4;
-						if (const auto ModeField = Primitive.find("mode"); ModeField != Primitive.end())
-						{
-							if (!ModeField->is_number_integer() || ModeField->get<int64_t>() < 0)
-								return std::unexpected(MakeError(SourcePath, "glTF primitive mode must be a non-negative integer"));
-							Mode = ModeField->get<uint64_t>();
-						}
-						if (!Draco && !HasMorphTargets && Mode == 4)
-							Output.Subresources.push_back({ { Owner.ID, PathToUtf8(Owner.ProjectRelativePath), Key },
-								MeshName + " / primitive " + std::to_string(PrimitiveIndex) });
-						else
-						{
-							const AssetDependencyNode Target = SourceFileNode(PathToUtf8(Owner.ProjectRelativePath));
-							const std::string Reason = Draco			 ? "Primitive uses unsupported KHR_draco_mesh_compression"
-													   : HasMorphTargets ? "Primitive has unsupported morph targets"
-																		 : "Only triangle-list primitives are importable";
-							AppendIssue(Output, Referrer, Target, AssetDependencyStatus::Unsupported,
-								"meshes/" + std::to_string(MeshIndex) + "/primitives/" + std::to_string(PrimitiveIndex), Reason);
-							AnyUnavailable = true;
-						}
+						// Index locators remain stable for unchanged structure; a locator is not proof that output was imported.
+						const AssetDependencyNode PrimitiveNode{ Owner.ID, PathToUtf8(Owner.ProjectRelativePath), Key };
+						Output.Subresources.push_back({ PrimitiveNode,
+							MeshName + " / primitive " + std::to_string(PrimitiveIndex),
+							AssetSubresourceClassification::DiscoveredLocator });
 					}
 				}
+				std::vector<Assets::Detail::GltfPrimitiveLocator> Locators;
+				Locators.reserve(TotalPrimitives);
+				for (size_t MeshIndex = 0; MeshIndex < Meshes->size(); ++MeshIndex)
+				{
+					const Json& Mesh = (*Meshes)[MeshIndex];
+					const auto Primitives = Mesh.find("primitives");
+					for (size_t PrimitiveIndex = 0; PrimitiveIndex < Primitives->size(); ++PrimitiveIndex)
+						Locators.push_back({ static_cast<uint32_t>(MeshIndex), static_cast<uint32_t>(PrimitiveIndex) });
+				}
+				const std::optional<uint64_t> BinaryLength = SourceRead->BinaryRange
+					? std::optional<uint64_t>(SourceRead->BinaryRange->Length)
+					: std::nullopt;
+				auto Inspections = Assets::Detail::InspectStaticPrimitives(
+					SourceRead->JsonText, SourcePath, ProjectRoot, Locators, BinaryLength);
+				if (Inspections.size() != Output.Subresources.size() - FirstSubresource)
+					return std::unexpected(MakeError(SourcePath, "glTF primitive inspection returned an inconsistent locator count"));
+				for (size_t Index = 0; Index < Inspections.size(); ++Index)
+				{
+					AssetSubresourceRecord& Subresource = Output.Subresources[FirstSubresource + Index];
+					Subresource.Classification = Inspections[Index].Classification;
+					if (Subresource.Classification != AssetSubresourceClassification::Invalid &&
+						Subresource.Classification != AssetSubresourceClassification::Unsupported)
+						continue;
+					const AssetDependencyStatus Status = Subresource.Classification == AssetSubresourceClassification::Invalid
+						? AssetDependencyStatus::Invalid
+						: AssetDependencyStatus::Unsupported;
+					AppendIssue(Output, Subresource.Identity, SourceFileNode(PathToUtf8(Owner.ProjectRelativePath)), Status,
+						"meshes/" + std::to_string(Locators[Index].MeshIndex) + "/primitives/" +
+							std::to_string(Locators[Index].PrimitiveIndex), std::move(Inspections[Index].Diagnostic));
+				}
 			}
-
-			XxHashState Hash;
-			if (!Hash.Value || XXH3_128bits_reset(Hash.Value) != XXH_OK)
-				return std::unexpected(MakeError(SourcePath, "Could not initialize the deterministic glTF fingerprint"));
-			HashString(Hash.Value, "PulseForge.GltfImportInputs.v1");
-			HashString(Hash.Value, std::string(GltfImporterID));
-			HashString(Hash.Value, std::string(GltfImporterVersion));
-			HashString(Hash.Value, std::to_string(GltfOutputSchemaVersion));
-			HashString(Hash.Value, PathToUtf8(Owner.ProjectRelativePath));
-			HashString(Hash.Value, std::to_string(SourceRead->FileSize));
-			HashString(Hash.Value, DigestHex(SourceRead->SourceDigest));
 
 			std::sort(ExternalBuffers.begin(), ExternalBuffers.end(),
 				[](const BufferInput& First, const BufferInput& Second)
@@ -827,40 +792,137 @@ namespace PulseForge
 					if (First.ProjectRelativeKey != Second.ProjectRelativeKey) return First.ProjectRelativeKey < Second.ProjectRelativeKey;
 					return First.ByteLength < Second.ByteLength;
 				});
-			for (const BufferInput& Input : ExternalBuffers)
+			std::vector<AssetImportInputFingerprint> RecipeInputs;
+			RecipeInputs.push_back({ PathToUtf8(Owner.ProjectRelativePath), SourceRead->Content });
+			for (BufferInput& Input : ExternalBuffers)
 			{
-				HashString(Hash.Value, "external-buffer");
-				HashString(Hash.Value, Input.ProjectRelativeKey);
-				HashString(Hash.Value, std::to_string(Input.ByteLength));
 				if (Input.Status != AssetDependencyStatus::Resolved) continue;
-				auto InputHash = HashFileRange(Hash.Value, Input.AbsolutePath, Input.ByteLength);
+				std::error_code SizeError;
+				const uintmax_t Size = std::filesystem::file_size(Input.AbsolutePath, SizeError);
+				if (SizeError || Size < Input.ByteLength || Size > MaximumGltfBufferBytes)
+					return std::unexpected(MakeError(Input.AbsolutePath,
+						"Could not fingerprint glTF external buffer: file is missing, too short, or over the importer limit"));
+				auto InputHash = FingerprintFile(Input.AbsolutePath, static_cast<uint64_t>(Size), MaximumGltfBufferBytes);
 				if (!InputHash)
 					return std::unexpected(
 						MakeError(Input.AbsolutePath, "Could not fingerprint glTF external buffer: " + InputHash.error()));
+				Input.Content = *InputHash;
+				AddReadReceipt(Output, Input.ProjectRelativeKey, static_cast<uint64_t>(Size), *InputHash);
+				RecipeInputs.push_back({ Input.ProjectRelativeKey, *InputHash });
 			}
-			auto SourceUnchanged = VerifySourceDigest(SourcePath, SourceRead->FileSize, SourceRead->SourceDigest);
-			if (!SourceUnchanged)
-				return std::unexpected(MakeError(SourcePath, "glTF source changed during dependency analysis: " + SourceUnchanged.error()));
+			std::sort(RecipeInputs.begin(), RecipeInputs.end(), [](const auto& First, const auto& Second)
+				{ return First.ProjectRelativePath < Second.ProjectRelativePath; });
+			RecipeInputs.erase(std::unique(RecipeInputs.begin(), RecipeInputs.end(),
+				[](const auto& First, const auto& Second)
+				{ return First.ProjectRelativePath == Second.ProjectRelativePath && First.Content == Second.Content; }), RecipeInputs.end());
+			for (size_t Index = 1; Index < RecipeInputs.size(); ++Index)
+				if (RecipeInputs[Index - 1].ProjectRelativePath == RecipeInputs[Index].ProjectRelativePath)
+					return std::unexpected(MakeError(SourcePath, "glTF import read set has conflicting content for one project-relative path"));
 
-			const XXH128_hash_t Digest = XXH3_128bits_digest(Hash.Value);
-			AssetImportObservation Observation;
-			Observation.Asset = Owner.ID;
-			Observation.ImporterID = GltfImporterID;
-			Observation.ImporterVersion = GltfImporterVersion;
-			Observation.SettingsVersion = 1;
-			Observation.EffectiveSettings.clear(); // Current importer has no authored settings; mesh/primitive are source locators.
-			Observation.InputFingerprint = { "xxh3-128-v0.8.2-input-v1", DigestHex(Digest) };
-			Observation.ResultState =
-				AnyUnavailable ? AssetImportResultState::Unavailable : AssetImportResultState::NoSuccessfulResultRecorded;
-			// This catalog inspection records inputs only. No successful artifact/import result is persisted today.
-			Output.ImportObservations.push_back(std::move(Observation));
+			const std::filesystem::path ProvenancePath = AssetImportProvenanceSerializer::GetSidecarPath(SourcePath);
+			std::optional<AssetImportSuccessReceipt> LastSuccess;
+			bool ProvenanceUnavailable = false;
+			std::error_code ProvenanceError;
+			const auto ProvenanceStatus = std::filesystem::symlink_status(ProvenancePath, ProvenanceError);
+			if (ProvenanceError == std::errc::no_such_file_or_directory)
+			{
+				Output.ReadSet.push_back({ ProjectRelativeKey(ProjectRoot, ProvenancePath), false, 0, {} });
+			}
+			else if (ProvenanceError || std::filesystem::is_symlink(ProvenanceStatus) || !std::filesystem::is_regular_file(ProvenanceStatus))
+			{
+				ProvenanceUnavailable = true;
+				Output.Issues.push_back({ AssetDependencyIssueCode::InvalidImportProvenance, Referrer,
+					SourceFileNode(ProjectRelativeKey(ProjectRoot, ProvenancePath)), "import-result",
+					"Import success receipt is unreadable or is not a regular non-symlink file" });
+			}
+			else
+			{
+				auto ReceiptBytes = ReadBoundedBytes(ProvenancePath, MaximumProvenanceBytes);
+				if (!ReceiptBytes)
+				{
+					ProvenanceUnavailable = true;
+					Output.Issues.push_back({ AssetDependencyIssueCode::InvalidImportProvenance, Referrer,
+						SourceFileNode(ProjectRelativeKey(ProjectRoot, ProvenancePath)), "import-result",
+						"Import success receipt could not be read: " + ReceiptBytes.error() });
+				}
+				else
+				{
+					AddReadReceipt(Output, ProjectRoot, ProvenancePath, *ReceiptBytes);
+					const std::string ReceiptText(ReceiptBytes->empty() ? std::string{} :
+						std::string(reinterpret_cast<const char*>(ReceiptBytes->data()), ReceiptBytes->size()));
+					auto Receipt = AssetImportProvenanceSerializer::Deserialize(ReceiptText, ProvenancePath);
+					if (!Receipt || Receipt->Recipe.SourceAsset != Owner.ID)
+					{
+						ProvenanceUnavailable = true;
+						Output.Issues.push_back({ AssetDependencyIssueCode::InvalidImportProvenance, Referrer,
+							SourceFileNode(ProjectRelativeKey(ProjectRoot, ProvenancePath)), "import-result",
+							Receipt ? "Import receipt belongs to a different asset UUID" : Receipt.error().Message });
+					}
+					else LastSuccess = std::move(*Receipt);
+				}
+			}
+
+			for (AssetSubresourceRecord& Subresource : Output.Subresources)
+			{
+				if (Subresource.Identity.Asset != Owner.ID) continue;
+				AssetImportRecipe Recipe;
+				Recipe.SourceAsset = Owner.ID;
+				Recipe.SubresourceKey = Subresource.Identity.SubresourceKey;
+				Recipe.ImporterID = GltfImporterID;
+				Recipe.ImporterVersion = GltfImporterVersion;
+				Recipe.OutputSchemaVersion = GltfOutputSchemaVersion;
+				Recipe.EffectiveSettings = *CanonicalSettings;
+				Recipe.TargetID = "cpu-generic-v1";
+				Recipe.Inputs = RecipeInputs;
+				auto Fingerprint = ComputeAssetImportInputFingerprint(Recipe);
+				if (!Fingerprint) return std::unexpected(MakeError(SourcePath, "Could not compute glTF import recipe: " + Fingerprint.error()));
+				Recipe.InputFingerprint = *Fingerprint;
+
+				AssetImportObservation Observation;
+				Observation.Asset = Owner.ID;
+				Observation.SubresourceKey = Recipe.SubresourceKey;
+				Observation.ImporterID = Recipe.ImporterID;
+				Observation.ImporterVersion = Recipe.ImporterVersion;
+				Observation.SettingsVersion = GltfMeshImportSettings::CurrentVersion;
+				Observation.OutputSchemaVersion = Recipe.OutputSchemaVersion;
+				Observation.EffectiveSettings = Recipe.EffectiveSettings;
+				Observation.TargetID = Recipe.TargetID;
+				Observation.Inputs = Recipe.Inputs;
+				Observation.InputFingerprint = Recipe.InputFingerprint;
+				if (Subresource.Classification == AssetSubresourceClassification::Invalid ||
+					Subresource.Classification == AssetSubresourceClassification::Unsupported || ProvenanceUnavailable)
+					Observation.ResultState = AssetImportResultState::Unavailable;
+				else if (LastSuccess && LastSuccess->Recipe.SubresourceKey == Recipe.SubresourceKey)
+				{
+					const AssetImportRecipe& SuccessfulRecipe = LastSuccess->Recipe;
+					Observation.LastSuccessfulResult = LastSuccess;
+					const bool RecipeIdentityMatches = SuccessfulRecipe.SourceAsset == Recipe.SourceAsset &&
+						SuccessfulRecipe.SubresourceKey == Recipe.SubresourceKey && SuccessfulRecipe.ImporterID == Recipe.ImporterID &&
+						SuccessfulRecipe.ImporterVersion == Recipe.ImporterVersion &&
+						SuccessfulRecipe.OutputSchemaVersion == Recipe.OutputSchemaVersion &&
+						SuccessfulRecipe.EffectiveSettings == Recipe.EffectiveSettings && SuccessfulRecipe.TargetID == Recipe.TargetID;
+					const bool InputsMatch = SuccessfulRecipe.InputFingerprint == Recipe.InputFingerprint;
+					Observation.ResultState = RecipeIdentityMatches && InputsMatch
+						? AssetImportResultState::SuccessfulInputsMatch
+						: AssetImportResultState::SuccessfulInputsDiffer;
+					if (RecipeIdentityMatches && InputsMatch && SuccessfulRecipe.Inputs == Recipe.Inputs)
+						Subresource.Classification = AssetSubresourceClassification::Imported;
+				}
+				Output.ImportObservations.push_back(std::move(Observation));
+			}
 			return {};
 		}
 
 		std::expected<void, AssetDependencyCatalogError> AnalyzeMaterial(AssetDependencyExtraction& Output,
-			const std::filesystem::path& SourcePath, const AssetRecord& Owner, const AssetRegistry& Registry)
+			const std::filesystem::path& ProjectRoot, const std::filesystem::path& SourcePath, const AssetRecord& Owner,
+			const AssetRegistry& Registry)
 		{
-			auto Material = MaterialAssetSerializer::LoadFromFile(SourcePath);
+			auto Bytes = ReadBoundedBytes(SourcePath, 1024ull * 1024ull);
+			if (!Bytes) return std::unexpected(MakeError(SourcePath, "Material dependency analysis failed: " + Bytes.error()));
+			AddReadReceipt(Output, ProjectRoot, SourcePath, *Bytes);
+			const std::string Data(Bytes->empty() ? std::string{} :
+				std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size()));
+			auto Material = MaterialAssetSerializer::Deserialize(Data);
 			if (!Material)
 				return std::unexpected(MakeError(SourcePath, "Material dependency analysis failed: " + Material.error().Message));
 			const AssetDependencyNode Referrer = RootNode(Owner);
@@ -972,22 +1034,124 @@ namespace PulseForge
 		{
 			auto Resolved = AssetPathResolver::ResolveManagedSourcePath(AbsoluteProjectRoot, Record.ProjectRelativePath);
 			if (!Resolved) return std::unexpected(MakeError(Resolved.error().Path, Resolved.error().Message));
+			auto Metadata = ReadAssetMetadata(Output, AbsoluteProjectRoot, *Resolved, Record);
+			if (!Metadata) return std::unexpected(Metadata.error());
 
 			std::expected<void, AssetDependencyCatalogError> Result;
 			if (HasAssetTypeExtension(Record.ProjectRelativePath, AssetFileType::Material))
-				Result = AnalyzeMaterial(Output, *Resolved, Record, Registry);
+				Result = AnalyzeMaterial(Output, AbsoluteProjectRoot, *Resolved, Record, Registry);
 			else if (HasAssetTypeExtension(Record.ProjectRelativePath, AssetFileType::Scene))
-				Result = ExtractSceneFile(Output, *Resolved, Record, Registry);
+				Result = ExtractSceneFile(Output, AbsoluteProjectRoot, *Resolved, Record, Registry);
 			else if (HasAssetTypeExtension(Record.ProjectRelativePath, AssetFileType::Prefab))
-				Result = ExtractPrefabFile(Output, *Resolved, Record, Registry);
+				Result = ExtractPrefabFile(Output, AbsoluteProjectRoot, *Resolved, Record, Registry);
 			else if (HasAssetTypeExtension(Record.ProjectRelativePath, AssetFileType::Mesh))
-				Result = AnalyzeGltf(Output, AbsoluteProjectRoot, *Resolved, Record);
+				Result = AnalyzeGltf(Output, AbsoluteProjectRoot, *Resolved, Record, *Metadata);
 			else continue;
 			if (!Result) return std::unexpected(std::move(Result.error()));
+		}
+
+		std::set<std::string> ReadPaths;
+		for (const AssetDependencyInputReceipt& Receipt : Output.ReadSet) ReadPaths.insert(Receipt.ProjectRelativePath);
+		for (const AssetDependencyEdge& Edge : Output.Edges)
+		{
+			if (Edge.Kind != AssetDependencyEdgeKind::RuntimeReference || Edge.Status != AssetDependencyStatus::Resolved ||
+				Edge.Target.Asset.IsNil())
+				continue;
+			const auto TargetRecord = Registry.Find(Edge.Target.Asset);
+			if (!TargetRecord) continue;
+			const std::string Key = PathToUtf8(TargetRecord->ProjectRelativePath);
+			if (!ReadPaths.insert(Key).second) continue;
+			auto TargetPath = AssetPathResolver::ResolveManagedSourcePath(AbsoluteProjectRoot, TargetRecord->ProjectRelativePath);
+			if (!TargetPath)
+				return std::unexpected(MakeError(TargetRecord->ProjectRelativePath,
+					"Resolved runtime dependency became unavailable during source fingerprinting: " + TargetPath.error().Message));
+			std::error_code SizeError;
+			const uintmax_t Size = std::filesystem::file_size(*TargetPath, SizeError);
+			if (SizeError || Size > MaximumGltfContainerBytes)
+				return std::unexpected(MakeError(*TargetPath,
+					"Resolved runtime dependency exceeds the bounded source fingerprint limit"));
+			auto Content = FingerprintFile(*TargetPath, static_cast<uint64_t>(Size), MaximumGltfContainerBytes);
+			if (!Content)
+				return std::unexpected(MakeError(*TargetPath,
+					"Resolved runtime dependency could not be fingerprinted: " + Content.error()));
+			AddReadReceipt(Output, Key, static_cast<uint64_t>(Size), *Content);
 		}
 		auto Cycles = AppendRuntimeCycles(Output, AbsoluteProjectRoot, Records);
 		if (!Cycles) return std::unexpected(std::move(Cycles.error()));
 
+		std::sort(Output.ReadSet.begin(), Output.ReadSet.end(), [](const auto& First, const auto& Second)
+			{ return First.ProjectRelativePath < Second.ProjectRelativePath; });
+		std::vector<AssetDependencyInputReceipt> UniqueReadSet;
+		UniqueReadSet.reserve(Output.ReadSet.size());
+		for (AssetDependencyInputReceipt& Receipt : Output.ReadSet)
+		{
+			if (!UniqueReadSet.empty() && UniqueReadSet.back().ProjectRelativePath == Receipt.ProjectRelativePath)
+			{
+				if (UniqueReadSet.back() != Receipt)
+					return std::unexpected(MakeError(AbsoluteProjectRoot / std::filesystem::u8path(Receipt.ProjectRelativePath),
+						"One input changed while dependency analysis was reading it; candidate read set is inconsistent"));
+				continue;
+			}
+			UniqueReadSet.push_back(std::move(Receipt));
+		}
+		Output.ReadSet = std::move(UniqueReadSet);
+
 		return Output;
+	}
+
+	std::expected<void, AssetDependencyCatalogError> AssetDependencyExtractor::ValidateInputReceipts(
+		const std::filesystem::path& ProjectRoot, std::span<const AssetDependencyInputReceipt> ReadSet)
+	{
+		std::error_code RootError;
+		const std::filesystem::path AbsoluteRoot = std::filesystem::absolute(ProjectRoot, RootError).lexically_normal();
+		if (RootError || !std::filesystem::is_directory(AbsoluteRoot, RootError) || RootError)
+			return std::unexpected(MakeError(ProjectRoot, "Project root is not accessible during dependency read-set validation"));
+
+		std::string PreviousKey;
+		for (const AssetDependencyInputReceipt& Receipt : ReadSet)
+		{
+			const std::filesystem::path Relative = std::filesystem::u8path(Receipt.ProjectRelativePath);
+			if (!IsSafeReadSetKey(Relative) || PathToUtf8(Relative) != Receipt.ProjectRelativePath ||
+				(!PreviousKey.empty() && PreviousKey >= Receipt.ProjectRelativePath))
+				return std::unexpected(MakeError(Relative, "Dependency input read set contains an invalid or non-deterministic path key"));
+			PreviousKey = Receipt.ProjectRelativePath;
+
+			if (!Receipt.Exists)
+			{
+				const std::filesystem::path Candidate = AbsoluteRoot / Relative;
+				std::filesystem::path Current = AbsoluteRoot;
+				auto Component = Relative.begin();
+				for (; Component != Relative.end(); ++Component)
+				{
+					Current /= *Component;
+					std::error_code StatusError;
+					const auto Status = std::filesystem::symlink_status(Current, StatusError);
+					const bool IsFinal = std::next(Component) == Relative.end();
+					if (StatusError == std::errc::no_such_file_or_directory ||
+						(!StatusError && Status.type() == std::filesystem::file_type::not_found))
+					{
+						if (IsFinal) break;
+						return std::unexpected(MakeError(Candidate, "An input parent directory disappeared during dependency analysis"));
+					}
+					if (StatusError || std::filesystem::is_symlink(Status) || (IsFinal ? !std::filesystem::is_regular_file(Status)
+						: !std::filesystem::is_directory(Status)))
+						return std::unexpected(MakeError(Candidate, "An expected-absent input appeared or its path became unsafe during dependency analysis"));
+					if (IsFinal)
+						return std::unexpected(MakeError(Candidate, "An input recorded as absent appeared during dependency analysis"));
+				}
+				continue;
+			}
+
+			auto ManagedPath = AssetPathResolver::ResolveManagedSourcePath(AbsoluteRoot, Relative);
+			if (!ManagedPath)
+				return std::unexpected(MakeError(ManagedPath.error().Path,
+					"Dependency input became unavailable or unsafe: " + ManagedPath.error().Message));
+			auto Content = FingerprintFile(*ManagedPath, Receipt.ByteLength, MaximumGltfContainerBytes);
+			if (!Content)
+				return std::unexpected(MakeError(*ManagedPath, "Dependency input changed or could not be revalidated: " + Content.error()));
+			if (*Content != Receipt.Content)
+				return std::unexpected(MakeError(*ManagedPath, "Dependency input content changed after extraction and before publication"));
+		}
+		return {};
 	}
 } // namespace PulseForge

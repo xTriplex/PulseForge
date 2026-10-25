@@ -61,16 +61,18 @@ add_library(PulseForgeRenderMath STATIC
 target_include_directories(PulseForgeRenderMath PUBLIC PulseForge/Source/Public)
 target_link_libraries(PulseForgeRenderMath PUBLIC PulseForgeScene)
 add_library(PulseForgeAssetCatalog STATIC
+	PulseForge/Source/Private/Assets/AssetImportProvenance.cpp
 	PulseForge/Source/Private/Assets/AssetMetadata.cpp
 	PulseForge/Source/Private/Assets/AssetOperations.cpp
 	PulseForge/Source/Private/Assets/AssetPathResolver.cpp
 	PulseForge/Source/Private/Assets/AssetReferenceValidator.cpp
 	PulseForge/Source/Private/Assets/AssetRegistry.cpp
+	PulseForge/Source/Private/Assets/GltfPrimitiveInspector.cpp
 	PulseForge/Source/Private/Assets/GltfSourceDocument.cpp
 )
 target_include_directories(PulseForgeAssetCatalog
 	PUBLIC PulseForge/Source/Public
-	PRIVATE PulseForge/Vendor/json/include
+	PRIVATE PulseForge/Vendor/json/include PulseForge/Vendor/tracy/server
 )
 target_compile_definitions(PulseForgeAssetCatalog PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_link_libraries(PulseForgeAssetCatalog PUBLIC PulseForgeCore PulseForgeScene)
@@ -172,6 +174,7 @@ target_link_libraries(PulseForgeRenderer
 )
 target_precompile_headers(PulseForgeRenderer PRIVATE "${PULSEFORGE_ENGINE_PCH}")
 add_library(PulseForgeAssetImporters STATIC
+	PulseForge/Source/Private/Assets/GltfMeshImportCoordinator.cpp
 	PulseForge/Source/Private/Assets/GltfMeshImporter.cpp
 	PulseForge/Source/Private/Assets/ImageAssetImporter.cpp
 	PulseForge/Source/Private/Utils/stb_image.cpp

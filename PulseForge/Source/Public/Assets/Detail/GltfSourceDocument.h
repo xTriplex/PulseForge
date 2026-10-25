@@ -38,6 +38,8 @@ namespace PulseForge::Assets::Detail
 	[[nodiscard]] PULSEFORGE_API std::expected<std::string, std::string> ReadGlbJsonChunk(
 		uint64_t FileSize, uint64_t MaximumJsonBytes, const GlbReadRange& ReadRange);
 
+	[[nodiscard]] PULSEFORGE_API bool HasUriScheme(std::string_view Uri) noexcept;
+
 	// Decodes one relative file URI exactly once. Data URIs return an empty optional. Consumers resolve the returned
 	// relative path against the source directory and apply their own containment/move policy.
 	[[nodiscard]] PULSEFORGE_API std::expected<std::optional<std::filesystem::path>, std::string> DecodeGltfBufferUri(std::string_view Uri);

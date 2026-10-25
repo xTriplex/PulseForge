@@ -1606,7 +1606,12 @@ namespace
 		{
 			if (IsEditorPanelFocused(PulseForgeEditor::EditorPanel::MaterialDetails))
 				return m_MaterialDetailsAsset && SaveMaterialDraft(*m_MaterialDetailsAsset);
-			if (auto* Session = GetFocusedRegisteredDocument()) return m_DocumentEditors.Save(*Session);
+			if (auto* Session = GetFocusedRegisteredDocument())
+			{
+				if (!m_DocumentEditors.Save(*Session)) return false;
+				m_ContentBrowserPanel.MarkDependencyAnalysisOutdated();
+				return true;
+			}
 			if (const auto Material = GetFocusedMaterialAsset()) return SaveMaterialDraft(*Material);
 			const auto* Identity = GetFocusedDocumentIdentity();
 			const PulseForge::UUID CurrentProject = m_Project ? m_Project->GetDescription().ID : PulseForge::UUID{};
@@ -4306,6 +4311,7 @@ namespace
 				SetError("Could not set the project startup scene: " + Result.error().Message);
 				return;
 			}
+			m_ContentBrowserPanel.MarkDependencyAnalysisOutdated();
 			SetStatus("Updated the project startup scene to " + Identifier.ToString() + ".");
 		}
 
@@ -4327,6 +4333,7 @@ namespace
 			}
 			else
 			{
+				m_ContentBrowserPanel.MarkDependencyAnalysisOutdated();
 				MarkSceneSaved();
 				SetStatus("Scene saved.");
 			}
@@ -5239,6 +5246,7 @@ namespace
 			}
 			if (WasDirty)
 			{
+				m_ContentBrowserPanel.MarkDependencyAnalysisOutdated();
 				m_AssetPreviewAssetsPending = true;
 				m_MaterialAssetBindingsPending = true;
 			}
@@ -5403,6 +5411,7 @@ namespace
 								return std::unexpected("The material could not be saved; its draft remains open.");
 							else if (Identity.Kind != PulseForgeEditor::EditorDocumentKind::Material)
 								return std::unexpected("This document type does not provide a save operation.");
+							m_ContentBrowserPanel.MarkDependencyAnalysisOutdated();
 						}
 						if (DirtyMaterial && !SaveMaterialDraft(Identity.Asset))
 							return std::unexpected("The material could not be saved; its draft remains open.");
@@ -8165,6 +8174,7 @@ namespace
 
 		void UpdateAssetList(bool RendererAssetsChanged = false)
 		{
+			m_ContentBrowserPanel.MarkDependencyAnalysisOutdated();
 			m_AssetPreviewProjectPending = true;
 			m_AssetPreviewAssetsPending = true;
 			m_RendererAssetCachesPending = m_RendererAssetCachesPending || RendererAssetsChanged;

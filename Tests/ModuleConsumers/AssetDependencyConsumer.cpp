@@ -55,6 +55,7 @@ int main()
 	if (!Candidate || !Catalog.Publish(Ticket, *Candidate)) return 9;
 	const auto Snapshot = Catalog.GetSnapshot();
 	if (!Snapshot || Snapshot->GetProjectID() != *ProjectID || Snapshot->GetRegistry().GetAssets().size() != 2) return 10;
+	if (Snapshot->GetInputReadSet().empty()) return 13;
 
 	const PulseForge::AssetDependencyNode MaterialNode{ MaterialMetadata->ID, "Assets/Surface.material", {} };
 	const auto Dependencies = Snapshot->GetDirectDependencies(MaterialNode);

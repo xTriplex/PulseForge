@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Assets/AssetRegistry.h"
+#include "Assets/AssetDependencyTypes.h"
+#include "Assets/AssetImportProvenance.h"
 #include "Core/Core.h"
 
 #include <cstddef>
@@ -66,6 +68,9 @@ namespace PulseForge
 		AssetDependencyStatus Status = AssetDependencyStatus::Resolved;
 		std::string Location;
 		std::string OriginalReference;
+		// Set only on query copies for an imported subresource: the source-level processing inputs apply to every
+		// primitive because the current importer reads the complete glTF source and all declared buffers.
+		bool InheritedSourceInputs = false;
 	};
 
 	enum class AssetDependencyIssueCode : uint8_t
@@ -74,6 +79,7 @@ namespace PulseForge
 		WrongDependencyType,
 		UnsupportedDependency,
 		InvalidDependency,
+		InvalidImportProvenance,
 		Cycle
 	};
 
@@ -90,34 +96,68 @@ namespace PulseForge
 	{
 		AssetDependencyNode Identity;
 		std::string DisplayName;
-	};
-
-	struct AssetContentFingerprint
-	{
-		std::string Algorithm;
-		std::string DigestHex;
-		friend bool operator==(const AssetContentFingerprint&, const AssetContentFingerprint&) = default;
+		AssetSubresourceClassification Classification = AssetSubresourceClassification::DiscoveredLocator;
 	};
 
 	enum class AssetImportResultState : uint8_t
 	{
 		NoSuccessfulResultRecorded,
-		Current,
-		Stale,
+		SuccessfulInputsMatch,
+		SuccessfulInputsDiffer,
 		Unavailable
+	};
+
+	enum class AssetImportArtifactAvailability : uint8_t
+	{
+		NotTracked,
+		Available,
+		Missing
 	};
 
 	struct AssetImportObservation
 	{
 		AssetID Asset;
+		std::string SubresourceKey;
 		std::string ImporterID;
 		std::string ImporterVersion;
 		uint32_t SettingsVersion = 1;
+		uint32_t OutputSchemaVersion = 0;
 		// Canonical effective settings used as fingerprint input. Empty means the importer has no settings.
 		std::string EffectiveSettings;
+		std::string TargetID;
+		std::vector<AssetImportInputFingerprint> Inputs;
 		AssetContentFingerprint InputFingerprint;
 		AssetImportResultState ResultState = AssetImportResultState::NoSuccessfulResultRecorded;
-		std::optional<AssetContentFingerprint> SuccessfulResultFingerprint;
+		std::optional<AssetImportSuccessReceipt> LastSuccessfulResult;
+		AssetImportArtifactAvailability ArtifactAvailability = AssetImportArtifactAvailability::NotTracked;
+	};
+
+	enum class AssetDependencyImpactReason : uint8_t
+	{
+		Added,
+		Removed,
+		InputChanged,
+		SettingsChanged,
+		ImporterChanged,
+		SchemaChanged,
+		TargetChanged,
+		RuntimeReferenceChanged,
+		DependencyResolved,
+		DependencyMissing
+	};
+
+	struct AssetDependencyImpactEntry
+	{
+		AssetID Asset;
+		AssetDependencyImpactReason Reason = AssetDependencyImpactReason::InputChanged;
+		friend bool operator==(const AssetDependencyImpactEntry&, const AssetDependencyImpactEntry&) = default;
+	};
+
+	struct AssetDependencyChangeImpact
+	{
+		std::vector<AssetDependencyImpactEntry> ImportWork;
+		std::vector<AssetDependencyImpactEntry> RuntimeRefresh;
+		std::vector<AssetID> UnchangedAssets;
 	};
 
 	struct AssetDependencyCatalogError
@@ -133,6 +173,7 @@ namespace PulseForge
 	{
 	public:
 		[[nodiscard]] const UUID& GetProjectID() const noexcept { return m_ProjectID; }
+		[[nodiscard]] const std::filesystem::path& GetProjectRootPath() const noexcept { return m_ProjectRoot; }
 		[[nodiscard]] uint64_t GetGeneration() const noexcept { return m_Generation; }
 		[[nodiscard]] const AssetRegistry& GetRegistry() const noexcept { return m_Registry; }
 		[[nodiscard]] const std::vector<AssetDependencyEdge>& GetEdges() const noexcept { return m_Edges; }
@@ -141,13 +182,15 @@ namespace PulseForge
 		[[nodiscard]] const std::vector<AssetImportObservation>& GetImportObservations() const noexcept { return m_ImportObservations; }
 		[[nodiscard]] std::vector<AssetDependencyEdge> GetDirectDependencies(const AssetDependencyNode& Node) const;
 		[[nodiscard]] std::vector<AssetDependencyEdge> GetDirectReferencers(const AssetDependencyNode& Node) const;
+		[[nodiscard]] const std::vector<AssetDependencyInputReceipt>& GetInputReadSet() const noexcept { return m_InputReadSet; }
 
 	private:
 		friend class AssetDependencyCatalogBuilder;
 		friend class AssetDependencyCatalog;
 		AssetDependencyCatalogSnapshot(UUID ProjectID, uint64_t Generation, AssetRegistry Registry, std::vector<AssetDependencyEdge> Edges,
 			std::vector<AssetDependencyIssue> Issues, std::vector<AssetSubresourceRecord> Subresources,
-			std::vector<AssetImportObservation> ImportObservations);
+			std::vector<AssetImportObservation> ImportObservations, std::filesystem::path ProjectRoot,
+			std::vector<AssetDependencyInputReceipt> InputReadSet);
 
 		UUID m_ProjectID;
 		uint64_t m_Generation = 0;
@@ -156,6 +199,8 @@ namespace PulseForge
 		std::vector<AssetDependencyIssue> m_Issues;
 		std::vector<AssetSubresourceRecord> m_Subresources;
 		std::vector<AssetImportObservation> m_ImportObservations;
+		std::filesystem::path m_ProjectRoot;
+		std::vector<AssetDependencyInputReceipt> m_InputReadSet;
 		std::map<AssetDependencyNode, std::vector<size_t>, AssetDependencyNodeLess> m_ForwardIndex;
 		std::map<AssetDependencyNode, std::vector<size_t>, AssetDependencyNodeLess> m_ReverseIndex;
 	};
@@ -165,6 +210,8 @@ namespace PulseForge
 		UUID ProjectID;
 		uint64_t Generation = 0;
 	};
+
+	struct AssetDependencyCatalogBuildOptions;
 
 	class PULSEFORGE_API AssetDependencyCatalog final
 	{
@@ -191,5 +238,11 @@ namespace PulseForge
 	public:
 		[[nodiscard]] static std::expected<AssetDependencyCatalog::SnapshotPtr, AssetDependencyCatalogError> Build(
 			const std::filesystem::path& ProjectRoot, const UUID& ProjectID, uint64_t Generation);
+		[[nodiscard]] static std::expected<AssetDependencyCatalog::SnapshotPtr, AssetDependencyCatalogError> Build(
+			const std::filesystem::path& ProjectRoot, const UUID& ProjectID, uint64_t Generation,
+			const AssetDependencyCatalogBuildOptions& Options);
 	};
+
+	[[nodiscard]] PULSEFORGE_API AssetDependencyChangeImpact ComputeAssetDependencyChangeImpact(
+		const AssetDependencyCatalogSnapshot& Previous, const AssetDependencyCatalogSnapshot& Current);
 } // namespace PulseForge

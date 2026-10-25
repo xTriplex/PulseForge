@@ -302,7 +302,8 @@ namespace
 		PF_CHECK(Tests, InitialMeshObservation->InputFingerprint.Algorithm == InitialGlbObservation->InputFingerprint.Algorithm);
 		PF_CHECK(Tests, InitialMeshObservation->ResultState == AssetImportResultState::NoSuccessfulResultRecorded);
 		PF_CHECK(Tests, InitialGlbObservation->ResultState == AssetImportResultState::NoSuccessfulResultRecorded);
-		PF_CHECK(Tests, !InitialMeshObservation->SuccessfulResultFingerprint.has_value());
+		PF_CHECK(Tests, !InitialMeshObservation->LastSuccessfulResult.has_value());
+		PF_CHECK(Tests, InitialMeshObservation->ArtifactAvailability == AssetImportArtifactAvailability::NotTracked);
 
 		const auto TextureReferencers = Snapshot.GetDirectReferencers(AssetDependencyNode{ *TextureID, {}, {} });
 		PF_CHECK(Tests, !TextureReferencers.empty());

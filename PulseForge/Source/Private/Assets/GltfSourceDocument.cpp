@@ -97,9 +97,26 @@ namespace PulseForge::Assets::Detail
 		return Json;
 	}
 
+	bool HasUriScheme(std::string_view Uri) noexcept
+	{
+		if (Uri.empty() || !((Uri.front() >= 'A' && Uri.front() <= 'Z') || (Uri.front() >= 'a' && Uri.front() <= 'z')))
+			return false;
+		for (size_t Index = 1; Index < Uri.size(); ++Index)
+		{
+			const char Character = Uri[Index];
+			if (Character == ':') return true;
+			if (Character == '/' || Character == '\\' || Character == '?' || Character == '#') return false;
+			if (!((Character >= 'A' && Character <= 'Z') || (Character >= 'a' && Character <= 'z') ||
+				(Character >= '0' && Character <= '9') || Character == '+' || Character == '-' || Character == '.'))
+				return false;
+		}
+		return false;
+	}
+
 	std::expected<std::optional<std::filesystem::path>, std::string> DecodeGltfBufferUri(std::string_view Uri)
 	{
 		if (Uri.starts_with("data:")) return std::optional<std::filesystem::path>{};
+		if (HasUriScheme(Uri)) return std::unexpected("external buffer URI uses an unsupported scheme");
 
 		std::string Decoded;
 		Decoded.reserve(Uri.size());

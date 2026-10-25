@@ -3,6 +3,7 @@
 #include <string_view>
 
 void RunAssetDependencyCatalogTests(TestRunner& Tests);
+void RunAssetDependencyCorrectionTests(TestRunner& Tests);
 
 int main(int ArgumentCount, char** Arguments)
 {
@@ -11,6 +12,7 @@ int main(int ArgumentCount, char** Arguments)
 	if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--dependency-catalog-only")
 	{
 		RunAssetDependencyCatalogTests(Tests);
+		RunAssetDependencyCorrectionTests(Tests);
 		return Tests.Finish();
 	}
 	RunAssetsTests(Tests);
@@ -18,5 +20,6 @@ int main(int ArgumentCount, char** Arguments)
 	RunAssetOperationsTests(Tests);
 	RunSceneAssetTests(Tests);
 	RunAssetDependencyCatalogTests(Tests);
+	RunAssetDependencyCorrectionTests(Tests);
 	return Tests.Finish();
 }

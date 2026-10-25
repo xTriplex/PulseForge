@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <set>
 #include <tuple>
 
 namespace PulseForge
@@ -80,9 +81,11 @@ namespace PulseForge
 
 	AssetDependencyCatalogSnapshot::AssetDependencyCatalogSnapshot(UUID ProjectID, uint64_t Generation, AssetRegistry Registry,
 		std::vector<AssetDependencyEdge> Edges, std::vector<AssetDependencyIssue> Issues, std::vector<AssetSubresourceRecord> Subresources,
-		std::vector<AssetImportObservation> ImportObservations)
+		std::vector<AssetImportObservation> ImportObservations, std::filesystem::path ProjectRoot,
+		std::vector<AssetDependencyInputReceipt> InputReadSet)
 		: m_ProjectID(std::move(ProjectID)), m_Generation(Generation), m_Registry(std::move(Registry)), m_Edges(std::move(Edges)),
-		  m_Issues(std::move(Issues)), m_Subresources(std::move(Subresources)), m_ImportObservations(std::move(ImportObservations))
+		  m_Issues(std::move(Issues)), m_Subresources(std::move(Subresources)), m_ImportObservations(std::move(ImportObservations)),
+		  m_ProjectRoot(std::move(ProjectRoot)), m_InputReadSet(std::move(InputReadSet))
 	{
 		std::sort(m_Edges.begin(), m_Edges.end(), EdgeLess);
 		m_Edges.erase(std::unique(m_Edges.begin(), m_Edges.end(), SameEdge), m_Edges.end());
@@ -97,7 +100,10 @@ namespace PulseForge
 				return First.DisplayName < Second.DisplayName;
 			});
 		std::sort(m_ImportObservations.begin(), m_ImportObservations.end(),
-			[](const AssetImportObservation& First, const AssetImportObservation& Second) { return First.Asset < Second.Asset; });
+			[](const AssetImportObservation& First, const AssetImportObservation& Second)
+			{
+				return std::tie(First.Asset, First.SubresourceKey) < std::tie(Second.Asset, Second.SubresourceKey);
+			});
 
 		for (size_t Index = 0; Index < m_Edges.size(); ++Index)
 		{
@@ -109,6 +115,24 @@ namespace PulseForge
 	std::vector<AssetDependencyEdge> AssetDependencyCatalogSnapshot::GetDirectDependencies(const AssetDependencyNode& Node) const
 	{
 		std::vector<AssetDependencyEdge> Result;
+		const bool IsKnownSubresource = !Node.Asset.IsNil() && !Node.SubresourceKey.empty() &&
+			std::any_of(m_Subresources.begin(), m_Subresources.end(), [&](const AssetSubresourceRecord& Record)
+				{ return SameNodeIdentity(Record.Identity, Node); });
+		if (IsKnownSubresource)
+		{
+			const AssetDependencyNode SourceNode{ Node.Asset, {}, {} };
+			const auto It = m_ForwardIndex.find(SourceNode);
+			if (It == m_ForwardIndex.end()) return Result;
+			for (const size_t Index : It->second)
+			{
+				if (m_Edges[Index].Kind != AssetDependencyEdgeKind::ImportInput) continue;
+				AssetDependencyEdge Inherited = m_Edges[Index];
+				Inherited.Referrer = Node;
+				Inherited.InheritedSourceInputs = true;
+				Result.push_back(std::move(Inherited));
+			}
+			return Result;
+		}
 		if (!Node.Asset.IsNil() && Node.SubresourceKey.empty())
 		{
 			for (const AssetDependencyEdge& Edge : m_Edges)
@@ -163,6 +187,13 @@ namespace PulseForge
 	bool AssetDependencyCatalog::Publish(const AssetDependencyCatalogTicket& Ticket, SnapshotPtr Candidate)
 	{
 		if (!Candidate) return false;
+		{
+			std::lock_guard Lock(m_Mutex);
+			if (Ticket.ProjectID != m_RequestedProject || Ticket.Generation != m_LatestGeneration ||
+				Candidate->GetProjectID() != Ticket.ProjectID || Candidate->GetGeneration() != Ticket.Generation)
+				return false;
+		}
+		if (!AssetDependencyExtractor::ValidateInputReceipts(Candidate->m_ProjectRoot, Candidate->m_InputReadSet)) return false;
 		std::lock_guard Lock(m_Mutex);
 		if (Ticket.ProjectID != m_RequestedProject || Ticket.Generation != m_LatestGeneration ||
 			Candidate->GetProjectID() != Ticket.ProjectID || Candidate->GetGeneration() != Ticket.Generation)
@@ -186,12 +217,23 @@ namespace PulseForge
 	std::expected<AssetDependencyCatalog::SnapshotPtr, AssetDependencyCatalogError> AssetDependencyCatalogBuilder::Build(
 		const std::filesystem::path& ProjectRoot, const UUID& ProjectID, uint64_t Generation)
 	{
+		return Build(ProjectRoot, ProjectID, Generation, AssetDependencyCatalogBuildOptions{});
+	}
+
+	std::expected<AssetDependencyCatalog::SnapshotPtr, AssetDependencyCatalogError> AssetDependencyCatalogBuilder::Build(
+		const std::filesystem::path& ProjectRoot, const UUID& ProjectID, uint64_t Generation,
+		const AssetDependencyCatalogBuildOptions& Options)
+	{
 		if (ProjectRoot.empty() || ProjectID.IsNil() || Generation == 0)
 			return std::unexpected(
 				MakeBuildError(ProjectRoot, "Asset catalog build requires a project path, non-nil project ID, and nonzero generation"));
+		std::error_code RootError;
+		const std::filesystem::path AbsoluteProjectRoot = std::filesystem::absolute(ProjectRoot, RootError).lexically_normal();
+		if (RootError || !std::filesystem::is_directory(AbsoluteProjectRoot, RootError) || RootError)
+			return std::unexpected(MakeBuildError(ProjectRoot, "Asset catalog build requires an accessible project directory"));
 
 		AssetRegistry Registry;
-		if (auto RegistryResult = Registry.Rebuild(ProjectRoot); !RegistryResult)
+		if (auto RegistryResult = Registry.Rebuild(AbsoluteProjectRoot); !RegistryResult)
 		{
 			std::string Message = "Could not build the asset registry for the dependency catalog";
 			for (const AssetRegistryIssue& Issue : RegistryResult.error().Issues)
@@ -203,12 +245,13 @@ namespace PulseForge
 			return std::unexpected(MakeBuildError(ProjectRoot, std::move(Message)));
 		}
 
-		auto ExtractionResult = AssetDependencyExtractor::Extract(ProjectRoot, ProjectID, Registry);
+		auto ExtractionResult = AssetDependencyExtractor::Extract(AbsoluteProjectRoot, ProjectID, Registry);
 		if (!ExtractionResult) return std::unexpected(std::move(ExtractionResult.error()));
 
 		AssetDependencyExtraction Extraction = std::move(*ExtractionResult);
+		if (Options.BeforeFinalInputValidation) Options.BeforeFinalInputValidation();
 		AssetRegistry FinalRegistry;
-		if (auto FinalRegistryResult = FinalRegistry.Rebuild(ProjectRoot); !FinalRegistryResult)
+		if (auto FinalRegistryResult = FinalRegistry.Rebuild(AbsoluteProjectRoot); !FinalRegistryResult)
 			return std::unexpected(MakeBuildError(
 				ProjectRoot, "Asset catalog inputs changed or became unreadable during dependency analysis; final registry scan failed"));
 		const std::vector<AssetRecord> InitialAssets = Registry.GetAssets();
@@ -222,6 +265,9 @@ namespace PulseForge
 			Registry.GetSourceByteAccounting().UnavailableAssetCount != FinalRegistry.GetSourceByteAccounting().UnavailableAssetCount)
 			return std::unexpected(MakeBuildError(ProjectRoot,
 				"Asset registry membership or source sizes changed during dependency analysis; candidate snapshot was discarded"));
+		if (!AssetDependencyExtractor::ValidateInputReceipts(AbsoluteProjectRoot, Extraction.ReadSet))
+			return std::unexpected(MakeBuildError(ProjectRoot,
+				"Asset dependency inputs changed during analysis; candidate snapshot was discarded"));
 
 		std::map<AssetDependencyNode, std::string, AssetDependencyNodeLess> SubresourceNames;
 		std::vector<AssetSubresourceRecord> UniqueSubresources;
@@ -262,21 +308,6 @@ namespace PulseForge
 			});
 		Extraction.Subresources = std::move(UniqueSubresources);
 
-		std::map<AssetID, bool> ObservedAssets;
-		for (const AssetImportObservation& Observation : Extraction.ImportObservations)
-		{
-			if (Observation.Asset.IsNil() || !Registry.Find(Observation.Asset))
-				return std::unexpected(
-					MakeBuildError(ProjectRoot, "Dependency extractor returned import observations for an unregistered asset"));
-			if (!ObservedAssets.try_emplace(Observation.Asset, true).second)
-				return std::unexpected(MakeBuildError(ProjectRoot,
-					"Dependency extractor returned more than one import observation for asset UUID " + Observation.Asset.ToString()));
-			if (Observation.ResultState == AssetImportResultState::Current || Observation.ResultState == AssetImportResultState::Stale ||
-				Observation.SuccessfulResultFingerprint)
-				return std::unexpected(MakeBuildError(ProjectRoot,
-					"Catalog scan cannot claim successful import provenance because no persisted successful result is recorded"));
-		}
-
 		const std::map<AssetDependencyNode, bool, AssetDependencyNodeLess> KnownSubresources = [&]
 		{
 			std::map<AssetDependencyNode, bool, AssetDependencyNodeLess> Result;
@@ -284,6 +315,31 @@ namespace PulseForge
 				Result.emplace(Subresource.Identity, true);
 			return Result;
 		}();
+
+		std::map<std::pair<AssetID, std::string>, bool> ObservedAssets;
+		for (const AssetImportObservation& Observation : Extraction.ImportObservations)
+		{
+			if (Observation.Asset.IsNil() || !Registry.Find(Observation.Asset))
+				return std::unexpected(
+					MakeBuildError(ProjectRoot, "Dependency extractor returned import observations for an unregistered asset"));
+			if (!ObservedAssets.try_emplace(std::make_pair(Observation.Asset, Observation.SubresourceKey), true).second)
+				return std::unexpected(MakeBuildError(ProjectRoot,
+					"Dependency extractor returned more than one import observation for asset/subresource " + Observation.Asset.ToString() +
+					Observation.SubresourceKey));
+			if (!Observation.SubresourceKey.empty() &&
+				!KnownSubresources.contains(AssetDependencyNode{ Observation.Asset, {}, Observation.SubresourceKey }))
+				return std::unexpected(MakeBuildError(ProjectRoot,
+					"Dependency extractor returned import observation for an undeclared subresource '" + Observation.SubresourceKey + "'"));
+			if ((Observation.ResultState == AssetImportResultState::SuccessfulInputsMatch ||
+					Observation.ResultState == AssetImportResultState::SuccessfulInputsDiffer) &&
+				!Observation.LastSuccessfulResult)
+				return std::unexpected(MakeBuildError(ProjectRoot,
+					"Catalog observation cannot compare successful inputs without a persisted success receipt"));
+			if (Observation.ResultState == AssetImportResultState::NoSuccessfulResultRecorded && Observation.LastSuccessfulResult)
+				return std::unexpected(MakeBuildError(ProjectRoot,
+					"Catalog observation attached a success receipt while claiming that no success was recorded"));
+		}
+
 		for (const AssetDependencyEdge& Edge : Extraction.Edges)
 		{
 			if (Edge.Referrer.Asset.IsNil() || !Registry.Find(Edge.Referrer.Asset))
@@ -303,7 +359,163 @@ namespace PulseForge
 
 		auto Candidate = std::shared_ptr<AssetDependencyCatalogSnapshot>(
 			new AssetDependencyCatalogSnapshot(ProjectID, Generation, std::move(Registry), std::move(Extraction.Edges),
-				std::move(Extraction.Issues), std::move(Extraction.Subresources), std::move(Extraction.ImportObservations)));
+				std::move(Extraction.Issues), std::move(Extraction.Subresources), std::move(Extraction.ImportObservations),
+				AbsoluteProjectRoot, std::move(Extraction.ReadSet)));
 		return std::static_pointer_cast<const AssetDependencyCatalogSnapshot>(std::move(Candidate));
+	}
+
+	AssetDependencyChangeImpact ComputeAssetDependencyChangeImpact(
+		const AssetDependencyCatalogSnapshot& Previous, const AssetDependencyCatalogSnapshot& Current)
+	{
+		AssetDependencyChangeImpact Impact;
+		using ObservationKey = std::pair<AssetID, std::string>;
+		std::map<ObservationKey, const AssetImportObservation*> OldObservations;
+		std::map<ObservationKey, const AssetImportObservation*> NewObservations;
+		for (const AssetImportObservation& Observation : Previous.GetImportObservations())
+			OldObservations.emplace(ObservationKey{ Observation.Asset, Observation.SubresourceKey }, &Observation);
+		for (const AssetImportObservation& Observation : Current.GetImportObservations())
+			NewObservations.emplace(ObservationKey{ Observation.Asset, Observation.SubresourceKey }, &Observation);
+
+		const auto AddUnique = [](std::vector<AssetDependencyImpactEntry>& Entries, const AssetID& Asset,
+			AssetDependencyImpactReason Reason)
+		{
+			const AssetDependencyImpactEntry Entry{ Asset, Reason };
+			if (std::find(Entries.begin(), Entries.end(), Entry) == Entries.end()) Entries.push_back(Entry);
+		};
+		for (const auto& [Key, NewObservation] : NewObservations)
+		{
+			const AssetID& Asset = Key.first;
+			const auto OldIt = OldObservations.find(Key);
+			if (OldIt == OldObservations.end())
+			{
+				AddUnique(Impact.ImportWork, Asset, AssetDependencyImpactReason::Added);
+				continue;
+			}
+			const AssetImportObservation& Old = *OldIt->second;
+			if (Old.Inputs != NewObservation->Inputs)
+				AddUnique(Impact.ImportWork, Asset, AssetDependencyImpactReason::InputChanged);
+			if (Old.EffectiveSettings != NewObservation->EffectiveSettings || Old.SettingsVersion != NewObservation->SettingsVersion)
+				AddUnique(Impact.ImportWork, Asset, AssetDependencyImpactReason::SettingsChanged);
+			if (Old.ImporterID != NewObservation->ImporterID || Old.ImporterVersion != NewObservation->ImporterVersion)
+				AddUnique(Impact.ImportWork, Asset, AssetDependencyImpactReason::ImporterChanged);
+			if (Old.OutputSchemaVersion != NewObservation->OutputSchemaVersion)
+				AddUnique(Impact.ImportWork, Asset, AssetDependencyImpactReason::SchemaChanged);
+			if (Old.TargetID != NewObservation->TargetID)
+				AddUnique(Impact.ImportWork, Asset, AssetDependencyImpactReason::TargetChanged);
+			if (Old.InputFingerprint != NewObservation->InputFingerprint &&
+				std::none_of(Impact.ImportWork.begin(), Impact.ImportWork.end(), [&](const AssetDependencyImpactEntry& Entry)
+					{ return Entry.Asset == Asset; }))
+				AddUnique(Impact.ImportWork, Asset, AssetDependencyImpactReason::InputChanged);
+		}
+		for (const auto& [Key, OldObservation] : OldObservations)
+		{
+			(void)OldObservation;
+			if (!NewObservations.contains(Key)) AddUnique(Impact.ImportWork, Key.first, AssetDependencyImpactReason::Removed);
+		}
+
+		const auto SameRuntimeRelationship = [](const AssetDependencyEdge& First, const AssetDependencyEdge& Second)
+		{
+			return First.Kind == AssetDependencyEdgeKind::RuntimeReference && Second.Kind == AssetDependencyEdgeKind::RuntimeReference &&
+				SameNodeIdentity(First.Referrer, Second.Referrer) && SameNodeIdentity(First.Target, Second.Target) &&
+				First.Location == Second.Location && First.OriginalReference == Second.OriginalReference;
+		};
+		const auto AddRuntimeEdgeChanges = [&](const std::vector<AssetDependencyEdge>& OldEdges,
+			const std::vector<AssetDependencyEdge>& NewEdges)
+		{
+			for (const AssetDependencyEdge& Old : OldEdges)
+			{
+				if (Old.Kind != AssetDependencyEdgeKind::RuntimeReference) continue;
+				const auto NewIt = std::find_if(NewEdges.begin(), NewEdges.end(), [&](const AssetDependencyEdge& New)
+					{ return SameRuntimeRelationship(Old, New); });
+				if (NewIt == NewEdges.end())
+					AddUnique(Impact.RuntimeRefresh, Old.Referrer.Asset, AssetDependencyImpactReason::RuntimeReferenceChanged);
+				else if (Old.Status != NewIt->Status)
+					AddUnique(Impact.RuntimeRefresh, Old.Referrer.Asset,
+						NewIt->Status == AssetDependencyStatus::Resolved ? AssetDependencyImpactReason::DependencyResolved
+																								: AssetDependencyImpactReason::DependencyMissing);
+			}
+			for (const AssetDependencyEdge& New : NewEdges)
+			{
+				if (New.Kind != AssetDependencyEdgeKind::RuntimeReference) continue;
+				if (std::none_of(OldEdges.begin(), OldEdges.end(), [&](const AssetDependencyEdge& Old)
+						{ return SameRuntimeRelationship(Old, New); }))
+					AddUnique(Impact.RuntimeRefresh, New.Referrer.Asset, AssetDependencyImpactReason::RuntimeReferenceChanged);
+			}
+		};
+		AddRuntimeEdgeChanges(Previous.GetEdges(), Current.GetEdges());
+
+		// A changed imported asset makes its authored runtime referencers stale, but does not turn those references into
+		// importer work. Traverse the reverse runtime-reference relation separately and retain the edge distinction.
+		std::vector<AssetID> ChangedImports;
+		for (const AssetDependencyImpactEntry& Entry : Impact.ImportWork)
+			if (Entry.Reason != AssetDependencyImpactReason::Removed) ChangedImports.push_back(Entry.Asset);
+
+		std::map<std::string, AssetDependencyInputReceipt> PreviousInputs;
+		std::map<std::string, AssetDependencyInputReceipt> CurrentInputs;
+		for (const AssetDependencyInputReceipt& Receipt : Previous.GetInputReadSet())
+			PreviousInputs.emplace(Receipt.ProjectRelativePath, Receipt);
+		for (const AssetDependencyInputReceipt& Receipt : Current.GetInputReadSet())
+			CurrentInputs.emplace(Receipt.ProjectRelativePath, Receipt);
+		std::set<std::string> ChangedPaths;
+		for (const auto& [Path, OldReceipt] : PreviousInputs)
+		{
+			const auto NewIt = CurrentInputs.find(Path);
+			if (NewIt == CurrentInputs.end() || NewIt->second != OldReceipt) ChangedPaths.insert(Path);
+		}
+		for (const auto& [Path, NewReceipt] : CurrentInputs)
+		{
+			(void)NewReceipt;
+			if (!PreviousInputs.contains(Path)) ChangedPaths.insert(Path);
+		}
+
+		std::map<std::string, AssetID> PreviousAssetsByPath;
+		std::map<std::string, AssetID> CurrentAssetsByPath;
+		for (const AssetRecord& Asset : Previous.GetRegistry().GetAssets())
+			PreviousAssetsByPath.emplace(PathToUtf8(Asset.ProjectRelativePath), Asset.ID);
+		for (const AssetRecord& Asset : Current.GetRegistry().GetAssets())
+			CurrentAssetsByPath.emplace(PathToUtf8(Asset.ProjectRelativePath), Asset.ID);
+		std::vector<AssetID> ChangedRuntimeTargets;
+		for (const std::string& Path : ChangedPaths)
+		{
+			if (Path.ends_with(".meta") || Path.ends_with(".importresult")) continue;
+			if (const auto It = PreviousAssetsByPath.find(Path); It != PreviousAssetsByPath.end()) ChangedRuntimeTargets.push_back(It->second);
+			if (const auto It = CurrentAssetsByPath.find(Path); It != CurrentAssetsByPath.end()) ChangedRuntimeTargets.push_back(It->second);
+		}
+		ChangedRuntimeTargets.insert(ChangedRuntimeTargets.end(), ChangedImports.begin(), ChangedImports.end());
+		for (const AssetID& Changed : ChangedRuntimeTargets)
+		{
+			for (const AssetDependencyCatalogSnapshot* Snapshot : { &Previous, &Current })
+			{
+				std::vector<AssetID> Pending{ Changed };
+				std::map<AssetID, bool> Visited;
+				while (!Pending.empty())
+				{
+					const AssetID Target = Pending.back();
+					Pending.pop_back();
+					if (!Visited.try_emplace(Target, true).second) continue;
+					for (const AssetDependencyEdge& Edge : Snapshot->GetDirectReferencers(AssetDependencyNode{ Target, {}, {} }))
+					{
+						if (Edge.Kind != AssetDependencyEdgeKind::RuntimeReference || Edge.Referrer.Asset.IsNil()) continue;
+						AddUnique(Impact.RuntimeRefresh, Edge.Referrer.Asset, AssetDependencyImpactReason::RuntimeReferenceChanged);
+						Pending.push_back(Edge.Referrer.Asset);
+					}
+				}
+			}
+		}
+
+		std::sort(Impact.ImportWork.begin(), Impact.ImportWork.end(), [](const auto& First, const auto& Second)
+			{ return std::tie(First.Asset, First.Reason) < std::tie(Second.Asset, Second.Reason); });
+		std::sort(Impact.RuntimeRefresh.begin(), Impact.RuntimeRefresh.end(), [](const auto& First, const auto& Second)
+			{ return std::tie(First.Asset, First.Reason) < std::tie(Second.Asset, Second.Reason); });
+		for (const AssetRecord& Asset : Current.GetRegistry().GetAssets())
+		{
+			const bool HasImportImpact = std::any_of(Impact.ImportWork.begin(), Impact.ImportWork.end(),
+				[&](const AssetDependencyImpactEntry& Entry) { return Entry.Asset == Asset.ID; });
+			const bool HasRuntimeImpact = std::any_of(Impact.RuntimeRefresh.begin(), Impact.RuntimeRefresh.end(),
+				[&](const AssetDependencyImpactEntry& Entry) { return Entry.Asset == Asset.ID; });
+			if (!HasImportImpact && !HasRuntimeImpact) Impact.UnchangedAssets.push_back(Asset.ID);
+		}
+		std::sort(Impact.UnchangedAssets.begin(), Impact.UnchangedAssets.end());
+		return Impact;
 	}
 } // namespace PulseForge

@@ -1,32 +1,60 @@
 #include "Assets/GltfMeshImporter.h"
+#include "Assets/AssetMetadata.h"
 #include "Assets/AssetTypes.h"
 #include "Assets/AssetPathResolver.h"
 #include "Assets/Detail/GltfSourceDocument.h"
+#include "Assets/Detail/GltfPrimitiveInspector.h"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <bit>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <limits>
 #include <optional>
+#include <set>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 namespace PulseForge
 {
 	namespace
 	{
 		using Json = nlohmann::json;
+		using SettingsJson = nlohmann::ordered_json;
 		using ByteVector = std::vector<std::byte>;
 		constexpr uint64_t MaxContainerBytes = 512ull * 1024ull * 1024ull;
 		constexpr uint64_t MaxJsonBytes = 64ull * 1024ull * 1024ull;
 		constexpr uint64_t MaxDecodedBufferBytes = 512ull * 1024ull * 1024ull;
 		constexpr uint64_t MaxVertexCount = 10'000'000;
 		constexpr uint64_t MaxIndexCount = 30'000'000;
+
+		SettingsJson ParseUniqueSettingsJson(std::string_view Data)
+		{
+			std::vector<std::set<std::string>> ObjectKeys;
+			bool HasDuplicateKey = false;
+			const auto Callback = [&ObjectKeys, &HasDuplicateKey](int, SettingsJson::parse_event_t Event, SettingsJson& Parsed)
+			{
+				if (Event == SettingsJson::parse_event_t::object_start)
+					ObjectKeys.emplace_back();
+				else if (Event == SettingsJson::parse_event_t::key && !ObjectKeys.empty())
+					HasDuplicateKey |= !ObjectKeys.back().insert(Parsed.get<std::string>()).second;
+				else if (Event == SettingsJson::parse_event_t::object_end && !ObjectKeys.empty())
+					ObjectKeys.pop_back();
+				return true;
+			};
+			SettingsJson Settings = SettingsJson::parse(Data, Callback);
+			if (HasDuplicateKey)
+				throw std::runtime_error("JSON object contains a duplicate key");
+			return Settings;
+		}
 
 		GltfMeshImportError MakeError(
 			GltfMeshImportErrorCode Code,
@@ -54,7 +82,7 @@ namespace PulseForge
 
 		std::string PathToUtf8(const std::filesystem::path& Path)
 		{
-			const std::u8string Utf8Path = Path.u8string();
+			const std::u8string Utf8Path = Path.generic_u8string();
 			return { reinterpret_cast<const char*>(Utf8Path.data()), Utf8Path.size() };
 		}
 
@@ -271,6 +299,7 @@ namespace PulseForge
 		struct LoadedBufferData
 		{
 			std::vector<ByteVector> OwnedBuffers;
+			std::vector<AssetImportInputFingerprint> ExternalInputs;
 			// Views borrow from OwnedBuffers or the source GLB container; both owners outlive accessor decoding.
 			std::vector<std::span<const std::byte>> Views;
 		};
@@ -312,6 +341,7 @@ namespace PulseForge
 				const Json* Uri = FindField(Buffer, "uri");
 				std::span<const std::byte> BufferData;
 				ByteVector OwnedData;
+				std::string ExternalInputKey;
 				if (Uri == nullptr)
 				{
 					if (BufferOrdinal != 0 || !GlbBinaryChunk || UsedGlbBinaryChunk ||
@@ -385,6 +415,13 @@ namespace PulseForge
 						}
 						auto ReadBuffer = ReadFile(*ManagedBufferPath, MaxDecodedBufferBytes);
 						if (!ReadBuffer) return std::unexpected(std::move(ReadBuffer.error()));
+						std::error_code FileError;
+						const std::filesystem::path RelativeBuffer = std::filesystem::relative(*ManagedBufferPath, ProjectRoot, FileError);
+						if (FileError || RelativeBuffer.empty() || RelativeBuffer.is_absolute())
+							return std::unexpected(MakeError(
+								GltfMeshImportErrorCode::InvalidProjectPath, *ManagedBufferPath,
+								"Could not identify external glTF buffer relative to the project root"));
+						ExternalInputKey = PathToUtf8(RelativeBuffer.lexically_normal());
 						OwnedData = std::move(*ReadBuffer);
 					}
 
@@ -393,6 +430,8 @@ namespace PulseForge
 						return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidBuffer, SourcePath,
 							"glTF buffer data is shorter than its declared byteLength"));
 					}
+					if (!ExternalInputKey.empty())
+						LoadedBuffers.ExternalInputs.push_back({ ExternalInputKey, ComputeAssetContentFingerprint(OwnedData) });
 					OwnedData.resize(static_cast<size_t>(*DeclaredLength));
 					LoadedBuffers.OwnedBuffers.push_back(std::move(OwnedData));
 					BufferData = LoadedBuffers.OwnedBuffers.back();
@@ -990,6 +1029,89 @@ namespace PulseForge
 		{
 			return HasAssetExtension(Path, { Extension });
 		}
+
+		void UpdateU32(AssetFingerprintBuilder& Builder, std::string_view Label, uint32_t Value)
+		{
+			std::array<std::byte, 4> Bytes{};
+			for (size_t Index = 0; Index < Bytes.size(); ++Index)
+				Bytes[Index] = static_cast<std::byte>((Value >> (Index * 8)) & 0xff);
+			Builder.UpdateBytes(Label, Bytes);
+		}
+
+		AssetContentFingerprint ComputeMeshFingerprint(const ImportedGltfMesh& Mesh)
+		{
+			AssetFingerprintBuilder Builder("PulseForge.GltfMeshResult.v1");
+			Builder.UpdateText("name", Mesh.Name);
+			UpdateU32(Builder, "vertexCount", static_cast<uint32_t>(Mesh.Vertices.size()));
+			for (const GltfMeshVertex& Vertex : Mesh.Vertices)
+			{
+				for (float Value : Vertex.Position) UpdateU32(Builder, "floatBits", std::bit_cast<uint32_t>(Value));
+				for (float Value : Vertex.Color) UpdateU32(Builder, "floatBits", std::bit_cast<uint32_t>(Value));
+				for (float Value : Vertex.TexCoord) UpdateU32(Builder, "floatBits", std::bit_cast<uint32_t>(Value));
+				for (float Value : Vertex.Normal) UpdateU32(Builder, "floatBits", std::bit_cast<uint32_t>(Value));
+				for (float Value : Vertex.Tangent) UpdateU32(Builder, "floatBits", std::bit_cast<uint32_t>(Value));
+			}
+			UpdateU32(Builder, "indexCount", static_cast<uint32_t>(Mesh.Indices.size()));
+			for (uint32_t Index : Mesh.Indices) UpdateU32(Builder, "index", Index);
+			return Builder.Finish();
+		}
+	}
+
+	std::expected<GltfMeshImportSettings, std::string> GltfMeshImportSettings::Parse(std::string_view ImportSettingsObjectJson)
+	{
+		try
+		{
+			const SettingsJson SettingsObject = ImportSettingsObjectJson.empty()
+				? SettingsJson::object()
+				: ParseUniqueSettingsJson(ImportSettingsObjectJson);
+			if (!SettingsObject.is_object()) return std::unexpected("Import settings must be a JSON object");
+			for (auto It = SettingsObject.begin(); It != SettingsObject.end(); ++It)
+				if (It.key() != "gltfStaticMesh")
+					return std::unexpected("Import settings contain an unsupported top-level key: " + It.key());
+			GltfMeshImportSettings Settings;
+			const auto GltfSettings = SettingsObject.find("gltfStaticMesh");
+			if (GltfSettings == SettingsObject.end()) return Settings;
+			if (!GltfSettings->is_object()) return std::unexpected("gltfStaticMesh settings must be an object");
+			const auto Version = GltfSettings->find("version");
+			const bool SupportedVersion = Version != GltfSettings->end() &&
+				((Version->is_number_unsigned() && Version->get<uint64_t>() == CurrentVersion) ||
+					(Version->is_number_integer() && !Version->is_number_unsigned() && Version->get<int64_t>() == CurrentVersion));
+			if (!SupportedVersion)
+				return std::unexpected("gltfStaticMesh settings version is missing, malformed, or unsupported");
+			const auto Policy = GltfSettings->find("missingNormalsPolicy");
+			if (Policy == GltfSettings->end() || !Policy->is_string())
+				return std::unexpected("gltfStaticMesh.missingNormalsPolicy must be a string");
+			const std::string PolicyName = Policy->get<std::string>();
+			if (PolicyName == "GenerateSmooth") Settings.NormalsPolicy = MissingNormalsPolicy::GenerateSmooth;
+			else if (PolicyName == "Reject") Settings.NormalsPolicy = MissingNormalsPolicy::Reject;
+			else return std::unexpected("gltfStaticMesh.missingNormalsPolicy is not supported");
+			if (GltfSettings->size() != 2)
+				return std::unexpected("gltfStaticMesh settings contain an unsupported field");
+			return Settings;
+		}
+		catch (const nlohmann::json::exception& Exception)
+		{
+			return std::unexpected(std::string("Import settings JSON is malformed: ") + Exception.what());
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(std::string("Import settings JSON is invalid: ") + Exception.what());
+		}
+	}
+
+	std::expected<std::string, std::string> GltfMeshImportSettings::Canonicalize() const
+	{
+		std::string Policy;
+		switch (NormalsPolicy)
+		{
+			case MissingNormalsPolicy::GenerateSmooth: Policy = "GenerateSmooth"; break;
+			case MissingNormalsPolicy::Reject: Policy = "Reject"; break;
+			default: return std::unexpected("Missing normals policy value is invalid");
+		}
+		return nlohmann::ordered_json::object({
+			{ "version", CurrentVersion },
+			{ "missingNormalsPolicy", std::move(Policy) }
+		}).dump();
 	}
 
 	MeshDesc ImportedGltfMesh::GetMeshDescription() const
@@ -1010,6 +1132,18 @@ namespace PulseForge
 	}
 
 	std::expected<ImportedGltfMesh, GltfMeshImportError> GltfMeshImporter::ImportStaticPrimitive(
+		const AssetID& Asset,
+		const std::filesystem::path& ProjectRoot,
+		const AssetRegistry& Registry,
+		uint32_t MeshIndex,
+		uint32_t PrimitiveIndex)
+	{
+		auto Product = ProcessStaticPrimitive(Asset, ProjectRoot, Registry, MeshIndex, PrimitiveIndex);
+		if (!Product) return std::unexpected(std::move(Product.error()));
+		return std::move(Product->Mesh);
+	}
+
+	std::expected<GltfMeshImportProduct, GltfMeshImportError> GltfMeshImporter::ProcessStaticPrimitive(
 		const AssetID& Asset,
 		const std::filesystem::path& ProjectRoot,
 		const AssetRegistry& Registry,
@@ -1058,6 +1192,24 @@ namespace PulseForge
 					*Source,
 					"Static mesh import requires a .gltf or .glb source asset"));
 			}
+			auto Metadata = AssetMetadataSerializer::LoadFromFile(AssetMetadataSerializer::GetSidecarPath(*Source));
+			if (!Metadata || Metadata->ID != Asset)
+				return std::unexpected(MakeError(
+					GltfMeshImportErrorCode::InvalidDocument,
+					AssetMetadataSerializer::GetSidecarPath(*Source),
+					Metadata ? "Asset metadata UUID does not match the registry" : Metadata.error().Message));
+			auto Settings = GltfMeshImportSettings::Parse(Metadata->ImportSettingsJson);
+			if (!Settings)
+				return std::unexpected(MakeError(
+					GltfMeshImportErrorCode::InvalidDocument,
+					AssetMetadataSerializer::GetSidecarPath(*Source),
+					Settings.error()));
+			auto CanonicalSettings = Settings->Canonicalize();
+			if (!CanonicalSettings)
+				return std::unexpected(MakeError(
+					GltfMeshImportErrorCode::InvalidDocument,
+					AssetMetadataSerializer::GetSidecarPath(*Source),
+					CanonicalSettings.error()));
 
 			auto FileBytesResult = ReadFile(*Source, HasExtension(*Source, ".glb") ? MaxContainerBytes : MaxJsonBytes);
 			if (!FileBytesResult)
@@ -1113,6 +1265,10 @@ namespace PulseForge
 					*Source,
 					"glTF asset.version must be \"2.0\""));
 			}
+			const std::optional<uint64_t> BinaryLength = Container.BinaryChunk
+				? std::optional<uint64_t>(Container.BinaryChunk->size()) : std::nullopt;
+			const Assets::Detail::GltfPrimitiveInspection Inspection = Assets::Detail::InspectStaticPrimitive(
+				Container.JsonText, *Source, AbsoluteProjectRoot, MeshIndex, PrimitiveIndex, BinaryLength);
 			if (const Json* RequiredExtensions = FindField(Document, "extensionsRequired"); RequiredExtensions != nullptr)
 			{
 				if (!RequiredExtensions->is_array())
@@ -1142,6 +1298,32 @@ namespace PulseForge
 			auto Buffers = LoadBuffers(Document, *Source, AbsoluteProjectRoot, Container.BinaryChunk);
 			if (!Buffers)
 				return std::unexpected(std::move(Buffers.error()));
+			std::vector<AssetImportInputFingerprint> Inputs;
+			Inputs.reserve(Buffers->ExternalInputs.size() + 1);
+			const std::filesystem::path SourceRelativeKey = Record->ProjectRelativePath.lexically_normal();
+			Inputs.push_back({ PathToUtf8(SourceRelativeKey), ComputeAssetContentFingerprint(FileBytes) });
+			Inputs.insert(Inputs.end(), Buffers->ExternalInputs.begin(), Buffers->ExternalInputs.end());
+			std::sort(Inputs.begin(), Inputs.end(), [](const auto& A, const auto& B)
+				{ return A.ProjectRelativePath < B.ProjectRelativePath; });
+			for (size_t Index = 1; Index < Inputs.size(); ++Index)
+				if (Inputs[Index - 1].ProjectRelativePath == Inputs[Index].ProjectRelativePath)
+					return std::unexpected(MakeError(
+						GltfMeshImportErrorCode::InvalidBuffer, *Source,
+						"Import read the same project-relative input more than once"));
+			AssetImportRecipe Recipe;
+			Recipe.SourceAsset = Asset;
+			Recipe.SubresourceKey = "mesh/" + std::to_string(MeshIndex) + "/primitive/" + std::to_string(PrimitiveIndex);
+			Recipe.ImporterID = "PulseForge.StaticGltfMeshImporter";
+			Recipe.ImporterVersion = "1";
+			Recipe.OutputSchemaVersion = 1;
+			Recipe.EffectiveSettings = *CanonicalSettings;
+			Recipe.TargetID = "cpu-generic-v1";
+			Recipe.Inputs = std::move(Inputs);
+			auto InputFingerprint = ComputeAssetImportInputFingerprint(Recipe);
+			if (!InputFingerprint)
+				return std::unexpected(MakeError(
+					GltfMeshImportErrorCode::InvalidDocument, *Source, InputFingerprint.error()));
+			Recipe.InputFingerprint = std::move(*InputFingerprint);
 
 			const Json* Meshes = FindField(Document, "meshes");
 			if (Meshes == nullptr || !Meshes->is_array() || MeshIndex >= Meshes->size())
@@ -1382,6 +1564,10 @@ namespace PulseForge
 			}
 			if (!HasNormals)
 			{
+				if (Settings->NormalsPolicy == MissingNormalsPolicy::Reject)
+					return std::unexpected(MakeError(
+						GltfMeshImportErrorCode::UnsupportedFeature, *Source,
+						"Primitive has no authored normals and the import settings require them"));
 				if (auto Generated = GenerateVertexNormals(Imported.Vertices, Imported.Indices, *Source); !Generated)
 					return std::unexpected(std::move(Generated.error()));
 			}
@@ -1400,7 +1586,19 @@ namespace PulseForge
 					*Source,
 					"Imported glTF geometry failed PulseForge mesh validation: " + Validation.error().Message));
 			}
-			return Imported;
+			if (Inspection.Classification != AssetSubresourceClassification::SupportedCandidate)
+			{
+				return std::unexpected(MakeError(
+					Inspection.Classification == AssetSubresourceClassification::Unsupported
+						? GltfMeshImportErrorCode::UnsupportedFeature : GltfMeshImportErrorCode::InvalidMesh,
+					*Source,
+					Inspection.Diagnostic.empty() ? "glTF primitive failed shared structural inspection" : Inspection.Diagnostic));
+			}
+			GltfMeshImportProduct Product;
+			Product.ResultFingerprint = ComputeMeshFingerprint(Imported);
+			Product.Recipe = std::move(Recipe);
+			Product.Mesh = std::move(Imported);
+			return Product;
 		}
 		catch (const std::bad_alloc&)
 		{
