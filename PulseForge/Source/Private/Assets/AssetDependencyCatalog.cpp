@@ -59,6 +59,26 @@ namespace PulseForge
 			return { Path, std::move(Message) };
 		}
 
+		AssetDependencyCatalogError MakeRegistryError(
+			const std::filesystem::path& ProjectRoot,
+			const AssetRegistryError& RegistryError)
+		{
+			std::string Message = "Could not validate asset registry membership before dependency publication";
+			std::filesystem::path Path = ProjectRoot;
+			for (const AssetRegistryIssue& Issue : RegistryError.Issues)
+			{
+				if (!Issue.ProjectRelativePath.empty())
+				{
+					if (Path == ProjectRoot) Path = ProjectRoot / Issue.ProjectRelativePath;
+					Message += "\n - " + Issue.ProjectRelativePath.generic_string();
+				}
+				if (!Issue.RelatedProjectRelativePath.empty())
+					Message += " (conflicts with " + Issue.RelatedProjectRelativePath.generic_string() + ")";
+				Message += ": " + Issue.Message;
+			}
+			return MakeBuildError(Path, std::move(Message));
+		}
+
 		bool IsSubresourceNode(const AssetDependencyNode& Node)
 		{
 			return !Node.Asset.IsNil() && Node.SubresourceKey.starts_with("mesh/");
@@ -184,22 +204,51 @@ namespace PulseForge
 		return { ProjectID, m_LatestGeneration };
 	}
 
-	bool AssetDependencyCatalog::Publish(const AssetDependencyCatalogTicket& Ticket, SnapshotPtr Candidate)
+	std::expected<void, AssetDependencyCatalogError> AssetDependencyCatalog::Publish(
+		const AssetDependencyCatalogTicket& Ticket,
+		SnapshotPtr Candidate,
+		const AssetDependencyCatalogPublishOptions& Options)
 	{
-		if (!Candidate) return false;
+		if (!Candidate)
+			return std::unexpected(MakeBuildError({}, "Cannot publish an empty asset dependency snapshot"));
 		{
 			std::lock_guard Lock(m_Mutex);
 			if (Ticket.ProjectID != m_RequestedProject || Ticket.Generation != m_LatestGeneration ||
 				Candidate->GetProjectID() != Ticket.ProjectID || Candidate->GetGeneration() != Ticket.Generation)
-				return false;
+				return std::unexpected(MakeBuildError(Candidate->GetProjectRootPath(),
+					"Asset dependency publication request was superseded or does not match the candidate snapshot"));
 		}
-		if (!AssetDependencyExtractor::ValidateInputReceipts(Candidate->m_ProjectRoot, Candidate->m_InputReadSet)) return false;
+
+		AssetRegistry CurrentRegistry;
+		if (auto RegistryResult = CurrentRegistry.Rebuild(Candidate->m_ProjectRoot); !RegistryResult)
+			return std::unexpected(MakeRegistryError(Candidate->m_ProjectRoot, RegistryResult.error()));
+
+		const std::vector<AssetRecord> CandidateAssets = Candidate->m_Registry.GetAssets();
+		const std::vector<AssetRecord> CurrentAssets = CurrentRegistry.GetAssets();
+		const bool SameMembership = CandidateAssets.size() == CurrentAssets.size() &&
+			std::equal(CandidateAssets.begin(), CandidateAssets.end(), CurrentAssets.begin(), [](const AssetRecord& First,
+				const AssetRecord& Second)
+			{
+				return First.ID == Second.ID && First.ProjectRelativePath == Second.ProjectRelativePath;
+			});
+		if (!SameMembership)
+			return std::unexpected(MakeBuildError(Candidate->m_ProjectRoot,
+				"Asset registry membership changed after dependency analysis; candidate snapshot was discarded"));
+
+		if (auto ReadSetResult = AssetDependencyExtractor::ValidateInputReceipts(
+				Candidate->m_ProjectRoot, Candidate->m_InputReadSet);
+			!ReadSetResult)
+			return std::unexpected(ReadSetResult.error());
+
+		if (Options.BeforeFinalTicketValidation) Options.BeforeFinalTicketValidation();
+
 		std::lock_guard Lock(m_Mutex);
 		if (Ticket.ProjectID != m_RequestedProject || Ticket.Generation != m_LatestGeneration ||
 			Candidate->GetProjectID() != Ticket.ProjectID || Candidate->GetGeneration() != Ticket.Generation)
-			return false;
+			return std::unexpected(MakeBuildError(Candidate->GetProjectRootPath(),
+				"Asset dependency publication request was superseded during filesystem validation"));
 		m_Current = std::move(Candidate);
-		return true;
+		return {};
 	}
 
 	AssetDependencyCatalog::SnapshotPtr AssetDependencyCatalog::GetSnapshot() const

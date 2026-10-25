@@ -4,6 +4,7 @@
 
 void RunAssetDependencyCatalogTests(TestRunner& Tests);
 void RunAssetDependencyCorrectionTests(TestRunner& Tests);
+void RunAssetDependencyPublicationTests(TestRunner& Tests);
 
 int main(int ArgumentCount, char** Arguments)
 {
@@ -13,6 +14,7 @@ int main(int ArgumentCount, char** Arguments)
 	{
 		RunAssetDependencyCatalogTests(Tests);
 		RunAssetDependencyCorrectionTests(Tests);
+		RunAssetDependencyPublicationTests(Tests);
 		return Tests.Finish();
 	}
 	RunAssetsTests(Tests);
@@ -21,5 +23,6 @@ int main(int ArgumentCount, char** Arguments)
 	RunSceneAssetTests(Tests);
 	RunAssetDependencyCatalogTests(Tests);
 	RunAssetDependencyCorrectionTests(Tests);
+	RunAssetDependencyPublicationTests(Tests);
 	return Tests.Finish();
 }

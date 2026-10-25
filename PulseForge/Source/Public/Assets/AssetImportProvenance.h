@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -28,6 +29,9 @@ namespace PulseForge
 		AssetContentFingerprint Content;
 		friend bool operator==(const AssetImportInputFingerprint&, const AssetImportInputFingerprint&) = default;
 	};
+
+	[[nodiscard]] PULSEFORGE_API std::expected<void, std::string> NormalizeAssetImportRecipeInputs(
+		std::vector<AssetImportInputFingerprint>& Inputs);
 
 	struct AssetImportRecipe
 	{
@@ -92,19 +96,33 @@ namespace PulseForge
 	class PULSEFORGE_API AssetImportProvenanceSerializer final
 	{
 	public:
-		static constexpr uint32_t CurrentVersion = 1;
+		static constexpr uint32_t LegacySingleRecordVersion = 1;
+		static constexpr uint32_t CurrentVersion = 2;
 
 		[[nodiscard]] static std::filesystem::path GetSidecarPath(const std::filesystem::path& SourceAssetPath);
+		[[nodiscard]] static std::expected<std::vector<AssetImportSuccessReceipt>, AssetImportProvenanceError> DeserializeAll(
+			std::string_view Data,
+			const std::filesystem::path& Path = {});
 		[[nodiscard]] static std::expected<AssetImportSuccessReceipt, AssetImportProvenanceError> Deserialize(
 			std::string_view Data,
 			const std::filesystem::path& Path = {});
+		// An absent optional receipt sidecar is represented by an empty record list.
+		[[nodiscard]] static std::expected<std::vector<AssetImportSuccessReceipt>, AssetImportProvenanceError> LoadAll(
+			const std::filesystem::path& Path);
 		[[nodiscard]] static std::expected<AssetImportSuccessReceipt, AssetImportProvenanceError> Load(
 			const std::filesystem::path& Path);
 
 	private:
 		friend class GltfMeshImportCoordinator;
-		[[nodiscard]] static std::expected<void, AssetImportProvenanceError> Save(
+		friend struct AssetImportProvenanceTestAccess;
+		using ReplacementFunction = std::function<std::expected<void, std::string>(
+			const std::filesystem::path&, const std::filesystem::path&)>;
+		[[nodiscard]] static std::expected<void, AssetImportProvenanceError> SaveAll(
 			const std::filesystem::path& Path,
-			const AssetImportSuccessReceipt& Receipt);
+			std::span<const AssetImportSuccessReceipt> Receipts);
+		[[nodiscard]] static std::expected<void, AssetImportProvenanceError> SaveAllWithReplacement(
+			const std::filesystem::path& Path,
+			std::span<const AssetImportSuccessReceipt> Receipts,
+			const ReplacementFunction& Replace);
 	};
 }

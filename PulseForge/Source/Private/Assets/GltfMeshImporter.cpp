@@ -1303,13 +1303,9 @@ namespace PulseForge
 			const std::filesystem::path SourceRelativeKey = Record->ProjectRelativePath.lexically_normal();
 			Inputs.push_back({ PathToUtf8(SourceRelativeKey), ComputeAssetContentFingerprint(FileBytes) });
 			Inputs.insert(Inputs.end(), Buffers->ExternalInputs.begin(), Buffers->ExternalInputs.end());
-			std::sort(Inputs.begin(), Inputs.end(), [](const auto& A, const auto& B)
-				{ return A.ProjectRelativePath < B.ProjectRelativePath; });
-			for (size_t Index = 1; Index < Inputs.size(); ++Index)
-				if (Inputs[Index - 1].ProjectRelativePath == Inputs[Index].ProjectRelativePath)
-					return std::unexpected(MakeError(
-						GltfMeshImportErrorCode::InvalidBuffer, *Source,
-						"Import read the same project-relative input more than once"));
+			if (auto Normalized = NormalizeAssetImportRecipeInputs(Inputs); !Normalized)
+				return std::unexpected(MakeError(
+					GltfMeshImportErrorCode::InvalidBuffer, *Source, Normalized.error()));
 			AssetImportRecipe Recipe;
 			Recipe.SourceAsset = Asset;
 			Recipe.SubresourceKey = "mesh/" + std::to_string(MeshIndex) + "/primitive/" + std::to_string(PrimitiveIndex);

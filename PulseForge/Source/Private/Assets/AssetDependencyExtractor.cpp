@@ -810,17 +810,11 @@ namespace PulseForge
 				AddReadReceipt(Output, Input.ProjectRelativeKey, static_cast<uint64_t>(Size), *InputHash);
 				RecipeInputs.push_back({ Input.ProjectRelativeKey, *InputHash });
 			}
-			std::sort(RecipeInputs.begin(), RecipeInputs.end(), [](const auto& First, const auto& Second)
-				{ return First.ProjectRelativePath < Second.ProjectRelativePath; });
-			RecipeInputs.erase(std::unique(RecipeInputs.begin(), RecipeInputs.end(),
-				[](const auto& First, const auto& Second)
-				{ return First.ProjectRelativePath == Second.ProjectRelativePath && First.Content == Second.Content; }), RecipeInputs.end());
-			for (size_t Index = 1; Index < RecipeInputs.size(); ++Index)
-				if (RecipeInputs[Index - 1].ProjectRelativePath == RecipeInputs[Index].ProjectRelativePath)
-					return std::unexpected(MakeError(SourcePath, "glTF import read set has conflicting content for one project-relative path"));
+			if (auto Normalized = NormalizeAssetImportRecipeInputs(RecipeInputs); !Normalized)
+				return std::unexpected(MakeError(SourcePath, Normalized.error()));
 
 			const std::filesystem::path ProvenancePath = AssetImportProvenanceSerializer::GetSidecarPath(SourcePath);
-			std::optional<AssetImportSuccessReceipt> LastSuccess;
+			std::vector<AssetImportSuccessReceipt> LastSuccesses;
 			bool ProvenanceUnavailable = false;
 			std::error_code ProvenanceError;
 			const auto ProvenanceStatus = std::filesystem::symlink_status(ProvenancePath, ProvenanceError);
@@ -850,15 +844,17 @@ namespace PulseForge
 					AddReadReceipt(Output, ProjectRoot, ProvenancePath, *ReceiptBytes);
 					const std::string ReceiptText(ReceiptBytes->empty() ? std::string{} :
 						std::string(reinterpret_cast<const char*>(ReceiptBytes->data()), ReceiptBytes->size()));
-					auto Receipt = AssetImportProvenanceSerializer::Deserialize(ReceiptText, ProvenancePath);
-					if (!Receipt || Receipt->Recipe.SourceAsset != Owner.ID)
+					auto Receipts = AssetImportProvenanceSerializer::DeserializeAll(ReceiptText, ProvenancePath);
+					const bool HasForeignSource = Receipts && std::any_of(Receipts->begin(), Receipts->end(),
+						[&Owner](const AssetImportSuccessReceipt& Receipt) { return Receipt.Recipe.SourceAsset != Owner.ID; });
+					if (!Receipts || HasForeignSource)
 					{
 						ProvenanceUnavailable = true;
 						Output.Issues.push_back({ AssetDependencyIssueCode::InvalidImportProvenance, Referrer,
 							SourceFileNode(ProjectRelativeKey(ProjectRoot, ProvenancePath)), "import-result",
-							Receipt ? "Import receipt belongs to a different asset UUID" : Receipt.error().Message });
+							Receipts ? "Import receipt belongs to a different asset UUID" : Receipts.error().Message });
 					}
-					else LastSuccess = std::move(*Receipt);
+					else LastSuccesses = std::move(*Receipts);
 				}
 			}
 
@@ -892,9 +888,13 @@ namespace PulseForge
 				if (Subresource.Classification == AssetSubresourceClassification::Invalid ||
 					Subresource.Classification == AssetSubresourceClassification::Unsupported || ProvenanceUnavailable)
 					Observation.ResultState = AssetImportResultState::Unavailable;
-				else if (LastSuccess && LastSuccess->Recipe.SubresourceKey == Recipe.SubresourceKey)
+				else if (const auto SuccessfulRecord = std::lower_bound(LastSuccesses.begin(), LastSuccesses.end(),
+					Recipe.SubresourceKey, [](const AssetImportSuccessReceipt& Receipt, std::string_view Key)
+					{ return Receipt.Recipe.SubresourceKey < Key; });
+					SuccessfulRecord != LastSuccesses.end() && SuccessfulRecord->Recipe.SubresourceKey == Recipe.SubresourceKey)
 				{
-					const AssetImportRecipe& SuccessfulRecipe = LastSuccess->Recipe;
+					const AssetImportSuccessReceipt& LastSuccess = *SuccessfulRecord;
+					const AssetImportRecipe& SuccessfulRecipe = LastSuccess.Recipe;
 					Observation.LastSuccessfulResult = LastSuccess;
 					const bool RecipeIdentityMatches = SuccessfulRecipe.SourceAsset == Recipe.SourceAsset &&
 						SuccessfulRecipe.SubresourceKey == Recipe.SubresourceKey && SuccessfulRecipe.ImporterID == Recipe.ImporterID &&

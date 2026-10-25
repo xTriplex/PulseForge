@@ -305,9 +305,11 @@ namespace PulseForgeEditor
 					m_DependencyState->LastError = Candidate.error().Message;
 					m_DependencyState->IsOutdated = m_DependencyState->Snapshot != nullptr;
 				}
-				else if (!m_DependencyState->Catalog.Publish(Ticket, *Candidate))
+				else if (auto Published = m_DependencyState->Catalog.Publish(Ticket, *Candidate); !Published)
 				{
-					m_DependencyState->LastError = "Inputs or project request changed before publication.";
+					m_DependencyState->LastError = Published.error().Message;
+					if (!Published.error().Path.empty())
+						m_DependencyState->LastError = Published.error().Path.generic_string() + ": " + m_DependencyState->LastError;
 					m_DependencyState->IsOutdated = m_DependencyState->Snapshot != nullptr;
 				}
 				else

@@ -99,6 +99,7 @@ if(BUILD_TESTING)
 		Tests/AssetOperationsTests.cpp
 		Tests/AssetDependencyCatalogTests.cpp
 		Tests/AssetDependencyCorrectionTests.cpp
+		Tests/AssetDependencyPublicationTests.cpp
 	)
 	target_include_directories(PulseForgeAssetTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_link_libraries(PulseForgeAssetTests PRIVATE
@@ -116,11 +117,13 @@ if(BUILD_TESTING)
 	add_executable(PulseForgeAssetImportTests
 		Tests/PulseForgeAssetImportTests.cpp
 		Tests/GltfMeshImportTests.cpp
+		Tests/GltfMeshImporterRegressionTests.cpp
 		Tests/ImageAssetImportTests.cpp
 		Tests/AssetImportProvenanceTests.cpp
 	)
 	target_include_directories(PulseForgeAssetImportTests PRIVATE Tests PulseForge/Vendor/json/include)
-	target_link_libraries(PulseForgeAssetImportTests PRIVATE PulseForgeAssetImporters PulseForgeAssetServices)
+	target_link_libraries(PulseForgeAssetImportTests PRIVATE
+		PulseForgeAssetImporters PulseForgeAssetServices PulseForgeAssetDependencyCatalog)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeAssetImportTests PulseForgePublicHeaderChecks)
 	endif()

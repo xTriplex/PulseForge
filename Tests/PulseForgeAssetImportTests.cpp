@@ -1,6 +1,7 @@
 #include "TestEngineSupport.h"
 
 void RunAssetImportProvenanceTests(TestRunner& Tests);
+void RunGltfMeshImporterRegressionTests(TestRunner& Tests);
 
 int main()
 {
@@ -9,5 +10,6 @@ int main()
 	RunGltfMeshImportTests(Tests);
 	RunImageAssetImportTests(Tests);
 	RunAssetImportProvenanceTests(Tests);
+	RunGltfMeshImporterRegressionTests(Tests);
 	return Tests.Finish();
 }

@@ -1,11 +1,31 @@
 #include "TestAssetSupport.h"
 
 #include "Assets/AssetImportProvenance.h"
+#include "Assets/AssetDependencyCatalog.h"
 #include "Assets/GltfMeshImportCoordinator.h"
 #include "Assets/GltfMeshImporter.h"
 
+#include <nlohmann/json.hpp>
+
 #include <bit>
 #include <cmath>
+
+namespace PulseForge
+{
+	struct AssetImportProvenanceTestAccess
+	{
+		using Replacement = std::function<std::expected<void, std::string>(
+			const std::filesystem::path&, const std::filesystem::path&)>;
+
+		static std::expected<void, AssetImportProvenanceError> SaveAllWithReplacement(
+			const std::filesystem::path& Path,
+			std::span<const AssetImportSuccessReceipt> Receipts,
+			const Replacement& Replace)
+		{
+			return AssetImportProvenanceSerializer::SaveAllWithReplacement(Path, Receipts, Replace);
+		}
+	};
+}
 
 namespace
 {
@@ -65,6 +85,15 @@ namespace
 			Base64Encode(Bytes) + "\",\"byteLength\":36}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36}]," +
 			"\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}]," +
 			"\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}]}";
+	}
+
+	std::string TwoPrimitiveTriangleDocument()
+	{
+		const std::vector<std::byte> Bytes = MakeTriangleBytes();
+		return "{\"asset\":{\"version\":\"2.0\"},\"buffers\":[{\"uri\":\"data:application/octet-stream;base64," +
+			Base64Encode(Bytes) + "\",\"byteLength\":36}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36}]," +
+			"\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}]," +
+			"\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}},{\"attributes\":{\"POSITION\":0}}]}]}";
 	}
 
 	PulseForge::AssetImportRecipe MakeRecipe(const PulseForge::AssetID& SourceAsset, std::string EffectiveSettings)
@@ -138,6 +167,23 @@ void RunAssetImportProvenanceTests(TestRunner& Tests)
 	const auto RecipeAsset = UUID::Generate();
 	PF_CHECK(Tests, RecipeAsset.has_value());
 	if (!RecipeAsset) return;
+	AssetFingerprintBuilder IdenticalContent("test-identical-input");
+	IdenticalContent.UpdateText("value", "same");
+	const AssetContentFingerprint IdenticalFingerprint = IdenticalContent.Finish();
+	AssetFingerprintBuilder ConflictingContent("test-conflicting-input");
+	ConflictingContent.UpdateText("value", "different");
+	const AssetContentFingerprint ConflictingFingerprint = ConflictingContent.Finish();
+	std::vector<AssetImportInputFingerprint> DuplicateInputs{
+		{ "Assets/shared.bin", IdenticalFingerprint }, { "Assets/shared.bin", IdenticalFingerprint }
+	};
+	PF_CHECK(Tests, NormalizeAssetImportRecipeInputs(DuplicateInputs).has_value());
+	PF_CHECK(Tests, DuplicateInputs.size() == 1);
+	std::vector<AssetImportInputFingerprint> ConflictingInputs{
+		{ "Assets/shared.bin", ConflictingFingerprint }, { "Assets/shared.bin", IdenticalFingerprint }
+	};
+	const auto ConflictingNormalization = NormalizeAssetImportRecipeInputs(ConflictingInputs);
+	PF_CHECK(Tests, !ConflictingNormalization &&
+		ConflictingNormalization.error().find("conflicting content") != std::string::npos);
 	const auto DefaultRecipe = MakeRecipe(*RecipeAsset, *DefaultCanonical);
 	const auto EquivalentRecipe = MakeRecipe(*RecipeAsset, *DefaultCanonical);
 	const auto DifferentRecipe = MakeRecipe(*RecipeAsset, "{\"version\":1,\"missingNormalsPolicy\":\"Reject\"}");
@@ -170,6 +216,224 @@ void RunAssetImportProvenanceTests(TestRunner& Tests)
 	PF_CHECK(Tests, PreviousReceipt && PreviousReceipt->Recipe.SubresourceKey == Imported->Recipe.SubresourceKey);
 	PF_CHECK(Tests, PreviousReceipt && PreviousReceipt->ResultIdentity == "mesh/0/primitive/0");
 	PF_CHECK(Tests, PreviousReceipt && PreviousReceipt->ResultFingerprint == Imported->ResultFingerprint);
+
+	// Each supported primitive is an independent logical processing output for provenance purposes.
+	const std::filesystem::path MultiOutputPath = ModelDirectory / "two-primitives.gltf";
+	PF_CHECK(Tests, WriteTextFile(MultiOutputPath, TwoPrimitiveTriangleDocument()));
+	const auto MultiOutputMetadata = AssetMetadataSerializer::CreateForNewAsset(MultiOutputPath);
+	PF_CHECK(Tests, MultiOutputMetadata.has_value());
+	if (!MultiOutputMetadata) return;
+	AssetRegistry MultiOutputRegistry;
+	PF_CHECK(Tests, MultiOutputRegistry.Rebuild(ProjectRoot).has_value());
+	const auto PrimitiveA = GltfMeshImportCoordinator::ProcessAndRecordStaticPrimitive(
+		MultiOutputMetadata->ID, ProjectRoot, MultiOutputRegistry, 0, 0);
+	const auto PrimitiveB = GltfMeshImportCoordinator::ProcessAndRecordStaticPrimitive(
+		MultiOutputMetadata->ID, ProjectRoot, MultiOutputRegistry, 0, 1);
+	PF_CHECK(Tests, PrimitiveA.has_value());
+	PF_CHECK(Tests, PrimitiveB.has_value());
+	if (!PrimitiveA || !PrimitiveB) return;
+	PF_CHECK(Tests, PrimitiveA->Receipt.ResultIdentity == "mesh/0/primitive/0");
+	PF_CHECK(Tests, PrimitiveB->Receipt.ResultIdentity == "mesh/0/primitive/1");
+	const std::filesystem::path MultiOutputReceiptPath =
+		AssetImportProvenanceSerializer::GetSidecarPath(MultiOutputPath);
+	auto ReceiptsAfterBoth = AssetImportProvenanceSerializer::LoadAll(MultiOutputReceiptPath);
+	PF_CHECK(Tests, ReceiptsAfterBoth && ReceiptsAfterBoth->size() == 2);
+	if (!ReceiptsAfterBoth || ReceiptsAfterBoth->size() != 2) return;
+	PF_CHECK(Tests, (*ReceiptsAfterBoth)[0].Recipe.SubresourceKey == "mesh/0/primitive/0");
+	PF_CHECK(Tests, (*ReceiptsAfterBoth)[1].Recipe.SubresourceKey == "mesh/0/primitive/1");
+	PF_CHECK(Tests, (*ReceiptsAfterBoth)[0].Recipe.SourceAsset == MultiOutputMetadata->ID &&
+		(*ReceiptsAfterBoth)[1].Recipe.SourceAsset == MultiOutputMetadata->ID);
+	const auto MultiOutputProjectID = UUID::Generate();
+	PF_CHECK(Tests, MultiOutputProjectID.has_value());
+	if (!MultiOutputProjectID) return;
+	const auto CatalogAfterTwoImports = AssetDependencyCatalogBuilder::Build(ProjectRoot, *MultiOutputProjectID, 1);
+	PF_CHECK(Tests, CatalogAfterTwoImports.has_value());
+	if (!CatalogAfterTwoImports) return;
+	const auto FindMultiOutputObservation = [](const AssetDependencyCatalogSnapshot& Snapshot,
+		const AssetID& Asset, std::string_view Key)
+	{
+		return std::find_if(Snapshot.GetImportObservations().begin(), Snapshot.GetImportObservations().end(),
+			[&](const AssetImportObservation& Observation)
+			{ return Observation.Asset == Asset && Observation.SubresourceKey == Key; });
+	};
+	const auto& TwoImportSnapshot = **CatalogAfterTwoImports;
+	const auto PrimitiveAObservation = FindMultiOutputObservation(
+		TwoImportSnapshot, MultiOutputMetadata->ID, "mesh/0/primitive/0");
+	const auto PrimitiveBObservation = FindMultiOutputObservation(
+		TwoImportSnapshot, MultiOutputMetadata->ID, "mesh/0/primitive/1");
+	PF_CHECK(Tests, PrimitiveAObservation != TwoImportSnapshot.GetImportObservations().end());
+	PF_CHECK(Tests, PrimitiveBObservation != TwoImportSnapshot.GetImportObservations().end());
+	if (PrimitiveAObservation != TwoImportSnapshot.GetImportObservations().end() &&
+		PrimitiveBObservation != TwoImportSnapshot.GetImportObservations().end())
+	{
+		PF_CHECK(Tests, PrimitiveAObservation->ResultState == AssetImportResultState::SuccessfulInputsMatch);
+		PF_CHECK(Tests, PrimitiveAObservation->LastSuccessfulResult.has_value());
+		PF_CHECK(Tests, PrimitiveAObservation->LastSuccessfulResult &&
+			PrimitiveAObservation->LastSuccessfulResult->Recipe.InputFingerprint == PrimitiveA->Receipt.Recipe.InputFingerprint);
+		PF_CHECK(Tests, PrimitiveBObservation->ResultState == AssetImportResultState::SuccessfulInputsMatch);
+		PF_CHECK(Tests, PrimitiveBObservation->LastSuccessfulResult.has_value());
+		PF_CHECK(Tests, PrimitiveBObservation->LastSuccessfulResult &&
+			PrimitiveBObservation->LastSuccessfulResult->Recipe.InputFingerprint == PrimitiveB->Receipt.Recipe.InputFingerprint);
+	}
+	const auto ReimportedPrimitiveA = GltfMeshImportCoordinator::ProcessAndRecordStaticPrimitive(
+		MultiOutputMetadata->ID, ProjectRoot, MultiOutputRegistry, 0, 0);
+	PF_CHECK(Tests, ReimportedPrimitiveA.has_value());
+	if (!ReimportedPrimitiveA) return;
+	const auto CatalogAfterAReimport = AssetDependencyCatalogBuilder::Build(ProjectRoot, *MultiOutputProjectID, 2);
+	PF_CHECK(Tests, CatalogAfterAReimport.has_value());
+	if (!CatalogAfterAReimport) return;
+	const auto& ReimportSnapshot = **CatalogAfterAReimport;
+	const auto ReimportedAObservation = FindMultiOutputObservation(
+		ReimportSnapshot, MultiOutputMetadata->ID, "mesh/0/primitive/0");
+	const auto RetainedBObservation = FindMultiOutputObservation(
+		ReimportSnapshot, MultiOutputMetadata->ID, "mesh/0/primitive/1");
+	PF_CHECK(Tests, ReimportedAObservation != ReimportSnapshot.GetImportObservations().end());
+	PF_CHECK(Tests, RetainedBObservation != ReimportSnapshot.GetImportObservations().end());
+	if (ReimportedAObservation != ReimportSnapshot.GetImportObservations().end() &&
+		RetainedBObservation != ReimportSnapshot.GetImportObservations().end())
+	{
+		PF_CHECK(Tests, ReimportedAObservation->ResultState == AssetImportResultState::SuccessfulInputsMatch);
+		PF_CHECK(Tests, RetainedBObservation->ResultState == AssetImportResultState::SuccessfulInputsMatch);
+		PF_CHECK(Tests, RetainedBObservation->LastSuccessfulResult.has_value());
+	}
+	auto ReceiptsAfterAReimport = AssetImportProvenanceSerializer::LoadAll(MultiOutputReceiptPath);
+	PF_CHECK(Tests, ReceiptsAfterAReimport && ReceiptsAfterAReimport->size() == 2);
+	if (!ReceiptsAfterAReimport || ReceiptsAfterAReimport->size() != 2) return;
+	PF_CHECK(Tests, (*ReceiptsAfterAReimport)[0].ResultFingerprint == ReimportedPrimitiveA->Receipt.ResultFingerprint);
+	PF_CHECK(Tests, (*ReceiptsAfterAReimport)[1].ResultFingerprint == (*ReceiptsAfterBoth)[1].ResultFingerprint);
+
+	// A legacy v1 single-record receipt remains readable without a read-time rewrite, then upgrades on a successful update.
+	const auto MultiOutputReceiptBeforeLegacyRead = ReadTextFile(MultiOutputReceiptPath);
+	PF_CHECK(Tests, MultiOutputReceiptBeforeLegacyRead.has_value());
+	if (!MultiOutputReceiptBeforeLegacyRead) return;
+	using Json = nlohmann::ordered_json;
+	Json LegacyVersionOne = Json::object({ { "format", "PulseForgeImportResult" }, { "version", 1 } });
+	const Json CurrentVersionTwo = Json::parse(*MultiOutputReceiptBeforeLegacyRead);
+	for (auto It = CurrentVersionTwo.at("records").front().begin(); It != CurrentVersionTwo.at("records").front().end(); ++It)
+		LegacyVersionOne[It.key()] = It.value();
+	const std::string LegacyVersionOneBytes = LegacyVersionOne.dump(2) + "\n";
+	PF_CHECK(Tests, WriteTextFile(MultiOutputReceiptPath, LegacyVersionOneBytes));
+	const auto ReadLegacyReceipt = AssetImportProvenanceSerializer::LoadAll(MultiOutputReceiptPath);
+	PF_CHECK(Tests, ReadLegacyReceipt && ReadLegacyReceipt->size() == 1 &&
+		ReadLegacyReceipt->front().Recipe.SubresourceKey == "mesh/0/primitive/0");
+	PF_CHECK(Tests, ReadTextFile(MultiOutputReceiptPath) == LegacyVersionOneBytes);
+	const auto UpgradeByImportingB = GltfMeshImportCoordinator::ProcessAndRecordStaticPrimitive(
+		MultiOutputMetadata->ID, ProjectRoot, MultiOutputRegistry, 0, 1);
+	PF_CHECK(Tests, UpgradeByImportingB.has_value());
+	if (!UpgradeByImportingB) return;
+	auto UpgradedReceiptRecords = AssetImportProvenanceSerializer::LoadAll(MultiOutputReceiptPath);
+	PF_CHECK(Tests, UpgradedReceiptRecords && UpgradedReceiptRecords->size() == 2);
+	if (!UpgradedReceiptRecords || UpgradedReceiptRecords->size() != 2) return;
+	PF_CHECK(Tests, (*UpgradedReceiptRecords)[0].Recipe.SubresourceKey == "mesh/0/primitive/0");
+	PF_CHECK(Tests, (*UpgradedReceiptRecords)[1].Recipe.SubresourceKey == "mesh/0/primitive/1");
+	const auto CatalogAfterLegacyUpgrade = AssetDependencyCatalogBuilder::Build(ProjectRoot, *MultiOutputProjectID, 3);
+	PF_CHECK(Tests, CatalogAfterLegacyUpgrade.has_value());
+	if (!CatalogAfterLegacyUpgrade) return;
+	const auto& LegacyUpgradeSnapshot = **CatalogAfterLegacyUpgrade;
+	const auto LegacyAObservation = FindMultiOutputObservation(
+		LegacyUpgradeSnapshot, MultiOutputMetadata->ID, "mesh/0/primitive/0");
+	const auto LegacyBObservation = FindMultiOutputObservation(
+		LegacyUpgradeSnapshot, MultiOutputMetadata->ID, "mesh/0/primitive/1");
+	PF_CHECK(Tests, LegacyAObservation != LegacyUpgradeSnapshot.GetImportObservations().end());
+	PF_CHECK(Tests, LegacyBObservation != LegacyUpgradeSnapshot.GetImportObservations().end());
+	if (LegacyAObservation != LegacyUpgradeSnapshot.GetImportObservations().end() &&
+		LegacyBObservation != LegacyUpgradeSnapshot.GetImportObservations().end())
+	{
+		PF_CHECK(Tests, LegacyAObservation->ResultState == AssetImportResultState::SuccessfulInputsMatch);
+		PF_CHECK(Tests, LegacyBObservation->ResultState == AssetImportResultState::SuccessfulInputsMatch);
+		PF_CHECK(Tests, LegacyAObservation->LastSuccessfulResult.has_value());
+		PF_CHECK(Tests, LegacyBObservation->LastSuccessfulResult.has_value());
+	}
+	const auto VersionTwoBytesBeforeInjectedFailure = ReadTextFile(MultiOutputReceiptPath);
+	PF_CHECK(Tests, VersionTwoBytesBeforeInjectedFailure.has_value());
+	if (!VersionTwoBytesBeforeInjectedFailure) return;
+	std::vector<AssetImportSuccessReceipt> AlteredRecords = *UpgradedReceiptRecords;
+	AlteredRecords[0].ResultFingerprint.DigestHex[0] = AlteredRecords[0].ResultFingerprint.DigestHex[0] == '0' ? '1' : '0';
+	bool ReplacementInvoked = false;
+	const auto InjectedPersistenceFailure = AssetImportProvenanceTestAccess::SaveAllWithReplacement(
+		MultiOutputReceiptPath, AlteredRecords,
+		[&ReplacementInvoked](const std::filesystem::path&, const std::filesystem::path&) -> std::expected<void, std::string>
+		{
+			ReplacementInvoked = true;
+			return std::unexpected("deterministic replacement failure");
+		});
+	PF_CHECK(Tests, !InjectedPersistenceFailure &&
+		InjectedPersistenceFailure.error().Code == AssetImportProvenanceErrorCode::WriteFailed);
+	PF_CHECK(Tests, ReplacementInvoked);
+	PF_CHECK(Tests, ReadTextFile(MultiOutputReceiptPath) == VersionTwoBytesBeforeInjectedFailure);
+	const auto RecordsAfterInjectedFailure = AssetImportProvenanceSerializer::LoadAll(MultiOutputReceiptPath);
+	PF_CHECK(Tests, RecordsAfterInjectedFailure && RecordsAfterInjectedFailure->size() == 2);
+	if (RecordsAfterInjectedFailure && RecordsAfterInjectedFailure->size() == 2)
+		PF_CHECK(Tests, (*RecordsAfterInjectedFailure)[0].ResultFingerprint == (*UpgradedReceiptRecords)[0].ResultFingerprint);
+
+	Json MalformedDuplicateOutput = Json::parse(*VersionTwoBytesBeforeInjectedFailure);
+	MalformedDuplicateOutput["records"].push_back(MalformedDuplicateOutput["records"].front());
+	const auto DuplicateOutputParse = AssetImportProvenanceSerializer::DeserializeAll(MalformedDuplicateOutput.dump());
+	PF_CHECK(Tests, !DuplicateOutputParse &&
+		DuplicateOutputParse.error().Code == AssetImportProvenanceErrorCode::InvalidDocument);
+
+	const std::string RejectMultiOutputSettings =
+		"{\"gltfStaticMesh\":{\"version\":1,\"missingNormalsPolicy\":\"Reject\"}}";
+	PF_CHECK(Tests, AssetMetadataSerializer::SaveImportSettings(
+		AssetMetadataSerializer::GetSidecarPath(MultiOutputPath), *MultiOutputMetadata, RejectMultiOutputSettings).has_value());
+	const auto FailedMultiOutputReimport = GltfMeshImportCoordinator::ProcessAndRecordStaticPrimitive(
+		MultiOutputMetadata->ID, ProjectRoot, MultiOutputRegistry, 0, 0);
+	PF_CHECK(Tests, !FailedMultiOutputReimport &&
+		FailedMultiOutputReimport.error().Code == GltfMeshImportCoordinatorErrorCode::ImportFailed);
+	const auto RecordsAfterMultiOutputFailure = AssetImportProvenanceSerializer::LoadAll(MultiOutputReceiptPath);
+	PF_CHECK(Tests, RecordsAfterMultiOutputFailure && RecordsAfterMultiOutputFailure->size() == 2);
+	if (!RecordsAfterMultiOutputFailure || RecordsAfterMultiOutputFailure->size() != 2) return;
+	PF_CHECK(Tests, (*RecordsAfterMultiOutputFailure)[0].ResultFingerprint == (*UpgradedReceiptRecords)[0].ResultFingerprint);
+	PF_CHECK(Tests, (*RecordsAfterMultiOutputFailure)[1].ResultFingerprint == (*UpgradedReceiptRecords)[1].ResultFingerprint);
+	const auto CatalogAfterSettingsChange = AssetDependencyCatalogBuilder::Build(ProjectRoot, *MultiOutputProjectID, 4);
+	PF_CHECK(Tests, CatalogAfterSettingsChange.has_value());
+	if (!CatalogAfterSettingsChange) return;
+	const auto& SettingsChangeSnapshot = **CatalogAfterSettingsChange;
+	const auto HistoricalAObservation = FindMultiOutputObservation(
+		SettingsChangeSnapshot, MultiOutputMetadata->ID, "mesh/0/primitive/0");
+	const auto HistoricalBObservation = FindMultiOutputObservation(
+		SettingsChangeSnapshot, MultiOutputMetadata->ID, "mesh/0/primitive/1");
+	PF_CHECK(Tests, HistoricalAObservation != SettingsChangeSnapshot.GetImportObservations().end());
+	PF_CHECK(Tests, HistoricalBObservation != SettingsChangeSnapshot.GetImportObservations().end());
+	if (HistoricalAObservation != SettingsChangeSnapshot.GetImportObservations().end() &&
+		HistoricalBObservation != SettingsChangeSnapshot.GetImportObservations().end())
+	{
+		PF_CHECK(Tests, HistoricalAObservation->ResultState == AssetImportResultState::SuccessfulInputsDiffer);
+		PF_CHECK(Tests, HistoricalBObservation->ResultState == AssetImportResultState::SuccessfulInputsDiffer);
+		PF_CHECK(Tests, HistoricalAObservation->LastSuccessfulResult.has_value());
+		PF_CHECK(Tests, HistoricalBObservation->LastSuccessfulResult.has_value());
+	}
+
+	const std::filesystem::path ForeignOwnerPath = ModelDirectory / "foreign-owner.gltf";
+	PF_CHECK(Tests, WriteTextFile(ForeignOwnerPath, TwoPrimitiveTriangleDocument()));
+	const auto ForeignOwnerMetadata = AssetMetadataSerializer::CreateForNewAsset(ForeignOwnerPath);
+	PF_CHECK(Tests, ForeignOwnerMetadata.has_value());
+	if (!ForeignOwnerMetadata) return;
+	const std::filesystem::path ForeignReceiptPath = AssetImportProvenanceSerializer::GetSidecarPath(ForeignOwnerPath);
+	std::filesystem::copy_file(MultiOutputReceiptPath, ForeignReceiptPath,
+		std::filesystem::copy_options::overwrite_existing, Error);
+	PF_CHECK(Tests, !Error);
+	const auto ForeignReceiptBytesBeforeProcess = ReadTextFile(ForeignReceiptPath);
+	PF_CHECK(Tests, ForeignReceiptBytesBeforeProcess.has_value());
+	AssetRegistry ForeignOwnerRegistry;
+	PF_CHECK(Tests, ForeignOwnerRegistry.Rebuild(ProjectRoot).has_value());
+	const auto ForeignReceiptImport = GltfMeshImportCoordinator::ProcessAndRecordStaticPrimitive(
+		ForeignOwnerMetadata->ID, ProjectRoot, ForeignOwnerRegistry, 0, 0);
+	PF_CHECK(Tests, !ForeignReceiptImport &&
+		ForeignReceiptImport.error().Code == GltfMeshImportCoordinatorErrorCode::ReceiptPersistenceFailed);
+	PF_CHECK(Tests, ReadTextFile(ForeignReceiptPath) == ForeignReceiptBytesBeforeProcess);
+
+	// Stale records for a removed primitive remain historical data and do not create a live output observation.
+	PF_CHECK(Tests, WriteTextFile(MultiOutputPath, TriangleDocument()));
+	const auto CatalogAfterOutputRemoval = AssetDependencyCatalogBuilder::Build(ProjectRoot, *MultiOutputProjectID, 5);
+	PF_CHECK(Tests, CatalogAfterOutputRemoval.has_value());
+	if (!CatalogAfterOutputRemoval) return;
+	const auto& OutputRemovalSnapshot = **CatalogAfterOutputRemoval;
+	const auto RemovedPrimitiveObservation = FindMultiOutputObservation(
+		OutputRemovalSnapshot, MultiOutputMetadata->ID, "mesh/0/primitive/1");
+	PF_CHECK(Tests, RemovedPrimitiveObservation == OutputRemovalSnapshot.GetImportObservations().end());
+	const auto HistoricalRecordsAfterOutputRemoval = AssetImportProvenanceSerializer::LoadAll(MultiOutputReceiptPath);
+	PF_CHECK(Tests, HistoricalRecordsAfterOutputRemoval && HistoricalRecordsAfterOutputRemoval->size() == 2);
 
 	const std::string RejectSettings = "{\"gltfStaticMesh\":{\"version\":1,\"missingNormalsPolicy\":\"Reject\"}}";
 	PF_CHECK(Tests, AssetMetadataSerializer::SaveImportSettings(

@@ -27,6 +27,7 @@ namespace PulseForge
 	{
 		using Json = nlohmann::ordered_json;
 		constexpr size_t MaxReceiptBytes = 1024 * 1024;
+		constexpr size_t MaxReceiptRecords = 4096;
 		constexpr std::string_view FingerprintAlgorithm = "xxh3-128-v0.8.2";
 		constexpr size_t ContentFingerprintChunkBytes = 64 * 1024;
 
@@ -58,6 +59,13 @@ namespace PulseForge
 			return { Code, Path, std::move(Message) };
 		}
 
+		bool IsSupportedFingerprint(const AssetContentFingerprint& Fingerprint)
+		{
+			return Fingerprint.Algorithm == FingerprintAlgorithm && Fingerprint.DigestHex.size() == 32 &&
+				std::all_of(Fingerprint.DigestHex.begin(), Fingerprint.DigestHex.end(), [](char Character)
+					{ return (Character >= '0' && Character <= '9') || (Character >= 'a' && Character <= 'f'); });
+		}
+
 		bool IsCanonicalProjectKey(std::string_view Key)
 		{
 			if (Key.empty() || Key.front() == '/' || Key.find('\\') != std::string_view::npos || Key.find(':') != std::string_view::npos)
@@ -84,11 +92,7 @@ namespace PulseForge
 			if (Algorithm == Value.end() || !Algorithm->is_string() || Digest == Value.end() || !Digest->is_string())
 				return std::unexpected("Fingerprint requires string algorithm and digest fields");
 			AssetContentFingerprint Result{ Algorithm->get<std::string>(), Digest->get<std::string>() };
-			if (Result.Algorithm != FingerprintAlgorithm || Result.DigestHex.size() != 32 ||
-				!std::all_of(Result.DigestHex.begin(), Result.DigestHex.end(), [](char Character)
-				{
-					return (Character >= '0' && Character <= '9') || (Character >= 'a' && Character <= 'f');
-				}))
+			if (!IsSupportedFingerprint(Result))
 				return std::unexpected("Fingerprint algorithm or digest encoding is unsupported");
 			return Result;
 		}
@@ -192,6 +196,59 @@ namespace PulseForge
 			if (!Calculated || *Calculated != Recipe.InputFingerprint)
 				return std::unexpected("Import recipe input fingerprint does not match its contents");
 			return Recipe;
+		}
+
+		Json ReceiptToJson(const AssetImportSuccessReceipt& Receipt)
+		{
+			return Json::object({
+				{ "recipe", RecipeToJson(Receipt.Recipe) },
+				{ "resultFingerprint", FingerprintToJson(Receipt.ResultFingerprint) },
+				{ "resultIdentity", Receipt.ResultIdentity },
+				{ "artifactAvailability", "notPersisted" },
+				{ "gpuResidency", "unknown" }
+			});
+		}
+
+		std::expected<AssetImportSuccessReceipt, std::string> ReceiptFromJson(const Json& Value)
+		{
+			if (!Value.is_object()) return std::unexpected("Import output record must be an object");
+			const auto RecipeValue = Value.find("recipe");
+			const auto ResultValue = Value.find("resultFingerprint");
+			const auto IdentityValue = Value.find("resultIdentity");
+			const auto ArtifactValue = Value.find("artifactAvailability");
+			const auto ResidencyValue = Value.find("gpuResidency");
+			if (RecipeValue == Value.end() || ResultValue == Value.end() || IdentityValue == Value.end() ||
+				!IdentityValue->is_string() || IdentityValue->get<std::string>().empty() ||
+				ArtifactValue == Value.end() || !ArtifactValue->is_string() || ArtifactValue->get<std::string>() != "notPersisted" ||
+				ResidencyValue == Value.end() || !ResidencyValue->is_string() || ResidencyValue->get<std::string>() != "unknown")
+				return std::unexpected("Import output record has invalid result, artifact, or residency fields");
+			auto Recipe = RecipeFromJson(*RecipeValue);
+			auto ResultFingerprint = ParseFingerprint(*ResultValue);
+			if (!Recipe || !ResultFingerprint)
+				return std::unexpected(Recipe ? ResultFingerprint.error() : Recipe.error());
+			const std::string ResultIdentity = IdentityValue->get<std::string>();
+			if (ResultIdentity != Recipe->SubresourceKey)
+				return std::unexpected("Import result identity does not match its recipe subresource");
+			return AssetImportSuccessReceipt{ std::move(*Recipe), std::move(*ResultFingerprint), ResultIdentity };
+		}
+
+		std::expected<void, std::string> ValidateReceiptRecords(std::span<const AssetImportSuccessReceipt> Receipts)
+		{
+			if (Receipts.empty() || Receipts.size() > MaxReceiptRecords)
+				return std::unexpected("Import receipt record count is empty or exceeds its limit");
+			const AssetID SourceAsset = Receipts.front().Recipe.SourceAsset;
+			if (SourceAsset.IsNil()) return std::unexpected("Import receipt source asset UUID is invalid");
+			std::string_view PreviousKey;
+			for (const AssetImportSuccessReceipt& Receipt : Receipts)
+			{
+				if (Receipt.Recipe.SourceAsset != SourceAsset)
+					return std::unexpected("Import receipt records refer to different source asset UUIDs");
+				if (Receipt.Recipe.SubresourceKey.empty() ||
+					(!PreviousKey.empty() && PreviousKey >= Receipt.Recipe.SubresourceKey))
+					return std::unexpected("Import receipt records must have unique sorted output identities");
+				PreviousKey = Receipt.Recipe.SubresourceKey;
+			}
+			return {};
 		}
 
 		std::string HexDigest(XXH128_hash_t Digest)
@@ -319,7 +376,38 @@ namespace PulseForge
 		return Path;
 	}
 
-	std::expected<AssetImportSuccessReceipt, AssetImportProvenanceError> AssetImportProvenanceSerializer::Deserialize(
+	std::expected<void, std::string> NormalizeAssetImportRecipeInputs(
+		std::vector<AssetImportInputFingerprint>& Inputs)
+	{
+		for (const AssetImportInputFingerprint& Input : Inputs)
+			if (!IsCanonicalProjectKey(Input.ProjectRelativePath) || !IsSupportedFingerprint(Input.Content))
+				return std::unexpected("Import recipe contains a noncanonical input path or unsupported fingerprint");
+		std::sort(Inputs.begin(), Inputs.end(), [](const auto& First, const auto& Second)
+		{
+			if (First.ProjectRelativePath != Second.ProjectRelativePath)
+				return First.ProjectRelativePath < Second.ProjectRelativePath;
+			if (First.Content.Algorithm != Second.Content.Algorithm)
+				return First.Content.Algorithm < Second.Content.Algorithm;
+			return First.Content.DigestHex < Second.Content.DigestHex;
+		});
+		std::vector<AssetImportInputFingerprint> Normalized;
+		Normalized.reserve(Inputs.size());
+		for (AssetImportInputFingerprint& Input : Inputs)
+		{
+			if (!Normalized.empty() && Normalized.back().ProjectRelativePath == Input.ProjectRelativePath)
+			{
+				if (Normalized.back().Content != Input.Content)
+					return std::unexpected("Import recipe observed conflicting content for one canonical input path");
+				continue;
+			}
+			Normalized.push_back(std::move(Input));
+		}
+		Inputs = std::move(Normalized);
+		return {};
+	}
+
+	std::expected<std::vector<AssetImportSuccessReceipt>, AssetImportProvenanceError>
+		AssetImportProvenanceSerializer::DeserializeAll(
 		std::string_view Data,
 		const std::filesystem::path& Path)
 	{
@@ -337,30 +425,35 @@ namespace PulseForge
 				Version == Document.end() || !ReadUInt32(*Version, ReceiptVersion))
 				return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path,
 					"Import receipt requires a format identifier and numeric version"));
-			if (ReceiptVersion != CurrentVersion)
+			if (ReceiptVersion != LegacySingleRecordVersion && ReceiptVersion != CurrentVersion)
 				return std::unexpected(MakeError(AssetImportProvenanceErrorCode::UnsupportedVersion, Path,
 					"Import receipt version is not supported"));
-			const auto RecipeValue = Document.find("recipe");
-			const auto ResultValue = Document.find("resultFingerprint");
-			const auto IdentityValue = Document.find("resultIdentity");
-			const auto ArtifactValue = Document.find("artifactAvailability");
-			const auto ResidencyValue = Document.find("gpuResidency");
-			if (RecipeValue == Document.end() || ResultValue == Document.end() || IdentityValue == Document.end() ||
-				!IdentityValue->is_string() || IdentityValue->get<std::string>().empty() ||
-				ArtifactValue == Document.end() || !ArtifactValue->is_string() || ArtifactValue->get<std::string>() != "notPersisted" ||
-				ResidencyValue == Document.end() || !ResidencyValue->is_string() || ResidencyValue->get<std::string>() != "unknown")
-				return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path,
-					"Import receipt has invalid result, artifact, or residency fields"));
-			auto Recipe = RecipeFromJson(*RecipeValue);
-			auto ResultFingerprint = ParseFingerprint(*ResultValue);
-			if (!Recipe || !ResultFingerprint)
-				return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path,
-					Recipe ? ResultFingerprint.error() : Recipe.error()));
-			const std::string ResultIdentity = IdentityValue->get<std::string>();
-			if (ResultIdentity != Recipe->SubresourceKey)
-				return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path,
-					"Import result identity does not match its recipe subresource"));
-			return AssetImportSuccessReceipt{ std::move(*Recipe), std::move(*ResultFingerprint), ResultIdentity };
+			std::vector<AssetImportSuccessReceipt> Receipts;
+			if (ReceiptVersion == LegacySingleRecordVersion)
+			{
+				auto Receipt = ReceiptFromJson(Document);
+				if (!Receipt)
+					return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path, Receipt.error()));
+				Receipts.push_back(std::move(*Receipt));
+			}
+			else
+			{
+				const auto Records = Document.find("records");
+				if (Records == Document.end() || !Records->is_array() || Records->empty() || Records->size() > MaxReceiptRecords)
+					return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path,
+						"Version-2 import receipt records are missing, empty, or exceed their limit"));
+				Receipts.reserve(Records->size());
+				for (const Json& RecordValue : *Records)
+				{
+					auto Receipt = ReceiptFromJson(RecordValue);
+					if (!Receipt)
+						return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path, Receipt.error()));
+					Receipts.push_back(std::move(*Receipt));
+				}
+			}
+			if (auto Valid = ValidateReceiptRecords(Receipts); !Valid)
+				return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path, Valid.error()));
+			return Receipts;
 		}
 		catch (const nlohmann::json::exception& Exception)
 		{
@@ -374,11 +467,33 @@ namespace PulseForge
 		}
 	}
 
-	std::expected<AssetImportSuccessReceipt, AssetImportProvenanceError> AssetImportProvenanceSerializer::Load(
+	std::expected<AssetImportSuccessReceipt, AssetImportProvenanceError> AssetImportProvenanceSerializer::Deserialize(
+		std::string_view Data,
+		const std::filesystem::path& Path)
+	{
+		auto Receipts = DeserializeAll(Data, Path);
+		if (!Receipts) return std::unexpected(Receipts.error());
+		if (Receipts->size() != 1)
+			return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path,
+				"Import receipt contains multiple output records; use DeserializeAll"));
+		return std::move(Receipts->front());
+	}
+
+	std::expected<std::vector<AssetImportSuccessReceipt>, AssetImportProvenanceError> AssetImportProvenanceSerializer::LoadAll(
 		const std::filesystem::path& Path)
 	{
 		if (Path.empty()) return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidPath, Path,
 			"Import receipt path must not be empty"));
+		std::error_code StatusError;
+		const std::filesystem::file_status Status = std::filesystem::symlink_status(Path, StatusError);
+		if (StatusError == std::errc::no_such_file_or_directory) return std::vector<AssetImportSuccessReceipt>{};
+		if (StatusError)
+			return std::unexpected(MakeError(AssetImportProvenanceErrorCode::FileOpenFailed, Path,
+				"Could not inspect import receipt: " + StatusError.message()));
+		if (Status.type() == std::filesystem::file_type::not_found) return std::vector<AssetImportSuccessReceipt>{};
+		if (std::filesystem::is_symlink(Status) || !std::filesystem::is_regular_file(Status))
+			return std::unexpected(MakeError(AssetImportProvenanceErrorCode::FileOpenFailed, Path,
+				"Import receipt must be a regular non-symlink file"));
 		std::ifstream Input(Path, std::ios::binary);
 		if (!Input.is_open()) return std::unexpected(MakeError(AssetImportProvenanceErrorCode::FileOpenFailed, Path,
 			"Could not open import receipt"));
@@ -391,36 +506,66 @@ namespace PulseForge
 		if (Count > static_cast<std::streamsize>(MaxReceiptBytes))
 			return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path, "Import receipt exceeds its size limit"));
 		Data.resize(static_cast<size_t>(Count));
-		return Deserialize(Data, Path);
+		return DeserializeAll(Data, Path);
 	}
 
-	std::expected<void, AssetImportProvenanceError> AssetImportProvenanceSerializer::Save(
+	std::expected<AssetImportSuccessReceipt, AssetImportProvenanceError> AssetImportProvenanceSerializer::Load(
+		const std::filesystem::path& Path)
+	{
+		auto Receipts = LoadAll(Path);
+		if (!Receipts) return std::unexpected(Receipts.error());
+		if (Receipts->size() != 1)
+			return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path,
+				Receipts->empty() ? "Import receipt has no successful output records" :
+				"Import receipt contains multiple output records; use LoadAll"));
+		return std::move(Receipts->front());
+	}
+
+	std::expected<void, AssetImportProvenanceError> AssetImportProvenanceSerializer::SaveAll(
 		const std::filesystem::path& Path,
-		const AssetImportSuccessReceipt& Receipt)
+		std::span<const AssetImportSuccessReceipt> Receipts)
+	{
+		return SaveAllWithReplacement(Path, Receipts, [](const std::filesystem::path& Temporary, const std::filesystem::path& Destination)
+			-> std::expected<void, std::string>
+		{
+			auto Replaced = Platform::ReplaceFileAtomically(Temporary, Destination);
+			if (!Replaced) return std::unexpected(Replaced.error().Message);
+			return {};
+		});
+	}
+
+	std::expected<void, AssetImportProvenanceError> AssetImportProvenanceSerializer::SaveAllWithReplacement(
+		const std::filesystem::path& Path,
+		std::span<const AssetImportSuccessReceipt> Receipts,
+		const ReplacementFunction& Replace)
 	{
 		if (Path.empty()) return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidPath, Path,
 			"Import receipt path must not be empty"));
-		const auto CalculatedInput = ComputeAssetImportInputFingerprint(Receipt.Recipe);
-		if (!CalculatedInput || *CalculatedInput != Receipt.Recipe.InputFingerprint ||
-			Receipt.ResultIdentity != Receipt.Recipe.SubresourceKey ||
-			Receipt.ResultFingerprint.Algorithm != FingerprintAlgorithm || Receipt.ResultFingerprint.DigestHex.size() != 32 ||
-			!std::all_of(Receipt.ResultFingerprint.DigestHex.begin(), Receipt.ResultFingerprint.DigestHex.end(), [](char Character)
-				{ return (Character >= '0' && Character <= '9') || (Character >= 'a' && Character <= 'f'); }))
-			return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path,
-				CalculatedInput ? "Import receipt fields are invalid" : CalculatedInput.error()));
+		if (auto Valid = ValidateReceiptRecords(Receipts); !Valid)
+			return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path, Valid.error()));
+		for (const AssetImportSuccessReceipt& Receipt : Receipts)
+		{
+			const auto CalculatedInput = ComputeAssetImportInputFingerprint(Receipt.Recipe);
+			if (!CalculatedInput || *CalculatedInput != Receipt.Recipe.InputFingerprint ||
+				Receipt.ResultIdentity != Receipt.Recipe.SubresourceKey ||
+				Receipt.ResultFingerprint.Algorithm != FingerprintAlgorithm || Receipt.ResultFingerprint.DigestHex.size() != 32 ||
+				!std::all_of(Receipt.ResultFingerprint.DigestHex.begin(), Receipt.ResultFingerprint.DigestHex.end(), [](char Character)
+					{ return (Character >= '0' && Character <= '9') || (Character >= 'a' && Character <= 'f'); }))
+				return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path,
+					CalculatedInput ? "Import receipt fields are invalid" : CalculatedInput.error()));
+		}
+		Json Records = Json::array();
+		for (const AssetImportSuccessReceipt& Receipt : Receipts)
+			Records.push_back(ReceiptToJson(Receipt));
 		const Json Document = Json::object({
 			{ "format", "PulseForgeImportResult" },
 			{ "version", CurrentVersion },
-			{ "recipe", RecipeToJson(Receipt.Recipe) },
-			{ "resultFingerprint", FingerprintToJson(Receipt.ResultFingerprint) },
-			{ "resultIdentity", Receipt.ResultIdentity },
-			{ "artifactAvailability", "notPersisted" },
-			{ "gpuResidency", "unknown" }
+			{ "records", std::move(Records) }
 		});
 		const std::string Serialized = Document.dump(2) + "\n";
 		if (Serialized.size() > MaxReceiptBytes)
 			return std::unexpected(MakeError(AssetImportProvenanceErrorCode::InvalidDocument, Path,
-				"Serialized import receipt exceeds its size limit"));
+				"Serialized import receipt records exceed the file size limit"));
 		std::error_code DestinationError;
 		const std::filesystem::file_status DestinationStatus = std::filesystem::symlink_status(Path, DestinationError);
 		if (DestinationError != std::errc::no_such_file_or_directory && DestinationError)
@@ -447,8 +592,8 @@ namespace PulseForge
 		Output.close();
 		if (!Output) return std::unexpected(MakeError(AssetImportProvenanceErrorCode::WriteFailed, Path,
 			"Could not write complete import receipt"));
-		auto Replaced = Platform::ReplaceFileAtomically(Temporary, Path);
-		if (!Replaced) return std::unexpected(MakeError(AssetImportProvenanceErrorCode::WriteFailed, Path, Replaced.error().Message));
+		auto Replaced = Replace(Temporary, Path);
+		if (!Replaced) return std::unexpected(MakeError(AssetImportProvenanceErrorCode::WriteFailed, Path, Replaced.error()));
 		return {};
 	}
 }

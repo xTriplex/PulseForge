@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -211,6 +212,13 @@ namespace PulseForge
 		uint64_t Generation = 0;
 	};
 
+	struct AssetDependencyCatalogPublishOptions
+	{
+		// Allows deterministic request supersession at the final commit boundary in tests. Filesystem validation
+		// has completed and no catalog mutex is held when this callback runs.
+		std::function<void()> BeforeFinalTicketValidation;
+	};
+
 	struct AssetDependencyCatalogBuildOptions;
 
 	class PULSEFORGE_API AssetDependencyCatalog final
@@ -222,7 +230,10 @@ namespace PulseForge
 		// Beginning a new project invalidates publication from the prior project. Refreshes in the same project retain
 		// the prior usable snapshot until a complete replacement is published.
 		[[nodiscard]] AssetDependencyCatalogTicket BeginRequest(const UUID& ProjectID);
-		[[nodiscard]] bool Publish(const AssetDependencyCatalogTicket& Ticket, SnapshotPtr Candidate);
+		[[nodiscard]] std::expected<void, AssetDependencyCatalogError> Publish(
+			const AssetDependencyCatalogTicket& Ticket,
+			SnapshotPtr Candidate,
+			const AssetDependencyCatalogPublishOptions& Options = {});
 		[[nodiscard]] SnapshotPtr GetSnapshot() const;
 		[[nodiscard]] bool IsLatestRequest(const AssetDependencyCatalogTicket& Ticket) const;
 
