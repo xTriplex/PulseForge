@@ -1,7 +1,7 @@
 #include "Assets/GltfMeshImporter.h"
-#include "Assets/AssetOperations.h"
 #include "Assets/AssetTypes.h"
 #include "Assets/AssetPathResolver.h"
+#include "Assets/Detail/GltfSourceDocument.h"
 
 #include <nlohmann/json.hpp>
 
@@ -229,72 +229,6 @@ namespace PulseForge
 			return Decoded;
 		}
 
-		std::expected<std::string, GltfMeshImportError> DecodeRelativeUri(
-			std::string_view Uri,
-			const std::filesystem::path& Path)
-		{
-			std::string Decoded;
-			Decoded.reserve(Uri.size());
-			for (size_t Index = 0; Index < Uri.size(); ++Index)
-			{
-				if (Uri[Index] != '%')
-				{
-					Decoded.push_back(Uri[Index]);
-					continue;
-				}
-				if (Index + 2 >= Uri.size())
-				{
-					return std::unexpected(MakeError(
-						GltfMeshImportErrorCode::InvalidBuffer,
-						Path,
-						"External glTF buffer URI contains an incomplete percent escape"));
-				}
-
-				const auto HexValue = [](char Character) -> int
-				{
-					if (Character >= '0' && Character <= '9')
-						return Character - '0';
-					if (Character >= 'a' && Character <= 'f')
-						return Character - 'a' + 10;
-					if (Character >= 'A' && Character <= 'F')
-						return Character - 'A' + 10;
-					return -1;
-				};
-				const int High = HexValue(Uri[Index + 1]);
-				const int Low = HexValue(Uri[Index + 2]);
-				if (High < 0 || Low < 0)
-				{
-					return std::unexpected(MakeError(
-						GltfMeshImportErrorCode::InvalidBuffer,
-						Path,
-						"External glTF buffer URI contains an invalid percent escape"));
-				}
-				const char DecodedCharacter = static_cast<char>((High << 4) | Low);
-				if (DecodedCharacter == '\0' || DecodedCharacter == '\\' || DecodedCharacter == ':' ||
-					DecodedCharacter == '?' || DecodedCharacter == '#')
-				{
-					return std::unexpected(MakeError(
-						GltfMeshImportErrorCode::InvalidBuffer,
-						Path,
-						"External glTF buffer URI contains a forbidden path character"));
-				}
-				Decoded.push_back(DecodedCharacter);
-				Index += 2;
-			}
-
-			if (Decoded.empty() || Decoded.find('\0') != std::string::npos || Decoded.front() == '/' ||
-				Decoded.find('\\') != std::string::npos ||
-				Decoded.find(':') != std::string::npos || Decoded.find('?') != std::string::npos ||
-				Decoded.find('#') != std::string::npos)
-			{
-				return std::unexpected(MakeError(
-					GltfMeshImportErrorCode::InvalidBuffer,
-					Path,
-					"External glTF buffer URI must be a relative file path"));
-			}
-			return Decoded;
-		}
-
 		std::expected<uint64_t, GltfMeshImportError> ReadUnsignedInteger(
 			const Json* Value,
 			const std::filesystem::path& Path,
@@ -407,44 +341,37 @@ namespace PulseForge
 						constexpr std::string_view OctetStreamPrefix = "data:application/octet-stream;base64,";
 						constexpr std::string_view GltfBufferPrefix = "data:application/gltf-buffer;base64,";
 						std::string_view Encoded;
-						if (UriText.starts_with(OctetStreamPrefix))
-							Encoded = std::string_view(UriText).substr(OctetStreamPrefix.size());
-						else if (UriText.starts_with(GltfBufferPrefix))
-							Encoded = std::string_view(UriText).substr(GltfBufferPrefix.size());
+						if (UriText.starts_with(OctetStreamPrefix)) Encoded = std::string_view(UriText).substr(OctetStreamPrefix.size());
+						else if (UriText.starts_with(GltfBufferPrefix)) Encoded = std::string_view(UriText).substr(GltfBufferPrefix.size());
 						else
 						{
-							return std::unexpected(MakeError(
-								GltfMeshImportErrorCode::UnsupportedFeature,
-								SourcePath,
+							return std::unexpected(MakeError(GltfMeshImportErrorCode::UnsupportedFeature, SourcePath,
 								"Only base64 application/octet-stream and application/gltf-buffer data URIs are supported"));
 						}
 						auto Decoded = DecodeBase64(Encoded, SourcePath);
-						if (!Decoded)
-							return std::unexpected(std::move(Decoded.error()));
+						if (!Decoded) return std::unexpected(std::move(Decoded.error()));
 						OwnedData = std::move(*Decoded);
 					}
 					else
 					{
-						auto DecodedUri = DecodeRelativeUri(UriText, SourcePath);
+						auto DecodedUri = Assets::Detail::DecodeGltfBufferUri(UriText);
 						if (!DecodedUri)
-							return std::unexpected(std::move(DecodedUri.error()));
-						const std::filesystem::path UriPath = std::filesystem::u8path(*DecodedUri);
+							return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidBuffer, SourcePath, DecodedUri.error()));
+						if (!*DecodedUri)
+							return std::unexpected(
+								MakeError(GltfMeshImportErrorCode::UnsupportedFeature, SourcePath, "Unsupported embedded glTF buffer URI"));
+						const std::filesystem::path& UriPath = **DecodedUri;
 						if (UriPath.is_absolute() || UriPath.has_root_name() || UriPath.has_root_directory())
 						{
-							return std::unexpected(MakeError(
-								GltfMeshImportErrorCode::InvalidBuffer,
-								SourcePath,
-								"External glTF buffer URI must be relative"));
+							return std::unexpected(
+								MakeError(GltfMeshImportErrorCode::InvalidBuffer, SourcePath, "External glTF buffer URI must be relative"));
 						}
 						for (const auto& Component : UriPath)
 						{
-							if (Component == "." || Component == "..")
-								continue;
+							if (Component == "." || Component == "..") continue;
 							if (HasWindowsAmbiguousTrailingCharacter(Component))
 							{
-								return std::unexpected(MakeError(
-									GltfMeshImportErrorCode::InvalidBuffer,
-									SourcePath,
+								return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidBuffer, SourcePath,
 									"External glTF buffer URI contains a path component that is ambiguous on Windows"));
 							}
 						}
@@ -453,22 +380,17 @@ namespace PulseForge
 						auto ManagedBufferPath = AssetPathResolver::ResolveManagedSourcePath(ProjectRoot, RelativeBufferPath);
 						if (!ManagedBufferPath)
 						{
-							return std::unexpected(MakeError(
-								GltfMeshImportErrorCode::InvalidProjectPath,
-								ManagedBufferPath.error().Path,
+							return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidProjectPath, ManagedBufferPath.error().Path,
 								ManagedBufferPath.error().Message));
 						}
 						auto ReadBuffer = ReadFile(*ManagedBufferPath, MaxDecodedBufferBytes);
-						if (!ReadBuffer)
-							return std::unexpected(std::move(ReadBuffer.error()));
+						if (!ReadBuffer) return std::unexpected(std::move(ReadBuffer.error()));
 						OwnedData = std::move(*ReadBuffer);
 					}
 
 					if (OwnedData.size() < *DeclaredLength)
 					{
-						return std::unexpected(MakeError(
-							GltfMeshImportErrorCode::InvalidBuffer,
-							SourcePath,
+						return std::unexpected(MakeError(GltfMeshImportErrorCode::InvalidBuffer, SourcePath,
 							"glTF buffer data is shorter than its declared byteLength"));
 					}
 					OwnedData.resize(static_cast<size_t>(*DeclaredLength));

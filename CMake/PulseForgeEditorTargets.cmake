@@ -70,6 +70,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 	target_link_libraries(PulseForgeEditorUI
 		PUBLIC PulseForgeRenderer PulseForgeEditorCore
 		PRIVATE PulseForgeCore PulseForgeInput PulseForgeApplication PulseForgeAssetImporters PulseForgeAssetServices
+			PulseForgeAssetDependencyCatalog
 			PulseForgeImGui PulseForgeSceneRenderer freetype spdlog::spdlog
 			nfd::nfd
 	)

@@ -66,6 +66,7 @@ add_library(PulseForgeAssetCatalog STATIC
 	PulseForge/Source/Private/Assets/AssetPathResolver.cpp
 	PulseForge/Source/Private/Assets/AssetReferenceValidator.cpp
 	PulseForge/Source/Private/Assets/AssetRegistry.cpp
+	PulseForge/Source/Private/Assets/GltfSourceDocument.cpp
 )
 target_include_directories(PulseForgeAssetCatalog
 	PUBLIC PulseForge/Source/Public
@@ -185,6 +186,19 @@ target_include_directories(PulseForgeAssetImporters SYSTEM PRIVATE
 target_compile_definitions(PulseForgeAssetImporters PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(PulseForgeAssetImporters PUBLIC PulseForgeAssetCatalog PulseForgeMeshData PulseForgeImageData)
 target_precompile_headers(PulseForgeAssetImporters PRIVATE "${PULSEFORGE_ENGINE_PCH}")
+add_library(PulseForgeAssetDependencyCatalog STATIC
+	PulseForge/Source/Private/Assets/AssetDependencyCatalog.cpp
+	PulseForge/Source/Private/Assets/AssetDependencyExtractor.cpp
+)
+target_include_directories(PulseForgeAssetDependencyCatalog
+	PUBLIC PulseForge/Source/Public
+	PRIVATE PulseForge/Vendor/json/include PulseForge/Vendor/tracy/server
+)
+target_link_libraries(PulseForgeAssetDependencyCatalog
+	PUBLIC PulseForgeAssetCatalog
+	PRIVATE PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization
+)
+target_precompile_headers(PulseForgeAssetDependencyCatalog PRIVATE "${PULSEFORGE_ENGINE_PCH}")
 add_library(PulseForgeApplication STATIC PulseForge/Source/Private/Core/Application.cpp)
 target_include_directories(PulseForgeApplication
 	PUBLIC PulseForge/Source/Public

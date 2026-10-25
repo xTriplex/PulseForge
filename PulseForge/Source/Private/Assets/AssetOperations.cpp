@@ -1,4 +1,6 @@
 #include "Assets/AssetOperations.h"
+
+#include "Assets/Detail/GltfSourceDocument.h"
 #include "Assets/AssetTypes.h"
 
 #include "Assets/AssetMetadata.h"
@@ -249,62 +251,13 @@ namespace PulseForge
 		std::expected<std::optional<FilesystemPath>, std::string> ResolveGltfBufferUri(
 			std::string_view Uri, const FilesystemPath& SourcePath)
 		{
-			if (Uri.starts_with("data:")) return std::optional<FilesystemPath>{};
-
-			std::string Decoded;
-			Decoded.reserve(Uri.size());
-			for (size_t Index = 0; Index < Uri.size(); ++Index)
-			{
-				if (Uri[Index] != '%')
-				{
-					Decoded.push_back(Uri[Index]);
-					continue;
-				}
-				if (Index + 2 >= Uri.size()) return std::unexpected("external buffer URI has an incomplete percent escape");
-
-				const auto HexValue = [](char Character) -> int
-				{
-					if (Character >= '0' && Character <= '9') return Character - '0';
-					if (Character >= 'a' && Character <= 'f') return Character - 'a' + 10;
-					if (Character >= 'A' && Character <= 'F') return Character - 'A' + 10;
-					return -1;
-				};
-				const int High = HexValue(Uri[Index + 1]);
-				const int Low = HexValue(Uri[Index + 2]);
-				if (High < 0 || Low < 0) return std::unexpected("external buffer URI has an invalid percent escape");
-				const char Character = static_cast<char>((High << 4) | Low);
-				if (Character == '\0' || Character == '\\' || Character == ':' || Character == '?' || Character == '#')
-					return std::unexpected("external buffer URI contains a forbidden path character");
-				Decoded.push_back(Character);
-				Index += 2;
-			}
-
-			if (Decoded.empty() || Decoded.front() == '/' || Decoded.find('\0') != std::string::npos ||
-				Decoded.find('\\') != std::string::npos || Decoded.find(':') != std::string::npos ||
-				Decoded.find('?') != std::string::npos || Decoded.find('#') != std::string::npos)
-			{
-				return std::unexpected("external buffer URI must be a relative file path");
-			}
-
-			try
-			{
-				const FilesystemPath RelativePath = std::filesystem::u8path(Decoded);
-				if (RelativePath.is_absolute() || RelativePath.has_root_name() || RelativePath.has_root_directory())
-					return std::unexpected("external buffer URI must be relative");
-				for (const FilesystemPath& Component : RelativePath)
-				{
-					if (Component == "." || Component == "..")
-						return std::unexpected("external buffer URI contains a path component not supported by the glTF importer");
-					const std::u8string Text = Component.generic_u8string();
-					if (!Text.empty() && (Text.back() == u8'.' || Text.back() == u8' '))
-						return std::unexpected("external buffer URI contains a Windows-ambiguous path component");
-				}
-				return std::optional<FilesystemPath>{ (SourcePath.parent_path() / RelativePath).lexically_normal() };
-			}
-			catch (const std::exception& Exception)
-			{
-				return std::unexpected(std::string("external buffer URI is not a valid filesystem path: ") + Exception.what());
-			}
+			auto Decoded = Assets::Detail::DecodeGltfBufferUri(Uri);
+			if (!Decoded) return std::unexpected(Decoded.error());
+			if (!*Decoded) return std::optional<FilesystemPath>{};
+			for (const FilesystemPath& Component : **Decoded)
+				if (Component == "." || Component == "..")
+					return std::unexpected("external buffer URI contains a path component not supported by asset move operations");
+			return std::optional<FilesystemPath>{ (SourcePath.parent_path() / **Decoded).lexically_normal() };
 		}
 
 		std::expected<std::vector<FilesystemPath>, std::string> ReadGltfExternalBufferPaths(const FilesystemPath& SourcePath)

@@ -1,6 +1,7 @@
 #include "Editor/EditorContentBrowserPanel.h"
 
 #include "Assets/AssetPathResolver.h"
+#include "Assets/AssetDependencyCatalog.h"
 #include "Assets/Project.h"
 #include "Editor/EditorAssetPreviewService.h"
 #include "Editor/EditorContentBrowserPolicy.h"
@@ -13,8 +14,65 @@
 
 namespace PulseForgeEditor
 {
+	struct EditorContentBrowserDependencyState
+	{
+		PulseForge::AssetDependencyCatalog Catalog;
+		PulseForge::AssetDependencyCatalog::SnapshotPtr Snapshot;
+		PulseForge::UUID ProjectID;
+		std::string LastError;
+	};
+
 	namespace
 	{
+		std::string PathToUtf8(const std::filesystem::path& Path);
+
+		const char* DependencyKindName(PulseForge::AssetDependencyEdgeKind Kind)
+		{
+			return Kind == PulseForge::AssetDependencyEdgeKind::ImportInput ? "Import input" : "Runtime reference";
+		}
+
+		const char* DependencyStatusName(PulseForge::AssetDependencyStatus Status)
+		{
+			switch (Status)
+			{
+			case PulseForge::AssetDependencyStatus::Resolved:
+				return "resolved";
+			case PulseForge::AssetDependencyStatus::Missing:
+				return "missing";
+			case PulseForge::AssetDependencyStatus::WrongType:
+				return "wrong type";
+			case PulseForge::AssetDependencyStatus::Unsupported:
+				return "unsupported";
+			case PulseForge::AssetDependencyStatus::Invalid:
+				return "invalid";
+			}
+			return "unknown";
+		}
+
+		std::string DependencyNodeLabel(const PulseForge::AssetDependencyCatalogSnapshot& Snapshot,
+			const PulseForge::AssetDependencyNode& Node)
+		{
+			if (!Node.Asset.IsNil())
+			{
+				const auto Record = Snapshot.GetRegistry().Find(Node.Asset);
+				const std::string AssetLabel = Record ? PathToUtf8(Record->ProjectRelativePath) : Node.Asset.ToString();
+				return AssetLabel + (Node.SubresourceKey.empty() ? std::string{} : " [" + Node.SubresourceKey + "]");
+			}
+			return Node.SourceFileKey;
+		}
+
+		void DrawDependencyEdges(const PulseForge::AssetDependencyCatalogSnapshot& Snapshot, const char* Label,
+			const std::vector<PulseForge::AssetDependencyEdge>& Edges, bool ShowTarget)
+		{
+			ImGui::Text("%s (%zu)", Label, Edges.size());
+			for (const PulseForge::AssetDependencyEdge& Edge : Edges)
+			{
+				const std::string NodeLabel = DependencyNodeLabel(Snapshot, ShowTarget ? Edge.Target : Edge.Referrer);
+				ImGui::BulletText("%s: %s (%s)%s%s", DependencyKindName(Edge.Kind), NodeLabel.c_str(), DependencyStatusName(Edge.Status),
+					Edge.Location.empty() ? "" : " — ", Edge.Location.c_str());
+			}
+		}
+
 		std::string PathToUtf8(const std::filesystem::path& Path)
 		{
 			const std::u8string Encoded = Path.generic_u8string();
@@ -211,5 +269,67 @@ namespace PulseForgeEditor
 			ImGui::EndDisabled();
 		}
 		if (IsProtectedScene) Style.TextMuted("Open and startup scenes cannot be deleted.");
+
+		if (!m_DependencyState) m_DependencyState = std::make_shared<EditorContentBrowserDependencyState>();
+		if (m_DependencyState->ProjectID != Project.GetDescription().ID)
+		{
+			m_DependencyState->ProjectID = Project.GetDescription().ID;
+			(void)m_DependencyState->Catalog.BeginRequest(m_DependencyState->ProjectID);
+			m_DependencyState->Snapshot.reset();
+			m_DependencyState->LastError.clear();
+		}
+
+		if (ImGui::CollapsingHeader("Dependency Analysis", ImGuiTreeNodeFlags_DefaultOpen))
+		{
+			if (ImGui::SmallButton("Analyze Project Dependencies"))
+			{
+				const PulseForge::AssetDependencyCatalogTicket Ticket =
+					m_DependencyState->Catalog.BeginRequest(Project.GetDescription().ID);
+				const auto Candidate =
+					PulseForge::AssetDependencyCatalogBuilder::Build(Project.GetRootPath(), Project.GetDescription().ID, Ticket.Generation);
+				if (!Candidate) m_DependencyState->LastError = Candidate.error().Message;
+				else if (!m_DependencyState->Catalog.Publish(Ticket, *Candidate))
+					m_DependencyState->LastError = "The analysis became stale before publication.";
+				else
+				{
+					m_DependencyState->Snapshot = m_DependencyState->Catalog.GetSnapshot();
+					m_DependencyState->LastError.clear();
+				}
+			}
+			if (!m_DependencyState->LastError.empty())
+				ImGui::TextWrapped("Latest analysis failed: %s", m_DependencyState->LastError.c_str());
+			const auto& Snapshot = m_DependencyState->Snapshot;
+			if (!Snapshot)
+			{
+				Style.TextMuted("No dependency snapshot has been published.");
+			}
+			else
+			{
+				ImGui::Text("Catalog generation %llu; %zu diagnostic(s)", static_cast<unsigned long long>(Snapshot->GetGeneration()),
+					Snapshot->GetIssues().size());
+				const auto Record = Snapshot->GetRegistry().Find(Asset.ID);
+				const PulseForge::AssetDependencyNode SelectedNode{ Asset.ID,
+					Record ? PathToUtf8(Record->ProjectRelativePath) : std::string{}, {} };
+				DrawDependencyEdges(*Snapshot, "Direct dependencies", Snapshot->GetDirectDependencies(SelectedNode), true);
+				DrawDependencyEdges(*Snapshot, "Referencers", Snapshot->GetDirectReferencers(SelectedNode), false);
+				for (const PulseForge::AssetDependencyIssue& Issue : Snapshot->GetIssues())
+				{
+					if (Issue.Referrer.Asset == Asset.ID || Issue.Target.Asset == Asset.ID)
+						ImGui::BulletText("Diagnostic: %s", Issue.Message.c_str());
+				}
+				bool HasImportObservation = false;
+				for (const PulseForge::AssetImportObservation& Observation : Snapshot->GetImportObservations())
+				{
+					if (Observation.Asset != Asset.ID) continue;
+					HasImportObservation = true;
+					ImGui::Text("Import inputs: %s (%s)", Observation.ImporterID.c_str(),
+						Observation.ResultState == PulseForge::AssetImportResultState::Unavailable ? "unavailable"
+																								   : "no successful result recorded");
+					ImGui::TextWrapped("Input fingerprint: %s:%s", Observation.InputFingerprint.Algorithm.c_str(),
+						Observation.InputFingerprint.DigestHex.c_str());
+				}
+				if (!HasImportObservation) Style.TextMuted("No import provenance is defined for this asset type.");
+			}
+		}
 	}
 } // namespace PulseForgeEditor

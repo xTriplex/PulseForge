@@ -22,9 +22,10 @@ namespace PulseForge
 
 		std::string PathForMessage(const std::filesystem::path& Path)
 		{
-			return Path.generic_string();
+			const std::u8string UTF8Path = Path.generic_u8string();
+			return { reinterpret_cast<const char*>(UTF8Path.data()), UTF8Path.size() };
 		}
-	}
+	} // namespace
 
 	std::expected<void, AssetRegistryError> AssetRegistry::Rebuild(const std::filesystem::path& ProjectRoot)
 	{
@@ -138,9 +139,7 @@ namespace PulseForge
 		}
 
 		const auto SortByPath = [](const std::filesystem::path& First, const std::filesystem::path& Second)
-		{
-			return First.generic_string() < Second.generic_string();
-		};
+		{ return First.generic_u8string() < Second.generic_u8string(); };
 		std::sort(SourceFiles.begin(), SourceFiles.end(), SortByPath);
 		std::sort(SidecarFiles.begin(), SidecarFiles.end(), SortByPath);
 		std::unordered_map<std::filesystem::path, std::filesystem::path> SidecarsBySourcePath;
