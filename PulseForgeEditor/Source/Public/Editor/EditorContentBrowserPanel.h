@@ -3,6 +3,8 @@
 #include "Editor/EditorContentBrowserAssetView.h"
 #include "Editor/EditorContentBrowserNavigation.h"
 
+#include <memory>
+
 namespace PulseForge
 {
 	class Project;
@@ -12,6 +14,7 @@ namespace PulseForgeEditor
 {
 	class EditorAssetPreviewService;
 	class EditorStyle;
+	struct EditorContentBrowserDependencyState;
 
 	enum class EditorContentBrowserToolbarAction
 	{
@@ -33,11 +36,13 @@ namespace PulseForgeEditor
 	public:
 		void DrawContents(EditorContentBrowserState& State, const PulseForge::Project& Project, bool SceneAvailable,
 			EditorAssetPreviewService& Previews, EditorStyle& Style, EditorContentBrowserPanelActions& Actions);
+		void MarkDependencyAnalysisOutdated();
 		void FocusSearch() noexcept { m_FocusSearchNextFrame = true; }
 
 	private:
 		EditorContentBrowserNavigation m_Navigation;
 		EditorContentBrowserAssetView m_AssetView;
+		std::shared_ptr<EditorContentBrowserDependencyState> m_DependencyState;
 		bool m_FocusSearchNextFrame = false;
 		bool m_DetailsExpandedCompact = false;
 		void DrawSelectedAssetDetails(EditorContentBrowserState& State, const PulseForge::Project& Project, bool SceneAvailable,

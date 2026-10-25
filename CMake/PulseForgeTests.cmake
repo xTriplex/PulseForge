@@ -97,22 +97,33 @@ if(BUILD_TESTING)
 		Tests/SceneAssetTests.cpp
 		Tests/AssetRegistryTests.cpp
 		Tests/AssetOperationsTests.cpp
+		Tests/AssetDependencyCatalogTests.cpp
+		Tests/AssetDependencyCorrectionTests.cpp
+		Tests/AssetDependencyPublicationTests.cpp
 	)
 	target_include_directories(PulseForgeAssetTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_link_libraries(PulseForgeAssetTests PRIVATE
-		PulseForgeAssetCatalog PulseForgeAssetServices PulseForgeSceneSerialization)
+		PulseForgeAssetCatalog PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeAssetDependencyCatalog)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeAssetTests PulseForgePublicHeaderChecks)
 	endif()
 	add_test(NAME PulseForge.Assets COMMAND PulseForgeAssetTests)
+	add_test(NAME PulseForge.AssetDependencyCatalog COMMAND PulseForgeAssetTests --dependency-catalog-only)
+	add_executable(PulseForgeAssetDependencyConsumer Tests/ModuleConsumers/AssetDependencyConsumer.cpp)
+	target_link_libraries(PulseForgeAssetDependencyConsumer PRIVATE PulseForgeAssetDependencyCatalog)
+	set_property(TARGET PulseForgeAssetDependencyConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+	add_test(NAME PulseForge.AssetDependencyConsumer COMMAND PulseForgeAssetDependencyConsumer)
 
 	add_executable(PulseForgeAssetImportTests
 		Tests/PulseForgeAssetImportTests.cpp
 		Tests/GltfMeshImportTests.cpp
+		Tests/GltfMeshImporterRegressionTests.cpp
 		Tests/ImageAssetImportTests.cpp
+		Tests/AssetImportProvenanceTests.cpp
 	)
 	target_include_directories(PulseForgeAssetImportTests PRIVATE Tests PulseForge/Vendor/json/include)
-	target_link_libraries(PulseForgeAssetImportTests PRIVATE PulseForgeAssetImporters PulseForgeAssetServices)
+	target_link_libraries(PulseForgeAssetImportTests PRIVATE
+		PulseForgeAssetImporters PulseForgeAssetServices PulseForgeAssetDependencyCatalog)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeAssetImportTests PulseForgePublicHeaderChecks)
 	endif()
@@ -238,7 +249,7 @@ if(BUILD_TESTING)
 	if(PULSEFORGE_BUILD_EDITOR)
 		set(PULSEFORGE_EDITOR_INTEGRATION_LIBRARIES
 			PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath
-			PulseForgeAssetCatalog PulseForgeAssetImporters PulseForgeAudio PulseForgeAudioAssets
+			PulseForgeAssetCatalog PulseForgeAssetImporters PulseForgeAssetDependencyCatalog PulseForgeAudio PulseForgeAudioAssets
 			PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeScripting PulseForgeRuntime
 			PulseForgeRenderer PulseForgeApplication PulseForgeSceneRenderer
 		)
@@ -311,6 +322,7 @@ if(BUILD_TESTING)
 		PulseForgeAssetTests
 		PulseForgeAssetImportTests
 		PulseForgeAssetImporterConsumer
+		PulseForgeAssetDependencyConsumer
 		PulseForgeSceneRendererConsumer
 		PulseForgeAudioRuntimeTests
 		PulseForgeScriptingRuntimeTests

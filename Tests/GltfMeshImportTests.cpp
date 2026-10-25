@@ -1,6 +1,7 @@
 #include "TestEngineSupport.h"
 
 #include "Assets/AssetOperations.h"
+#include "Assets/Detail/GltfSourceDocument.h"
 
 #include <cstring>
 

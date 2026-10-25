@@ -55,11 +55,11 @@ if(BUILD_TESTING)
 endif()
 
 foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath
-		PulseForgeAssetCatalog PulseForgeAssetImporters PulseForgeAudio PulseForgeAudioAssets PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics
+		PulseForgeAssetCatalog PulseForgeAssetImporters PulseForgeAssetDependencyCatalog PulseForgeAudio PulseForgeAudioAssets PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics
 		PulseForgeScripting PulseForgeRuntime PulseForgeRenderer PulseForgeMeshData
 		PulseForgeApplication PulseForgeSceneRenderer
 		PulseForge PulseForgeGame PulseForgeEditor PulseForgeEditorCore PulseForgeEditorUI PulseForgeRendererTests PulseForgeRenderMathTests PulseForgeGpuValidationAnalysis PulseForgeGpuValidationAnalysisTests
-		PulseForgeCoreTests PulseForgeCoreConsumer PulseForgeSceneTests PulseForgeAssetTests PulseForgeAssetImportTests PulseForgeAssetImporterConsumer PulseForgeAudioRuntimeTests
+		PulseForgeCoreTests PulseForgeCoreConsumer PulseForgeSceneTests PulseForgeAssetTests PulseForgeAssetImportTests PulseForgeAssetImporterConsumer PulseForgeAssetDependencyConsumer PulseForgeAudioRuntimeTests
 		PulseForgeSceneRendererConsumer PulseForgeEditorCoreConsumer PulseForgeScriptingRuntimeTests PulseForgeEditorTests PulseForgeEditorWorkspacePresentationTests PulseForgeEditorCoreTests
 		PulseForgeBufferUpdateTests PulseForgeCommandHistoryFailureTests PulseForgeEditorDocumentTransferFailureTests PulseForgeGpuValidation
 		PulseForgeLinuxWindowLifecycleValidation PulseForgeEditorImGuiProofRenderer PulseForgeMacOSRendererValidation
@@ -78,7 +78,7 @@ foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSe
 			$<$<CONFIG:Dist>:PF_DIST>
 		)
 		if(PULSEFORGE_ENABLE_MSVC_ANALYSIS AND
-			"${Target}" MATCHES "^(PulseForgeAssetImporters|PulseForgeMeshData|PulseForgeEditorCore|PulseForgeEditorUI|PulseForgeSceneRenderer)$")
+			"${Target}" MATCHES "^(PulseForgeAssetImporters|PulseForgeAssetDependencyCatalog|PulseForgeMeshData|PulseForgeEditorCore|PulseForgeEditorUI|PulseForgeSceneRenderer)$")
 			target_compile_options(${Target} PRIVATE /analyze /analyze:external- /external:W0)
 		endif()
 	endif()
