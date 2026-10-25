@@ -832,7 +832,7 @@ namespace PulseForge
 			case AssetPreparationStatus::Queued:
 			case AssetPreparationStatus::Processing:
 				if (State.GpuTextures) return std::cref(*State.GpuTextures);
-				return std::unexpected(MakeError(Asset, "Environment CPU preparation is pending"));
+				return std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>{};
 			case AssetPreparationStatus::CpuReady:
 			{
 				const auto* Product = Prepared.CpuPayload
@@ -847,7 +847,7 @@ namespace PulseForge
 				if (m_UploadBudget && !m_UploadBudget->TryReserve(Prepared.CpuPayload->GetRetainedBytes()))
 				{
 					if (State.GpuTextures) return std::cref(*State.GpuTextures);
-					return std::unexpected(MakeError(Asset, "Environment GPU upload is deferred by the per-frame upload budget"));
+					return std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>{};
 				}
 				if (m_Diagnostics)
 				{
