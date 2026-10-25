@@ -231,7 +231,7 @@ namespace
 					Fail("Could not prepare the PBR scene: " + Prepared.error().Message);
 					return;
 				}
-				if (m_SceneRenderer->IsEnvironmentLightingPending()) return;
+				if (m_SceneRenderer->IsAssetPreparationPending()) return;
 				if (!m_SceneRenderer->HasPreparedEnvironmentLighting())
 				{
 					Fail("The PBR scene did not finish preparing its HDR environment lighting");
