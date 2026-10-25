@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Assets/AssetPreparationService.h"
 #include "Core/Core.h"
 #include "Renderer/Graphics.h"
 #include "Renderer/Binding.h"
@@ -37,6 +38,7 @@ namespace PulseForge
 		ResourceCreationFailed,
 		SnapshotBuildFailed,
 		AssetLoadFailed,
+		AssetLoadPending,
 		MissingMaterial,
 		UnsupportedVertexLayout,
 		DrawFailed
@@ -159,6 +161,8 @@ namespace PulseForge
 		// Invalidates project asset data and dependent bindings at an update boundary before command recording.
 		void RefreshProjectAssets() noexcept;
 		[[nodiscard]] bool IsEnvironmentLightingPending() const noexcept { return m_EnvironmentLightingPending; }
+		[[nodiscard]] bool IsAssetPreparationPending() const noexcept { return m_AssetPreparationPending; }
+		[[nodiscard]] AssetPreparationServiceStats GetAssetPreparationStats() const noexcept;
 		[[nodiscard]] bool HasPreparedEnvironmentLighting() const noexcept { return m_PreparedEnvironmentReady; }
 		// Narrow diagnostic access used by the opt-in GPU validation harness to read actual cubemap face depth.
 		[[nodiscard]] const Texture* GetPointShadowFaceTextureForValidation(size_t Slot, uint32_t Face) const noexcept;
@@ -258,6 +262,7 @@ namespace PulseForge
 		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;
 		std::unique_ptr<AmbientOcclusionPass> m_AmbientOcclusionPass;
 		bool m_EnvironmentLightingPending = false;
+		bool m_AssetPreparationPending = false;
 		bool m_PreparedEnvironmentReady = false;
 		bool m_LoggedFirstSnapshotPreparation = false;
 		std::unique_ptr<SceneRendererMaterialBindingCache> m_MaterialBindingCache;

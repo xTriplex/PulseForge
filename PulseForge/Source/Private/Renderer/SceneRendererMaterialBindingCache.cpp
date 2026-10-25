@@ -152,7 +152,9 @@ namespace PulseForge
 			if (TextureAsset.IsNil()) return std::cref(Fallback);
 			auto Texture = m_Textures->GetOrLoad(TextureAsset, Format);
 			if (!Texture)
-				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, {}, TextureAsset,
+				return std::unexpected(SceneRendererError{ Texture.error().Code == TextureAssetErrorCode::Pending
+															? SceneRendererErrorCode::AssetLoadPending
+															: SceneRendererErrorCode::AssetLoadFailed, {}, TextureAsset,
 					"Could not load " + std::string(Name) + " texture for material " + MaterialAsset.ToString() + ": " +
 						Texture.error().Message });
 			return std::cref(Texture->get());

@@ -81,3 +81,4 @@ Thumbs.db
 **/.pulseforge/cache/
 **/.pulseforge/imported/
 **/.pulseforge/derived/
+**/.pulseforge/DerivedData/

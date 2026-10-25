@@ -6659,10 +6659,16 @@ namespace
 								(ImGui::GetIO().MouseReleased[ImGuiMouseButton_Right] || !ImGui::GetIO().MouseDown[ImGuiMouseButton_Right]))
 								EndEditorCameraNavigation();
 							if (ShowEditorOverlays) DrawViewportOrientationWidget(ImGui::GetWindowDrawList(), ImageMinimum, ImageMaximum);
-							if (m_ViewportRenderView.IsEnvironmentLightingPending())
+							if (m_ViewportRenderView.IsAssetPreparationPending())
+							{
+								const auto& Preparation = m_ViewportRenderView.GetAssetPreparationStats();
+								const std::string Status = "Preparing scene assets (" + std::to_string(Preparation.ActiveJobs) +
+									" active, " + std::to_string(Preparation.QueuedJobs) + " queued, " +
+									std::to_string(Preparation.CpuReadyJobs) + " awaiting upload)";
 								ImGui::GetWindowDrawList()->AddText(ImVec2(ImageMinimum.x + 12.0f, ImageMinimum.y + 12.0f),
 									ImGui::GetColorU32(m_EditorStyle.GetColor(PulseForgeEditor::EditorColorToken::TextMuted)),
-									"Preparing environment lighting...");
+									Status.c_str());
+							}
 						}
 						else
 						{

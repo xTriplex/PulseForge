@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Assets/AssetPreparationService.h"
 #include "Renderer/RenderTarget.h"
 #include "Renderer/RenderDevice.h"
 #include "Scene/UUID.h"
@@ -56,6 +57,11 @@ namespace PulseForgeEditor
 		[[nodiscard]] bool IsSceneReady() const noexcept { return m_SceneReady; }
 		[[nodiscard]] bool IsViewProjectionValid() const noexcept { return m_ViewProjectionValid; }
 		[[nodiscard]] bool IsEnvironmentLightingPending() const noexcept { return m_EnvironmentLightingPending; }
+		[[nodiscard]] bool IsAssetPreparationPending() const noexcept { return m_AssetPreparationPending; }
+		[[nodiscard]] const PulseForge::AssetPreparationServiceStats& GetAssetPreparationStats() const noexcept
+		{
+			return m_AssetPreparationStats;
+		}
 		[[nodiscard]] bool HasPreparedEnvironmentLighting() const noexcept;
 		[[nodiscard]] const glm::mat4& GetViewProjection() const noexcept { return m_ViewProjection; }
 		[[nodiscard]] const std::string& GetTargetError() const noexcept { return m_TargetError; }
@@ -88,6 +94,8 @@ namespace PulseForgeEditor
 		bool m_SceneReady = false;
 		bool m_ViewProjectionValid = false;
 		bool m_EnvironmentLightingPending = false;
+		bool m_AssetPreparationPending = false;
+		PulseForge::AssetPreparationServiceStats m_AssetPreparationStats;
 		EditorViewportInitializationRetry m_SceneRendererInitializationRetry;
 		std::string m_TargetError;
 		std::string m_SceneError;

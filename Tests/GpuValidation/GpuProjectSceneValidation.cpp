@@ -200,7 +200,7 @@ namespace PulseForge::GpuValidation
 			Fail("Scene renderer preparation changed serialized scene state or created a material asset");
 			return;
 		}
-		if (m_SceneRenderer.IsEnvironmentLightingPending()) return;
+		if (m_SceneRenderer.IsAssetPreparationPending()) return;
 		m_ScenePrepared = true;
 	}
 
@@ -288,7 +288,7 @@ namespace PulseForge::GpuValidation
 			Fail("Could not prepare the transparency project startup scene: " + Prepared.error().Message);
 			return;
 		}
-		if (m_SceneRenderer.IsEnvironmentLightingPending()) return;
+		if (m_SceneRenderer.IsAssetPreparationPending()) return;
 		const auto Snapshot = SceneRenderSnapshotBuilder::Build(m_Scene, Aspect);
 		if (!Snapshot)
 		{

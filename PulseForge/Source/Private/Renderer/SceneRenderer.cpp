@@ -10,6 +10,8 @@
 #include "Renderer/SceneRendererMaterialBindingCache.h"
 
 #include "Assets/MaterialAssetCache.h"
+#include "Assets/AssetPreparationService.h"
+#include "Assets/DerivedDataArtifactStore.h"
 #include "Renderer/AssetCache/MeshAssetCache.h"
 #include "Assets/Project.h"
 #include "Renderer/AssetCache/TextureAssetCache.h"
@@ -21,6 +23,7 @@
 #include "Scene/Components/EnvironmentLightComponent.h"
 
 #include <cmath>
+#include <atomic>
 #include <fstream>
 #include <iterator>
 #include <span>
@@ -127,25 +130,44 @@ namespace PulseForge
 
 	struct SceneRenderer::ProjectAssetCaches final
 	{
+		DerivedDataArtifactStore Artifacts;
+		AssetPreparationService Preparation;
+		AssetUploadBudget UploadBudget;
+		std::string SessionKey;
 		MeshAssetCache Meshes;
 		TextureAssetCache Textures;
 		MaterialAssetCache Materials;
 		EnvironmentLightingCache EnvironmentLighting;
 
+		static std::string MakeSessionKey(const std::filesystem::path& ProjectRoot)
+		{
+			static std::atomic<uint64_t> NextSession{ 1 };
+			const uint64_t Session = NextSession.fetch_add(1, std::memory_order_relaxed);
+			return ProjectRoot.lexically_normal().generic_string() + "#session-" + std::to_string(Session);
+		}
+
 		ProjectAssetCaches(RenderDevice& Runtime, const Project& SourceProject)
-			: Meshes(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry(), Runtime.GetDiagnosticRecorder()),
-			  Textures(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry(), Runtime.GetDiagnosticRecorder()),
+			: Artifacts(DerivedDataArtifactStoreOptions{ SourceProject.GetRootPath() / ".pulseforge" / "DerivedData" }),
+			  SessionKey(MakeSessionKey(SourceProject.GetRootPath())),
+			  Meshes(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry(), Preparation, &UploadBudget,
+				  Artifacts, SessionKey,
+				  Runtime.GetDiagnosticRecorder()),
+			  Textures(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry(), Preparation, &UploadBudget,
+				  Artifacts, SessionKey,
+				  Runtime.GetDiagnosticRecorder()),
 			  Materials(SourceProject.GetRootPath(), SourceProject.GetAssetRegistry()),
-			  EnvironmentLighting(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry(), Runtime.GetDiagnosticRecorder())
+			  EnvironmentLighting(Runtime, SourceProject.GetRootPath(), SourceProject.GetAssetRegistry(), Preparation,
+				  &UploadBudget, Artifacts, SessionKey, Runtime.GetDiagnosticRecorder())
 		{
 		}
 
 		void Clear() noexcept
 		{
-			Meshes.Clear();
-			Textures.Clear();
+			SessionKey = MakeSessionKey(Artifacts.GetOptions().Root.parent_path().parent_path());
+			Meshes.SetSessionKey(SessionKey);
+			Textures.SetSessionKey(SessionKey);
+			EnvironmentLighting.SetSessionKey(SessionKey);
 			Materials.Clear();
-			EnvironmentLighting.Clear();
 		}
 	};
 
@@ -160,6 +182,11 @@ namespace PulseForge
 	}
 
 	SceneRenderer::~SceneRenderer() = default;
+
+	AssetPreparationServiceStats SceneRenderer::GetAssetPreparationStats() const noexcept
+	{
+		return m_ProjectAssetCaches->Preparation.GetStats();
+	}
 
 	const Texture* SceneRenderer::GetPointShadowFaceTextureForValidation(size_t Slot, uint32_t Face) const noexcept
 	{
@@ -600,7 +627,9 @@ namespace PulseForge
 		}
 		m_PreparedSnapshot.reset();
 		m_EnvironmentLightingPending = false;
+		m_AssetPreparationPending = false;
 		m_PreparedEnvironmentReady = false;
+		m_ProjectAssetCaches->UploadBudget.BeginFrame();
 		if (!Snapshot)
 		{
 			return std::unexpected(SceneRendererError{
@@ -635,6 +664,7 @@ namespace PulseForge
 			if (!LoadedEnvironment->has_value())
 			{
 				m_EnvironmentLightingPending = true;
+				m_AssetPreparationPending = true;
 				BindingEnvironmentAsset.reset();
 			}
 			else
@@ -649,11 +679,18 @@ namespace PulseForge
 		}
 
 		std::optional<VertexLayoutDesc> SceneVertexLayout;
+		std::vector<SceneMeshInstance> ReadyMeshes;
+		ReadyMeshes.reserve(Snapshot->Meshes.size());
 		for (const SceneMeshInstance& Instance : Snapshot->Meshes)
 		{
 			auto Mesh = m_ProjectAssetCaches->Meshes.GetOrLoad(Instance.MeshAsset);
 			if (!Mesh)
 			{
+				if (Mesh.error().Code == MeshAssetErrorCode::Pending)
+				{
+					m_AssetPreparationPending = true;
+					continue;
+				}
 				return std::unexpected(SceneRendererError{
 					SceneRendererErrorCode::AssetLoadFailed,
 					Instance.Entity,
@@ -681,10 +718,17 @@ namespace PulseForge
 			else if (!BindingEnvironmentAsset) Bindings = m_MaterialBindingCache->EnsureDefaultMaterialBindings(*EnvironmentTextures);
 			if (!Bindings)
 			{
+				if (Bindings.error().Code == SceneRendererErrorCode::AssetLoadPending)
+				{
+					m_AssetPreparationPending = true;
+					continue;
+				}
 				Bindings.error().Entity = Instance.Entity;
 				return std::unexpected(std::move(Bindings.error()));
 			}
+			ReadyMeshes.push_back(Instance);
 		}
+		Snapshot->Meshes = std::move(ReadyMeshes);
 
 		if (SceneVertexLayout)
 		{
@@ -783,6 +827,7 @@ namespace PulseForge
 		m_PreparedCascades.reset();
 		m_PreparedEnvironmentTextures = &m_FallbackEnvironmentTextures;
 		m_EnvironmentLightingPending = false;
+		m_AssetPreparationPending = false;
 		m_PreparedEnvironmentReady = false;
 		m_MaterialBindingCache->RefreshProjectAssets();
 		m_ProjectAssetCaches->Clear();
