@@ -119,6 +119,7 @@ if(BUILD_TESTING)
 		Tests/AssetPreparationMetricsTests.cpp
 		Tests/DerivedDataArtifactStoreTests.cpp
 		Tests/DerivedAssetPreparationTests.cpp
+		Tests/DerivedDataG06Workload.cpp
 		Tests/EnvironmentLightingCacheTests.cpp
 		Tests/AssetUploadBudgetTests.cpp
 	)

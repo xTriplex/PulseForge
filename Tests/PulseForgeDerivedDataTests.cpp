@@ -5,6 +5,7 @@ void RunAssetPreparationServiceTests(TestRunner& Tests);
 void RunAssetPreparationMetricsTests(TestRunner& Tests);
 void RunDerivedDataArtifactStoreTests(TestRunner& Tests);
 void RunDerivedAssetPreparationTests(TestRunner& Tests);
+void RunG06RepresentativeWorkloadMeasurement(TestRunner& Tests);
 void RunEnvironmentLightingCacheTests(TestRunner& Tests);
 void RunAssetUploadBudgetTests(TestRunner& Tests);
 
@@ -16,6 +17,7 @@ int main()
 	RunAssetPreparationMetricsTests(Tests);
 	RunDerivedDataArtifactStoreTests(Tests);
 	RunDerivedAssetPreparationTests(Tests);
+	RunG06RepresentativeWorkloadMeasurement(Tests);
 	RunEnvironmentLightingCacheTests(Tests);
 	RunAssetUploadBudgetTests(Tests);
 	return Tests.Finish();

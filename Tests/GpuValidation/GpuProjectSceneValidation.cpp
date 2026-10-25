@@ -314,6 +314,7 @@ namespace PulseForge::GpuValidation
 						return;
 					}
 					m_G11GateReleased = true;
+					m_G11GateReleasedAt = std::chrono::steady_clock::now();
 					for (const auto& Gate : m_G11PreparationGates)
 						if (Gate) Gate->Release();
 					PF_INFO("G11_RESPONSIVENESS_RESULT=PASS; held_worker_frames={0}; render_frames={1}; queued_jobs_high_water={2}; "
@@ -324,6 +325,16 @@ namespace PulseForge::GpuValidation
 #endif
 			return;
 		}
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+		if (m_G11GateReleased && !m_G11SceneReadinessRecorded)
+		{
+			const auto ReadyAt = std::chrono::steady_clock::now();
+			PF_INFO("G11_G06_PBR_RENDER_READY gate_release_to_scene_ready_us={0}; acceptance_start_to_scene_ready_us={1}",
+				std::chrono::duration_cast<std::chrono::microseconds>(ReadyAt - m_G11GateReleasedAt).count(),
+				std::chrono::duration_cast<std::chrono::microseconds>(ReadyAt - m_StartedAt).count());
+			m_G11SceneReadinessRecorded = true;
+		}
+#endif
 		m_ScenePrepared = true;
 	}
 
