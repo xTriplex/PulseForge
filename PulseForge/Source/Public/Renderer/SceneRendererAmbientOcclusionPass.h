@@ -22,7 +22,7 @@ namespace PulseForge
 			const SceneRenderSnapshot& Snapshot;
 			const std::optional<VertexLayoutDesc>& SceneVertexLayout;
 			const BindingLayoutHandle& SceneMaterialLayout;
-			const std::vector<std::pair<AssetID, const Mesh*>>& PreparedMeshes;
+			const PreparedMeshResourceMap& PreparedMeshes;
 			const Buffer& FullscreenTriangle;
 			const MaterialResolver& ResolveMaterial;
 			const BindingResolver& ResolveBindings;

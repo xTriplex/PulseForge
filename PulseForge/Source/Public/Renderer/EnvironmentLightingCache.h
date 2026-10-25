@@ -92,6 +92,7 @@ namespace PulseForge
 	};
 
 	// CPU decoding/preprocessing is asynchronous; GPU upload and texture ownership stay on the renderer thread.
+	// Returned resource references remain valid until a later AdvancePending() publishes a replacement, Clear(), or destruction.
 	// The optional diagnostics recorder must outlive this cache and is only used from synchronous renderer-thread calls.
 	class EnvironmentLightingCache final
 	{
@@ -133,6 +134,7 @@ namespace PulseForge
 		EnvironmentLightingCache& operator=(const EnvironmentLightingCache&) = delete;
 		[[nodiscard]] std::expected<std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>, EnvironmentLightingCacheError>
 		GetOrLoad(const AssetID& Asset);
+		// Publishes completed renderer resources as one pre-frame phase. GetOrLoad only admits/resolves in async mode.
 		// Advance admitted CPU products and renderer uploads independently of binding-cache lookup results.
 		[[nodiscard]] bool AdvancePending();
 		[[nodiscard]] uint64_t GetResourceRevision(const AssetID& Asset) const noexcept;
@@ -145,6 +147,9 @@ namespace PulseForge
 		void Clear() noexcept;
 
 	private:
+		[[nodiscard]] std::expected<std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>, EnvironmentLightingCacheError>
+		GetOrLoadInternal(const AssetID& Asset, bool CollectReadyProduct);
+
 		struct Entry
 		{
 			std::optional<AssetPreparationService::Subscription> Pending;

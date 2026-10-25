@@ -22,6 +22,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -33,6 +34,9 @@ namespace PulseForge
 	class SceneRendererPipelineCache;
 	class SceneRendererMaterialBindingCache;
 	class Mesh;
+
+	using PreparedMeshResourceMap = std::unordered_map<AssetID, const Mesh*, UUIDHash>;
+	using PreparedMaterialBindingMap = std::unordered_map<UUID, const BindingSet*, UUIDHash>;
 
 	enum class SceneRendererErrorCode : uint8_t
 	{
@@ -264,8 +268,9 @@ namespace PulseForge
 		TextureHandle m_FallbackPointShadowTexture;
 		EnvironmentLightingTextures m_FallbackEnvironmentTextures;
 		std::optional<SceneRenderSnapshot> m_PreparedSnapshot;
-		std::vector<std::pair<AssetID, const Mesh*>> m_PreparedMeshResources;
-		std::vector<std::pair<UUID, const BindingSet*>> m_PreparedMaterialBindings;
+		// Non-owning frame pins. The next PrepareSnapshot clears them before cache publication advances any resource.
+		PreparedMeshResourceMap m_PreparedMeshResources;
+		PreparedMaterialBindingMap m_PreparedMaterialBindings;
 		std::vector<const SceneMeshInstance*> m_TransparentDrawOrder;
 		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
 		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;

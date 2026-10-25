@@ -40,7 +40,8 @@ namespace PulseForge
 
 	// Per-project runtime GPU cache. The rendering device, project registry, optional upload budget and diagnostics recorder
 	// must outlive this cache.
-	// Returned texture references remain valid until Clear() or cache destruction. The cache is not thread-safe.
+	// Returned texture references remain valid until a later AdvancePending() publishes a replacement, Clear(), or destruction.
+	// The cache is not thread-safe.
 	class TextureAssetCache final
 	{
 	public:
@@ -73,6 +74,8 @@ namespace PulseForge
 		TextureAssetCache(TextureAssetCache&&) = delete;
 		TextureAssetCache& operator=(TextureAssetCache&&) = delete;
 
+		// In asynchronous mode this admits preparation and returns the last published texture. GPU publication happens only
+		// in AdvancePending(), before a renderer begins resolving resources for a prepared frame.
 		[[nodiscard]] std::expected<std::reference_wrapper<const Texture>, TextureAssetError> GetOrLoad(
 			const AssetID& Asset, TextureFormat Format = TextureFormat::RGBA8_Srgb);
 		// Advance every admitted texture request on the render owner, even when an existing material binding is still usable.
@@ -87,6 +90,9 @@ namespace PulseForge
 		[[nodiscard]] size_t GetLoadedCount() const noexcept;
 
 	private:
+		[[nodiscard]] std::expected<std::reference_wrapper<const Texture>, TextureAssetError> GetOrLoadInternal(
+			const AssetID& Asset, TextureFormat Format, bool CollectReadyProduct);
+
 		struct CacheKey
 		{
 			AssetID Asset;

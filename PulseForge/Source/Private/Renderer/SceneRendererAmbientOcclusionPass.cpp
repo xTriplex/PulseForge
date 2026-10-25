@@ -27,10 +27,9 @@ namespace PulseForge
 			return { SceneRendererErrorCode::DrawFailed, {}, {}, std::move(Message) };
 		}
 
-		const Mesh* FindPreparedMesh(const std::vector<std::pair<AssetID, const Mesh*>>& PreparedMeshes, const AssetID& Asset)
+		const Mesh* FindPreparedMesh(const PreparedMeshResourceMap& PreparedMeshes, const AssetID& Asset)
 		{
-			const auto Found = std::find_if(PreparedMeshes.begin(), PreparedMeshes.end(),
-				[&Asset](const auto& Entry) { return Entry.first == Asset; });
+			const auto Found = PreparedMeshes.find(Asset);
 			return Found == PreparedMeshes.end() ? nullptr : Found->second;
 		}
 

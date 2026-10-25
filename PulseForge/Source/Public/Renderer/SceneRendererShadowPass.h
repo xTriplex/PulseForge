@@ -29,8 +29,8 @@ namespace PulseForge
 			ShadowTargetCache& Targets;
 			SceneRendererPipelineCache& Pipelines;
 			SceneRendererMaterialBindingCache& MaterialBindings;
-			const std::vector<std::pair<AssetID, const Mesh*>>& PreparedMeshes;
-			const std::vector<std::pair<UUID, const BindingSet*>>& PreparedMaterialBindings;
+			const PreparedMeshResourceMap& PreparedMeshes;
+			const PreparedMaterialBindingMap& PreparedMaterialBindings;
 			const BindingLayoutHandle& SpotlightLayout;
 			const BindingLayoutHandle& PointLightLayout;
 			const Sampler& ShadowSampler;

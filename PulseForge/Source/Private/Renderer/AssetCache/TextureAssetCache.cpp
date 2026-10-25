@@ -119,6 +119,12 @@ namespace PulseForge
 	std::expected<std::reference_wrapper<const Texture>, TextureAssetError> TextureAssetCache::GetOrLoad(
 		const AssetID& Asset, TextureFormat Format)
 	{
+		return GetOrLoadInternal(Asset, Format, false);
+	}
+
+	std::expected<std::reference_wrapper<const Texture>, TextureAssetError> TextureAssetCache::GetOrLoadInternal(
+		const AssetID& Asset, TextureFormat Format, bool CollectReadyProduct)
+	{
 		if (Asset.IsNil() || !m_Registry->Find(Asset))
 		{
 			return std::unexpected(TextureAssetError{ TextureAssetErrorCode::AssetNotFound, Asset,
@@ -253,6 +259,12 @@ namespace PulseForge
 				return std::cref(*State.Current);
 			if (State.TerminalFailure)
 				return std::unexpected(TextureAssetError{ State.TerminalFailureCode, Asset, State.FailureMessage });
+			return std::unexpected(TextureAssetError{ TextureAssetErrorCode::Pending, Asset, "Texture preparation is pending" });
+		}
+		if (!CollectReadyProduct)
+		{
+			if (State.Current)
+				return std::cref(*State.Current);
 			return std::unexpected(TextureAssetError{ TextureAssetErrorCode::Pending, Asset, "Texture preparation is pending" });
 		}
 
@@ -396,7 +408,7 @@ namespace PulseForge
 			if (Found == m_Textures.end())
 				continue;
 			const uint64_t PreviousRevision = Found->second.ResourceRevision;
-			(void)GetOrLoad(Key.Asset, Key.Format);
+			(void)GetOrLoadInternal(Key.Asset, Key.Format, true);
 			const auto Updated = m_Textures.find(Key);
 			PublishedReplacement |= Updated != m_Textures.end() && Updated->second.ResourceRevision != PreviousRevision;
 		}

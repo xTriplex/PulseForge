@@ -768,6 +768,12 @@ namespace PulseForge
 	std::expected<std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>, EnvironmentLightingCacheError>
 	EnvironmentLightingCache::GetOrLoad(const AssetID& Asset)
 	{
+		return GetOrLoadInternal(Asset, false);
+	}
+
+	std::expected<std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>, EnvironmentLightingCacheError>
+	EnvironmentLightingCache::GetOrLoadInternal(const AssetID& Asset, bool CollectReadyProduct)
+	{
 		if (m_SessionKey.empty())
 		{
 			const auto Existing = m_Entries.find(Asset);
@@ -851,6 +857,12 @@ namespace PulseForge
 		{
 			if (State.GpuTextures) return std::cref(*State.GpuTextures);
 			return std::unexpected(MakeError(Asset, State.Error.empty() ? "Environment preparation is pending" : State.Error));
+		}
+		if (!CollectReadyProduct)
+		{
+			if (State.GpuTextures)
+				return std::cref(*State.GpuTextures);
+			return std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>{};
 		}
 
 		const AssetPreparationSnapshot Prepared = State.Pending->Poll();
@@ -947,7 +959,7 @@ namespace PulseForge
 			if (Found == m_Entries.end())
 				continue;
 			const uint64_t PreviousRevision = Found->second->ResourceRevision;
-			(void)GetOrLoad(Asset);
+			(void)GetOrLoadInternal(Asset, true);
 			const auto Updated = m_Entries.find(Asset);
 			PublishedReplacement |= Updated != m_Entries.end() && Updated->second->ResourceRevision != PreviousRevision;
 		}

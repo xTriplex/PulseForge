@@ -11,6 +11,7 @@
 #include <limits>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace PulseForge
 {
@@ -108,6 +109,12 @@ namespace PulseForge
 	}
 
 	std::expected<std::reference_wrapper<const Mesh>, MeshAssetError> MeshAssetCache::GetOrLoad(const AssetID& Asset)
+	{
+		return GetOrLoadInternal(Asset, false);
+	}
+
+	std::expected<std::reference_wrapper<const Mesh>, MeshAssetError> MeshAssetCache::GetOrLoadInternal(
+		const AssetID& Asset, bool CollectReadyProduct)
 	{
 		if (Asset.IsNil())
 			return std::unexpected(MeshAssetError{ MeshAssetErrorCode::AssetNotFound, Asset,
@@ -240,6 +247,12 @@ namespace PulseForge
 				return std::unexpected(MeshAssetError{ State.TerminalFailureCode, Asset, State.FailureMessage });
 			return std::unexpected(MeshAssetError{ MeshAssetErrorCode::Pending, Asset, "Mesh preparation is pending" });
 		}
+		if (!CollectReadyProduct)
+		{
+			if (State.Current)
+				return std::cref(*State.Current);
+			return std::unexpected(MeshAssetError{ MeshAssetErrorCode::Pending, Asset, "Mesh preparation is pending" });
+		}
 
 		const AssetPreparationSnapshot Prepared = State.Pending->Poll();
 		switch (Prepared.Status)
@@ -343,6 +356,30 @@ namespace PulseForge
 				return std::unexpected(MeshAssetError{ MeshAssetErrorCode::Pending, Asset, "Mesh preparation was cancelled" });
 		}
 		return std::unexpected(MeshAssetError{ MeshAssetErrorCode::CacheFailure, Asset, "Unrecognized mesh preparation state" });
+	}
+
+	bool MeshAssetCache::AdvancePending()
+	{
+		std::vector<AssetID> Assets;
+		Assets.reserve(m_Meshes.size());
+		for (const auto& [Asset, State] : m_Meshes)
+		{
+			(void)State;
+			Assets.push_back(Asset);
+		}
+
+		bool PublishedReplacement = false;
+		for (const AssetID& Asset : Assets)
+		{
+			const auto Found = m_Meshes.find(Asset);
+			if (Found == m_Meshes.end())
+				continue;
+			const Mesh* Previous = Found->second.Current.get();
+			(void)GetOrLoadInternal(Asset, true);
+			const auto Updated = m_Meshes.find(Asset);
+			PublishedReplacement |= Updated != m_Meshes.end() && Updated->second.Current.get() != Previous;
+		}
+		return PublishedReplacement;
 	}
 
 	void MeshAssetCache::Clear() noexcept

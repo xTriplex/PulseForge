@@ -84,10 +84,9 @@ namespace PulseForge
 			return true;
 		}
 
-		const Mesh* FindPreparedMesh(const std::vector<std::pair<AssetID, const Mesh*>>& PreparedMeshes, const AssetID& Asset)
+		const Mesh* FindPreparedMesh(const PreparedMeshResourceMap& PreparedMeshes, const AssetID& Asset)
 		{
-			const auto Found = std::find_if(PreparedMeshes.begin(), PreparedMeshes.end(),
-				[&Asset](const auto& Entry) { return Entry.first == Asset; });
+			const auto Found = PreparedMeshes.find(Asset);
 			return Found == PreparedMeshes.end() ? nullptr : Found->second;
 		}
 
@@ -661,12 +660,15 @@ namespace PulseForge
 		m_PreparedSnapshot.reset();
 		m_PreparedMeshResources.clear();
 		m_PreparedMaterialBindings.clear();
+		m_PreparedEnvironmentTextures = &m_FallbackEnvironmentTextures;
 		m_PreparedEnvironmentBinding = nullptr;
 		m_PreparedEnvironmentRevision = 0;
 		m_EnvironmentLightingPending = false;
 		m_AssetPreparationPending = false;
 		m_PreparedEnvironmentReady = false;
 		m_ProjectAssetCaches->UploadBudget.BeginFrame();
+		// Publish completed GPU replacements before any resource or binding is pinned for this frame.
+		(void)m_ProjectAssetCaches->Meshes.AdvancePending();
 		(void)m_ProjectAssetCaches->Textures.AdvancePending();
 		(void)m_ProjectAssetCaches->EnvironmentLighting.AdvancePending();
 		if (!Snapshot)
@@ -685,6 +687,8 @@ namespace PulseForge
 				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::SnapshotBuildFailed, Instance.Entity, Instance.MeshAsset,
 					"Cannot prepare a mesh with a singular or non-finite world transform" });
 		}
+		m_PreparedMeshResources.reserve(Snapshot->Meshes.size());
+		m_PreparedMaterialBindings.reserve(Snapshot->Meshes.size());
 		const std::optional<AssetID> EnvironmentAsset = Snapshot->EnvironmentLight
 			? std::optional<AssetID>{ Snapshot->EnvironmentLight->HdrImage }
 			: std::nullopt;
@@ -762,8 +766,7 @@ namespace PulseForge
 				});
 			}
 			SceneVertexLayout = Layout;
-			if (FindPreparedMesh(m_PreparedMeshResources, Instance.MeshAsset) == nullptr)
-				m_PreparedMeshResources.emplace_back(Instance.MeshAsset, &Mesh->get());
+			m_PreparedMeshResources.try_emplace(Instance.MeshAsset, &Mesh->get());
 
 			std::expected<void, SceneRendererError> Bindings;
 			if (Instance.MaterialAsset)
@@ -793,7 +796,7 @@ namespace PulseForge
 				}
 				return std::unexpected(std::move(MaterialBinding.error()));
 			}
-			m_PreparedMaterialBindings.emplace_back(Instance.Entity, *MaterialBinding);
+			m_PreparedMaterialBindings.insert_or_assign(Instance.Entity, *MaterialBinding);
 			ReadyMeshes.push_back(Instance);
 		}
 		Snapshot->Meshes = std::move(ReadyMeshes);
@@ -841,8 +844,7 @@ namespace PulseForge
 
 	const BindingSet* SceneRenderer::FindPreparedMaterialBinding(UUID Entity) const noexcept
 	{
-		const auto Found = std::find_if(m_PreparedMaterialBindings.begin(), m_PreparedMaterialBindings.end(),
-			[Entity](const auto& Entry) { return Entry.first == Entity; });
+		const auto Found = m_PreparedMaterialBindings.find(Entity);
 		return Found == m_PreparedMaterialBindings.end() ? nullptr : Found->second;
 	}
 

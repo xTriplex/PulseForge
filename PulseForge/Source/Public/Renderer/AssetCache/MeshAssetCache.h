@@ -39,7 +39,8 @@ namespace PulseForge
 
 	// Per-project runtime GPU cache. The rendering device, project registry, optional upload budget and diagnostics recorder
 	// must outlive this cache.
-	// Returned mesh references remain valid until Clear() or cache destruction. The cache is not thread-safe.
+	// Returned mesh references remain valid until a later AdvancePending() publishes a replacement, Clear(), or destruction.
+	// The cache is not thread-safe.
 	class MeshAssetCache final
 	{
 	public:
@@ -72,7 +73,10 @@ namespace PulseForge
 		MeshAssetCache(MeshAssetCache&&) = delete;
 		MeshAssetCache& operator=(MeshAssetCache&&) = delete;
 
+		// In asynchronous mode this admits preparation and returns the last published mesh. GPU publication happens only
+		// in AdvancePending(), before a renderer begins resolving resources for a prepared frame.
 		[[nodiscard]] std::expected<std::reference_wrapper<const Mesh>, MeshAssetError> GetOrLoad(const AssetID& Asset);
+		[[nodiscard]] bool AdvancePending();
 		// Change this on project close/reopen or a known source/settings refresh. Current GPU handles remain usable
 		// while requests for the new session are prepared; work from the previous session is cancelled.
 		void SetSessionKey(std::string SessionKey);
@@ -82,6 +86,9 @@ namespace PulseForge
 		[[nodiscard]] size_t GetLoadedCount() const noexcept;
 
 	private:
+		[[nodiscard]] std::expected<std::reference_wrapper<const Mesh>, MeshAssetError> GetOrLoadInternal(
+			const AssetID& Asset, bool CollectReadyProduct);
+
 		struct Entry
 		{
 			MeshHandle Current;
