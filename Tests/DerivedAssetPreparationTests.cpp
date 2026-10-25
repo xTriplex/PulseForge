@@ -34,12 +34,17 @@ namespace
 		{
 			std::error_code Error;
 			const auto Temp = std::filesystem::temp_directory_path(Error);
+			if (Error)
+				return;
+			const auto CanonicalTemp = std::filesystem::canonical(Temp, Error);
 			const auto Identifier = UUID::Generate();
 			if (!Error && Identifier)
-				Root = Temp / ("PulseForgeDerivedProducts-" + Identifier->ToString());
+				Root = CanonicalTemp / ("PulseForgeDerivedProducts-" + Identifier->ToString());
 			if (Root.empty()) return;
 			std::filesystem::create_directories(Root / "Assets" / "Meshes", Error);
 			std::filesystem::create_directories(Root / "Assets" / "Textures", Error);
+			if (Error)
+				Root.clear();
 		}
 		~TemporaryProject()
 		{

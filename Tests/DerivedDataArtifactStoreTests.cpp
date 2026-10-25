@@ -52,9 +52,16 @@ namespace
 	public:
 		TemporaryArtifactRoot()
 		{
+			std::error_code Error;
+			const std::filesystem::path Temp = std::filesystem::temp_directory_path(Error);
+			if (Error)
+				return;
+			const std::filesystem::path TempRoot = std::filesystem::canonical(Temp, Error);
+			if (Error)
+				return;
 			auto Id = PulseForge::UUID::Generate();
 			if (Id)
-				Path = std::filesystem::temp_directory_path() / ("PulseForgeArtifactTest-" + Id->ToString());
+				Path = TempRoot / ("PulseForgeArtifactTest-" + Id->ToString());
 		}
 		~TemporaryArtifactRoot()
 		{

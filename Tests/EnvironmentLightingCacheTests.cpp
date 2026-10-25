@@ -25,9 +25,21 @@ namespace
 	public:
 		TemporaryEnvironmentCacheRoot()
 		{
+			std::error_code Error;
+			const std::filesystem::path Temp = std::filesystem::temp_directory_path(Error);
+			if (Error)
+				return;
+			const std::filesystem::path CanonicalTemp = std::filesystem::canonical(Temp, Error);
+			if (Error)
+				return;
 			const auto Id = PulseForge::UUID::Generate();
 			if (Id)
-				Path = std::filesystem::temp_directory_path() / ("PulseForgeEnvironmentArtifactTest-" + Id->ToString());
+			{
+				Path = CanonicalTemp / ("PulseForgeEnvironmentArtifactTest-" + Id->ToString());
+				std::filesystem::create_directories(Path, Error);
+				if (Error)
+					Path.clear();
+			}
 		}
 
 		~TemporaryEnvironmentCacheRoot()
@@ -195,6 +207,8 @@ void RunEnvironmentLightingCacheTests(TestRunner& Tests)
 	using namespace PulseForge;
 	TemporaryEnvironmentCacheRoot Root;
 	PF_CHECK(Tests, !Root.Path.empty());
+	if (Root.Path.empty())
+		return;
 	const EnvironmentProcessingDesc Description = MakeSmallDescription();
 	const EnvironmentLightingData Original = MakeData(Description);
 	const auto Encoded = Detail::EnvironmentLightingArtifactCodec::EncodeEnvironment(Original, Description);
