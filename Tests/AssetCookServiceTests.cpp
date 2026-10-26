@@ -37,9 +37,12 @@ namespace
 			const auto ID = UUID::Generate();
 			if (!ID) return;
 			std::error_code Error;
-			Root = std::filesystem::temp_directory_path(Error) /
-				std::filesystem::u8path("PF \xCE\xA9 " + ID->ToString());
+			const auto SystemTemporaryRoot = std::filesystem::temp_directory_path(Error);
 			if (Error) { Root.clear(); return; }
+			const auto TemporaryRoot = std::filesystem::weakly_canonical(SystemTemporaryRoot, Error);
+			if (Error) { Root.clear(); return; }
+			Root = TemporaryRoot /
+				std::filesystem::u8path("PF \xCE\xA9 " + ID->ToString());
 			Source = Root / "S";
 			Output = Root / "O";
 			ProjectFile = Source / "P.pfproj";
@@ -134,6 +137,7 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	if (!Snapshot) return;
 	AssetCookRequest Request = Fixture.Request(*Snapshot);
 	auto Planned = AssetCookService::Plan(Request);
+	if (!Planned) std::cerr << "Cook planning failed: " << Planned.error().Message << " (" << Planned.error().Path << ")\n";
 	PF_CHECK(Tests, Planned.has_value());
 	if (!Planned) return;
 	auto First = AssetCookService::Cook(*Planned);

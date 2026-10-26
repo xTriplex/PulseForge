@@ -360,6 +360,8 @@ if(BUILD_TESTING)
 		PulseForgeAssetImportTests
 		PulseForgeAssetImporterConsumer
 		PulseForgeAssetDependencyConsumer
+		PulseForgeCookedAssetCatalogTests
+		PulseForgeCookedAssetCatalogConsumer
 		PulseForgeDerivedDataTests
 		PulseForgeDerivedDataConsumer
 		PulseForgeSceneRendererConsumer
