@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <memory>
 #include <string>
 
 namespace PulseForge
@@ -19,6 +20,7 @@ namespace PulseForge
 	class DiagnosticRecorder;
 	class Project;
 	class Scene;
+	class CookedContentProvider;
 
 	struct SceneRuntimeDesc
 	{
@@ -73,8 +75,14 @@ namespace PulseForge
 	class PULSEFORGE_API SceneRuntime final
 	{
 	public:
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		explicit SceneRuntime(
 			const Project& SourceProject,
+			SceneRuntimeDesc Description = {},
+			SceneRuntimeServices Services = {});
+#endif
+		explicit SceneRuntime(
+			std::shared_ptr<const CookedContentProvider> CookedAssets,
 			SceneRuntimeDesc Description = {},
 			SceneRuntimeServices Services = {});
 		~SceneRuntime();
@@ -93,7 +101,10 @@ namespace PulseForge
 
 	private:
 		struct Impl;
-		const Project& m_Project;
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+		const Project* m_Project = nullptr;
+#endif
+		std::shared_ptr<const CookedContentProvider> m_CookedAssets;
 		SceneRuntimeDesc m_Description;
 		SceneRuntimeServices m_Services;
 		std::unique_ptr<Impl> m_Impl;

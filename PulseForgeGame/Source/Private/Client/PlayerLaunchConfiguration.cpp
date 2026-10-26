@@ -1,9 +1,10 @@
 #include "Client/PlayerLaunchConfiguration.h"
 
-#include "Assets/AssetTypes.h"
 #include "Scene/UUID.h"
 
+#include <algorithm>
 #include <charconv>
+#include <cctype>
 #include <limits>
 #include <system_error>
 #include <utility>
@@ -33,6 +34,16 @@ namespace PulseForgeGame
 			Value = Parsed;
 			return true;
 		}
+
+		bool HasProjectExtension(const std::filesystem::path& Path)
+		{
+			std::string Extension = Path.extension().string();
+			std::transform(Extension.begin(), Extension.end(), Extension.begin(), [](unsigned char Character)
+			{
+				return static_cast<char>(std::tolower(Character));
+			});
+			return Extension == ".pfproj";
+		}
 	} // namespace
 
 	std::expected<PlayerLaunchConfiguration, PlayerLaunchConfigurationError> ParsePlayerLaunchConfiguration(
@@ -46,6 +57,7 @@ namespace PulseForgeGame
 
 		PlayerLaunchConfiguration Configuration;
 		bool HasProject = false;
+		bool HasCookedContent = false;
 		bool HasStartupScene = false;
 		bool HasRenderer = false;
 		bool HasWindowSize = false;
@@ -66,13 +78,44 @@ namespace PulseForgeGame
 				std::filesystem::path ProjectFile = MakeUtf8Path(Arguments[++Index]);
 				if (ProjectFile.is_relative()) ProjectFile = AbsoluteInvocationDirectory / ProjectFile;
 				ProjectFile = std::filesystem::absolute(ProjectFile, FileError).lexically_normal();
-				if (FileError || !PulseForge::HasAssetTypeExtension(ProjectFile, PulseForge::AssetFileType::Project) ||
+				if (FileError || !HasProjectExtension(ProjectFile) ||
 					!std::filesystem::is_regular_file(ProjectFile, FileError) || FileError)
 					return std::unexpected(MakeError(PlayerLaunchConfigurationErrorCode::InvalidProjectPath,
 						"The project path must name an existing .pfproj file.", Index));
 
 				Configuration.ProjectFile = std::move(ProjectFile);
 				HasProject = true;
+				continue;
+			}
+
+			if (Argument == "--cooked-content")
+			{
+				if (HasCookedContent)
+					return std::unexpected(MakeError(PlayerLaunchConfigurationErrorCode::DuplicateOption,
+						"The --cooked-content option may be specified only once.", Index));
+				if (Index + 1 >= Arguments.size() || Arguments[Index + 1].starts_with("--"))
+					return std::unexpected(MakeError(PlayerLaunchConfigurationErrorCode::MissingOptionValue,
+						"The --cooked-content option requires a cooked content root.", Index));
+				std::filesystem::path Root = MakeUtf8Path(Arguments[++Index]);
+				if (Root.is_relative()) Root = AbsoluteInvocationDirectory / Root;
+				Root = std::filesystem::absolute(Root, FileError).lexically_normal();
+				if (FileError || !std::filesystem::is_directory(Root, FileError) || FileError)
+					return std::unexpected(MakeError(PlayerLaunchConfigurationErrorCode::InvalidCookedContentPath,
+						"The cooked content root must be an existing directory.", Index));
+				Configuration.CookedContentRoot = std::move(Root);
+				HasCookedContent = true;
+				continue;
+			}
+
+			if (Argument == "--runtime-abi")
+			{
+				if (Index + 1 >= Arguments.size() || Arguments[Index + 1].starts_with("--"))
+					return std::unexpected(MakeError(PlayerLaunchConfigurationErrorCode::MissingOptionValue,
+						"The --runtime-abi option requires an ABI identifier.", Index));
+				Configuration.RuntimeABI = std::string(Arguments[++Index]);
+				if (Configuration.RuntimeABI.empty())
+					return std::unexpected(MakeError(PlayerLaunchConfigurationErrorCode::UnexpectedArgument,
+						"The runtime ABI identifier must not be empty.", Index));
 				continue;
 			}
 
@@ -152,9 +195,9 @@ namespace PulseForgeGame
 				PlayerLaunchConfigurationErrorCode::UnexpectedArgument, "Unknown player launch argument: " + std::string(Argument), Index));
 		}
 
-		if (!HasProject)
-			return std::unexpected(
-				MakeError(PlayerLaunchConfigurationErrorCode::MissingProjectPath, "A --project <path> argument is required."));
+		if (HasProject == HasCookedContent)
+			return std::unexpected(MakeError(PlayerLaunchConfigurationErrorCode::MissingLaunchContent,
+				"Specify exactly one of --project <path> or --cooked-content <root>."));
 
 		return Configuration;
 	}

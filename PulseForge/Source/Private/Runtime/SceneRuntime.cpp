@@ -1,7 +1,10 @@
 #include "Runtime/SceneRuntime.h"
+#include "Runtime/CookedContentProvider.h"
 
 #include "Assets/AudioAssetCache.h"
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/Project.h"
+#endif
 #include "Audio/AudioSceneRuntime.h"
 #include "Core/Diagnostics.h"
 #include "Physics/PhysicsSceneRuntime.h"
@@ -36,11 +39,21 @@ namespace PulseForge
 		bool Paused = false;
 	};
 
+	#if !defined(PF_COOKED_RUNTIME_ONLY)
 	SceneRuntime::SceneRuntime(
 		const Project& SourceProject,
 		SceneRuntimeDesc Description,
 		SceneRuntimeServices Services)
-		: m_Project(SourceProject), m_Description(Description), m_Services(Services)
+		: m_Project(&SourceProject), m_Description(Description), m_Services(Services)
+	{
+	}
+	#endif
+
+	SceneRuntime::SceneRuntime(
+		std::shared_ptr<const CookedContentProvider> CookedAssets,
+		SceneRuntimeDesc Description,
+		SceneRuntimeServices Services)
+		: m_CookedAssets(std::move(CookedAssets)), m_Description(Description), m_Services(Services)
 	{
 	}
 
@@ -66,10 +79,33 @@ namespace PulseForge
 					SceneRuntimeSubsystem::AudioDevice,
 					"Could not initialize the audio device: " + AudioDevice.error().Message));
 			Candidate->AudioDevice.emplace(std::move(*AudioDevice));
-			Candidate->AudioAssets = std::make_unique<AudioAssetCache>(
-				*Candidate->AudioDevice,
-				m_Project.GetRootPath(),
-				m_Project.GetAssetRegistry());
+			if (m_CookedAssets)
+			{
+				auto Provider = m_CookedAssets;
+				Candidate->AudioAssets = std::make_unique<AudioAssetCache>(*Candidate->AudioDevice,
+					[Provider = std::move(Provider)](const AssetID& Asset) -> std::expected<std::vector<std::byte>, AudioAssetError>
+					{
+						auto Bytes = Provider->ReadAudio(Asset);
+						if (!Bytes)
+							return std::unexpected(AudioAssetError{ .Code = AudioAssetErrorCode::FileReadFailed,
+								.Asset = Asset, .Message = Bytes.error().Message });
+						return std::move(*Bytes);
+					});
+			}
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+			else if (m_Project)
+				Candidate->AudioAssets = std::make_unique<AudioAssetCache>(
+					*Candidate->AudioDevice, m_Project->GetRootPath(), m_Project->GetAssetRegistry());
+#else
+			else
+				return std::unexpected(MakeError(SceneRuntimeErrorCode::InitializationFailed, SceneRuntimeSubsystem::None,
+					"Cooked runtime requires a cooked content provider"));
+#endif
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+			else
+				return std::unexpected(MakeError(SceneRuntimeErrorCode::InitializationFailed, SceneRuntimeSubsystem::None,
+					"Scene runtime requires a source project or cooked content provider"));
+#endif
 
 			Candidate->Physics = std::make_unique<PhysicsSceneRuntime>(m_Description.Physics);
 			if (auto Result = Candidate->Physics->Start(Source); !Result)
@@ -91,7 +127,12 @@ namespace PulseForge
 				.GameplayInput = m_Services.GameplayInput,
 				.InputState = m_Services.InputState,
 				.Observer = m_Services.ScriptObserver };
-			Candidate->Scripting = std::make_unique<ScriptRuntime>(m_Project, m_Description.Scripting, Services);
+			if (m_CookedAssets)
+				Candidate->Scripting = std::make_unique<ScriptRuntime>(m_CookedAssets, m_Description.Scripting, Services);
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+			else
+				Candidate->Scripting = std::make_unique<ScriptRuntime>(*m_Project, m_Description.Scripting, Services);
+#endif
 			if (auto Result = Candidate->Scripting->Start(Source); !Result)
 				return std::unexpected(MakeError(
 					SceneRuntimeErrorCode::InitializationFailed,

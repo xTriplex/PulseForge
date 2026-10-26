@@ -1,10 +1,13 @@
 #include "Renderer/AssetCache/TextureAssetCache.h"
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/ImageAssetImporter.h"
 #include "Assets/AssetPathResolver.h"
 #include "Assets/DerivedDataArtifactStore.h"
-#include "Core/Diagnostics.h"
 #include "Assets/Detail/AssetCpuProducts.h"
+#endif
+#include "Core/Diagnostics.h"
+#include "Runtime/CookedContentProvider.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -12,7 +15,9 @@
 #include <exception>
 #include <limits>
 #include <span>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace PulseForge
@@ -20,6 +25,7 @@ namespace PulseForge
 	namespace
 	{
 		using OwnedMipLevel = Detail::PreparedMipLevel;
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		struct PreparedTextureData
 		{
 			uint32_t Width = 0;
@@ -43,9 +49,11 @@ namespace PulseForge
 			}
 			return Total;
 		}
+#endif
 
 	} // namespace
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 	TextureAssetCache::TextureAssetCache(
 		RenderDevice& Runtime,
 		std::filesystem::path ProjectRoot,
@@ -55,7 +63,17 @@ namespace PulseForge
 		  m_RegistryOwner(std::make_shared<const AssetRegistry>(Registry)), m_Registry(m_RegistryOwner.get()), m_Diagnostics(Diagnostics)
 	{
 	}
+#endif
 
+	TextureAssetCache::TextureAssetCache(
+		RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content, DiagnosticRecorder* Diagnostics)
+		: m_Runtime(Runtime), m_CookedContent(std::move(Content)), m_Diagnostics(Diagnostics)
+	{
+		if (!m_CookedContent)
+			throw std::invalid_argument("Cooked texture cache requires a content provider");
+	}
+
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 	TextureAssetCache::TextureAssetCache(
 		RenderDevice& Runtime,
 		std::filesystem::path ProjectRoot,
@@ -86,6 +104,7 @@ namespace PulseForge
 		  m_ArtifactStore(&ArtifactStore), m_SessionKey(std::move(SessionKey)), m_Diagnostics(Diagnostics)
 	{
 	}
+#endif
 
 	TextureAssetCache::~TextureAssetCache()
 	{
@@ -125,6 +144,66 @@ namespace PulseForge
 	std::expected<std::reference_wrapper<const Texture>, TextureAssetError> TextureAssetCache::GetOrLoadInternal(
 		const AssetID& Asset, TextureFormat Format, bool CollectReadyProduct)
 	{
+		if (m_CookedContent)
+		{
+			if (Format != TextureFormat::RGBA8_UNorm && Format != TextureFormat::RGBA8_Srgb)
+				return std::unexpected(TextureAssetError{ TextureAssetErrorCode::UnsupportedFormat, Asset,
+					"Image assets can only be loaded as RGBA8_UNorm or RGBA8_Srgb textures" });
+			if (Asset.IsNil())
+				return std::unexpected(TextureAssetError{ TextureAssetErrorCode::AssetNotFound, Asset,
+					"Cannot load a texture with a nil asset UUID" });
+			const CacheKey Key{ Asset, Format };
+			auto [EntryIterator, WasInserted] = m_Textures.try_emplace(Key);
+			(void)WasInserted;
+			Entry& State = EntryIterator->second;
+			if (State.Current)
+			{
+				++m_CacheHits;
+				return std::cref(*State.Current);
+			}
+			++m_CacheMisses;
+			const std::string_view Subresource = Format == TextureFormat::RGBA8_Srgb ? "srgb" : "linear";
+			auto Product = m_CookedContent->LoadTextureProduct(Asset, Subresource);
+			if (!Product)
+				return std::unexpected(TextureAssetError{
+					Product.error().Code == CookedAssetCatalogErrorCode::AssetNotFound
+						? TextureAssetErrorCode::AssetNotFound : TextureAssetErrorCode::ImportFailed,
+					Asset, Product.error().Message });
+			const auto& Data = *Product;
+			const Detail::ImageColorSpace ExpectedColorSpace = Format == TextureFormat::RGBA8_Srgb
+				? Detail::ImageColorSpace::Srgb : Detail::ImageColorSpace::Linear;
+			if (Data.ColorSpace != ExpectedColorSpace)
+				return std::unexpected(TextureAssetError{ TextureAssetErrorCode::ImportFailed, Asset,
+					"Cooked texture color space does not match its requested subresource" });
+			TextureDesc Description;
+			Description.Width = Data.Width;
+			Description.Height = Data.Height;
+			Description.Format = Data.ColorSpace == Detail::ImageColorSpace::Srgb
+				? TextureFormat::RGBA8_Srgb : TextureFormat::RGBA8_UNorm;
+			Description.MipLevels = static_cast<uint32_t>(Data.MipLevels.size());
+			Description.DebugName = "Image asset " + Asset.ToString();
+			std::vector<TextureSubresourceData> InitialData;
+			InitialData.reserve(Data.MipLevels.size());
+			for (uint32_t MipLevel = 0; MipLevel < Data.MipLevels.size(); ++MipLevel)
+			{
+				const OwnedMipLevel& Level = Data.MipLevels[MipLevel];
+				InitialData.push_back({ MipLevel, 0, std::as_bytes(std::span(Level.Pixels)), 0 });
+			}
+			auto CreatedTexture = m_Runtime.CreateTexture(Description, InitialData);
+			if (!CreatedTexture)
+				return std::unexpected(TextureAssetError{ TextureAssetErrorCode::TextureCreationFailed, Asset,
+					CreatedTexture.error().Message });
+			State.Current = std::move(*CreatedTexture);
+			++State.ResourceRevision;
+			if (m_Diagnostics)
+				(void)m_Diagnostics->RecordEvent(DiagnosticEventKind::Resource, "Texture cache resource created", "TextureAssetCache", "objects", 1);
+			return std::cref(*State.Current);
+		}
+#if defined(PF_COOKED_RUNTIME_ONLY)
+		(void)CollectReadyProduct;
+		return std::unexpected(TextureAssetError{ TextureAssetErrorCode::AssetNotFound, Asset,
+			"No cooked texture product is available for this asset identity" });
+#else
 		if (Asset.IsNil() || !m_Registry->Find(Asset))
 		{
 			return std::unexpected(TextureAssetError{ TextureAssetErrorCode::AssetNotFound, Asset,
@@ -389,10 +468,14 @@ namespace PulseForge
 		}
 		return std::unexpected(TextureAssetError{ TextureAssetErrorCode::CacheFailure, Asset,
 			"Unrecognized texture preparation state" });
+#endif
 	}
 
 	bool TextureAssetCache::AdvancePending()
 	{
+#if defined(PF_COOKED_RUNTIME_ONLY)
+		return false;
+#else
 		std::vector<CacheKey> Keys;
 		Keys.reserve(m_Textures.size());
 		for (const auto& [Key, State] : m_Textures)
@@ -413,6 +496,7 @@ namespace PulseForge
 			PublishedReplacement |= Updated != m_Textures.end() && Updated->second.ResourceRevision != PreviousRevision;
 		}
 		return PublishedReplacement;
+#endif
 	}
 
 	uint64_t TextureAssetCache::GetResourceRevision(const AssetID& Asset, TextureFormat Format) const noexcept
@@ -423,11 +507,15 @@ namespace PulseForge
 
 	bool TextureAssetCache::HasPendingWork() const noexcept
 	{
+#if defined(PF_COOKED_RUNTIME_ONLY)
+		return false;
+#else
 		return std::ranges::any_of(m_Textures, [this](const auto& Pair)
 		{
 			const auto& State = Pair.second;
 			return State.Pending.has_value() || State.AdmissionDeferred;
 		});
+#endif
 	}
 
 	void TextureAssetCache::Clear() noexcept

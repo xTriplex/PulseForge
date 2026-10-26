@@ -267,6 +267,9 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 		pulseforge_runtime_resource_directory(PulseForgeGame PULSEFORGE_GAME_RESOURCE_DIRECTORY)
 		pulseforge_attach_shader_deployment(PulseForgeGame "${PULSEFORGE_GAME_RESOURCE_DIRECTORY}/Shaders"
 			ASSET_TARGETS PulseForgeSceneShaderAssets SHADERS ${PULSEFORGE_SCENE_SHADER_OUTPUTS})
+		pulseforge_runtime_resource_directory(PulseForgeCookedGame PULSEFORGE_COOKED_GAME_RESOURCE_DIRECTORY)
+		pulseforge_attach_shader_deployment(PulseForgeCookedGame "${PULSEFORGE_COOKED_GAME_RESOURCE_DIRECTORY}/Shaders"
+			ASSET_TARGETS PulseForgeSceneShaderAssets SHADERS ${PULSEFORGE_SCENE_SHADER_OUTPUTS})
 		pulseforge_attach_asset_deployment(PulseForgeGame "${PULSEFORGE_GAME_RESOURCE_DIRECTORY}"
 			DIRECTORIES
 				"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeGame/Assets/Models" "Assets/Models"

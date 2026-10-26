@@ -36,6 +36,7 @@ namespace PulseForge::ScriptRuntimeDetail
 		AssetID Asset;
 		Scene* SourceScene = nullptr;
 		const Project* SourceProject = nullptr;
+		std::shared_ptr<const CookedContentProvider> CookedAssets;
 		ScriptRuntimeServices Services;
 		LuaMemory Memory;
 		lua_State* State = nullptr;

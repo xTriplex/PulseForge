@@ -15,6 +15,7 @@ namespace PulseForge
 {
 	class Project;
 	class Scene;
+	class CookedContentProvider;
 
 	enum class PlayerSessionErrorCode : uint8_t
 	{
@@ -41,8 +42,13 @@ namespace PulseForge
 	class PULSEFORGE_API PlayerSession final
 	{
 	public:
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		explicit PlayerSession(
 			std::filesystem::path ProjectFile, SceneRuntimeDesc RuntimeDescription = {}, SceneRuntimeServices RuntimeServices = {});
+#endif
+		explicit PlayerSession(
+			std::shared_ptr<const CookedContentProvider> CookedAssets,
+			SceneRuntimeDesc RuntimeDescription = {}, SceneRuntimeServices RuntimeServices = {});
 		~PlayerSession();
 		PlayerSession(const PlayerSession&) = delete;
 		PlayerSession& operator=(const PlayerSession&) = delete;
@@ -60,7 +66,15 @@ namespace PulseForge
 		[[nodiscard]] bool IsRunning() const noexcept { return m_Runtime != nullptr; }
 		void Stop() noexcept;
 
-		[[nodiscard]] const Project* GetProject() const noexcept { return m_Project.get(); }
+		[[nodiscard]] const Project* GetProject() const noexcept
+		{
+#if defined(PF_COOKED_RUNTIME_ONLY)
+			return nullptr;
+#else
+			return m_Project.get();
+#endif
+		}
+		[[nodiscard]] bool IsCookedSession() const noexcept { return m_CookedAssets != nullptr; }
 		[[nodiscard]] Scene* GetActiveScene() noexcept { return m_Scene.get(); }
 		[[nodiscard]] const Scene* GetActiveScene() const noexcept { return m_Scene.get(); }
 		[[nodiscard]] const std::optional<AssetID>& GetActiveSceneAsset() const noexcept { return m_SceneAsset; }
@@ -68,11 +82,16 @@ namespace PulseForge
 	private:
 		struct PendingScene;
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		std::filesystem::path m_ProjectFile;
+#endif
+		std::shared_ptr<const CookedContentProvider> m_CookedAssets;
 		SceneRuntimeDesc m_RuntimeDescription;
 		SceneRuntimeServices m_RuntimeServices;
 		// Declaration order ensures runtime teardown precedes scene and project teardown.
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		std::unique_ptr<Project> m_Project;
+#endif
 		std::unique_ptr<Scene> m_Scene;
 		std::unique_ptr<SceneRuntime> m_Runtime;
 		std::unique_ptr<PendingScene> m_PendingScene;

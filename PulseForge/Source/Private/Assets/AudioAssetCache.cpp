@@ -1,6 +1,8 @@
 #include "Assets/AudioAssetCache.h"
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/AssetPathResolver.h"
+#endif
 
 #include <fstream>
 #include <limits>
@@ -11,9 +13,11 @@
 
 namespace PulseForge
 {
-	namespace
+		namespace
 	{
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		constexpr uintmax_t MaxAudioSourceBytes = 256ull * 1024ull * 1024ull;
+#endif
 
 		AudioAssetError MakeError(AudioAssetErrorCode Code, const AssetID& Asset, std::string Message)
 		{
@@ -21,11 +25,20 @@ namespace PulseForge
 		}
 	}
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 	AudioAssetCache::AudioAssetCache(
 		AudioEngine& Engine,
 		std::filesystem::path ProjectRoot,
 		const AssetRegistry& Registry)
-		: m_Engine(Engine), m_ProjectRoot(std::move(ProjectRoot)), m_Registry(Registry)
+		: m_Engine(Engine), m_ProjectRoot(std::move(ProjectRoot)), m_Registry(&Registry)
+	{
+	}
+#endif
+
+	AudioAssetCache::AudioAssetCache(
+		AudioEngine& Engine,
+		std::function<std::expected<std::vector<std::byte>, AudioAssetError>(const AssetID&)> CookedReader)
+		: m_Engine(Engine), m_Registry(nullptr), m_CookedReader(std::move(CookedReader))
 	{
 	}
 
@@ -35,8 +48,19 @@ namespace PulseForge
 			return std::unexpected(MakeError(AudioAssetErrorCode::AssetNotFound, Asset, "Cannot load an audio asset with a nil UUID"));
 		if (const auto Existing = m_Clips.find(Asset); Existing != m_Clips.end())
 			return Existing->second;
+		if (m_CookedReader)
+		{
+			auto EncodedData = m_CookedReader(Asset);
+			if (!EncodedData) return std::unexpected(EncodedData.error());
+			auto Clip = m_Engine.CreateClip("Cooked audio asset " + Asset.ToString(), *EncodedData);
+			if (!Clip)
+				return std::unexpected(MakeError(AudioAssetErrorCode::ClipCreationFailed, Asset, Clip.error().Message));
+			auto Stored = m_Clips.try_emplace(Asset, std::move(*Clip)).first;
+			return Stored->second;
+		}
 
-		const auto Record = m_Registry.Find(Asset);
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+		const auto Record = m_Registry ? m_Registry->Find(Asset) : std::nullopt;
 		if (!Record)
 		{
 			return std::unexpected(MakeError(
@@ -44,7 +68,12 @@ namespace PulseForge
 				Asset,
 				"Audio asset UUID " + Asset.ToString() + " is not present in the project registry"));
 		}
+#else
+		return std::unexpected(MakeError(AudioAssetErrorCode::AssetNotFound, Asset,
+			"Cooked runtime has no payload reader for this audio asset"));
+#endif
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		const auto ResolvedPath = AssetPathResolver::ResolveManagedSourcePath(m_ProjectRoot, Record->ProjectRelativePath);
 		if (!ResolvedPath)
 		{
@@ -97,6 +126,7 @@ namespace PulseForge
 				Asset,
 				std::string("Could not retain managed audio asset: ") + Exception.what()));
 		}
+#endif
 	}
 
 	void AudioAssetCache::Clear() noexcept

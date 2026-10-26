@@ -24,6 +24,7 @@
 namespace PulseForge
 {
 	class DiagnosticRecorder;
+	class CookedContentProvider;
 
 	namespace Detail
 	{
@@ -61,28 +62,6 @@ namespace PulseForge
 			EnvironmentProcessingDesc Processing,
 			std::stop_token StopToken = {});
 
-		class EnvironmentLightingArtifactCodec final
-		{
-		public:
-			[[nodiscard]] static DerivedDataArtifactKey MakeEnvironmentKey(
-				const AssetID& Asset,
-				const AssetContentFingerprint& SourceContent,
-				const EnvironmentProcessingDesc& Description);
-			[[nodiscard]] static DerivedDataArtifactKey MakeBrdfLutKey(const EnvironmentProcessingDesc& Description);
-			[[nodiscard]] static std::expected<std::vector<std::byte>, std::string> EncodeEnvironment(
-				const EnvironmentLightingData& Data,
-				const EnvironmentProcessingDesc& Description);
-			[[nodiscard]] static std::expected<EnvironmentLightingData, std::string> DecodeEnvironment(
-				std::span<const std::byte> Payload,
-				const EnvironmentProcessingDesc& Description);
-			[[nodiscard]] static std::expected<std::vector<std::byte>, std::string> EncodeBrdfLut(
-				const ImportedFloatImage& Image,
-				uint32_t Samples);
-			[[nodiscard]] static std::expected<ImportedFloatImage, std::string> DecodeBrdfLut(
-				std::span<const std::byte> Payload,
-				uint32_t ExpectedSize,
-				uint32_t ExpectedSamples);
-		};
 	}
 
 	struct EnvironmentLightingCacheError
@@ -103,6 +82,8 @@ namespace PulseForge
 			const AssetRegistry& Registry,
 			DiagnosticRecorder* Diagnostics = nullptr,
 			DerivedDataArtifactStoreOptions ArtifactStoreOptions = {});
+		EnvironmentLightingCache(RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content,
+			DiagnosticRecorder* Diagnostics = nullptr);
 		EnvironmentLightingCache(
 			RenderDevice& Runtime,
 			std::filesystem::path ProjectRoot,
@@ -167,10 +148,14 @@ namespace PulseForge
 			const AssetID& Asset, const EnvironmentLightingData& Data);
 
 		RenderDevice& m_Runtime;
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		std::filesystem::path m_ProjectRoot;
 		std::shared_ptr<const AssetRegistry> m_RegistryOwner;
 		const AssetRegistry* m_Registry = nullptr;
+#endif
+		std::shared_ptr<const CookedContentProvider> m_CookedContent;
 		DiagnosticRecorder* m_Diagnostics = nullptr;
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		std::unique_ptr<AssetPreparationService> m_OwnedPreparationService;
 		AssetPreparationService* m_Preparation = nullptr;
 		AssetUploadBudget* m_UploadBudget = nullptr;
@@ -178,6 +163,7 @@ namespace PulseForge
 		DerivedDataArtifactStore* m_ArtifactStore = nullptr;
 		std::string m_SessionKey;
 		EnvironmentProcessingDesc m_Processing;
+#endif
 		uint64_t m_CacheHits = 0;
 		uint64_t m_CacheMisses = 0;
 		std::unordered_map<AssetID, std::shared_ptr<Entry>, UUIDHash> m_Entries;

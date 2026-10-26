@@ -24,6 +24,10 @@ namespace PulseForge
 		const std::filesystem::path& ProjectRoot,
 		const UUID& ProjectId,
 		const std::filesystem::path& UserDataRoot);
+	[[nodiscard]] PULSEFORGE_API std::expected<GameplayInputMapLoad, GameplayInputError> ApplyGameplayInputOverrides(
+		GameplayActionMap Defaults,
+		const UUID& ProjectId,
+		const std::filesystem::path& UserDataRoot);
 
 	[[nodiscard]] PULSEFORGE_API std::expected<void, GameplayInputError> SaveGameplayInputBindingOverride(
 		const std::filesystem::path& UserDataRoot,

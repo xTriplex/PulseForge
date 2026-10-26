@@ -41,7 +41,10 @@ target_include_directories(PulseForgeScene
 )
 target_compile_definitions(PulseForgeScene PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(PulseForgeScene PUBLIC PulseForgeCore)
-add_library(PulseForgeSceneSerialization STATIC PulseForge/Source/Private/Scene/SceneSerializer.cpp)
+add_library(PulseForgeSceneSerialization STATIC
+	PulseForge/Source/Private/Scene/SceneSerializer.cpp
+	PulseForge/Source/Private/Assets/PrefabSerializer.cpp
+)
 target_include_directories(PulseForgeSceneSerialization
 	PUBLIC PulseForge/Source/Public
 	PRIVATE PulseForge/Vendor/json/include
@@ -52,6 +55,10 @@ add_library(PulseForgeMeshData STATIC PulseForge/Source/Private/Renderer/MeshDat
 target_include_directories(PulseForgeMeshData PUBLIC PulseForge/Source/Public)
 add_library(PulseForgeImageData INTERFACE)
 target_include_directories(PulseForgeImageData INTERFACE PulseForge/Source/Public)
+add_library(PulseForgeCookedProductCodecs STATIC PulseForge/Source/Private/Assets/CookedProductCodec.cpp)
+target_include_directories(PulseForgeCookedProductCodecs PUBLIC PulseForge/Source/Public)
+target_link_libraries(PulseForgeCookedProductCodecs PUBLIC PulseForgeCore PulseForgeMeshData PulseForgeImageData)
+set_property(TARGET PulseForgeCookedProductCodecs PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 add_library(PulseForgeRenderMath STATIC
 	PulseForge/Source/Private/Renderer/DirectionalShadowMath.cpp
 	PulseForge/Source/Private/Renderer/SpotlightShadowMath.cpp
@@ -77,6 +84,18 @@ target_include_directories(PulseForgeAssetCatalog
 )
 target_compile_definitions(PulseForgeAssetCatalog PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_link_libraries(PulseForgeAssetCatalog PUBLIC PulseForgeCore PulseForgeScene)
+add_library(PulseForgeCookedAssetCatalog STATIC PulseForge/Source/Private/Assets/CookedAssetCatalog.cpp)
+target_include_directories(PulseForgeCookedAssetCatalog
+	PUBLIC PulseForge/Source/Public PulseForge/Vendor/glm
+	PRIVATE PulseForge/Vendor/json/include PulseForge/Vendor/tracy/server
+)
+target_link_libraries(PulseForgeCookedAssetCatalog PUBLIC PulseForgeScene)
+set_property(TARGET PulseForgeCookedAssetCatalog PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+add_library(PulseForgeCookedRuntimeProvider STATIC PulseForge/Source/Private/Runtime/CookedContentProvider.cpp)
+target_include_directories(PulseForgeCookedRuntimeProvider PUBLIC PulseForge/Source/Public)
+target_link_libraries(PulseForgeCookedRuntimeProvider
+	PUBLIC PulseForgeCookedAssetCatalog PulseForgeSceneSerialization PulseForgeInput PulseForgeCookedProductCodecs)
+set_property(TARGET PulseForgeCookedRuntimeProvider PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 add_library(PulseForgeAudio STATIC
 	PulseForge/Source/Private/Audio/AudioEngine.cpp
 	PulseForge/Source/Private/Audio/MiniAudio/MiniAudio.cpp
@@ -95,7 +114,6 @@ add_library(PulseForgeAssetServices STATIC
 	PulseForge/Source/Private/Assets/MaterialAssetCache.cpp
 	PulseForge/Source/Private/Assets/MaterialAssetService.cpp
 	PulseForge/Source/Private/Assets/PrefabAssetService.cpp
-	PulseForge/Source/Private/Assets/PrefabSerializer.cpp
 	PulseForge/Source/Private/Assets/Project.cpp
 	PulseForge/Source/Private/Assets/SceneAssetService.cpp
 )
@@ -130,7 +148,8 @@ target_include_directories(PulseForgeScripting
 target_compile_definitions(PulseForgeScripting PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 target_link_libraries(PulseForgeScripting
 	PUBLIC PulseForgeAssetCatalog
-	PRIVATE PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeInput PulseForgeCore PulseForgeLua spdlog::spdlog
+	PRIVATE PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics PulseForgeInput PulseForgeCore PulseForgeLua
+		PulseForgeCookedRuntimeProvider spdlog::spdlog
 )
 add_library(PulseForgeRuntime STATIC
 	PulseForge/Source/Private/Runtime/SceneRuntime.cpp
@@ -139,8 +158,45 @@ add_library(PulseForgeRuntime STATIC
 target_include_directories(PulseForgeRuntime PUBLIC PulseForge/Source/Public)
 target_link_libraries(PulseForgeRuntime
 	PUBLIC PulseForgeAudio PulseForgePhysics PulseForgeScripting
-	PRIVATE PulseForgeAssetServices PulseForgeAudioAssets PulseForgeAudioScene PulseForgeScene PulseForgeInput
+	PRIVATE PulseForgeAssetServices PulseForgeAudioAssets PulseForgeAudioScene PulseForgeCookedRuntimeProvider PulseForgeScene
+		PulseForgeInput
 )
+
+# The cooked player compiles the same runtime owners with their source-project branches removed.
+# This keeps the shipped cooked route out of the authoring registry and importer target closure.
+add_library(PulseForgeCookedAudioAssets STATIC PulseForge/Source/Private/Assets/AudioAssetCache.cpp)
+target_include_directories(PulseForgeCookedAudioAssets PUBLIC PulseForge/Source/Public)
+target_compile_definitions(PulseForgeCookedAudioAssets PRIVATE PF_COOKED_RUNTIME_ONLY)
+target_link_libraries(PulseForgeCookedAudioAssets PUBLIC PulseForgeAudio)
+set_property(TARGET PulseForgeCookedAudioAssets PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+
+add_library(PulseForgeCookedAudioScene STATIC PulseForge/Source/Private/Audio/AudioSceneRuntime.cpp)
+target_include_directories(PulseForgeCookedAudioScene PUBLIC PulseForge/Source/Public)
+target_link_libraries(PulseForgeCookedAudioScene PUBLIC PulseForgeAudio PulseForgeScene
+	PRIVATE PulseForgeCookedAudioAssets)
+set_property(TARGET PulseForgeCookedAudioScene PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+
+add_library(PulseForgeCookedScripting STATIC
+	PulseForge/Source/Private/Scripting/ScriptEnvironment.cpp
+	PulseForge/Source/Private/Scripting/ScriptRuntime.cpp)
+target_include_directories(PulseForgeCookedScripting PUBLIC PulseForge/Source/Public
+	PRIVATE PulseForge/Vendor/json/include)
+target_compile_definitions(PulseForgeCookedScripting PRIVATE PF_COOKED_RUNTIME_ONLY _CRT_SECURE_NO_WARNINGS NOMINMAX)
+target_link_libraries(PulseForgeCookedScripting
+	PUBLIC PulseForgeScene
+	PRIVATE PulseForgeCookedRuntimeProvider PulseForgeCookedAudioScene PulseForgePhysics PulseForgeInput PulseForgeCore
+		PulseForgeLua spdlog::spdlog)
+set_property(TARGET PulseForgeCookedScripting PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+
+add_library(PulseForgeCookedRuntime STATIC
+	PulseForge/Source/Private/Runtime/SceneRuntime.cpp
+	PulseForge/Source/Private/Runtime/PlayerSession.cpp)
+target_include_directories(PulseForgeCookedRuntime PUBLIC PulseForge/Source/Public)
+target_compile_definitions(PulseForgeCookedRuntime PUBLIC PF_COOKED_RUNTIME_ONLY)
+target_link_libraries(PulseForgeCookedRuntime
+	PUBLIC PulseForgeAudio PulseForgePhysics PulseForgeCookedScripting PulseForgeCookedRuntimeProvider PulseForgeScene
+	PRIVATE PulseForgeCookedAudioAssets PulseForgeCookedAudioScene PulseForgeInput)
+set_property(TARGET PulseForgeCookedRuntime PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 add_library(PulseForgeRenderer STATIC
 	PulseForge/Source/Private/Renderer/OpenGLRenderer.cpp
 	PulseForge/Source/Private/Renderer/Buffer.cpp
@@ -188,7 +244,8 @@ target_include_directories(PulseForgeAssetImporters SYSTEM PRIVATE
 	PulseForge/Vendor/stb
 )
 target_compile_definitions(PulseForgeAssetImporters PRIVATE _CRT_SECURE_NO_WARNINGS)
-target_link_libraries(PulseForgeAssetImporters PUBLIC PulseForgeAssetCatalog PulseForgeMeshData PulseForgeImageData)
+target_link_libraries(PulseForgeAssetImporters PUBLIC
+	PulseForgeAssetCatalog PulseForgeMeshData PulseForgeImageData PulseForgeCookedProductCodecs)
 target_precompile_headers(PulseForgeAssetImporters PRIVATE "${PULSEFORGE_ENGINE_PCH}")
 add_library(PulseForgeAssetDependencyCatalog STATIC
 	PulseForge/Source/Private/Assets/AssetEditTransaction.cpp
@@ -214,7 +271,8 @@ target_link_libraries(PulseForgeDerivedData PUBLIC PulseForgeAssetCatalog)
 add_library(PulseForgeAssetCpuProducts STATIC PulseForge/Source/Private/Assets/AssetCpuProducts.cpp)
 target_include_directories(PulseForgeAssetCpuProducts PUBLIC PulseForge/Source/Public)
 target_link_libraries(PulseForgeAssetCpuProducts
-	PUBLIC PulseForgeAssetPreparation PulseForgeDerivedData PulseForgeAssetImporters PulseForgeAssetDependencyCatalog)
+	PUBLIC PulseForgeAssetPreparation PulseForgeDerivedData PulseForgeAssetImporters PulseForgeAssetDependencyCatalog
+		PulseForgeCookedProductCodecs)
 add_library(PulseForgeApplication STATIC PulseForge/Source/Private/Core/Application.cpp)
 target_include_directories(PulseForgeApplication
 	PUBLIC PulseForge/Source/Public
@@ -241,9 +299,46 @@ target_include_directories(PulseForgeSceneRenderer
 target_compile_definitions(PulseForgeSceneRenderer PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(PulseForgeSceneRenderer
 	PUBLIC PulseForgeRenderMath PulseForgeScene PulseForgeRenderer PulseForgeAssetPreparation PulseForgeDerivedData
-	PRIVATE PulseForgeAssetCpuProducts PulseForgeAssetImporters PulseForgeAssetServices
+	PRIVATE PulseForgeAssetCpuProducts PulseForgeAssetImporters PulseForgeAssetServices PulseForgeCookedProductCodecs
+		PulseForgeCookedRuntimeProvider
 )
 target_precompile_headers(PulseForgeSceneRenderer PRIVATE "${PULSEFORGE_ENGINE_PCH}")
+
+# This renderer variant consumes only cooked CPU products. Source import, registry and artifact-store owners are
+# compiled out of its cache adapters so a cooked Player does not inherit the authoring pipeline through linkage.
+add_library(PulseForgeCookedSceneRenderer STATIC
+	PulseForge/Source/Private/Renderer/AssetCache/MeshAssetCache.cpp
+	PulseForge/Source/Private/Renderer/AssetCache/TextureAssetCache.cpp
+	PulseForge/Source/Private/Renderer/CookedEnvironmentLightingCache.cpp
+	PulseForge/Source/Private/Assets/MaterialAssetCache.cpp
+	PulseForge/Source/Private/Renderer/SceneRendererAmbientOcclusionPass.cpp
+	PulseForge/Source/Private/Renderer/SceneRendererHdrTargetCache.cpp
+	PulseForge/Source/Private/Renderer/SceneRendererLocalLightingState.cpp
+	PulseForge/Source/Private/Renderer/SceneRendererMaterialBindingCache.cpp
+	PulseForge/Source/Private/Renderer/SceneRendererPipelineCache.cpp
+	PulseForge/Source/Private/Renderer/SceneRendererShadowPass.cpp
+	PulseForge/Source/Private/Renderer/SceneRendererShadowTargetCache.cpp
+	PulseForge/Source/Private/Renderer/SceneRenderer.cpp
+	PulseForge/Source/Private/Renderer/SceneRendererToneMappingStage.cpp
+)
+target_include_directories(PulseForgeCookedSceneRenderer PUBLIC PulseForge/Source/Public PulseForge/Vendor/glm)
+target_compile_definitions(PulseForgeCookedSceneRenderer PUBLIC PF_COOKED_RUNTIME_ONLY _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(PulseForgeCookedSceneRenderer
+	PUBLIC PulseForgeRenderMath PulseForgeScene PulseForgeRenderer PulseForgeAssetPreparation
+	PRIVATE PulseForgeCookedRuntimeProvider PulseForgeCookedProductCodecs)
+set_property(TARGET PulseForgeCookedSceneRenderer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+
+add_library(PulseForgeAssetCookService STATIC PulseForge/Source/Private/Assets/AssetCookService.cpp)
+target_include_directories(PulseForgeAssetCookService PUBLIC PulseForge/Source/Public PRIVATE PulseForge/Vendor/json/include)
+target_link_libraries(PulseForgeAssetCookService
+	PUBLIC PulseForgeCookedAssetCatalog
+	PRIVATE PulseForgeAssetCpuProducts PulseForgeAssetDependencyCatalog PulseForgeAssetImporters
+		PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeInput PulseForgeSceneRenderer)
+set_property(TARGET PulseForgeAssetCookService PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+add_executable(PulseForgeCook PulseForge/Source/Private/Assets/AssetCookCommand.cpp)
+target_include_directories(PulseForgeCook PRIVATE PulseForge/Source/Public)
+target_link_libraries(PulseForgeCook PRIVATE PulseForgeAssetCookService PulseForgeAssetServices PulseForgeAssetDependencyCatalog)
+set_property(TARGET PulseForgeCook PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 add_library(PulseForge STATIC
 	PulseForge/Source/Private/Core/Core.cpp
 	PulseForge/Source/Private/Core/EntryPoint.cpp

@@ -1,12 +1,15 @@
 #include "Client/PulseForgeGame.h"
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
+#endif
 #include "Core/Application.h"
 #include "Core/EntryPoint.h"
 #include "Core/Log.h"
 #include "Core/PlatformServices.h"
 #include "Input/GameplayInputStore.h"
 #include "Renderer/SceneRenderer.h"
+#include "Runtime/CookedContentProvider.h"
 #include "Runtime/PlayerSession.h"
 #include "Scene/Scene.h"
 
@@ -90,6 +93,7 @@ namespace
 		return *ResourceDirectory / PF_SAMPLE_SHADER_DIRECTORY;
 	}
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 	void ValidateLaunchProject(const PulseForgeGame::PlayerLaunchConfiguration& Configuration)
 	{
 		auto ProjectResult = PulseForge::Project::Open(Configuration.ProjectFile);
@@ -103,6 +107,20 @@ namespace
 				PulseForge::SceneAssetService::Load(*StartupScene, ProjectResult->GetRootPath(), ProjectResult->GetAssetRegistry(), Scene);
 			!Loaded)
 			throw std::runtime_error("Could not load player startup scene: " + Loaded.error().Message);
+	}
+#endif
+
+	std::string CurrentTargetPlatform()
+	{
+#if defined(PF_PLATFORM_WINDOWS)
+		return "Windows";
+#elif defined(PF_PLATFORM_MACOS)
+		return "macOS";
+#elif defined(PF_PLATFORM_LINUX)
+		return "Linux";
+#else
+		return "Unsupported";
+#endif
 	}
 
 	PulseForge::RendererAPI ResolveRendererAPI(const PulseForgeGame::PlayerLaunchConfiguration& Configuration)
@@ -128,6 +146,9 @@ namespace
 		bool EditorControlEnabled = false;
 		if (ArgumentCount <= 1)
 		{
+#if defined(PF_COOKED_RUNTIME_ONLY)
+			throw std::runtime_error("Cooked Player requires --cooked-content <root>; source-project fallback is disabled");
+#else
 			auto ResourceDirectory = PulseForge::Platform::GetResourceDirectory();
 			if (!ResourceDirectory)
 				throw std::runtime_error(
@@ -135,6 +156,7 @@ namespace
 			DefaultArguments = { "--project", PathToUtf8(*ResourceDirectory / "PulseForgeGame.pfproj") };
 			for (const std::string& Argument : DefaultArguments)
 				ParsedArguments.push_back(Argument);
+#endif
 		}
 		else
 		{
@@ -155,7 +177,16 @@ namespace
 		if (Error) throw std::runtime_error("Could not resolve the player invocation directory: " + Error.message());
 		auto Configuration = PulseForgeGame::ParsePlayerLaunchConfiguration(ParsedArguments, WorkingDirectory);
 		if (!Configuration) throw std::runtime_error(Configuration.error().Message);
-		ValidateLaunchProject(*Configuration);
+
+		if (Configuration->CookedContentRoot.empty())
+		{
+#if defined(PF_COOKED_RUNTIME_ONLY)
+			throw std::runtime_error("Cooked Player requires --cooked-content; authoring project loading is not linked");
+#else
+			ValidateLaunchProject(*Configuration);
+#endif
+		}
+
 		return { std::move(*Configuration), EditorControlEnabled };
 	}
 } // namespace
@@ -174,36 +205,95 @@ public:
 			.GameplayInput = &PulseForge::Application::Get().GetGameplayInput(),
 			.Diagnostics = PulseForge::Application::Get().GetDiagnosticsRecorder() };
 		auto& Application = PulseForge::Application::Get();
-		auto ActionProject = PulseForge::Project::Open(m_Configuration.ProjectFile);
-		if (!ActionProject) throw std::runtime_error("Could not load player input project settings: " + ActionProject.error().Message);
-		auto UserDataRoot = PulseForge::Platform::GetUserDataDirectory();
-		if (UserDataRoot)
+		if (!m_Configuration.CookedContentRoot.empty())
 		{
-			auto Loaded = PulseForge::LoadGameplayInputMap(
-				ActionProject->GetRootPath(), ActionProject->GetDescription().ID, *UserDataRoot);
-			if (!Loaded) throw std::runtime_error("Could not load player input map: " + Loaded.error().Message);
-			for (const std::string& Warning : Loaded->Warnings) PF_WARN("Player input map: {}", Warning);
-			if (auto Applied = Application.GetGameplayInput().SetActionMap(std::move(Loaded->ActionMap)); !Applied)
-				throw std::runtime_error("Could not apply player input map: " + Applied.error().Message);
+			const PulseForge::CookedAssetCompatibility Compatibility{
+				.TargetPlatform = CurrentTargetPlatform(),
+				.RendererBackend = ResolveRendererAPI(m_Configuration) == PulseForge::RendererAPI::Vulkan ? "Vulkan" : "OpenGL",
+				.RuntimeABI = m_Configuration.RuntimeABI
+			};
+			auto Opened = PulseForge::CookedContentProvider::Open(m_Configuration.CookedContentRoot, Compatibility);
+			if (!Opened) throw std::runtime_error("Could not open cooked player content: " + Opened.error().Message);
+			m_CookedContent = std::move(*Opened);
+		}
+		auto UserDataRoot = PulseForge::Platform::GetUserDataDirectory();
+		if (m_CookedContent)
+		{
+			if (Application.GetRendererAPI() != PulseForge::RendererAPI::Vulkan)
+				throw std::runtime_error("Cooked scene rendering currently requires the Vulkan renderer backend");
+			PulseForge::GameplayActionMap Defaults;
+			if (m_CookedContent->FindGameplayInput(m_CookedContent->GetProjectID()))
+			{
+				auto Loaded = m_CookedContent->LoadGameplayInput(m_CookedContent->GetProjectID());
+				if (!Loaded) throw std::runtime_error("Could not load cooked gameplay input map: " + Loaded.error().Message);
+				Defaults = std::move(*Loaded);
+			}
+			if (UserDataRoot)
+			{
+				auto Loaded = PulseForge::ApplyGameplayInputOverrides(
+					std::move(Defaults), m_CookedContent->GetProjectID(), *UserDataRoot);
+				if (!Loaded) throw std::runtime_error("Could not apply cooked player input overrides: " + Loaded.error().Message);
+				for (const std::string& Warning : Loaded->Warnings) PF_WARN("Player input map: {}", Warning);
+				Defaults = std::move(Loaded->ActionMap);
+			}
+			else
+				PF_WARN("Player input overrides are unavailable: {}; using cooked defaults", UserDataRoot.error().Message);
+			if (auto Applied = Application.GetGameplayInput().SetActionMap(std::move(Defaults)); !Applied)
+				throw std::runtime_error("Could not apply cooked player input map: " + Applied.error().Message);
 		}
 		else
 		{
-			PF_WARN("Player input overrides are unavailable: {}; using project-authored defaults", UserDataRoot.error().Message);
-			auto Defaults = PulseForge::LoadProjectGameplayActionMap(ActionProject->GetRootPath());
-			if (!Defaults) throw std::runtime_error("Could not load player input defaults: " + Defaults.error().Message);
-			if (auto Applied = Application.GetGameplayInput().SetActionMap(std::move(*Defaults)); !Applied)
-				throw std::runtime_error("Could not apply player input defaults: " + Applied.error().Message);
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+			auto ActionProject = PulseForge::Project::Open(m_Configuration.ProjectFile);
+			if (!ActionProject) throw std::runtime_error("Could not load player input project settings: " + ActionProject.error().Message);
+			if (UserDataRoot)
+			{
+				auto Loaded = PulseForge::LoadGameplayInputMap(
+					ActionProject->GetRootPath(), ActionProject->GetDescription().ID, *UserDataRoot);
+				if (!Loaded) throw std::runtime_error("Could not load player input map: " + Loaded.error().Message);
+				for (const std::string& Warning : Loaded->Warnings) PF_WARN("Player input map: {}", Warning);
+				if (auto Applied = Application.GetGameplayInput().SetActionMap(std::move(Loaded->ActionMap)); !Applied)
+					throw std::runtime_error("Could not apply player input map: " + Applied.error().Message);
+			}
+			else
+			{
+				PF_WARN("Player input overrides are unavailable: {}; using project-authored defaults", UserDataRoot.error().Message);
+				auto Defaults = PulseForge::LoadProjectGameplayActionMap(ActionProject->GetRootPath());
+				if (!Defaults) throw std::runtime_error("Could not load player input defaults: " + Defaults.error().Message);
+				if (auto Applied = Application.GetGameplayInput().SetActionMap(std::move(*Defaults)); !Applied)
+					throw std::runtime_error("Could not apply player input defaults: " + Applied.error().Message);
+			}
+#else
+			throw std::runtime_error("Cooked Player cannot load source-project input settings");
+#endif
 		}
-		m_Session = std::make_unique<PulseForge::PlayerSession>(m_Configuration.ProjectFile, PulseForge::SceneRuntimeDesc{}, Services);
+#if defined(PF_COOKED_RUNTIME_ONLY)
+		m_Session = std::make_unique<PulseForge::PlayerSession>(m_CookedContent, PulseForge::SceneRuntimeDesc{}, Services);
+#else
+		m_Session = m_CookedContent
+			? std::make_unique<PulseForge::PlayerSession>(m_CookedContent, PulseForge::SceneRuntimeDesc{}, Services)
+			: std::make_unique<PulseForge::PlayerSession>(m_Configuration.ProjectFile, PulseForge::SceneRuntimeDesc{}, Services);
+#endif
 		if (auto Started = m_Session->Start(m_Configuration.StartupScene); !Started)
 			throw std::runtime_error("Could not start player session: " + Started.error().Message);
 
-		if (PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan)
+		if (m_CookedContent && PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan)
 		{
+			auto CreatedRenderer = PulseForge::SceneRenderer::Create(
+				PulseForge::Application::Get(), m_CookedContent, ResolveCompiledShaderDirectory());
+			if (!CreatedRenderer) throw std::runtime_error(CreatedRenderer.error().Message);
+			m_SceneRenderer = std::move(*CreatedRenderer);
+		}
+		else if (!m_CookedContent && PulseForge::Application::Get().GetRendererAPI() == PulseForge::RendererAPI::Vulkan)
+		{
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 			auto CreatedRenderer = PulseForge::SceneRenderer::Create(
 				PulseForge::Application::Get(), *m_Session->GetProject(), ResolveCompiledShaderDirectory());
 			if (!CreatedRenderer) throw std::runtime_error(CreatedRenderer.error().Message);
 			m_SceneRenderer = std::move(*CreatedRenderer);
+#else
+			throw std::runtime_error("Cooked Player cannot construct a source-project renderer");
+#endif
 		}
 	}
 
@@ -305,6 +395,7 @@ public:
 
 private:
 	PulseForgeGame::PlayerLaunchConfiguration m_Configuration;
+	std::shared_ptr<const PulseForge::CookedContentProvider> m_CookedContent;
 	std::unique_ptr<PulseForge::PlayerSession> m_Session;
 	std::unique_ptr<PulseForge::SceneRenderer> m_SceneRenderer;
 	bool m_LoggedPrepareFailure = false;

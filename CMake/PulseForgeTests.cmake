@@ -101,10 +101,14 @@ if(BUILD_TESTING)
 		Tests/AssetDependencyCorrectionTests.cpp
 		Tests/AssetDependencyPublicationTests.cpp
 		Tests/AssetEditTransactionTests.cpp
+		Tests/AssetCookServiceTests.cpp
 	)
 	target_include_directories(PulseForgeAssetTests PRIVATE Tests PulseForge/Vendor/json/include)
+	target_compile_definitions(PulseForgeAssetTests PRIVATE
+		"PF_COOK_FIXTURE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj\"")
 	target_link_libraries(PulseForgeAssetTests PRIVATE
 		PulseForgeAssetCatalog PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeAssetDependencyCatalog)
+	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeAssetCookService PulseForgeCookedRuntimeProvider)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeAssetTests PulseForgePublicHeaderChecks)
 	endif()
@@ -115,6 +119,17 @@ if(BUILD_TESTING)
 	target_link_libraries(PulseForgeAssetDependencyConsumer PRIVATE PulseForgeAssetDependencyCatalog)
 	set_property(TARGET PulseForgeAssetDependencyConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 	add_test(NAME PulseForge.AssetDependencyConsumer COMMAND PulseForgeAssetDependencyConsumer)
+	add_test(NAME PulseForge.AssetCook COMMAND PulseForgeAssetTests --cook-only)
+	add_test(NAME PulseForge.CookCliUsage COMMAND PulseForgeCook)
+	set_tests_properties(PulseForge.CookCliUsage PROPERTIES WILL_FAIL TRUE)
+	add_executable(PulseForgeCookedAssetCatalogTests Tests/CookedAssetCatalogTests.cpp)
+	target_link_libraries(PulseForgeCookedAssetCatalogTests PRIVATE PulseForgeCookedAssetCatalog)
+	set_property(TARGET PulseForgeCookedAssetCatalogTests PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+	add_test(NAME PulseForge.CookedAssetCatalog COMMAND PulseForgeCookedAssetCatalogTests)
+	add_executable(PulseForgeCookedAssetCatalogConsumer Tests/ModuleConsumers/CookedAssetCatalogConsumer.cpp)
+	target_link_libraries(PulseForgeCookedAssetCatalogConsumer PRIVATE PulseForgeCookedRuntimeProvider)
+	set_property(TARGET PulseForgeCookedAssetCatalogConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+	add_test(NAME PulseForge.CookedAssetCatalogConsumer COMMAND PulseForgeCookedAssetCatalogConsumer)
 	add_executable(PulseForgeDerivedDataTests
 		Tests/PulseForgeDerivedDataTests.cpp
 		Tests/AssetPreparationServiceTests.cpp
@@ -405,7 +420,7 @@ if(BUILD_TESTING)
 	endif()
 
 	add_custom_target(PulseForgeTests)
-	add_dependencies(PulseForgeTests ${PULSEFORGE_TEST_EXECUTABLE_TARGETS})
+	add_dependencies(PulseForgeTests ${PULSEFORGE_TEST_EXECUTABLE_TARGETS} PulseForgeCook)
 	if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 		add_dependencies(PulseForgeTests PulseForgePublicHeaderChecks)
 	endif()

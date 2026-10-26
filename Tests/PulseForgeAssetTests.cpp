@@ -6,6 +6,7 @@ void RunAssetDependencyCatalogTests(TestRunner& Tests);
 void RunAssetDependencyCorrectionTests(TestRunner& Tests);
 void RunAssetDependencyPublicationTests(TestRunner& Tests);
 void RunAssetEditTransactionTests(TestRunner& Tests);
+void RunAssetCookServiceTests(TestRunner& Tests);
 void SetAssetEditTestExecutablePath(const std::filesystem::path& Executable);
 int RunAssetEditTransactionChildMode(int ArgumentCount, char** Arguments);
 
@@ -29,6 +30,11 @@ int main(int ArgumentCount, char** Arguments)
 		RunAssetEditTransactionTests(Tests);
 		return Tests.Finish();
 	}
+	if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--cook-only")
+	{
+		RunAssetCookServiceTests(Tests);
+		return Tests.Finish();
+	}
 	RunAssetsTests(Tests);
 	RunAssetRegistryTests(Tests);
 	RunAssetOperationsTests(Tests);
@@ -37,5 +43,6 @@ int main(int ArgumentCount, char** Arguments)
 	RunAssetDependencyCorrectionTests(Tests);
 	RunAssetDependencyPublicationTests(Tests);
 	RunAssetEditTransactionTests(Tests);
+	RunAssetCookServiceTests(Tests);
 	return Tests.Finish();
 }

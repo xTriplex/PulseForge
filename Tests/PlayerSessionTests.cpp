@@ -4,7 +4,13 @@
 #include "Assets/AssetOperations.h"
 #include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
+#include "Assets/CookedAssetCatalog.h"
+#include "Runtime/CookedContentProvider.h"
 #include "Runtime/PlayerSession.h"
+#include "Scene/Components/AudioSourceComponent.h"
+#include "Scene/Components/BoxColliderComponent.h"
+#include "Scene/Components/RigidbodyComponent.h"
+#include "Scene/SceneSerializer.h"
 #include "Scene/Components/ScriptComponent.h"
 #include "Scene/Scene.h"
 #include "Scripting/ScriptRuntime.h"
@@ -20,6 +26,43 @@
 
 namespace
 {
+	std::vector<std::byte> MakeCookedSilentWave()
+	{
+		// One mono PCM16 sample at 44.1 kHz is sufficient to exercise the production decoder.
+		constexpr uint32_t DataSize = 2;
+		std::vector<std::byte> Data(44 + DataSize);
+		auto WriteFourCC = [&Data](size_t Offset, std::string_view Value)
+		{
+			for (size_t Index = 0; Index < Value.size(); ++Index)
+				Data[Offset + Index] = static_cast<std::byte>(static_cast<unsigned char>(Value[Index]));
+		};
+		auto Write16 = [&Data](size_t Offset, uint16_t Value)
+		{
+			Data[Offset] = static_cast<std::byte>(Value & 0xff);
+			Data[Offset + 1] = static_cast<std::byte>((Value >> 8) & 0xff);
+		};
+		auto Write32 = [&Data](size_t Offset, uint32_t Value)
+		{
+			for (size_t Byte = 0; Byte < 4; ++Byte)
+				Data[Offset + Byte] = static_cast<std::byte>((Value >> (Byte * 8)) & 0xff);
+		};
+
+		WriteFourCC(0, "RIFF");
+		Write32(4, static_cast<uint32_t>(Data.size() - 8));
+		WriteFourCC(8, "WAVE");
+		WriteFourCC(12, "fmt ");
+		Write32(16, 16);
+		Write16(20, 1);
+		Write16(22, 1);
+		Write32(24, 44100);
+		Write32(28, 88200);
+		Write16(32, 2);
+		Write16(34, 16);
+		WriteFourCC(36, "data");
+		Write32(40, DataSize);
+		return Data;
+	}
+
 	struct ScriptObservationBuffer
 	{
 		std::array<PulseForge::ScriptRuntimeObservation, 64> Events{};
@@ -325,9 +368,121 @@ namespace
 		const auto MissingStartup = MissingStartupSession.Start();
 		PF_CHECK(Tests, !MissingStartup && MissingStartup.error().Code == PlayerSessionErrorCode::MissingStartupScene);
 	}
+
+	void TestCookedPlayerSessionDoesNotOpenSourceProject(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const auto ProjectIdentifier = UUID::Generate();
+		const auto SceneIdentifier = UUID::Generate();
+		PF_CHECK(Tests, ProjectIdentifier.has_value() && SceneIdentifier.has_value());
+		if (!ProjectIdentifier || !SceneIdentifier) return;
+
+		std::error_code Error;
+		const auto Temporary = std::filesystem::canonical(std::filesystem::temp_directory_path(Error), Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const auto Root = Temporary / ("PulseForge Cooked Player Session " + ProjectIdentifier->ToString());
+		std::filesystem::create_directories(Root / "products", Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		struct DirectoryCleanup
+		{
+			std::filesystem::path Path;
+			~DirectoryCleanup() { std::error_code CleanupError; std::filesystem::remove_all(Path, CleanupError); }
+		} Cleanup{ Root };
+
+		Scene AuthoredScene;
+		const auto ScriptIdentifier = UUID::Generate();
+		PF_CHECK(Tests, ScriptIdentifier.has_value());
+		if (!ScriptIdentifier) return;
+		auto AuthoredEntity = AuthoredScene.CreateEntity("Cooked Runtime Entity");
+		PF_CHECK(Tests, AuthoredEntity.has_value());
+		if (!AuthoredEntity) return;
+		PF_CHECK(Tests, AuthoredEntity->SetScript(ScriptComponent{ *ScriptIdentifier }).has_value());
+		PF_CHECK(Tests, AuthoredEntity->SetRigidbody({ RigidbodyMotionType::Dynamic, 1.0f, 0.2f, 0.0f, false }).has_value());
+		PF_CHECK(Tests, AuthoredEntity->SetBoxCollider({ { 0.5f, 0.5f, 0.5f } }).has_value());
+		const auto AudioIdentifier = UUID::Generate();
+		PF_CHECK(Tests, AudioIdentifier.has_value());
+		if (!AudioIdentifier) return;
+		PF_CHECK(Tests, AuthoredEntity->SetAudioSource(AudioSourceComponent{ *AudioIdentifier, 1.0f, true, true, false }).has_value());
+		auto Serialized = SceneSerializer::Serialize(AuthoredScene);
+		PF_CHECK(Tests, Serialized.has_value());
+		if (!Serialized) return;
+		const std::span<const std::byte> PayloadBytes = std::as_bytes(std::span(Serialized->data(), Serialized->size()));
+		const std::vector<std::byte> Payload(PayloadBytes.begin(), PayloadBytes.end());
+		{
+			std::ofstream Output(Root / "products" / "startup.scene", std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(Payload.data()), static_cast<std::streamsize>(Payload.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const CookedAssetDigest Digest = CookedAssetCatalog::ComputePayloadDigest(Payload);
+		CookedAssetEntry Entry{ *SceneIdentifier, CookedAssetProductKind::Scene, {}, "products/startup.scene", 1,
+			Payload.size(), Digest.Algorithm, Digest.Value, {} };
+		const std::string Script =
+			"function OnCreate() assert(entity:play_audio()) end\n"
+			"function OnUpdate(dt) assert(entity:set_translation(dt, 0, 0)) end\n";
+		const std::span<const std::byte> ScriptSpan = std::as_bytes(std::span(Script.data(), Script.size()));
+		const std::vector<std::byte> ScriptBytes(ScriptSpan.begin(), ScriptSpan.end());
+		const CookedAssetDigest ScriptDigest = CookedAssetCatalog::ComputePayloadDigest(ScriptBytes);
+		{
+			std::ofstream Output(Root / "products" / "script.lua", std::ios::binary | std::ios::trunc);
+			Output.write(Script.data(), static_cast<std::streamsize>(Script.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		CookedAssetEntry ScriptEntry{ *ScriptIdentifier, CookedAssetProductKind::Script, {}, "products/script.lua", 1,
+			ScriptBytes.size(), ScriptDigest.Algorithm, ScriptDigest.Value, {} };
+		const std::vector<std::byte> WaveBytes = MakeCookedSilentWave();
+		{
+			std::ofstream Output(Root / "products" / "sound.wav", std::ios::binary | std::ios::trunc);
+			Output.write(reinterpret_cast<const char*>(WaveBytes.data()), static_cast<std::streamsize>(WaveBytes.size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		const CookedAssetDigest AudioDigest = CookedAssetCatalog::ComputePayloadDigest(WaveBytes);
+		CookedAssetEntry AudioEntry{ *AudioIdentifier, CookedAssetProductKind::Audio, {}, "products/sound.wav", 1,
+			WaveBytes.size(), AudioDigest.Algorithm, AudioDigest.Value, {} };
+		const CookedAssetCompatibility Compatibility{ "test-target", "test-renderer", "test-runtime-abi" };
+		auto Manifest = CookedAssetCatalog::SerializeManifest(
+			*ProjectIdentifier, *SceneIdentifier, Compatibility, {},
+			{ std::move(Entry), std::move(ScriptEntry), std::move(AudioEntry) });
+		PF_CHECK(Tests, Manifest.has_value());
+		if (!Manifest) return;
+		{
+			std::ofstream Output(Root / CookedAssetCatalog::ManifestFileName, std::ios::binary | std::ios::trunc);
+			Output.write(Manifest->data(), static_cast<std::streamsize>(Manifest->size()));
+			PF_CHECK(Tests, static_cast<bool>(Output));
+		}
+		auto Provider = CookedContentProvider::Open(Root, Compatibility);
+		PF_CHECK(Tests, Provider.has_value());
+		if (!Provider) return;
+
+		ScriptObservationBuffer ScriptObservations;
+		SceneRuntimeServices RuntimeServices;
+		RuntimeServices.ScriptObserver = { &ScriptObservations, StoreScriptObservation };
+		SceneRuntimeDesc RuntimeDescription;
+		RuntimeDescription.Audio.OutputBackend = AudioOutputBackend::Null;
+		PlayerSession Session(*Provider, RuntimeDescription, RuntimeServices);
+		PF_CHECK(Tests, Session.Start().has_value());
+		PF_CHECK(Tests, Session.IsCookedSession());
+		PF_CHECK(Tests, Session.GetProject() == nullptr);
+		PF_CHECK(Tests, !std::filesystem::exists(Root / "SourceProject.pfproj"));
+		PF_CHECK(Tests, !std::filesystem::exists(Root / "Assets"));
+		PF_CHECK(Tests, Session.GetActiveSceneAsset() == *SceneIdentifier);
+		PF_CHECK(Tests, Session.GetActiveScene() && Session.GetActiveScene()->GetEntityCount() == 1);
+		auto Advanced = Session.Advance(Timestep(1.0 / 60.0));
+		PF_CHECK(Tests, Advanced.has_value());
+		PF_CHECK(Tests, Advanced && Advanced->PhysicsSteps > 0);
+		PF_CHECK(Tests, CountScriptObservations(ScriptObservations, ScriptRuntimeObservationKind::CallbackCompleted,
+			*ScriptIdentifier, AuthoredEntity->GetUUID(), ScriptRuntimeCallback::OnCreate) == 1);
+		const auto CookedEntity = Session.GetActiveScene()->FindEntity(AuthoredEntity->GetUUID());
+		PF_CHECK(Tests, CookedEntity.has_value());
+		PF_CHECK(Tests, CookedEntity && CookedEntity->GetTransform()->Translation.x > 0.0f);
+		PF_CHECK(Tests, CookedEntity && CookedEntity->GetTransform()->Translation.y < 0.0f);
+		Session.Stop();
+	}
 } // namespace
 
 void RunPlayerSessionTests(TestRunner& Tests)
 {
 	TestPlayerSessionLifecycleAndTransitions(Tests);
+	TestCookedPlayerSessionDoesNotOpenSourceProject(Tests);
 }

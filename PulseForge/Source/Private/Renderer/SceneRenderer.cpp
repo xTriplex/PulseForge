@@ -10,10 +10,13 @@
 #include "Renderer/SceneRendererMaterialBindingCache.h"
 
 #include "Assets/MaterialAssetCache.h"
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/AssetPreparationService.h"
 #include "Assets/DerivedDataArtifactStore.h"
-#include "Renderer/AssetCache/MeshAssetCache.h"
 #include "Assets/Project.h"
+#endif
+#include "Renderer/AssetCache/MeshAssetCache.h"
+#include "Runtime/CookedContentProvider.h"
 #include "Renderer/AssetCache/TextureAssetCache.h"
 #include "Renderer/EnvironmentLightingCache.h"
 #include "Core/Log.h"
@@ -136,16 +139,22 @@ namespace PulseForge
 
 	struct SceneRenderer::ProjectAssetCaches final
 	{
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		DerivedDataArtifactStore Artifacts;
 		AssetPreparationService Preparation;
+#endif
 		AssetUploadBudget UploadBudget;
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		std::string SessionKey;
 		std::shared_ptr<const AssetRegistry> Registry;
+#endif
+		std::shared_ptr<const CookedContentProvider> CookedContent;
 		MeshAssetCache Meshes;
 		TextureAssetCache Textures;
 		MaterialAssetCache Materials;
 		EnvironmentLightingCache EnvironmentLighting;
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		static std::string MakeSessionKey(const std::filesystem::path& ProjectRoot)
 		{
 			static std::atomic<uint64_t> NextSession{ 1 };
@@ -169,6 +178,18 @@ namespace PulseForge
 		{
 		}
 
+		ProjectAssetCaches(RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content)
+			: Artifacts(DerivedDataArtifactStoreOptions{ .Enabled = false }),
+			  SessionKey(Content ? Content->GetProjectID().ToString() : std::string{}),
+			  Registry(std::make_shared<const AssetRegistry>()), CookedContent(std::move(Content)),
+			  Meshes(Runtime, CookedContent, Runtime.GetDiagnosticRecorder()),
+			  Textures(Runtime, CookedContent, Runtime.GetDiagnosticRecorder()),
+			  Materials(CookedContent), EnvironmentLighting(Runtime, CookedContent, Runtime.GetDiagnosticRecorder())
+		{
+			if (!CookedContent)
+				throw std::invalid_argument("Cooked scene renderer requires a content provider");
+		}
+
 		void Clear(const AssetRegistry& CurrentRegistry) noexcept
 		{
 			try
@@ -189,10 +210,32 @@ namespace PulseForge
 			EnvironmentLighting.SetSessionKey(SessionKey);
 			Materials.Clear();
 		}
+#else
+		ProjectAssetCaches(RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content)
+			: CookedContent(std::move(Content)), Meshes(Runtime, CookedContent, Runtime.GetDiagnosticRecorder()),
+			  Textures(Runtime, CookedContent, Runtime.GetDiagnosticRecorder()), Materials(CookedContent),
+			  EnvironmentLighting(Runtime, CookedContent, Runtime.GetDiagnosticRecorder())
+		{
+			if (!CookedContent)
+				throw std::invalid_argument("Cooked scene renderer requires a content provider");
+		}
+#endif
 	};
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 	SceneRenderer::SceneRenderer(RenderDevice& Runtime, const Project& SourceProject)
-		: m_Runtime(Runtime), m_Project(SourceProject), m_ProjectAssetCaches(std::make_unique<ProjectAssetCaches>(Runtime, SourceProject)),
+		: m_Runtime(Runtime), m_Project(&SourceProject), m_ProjectAssetCaches(std::make_unique<ProjectAssetCaches>(Runtime, SourceProject)),
+		  m_PipelineCache(std::make_unique<SceneRendererPipelineCache>(Runtime)),
+		  m_ToneMappingStage(std::make_unique<ToneMappingStage>(Runtime)), m_HdrTargetCache(std::make_unique<HdrTargetCache>(Runtime)),
+		  m_ShadowTargetCache(std::make_unique<ShadowTargetCache>(Runtime)), m_LocalLightingState(std::make_unique<LocalLightingState>()),
+		  m_AmbientOcclusionPass(std::make_unique<AmbientOcclusionPass>(Runtime)),
+		  m_MaterialBindingCache(std::make_unique<SceneRendererMaterialBindingCache>(Runtime)), m_ShadowPass(std::make_unique<ShadowPass>())
+	{
+	}
+#endif
+
+	SceneRenderer::SceneRenderer(RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content)
+		: m_Runtime(Runtime), m_ProjectAssetCaches(std::make_unique<ProjectAssetCaches>(Runtime, std::move(Content))),
 		  m_PipelineCache(std::make_unique<SceneRendererPipelineCache>(Runtime)),
 		  m_ToneMappingStage(std::make_unique<ToneMappingStage>(Runtime)), m_HdrTargetCache(std::make_unique<HdrTargetCache>(Runtime)),
 		  m_ShadowTargetCache(std::make_unique<ShadowTargetCache>(Runtime)), m_LocalLightingState(std::make_unique<LocalLightingState>()),
@@ -205,10 +248,15 @@ namespace PulseForge
 
 	AssetPreparationServiceStats SceneRenderer::GetAssetPreparationStats() const noexcept
 	{
+#if defined(PF_COOKED_RUNTIME_ONLY)
+		return {};
+#else
 		return m_ProjectAssetCaches->Preparation.GetStats();
+#endif
 	}
 
 #if defined(PF_G11_GPU_VALIDATION_TESTS)
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 	std::expected<AssetPreparationService::Subscription, AssetPreparationError>
 	SceneRenderer::EnqueuePreparationForValidation(AssetPreparationService::Processor Processor)
 	{
@@ -218,6 +266,7 @@ namespace PulseForge
 		return m_ProjectAssetCaches->Preparation.Request(
 			{ m_ProjectAssetCaches->SessionKey, RecipeKey }, AssetPreparationPriority::Interactive, 1, std::move(Processor));
 	}
+#endif
 #endif
 
 	const Texture* SceneRenderer::GetPointShadowFaceTextureForValidation(size_t Slot, uint32_t Face) const noexcept
@@ -240,11 +289,27 @@ namespace PulseForge
 		return m_AmbientOcclusionPass->GetPrepassDepthTextureForValidation();
 	}
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 	std::expected<std::unique_ptr<SceneRenderer>, SceneRendererError> SceneRenderer::Create(
 		RenderDevice& Runtime, const Project& SourceProject, const std::filesystem::path& CompiledShaderDirectory)
 	{
 		Detail::ScopedProfileTimer Timer("SceneRenderer::Create");
 		auto Renderer = std::unique_ptr<SceneRenderer>(new SceneRenderer(Runtime, SourceProject));
+		if (auto Result = Renderer->Initialize(CompiledShaderDirectory); !Result)
+			return std::unexpected(std::move(Result.error()));
+		return Renderer;
+	}
+#endif
+
+	std::expected<std::unique_ptr<SceneRenderer>, SceneRendererError> SceneRenderer::Create(
+		RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content,
+		const std::filesystem::path& CompiledShaderDirectory)
+	{
+		if (!Content)
+			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, {}, {},
+				"Cooked scene renderer requires a content provider" });
+		Detail::ScopedProfileTimer Timer("SceneRenderer::Create cooked");
+		auto Renderer = std::unique_ptr<SceneRenderer>(new SceneRenderer(Runtime, std::move(Content)));
 		if (auto Result = Renderer->Initialize(CompiledShaderDirectory); !Result)
 			return std::unexpected(std::move(Result.error()));
 		return Renderer;
@@ -800,10 +865,12 @@ namespace PulseForge
 			ReadyMeshes.push_back(Instance);
 		}
 		Snapshot->Meshes = std::move(ReadyMeshes);
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		const AssetPreparationServiceStats PreparationStats = m_ProjectAssetCaches->Preparation.GetStats();
 		m_AssetPreparationPending |= PreparationStats.QueuedJobs > 0 || PreparationStats.ActiveJobs > 0 ||
 			PreparationStats.CpuReadyJobs > 0 || m_ProjectAssetCaches->Meshes.HasPendingWork() ||
 			m_ProjectAssetCaches->Textures.HasPendingWork() || m_ProjectAssetCaches->EnvironmentLighting.HasPendingWork();
+#endif
 
 		if (SceneVertexLayout)
 		{
@@ -915,7 +982,17 @@ namespace PulseForge
 		m_AssetPreparationPending = false;
 		m_PreparedEnvironmentReady = false;
 		m_MaterialBindingCache->RefreshProjectAssets();
-		m_ProjectAssetCaches->Clear(m_Project.GetAssetRegistry());
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+		if (m_Project)
+			m_ProjectAssetCaches->Clear(m_Project->GetAssetRegistry());
+		else
+#endif
+		{
+			m_ProjectAssetCaches->Meshes.Clear();
+			m_ProjectAssetCaches->Textures.Clear();
+			m_ProjectAssetCaches->EnvironmentLighting.Clear();
+			m_ProjectAssetCaches->Materials.Clear();
+		}
 	}
 
 	std::expected<HdrSceneRenderResult, SceneRendererError> SceneRenderer::RenderPreparedSceneToHdr(uint32_t Width, uint32_t Height)

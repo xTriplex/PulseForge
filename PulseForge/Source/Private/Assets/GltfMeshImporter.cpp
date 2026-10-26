@@ -1114,23 +1114,6 @@ namespace PulseForge
 		}).dump();
 	}
 
-	MeshDesc ImportedGltfMesh::GetMeshDescription() const
-	{
-		MeshDesc Description;
-		Description.VertexLayout.Stride = sizeof(GltfMeshVertex);
-		Description.VertexLayout.Attributes = {
-			{ VertexSemantic::Position, VertexFormat::Float3, offsetof(GltfMeshVertex, Position) },
-			{ VertexSemantic::Color, VertexFormat::Float4, offsetof(GltfMeshVertex, Color) },
-			{ VertexSemantic::TexCoord, VertexFormat::Float2, offsetof(GltfMeshVertex, TexCoord) },
-			{ VertexSemantic::Normal, VertexFormat::Float3, offsetof(GltfMeshVertex, Normal) },
-			{ VertexSemantic::Tangent, VertexFormat::Float4, offsetof(GltfMeshVertex, Tangent) }
-		};
-		Description.VertexData = std::as_bytes(std::span(Vertices));
-		Description.Indices = Indices;
-		Description.DebugName = Name;
-		return Description;
-	}
-
 	std::expected<ImportedGltfMesh, GltfMeshImportError> GltfMeshImporter::ImportStaticPrimitive(
 		const AssetID& Asset,
 		const std::filesystem::path& ProjectRoot,

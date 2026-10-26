@@ -6,8 +6,10 @@
 
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace PulseForge
 {
@@ -33,6 +35,8 @@ namespace PulseForge
 	{
 	public:
 		AudioAssetCache(AudioEngine& Engine, std::filesystem::path ProjectRoot, const AssetRegistry& Registry);
+		AudioAssetCache(AudioEngine& Engine,
+			std::function<std::expected<std::vector<std::byte>, AudioAssetError>(const AssetID&)> CookedReader);
 		AudioAssetCache(const AudioAssetCache&) = delete;
 		AudioAssetCache& operator=(const AudioAssetCache&) = delete;
 
@@ -43,7 +47,8 @@ namespace PulseForge
 	private:
 		AudioEngine& m_Engine;
 		std::filesystem::path m_ProjectRoot;
-		const AssetRegistry& m_Registry;
+		const AssetRegistry* m_Registry = nullptr;
+		std::function<std::expected<std::vector<std::byte>, AudioAssetError>(const AssetID&)> m_CookedReader;
 		std::unordered_map<AssetID, AudioClip, UUIDHash> m_Clips;
 	};
 }

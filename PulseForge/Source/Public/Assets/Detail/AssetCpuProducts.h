@@ -4,13 +4,16 @@
 #include "Assets/GltfMeshImporter.h"
 #include "Assets/DerivedDataArtifactStore.h"
 #include "Assets/AssetImportProvenance.h"
+#include "Assets/CookedProductCodec.h"
 #include "Assets/ImportedImageData.h"
 
 #include <expected>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <optional>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -18,12 +21,6 @@
 
 namespace PulseForge::Detail
 {
-	enum class ImageColorSpace : uint8_t
-	{
-		Linear,
-		Srgb
-	};
-
 	struct AssetCpuPhaseTiming
 	{
 		uint64_t StartTimestampNanoseconds = 0;
@@ -35,21 +32,6 @@ namespace PulseForge::Detail
 		ArtifactHit,
 		ProcessedAndStored,
 		ProcessedStoreUnavailable
-	};
-
-	struct PreparedMipLevel
-	{
-		uint32_t Width = 0;
-		uint32_t Height = 0;
-		std::vector<uint8_t> Pixels;
-	};
-
-	struct PreparedTextureCpuProduct
-	{
-		uint32_t Width = 0;
-		uint32_t Height = 0;
-		ImageColorSpace ColorSpace = ImageColorSpace::Srgb;
-		std::vector<PreparedMipLevel> MipLevels;
 	};
 
 	template<typename T>
@@ -76,7 +58,6 @@ namespace PulseForge::Detail
 		const AssetContentFingerprint& Source, ImageColorSpace ColorSpace);
 	[[nodiscard]] PULSEFORGE_API std::vector<PreparedMipLevel> BuildTextureMipChain(
 		uint32_t Width, uint32_t Height, std::span<const uint8_t> SourcePixels, ImageColorSpace ColorSpace);
-
 	// CPU-only preparation. A cache hit returns a validated owned product without calling the processor.
 	// Processor overrides are per-call deterministic test seams; normal consumers use the production importer.
 	[[nodiscard]] PULSEFORGE_API std::expected<AssetCpuProductResult<ImportedGltfMesh>, std::string> PrepareMeshCpuProduct(

@@ -1,14 +1,18 @@
 #include "Renderer/AssetCache/MeshAssetCache.h"
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/DerivedDataArtifactStore.h"
 #include "Assets/GltfMeshImporter.h"
-#include "Core/Diagnostics.h"
 #include "Assets/Detail/AssetCpuProducts.h"
+#endif
+#include "Core/Diagnostics.h"
+#include "Runtime/CookedContentProvider.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <exception>
 #include <limits>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -17,6 +21,7 @@ namespace PulseForge
 {
 	namespace
 	{
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		// GltfMeshImporter permits up to 10M vertices/30M indices; this reservation is a bounded admission estimate,
 		// not a precise peak allocator measurement. Products beyond service completion limits fail explicitly.
 		constexpr size_t EstimatedMeshWorkingBytes = 512ull * 1024ull * 1024ull;
@@ -35,9 +40,11 @@ namespace PulseForge
 		{
 			return "gltf-static-mesh-v1/" + Asset.ToString() + "/mesh-0/primitive-0/" + std::string(CanonicalSettings);
 		}
+#endif
 
 	}
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 	MeshAssetCache::MeshAssetCache(
 		RenderDevice& Runtime,
 		std::filesystem::path ProjectRoot,
@@ -47,7 +54,17 @@ namespace PulseForge
 		  m_RegistryOwner(std::make_shared<const AssetRegistry>(Registry)), m_Registry(m_RegistryOwner.get()), m_Diagnostics(Diagnostics)
 	{
 	}
+#endif
 
+	MeshAssetCache::MeshAssetCache(
+		RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content, DiagnosticRecorder* Diagnostics)
+		: m_Runtime(Runtime), m_CookedContent(std::move(Content)), m_Diagnostics(Diagnostics)
+	{
+		if (!m_CookedContent)
+			throw std::invalid_argument("Cooked mesh cache requires a content provider");
+	}
+
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 	MeshAssetCache::MeshAssetCache(
 		RenderDevice& Runtime,
 		std::filesystem::path ProjectRoot,
@@ -63,7 +80,9 @@ namespace PulseForge
 		  m_SessionKey(std::move(SessionKey)), m_Diagnostics(Diagnostics)
 	{
 	}
+#endif
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 	MeshAssetCache::MeshAssetCache(
 		RenderDevice& Runtime,
 		std::filesystem::path ProjectRoot,
@@ -78,6 +97,7 @@ namespace PulseForge
 		  m_ArtifactStore(&ArtifactStore), m_SessionKey(std::move(SessionKey)), m_Diagnostics(Diagnostics)
 	{
 	}
+#endif
 
 	MeshAssetCache::~MeshAssetCache()
 	{
@@ -116,6 +136,40 @@ namespace PulseForge
 	std::expected<std::reference_wrapper<const Mesh>, MeshAssetError> MeshAssetCache::GetOrLoadInternal(
 		const AssetID& Asset, bool CollectReadyProduct)
 	{
+		if (m_CookedContent)
+		{
+			if (Asset.IsNil())
+				return std::unexpected(MeshAssetError{ MeshAssetErrorCode::AssetNotFound, Asset,
+					"Cannot load a mesh with a nil asset UUID" });
+			auto [EntryIterator, WasInserted] = m_Meshes.try_emplace(Asset);
+			(void)WasInserted;
+			Entry& State = EntryIterator->second;
+			if (State.Current)
+			{
+				++m_CacheHits;
+				return std::cref(*State.Current);
+			}
+			++m_CacheMisses;
+			auto Product = m_CookedContent->LoadMeshPrimitive(Asset, "mesh/0/primitive/0");
+			if (!Product)
+				return std::unexpected(MeshAssetError{
+					Product.error().Code == CookedAssetCatalogErrorCode::AssetNotFound
+						? MeshAssetErrorCode::AssetNotFound : MeshAssetErrorCode::ImportFailed,
+					Asset, Product.error().Message });
+			const MeshDesc Description = Product->GetMeshDescription();
+			auto CreatedMesh = m_Runtime.CreateMesh(Description);
+			if (!CreatedMesh)
+				return std::unexpected(MeshAssetError{ MeshAssetErrorCode::MeshCreationFailed, Asset, CreatedMesh.error().Message });
+			State.Current = std::move(*CreatedMesh);
+			if (m_Diagnostics)
+				(void)m_Diagnostics->RecordEvent(DiagnosticEventKind::Resource, "Mesh cache resource created", "MeshAssetCache", "objects", 1);
+			return std::cref(*State.Current);
+		}
+#if defined(PF_COOKED_RUNTIME_ONLY)
+		(void)CollectReadyProduct;
+		return std::unexpected(MeshAssetError{ MeshAssetErrorCode::AssetNotFound, Asset,
+			"No cooked mesh product is available for this asset identity" });
+#else
 		if (Asset.IsNil())
 			return std::unexpected(MeshAssetError{ MeshAssetErrorCode::AssetNotFound, Asset,
 				"Cannot load a mesh with a nil asset UUID" });
@@ -356,10 +410,14 @@ namespace PulseForge
 				return std::unexpected(MeshAssetError{ MeshAssetErrorCode::Pending, Asset, "Mesh preparation was cancelled" });
 		}
 		return std::unexpected(MeshAssetError{ MeshAssetErrorCode::CacheFailure, Asset, "Unrecognized mesh preparation state" });
+#endif
 	}
 
 	bool MeshAssetCache::AdvancePending()
 	{
+#if defined(PF_COOKED_RUNTIME_ONLY)
+		return false;
+#else
 		std::vector<AssetID> Assets;
 		Assets.reserve(m_Meshes.size());
 		for (const auto& [Asset, State] : m_Meshes)
@@ -380,6 +438,7 @@ namespace PulseForge
 			PublishedReplacement |= Updated != m_Meshes.end() && Updated->second.Current.get() != Previous;
 		}
 		return PublishedReplacement;
+#endif
 	}
 
 	void MeshAssetCache::Clear() noexcept
@@ -409,10 +468,14 @@ namespace PulseForge
 
 	bool MeshAssetCache::HasPendingWork() const noexcept
 	{
+#if defined(PF_COOKED_RUNTIME_ONLY)
+		return false;
+#else
 		return std::ranges::any_of(m_Meshes, [this](const auto& Pair)
 		{
 			const auto& State = Pair.second;
 			return State.Pending.has_value() || State.AdmissionDeferred;
 		});
+#endif
 	}
 } // namespace PulseForge

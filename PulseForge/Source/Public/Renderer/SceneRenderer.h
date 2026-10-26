@@ -34,6 +34,7 @@ namespace PulseForge
 	class SceneRendererPipelineCache;
 	class SceneRendererMaterialBindingCache;
 	class Mesh;
+	class CookedContentProvider;
 
 	using PreparedMeshResourceMap = std::unordered_map<AssetID, const Mesh*, UUIDHash>;
 	using PreparedMaterialBindingMap = std::unordered_map<UUID, const BindingSet*, UUIDHash>;
@@ -110,6 +111,9 @@ namespace PulseForge
 		static constexpr size_t MaxLocalLights = MaxLocalLightCount;
 		[[nodiscard]] static std::expected<std::unique_ptr<SceneRenderer>, SceneRendererError> Create(
 			RenderDevice& Runtime, const Project& SourceProject, const std::filesystem::path& CompiledShaderDirectory);
+		[[nodiscard]] static std::expected<std::unique_ptr<SceneRenderer>, SceneRendererError> Create(
+			RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content,
+			const std::filesystem::path& CompiledShaderDirectory);
 
 		SceneRenderer(const SceneRenderer&) = delete;
 		SceneRenderer& operator=(const SceneRenderer&) = delete;
@@ -190,6 +194,7 @@ namespace PulseForge
 		class ShadowPass;
 
 		SceneRenderer(RenderDevice& Runtime, const Project& SourceProject);
+		SceneRenderer(RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content);
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
 			const std::filesystem::path& CompiledShaderDirectory);
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderShadowCascades();
@@ -243,7 +248,7 @@ namespace PulseForge
 		static_assert(sizeof(PointShadowObjectConstants) == 144);
 
 		RenderDevice& m_Runtime;
-		const Project& m_Project;
+		const Project* m_Project = nullptr;
 		std::unique_ptr<ProjectAssetCaches> m_ProjectAssetCaches;
 		std::unique_ptr<SceneRendererPipelineCache> m_PipelineCache;
 		std::unique_ptr<ToneMappingStage> m_ToneMappingStage;
