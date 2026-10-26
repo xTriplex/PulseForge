@@ -159,7 +159,10 @@ namespace PulseForge
 		AfterMovedSourceRewrite,
 		AfterAssetMove,
 		BeforeRegistryPublication,
-		AfterCommitMarker
+		AfterCommitMarker,
+		BeforeRecoveryCreateEntryObservation,
+		AfterRecoveryCreateFileRemoved,
+		BeforeRecoveryCleanupEntryObservation
 	};
 
 	struct AssetEditTransactionOptions
@@ -224,6 +227,6 @@ namespace PulseForge
 		// Run before registry construction while opening an authoring project. Recognized incomplete operations are
 		// reconciled and rolled back from their bounded journal; malformed, foreign, or externally changed state is retained.
 		[[nodiscard]] static std::expected<void, AssetEditTransactionError> RecoverInterruptedTransactions(
-			const std::filesystem::path& ProjectRoot, const UUID& ProjectID);
+			const std::filesystem::path& ProjectRoot, const UUID& ProjectID, const AssetEditTransactionOptions& Options = {});
 	};
 } // namespace PulseForge

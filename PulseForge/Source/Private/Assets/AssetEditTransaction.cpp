@@ -15,6 +15,7 @@
 #include <array>
 #include <cctype>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <set>
@@ -571,6 +572,9 @@ namespace PulseForge
 				   (!Expected.Identity || Actual.Identity == Expected.Identity);
 		}
 
+		std::expected<void, AssetEditTransactionError> InvokeHook(
+			const AssetEditTransactionOptions& Options, AssetEditTransactionStage Stage, const Path& Location);
+
 		std::expected<RecoveryEntryState, AssetEditTransactionError> CaptureRecoveryFileStateWithIdentity(
 			const Path& Root, const Path& RelativePath, bool AllowMissing = true)
 		{
@@ -581,17 +585,86 @@ namespace PulseForge
 			else IdentityPath = AssetMetadataSerializer::GetSidecarPath(Root / RelativePath);
 			std::error_code Error;
 			const auto Status = std::filesystem::symlink_status(IdentityPath, Error);
-			if (!Error && std::filesystem::is_regular_file(Status) && !IsLinkedOrReparsePath(IdentityPath, Status))
-			{
-				auto Metadata = AssetMetadataSerializer::LoadFromFile(IdentityPath);
-				if (!Metadata)
-					return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, IdentityPath,
-						"Recovery metadata identity cannot be validated: " + Metadata.error().Message));
-				State->Identity = Metadata->ID;
-			}
-			else if (RelativePath.extension() == ".meta")
+			if (Error == std::errc::no_such_file_or_directory ||
+				(!Error && Status.type() == std::filesystem::file_type::not_found))
+				return State;
+			if (Error)
 				return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, IdentityPath,
-					"Recovery metadata identity is missing, linked, or inaccessible"));
+					"Recovery metadata identity could not be observed: " + Error.message()));
+			if (IsLinkedOrReparsePath(IdentityPath, Status) || !std::filesystem::is_regular_file(Status))
+				return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, IdentityPath,
+					"Recovery metadata identity is linked or has an unexpected filesystem type"));
+			auto Metadata = AssetMetadataSerializer::LoadFromFile(IdentityPath);
+			if (!Metadata)
+				return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, IdentityPath,
+					"Recovery metadata identity cannot be validated: " + Metadata.error().Message));
+			State->Identity = Metadata->ID;
+			return State;
+		}
+
+		std::expected<RecoveryEntryState, AssetEditTransactionError> CaptureRecoveryTransitFileStateWithIdentity(
+			const Path& Root, const RecoveryAction& Action)
+		{
+			if (!Action.TransitPath)
+				return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, Action.CurrentPath,
+					"Recovery transit path is missing from the recorded action"));
+			auto State = CaptureRecoveryState(Root, *Action.TransitPath, RecoveryEntryType::File);
+			if (!State || !State->Exists) return State;
+			if (Action.OriginalPath.extension() == ".meta")
+			{
+				auto Metadata = AssetMetadataSerializer::LoadFromFile(Root / *Action.TransitPath);
+				if (!Metadata)
+					return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, Root / *Action.TransitPath,
+						"Recovery transit metadata identity cannot be validated: " + Metadata.error().Message));
+				State->Identity = Metadata->ID;
+				return State;
+			}
+
+			std::vector<Path> MetadataCandidates;
+			const Path OriginalMetadata = AssetMetadataSerializer::GetSidecarPath(Root / Action.OriginalPath);
+			Path TransitMetadata = OriginalMetadata;
+			const auto OriginalName = Action.OriginalPath.filename().native();
+			const auto TransitName = Action.TransitPath->filename().native();
+			if (TransitName.size() > OriginalName.size() && TransitName.starts_with(OriginalName))
+				TransitMetadata += TransitName.substr(OriginalName.size());
+			MetadataCandidates.push_back(TransitMetadata.lexically_relative(Root));
+			MetadataCandidates.push_back(OriginalMetadata.lexically_relative(Root));
+			MetadataCandidates.push_back(AssetMetadataSerializer::GetSidecarPath(Root / Action.CurrentPath).lexically_relative(Root));
+			std::vector<Path> UniqueCandidates;
+			for (const Path& Candidate : MetadataCandidates)
+				if (std::find(UniqueCandidates.begin(), UniqueCandidates.end(), Candidate) == UniqueCandidates.end())
+					UniqueCandidates.push_back(Candidate);
+
+			std::optional<AssetID> ObservedIdentity;
+			for (const Path& Candidate : UniqueCandidates)
+			{
+				const Path Absolute = Root / Candidate;
+				std::error_code Error;
+				const auto Status = std::filesystem::symlink_status(Absolute, Error);
+				if (Error == std::errc::no_such_file_or_directory ||
+					(!Error && Status.type() == std::filesystem::file_type::not_found))
+					continue;
+				if (Error || IsLinkedOrReparsePath(Absolute, Status) || !std::filesystem::is_regular_file(Status))
+					return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, Absolute,
+						"Recovery could not safely observe the identity sidecar for a transit file"));
+				auto Metadata = AssetMetadataSerializer::LoadFromFile(Absolute);
+				if (!Metadata)
+					return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, Absolute,
+						"Recovery transit metadata identity cannot be validated: " + Metadata.error().Message));
+				if (ObservedIdentity && *ObservedIdentity != Metadata->ID)
+					return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, Absolute,
+						"Recovery transit file has conflicting identity sidecars"));
+				ObservedIdentity = Metadata->ID;
+			}
+
+			if (ObservedIdentity)
+			{
+				State->Identity = *ObservedIdentity;
+				return State;
+			}
+			if (Action.Before.Identity || Action.After.Identity)
+				return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, *Action.TransitPath,
+					"Recovery transit file has no observable identity sidecar"));
 			return State;
 		}
 
@@ -609,12 +682,17 @@ namespace PulseForge
 		std::expected<void, AssetEditTransactionError> RestoreRecoveryRewrite(
 			const Path& Root, const Path& TransactionDirectory, const RecoveryAction& Action)
 		{
-			const std::array<Path, 2> Candidates{ Action.CurrentPath, Action.OriginalPath };
+			std::array<Path, 3> Candidates{ Action.CurrentPath, Action.OriginalPath,
+				Action.TransitPath.value_or(Path{}) };
 			for (size_t Index = 0; Index < Candidates.size(); ++Index)
 			{
 				const Path& Target = Candidates[Index];
-				if (Index == 1 && Action.OriginalPath == Action.CurrentPath) continue;
-				auto Current = CaptureRecoveryFileStateWithIdentity(Root, Target);
+				if (Target.empty() || (Index == 1 && Action.OriginalPath == Action.CurrentPath) ||
+					(Index == 2 && (!Action.TransitPath || *Action.TransitPath == Action.CurrentPath ||
+						*Action.TransitPath == Action.OriginalPath)))
+					continue;
+				auto Current = Index == 2 ? CaptureRecoveryTransitFileStateWithIdentity(Root, Action)
+											: CaptureRecoveryFileStateWithIdentity(Root, Target);
 				if (!Current) return std::unexpected(Current.error());
 				if (!Current->Exists) continue;
 				if (RecoveryStateMatches(Action.Before, *Current)) return {};
@@ -635,7 +713,8 @@ namespace PulseForge
 						"Could not restore the owned before-image: " + Restored.error().Message));
 				return {};
 			}
-			return {};
+			return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired,
+				Action.CurrentPath, "Rewritten output is absent from every recorded location; recovery data was retained"));
 		}
 
 		std::expected<void, AssetEditTransactionError> ValidateRecoveryDirectoryTree(
@@ -686,7 +765,8 @@ namespace PulseForge
 		}
 
 		std::expected<void, AssetEditTransactionError> ValidateRecoveryCreateTree(const Path& Root, const Path& TransactionDirectory,
-			const RecoveryRecord& Record, const RecoveryAction& RootAction, bool IsStaged)
+			const RecoveryRecord& Record, const RecoveryAction& RootAction, bool IsStaged,
+			const AssetEditTransactionOptions& Options)
 		{
 			const Path TreeRelative = IsStaged ? *RootAction.StagedPath : RootAction.CurrentPath;
 			const Path TreeAbsolute = IsStaged ? TransactionDirectory / TreeRelative : Root / TreeRelative;
@@ -698,6 +778,7 @@ namespace PulseForge
 												 : TreeState.error());
 
 			std::set<Path> ExpectedEntries;
+			std::vector<std::pair<Path, RecoveryEntryState>> ObservedEntries;
 			for (const RecoveryAction& Action : Record.Actions)
 			{
 				if (Action.Kind != RecoveryActionKind::Create && Action.Kind != RecoveryActionKind::DirectoryCreate) continue;
@@ -712,17 +793,33 @@ namespace PulseForge
 					return std::unexpected(
 						MakeError(AssetEditTransactionErrorCode::RecoveryRequired, Candidate, "Duplicate entry escapes its recorded root"));
 				ExpectedEntries.insert(RelativeToTree);
+				if (auto Hook = InvokeHook(Options, AssetEditTransactionStage::BeforeRecoveryCreateEntryObservation,
+						IsStaged ? TransactionDirectory / Candidate : Root / Candidate); !Hook)
+					return std::unexpected(Hook.error());
 				auto Actual = Action.After.Type == RecoveryEntryType::File
 								  ? CaptureRecoveryFileStateWithIdentity(IsStaged ? TransactionDirectory : Root, Candidate)
 								  : CaptureRecoveryState(IsStaged ? TransactionDirectory : Root, Candidate, RecoveryEntryType::Directory);
-				if (!Actual)
-				{
-					if (Actual.error().Code == AssetEditTransactionErrorCode::RecoveryRequired) continue;
-					return std::unexpected(Actual.error());
-				}
+				if (!Actual) return std::unexpected(Actual.error());
 				if (Actual->Exists && !RecoveryStateMatches(Action.After, *Actual))
 					return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, Candidate,
 						"Duplicate entry differs from its recorded output; it was preserved"));
+				ObservedEntries.emplace_back(RelativeToTree, *Actual);
+			}
+
+			// Rollback removes copied source files before their .meta sidecars. A missing sidecar
+			// while its source still exists cannot be a completed earlier rollback step and must
+			// not be treated as an identity-free ownership match. Both may be absent after a
+			// previous recovery removed the source first and then the sidecar.
+			for (const auto& [RelativePath, State] : ObservedEntries)
+			{
+				if (!State.Exists || RelativePath.extension() == ".meta") continue;
+				Path MetadataRelative = RelativePath;
+				MetadataRelative += ".meta";
+				const auto Metadata = std::find_if(ObservedEntries.begin(), ObservedEntries.end(),
+					[&](const auto& Entry) { return Entry.first == MetadataRelative; });
+				if (Metadata != ObservedEntries.end() && !Metadata->second.Exists)
+					return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, TreeAbsolute / MetadataRelative,
+						"Copied source remains but its required identity sidecar is absent; the source was preserved"));
 			}
 
 			std::set<Path> ActualEntries;
@@ -748,7 +845,8 @@ namespace PulseForge
 		}
 
 		std::expected<void, AssetEditTransactionError> RollbackRecoveryCreates(
-			const Path& Root, const Path& TransactionDirectory, const RecoveryRecord& Record)
+			const Path& Root, const Path& TransactionDirectory, const RecoveryRecord& Record,
+			const AssetEditTransactionOptions& Options)
 		{
 			std::vector<const RecoveryAction*> DirectoryActions;
 			for (const RecoveryAction& Action : Record.Actions)
@@ -780,7 +878,7 @@ namespace PulseForge
 				DirectoryChoice Choice{ Action, Staged->Exists, Current->Exists || Staged->Exists };
 				if (Choice.Exists)
 				{
-					auto ValidatedTree = ValidateRecoveryCreateTree(Root, TransactionDirectory, Record, *Action, Choice.Staged);
+					auto ValidatedTree = ValidateRecoveryCreateTree(Root, TransactionDirectory, Record, *Action, Choice.Staged, Options);
 					if (!ValidatedTree) return ValidatedTree;
 				}
 				Choices.push_back(Choice);
@@ -807,7 +905,17 @@ namespace PulseForge
 					if (!IsWithinStagedRoot)
 						return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, StagedPath,
 							"Duplicate file staging path does not match its directory root"));
-					Files.push_back({ Enclosing->Staged ? TransactionDirectory / StagedPath : Root / Action.CurrentPath });
+					const Path TargetRoot = Enclosing->Staged ? TransactionDirectory : Root;
+					const Path& TargetRelative = Enclosing->Staged ? StagedPath : Action.CurrentPath;
+					auto Actual = CaptureRecoveryFileStateWithIdentity(TargetRoot, TargetRelative);
+					if (!Actual)
+						return std::unexpected(Actual.error());
+					// Absence is a successful, typed observation. It is expected when a prior recovery
+					// attempt removed this entry before being interrupted.
+					if (Actual->Exists && !RecoveryStateMatches(Action.After, *Actual))
+						return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired,
+							TargetRoot / TargetRelative, "Published duplicate file changed independently and was preserved"));
+					if (Actual->Exists) Files.push_back({ TargetRoot / TargetRelative });
 					continue;
 				}
 				auto Current = CaptureRecoveryFileStateWithIdentity(Root, Action.CurrentPath);
@@ -826,12 +934,21 @@ namespace PulseForge
 				else if (Staged->Exists) Files.push_back({ TransactionDirectory / *Action.StagedPath });
 			}
 
+			std::sort(Files.begin(), Files.end(), [](const FileChoice& First, const FileChoice& Second)
+				{
+					const bool FirstIsMetadata = First.Target.extension() == ".meta";
+					const bool SecondIsMetadata = Second.Target.extension() == ".meta";
+					if (FirstIsMetadata != SecondIsMetadata) return !FirstIsMetadata;
+					return First.Target.generic_string() < Second.Target.generic_string();
+				});
 			for (const FileChoice& File : Files)
 			{
 				std::error_code Error;
 				if (!std::filesystem::remove(File.Target, Error) || Error)
 					return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, File.Target,
 						"Could not remove a validated transaction-created file: " + Error.message()));
+				if (auto Hook = InvokeHook(Options, AssetEditTransactionStage::AfterRecoveryCreateFileRemoved, File.Target); !Hook)
+					return std::unexpected(Hook.error());
 			}
 
 			std::vector<Path> DirectoriesToRemove;
@@ -862,7 +979,7 @@ namespace PulseForge
 			auto Original = CaptureRecoveryFileStateWithIdentity(Root, Action.OriginalPath);
 			auto Current = CaptureRecoveryFileStateWithIdentity(Root, Action.CurrentPath);
 			auto Transit = Action.TransitPath
-							   ? CaptureRecoveryFileStateWithIdentity(Root, *Action.TransitPath)
+							   ? CaptureRecoveryTransitFileStateWithIdentity(Root, Action)
 							   : std::expected<RecoveryEntryState, AssetEditTransactionError>(MakeRecoveryFileState({ {}, false, 0, {} }));
 			if (!Original || !Current || !Transit)
 				return std::unexpected(!Original ? Original.error() : !Current ? Current.error() : Transit.error());
@@ -947,7 +1064,7 @@ namespace PulseForge
 		}
 
 		std::expected<void, AssetEditTransactionError> CleanupRecoveryDirectory(
-			const Path& TransactionDirectory, const RecoveryRecord& Record)
+			const Path& TransactionDirectory, const RecoveryRecord& Record, const AssetEditTransactionOptions& Options = {})
 		{
 			std::set<Path> OwnedFiles{ Path("RecoveryRecord.json") };
 			std::set<Path> OwnedDirectories;
@@ -1003,9 +1120,16 @@ namespace PulseForge
 				if (Action.BackupPath)
 				{
 					const Path Backup = TransactionDirectory / *Action.BackupPath;
+					if (auto Hook = InvokeHook(Options, AssetEditTransactionStage::BeforeRecoveryCleanupEntryObservation, Backup); !Hook)
+						return std::unexpected(Hook.error());
 					std::error_code StatusError;
 					const auto Status = std::filesystem::symlink_status(Backup, StatusError);
-					if (!StatusError && Status.type() != std::filesystem::file_type::not_found)
+					const bool BackupAbsent = StatusError == std::errc::no_such_file_or_directory ||
+						(!StatusError && Status.type() == std::filesystem::file_type::not_found);
+					if (StatusError && !BackupAbsent)
+						return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, Backup,
+							"Could not establish whether the owned backup exists: " + StatusError.message()));
+					if (!BackupAbsent)
 					{
 						if (IsLinkedOrReparsePath(Backup, Status) || !std::filesystem::is_regular_file(Status))
 							return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, Backup,
@@ -1019,9 +1143,16 @@ namespace PulseForge
 				if (Action.StagedPath)
 				{
 					const Path Staged = TransactionDirectory / *Action.StagedPath;
+					if (auto Hook = InvokeHook(Options, AssetEditTransactionStage::BeforeRecoveryCleanupEntryObservation, Staged); !Hook)
+						return std::unexpected(Hook.error());
 					std::error_code StatusError;
 					const auto Status = std::filesystem::symlink_status(Staged, StatusError);
-					if (!StatusError && Status.type() != std::filesystem::file_type::not_found)
+					const bool StagedAbsent = StatusError == std::errc::no_such_file_or_directory ||
+						(!StatusError && Status.type() == std::filesystem::file_type::not_found);
+					if (StatusError && !StagedAbsent)
+						return std::unexpected(MakeError(AssetEditTransactionErrorCode::RecoveryRequired, Staged,
+							"Could not establish whether the staged output exists: " + StatusError.message()));
+					if (!StagedAbsent)
 					{
 						if (IsLinkedOrReparsePath(Staged, Status))
 							return std::unexpected(MakeError(
@@ -1291,7 +1422,7 @@ namespace PulseForge
 	} // namespace
 
 	std::expected<void, AssetEditTransactionError> AssetEditTransaction::RecoverInterruptedTransactions(
-		const std::filesystem::path& ProjectRoot, const UUID& ProjectID)
+		const std::filesystem::path& ProjectRoot, const UUID& ProjectID, const AssetEditTransactionOptions& Options)
 	{
 		std::error_code Error;
 		const Path Root = std::filesystem::absolute(ProjectRoot, Error).lexically_normal();
@@ -1398,7 +1529,7 @@ namespace PulseForge
 									   IsPathWithin(Other.CurrentPath, Action.CurrentPath);
 							}))
 					{
-						auto Tree = ValidateRecoveryCreateTree(Root, TransactionDirectory, Record, Action, false);
+						auto Tree = ValidateRecoveryCreateTree(Root, TransactionDirectory, Record, Action, false, Options);
 						if (!Tree) return FailRecovery(Tree.error());
 					}
 				}
@@ -1459,12 +1590,12 @@ namespace PulseForge
 				if (Record.OperationKind == RecoveryOperationKind::AssetDuplicate ||
 					Record.OperationKind == RecoveryOperationKind::FolderDuplicate)
 				{
-					auto Removed = RollbackRecoveryCreates(Root, TransactionDirectory, Record);
+					auto Removed = RollbackRecoveryCreates(Root, TransactionDirectory, Record, Options);
 					if (!Removed) return FailRecovery(Removed.error());
 				}
 			}
 
-			auto Cleaned = CleanupRecoveryDirectory(TransactionDirectory, Record);
+			auto Cleaned = CleanupRecoveryDirectory(TransactionDirectory, Record, Options);
 			if (!Cleaned) return FailRecovery(Cleaned.error());
 		}
 		return {};
@@ -2494,28 +2625,33 @@ namespace PulseForge
 				}
 			}
 		}
-		bool SourceInStage = false;
-		bool MetaInStage = false;
-		bool ReceiptInStage = false;
 		std::optional<AssetEditTransactionError> StageFailure;
 		if (Plan.IsCaseOnlyAlias())
 		{
 			Error = RenameNoReplace(Source, SourceStage);
-			SourceInStage = !Error;
+			if (!Error)
+				if (auto Hook = InvokeHook(Options, AssetEditTransactionStage::AfterSourceMove, SourceStage); !Hook)
+				{
+					StageFailure = Hook.error();
+					Error = std::make_error_code(std::errc::operation_canceled);
+				}
 			if (!Error)
 			{
 				Error = RenameNoReplace(SourceStage, Destination);
-				SourceInStage = static_cast<bool>(Error);
 			}
 			if (!Error)
 			{
 				Error = RenameNoReplace(SourceMeta, MetaStage);
-				MetaInStage = !Error;
+				if (!Error)
+					if (auto Hook = InvokeHook(Options, AssetEditTransactionStage::AfterMetadataMove, MetaStage); !Hook)
+					{
+						StageFailure = Hook.error();
+						Error = std::make_error_code(std::errc::operation_canceled);
+					}
 			}
 			if (!Error)
 			{
 				Error = RenameNoReplace(MetaStage, DestinationMeta);
-				MetaInStage = static_cast<bool>(Error);
 			}
 		}
 		else
@@ -2545,11 +2681,9 @@ namespace PulseForge
 				if (Plan.IsCaseOnlyAlias())
 				{
 					Error = RenameNoReplace(SourceReceipt, ReceiptStage);
-					ReceiptInStage = !Error;
 					if (!Error)
 					{
 						Error = RenameNoReplace(ReceiptStage, DestinationReceipt);
-						ReceiptInStage = static_cast<bool>(Error);
 					}
 				}
 				else Error = RenameNoReplace(SourceReceipt, DestinationReceipt);
@@ -2568,47 +2702,15 @@ namespace PulseForge
 		if (Error)
 		{
 			const std::string Failure = StageFailure ? StageFailure->Message : Error.message();
-			std::string RollbackFailure;
-			if (ReceiptMoved)
+			auto Recovered = RecoverInterruptedTransactions(Plan.GetProjectRoot(), Plan.GetProjectID());
+			if (!Recovered)
 			{
-				Error = RestoreMovedPath(
-					ReceiptInStage ? ReceiptStage : DestinationReceipt, SourceReceipt, ReceiptStage, Plan.IsCaseOnlyAlias());
-				if (Error) RollbackFailure += " receipt restore: " + Error.message();
-			}
-			else if (ReceiptInStage)
-			{
-				Error = RenameNoReplace(ReceiptStage, SourceReceipt);
-				if (Error) RollbackFailure += " staged provenance restore: " + Error.message();
-			}
-			if (std::filesystem::exists(DestinationMeta))
-			{
-				Error = RestoreMovedPath(DestinationMeta, SourceMeta, MetaStage, Plan.IsCaseOnlyAlias());
-				if (Error) RollbackFailure += " metadata restore: " + Error.message();
-			}
-			if (std::filesystem::exists(Destination))
-			{
-				Error = RestoreMovedPath(Destination, Source, SourceStage, Plan.IsCaseOnlyAlias());
-				if (Error) RollbackFailure += " source restore: " + Error.message();
-			}
-			if (SourceInStage)
-			{
-				Error = RenameNoReplace(SourceStage, Source);
-				if (Error) RollbackFailure += " staged source restore: " + Error.message();
-			}
-			if (MetaInStage)
-			{
-				Error = RenameNoReplace(MetaStage, SourceMeta);
-				if (Error) RollbackFailure += " staged metadata restore: " + Error.message();
-			}
-			RollbackFailure += RollbackReferences();
-			if (!RollbackFailure.empty())
-			{
-				auto Recovery = MakeError(AssetEditTransactionErrorCode::RecoveryRequired, Plan.GetMapping().Destination,
-					"Asset move failed (" + Failure + ") and rollback needs recovery:" + RollbackFailure);
+				AssetEditTransactionError Recovery = Recovered.error();
+				Recovery.Code = AssetEditTransactionErrorCode::RecoveryRequired;
+				Recovery.Message = "Asset move failed (" + Failure + "); receipt-validated rollback requires recovery: " + Recovery.Message;
 				Recovery.RecoveryPath = TransactionDirectory;
 				return std::unexpected(std::move(Recovery));
 			}
-			std::filesystem::remove_all(TransactionDirectory, Error);
 			if (StageFailure) return std::unexpected(std::move(*StageFailure));
 			return std::unexpected(MakeError(AssetEditTransactionErrorCode::FilesystemFailure, Plan.GetMapping().Destination,
 				"Could not move the source/metadata/provenance pair: " + Failure));
