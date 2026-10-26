@@ -45,7 +45,12 @@ namespace PulseForgeEditor
 		[[nodiscard]] bool IsGridView() const noexcept { return m_IsGridView; }
 		[[nodiscard]] bool& GridView() noexcept { return m_IsGridView; }
 		[[nodiscard]] const std::optional<PulseForge::AssetID>& SelectedAsset() const noexcept { return m_SelectedAsset; }
-		[[nodiscard]] std::optional<PulseForge::AssetID>& SelectedAsset() noexcept { return m_SelectedAsset; }
+		[[nodiscard]] const std::vector<PulseForge::AssetID>& SelectedAssets() const noexcept { return m_SelectedAssets; }
+		[[nodiscard]] bool IsAssetSelected(const PulseForge::AssetID& Asset) const noexcept;
+		void SelectAsset(const PulseForge::AssetID& Asset, bool Toggle = false);
+		void SetPrimarySelectedAsset(const PulseForge::AssetID& Asset) noexcept;
+		void SetSelectedAssets(std::vector<PulseForge::AssetID> Assets);
+		void ClearAssetSelection() noexcept;
 
 		void SetAssets(std::vector<PulseForge::AssetRecord> Assets);
 		void ResetNavigation();
@@ -71,6 +76,7 @@ namespace PulseForgeEditor
 		std::optional<std::filesystem::path> m_SelectedFolder;
 		std::string m_SearchText;
 		std::optional<PulseForge::AssetID> m_SelectedAsset;
+		std::vector<PulseForge::AssetID> m_SelectedAssets;
 		bool m_IsGridView = true;
 	};
 } // namespace PulseForgeEditor

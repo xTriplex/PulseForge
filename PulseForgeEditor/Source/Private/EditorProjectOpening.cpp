@@ -1,7 +1,12 @@
 #include "Editor/EditorProjectOpening.h"
 
+#include "Assets/AssetEditTransaction.h"
+#include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
 
+#include <cstdint>
+#include <fstream>
+#include <string>
 #include <utility>
 
 namespace PulseForgeEditor
@@ -23,6 +28,40 @@ namespace PulseForgeEditor
 	std::expected<PreparedEditorProject, EditorProjectPreparationError> PrepareEditorProjectOpen(
 		const std::filesystem::path& ProjectFile, PulseForge::DiagnosticRecorder* Diagnostics)
 	{
+		std::error_code PathError;
+		const std::filesystem::path AbsoluteProjectFile = std::filesystem::absolute(ProjectFile, PathError).lexically_normal();
+		if (PathError)
+			return std::unexpected(
+				EditorProjectPreparationError{ "Project path could not be resolved before transaction recovery: " + PathError.message() });
+		std::ifstream ProjectInput(AbsoluteProjectFile, std::ios::binary);
+		if (!ProjectInput)
+			return std::unexpected(
+				EditorProjectPreparationError{ "Project could not be opened: metadata could not be read before transaction recovery." });
+		ProjectInput.seekg(0, std::ios::end);
+		const std::streamoff ProjectLength = ProjectInput.tellg();
+		if (ProjectLength < 0 || static_cast<uint64_t>(ProjectLength) > PulseForge::ProjectSerializer::MaximumDocumentBytes)
+			return std::unexpected(EditorProjectPreparationError{ "Project metadata exceeds its bounded recovery identity read." });
+		std::string ProjectText(static_cast<size_t>(ProjectLength), '\0');
+		ProjectInput.seekg(0, std::ios::beg);
+		if (!ProjectText.empty() && !ProjectInput.read(ProjectText.data(), static_cast<std::streamsize>(ProjectText.size())))
+			return std::unexpected(
+				EditorProjectPreparationError{ "Project metadata changed or could not be read completely before recovery." });
+		auto ProjectDescription = PulseForge::ProjectSerializer::Deserialize(ProjectText);
+		if (!ProjectDescription)
+			return std::unexpected(EditorProjectPreparationError{
+				"Project could not be opened: identity could not be validated before transaction recovery: " +
+				ProjectDescription.error().Message });
+		const std::filesystem::path ProjectRoot = AbsoluteProjectFile.parent_path();
+		if (auto Recovered = PulseForge::AssetEditTransaction::RecoverInterruptedTransactions(ProjectRoot, ProjectDescription->ID);
+			!Recovered)
+		{
+			std::string Message = "An interrupted asset edit requires recovery before the project can open";
+			if (!Recovered.error().Path.empty()) Message += " at " + PathToUtf8(Recovered.error().Path);
+			Message += ": " + Recovered.error().Message;
+			if (Recovered.error().RecoveryPath) Message += " Recovery data: " + PathToUtf8(*Recovered.error().RecoveryPath);
+			return std::unexpected(EditorProjectPreparationError{ std::move(Message) });
+		}
+
 		auto OpenedProject = PulseForge::Project::Open(ProjectFile, Diagnostics);
 		if (!OpenedProject)
 			return std::unexpected(EditorProjectPreparationError{ "Project could not be opened: " + OpenedProject.error().Message });

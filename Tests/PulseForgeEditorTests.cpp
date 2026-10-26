@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 
 void RunEditorDocumentHostTestEditorTests(TestRunner& Tests);
+void RunEditorAssetEditSchedulingTests(TestRunner& Tests);
 void RunEditorInspectorRegressionTests(TestRunner& Tests);
 #if defined(_DEBUG) || defined(PF_DEBUG)
 void RunEditorDebugAcceptanceCoordinatorTests(TestRunner& Tests);
@@ -18,6 +19,7 @@ int main()
 	RunEditorViewportTests(Tests);
 	RunEditorViewportSceneRenderViewTests(Tests);
 	RunEditorAssetPreviewStressHarnessTests(Tests);
+	RunEditorAssetEditSchedulingTests(Tests);
 	RunEditorDocumentHostTestEditorTests(Tests);
 #if defined(_DEBUG) || defined(PF_DEBUG)
 	RunEditorDebugAcceptanceCoordinatorTests(Tests);

@@ -2,6 +2,7 @@ if(PULSEFORGE_BUILD_EDITOR OR (BUILD_TESTING AND NOT PULSEFORGE_PLATFORM_LINUX))
 	add_library(PulseForgeEditorCore STATIC
 		PulseForgeEditor/Source/Private/EditorEntityClipboard.cpp
 		PulseForgeEditor/Source/Private/EditorAssetWorkflowState.cpp
+		PulseForgeEditor/Source/Private/EditorAssetEditScheduler.cpp
 		PulseForgeEditor/Source/Private/EditorConsoleHistory.cpp
 		PulseForgeEditor/Source/Private/EditorConsoleSeverity.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserState.cpp
@@ -47,7 +48,7 @@ if(PULSEFORGE_BUILD_EDITOR OR (BUILD_TESTING AND NOT PULSEFORGE_PLATFORM_LINUX))
 		PRIVATE PulseForge/Source/Public PulseForge/Vendor/json/include
 	)
 	target_link_libraries(PulseForgeEditorCore
-		PUBLIC PulseForgeAssetServices PulseForgeScene
+		PUBLIC PulseForgeAssetServices PulseForgeAssetDependencyCatalog PulseForgeScene
 		PRIVATE PulseForgeCore PulseForgeAssetImporters PulseForgeSceneSerialization
 	)
 	target_precompile_headers(PulseForgeEditorCore PRIVATE

@@ -14,6 +14,8 @@
 #include "Events/KeyEvent.h"
 #include "Events/MouseEvent.h"
 #include "Assets/AssetOperations.h"
+#include "Assets/AssetDependencyCatalog.h"
+#include "Assets/AssetEditTransaction.h"
 #include "Assets/AssetMetadata.h"
 #include "Assets/AssetPathResolver.h"
 #include "Assets/MaterialAssetService.h"
@@ -28,6 +30,7 @@
 #include "Window/Window.h"
 #include "Editor/EditorImGuiRenderer.h"
 #include "Editor/EditorAssetPreviewService.h"
+#include "Editor/EditorAssetEditScheduler.h"
 #include "Editor/EditorAssetPreviewStressHarness.h"
 #include "Editor/EditorAssetPreviewPolicy.h"
 #include "Editor/EditorAssetDestinationDialog.h"
@@ -677,12 +680,23 @@ namespace
 
 		void QueueAssetMoveAfterSave(const PulseForge::AssetID& Asset, const std::filesystem::path& Destination) override
 		{
-			QueueAfterSave([this, Asset, Destination] { MoveAssetAt(Asset, Destination); });
+			QueueAssetOperation([this, Asset, Destination] { MoveAssetAt(Asset, Destination); });
+		}
+
+		void QueueAssetSetMoveAfterSave(
+			const std::vector<PulseForge::AssetID>& Assets, const std::filesystem::path& DestinationFolder) override
+		{
+			QueueAssetOperation([this, Assets, DestinationFolder] { MoveAssetSetToFolderAt(Assets, DestinationFolder); });
 		}
 
 		void QueueFolderMoveAfterSave(const std::filesystem::path& Source, const std::filesystem::path& Destination) override
 		{
-			QueueAfterSave([this, Source, Destination] { MoveFolderAt(Source, Destination); });
+			QueueAssetOperation([this, Source, Destination] { MoveFolderAt(Source, Destination); });
+		}
+
+		void QueueFolderDuplicateAfterSave(const std::filesystem::path& Source) override
+		{
+			QueueAssetOperation([this, Source] { DuplicateFolderAt(Source); });
 		}
 
 		static EditorLayer* GetPlatformCallbackLayer() noexcept
@@ -1868,6 +1882,8 @@ namespace
 			const auto StartupSceneAsset = Prepared.StartupSceneAsset;
 			StopRuntime();
 			ResetViewportSceneRenderer();
+			m_PendingAssetMovePlan.reset();
+			++m_AssetOperationGeneration;
 			m_Project.emplace(std::move(Prepared.Project));
 			ConfigureGameplayInputForProject();
 			RegisterLevelDocument();
@@ -1878,7 +1894,8 @@ namespace
 				m_Scene = std::move(StartupScene);
 				m_SceneAsset = StartupSceneAsset;
 				SelectSingleEntity(std::nullopt);
-				m_ContentBrowser.SelectedAsset() = StartupSceneAsset;
+				if (StartupSceneAsset) m_ContentBrowser.SelectAsset(*StartupSceneAsset);
+				else m_ContentBrowser.ClearAssetSelection();
 				m_AssetWorkflow.DismissDelete();
 				ResetSceneHistory();
 			}
@@ -3793,7 +3810,7 @@ namespace
 			}
 
 			UpdateAssetList(true);
-			m_ContentBrowser.SelectedAsset() = Imported->ID;
+			m_ContentBrowser.SelectAsset(Imported->ID);
 			SetStatus("Imported " + PathToUtf8(Imported->ProjectRelativePath) + " (UUID " + Imported->ID.ToString() + ").");
 		}
 
@@ -3856,70 +3873,291 @@ namespace
 		{
 			const auto Operation = PulseForgeEditor::EditorAssetDestinationDialog::Draw(
 				m_EditorStyle, m_AssetWorkflow, m_Project ? &*m_Project : nullptr, m_ContentBrowser);
-			if (!Operation || !m_Project) return;
-
-			const std::filesystem::path Target = Operation->ProjectRelativeDestination;
-			switch (Operation->Kind)
+			if (Operation && m_Project)
 			{
-			case PulseForgeEditor::EditorAssetDestinationOperationKind::MoveAsset:
-				if (Operation->Asset) QueueAfterSave([this, ID = *Operation->Asset, Target] { MoveAssetAt(ID, Target); });
-				break;
-			case PulseForgeEditor::EditorAssetDestinationOperationKind::DuplicateAsset:
-				if (Operation->Asset) QueueAfterSave([this, ID = *Operation->Asset, Target] { DuplicateAssetAt(ID, Target); });
-				break;
-			case PulseForgeEditor::EditorAssetDestinationOperationKind::CreateScene:
-			case PulseForgeEditor::EditorAssetDestinationOperationKind::SaveSceneAs:
-			{
-				const bool SaveAs = Operation->Kind == PulseForgeEditor::EditorAssetDestinationOperationKind::SaveSceneAs;
-				QueueAfterSave(
-					[this, Target, SaveAs]
-					{
-						const std::filesystem::path AbsoluteTarget = m_Project ? m_Project->GetRootPath() / Target : Target;
-						CreateSceneAt(AbsoluteTarget, SaveAs);
-					});
-				break;
+				const std::filesystem::path Target = Operation->ProjectRelativeDestination;
+				switch (Operation->Kind)
+				{
+				case PulseForgeEditor::EditorAssetDestinationOperationKind::MoveAsset:
+					if (Operation->Asset) QueueAssetOperation([this, ID = *Operation->Asset, Target] { MoveAssetAt(ID, Target); });
+					break;
+				case PulseForgeEditor::EditorAssetDestinationOperationKind::DuplicateAsset:
+					if (Operation->Asset) QueueAssetOperation([this, ID = *Operation->Asset, Target] { DuplicateAssetAt(ID, Target); });
+					break;
+				case PulseForgeEditor::EditorAssetDestinationOperationKind::CreateScene:
+				case PulseForgeEditor::EditorAssetDestinationOperationKind::SaveSceneAs:
+				{
+					const bool SaveAs = Operation->Kind == PulseForgeEditor::EditorAssetDestinationOperationKind::SaveSceneAs;
+					QueueAfterSave(
+						[this, Target, SaveAs]
+						{
+							const std::filesystem::path AbsoluteTarget = m_Project ? m_Project->GetRootPath() / Target : Target;
+							CreateSceneAt(AbsoluteTarget, SaveAs);
+						});
+					break;
+				}
+				case PulseForgeEditor::EditorAssetDestinationOperationKind::CreatePrefab:
+					if (Operation->PrefabRoot)
+						QueueAfterSave([this, Root = *Operation->PrefabRoot, Target] { CreatePrefabAt(Root, Target); });
+					break;
+				}
 			}
-			case PulseForgeEditor::EditorAssetDestinationOperationKind::CreatePrefab:
-				if (Operation->PrefabRoot) QueueAfterSave([this, Root = *Operation->PrefabRoot, Target] { CreatePrefabAt(Root, Target); });
-				break;
-			}
+			DrawAssetMoveConfirmation();
 		}
 
 		void MoveAssetAt(const PulseForge::AssetID& Identifier, const std::filesystem::path& Destination)
 		{
 			if (!m_Project) return;
-			auto Moved =
-				PulseForge::AssetOperations::Move(m_Project->GetAssetRegistry(), m_Project->GetRootPath(), Identifier, Destination);
-			if (!Moved)
+			const PulseForge::UUID ProjectID = m_Project->GetDescription().ID;
+			auto Snapshot =
+				PulseForge::AssetDependencyCatalogBuilder::Build(m_Project->GetRootPath(), ProjectID, m_AssetOperationGeneration);
+			if (!Snapshot)
 			{
-				std::string Message = DescribeAssetOperationError("Asset move failed", Moved.error());
-				RefreshAssetsAfterOperationFailure(Message);
-				SetError(std::move(Message));
+				SetError("Asset move preview failed" +
+						 (Snapshot.error().Path.empty() ? std::string{} : ": " + PathToUtf8(Snapshot.error().Path)) + ": " +
+						 Snapshot.error().Message);
 				return;
 			}
-
-			UpdateAssetList(true);
-			m_ContentBrowser.SelectedAsset() = Moved->ID;
-			SetStatus("Moved " + PathToUtf8(Moved->ProjectRelativePath) + ".");
+			auto Plan = PulseForge::AssetEditTransaction::PlanMove(**Snapshot, Identifier, Destination);
+			if (!Plan)
+			{
+				SetError("Asset move preview failed" + (Plan.error().Path.empty() ? std::string{} : ": " + PathToUtf8(Plan.error().Path)) +
+						 ": " + Plan.error().Message);
+				return;
+			}
+			if (HasDirtyDocumentConflict(**Plan)) return;
+			if (!(*Plan)->GetAffectedReferences().empty())
+			{
+				m_PendingAssetMovePlan = *Plan;
+				m_OpenAssetMoveConfirmation = true;
+				return;
+			}
+			QueueAssetEditPlan(*Plan);
 		}
 
-		void MoveFolderAt(const std::filesystem::path& Source, const std::filesystem::path& DestinationParent)
+		void DrawAssetMoveConfirmation()
 		{
-			if (!m_Project) return;
-			auto Moved =
-				PulseForge::AssetOperations::MoveFolder(m_Project->GetAssetRegistry(), m_Project->GetRootPath(), Source, DestinationParent);
+			constexpr const char* PopupName = "Confirm Asset Operation";
+			if (m_OpenAssetMoveConfirmation)
+			{
+				ImGui::OpenPopup(PopupName);
+				m_OpenAssetMoveConfirmation = false;
+			}
+			if (!m_PendingAssetMovePlan || !ImGui::BeginPopupModal(PopupName, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+			const auto& Plan = *m_PendingAssetMovePlan;
+			if (Plan.IsFolderDuplicate() || Plan.IsAssetDuplicate())
+			{
+				ImGui::TextWrapped(
+					"Duplicate %s to %s?", PathToUtf8(Plan.GetMapping().Source).c_str(), PathToUtf8(Plan.GetMapping().Destination).c_str());
+				ImGui::Text("%zu managed asset(s) receive new UUIDs.", Plan.GetIdentityRemap().size());
+				if (Plan.IsFolderDuplicate())
+					ImGui::TextWrapped(
+						"Supported internal material texture references are remapped. External references stay with the originals. "
+						"Successful import receipts are not copied.");
+				else
+					ImGui::TextWrapped(
+						"References to other assets remain pointed at the originals. Successful import receipts are not copied.");
+				ImGui::TextWrapped("Duplicates use content currently saved on disk. "
+								   "Unsaved editor drafts remain with the original assets and are not copied.");
+				if (!Plan.GetAffectedReferences().empty())
+					ImGui::Text("%zu supported external glTF buffer reference(s) are adjusted in the duplicate.",
+						Plan.GetAffectedReferences().size());
+			}
+			else
+			{
+				if (Plan.IsAssetBatchMove())
+				{
+					ImGui::TextWrapped("Move %zu selected assets into %s:", Plan.GetMovedAssets().size(),
+						PathToUtf8(Plan.GetMapping().Destination.parent_path()).c_str());
+					for (const PulseForge::AssetEditPathMapping& Mapping : Plan.GetPathMappings())
+						ImGui::BulletText("%s -> %s", PathToUtf8(Mapping.Source).c_str(), PathToUtf8(Mapping.Destination).c_str());
+				}
+				else
+					ImGui::TextWrapped("Move %s to %s?", PathToUtf8(Plan.GetMapping().Source).c_str(),
+						PathToUtf8(Plan.GetMapping().Destination).c_str());
+				ImGui::Text("This also rewrites %zu supported glTF buffer reference(s):", Plan.GetAffectedReferences().size());
+				std::vector<std::filesystem::path> Referrers;
+				for (const auto& Reference : Plan.GetAffectedReferences())
+					if (std::find(Referrers.begin(), Referrers.end(), Reference.ReferringSource) == Referrers.end())
+						Referrers.push_back(Reference.ReferringSource);
+				for (const auto& Referrer : Referrers)
+					ImGui::BulletText("%s", PathToUtf8(Referrer).c_str());
+			}
+
+			const char* ConfirmLabel = Plan.IsFolderDuplicate() ? "Create Duplicate Folder"
+				: Plan.IsAssetDuplicate()                           ? "Create Duplicate Asset"
+				: Plan.IsAssetBatchMove()                           ? "Move Selected Assets and Update References"
+															  : "Move and Update References";
+			if (ImGui::Button(ConfirmLabel))
+			{
+				auto AcceptedPlan = std::exchange(m_PendingAssetMovePlan, {});
+				ImGui::CloseCurrentPopup();
+				QueueAssetEditPlan(std::move(AcceptedPlan));
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Cancel"))
+			{
+				m_PendingAssetMovePlan.reset();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::EndPopup();
+		}
+
+		bool HasDirtyDocumentConflict(const PulseForge::AssetEditMovePlan& Plan)
+		{
+			const std::vector<PulseForgeEditor::EditorDocumentIdentity> DirtyDocuments = GetDirtyAssetDocuments();
+			if (const auto Conflict = PulseForgeEditor::FindDirtyAssetEditDocumentConflict(Plan, DirtyDocuments))
+			{
+				SetError("Cannot update " + PathToUtf8(Conflict->RewrittenSource) +
+						 " because its open document or draft has unsaved edits. Save or discard that draft before moving the asset.");
+				return true;
+			}
+			return false;
+		}
+
+		void ApplyAssetEditPlan(PulseForge::AssetEditTransaction::PlanPtr Plan)
+		{
+			if (!m_Project || !Plan) return;
+			if (!Plan->IsFolderDuplicate() && !Plan->IsAssetDuplicate() && HasDirtyDocumentConflict(*Plan)) return;
+			auto Moved = PulseForge::AssetEditTransaction::ApplyPlan(
+				*Plan, m_Project->GetRootPath(), m_Project->GetDescription().ID, m_AssetOperationGeneration, m_Project->GetAssetRegistry());
 			if (!Moved)
 			{
-				std::string Message = DescribeAssetOperationError("Folder move failed", Moved.error());
-				RefreshAssetsAfterOperationFailure(Message);
-				SetError(std::move(Message));
+				SetError("Asset move failed" + (Moved.error().Path.empty() ? std::string{} : ": " + PathToUtf8(Moved.error().Path)) + ": " +
+						 Moved.error().Message);
 				return;
 			}
 
-			m_ContentBrowser.RebaseFoldersAfterMove(Source, *Moved);
+			if (Plan->IsFolderDuplicate() || Plan->IsAssetDuplicate())
+			{
+				UpdateAssetList(true);
+				if (!Moved->CreatedAssets.empty()) m_ContentBrowser.SelectAsset(Moved->CreatedAssets.front().ID);
+				SetStatus("Duplicated " + std::string(Plan->IsFolderDuplicate() ? "folder " : "asset ") +
+					  PathToUtf8(Plan->GetMapping().Source) + " to " +
+						  PathToUtf8(Plan->GetMapping().Destination) + " with fresh asset identities.");
+			}
+			else if (Plan->IsAssetBatchMove())
+			{
+				UpdateAssetList(true);
+				m_ContentBrowser.SetSelectedAssets(Plan->GetMovedAssets());
+				SetStatus("Moved " + std::to_string(Moved->MovedAssets.size()) + " selected assets into " +
+					PathToUtf8(Plan->GetMapping().Destination.parent_path()) + ". Asset identities were preserved.");
+			}
+			else if (Plan->IsFolderMove())
+			{
+				m_ContentBrowser.RebaseFoldersAfterMove(Plan->GetMapping().Source, Plan->GetMapping().Destination);
+				UpdateAssetList(true);
+				SetStatus("Moved folder " + PathToUtf8(Plan->GetMapping().Source) + " to " + PathToUtf8(Plan->GetMapping().Destination) +
+						  ". Asset identities were preserved.");
+			}
+			else
+			{
+				UpdateAssetList(true);
+				m_ContentBrowser.SelectAsset(Moved->MovedAsset.ID);
+				SetStatus("Moved " + PathToUtf8(Moved->MovedAsset.ProjectRelativePath) + ".");
+			}
+			if (!Moved->PostCommitWarning.empty())
+			{
+				std::string Warning = "The asset operation committed, but transaction cleanup needs recovery";
+				if (Moved->RecoveryPath) Warning += " at " + PathToUtf8(*Moved->RecoveryPath);
+				Warning += ": " + Moved->PostCommitWarning;
+				SetWarning(std::move(Warning));
+			}
+		}
 
-			UpdateAssetList(true);
-			SetStatus("Moved folder to " + PathToUtf8(*Moved) + ". Asset identities were preserved.");
+		void MoveAssetSetToFolderAt(
+			const std::vector<PulseForge::AssetID>& Assets, const std::filesystem::path& DestinationFolder)
+		{
+			if (!m_Project) return;
+			auto Snapshot = PulseForge::AssetDependencyCatalogBuilder::Build(
+				m_Project->GetRootPath(), m_Project->GetDescription().ID, m_AssetOperationGeneration);
+			if (!Snapshot)
+			{
+				SetError("Selected-asset move preview failed" +
+						 (Snapshot.error().Path.empty() ? std::string{} : ": " + PathToUtf8(Snapshot.error().Path)) + ": " +
+						 Snapshot.error().Message);
+				return;
+			}
+			auto Plan = PulseForge::AssetEditTransaction::PlanMoveAssets(**Snapshot, Assets, DestinationFolder);
+			if (!Plan)
+			{
+				SetError("Selected-asset move preview failed" +
+						 (Plan.error().Path.empty() ? std::string{} : ": " + PathToUtf8(Plan.error().Path)) + ": " +
+						 Plan.error().Message);
+				return;
+			}
+			if (HasDirtyDocumentConflict(**Plan)) return;
+			m_PendingAssetMovePlan = *Plan;
+			m_OpenAssetMoveConfirmation = true;
+		}
+
+		void MoveFolderAt(const std::filesystem::path& Source, const std::filesystem::path& Destination)
+		{
+			if (!m_Project) return;
+			auto Snapshot = PulseForge::AssetDependencyCatalogBuilder::Build(
+				m_Project->GetRootPath(), m_Project->GetDescription().ID, m_AssetOperationGeneration);
+			if (!Snapshot)
+			{
+				SetError("Folder move preview failed" +
+						 (Snapshot.error().Path.empty() ? std::string{} : ": " + PathToUtf8(Snapshot.error().Path)) + ": " +
+						 Snapshot.error().Message);
+				return;
+			}
+			auto Plan = PulseForge::AssetEditTransaction::PlanMoveFolder(**Snapshot, Source, Destination);
+			if (!Plan)
+			{
+				SetError("Folder move preview failed" + (Plan.error().Path.empty() ? std::string{} : ": " + PathToUtf8(Plan.error().Path)) +
+						 ": " + Plan.error().Message);
+				return;
+			}
+			if (HasDirtyDocumentConflict(**Plan)) return;
+			if (!(*Plan)->GetAffectedReferences().empty())
+			{
+				m_PendingAssetMovePlan = *Plan;
+				m_OpenAssetMoveConfirmation = true;
+				return;
+			}
+			QueueAssetEditPlan(*Plan);
+		}
+
+		void DuplicateFolderAt(const std::filesystem::path& Source)
+		{
+			if (!m_Project) return;
+			std::filesystem::path Destination = Source.parent_path() / std::filesystem::u8path(PathToUtf8(Source.filename()) + " Copy");
+			std::error_code Error;
+			for (size_t Suffix = 2; std::filesystem::exists(m_Project->GetRootPath() / Destination, Error) && !Error; ++Suffix)
+			{
+				if (Suffix > 1000)
+				{
+					SetError("Could not choose a free sibling name for this folder duplicate.");
+					return;
+				}
+				Destination = Source.parent_path() / (Source.filename().string() + " Copy " + std::to_string(Suffix));
+			}
+			if (Error)
+			{
+				SetError("Could not inspect a destination for the folder duplicate: " + Error.message());
+				return;
+			}
+			auto Snapshot = PulseForge::AssetDependencyCatalogBuilder::Build(
+				m_Project->GetRootPath(), m_Project->GetDescription().ID, m_AssetOperationGeneration);
+			if (!Snapshot)
+			{
+				SetError("Folder duplicate preview failed" +
+						 (Snapshot.error().Path.empty() ? std::string{} : ": " + PathToUtf8(Snapshot.error().Path)) + ": " +
+						 Snapshot.error().Message);
+				return;
+			}
+			auto Plan = PulseForge::AssetEditTransaction::PlanDuplicateFolder(**Snapshot, Source, Destination);
+			if (!Plan)
+			{
+				SetError("Folder duplicate preview failed" +
+						 (Plan.error().Path.empty() ? std::string{} : ": " + PathToUtf8(Plan.error().Path)) + ": " + Plan.error().Message);
+				return;
+			}
+			m_PendingAssetMovePlan = *Plan;
+			m_OpenAssetMoveConfirmation = true;
 		}
 
 		void DuplicateAsset(const PulseForge::AssetID& Identifier)
@@ -3940,19 +4178,24 @@ namespace
 		void DuplicateAssetAt(const PulseForge::AssetID& Identifier, const std::filesystem::path& Destination)
 		{
 			if (!m_Project) return;
-			auto Duplicated =
-				PulseForge::AssetOperations::Duplicate(m_Project->GetAssetRegistry(), m_Project->GetRootPath(), Identifier, Destination);
-			if (!Duplicated)
+			auto Snapshot = PulseForge::AssetDependencyCatalogBuilder::Build(
+				m_Project->GetRootPath(), m_Project->GetDescription().ID, m_AssetOperationGeneration);
+			if (!Snapshot)
 			{
-				std::string Message = DescribeAssetOperationError("Asset duplication failed", Duplicated.error());
-				RefreshAssetsAfterOperationFailure(Message);
-				SetError(std::move(Message));
+				SetError("Asset duplicate preview failed" +
+						 (Snapshot.error().Path.empty() ? std::string{} : ": " + PathToUtf8(Snapshot.error().Path)) + ": " +
+						 Snapshot.error().Message);
 				return;
 			}
-
-			UpdateAssetList(true);
-			m_ContentBrowser.SelectedAsset() = Duplicated->ID;
-			SetStatus("Duplicated " + PathToUtf8(Duplicated->ProjectRelativePath) + " (new UUID " + Duplicated->ID.ToString() + ").");
+			auto Plan = PulseForge::AssetEditTransaction::PlanDuplicateAsset(**Snapshot, Identifier, Destination);
+			if (!Plan)
+			{
+				SetError("Asset duplicate preview failed" + (Plan.error().Path.empty() ? std::string{} : ": " + PathToUtf8(Plan.error().Path)) +
+					": " + Plan.error().Message);
+				return;
+			}
+			m_PendingAssetMovePlan = *Plan;
+			m_OpenAssetMoveConfirmation = true;
 		}
 
 		void CreatePrefabFromSelectedEntity()
@@ -3990,7 +4233,7 @@ namespace
 				if (Created.error().CommittedAsset)
 				{
 					UpdateAssetList(true);
-					m_ContentBrowser.SelectedAsset() = Created.error().CommittedAsset->ID;
+					m_ContentBrowser.SelectAsset(Created.error().CommittedAsset->ID);
 					SetWarning("Prefab was created with UUID " + Created.error().CommittedAsset->ID.ToString() +
 							   ", but temporary cleanup failed: " + Message);
 					return;
@@ -4002,7 +4245,7 @@ namespace
 			}
 
 			UpdateAssetList(true);
-			m_ContentBrowser.SelectedAsset() = Created->ID;
+			m_ContentBrowser.SelectAsset(Created->ID);
 			SetStatus("Created prefab " + PathToUtf8(Created->ProjectRelativePath) + " (UUID " + Created->ID.ToString() + ").");
 		}
 
@@ -4133,7 +4376,7 @@ namespace
 			if (!CommitPreparedDocumentCloseBatch(std::move(*PreparedClose))) return;
 			if (DeletedMaterial) ForgetMaterialDraft(Identifier);
 			if (m_ContentBrowser.SelectedAsset() && *m_ContentBrowser.SelectedAsset() == Identifier)
-				m_ContentBrowser.SelectedAsset().reset();
+				m_ContentBrowser.ClearAssetSelection();
 			SetStatus("Deleted asset " + Identifier.ToString() + ".");
 		}
 
@@ -4296,7 +4539,7 @@ namespace
 			ResetEditorViewportCamera();
 			m_Scene = std::move(Loaded);
 			m_SceneAsset = Identifier;
-			m_ContentBrowser.SelectedAsset() = Identifier;
+			m_ContentBrowser.SelectAsset(Identifier);
 			SelectSingleEntity(std::nullopt);
 			ResetSceneHistory();
 			const auto Record = m_Project->GetAssetRegistry().Find(Identifier);
@@ -4358,6 +4601,63 @@ namespace
 			}
 			if (Request.Status == PulseForgeEditor::EditorSceneTransitionQueue::RequestStatus::AwaitingDecision) m_OpenUnsavedDialog = true;
 			else if (Request.ReadyAction) Request.ReadyAction();
+		}
+
+		void QueueAssetOperation(std::function<void()> Operation)
+		{
+			if (!m_Project || !Operation) return;
+
+			std::error_code RootError;
+			const std::filesystem::path ProjectRoot = std::filesystem::absolute(m_Project->GetRootPath(), RootError).lexically_normal();
+			if (RootError)
+			{
+				SetError("Could not resolve the active project root for the asset operation: " + RootError.message());
+				return;
+			}
+
+			const PulseForge::UUID ProjectID = m_Project->GetDescription().ID;
+			const uint64_t OperationGeneration = m_AssetOperationGeneration;
+			m_DeferredEditorOperations.Enqueue(
+				[this, Operation = std::move(Operation), ProjectID, ProjectRoot, OperationGeneration]() mutable
+				{
+					if (!IsAssetOperationContextCurrent(ProjectID, ProjectRoot, OperationGeneration))
+					{
+						SetWarning("The asset operation was cancelled because its project context is no longer active.");
+						return;
+					}
+					if (!FinishSceneEdit()) return;
+					Operation();
+				});
+		}
+
+		void QueueAssetEditPlan(PulseForge::AssetEditTransaction::PlanPtr Plan)
+		{
+			if (!Plan) return;
+			PulseForgeEditor::EditorAssetEditScheduler::Enqueue(m_DeferredEditorOperations, std::move(Plan),
+				{ [this](const PulseForgeEditor::EditorAssetEditExecutionContext& Context)
+					{ return IsAssetOperationContextCurrent(Context.ProjectID, Context.ProjectRoot, Context.Generation); },
+					[this] { return FinishActiveAssetEdit(); },
+					[this](PulseForge::AssetEditTransaction::PlanPtr AcceptedPlan) { ApplyAssetEditPlan(std::move(AcceptedPlan)); },
+					[this] { SetWarning("The asset operation was cancelled because its project context is no longer active."); } });
+		}
+
+		bool FinishActiveAssetEdit()
+		{
+			if (!FinishSceneEdit()) return false;
+			m_MaterialDrafts.FinalizePendingEdits(false);
+			return true;
+		}
+
+		[[nodiscard]] bool IsAssetOperationContextCurrent(
+			const PulseForge::UUID& ProjectID, const std::filesystem::path& ProjectRoot, uint64_t OperationGeneration) const
+		{
+			if (!m_Project || m_Project->GetDescription().ID != ProjectID || m_AssetOperationGeneration != OperationGeneration)
+				return false;
+
+			std::error_code RootError;
+			const std::filesystem::path CurrentProjectRoot =
+				std::filesystem::absolute(m_Project->GetRootPath(), RootError).lexically_normal();
+			return !RootError && CurrentProjectRoot == ProjectRoot.lexically_normal();
 		}
 
 		bool DiscardSceneChanges()
@@ -4446,6 +4746,8 @@ namespace
 			ResetViewportSceneRenderer();
 			ClearGameplayInputProject();
 			m_Project.reset();
+			m_PendingAssetMovePlan.reset();
+			++m_AssetOperationGeneration;
 			m_ContentBrowser.ClearProject();
 			SetStatus("Project closed.");
 		}
@@ -7541,7 +7843,7 @@ namespace
 
 			m_MaterialDetailsAsset = Identifier;
 			MarkDocumentWorkspaceDirty();
-			m_ContentBrowser.SelectedAsset() = Identifier;
+			m_ContentBrowser.SelectAsset(Identifier);
 			SetEditorPanelVisible(PulseForgeEditor::EditorPanel::MaterialDetails, true);
 		}
 
@@ -8232,7 +8534,7 @@ namespace
 			m_Scene.reset();
 			m_SceneAsset.reset();
 			SelectSingleEntity(std::nullopt);
-			m_ContentBrowser.SelectedAsset().reset();
+			m_ContentBrowser.ClearAssetSelection();
 			m_AssetWorkflow.DismissDelete();
 			ResetSceneHistory();
 		}
@@ -8358,6 +8660,9 @@ namespace
 		bool m_ApplicationShutdownRequested = false;
 		PulseForgeEditor::EditorDocumentCloseRequest m_DocumentCloseRequest;
 		PulseForgeEditor::EditorAssetWorkflowState m_AssetWorkflow;
+		uint64_t m_AssetOperationGeneration = 1;
+		PulseForge::AssetEditTransaction::PlanPtr m_PendingAssetMovePlan;
+		bool m_OpenAssetMoveConfirmation = false;
 		PulseForgeEditor::EditorConsolePanel m_ConsolePanel;
 		PulseForgeEditor::EditorPerformancePanel m_PerformancePanel;
 		PulseForgeEditor::EditorStatusPanel m_StatusPanel;

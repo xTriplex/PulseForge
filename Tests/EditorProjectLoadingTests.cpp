@@ -13,7 +13,10 @@ namespace
 		if (!Identifier) return;
 
 		std::error_code FileError;
-		const std::filesystem::path TemporaryDirectory = std::filesystem::temp_directory_path(FileError);
+		const std::filesystem::path TemporaryDirectoryAlias = std::filesystem::temp_directory_path(FileError);
+		PF_CHECK(Tests, !FileError);
+		if (FileError) return;
+		const std::filesystem::path TemporaryDirectory = std::filesystem::canonical(TemporaryDirectoryAlias, FileError);
 		PF_CHECK(Tests, !FileError);
 		if (FileError) return;
 
