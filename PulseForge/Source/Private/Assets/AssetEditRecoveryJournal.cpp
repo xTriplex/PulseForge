@@ -62,6 +62,14 @@ namespace PulseForge::Assets::Detail
 			return Key;
 		}
 
+		std::string AsciiCaseFoldedPathSpellingKey(const Path& Value)
+		{
+			std::string Key = PathToUtf8(Value);
+			std::transform(Key.begin(), Key.end(), Key.begin(), [](unsigned char Character)
+				{ return Character >= 'A' && Character <= 'Z' ? static_cast<char>(Character - 'A' + 'a') : static_cast<char>(Character); });
+			return Key;
+		}
+
 		Path PathFromUtf8(std::string_view Value)
 		{
 			return std::filesystem::u8path(Value.begin(), Value.end());
@@ -762,8 +770,13 @@ namespace PulseForge::Assets::Detail
 			if ((IsMove || IsMoveAndRewrite) && Action.OriginalPath == Action.CurrentPath)
 				return std::unexpected(MakeError(
 					AssetEditRecoveryJournalErrorCode::InvalidJournal, Action.CurrentPath, "Move actions must change the logical path"));
+			const bool IsMoveAction = IsMove || IsMoveAndRewrite;
+			const bool HasCaseOnlySpelling =
+				Action.OriginalPath != Action.CurrentPath &&
+				AsciiCaseFoldedPathSpellingKey(Action.OriginalPath) == AsciiCaseFoldedPathSpellingKey(Action.CurrentPath);
 			const bool IsCaseOnlyMove =
-				(IsMove || IsMoveAndRewrite) && LogicalPathKey(Action.OriginalPath) == LogicalPathKey(Action.CurrentPath);
+				IsMoveAction && HasCaseOnlySpelling &&
+				(Action.TransitPath.has_value() || LogicalPathKey(Action.OriginalPath) == LogicalPathKey(Action.CurrentPath));
 			if (IsCaseOnlyMove && !Action.TransitPath)
 				return std::unexpected(MakeError(AssetEditRecoveryJournalErrorCode::InvalidJournal, Action.CurrentPath,
 					"Case-only moves require a distinct transit path"));
