@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <string>
 
 int main()
@@ -14,8 +15,11 @@ int main()
 	const auto ProjectID = PulseForge::UUID::Generate();
 	if (!ProjectID) return 1;
 	std::error_code Error;
-	const std::filesystem::path Root = std::filesystem::temp_directory_path(Error) / ("PulseForgeCatalogConsumer-" + ProjectID->ToString());
+	const std::filesystem::path TemporaryDirectoryAlias = std::filesystem::temp_directory_path(Error);
 	if (Error) return 2;
+	const std::filesystem::path TemporaryDirectory = std::filesystem::canonical(TemporaryDirectoryAlias, Error);
+	if (Error) return 2;
+	const std::filesystem::path Root = TemporaryDirectory / ("PulseForgeCatalogConsumer-" + ProjectID->ToString());
 	struct Cleanup
 	{
 		std::filesystem::path Path;
@@ -68,5 +72,10 @@ int main()
 	if (Referencers.size() != 1 || Referencers.front().Referrer != MaterialNode) return 12;
 	const auto MovePlan = PulseForge::AssetEditTransaction::PlanMove(
 		*Snapshot, MaterialMetadata->ID, std::filesystem::path("Assets") / "RenamedSurface.material");
-	return MovePlan && (*MovePlan)->GetAsset() == MaterialMetadata->ID ? 0 : 14;
+	if (!MovePlan)
+	{
+		std::cerr << "Runtime-only dependency consumer could not create its asset move plan: " << MovePlan.error().Message << '\n';
+		return 14;
+	}
+	return (*MovePlan)->GetAsset() == MaterialMetadata->ID ? 0 : 15;
 }
