@@ -17,7 +17,7 @@ namespace PulseForgeEditor
 	{
 		if (Activated)
 		{
-			State.SelectedAsset() = Asset.ID;
+			State.SelectAsset(Asset.ID, ImGui::GetIO().KeyCtrl);
 			switch (ResolveAssetBrowserOpenAction(Presentation.Extension, Activated, ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)))
 			{
 			case AssetBrowserOpenAction::OpenScene:
@@ -37,15 +37,32 @@ namespace PulseForgeEditor
 
 		if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
 		{
-			const std::string Identifier = Asset.ID.ToString();
-			ImGui::SetDragDropPayload("PF_MANAGED_ASSET_MOVE", Identifier.c_str(), Identifier.size() + 1);
-			ImGui::Text("Move asset: %s", Presentation.Name.c_str());
+			if (State.IsAssetSelected(Asset.ID) && State.SelectedAssets().size() > 1)
+			{
+				std::string Identifiers;
+				for (const PulseForge::AssetID& Selected : State.SelectedAssets())
+				{
+					if (!Identifiers.empty()) Identifiers.push_back('\n');
+					Identifiers += Selected.ToString();
+				}
+				ImGui::SetDragDropPayload("PF_MANAGED_ASSET_SET_MOVE", Identifiers.data(), Identifiers.size());
+				ImGui::Text("Move %zu selected assets", State.SelectedAssets().size());
+			}
+			else
+			{
+				const std::string Identifier = Asset.ID.ToString();
+				ImGui::SetDragDropPayload("PF_MANAGED_ASSET_MOVE", Identifier.c_str(), Identifier.size() + 1);
+				ImGui::Text("Move asset: %s", Presentation.Name.c_str());
+			}
 			ImGui::EndDragDropSource();
 		}
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nUUID: %s", Presentation.FullPath.c_str(), Presentation.Identifier.c_str());
 		if (!ImGui::BeginPopupContextItem("Asset Actions")) return;
 
-		State.SelectedAsset() = Asset.ID;
+		if (State.IsAssetSelected(Asset.ID))
+			State.SetPrimarySelectedAsset(Asset.ID);
+		else
+			State.SelectAsset(Asset.ID);
 		const PulseForge::AssetID Identifier = Asset.ID;
 		const auto Defer = [&DeferredAction, &ActionHandler, &Identifier](EditorContentBrowserAssetAction Action)
 		{
@@ -91,7 +108,7 @@ namespace PulseForgeEditor
 				ImGui::PushID(Presentation.Identifier.c_str());
 				ImGui::TableNextRow();
 				ImGui::TableSetColumnIndex(0);
-				const bool IsSelected = State.SelectedAsset() && *State.SelectedAsset() == Asset.ID;
+				const bool IsSelected = State.IsAssetSelected(Asset.ID);
 				const bool Activated =
 					Style.Selectable(Presentation.Icon, Presentation.Name, IsSelected, ImGuiSelectableFlags_AllowDoubleClick);
 				HandleAssetItem(State, Project, Asset, Presentation, Activated, SceneAvailable, Style, ActionHandler, DeferredAction);
@@ -140,7 +157,7 @@ namespace PulseForgeEditor
 					const PulseForge::AssetRecord& Asset = State.Assets()[SourceIndex];
 					const EditorContentBrowserAssetPresentation& Presentation = State.AssetPresentations()[SourceIndex];
 					ImGui::PushID(Presentation.Identifier.c_str());
-					const bool IsSelected = State.SelectedAsset() && *State.SelectedAsset() == Asset.ID;
+					const bool IsSelected = State.IsAssetSelected(Asset.ID);
 					uint64_t PreviewID = 0;
 					uint32_t PreviewWidth = 0;
 					uint32_t PreviewHeight = 0;

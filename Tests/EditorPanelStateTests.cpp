@@ -87,6 +87,14 @@ namespace
 		PF_CHECK(Tests, Browser.AssetPresentations()[0].Icon == EditorIcon::Image);
 		PF_CHECK(Tests, Browser.AssetPresentations()[2].Icon == EditorIcon::Material);
 
+		Browser.SelectAsset(AssetID{ 0, 1 });
+		Browser.SelectAsset(AssetID{ 0, 2 }, true);
+		PF_CHECK(Tests, Browser.SelectedAssets().size() == 2);
+		PF_CHECK(Tests, Browser.SelectedAsset() && *Browser.SelectedAsset() == AssetID(0, 2));
+		Browser.SelectAsset(AssetID{ 0, 2 }, true);
+		PF_CHECK(Tests, Browser.SelectedAssets().size() == 1);
+		PF_CHECK(Tests, Browser.SelectedAsset() && *Browser.SelectedAsset() == AssetID(0, 1));
+
 		Browser.RebuildFilteredAssetIndices();
 		PF_CHECK(Tests, Browser.FilteredAssetIndices().empty());
 
@@ -105,7 +113,11 @@ namespace
 		PF_CHECK(Tests, Browser.CurrentFolder() == "Assets/Art/Textures");
 		PF_CHECK(Tests, Browser.SelectedFolder() && *Browser.SelectedFolder() == "Assets/Art/Textures/Sky");
 
+		Browser.SelectAsset(AssetID{ 0, 3 }, true);
+		PF_CHECK(Tests, Browser.SelectedAssets().size() == 2);
 		Browser.SetAssets({ { AssetID{ 0, 3 }, "Assets/Materials/metal.material" } });
+		PF_CHECK(Tests, Browser.SelectedAssets().size() == 1);
+		PF_CHECK(Tests, Browser.SelectedAsset() && *Browser.SelectedAsset() == AssetID(0, 3));
 		PF_CHECK(Tests, Browser.AssetPresentations().size() == 1);
 		PF_CHECK(Tests, Browser.AssetPresentations()[0].Name == "metal.material");
 		PF_CHECK(Tests, Browser.CurrentFolder() == "Assets");
@@ -116,7 +128,6 @@ namespace
 		PF_CHECK(Tests, Browser.SearchText().empty());
 		PF_CHECK(Tests, Browser.IsGridView());
 
-		Browser.SelectedAsset() = AssetID{ 0, 3 };
 		Browser.ClearProject();
 		PF_CHECK(Tests, Browser.Assets().empty());
 		PF_CHECK(Tests, Browser.AssetPresentations().empty());

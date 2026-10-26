@@ -150,6 +150,9 @@ namespace PulseForgeEditor
 			if (Style.ToolIconButton(EditorIcon::List, "List", "AssetListMode", "List view", !State.GridView())) State.GridView() = false;
 		}
 		Style.EndToolbar();
+		if (State.SelectedAssets().size() > 1)
+			ImGui::TextDisabled("%zu selected — drag a selected asset onto a folder to move them together.",
+				State.SelectedAssets().size());
 
 		State.RebuildFilteredAssetIndices();
 		const EditorContentFolderNode* CurrentFolderNode = State.FindFolder(State.CurrentFolder());
@@ -226,7 +229,7 @@ namespace PulseForgeEditor
 		const auto RegisteredAsset = Project.GetAssetRegistry().Find(*State.SelectedAsset());
 		if (!RegisteredAsset)
 		{
-			State.SelectedAsset().reset();
+			State.ClearAssetSelection();
 			return;
 		}
 		const auto AssetIterator = std::find_if(State.Assets().begin(), State.Assets().end(),

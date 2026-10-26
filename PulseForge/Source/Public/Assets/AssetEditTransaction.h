@@ -114,6 +114,7 @@ namespace PulseForge
 		[[nodiscard]] const std::vector<AssetEditRewrittenSource>& GetRewrittenSources() const noexcept { return m_RewrittenSources; }
 		[[nodiscard]] AssetEditProvenanceDisposition GetProvenanceDisposition() const noexcept { return m_ProvenanceDisposition; }
 		[[nodiscard]] bool IsCaseOnlyAlias() const noexcept { return m_CaseOnlyAlias; }
+		[[nodiscard]] bool IsAssetBatchMove() const noexcept { return m_IsAssetBatchMove; }
 		[[nodiscard]] bool IsFolderMove() const noexcept { return m_IsFolderMove; }
 		[[nodiscard]] bool IsFolderDuplicate() const noexcept { return m_IsFolderDuplicate; }
 		[[nodiscard]] bool IsAssetDuplicate() const noexcept { return m_IsAssetDuplicate; }
@@ -138,6 +139,7 @@ namespace PulseForge
 		std::vector<AssetEditRewrittenSource> m_RewrittenSources;
 		AssetEditProvenanceDisposition m_ProvenanceDisposition = AssetEditProvenanceDisposition::NoReceipt;
 		bool m_CaseOnlyAlias = false;
+		bool m_IsAssetBatchMove = false;
 		bool m_IsFolderMove = false;
 		bool m_IsFolderDuplicate = false;
 		bool m_IsAssetDuplicate = false;
@@ -164,6 +166,7 @@ namespace PulseForge
 		AssetRecord MovedAsset;
 		AssetEditProvenanceDisposition ProvenanceDisposition = AssetEditProvenanceDisposition::NoReceipt;
 		std::vector<AssetRecord> CreatedAssets;
+		std::vector<AssetRecord> MovedAssets;
 	};
 
 	class PULSEFORGE_API AssetEditTransaction final
@@ -173,6 +176,9 @@ namespace PulseForge
 
 		[[nodiscard]] static std::expected<PlanPtr, AssetEditTransactionError> PlanMove(
 			const AssetDependencyCatalogSnapshot& Snapshot, const AssetID& Asset, const std::filesystem::path& DestinationProjectRelative);
+		[[nodiscard]] static std::expected<PlanPtr, AssetEditTransactionError> PlanMoveAssets(
+			const AssetDependencyCatalogSnapshot& Snapshot, const std::vector<AssetID>& Assets,
+			const std::filesystem::path& DestinationFolderProjectRelative);
 
 		[[nodiscard]] static std::expected<PlanPtr, AssetEditTransactionError> PlanMoveFolder(
 			const AssetDependencyCatalogSnapshot& Snapshot, const std::filesystem::path& SourceFolderProjectRelative,
@@ -189,6 +195,9 @@ namespace PulseForge
 			AssetRegistry& Registry, const AssetEditTransactionOptions& Options = {});
 
 		[[nodiscard]] static std::expected<AssetEditTransactionResult, AssetEditTransactionError> ApplyFolderMove(
+			const AssetEditMovePlan& Plan, const std::filesystem::path& CurrentProjectRoot, const UUID& CurrentProjectID,
+			uint64_t CurrentCatalogGeneration, AssetRegistry& Registry, const AssetEditTransactionOptions& Options = {});
+		[[nodiscard]] static std::expected<AssetEditTransactionResult, AssetEditTransactionError> ApplyAssetBatchMove(
 			const AssetEditMovePlan& Plan, const std::filesystem::path& CurrentProjectRoot, const UUID& CurrentProjectID,
 			uint64_t CurrentCatalogGeneration, AssetRegistry& Registry, const AssetEditTransactionOptions& Options = {});
 

@@ -617,6 +617,10 @@ namespace PulseForge
 			{
 				auto Rewritten = RewriteGltfSource(Root / ReferrerPath, ReferrerPath, NewOwner, Mappings);
 				if (!Rewritten) return std::unexpected(Rewritten.error());
+				auto AfterRead = CaptureReceipt(Root, ReferrerPath);
+				if (!AfterRead || *AfterRead != *Receipt)
+					return std::unexpected(MakeError(AssetEditTransactionErrorCode::StaleInputs, ReferrerPath,
+						"A glTF referrer changed while its selected-asset rewrite was planned"));
 				Plan->m_RewrittenSources.push_back({ References.front().ReferringAsset, ReferrerPath, *Receipt, std::move(*Rewritten),
 					std::move(References), false, std::move(Mappings), NewOwner });
 			}
@@ -771,6 +775,170 @@ namespace PulseForge
 		Plan->m_Receipts.erase(std::unique(Plan->m_Receipts.begin(), Plan->m_Receipts.end(), [](const auto& First, const auto& Second)
 								   { return First.ProjectRelativePath == Second.ProjectRelativePath; }),
 			Plan->m_Receipts.end());
+		return std::static_pointer_cast<const AssetEditMovePlan>(Plan);
+	}
+
+	std::expected<AssetEditTransaction::PlanPtr, AssetEditTransactionError> AssetEditTransaction::PlanMoveAssets(
+		const AssetDependencyCatalogSnapshot& Snapshot, const std::vector<AssetID>& Assets,
+		const std::filesystem::path& DestinationFolderProjectRelative)
+	{
+		if (Snapshot.GetProjectID().IsNil() || Assets.empty() || DestinationFolderProjectRelative.empty() ||
+			DestinationFolderProjectRelative.is_absolute() ||
+			DestinationFolderProjectRelative.lexically_normal() != DestinationFolderProjectRelative ||
+			DestinationFolderProjectRelative.begin() == DestinationFolderProjectRelative.end() ||
+			*DestinationFolderProjectRelative.begin() != "Assets")
+			return std::unexpected(MakeError(AssetEditTransactionErrorCode::InvalidPlan, DestinationFolderProjectRelative,
+				"A selected-asset move needs a nonempty selection and a normalized destination folder beneath Assets"));
+
+		const Path Root = Snapshot.GetProjectRootPath();
+		if (HasLinkedOrReparseAncestor(Root))
+			return std::unexpected(MakeError(AssetEditTransactionErrorCode::UnsupportedOperation, Root,
+				"Asset edits do not traverse a project root or ancestor that is a symbolic link or reparse point"));
+		if (auto Recovery = RejectIncompleteTransactions(Root); !Recovery) return std::unexpected(Recovery.error());
+		if (auto Destination = ValidateManagedPath(Root, DestinationFolderProjectRelative, true, false); !Destination)
+			return std::unexpected(Destination.error());
+
+		std::vector<AssetID> Selected = Assets;
+		std::sort(Selected.begin(), Selected.end());
+		if (Selected.front().IsNil() || std::adjacent_find(Selected.begin(), Selected.end()) != Selected.end())
+			return std::unexpected(MakeError(AssetEditTransactionErrorCode::InvalidPlan, DestinationFolderProjectRelative,
+				"The selected asset set contains a nil or duplicate identity"));
+
+		auto Plan = std::make_shared<AssetEditMovePlan>();
+		auto OperationID = UUID::Generate();
+		if (!OperationID)
+			return std::unexpected(MakeError(AssetEditTransactionErrorCode::InvalidPlan, DestinationFolderProjectRelative,
+				"Could not allocate a unique asset-edit operation identity"));
+		Plan->m_OperationID = *OperationID;
+		Plan->m_ProjectID = Snapshot.GetProjectID();
+		Plan->m_ProjectRoot = Root;
+		Plan->m_CatalogGeneration = Snapshot.GetGeneration();
+		Plan->m_IsAssetBatchMove = true;
+		Plan->m_RegistryMembership = Snapshot.GetRegistry().GetAssets();
+		Plan->m_CatalogReceipts = Snapshot.GetInputReadSet();
+		if (auto Validated = AssetDependencyExtractor::ValidateInputReceipts(Root, Plan->m_CatalogReceipts); !Validated)
+			return std::unexpected(
+				MakeError(AssetEditTransactionErrorCode::StaleInputs, Validated.error().Path, Validated.error().Message));
+
+		std::set<std::string> DestinationKeys;
+		std::map<std::string, Path> MovedPathByKey;
+		for (const AssetID& Identifier : Selected)
+		{
+			const auto Record = Snapshot.GetRegistry().Find(Identifier);
+			if (!Record)
+				return std::unexpected(MakeError(AssetEditTransactionErrorCode::InvalidPlan, Identifier.ToString(),
+					"A selected asset is absent from the retained catalog snapshot"));
+			const Path Source = Record->ProjectRelativePath;
+			const Path Destination = DestinationFolderProjectRelative / Source.filename();
+			if (Source == Destination)
+				return std::unexpected(MakeError(AssetEditTransactionErrorCode::InvalidPlan, Source,
+					"Every selected asset must move to a different folder"));
+			if (auto Validated = ValidateManagedPath(Root, Source, true, true); !Validated)
+				return std::unexpected(Validated.error());
+			if (auto Parent = ValidateManagedPath(Root, Destination.parent_path(), true, false); !Parent)
+				return std::unexpected(Parent.error());
+			for (const Path& DestinationPath : { Destination,
+					 AssetMetadataSerializer::GetSidecarPath(Root / Destination).lexically_relative(Root),
+					 AssetImportProvenanceSerializer::GetSidecarPath(Root / Destination).lexically_relative(Root) })
+			{
+				if (!DestinationKeys.insert(AsciiCaseFoldedPathKey(DestinationPath)).second)
+					return std::unexpected(MakeError(AssetEditTransactionErrorCode::Conflict, DestinationPath,
+						"Selected assets have colliding destination or reserved sidecar paths"));
+				auto Absent = CaptureReceipt(Root, DestinationPath, true);
+				if (!Absent || Absent->Exists)
+					return std::unexpected(MakeError(AssetEditTransactionErrorCode::Conflict, DestinationPath,
+						"A selected-asset destination or reserved sidecar path already exists"));
+				Plan->m_Receipts.push_back(std::move(*Absent));
+			}
+			const Path SourceMetadata = AssetMetadataSerializer::GetSidecarPath(Root / Source).lexically_relative(Root);
+			const Path SourceProvenance = AssetImportProvenanceSerializer::GetSidecarPath(Root / Source).lexically_relative(Root);
+			for (const Path& SourcePath : { Source, SourceMetadata })
+			{
+				auto Receipt = CaptureReceipt(Root, SourcePath);
+				if (!Receipt) return std::unexpected(Receipt.error());
+				Plan->m_Receipts.push_back(std::move(*Receipt));
+			}
+			auto ProvenanceReceipt = CaptureReceipt(Root, SourceProvenance, true);
+			if (!ProvenanceReceipt) return std::unexpected(ProvenanceReceipt.error());
+			if (ProvenanceReceipt->Exists)
+				Plan->m_ProvenanceDisposition = AssetEditProvenanceDisposition::PreserveHistoricalReceiptAtNewPath;
+			Plan->m_Receipts.push_back(std::move(*ProvenanceReceipt));
+			Plan->m_MovedAssets.push_back(Identifier);
+			Plan->m_PathMappings.push_back({ Source, Destination });
+			if (!MovedPathByKey.emplace(PathKey(Source), Destination).second)
+				return std::unexpected(MakeError(AssetEditTransactionErrorCode::RegistryInvalid, Source,
+					"The retained registry contains multiple selected identities at one source path"));
+		}
+		if (Plan->m_PathMappings.empty())
+			return std::unexpected(MakeError(AssetEditTransactionErrorCode::InvalidPlan, DestinationFolderProjectRelative,
+				"The selected asset set is empty"));
+		Plan->m_Asset = Plan->m_MovedAssets.front();
+		std::sort(Plan->m_PathMappings.begin(), Plan->m_PathMappings.end(),
+			[](const AssetEditPathMapping& First, const AssetEditPathMapping& Second)
+			{ return PathKey(First.Source) < PathKey(Second.Source); });
+		Plan->m_Mapping = Plan->m_PathMappings.front();
+
+		std::map<Path, std::vector<AssetEditGltfBufferReference>> Rewrites;
+		for (const AssetDependencyEdge& Edge : Snapshot.GetEdges())
+		{
+			if (Edge.Kind != AssetDependencyEdgeKind::ImportInput || Edge.Target.SourceFileKey.empty()) continue;
+			const auto ReferrerRecord = Snapshot.GetRegistry().Find(Edge.Referrer.Asset);
+			if (!ReferrerRecord) continue;
+			const auto NewOwner = MovedPathByKey.find(PathKey(ReferrerRecord->ProjectRelativePath));
+			const Path OldTarget = std::filesystem::u8path(Edge.Target.SourceFileKey);
+			const auto NewTarget = MovedPathByKey.find(PathKey(OldTarget));
+			const bool ReferrerMoves = NewOwner != MovedPathByKey.end();
+			const bool TargetMoves = NewTarget != MovedPathByKey.end();
+			if (!ReferrerMoves && !TargetMoves) continue;
+			const Path ReferrerPath = ReferrerRecord->ProjectRelativePath;
+			if (Edge.Status != AssetDependencyStatus::Resolved || Edge.Location.starts_with("images/"))
+				return std::unexpected(MakeError(AssetEditTransactionErrorCode::UnsupportedOperation, ReferrerPath,
+					"Selected-asset move crosses an unresolved or unsupported dependency; no files were changed"));
+			std::string Extension = ReferrerPath.extension().string();
+			std::transform(Extension.begin(), Extension.end(), Extension.begin(),
+				[](unsigned char Character) { return static_cast<char>(std::tolower(Character)); });
+			if (Extension != ".gltf" && Extension != ".glb")
+				return std::unexpected(MakeError(AssetEditTransactionErrorCode::UnsupportedOperation, ReferrerPath,
+					"Changed import-input reference is not owned by a supported glTF/GLB source"));
+			const Path NewTargetPath = TargetMoves ? NewTarget->second : OldTarget;
+			AssetEditGltfBufferReference Reference{ Edge.Referrer.Asset, ReferrerPath, OldTarget, NewTargetPath, Edge.Location,
+				Edge.OriginalReference };
+			Rewrites[ReferrerPath].push_back(std::move(Reference));
+		}
+		for (auto& [ReferrerPath, References] : Rewrites)
+		{
+			auto Receipt = CaptureReceipt(Root, ReferrerPath);
+			if (!Receipt) return std::unexpected(Receipt.error());
+			Plan->m_Receipts.push_back(*Receipt);
+			std::vector<Assets::Detail::GltfBufferPathMapping> Mappings;
+			Mappings.reserve(References.size());
+			for (const AssetEditGltfBufferReference& Reference : References)
+				Mappings.push_back({ Reference.TargetSource, Reference.NewTargetSource });
+			const auto OwnerMapping = MovedPathByKey.find(PathKey(ReferrerPath));
+			const Path NewOwner = OwnerMapping == MovedPathByKey.end() ? ReferrerPath : OwnerMapping->second;
+			std::string Extension = ReferrerPath.extension().string();
+			std::transform(Extension.begin(), Extension.end(), Extension.begin(),
+				[](unsigned char Character) { return static_cast<char>(std::tolower(Character)); });
+			if (Extension == ".glb")
+				Plan->m_RewrittenSources.push_back({ References.front().ReferringAsset, ReferrerPath, *Receipt, {}, std::move(References),
+					true, std::move(Mappings), NewOwner });
+			else
+			{
+				auto Rewritten = RewriteGltfSource(Root / ReferrerPath, ReferrerPath, NewOwner, Mappings);
+				if (!Rewritten) return std::unexpected(Rewritten.error());
+				Plan->m_RewrittenSources.push_back({ References.front().ReferringAsset, ReferrerPath, *Receipt, std::move(*Rewritten),
+					std::move(References), false, std::move(Mappings), NewOwner });
+			}
+		}
+		for (const AssetEditRewrittenSource& Rewrite : Plan->m_RewrittenSources)
+			for (const AssetEditGltfBufferReference& Reference : Rewrite.References)
+				Plan->m_AffectedReferences.push_back(Reference);
+		std::sort(Plan->m_Receipts.begin(), Plan->m_Receipts.end(),
+			[](const AssetEditFileReceipt& First, const AssetEditFileReceipt& Second)
+			{ return PathKey(First.ProjectRelativePath) < PathKey(Second.ProjectRelativePath); });
+		Plan->m_Receipts.erase(std::unique(Plan->m_Receipts.begin(), Plan->m_Receipts.end(),
+			[](const AssetEditFileReceipt& First, const AssetEditFileReceipt& Second)
+			{ return First.ProjectRelativePath == Second.ProjectRelativePath; }), Plan->m_Receipts.end());
 		return std::static_pointer_cast<const AssetEditMovePlan>(Plan);
 	}
 
@@ -1162,6 +1330,8 @@ namespace PulseForge
 	{
 		if (Plan.IsAssetDuplicate())
 			return ApplyAssetDuplicate(Plan, CurrentProjectRoot, CurrentProjectID, CurrentCatalogGeneration, Registry, Options);
+		if (Plan.IsAssetBatchMove())
+			return ApplyAssetBatchMove(Plan, CurrentProjectRoot, CurrentProjectID, CurrentCatalogGeneration, Registry, Options);
 		if (Plan.IsFolderMove())
 		{
 			if (Plan.IsFolderDuplicate())
@@ -1515,6 +1685,220 @@ namespace PulseForge
 		Registry = std::move(Candidate);
 		std::filesystem::remove_all(TransactionDirectory, Error);
 		return AssetEditTransactionResult{ { Plan.GetAsset(), Plan.GetMapping().Destination }, Plan.GetProvenanceDisposition() };
+	}
+
+	std::expected<AssetEditTransactionResult, AssetEditTransactionError> AssetEditTransaction::ApplyAssetBatchMove(
+		const AssetEditMovePlan& Plan, const std::filesystem::path& CurrentProjectRoot, const UUID& CurrentProjectID,
+		uint64_t CurrentCatalogGeneration, AssetRegistry& Registry, const AssetEditTransactionOptions& Options)
+	{
+		if (!Plan.IsAssetBatchMove() || Plan.GetPathMappings().empty() || Plan.IsFolderMove() || Plan.IsAssetDuplicate())
+			return std::unexpected(MakeError(AssetEditTransactionErrorCode::InvalidPlan, Plan.GetMapping().Source,
+				"ApplyAssetBatchMove requires a nonempty selected-asset move plan"));
+		std::error_code Error;
+		const Path NormalizedRoot = std::filesystem::absolute(CurrentProjectRoot, Error).lexically_normal();
+		if (Error || NormalizedRoot != Plan.GetProjectRoot() || HasLinkedOrReparseAncestor(NormalizedRoot) ||
+			CurrentProjectID != Plan.GetProjectID() || CurrentCatalogGeneration != Plan.GetCatalogGeneration())
+			return std::unexpected(MakeError(AssetEditTransactionErrorCode::StaleProject, Plan.GetMapping().Source,
+				"Project identity, root, or catalog generation changed after the selected-asset preview"));
+		if (auto Recovery = RejectIncompleteTransactions(NormalizedRoot); !Recovery) return std::unexpected(Recovery.error());
+		if (auto Hook = InvokeHook(Options, AssetEditTransactionStage::BeforeRevalidation, Plan.GetMapping().Source); !Hook)
+			return std::unexpected(Hook.error());
+		if (auto Inputs = ValidatePlanInputs(Plan); !Inputs) return std::unexpected(Inputs.error());
+
+		AssetRegistry DiskRegistry;
+		if (auto Rebuilt = DiskRegistry.Rebuild(Plan.GetProjectRoot()); !Rebuilt ||
+			!SameMembership(Plan.GetRegistryMembership(), DiskRegistry.GetAssets()) ||
+			!SameMembership(Plan.GetRegistryMembership(), Registry.GetAssets()))
+			return std::unexpected(MakeError(AssetEditTransactionErrorCode::StaleInputs, "Assets",
+				"Registry membership changed after the selected-asset preview"));
+		if (auto Hook = InvokeHook(Options, AssetEditTransactionStage::AfterRevalidation, Plan.GetMapping().Source); !Hook)
+			return std::unexpected(Hook.error());
+		if (auto Inputs = ValidatePlanInputs(Plan); !Inputs) return std::unexpected(Inputs.error());
+		AssetRegistry BoundaryRegistry;
+		if (auto Rebuilt = BoundaryRegistry.Rebuild(Plan.GetProjectRoot()); !Rebuilt ||
+			!SameMembership(Plan.GetRegistryMembership(), BoundaryRegistry.GetAssets()))
+			return std::unexpected(MakeError(AssetEditTransactionErrorCode::StaleInputs, "Assets",
+				"Registry membership changed at the selected-asset commit boundary"));
+		if (auto Hook = InvokeHook(Options, AssetEditTransactionStage::BeforeFileMutation, Plan.GetMapping().Source); !Hook)
+			return std::unexpected(Hook.error());
+		if (auto Inputs = ValidatePlanInputs(Plan); !Inputs) return std::unexpected(Inputs.error());
+
+		const Path TransactionDirectory = Plan.GetProjectRoot() / (".pf-asset-edit-" + Plan.GetOperationID().ToString());
+		if (!std::filesystem::create_directory(TransactionDirectory, Error) || Error)
+			return std::unexpected(MakeError(AssetEditTransactionErrorCode::FilesystemFailure, TransactionDirectory,
+				"Could not create an exclusive selected-asset staging directory: " + Error.message()));
+		std::vector<StagedEditFile> StagedFiles;
+		for (size_t Index = 0; Index < Plan.GetRewrittenSources().size(); ++Index)
+		{
+			const AssetEditRewrittenSource& Rewrite = Plan.GetRewrittenSources()[Index];
+			auto Staged = StageRewrite(Plan, Rewrite, Index, TransactionDirectory);
+			if (!Staged)
+			{
+				std::filesystem::remove_all(TransactionDirectory, Error);
+				return std::unexpected(Staged.error());
+			}
+			auto Current = CaptureReceipt(Plan.GetProjectRoot(), Rewrite.ProjectRelativePath);
+			if (!Current || *Current != Rewrite.Before)
+			{
+				std::filesystem::remove_all(TransactionDirectory, Error);
+				return std::unexpected(MakeError(AssetEditTransactionErrorCode::StaleInputs, Rewrite.ProjectRelativePath,
+					"A glTF/GLB referrer changed while its selected-asset rewrite was staged"));
+			}
+			StagedFiles.push_back(std::move(*Staged));
+		}
+
+		struct MovedFile
+		{
+			Path Source;
+			Path Destination;
+			AssetEditFileReceipt Receipt;
+		};
+		std::vector<MovedFile> MovedFiles;
+		std::vector<size_t> PublishedRewrites;
+		const std::set<AssetID> MovedIDs(Plan.GetMovedAssets().begin(), Plan.GetMovedAssets().end());
+		auto Rollback = [&]() -> std::string
+		{
+			std::string Failures;
+			for (auto It = PublishedRewrites.rbegin(); It != PublishedRewrites.rend(); ++It)
+			{
+				auto Restored = RestoreStagedEditFile(Plan.GetProjectRoot(), StagedFiles[*It]);
+				if (!Restored) Failures += PathKey(StagedFiles[*It].Target) + ": " + Restored.error().Message + "; ";
+			}
+			for (auto It = MovedFiles.rbegin(); It != MovedFiles.rend(); ++It)
+			{
+				const Path SourceRelative = It->Source.lexically_relative(Plan.GetProjectRoot());
+				const Path DestinationRelative = It->Destination.lexically_relative(Plan.GetProjectRoot());
+				auto Current = CaptureReceipt(Plan.GetProjectRoot(), DestinationRelative);
+				if (!Current || Current->ByteLength != It->Receipt.ByteLength || Current->Content != It->Receipt.Content)
+				{
+					Failures += PathKey(It->Destination) + ": moved file changed before rollback; destination retained; ";
+					continue;
+				}
+				auto OriginalAbsent = CaptureReceipt(Plan.GetProjectRoot(), SourceRelative, true);
+				if (!OriginalAbsent || OriginalAbsent->Exists)
+				{
+					Failures += PathKey(It->Source) + ": restore path was independently occupied; destination retained; ";
+					continue;
+				}
+				const std::error_code RestoreError = RenameNoReplace(It->Destination, It->Source);
+				if (RestoreError) Failures += PathKey(It->Source) + ": " + RestoreError.message() + "; ";
+			}
+			return Failures;
+		};
+		auto FailAfterMutation = [&](AssetEditTransactionError Failure)
+			-> std::expected<AssetEditTransactionResult, AssetEditTransactionError>
+		{
+			const std::string RollbackFailure = Rollback();
+			if (!RollbackFailure.empty())
+			{
+				Failure.Code = AssetEditTransactionErrorCode::RecoveryRequired;
+				Failure.Message += "; rollback incomplete: " + RollbackFailure;
+				Failure.RecoveryPath = TransactionDirectory;
+				return std::unexpected(std::move(Failure));
+			}
+			std::filesystem::remove_all(TransactionDirectory, Error);
+			return std::unexpected(std::move(Failure));
+		};
+
+		for (size_t Index = 0; Index < StagedFiles.size(); ++Index)
+		{
+			const AssetEditRewrittenSource& Rewrite = Plan.GetRewrittenSources()[Index];
+			if (MovedIDs.contains(Rewrite.Asset)) continue;
+			auto BeforePublish = CaptureReceipt(Plan.GetProjectRoot(), Rewrite.ProjectRelativePath);
+			if (!BeforePublish || *BeforePublish != Rewrite.Before)
+				return FailAfterMutation(MakeError(AssetEditTransactionErrorCode::StaleInputs, Rewrite.ProjectRelativePath,
+					"An external glTF/GLB referrer changed before the batch reference update"));
+			auto Replaced = Platform::ReplaceFileAtomically(StagedFiles[Index].Staged, StagedFiles[Index].Target);
+			if (!Replaced)
+				return FailAfterMutation(MakeError(AssetEditTransactionErrorCode::FilesystemFailure, StagedFiles[Index].Target,
+					"Could not publish an external selected-asset reference rewrite: " + Replaced.error().Message));
+			PublishedRewrites.push_back(Index);
+			if (auto Hook = InvokeHook(Options, AssetEditTransactionStage::AfterReferenceWrite, StagedFiles[Index].Target); !Hook)
+				return FailAfterMutation(Hook.error());
+		}
+
+		for (const AssetEditPathMapping& Mapping : Plan.GetPathMappings())
+		{
+			const Path Source = Plan.GetProjectRoot() / Mapping.Source;
+			const Path Destination = Plan.GetProjectRoot() / Mapping.Destination;
+			const Path SourceMetadata = AssetMetadataSerializer::GetSidecarPath(Source);
+			const Path DestinationMetadata = AssetMetadataSerializer::GetSidecarPath(Destination);
+			const Path SourceProvenance = AssetImportProvenanceSerializer::GetSidecarPath(Source);
+			const Path DestinationProvenance = AssetImportProvenanceSerializer::GetSidecarPath(Destination);
+			for (const auto& [From, To] : { std::pair{ Source, Destination }, std::pair{ SourceMetadata, DestinationMetadata },
+					 std::pair{ SourceProvenance, DestinationProvenance } })
+			{
+				const Path FromRelative = From.lexically_relative(Plan.GetProjectRoot());
+				const auto Planned = std::find_if(Plan.GetReceipts().begin(), Plan.GetReceipts().end(),
+					[&FromRelative](const AssetEditFileReceipt& Receipt) { return Receipt.ProjectRelativePath == FromRelative; });
+				if (Planned == Plan.GetReceipts().end())
+					return FailAfterMutation(MakeError(AssetEditTransactionErrorCode::InvalidPlan, FromRelative,
+						"The selected-asset plan lacks a source or sidecar precondition"));
+				auto Before = CaptureReceipt(Plan.GetProjectRoot(), FromRelative, true);
+				if (!Before) return FailAfterMutation(Before.error());
+				if (*Before != *Planned)
+					return FailAfterMutation(MakeError(AssetEditTransactionErrorCode::StaleInputs, FromRelative,
+						"A selected source or sidecar changed after its move preview"));
+				if (!Before->Exists)
+				{
+					if (From == SourceProvenance) continue;
+					return FailAfterMutation(MakeError(AssetEditTransactionErrorCode::StaleInputs, From,
+						"A selected source or UUID sidecar disappeared before the batch move"));
+				}
+				auto DestinationAbsent = CaptureReceipt(Plan.GetProjectRoot(), To.lexically_relative(Plan.GetProjectRoot()), true);
+				if (!DestinationAbsent || DestinationAbsent->Exists)
+					return FailAfterMutation(MakeError(AssetEditTransactionErrorCode::Conflict, To,
+						"A selected-asset destination appeared before the batch move"));
+				const std::error_code MoveError = RenameNoReplace(From, To);
+				if (MoveError)
+					return FailAfterMutation(MakeError(AssetEditTransactionErrorCode::FilesystemFailure, To,
+						"Could not move a selected source or sidecar without overwriting: " + MoveError.message()));
+				MovedFiles.push_back({ From, To, *Before });
+			}
+			if (auto Hook = InvokeHook(Options, AssetEditTransactionStage::AfterAssetMove, Destination); !Hook)
+				return FailAfterMutation(Hook.error());
+		}
+
+		for (size_t Index = 0; Index < StagedFiles.size(); ++Index)
+		{
+			const AssetEditRewrittenSource& Rewrite = Plan.GetRewrittenSources()[Index];
+			if (!MovedIDs.contains(Rewrite.Asset)) continue;
+			const Path MovedReferrerPath = MapPlannedPath(Plan, Rewrite.ProjectRelativePath);
+			auto BeforePublish = CaptureReceipt(Plan.GetProjectRoot(), MovedReferrerPath);
+			if (!BeforePublish || BeforePublish->ByteLength != Rewrite.Before.ByteLength ||
+				BeforePublish->Content != Rewrite.Before.Content)
+				return FailAfterMutation(MakeError(AssetEditTransactionErrorCode::StaleInputs, MovedReferrerPath,
+					"A moved glTF/GLB referrer changed before its rewritten content was published"));
+			auto Replaced = Platform::ReplaceFileAtomically(StagedFiles[Index].Staged, StagedFiles[Index].Target);
+			if (!Replaced)
+				return FailAfterMutation(MakeError(AssetEditTransactionErrorCode::FilesystemFailure, StagedFiles[Index].Target,
+					"Could not publish a moved selected-source rewrite: " + Replaced.error().Message));
+			PublishedRewrites.push_back(Index);
+			if (auto Hook = InvokeHook(Options, AssetEditTransactionStage::AfterReferenceWrite, StagedFiles[Index].Target); !Hook)
+				return FailAfterMutation(Hook.error());
+		}
+
+		AssetRegistry Candidate;
+		if (auto Rebuilt = Candidate.Rebuild(Plan.GetProjectRoot()); !Rebuilt)
+			return FailAfterMutation(MakeError(AssetEditTransactionErrorCode::RegistryInvalid, "Assets",
+				"Candidate registry rejected the selected-asset move"));
+		auto ExpectedMembership = Plan.GetRegistryMembership();
+		for (AssetRecord& Record : ExpectedMembership)
+			if (MovedIDs.contains(Record.ID)) Record.ProjectRelativePath = MapPlannedPath(Plan, Record.ProjectRelativePath);
+		if (!SameMembership(std::move(ExpectedMembership), Candidate.GetAssets()))
+			return FailAfterMutation(MakeError(AssetEditTransactionErrorCode::RegistryInvalid, "Assets",
+				"Post-move registry membership differs from the planned selected-asset mapping"));
+		if (auto Hook = InvokeHook(Options, AssetEditTransactionStage::BeforeRegistryPublication, Plan.GetMapping().Destination); !Hook)
+			return FailAfterMutation(Hook.error());
+
+		Registry = std::move(Candidate);
+		std::filesystem::remove_all(TransactionDirectory, Error);
+		AssetEditTransactionResult Result;
+		Result.ProvenanceDisposition = Plan.GetProvenanceDisposition();
+		for (const AssetID& Identifier : Plan.GetMovedAssets())
+			if (const auto Record = Registry.Find(Identifier)) Result.MovedAssets.push_back(*Record);
+		if (!Result.MovedAssets.empty()) Result.MovedAsset = Result.MovedAssets.front();
+		return Result;
 	}
 
 	std::expected<AssetEditTransactionResult, AssetEditTransactionError> AssetEditTransaction::ApplyFolderMove(

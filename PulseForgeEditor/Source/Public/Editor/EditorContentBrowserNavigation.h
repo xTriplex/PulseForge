@@ -17,6 +17,8 @@ namespace PulseForgeEditor
 	public:
 		virtual ~EditorContentBrowserNavigationActions() = default;
 		virtual void QueueAssetMoveAfterSave(const PulseForge::AssetID& Asset, const std::filesystem::path& Destination) = 0;
+		virtual void QueueAssetSetMoveAfterSave(
+			const std::vector<PulseForge::AssetID>& Assets, const std::filesystem::path& DestinationFolder) = 0;
 		virtual void QueueFolderMoveAfterSave(const std::filesystem::path& Source, const std::filesystem::path& Destination) = 0;
 		virtual void QueueFolderDuplicateAfterSave(const std::filesystem::path& Source) = 0;
 	};

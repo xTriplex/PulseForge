@@ -117,7 +117,36 @@ namespace PulseForgeEditor
 	{
 		if (DeferredAction || !ImGui::BeginDragDropTarget()) return;
 
-		if (const ImGuiPayload* Payload = ImGui::AcceptDragDropPayload("PF_MANAGED_ASSET_MOVE"))
+		if (const ImGuiPayload* BatchPayload = ImGui::AcceptDragDropPayload("PF_MANAGED_ASSET_SET_MOVE"))
+		{
+			if (BatchPayload->IsDelivery() && BatchPayload->Data && BatchPayload->DataSize > 0)
+			{
+				const std::string_view PayloadText(static_cast<const char*>(BatchPayload->Data),
+					static_cast<size_t>(BatchPayload->DataSize));
+				std::vector<PulseForge::AssetID> Identifiers;
+				size_t Begin = 0;
+				bool Valid = true;
+				while (Begin < PayloadText.size())
+				{
+					const size_t End = PayloadText.find('\n', Begin);
+					const std::string_view Item = PayloadText.substr(
+						Begin, End == std::string_view::npos ? PayloadText.size() - Begin : End - Begin);
+					const auto Identifier = PulseForge::AssetID::Parse(Item);
+					if (!Identifier)
+					{
+						Valid = false;
+						break;
+					}
+					Identifiers.push_back(*Identifier);
+					if (End == std::string_view::npos) break;
+					Begin = End + 1;
+				}
+				if (Valid && Identifiers.size() > 1)
+					DeferredAction = [&Actions, Identifiers = std::move(Identifiers), Destination]
+					{ Actions.QueueAssetSetMoveAfterSave(Identifiers, Destination); };
+			}
+		}
+		else if (const ImGuiPayload* Payload = ImGui::AcceptDragDropPayload("PF_MANAGED_ASSET_MOVE"))
 		{
 			if (Payload->IsDelivery() && Payload->Data && Payload->DataSize > 1)
 			{

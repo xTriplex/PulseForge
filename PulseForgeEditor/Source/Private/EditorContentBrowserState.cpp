@@ -21,6 +21,10 @@ namespace PulseForgeEditor
 	void EditorContentBrowserState::SetAssets(std::vector<PulseForge::AssetRecord> Assets)
 	{
 		m_Assets = std::move(Assets);
+		std::erase_if(m_SelectedAssets, [this](const PulseForge::AssetID& Selected)
+			{ return std::none_of(m_Assets.begin(), m_Assets.end(), [&Selected](const auto& Asset) { return Asset.ID == Selected; }); });
+		if (m_SelectedAsset && !IsAssetSelected(*m_SelectedAsset))
+			m_SelectedAsset = m_SelectedAssets.empty() ? std::nullopt : std::optional<PulseForge::AssetID>(m_SelectedAssets.back());
 		RebuildAssetPresentations();
 		RebuildFolderTree();
 	}
@@ -89,9 +93,55 @@ namespace PulseForgeEditor
 	{
 		m_Assets.clear();
 		m_AssetPresentations.clear();
-		m_SelectedAsset.reset();
+		ClearAssetSelection();
 		m_FolderRoot = { "Assets", "Assets", {} };
 		ResetNavigation();
+	}
+
+	bool EditorContentBrowserState::IsAssetSelected(const PulseForge::AssetID& Asset) const noexcept
+	{
+		return std::find(m_SelectedAssets.begin(), m_SelectedAssets.end(), Asset) != m_SelectedAssets.end();
+	}
+
+	void EditorContentBrowserState::SelectAsset(const PulseForge::AssetID& Asset, bool Toggle)
+	{
+		if (Asset.IsNil()) return;
+		if (!Toggle)
+		{
+			m_SelectedAssets.assign(1, Asset);
+			m_SelectedAsset = Asset;
+			return;
+		}
+
+		const auto Existing = std::find(m_SelectedAssets.begin(), m_SelectedAssets.end(), Asset);
+		if (Existing == m_SelectedAssets.end())
+		{
+			m_SelectedAssets.push_back(Asset);
+			m_SelectedAsset = Asset;
+			return;
+		}
+		m_SelectedAssets.erase(Existing);
+		if (m_SelectedAsset == Asset)
+			m_SelectedAsset = m_SelectedAssets.empty() ? std::nullopt : std::optional<PulseForge::AssetID>(m_SelectedAssets.back());
+	}
+
+	void EditorContentBrowserState::SetSelectedAssets(std::vector<PulseForge::AssetID> Assets)
+	{
+		m_SelectedAssets.clear();
+		for (const PulseForge::AssetID& Asset : Assets)
+			if (!Asset.IsNil() && !IsAssetSelected(Asset)) m_SelectedAssets.push_back(Asset);
+		m_SelectedAsset = m_SelectedAssets.empty() ? std::nullopt : std::optional<PulseForge::AssetID>(m_SelectedAssets.back());
+	}
+
+	void EditorContentBrowserState::SetPrimarySelectedAsset(const PulseForge::AssetID& Asset) noexcept
+	{
+		if (IsAssetSelected(Asset)) m_SelectedAsset = Asset;
+	}
+
+	void EditorContentBrowserState::ClearAssetSelection() noexcept
+	{
+		m_SelectedAsset.reset();
+		m_SelectedAssets.clear();
 	}
 
 	void EditorContentBrowserState::SetCurrentFolder(std::filesystem::path Folder)

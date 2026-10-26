@@ -682,6 +682,12 @@ namespace
 			QueueAfterSave([this, Asset, Destination] { MoveAssetAt(Asset, Destination); });
 		}
 
+		void QueueAssetSetMoveAfterSave(
+			const std::vector<PulseForge::AssetID>& Assets, const std::filesystem::path& DestinationFolder) override
+		{
+			QueueAfterSave([this, Assets, DestinationFolder] { MoveAssetSetToFolderAt(Assets, DestinationFolder); });
+		}
+
 		void QueueFolderMoveAfterSave(const std::filesystem::path& Source, const std::filesystem::path& Destination) override
 		{
 			QueueAfterSave([this, Source, Destination] { MoveFolderAt(Source, Destination); });
@@ -1887,7 +1893,8 @@ namespace
 				m_Scene = std::move(StartupScene);
 				m_SceneAsset = StartupSceneAsset;
 				SelectSingleEntity(std::nullopt);
-				m_ContentBrowser.SelectedAsset() = StartupSceneAsset;
+				if (StartupSceneAsset) m_ContentBrowser.SelectAsset(*StartupSceneAsset);
+				else m_ContentBrowser.ClearAssetSelection();
 				m_AssetWorkflow.DismissDelete();
 				ResetSceneHistory();
 			}
@@ -3802,7 +3809,7 @@ namespace
 			}
 
 			UpdateAssetList(true);
-			m_ContentBrowser.SelectedAsset() = Imported->ID;
+			m_ContentBrowser.SelectAsset(Imported->ID);
 			SetStatus("Imported " + PathToUtf8(Imported->ProjectRelativePath) + " (UUID " + Imported->ID.ToString() + ").");
 		}
 
@@ -3956,8 +3963,16 @@ namespace
 			}
 			else
 			{
-				ImGui::TextWrapped(
-					"Move %s to %s?", PathToUtf8(Plan.GetMapping().Source).c_str(), PathToUtf8(Plan.GetMapping().Destination).c_str());
+				if (Plan.IsAssetBatchMove())
+				{
+					ImGui::TextWrapped("Move %zu selected assets into %s:", Plan.GetMovedAssets().size(),
+						PathToUtf8(Plan.GetMapping().Destination.parent_path()).c_str());
+					for (const PulseForge::AssetEditPathMapping& Mapping : Plan.GetPathMappings())
+						ImGui::BulletText("%s -> %s", PathToUtf8(Mapping.Source).c_str(), PathToUtf8(Mapping.Destination).c_str());
+				}
+				else
+					ImGui::TextWrapped("Move %s to %s?", PathToUtf8(Plan.GetMapping().Source).c_str(),
+						PathToUtf8(Plan.GetMapping().Destination).c_str());
 				ImGui::Text("This also rewrites %zu supported glTF buffer reference(s):", Plan.GetAffectedReferences().size());
 				std::vector<std::filesystem::path> Referrers;
 				for (const auto& Reference : Plan.GetAffectedReferences())
@@ -3969,7 +3984,8 @@ namespace
 
 			const char* ConfirmLabel = Plan.IsFolderDuplicate() ? "Create Duplicate Folder"
 				: Plan.IsAssetDuplicate()                           ? "Create Duplicate Asset"
-																  : "Move and Update References";
+				: Plan.IsAssetBatchMove()                           ? "Move Selected Assets and Update References"
+															  : "Move and Update References";
 			if (ImGui::Button(ConfirmLabel))
 			{
 				auto AcceptedPlan = std::move(m_PendingAssetMovePlan);
@@ -4018,10 +4034,17 @@ namespace
 			if (Plan->IsFolderDuplicate() || Plan->IsAssetDuplicate())
 			{
 				UpdateAssetList(true);
-				if (!Moved->CreatedAssets.empty()) m_ContentBrowser.SelectedAsset() = Moved->CreatedAssets.front().ID;
+				if (!Moved->CreatedAssets.empty()) m_ContentBrowser.SelectAsset(Moved->CreatedAssets.front().ID);
 				SetStatus("Duplicated " + std::string(Plan->IsFolderDuplicate() ? "folder " : "asset ") +
 					  PathToUtf8(Plan->GetMapping().Source) + " to " +
 						  PathToUtf8(Plan->GetMapping().Destination) + " with fresh asset identities.");
+			}
+			else if (Plan->IsAssetBatchMove())
+			{
+				UpdateAssetList(true);
+				m_ContentBrowser.SetSelectedAssets(Plan->GetMovedAssets());
+				SetStatus("Moved " + std::to_string(Moved->MovedAssets.size()) + " selected assets into " +
+					PathToUtf8(Plan->GetMapping().Destination.parent_path()) + ". Asset identities were preserved.");
 			}
 			else if (Plan->IsFolderMove())
 			{
@@ -4033,9 +4056,35 @@ namespace
 			else
 			{
 				UpdateAssetList(true);
-				m_ContentBrowser.SelectedAsset() = Moved->MovedAsset.ID;
+				m_ContentBrowser.SelectAsset(Moved->MovedAsset.ID);
 				SetStatus("Moved " + PathToUtf8(Moved->MovedAsset.ProjectRelativePath) + ".");
 			}
+		}
+
+		void MoveAssetSetToFolderAt(
+			const std::vector<PulseForge::AssetID>& Assets, const std::filesystem::path& DestinationFolder)
+		{
+			if (!m_Project) return;
+			auto Snapshot = PulseForge::AssetDependencyCatalogBuilder::Build(
+				m_Project->GetRootPath(), m_Project->GetDescription().ID, m_AssetOperationGeneration);
+			if (!Snapshot)
+			{
+				SetError("Selected-asset move preview failed" +
+						 (Snapshot.error().Path.empty() ? std::string{} : ": " + PathToUtf8(Snapshot.error().Path)) + ": " +
+						 Snapshot.error().Message);
+				return;
+			}
+			auto Plan = PulseForge::AssetEditTransaction::PlanMoveAssets(**Snapshot, Assets, DestinationFolder);
+			if (!Plan)
+			{
+				SetError("Selected-asset move preview failed" +
+						 (Plan.error().Path.empty() ? std::string{} : ": " + PathToUtf8(Plan.error().Path)) + ": " +
+						 Plan.error().Message);
+				return;
+			}
+			if (HasDirtyDocumentConflict(**Plan)) return;
+			m_PendingAssetMovePlan = *Plan;
+			m_OpenAssetMoveConfirmation = true;
 		}
 
 		void MoveFolderAt(const std::filesystem::path& Source, const std::filesystem::path& Destination)
@@ -4179,7 +4228,7 @@ namespace
 				if (Created.error().CommittedAsset)
 				{
 					UpdateAssetList(true);
-					m_ContentBrowser.SelectedAsset() = Created.error().CommittedAsset->ID;
+					m_ContentBrowser.SelectAsset(Created.error().CommittedAsset->ID);
 					SetWarning("Prefab was created with UUID " + Created.error().CommittedAsset->ID.ToString() +
 							   ", but temporary cleanup failed: " + Message);
 					return;
@@ -4191,7 +4240,7 @@ namespace
 			}
 
 			UpdateAssetList(true);
-			m_ContentBrowser.SelectedAsset() = Created->ID;
+			m_ContentBrowser.SelectAsset(Created->ID);
 			SetStatus("Created prefab " + PathToUtf8(Created->ProjectRelativePath) + " (UUID " + Created->ID.ToString() + ").");
 		}
 
@@ -4322,7 +4371,7 @@ namespace
 			if (!CommitPreparedDocumentCloseBatch(std::move(*PreparedClose))) return;
 			if (DeletedMaterial) ForgetMaterialDraft(Identifier);
 			if (m_ContentBrowser.SelectedAsset() && *m_ContentBrowser.SelectedAsset() == Identifier)
-				m_ContentBrowser.SelectedAsset().reset();
+				m_ContentBrowser.ClearAssetSelection();
 			SetStatus("Deleted asset " + Identifier.ToString() + ".");
 		}
 
@@ -4485,7 +4534,7 @@ namespace
 			ResetEditorViewportCamera();
 			m_Scene = std::move(Loaded);
 			m_SceneAsset = Identifier;
-			m_ContentBrowser.SelectedAsset() = Identifier;
+			m_ContentBrowser.SelectAsset(Identifier);
 			SelectSingleEntity(std::nullopt);
 			ResetSceneHistory();
 			const auto Record = m_Project->GetAssetRegistry().Find(Identifier);
@@ -7732,7 +7781,7 @@ namespace
 
 			m_MaterialDetailsAsset = Identifier;
 			MarkDocumentWorkspaceDirty();
-			m_ContentBrowser.SelectedAsset() = Identifier;
+			m_ContentBrowser.SelectAsset(Identifier);
 			SetEditorPanelVisible(PulseForgeEditor::EditorPanel::MaterialDetails, true);
 		}
 
@@ -8423,7 +8472,7 @@ namespace
 			m_Scene.reset();
 			m_SceneAsset.reset();
 			SelectSingleEntity(std::nullopt);
-			m_ContentBrowser.SelectedAsset().reset();
+			m_ContentBrowser.ClearAssetSelection();
 			m_AssetWorkflow.DismissDelete();
 			ResetSceneHistory();
 		}

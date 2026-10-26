@@ -303,6 +303,138 @@ namespace
 		}
 	}
 
+	void TestSelectedAssetBatchMovePreservesReferencesAndRollsBack(TestRunner& Tests)
+	{
+		AssetEditFixture Fixture;
+		PF_CHECK(Tests, Fixture.Valid);
+		if (!Fixture.Valid) return;
+		const AssetID FirstMesh = Fixture.AddMesh("BatchFirst");
+		const std::filesystem::path SecondBufferPath = Fixture.Root / "Assets/Other/Alternate.bin";
+		PF_CHECK(Tests, AssetEditFixture::WriteBinary(SecondBufferPath, AssetEditFixture::TriangleBytes()));
+		const auto SecondBufferMetadata = AssetMetadataSerializer::CreateForNewAsset(SecondBufferPath);
+		const std::filesystem::path SecondMeshPath = Fixture.Root / "Assets/Other/BatchSecond.gltf";
+		const std::string SecondMeshDocument =
+			R"({"asset":{"version":"2.0"},"buffers":[{"uri":"Alternate.bin","byteLength":42}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":6}],"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}],"meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}]})";
+		PF_CHECK(Tests, AssetEditFixture::WriteText(SecondMeshPath, SecondMeshDocument));
+		const auto SecondMeshMetadata = AssetMetadataSerializer::CreateForNewAsset(SecondMeshPath);
+		PF_CHECK(Tests, !FirstMesh.IsNil() && SecondBufferMetadata && SecondMeshMetadata);
+		if (FirstMesh.IsNil() || !SecondBufferMetadata || !SecondMeshMetadata) return;
+
+		AssetRegistry Registry;
+		PF_CHECK(Tests, Fixture.BuildRegistry(Registry).has_value());
+		const auto FirstBuffer = FindRecordByPath(Registry, "Assets/Models/Triangle.bin");
+		PF_CHECK(Tests, FirstBuffer.has_value());
+		if (!FirstBuffer) return;
+		auto Snapshot = Fixture.BuildSnapshot(4);
+		PF_CHECK(Tests, Snapshot.has_value());
+		if (!Snapshot) return;
+		const std::vector<AssetID> Selected{ FirstMesh, FirstBuffer->ID, SecondBufferMetadata->ID };
+		const auto DuplicateSelection = AssetEditTransaction::PlanMoveAssets(
+			**Snapshot, { FirstBuffer->ID, FirstBuffer->ID }, "Assets/Relocated");
+		PF_CHECK(Tests, !DuplicateSelection);
+		const auto Plan = AssetEditTransaction::PlanMoveAssets(**Snapshot, Selected, "Assets/Relocated");
+		PF_CHECK(Tests, Plan.has_value());
+		if (!Plan) return;
+		PF_CHECK(Tests, (*Plan)->IsAssetBatchMove());
+		PF_CHECK(Tests, (*Plan)->GetPathMappings().size() == 3);
+		PF_CHECK(Tests, (*Plan)->GetAffectedReferences().size() == 2);
+		PF_CHECK(Tests, (*Plan)->GetRewrittenSources().size() == 2);
+
+		const auto RacedDestination = Fixture.Root / "Assets/Relocated/Triangle.bin";
+		PF_CHECK(Tests, AssetEditFixture::WriteText(RacedDestination, "destination writer"));
+		const auto RejectedRace = AssetEditTransaction::ApplyMove(**Plan, Fixture.Root, Fixture.ProjectID, 4, Registry);
+		PF_CHECK(Tests, !RejectedRace && RejectedRace.error().Code == AssetEditTransactionErrorCode::Conflict);
+		PF_CHECK(Tests, AssetEditFixture::ReadText(RacedDestination) == std::optional<std::string>("destination writer"));
+		PF_CHECK(Tests, std::filesystem::exists(Fixture.Root / "Assets/Models/Triangle.bin"));
+		std::error_code RemoveError;
+		std::filesystem::remove(RacedDestination, RemoveError);
+		PF_CHECK(Tests, !RemoveError);
+		const auto Applied = AssetEditTransaction::ApplyMove(**Plan, Fixture.Root, Fixture.ProjectID, 4, Registry);
+		PF_CHECK(Tests, Applied && Applied->MovedAssets.size() == 3);
+		if (!Applied) return;
+		PF_CHECK(Tests, Registry.Find(FirstBuffer->ID)->ProjectRelativePath == "Assets/Relocated/Triangle.bin");
+		PF_CHECK(Tests, Registry.Find(SecondBufferMetadata->ID)->ProjectRelativePath == "Assets/Relocated/Alternate.bin");
+		PF_CHECK(Tests, Registry.Find(FirstMesh)->ProjectRelativePath == "Assets/Relocated/BatchFirst.gltf");
+		PF_CHECK(Tests, Registry.Find(SecondMeshMetadata->ID)->ProjectRelativePath == "Assets/Other/BatchSecond.gltf");
+		const auto FirstImport = GltfMeshImporter::ImportStaticPrimitive(FirstMesh, Fixture.Root, Registry);
+		const auto SecondImport = GltfMeshImporter::ImportStaticPrimitive(SecondMeshMetadata->ID, Fixture.Root, Registry);
+		PF_CHECK(Tests, FirstImport && FirstImport->Vertices.size() == 3);
+		PF_CHECK(Tests, SecondImport && SecondImport->Vertices.size() == 3);
+		auto Reopened = Fixture.BuildSnapshot(5);
+		PF_CHECK(Tests, Reopened.has_value());
+		if (Reopened)
+		{
+			for (const AssetDependencyEdge& Edge : (*Reopened)->GetEdges())
+				if (Edge.Kind == AssetDependencyEdgeKind::ImportInput &&
+					(Edge.Referrer.Asset == FirstMesh || Edge.Referrer.Asset == SecondMeshMetadata->ID))
+					PF_CHECK(Tests, Edge.Status == AssetDependencyStatus::Resolved);
+		}
+
+		AssetEditFixture RollbackFixture;
+		PF_CHECK(Tests, RollbackFixture.Valid);
+		if (!RollbackFixture.Valid) return;
+		const AssetID RollbackMesh = RollbackFixture.AddMesh("BatchRollback");
+		const auto ExtraBuffer = RollbackFixture.Root / "Assets/Other/Extra.bin";
+		PF_CHECK(Tests, AssetEditFixture::WriteBinary(ExtraBuffer, AssetEditFixture::TriangleBytes()));
+		const auto ExtraMetadata = AssetMetadataSerializer::CreateForNewAsset(ExtraBuffer);
+		AssetRegistry RollbackRegistry;
+		PF_CHECK(Tests, ExtraMetadata && RollbackFixture.BuildRegistry(RollbackRegistry).has_value());
+		if (!ExtraMetadata) return;
+		auto RollbackSnapshot = RollbackFixture.BuildSnapshot(9);
+		PF_CHECK(Tests, RollbackSnapshot.has_value());
+		if (!RollbackSnapshot) return;
+		const auto RollbackBuffer = FindRecordByPath(RollbackRegistry, "Assets/Models/Triangle.bin");
+		PF_CHECK(Tests, RollbackBuffer.has_value());
+		if (!RollbackBuffer) return;
+		const auto RollbackPlan = AssetEditTransaction::PlanMoveAssets(
+			**RollbackSnapshot, { RollbackMesh, RollbackBuffer->ID, ExtraMetadata->ID }, "Assets/Relocated");
+		PF_CHECK(Tests, RollbackPlan.has_value());
+		if (!RollbackPlan) return;
+		const auto OriginalMesh = AssetEditFixture::ReadText(RollbackFixture.Root / "Assets/Models/BatchRollback.gltf");
+		size_t CompletedAssets = 0;
+		AssetEditTransactionOptions Options;
+		Options.StageHook = [&CompletedAssets](AssetEditTransactionStage Stage, const std::filesystem::path&)
+			-> std::expected<void, std::string>
+		{
+			if (Stage == AssetEditTransactionStage::AfterAssetMove && ++CompletedAssets == 1)
+				return std::unexpected("fail after first selected asset move");
+			return {};
+		};
+		const auto Failed = AssetEditTransaction::ApplyMove(
+			**RollbackPlan, RollbackFixture.Root, RollbackFixture.ProjectID, 9, RollbackRegistry, Options);
+		PF_CHECK(Tests, !Failed && Failed.error().Code == AssetEditTransactionErrorCode::FilesystemFailure);
+		PF_CHECK(Tests, std::filesystem::exists(RollbackFixture.Root / "Assets/Models/Triangle.bin"));
+		PF_CHECK(Tests, std::filesystem::exists(ExtraBuffer));
+		PF_CHECK(Tests, !std::filesystem::exists(RollbackFixture.Root / "Assets/Relocated/Triangle.bin"));
+		PF_CHECK(Tests, !std::filesystem::exists(RollbackFixture.Root / "Assets/Relocated/Extra.bin"));
+		PF_CHECK(Tests, OriginalMesh == AssetEditFixture::ReadText(RollbackFixture.Root / "Assets/Models/BatchRollback.gltf"));
+		PF_CHECK(Tests, RollbackRegistry.Find(RollbackMesh)->ProjectRelativePath == "Assets/Models/BatchRollback.gltf");
+		PF_CHECK(Tests, RollbackRegistry.Find(RollbackBuffer->ID)->ProjectRelativePath == "Assets/Models/Triangle.bin");
+
+		Options.StageHook = [](AssetEditTransactionStage Stage, const std::filesystem::path&)
+			-> std::expected<void, std::string>
+		{
+			if (Stage == AssetEditTransactionStage::AfterReferenceWrite)
+				return std::unexpected("fail after rewriting a moved selected source");
+			return {};
+		};
+		const auto FailedReferenceUpdate = AssetEditTransaction::ApplyMove(
+			**RollbackPlan, RollbackFixture.Root, RollbackFixture.ProjectID, 9, RollbackRegistry, Options);
+		PF_CHECK(Tests, !FailedReferenceUpdate &&
+			FailedReferenceUpdate.error().Code == AssetEditTransactionErrorCode::FilesystemFailure);
+		PF_CHECK(Tests, std::filesystem::exists(RollbackFixture.Root / "Assets/Models/Triangle.bin"));
+		PF_CHECK(Tests, std::filesystem::exists(RollbackFixture.Root / "Assets/Other/Extra.bin"));
+		PF_CHECK(Tests, std::filesystem::exists(AssetMetadataSerializer::GetSidecarPath(
+			RollbackFixture.Root / "Assets/Models/BatchRollback.gltf")));
+		PF_CHECK(Tests, std::filesystem::exists(AssetMetadataSerializer::GetSidecarPath(
+			RollbackFixture.Root / "Assets/Models/Triangle.bin")));
+		PF_CHECK(Tests, !std::filesystem::exists(RollbackFixture.Root / "Assets/Relocated/BatchRollback.gltf"));
+		PF_CHECK(Tests, !std::filesystem::exists(AssetMetadataSerializer::GetSidecarPath(
+			RollbackFixture.Root / "Assets/Relocated/BatchRollback.gltf")));
+		PF_CHECK(Tests, OriginalMesh == AssetEditFixture::ReadText(RollbackFixture.Root / "Assets/Models/BatchRollback.gltf"));
+		PF_CHECK(Tests, RollbackRegistry.Find(RollbackMesh)->ProjectRelativePath == "Assets/Models/BatchRollback.gltf");
+	}
+
 	void TestAssetEditRollbackAtMutationStages(TestRunner& Tests)
 	{
 		for (const AssetEditTransactionStage FailureStage : { AssetEditTransactionStage::AfterReferenceWrite,
@@ -908,6 +1040,7 @@ void RunAssetEditTransactionTests(TestRunner& Tests)
 	TestAssetEditPlanIsReadOnly(Tests);
 	TestAssetEditPlanRejectsStaleInputsAndMembership(Tests);
 	TestAssetEditMoveRewritesAndImportsSharedBuffers(Tests);
+	TestSelectedAssetBatchMovePreservesReferencesAndRollsBack(Tests);
 	TestAssetEditRollbackAtMutationStages(Tests);
 	TestDestinationRaceNeverOverwrites(Tests);
 	TestIncompleteRollbackRetainsRecoveryMaterial(Tests);
