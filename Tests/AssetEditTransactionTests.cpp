@@ -53,6 +53,13 @@ namespace
 		return { reinterpret_cast<const char*>(Encoded.data()), Encoded.size() };
 	}
 
+	std::filesystem::path GetCanonicalTemporaryRoot(std::error_code& Error)
+	{
+		const std::filesystem::path TemporaryRoot = std::filesystem::temp_directory_path(Error);
+		if (Error) return {};
+		return std::filesystem::canonical(TemporaryRoot, Error);
+	}
+
 	std::optional<int> RunAssetEditChildProcess(const std::vector<std::string>& Arguments)
 	{
 		if (g_AssetEditTestExecutable.empty()) return std::nullopt;
@@ -103,7 +110,7 @@ namespace
 		AssetEditFixture()
 		{
 			std::error_code Error;
-			const auto Temp = std::filesystem::temp_directory_path(Error);
+			const auto Temp = GetCanonicalTemporaryRoot(Error);
 			if (Error) return;
 			const auto ID = UUID::Generate();
 			const auto Project = UUID::Generate();
@@ -933,6 +940,7 @@ namespace
 			PF_CHECK(Tests, Plan.has_value());
 			if (!Plan) return;
 			const auto Applied = AssetEditTransaction::ApplyMove(**Plan, Fixture.Root, Fixture.ProjectID, 4, Registry);
+			if (!Applied) std::cerr << "Case-only asset move failed: " << Applied.error().Message << '\n';
 			PF_CHECK(Tests, Applied.has_value());
 			PF_CHECK(Tests, !FindRecordByPath(Registry, "Assets/Models/CaseOnly.gltf").has_value());
 			PF_CHECK(Tests, std::filesystem::exists(Fixture.Root / "Assets/Models/caseonly.gltf"));

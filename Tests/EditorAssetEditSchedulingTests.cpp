@@ -28,6 +28,13 @@ namespace
 	using namespace PulseForge;
 	using namespace PulseForgeEditor;
 
+	std::filesystem::path GetCanonicalTemporaryRoot(std::error_code& Error)
+	{
+		const std::filesystem::path TemporaryRoot = std::filesystem::temp_directory_path(Error);
+		if (Error) return {};
+		return std::filesystem::canonical(TemporaryRoot, Error);
+	}
+
 	class Fixture final
 	{
 	public:
@@ -36,7 +43,7 @@ namespace
 			std::error_code Error;
 			const UUID ID = *UUID::Generate();
 			ProjectID = *UUID::Generate();
-			Root = std::filesystem::temp_directory_path(Error) / ("PulseForgeAssetEditSchedule-" + ID.ToString());
+			Root = GetCanonicalTemporaryRoot(Error) / ("PulseForgeAssetEditSchedule-" + ID.ToString());
 			if (Error) return;
 			std::filesystem::create_directories(Root / "Assets/Models", Error);
 			if (Error) return;
@@ -208,8 +215,7 @@ namespace
 		PF_CHECK(Tests, TemporaryID.has_value());
 		if (!TemporaryID) return;
 		std::error_code Error;
-		const std::filesystem::path Root =
-			std::filesystem::temp_directory_path(Error) / ("PulseForgeDirtyAssetMove-" + TemporaryID->ToString());
+		const std::filesystem::path Root = GetCanonicalTemporaryRoot(Error) / ("PulseForgeDirtyAssetMove-" + TemporaryID->ToString());
 		PF_CHECK(Tests, !Error);
 		if (Error) return;
 		struct Cleanup final
@@ -421,8 +427,7 @@ namespace
 		PF_CHECK(Tests, TemporaryID.has_value());
 		if (!TemporaryID) return;
 		std::error_code Error;
-		const std::filesystem::path Root =
-			std::filesystem::temp_directory_path(Error) / ("PulseForgeProjectOpenRecovery-" + TemporaryID->ToString());
+		const std::filesystem::path Root = GetCanonicalTemporaryRoot(Error) / ("PulseForgeProjectOpenRecovery-" + TemporaryID->ToString());
 		PF_CHECK(Tests, !Error);
 		if (Error) return;
 		struct Cleanup final
