@@ -3,6 +3,7 @@
 #include "Assets/AssetDependencyCatalog.h"
 #include "Assets/AssetEditTransaction.h"
 #include "Assets/AssetImportProvenance.h"
+#include "Assets/Detail/AssetEditRecoveryJournal.h"
 #include "Assets/Detail/GltfRelocation.h"
 #include "Assets/GltfMeshImporter.h"
 #include "Assets/MaterialAsset.h"
@@ -13,10 +14,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <expected>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <span>
 #include <string>
@@ -25,9 +28,74 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#elif defined(__APPLE__) || defined(__linux__)
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 namespace
 {
 	using namespace PulseForge;
+	std::filesystem::path g_AssetEditTestExecutable;
+
+	std::string PathToUtf8(const std::filesystem::path& Path)
+	{
+		const std::u8string Encoded = Path.generic_u8string();
+		return { reinterpret_cast<const char*>(Encoded.data()), Encoded.size() };
+	}
+
+	std::optional<int> RunAssetEditChildProcess(const std::vector<std::string>& Arguments)
+	{
+		if (g_AssetEditTestExecutable.empty()) return std::nullopt;
+#if defined(_WIN32)
+		std::wstring Command = L"\"" + g_AssetEditTestExecutable.wstring() + L"\"";
+		for (const std::string& Argument : Arguments)
+			Command += L" \"" + std::filesystem::u8path(Argument).wstring() + L"\"";
+		STARTUPINFOW Startup{};
+		Startup.cb = sizeof(Startup);
+		PROCESS_INFORMATION Process{};
+		if (!CreateProcessW(nullptr, Command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &Startup, &Process))
+			return std::nullopt;
+		WaitForSingleObject(Process.hProcess, INFINITE);
+		DWORD ExitCode = 0;
+		const bool ReadExitCode = GetExitCodeProcess(Process.hProcess, &ExitCode) != FALSE;
+		CloseHandle(Process.hThread);
+		CloseHandle(Process.hProcess);
+		return ReadExitCode ? std::optional<int>(static_cast<int>(ExitCode)) : std::nullopt;
+#elif defined(__APPLE__) || defined(__linux__)
+		std::vector<std::string> Storage;
+		Storage.reserve(Arguments.size() + 1);
+		Storage.push_back(g_AssetEditTestExecutable.string());
+		Storage.insert(Storage.end(), Arguments.begin(), Arguments.end());
+		std::vector<char*> Argv;
+		Argv.reserve(Storage.size() + 1);
+		for (std::string& Argument : Storage)
+			Argv.push_back(Argument.data());
+		Argv.push_back(nullptr);
+		const pid_t Child = fork();
+		if (Child < 0) return std::nullopt;
+		if (Child == 0)
+		{
+			execv(g_AssetEditTestExecutable.c_str(), Argv.data());
+			std::_Exit(127);
+		}
+		int Status = 0;
+		if (waitpid(Child, &Status, 0) != Child || !WIFEXITED(Status)) return std::nullopt;
+		return WEXITSTATUS(Status);
+#else
+		(void)Arguments;
+		return std::nullopt;
+#endif
+	}
 
 	class AssetEditFixture final
 	{
@@ -146,6 +214,113 @@ namespace
 		const auto Found =
 			std::find_if(Assets.begin(), Assets.end(), [&](const AssetRecord& Record) { return Record.ProjectRelativePath == Path; });
 		return Found == Assets.end() ? std::nullopt : std::optional<AssetRecord>(*Found);
+	}
+
+	std::string MakeValidImportReceipt(const AssetID& SourceAsset)
+	{
+		using Json = nlohmann::ordered_json;
+		AssetImportRecipe Recipe;
+		Recipe.SourceAsset = SourceAsset;
+		Recipe.SubresourceKey = "mesh/0/primitive/0";
+		Recipe.ImporterID = "PulseForge.AssetEditTransactionTests";
+		Recipe.ImporterVersion = "1";
+		Recipe.OutputSchemaVersion = 1;
+		Recipe.EffectiveSettings = "{}";
+		Recipe.TargetID = "cpu-test-v1";
+		const auto InputFingerprint = ComputeAssetImportInputFingerprint(Recipe);
+		if (!InputFingerprint) return {};
+		Recipe.InputFingerprint = *InputFingerprint;
+
+		const std::string ResultBytes = "previously imported result";
+		const AssetContentFingerprint ResultFingerprint =
+			ComputeAssetContentFingerprint(std::as_bytes(std::span(ResultBytes.data(), ResultBytes.size())));
+		const auto FingerprintJson = [](const AssetContentFingerprint& Fingerprint)
+		{ return Json::object({ { "algorithm", Fingerprint.Algorithm }, { "digest", Fingerprint.DigestHex } }); };
+		const Json RecipeJson = Json::object({ { "sourceAsset", Recipe.SourceAsset.ToString() }, { "subresource", Recipe.SubresourceKey },
+			{ "importer", Recipe.ImporterID }, { "importerVersion", Recipe.ImporterVersion },
+			{ "outputSchemaVersion", Recipe.OutputSchemaVersion }, { "effectiveSettings", Recipe.EffectiveSettings },
+			{ "target", Recipe.TargetID }, { "inputs", Json::array() }, { "inputFingerprint", FingerprintJson(Recipe.InputFingerprint) } });
+		const Json Record = Json::object({ { "recipe", RecipeJson }, { "resultFingerprint", FingerprintJson(ResultFingerprint) },
+			{ "resultIdentity", Recipe.SubresourceKey }, { "artifactAvailability", "notPersisted" }, { "gpuResidency", "unknown" } });
+		return Json::object({ { "format", "PulseForgeImportResult" }, { "version", AssetImportProvenanceSerializer::CurrentVersion },
+								{ "records", Json::array({ Record }) } })
+				   .dump(2) +
+			   "\n";
+	}
+
+	class AssetEditBufferMoveFixture final
+	{
+	public:
+		AssetEditBufferMoveFixture(TestRunner& Tests, std::string_view ReferrerName, bool WithProvenance = false)
+		{
+			PF_CHECK(Tests, Project.Valid);
+			if (!Project.Valid) return;
+
+			const AssetID Referrer = Project.AddMesh(ReferrerName);
+			PF_CHECK(Tests, !Referrer.IsNil());
+			if (Referrer.IsNil()) return;
+
+			Source = Project.Root / "Assets/Models/Triangle.bin";
+			Destination = Project.Root / "Assets/Relocated/Triangle.bin";
+			SourceMetadata = AssetMetadataSerializer::GetSidecarPath(Source);
+			DestinationMetadata = AssetMetadataSerializer::GetSidecarPath(Destination);
+			SourceProvenance = AssetImportProvenanceSerializer::GetSidecarPath(Source);
+			DestinationProvenance = AssetImportProvenanceSerializer::GetSidecarPath(Destination);
+
+			const auto Metadata = AssetMetadataSerializer::LoadFromFile(SourceMetadata);
+			PF_CHECK(Tests, Metadata.has_value());
+			if (!Metadata) return;
+			Buffer = Metadata->ID;
+
+			if (WithProvenance)
+			{
+				const std::string Receipt = MakeValidImportReceipt(Buffer);
+				PF_CHECK(Tests, !Receipt.empty() && AssetImportProvenanceSerializer::DeserializeAll(Receipt).has_value());
+				if (Receipt.empty() || !AssetImportProvenanceSerializer::DeserializeAll(Receipt)) return;
+				const bool ReceiptWritten = AssetEditFixture::WriteText(SourceProvenance, Receipt);
+				PF_CHECK(Tests, ReceiptWritten);
+				if (!ReceiptWritten) return;
+			}
+
+			const auto RegistryResult = Project.BuildRegistry(Registry);
+			PF_CHECK(Tests, RegistryResult.has_value());
+			if (!RegistryResult) return;
+			const auto Snapshot = Project.BuildSnapshot(21);
+			PF_CHECK(Tests, Snapshot.has_value());
+			if (!Snapshot) return;
+			const auto BufferRecord = FindRecordByPath(Registry, "Assets/Models/Triangle.bin");
+			PF_CHECK(Tests, BufferRecord.has_value() && BufferRecord->ID == Buffer);
+			if (!BufferRecord) return;
+
+			auto MovePlan = AssetEditTransaction::PlanMove(**Snapshot, Buffer, "Assets/Relocated/Triangle.bin");
+			PF_CHECK(Tests, MovePlan.has_value());
+			if (!MovePlan) return;
+			Plan = std::move(*MovePlan);
+			TransactionDirectory = Project.Root / (".pf-asset-edit-" + Plan->GetOperationID().ToString());
+			Ready = true;
+		}
+
+		AssetEditFixture Project;
+		AssetRegistry Registry;
+		AssetID Buffer;
+		AssetEditTransaction::PlanPtr Plan;
+		std::filesystem::path Source;
+		std::filesystem::path Destination;
+		std::filesystem::path SourceMetadata;
+		std::filesystem::path DestinationMetadata;
+		std::filesystem::path SourceProvenance;
+		std::filesystem::path DestinationProvenance;
+		std::filesystem::path TransactionDirectory;
+		bool Ready = false;
+	};
+
+	void CheckMoveFailureRecoveryState(TestRunner& Tests, const AssetEditBufferMoveFixture& Fixture,
+		const std::expected<AssetEditTransactionResult, AssetEditTransactionError>& Applied)
+	{
+		PF_CHECK(Tests, !Applied && Applied.error().Code == AssetEditTransactionErrorCode::RecoveryRequired);
+		PF_CHECK(Tests, std::filesystem::is_directory(Fixture.TransactionDirectory));
+		const auto Registered = Fixture.Registry.Find(Fixture.Buffer);
+		PF_CHECK(Tests, Registered && Registered->ProjectRelativePath == "Assets/Models/Triangle.bin");
 	}
 
 	void TestAssetEditPlanIsReadOnly(TestRunner& Tests)
@@ -553,6 +728,180 @@ namespace
 		PF_CHECK(Tests, !BlockedPlan && BlockedPlan.error().Code == AssetEditTransactionErrorCode::RecoveryRequired);
 	}
 
+	void TestMoveRollbackPreservesChangedSourceBytes(TestRunner& Tests)
+	{
+		AssetEditBufferMoveFixture Fixture(Tests, "ChangedSourceRollback");
+		PF_CHECK(Tests, Fixture.Ready);
+		if (!Fixture.Ready) return;
+
+		const auto MetadataBefore = AssetEditFixture::ReadText(Fixture.SourceMetadata);
+		PF_CHECK(Tests, MetadataBefore.has_value());
+		if (!MetadataBefore) return;
+		constexpr std::string_view IndependentSource = "independent source edit after move";
+		bool Injected = false;
+		AssetEditTransactionOptions Options;
+		Options.StageHook = [&](AssetEditTransactionStage Stage, const std::filesystem::path&) -> std::expected<void, std::string>
+		{
+			if (Stage != AssetEditTransactionStage::AfterAssetMove) return {};
+			Injected = AssetEditFixture::WriteText(Fixture.Destination, IndependentSource);
+			if (!Injected) return std::unexpected("could not change the moved source");
+			return std::unexpected("force rollback after the independent source edit");
+		};
+
+		const auto Applied =
+			AssetEditTransaction::ApplyMove(*Fixture.Plan, Fixture.Project.Root, Fixture.Project.ProjectID, 21, Fixture.Registry, Options);
+		CheckMoveFailureRecoveryState(Tests, Fixture, Applied);
+		PF_CHECK(Tests, Injected);
+		PF_CHECK(Tests, AssetEditFixture::ReadText(Fixture.Destination) == std::optional<std::string>(IndependentSource));
+		PF_CHECK(Tests, AssetEditFixture::ReadText(Fixture.DestinationMetadata) == MetadataBefore);
+		const auto DestinationMetadata = AssetMetadataSerializer::LoadFromFile(Fixture.DestinationMetadata);
+		PF_CHECK(Tests, DestinationMetadata && DestinationMetadata->ID == Fixture.Buffer);
+		PF_CHECK(Tests, !std::filesystem::exists(Fixture.Source));
+	}
+
+	void TestMoveRollbackPreservesChangedMetadata(TestRunner& Tests)
+	{
+		AssetEditBufferMoveFixture Fixture(Tests, "ChangedMetadataRollback");
+		PF_CHECK(Tests, Fixture.Ready);
+		if (!Fixture.Ready) return;
+
+		const auto MetadataBefore = AssetEditFixture::ReadText(Fixture.SourceMetadata);
+		const auto SourceBefore = AssetEditFixture::ReadText(Fixture.Source);
+		PF_CHECK(Tests, MetadataBefore.has_value() && SourceBefore.has_value());
+		if (!MetadataBefore || !SourceBefore) return;
+		const std::string IndependentMetadata = *MetadataBefore + " \n";
+		bool Injected = false;
+		AssetEditTransactionOptions Options;
+		Options.StageHook = [&](AssetEditTransactionStage Stage, const std::filesystem::path&) -> std::expected<void, std::string>
+		{
+			if (Stage != AssetEditTransactionStage::AfterAssetMove) return {};
+			Injected = AssetEditFixture::WriteText(Fixture.DestinationMetadata, IndependentMetadata);
+			if (!Injected) return std::unexpected("could not change the moved metadata");
+			return std::unexpected("force rollback after the independent metadata edit");
+		};
+
+		const auto Applied =
+			AssetEditTransaction::ApplyMove(*Fixture.Plan, Fixture.Project.Root, Fixture.Project.ProjectID, 21, Fixture.Registry, Options);
+		CheckMoveFailureRecoveryState(Tests, Fixture, Applied);
+		PF_CHECK(Tests, Injected);
+		PF_CHECK(Tests, AssetEditFixture::ReadText(Fixture.DestinationMetadata) == std::optional<std::string>(IndependentMetadata));
+		const auto DestinationMetadata = AssetMetadataSerializer::LoadFromFile(Fixture.DestinationMetadata);
+		PF_CHECK(Tests, DestinationMetadata && DestinationMetadata->ID == Fixture.Buffer);
+		PF_CHECK(Tests, AssetEditFixture::ReadText(Fixture.Destination) == SourceBefore);
+		PF_CHECK(Tests, !std::filesystem::exists(Fixture.SourceMetadata));
+	}
+
+	void TestMoveRollbackPreservesChangedProvenanceReceipt(TestRunner& Tests)
+	{
+		AssetEditBufferMoveFixture Fixture(Tests, "ChangedProvenanceRollback", true);
+		PF_CHECK(Tests, Fixture.Ready);
+		if (!Fixture.Ready) return;
+
+		const auto ReceiptBefore = AssetEditFixture::ReadText(Fixture.SourceProvenance);
+		const auto SourceBefore = AssetEditFixture::ReadText(Fixture.Source);
+		PF_CHECK(Tests, ReceiptBefore.has_value() && SourceBefore.has_value());
+		if (!ReceiptBefore || !SourceBefore) return;
+		const std::string IndependentReceipt = *ReceiptBefore + " \n";
+		bool Injected = false;
+		AssetEditTransactionOptions Options;
+		Options.StageHook = [&](AssetEditTransactionStage Stage, const std::filesystem::path&) -> std::expected<void, std::string>
+		{
+			if (Stage != AssetEditTransactionStage::AfterAssetMove) return {};
+			Injected = AssetEditFixture::WriteText(Fixture.DestinationProvenance, IndependentReceipt);
+			if (!Injected) return std::unexpected("could not change the moved provenance receipt");
+			return std::unexpected("force rollback after the independent receipt edit");
+		};
+
+		const auto Applied =
+			AssetEditTransaction::ApplyMove(*Fixture.Plan, Fixture.Project.Root, Fixture.Project.ProjectID, 21, Fixture.Registry, Options);
+		CheckMoveFailureRecoveryState(Tests, Fixture, Applied);
+		PF_CHECK(Tests, Injected);
+		PF_CHECK(Tests, AssetEditFixture::ReadText(Fixture.DestinationProvenance) == std::optional<std::string>(IndependentReceipt));
+		PF_CHECK(Tests, AssetImportProvenanceSerializer::LoadAll(Fixture.DestinationProvenance).has_value());
+		PF_CHECK(Tests, AssetEditFixture::ReadText(Fixture.Destination) == SourceBefore);
+		PF_CHECK(Tests, !std::filesystem::exists(Fixture.SourceProvenance));
+	}
+
+	void TestMoveRollbackPreservesOccupiedOriginalPath(TestRunner& Tests)
+	{
+		AssetEditBufferMoveFixture Fixture(Tests, "OccupiedRestorePathRollback");
+		PF_CHECK(Tests, Fixture.Ready);
+		if (!Fixture.Ready) return;
+
+		const auto SourceBefore = AssetEditFixture::ReadText(Fixture.Source);
+		const auto MetadataBefore = AssetEditFixture::ReadText(Fixture.SourceMetadata);
+		PF_CHECK(Tests, SourceBefore.has_value() && MetadataBefore.has_value());
+		if (!SourceBefore || !MetadataBefore) return;
+		constexpr std::string_view IndependentOccupant = "independent file at the original restore path";
+		bool Injected = false;
+		AssetEditTransactionOptions Options;
+		Options.StageHook = [&](AssetEditTransactionStage Stage, const std::filesystem::path&) -> std::expected<void, std::string>
+		{
+			if (Stage != AssetEditTransactionStage::AfterAssetMove) return {};
+			Injected = AssetEditFixture::WriteText(Fixture.Source, IndependentOccupant);
+			if (!Injected) return std::unexpected("could not occupy the original restore path");
+			return std::unexpected("force rollback after the original path was occupied");
+		};
+
+		const auto Applied =
+			AssetEditTransaction::ApplyMove(*Fixture.Plan, Fixture.Project.Root, Fixture.Project.ProjectID, 21, Fixture.Registry, Options);
+		CheckMoveFailureRecoveryState(Tests, Fixture, Applied);
+		PF_CHECK(Tests, Injected);
+		PF_CHECK(Tests, AssetEditFixture::ReadText(Fixture.Source) == std::optional<std::string>(IndependentOccupant));
+		PF_CHECK(Tests, AssetEditFixture::ReadText(Fixture.Destination) == SourceBefore);
+		PF_CHECK(Tests, AssetEditFixture::ReadText(Fixture.DestinationMetadata) == MetadataBefore);
+	}
+
+	void TestReferenceRollbackPreservesChangedBackup(TestRunner& Tests)
+	{
+		AssetEditBufferMoveFixture Fixture(Tests, "ChangedRewriteBackupRollback");
+		PF_CHECK(Tests, Fixture.Ready);
+		if (!Fixture.Ready) return;
+		PF_CHECK(Tests, !Fixture.Plan->GetRewrittenSources().empty());
+		if (Fixture.Plan->GetRewrittenSources().empty()) return;
+
+		const auto& RewrittenSources = Fixture.Plan->GetRewrittenSources();
+		const std::filesystem::path Referrer = Fixture.Project.Root / RewrittenSources.front().ProjectRelativePath;
+		const auto ReferrerBefore = AssetEditFixture::ReadText(Referrer);
+		PF_CHECK(Tests, ReferrerBefore.has_value());
+		if (!ReferrerBefore) return;
+
+		std::optional<std::filesystem::path> ChangedBackupPath;
+		std::optional<std::string> IndependentBackup;
+		std::optional<std::string> RewrittenReferrer;
+		bool Injected = false;
+		AssetEditTransactionOptions Options;
+		Options.StageHook = [&](AssetEditTransactionStage Stage, const std::filesystem::path& Location) -> std::expected<void, std::string>
+		{
+			if (Stage != AssetEditTransactionStage::AfterReferenceWrite) return {};
+			const auto Rewrite = std::find_if(RewrittenSources.begin(), RewrittenSources.end(),
+				[&](const AssetEditRewrittenSource& Entry) { return Entry.ProjectRelativePath == Location; });
+			if (Rewrite == RewrittenSources.end()) return std::unexpected("hook location was not a planned referrer");
+			const size_t Index = static_cast<size_t>(std::distance(RewrittenSources.begin(), Rewrite));
+			const std::filesystem::path Backup = Fixture.TransactionDirectory / ("rewrite-" + std::to_string(Index) + ".backup");
+			auto BackupBefore = AssetEditFixture::ReadText(Backup);
+			RewrittenReferrer = AssetEditFixture::ReadText(Fixture.Project.Root / Location);
+			if (!BackupBefore || !RewrittenReferrer)
+				return std::unexpected("could not inspect the published referrer and its rollback backup");
+			IndependentBackup = *BackupBefore + " \n";
+			if (!AssetEditFixture::WriteText(Backup, *IndependentBackup))
+				return std::unexpected("could not change the rewrite rollback backup");
+			ChangedBackupPath = Backup;
+			Injected = true;
+			return std::unexpected("force rollback after changing the rewrite backup");
+		};
+
+		const auto Applied =
+			AssetEditTransaction::ApplyMove(*Fixture.Plan, Fixture.Project.Root, Fixture.Project.ProjectID, 21, Fixture.Registry, Options);
+		CheckMoveFailureRecoveryState(Tests, Fixture, Applied);
+		PF_CHECK(Tests, Injected && ChangedBackupPath.has_value() && IndependentBackup.has_value() && RewrittenReferrer.has_value());
+		PF_CHECK(Tests, RewrittenReferrer && *RewrittenReferrer != *ReferrerBefore);
+		if (ChangedBackupPath && IndependentBackup) PF_CHECK(Tests, AssetEditFixture::ReadText(*ChangedBackupPath) == IndependentBackup);
+		PF_CHECK(Tests, AssetEditFixture::ReadText(Referrer) == RewrittenReferrer);
+		PF_CHECK(Tests, AssetEditFixture::ReadText(Fixture.Source).has_value());
+		PF_CHECK(Tests, !std::filesystem::exists(Fixture.Destination));
+	}
+
 	void TestSessionSupersessionAndCaseOnlyMove(TestRunner& Tests)
 	{
 		{
@@ -899,6 +1248,285 @@ namespace
 		PF_CHECK(Tests, std::filesystem::exists(RecoveryDirectory));
 	}
 
+	void TestRecoveryRejectsMalformedForeignAndLinkedRecords(TestRunner& Tests)
+	{
+		const auto VerifyRejectedRecord = [&](std::string_view Contents, std::string_view Suffix)
+		{
+			AssetEditFixture Fixture;
+			PF_CHECK(Tests, Fixture.Valid);
+			if (!Fixture.Valid) return;
+			const auto OperationID = UUID::Generate();
+			PF_CHECK(Tests, OperationID.has_value());
+			if (!OperationID) return;
+			const std::filesystem::path Directory = Fixture.Root / (".pf-asset-edit-" + OperationID->ToString());
+			std::error_code Error;
+			std::filesystem::create_directory(Directory, Error);
+			PF_CHECK(Tests, !Error);
+			if (Error) return;
+			const std::filesystem::path JournalPath = Directory / "RecoveryRecord.json";
+			std::ofstream Journal(JournalPath, std::ios::binary | std::ios::trunc);
+			if (Suffix == "oversized")
+			{
+				Journal.seekp(static_cast<std::streamoff>(Assets::Detail::AssetEditRecoveryJournal::MaximumDocumentBytes));
+				Journal.put('x');
+			}
+			else Journal.write(Contents.data(), static_cast<std::streamsize>(Contents.size()));
+			Journal.close();
+			PF_CHECK(Tests, static_cast<bool>(Journal));
+			const std::string Sentinel = "preserve malformed recovery data";
+			PF_CHECK(Tests, AssetEditFixture::WriteText(Directory / "sentinel.txt", Sentinel));
+			const auto Recovered = AssetEditTransaction::RecoverInterruptedTransactions(Fixture.Root, Fixture.ProjectID);
+			PF_CHECK(Tests, !Recovered && Recovered.error().Code == AssetEditTransactionErrorCode::RecoveryRequired);
+			PF_CHECK(Tests, !Recovered || Recovered.error().RecoveryPath == Directory);
+			PF_CHECK(Tests, std::filesystem::exists(JournalPath));
+			PF_CHECK(Tests, AssetEditFixture::ReadText(Directory / "sentinel.txt") == Sentinel);
+		};
+
+		VerifyRejectedRecord("{", "truncated");
+		VerifyRejectedRecord("not a journal", "malformed");
+		VerifyRejectedRecord({}, "oversized");
+
+		{
+			AssetEditFixture Fixture;
+			PF_CHECK(Tests, Fixture.Valid);
+			if (!Fixture.Valid) return;
+			const auto OperationID = UUID::Generate();
+			const auto ForeignProject = UUID::Generate();
+			PF_CHECK(Tests, OperationID.has_value() && ForeignProject.has_value());
+			if (!OperationID || !ForeignProject) return;
+			const std::filesystem::path Directory = Fixture.Root / (".pf-asset-edit-" + OperationID->ToString());
+			std::error_code Error;
+			std::filesystem::create_directory(Directory, Error);
+			PF_CHECK(Tests, !Error);
+			if (Error) return;
+			const std::u8string RootUtf8 = std::filesystem::absolute(Fixture.Root).lexically_normal().generic_u8string();
+			Assets::Detail::AssetEditRecoveryJournalRecord Record;
+			Record.OperationID = *OperationID;
+			Record.ProjectID = *ForeignProject;
+			Record.ProjectRootUtf8.assign(reinterpret_cast<const char*>(RootUtf8.data()), RootUtf8.size());
+			const auto JournalPath = Directory / "RecoveryRecord.json";
+			PF_CHECK(Tests, Assets::Detail::AssetEditRecoveryJournal::WriteAtomic(JournalPath, Record).has_value());
+			const auto Recovered = AssetEditTransaction::RecoverInterruptedTransactions(Fixture.Root, Fixture.ProjectID);
+			PF_CHECK(Tests, !Recovered && Recovered.error().Code == AssetEditTransactionErrorCode::RecoveryRequired);
+			PF_CHECK(Tests, std::filesystem::exists(JournalPath) && std::filesystem::exists(Directory));
+		}
+
+		{
+			AssetEditFixture Fixture;
+			PF_CHECK(Tests, Fixture.Valid);
+			if (!Fixture.Valid) return;
+			const auto OperationID = UUID::Generate();
+			PF_CHECK(Tests, OperationID.has_value());
+			if (!OperationID) return;
+			const std::filesystem::path Target = Fixture.Root / "unrelated-staging-target";
+			const std::filesystem::path Link = Fixture.Root / (".pf-asset-edit-" + OperationID->ToString());
+			std::error_code Error;
+			std::filesystem::create_directory(Target, Error);
+			PF_CHECK(Tests, !Error);
+			if (Error) return;
+			PF_CHECK(Tests, AssetEditFixture::WriteText(Target / "sentinel.txt", "untouched"));
+			std::filesystem::create_directory_symlink(Target, Link, Error);
+			if (Error)
+			{
+				std::cerr << "SKIP recovery symlink rejection: directory symlink creation is unavailable: " << Error.message() << '\n';
+				return;
+			}
+			const auto Recovered = AssetEditTransaction::RecoverInterruptedTransactions(Fixture.Root, Fixture.ProjectID);
+			PF_CHECK(Tests, !Recovered && Recovered.error().Code == AssetEditTransactionErrorCode::RecoveryRequired);
+			PF_CHECK(Tests, std::filesystem::is_symlink(Link));
+			PF_CHECK(Tests, AssetEditFixture::ReadText(Target / "sentinel.txt") == "untouched");
+		}
+	}
+
+	void TestRecoveryAcrossFreshProcessBoundary(TestRunner& Tests)
+	{
+		AssetEditFixture Fixture;
+		PF_CHECK(Tests, Fixture.Valid);
+		if (!Fixture.Valid) return;
+		const AssetID Mesh = Fixture.AddMesh("FreshProcessRecovery");
+		PF_CHECK(Tests, !Mesh.IsNil());
+		if (Mesh.IsNil()) return;
+		AssetRegistry Registry;
+		const auto Built = Fixture.BuildRegistry(Registry);
+		PF_CHECK(Tests, Built.has_value());
+		if (!Built) return;
+		const auto SourceRecord = Registry.Find(Mesh);
+		PF_CHECK(Tests, SourceRecord.has_value());
+		if (!SourceRecord) return;
+		const std::filesystem::path Source = Fixture.Root / SourceRecord->ProjectRelativePath;
+		const std::filesystem::path Destination = Fixture.Root / "Assets/Other/FreshProcessRecovery.gltf";
+		const std::vector<std::string> CrashArguments{ "--asset-edit-crash-child", PathToUtf8(Fixture.Root), Fixture.ProjectID.ToString(),
+			"move", "asset", Mesh.ToString() };
+		const auto Crashed = RunAssetEditChildProcess(CrashArguments);
+		PF_CHECK(Tests, Crashed == std::optional<int>(86));
+		PF_CHECK(Tests, Crashed && *Crashed == 86);
+		PF_CHECK(Tests, !std::filesystem::exists(Source) && std::filesystem::exists(Destination));
+		std::error_code Error;
+		bool FoundTransaction = false;
+		for (std::filesystem::directory_iterator It(Fixture.Root, Error), End; !Error && It != End; It.increment(Error))
+			if (It->path().filename().string().starts_with(".pf-asset-edit-")) FoundTransaction = true;
+		PF_CHECK(Tests, !Error && FoundTransaction);
+
+		const std::vector<std::string> RecoveryArguments{ "--asset-edit-recover-child", PathToUtf8(Fixture.Root),
+			Fixture.ProjectID.ToString(), "Assets/Models/FreshProcessRecovery.gltf", Mesh.ToString(), Mesh.ToString() };
+		const auto Recovered = RunAssetEditChildProcess(RecoveryArguments);
+		PF_CHECK(Tests, Recovered == std::optional<int>(0));
+		PF_CHECK(Tests, Recovered && *Recovered == 0);
+		PF_CHECK(Tests, std::filesystem::exists(Source) && !std::filesystem::exists(Destination));
+		PF_CHECK(Tests, std::filesystem::exists(Fixture.Root / "Assets/Models/Triangle.bin"));
+		PF_CHECK(Tests, AssetEditFixture::ReadText(Source).has_value());
+		const auto RecoveredMetadata = AssetMetadataSerializer::LoadFromFile(AssetMetadataSerializer::GetSidecarPath(Source));
+		PF_CHECK(Tests, RecoveredMetadata && RecoveredMetadata->ID == Mesh);
+
+		AssetRegistry Reopened;
+		const auto ReopenedResult = Fixture.BuildRegistry(Reopened);
+		PF_CHECK(Tests, ReopenedResult.has_value());
+		const auto ReopenedRecord = Reopened.Find(Mesh);
+		PF_CHECK(Tests, ReopenedRecord && ReopenedRecord->ProjectRelativePath == SourceRecord->ProjectRelativePath);
+		const auto Imported = GltfMeshImporter::ImportStaticPrimitive(Mesh, Fixture.Root, Reopened);
+		PF_CHECK(Tests, Imported.has_value());
+
+		const auto RepeatedRecovery = RunAssetEditChildProcess({ "--asset-edit-recover-child", PathToUtf8(Fixture.Root),
+			Fixture.ProjectID.ToString(), "Assets/Models/FreshProcessRecovery.gltf", Mesh.ToString(), Mesh.ToString() });
+		PF_CHECK(Tests, RepeatedRecovery == std::optional<int>(0));
+		for (std::filesystem::directory_iterator It(Fixture.Root, Error), End; !Error && It != End; It.increment(Error))
+			PF_CHECK(Tests, !It->path().filename().string().starts_with(".pf-asset-edit-"));
+		PF_CHECK(Tests, !Error);
+	}
+
+	void RunFreshProcessRecoveryScenario(TestRunner& Tests, AssetEditFixture& Fixture, std::string_view Operation,
+		std::string_view FailureStage, const AssetID& PrimaryID, const AssetID& RecordID, const AssetID& ImportID,
+		const std::filesystem::path& ExpectedPath, std::optional<AssetID> SecondID = std::nullopt)
+	{
+		const std::vector<std::string> CrashArguments{ "--asset-edit-crash-child", PathToUtf8(Fixture.Root), Fixture.ProjectID.ToString(),
+			std::string(Operation), std::string(FailureStage), PrimaryID.ToString() };
+		std::vector<std::string> Arguments = CrashArguments;
+		if (SecondID) Arguments.push_back(SecondID->ToString());
+		const auto Crashed = RunAssetEditChildProcess(Arguments);
+		PF_CHECK(Tests, Crashed == std::optional<int>(86));
+		if (Crashed != std::optional<int>(86)) return;
+
+		const auto Recovered = RunAssetEditChildProcess({ "--asset-edit-recover-child", PathToUtf8(Fixture.Root),
+			Fixture.ProjectID.ToString(), PathToUtf8(ExpectedPath), RecordID.ToString(), ImportID.ToString() });
+		PF_CHECK(Tests, Recovered == std::optional<int>(0));
+		if (Recovered != std::optional<int>(0)) return;
+
+		AssetRegistry Registry;
+		PF_CHECK(Tests, Registry.Rebuild(Fixture.Root).has_value());
+		const auto Record = Registry.Find(RecordID);
+		PF_CHECK(Tests, Record && Record->ProjectRelativePath == ExpectedPath);
+		PF_CHECK(Tests, GltfMeshImporter::ImportStaticPrimitive(ImportID, Fixture.Root, Registry).has_value());
+		std::error_code Error;
+		for (std::filesystem::directory_iterator It(Fixture.Root, Error), End; !Error && It != End; It.increment(Error))
+			PF_CHECK(Tests, !It->path().filename().string().starts_with(".pf-asset-edit-"));
+		PF_CHECK(Tests, !Error);
+	}
+
+	void TestFreshProcessRecoveryAcrossOperationKindsAndStages(TestRunner& Tests)
+	{
+		const std::filesystem::path OriginalMeshPath = "Assets/Models/FreshProcessRecovery.gltf";
+		const std::filesystem::path MovedMeshPath = "Assets/Other/FreshProcessRecovery.gltf";
+		{
+			AssetEditFixture Fixture;
+			const AssetID Mesh = Fixture.AddMesh("FreshProcessRecovery");
+			PF_CHECK(Tests, Fixture.Valid && !Mesh.IsNil());
+			if (!Fixture.Valid || Mesh.IsNil()) return;
+			RunFreshProcessRecoveryScenario(Tests, Fixture, "move", "prepared", Mesh, Mesh, Mesh, OriginalMeshPath);
+		}
+		{
+			AssetEditFixture Fixture;
+			const AssetID Mesh = Fixture.AddMesh("FreshProcessRecovery");
+			PF_CHECK(Tests, Fixture.Valid && !Mesh.IsNil());
+			if (!Fixture.Valid || Mesh.IsNil()) return;
+			RunFreshProcessRecoveryScenario(Tests, Fixture, "move", "source", Mesh, Mesh, Mesh, OriginalMeshPath);
+		}
+		{
+			AssetEditFixture Fixture;
+			const AssetID Mesh = Fixture.AddMesh("FreshProcessRecovery");
+			PF_CHECK(Tests, Fixture.Valid && !Mesh.IsNil());
+			if (!Fixture.Valid || Mesh.IsNil()) return;
+			RunFreshProcessRecoveryScenario(Tests, Fixture, "move", "metadata", Mesh, Mesh, Mesh, OriginalMeshPath);
+		}
+		{
+			AssetEditFixture Fixture;
+			const AssetID Mesh = Fixture.AddMesh("FreshProcessRecovery");
+			PF_CHECK(Tests, Fixture.Valid && !Mesh.IsNil());
+			if (!Fixture.Valid || Mesh.IsNil()) return;
+			const std::string Receipt = MakeValidImportReceipt(Mesh);
+			PF_CHECK(Tests,
+				!Receipt.empty() &&
+					AssetEditFixture::WriteText(AssetImportProvenanceSerializer::GetSidecarPath(Fixture.Root / OriginalMeshPath), Receipt));
+			RunFreshProcessRecoveryScenario(Tests, Fixture, "move", "provenance", Mesh, Mesh, Mesh, OriginalMeshPath);
+		}
+		{
+			AssetEditFixture Fixture;
+			const AssetID Mesh = Fixture.AddMesh("FreshProcessRecovery");
+			PF_CHECK(Tests, Fixture.Valid && !Mesh.IsNil());
+			if (!Fixture.Valid || Mesh.IsNil()) return;
+			RunFreshProcessRecoveryScenario(Tests, Fixture, "move", "rewrite", Mesh, Mesh, Mesh, OriginalMeshPath);
+		}
+		{
+			AssetEditFixture Fixture;
+			const AssetID Mesh = Fixture.AddMesh("FreshProcessRecovery");
+			PF_CHECK(Tests, Fixture.Valid && !Mesh.IsNil());
+			if (!Fixture.Valid || Mesh.IsNil()) return;
+			RunFreshProcessRecoveryScenario(Tests, Fixture, "move", "registry", Mesh, Mesh, Mesh, OriginalMeshPath);
+		}
+		{
+			AssetEditFixture Fixture;
+			const AssetID Mesh = Fixture.AddMesh("FreshProcessRecovery");
+			PF_CHECK(Tests, Fixture.Valid && !Mesh.IsNil());
+			if (!Fixture.Valid || Mesh.IsNil()) return;
+			RunFreshProcessRecoveryScenario(Tests, Fixture, "move", "commit", Mesh, Mesh, Mesh, MovedMeshPath);
+		}
+		{
+			AssetEditFixture Fixture;
+			const AssetID Mesh = Fixture.AddMesh("FreshProcessRecovery");
+			const auto BufferMetadata =
+				AssetMetadataSerializer::LoadFromFile(AssetMetadataSerializer::GetSidecarPath(Fixture.Root / "Assets/Models/Triangle.bin"));
+			PF_CHECK(Tests, Fixture.Valid && !Mesh.IsNil() && BufferMetadata.has_value());
+			if (!Fixture.Valid || Mesh.IsNil() || !BufferMetadata) return;
+			RunFreshProcessRecoveryScenario(
+				Tests, Fixture, "move", "reference", BufferMetadata->ID, BufferMetadata->ID, Mesh, "Assets/Models/Triangle.bin");
+		}
+		{
+			AssetEditFixture Fixture;
+			const AssetID First = Fixture.AddMesh("BatchFirst");
+			const AssetID Second = Fixture.AddMesh("BatchSecond");
+			PF_CHECK(Tests, Fixture.Valid && !First.IsNil() && !Second.IsNil());
+			if (!Fixture.Valid || First.IsNil() || Second.IsNil()) return;
+			RunFreshProcessRecoveryScenario(Tests, Fixture, "batch", "asset", First, First, First, "Assets/Models/BatchFirst.gltf", Second);
+			AssetRegistry Registry;
+			PF_CHECK(Tests, Registry.Rebuild(Fixture.Root).has_value());
+			const auto SecondRecord = Registry.Find(Second);
+			PF_CHECK(Tests, SecondRecord && SecondRecord->ProjectRelativePath == "Assets/Models/BatchSecond.gltf");
+			PF_CHECK(Tests, GltfMeshImporter::ImportStaticPrimitive(Second, Fixture.Root, Registry).has_value());
+		}
+		{
+			AssetEditFixture Fixture;
+			const AssetID Mesh = Fixture.AddMesh("FreshProcessRecovery");
+			PF_CHECK(Tests, Fixture.Valid && !Mesh.IsNil());
+			if (!Fixture.Valid || Mesh.IsNil()) return;
+			RunFreshProcessRecoveryScenario(Tests, Fixture, "folder-move", "asset", Mesh, Mesh, Mesh, OriginalMeshPath);
+		}
+		{
+			AssetEditFixture Fixture;
+			const AssetID Mesh = Fixture.AddMesh("FreshProcessRecovery");
+			PF_CHECK(Tests, Fixture.Valid && !Mesh.IsNil());
+			if (!Fixture.Valid || Mesh.IsNil()) return;
+			RunFreshProcessRecoveryScenario(Tests, Fixture, "asset-duplicate", "asset", Mesh, Mesh, Mesh, OriginalMeshPath);
+			PF_CHECK(Tests, !std::filesystem::exists(Fixture.Root / "Assets/Other/CrashCopy.gltf"));
+		}
+		{
+			AssetEditFixture Fixture;
+			const AssetID Mesh = Fixture.AddMesh("FreshProcessRecovery");
+			PF_CHECK(Tests, Fixture.Valid && !Mesh.IsNil());
+			if (!Fixture.Valid || Mesh.IsNil()) return;
+			RunFreshProcessRecoveryScenario(Tests, Fixture, "folder-duplicate", "asset", Mesh, Mesh, Mesh, OriginalMeshPath);
+			PF_CHECK(Tests, !std::filesystem::exists(Fixture.Root / "Assets/Relocated/ModelsCopy"));
+		}
+	}
+
 	void AppendUInt32LE(std::vector<std::byte>& Bytes, uint32_t Value)
 	{
 		for (size_t Index = 0; Index < sizeof(Value); ++Index)
@@ -1044,6 +1672,11 @@ void RunAssetEditTransactionTests(TestRunner& Tests)
 	TestAssetEditRollbackAtMutationStages(Tests);
 	TestDestinationRaceNeverOverwrites(Tests);
 	TestIncompleteRollbackRetainsRecoveryMaterial(Tests);
+	TestMoveRollbackPreservesChangedSourceBytes(Tests);
+	TestMoveRollbackPreservesChangedMetadata(Tests);
+	TestMoveRollbackPreservesChangedProvenanceReceipt(Tests);
+	TestMoveRollbackPreservesOccupiedOriginalPath(Tests);
+	TestReferenceRollbackPreservesChangedBackup(Tests);
 	TestSessionSupersessionAndCaseOnlyMove(Tests);
 	TestFolderMoveRewritesBothDependencyDirections(Tests);
 	TestFolderMoveRollbackKeepsOriginalGraph(Tests);
@@ -1051,6 +1684,113 @@ void RunAssetEditTransactionTests(TestRunner& Tests)
 	TestAssetDuplicateRebasesExternalGltfBuffers(Tests);
 	TestAssetDuplicateRollsBackBeforeRegistryPublication(Tests);
 	TestInterruptedTransactionBlocksNewPlans(Tests);
+	TestRecoveryRejectsMalformedForeignAndLinkedRecords(Tests);
+	TestRecoveryAcrossFreshProcessBoundary(Tests);
+	TestFreshProcessRecoveryAcrossOperationKindsAndStages(Tests);
 	TestGltfRelocationEncodingAndRepeatedUris(Tests);
 	TestGlbRelocationPreservesBinaryAndUnknownChunks(Tests);
+}
+
+void SetAssetEditTestExecutablePath(const std::filesystem::path& Executable)
+{
+	g_AssetEditTestExecutable = std::filesystem::absolute(Executable).lexically_normal();
+}
+
+int RunAssetEditTransactionChildMode(int ArgumentCount, char** Arguments)
+{
+	if (ArgumentCount < 2) return -1;
+	const std::string_view Mode(Arguments[1]);
+	if (Mode != "--asset-edit-crash-child" && Mode != "--asset-edit-recover-child") return -1;
+	if (ArgumentCount != 7 && ArgumentCount != 8) return 90;
+
+	using namespace PulseForge;
+	const std::filesystem::path Root = std::filesystem::u8path(Arguments[2]);
+	const auto ProjectID = UUID::Parse(Arguments[3]);
+	if (!ProjectID) return 91;
+
+	if (Mode == "--asset-edit-crash-child")
+	{
+		const std::string_view Operation(Arguments[4]);
+		const std::string_view FailureStage(Arguments[5]);
+		const auto PrimaryID = AssetID::Parse(Arguments[6]);
+		if (!PrimaryID) return 91;
+		AssetRegistry Registry;
+		if (!Registry.Rebuild(Root)) return 92;
+		const auto Snapshot = AssetDependencyCatalogBuilder::Build(Root, *ProjectID, 1);
+		if (!Snapshot) return 93;
+		AssetEditTransaction::PlanPtr Plan;
+		if (Operation == "move")
+		{
+			const auto Record = Registry.Find(*PrimaryID);
+			if (!Record) return 94;
+			const std::filesystem::path Destination = Record->ProjectRelativePath.extension() == ".bin"
+														  ? std::filesystem::path("Assets/Relocated/Triangle.bin")
+														  : std::filesystem::path("Assets/Other/FreshProcessRecovery.gltf");
+			auto Planned = AssetEditTransaction::PlanMove(**Snapshot, *PrimaryID, Destination);
+			if (!Planned) return 94;
+			Plan = *Planned;
+		}
+		else if (Operation == "batch")
+		{
+			if (ArgumentCount != 8) return 94;
+			const auto SecondID = AssetID::Parse(Arguments[7]);
+			if (!SecondID) return 94;
+			auto Planned = AssetEditTransaction::PlanMoveAssets(**Snapshot, { *PrimaryID, *SecondID }, "Assets/Other");
+			if (!Planned) return 94;
+			Plan = *Planned;
+		}
+		else if (Operation == "folder-move")
+		{
+			auto Planned = AssetEditTransaction::PlanMoveFolder(**Snapshot, "Assets/Models", "Assets/Relocated/Models");
+			if (!Planned) return 94;
+			Plan = *Planned;
+		}
+		else if (Operation == "asset-duplicate")
+		{
+			auto Planned = AssetEditTransaction::PlanDuplicateAsset(**Snapshot, *PrimaryID, "Assets/Other/CrashCopy.gltf");
+			if (!Planned) return 94;
+			Plan = *Planned;
+		}
+		else if (Operation == "folder-duplicate")
+		{
+			auto Planned = AssetEditTransaction::PlanDuplicateFolder(**Snapshot, "Assets/Models", "Assets/Relocated/ModelsCopy");
+			if (!Planned) return 94;
+			Plan = *Planned;
+		}
+		else return 94;
+
+		std::optional<AssetEditTransactionStage> CrashAt;
+		if (FailureStage == "prepared") CrashAt = AssetEditTransactionStage::AfterRecoveryJournalPrepared;
+		else if (FailureStage == "reference") CrashAt = AssetEditTransactionStage::AfterReferenceWrite;
+		else if (FailureStage == "source") CrashAt = AssetEditTransactionStage::AfterSourceMove;
+		else if (FailureStage == "metadata") CrashAt = AssetEditTransactionStage::AfterMetadataMove;
+		else if (FailureStage == "provenance") CrashAt = AssetEditTransactionStage::AfterProvenanceMove;
+		else if (FailureStage == "rewrite") CrashAt = AssetEditTransactionStage::AfterMovedSourceRewrite;
+		else if (FailureStage == "asset") CrashAt = AssetEditTransactionStage::AfterAssetMove;
+		else if (FailureStage == "registry") CrashAt = AssetEditTransactionStage::BeforeRegistryPublication;
+		else if (FailureStage == "commit") CrashAt = AssetEditTransactionStage::AfterCommitMarker;
+		if (!CrashAt) return 95;
+		if (!Plan) return 94;
+		AssetEditTransactionOptions Options;
+		Options.StageHook = [CrashAt](AssetEditTransactionStage Stage, const std::filesystem::path&) -> std::expected<void, std::string>
+		{
+			if (Stage == *CrashAt) std::_Exit(86);
+			return {};
+		};
+		const auto Applied = AssetEditTransaction::ApplyPlan(*Plan, Root, *ProjectID, 1, Registry, Options);
+		return Applied ? 95 : 96;
+	}
+
+	if (ArgumentCount != 7) return 90;
+	const std::filesystem::path ExpectedRelativePath = std::filesystem::u8path(Arguments[4]);
+	const auto RecordID = AssetID::Parse(Arguments[5]);
+	const auto ImportID = AssetID::Parse(Arguments[6]);
+	if (!RecordID || !ImportID) return 91;
+	const auto Recovered = AssetEditTransaction::RecoverInterruptedTransactions(Root, *ProjectID);
+	if (!Recovered) return 97;
+	AssetRegistry Registry;
+	if (!Registry.Rebuild(Root)) return 98;
+	const auto Record = Registry.Find(*RecordID);
+	if (!Record || Record->ProjectRelativePath != ExpectedRelativePath) return 99;
+	return GltfMeshImporter::ImportStaticPrimitive(*ImportID, Root, Registry) ? 0 : 100;
 }

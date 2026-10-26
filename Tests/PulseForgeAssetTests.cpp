@@ -6,10 +6,15 @@ void RunAssetDependencyCatalogTests(TestRunner& Tests);
 void RunAssetDependencyCorrectionTests(TestRunner& Tests);
 void RunAssetDependencyPublicationTests(TestRunner& Tests);
 void RunAssetEditTransactionTests(TestRunner& Tests);
+void SetAssetEditTestExecutablePath(const std::filesystem::path& Executable);
+int RunAssetEditTransactionChildMode(int ArgumentCount, char** Arguments);
 
 int main(int ArgumentCount, char** Arguments)
 {
 	PulseForge::Log::Init();
+	const int ChildResult = RunAssetEditTransactionChildMode(ArgumentCount, Arguments);
+	if (ChildResult >= 0) return ChildResult;
+	if (ArgumentCount > 0) SetAssetEditTestExecutablePath(std::filesystem::u8path(Arguments[0]));
 	TestRunner Tests;
 	if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--dependency-catalog-only")
 	{

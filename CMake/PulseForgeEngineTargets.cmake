@@ -192,6 +192,7 @@ target_link_libraries(PulseForgeAssetImporters PUBLIC PulseForgeAssetCatalog Pul
 target_precompile_headers(PulseForgeAssetImporters PRIVATE "${PULSEFORGE_ENGINE_PCH}")
 add_library(PulseForgeAssetDependencyCatalog STATIC
 	PulseForge/Source/Private/Assets/AssetEditTransaction.cpp
+	PulseForge/Source/Private/Assets/AssetEditRecoveryJournal.cpp
 	PulseForge/Source/Private/Assets/AssetDependencyCatalog.cpp
 	PulseForge/Source/Private/Assets/AssetDependencyExtractor.cpp
 )

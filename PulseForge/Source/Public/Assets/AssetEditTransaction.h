@@ -101,6 +101,7 @@ namespace PulseForge
 		[[nodiscard]] const std::vector<AssetID>& GetMovedAssets() const noexcept { return m_MovedAssets; }
 		[[nodiscard]] const std::vector<std::pair<AssetID, AssetID>>& GetIdentityRemap() const noexcept { return m_IdentityRemap; }
 		[[nodiscard]] const std::vector<AssetEditPathMapping>& GetPathMappings() const noexcept { return m_PathMappings; }
+		[[nodiscard]] const std::vector<std::filesystem::path>& GetFolderEntries() const noexcept { return m_FolderEntries; }
 		[[nodiscard]] const std::vector<AssetDependencyInputReceipt>& GetCatalogReceipts() const noexcept { return m_CatalogReceipts; }
 		[[nodiscard]] const std::vector<AssetEditFileReceipt>& GetReceipts() const noexcept { return m_Receipts; }
 		[[nodiscard]] const std::vector<AssetEditGltfBufferReference>& GetAffectedReferences() const noexcept
@@ -150,9 +151,15 @@ namespace PulseForge
 		BeforeRevalidation,
 		AfterRevalidation,
 		BeforeFileMutation,
+		AfterRecoveryJournalPrepared,
 		AfterReferenceWrite,
+		AfterSourceMove,
+		AfterMetadataMove,
+		AfterProvenanceMove,
+		AfterMovedSourceRewrite,
 		AfterAssetMove,
-		BeforeRegistryPublication
+		BeforeRegistryPublication,
+		AfterCommitMarker
 	};
 
 	struct AssetEditTransactionOptions
@@ -167,6 +174,9 @@ namespace PulseForge
 		AssetEditProvenanceDisposition ProvenanceDisposition = AssetEditProvenanceDisposition::NoReceipt;
 		std::vector<AssetRecord> CreatedAssets;
 		std::vector<AssetRecord> MovedAssets;
+		// A transaction can be committed while owned staging cleanup remains recoverable.
+		std::optional<std::filesystem::path> RecoveryPath;
+		std::string PostCommitWarning;
 	};
 
 	class PULSEFORGE_API AssetEditTransaction final
@@ -207,5 +217,13 @@ namespace PulseForge
 		[[nodiscard]] static std::expected<AssetEditTransactionResult, AssetEditTransactionError> ApplyAssetDuplicate(
 			const AssetEditMovePlan& Plan, const std::filesystem::path& CurrentProjectRoot, const UUID& CurrentProjectID,
 			uint64_t CurrentCatalogGeneration, AssetRegistry& Registry, const AssetEditTransactionOptions& Options = {});
+		[[nodiscard]] static std::expected<AssetEditTransactionResult, AssetEditTransactionError> ApplyPlan(const AssetEditMovePlan& Plan,
+			const std::filesystem::path& CurrentProjectRoot, const UUID& CurrentProjectID, uint64_t CurrentCatalogGeneration,
+			AssetRegistry& Registry, const AssetEditTransactionOptions& Options = {});
+
+		// Run before registry construction while opening an authoring project. Recognized incomplete operations are
+		// reconciled and rolled back from their bounded journal; malformed, foreign, or externally changed state is retained.
+		[[nodiscard]] static std::expected<void, AssetEditTransactionError> RecoverInterruptedTransactions(
+			const std::filesystem::path& ProjectRoot, const UUID& ProjectID);
 	};
 } // namespace PulseForge

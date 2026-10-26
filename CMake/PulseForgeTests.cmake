@@ -285,6 +285,7 @@ if(BUILD_TESTING)
 			Tests/EditorPanelStateTests.cpp
 			Tests/EditorSceneStateTests.cpp
 			Tests/EditorDocumentManagerTests.cpp
+			Tests/EditorAssetEditSchedulingTests.cpp
 			Tests/EditorDocumentEditorRegistryTests.cpp
 			Tests/EditorDocumentWorkspaceTests.cpp
 			Tests/EditorAssetImportOperationTests.cpp
