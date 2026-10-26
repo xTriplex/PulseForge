@@ -113,6 +113,25 @@ if(BUILD_TESTING)
 	target_link_libraries(PulseForgeAssetDependencyConsumer PRIVATE PulseForgeAssetDependencyCatalog)
 	set_property(TARGET PulseForgeAssetDependencyConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 	add_test(NAME PulseForge.AssetDependencyConsumer COMMAND PulseForgeAssetDependencyConsumer)
+	add_executable(PulseForgeDerivedDataTests
+		Tests/PulseForgeDerivedDataTests.cpp
+		Tests/AssetPreparationServiceTests.cpp
+		Tests/AssetPreparationMetricsTests.cpp
+		Tests/DerivedDataArtifactStoreTests.cpp
+		Tests/DerivedAssetPreparationTests.cpp
+		Tests/DerivedDataG06Workload.cpp
+		Tests/EnvironmentLightingCacheTests.cpp
+		Tests/AssetUploadBudgetTests.cpp
+	)
+	target_include_directories(PulseForgeDerivedDataTests PRIVATE Tests PulseForge/Vendor/json/include)
+	target_link_libraries(PulseForgeDerivedDataTests PRIVATE
+		PulseForgeAssetPreparation PulseForgeDerivedData PulseForgeAssetCpuProducts PulseForgeSceneRenderer)
+	set_property(TARGET PulseForgeDerivedDataTests PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+	add_test(NAME PulseForge.DerivedData COMMAND PulseForgeDerivedDataTests)
+	add_executable(PulseForgeDerivedDataConsumer Tests/ModuleConsumers/DerivedDataConsumer.cpp)
+	target_link_libraries(PulseForgeDerivedDataConsumer PRIVATE PulseForgeAssetPreparation PulseForgeDerivedData PulseForgeAssetCpuProducts)
+	set_property(TARGET PulseForgeDerivedDataConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
+	add_test(NAME PulseForge.DerivedDataConsumer COMMAND PulseForgeDerivedDataConsumer)
 
 	add_executable(PulseForgeAssetImportTests
 		Tests/PulseForgeAssetImportTests.cpp
@@ -323,6 +342,8 @@ if(BUILD_TESTING)
 		PulseForgeAssetImportTests
 		PulseForgeAssetImporterConsumer
 		PulseForgeAssetDependencyConsumer
+		PulseForgeDerivedDataTests
+		PulseForgeDerivedDataConsumer
 		PulseForgeSceneRendererConsumer
 		PulseForgeAudioRuntimeTests
 		PulseForgeScriptingRuntimeTests

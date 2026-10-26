@@ -35,6 +35,11 @@ namespace PulseForge
 		[[nodiscard]] static std::expected<AssetDependencyExtraction, AssetDependencyCatalogError> Extract(
 			const std::filesystem::path& ProjectRoot, const UUID& ProjectID, const AssetRegistry& Registry);
 
+		// Inspects one managed source without building a whole-project graph. The returned read set is validated
+		// before return and is suitable for worker-side processing-recipe lookup.
+		[[nodiscard]] static std::expected<AssetDependencyExtraction, AssetDependencyCatalogError> ExtractAsset(
+			const std::filesystem::path& ProjectRoot, const AssetID& Asset, const AssetRegistry& Registry);
+
 		[[nodiscard]] static std::expected<void, AssetDependencyCatalogError> ValidateInputReceipts(
 			const std::filesystem::path& ProjectRoot,
 			std::span<const AssetDependencyInputReceipt> ReadSet);

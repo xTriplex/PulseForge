@@ -1,6 +1,7 @@
 #include "TestAssetSupport.h"
 
 #include "Assets/AssetDependencyCatalog.h"
+#include "Assets/AssetDependencyExtractor.h"
 #include "Assets/AssetTypes.h"
 
 #include <algorithm>
@@ -304,6 +305,23 @@ namespace
 		PF_CHECK(Tests, InitialGlbObservation->ResultState == AssetImportResultState::NoSuccessfulResultRecorded);
 		PF_CHECK(Tests, !InitialMeshObservation->LastSuccessfulResult.has_value());
 		PF_CHECK(Tests, InitialMeshObservation->ArtifactAvailability == AssetImportArtifactAvailability::NotTracked);
+		const auto PerAssetExtraction = AssetDependencyExtractor::ExtractAsset(Fixture.Root, *MeshID, Snapshot.GetRegistry());
+		PF_CHECK(Tests, PerAssetExtraction.has_value());
+		if (PerAssetExtraction)
+		{
+			const auto CurrentObservation = std::find_if(PerAssetExtraction->ImportObservations.begin(),
+				PerAssetExtraction->ImportObservations.end(), [](const AssetImportObservation& Observation)
+				{ return Observation.SubresourceKey == "mesh/0/primitive/0"; });
+			PF_CHECK(Tests, CurrentObservation != PerAssetExtraction->ImportObservations.end());
+			if (CurrentObservation != PerAssetExtraction->ImportObservations.end())
+			{
+				PF_CHECK(Tests, CurrentObservation->InputFingerprint == InitialMeshObservation->InputFingerprint);
+				PF_CHECK(Tests, CurrentObservation->EffectiveSettings == InitialMeshObservation->EffectiveSettings);
+			}
+			PF_CHECK(Tests, std::any_of(PerAssetExtraction->ReadSet.begin(), PerAssetExtraction->ReadSet.end(),
+				[&](const AssetDependencyInputReceipt& Receipt) { return Receipt.ProjectRelativePath == BufferRelativeKey; }));
+			PF_CHECK(Tests, AssetDependencyExtractor::ValidateInputReceipts(Fixture.Root, PerAssetExtraction->ReadSet).has_value());
+		}
 
 		const auto TextureReferencers = Snapshot.GetDirectReferencers(AssetDependencyNode{ *TextureID, {}, {} });
 		PF_CHECK(Tests, !TextureReferencers.empty());

@@ -1,6 +1,9 @@
 #pragma once
 
 #include "Assets/MaterialAsset.h"
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+#include "Assets/AssetPreparationService.h"
+#endif
 #include "Renderer/RenderTarget.h"
 #include "Scene/Components/EnvironmentLightComponent.h"
 #include "Scene/Components/MeshRendererComponent.h"
@@ -26,6 +29,10 @@ namespace PulseForge
 
 namespace PulseForge::GpuValidation
 {
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+	struct G11PreparationGate;
+#endif
+
 	enum class ProjectSceneValidationMode : uint8_t
 	{
 		PbrMaterials,
@@ -162,5 +169,16 @@ namespace PulseForge::GpuValidation
 		bool m_TransparencyCaptureComplete = false;
 		bool m_Succeeded = true;
 		std::optional<std::string> m_Failure;
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+		std::array<std::shared_ptr<G11PreparationGate>, 2> m_G11PreparationGates;
+		std::array<std::optional<AssetPreparationService::Subscription>, 2> m_G11PreparationGateSubscriptions;
+		std::chrono::steady_clock::time_point m_G11GateReleasedAt{};
+		size_t m_G11HeldUpdateFrames = 0;
+		size_t m_G11HeldRenderFrames = 0;
+		bool m_G11GateEntered = false;
+		bool m_G11GateReleased = false;
+		bool m_G11RefreshDuringGate = false;
+		bool m_G11SceneReadinessRecorded = false;
+#endif
 	};
 } // namespace PulseForge::GpuValidation

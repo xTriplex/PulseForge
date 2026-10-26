@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Assets/AssetPreparationService.h"
 #include "Core/Core.h"
 #include "Renderer/Graphics.h"
 #include "Renderer/Binding.h"
@@ -21,7 +22,9 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace PulseForge
 {
@@ -30,6 +33,10 @@ namespace PulseForge
 	class Scene;
 	class SceneRendererPipelineCache;
 	class SceneRendererMaterialBindingCache;
+	class Mesh;
+
+	using PreparedMeshResourceMap = std::unordered_map<AssetID, const Mesh*, UUIDHash>;
+	using PreparedMaterialBindingMap = std::unordered_map<UUID, const BindingSet*, UUIDHash>;
 
 	enum class SceneRendererErrorCode : uint8_t
 	{
@@ -37,6 +44,7 @@ namespace PulseForge
 		ResourceCreationFailed,
 		SnapshotBuildFailed,
 		AssetLoadFailed,
+		AssetLoadPending,
 		MissingMaterial,
 		UnsupportedVertexLayout,
 		DrawFailed
@@ -159,6 +167,12 @@ namespace PulseForge
 		// Invalidates project asset data and dependent bindings at an update boundary before command recording.
 		void RefreshProjectAssets() noexcept;
 		[[nodiscard]] bool IsEnvironmentLightingPending() const noexcept { return m_EnvironmentLightingPending; }
+		[[nodiscard]] bool IsAssetPreparationPending() const noexcept { return m_AssetPreparationPending; }
+		[[nodiscard]] AssetPreparationServiceStats GetAssetPreparationStats() const noexcept;
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+		[[nodiscard]] std::expected<AssetPreparationService::Subscription, AssetPreparationError>
+			EnqueuePreparationForValidation(AssetPreparationService::Processor Processor);
+#endif
 		[[nodiscard]] bool HasPreparedEnvironmentLighting() const noexcept { return m_PreparedEnvironmentReady; }
 		// Narrow diagnostic access used by the opt-in GPU validation harness to read actual cubemap face depth.
 		[[nodiscard]] const Texture* GetPointShadowFaceTextureForValidation(size_t Slot, uint32_t Face) const noexcept;
@@ -186,6 +200,7 @@ namespace PulseForge
 			uint32_t Height);
 		[[nodiscard]] std::expected<const MaterialAssetDesc*, SceneRendererError> ResolveMaterialDescription(
 			const SceneMeshInstance& Instance);
+		[[nodiscard]] const BindingSet* FindPreparedMaterialBinding(UUID Entity) const noexcept;
 		[[nodiscard]] std::expected<void, SceneRendererError> PrepareSnapshot(
 			std::expected<SceneRenderSnapshot, SceneRenderSnapshotError> Snapshot);
 
@@ -253,13 +268,22 @@ namespace PulseForge
 		TextureHandle m_FallbackPointShadowTexture;
 		EnvironmentLightingTextures m_FallbackEnvironmentTextures;
 		std::optional<SceneRenderSnapshot> m_PreparedSnapshot;
+		// Non-owning frame pins. The next PrepareSnapshot clears them before cache publication advances any resource.
+		PreparedMeshResourceMap m_PreparedMeshResources;
+		PreparedMaterialBindingMap m_PreparedMaterialBindings;
 		std::vector<const SceneMeshInstance*> m_TransparentDrawOrder;
 		std::optional<DirectionalShadowCascadeSet> m_PreparedCascades;
 		const EnvironmentLightingTextures* m_PreparedEnvironmentTextures = nullptr;
+		const BindingSet* m_PreparedEnvironmentBinding = nullptr;
+		uint64_t m_PreparedEnvironmentRevision = 0;
 		std::unique_ptr<AmbientOcclusionPass> m_AmbientOcclusionPass;
 		bool m_EnvironmentLightingPending = false;
+		bool m_AssetPreparationPending = false;
 		bool m_PreparedEnvironmentReady = false;
 		bool m_LoggedFirstSnapshotPreparation = false;
+#if defined(PF_G11_GPU_VALIDATION_TESTS)
+		uint64_t m_ValidationPreparationRequest = 0;
+#endif
 		std::unique_ptr<SceneRendererMaterialBindingCache> m_MaterialBindingCache;
 		std::unique_ptr<ShadowPass> m_ShadowPass;
 	};

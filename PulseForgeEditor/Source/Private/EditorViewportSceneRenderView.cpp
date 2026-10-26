@@ -79,6 +79,8 @@ namespace PulseForgeEditor
 		m_SceneReady = false;
 		m_ViewProjectionValid = false;
 		m_EnvironmentLightingPending = false;
+		m_AssetPreparationPending = false;
+		m_AssetPreparationStats = {};
 		ClearTargetError();
 		return true;
 #endif
@@ -157,6 +159,8 @@ namespace PulseForgeEditor
 		m_ViewProjectionValid = SceneMode.ViewProjectionValid;
 		m_SceneReady = true;
 		m_EnvironmentLightingPending = m_SceneRenderer->IsEnvironmentLightingPending();
+		m_AssetPreparationPending = m_SceneRenderer->IsAssetPreparationPending();
+		m_AssetPreparationStats = m_SceneRenderer->GetAssetPreparationStats();
 #endif
 	}
 
@@ -202,6 +206,8 @@ namespace PulseForgeEditor
 		m_SceneReady = false;
 		m_ViewProjectionValid = false;
 		m_EnvironmentLightingPending = false;
+		m_AssetPreparationPending = false;
+		m_AssetPreparationStats = {};
 		m_SceneRendererInitializationRetry.Reset();
 		ClearSceneError();
 	}
@@ -211,12 +217,16 @@ namespace PulseForgeEditor
 		m_SceneReady = false;
 		m_ViewProjectionValid = false;
 		m_EnvironmentLightingPending = false;
+		m_AssetPreparationPending = false;
+		m_AssetPreparationStats = {};
 		ClearSceneError();
 	}
 
 	void EditorViewportSceneRenderView::ClearEnvironmentLightingPending() noexcept
 	{
 		m_EnvironmentLightingPending = false;
+		m_AssetPreparationPending = false;
+		m_AssetPreparationStats = {};
 	}
 
 	void EditorViewportSceneRenderView::RefreshMaterialAssets() noexcept

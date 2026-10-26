@@ -29,16 +29,20 @@ namespace PulseForge
 
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(const Resources& Resources);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureMaterialBindings(const AssetID& MaterialAsset,
-			const std::optional<AssetID>& EnvironmentAsset, const EnvironmentLightingTextures& EnvironmentTextures);
-		[[nodiscard]] std::expected<void, SceneRendererError> EnsureDefaultMaterialBindings(
+			const std::optional<AssetID>& EnvironmentAsset, uint64_t EnvironmentRevision,
 			const EnvironmentLightingTextures& EnvironmentTextures);
+		[[nodiscard]] std::expected<void, SceneRendererError> EnsureDefaultMaterialBindings(
+			const EnvironmentLightingTextures& EnvironmentTextures, uint64_t EnvironmentRevision);
 		[[nodiscard]] std::expected<void, SceneRendererError> EnsureEnvironmentBindings(
-			const AssetID& EnvironmentAsset, const EnvironmentLightingTextures& EnvironmentTextures, bool IsReady);
+			const AssetID& EnvironmentAsset, const EnvironmentLightingTextures& EnvironmentTextures, bool IsReady,
+			uint64_t ResourceRevision);
 		[[nodiscard]] std::expected<const MaterialAssetDesc*, SceneRendererError> ResolveMaterialDescription(
 			const SceneMeshInstance& Instance);
 		[[nodiscard]] std::expected<const BindingSet*, SceneRendererError> ResolveMaterialBinding(
-			const SceneMeshInstance& Instance, const std::optional<AssetID>& EnvironmentAsset) const;
-		[[nodiscard]] const BindingSet* FindEnvironmentBindings(const AssetID& EnvironmentAsset, bool IsReady) const;
+			const SceneMeshInstance& Instance, const std::optional<AssetID>& EnvironmentAsset,
+			uint64_t EnvironmentRevision);
+		[[nodiscard]] const BindingSet* FindEnvironmentBindings(
+			const AssetID& EnvironmentAsset, bool IsReady, uint64_t ResourceRevision) const;
 		void RefreshMaterialAssets() noexcept;
 		void RefreshProjectAssets() noexcept;
 
@@ -60,9 +64,11 @@ namespace PulseForge
 
 		[[nodiscard]] std::expected<void, SceneRendererError> RequireInitialized() const;
 		[[nodiscard]] static SceneRendererError MakeResourceError(std::string Message);
-		[[nodiscard]] static std::string MakeMaterialBindingKey(
-			const AssetID& MaterialAsset, const std::optional<AssetID>& EnvironmentAsset);
-		[[nodiscard]] static std::string MakeEnvironmentBindingKey(const AssetID& EnvironmentAsset, bool IsReady);
+		[[nodiscard]] std::string MakeMaterialBindingKey(const AssetID& MaterialAsset,
+			const std::optional<AssetID>& EnvironmentAsset, const MaterialAssetDesc& Description,
+			uint64_t EnvironmentRevision) const;
+		[[nodiscard]] static std::string MakeEnvironmentBindingKey(
+			const AssetID& EnvironmentAsset, bool IsReady, uint64_t ResourceRevision);
 
 		RenderDevice& m_Runtime;
 		MaterialAssetCache* m_Materials = nullptr;
@@ -81,6 +87,7 @@ namespace PulseForge
 		TextureHandle m_FallbackEmissive;
 		BufferHandle m_FallbackMaterialConstants;
 		BindingSetHandle m_DefaultMaterialBinding;
+		uint64_t m_DefaultBindingEnvironmentRevision = 0;
 		std::unordered_map<std::string, MaterialBinding> m_MaterialBindings;
 		std::unordered_map<std::string, BindingSetHandle> m_EnvironmentBindings;
 	};

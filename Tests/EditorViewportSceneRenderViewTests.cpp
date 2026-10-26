@@ -1,14 +1,26 @@
 #include "TestEditorSupport.h"
 #include "Assets/MaterialAsset.h"
+#include "Assets/AssetMetadata.h"
+#include "Assets/AssetPreparationService.h"
+#include "Assets/AssetRegistry.h"
+#include "Assets/DerivedDataArtifactStore.h"
+#include "Assets/MaterialAssetCache.h"
 #include "Editor/EditorAssetPreviewService.h"
 #include "Editor/EditorViewportSceneRenderView.h"
+#include "Renderer/AssetCache/TextureAssetCache.h"
+#include "Renderer/AssetCache/MeshAssetCache.h"
+#include "Renderer/EnvironmentLightingCache.h"
+#include "Renderer/SceneRendererMaterialBindingCache.h"
 
 #include <chrono>
 #include <array>
+#include <cstdint>
 #include <fstream>
 #include <map>
 #include <memory>
+#include <span>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -34,6 +46,26 @@ namespace
 		bool Alive = true;
 	};
 
+	struct FakeBufferLifetime final
+	{
+		bool Alive = true;
+	};
+
+	class FakeBuffer final : public PulseForge::Buffer
+	{
+	public:
+		FakeBuffer(PulseForge::BufferDesc Description, std::shared_ptr<FakeBufferLifetime> Lifetime)
+			: m_Description(std::move(Description)), m_Lifetime(std::move(Lifetime))
+		{
+		}
+		~FakeBuffer() override { m_Lifetime->Alive = false; }
+		[[nodiscard]] const PulseForge::BufferDesc& GetDescription() const noexcept override { return m_Description; }
+
+	private:
+		PulseForge::BufferDesc m_Description;
+		std::shared_ptr<FakeBufferLifetime> m_Lifetime;
+	};
+
 	class FakeTexture final : public PulseForge::Texture
 	{
 	public:
@@ -49,6 +81,50 @@ namespace
 	private:
 		PulseForge::TextureDesc m_Description;
 		std::shared_ptr<FakeTextureLifetime> m_Lifetime;
+	};
+
+	struct FakeBindingLifetime final
+	{
+		bool Alive = true;
+		std::vector<const PulseForge::Texture*> Textures;
+	};
+
+	class FakeSampler final : public PulseForge::Sampler
+	{
+	public:
+		explicit FakeSampler(PulseForge::SamplerDesc Description) : m_Description(std::move(Description)) {}
+		[[nodiscard]] const PulseForge::SamplerDesc& GetDescription() const noexcept override { return m_Description; }
+
+	private:
+		PulseForge::SamplerDesc m_Description;
+	};
+
+	class FakeBindingLayout final : public PulseForge::BindingLayout
+	{
+	public:
+		explicit FakeBindingLayout(PulseForge::BindingLayoutDesc Description) : m_Description(std::move(Description)) {}
+		[[nodiscard]] const PulseForge::BindingLayoutDesc& GetDescription() const noexcept override { return m_Description; }
+
+	private:
+		PulseForge::BindingLayoutDesc m_Description;
+	};
+
+	class FakeBindingSet final : public PulseForge::BindingSet
+	{
+	public:
+		FakeBindingSet(const PulseForge::BindingSetDesc& Description, std::shared_ptr<FakeBindingLifetime> Lifetime)
+			: m_Layout(std::make_unique<FakeBindingLayout>(Description.Layout->GetDescription())), m_Lifetime(std::move(Lifetime))
+		{
+			for (const auto& Texture : Description.Textures)
+				m_Lifetime->Textures.push_back(&Texture.Resource.get());
+		}
+		~FakeBindingSet() override { m_Lifetime->Alive = false; }
+		[[nodiscard]] const PulseForge::BindingLayout& GetLayout() const noexcept override { return *m_Layout; }
+		[[nodiscard]] const std::shared_ptr<FakeBindingLifetime>& GetLifetime() const noexcept { return m_Lifetime; }
+
+	private:
+		PulseForge::BindingLayoutHandle m_Layout;
+		std::shared_ptr<FakeBindingLifetime> m_Lifetime;
 	};
 
 	class FakeRenderTarget final : public PulseForge::RenderTarget
@@ -126,9 +202,14 @@ namespace
 			}
 			return {};
 		}
-		[[nodiscard]] PulseForge::BufferCreateResult CreateBuffer(const PulseForge::BufferDesc&, std::span<const std::byte>) override
+		[[nodiscard]] PulseForge::BufferCreateResult CreateBuffer(
+			const PulseForge::BufferDesc& Description, std::span<const std::byte>) override
 		{
-			return std::unexpected(PulseForge::BufferCreateError{ PulseForge::BufferCreateErrorCode::BackendFailure, "unused" });
+			if (!AllowBufferCreation)
+				return std::unexpected(PulseForge::BufferCreateError{ PulseForge::BufferCreateErrorCode::BackendFailure, "unused" });
+			LastBufferLifetime = std::make_shared<FakeBufferLifetime>();
+			BufferLifetimes.push_back(LastBufferLifetime);
+			return PulseForge::BufferHandle(std::make_unique<FakeBuffer>(Description, LastBufferLifetime));
 		}
 		[[nodiscard]] PulseForge::BufferUpdateResult WriteBuffer(const PulseForge::Buffer&, uint64_t, std::span<const std::byte>) override
 		{
@@ -138,20 +219,35 @@ namespace
 			const PulseForge::TextureDesc& Description, std::span<const PulseForge::TextureSubresourceData>) override
 		{
 			++TextureCreations;
+			if (TextureCreationFailuresRemaining > 0)
+			{
+				--TextureCreationFailuresRemaining;
+				return std::unexpected(PulseForge::TextureError{
+					PulseForge::TextureErrorCode::BackendFailure, "injected texture creation failure" });
+			}
 			LastTextureLifetime = std::make_shared<FakeTextureLifetime>();
 			return PulseForge::TextureHandle(std::make_unique<FakeTexture>(Description, LastTextureLifetime));
 		}
-		[[nodiscard]] PulseForge::SamplerCreateResult CreateSampler(const PulseForge::SamplerDesc&) override
+		[[nodiscard]] PulseForge::SamplerCreateResult CreateSampler(const PulseForge::SamplerDesc& Description) override
 		{
-			return std::unexpected(PulseForge::TextureError{ PulseForge::TextureErrorCode::BackendFailure, "unused" });
+			if (!AllowBindingCreation)
+				return std::unexpected(PulseForge::TextureError{ PulseForge::TextureErrorCode::BackendFailure, "unused" });
+			return PulseForge::SamplerHandle(std::make_unique<FakeSampler>(Description));
 		}
-		[[nodiscard]] PulseForge::BindingLayoutCreateResult CreateBindingLayout(const PulseForge::BindingLayoutDesc&) override
+		[[nodiscard]] PulseForge::BindingLayoutCreateResult CreateBindingLayout(
+			const PulseForge::BindingLayoutDesc& Description) override
 		{
-			return std::unexpected(PulseForge::BindingError{ PulseForge::BindingErrorCode::BackendFailure, "unused" });
+			if (!AllowBindingCreation)
+				return std::unexpected(PulseForge::BindingError{ PulseForge::BindingErrorCode::BackendFailure, "unused" });
+			return PulseForge::BindingLayoutHandle(std::make_unique<FakeBindingLayout>(Description));
 		}
-		[[nodiscard]] PulseForge::BindingSetCreateResult CreateBindingSet(const PulseForge::BindingSetDesc&) override
+		[[nodiscard]] PulseForge::BindingSetCreateResult CreateBindingSet(const PulseForge::BindingSetDesc& Description) override
 		{
-			return std::unexpected(PulseForge::BindingError{ PulseForge::BindingErrorCode::BackendFailure, "unused" });
+			if (!AllowBindingCreation)
+				return std::unexpected(PulseForge::BindingError{ PulseForge::BindingErrorCode::BackendFailure, "unused" });
+			LastBindingLifetime = std::make_shared<FakeBindingLifetime>();
+			BindingLifetimes.push_back(LastBindingLifetime);
+			return PulseForge::BindingSetHandle(std::make_unique<FakeBindingSet>(Description, LastBindingLifetime));
 		}
 		[[nodiscard]] PulseForge::ShaderCreateResult CreateShader(const PulseForge::ShaderDesc&, std::span<const std::byte>) override
 		{
@@ -186,11 +282,18 @@ namespace
 		bool NextTargetWithoutColor = false;
 		bool FailNextClearBegin = false;
 		bool FailNextClearEnd = false;
+		bool AllowBufferCreation = false;
+		bool AllowBindingCreation = false;
+		size_t TextureCreationFailuresRemaining = 0;
 		size_t RenderTargetCreations = 0;
 		size_t TextureCreations = 0;
 		size_t ClearBegins = 0;
 		size_t ClearEnds = 0;
 		std::shared_ptr<FakeTextureLifetime> LastTextureLifetime;
+		std::shared_ptr<FakeBufferLifetime> LastBufferLifetime;
+		std::vector<std::weak_ptr<FakeBufferLifetime>> BufferLifetimes;
+		std::shared_ptr<FakeBindingLifetime> LastBindingLifetime;
+		std::vector<std::weak_ptr<FakeBindingLifetime>> BindingLifetimes;
 	};
 
 	class FakeTextureRegistry final : public PulseForgeEditor::EditorTextureRegistry
@@ -235,17 +338,565 @@ namespace
 		std::map<uint64_t, std::weak_ptr<FakeTextureLifetime>> m_Textures;
 	};
 
-	bool WritePpm(const std::filesystem::path& Path, uint32_t Width, uint32_t Height)
+	bool WritePpm(const std::filesystem::path& Path, uint32_t Width, uint32_t Height,
+		std::array<char, 3> Color = { 90, 100, 110 })
 	{
 		std::ofstream Output(Path, std::ios::binary | std::ios::trunc);
 		if (!Output) return false;
 		Output << "P6\n" << Width << ' ' << Height << "\n255\n";
 		for (uint64_t Pixel = 0; Pixel < static_cast<uint64_t>(Width) * Height; ++Pixel)
 		{
-			constexpr std::array<char, 3> Color{ 90, 100, 110 };
 			Output.write(Color.data(), static_cast<std::streamsize>(Color.size()));
 		}
 		return Output.good();
+	}
+
+	std::filesystem::path MakePreviewTestRoot(TestRunner& Tests, std::string_view Name);
+
+	bool WriteTinyTriangleGltf(const std::filesystem::path& Path, float HorizontalOffset)
+	{
+		const std::filesystem::path BufferPath = Path.parent_path() / "Triangle.bin";
+		std::ofstream Buffer(BufferPath, std::ios::binary | std::ios::trunc);
+		if (!Buffer) return false;
+		const std::array<float, 9> Positions{ HorizontalOffset, 0.0f, 0.0f, HorizontalOffset + 1.0f, 0.0f, 0.0f,
+			HorizontalOffset, 1.0f, 0.0f };
+		Buffer.write(reinterpret_cast<const char*>(Positions.data()), static_cast<std::streamsize>(sizeof(Positions)));
+		const std::array<uint16_t, 3> Indices{ 0, 1, 2 };
+		Buffer.write(reinterpret_cast<const char*>(Indices.data()), static_cast<std::streamsize>(sizeof(Indices)));
+		Buffer.close();
+		if (!Buffer) return false;
+		std::ofstream Gltf(Path, std::ios::binary | std::ios::trunc);
+		if (!Gltf) return false;
+		Gltf << R"({"asset":{"version":"2.0"},"buffers":[{"uri":"Triangle.bin","byteLength":42}],)"
+			R"("bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":6}],)"
+			R"("accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},)"
+			R"({"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}],)"
+			R"("meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}]})";
+		return Gltf.good();
+	}
+
+	void TestMeshPublicationWaitsForPreparedFrameBoundary(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const std::filesystem::path Root = MakePreviewTestRoot(Tests, "MeshFramePublication");
+		if (Root.empty()) return;
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup() { std::error_code Error; std::filesystem::remove_all(Path, Error); }
+		} CleanupTemporary{ Root };
+		const std::filesystem::path MeshPath = Root / "Assets" / "Models" / "Triangle.gltf";
+		std::error_code Error;
+		std::filesystem::create_directories(MeshPath.parent_path(), Error);
+		PF_CHECK(Tests, !Error && WriteTinyTriangleGltf(MeshPath, 0.0f));
+		if (Error) return;
+		const auto BufferMetadata = AssetMetadataSerializer::CreateForNewAsset(MeshPath.parent_path() / "Triangle.bin");
+		const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(MeshPath);
+		PF_CHECK(Tests, BufferMetadata.has_value() && Metadata.has_value());
+		if (!BufferMetadata || !Metadata) return;
+		AssetRegistry Registry;
+		PF_CHECK(Tests, Registry.Rebuild(Root).has_value());
+		AssetPreparationService Preparation;
+		DerivedDataArtifactStoreOptions StoreOptions;
+		StoreOptions.Root = Root / "DerivedCache";
+		StoreOptions.Enabled = false;
+		DerivedDataArtifactStore Store(StoreOptions);
+		AssetUploadBudget UploadBudget;
+		FakeRenderDevice Runtime;
+		Runtime.AllowBufferCreation = true;
+		MeshAssetCache Meshes(Runtime, Root, std::make_shared<const AssetRegistry>(Registry), Preparation,
+			&UploadBudget, Store, "mesh-frame-1");
+		const auto WaitUntilCpuReady = [&]()
+		{
+			const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+			while (std::chrono::steady_clock::now() < Deadline)
+			{
+				if (Preparation.GetStats().CpuReadyJobs > 0) return true;
+				std::this_thread::yield();
+			}
+			return Preparation.GetStats().CpuReadyJobs > 0;
+		};
+		(void)Meshes.GetOrLoad(Metadata->ID);
+		PF_CHECK(Tests, WaitUntilCpuReady());
+		UploadBudget.BeginFrame();
+		PF_CHECK(Tests, Meshes.AdvancePending());
+		auto Original = Meshes.GetOrLoad(Metadata->ID);
+		PF_CHECK(Tests, Original.has_value());
+		if (!Original) return;
+		const Mesh* OldMesh = &Original->get();
+		const std::weak_ptr<FakeBufferLifetime> OldVertexBuffer = Runtime.BufferLifetimes[0];
+		PF_CHECK(Tests, !OldVertexBuffer.expired());
+
+		PF_CHECK(Tests, WriteTinyTriangleGltf(MeshPath, 2.0f));
+		Meshes.SetSessionKey("mesh-frame-2");
+		auto FirstInstance = Meshes.GetOrLoad(Metadata->ID);
+		PF_CHECK(Tests, FirstInstance && &FirstInstance->get() == OldMesh);
+		PF_CHECK(Tests, WaitUntilCpuReady());
+		// Model two instances resolved during one preparation pass after worker completion.
+		auto SecondInstance = Meshes.GetOrLoad(Metadata->ID);
+		PF_CHECK(Tests, SecondInstance && &SecondInstance->get() == OldMesh);
+		PF_CHECK(Tests, !OldVertexBuffer.expired() && OldVertexBuffer.lock()->Alive);
+		PF_CHECK(Tests, Runtime.BufferLifetimes.size() == 2);
+
+		UploadBudget.BeginFrame();
+		PF_CHECK(Tests, Meshes.AdvancePending());
+		auto NextFrame = Meshes.GetOrLoad(Metadata->ID);
+		PF_CHECK(Tests, NextFrame.has_value());
+		PF_CHECK(Tests, OldVertexBuffer.expired());
+		Preparation.Shutdown();
+	}
+
+	void TestMaterialBindingPublicationWaitsForNewPreparedFrame(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const std::filesystem::path Root = MakePreviewTestRoot(Tests, "MaterialBindingFramePublication");
+		if (Root.empty()) return;
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup() { std::error_code Error; std::filesystem::remove_all(Path, Error); }
+		} CleanupTemporary{ Root };
+		const std::filesystem::path TexturePath = Root / "Assets" / "Textures" / "BaseColor.ppm";
+		const std::filesystem::path MaterialPath = Root / "Assets" / "Materials" / "Shared.material";
+		std::error_code Error;
+		std::filesystem::create_directories(TexturePath.parent_path(), Error);
+		std::filesystem::create_directories(MaterialPath.parent_path(), Error);
+		PF_CHECK(Tests, !Error && WritePpm(TexturePath, 2, 2,
+			{ static_cast<char>(20), static_cast<char>(60), static_cast<char>(100) }));
+		if (Error) return;
+		const auto TextureMetadata = AssetMetadataSerializer::CreateForNewAsset(TexturePath);
+		PF_CHECK(Tests, TextureMetadata.has_value());
+		if (!TextureMetadata) return;
+		MaterialAssetDesc MaterialDescription;
+		MaterialDescription.BaseColorTexture = TextureMetadata->ID;
+		const auto MaterialBytes = MaterialAssetSerializer::Serialize(MaterialDescription);
+		PF_CHECK(Tests, MaterialBytes.has_value());
+		if (!MaterialBytes) return;
+		{
+			std::ofstream MaterialFile(MaterialPath, std::ios::binary | std::ios::trunc);
+			MaterialFile.write(MaterialBytes->data(), static_cast<std::streamsize>(MaterialBytes->size()));
+			PF_CHECK(Tests, MaterialFile.good());
+		}
+		const auto MaterialMetadata = AssetMetadataSerializer::CreateForNewAsset(MaterialPath);
+		PF_CHECK(Tests, MaterialMetadata.has_value());
+		if (!MaterialMetadata) return;
+		AssetRegistry Registry;
+		PF_CHECK(Tests, Registry.Rebuild(Root).has_value());
+		auto RegistrySnapshot = std::make_shared<const AssetRegistry>(Registry);
+		AssetPreparationService Preparation;
+		DerivedDataArtifactStoreOptions StoreOptions;
+		StoreOptions.Root = Root / "DerivedCache";
+		StoreOptions.Enabled = false;
+		DerivedDataArtifactStore Store(StoreOptions);
+		AssetUploadBudget UploadBudget;
+		FakeRenderDevice Runtime;
+		Runtime.AllowBufferCreation = true;
+		Runtime.AllowBindingCreation = true;
+		TextureAssetCache Textures(Runtime, Root, RegistrySnapshot, Preparation, &UploadBudget, Store, "bindings-1");
+		MaterialAssetCache Materials(Root, Registry);
+		const auto WaitUntilCpuReady = [&]()
+		{
+			const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+			while (std::chrono::steady_clock::now() < Deadline)
+			{
+				if (Preparation.GetStats().CpuReadyJobs > 0) return true;
+				std::this_thread::yield();
+			}
+			return Preparation.GetStats().CpuReadyJobs > 0;
+		};
+		(void)Textures.GetOrLoad(TextureMetadata->ID);
+		PF_CHECK(Tests, WaitUntilCpuReady());
+		UploadBudget.BeginFrame();
+		PF_CHECK(Tests, Textures.AdvancePending());
+		auto OldTextureResult = Textures.GetOrLoad(TextureMetadata->ID);
+		PF_CHECK(Tests, OldTextureResult.has_value());
+		if (!OldTextureResult) return;
+		const Texture* OldTexture = &OldTextureResult->get();
+		const std::weak_ptr<FakeTextureLifetime> OldTextureLifetime =
+			dynamic_cast<const FakeTexture*>(OldTexture)->GetLifetime();
+
+		BindingLayoutDesc LayoutDescription;
+		auto Layout = Runtime.CreateBindingLayout(LayoutDescription);
+		PF_CHECK(Tests, Layout.has_value());
+		if (!Layout) return;
+		const auto CreateTexture = [&Runtime](TextureDimension Dimension, std::string Name)
+		{
+			TextureDesc Description;
+			Description.Width = 1;
+			Description.Height = 1;
+			Description.Dimension = Dimension;
+			Description.DebugName = std::move(Name);
+			return Runtime.CreateTexture(Description, std::span<const TextureSubresourceData>{});
+		};
+		const auto MakeEnvironment = [&CreateTexture](std::string_view Name) -> std::optional<EnvironmentLightingTextures>
+		{
+			auto Environment = CreateTexture(TextureDimension::TextureCube, std::string(Name) + " environment");
+			auto Diffuse = CreateTexture(TextureDimension::TextureCube, std::string(Name) + " diffuse");
+			auto Specular = CreateTexture(TextureDimension::TextureCube, std::string(Name) + " specular");
+			auto Brdf = CreateTexture(TextureDimension::Texture2D, std::string(Name) + " brdf");
+			if (!Environment || !Diffuse || !Specular || !Brdf) return std::nullopt;
+			return EnvironmentLightingTextures{ std::move(*Environment), std::move(*Diffuse), std::move(*Specular), std::move(*Brdf) };
+		};
+		auto OldEnvironment = MakeEnvironment("old");
+		auto NewEnvironment = MakeEnvironment("new");
+		PF_CHECK(Tests, OldEnvironment.has_value() && NewEnvironment.has_value());
+		if (!OldEnvironment || !NewEnvironment) return;
+		auto Occlusion = CreateTexture(TextureDimension::Texture2D, "occlusion fallback");
+		PF_CHECK(Tests, Occlusion.has_value());
+		if (!Occlusion) return;
+		const auto CreateBuffer = [&Runtime](std::string Name)
+		{
+			BufferDesc Description;
+			Description.ByteSize = 64;
+			Description.Usage = BufferUsage::Constant;
+			Description.DebugName = std::move(Name);
+			return Runtime.CreateBuffer(Description, std::span<const std::byte>{});
+		};
+		auto ObjectConstants = CreateBuffer("object constants");
+		auto FrameConstants = CreateBuffer("frame constants");
+		auto LocalConstants = CreateBuffer("local constants");
+		PF_CHECK(Tests, ObjectConstants && FrameConstants && LocalConstants);
+		if (!ObjectConstants || !FrameConstants || !LocalConstants) return;
+		SceneRendererMaterialBindingCache Bindings(Runtime);
+		PF_CHECK(Tests, Bindings.Initialize({ Materials, Textures, *Layout, **Occlusion,
+			*ObjectConstants, *FrameConstants, *LocalConstants }).has_value());
+		const auto EnvironmentID = UUID::Generate();
+		PF_CHECK(Tests, EnvironmentID.has_value());
+		if (!EnvironmentID) return;
+		PF_CHECK(Tests, Bindings.EnsureEnvironmentBindings(*EnvironmentID, *OldEnvironment, true, 1).has_value());
+		const BindingSet* OldEnvironmentBinding = Bindings.FindEnvironmentBindings(*EnvironmentID, true, 1);
+		PF_CHECK(Tests, OldEnvironmentBinding != nullptr);
+		const auto* OldEnvironmentFakeBinding = dynamic_cast<const FakeBindingSet*>(OldEnvironmentBinding);
+		PF_CHECK(Tests, OldEnvironmentFakeBinding != nullptr);
+		if (!OldEnvironmentFakeBinding) return;
+		const auto OldEnvironmentBindingLifetime = OldEnvironmentFakeBinding->GetLifetime();
+
+		const auto FirstEntityID = UUID::Generate();
+		const auto SecondEntityID = UUID::Generate();
+		const auto FirstDefaultEntityID = UUID::Generate();
+		const auto SecondDefaultEntityID = UUID::Generate();
+		PF_CHECK(Tests, FirstEntityID.has_value() && SecondEntityID.has_value() &&
+			FirstDefaultEntityID.has_value() && SecondDefaultEntityID.has_value());
+		if (!FirstEntityID || !SecondEntityID || !FirstDefaultEntityID || !SecondDefaultEntityID) return;
+		SceneMeshInstance FirstInstance;
+		FirstInstance.Entity = *FirstEntityID;
+		FirstInstance.MaterialAsset = MaterialMetadata->ID;
+		SceneMeshInstance SecondInstance = FirstInstance;
+		SecondInstance.Entity = *SecondEntityID;
+		SceneMeshInstance FirstDefaultInstance;
+		FirstDefaultInstance.Entity = *FirstDefaultEntityID;
+		SceneMeshInstance SecondDefaultInstance = FirstDefaultInstance;
+		SecondDefaultInstance.Entity = *SecondDefaultEntityID;
+		PF_CHECK(Tests, Bindings.EnsureMaterialBindings(MaterialMetadata->ID, *EnvironmentID, 1, *OldEnvironment).has_value());
+		auto FirstDefaultBinding = Bindings.ResolveMaterialBinding(FirstDefaultInstance, *EnvironmentID, 1);
+		auto SecondDefaultBinding = Bindings.ResolveMaterialBinding(SecondDefaultInstance, *EnvironmentID, 1);
+		PF_CHECK(Tests, FirstDefaultBinding && *FirstDefaultBinding == OldEnvironmentBinding);
+		PF_CHECK(Tests, SecondDefaultBinding && *SecondDefaultBinding == OldEnvironmentBinding);
+		auto FirstBinding = Bindings.ResolveMaterialBinding(FirstInstance, *EnvironmentID, 1);
+		PF_CHECK(Tests, FirstBinding.has_value());
+		if (!FirstBinding) return;
+		auto* OldMaterialBinding = dynamic_cast<const FakeBindingSet*>(*FirstBinding);
+		PF_CHECK(Tests, OldMaterialBinding != nullptr && !OldMaterialBinding->GetLifetime()->Textures.empty());
+		if (!OldMaterialBinding || OldMaterialBinding->GetLifetime()->Textures.empty()) return;
+		const auto OldMaterialBindingLifetime = OldMaterialBinding->GetLifetime();
+		PF_CHECK(Tests, OldMaterialBindingLifetime->Textures.front() == OldTexture);
+		PF_CHECK(Tests, Bindings.EnsureMaterialBindings(MaterialMetadata->ID, *EnvironmentID, 1, *OldEnvironment).has_value());
+		auto SecondBinding = Bindings.ResolveMaterialBinding(SecondInstance, *EnvironmentID, 1);
+		PF_CHECK(Tests, SecondBinding && *SecondBinding == *FirstBinding);
+
+		PF_CHECK(Tests, WritePpm(TexturePath, 2, 2,
+			{ static_cast<char>(190), static_cast<char>(40), static_cast<char>(10) }));
+		Textures.SetSessionKey("bindings-2");
+		(void)Textures.GetOrLoad(TextureMetadata->ID);
+		auto FirstPreparedTexture = Textures.GetOrLoad(TextureMetadata->ID);
+		PF_CHECK(Tests, FirstPreparedTexture && &FirstPreparedTexture->get() == OldTexture);
+		PF_CHECK(Tests, Bindings.EnsureMaterialBindings(MaterialMetadata->ID, *EnvironmentID, 1, *OldEnvironment).has_value());
+		auto StillPinnedFirst = Bindings.ResolveMaterialBinding(FirstInstance, *EnvironmentID, 1);
+		PF_CHECK(Tests, StillPinnedFirst && *StillPinnedFirst == *FirstBinding);
+		PF_CHECK(Tests, WaitUntilCpuReady());
+		auto SecondPreparedTexture = Textures.GetOrLoad(TextureMetadata->ID);
+		PF_CHECK(Tests, SecondPreparedTexture && &SecondPreparedTexture->get() == OldTexture);
+		PF_CHECK(Tests, Bindings.EnsureMaterialBindings(MaterialMetadata->ID, *EnvironmentID, 1, *OldEnvironment).has_value());
+		auto StillPinnedSecond = Bindings.ResolveMaterialBinding(SecondInstance, *EnvironmentID, 1);
+		PF_CHECK(Tests, StillPinnedSecond && *StillPinnedSecond == *FirstBinding);
+		auto StillPinnedDefault = Bindings.ResolveMaterialBinding(SecondDefaultInstance, *EnvironmentID, 1);
+		PF_CHECK(Tests, StillPinnedDefault && *StillPinnedDefault == OldEnvironmentBinding);
+		PF_CHECK(Tests, OldMaterialBindingLifetime->Alive && OldEnvironmentBindingLifetime->Alive);
+		PF_CHECK(Tests, !OldTextureLifetime.expired());
+
+		UploadBudget.BeginFrame();
+		PF_CHECK(Tests, Textures.AdvancePending());
+		auto NewTextureResult = Textures.GetOrLoad(TextureMetadata->ID);
+		PF_CHECK(Tests, NewTextureResult.has_value());
+		PF_CHECK(Tests, OldTextureLifetime.expired());
+		PF_CHECK(Tests, Bindings.EnsureEnvironmentBindings(*EnvironmentID, *NewEnvironment, true, 2).has_value());
+		PF_CHECK(Tests, Bindings.EnsureMaterialBindings(MaterialMetadata->ID, *EnvironmentID, 2, *NewEnvironment).has_value());
+		auto NewBinding = Bindings.ResolveMaterialBinding(FirstInstance, *EnvironmentID, 2);
+		PF_CHECK(Tests, NewBinding.has_value());
+		auto NewDefaultBinding = Bindings.ResolveMaterialBinding(FirstDefaultInstance, *EnvironmentID, 2);
+		PF_CHECK(Tests, NewDefaultBinding.has_value());
+		PF_CHECK(Tests, !OldMaterialBindingLifetime->Alive && !OldEnvironmentBindingLifetime->Alive);
+		Preparation.Shutdown();
+	}
+
+	void TestTextureUploadFailureReleasesCpuProductAndRequiresExplicitRetry(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const std::filesystem::path Root = MakePreviewTestRoot(Tests, "TextureUploadFailure");
+		if (Root.empty()) return;
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup() { std::error_code Error; std::filesystem::remove_all(Path, Error); }
+		} CleanupTemporary{ Root };
+		const std::filesystem::path AssetDirectory = Root / "Assets" / "Textures";
+		std::error_code Error;
+		std::filesystem::create_directories(AssetDirectory, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+
+		const std::filesystem::path FirstPath = AssetDirectory / "First.ppm";
+		const std::filesystem::path OtherPath = AssetDirectory / "Other.ppm";
+		PF_CHECK(Tests, WritePpm(FirstPath, 128, 128,
+			{ static_cast<char>(30), static_cast<char>(70), static_cast<char>(110) }));
+		PF_CHECK(Tests, WritePpm(OtherPath, 128, 128,
+			{ static_cast<char>(120), static_cast<char>(90), static_cast<char>(60) }));
+		const auto FirstMetadata = AssetMetadataSerializer::CreateForNewAsset(FirstPath);
+		const auto OtherMetadata = AssetMetadataSerializer::CreateForNewAsset(OtherPath);
+		PF_CHECK(Tests, FirstMetadata.has_value() && OtherMetadata.has_value());
+		if (!FirstMetadata || !OtherMetadata) return;
+		AssetRegistry Registry;
+		PF_CHECK(Tests, Registry.Rebuild(Root).has_value());
+		auto RegistrySnapshot = std::make_shared<const AssetRegistry>(Registry);
+		AssetPreparationService Preparation;
+		DerivedDataArtifactStoreOptions StoreOptions;
+		StoreOptions.Root = Root / "DerivedCache";
+		StoreOptions.Enabled = false;
+		DerivedDataArtifactStore Store(StoreOptions);
+		AssetUploadBudget UploadBudget;
+		FakeRenderDevice Runtime;
+		TextureAssetCache Textures(Runtime, Root, RegistrySnapshot, Preparation, &UploadBudget, Store, "texture-upload-1");
+
+		const auto WaitUntilCpuReady = [&]()
+		{
+			const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+			while (std::chrono::steady_clock::now() < Deadline)
+			{
+				if (Preparation.GetStats().CpuReadyJobs > 0) return true;
+				std::this_thread::yield();
+			}
+			return Preparation.GetStats().CpuReadyJobs > 0;
+		};
+		const auto AdvanceUntilRevision = [&](const AssetID& Asset, uint64_t Revision)
+		{
+			const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+			while (std::chrono::steady_clock::now() < Deadline)
+			{
+				UploadBudget.BeginFrame();
+				(void)Textures.AdvancePending();
+				if (Textures.GetResourceRevision(Asset, TextureFormat::RGBA8_Srgb) >= Revision) return true;
+				std::this_thread::yield();
+			}
+			return Textures.GetResourceRevision(Asset, TextureFormat::RGBA8_Srgb) >= Revision;
+		};
+
+		(void)Textures.GetOrLoad(FirstMetadata->ID);
+		PF_CHECK(Tests, Textures.HasPendingWork());
+		PF_CHECK(Tests, WaitUntilCpuReady());
+		PF_CHECK(Tests, AdvanceUntilRevision(FirstMetadata->ID, 1));
+		PF_CHECK(Tests, !Textures.HasPendingWork());
+		auto Original = Textures.GetOrLoad(FirstMetadata->ID);
+		PF_CHECK(Tests, Original.has_value());
+		if (!Original) return;
+		const Texture* OriginalTexture = &Original->get();
+		PF_CHECK(Tests, Runtime.TextureCreations == 1);
+
+		PF_CHECK(Tests, WritePpm(FirstPath, 128, 128,
+			{ static_cast<char>(200), static_cast<char>(20), static_cast<char>(40) }));
+		Textures.SetSessionKey("texture-upload-replacement");
+		(void)Textures.GetOrLoad(FirstMetadata->ID);
+		PF_CHECK(Tests, Textures.HasPendingWork());
+		PF_CHECK(Tests, WaitUntilCpuReady());
+		// Both entity resolutions in the current frame see the old texture revision until the next publish phase.
+		auto FirstPreparedBindingTexture = Textures.GetOrLoad(FirstMetadata->ID);
+		auto SecondPreparedBindingTexture = Textures.GetOrLoad(FirstMetadata->ID);
+		PF_CHECK(Tests, FirstPreparedBindingTexture && SecondPreparedBindingTexture &&
+			&FirstPreparedBindingTexture->get() == OriginalTexture && &SecondPreparedBindingTexture->get() == OriginalTexture);
+		PF_CHECK(Tests, Textures.GetResourceRevision(FirstMetadata->ID, TextureFormat::RGBA8_Srgb) == 1);
+		Runtime.TextureCreationFailuresRemaining = 1;
+		UploadBudget.BeginFrame();
+		(void)Textures.AdvancePending();
+		PF_CHECK(Tests, Textures.GetResourceRevision(FirstMetadata->ID, TextureFormat::RGBA8_Srgb) == 1);
+		auto Retained = Textures.GetOrLoad(FirstMetadata->ID);
+		PF_CHECK(Tests, Retained && &Retained->get() == OriginalTexture);
+		PF_CHECK(Tests, Runtime.TextureCreations == 2);
+		PF_CHECK(Tests, Preparation.GetStats().CompletedRetainedPayloadBytes == 0);
+		PF_CHECK(Tests, !Textures.HasPendingWork());
+
+		for (size_t Poll = 0; Poll < 20; ++Poll)
+		{
+			UploadBudget.BeginFrame();
+			(void)Textures.AdvancePending();
+		}
+		PF_CHECK(Tests, Runtime.TextureCreations == 2);
+		Retained = Textures.GetOrLoad(FirstMetadata->ID);
+		PF_CHECK(Tests, Retained && &Retained->get() == OriginalTexture);
+
+		// A second product can complete after the failed upload released its completed CPU payload budget.
+		(void)Textures.GetOrLoad(OtherMetadata->ID);
+		PF_CHECK(Tests, WaitUntilCpuReady());
+		PF_CHECK(Tests, AdvanceUntilRevision(OtherMetadata->ID, 1));
+		PF_CHECK(Tests, Textures.GetResourceRevision(OtherMetadata->ID, TextureFormat::RGBA8_Srgb) == 1);
+
+		// Retry is explicit: a new source/session generation clears the terminal upload failure.
+		Textures.SetSessionKey("texture-upload-explicit-retry");
+		(void)Textures.GetOrLoad(FirstMetadata->ID);
+		PF_CHECK(Tests, Textures.HasPendingWork());
+		PF_CHECK(Tests, WaitUntilCpuReady());
+		auto RetryFrameFirst = Textures.GetOrLoad(FirstMetadata->ID);
+		auto RetryFrameSecond = Textures.GetOrLoad(FirstMetadata->ID);
+		PF_CHECK(Tests, RetryFrameFirst && RetryFrameSecond && &RetryFrameFirst->get() == OriginalTexture &&
+			&RetryFrameSecond->get() == OriginalTexture);
+		PF_CHECK(Tests, AdvanceUntilRevision(FirstMetadata->ID, 2));
+		auto Replaced = Textures.GetOrLoad(FirstMetadata->ID);
+		PF_CHECK(Tests, Replaced && &Replaced->get() != OriginalTexture);
+		PF_CHECK(Tests, Textures.GetResourceRevision(FirstMetadata->ID, TextureFormat::RGBA8_Srgb) == 2);
+		Preparation.Shutdown();
+	}
+
+	bool WriteTinyHdr(const std::filesystem::path& Path, uint8_t Red)
+	{
+		const std::string Header = "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 2\n";
+		std::ofstream Output(Path, std::ios::binary | std::ios::trunc);
+		if (!Output) return false;
+		Output.write(Header.data(), static_cast<std::streamsize>(Header.size()));
+		for (size_t Pixel = 0; Pixel < 4; ++Pixel)
+		{
+			const std::array<uint8_t, 4> Rgbe{ Red, 64, 32, 129 };
+			Output.write(reinterpret_cast<const char*>(Rgbe.data()), static_cast<std::streamsize>(Rgbe.size()));
+		}
+		return Output.good();
+	}
+
+	void TestEnvironmentUploadFailureIsTerminalUntilNewSession(TestRunner& Tests)
+	{
+		using namespace PulseForge;
+		const std::filesystem::path Root = MakePreviewTestRoot(Tests, "EnvironmentUploadFailure");
+		if (Root.empty()) return;
+		struct Cleanup final
+		{
+			std::filesystem::path Path;
+			~Cleanup() { std::error_code Error; std::filesystem::remove_all(Path, Error); }
+		} CleanupTemporary{ Root };
+		const std::filesystem::path AssetDirectory = Root / "Assets" / "Environments";
+		std::error_code Error;
+		std::filesystem::create_directories(AssetDirectory, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const std::filesystem::path HdrPath = AssetDirectory / "tiny.hdr";
+		PF_CHECK(Tests, WriteTinyHdr(HdrPath, 128));
+		const auto Metadata = AssetMetadataSerializer::CreateForNewAsset(HdrPath);
+		PF_CHECK(Tests, Metadata.has_value());
+		if (!Metadata) return;
+		AssetRegistry Registry;
+		PF_CHECK(Tests, Registry.Rebuild(Root).has_value());
+		AssetPreparationService Preparation;
+		DerivedDataArtifactStoreOptions StoreOptions;
+		StoreOptions.Root = Root / "DerivedCache";
+		StoreOptions.Enabled = false;
+		DerivedDataArtifactStore Store(StoreOptions);
+		AssetUploadBudget UploadBudget;
+		EnvironmentProcessingDesc Processing;
+		Processing.EnvironmentFaceSize = 2;
+		Processing.IrradianceFaceSize = 1;
+		Processing.SpecularFaceSize = 2;
+		Processing.BrdfLutSize = 2;
+		Processing.IrradianceSamples = 2;
+		Processing.PrefilterSamples = 2;
+		Processing.BrdfSamples = 2;
+		FakeRenderDevice Runtime;
+		EnvironmentLightingCache Environments(Runtime, Root, std::make_shared<const AssetRegistry>(Registry), Preparation,
+			&UploadBudget, Store, "environment-upload-1", nullptr, Processing);
+
+		const auto WaitUntilCpuReady = [&]()
+		{
+			const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+			while (std::chrono::steady_clock::now() < Deadline)
+			{
+				if (Preparation.GetStats().CpuReadyJobs > 0) return true;
+				std::this_thread::yield();
+			}
+			return Preparation.GetStats().CpuReadyJobs > 0;
+		};
+		const auto AdvanceUntilRevision = [&](uint64_t Revision)
+		{
+			const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+			while (std::chrono::steady_clock::now() < Deadline)
+			{
+				UploadBudget.BeginFrame();
+				(void)Environments.AdvancePending();
+				if (Environments.GetResourceRevision(Metadata->ID) >= Revision) return true;
+				std::this_thread::yield();
+			}
+			return Environments.GetResourceRevision(Metadata->ID) >= Revision;
+		};
+
+		(void)Environments.GetOrLoad(Metadata->ID);
+		PF_CHECK(Tests, Environments.HasPendingWork());
+		PF_CHECK(Tests, WaitUntilCpuReady());
+		PF_CHECK(Tests, AdvanceUntilRevision(1));
+		auto Original = Environments.GetOrLoad(Metadata->ID);
+		PF_CHECK(Tests, Original && Original->has_value());
+		if (!Original || !*Original) return;
+		const EnvironmentLightingTextures* OriginalTextures = &Original->value().get();
+		const Texture* OriginalEnvironmentTexture = OriginalTextures->Environment.get();
+
+		PF_CHECK(Tests, WriteTinyHdr(HdrPath, 220));
+		Environments.SetSessionKey("environment-upload-replacement");
+		(void)Environments.GetOrLoad(Metadata->ID);
+		PF_CHECK(Tests, WaitUntilCpuReady());
+		auto FirstPreparedEnvironment = Environments.GetOrLoad(Metadata->ID);
+		auto SecondPreparedEnvironment = Environments.GetOrLoad(Metadata->ID);
+		PF_CHECK(Tests, FirstPreparedEnvironment && FirstPreparedEnvironment->has_value() &&
+			SecondPreparedEnvironment && SecondPreparedEnvironment->has_value());
+		if (FirstPreparedEnvironment && FirstPreparedEnvironment->has_value() &&
+			SecondPreparedEnvironment && SecondPreparedEnvironment->has_value())
+		{
+			PF_CHECK(Tests, &FirstPreparedEnvironment->value().get() == OriginalTextures &&
+				&SecondPreparedEnvironment->value().get() == OriginalTextures);
+		}
+		PF_CHECK(Tests, Environments.GetResourceRevision(Metadata->ID) == 1);
+		Runtime.TextureCreationFailuresRemaining = 1;
+		const size_t AttemptsBeforeFailure = Runtime.TextureCreations;
+		UploadBudget.BeginFrame();
+		(void)Environments.AdvancePending();
+		PF_CHECK(Tests, Runtime.TextureCreations == AttemptsBeforeFailure + 1);
+		PF_CHECK(Tests, Environments.GetResourceRevision(Metadata->ID) == 1);
+		PF_CHECK(Tests, !Environments.HasPendingWork());
+		auto Retained = Environments.GetOrLoad(Metadata->ID);
+		PF_CHECK(Tests, Retained && Retained->has_value() &&
+			Retained->value().get().Environment.get() == OriginalEnvironmentTexture);
+		PF_CHECK(Tests, Preparation.GetStats().CompletedRetainedPayloadBytes == 0);
+		for (size_t Poll = 0; Poll < 20; ++Poll)
+		{
+			UploadBudget.BeginFrame();
+			(void)Environments.AdvancePending();
+		}
+		PF_CHECK(Tests, Runtime.TextureCreations == AttemptsBeforeFailure + 1);
+		Retained = Environments.GetOrLoad(Metadata->ID);
+		PF_CHECK(Tests, Retained && Retained->has_value() &&
+			Retained->value().get().Environment.get() == OriginalEnvironmentTexture);
+
+		Environments.SetSessionKey("environment-upload-explicit-retry");
+		(void)Environments.GetOrLoad(Metadata->ID);
+		PF_CHECK(Tests, Environments.HasPendingWork());
+		PF_CHECK(Tests, WaitUntilCpuReady());
+		PF_CHECK(Tests, AdvanceUntilRevision(2));
+		PF_CHECK(Tests, !Environments.HasPendingWork());
+		auto Replaced = Environments.GetOrLoad(Metadata->ID);
+		PF_CHECK(Tests, Replaced && Replaced->has_value() &&
+			Replaced->value().get().Environment.get() != OriginalEnvironmentTexture);
+		Preparation.Shutdown();
 	}
 
 	std::filesystem::path MakePreviewTestRoot(TestRunner& Tests, std::string_view Name)
@@ -613,6 +1264,10 @@ namespace
 
 void RunEditorViewportSceneRenderViewTests(TestRunner& Tests)
 {
+	TestMeshPublicationWaitsForPreparedFrameBoundary(Tests);
+	TestMaterialBindingPublicationWaitsForNewPreparedFrame(Tests);
+	TestTextureUploadFailureReleasesCpuProductAndRequiresExplicitRetry(Tests);
+	TestEnvironmentUploadFailureIsTerminalUntilNewSession(Tests);
 	TestPreviewStatisticsWhileWorkerDecodes(Tests);
 	TestPreviewOversizedResultDoesNotBlockWorker(Tests);
 	TestPreviewBudgetWaitInvalidationAndShutdown(Tests);

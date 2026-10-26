@@ -202,6 +202,16 @@ target_link_libraries(PulseForgeAssetDependencyCatalog
 	PRIVATE PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization
 )
 target_precompile_headers(PulseForgeAssetDependencyCatalog PRIVATE "${PULSEFORGE_ENGINE_PCH}")
+add_library(PulseForgeAssetPreparation STATIC PulseForge/Source/Private/Assets/AssetPreparationService.cpp)
+target_include_directories(PulseForgeAssetPreparation PUBLIC PulseForge/Source/Public)
+target_link_libraries(PulseForgeAssetPreparation PUBLIC PulseForgeCore)
+add_library(PulseForgeDerivedData STATIC PulseForge/Source/Private/Assets/DerivedDataArtifactStore.cpp)
+target_include_directories(PulseForgeDerivedData PUBLIC PulseForge/Source/Public)
+target_link_libraries(PulseForgeDerivedData PUBLIC PulseForgeAssetCatalog)
+add_library(PulseForgeAssetCpuProducts STATIC PulseForge/Source/Private/Assets/AssetCpuProducts.cpp)
+target_include_directories(PulseForgeAssetCpuProducts PUBLIC PulseForge/Source/Public)
+target_link_libraries(PulseForgeAssetCpuProducts
+	PUBLIC PulseForgeAssetPreparation PulseForgeDerivedData PulseForgeAssetImporters PulseForgeAssetDependencyCatalog)
 add_library(PulseForgeApplication STATIC PulseForge/Source/Private/Core/Application.cpp)
 target_include_directories(PulseForgeApplication
 	PUBLIC PulseForge/Source/Public
@@ -227,8 +237,8 @@ target_include_directories(PulseForgeSceneRenderer
 )
 target_compile_definitions(PulseForgeSceneRenderer PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_link_libraries(PulseForgeSceneRenderer
-	PUBLIC PulseForgeRenderMath PulseForgeScene PulseForgeRenderer
-	PRIVATE PulseForgeAssetImporters PulseForgeAssetServices
+	PUBLIC PulseForgeRenderMath PulseForgeScene PulseForgeRenderer PulseForgeAssetPreparation PulseForgeDerivedData
+	PRIVATE PulseForgeAssetCpuProducts PulseForgeAssetImporters PulseForgeAssetServices
 )
 target_precompile_headers(PulseForgeSceneRenderer PRIVATE "${PULSEFORGE_ENGINE_PCH}")
 add_library(PulseForge STATIC

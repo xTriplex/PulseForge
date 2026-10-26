@@ -1099,6 +1099,52 @@ namespace PulseForge
 		return Output;
 	}
 
+	std::expected<AssetDependencyExtraction, AssetDependencyCatalogError> AssetDependencyExtractor::ExtractAsset(
+		const std::filesystem::path& ProjectRoot, const AssetID& Asset, const AssetRegistry& Registry)
+	{
+		if (Asset.IsNil())
+			return std::unexpected(MakeError(ProjectRoot, "Per-asset dependency inspection requires a non-nil asset identity"));
+		std::error_code RootError;
+		const std::filesystem::path AbsoluteRoot = std::filesystem::absolute(ProjectRoot, RootError).lexically_normal();
+		if (RootError || !std::filesystem::is_directory(AbsoluteRoot, RootError) || RootError)
+			return std::unexpected(MakeError(ProjectRoot, "Project root is not an accessible directory"));
+		const auto Record = Registry.Find(Asset);
+		if (!Record)
+			return std::unexpected(MakeError(ProjectRoot, "Asset is not present in the captured registry"));
+		if (!HasAssetTypeExtension(Record->ProjectRelativePath, AssetFileType::Mesh))
+			return std::unexpected(MakeError(Record->ProjectRelativePath, "Per-asset import inspection currently supports glTF mesh sources only"));
+
+		AssetDependencyExtraction Output;
+		auto Resolved = AssetPathResolver::ResolveManagedSourcePath(AbsoluteRoot, Record->ProjectRelativePath);
+		if (!Resolved)
+			return std::unexpected(MakeError(Resolved.error().Path, Resolved.error().Message));
+		auto Metadata = ReadAssetMetadata(Output, AbsoluteRoot, *Resolved, *Record);
+		if (!Metadata)
+			return std::unexpected(Metadata.error());
+		if (auto Analyzed = AnalyzeGltf(Output, AbsoluteRoot, *Resolved, *Record, *Metadata); !Analyzed)
+			return std::unexpected(Analyzed.error());
+
+		std::sort(Output.ReadSet.begin(), Output.ReadSet.end(), [](const auto& First, const auto& Second)
+			{ return First.ProjectRelativePath < Second.ProjectRelativePath; });
+		std::vector<AssetDependencyInputReceipt> UniqueReadSet;
+		UniqueReadSet.reserve(Output.ReadSet.size());
+		for (AssetDependencyInputReceipt& Receipt : Output.ReadSet)
+		{
+			if (!UniqueReadSet.empty() && UniqueReadSet.back().ProjectRelativePath == Receipt.ProjectRelativePath)
+			{
+				if (UniqueReadSet.back() != Receipt)
+					return std::unexpected(MakeError(AbsoluteRoot / std::filesystem::u8path(Receipt.ProjectRelativePath),
+						"One input changed while per-asset import inspection was reading it"));
+				continue;
+			}
+			UniqueReadSet.push_back(std::move(Receipt));
+		}
+		Output.ReadSet = std::move(UniqueReadSet);
+		if (auto Validated = ValidateInputReceipts(AbsoluteRoot, Output.ReadSet); !Validated)
+			return std::unexpected(Validated.error());
+		return Output;
+	}
+
 	std::expected<void, AssetDependencyCatalogError> AssetDependencyExtractor::ValidateInputReceipts(
 		const std::filesystem::path& ProjectRoot, std::span<const AssetDependencyInputReceipt> ReadSet)
 	{

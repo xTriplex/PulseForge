@@ -19,6 +19,8 @@ if(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS)
 		PF_POINT_SHADOW_DEMO_PROJECT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/PointLightShadows/PointLightShadows.pfproj"
 		PF_GPU_VALIDATION_SCENE_SHADER_DIRECTORY="${PULSEFORGE_SHADER_OUTPUT_DIR}")
 	target_link_libraries(PulseForgeGpuValidation PRIVATE PulseForge PulseForgeGpuValidationAnalysis)
+	target_compile_definitions(PulseForgeSceneRenderer PRIVATE "$<$<CONFIG:Debug>:PF_G11_GPU_VALIDATION_TESTS>")
+	target_compile_definitions(PulseForgeGpuValidation PRIVATE "$<$<CONFIG:Debug>:PF_G11_GPU_VALIDATION_TESTS>")
 	add_dependencies(PulseForgeGpuValidation PulseForgeGpuValidationShaders PulseForgeSceneShaderAssets)
 	pulseforge_apply_visual_studio_debugger_working_directory(PulseForgeGpuValidation)
 	if(PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF OR PULSEFORGE_BUILD_MACOS_DESKTOP)

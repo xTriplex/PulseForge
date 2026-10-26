@@ -79,7 +79,7 @@ namespace PulseForge::GpuValidation
 									   : m_Mode == LightingValidationMode::SpotlightShadows
 										   ? "Could not prepare spotlight-shadow scene: " + Prepared.error().Message
 										   : "Could not prepare point-shadow scene: " + Prepared.error().Message);
-			if (m_SceneRenderer.IsEnvironmentLightingPending()) return false;
+			if (m_SceneRenderer.IsAssetPreparationPending()) return false;
 			m_ScenePrepared = true;
 		}
 		catch (const std::exception& Exception)

@@ -4,6 +4,8 @@
 #include "Renderer/ScreenSpaceAmbientOcclusion.h"
 
 #include <functional>
+#include <utility>
+#include <vector>
 
 namespace PulseForge
 {
@@ -20,7 +22,7 @@ namespace PulseForge
 			const SceneRenderSnapshot& Snapshot;
 			const std::optional<VertexLayoutDesc>& SceneVertexLayout;
 			const BindingLayoutHandle& SceneMaterialLayout;
-			MeshAssetCache& Meshes;
+			const PreparedMeshResourceMap& PreparedMeshes;
 			const Buffer& FullscreenTriangle;
 			const MaterialResolver& ResolveMaterial;
 			const BindingResolver& ResolveBindings;

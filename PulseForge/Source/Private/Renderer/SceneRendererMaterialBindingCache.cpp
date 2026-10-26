@@ -2,6 +2,7 @@
 
 #include "Core/ScopedProfileTimer.h"
 
+#include <algorithm>
 #include <array>
 #include <functional>
 #include <span>
@@ -109,10 +110,10 @@ namespace PulseForge
 	}
 
 	std::expected<void, SceneRendererError> SceneRendererMaterialBindingCache::EnsureDefaultMaterialBindings(
-		const EnvironmentLightingTextures& EnvironmentTextures)
+		const EnvironmentLightingTextures& EnvironmentTextures, uint64_t EnvironmentRevision)
 	{
 		if (auto Initialized = RequireInitialized(); !Initialized) return Initialized;
-		if (m_DefaultMaterialBinding) return {};
+		if (m_DefaultMaterialBinding && m_DefaultBindingEnvironmentRevision == EnvironmentRevision) return {};
 
 		BindingSetDesc Description;
 		Description.Layout = *m_Layout;
@@ -129,21 +130,20 @@ namespace PulseForge
 		auto Binding = m_Runtime.CreateBindingSet(Description);
 		if (!Binding) return std::unexpected(MakeResourceError("Could not create default material bindings: " + Binding.error().Message));
 		m_DefaultMaterialBinding = std::move(*Binding);
+		m_DefaultBindingEnvironmentRevision = EnvironmentRevision;
 		return {};
 	}
 
 	std::expected<void, SceneRendererError> SceneRendererMaterialBindingCache::EnsureMaterialBindings(const AssetID& MaterialAsset,
-		const std::optional<AssetID>& EnvironmentAsset, const EnvironmentLightingTextures& EnvironmentTextures)
+		const std::optional<AssetID>& EnvironmentAsset, uint64_t EnvironmentRevision,
+		const EnvironmentLightingTextures& EnvironmentTextures)
 	{
 		if (auto Initialized = RequireInitialized(); !Initialized) return Initialized;
-		const std::string Key = MakeMaterialBindingKey(MaterialAsset, EnvironmentAsset);
-		if (m_MaterialBindings.contains(Key)) return {};
-		Detail::ScopedProfileTimer Timer("PBR material/texture binding first creation");
-
 		auto Material = m_Materials->GetOrLoad(MaterialAsset);
 		if (!Material)
 			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, {}, MaterialAsset,
 				"Could not load scene material " + MaterialAsset.ToString() + ": " + Material.error().Message });
+		Detail::ScopedProfileTimer Timer("PBR material/texture binding creation");
 
 		const auto LoadMaterialTexture =
 			[this, &MaterialAsset](const AssetID& TextureAsset, TextureFormat Format, const Texture& Fallback,
@@ -152,7 +152,9 @@ namespace PulseForge
 			if (TextureAsset.IsNil()) return std::cref(Fallback);
 			auto Texture = m_Textures->GetOrLoad(TextureAsset, Format);
 			if (!Texture)
-				return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, {}, TextureAsset,
+				return std::unexpected(SceneRendererError{ Texture.error().Code == TextureAssetErrorCode::Pending
+															? SceneRendererErrorCode::AssetLoadPending
+															: SceneRendererErrorCode::AssetLoadFailed, {}, TextureAsset,
 					"Could not load " + std::string(Name) + " texture for material " + MaterialAsset.ToString() + ": " +
 						Texture.error().Message });
 			return std::cref(Texture->get());
@@ -172,6 +174,8 @@ namespace PulseForge
 		auto EmissiveTexture =
 			LoadMaterialTexture(Material->get().EmissiveTexture, TextureFormat::RGBA8_Srgb, *m_FallbackEmissive, "emissive");
 		if (!EmissiveTexture) return std::unexpected(std::move(EmissiveTexture.error()));
+		const std::string Key = MakeMaterialBindingKey(MaterialAsset, EnvironmentAsset, Material->get(), EnvironmentRevision);
+		if (m_MaterialBindings.contains(Key)) return {};
 
 		const MaterialConstants Constants{ { Material->get().BaseColorFactor.r, Material->get().BaseColorFactor.g,
 											   Material->get().BaseColorFactor.b, Material->get().BaseColorFactor.a },
@@ -202,15 +206,22 @@ namespace PulseForge
 		auto BindingSet = m_Runtime.CreateBindingSet(BindingSetDescription);
 		if (!BindingSet) return std::unexpected(MakeResourceError("Could not create material bindings: " + BindingSet.error().Message));
 
+		const std::string Prefix = MaterialAsset.ToString() + ":" +
+			(EnvironmentAsset ? EnvironmentAsset->ToString() : std::string("none")) + ":";
+		std::erase_if(m_MaterialBindings, [&Prefix, &Key](const auto& Entry)
+		{
+			return Entry.first != Key && Entry.first.starts_with(Prefix);
+		});
 		m_MaterialBindings.emplace(Key, MaterialBinding{ std::move(*MaterialBuffer), std::move(*BindingSet) });
 		return {};
 	}
 
 	std::expected<void, SceneRendererError> SceneRendererMaterialBindingCache::EnsureEnvironmentBindings(
-		const AssetID& EnvironmentAsset, const EnvironmentLightingTextures& EnvironmentTextures, bool IsReady)
+		const AssetID& EnvironmentAsset, const EnvironmentLightingTextures& EnvironmentTextures, bool IsReady,
+		uint64_t ResourceRevision)
 	{
 		if (auto Initialized = RequireInitialized(); !Initialized) return Initialized;
-		const std::string Key = MakeEnvironmentBindingKey(EnvironmentAsset, IsReady);
+		const std::string Key = MakeEnvironmentBindingKey(EnvironmentAsset, IsReady, ResourceRevision);
 		if (m_EnvironmentBindings.contains(Key)) return {};
 		Detail::ScopedProfileTimer Timer("Environment GPU binding creation");
 		BindingSetDesc Description;
@@ -228,6 +239,11 @@ namespace PulseForge
 		auto BindingSet = m_Runtime.CreateBindingSet(Description);
 		if (!BindingSet)
 			return std::unexpected(MakeResourceError("Could not create environment binding set: " + BindingSet.error().Message));
+		const std::string Prefix = EnvironmentAsset.ToString() + (IsReady ? ":ready:" : ":loading:");
+		std::erase_if(m_EnvironmentBindings, [&Prefix, &Key](const auto& Entry)
+		{
+			return Entry.first != Key && Entry.first.starts_with(Prefix);
+		});
 		m_EnvironmentBindings.emplace(Key, std::move(*BindingSet));
 		return {};
 	}
@@ -245,30 +261,37 @@ namespace PulseForge
 	}
 
 	std::expected<const BindingSet*, SceneRendererError> SceneRendererMaterialBindingCache::ResolveMaterialBinding(
-		const SceneMeshInstance& Instance, const std::optional<AssetID>& EnvironmentAsset) const
+		const SceneMeshInstance& Instance, const std::optional<AssetID>& EnvironmentAsset, uint64_t EnvironmentRevision)
 	{
 		if (auto Initialized = RequireInitialized(); !Initialized) return std::unexpected(std::move(Initialized.error()));
 		if (!Instance.MaterialAsset)
 		{
 			if (EnvironmentAsset)
 			{
-				const auto EnvironmentBinding = m_EnvironmentBindings.find(MakeEnvironmentBindingKey(*EnvironmentAsset, true));
+				const auto EnvironmentBinding = m_EnvironmentBindings.find(
+					MakeEnvironmentBindingKey(*EnvironmentAsset, true, EnvironmentRevision));
 				if (EnvironmentBinding != m_EnvironmentBindings.end()) return EnvironmentBinding->second.get();
 			}
 			if (m_DefaultMaterialBinding) return m_DefaultMaterialBinding.get();
 			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::ResourceCreationFailed, Instance.Entity, Instance.MeshAsset,
 				"Prepared default material binding set is unavailable" });
 		}
-		const auto Binding = m_MaterialBindings.find(MakeMaterialBindingKey(*Instance.MaterialAsset, EnvironmentAsset));
+		auto Material = m_Materials->GetOrLoad(*Instance.MaterialAsset);
+		if (!Material)
+			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity, *Instance.MaterialAsset,
+				"Could not resolve material binding description: " + Material.error().Message });
+		const auto Binding = m_MaterialBindings.find(
+			MakeMaterialBindingKey(*Instance.MaterialAsset, EnvironmentAsset, Material->get(), EnvironmentRevision));
 		if (Binding == m_MaterialBindings.end())
 			return std::unexpected(SceneRendererError{ SceneRendererErrorCode::AssetLoadFailed, Instance.Entity, *Instance.MaterialAsset,
 				"Prepared material binding set is unavailable" });
 		return Binding->second.Set.get();
 	}
 
-	const BindingSet* SceneRendererMaterialBindingCache::FindEnvironmentBindings(const AssetID& EnvironmentAsset, bool IsReady) const
+	const BindingSet* SceneRendererMaterialBindingCache::FindEnvironmentBindings(
+		const AssetID& EnvironmentAsset, bool IsReady, uint64_t ResourceRevision) const
 	{
-		const auto Binding = m_EnvironmentBindings.find(MakeEnvironmentBindingKey(EnvironmentAsset, IsReady));
+		const auto Binding = m_EnvironmentBindings.find(MakeEnvironmentBindingKey(EnvironmentAsset, IsReady, ResourceRevision));
 		return Binding != m_EnvironmentBindings.end() ? Binding->second.get() : nullptr;
 	}
 
@@ -295,14 +318,26 @@ namespace PulseForge
 		return { SceneRendererErrorCode::ResourceCreationFailed, {}, {}, std::move(Message) };
 	}
 
-	std::string SceneRendererMaterialBindingCache::MakeMaterialBindingKey(
-		const AssetID& MaterialAsset, const std::optional<AssetID>& EnvironmentAsset)
+	std::string SceneRendererMaterialBindingCache::MakeMaterialBindingKey(const AssetID& MaterialAsset,
+		const std::optional<AssetID>& EnvironmentAsset, const MaterialAssetDesc& Description,
+		uint64_t EnvironmentRevision) const
 	{
-		return MaterialAsset.ToString() + ":" + (EnvironmentAsset ? EnvironmentAsset->ToString() : std::string("none"));
+		const auto TextureRevision = [this](const AssetID& Asset, TextureFormat Format)
+		{
+			return Asset.IsNil() ? uint64_t{ 0 } : m_Textures->GetResourceRevision(Asset, Format);
+		};
+		return MaterialAsset.ToString() + ":" + (EnvironmentAsset ? EnvironmentAsset->ToString() : std::string("none")) + ":" +
+			std::to_string(EnvironmentRevision) + ":" +
+			std::to_string(TextureRevision(Description.BaseColorTexture, TextureFormat::RGBA8_Srgb)) + ":" +
+			std::to_string(TextureRevision(Description.MetallicRoughnessTexture, TextureFormat::RGBA8_UNorm)) + ":" +
+			std::to_string(TextureRevision(Description.NormalTexture, TextureFormat::RGBA8_UNorm)) + ":" +
+			std::to_string(TextureRevision(Description.OcclusionTexture, TextureFormat::RGBA8_UNorm)) + ":" +
+			std::to_string(TextureRevision(Description.EmissiveTexture, TextureFormat::RGBA8_Srgb));
 	}
 
-	std::string SceneRendererMaterialBindingCache::MakeEnvironmentBindingKey(const AssetID& EnvironmentAsset, bool IsReady)
+	std::string SceneRendererMaterialBindingCache::MakeEnvironmentBindingKey(
+		const AssetID& EnvironmentAsset, bool IsReady, uint64_t ResourceRevision)
 	{
-		return EnvironmentAsset.ToString() + (IsReady ? ":ready" : ":loading");
+		return EnvironmentAsset.ToString() + (IsReady ? ":ready:" : ":loading:") + std::to_string(ResourceRevision);
 	}
 } // namespace PulseForge

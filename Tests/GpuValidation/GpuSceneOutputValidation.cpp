@@ -63,7 +63,7 @@ namespace PulseForge::GpuValidation
 			if (!Prepared) return std::unexpected("Could not prepare the scene for tone mapping: " + Prepared.error().Message);
 
 			const bool HasEnvironment = m_ToneMappingFrame < 7;
-			if (HasEnvironment && m_Renderer.IsEnvironmentLightingPending()) return false;
+			if (m_Renderer.IsAssetPreparationPending()) return false;
 			if (HasEnvironment && !m_Renderer.HasPreparedEnvironmentLighting())
 				return std::unexpected("Tone-mapping scenario did not prepare its environment lighting");
 			m_ScenePrepared = true;
@@ -84,7 +84,7 @@ namespace PulseForge::GpuValidation
 		if (!Prepared) return std::unexpected("Could not prepare the bundled scene for HDR rendering: " + Prepared.error().Message);
 
 		const bool SceneHasEnvironment = m_SceneCompletedFrames < 4 || m_ScenarioIndex == 1;
-		if (SceneHasEnvironment && m_Renderer.IsEnvironmentLightingPending()) return false;
+		if (m_Renderer.IsAssetPreparationPending()) return false;
 		if (SceneHasEnvironment && !m_Renderer.HasPreparedEnvironmentLighting())
 			return std::unexpected("Bundled validation scene did not produce prepared environment lighting");
 		m_ScenePrepared = true;
