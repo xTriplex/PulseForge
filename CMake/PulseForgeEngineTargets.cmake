@@ -65,6 +65,7 @@ add_library(PulseForgeAssetCatalog STATIC
 	PulseForge/Source/Private/Assets/AssetMetadata.cpp
 	PulseForge/Source/Private/Assets/AssetOperations.cpp
 	PulseForge/Source/Private/Assets/AssetPathResolver.cpp
+	PulseForge/Source/Private/Assets/GltfRelocation.cpp
 	PulseForge/Source/Private/Assets/AssetReferenceValidator.cpp
 	PulseForge/Source/Private/Assets/AssetRegistry.cpp
 	PulseForge/Source/Private/Assets/GltfPrimitiveInspector.cpp
@@ -190,6 +191,7 @@ target_compile_definitions(PulseForgeAssetImporters PRIVATE _CRT_SECURE_NO_WARNI
 target_link_libraries(PulseForgeAssetImporters PUBLIC PulseForgeAssetCatalog PulseForgeMeshData PulseForgeImageData)
 target_precompile_headers(PulseForgeAssetImporters PRIVATE "${PULSEFORGE_ENGINE_PCH}")
 add_library(PulseForgeAssetDependencyCatalog STATIC
+	PulseForge/Source/Private/Assets/AssetEditTransaction.cpp
 	PulseForge/Source/Private/Assets/AssetDependencyCatalog.cpp
 	PulseForge/Source/Private/Assets/AssetDependencyExtractor.cpp
 )

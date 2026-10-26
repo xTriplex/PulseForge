@@ -1,4 +1,5 @@
 #include "Assets/AssetDependencyCatalog.h"
+#include "Assets/AssetEditTransaction.h"
 #include "Assets/AssetMetadata.h"
 #include "Assets/MaterialAsset.h"
 #include "Core/Log.h"
@@ -64,5 +65,8 @@ int main()
 		Dependencies.front().Status != PulseForge::AssetDependencyStatus::Resolved)
 		return 11;
 	const auto Referencers = Snapshot->GetDirectReferencers(Dependencies.front().Target);
-	return Referencers.size() == 1 && Referencers.front().Referrer == MaterialNode ? 0 : 12;
+	if (Referencers.size() != 1 || Referencers.front().Referrer != MaterialNode) return 12;
+	const auto MovePlan = PulseForge::AssetEditTransaction::PlanMove(
+		*Snapshot, MaterialMetadata->ID, std::filesystem::path("Assets") / "RenamedSurface.material");
+	return MovePlan && (*MovePlan)->GetAsset() == MaterialMetadata->ID ? 0 : 14;
 }

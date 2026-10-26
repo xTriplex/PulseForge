@@ -450,21 +450,29 @@ namespace PulseForge
 		catch (const std::exception& Exception)
 		{
 			return std::unexpected(MakeMetadataError(
-				AssetMetadataErrorCode::FileWriteFailed, SidecarPath,
-				std::string("Could not save import settings: ") + Exception.what()));
+				AssetMetadataErrorCode::FileWriteFailed, SidecarPath, std::string("Could not save import settings: ") + Exception.what()));
 		}
 	}
 
 	std::expected<AssetMetadata, AssetMetadataError> AssetMetadataSerializer::CreateDuplicateForNewAsset(
-		const std::filesystem::path& SourceAssetPath,
-		const std::filesystem::path& DuplicateAssetPath)
+		const std::filesystem::path& SourceAssetPath, const std::filesystem::path& DuplicateAssetPath)
+	{
+		const auto GeneratedID = UUID::Generate();
+		if (!GeneratedID)
+		{
+			return std::unexpected(
+				MakeMetadataError(AssetMetadataErrorCode::UUIDGenerationFailed, DuplicateAssetPath, GeneratedID.error().Message));
+		}
+		return CreateDuplicateForNewAsset(SourceAssetPath, DuplicateAssetPath, *GeneratedID);
+	}
+
+	std::expected<AssetMetadata, AssetMetadataError> AssetMetadataSerializer::CreateDuplicateForNewAsset(
+		const std::filesystem::path& SourceAssetPath, const std::filesystem::path& DuplicateAssetPath, const AssetID& DuplicateID)
 	{
 		if (SourceAssetPath.empty() || IsMetadataSidecarPath(SourceAssetPath) || DuplicateAssetPath.empty() ||
-			DuplicateAssetPath.filename().empty() || IsMetadataSidecarPath(DuplicateAssetPath))
+			DuplicateAssetPath.filename().empty() || IsMetadataSidecarPath(DuplicateAssetPath) || DuplicateID.IsNil())
 		{
-			return std::unexpected(MakeMetadataError(
-				AssetMetadataErrorCode::InvalidPath,
-				DuplicateAssetPath,
+			return std::unexpected(MakeMetadataError(AssetMetadataErrorCode::InvalidPath, DuplicateAssetPath,
 				"Asset duplication requires valid source and destination file paths"));
 		}
 
@@ -474,9 +482,7 @@ namespace PulseForge
 			const auto SourceStatus = std::filesystem::symlink_status(SourceAssetPath, FileError);
 			if (FileError || !std::filesystem::is_regular_file(SourceStatus))
 			{
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::SourceAssetMissing,
-					SourceAssetPath,
+				return std::unexpected(MakeMetadataError(AssetMetadataErrorCode::SourceAssetMissing, SourceAssetPath,
 					"Cannot duplicate metadata because the source asset is missing or is not a regular file: " +
 						PathForMessage(SourceAssetPath)));
 			}
@@ -485,9 +491,7 @@ namespace PulseForge
 			const auto DuplicateStatus = std::filesystem::symlink_status(DuplicateAssetPath, FileError);
 			if (FileError || !std::filesystem::is_regular_file(DuplicateStatus))
 			{
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::DestinationAssetMissing,
-					DuplicateAssetPath,
+				return std::unexpected(MakeMetadataError(AssetMetadataErrorCode::DestinationAssetMissing, DuplicateAssetPath,
 					"Duplicate metadata requires an existing regular destination asset: " + PathForMessage(DuplicateAssetPath)));
 			}
 
@@ -495,9 +499,7 @@ namespace PulseForge
 			std::ifstream Input(SourceSidecarPath, std::ios::binary);
 			if (!Input.is_open())
 			{
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::FileOpenFailed,
-					SourceSidecarPath,
+				return std::unexpected(MakeMetadataError(AssetMetadataErrorCode::FileOpenFailed, SourceSidecarPath,
 					"Could not open source metadata for duplication: " + PathForMessage(SourceSidecarPath)));
 			}
 			std::string Data(MaxMetadataBytes + 1, '\0');
@@ -507,47 +509,38 @@ namespace PulseForge
 				return std::unexpected(MakeMetadataError(AssetMetadataErrorCode::FileReadFailed, SourceSidecarPath,
 					"Could not read source metadata completely: " + PathForMessage(SourceSidecarPath)));
 			if (Count > static_cast<std::streamsize>(MaxMetadataBytes))
-				return std::unexpected(MakeMetadataError(AssetMetadataErrorCode::InvalidDocument, SourceSidecarPath,
-					"Source asset metadata exceeds its size limit"));
+				return std::unexpected(MakeMetadataError(
+					AssetMetadataErrorCode::InvalidDocument, SourceSidecarPath, "Source asset metadata exceeds its size limit"));
 			Data.resize(static_cast<size_t>(Count));
 
 			Json Document = ParseUniqueJson(Data);
-			if (auto ParsedMetadata = ValidateMetadataDocument(Document, SourceSidecarPath); !ParsedMetadata)
-				return std::unexpected(std::move(ParsedMetadata.error()));
-			const auto GeneratedID = UUID::Generate();
-			if (!GeneratedID)
-			{
-				return std::unexpected(MakeMetadataError(
-					AssetMetadataErrorCode::UUIDGenerationFailed,
-					DuplicateAssetPath,
-					GeneratedID.error().Message));
-			}
-			Document["uuid"] = GeneratedID->ToString();
+			const auto ParsedMetadata = ValidateMetadataDocument(Document, SourceSidecarPath);
+			if (!ParsedMetadata) return std::unexpected(std::move(ParsedMetadata.error()));
+			if (ParsedMetadata->ID == DuplicateID)
+				return std::unexpected(MakeMetadataError(AssetMetadataErrorCode::InvalidIdentifier, DuplicateAssetPath,
+					"Duplicate asset identity must differ from its source identity"));
+			Document["uuid"] = DuplicateID.ToString();
 
 			const std::filesystem::path DuplicateSidecarPath = GetSidecarPath(DuplicateAssetPath);
-			if (auto WriteResult = WriteNewMetadataFile(DuplicateSidecarPath, *GeneratedID, Document); !WriteResult)
+			if (auto WriteResult = WriteNewMetadataFile(DuplicateSidecarPath, DuplicateID, Document); !WriteResult)
 				return std::unexpected(std::move(WriteResult.error()));
 
-			return AssetMetadata{ *GeneratedID, CurrentVersion };
+			return AssetMetadata{ DuplicateID, CurrentVersion };
 		}
 		catch (const nlohmann::json::exception& Exception)
 		{
-			return std::unexpected(MakeMetadataError(
-				AssetMetadataErrorCode::InvalidDocument,
-				SourceAssetPath,
+			return std::unexpected(MakeMetadataError(AssetMetadataErrorCode::InvalidDocument, SourceAssetPath,
 				std::string("Source asset metadata became invalid during duplication: ") + Exception.what()));
 		}
 		catch (const DuplicateJsonKeyError& Exception)
 		{
-			return std::unexpected(MakeMetadataError(
-				AssetMetadataErrorCode::InvalidDocument, GetSidecarPath(SourceAssetPath), Exception.what()));
+			return std::unexpected(
+				MakeMetadataError(AssetMetadataErrorCode::InvalidDocument, GetSidecarPath(SourceAssetPath), Exception.what()));
 		}
 		catch (const std::exception& Exception)
 		{
-			return std::unexpected(MakeMetadataError(
-				AssetMetadataErrorCode::FileWriteFailed,
-				DuplicateAssetPath,
+			return std::unexpected(MakeMetadataError(AssetMetadataErrorCode::FileWriteFailed, DuplicateAssetPath,
 				std::string("Could not duplicate asset metadata: ") + Exception.what()));
 		}
 	}
-}
+} // namespace PulseForge

@@ -2,6 +2,8 @@
 
 #include "Editor/EditorStyle.h"
 
+#include <misc/cpp/imgui_stdlib.h>
+
 namespace PulseForgeEditor
 {
 	namespace
@@ -66,6 +68,50 @@ namespace PulseForgeEditor
 		ImGui::EndDragDropSource();
 	}
 
+	void EditorContentBrowserNavigation::DrawFolderContextMenu(
+		const std::filesystem::path& Folder, EditorContentBrowserNavigationActions& Actions, std::function<void()>& DeferredAction)
+	{
+		if (DeferredAction || !ImGui::BeginPopupContextItem("ManagedFolderContext")) return;
+		if (ImGui::MenuItem("Rename folder"))
+		{
+			m_RenameFolder = Folder;
+			m_FolderRenameText = PathToUtf8(Folder.filename());
+			m_OpenFolderRenamePopup = true;
+		}
+		if (ImGui::MenuItem("Duplicate folder")) DeferredAction = [&Actions, Folder] { Actions.QueueFolderDuplicateAfterSave(Folder); };
+		ImGui::EndPopup();
+	}
+
+	void EditorContentBrowserNavigation::DrawFolderRenamePopup(
+		EditorContentBrowserNavigationActions& Actions, std::function<void()>& DeferredAction)
+	{
+		constexpr const char* PopupName = "Rename Managed Folder";
+		if (m_OpenFolderRenamePopup)
+		{
+			ImGui::OpenPopup(PopupName);
+			m_OpenFolderRenamePopup = false;
+		}
+		if (!ImGui::BeginPopupModal(PopupName, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+		ImGui::TextWrapped("Rename %s", PathToUtf8(m_RenameFolder).c_str());
+		ImGui::SetNextItemWidth(300.0f);
+		const bool Commit = ImGui::InputText("New folder name", &m_FolderRenameText, ImGuiInputTextFlags_EnterReturnsTrue);
+		const std::filesystem::path NewName = std::filesystem::u8path(m_FolderRenameText);
+		const bool ValidName =
+			!m_FolderRenameText.empty() && NewName.filename() == NewName && m_FolderRenameText != "." && m_FolderRenameText != "..";
+		ImGui::BeginDisabled(!ValidName);
+		const bool Clicked = ImGui::Button("Rename");
+		if (ValidName && (Commit || Clicked))
+		{
+			const std::filesystem::path Destination = m_RenameFolder.parent_path() / NewName;
+			DeferredAction = [&Actions, Source = m_RenameFolder, Destination] { Actions.QueueFolderMoveAfterSave(Source, Destination); };
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndDisabled();
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+	}
+
 	void EditorContentBrowserNavigation::HandleFolderDropTarget(const EditorContentBrowserState& State,
 		const std::filesystem::path& Destination, EditorContentBrowserNavigationActions& Actions, std::function<void()>& DeferredAction)
 	{
@@ -99,7 +145,8 @@ namespace PulseForgeEditor
 				if (!SourceText.empty() && SourceText.back() == '\0') SourceText.remove_suffix(1);
 				const std::string SourceString(SourceText);
 				const std::filesystem::path Source = std::filesystem::u8path(SourceString);
-				DeferredAction = [&Actions, Source, Destination] { Actions.QueueFolderMoveAfterSave(Source, Destination); };
+				DeferredAction = [&Actions, Source, Target = Destination / Source.filename()]
+				{ Actions.QueueFolderMoveAfterSave(Source, Target); };
 			}
 		}
 		ImGui::EndDragDropTarget();
@@ -170,6 +217,7 @@ namespace PulseForgeEditor
 	{
 		if (State.GridView()) DrawFolderGrid(State, Folders, Style, Actions, DeferredAction);
 		else DrawFolderList(State, Folders, Style, Actions, DeferredAction);
+		DrawFolderRenamePopup(Actions, DeferredAction);
 	}
 
 	void EditorContentBrowserNavigation::DrawFolderList(EditorContentBrowserState& State,
@@ -198,6 +246,7 @@ namespace PulseForgeEditor
 				State.SelectedFolder() = Folder.RelativePath;
 				if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) State.SetCurrentFolder(Folder.RelativePath);
 			}
+			DrawFolderContextMenu(Folder.RelativePath, Actions, DeferredAction);
 			BeginFolderDragSource(Folder.RelativePath, Folder.Name);
 			HandleFolderDropTarget(State, Folder.RelativePath, Actions, DeferredAction);
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", StableID.c_str());
@@ -247,6 +296,7 @@ namespace PulseForgeEditor
 						State.SelectedFolder() = Folder.RelativePath;
 						if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) State.SetCurrentFolder(Folder.RelativePath);
 					}
+					DrawFolderContextMenu(Folder.RelativePath, Actions, DeferredAction);
 					BeginFolderDragSource(Folder.RelativePath, Folder.Name);
 					HandleFolderDropTarget(State, Folder.RelativePath, Actions, DeferredAction);
 					if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", StableID.c_str());

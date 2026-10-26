@@ -100,6 +100,7 @@ if(BUILD_TESTING)
 		Tests/AssetDependencyCatalogTests.cpp
 		Tests/AssetDependencyCorrectionTests.cpp
 		Tests/AssetDependencyPublicationTests.cpp
+		Tests/AssetEditTransactionTests.cpp
 	)
 	target_include_directories(PulseForgeAssetTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_link_libraries(PulseForgeAssetTests PRIVATE
@@ -109,6 +110,7 @@ if(BUILD_TESTING)
 	endif()
 	add_test(NAME PulseForge.Assets COMMAND PulseForgeAssetTests)
 	add_test(NAME PulseForge.AssetDependencyCatalog COMMAND PulseForgeAssetTests --dependency-catalog-only)
+	add_test(NAME PulseForge.AssetEditing COMMAND PulseForgeAssetTests --asset-edit-only)
 	add_executable(PulseForgeAssetDependencyConsumer Tests/ModuleConsumers/AssetDependencyConsumer.cpp)
 	target_link_libraries(PulseForgeAssetDependencyConsumer PRIVATE PulseForgeAssetDependencyCatalog)
 	set_property(TARGET PulseForgeAssetDependencyConsumer PROPERTY DISABLE_PRECOMPILE_HEADERS ON)

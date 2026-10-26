@@ -60,7 +60,9 @@ namespace PulseForge
 			const std::filesystem::path& SourceAssetPath);
 		// Both files must exist. Copies source settings to the new asset while assigning it a fresh UUID.
 		[[nodiscard]] static std::expected<AssetMetadata, AssetMetadataError> CreateDuplicateForNewAsset(
-			const std::filesystem::path& SourceAssetPath,
-			const std::filesystem::path& DuplicateAssetPath);
+			const std::filesystem::path& SourceAssetPath, const std::filesystem::path& DuplicateAssetPath);
+		// Transaction plans can reserve the new identity before any filesystem mutation.
+		[[nodiscard]] static std::expected<AssetMetadata, AssetMetadataError> CreateDuplicateForNewAsset(
+			const std::filesystem::path& SourceAssetPath, const std::filesystem::path& DuplicateAssetPath, const AssetID& DuplicateID);
 	};
-}
+} // namespace PulseForge

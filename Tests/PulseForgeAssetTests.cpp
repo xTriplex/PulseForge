@@ -5,6 +5,7 @@
 void RunAssetDependencyCatalogTests(TestRunner& Tests);
 void RunAssetDependencyCorrectionTests(TestRunner& Tests);
 void RunAssetDependencyPublicationTests(TestRunner& Tests);
+void RunAssetEditTransactionTests(TestRunner& Tests);
 
 int main(int ArgumentCount, char** Arguments)
 {
@@ -15,6 +16,12 @@ int main(int ArgumentCount, char** Arguments)
 		RunAssetDependencyCatalogTests(Tests);
 		RunAssetDependencyCorrectionTests(Tests);
 		RunAssetDependencyPublicationTests(Tests);
+		RunAssetEditTransactionTests(Tests);
+		return Tests.Finish();
+	}
+	if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--asset-edit-only")
+	{
+		RunAssetEditTransactionTests(Tests);
 		return Tests.Finish();
 	}
 	RunAssetsTests(Tests);
@@ -24,5 +31,6 @@ int main(int ArgumentCount, char** Arguments)
 	RunAssetDependencyCatalogTests(Tests);
 	RunAssetDependencyCorrectionTests(Tests);
 	RunAssetDependencyPublicationTests(Tests);
+	RunAssetEditTransactionTests(Tests);
 	return Tests.Finish();
 }
