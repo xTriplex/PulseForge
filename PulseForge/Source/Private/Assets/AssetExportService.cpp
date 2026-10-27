@@ -607,11 +607,9 @@ namespace PulseForge
 #if !defined(_WIN32)
 			std::error_code PermissionError;
 			const auto Permissions = std::filesystem::status(Path, PermissionError).permissions();
-			const auto ExecuteBits = std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec |
-				std::filesystem::perms::others_exec;
-			if (PermissionError || (Permissions & ExecuteBits) == std::filesystem::perms::none)
+			if (PermissionError || (Permissions & std::filesystem::perms::owner_exec) == std::filesystem::perms::none)
 				return std::unexpected(MakeError(AssetExportErrorCode::TemplateIncomplete,
-					"Template entrypoint does not have executable permissions on this platform", Path));
+					"Template entrypoint is not executable by the export owner on this platform", Path));
 #endif
 			const auto U16 = [&Header](size_t Offset)
 			{

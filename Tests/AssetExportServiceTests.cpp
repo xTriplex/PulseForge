@@ -440,7 +440,8 @@ namespace
 		const auto Executable = Fixture.Root() / std::filesystem::u8path(Descriptor.Entrypoint);
 		PF_CHECK(Tests, WriteValidTestExecutable(Executable));
 		std::error_code Error;
-		std::filesystem::permissions(Executable, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+		std::filesystem::permissions(Executable, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
+			std::filesystem::perms::group_exec | std::filesystem::perms::others_exec,
 			std::filesystem::perm_options::replace, Error);
 		PF_CHECK(Tests, !Error);
 		const auto DescriptorPath = Fixture.Root() / "template.json";
