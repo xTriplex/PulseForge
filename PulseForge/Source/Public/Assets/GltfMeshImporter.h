@@ -2,8 +2,8 @@
 
 #include "Assets/AssetRegistry.h"
 #include "Assets/AssetImportProvenance.h"
+#include "Assets/CookedProductCodec.h"
 #include "Core/Core.h"
-#include "Renderer/MeshData.h"
 
 #include <cstdint>
 #include <array>
@@ -15,25 +15,6 @@
 
 namespace PulseForge
 {
-	struct GltfMeshVertex
-	{
-		float Position[3]{};
-		float Color[4]{ 1.0f, 1.0f, 1.0f, 1.0f };
-		float TexCoord[2]{};
-		float Normal[3]{ 0.0f, 0.0f, 1.0f };
-		std::array<float, 4> Tangent{ 1.0f, 0.0f, 0.0f, 1.0f };
-	};
-
-	struct ImportedGltfMesh
-	{
-		std::string Name;
-		std::vector<GltfMeshVertex> Vertices;
-		std::vector<uint32_t> Indices;
-
-		// The returned spans borrow from this object's vectors and remain valid until it is modified, moved, or destroyed.
-		[[nodiscard]] MeshDesc GetMeshDescription() const;
-	};
-
 	enum class MissingNormalsPolicy : uint8_t
 	{
 		GenerateSmooth,

@@ -293,6 +293,22 @@ namespace PulseForgeEditor::Detail
 		std::array<float, 3> CameraForward{};
 		std::array<float, 3> CameraPosition{};
 		float CameraMoveSpeed = 0.0f;
+		std::string WheelAction;
+		uint64_t ScrollCallbackSequence = 0;
+		uintptr_t ScrollCallbackWindow = 0;
+		uint32_t ScrollCallbackViewportID = 0;
+		uint64_t ScrollCallbackInputWindowID = 0;
+		float ScrollCallbackXOffset = 0.0f;
+		float ScrollCallbackYOffset = 0.0f;
+		bool ScrollCallbackAccumulated = false;
+		uint64_t ScrollConsumedSequence = 0;
+		float ScrollConsumedDelta = 0.0f;
+		float OwnerScrollDelta = 0.0f;
+		uint64_t OwnerInputWindowID = 0;
+		bool OwnerScrollRouteRegistered = false;
+		bool OwnerRouterScrollCallbackInstalled = false;
+		bool OwnerBackendScrollCallbackChained = false;
+		bool LastScrollCallbackMatchesOwner = false;
 		int CursorMode = 0;
 		bool RawMotionSupported = false;
 		bool RawMotionEnabled = false;
@@ -322,7 +338,7 @@ namespace PulseForgeEditor::Detail
 	class SceneViewportNativeSmokeCoordinator final
 	{
 	public:
-		explicit SceneViewportNativeSmokeCoordinator(bool Enabled) noexcept;
+		explicit SceneViewportNativeSmokeCoordinator(bool Enabled);
 		[[nodiscard]] bool IsEnabled() const noexcept;
 		[[nodiscard]] bool Complete() const noexcept;
 		[[nodiscard]] std::optional<std::string> Observe(const SceneViewportNativeSmokeObservation& Observation);
@@ -355,6 +371,7 @@ namespace PulseForgeEditor::Detail
 		std::array<float, 3> m_InitialCameraForward{};
 		std::array<float, 3> m_ReattachedCameraPosition{};
 		std::array<float, 3> m_LastObservedCameraPosition{};
+		std::string m_WheelActionID;
 		bool m_CaptureWasObserved = false;
 		bool m_NormalReleaseObserved = false;
 		bool m_LastRightButtonDown = false;
@@ -373,6 +390,8 @@ namespace PulseForgeEditor::Detail
 		double m_LastStateObservationTime = -1.0;
 		uint32_t m_LastStateViewportID = 0;
 		uintptr_t m_LastStateWindow = 0;
+		uint64_t m_LastScrollCallbackSequence = 0;
+		uint64_t m_LastScrollConsumedSequence = 0;
 		std::array<float, 8> m_LastCameraGeometry{};
 	};
 } // namespace PulseForgeEditor::Detail

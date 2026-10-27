@@ -112,6 +112,52 @@ def is_fresh_geometry_sample(line: str | None, previous_sample: int) -> bool:
     return sample > previous_sample
 
 
+def wheel_callback_matches_owner(
+    fields: dict[str, str], action_id: str, previous_callback_sequence: int, owner_viewport: str, owner_window: str
+) -> bool:
+    try:
+        return (
+            fields.get("wheel_action_id") == action_id
+            and int(fields.get("scroll_callback_sequence", "0")) > previous_callback_sequence
+            and fields.get("scroll_callback_viewport") == owner_viewport
+            and fields.get("scroll_callback_window", "").lower() == owner_window.lower()
+            and fields.get("scroll_callback_input_window") == fields.get("owner_input_window")
+            and fields.get("last_scroll_callback_matches_owner") == "1"
+            and fields.get("scroll_callback_accumulated") == "1"
+            and fields.get("owner_scroll_route_registered") == "1"
+            and fields.get("owner_router_scroll_callback_installed") == "1"
+            and fields.get("owner_backend_scroll_callback_chained") == "1"
+        )
+    except (KeyError, ValueError):
+        return False
+
+
+def wheel_delta_consumed(fields: dict[str, str], action_id: str, callback_sequence: int) -> bool:
+    try:
+        return (
+            fields.get("wheel_action_id") == action_id
+            and int(fields.get("scroll_consumed_sequence", "0")) >= callback_sequence
+            and float(fields.get("scroll_consumed_delta", "0")) != 0.0
+            and float(fields.get("owner_scroll_delta", "0")) != 0.0
+        )
+    except ValueError:
+        return False
+
+
+def wheel_speed_changed(fields: dict[str, str], action_id: str, speed_before: float) -> bool:
+    try:
+        return (
+            fields.get("wheel_action_id") == action_id
+            and fields.get("focused") == "1"
+            and fields.get("capture") == "1"
+            and fields.get("right_button_down") == "1"
+            and fields.get("wheel_action") == "adjust-fly-speed"
+            and float(fields.get("camera_speed", "nan")) > speed_before
+        )
+    except ValueError:
+        return False
+
+
 def find_fresh_state(
     observations: list[tuple[int, float, str]],
     dropped_through: int,
@@ -376,6 +422,8 @@ def main() -> int:
 
         environment = os.environ.copy()
         environment["PULSEFORGE_EDITOR_SETTINGS_DIR"] = str(settings_directory)
+        wheel_id = uuid.uuid4().hex
+        environment["PULSEFORGE_SCENE_VIEWPORT_WHEEL_ACTION_ID"] = wheel_id
         command = [str(editor), "--project", str(project), "--scene-viewport-native-smoke"]
         print(f"MACOS_SCENE_VIEWPORT_COMMAND={command!r}; cwd={working_directory}")
         process = subprocess.Popen(
@@ -426,9 +474,10 @@ def main() -> int:
                 raise ValueError(f"native camera state observation sequence must be positive: {line!r}")
             return sequence
 
-        def wait_for_state(after_sequence: int, label: str, predicate) -> str:
+        def wait_for_state(after_sequence: int, label: str, predicate, timeout_seconds: float | None = None) -> str:
             assert process is not None and capture is not None
-            while time.monotonic() < deadline:
+            wait_deadline = deadline if timeout_seconds is None else min(deadline, time.monotonic() + timeout_seconds)
+            while time.monotonic() < wait_deadline:
                 if capture.reader_error:
                     raise RuntimeError(f"editor output reader failed while waiting for {label}: {capture.reader_error}")
                 with capture.state_observations_lock:
@@ -450,8 +499,10 @@ def main() -> int:
                     )
                 if process.poll() is not None:
                     raise RuntimeError(f"editor exited with status {process.returncode} before {label}")
-                capture.finished.wait(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
-            raise TimeoutError(f"timed out waiting for {label}; after_sequence={after_sequence}; process_status={process.poll()}")
+                capture.finished.wait(timeout=min(0.1, max(0.0, wait_deadline - time.monotonic())))
+            latest_state = capture.marker_lines.get(STATE, "<no state observation>")
+            raise TimeoutError(f"timed out waiting for {label}; after_sequence={after_sequence}; "
+                               f"latest_state={latest_state}; process_status={process.poll()}")
 
         ready_line = wait_for(READY, "main Scene Viewport and image ready")
         if not screenshot("macos-scene-viewport-checkpoint-main.png", "main-owner-scene-loaded"):
@@ -567,21 +618,51 @@ def main() -> int:
         capture_state = marker_fields(capture_state_line, STATE)
         capture_state_sample = int(capture_state["sequence"])
         speed_before_wheel = float(capture_state["camera_speed"])
-        wheel_id = uuid.uuid4().hex
+        previous_callback_sequence = int(capture_state.get("scroll_callback_sequence", "0"))
+        wheel_baseline = latest_state_sequence()
+        print(f"MACOS_SCENE_VIEWPORT_OWNER_WHEEL_ARMED=action_id={wheel_id}; after_sequence={wheel_baseline}; "
+              f"prior_callback_sequence={previous_callback_sequence}; owner_viewport={detached['owner_viewport']}; "
+              f"owner_window={detached['owner_window']}; speed_before={speed_before_wheel:.4f}")
         code, stdout, stderr = run_bounded_command(
             [str(driver), "scroll", str(process.pid), wheel_id, str(image_center_x), str(image_center_y), "1"],
             timeout=min(8.0, max(0.1, deadline - time.monotonic())),
         )
-        print(f"MACOS_SCENE_VIEWPORT_OWNER_WHEEL=action_id={wheel_id}; exit_code={code}; "
+        print(f"MACOS_SCENE_VIEWPORT_OWNER_WHEEL=action_id={wheel_id}; after_sequence={wheel_baseline}; "
+              f"exit_code={code}; "
               f"output={stdout[-1000:]!r}; error={stderr[-800:]!r}")
         if code != 0:
             raise RuntimeError("the single detached-owner wheel event was not posted")
-        wheel_baseline = latest_state_sequence()
-        wheel_state_line = wait_for_state(
-            wheel_baseline, "detached-owner fly speed changed from owner wheel input",
-            lambda fields: fields.get("focused") == "1" and fields.get("capture") == "1" and
-            float(fields.get("camera_speed", "nan")) > speed_before_wheel,
+        callback_state_line = wait_for_state(
+            wheel_baseline, "GLFW scroll callback reached the detached owner",
+            lambda fields: fields.get("wheel_action_id") == wheel_id and
+            int(fields.get("scroll_callback_sequence", "0")) > previous_callback_sequence,
+            timeout_seconds=5.0,
         )
+        callback_state = marker_fields(callback_state_line, STATE)
+        callback_sequence = int(callback_state["scroll_callback_sequence"])
+        if not wheel_callback_matches_owner(callback_state, wheel_id, previous_callback_sequence,
+                                            detached["owner_viewport"], detached["owner_window"]):
+            raise RuntimeError(f"scroll callback did not accumulate under the detached owner: {callback_state_line}")
+
+        if wheel_delta_consumed(callback_state, wheel_id, callback_sequence):
+            consumed_state_line = callback_state_line
+            consumed_state = callback_state
+        else:
+            consumed_state_line = wait_for_state(
+                int(callback_state["sequence"]), "detached-owner scroll delta consumed by viewport",
+                lambda fields: wheel_delta_consumed(fields, wheel_id, callback_sequence),
+                timeout_seconds=5.0,
+            )
+            consumed_state = marker_fields(consumed_state_line, STATE)
+
+        if wheel_speed_changed(consumed_state, wheel_id, speed_before_wheel):
+            wheel_state_line = consumed_state_line
+        else:
+            wheel_state_line = wait_for_state(
+                int(consumed_state["sequence"]), "detached-owner fly speed changed from owner wheel input",
+                lambda fields: wheel_speed_changed(fields, wheel_id, speed_before_wheel),
+                timeout_seconds=5.0,
+            )
         wheel_state = marker_fields(wheel_state_line, STATE)
         wheel_state_sample = int(wheel_state["sequence"])
 

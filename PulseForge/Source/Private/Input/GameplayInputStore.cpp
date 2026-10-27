@@ -136,10 +136,18 @@ namespace PulseForge
 		const UUID& ProjectId,
 		const std::filesystem::path& UserDataRoot)
 	{
-		GameplayInputMapLoad Result;
 		auto Defaults = LoadProjectGameplayActionMap(ProjectRoot);
 		if (!Defaults) return std::unexpected(Defaults.error());
-		Result.ActionMap = std::move(*Defaults);
+		return ApplyGameplayInputOverrides(std::move(*Defaults), ProjectId, UserDataRoot);
+	}
+
+	std::expected<GameplayInputMapLoad, GameplayInputError> ApplyGameplayInputOverrides(
+		GameplayActionMap Defaults,
+		const UUID& ProjectId,
+		const std::filesystem::path& UserDataRoot)
+	{
+		GameplayInputMapLoad Result;
+		Result.ActionMap = std::move(Defaults);
 		if (ProjectId.IsNil())
 		{
 			Result.Warnings.push_back("Project identity is unavailable; project-scoped input overrides were not loaded");

@@ -1,8 +1,11 @@
 #include "Scripting/ScriptEnvironment.h"
 #include "Scripting/ScriptRuntimeInternal.h"
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/PrefabAssetService.h"
 #include "Assets/Project.h"
+#endif
+#include "Runtime/CookedContentProvider.h"
 #include "Audio/AudioSceneRuntime.h"
 #include "Core/Input.h"
 #include "Input/GameplayInput.h"
@@ -522,8 +525,8 @@ namespace PulseForge::ScriptEnvironment
 		int LuaSceneSpawnPrefab(lua_State* State)
 		{
 			ScriptInstance* Instance = GetScriptInstance(State);
-			if (!Instance || !Instance->SourceScene || !Instance->SourceProject)
-				return ReturnHostError(State, "scene or project service is no longer available");
+			if (!Instance || !Instance->SourceScene || (!Instance->SourceProject && !Instance->CookedAssets))
+				return ReturnHostError(State, "scene or asset provider is no longer available");
 			const auto PrefabIdentifier = ReadUUIDArgument(State, 1);
 			if (!PrefabIdentifier) return ReturnHostError(State, "scene.spawn_prefab requires a canonical prefab asset UUID");
 
@@ -533,8 +536,21 @@ namespace PulseForge::ScriptEnvironment
 			try
 			{
 				{
-					auto Result = PrefabAssetService::Instantiate(*PrefabIdentifier, Instance->SourceProject->GetRootPath(),
-						Instance->SourceProject->GetAssetRegistry(), *Instance->SourceScene);
+#if defined(PF_COOKED_RUNTIME_ONLY)
+					auto Result = Instance->CookedAssets->InstantiatePrefab(*PrefabIdentifier, *Instance->SourceScene);
+#else
+					auto Result = Instance->CookedAssets
+						? Instance->CookedAssets->InstantiatePrefab(*PrefabIdentifier, *Instance->SourceScene)
+						: [&]() -> std::expected<Entity, CookedAssetCatalogError>
+						{
+							auto SourceResult = PrefabAssetService::Instantiate(*PrefabIdentifier, Instance->SourceProject->GetRootPath(),
+								Instance->SourceProject->GetAssetRegistry(), *Instance->SourceScene);
+							if (!SourceResult)
+								return std::unexpected(CookedAssetCatalogError{ .Code = CookedAssetCatalogErrorCode::InvalidPayload,
+									.Asset = *PrefabIdentifier, .Message = SourceResult.error().Message });
+							return *SourceResult;
+						}();
+#endif
 					if (Result)
 					{
 						UserData->Value = std::move(*Result);

@@ -34,6 +34,7 @@ namespace PulseForge
 	class SceneRendererPipelineCache;
 	class SceneRendererMaterialBindingCache;
 	class Mesh;
+	class CookedContentProvider;
 
 	using PreparedMeshResourceMap = std::unordered_map<AssetID, const Mesh*, UUIDHash>;
 	using PreparedMaterialBindingMap = std::unordered_map<UUID, const BindingSet*, UUIDHash>;
@@ -110,6 +111,9 @@ namespace PulseForge
 		static constexpr size_t MaxLocalLights = MaxLocalLightCount;
 		[[nodiscard]] static std::expected<std::unique_ptr<SceneRenderer>, SceneRendererError> Create(
 			RenderDevice& Runtime, const Project& SourceProject, const std::filesystem::path& CompiledShaderDirectory);
+		[[nodiscard]] static std::expected<std::unique_ptr<SceneRenderer>, SceneRendererError> Create(
+			RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content,
+			const std::filesystem::path& CompiledShaderDirectory);
 
 		SceneRenderer(const SceneRenderer&) = delete;
 		SceneRenderer& operator=(const SceneRenderer&) = delete;
@@ -174,6 +178,10 @@ namespace PulseForge
 			EnqueuePreparationForValidation(AssetPreparationService::Processor Processor);
 #endif
 		[[nodiscard]] bool HasPreparedEnvironmentLighting() const noexcept { return m_PreparedEnvironmentReady; }
+#if defined(PF_DEBUG)
+		[[nodiscard]] const Texture* GetHdrColorTextureForValidation() const noexcept;
+		[[nodiscard]] const Texture* GetHdrDepthTextureForValidation() const noexcept;
+#endif
 		// Narrow diagnostic access used by the opt-in GPU validation harness to read actual cubemap face depth.
 		[[nodiscard]] const Texture* GetPointShadowFaceTextureForValidation(size_t Slot, uint32_t Face) const noexcept;
 		[[nodiscard]] const Texture* GetDirectionalShadowTextureForValidation(size_t Cascade) const noexcept;
@@ -190,6 +198,7 @@ namespace PulseForge
 		class ShadowPass;
 
 		SceneRenderer(RenderDevice& Runtime, const Project& SourceProject);
+		SceneRenderer(RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content);
 		[[nodiscard]] std::expected<void, SceneRendererError> Initialize(
 			const std::filesystem::path& CompiledShaderDirectory);
 		[[nodiscard]] std::expected<void, SceneRendererError> RenderShadowCascades();
@@ -243,7 +252,7 @@ namespace PulseForge
 		static_assert(sizeof(PointShadowObjectConstants) == 144);
 
 		RenderDevice& m_Runtime;
-		const Project& m_Project;
+		const Project* m_Project = nullptr;
 		std::unique_ptr<ProjectAssetCaches> m_ProjectAssetCaches;
 		std::unique_ptr<SceneRendererPipelineCache> m_PipelineCache;
 		std::unique_ptr<ToneMappingStage> m_ToneMappingStage;

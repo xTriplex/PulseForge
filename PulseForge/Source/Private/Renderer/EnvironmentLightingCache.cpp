@@ -5,6 +5,7 @@
 #include "Assets/ImageAssetImporter.h"
 #include "Core/Diagnostics.h"
 #include "Core/ScopedProfileTimer.h"
+#include "Runtime/CookedContentProvider.h"
 
 #include <algorithm>
 #include <array>
@@ -19,6 +20,7 @@
 #include <new>
 #include <span>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -31,7 +33,6 @@ namespace PulseForge
 		constexpr uint32_t EnvironmentAlgorithmVersion = 1;
 		constexpr uint32_t BrdfCacheVersion = 1;
 		constexpr uint32_t EnvironmentProductSchemaVersion = 1;
-		constexpr uint32_t EnvironmentCodecVersion = 1;
 		constexpr uint32_t BrdfCodecVersion = 1;
 		constexpr uint64_t MaximumCacheBytes = 64ull * 1024ull * 1024ull;
 		constexpr uint64_t MaximumSourceBytes = 128ull * 1024ull * 1024ull;
@@ -305,88 +306,6 @@ namespace PulseForge
 			return { Asset, std::move(Message) };
 		}
 
-		void AppendU32(std::vector<std::byte>& Bytes, uint32_t Value)
-		{
-			for (unsigned Shift = 0; Shift < 32; Shift += 8)
-				Bytes.push_back(static_cast<std::byte>((Value >> Shift) & 0xff));
-		}
-
-		bool ReadU32(std::span<const std::byte> Bytes, size_t& Offset, uint32_t& Value)
-		{
-			if (Offset > Bytes.size() || Bytes.size() - Offset < 4)
-				return false;
-			Value = 0;
-			for (unsigned Shift = 0; Shift < 32; Shift += 8)
-				Value |= static_cast<uint32_t>(std::to_integer<uint8_t>(Bytes[Offset++])) << Shift;
-			return true;
-		}
-
-		void AppendFloat(std::vector<std::byte>& Bytes, float Value)
-		{
-			const uint32_t Bits = std::bit_cast<uint32_t>(Value);
-			AppendU32(Bytes, Bits);
-		}
-
-		bool ReadFloat(std::span<const std::byte> Bytes, size_t& Offset, float& Value)
-		{
-			uint32_t Bits = 0;
-			if (!ReadU32(Bytes, Offset, Bits))
-				return false;
-			Value = std::bit_cast<float>(Bits);
-			return std::isfinite(Value);
-		}
-
-		bool IsValidEnvironmentDescription(const EnvironmentProcessingDesc& Description)
-		{
-			return Description.EnvironmentFaceSize > 0 && Description.EnvironmentFaceSize <= 2048 &&
-				Description.IrradianceFaceSize > 0 && Description.IrradianceFaceSize <= 2048 &&
-				Description.SpecularFaceSize > 0 && Description.SpecularFaceSize <= 2048 &&
-				Description.BrdfLutSize > 0 && Description.BrdfLutSize <= 2048 &&
-				Description.IrradianceSamples > 0 && Description.IrradianceSamples <= 4096 &&
-				Description.PrefilterSamples > 0 && Description.PrefilterSamples <= 4096 &&
-				Description.BrdfSamples > 0 && Description.BrdfSamples <= 4096 &&
-				GetEnvironmentFloatCount(Description) <= MaximumCacheBytes / sizeof(float);
-		}
-
-		bool AppendLevelFloats(std::vector<std::byte>& Payload, const FloatCubeLevel& Level, uint32_t ExpectedSize)
-		{
-			const uint64_t FloatCount = static_cast<uint64_t>(ExpectedSize) * ExpectedSize * 4;
-			if (Level.Size != ExpectedSize)
-				return false;
-			for (const std::vector<float>& Face : Level.Faces)
-			{
-				if (Face.size() != FloatCount || !std::ranges::all_of(Face, [](float Value) { return std::isfinite(Value); }))
-					return false;
-				for (float Value : Face)
-					AppendFloat(Payload, Value);
-			}
-			return true;
-		}
-
-		bool ReadLevelFloats(
-			std::span<const std::byte> Payload,
-			size_t& Offset,
-			FloatCubeLevel& Level,
-			uint32_t Size)
-		{
-			Level.Size = Size;
-			const uint64_t FloatCount = static_cast<uint64_t>(Size) * Size * 4;
-			try
-			{
-				for (std::vector<float>& Face : Level.Faces)
-					Face.resize(static_cast<size_t>(FloatCount));
-			}
-			catch (const std::bad_alloc&)
-			{
-				return false;
-			}
-			for (std::vector<float>& Face : Level.Faces)
-				for (float& Value : Face)
-					if (!ReadFloat(Payload, Offset, Value))
-						return false;
-			return true;
-		}
-
 		struct EnvironmentSourceObservation
 		{
 			AssetContentFingerprint Content;
@@ -516,155 +435,6 @@ namespace PulseForge
 		return { "environment-brdf-lut", Builder.Finish(), BrdfCodecVersion };
 	}
 
-	std::expected<std::vector<std::byte>, std::string> Detail::EnvironmentLightingArtifactCodec::EncodeEnvironment(
-		const EnvironmentLightingData& Data,
-		const EnvironmentProcessingDesc& Description)
-	{
-		if (!IsValidEnvironmentDescription(Description))
-			return std::unexpected("Environment artifact processing dimensions or samples exceed bounds");
-		const uint32_t MipCount = GetMipCount(Description.SpecularFaceSize);
-		if (Data.PrefilteredSpecular.size() != MipCount)
-			return std::unexpected("Environment artifact has an invalid specular mip count");
-		try
-		{
-			const uint64_t FloatCount = GetEnvironmentFloatCount(Description);
-			std::vector<std::byte> Payload;
-			Payload.reserve(8 * sizeof(uint32_t) + static_cast<size_t>(FloatCount) * sizeof(float));
-			AppendU32(Payload, EnvironmentCodecVersion);
-			AppendU32(Payload, Description.EnvironmentFaceSize);
-			AppendU32(Payload, Description.IrradianceFaceSize);
-			AppendU32(Payload, Description.SpecularFaceSize);
-			AppendU32(Payload, Description.BrdfLutSize);
-			AppendU32(Payload, Description.IrradianceSamples);
-			AppendU32(Payload, Description.PrefilterSamples);
-			AppendU32(Payload, Description.BrdfSamples);
-			AppendU32(Payload, MipCount);
-			if (!AppendLevelFloats(Payload, Data.Environment, Description.EnvironmentFaceSize) ||
-				!AppendLevelFloats(Payload, Data.DiffuseIrradiance, Description.IrradianceFaceSize))
-				return std::unexpected("Environment or irradiance cube has an invalid layout or non-finite channel");
-			uint32_t MipSize = Description.SpecularFaceSize;
-			for (const FloatCubeLevel& Level : Data.PrefilteredSpecular)
-			{
-				if (!AppendLevelFloats(Payload, Level, MipSize))
-					return std::unexpected("Specular cube mip has an invalid layout or non-finite channel");
-				MipSize = std::max(1u, MipSize / 2);
-			}
-			return Payload;
-		}
-		catch (const std::bad_alloc&)
-		{
-			return std::unexpected("Could not allocate bounded environment artifact payload");
-		}
-	}
-
-	std::expected<EnvironmentLightingData, std::string> Detail::EnvironmentLightingArtifactCodec::DecodeEnvironment(
-		std::span<const std::byte> Payload,
-		const EnvironmentProcessingDesc& Description)
-	{
-		if (!IsValidEnvironmentDescription(Description))
-			return std::unexpected("Environment artifact processing dimensions or samples exceed bounds");
-		const uint64_t ExpectedBytes = 9 * sizeof(uint32_t) + GetEnvironmentFloatCount(Description) * sizeof(float);
-		if (Payload.size() != ExpectedBytes)
-			return std::unexpected("Environment artifact payload size does not match its declared processing layout");
-		size_t Offset = 0;
-		std::array<uint32_t, 9> Fields{};
-		for (uint32_t& Field : Fields)
-			if (!ReadU32(Payload, Offset, Field))
-				return std::unexpected("Environment artifact header is truncated");
-		const std::array<uint32_t, 9> ExpectedFields{
-			EnvironmentCodecVersion, Description.EnvironmentFaceSize, Description.IrradianceFaceSize,
-			Description.SpecularFaceSize, Description.BrdfLutSize, Description.IrradianceSamples,
-			Description.PrefilterSamples, Description.BrdfSamples, GetMipCount(Description.SpecularFaceSize)
-		};
-		if (Fields != ExpectedFields)
-			return std::unexpected("Environment artifact codec or processing schema is incompatible");
-
-		EnvironmentLightingData Data;
-		if (!ReadLevelFloats(Payload, Offset, Data.Environment, Description.EnvironmentFaceSize) ||
-			!ReadLevelFloats(Payload, Offset, Data.DiffuseIrradiance, Description.IrradianceFaceSize))
-			return std::unexpected("Environment artifact has an invalid cube layout or non-finite channel");
-		try
-		{
-			Data.PrefilteredSpecular.reserve(Fields[8]);
-			uint32_t MipSize = Description.SpecularFaceSize;
-			for (uint32_t Mip = 0; Mip < Fields[8]; ++Mip)
-			{
-				FloatCubeLevel& Level = Data.PrefilteredSpecular.emplace_back();
-				if (!ReadLevelFloats(Payload, Offset, Level, MipSize))
-					return std::unexpected("Environment artifact has an invalid specular mip layout or channel");
-				MipSize = std::max(1u, MipSize / 2);
-			}
-		}
-		catch (const std::bad_alloc&)
-		{
-			return std::unexpected("Could not allocate bounded environment artifact result");
-		}
-		if (Offset != Payload.size())
-			return std::unexpected("Environment artifact contains trailing data");
-		return Data;
-	}
-
-	std::expected<std::vector<std::byte>, std::string> Detail::EnvironmentLightingArtifactCodec::EncodeBrdfLut(
-		const ImportedFloatImage& Image,
-		uint32_t Samples)
-	{
-		if (Image.Width == 0 || Image.Width > 2048 || Image.Height != Image.Width || Samples == 0 || Samples > 4096 ||
-			Image.RGBA32FPixels.size() != static_cast<uint64_t>(Image.Width) * Image.Height * 4 ||
-			Image.RGBA32FPixels.size() * sizeof(float) > MaximumCacheBytes || !IsFiniteImage(Image))
-			return std::unexpected("BRDF LUT dimensions, sample count, or pixels are invalid");
-		try
-		{
-			std::vector<std::byte> Payload;
-			Payload.reserve(4 * sizeof(uint32_t) + Image.RGBA32FPixels.size() * sizeof(float));
-			AppendU32(Payload, BrdfCodecVersion);
-			AppendU32(Payload, Image.Width);
-			AppendU32(Payload, Image.Height);
-			AppendU32(Payload, Samples);
-			for (float Value : Image.RGBA32FPixels)
-				AppendFloat(Payload, Value);
-			return Payload;
-		}
-		catch (const std::bad_alloc&)
-		{
-			return std::unexpected("Could not allocate bounded BRDF LUT artifact payload");
-		}
-	}
-
-	std::expected<ImportedFloatImage, std::string> Detail::EnvironmentLightingArtifactCodec::DecodeBrdfLut(
-		std::span<const std::byte> Payload,
-		uint32_t ExpectedSize,
-		uint32_t ExpectedSamples)
-	{
-		if (ExpectedSize == 0 || ExpectedSize > 2048 || ExpectedSamples == 0 || ExpectedSamples > 4096)
-			return std::unexpected("Requested BRDF LUT dimensions or sample count exceed bounds");
-		const uint64_t FloatCount = static_cast<uint64_t>(ExpectedSize) * ExpectedSize * 4;
-		if (FloatCount * sizeof(float) > MaximumCacheBytes || Payload.size() != 4 * sizeof(uint32_t) + FloatCount * sizeof(float))
-			return std::unexpected("BRDF LUT artifact payload size is invalid");
-		size_t Offset = 0;
-		std::array<uint32_t, 4> Fields{};
-		for (uint32_t& Field : Fields)
-			if (!ReadU32(Payload, Offset, Field))
-				return std::unexpected("BRDF LUT artifact header is truncated");
-		if (Fields != std::array<uint32_t, 4>{ BrdfCodecVersion, ExpectedSize, ExpectedSize, ExpectedSamples })
-			return std::unexpected("BRDF LUT artifact schema does not match the request");
-		ImportedFloatImage Image;
-		Image.Width = ExpectedSize;
-		Image.Height = ExpectedSize;
-		try
-		{
-			Image.RGBA32FPixels.resize(static_cast<size_t>(FloatCount));
-		}
-		catch (const std::bad_alloc&)
-		{
-			return std::unexpected("Could not allocate bounded BRDF LUT artifact result");
-		}
-		for (float& Value : Image.RGBA32FPixels)
-			if (!ReadFloat(Payload, Offset, Value))
-				return std::unexpected("BRDF LUT artifact has a non-finite or truncated channel");
-		return Image;
-	}
-
-
 	EnvironmentLightingCache::EnvironmentLightingCache(
 		RenderDevice& Runtime, std::filesystem::path ProjectRoot, const AssetRegistry& Registry,
 		DiagnosticRecorder* Diagnostics, DerivedDataArtifactStoreOptions ArtifactStoreOptions)
@@ -677,6 +447,14 @@ namespace PulseForge
 		  m_ArtifactStore(m_OwnedArtifactStore.get()), m_SessionKey(MakeCompatibilityPreparationSession(m_ProjectRoot)),
 		  m_Processing(GetProcessingDescription())
 	{
+	}
+
+	EnvironmentLightingCache::EnvironmentLightingCache(
+		RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content, DiagnosticRecorder* Diagnostics)
+		: m_Runtime(Runtime), m_CookedContent(std::move(Content)), m_Diagnostics(Diagnostics)
+	{
+		if (!m_CookedContent)
+			throw std::invalid_argument("Cooked environment cache requires a content provider");
 	}
 
 	EnvironmentLightingCache::EnvironmentLightingCache(
@@ -774,6 +552,40 @@ namespace PulseForge
 	std::expected<std::optional<std::reference_wrapper<const EnvironmentLightingTextures>>, EnvironmentLightingCacheError>
 	EnvironmentLightingCache::GetOrLoadInternal(const AssetID& Asset, bool CollectReadyProduct)
 	{
+		if (m_CookedContent)
+		{
+			if (Asset.IsNil())
+				return std::unexpected(MakeError(Asset, "Cannot load environment lighting with a nil asset UUID"));
+			auto Found = m_Entries.find(Asset);
+			if (Found != m_Entries.end() && Found->second->GpuTextures)
+			{
+				++m_CacheHits;
+				return std::cref(*Found->second->GpuTextures);
+			}
+			auto& State = m_Entries.try_emplace(Asset, std::make_shared<Entry>()).first->second;
+			++m_CacheMisses;
+			auto Product = m_CookedContent->LoadEnvironmentProduct(Asset);
+			if (!Product)
+			{
+				State->Error = Product.error().Message;
+				return std::unexpected(MakeError(Asset, State->Error));
+			}
+			auto Uploaded = UploadProcessedData(Asset, Product->Data);
+			if (!Uploaded)
+			{
+				State->Error = Uploaded.error().Message;
+				State->UploadFailed = true;
+				return std::unexpected(std::move(Uploaded.error()));
+			}
+			State->GpuTextures.emplace(std::move(*Uploaded));
+			++State->ResourceRevision;
+			State->Error.clear();
+			State->UploadFailed = false;
+			if (m_Diagnostics)
+				(void)m_Diagnostics->RecordEvent(DiagnosticEventKind::Resource, "Environment cache resource created",
+					"EnvironmentLightingCache", "objects", 1);
+			return std::cref(*State->GpuTextures);
+		}
 		if (m_SessionKey.empty())
 		{
 			const auto Existing = m_Entries.find(Asset);

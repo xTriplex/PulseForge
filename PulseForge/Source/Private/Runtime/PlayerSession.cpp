@@ -1,7 +1,10 @@
 #include "Runtime/PlayerSession.h"
+#include "Runtime/CookedContentProvider.h"
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/Project.h"
 #include "Assets/SceneAssetService.h"
+#endif
 #include "Scene/Scene.h"
 
 #include <cmath>
@@ -23,9 +26,19 @@ namespace PulseForge
 		}
 	} // namespace
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 	PlayerSession::PlayerSession(
 		std::filesystem::path ProjectFile, SceneRuntimeDesc RuntimeDescription, SceneRuntimeServices RuntimeServices)
 		: m_ProjectFile(std::move(ProjectFile)), m_RuntimeDescription(std::move(RuntimeDescription)), m_RuntimeServices(RuntimeServices)
+	{
+	}
+#endif
+
+	PlayerSession::PlayerSession(
+		std::shared_ptr<const CookedContentProvider> CookedAssets,
+		SceneRuntimeDesc RuntimeDescription,
+		SceneRuntimeServices RuntimeServices)
+		: m_CookedAssets(std::move(CookedAssets)), m_RuntimeDescription(std::move(RuntimeDescription)), m_RuntimeServices(RuntimeServices)
 	{
 	}
 
@@ -38,6 +51,28 @@ namespace PulseForge
 	{
 		if (IsRunning()) return std::unexpected(MakeError(PlayerSessionErrorCode::AlreadyStarted, "Player session is already running"));
 
+		if (m_CookedAssets)
+		{
+			const AssetID StartupScene = StartupSceneOverride.value_or(m_CookedAssets->GetStartupScene());
+			if (StartupScene.IsNil())
+				return std::unexpected(MakeError(PlayerSessionErrorCode::InvalidSceneAsset, "Cooked startup scene UUID must not be nil"));
+			auto CandidateScene = m_CookedAssets->LoadScene(StartupScene);
+			if (!CandidateScene)
+				return std::unexpected(MakeError(PlayerSessionErrorCode::SceneLoadFailed,
+					"Could not load cooked startup scene: " + CandidateScene.error().Message));
+			auto CandidateRuntime = std::make_unique<SceneRuntime>(m_CookedAssets, m_RuntimeDescription, m_RuntimeServices);
+			if (auto Started = CandidateRuntime->Start(**CandidateScene); !Started)
+				return std::unexpected(MakeError(PlayerSessionErrorCode::RuntimeStartFailed,
+					"Could not start cooked player runtime: " + Started.error().Message));
+			m_Scene = std::move(*CandidateScene);
+			m_Runtime = std::move(CandidateRuntime);
+			m_SceneAsset = StartupScene;
+			m_PendingScene.reset();
+			m_Paused = false;
+			return {};
+		}
+
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		auto OpenedProject = Project::Open(m_ProjectFile, m_RuntimeServices.Diagnostics);
 		if (!OpenedProject)
 			return std::unexpected(
@@ -71,6 +106,10 @@ namespace PulseForge
 		m_PendingScene.reset();
 		m_Paused = false;
 		return {};
+#else
+		return std::unexpected(MakeError(PlayerSessionErrorCode::ProjectOpenFailed,
+			"Cooked player session requires its cooked content provider"));
+#endif
 	}
 
 	std::expected<void, PlayerSessionError> PlayerSession::RequestSceneTransition(const AssetID& SceneAsset)
@@ -80,15 +119,29 @@ namespace PulseForge
 			return std::unexpected(MakeError(PlayerSessionErrorCode::InvalidSceneAsset, "Transition scene UUID must not be nil"));
 
 		auto CandidateScene = std::make_unique<Scene>();
-		if (auto Loaded = SceneAssetService::Load(
+		auto Candidate = std::make_unique<PendingScene>();
+		if (m_CookedAssets)
+		{
+			auto Loaded = m_CookedAssets->LoadScene(SceneAsset);
+			if (!Loaded)
+				return std::unexpected(MakeError(PlayerSessionErrorCode::SceneLoadFailed,
+					"Could not prepare cooked scene transition: " + Loaded.error().Message));
+			Candidate->Value = std::move(*Loaded);
+		}
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+		else if (auto Loaded = SceneAssetService::Load(
 				SceneAsset, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), *CandidateScene, m_RuntimeServices.Diagnostics);
 			!Loaded)
 			return std::unexpected(
 				MakeError(PlayerSessionErrorCode::SceneLoadFailed, "Could not prepare player scene transition: " + Loaded.error().Message));
 
-		auto Candidate = std::make_unique<PendingScene>();
 		Candidate->Asset = SceneAsset;
-		Candidate->Value = std::move(CandidateScene);
+		if (!m_CookedAssets) Candidate->Value = std::move(CandidateScene);
+#else
+		else
+			return std::unexpected(MakeError(PlayerSessionErrorCode::SceneLoadFailed,
+				"Cooked scene transitions require a cooked content provider"));
+#endif
 		m_PendingScene = std::move(Candidate);
 		return {};
 	}
@@ -112,7 +165,13 @@ namespace PulseForge
 			auto CandidateScene = std::move(m_PendingScene->Value);
 			const AssetID CandidateAsset = m_PendingScene->Asset;
 			m_PendingScene.reset();
-			auto CandidateRuntime = std::make_unique<SceneRuntime>(*m_Project, m_RuntimeDescription, m_RuntimeServices);
+#if defined(PF_COOKED_RUNTIME_ONLY)
+			auto CandidateRuntime = std::make_unique<SceneRuntime>(m_CookedAssets, m_RuntimeDescription, m_RuntimeServices);
+#else
+			auto CandidateRuntime = m_CookedAssets
+				? std::make_unique<SceneRuntime>(m_CookedAssets, m_RuntimeDescription, m_RuntimeServices)
+				: std::make_unique<SceneRuntime>(*m_Project, m_RuntimeDescription, m_RuntimeServices);
+#endif
 			if (auto Started = CandidateRuntime->Start(*CandidateScene); !Started)
 			{
 				return std::unexpected(MakeError(
@@ -182,7 +241,9 @@ namespace PulseForge
 		m_Runtime.reset();
 		m_Scene.reset();
 		m_SceneAsset.reset();
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 		m_Project.reset();
+#endif
 		m_Paused = false;
 		m_TimeScale = 1.0;
 	}

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <filesystem>
 #include <memory>
 #include <span>
 #include <string>
@@ -20,6 +21,7 @@ namespace PulseForge
 	class PhysicsSceneRuntime;
 	class Project;
 	class Scene;
+	class CookedContentProvider;
 
 	struct ScriptRuntimeDesc
 	{
@@ -90,6 +92,7 @@ namespace PulseForge
 		const GameplayInputService* GameplayInput = nullptr;
 		Input* InputState = nullptr;
 		ScriptRuntimeObserver Observer;
+		std::shared_ptr<const CookedContentProvider> CookedAssets;
 	};
 
 	enum class ScriptRuntimeErrorCode : uint8_t
@@ -117,6 +120,10 @@ namespace PulseForge
 			const Project& SourceProject,
 			ScriptRuntimeDesc Description = {},
 			ScriptRuntimeServices Services = {});
+		explicit ScriptRuntime(
+			std::shared_ptr<const CookedContentProvider> CookedAssets,
+			ScriptRuntimeDesc Description = {},
+			ScriptRuntimeServices Services = {});
 		~ScriptRuntime();
 		ScriptRuntime(const ScriptRuntime&) = delete;
 		ScriptRuntime& operator=(const ScriptRuntime&) = delete;
@@ -131,7 +138,7 @@ namespace PulseForge
 
 	private:
 		struct Impl;
-		const Project& m_Project;
+		const Project* m_Project = nullptr;
 		ScriptRuntimeDesc m_Description;
 		ScriptRuntimeServices m_Services;
 		std::unique_ptr<Impl> m_Impl;

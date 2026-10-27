@@ -9,11 +9,12 @@ namespace
 	using SceneRendererFactory = std::expected<std::unique_ptr<PulseForge::SceneRenderer>, PulseForge::SceneRendererError> (*)(
 		PulseForge::RenderDevice&, const PulseForge::Project&, const std::filesystem::path&);
 
-	static_assert(std::is_same_v<decltype(&PulseForge::SceneRenderer::Create), SceneRendererFactory>);
+	static_assert(std::is_same_v<
+		decltype(static_cast<SceneRendererFactory>(&PulseForge::SceneRenderer::Create)), SceneRendererFactory>);
 
 	[[nodiscard]] SceneRendererFactory GetSceneRendererFactory() noexcept
 	{
-		return &PulseForge::SceneRenderer::Create;
+		return static_cast<SceneRendererFactory>(&PulseForge::SceneRenderer::Create);
 	}
 } // namespace
 

@@ -16,6 +16,7 @@ namespace PulseForgeGame
 	struct PlayerLaunchConfiguration
 	{
 		std::filesystem::path ProjectFile;
+		std::filesystem::path CookedContentRoot;
 		std::optional<PulseForge::AssetID> StartupScene;
 		std::optional<uint32_t> WindowWidth;
 		std::optional<uint32_t> WindowHeight;
@@ -27,10 +28,12 @@ namespace PulseForgeGame
 	{
 		InvalidWorkingDirectory,
 		MissingProjectPath,
+		MissingLaunchContent,
 		MissingOptionValue,
 		DuplicateOption,
 		UnexpectedArgument,
 		InvalidProjectPath,
+		InvalidCookedContentPath,
 		InvalidStartupScene,
 		InvalidRenderer,
 		InvalidWindowSize

@@ -17,6 +17,10 @@ namespace PulseForge
 
 		[[nodiscard]] bool NeedsReplacement(uint32_t Width, uint32_t Height) const noexcept;
 		[[nodiscard]] std::expected<EnsureResult, SceneRendererError> Ensure(uint32_t Width, uint32_t Height);
+#if defined(PF_DEBUG)
+		[[nodiscard]] const Texture* GetColorTextureForValidation() const noexcept;
+		[[nodiscard]] const Texture* GetDepthTextureForValidation() const noexcept;
+#endif
 
 	private:
 		[[nodiscard]] bool CanReuse(uint32_t Width, uint32_t Height) const noexcept;

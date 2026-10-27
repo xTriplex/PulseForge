@@ -20,6 +20,7 @@ namespace PulseForge
 {
 	class DerivedDataArtifactStore;
 	class DiagnosticRecorder;
+	class CookedContentProvider;
 
 	enum class TextureAssetErrorCode : uint8_t
 	{
@@ -49,6 +50,8 @@ namespace PulseForge
 			RenderDevice& Runtime,
 			std::filesystem::path ProjectRoot,
 			const AssetRegistry& Registry,
+			DiagnosticRecorder* Diagnostics = nullptr);
+		TextureAssetCache(RenderDevice& Runtime, std::shared_ptr<const CookedContentProvider> Content,
 			DiagnosticRecorder* Diagnostics = nullptr);
 		TextureAssetCache(
 			RenderDevice& Runtime,
@@ -123,6 +126,7 @@ namespace PulseForge
 		std::filesystem::path m_ProjectRoot;
 		std::shared_ptr<const AssetRegistry> m_RegistryOwner;
 		const AssetRegistry* m_Registry = nullptr;
+		std::shared_ptr<const CookedContentProvider> m_CookedContent;
 		AssetPreparationService* m_Preparation = nullptr;
 		AssetUploadBudget* m_UploadBudget = nullptr;
 		DerivedDataArtifactStore* m_ArtifactStore = nullptr;

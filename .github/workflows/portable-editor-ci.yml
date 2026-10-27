@@ -234,7 +234,7 @@ jobs:
         run: |
           set -o pipefail
           cmake --build Build/CI/macos-renderer --parallel --target \
-            PulseForgeTests PulseForgeEditor PulseForgeGame PulseForgeMacOSRendererValidation \
+            PulseForgeTests PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeCookedGame PulseForgeMacOSRendererValidation \
             PulseForgeNativeDialogValidation 2>&1 |
             tee "$RUNNER_TEMP/macos-build.log"
 
@@ -309,6 +309,19 @@ jobs:
             --player-bundle Build/CI/macos-renderer/PulseForgeGame.app \
             --log-directory "$RUNNER_TEMP" \
             --timeout-seconds 180 2>&1 | tee "$RUNNER_TEMP/macos-bundle-smoke.log"
+
+      - name: Cook and launch isolated PBR content with the cooked Player
+        id: macos_cooked_player_acceptance
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          python3 Tests/Platform/CookedPlayerAcceptance.py \
+            --cook Build/CI/macos-renderer/PulseForgeCook \
+            --player Build/CI/macos-renderer/PulseForgeCookedGame.app/Contents/MacOS/PulseForgeCookedGame \
+            --source-project Samples/VisualValidation/PBRMaterials/PBRMaterials.pfproj \
+            --input-actions Samples/VisualValidation/GameplayInput/InputActions.json \
+            --target macOS --backend Vulkan --log-directory "$RUNNER_TEMP" \
+            --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-cooked-player-acceptance.log"
 
       - name: Exercise editor Play and Stop through the production runtime transition
         id: macos_editor_runtime_play_stop
@@ -435,7 +448,7 @@ jobs:
               -DFETCHCONTENT_FULLY_DISCONNECTED=OFF 2>&1 |
               tee "$RUNNER_TEMP/macos-configure-$CONFIGURATION_LOWER.log"
             cmake --build "$BUILD_DIR" --parallel --target \
-              PulseForgeEditor PulseForgeGame PulseForgeEditorCoreConsumer PulseForgeEditorTests 2>&1 |
+              PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeCookedGame PulseForgeEditorCoreConsumer PulseForgeEditorTests 2>&1 |
               tee "$RUNNER_TEMP/macos-build-$CONFIGURATION_LOWER.log"
             EDITOR="$GITHUB_WORKSPACE/$BUILD_DIR/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor"
             if [ ! -d "$BUILD_DIR/CMakeFiles/PulseForgeEditorCore.dir" ] || [ ! -x "$EDITOR" ]; then
@@ -520,6 +533,9 @@ jobs:
             ${{ runner.temp }}/macos-bundle-smoke.log
             ${{ runner.temp }}/macos-editor-bundle-smoke.log
             ${{ runner.temp }}/macos-player-bundle-smoke.log
+            ${{ runner.temp }}/macos-cooked-player-acceptance.log
+            ${{ runner.temp }}/cooked-player-acceptance-cook.log
+            ${{ runner.temp }}/cooked-player-acceptance-player.log
             ${{ runner.temp }}/macos-editor-runtime-play-stop.log
             ${{ runner.temp }}/macos-editor-runtime-play-stop-smoke.log
             ${{ runner.temp }}/macos-scene-viewport-native-smoke.log
@@ -610,7 +626,7 @@ jobs:
       - name: Build first-party tests, editor and game
         shell: pwsh
         run: |
-          & cmake --build Build/CI/windows --config Debug --parallel --target PulseForgeTests PulseForgeEditor PulseForgeGame *> "$env:RUNNER_TEMP/build.log"
+          & cmake --build Build/CI/windows --config Debug --parallel --target PulseForgeTests PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeCookedGame *> "$env:RUNNER_TEMP/build.log"
           $result = $LASTEXITCODE
           Get-Content "$env:RUNNER_TEMP/build.log"
           if ($result -ne 0) { exit $result }
@@ -631,7 +647,7 @@ jobs:
           if (-not (Test-Path $debugObject)) { throw "Debug coordinator object was not produced: $debugObject" }
           foreach ($configuration in @("Release", "Dist")) {
             & cmake --build Build/CI/windows --config $configuration --parallel --target `
-              PulseForgeEditor PulseForgeGame PulseForgeEditorCoreConsumer PulseForgeEditorTests `
+              PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeCookedGame PulseForgeEditorCoreConsumer PulseForgeEditorTests `
               *> "$env:RUNNER_TEMP/build-$($configuration.ToLowerInvariant()).log"
             $result = $LASTEXITCODE
             Get-Content "$env:RUNNER_TEMP/build-$($configuration.ToLowerInvariant()).log"
@@ -710,7 +726,7 @@ jobs:
       - name: Build first-party tests, editor and game
         run: |
           set -o pipefail
-          cmake --build Build/CI/linux --parallel --target PulseForgeTests PulseForgeEditor PulseForgeGame 2>&1 |
+          cmake --build Build/CI/linux --parallel --target PulseForgeTests PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeCookedGame 2>&1 |
             tee "$RUNNER_TEMP/build.log"
 
       - name: Run registered CPU tests
@@ -732,7 +748,7 @@ jobs:
               -DFETCHCONTENT_FULLY_DISCONNECTED=OFF 2>&1 |
               tee "$RUNNER_TEMP/configure-${CONFIGURATION,,}.log"
             cmake --build "$BUILD_DIR" --parallel --target \
-              PulseForgeEditor PulseForgeGame PulseForgeEditorCoreConsumer PulseForgeEditorTests 2>&1 |
+              PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeCookedGame PulseForgeEditorCoreConsumer PulseForgeEditorTests 2>&1 |
               tee "$RUNNER_TEMP/build-${CONFIGURATION,,}.log"
             if find "$BUILD_DIR/CMakeFiles/PulseForgeEditorCore.dir" -name 'EditorDebugAcceptanceCoordinators.cpp.o' -print -quit | grep -q .; then
               echo "Debug-only coordinator was compiled for $CONFIGURATION" >&2

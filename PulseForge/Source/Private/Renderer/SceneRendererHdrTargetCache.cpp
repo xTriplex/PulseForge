@@ -24,6 +24,18 @@ namespace PulseForge
 		return Width != 0 && Height != 0 && !CanReuse(Width, Height);
 	}
 
+#if defined(PF_DEBUG)
+	const Texture* SceneRenderer::HdrTargetCache::GetColorTextureForValidation() const noexcept
+	{
+		return m_Target ? m_Target->GetColorTexture() : nullptr;
+	}
+
+	const Texture* SceneRenderer::HdrTargetCache::GetDepthTextureForValidation() const noexcept
+	{
+		return m_Target ? m_Target->GetDepthTexture() : nullptr;
+	}
+#endif
+
 	bool SceneRenderer::HdrTargetCache::CanReuse(uint32_t Width, uint32_t Height) const noexcept
 	{
 		if (!m_Target || !MatchesRenderTargetConfiguration(

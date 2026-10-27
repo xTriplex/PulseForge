@@ -1,10 +1,15 @@
 #include "Scripting/ScriptRuntime.h"
+#include "Runtime/CookedContentProvider.h"
 #include "Scripting/ScriptRuntimeInternal.h"
 #include "Scripting/ScriptEnvironment.h"
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/AssetPathResolver.h"
 #include "Assets/AssetTypes.h"
+#endif
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 #include "Assets/Project.h"
+#endif
 #include "Core/Log.h"
 #include "Scene/Components/ScriptComponent.h"
 #include "Scene/Entity.h"
@@ -156,9 +161,26 @@ namespace PulseForge
 		}
 
 		std::expected<std::string, ScriptDiagnostic> ReadScriptSource(
-			const Project& SourceProject, const AssetID& ScriptAsset, UUID EntityIdentifier, size_t MaximumSourceBytes)
+			const Project* SourceProject,
+			const std::shared_ptr<const CookedContentProvider>& CookedAssets,
+			const AssetID& ScriptAsset, UUID EntityIdentifier, size_t MaximumSourceBytes)
 		{
-			const auto Record = SourceProject.GetAssetRegistry().Find(ScriptAsset);
+			if (CookedAssets)
+			{
+				auto Bytes = CookedAssets->ReadScript(ScriptAsset);
+				if (!Bytes)
+					return std::unexpected(MakeDiagnostic(EntityIdentifier, ScriptAsset, ScriptDiagnosticCode::FileReadFailed,
+						Bytes.error().Message));
+				if (Bytes->size() > MaximumSourceBytes)
+					return std::unexpected(MakeDiagnostic(EntityIdentifier, ScriptAsset, ScriptDiagnosticCode::FileReadFailed,
+						"Cooked script source exceeds the configured source limit"));
+				return std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size());
+			}
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+			if (!SourceProject)
+				return std::unexpected(MakeDiagnostic(EntityIdentifier, ScriptAsset, ScriptDiagnosticCode::AssetNotFound,
+					"No source project or cooked asset provider is available"));
+			const auto Record = SourceProject->GetAssetRegistry().Find(ScriptAsset);
 			if (!Record)
 			{
 				return std::unexpected(MakeDiagnostic(EntityIdentifier, ScriptAsset, ScriptDiagnosticCode::AssetNotFound,
@@ -170,7 +192,7 @@ namespace PulseForge
 					EntityIdentifier, ScriptAsset, ScriptDiagnosticCode::WrongAssetType, "Script asset must reference a .lua source file"));
 			}
 
-			const auto ResolvedPath = AssetPathResolver::ResolveManagedSourcePath(SourceProject.GetRootPath(), Record->ProjectRelativePath);
+			const auto ResolvedPath = AssetPathResolver::ResolveManagedSourcePath(SourceProject->GetRootPath(), Record->ProjectRelativePath);
 			if (!ResolvedPath)
 			{
 				return std::unexpected(
@@ -209,12 +231,18 @@ namespace PulseForge
 				return std::unexpected(MakeDiagnostic(EntityIdentifier, ScriptAsset, ScriptDiagnosticCode::FileReadFailed,
 					std::string("Could not read script source: ") + Exception.what()));
 			}
+#else
+			(void)SourceProject;
+			return std::unexpected(MakeDiagnostic(EntityIdentifier, ScriptAsset, ScriptDiagnosticCode::AssetNotFound,
+				"Cooked script provider is unavailable"));
+#endif
 		}
 	} // namespace
 
 	struct ScriptRuntime::Impl final
 	{
-		const Project& SourceProject;
+		const Project* SourceProject = nullptr;
+		std::shared_ptr<const CookedContentProvider> CookedAssets;
 		ScriptRuntimeDesc Description;
 		ScriptRuntimeServices Services;
 		Scene* Source = nullptr;
@@ -228,8 +256,9 @@ namespace PulseForge
 		std::map<UUID, FailedAttachment> FailedAttachments;
 		std::vector<ScriptDiagnostic> Diagnostics;
 
-		Impl(const Project& ProjectValue, ScriptRuntimeDesc RuntimeDescription, ScriptRuntimeServices RuntimeServices)
-			: SourceProject(ProjectValue), Description(RuntimeDescription), Services(RuntimeServices)
+		Impl(const Project* ProjectValue, std::shared_ptr<const CookedContentProvider> Provider,
+			ScriptRuntimeDesc RuntimeDescription, ScriptRuntimeServices RuntimeServices)
+			: SourceProject(ProjectValue), CookedAssets(std::move(Provider)), Description(RuntimeDescription), Services(RuntimeServices)
 		{
 			MemoryPool.MaximumBytes = Description.MaxTotalLuaMemoryBytes;
 		}
@@ -254,7 +283,7 @@ namespace PulseForge
 					EntityIdentifier, Component.ScriptAsset, ScriptDiagnosticCode::InvalidComponent, Validation.error().Message));
 			}
 
-			auto LoadedSource = ReadScriptSource(SourceProject, Component.ScriptAsset, EntityIdentifier, Description.MaxSourceBytes);
+			auto LoadedSource = ReadScriptSource(SourceProject, CookedAssets, Component.ScriptAsset, EntityIdentifier, Description.MaxSourceBytes);
 			if (!LoadedSource) return std::unexpected(std::move(LoadedSource.error()));
 			const std::string& ScriptSource = *LoadedSource;
 
@@ -262,7 +291,8 @@ namespace PulseForge
 			Instance->BoundEntity = EntityValue;
 			Instance->Asset = Component.ScriptAsset;
 			Instance->SourceScene = &SceneValue;
-			Instance->SourceProject = &SourceProject;
+			Instance->SourceProject = SourceProject;
+			Instance->CookedAssets = CookedAssets;
 			Instance->Services = Services;
 			Instance->Memory.MaximumBytes = Description.MaxLuaMemoryBytes;
 			Instance->Memory.Pool = &MemoryPool;
@@ -289,8 +319,12 @@ namespace PulseForge
 					ScriptDiagnosticCode::LuaInitializationFailed, LuaErrorMessage(Instance->State)));
 			}
 
-			const auto AssetRecord = SourceProject.GetAssetRegistry().Find(Component.ScriptAsset);
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+			const auto AssetRecord = SourceProject ? SourceProject->GetAssetRegistry().Find(Component.ScriptAsset) : std::nullopt;
 			const std::string ChunkName = AssetRecord ? "@" + AssetRecord->ProjectRelativePath.generic_string() : "@PulseForge script";
+#else
+			const std::string ChunkName = "@PulseForge cooked script";
+#endif
 			const int LoadStatus = luaL_loadbufferx(Instance->State, ScriptSource.data(), ScriptSource.size(), ChunkName.c_str(), "t");
 			if (LoadStatus != LUA_OK)
 			{
@@ -418,9 +452,18 @@ namespace PulseForge
 		}
 	};
 
+#if !defined(PF_COOKED_RUNTIME_ONLY)
 	ScriptRuntime::ScriptRuntime(const Project& SourceProject, ScriptRuntimeDesc Description, ScriptRuntimeServices Services)
-		: m_Project(SourceProject), m_Description(Description), m_Services(Services)
+		: m_Project(&SourceProject), m_Description(Description), m_Services(Services)
 	{
+	}
+#endif
+
+	ScriptRuntime::ScriptRuntime(
+		std::shared_ptr<const CookedContentProvider> CookedAssets, ScriptRuntimeDesc Description, ScriptRuntimeServices Services)
+		: m_Description(Description), m_Services(Services)
+	{
+		m_Services.CookedAssets = std::move(CookedAssets);
 	}
 
 	ScriptRuntime::~ScriptRuntime()
@@ -440,7 +483,14 @@ namespace PulseForge
 
 		try
 		{
-			auto Candidate = std::make_unique<Impl>(m_Project, m_Description, m_Services);
+			if (!m_Services.CookedAssets
+#if !defined(PF_COOKED_RUNTIME_ONLY)
+				&& !m_Project
+#endif
+			)
+				return std::unexpected(MakeRuntimeError(ScriptRuntimeErrorCode::InitializationFailed,
+					"Script runtime requires a source project or cooked asset provider"));
+			auto Candidate = std::make_unique<Impl>(m_Project, m_Services.CookedAssets, m_Description, m_Services);
 			Candidate->Source = &Source;
 			for (const Entity& EntityValue : Source.GetEntities())
 			{

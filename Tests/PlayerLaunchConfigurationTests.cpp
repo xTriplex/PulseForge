@@ -55,7 +55,7 @@ namespace
 		const std::span<const std::string_view> NoArguments;
 		const auto MissingProject = ParsePlayerLaunchConfiguration(NoArguments, Root);
 		PF_CHECK(Tests, !MissingProject);
-		PF_CHECK(Tests, !MissingProject && MissingProject.error().Code == PlayerLaunchConfigurationErrorCode::MissingProjectPath);
+		PF_CHECK(Tests, !MissingProject && MissingProject.error().Code == PlayerLaunchConfigurationErrorCode::MissingLaunchContent);
 
 		const std::array BasicArguments = { std::string_view("--project"), std::string_view(ProjectPath) };
 		const auto Basic = ParsePlayerLaunchConfiguration(BasicArguments, Root);
@@ -85,6 +85,19 @@ namespace
 			std::string_view("opengl") };
 		const auto OpenGL = ParsePlayerLaunchConfiguration(OpenGLArguments, Root);
 		PF_CHECK(Tests, OpenGL && OpenGL->Renderer == PulseForge::RendererAPI::OpenGL);
+
+		const std::string RootPath = PathToUtf8(Root);
+		const std::array CookedArguments = { std::string_view("--cooked-content"), std::string_view(RootPath) };
+		const auto Cooked = ParsePlayerLaunchConfiguration(CookedArguments, TemporaryDirectory);
+		PF_CHECK(Tests, Cooked && Cooked->CookedContentRoot == std::filesystem::absolute(Root).lexically_normal());
+		const std::array RuntimeAbiOverride = { std::string_view("--cooked-content"), std::string_view(RootPath),
+			std::string_view("--runtime-abi"), std::string_view("test-runtime-abi") };
+		const auto RuntimeAbiOverrideResult = ParsePlayerLaunchConfiguration(RuntimeAbiOverride, TemporaryDirectory);
+		PF_CHECK(Tests, !RuntimeAbiOverrideResult && RuntimeAbiOverrideResult.error().Code == PlayerLaunchConfigurationErrorCode::UnexpectedArgument);
+		const std::array ConflictingLaunchModes = { std::string_view("--project"), std::string_view(ProjectPath),
+			std::string_view("--cooked-content"), std::string_view(RootPath) };
+		const auto ConflictingModes = ParsePlayerLaunchConfiguration(ConflictingLaunchModes, Root);
+		PF_CHECK(Tests, !ConflictingModes && ConflictingModes.error().Code == PlayerLaunchConfigurationErrorCode::MissingLaunchContent);
 
 		const std::string AbsoluteProjectPath = PathToUtf8(ProjectFile);
 		const std::array AbsoluteArguments = { std::string_view("--project"), std::string_view(AbsoluteProjectPath) };
