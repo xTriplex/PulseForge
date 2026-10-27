@@ -406,6 +406,12 @@ namespace
 			Output.flush();
 			PF_CHECK(Tests, static_cast<bool>(Output));
 		}
+#if !defined(_WIN32)
+		std::error_code PermissionError;
+		std::filesystem::permissions(Entrypoint, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
+			std::filesystem::perms::owner_exec, std::filesystem::perm_options::replace, PermissionError);
+		PF_CHECK(Tests, !PermissionError);
+#endif
 
 		const auto OutputPath = Fixture.Root() / "Invalid Executable Package";
 		AssetExportRequest Request;
