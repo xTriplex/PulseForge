@@ -87,11 +87,13 @@ namespace
 		PF_CHECK(Tests, OpenGL && OpenGL->Renderer == PulseForge::RendererAPI::OpenGL);
 
 		const std::string RootPath = PathToUtf8(Root);
-		const std::array CookedArguments = { std::string_view("--cooked-content"), std::string_view(RootPath),
-			std::string_view("--runtime-abi"), std::string_view("test-runtime-abi") };
+		const std::array CookedArguments = { std::string_view("--cooked-content"), std::string_view(RootPath) };
 		const auto Cooked = ParsePlayerLaunchConfiguration(CookedArguments, TemporaryDirectory);
 		PF_CHECK(Tests, Cooked && Cooked->CookedContentRoot == std::filesystem::absolute(Root).lexically_normal());
-		PF_CHECK(Tests, Cooked && Cooked->RuntimeABI == "test-runtime-abi");
+		const std::array RuntimeAbiOverride = { std::string_view("--cooked-content"), std::string_view(RootPath),
+			std::string_view("--runtime-abi"), std::string_view("test-runtime-abi") };
+		const auto RuntimeAbiOverrideResult = ParsePlayerLaunchConfiguration(RuntimeAbiOverride, TemporaryDirectory);
+		PF_CHECK(Tests, !RuntimeAbiOverrideResult && RuntimeAbiOverrideResult.error().Code == PlayerLaunchConfigurationErrorCode::UnexpectedArgument);
 		const std::array ConflictingLaunchModes = { std::string_view("--project"), std::string_view(ProjectPath),
 			std::string_view("--cooked-content"), std::string_view(RootPath) };
 		const auto ConflictingModes = ParsePlayerLaunchConfiguration(ConflictingLaunchModes, Root);

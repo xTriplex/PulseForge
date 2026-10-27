@@ -255,6 +255,18 @@ namespace PulseForge
 #endif
 	}
 
+#if defined(PF_DEBUG)
+	const Texture* SceneRenderer::GetHdrColorTextureForValidation() const noexcept
+	{
+		return m_HdrTargetCache ? m_HdrTargetCache->GetColorTextureForValidation() : nullptr;
+	}
+
+	const Texture* SceneRenderer::GetHdrDepthTextureForValidation() const noexcept
+	{
+		return m_HdrTargetCache ? m_HdrTargetCache->GetDepthTextureForValidation() : nullptr;
+	}
+#endif
+
 #if defined(PF_G11_GPU_VALIDATION_TESTS)
 #if !defined(PF_COOKED_RUNTIME_ONLY)
 	std::expected<AssetPreparationService::Subscription, AssetPreparationError>

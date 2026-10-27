@@ -1,4 +1,5 @@
 #include "Assets/AssetCookService.h"
+#include "Core/Log.h"
 
 #include "Assets/AssetDependencyExtractor.h"
 #include "Assets/AssetImportProvenance.h"
@@ -137,7 +138,8 @@ namespace PulseForge
 		{
 			if (!Request.SourceSnapshot || Request.SourceSnapshot->GetProjectID().IsNil() || Request.StartupScene.IsNil() ||
 				Request.SourceProjectFile.empty() || Request.OutputRoot.empty() || Request.Compatibility.TargetPlatform.empty() ||
-				Request.Compatibility.RendererBackend.empty() || Request.Compatibility.RuntimeABI.empty())
+				Request.Compatibility.RendererBackend.empty() || Request.Compatibility.RuntimeABI.empty() ||
+				GetCookedBuildConfigurationName(Request.Compatibility.Configuration).empty())
 				return std::unexpected(Error(AssetCookErrorCode::InvalidRequest, "Cook request is missing its source snapshot, project, roots, compatibility, or destination"));
 
 			auto ProjectFile = AbsoluteNormalized(Request.SourceProjectFile);
@@ -171,6 +173,9 @@ namespace PulseForge
 					"This cook adapter supports only the host target platform '" + std::string(HostTarget) + "'"));
 			if (Request.Compatibility.RendererBackend != "Vulkan" && Request.Compatibility.RendererBackend != "OpenGL")
 				return std::unexpected(Error(AssetCookErrorCode::UnsupportedTarget, "Requested renderer backend is not supported by the cook service"));
+			if (Request.Compatibility.RuntimeABI != CookedRuntimeABIIdentifier)
+				return std::unexpected(Error(AssetCookErrorCode::UnsupportedTarget,
+					"Requested runtime ABI is not implemented by this cook service"));
 
 			auto Description = ReadProjectDescription(*ProjectFile);
 			if (!Description) return std::unexpected(Description.error());
@@ -208,12 +213,15 @@ namespace PulseForge
 		std::expected<void, AssetCookError> ValidateCookSourceFresh(const AssetCookPlan& Plan)
 		{
 			const auto& Request = Plan.Request;
+			PF_INFO("Validating cook source read set");
 			if (auto ReadSet = AssetDependencyExtractor::ValidateInputReceipts(
 				Request.SourceSnapshot->GetProjectRootPath(), Request.SourceSnapshot->GetInputReadSet()); !ReadSet)
 				return std::unexpected(Error(AssetCookErrorCode::SourceChanged,
 					"Source project changed during cook: " + ReadSet.error().Message, ReadSet.error().Path));
+			PF_INFO("Validating cook source registry membership");
 			if (auto Membership = ValidateRegistryMembership(*Request.SourceSnapshot); !Membership)
 				return std::unexpected(Membership.error());
+			PF_INFO("Validating cook project description");
 			auto Project = ReadProjectDescription(Request.SourceProjectFile);
 			if (!Project || Project->Fingerprint != Plan.ProjectFileFingerprint || Project->Bytes != Plan.ProjectFileBytes)
 				return std::unexpected(Error(AssetCookErrorCode::SourceChanged, "Project startup settings changed during cook", Request.SourceProjectFile));
@@ -229,6 +237,7 @@ namespace PulseForge
 					ComputeAssetContentFingerprint(*InputBytes) != *Plan.GameplayInputFingerprint)
 					return std::unexpected(Error(AssetCookErrorCode::SourceChanged, "Gameplay input defaults changed during cook", InputActionsPath));
 			}
+			PF_INFO("Cook source validation complete");
 			return {};
 		}
 
@@ -743,10 +752,13 @@ namespace PulseForge
 			return std::unexpected(Freshness.error());
 
 		AssetFingerprintBuilder GenerationBuilder("pulseforge-cooked-generation-v1");
+		PF_INFO("Computing cooked generation identity");
 		GenerationBuilder.UpdateText("project", Plan.ProjectID.ToString());
 		GenerationBuilder.UpdateText("target", Request.Compatibility.TargetPlatform);
 		GenerationBuilder.UpdateText("backend", Request.Compatibility.RendererBackend);
 		GenerationBuilder.UpdateText("abi", Request.Compatibility.RuntimeABI);
+		// Configuration is recorded as provenance but excluded from product identity while all current adapters
+		// produce configuration-independent payloads. Add it only when an adapter actually changes its output.
 		for (const AssetID& Root : Plan.SortedRoots) GenerationBuilder.UpdateText("root", Root.ToString());
 		for (size_t Index = 0; Index < Entries.size(); ++Index)
 		{
@@ -758,14 +770,16 @@ namespace PulseForge
 				GenerationBuilder.UpdateText("dependency", ProductIdentityKey(Dependency));
 		}
 		const std::string Generation = GenerationBuilder.Finish().DigestHex;
+		PF_INFO("Cooked generation identity computed: {}", Generation);
 		for (CookedAssetEntry& Entry : Entries) Entry.RelativePayloadPath = ProductPath(Entry, Generation);
 		auto Manifest = CookedAssetCatalog::SerializeManifest(Plan.ProjectID, Request.StartupScene,
 				Request.Compatibility, Plan.Request.DynamicRoots, Entries);
 		if (!Manifest) return std::unexpected(Error(AssetCookErrorCode::SerializationFailed, Manifest.error().Message, Manifest.error().Path));
 
-		auto StageId = UUID::Generate();
-		if (!StageId) return std::unexpected(Error(AssetCookErrorCode::StagingFailed, "Could not allocate a unique cook staging identity"));
-		const std::filesystem::path Stage = *OutputAbsolute / (".pf-cs-" + StageId->ToString());
+		PF_INFO("Creating cooked generation staging directory");
+		// The exclusive output lock already owns this namespace. Avoid a second random identifier and keep
+		// interrupted staging data visibly contained by the lock that prevents another writer from entering.
+		const std::filesystem::path Stage = LockPath / "stage";
 		if (!std::filesystem::create_directory(Stage, DirectoryError) || DirectoryError)
 			return std::unexpected(Error(AssetCookErrorCode::StagingFailed, "Could not create unique cook staging directory: " + DirectoryError.message(), Stage));
 		std::vector<std::filesystem::path> StagedFiles;
@@ -783,6 +797,7 @@ namespace PulseForge
 			StagedExpectedBytes.emplace_back(Payloads[Index]);
 			if (auto Written = WriteFile(Destination, Payloads[Index]); !Written) return std::unexpected(Written.error());
 		}
+		PF_INFO("Staged {} cooked payloads", Entries.size());
 		if (auto Freshness = ValidateCookSourceFresh(Plan); !Freshness)
 			return std::unexpected(Freshness.error());
 		const std::filesystem::path GenerationDirectory = *OutputAbsolute / "g" / Generation;
@@ -843,6 +858,7 @@ namespace PulseForge
 		StagedFiles.push_back(ManifestTemporary);
 		StagedExpectedBytes.emplace_back(ManifestBytes);
 		if (auto Written = WriteFile(ManifestTemporary, ManifestBytes); !Written) return std::unexpected(Written.error());
+		PF_INFO("Staged cooked manifest");
 		if (auto Freshness = ValidateCookSourceFresh(Plan); !Freshness)
 			return std::unexpected(Freshness.error());
 		std::error_code ManifestCheckError;
@@ -860,10 +876,12 @@ namespace PulseForge
 		}
 		if (auto Replaced = Platform::ReplaceFileAtomically(ManifestTemporary, ManifestPath); !Replaced)
 			return std::unexpected(Error(AssetCookErrorCode::PublicationFailed, "Cooked generation exists, but manifest publication failed: " + Replaced.error().Message, ManifestPath));
+		PF_INFO("Published cooked manifest");
 		uint64_t PayloadBytes = 0;
 		for (const CookedAssetEntry& Entry : Entries) PayloadBytes += Entry.PayloadBytes;
 		std::error_code CleanupError;
 		const bool Cleaned = StageCleanup.Cleanup();
+		PF_INFO("Cook staging cleanup completed: {}", Cleaned);
 		AssetCookReport Report{ ManifestPath, Generation, PayloadBytes, Entries.size() };
 		Report.StagingCleanupPending = !Cleaned;
 		if (!Cleaned) Report.RetainedStagingPath = Stage;

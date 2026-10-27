@@ -107,18 +107,6 @@ namespace PulseForgeGame
 				continue;
 			}
 
-			if (Argument == "--runtime-abi")
-			{
-				if (Index + 1 >= Arguments.size() || Arguments[Index + 1].starts_with("--"))
-					return std::unexpected(MakeError(PlayerLaunchConfigurationErrorCode::MissingOptionValue,
-						"The --runtime-abi option requires an ABI identifier.", Index));
-				Configuration.RuntimeABI = std::string(Arguments[++Index]);
-				if (Configuration.RuntimeABI.empty())
-					return std::unexpected(MakeError(PlayerLaunchConfigurationErrorCode::UnexpectedArgument,
-						"The runtime ABI identifier must not be empty.", Index));
-				continue;
-			}
-
 			if (Argument == "--start-scene")
 			{
 				if (HasStartupScene)

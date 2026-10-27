@@ -25,6 +25,25 @@ static_assert(XXH_VERSION_NUMBER == 802, "Cooked payload digests use the pinned 
 
 namespace PulseForge
 {
+	std::string_view GetCookedBuildConfigurationName(CookedBuildConfiguration Configuration) noexcept
+	{
+		switch (Configuration)
+		{
+		case CookedBuildConfiguration::Debug: return "Debug";
+		case CookedBuildConfiguration::Release: return "Release";
+		case CookedBuildConfiguration::Dist: return "Dist";
+		}
+		return {};
+	}
+
+	std::expected<CookedBuildConfiguration, std::string> ParseCookedBuildConfiguration(std::string_view Configuration)
+	{
+		if (Configuration == "Debug") return CookedBuildConfiguration::Debug;
+		if (Configuration == "Release") return CookedBuildConfiguration::Release;
+		if (Configuration == "Dist") return CookedBuildConfiguration::Dist;
+		return std::unexpected("Cook configuration must be Debug, Release, or Dist");
+	}
+
 	namespace
 	{
 		using Json = nlohmann::ordered_json;
@@ -197,7 +216,8 @@ namespace PulseForge
 		std::vector<AssetID> DynamicRoots, std::vector<CookedAssetEntry> Entries)
 	{
 		if (ProjectID.IsNil() || StartupScene.IsNil() || Compatibility.TargetPlatform.empty() ||
-			Compatibility.RendererBackend.empty() || Compatibility.RuntimeABI.empty())
+			Compatibility.RendererBackend.empty() || Compatibility.RuntimeABI.empty() ||
+			GetCookedBuildConfigurationName(Compatibility.Configuration).empty())
 			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, {}, "Manifest identity or compatibility is incomplete"));
 		if (Entries.empty() || Entries.size() > MaximumEntries || DynamicRoots.size() > MaximumEntries)
 			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, {}, "Manifest entry or root count is invalid"));
@@ -267,7 +287,9 @@ namespace PulseForge
 		Json Manifest = Json::object({ { "format", Format }, { "version", ManifestVersion },
 			{ "projectId", ProjectID.ToString() }, { "startupScene", StartupScene.ToString() },
 			{ "targetPlatform", Compatibility.TargetPlatform }, { "rendererBackend", Compatibility.RendererBackend },
-			{ "runtimeABI", Compatibility.RuntimeABI }, { "dynamicRoots", std::move(Roots) }, { "entries", std::move(JsonEntries) } });
+			{ "runtimeABI", Compatibility.RuntimeABI },
+			{ "configuration", GetCookedBuildConfigurationName(Compatibility.Configuration) },
+			{ "dynamicRoots", std::move(Roots) }, { "entries", std::move(JsonEntries) } });
 		std::string Data = Manifest.dump(2) + "\n";
 		if (Data.size() > MaximumManifestBytes)
 			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::ManifestTooLarge, {}, "Cook manifest exceeds its 16 MiB limit"));
@@ -283,6 +305,9 @@ namespace PulseForge
 			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidRoot, ContentRoot, "Cooked content root must be an existing directory"));
 		if (HasLinkedComponent(AbsoluteRoot, Error) || Error)
 			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidRoot, AbsoluteRoot, "Cooked content root traverses a linked or unobservable path"));
+		if (GetCookedBuildConfigurationName(ExpectedCompatibility.Configuration).empty())
+			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::UnsupportedConfiguration, AbsoluteRoot,
+				"Runtime expected an unsupported build configuration identity"));
 		const std::filesystem::path ManifestPath = AbsoluteRoot / ManifestFileName;
 		if (IsLinked(ManifestPath, Error) || Error)
 			return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidRoot, ManifestPath, "Cook manifest is linked or cannot be inspected"));
@@ -301,7 +326,7 @@ namespace PulseForge
 		{
 			const Json Root = Json::parse(Data);
 			if (!HasExactFields(Root, { "format", "version", "projectId", "startupScene", "targetPlatform", "rendererBackend",
-				"runtimeABI", "dynamicRoots", "entries" }))
+				"runtimeABI", "configuration", "dynamicRoots", "entries" }))
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath, "Cook manifest fields are missing or unsupported"));
 			if (!Root["format"].is_string() || Root["format"].get<std::string>() != Format)
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath, "Cook manifest format identifier is invalid"));
@@ -321,10 +346,18 @@ namespace PulseForge
 			for (const std::string_view Field : { "targetPlatform", "rendererBackend", "runtimeABI" })
 				if (!Root[std::string(Field)].is_string() || Root[std::string(Field)].get<std::string>().empty())
 					return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath, "Manifest compatibility field is invalid"));
-			CookedAssetCompatibility Compatibility{ Root["targetPlatform"].get<std::string>(), Root["rendererBackend"].get<std::string>(), Root["runtimeABI"].get<std::string>() };
+			if (!Root["configuration"].is_string())
+				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath,
+					"Manifest configuration must be Debug, Release, or Dist"));
+			auto Configuration = ParseCookedBuildConfiguration(Root["configuration"].get<std::string>());
+			if (!Configuration)
+				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::UnsupportedConfiguration, ManifestPath, Configuration.error()));
+			CookedAssetCompatibility Compatibility{ Root["targetPlatform"].get<std::string>(), Root["rendererBackend"].get<std::string>(),
+				Root["runtimeABI"].get<std::string>(), *Configuration };
 			if (Compatibility.TargetPlatform != ExpectedCompatibility.TargetPlatform ||
 				Compatibility.RendererBackend != ExpectedCompatibility.RendererBackend || Compatibility.RuntimeABI != ExpectedCompatibility.RuntimeABI)
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::IncompatibleTarget, ManifestPath, "Cooked target, renderer or runtime ABI is incompatible"));
+			// Configuration is provenance only today: payload adapters produce equivalent bytes in Debug, Release and Dist.
 			if (!Root["dynamicRoots"].is_array() || Root["dynamicRoots"].size() > MaximumEntries ||
 				!Root["entries"].is_array() || Root["entries"].empty() || Root["entries"].size() > MaximumEntries)
 				return std::unexpected(MakeError(CookedAssetCatalogErrorCode::InvalidManifest, ManifestPath, "Manifest roots or entries exceed their limits"));

@@ -186,14 +186,56 @@ namespace
 		PF_CHECK(Tests, !Truncated && Truncated.error().Code == CookedAssetCatalogErrorCode::InvalidManifest);
 
 		std::string Unsupported = *Baseline;
-		PF_CHECK(Tests, ReplaceOnce(Unsupported, "\"version\": 1", "\"version\": 77"));
+		PF_CHECK(Tests, ReplaceOnce(Unsupported, "\"version\": 2", "\"version\": 77"));
 		Fixture.WriteManifest(Unsupported);
 		const auto Version = Fixture.Open();
 		PF_CHECK(Tests, !Version && Version.error().Code == CookedAssetCatalogErrorCode::UnsupportedVersion);
+		std::string LegacyVersion = *Baseline;
+		PF_CHECK(Tests, ReplaceOnce(LegacyVersion, "\"version\": 2", "\"version\": 1"));
+		Fixture.WriteManifest(LegacyVersion);
+		const auto LegacyManifest = Fixture.Open();
+		PF_CHECK(Tests, !LegacyManifest && LegacyManifest.error().Code == CookedAssetCatalogErrorCode::UnsupportedVersion);
 
 		Fixture.WriteManifest(*Baseline);
 		auto Incompatible = Fixture.Open({ "other-target", Compatibility.RendererBackend, Compatibility.RuntimeABI });
 		PF_CHECK(Tests, !Incompatible && Incompatible.error().Code == CookedAssetCatalogErrorCode::IncompatibleTarget);
+		auto OtherBackend = Fixture.Open({ Compatibility.TargetPlatform, "other-renderer", Compatibility.RuntimeABI });
+		PF_CHECK(Tests, !OtherBackend && OtherBackend.error().Code == CookedAssetCatalogErrorCode::IncompatibleTarget);
+		auto OtherABI = Fixture.Open({ Compatibility.TargetPlatform, Compatibility.RendererBackend, "other-abi" });
+		PF_CHECK(Tests, !OtherABI && OtherABI.error().Code == CookedAssetCatalogErrorCode::IncompatibleTarget);
+		const auto CrossConfiguration = Fixture.Open({ Compatibility.TargetPlatform, Compatibility.RendererBackend,
+			Compatibility.RuntimeABI, CookedBuildConfiguration::Dist });
+		PF_CHECK(Tests, CrossConfiguration.has_value());
+		if (CrossConfiguration)
+			PF_CHECK(Tests, (*CrossConfiguration)->GetCompatibility().Configuration == CookedBuildConfiguration::Debug);
+		const auto InvalidExpectedConfiguration = Fixture.Open({ Compatibility.TargetPlatform, Compatibility.RendererBackend,
+			Compatibility.RuntimeABI, static_cast<CookedBuildConfiguration>(255) });
+		PF_CHECK(Tests, !InvalidExpectedConfiguration &&
+			InvalidExpectedConfiguration.error().Code == CookedAssetCatalogErrorCode::UnsupportedConfiguration);
+
+		std::string MissingConfiguration = *Baseline;
+		PF_CHECK(Tests, ReplaceOnce(MissingConfiguration, "  \"configuration\": \"Debug\",\n", ""));
+		Fixture.WriteManifest(MissingConfiguration);
+		const auto MissingConfig = Fixture.Open();
+		PF_CHECK(Tests, !MissingConfig && MissingConfig.error().Code == CookedAssetCatalogErrorCode::InvalidManifest);
+
+		std::string UnsupportedConfiguration = *Baseline;
+		PF_CHECK(Tests, ReplaceOnce(UnsupportedConfiguration, "\"configuration\": \"Debug\"",
+			"\"configuration\": \"Profile\""));
+		Fixture.WriteManifest(UnsupportedConfiguration);
+		const auto UnsupportedConfig = Fixture.Open();
+		PF_CHECK(Tests, !UnsupportedConfig && UnsupportedConfig.error().Code == CookedAssetCatalogErrorCode::UnsupportedConfiguration);
+
+		std::string MalformedConfiguration = *Baseline;
+		PF_CHECK(Tests, ReplaceOnce(MalformedConfiguration, "\"configuration\": \"Debug\"", "\"configuration\": 7"));
+		Fixture.WriteManifest(MalformedConfiguration);
+		const auto MalformedConfig = Fixture.Open();
+		PF_CHECK(Tests, !MalformedConfig && MalformedConfig.error().Code == CookedAssetCatalogErrorCode::InvalidManifest);
+
+		PF_CHECK(Tests, ParseCookedBuildConfiguration("Debug") == CookedBuildConfiguration::Debug);
+		PF_CHECK(Tests, ParseCookedBuildConfiguration("Release") == CookedBuildConfiguration::Release);
+		PF_CHECK(Tests, ParseCookedBuildConfiguration("Dist") == CookedBuildConfiguration::Dist);
+		PF_CHECK(Tests, !ParseCookedBuildConfiguration("Profile"));
 
 		std::string Duplicate = *Baseline;
 		PF_CHECK(Tests, DuplicateOnlyEntry(Duplicate));

@@ -337,6 +337,7 @@ target_link_libraries(PulseForgeAssetCookService
 set_property(TARGET PulseForgeAssetCookService PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 add_executable(PulseForgeCook PulseForge/Source/Private/Assets/AssetCookCommand.cpp)
 target_include_directories(PulseForgeCook PRIVATE PulseForge/Source/Public)
+target_compile_definitions(PulseForgeCook PRIVATE "PF_BUILD_CONFIGURATION=\"$<CONFIG>\"")
 target_link_libraries(PulseForgeCook PRIVATE PulseForgeAssetCookService PulseForgeAssetServices PulseForgeAssetDependencyCatalog)
 set_property(TARGET PulseForgeCook PROPERTY DISABLE_PRECOMPILE_HEADERS ON)
 add_library(PulseForge STATIC

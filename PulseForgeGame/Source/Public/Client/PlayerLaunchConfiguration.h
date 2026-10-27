@@ -17,7 +17,6 @@ namespace PulseForgeGame
 	{
 		std::filesystem::path ProjectFile;
 		std::filesystem::path CookedContentRoot;
-		std::string RuntimeABI = "pulseforge-runtime-v1";
 		std::optional<PulseForge::AssetID> StartupScene;
 		std::optional<uint32_t> WindowWidth;
 		std::optional<uint32_t> WindowHeight;

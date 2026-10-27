@@ -16,6 +16,18 @@
 
 namespace PulseForge
 {
+	enum class CookedBuildConfiguration : uint8_t
+	{
+		Debug,
+		Release,
+		Dist
+	};
+
+	[[nodiscard]] PULSEFORGE_API std::string_view GetCookedBuildConfigurationName(CookedBuildConfiguration Configuration) noexcept;
+	[[nodiscard]] PULSEFORGE_API std::expected<CookedBuildConfiguration, std::string> ParseCookedBuildConfiguration(
+		std::string_view Configuration);
+	inline constexpr std::string_view CookedRuntimeABIIdentifier = "pulseforge-runtime-v1";
+
 	struct CookedAssetDigest final
 	{
 		std::string Algorithm;
@@ -60,9 +72,12 @@ namespace PulseForge
 
 	struct CookedAssetCompatibility final
 	{
+		// These three fields determine whether the runtime can consume the products.
 		std::string TargetPlatform;
 		std::string RendererBackend;
 		std::string RuntimeABI;
+		// Manifest provenance. Not a compatibility discriminator while all adapters are configuration-independent.
+		CookedBuildConfiguration Configuration = CookedBuildConfiguration::Debug;
 	};
 
 	enum class CookedAssetCatalogErrorCode : uint8_t
@@ -79,6 +94,7 @@ namespace PulseForge
 		PayloadTooLarge,
 		PayloadReadFailed,
 		PayloadDigestMismatch,
+		UnsupportedConfiguration,
 		AssetNotFound,
 		InvalidPayload
 	};
@@ -95,7 +111,8 @@ namespace PulseForge
 	class PULSEFORGE_API CookedAssetCatalog final
 	{
 	public:
-		static constexpr uint32_t ManifestVersion = 1;
+		// Version 2 adds required build-configuration provenance; version 1 is intentionally rejected.
+		static constexpr uint32_t ManifestVersion = 2;
 		static constexpr std::string_view ManifestFileName = "manifest.pfmanifest";
 		static constexpr size_t MaximumManifestBytes = 16u * 1024u * 1024u;
 		static constexpr size_t MaximumEntries = 250'000;

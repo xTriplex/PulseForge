@@ -122,6 +122,11 @@ if(BUILD_TESTING)
 	add_test(NAME PulseForge.AssetCook COMMAND PulseForgeAssetTests --cook-only)
 	add_test(NAME PulseForge.CookCliUsage COMMAND PulseForgeCook)
 	set_tests_properties(PulseForge.CookCliUsage PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME PulseForge.CookConfigurationCLI
+		COMMAND "${CMAKE_COMMAND}"
+			"-DPULSEFORGE_COOK_EXECUTABLE=$<TARGET_FILE:PulseForgeCook>"
+			"-DPULSEFORGE_TEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}"
+			-P "${CMAKE_CURRENT_SOURCE_DIR}/Tests/CMake/TestCookConfigurationCLI.cmake")
 	add_executable(PulseForgeCookedAssetCatalogTests Tests/CookedAssetCatalogTests.cpp)
 	target_link_libraries(PulseForgeCookedAssetCatalogTests PRIVATE PulseForgeCookedAssetCatalog)
 	set_property(TARGET PulseForgeCookedAssetCatalogTests PROPERTY DISABLE_PRECOMPILE_HEADERS ON)

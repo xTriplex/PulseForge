@@ -158,6 +158,23 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	SecondManifestStream.close();
 	PF_CHECK(Tests, FirstManifest == SecondManifest);
 	PF_CHECK(Tests, First->GenerationIdentity == Second->GenerationIdentity);
+	auto DistRequest = Request;
+	DistRequest.Compatibility.Configuration = CookedBuildConfiguration::Dist;
+	DistRequest.OutputRoot = Fixture.Root / "DistCook";
+	const auto DistCook = AssetCookService::Cook(DistRequest);
+	PF_CHECK(Tests, DistCook.has_value());
+	if (DistCook)
+	{
+		PF_CHECK(Tests, DistCook->GenerationIdentity == First->GenerationIdentity);
+		auto DistProvider = CookedContentProvider::Open(DistRequest.OutputRoot, Fixture.Compatibility);
+		PF_CHECK(Tests, DistProvider.has_value());
+		if (DistProvider)
+			PF_CHECK(Tests, (*DistProvider)->GetCompatibility().Configuration == CookedBuildConfiguration::Dist);
+	}
+	auto InvalidAbiRequest = Request;
+	InvalidAbiRequest.Compatibility.RuntimeABI = "future-runtime-abi";
+	const auto InvalidAbi = AssetCookService::Plan(InvalidAbiRequest);
+	PF_CHECK(Tests, !InvalidAbi && InvalidAbi.error().Code == AssetCookErrorCode::UnsupportedTarget);
 	auto Provider = CookedContentProvider::Open(Fixture.Output, Fixture.Compatibility);
 	PF_CHECK(Tests, Provider.has_value());
 	if (!Provider) return;
