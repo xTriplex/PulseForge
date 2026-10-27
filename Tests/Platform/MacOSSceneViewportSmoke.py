@@ -144,6 +144,20 @@ def wheel_delta_consumed(fields: dict[str, str], action_id: str, callback_sequen
         return False
 
 
+def wheel_speed_changed(fields: dict[str, str], action_id: str, speed_before: float) -> bool:
+    try:
+        return (
+            fields.get("wheel_action_id") == action_id
+            and fields.get("focused") == "1"
+            and fields.get("capture") == "1"
+            and fields.get("right_button_down") == "1"
+            and fields.get("wheel_action") == "adjust-fly-speed"
+            and float(fields.get("camera_speed", "nan")) > speed_before
+        )
+    except ValueError:
+        return False
+
+
 def find_fresh_state(
     observations: list[tuple[int, float, str]],
     dropped_through: int,
@@ -630,20 +644,25 @@ def main() -> int:
                                             detached["owner_viewport"], detached["owner_window"]):
             raise RuntimeError(f"scroll callback did not accumulate under the detached owner: {callback_state_line}")
 
-        consumed_state_line = wait_for_state(
-            int(callback_state["sequence"]), "detached-owner scroll delta consumed by viewport",
-            lambda fields: wheel_delta_consumed(fields, wheel_id, callback_sequence),
-            timeout_seconds=5.0,
-        )
-        consumed_state = marker_fields(consumed_state_line, STATE)
-        wheel_state_line = wait_for_state(
-            int(consumed_state["sequence"]), "detached-owner fly speed changed from owner wheel input",
-            lambda fields: fields.get("wheel_action_id") == wheel_id and fields.get("focused") == "1" and
-            fields.get("capture") == "1" and fields.get("right_button_down") == "1" and
-            fields.get("wheel_action") == "adjust-fly-speed" and
-            float(fields.get("camera_speed", "nan")) > speed_before_wheel,
-            timeout_seconds=5.0,
-        )
+        if wheel_delta_consumed(callback_state, wheel_id, callback_sequence):
+            consumed_state_line = callback_state_line
+            consumed_state = callback_state
+        else:
+            consumed_state_line = wait_for_state(
+                int(callback_state["sequence"]), "detached-owner scroll delta consumed by viewport",
+                lambda fields: wheel_delta_consumed(fields, wheel_id, callback_sequence),
+                timeout_seconds=5.0,
+            )
+            consumed_state = marker_fields(consumed_state_line, STATE)
+
+        if wheel_speed_changed(consumed_state, wheel_id, speed_before_wheel):
+            wheel_state_line = consumed_state_line
+        else:
+            wheel_state_line = wait_for_state(
+                int(consumed_state["sequence"]), "detached-owner fly speed changed from owner wheel input",
+                lambda fields: wheel_speed_changed(fields, wheel_id, speed_before_wheel),
+                timeout_seconds=5.0,
+            )
         wheel_state = marker_fields(wheel_state_line, STATE)
         wheel_state_sample = int(wheel_state["sequence"])
 

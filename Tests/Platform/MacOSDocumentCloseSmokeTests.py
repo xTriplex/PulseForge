@@ -242,6 +242,32 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
             {**fields, "owner_scroll_delta": "0"}, "a" * 32, 9
         ))
 
+    def test_one_fresh_state_can_report_callback_consumption_and_speed_change(self) -> None:
+        fields = {
+            "wheel_action_id": "a" * 32,
+            "scroll_callback_sequence": "9",
+            "scroll_callback_window": "0x2000",
+            "scroll_callback_viewport": "2",
+            "scroll_callback_input_window": "12",
+            "last_scroll_callback_matches_owner": "1",
+            "scroll_callback_accumulated": "1",
+            "owner_input_window": "12",
+            "owner_scroll_route_registered": "1",
+            "owner_router_scroll_callback_installed": "1",
+            "owner_backend_scroll_callback_chained": "1",
+            "scroll_consumed_sequence": "9",
+            "scroll_consumed_delta": "1.0",
+            "owner_scroll_delta": "1.0",
+            "focused": "1",
+            "capture": "1",
+            "right_button_down": "1",
+            "wheel_action": "adjust-fly-speed",
+            "camera_speed": "6.0",
+        }
+        self.assertTrue(scene_viewport_smoke.wheel_callback_matches_owner(fields, "a" * 32, 8, "2", "0x2000"))
+        self.assertTrue(scene_viewport_smoke.wheel_delta_consumed(fields, "a" * 32, 9))
+        self.assertTrue(scene_viewport_smoke.wheel_speed_changed(fields, "a" * 32, 5.0))
+
     def test_camera_input_uses_only_the_visible_intersection_of_a_detached_image(self) -> None:
         display, minimum, maximum = scene_viewport_smoke.visible_camera_region(
             (832.2, 425.0),
