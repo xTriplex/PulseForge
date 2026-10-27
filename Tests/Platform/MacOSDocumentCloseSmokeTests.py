@@ -55,6 +55,36 @@ class FakeCapture:
         return []
 
 
+class MacOSBundleRuntimeEnvironmentTests(unittest.TestCase):
+    def test_sdk_loader_search_path_is_removed_for_bundled_app_runtime(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="PulseForge macOS runtime env ") as temporary:
+            sdk = Path(temporary)
+            icd_directory = sdk / "share" / "vulkan" / "icd.d"
+            layer_directory = sdk / "share" / "vulkan" / "explicit_layer.d"
+            icd_directory.mkdir(parents=True)
+            layer_directory.mkdir(parents=True)
+            (icd_directory / "MoltenVK_icd.json").write_text("{}", encoding="utf-8")
+            inherited = {
+                "VULKAN_SDK": str(sdk),
+                "DYLD_LIBRARY_PATH": str(sdk / "lib"),
+                "DYLD_FALLBACK_LIBRARY_PATH": str(sdk / "lib"),
+                "VK_DRIVER_FILES": str(icd_directory / "MoltenVK_icd.json"),
+                "VK_LAYER_PATH": str(layer_directory),
+                "VK_INSTANCE_LAYERS": "VK_LAYER_KHRONOS_validation",
+            }
+
+            with patch("os.environ.copy", return_value=inherited):
+                environment = bundle.sdk_assisted_runtime_environment()
+
+        self.assertFalse(any(name.startswith("DYLD_") for name in environment))
+        allowed_vulkan_variables = {"VK_DRIVER_FILES", "VK_LAYER_PATH"}
+        self.assertFalse(any(
+            name.startswith("VK_") and name not in allowed_vulkan_variables for name in environment
+        ))
+        self.assertEqual(environment["VK_LAYER_PATH"], str(layer_directory))
+        self.assertIn("VULKAN_SDK", environment)
+
+
 def marker(kind: str, **fields: str) -> dict[str, str]:
     return {"kind": kind, "_capture_index": "1", "raw": f"PF_DOC_CLOSE_UI|{kind}", **fields}
 

@@ -197,7 +197,6 @@ jobs:
           DXC_EXECUTABLE="$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS/bin/dxc"
           echo "VULKAN_SDK=$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS" >> "$GITHUB_ENV"
           echo "PULSEFORGE_DXC_EXECUTABLE=$DXC_EXECUTABLE" >> "$GITHUB_ENV"
-          echo "DYLD_LIBRARY_PATH=$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS/lib" >> "$GITHUB_ENV"
           echo "VK_DRIVER_FILES=$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS/share/vulkan/icd.d/MoltenVK_icd.json" >> "$GITHUB_ENV"
           echo "VK_LAYER_PATH=$RUNNER_TEMP/VulkanSDK/${SDK_VERSION}/macOS/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
           xcodebuild -version | tee "$RUNNER_TEMP/apple-toolchain.log"
@@ -208,8 +207,12 @@ jobs:
         if: ${{ always() && !cancelled() && steps.install_vulkan_sdk.outcome == 'success' }}
         run: |
           set -o pipefail
-          "$VULKAN_SDK/bin/vulkaninfo" --summary 2>&1 | tee "$RUNNER_TEMP/vulkaninfo-summary.log"
-          "$VULKAN_SDK/bin/vulkaninfo" --show-formats > "$RUNNER_TEMP/vulkaninfo-full.log" 2>&1
+          if [[ -n "${DYLD_LIBRARY_PATH:-}" ]]; then
+            echo "The SDK loader path must not leak into bundled application launches." >&2
+            exit 1
+          fi
+          DYLD_LIBRARY_PATH="$VULKAN_SDK/lib" "$VULKAN_SDK/bin/vulkaninfo" --summary 2>&1 | tee "$RUNNER_TEMP/vulkaninfo-summary.log"
+          DYLD_LIBRARY_PATH="$VULKAN_SDK/lib" "$VULKAN_SDK/bin/vulkaninfo" --show-formats > "$RUNNER_TEMP/vulkaninfo-full.log" 2>&1
           grep -Ei 'deviceName|deviceType|apiVersion|driverVersion|VK_KHR_portability_(enumeration|subset)|VK_KHR_swapchain|VK_KHR_dynamic_rendering|VK_KHR_synchronization2|VK_EXT_metal_surface|swapchainMaintenance1|timelineSemaphore|dynamicRendering|synchronization2|shaderDemoteToHelperInvocation|D32|depth' \
             "$RUNNER_TEMP/vulkaninfo-full.log" | tee "$RUNNER_TEMP/moltenvk-capabilities.log"
 
@@ -839,9 +842,18 @@ jobs:
         id: linux_standalone_acceptance
         run: |
           set -euo pipefail
-          DRIVER_MANIFEST=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-          test -f "$DRIVER_MANIFEST"
+          mapfile -t LAVAPIPE_MANIFESTS < <(
+            find /usr/share/vulkan/icd.d /etc/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print 2>/dev/null | sort
+          )
+          if [[ ${#LAVAPIPE_MANIFESTS[@]} -ne 1 ]]; then
+            echo "Expected one installed Lavapipe Vulkan manifest; found ${#LAVAPIPE_MANIFESTS[@]}:" >&2
+            find /usr/share/vulkan/icd.d /etc/vulkan/icd.d -maxdepth 1 -type f -name '*.json' -print 2>/dev/null | sort >&2 || true
+            exit 1
+          fi
+          DRIVER_MANIFEST="${LAVAPIPE_MANIFESTS[0]}"
+          echo "Using installed Lavapipe manifest: $DRIVER_MANIFEST"
           mkdir -p "$RUNNER_TEMP/g14-exported-linux"
+          python3 Tests/Platform/CookedPlayerAcceptanceTests.py
           xvfb-run -a python3 Tests/Platform/CookedPlayerAcceptance.py \
             --cook Build/CI/linux/PulseForgeCook \
             --player Build/CI/linux/PulseForgeCookedGame \
@@ -910,6 +922,9 @@ jobs:
             ${{ runner.temp }}/build-release.log
             ${{ runner.temp }}/configure-dist.log
             ${{ runner.temp }}/build-dist.log
+            ${{ runner.temp }}/linux-standalone-acceptance.log
+            ${{ runner.temp }}/cooked-player-acceptance-*.log
+            ${{ runner.temp }}/standalone-package-*.log
             Build/CI/linux/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/linux/CMakeFiles/CMakeOutput.log
             Build/CI/linux/CMakeFiles/CMakeError.log
@@ -942,18 +957,29 @@ jobs:
           PACKAGE="$RUNNER_TEMP/G14 Package Ω/PulseForge Standalone Ω"
           EXECUTABLE="$PACKAGE/PulseForgeCookedGame"
           test -x "$EXECUTABLE"
-          DRIVER_MANIFEST=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-          test -f "$DRIVER_MANIFEST"
+          mapfile -t LAVAPIPE_MANIFESTS < <(
+            find /usr/share/vulkan/icd.d /etc/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print 2>/dev/null | sort
+          )
+          if [[ ${#LAVAPIPE_MANIFESTS[@]} -ne 1 ]]; then
+            echo "Expected one installed Lavapipe Vulkan manifest; found ${#LAVAPIPE_MANIFESTS[@]}:" >&2
+            find /usr/share/vulkan/icd.d /etc/vulkan/icd.d -maxdepth 1 -type f -name '*.json' -print 2>/dev/null | sort >&2 || true
+            exit 1
+          fi
+          DRIVER_MANIFEST="${LAVAPIPE_MANIFESTS[0]}"
+          echo "Using installed Lavapipe manifest for package-only launch: $DRIVER_MANIFEST"
           chmod -R a-w "$PACKAGE"
           mkdir -p "$RUNNER_TEMP/G14 User Data Ω/PulseForge" "$RUNNER_TEMP/G14 Unrelated CWD Ω"
           USER_DATA="$RUNNER_TEMP/G14 User Data Ω/PulseForge"
           cd "$RUNNER_TEMP/G14 Unrelated CWD Ω"
           set +e
-          xvfb-run -a env -i HOME="$RUNNER_TEMP/G14 User Data Ω" TMPDIR="$RUNNER_TEMP" \
-            PATH=/usr/bin:/bin LANG=C.UTF-8 DISPLAY="$DISPLAY" XAUTHORITY="${XAUTHORITY:-}" \
-            VK_DRIVER_FILES="$DRIVER_MANIFEST" VK_ICD_FILENAMES="$DRIVER_MANIFEST" \
-            PULSEFORGE_USER_DATA_DIR="$USER_DATA" PULSEFORGE_COOKED_PLAYER_ACCEPTANCE=1 \
-            "$EXECUTABLE" > "$RUNNER_TEMP/g14-package-only-player.log" 2>&1
+          xvfb-run -a bash -c '
+            env -i HOME="$1" TMPDIR="$2" PATH=/usr/bin:/bin LANG=C.UTF-8 \
+              DISPLAY="$DISPLAY" XAUTHORITY="${XAUTHORITY:-}" \
+              VK_DRIVER_FILES="$3" VK_ICD_FILENAMES="$3" \
+              PULSEFORGE_USER_DATA_DIR="$4" PULSEFORGE_COOKED_PLAYER_ACCEPTANCE=1 \
+              "$5"
+          ' _ "$RUNNER_TEMP/G14 User Data Ω" "$RUNNER_TEMP" "$DRIVER_MANIFEST" "$USER_DATA" "$EXECUTABLE" \
+            > "$RUNNER_TEMP/g14-package-only-player.log" 2>&1
           STATUS=$?
           set -e
           cat "$RUNNER_TEMP/g14-package-only-player.log"

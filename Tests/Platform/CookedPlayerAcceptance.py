@@ -241,6 +241,16 @@ def verify_cook_manifest(path: Path, dynamic_root: str) -> None:
         raise RuntimeError("cook manifest did not record a supported build configuration")
 
 
+def make_linux_standalone_environment(inherited: dict[str, str]) -> dict[str, str]:
+    """Retain only the virtual X11 connection needed by the package-only runtime check."""
+    environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"}
+    for variable in ("DISPLAY", "XAUTHORITY"):
+        value = inherited.get(variable)
+        if value:
+            environment[variable] = value
+    return environment
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cook", required=True, type=Path)
@@ -381,11 +391,12 @@ def main() -> int:
                 for variable in ("WINDIR", "SystemDrive"):
                     if variable in os.environ:
                         standalone_environment[variable] = os.environ[variable]
-            else:
+            elif sys.platform == "darwin":
                 standalone_environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"}
-                if sys.platform == "darwin":
-                    standalone_environment["TMPDIR"] = str(Path(tempfile.gettempdir()))
+                standalone_environment["TMPDIR"] = str(Path(tempfile.gettempdir()))
                 standalone_environment["DYLD_PRINT_LIBRARIES"] = "1"
+            else:
+                standalone_environment = make_linux_standalone_environment(os.environ)
             standalone_environment["PULSEFORGE_COOKED_PLAYER_ACCEPTANCE"] = "1"
             if runtime_driver_manifest:
                 standalone_environment["VK_DRIVER_FILES"] = str(runtime_driver_manifest)
