@@ -136,6 +136,8 @@ if(PULSEFORGE_BUILD_EDITOR)
 		target_link_libraries(PulseForgeEditor PRIVATE shell32 ole32 dwmapi)
 	endif()
 	pulseforge_runtime_resource_directory(PulseForgeEditor PULSEFORGE_EDITOR_RESOURCE_DIRECTORY)
+	pulseforge_stage_macos_vulkan_runtime(PulseForgeEditor "${PULSEFORGE_EDITOR_RESOURCE_DIRECTORY}"
+		"${PULSEFORGE_EDITOR_RENDERER}")
 	pulseforge_attach_asset_deployment(PulseForgeEditor "${PULSEFORGE_EDITOR_RESOURCE_DIRECTORY}/EditorAssets"
 		DIRECTORIES
 			"${CMAKE_CURRENT_SOURCE_DIR}/PulseForgeEditor/Assets/Fonts" "Fonts"

@@ -42,6 +42,10 @@ namespace
 			m_Root = std::filesystem::temp_directory_path() / std::filesystem::u8path(DirectoryName);
 			std::error_code Error;
 			std::filesystem::create_directories(m_Root, Error);
+			if (!Error)
+			{
+				m_Root = std::filesystem::canonical(m_Root, Error);
+			}
 			m_Ready = !Error;
 		}
 
@@ -399,6 +403,10 @@ namespace
 		std::array<char, 64> InvalidExecutableHeader{};
 		InvalidExecutableHeader[0] = 'N';
 		InvalidExecutableHeader[1] = 'O';
+		std::error_code DirectoryError;
+		std::filesystem::create_directories(Entrypoint.parent_path(), DirectoryError);
+		PF_CHECK(Tests, !DirectoryError);
+		if (DirectoryError) return;
 		{
 			std::ofstream Output(Entrypoint, std::ios::binary | std::ios::trunc);
 			PF_CHECK(Tests, static_cast<bool>(Output));

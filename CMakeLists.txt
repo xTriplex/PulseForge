@@ -69,6 +69,7 @@ endif()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeDependencies.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeEngineTargets.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeMacOSBundleRuntime.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeGameTarget.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeEditorCoreTarget.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/CMake/PulseForgeAssetDeployment.cmake")

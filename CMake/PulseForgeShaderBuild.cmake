@@ -265,6 +265,8 @@ if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan" OR
 	endif()
 	if(PULSEFORGE_SAMPLE_RENDERER STREQUAL "Vulkan")
 		pulseforge_runtime_resource_directory(PulseForgeGame PULSEFORGE_GAME_RESOURCE_DIRECTORY)
+		pulseforge_stage_macos_vulkan_runtime(PulseForgeGame "${PULSEFORGE_GAME_RESOURCE_DIRECTORY}"
+			"${PULSEFORGE_SAMPLE_RENDERER}")
 		pulseforge_attach_shader_deployment(PulseForgeGame "${PULSEFORGE_GAME_RESOURCE_DIRECTORY}/Shaders"
 			ASSET_TARGETS PulseForgeSceneShaderAssets SHADERS ${PULSEFORGE_SCENE_SHADER_OUTPUTS})
 		pulseforge_runtime_resource_directory(PulseForgeCookedGame PULSEFORGE_COOKED_GAME_RESOURCE_DIRECTORY)
