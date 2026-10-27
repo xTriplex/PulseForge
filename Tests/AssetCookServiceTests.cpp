@@ -331,6 +331,9 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 					PF_CHECK(Tests, ModelRecord != Records.end());
 					if (RealProvider && ModelRecord != Records.end())
 						{
+							const CookedAssetEntry* MeshEntry = (*RealProvider)->FindMeshPrimitive(
+								ModelRecord->ID, "mesh/0/primitive/0");
+							PF_CHECK(Tests, MeshEntry && MeshEntry->RelativePayloadPath.size() < 96);
 							const auto MeshPayload = (*RealProvider)->ReadMeshPrimitive(
 								ModelRecord->ID, "mesh/0/primitive/0");
 							PF_CHECK(Tests, MeshPayload.has_value());

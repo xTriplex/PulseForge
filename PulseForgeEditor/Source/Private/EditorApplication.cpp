@@ -14,6 +14,8 @@
 #include "Events/KeyEvent.h"
 #include "Events/MouseEvent.h"
 #include "Assets/AssetOperations.h"
+#include "Assets/AssetExportService.h"
+#include "Assets/ExportBuildProfile.h"
 #include "Assets/AssetDependencyCatalog.h"
 #include "Assets/AssetEditTransaction.h"
 #include "Assets/AssetMetadata.h"
@@ -49,6 +51,7 @@
 #include "Editor/EditorMainMenuPanel.h"
 #include "Editor/EditorPerformancePanel.h"
 #include "Editor/EditorPerformanceCaptureService.h"
+#include "Editor/EditorBuildProfilePanel.h"
 #include "Editor/EditorViewportCamera.h"
 #include "Editor/EditorViewportSceneRenderView.h"
 #include "Editor/EditorViewportToolbar.h"
@@ -922,6 +925,8 @@ namespace
 
 		void OnDetach() override
 		{
+			CancelBuildProfileExport("Editor shutdown");
+			m_AssetExportService.Shutdown();
 			m_DeferredEditorOperations.Clear();
 			EndEditorCameraNavigation();
 			CancelGizmoInteraction();
@@ -1878,6 +1883,10 @@ namespace
 		bool ActivatePreparedProject(PulseForgeEditor::PreparedEditorProject&& Prepared, bool ClearSceneWhenMissing)
 		{
 			if (!FinishSceneEdit()) return false;
+			CancelBuildProfileExport("Project changed");
+			m_ExportProfile.reset();
+			m_ExportProfilePath.clear();
+			m_ExportTemplateDescriptorPath.clear();
 			auto StartupScene = std::move(Prepared.StartupScene);
 			const auto StartupSceneAsset = Prepared.StartupSceneAsset;
 			StopRuntime();
@@ -4742,6 +4751,10 @@ namespace
 		void CloseProjectNow()
 		{
 			if (!ClearCurrentProjectDocumentState([this] { CloseProjectNow(); })) return;
+			CancelBuildProfileExport("Project closed");
+			m_ExportProfile.reset();
+			m_ExportProfilePath.clear();
+			m_ExportTemplateDescriptorPath.clear();
 			ClearScene();
 			ResetViewportSceneRenderer();
 			ClearGameplayInputProject();
@@ -5240,6 +5253,241 @@ namespace
 			case PulseForgeEditor::EditorPerformanceActionKind::None:
 				break;
 			}
+		}
+
+		bool IsBuildProfileExportContentReady(std::string& Reason) const
+		{
+			if (!m_Project)
+			{
+				Reason = "Open a project before exporting.";
+				return false;
+			}
+			if (m_SceneRuntime)
+			{
+				Reason = "Stop Play mode before exporting saved project content.";
+				return false;
+			}
+			if (m_SceneEditController.IsActive() || m_SceneEditController.IsDirty())
+			{
+				Reason = "The Level Editor has an active or unsaved edit. Export reads saved project files only; finish and save the scene first.";
+				return false;
+			}
+			if (!m_MaterialDrafts.GetDirtyAssets(*m_Project).empty())
+			{
+				Reason = "Material Details has unsaved changes. Export reads saved project files only; save the material first.";
+				return false;
+			}
+			for (const auto& [Identity, Session] : m_Documents.GetSessions())
+			{
+				if (Identity.Project != m_Project->GetDescription().ID) continue;
+				if (Session.IsDirty())
+				{
+					Reason = "An open document has unsaved changes. Export reads saved project files only; save or close dirty documents first.";
+					return false;
+				}
+			}
+			Reason.clear();
+			return true;
+		}
+
+		void CancelBuildProfileExport(std::string_view Reason)
+		{
+			if (!m_ExportRequestID) return;
+			const PulseForge::AssetExportSnapshot Snapshot = m_AssetExportService.GetSnapshot(*m_ExportRequestID);
+			if (Snapshot.Running)
+			{
+				(void)m_AssetExportService.RequestCancel(*m_ExportRequestID);
+				m_BuildProfileStatus = "Export cancellation requested because " + std::string(Reason) + ".";
+			}
+		}
+
+		void SaveBuildProfile(bool SaveAs)
+		{
+			if (!m_ExportProfile)
+			{
+				m_BuildProfileStatus = "Create or load a profile before saving.";
+				return;
+			}
+			std::filesystem::path Destination = m_ExportProfilePath;
+			if (SaveAs || Destination.empty())
+			{
+				static constexpr PulseForgeEditor::EditorFileDialogFilter Filter{ "PulseForge Build Profile", "pfbuildprofile" };
+				const std::filesystem::path DefaultDirectory = m_Project ? m_Project->GetRootPath() : std::filesystem::path{};
+				const auto Selected = ShowSaveDialog(&Filter, DefaultDirectory, "Default.pfbuildprofile");
+				if (!Selected) return;
+				Destination = *Selected;
+				if (Destination.extension() != ".pfbuildprofile") Destination += ".pfbuildprofile";
+			}
+			const auto Saved = PulseForge::ExportBuildProfileSerializer::Save(Destination, *m_ExportProfile);
+			if (!Saved)
+			{
+				m_BuildProfileStatus = Saved.error().Message;
+				SetError(m_BuildProfileStatus);
+				return;
+			}
+			m_ExportProfilePath = std::move(Destination);
+			m_BuildProfileStatus = "Build profile saved.";
+			SetStatus(m_BuildProfileStatus);
+		}
+
+		void HandleBuildProfileAction(PulseForgeEditor::EditorBuildProfileAction Action)
+		{
+			using PulseForgeEditor::EditorBuildProfileActionKind;
+			switch (Action.Kind)
+			{
+			case EditorBuildProfileActionKind::None:
+				return;
+			case EditorBuildProfileActionKind::NewProfile:
+			{
+				const auto Identifier = PulseForge::UUID::Generate();
+				if (!Identifier)
+				{
+					m_BuildProfileStatus = Identifier.error().Message;
+					SetError(m_BuildProfileStatus);
+					return;
+				}
+				PulseForge::ExportBuildProfile Profile;
+				Profile.ProfileID = *Identifier;
+				Profile.DisplayName = "Build Profile";
+				if (m_Project && m_Project->GetDescription().StartScene)
+					Profile.StartupScene = *m_Project->GetDescription().StartScene;
+				else if (m_SceneAsset) Profile.StartupScene = *m_SceneAsset;
+#if defined(__APPLE__)
+				Profile.TargetPlatform = PulseForge::ExportTargetPlatform::MacOS;
+				Profile.Architecture = PulseForge::ExportTargetArchitecture::Arm64;
+#elif defined(_WIN32)
+				Profile.TargetPlatform = PulseForge::ExportTargetPlatform::Windows;
+				Profile.Architecture = PulseForge::ExportTargetArchitecture::X64;
+#else
+				Profile.TargetPlatform = PulseForge::ExportTargetPlatform::Linux;
+				Profile.Architecture = PulseForge::ExportTargetArchitecture::X64;
+#endif
+				m_ExportProfile = std::move(Profile);
+				m_ExportProfilePath.clear();
+				m_BuildProfileStatus = "New profile created. Save it to persist the profile.";
+				return;
+			}
+			case EditorBuildProfileActionKind::LoadProfile:
+			{
+				static constexpr PulseForgeEditor::EditorFileDialogFilter Filter{ "PulseForge Build Profile", "pfbuildprofile" };
+				const auto Selected = ShowOpenDialog(&Filter, m_Project ? m_Project->GetRootPath() : std::filesystem::path{});
+				if (!Selected) return;
+				const auto Loaded = PulseForge::ExportBuildProfileSerializer::Load(*Selected);
+				if (!Loaded)
+				{
+					m_BuildProfileStatus = Loaded.error().Message;
+					SetError(m_BuildProfileStatus);
+					return;
+				}
+				m_ExportProfile = *Loaded;
+				m_ExportProfilePath = *Selected;
+				m_BuildProfileStatus = "Build profile loaded.";
+				return;
+			}
+			case EditorBuildProfileActionKind::SaveProfile:
+				SaveBuildProfile(false);
+				return;
+			case EditorBuildProfileActionKind::SaveProfileAs:
+				SaveBuildProfile(true);
+				return;
+			case EditorBuildProfileActionKind::SelectTemplate:
+			{
+				static constexpr PulseForgeEditor::EditorFileDialogFilter Filter{ "Player template descriptor", "json" };
+				const auto Selected = ShowOpenDialog(&Filter, m_Project ? m_Project->GetRootPath() : std::filesystem::path{});
+				if (Selected) m_ExportTemplateDescriptorPath = *Selected;
+				return;
+			}
+			case EditorBuildProfileActionKind::StartExport:
+			{
+				std::string DirtyReason;
+				if (!m_Project || !m_ExportProfile || !IsBuildProfileExportContentReady(DirtyReason))
+				{
+					m_BuildProfileStatus = DirtyReason.empty() ? "Open a project and select a valid profile before exporting." : DirtyReason;
+					return;
+				}
+				if (m_ExportTemplateDescriptorPath.empty())
+				{
+					m_BuildProfileStatus = "Select a compatible local player template before exporting.";
+					return;
+				}
+				const auto ValidProfile = PulseForge::ExportBuildProfileSerializer::Serialize(*m_ExportProfile);
+				if (!ValidProfile)
+				{
+					m_BuildProfileStatus = ValidProfile.error().Message;
+					SetError(m_BuildProfileStatus);
+					return;
+				}
+				PulseForge::AssetExportRequest Request;
+				Request.SourceProjectFile = m_Project->GetFilePath();
+				Request.Profile = *m_ExportProfile;
+				Request.TemplateDescriptor = m_ExportTemplateDescriptorPath;
+				const auto TemplateDescriptor = PulseForge::LoadExportTemplateDescriptor(m_ExportTemplateDescriptorPath);
+				if (!TemplateDescriptor)
+				{
+					m_BuildProfileStatus = TemplateDescriptor.error().Message;
+					SetError(m_BuildProfileStatus);
+					return;
+				}
+			Request.TemplateRoot = m_ExportTemplateDescriptorPath.parent_path();
+			while (!std::filesystem::exists(Request.TemplateRoot / std::filesystem::u8path(TemplateDescriptor->Entrypoint)) &&
+				Request.TemplateRoot.has_parent_path() && Request.TemplateRoot.parent_path() != Request.TemplateRoot)
+				Request.TemplateRoot = Request.TemplateRoot.parent_path();
+			if (!std::filesystem::exists(Request.TemplateRoot / std::filesystem::u8path(TemplateDescriptor->Entrypoint)))
+			{
+				m_BuildProfileStatus = "Template descriptor entrypoint is not present under its bundle/template root.";
+				SetError(m_BuildProfileStatus);
+				return;
+			}
+				auto Started = m_AssetExportService.Start(std::move(Request));
+				if (!Started)
+				{
+					m_BuildProfileStatus = Started.error().Message;
+					SetError(m_BuildProfileStatus);
+					return;
+				}
+				m_ExportRequestID = *Started;
+				m_BuildProfileStatus = "Export started using saved project content.";
+				return;
+			}
+			case EditorBuildProfileActionKind::CancelExport:
+				if (m_ExportRequestID) (void)m_AssetExportService.RequestCancel(*m_ExportRequestID);
+				m_BuildProfileStatus = "Export cancellation requested.";
+				return;
+			}
+		}
+
+		void DrawBuildProfilesPanel()
+		{
+			bool* IsOpen = m_Layout.GetPanelVisibility(PulseForgeEditor::EditorPanel::BuildProfiles);
+			if (!IsOpen || !*IsOpen) return;
+			const ImGuiWindowClass UtilityClass = PulseForgeEditor::MakeEditorDockingClass(
+				PulseForgeEditor::EditorDockingDomain::UtilityPanel);
+			ImGui::SetNextWindowClass(&UtilityClass);
+			const bool WasOpen = *IsOpen;
+			const bool ContentsVisible = ImGui::Begin("Build Profiles###BuildProfiles", IsOpen);
+			const bool DockingDomainValid = PulseForgeEditor::EnforceCurrentEditorWindowDockingDomain(
+				PulseForgeEditor::EditorDockingDomain::UtilityPanel);
+			PulseForge::AssetExportSnapshot Snapshot;
+			if (m_ExportRequestID) Snapshot = m_AssetExportService.GetSnapshot(*m_ExportRequestID);
+			std::string DirtyReason;
+			const bool SavedContentReady = IsBuildProfileExportContentReady(DirtyReason);
+			PulseForgeEditor::EditorBuildProfileDrawResult DrawResult;
+			if (ContentsVisible && DockingDomainValid)
+				DrawResult = m_BuildProfilePanel.DrawContents(m_ExportProfile ? &*m_ExportProfile : nullptr,
+					PathToUtf8(m_ExportProfilePath), PathToUtf8(m_ExportTemplateDescriptorPath), m_Project.has_value(), SavedContentReady,
+					Snapshot, m_BuildProfileStatus, m_EditorStyle);
+			ImGui::End();
+			if (WasOpen != *IsOpen)
+			{
+				m_Layout.MarkSettingsDirty();
+				HandleEditorPanelVisibilityChange(PulseForgeEditor::EditorPanel::BuildProfiles);
+			}
+			if (DrawResult.UpdatedProfile)
+			{
+				m_ExportProfile = std::move(DrawResult.UpdatedProfile);
+				m_BuildProfileStatus = "Profile has unsaved edits.";
+			}
+			HandleBuildProfileAction(DrawResult.Action);
 		}
 
 		void ExecuteMainMenuAction(const PulseForgeEditor::EditorMainMenuAction& Action)
@@ -6659,6 +6907,7 @@ namespace
 				DrawConsolePanel();
 				DrawPerformancePanel();
 			}
+			DrawBuildProfilesPanel();
 			DrawNativeDocumentHosts();
 			DrawInputMappingPanel();
 			m_WorkspacePresentation.KeepInactiveWorkspacesAlive(m_Documents, m_DocumentEditors);
@@ -6704,6 +6953,7 @@ namespace
 			case PulseForgeEditor::EditorPanel::Scene:
 			case PulseForgeEditor::EditorPanel::MaterialDetails:
 			case PulseForgeEditor::EditorPanel::Performance:
+			case PulseForgeEditor::EditorPanel::BuildProfiles:
 			case PulseForgeEditor::EditorPanel::Count:
 				return;
 			}
@@ -8697,6 +8947,13 @@ namespace
 		bool m_OpenAssetMoveConfirmation = false;
 		PulseForgeEditor::EditorConsolePanel m_ConsolePanel;
 		PulseForgeEditor::EditorPerformancePanel m_PerformancePanel;
+		PulseForgeEditor::EditorBuildProfilePanel m_BuildProfilePanel;
+		PulseForge::AssetExportService m_AssetExportService;
+		std::optional<PulseForge::ExportBuildProfile> m_ExportProfile;
+		std::filesystem::path m_ExportProfilePath;
+		std::filesystem::path m_ExportTemplateDescriptorPath;
+		std::optional<uint64_t> m_ExportRequestID;
+		std::string m_BuildProfileStatus;
 		PulseForgeEditor::EditorStatusPanel m_StatusPanel;
 		PulseForgeEditor::EditorHierarchyPanel m_HierarchyPanel;
 		PulseForgeEditor::EditorMainMenuPanel m_MainMenuPanel;

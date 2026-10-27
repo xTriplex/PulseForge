@@ -7,6 +7,8 @@ void RunAssetDependencyCorrectionTests(TestRunner& Tests);
 void RunAssetDependencyPublicationTests(TestRunner& Tests);
 void RunAssetEditTransactionTests(TestRunner& Tests);
 void RunAssetCookServiceTests(TestRunner& Tests);
+void RunExportBuildProfileTests(TestRunner& Tests);
+void RunAssetExportServiceTests(TestRunner& Tests);
 void SetAssetEditTestExecutablePath(const std::filesystem::path& Executable);
 int RunAssetEditTransactionChildMode(int ArgumentCount, char** Arguments);
 
@@ -33,6 +35,14 @@ int main(int ArgumentCount, char** Arguments)
 	if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--cook-only")
 	{
 		RunAssetCookServiceTests(Tests);
+		RunExportBuildProfileTests(Tests);
+		RunAssetExportServiceTests(Tests);
+		return Tests.Finish();
+	}
+	if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--export-only")
+	{
+		RunExportBuildProfileTests(Tests);
+		RunAssetExportServiceTests(Tests);
 		return Tests.Finish();
 	}
 	RunAssetsTests(Tests);
@@ -44,5 +54,7 @@ int main(int ArgumentCount, char** Arguments)
 	RunAssetDependencyPublicationTests(Tests);
 	RunAssetEditTransactionTests(Tests);
 	RunAssetCookServiceTests(Tests);
+	RunExportBuildProfileTests(Tests);
+	RunAssetExportServiceTests(Tests);
 	return Tests.Finish();
 }

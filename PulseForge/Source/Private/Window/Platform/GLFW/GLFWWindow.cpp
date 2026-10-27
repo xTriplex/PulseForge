@@ -131,34 +131,53 @@ namespace PulseForge
 
 	static void InitializeMacOSVulkanLoader()
 	{
+		uint32_t PathLength = 0;
+		(void)_NSGetExecutablePath(nullptr, &PathLength);
+		std::string ExecutablePath(PathLength, '\0');
+		if (PathLength > 0 && _NSGetExecutablePath(ExecutablePath.data(), &PathLength) == 0)
+		{
+			const std::filesystem::path Executable = std::filesystem::weakly_canonical(
+				std::filesystem::path(ExecutablePath.c_str()));
+			const std::filesystem::path ExecutableDirectory = Executable.parent_path();
+			const std::filesystem::path ContentsDirectory = ExecutableDirectory.parent_path();
+			const bool IsAppBundle = ExecutableDirectory.filename() == "MacOS" && ContentsDirectory.filename() == "Contents" &&
+				ContentsDirectory.parent_path().extension() == ".app";
+			if (IsAppBundle)
+			{
+				const std::filesystem::path BundleLoader = ContentsDirectory / "Frameworks/libvulkan.1.dylib";
+				std::string BundleDiagnostic;
+				if (!TryLoadMacOSVulkanLoader(BundleLoader, true, BundleDiagnostic))
+					throw std::runtime_error("Could not load the Vulkan runtime from this app bundle: " + BundleDiagnostic);
+				const std::filesystem::path DriverManifest = ContentsDirectory / "Resources/vulkan/icd.d/MoltenVK_icd.json";
+				if (!std::filesystem::is_regular_file(DriverManifest))
+					throw std::runtime_error("The app bundle Vulkan loader is present but its MoltenVK driver manifest is missing: " +
+						DriverManifest.string());
+				if (setenv("VK_DRIVER_FILES", DriverManifest.c_str(), 1) != 0 ||
+					setenv("VK_ICD_FILENAMES", DriverManifest.c_str(), 1) != 0 ||
+					setenv("VK_LOADER_SEARCH_ONLY_IN_BUNDLE", "1", 1) != 0)
+					throw std::runtime_error("Could not configure Vulkan to load the MoltenVK driver from this app bundle");
+				PF_CORE_INFO("PULSEFORGE_BUNDLED_VULKAN_RUNTIME=PASS; loader='{}'; driver='{}'",
+					BundleLoader.string(), DriverManifest.string());
+				glfwInitVulkanLoader(s_VulkanLoaderProcAddress);
+				s_GLFWInitUsesVulkanLoader = true;
+				return;
+			}
+		}
+
 		if (const char* VulkanSdk = std::getenv("VULKAN_SDK"); VulkanSdk && VulkanSdk[0] != '\0')
 		{
 			const std::filesystem::path LibraryDirectory = std::filesystem::path(VulkanSdk) / "lib";
 			std::string VersionedLoaderDiagnostic;
 			std::string UnversionedLoaderDiagnostic;
-			if (!TryLoadMacOSVulkanLoader(
-					LibraryDirectory / "libvulkan.1.dylib", true, VersionedLoaderDiagnostic) &&
-				!TryLoadMacOSVulkanLoader(
-					LibraryDirectory / "libvulkan.dylib", true, UnversionedLoaderDiagnostic))
-				throw std::runtime_error(
-					"VULKAN_SDK is set but no loader was loaded from that SDK. libvulkan.1.dylib: " +
+			if (!TryLoadMacOSVulkanLoader(LibraryDirectory / "libvulkan.1.dylib", true, VersionedLoaderDiagnostic) &&
+				!TryLoadMacOSVulkanLoader(LibraryDirectory / "libvulkan.dylib", true, UnversionedLoaderDiagnostic))
+				throw std::runtime_error("VULKAN_SDK is set but no loader was loaded from that SDK. libvulkan.1.dylib: " +
 					VersionedLoaderDiagnostic + "; libvulkan.dylib: " + UnversionedLoaderDiagnostic);
 		}
 		else
 		{
-			uint32_t PathLength = 0;
-			(void)_NSGetExecutablePath(nullptr, &PathLength);
-			std::string ExecutablePath(PathLength, '\0');
-			if (PathLength > 0 && _NSGetExecutablePath(ExecutablePath.data(), &PathLength) == 0)
-			{
-				const std::filesystem::path BundleLoader =
-					std::filesystem::weakly_canonical(std::filesystem::path(ExecutablePath.c_str())).parent_path() /
-					"../Frameworks/libvulkan.1.dylib";
-				std::string IgnoredDiagnostic;
-				(void)TryLoadMacOSVulkanLoader(BundleLoader, false, IgnoredDiagnostic);
-			}
 			std::string IgnoredDiagnostic;
-			if (!s_VulkanLoaderProcAddress && !TryLoadMacOSVulkanLoader("libvulkan.1.dylib", false, IgnoredDiagnostic))
+			if (!TryLoadMacOSVulkanLoader("libvulkan.1.dylib", false, IgnoredDiagnostic))
 				(void)TryLoadMacOSVulkanLoader("libvulkan.dylib", false, IgnoredDiagnostic);
 			if (!s_VulkanLoaderProcAddress)
 				throw std::runtime_error("No Vulkan loader found in the app bundle or the macOS loader search path");

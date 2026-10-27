@@ -234,7 +234,7 @@ jobs:
         run: |
           set -o pipefail
           cmake --build Build/CI/macos-renderer --parallel --target \
-            PulseForgeTests PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeCookedGame PulseForgeMacOSRendererValidation \
+            PulseForgeTests PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeExport PulseForgeCookedGame PulseForgeCookedPlayerTemplate PulseForgeMacOSRendererValidation \
             PulseForgeNativeDialogValidation 2>&1 |
             tee "$RUNNER_TEMP/macos-build.log"
 
@@ -253,6 +253,27 @@ jobs:
               otool -L "$LOADER" | tee -a "$RUNNER_TEMP/macos-loader-lifecycle-otool.log"
             fi
           done
+
+      - name: Inspect the standalone app's bundled runtime dependencies
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          APP="Build/CI/macos-renderer/PulseForgeCookedGame.app"
+          for BINARY in \
+            "$APP/Contents/MacOS/PulseForgeCookedGame" \
+            "$APP/Contents/Frameworks/libvulkan.1.dylib" \
+            "$APP/Contents/Frameworks/libMoltenVK.dylib"; do
+            test -f "$BINARY"
+            file "$BINARY" | tee -a "$RUNNER_TEMP/macos-bundled-runtime.log"
+            otool -L "$BINARY" | tee -a "$RUNNER_TEMP/macos-bundled-runtime.log"
+          done
+          if grep -F "$VULKAN_SDK" "$RUNNER_TEMP/macos-bundled-runtime.log"; then
+            echo "The standalone app retains a load command into the build SDK." >&2
+            exit 1
+          fi
+          test -s "$APP/Contents/Resources/ThirdPartyNotices.txt"
+          grep -q 'Khronos Vulkan Loader and MoltenVK' "$APP/Contents/Resources/ThirdPartyNotices.txt"
+          grep -q 'Lua 5.5.1' "$APP/Contents/Resources/ThirdPartyNotices.txt"
 
       - name: Run registered macOS CPU and editor tests
         id: macos_cpu_validation
@@ -315,13 +336,36 @@ jobs:
         if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
         run: |
           set -o pipefail
+          mkdir -p "$RUNNER_TEMP/g14-exported-macos"
           python3 Tests/Platform/CookedPlayerAcceptance.py \
             --cook Build/CI/macos-renderer/PulseForgeCook \
             --player Build/CI/macos-renderer/PulseForgeCookedGame.app/Contents/MacOS/PulseForgeCookedGame \
             --source-project Samples/VisualValidation/PBRMaterials/PBRMaterials.pfproj \
             --input-actions Samples/VisualValidation/GameplayInput/InputActions.json \
             --target macOS --backend Vulkan --log-directory "$RUNNER_TEMP" \
+            --export Build/CI/macos-renderer/PulseForgeExport \
+            --template-root Build/CI/macos-renderer/PulseForgeCookedGame.app \
+            --template-descriptor Build/CI/macos-renderer/PulseForgeCookedGame.app/Contents/MacOS/PulseForgePlayerTemplate.json \
+            --retain-export-to "$RUNNER_TEMP/g14-exported-macos/PulseForge Standalone Ω.app" \
             --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-cooked-player-acceptance.log"
+
+      - name: Upload the verified macOS standalone package
+        if: ${{ success() && steps.macos_cooked_player_acceptance.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          PACKAGE_PARENT="$RUNNER_TEMP/g14-exported-macos"
+          tar -czf "$RUNNER_TEMP/g14-macos-package.tar.gz" -C "$PACKAGE_PARENT" "PulseForge Standalone Ω.app"
+          test -s "$RUNNER_TEMP/g14-macos-package.tar.gz"
+
+      - name: Publish the verified macOS standalone package
+        if: ${{ success() && steps.macos_cooked_player_acceptance.outcome == 'success' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: g14-macos-arm64-package-${{ github.sha }}
+          path: ${{ runner.temp }}/g14-macos-package.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
       - name: Exercise editor Play and Stop through the production runtime transition
         id: macos_editor_runtime_play_stop
@@ -448,7 +492,8 @@ jobs:
               -DFETCHCONTENT_FULLY_DISCONNECTED=OFF 2>&1 |
               tee "$RUNNER_TEMP/macos-configure-$CONFIGURATION_LOWER.log"
             cmake --build "$BUILD_DIR" --parallel --target \
-              PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeCookedGame PulseForgeEditorCoreConsumer PulseForgeEditorTests 2>&1 |
+              PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeExport PulseForgeCookedGame PulseForgeCookedPlayerTemplate \
+              PulseForgeEditorCoreConsumer PulseForgeEditorTests 2>&1 |
               tee "$RUNNER_TEMP/macos-build-$CONFIGURATION_LOWER.log"
             EDITOR="$GITHUB_WORKSPACE/$BUILD_DIR/PulseForgeEditor.app/Contents/MacOS/PulseForgeEditor"
             if [ ! -d "$BUILD_DIR/CMakeFiles/PulseForgeEditorCore.dir" ] || [ ! -x "$EDITOR" ]; then
@@ -582,6 +627,61 @@ jobs:
           if-no-files-found: ignore
           retention-days: 1
 
+  macos-package-only-verification:
+    name: macOS · package-only standalone verification
+    runs-on: macos-26
+    timeout-minutes: 10
+    needs: macos-desktop
+    if: ${{ needs.macos-desktop.result == 'success' }}
+    steps:
+      - name: Download only the exported package
+        uses: actions/download-artifact@v6
+        with:
+          name: g14-macos-arm64-package-${{ github.sha }}
+          path: ${{ runner.temp }}/G14 Package Ω
+
+      - name: Launch the read-only package without checkout or SDK environment
+        run: |
+          set -euo pipefail
+          tar -xzf "$RUNNER_TEMP/G14 Package Ω/g14-macos-package.tar.gz" -C "$RUNNER_TEMP/G14 Package Ω"
+          PACKAGE="$RUNNER_TEMP/G14 Package Ω/PulseForge Standalone Ω.app"
+          EXECUTABLE="$PACKAGE/Contents/MacOS/PulseForgeCookedGame"
+          test -x "$EXECUTABLE"
+          test -f "$PACKAGE/Contents/Resources/vulkan/icd.d/MoltenVK_icd.json"
+          test -s "$PACKAGE/Contents/Resources/ThirdPartyNotices.txt"
+          grep -q 'Khronos Vulkan Loader and MoltenVK' "$PACKAGE/Contents/Resources/ThirdPartyNotices.txt"
+          chmod -R a-w "$PACKAGE"
+          mkdir -p "$RUNNER_TEMP/G14 User Data Ω" "$RUNNER_TEMP/G14 Unrelated CWD Ω"
+          USER_DATA="$RUNNER_TEMP/G14 User Data Ω/PulseForge"
+          mkdir -p "$USER_DATA"
+          cd "$RUNNER_TEMP/G14 Unrelated CWD Ω"
+          set +e
+          env -i HOME="$RUNNER_TEMP/G14 User Data Ω" TMPDIR="$RUNNER_TEMP" \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=en_US.UTF-8 \
+            PULSEFORGE_USER_DATA_DIR="$USER_DATA" PULSEFORGE_COOKED_PLAYER_ACCEPTANCE=1 \
+            "$EXECUTABLE" > "$RUNNER_TEMP/g14-package-only-player.log" 2>&1
+          STATUS=$?
+          set -e
+          cat "$RUNNER_TEMP/g14-package-only-player.log"
+          if [[ $STATUS -ne 0 ]]; then
+            echo "Package-only Player returned $STATUS" >&2
+            exit 1
+          fi
+          for marker in \
+            PULSEFORGE_BUNDLED_VULKAN_RUNTIME=PASS \
+            PULSEFORGE_COOKED_STARTUP_SCENE=PASS \
+            PULSEFORGE_COOKED_INPUT_MAP=PASS \
+            PULSEFORGE_COOKED_AUDIO=PASS \
+            PULSEFORGE_COOKED_SCRIPT=PASS \
+            PULSEFORGE_COOKED_ENVIRONMENT=PASS \
+            PULSEFORGE_COOKED_RENDER_READBACK=PASS \
+            PULSEFORGE_COOKED_PLAYER_SHUTDOWN=PASS; do
+            grep -q "$marker" "$RUNNER_TEMP/g14-package-only-player.log"
+          done
+          grep -F "PULSEFORGE_COOKED_USER_DATA=PASS; root=$USER_DATA" "$RUNNER_TEMP/g14-package-only-player.log"
+          grep -F "$PACKAGE/Contents/Frameworks/libvulkan.1.dylib" "$RUNNER_TEMP/g14-package-only-player.log"
+          echo "G14_MACOS_PACKAGE_ONLY=PASS; no checkout; no Vulkan SDK/DYLD overrides; package read-only; unrelated CWD"
+
   windows-msvc:
     name: Windows 2022 · MSVC · Debug
     if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]'))) }}
@@ -626,7 +726,7 @@ jobs:
       - name: Build first-party tests, editor and game
         shell: pwsh
         run: |
-          & cmake --build Build/CI/windows --config Debug --parallel --target PulseForgeTests PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeCookedGame *> "$env:RUNNER_TEMP/build.log"
+          & cmake --build Build/CI/windows --config Debug --parallel --target PulseForgeTests PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeExport PulseForgeCookedGame PulseForgeCookedPlayerTemplate *> "$env:RUNNER_TEMP/build.log"
           $result = $LASTEXITCODE
           Get-Content "$env:RUNNER_TEMP/build.log"
           if ($result -ne 0) { exit $result }
@@ -647,7 +747,8 @@ jobs:
           if (-not (Test-Path $debugObject)) { throw "Debug coordinator object was not produced: $debugObject" }
           foreach ($configuration in @("Release", "Dist")) {
             & cmake --build Build/CI/windows --config $configuration --parallel --target `
-              PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeCookedGame PulseForgeEditorCoreConsumer PulseForgeEditorTests `
+              PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeExport PulseForgeCookedGame PulseForgeCookedPlayerTemplate `
+              PulseForgeEditorCoreConsumer PulseForgeEditorTests `
               *> "$env:RUNNER_TEMP/build-$($configuration.ToLowerInvariant()).log"
             $result = $LASTEXITCODE
             Get-Content "$env:RUNNER_TEMP/build-$($configuration.ToLowerInvariant()).log"
@@ -709,8 +810,8 @@ jobs:
             cmake ninja-build g++ pkg-config \
             libgtk-3-dev \
             libwayland-dev libwayland-bin libwayland-cursor0 wayland-protocols libxkbcommon-dev \
-            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev \
-            libvulkan-dev libgl1-mesa-dev libegl1-mesa-dev
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev xauth xvfb \
+            libvulkan-dev libgl1-mesa-dev libegl1-mesa-dev mesa-vulkan-drivers
 
       - name: Configure
         run: |
@@ -726,13 +827,43 @@ jobs:
       - name: Build first-party tests, editor and game
         run: |
           set -o pipefail
-          cmake --build Build/CI/linux --parallel --target PulseForgeTests PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeCookedGame 2>&1 |
+          cmake --build Build/CI/linux --parallel --target PulseForgeTests PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeExport PulseForgeCookedGame PulseForgeCookedPlayerTemplate 2>&1 |
             tee "$RUNNER_TEMP/build.log"
 
       - name: Run registered CPU tests
         run: |
           set -o pipefail
           ctest --test-dir Build/CI/linux --output-on-failure 2>&1 | tee "$RUNNER_TEMP/ctest.log"
+
+      - name: Cook and export an isolated standalone Linux package
+        id: linux_standalone_acceptance
+        run: |
+          set -euo pipefail
+          DRIVER_MANIFEST=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          test -f "$DRIVER_MANIFEST"
+          mkdir -p "$RUNNER_TEMP/g14-exported-linux"
+          xvfb-run -a python3 Tests/Platform/CookedPlayerAcceptance.py \
+            --cook Build/CI/linux/PulseForgeCook \
+            --player Build/CI/linux/PulseForgeCookedGame \
+            --source-project Samples/VisualValidation/PBRMaterials/PBRMaterials.pfproj \
+            --input-actions Samples/VisualValidation/GameplayInput/InputActions.json \
+            --target Linux --backend Vulkan --runtime-driver-manifest "$DRIVER_MANIFEST" \
+            --log-directory "$RUNNER_TEMP" --export Build/CI/linux/PulseForgeExport \
+            --template-root Build/CI/linux --template-descriptor Build/CI/linux/PulseForgePlayerTemplate.json \
+            --retain-export-to "$RUNNER_TEMP/g14-exported-linux/PulseForge Standalone Ω" \
+            --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/linux-standalone-acceptance.log"
+          tar -czf "$RUNNER_TEMP/g14-linux-package.tar.gz" -C "$RUNNER_TEMP/g14-exported-linux" "PulseForge Standalone Ω"
+          test -s "$RUNNER_TEMP/g14-linux-package.tar.gz"
+
+      - name: Upload the verified standalone Linux package
+        if: ${{ success() && steps.linux_standalone_acceptance.outcome == 'success' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: g14-linux-x64-package-${{ github.sha }}
+          path: ${{ runner.temp }}/g14-linux-package.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
       - name: Build Release and Dist editor consumers and verify Debug fixture exclusion
         run: |
@@ -748,7 +879,8 @@ jobs:
               -DFETCHCONTENT_FULLY_DISCONNECTED=OFF 2>&1 |
               tee "$RUNNER_TEMP/configure-${CONFIGURATION,,}.log"
             cmake --build "$BUILD_DIR" --parallel --target \
-              PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeCookedGame PulseForgeEditorCoreConsumer PulseForgeEditorTests 2>&1 |
+              PulseForgeEditor PulseForgeGame PulseForgeCook PulseForgeExport PulseForgeCookedGame PulseForgeCookedPlayerTemplate \
+              PulseForgeEditorCoreConsumer PulseForgeEditorTests 2>&1 |
               tee "$RUNNER_TEMP/build-${CONFIGURATION,,}.log"
             if find "$BUILD_DIR/CMakeFiles/PulseForgeEditorCore.dir" -name 'EditorDebugAcceptanceCoordinators.cpp.o' -print -quit | grep -q .; then
               echo "Debug-only coordinator was compiled for $CONFIGURATION" >&2
@@ -784,3 +916,54 @@ jobs:
             Build/CI/linux/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
           retention-days: 5
+
+  linux-package-only-verification:
+    name: Ubuntu · package-only standalone verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: linux-gcc
+    if: ${{ needs.linux-gcc.result == 'success' }}
+    steps:
+      - name: Install the platform software Vulkan driver and virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y mesa-vulkan-drivers xvfb xauth
+
+      - name: Download only the exported package
+        uses: actions/download-artifact@v6
+        with:
+          name: g14-linux-x64-package-${{ github.sha }}
+          path: ${{ runner.temp }}/G14 Package Ω
+
+      - name: Launch the read-only package without source checkout or SDK environment
+        run: |
+          set -euo pipefail
+          tar -xzf "$RUNNER_TEMP/G14 Package Ω/g14-linux-package.tar.gz" -C "$RUNNER_TEMP/G14 Package Ω"
+          PACKAGE="$RUNNER_TEMP/G14 Package Ω/PulseForge Standalone Ω"
+          EXECUTABLE="$PACKAGE/PulseForgeCookedGame"
+          test -x "$EXECUTABLE"
+          DRIVER_MANIFEST=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          test -f "$DRIVER_MANIFEST"
+          chmod -R a-w "$PACKAGE"
+          mkdir -p "$RUNNER_TEMP/G14 User Data Ω/PulseForge" "$RUNNER_TEMP/G14 Unrelated CWD Ω"
+          USER_DATA="$RUNNER_TEMP/G14 User Data Ω/PulseForge"
+          cd "$RUNNER_TEMP/G14 Unrelated CWD Ω"
+          set +e
+          xvfb-run -a env -i HOME="$RUNNER_TEMP/G14 User Data Ω" TMPDIR="$RUNNER_TEMP" \
+            PATH=/usr/bin:/bin LANG=C.UTF-8 DISPLAY="$DISPLAY" XAUTHORITY="${XAUTHORITY:-}" \
+            VK_DRIVER_FILES="$DRIVER_MANIFEST" VK_ICD_FILENAMES="$DRIVER_MANIFEST" \
+            PULSEFORGE_USER_DATA_DIR="$USER_DATA" PULSEFORGE_COOKED_PLAYER_ACCEPTANCE=1 \
+            "$EXECUTABLE" > "$RUNNER_TEMP/g14-package-only-player.log" 2>&1
+          STATUS=$?
+          set -e
+          cat "$RUNNER_TEMP/g14-package-only-player.log"
+          if [[ $STATUS -ne 0 ]]; then echo "Package-only Player returned $STATUS" >&2; exit 1; fi
+          for marker in \
+            PULSEFORGE_COOKED_STARTUP_SCENE=PASS PULSEFORGE_COOKED_INPUT_MAP=PASS \
+            PULSEFORGE_COOKED_AUDIO=PASS PULSEFORGE_COOKED_SCRIPT=PASS \
+            PULSEFORGE_COOKED_ENVIRONMENT=PASS PULSEFORGE_COOKED_RENDER_READBACK=PASS \
+            PULSEFORGE_COOKED_PLAYER_SHUTDOWN=PASS; do
+            grep -q "$marker" "$RUNNER_TEMP/g14-package-only-player.log"
+          done
+          grep -F "PULSEFORGE_COOKED_USER_DATA=PASS; root=$USER_DATA" "$RUNNER_TEMP/g14-package-only-player.log"
+          echo "G14_LINUX_PACKAGE_ONLY=PASS; no checkout; system Mesa lavapipe; package read-only; unrelated CWD"

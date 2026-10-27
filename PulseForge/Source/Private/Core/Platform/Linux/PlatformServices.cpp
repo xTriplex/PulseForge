@@ -60,6 +60,14 @@ namespace PulseForge::Platform
 
 	PathResult GetUserDataDirectory()
 	{
+		if (const char* Override = std::getenv("PULSEFORGE_USER_DATA_DIR"); Override && Override[0] != '\0')
+		{
+			const std::filesystem::path Directory = std::filesystem::u8path(Override);
+			if (!Directory.is_absolute())
+				return std::unexpected(PathError{ "PULSEFORGE_USER_DATA_DIR must be an absolute path" });
+			return Directory;
+		}
+
 		if (const char* XdgDataHome = std::getenv("XDG_DATA_HOME"); XdgDataHome && XdgDataHome[0] != '\0')
 		{
 			const std::filesystem::path Directory(XdgDataHome);

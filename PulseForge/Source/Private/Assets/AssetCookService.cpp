@@ -290,25 +290,13 @@ namespace PulseForge
 			return Product.Asset.ToString() + ":" + std::to_string(static_cast<uint32_t>(Product.Product)) + ":" + Product.Subresource;
 		}
 
-		std::string Hex(std::string_view Text)
-		{
-			constexpr char Digits[] = "0123456789abcdef";
-			std::string Output;
-			Output.reserve(Text.size() * 2);
-			for (unsigned char Character : Text)
-			{
-				Output.push_back(Digits[Character >> 4]);
-				Output.push_back(Digits[Character & 0x0f]);
-			}
-			return Output;
-		}
-
 		std::string ProductPath(const CookedAssetEntry& Entry, std::string_view Generation)
 		{
-			std::string Path = "g/" + std::string(Generation) + "/" + Entry.Asset.ToString() + "_" +
-				std::to_string(static_cast<uint32_t>(Entry.Product));
-			if (!Entry.Subresource.empty()) Path += "_" + Hex(Entry.Subresource);
-			return Path + ".bin";
+			AssetFingerprintBuilder Identity("pulseforge-cooked-product-path-v1");
+			Identity.UpdateText("asset", Entry.Asset.ToString());
+			Identity.UpdateText("product", std::to_string(static_cast<uint32_t>(Entry.Product)));
+			Identity.UpdateText("subresource", Entry.Subresource);
+			return "g/" + std::string(Generation) + "/" + Identity.Finish().DigestHex + ".bin";
 		}
 
 		bool SameProducts(const AssetCookPlan& First, const AssetCookPlan& Second)
@@ -771,7 +759,14 @@ namespace PulseForge
 		}
 		const std::string Generation = GenerationBuilder.Finish().DigestHex;
 		PF_INFO("Cooked generation identity computed: {}", Generation);
-		for (CookedAssetEntry& Entry : Entries) Entry.RelativePayloadPath = ProductPath(Entry, Generation);
+		std::set<std::string> PayloadPaths;
+		for (CookedAssetEntry& Entry : Entries)
+		{
+			Entry.RelativePayloadPath = ProductPath(Entry, Generation);
+			if (Entry.RelativePayloadPath.size() > 96 || !PayloadPaths.insert(Entry.RelativePayloadPath).second)
+				return std::unexpected(Error(AssetCookErrorCode::SerializationFailed,
+					"Cooked product path is too long or collides with another logical product", Request.OutputRoot, Entry.Asset));
+		}
 		auto Manifest = CookedAssetCatalog::SerializeManifest(Plan.ProjectID, Request.StartupScene,
 				Request.Compatibility, Plan.Request.DynamicRoots, Entries);
 		if (!Manifest) return std::unexpected(Error(AssetCookErrorCode::SerializationFailed, Manifest.error().Message, Manifest.error().Path));

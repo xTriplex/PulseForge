@@ -72,6 +72,22 @@ namespace PulseForge::Platform
 
 	PathResult GetUserDataDirectory()
 	{
+		constexpr DWORD MaximumPathLength = 32768;
+		const DWORD OverrideLength = GetEnvironmentVariableW(L"PULSEFORGE_USER_DATA_DIR", nullptr, 0);
+		if (OverrideLength > 0)
+		{
+			if (OverrideLength > MaximumPathLength)
+				return std::unexpected(PathError{ "PULSEFORGE_USER_DATA_DIR exceeds the Windows path limit" });
+			std::vector<wchar_t> Override(OverrideLength);
+			const DWORD Written = GetEnvironmentVariableW(L"PULSEFORGE_USER_DATA_DIR", Override.data(), OverrideLength);
+			if (Written == 0 || Written >= OverrideLength)
+				return std::unexpected(PathError{ "Could not read PULSEFORGE_USER_DATA_DIR" });
+			const std::filesystem::path Directory(std::wstring(Override.data(), Written));
+			if (!Directory.is_absolute())
+				return std::unexpected(PathError{ "PULSEFORGE_USER_DATA_DIR must be an absolute path" });
+			return Directory;
+		}
+
 		PWSTR RawPath = nullptr;
 		const HRESULT Result = SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &RawPath);
 		std::unique_ptr<wchar_t, KnownFolderDeleter> Path(RawPath);

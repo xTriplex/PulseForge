@@ -73,6 +73,14 @@ namespace PulseForge::Platform
 
 	PathResult GetUserDataDirectory()
 	{
+		if (const char* Override = std::getenv("PULSEFORGE_USER_DATA_DIR"); Override && Override[0] != '\0')
+		{
+			const std::filesystem::path Directory = std::filesystem::u8path(Override);
+			if (!Directory.is_absolute())
+				return std::unexpected(PathError{ "PULSEFORGE_USER_DATA_DIR must be an absolute path" });
+			return Directory;
+		}
+
 		const char* Home = std::getenv("HOME");
 		if (!Home || Home[0] == '\0')
 			return std::unexpected(PathError{ "HOME is unset; cannot resolve the user's application-support directory" });
