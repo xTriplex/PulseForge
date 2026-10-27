@@ -6854,6 +6854,7 @@ namespace
 		void DrawSceneViewportPanel()
 		{
 			m_ViewportImageHovered = false;
+			m_SceneViewportOwnerScrollDelta = 0.0f;
 			if (!m_Layout.IsPanelVisible(PulseForgeEditor::EditorPanel::SceneViewport))
 			{
 				m_ViewportScrollInput.DiscardPending();
@@ -6867,6 +6868,7 @@ namespace
 				GLFWwindow* OwnerWindow = OwnerViewport ? static_cast<GLFWwindow*>(OwnerViewport->PlatformHandle) : nullptr;
 				UpdateSceneViewportOwner(OwnerViewport, OwnerWindow);
 				const float OwnerScrollDelta = m_ViewportScrollInput.Consume(OwnerViewport ? OwnerViewport->ID : 0, OwnerWindow);
+				m_SceneViewportOwnerScrollDelta = OwnerScrollDelta;
 				if (!m_Project) m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::FolderOpen, "Open a project to render a scene.");
 				else if (!m_Scene) m_EditorStyle.EmptyState(PulseForgeEditor::EditorIcon::Scene, "Open a scene to render it here.");
 				else
@@ -7057,6 +7059,35 @@ namespace
 			Observation.FramebufferScale = { OwnerViewport->FramebufferScale.x, OwnerViewport->FramebufferScale.y };
 			ImGuiIO& SmokeIO = ImGui::GetIO();
 			Observation.RightButtonDown = SmokeIO.MouseDown[ImGuiMouseButton_Right];
+			Observation.OwnerScrollDelta = m_SceneViewportOwnerScrollDelta;
+			const auto ScrollDiagnostics = m_ViewportScrollInput.GetDiagnostics(OwnerViewport->ID, OwnerWindow);
+			Observation.ScrollCallbackSequence = ScrollDiagnostics.CallbackSequence;
+			Observation.ScrollCallbackWindow = ScrollDiagnostics.CallbackWindow;
+			Observation.ScrollCallbackViewportID = ScrollDiagnostics.CallbackViewportID;
+			Observation.ScrollCallbackInputWindowID = ScrollDiagnostics.CallbackInputWindowID;
+			Observation.ScrollCallbackXOffset = ScrollDiagnostics.CallbackXOffset;
+			Observation.ScrollCallbackYOffset = ScrollDiagnostics.CallbackYOffset;
+			Observation.ScrollCallbackAccumulated = ScrollDiagnostics.CallbackAccumulated;
+			Observation.ScrollConsumedSequence = ScrollDiagnostics.ConsumedSequence;
+			Observation.ScrollConsumedDelta = ScrollDiagnostics.ConsumedDelta;
+			Observation.OwnerInputWindowID = ScrollDiagnostics.CurrentInputWindowID;
+			Observation.OwnerScrollRouteRegistered = ScrollDiagnostics.CurrentRouteRegistered;
+			Observation.OwnerRouterScrollCallbackInstalled = ScrollDiagnostics.RouterCallbackInstalled;
+			Observation.OwnerBackendScrollCallbackChained = ScrollDiagnostics.CurrentBackendCallbackChained;
+			Observation.LastScrollCallbackMatchesOwner = ScrollDiagnostics.LastCallbackMatchesCurrentOwner;
+			const auto WheelAction = PulseForgeEditor::ResolveViewportWheelAction({
+				.PointerOverViewportImage = m_ViewportImageHovered,
+				.RightMouseNavigationActive = m_ViewportMouseCapture.OwnsMouse(),
+				.RightMouseHeld = SmokeIO.MouseDown[ImGuiMouseButton_Right],
+				.RuntimeActive = m_SceneRuntime != nullptr,
+				.PopupOpen = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup) });
+			switch (WheelAction)
+			{
+			case PulseForgeEditor::ViewportWheelAction::None: Observation.WheelAction = "none"; break;
+			case PulseForgeEditor::ViewportWheelAction::ScrollPanel: Observation.WheelAction = "scroll-panel"; break;
+			case PulseForgeEditor::ViewportWheelAction::AdjustFlySpeed: Observation.WheelAction = "adjust-fly-speed"; break;
+			case PulseForgeEditor::ViewportWheelAction::Zoom: Observation.WheelAction = "zoom"; break;
+			}
 			Observation.RightButtonClicked = SmokeIO.MouseClicked[ImGuiMouseButton_Right];
 			Observation.RightButtonReleased = SmokeIO.MouseReleased[ImGuiMouseButton_Right];
 			Observation.ImGuiMousePosition = { SmokeIO.MousePos.x, SmokeIO.MousePos.y };
@@ -8652,6 +8683,7 @@ namespace
 		PulseForgeEditor::Detail::EditorInputMappingPanel m_InputMappingPanel;
 		PulseForgeEditor::Detail::EditorViewportMouseCapture m_ViewportMouseCapture;
 		PulseForgeEditor::Detail::EditorViewportScrollInput m_ViewportScrollInput;
+		float m_SceneViewportOwnerScrollDelta = 0.0f;
 		PulseForgeEditor::EditorSceneEditController m_SceneEditController;
 		PulseForgeEditor::EditorSceneWorkspaceState m_SceneWorkspace;
 		PulseForgeEditor::EditorSceneVisibilityCommands m_SceneVisibilityCommands;

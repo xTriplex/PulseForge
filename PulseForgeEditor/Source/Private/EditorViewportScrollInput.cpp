@@ -29,6 +29,7 @@ namespace PulseForgeEditor::Detail
 		void (*PreviousDestroyWindow)(ImGuiViewport*) = nullptr;
 		std::unordered_map<GLFWwindow*, WindowRoute> Routes;
 		ViewportScrollEventAccumulator PendingScroll;
+		ViewportScrollInputDiagnostics Diagnostics;
 		uint64_t NextRegistration = 1;
 		bool Installed = false;
 
@@ -111,12 +112,20 @@ namespace PulseForgeEditor::Detail
 		try
 		{
 			Owner->PendingScroll.Record(Route->second.Registration, static_cast<float>(YOffset));
+			Owner->Diagnostics.CallbackAccumulated = true;
 		}
 		catch (...)
 		{
+			Owner->Diagnostics.CallbackAccumulated = false;
 			// Never allow allocation failure to cross GLFW's C callback boundary. ImGui
 			// still receives the event through the backend callback below.
 		}
+		++Owner->Diagnostics.CallbackSequence;
+		Owner->Diagnostics.CallbackWindow = reinterpret_cast<uintptr_t>(Window);
+		Owner->Diagnostics.CallbackViewportID = Route->second.ViewportID;
+		Owner->Diagnostics.CallbackInputWindowID = Route->second.InputWindow;
+		Owner->Diagnostics.CallbackXOffset = static_cast<float>(XOffset);
+		Owner->Diagnostics.CallbackYOffset = static_cast<float>(YOffset);
 		if (Route->second.BackendCallback) Route->second.BackendCallback(Window, XOffset, YOffset);
 	}
 
@@ -189,7 +198,13 @@ namespace PulseForgeEditor::Detail
 			m_State->PendingScroll.DiscardAll();
 			return 0.0f;
 		}
-		return m_State->PendingScroll.Consume(Route->second.Registration);
+		const float Delta = m_State->PendingScroll.Consume(Route->second.Registration);
+		if (Delta != 0.0f)
+		{
+			m_State->Diagnostics.ConsumedSequence = m_State->Diagnostics.CallbackSequence;
+			m_State->Diagnostics.ConsumedDelta = Delta;
+		}
+		return Delta;
 	}
 
 	uint64_t EditorViewportScrollInput::GetInputWindowID(uint32_t ViewportID, GLFWwindow* Window) const noexcept
@@ -197,6 +212,23 @@ namespace PulseForgeEditor::Detail
 		if (!m_State || !m_State->Installed) return 0;
 		const auto Route = m_State->Routes.find(Window);
 		return Route != m_State->Routes.end() && Route->second.ViewportID == ViewportID ? Route->second.InputWindow : 0;
+	}
+
+	ViewportScrollInputDiagnostics EditorViewportScrollInput::GetDiagnostics(uint32_t ViewportID, GLFWwindow* Window) const noexcept
+	{
+		if (!m_State || !m_State->Installed || !Window) return {};
+		ViewportScrollInputDiagnostics Result = m_State->Diagnostics;
+		const auto Route = m_State->Routes.find(Window);
+		if (Route != m_State->Routes.end() && Route->second.ViewportID == ViewportID)
+		{
+			Result.CurrentRouteRegistered = true;
+			Result.CurrentInputWindowID = Route->second.InputWindow;
+			Result.RouterCallbackInstalled = true;
+			Result.CurrentBackendCallbackChained = Route->second.BackendCallback != nullptr;
+			Result.LastCallbackMatchesCurrentOwner = Result.CallbackWindow == reinterpret_cast<uintptr_t>(Window) &&
+				Result.CallbackViewportID == ViewportID && Result.CallbackInputWindowID == Route->second.InputWindow;
+		}
+		return Result;
 	}
 
 	void EditorViewportScrollInput::DiscardPending() noexcept

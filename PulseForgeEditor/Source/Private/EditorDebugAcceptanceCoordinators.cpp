@@ -4,7 +4,9 @@
 
 #include "Core/Log.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <sstream>
 
@@ -52,6 +54,19 @@ namespace PulseForgeEditor::Detail
 				}
 			}
 			return Escaped;
+		}
+
+		[[nodiscard]] std::string GetSceneViewportWheelActionID()
+		{
+			const char* Value = std::getenv("PULSEFORGE_SCENE_VIEWPORT_WHEEL_ACTION_ID");
+			if (!Value) return {};
+			const std::string_view ID(Value);
+			if (ID.size() != 32 || !std::all_of(ID.begin(), ID.end(), [](unsigned char Character) {
+					return (Character >= '0' && Character <= '9') || (Character >= 'a' && Character <= 'f') ||
+						(Character >= 'A' && Character <= 'F');
+				}))
+				return {};
+			return std::string(ID);
 		}
 	} // namespace
 
@@ -607,8 +622,9 @@ namespace PulseForgeEditor::Detail
 		m_FailureReason = std::move(Reason);
 	}
 
-	SceneViewportNativeSmokeCoordinator::SceneViewportNativeSmokeCoordinator(bool Enabled) noexcept
+	SceneViewportNativeSmokeCoordinator::SceneViewportNativeSmokeCoordinator(bool Enabled)
 		: m_Phase(Enabled ? Phase::AwaitingMainScene : Phase::Disabled)
+		, m_WheelActionID(Enabled ? GetSceneViewportWheelActionID() : std::string{})
 	{
 	}
 
@@ -696,7 +712,9 @@ namespace PulseForgeEditor::Detail
 		const bool FocusChanged = !m_HasStateSnapshot || Observation.OwnerFocused != m_LastOwnerFocused ||
 			Observation.CameraCaptureActive != m_LastCameraCaptureActive ||
 			Observation.ViewportKeyboardFocused != m_LastViewportKeyboardFocused ||
-			Observation.ImageHovered != m_LastImageHovered || Observation.SceneImageReady != m_LastSceneImageReady;
+			Observation.ImageHovered != m_LastImageHovered || Observation.SceneImageReady != m_LastSceneImageReady ||
+			Observation.ScrollCallbackSequence != m_LastScrollCallbackSequence ||
+			Observation.ScrollConsumedSequence != m_LastScrollConsumedSequence;
 		const bool CameraMoved = !m_HasStateSnapshot ||
 			Distance(m_LastObservedCameraPosition, Observation.CameraPosition) > 0.005f;
 		const bool MotionCanBeReported = m_LastStateObservationTime < 0.0 ||
@@ -714,6 +732,8 @@ namespace PulseForgeEditor::Detail
 		m_LastViewportKeyboardFocused = Observation.ViewportKeyboardFocused;
 		m_LastImageHovered = Observation.ImageHovered;
 		m_LastSceneImageReady = Observation.SceneImageReady;
+		m_LastScrollCallbackSequence = Observation.ScrollCallbackSequence;
+		m_LastScrollConsumedSequence = Observation.ScrollConsumedSequence;
 		m_LastObservedCameraPosition = Observation.CameraPosition;
 		m_LastStateObservationTime = Observation.ImGuiTime;
 		++m_StateSequence;
@@ -728,6 +748,23 @@ namespace PulseForgeEditor::Detail
 			   << "; imgui_mouse=" << Observation.ImGuiMousePosition[0] << ',' << Observation.ImGuiMousePosition[1]
 			   << "; hovered_viewport=" << Observation.ImGuiHoveredViewportID << "; cursor_mode=" << Observation.CursorMode
 			   << "; raw_motion_supported=" << Observation.RawMotionSupported << "; raw_motion_enabled=" << Observation.RawMotionEnabled
+			   << "; wheel_action_id=" << (m_WheelActionID.empty() ? "unassigned" : m_WheelActionID)
+			   << "; right_button_down=" << Observation.RightButtonDown << "; wheel_action=" << Observation.WheelAction
+			   << "; owner_scroll_delta=" << Observation.OwnerScrollDelta
+			   << "; scroll_callback_sequence=" << Observation.ScrollCallbackSequence
+			   << "; scroll_callback_window=0x" << std::hex << Observation.ScrollCallbackWindow << std::dec
+			   << "; scroll_callback_viewport=" << Observation.ScrollCallbackViewportID
+			   << "; scroll_callback_input_window=" << Observation.ScrollCallbackInputWindowID
+			   << "; scroll_callback_x=" << Observation.ScrollCallbackXOffset
+			   << "; scroll_callback_y=" << Observation.ScrollCallbackYOffset
+			   << "; scroll_callback_accumulated=" << Observation.ScrollCallbackAccumulated
+			   << "; scroll_consumed_sequence=" << Observation.ScrollConsumedSequence
+			   << "; scroll_consumed_delta=" << Observation.ScrollConsumedDelta
+			   << "; owner_input_window=" << Observation.OwnerInputWindowID
+			   << "; owner_scroll_route_registered=" << Observation.OwnerScrollRouteRegistered
+			   << "; owner_router_scroll_callback_installed=" << Observation.OwnerRouterScrollCallbackInstalled
+			   << "; owner_backend_scroll_callback_chained=" << Observation.OwnerBackendScrollCallbackChained
+			   << "; last_scroll_callback_matches_owner=" << Observation.LastScrollCallbackMatchesOwner
 			   << "; camera_position=" << Observation.CameraPosition[0] << ',' << Observation.CameraPosition[1] << ','
 			   << Observation.CameraPosition[2] << "; camera_forward=" << Observation.CameraForward[0] << ','
 			   << Observation.CameraForward[1] << ',' << Observation.CameraForward[2] << "; camera_speed=" << Observation.CameraMoveSpeed;

@@ -200,6 +200,48 @@ class SceneViewportSmokeProtocolTests(unittest.TestCase):
                 "MACOS_SCENE_VIEWPORT_NATIVE_SMOKE=READY_FOR_CAMERA_INPUT; stable_seconds=1.5", 4
             )
 
+    def test_wheel_receipt_requires_fresh_callback_for_the_detached_owner(self) -> None:
+        fields = {
+            "wheel_action_id": "a" * 32,
+            "scroll_callback_sequence": "9",
+            "scroll_callback_window": "0x2000",
+            "scroll_callback_viewport": "2",
+            "scroll_callback_input_window": "12",
+            "last_scroll_callback_matches_owner": "1",
+            "scroll_callback_accumulated": "1",
+            "owner_input_window": "12",
+            "owner_scroll_route_registered": "1",
+            "owner_router_scroll_callback_installed": "1",
+            "owner_backend_scroll_callback_chained": "1",
+        }
+        self.assertTrue(scene_viewport_smoke.wheel_callback_matches_owner(fields, "a" * 32, 8, "2", "0x2000"))
+        self.assertFalse(scene_viewport_smoke.wheel_callback_matches_owner(fields, "b" * 32, 8, "2", "0x2000"))
+        self.assertFalse(scene_viewport_smoke.wheel_callback_matches_owner(fields, "a" * 32, 9, "2", "0x2000"))
+        self.assertFalse(scene_viewport_smoke.wheel_callback_matches_owner(fields, "a" * 32, 8, "3", "0x2000"))
+        self.assertFalse(scene_viewport_smoke.wheel_callback_matches_owner(fields, "a" * 32, 8, "2", "0x3000"))
+        self.assertFalse(scene_viewport_smoke.wheel_callback_matches_owner(
+            {**fields, "scroll_callback_accumulated": "0"}, "a" * 32, 8, "2", "0x2000"
+        ))
+        self.assertFalse(scene_viewport_smoke.wheel_callback_matches_owner(
+            {**fields, "scroll_callback_input_window": "13"}, "a" * 32, 8, "2", "0x2000"
+        ))
+        self.assertFalse(scene_viewport_smoke.wheel_callback_matches_owner(
+            {**fields, "owner_backend_scroll_callback_chained": "0"}, "a" * 32, 8, "2", "0x2000"
+        ))
+
+    def test_wheel_receipt_requires_owner_accumulation_after_callback(self) -> None:
+        fields = {
+            "wheel_action_id": "a" * 32,
+            "scroll_consumed_sequence": "9",
+            "scroll_consumed_delta": "1.0",
+            "owner_scroll_delta": "1.0",
+        }
+        self.assertTrue(scene_viewport_smoke.wheel_delta_consumed(fields, "a" * 32, 9))
+        self.assertFalse(scene_viewport_smoke.wheel_delta_consumed(fields, "a" * 32, 10))
+        self.assertFalse(scene_viewport_smoke.wheel_delta_consumed(
+            {**fields, "owner_scroll_delta": "0"}, "a" * 32, 9
+        ))
+
     def test_camera_input_uses_only_the_visible_intersection_of_a_detached_image(self) -> None:
         display, minimum, maximum = scene_viewport_smoke.visible_camera_region(
             (832.2, 425.0),

@@ -9,6 +9,24 @@ struct ImGuiContext;
 
 namespace PulseForgeEditor::Detail
 {
+	struct ViewportScrollInputDiagnostics
+	{
+		uint64_t CallbackSequence = 0;
+		uintptr_t CallbackWindow = 0;
+		uint32_t CallbackViewportID = 0;
+		uint64_t CallbackInputWindowID = 0;
+		float CallbackXOffset = 0.0f;
+		float CallbackYOffset = 0.0f;
+		bool CallbackAccumulated = false;
+		uint64_t ConsumedSequence = 0;
+		float ConsumedDelta = 0.0f;
+		uint64_t CurrentInputWindowID = 0;
+		bool CurrentRouteRegistered = false;
+		bool RouterCallbackInstalled = false;
+		bool CurrentBackendCallbackChained = false;
+		bool LastCallbackMatchesCurrentOwner = false;
+	};
+
 	class ViewportScrollEventAccumulator final
 	{
 	public:
@@ -32,6 +50,7 @@ namespace PulseForgeEditor::Detail
 		[[nodiscard]] bool Install(ImGuiContext* Context, GLFWwindow* MainWindow);
 		[[nodiscard]] float Consume(uint32_t ViewportID, GLFWwindow* Window) noexcept;
 		[[nodiscard]] uint64_t GetInputWindowID(uint32_t ViewportID, GLFWwindow* Window) const noexcept;
+		[[nodiscard]] ViewportScrollInputDiagnostics GetDiagnostics(uint32_t ViewportID, GLFWwindow* Window) const noexcept;
 		void DiscardPending() noexcept;
 		void Shutdown() noexcept;
 

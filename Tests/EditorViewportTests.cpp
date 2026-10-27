@@ -305,6 +305,9 @@ namespace
 		PF_CHECK(Tests,
 			ResolveViewportWheelAction({ .PointerOverViewportImage = true, .RightMouseNavigationActive = true, .RightMouseHeld = true }) ==
 				ViewportWheelAction::AdjustFlySpeed);
+		PF_CHECK(Tests,
+			ResolveViewportWheelAction({ .PointerOverViewportImage = false, .RightMouseNavigationActive = true, .RightMouseHeld = true }) ==
+				ViewportWheelAction::AdjustFlySpeed);
 		PF_CHECK(
 			Tests, ResolveViewportWheelAction({ .PointerOverViewportImage = true, .RuntimeActive = true }) == ViewportWheelAction::None);
 		PF_CHECK(Tests, ResolveViewportWheelAction({ .PointerOverViewportImage = true, .PopupOpen = true }) == ViewportWheelAction::None);
