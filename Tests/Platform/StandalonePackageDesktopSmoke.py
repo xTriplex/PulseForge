@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+from contextlib import redirect_stderr, redirect_stdout
 import ctypes
 import ctypes.util
+from dataclasses import dataclass
 import hashlib
+from io import BytesIO, TextIOWrapper
 import json
 import os
 import plistlib
@@ -21,10 +24,11 @@ import tempfile
 import threading
 import time
 import zlib
-from dataclasses import dataclass
 from ctypes import wintypes
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 from unittest.mock import patch
+
+from AcceptanceDiagnostics import configure_utf8_diagnostics
 
 
 DRAW_MARKER = re.compile(r"Submitted\s+(\d+)\s+indexed mesh instance\(s\) from the player scene")
@@ -32,6 +36,7 @@ PRESENTED_GEOMETRY_MARKER = re.compile(
     r"First Vulkan/NVRHI frame submitted and presented successfully \(geometry draw recorded:\s*(?:true|1)\)")
 MAX_CAPTURE_PIXELS = 40_000_000
 MAX_LOG_BYTES = 4 * 1024 * 1024
+MAX_CDB_DIAGNOSTIC_TAIL_BYTES = 64 * 1024
 
 
 class SmokeFailure(RuntimeError):
@@ -63,7 +68,7 @@ def has_presented_geometry(Text: str) -> bool:
     return PRESENTED_GEOMETRY_MARKER.search(Text) is not None
 
 
-def build_launch_command(Executable: Path) -> list[str]:
+def build_launch_command(Executable: PurePath) -> list[str]:
     """The package must resolve its bundled Content without command-line arguments."""
     return [str(Executable)]
 
@@ -817,8 +822,8 @@ class MacOSDesktop:
     def _osascript(Script: str, Timeout: float = 5.0) -> str:
         try:
             Result = subprocess.run(["osascript", "-e", Script], check=False, capture_output=True,
-                                    text=True, timeout=Timeout, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                                                                     "LANG": "C.UTF-8"})
+                                    text=True, encoding="utf-8", errors="strict", timeout=Timeout,
+                                    env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"})
         except subprocess.TimeoutExpired as Error:
             def OutputTail(Value: str | bytes | None) -> str:
                 if isinstance(Value, bytes):
@@ -968,6 +973,11 @@ def _make_read_only(PackageRoot: Path) -> int:
 class WindowsPackageReadOnlyAccess:
     """Applies a restorable deny-write DACL to this owned temporary package only."""
 
+    # Generic W also denies standard rights shared by read/execute handles on Windows.
+    # Deny package mutation rights explicitly so image execution remains available.
+    # Keep DACL/owner management available so the test can restore the saved ACL after launch.
+    WriteDenial = "(OI)(CI)(WD,AD,WEA,WA,DE,DC)"
+
     def __init__(self, PackageRoot: Path, TemporaryRoot: Path):
         self.PackageRoot = PackageRoot
         self.WorkingDirectory = PackageRoot.parent
@@ -1009,7 +1019,7 @@ class WindowsPackageReadOnlyAccess:
         self._run([self.Icacls, self.PackageRoot.name, "/save", str(self.Backup), "/t", "/c", "/q"],
                   self.WorkingDirectory)
         self.Saved = True
-        self._run([self.Icacls, self.PackageRoot.name, "/deny", f"*{self.Sid}:(OI)(CI)(W)",
+        self._run([self.Icacls, self.PackageRoot.name, "/deny", f"*{self.Sid}:{self.WriteDenial}",
                    "/t", "/c", "/q"], self.WorkingDirectory)
         Probe = self.PackageRoot / ".pf-read-only-write-probe"
         try:
@@ -1123,7 +1133,8 @@ def _remove_owned_package_copy(PackageRoot: Path, TemporaryRoot: Path) -> None:
         raise SmokeFailure(f"could not remove the owned read-only package copy: {Error}") from Error
 
 
-def _build_environment(Platform: str, WorkRoot: Path, SystemVulkanIcd: Path | None = None) -> dict[str, str]:
+def _build_environment(Platform: str, WorkRoot: Path, SystemVulkanIcd: Path | None = None,
+                      WindowsVulkanRuntimeLibrary: Path | None = None) -> dict[str, str]:
     UserData = WorkRoot / "User Data Ω" / "PulseForge"
     Home = WorkRoot / "Home Ω"
     Temp = WorkRoot / "Temp Ω"
@@ -1186,8 +1197,17 @@ def _build_environment(Platform: str, WorkRoot: Path, SystemVulkanIcd: Path | No
         Local = WindowsHome / "AppData" / "Local"
         for Directory in (WindowsHome, Roaming, Local):
             Directory.mkdir(parents=True, exist_ok=True)
+        SystemDirectory = Path(SystemRoot) / "System32"
+        RuntimeDirectories = [str(SystemDirectory)]
+        if WindowsVulkanRuntimeLibrary is not None:
+            if WindowsVulkanRuntimeLibrary.is_symlink() or not WindowsVulkanRuntimeLibrary.is_file():
+                raise SmokeFailure("--windows-vulkan-runtime-library must name an existing unlinked DLL")
+            RuntimeLibrary = WindowsVulkanRuntimeLibrary.resolve(strict=True)
+            if RuntimeLibrary.name.casefold() != "vulkan-1.dll":
+                raise SmokeFailure("--windows-vulkan-runtime-library must be named vulkan-1.dll")
+            RuntimeDirectories.insert(0, str(RuntimeLibrary.parent))
         Environment.update({
-            "PATH": str(Path(SystemRoot) / "System32"),
+            "PATH": os.pathsep.join(RuntimeDirectories),
             "SystemRoot": SystemRoot,
             "WINDIR": SystemRoot,
             "SystemDrive": os.environ.get("SystemDrive", "C:"),
@@ -1196,6 +1216,155 @@ def _build_environment(Platform: str, WorkRoot: Path, SystemVulkanIcd: Path | No
             "LOCALAPPDATA": str(Local),
         })
     return Environment
+
+
+def _windows_cdb_exception_script() -> str:
+    CaptureCommands = (
+        ".echo G14_WINDOWS_CDB_SECOND_CHANCE_CAPTURE=BEGIN; "
+        ".exr -1; .ecxr; .time; r; u @rip-10 @rip+20; lmv a @rip; kv; "
+        ".echo G14_WINDOWS_CDB_SECOND_CHANCE_CAPTURE=END; q"
+    )
+    return (f'sxd -c2 "{CaptureCommands}" 0xc000001d\n'
+            f'sxd -c2 "{CaptureCommands}" *\ng\n')
+
+
+def _has_cdb_second_chance_capture(Text: str) -> bool:
+    return re.search(
+        r"(?m)^\s*(?:[0-9a-f]+:[0-9a-f]+>\s*)?"
+        r"G14_WINDOWS_CDB_SECOND_CHANCE_CAPTURE=END\s*$",
+        Text,
+        re.IGNORECASE,
+    ) is not None
+
+
+def read_log_tail(LogPath: Path, MaxBytes: int = MAX_CDB_DIAGNOSTIC_TAIL_BYTES) -> str:
+    """Read a bounded diagnostic tail while preserving UTF-8 and exposing other encoded bytes."""
+    if MaxBytes < 1:
+        raise ValueError("diagnostic log tail bound must be positive")
+
+    with LogPath.open("rb") as Log:
+        Log.seek(0, os.SEEK_END)
+        LogSize = Log.tell()
+        Start = max(0, LogSize - MaxBytes)
+        Log.seek(Start)
+        Data = Log.read(MaxBytes)
+
+    Truncated = Start > 0
+    if Truncated:
+        FirstLineBreak = Data.find(b"\n")
+        if FirstLineBreak >= 0:
+            Data = Data[FirstLineBreak + 1:]
+
+    if Data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        Text = Data.decode("utf-16", errors="backslashreplace")
+    else:
+        try:
+            Text = Data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            if os.name == "nt":
+                Text = None
+                for Encoding in ("mbcs", "oem"):
+                    try:
+                        Text = Data.decode(Encoding)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                if Text is None:
+                    Text = Data.decode("utf-8", errors="backslashreplace")
+            else:
+                Text = Data.decode("utf-8", errors="backslashreplace")
+
+    if Truncated:
+        return f"[earlier diagnostic bytes omitted; showing at most {MaxBytes} bytes]\n{Text}"
+    return Text
+
+
+def capture_windows_unhandled_exception(PackageRoot: Path, Cdb: Path, LogDirectory: Path,
+                                       WindowsVulkanRuntimeLibrary: Path, Timeout: int) -> int:
+    """Rerun an already-failing packaged Player under CDB and retain only bounded text diagnostics."""
+    if os.name != "nt":
+        raise SmokeFailure("Windows CDB crash capture must run on a Windows host")
+    if not 1 <= Timeout <= 30:
+        raise SmokeFailure("Windows CDB crash capture timeout must be between 1 and 30 seconds")
+
+    PackageRoot, Executable = _resolve_package(PackageRoot, "Windows")
+    if Cdb.is_symlink() or not Cdb.is_file():
+        raise SmokeFailure(f"Windows CDB executable is missing or linked: {Cdb}")
+    Cdb = Cdb.resolve(strict=True)
+    if WindowsVulkanRuntimeLibrary.is_symlink() or not WindowsVulkanRuntimeLibrary.is_file():
+        raise SmokeFailure(
+            "--windows-vulkan-runtime-library must name an existing unlinked DLL")
+    WindowsVulkanRuntimeLibrary = WindowsVulkanRuntimeLibrary.resolve(strict=True)
+    if WindowsVulkanRuntimeLibrary.name.casefold() != "vulkan-1.dll":
+        raise SmokeFailure("--windows-vulkan-runtime-library must be named vulkan-1.dll")
+
+    LogDirectory.mkdir(parents=True, exist_ok=True)
+    LogDirectory = LogDirectory.resolve(strict=True)
+    if LogDirectory == PackageRoot or PackageRoot in LogDirectory.parents:
+        raise SmokeFailure("CDB diagnostics must be outside the read-only package")
+    RunRoot = Path(tempfile.mkdtemp(prefix="PulseForge Windows CDB Ω ", dir=LogDirectory))
+    WorkRoot = RunRoot / "Runtime Data Ω"
+    WorkingDirectory = RunRoot / "Unrelated Working Directory Ω"
+    WorkRoot.mkdir()
+    WorkingDirectory.mkdir()
+
+    CommandFile = RunRoot / "cdb-exception-commands.txt"
+    CommandFile.write_text(_windows_cdb_exception_script(), encoding="ascii", newline="\n")
+    LogPath = LogDirectory / "cdb-live.txt"
+    if LogPath.exists() or LogPath.is_symlink():
+        raise SmokeFailure(f"CDB diagnostic log already exists or is linked: {LogPath}")
+    Environment = _build_environment("Windows", WorkRoot, WindowsVulkanRuntimeLibrary=WindowsVulkanRuntimeLibrary)
+    Command = [str(Cdb), "-cf", str(CommandFile), "-G", str(Executable)]
+    CreationFlags = subprocess.CREATE_NEW_PROCESS_GROUP
+    TimedOut = False
+    Process: subprocess.Popen[bytes] | None = None
+    print(f"STANDALONE_PACKAGE_CDB_PROBE=START; timeout_seconds={Timeout}; argv={Command!r}")
+    with LogPath.open("xb") as Output:
+        Process = subprocess.Popen(Command, cwd=WorkingDirectory, env=Environment,
+                                   stdin=subprocess.DEVNULL, stdout=Output, stderr=subprocess.STDOUT,
+                                   bufsize=0, creationflags=CreationFlags)
+        print(f"STANDALONE_PACKAGE_CDB_PROBE=PROCESS; debugger_pid={Process.pid}")
+        try:
+            ReturnCode = Process.wait(timeout=Timeout)
+        except subprocess.TimeoutExpired:
+            TimedOut = True
+            TaskKill = Path(Environment["SystemRoot"]) / "System32" / "taskkill.exe"
+            CleanupFailure: str | None = None
+            try:
+                Cleanup = subprocess.run([str(TaskKill), "/PID", str(Process.pid), "/T", "/F"],
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, timeout=5, check=False)
+                Output.write(b"\nSTANDALONE_PACKAGE_CDB_PROBE=CLEANUP; taskkill_exit=")
+                Output.write(str(Cleanup.returncode).encode("ascii"))
+                Output.write(b"\n")
+                Output.write(Cleanup.stdout or b"")
+                if Cleanup.returncode != 0:
+                    CleanupFailure = f"taskkill exited {Cleanup.returncode} for owned debugger PID {Process.pid}"
+            except (OSError, subprocess.SubprocessError) as Error:
+                CleanupFailure = f"could not terminate owned debugger process tree {Process.pid}: {Error}"
+                Output.write(f"\nSTANDALONE_PACKAGE_CDB_PROBE=CLEANUP_ERROR; {CleanupFailure}\n".encode("utf-8"))
+            Output.flush()
+            try:
+                ReturnCode = Process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                Process.kill()
+                try:
+                    ReturnCode = Process.wait(timeout=5)
+                except subprocess.TimeoutExpired as Error:
+                    raise SmokeFailure(
+                        f"could not reap owned CDB process PID {Process.pid} after bounded process-tree cleanup") from Error
+            if CleanupFailure is not None:
+                raise SmokeFailure(CleanupFailure)
+
+    Tail = read_log_tail(LogPath)
+    if _has_cdb_second_chance_capture(Tail):
+        print(f"STANDALONE_PACKAGE_CDB_PROBE=CAPTURED; cdb_exit={ReturnCode}; log={LogPath}")
+    elif TimedOut:
+        print(f"STANDALONE_PACKAGE_CDB_PROBE=TIMEOUT; cdb_exit={ReturnCode}; log={LogPath}")
+    else:
+        print(f"STANDALONE_PACKAGE_CDB_PROBE=NO_UNHANDLED_EXCEPTION; cdb_exit={ReturnCode}; log={LogPath}")
+    print(Tail)
+    return 0
 
 
 def _wait_for_exit(Process: subprocess.Popen[bytes], Timeout: float) -> int:
@@ -1256,15 +1425,27 @@ def _route(Platform: str, PackageRoot: Path):
 
 
 def run_smoke(PackageRoot: Path, Platform: str, LogDirectory: Path, Timeout: int,
-              SystemVulkanIcd: Path | None = None) -> None:
+              SystemVulkanIcd: Path | None = None,
+              WindowsVulkanRuntimeLibrary: Path | None = None) -> None:
     if Timeout < 15 or Timeout > 600:
         raise SmokeFailure("timeout-seconds must be between 15 and 600")
     if SystemVulkanIcd is not None and Platform != "Linux":
         raise SmokeFailure("--system-vulkan-icd is only valid for Linux package runs")
+    if WindowsVulkanRuntimeLibrary is not None and Platform != "Windows":
+        raise SmokeFailure("--windows-vulkan-runtime-library is only valid for Windows package runs")
     if ((Platform == "Windows" and os.name != "nt") or (Platform == "Linux" and sys.platform != "linux") or
             (Platform == "macOS" and sys.platform != "darwin")):
         raise UnsupportedCapability(f"the {Platform} desktop capture route is unavailable on this host")
     PackageSourceRoot, _ = _resolve_package(PackageRoot, Platform)
+    if WindowsVulkanRuntimeLibrary is not None:
+        if WindowsVulkanRuntimeLibrary.is_symlink() or not WindowsVulkanRuntimeLibrary.is_file():
+            raise SmokeFailure("--windows-vulkan-runtime-library must name an existing unlinked DLL")
+        ResolvedRuntimeLibrary = WindowsVulkanRuntimeLibrary.resolve(strict=True)
+        if ResolvedRuntimeLibrary.name.casefold() != "vulkan-1.dll":
+            raise SmokeFailure("--windows-vulkan-runtime-library must be named vulkan-1.dll")
+        if ResolvedRuntimeLibrary.parent == PackageSourceRoot or PackageSourceRoot in ResolvedRuntimeLibrary.parents:
+            raise SmokeFailure("the test-only Vulkan runtime DLL must be outside the exported package")
+        WindowsVulkanRuntimeLibrary = ResolvedRuntimeLibrary
     LogDirectory.mkdir(parents=True, exist_ok=True)
     if LogDirectory.is_symlink():
         raise SmokeFailure(f"log directory must not be a symbolic link: {LogDirectory}")
@@ -1277,7 +1458,7 @@ def run_smoke(PackageRoot: Path, Platform: str, LogDirectory: Path, Timeout: int
     WorkRoot.mkdir()
     WorkingDirectory = RunDirectory / "Unrelated Working Directory Ω"
     WorkingDirectory.mkdir()
-    Environment = _build_environment(Platform, WorkRoot, SystemVulkanIcd)
+    Environment = _build_environment(Platform, WorkRoot, SystemVulkanIcd, WindowsVulkanRuntimeLibrary)
     LogPath = RunDirectory / "standalone-player.log"
     ScreenshotPath = RunDirectory / "standalone-player-window.png"
     if LogPath.exists() or ScreenshotPath.exists():
@@ -1351,6 +1532,10 @@ def run_smoke(PackageRoot: Path, Platform: str, LogDirectory: Path, Timeout: int
               f"developer_sdk_overrides=omitted")
         if SystemVulkanIcd is not None:
             print(f"STANDALONE_PACKAGE_SMOKE_SYSTEM_LAVAPIPE={Environment['VK_DRIVER_FILES']}")
+        if WindowsVulkanRuntimeLibrary is not None:
+            RuntimeDigest = hashlib.sha256(WindowsVulkanRuntimeLibrary.read_bytes()).hexdigest()
+            print("STANDALONE_PACKAGE_SMOKE_WINDOWS_VULKAN_RUNTIME=TEST_PREREQUISITE; "
+                  f"path={WindowsVulkanRuntimeLibrary}; sha256={RuntimeDigest}; package_copy=external")
         DrawCount = Collector.wait_for_presented_geometry(Process, time.monotonic() + Timeout)
         print(f"STANDALONE_PACKAGE_SMOKE_RENDER_LOG=PASS; indexed_mesh_instances={DrawCount}")
         print("STANDALONE_PACKAGE_SMOKE_PRESENTATION=PASS; geometry_frame=successfully_presented")
@@ -1458,8 +1643,114 @@ def _read_configuration(PackageRoot: Path, Platform: str) -> str:
     return str(Manifest["configuration"])
 
 
+def _self_test_windows_read_only_execution() -> None:
+    if os.name != "nt":
+        return
+
+    SystemRoot = os.environ.get("SystemRoot")
+    SystemExecutable = Path(SystemRoot) / "System32" / "whoami.exe" if SystemRoot else None
+    if SystemExecutable is None or not SystemExecutable.is_file() or SystemExecutable.is_symlink():
+        raise AssertionError("Windows read-only ACL regression requires the inbox System32/whoami.exe")
+
+    with tempfile.TemporaryDirectory(prefix="PulseForge Read-Only ACL Ω ") as Temporary:
+        TemporaryRoot = Path(Temporary)
+        PackageParent = TemporaryRoot / "Package"
+        PackageParent.mkdir()
+        PackageRoot = PackageParent / "Runtime Fixture Ω"
+        PackageRoot.mkdir()
+        PackagedExecutable = PackageRoot / "whoami.exe"
+        shutil.copy2(SystemExecutable, PackagedExecutable)
+        _make_read_only(PackageRoot)
+        Access = WindowsPackageReadOnlyAccess(PackageRoot, TemporaryRoot)
+        try:
+            Access.apply()
+            Result = subprocess.run([str(PackagedExecutable), "/user"], cwd=TemporaryRoot,
+                                    text=True, capture_output=True, timeout=15, check=False)
+            if Result.returncode != 0:
+                raise AssertionError(f"read-only packaged executable exited {Result.returncode}: {Result.stderr.strip()}")
+        finally:
+            Access.restore()
+            if PackageRoot.exists():
+                try:
+                    Mode = PackagedExecutable.stat(follow_symlinks=False).st_mode
+                    PackagedExecutable.chmod(Mode | stat.S_IWRITE)
+                except OSError as Error:
+                    raise AssertionError(
+                        f"saved package ACL was not restored for owned fixture cleanup: {Error}") from Error
+                _remove_owned_package_copy(PackageRoot, TemporaryRoot)
+
+    print("STANDALONE_PACKAGE_SMOKE_WINDOWS_READ_ONLY_EXECUTION=PASS; write denied; packaged process executed")
+
+
 def self_test() -> None:
-    assert build_launch_command(Path("/tmp/PulseForgeCookedGame")) == ["/tmp/PulseForgeCookedGame"]
+    stdout_bytes = BytesIO()
+    stderr_bytes = BytesIO()
+    stdout = TextIOWrapper(stdout_bytes, encoding="cp1252")
+    stderr = TextIOWrapper(stderr_bytes, encoding="cp1252")
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        configure_utf8_diagnostics()
+        assert stdout.encoding.casefold().replace("-", "") == "utf8"
+        assert stderr.encoding.casefold().replace("-", "") == "utf8"
+        print("STANDALONE_TEST_PATH=C:/Runner Temp/PulseForge Ω")
+        print("STANDALONE_TEST_ERROR=C:/Runner Temp/PulseForge Ω", file=sys.stderr)
+        stdout.flush()
+        stderr.flush()
+    assert "Ω".encode("utf-8") in stdout_bytes.getvalue()
+    assert "Ω".encode("utf-8") in stderr_bytes.getvalue()
+    CdbScript = _windows_cdb_exception_script()
+    assert 'sxd -c2 ' in CdbScript and CdbScript.rstrip().endswith("g")
+    assert "G14_WINDOWS_CDB_SECOND_CHANCE_CAPTURE=BEGIN" in CdbScript
+    assert "G14_WINDOWS_CDB_SECOND_CHANCE_CAPTURE=END" in CdbScript
+    assert ".exr -1; .ecxr; .time; r; u @rip-10 @rip+20; lmv a @rip; kv;" in CdbScript
+    assert ".echo G14_WINDOWS_CDB_SECOND_CHANCE_CAPTURE=END; q" in CdbScript
+    assert CdbScript.count("sxd -c2 ") == 2 and "0xc000001d" in CdbScript
+    assert not _has_cdb_second_chance_capture(
+        '0:000> sxd -c2 ".echo G14_WINDOWS_CDB_SECOND_CHANCE_CAPTURE=END; q" 0xc000001d')
+    assert _has_cdb_second_chance_capture("G14_WINDOWS_CDB_SECOND_CHANCE_CAPTURE=END\n")
+    assert _has_cdb_second_chance_capture("0:000> G14_WINDOWS_CDB_SECOND_CHANCE_CAPTURE=END\n")
+
+    with tempfile.TemporaryDirectory(prefix="PulseForge verifier failure Ω ") as Temporary:
+        Root = Path(Temporary)
+        CdbLog = Root / "CDB diagnostics Ω.log"
+        CdbLog.write_bytes(("obsolete Ω record\n" + "retained Ω diagnostic\n" * 8).encode("utf-8"))
+        CdbTail = read_log_tail(CdbLog, MaxBytes=64)
+        assert "retained Ω diagnostic" in CdbTail and "obsolete" not in CdbTail
+        assert "earlier diagnostic bytes omitted" in CdbTail
+
+        IncompletePackage = Root / "Incomplete Package Ω"
+        IncompletePackage.mkdir()
+        if os.name == "nt":
+            HostPlatform = "Windows"
+        elif sys.platform == "darwin":
+            HostPlatform = "macOS"
+        elif sys.platform == "linux":
+            HostPlatform = "Linux"
+        else:
+            raise AssertionError(f"unsupported acceptance self-test host: {sys.platform}")
+        ChildEnvironment = os.environ.copy()
+        ChildEnvironment.pop("PYTHONIOENCODING", None)
+        Child = subprocess.run(
+            [sys.executable, "-X", "utf8=0", str(Path(__file__).resolve()),
+             "--package-root", str(IncompletePackage), "--platform", HostPlatform,
+             "--log-directory", str(Root / "Logs")],
+            cwd=Root,
+            env=ChildEnvironment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=15,
+            check=False,
+        )
+        ChildOutput = Child.stdout.decode("utf-8")
+        assert Child.returncode == 1, f"acceptance failure status was not preserved: {Child.returncode}; {ChildOutput}"
+        assert "STANDALONE_PACKAGE_SMOKE=FAIL" in ChildOutput
+        assert "Incomplete Package Ω" in ChildOutput, f"Unicode package path was not retained: {ChildOutput!r}"
+        ExpectedFailure = {
+            "Windows": "PulseForgeCookedGame.exe",
+            "Linux": "PulseForgeCookedGame",
+            "macOS": "must be the exported .app bundle",
+        }[HostPlatform]
+        assert ExpectedFailure in ChildOutput, f"unexpected incomplete-package diagnostic: {ChildOutput!r}"
+    assert build_launch_command(PurePosixPath("/tmp/PulseForgeCookedGame")) == ["/tmp/PulseForgeCookedGame"]
     assert parse_draw_count("Submitted 3 indexed mesh instance(s) from the player scene") == 3
     assert parse_draw_count("Submitted 0 indexed mesh instance(s) from the player scene") is None
     assert parse_draw_count("some unrelated line") is None
@@ -1472,6 +1763,26 @@ def self_test() -> None:
                     0, 255, 0, 255, 0, 0, 255, 255))
     Width, Height, Decoded = decode_png(encode_png(2, 2, Pixels))
     assert (Width, Height, Decoded) == (2, 2, bytearray(Pixels))
+    with tempfile.TemporaryDirectory(prefix="PulseForge Vulkan Runtime Fixture ") as Temporary:
+        Root = Path(Temporary)
+        RuntimeDirectory = Root / "Runtime"
+        RuntimeDirectory.mkdir()
+        RuntimeLibrary = RuntimeDirectory / "vulkan-1.dll"
+        RuntimeLibrary.write_bytes(b"test-only Vulkan runtime")
+        Environment = _build_environment("Windows", Root / "Work",
+                                         WindowsVulkanRuntimeLibrary=RuntimeLibrary)
+        assert Environment["PATH"].split(os.pathsep)[0] == str(RuntimeDirectory.resolve())
+        assert "VULKAN_SDK" not in Environment and "VK_SDK_PATH" not in Environment
+        assert "VK_ICD_FILENAMES" not in Environment and "VK_DRIVER_FILES" not in Environment
+        WrongNameRuntimeLibrary = RuntimeDirectory / "vk_swiftshader.dll"
+        WrongNameRuntimeLibrary.write_bytes(b"test-only Vulkan runtime")
+        try:
+            _build_environment("Windows", Root / "InvalidWork",
+                               WindowsVulkanRuntimeLibrary=WrongNameRuntimeLibrary)
+        except SmokeFailure as Error:
+            assert "named vulkan-1.dll" in str(Error)
+        else:
+            raise AssertionError("Windows test Vulkan runtime accepted an unrenamed ICD module")
     MacRoute = MacOSDesktop.__new__(MacOSDesktop)
     MacScripts: list[str] = []
     MacRoute._osascript = lambda Script, Timeout=5.0: (MacScripts.append(Script), "20|40|800|600")[1]
@@ -1516,6 +1827,8 @@ def self_test() -> None:
         MacNoticePath.write_text(MacNotices, encoding="utf-8")
         validate_third_party_notices(Root, "macOS")
 
+    _self_test_windows_read_only_execution()
+
     try:
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
                 ["osascript"], 5, output=b"close-target-ready", stderr=b"waiting-for-AX")):
@@ -1526,10 +1839,11 @@ def self_test() -> None:
     else:
         raise AssertionError("macOS Accessibility timeout discarded its partial operation diagnostics")
     print("STANDALONE_PACKAGE_SMOKE_SELF_TEST=PASS; argv, PNG codec, Vulkan presentation marker, macOS window route, "
-          "and platform-specific notices")
+          "UTF-8 diagnostics, and platform-specific notices")
 
 
 def main() -> int:
+    configure_utf8_diagnostics()
     Parser = argparse.ArgumentParser(description=__doc__)
     Parser.add_argument("--package-root", type=Path)
     Parser.add_argument("--platform", choices=("Windows", "Linux", "macOS"))
@@ -1537,6 +1851,13 @@ def main() -> int:
     Parser.add_argument("--timeout-seconds", type=int, default=180)
     Parser.add_argument("--system-vulkan-icd", type=Path,
                         help="Optional system Lavapipe ICD manifest; must live under /usr/share or /etc")
+    Parser.add_argument("--windows-vulkan-runtime-library", type=Path,
+                        help="Optional external test-only vulkan-1.dll; only its directory is added to the sanitized Windows PATH")
+    Parser.add_argument("--capture-windows-unhandled-exception", action="store_true",
+                        help="Rerun a failed Windows packaged Player under CDB and record its second-chance context")
+    Parser.add_argument("--cdb", type=Path, help="Microsoft CDB executable for the bounded Windows crash diagnostic")
+    Parser.add_argument("--debugger-timeout-seconds", type=int, default=20,
+                        help="Bound the diagnostic CDB process (1 to 30 seconds)")
     Parser.add_argument("--self-test", action="store_true", help="Run the local argv/PNG helper checks")
     Arguments = Parser.parse_args()
     if Arguments.self_test:
@@ -1545,9 +1866,22 @@ def main() -> int:
     Missing = [Name for Name in ("package_root", "platform", "log_directory") if getattr(Arguments, Name) is None]
     if Missing:
         Parser.error("--package-root, --platform, and --log-directory are required")
+    if Arguments.capture_windows_unhandled_exception:
+        if Arguments.platform != "Windows":
+            Parser.error("--capture-windows-unhandled-exception requires --platform Windows")
+        if Arguments.cdb is None or Arguments.windows_vulkan_runtime_library is None:
+            Parser.error("CDB capture requires --cdb and --windows-vulkan-runtime-library")
+        try:
+            return capture_windows_unhandled_exception(
+                Arguments.package_root, Arguments.cdb, Arguments.log_directory,
+                Arguments.windows_vulkan_runtime_library, Arguments.debugger_timeout_seconds)
+        except (OSError, SmokeFailure, subprocess.SubprocessError, TimeoutError, ValueError) as Error:
+            print(f"STANDALONE_PACKAGE_CDB_PROBE=FAIL; {Error}", file=sys.stderr)
+            return 1
     try:
         run_smoke(Arguments.package_root, Arguments.platform, Arguments.log_directory,
-                  Arguments.timeout_seconds, Arguments.system_vulkan_icd)
+                  Arguments.timeout_seconds, Arguments.system_vulkan_icd,
+                  Arguments.windows_vulkan_runtime_library)
         return 0
     except UnsupportedCapability as Error:
         print(f"STANDALONE_PACKAGE_SMOKE=UNSUPPORTED; {Error}", file=sys.stderr)

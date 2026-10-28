@@ -15,6 +15,8 @@ import sys
 import tempfile
 import wave
 
+from AcceptanceDiagnostics import configure_utf8_diagnostics
+
 MAX_CAPTURE_BYTES = 1024 * 1024
 PROBE_SCRIPT = "bfc10000-0000-4000-8000-000000000001"
 DYNAMIC_SCRIPT = "bfc10000-0000-4000-8000-000000000002"
@@ -252,6 +254,7 @@ def make_linux_standalone_environment(inherited: dict[str, str]) -> dict[str, st
 
 
 def main() -> int:
+    configure_utf8_diagnostics()
     parser = argparse.ArgumentParser()
     parser.add_argument("--cook", required=True, type=Path)
     parser.add_argument("--player", required=True, type=Path)
