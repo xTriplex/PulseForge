@@ -778,6 +778,18 @@ jobs:
           grep -q 'exit_code=0' "$RUN_ROOT/Logs/standalone-package-smoke.log"
           echo "G14_MACOS_${{ matrix.configuration }}_PACKAGE_ONLY=PASS; no checkout; no SDK overrides; package read-only; pixel capture; native close"
 
+      - name: Preserve compact macOS standalone failure evidence
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: g14-macos-${{ matrix.configuration }}-standalone-failure-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/G14 ${{ matrix.configuration }} Unrelated Ω/Logs/standalone-package-smoke.log
+            ${{ runner.temp }}/G14 ${{ matrix.configuration }} Unrelated Ω/Logs/PulseForge Standalone Smoke Ω */standalone-player.log
+            ${{ runner.temp }}/G14 ${{ matrix.configuration }} Unrelated Ω/Logs/PulseForge Standalone Smoke Ω */standalone-player-window.png
+          if-no-files-found: ignore
+          retention-days: 5
+
   windows-msvc:
     name: Windows 2022 · MSVC · Debug
     if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]'))) }}
@@ -1362,3 +1374,15 @@ jobs:
           grep -q "configuration=${{ matrix.configuration }}" "$RUN_ROOT/Logs/standalone-package-smoke.log"
           grep -q 'exit_code=0' "$RUN_ROOT/Logs/standalone-package-smoke.log"
           echo "G14_LINUX_${{ matrix.configuration }}_PACKAGE_ONLY=PASS; no checkout; system Mesa lavapipe; pixel capture; native close"
+
+      - name: Preserve compact Linux standalone failure evidence
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: g14-linux-${{ matrix.configuration }}-standalone-failure-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/G14 ${{ matrix.configuration }} Unrelated Ω/Logs/standalone-package-smoke.log
+            ${{ runner.temp }}/G14 ${{ matrix.configuration }} Unrelated Ω/Logs/PulseForge Standalone Smoke Ω */standalone-player.log
+            ${{ runner.temp }}/G14 ${{ matrix.configuration }} Unrelated Ω/Logs/PulseForge Standalone Smoke Ω */standalone-player-window.png
+          if-no-files-found: ignore
+          retention-days: 5

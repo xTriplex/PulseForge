@@ -28,6 +28,8 @@ from unittest.mock import patch
 
 
 DRAW_MARKER = re.compile(r"Submitted\s+(\d+)\s+indexed mesh instance\(s\) from the player scene")
+PRESENTED_GEOMETRY_MARKER = re.compile(
+    r"First Vulkan/NVRHI frame submitted and presented successfully \(geometry draw recorded:\s*(?:true|1)\)")
 MAX_CAPTURE_PIXELS = 40_000_000
 MAX_LOG_BYTES = 4 * 1024 * 1024
 
@@ -55,6 +57,10 @@ def parse_draw_count(Text: str) -> int | None:
         if Count > 0:
             return Count
     return None
+
+
+def has_presented_geometry(Text: str) -> bool:
+    return PRESENTED_GEOMETRY_MARKER.search(Text) is not None
 
 
 def build_launch_command(Executable: Path) -> list[str]:
@@ -280,6 +286,7 @@ class OutputCollector:
         self.Tail = ""
         self.CapturedOutput = bytearray()
         self.DrawCount: int | None = None
+        self.PresentedGeometry = False
         self.ReadError: str | None = None
         self.Reader = threading.Thread(target=self._read, name="player-output-reader", daemon=True)
         self.Reader.start()
@@ -306,25 +313,27 @@ class OutputCollector:
                     with self.Lock:
                         self.Tail = (self.Tail + Text)[-128_000:]
                         self.DrawCount = parse_draw_count(self.Tail)
+                        self.PresentedGeometry = has_presented_geometry(self.Tail)
                         self.Changed.set()
         except OSError as Error:
             with self.Lock:
                 self.ReadError = str(Error)
                 self.Changed.set()
 
-    def wait_for_geometry(self, Process: subprocess.Popen[bytes], Deadline: float) -> int:
+    def wait_for_presented_geometry(self, Process: subprocess.Popen[bytes], Deadline: float) -> int:
         while time.monotonic() < Deadline:
             with self.Lock:
                 Count = self.DrawCount
+                PresentedGeometry = self.PresentedGeometry
                 Tail = self.Tail
                 ReadError = self.ReadError
-            if Count is not None:
+            if Count is not None and PresentedGeometry:
                 return Count
             Status = Process.poll()
             if Status is not None:
                 self.Reader.join(timeout=1)
                 raise SmokeFailure(
-                    f"Player exited with status {Status} before the production geometry-submission log; "
+                    f"Player exited with status {Status} before a geometry frame was successfully presented; "
                     f"output tail={Tail[-1200:]!r}")
             if ReadError:
                 raise SmokeFailure(f"could not capture Player output: {ReadError}")
@@ -332,7 +341,11 @@ class OutputCollector:
             self.Changed.clear()
         with self.Lock:
             Tail = self.Tail
-        raise SmokeFailure(f"timed out waiting for Submitted N indexed mesh instance(s); output tail={Tail[-1200:]!r}")
+            Count = self.DrawCount
+            PresentedGeometry = self.PresentedGeometry
+        raise SmokeFailure(
+            "timed out waiting for a successfully presented geometry frame; "
+            f"draw_count={Count}; presented_geometry={PresentedGeometry}; output tail={Tail[-1200:]!r}")
 
     def require_macos_library_provenance(self, PackageRoot: Path) -> tuple[str, str]:
         with self.Lock:
@@ -806,7 +819,17 @@ class MacOSDesktop:
             Result = subprocess.run(["osascript", "-e", Script], check=False, capture_output=True,
                                     text=True, timeout=Timeout, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                                                                      "LANG": "C.UTF-8"})
-        except (OSError, subprocess.TimeoutExpired) as Error:
+        except subprocess.TimeoutExpired as Error:
+            def OutputTail(Value: str | bytes | None) -> str:
+                if isinstance(Value, bytes):
+                    Value = Value.decode("utf-8", errors="replace")
+                return (Value or "")[-1000:]
+
+            Stdout = Error.stdout if Error.stdout is not None else Error.output
+            raise UnsupportedCapability(
+                f"bounded AppleScript/Accessibility operation timed out after {Timeout:.1f}s; "
+                f"stdout_tail={OutputTail(Stdout)!r}; stderr_tail={OutputTail(Error.stderr)!r}") from Error
+        except OSError as Error:
             raise UnsupportedCapability(f"bounded AppleScript/Accessibility operation failed: {Error}") from Error
         if Result.returncode != 0:
             Detail = (Result.stderr or Result.stdout).strip()
@@ -857,16 +880,17 @@ end tell'''
             Detail = (Result.stderr or Result.stdout).strip()
             raise UnsupportedCapability(f"screencapture could not capture window {Target.Handle}: {Detail or Result.returncode}")
 
-    def close_window(self, Target: Window, PID: int) -> None:
+    def close_window(self, Target: Window, PID: int, Timeout: float = 30.0) -> None:
         Script = f'''tell application "System Events"
     set targetProcess to first process whose unix id is {PID}
     if (count of windows of targetProcess) is not 1 then error "PulseForge process does not have exactly one window to close"
     set targetWindow to first window of targetProcess
     set closeButton to first button of targetWindow whose subrole is "AXCloseButton"
+    log "STANDALONE_NATIVE_CLOSE_TARGET_READY; pid={PID}"
     click closeButton
     return "MACOS_NATIVE_WINDOW_CLOSE_REQUESTED; pid={PID}"
 end tell'''
-        self._osascript(Script)
+        self._osascript(Script, Timeout)
 
 
 def _resolve_package(PackageRoot: Path, Platform: str) -> tuple[Path, Path]:
@@ -1308,6 +1332,7 @@ def run_smoke(PackageRoot: Path, Platform: str, LogDirectory: Path, Timeout: int
     Collector: OutputCollector | None = None
     TargetWindow: Window | None = None
     CloseSent = False
+    CloseAttempted = False
     RouteClosed = False
     PackageSnapshotVerified = False
     PackageCopyRemoved = False
@@ -1326,8 +1351,9 @@ def run_smoke(PackageRoot: Path, Platform: str, LogDirectory: Path, Timeout: int
               f"developer_sdk_overrides=omitted")
         if SystemVulkanIcd is not None:
             print(f"STANDALONE_PACKAGE_SMOKE_SYSTEM_LAVAPIPE={Environment['VK_DRIVER_FILES']}")
-        DrawCount = Collector.wait_for_geometry(Process, time.monotonic() + Timeout)
+        DrawCount = Collector.wait_for_presented_geometry(Process, time.monotonic() + Timeout)
         print(f"STANDALONE_PACKAGE_SMOKE_RENDER_LOG=PASS; indexed_mesh_instances={DrawCount}")
+        print("STANDALONE_PACKAGE_SMOKE_PRESENTATION=PASS; geometry_frame=successfully_presented")
         if Platform == "macOS":
             VulkanPath, MoltenVKPath = Collector.require_macos_library_provenance(PackageRoot)
             print("STANDALONE_PACKAGE_SMOKE_MACOS_LIBRARY_PROVENANCE=PASS; "
@@ -1335,10 +1361,22 @@ def run_smoke(PackageRoot: Path, Platform: str, LogDirectory: Path, Timeout: int
         TargetWindow = Route.find_window(Process.pid, time.monotonic() + min(15, Timeout))
         print(f"STANDALONE_PACKAGE_SMOKE_WINDOW=FOUND; handle={TargetWindow.Handle}; size={TargetWindow.Width}x{TargetWindow.Height}")
         Route.capture(TargetWindow, ScreenshotPath)
-        Width, Height, DistinctColors, LuminanceRange = check_nonuniform_png(ScreenshotPath)
+        try:
+            Width, Height, DistinctColors, LuminanceRange = check_nonuniform_png(ScreenshotPath)
+        except SmokeFailure as Error:
+            raise SmokeFailure(f"{Error}; screenshot={ScreenshotPath}; player_log={LogPath}") from Error
         print(f"STANDALONE_PACKAGE_SMOKE_NONUNIFORM_WINDOW_CAPTURE=PASS; capture={Width}x{Height}; "
               f"distinct_colors={DistinctColors}; luminance_range={LuminanceRange}; path={ScreenshotPath}")
-        Route.close_window(TargetWindow, Process.pid) if Platform == "macOS" else Route.close_window(TargetWindow)
+        CloseAttempted = True
+        try:
+            if Platform == "macOS":
+                Route.close_window(TargetWindow, Process.pid, min(30.0, float(Timeout)))
+            else:
+                Route.close_window(TargetWindow)
+        except UnsupportedCapability as Error:
+            raise SmokeFailure(
+                f"native close request did not complete; player_exit_status={Process.poll()}; "
+                f"screenshot={ScreenshotPath}; player_log={LogPath}; detail={Error}") from Error
         CloseSent = True
         print("STANDALONE_PACKAGE_SMOKE_CLOSE=REQUESTED; route=native-window-close")
         Status = _wait_for_exit(Process, min(30, Timeout))
@@ -1364,12 +1402,16 @@ def run_smoke(PackageRoot: Path, Platform: str, LogDirectory: Path, Timeout: int
                     TargetWindow = Route.find_window(Process.pid, time.monotonic() + 2)
                 except (SmokeFailure, OSError, subprocess.SubprocessError):
                     TargetWindow = None
-            if TargetWindow is not None and not CloseSent:
+            if TargetWindow is not None and not CloseAttempted:
+                CloseAttempted = True
                 try:
-                    Route.close_window(TargetWindow, Process.pid) if Platform == "macOS" else Route.close_window(TargetWindow)
+                    if Platform == "macOS":
+                        Route.close_window(TargetWindow, Process.pid, min(30.0, float(Timeout)))
+                    else:
+                        Route.close_window(TargetWindow)
                     CloseSent = True
                     try:
-                        _wait_for_exit(Process, 5)
+                        _wait_for_exit(Process, min(30, Timeout))
                         RouteClosed = True
                     except SmokeFailure:
                         pass
@@ -1421,13 +1463,18 @@ def self_test() -> None:
     assert parse_draw_count("Submitted 3 indexed mesh instance(s) from the player scene") == 3
     assert parse_draw_count("Submitted 0 indexed mesh instance(s) from the player scene") is None
     assert parse_draw_count("some unrelated line") is None
+    assert not has_presented_geometry("Submitted 3 indexed mesh instance(s) from the player scene")
+    assert has_presented_geometry(
+        "First Vulkan/NVRHI frame submitted and presented successfully (geometry draw recorded: true)")
+    assert not has_presented_geometry(
+        "First Vulkan/NVRHI frame submitted and presented successfully (geometry draw recorded: false)")
     Pixels = bytes((0, 0, 0, 255, 255, 0, 0, 255,
                     0, 255, 0, 255, 0, 0, 255, 255))
     Width, Height, Decoded = decode_png(encode_png(2, 2, Pixels))
     assert (Width, Height, Decoded) == (2, 2, bytearray(Pixels))
     MacRoute = MacOSDesktop.__new__(MacOSDesktop)
     MacScripts: list[str] = []
-    MacRoute._osascript = lambda Script: (MacScripts.append(Script), "20|40|800|600")[1]
+    MacRoute._osascript = lambda Script, Timeout=5.0: (MacScripts.append(Script), "20|40|800|600")[1]
     MacWindow = MacRoute.find_window(1234, time.monotonic() + 1)
     assert MacWindow == Window(None, 800, 600, 20, 40)
     assert "position of targetWindow" in MacScripts[0] and "size of targetWindow" in MacScripts[0]
@@ -1446,9 +1493,14 @@ def self_test() -> None:
         MacRoute.close_window(MacWindow, 1234)
         CloseScript = MacScripts[-1]
         assert "unix id is 1234" in CloseScript and "AXCloseButton" in CloseScript
+        assert "STANDALONE_NATIVE_CLOSE_TARGET_READY; pid=1234" in CloseScript
         assert "id of targetWindow" not in CloseScript
+
         (Root / "ThirdPartyNotices.txt").write_text("MIT runtime notices", encoding="utf-8")
         validate_third_party_notices(Root, "Linux")
+        MacNoticePath = Root / "Contents" / "Resources" / "ThirdPartyNotices.txt"
+        MacNoticePath.parent.mkdir(parents=True)
+        MacNoticePath.write_text("MIT runtime notices", encoding="utf-8")
         try:
             validate_third_party_notices(Root, "macOS")
         except SmokeFailure as Error:
@@ -1461,10 +1513,20 @@ def self_test() -> None:
             "https://github.com/KhronosGroup/Vulkan-Loader/blob/vulkan-sdk-1.4.350.0/LICENSE.txt",
             "MoltenVK 1.4.1", "https://github.com/KhronosGroup/MoltenVK/blob/v1.4.1/LICENSE",
         ))
-        (Root / "Contents" / "Resources").mkdir(parents=True)
-        (Root / "Contents" / "Resources" / "ThirdPartyNotices.txt").write_text(MacNotices, encoding="utf-8")
+        MacNoticePath.write_text(MacNotices, encoding="utf-8")
         validate_third_party_notices(Root, "macOS")
-    print("STANDALONE_PACKAGE_SMOKE_SELF_TEST=PASS; argv, PNG codec, macOS window route, and platform-specific notices")
+
+    try:
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
+                ["osascript"], 5, output=b"close-target-ready", stderr=b"waiting-for-AX")):
+            MacOSDesktop._osascript("return \"probe\"", Timeout=5.0)
+    except UnsupportedCapability as Error:
+        assert "timed out after 5.0s" in str(Error)
+        assert "close-target-ready" in str(Error) and "waiting-for-AX" in str(Error)
+    else:
+        raise AssertionError("macOS Accessibility timeout discarded its partial operation diagnostics")
+    print("STANDALONE_PACKAGE_SMOKE_SELF_TEST=PASS; argv, PNG codec, Vulkan presentation marker, macOS window route, "
+          "and platform-specific notices")
 
 
 def main() -> int:
