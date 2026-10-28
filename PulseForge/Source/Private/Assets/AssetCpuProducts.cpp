@@ -57,32 +57,55 @@ namespace PulseForge::Detail
 			return DerivedDataArtifactKey{ "gltf-static-mesh", *Fingerprint, MeshProductSchemaVersion };
 		}
 
-		std::expected<std::vector<std::byte>, std::string> ReadImage(const std::filesystem::path& Path)
+		std::expected<std::vector<std::byte>, std::string> ReadImage(
+			const std::filesystem::path& Path, std::stop_token Stop)
 		{
+			if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled before reading image bytes");
 			std::error_code Ec;
 			const auto Size = std::filesystem::file_size(Path, Ec);
 			if (Ec || Size == 0 || Size > MaximumImageSourceBytes || Size > std::numeric_limits<size_t>::max() ||
 				Size > static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max()))
 				return std::unexpected("Image source is unavailable or exceeds its size limit");
-			std::vector<std::byte> Bytes(static_cast<size_t>(Size));
+			if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled before allocating image bytes");
+			std::vector<std::byte> Bytes;
+			Bytes.reserve(static_cast<size_t>(Size));
 			std::ifstream In(Path, std::ios::binary);
 			if (!In.is_open()) return std::unexpected("Image source could not be opened");
-			In.read(reinterpret_cast<char*>(Bytes.data()), static_cast<std::streamsize>(Bytes.size()));
-			if (!In || In.bad()) return std::unexpected("Image source could not be read completely");
+			std::array<std::byte, 256 * 1024> ReadBuffer{};
+			for (uint64_t Offset = 0; Offset < Size; Offset += ReadBuffer.size())
+			{
+				if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled while reading image bytes");
+				const size_t ChunkSize = static_cast<size_t>((std::min)(static_cast<uint64_t>(ReadBuffer.size()), Size - Offset));
+				In.read(reinterpret_cast<char*>(ReadBuffer.data()), static_cast<std::streamsize>(ChunkSize));
+				if (!In || In.bad() || static_cast<size_t>(In.gcount()) != ChunkSize)
+					return std::unexpected("Image source could not be read completely");
+				Bytes.insert(Bytes.end(), ReadBuffer.begin(), ReadBuffer.begin() + static_cast<std::ptrdiff_t>(ChunkSize));
+			}
+			if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled while reading image bytes");
 			return Bytes;
 		}
 
-		std::array<uint64_t, 2> ImporterFingerprint(std::span<const std::byte> Bytes)
+		std::expected<std::array<uint64_t, 2>, std::string> ImporterFingerprint(
+			std::span<const std::byte> Bytes, std::stop_token Stop)
 		{
 			uint64_t A = 14695981039346656037ull, B = 7809847782465536322ull;
-			for (std::byte Byte : Bytes)
+			constexpr size_t FingerprintChunkBytes = 1024 * 1024;
+			for (size_t ChunkOffset = 0; ChunkOffset < Bytes.size(); ChunkOffset += FingerprintChunkBytes)
 			{
-				const uint8_t X = std::to_integer<uint8_t>(Byte);
-				A = (A ^ X) * 1099511628211ull;
-				B = (B ^ (X + 0x9du)) * 14029467366897019727ull;
-				B ^= B >> 29;
+				if (Stop.stop_requested())
+					return std::unexpected("Texture preparation cancelled while fingerprinting image bytes");
+				const size_t ChunkSize = (std::min)(FingerprintChunkBytes, Bytes.size() - ChunkOffset);
+				for (size_t Offset = ChunkOffset; Offset < ChunkOffset + ChunkSize; ++Offset)
+				{
+					const uint8_t X = std::to_integer<uint8_t>(Bytes[Offset]);
+					A = (A ^ X) * 1099511628211ull;
+					B = (B ^ (X + 0x9du)) * 14029467366897019727ull;
+					B ^= B >> 29;
+				}
 			}
-			return { A, B };
+			if (Stop.stop_requested())
+				return std::unexpected("Texture preparation cancelled while fingerprinting image bytes");
+			return std::array<uint64_t, 2>{ A, B };
 		}
 
 		DerivedDataArtifactKey TextureKey(const AssetContentFingerprint& Source, ImageColorSpace ColorSpace)
@@ -109,16 +132,33 @@ namespace PulseForge::Detail
 			return static_cast<uint8_t>(std::lround(E * 255.0f));
 		}
 
-		std::vector<PreparedMipLevel> MakeMips(uint32_t W, uint32_t H, std::span<const uint8_t> Pixels, bool Srgb)
+		std::expected<std::vector<PreparedMipLevel>, std::string> MakeMips(
+			uint32_t W, uint32_t H, std::span<const uint8_t> Pixels, bool Srgb, std::stop_token Stop)
 		{
+			if (Stop.stop_requested()) return std::unexpected("Texture mip preparation was cancelled");
 			std::vector<PreparedMipLevel> Levels;
-			Levels.push_back({ W, H, { Pixels.begin(), Pixels.end() } });
+			PreparedMipLevel Base{ W, H, {} };
+			constexpr size_t CopyChunkBytes = 1024 * 1024;
+			Base.Pixels.reserve(Pixels.size());
+			for (size_t Offset = 0; Offset < Pixels.size(); Offset += CopyChunkBytes)
+			{
+				if (Stop.stop_requested()) return std::unexpected("Texture mip preparation was cancelled while copying the base level");
+				const size_t ChunkSize = (std::min)(CopyChunkBytes, Pixels.size() - Offset);
+				Base.Pixels.insert(Base.Pixels.end(), Pixels.begin() + static_cast<std::ptrdiff_t>(Offset),
+					Pixels.begin() + static_cast<std::ptrdiff_t>(Offset + ChunkSize));
+			}
+			Levels.push_back(std::move(Base));
 			while (W > 1 || H > 1)
 			{
+				if (Stop.stop_requested()) return std::unexpected("Texture mip preparation was cancelled");
 				const auto& Previous = Levels.back();
 				const uint32_t NW = (std::max)(1u, W / 2), NH = (std::max)(1u, H / 2);
-				PreparedMipLevel Next{ NW, NH, std::vector<uint8_t>(static_cast<size_t>(NW) * NH * 4) };
+				PreparedMipLevel Next{ NW, NH, {} };
+				Next.Pixels.reserve(static_cast<size_t>(NW) * NH * 4);
 				for (uint32_t Y = 0; Y < NH; ++Y)
+				{
+					if ((Y & 0x1fu) == 0 && Stop.stop_requested())
+						return std::unexpected("Texture mip preparation was cancelled while filtering pixels");
 					for (uint32_t X = 0; X < NW; ++X)
 					{
 						const uint32_t X0 = static_cast<uint32_t>((static_cast<uint64_t>(X) * W) / NW);
@@ -134,13 +174,13 @@ namespace PulseForge::Detail
 									Sum[C] += Srgb && C < 3 ? SrgbToLinear(Previous.Pixels[At + C]) : Previous.Pixels[At + C] / 255.0f;
 								++N;
 							}
-						const size_t Dst = (static_cast<size_t>(Y) * NW + X) * 4;
 						for (size_t C = 0; C < 4; ++C)
 						{
 							const float Avg = Sum[C] / static_cast<float>(N);
-							Next.Pixels[Dst + C] = Srgb && C < 3 ? LinearToSrgb(Avg) : static_cast<uint8_t>(std::lround(Avg * 255.0f));
+							Next.Pixels.push_back(Srgb && C < 3 ? LinearToSrgb(Avg) : static_cast<uint8_t>(std::lround(Avg * 255.0f)));
 						}
 					}
+				}
 				Levels.push_back(std::move(Next)); W = NW; H = NH;
 			}
 			return Levels;
@@ -159,10 +199,11 @@ namespace PulseForge::Detail
 		return TextureKey(Source, ColorSpace);
 	}
 
-	std::vector<PreparedMipLevel> BuildTextureMipChain(
-		uint32_t Width, uint32_t Height, std::span<const uint8_t> SourcePixels, ImageColorSpace ColorSpace)
+	std::expected<std::vector<PreparedMipLevel>, std::string> BuildTextureMipChain(
+		uint32_t Width, uint32_t Height, std::span<const uint8_t> SourcePixels, ImageColorSpace ColorSpace,
+		std::stop_token CancellationToken)
 	{
-		return MakeMips(Width, Height, SourcePixels, ColorSpace == ImageColorSpace::Srgb);
+		return MakeMips(Width, Height, SourcePixels, ColorSpace == ImageColorSpace::Srgb, CancellationToken);
 	}
 
 	std::expected<AssetCpuProductResult<ImportedGltfMesh>, std::string> PrepareMeshCpuProduct(
@@ -178,9 +219,12 @@ namespace PulseForge::Detail
 		// Observe inputs for every processing run, including when the disposable cache is
 		// unavailable. Cache persistence is optional; publishing a product prepared from
 		// inputs that changed during processing is not.
-		auto Inspection = AssetDependencyExtractor::ExtractAsset(Root, Asset, Registry);
+		auto Inspection = AssetDependencyExtractor::ExtractAsset(Root, Asset, Registry, Stop);
 		if (!Inspection)
+		{
+			if (Stop.stop_requested()) return std::unexpected("Mesh preparation cancelled during source inspection");
 			return std::unexpected("Mesh source could not be inspected for a stable processing read set: " + Inspection.error().Message);
+		}
 		auto O = std::find_if(Inspection->ImportObservations.begin(), Inspection->ImportObservations.end(),
 			[](const auto& X) { return X.SubresourceKey == "mesh/0/primitive/0"; });
 		auto S = std::find_if(Inspection->Subresources.begin(), Inspection->Subresources.end(),
@@ -200,7 +244,9 @@ namespace PulseForge::Detail
 				if (Cached.Status == DerivedDataArtifactReadStatus::Hit)
 				{
 					auto Product = DecodeMeshProduct(Cached.Payload);
-					if (Product && AssetDependencyExtractor::ValidateInputReceipts(Root, ReadSet))
+					auto InputsCurrent = AssetDependencyExtractor::ValidateInputReceipts(Root, ReadSet, Stop);
+					if (Stop.stop_requested()) return std::unexpected("Mesh preparation cancelled during cache validation");
+					if (Product && InputsCurrent)
 					{
 						const auto LookupEnd = std::chrono::steady_clock::now();
 						AssetCpuProductResult<ImportedGltfMesh> Result{ std::move(*Product), AssetCpuProductCacheOutcome::ArtifactHit,
@@ -215,10 +261,10 @@ namespace PulseForge::Detail
 		}
 		if (Stop.stop_requested()) return std::unexpected("Mesh preparation cancelled before import");
 		if (!Processor)
-			Processor = [](const AssetID& ID, const std::filesystem::path& Project, const AssetRegistry& Assets)
+			Processor = [Stop](const AssetID& ID, const std::filesystem::path& Project, const AssetRegistry& Assets)
 				-> std::expected<GltfMeshImportProduct, std::string>
 			{
-				auto Product = GltfMeshImporter::ProcessStaticPrimitive(ID, Project, Assets);
+				auto Product = GltfMeshImporter::ProcessStaticPrimitive(ID, Project, Assets, 0, 0, Stop);
 				if (!Product) return std::unexpected(Product.error().Message);
 				return std::move(*Product);
 			};
@@ -228,12 +274,15 @@ namespace PulseForge::Detail
 		auto Product = Processor(Asset, Root, Registry);
 		const auto ProcessEnd = std::chrono::steady_clock::now();
 		const uint64_t ProcessMicroseconds = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(ProcessEnd - ProcessStart).count());
+		if (Stop.stop_requested()) return std::unexpected("Mesh preparation cancelled during import");
 		if (!Product) return std::unexpected(Product.error());
 		if (Product->Recipe.EffectiveSettings != Settings) return std::unexpected("Mesh import settings changed during preparation");
 		if (Stop.stop_requested()) return std::unexpected("Mesh preparation cancelled after import");
 		if (!Observed || !SameRecipe(Product->Recipe, *Observed))
 			return std::unexpected("Mesh inputs or processing recipe changed during preparation");
-		if (!AssetDependencyExtractor::ValidateInputReceipts(Root, ReadSet))
+		auto InputsCurrent = AssetDependencyExtractor::ValidateInputReceipts(Root, ReadSet, Stop);
+		if (Stop.stop_requested()) return std::unexpected("Mesh preparation cancelled during final input validation");
+		if (!InputsCurrent)
 			return std::unexpected("Mesh inputs changed during preparation; the CPU product was rejected as stale");
 		AssetCpuProductCacheOutcome Outcome = AssetCpuProductCacheOutcome::ProcessedStoreUnavailable;
 		uint64_t WriteMicroseconds = 0;
@@ -241,18 +290,23 @@ namespace PulseForge::Detail
 		auto WriteEnd = WriteStart;
 		if (Store && Key)
 		{
+			if (Stop.stop_requested()) return std::unexpected("Mesh preparation cancelled before artifact encoding");
 			WriteStart = std::chrono::steady_clock::now();
-			if (auto Bytes = EncodeMeshProduct(Product->Mesh); Bytes)
+			if (auto Bytes = EncodeMeshProduct(Product->Mesh, Stop); Bytes)
 			{
+				if (Stop.stop_requested()) return std::unexpected("Mesh preparation cancelled before artifact persistence");
 				const auto Write = RejectedProductChecksum
 					? Store->ReplaceRejectedProduct(*Key, *RejectedProductChecksum, *Bytes)
 					: Store->Write(*Key, *Bytes);
+				if (Stop.stop_requested()) return std::unexpected("Mesh preparation cancelled after artifact persistence");
 				if (Write.Status == DerivedDataArtifactWriteStatus::Written || Write.Status == DerivedDataArtifactWriteStatus::ExistingValid)
 					Outcome = AssetCpuProductCacheOutcome::ProcessedAndStored;
 			}
+			else if (Stop.stop_requested()) return std::unexpected("Mesh preparation cancelled during artifact encoding");
 			WriteEnd = std::chrono::steady_clock::now();
 			WriteMicroseconds = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(WriteEnd - WriteStart).count());
 		}
+		if (Stop.stop_requested()) return std::unexpected("Mesh preparation cancelled before publishing its CPU product");
 		AssetCpuProductResult<ImportedGltfMesh> Result{ std::move(Product->Mesh), Outcome,
 			LookupMicroseconds, ProcessMicroseconds, WriteMicroseconds };
 		Result.ObservationAndLookup = MakeTiming(LookupStart, LookupEnd);
@@ -272,10 +326,18 @@ namespace PulseForge::Detail
 		if (!Record) return std::unexpected("Image asset is absent from captured registry");
 		auto Resolved = AssetPathResolver::ResolveManagedSourcePath(Root, Record->ProjectRelativePath);
 		if (!Resolved) return std::unexpected(Resolved.error().Message);
-		auto Source = ReadImage(*Resolved);
-		if (!Source) return std::unexpected(Source.error());
-		const AssetContentFingerprint Fingerprint = ComputeAssetContentFingerprint(*Source);
-		const auto RawFingerprint = ImporterFingerprint(*Source);
+		auto Source = ReadImage(*Resolved, Stop);
+		if (!Source)
+		{
+			if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled while reading source bytes");
+			return std::unexpected(Source.error());
+		}
+		auto FingerprintResult = ComputeAssetContentFingerprintCancellable(*Source, Stop);
+		if (!FingerprintResult) return std::unexpected("Texture preparation cancelled while computing the source fingerprint");
+		const AssetContentFingerprint Fingerprint = std::move(*FingerprintResult);
+		auto RawFingerprintResult = ImporterFingerprint(*Source, Stop);
+		if (!RawFingerprintResult) return std::unexpected(RawFingerprintResult.error());
+		const auto RawFingerprint = *RawFingerprintResult;
 		const DerivedDataArtifactKey Key = MakeTextureArtifactKey(Fingerprint, ColorSpace);
 		std::optional<AssetContentFingerprint> RejectedProductChecksum;
 		std::vector<std::byte>().swap(*Source);
@@ -289,8 +351,14 @@ namespace PulseForge::Detail
 					Product = std::unexpected(std::string("Texture artifact color space does not match the requested interpretation"));
 				if (Product)
 				{
-					auto Current = ReadImage(*Resolved);
-					if (!Current || ComputeAssetContentFingerprint(*Current) != Fingerprint) return std::unexpected("Image source changed during cache lookup");
+					auto Current = ReadImage(*Resolved, Stop);
+					if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled during cache validation");
+					if (!Current) return std::unexpected("Image source could not be reread during cache validation");
+					auto CurrentFingerprint = ComputeAssetContentFingerprintCancellable(*Current, Stop);
+					if (!CurrentFingerprint || *CurrentFingerprint != Fingerprint)
+						return std::unexpected(Stop.stop_requested()
+							? "Texture preparation cancelled during cache validation"
+							: "Image source changed during cache lookup");
 					const auto LookupEnd = std::chrono::steady_clock::now();
 					AssetCpuProductResult<PreparedTextureCpuProduct> Result{ std::move(*Product), AssetCpuProductCacheOutcome::ArtifactHit,
 						static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(LookupEnd - LookupStart).count()), 0, 0 };
@@ -313,34 +381,51 @@ namespace PulseForge::Detail
 		const uint64_t LookupMicroseconds = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(LookupEnd - LookupStart).count());
 		const auto ProcessStart = std::chrono::steady_clock::now();
 		auto Image = Processor(Asset, Root, Registry);
+		if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled after image decode");
 		if (!Image) return std::unexpected(Image.error());
 		if (Image->SourceFingerprint != RawFingerprint) return std::unexpected("Image changed between key observation and decoding");
 		PreparedTextureCpuProduct Product;
 		Product.Width = Image->Width; Product.Height = Image->Height; Product.ColorSpace = ColorSpace;
-		Product.MipLevels = MakeMips(Image->Width, Image->Height, Image->RGBA8Pixels, ColorSpace == ImageColorSpace::Srgb);
+		auto Mips = MakeMips(Image->Width, Image->Height, Image->RGBA8Pixels, ColorSpace == ImageColorSpace::Srgb, Stop);
+		if (!Mips)
+			return std::unexpected(Stop.stop_requested()
+				? "Texture preparation cancelled during mip processing"
+				: Mips.error());
+		Product.MipLevels = std::move(*Mips);
 		const auto ProcessEnd = std::chrono::steady_clock::now();
 		const uint64_t ProcessMicroseconds = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(ProcessEnd - ProcessStart).count());
 		if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled after mip processing");
-		auto Current = ReadImage(*Resolved);
-		if (!Current || ComputeAssetContentFingerprint(*Current) != Fingerprint) return std::unexpected("Image source changed during CPU processing");
+		auto Current = ReadImage(*Resolved, Stop);
+		if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled during final source validation");
+		if (!Current) return std::unexpected("Image source could not be reread after CPU processing");
+		auto CurrentFingerprint = ComputeAssetContentFingerprintCancellable(*Current, Stop);
+		if (!CurrentFingerprint || *CurrentFingerprint != Fingerprint)
+			return std::unexpected(Stop.stop_requested()
+				? "Texture preparation cancelled during final source validation"
+				: "Image source changed during CPU processing");
 		AssetCpuProductCacheOutcome Outcome = AssetCpuProductCacheOutcome::ProcessedStoreUnavailable;
 		uint64_t WriteMicroseconds = 0;
 		auto WriteStart = std::chrono::steady_clock::time_point{};
 		auto WriteEnd = WriteStart;
 		if (Store)
 		{
+			if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled before artifact encoding");
 			WriteStart = std::chrono::steady_clock::now();
-			if (auto Bytes = EncodeTextureProduct(Product); Bytes)
+			if (auto Bytes = EncodeTextureProduct(Product, Stop); Bytes)
 			{
+				if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled before artifact persistence");
 				const auto Write = RejectedProductChecksum
 					? Store->ReplaceRejectedProduct(Key, *RejectedProductChecksum, *Bytes)
 					: Store->Write(Key, *Bytes);
+				if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled after artifact persistence");
 				if (Write.Status == DerivedDataArtifactWriteStatus::Written || Write.Status == DerivedDataArtifactWriteStatus::ExistingValid)
 					Outcome = AssetCpuProductCacheOutcome::ProcessedAndStored;
 			}
+			else if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled during artifact encoding");
 			WriteEnd = std::chrono::steady_clock::now();
 			WriteMicroseconds = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(WriteEnd - WriteStart).count());
 		}
+		if (Stop.stop_requested()) return std::unexpected("Texture preparation cancelled before publishing its CPU product");
 		AssetCpuProductResult<PreparedTextureCpuProduct> Result{ std::move(Product), Outcome,
 			LookupMicroseconds, ProcessMicroseconds, WriteMicroseconds };
 		Result.ObservationAndLookup = MakeTiming(LookupStart, LookupEnd);

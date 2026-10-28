@@ -4,11 +4,15 @@
 #include "Assets/AssetDependencyExtractor.h"
 #include "Assets/GltfMeshImporter.h"
 #include "Assets/ImageAssetImporter.h"
+#include "Assets/CookedProductCodec.h"
+#include "Assets/CookedAssetCatalog.h"
 #include "Assets/Detail/AssetCpuProducts.h"
 
 #include <bit>
+#include <array>
 #include <cstring>
 #include <fstream>
+#include <stop_token>
 
 namespace
 {
@@ -111,6 +115,37 @@ namespace
 		PF_CHECK(Tests, Cold.has_value() && Cold->CacheOutcome == Detail::AssetCpuProductCacheOutcome::ProcessedAndStored);
 		PF_CHECK(Tests, ImportCount == 1);
 		PF_CHECK(Tests, Cold && Cold->Product.Vertices.size() == 3 && Cold->Product.Indices == std::vector<uint32_t>({ 0, 1, 2 }));
+		auto CancellationInspection = AssetDependencyExtractor::ExtractAsset(Project.Root, SourceMetadata->ID, Registry);
+		PF_CHECK(Tests, CancellationInspection.has_value());
+		if (CancellationInspection)
+		{
+			const auto Observation = std::find_if(CancellationInspection->ImportObservations.begin(),
+				CancellationInspection->ImportObservations.end(),
+				[](const AssetImportObservation& Item) { return Item.SubresourceKey == "mesh/0/primitive/0"; });
+			if (Observation != CancellationInspection->ImportObservations.end())
+			{
+				const auto CancellationKey = Detail::MakeMeshArtifactKey(
+					MakeRecipe(*Observation), SourceMetadata->ID, *Settings);
+				PF_CHECK(Tests, CancellationKey.has_value());
+				DerivedDataArtifactStore CancellationStore({ Project.Root / "Out" / "CancelledMeshCache", true,
+					1024 * 1024, 512 * 1024, 16 });
+				std::stop_source CancelAfterImport;
+				Detail::MeshProcessor CancelledImporter = [&CancelAfterImport](const AssetID& ID, const auto& Root,
+					const AssetRegistry& Assets) -> std::expected<GltfMeshImportProduct, std::string>
+				{
+					auto Imported = GltfMeshImporter::ProcessStaticPrimitive(ID, Root, Assets);
+					CancelAfterImport.request_stop();
+					if (!Imported) return std::unexpected(Imported.error().Message);
+					return std::move(*Imported);
+				};
+				const auto CancelledDuringProcessing = Detail::PrepareMeshCpuProduct(SourceMetadata->ID,
+					Project.Root, Registry, *Settings, &CancellationStore, CancelAfterImport.get_token(), CancelledImporter);
+				PF_CHECK(Tests, !CancelledDuringProcessing &&
+					CancelledDuringProcessing.error().find("cancelled") != std::string::npos);
+				if (CancellationKey)
+					PF_CHECK(Tests, CancellationStore.Read(*CancellationKey).Status == DerivedDataArtifactReadStatus::Miss);
+			}
+		}
 		DerivedDataArtifactStore WarmStore({ CacheRoot, true, 1024 * 1024, 512 * 1024, 16 });
 		auto Warm = Detail::PrepareMeshCpuProduct(SourceMetadata->ID, Project.Root, Registry, *Settings, &WarmStore, {}, CountedImporter);
 		PF_CHECK(Tests, Warm.has_value() && Warm->CacheOutcome == Detail::AssetCpuProductCacheOutcome::ArtifactHit);
@@ -267,13 +302,28 @@ namespace
 		PF_CHECK(Tests, DecodeCount == 1);
 		PF_CHECK(Tests, Warm && Cold && Warm->Product.MipLevels.size() == Cold->Product.MipLevels.size() &&
 			Warm->Product.MipLevels.front().Pixels == Cold->Product.MipLevels.front().Pixels);
+		const auto SourceFingerprint = ComputeAssetContentFingerprint(std::as_bytes(std::span(Bitmap)));
+		const auto TextureKey = Detail::MakeTextureArtifactKey(SourceFingerprint, Detail::ImageColorSpace::Srgb);
+		DerivedDataArtifactStore CancellationStore({ Project.Root / "Out" / "CancelledImageCache", true,
+			8 * 1024 * 1024, 4 * 1024 * 1024, 16 });
+		std::stop_source CancelAfterDecode;
+		Detail::ImageProcessor CancelledDecoder = [&CancelAfterDecode](const AssetID& ID, const auto& Root,
+			const AssetRegistry& Assets) -> std::expected<ImportedImage, std::string>
+		{
+			auto Image = ImageAssetImporter::ImportRGBA8(ID, Root, Assets);
+			CancelAfterDecode.request_stop();
+			if (!Image) return std::unexpected(Image.error().Message);
+			return std::move(*Image);
+		};
+		const auto CancelledAfterDecode = Detail::PrepareTextureCpuProduct(Metadata->ID, Project.Root, Registry,
+			Detail::ImageColorSpace::Srgb, &CancellationStore, CancelAfterDecode.get_token(), CancelledDecoder);
+		PF_CHECK(Tests, !CancelledAfterDecode && CancelledAfterDecode.error().find("cancelled") != std::string::npos);
+		PF_CHECK(Tests, CancellationStore.Read(TextureKey).Status == DerivedDataArtifactReadStatus::Miss);
 		if (Cold && Warm)
 			std::cout << "G11 image CPU cold: lookup=" << Cold->ObservationAndLookupMicroseconds << "us decode+mips="
 				<< Cold->ProcessingMicroseconds << "us write=" << Cold->CacheWriteMicroseconds << "us; warm: lookup="
 				<< Warm->ObservationAndLookupMicroseconds << "us process=" << Warm->ProcessingMicroseconds << "us\n";
 
-		const auto SourceFingerprint = ComputeAssetContentFingerprint(std::as_bytes(std::span(Bitmap)));
-		const auto TextureKey = Detail::MakeTextureArtifactKey(SourceFingerprint, Detail::ImageColorSpace::Srgb);
 		const auto SemanticRoot = Project.Root / "Out" / "SemanticImageCache";
 		DerivedDataArtifactStore SemanticStore({ SemanticRoot, true, 8 * 1024 * 1024, 4 * 1024 * 1024, 16 });
 		PF_CHECK(Tests, SemanticStore.Write(TextureKey, AsBytes("checksummed but invalid texture payload")).Status ==
@@ -296,10 +346,57 @@ namespace
 		PF_CHECK(Tests, Reopened.has_value() && Reopened->CacheOutcome == Detail::AssetCpuProductCacheOutcome::ArtifactHit);
 		PF_CHECK(Tests, SemanticDecodeCount == 1);
 	}
+
+	void TestTextureMipPreparationHonorsCancellation(TestRunner& Tests)
+	{
+		const std::array<uint8_t, 16> Pixels{
+			255, 0, 0, 255, 0, 255, 0, 255,
+			0, 0, 255, 255, 255, 255, 255, 255
+		};
+		const auto Complete = Detail::BuildTextureMipChain(2, 2, Pixels, Detail::ImageColorSpace::Srgb);
+		PF_CHECK(Tests, Complete && Complete->size() == 2);
+		if (Complete)
+			PF_CHECK(Tests, Complete->front().Pixels == std::vector<uint8_t>(Pixels.begin(), Pixels.end()));
+
+		std::stop_source Stop;
+		Stop.request_stop();
+		const auto Cancelled = Detail::BuildTextureMipChain(2, 2, Pixels, Detail::ImageColorSpace::Srgb, Stop.get_token());
+		PF_CHECK(Tests, !Cancelled && Cancelled.error().find("cancelled") != std::string::npos);
+	}
+
+	void TestCookedProductEncodingHonorsCancellation(TestRunner& Tests)
+	{
+		std::stop_source Stop;
+		Stop.request_stop();
+		const auto Mesh = Detail::EncodeMeshProduct({}, Stop.get_token());
+		PF_CHECK(Tests, !Mesh && Mesh.error().find("cancelled") != std::string::npos);
+
+		const auto Texture = Detail::EncodeTextureProduct({}, Stop.get_token());
+		PF_CHECK(Tests, !Texture && Texture.error().find("cancelled") != std::string::npos);
+
+		EnvironmentLightingData Environment;
+		const EnvironmentProcessingDesc Description{};
+		const auto EncodedEnvironment = Detail::EnvironmentLightingArtifactCodec::EncodeEnvironment(
+			Environment, Description, Stop.get_token());
+		PF_CHECK(Tests, !EncodedEnvironment && EncodedEnvironment.error().find("cancelled") != std::string::npos);
+
+		const auto EncodedBrdf = Detail::EnvironmentLightingArtifactCodec::EncodeBrdfLut(
+			{}, Description.BrdfSamples, Stop.get_token());
+		PF_CHECK(Tests, !EncodedBrdf && EncodedBrdf.error().find("cancelled") != std::string::npos);
+
+		const std::array<std::byte, 4> Payload{};
+		const auto Digest = CookedAssetCatalog::ComputePayloadDigestCancellable(Payload, Stop.get_token());
+		PF_CHECK(Tests, !Digest && Digest.error().find("cancelled") != std::string::npos);
+		const auto Manifest = CookedAssetCatalog::SerializeManifest(
+			UUID{}, AssetID{}, CookedAssetCompatibility{}, {}, {}, Stop.get_token());
+		PF_CHECK(Tests, !Manifest && Manifest.error().Code == CookedAssetCatalogErrorCode::Cancelled);
+	}
 }
 
 void RunDerivedAssetPreparationTests(TestRunner& Tests)
 {
 	TestMeshColdWarmArtifactBypassesImporter(Tests);
 	TestTextureColdWarmArtifactBypassesDecoder(Tests);
+	TestTextureMipPreparationHonorsCancellation(Tests);
+	TestCookedProductEncodingHonorsCancellation(Tests);
 }

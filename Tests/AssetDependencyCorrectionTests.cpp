@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <stop_token>
 #include <vector>
 
 namespace
@@ -594,6 +595,11 @@ namespace
 		PF_CHECK(Tests, ExtensionPrimitive && ExtensionPrimitive->Classification == AssetSubresourceClassification::Unsupported);
 		AssetRegistry Registry = Fixture.BuildRegistry();
 		PF_CHECK(Tests, GltfMeshImporter::ImportStaticPrimitive(*Valid, Fixture.Root, Registry).has_value());
+		std::stop_source CancelledImportSource;
+		CancelledImportSource.request_stop();
+		const auto CancelledImport = GltfMeshImporter::ProcessStaticPrimitive(
+			*Valid, Fixture.Root, Registry, 0, 0, CancelledImportSource.get_token());
+		PF_CHECK(Tests, !CancelledImport && CancelledImport.error().Code == GltfMeshImportErrorCode::Cancelled);
 		PF_CHECK(Tests, !GltfMeshImporter::ImportStaticPrimitive(*NoAttributes, Fixture.Root, Registry));
 		PF_CHECK(Tests, !GltfMeshImporter::ImportStaticPrimitive(*InvalidAccessor, Fixture.Root, Registry));
 		PF_CHECK(Tests, !GltfMeshImporter::ImportStaticPrimitive(*UnsupportedMode, Fixture.Root, Registry));

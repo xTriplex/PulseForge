@@ -342,8 +342,10 @@ namespace PulseForge
 		std::expected<EnvironmentSourceObservation, std::string> ObserveEnvironmentSource(
 			const AssetID& Asset,
 			const std::filesystem::path& ProjectRoot,
-			const AssetRegistry& Registry)
+			const AssetRegistry& Registry,
+			std::stop_token StopToken)
 		{
+			if (StopToken.stop_requested()) return std::unexpected("cancelled");
 			const auto Record = Registry.Find(Asset);
 			if (!Record)
 				return std::unexpected("Environment asset is not present in the project registry");
@@ -372,6 +374,7 @@ namespace PulseForge
 				return std::unexpected("Could not open environment source for bounded fingerprinting");
 			while (Remaining > 0)
 			{
+				if (StopToken.stop_requested()) return std::unexpected("cancelled");
 				const size_t ChunkSize = static_cast<size_t>(std::min<uint64_t>(Remaining, Buffer.size()));
 				if (!Input.read(reinterpret_cast<char*>(Buffer.data()), static_cast<std::streamsize>(ChunkSize)))
 					return std::unexpected("Environment source changed or failed during fingerprinting");
@@ -386,6 +389,7 @@ namespace PulseForge
 				}
 				Remaining -= ChunkSize;
 			}
+			if (StopToken.stop_requested()) return std::unexpected("cancelled");
 			if (Input.peek() != std::char_traits<char>::eof())
 				return std::unexpected("Environment source grew while it was being fingerprinted");
 			Observation.Content = Builder.Finish();
@@ -807,8 +811,10 @@ namespace PulseForge
 			if (StopToken.stop_requested()) return Fail("Environment preparation cancelled before processing");
 			EnvironmentCpuPreparationResult Product;
 			Product.DerivedCacheReadStartTimestampNanoseconds = GetMonotonicTimestampNanoseconds();
-			auto Source = ObserveEnvironmentSource(Asset, ProjectRoot, Registry);
-			if (!Source) return Fail("Environment source fingerprint failed: " + Source.error());
+			auto Source = ObserveEnvironmentSource(Asset, ProjectRoot, Registry, StopToken);
+			if (!Source) return Fail(StopToken.stop_requested()
+				? "Environment preparation cancelled while fingerprinting its source"
+				: "Environment source fingerprint failed: " + Source.error());
 			const DerivedDataArtifactKey Key =
 				Detail::EnvironmentLightingArtifactCodec::MakeEnvironmentKey(Asset, Source->Content, Processing);
 			std::optional<EnvironmentLightingData> Data;
@@ -862,8 +868,9 @@ namespace PulseForge
 				Brdf = ReadBrdfCache(LegacyBrdf, Processing.BrdfLutSize, Processing.BrdfSamples);
 				BrdfCacheHit = Brdf.has_value();
 				if (Brdf && ArtifactStore)
-					if (auto Encoded = Detail::EnvironmentLightingArtifactCodec::EncodeBrdfLut(*Brdf, Processing.BrdfSamples))
+					if (auto Encoded = Detail::EnvironmentLightingArtifactCodec::EncodeBrdfLut(*Brdf, Processing.BrdfSamples, StopToken))
 					{
+						if (StopToken.stop_requested()) return Fail("Environment preparation cancelled before persisting the migrated BRDF product");
 						const auto Stored = RejectedBrdfEntry
 							? ArtifactStore->ReplaceRejectedProduct(BrdfKey, *RejectedBrdfEntry, *Encoded)
 							: ArtifactStore->Write(BrdfKey, *Encoded);
@@ -879,8 +886,9 @@ namespace PulseForge
 				if (!Generated) return Fail(Generated.error().Message);
 				Brdf = std::move(*Generated);
 				if (ArtifactStore)
-					if (auto Encoded = Detail::EnvironmentLightingArtifactCodec::EncodeBrdfLut(*Brdf, Processing.BrdfSamples))
+					if (auto Encoded = Detail::EnvironmentLightingArtifactCodec::EncodeBrdfLut(*Brdf, Processing.BrdfSamples, StopToken))
 					{
+						if (StopToken.stop_requested()) return Fail("Environment preparation cancelled before persisting the BRDF product");
 						const auto Stored = RejectedBrdfEntry
 							? ArtifactStore->ReplaceRejectedProduct(BrdfKey, *RejectedBrdfEntry, *Encoded)
 							: ArtifactStore->Write(BrdfKey, *Encoded);
@@ -898,14 +906,16 @@ namespace PulseForge
 				if (Data)
 				{
 					CacheHit = true;
-					if (auto Encoded = Detail::EnvironmentLightingArtifactCodec::EncodeEnvironment(*Data, Processing))
+					if (auto Encoded = Detail::EnvironmentLightingArtifactCodec::EncodeEnvironment(*Data, Processing, StopToken))
 						ToStore = std::move(*Encoded);
 				}
 				else
 				{
+					if (StopToken.stop_requested()) return Fail("Environment preparation cancelled before HDR decoding");
 					Product.ImportStartTimestampNanoseconds = GetMonotonicTimestampNanoseconds();
 					auto Imported = ImageAssetImporter::ImportRGBA32F(Asset, ProjectRoot, Registry);
 					Product.ImportEndTimestampNanoseconds = GetMonotonicTimestampNanoseconds();
+					if (StopToken.stop_requested()) return Fail("Environment preparation cancelled after the bounded HDR decoder returned");
 					if (!Imported) return Fail("HDR image import failed: " + Imported.error().Message);
 					if (Imported->SourceFingerprint != Source->LegacyFingerprint)
 						return Fail("Environment source changed between fingerprinting and HDR decode");
@@ -915,17 +925,22 @@ namespace PulseForge
 					if (!Processed) return Fail("Environment preprocessing failed: " + Processed.error().Message);
 					Data = std::move(*Processed);
 					Product.PreprocessEndTimestampNanoseconds = GetMonotonicTimestampNanoseconds();
-					if (auto Encoded = Detail::EnvironmentLightingArtifactCodec::EncodeEnvironment(*Data, Processing))
+					if (auto Encoded = Detail::EnvironmentLightingArtifactCodec::EncodeEnvironment(*Data, Processing, StopToken))
+					{
+						if (StopToken.stop_requested()) return Fail("Environment preparation cancelled while encoding its product");
 						ToStore = std::move(*Encoded);
+					}
 				}
 			}
 			if (!Data) return Fail("Environment CPU preparation produced no data");
 			if (StopToken.stop_requested()) return Fail("Environment preparation cancelled before publication");
-			auto Current = ObserveEnvironmentSource(Asset, ProjectRoot, Registry);
+			auto Current = ObserveEnvironmentSource(Asset, ProjectRoot, Registry, StopToken);
+			if (StopToken.stop_requested()) return Fail("Environment preparation cancelled during final source validation");
 			if (!Current || Current->Content != Source->Content)
 				return Fail("Environment source changed during preparation; stale product discarded");
 			if (ToStore && ArtifactStore)
 			{
+				if (StopToken.stop_requested()) return Fail("Environment preparation cancelled before artifact persistence");
 				const auto Stored = RejectedEnvironmentEntry
 					? ArtifactStore->ReplaceRejectedProduct(Key, *RejectedEnvironmentEntry, *ToStore)
 					: ArtifactStore->Write(Key, *ToStore);
@@ -933,6 +948,7 @@ namespace PulseForge
 					Stored.Status == DerivedDataArtifactWriteStatus::Rejected) && ArtifactStore->GetOptions().Enabled)
 					PF_WARN("Could not persist environment artifact for {}: {}", Asset.ToString(), Stored.Message);
 			}
+			if (StopToken.stop_requested()) return Fail("Environment preparation cancelled before publishing its CPU product");
 			Product.EnvironmentArtifactHit = CacheHit;
 			Product.BrdfArtifactHit = BrdfCacheHit;
 			Product.Source = CacheHit

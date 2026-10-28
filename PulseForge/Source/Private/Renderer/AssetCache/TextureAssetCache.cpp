@@ -242,9 +242,12 @@ namespace PulseForge
 			Prepared.Format = Format;
 			{
 				ScopedDiagnosticTimer Timer(m_Diagnostics, "Texture mip generation", "TextureAssetCache");
-			Prepared.MipLevels = Detail::BuildTextureMipChain(ImportedImage->Width, ImportedImage->Height,
+				auto Mips = Detail::BuildTextureMipChain(ImportedImage->Width, ImportedImage->Height,
 				ImportedImage->RGBA8Pixels, Format == TextureFormat::RGBA8_Srgb
 					? Detail::ImageColorSpace::Srgb : Detail::ImageColorSpace::Linear);
+				if (!Mips)
+					return std::unexpected(TextureAssetError{ TextureAssetErrorCode::ImportFailed, Asset, Mips.error() });
+				Prepared.MipLevels = std::move(*Mips);
 			}
 			TextureDesc Description;
 			Description.Width = Prepared.Width;

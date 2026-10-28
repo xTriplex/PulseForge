@@ -331,6 +331,28 @@ namespace PulseForge
 		return Builder.Finish();
 	}
 
+	std::expected<AssetContentFingerprint, std::string> ComputeAssetContentFingerprintCancellable(
+		std::span<const std::byte> Bytes, std::stop_token CancellationToken)
+	{
+		AssetFingerprintBuilder Builder("PulseForge.AssetInputBytes.v1");
+		std::array<char, 32> LengthBuffer{};
+		const auto [LengthEnd, LengthError] = std::to_chars(
+			LengthBuffer.data(), LengthBuffer.data() + LengthBuffer.size(), Bytes.size());
+		if (LengthError != std::errc{})
+			return std::unexpected("Could not encode asset content length");
+		Builder.UpdateText("byteLength", std::string_view(LengthBuffer.data(), static_cast<size_t>(LengthEnd - LengthBuffer.data())));
+		for (size_t Offset = 0; Offset < Bytes.size(); Offset += ContentFingerprintChunkBytes)
+		{
+			if (CancellationToken.stop_requested())
+				return std::unexpected("Asset fingerprinting was cancelled");
+			const size_t ChunkSize = std::min(ContentFingerprintChunkBytes, Bytes.size() - Offset);
+			Builder.UpdateBytes("chunk", Bytes.subspan(Offset, ChunkSize));
+		}
+		if (CancellationToken.stop_requested())
+			return std::unexpected("Asset fingerprinting was cancelled");
+		return Builder.Finish();
+	}
+
 	std::expected<AssetContentFingerprint, std::string> ComputeAssetImportInputFingerprint(const AssetImportRecipe& Recipe)
 	{
 		if (Recipe.SourceAsset.IsNil() || Recipe.SubresourceKey.empty() || Recipe.ImporterID.empty() || Recipe.ImporterVersion.empty() ||

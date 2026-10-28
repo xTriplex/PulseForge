@@ -24,6 +24,7 @@ import zlib
 from dataclasses import dataclass
 from ctypes import wintypes
 from pathlib import Path
+from unittest.mock import patch
 
 
 DRAW_MARKER = re.compile(r"Submitted\s+(\d+)\s+indexed mesh instance\(s\) from the player scene")
@@ -41,7 +42,7 @@ class UnsupportedCapability(SmokeFailure):
 
 @dataclass(frozen=True)
 class Window:
-    Handle: int
+    Handle: int | None
     Width: int
     Height: int
     X: int = 0
@@ -254,9 +255,9 @@ def validate_third_party_notices(PackageRoot: Path, Platform: str) -> Path:
     except (OSError, UnicodeError) as Error:
         raise SmokeFailure(f"could not read the package third-party notices file: {Error}") from Error
 
-    if "Apache License" not in NoticeText:
-        raise SmokeFailure("the package third-party notices omit the Apache 2.0 license text")
     if Platform == "macOS":
+        if "Apache License" not in NoticeText:
+            raise SmokeFailure("the macOS package notices omit the Apache 2.0 license text")
         RequiredNotices = (
             "Khronos Vulkan Loader 1.4.350.0",
             "Some source files use more permissive licenses",
@@ -822,28 +823,32 @@ class MacOSDesktop:
     if (count of windows of targetProcess) is not 1 then error "PulseForge process does not have exactly one window"
     set frontmost of targetProcess to true
     set targetWindow to first window of targetProcess
-    set windowID to id of targetWindow
-    set windowBounds to bounds of targetWindow
-    return (windowID as text) & "|" & (item 1 of windowBounds as text) & "|" & (item 2 of windowBounds as text) & "|" & (item 3 of windowBounds as text) & "|" & (item 4 of windowBounds as text)
+    set windowPosition to position of targetWindow
+    set windowSize to size of targetWindow
+    return (item 1 of windowPosition as text) & "|" & (item 2 of windowPosition as text) & "|" & (item 1 of windowSize as text) & "|" & (item 2 of windowSize as text)
 end tell'''
         while time.monotonic() < Deadline:
-            try:
-                Result = self._osascript(Script)
-            except UnsupportedCapability:
-                raise
-            Values = re.fullmatch(r"\s*(\d+)\|(-?\d+)\|(-?\d+)\|(-?\d+)\|(-?\d+)\s*", Result)
+            Result = self._osascript(Script)
+            Values = re.fullmatch(r"\s*(-?\d+)\|(-?\d+)\|(\d+)\|(\d+)\s*", Result)
             if Values:
-                Handle, Left, Top, Right, Bottom = map(int, Values.groups())
-                Width = Right - Left
-                Height = Bottom - Top
-                if Handle > 0 and Width >= 100 and Height >= 100:
-                    return Window(Handle, Width, Height, Left, Top)
+                Left, Top, Width, Height = map(int, Values.groups())
+                if Width >= 100 and Height >= 100:
+                    if Width * Height > MAX_CAPTURE_PIXELS:
+                        raise UnsupportedCapability("PulseForge macOS window exceeds the capture pixel safety limit")
+                    return Window(None, Width, Height, Left, Top)
             time.sleep(0.1)
         raise UnsupportedCapability(f"macOS Accessibility could not identify a visible app window for PID {PID}")
 
     def capture(self, Target: Window, Destination: Path) -> None:
+        if Target.Handle is None:
+            CaptureArguments = [
+                "/usr/sbin/screencapture", "-x", "-R",
+                f"{Target.X},{Target.Y},{Target.Width},{Target.Height}", str(Destination),
+            ]
+        else:
+            CaptureArguments = ["/usr/sbin/screencapture", "-x", "-l", str(Target.Handle), str(Destination)]
         try:
-            Result = subprocess.run(["/usr/sbin/screencapture", "-x", "-l", str(Target.Handle), str(Destination)],
+            Result = subprocess.run(CaptureArguments,
                                     check=False, capture_output=True, text=True, timeout=10,
                                     env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C.UTF-8"})
         except (OSError, subprocess.TimeoutExpired) as Error:
@@ -855,10 +860,11 @@ end tell'''
     def close_window(self, Target: Window, PID: int) -> None:
         Script = f'''tell application "System Events"
     set targetProcess to first process whose unix id is {PID}
-    set targetWindow to first window of targetProcess whose id is {Target.Handle}
+    if (count of windows of targetProcess) is not 1 then error "PulseForge process does not have exactly one window to close"
+    set targetWindow to first window of targetProcess
     set closeButton to first button of targetWindow whose subrole is "AXCloseButton"
     click closeButton
-    return "MACOS_NATIVE_WINDOW_CLOSE_REQUESTED; pid={PID}; window={Target.Handle}"
+    return "MACOS_NATIVE_WINDOW_CLOSE_REQUESTED; pid={PID}"
 end tell'''
         self._osascript(Script)
 
@@ -1419,7 +1425,46 @@ def self_test() -> None:
                     0, 255, 0, 255, 0, 0, 255, 255))
     Width, Height, Decoded = decode_png(encode_png(2, 2, Pixels))
     assert (Width, Height, Decoded) == (2, 2, bytearray(Pixels))
-    print("STANDALONE_PACKAGE_SMOKE_SELF_TEST=PASS; argv and PNG codec checks")
+    MacRoute = MacOSDesktop.__new__(MacOSDesktop)
+    MacScripts: list[str] = []
+    MacRoute._osascript = lambda Script: (MacScripts.append(Script), "20|40|800|600")[1]
+    MacWindow = MacRoute.find_window(1234, time.monotonic() + 1)
+    assert MacWindow == Window(None, 800, 600, 20, 40)
+    assert "position of targetWindow" in MacScripts[0] and "size of targetWindow" in MacScripts[0]
+    assert "id of targetWindow" not in MacScripts[0]
+    with tempfile.TemporaryDirectory(prefix="PulseForge Notice Fixture ") as Temporary:
+        Root = Path(Temporary)
+        CapturePath = Root / "capture.png"
+
+        def CaptureRegion(Arguments, **_Options):
+            assert Arguments[1:4] == ["-x", "-R", "20,40,800,600"]
+            CapturePath.write_bytes(b"captured")
+            return subprocess.CompletedProcess(Arguments, 0, "", "")
+
+        with patch("subprocess.run", side_effect=CaptureRegion):
+            MacRoute.capture(MacWindow, CapturePath)
+        MacRoute.close_window(MacWindow, 1234)
+        CloseScript = MacScripts[-1]
+        assert "unix id is 1234" in CloseScript and "AXCloseButton" in CloseScript
+        assert "id of targetWindow" not in CloseScript
+        (Root / "ThirdPartyNotices.txt").write_text("MIT runtime notices", encoding="utf-8")
+        validate_third_party_notices(Root, "Linux")
+        try:
+            validate_third_party_notices(Root, "macOS")
+        except SmokeFailure as Error:
+            assert "Apache 2.0" in str(Error)
+        else:
+            raise AssertionError("macOS notices accepted without the bundled Vulkan license")
+        MacNotices = "\n".join((
+            "Apache License", "Khronos Vulkan Loader 1.4.350.0",
+            "Some source files use more permissive licenses",
+            "https://github.com/KhronosGroup/Vulkan-Loader/blob/vulkan-sdk-1.4.350.0/LICENSE.txt",
+            "MoltenVK 1.4.1", "https://github.com/KhronosGroup/MoltenVK/blob/v1.4.1/LICENSE",
+        ))
+        (Root / "Contents" / "Resources").mkdir(parents=True)
+        (Root / "Contents" / "Resources" / "ThirdPartyNotices.txt").write_text(MacNotices, encoding="utf-8")
+        validate_third_party_notices(Root, "macOS")
+    print("STANDALONE_PACKAGE_SMOKE_SELF_TEST=PASS; argv, PNG codec, macOS window route, and platform-specific notices")
 
 
 def main() -> int:

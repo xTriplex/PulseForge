@@ -634,16 +634,55 @@ namespace PulseForge
 			return Bytes;
 		}
 
-		std::expected<AssetContentFingerprint, AssetExportError> Fingerprint(const std::filesystem::path& Path)
+		std::expected<AssetContentFingerprint, AssetExportError> Fingerprint(
+			const std::filesystem::path& Path, std::stop_token CancellationToken = {})
 		{
-			auto Bytes = ReadFile(Path, MaximumExportFileBytes);
-			if (!Bytes) return std::unexpected(Bytes.error());
-			return ComputeAssetContentFingerprint(*Bytes);
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(AssetExportErrorCode::Cancelled, "Export was cancelled before fingerprinting a package file", Path));
+			std::error_code Error;
+			const uintmax_t Size = std::filesystem::file_size(Path, Error);
+			if (Error || Size > MaximumExportFileBytes ||
+				Size > static_cast<uintmax_t>((std::numeric_limits<std::streamsize>::max)()))
+				return std::unexpected(MakeError(AssetExportErrorCode::VerificationFailed,
+					Error ? "Could not inspect file for export fingerprinting: " + Error.message()
+						: "File exceeds the export size limit", Path));
+			std::ifstream Input(Path, std::ios::binary);
+			if (!Input) return std::unexpected(MakeError(AssetExportErrorCode::VerificationFailed,
+				"Could not open file for export fingerprinting", Path));
+			AssetFingerprintBuilder Builder("PulseForge.AssetInputBytes.v1");
+			Builder.UpdateText("byteLength", std::to_string(Size));
+			std::array<std::byte, 64 * 1024> Buffer{};
+			uint64_t Remaining = Size;
+			while (Remaining != 0)
+			{
+				if (CancellationToken.stop_requested())
+					return std::unexpected(MakeError(AssetExportErrorCode::Cancelled,
+						"Export was cancelled while fingerprinting a package file", Path));
+				const size_t Count = static_cast<size_t>(std::min<uint64_t>(Remaining, Buffer.size()));
+				Input.read(reinterpret_cast<char*>(Buffer.data()), static_cast<std::streamsize>(Count));
+				if (!Input || Input.bad() || static_cast<size_t>(Input.gcount()) != Count)
+					return std::unexpected(MakeError(AssetExportErrorCode::VerificationFailed,
+						"Could not read the complete file for export fingerprinting", Path));
+				Builder.UpdateBytes("chunk", std::span<const std::byte>(Buffer.data(), Count));
+				Remaining -= Count;
+			}
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(AssetExportErrorCode::Cancelled,
+					"Export was cancelled after fingerprinting a package file", Path));
+			Error.clear();
+			const uintmax_t FinalSize = std::filesystem::file_size(Path, Error);
+			if (Error || FinalSize != Size)
+				return std::unexpected(MakeError(AssetExportErrorCode::VerificationFailed,
+					"File size changed while export fingerprinting was in progress", Path));
+			return Builder.Finish();
 		}
 
 		std::expected<void, AssetExportError> CopyOne(const std::filesystem::path& Source,
-			const std::filesystem::path& Destination)
+			const std::filesystem::path& Destination, std::stop_token CancellationToken = {})
 		{
+			if (CancellationToken.stop_requested())
+				return std::unexpected(MakeError(AssetExportErrorCode::Cancelled,
+					"Export was cancelled before copying a package file", Source));
 			std::error_code Error;
 			std::filesystem::create_directories(Destination.parent_path(), Error);
 			if (Error) return std::unexpected(MakeError(AssetExportErrorCode::StageFailed,
@@ -662,7 +701,8 @@ namespace PulseForge
 			return {};
 		}
 
-		std::expected<std::vector<std::string>, AssetExportError> EnumerateFiles(const std::filesystem::path& Root)
+		std::expected<std::vector<std::string>, AssetExportError> EnumerateFiles(
+			const std::filesystem::path& Root, std::stop_token CancellationToken = {})
 		{
 			std::vector<std::string> Files;
 			std::error_code Error;
@@ -671,6 +711,9 @@ namespace PulseForge
 				"Could not start package enumeration: " + Error.message(), Root));
 			while (It != End)
 			{
+				if (CancellationToken.stop_requested())
+					return std::unexpected(MakeError(AssetExportErrorCode::Cancelled,
+						"Export was cancelled while enumerating package files", Root));
 				const auto EntryPath = It->path();
 				const auto Status = It->symlink_status(Error);
 				if (Error || std::filesystem::is_symlink(Status))
@@ -697,7 +740,8 @@ namespace PulseForge
 			return Files;
 		}
 
-		std::expected<std::map<std::string, std::string>, AssetExportError> CaptureTree(const std::filesystem::path& Root)
+		std::expected<std::map<std::string, std::string>, AssetExportError> CaptureTree(
+			const std::filesystem::path& Root, std::stop_token CancellationToken = {})
 		{
 			std::map<std::string, std::string> Result;
 			std::error_code Error;
@@ -706,6 +750,9 @@ namespace PulseForge
 				"Could not start export tree enumeration: " + Error.message(), Root));
 			while (It != End)
 			{
+				if (CancellationToken.stop_requested())
+					return std::unexpected(MakeError(AssetExportErrorCode::Cancelled,
+						"Export was cancelled while validating a package tree", Root));
 				const auto EntryPath = It->path();
 				const auto Status = It->symlink_status(Error);
 				if (Error || std::filesystem::is_symlink(Status) ||
@@ -723,7 +770,7 @@ namespace PulseForge
 					Result.emplace("D:" + Name, "directory");
 				else
 				{
-					auto Digest = Fingerprint(EntryPath);
+					auto Digest = Fingerprint(EntryPath, CancellationToken);
 					if (!Digest) return std::unexpected(Digest.error());
 					Result.emplace("F:" + Name, Digest->DigestHex);
 				}
@@ -1734,6 +1781,14 @@ namespace PulseForge
 	void AssetExportService::Run(uint64_t RequestID, AssetExportRequest Request, std::stop_token CancellationToken) noexcept
 	{
 		const auto Cancelled = [CancellationToken]() { return CancellationToken.stop_requested(); };
+		const auto FinishPackageWorkError = [this, RequestID, &Cancelled](const AssetExportError& Error)
+		{
+			if (Cancelled() || Error.Code == AssetExportErrorCode::Cancelled)
+				Finish(RequestID, AssetExportPhase::Cancelled,
+					MakeError(AssetExportErrorCode::Cancelled, "Export was cancelled during bounded package file work", Error.Path));
+			else
+				Finish(RequestID, AssetExportPhase::Failed, Error);
+		};
 		try
 		{
 			auto ValidProfile = ValidateProfile(Request.Profile);
@@ -1761,8 +1816,19 @@ namespace PulseForge
 			if (auto Entrypoint = ValidateNativeEntrypoint(TemplateEntrypoint, *Descriptor); !Entrypoint)
 				{ Finish(RequestID, AssetExportPhase::Failed, Entrypoint.error()); return; }
 			Update(RequestID, AssetExportPhase::ResolveTemplate, 0.14f, "Template executable format verified");
-			auto Project = Project::Open(Request.SourceProjectFile);
-			if (!Project) { Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::ProjectOpenFailed, Project.error().Message, Request.SourceProjectFile)); return; }
+			auto Project = Project::Open(Request.SourceProjectFile, nullptr, CancellationToken);
+			if (!Project)
+			{
+				if (Cancelled() || Project.error().Code == ProjectErrorCode::Cancelled)
+					Finish(RequestID, AssetExportPhase::Cancelled, MakeError(AssetExportErrorCode::Cancelled,
+						"Export cancelled while opening the source project", Request.SourceProjectFile));
+				else
+					Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::ProjectOpenFailed,
+						Project.error().Message, Request.SourceProjectFile));
+				return;
+			}
+			if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+				MakeError(AssetExportErrorCode::Cancelled, "Export cancelled after opening the source project")); return; }
 			Update(RequestID, AssetExportPhase::Validate, 0.18f, "Source project opened and identity captured");
 			auto SourceRoot = Absolute(Project->GetRootPath());
 			if (!SourceRoot) { Finish(RequestID, AssetExportPhase::Failed, SourceRoot.error()); return; }
@@ -1828,8 +1894,8 @@ namespace PulseForge
 					Request.Profile.ProfileID.ToString(), Project->GetDescription().ID.ToString(), OutputCaseSensitive);
 				if (!Existing) { Finish(RequestID, AssetExportPhase::Failed, Existing.error()); return; }
 				PreviousOwned = std::move(Existing->Files);
-				auto Tree = CaptureTree(Output);
-				if (!Tree) { Finish(RequestID, AssetExportPhase::Failed, Tree.error()); return; }
+				auto Tree = CaptureTree(Output, CancellationToken);
+				if (!Tree) { FinishPackageWorkError(Tree.error()); return; }
 				ExistingTree = std::move(*Tree);
 			}
 			std::vector<ExportFileDestination> InitialDestinations;
@@ -1981,6 +2047,8 @@ namespace PulseForge
 			{
 				for (const auto& [Entry, Digest] : ExistingTree)
 				{
+					if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+						MakeError(AssetExportErrorCode::Cancelled, "Export cancelled while preserving existing package directories")); return; }
 					(void)Digest;
 					if (!Entry.starts_with("D:")) continue;
 					const auto Destination = Candidate / std::filesystem::u8path(Entry.substr(2));
@@ -1990,26 +2058,37 @@ namespace PulseForge
 				}
 				for (const auto& [Entry, ExpectedDigest] : ExistingTree)
 				{
+					if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+						MakeError(AssetExportErrorCode::Cancelled, "Export cancelled while preserving existing package files")); return; }
 					if (Entry.starts_with("D:")) continue;
 					const std::string Name = Entry.substr(2);
 					const auto Source = Output / std::filesystem::u8path(Name);
 					if (auto Safe = CheckNoLinks(Source); !Safe) { Finish(RequestID, AssetExportPhase::Failed, Safe.error()); return; }
-					auto Actual = Fingerprint(Source);
-					if (!Actual || Actual->DigestHex != ExpectedDigest)
+					auto Actual = Fingerprint(Source, CancellationToken);
+					if (!Actual) { FinishPackageWorkError(Actual.error()); return; }
+					if (Actual->DigestHex != ExpectedDigest)
 						{ Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::PublicationFailed,
 							"An existing package file changed while the candidate was being staged", Source)); return; }
-					if (auto Copied = CopyOne(Source, Candidate / std::filesystem::u8path(Name)); !Copied)
-						{ Finish(RequestID, AssetExportPhase::Failed, Copied.error()); return; }
+					if (auto Copied = CopyOne(Source, Candidate / std::filesystem::u8path(Name), CancellationToken); !Copied)
+						{ FinishPackageWorkError(Copied.error()); return; }
+					if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+						MakeError(AssetExportErrorCode::Cancelled, "Export cancelled after preserving an existing package file")); return; }
 				}
 			}
-			auto CopiedOriginal = CaptureTree(Candidate);
-			if (!CopiedOriginal || *CopiedOriginal != CandidateExpected)
+			auto CopiedOriginal = CaptureTree(Candidate, CancellationToken);
+			if (!CopiedOriginal)
 			{
-				Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::RecoveryRequired,
-					CopiedOriginal ? "Candidate differs from the validated prior package copy" : CopiedOriginal.error().Message,
-					Candidate));
+				FinishPackageWorkError(CopiedOriginal.error());
 				return;
 			}
+			if (*CopiedOriginal != CandidateExpected)
+			{
+				Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::RecoveryRequired,
+					"Candidate differs from the validated prior package copy", Candidate));
+				return;
+			}
+			if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+				MakeError(AssetExportErrorCode::Cancelled, "Export cancelled after validating the prior package copy")); return; }
 			Update(RequestID, AssetExportPhase::Stage, 0.14f, "Staging validated runtime template");
 			for (const std::string& Relative : Descriptor->RuntimeFiles)
 			{
@@ -2019,24 +2098,33 @@ namespace PulseForge
 				const auto Status = std::filesystem::symlink_status(Source, Error);
 				if (Error || !std::filesystem::is_regular_file(Status)) { Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::TemplateIncomplete, "Required template file is missing or not regular", Source)); return; }
 				if (std::filesystem::file_size(Source, Error) > MaximumExportFileBytes || Error) { Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::TemplateIncomplete, "Template file exceeds the bounded size", Source)); return; }
-				auto SourceDigest = Fingerprint(Source);
-				if (!SourceDigest) { Finish(RequestID, AssetExportPhase::Failed, SourceDigest.error()); return; }
+				auto SourceDigest = Fingerprint(Source, CancellationToken);
+				if (!SourceDigest) { FinishPackageWorkError(SourceDigest.error()); return; }
+				if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+					MakeError(AssetExportErrorCode::Cancelled, "Export cancelled after validating a template file")); return; }
 				const auto Destination = Candidate / std::filesystem::u8path(Relative);
-				if (auto Copied = CopyOne(Source, Destination); !Copied) { Finish(RequestID, AssetExportPhase::Failed, Copied.error()); return; }
-				auto CopiedDigest = Fingerprint(Destination);
-				if (!CopiedDigest || CopiedDigest->DigestHex != SourceDigest->DigestHex)
-					{ Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::StageFailed,
-						"Template bytes changed or could not be verified after copying", Destination)); return; }
+				if (auto Copied = CopyOne(Source, Destination, CancellationToken); !Copied) { FinishPackageWorkError(Copied.error()); return; }
 				AddParentDirectoryReceipts(CandidateExpected, Relative);
 				CandidateExpected.insert_or_assign("F:" + Relative, SourceDigest->DigestHex);
 				Recovery.CandidateTree = CandidateExpected;
+				auto CopiedDigest = Fingerprint(Destination, CancellationToken);
+				if (!CopiedDigest) { FinishPackageWorkError(CopiedDigest.error()); return; }
+				if (CopiedDigest->DigestHex != SourceDigest->DigestHex)
+					{ Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::StageFailed,
+						"Template bytes changed or could not be verified after copying", Destination)); return; }
+				if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+					MakeError(AssetExportErrorCode::Cancelled, "Export cancelled after staging a template file")); return; }
 			}
-			auto TemplateCandidate = CaptureTree(Candidate);
-			if (!TemplateCandidate || *TemplateCandidate != CandidateExpected)
+			auto TemplateCandidate = CaptureTree(Candidate, CancellationToken);
+			if (!TemplateCandidate)
+			{
+				FinishPackageWorkError(TemplateCandidate.error());
+				return;
+			}
+			if (*TemplateCandidate != CandidateExpected)
 			{
 				Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::RecoveryRequired,
-					TemplateCandidate ? "Candidate contains an entry outside the staged package receipts" : TemplateCandidate.error().Message,
-					Candidate));
+					"Candidate contains an entry outside the staged package receipts", Candidate));
 				return;
 			}
 			if (auto Saved = SaveRecoveryRecord(JournalPath, Recovery); !Saved)
@@ -2083,21 +2171,29 @@ namespace PulseForge
 			if (Cancelled())
 				{ Finish(RequestID, AssetExportPhase::Cancelled, MakeError(AssetExportErrorCode::Cancelled,
 					"Export cancelled after cooking")); return; }
-			auto CookedFiles = EnumerateFiles(CookStagingRoot);
-			if (!CookedFiles) { Finish(RequestID, AssetExportPhase::Failed, CookedFiles.error()); return; }
-			auto CookStagingTree = CaptureTree(CookStagingRoot);
-			if (!CookStagingTree) { Finish(RequestID, AssetExportPhase::Failed, CookStagingTree.error()); return; }
+			auto CookedFiles = EnumerateFiles(CookStagingRoot, CancellationToken);
+			if (!CookedFiles) { FinishPackageWorkError(CookedFiles.error()); return; }
+			if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+				MakeError(AssetExportErrorCode::Cancelled, "Export cancelled after enumerating cooked products")); return; }
+			auto CookStagingTree = CaptureTree(CookStagingRoot, CancellationToken);
+			if (!CookStagingTree) { FinishPackageWorkError(CookStagingTree.error()); return; }
+			if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+				MakeError(AssetExportErrorCode::Cancelled, "Export cancelled after validating cooked products")); return; }
 			std::map<std::string, std::string> CandidateWithCookStage = CandidateExpected;
 			CandidateWithCookStage.insert_or_assign("D:" + std::string(CookStagingDirectoryName), "directory");
 			for (const auto& [Name, Digest] : *CookStagingTree)
 				CandidateWithCookStage.insert_or_assign(
 					std::string(Name.starts_with("F:") ? "F:" : "D:") + std::string(CookStagingDirectoryName) + "/" + Name.substr(2), Digest);
-			auto CandidateWithCookStageActual = CaptureTree(Candidate);
-			if (!CandidateWithCookStageActual || *CandidateWithCookStageActual != CandidateWithCookStage)
+			auto CandidateWithCookStageActual = CaptureTree(Candidate, CancellationToken);
+			if (!CandidateWithCookStageActual)
+			{
+				FinishPackageWorkError(CandidateWithCookStageActual.error());
+				return;
+			}
+			if (*CandidateWithCookStageActual != CandidateWithCookStage)
 			{
 				Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::RecoveryRequired,
-					CandidateWithCookStageActual ? "Cook staging contains an unrecorded candidate entry" :
-					CandidateWithCookStageActual.error().Message, Candidate));
+					"Cook staging contains an unrecorded candidate entry", Candidate));
 				return;
 			}
 			CandidateExpected = std::move(CandidateWithCookStage);
@@ -2116,6 +2212,8 @@ namespace PulseForge
 				{ Finish(RequestID, AssetExportPhase::Failed, Preflight.error()); return; }
 			for (const std::string& Name : *CookedFiles)
 			{
+				if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+					MakeError(AssetExportErrorCode::Cancelled, "Export cancelled while staging cooked products")); return; }
 				const auto Source = CookStagingRoot / std::filesystem::u8path(Name);
 				const auto Destination = ResourceRoot / "Content" / std::filesystem::u8path(Name);
 				if (auto Safe = CheckNoLinks(Source); !Safe) { Finish(RequestID, AssetExportPhase::Failed, Safe.error()); return; }
@@ -2124,16 +2222,19 @@ namespace PulseForge
 				if (StagedDigest == CandidateExpected.end())
 					{ Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::VerificationFailed,
 						"Cook output file is absent from its staging receipt", Source)); return; }
-				if (auto Copied = CopyOne(Source, Destination); !Copied) { Finish(RequestID, AssetExportPhase::Failed, Copied.error()); return; }
-				auto DestinationDigest = Fingerprint(Destination);
-				if (!DestinationDigest || DestinationDigest->DigestHex != StagedDigest->second)
-					{ Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::StageFailed,
-						"Cooked product changed or could not be verified after staging", Destination)); return; }
+				if (auto Copied = CopyOne(Source, Destination, CancellationToken); !Copied) { FinishPackageWorkError(Copied.error()); return; }
 				const std::string RelativeDestination =
 					(ResourceRelative / "Content" / std::filesystem::u8path(Name)).generic_string();
 				AddParentDirectoryReceipts(CandidateExpected, RelativeDestination);
 				CandidateExpected.insert_or_assign("F:" + RelativeDestination, StagedDigest->second);
 				Recovery.CandidateTree = CandidateExpected;
+				auto DestinationDigest = Fingerprint(Destination, CancellationToken);
+				if (!DestinationDigest) { FinishPackageWorkError(DestinationDigest.error()); return; }
+				if (DestinationDigest->DigestHex != StagedDigest->second)
+					{ Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::StageFailed,
+						"Cooked product changed or could not be verified after staging", Destination)); return; }
+				if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+					MakeError(AssetExportErrorCode::Cancelled, "Export cancelled after staging a cooked product")); return; }
 			}
 			Recovery.State = RecoveryStateStagingCleanupPending;
 			if (auto Saved = SaveRecoveryRecord(JournalPath, Recovery); !Saved)
@@ -2162,13 +2263,21 @@ namespace PulseForge
 			Recovery.CandidateTree = CandidateExpected;
 			if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled, MakeError(AssetExportErrorCode::Cancelled, "Export cancelled after cooking; previous package remains usable")); return; }
 			Update(RequestID, AssetExportPhase::Verify, 0.82f, "Verifying package inventory and cooked manifest");
-			auto Files = EnumerateFiles(Candidate);
-			if (!Files) { Finish(RequestID, AssetExportPhase::Failed, Files.error()); return; }
+			auto Files = EnumerateFiles(Candidate, CancellationToken);
+			if (!Files) { FinishPackageWorkError(Files.error()); return; }
 			std::map<std::string, ExportFileRole> CurrentRoles;
 			for (const std::string& Name : Descriptor->RuntimeFiles)
+			{
+				if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+					MakeError(AssetExportErrorCode::Cancelled, "Export cancelled while preparing package inventory")); return; }
 				CurrentRoles.emplace(Name, ExportFileRole::Template);
+			}
 			for (const std::string& Name : *CookedFiles)
+			{
+				if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+					MakeError(AssetExportErrorCode::Cancelled, "Export cancelled while preparing package inventory")); return; }
 				CurrentRoles.emplace((ResourceRelative / "Content" / std::filesystem::u8path(Name)).generic_string(), ExportFileRole::Cooked);
+			}
 			CurrentRoles.emplace((ResourceRelative / RuntimeConfigurationName).generic_string(), ExportFileRole::RuntimeConfiguration);
 			CurrentRoles.emplace(std::string(TemplateOwnershipName), ExportFileRole::TemplateOwnership);
 			std::set<std::string> CurrentOwned;
@@ -2179,12 +2288,15 @@ namespace PulseForge
 			}
 			for (const std::string& Stale : PreviousOwned)
 			{
+				if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+					MakeError(AssetExportErrorCode::Cancelled, "Export cancelled while removing stale owned package files")); return; }
 				if (CurrentOwned.contains(Stale)) continue;
 				const auto StalePath = Candidate / std::filesystem::u8path(Stale);
 				if (auto Safe = CheckNoLinks(StalePath); !Safe) { Finish(RequestID, AssetExportPhase::Failed, Safe.error()); return; }
 				const auto Expected = ExistingTree.find("F:" + Stale);
-				auto Actual = Fingerprint(StalePath);
-				if (Expected == ExistingTree.end() || !Actual || Actual->DigestHex != Expected->second)
+				auto Actual = Fingerprint(StalePath, CancellationToken);
+				if (!Actual) { FinishPackageWorkError(Actual.error()); return; }
+				if (Expected == ExistingTree.end() || Actual->DigestHex != Expected->second)
 					{ Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::PublicationFailed,
 						"Stale owned file no longer matches the previous package receipt", StalePath)); return; }
 				std::filesystem::remove(StalePath, Error);
@@ -2209,8 +2321,10 @@ namespace PulseForge
 			Json OwnedFiles = Json::object();
 			for (const auto& [Name, Role] : CurrentRoles)
 			{
-				auto Digest = Fingerprint(Candidate / std::filesystem::u8path(Name));
-				if (!Digest) { Finish(RequestID, AssetExportPhase::Failed, Digest.error()); return; }
+				if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled,
+					MakeError(AssetExportErrorCode::Cancelled, "Export cancelled while preparing package ownership receipts")); return; }
+				auto Digest = Fingerprint(Candidate / std::filesystem::u8path(Name), CancellationToken);
+				if (!Digest) { FinishPackageWorkError(Digest.error()); return; }
 				Json Receipt;
 				Receipt["role"] = std::string(RoleName(Role));
 				Receipt["digest"] = Digest->DigestHex;
@@ -2234,8 +2348,13 @@ namespace PulseForge
 			if (Error) { Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::PublicationFailed, "Could not revalidate destination: " + Error.message(), Output)); return; }
 			if (OutputStillExists)
 			{
-				auto FreshTree = CaptureTree(Output);
-				if (!FreshTree || *FreshTree != ExistingTree)
+				auto FreshTree = CaptureTree(Output, CancellationToken);
+				if (!FreshTree)
+				{
+					FinishPackageWorkError(FreshTree.error());
+					return;
+				}
+				if (*FreshTree != ExistingTree)
 					{ Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::PublicationFailed,
 						"Existing package membership or contents changed after staging; preserving it", Output)); return; }
 				auto FreshOwnership = ValidateInventory(Output, TemplateFiles, ResourcePrefix,
@@ -2247,11 +2366,15 @@ namespace PulseForge
 			else if (!ExistingTree.empty())
 				{ Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::PublicationFailed,
 					"Existing package disappeared after staging; refusing to replace it", Output)); return; }
-			auto CandidateReceipt = CaptureTree(Candidate);
-			if (!CandidateReceipt || *CandidateReceipt != CandidateExpected)
+			auto CandidateReceipt = CaptureTree(Candidate, CancellationToken);
+			if (!CandidateReceipt)
+			{
+				FinishPackageWorkError(CandidateReceipt.error());
+				return;
+			}
+			if (*CandidateReceipt != CandidateExpected)
 				{ Finish(RequestID, AssetExportPhase::Failed, MakeError(AssetExportErrorCode::RecoveryRequired,
-					CandidateReceipt ? "Candidate differs from its incrementally recorded ownership receipts" :
-					CandidateReceipt.error().Message, Candidate)); return; }
+					"Candidate differs from its incrementally recorded ownership receipts", Candidate)); return; }
 			Recovery.HadPreviousOutput = OutputStillExists;
 			Recovery.State = RecoveryStatePrepared;
 			Recovery.PreviousTree = ExistingTree;

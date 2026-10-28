@@ -247,6 +247,8 @@ namespace PulseForge
 		const ImportedFloatImage* CachedBrdfLut)
 	{
 		Detail::ScopedProfileTimer TotalTimer("ProcessEnvironmentImage total");
+		if (StopToken.stop_requested())
+			return std::unexpected(MakeError(EnvironmentProcessingErrorCode::Cancelled, "Environment processing was cancelled"));
 		if (Source.Width == 0 || Source.Height == 0 ||
 			static_cast<uint64_t>(Source.Width) * Source.Height > 8ull * 1024ull * 1024ull ||
 			Source.RGBA32FPixels.size() != static_cast<size_t>(Source.Width) * Source.Height * 4)
@@ -270,12 +272,17 @@ namespace PulseForge
 			return std::unexpected(MakeError(EnvironmentProcessingErrorCode::ResourceLimitExceeded,
 				"Generated environment lighting data would exceed the 64 MiB CPU-output limit"));
 		}
-		for (float Channel : Source.RGBA32FPixels)
+		for (size_t ChannelIndex = 0; ChannelIndex < Source.RGBA32FPixels.size(); ++ChannelIndex)
 		{
+			if ((ChannelIndex & 0x3fffu) == 0 && StopToken.stop_requested())
+				return std::unexpected(MakeError(EnvironmentProcessingErrorCode::Cancelled, "Environment processing was cancelled"));
+			const float Channel = Source.RGBA32FPixels[ChannelIndex];
 			if (!std::isfinite(Channel))
 				return std::unexpected(MakeError(EnvironmentProcessingErrorCode::InvalidSource,
 					"Environment source contains a non-finite channel"));
 		}
+		if (StopToken.stop_requested())
+			return std::unexpected(MakeError(EnvironmentProcessingErrorCode::Cancelled, "Environment processing was cancelled"));
 
 		try
 		{

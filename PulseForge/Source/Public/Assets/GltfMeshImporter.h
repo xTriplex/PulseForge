@@ -9,6 +9,7 @@
 #include <array>
 #include <expected>
 #include <filesystem>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -48,7 +49,8 @@ namespace PulseForge
 		InvalidBuffer,
 		InvalidAccessor,
 		InvalidMesh,
-		UnsupportedFeature
+		UnsupportedFeature,
+		Cancelled
 	};
 
 	struct GltfMeshImportError
@@ -69,7 +71,8 @@ namespace PulseForge
 			const std::filesystem::path& ProjectRoot,
 			const AssetRegistry& Registry,
 			uint32_t MeshIndex = 0,
-			uint32_t PrimitiveIndex = 0);
+			uint32_t PrimitiveIndex = 0,
+			std::stop_token CancellationToken = {});
 
 		// Performs a CPU import and returns the exact input recipe and output digest used for truthful provenance.
 		[[nodiscard]] static std::expected<GltfMeshImportProduct, GltfMeshImportError> ProcessStaticPrimitive(
@@ -77,6 +80,7 @@ namespace PulseForge
 			const std::filesystem::path& ProjectRoot,
 			const AssetRegistry& Registry,
 			uint32_t MeshIndex = 0,
-			uint32_t PrimitiveIndex = 0);
+			uint32_t PrimitiveIndex = 0,
+			std::stop_token CancellationToken = {});
 	};
 }
