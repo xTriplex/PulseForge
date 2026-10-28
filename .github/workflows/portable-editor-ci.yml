@@ -874,9 +874,12 @@ jobs:
       - name: Run registered CPU tests
         shell: pwsh
         run: |
-          & ctest --test-dir Build/CI/windows -C Debug --output-on-failure --verbose 2>&1 |
+          cmake --version
+          ctest --version
+          & ctest --test-dir Build/CI/windows -C Debug --interactive-debug-mode 0 --output-on-failure --verbose 2>&1 |
             Tee-Object -FilePath "$env:RUNNER_TEMP/ctest.log"
           $result = $LASTEXITCODE
+          Add-Content -LiteralPath "$env:RUNNER_TEMP/ctest.log" -Value "CTEST_EXIT_CODE=$result"
           if ($result -ne 0) { exit $result }
 
       - name: Build Release and Dist editor consumers and verify Debug fixture exclusion
@@ -1016,6 +1019,14 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Report CMake and CTest versions
+        shell: pwsh
+        run: |
+          cmake --version
+          ctest --version
+          where.exe cmake
+          where.exe ctest
+
       - name: Restore pinned dependency sources
         uses: actions/cache@v5
         with:
@@ -1090,6 +1101,16 @@ jobs:
             -LogDirectory "$env:RUNNER_TEMP/windows-asset-diagnostic" `
             -TimeoutSeconds 120
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run focused CTest suites with noninteractive error reporting
+        shell: pwsh
+        run: |
+          $logPath = "$env:RUNNER_TEMP/windows-asset-diagnostic/ctest.log"
+          & ctest --test-dir Build/CI/windows -C Debug --interactive-debug-mode 0 --verbose --output-on-failure `
+            -R '^PulseForge\.(AssetCook|AssetExport)$' 2>&1 | Tee-Object -FilePath $logPath
+          $result = $LASTEXITCODE
+          Add-Content -LiteralPath $logPath -Value "CTEST_EXIT_CODE=$result"
+          if ($result -ne 0) { exit $result }
 
       - name: Upload focused Windows diagnostics
         if: always()

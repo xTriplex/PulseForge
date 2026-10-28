@@ -150,7 +150,12 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 	if (!Snapshot) return;
 	AssetCookRequest Request = Fixture.Request(*Snapshot);
 	auto Planned = AssetCookService::Plan(Request);
-	if (!Planned) std::cerr << "Cook planning failed: " << Planned.error().Message << " (" << Planned.error().Path << ")\n";
+	if (!Planned)
+	{
+		std::cerr << "Cook planning failed: " << Planned.error().Message << " (";
+		TestSupport::WritePathUtf8(std::cerr, Planned.error().Path);
+		std::cerr << ")\n";
+	}
 	PF_CHECK(Tests, Planned.has_value());
 	if (!Planned) return;
 	auto First = RunCookWithBoundary("first-manifest", [&] { return AssetCookService::Cook(*Planned); });

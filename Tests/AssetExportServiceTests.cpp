@@ -15,6 +15,7 @@
 #include <map>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -672,7 +673,12 @@ namespace
 		PF_CHECK(Tests, std::filesystem::exists(Fixture.Root() / ".Package.pf-export-recovery.json"));
 
 		auto Recovered = AssetExportService::RecoverInterruptedPublication(Output);
-		if (!Recovered) std::cerr << "Recovery test reported: " << Recovered.error().Message << " at " << Recovered.error().Path << '\n';
+		if (!Recovered)
+		{
+			std::cerr << "Recovery test reported: " << Recovered.error().Message << " at ";
+			TestSupport::WritePathUtf8(std::cerr, Recovered.error().Path);
+			std::cerr << '\n';
+		}
 		PF_CHECK(Tests, Recovered.has_value());
 		PF_CHECK(Tests, std::filesystem::exists(Output / "old.txt"));
 		PF_CHECK(Tests, !std::filesystem::exists(Output / "new.txt"));
@@ -757,6 +763,9 @@ namespace
 		TemporaryExportFixture Fixture;
 		PF_CHECK(Tests, Fixture.IsReady());
 		if (!Fixture.IsReady()) return;
+		std::ostringstream PathDiagnostic;
+		TestSupport::WritePathUtf8(PathDiagnostic, Fixture.Root());
+		PF_CHECK(Tests, PathDiagnostic.str().find("\xCE\xA9") != std::string::npos);
 		std::filesystem::path ProjectFile;
 		AssetID StartupScene;
 		PF_CHECK(Tests, PrepareExportProject(Fixture.Root(), ProjectFile, StartupScene));
@@ -791,7 +800,12 @@ namespace
 		if (!Started) return;
 		const AssetExportSnapshot Published = WaitForTerminal(Service, *Started, "package inventory initial export");
 		if (Published.Error)
-			std::cerr << "Real export fixture failed: " << Published.Error->Message << " at " << Published.Error->Path << '\n';
+		{
+			std::cerr << "Real export fixture failed (code " << static_cast<int>(Published.Error->Code) << "): "
+				<< Published.Error->Message << " at ";
+			TestSupport::WritePathUtf8(std::cerr, Published.Error->Path);
+			std::cerr << '\n';
+		}
 		PF_CHECK(Tests, Published.Phase == AssetExportPhase::Complete);
 		PF_CHECK(Tests, std::filesystem::exists(Output / ".pf-export-inventory.json"));
 		Service.Shutdown();
