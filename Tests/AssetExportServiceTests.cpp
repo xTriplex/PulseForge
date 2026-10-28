@@ -322,7 +322,8 @@ namespace
 		return !Error;
 	}
 
-	AssetExportSnapshot WaitForTerminal(AssetExportService& Service, uint64_t RequestID);
+	AssetExportSnapshot WaitForTerminal(AssetExportService& Service, uint64_t RequestID,
+		std::string_view Context = "asset export request");
 
 	AssetExportSnapshot RunExportRequest(TestRunner& Tests, AssetExportRequest Request)
 	{
@@ -411,7 +412,7 @@ namespace
 		return WriteTextFile(Journal, Document);
 	}
 
-	AssetExportSnapshot WaitForTerminal(AssetExportService& Service, uint64_t RequestID)
+	AssetExportSnapshot WaitForTerminal(AssetExportService& Service, uint64_t RequestID, std::string_view Context)
 	{
 		const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
 		AssetExportSnapshot Snapshot = Service.GetSnapshot(RequestID);
@@ -420,6 +421,10 @@ namespace
 			std::this_thread::yield();
 			Snapshot = Service.GetSnapshot(RequestID);
 		}
+		if (Snapshot.Running)
+			std::cerr << "ASSET_EXPORT_WAIT_TIMEOUT context=" << Context << " request=" << RequestID
+				<< " phase=" << static_cast<unsigned>(Snapshot.Phase) << " progress=" << Snapshot.Progress
+				<< " cancellation_requested=" << Snapshot.CancellationRequested << std::endl;
 		return Snapshot;
 	}
 
@@ -784,7 +789,7 @@ namespace
 		auto Started = Service.Start(Request);
 		PF_CHECK(Tests, Started.has_value());
 		if (!Started) return;
-		const AssetExportSnapshot Published = WaitForTerminal(Service, *Started);
+		const AssetExportSnapshot Published = WaitForTerminal(Service, *Started, "package inventory initial export");
 		if (Published.Error)
 			std::cerr << "Real export fixture failed: " << Published.Error->Message << " at " << Published.Error->Path << '\n';
 		PF_CHECK(Tests, Published.Phase == AssetExportPhase::Complete);
@@ -801,7 +806,7 @@ namespace
 		auto RecoveryRequestID = RecoveryService.Start(Request);
 		PF_CHECK(Tests, RecoveryRequestID.has_value());
 		if (!RecoveryRequestID) { CloseHandle(HeldPackageFile); return; }
-		const AssetExportSnapshot Interrupted = WaitForTerminal(RecoveryService, *RecoveryRequestID);
+		const AssetExportSnapshot Interrupted = WaitForTerminal(RecoveryService, *RecoveryRequestID, "locked package recovery export");
 		PF_CHECK(Tests, Interrupted.Phase == AssetExportPhase::Failed);
 		if (Interrupted.Error)
 			std::cerr << "Locked-package export returned " << static_cast<int>(Interrupted.Error->Code)
@@ -1398,24 +1403,30 @@ namespace
 
 void RunAssetExportServiceTests(TestRunner& Tests)
 {
-	TestTemplateDescriptorRoundTripAndStrictness(Tests);
-	TestMalformedAndMissingTemplateDescriptor(Tests);
-	TestTemplateMismatchDoesNotTouchOutput(Tests);
-	TestMissingTemplateDoesNotTouchOutput(Tests);
-	TestNativeEntrypointValidationDoesNotTouchOutput(Tests);
-	TestPosixEntrypointRequiresExecutablePermission(Tests);
-	TestInterruptedPublicationRestoresLastGoodPackage(Tests);
-	TestInterruptedStagingRecoveryIsExplicitAndSafe(Tests);
-	TestInterruptedPublicationPreservesChangedRecoveryData(Tests);
-	TestPackageInventoryCannotClaimUnrelatedFiles(Tests);
-	TestExportTemplateRenameRemovalAndRepeatedExport(Tests);
-	TestExportPreservesModifiedPreviouslyOwnedFile(Tests);
-	TestExportPreservesUnownedTemplateCollisionAndAllowsRetry(Tests);
-	TestExportDoesNotAdoptAnOccupiedCandidatePath(Tests);
-	TestCandidateCleanupPreservesUnownedChangesAndRecoveryRecord(Tests);
-	TestExportRejectsTemplateRuntimeConfigurationCollision(Tests);
-	TestExportPreservesUnownedRuntimeConfigurationCollision(Tests);
-	TestExportRejectsCaseAliasesOnCaseInsensitiveFilesystem(Tests);
-	TestHeldDependencyValidationCancellationRetainsOutputAndRetries(Tests);
-	TestCancellationClosesAtPublicationBoundary(Tests);
+	const auto Run = [&Tests](std::string_view Name, auto&& Test)
+	{
+		std::cerr << "ASSET_EXPORT_TEST_BEGIN " << Name << std::endl;
+		Test(Tests);
+		std::cerr << "ASSET_EXPORT_TEST_END " << Name << std::endl;
+	};
+	Run("TemplateDescriptorRoundTripAndStrictness", TestTemplateDescriptorRoundTripAndStrictness);
+	Run("MalformedAndMissingTemplateDescriptor", TestMalformedAndMissingTemplateDescriptor);
+	Run("TemplateMismatchDoesNotTouchOutput", TestTemplateMismatchDoesNotTouchOutput);
+	Run("MissingTemplateDoesNotTouchOutput", TestMissingTemplateDoesNotTouchOutput);
+	Run("NativeEntrypointValidationDoesNotTouchOutput", TestNativeEntrypointValidationDoesNotTouchOutput);
+	Run("PosixEntrypointRequiresExecutablePermission", TestPosixEntrypointRequiresExecutablePermission);
+	Run("InterruptedPublicationRestoresLastGoodPackage", TestInterruptedPublicationRestoresLastGoodPackage);
+	Run("InterruptedStagingRecoveryIsExplicitAndSafe", TestInterruptedStagingRecoveryIsExplicitAndSafe);
+	Run("InterruptedPublicationPreservesChangedRecoveryData", TestInterruptedPublicationPreservesChangedRecoveryData);
+	Run("PackageInventoryCannotClaimUnrelatedFiles", TestPackageInventoryCannotClaimUnrelatedFiles);
+	Run("ExportTemplateRenameRemovalAndRepeatedExport", TestExportTemplateRenameRemovalAndRepeatedExport);
+	Run("ExportPreservesModifiedPreviouslyOwnedFile", TestExportPreservesModifiedPreviouslyOwnedFile);
+	Run("ExportPreservesUnownedTemplateCollisionAndAllowsRetry", TestExportPreservesUnownedTemplateCollisionAndAllowsRetry);
+	Run("ExportDoesNotAdoptAnOccupiedCandidatePath", TestExportDoesNotAdoptAnOccupiedCandidatePath);
+	Run("CandidateCleanupPreservesUnownedChangesAndRecoveryRecord", TestCandidateCleanupPreservesUnownedChangesAndRecoveryRecord);
+	Run("ExportRejectsTemplateRuntimeConfigurationCollision", TestExportRejectsTemplateRuntimeConfigurationCollision);
+	Run("ExportPreservesUnownedRuntimeConfigurationCollision", TestExportPreservesUnownedRuntimeConfigurationCollision);
+	Run("ExportRejectsCaseAliasesOnCaseInsensitiveFilesystem", TestExportRejectsCaseAliasesOnCaseInsensitiveFilesystem);
+	Run("HeldDependencyValidationCancellationRetainsOutputAndRetries", TestHeldDependencyValidationCancellationRetainsOutputAndRetries);
+	Run("CancellationClosesAtPublicationBoundary", TestCancellationClosesAtPublicationBoundary);
 }

@@ -915,12 +915,13 @@ namespace PulseForge
 		if (Request.CancellationToken.stop_requested())
 			return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled before output staging"));
 
-		PF_INFO("Creating cooked generation staging directory");
 		// The exclusive output lock already owns this namespace. Avoid a second random identifier and keep
 		// interrupted staging data visibly contained by the lock that prevents another writer from entering.
 		const std::filesystem::path Stage = LockPath / "stage";
+		PF_INFO("Creating cooked generation staging directory ({} path characters)", Stage.native().size());
 		if (!std::filesystem::create_directory(Stage, DirectoryError) || DirectoryError)
 			return std::unexpected(Error(AssetCookErrorCode::StagingFailed, "Could not create unique cook staging directory: " + DirectoryError.message(), Stage));
+		PF_INFO("Cook generation staging directory created ({} path characters)", Stage.native().size());
 		std::vector<std::filesystem::path> StagedFiles;
 		StagedFiles.reserve(Payloads.size() + 1);
 		std::vector<std::span<const std::byte>> StagedExpectedBytes;
@@ -936,8 +937,13 @@ namespace PulseForge
 				return std::unexpected(Error(AssetCookErrorCode::SerializationFailed, "Cooked payload path escapes its staging generation", Destination));
 			StagedFiles.push_back(Destination);
 			StagedExpectedBytes.emplace_back(Payloads[Index]);
+			if (Index == 0)
+				PF_INFO("Staging first cooked payload ({} bytes, {} path characters)",
+					Payloads[Index].size(), Destination.native().size());
 			if (auto Written = WriteFile(Destination, Payloads[Index], Request.CancellationToken); !Written)
 				return std::unexpected(Written.error());
+			if (Index == 0)
+				PF_INFO("First cooked payload staged");
 		}
 		PF_INFO("Staged {} cooked payloads", Entries.size());
 		if (auto Freshness = ValidateCookSourceFresh(Plan); !Freshness)

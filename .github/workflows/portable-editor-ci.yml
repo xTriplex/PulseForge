@@ -12,6 +12,7 @@ on:
           - full
           - automation-probe-only
           - macos-desktop-only
+          - windows-asset-diagnostic-only
         default: full
         required: true
 
@@ -25,6 +26,7 @@ concurrency:
 jobs:
   macos-automation-bridge:
     name: macOS · JXA permission bridge probe
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'windows-asset-diagnostic-only') && (github.event_name != 'push' || !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]')) }}
     runs-on: macos-26
     timeout-minutes: 10
     steps:
@@ -132,7 +134,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     needs: macos-automation-bridge
-    if: ${{ always() && !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'automation-probe-only') && (github.event_name != 'push' || !contains(github.event.head_commit.message || '', '[automation-probe-only]')) }}
+    if: ${{ always() && !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'windows-asset-diagnostic-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
     steps:
       - name: Check out sources
         id: checkout_sources
@@ -792,7 +794,7 @@ jobs:
 
   windows-msvc:
     name: Windows 2022 · MSVC · Debug
-    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]'))) }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only' && inputs.validation_mode != 'windows-asset-diagnostic-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -872,9 +874,9 @@ jobs:
       - name: Run registered CPU tests
         shell: pwsh
         run: |
-          & ctest --test-dir Build/CI/windows -C Debug --output-on-failure *> "$env:RUNNER_TEMP/ctest.log"
+          & ctest --test-dir Build/CI/windows -C Debug --output-on-failure --verbose 2>&1 |
+            Tee-Object -FilePath "$env:RUNNER_TEMP/ctest.log"
           $result = $LASTEXITCODE
-          Get-Content "$env:RUNNER_TEMP/ctest.log"
           if ($result -ne 0) { exit $result }
 
       - name: Build Release and Dist editor consumers and verify Debug fixture exclusion
@@ -1003,6 +1005,104 @@ jobs:
           if-no-files-found: ignore
           retention-days: 5
 
+  windows-asset-test-diagnostic:
+    name: Windows 2022 · focused asset/cook hang diagnosis
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'windows-asset-diagnostic-only') || (github.event_name == 'push' && contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]')) }}
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - name: Check out pinned sources and submodules
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Restore pinned dependency sources
+        uses: actions/cache@v5
+        with:
+          path: |
+            Build/CI/Dependencies/pulseforgenvrhi-src
+            Build/CI/Dependencies/pulseforgelua-src
+            Build/CI/Dependencies/vulkan_headers-src
+            Build/CI/Dependencies/_downloads
+          key: ${{ runner.os }}-fetchcontent-v1-${{ hashFiles('CMake/PulseForgeDependencies.cmake', '.gitmodules') }}
+
+      - name: Validate restored dependency sources
+        shell: pwsh
+        run: |
+          & cmake -DPULSEFORGE_REPOSITORY_ROOT="$env:GITHUB_WORKSPACE" `
+            -DPULSEFORGE_CI_DEPENDENCY_CACHE="$env:GITHUB_WORKSPACE/Build/CI/Dependencies" `
+            -P CMake/PulseForgeCiDependencyCache.cmake
+
+      - name: Configure focused Debug asset tests
+        shell: pwsh
+        run: |
+          & cmake -S . -B Build/CI/windows -G "Visual Studio 17 2022" -A x64 `
+            -DBUILD_TESTING=ON `
+            -DPULSEFORGE_BUILD_EDITOR=ON `
+            -DPULSEFORGE_BUILD_GPU_VALIDATION_TESTS=OFF `
+            -DFETCHCONTENT_BASE_DIR="$env:GITHUB_WORKSPACE/Build/CI/Dependencies" `
+            -DFETCHCONTENT_FULLY_DISCONNECTED=OFF *> "$env:RUNNER_TEMP/asset-diagnostic-configure.log"
+          $result = $LASTEXITCODE
+          Get-Content "$env:RUNNER_TEMP/asset-diagnostic-configure.log"
+          if ($result -ne 0) { exit $result }
+
+      - name: Build only the asset test executable
+        shell: pwsh
+        run: |
+          & cmake --build Build/CI/windows --config Debug --parallel --target PulseForgeAssetTests *> `
+            "$env:RUNNER_TEMP/asset-diagnostic-build.log"
+          $result = $LASTEXITCODE
+          Get-Content "$env:RUNNER_TEMP/asset-diagnostic-build.log"
+          if ($result -ne 0) { exit $result }
+
+      - name: Install only Microsoft's Windows debugger if CDB is absent
+        shell: pwsh
+        run: |
+          $Cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
+          if (Test-Path -LiteralPath $Cdb -PathType Leaf) {
+            Write-Output "Using runner-provided CDB: $Cdb"
+            exit 0
+          }
+          $Installer = Join-Path $env:RUNNER_TEMP 'winsdksetup.exe'
+          Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/?linkid=2382321' `
+            -OutFile $Installer -MaximumRedirection 10
+          $Signature = Get-AuthenticodeSignature -FilePath $Installer
+          if ($Signature.Status -ne 'Valid' -or $Signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
+            throw "Windows SDK bootstrapper signature was not valid for Microsoft: $($Signature.Status)"
+          }
+          $Setup = Start-Process -FilePath $Installer `
+            -ArgumentList @('/features', 'OptionId.WindowsDesktopDebuggers', '/quiet', '/norestart') `
+            -PassThru -Wait
+          if ($Setup.ExitCode -notin @(0, 3010)) {
+            throw "Windows Debugging Tools installation failed: exit code $($Setup.ExitCode)"
+          }
+          if (-not (Test-Path -LiteralPath $Cdb -PathType Leaf)) {
+            throw "Windows SDK setup completed without installing the expected debugger: $Cdb"
+          }
+          Write-Output "Installed only the signed Windows Debugging Tools component: $Cdb"
+
+      - name: Run isolated cook and export suites with live output and stack watchdog
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -File Tests/Platform/WindowsAssetTestHangDiagnostic.ps1 `
+            -TestExecutable "$env:GITHUB_WORKSPACE/Build/CI/windows/Debug/PulseForgeAssetTests.exe" `
+            -WorkingDirectory "$env:GITHUB_WORKSPACE/Build/CI/windows" `
+            -LogDirectory "$env:RUNNER_TEMP/windows-asset-diagnostic" `
+            -TimeoutSeconds 120
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload focused Windows diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-asset-cook-diagnostic-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/asset-diagnostic-configure.log
+            ${{ runner.temp }}/asset-diagnostic-build.log
+            ${{ runner.temp }}/windows-asset-diagnostic/*.log
+          if-no-files-found: ignore
+          retention-days: 5
+
   windows-release-dist-package-verification:
     name: Windows · ${{ matrix.configuration }} package-only desktop verification
     runs-on: windows-2022
@@ -1053,7 +1153,7 @@ jobs:
 
   linux-gcc:
     name: Ubuntu 24.04 · GCC · Ninja · Debug
-    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]'))) }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only' && inputs.validation_mode != 'windows-asset-diagnostic-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
