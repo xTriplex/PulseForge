@@ -44,8 +44,8 @@ namespace
 			else if (Option == "--output") Result.Output = Value;
 			else return std::unexpected("Unknown option: " + std::string(Option));
 		}
-		if (Result.Profile.empty() || Result.Project.empty() || Result.TemplateRoot.empty() || Result.Descriptor.empty())
-			return std::unexpected("Usage: PulseForgeExport --profile <profile.json> --project <project.pfproj> --template-root <dir> --template-descriptor <descriptor.json> [--output <dir>]");
+		if (Result.Profile.empty() || Result.Project.empty() || Result.Descriptor.empty())
+			return std::unexpected("Usage: PulseForgeExport --profile <profile.json> --project <project.pfproj> --template-descriptor <descriptor.json> [--template-root <dir>] [--output <dir>]");
 		return Result;
 	}
 
@@ -69,11 +69,21 @@ namespace
 		if (!Parsed) { std::cerr << Parsed.error() << '\n'; return 2; }
 		auto Profile = PulseForge::ExportBuildProfileSerializer::Load(Parsed->Profile);
 		if (!Profile) { std::cerr << "Invalid profile: " << Profile.error().Message << '\n'; return 2; }
+		std::optional<std::filesystem::path> ExplicitTemplateRoot;
+		if (!Parsed->TemplateRoot.empty()) ExplicitTemplateRoot = Parsed->TemplateRoot;
+		auto TemplateRoot = PulseForge::ResolveExportTemplateRoot(Parsed->Descriptor, ExplicitTemplateRoot);
+		if (!TemplateRoot)
+		{
+			std::cerr << "Invalid player template: " << TemplateRoot.error().Message;
+			if (!TemplateRoot.error().Path.empty()) std::cerr << " [" << PathToUtf8(TemplateRoot.error().Path) << ']';
+			std::cerr << '\n';
+			return 2;
+		}
 		PulseForge::AssetExportService Service;
 		PulseForge::AssetExportRequest Request;
 		Request.SourceProjectFile = Parsed->Project;
 		Request.Profile = std::move(*Profile);
-		Request.TemplateRoot = Parsed->TemplateRoot;
+		Request.TemplateRoot = std::move(*TemplateRoot);
 		Request.TemplateDescriptor = Parsed->Descriptor;
 		Request.OutputOverride = Parsed->Output;
 		auto Started = Service.Start(std::move(Request));

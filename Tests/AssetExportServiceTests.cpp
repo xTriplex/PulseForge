@@ -5,16 +5,21 @@
 #include "Assets/Project.h"
 #include "Scene/SceneSerializer.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -227,6 +232,163 @@ namespace
 		return true;
 	}
 
+	bool ReadTextFile(const std::filesystem::path& Path, std::string& Content)
+	{
+		std::ifstream Input(Path, std::ios::binary);
+		if (!Input) return false;
+		Content.assign(std::istreambuf_iterator<char>(Input), std::istreambuf_iterator<char>());
+		return !Input.bad();
+	}
+
+	bool WriteTemplateBundle(const std::filesystem::path& TemplateRoot, const ExportTemplateDescriptor& Descriptor)
+	{
+		for (const std::string& Relative : Descriptor.RuntimeFiles)
+		{
+			const std::filesystem::path Destination = TemplateRoot / std::filesystem::u8path(Relative);
+			if (Relative == Descriptor.Entrypoint)
+			{
+				if (!WriteValidTestExecutable(Destination)) return false;
+			}
+			else if (!WriteTextFile(Destination, "template file: " + Relative)) return false;
+		}
+		return true;
+	}
+
+	bool WriteTemplateDescriptor(const std::filesystem::path& DescriptorPath, const ExportTemplateDescriptor& Descriptor)
+	{
+		const auto Serialized = SerializeExportTemplateDescriptor(Descriptor);
+		return Serialized && WriteTextFile(DescriptorPath, *Serialized);
+	}
+
+	bool WriteTemplateDescriptorWithRawRuntimeFiles(const std::filesystem::path& DescriptorPath,
+		const ExportTemplateDescriptor& ValidDescriptor, const std::vector<std::string>& RuntimeFiles)
+	{
+		const auto Serialized = SerializeExportTemplateDescriptor(ValidDescriptor);
+		if (!Serialized) return false;
+		nlohmann::json Document = nlohmann::json::parse(*Serialized);
+		Document["runtimeFiles"] = RuntimeFiles;
+		return WriteTextFile(DescriptorPath, Document.dump(2) + "\n");
+	}
+
+	struct RealExportCase final
+	{
+		ExportTemplateDescriptor Descriptor = MakeHostDescriptor();
+		AssetExportRequest Request;
+		std::filesystem::path TemplateRoot;
+		std::filesystem::path DescriptorPath;
+		std::filesystem::path Output;
+	};
+
+	bool PrepareRealExportCase(const std::filesystem::path& Root, RealExportCase& ExportCase)
+	{
+		std::filesystem::path ProjectFile;
+		AssetID StartupScene;
+		if (!PrepareExportProject(Root, ProjectFile, StartupScene)) return false;
+
+		ExportCase.TemplateRoot = Root / "Template";
+		ExportCase.DescriptorPath = Root / "template.json";
+		ExportCase.Output = Root / "Package";
+		if (!WriteTemplateBundle(ExportCase.TemplateRoot, ExportCase.Descriptor) ||
+			!WriteTemplateDescriptor(ExportCase.DescriptorPath, ExportCase.Descriptor)) return false;
+
+		ExportCase.Request.SourceProjectFile = ProjectFile;
+		ExportCase.Request.Profile = MakeHostProfile();
+		ExportCase.Request.Profile.StartupScene = StartupScene;
+		ExportCase.Request.TemplateRoot = ExportCase.TemplateRoot;
+		ExportCase.Request.TemplateDescriptor = ExportCase.DescriptorPath;
+		ExportCase.Request.OutputOverride = ExportCase.Output;
+		return true;
+	}
+
+	bool CapturePackageTree(const std::filesystem::path& Root, std::map<std::string, std::string>& Tree)
+	{
+		std::error_code Error;
+		std::filesystem::recursive_directory_iterator Current(Root, Error);
+		if (Error) return false;
+		for (const std::filesystem::recursive_directory_iterator End; Current != End; Current.increment(Error))
+		{
+			if (Error) return false;
+			const std::filesystem::file_status Status = Current->symlink_status(Error);
+			if (Error) return false;
+			if (std::filesystem::is_directory(Status)) continue;
+			if (!std::filesystem::is_regular_file(Status)) return false;
+
+			std::ifstream Input(Current->path(), std::ios::binary);
+			if (!Input) return false;
+			const std::string Bytes((std::istreambuf_iterator<char>(Input)), std::istreambuf_iterator<char>());
+			if (Input.bad()) return false;
+			Tree[PathUtf8(Current->path().lexically_relative(Root))] = DigestText(Bytes);
+		}
+		return !Error;
+	}
+
+	AssetExportSnapshot WaitForTerminal(AssetExportService& Service, uint64_t RequestID);
+
+	AssetExportSnapshot RunExportRequest(TestRunner& Tests, AssetExportRequest Request)
+	{
+		AssetExportService Service;
+		const auto Started = Service.Start(std::move(Request));
+		PF_CHECK(Tests, Started.has_value());
+		if (!Started) return {};
+		const AssetExportSnapshot Snapshot = WaitForTerminal(Service, *Started);
+		PF_CHECK(Tests, !Snapshot.Running);
+		Service.Shutdown();
+		return Snapshot;
+	}
+
+	std::string RuntimeConfigurationRelativePath()
+	{
+		return HostPlatform() == ExportTargetPlatform::MacOS
+			? "Contents/Resources/PulseForgeRuntime.cfg"
+			: "PulseForgeRuntime.cfg";
+	}
+
+	bool HasCaseInsensitivePathSemantics(const std::filesystem::path& Root)
+	{
+		const auto MixedCase = Root / "CaseSemanticsProbe";
+		const auto LowerCase = Root / "casesemanticsprobe";
+		if (!WriteTextFile(MixedCase, "probe")) return false;
+		std::error_code Error;
+		const bool IsCaseInsensitive = std::filesystem::exists(LowerCase, Error) && !Error;
+		std::filesystem::remove(MixedCase, Error);
+		return IsCaseInsensitive;
+	}
+
+	class ExportTestGate final
+	{
+	public:
+		~ExportTestGate() { Release(); }
+
+		void Pause()
+		{
+			std::unique_lock Lock(m_Mutex);
+			m_Entered = true;
+			m_Condition.notify_all();
+			m_Condition.wait(Lock, [this] { return m_Released; });
+		}
+
+		[[nodiscard]] bool WaitUntilEntered(std::chrono::milliseconds Timeout)
+		{
+			std::unique_lock Lock(m_Mutex);
+			return m_Condition.wait_for(Lock, Timeout, [this] { return m_Entered; });
+		}
+
+		void Release() noexcept
+		{
+			{
+				std::lock_guard Lock(m_Mutex);
+				m_Released = true;
+			}
+			m_Condition.notify_all();
+		}
+
+	private:
+		std::mutex m_Mutex;
+		std::condition_variable m_Condition;
+		bool m_Entered = false;
+		bool m_Released = false;
+	};
+
 	bool WriteRecoveryFixture(
 		const std::filesystem::path& Output,
 		const std::filesystem::path& Candidate,
@@ -334,6 +496,7 @@ namespace
 		WrongTarget.TargetPlatform = OtherPlatform(WrongTarget.TargetPlatform);
 		WrongTarget.TargetArchitecture = ExportTargetArchitecture::X64;
 		WrongTarget.RuntimeFiles = { WrongTarget.Entrypoint };
+		PF_CHECK(Tests, WriteTemplateBundle(Fixture.Root(), WrongTarget));
 		const auto WrongTargetJson = SerializeExportTemplateDescriptor(WrongTarget);
 		PF_CHECK(Tests, WrongTargetJson.has_value());
 		if (!WrongTargetJson) return;
@@ -356,6 +519,9 @@ namespace
 		const AssetExportSnapshot Snapshot = WaitForTerminal(Service, *Started);
 		PF_CHECK(Tests, !Snapshot.Running);
 		PF_CHECK(Tests, Snapshot.Phase == AssetExportPhase::Failed);
+		if (Snapshot.Error)
+			std::cerr << "Wrong-target export returned " << static_cast<int>(Snapshot.Error->Code)
+				<< ": " << Snapshot.Error->Message << '\n';
 		PF_CHECK(Tests, Snapshot.Error && Snapshot.Error->Code == AssetExportErrorCode::TemplateIncompatible);
 		PF_CHECK(Tests, !std::filesystem::exists(Output));
 		Service.Shutdown();
@@ -655,14 +821,35 @@ namespace
 		const auto InventoryPath = Output / ".pf-export-inventory.json";
 		std::ifstream InventoryInput(InventoryPath, std::ios::binary);
 		const std::string InventoryText((std::istreambuf_iterator<char>(InventoryInput)), std::istreambuf_iterator<char>());
+		InventoryInput.close();
 		Json Inventory = Json::parse(InventoryText);
-		Inventory["files"]["unrelated sentinel.txt"] = DigestText("owned by the user");
+		PF_CHECK(Tests, Inventory.is_object());
+		PF_CHECK(Tests, Inventory.value("format", std::string{}) == "PulseForgeExportInventory");
+		PF_CHECK(Tests, Inventory.value("version", 0u) == 3u);
+		PF_CHECK(Tests, Inventory.value("profileId", std::string{}) == Request.Profile.ProfileID.ToString());
+		PF_CHECK(Tests, !Inventory.value("cookGeneration", std::string{}).empty());
+		PF_CHECK(Tests, Inventory.contains("files") && Inventory["files"].is_object());
+		const auto OwnershipPath = Output / ".pf-export-template-ownership.json";
+		std::string OwnershipText;
+		PF_CHECK(Tests, ReadTextFile(OwnershipPath, OwnershipText));
+		const Json Ownership = Json::parse(OwnershipText);
+		PF_CHECK(Tests, Ownership.value("format", std::string{}) == "PulseForgeTemplateOwnership");
+		PF_CHECK(Tests, Ownership.value("version", 0u) == 1u);
+		PF_CHECK(Tests, Ownership.value("entrypoint", std::string{}) == Descriptor.Entrypoint);
+		PF_CHECK(Tests, Ownership.value("membershipDigest", std::string{}).size() == 32);
+		const Json OriginalInventory = Inventory;
+		Inventory["files"]["unrelated sentinel.txt"] = Json{
+			{ "role", "template" }, { "digest", DigestText("owned by the user") }
+		};
+		PF_CHECK(Tests, Inventory["files"]["unrelated sentinel.txt"].value("digest", std::string{}) ==
+			DigestText("owned by the user"));
 		PF_CHECK(Tests, WriteTextFile(InventoryPath, Inventory.dump(2) + "\n"));
 		std::ifstream TamperedInput(InventoryPath, std::ios::binary);
 		const std::string TamperedInventory((std::istreambuf_iterator<char>(TamperedInput)), std::istreambuf_iterator<char>());
+		TamperedInput.close();
 
 		AssetExportService RetryService;
-		Started = RetryService.Start(std::move(Request));
+		Started = RetryService.Start(Request);
 		PF_CHECK(Tests, Started.has_value());
 		if (!Started) return;
 		const AssetExportSnapshot Rejected = WaitForTerminal(RetryService, *Started);
@@ -670,11 +857,542 @@ namespace
 		PF_CHECK(Tests, Rejected.Error && Rejected.Error->Code == AssetExportErrorCode::PublicationFailed);
 		std::ifstream PreservedInventoryInput(InventoryPath, std::ios::binary);
 		const std::string PreservedInventory((std::istreambuf_iterator<char>(PreservedInventoryInput)), std::istreambuf_iterator<char>());
+		PreservedInventoryInput.close();
 		std::ifstream SentinelInput(Sentinel, std::ios::binary);
 		const std::string PreservedSentinel((std::istreambuf_iterator<char>(SentinelInput)), std::istreambuf_iterator<char>());
+		SentinelInput.close();
 		PF_CHECK(Tests, PreservedInventory == TamperedInventory);
 		PF_CHECK(Tests, PreservedSentinel == "owned by the user");
 		RetryService.Shutdown();
+
+		Json UnsupportedVersion = Inventory;
+		UnsupportedVersion["version"] = 1;
+		const std::string UnsupportedVersionInventory = UnsupportedVersion.dump(2) + "\n";
+		PF_CHECK(Tests, WriteTextFile(InventoryPath, UnsupportedVersionInventory));
+		AssetExportService VersionRetryService;
+		Started = VersionRetryService.Start(Request);
+		PF_CHECK(Tests, Started.has_value());
+		if (!Started) return;
+		const AssetExportSnapshot VersionRejected = WaitForTerminal(VersionRetryService, *Started);
+		PF_CHECK(Tests, VersionRejected.Phase == AssetExportPhase::Failed);
+		PF_CHECK(Tests, VersionRejected.Error && VersionRejected.Error->Code == AssetExportErrorCode::PublicationFailed);
+		std::string PreservedVersionInventory;
+		PF_CHECK(Tests, ReadTextFile(InventoryPath, PreservedVersionInventory));
+		PF_CHECK(Tests, PreservedVersionInventory == UnsupportedVersionInventory);
+		VersionRetryService.Shutdown();
+
+		Json LegacyVersionTwo = OriginalInventory;
+		LegacyVersionTwo["version"] = 2;
+		LegacyVersionTwo.erase("resourcePrefix");
+		LegacyVersionTwo.erase("templateFiles");
+		LegacyVersionTwo.erase("templateEntrypoint");
+		LegacyVersionTwo.erase("templateMembershipDigest");
+		Json LegacyReceipts = Json::object();
+		for (const auto& [Name, Receipt] : OriginalInventory["files"].items())
+			if (Name != ".pf-export-template-ownership.json") LegacyReceipts[Name] = Receipt.at("digest");
+		LegacyVersionTwo["files"] = std::move(LegacyReceipts);
+		const std::string LegacyVersionTwoText = LegacyVersionTwo.dump(2) + "\n";
+		PF_CHECK(Tests, WriteTextFile(InventoryPath, LegacyVersionTwoText));
+		std::error_code RemoveOwnershipError;
+		std::filesystem::remove(OwnershipPath, RemoveOwnershipError);
+		PF_CHECK(Tests, !RemoveOwnershipError);
+		AssetExportService LegacyUpgradeService;
+		Started = LegacyUpgradeService.Start(Request);
+		PF_CHECK(Tests, Started.has_value());
+		if (!Started) return;
+		const AssetExportSnapshot LegacyUpgraded = WaitForTerminal(LegacyUpgradeService, *Started);
+		if (LegacyUpgraded.Error)
+			std::cerr << "Legacy inventory upgrade returned " << static_cast<int>(LegacyUpgraded.Error->Code)
+				<< ": " << LegacyUpgraded.Error->Message << " at " << LegacyUpgraded.Error->Path << '\n';
+		PF_CHECK(Tests, LegacyUpgraded.Phase == AssetExportPhase::Complete);
+		std::string UpgradedInventoryText;
+		PF_CHECK(Tests, ReadTextFile(InventoryPath, UpgradedInventoryText));
+		const Json UpgradedInventory = Json::parse(UpgradedInventoryText);
+		PF_CHECK(Tests, UpgradedInventory.value("version", 0u) == 3u);
+		std::string PreservedLegacySentinel;
+		PF_CHECK(Tests, ReadTextFile(Sentinel, PreservedLegacySentinel));
+		PF_CHECK(Tests, PreservedLegacySentinel == "owned by the user");
+		LegacyUpgradeService.Shutdown();
+	}
+
+	void TestExportTemplateRenameRemovalAndRepeatedExport(TestRunner& Tests)
+	{
+		TemporaryExportFixture Fixture;
+		PF_CHECK(Tests, Fixture.IsReady());
+		if (!Fixture.IsReady()) return;
+
+		RealExportCase ExportCase;
+		PF_CHECK(Tests, PrepareRealExportCase(Fixture.Root(), ExportCase));
+		if (ExportCase.Request.SourceProjectFile.empty()) return;
+
+		const std::string OldRuntimeFile = "Runtime/Old.dat";
+		const std::string RemovedRuntimeFile = "Runtime/Removed.dat";
+		const std::string RenamedRuntimeFile = "Runtime/New.dat";
+		ExportCase.Descriptor.RuntimeFiles.push_back(OldRuntimeFile);
+		ExportCase.Descriptor.RuntimeFiles.push_back(RemovedRuntimeFile);
+		PF_CHECK(Tests, WriteTemplateBundle(ExportCase.TemplateRoot, ExportCase.Descriptor));
+		PF_CHECK(Tests, WriteTemplateDescriptor(ExportCase.DescriptorPath, ExportCase.Descriptor));
+
+		const AssetExportSnapshot First = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, First.Phase == AssetExportPhase::Complete);
+		if (First.Phase != AssetExportPhase::Complete) return;
+
+		const auto Sentinel = ExportCase.Output / "User" / "sentinel.txt";
+		PF_CHECK(Tests, WriteTextFile(Sentinel, "user-owned package data"));
+		const auto OldOutputFile = ExportCase.Output / std::filesystem::u8path(OldRuntimeFile);
+		const auto RemovedOutputFile = ExportCase.Output / std::filesystem::u8path(RemovedRuntimeFile);
+		const auto RenamedOutputFile = ExportCase.Output / std::filesystem::u8path(RenamedRuntimeFile);
+		PF_CHECK(Tests, std::filesystem::exists(OldOutputFile));
+		PF_CHECK(Tests, std::filesystem::exists(RemovedOutputFile));
+
+		auto OldRuntime = std::find(ExportCase.Descriptor.RuntimeFiles.begin(), ExportCase.Descriptor.RuntimeFiles.end(), OldRuntimeFile);
+		PF_CHECK(Tests, OldRuntime != ExportCase.Descriptor.RuntimeFiles.end());
+		if (OldRuntime == ExportCase.Descriptor.RuntimeFiles.end()) return;
+		*OldRuntime = RenamedRuntimeFile;
+		std::erase(ExportCase.Descriptor.RuntimeFiles, RemovedRuntimeFile);
+		PF_CHECK(Tests, WriteTemplateBundle(ExportCase.TemplateRoot, ExportCase.Descriptor));
+		PF_CHECK(Tests, WriteTemplateDescriptor(ExportCase.DescriptorPath, ExportCase.Descriptor));
+
+		const AssetExportSnapshot Updated = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, Updated.Phase == AssetExportPhase::Complete);
+		if (Updated.Phase != AssetExportPhase::Complete) return;
+		PF_CHECK(Tests, !std::filesystem::exists(OldOutputFile));
+		PF_CHECK(Tests, !std::filesystem::exists(RemovedOutputFile));
+		PF_CHECK(Tests, std::filesystem::exists(RenamedOutputFile));
+		std::string RuntimeText;
+		PF_CHECK(Tests, ReadTextFile(RenamedOutputFile, RuntimeText));
+		PF_CHECK(Tests, RuntimeText == "template file: " + RenamedRuntimeFile);
+		std::string SentinelText;
+		PF_CHECK(Tests, ReadTextFile(Sentinel, SentinelText));
+		PF_CHECK(Tests, SentinelText == "user-owned package data");
+
+		const AssetExportSnapshot Repeated = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, Repeated.Phase == AssetExportPhase::Complete);
+		PF_CHECK(Tests, std::filesystem::exists(RenamedOutputFile));
+		PF_CHECK(Tests, !std::filesystem::exists(OldOutputFile));
+		PF_CHECK(Tests, !std::filesystem::exists(RemovedOutputFile));
+		PF_CHECK(Tests, ReadTextFile(Sentinel, SentinelText));
+		PF_CHECK(Tests, SentinelText == "user-owned package data");
+
+		std::string InventoryText;
+		PF_CHECK(Tests, ReadTextFile(ExportCase.Output / ".pf-export-inventory.json", InventoryText));
+		const nlohmann::json Inventory = nlohmann::json::parse(InventoryText);
+		PF_CHECK(Tests, Inventory.value("version", 0u) == 3u);
+		std::string OwnershipText;
+		PF_CHECK(Tests, ReadTextFile(ExportCase.Output / ".pf-export-template-ownership.json", OwnershipText));
+		const nlohmann::json Ownership = nlohmann::json::parse(OwnershipText);
+		PF_CHECK(Tests, Ownership["templateFiles"].is_array());
+		PF_CHECK(Tests, std::find(Ownership["templateFiles"].begin(), Ownership["templateFiles"].end(), RenamedRuntimeFile) !=
+			Ownership["templateFiles"].end());
+		PF_CHECK(Tests, std::find(Ownership["templateFiles"].begin(), Ownership["templateFiles"].end(), OldRuntimeFile) ==
+			Ownership["templateFiles"].end());
+		PF_CHECK(Tests, std::find(Ownership["templateFiles"].begin(), Ownership["templateFiles"].end(), RemovedRuntimeFile) ==
+			Ownership["templateFiles"].end());
+		PF_CHECK(Tests, Inventory["files"].contains(RenamedRuntimeFile));
+		PF_CHECK(Tests, Inventory["files"][RenamedRuntimeFile].value("role", std::string{}) == "template");
+		PF_CHECK(Tests, Inventory["files"][RenamedRuntimeFile].value("digest", std::string{}) ==
+			DigestText("template file: " + RenamedRuntimeFile));
+		PF_CHECK(Tests, !Inventory["files"].contains(OldRuntimeFile));
+		PF_CHECK(Tests, !Inventory["files"].contains(RemovedRuntimeFile));
+		PF_CHECK(Tests, !Inventory["files"].contains("User/sentinel.txt"));
+	}
+
+	void TestExportPreservesModifiedPreviouslyOwnedFile(TestRunner& Tests)
+	{
+		TemporaryExportFixture Fixture;
+		PF_CHECK(Tests, Fixture.IsReady());
+		if (!Fixture.IsReady()) return;
+		RealExportCase ExportCase;
+		PF_CHECK(Tests, PrepareRealExportCase(Fixture.Root(), ExportCase));
+		if (ExportCase.Request.SourceProjectFile.empty()) return;
+
+		const AssetExportSnapshot First = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, First.Phase == AssetExportPhase::Complete);
+		if (First.Phase != AssetExportPhase::Complete) return;
+
+		const auto Sentinel = ExportCase.Output / "User" / "sentinel.txt";
+		PF_CHECK(Tests, WriteTextFile(Sentinel, "keep this unowned file"));
+		const std::string OwnedRuntimePath = ExportCase.Descriptor.RuntimeFiles.back();
+		const auto ModifiedOwnedFile = ExportCase.Output / std::filesystem::u8path(OwnedRuntimePath);
+		PF_CHECK(Tests, WriteTextFile(ModifiedOwnedFile, "user-modified owned runtime file"));
+		std::map<std::string, std::string> BeforeRetry;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, BeforeRetry));
+
+		const AssetExportSnapshot Rejected = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, Rejected.Phase == AssetExportPhase::Failed);
+		PF_CHECK(Tests, Rejected.Error && Rejected.Error->Code == AssetExportErrorCode::PublicationFailed);
+		std::map<std::string, std::string> AfterRetry;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, AfterRetry));
+		PF_CHECK(Tests, AfterRetry == BeforeRetry);
+		std::string ModifiedText;
+		PF_CHECK(Tests, ReadTextFile(ModifiedOwnedFile, ModifiedText));
+		PF_CHECK(Tests, ModifiedText == "user-modified owned runtime file");
+		std::string SentinelText;
+		PF_CHECK(Tests, ReadTextFile(Sentinel, SentinelText));
+		PF_CHECK(Tests, SentinelText == "keep this unowned file");
+	}
+
+	void TestExportPreservesUnownedTemplateCollisionAndAllowsRetry(TestRunner& Tests)
+	{
+		TemporaryExportFixture Fixture;
+		PF_CHECK(Tests, Fixture.IsReady());
+		if (!Fixture.IsReady()) return;
+		RealExportCase ExportCase;
+		PF_CHECK(Tests, PrepareRealExportCase(Fixture.Root(), ExportCase));
+		if (ExportCase.Request.SourceProjectFile.empty()) return;
+
+		const AssetExportSnapshot First = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, First.Phase == AssetExportPhase::Complete);
+		if (First.Phase != AssetExportPhase::Complete) return;
+
+		const std::string CollidingPath = "User/PlayerData.dat";
+		const auto Sentinel = ExportCase.Output / std::filesystem::u8path(CollidingPath);
+		PF_CHECK(Tests, WriteTextFile(Sentinel, "unowned bytes must survive"));
+		std::map<std::string, std::string> BeforeCollision;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, BeforeCollision));
+
+		ExportCase.Descriptor.RuntimeFiles.push_back(CollidingPath);
+		PF_CHECK(Tests, WriteTemplateBundle(ExportCase.TemplateRoot, ExportCase.Descriptor));
+		PF_CHECK(Tests, WriteTemplateDescriptor(ExportCase.DescriptorPath, ExportCase.Descriptor));
+		const AssetExportSnapshot Collision = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, Collision.Phase == AssetExportPhase::Failed);
+		PF_CHECK(Tests, Collision.Error && Collision.Error->Code == AssetExportErrorCode::PublicationFailed);
+		PF_CHECK(Tests, Collision.Error && Collision.Error->Message.find("unowned package file collides") != std::string::npos);
+		std::map<std::string, std::string> AfterCollision;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, AfterCollision));
+		PF_CHECK(Tests, AfterCollision == BeforeCollision);
+		std::string SentinelText;
+		PF_CHECK(Tests, ReadTextFile(Sentinel, SentinelText));
+		PF_CHECK(Tests, SentinelText == "unowned bytes must survive");
+
+		std::error_code Error;
+		std::filesystem::remove(Sentinel, Error);
+		PF_CHECK(Tests, !Error);
+		const AssetExportSnapshot Retry = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, Retry.Phase == AssetExportPhase::Complete);
+		std::string TemplateText;
+		PF_CHECK(Tests, ReadTextFile(ExportCase.Output / std::filesystem::u8path(CollidingPath), TemplateText));
+		PF_CHECK(Tests, TemplateText == "template file: " + CollidingPath);
+	}
+
+	void TestExportDoesNotAdoptAnOccupiedCandidatePath(TestRunner& Tests)
+	{
+		TemporaryExportFixture Fixture;
+		PF_CHECK(Tests, Fixture.IsReady());
+		if (!Fixture.IsReady()) return;
+		RealExportCase ExportCase;
+		PF_CHECK(Tests, PrepareRealExportCase(Fixture.Root(), ExportCase));
+		if (ExportCase.Request.SourceProjectFile.empty()) return;
+
+		const AssetExportSnapshot First = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, First.Phase == AssetExportPhase::Complete);
+		if (First.Phase != AssetExportPhase::Complete) return;
+		std::map<std::string, std::string> PublishedBefore;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, PublishedBefore));
+
+		bool CollisionCreated = false;
+		std::filesystem::path OccupiedCandidate;
+		AssetExportRequest Request = ExportCase.Request;
+		Request.BeforeCandidateCreate = [&CollisionCreated, &OccupiedCandidate](const std::filesystem::path& Candidate)
+		{
+			OccupiedCandidate = Candidate;
+			std::error_code Error;
+			CollisionCreated = std::filesystem::create_directory(Candidate, Error) && !Error;
+			if (CollisionCreated)
+				CollisionCreated = WriteTextFile(Candidate / "foreign.txt", "foreign candidate data");
+		};
+		const AssetExportSnapshot Rejected = RunExportRequest(Tests, std::move(Request));
+		PF_CHECK(Tests, CollisionCreated);
+		PF_CHECK(Tests, Rejected.Phase == AssetExportPhase::Failed);
+		PF_CHECK(Tests, Rejected.Error && Rejected.Error->Code == AssetExportErrorCode::RecoveryRequired);
+		std::string ForeignText;
+		PF_CHECK(Tests, ReadTextFile(OccupiedCandidate / "foreign.txt", ForeignText));
+		PF_CHECK(Tests, ForeignText == "foreign candidate data");
+		std::map<std::string, std::string> PublishedAfter;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, PublishedAfter));
+		PF_CHECK(Tests, PublishedAfter == PublishedBefore);
+	}
+
+	void TestCandidateCleanupPreservesUnownedChangesAndRecoveryRecord(TestRunner& Tests)
+	{
+		TemporaryExportFixture Fixture;
+		PF_CHECK(Tests, Fixture.IsReady());
+		if (!Fixture.IsReady()) return;
+		RealExportCase ExportCase;
+		PF_CHECK(Tests, PrepareRealExportCase(Fixture.Root(), ExportCase));
+		if (ExportCase.Request.SourceProjectFile.empty()) return;
+
+		const AssetExportSnapshot First = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, First.Phase == AssetExportPhase::Complete);
+		if (First.Phase != AssetExportPhase::Complete) return;
+		std::map<std::string, std::string> PublishedBefore;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, PublishedBefore));
+
+		const std::string ModifiedRelative = ExportCase.Descriptor.RuntimeFiles.back();
+		std::filesystem::path CandidatePath;
+		bool ModifiedCandidate = false;
+		bool AddedCandidateEntry = false;
+		ExportTestGate Gate;
+		AssetExportRequest Request = ExportCase.Request;
+		Request.BeforeDependencyFinalValidation = [&Gate] { Gate.Pause(); };
+		Request.BeforeCandidateCleanup = [&](const std::filesystem::path& Candidate)
+		{
+			CandidatePath = Candidate;
+			ModifiedCandidate = WriteTextFile(Candidate / std::filesystem::u8path(ModifiedRelative), "independently changed runtime");
+			AddedCandidateEntry = WriteTextFile(Candidate / "foreign-after-stage.txt", "unowned candidate bytes");
+		};
+
+		AssetExportService Service;
+		const auto Started = Service.Start(std::move(Request));
+		PF_CHECK(Tests, Started.has_value());
+		if (!Started)
+		{
+			Gate.Release();
+			Service.Shutdown();
+			return;
+		}
+		const bool ReachedGate = Gate.WaitUntilEntered(std::chrono::seconds(10));
+		PF_CHECK(Tests, ReachedGate);
+		if (!ReachedGate)
+		{
+			Gate.Release();
+			(void)WaitForTerminal(Service, *Started);
+			Service.Shutdown();
+			return;
+		}
+		PF_CHECK(Tests, Service.RequestCancel(*Started));
+		Gate.Release();
+		const AssetExportSnapshot Rejected = WaitForTerminal(Service, *Started);
+		Service.Shutdown();
+
+		PF_CHECK(Tests, ModifiedCandidate);
+		PF_CHECK(Tests, AddedCandidateEntry);
+		PF_CHECK(Tests, Rejected.Phase == AssetExportPhase::Failed);
+		PF_CHECK(Tests, Rejected.Error && Rejected.Error->Code == AssetExportErrorCode::RecoveryRequired);
+		PF_CHECK(Tests, Rejected.Error && Rejected.Error->Message.find("preserving the candidate") != std::string::npos);
+		std::string ModifiedText;
+		PF_CHECK(Tests, ReadTextFile(CandidatePath / std::filesystem::u8path(ModifiedRelative), ModifiedText));
+		PF_CHECK(Tests, ModifiedText == "independently changed runtime");
+		std::string ForeignText;
+		PF_CHECK(Tests, ReadTextFile(CandidatePath / "foreign-after-stage.txt", ForeignText));
+		PF_CHECK(Tests, ForeignText == "unowned candidate bytes");
+		std::map<std::string, std::string> PublishedAfter;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, PublishedAfter));
+		PF_CHECK(Tests, PublishedAfter == PublishedBefore);
+
+		const auto OutputName = ExportCase.Output.filename().u8string();
+		const std::string Utf8OutputName(reinterpret_cast<const char*>(OutputName.data()), OutputName.size());
+		const auto Recovery = ExportCase.Output.parent_path() /
+			std::filesystem::u8path("." + Utf8OutputName + ".pf-export-recovery.json");
+		std::string RecoveryBefore;
+		PF_CHECK(Tests, ReadTextFile(Recovery, RecoveryBefore));
+		const auto RecoveryAttempt = AssetExportService::RecoverInterruptedPublication(ExportCase.Output);
+		PF_CHECK(Tests, !RecoveryAttempt);
+		PF_CHECK(Tests, RecoveryAttempt.error().Code == AssetExportErrorCode::RecoveryRequired);
+		std::string RecoveryAfter;
+		PF_CHECK(Tests, ReadTextFile(Recovery, RecoveryAfter));
+		PF_CHECK(Tests, RecoveryAfter == RecoveryBefore);
+		PF_CHECK(Tests, ReadTextFile(CandidatePath / "foreign-after-stage.txt", ForeignText));
+		PF_CHECK(Tests, ForeignText == "unowned candidate bytes");
+	}
+
+	void TestExportRejectsTemplateRuntimeConfigurationCollision(TestRunner& Tests)
+	{
+		TemporaryExportFixture Fixture;
+		PF_CHECK(Tests, Fixture.IsReady());
+		if (!Fixture.IsReady()) return;
+		RealExportCase ExportCase;
+		PF_CHECK(Tests, PrepareRealExportCase(Fixture.Root(), ExportCase));
+		if (ExportCase.Request.SourceProjectFile.empty()) return;
+
+		const std::string RuntimeConfiguration = RuntimeConfigurationRelativePath();
+		ExportCase.Descriptor.RuntimeFiles.push_back(RuntimeConfiguration);
+		PF_CHECK(Tests, WriteTemplateBundle(ExportCase.TemplateRoot, ExportCase.Descriptor));
+		PF_CHECK(Tests, WriteTemplateDescriptorWithRawRuntimeFiles(
+			ExportCase.DescriptorPath, MakeHostDescriptor(), ExportCase.Descriptor.RuntimeFiles));
+		const AssetExportSnapshot Rejected = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, Rejected.Phase == AssetExportPhase::Failed);
+		PF_CHECK(Tests, Rejected.Error && Rejected.Error->Code == AssetExportErrorCode::TemplateIncompatible);
+		PF_CHECK(Tests, !std::filesystem::exists(ExportCase.Output));
+	}
+
+	void TestExportPreservesUnownedRuntimeConfigurationCollision(TestRunner& Tests)
+	{
+		TemporaryExportFixture Fixture;
+		PF_CHECK(Tests, Fixture.IsReady());
+		if (!Fixture.IsReady()) return;
+		RealExportCase ExportCase;
+		PF_CHECK(Tests, PrepareRealExportCase(Fixture.Root(), ExportCase));
+		if (ExportCase.Request.SourceProjectFile.empty()) return;
+
+		const AssetExportSnapshot First = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, First.Phase == AssetExportPhase::Complete);
+		if (First.Phase != AssetExportPhase::Complete) return;
+
+		const std::string RuntimeConfiguration = RuntimeConfigurationRelativePath();
+		const auto Sentinel = ExportCase.Output / std::filesystem::u8path(RuntimeConfiguration);
+		std::string InventoryText;
+		PF_CHECK(Tests, ReadTextFile(ExportCase.Output / ".pf-export-inventory.json", InventoryText));
+		nlohmann::json Inventory = nlohmann::json::parse(InventoryText);
+		PF_CHECK(Tests, Inventory.value("version", 0u) == 3u);
+		PF_CHECK(Tests, Inventory["files"].contains(RuntimeConfiguration));
+		Inventory["files"].erase(RuntimeConfiguration);
+		PF_CHECK(Tests, WriteTextFile(ExportCase.Output / ".pf-export-inventory.json", Inventory.dump(2) + "\n"));
+		PF_CHECK(Tests, WriteTextFile(Sentinel, "unowned runtime configuration"));
+		std::map<std::string, std::string> BeforeExport;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, BeforeExport));
+		const AssetExportSnapshot Rejected = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, Rejected.Phase == AssetExportPhase::Failed);
+		PF_CHECK(Tests, Rejected.Error && Rejected.Error->Code == AssetExportErrorCode::PublicationFailed);
+		PF_CHECK(Tests, Rejected.Error && Rejected.Error->Message.find("unowned package file collides") != std::string::npos);
+		std::map<std::string, std::string> AfterExport;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, AfterExport));
+		PF_CHECK(Tests, AfterExport == BeforeExport);
+		std::string SentinelText;
+		PF_CHECK(Tests, ReadTextFile(Sentinel, SentinelText));
+		PF_CHECK(Tests, SentinelText == "unowned runtime configuration");
+	}
+
+	void TestExportRejectsCaseAliasesOnCaseInsensitiveFilesystem(TestRunner& Tests)
+	{
+		TemporaryExportFixture Fixture;
+		PF_CHECK(Tests, Fixture.IsReady());
+		if (!Fixture.IsReady()) return;
+		if (!HasCaseInsensitivePathSemantics(Fixture.Root())) return;
+
+		RealExportCase ExportCase;
+		PF_CHECK(Tests, PrepareRealExportCase(Fixture.Root(), ExportCase));
+		if (ExportCase.Request.SourceProjectFile.empty()) return;
+		ExportCase.Descriptor.RuntimeFiles.push_back("CaseAlias.bin");
+		ExportCase.Descriptor.RuntimeFiles.push_back("casealias.bin");
+		PF_CHECK(Tests, WriteTemplateBundle(ExportCase.TemplateRoot, ExportCase.Descriptor));
+		PF_CHECK(Tests, WriteTemplateDescriptorWithRawRuntimeFiles(
+			ExportCase.DescriptorPath, MakeHostDescriptor(), ExportCase.Descriptor.RuntimeFiles));
+		const AssetExportSnapshot Rejected = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, Rejected.Phase == AssetExportPhase::Failed);
+		PF_CHECK(Tests, Rejected.Error && Rejected.Error->Code == AssetExportErrorCode::TemplateIncompatible);
+		PF_CHECK(Tests, !std::filesystem::exists(ExportCase.Output));
+	}
+
+	void TestHeldDependencyValidationCancellationRetainsOutputAndRetries(TestRunner& Tests)
+	{
+		TemporaryExportFixture Fixture;
+		PF_CHECK(Tests, Fixture.IsReady());
+		if (!Fixture.IsReady()) return;
+		RealExportCase ExportCase;
+		PF_CHECK(Tests, PrepareRealExportCase(Fixture.Root(), ExportCase));
+		if (ExportCase.Request.SourceProjectFile.empty()) return;
+
+		const AssetExportSnapshot First = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, First.Phase == AssetExportPhase::Complete);
+		if (First.Phase != AssetExportPhase::Complete) return;
+
+		const auto Sentinel = ExportCase.Output / "User" / "sentinel.txt";
+		PF_CHECK(Tests, WriteTextFile(Sentinel, "old package remains usable"));
+		std::map<std::string, std::string> BeforeCancellation;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, BeforeCancellation));
+
+		ExportTestGate Gate;
+		size_t CookStartCount = 0;
+		AssetExportRequest CancellationRequest = ExportCase.Request;
+		CancellationRequest.BeforeDependencyFinalValidation = [&Gate] { Gate.Pause(); };
+		CancellationRequest.BeforeCook = [&CookStartCount] { ++CookStartCount; };
+		AssetExportService Service;
+		const auto Started = Service.Start(std::move(CancellationRequest));
+		PF_CHECK(Tests, Started.has_value());
+		if (!Started)
+		{
+			Gate.Release();
+			Service.Shutdown();
+			return;
+		}
+
+		const bool ReachedValidationBoundary = Gate.WaitUntilEntered(std::chrono::seconds(10));
+		PF_CHECK(Tests, ReachedValidationBoundary);
+		if (!ReachedValidationBoundary)
+		{
+			Gate.Release();
+			(void)WaitForTerminal(Service, *Started);
+			Service.Shutdown();
+			return;
+		}
+
+		const AssetExportSnapshot Held = Service.GetSnapshot(*Started);
+		PF_CHECK(Tests, Held.Running);
+		PF_CHECK(Tests, Held.Phase == AssetExportPhase::Cook);
+		const bool CancellationRequested = Service.RequestCancel(*Started);
+		PF_CHECK(Tests, CancellationRequested);
+		PF_CHECK(Tests, Service.GetSnapshot(*Started).CancellationRequested);
+		Gate.Release();
+
+		const AssetExportSnapshot Cancelled = WaitForTerminal(Service, *Started);
+		PF_CHECK(Tests, Cancelled.Phase == AssetExportPhase::Cancelled);
+		PF_CHECK(Tests, Cancelled.Error && Cancelled.Error->Code == AssetExportErrorCode::Cancelled);
+		PF_CHECK(Tests, CookStartCount == 0);
+		std::map<std::string, std::string> AfterCancellation;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, AfterCancellation));
+		PF_CHECK(Tests, AfterCancellation == BeforeCancellation);
+		PF_CHECK(Tests, !Service.RequestCancel(*Started));
+		Service.Shutdown();
+
+		const AssetExportSnapshot Retry = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, Retry.Phase == AssetExportPhase::Complete);
+		std::string SentinelText;
+		PF_CHECK(Tests, ReadTextFile(Sentinel, SentinelText));
+		PF_CHECK(Tests, SentinelText == "old package remains usable");
+	}
+
+	void TestCancellationClosesAtPublicationBoundary(TestRunner& Tests)
+	{
+		TemporaryExportFixture Fixture;
+		PF_CHECK(Tests, Fixture.IsReady());
+		if (!Fixture.IsReady()) return;
+		RealExportCase ExportCase;
+		PF_CHECK(Tests, PrepareRealExportCase(Fixture.Root(), ExportCase));
+		if (ExportCase.Request.SourceProjectFile.empty()) return;
+
+		const AssetExportSnapshot First = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, First.Phase == AssetExportPhase::Complete);
+		if (First.Phase != AssetExportPhase::Complete) return;
+		std::map<std::string, std::string> BeforePublication;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, BeforePublication));
+
+		ExportTestGate Gate;
+		AssetExportRequest Request = ExportCase.Request;
+		Request.BeforePublicationRename = [&Gate] { Gate.Pause(); };
+		AssetExportService Service;
+		const auto Started = Service.Start(std::move(Request));
+		PF_CHECK(Tests, Started.has_value());
+		if (!Started)
+		{
+			Gate.Release();
+			Service.Shutdown();
+			return;
+		}
+
+		const bool ReachedBoundary = Gate.WaitUntilEntered(std::chrono::seconds(10));
+		PF_CHECK(Tests, ReachedBoundary);
+		if (!ReachedBoundary)
+		{
+			Gate.Release();
+			(void)WaitForTerminal(Service, *Started);
+			Service.Shutdown();
+			return;
+		}
+		const AssetExportSnapshot Held = Service.GetSnapshot(*Started);
+		PF_CHECK(Tests, Held.Running && Held.Phase == AssetExportPhase::Publish);
+		PF_CHECK(Tests, !Held.CancellationRequested);
+		PF_CHECK(Tests, !Service.RequestCancel(*Started));
+		std::map<std::string, std::string> StillPublished;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, StillPublished));
+		PF_CHECK(Tests, StillPublished == BeforePublication);
+
+		Gate.Release();
+		const AssetExportSnapshot Completed = WaitForTerminal(Service, *Started);
+		PF_CHECK(Tests, Completed.Phase == AssetExportPhase::Complete);
+		PF_CHECK(Tests, !Completed.CancellationRequested);
+		PF_CHECK(Tests, std::filesystem::exists(ExportCase.Output / ".pf-export-inventory.json"));
+		Service.Shutdown();
 	}
 } // namespace
 
@@ -690,4 +1408,14 @@ void RunAssetExportServiceTests(TestRunner& Tests)
 	TestInterruptedStagingRecoveryIsExplicitAndSafe(Tests);
 	TestInterruptedPublicationPreservesChangedRecoveryData(Tests);
 	TestPackageInventoryCannotClaimUnrelatedFiles(Tests);
+	TestExportTemplateRenameRemovalAndRepeatedExport(Tests);
+	TestExportPreservesModifiedPreviouslyOwnedFile(Tests);
+	TestExportPreservesUnownedTemplateCollisionAndAllowsRetry(Tests);
+	TestExportDoesNotAdoptAnOccupiedCandidatePath(Tests);
+	TestCandidateCleanupPreservesUnownedChangesAndRecoveryRecord(Tests);
+	TestExportRejectsTemplateRuntimeConfigurationCollision(Tests);
+	TestExportPreservesUnownedRuntimeConfigurationCollision(Tests);
+	TestExportRejectsCaseAliasesOnCaseInsensitiveFilesystem(Tests);
+	TestHeldDependencyValidationCancellationRetainsOutputAndRetries(Tests);
+	TestCancellationClosesAtPublicationBoundary(Tests);
 }

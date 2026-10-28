@@ -20,6 +20,7 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForgeEditor/Source/Private/EditorDocumentHostTestEditor.cpp
 		PulseForgeEditor/Source/Private/EditorPerformancePanel.cpp
 		PulseForgeEditor/Source/Private/EditorBuildProfilePanel.cpp
+		PulseForgeEditor/Source/Private/EditorBuildProfileController.cpp
 		PulseForgeEditor/Source/Private/EditorPerformanceCaptureService.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserAssetView.cpp
 		PulseForgeEditor/Source/Private/EditorContentBrowserNavigation.cpp
@@ -69,10 +70,10 @@ if(PULSEFORGE_BUILD_EDITOR)
 		PulseForge/Vendor/spdlog/include
 	)
 	target_link_libraries(PulseForgeEditorUI
-		PUBLIC PulseForgeRenderer PulseForgeEditorCore
+		PUBLIC PulseForgeRenderer PulseForgeEditorCore PulseForgeAssetExportService
 		PRIVATE PulseForgeCore PulseForgeInput PulseForgeApplication PulseForgeAssetImporters PulseForgeAssetServices
 			PulseForgeAssetDependencyCatalog
-			PulseForgeBuildProfiles PulseForgeAssetExportService
+			PulseForgeBuildProfiles
 			PulseForgeImGui PulseForgeSceneRenderer freetype spdlog::spdlog
 			nfd::nfd
 	)

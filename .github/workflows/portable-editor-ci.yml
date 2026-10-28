@@ -275,7 +275,8 @@ jobs:
             exit 1
           fi
           test -s "$APP/Contents/Resources/ThirdPartyNotices.txt"
-          grep -q 'Khronos Vulkan Loader and MoltenVK' "$APP/Contents/Resources/ThirdPartyNotices.txt"
+          grep -q 'Khronos Vulkan Loader 1.4.350.0' "$APP/Contents/Resources/ThirdPartyNotices.txt"
+          grep -q 'MoltenVK 1.4.1' "$APP/Contents/Resources/ThirdPartyNotices.txt"
           grep -q 'Lua 5.5.1' "$APP/Contents/Resources/ThirdPartyNotices.txt"
 
       - name: Run registered macOS CPU and editor tests
@@ -556,7 +557,57 @@ jobs:
           PY
               grep -q 'available only in Debug' "$LOG"
             done
+
+            PACKAGE_PARENT="$RUNNER_TEMP/g14-macos-$CONFIGURATION_LOWER-package"
+            mkdir -p "$PACKAGE_PARENT"
+            python3 Tests/Platform/CookedPlayerAcceptance.py \
+              --cook "$BUILD_DIR/PulseForgeCook" \
+              --player "$BUILD_DIR/PulseForgeCookedGame.app/Contents/MacOS/PulseForgeCookedGame" \
+              --source-project Samples/VisualValidation/PBRMaterials/PBRMaterials.pfproj \
+              --input-actions Samples/VisualValidation/GameplayInput/InputActions.json \
+              --target macOS --backend Vulkan --configuration "$CONFIGURATION" --export-only \
+              --log-directory "$RUNNER_TEMP" --export "$BUILD_DIR/PulseForgeExport" \
+              --template-root "$BUILD_DIR/PulseForgeCookedGame.app" \
+              --template-descriptor "$BUILD_DIR/PulseForgeCookedGame.app/Contents/MacOS/PulseForgePlayerTemplate.json" \
+              --retain-export-to "$PACKAGE_PARENT/PulseForge Standalone $CONFIGURATION Ω.app" \
+              --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/macos-$CONFIGURATION_LOWER-package-production.log"
+            tar -czf "$RUNNER_TEMP/g14-macos-$CONFIGURATION_LOWER-package.tar.gz" \
+              -C "$PACKAGE_PARENT" "PulseForge Standalone $CONFIGURATION Ω.app"
+            test -s "$RUNNER_TEMP/g14-macos-$CONFIGURATION_LOWER-package.tar.gz"
           done
+
+      - name: Run package-only desktop verifier self-test
+        if: ${{ always() && !cancelled() && steps.build_desktop_targets.outcome == 'success' }}
+        run: python3 Tests/Platform/StandalonePackageDesktopSmoke.py --self-test
+
+      - name: Publish macOS Release standalone package
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: g14-macos-release-package-${{ github.sha }}
+          path: ${{ runner.temp }}/g14-macos-release-package.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Publish macOS Dist standalone package
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: g14-macos-dist-package-${{ github.sha }}
+          path: ${{ runner.temp }}/g14-macos-dist-package.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Publish the standalone desktop verifier
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: g14-macos-desktop-verifier-${{ github.sha }}
+          path: Tests/Platform/StandalonePackageDesktopSmoke.py
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Upload compact renderer evidence
         if: always()
@@ -652,7 +703,8 @@ jobs:
           test -x "$EXECUTABLE"
           test -f "$PACKAGE/Contents/Resources/vulkan/icd.d/MoltenVK_icd.json"
           test -s "$PACKAGE/Contents/Resources/ThirdPartyNotices.txt"
-          grep -q 'Khronos Vulkan Loader and MoltenVK' "$PACKAGE/Contents/Resources/ThirdPartyNotices.txt"
+          grep -q 'Khronos Vulkan Loader 1.4.350.0' "$PACKAGE/Contents/Resources/ThirdPartyNotices.txt"
+          grep -q 'MoltenVK 1.4.1' "$PACKAGE/Contents/Resources/ThirdPartyNotices.txt"
           chmod -R a-w "$PACKAGE"
           mkdir -p "$RUNNER_TEMP/G14 User Data Ω" "$RUNNER_TEMP/G14 Unrelated CWD Ω"
           USER_DATA="$RUNNER_TEMP/G14 User Data Ω/PulseForge"
@@ -684,6 +736,47 @@ jobs:
           grep -F "PULSEFORGE_COOKED_USER_DATA=PASS; root=$USER_DATA" "$RUNNER_TEMP/g14-package-only-player.log"
           grep -F "$PACKAGE/Contents/Frameworks/libvulkan.1.dylib" "$RUNNER_TEMP/g14-package-only-player.log"
           echo "G14_MACOS_PACKAGE_ONLY=PASS; no checkout; no Vulkan SDK/DYLD overrides; package read-only; unrelated CWD"
+
+  macos-release-dist-package-verification:
+    name: macOS · ${{ matrix.configuration }} package-only desktop verification
+    runs-on: macos-26
+    timeout-minutes: 20
+    needs: macos-desktop
+    if: ${{ needs.macos-desktop.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Release, Dist]
+    steps:
+      - name: Download only the exported package
+        uses: actions/download-artifact@v6
+        with:
+          name: g14-macos-${{ matrix.configuration == 'Release' && 'release' || 'dist' }}-package-${{ github.sha }}
+          path: ${{ runner.temp }}/G14 Package ${{ matrix.configuration }} Ω
+
+      - name: Download the separately identified desktop verifier
+        uses: actions/download-artifact@v6
+        with:
+          name: g14-macos-desktop-verifier-${{ github.sha }}
+          path: ${{ runner.temp }}/Acceptance Helper
+
+      - name: Launch the read-only package from an unrelated directory
+        run: |
+          set -euo pipefail
+          PACKAGE_PARENT="$RUNNER_TEMP/G14 Package ${{ matrix.configuration }} Ω"
+          PACKAGE="$PACKAGE_PARENT/PulseForge Standalone ${{ matrix.configuration }} Ω.app"
+          tar -xzf "$PACKAGE_PARENT/g14-macos-${{ matrix.configuration == 'Release' && 'release' || 'dist' }}-package.tar.gz" -C "$PACKAGE_PARENT"
+          test -x "$PACKAGE/Contents/MacOS/PulseForgeCookedGame"
+          chmod -R a-w "$PACKAGE"
+          RUN_ROOT="$RUNNER_TEMP/G14 ${{ matrix.configuration }} Unrelated Ω"
+          mkdir -p "$RUN_ROOT/User Data Ω/PulseForge" "$RUN_ROOT/Working Directory Ω" "$RUN_ROOT/Logs"
+          cd "$RUN_ROOT/Working Directory Ω"
+          python3 "$RUNNER_TEMP/Acceptance Helper/StandalonePackageDesktopSmoke.py" \
+            --package-root "$PACKAGE" --platform macOS --log-directory "$RUN_ROOT/Logs" \
+            --timeout-seconds 180 2>&1 | tee "$RUN_ROOT/Logs/standalone-package-smoke.log"
+          grep -q "configuration=${{ matrix.configuration }}" "$RUN_ROOT/Logs/standalone-package-smoke.log"
+          grep -q 'exit_code=0' "$RUN_ROOT/Logs/standalone-package-smoke.log"
+          echo "G14_MACOS_${{ matrix.configuration }}_PACKAGE_ONLY=PASS; no checkout; no SDK overrides; package read-only; pixel capture; native close"
 
   windows-msvc:
     name: Windows 2022 · MSVC · Debug
@@ -734,6 +827,36 @@ jobs:
           Get-Content "$env:RUNNER_TEMP/build.log"
           if ($result -ne 0) { exit $result }
 
+      - name: Verify template metadata refreshes without relinking the Player
+        shell: pwsh
+        run: |
+          $resourceDirectory = Join-Path $env:GITHUB_WORKSPACE 'Build/CI/windows/Debug/Shaders'
+          $descriptor = Join-Path $env:GITHUB_WORKSPACE 'Build/CI/windows/Debug/PulseForgePlayerTemplate.json'
+          $probe = Join-Path $resourceDirectory 'G14RefreshProbe.spv'
+          if (Test-Path -LiteralPath $probe) { throw "Refresh probe already exists: $probe" }
+          [System.IO.File]::WriteAllBytes($probe, [byte[]](0x03, 0x02, 0x23, 0x07))
+          try {
+            & cmake --build Build/CI/windows --config Debug --parallel 1 --target PulseForgeCookedPlayerTemplate *> `
+              "$env:RUNNER_TEMP/template-refresh-add.log"
+            $result = $LASTEXITCODE
+            Get-Content "$env:RUNNER_TEMP/template-refresh-add.log"
+            if ($result -ne 0) { throw "Could not refresh the Player template with the added resource: $result" }
+            if (-not (Get-Content -LiteralPath $descriptor -Raw).Contains('G14RefreshProbe.spv')) {
+              throw 'Player template metadata did not include a newly staged shader when the Player was up to date.'
+            }
+          }
+          finally {
+            Remove-Item -LiteralPath $probe -ErrorAction SilentlyContinue
+          }
+          & cmake --build Build/CI/windows --config Debug --parallel 1 --target PulseForgeCookedPlayerTemplate *> `
+            "$env:RUNNER_TEMP/template-refresh-remove.log"
+          $result = $LASTEXITCODE
+          Get-Content "$env:RUNNER_TEMP/template-refresh-remove.log"
+          if ($result -ne 0) { exit $result }
+          if ((Get-Content -LiteralPath $descriptor -Raw).Contains('G14RefreshProbe.spv')) {
+            throw 'Player template metadata retained a removed staged shader.'
+          }
+
       - name: Run registered CPU tests
         shell: pwsh
         run: |
@@ -758,7 +881,95 @@ jobs:
             if ($result -ne 0) { exit $result }
             $configurationObject = Join-Path $coreDir "$configuration/EditorDebugAcceptanceCoordinators.obj"
             if (Test-Path $configurationObject) { throw "Debug-only coordinator was compiled for $configuration" }
+
+            $configurationDir = Join-Path $env:GITHUB_WORKSPACE "Build/CI/windows/$configuration"
+            $packageParent = Join-Path $env:RUNNER_TEMP "g14-windows-$($configuration.ToLowerInvariant())"
+            New-Item -ItemType Directory -Force -Path $packageParent | Out-Null
+            $retainPath = Join-Path $packageParent "PulseForge Standalone Ω"
+            $acceptanceArguments = @(
+              "--cook", (Join-Path $configurationDir "PulseForgeCook.exe"),
+              "--player", (Join-Path $configurationDir "PulseForgeCookedGame.exe"),
+              "--source-project", "Samples/VisualValidation/PBRMaterials/PBRMaterials.pfproj",
+              "--input-actions", "Samples/VisualValidation/GameplayInput/InputActions.json",
+              "--target", "Windows", "--backend", "Vulkan", "--configuration", $configuration,
+              "--export-only", "--log-directory", $env:RUNNER_TEMP,
+              "--export", (Join-Path $configurationDir "PulseForgeExport.exe"),
+              "--template-root", $configurationDir,
+              "--template-descriptor", (Join-Path $configurationDir "PulseForgePlayerTemplate.json"),
+              "--retain-export-to", $retainPath, "--timeout-seconds", "240"
+            )
+            & python Tests/Platform/CookedPlayerAcceptance.py @acceptanceArguments *> `
+              "$env:RUNNER_TEMP/windows-$($configuration.ToLowerInvariant())-package-production.log"
+            $result = $LASTEXITCODE
+            Get-Content "$env:RUNNER_TEMP/windows-$($configuration.ToLowerInvariant())-package-production.log"
+            if ($result -ne 0) { exit $result }
+
+            $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+            if (-not (Test-Path -LiteralPath $vswhere)) { throw "Visual Studio locator is missing: $vswhere" }
+            $visualStudio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            if ($LASTEXITCODE -ne 0 -or -not $visualStudio) { throw 'Could not locate the installed MSVC toolchain for the package dependency audit.' }
+            $dumpbin = Get-ChildItem -LiteralPath (Join-Path $visualStudio 'VC/Tools/MSVC') -Filter dumpbin.exe -Recurse -File |
+              Where-Object { $_.FullName -match '[\\/]bin[\\/]Hostx64[\\/]x64[\\/]dumpbin\.exe$' } |
+              Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $dumpbin) { throw 'Could not locate x64 dumpbin.exe for the standalone dependency audit.' }
+            $packageDllNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            Get-ChildItem -LiteralPath $retainPath -Recurse -File -Filter '*.dll' | ForEach-Object { [void]$packageDllNames.Add($_.Name) }
+            $packageBinaries = Get-ChildItem -LiteralPath $retainPath -Recurse -File |
+              Where-Object { $_.Extension -in @('.exe', '.dll') }
+            foreach ($binary in $packageBinaries) {
+              $dependencyOutput = @(& $dumpbin.FullName /nologo /dependents $binary.FullName 2>&1)
+              if ($LASTEXITCODE -ne 0) { throw "dumpbin could not inspect $($binary.FullName): $($dependencyOutput -join "`n")" }
+              foreach ($match in [regex]::Matches(($dependencyOutput -join "`n"), '(?im)^\s+([A-Za-z0-9_.-]+\.dll)\s*$')) {
+                $dependency = $match.Groups[1].Value
+                if ($dependency -match '^(?i)(vcruntime|msvcp|ucrtbase|concrt).*d\.dll$') {
+                  throw "Debug CRT dependency is forbidden in a $configuration package: $dependency ($($binary.Name))"
+                }
+                if ($dependency -match '^(?i)(vcruntime|msvcp|concrt)140.*\.dll$' -and -not $packageDllNames.Contains($dependency)) {
+                  throw "The $configuration package has an unstaged dynamic MSVC runtime dependency: $dependency ($($binary.Name))"
+                }
+                if ($packageDllNames.Contains($dependency) -or $dependency -match '^(?i)(api-ms-win-|ext-ms-win-)') { continue }
+                $systemDependency = Join-Path "$env:WINDIR/System32" $dependency
+                if (-not (Test-Path -LiteralPath $systemDependency -PathType Leaf)) {
+                  throw "The $configuration package has an unstaged non-system runtime dependency: $dependency ($($binary.Name))"
+                }
+              }
+            }
+            Write-Output "G14_WINDOWS_$($configuration.ToUpperInvariant())_DEPENDENCIES=PASS; inspected $($packageBinaries.Count) PE files; no debug CRT or unstaged non-system dependencies"
+            Compress-Archive -Path $retainPath -DestinationPath `
+              (Join-Path $env:RUNNER_TEMP "g14-windows-$($configuration.ToLowerInvariant())-package.zip") -CompressionLevel NoCompression
           }
+
+      - name: Run package-only desktop verifier self-test
+        shell: pwsh
+        run: python Tests/Platform/StandalonePackageDesktopSmoke.py --self-test
+
+      - name: Publish the separately identified Windows desktop verifier
+        uses: actions/upload-artifact@v6
+        with:
+          name: g14-windows-desktop-verifier-${{ github.sha }}
+          path: Tests/Platform/StandalonePackageDesktopSmoke.py
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Publish Windows Release standalone package
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: g14-windows-release-package-${{ github.sha }}
+          path: ${{ runner.temp }}/g14-windows-release-package.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Publish Windows Dist standalone package
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: g14-windows-dist-package-${{ github.sha }}
+          path: ${{ runner.temp }}/g14-windows-dist-package.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
       - name: Upload failure logs
         if: failure()
@@ -771,12 +982,62 @@ jobs:
             ${{ runner.temp }}/ctest.log
             ${{ runner.temp }}/build-release.log
             ${{ runner.temp }}/build-dist.log
+            ${{ runner.temp }}/windows-release-package-production.log
+            ${{ runner.temp }}/windows-dist-package-production.log
             Build/CI/windows/CMakeFiles/CMakeConfigureLog.yaml
             Build/CI/windows/CMakeFiles/CMakeOutput.log
             Build/CI/windows/CMakeFiles/CMakeError.log
             Build/CI/windows/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
           retention-days: 5
+
+  windows-release-dist-package-verification:
+    name: Windows · ${{ matrix.configuration }} package-only desktop verification
+    runs-on: windows-2022
+    timeout-minutes: 20
+    needs: windows-msvc
+    if: ${{ needs.windows-msvc.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Release, Dist]
+    steps:
+      - name: Download only the exported package
+        uses: actions/download-artifact@v6
+        with:
+          name: g14-windows-${{ matrix.configuration == 'Release' && 'release' || 'dist' }}-package-${{ github.sha }}
+          path: ${{ runner.temp }}/G14 Package ${{ matrix.configuration }} Ω
+
+      - name: Download the separately identified desktop verifier
+        uses: actions/download-artifact@v6
+        with:
+          name: g14-windows-desktop-verifier-${{ github.sha }}
+          path: ${{ runner.temp }}/Acceptance Helper
+
+      - name: Launch the read-only package from an unrelated directory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PackageParent = Join-Path $env:RUNNER_TEMP 'G14 Package ${{ matrix.configuration }} Ω'
+          $Archive = Join-Path $PackageParent 'g14-windows-${{ matrix.configuration == 'Release' && 'release' || 'dist' }}-package.zip'
+          Expand-Archive -LiteralPath $Archive -DestinationPath $PackageParent
+          $Package = Join-Path $PackageParent 'PulseForge Standalone Ω'
+          if (-not (Test-Path -LiteralPath (Join-Path $Package 'PulseForgeCookedGame.exe') -PathType Leaf)) {
+            throw "Exported package entrypoint is missing: $Package"
+          }
+          $RunRoot = Join-Path $env:RUNNER_TEMP 'G14 ${{ matrix.configuration }} Unrelated Ω'
+          $LogDirectory = Join-Path $RunRoot 'Logs'
+          New-Item -ItemType Directory -Force -Path $LogDirectory, (Join-Path $RunRoot 'Working Directory Ω') | Out-Null
+          Set-Location (Join-Path $RunRoot 'Working Directory Ω')
+          $Verifier = Join-Path $env:RUNNER_TEMP 'Acceptance Helper/StandalonePackageDesktopSmoke.py'
+          & python $Verifier --package-root $Package --platform Windows --log-directory $LogDirectory --timeout-seconds 180 *> `
+            (Join-Path $LogDirectory 'standalone-package-smoke.log')
+          $result = $LASTEXITCODE
+          Get-Content (Join-Path $LogDirectory 'standalone-package-smoke.log')
+          if ($result -ne 0) { exit $result }
+          Select-String -SimpleMatch 'configuration=${{ matrix.configuration }}' (Join-Path $LogDirectory 'standalone-package-smoke.log') | Out-Null
+          Select-String -SimpleMatch 'exit_code=0' (Join-Path $LogDirectory 'standalone-package-smoke.log') | Out-Null
+          Write-Output 'G14_WINDOWS_${{ matrix.configuration }}_PACKAGE_ONLY=PASS; no checkout; no SDK overrides; package read-only; unrelated CWD; native window capture and close'
 
   linux-gcc:
     name: Ubuntu 24.04 · GCC · Ninja · Debug
@@ -907,6 +1168,24 @@ jobs:
               fi
               grep -q 'available only in Debug' "$LOG"
             done
+
+            PACKAGE_PARENT="$RUNNER_TEMP/g14-linux-${CONFIGURATION,,}-package"
+            mkdir -p "$PACKAGE_PARENT"
+            python3 Tests/Platform/CookedPlayerAcceptance.py \
+              --cook "$BUILD_DIR/PulseForgeCook" \
+              --player "$BUILD_DIR/PulseForgeCookedGame" \
+              --source-project Samples/VisualValidation/PBRMaterials/PBRMaterials.pfproj \
+              --input-actions Samples/VisualValidation/GameplayInput/InputActions.json \
+              --target Linux --backend Vulkan --configuration "$CONFIGURATION" --export-only \
+              --log-directory "$RUNNER_TEMP" --export "$BUILD_DIR/PulseForgeExport" \
+              --template-root "$BUILD_DIR" \
+              --template-descriptor "$BUILD_DIR/PulseForgePlayerTemplate.json" \
+              --retain-export-to "$PACKAGE_PARENT/PulseForge Standalone Ω" \
+              --timeout-seconds 240 2>&1 | tee "$RUNNER_TEMP/linux-${CONFIGURATION,,}-package-production.log"
+            tar -czf "$RUNNER_TEMP/g14-linux-${CONFIGURATION,,}-package.tar.gz" \
+              -C "$PACKAGE_PARENT" "PulseForge Standalone Ω"
+            test -s "$RUNNER_TEMP/g14-linux-${CONFIGURATION,,}-package.tar.gz"
+
           done
 
       - name: Upload failure logs
@@ -923,6 +1202,8 @@ jobs:
             ${{ runner.temp }}/configure-dist.log
             ${{ runner.temp }}/build-dist.log
             ${{ runner.temp }}/linux-standalone-acceptance.log
+            ${{ runner.temp }}/linux-release-package-production.log
+            ${{ runner.temp }}/linux-dist-package-production.log
             ${{ runner.temp }}/cooked-player-acceptance-*.log
             ${{ runner.temp }}/standalone-package-*.log
             Build/CI/linux/CMakeFiles/CMakeConfigureLog.yaml
@@ -931,6 +1212,39 @@ jobs:
             Build/CI/linux/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
           retention-days: 5
+
+      - name: Run package-only desktop verifier self-test
+        if: ${{ success() }}
+        run: python3 Tests/Platform/StandalonePackageDesktopSmoke.py --self-test
+
+      - name: Publish Linux Release standalone package
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: g14-linux-release-package-${{ github.sha }}
+          path: ${{ runner.temp }}/g14-linux-release-package.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Publish Linux Dist standalone package
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: g14-linux-dist-package-${{ github.sha }}
+          path: ${{ runner.temp }}/g14-linux-dist-package.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Publish the standalone desktop verifier
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: g14-linux-desktop-verifier-${{ github.sha }}
+          path: Tests/Platform/StandalonePackageDesktopSmoke.py
+          if-no-files-found: error
+          retention-days: 1
 
   linux-package-only-verification:
     name: Ubuntu · package-only standalone verification
@@ -993,3 +1307,58 @@ jobs:
           done
           grep -F "PULSEFORGE_COOKED_USER_DATA=PASS; root=$USER_DATA" "$RUNNER_TEMP/g14-package-only-player.log"
           echo "G14_LINUX_PACKAGE_ONLY=PASS; no checkout; system Mesa lavapipe; package read-only; unrelated CWD"
+
+  linux-release-dist-package-verification:
+    name: Ubuntu · ${{ matrix.configuration }} package-only desktop verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: linux-gcc
+    if: ${{ needs.linux-gcc.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Release, Dist]
+    steps:
+      - name: Install the platform software Vulkan driver and virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y mesa-vulkan-drivers xvfb xauth libx11-6
+
+      - name: Download only the exported package
+        uses: actions/download-artifact@v6
+        with:
+          name: g14-linux-${{ matrix.configuration == 'Release' && 'release' || 'dist' }}-package-${{ github.sha }}
+          path: ${{ runner.temp }}/G14 Package ${{ matrix.configuration }} Ω
+
+      - name: Download the separately identified desktop verifier
+        uses: actions/download-artifact@v6
+        with:
+          name: g14-linux-desktop-verifier-${{ github.sha }}
+          path: ${{ runner.temp }}/Acceptance Helper
+
+      - name: Launch the read-only package from an unrelated directory
+        run: |
+          set -euo pipefail
+          PACKAGE_PARENT="$RUNNER_TEMP/G14 Package ${{ matrix.configuration }} Ω"
+          PACKAGE="$PACKAGE_PARENT/PulseForge Standalone Ω"
+          tar -xzf "$PACKAGE_PARENT/g14-linux-${{ matrix.configuration == 'Release' && 'release' || 'dist' }}-package.tar.gz" -C "$PACKAGE_PARENT"
+          test -x "$PACKAGE/PulseForgeCookedGame"
+          mapfile -t LAVAPIPE_MANIFESTS < <(
+            find /usr/share/vulkan/icd.d /etc/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print 2>/dev/null | sort
+          )
+          if [[ ${#LAVAPIPE_MANIFESTS[@]} -ne 1 ]]; then
+            echo "Expected one installed Lavapipe manifest; found ${#LAVAPIPE_MANIFESTS[@]}:" >&2
+            find /usr/share/vulkan/icd.d /etc/vulkan/icd.d -maxdepth 1 -type f -name '*.json' -print 2>/dev/null | sort >&2 || true
+            exit 1
+          fi
+          DRIVER_MANIFEST="${LAVAPIPE_MANIFESTS[0]}"
+          RUN_ROOT="$RUNNER_TEMP/G14 ${{ matrix.configuration }} Unrelated Ω"
+          mkdir -p "$RUN_ROOT/Logs" "$RUN_ROOT/Working Directory Ω"
+          cd "$RUN_ROOT/Working Directory Ω"
+          xvfb-run -a python3 "$RUNNER_TEMP/Acceptance Helper/StandalonePackageDesktopSmoke.py" \
+            --package-root "$PACKAGE" --platform Linux --system-vulkan-icd "$DRIVER_MANIFEST" \
+            --log-directory "$RUN_ROOT/Logs" --timeout-seconds 180 \
+            2>&1 | tee "$RUN_ROOT/Logs/standalone-package-smoke.log"
+          grep -q "configuration=${{ matrix.configuration }}" "$RUN_ROOT/Logs/standalone-package-smoke.log"
+          grep -q 'exit_code=0' "$RUN_ROOT/Logs/standalone-package-smoke.log"
+          echo "G14_LINUX_${{ matrix.configuration }}_PACKAGE_ONLY=PASS; no checkout; system Mesa lavapipe; pixel capture; native close"

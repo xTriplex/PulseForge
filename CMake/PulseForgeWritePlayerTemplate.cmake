@@ -21,7 +21,8 @@ set(THIRD_PARTY_LICENSES
 	"NVRHI|${PF_NVRHI_SOURCE_DIR}/LICENSE.txt")
 if(PF_PLATFORM STREQUAL "macOS")
 	list(APPEND THIRD_PARTY_LICENSES
-		"Khronos Vulkan Loader and MoltenVK (Apache License 2.0, bundled from the configured LunarG SDK)|${PF_SOURCE_ROOT}/PulseForge/Vendor/json/LICENSES/Apache-2.0.txt")
+		"Khronos Vulkan Loader 1.4.350.0 (Apache 2.0 applies to most files. Some source files use more permissive licenses. Upstream LICENSE.txt: https://github.com/KhronosGroup/Vulkan-Loader/blob/vulkan-sdk-1.4.350.0/LICENSE.txt)|${PF_SOURCE_ROOT}/PulseForge/Vendor/json/LICENSES/Apache-2.0.txt"
+		"MoltenVK 1.4.1 (Apache License 2.0. Upstream LICENSE: https://github.com/KhronosGroup/MoltenVK/blob/v1.4.1/LICENSE)|${PF_SOURCE_ROOT}/PulseForge/Vendor/json/LICENSES/Apache-2.0.txt")
 endif()
 foreach(LICENSE_ENTRY IN LISTS THIRD_PARTY_LICENSES)
 	string(FIND "${LICENSE_ENTRY}" "|" SEPARATOR)

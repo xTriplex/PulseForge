@@ -259,6 +259,10 @@ def main() -> int:
     parser.add_argument("--input-actions", required=True, type=Path)
     parser.add_argument("--target", required=True, choices=("Windows", "Linux", "macOS"))
     parser.add_argument("--backend", default="Vulkan", choices=("Vulkan", "OpenGL"))
+    parser.add_argument("--configuration", default="Debug", choices=("Debug", "Release", "Dist"),
+                        help="Cook and export build configuration; detailed in-process assertions remain Debug-only")
+    parser.add_argument("--export-only", action="store_true",
+                        help="Cook and retain a package without launching it; use the independent desktop verifier next")
     parser.add_argument("--export", type=Path, help="Optional PulseForgeExport executable")
     parser.add_argument("--template-root", type=Path, help="Built cooked-player template root")
     parser.add_argument("--template-descriptor", type=Path, help="Machine-readable template descriptor")
@@ -269,6 +273,9 @@ def main() -> int:
     parser.add_argument("--log-directory", required=True, type=Path)
     parser.add_argument("--timeout-seconds", type=int, default=180)
     args = parser.parse_args()
+
+    if args.export_only and not all((args.export, args.template_root, args.template_descriptor, args.retain_export_to)):
+        parser.error("--export-only requires --export, --template-root, --template-descriptor, and --retain-export-to")
 
     root: Path | None = None
     try:
@@ -298,7 +305,7 @@ def main() -> int:
         cook_log = logs / "cooked-player-acceptance-cook.log"
         cook_output = run_bounded([
             str(args.cook.resolve()), "--project", str(project_file), "--output", str(cooked_root),
-            "--target", args.target, "--backend", args.backend, "--configuration", "Debug", "--dynamic", DYNAMIC_SCRIPT,
+            "--target", args.target, "--backend", args.backend, "--configuration", args.configuration, "--dynamic", DYNAMIC_SCRIPT,
         ], unrelated_cwd, os.environ.copy(), args.timeout_seconds, cook_log)
         print(cook_output)
         manifest_path = cooked_root / "manifest.pfmanifest"
@@ -316,7 +323,7 @@ def main() -> int:
                 "profileId": "bfc20000-0000-4000-8000-000000000001",
                 "displayName": "Standalone Acceptance Ω", "targetPlatform": args.target,
                 "architecture": "arm64" if args.target == "macOS" else "x64",
-                "configuration": "Debug", "renderer": "Vulkan",
+                "configuration": args.configuration, "renderer": "Vulkan",
                 "startupScene": project_description["startScene"], "dynamicRoots": [DYNAMIC_SCRIPT],
                 "defaultOutputPath": "Build/Exports/Acceptance", "window": {"width": 960, "height": 540},
             }
@@ -337,6 +344,33 @@ def main() -> int:
         shutil.rmtree(project_root)
         if project_root.exists() or scene_path.exists():
             raise RuntimeError("isolated authoring source remained available after removal")
+        if args.export_only:
+            if exported_package is None or not exported_package.is_dir() or args.retain_export_to is None:
+                raise RuntimeError("export-only acceptance did not produce a package")
+            if args.target == "macOS":
+                executable = exported_package / "Contents" / "MacOS" / "PulseForgeCookedGame"
+            else:
+                executable = exported_package / ("PulseForgeCookedGame.exe" if args.target == "Windows" else "PulseForgeCookedGame")
+            if not executable.is_file():
+                raise RuntimeError(f"exported executable is missing from its package: {executable}")
+            retain_path = args.retain_export_to.absolute()
+            try:
+                retain_path.relative_to(root)
+            except ValueError:
+                pass
+            else:
+                raise RuntimeError("retained package destination must be outside the temporary acceptance root")
+            if retain_path.exists() or retain_path.is_symlink():
+                raise RuntimeError(f"retained package destination must not already exist: {retain_path}")
+            if not retain_path.parent.resolve(strict=True).is_dir() or retain_path.parent.is_symlink():
+                raise RuntimeError(f"retained package parent must be an existing, non-linked directory: {retain_path.parent}")
+            shutil.copytree(exported_package, retain_path, symlinks=False)
+            if any(path.is_symlink() for path in retain_path.rglob("*")):
+                raise RuntimeError(f"refusing to retain a package containing a linked entry: {retain_path}")
+            print(f"STANDALONE_PACKAGE_RETAINED={retain_path}")
+            print(f"STANDALONE_PACKAGE_PRODUCTION=PASS; configuration={args.configuration}; source removed; external launch pending")
+            remove_owned_acceptance_root(root, parent)
+            return 0
         relocated_content = root / "Relocated Cooked Content Ω"
         cooked_root.rename(relocated_content)
 

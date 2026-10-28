@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 
 void RunEditorDocumentHostTestEditorTests(TestRunner& Tests);
+void RunEditorBuildProfileControllerTests(TestRunner& Tests);
 void RunEditorAssetEditSchedulingTests(TestRunner& Tests);
 void RunEditorInspectorRegressionTests(TestRunner& Tests);
 #if defined(_DEBUG) || defined(PF_DEBUG)
@@ -17,6 +18,7 @@ int main()
 	PF_CHECK(Tests, spdlog::get("APP") != nullptr);
 	RunEditorHistoryTests(Tests);
 	RunEditorViewportTests(Tests);
+	RunEditorBuildProfileControllerTests(Tests);
 	RunEditorViewportSceneRenderViewTests(Tests);
 	RunEditorAssetPreviewStressHarnessTests(Tests);
 	RunEditorAssetEditSchedulingTests(Tests);

@@ -54,9 +54,10 @@ namespace PulseForge
 				   SameNodeIdentity(First.Target, Second.Target) && First.Location == Second.Location && First.Message == Second.Message;
 		}
 
-		AssetDependencyCatalogError MakeBuildError(const std::filesystem::path& Path, std::string Message)
+		AssetDependencyCatalogError MakeBuildError(
+			const std::filesystem::path& Path, std::string Message, bool Cancelled = false)
 		{
-			return { Path, std::move(Message) };
+			return { Path, std::move(Message), Cancelled };
 		}
 
 		AssetDependencyCatalogError MakeRegistryError(
@@ -273,6 +274,8 @@ namespace PulseForge
 		const std::filesystem::path& ProjectRoot, const UUID& ProjectID, uint64_t Generation,
 		const AssetDependencyCatalogBuildOptions& Options)
 	{
+		if (Options.CancellationToken.stop_requested())
+			return std::unexpected(MakeBuildError(ProjectRoot, "Dependency catalog build was cancelled", true));
 		if (ProjectRoot.empty() || ProjectID.IsNil() || Generation == 0)
 			return std::unexpected(
 				MakeBuildError(ProjectRoot, "Asset catalog build requires a project path, non-nil project ID, and nonzero generation"));
@@ -282,8 +285,10 @@ namespace PulseForge
 			return std::unexpected(MakeBuildError(ProjectRoot, "Asset catalog build requires an accessible project directory"));
 
 		AssetRegistry Registry;
-		if (auto RegistryResult = Registry.Rebuild(AbsoluteProjectRoot); !RegistryResult)
+		if (auto RegistryResult = Registry.Rebuild(AbsoluteProjectRoot, Options.CancellationToken); !RegistryResult)
 		{
+			if (Options.CancellationToken.stop_requested())
+				return std::unexpected(MakeBuildError(ProjectRoot, "Dependency catalog build was cancelled during registry scanning", true));
 			std::string Message = "Could not build the asset registry for the dependency catalog";
 			for (const AssetRegistryIssue& Issue : RegistryResult.error().Issues)
 			{
@@ -293,36 +298,58 @@ namespace PulseForge
 			}
 			return std::unexpected(MakeBuildError(ProjectRoot, std::move(Message)));
 		}
+		if (Options.CancellationToken.stop_requested())
+			return std::unexpected(MakeBuildError(ProjectRoot, "Dependency catalog build was cancelled after registry scanning", true));
 
-		auto ExtractionResult = AssetDependencyExtractor::Extract(AbsoluteProjectRoot, ProjectID, Registry);
+		auto ExtractionResult = AssetDependencyExtractor::Extract(
+			AbsoluteProjectRoot, ProjectID, Registry, Options.CancellationToken);
 		if (!ExtractionResult) return std::unexpected(std::move(ExtractionResult.error()));
 
 		AssetDependencyExtraction Extraction = std::move(*ExtractionResult);
 		if (Options.BeforeFinalInputValidation) Options.BeforeFinalInputValidation();
+		if (Options.CancellationToken.stop_requested())
+			return std::unexpected(MakeBuildError(ProjectRoot, "Dependency catalog build was cancelled before final validation", true));
 		AssetRegistry FinalRegistry;
-		if (auto FinalRegistryResult = FinalRegistry.Rebuild(AbsoluteProjectRoot); !FinalRegistryResult)
+		if (auto FinalRegistryResult = FinalRegistry.Rebuild(AbsoluteProjectRoot, Options.CancellationToken); !FinalRegistryResult)
+		{
+			if (Options.CancellationToken.stop_requested())
+				return std::unexpected(MakeBuildError(ProjectRoot, "Dependency catalog build was cancelled during final registry scanning", true));
 			return std::unexpected(MakeBuildError(
 				ProjectRoot, "Asset catalog inputs changed or became unreadable during dependency analysis; final registry scan failed"));
+		}
 		const std::vector<AssetRecord> InitialAssets = Registry.GetAssets();
 		const std::vector<AssetRecord> FinalAssets = FinalRegistry.GetAssets();
 		bool SameRegistryMembership = InitialAssets.size() == FinalAssets.size();
 		for (size_t Index = 0; SameRegistryMembership && Index < InitialAssets.size(); ++Index)
+		{
+			if (Options.CancellationToken.stop_requested())
+				return std::unexpected(MakeBuildError(ProjectRoot, "Dependency catalog build was cancelled during final membership validation", true));
 			SameRegistryMembership = InitialAssets[Index].ID == FinalAssets[Index].ID &&
 									 InitialAssets[Index].ProjectRelativePath == FinalAssets[Index].ProjectRelativePath;
+		}
 		if (!SameRegistryMembership ||
 			Registry.GetSourceByteAccounting().KnownBytes != FinalRegistry.GetSourceByteAccounting().KnownBytes ||
 			Registry.GetSourceByteAccounting().UnavailableAssetCount != FinalRegistry.GetSourceByteAccounting().UnavailableAssetCount)
 			return std::unexpected(MakeBuildError(ProjectRoot,
 				"Asset registry membership or source sizes changed during dependency analysis; candidate snapshot was discarded"));
-		if (!AssetDependencyExtractor::ValidateInputReceipts(AbsoluteProjectRoot, Extraction.ReadSet))
+		auto ReceiptValidation = AssetDependencyExtractor::ValidateInputReceipts(
+			AbsoluteProjectRoot, Extraction.ReadSet, Options.CancellationToken);
+		if (!ReceiptValidation)
+		{
+			if (ReceiptValidation.error().Cancelled) return std::unexpected(std::move(ReceiptValidation.error()));
 			return std::unexpected(MakeBuildError(ProjectRoot,
 				"Asset dependency inputs changed during analysis; candidate snapshot was discarded"));
+		}
+		if (Options.CancellationToken.stop_requested())
+			return std::unexpected(MakeBuildError(ProjectRoot, "Dependency catalog build was cancelled after final validation", true));
 
 		std::map<AssetDependencyNode, std::string, AssetDependencyNodeLess> SubresourceNames;
 		std::vector<AssetSubresourceRecord> UniqueSubresources;
 		UniqueSubresources.reserve(Extraction.Subresources.size());
 		for (AssetSubresourceRecord& Subresource : Extraction.Subresources)
 		{
+			if (Options.CancellationToken.stop_requested())
+				return std::unexpected(MakeBuildError(ProjectRoot, "Dependency catalog build was cancelled while validating subresources", true));
 			if (!IsSubresourceNode(Subresource.Identity))
 				return std::unexpected(MakeBuildError(
 					ProjectRoot, "Dependency extractor returned a subresource without a managed source UUID or mesh locator key"));
@@ -357,17 +384,20 @@ namespace PulseForge
 			});
 		Extraction.Subresources = std::move(UniqueSubresources);
 
-		const std::map<AssetDependencyNode, bool, AssetDependencyNodeLess> KnownSubresources = [&]
+		std::map<AssetDependencyNode, bool, AssetDependencyNodeLess> KnownSubresources;
+		for (const AssetSubresourceRecord& Subresource : Extraction.Subresources)
 		{
-			std::map<AssetDependencyNode, bool, AssetDependencyNodeLess> Result;
-			for (const AssetSubresourceRecord& Subresource : Extraction.Subresources)
-				Result.emplace(Subresource.Identity, true);
-			return Result;
-		}();
+			if (Options.CancellationToken.stop_requested())
+				return std::unexpected(MakeBuildError(ProjectRoot,
+					"Dependency catalog build was cancelled while indexing subresources", true));
+			KnownSubresources.emplace(Subresource.Identity, true);
+		}
 
 		std::map<std::pair<AssetID, std::string>, bool> ObservedAssets;
 		for (const AssetImportObservation& Observation : Extraction.ImportObservations)
 		{
+			if (Options.CancellationToken.stop_requested())
+				return std::unexpected(MakeBuildError(ProjectRoot, "Dependency catalog build was cancelled while validating import observations", true));
 			if (Observation.Asset.IsNil() || !Registry.Find(Observation.Asset))
 				return std::unexpected(
 					MakeBuildError(ProjectRoot, "Dependency extractor returned import observations for an unregistered asset"));
@@ -391,6 +421,8 @@ namespace PulseForge
 
 		for (const AssetDependencyEdge& Edge : Extraction.Edges)
 		{
+			if (Options.CancellationToken.stop_requested())
+				return std::unexpected(MakeBuildError(ProjectRoot, "Dependency catalog build was cancelled while validating dependency edges", true));
 			if (Edge.Referrer.Asset.IsNil() || !Registry.Find(Edge.Referrer.Asset))
 				return std::unexpected(
 					MakeBuildError(ProjectRoot, "Dependency extractor returned an edge whose referring managed asset is not registered"));

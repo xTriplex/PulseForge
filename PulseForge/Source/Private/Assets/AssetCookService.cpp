@@ -136,6 +136,8 @@ namespace PulseForge
 		std::expected<void, AssetCookError> ValidateRequest(const AssetCookRequest& Request, ProjectDesc* Project = nullptr,
 			AssetContentFingerprint* ProjectFingerprint = nullptr, uint64_t* ProjectBytes = nullptr)
 		{
+			if (Request.CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled before request validation"));
 			if (!Request.SourceSnapshot || Request.SourceSnapshot->GetProjectID().IsNil() || Request.StartupScene.IsNil() ||
 				Request.SourceProjectFile.empty() || Request.OutputRoot.empty() || Request.Compatibility.TargetPlatform.empty() ||
 				Request.Compatibility.RendererBackend.empty() || Request.Compatibility.RuntimeABI.empty() ||
@@ -179,6 +181,8 @@ namespace PulseForge
 
 			auto Description = ReadProjectDescription(*ProjectFile);
 			if (!Description) return std::unexpected(Description.error());
+			if (Request.CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled after reading the project description", *ProjectFile));
 			if (Description->Description.ID != Request.SourceSnapshot->GetProjectID())
 				return std::unexpected(Error(AssetCookErrorCode::InvalidRequest, "Project document identity does not match the retained dependency snapshot", *ProjectFile));
 			if (Project) *Project = Description->Description;
@@ -187,26 +191,37 @@ namespace PulseForge
 			return {};
 		}
 
-		std::expected<void, AssetCookError> ValidateRegistryMembership(const AssetDependencyCatalogSnapshot& Snapshot)
+		std::expected<void, AssetCookError> ValidateRegistryMembership(
+			const AssetDependencyCatalogSnapshot& Snapshot, std::stop_token CancellationToken = {})
 		{
+			if (CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled before registry membership validation"));
 			AssetRegistry Current;
-			auto Rebuilt = Current.Rebuild(Snapshot.GetProjectRootPath());
+			auto Rebuilt = Current.Rebuild(Snapshot.GetProjectRootPath(), CancellationToken);
 			if (!Rebuilt)
 			{
+				if (CancellationToken.stop_requested())
+					return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled during registry membership scanning"));
 				const std::string Detail = Rebuilt.error().Issues.empty() ? "registry rebuild failed" : Rebuilt.error().Issues.front().Message;
 				return std::unexpected(Error(AssetCookErrorCode::SourceChanged,
 					"Source registry membership is invalid or changed: " + Detail,
 					Rebuilt.error().Issues.empty() ? Snapshot.GetProjectRootPath() : Rebuilt.error().Issues.front().ProjectRelativePath));
 			}
+			if (CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled after registry membership scanning"));
 			const auto Expected = Snapshot.GetRegistry().GetAssets();
 			const auto Actual = Current.GetAssets();
 			if (Expected.size() != Actual.size())
 				return std::unexpected(Error(AssetCookErrorCode::SourceChanged, "Managed asset membership changed after dependency analysis", Snapshot.GetProjectRootPath()));
 			for (size_t Index = 0; Index < Expected.size(); ++Index)
+			{
+				if (CancellationToken.stop_requested())
+					return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled during registry membership validation"));
 				if (Expected[Index].ID != Actual[Index].ID || Expected[Index].ProjectRelativePath != Actual[Index].ProjectRelativePath)
 					return std::unexpected(Error(AssetCookErrorCode::SourceChanged,
 						"Managed asset identity or location changed after dependency analysis",
 						Snapshot.GetProjectRootPath(), Actual[Index].ID));
+			}
 			return {};
 		}
 
@@ -214,17 +229,25 @@ namespace PulseForge
 		{
 			const auto& Request = Plan.Request;
 			PF_INFO("Validating cook source read set");
+			if (Request.CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled before source freshness validation"));
 			if (auto ReadSet = AssetDependencyExtractor::ValidateInputReceipts(
-				Request.SourceSnapshot->GetProjectRootPath(), Request.SourceSnapshot->GetInputReadSet()); !ReadSet)
+				Request.SourceSnapshot->GetProjectRootPath(), Request.SourceSnapshot->GetInputReadSet(), Request.CancellationToken); !ReadSet)
+			{
+				if (ReadSet.error().Cancelled)
+					return std::unexpected(Error(AssetCookErrorCode::Cancelled, ReadSet.error().Message, ReadSet.error().Path));
 				return std::unexpected(Error(AssetCookErrorCode::SourceChanged,
 					"Source project changed during cook: " + ReadSet.error().Message, ReadSet.error().Path));
+			}
 			PF_INFO("Validating cook source registry membership");
-			if (auto Membership = ValidateRegistryMembership(*Request.SourceSnapshot); !Membership)
+			if (auto Membership = ValidateRegistryMembership(*Request.SourceSnapshot, Request.CancellationToken); !Membership)
 				return std::unexpected(Membership.error());
 			PF_INFO("Validating cook project description");
 			auto Project = ReadProjectDescription(Request.SourceProjectFile);
 			if (!Project || Project->Fingerprint != Plan.ProjectFileFingerprint || Project->Bytes != Plan.ProjectFileBytes)
 				return std::unexpected(Error(AssetCookErrorCode::SourceChanged, "Project startup settings changed during cook", Request.SourceProjectFile));
+			if (Request.CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled after re-reading the project description", Request.SourceProjectFile));
 			const std::filesystem::path InputActionsPath = Request.SourceSnapshot->GetProjectRootPath() / "InputActions.json";
 			std::error_code InputError;
 			const bool InputPresent = std::filesystem::exists(InputActionsPath, InputError);
@@ -391,6 +414,8 @@ namespace PulseForge
 
 	std::expected<AssetCookPlan, AssetCookError> AssetCookService::Plan(const AssetCookRequest& Request)
 	{
+		if (Request.CancellationToken.stop_requested())
+			return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook planning was cancelled"));
 		ProjectDesc Description;
 		AssetContentFingerprint ProjectFingerprint;
 		uint64_t ProjectBytes = 0;
@@ -401,10 +426,14 @@ namespace PulseForge
 		if (Request.SourceSnapshot->GetRegistry().GetAssetCount() == 0)
 			return std::unexpected(Error(AssetCookErrorCode::InvalidRoot, "Source dependency snapshot contains no managed assets"));
 		if (auto ReadSet = AssetDependencyExtractor::ValidateInputReceipts(
-			Request.SourceSnapshot->GetProjectRootPath(), Request.SourceSnapshot->GetInputReadSet()); !ReadSet)
-			return std::unexpected(Error(AssetCookErrorCode::SourceChanged, "Source project changed after dependency analysis: " + ReadSet.error().Message,
-				ReadSet.error().Path));
-		if (auto Membership = ValidateRegistryMembership(*Request.SourceSnapshot); !Membership)
+			Request.SourceSnapshot->GetProjectRootPath(), Request.SourceSnapshot->GetInputReadSet(), Request.CancellationToken); !ReadSet)
+		{
+			if (ReadSet.error().Cancelled)
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, ReadSet.error().Message, ReadSet.error().Path));
+			return std::unexpected(Error(AssetCookErrorCode::SourceChanged,
+				"Source project changed after dependency analysis: " + ReadSet.error().Message, ReadSet.error().Path));
+		}
+		if (auto Membership = ValidateRegistryMembership(*Request.SourceSnapshot, Request.CancellationToken); !Membership)
 			return std::unexpected(Membership.error());
 
 		AssetCookPlan Plan;
@@ -427,6 +456,8 @@ namespace PulseForge
 		std::vector<Pending> Queue;
 		for (const AssetID& Root : Plan.SortedRoots)
 		{
+			if (Request.CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook planning was cancelled while validating roots"));
 			const auto Record = Request.SourceSnapshot->GetRegistry().Find(Root);
 			if (!Record)
 				return std::unexpected(Error(AssetCookErrorCode::InvalidRoot, "Cook root is absent from the captured asset registry", {}, Root));
@@ -446,6 +477,8 @@ namespace PulseForge
 		std::map<std::string, AssetCookPlannedProduct> Products;
 		for (size_t Cursor = 0; Cursor < Queue.size(); ++Cursor)
 		{
+			if (Request.CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook planning was cancelled while resolving dependencies"));
 			const CookedAssetDependency Current = Queue[Cursor].Product;
 			const std::string Key = ProductIdentityKey(Current);
 			if (Products.contains(Key)) continue;
@@ -474,6 +507,8 @@ namespace PulseForge
 
 			for (const AssetDependencyEdge& Edge : Request.SourceSnapshot->GetDirectDependencies({ Current.Asset, {}, {} }))
 			{
+				if (Request.CancellationToken.stop_requested())
+					return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook planning was cancelled while enumerating dependencies"));
 				if (Edge.Kind != AssetDependencyEdgeKind::RuntimeReference) continue;
 				if (Edge.Status != AssetDependencyStatus::Resolved || Edge.Target.Asset.IsNil())
 					return std::unexpected(Error(AssetCookErrorCode::InvalidDependency,
@@ -501,6 +536,8 @@ namespace PulseForge
 			{
 				for (const AssetSubresourceRecord& Candidate : Request.SourceSnapshot->GetSubresources())
 				{
+					if (Request.CancellationToken.stop_requested())
+						return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook planning was cancelled while enumerating mesh outputs"));
 					if (Candidate.Identity.Asset != Current.Asset || Candidate.Identity.SubresourceKey == Current.Subresource ||
 						(Candidate.Classification != AssetSubresourceClassification::SupportedCandidate &&
 							Candidate.Classification != AssetSubresourceClassification::Imported))
@@ -513,6 +550,8 @@ namespace PulseForge
 
 		for (auto& [Key, Product] : Products)
 		{
+			if (Request.CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook planning was cancelled while finalizing products"));
 			(void)Key;
 			Plan.Products.push_back(std::move(Product));
 		}
@@ -526,6 +565,8 @@ namespace PulseForge
 			Plan.GameplayInputPresent = true;
 			auto InputBytes = ReadBounded(InputActionsPath, MaximumInputMapBytes);
 			if (!InputBytes) return std::unexpected(InputBytes.error());
+			if (Request.CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook planning was cancelled after reading gameplay input defaults", InputActionsPath));
 			const std::string InputText(InputBytes->empty() ? "" : reinterpret_cast<const char*>(InputBytes->data()), InputBytes->size());
 			auto Input = ParseGameplayActionMap(InputText);
 			if (!Input) return std::unexpected(Error(AssetCookErrorCode::SourceReadFailed, Input.error().Message, InputActionsPath));
@@ -551,6 +592,8 @@ namespace PulseForge
 
 	std::expected<AssetCookReport, AssetCookError> AssetCookService::Cook(const AssetCookPlan& Plan)
 	{
+		if (Plan.Request.CancellationToken.stop_requested())
+			return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled before processing began"));
 		auto Fresh = AssetCookService::Plan(Plan.Request);
 		if (!Fresh) return std::unexpected(Fresh.error());
 		if (!SameProducts(Plan, *Fresh))
@@ -599,6 +642,9 @@ namespace PulseForge
 		Entries.reserve(Plan.Products.size());
 		for (const AssetCookPlannedProduct& Product : Plan.Products)
 		{
+			if (Request.CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled before processing the next product",
+					Product.SourcePath, Product.Asset));
 			std::vector<std::byte> Bytes;
 			uint32_t Version = 1;
 			if (Product.Product == CookedAssetProductKind::MeshPrimitive)
@@ -608,6 +654,8 @@ namespace PulseForge
 					return std::unexpected(Error(AssetCookErrorCode::UnsupportedProduct, "Unsupported source-local mesh locator", Product.SourcePath, Product.Asset));
 				auto Imported = GltfMeshImporter::ProcessStaticPrimitive(Product.Asset, Request.SourceSnapshot->GetProjectRootPath(),
 					Request.SourceSnapshot->GetRegistry(), MeshIndex, PrimitiveIndex);
+				if (Request.CancellationToken.stop_requested())
+					return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled after mesh import", Product.SourcePath, Product.Asset));
 				if (!Imported) return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed, Imported.error().Message, Imported.error().Path, Product.Asset));
 				auto Encoded = Detail::EncodeMeshProduct(Imported->Mesh);
 				if (!Encoded) return std::unexpected(Error(AssetCookErrorCode::SerializationFailed, Encoded.error(), Product.SourcePath, Product.Asset));
@@ -620,8 +668,12 @@ namespace PulseForge
 				const auto ColorSpace = Srgb ? Detail::ImageColorSpace::Srgb : Detail::ImageColorSpace::Linear;
 				auto Imported = ImageAssetImporter::ImportRGBA8(Product.Asset, Request.SourceSnapshot->GetProjectRootPath(),
 					Request.SourceSnapshot->GetRegistry());
+				if (Request.CancellationToken.stop_requested())
+					return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled after image decode", Product.SourcePath, Product.Asset));
 				if (!Imported) return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed, Imported.error().Message, Imported.error().Path, Product.Asset));
 				auto Mips = Detail::BuildTextureMipChain(Imported->Width, Imported->Height, Imported->RGBA8Pixels, ColorSpace);
+				if (Request.CancellationToken.stop_requested())
+					return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled after texture mip processing", Product.SourcePath, Product.Asset));
 				Detail::PreparedTextureCpuProduct Texture{ Imported->Width, Imported->Height, ColorSpace, std::move(Mips) };
 				auto Encoded = Detail::EncodeTextureProduct(Texture);
 				if (!Encoded) return std::unexpected(Error(AssetCookErrorCode::SerializationFailed, Encoded.error(), Product.SourcePath, Product.Asset));
@@ -631,7 +683,10 @@ namespace PulseForge
 			{
 				const EnvironmentProcessingDesc Processing{};
 				auto Prepared = Detail::PrepareEnvironmentCpuProduct(Product.Asset,
-					Request.SourceSnapshot->GetProjectRootPath(), Request.SourceSnapshot->GetRegistry(), nullptr, Processing);
+					Request.SourceSnapshot->GetProjectRootPath(), Request.SourceSnapshot->GetRegistry(), nullptr, Processing,
+					Request.CancellationToken);
+				if (Request.CancellationToken.stop_requested())
+					return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled during environment processing", Product.SourcePath, Product.Asset));
 				if (!Prepared)
 					return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed,
 						Prepared.error().Message, Product.SourcePath, Product.Asset));
@@ -664,6 +719,8 @@ namespace PulseForge
 				auto Read = ReadBounded(Product.SourcePath, MaximumAuthoredPayloadBytes, Product.Asset);
 				if (!Read) return std::unexpected(Read.error());
 				Bytes = std::move(*Read);
+				if (Request.CancellationToken.stop_requested())
+					return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled after reading an authored product", Product.SourcePath, Product.Asset));
 				if (Product.Product == CookedAssetProductKind::Scene)
 				{
 					Scene SceneValue;
@@ -720,6 +777,9 @@ namespace PulseForge
 						return std::unexpected(Error(AssetCookErrorCode::ProductProcessingFailed, Parsed.error().Message, Product.SourcePath, Product.Asset));
 				}
 			}
+			if (Request.CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled before accepting the processed product",
+					Product.SourcePath, Product.Asset));
 			if (Bytes.size() > CookedAssetCatalog::MaximumPayloadBytes)
 				return std::unexpected(Error(AssetCookErrorCode::SerializationFailed, "Cooked product exceeds the runtime payload limit", Product.SourcePath, Product.Asset));
 			const CookedAssetDigest Digest = CookedAssetCatalog::ComputePayloadDigest(Bytes);
@@ -747,9 +807,16 @@ namespace PulseForge
 		GenerationBuilder.UpdateText("abi", Request.Compatibility.RuntimeABI);
 		// Configuration is recorded as provenance but excluded from product identity while all current adapters
 		// produce configuration-independent payloads. Add it only when an adapter actually changes its output.
-		for (const AssetID& Root : Plan.SortedRoots) GenerationBuilder.UpdateText("root", Root.ToString());
+		for (const AssetID& Root : Plan.SortedRoots)
+		{
+			if (Request.CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled while computing generation identity"));
+			GenerationBuilder.UpdateText("root", Root.ToString());
+		}
 		for (size_t Index = 0; Index < Entries.size(); ++Index)
 		{
+			if (Request.CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled while computing generation identity"));
 			GenerationBuilder.UpdateText("asset", Entries[Index].Asset.ToString());
 			GenerationBuilder.UpdateText("product", std::to_string(static_cast<uint32_t>(Entries[Index].Product)));
 			GenerationBuilder.UpdateText("subresource", Entries[Index].Subresource);
@@ -770,6 +837,8 @@ namespace PulseForge
 		auto Manifest = CookedAssetCatalog::SerializeManifest(Plan.ProjectID, Request.StartupScene,
 				Request.Compatibility, Plan.Request.DynamicRoots, Entries);
 		if (!Manifest) return std::unexpected(Error(AssetCookErrorCode::SerializationFailed, Manifest.error().Message, Manifest.error().Path));
+		if (Request.CancellationToken.stop_requested())
+			return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled before output staging"));
 
 		PF_INFO("Creating cooked generation staging directory");
 		// The exclusive output lock already owns this namespace. Avoid a second random identifier and keep
@@ -784,6 +853,8 @@ namespace PulseForge
 		ScopedCookStageCleanup StageCleanup{ Stage, StagedFiles, StagedExpectedBytes };
 		for (size_t Index = 0; Index < Entries.size(); ++Index)
 		{
+			if (Request.CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled while staging products"));
 			const std::filesystem::path Relative = std::filesystem::u8path(Entries[Index].RelativePayloadPath);
 			const std::filesystem::path Destination = Stage / "p" / Relative;
 			if (!IsSameOrWithin(Destination.lexically_normal(), Stage.lexically_normal()))
@@ -795,6 +866,8 @@ namespace PulseForge
 		PF_INFO("Staged {} cooked payloads", Entries.size());
 		if (auto Freshness = ValidateCookSourceFresh(Plan); !Freshness)
 			return std::unexpected(Freshness.error());
+		if (Request.CancellationToken.stop_requested())
+			return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled before cooked generation publication"));
 		const std::filesystem::path GenerationDirectory = *OutputAbsolute / "g" / Generation;
 		if (auto Links = RejectLinkedAncestors(GenerationDirectory); !Links) return std::unexpected(Links.error());
 		std::filesystem::create_directories(GenerationDirectory.parent_path(), DirectoryError);
@@ -808,6 +881,8 @@ namespace PulseForge
 			// this cook's owned staging tree, but a present or unobservable entry is never overwritten.
 			for (size_t Index = 0; Index < Entries.size(); ++Index)
 			{
+				if (Request.CancellationToken.stop_requested())
+					return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled while validating deterministic payloads"));
 				const std::filesystem::path Existing = *OutputAbsolute / std::filesystem::u8path(Entries[Index].RelativePayloadPath);
 				std::error_code ExistingStatusError;
 				const auto ExistingStatus = std::filesystem::symlink_status(Existing, ExistingStatusError);
@@ -844,6 +919,8 @@ namespace PulseForge
 			std::filesystem::path StagedGeneration = Stage / "p" / "g" / Generation;
 			std::filesystem::create_directories(GenerationDirectory.parent_path(), DirectoryError);
 			if (DirectoryError) return std::unexpected(Error(AssetCookErrorCode::StagingFailed, "Could not prepare generation parent", GenerationDirectory.parent_path()));
+			if (Request.CancellationToken.stop_requested())
+				return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled before publishing cooked payloads"));
 			std::filesystem::rename(StagedGeneration, GenerationDirectory, DirectoryError);
 			if (DirectoryError) return std::unexpected(Error(AssetCookErrorCode::OutputConflict, "Could not publish complete cooked generation: " + DirectoryError.message(), GenerationDirectory));
 		}
@@ -856,6 +933,8 @@ namespace PulseForge
 		PF_INFO("Staged cooked manifest");
 		if (auto Freshness = ValidateCookSourceFresh(Plan); !Freshness)
 			return std::unexpected(Freshness.error());
+		if (Request.CancellationToken.stop_requested())
+			return std::unexpected(Error(AssetCookErrorCode::Cancelled, "Cook was cancelled before manifest publication"));
 		std::error_code ManifestCheckError;
 		const auto CurrentManifestStatus = std::filesystem::symlink_status(ManifestPath, ManifestCheckError);
 		if (ManifestCheckError != std::errc::no_such_file_or_directory && ManifestCheckError)

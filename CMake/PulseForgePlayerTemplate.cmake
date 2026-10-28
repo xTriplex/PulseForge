@@ -32,7 +32,7 @@ if(NOT PULSEFORGE_COOKED_GAME_RESOURCE_DIRECTORY)
 	message(FATAL_ERROR "Cooked player resource directory was not configured")
 endif()
 
-add_custom_command(TARGET PulseForgeCookedGame POST_BUILD
+add_custom_target(PulseForgeCookedPlayerTemplate
 	COMMAND "${CMAKE_COMMAND}"
 		"-DPF_TEMPLATE_ROOT=${PF_TEMPLATE_ROOT}"
 		"-DPF_PLAYER_FILE=$<TARGET_FILE:PulseForgeCookedGame>"
@@ -45,6 +45,6 @@ add_custom_command(TARGET PulseForgeCookedGame POST_BUILD
 		"-DPF_ARCHITECTURE=${PF_TEMPLATE_ARCH}"
 		"-DPF_DESCRIPTOR=$<TARGET_FILE_DIR:PulseForgeCookedGame>/PulseForgePlayerTemplate.json"
 		-P "${CMAKE_CURRENT_LIST_DIR}/PulseForgeWritePlayerTemplate.cmake"
+	DEPENDS PulseForgeCookedGame
 	VERBATIM
-	COMMENT "Writing compatible PulseForge cooked-player template descriptor")
-add_custom_target(PulseForgeCookedPlayerTemplate DEPENDS PulseForgeCookedGame)
+	COMMENT "Refreshing compatible PulseForge cooked-player template metadata")

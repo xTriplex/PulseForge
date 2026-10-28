@@ -301,6 +301,7 @@ if(BUILD_TESTING)
 		add_executable(PulseForgeEditorTests
 			Tests/PulseForgeEditorTests.cpp
 			Tests/EditorTests.cpp
+			Tests/EditorBuildProfileControllerTests.cpp
 			Tests/EditorViewportTests.cpp
 			Tests/EditorViewportSceneRenderViewTests.cpp
 			Tests/EditorAssetPreviewStressHarnessTests.cpp

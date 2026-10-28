@@ -4,14 +4,15 @@
 #include "Assets/ExportBuildProfile.h"
 #include "Core/Core.h"
 
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <vector>
@@ -85,6 +86,11 @@ namespace PulseForge
 		std::filesystem::path TemplateRoot;
 		std::filesystem::path TemplateDescriptor;
 		std::optional<std::filesystem::path> OutputOverride;
+		std::function<void()> BeforeDependencyFinalValidation;
+		std::function<void()> BeforeCook;
+		std::function<void()> BeforePublicationRename;
+		std::function<void(const std::filesystem::path&)> BeforeCandidateCleanup;
+		std::function<void(const std::filesystem::path&)> BeforeCandidateCreate;
 	};
 
 	struct AssetExportSnapshot final
@@ -116,21 +122,37 @@ namespace PulseForge
 			const std::filesystem::path& Output);
 
 	private:
-		void Run(uint64_t RequestID, AssetExportRequest Request) noexcept;
+		struct PendingFinish final
+		{
+			AssetExportPhase Phase = AssetExportPhase::Idle;
+			std::optional<AssetExportError> Error;
+			std::filesystem::path Output;
+		};
+
+		void Run(uint64_t RequestID, AssetExportRequest Request, std::stop_token CancellationToken) noexcept;
 		void Update(uint64_t RequestID, AssetExportPhase Phase, float Progress, std::string Message = {});
+		[[nodiscard]] bool TryBeginPublication(uint64_t RequestID) noexcept;
+		void BeginCandidateCleanup(uint64_t RequestID) noexcept;
+		void CompleteCandidateCleanup(uint64_t RequestID) noexcept;
 		void Finish(uint64_t RequestID, AssetExportPhase Phase, std::optional<AssetExportError> Error,
 			std::filesystem::path Output = {}) noexcept;
 
 		mutable std::mutex m_Mutex;
 		std::jthread m_Worker;
+		std::stop_source m_RequestStopSource;
 		AssetExportSnapshot m_Snapshot;
-		std::atomic<bool> m_CancelRequested = false;
 		uint64_t m_NextRequestID = 1;
 		bool m_ShuttingDown = false;
+		bool m_PublicationStarted = false;
+		bool m_CandidateCleanupPending = false;
+		std::optional<PendingFinish> m_PendingFinish;
 	};
 
 	[[nodiscard]] PULSEFORGE_API std::expected<ExportTemplateDescriptor, AssetExportError> LoadExportTemplateDescriptor(
 		const std::filesystem::path& Path);
+	[[nodiscard]] PULSEFORGE_API std::expected<std::filesystem::path, AssetExportError> ResolveExportTemplateRoot(
+		const std::filesystem::path& DescriptorPath,
+		std::optional<std::filesystem::path> ExplicitRoot = {});
 	[[nodiscard]] PULSEFORGE_API std::expected<std::string, AssetExportError> SerializeExportTemplateDescriptor(
 		const ExportTemplateDescriptor& Descriptor);
 } // namespace PulseForge

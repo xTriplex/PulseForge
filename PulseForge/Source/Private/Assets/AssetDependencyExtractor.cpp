@@ -54,6 +54,11 @@ namespace PulseForge
 			return { Path, std::move(Message) };
 		}
 
+		AssetDependencyCatalogError MakeCancelledError(const std::filesystem::path& Path)
+		{
+			return { Path, "Dependency analysis was cancelled", true };
+		}
+
 		bool IsSafeReadSetKey(const std::filesystem::path& Relative)
 		{
 			if (Relative.empty() || Relative.is_absolute() || Relative.has_root_name() || Relative.has_root_directory() ||
@@ -235,7 +240,8 @@ namespace PulseForge
 		}
 
 		std::expected<void, AssetDependencyCatalogError> ExtractSceneReferences(
-			AssetDependencyExtraction& Output, const AssetRecord& Owner, const AssetRegistry& Registry, const Scene& Source)
+			AssetDependencyExtraction& Output, const AssetRecord& Owner, const AssetRegistry& Registry, const Scene& Source,
+			std::stop_token CancellationToken = {})
 		{
 			auto Validation = AssetReferenceValidator::Validate(Source, Registry);
 			if (!Validation)
@@ -256,6 +262,7 @@ namespace PulseForge
 
 			for (const Entity& EntityValue : Source.GetEntities())
 			{
+				if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(Owner.ProjectRelativePath));
 				const std::string EntityKey = "entity/" + EntityValue.GetUUID().ToString();
 				const AssetDependencyNode Referrer{ Owner.ID, {}, EntityKey };
 
@@ -296,25 +303,29 @@ namespace PulseForge
 
 		std::expected<void, AssetDependencyCatalogError> ExtractSceneFile(AssetDependencyExtraction& Output,
 			const std::filesystem::path& ProjectRoot, const std::filesystem::path& SourcePath, const AssetRecord& Owner,
-			const AssetRegistry& Registry)
+			const AssetRegistry& Registry, std::stop_token CancellationToken = {})
 		{
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 			auto Bytes = ReadBoundedBytes(SourcePath, 64ull * 1024ull * 1024ull);
 			if (!Bytes) return std::unexpected(MakeError(SourcePath, "Scene dependency analysis failed: " + Bytes.error()));
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 			AddReadReceipt(Output, ProjectRoot, SourcePath, *Bytes);
 			const std::string Data(Bytes->empty() ? std::string{} :
 				std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size()));
 			Scene Source;
 			auto Loaded = SceneSerializer::Deserialize(Data, Source);
 			if (!Loaded) return std::unexpected(MakeError(SourcePath, "Scene dependency analysis failed: " + Loaded.error().Message));
-			return ExtractSceneReferences(Output, Owner, Registry, Source);
+			return ExtractSceneReferences(Output, Owner, Registry, Source, CancellationToken);
 		}
 
 		std::expected<void, AssetDependencyCatalogError> ExtractPrefabFile(AssetDependencyExtraction& Output,
 			const std::filesystem::path& ProjectRoot, const std::filesystem::path& SourcePath, const AssetRecord& Owner,
-			const AssetRegistry& Registry)
+			const AssetRegistry& Registry, std::stop_token CancellationToken = {})
 		{
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 			auto Bytes = ReadBoundedBytes(SourcePath, MaximumPrefabBytes);
 			if (!Bytes) return std::unexpected(MakeError(SourcePath, "Prefab dependency analysis failed: " + Bytes.error()));
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 			AddReadReceipt(Output, ProjectRoot, SourcePath, *Bytes);
 			const std::string Data(Bytes->empty() ? std::string{} :
 				std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size()));
@@ -325,6 +336,7 @@ namespace PulseForge
 			auto ValidatedRoot = PrefabSerializer::Instantiate(Data, ValidationScene);
 			if (!ValidatedRoot)
 				return std::unexpected(MakeError(SourcePath, "Prefab dependency analysis failed: " + ValidatedRoot.error().Message));
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 
 			Json Document;
 			try
@@ -344,7 +356,7 @@ namespace PulseForge
 			auto SceneLoad = SceneSerializer::Deserialize(SceneText, AuthoredScene);
 			if (!SceneLoad)
 				return std::unexpected(MakeError(SourcePath, "Prefab scene dependency analysis failed: " + SceneLoad.error().Message));
-			return ExtractSceneReferences(Output, Owner, Registry, AuthoredScene);
+			return ExtractSceneReferences(Output, Owner, Registry, AuthoredScene, CancellationToken);
 		}
 
 		struct BufferInput
@@ -531,11 +543,13 @@ namespace PulseForge
 
 		std::expected<void, AssetDependencyCatalogError> AnalyzeGltf(AssetDependencyExtraction& Output,
 			const std::filesystem::path& ProjectRoot, const std::filesystem::path& SourcePath, const AssetRecord& Owner,
-			const AssetMetadata& Metadata)
+			const AssetMetadata& Metadata, std::stop_token CancellationToken = {})
 		{
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 			const bool IsGlb = HasAssetExtension(SourcePath, { ".glb" });
 			auto SourceRead = ReadGltfSource(Output, ProjectRoot, SourcePath, IsGlb);
 			if (!SourceRead) return std::unexpected(MakeError(SourcePath, "glTF dependency analysis failed: " + SourceRead.error()));
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 
 			Json Document;
 			try
@@ -564,6 +578,7 @@ namespace PulseForge
 					return std::unexpected(MakeError(SourcePath, "glTF extensionsRequired must be a bounded array"));
 				for (size_t Index = 0; Index < Required->size(); ++Index)
 				{
+					if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 					if (!(*Required)[Index].is_string())
 						return std::unexpected(MakeError(SourcePath, "glTF required extension name must be a string"));
 					const std::string Extension = (*Required)[Index].get<std::string>();
@@ -580,6 +595,7 @@ namespace PulseForge
 				uint64_t TotalBufferBytes = 0;
 				for (size_t Index = 0; Index < Buffers->size(); ++Index)
 				{
+					if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 					const Json& Buffer = (*Buffers)[Index];
 					auto ByteLength = ReadByteLength(Buffer);
 					if (!ByteLength || TotalBufferBytes > MaximumGltfBufferBytes - *ByteLength)
@@ -673,6 +689,7 @@ namespace PulseForge
 					return std::unexpected(MakeError(SourcePath, "glTF images must be a bounded array"));
 				for (size_t Index = 0; Index < Images->size(); ++Index)
 				{
+					if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 					const Json& Image = (*Images)[Index];
 					if (!Image.is_object()) return std::unexpected(MakeError(SourcePath, "glTF image entry must be an object"));
 					const auto Uri = Image.find("uri");
@@ -736,6 +753,7 @@ namespace PulseForge
 				size_t TotalPrimitives = 0;
 				for (size_t MeshIndex = 0; MeshIndex < Meshes->size(); ++MeshIndex)
 				{
+					if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 					const Json& Mesh = (*Meshes)[MeshIndex];
 					if (!Mesh.is_object()) return std::unexpected(MakeError(SourcePath, "glTF mesh entry must be an object"));
 					const auto Primitives = Mesh.find("primitives");
@@ -746,6 +764,7 @@ namespace PulseForge
 					const std::string MeshName = FindString(Mesh, "name").value_or("mesh " + std::to_string(MeshIndex));
 					for (size_t PrimitiveIndex = 0; PrimitiveIndex < Primitives->size(); ++PrimitiveIndex)
 					{
+						if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 						const std::string Key = MeshPrimitiveKey(MeshIndex, PrimitiveIndex);
 						// Index locators remain stable for unchanged structure; a locator is not proof that output was imported.
 						const AssetDependencyNode PrimitiveNode{ Owner.ID, PathToUtf8(Owner.ProjectRelativePath), Key };
@@ -768,10 +787,12 @@ namespace PulseForge
 					: std::nullopt;
 				auto Inspections = Assets::Detail::InspectStaticPrimitives(
 					SourceRead->JsonText, SourcePath, ProjectRoot, Locators, BinaryLength);
+				if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 				if (Inspections.size() != Output.Subresources.size() - FirstSubresource)
 					return std::unexpected(MakeError(SourcePath, "glTF primitive inspection returned an inconsistent locator count"));
 				for (size_t Index = 0; Index < Inspections.size(); ++Index)
 				{
+					if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 					AssetSubresourceRecord& Subresource = Output.Subresources[FirstSubresource + Index];
 					Subresource.Classification = Inspections[Index].Classification;
 					if (Subresource.Classification != AssetSubresourceClassification::Invalid &&
@@ -796,6 +817,7 @@ namespace PulseForge
 			RecipeInputs.push_back({ PathToUtf8(Owner.ProjectRelativePath), SourceRead->Content });
 			for (BufferInput& Input : ExternalBuffers)
 			{
+				if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(Input.AbsolutePath));
 				if (Input.Status != AssetDependencyStatus::Resolved) continue;
 				std::error_code SizeError;
 				const uintmax_t Size = std::filesystem::file_size(Input.AbsolutePath, SizeError);
@@ -915,10 +937,12 @@ namespace PulseForge
 
 		std::expected<void, AssetDependencyCatalogError> AnalyzeMaterial(AssetDependencyExtraction& Output,
 			const std::filesystem::path& ProjectRoot, const std::filesystem::path& SourcePath, const AssetRecord& Owner,
-			const AssetRegistry& Registry)
+			const AssetRegistry& Registry, std::stop_token CancellationToken = {})
 		{
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 			auto Bytes = ReadBoundedBytes(SourcePath, 1024ull * 1024ull);
 			if (!Bytes) return std::unexpected(MakeError(SourcePath, "Material dependency analysis failed: " + Bytes.error()));
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 			AddReadReceipt(Output, ProjectRoot, SourcePath, *Bytes);
 			const std::string Data(Bytes->empty() ? std::string{} :
 				std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size()));
@@ -930,23 +954,31 @@ namespace PulseForge
 				{ "metallicRoughnessTexture", Material->MetallicRoughnessTexture }, { "normalTexture", Material->NormalTexture },
 				{ "occlusionTexture", Material->OcclusionTexture }, { "emissiveTexture", Material->EmissiveTexture } } };
 			for (const auto& [Field, Asset] : References)
+			{
+				if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
 				AddRuntimeReference(Output, Registry, Referrer, Asset, AssetFileType::Image, "material." + std::string(Field), true,
 					Asset.IsNil() ? "null" : Asset.ToString());
+			}
 			return {};
 		}
 
 		std::expected<void, AssetDependencyCatalogError> AppendRuntimeCycles(
-			AssetDependencyExtraction& Output, const std::filesystem::path& ProjectRoot, const std::vector<AssetRecord>& Records)
+			AssetDependencyExtraction& Output, const std::filesystem::path& ProjectRoot, const std::vector<AssetRecord>& Records,
+			std::stop_token CancellationToken = {})
 		{
 			if (Records.size() > MaximumCycleNodes)
 				return std::unexpected(MakeError(ProjectRoot, "Runtime dependency graph exceeds the bounded cycle-analysis node limit"));
 
 			std::map<AssetID, std::vector<AssetID>> Adjacency;
 			for (const AssetRecord& Record : Records)
+			{
+				if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(ProjectRoot));
 				Adjacency.try_emplace(Record.ID);
+			}
 			size_t EdgeCount = 0;
 			for (const AssetDependencyEdge& Edge : Output.Edges)
 			{
+				if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(ProjectRoot));
 				if (Edge.Kind != AssetDependencyEdgeKind::RuntimeReference || Edge.Status != AssetDependencyStatus::Resolved ||
 					Edge.Referrer.Asset.IsNil() || Edge.Target.Asset.IsNil())
 					continue;
@@ -957,6 +989,7 @@ namespace PulseForge
 			}
 			for (auto& [Asset, Targets] : Adjacency)
 			{
+				if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(ProjectRoot));
 				(void)Asset;
 				std::sort(Targets.begin(), Targets.end());
 				Targets.erase(std::unique(Targets.begin(), Targets.end()), Targets.end());
@@ -972,12 +1005,14 @@ namespace PulseForge
 			std::vector<Frame> Stack;
 			for (const auto& [Root, Targets] : Adjacency)
 			{
+				if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(ProjectRoot));
 				(void)Targets;
 				if (Color[Root] != 0) continue;
 				Color[Root] = 1;
 				Stack.push_back({ Root, 0 });
 				while (!Stack.empty())
 				{
+					if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(ProjectRoot));
 					Frame& Current = Stack.back();
 					const auto Found = Adjacency.find(Current.Node);
 					if (Found == Adjacency.end() || Current.Next == Found->second.size())
@@ -1018,8 +1053,10 @@ namespace PulseForge
 	} // namespace
 
 	std::expected<AssetDependencyExtraction, AssetDependencyCatalogError> AssetDependencyExtractor::Extract(
-		const std::filesystem::path& ProjectRoot, const UUID& ProjectID, const AssetRegistry& Registry)
+		const std::filesystem::path& ProjectRoot, const UUID& ProjectID, const AssetRegistry& Registry,
+		std::stop_token CancellationToken)
 	{
+		if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(ProjectRoot));
 		if (ProjectID.IsNil()) return std::unexpected(MakeError(ProjectRoot, "Dependency extraction requires a non-nil project identity"));
 		// The current catalog node contract identifies managed sources and subresources, but has no stable project-file
 		// pseudo-node. The project's startup-scene setting is therefore intentionally outside this asset graph.
@@ -1032,28 +1069,36 @@ namespace PulseForge
 		const std::vector<AssetRecord> Records = Registry.GetAssets();
 		for (const AssetRecord& Record : Records)
 		{
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(Record.ProjectRelativePath));
 			auto Resolved = AssetPathResolver::ResolveManagedSourcePath(AbsoluteProjectRoot, Record.ProjectRelativePath);
 			if (!Resolved) return std::unexpected(MakeError(Resolved.error().Path, Resolved.error().Message));
 			auto Metadata = ReadAssetMetadata(Output, AbsoluteProjectRoot, *Resolved, Record);
 			if (!Metadata) return std::unexpected(Metadata.error());
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(*Resolved));
 
 			std::expected<void, AssetDependencyCatalogError> Result;
 			if (HasAssetTypeExtension(Record.ProjectRelativePath, AssetFileType::Material))
-				Result = AnalyzeMaterial(Output, AbsoluteProjectRoot, *Resolved, Record, Registry);
+				Result = AnalyzeMaterial(Output, AbsoluteProjectRoot, *Resolved, Record, Registry, CancellationToken);
 			else if (HasAssetTypeExtension(Record.ProjectRelativePath, AssetFileType::Scene))
-				Result = ExtractSceneFile(Output, AbsoluteProjectRoot, *Resolved, Record, Registry);
+				Result = ExtractSceneFile(Output, AbsoluteProjectRoot, *Resolved, Record, Registry, CancellationToken);
 			else if (HasAssetTypeExtension(Record.ProjectRelativePath, AssetFileType::Prefab))
-				Result = ExtractPrefabFile(Output, AbsoluteProjectRoot, *Resolved, Record, Registry);
+				Result = ExtractPrefabFile(Output, AbsoluteProjectRoot, *Resolved, Record, Registry, CancellationToken);
 			else if (HasAssetTypeExtension(Record.ProjectRelativePath, AssetFileType::Mesh))
-				Result = AnalyzeGltf(Output, AbsoluteProjectRoot, *Resolved, Record, *Metadata);
+				Result = AnalyzeGltf(Output, AbsoluteProjectRoot, *Resolved, Record, *Metadata, CancellationToken);
 			else continue;
 			if (!Result) return std::unexpected(std::move(Result.error()));
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(*Resolved));
 		}
 
 		std::set<std::string> ReadPaths;
-		for (const AssetDependencyInputReceipt& Receipt : Output.ReadSet) ReadPaths.insert(Receipt.ProjectRelativePath);
+		for (const AssetDependencyInputReceipt& Receipt : Output.ReadSet)
+		{
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(ProjectRoot));
+			ReadPaths.insert(Receipt.ProjectRelativePath);
+		}
 		for (const AssetDependencyEdge& Edge : Output.Edges)
 		{
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(ProjectRoot));
 			if (Edge.Kind != AssetDependencyEdgeKind::RuntimeReference || Edge.Status != AssetDependencyStatus::Resolved ||
 				Edge.Target.Asset.IsNil())
 				continue;
@@ -1071,12 +1116,13 @@ namespace PulseForge
 				return std::unexpected(MakeError(*TargetPath,
 					"Resolved runtime dependency exceeds the bounded source fingerprint limit"));
 			auto Content = FingerprintFile(*TargetPath, static_cast<uint64_t>(Size), MaximumGltfContainerBytes);
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(*TargetPath));
 			if (!Content)
 				return std::unexpected(MakeError(*TargetPath,
 					"Resolved runtime dependency could not be fingerprinted: " + Content.error()));
 			AddReadReceipt(Output, Key, static_cast<uint64_t>(Size), *Content);
 		}
-		auto Cycles = AppendRuntimeCycles(Output, AbsoluteProjectRoot, Records);
+		auto Cycles = AppendRuntimeCycles(Output, AbsoluteProjectRoot, Records, CancellationToken);
 		if (!Cycles) return std::unexpected(std::move(Cycles.error()));
 
 		std::sort(Output.ReadSet.begin(), Output.ReadSet.end(), [](const auto& First, const auto& Second)
@@ -1085,6 +1131,7 @@ namespace PulseForge
 		UniqueReadSet.reserve(Output.ReadSet.size());
 		for (AssetDependencyInputReceipt& Receipt : Output.ReadSet)
 		{
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(ProjectRoot));
 			if (!UniqueReadSet.empty() && UniqueReadSet.back().ProjectRelativePath == Receipt.ProjectRelativePath)
 			{
 				if (UniqueReadSet.back() != Receipt)
@@ -1146,8 +1193,10 @@ namespace PulseForge
 	}
 
 	std::expected<void, AssetDependencyCatalogError> AssetDependencyExtractor::ValidateInputReceipts(
-		const std::filesystem::path& ProjectRoot, std::span<const AssetDependencyInputReceipt> ReadSet)
+		const std::filesystem::path& ProjectRoot, std::span<const AssetDependencyInputReceipt> ReadSet,
+		std::stop_token CancellationToken)
 	{
+		if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(ProjectRoot));
 		std::error_code RootError;
 		const std::filesystem::path AbsoluteRoot = std::filesystem::absolute(ProjectRoot, RootError).lexically_normal();
 		if (RootError || !std::filesystem::is_directory(AbsoluteRoot, RootError) || RootError)
@@ -1156,6 +1205,7 @@ namespace PulseForge
 		std::string PreviousKey;
 		for (const AssetDependencyInputReceipt& Receipt : ReadSet)
 		{
+			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(ProjectRoot));
 			const std::filesystem::path Relative = std::filesystem::u8path(Receipt.ProjectRelativePath);
 			if (!IsSafeReadSetKey(Relative) || PathToUtf8(Relative) != Receipt.ProjectRelativePath ||
 				(!PreviousKey.empty() && PreviousKey >= Receipt.ProjectRelativePath))
