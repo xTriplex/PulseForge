@@ -921,8 +921,12 @@ namespace
 		if (!Started) return;
 		const AssetExportSnapshot LegacyUpgraded = WaitForTerminal(LegacyUpgradeService, *Started);
 		if (LegacyUpgraded.Error)
+		{
 			std::cerr << "Legacy inventory upgrade returned " << static_cast<int>(LegacyUpgraded.Error->Code)
-				<< ": " << LegacyUpgraded.Error->Message << " at " << LegacyUpgraded.Error->Path << '\n';
+				<< ": " << LegacyUpgraded.Error->Message << " at ";
+			TestSupport::WritePathUtf8(std::cerr, LegacyUpgraded.Error->Path);
+			std::cerr << '\n';
+		}
 		PF_CHECK(Tests, LegacyUpgraded.Phase == AssetExportPhase::Complete);
 		std::string UpgradedInventoryText;
 		PF_CHECK(Tests, ReadTextFile(InventoryPath, UpgradedInventoryText));
@@ -932,6 +936,51 @@ namespace
 		PF_CHECK(Tests, ReadTextFile(Sentinel, PreservedLegacySentinel));
 		PF_CHECK(Tests, PreservedLegacySentinel == "owned by the user");
 		LegacyUpgradeService.Shutdown();
+	}
+
+	void TestCookFailureCleansOwnedStagingRoot(TestRunner& Tests)
+	{
+		TemporaryExportFixture Fixture;
+		PF_CHECK(Tests, Fixture.IsReady());
+		if (!Fixture.IsReady()) return;
+		RealExportCase ExportCase;
+		PF_CHECK(Tests, PrepareRealExportCase(Fixture.Root(), ExportCase));
+		if (ExportCase.Request.SourceProjectFile.empty()) return;
+
+		const AssetExportSnapshot First = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, First.Phase == AssetExportPhase::Complete);
+		if (First.Phase != AssetExportPhase::Complete) return;
+		std::map<std::string, std::string> LastGoodPackage;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, LastGoodPackage));
+
+		std::filesystem::path Candidate;
+		bool StageRootPrepared = false;
+		bool SourceChanged = false;
+		const std::filesystem::path SceneSource = ExportCase.Request.SourceProjectFile.parent_path() / "Assets" / "Startup.scene";
+		ExportCase.Request.BeforeCandidateCreate = [&Candidate](const std::filesystem::path& Path) { Candidate = Path; };
+		ExportCase.Request.BeforeCook = [&]
+		{
+			if (Candidate.empty()) return;
+			std::error_code Error;
+			const std::filesystem::path CookRoot = Candidate / ".pf-cook";
+			std::filesystem::create_directories(CookRoot, Error);
+			StageRootPrepared = !Error && std::filesystem::is_directory(CookRoot);
+			std::string SceneText;
+			SourceChanged = StageRootPrepared && ReadTextFile(SceneSource, SceneText) &&
+				WriteTextFile(SceneSource, SceneText + "\n");
+		};
+
+		const AssetExportSnapshot Rejected = RunExportRequest(Tests, ExportCase.Request);
+		PF_CHECK(Tests, StageRootPrepared);
+		PF_CHECK(Tests, SourceChanged);
+		PF_CHECK(Tests, Rejected.Phase == AssetExportPhase::Failed);
+		PF_CHECK(Tests, Rejected.Error && Rejected.Error->Code == AssetExportErrorCode::CookFailed);
+		PF_CHECK(Tests, Rejected.Error && Rejected.Error->Path == SceneSource);
+		std::map<std::string, std::string> AfterFailure;
+		PF_CHECK(Tests, CapturePackageTree(ExportCase.Output, AfterFailure));
+		PF_CHECK(Tests, AfterFailure == LastGoodPackage);
+		PF_CHECK(Tests, !Candidate.empty() && !std::filesystem::exists(Candidate));
+		PF_CHECK(Tests, !std::filesystem::exists(Fixture.Root() / ".Package.pf-export-recovery.json"));
 	}
 
 	void TestExportTemplateRenameRemovalAndRepeatedExport(TestRunner& Tests)
@@ -1433,6 +1482,7 @@ void RunAssetExportServiceTests(TestRunner& Tests)
 	Run("InterruptedStagingRecoveryIsExplicitAndSafe", TestInterruptedStagingRecoveryIsExplicitAndSafe);
 	Run("InterruptedPublicationPreservesChangedRecoveryData", TestInterruptedPublicationPreservesChangedRecoveryData);
 	Run("PackageInventoryCannotClaimUnrelatedFiles", TestPackageInventoryCannotClaimUnrelatedFiles);
+	Run("CookFailureCleansOwnedStagingRoot", TestCookFailureCleansOwnedStagingRoot);
 	Run("ExportTemplateRenameRemovalAndRepeatedExport", TestExportTemplateRenameRemovalAndRepeatedExport);
 	Run("ExportPreservesModifiedPreviouslyOwnedFile", TestExportPreservesModifiedPreviouslyOwnedFile);
 	Run("ExportPreservesUnownedTemplateCollisionAndAllowsRetry", TestExportPreservesUnownedTemplateCollisionAndAllowsRetry);

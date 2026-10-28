@@ -39,7 +39,8 @@ namespace PulseForge
 		constexpr std::string_view InventoryName = ".pf-export-inventory.json";
 		constexpr std::string_view TemplateOwnershipName = ".pf-export-template-ownership.json";
 		constexpr std::string_view RuntimeConfigurationName = "PulseForgeRuntime.cfg";
-		constexpr std::string_view CookStagingDirectoryName = ".pf-export-cook-stage";
+		// Keep transient package paths short enough for legacy Windows path consumers.
+		constexpr std::string_view CookStagingDirectoryName = ".pf-cook";
 		constexpr std::string_view RecoveryFormat = "PulseForgeExportRecovery";
 		constexpr uint32_t RecoveryVersion = 1;
 		constexpr uint64_t MaximumRecoveryBytes = 16u * 1024u * 1024u;
@@ -2127,6 +2128,10 @@ namespace PulseForge
 					"Candidate contains an entry outside the staged package receipts", Candidate));
 				return;
 			}
+			// The cook service owns files beneath this reserved directory. Record the directory intent before
+			// calling it so an early cook failure can remove an empty output root without treating it as unknown.
+			CandidateExpected.insert_or_assign("D:" + std::string(CookStagingDirectoryName), "directory");
+			Recovery.CandidateTree = CandidateExpected;
 			if (auto Saved = SaveRecoveryRecord(JournalPath, Recovery); !Saved)
 				{ Finish(RequestID, AssetExportPhase::Failed, Saved.error()); return; }
 			if (Cancelled()) { Finish(RequestID, AssetExportPhase::Cancelled, MakeError(AssetExportErrorCode::Cancelled, "Export cancelled before cooking")); return; }
