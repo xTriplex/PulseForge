@@ -135,7 +135,7 @@ namespace
 		PF_CHECK(Tests, Serialized.has_value());
 		if (!Serialized) return;
 		PF_CHECK(Tests, Serialized->find("\"format\": \"PulseForgeScene\"") != std::string::npos);
-		PF_CHECK(Tests, Serialized->find("\"version\": 8") != std::string::npos);
+		PF_CHECK(Tests, Serialized->find("\"version\": 9") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"properties\"") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"primary\": true") != std::string::npos);
 		PF_CHECK(Tests, Serialized->find("\"directionalLight\"") != std::string::npos);
@@ -304,19 +304,19 @@ namespace
 
 		const auto DestinationRootBeforeFailure = Destination.FindEntity(RootId);
 		std::string UnsupportedVersion = *Serialized;
-		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 8");
+		const size_t VersionPosition = UnsupportedVersion.find("\"version\": 9");
 		PF_CHECK(Tests, VersionPosition != std::string::npos);
 		if (VersionPosition != std::string::npos)
-			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 8").size(), "\"version\": 99");
+			UnsupportedVersion.replace(VersionPosition, std::string("\"version\": 9").size(), "\"version\": 99");
 		const auto UnsupportedVersionResult = SceneSerializer::Deserialize(UnsupportedVersion, Destination);
 		PF_CHECK(Tests, !UnsupportedVersionResult.has_value());
 		PF_CHECK(
 			Tests, !UnsupportedVersionResult && UnsupportedVersionResult.error().Code == SceneSerializationErrorCode::UnsupportedVersion);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
-		for (const std::string_view UnsupportedSceneVersion : { "0", "-1", "9", "1.5", "\"8\"" })
+		for (const std::string_view UnsupportedSceneVersion : { "0", "-1", "10", "1.5", "\"9\"" })
 		{
 			std::string UnsupportedDocument = *Serialized;
-			const size_t VersionValue = UnsupportedDocument.find("8", UnsupportedDocument.find("\"version\": "));
+			const size_t VersionValue = UnsupportedDocument.find("9", UnsupportedDocument.find("\"version\": "));
 			PF_CHECK(Tests, VersionValue != std::string::npos);
 			if (VersionValue == std::string::npos) continue;
 			UnsupportedDocument.replace(VersionValue, 1, UnsupportedSceneVersion);
@@ -404,10 +404,10 @@ namespace
 								MaximumCountScript->value().FloatProperties.size() == MaximumScriptFloatPropertyCount);
 		}
 		std::string LegacyScriptProperties = *Serialized;
-		const size_t ScriptPropertiesPosition = LegacyScriptProperties.find("\"version\": 8");
+		const size_t ScriptPropertiesPosition = LegacyScriptProperties.find("\"version\": 9");
 		PF_CHECK(Tests, ScriptPropertiesPosition != std::string::npos);
 		if (ScriptPropertiesPosition != std::string::npos)
-			LegacyScriptProperties.replace(ScriptPropertiesPosition, std::string("\"version\": 8").size(), "\"version\": 7");
+			LegacyScriptProperties.replace(ScriptPropertiesPosition, std::string("\"version\": 9").size(), "\"version\": 7");
 		const auto LegacyScriptPropertiesResult = SceneSerializer::Deserialize(LegacyScriptProperties, Destination);
 		PF_CHECK(Tests, !LegacyScriptPropertiesResult);
 		PF_CHECK(Tests, Destination.FindEntity(RootId) == DestinationRootBeforeFailure);
@@ -448,10 +448,10 @@ namespace
 				EntityRecord.erase(std::string(Field));
 		}
 		LegacyVersionThree = LegacyVersionThreeDocument.dump(2) + "\n";
-		const size_t LegacyVersionThreePosition = LegacyVersionThree.find("\"version\": 8");
+		const size_t LegacyVersionThreePosition = LegacyVersionThree.find("\"version\": 9");
 		PF_CHECK(Tests, LegacyVersionThreePosition != std::string::npos);
 		if (LegacyVersionThreePosition != std::string::npos)
-			LegacyVersionThree.replace(LegacyVersionThreePosition, std::string("\"version\": 8").size(), "\"version\": 3");
+			LegacyVersionThree.replace(LegacyVersionThreePosition, std::string("\"version\": 9").size(), "\"version\": 3");
 		Scene LegacyVersionThreeDestination;
 		const auto LegacyVersionThreeLoad = SceneSerializer::Deserialize(LegacyVersionThree, LegacyVersionThreeDestination);
 		PF_CHECK(Tests, LegacyVersionThreeLoad.has_value());

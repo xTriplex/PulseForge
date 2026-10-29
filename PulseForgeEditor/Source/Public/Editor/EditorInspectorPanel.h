@@ -26,6 +26,23 @@ namespace PulseForgeEditor
 		[[nodiscard]] virtual std::expected<void, std::string> RunInspectorSceneEdit(
 			std::string Description, std::function<std::expected<void, PulseForge::SceneError>()> Operation) = 0;
 		virtual void ReportInspectorError(std::string Message) = 0;
+		[[nodiscard]] virtual bool IsLinkedPrefabEntity(const PulseForge::Entity& Entity) const { (void)Entity; return false; }
+		[[nodiscard]] virtual std::expected<void, std::string> RecordPrefabPropertyOverride(
+			const PulseForge::Entity& Entity, std::string_view ComponentID, std::string_view PropertyID)
+		{
+			(void)Entity; (void)ComponentID; (void)PropertyID; return {};
+		}
+		[[nodiscard]] virtual std::expected<void, std::string> RecordPrefabRenameOverride(
+			const PulseForge::Entity& Entity, std::string_view Name)
+		{
+			(void)Entity; (void)Name; return {};
+		}
+		[[nodiscard]] virtual std::expected<void, std::string> ResetPrefabPropertyOverride(
+			const PulseForge::Entity& Entity, std::string_view ComponentID, std::string_view PropertyID)
+		{
+			(void)Entity; (void)ComponentID; (void)PropertyID;
+			return std::unexpected("Prefab property reset is unavailable in this editor context");
+		}
 	};
 
 	class EditorInspectorPanel final

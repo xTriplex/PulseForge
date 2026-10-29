@@ -291,7 +291,8 @@ namespace PulseForge
 				const auto Environment = EntityValue.GetEnvironmentLight();
 				const auto Audio = EntityValue.GetAudioSource();
 				const auto Script = EntityValue.GetScript();
-				if (!Mesh || !Environment || !Audio || !Script)
+				const auto PrefabInstance = EntityValue.GetPrefabInstance();
+				if (!Mesh || !Environment || !Audio || !Script || !PrefabInstance)
 					return std::unexpected(
 						MakeError(Owner.ProjectRelativePath, "Validated scene entity could not be read through its scene accessors"));
 
@@ -318,6 +319,37 @@ namespace PulseForge
 					AddRuntimeReference(Output, Registry, Referrer, Script->value().ScriptAsset, AssetFileType::Script,
 						"entities/" + EntityKey.substr(7) + "/script.asset", false, Script->value().ScriptAsset.ToString(),
 						FindValidationStatus(EntityValue.GetUUID(), Script->value().ScriptAsset, AssetReferenceKind::Script));
+				if (PrefabInstance->has_value())
+				{
+					AddRuntimeReference(Output, Registry, Referrer, (**PrefabInstance).SourceAsset, AssetFileType::Prefab,
+						"entities/" + EntityKey.substr(7) + "/prefabInstance.asset", false,
+						(**PrefabInstance).SourceAsset.ToString());
+					for (const PrefabOverrideRecord& Override : (**PrefabInstance).Overrides)
+					{
+						if (Override.Operation != PrefabOverrideOperation::SetProperty) continue;
+						const std::string Location = "entities/" + EntityKey.substr(7) + "/prefabOverrides/" +
+							Override.Entity.Key.ToString() + "/" + Override.ComponentID + "." + Override.PropertyID;
+						if (Override.ComponentID == PropertyComponentIds::MeshRenderer && Override.PropertyID == PropertyIds::MeshAsset)
+						{
+							if (const auto* Asset = std::get_if<AssetID>(&Override.Value))
+								AddRuntimeReference(Output, Registry, Referrer, *Asset, AssetFileType::Mesh,
+									Location, false, Asset->ToString());
+						}
+						else if (Override.ComponentID == PropertyComponentIds::MeshRenderer &&
+							Override.PropertyID == PropertyIds::MaterialAsset)
+						{
+							if (const auto* Asset = std::get_if<std::optional<AssetID>>(&Override.Value); Asset && Asset->has_value())
+								AddRuntimeReference(Output, Registry, Referrer, **Asset, AssetFileType::Material,
+									Location, true, (**Asset).ToString());
+						}
+						else if (Override.ComponentID == PropertyComponentIds::Script && Override.PropertyID == PropertyIds::Asset)
+						{
+							if (const auto* Asset = std::get_if<AssetID>(&Override.Value))
+								AddRuntimeReference(Output, Registry, Referrer, *Asset, AssetFileType::Script,
+									Location, false, Asset->ToString());
+						}
+					}
+				}
 			}
 			return {};
 		}
@@ -358,34 +390,11 @@ namespace PulseForge
 			const std::string Data(Bytes->empty() ? std::string{} :
 				std::string(reinterpret_cast<const char*>(Bytes->data()), Bytes->size()));
 
-			// Use the production prefab path to validate its wrapper/root/subtree policy, then deserialize its nested
-			// scene separately so edge owners retain the authored entity UUIDs rather than the instance UUIDs.
-			Scene ValidationScene;
-			auto ValidatedRoot = PrefabSerializer::Instantiate(Data, ValidationScene);
-			if (!ValidatedRoot)
-				return std::unexpected(MakeError(SourcePath, "Prefab dependency analysis failed: " + ValidatedRoot.error().Message));
+			auto AuthoredDocument = PrefabSerializer::Parse(Data, Owner.ID);
+			if (!AuthoredDocument)
+				return std::unexpected(MakeError(SourcePath, "Prefab dependency analysis failed: " + AuthoredDocument.error().Message));
 			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
-
-			Json Document;
-			try
-			{
-				Document = Json::parse(Data.begin(), Data.end());
-			}
-			catch (const Json::exception& Exception)
-			{
-				return std::unexpected(MakeError(SourcePath, std::string("Prefab JSON parse failed: ") + Exception.what()));
-			}
-			const auto SceneValue = Document.find("scene");
-			if (SceneValue == Document.end() || !SceneValue->is_object())
-				return std::unexpected(MakeError(SourcePath, "Validated prefab is missing its embedded scene object"));
-
-			Scene AuthoredScene;
-			const std::string SceneText = SceneValue->dump();
-			auto SceneLoad = SceneSerializer::Deserialize(SceneText, AuthoredScene);
-			if (CancellationToken.stop_requested()) return std::unexpected(MakeCancelledError(SourcePath));
-			if (!SceneLoad)
-				return std::unexpected(MakeError(SourcePath, "Prefab scene dependency analysis failed: " + SceneLoad.error().Message));
-			return ExtractSceneReferences(Output, Owner, Registry, AuthoredScene, CancellationToken);
+			return ExtractSceneReferences(Output, Owner, Registry, AuthoredDocument->GetScene(), CancellationToken);
 		}
 
 		struct BufferInput

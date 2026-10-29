@@ -100,6 +100,7 @@ if(BUILD_TESTING)
 		Tests/PulseForgeAssetTests.cpp
 		Tests/AssetsTests.cpp
 		Tests/SceneAssetTests.cpp
+		Tests/PrefabLinkedInstanceTests.cpp
 		Tests/AssetRegistryTests.cpp
 		Tests/AssetOperationsTests.cpp
 		Tests/AssetDependencyCatalogTests.cpp
@@ -112,7 +113,8 @@ if(BUILD_TESTING)
 	)
 	target_include_directories(PulseForgeAssetTests PRIVATE Tests PulseForge/Vendor/json/include)
 	target_compile_definitions(PulseForgeAssetTests PRIVATE
-		"PF_COOK_FIXTURE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj\"")
+		"PF_COOK_FIXTURE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/VisualValidation/EditorWorkflow/EditorWorkflow.pfproj\""
+		"PF_PREFAB_LINKED_SAMPLE_PROJECT=\"${CMAKE_CURRENT_SOURCE_DIR}/Samples/PrefabLinkedInstances/PrefabLinkedInstances.pfproj\"")
 	target_link_libraries(PulseForgeAssetTests PRIVATE
 		PulseForgeAssetCatalog PulseForgeAssetImporters PulseForgeAssetServices PulseForgeSceneSerialization PulseForgeAssetDependencyCatalog)
 	target_link_libraries(PulseForgeAssetTests PRIVATE PulseForgeAssetCookService PulseForgeCookedRuntimeProvider)
@@ -313,6 +315,7 @@ if(BUILD_TESTING)
 			Tests/EditorViewportSceneRenderViewTests.cpp
 			Tests/EditorAssetPreviewStressHarnessTests.cpp
 			Tests/EditorDocumentHostTestEditorTests.cpp
+			Tests/PrefabLinkedInstanceEditorTests.cpp
 			Tests/EditorStateTests.cpp
 			Tests/EditorPanelStateTests.cpp
 			Tests/EditorSceneStateTests.cpp

@@ -76,6 +76,9 @@
 #include "Editor/EditorDocumentManager.h"
 #include "Editor/EditorDocumentEditorRegistry.h"
 #include "Editor/EditorDocumentHostTestEditor.h"
+#include "Editor/EditorPrefabDocumentEditor.h"
+#include "Editor/EditorPrefabInstanceController.h"
+#include "Editor/EditorPrefabInstancePanel.h"
 #if defined(_DEBUG) || defined(PF_DEBUG)
 #include "Editor/EditorDebugAcceptanceCoordinators.h"
 #if defined(__APPLE__)
@@ -403,6 +406,7 @@ namespace
 	class EditorLayer final : public PulseForge::Layer,
 							  public PulseForgeEditor::EditorHierarchyPanelActionSink,
 							  public PulseForgeEditor::EditorInspectorPanelActions,
+							  public PulseForgeEditor::EditorPrefabInstanceControllerHost,
 							  public PulseForgeEditor::EditorSceneEntityCommandActions,
 							  public PulseForgeEditor::EditorMaterialDetailsActionSink,
 							  public PulseForgeEditor::EditorContentBrowserPanelActions
@@ -535,6 +539,11 @@ namespace
 			  m_DocumentHostAcquireOutOfDateTest(Options.EnableDocumentHostAcquireOutOfDateTest),
 			  m_DocumentHostImageAllocationFailureTest(Options.EnableDocumentHostImageAllocationFailureTest)
 		{
+			m_PrefabDocumentEditor = std::make_unique<PulseForgeEditor::EditorPrefabDocumentEditor>(
+				m_Documents, m_DocumentEditors, m_EditorStyle);
+			if (auto Result = m_PrefabDocumentEditor->Register(PulseForgeEditor::EditorDocumentKind::Prefab); !Result)
+				PF_ERROR("Could not register the prefab document editor: {}", Result.error());
+			m_PrefabInstanceController = std::make_unique<PulseForgeEditor::EditorPrefabInstanceController>(*this);
 #if defined(_DEBUG) || defined(PF_DEBUG)
 			if (m_DiagnosticsCaptureSmokeOutput) m_DiagnosticsSmokeStartedAt = std::chrono::steady_clock::now();
 			m_EditorRuntimePlayStopCoordinator =
@@ -605,6 +614,79 @@ namespace
 
 		void ReportInspectorError(std::string Message) override { SetError(std::move(Message)); }
 
+		PulseForge::Project* GetPrefabProject() override { return m_Project ? &*m_Project : nullptr; }
+
+		PulseForge::Scene* GetPrefabScene() const override { return m_Scene.get(); }
+
+		uint64_t GetPrefabSceneSessionGeneration() const override { return m_SceneSessionGeneration; }
+
+		bool IsPrefabRuntimeActive() const override { return m_SceneRuntime != nullptr; }
+
+		void QueuePrefabOperation(std::function<void()> Operation) override
+		{
+			QueueAssetOperation(std::move(Operation));
+		}
+
+		[[nodiscard]] std::expected<void, std::string> RunPrefabSceneEdit(
+			std::string Description, std::function<std::expected<void, PulseForge::SceneError>()> Operation) override
+		{
+			return RunSceneEdit(std::move(Description), std::move(Operation));
+		}
+
+		void UpdatePrefabSceneDirty() override { UpdateSceneDirty(); }
+
+		PulseForgeEditor::EditorDocumentManager& GetPrefabDocumentManager() override { return m_Documents; }
+
+		PulseForgeEditor::EditorPrefabDocumentEditor* GetPrefabDocumentEditor() const override
+		{
+			return m_PrefabDocumentEditor.get();
+		}
+
+		void ReportPrefabError(std::string Message) override { SetError(std::move(Message)); }
+
+		void ReportPrefabWarning(std::string Message) override { SetWarning(std::move(Message)); }
+
+		void ReportPrefabStatus(std::string Message) override { SetStatus(std::move(Message)); }
+
+		[[nodiscard]] bool IsLinkedPrefabEntity(const PulseForge::Entity& Entity) const override
+		{
+			return m_PrefabInstanceController && m_PrefabInstanceController->IsLinkedPrefabEntity(Entity);
+		}
+
+		[[nodiscard]] std::expected<void, std::string> RecordPrefabPropertyOverride(
+			const PulseForge::Entity& Entity, std::string_view ComponentID, std::string_view PropertyID) override
+		{
+			if (!m_PrefabInstanceController) return {};
+			return m_PrefabInstanceController->RecordPropertyOverride(Entity, ComponentID, PropertyID);
+		}
+
+		[[nodiscard]] std::expected<void, std::string> RecordPrefabRenameOverride(
+			const PulseForge::Entity& Entity, std::string_view Name) override
+		{
+			if (!m_PrefabInstanceController) return {};
+			return m_PrefabInstanceController->RecordRenameOverride(Entity, Name);
+		}
+
+		[[nodiscard]] std::expected<void, std::string> ResetPrefabPropertyOverride(
+			const PulseForge::Entity& Entity, std::string_view ComponentID, std::string_view PropertyID) override
+		{
+			if (!m_PrefabInstanceController) return std::unexpected("Prefab instance controller is unavailable");
+			return m_PrefabInstanceController->ResetPropertyOverride(Entity, ComponentID, PropertyID);
+		}
+
+		[[nodiscard]] std::expected<void, std::string> RecordPrefabReparent(
+			const PulseForge::Entity& Entity, const std::optional<PulseForge::Entity>& Parent) override
+		{
+			if (!m_PrefabInstanceController) return {};
+			return m_PrefabInstanceController->RecordReparent(Entity, Parent);
+		}
+
+		[[nodiscard]] std::expected<void, std::string> RecordPrefabRemoval(const PulseForge::Entity& Entity) override
+		{
+			if (!m_PrefabInstanceController) return {};
+			return m_PrefabInstanceController->RecordRemoval(Entity);
+		}
+
 		[[nodiscard]] std::expected<void, std::string> RunEditorSceneEdit(
 			std::string Description, std::function<std::expected<void, PulseForge::SceneError>()> Operation) override
 		{
@@ -642,6 +724,9 @@ namespace
 			{
 			case EditorContentBrowserAssetAction::OpenScene:
 				OpenScene(Identifier);
+				break;
+			case EditorContentBrowserAssetAction::OpenPrefab:
+				OpenPrefab(Identifier);
 				break;
 			case EditorContentBrowserAssetAction::ShowMaterialDetails:
 				ShowMaterialDetails(Identifier);
@@ -1895,6 +1980,7 @@ namespace
 			else
 			{
 				m_Scene = std::move(StartupScene);
+				++m_SceneSessionGeneration;
 				m_SceneAsset = StartupSceneAsset;
 				SelectSingleEntity(std::nullopt);
 				if (StartupSceneAsset) m_ContentBrowser.SelectAsset(*StartupSceneAsset);
@@ -3900,7 +3986,7 @@ namespace
 				}
 				case PulseForgeEditor::EditorAssetDestinationOperationKind::CreatePrefab:
 					if (Operation->PrefabRoot)
-						QueueAfterSave([this, Root = *Operation->PrefabRoot, Target] { CreatePrefabAt(Root, Target); });
+						QueueAssetOperation([this, Root = *Operation->PrefabRoot, Target] { CreatePrefabAt(Root, Target); });
 					break;
 				}
 			}
@@ -4258,7 +4344,7 @@ namespace
 				SetError("Open a project and scene before instantiating a prefab.");
 				return;
 			}
-			QueueAfterSave([this, Identifier] { InstantiatePrefabAt(Identifier); });
+			QueueAssetOperation([this, Identifier] { InstantiatePrefabAt(Identifier); });
 		}
 
 		void InstantiatePrefabAt(const PulseForge::AssetID& Identifier)
@@ -4273,7 +4359,7 @@ namespace
 			const auto Recorded = RunSceneEdit("Instantiate Prefab",
 				[this, Identifier, &InstantiatedIdentifier] -> std::expected<void, PulseForge::PrefabAssetError>
 				{
-					auto Instantiated = PulseForge::PrefabAssetService::Instantiate(
+					auto Instantiated = PulseForge::PrefabAssetService::InstantiateLinked(
 						Identifier, m_Project->GetRootPath(), m_Project->GetAssetRegistry(), *m_Scene);
 					if (!Instantiated) return std::unexpected(Instantiated.error());
 					InstantiatedIdentifier = Instantiated->GetUUID();
@@ -4494,6 +4580,7 @@ namespace
 			{
 				ResetEditorViewportCamera();
 				m_Scene = std::move(NewScene);
+				++m_SceneSessionGeneration;
 			}
 			m_SceneAsset = Record.ID;
 			SelectSingleEntity(std::nullopt);
@@ -4523,6 +4610,58 @@ namespace
 			QueueAfterSave([this, Identifier] { OpenSceneNow(Identifier); });
 		}
 
+		void OpenPrefab(const PulseForge::AssetID& Identifier)
+		{
+			QueueAssetOperation([this, Identifier] { OpenPrefabNow(Identifier); });
+		}
+
+		void OpenPrefabNow(const PulseForge::AssetID& Identifier)
+		{
+			if (!m_Project || !m_PrefabDocumentEditor) return;
+			const auto Asset = m_Project->GetAssetRegistry().Find(Identifier);
+			if (!Asset || !PulseForge::HasAssetTypeExtension(Asset->ProjectRelativePath, PulseForge::AssetFileType::Prefab))
+			{
+				SetError("The selected asset is not a managed prefab.");
+				return;
+			}
+			const PulseForgeEditor::EditorDocumentIdentity Identity{
+				m_Project->GetDescription().ID, Identifier, PulseForgeEditor::EditorDocumentKind::Prefab };
+			const std::string DisplayName = PathToUtf8(Asset->ProjectRelativePath.filename());
+			auto Opened = m_Documents.Open(Identity, Asset->ProjectRelativePath, DisplayName, m_Documents.GetOpeningPreference());
+			if (!Opened)
+			{
+				SetError("Prefab document could not be opened: " + Opened.error());
+				return;
+			}
+			auto* Session = m_Documents.Find(Identity);
+			const auto Context = MakeDocumentEditorContext(Identity, Asset->ProjectRelativePath, DisplayName);
+			if (!Session || (!Session->EditorState && !m_PrefabDocumentEditor->Open(*Session, Context)))
+			{
+				SetError("Prefab document could not load its managed source and isolated preview.");
+				if (Opened->Created)
+					(void)m_Documents.Close(Identity, PulseForgeEditor::EditorDocumentCloseChoice::Discard, {}, {});
+				return;
+			}
+			if (!m_Documents.Activate(Identity))
+			{
+				SetError("Prefab document loaded but could not be activated.");
+				return;
+			}
+			m_ContentBrowser.SelectAsset(Identifier);
+			SetStatus("Opened prefab source " + PathToUtf8(Asset->ProjectRelativePath) + ".");
+		}
+
+		bool EnsurePrefabDocumentOpen(const PulseForge::AssetID& Identifier) override
+		{
+			if (!m_Project || !m_PrefabDocumentEditor) return false;
+			const PulseForgeEditor::EditorDocumentIdentity Identity{
+				m_Project->GetDescription().ID, Identifier, PulseForgeEditor::EditorDocumentKind::Prefab };
+			if (const auto* Session = m_Documents.Find(Identity); Session && Session->EditorState) return true;
+			OpenPrefabNow(Identifier);
+			const auto* Session = m_Documents.Find(Identity);
+			return Session && Session->EditorState;
+		}
+
 		void OpenSceneNow(const PulseForge::AssetID& Identifier)
 		{
 			if (!m_Project) return;
@@ -4540,6 +4679,7 @@ namespace
 			StopRuntime();
 			ResetEditorViewportCamera();
 			m_Scene = std::move(Loaded);
+			++m_SceneSessionGeneration;
 			m_SceneAsset = Identifier;
 			m_ContentBrowser.SelectAsset(Identifier);
 			SelectSingleEntity(std::nullopt);
@@ -4685,6 +4825,7 @@ namespace
 			StopRuntime();
 			ResetEditorViewportCamera();
 			m_Scene = std::move(ReloadedScene);
+			++m_SceneSessionGeneration;
 			SelectSingleEntity(std::nullopt);
 			ResetSceneHistory();
 			SetStatus("Unsaved scene changes discarded.");
@@ -7959,6 +8100,7 @@ namespace
 					m_SceneEditController.IsActive(), m_SceneEditController.InspectorHistoryItem(), GImGui ? GImGui->ActiveId : 0);
 				m_InspectorPanel.DrawContents(m_Scene.get(), m_SceneWorkspace, m_EditorStyle, m_AssetSelector, m_ContentBrowser.Assets(),
 					m_Project.has_value(), FinishCurrentEdit, *this);
+			m_PrefabInstancePanel.Draw(m_Scene.get(), m_SceneWorkspace, m_EditorStyle, *m_PrefabInstanceController);
 			}
 			ImGui::End();
 		}
@@ -8660,6 +8802,7 @@ namespace
 			StopRuntime();
 			m_ViewportRenderView.InvalidatePreparedScene();
 			m_Scene.reset();
+			++m_SceneSessionGeneration;
 			m_SceneAsset.reset();
 			SelectSingleEntity(std::nullopt);
 			m_ContentBrowser.ClearAssetSelection();
@@ -8733,6 +8876,8 @@ namespace
 		PulseForgeEditor::EditorWorkspacePresentation m_WorkspacePresentation;
 		PulseForgeEditor::EditorDeferredOperationQueue m_DeferredEditorOperations;
 		PulseForgeEditor::EditorStyle m_EditorStyle;
+		std::unique_ptr<PulseForgeEditor::EditorPrefabDocumentEditor> m_PrefabDocumentEditor;
+		std::unique_ptr<PulseForgeEditor::EditorPrefabInstanceController> m_PrefabInstanceController;
 		std::unique_ptr<PulseForgeEditor::EditorImGuiRenderer> m_ImGuiRenderer;
 		PulseForgeEditor::EditorAssetPreviewService m_AssetPreviews;
 		PulseForgeEditor::EditorPerformanceCaptureService m_PerformanceCaptureService;
@@ -8790,6 +8935,7 @@ namespace
 		PulseForgeEditor::EditorDocumentCloseRequest m_DocumentCloseRequest;
 		PulseForgeEditor::EditorAssetWorkflowState m_AssetWorkflow;
 		uint64_t m_AssetOperationGeneration = 1;
+		uint64_t m_SceneSessionGeneration = 1;
 		PulseForge::AssetEditTransaction::PlanPtr m_PendingAssetMovePlan;
 		bool m_OpenAssetMoveConfirmation = false;
 		PulseForgeEditor::EditorConsolePanel m_ConsolePanel;
@@ -8800,6 +8946,7 @@ namespace
 		PulseForgeEditor::EditorHierarchyPanel m_HierarchyPanel;
 		PulseForgeEditor::EditorMainMenuPanel m_MainMenuPanel;
 		PulseForgeEditor::EditorInspectorPanel m_InspectorPanel;
+		PulseForgeEditor::EditorPrefabInstancePanel m_PrefabInstancePanel;
 		PulseForgeEditor::EditorAssetSelector m_AssetSelector;
 		PulseForgeEditor::EditorContentBrowserPanel m_ContentBrowserPanel;
 		PulseForgeEditor::EditorMaterialDetailsPanel m_MaterialDetailsPanel;

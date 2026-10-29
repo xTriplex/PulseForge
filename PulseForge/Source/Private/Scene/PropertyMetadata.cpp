@@ -10,13 +10,15 @@ namespace PulseForge
 	namespace
 	{
 		constexpr std::string_view TransformId = PropertyComponentIds::Transform;
+		constexpr std::string_view TagId = PropertyComponentIds::Tag;
 		constexpr std::string_view DirectionalLightId = PropertyComponentIds::DirectionalLight;
 		constexpr std::string_view PointLightId = PropertyComponentIds::PointLight;
 		constexpr std::string_view SpotLightId = PropertyComponentIds::SpotLight;
 		constexpr std::string_view MeshRendererId = PropertyComponentIds::MeshRenderer;
 		constexpr std::string_view ScriptId = PropertyComponentIds::Script;
 
-		const std::array Descriptors{ PropertyDescriptor{ TransformId, "translation", "Translation", glm::vec3(0.0f), "world units" },
+		const std::array Descriptors{ PropertyDescriptor{ TagId, "name", "Name", std::string("Entity") },
+			PropertyDescriptor{ TransformId, "translation", "Translation", glm::vec3(0.0f), "world units" },
 			PropertyDescriptor{ TransformId, "rotation", "Rotation", glm::quat(1.0f, 0.0f, 0.0f, 0.0f), "unit quaternion" },
 			PropertyDescriptor{ TransformId, "scale", "Scale", glm::vec3(1.0f), "unitless" },
 			PropertyDescriptor{ DirectionalLightId, "color", "Color", glm::vec3(1.0f), "linear RGB" },
@@ -143,6 +145,12 @@ namespace PulseForge
 			return PropertyValue{ *Value };
 		}
 		if (!FindPropertyDescriptor(ComponentId, PropertyId)) return std::unexpected(UnknownPropertyError(ComponentId, PropertyId));
+		if (ComponentId == TagId)
+		{
+			const auto Tag = Target.GetTag();
+			if (!Tag) return std::unexpected(SceneErrorToPropertyError(Tag.error()));
+			return PropertyValue{ Tag->Name };
+		}
 
 		if (ComponentId == TransformId)
 		{
@@ -227,6 +235,13 @@ namespace PulseForge
 
 		const auto Reject = [](const SceneError& Error) -> std::expected<void, PropertyAccessError>
 		{ return std::unexpected(SceneErrorToPropertyError(Error)); };
+		if (ComponentId == TagId)
+		{
+			auto Typed = RequireValue<std::string>(Value, PropertyId);
+			if (!Typed) return std::unexpected(Typed.error());
+			const auto Result = Target.SetTag(TagComponent{ *Typed });
+			return Result ? std::expected<void, PropertyAccessError>{} : Reject(Result.error());
+		}
 		if (ComponentId == TransformId)
 		{
 			auto Current = Target.GetTransform();

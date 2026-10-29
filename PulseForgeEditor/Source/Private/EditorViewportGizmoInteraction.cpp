@@ -4,9 +4,13 @@
 #include "Editor/EditorSceneHierarchyOperations.h"
 #include "Editor/EditorSceneWorkspaceState.h"
 #include "Editor/ViewportMath.h"
+#include "Assets/PrefabInstanceReconciler.h"
+#include "Scene/PropertyMetadata.h"
 #include "Scene/Scene.h"
 
 #include <cmath>
+#include <string_view>
+#include <utility>
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtc/matrix_transform.hpp>
@@ -14,6 +18,39 @@
 
 namespace PulseForgeEditor
 {
+	namespace
+	{
+		[[nodiscard]] std::expected<void, std::string> RecordPrefabTransformOverrides(
+			const PulseForge::Scene& SceneValue,
+			const PulseForge::Entity& Entity,
+			const PulseForge::TransformComponent& Before,
+			const PulseForge::TransformComponent& After)
+		{
+			const auto LinkedRoot = PulseForge::PrefabInstanceReconciler::FindLinkedRoot(SceneValue, Entity);
+			if (!LinkedRoot) return std::unexpected(LinkedRoot.error().Message);
+			if (!LinkedRoot->has_value() || **LinkedRoot == Entity) return {}; // The linked root transform is instance placement.
+
+			const auto Record = [&](std::string_view PropertyID, PulseForge::PropertyValue Value) -> std::expected<void, std::string>
+			{
+				auto Result = PulseForge::PrefabInstanceReconciler::RecordPropertyOverride(
+					**LinkedRoot, Entity, std::string(PulseForge::PropertyComponentIds::Transform),
+					std::string(PropertyID), std::move(Value));
+				if (!Result) return std::unexpected(Result.error().Message);
+				return {};
+			};
+			constexpr float Epsilon = 1.0e-6f;
+			if (glm::length(Before.Translation - After.Translation) > Epsilon)
+				if (auto Result = Record(PulseForge::PropertyIds::Translation, After.Translation); !Result) return Result;
+			const glm::quat BeforeRotation = glm::normalize(Before.Rotation);
+			const glm::quat AfterRotation = glm::normalize(After.Rotation);
+			if (1.0f - std::abs(glm::dot(BeforeRotation, AfterRotation)) > Epsilon)
+				if (auto Result = Record(PulseForge::PropertyIds::Rotation, After.Rotation); !Result) return Result;
+			if (glm::length(Before.Scale - After.Scale) > Epsilon)
+				if (auto Result = Record(PulseForge::PropertyIds::Scale, After.Scale); !Result) return Result;
+			return {};
+		}
+	}
+
 	std::expected<bool, std::string> EditorViewportGizmoInteraction::Begin(PulseForge::Scene& SceneValue,
 		EditorSceneWorkspaceState& Workspace, EditorSceneEditController& EditController, const EditorViewportGizmoBeginInput& Input,
 		const RestoreCallback& RestoreState)
@@ -185,6 +222,9 @@ namespace PulseForgeEditor
 			if (auto Result = Entity->SetTransform(*Updated); !Result)
 				return CancelAfterFailure(SceneValue, Workspace, EditController, RestoreState,
 					"Viewport transform manipulation failed: " + Result.error().Message);
+			if (auto Recorded = RecordPrefabTransformOverrides(*SceneValue, *Entity, *Current, *Updated); !Recorded)
+				return CancelAfterFailure(SceneValue, Workspace, EditController, RestoreState,
+					"Could not record linked prefab transform overrides: " + Recorded.error());
 			EditController.MarkDirty();
 			return {};
 		}
@@ -237,6 +277,9 @@ namespace PulseForgeEditor
 			if (auto Result = Entity->SetTransform(*Updated); !Result)
 				return CancelAfterFailure(SceneValue, Workspace, EditController, RestoreState,
 					"Viewport transform manipulation failed: " + Result.error().Message);
+			if (auto Recorded = RecordPrefabTransformOverrides(*SceneValue, *Entity, Target.LocalTransform, *Updated); !Recorded)
+				return CancelAfterFailure(SceneValue, Workspace, EditController, RestoreState,
+					"Could not record linked prefab transform overrides: " + Recorded.error());
 		}
 		EditController.MarkDirty();
 		return {};

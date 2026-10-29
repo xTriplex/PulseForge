@@ -1,0 +1,113 @@
+{
+  "format": "PulseForgeScene",
+  "version": 9,
+  "entities": [
+    {
+      "uuid": "51000000-0000-4000-8000-000000000001",
+      "tag": { "name": "Scene camera and listener" },
+      "transform": { "translation": [0.0, 4.0, 12.0], "rotation": [0.98480775, -0.17364818, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "camera": { "verticalFovRadians": 0.73303829, "nearClipPlane": 0.1, "farClipPlane": 100.0, "primary": true },
+      "audioListener": { "primary": true },
+      "parent": null
+    },
+    {
+      "uuid": "51000000-0000-4000-8000-000000000002",
+      "tag": { "name": "Sample key light" },
+      "transform": { "translation": [0.0, 3.0, 2.0], "rotation": [0.92387953, -0.38268343, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "directionalLight": { "color": [1.0, 0.94, 0.82], "intensity": 2.0, "castShadows": false, "shadowDistance": 35.0, "shadowBias": 1.0, "shadowNormalBias": 0.025, "shadowSoftness": 1.0 },
+      "parent": null
+    },
+    {
+      "uuid": "21000000-0000-4000-8000-000000000001",
+      "tag": { "name": "Linked assembly left" },
+      "transform": { "translation": [-2.1, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "camera": { "verticalFovRadians": 0.78539816, "nearClipPlane": 0.1, "farClipPlane": 100.0, "primary": false },
+      "audioListener": { "primary": false },
+      "prefabInstance": {
+        "version": 1,
+        "instance": "31000000-0000-4000-8000-000000000001",
+        "asset": "d0020000-0000-4000-8000-000000000001",
+        "root": "11000000-0000-4000-8000-000000000001",
+        "fingerprint": "xxh3-128-v0.8.2:628b8b545619cd6a21bb8c9d0305a77a",
+        "sourceEntities": [
+          { "source": "11000000-0000-4000-8000-000000000001", "entity": "21000000-0000-4000-8000-000000000001" },
+          { "source": "11000000-0000-4000-8000-000000000002", "entity": "21000000-0000-4000-8000-000000000002" },
+          { "source": "11000000-0000-4000-8000-000000000003", "entity": "21000000-0000-4000-8000-000000000003" }
+        ],
+        "localEntities": [
+          { "key": "41000000-0000-4000-8000-000000000001", "entity": "21000000-0000-4000-8000-000000000004" }
+        ],
+        "overrides": [
+          {
+            "entity": { "key": "11000000-0000-4000-8000-000000000002", "local": false },
+            "operation": 0,
+            "component": "meshRenderer",
+            "property": "materialAsset",
+            "parent": null,
+            "name": "",
+            "value": { "type": "optionalAsset", "value": "d0050000-0000-4000-8000-000000000001" }
+          }
+        ],
+        "conflicts": []
+      },
+      "parent": null
+    },
+    {
+      "uuid": "21000000-0000-4000-8000-000000000002",
+      "tag": { "name": "Linked cube" },
+      "transform": { "translation": [0.0, 0.15, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [0.85, 0.85, 0.85] },
+      "meshRenderer": { "meshAsset": "d0030000-0000-4000-8000-000000000001", "materialAsset": "d0050000-0000-4000-8000-000000000001" },
+      "script": { "asset": "d0060000-0000-4000-8000-000000000001", "enabled": true },
+      "parent": "21000000-0000-4000-8000-000000000001"
+    },
+    {
+      "uuid": "21000000-0000-4000-8000-000000000003",
+      "tag": { "name": "Source accent" },
+      "transform": { "translation": [0.0, 1.35, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [0.35, 0.35, 0.35] },
+      "parent": "21000000-0000-4000-8000-000000000002"
+    },
+    {
+      "uuid": "21000000-0000-4000-8000-000000000004",
+      "tag": { "name": "Local amber marker" },
+      "transform": { "translation": [1.25, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [0.25, 0.25, 0.25] },
+      "parent": "21000000-0000-4000-8000-000000000002"
+    },
+    {
+      "uuid": "22000000-0000-4000-8000-000000000001",
+      "tag": { "name": "Linked assembly right" },
+      "transform": { "translation": [2.1, 0.0, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0] },
+      "camera": { "verticalFovRadians": 0.78539816, "nearClipPlane": 0.1, "farClipPlane": 100.0, "primary": false },
+      "audioListener": { "primary": false },
+      "prefabInstance": {
+        "version": 1,
+        "instance": "32000000-0000-4000-8000-000000000001",
+        "asset": "d0020000-0000-4000-8000-000000000001",
+        "root": "11000000-0000-4000-8000-000000000001",
+        "fingerprint": "xxh3-128-v0.8.2:628b8b545619cd6a21bb8c9d0305a77a",
+        "sourceEntities": [
+          { "source": "11000000-0000-4000-8000-000000000001", "entity": "22000000-0000-4000-8000-000000000001" },
+          { "source": "11000000-0000-4000-8000-000000000002", "entity": "22000000-0000-4000-8000-000000000002" },
+          { "source": "11000000-0000-4000-8000-000000000003", "entity": "22000000-0000-4000-8000-000000000003" }
+        ],
+        "localEntities": [],
+        "overrides": [],
+        "conflicts": []
+      },
+      "parent": null
+    },
+    {
+      "uuid": "22000000-0000-4000-8000-000000000002",
+      "tag": { "name": "Linked cube" },
+      "transform": { "translation": [0.0, 0.15, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [0.85, 0.85, 0.85] },
+      "meshRenderer": { "meshAsset": "d0030000-0000-4000-8000-000000000001", "materialAsset": "d0040000-0000-4000-8000-000000000001" },
+      "script": { "asset": "d0060000-0000-4000-8000-000000000001", "enabled": true },
+      "parent": "22000000-0000-4000-8000-000000000001"
+    },
+    {
+      "uuid": "22000000-0000-4000-8000-000000000003",
+      "tag": { "name": "Source accent" },
+      "transform": { "translation": [0.0, 1.35, 0.0], "rotation": [1.0, 0.0, 0.0, 0.0], "scale": [0.35, 0.35, 0.35] },
+      "parent": "22000000-0000-4000-8000-000000000002"
+    }
+  ]
+}

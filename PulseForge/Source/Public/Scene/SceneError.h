@@ -26,7 +26,8 @@ namespace PulseForge
 		InvalidAudioComponent,
 		InvalidScriptComponent,
 		InvalidPointLight,
-		InvalidSpotLight
+		InvalidSpotLight,
+		InvalidPrefabInstance
 	};
 
 	struct SceneError

@@ -1,21 +1,69 @@
 #include "Editor/EditorSceneEntityCommands.h"
 
+#include "Assets/PrefabInstanceReconciler.h"
 #include "Editor/EditorMeshPickingCache.h"
 #include "Editor/EditorSceneHierarchyOperations.h"
 #include "Editor/EditorSceneWorkspaceState.h"
 #include "Editor/EditorSceneVisibilityCommands.h"
 #include "Editor/ViewportMath.h"
+#include "Scene/PropertyMetadata.h"
 #include "Scene/SceneSerializer.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 
 namespace PulseForgeEditor
 {
+	namespace
+	{
+		struct SnapTransformEdit
+		{
+			PulseForge::UUID Identifier;
+			PulseForge::TransformComponent Before;
+			PulseForge::TransformComponent After;
+		};
+
+		[[nodiscard]] std::expected<void, PulseForge::SceneError> RecordPrefabTransformOverrides(
+			const PulseForge::Scene& SceneValue,
+			const PulseForge::Entity& Entity,
+			const PulseForge::TransformComponent& Before,
+			const PulseForge::TransformComponent& After)
+		{
+			const auto LinkedRoot = PulseForge::PrefabInstanceReconciler::FindLinkedRoot(SceneValue, Entity);
+			if (!LinkedRoot)
+				return std::unexpected(PulseForge::SceneError{
+					PulseForge::SceneErrorCode::InvalidPrefabInstance, LinkedRoot.error().Message });
+			if (!LinkedRoot->has_value() || **LinkedRoot == Entity) return {}; // The linked root transform is instance placement.
+
+			const auto Record = [&](std::string_view PropertyID, PulseForge::PropertyValue Value)
+				-> std::expected<void, PulseForge::SceneError>
+			{
+				auto Result = PulseForge::PrefabInstanceReconciler::RecordPropertyOverride(
+					**LinkedRoot, Entity, std::string(PulseForge::PropertyComponentIds::Transform),
+					std::string(PropertyID), std::move(Value));
+				if (!Result)
+					return std::unexpected(PulseForge::SceneError{
+						PulseForge::SceneErrorCode::InvalidPrefabInstance, Result.error().Message });
+				return {};
+			};
+			constexpr float Epsilon = 1.0e-6f;
+			if (glm::length(Before.Translation - After.Translation) > Epsilon)
+				if (auto Result = Record(PulseForge::PropertyIds::Translation, After.Translation); !Result) return Result;
+			const glm::quat BeforeRotation = glm::normalize(Before.Rotation);
+			const glm::quat AfterRotation = glm::normalize(After.Rotation);
+			if (1.0f - std::abs(glm::dot(BeforeRotation, AfterRotation)) > Epsilon)
+				if (auto Result = Record(PulseForge::PropertyIds::Rotation, After.Rotation); !Result) return Result;
+			if (glm::length(Before.Scale - After.Scale) > Epsilon)
+				if (auto Result = Record(PulseForge::PropertyIds::Scale, After.Scale); !Result) return Result;
+			return {};
+		}
+	}
+
 	void EditorSceneEntityCommands::CreateEntity(PulseForge::Scene* SceneValue, EditorSceneEntityCommandActions& Actions) const
 	{
 		if (!SceneValue) return;
@@ -76,13 +124,37 @@ namespace PulseForgeEditor
 		}
 
 		const size_t DeleteCount = Subtree->size();
+		std::unordered_set<PulseForge::UUID, PulseForge::UUIDHash> EntireLinkedInstances;
+		for (const PulseForge::Entity& Root : *Roots)
+		{
+			const auto Link = Root.GetPrefabInstance();
+			if (!Link)
+			{
+				Actions.ReportEditorSceneCommandError("Could not inspect linked prefab metadata before deletion: " + Link.error().Message);
+				return;
+			}
+			if (!Link->has_value()) continue;
+			const std::array RootOnly{ Root };
+			auto LinkedSubtree = EditorSceneHierarchyOperations::CollectSubtrees(RootOnly);
+			if (!LinkedSubtree)
+			{
+				Actions.ReportEditorSceneCommandError("Could not inspect the linked instance before deletion: " + LinkedSubtree.error());
+				return;
+			}
+			for (const PulseForge::Entity& Entity : *LinkedSubtree) EntireLinkedInstances.insert(Entity.GetUUID());
+		}
 		const auto Recorded = Actions.RunEditorSceneEdit("Delete Entities",
-			[SceneValue, &Workspace, &Actions, Subtree = std::move(*Subtree)]() -> std::expected<void, PulseForge::SceneError>
+			[SceneValue, &Workspace, &Actions, EntireLinkedInstances = std::move(EntireLinkedInstances),
+				Subtree = std::move(*Subtree)]() -> std::expected<void, PulseForge::SceneError>
 			{
 				for (auto Entity = Subtree.rbegin(); Entity != Subtree.rend(); ++Entity)
 				{
 					const auto Target = SceneValue->FindEntity(Entity->GetUUID());
 					if (!Target) continue;
+					if (!EntireLinkedInstances.contains(Target->GetUUID()))
+						if (auto Recorded = Actions.RecordPrefabRemoval(*Target); !Recorded)
+							return std::unexpected(PulseForge::SceneError{
+								PulseForge::SceneErrorCode::InvalidPrefabInstance, Recorded.error() });
 					Workspace.Visibility().Remove(Entity->GetUUID());
 					if (auto Deleted = SceneValue->DestroyEntity(*Target); !Deleted) return std::unexpected(Deleted.error());
 				}
@@ -209,17 +281,81 @@ namespace PulseForgeEditor
 		}
 
 		const auto Recorded = Actions.RunEditorSceneEdit("Reparent Entity",
-			[SceneValue, Child = *Child, ParentIdentifier]() -> std::expected<void, PulseForge::SceneError>
+			[SceneValue, Child = *Child, ParentIdentifier, &Actions]() -> std::expected<void, PulseForge::SceneError>
 			{
+				std::optional<PulseForge::Entity> ParentValue;
 				if (ParentIdentifier)
 				{
 					const auto Parent = SceneValue->FindEntity(*ParentIdentifier);
 					if (!Parent)
 						return std::unexpected(PulseForge::SceneError{
 							PulseForge::SceneErrorCode::InvalidEntity, "The selected parent entity no longer exists" });
-					return Child.SetParent(*Parent);
+					ParentValue = *Parent;
 				}
-				return Child.ClearParent();
+
+				// Capture stable instance membership and source address before hierarchy mutation. Scene::SetParent/ClearParent
+				// enforce detach, cross-instance, and nested-root restrictions; these captured identities drive the supported edit.
+				const auto ChildRootResult = PulseForge::PrefabInstanceReconciler::FindLinkedRoot(*SceneValue, Child);
+				if (!ChildRootResult)
+					return std::unexpected(PulseForge::SceneError{
+						PulseForge::SceneErrorCode::InvalidPrefabInstance, ChildRootResult.error().Message });
+				const std::optional<PulseForge::Entity> ChildLinkedRoot = *ChildRootResult;
+				std::optional<PulseForge::PrefabEntityAddress> ChildAddress;
+				if (ChildLinkedRoot && *ChildLinkedRoot != Child)
+				{
+					auto Address = PulseForge::PrefabInstanceReconciler::ResolveOrRegisterEntityAddress(*ChildLinkedRoot, Child);
+					if (!Address)
+						return std::unexpected(PulseForge::SceneError{
+							PulseForge::SceneErrorCode::InvalidPrefabInstance, Address.error().Message });
+					ChildAddress = *Address;
+				}
+
+				std::optional<PulseForge::Entity> ParentLinkedRoot;
+				std::optional<PulseForge::PrefabEntityAddress> ParentAddress;
+				if (ParentValue)
+				{
+					const auto ParentRootResult = PulseForge::PrefabInstanceReconciler::FindLinkedRoot(*SceneValue, *ParentValue);
+					if (!ParentRootResult)
+						return std::unexpected(PulseForge::SceneError{
+							PulseForge::SceneErrorCode::InvalidPrefabInstance, ParentRootResult.error().Message });
+					ParentLinkedRoot = *ParentRootResult;
+					if (ParentLinkedRoot && ChildLinkedRoot && *ParentLinkedRoot == *ChildLinkedRoot)
+					{
+						auto Address = PulseForge::PrefabInstanceReconciler::ResolveOrRegisterEntityAddress(*ParentLinkedRoot, *ParentValue);
+						if (!Address)
+							return std::unexpected(PulseForge::SceneError{
+								PulseForge::SceneErrorCode::InvalidPrefabInstance, Address.error().Message });
+						ParentAddress = *Address;
+					}
+				}
+
+				if (ParentValue)
+				{
+					if (auto Result = Child.SetParent(*ParentValue); !Result) return Result;
+				}
+				else if (auto Result = Child.ClearParent(); !Result) return Result;
+
+				if (ChildLinkedRoot && *ChildLinkedRoot != Child)
+				{
+					if (ChildAddress && !ChildAddress->IsLocal && ParentAddress)
+					{
+						PulseForge::PrefabOverrideRecord Override;
+						Override.Entity = *ChildAddress;
+						Override.Operation = PulseForge::PrefabOverrideOperation::Reparent;
+						Override.Parent = *ParentAddress;
+						auto Result = PulseForge::PrefabInstanceReconciler::RecordOverride(*ChildLinkedRoot, Override);
+						if (!Result)
+							return std::unexpected(PulseForge::SceneError{
+								PulseForge::SceneErrorCode::InvalidPrefabInstance, Result.error().Message });
+					}
+				}
+				else if (ParentLinkedRoot && !ChildLinkedRoot)
+				{
+					if (auto Result = Actions.RecordPrefabReparent(Child, ParentValue); !Result)
+						return std::unexpected(PulseForge::SceneError{
+							PulseForge::SceneErrorCode::InvalidPrefabInstance, Result.error() });
+				}
+				return {};
 			});
 		if (!Recorded) Actions.ReportEditorSceneCommandError("Entity reparenting failed: " + Recorded.error());
 	}
@@ -271,7 +407,7 @@ namespace PulseForgeEditor
 			return;
 		}
 
-		std::vector<std::pair<PulseForge::UUID, PulseForge::TransformComponent>> UpdatedTransforms;
+		std::vector<SnapTransformEdit> UpdatedTransforms;
 		constexpr size_t MaximumContactCandidates = 2048;
 		constexpr size_t MaximumContactSamples = 128;
 		for (const PulseForge::Entity& Root : *Roots)
@@ -349,7 +485,7 @@ namespace PulseForgeEditor
 			PulseForge::TransformComponent Updated = *Transform;
 			Updated.Translation = glm::vec3(glm::inverse(ParentWorld) * glm::vec4(NewWorldPosition, 1.0f));
 			if (!Detail::IsFinite(Updated.Translation)) continue;
-			UpdatedTransforms.emplace_back(Root.GetUUID(), Updated);
+			UpdatedTransforms.push_back({ Root.GetUUID(), *Transform, Updated });
 		}
 
 		if (UpdatedTransforms.empty())
@@ -360,13 +496,14 @@ namespace PulseForgeEditor
 		const auto Recorded = Actions.RunEditorSceneEdit("Snap Selection to Surface",
 			[SceneValue, UpdatedTransforms]() -> std::expected<void, PulseForge::SceneError>
 			{
-				for (const auto& [Identifier, Transform] : UpdatedTransforms)
+				for (const SnapTransformEdit& Edit : UpdatedTransforms)
 				{
-					const auto Entity = SceneValue->FindEntity(Identifier);
+					const auto Entity = SceneValue->FindEntity(Edit.Identifier);
 					if (!Entity)
 						return std::unexpected(PulseForge::SceneError{
 							PulseForge::SceneErrorCode::InvalidEntity, "A selected entity disappeared during surface snapping" });
-					if (auto Result = Entity->SetTransform(Transform); !Result) return std::unexpected(Result.error());
+					if (auto Result = Entity->SetTransform(Edit.After); !Result) return std::unexpected(Result.error());
+					if (auto Result = RecordPrefabTransformOverrides(*SceneValue, *Entity, Edit.Before, Edit.After); !Result) return Result;
 				}
 				return {};
 			});

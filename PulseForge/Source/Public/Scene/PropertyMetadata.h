@@ -37,6 +37,7 @@ namespace PulseForge
 	namespace PropertyComponentIds
 	{
 		inline constexpr std::string_view Transform = "transform";
+		inline constexpr std::string_view Tag = "tag";
 		inline constexpr std::string_view DirectionalLight = "directionalLight";
 		inline constexpr std::string_view PointLight = "pointLight";
 		inline constexpr std::string_view SpotLight = "spotLight";
@@ -48,6 +49,7 @@ namespace PulseForge
 	namespace PropertyIds
 	{
 		inline constexpr std::string_view Translation = "translation";
+		inline constexpr std::string_view Name = "name";
 		inline constexpr std::string_view Rotation = "rotation";
 		inline constexpr std::string_view Scale = "scale";
 		inline constexpr std::string_view Color = "color";

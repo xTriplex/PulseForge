@@ -6,6 +6,7 @@
 #include "Editor/EditorHierarchyPanelPolicy.h"
 #include "Editor/EditorSceneWorkspaceState.h"
 #include "Editor/EditorStyle.h"
+#include "Assets/PrefabInstanceReconciler.h"
 
 #include <misc/cpp/imgui_stdlib.h>
 
@@ -82,14 +83,26 @@ namespace PulseForgeEditor
 					}
 					if (NameChanged)
 					{
-						const auto Updated =
-							Actions.RunInspectorSceneEdit("Rename Entity", [Entity = *Entity, Tag = *Tag] { return Entity.SetTag(Tag); });
+						const auto Updated = Actions.RunInspectorSceneEdit("Rename Entity",
+							[Entity = *Entity, Tag = *Tag, Actions = &Actions]() -> std::expected<void, PulseForge::SceneError>
+							{
+								if (auto Result = Entity.SetTag(Tag); !Result) return Result;
+								if (auto Result = Actions->RecordPrefabRenameOverride(Entity, Tag.Name); !Result)
+									return std::unexpected(PulseForge::SceneError{
+										PulseForge::SceneErrorCode::InvalidPrefabInstance, Result.error() });
+								return {};
+							});
 						if (!Updated) Actions.ReportInspectorError("Entity name update failed: " + Updated.error());
 					}
 					ImGui::SetCursorPosX(ImGui::GetStyle().WindowPadding.x + 29.0f);
 					Style.TextMuted(Entity->GetUUID().ToString());
 				}
 				Style.EndToolbar();
+				if (Actions.IsLinkedPrefabEntity(*Entity))
+				{
+					ImGui::TextDisabled("Linked prefab instance. Typed property edits are recorded as overrides.");
+					ImGui::TextDisabled("Component add/remove and untyped component edits are not supported on this instance.");
+				}
 				ImGui::Spacing();
 			}
 
@@ -149,6 +162,16 @@ namespace PulseForgeEditor
 	template <typename Action>
 	void EditorInspectorPanel::RecordComponentOperation(Context& Inspector, Action&& Operation, std::string_view Context)
 	{
+		if (Inspector.SceneValue)
+			if (const auto Selected = Inspector.Workspace.Selection().GetPrimary())
+				if (const auto Entity = Inspector.SceneValue->FindEntity(*Selected);
+					Entity && Inspector.Actions.IsLinkedPrefabEntity(*Entity))
+				{
+					Inspector.Actions.ReportInspectorError(
+						"This component operation is not yet supported as a linked-instance override. "
+						"Edit the prefab source or use a supported typed property.");
+					return;
+				}
 		const auto Result = Inspector.Actions.RunInspectorSceneEdit(std::string(Context), std::forward<Action>(Operation));
 		if (!Result)
 		{
@@ -171,14 +194,39 @@ namespace PulseForgeEditor
 
 		const auto Updated = Inspector.Actions.RunInspectorSceneEdit("Edit " + std::string(PropertyId),
 			[Entity, ComponentId = std::string(ComponentId), PropertyId = std::string(PropertyId),
-				Value = std::move(*Value)]() -> std::expected<void, PulseForge::SceneError>
+				Value = std::move(*Value), Actions = &Inspector.Actions]() -> std::expected<void, PulseForge::SceneError>
 			{
 				const auto Result = PulseForge::WriteProperty(Entity, ComponentId, PropertyId, Value);
 				if (!Result)
 					return std::unexpected(PulseForge::SceneError{ PulseForge::SceneErrorCode::StorageFailure, Result.error().Message });
+				if (auto Recorded = Actions->RecordPrefabPropertyOverride(Entity, ComponentId, PropertyId); !Recorded)
+					return std::unexpected(PulseForge::SceneError{
+						PulseForge::SceneErrorCode::InvalidPrefabInstance, Recorded.error() });
 				return {};
 			});
 		if (!Updated) Inspector.Actions.ReportInspectorError("Inspector property update failed: " + Updated.error());
+
+		if (!Inspector.SceneValue) return;
+		auto LinkedRoot = PulseForge::PrefabInstanceReconciler::FindLinkedRoot(*Inspector.SceneValue, Entity);
+		if (!LinkedRoot || !LinkedRoot->has_value()) return;
+		const auto Metadata = (**LinkedRoot).GetPrefabInstance();
+		if (!Metadata || !Metadata->has_value()) return;
+		std::optional<PulseForge::PrefabEntityAddress> Address;
+		for (const PulseForge::PrefabEntityMapping& Mapping : (**Metadata).SourceEntities)
+			if (Mapping.SceneEntity == Entity.GetUUID()) Address = PulseForge::PrefabEntityAddress{ Mapping.SourceKey, false };
+		if (!Address) return; // Local entities have no source value to reset to.
+		const bool HasOverride = std::any_of((**Metadata).Overrides.begin(), (**Metadata).Overrides.end(),
+			[&](const PulseForge::PrefabOverrideRecord& Override)
+			{
+				return Override.Entity == *Address && Override.Operation == PulseForge::PrefabOverrideOperation::SetProperty &&
+					Override.ComponentID == ComponentId && Override.PropertyID == PropertyId;
+			});
+		if (!HasOverride) return;
+		ImGui::SameLine();
+		const std::string ResetLabel = "Reset override##" + std::string(ComponentId) + std::string(PropertyId) + Entity.GetUUID().ToString();
+		if (!ImGui::SmallButton(ResetLabel.c_str())) return;
+		auto Reset = Inspector.Actions.ResetPrefabPropertyOverride(Entity, ComponentId, PropertyId);
+		if (!Reset) Inspector.Actions.ReportInspectorError("Prefab override reset failed: " + Reset.error());
 	}
 
 	void EditorInspectorPanel::SetCameraComponent(

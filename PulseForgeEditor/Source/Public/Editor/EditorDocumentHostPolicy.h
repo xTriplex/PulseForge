@@ -93,6 +93,8 @@ namespace PulseForgeEditor
 			return EditorDocumentCommandTarget::Material;
 		case EditorDocumentKind::Texture:
 			return EditorDocumentCommandTarget::Unsupported;
+		case EditorDocumentKind::Prefab:
+			return EditorDocumentCommandTarget::Unsupported;
 		}
 		return EditorDocumentCommandTarget::Unsupported;
 	}

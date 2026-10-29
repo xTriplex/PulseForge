@@ -2,6 +2,9 @@
 #include "Assets/AssetMetadata.h"
 #include "Assets/AssetRegistry.h"
 #include "Assets/Project.h"
+#include "Assets/PrefabAssetService.h"
+#include "Assets/AssetCookService.h"
+#include "Assets/AssetDependencyCatalog.h"
 #include "Assets/Detail/AssetCpuProducts.h"
 #include "Assets/AssetTypes.h"
 #include "Assets/MaterialAsset.h"
@@ -137,6 +140,119 @@ namespace
 			return { std::move(Snapshot), ProjectFile, SceneAsset, {}, Compatibility, Output };
 		}
 	};
+
+	void TestLinkedPrefabSampleCookAndRuntimeScene(TestRunner& Tests)
+	{
+#if defined(PF_PREFAB_LINKED_SAMPLE_PROJECT)
+		constexpr AssetID StartupScene{ 0xd001000000004000ull, 0x8000000000000001ull };
+		constexpr AssetID PrefabAsset{ 0xd002000000004000ull, 0x8000000000000001ull };
+		constexpr AssetID MeshAsset{ 0xd003000000004000ull, 0x8000000000000001ull };
+		constexpr AssetID SourceMaterial{ 0xd004000000004000ull, 0x8000000000000001ull };
+		constexpr AssetID OverrideMaterial{ 0xd005000000004000ull, 0x8000000000000001ull };
+		constexpr AssetID ScriptAsset{ 0xd006000000004000ull, 0x8000000000000001ull };
+		const auto ID = UUID::Generate();
+		PF_CHECK(Tests, ID.has_value());
+		if (!ID) return;
+		std::error_code Error;
+		const auto TemporaryDirectory = std::filesystem::temp_directory_path(Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		const std::filesystem::path TemporaryRoot = TemporaryDirectory /
+			std::filesystem::u8path("PulseForge-G15-Cook-" + ID->ToString());
+		struct OwnedTemporaryRoot final
+		{
+			std::filesystem::path Path;
+			~OwnedTemporaryRoot() { std::error_code CleanupError; std::filesystem::remove_all(Path, CleanupError); }
+		} Cleanup{ TemporaryRoot };
+		const std::filesystem::path SourceRoot = TemporaryRoot / "Source";
+		const std::filesystem::path OutputRoot = TemporaryRoot / "Cooked";
+		std::filesystem::create_directories(TemporaryRoot, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+		std::filesystem::copy(std::filesystem::path(PF_PREFAB_LINKED_SAMPLE_PROJECT).parent_path(), SourceRoot,
+			std::filesystem::copy_options::recursive, Error);
+		PF_CHECK(Tests, !Error);
+		if (Error) return;
+
+		auto OpenedProject = Project::Open(SourceRoot / std::filesystem::path(PF_PREFAB_LINKED_SAMPLE_PROJECT).filename());
+		PF_CHECK(Tests, OpenedProject.has_value());
+		if (!OpenedProject) return;
+		PF_CHECK(Tests, OpenedProject->GetDescription().StartScene == StartupScene);
+		auto SourceSnapshot = AssetDependencyCatalogBuilder::Build(
+			OpenedProject->GetRootPath(), OpenedProject->GetDescription().ID, 1);
+		PF_CHECK(Tests, SourceSnapshot.has_value());
+		if (!SourceSnapshot) return;
+		AssetCookRequest Request{
+			*SourceSnapshot,
+			OpenedProject->GetFilePath(),
+			StartupScene,
+			{},
+#if defined(_WIN32)
+			{ "Windows", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#elif defined(__APPLE__)
+			{ "macOS", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#else
+			{ "Linux", "Vulkan", std::string(CookedRuntimeABIIdentifier) },
+#endif
+			OutputRoot
+		};
+		auto Plan = AssetCookService::Plan(Request);
+		PF_CHECK(Tests, Plan.has_value());
+		if (!Plan) return;
+		const auto HasProduct = [&](AssetID Asset, CookedAssetProductKind Product)
+		{
+			return std::any_of(Plan->Products.begin(), Plan->Products.end(), [&](const AssetCookPlannedProduct& Candidate)
+			{
+				return Candidate.Asset == Asset && Candidate.Product == Product;
+			});
+		};
+		PF_CHECK(Tests, HasProduct(PrefabAsset, CookedAssetProductKind::Prefab));
+		PF_CHECK(Tests, HasProduct(MeshAsset, CookedAssetProductKind::MeshPrimitive));
+		PF_CHECK(Tests, HasProduct(SourceMaterial, CookedAssetProductKind::Material));
+		PF_CHECK(Tests, HasProduct(OverrideMaterial, CookedAssetProductKind::Material));
+		PF_CHECK(Tests, HasProduct(ScriptAsset, CookedAssetProductKind::Script));
+		auto Cooked = AssetCookService::Cook(*Plan);
+		PF_CHECK(Tests, Cooked.has_value());
+		if (!Cooked) return;
+		auto Provider = CookedContentProvider::Open(OutputRoot, Request.Compatibility);
+		PF_CHECK(Tests, Provider.has_value());
+		if (!Provider) return;
+		PF_CHECK(Tests, (*Provider)->GetStartupScene() == StartupScene);
+		PF_CHECK(Tests, (*Provider)->FindPrefab(PrefabAsset) != nullptr);
+		PF_CHECK(Tests, (*Provider)->FindMaterial(SourceMaterial) != nullptr);
+		PF_CHECK(Tests, (*Provider)->FindMaterial(OverrideMaterial) != nullptr);
+		PF_CHECK(Tests, (*Provider)->FindScript(ScriptAsset) != nullptr);
+		auto RuntimeScene = (*Provider)->LoadScene(StartupScene);
+		PF_CHECK(Tests, RuntimeScene.has_value());
+		if (!RuntimeScene) return;
+		const auto LeftRoot = (*RuntimeScene)->FindEntity(UUID{ 0x2100000000004000ull, 0x8000000000000001ull });
+		const auto LeftChild = (*RuntimeScene)->FindEntity(UUID{ 0x2100000000004000ull, 0x8000000000000002ull });
+		const auto RightChild = (*RuntimeScene)->FindEntity(UUID{ 0x2200000000004000ull, 0x8000000000000002ull });
+		PF_CHECK(Tests, LeftRoot.has_value() && LeftChild.has_value() && RightChild.has_value());
+		if (!LeftRoot || !LeftChild || !RightChild) return;
+		const auto LeftInstance = LeftRoot->GetPrefabInstance();
+		PF_CHECK(Tests, LeftInstance && LeftInstance->has_value() && (**LeftInstance).SourceAsset == PrefabAsset);
+		PF_CHECK(Tests, LeftInstance && LeftInstance->has_value() && !(**LeftInstance).Overrides.empty());
+		const auto LeftRenderer = LeftChild->GetMeshRenderer();
+		const auto RightRenderer = RightChild->GetMeshRenderer();
+		PF_CHECK(Tests, LeftRenderer && LeftRenderer->has_value());
+		PF_CHECK(Tests, RightRenderer && RightRenderer->has_value());
+		if (LeftRenderer && LeftRenderer->has_value())
+			PF_CHECK(Tests, (**LeftRenderer).MaterialAsset == OverrideMaterial);
+		if (RightRenderer && RightRenderer->has_value())
+			PF_CHECK(Tests, (**RightRenderer).MaterialAsset == SourceMaterial);
+
+		auto LoadedSource = PrefabAssetService::LoadSource(
+			PrefabAsset, OpenedProject->GetRootPath(), OpenedProject->GetAssetRegistry());
+		PF_CHECK(Tests, LoadedSource.has_value());
+		if (LoadedSource && LeftInstance && LeftInstance->has_value())
+		{
+			if ((**LeftInstance).AppliedSourceFingerprint != LoadedSource->GetFingerprint())
+				std::cerr << "G15_SAMPLE_SOURCE_FINGERPRINT_EXPECTED " << LoadedSource->GetFingerprint() << '\n';
+			PF_CHECK(Tests, (**LeftInstance).AppliedSourceFingerprint == LoadedSource->GetFingerprint());
+		}
+#endif
+	}
 }
 
 void RunAssetCookServiceTests(TestRunner& Tests)
@@ -418,4 +534,5 @@ void RunAssetCookServiceTests(TestRunner& Tests)
 			}
 		}
 	}
+	TestLinkedPrefabSampleCookAndRuntimeScene(Tests);
 }

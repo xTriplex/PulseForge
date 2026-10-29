@@ -113,8 +113,7 @@ namespace
 		PF_CHECK(Tests, PrefabData->find("\"materialAsset\": \"" + MaterialAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"asset\": \"" + AudioAssetID.ToString() + "\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"asset\": \"" + ScriptAssetID.ToString() + "\"") != std::string::npos);
-		PF_CHECK(Tests, PrefabData->find("\"primary\": false") != std::string::npos);
-		PF_CHECK(Tests, PrefabData->find("\"primary\": true") == std::string::npos);
+		PF_CHECK(Tests, PrefabData->find("\"primary\": true") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"directionalLight\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"pointLight\"") != std::string::npos);
 		PF_CHECK(Tests, PrefabData->find("\"spotLight\"") != std::string::npos);
@@ -126,18 +125,22 @@ namespace
 		PF_CHECK(Tests, PrefabData->find("Outside prefab") == std::string::npos);
 		PF_CHECK(Tests, PrefabData->find(ExternalParent->GetUUID().ToString()) == std::string::npos);
 
-		std::string PrimaryRolePrefab = *PrefabData;
-		size_t PrimaryRoleCount = 0;
-		for (size_t PrimaryFlag = PrimaryRolePrefab.find("\"primary\": false"); PrimaryFlag != std::string::npos;
-			PrimaryFlag = PrimaryRolePrefab.find("\"primary\": false", PrimaryFlag))
+		const auto ParsedSource = PrefabSerializer::Parse(*PrefabData);
+		PF_CHECK(Tests, ParsedSource.has_value());
+		if (ParsedSource)
 		{
-			PrimaryRolePrefab.replace(PrimaryFlag, std::string("\"primary\": false").size(), "\"primary\": true");
-			PrimaryFlag += std::string("\"primary\": true").size();
-			++PrimaryRoleCount;
+			const auto ParsedRoot = ParsedSource->GetScene().FindEntity(ParsedSource->GetRootKey());
+			PF_CHECK(Tests, ParsedRoot.has_value());
+			if (ParsedRoot)
+			{
+				const auto ParsedCamera = ParsedRoot->GetCamera();
+				const auto ParsedListener = ParsedRoot->GetAudioListener();
+				PF_CHECK(Tests, ParsedCamera && ParsedCamera->has_value() && ParsedCamera->value().IsPrimary);
+				PF_CHECK(Tests, ParsedListener && ParsedListener->has_value() && ParsedListener->value().IsPrimary);
+			}
 		}
-		PF_CHECK(Tests, PrimaryRoleCount == 2);
 		Scene PrimaryRoleDestination;
-		const auto PrimaryRoleInstance = PrefabSerializer::Instantiate(PrimaryRolePrefab, PrimaryRoleDestination);
+		const auto PrimaryRoleInstance = PrefabSerializer::Instantiate(*PrefabData, PrimaryRoleDestination);
 		PF_CHECK(Tests, PrimaryRoleInstance.has_value());
 		if (PrimaryRoleInstance)
 		{

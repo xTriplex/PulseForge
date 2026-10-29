@@ -18,6 +18,7 @@ void RunAssetEditTransactionTests(TestRunner& Tests);
 void RunAssetCookServiceTests(TestRunner& Tests);
 void RunExportBuildProfileTests(TestRunner& Tests);
 void RunAssetExportServiceTests(TestRunner& Tests);
+void RunPrefabLinkedInstanceTests(TestRunner& Tests);
 void SetAssetEditTestExecutablePath(const std::filesystem::path& Executable);
 int RunAssetEditTransactionChildMode(int ArgumentCount, char** Arguments);
 
@@ -51,6 +52,7 @@ int main(int ArgumentCount, char** Arguments)
 			RunAssetRegistryTests(Tests);
 			RunAssetOperationsTests(Tests);
 			RunSceneAssetTests(Tests);
+			RunPrefabLinkedInstanceTests(Tests);
 			return Tests.Finish();
 		}
 		if (ArgumentCount == 2 && std::string_view(Arguments[1]) == "--asset-edit-only")
@@ -79,6 +81,7 @@ int main(int ArgumentCount, char** Arguments)
 		RunAssetRegistryTests(Tests);
 		RunAssetOperationsTests(Tests);
 		RunSceneAssetTests(Tests);
+		RunPrefabLinkedInstanceTests(Tests);
 		RunAssetDependencyCatalogTests(Tests);
 		RunAssetDependencyCorrectionTests(Tests);
 		RunAssetDependencyPublicationTests(Tests);

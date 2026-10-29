@@ -231,7 +231,7 @@ namespace PulseForge
 		}
 	}
 
-	std::expected<Entity, SceneError> Scene::DuplicateEntity(const Entity& Source)
+	std::expected<Entity, SceneError> Scene::DuplicateEntity(const Entity& Source, bool PreserveParent)
 	{
 		const auto SourceStorage = Source.m_Storage.lock();
 		if (!SourceStorage || !Source.IsValid())
@@ -358,18 +358,21 @@ namespace PulseForge
 			}
 		}
 
-		const auto Parent = Source.GetParent();
-		if (!Parent)
+		if (PreserveParent)
 		{
-			(void)DestroyEntity(*Duplicated);
-			return std::unexpected(Parent.error());
-		}
-		if (Parent->has_value())
-		{
-			if (auto ParentResult = Duplicated->SetParent(**Parent); !ParentResult)
+			const auto Parent = Source.GetParent();
+			if (!Parent)
 			{
 				(void)DestroyEntity(*Duplicated);
-				return std::unexpected(ParentResult.error());
+				return std::unexpected(Parent.error());
+			}
+			if (Parent->has_value())
+			{
+				if (auto ParentResult = Duplicated->SetParent(**Parent); !ParentResult)
+				{
+					(void)DestroyEntity(*Duplicated);
+					return std::unexpected(ParentResult.error());
+				}
 			}
 		}
 		return Duplicated;
@@ -1031,6 +1034,48 @@ namespace PulseForge
 		return {};
 	}
 
+	std::expected<std::optional<PrefabInstanceComponent>, SceneError> Entity::GetPrefabInstance() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot read prefab metadata from an invalid entity"));
+		if (!Storage->Registry.all_of<PrefabInstanceComponent>(*Native)) return std::optional<PrefabInstanceComponent>{};
+		return std::optional<PrefabInstanceComponent>{ Storage->Registry.get<PrefabInstanceComponent>(*Native) };
+	}
+
+	std::expected<void, SceneError> Entity::SetPrefabInstance(const PrefabInstanceComponent& Instance) const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot set prefab metadata on an invalid entity"));
+		if (const auto Validation = Instance.Validate(m_UUID); !Validation)
+			return std::unexpected(SceneError{ SceneErrorCode::InvalidPrefabInstance, Validation.error() });
+		try
+		{
+			Storage->Registry.emplace_or_replace<PrefabInstanceComponent>(*Native, Instance);
+			return {};
+		}
+		catch (const std::exception& Exception)
+		{
+			return std::unexpected(SceneError{ SceneErrorCode::StorageFailure,
+				std::string("Could not set prefab instance metadata: ") + Exception.what() });
+		}
+	}
+
+	std::expected<void, SceneError> Entity::RemovePrefabInstance() const
+	{
+		const auto Storage = m_Storage.lock();
+		const auto Native = Storage ? ResolveEntity(*Storage, m_UUID, m_Incarnation) : std::nullopt;
+		if (!Native)
+			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot remove prefab metadata from an invalid entity"));
+		if (!Storage->Registry.all_of<PrefabInstanceComponent>(*Native))
+			return std::unexpected(MakeSceneError(SceneErrorCode::MissingComponent, "Entity has no linked prefab metadata"));
+		Storage->Registry.remove<PrefabInstanceComponent>(*Native);
+		return {};
+	}
+
 	std::expected<glm::mat4, SceneError> Entity::GetWorldMatrix() const
 	{
 		const auto Storage = m_Storage.lock();
@@ -1107,6 +1152,37 @@ namespace PulseForge
 		if (Storage.get() != ParentStorage.get())
 			return std::unexpected(MakeSceneError(SceneErrorCode::ForeignEntity, "Entities must belong to the same scene to form a hierarchy"));
 
+		const auto FindLinkedRoot = [&](Entity Current) -> std::expected<std::optional<Entity>, SceneError>
+		{
+			for (size_t Depth = 0; Depth <= Storage->Entities.size(); ++Depth)
+			{
+				const auto Metadata = Current.GetPrefabInstance();
+				if (!Metadata) return std::unexpected(Metadata.error());
+				if (Metadata->has_value()) return std::optional<Entity>{ Current };
+				const auto CurrentParent = Current.GetParent();
+				if (!CurrentParent) return std::unexpected(CurrentParent.error());
+				if (!CurrentParent->has_value()) return std::optional<Entity>{};
+				Current = **CurrentParent;
+			}
+			return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure,
+				"Could not validate prefab nesting because the entity hierarchy is cyclic"));
+		};
+		const auto ThisLinkedRoot = FindLinkedRoot(*this);
+		const auto ParentLinkedRoot = FindLinkedRoot(Parent);
+		if (!ThisLinkedRoot) return std::unexpected(ThisLinkedRoot.error());
+		if (!ParentLinkedRoot) return std::unexpected(ParentLinkedRoot.error());
+		if (ThisLinkedRoot->has_value())
+		{
+			const bool IsLinkedRoot = (**ThisLinkedRoot).GetUUID() == m_UUID;
+			if (IsLinkedRoot && ParentLinkedRoot->has_value())
+				return std::unexpected(MakeSceneError(SceneErrorCode::InvalidPrefabInstance,
+					"Linked prefab roots cannot be nested under another linked prefab instance"));
+			if (!IsLinkedRoot &&
+				(!ParentLinkedRoot->has_value() || (**ParentLinkedRoot).GetUUID() != (**ThisLinkedRoot).GetUUID()))
+				return std::unexpected(MakeSceneError(SceneErrorCode::InvalidPrefabInstance,
+					"Entities inside a linked prefab must remain parented inside their own instance"));
+		}
+
 		return SetParentInStorage(Storage, m_UUID, Parent.m_UUID);
 	}
 
@@ -1115,6 +1191,26 @@ namespace PulseForge
 		const auto Storage = m_Storage.lock();
 		if (!Storage || !IsValid())
 			return std::unexpected(MakeSceneError(SceneErrorCode::InvalidEntity, "Cannot clear the parent of an invalid entity"));
+		Entity Current = *this;
+		for (size_t Depth = 0; Depth <= Storage->Entities.size(); ++Depth)
+		{
+			const auto Metadata = Current.GetPrefabInstance();
+			if (!Metadata) return std::unexpected(Metadata.error());
+			if (Metadata->has_value())
+			{
+				if (Current.GetUUID() != m_UUID)
+					return std::unexpected(MakeSceneError(SceneErrorCode::InvalidPrefabInstance,
+						"Entities inside a linked prefab cannot be detached from their instance"));
+				break; // Clearing the linked root parent changes instance placement.
+			}
+			const auto Parent = Current.GetParent();
+			if (!Parent) return std::unexpected(Parent.error());
+			if (!Parent->has_value()) break;
+			Current = **Parent;
+			if (Depth == Storage->Entities.size())
+				return std::unexpected(MakeSceneError(SceneErrorCode::StorageFailure,
+					"Could not validate prefab detachment because the entity hierarchy is cyclic"));
+		}
 		return SetParentInStorage(Storage, m_UUID, std::nullopt);
 	}
 

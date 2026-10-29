@@ -1,0 +1,7 @@
+{
+  "format": "PulseForgeProject",
+  "version": 1,
+  "projectId": "d0000000-0000-4000-8000-000000000001",
+  "name": "Prefab Linked Instances",
+  "startScene": "d0010000-0000-4000-8000-000000000001"
+}
