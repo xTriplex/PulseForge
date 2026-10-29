@@ -194,14 +194,9 @@ if(PULSEFORGE_ENABLE_QUALITY_CHECKS)
 			target_compile_options(${CheckTarget} PRIVATE
 				$<$<CXX_COMPILER_ID:MSVC>:/EHsc>
 				$<$<CXX_COMPILER_ID:MSVC>:/utf-8>
-				$<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Dist>>:/O2>
 			)
-			target_compile_definitions(${CheckTarget} PRIVATE
-				PF_PLATFORM_WINDOWS
-				$<$<CONFIG:Debug>:PF_DEBUG>
-				$<$<CONFIG:Release>:PF_RELEASE>
-				$<$<CONFIG:Dist>:PF_DIST>
-			)
+			target_compile_definitions(${CheckTarget} PRIVATE PF_PLATFORM_WINDOWS)
+			pulseforge_apply_configuration_identity(${CheckTarget})
 			target_link_libraries(${CheckTarget} PRIVATE "${HeaderOwner}")
 			list(APPEND CheckTargets "${CheckTarget}")
 		endforeach()

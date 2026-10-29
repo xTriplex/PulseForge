@@ -94,9 +94,6 @@ set_target_properties(PulseForgeLua PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED
 
 add_library(PulseForgeGlad STATIC PulseForge/Vendor/Glad/src/glad.c)
 target_include_directories(PulseForgeGlad PUBLIC PulseForge/Vendor/Glad/include)
-target_compile_options(PulseForgeGlad PRIVATE
-	$<$<AND:$<C_COMPILER_ID:MSVC>,$<CONFIG:Dist>>:/O2>
-)
 
 if(PULSEFORGE_BUILD_EDITOR)
 	set(NFD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -138,8 +135,5 @@ if(PULSEFORGE_BUILD_EDITOR OR PULSEFORGE_ENABLE_MACOS_VULKAN_PROOF)
 	if(PULSEFORGE_EDITOR_RENDERER STREQUAL "OpenGL")
 		target_link_libraries(PulseForgeImGui PUBLIC OpenGL::GL)
 	endif()
-	target_compile_options(PulseForgeImGui PRIVATE
-		$<$<CXX_COMPILER_ID:MSVC>:/EHsc>
-		$<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Dist>>:/O2>
-	)
+	target_compile_options(PulseForgeImGui PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/EHsc>)
 endif()

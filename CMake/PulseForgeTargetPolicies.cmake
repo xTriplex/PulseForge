@@ -54,7 +54,7 @@ if(BUILD_TESTING)
 	endif()
 endif()
 
-foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath
+foreach(Target PulseForgeCore PulseForgeInput PulseForgeWindow PulseForgeScene PulseForgeSceneSerialization PulseForgeRenderMath
 		PulseForgeAssetCatalog PulseForgeAssetImporters PulseForgeAssetDependencyCatalog PulseForgeAssetPreparation PulseForgeDerivedData PulseForgeAssetCpuProducts PulseForgeAudio PulseForgeAudioAssets PulseForgeAssetServices PulseForgeAudioScene PulseForgePhysics
 		PulseForgeCookedProductCodecs PulseForgeCookedAssetCatalog PulseForgeCookedRuntimeProvider PulseForgeCookedAudioAssets
 		PulseForgeCookedAudioScene PulseForgeCookedScripting PulseForgeCookedRuntime PulseForgeCookedSceneRenderer
@@ -72,15 +72,8 @@ foreach(Target PulseForgeCore PulseForgeWindow PulseForgeScene PulseForgeSceneSe
 		target_compile_options(${Target} PRIVATE
 			$<$<CXX_COMPILER_ID:MSVC>:/EHsc>
 			$<$<CXX_COMPILER_ID:MSVC>:/utf-8>
-			$<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Dist>>:/O2>
-			$<$<AND:$<CONFIG:Dist>,$<COMPILE_LANG_AND_ID:C,GNU,Clang>>:-O3>
-			$<$<AND:$<CONFIG:Dist>,$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>>:-O3>
 		)
-		target_compile_definitions(${Target} PRIVATE
-			$<$<CONFIG:Debug>:PF_DEBUG>
-			$<$<CONFIG:Release>:PF_RELEASE>
-			$<$<CONFIG:Dist>:PF_DIST>
-		)
+		pulseforge_apply_configuration_identity(${Target})
 		if(PULSEFORGE_ENABLE_MSVC_ANALYSIS AND
 			"${Target}" MATCHES "^(PulseForgeAssetImporters|PulseForgeAssetDependencyCatalog|PulseForgeMeshData|PulseForgeEditorCore|PulseForgeEditorUI|PulseForgeSceneRenderer)$")
 			target_compile_options(${Target} PRIVATE /analyze /analyze:external- /external:W0)

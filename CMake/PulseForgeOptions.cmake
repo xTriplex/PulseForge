@@ -22,6 +22,8 @@ option(PULSEFORGE_BUILD_EDITOR "Build the experimental PulseForge editor shell" 
 option(PULSEFORGE_BUILD_GPU_VALIDATION_TESTS "Build opt-in Vulkan GPU validation smoke tests" OFF)
 option(PULSEFORGE_ENABLE_QUALITY_CHECKS "Enable explicitly requested source, architecture, formatting, and analysis checks" OFF)
 option(PULSEFORGE_ENABLE_MSVC_ANALYSIS "Enable selected MSVC static analysis checks" OFF)
+option(PULSEFORGE_DIST_INHERIT_RELEASE_FLAGS
+	"Use active Release compiler and linker flags when Dist flags are empty" ON)
 set(PULSEFORGE_EDITOR_RENDERER "Vulkan" CACHE STRING "Renderer used by PulseForgeEditor (Vulkan or OpenGL)")
 set_property(CACHE PULSEFORGE_EDITOR_RENDERER PROPERTY STRINGS Vulkan OpenGL)
 
@@ -131,6 +133,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(MSVC)
 	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/PulseForgeConfigurationPolicy.cmake")
 
 include(CheckCXXSourceCompiles)
 check_cxx_source_compiles("#include <expected>
