@@ -13,7 +13,6 @@ on:
           - automation-probe-only
           - macos-desktop-only
           - windows-asset-diagnostic-only
-          - windows-build-profile-only
         default: full
         required: true
 
@@ -27,7 +26,7 @@ concurrency:
 jobs:
   macos-automation-bridge:
     name: macOS · JXA permission bridge probe
-    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'windows-asset-diagnostic-only' && inputs.validation_mode != 'windows-build-profile-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]') && !contains(github.event.head_commit.message || '', '[windows-build-profile-only]'))) }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || inputs.validation_mode != 'windows-asset-diagnostic-only') && (github.event_name != 'push' || !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]')) }}
     runs-on: macos-26
     timeout-minutes: 10
     steps:
@@ -135,7 +134,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     needs: macos-automation-bridge
-    if: ${{ always() && !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'windows-asset-diagnostic-only' && inputs.validation_mode != 'windows-build-profile-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]') && !contains(github.event.head_commit.message || '', '[windows-build-profile-only]'))) }}
+    if: ${{ always() && !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'windows-asset-diagnostic-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
     steps:
       - name: Check out sources
         id: checkout_sources
@@ -796,8 +795,8 @@ jobs:
           retention-days: 5
 
   windows-msvc:
-    name: Windows 2022 · MSVC · Debug
-    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only' && inputs.validation_mode != 'windows-asset-diagnostic-only' && inputs.validation_mode != 'windows-build-profile-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]') && !contains(github.event.head_commit.message || '', '[windows-build-profile-only]'))) }}
+    name: Windows 2022 · MSVC · Ninja Multi-Config · Debug
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only' && inputs.validation_mode != 'windows-asset-diagnostic-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -823,18 +822,63 @@ jobs:
             -DPULSEFORGE_CI_DEPENDENCY_CACHE="$env:GITHUB_WORKSPACE/Build/CI/Dependencies" `
             -P CMake/PulseForgeCiDependencyCache.cmake
 
-      - name: Configure
+      - name: Configure with the MSVC toolchain and Ninja Multi-Config
         shell: pwsh
         run: |
-          & cmake -S . -B Build/CI/windows -G "Visual Studio 17 2022" -A x64 `
+          $vsWhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vsWhere)) { throw "Visual Studio locator is missing: $vsWhere" }
+          $vsInstallation = & $vsWhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vsInstallation) { throw 'Could not locate the installed MSVC x64 toolchain.' }
+          $vsDevCmd = Join-Path $vsInstallation 'Common7/Tools/VsDevCmd.bat'
+          if (-not (Test-Path -LiteralPath $vsDevCmd)) { throw "MSVC environment setup is missing: $vsDevCmd" }
+          $environmentScript = Join-Path $env:RUNNER_TEMP 'pulseforge-msvc-environment.cmd'
+          $scriptContents = "@call `"$vsDevCmd`" -no_logo -arch=amd64 -host_arch=amd64 >nul`r`n@if errorlevel 1 exit /b 1`r`n@set`r`n"
+          [System.IO.File]::WriteAllText($environmentScript, $scriptContents, [System.Text.Encoding]::ASCII)
+          try {
+            $environmentLines = & $env:ComSpec /d /c $environmentScript
+            $environmentExitCode = $LASTEXITCODE
+            if ($environmentExitCode -ne 0) { throw "VsDevCmd failed with exit code $environmentExitCode." }
+            $environmentEncoding = [System.Text.UTF8Encoding]::new($false)
+            $persistedMsvcVariables = @(
+              'PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VSINSTALLDIR', 'VCINSTALLDIR', 'VCToolsInstallDir',
+              'VCToolsVersion', 'VisualStudioVersion', 'VS170COMNTOOLS', 'WindowsSdkDir', 'WindowsSDKVersion',
+              'UniversalCRTSdkDir', 'UCRTVersion', 'VSCMD_ARG_HOST_ARCH', 'VSCMD_ARG_TGT_ARCH', 'VSCMD_VER',
+              'DevEnvDir', 'VCIDEInstallDir', 'ExtensionSdkDir', 'WindowsLibPath'
+            )
+            foreach ($line in $environmentLines) {
+              $separator = $line.IndexOf('=')
+              if ($separator -le 0) { continue }
+              $name = $line.Substring(0, $separator)
+              $value = $line.Substring($separator + 1)
+              [System.Environment]::SetEnvironmentVariable($name, $value, 'Process')
+              if ($persistedMsvcVariables -contains $name) {
+                [System.IO.File]::AppendAllText($env:GITHUB_ENV, "$name=$value`n", $environmentEncoding)
+              }
+            }
+          }
+          finally {
+            Remove-Item -LiteralPath $environmentScript -Force -ErrorAction SilentlyContinue
+          }
+          cmake --version
+          ninja --version
+          if ($LASTEXITCODE -ne 0) { throw 'Ninja is unavailable on the Windows runner.' }
+          where.exe cl
+          if ($LASTEXITCODE -ne 0) { throw 'The MSVC compiler was not added to PATH.' }
+          $dependencyRoot = $env:GITHUB_WORKSPACE.Replace('\', '/') + '/Build/CI/Dependencies'
+          & cmake -S . -B Build/CI/windows -G "Ninja Multi-Config" `
             -DBUILD_TESTING=ON `
             -DPULSEFORGE_BUILD_EDITOR=ON `
             -DPULSEFORGE_BUILD_GPU_VALIDATION_TESTS=OFF `
-            -DFETCHCONTENT_BASE_DIR="$env:GITHUB_WORKSPACE/Build/CI/Dependencies" `
+            -DFETCHCONTENT_BASE_DIR="$dependencyRoot" `
             -DFETCHCONTENT_FULLY_DISCONNECTED=OFF *> "$env:RUNNER_TEMP/configure.log"
           $result = $LASTEXITCODE
           Get-Content "$env:RUNNER_TEMP/configure.log"
           if ($result -ne 0) { exit $result }
+          $configureOutput = Get-Content -LiteralPath "$env:RUNNER_TEMP/configure.log" -Raw
+          if ($configureOutput -notmatch '(?m)^-- The C compiler identification is MSVC\b' -or
+              $configureOutput -notmatch '(?m)^-- The CXX compiler identification is MSVC\b') {
+            throw 'Windows CI must configure both C and C++ with MSVC.'
+          }
 
       - name: Build first-party tests, editor and game
         shell: pwsh
@@ -888,9 +932,19 @@ jobs:
       - name: Build Release and Dist editor consumers and verify Debug fixture exclusion
         shell: pwsh
         run: |
-          $coreDir = "Build/CI/windows/PulseForgeEditorCore.dir"
-          $debugObject = Join-Path $coreDir "Debug/EditorDebugAcceptanceCoordinators.obj"
-          if (-not (Test-Path $debugObject)) { throw "Debug coordinator object was not produced: $debugObject" }
+          $coreObjectDir = "Build/CI/windows/CMakeFiles/PulseForgeEditorCore.dir"
+          if (-not (Test-Path -LiteralPath $coreObjectDir -PathType Container)) {
+            throw "Ninja editor-core object directory was not produced: $coreObjectDir"
+          }
+          $debugObjectDir = Join-Path $coreObjectDir "Debug"
+          if (-not (Test-Path -LiteralPath $debugObjectDir -PathType Container)) {
+            throw "Ninja Debug editor-core object directory was not produced: $debugObjectDir"
+          }
+          $debugObjects = @(Get-ChildItem -LiteralPath $debugObjectDir `
+            -Filter "EditorDebugAcceptanceCoordinators.cpp.obj" -File -Recurse -ErrorAction Stop)
+          if ($debugObjects.Count -eq 0) {
+            throw "Debug coordinator object was not produced under $(Join-Path $coreObjectDir 'Debug')"
+          }
           foreach ($configuration in @("Release", "Dist")) {
             $buildLog = "$env:RUNNER_TEMP/build-$($configuration.ToLowerInvariant()).log"
             Write-Output "G14_WINDOWS_BUILD=START; configuration=$configuration; targets=editor,game,cook,export,cooked-player,template,editor-consumers"
@@ -900,8 +954,14 @@ jobs:
             $result = $LASTEXITCODE
             if ($result -ne 0) { exit $result }
             Write-Output "G14_WINDOWS_BUILD=PASS; configuration=$configuration"
-            $configurationObject = Join-Path $coreDir "$configuration/EditorDebugAcceptanceCoordinators.obj"
-            if (Test-Path $configurationObject) { throw "Debug-only coordinator was compiled for $configuration" }
+            $configurationObjectDir = Join-Path $coreObjectDir $configuration
+            if (Test-Path -LiteralPath $configurationObjectDir -PathType Container) {
+              $configurationObjects = @(Get-ChildItem -LiteralPath $configurationObjectDir `
+                -Filter "EditorDebugAcceptanceCoordinators.cpp.obj" -File -Recurse -ErrorAction Stop)
+              if ($configurationObjects.Count -gt 0) {
+                throw "Debug-only coordinator was compiled for $configuration"
+              }
+            }
 
             $configurationDir = Join-Path $env:GITHUB_WORKSPACE "Build/CI/windows/$configuration"
             $packageParent = Join-Path $env:RUNNER_TEMP "g14-windows-$($configuration.ToLowerInvariant())"
@@ -1015,53 +1075,6 @@ jobs:
             Build/CI/windows/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
           retention-days: 5
-
-  windows-build-generator-profile:
-    name: Windows 2022 · MSVC generator performance comparison
-    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.validation_mode == 'windows-build-profile-only') || (github.event_name == 'push' && contains(github.event.head_commit.message || '', '[windows-build-profile-only]')) }}
-    runs-on: windows-2022
-    timeout-minutes: 120
-    steps:
-      - name: Check out pinned sources and submodules
-        uses: actions/checkout@v5
-        with:
-          submodules: recursive
-
-      - name: Restore the same pinned dependency-source cache as the Windows matrix
-        id: dependency_sources
-        uses: actions/cache@v5
-        with:
-          path: |
-            Build/CI/Dependencies/pulseforgenvrhi-src
-            Build/CI/Dependencies/pulseforgelua-src
-            Build/CI/Dependencies/vulkan_headers-src
-            Build/CI/Dependencies/_downloads
-          key: ${{ runner.os }}-fetchcontent-v1-${{ hashFiles('CMake/PulseForgeDependencies.cmake', '.gitmodules') }}
-
-      - name: Validate pinned dependency sources and compare MSBuild with Ninja Multi-Config
-        shell: pwsh
-        run: |
-          Write-Output "BUILD_PROFILE_DEPENDENCY_CACHE_HIT=${{ steps.dependency_sources.outputs.cache-hit }}"
-          & cmake -DPULSEFORGE_REPOSITORY_ROOT="$env:GITHUB_WORKSPACE" `
-            -DPULSEFORGE_CI_DEPENDENCY_CACHE="$env:GITHUB_WORKSPACE/Build/CI/Dependencies" `
-            -P CMake/PulseForgeCiDependencyCache.cmake
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & "$env:GITHUB_WORKSPACE/.github/WindowsBuildGeneratorComparison.ps1"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Preserve compact generator comparison evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: windows-build-generator-profile-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/windows-build-generator-comparison.json
-            ${{ runner.temp }}/vs-*.stdout.log
-            ${{ runner.temp }}/vs-*.stderr.log
-            ${{ runner.temp }}/ninja-*.stdout.log
-            ${{ runner.temp }}/ninja-*.stderr.log
-          if-no-files-found: ignore
-          retention-days: 3
 
   windows-asset-test-diagnostic:
     name: Windows 2022 · focused asset/cook hang diagnosis
@@ -1430,7 +1443,7 @@ jobs:
 
   linux-gcc:
     name: Ubuntu 24.04 · GCC · Ninja · Debug
-    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only' && inputs.validation_mode != 'windows-asset-diagnostic-only' && inputs.validation_mode != 'windows-build-profile-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]') && !contains(github.event.head_commit.message || '', '[windows-build-profile-only]'))) }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || (inputs.validation_mode != 'automation-probe-only' && inputs.validation_mode != 'macos-desktop-only' && inputs.validation_mode != 'windows-asset-diagnostic-only')) && (github.event_name != 'push' || (!contains(github.event.head_commit.message || '', '[automation-probe-only]') && !contains(github.event.head_commit.message || '', '[macos-desktop-only]') && !contains(github.event.head_commit.message || '', '[windows-asset-diagnostic-only]'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
