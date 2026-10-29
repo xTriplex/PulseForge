@@ -139,10 +139,10 @@ namespace PulseForge
 
 		BindingLayoutDesc EvaluationDescription;
 		EvaluationDescription.Visibility = ShaderVisibility::Fragment;
-		EvaluationDescription.ShaderRegisterSpace = 4;
+		EvaluationDescription.ShaderRegisterSpace = 3;
 		EvaluationDescription.Items = { { BindingResourceType::Texture2D, 0 }, { BindingResourceType::Texture2D, 1 },
 			{ BindingResourceType::Sampler, 0 }, { BindingResourceType::ConstantBuffer, 0 } };
-		EvaluationDescription.DebugName = "PulseForge SSAO evaluation resources (space4)";
+		EvaluationDescription.DebugName = "PulseForge SSAO evaluation resources (space3)";
 		auto EvaluationLayout = m_Runtime.CreateBindingLayout(EvaluationDescription);
 		if (!EvaluationLayout)
 			return std::unexpected(
@@ -151,11 +151,11 @@ namespace PulseForge
 
 		BindingLayoutDesc BlurDescription;
 		BlurDescription.Visibility = ShaderVisibility::Fragment;
-		BlurDescription.ShaderRegisterSpace = 4;
+		BlurDescription.ShaderRegisterSpace = 3;
 		BlurDescription.Items = { { BindingResourceType::Texture2D, 0 }, { BindingResourceType::Texture2D, 1 },
 			{ BindingResourceType::Texture2D, 2 }, { BindingResourceType::Sampler, 0 }, { BindingResourceType::Sampler, 1 },
 			{ BindingResourceType::ConstantBuffer, 0 } };
-		BlurDescription.DebugName = "PulseForge SSAO bilateral blur resources (space4)";
+		BlurDescription.DebugName = "PulseForge SSAO bilateral blur resources (space3)";
 		auto BlurLayout = m_Runtime.CreateBindingLayout(BlurDescription);
 		if (!BlurLayout)
 			return std::unexpected(MakeAmbientOcclusionResourceError("Could not create SSAO blur layout: " + BlurLayout.error().Message));
@@ -163,9 +163,9 @@ namespace PulseForge
 
 		BindingLayoutDesc PrepassDescription;
 		PrepassDescription.Visibility = ShaderVisibility::AllGraphics;
-		PrepassDescription.ShaderRegisterSpace = 4;
+		PrepassDescription.ShaderRegisterSpace = 3;
 		PrepassDescription.Items = { { BindingResourceType::ConstantBuffer, 0 } };
-		PrepassDescription.DebugName = "PulseForge SSAO prepass constants (space4)";
+		PrepassDescription.DebugName = "PulseForge SSAO prepass constants (space3)";
 		auto PrepassLayout = m_Runtime.CreateBindingLayout(PrepassDescription);
 		if (!PrepassLayout)
 			return std::unexpected(

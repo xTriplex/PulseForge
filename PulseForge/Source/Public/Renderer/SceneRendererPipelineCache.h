@@ -26,7 +26,6 @@ namespace PulseForge
 			BindingLayoutHandle SceneMaterialLayout;
 			BindingLayoutHandle DirectionalShadowLayout;
 			BindingLayoutHandle AmbientOcclusionLayout;
-			BindingLayoutHandle SpotlightShadowLayout;
 			BindingLayoutHandle PointLightShadowLayout;
 			BindingLayoutHandle ShadowObjectLayout;
 			BindingLayoutHandle PointShadowObjectLayout;

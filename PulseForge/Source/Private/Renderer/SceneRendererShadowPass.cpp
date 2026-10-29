@@ -75,7 +75,7 @@ namespace PulseForge
 
 		if (Plan->RequiresSpotlightResources)
 		{
-			if (auto TargetResult = Resources.Targets.EnsureSpotlightMaps(Resources.SpotlightLayout, Resources.ShadowSampler);
+			if (auto TargetResult = Resources.Targets.EnsureSpotlightMaps(Resources.ShadowLayout, Resources.ShadowSampler);
 				!TargetResult)
 				return std::unexpected(std::move(TargetResult.error()));
 			if (auto Pipeline = Resources.Pipelines.EnsureShadowPipeline(1.0f); !Pipeline)

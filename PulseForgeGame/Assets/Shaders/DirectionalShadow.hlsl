@@ -1,4 +1,4 @@
-cbuffer ShadowObject : register(b0, space4)
+cbuffer ShadowObject : register(b0, space3)
 {
 	float4x4 LightViewProjectionModel;
 };

@@ -1,4 +1,4 @@
-cbuffer BlurParameters : register(b0, space4)
+cbuffer BlurParameters : register(b0, space3)
 {
 	float4x4 InverseProjection;
 	float4 OutputSize;
@@ -6,11 +6,11 @@ cbuffer BlurParameters : register(b0, space4)
 	float4 Direction; // x/y half-resolution texel offset
 };
 
-Texture2D<float4> AmbientOcclusionTexture : register(t0, space4);
-Texture2D<float4> ViewNormalTexture : register(t1, space4);
-Texture2D<float> CameraDepth : register(t2, space4);
-SamplerState LinearClampSampler : register(s0, space4);
-SamplerState PointClampSampler : register(s1, space4);
+Texture2D<float4> AmbientOcclusionTexture : register(t0, space3);
+Texture2D<float4> ViewNormalTexture : register(t1, space3);
+Texture2D<float> CameraDepth : register(t2, space3);
+SamplerState LinearClampSampler : register(s0, space3);
+SamplerState PointClampSampler : register(s1, space3);
 
 float3 ReconstructViewPosition(float2 UV, float Depth)
 {

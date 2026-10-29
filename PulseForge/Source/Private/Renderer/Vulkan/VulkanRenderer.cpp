@@ -2230,6 +2230,8 @@ namespace PulseForge
 
 			std::vector<std::shared_ptr<VulkanBindingLayout>> NativeBindingLayouts;
 			NativeBindingLayouts.reserve(Description.BindingLayouts.size());
+			std::vector<uint32_t> RegisterSpaces;
+			RegisterSpaces.reserve(Description.BindingLayouts.size());
 			for (const BindingLayoutHandle& LayoutHandle : Description.BindingLayouts)
 			{
 				auto Layout = std::dynamic_pointer_cast<VulkanBindingLayout>(LayoutHandle);
@@ -2240,7 +2242,19 @@ namespace PulseForge
 						"Vulkan graphics pipelines require binding layouts created by the active Vulkan renderer"
 					});
 				}
+				RegisterSpaces.push_back(Layout->GetDescription().ShaderRegisterSpace);
 				NativeBindingLayouts.push_back(std::move(Layout));
+			}
+
+			const VulkanSupport::DescriptorSetLimitCheck DescriptorSetLimit =
+				VulkanSupport::CheckDescriptorSetLimit(RegisterSpaces, m_MaxBoundDescriptorSets);
+			if (!DescriptorSetLimit.IsSupported())
+			{
+				const std::string Message = "Vulkan device supports maxBoundDescriptorSets=" +
+					std::to_string(DescriptorSetLimit.MaximumCount) + ", but pipeline '" + Description.DebugName +
+					"' requires " + std::to_string(DescriptorSetLimit.RequiredCount) +
+					" descriptor-set slots based on its shader register spaces";
+				return std::unexpected(GraphicsError{ GraphicsErrorCode::UnsupportedFeature, Message });
 			}
 
 			std::vector<VertexAttributeDesc> OrderedAttributes = Description.VertexLayout.Attributes;
@@ -3265,6 +3279,7 @@ namespace PulseForge
 			m_PhysicalDevice = BestCandidate->Device;
 			m_QueueFamilies = BestCandidate->QueueFamilies;
 			m_GpuDeviceName = BestCandidate->Properties.deviceName.data();
+			m_MaxBoundDescriptorSets = BestCandidate->Properties.limits.maxBoundDescriptorSets;
 			m_GpuTimestampValidBits = BestCandidate->GraphicsTimestampValidBits;
 			m_GpuTimestampPeriodNanoseconds = BestCandidate->TimestampPeriodNanoseconds;
 			m_SurfaceFormat = BestCandidate->SurfaceFormat;
@@ -3297,10 +3312,11 @@ namespace PulseForge
 			}
 
 			PF_CORE_INFO(
-				"Selected Vulkan GPU: {0} (API {1}, driver {2}, graphics queue {3}, present queue {4})",
+				"Selected Vulkan GPU: {0} (API {1}, driver {2}, maxBoundDescriptorSets {3}, graphics queue {4}, present queue {5})",
 				std::string(BestCandidate->Properties.deviceName.data()),
 				ApiVersionString(BestCandidate->Properties.apiVersion),
 				BestCandidate->Properties.driverVersion,
+				m_MaxBoundDescriptorSets,
 				m_QueueFamilies.GraphicsIndex,
 				m_QueueFamilies.PresentIndex);
 			if (UsesPresentationFences())
@@ -4334,6 +4350,7 @@ namespace PulseForge
 		uint64_t m_GpuFrameSequence = 0;
 		uint64_t m_GpuFrameTimingSessionId = 0;
 		uint32_t m_GpuTimestampValidBits = 0;
+		uint32_t m_MaxBoundDescriptorSets = 0;
 		float m_GpuTimestampPeriodNanoseconds = 0.0f;
 		std::string m_GpuFrameTimingUnavailableReason = "Vulkan timestamp capability has not been queried.";
 		std::string m_GpuDeviceName = "Vulkan device name unavailable";

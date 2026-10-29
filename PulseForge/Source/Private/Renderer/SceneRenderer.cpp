@@ -511,36 +511,24 @@ namespace PulseForge
 		ShadowBindingLayoutDescription.Items = {
 			{ BindingResourceType::Texture2D, 0 }, { BindingResourceType::Texture2D, 1 },
 			{ BindingResourceType::Texture2D, 2 }, { BindingResourceType::Texture2D, 3 },
+			{ BindingResourceType::Texture2D, 4 }, { BindingResourceType::Texture2D, 5 },
+			{ BindingResourceType::Texture2D, 6 }, { BindingResourceType::Texture2D, 7 },
 			{ BindingResourceType::Sampler, 0 }
 		};
-		ShadowBindingLayoutDescription.DebugName = "PulseForge directional shadow maps (space1)";
+		ShadowBindingLayoutDescription.DebugName = "PulseForge directional and spotlight shadow maps (space1)";
 		auto ShadowBindingLayout = m_Runtime.CreateBindingLayout(ShadowBindingLayoutDescription);
 		if (!ShadowBindingLayout)
-			return std::unexpected(MakeResourceError("Could not create directional shadow binding layout: " + ShadowBindingLayout.error().Message));
+			return std::unexpected(MakeResourceError("Could not create combined shadow binding layout: " + ShadowBindingLayout.error().Message));
 		m_ShadowBindingLayout = std::move(*ShadowBindingLayout);
-
-		BindingLayoutDesc SpotShadowBindingLayoutDescription;
-		SpotShadowBindingLayoutDescription.Visibility = ShaderVisibility::Fragment;
-		SpotShadowBindingLayoutDescription.ShaderRegisterSpace = 3;
-		SpotShadowBindingLayoutDescription.Items = {
-			{ BindingResourceType::Texture2D, 0 }, { BindingResourceType::Texture2D, 1 },
-			{ BindingResourceType::Texture2D, 2 }, { BindingResourceType::Texture2D, 3 },
-			{ BindingResourceType::Sampler, 0 }
-		};
-		SpotShadowBindingLayoutDescription.DebugName = "PulseForge spotlight shadow maps (space3)";
-		auto SpotShadowBindingLayout = m_Runtime.CreateBindingLayout(SpotShadowBindingLayoutDescription);
-		if (!SpotShadowBindingLayout)
-			return std::unexpected(MakeResourceError("Could not create spotlight shadow binding layout: " + SpotShadowBindingLayout.error().Message));
-		m_SpotShadowBindingLayout = std::move(*SpotShadowBindingLayout);
 
 		BindingLayoutDesc PointShadowBindingLayoutDescription;
 		PointShadowBindingLayoutDescription.Visibility = ShaderVisibility::Fragment;
-		PointShadowBindingLayoutDescription.ShaderRegisterSpace = 5;
+		PointShadowBindingLayoutDescription.ShaderRegisterSpace = 3;
 		PointShadowBindingLayoutDescription.Items = {
 			{ BindingResourceType::TextureCube, 0 }, { BindingResourceType::TextureCube, 1 },
 			{ BindingResourceType::Sampler, 0 }
 		};
-		PointShadowBindingLayoutDescription.DebugName = "PulseForge point-shadow cubemaps (space5)";
+		PointShadowBindingLayoutDescription.DebugName = "PulseForge point-shadow cubemaps (space3)";
 		auto PointShadowBindingLayout = m_Runtime.CreateBindingLayout(PointShadowBindingLayoutDescription);
 		if (!PointShadowBindingLayout)
 			return std::unexpected(MakeResourceError("Could not create point-shadow binding layout: " + PointShadowBindingLayout.error().Message));
@@ -548,7 +536,7 @@ namespace PulseForge
 
 		BindingLayoutDesc ShadowObjectLayoutDescription;
 		ShadowObjectLayoutDescription.Visibility = ShaderVisibility::Vertex;
-		ShadowObjectLayoutDescription.ShaderRegisterSpace = 4;
+		ShadowObjectLayoutDescription.ShaderRegisterSpace = 3;
 		ShadowObjectLayoutDescription.Items = { { BindingResourceType::ConstantBuffer, 0 } };
 		ShadowObjectLayoutDescription.DebugName = "PulseForge directional shadow object constants";
 		auto ShadowObjectLayout = m_Runtime.CreateBindingLayout(ShadowObjectLayoutDescription);
@@ -558,7 +546,7 @@ namespace PulseForge
 
 		BindingLayoutDesc PointShadowObjectLayoutDescription;
 		PointShadowObjectLayoutDescription.Visibility = ShaderVisibility::AllGraphics;
-		PointShadowObjectLayoutDescription.ShaderRegisterSpace = 4;
+		PointShadowObjectLayoutDescription.ShaderRegisterSpace = 3;
 		PointShadowObjectLayoutDescription.Items = { { BindingResourceType::ConstantBuffer, 0 } };
 		PointShadowObjectLayoutDescription.DebugName = "PulseForge point-shadow pass/object constants";
 		auto PointShadowObjectLayout = m_Runtime.CreateBindingLayout(PointShadowObjectLayoutDescription);
@@ -643,7 +631,7 @@ namespace PulseForge
 			return std::unexpected(MakeResourceError("Could not create shadow sampler: " + ShadowSampler.error().Message));
 		m_ShadowSampler = std::move(*ShadowSampler);
 
-		if (auto ShadowTargets = m_ShadowTargetCache->Initialize(m_ShadowBindingLayout, m_SpotShadowBindingLayout,
+		if (auto ShadowTargets = m_ShadowTargetCache->Initialize(m_ShadowBindingLayout,
 				m_PointShadowBindingLayout, *m_ShadowSampler, *m_FallbackPointShadowTexture);
 			!ShadowTargets)
 			return std::unexpected(std::move(ShadowTargets.error()));
@@ -668,7 +656,6 @@ namespace PulseForge
 		PipelineResources.SceneMaterialLayout = m_BindingLayout;
 		PipelineResources.DirectionalShadowLayout = m_ShadowBindingLayout;
 		PipelineResources.AmbientOcclusionLayout = m_AmbientOcclusionPass->GetFinalLayout();
-		PipelineResources.SpotlightShadowLayout = m_SpotShadowBindingLayout;
 		PipelineResources.PointLightShadowLayout = m_PointShadowBindingLayout;
 		PipelineResources.ShadowObjectLayout = m_ShadowObjectBindingLayout;
 		PipelineResources.PointShadowObjectLayout = m_PointShadowObjectBindingLayout;
@@ -938,7 +925,7 @@ namespace PulseForge
 			m_PreparedCascades ? &*m_PreparedCascades : nullptr,
 			*m_LocalLightingState, *m_ShadowTargetCache,
 			*m_PipelineCache, *m_MaterialBindingCache, m_PreparedMeshResources, m_PreparedMaterialBindings,
-			m_SpotShadowBindingLayout, m_PointShadowBindingLayout,
+			m_ShadowBindingLayout, m_PointShadowBindingLayout,
 			*m_ShadowSampler, m_ShadowObjectConstantsBuffer, m_ShadowObjectBindingSet, m_PointShadowObjectConstantsBuffer,
 			m_PointShadowObjectBindingSet };
 		return m_ShadowPass->Render(Resources);
@@ -1284,8 +1271,8 @@ namespace PulseForge
 
 			const DrawIndexedArguments Arguments{ MeshResource->GetIndexCount(), 1, 0, 0 };
 			const BindingSet* AmbientOcclusionBindings = m_AmbientOcclusionPass->GetSceneBindingSet();
-			const std::array<const BindingSet*, 5> BindingSets = { *MaterialBinding, &m_ShadowTargetCache->DirectionalBindings(),
-				AmbientOcclusionBindings, &m_ShadowTargetCache->SpotlightBindings(), &m_ShadowTargetCache->PointLightBindings() };
+			const std::array<const BindingSet*, 4> BindingSets = { *MaterialBinding, &m_ShadowTargetCache->ShadowBindings(),
+				AmbientOcclusionBindings, &m_ShadowTargetCache->PointLightBindings() };
 			const GraphicsResult Draw = m_Runtime.DrawIndexed(*Pipeline, *MeshResource, Arguments, BindingSets);
 			if (!Draw)
 			{

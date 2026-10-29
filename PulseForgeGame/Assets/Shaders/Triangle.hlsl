@@ -63,14 +63,13 @@ Texture2D<float> ShadowCascade3 : register(t3, space1);
 SamplerState ShadowSampler : register(s0, space1);
 Texture2D<float> AmbientOcclusionTexture : register(t0, space2);
 SamplerState AmbientOcclusionSampler : register(s0, space2);
-Texture2D<float> SpotShadowMap0 : register(t0, space3);
-Texture2D<float> SpotShadowMap1 : register(t1, space3);
-Texture2D<float> SpotShadowMap2 : register(t2, space3);
-Texture2D<float> SpotShadowMap3 : register(t3, space3);
-SamplerState SpotShadowSampler : register(s0, space3);
-TextureCube<float> PointShadowMap0 : register(t0, space5);
-TextureCube<float> PointShadowMap1 : register(t1, space5);
-SamplerState PointShadowSampler : register(s0, space5);
+Texture2D<float> SpotShadowMap0 : register(t4, space1);
+Texture2D<float> SpotShadowMap1 : register(t5, space1);
+Texture2D<float> SpotShadowMap2 : register(t6, space1);
+Texture2D<float> SpotShadowMap3 : register(t7, space1);
+TextureCube<float> PointShadowMap0 : register(t0, space3);
+TextureCube<float> PointShadowMap1 : register(t1, space3);
+SamplerState PointShadowSampler : register(s0, space3);
 
 float3 SafeNormalize(float3 Value, float3 Fallback)
 {
@@ -160,7 +159,7 @@ float FilterSpotShadowMap(Texture2D<float> ShadowMap, float2 UV, float ReceiverD
 				Visibility += 1.0f;
 			else
 			{
-				const float StoredDepth = ShadowMap.SampleLevel(SpotShadowSampler, SampleUV, 0.0f);
+				const float StoredDepth = ShadowMap.SampleLevel(ShadowSampler, SampleUV, 0.0f);
 				Visibility += ReceiverDepth <= StoredDepth ? 1.0f : 0.0f;
 			}
 		}

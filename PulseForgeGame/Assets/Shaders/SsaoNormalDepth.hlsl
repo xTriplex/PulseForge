@@ -1,4 +1,4 @@
-cbuffer PerObject : register(b0, space4)
+cbuffer PerObject : register(b0, space3)
 {
 	float4x4 ViewProjectionModel;
 	float4x4 ViewNormalTransform;

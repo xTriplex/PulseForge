@@ -31,7 +31,7 @@ namespace PulseForge
 			SceneRendererMaterialBindingCache& MaterialBindings;
 			const PreparedMeshResourceMap& PreparedMeshes;
 			const PreparedMaterialBindingMap& PreparedMaterialBindings;
-			const BindingLayoutHandle& SpotlightLayout;
+			const BindingLayoutHandle& ShadowLayout;
 			const BindingLayoutHandle& PointLightLayout;
 			const Sampler& ShadowSampler;
 			const BufferHandle& ShadowObjectConstants;
